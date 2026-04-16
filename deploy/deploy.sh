@@ -21,7 +21,35 @@ NC='\033[0m' # No Color
 DEPLOY_DIR="/opt/quantmind"
 DATA_DIR="/opt/quantmind/data"
 REPO_URL="https://gitee.com/qusong0627/quantmind.git"
-SERVER_IP="139.199.75.121"
+
+# 自动检测服务器IP
+detect_server_ip() {
+    # 优先尝试获取公网IP
+    local public_ip=$(curl -s --connect-timeout 3 ifconfig.me 2>/dev/null || curl -s --connect-timeout 3 icanhazip.com 2>/dev/null)
+    if [[ -n "$public_ip" && "$public_ip" != "127.0.0.1" ]]; then
+        echo "$public_ip"
+        return
+    fi
+    
+    # 回退到局域网IP
+    local local_ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+    if [[ -n "$local_ip" && "$local_ip" != "127.0.0.1" ]]; then
+        echo "$local_ip"
+        return
+    fi
+    
+    # 最后使用localhost
+    echo "localhost"
+}
+
+# 允许通过环境变量或命令行参数指定IP
+if [[ -n "$1" && "$1" != "--"* ]]; then
+    SERVER_IP="$1"
+elif [[ -n "$QUANTMIND_SERVER_IP" ]]; then
+    SERVER_IP="$QUANTMIND_SERVER_IP"
+else
+    SERVER_IP=$(detect_server_ip)
+fi
 
 # 日志函数
 log_info() {

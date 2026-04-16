@@ -9,6 +9,26 @@
 curl -fsSL https://gitee.com/qusong0627/quantmind/raw/master/deploy/quick-deploy.sh | sudo bash
 ```
 
+## 指定服务器IP
+
+脚本会自动检测服务器IP，优先级如下：
+1. 命令行参数：`sudo ./deploy.sh 192.168.1.100`
+2. 环境变量：`export QUANTMIND_SERVER_IP=192.168.1.100 && sudo ./deploy.sh`
+3. 自动检测：公网IP → 局域网IP → localhost
+
+### 本机部署（无公网IP）
+
+```bash
+# 方式1：使用localhost
+sudo ./deploy.sh localhost
+
+# 方式2：使用局域网IP
+sudo ./deploy.sh 192.168.1.100
+
+# 方式3：让脚本自动检测
+sudo ./deploy.sh
+```
+
 ## 手动部署
 
 ### 1. 克隆代码
@@ -60,15 +80,17 @@ sudo ./deploy/deploy.sh
 
 ## 访问地址
 
-部署完成后：
+部署完成后，根据部署方式访问：
 
 | 服务 | 地址 |
 |-----|------|
-| 前端 | http://服务器IP |
+| 前端 | http://服务器IP 或 http://localhost |
 | 后端 API | http://服务器IP:8000 |
 | Engine | http://服务器IP:8001 |
 | Trade | http://服务器IP:8002 |
 | Stream | http://服务器IP:8003 |
+
+> 本机部署时，使用 `http://localhost` 访问前端
 
 ## 默认账号
 
