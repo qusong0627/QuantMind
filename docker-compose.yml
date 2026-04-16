@@ -79,7 +79,7 @@ services:
       # Redis 配置
       - REDIS_HOST=redis
       - REDIS_PORT=6379
-      - REDIS_PASSWORD=${REDIS_PASSWORD:-quantmind2026}
+      - REDIS_PASSWORD=
       
       # 存储配置 (本地存储)
       - STORAGE_MODE=local
