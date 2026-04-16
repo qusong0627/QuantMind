@@ -16,21 +16,13 @@ export interface LoginCredentials {
 }
 
 export interface RegisterData {
-  /**
-   * 多租户隔离所需：租户ID。
-   * 未显式传入时，前端会使用 VITE_TENANT_ID 或默认值。
-   */
   tenant_id?: string;
-  /**
-   * 新注册流程：手机号注册为主路径；后端会自动生成用户名。
-   * 邮箱为可选项（当前不强制写入后端用户表）。
-   */
-  phone: string;
-  sms_verification_code: string;
-  email?: string;
+  email: string;
   password: string;
   confirmPassword: string;
   full_name?: string;
+  phone?: string;
+  sms_verification_code?: string;
 }
 
 export interface User {
@@ -93,8 +85,8 @@ export interface RegisterFormState {
   password: string;
   confirmPassword: string;
   full_name: string;
-  phone: string;
-  sms_verification_code: string;
+  phone?: string;
+  sms_verification_code?: string;
   errors: FormErrors;
   isSubmitting: boolean;
 }

@@ -19,7 +19,7 @@ class UserRegister(BaseModel):
     username: str = Field(..., min_length=3, max_length=128, description="用户名")
     email: EmailStr = Field(..., description="邮箱")
     password: str = Field(..., min_length=8, max_length=128, description="密码")
-    email_verification_code: str | None = Field(None, description="邮箱验证码（可选，注册时建议提供）")
+    full_name: str | None = Field(None, description="全名（可选）")
 
     @field_validator("username")
     @classmethod
@@ -52,7 +52,9 @@ class VerificationRequest(BaseModel):
     tenant_id: str = Field(..., min_length=1, max_length=64, description="租户ID")
     identifier: str = Field(..., description="目标标识（邮箱/手机号）")
     type: Literal["email", "sms"] = Field("email", description="验证码类型")
-    purpose: Literal["register", "reset_password"] = Field("register", description="用途")
+    purpose: Literal["register", "reset_password"] = Field(
+        "register", description="用途"
+    )
     user_id: str | None = Field(None, description="相关用户ID（可选）")
 
 
@@ -87,10 +89,14 @@ class UserProfileUpdate(BaseModel):
     location: str | None = Field(None, max_length=128)
     website: str | None = Field(None, max_length=255)
     phone: str | None = Field(None, max_length=32)
-    trading_experience: str | None = Field(None, pattern="^(beginner|intermediate|advanced)$")
+    trading_experience: str | None = Field(
+        None, pattern="^(beginner|intermediate|advanced)$"
+    )
     risk_tolerance: str | None = Field(None, pattern="^(low|medium|high)$")
     investment_goal: str | None = Field(None, max_length=128)
-    ai_ide_api_key: str | None = Field(None, max_length=2048, description="AI-IDE API Key")
+    ai_ide_api_key: str | None = Field(
+        None, max_length=2048, description="AI-IDE API Key"
+    )
 
 
 # ============ 响应模型 ============
@@ -120,7 +126,9 @@ class UserProfileResponse(BaseModel):
     user_id: str
     tenant_id: str
     display_name: str | None
-    username: str | None = Field(None, alias="username_at_runtime", description="用户名（来自User表）")
+    username: str | None = Field(
+        None, alias="username_at_runtime", description="用户名（来自User表）"
+    )
     avatar_url: str | None
     bio: str | None
     location: str | None
@@ -183,7 +191,9 @@ class PhoneSendCodeRequest(BaseModel):
     个人中心手机号绑定/换绑专用：必须已登录，由后端控制可发送的目的与频率。
     """
 
-    purpose: Literal["bind_phone", "change_phone_old", "change_phone_new"] = Field(..., description="发送验证码用途")
+    purpose: Literal["bind_phone", "change_phone_old", "change_phone_new"] = Field(
+        ..., description="发送验证码用途"
+    )
     phone: str | None = Field(
         None,
         description="目标手机号（bind/change_new 必填；change_old 可不传，默认使用当前绑定手机号）",

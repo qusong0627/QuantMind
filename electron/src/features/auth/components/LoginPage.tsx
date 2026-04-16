@@ -4,20 +4,18 @@
 
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { Link, useNavigate, useLocation } from 'react-router-dom';
-import { Card, Form, Input, Button, Checkbox, Alert, Spin, Typography, Divider, Space, message, Tabs, Radio } from 'antd';
+import { Card, Form, Input, Button, Checkbox, Alert, Spin, Typography, Divider, Space, message } from 'antd';
 import {
   UserOutlined,
   LockOutlined,
   SafetyCertificateOutlined,
   EyeOutlined,
   EyeInvisibleOutlined,
-  MobileOutlined,
   MailOutlined,
-  KeyOutlined,
 } from '@ant-design/icons';
 import { useAuth, useLoginForm } from '../hooks/useAuth';
 import { useAppDispatch } from '../../../store';
-import { loginWithSmsCode, setUser } from '../store/authSlice';
+import { setUser } from '../store/authSlice';
 import { PageLoading } from './LoadingStates';
 import type { LoginCredentials } from '../types/auth.types';
 import { preloadAiIdeResources } from '../utils/lazyLoad';
@@ -30,11 +28,6 @@ const LoginPage: React.FC = () => {
   const [form] = Form.useForm();
   const { login: handleLogin, isAuthenticated, isLoading } = useAuth();
   const dispatch = useAppDispatch();
-  const [activeTab, setActiveTab] = useState<'password'|'sms'>('password');
-  const [phoneNumber, setPhoneNumber] = useState<string>('');
-  const [smsCode, setSmsCode] = useState<string>('');
-  const [codeSending, setCodeSending] = useState<boolean>(false);
-  const [countdown, setCountdown] = useState<number>(0);
   const [lockoutSeconds, setLockoutSeconds] = useState<number>(0);
   const {
     email_or_username,
@@ -163,33 +156,16 @@ const LoginPage: React.FC = () => {
     try {
       setLoginError(null);
       clearErrors();
-      let loginResult: any;
-      if (activeTab === 'password') {
-        const credentials: LoginCredentials = {
-          tenant_id: String((import.meta as any).env?.VITE_TENANT_ID || 'default'),
-          email_or_username: values.email_or_username.trim(),
-          password: values.password,
-          remember_me: values.remember_me || false,
-        };
+      
+      const credentials: LoginCredentials = {
+        tenant_id: String((import.meta as any).env?.VITE_TENANT_ID || 'default'),
+        email_or_username: values.email_or_username.trim(),
+        password: values.password,
+        remember_me: values.remember_me || false,
+      };
 
-        // 在线认证
-        loginResult = await handleLogin(credentials);
-      } else {
-        if (!phoneNumber || !smsCode) {
-          message.warning('请输入手机号与验证码');
-          return;
-        }
-        const result = await dispatch(loginWithSmsCode({ phoneNumber, code: smsCode })).unwrap();
-        loginResult = result;
-      }
-
-      // 检查是否需要MFA验证
-      // MFA功能已移除，直接处理登录成功
-
-      // 显示成功消息
+      await handleLogin(credentials);
       message.success('登录成功！');
-
-      // 获取来源页面或默认跳转到仪表盘
       const from = (location.state as any)?.from?.pathname || '/';
       navigate(from, { replace: true });
     } catch (error: any) {
@@ -380,37 +356,6 @@ const LoginPage: React.FC = () => {
             />
           )}
 
-          {/* 现代化标签页 */}
-          <Tabs
-            activeKey={activeTab}
-            onChange={(k) => setActiveTab(k as any)}
-            items={[
-              {
-                key: 'password',
-                label: (
-                  <span style={{ fontSize: isMobile ? '15px' : '16px', fontWeight: 500 }}>
-                    <MailOutlined style={{ marginRight: '8px' }} />
-                    密码登录
-                  </span>
-                )
-              },
-              {
-                key: 'sms',
-                label: (
-                  <span style={{ fontSize: isMobile ? '15px' : '16px', fontWeight: 500 }}>
-                    <MobileOutlined style={{ marginRight: '8px' }} />
-                    验证码登录
-                  </span>
-                )
-              }
-            ]}
-            style={{
-              marginBottom: '24px'
-            }}
-          />
-
-          {activeTab === 'password' && (
-          <>
           {lockoutSeconds>0 && (
             <Alert
               type="error"
@@ -533,105 +478,6 @@ const LoginPage: React.FC = () => {
               {isLoading ? '登录中...' : '立即登录'}
             </Button>
           </Form.Item>
-        </>
-      )}
-
-        {activeTab === 'sms' && (
-          <>
-            <Form.Item name="phone" rules={[{ required: true, message: '请输入手机号' }, { len: 11, message: '请输入11位手机号' }]}>
-              <Input
-                className="form-input"
-                placeholder="手机号"
-                value={phoneNumber}
-                onChange={(e) => setPhoneNumber(e.target.value)}
-                prefix={<MobileOutlined style={{ color: '#1890ff' }} />}
-                style={{
-                  height: isMobile ? '48px' : '56px',
-                  borderRadius: '12px',
-                  border: '2px solid #f0f0f0',
-                  fontSize: isMobile ? '15px' : '16px',
-                  transition: 'all 0.3s ease',
-                }}
-              />
-            </Form.Item>
-            <Form.Item name="sms_code" rules={[{ required: true, message: '请输入验证码' }, { len: 6, message: '请输入6位验证码' }]}>
-              <Space.Compact style={{ width: '100%' }}>
-                <Input
-                  className="form-input"
-                  placeholder="验证码"
-                  value={smsCode}
-                  onChange={(e) => setSmsCode(e.target.value)}
-                  prefix={<KeyOutlined style={{ color: '#1890ff' }} />}
-                  style={{
-                    borderRadius: '12px 0 0 12px',
-                    border: '2px solid #f0f0f0',
-                    borderRight: 'none',
-                    height: isMobile ? '48px' : '56px',
-                    fontSize: isMobile ? '15px' : '16px',
-                    transition: 'all 0.3s ease',
-                  }}
-                />
-                <Button
-                  disabled={codeSending || countdown>0}
-                  onClick={async ()=>{
-                    if (!phoneNumber) { message.warning('请输入手机号'); return; }
-                    try {
-                      setCodeSending(true);
-                      await (await import('../services/authService')).authService.requestSmsCode(phoneNumber);
-                      message.success('验证码已发送');
-                      let remaining = 60;
-                      setCountdown(remaining);
-                      const timer = setInterval(()=>{
-                        remaining -= 1;
-                        if (remaining <= 0) { clearInterval(timer); setCountdown(0); }
-                        else { setCountdown(remaining); }
-                      },1000);
-                    } catch (e:any) {
-                      message.error(e?.message||'验证码发送失败');
-                    } finally {
-                      setCodeSending(false);
-                    }
-                  }}
-                  style={{
-                    height: isMobile ? '48px' : '56px',
-                    borderRadius: '0 12px 12px 0',
-                    border: '2px solid #f0f0f0',
-                    borderLeft: 'none',
-                    padding: '0 16px',
-                    fontSize: isMobile ? '14px' : '15px',
-                    fontWeight: 500,
-                    background: countdown>0 ? '#f5f5f5' : '#1890ff',
-                    color: countdown>0 ? '#999' : '#fff',
-                    transition: 'all 0.3s ease',
-                  }}
-                >
-                  {countdown>0?`${countdown}s后重试`:'获取验证码'}
-                </Button>
-              </Space.Compact>
-            </Form.Item>
-            <Form.Item style={{ marginBottom: '16px' }}>
-              <Button
-                type="primary"
-                htmlType="submit"
-                size={isMobile?'large':'large'}
-                block
-                loading={isLoading}
-                className="submit-button"
-                style={{
-                  height: isMobile ? '48px' : '56px',
-                  borderRadius: '12px',
-                  fontSize: isMobile ? '16px' : '18px',
-                  fontWeight: 600,
-                  boxShadow: '0 4px 20px rgba(24, 144, 255, 0.3)',
-                  transition: 'all 0.3s ease',
-                }}
-              >
-                {isLoading ? '登录中...' : '立即登录'}
-              </Button>
-            </Form.Item>
-          </>
-        )}
-
         </Form>
 
         {/* 注册链接 - 现代化设计 */}

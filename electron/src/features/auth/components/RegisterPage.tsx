@@ -17,24 +17,20 @@ import {
   Space,
   Tooltip,
   message,
-  Radio,
 } from 'antd';
 import {
   UserOutlined,
   MailOutlined,
   LockOutlined,
-  PhoneOutlined,
   CheckCircleOutlined,
   InfoCircleOutlined,
   EyeOutlined,
   EyeInvisibleOutlined,
-  SafetyCertificateOutlined,
 } from '@ant-design/icons';
 import { useAuth, useRegisterForm } from '../hooks/useAuth';
-import { authService } from '../services/authService';
 import { useAppDispatch } from '../../../store';
 import { setUser } from '../store/authSlice';
-import { validatePasswordStrength, createValidationRules, debounce, PHONE_REGEX } from '../utils/validation';
+import { validatePasswordStrength, createValidationRules, debounce } from '../utils/validation';
 import { PageLoading } from './LoadingStates';
 import type { RegisterData } from '../types/auth.types';
 
@@ -49,8 +45,6 @@ const RegisterPage: React.FC = () => {
     password,
     confirmPassword,
     full_name,
-    phone,
-    sms_verification_code,
     errors,
     updateField,
     setErrors,
@@ -59,8 +53,6 @@ const RegisterPage: React.FC = () => {
     setPassword,
     setConfirmPassword,
     setFullName,
-    setPhone,
-    setSmsVerificationCode,
   } = useRegisterForm();
 
   const [registerError, setRegisterError] = useState<string | null>(null);
@@ -70,8 +62,6 @@ const RegisterPage: React.FC = () => {
   const dispatch = useAppDispatch();
   const [passwordVisible, setPasswordVisible] = useState(false);
   const [confirmPasswordVisible, setConfirmPasswordVisible] = useState(false);
-  const [countdown, setCountdown] = useState(0);
-  const [sendingCode, setSendingCode] = useState(false);
 
   // 响应式设计
   useEffect(() => {
@@ -180,83 +170,6 @@ const RegisterPage: React.FC = () => {
     if (newEmail) debouncedValidateField('email', newEmail);
   };
 
-  // 处理手机号变化
-  const handlePhoneChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const newPhone = e.target.value;
-    setPhone(newPhone);
-    debouncedValidateField('phone', newPhone);
-  };
-
-  // 倒计时效果
-  useEffect(() => {
-    let timer: NodeJS.Timeout;
-    if (countdown > 0) {
-      timer = setInterval(() => {
-        setCountdown(countdown - 1);
-      }, 1000);
-    }
-    return () => clearInterval(timer);
-  }, [countdown]);
-
-  // 发送验证码
-  const getRegisterSmsFriendlyErrorMessage = (error: any): string => {
-    const status = error?.response?.status;
-    const data = error?.response?.data || {};
-    const detail = String(data?.detail || data?.message || '').trim();
-    const code = String(data?.error_code || data?.code || error?.code || '').trim().toUpperCase();
-
-    if (status === 429 || code.includes('TOO_MANY') || detail.includes('频繁')) {
-      return '发送过于频繁，请稍后再试';
-    }
-    if (detail.includes('今日发送次数已达上限')) {
-      return '今日验证码发送次数已达上限，请明日再试';
-    }
-    if (status === 503 || detail.includes('短信服务配置缺失') || detail.includes('短信客户端未初始化') || detail.includes('短信服务依赖未安装')) {
-      return '短信服务暂不可用，请联系管理员检查短信配置';
-    }
-    if (detail.includes('短信模板未配置')) {
-      return '短信模板未配置，请联系管理员';
-    }
-    if (detail.includes('Redis 未就绪')) {
-      return '系统限流服务未就绪，请稍后重试';
-    }
-    if (code === 'ERR_NETWORK' || error?.name === 'AxiosError' && !status) {
-      return '网络连接失败，请检查网络后重试';
-    }
-    if (status === 400 && detail) {
-      return detail;
-    }
-    if (detail) {
-      return detail;
-    }
-    return error?.message || '发送验证码失败，请稍后重试';
-  };
-
-  const handleSendCode = async () => {
-    if (countdown > 0) {
-      message.warning(`请求过于频繁，请在 ${countdown} 秒后重试`);
-      return;
-    }
-    if (!phone) {
-      setErrors({ phone: '请输入手机号' });
-      return;
-    }
-    if (errors.phone) {
-      return;
-    }
-
-    try {
-      setSendingCode(true);
-      await authService.requestRegisterSmsCode(phone.trim());
-      message.success('验证码已发送，请查收短信');
-      setCountdown(60);
-    } catch (error: any) {
-      message.error(getRegisterSmsFriendlyErrorMessage(error));
-    } finally {
-      setSendingCode(false);
-    }
-  };
-
   // 处理注册表单提交
   const handleSubmit = async (values: any) => {
     try {
@@ -278,12 +191,10 @@ const RegisterPage: React.FC = () => {
       }
 
       const registerData: RegisterData = {
-        phone: values.phone.trim(),
-        sms_verification_code: values.sms_verification_code.trim(),
-        email: values.email?.trim() || undefined,
+        email: values.email?.trim(),
         password: values.password,
         confirmPassword: values.confirmPassword,
-        full_name: values.full_name?.trim() || undefined,
+        full_name: values.full_name?.trim(),
       };
 
       try {
@@ -325,7 +236,7 @@ const RegisterPage: React.FC = () => {
 
   const containerStyle = useMemo(() => ({
     minHeight: '100vh',
-    background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+    background: 'linear-gradient(135deg, #f5f7fa 0%, #e4e8ec 100%)',
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'center',
@@ -408,70 +319,14 @@ const RegisterPage: React.FC = () => {
           </Form.Item>
 
           <Form.Item
-            name="phone"
-            rules={[
-              { required: true, message: '请输入手机号' },
-              { pattern: PHONE_REGEX, message: '请输入有效的中国大陆手机号' },
-            ]}
-            validateStatus={errors.phone ? 'error' : undefined}
-            help={errors.phone}
-          >
-            <Input
-              prefix={<PhoneOutlined />}
-              placeholder="手机号码"
-              size={isMobile ? 'large' : 'large'}
-              value={phone}
-              onChange={handlePhoneChange}
-              autoComplete="tel"
-            />
-          </Form.Item>
-
-          <Form.Item style={{ marginBottom: 24 }}>
-            <div style={{ display: 'flex', gap: '8px', width: '100%' }}>
-              <Form.Item
-                name="sms_verification_code"
-                rules={[
-                  { required: true, message: '请输入验证码' },
-                  { len: 6, message: '请输入6位验证码' },
-                ]}
-                noStyle
-              >
-                <Input
-                  prefix={<SafetyCertificateOutlined />}
-                  placeholder="短信验证码"
-                  size={isMobile ? 'large' : 'large'}
-                  maxLength={6}
-                  style={{ flex: 1 }}
-                  value={sms_verification_code}
-                  onChange={(e) => setSmsVerificationCode(e.target.value)}
-                />
-              </Form.Item>
-              <Button
-                size={isMobile ? 'large' : 'large'}
-                onClick={handleSendCode}
-                disabled={!!countdown || !full_name?.trim() || !phone || !!errors.phone}
-                loading={sendingCode}
-                style={{ width: '120px' }}
-              >
-                {countdown > 0 ? `${countdown}s` : '获取验证码'}
-              </Button>
-            </div>
-            <div style={{ marginTop: 8 }}>
-              <Text type="secondary" style={{ fontSize: 12 }}>
-                {countdown > 0 ? `请在 ${countdown} 秒后重发验证码` : '未收到验证码可在60秒后重发'}
-              </Text>
-            </div>
-          </Form.Item>
-
-          <Form.Item
             name="email"
-            rules={[{ type: 'email', message: '请输入有效的邮箱地址' }]}
+            rules={[{ required: true, message: '请输入邮箱地址' }, { type: 'email', message: '请输入有效的邮箱地址' }]}
             validateStatus={errors.email ? 'error' : undefined}
             help={errors.email}
           >
             <Input
               prefix={<MailOutlined />}
-              placeholder="邮箱地址（可选）"
+              placeholder="邮箱地址"
               size={isMobile ? 'large' : 'large'}
               value={email}
               onChange={handleEmailChange}
@@ -645,14 +500,14 @@ const RegisterPage: React.FC = () => {
             left: '0',
             right: '0',
             textAlign: 'center',
-            color: 'white',
+            color: '#666',
             fontSize: '12px',
           }}
         >
-          <Space split={<span style={{ color: 'rgba(255,255,255,0.3)' }}>|</span>}>
-            <a href="https://www.quantmindai.cn/privacy" target="_blank" rel="noopener noreferrer" style={{ color: 'white', textDecoration: 'none' }}>隐私政策</a>
-            <a href="https://www.quantmindai.cn/terms" target="_blank" rel="noopener noreferrer" style={{ color: 'white', textDecoration: 'none' }}>服务条款</a>
-            <a href="https://www.quantmindai.cn/help" target="_blank" rel="noopener noreferrer" style={{ color: 'white', textDecoration: 'none' }}>帮助中心</a>
+          <Space split={<span style={{ color: 'rgba(0,0,0,0.2)' }}>|</span>}>
+            <a href="https://www.quantmindai.cn/privacy" target="_blank" rel="noopener noreferrer" style={{ color: '#666', textDecoration: 'none' }}>隐私政策</a>
+            <a href="https://www.quantmindai.cn/terms" target="_blank" rel="noopener noreferrer" style={{ color: '#666', textDecoration: 'none' }}>服务条款</a>
+            <a href="https://www.quantmindai.cn/help" target="_blank" rel="noopener noreferrer" style={{ color: '#666', textDecoration: 'none' }}>帮助中心</a>
             <span>© 2026 QuantMind</span>
           </Space>
         </div>

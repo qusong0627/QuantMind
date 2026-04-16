@@ -477,23 +477,6 @@ class AuthService:
             if result.scalar_one_or_none():
                 raise ValueError("邮箱已被注册")
 
-            verification_service = VerificationService(session)
-            verification_code = user_data.email_verification_code
-            if not verification_code:
-                raise ValueError("请提供邮箱验证码")
-            placeholder_id = f"register:{user_data.tenant_id}:{user_data.email.lower()}"
-            verified, msg = await verification_service.verify_code(
-                verification_code,
-                user_id=placeholder_id,
-                tenant_id=user_data.tenant_id,
-                code_type="register",
-            )
-            if not verified:
-                raise ValueError(msg or "验证码无效")
-            await verification_service.invalidate_user_codes(
-                placeholder_id, user_data.tenant_id, "register"
-            )
-
             user_id = await self._generate_user_id(session)
             user = User(
                 user_id=user_id,
@@ -501,6 +484,7 @@ class AuthService:
                 username=user_data.username,
                 email=user_data.email,
                 password_hash=self._hash_password(user_data.password),
+                full_name=user_data.full_name,
             )
             session.add(user)
 
