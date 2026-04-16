@@ -295,7 +295,7 @@ class StrategyStorageService:
 
     def _db_upsert(
         self,
-        user_int_id: int,
+        user_id: str,
         strategy_id: str | None,
         name: str,
         code: str,
@@ -323,7 +323,7 @@ class StrategyStorageService:
             has_cos_key = self._has_cos_key_column(session)
 
             params = {
-                "uid": user_int_id,
+                "uid": user_id,
                 "name": name,
                 "desc": description,
                 "stype": strategy_type,
@@ -403,7 +403,6 @@ class StrategyStorageService:
         strategy_id: str | None = None,
     ) -> dict[str, Any]:
         metadata = metadata or {}
-        user_int_id = _ensure_int_user_id(user_id)
         new_id = str(uuid4())
         cos_key = _make_cos_key(user_id, new_id)
         file_size = len(code.encode("utf-8"))
@@ -416,7 +415,7 @@ class StrategyStorageService:
             except Exception as e:
                 logger.error(f"COS 上传失败: {e}")
 
-        db_id = self._db_upsert(user_int_id, strategy_id, name, code, cos_key, cos_url, file_size, hash_val, metadata)
+        db_id = self._db_upsert(user_id, strategy_id, name, code, cos_key, cos_url, file_size, hash_val, metadata)
         return {"id": db_id, "cos_key": cos_key, "cos_url": cos_url, "code_hash": hash_val, "file_size": file_size}
 
     async def get(
@@ -462,7 +461,7 @@ class StrategyStorageService:
             """
             params = {"sid": strategy_id}
             if user_id:
-                params["uid"] = _ensure_int_user_id(user_id)
+                params["uid"] = user_id
                 sql += " AND user_id = :uid"
 
             row = session.execute(text(sql), params).fetchone()
@@ -484,11 +483,10 @@ class StrategyStorageService:
             }
 
     async def mark_as_verified(self, strategy_id: str, user_id: str) -> bool:
-        uid = _ensure_int_user_id(user_id)
         with get_db() as session:
             session.execute(
                 text("UPDATE strategies SET is_verified = TRUE, updated_at = :now WHERE id = :sid AND user_id = :uid"),
-                {"sid": int(strategy_id), "uid": uid, "now": datetime.now(timezone.utc)},
+                {"sid": int(strategy_id), "uid": user_id, "now": datetime.now(timezone.utc)},
             )
             return True
 
@@ -501,7 +499,6 @@ class StrategyStorageService:
         if not sid_text.isdigit():
             logger.warning("update_lifecycle_status skip non-numeric strategy_id=%s", sid_text)
             return False
-        uid = _ensure_int_user_id(user_id)
         normalized = _normalize_lifecycle_status(status)
         with get_db() as session:
             result = session.execute(
@@ -514,7 +511,7 @@ class StrategyStorageService:
                     "status": normalized,
                     "now": datetime.now(timezone.utc),
                     "sid": int(sid_text),
-                    "uid": uid,
+                    "uid": user_id,
                     "archived": _STATUS_ARCHIVED,
                 },
             )
@@ -527,7 +524,6 @@ class StrategyStorageService:
         if isinstance(strategy_id, str) and strategy_id.startswith("sys_"):
             raise ValueError("无法删除系统内置策略")
 
-        uid = _ensure_int_user_id(user_id)
         if not str(strategy_id).isdigit():
             return False
 
@@ -548,7 +544,7 @@ class StrategyStorageService:
         with get_db() as session:
             session.execute(
                 text("DELETE FROM strategies WHERE id = :sid AND user_id = :uid"),
-                {"sid": int(strategy_id), "uid": uid}
+                {"sid": int(strategy_id), "uid": user_id}
             )
         return True
 
@@ -559,16 +555,16 @@ class StrategyStorageService:
         search: str | None = None,
         tags: builtins.list[str] | None = None,
     ) -> builtins.list[dict[str, Any]]:
-        uid = _ensure_int_user_id(user_id)
+        # user_id is already a string (e.g., 'admin'), use directly
         with get_db() as session:
             has_cos_key = self._has_cos_key_column(session)
             cos_key_expr = "cos_key" if has_cos_key else "NULL::text as cos_key"
             sql = f"""
-                SELECT id, name, description, status, cos_url, {cos_key_expr}, 
+                SELECT id, name, description, status, cos_url, {cos_key_expr},
                        code_hash, tags, is_verified, execution_config, created_at, updated_at
                 FROM strategies WHERE user_id = :uid AND status != '{_STATUS_ARCHIVED}'
             """
-            rows = session.execute(text(sql), {"uid": uid}).fetchall()
+            rows = session.execute(text(sql), {"uid": user_id}).fetchall()
             return [
                 {
                     "id": str(r[0]),
