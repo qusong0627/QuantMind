@@ -42,8 +42,14 @@ ruff format backend/
 # Install dependencies (from project root)
 npm install
 
-# Development
+# Development (Electron desktop)
 npm run dev
+
+# Development (Web browser - for server deployment)
+npm run dev:web
+
+# Production preview (Web mode)
+npm run dashboard:preview
 
 # Type check
 npm run typecheck
@@ -51,9 +57,14 @@ npm run typecheck
 # Build
 npm run dashboard:build
 
-# Package for distribution
+# Package for distribution (Electron)
 npm run dashboard:package:win
 ```
+
+### Deployment Modes
+- **Electron Desktop**: `npm run dev` - Native desktop experience
+- **Web Browser**: `npm run dev:web` - Access via http://localhost:3000
+- See `docs/WEB_DEPLOYMENT.md` for production deployment guide
 
 ### Structure
 - `electron/src/features/` - Feature modules (quantbot, strategy-wizard, auth, user-center)

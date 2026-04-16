@@ -8,8 +8,10 @@
   ],
   "scripts": {
     "dev": "npm run dashboard:dev",
+    "dev:web": "cross-env VITE_API_URL=${VITE_API_URL:-http://localhost:8000} npm run dev -w QuantMind -- --host 0.0.0.0",
     "dashboard:dev": "npm run dev -w QuantMind",
     "dashboard:build": "npm run build -w QuantMind",
+    "dashboard:preview": "npm run preview -w QuantMind -- --host 0.0.0.0 --port 3000",
     "dashboard:package:win": "npm run build:package:win -w QuantMind",
     "dashboard:package:win:dir": "npm run build:package:win:dir -w QuantMind",
     "clean": "npm run clean -w QuantMind",
@@ -28,6 +30,7 @@
   "devDependencies": {
     "@types/styled-jsx": "^2.2.9",
     "@types/testing-library__jest-dom": "^5.14.9",
+    "cross-env": "^7.0.3",
     "electron": "40.8.0",
     "electron-is-dev": "^3.0.1",
     "electron-vite": "^4.0.1"

@@ -5,6 +5,9 @@ import { HashRouter } from 'react-router-dom';
 import App from './App';
 import store from './store';
 
+// Electron API 兼容层 (Web 模式自动降级)
+import './utils/electronCompat';
+
 // 错误上报逻辑已移除，由 ErrorBoundary 统一处理
 
 

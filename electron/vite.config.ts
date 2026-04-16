@@ -49,9 +49,17 @@ export default defineConfig(({ mode }) => {
     },
     server: {
       port: parseInt(process.env.VITE_PORT || '3000'),
-      strictPort: true, // 固定使用指定端口（默认 3000），占用则直接报错
-      host: '127.0.0.1',
+      strictPort: true,
+      host: '0.0.0.0', // 允许外部访问
       proxy: {
+        '/api': {
+          target: process.env.VITE_API_URL || 'http://localhost:8000',
+          changeOrigin: true,
+        },
+        '/ws': {
+          target: process.env.VITE_WS_URL || 'ws://localhost:8000',
+          ws: true,
+        },
         '/api/tencent': {
           target: 'https://qt.gtimg.cn',
           changeOrigin: true,
