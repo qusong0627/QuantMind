@@ -226,21 +226,22 @@ const RegisterPage: React.FC = () => {
   };
 
   // 响应式样式
+  const containerStyle = useMemo(() => ({
+    minHeight: '100vh',
+    background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: isMobile ? 0 : '20px',
+  }), [isMobile]);
+
   const cardStyle = useMemo(() => ({
     width: '100%',
     maxWidth: isMobile ? '100%' : 480,
     borderRadius: isMobile ? 0 : '12px',
     boxShadow: isMobile ? 'none' : '0 8px 32px rgba(0, 0, 0, 0.1)',
     margin: isMobile ? 0 : 'auto',
-  }), [isMobile]);
-
-  const containerStyle = useMemo(() => ({
-    minHeight: '100vh',
-    background: 'linear-gradient(135deg, #f5f7fa 0%, #e4e8ec 100%)',
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    padding: isMobile ? 0 : '20px',
+    background: 'linear-gradient(135deg, #f5f7fa 0%, #e8ecf0 100%)',
   }), [isMobile]);
 
   // 初始加载状态
@@ -500,14 +501,14 @@ const RegisterPage: React.FC = () => {
             left: '0',
             right: '0',
             textAlign: 'center',
-            color: '#666',
+            color: 'white',
             fontSize: '12px',
           }}
         >
-          <Space split={<span style={{ color: 'rgba(0,0,0,0.2)' }}>|</span>}>
-            <a href="https://www.quantmindai.cn/privacy" target="_blank" rel="noopener noreferrer" style={{ color: '#666', textDecoration: 'none' }}>隐私政策</a>
-            <a href="https://www.quantmindai.cn/terms" target="_blank" rel="noopener noreferrer" style={{ color: '#666', textDecoration: 'none' }}>服务条款</a>
-            <a href="https://www.quantmindai.cn/help" target="_blank" rel="noopener noreferrer" style={{ color: '#666', textDecoration: 'none' }}>帮助中心</a>
+          <Space split={<span style={{ color: 'rgba(255,255,255,0.3)' }}>|</span>}>
+            <a href="https://www.quantmindai.cn/privacy" target="_blank" rel="noopener noreferrer" style={{ color: 'white', textDecoration: 'none' }}>隐私政策</a>
+            <a href="https://www.quantmindai.cn/terms" target="_blank" rel="noopener noreferrer" style={{ color: 'white', textDecoration: 'none' }}>服务条款</a>
+            <a href="https://www.quantmindai.cn/help" target="_blank" rel="noopener noreferrer" style={{ color: 'white', textDecoration: 'none' }}>帮助中心</a>
             <span>© 2026 QuantMind</span>
           </Space>
         </div>

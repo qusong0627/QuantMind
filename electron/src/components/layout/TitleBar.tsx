@@ -9,9 +9,13 @@ export const TitleBar: React.FC = () => {
   const [downloadProgress, setDownloadProgress] = useState<number>(0);
   const [updateVersion, setUpdateVersion] = useState<string>('');
   const [errorMessage, setErrorMessage] = useState<string>('');
+  const [isElectron, setIsElectron] = useState(false);
 
   useEffect(() => {
-    if (!window.electronAPI) return;
+    const isElectronEnv = !!window.electronAPI;
+    setIsElectron(isElectronEnv);
+    
+    if (!isElectronEnv) return;
     setPlatform(window.electronAPI.getPlatform());
 
     const cleanups: (() => void)[] = [];
@@ -110,6 +114,11 @@ export const TitleBar: React.FC = () => {
         return null;
     }
   };
+
+  // 非 Electron 环境（Web 部署）不渲染标题栏
+  if (!isElectron) {
+    return null;
+  }
 
   // macOS：仅在有更新状态时渲染可点击区域，否则保持纯拖拽层
   if (isMac) {
