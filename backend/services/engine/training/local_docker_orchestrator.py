@@ -9,6 +9,7 @@ QuantMind 本地 Docker 训练编排器
   3. 轮询容器状态，写回 DB
   4. 训练容器完成后通过 callback 回写结果
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -22,44 +23,68 @@ from typing import Any, Dict, List
 import docker
 from docker import DockerClient
 import yaml
-from qcloud_cos import CosConfig, CosS3Client
+
+# OSS 版本不需要腾讯云 COS
+try:
+    from qcloud_cos import CosConfig, CosS3Client
+
+    HAS_QCLOUD_COS = True
+except ImportError:
+    CosConfig = None
+    CosS3Client = None
+    HAS_QCLOUD_COS = False
 
 from backend.services.engine.training.training_log_stream import TrainingRunLogStream
 
 logger = logging.getLogger(__name__)
 
-_TRAINING_IMAGE = (
-    os.getenv("TRAINING_IMAGE")
-    or "quantmind-ml-runtime:latest"
-).strip()
+_TRAINING_IMAGE = (os.getenv("TRAINING_IMAGE") or "quantmind-ml-runtime:latest").strip()
 _CALLBACK_TIMEOUT = int(os.getenv("TRAINING_CALLBACK_TIMEOUT_SECONDS", "600"))
 _POLL_INTERVAL = 10  # 秒
-_CALLBACK_CHECK_INTERVAL = int(os.getenv("TRAINING_CALLBACK_CHECK_INTERVAL_SECONDS", "2"))
+_CALLBACK_CHECK_INTERVAL = int(
+    os.getenv("TRAINING_CALLBACK_CHECK_INTERVAL_SECONDS", "2")
+)
 _DOCKER_NETWORK = os.getenv("TRAINING_DOCKER_NETWORK", "quantmind-network")
 _HOST_PROJECT_PATH = Path(
-    os.getenv("HOST_PROJECT_PATH") or os.getenv("TRAINING_HOST_PROJECT_PATH") or "/home/ubuntu/quantmind"
+    os.getenv("HOST_PROJECT_PATH")
+    or os.getenv("TRAINING_HOST_PROJECT_PATH")
+    or "/home/ubuntu/quantmind"
 ).expanduser()
 _LOCAL_DATA_MOUNT_DIR = "/tmp/feature_snapshots"
-_LOCAL_DATA_PATH = str(Path(os.getenv("TRAINING_LOCAL_DATA_PATH", str(_HOST_PROJECT_PATH / "db" / "feature_snapshots"))))
+_LOCAL_DATA_PATH = str(
+    Path(
+        os.getenv(
+            "TRAINING_LOCAL_DATA_PATH",
+            str(_HOST_PROJECT_PATH / "db" / "feature_snapshots"),
+        )
+    )
+)
 _TRAINING_SCRIPT_HOST_PATH = Path(
-    os.getenv("TRAINING_SCRIPT_HOST_PATH", str(_HOST_PROJECT_PATH / "docker" / "training" / "train.py"))
+    os.getenv(
+        "TRAINING_SCRIPT_HOST_PATH",
+        str(_HOST_PROJECT_PATH / "docker" / "training" / "train.py"),
+    )
 ).expanduser()
 
 
 class LocalDockerOrchestrator:
     def __init__(self):
-        self.docker          = DockerClient.from_env()
-        self.secret_id       = (os.getenv("TENCENT_SECRET_ID") or "").strip()
-        self.secret_key      = (os.getenv("TENCENT_SECRET_KEY") or "").strip()
-        self.region          = (os.getenv("TENCENT_REGION") or "ap-guangzhou").strip()
-        self.bucket          = (os.getenv("TENCENT_BUCKET") or "quantmind-1255718505").strip()
-        self.api_base        = (os.getenv("QUANTMIND_API_BASE_URL") or "http://quantmind-api:8000").strip()
+        self.docker = DockerClient.from_env()
+        self.secret_id = (os.getenv("TENCENT_SECRET_ID") or "").strip()
+        self.secret_key = (os.getenv("TENCENT_SECRET_KEY") or "").strip()
+        self.region = (os.getenv("TENCENT_REGION") or "ap-guangzhou").strip()
+        self.bucket = (os.getenv("TENCENT_BUCKET") or "quantmind-1255718505").strip()
+        self.api_base = (
+            os.getenv("QUANTMIND_API_BASE_URL") or "http://quantmind-api:8000"
+        ).strip()
         self.internal_secret = (os.getenv("INTERNAL_CALL_SECRET") or "").strip()
-        self.cos = CosS3Client(CosConfig(
-            Region=self.region,
-            SecretId=self.secret_id,
-            SecretKey=self.secret_key,
-        ))
+        self.cos = CosS3Client(
+            CosConfig(
+                Region=self.region,
+                SecretId=self.secret_id,
+                SecretKey=self.secret_key,
+            )
+        )
         self.log_stream = TrainingRunLogStream()
 
     @staticmethod
@@ -100,37 +125,46 @@ class LocalDockerOrchestrator:
     def _upload_config(self, run_id: str, config: dict) -> str:
         key = f"training-configs/{run_id}/config.yaml"
         body = yaml.dump(config, allow_unicode=True, default_flow_style=False).encode()
-        self.cos.put_object(Bucket=self.bucket, Key=key, Body=body, ContentType="application/x-yaml")
+        self.cos.put_object(
+            Bucket=self.bucket, Key=key, Body=body, ContentType="application/x-yaml"
+        )
         logger.info("Config uploaded: cos://%s/%s", self.bucket, key)
         return key
 
     # ── 构造 config.yaml 内容 ───────────────────────────────────────────────────
     def _build_config_yaml(self, run_id: str, payload: dict) -> dict:
         if payload is None:
-            logger.error("[%s] Payload is None in _build_config_yaml, using absolute defaults", run_id)
+            logger.error(
+                "[%s] Payload is None in _build_config_yaml, using absolute defaults",
+                run_id,
+            )
             payload = {}
         cos_prefix = f"models/candidates/{run_id}/"
-        context = payload.get("context") if isinstance(payload.get("context"), dict) else {}
+        context = (
+            payload.get("context") if isinstance(payload.get("context"), dict) else {}
+        )
 
         # 强制使用本地数据，不回落到 COS 下载
         data_source_mode = payload.get("data_source_mode", "LOCAL")
 
         config: dict[str, Any] = {
-            "run_id":   run_id,
+            "run_id": run_id,
             "job_name": payload.get("job_name", "unnamed"),
             "data": {
                 "train_start": payload.get("train_start", "2022-01-01"),
-                "train_end":   payload.get("train_end",   "2024-12-31"),
-                "features":    payload.get("features", []),
+                "train_end": payload.get("train_end", "2024-12-31"),
+                "features": payload.get("features", []),
                 "source_mode": data_source_mode,
-                "local_dir":   _LOCAL_DATA_MOUNT_DIR if data_source_mode == "LOCAL" else None
+                "local_dir": _LOCAL_DATA_MOUNT_DIR
+                if data_source_mode == "LOCAL"
+                else None,
             },
             "model": {
-                "type":            payload.get("model_type", "lightgbm"),
+                "type": payload.get("model_type", "lightgbm"),
                 "num_boost_round": payload.get("num_boost_round", 1000),
                 "early_stopping_rounds": payload.get("early_stopping_rounds", 100),
-                "val_ratio":       payload.get("val_ratio", 0.15),
-                "params":          payload.get("lgb_params", {}),
+                "val_ratio": payload.get("val_ratio", 0.15),
+                "params": payload.get("lgb_params", {}),
             },
             "label": {
                 "target_horizon_days": payload.get("target_horizon_days", 1),
@@ -147,20 +181,18 @@ class LocalDockerOrchestrator:
                 "deal_price": context.get("deal_price", "close"),
             },
             "output": {
-                "result_path":        "/workspace/result.json",
-                "cos_prefix":         cos_prefix,
+                "result_path": "/workspace/result.json",
+                "cos_prefix": cos_prefix,
                 "required_artifacts": payload.get(
                     "required_artifacts",
                     ["model.lgb", "pred.pkl", "metadata.json", "result.json"],
                 ),
             },
             "callback": {
-                "url":    f"{self.api_base}/api/v1/models/training-runs/{run_id}/complete",
+                "url": f"{self.api_base}/api/v1/models/training-runs/{run_id}/complete",
                 "secret": self.internal_secret,
             },
-            "cache": {
-                "dir": "/tmp" if data_source_mode == "LOCAL" else None
-            }
+            "cache": {"dir": "/tmp" if data_source_mode == "LOCAL" else None},
         }
         # 显式时间段切分（valid_start/end 优先于 val_ratio）
         split_fields: list[str] = ["valid_start", "valid_end", "test_start", "test_end"]
@@ -168,7 +200,7 @@ class LocalDockerOrchestrator:
             config["split"] = {
                 "train": [payload.get("train_start"), payload.get("train_end")],
                 "valid": [payload.get("valid_start"), payload.get("valid_end")],
-                "test":  [payload.get("test_start"),  payload.get("test_end")],
+                "test": [payload.get("test_start"), payload.get("test_end")],
             }
             config["model"]["val_ratio"] = None
         return config
@@ -191,7 +223,9 @@ class LocalDockerOrchestrator:
                 record.status = "provisioning"
                 record.progress = max(int(record.progress or 0), 5)
                 # 增量记录日志，防止覆盖 [SYSTEM] 训练任务已创建
-                record.logs = (record.logs or "") + f"Starting container: {_TRAINING_IMAGE}\n"
+                record.logs = (
+                    record.logs or ""
+                ) + f"Starting container: {_TRAINING_IMAGE}\n"
                 user_id = str(record.user_id or "unknown")
                 tenant_id = str(record.tenant_id or "default")
 
@@ -220,7 +254,9 @@ class LocalDockerOrchestrator:
                         progress=5,
                     )
             else:
-                logger.warning("[%s] Training record not found in launch_training_job", run_id)
+                logger.warning(
+                    "[%s] Training record not found in launch_training_job", run_id
+                )
                 user_id = "unknown"
                 tenant_id = "default"
 
@@ -231,15 +267,27 @@ class LocalDockerOrchestrator:
         model_id = model_registry_service.build_model_id_from_run(run_id)
 
         user_models_root = Path(model_registry_service.user_models_root)
-        internal_models_root = user_models_root if user_models_root.is_absolute() else Path("/app") / user_models_root
-        host_models_root = user_models_root if user_models_root.is_absolute() else (_HOST_PROJECT_PATH / user_models_root)
+        internal_models_root = (
+            user_models_root
+            if user_models_root.is_absolute()
+            else Path("/app") / user_models_root
+        )
+        host_models_root = (
+            user_models_root
+            if user_models_root.is_absolute()
+            else (_HOST_PROJECT_PATH / user_models_root)
+        )
         internal_output_dir = internal_models_root / tenant_id / user_id / model_id
         host_output_dir = host_models_root / tenant_id / user_id / model_id
 
         # 强制创建目录（容器内路径用于回调热路径，宿主机路径用于 docker -v）
         os.makedirs(internal_output_dir, exist_ok=True)
         os.makedirs(host_output_dir, exist_ok=True)
-        logger.info("[%s] Local model output directory prepared: %s", run_id, internal_output_dir)
+        logger.info(
+            "[%s] Local model output directory prepared: %s",
+            run_id,
+            internal_output_dir,
+        )
 
         # ── 提前将 config.yaml 写入本地目录 ───────────────────────────────────
         local_config_path = internal_output_dir / "config.yaml"
@@ -250,17 +298,32 @@ class LocalDockerOrchestrator:
         except Exception as e:
             logger.warning("[%s] Failed to save config locally: %s", run_id, e)
 
-
         # 始终挂载本地数据目录（宿主机路径，API 容器内 os.path.exists 无法感知）
         volumes: dict[str, dict[str, str]] = {
             str(host_output_dir): {"bind": "/workspace", "mode": "rw"},
             str(_LOCAL_DATA_PATH): {"bind": _LOCAL_DATA_MOUNT_DIR, "mode": "ro"},
         }
-        logger.info("[%s] Local data path mounted: %s -> %s", run_id, _LOCAL_DATA_PATH, _LOCAL_DATA_MOUNT_DIR)
+        logger.info(
+            "[%s] Local data path mounted: %s -> %s",
+            run_id,
+            _LOCAL_DATA_PATH,
+            _LOCAL_DATA_MOUNT_DIR,
+        )
         # 始终挂载宿主机 train.py 覆盖镜像内脚本（注意：os.path.exists 在 API 容器内无法感知宿主机路径，固定挂载）
-        volumes[str(_TRAINING_SCRIPT_HOST_PATH)] = {"bind": "/app/train.py", "mode": "ro"}
-        logger.info("[%s] Local train.py override mounted: %s -> /app/train.py", run_id, _TRAINING_SCRIPT_HOST_PATH)
-        logger.info("[%s] PERSISTENCE Local output mounted: %s -> /workspace", run_id, host_output_dir)
+        volumes[str(_TRAINING_SCRIPT_HOST_PATH)] = {
+            "bind": "/app/train.py",
+            "mode": "ro",
+        }
+        logger.info(
+            "[%s] Local train.py override mounted: %s -> /app/train.py",
+            run_id,
+            _TRAINING_SCRIPT_HOST_PATH,
+        )
+        logger.info(
+            "[%s] PERSISTENCE Local output mounted: %s -> /workspace",
+            run_id,
+            host_output_dir,
+        )
         logger.info("[%s] Final volumes config: %s", run_id, volumes)
 
         try:
@@ -269,14 +332,14 @@ class LocalDockerOrchestrator:
                 _TRAINING_IMAGE,
                 command="python /app/train.py --config /workspace/config.yaml",
                 environment={
-                    "TENCENT_SECRET_ID":    self.secret_id,
-                    "TENCENT_SECRET_KEY":   self.secret_key,
-                    "TENCENT_REGION":       self.region,
-                    "TENCENT_BUCKET":       self.bucket,
+                    "TENCENT_SECRET_ID": self.secret_id,
+                    "TENCENT_SECRET_KEY": self.secret_key,
+                    "TENCENT_REGION": self.region,
+                    "TENCENT_BUCKET": self.bucket,
                     "INTERNAL_CALL_SECRET": self.internal_secret,
-                    "USE_LOCAL_DATA":       "true",
+                    "USE_LOCAL_DATA": "true",
                     "TRAINING_LOCAL_DATA_DIR": _LOCAL_DATA_MOUNT_DIR,
-                    "TRAINING_CACHE_DIR":   "/tmp",
+                    "TRAINING_CACHE_DIR": "/tmp",
                 },
                 volumes=volumes,
                 network=_DOCKER_NETWORK,
@@ -286,12 +349,15 @@ class LocalDockerOrchestrator:
         except Exception as e:
             from backend.shared.database_manager_v2 import get_session
             from backend.services.api.routers.admin.db import TrainingJobRecord
+
             logger.error("[%s] docker run failed: %s", run_id, e)
             async with get_session() as db:
                 record = await db.get(TrainingJobRecord, run_id)
                 if record:
-                    record.status   = "failed"
-                    record.logs     = (record.logs or "") + f"[ERROR] docker run failed: {e}\n"
+                    record.status = "failed"
+                    record.logs = (
+                        record.logs or ""
+                    ) + f"[ERROR] docker run failed: {e}\n"
                     record.progress = 100
                     await db.commit()
             self.log_stream.append_log(
@@ -308,10 +374,12 @@ class LocalDockerOrchestrator:
         async with get_session() as db:
             record = await db.get(TrainingJobRecord, run_id)
             if record:
-                record.status      = "running"
+                record.status = "running"
                 record.progress = max(int(record.progress or 0), 12)
                 record.instance_id = container.id[:12]
-                record.logs        = (record.logs or "") + f"Container ID: {container.id[:12]}\n"
+                record.logs = (
+                    record.logs or ""
+                ) + f"Container ID: {container.id[:12]}\n"
                 await db.commit()
         self.log_stream.append_log(
             run_id=run_id,
@@ -323,10 +391,16 @@ class LocalDockerOrchestrator:
             container_id=container.id[:12],
         )
 
-        asyncio.create_task(self._poll_container(run_id, container.id, tenant_id=tenant_id, user_id=user_id))
+        asyncio.create_task(
+            self._poll_container(
+                run_id, container.id, tenant_id=tenant_id, user_id=user_id
+            )
+        )
 
     # ── 轮询容器状态 ─────────────────────────────────────────────────────────────
-    async def _poll_container(self, run_id: str, container_id: str, *, tenant_id: str, user_id: str) -> None:
+    async def _poll_container(
+        self, run_id: str, container_id: str, *, tenant_id: str, user_id: str
+    ) -> None:
         from backend.services.api.routers.admin.db import TrainingJobRecord
         from backend.shared.database_manager_v2 import get_session
 
@@ -340,7 +414,7 @@ class LocalDockerOrchestrator:
             try:
                 c = self.docker.containers.get(container_id)
                 c.reload()
-                status    = c.attrs["State"].get("Status", "")
+                status = c.attrs["State"].get("Status", "")
                 exit_code = c.attrs["State"].get("ExitCode", -1)
 
                 # 增量抓取容器日志并写入回测 Redis，供前端轮询时查看真实进度
@@ -362,7 +436,9 @@ class LocalDockerOrchestrator:
                             if ts_val > 0:
                                 log_cursor_ts = max(log_cursor_ts, ts_val)
                             last_log_sig = sig
-                            current_progress = self._infer_progress_from_log_line(msg, current_progress)
+                            current_progress = self._infer_progress_from_log_line(
+                                msg, current_progress
+                            )
                             self.log_stream.append_log(
                                 run_id=run_id,
                                 tenant_id=tenant_id,
@@ -373,7 +449,9 @@ class LocalDockerOrchestrator:
                                 container_id=container_id[:12],
                             )
                 except Exception as log_err:
-                    logger.debug("[%s] incremental log fetch failed: %s", run_id, log_err)
+                    logger.debug(
+                        "[%s] incremental log fetch failed: %s", run_id, log_err
+                    )
 
                 if status in ("running", "created"):
                     continue
@@ -387,7 +465,10 @@ class LocalDockerOrchestrator:
                         if r:
                             r.status = "waiting_callback"
                             r.progress = max(int(r.progress or 0), 95)
-                            r.logs   = (r.logs or "") + f"[DONE] Container exited 0, waiting callback\n{tail_logs}"
+                            r.logs = (
+                                (r.logs or "")
+                                + f"[DONE] Container exited 0, waiting callback\n{tail_logs}"
+                            )
                             await db.commit()
                     self.log_stream.append_log(
                         run_id=run_id,
@@ -413,7 +494,9 @@ class LocalDockerOrchestrator:
                             r = await db.get(TrainingJobRecord, run_id)
                             if r and r.status == "waiting_callback":
                                 r.status = "failed"
-                                r.logs = (r.logs or "") + "[TIMEOUT] Callback not received\n"
+                                r.logs = (
+                                    r.logs or ""
+                                ) + "[TIMEOUT] Callback not received\n"
                                 r.progress = 100
                                 await db.commit()
                                 self.log_stream.append_log(
@@ -429,8 +512,10 @@ class LocalDockerOrchestrator:
                     async with get_session() as db:
                         r = await db.get(TrainingJobRecord, run_id)
                         if r:
-                            r.status   = "failed"
-                            r.logs     = (r.logs or "") + f"[FAILED] ExitCode={exit_code}\n{tail_logs}"
+                            r.status = "failed"
+                            r.logs = (
+                                r.logs or ""
+                            ) + f"[FAILED] ExitCode={exit_code}\n{tail_logs}"
                             r.progress = 100
                             await db.commit()
                     self.log_stream.append_log(
@@ -454,8 +539,8 @@ class LocalDockerOrchestrator:
                 async with get_session() as db:
                     r = await db.get(TrainingJobRecord, run_id)
                     if r and r.status not in ("completed", "failed"):
-                        r.status   = "failed"
-                        r.logs     = (r.logs or "") + "[ERROR] Container not found\n"
+                        r.status = "failed"
+                        r.logs = (r.logs or "") + "[ERROR] Container not found\n"
                         r.progress = 100
                         await db.commit()
                         self.log_stream.append_log(
@@ -475,8 +560,8 @@ class LocalDockerOrchestrator:
         async with get_session() as db:
             r = await db.get(TrainingJobRecord, run_id)
             if r and r.status not in ("completed", "failed"):
-                r.status   = "failed"
-                r.logs     = (r.logs or "") + "[TIMEOUT] 2h limit exceeded\n"
+                r.status = "failed"
+                r.logs = (r.logs or "") + "[TIMEOUT] 2h limit exceeded\n"
                 r.progress = 100
                 await db.commit()
                 self.log_stream.append_log(
