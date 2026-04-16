@@ -103,6 +103,11 @@ services:
       - ./db:/app/db
       # 日志
       - ./logs:/app/logs
+      # 后端 models 目录 (外挂载解决模块导入问题)
+      - ./backend/services/api/user_app/models:/app/backend/services/api/user_app/models
+      - ./backend/services/stream/market_app/models:/app/backend/services/stream/market_app/models
+      - ./backend/services/trade/models:/app/backend/services/trade/models
+      - ./backend/services/engine/ai_strategy/models:/app/backend/services/engine/ai_strategy/models
     restart: unless-stopped
     networks:
       - quantmind-net
