@@ -110,6 +110,8 @@ services:
       - ./backend/services/stream/market_app/models:/app/backend/services/stream/market_app/models
       - ./backend/services/trade/models:/app/backend/services/trade/models
       - ./backend/services/trade/simulation/models:/app/backend/services/trade/simulation/models
+      - ./backend/services/trade/portfolio/models:/app/backend/services/trade/portfolio/models
+      - ./backend/services/engine/models:/app/backend/services/engine/models
       - ./backend/services/engine/ai_strategy/models:/app/backend/services/engine/ai_strategy/models
     restart: unless-stopped
     networks:
