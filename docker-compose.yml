@@ -94,6 +94,10 @@ services:
       # 调试配置
       - DEBUG=false
       - LOG_LEVEL=INFO
+      
+      # LLM 配置 (可选，用于 AI 策略功能)
+      - LLM_API_KEY=${LLM_API_KEY:-sk-placeholder}
+      - LLM_BASE_URL=${LLM_BASE_URL:-https://api.openai.com/v1}
     volumes:
       # 运行时数据
       - ./data:/data
