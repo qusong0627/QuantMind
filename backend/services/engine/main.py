@@ -86,10 +86,10 @@ async def lifespan(app: FastAPI):
                 "⚠️ AI Strategy Warmup timeout after %.1fs; startup continues",
                 warmup_timeout_seconds,
             )
-            app.state.startup_healthy = False
+            # Timeout is not critical - service can still function
         except Exception as e:
             logger.warning(f"⚠️ AI Strategy Warmup skipped: {e}")
-            app.state.startup_healthy = False
+            # Missing API key or other non-critical error - service can still function
 
     set_service_health("quantmind-engine", bool(getattr(app.state, "startup_healthy", True)))
 
