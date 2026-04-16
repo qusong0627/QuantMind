@@ -12,9 +12,10 @@ export const TitleBar: React.FC = () => {
   const [isElectron, setIsElectron] = useState(false);
 
   useEffect(() => {
-    const isElectronEnv = !!window.electronAPI;
+    // 更可靠的 Electron 环境检测：检查 process.type 或 electronAPI 的原生实现
+    const isElectronEnv = typeof (window as any).process !== 'undefined' && (window as any).process?.type === 'renderer';
     setIsElectron(isElectronEnv);
-    
+
     if (!isElectronEnv) return;
     setPlatform(window.electronAPI.getPlatform());
 
