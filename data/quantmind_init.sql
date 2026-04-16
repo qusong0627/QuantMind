@@ -67,14 +67,23 @@ CREATE TABLE public.user_profiles (
 );
 
 CREATE TABLE public.user_sessions (
-    id VARCHAR(64) PRIMARY KEY,
+    id VARCHAR(64) DEFAULT gen_random_uuid()::VARCHAR(64),
+    session_id VARCHAR(64) PRIMARY KEY,
     user_id VARCHAR(64) NOT NULL,
     tenant_id VARCHAR(64) NOT NULL DEFAULT 'default',
-    token_hash VARCHAR(255) NOT NULL,
+    token_hash VARCHAR(255),
+    token_jti VARCHAR(64),
+    refresh_token VARCHAR(1024),
+    refresh_token_expires_at TIMESTAMPTZ,
     device_info VARCHAR(255),
+    user_agent VARCHAR(255),
     ip_address VARCHAR(64),
     expires_at TIMESTAMPTZ NOT NULL,
+    last_activity_at TIMESTAMPTZ,
+    last_active_at TIMESTAMPTZ,
     revoked_at TIMESTAMPTZ,
+    is_active BOOLEAN DEFAULT true,
+    is_revoked BOOLEAN DEFAULT false,
     created_at TIMESTAMPTZ DEFAULT now()
 );
 
@@ -476,7 +485,7 @@ CREATE INDEX idx_audit_logs_created_at ON public.audit_logs(created_at);
 
 INSERT INTO public.users (user_id, tenant_id, username, email, password_hash, is_active, is_verified, is_admin)
 VALUES ('admin', 'default', 'admin', 'admin@quantmind.local', 
-        '$2b$12$LQv3c1yqBWVHxkd0LQv3c1yqBWVHxkd0LQv3c1yqBWVHxkd0LQv3c1', 
+        '$2b$12$B/yjK9cT.wx4BlB9j.r/t.dADjCbmutIXoDM7PdKZmV6ypuYiiUvW', 
         true, true, true);
 
 INSERT INTO public.user_profiles (user_id, tenant_id, nickname)
