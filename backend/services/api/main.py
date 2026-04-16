@@ -103,9 +103,9 @@ app.mount("/uploads", StaticFiles(directory="data/uploads"), name="uploads")
 app.include_router(auth.router, prefix="/api/v1", tags=["Auth"])
 app.include_router(system.router)
 
-# 仅在非开源版中包含社区功能
-if settings.edition != "oss":
-    app.include_router(community_router)
+# OSS 版本禁用社区功能
+# if settings.edition != "oss":
+#     app.include_router(community_router)
 
 app.include_router(users.router, prefix="/api/v1/users", tags=["Users"])
 app.include_router(profiles.router, prefix="/api/v1/profiles", tags=["Profiles"])
