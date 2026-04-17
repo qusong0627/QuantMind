@@ -332,10 +332,40 @@ class COSUploader:
         self, url: str | None = None, object_key: str | None = None
     ) -> str:
         try:
+            # 优先使用 url 参数
             if url and url.startswith("file://"):
                 file_path = url.replace("file://", "")
                 with open(file_path, encoding="utf-8") as f:
                     return f.read()
+
+            # 如果提供了 object_key，从本地存储路径读取
+            if object_key:
+                # object_key 格式如: user_pools/user_id/timestamp/stock_pool.txt
+                # 需要映射到实际路径: {local_storage_path}/user_{user_id}/timestamp/stock_pool.txt
+                if object_key.startswith("user_pools/"):
+                    # 转换: user_pools/{user_id}/{timestamp}/{file} -> user_{user_id}/{timestamp}/{file}
+                    parts = object_key.split("/")
+                    if len(parts) >= 4:
+                        user_id = parts[1]
+                        timestamp = parts[2]
+                        file_name = parts[3]
+                        relative_path = f"user_{user_id}/{timestamp}/{file_name}"
+                        file_path = self.local_storage_path / relative_path
+                        if file_path.exists():
+                            with open(file_path, encoding="utf-8") as f:
+                                return f.read()
+                        else:
+                            logger.warning(f"股票池文件不存在: {file_path}")
+                            return ""
+                else:
+                    # 其他 object_key 格式，直接拼接
+                    file_path = self.local_storage_path / object_key
+                    if file_path.exists():
+                        with open(file_path, encoding="utf-8") as f:
+                            return f.read()
+                    else:
+                        logger.warning(f"文件不存在: {file_path}")
+                        return ""
 
             return ""
         except Exception as e:
