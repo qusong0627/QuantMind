@@ -105,7 +105,10 @@ services:
       # 调试配置
       - DEBUG=false
       - LOG_LEVEL=INFO
-      
+
+      # 策略模板目录
+      - STRATEGY_TEMPLATES_DIR=/app/strategy_templates
+
       # LLM 配置 (可选，用于 AI 策略功能)
       - LLM_API_KEY=${LLM_API_KEY:-sk-placeholder}
       - LLM_BASE_URL=${LLM_BASE_URL:-https://api.openai.com/v1}
@@ -121,6 +124,8 @@ services:
       # 后端代码 (外挂载解决热更新问题)
       - ./backend:/app/backend
       - ./config:/app/config
+      # 策略模板
+      - ./strategy_templates:/app/strategy_templates
     restart: unless-stopped
     networks:
       - quantmind-net
