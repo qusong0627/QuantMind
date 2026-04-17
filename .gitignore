@@ -158,3 +158,4 @@ codebase.tar
 celerybeat-schedule
 data/feature_snapshots
 quantmind_test.tar.gz
+data/quantmind_20260415_214859.sql
