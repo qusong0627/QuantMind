@@ -306,20 +306,6 @@ export class UserCenterService extends BaseApiClient {
     return this.mapProfileFromBackend(raw);
   }
 
-  // ============ 手机号绑定/换绑（短信验证码） ============
-
-  async sendPhoneCode(purpose: 'bind_phone' | 'change_phone_old' | 'change_phone_new', phone?: string): Promise<void> {
-    await this.post(`/users/me/phone/send-code`, { purpose, phone });
-  }
-
-  async bindPhone(phone: string, code: string): Promise<{ phone: string }> {
-    return this.post(`/users/me/phone/bind`, { phone, code });
-  }
-
-  async changePhone(old_code: string, new_phone: string, new_code: string): Promise<{ phone: string }> {
-    return this.post(`/users/me/phone/change`, { old_code, new_phone, new_code });
-  }
-
   async changePassword(oldPassword: string, newPassword: string): Promise<void> {
     await this.post(`/auth/change-password`, { old_password: oldPassword, new_password: newPassword });
   }

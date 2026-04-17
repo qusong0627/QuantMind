@@ -1,6 +1,6 @@
 import React, { useState, useMemo } from 'react';
-import { Button, List, Modal, Input, Steps, Alert, message, Tag, Progress } from 'antd';
-import { MobileOutlined, LockOutlined, SafetyCertificateOutlined, CheckCircleOutlined, CloseCircleOutlined } from '@ant-design/icons';
+import { Button, List, Modal, Input, Alert, message, Progress } from 'antd';
+import { LockOutlined, CheckCircleOutlined, CloseCircleOutlined } from '@ant-design/icons';
 import { userCenterService } from '../services/userCenterService';
 import { useProfile } from '../hooks';
 
@@ -10,9 +10,6 @@ interface SecuritySettingsProps {
 
 export const SecuritySettings: React.FC<SecuritySettingsProps> = ({ userId }) => {
     const { profile, refetch } = useProfile(userId);
-    const [phoneModalOpen, setPhoneModalOpen] = useState(false);
-    const [phoneMode, setPhoneMode] = useState<'bind' | 'change'>('bind');
-    const [phoneStep, setPhoneStep] = useState(0);
     const [loading, setLoading] = useState(false);
 
     // Password Form State
@@ -20,7 +17,7 @@ export const SecuritySettings: React.FC<SecuritySettingsProps> = ({ userId }) =>
     const [oldPassword, setOldPassword] = useState('');
     const [newPassword, setNewPassword] = useState('');
     const [confirmPassword, setConfirmPassword] = useState('');
-    
+
     // 密码强度检查
     const passwordChecks = useMemo(() => ({
         length: newPassword.length >= 8,
@@ -28,64 +25,11 @@ export const SecuritySettings: React.FC<SecuritySettingsProps> = ({ userId }) =>
         lower: /[a-z]/.test(newPassword),
         digit: /\d/.test(newPassword),
     }), [newPassword]);
-    
+
     const passwordStrength = useMemo(() => {
         const score = Object.values(passwordChecks).filter(Boolean).length;
         return score;
     }, [passwordChecks]);
-
-    // Phone Form State
-    const [bindPhone, setBindPhone] = useState('');
-    const [bindCode, setBindCode] = useState('');
-    const [oldPhoneCode, setOldPhoneCode] = useState('');
-    const [newPhone, setNewPhone] = useState('');
-    const [newPhoneCode, setNewPhoneCode] = useState('');
-
-    const openPhoneModal = () => {
-        const hasPhone = !!(profile?.phone && String(profile.phone).trim());
-        setPhoneMode(hasPhone ? 'change' : 'bind');
-        setPhoneStep(0);
-        // Reset fields
-        setBindPhone('');
-        setBindCode('');
-        setOldPhoneCode('');
-        setNewPhone('');
-        setNewPhoneCode('');
-        setPhoneModalOpen(true);
-    };
-
-    const sendCode = async (type: 'bind_phone' | 'change_phone_old' | 'change_phone_new', phone?: string) => {
-        try {
-            setLoading(true);
-            await userCenterService.sendPhoneCode(type, phone);
-            message.success('验证码已发送');
-        } catch (error: any) {
-            message.error(error.message || '发送失败');
-        } finally {
-            setLoading(false);
-        }
-    };
-
-    const handleSubmit = async () => {
-        try {
-            setLoading(true);
-            if (phoneMode === 'bind') {
-                if (!bindPhone || !bindCode) return message.warning('请填写完整');
-                await userCenterService.bindPhone(bindPhone, bindCode);
-                message.success('绑定成功');
-            } else {
-                if (!oldPhoneCode || !newPhone || !newPhoneCode) return message.warning('请填写完整');
-                await userCenterService.changePhone(oldPhoneCode, newPhone, newPhoneCode);
-                message.success('换绑成功');
-            }
-            setPhoneModalOpen(false);
-            refetch();
-        } catch (error: any) {
-            message.error(error.message || '操作失败');
-        } finally {
-            setLoading(false);
-        }
-    };
 
     const handlePasswordSubmit = async () => {
         if (!oldPassword) return message.warning('请输入当前密码');
@@ -122,16 +66,6 @@ export const SecuritySettings: React.FC<SecuritySettingsProps> = ({ userId }) =>
             description: '已设置。建议定期更换密码以保障账户安全。',
             icon: <LockOutlined className="text-blue-500 text-xl" />,
             action: <Button onClick={() => setPassModalOpen(true)}>修改</Button>
-        },
-        {
-            title: '手机绑定',
-            description: profile?.phone ? `已绑定手机：${profile.phone}` : '未绑定手机，绑定后可用于登录和找回密码。',
-            icon: <MobileOutlined className="text-blue-500 text-xl" />,
-            action: (
-                <Button onClick={openPhoneModal}>
-                    {profile?.phone ? '换绑' : '绑定'}
-                </Button>
-            )
         }
     ];
 
@@ -179,16 +113,16 @@ export const SecuritySettings: React.FC<SecuritySettingsProps> = ({ userId }) =>
                             <div className="mt-2 space-y-2">
                                 <div className="flex items-center gap-2">
                                     <span className="text-xs text-slate-500">密码强度：</span>
-                                    <Progress 
-                                        percent={passwordStrength * 25} 
-                                        size="small" 
+                                    <Progress
+                                        percent={passwordStrength * 25}
+                                        size="small"
                                         showInfo={false}
                                         strokeColor={passwordStrength <= 1 ? '#ff4d4f' : passwordStrength <= 2 ? '#faad14' : passwordStrength <= 3 ? '#52c41a' : '#1890ff'}
                                         className="flex-1"
                                     />
                                     <span className={`text-xs font-medium ${
-                                        passwordStrength <= 1 ? 'text-red-500' : 
-                                        passwordStrength <= 2 ? 'text-orange-500' : 
+                                        passwordStrength <= 1 ? 'text-red-500' :
+                                        passwordStrength <= 2 ? 'text-orange-500' :
                                         passwordStrength <= 3 ? 'text-green-500' : 'text-blue-500'
                                     }`}>
                                         {passwordStrength <= 1 ? '弱' : passwordStrength <= 2 ? '中' : passwordStrength <= 3 ? '强' : '很强'}
@@ -234,113 +168,13 @@ export const SecuritySettings: React.FC<SecuritySettingsProps> = ({ userId }) =>
                     />
                     <div className="flex justify-end gap-2 mt-4">
                         <Button onClick={() => setPassModalOpen(false)}>取消</Button>
-                        <Button 
-                            type="primary" 
-                            onClick={handlePasswordSubmit} 
+                        <Button
+                            type="primary"
+                            onClick={handlePasswordSubmit}
                             loading={loading}
                             disabled={passwordStrength < 4}
                         >
                             提交修改
-                        </Button>
-                    </div>
-                </div>
-            </Modal>
-
-            <Modal
-                title={phoneMode === 'bind' ? '绑定手机号' : '更换手机号'}
-                open={phoneModalOpen}
-                onCancel={() => setPhoneModalOpen(false)}
-                footer={null}
-                destroyOnHidden
-            >
-                <div className="flex flex-col gap-4 py-4">
-                    {phoneMode === 'change' && (
-                        <Steps
-                            size="small"
-                            current={phoneStep}
-                            items={[{ title: '验证旧手机' }, { title: '验证新手机' }]}
-                            className="mb-4"
-                        />
-                    )}
-
-                    {phoneMode === 'bind' ? (
-                        <>
-                            <Input
-                                placeholder="请输入手机号"
-                                value={bindPhone}
-                                onChange={e => setBindPhone(e.target.value)}
-                            />
-                            <div className="flex gap-2 items-center">
-                                <Input
-                                    placeholder="验证码"
-                                    value={bindCode}
-                                    style={{ flex: 1 }}
-                                    onChange={e => setBindCode(e.target.value)}
-                                />
-                                <Button 
-                                    loading={loading} 
-                                    onClick={() => sendCode('bind_phone', bindPhone)}
-                                    style={{ width: 100 }}
-                                >
-                                    发送验证码
-                                </Button>
-                            </div>
-                        </>
-                    ) : (
-                        <div className="flex flex-col gap-4">
-                            <div className="p-3 bg-orange-50 text-orange-600 text-xs rounded-lg">
-                                为了您的账户安全，更换手机号需要验证旧手机号。
-                            </div>
-
-                            <div className="space-y-2">
-                                <span className="text-xs font-bold text-slate-500">验证旧手机号 ({profile?.phone})</span>
-                                <div className="flex gap-2 items-center">
-                                    <Input
-                                        placeholder="旧手机验证码"
-                                        value={oldPhoneCode}
-                                        style={{ flex: 1 }}
-                                        onChange={e => setOldPhoneCode(e.target.value)}
-                                    />
-                                    <Button 
-                                        loading={loading} 
-                                        onClick={() => sendCode('change_phone_old')}
-                                        style={{ width: 100 }}
-                                    >
-                                        发送验证码
-                                    </Button>
-                                </div>
-                            </div>
-
-                            <div className="space-y-2">
-                                <span className="text-xs font-bold text-slate-500">绑定新手机号</span>
-                                <Input
-                                    placeholder="新手机号"
-                                    value={newPhone}
-                                    onChange={e => setNewPhone(e.target.value)}
-                                />
-                                <div className="flex gap-2 items-center">
-                                    <Input
-                                        placeholder="新手机验证码"
-                                        value={newPhoneCode}
-                                        style={{ flex: 1 }}
-                                        onChange={e => setNewPhoneCode(e.target.value)}
-                                    />
-                                    <Button 
-                                        loading={loading} 
-                                        onClick={() => sendCode('change_phone_new', newPhone)}
-                                        style={{ width: 100 }}
-                                    >
-                                        发送验证码
-                                    </Button>
-                                </div>
-                            </div>
-                        </div>
-                    )}
-
-                    <div className="flex justify-end gap-2 mt-4">
-                        <Button onClick={() => setPhoneModalOpen(false)}>取消</Button>
-                        <Button type="primary" onClick={handleSubmit} loading={loading}>
-                            提交
                         </Button>
                     </div>
                 </div>
