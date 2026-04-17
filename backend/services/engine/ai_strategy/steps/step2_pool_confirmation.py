@@ -302,9 +302,9 @@ def _query_stock_pool(
 
             # 5. 执行最终查询 (全量返回，最高支持 10000 只股票)
             sql = f"""
-            SELECT 
-                code as symbol, 
-                stock_name as name, 
+            SELECT
+                code as symbol,
+                stock_name as name,
                 total_mv as market_cap,
                 pe_ttm as pe_ratio,
                 pb as pb_ratio,

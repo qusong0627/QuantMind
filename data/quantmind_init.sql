@@ -91,14 +91,15 @@ CREATE TABLE public.api_keys (
     id SERIAL PRIMARY KEY,
     user_id VARCHAR(64) NOT NULL,
     tenant_id VARCHAR(64) NOT NULL DEFAULT 'default',
-    key_hash VARCHAR(255) NOT NULL,
-    key_prefix VARCHAR(16) NOT NULL,
+    access_key VARCHAR(64) NOT NULL,
+    secret_hash VARCHAR(255) NOT NULL,
     name VARCHAR(128),
     permissions JSONB DEFAULT '[]',
     last_used_at TIMESTAMPTZ,
     expires_at TIMESTAMPTZ,
     is_active BOOLEAN DEFAULT true,
-    created_at TIMESTAMPTZ DEFAULT now()
+    created_at TIMESTAMPTZ DEFAULT now(),
+    CONSTRAINT uq_api_keys_access_key UNIQUE (access_key)
 );
 
 -- ============================================================================
@@ -533,6 +534,8 @@ CREATE INDEX idx_users_user_id ON public.users(user_id);
 CREATE INDEX idx_users_tenant_id ON public.users(tenant_id);
 CREATE INDEX idx_user_sessions_user_id ON public.user_sessions(user_id);
 CREATE INDEX idx_api_keys_user_id ON public.api_keys(user_id);
+CREATE INDEX idx_api_keys_tenant_id ON public.api_keys(tenant_id);
+CREATE INDEX idx_api_keys_access_key ON public.api_keys(access_key);
 CREATE INDEX idx_strategies_user_id ON public.strategies(user_id);
 CREATE INDEX idx_user_strategies_user_id ON public.user_strategies(user_id);
 CREATE INDEX idx_qlib_backtest_runs_user_id ON public.qlib_backtest_runs(user_id);
