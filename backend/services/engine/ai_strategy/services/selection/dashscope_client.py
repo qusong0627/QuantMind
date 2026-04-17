@@ -22,6 +22,8 @@ def _get_ai_strategy_config():
 class DashScopeClient:
     """Minimal wrapper around DashScope (OpenAI-compatible) APIs."""
 
+    MOCK_KEY_PATTERNS = ["mock-api-key", "not-configured", "placeholder"]
+
     def __init__(
         self,
         api_key: str | None = None,
@@ -30,6 +32,11 @@ class DashScopeClient:
         self.api_key = api_key or os.getenv("DASHSCOPE_API_KEY")
         if not self.api_key:
             raise RuntimeError("DASHSCOPE_API_KEY is not configured")
+        # 检测 mock key
+        if any(pattern in self.api_key for pattern in self.MOCK_KEY_PATTERNS):
+            raise RuntimeError(
+                "DASHSCOPE_API_KEY 未配置真实密钥。请在个人中心配置您的 API Key。"
+            )
         self.base_url = base_url or os.getenv("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
         self.client = OpenAI(api_key=self.api_key, base_url=self.base_url)
 

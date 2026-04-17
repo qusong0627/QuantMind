@@ -286,6 +286,15 @@ def validate_required_config(config: AIStrategyConfig) -> None:
     Raises:
         ValueError: 当必需配置缺失时
     """
+    # 检测 mock API key（允许启动但会记录警告）
+    mock_key_patterns = ["mock-api-key", "not-configured", "placeholder"]
+    is_mock_key = any(pattern in config.LLM_API_KEY for pattern in mock_key_patterns)
+    if is_mock_key:
+        import logging
+        logging.getLogger(__name__).warning(
+            "⚠️ 检测到 mock API key，AI 功能将不可用。请在个人中心配置真实的 API key。"
+        )
+
     required_configs = {
         "LLM_API_KEY": config.LLM_API_KEY,
         "DATABASE_URL": config.DATABASE_URL,

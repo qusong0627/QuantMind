@@ -190,9 +190,14 @@ async def chat_completions(request: Request, item: ChatRequest):
     masked_key = f"{api_key[:6]}...{api_key[-4:]}" if len(api_key) > 10 else "***"
     logger.info(f"Initializing QuantAgent: model={model}, base_url={base_url}, api_key={masked_key}")
 
-    if not api_key:
-        logger.error("Chat failed: API Key is empty (both env and profile)")
-        raise HTTPException(status_code=500, detail="Cloud AI API Key not configured on server.")
+    # 检测 mock key
+    mock_key_patterns = ["mock-api-key", "not-configured", "placeholder"]
+    if not api_key or any(pattern in api_key for pattern in mock_key_patterns):
+        logger.error("Chat failed: API Key is empty or mock key")
+        raise HTTPException(
+            status_code=500,
+            detail="API Key 未配置。请在个人中心配置您的 API Key。"
+        )
 
     agent = QuantAgent(api_key, base_url, model, project_root)
 

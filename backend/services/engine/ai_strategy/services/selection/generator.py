@@ -12,8 +12,15 @@ logger = logging.getLogger(__name__)
 
 
 class SQLGenerator:
+    MOCK_KEY_PATTERNS = ["mock-api-key", "not-configured", "placeholder"]
+
     def __init__(self):
         api_key = os.getenv("QWEN_API_KEY") or os.getenv("DASHSCOPE_API_KEY")
+        # 检测 mock key
+        if api_key and any(pattern in api_key for pattern in self.MOCK_KEY_PATTERNS):
+            raise RuntimeError(
+                "API Key 未配置真实密钥。请在个人中心配置您的 API Key。"
+            )
         base_url = os.getenv("DASHSCOPE_BASE_URL") or "https://dashscope.aliyuncs.com/compatible-mode/v1"
 
         self.client = AsyncOpenAI(api_key=api_key, base_url=base_url)

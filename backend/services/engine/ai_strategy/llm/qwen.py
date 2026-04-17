@@ -28,6 +28,8 @@ from .base import BaseLLMProvider, normalize_name
 
 
 class QwenLLM:
+    MOCK_KEY_PATTERNS = ["mock-api-key", "not-configured", "placeholder"]
+
     def __init__(self):
         from ..ai_strategy_config import get_config as _gc
 
@@ -37,6 +39,11 @@ class QwenLLM:
         self.api_key = os.getenv("QWEN_API_KEY") or os.getenv("DASHSCOPE_API_KEY")
         if not self.api_key:
             raise RuntimeError("QWEN_API_KEY or DASHSCOPE_API_KEY not set in environment")
+        # 检测 mock key
+        if any(pattern in self.api_key for pattern in self.MOCK_KEY_PATTERNS):
+            raise RuntimeError(
+                "API Key 未配置真实密钥。请在个人中心配置您的 API Key。"
+            )
         # OpenAI 兼容模式端点
         base_url = self._config.LLM_API_BASE.rstrip("/")
         self.endpoint = f"{base_url}/chat/completions"
