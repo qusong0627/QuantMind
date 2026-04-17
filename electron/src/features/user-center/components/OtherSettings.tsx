@@ -174,7 +174,7 @@ export const OtherSettings: React.FC<OtherSettingsProps> = ({ userId, tenantId }
           <div className="text-xs text-gray-500 space-y-1 pt-2 border-t border-gray-100">
             <p>• API Key 将安全存储在您的个人档案中</p>
             <p>• 用于 AI-IDE 智能助手对话和智能策略生成</p>
-            <p>• 获取 API Key：<a href="https://dashscope.console.aliyun.com/apiKey" target="_blank" rel="noopener noreferrer" className="text-indigo-600 hover:underline">阿里云 DashScope 控制台</a></p>
+            <p>• 获取 API Key：<a href="https://bailian.console.aliyun.com/" target="_blank" rel="noopener noreferrer" className="text-indigo-600 hover:underline">阿里云百炼控制台</a></p>
           </div>
         </div>
       </div>
