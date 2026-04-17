@@ -109,6 +109,9 @@ services:
       # 策略模板目录
       - STRATEGY_TEMPLATES_DIR=/app/strategy_templates
 
+      # 回测结果存储目录（使用共享卷）
+      - QLIB_BACKTEST_RESULT_DIR=/data/backtest_results
+
       # Qwen/DashScope API (用于 AI 策略功能)
       # 使用 mock key 允许服务启动，用户需在个人中心配置真实 API key
       - DASHSCOPE_API_KEY=${DASHSCOPE_API_KEY:-mock-api-key-not-configured}
@@ -167,6 +170,9 @@ services:
 
       # 策略模板目录
       - STRATEGY_TEMPLATES_DIR=/app/strategy_templates
+
+      # 回测结果存储目录（使用共享卷）
+      - QLIB_BACKTEST_RESULT_DIR=/data/backtest_results
 
       # Qwen/DashScope API (mock key 允许启动，用户需配置真实 key)
       - DASHSCOPE_API_KEY=${DASHSCOPE_API_KEY:-mock-api-key-not-configured}
