@@ -1,0 +1,109 @@
+cache:
+  dir: /tmp
+callback:
+  secret: 83fcf31f7620827251fb4516adf1f928f0ed689b6238407c7d80e617f31d4e5b
+  url: http://quantmind-api:8000/api/v1/models/training-runs/train_20260412145721_9273d147/complete
+context:
+  benchmark: SH000300
+  commission_rate: 0.00025
+  deal_price: close
+  initial_capital: 1000000.0
+  slippage: 0.0005
+data:
+  features:
+  - open
+  - high
+  - low
+  - close
+  - volume
+  - factor
+  - mom_ret_1d
+  - mom_ret_5d
+  - mom_ret_10d
+  - mom_ret_20d
+  - mom_ma_gap_5
+  - mom_ma_gap_20
+  - mom_macd_hist
+  - mom_rsi_14
+  - mom_kdj_k
+  - mom_breakout_20d
+  - vol_std_20
+  - vol_atr_14
+  - vol_parkinson_20
+  - vol_gk_20
+  - vol_rs_20
+  - vol_downside_20
+  - vol_realized_rv
+  - vol_jump_zadj
+  - liq_volume_ma_20
+  - liq_volume_ratio_5
+  - liq_amount_ma_20
+  - liq_amount_ratio_5
+  - liq_mfi_14
+  - liq_amihud_20
+  - liq_amihud_60
+  - liq_accdist_20
+  - flow_net_amount
+  - flow_net_amount_ratio
+  - flow_large_net_amount
+  - flow_vpin
+  - flow_vpin_ma_5
+  - flow_vpin_ma_20
+  - style_ln_mv_total
+  - style_ln_mv_float
+  - style_beta_20
+  - style_beta_60
+  - style_idio_vol_20
+  - style_residual_ret_20
+  - ind_ret_1d
+  - ind_ret_20d
+  - ind_strength_20
+  - ind_momentum_rank_20
+  local_dir: /tmp/feature_snapshots
+  source_mode: LOCAL
+  train_end: '2023-12-31'
+  train_start: '2016-01-01'
+job_name: model_train_t5_20260412225720
+label:
+  effective_trade_date: '2025-01-06'
+  label_formula: label = future_return(T, T+5) = close(T+5) / close(T) - 1
+  target_horizon_days: 5
+  target_mode: return
+  training_window: 2016-01-01 → 2023-12-31 | 2024-01-01 → 2024-12-31 | 2025-01-01
+    → 2025-12-31
+model:
+  early_stopping_rounds: 50
+  num_boost_round: 2000
+  params:
+    bagging_fraction: 0.8
+    feature_fraction: 0.7
+    lambda_l1: 0.5
+    lambda_l2: 1
+    learning_rate: 0.02
+    max_depth: -1
+    metric: l2
+    min_data_in_leaf: 300
+    num_leaves: 31
+    objective: regression
+  type: lightgbm
+  val_ratio: null
+output:
+  cos_prefix: models/candidates/train_20260412145721_9273d147/
+  required_artifacts:
+  - model.lgb
+  - pred.pkl
+  - metadata.json
+  - config.yaml
+  - result.json
+  result_path: /workspace/result.json
+run_id: train_20260412145721_9273d147
+split:
+  test:
+  - '2025-01-05'
+  - '2025-12-31'
+  train:
+  - '2016-01-01'
+  - '2023-12-31'
+  valid:
+  - '2024-01-05'
+  - '2024-12-31'
