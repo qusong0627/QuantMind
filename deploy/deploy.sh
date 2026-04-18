@@ -527,9 +527,11 @@ step10_init_database() {
 
     if [[ -f "data/quantmind_init.sql" ]]; then
         log_info "初始化数据库..."
-        docker exec -i quantmind-db psql -U quantmind -d quantmind < data/quantmind_init.sql 2>&1 | head -20 || \
-            log_warn "数据库可能已初始化"
-        log_info "数据库初始化完成"
+        if docker exec -i quantmind-db psql -U quantmind -d quantmind < data/quantmind_init.sql 2>&1; then
+            log_info "数据库初始化完成"
+        else
+            log_warn "数据库初始化可能失败，检查日志"
+        fi
     else
         log_warn "未找到初始化 SQL: data/quantmind_init.sql"
     fi
@@ -537,10 +539,10 @@ step10_init_database() {
     # 创建默认管理员用户（如果不存在）
     log_info "创建默认管理员用户..."
     docker exec quantmind-db psql -U quantmind -d quantmind -c "
-    INSERT INTO users (user_id, tenant_id, username, email, password_hash, is_active, is_admin, is_verified, is_locked, is_deleted, login_count, created_at, updated_at)
-    SELECT gen_random_uuid(), 'default', 'admin', 'admin@quantmind.local',
+    INSERT INTO users (id, user_id, tenant_id, username, email, password_hash, is_active, is_admin, is_verified, is_locked, login_count, created_at, updated_at, is_deleted)
+    SELECT 1, 'admin', 'default', 'admin', 'admin@quantmind.local',
            '\$2b\$12\$B/yjK9cT.wx4BlB9j.r/t.dADjCbmutIXoDM7PdKZmV6ypuYiiUvW',
-           true, true, true, false, false, 0, now(), now()
+           true, true, true, false, 37, now(), now(), false
     WHERE NOT EXISTS (SELECT 1 FROM users WHERE username = 'admin' AND tenant_id = 'default');
     " 2>/dev/null || log_warn "管理员用户可能已存在"
 
