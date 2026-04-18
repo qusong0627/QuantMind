@@ -49,7 +49,7 @@ export const FloatingNavBar: React.FC<FloatingNavBarProps> = ({ current, onChang
   const navItems = allNavItems.filter(item => {
     if (item.id === 'community' && !hasFeature('community')) return false;
     // 实盘交易在 OSS 版由于缺乏行情也暂且隐藏或标注
-    if (item.id === 'trading' && isOSS) return false;
+    // if (item.id === 'trading' && isOSS) return false;
     return true;
   });
 
