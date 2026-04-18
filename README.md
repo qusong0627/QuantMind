@@ -48,8 +48,24 @@
 
 从训练到推理，完整闭环：
 
-```
-数据准备 → 模型训练 → 效果评估 → 模型部署 → 实时推理 → 信号生成
+```mermaid
+flowchart LR
+    A[📊 数据准备] --> B[🧠 模型训练]
+    B --> C[📈 效果评估]
+    C --> D{通过验证?}
+    D -->|是| E[🚀 模型部署]
+    D -->|否| B
+    E --> F[⚡ 实时推理]
+    F --> G[📡 信号生成]
+    G --> H[💹 执行交易]
+
+    style A fill:#e3f2fd
+    style B fill:#f3e5f5
+    style C fill:#fff3e0
+    style E fill:#e8f5e9
+    style F fill:#fce4ec
+    style G fill:#e1f5fe
+    style H fill:#f1f8e9
 ```
 
 - **一键训练** — 自动化特征提取、样本划分、超参优化
@@ -179,28 +195,71 @@ npm install && npm run dev
 
 ### 微服务架构
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                      QuantMind Platform                          │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                   │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌─────────┐ │
-│  │  API Gateway │  │   Engine    │  │    Trade    │  │ Stream  │ │
-│  │   Port 8000  │  │  Port 8001  │  │  Port 8002  │  │Port 8003│ │
-│  │              │  │             │  │             │  │         │ │
-│  │ • 用户认证   │  │ • Qlib回测  │  │ • 订单管理  │  │• 实时行情│ │
-│  │ • 策略管理   │  │ • 模型训练  │  │ • 持仓管理  │  │• WS推送 │ │
-│  │ • 社区功能   │  │ • AI推理    │  │ • 风控系统  │  │• 数据订阅│ │
-│  └─────────────┘  └─────────────┘  └─────────────┘  └─────────┘ │
-│                                                                   │
-└─────────────────────────────────────────────────────────────────┘
-                              │
-              ┌───────────────┼───────────────┐
-              ▼               ▼               ▼
-        ┌──────────┐    ┌──────────┐    ┌──────────┐
-        │PostgreSQL│    │  Redis   │    │ 本地存储  │
-        │   数据库  │    │  缓存    │    │  /data   │
-        └──────────┘    └──────────┘    └──────────┘
+```mermaid
+flowchart TB
+    subgraph Client["🖥️ 客户端"]
+        Web["Web Browser"]
+        Desktop["Electron Desktop"]
+    end
+
+    subgraph Gateway["🚪 API Gateway :8000"]
+        Auth["用户认证"]
+        Strategy["策略管理"]
+        Community["社区功能"]
+    end
+
+    subgraph Engine["🧠 Engine Service :8001"]
+        Qlib["Qlib 回测引擎"]
+        Training["模型训练"]
+        Inference["AI 推理"]
+    end
+
+    subgraph Trade["💹 Trade Service :8002"]
+        Order["订单管理"]
+        Position["持仓管理"]
+        Risk["风控系统"]
+    end
+
+    subgraph Stream["📡 Stream Service :8003"]
+        Quote["实时行情"]
+        WS["WebSocket 推送"]
+    end
+
+    subgraph Storage["💾 数据层"]
+        PG[("PostgreSQL<br/>数据库")]
+        Redis[("Redis<br/>缓存")]
+        Local[("本地存储<br/>/data")]
+    end
+
+    subgraph External["🌐 外部服务"]
+        Broker["券商接口"]
+        Market["行情源"]
+    end
+
+    Client --> Gateway
+    Gateway --> Engine
+    Gateway --> Trade
+    Gateway --> Stream
+
+    Engine --> PG
+    Engine --> Redis
+    Engine --> Local
+
+    Trade --> PG
+    Trade --> Redis
+    Trade --> Broker
+
+    Stream --> Redis
+    Stream --> Market
+    Stream --> Client
+
+    style Client fill:#e1f5fe
+    style Gateway fill:#fff3e0
+    style Engine fill:#f3e5f5
+    style Trade fill:#e8f5e9
+    style Stream fill:#fce4ec
+    style Storage fill:#f5f5f5
+    style External fill:#fff8e1
 ```
 
 ### 技术栈
