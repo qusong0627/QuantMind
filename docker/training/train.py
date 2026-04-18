@@ -11,7 +11,7 @@ config.yaml 结构：
   run_id / job_name
   data.train_start / data.train_end / data.features
   model.type / model.num_boost_round / model.val_ratio / model.params
-  output.result_path / output.cos_prefix
+  output.result_path
   callback.url / callback.secret
 """
 
@@ -26,14 +26,13 @@ import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
 
 import lightgbm as lgb
 import numpy as np
 import pandas as pd
+import pyarrow.parquet as pq
 import requests
 import yaml
-from qcloud_cos import CosConfig, CosS3Client
 
 logging.basicConfig(
     level=logging.INFO,
@@ -67,69 +66,50 @@ TRAINING_BASE_FEATURES: list[str] = [
 ]
 
 
-# ── COS 辅助 ─────────────────────────────────────────────────────────────────
-def _cos_client() -> CosS3Client:
-    region = os.getenv("TENCENT_REGION", "ap-guangzhou")
-    # 训练链路强制使用 COS SDK（Bucket + Key）访问，避免自定义公网域名下载产生流量费。
-    # EnableInternalDomain=True 会优先走腾讯云内网解析（同地域场景）。
-    return CosS3Client(CosConfig(
-        Region=region,
-        SecretId=os.getenv("TENCENT_SECRET_ID", ""),
-        SecretKey=os.getenv("TENCENT_SECRET_KEY", ""),
-        Scheme="https",
-        EnableInternalDomain=True,
-        AutoSwitchDomainOnRetry=True,
-    ))
-
-
-def _load_local_parquet(local_dir: Path, year: int) -> pd.DataFrame | None:
+def _load_local_parquet(
+    local_dir: Path,
+    year: int,
+    required_columns: list[str],
+    clip_start: pd.Timestamp | None = None,
+    clip_end: pd.Timestamp | None = None,
+) -> pd.DataFrame | None:
     file_path = local_dir / f"model_features_{year}.parquet"
     if not file_path.exists():
         return None
     try:
         logger.info(f"Local data hit: {file_path}")
-        return pd.read_parquet(file_path, engine="pyarrow")
+
+        schema_cols = set(pq.ParquetFile(file_path).schema_arrow.names)
+        selected_cols = [c for c in required_columns if c in schema_cols]
+        if "trade_date" not in selected_cols or "symbol" not in selected_cols:
+            logger.warning(
+                "Skip parquet missing required base columns trade_date/symbol: %s",
+                file_path,
+            )
+            return None
+        df = pd.read_parquet(file_path, columns=selected_cols, engine="pyarrow")
+
+        # 先按日期裁剪每年数据，避免把无关年份全量堆进内存
+        if "trade_date" in df.columns and (clip_start is not None or clip_end is not None):
+            df["trade_date"] = pd.to_datetime(df["trade_date"], errors="coerce")
+            mask = pd.Series(True, index=df.index)
+            if clip_start is not None:
+                mask &= df["trade_date"] >= clip_start
+            if clip_end is not None:
+                mask &= df["trade_date"] <= clip_end
+            df = df.loc[mask].copy()
+
+        # 数值列统一降为 float32，降低内存峰值
+        for col in df.columns:
+            if col in {"trade_date", "symbol"}:
+                continue
+            if pd.api.types.is_numeric_dtype(df[col]):
+                df[col] = df[col].astype(np.float32, copy=False)
+
+        return df
     except Exception as exc:
         logger.warning(f"  ⚠ Failed to read local parquet {file_path}: {exc}")
         return None
-
-
-def _upload_bytes(client: CosS3Client, bucket: str, key: str, data: bytes, content_type: str = "application/octet-stream") -> str:
-    client.put_object(Bucket=bucket, Key=key, Body=data, ContentType=content_type)
-    logger.info(f"Uploaded cos://{bucket}/{key}  ({len(data):,} bytes)")
-    return key
-
-
-def _normalize_cos_key(raw: str) -> str:
-    val = (raw or "").strip()
-    if not val:
-        return ""
-    if val.startswith(("http://", "https://")):
-        parsed = urlparse(val)
-        path_key = parsed.path.lstrip("/")
-        logger.warning(
-            "config-cos-key is URL (%s), normalized to object key '%s'; "
-            "training should use COS key instead of public URL",
-            parsed.netloc,
-            path_key,
-        )
-        return path_key
-    return val
-
-
-def _download_config_from_cos(cos_key: str, dest_path: Path) -> Path:
-    bucket = os.getenv("TENCENT_BUCKET", "quantmind-1255718505")
-    key = _normalize_cos_key(cos_key)
-    if not key:
-        raise RuntimeError("empty config cos key")
-    client = _cos_client()
-    logger.info(f"Downloading config from cos://{bucket}/{key} -> {dest_path}")
-    resp = client.get_object(Bucket=bucket, Key=key)
-    raw = resp["Body"].get_raw_stream().read()
-    dest_path.parent.mkdir(parents=True, exist_ok=True)
-    dest_path.write_bytes(raw)
-    logger.info(f"Config downloaded: {len(raw):,} bytes")
-    return dest_path
 
 
 # ── 评估指标 ─────────────────────────────────────────────────────────────────
@@ -194,11 +174,37 @@ def load_data(
     if local_root is None:
         raise RuntimeError("local_dir must be provided; COS data download has been removed")
 
+    # 仅读取训练必需列，避免整表加载导致 OOM
+    horizon = max(1, int(target_horizon_days or 1))
+    horizon_col = f"mom_ret_{horizon}d"
+    required_columns = list(
+        dict.fromkeys(
+            ["trade_date", "symbol", "mom_ret_1d", horizon_col] + list(features)
+        )
+    )
+    logger.info(
+        "Memory-optimized read: selected %d columns (horizon=%s)",
+        len(required_columns),
+        horizon,
+    )
+
+    # 给标签构建预留边界，避免裁剪过早影响 shift/rolling
+    range_start = pd.Timestamp(train_start) - pd.Timedelta(days=max(7, horizon + 3))
+    upper_bound = test_end or valid_end or train_end
+    range_end = pd.Timestamp(upper_bound) + pd.Timedelta(days=max(7, horizon + 3))
+
     chunks = []
     for year in range(max(start_year - 1, 2016), end_year + 1):
-        df_year = _load_local_parquet(local_root, year)
+        df_year = _load_local_parquet(
+            local_root,
+            year,
+            required_columns=required_columns,
+            clip_start=range_start,
+            clip_end=range_end,
+        )
         if df_year is not None:
-            chunks.append(df_year)
+            if not df_year.empty:
+                chunks.append(df_year)
         else:
             logger.warning(f"No data file found for year {year} in {local_root}, skipping")
 
@@ -206,7 +212,8 @@ def load_data(
         raise RuntimeError("No data loaded from local storage")
 
     df = pd.concat(chunks, axis=0, ignore_index=True)
-    df["trade_date"] = pd.to_datetime(df["trade_date"])
+    df["trade_date"] = pd.to_datetime(df["trade_date"], errors="coerce")
+    df = df[df["trade_date"].notna()].copy()
     logger.info(f"Raw concat size: {len(df)} rows. Date range: {df['trade_date'].min()} to {df['trade_date'].max()}")
 
     # 过滤北交所代码（4/8开头）
@@ -406,12 +413,9 @@ def main() -> int:
     # 最早期诊断日志：在任何处理之前打印，确保 Batch 环境中一定能看到
     print(f"[BOOT] python={sys.version}", flush=True)
     print(f"[BOOT] argv={sys.argv}", flush=True)
-    print(f"[BOOT] TRAIN_CONFIG_COS_KEY={os.getenv('TRAIN_CONFIG_COS_KEY','<unset>')}", flush=True)
-    print(f"[BOOT] TENCENT_SECRET_ID len={len(os.getenv('TENCENT_SECRET_ID',''))}", flush=True)
 
     parser = argparse.ArgumentParser(description="QuantMind Training — YAML config driven")
     parser.add_argument("--config", required=False, help="Path to config.yaml")
-    parser.add_argument("--config-cos-key", required=False, help="COS key of config.yaml")
     try:
         args, unknown_args = parser.parse_known_args()
     except SystemExit as exc:
@@ -420,28 +424,21 @@ def main() -> int:
         # Batch 运行时偶发注入畸形参数（如缺失值的已知 flag）会触发 argparse 退出码 2。
         # 这里降级为环境变量驱动启动，避免任务在入口阶段直接失败。
         logger.warning(f"Argparse failed with argv={sys.argv}; fallback to env-driven args")
-        args = argparse.Namespace(config=None, config_cos_key=os.getenv("TRAIN_CONFIG_COS_KEY", ""))
+        args = argparse.Namespace(config=None)
         unknown_args = []
     if unknown_args:
         logger.warning(f"Ignoring unknown CLI args from runtime: {unknown_args}")
 
-    # 完全依赖环境变量（Batch 通过 EnvVars 注入），CLI 参数作为可选覆盖
+    # 本地挂载 config.yaml，CLI 参数作为可选覆盖
     cfg_path = Path(args.config) if args.config else Path("/tmp/config.yaml")
-    config_cos_key = (args.config_cos_key or os.getenv("TRAIN_CONFIG_COS_KEY", "")).strip()
 
     run_id     = "unknown"
-    cos_prefix = "models/candidates/unknown/"
-    result_cos_key = f"{cos_prefix}result.json"
     result: dict = {}
     callback_url    = ""
     callback_secret = ""
     result_path = Path("/workspace/result.json")
 
     try:
-        # config 下载放入 try/except，避免 COS 异常导致 uncaught exit
-        if config_cos_key:
-            cfg_path = _download_config_from_cos(config_cos_key, cfg_path)
-
         if not cfg_path.exists():
             raise RuntimeError(f"Config file not found: {cfg_path}")
         cfg = yaml.safe_load(cfg_path.read_text())
@@ -449,7 +446,6 @@ def main() -> int:
         run_id          = cfg.get("run_id", "unknown")
         job_name        = cfg.get("job_name", "unnamed")
         result_path     = Path(cfg.get("output", {}).get("result_path", "/workspace/result.json"))
-        cos_prefix      = cfg.get("output", {}).get("cos_prefix", "models/candidates/{run_id}/").format(run_id=run_id)
         callback_url    = cfg.get("callback", {}).get("url", "")
         callback_secret = cfg.get("callback", {}).get("secret", "")
 
@@ -459,7 +455,7 @@ def main() -> int:
         submitted_features = list(dict.fromkeys([str(item).strip() for item in (cfg["data"].get("features", []) or []) if str(item).strip()]))
         auto_appended_features = [feature for feature in TRAINING_BASE_FEATURES if feature not in submitted_features]
         features = list(dict.fromkeys(TRAINING_BASE_FEATURES + submitted_features))
-        source_mode = str((cfg.get("data", {}) or {}).get("source_mode") or "COS").strip().upper()
+        source_mode = str((cfg.get("data", {}) or {}).get("source_mode") or "LOCAL").strip().upper()
         local_data_dir = str((cfg.get("data", {}) or {}).get("local_dir") or "").strip() or None
 
         df, valid_features = load_data(
@@ -473,8 +469,6 @@ def main() -> int:
             source_mode=source_mode,
             local_dir=local_data_dir,
         )
-        cos    = _cos_client()
-        bucket = os.getenv("TENCENT_BUCKET", "quantmind-1255718505")
         train_t0 = time.time()
         model, fill_values, train_m, val_m, test_m, pred_df = train_model(df, valid_features, cfg)
         elapsed = float(time.time() - train_t0)
@@ -504,7 +498,6 @@ def main() -> int:
         logger.info(f"Backtest-compatible pred.pkl saved ({pred_pkl_path.stat().st_size/1024/1024:.1f} MB, {len(pred_qlib):,} rows)")
 
         # 构造 metadata
-        cos_prefix_str = cos_prefix  # 供定时上传任务使用
         metadata = {
             "run_id": run_id, "job_name": job_name,
             "framework": "lightgbm",
@@ -650,26 +643,6 @@ if __name__ == "__main__":
         Path("/workspace/inference.py").write_text(_INFERENCE_SCRIPT, encoding="utf-8")
         logger.info("inference.py generated in model directory")
 
-        # 写入 cos_upload_pending.json，供凌晨定时任务批量上传
-        upload_manifest = {
-            "cos_prefix": cos_prefix_str,
-            "bucket": bucket,
-            "files": [
-                {"local": "model.lgb",      "key": cos_prefix_str + "model.lgb",      "content_type": "application/octet-stream"},
-                {"local": "pred.parquet",   "key": cos_prefix_str + "pred.parquet",   "content_type": "application/octet-stream"},
-                {"local": "pred.pkl",       "key": cos_prefix_str + "pred.pkl",       "content_type": "application/octet-stream"},
-                {"local": "metadata.json",  "key": cos_prefix_str + "metadata.json",  "content_type": "application/json"},
-                {"local": "config.yaml",    "key": cos_prefix_str + "config.yaml",    "content_type": "application/x-yaml"},
-                {"local": "result.json",    "key": cos_prefix_str + "result.json",    "content_type": "application/json"},
-            ],
-            "created_at": datetime.utcnow().isoformat(),
-            "uploaded": False,
-        }
-        Path("/workspace/cos_upload_pending.json").write_text(
-            json.dumps(upload_manifest, ensure_ascii=False, indent=2)
-        )
-        logger.info("cos_upload_pending.json written, artifacts will be uploaded by nightly job")
-
         result = {
             "status": "completed",
             "run_id": run_id,
@@ -689,7 +662,7 @@ if __name__ == "__main__":
             ],
             "summary": {
                 "status": "训练完成",
-                "message": f"训练完成，best_iteration={model.best_iteration}，产物已保存本地，待凌晨3:00上传至COS",
+                "message": f"训练完成，best_iteration={model.best_iteration}，产物已保存到本地模型目录",
             },
             "metadata": metadata,
             "error": "",

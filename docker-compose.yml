@@ -112,6 +112,13 @@ services:
       # 回测结果存储目录（使用共享卷）
       - QLIB_BACKTEST_RESULT_DIR=/data/backtest_results
 
+      # 本地 Docker 训练编排（模型训练）
+      - INTERNAL_CALL_SECRET=${INTERNAL_CALL_SECRET:-quantmind-internal-secret}
+      - TRAINING_IMAGE=${TRAINING_IMAGE:-quantmind-oss:latest}
+      - TRAINING_DOCKER_NETWORK=${TRAINING_DOCKER_NETWORK:-quantmind_quantmind-net}
+      - HOST_PROJECT_PATH=${HOST_PROJECT_PATH:-/opt/quantmind/quantmind}
+      - QUANTMIND_API_BASE_URL=${QUANTMIND_API_BASE_URL:-http://quantmind:8000}
+
       # Qwen/DashScope API (用于 AI 策略功能)
       # 使用 mock key 允许服务启动，用户需在个人中心配置真实 API key
       - DASHSCOPE_API_KEY=${DASHSCOPE_API_KEY:-mock-api-key-not-configured}
@@ -130,6 +137,8 @@ services:
       - ./config:/app/config
       # 策略模板
       - ./strategy_templates:/app/strategy_templates
+      # 允许 API 容器调用宿主机 Docker 启动训练容器
+      - /var/run/docker.sock:/var/run/docker.sock
     restart: unless-stopped
     networks:
       - quantmind-net

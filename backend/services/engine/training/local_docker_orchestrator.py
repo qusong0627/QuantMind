@@ -4,7 +4,7 @@ QuantMind 本地 Docker 训练编排器
 使用本机 docker run 异步执行训练任务，无需云 BatchCompute。
 
 流程：
-  1. 将 config.yaml 上传到 COS（便于复现和审计）
+  1. 生成并挂载 config.yaml
   2. docker run -d 启动训练容器（加入 quantmind-network）
   3. 轮询容器状态，写回 DB
   4. 训练容器完成后通过 callback 回写结果
@@ -23,16 +23,6 @@ from typing import Any, Dict, List
 import docker
 from docker import DockerClient
 import yaml
-
-# OSS 版本不需要腾讯云 COS
-try:
-    from qcloud_cos import CosConfig, CosS3Client
-
-    HAS_QCLOUD_COS = True
-except ImportError:
-    CosConfig = None
-    CosS3Client = None
-    HAS_QCLOUD_COS = False
 
 from backend.services.engine.training.training_log_stream import TrainingRunLogStream
 
@@ -70,21 +60,10 @@ _TRAINING_SCRIPT_HOST_PATH = Path(
 class LocalDockerOrchestrator:
     def __init__(self):
         self.docker = DockerClient.from_env()
-        self.secret_id = (os.getenv("TENCENT_SECRET_ID") or "").strip()
-        self.secret_key = (os.getenv("TENCENT_SECRET_KEY") or "").strip()
-        self.region = (os.getenv("TENCENT_REGION") or "ap-guangzhou").strip()
-        self.bucket = (os.getenv("TENCENT_BUCKET") or "quantmind-1255718505").strip()
         self.api_base = (
             os.getenv("QUANTMIND_API_BASE_URL") or "http://quantmind-api:8000"
         ).strip()
         self.internal_secret = (os.getenv("INTERNAL_CALL_SECRET") or "").strip()
-        self.cos = CosS3Client(
-            CosConfig(
-                Region=self.region,
-                SecretId=self.secret_id,
-                SecretKey=self.secret_key,
-            )
-        )
         self.log_stream = TrainingRunLogStream()
 
     @staticmethod
@@ -117,19 +96,9 @@ class LocalDockerOrchestrator:
             next_progress = max(next_progress, 50)
         if "training finished" in text:
             next_progress = max(next_progress, 86)
-        if "result report saved" in text or "uploaded cos://" in text:
+        if "result report saved" in text:
             next_progress = max(next_progress, 92)
         return min(99, next_progress)
-
-    # ── config.yaml 上传 ────────────────────────────────────────────────────────
-    def _upload_config(self, run_id: str, config: dict) -> str:
-        key = f"training-configs/{run_id}/config.yaml"
-        body = yaml.dump(config, allow_unicode=True, default_flow_style=False).encode()
-        self.cos.put_object(
-            Bucket=self.bucket, Key=key, Body=body, ContentType="application/x-yaml"
-        )
-        logger.info("Config uploaded: cos://%s/%s", self.bucket, key)
-        return key
 
     # ── 构造 config.yaml 内容 ───────────────────────────────────────────────────
     def _build_config_yaml(self, run_id: str, payload: dict) -> dict:
@@ -139,7 +108,6 @@ class LocalDockerOrchestrator:
                 run_id,
             )
             payload = {}
-        cos_prefix = f"models/candidates/{run_id}/"
         context = (
             payload.get("context") if isinstance(payload.get("context"), dict) else {}
         )
@@ -182,7 +150,6 @@ class LocalDockerOrchestrator:
             },
             "output": {
                 "result_path": "/workspace/result.json",
-                "cos_prefix": cos_prefix,
                 "required_artifacts": payload.get(
                     "required_artifacts",
                     ["model.lgb", "pred.pkl", "metadata.json", "result.json"],
@@ -215,8 +182,6 @@ class LocalDockerOrchestrator:
             payload = {}
 
         config = self._build_config_yaml(run_id, payload)
-        await asyncio.to_thread(self._upload_config, run_id, config)
-
         async with get_session() as db:
             record = await db.get(TrainingJobRecord, run_id)
             if record:
@@ -332,10 +297,6 @@ class LocalDockerOrchestrator:
                 _TRAINING_IMAGE,
                 command="python /app/train.py --config /workspace/config.yaml",
                 environment={
-                    "TENCENT_SECRET_ID": self.secret_id,
-                    "TENCENT_SECRET_KEY": self.secret_key,
-                    "TENCENT_REGION": self.region,
-                    "TENCENT_BUCKET": self.bucket,
                     "INTERNAL_CALL_SECRET": self.internal_secret,
                     "USE_LOCAL_DATA": "true",
                     "TRAINING_LOCAL_DATA_DIR": _LOCAL_DATA_MOUNT_DIR,

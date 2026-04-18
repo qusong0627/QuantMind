@@ -91,6 +91,10 @@ export const ModelTrainingPage: React.FC = () => {
     [selectedFeatures, featureCategories, timePeriods, target, params, context, displayName]
   );
   const isReadyToTrain = selectedFeatures.length > 0 && target.horizonDays >= 1 && totalDays > 0;
+  const isTrainingInProgress =
+    trainingStatus === 'running' ||
+    ['pending', 'provisioning', 'running', 'waiting_callback'].includes((backendRunStatus || '').toLowerCase());
+  const disableStartTraining = isTrainingInProgress && currentStep === 3;
 
   useEffect(() => {
     if (displayNameMode !== 'auto') return;
@@ -186,8 +190,14 @@ export const ModelTrainingPage: React.FC = () => {
   };
 
   const startTraining = async () => {
+    if (isTrainingInProgress) {
+      message.warning('训练任务进行中，请稍候');
+      return;
+    }
     if (!isReadyToTrain) { message.warning('配置不完整'); return; }
     clearTimers();
+    setResultError('');
+    setResult(null);
     setTrainingStatus('running');
     setExecutionStage('准备训练请求');
     setProgress(5);
@@ -218,6 +228,7 @@ export const ModelTrainingPage: React.FC = () => {
             const parsed = parseTrainingResult(requestPreview, runId, run.result);
             if (parsed) {
               setResult(parsed);
+              setResultError('');
               setTrainingStatus('completed');
               setProgress(100);
               setCurrentStep(4);
@@ -326,7 +337,7 @@ export const ModelTrainingPage: React.FC = () => {
                </div>
                <div className="flex gap-2">
                  <Button size="small" block className="rounded-lg" onClick={() => message.success('草稿已保存')}>保存草稿</Button>
-                 <Button size="small" block className="rounded-lg" onClick={handleResetAll}>重置</Button>
+                 <Button size="small" block className="rounded-lg" onClick={handleResetAll} disabled={isTrainingInProgress}>重置</Button>
                </div>
             </div>
           </aside>
@@ -352,8 +363,8 @@ export const ModelTrainingPage: React.FC = () => {
                         <Paragraph className="!mb-0 !mt-2 text-gray-500 text-xs">{currentModule.description}</Paragraph>
                     </div>
                     <Space>
-                      <Button icon={<RefreshCcw size={14}/>} className="rounded-xl h-9" onClick={handleResetAll}>清空</Button>
-                      <Button type="primary" icon={<ChevronRight size={14}/>} className="rounded-xl h-9 bg-blue-600" onClick={stepAction}>
+                      <Button icon={<RefreshCcw size={14}/>} className="rounded-xl h-9" onClick={handleResetAll} disabled={isTrainingInProgress}>清空</Button>
+                      <Button type="primary" icon={<ChevronRight size={14}/>} className="rounded-xl h-9 bg-blue-600" onClick={stepAction} disabled={disableStartTraining}>
                         {stepActionLabel}
                       </Button>
                     </Space>
