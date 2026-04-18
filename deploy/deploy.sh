@@ -500,7 +500,7 @@ step9_start_database() {
     chown -R 999:999 $DATA_DIR/postgres $DATA_DIR/redis
 
     log_info "启动数据库和 Redis..."
-    docker compose up -d quantmind-db quantmind-redis
+    docker compose up -d db redis
 
     log_info "等待数据库就绪 (15秒)..."
     sleep 15
@@ -508,7 +508,7 @@ step9_start_database() {
     # 再次修复权限（Docker 可能会重新创建目录）
     chown -R 999:999 $DATA_DIR/postgres $DATA_DIR/redis
 
-    docker compose ps quantmind-db quantmind-redis
+    docker compose ps db redis
 
     log_done "Step 9"
     save_progress "9"
