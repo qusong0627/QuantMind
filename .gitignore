@@ -107,7 +107,11 @@ research/data_adapter/qlib_data/
 research/data_adapter/processed/
 models/*
 !models/.gitkeep
+!models/production
+models/production/*
 !models/production/.gitkeep
+!models/production/alpha158
+!models/production/alpha158/**
 !backend/services/*/models/
 !backend/services/*/*/models/
 

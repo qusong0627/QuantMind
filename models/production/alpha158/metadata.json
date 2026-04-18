@@ -1,0 +1,65 @@
+{
+  "framework": "lightgbm",
+  "model_type": "LGBModel",
+  "resolved_class": "qlib.contrib.model.gbdt.LGBModel",
+  "data_source": "qlib",
+  "feature_count": 158,
+  "is_neutralized": false,
+  "model_info": {
+    "name": "Alpha158_Base",
+    "version": "v19",
+    "description": "T+3 基线模型 (V2)，使用纯 Pandas 特征工程；数据范围：2020-2026，涵盖 6017 标的",
+    "algorithm": "LightGBM_Vectorized",
+    "author": "quantmind-ai",
+    "created_at": "2026-04-17"
+  },
+  "training_config": {
+    "start_time": "2020-01-01",
+    "end_time": "2026-03-31",
+    "fit_start_time": "2020-01-01",
+    "fit_end_time": "2024-12-31",
+    "instruments": "all",
+    "label": "Ref($close, -3)/Ref($close, -1) - 1",
+    "label_name": "LABEL0"
+  },
+  "performance_metrics": {
+    "train": {
+      "mean_ic": 0.0793,
+      "icir": 0.7607
+    },
+    "valid": {
+      "mean_ic": 0.0711,
+      "icir": 0.4997
+    },
+    "test": {
+      "mean_ic": 0.0542,
+      "icir": 0.4028
+    }
+  },
+  "train_start": "2019-01-01",
+  "train_end": "2024-12-31",
+  "valid_start": "2025-01-01",
+  "valid_end": "2025-06-30",
+  "test_start": "2025-07-01",
+  "test_end": "2026-03-31",
+  "qlib_data_path": "/app/db/qlib_data",
+  "files": {
+    "config": "config.yaml",
+    "prepare_script": "prepare_data.py",
+    "train_script": "train.py",
+    "inference_script": "inference.py",
+    "model_checkpoint": "alpha158.bin",
+    "prediction_full": "pred.pkl"
+  },
+  "inference": {
+    "script": "inference.py",
+    "output_format": "json",
+    "supports_batch": true,
+    "default_topk": 50,
+    "pred_file": "pred.pkl"
+  },
+  "notes": "模板文件：config.yaml, prepare_data.py, train.py。训练产物应保存 model_checkpoint.bin。",
+  "trained_at": "2026-04-17 17:01:33",
+  "model_path": "/root/qlib-main/model/19_T3_Alpha158_Base/model_checkpoint_v19.bin",
+  "prediction_path": "/root/qlib-main/model/19_T3_Alpha158_Base/pred_v19_test.pkl"
+}
