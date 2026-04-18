@@ -40,6 +40,7 @@ DOCKER_MIRRORS=(
     "https://docker.1ms.run"
     "https://docker.xuanyuan.live"
     "https://hub.rat.dev"
+    "https://naw1faud2gpqbs.xuanyuan.run"
 )
 
 # npm 镜像加速器列表（自动选择最快）
