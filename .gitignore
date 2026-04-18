@@ -116,6 +116,9 @@ models/production/*
 !models/production/.gitkeep
 !models/production/alpha158
 !models/production/alpha158/**
+!models/production/model_qlib
+!models/production/model_qlib/**
+models/production/model_qlib/pred.parquet
 !backend/services/*/models/
 !backend/services/*/*/models/
 
