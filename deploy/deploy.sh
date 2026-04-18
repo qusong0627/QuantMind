@@ -437,8 +437,8 @@ step8_build_docker() {
 #===============================================================================
 # Step 9: 启动后端服务
 #===============================================================================
-step9_start_backend() {
-    log_step "Step 9: 启动后端服务"
+step9_start_database() {
+    log_step "Step 9: 启动数据库服务"
 
     cd $DEPLOY_DIR/quantmind
 
@@ -448,16 +448,16 @@ step9_start_backend() {
     # 修复数据目录权限（Docker 容器内使用 999:999）
     chown -R 999:999 $DATA_DIR/postgres $DATA_DIR/redis
 
-    log_info "启动 Docker Compose 服务..."
-    docker compose up -d
+    log_info "启动数据库和 Redis..."
+    docker compose up -d quantmind-db quantmind-redis
 
-    log_info "等待服务启动 (30秒)..."
-    sleep 30
+    log_info "等待数据库就绪 (15秒)..."
+    sleep 15
 
     # 再次修复权限（Docker 可能会重新创建目录）
     chown -R 999:999 $DATA_DIR/postgres $DATA_DIR/redis
 
-    docker compose ps
+    docker compose ps quantmind-db quantmind-redis
 
     log_done "Step 9"
     save_progress "9"
@@ -472,7 +472,7 @@ step10_init_database() {
     cd $DEPLOY_DIR/quantmind
 
     log_info "等待数据库就绪..."
-    sleep 10
+    sleep 5
 
     if [[ -f "data/quantmind_init.sql" ]]; then
         log_info "初始化数据库..."
@@ -498,10 +498,30 @@ step10_init_database() {
 }
 
 #===============================================================================
-# Step 11: 安装前端依赖
+# Step 11: 启动后端服务
 #===============================================================================
-step11_install_frontend() {
-    log_step "Step 11: 安装前端依赖"
+step11_start_backend() {
+    log_step "Step 11: 启动后端服务"
+
+    cd $DEPLOY_DIR/quantmind
+
+    log_info "启动后端容器..."
+    docker compose up -d quantmind quantmind-celery
+
+    log_info "等待后端启动 (20秒)..."
+    sleep 20
+
+    docker compose ps
+
+    log_done "Step 11"
+    save_progress "11"
+}
+
+#===============================================================================
+# Step 12: 安装前端依赖
+#===============================================================================
+step12_install_frontend() {
+    log_step "Step 12: 安装前端依赖"
 
     cd $DEPLOY_DIR/quantmind
 
@@ -538,15 +558,15 @@ EOF
         echo -e "\r$line"
     done
 
-    log_done "Step 11"
-    save_progress "11"
+    log_done "Step 12"
+    save_progress "12"
 }
 
 #===============================================================================
-# Step 12: 构建前端
+# Step 13: 构建前端
 #===============================================================================
-step12_build_frontend() {
-    log_step "Step 12: 构建前端"
+step13_build_frontend() {
+    log_step "Step 13: 构建前端"
 
     cd $DEPLOY_DIR/quantmind
 
@@ -561,15 +581,15 @@ step12_build_frontend() {
 
     ls -la electron/dist-react/ 2>/dev/null | head -5 || log_warn "前端构建目录不存在"
 
-    log_done "Step 12"
-    save_progress "12"
+    log_done "Step 13"
+    save_progress "13"
 }
 
 #===============================================================================
-# Step 13: 启动前端服务
+# Step 14: 启动前端服务
 #===============================================================================
-step13_start_frontend() {
-    log_step "Step 13: 启动前端服务"
+step14_start_frontend() {
+    log_step "Step 14: 启动前端服务"
 
     cd $DEPLOY_DIR/quantmind
 
@@ -584,15 +604,15 @@ step13_start_frontend() {
 
     pm2 status
 
-    log_done "Step 13"
-    save_progress "13"
+    log_done "Step 14"
+    save_progress "14"
 }
 
 #===============================================================================
-# Step 14: 配置 Nginx
+# Step 15: 配置 Nginx
 #===============================================================================
-step14_config_nginx() {
-    log_step "Step 14: 配置 Nginx"
+step15_config_nginx() {
+    log_step "Step 15: 配置 Nginx"
 
     log_info "创建 Nginx 配置..."
     cat > /etc/nginx/sites-available/quantmind << 'EOF'
@@ -645,15 +665,15 @@ EOF
 
     nginx -t && systemctl restart nginx && systemctl enable nginx
 
-    log_done "Step 14"
-    save_progress "14"
+    log_done "Step 15"
+    save_progress "15"
 }
 
 #===============================================================================
-# Step 15: 健康检查
+# Step 16: 健康检查
 #===============================================================================
-step15_health_check() {
-    log_step "Step 15: 健康检查"
+step16_health_check() {
+    log_step "Step 16: 健康检查"
 
     log_info "Docker 容器状态:"
     docker compose -f $DEPLOY_DIR/quantmind/docker-compose.yml ps
@@ -672,15 +692,15 @@ step15_health_check() {
     curl -s http://localhost:3000 > /dev/null && log_info "前端服务: ✅" || log_warn "前端服务: ❌"
     curl -s http://localhost > /dev/null && log_info "Nginx: ✅" || log_warn "Nginx: ❌"
 
-    log_done "Step 15"
-    save_progress "15"
+    log_done "Step 16"
+    save_progress "16"
 }
 
 #===============================================================================
-# Step 16: 配置防火墙
+# Step 17: 配置防火墙
 #===============================================================================
-step16_firewall() {
-    log_step "Step 16: 配置防火墙"
+step17_firewall() {
+    log_step "Step 17: 配置防火墙"
 
     if command -v ufw &> /dev/null; then
         ufw allow 22/tcp comment 'SSH'
@@ -692,8 +712,8 @@ step16_firewall() {
         log_warn "UFW 未安装，跳过防火墙配置"
     fi
 
-    log_done "Step 16"
-    save_progress "16"
+    log_done "Step 17"
+    save_progress "17"
 }
 
 #===============================================================================
@@ -830,10 +850,10 @@ main() {
     # 根据部署模式执行步骤
     if $FRONTEND_ONLY; then
         log_info "仅部署前端..."
-        [[ $CURRENT_STEP -lt 11 ]] && step11_install_frontend
-        [[ $CURRENT_STEP -lt 12 ]] && step12_build_frontend
-        [[ $CURRENT_STEP -lt 13 ]] && step13_start_frontend
-        [[ $CURRENT_STEP -lt 14 ]] && step14_config_nginx
+        [[ $CURRENT_STEP -lt 12 ]] && step12_install_frontend
+        [[ $CURRENT_STEP -lt 13 ]] && step13_build_frontend
+        [[ $CURRENT_STEP -lt 14 ]] && step14_start_frontend
+        [[ $CURRENT_STEP -lt 15 ]] && step15_config_nginx
     elif $BACKEND_ONLY; then
         log_info "仅部署后端..."
         [[ $CURRENT_STEP -lt 1 ]] && step1_update_system
@@ -841,8 +861,9 @@ main() {
         [[ $CURRENT_STEP -lt 6 ]] && step6_clone_code
         [[ $CURRENT_STEP -lt 7 ]] && step7_config_environment
         [[ $CURRENT_STEP -lt 8 ]] && step8_build_docker
-        [[ $CURRENT_STEP -lt 9 ]] && step9_start_backend
+        [[ $CURRENT_STEP -lt 9 ]] && step9_start_database
         [[ $CURRENT_STEP -lt 10 ]] && step10_init_database
+        [[ $CURRENT_STEP -lt 11 ]] && step11_start_backend
     else
         # 完整部署
         [[ $CURRENT_STEP -lt 1 ]] && step1_update_system
@@ -853,14 +874,15 @@ main() {
         [[ $CURRENT_STEP -lt 6 ]] && step6_clone_code
         [[ $CURRENT_STEP -lt 7 ]] && step7_config_environment
         [[ $CURRENT_STEP -lt 8 ]] && step8_build_docker
-        [[ $CURRENT_STEP -lt 9 ]] && step9_start_backend
+        [[ $CURRENT_STEP -lt 9 ]] && step9_start_database
         [[ $CURRENT_STEP -lt 10 ]] && step10_init_database
-        [[ $CURRENT_STEP -lt 11 ]] && step11_install_frontend
-        [[ $CURRENT_STEP -lt 12 ]] && step12_build_frontend
-        [[ $CURRENT_STEP -lt 13 ]] && step13_start_frontend
-        [[ $CURRENT_STEP -lt 14 ]] && step14_config_nginx
-        [[ $CURRENT_STEP -lt 15 ]] && step15_health_check
-        [[ $CURRENT_STEP -lt 16 ]] && step16_firewall
+        [[ $CURRENT_STEP -lt 11 ]] && step11_start_backend
+        [[ $CURRENT_STEP -lt 12 ]] && step12_install_frontend
+        [[ $CURRENT_STEP -lt 13 ]] && step13_build_frontend
+        [[ $CURRENT_STEP -lt 14 ]] && step14_start_frontend
+        [[ $CURRENT_STEP -lt 15 ]] && step15_config_nginx
+        [[ $CURRENT_STEP -lt 16 ]] && step16_health_check
+        [[ $CURRENT_STEP -lt 17 ]] && step17_firewall
     fi
 
     show_info
