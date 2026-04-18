@@ -464,18 +464,28 @@ step11_install_frontend() {
 
     chown -R ${SUDO_USER:-root}:${SUDO_USER:-root} .
 
-    # 配置 npm 镜像加速（包括 Electron）
+    # 配置 npm 镜像加速（包括 Electron、Puppeteer 等）
     log_info "配置 npm 镜像加速..."
     NPMRC_FILE="/home/${SUDO_USER:-root}/.npmrc"
     if [[ ! -f "$NPMRC_FILE" ]]; then
         NPMRC_FILE="/root/.npmrc"
     fi
-    cat >> "$NPMRC_FILE" << 'EOF'
+
+    # 写入完整配置（覆盖旧配置避免重复）
+    cat > "$NPMRC_FILE" << 'EOF'
 registry=https://registry.npmmirror.com
+# Electron 二进制镜像
 electron_mirror=https://npmmirror.com/mirrors/electron/
 electron_builder_binaries_mirror=https://npmmirror.com/mirrors/electron-builder-binaries/
+# Puppeteer Chromium 镜像
+puppeteer_download_host=https://npmmirror.com/mirrors
+# Sass 二进制镜像
+sass_binary_site=https://npmmirror.com/mirrors/node-sass/
+# Python 镜像（node-gyp 使用）
+python_mirror=https://npmmirror.com/mirrors/python/
 EOF
 
+    log_info "npm 镜像配置完成"
     log_info "安装 npm 依赖 (3-5分钟)..."
     sudo -u ${SUDO_USER:-root} npm install
 
@@ -726,6 +736,13 @@ show_welcome() {
 confirm_deploy() {
     # 自动确认模式
     if $AUTO_YES; then
+        return 0
+    fi
+
+    # 检查是否为交互式终端
+    if [[ ! -t 0 ]]; then
+        log_warn "检测到非交互式终端，自动继续部署"
+        log_info "如需手动确认，请使用: sudo ./deploy/deploy.sh --yes"
         return 0
     fi
 
