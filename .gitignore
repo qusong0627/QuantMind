@@ -89,7 +89,8 @@ user_center.db
 user_center.db.*
 
 # Qlib & Large Data Files
-db/qlib_data/
+db/qlib_data/*
+!db/qlib_data/.gitkeep
 db/qlib_bin/
 db/qlib_csv/
 db/*.tar.gz
@@ -104,7 +105,9 @@ userdata/
 research/data/
 research/data_adapter/qlib_data/
 research/data_adapter/processed/
-models/
+models/*
+!models/.gitkeep
+!models/production/.gitkeep
 !backend/services/*/models/
 !backend/services/*/*/models/
 
@@ -150,12 +153,8 @@ redis/data/appendonlydir/appendonly.aof.2.incr.aof
 electron/public/fonts/AlibabaPuHuiTi-Bold.ttf
 electron/public/fonts/AlibabaPuHuiTi-Regular.ttf
 data/ai_ide/config.json
-/db/
-/models/
-codebase.tar
-# Ensure package marker files are tracked
-!**/__init__.py
-celerybeat-schedule
-data/feature_snapshots
-quantmind_test.tar.gz
-data/quantmind_20260415_214859.sql
+/db/*.sql
+/redis
+/models/model64
+/models/model48
+/models/model_preview
