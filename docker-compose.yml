@@ -64,8 +64,8 @@ services:
       - PYTHONPATH=/app
 
       # 安全配置
-      - SECRET_KEY=${SECRET_KEY:-quantmind-oss-secret-key-2026}
-      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-quantmind-oss-jwt-key-2026}
+      - SECRET_KEY=${SECRET_KEY:-cbe2c739fa3a59798800aede60f68b87205653395175097802931c12858c2c52}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-cbe2c739fa3a59798800aede60f68b87205653395175097802931c12858c2c52}
 
       # 数据库配置
       - DB_DRIVER=asyncpg
