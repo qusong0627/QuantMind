@@ -443,15 +443,20 @@ step9_start_backend() {
 
     cd $DEPLOY_DIR/quantmind
 
-    # 修复数据目录权限
-    chown -R 999:999 $DATA_DIR/postgres 2>/dev/null || true
-    chown -R 999:999 $DATA_DIR/redis 2>/dev/null || true
+    # 确保数据目录存在
+    mkdir -p $DATA_DIR/postgres $DATA_DIR/redis
+
+    # 修复数据目录权限（Docker 容器内使用 999:999）
+    chown -R 999:999 $DATA_DIR/postgres $DATA_DIR/redis
 
     log_info "启动 Docker Compose 服务..."
     docker compose up -d
 
     log_info "等待服务启动 (30秒)..."
     sleep 30
+
+    # 再次修复权限（Docker 可能会重新创建目录）
+    chown -R 999:999 $DATA_DIR/postgres $DATA_DIR/redis
 
     docker compose ps
 
