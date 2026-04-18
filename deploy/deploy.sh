@@ -52,16 +52,12 @@ NPM_MIRRORS=(
 # 解析参数
 BACKEND_ONLY=false
 FRONTEND_ONLY=false
-RESUME=false
-RESET=false
 AUTO_YES=false
 
 for arg in "$@"; do
     case $arg in
         --backend-only) BACKEND_ONLY=true ;;
         --frontend-only) FRONTEND_ONLY=true ;;
-        --resume) RESUME=true ;;
-        --reset) RESET=true ;;
         --yes) AUTO_YES=true ;;
     esac
 done
@@ -811,22 +807,12 @@ main() {
     check_root
     check_system
 
-    # 处理重置
-    if $RESET; then
-        reset_progress
-        exit 0
-    fi
-
-    # 获取当前进度
+    # 如果有上次部署进度，自动重置重新开始
     CURRENT_STEP=$(get_progress)
-    if [[ "$CURRENT_STEP" != "0" ]] && ! $RESUME; then
-        log_info "检测到上次部署进度: Step $CURRENT_STEP"
-        log_info "使用 --resume 继续部署，或 --reset 重置进度"
-        exit 0
-    fi
-
-    if $RESUME && [[ "$CURRENT_STEP" != "0" ]]; then
-        log_info "从 Step $((CURRENT_STEP + 1)) 继续部署"
+    if [[ "$CURRENT_STEP" != "0" ]]; then
+        log_warn "检测到上次部署进度: Step $CURRENT_STEP"
+        log_info "自动重置进度，重新开始部署..."
+        reset_progress
     fi
 
     # 根据部署模式执行步骤
