@@ -43,6 +43,12 @@ DOCKER_MIRRORS=(
     "https://hub.rat.dev"
 )
 
+# npm 镜像加速器列表（自动选择最快）
+NPM_MIRRORS=(
+    "https://registry.npmmirror.com"
+    "https://mirrors.cloud.tencent.com/npm"
+)
+
 # 解析参数
 BACKEND_ONLY=false
 FRONTEND_ONLY=false
@@ -152,6 +158,29 @@ select_docker_mirror() {
     log_warn "未找到可用镜像加速器，使用默认源"
 }
 
+# 测试 npm 镜像加速器
+test_npm_mirror() {
+    local mirror=$1
+    if curl -s --connect-timeout 5 "${mirror}/" > /dev/null 2>&1; then
+        return 0
+    fi
+    return 1
+}
+
+# 选择最佳 npm 镜像
+select_npm_mirror() {
+    log_info "测试 npm 镜像加速器..."
+    for mirror in "${NPM_MIRRORS[@]}"; do
+        if test_npm_mirror "$mirror"; then
+            echo "$mirror"
+            log_info "选择镜像: $mirror"
+            return
+        fi
+    done
+    echo "https://registry.npmjs.org"
+    log_warn "未找到可用镜像加速器，使用默认源"
+}
+
 #===============================================================================
 # Step 1: 更新系统
 #===============================================================================
@@ -224,7 +253,7 @@ EOF
 # Step 3: 安装 Node.js
 #===============================================================================
 step3_install_nodejs() {
-    log_step "Step 3: 安装 Node.js (淘宝镜像)"
+    log_step "Step 3: 安装 Node.js"
 
     if command -v node &> /dev/null && [[ "$(node --version)" == "v${NODE_VERSION}" ]]; then
         log_warn "Node.js 已安装: $(node --version)"
@@ -244,7 +273,9 @@ step3_install_nodejs() {
         ln -sf /usr/local/nodejs/bin/npm /usr/local/bin/npm
         ln -sf /usr/local/nodejs/bin/npx /usr/local/bin/npx
 
-        npm config set registry https://registry.npmmirror.com
+        # 选择最佳 npm 镜像
+        local npm_mirror=$(select_npm_mirror)
+        npm config set registry "$npm_mirror"
 
         log_info "Node.js: $(node --version)"
         log_info "npm: $(npm --version)"
@@ -464,6 +495,9 @@ step11_install_frontend() {
 
     chown -R ${SUDO_USER:-root}:${SUDO_USER:-root} .
 
+    # 选择最佳 npm 镜像
+    local npm_mirror=$(select_npm_mirror)
+
     # 配置 npm 镜像加速（包括 Electron、Puppeteer 等）
     log_info "配置 npm 镜像加速..."
     NPMRC_FILE="/home/${SUDO_USER:-root}/.npmrc"
@@ -472,8 +506,8 @@ step11_install_frontend() {
     fi
 
     # 写入完整配置（覆盖旧配置避免重复）
-    cat > "$NPMRC_FILE" << 'EOF'
-registry=https://registry.npmmirror.com
+    cat > "$NPMRC_FILE" << EOF
+registry=${npm_mirror}
 # Electron 二进制镜像
 electron_mirror=https://npmmirror.com/mirrors/electron/
 electron_builder_binaries_mirror=https://npmmirror.com/mirrors/electron-builder-binaries/
@@ -485,7 +519,7 @@ sass_binary_site=https://npmmirror.com/mirrors/node-sass/
 python_mirror=https://npmmirror.com/mirrors/python/
 EOF
 
-    log_info "npm 镜像配置完成"
+    log_info "npm 镜像配置完成: $npm_mirror"
     log_info "安装 npm 依赖 (3-5分钟)..."
     sudo -u ${SUDO_USER:-root} npm install
 
