@@ -444,8 +444,8 @@ step10_init_database() {
     log_info "创建默认管理员用户..."
     docker exec quantmind-db psql -U quantmind -d quantmind -c "
     INSERT INTO users (user_id, tenant_id, username, email, password_hash, is_active, is_admin, is_verified, is_locked, is_deleted, login_count, created_at, updated_at)
-    SELECT gen_random_uuid(), 'default', 'admin', 'admin@quantmind.io',
-           '\$2b\$12\$b50Z2D1/xYVn9pN4iZ4ezekqjUveHMaWuBudlINRTB4L6qVStx/X6',
+    SELECT gen_random_uuid(), 'default', 'admin', 'admin@quantmind.local',
+           '\$2b\$12\$B/yjK9cT.wx4BlB9j.r/t.dADjCbmutIXoDM7PdKZmV6ypuYiiUvW',
            true, true, true, false, false, 0, now(), now()
     WHERE NOT EXISTS (SELECT 1 FROM users WHERE username = 'admin' AND tenant_id = 'default');
     " 2>/dev/null || log_warn "管理员用户可能已存在"
