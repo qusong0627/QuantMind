@@ -427,7 +427,57 @@ step8_build_docker() {
     cd $DEPLOY_DIR/quantmind
 
     log_info "构建 QuantMind OSS 镜像 (5-10分钟)..."
-    docker build -t quantmind-oss:latest -f docker/Dockerfile.oss .
+
+    # 尝试使用不同镜像源构建
+    local build_success=false
+    local tried_mirrors=()
+
+    for mirror in "${DOCKER_MIRRORS[@]}"; do
+        if [[ -n "$mirror" ]]; then
+            log_info "尝试使用镜像源: $mirror"
+
+            # 配置 Docker daemon 使用镜像加速
+            if [[ ! -f /etc/docker/daemon.json ]]; then
+                mkdir -p /etc/docker
+                echo "{\"registry-mirrors\": [\"$mirror\"]}" > /etc/docker/daemon.json
+                systemctl restart docker
+                sleep 3
+            else
+                # 检查是否已配置该镜像
+                if ! grep -q "$mirror" /etc/docker/daemon.json; then
+                    sed -i "s/\"registry-mirrors\": \[/\"registry-mirrors\": [\"$mirror\", /" /etc/docker/daemon.json
+                    systemctl restart docker
+                    sleep 3
+                fi
+            fi
+
+            if docker build -t quantmind-oss:latest -f docker/Dockerfile.oss . 2>&1; then
+                build_success=true
+                log_info "构建成功，使用镜像源: $mirror"
+                break
+            else
+                log_warn "镜像源 $mirror 构建失败，尝试下一个..."
+                tried_mirrors+=("$mirror")
+            fi
+        fi
+    done
+
+    # 如果所有镜像都失败，尝试不使用镜像加速
+    if ! $build_success; then
+        log_warn "所有镜像加速器均失败，尝试直接拉取..."
+        rm -f /etc/docker/daemon.json
+        systemctl restart docker
+        sleep 3
+
+        if docker build -t quantmind-oss:latest -f docker/Dockerfile.oss . 2>&1; then
+            build_success=true
+        fi
+    fi
+
+    if ! $build_success; then
+        log_error "Docker 镜像构建失败"
+        exit 1
+    fi
 
     docker images | grep quantmind-oss
 
