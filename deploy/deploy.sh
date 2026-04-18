@@ -558,6 +558,9 @@ step11_start_backend() {
 
     cd $DEPLOY_DIR/quantmind
 
+    # 再次修复权限（Docker 重启后可能需要）
+    chown -R 999:999 $DATA_DIR/postgres $DATA_DIR/redis
+
     log_info "启动后端容器..."
     docker compose up -d quantmind celery-worker
 
