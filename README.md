@@ -230,7 +230,6 @@ flowchart TB
     subgraph Gateway["🚪 API Gateway :8000"]
         Auth["用户认证"]
         Strategy["策略管理"]
-        Community["社区功能"]
     end
 
     subgraph Engine["🧠 Engine Service :8001"]
