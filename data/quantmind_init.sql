@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict GTdzWcIe0g227VcK9wsgxuoHB3tfDhabvma7jO7Ixg1iww2aUOwl4Lk0ynaWCMe
+\restrict QtrYUayyGzrhXQjha5YRdL6AaBroyQJ8NHa34jFkj1JCsUp2U0brAJ2deptAL6i
 
 -- Dumped from database version 15.17
 -- Dumped by pg_dump version 15.17
@@ -18,6 +18,402 @@ SET xmloption = content;
 SET client_min_messages = warning;
 SET row_security = off;
 
+ALTER TABLE IF EXISTS ONLY public.user_subscriptions DROP CONSTRAINT IF EXISTS user_subscriptions_plan_id_fkey;
+ALTER TABLE IF EXISTS ONLY public.user_roles DROP CONSTRAINT IF EXISTS user_roles_user_id_fkey;
+ALTER TABLE IF EXISTS ONLY public.user_roles DROP CONSTRAINT IF EXISTS user_roles_role_id_fkey;
+ALTER TABLE IF EXISTS ONLY public.trades DROP CONSTRAINT IF EXISTS trades_order_id_fkey;
+ALTER TABLE IF EXISTS ONLY public.role_permissions DROP CONSTRAINT IF EXISTS role_permissions_role_id_fkey;
+ALTER TABLE IF EXISTS ONLY public.role_permissions DROP CONSTRAINT IF EXISTS role_permissions_permission_id_fkey;
+ALTER TABLE IF EXISTS ONLY public.positions DROP CONSTRAINT IF EXISTS positions_portfolio_id_fkey;
+ALTER TABLE IF EXISTS ONLY public.position_history DROP CONSTRAINT IF EXISTS position_history_position_id_fkey;
+ALTER TABLE IF EXISTS ONLY public.portfolio_snapshots DROP CONSTRAINT IF EXISTS portfolio_snapshots_portfolio_id_fkey;
+ALTER TABLE IF EXISTS ONLY public.password_reset_tokens DROP CONSTRAINT IF EXISTS password_reset_tokens_user_id_fkey;
+ALTER TABLE IF EXISTS ONLY public.admin_data_files DROP CONSTRAINT IF EXISTS admin_data_files_data_source_id_fkey;
+DROP TRIGGER IF EXISTS trg_auto_populate_id ON public.qlib_backtest_runs;
+DROP INDEX IF EXISTS public.uq_qm_user_models_default_per_user;
+DROP INDEX IF EXISTS public.uq_api_keys_access_key;
+DROP INDEX IF EXISTS public.ix_user_subscriptions_user_id;
+DROP INDEX IF EXISTS public.ix_user_subscriptions_tenant_id;
+DROP INDEX IF EXISTS public.ix_user_audit_logs_user_id;
+DROP INDEX IF EXISTS public.ix_user_audit_logs_tenant_id;
+DROP INDEX IF EXISTS public.ix_user_audit_logs_created_at;
+DROP INDEX IF EXISTS public.ix_user_audit_logs_action;
+DROP INDEX IF EXISTS public.ix_trades_user_id;
+DROP INDEX IF EXISTS public.ix_trades_trading_mode;
+DROP INDEX IF EXISTS public.ix_trades_trade_id;
+DROP INDEX IF EXISTS public.ix_trades_trade_action;
+DROP INDEX IF EXISTS public.ix_trades_tenant_id;
+DROP INDEX IF EXISTS public.ix_trades_symbol;
+DROP INDEX IF EXISTS public.ix_trades_position_side;
+DROP INDEX IF EXISTS public.ix_trades_portfolio_id;
+DROP INDEX IF EXISTS public.ix_trades_order_id;
+DROP INDEX IF EXISTS public.ix_subscription_plans_code;
+DROP INDEX IF EXISTS public.ix_roles_code;
+DROP INDEX IF EXISTS public.ix_risk_rules_rule_type;
+DROP INDEX IF EXISTS public.ix_risk_rules_rule_name;
+DROP INDEX IF EXISTS public.ix_risk_rules_is_active;
+DROP INDEX IF EXISTS public.ix_real_trading_preflight_snapshots_user_id;
+DROP INDEX IF EXISTS public.ix_real_trading_preflight_snapshots_trading_mode;
+DROP INDEX IF EXISTS public.ix_real_trading_preflight_snapshots_tenant_id;
+DROP INDEX IF EXISTS public.ix_real_trading_preflight_snapshots_snapshot_date;
+DROP INDEX IF EXISTS public.ix_real_account_snapshots_user_id;
+DROP INDEX IF EXISTS public.ix_real_account_snapshots_user;
+DROP INDEX IF EXISTS public.ix_real_account_snapshots_tenant_id;
+DROP INDEX IF EXISTS public.ix_real_account_snapshots_tenant;
+DROP INDEX IF EXISTS public.ix_real_account_snapshots_snapshot_month;
+DROP INDEX IF EXISTS public.ix_real_account_snapshots_snapshot_date;
+DROP INDEX IF EXISTS public.ix_real_account_snapshots_snapshot_at;
+DROP INDEX IF EXISTS public.ix_real_account_snapshots_scope_time;
+DROP INDEX IF EXISTS public.ix_real_account_snapshots_scope_month_time;
+DROP INDEX IF EXISTS public.ix_real_account_snapshots_scope_date_time;
+DROP INDEX IF EXISTS public.ix_real_account_snapshots_date;
+DROP INDEX IF EXISTS public.ix_real_account_snapshots_account_id;
+DROP INDEX IF EXISTS public.ix_real_account_snapshots_account;
+DROP INDEX IF EXISTS public.ix_real_account_ledger_daily_snapshots_user_id;
+DROP INDEX IF EXISTS public.ix_real_account_ledger_daily_snapshots_tenant_id;
+DROP INDEX IF EXISTS public.ix_real_account_ledger_daily_snapshots_snapshot_date;
+DROP INDEX IF EXISTS public.ix_real_account_ledger_daily_snapshots_last_snapshot_at;
+DROP INDEX IF EXISTS public.ix_real_account_ledger_daily_snapshots_account_id;
+DROP INDEX IF EXISTS public.ix_real_account_ledger_daily_scope_date;
+DROP INDEX IF EXISTS public.ix_qmt_agent_sessions_user_id;
+DROP INDEX IF EXISTS public.ix_qmt_agent_sessions_token_hash;
+DROP INDEX IF EXISTS public.ix_qmt_agent_sessions_tenant_id;
+DROP INDEX IF EXISTS public.ix_qmt_agent_sessions_binding_id;
+DROP INDEX IF EXISTS public.ix_qmt_agent_bindings_user_id;
+DROP INDEX IF EXISTS public.ix_qmt_agent_bindings_tenant_id;
+DROP INDEX IF EXISTS public.ix_qmt_agent_bindings_status;
+DROP INDEX IF EXISTS public.ix_qmt_agent_bindings_api_key_id;
+DROP INDEX IF EXISTS public.ix_qmt_agent_bindings_account_id;
+DROP INDEX IF EXISTS public.ix_positions_symbol;
+DROP INDEX IF EXISTS public.ix_positions_portfolio_id;
+DROP INDEX IF EXISTS public.ix_positions_id;
+DROP INDEX IF EXISTS public.ix_position_history_position_id;
+DROP INDEX IF EXISTS public.ix_position_history_id;
+DROP INDEX IF EXISTS public.ix_portfolios_user_id;
+DROP INDEX IF EXISTS public.ix_portfolios_trading_mode;
+DROP INDEX IF EXISTS public.ix_portfolios_tenant_id;
+DROP INDEX IF EXISTS public.ix_portfolios_id;
+DROP INDEX IF EXISTS public.ix_portfolio_snapshots_portfolio_id;
+DROP INDEX IF EXISTS public.ix_portfolio_snapshots_id;
+DROP INDEX IF EXISTS public.ix_permissions_resource;
+DROP INDEX IF EXISTS public.ix_permissions_code;
+DROP INDEX IF EXISTS public.ix_password_reset_tokens_user_id;
+DROP INDEX IF EXISTS public.ix_password_reset_tokens_token;
+DROP INDEX IF EXISTS public.ix_password_reset_tokens_tenant_id;
+DROP INDEX IF EXISTS public.ix_password_reset_tokens_is_used;
+DROP INDEX IF EXISTS public.ix_password_reset_tokens_expires_at;
+DROP INDEX IF EXISTS public.ix_password_reset_tokens_email;
+DROP INDEX IF EXISTS public.ix_orders_user_id;
+DROP INDEX IF EXISTS public.ix_orders_trading_mode;
+DROP INDEX IF EXISTS public.ix_orders_trade_action;
+DROP INDEX IF EXISTS public.ix_orders_tenant_id;
+DROP INDEX IF EXISTS public.ix_orders_symbol;
+DROP INDEX IF EXISTS public.ix_orders_strategy_id;
+DROP INDEX IF EXISTS public.ix_orders_status;
+DROP INDEX IF EXISTS public.ix_orders_position_side;
+DROP INDEX IF EXISTS public.ix_orders_portfolio_id;
+DROP INDEX IF EXISTS public.ix_orders_order_id;
+DROP INDEX IF EXISTS public.ix_login_devices_user_id;
+DROP INDEX IF EXISTS public.ix_login_devices_tenant_id;
+DROP INDEX IF EXISTS public.ix_login_devices_device_id;
+DROP INDEX IF EXISTS public.ix_email_verifications_verification_code;
+DROP INDEX IF EXISTS public.ix_email_verifications_user_id;
+DROP INDEX IF EXISTS public.ix_email_verifications_tenant_id;
+DROP INDEX IF EXISTS public.ix_email_verifications_is_used;
+DROP INDEX IF EXISTS public.ix_email_verifications_expires_at;
+DROP INDEX IF EXISTS public.ix_email_verifications_email;
+DROP INDEX IF EXISTS public.ix_community_posts_tenant_id;
+DROP INDEX IF EXISTS public.ix_community_posts_category;
+DROP INDEX IF EXISTS public.ix_community_posts_author_id;
+DROP INDEX IF EXISTS public.ix_community_interactions_user_id;
+DROP INDEX IF EXISTS public.ix_community_interactions_tenant_id;
+DROP INDEX IF EXISTS public.ix_community_interactions_post_id;
+DROP INDEX IF EXISTS public.ix_community_interactions_comment_id;
+DROP INDEX IF EXISTS public.ix_community_comments_tenant_id;
+DROP INDEX IF EXISTS public.ix_community_comments_post_id;
+DROP INDEX IF EXISTS public.ix_community_comments_parent_id;
+DROP INDEX IF EXISTS public.ix_community_comments_author_id;
+DROP INDEX IF EXISTS public.ix_community_author_follows_tenant_id;
+DROP INDEX IF EXISTS public.ix_community_author_follows_follower_user_id;
+DROP INDEX IF EXISTS public.ix_community_author_follows_author_user_id;
+DROP INDEX IF EXISTS public.ix_community_audit_logs_user_id;
+DROP INDEX IF EXISTS public.ix_community_audit_logs_tenant_id;
+DROP INDEX IF EXISTS public.ix_community_audit_logs_action;
+DROP INDEX IF EXISTS public.ix_admin_training_jobs_user_id;
+DROP INDEX IF EXISTS public.ix_admin_training_jobs_tenant_id;
+DROP INDEX IF EXISTS public.ix_admin_training_jobs_id;
+DROP INDEX IF EXISTS public.ix_admin_models_user_id;
+DROP INDEX IF EXISTS public.ix_admin_models_tenant_id;
+DROP INDEX IF EXISTS public.ix_admin_models_name;
+DROP INDEX IF EXISTS public.ix_admin_models_id;
+DROP INDEX IF EXISTS public.ix_admin_data_files_tenant_id;
+DROP INDEX IF EXISTS public.ix_admin_data_files_id;
+DROP INDEX IF EXISTS public.idx_users_user_id;
+DROP INDEX IF EXISTS public.idx_users_tenant_id;
+DROP INDEX IF EXISTS public.idx_user_strategies_user_id;
+DROP INDEX IF EXISTS public.idx_user_sessions_user_id;
+DROP INDEX IF EXISTS public.idx_trade_user_symbol;
+DROP INDEX IF EXISTS public.idx_trade_tenant_user_symbol;
+DROP INDEX IF EXISTS public.idx_trade_portfolio;
+DROP INDEX IF EXISTS public.idx_trade_order;
+DROP INDEX IF EXISTS public.idx_trade_manual_execution_tasks_type_created;
+DROP INDEX IF EXISTS public.idx_trade_manual_execution_tasks_status_created;
+DROP INDEX IF EXISTS public.idx_trade_manual_execution_tasks_owner_created;
+DROP INDEX IF EXISTS public.idx_trade_executed;
+DROP INDEX IF EXISTS public.idx_strategies_user_id;
+DROP INDEX IF EXISTS public.idx_status;
+DROP INDEX IF EXISTS public.idx_snapshot_date;
+DROP INDEX IF EXISTS public.idx_simulation_jobs_user_id;
+DROP INDEX IF EXISTS public.idx_sim_trades_job_id;
+DROP INDEX IF EXISTS public.idx_sim_orders_job_id;
+DROP INDEX IF EXISTS public.idx_qmt_session_tenant_user;
+DROP INDEX IF EXISTS public.idx_qmt_session_binding;
+DROP INDEX IF EXISTS public.idx_qmt_binding_tenant_account_status;
+DROP INDEX IF EXISTS public.idx_qmt_binding_api_key;
+DROP INDEX IF EXISTS public.idx_qm_user_models_user_status;
+DROP INDEX IF EXISTS public.idx_qm_strategy_model_bindings_model;
+DROP INDEX IF EXISTS public.idx_qm_model_inference_settings_owner;
+DROP INDEX IF EXISTS public.idx_qm_model_inference_runs_target_date;
+DROP INDEX IF EXISTS public.idx_qm_model_inference_runs_owner_created;
+DROP INDEX IF EXISTS public.idx_qm_model_inference_runs_model_status;
+DROP INDEX IF EXISTS public.idx_qm_calendar_day_query;
+DROP INDEX IF EXISTS public.idx_qlib_optimization_runs_user_created;
+DROP INDEX IF EXISTS public.idx_qlib_optimization_runs_tenant_created;
+DROP INDEX IF EXISTS public.idx_qlib_optimization_runs_status;
+DROP INDEX IF EXISTS public.idx_qlib_backtest_runs_user_id;
+DROP INDEX IF EXISTS public.idx_qlib_backtest_runs_user_created;
+DROP INDEX IF EXISTS public.idx_qlib_backtest_runs_tenant_created;
+DROP INDEX IF EXISTS public.idx_qlib_backtest_runs_status;
+DROP INDEX IF EXISTS public.idx_post_tenant_category;
+DROP INDEX IF EXISTS public.idx_pos_history_created_at;
+DROP INDEX IF EXISTS public.idx_portfolio_user_status;
+DROP INDEX IF EXISTS public.idx_portfolio_tenant_user_status;
+DROP INDEX IF EXISTS public.idx_portfolio_symbol;
+DROP INDEX IF EXISTS public.idx_portfolio_date;
+DROP INDEX IF EXISTS public.idx_portfolio_created_at;
+DROP INDEX IF EXISTS public.idx_order_user_status;
+DROP INDEX IF EXISTS public.idx_order_tenant_user_status;
+DROP INDEX IF EXISTS public.idx_order_portfolio_symbol;
+DROP INDEX IF EXISTS public.idx_order_created;
+DROP INDEX IF EXISTS public.idx_notifications_user_id;
+DROP INDEX IF EXISTS public.idx_notifications_tenant_user_read_created_at;
+DROP INDEX IF EXISTS public.idx_notifications_tenant_user_created_at;
+DROP INDEX IF EXISTS public.idx_market_data_daily_symbol_date;
+DROP INDEX IF EXISTS public.idx_market_data_daily_symbol;
+DROP INDEX IF EXISTS public.idx_market_data_daily_date;
+DROP INDEX IF EXISTS public.idx_audit_logs_user_id;
+DROP INDEX IF EXISTS public.idx_audit_logs_created_at;
+DROP INDEX IF EXISTS public.idx_api_keys_user_id;
+DROP INDEX IF EXISTS public.idx_api_keys_access_key;
+ALTER TABLE IF EXISTS ONLY public.users DROP CONSTRAINT IF EXISTS users_user_id_key;
+ALTER TABLE IF EXISTS ONLY public.users DROP CONSTRAINT IF EXISTS users_pkey;
+ALTER TABLE IF EXISTS ONLY public.user_subscriptions DROP CONSTRAINT IF EXISTS user_subscriptions_pkey;
+ALTER TABLE IF EXISTS ONLY public.user_strategies DROP CONSTRAINT IF EXISTS user_strategies_pkey;
+ALTER TABLE IF EXISTS ONLY public.user_sessions DROP CONSTRAINT IF EXISTS user_sessions_pkey;
+ALTER TABLE IF EXISTS ONLY public.user_roles DROP CONSTRAINT IF EXISTS user_roles_pkey;
+ALTER TABLE IF EXISTS ONLY public.user_profiles DROP CONSTRAINT IF EXISTS user_profiles_pkey;
+ALTER TABLE IF EXISTS ONLY public.user_audit_logs DROP CONSTRAINT IF EXISTS user_audit_logs_pkey;
+ALTER TABLE IF EXISTS ONLY public.real_account_ledger_daily_snapshots DROP CONSTRAINT IF EXISTS uq_real_account_ledger_daily;
+ALTER TABLE IF EXISTS ONLY public.qlib_backtest_runs DROP CONSTRAINT IF EXISTS uq_qlib_backtest_runs_backtest_id;
+ALTER TABLE IF EXISTS ONLY public.community_interactions DROP CONSTRAINT IF EXISTS uq_community_interactions;
+ALTER TABLE IF EXISTS ONLY public.community_author_follows DROP CONSTRAINT IF EXISTS uq_community_author_follows_model;
+ALTER TABLE IF EXISTS ONLY public.trades DROP CONSTRAINT IF EXISTS trades_pkey;
+ALTER TABLE IF EXISTS ONLY public.trade_manual_execution_tasks DROP CONSTRAINT IF EXISTS trade_manual_execution_tasks_pkey;
+ALTER TABLE IF EXISTS ONLY public.system_settings DROP CONSTRAINT IF EXISTS system_settings_pkey;
+ALTER TABLE IF EXISTS ONLY public.subscription_plans DROP CONSTRAINT IF EXISTS subscription_plans_pkey;
+ALTER TABLE IF EXISTS ONLY public.strategies DROP CONSTRAINT IF EXISTS strategies_pkey;
+ALTER TABLE IF EXISTS ONLY public.stocks DROP CONSTRAINT IF EXISTS stocks_symbol_key;
+ALTER TABLE IF EXISTS ONLY public.stocks DROP CONSTRAINT IF EXISTS stocks_pkey;
+ALTER TABLE IF EXISTS ONLY public.stock_pool_files DROP CONSTRAINT IF EXISTS stock_pool_files_pkey;
+ALTER TABLE IF EXISTS ONLY public.stock_daily_latest DROP CONSTRAINT IF EXISTS stock_daily_latest_symbol_key;
+ALTER TABLE IF EXISTS ONLY public.stock_daily_latest DROP CONSTRAINT IF EXISTS stock_daily_latest_pkey;
+ALTER TABLE IF EXISTS ONLY public.simulation_positions DROP CONSTRAINT IF EXISTS simulation_positions_pkey;
+ALTER TABLE IF EXISTS ONLY public.simulation_jobs DROP CONSTRAINT IF EXISTS simulation_jobs_pkey;
+ALTER TABLE IF EXISTS ONLY public.simulation_fund_snapshots DROP CONSTRAINT IF EXISTS simulation_fund_snapshots_pkey;
+ALTER TABLE IF EXISTS ONLY public.sim_trades DROP CONSTRAINT IF EXISTS sim_trades_pkey;
+ALTER TABLE IF EXISTS ONLY public.sim_orders DROP CONSTRAINT IF EXISTS sim_orders_pkey;
+ALTER TABLE IF EXISTS ONLY public.roles DROP CONSTRAINT IF EXISTS roles_pkey;
+ALTER TABLE IF EXISTS ONLY public.roles DROP CONSTRAINT IF EXISTS roles_name_key;
+ALTER TABLE IF EXISTS ONLY public.role_permissions DROP CONSTRAINT IF EXISTS role_permissions_pkey;
+ALTER TABLE IF EXISTS ONLY public.risk_rules DROP CONSTRAINT IF EXISTS risk_rules_pkey;
+ALTER TABLE IF EXISTS ONLY public.real_trading_preflight_snapshots DROP CONSTRAINT IF EXISTS real_trading_preflight_snapshots_pkey;
+ALTER TABLE IF EXISTS ONLY public.real_account_snapshots DROP CONSTRAINT IF EXISTS real_account_snapshots_pkey;
+ALTER TABLE IF EXISTS ONLY public.real_account_ledger_daily_snapshots DROP CONSTRAINT IF EXISTS real_account_ledger_daily_snapshots_pkey;
+ALTER TABLE IF EXISTS ONLY public.quotes DROP CONSTRAINT IF EXISTS quotes_pkey;
+ALTER TABLE IF EXISTS ONLY public.qmt_agent_sessions DROP CONSTRAINT IF EXISTS qmt_agent_sessions_pkey;
+ALTER TABLE IF EXISTS ONLY public.qmt_agent_bindings DROP CONSTRAINT IF EXISTS qmt_agent_bindings_pkey;
+ALTER TABLE IF EXISTS ONLY public.qm_user_models DROP CONSTRAINT IF EXISTS qm_user_models_pkey;
+ALTER TABLE IF EXISTS ONLY public.qm_strategy_model_bindings DROP CONSTRAINT IF EXISTS qm_strategy_model_bindings_pkey;
+ALTER TABLE IF EXISTS ONLY public.qm_model_inference_settings DROP CONSTRAINT IF EXISTS qm_model_inference_settings_pkey;
+ALTER TABLE IF EXISTS ONLY public.qm_model_inference_runs DROP CONSTRAINT IF EXISTS qm_model_inference_runs_pkey;
+ALTER TABLE IF EXISTS ONLY public.qm_market_calendar_day DROP CONSTRAINT IF EXISTS qm_market_calendar_day_pkey;
+ALTER TABLE IF EXISTS ONLY public.qlib_optimization_runs DROP CONSTRAINT IF EXISTS qlib_optimization_runs_pkey;
+ALTER TABLE IF EXISTS ONLY public.positions DROP CONSTRAINT IF EXISTS positions_pkey;
+ALTER TABLE IF EXISTS ONLY public.position_history DROP CONSTRAINT IF EXISTS position_history_pkey;
+ALTER TABLE IF EXISTS ONLY public.portfolios DROP CONSTRAINT IF EXISTS portfolios_pkey;
+ALTER TABLE IF EXISTS ONLY public.portfolio_snapshots DROP CONSTRAINT IF EXISTS portfolio_snapshots_pkey;
+ALTER TABLE IF EXISTS ONLY public.permissions DROP CONSTRAINT IF EXISTS permissions_pkey;
+ALTER TABLE IF EXISTS ONLY public.permissions DROP CONSTRAINT IF EXISTS permissions_name_key;
+ALTER TABLE IF EXISTS ONLY public.password_reset_tokens DROP CONSTRAINT IF EXISTS password_reset_tokens_pkey;
+ALTER TABLE IF EXISTS ONLY public.orders DROP CONSTRAINT IF EXISTS orders_pkey;
+ALTER TABLE IF EXISTS ONLY public.orders DROP CONSTRAINT IF EXISTS orders_client_order_id_key;
+ALTER TABLE IF EXISTS ONLY public.notifications DROP CONSTRAINT IF EXISTS notifications_pkey;
+ALTER TABLE IF EXISTS ONLY public.market_data_daily DROP CONSTRAINT IF EXISTS market_data_daily_symbol_trade_date_key;
+ALTER TABLE IF EXISTS ONLY public.market_data_daily DROP CONSTRAINT IF EXISTS market_data_daily_pkey;
+ALTER TABLE IF EXISTS ONLY public.login_devices DROP CONSTRAINT IF EXISTS login_devices_pkey;
+ALTER TABLE IF EXISTS ONLY public.email_verifications DROP CONSTRAINT IF EXISTS email_verifications_pkey;
+ALTER TABLE IF EXISTS ONLY public.community_posts DROP CONSTRAINT IF EXISTS community_posts_pkey;
+ALTER TABLE IF EXISTS ONLY public.community_interactions DROP CONSTRAINT IF EXISTS community_interactions_pkey;
+ALTER TABLE IF EXISTS ONLY public.community_comments DROP CONSTRAINT IF EXISTS community_comments_pkey;
+ALTER TABLE IF EXISTS ONLY public.community_author_follows DROP CONSTRAINT IF EXISTS community_author_follows_pkey;
+ALTER TABLE IF EXISTS ONLY public.community_audit_logs DROP CONSTRAINT IF EXISTS community_audit_logs_pkey;
+ALTER TABLE IF EXISTS ONLY public.audit_logs DROP CONSTRAINT IF EXISTS audit_logs_pkey;
+ALTER TABLE IF EXISTS ONLY public.api_keys DROP CONSTRAINT IF EXISTS api_keys_pkey;
+ALTER TABLE IF EXISTS ONLY public.admin_training_jobs DROP CONSTRAINT IF EXISTS admin_training_jobs_pkey;
+ALTER TABLE IF EXISTS ONLY public.admin_models DROP CONSTRAINT IF EXISTS admin_models_pkey;
+ALTER TABLE IF EXISTS ONLY public.admin_data_files DROP CONSTRAINT IF EXISTS admin_data_files_pkey;
+ALTER TABLE IF EXISTS public.users ALTER COLUMN id DROP DEFAULT;
+ALTER TABLE IF EXISTS public.user_subscriptions ALTER COLUMN id DROP DEFAULT;
+ALTER TABLE IF EXISTS public.user_profiles ALTER COLUMN id DROP DEFAULT;
+ALTER TABLE IF EXISTS public.user_audit_logs ALTER COLUMN id DROP DEFAULT;
+ALTER TABLE IF EXISTS public.trades ALTER COLUMN id DROP DEFAULT;
+ALTER TABLE IF EXISTS public.subscription_plans ALTER COLUMN id DROP DEFAULT;
+ALTER TABLE IF EXISTS public.strategies ALTER COLUMN id DROP DEFAULT;
+ALTER TABLE IF EXISTS public.stocks ALTER COLUMN id DROP DEFAULT;
+ALTER TABLE IF EXISTS public.stock_pool_files ALTER COLUMN id DROP DEFAULT;
+ALTER TABLE IF EXISTS public.stock_daily_latest ALTER COLUMN id DROP DEFAULT;
+ALTER TABLE IF EXISTS public.simulation_positions ALTER COLUMN id DROP DEFAULT;
+ALTER TABLE IF EXISTS public.simulation_fund_snapshots ALTER COLUMN id DROP DEFAULT;
+ALTER TABLE IF EXISTS public.roles ALTER COLUMN id DROP DEFAULT;
+ALTER TABLE IF EXISTS public.risk_rules ALTER COLUMN id DROP DEFAULT;
+ALTER TABLE IF EXISTS public.real_trading_preflight_snapshots ALTER COLUMN id DROP DEFAULT;
+ALTER TABLE IF EXISTS public.real_account_snapshots ALTER COLUMN id DROP DEFAULT;
+ALTER TABLE IF EXISTS public.real_account_ledger_daily_snapshots ALTER COLUMN id DROP DEFAULT;
+ALTER TABLE IF EXISTS public.positions ALTER COLUMN id DROP DEFAULT;
+ALTER TABLE IF EXISTS public.position_history ALTER COLUMN id DROP DEFAULT;
+ALTER TABLE IF EXISTS public.portfolios ALTER COLUMN id DROP DEFAULT;
+ALTER TABLE IF EXISTS public.portfolio_snapshots ALTER COLUMN id DROP DEFAULT;
+ALTER TABLE IF EXISTS public.permissions ALTER COLUMN id DROP DEFAULT;
+ALTER TABLE IF EXISTS public.password_reset_tokens ALTER COLUMN id DROP DEFAULT;
+ALTER TABLE IF EXISTS public.orders ALTER COLUMN id DROP DEFAULT;
+ALTER TABLE IF EXISTS public.notifications ALTER COLUMN id DROP DEFAULT;
+ALTER TABLE IF EXISTS public.market_data_daily ALTER COLUMN id DROP DEFAULT;
+ALTER TABLE IF EXISTS public.login_devices ALTER COLUMN id DROP DEFAULT;
+ALTER TABLE IF EXISTS public.email_verifications ALTER COLUMN id DROP DEFAULT;
+ALTER TABLE IF EXISTS public.community_posts ALTER COLUMN id DROP DEFAULT;
+ALTER TABLE IF EXISTS public.community_interactions ALTER COLUMN id DROP DEFAULT;
+ALTER TABLE IF EXISTS public.community_comments ALTER COLUMN id DROP DEFAULT;
+ALTER TABLE IF EXISTS public.community_author_follows ALTER COLUMN id DROP DEFAULT;
+ALTER TABLE IF EXISTS public.community_audit_logs ALTER COLUMN id DROP DEFAULT;
+ALTER TABLE IF EXISTS public.audit_logs ALTER COLUMN id DROP DEFAULT;
+ALTER TABLE IF EXISTS public.api_keys ALTER COLUMN id DROP DEFAULT;
+ALTER TABLE IF EXISTS public.admin_models ALTER COLUMN id DROP DEFAULT;
+ALTER TABLE IF EXISTS public.admin_data_files ALTER COLUMN id DROP DEFAULT;
+DROP SEQUENCE IF EXISTS public.users_id_seq;
+DROP TABLE IF EXISTS public.users;
+DROP SEQUENCE IF EXISTS public.user_subscriptions_id_seq;
+DROP TABLE IF EXISTS public.user_subscriptions;
+DROP TABLE IF EXISTS public.user_strategies;
+DROP TABLE IF EXISTS public.user_sessions;
+DROP TABLE IF EXISTS public.user_roles;
+DROP SEQUENCE IF EXISTS public.user_profiles_id_seq;
+DROP TABLE IF EXISTS public.user_profiles;
+DROP SEQUENCE IF EXISTS public.user_audit_logs_id_seq;
+DROP TABLE IF EXISTS public.user_audit_logs;
+DROP SEQUENCE IF EXISTS public.trades_id_seq;
+DROP TABLE IF EXISTS public.trades;
+DROP TABLE IF EXISTS public.trade_manual_execution_tasks;
+DROP TABLE IF EXISTS public.system_settings;
+DROP SEQUENCE IF EXISTS public.subscription_plans_id_seq;
+DROP TABLE IF EXISTS public.subscription_plans;
+DROP SEQUENCE IF EXISTS public.strategies_id_seq;
+DROP TABLE IF EXISTS public.strategies;
+DROP SEQUENCE IF EXISTS public.stocks_id_seq;
+DROP TABLE IF EXISTS public.stocks;
+DROP SEQUENCE IF EXISTS public.stock_pool_files_id_seq;
+DROP TABLE IF EXISTS public.stock_pool_files;
+DROP SEQUENCE IF EXISTS public.stock_daily_latest_id_seq;
+DROP TABLE IF EXISTS public.stock_daily_latest;
+DROP SEQUENCE IF EXISTS public.simulation_positions_id_seq;
+DROP TABLE IF EXISTS public.simulation_positions;
+DROP TABLE IF EXISTS public.simulation_jobs;
+DROP SEQUENCE IF EXISTS public.simulation_fund_snapshots_id_seq;
+DROP TABLE IF EXISTS public.simulation_fund_snapshots;
+DROP TABLE IF EXISTS public.sim_trades;
+DROP TABLE IF EXISTS public.sim_orders;
+DROP SEQUENCE IF EXISTS public.roles_id_seq;
+DROP TABLE IF EXISTS public.roles;
+DROP TABLE IF EXISTS public.role_permissions;
+DROP SEQUENCE IF EXISTS public.risk_rules_id_seq;
+DROP TABLE IF EXISTS public.risk_rules;
+DROP SEQUENCE IF EXISTS public.real_trading_preflight_snapshots_id_seq;
+DROP TABLE IF EXISTS public.real_trading_preflight_snapshots;
+DROP SEQUENCE IF EXISTS public.real_account_snapshots_id_seq;
+DROP VIEW IF EXISTS public.real_account_snapshot_overview_v;
+DROP TABLE IF EXISTS public.real_account_snapshots;
+DROP SEQUENCE IF EXISTS public.real_account_ledger_daily_snapshots_id_seq;
+DROP TABLE IF EXISTS public.real_account_ledger_daily_snapshots;
+DROP TABLE IF EXISTS public.quotes;
+DROP TABLE IF EXISTS public.qmt_agent_sessions;
+DROP TABLE IF EXISTS public.qmt_agent_bindings;
+DROP TABLE IF EXISTS public.qm_user_models;
+DROP TABLE IF EXISTS public.qm_strategy_model_bindings;
+DROP TABLE IF EXISTS public.qm_model_inference_settings;
+DROP TABLE IF EXISTS public.qm_model_inference_runs;
+DROP TABLE IF EXISTS public.qm_market_calendar_day;
+DROP TABLE IF EXISTS public.qlib_optimization_runs;
+DROP TABLE IF EXISTS public.qlib_backtest_runs;
+DROP SEQUENCE IF EXISTS public.positions_id_seq;
+DROP TABLE IF EXISTS public.positions;
+DROP SEQUENCE IF EXISTS public.position_history_id_seq;
+DROP TABLE IF EXISTS public.position_history;
+DROP SEQUENCE IF EXISTS public.portfolios_id_seq;
+DROP TABLE IF EXISTS public.portfolios;
+DROP SEQUENCE IF EXISTS public.portfolio_snapshots_id_seq;
+DROP TABLE IF EXISTS public.portfolio_snapshots;
+DROP SEQUENCE IF EXISTS public.permissions_id_seq;
+DROP TABLE IF EXISTS public.permissions;
+DROP SEQUENCE IF EXISTS public.password_reset_tokens_id_seq;
+DROP TABLE IF EXISTS public.password_reset_tokens;
+DROP SEQUENCE IF EXISTS public.orders_id_seq;
+DROP TABLE IF EXISTS public.orders;
+DROP SEQUENCE IF EXISTS public.notifications_id_seq;
+DROP TABLE IF EXISTS public.notifications;
+DROP SEQUENCE IF EXISTS public.market_data_daily_id_seq;
+DROP TABLE IF EXISTS public.market_data_daily;
+DROP SEQUENCE IF EXISTS public.login_devices_id_seq;
+DROP TABLE IF EXISTS public.login_devices;
+DROP SEQUENCE IF EXISTS public.email_verifications_id_seq;
+DROP TABLE IF EXISTS public.email_verifications;
+DROP SEQUENCE IF EXISTS public.community_posts_id_seq;
+DROP TABLE IF EXISTS public.community_posts;
+DROP SEQUENCE IF EXISTS public.community_interactions_id_seq;
+DROP TABLE IF EXISTS public.community_interactions;
+DROP SEQUENCE IF EXISTS public.community_comments_id_seq;
+DROP TABLE IF EXISTS public.community_comments;
+DROP SEQUENCE IF EXISTS public.community_author_follows_id_seq;
+DROP TABLE IF EXISTS public.community_author_follows;
+DROP SEQUENCE IF EXISTS public.community_audit_logs_id_seq;
+DROP TABLE IF EXISTS public.community_audit_logs;
+DROP SEQUENCE IF EXISTS public.audit_logs_id_seq;
+DROP TABLE IF EXISTS public.audit_logs;
+DROP SEQUENCE IF EXISTS public.api_keys_id_seq;
+DROP TABLE IF EXISTS public.api_keys;
+DROP TABLE IF EXISTS public.admin_training_jobs;
+DROP SEQUENCE IF EXISTS public.admin_models_id_seq;
+DROP TABLE IF EXISTS public.admin_models;
+DROP SEQUENCE IF EXISTS public.admin_data_files_id_seq;
+DROP TABLE IF EXISTS public.admin_data_files;
+DROP FUNCTION IF EXISTS public.auto_populate_id();
+DROP TYPE IF EXISTS public.tradingmode;
+DROP TYPE IF EXISTS public.tradeaction;
+DROP TYPE IF EXISTS public.strategytype;
+DROP TYPE IF EXISTS public.strategystatus;
+DROP TYPE IF EXISTS public.simulationstatus;
+DROP TYPE IF EXISTS public.positionside;
+DROP TYPE IF EXISTS public.ordertype;
+DROP TYPE IF EXISTS public.orderstatus;
+DROP TYPE IF EXISTS public.orderside;
 --
 -- Name: orderside; Type: TYPE; Schema: public; Owner: quantmind
 --
@@ -3787,7 +4183,7 @@ COPY public.email_verifications (id, user_id, tenant_id, email, verification_cod
 COPY public.login_devices (id, user_id, tenant_id, device_id, device_name, device_type, os, browser, ip_address, location, is_trusted, is_active, first_seen_at, last_seen_at, last_location_change) FROM stdin;
 3	admin	default	666bb8ac6892a037d361735609e102ae016ac1b4fc21a1448f2967f76f7bf7a7	Apple Mac	desktop	Mac OS X 10.15.7	Chrome 147.0.0	172.18.0.1	\N	f	t	2026-04-17 00:12:07.657099+08	2026-04-17 00:12:07.657742+08	\N
 1	admin	default	5fb5b0d3685b5c8729ee03b6d3cfe5c1037f6619483e5cdb49a43effe3268fa8	Other	desktop	Other 	curl 8.5.0	172.18.0.1	\N	f	t	2026-04-16 22:32:02.570292+08	2026-04-17 18:30:10.439509+08	\N
-2	admin	default	43e514d659dad8042bc8175828660f9eed9d7d1aa07f515c2b529ba899f8d6b5	Apple Mac	desktop	Mac OS X 10.15.7	Edge 147.0.0	172.18.0.1	\N	f	t	2026-04-16 22:38:25.46269+08	2026-04-18 10:31:57.100539+08	\N
+2	admin	default	43e514d659dad8042bc8175828660f9eed9d7d1aa07f515c2b529ba899f8d6b5	Apple Mac	desktop	Mac OS X 10.15.7	Edge 147.0.0	172.18.0.1	\N	f	t	2026-04-16 22:38:25.46269+08	2026-04-18 14:29:10.632157+08	\N
 \.
 
 
@@ -9639,6 +10035,8 @@ COPY public.user_audit_logs (id, user_id, tenant_id, action, resource, resource_
 38	admin	default	login	auth	\N	用户成功登录	\N	\N	172.18.0.1	Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36 Edg/147.0.0.0	\N	\N	\N	t	\N	2026-04-17 21:56:21.135048+08	\N
 39	admin	default	login	auth	\N	用户成功登录	\N	\N	172.18.0.1	Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36 Edg/147.0.0.0	\N	\N	\N	t	\N	2026-04-17 23:05:07.717483+08	\N
 40	admin	default	login	auth	\N	用户成功登录	\N	\N	172.18.0.1	Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36 Edg/147.0.0.0	\N	\N	\N	t	\N	2026-04-18 10:31:57.105184+08	\N
+41	admin	default	login	auth	\N	用户成功登录	\N	\N	172.18.0.1	Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36 Edg/147.0.0.0	\N	\N	\N	t	\N	2026-04-18 14:13:12.731794+08	\N
+42	admin	default	login	auth	\N	用户成功登录	\N	\N	172.18.0.1	Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36 Edg/147.0.0.0	\N	\N	\N	t	\N	2026-04-18 14:29:10.636721+08	\N
 \.
 
 
@@ -9690,6 +10088,8 @@ e49d10f5-4275-443b-bb71-8d3b3ad4fdee	admin	default	\N	\N	172.18.0.1	2026-04-17 2
 9265ed38-b274-4ac3-9b96-849403056e7b	admin	default	\N	\N	172.18.0.1	2026-04-17 22:56:21.151949+08	\N	2026-04-17 21:56:21.154058+08	sess_1b8c902493d448e9843113f6ab94c2dc	33f7dffe-7354-4536-9531-5c5f24120ab0	Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36 Edg/147.0.0.0	\N	eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhZG1pbiIsInRlbmFudF9pZCI6ImRlZmF1bHQiLCJqdGkiOiI4ZjQzNzFmNS04YTY0LTRjMmEtOWEwOC1kOTIxMmM2OTZiZDEiLCJpYXQiOjE3NzY0NjI5ODEsImV4cCI6MTc3OTA1NDk4MSwidHlwZSI6InJlZnJlc2gifQ.sBtcZISOqt32xlbZP8MwxkZSQRYDp-SejWfcUasFp10	\N	\N	t	f
 65f33359-9509-4bbb-ad7f-b575d2b5c515	admin	default	\N	\N	172.18.0.1	2026-04-18 00:05:07.736213+08	\N	2026-04-17 23:05:07.738463+08	sess_7cc0c2efc27c489e827b95b080635fc2	1d3da9b4-2642-4336-aa74-63d7ae68f9fd	Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36 Edg/147.0.0.0	\N	eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhZG1pbiIsInRlbmFudF9pZCI6ImRlZmF1bHQiLCJqdGkiOiI4YThjM2UzZi0wOGRmLTQzZDUtYTA4My00MjAxNDRjMDA0YmIiLCJpYXQiOjE3NzY0NjcxMDcsImV4cCI6MTc3OTA1OTEwNywidHlwZSI6InJlZnJlc2gifQ.El7LBq42AxtogDww_ShNZLzg3UYBUV7caVYeLfjFxKE	\N	\N	t	f
 78bc1fa3-be1f-4e3e-81de-260e860974ea	admin	default	\N	\N	172.18.0.1	2026-04-18 11:31:57.120069+08	\N	2026-04-18 10:31:57.121691+08	sess_e6cb36b22b614958b35483df23e645f8	45c43f60-3c0d-4e3f-ad00-dd3ed9ca2ce3	Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36 Edg/147.0.0.0	\N	eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhZG1pbiIsInRlbmFudF9pZCI6ImRlZmF1bHQiLCJqdGkiOiI0MzAwMTljYy0zOWQ3LTQ4NTUtOWZlYi0yNDcwZjdhNDcyODAiLCJpYXQiOjE3NzY1MDgzMTcsImV4cCI6MTc3OTEwMDMxNywidHlwZSI6InJlZnJlc2gifQ.m8WqNbW2yEEGgWXhbqTSbRdI45NaUmfjgL9BV8ht5y8	\N	\N	t	f
+93a61ded-0f7f-4a29-9f95-c69a2e0e398d	admin	default	\N	\N	172.18.0.1	2026-04-18 15:13:12.74439+08	\N	2026-04-18 14:13:12.745489+08	sess_3cb244514eef4c44a5642542e2de18b1	565910dc-5ad0-4698-b53c-8ff16db2a457	Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36 Edg/147.0.0.0	\N	eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhZG1pbiIsInRlbmFudF9pZCI6ImRlZmF1bHQiLCJqdGkiOiIxMGE3OTNjOS04NWM4LTQ5YTItODUwMS04MzY2ZGVkOGEyOGYiLCJpYXQiOjE3NzY1MjE1OTIsImV4cCI6MTc3OTExMzU5MiwidHlwZSI6InJlZnJlc2gifQ.QMyUTvmo7lXc1p9nm51Hfo2s1i2pLw0eNZDEHh85qmM	\N	\N	t	f
+c9494210-d869-4b46-9e67-3b18979fb03e	admin	default	\N	\N	172.18.0.1	2026-04-18 15:29:10.651274+08	\N	2026-04-18 14:29:10.653352+08	sess_4763efac6db0445cb2c98cbd3c4d1f07	d59eb0d3-2f4c-4354-969b-8f072f47a844	Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36 Edg/147.0.0.0	\N	eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhZG1pbiIsInRlbmFudF9pZCI6ImRlZmF1bHQiLCJqdGkiOiIxNDJlOGIyZS01Nzc3LTQ3NGUtYmI3Yi1kZWUxNGUwMThkYmUiLCJpYXQiOjE3NzY1MjI1NTAsImV4cCI6MTc3OTExNDU1MCwidHlwZSI6InJlZnJlc2gifQ.G63wpCiJkgL4_pgpPTT4eRWlFKYWchY2JWda6RD-A1E	\N	\N	t	f
 \.
 
 
@@ -9714,7 +10114,7 @@ COPY public.user_subscriptions (id, user_id, tenant_id, plan_id, status, start_d
 --
 
 COPY public.users (id, user_id, tenant_id, username, email, phone_number, password_hash, is_active, is_verified, is_admin, is_locked, last_login_at, last_login_ip, login_count, created_at, updated_at, is_deleted, deleted_at) FROM stdin;
-1	admin	default	admin	admin@quantmind.local	\N	$2b$12$B/yjK9cT.wx4BlB9j.r/t.dADjCbmutIXoDM7PdKZmV6ypuYiiUvW	t	t	t	f	2026-04-18 10:31:57.09091+08	\N	35	2026-04-16 20:57:19.018279+08	2026-04-18 10:31:57.089898+08	f	\N
+1	admin	default	admin	admin@quantmind.local	\N	$2b$12$B/yjK9cT.wx4BlB9j.r/t.dADjCbmutIXoDM7PdKZmV6ypuYiiUvW	t	t	t	f	2026-04-18 14:29:10.62207+08	\N	37	2026-04-16 20:57:19.018279+08	2026-04-18 14:29:10.621334+08	f	\N
 \.
 
 
@@ -9953,7 +10353,7 @@ SELECT pg_catalog.setval('public.trades_id_seq', 1, false);
 -- Name: user_audit_logs_id_seq; Type: SEQUENCE SET; Schema: public; Owner: quantmind
 --
 
-SELECT pg_catalog.setval('public.user_audit_logs_id_seq', 40, true);
+SELECT pg_catalog.setval('public.user_audit_logs_id_seq', 42, true);
 
 
 --
@@ -11844,5 +12244,5 @@ GRANT USAGE ON SCHEMA public TO quantmind;
 -- PostgreSQL database dump complete
 --
 
-\unrestrict GTdzWcIe0g227VcK9wsgxuoHB3tfDhabvma7jO7Ixg1iww2aUOwl4Lk0ynaWCMe
+\unrestrict QtrYUayyGzrhXQjha5YRdL6AaBroyQJ8NHa34jFkj1JCsUp2U0brAJ2deptAL6i
 
