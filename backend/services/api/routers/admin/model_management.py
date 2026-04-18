@@ -565,11 +565,6 @@ async def get_model_directory_detail(
 
 
 async def ensure_admin_tables():
-    """确保管理员相关表存在"""
-    from backend.shared.database_manager_v2 import get_db_manager
-
-    db_manager = get_db_manager()
-    engine = db_manager._master_engine
-    if engine:
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+    """确保管理员相关表存在 - 已禁用自动建表"""
+    # 表结构由 quantmind_init.sql 初始化
+    pass

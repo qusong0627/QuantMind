@@ -163,6 +163,8 @@ async def create_registered_tables(
     schema_keys: Iterable[str] | None = None,
     checkfirst: bool = True,
 ) -> None:
-    for schema in load_registered_schemas(schema_keys):
-        async with engine.begin() as conn:
-            await conn.run_sync(lambda sync_conn: schema.metadata.create_all(sync_conn, checkfirst=checkfirst))
+    """已禁用自动建表，强制使用 quantmind_init.sql"""
+    # for schema in load_registered_schemas(schema_keys):
+    #     async with engine.begin() as conn:
+    #         await conn.run_sync(lambda sync_conn: schema.metadata.create_all(sync_conn, checkfirst=checkfirst))
+    pass

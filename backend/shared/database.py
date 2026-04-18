@@ -60,9 +60,6 @@ def get_db() -> Session:
 
 
 def init_db():
-    """初始化数据库"""
-    try:
-        Base.metadata.create_all(bind=engine)
-        logger.info("数据库初始化成功")
-    except Exception as e:
-        logger.error(f"数据库初始化失败: {e}")
+    """初始化数据库 - 已禁用自动建表，强制使用 quantmind_init.sql"""
+    # Base.metadata.create_all(bind=engine)  # 禁用：强制使用 SQL 初始化脚本
+    logger.info("数据库初始化已跳过（使用 quantmind_init.sql）")
