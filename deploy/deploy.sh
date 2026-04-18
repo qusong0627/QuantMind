@@ -670,6 +670,10 @@ step14_start_frontend() {
 step15_config_nginx() {
     log_step "Step 15: 配置 Nginx"
 
+    # 创建 uploads 目录
+    mkdir -p $DEPLOY_DIR/quantmind/data/uploads
+    chown -R 1000:1001 $DEPLOY_DIR/quantmind/data/uploads
+
     log_info "创建 Nginx 配置..."
     cat > /etc/nginx/sites-available/quantmind << 'EOF'
 server {
@@ -677,6 +681,13 @@ server {
     server_name _;
 
     client_max_body_size 100M;
+
+    # 静态文件 (uploads)
+    location /uploads/ {
+        alias /opt/quantmind/quantmind/data/uploads/;
+        expires 30d;
+        add_header Cache-Control "public, immutable";
+    }
 
     # 前端
     location / {
