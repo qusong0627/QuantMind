@@ -557,7 +557,7 @@ step11_start_backend() {
     cd $DEPLOY_DIR/quantmind
 
     log_info "启动后端容器..."
-    docker compose up -d quantmind quantmind-celery
+    docker compose up -d quantmind celery-worker
 
     log_info "等待后端启动 (20秒)..."
     sleep 20
