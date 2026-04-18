@@ -34,7 +34,8 @@ __pycache__/
 Thumbs.db
 *.swp
 *.swo
-*bak
+*.bak
+*.bak_*
 .project
 .pydevproject
 .settings/
@@ -89,8 +90,11 @@ user_center.db
 user_center.db.*
 
 # Qlib & Large Data Files
-db/qlib_data/*
-!db/qlib_data/.gitkeep
+db/qlib_data/**/*.bin
+db/qlib_data/**/*.data
+!db/qlib_data/
+!db/qlib_data/**/
+!db/qlib_data/**/*.txt
 db/qlib_bin/
 db/qlib_csv/
 db/*.tar.gz
