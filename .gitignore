@@ -63,6 +63,7 @@ electron/out/
 .hintrc
 .traeignore
 .antigravityignore
+.workbuddy/
 
 # ==============================================================================
 # 4. Data, ML & Results
