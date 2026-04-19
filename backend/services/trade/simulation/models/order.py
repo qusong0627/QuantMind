@@ -93,11 +93,11 @@ class SimOrder(Base, TimestampMixin):
         Float, nullable=False, default=0.0)
 
     submitted_at: Mapped[Optional[datetime]
-                         ] = mapped_column(DateTime, nullable=True)
+                         ] = mapped_column(DateTime(timezone=True), nullable=True)
     filled_at: Mapped[Optional[datetime]] = mapped_column(
-        DateTime, nullable=True)
+        DateTime(timezone=True), nullable=True)
     cancelled_at: Mapped[Optional[datetime]
-                         ] = mapped_column(DateTime, nullable=True)
+                         ] = mapped_column(DateTime(timezone=True), nullable=True)
 
     execution_model: Mapped[str] = mapped_column(
         String(32), nullable=False, default="synthetic_price"
