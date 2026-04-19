@@ -585,10 +585,12 @@ step9_start_database() {
     # 确保数据目录存在
     mkdir -p "$DATA_DIR/postgres" "$DATA_DIR/redis"
 
-    # 修复数据目录权限（Docker 容器内使用 999:999）
-    # 必须在启动容器前设置，否则 PostgreSQL 无法访问数据文件
-    chown -R 999:999 "$DATA_DIR/postgres" "$DATA_DIR/redis"
+    # 修复数据目录权限
+    # postgres:15-alpine 使用 UID=70, redis:7-alpine 使用 UID=999
+    # 必须在启动容器前设置，否则服务无法访问数据文件
+    chown -R 70:70 "$DATA_DIR/postgres"
     chmod 700 "$DATA_DIR/postgres"
+    chown -R 999:999 "$DATA_DIR/redis"
 
     log_info "启动数据库和 Redis..."
     docker compose up -d db redis
@@ -600,8 +602,9 @@ step9_start_database() {
     if ! docker exec quantmind-db psql -U quantmind -d quantmind -c "SELECT 1" > /dev/null 2>&1; then
         log_warn "数据库连接失败，检查权限..."
         docker compose down
-        chown -R 999:999 "$DATA_DIR/postgres" "$DATA_DIR/redis"
+        chown -R 70:70 "$DATA_DIR/postgres"
         chmod 700 "$DATA_DIR/postgres"
+        chown -R 999:999 "$DATA_DIR/redis"
         docker compose up -d db redis
         sleep 10
     fi
