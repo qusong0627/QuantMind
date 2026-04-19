@@ -109,6 +109,19 @@ curl -fsSL https://gitee.com/qusong0627/quantmind/raw/master/deploy/quick-deploy
 
 **默认账号：** `admin` / `admin123`
 
+### 离线数据包
+
+部署完成后，需要下载离线数据包以启用完整功能（回测、模型训练、模型推理）：
+
+**下载地址：** [https://www.quantmindai.cn/data-download](https://www.quantmindai.cn/data-download)
+
+数据包包含：
+- Qlib 股票特征数据（6000+ 股票）
+- 模型特征快照（2016-2026 年）
+- 预训练模型文件
+
+安装方法详见：[docs/数据包安装指南.md](docs/数据包安装指南.md)
+
 ### 部署选项
 
 ```bash
