@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict F2mU5fsWbnshw97WVYIpiBJovl10GsZq83Tuo554ogpxxfPngfwKe7JPlP0ubZJ
+\restrict 6HaFnYZTWVb23E8pSK8ALZndAEpS7c6qdQhVMbig8ccaxYPrUgD3bxGh86WK08E
 
 -- Dumped from database version 15.17
 -- Dumped by pg_dump version 15.17
@@ -4201,8 +4201,8 @@ COPY public.email_verifications (id, user_id, tenant_id, email, verification_cod
 
 COPY public.login_devices (id, user_id, tenant_id, device_id, device_name, device_type, os, browser, ip_address, location, is_trusted, is_active, first_seen_at, last_seen_at, last_location_change) FROM stdin;
 3	admin	default	666bb8ac6892a037d361735609e102ae016ac1b4fc21a1448f2967f76f7bf7a7	Apple Mac	desktop	Mac OS X 10.15.7	Chrome 147.0.0	172.18.0.1	\N	f	t	2026-04-17 00:12:07.657099+08	2026-04-17 00:12:07.657742+08	\N
-2	admin	default	43e514d659dad8042bc8175828660f9eed9d7d1aa07f515c2b529ba899f8d6b5	Apple Mac	desktop	Mac OS X 10.15.7	Edge 147.0.0	172.18.0.1	\N	f	t	2026-04-16 22:38:25.46269+08	2026-04-19 15:00:02.626698+08	\N
 1	admin	default	5fb5b0d3685b5c8729ee03b6d3cfe5c1037f6619483e5cdb49a43effe3268fa8	Other	desktop	Other 	curl 8.5.0	172.18.0.1	\N	f	t	2026-04-16 22:32:02.570292+08	2026-04-19 15:07:30.938707+08	\N
+2	admin	default	43e514d659dad8042bc8175828660f9eed9d7d1aa07f515c2b529ba899f8d6b5	Apple Mac	desktop	Mac OS X 10.15.7	Edge 147.0.0	172.18.0.1	\N	f	t	2026-04-16 22:38:25.46269+08	2026-04-19 15:40:27.965483+08	\N
 \.
 
 
@@ -10066,6 +10066,7 @@ COPY public.user_audit_logs (id, user_id, tenant_id, action, resource, resource_
 46	admin	default	login	auth	\N	用户成功登录	\N	\N	172.18.0.1	curl/8.5.0	\N	\N	\N	t	\N	2026-04-19 14:34:44.401458+08	\N
 47	admin	default	login	auth	\N	用户成功登录	\N	\N	172.18.0.1	Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36 Edg/147.0.0.0	\N	\N	\N	t	\N	2026-04-19 15:00:02.631096+08	\N
 48	admin	default	login	auth	\N	用户成功登录	\N	\N	172.18.0.1	curl/8.5.0	\N	\N	\N	t	\N	2026-04-19 15:07:30.941317+08	\N
+49	admin	default	login	auth	\N	用户成功登录	\N	\N	172.18.0.1	Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36 Edg/147.0.0.0	\N	\N	\N	t	\N	2026-04-19 15:40:27.969644+08	\N
 \.
 
 
@@ -10125,6 +10126,7 @@ c9494210-d869-4b46-9e67-3b18979fb03e	admin	default	\N	\N	172.18.0.1	2026-04-18 1
 8a6a3ea9-7792-4068-8488-9f664f1e8241	admin	default	\N	\N	172.18.0.1	2026-04-19 15:34:44.408113+08	\N	2026-04-19 14:34:44.409031+08	sess_877d4fd000c84023853db49f86135b80	7c0dcb97-177f-4a50-b21a-b12c6b5b95f0	curl/8.5.0	\N	eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhZG1pbiIsInRlbmFudF9pZCI6ImRlZmF1bHQiLCJqdGkiOiI1ODRmNmJiYy01M2Q3LTRiYjItYTBmNS02ZGY1YTAzM2QyNzUiLCJpYXQiOjE3NzY2MDkyODQsImV4cCI6MTc3OTIwMTI4NCwidHlwZSI6InJlZnJlc2gifQ.795pQvLiSa2zLsqUraCa3FEkJUULIF7dnede3JElRfQ	\N	\N	t	f
 8045c346-2374-4ebe-80a9-b5b366eb2f8d	admin	default	\N	\N	172.18.0.1	2026-04-19 16:00:02.645455+08	\N	2026-04-19 15:00:02.647508+08	sess_590970fdbc744a7984497cee9bd1aa1f	fabdb79b-cb31-46da-915c-bf02b6b68890	Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36 Edg/147.0.0.0	\N	eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhZG1pbiIsInRlbmFudF9pZCI6ImRlZmF1bHQiLCJqdGkiOiIyNGZhYzNkNi00ZmNmLTRhZjUtODAwNC0yOWZhZjFiN2YxMzEiLCJpYXQiOjE3NzY2MTA4MDIsImV4cCI6MTc3OTIwMjgwMiwidHlwZSI6InJlZnJlc2gifQ.DJqzW46mJtTzzhOWkk1KCqM-3qtAcVKO0Lsd9T26AiI	\N	\N	t	f
 9f437616-8f94-48f6-ab84-f41f3dfe686c	admin	default	\N	\N	172.18.0.1	2026-04-19 16:07:30.947253+08	\N	2026-04-19 15:07:30.947981+08	sess_11aee8281efb4aa0b82fc92bd54f5e1f	ada7246f-8a89-4cc9-bf96-98e6ed1fe3ff	curl/8.5.0	\N	eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhZG1pbiIsInRlbmFudF9pZCI6ImRlZmF1bHQiLCJqdGkiOiIyMWIzMTUyYy1mZGI4LTRhZDUtYjdmNy1jNjNiZmU3YTg5YWMiLCJpYXQiOjE3NzY2MTEyNTAsImV4cCI6MTc3OTIwMzI1MCwidHlwZSI6InJlZnJlc2gifQ.ooHwzFHf7NWfsDVz3B2GBJLtllDWgk6B22jU1ht7CEc	\N	\N	t	f
+62b96510-d491-4c7e-b944-fd586de8fb0b	admin	default	\N	\N	172.18.0.1	2026-04-19 16:40:27.98162+08	\N	2026-04-19 15:40:27.983843+08	sess_8989163c0f9a413ebf071b59a5fc9062	e899c1fc-3204-4ec0-aac7-ef3f3bb4fefc	Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36 Edg/147.0.0.0	\N	eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhZG1pbiIsInRlbmFudF9pZCI6ImRlZmF1bHQiLCJqdGkiOiJiNDk1NGE0NS05NDdjLTRhNDAtYTQzOC0wNzU5NWIzM2FmMDgiLCJpYXQiOjE3NzY2MTMyMjcsImV4cCI6MTc3OTIwNTIyNywidHlwZSI6InJlZnJlc2gifQ.ylqBJxUcbtUmojz0UDau9CYPIdNPcgX3tufeL9YN5GE	\N	\N	t	f
 \.
 
 
@@ -10149,7 +10151,7 @@ COPY public.user_subscriptions (id, user_id, tenant_id, plan_id, status, start_d
 --
 
 COPY public.users (id, user_id, tenant_id, username, email, phone_number, password_hash, is_active, is_verified, is_admin, is_locked, last_login_at, last_login_ip, login_count, created_at, updated_at, is_deleted, deleted_at) FROM stdin;
-1	admin	default	admin	admin@quantmind.local	\N	$2b$12$B/yjK9cT.wx4BlB9j.r/t.dADjCbmutIXoDM7PdKZmV6ypuYiiUvW	t	t	t	f	2026-04-19 15:07:30.932833+08	\N	43	2026-04-16 20:57:19.018279+08	2026-04-19 15:07:30.930207+08	f	\N
+1	admin	default	admin	admin@quantmind.local	\N	$2b$12$B/yjK9cT.wx4BlB9j.r/t.dADjCbmutIXoDM7PdKZmV6ypuYiiUvW	t	t	t	f	2026-04-19 15:40:27.957017+08	\N	44	2026-04-16 20:57:19.018279+08	2026-04-19 15:40:27.95638+08	f	\N
 \.
 
 
@@ -10388,7 +10390,7 @@ SELECT pg_catalog.setval('public.trades_id_seq', 1, false);
 -- Name: user_audit_logs_id_seq; Type: SEQUENCE SET; Schema: public; Owner: quantmind
 --
 
-SELECT pg_catalog.setval('public.user_audit_logs_id_seq', 48, true);
+SELECT pg_catalog.setval('public.user_audit_logs_id_seq', 49, true);
 
 
 --
@@ -12287,5 +12289,5 @@ GRANT USAGE ON SCHEMA public TO quantmind;
 -- PostgreSQL database dump complete
 --
 
-\unrestrict F2mU5fsWbnshw97WVYIpiBJovl10GsZq83Tuo554ogpxxfPngfwKe7JPlP0ubZJ
+\unrestrict 6HaFnYZTWVb23E8pSK8ALZndAEpS7c6qdQhVMbig8ccaxYPrUgD3bxGh86WK08E
 
