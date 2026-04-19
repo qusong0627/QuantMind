@@ -129,7 +129,7 @@ class UserProfileResponse(BaseModel):
     username: str | None = Field(
         None, alias="username_at_runtime", description="用户名（来自User表）"
     )
-    avatar_url: str | None
+    avatar_url: str | None = None
     bio: str | None
     location: str | None
     website: str | None
@@ -140,6 +140,14 @@ class UserProfileResponse(BaseModel):
     ai_ide_api_key: str | None = Field(None, description="AI-IDE API Key")
     created_at: datetime
     updated_at: datetime | None
+
+    @field_validator("avatar_url", mode="before")
+    @classmethod
+    def default_avatar(cls, v: str | None) -> str:
+        """如果没有头像，返回默认头像"""
+        if v is None or v == "":
+            return "/uploads/default_avatar.png"
+        return v
 
 
 class UserDetailResponse(BaseModel):
