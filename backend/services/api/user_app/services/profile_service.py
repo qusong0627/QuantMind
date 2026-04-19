@@ -18,6 +18,9 @@ from backend.shared.redis_sentinel_client import get_redis_sentinel_client
 
 logger = logging.getLogger(__name__)
 
+# 默认头像路径
+DEFAULT_AVATAR_URL = "/uploads/default_avatar.png"
+
 
 class ProfileService:
     """用户档案服务"""
@@ -158,7 +161,11 @@ class ProfileService:
             profile.username_at_runtime = username
 
             if profile:
-                profile.avatar_url = self._normalize_avatar_url(profile.avatar_url)
+                # 如果没有头像，使用默认头像
+                if not profile.avatar_url:
+                    profile.avatar_url = DEFAULT_AVATAR_URL
+                else:
+                    profile.avatar_url = self._normalize_avatar_url(profile.avatar_url)
                 if use_cache:
                     # 缓存档案
                     cache_key = f"profile:{tenant_id}:{user_id}"
