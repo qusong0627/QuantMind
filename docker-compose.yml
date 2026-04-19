@@ -12,7 +12,7 @@ services:
       - POSTGRES_PASSWORD=${DB_PASSWORD:-quantmind2026}
       - TZ=Asia/Shanghai
     volumes:
-      - ./data/postgres:/var/lib/postgresql/data
+      - postgres-data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 10s
@@ -28,7 +28,7 @@ services:
     container_name: quantmind-redis
     command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru --databases 16
     volumes:
-      - ./data/redis:/data
+      - redis-data:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s

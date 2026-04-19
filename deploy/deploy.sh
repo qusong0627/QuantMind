@@ -582,32 +582,12 @@ step9_start_database() {
 
     cd "$PROJECT_DIR"
 
-    # 确保数据目录存在
-    mkdir -p "$DATA_DIR/postgres" "$DATA_DIR/redis"
-
-    # 修复数据目录权限
-    # postgres:15-alpine 使用 UID=70, redis:7-alpine 使用 UID=999
-    # 必须在启动容器前设置，否则服务无法访问数据文件
-    chown -R 70:70 "$DATA_DIR/postgres"
-    chmod 700 "$DATA_DIR/postgres"
-    chown -R 999:999 "$DATA_DIR/redis"
-
+    # 使用 Docker 命名卷，无需手动设置权限
     log_info "启动数据库和 Redis..."
     docker compose up -d db redis
 
     log_info "等待数据库就绪 (15秒)..."
     sleep 15
-
-    # 验证数据库是否正常连接
-    if ! docker exec quantmind-db psql -U quantmind -d quantmind -c "SELECT 1" > /dev/null 2>&1; then
-        log_warn "数据库连接失败，检查权限..."
-        docker compose down
-        chown -R 70:70 "$DATA_DIR/postgres"
-        chmod 700 "$DATA_DIR/postgres"
-        chown -R 999:999 "$DATA_DIR/redis"
-        docker compose up -d db redis
-        sleep 10
-    fi
 
     docker compose ps db redis
 
@@ -658,9 +638,6 @@ step11_start_backend() {
     log_step "Step 11: 启动后端服务"
 
     cd "$PROJECT_DIR"
-
-    # 再次修复权限（Docker 重启后可能需要）
-    chown -R 999:999 "$DATA_DIR/postgres" "$DATA_DIR/redis"
 
     log_info "启动后端容器..."
     docker compose up -d quantmind celery-worker
