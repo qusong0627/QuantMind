@@ -1,0 +1,114 @@
+# QuantMind 完整数据包安装指南
+
+本文档说明如何在部署完成后安装完整数据包，以启用回测和模型推理功能。
+
+## 数据包内容
+
+完整数据包包含以下数据：
+
+| 目录 | 说明 |
+|------|------|
+| `db/qlib_data/features/` | Qlib 股票特征数据（6000+ 股票） |
+| `db/feature_snapshots/` | 模型特征快照（2016-2026 年） |
+| `models/production/` | 预训练模型文件 |
+| `data/stocks/` | 股票元数据 |
+
+## 安装步骤
+
+### 1. 下载数据包
+
+联系管理员获取完整数据包下载地址。
+
+下载完成后上传到服务器 `/tmp` 目录，或直接在服务器下载：
+
+```bash
+# 将数据包保存到 /tmp 目录
+# 文件名: quantmind_data_backup.tar.gz
+ls -lh /tmp/quantmind_data_backup.tar.gz
+```
+
+### 2. 解压数据包
+
+进入 QuantMind 项目目录并解压：
+
+```bash
+cd /opt/quantmind/quantmind
+sudo tar -xzf /tmp/quantmind_data_backup.tar.gz --overwrite
+```
+
+> **注意**：必须使用 `--overwrite` 参数覆盖已有的空目录。
+
+### 3. 验证数据
+
+检查数据是否正确解压：
+
+```bash
+# 检查股票特征数据（应显示 6000+ 个目录）
+ls db/qlib_data/features/ | wc -l
+
+# 检查模型特征快照（应显示 2016-2026 年的 parquet 文件）
+ls -la db/feature_snapshots/*.parquet
+
+# 检查模型文件
+ls -la models/production/
+```
+
+### 4. 重启服务
+
+解压完成后重启后端服务：
+
+```bash
+cd /opt/quantmind/quantmind
+docker compose restart quantmind celery-worker
+```
+
+等待服务启动（约 10 秒）：
+
+```bash
+docker compose ps
+```
+
+### 5. 验证功能
+
+登录 QuantMind 前端，验证以下功能：
+
+- **策略回测**：创建回测任务，应能正常运行
+- **模型推理**：进入模型推理页面，应显示"历史 Parquet 数据就绪"
+
+## 常见问题
+
+### Q: 解压后 features 目录为空？
+
+确保在正确的目录下解压：
+
+```bash
+cd /opt/quantmind/quantmind
+sudo tar -xzf /tmp/quantmind_data_backup.tar.gz --overwrite
+```
+
+### Q: 回测仍然失败？
+
+1. 检查容器内数据是否正确挂载：
+
+```bash
+docker exec quantmind ls -la /app/db/qlib_data/features/ | head
+docker exec quantmind ls -la /app/db/feature_snapshots/*.parquet | head
+```
+
+2. 重启服务：
+
+```bash
+docker compose restart quantmind celery-worker
+```
+
+### Q: 磁盘空间不足？
+
+数据包解压后约需 20GB 空间，确保服务器磁盘有足够容量：
+
+```bash
+df -h /
+```
+
+---
+
+如有问题，请访问 [GitHub Issues](https://github.com/anthropics/quantmind/issues) 反馈。
