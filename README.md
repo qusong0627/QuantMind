@@ -18,7 +18,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/Python-3.10+-blue.svg" alt="Python">
-  <img src="https://img.shields.io/badge/Node.js-18+-green.svg" alt="Node.js">
+  <img src="https://img.shields.io/badge/Node.js-20+-green.svg" alt="Node.js">
   <img src="https://img.shields.io/badge/License-AGPL%20v3-blue.svg" alt="License">
   <img src="https://img.shields.io/badge/Qlib-Powered-orange.svg" alt="Qlib">
 </p>
@@ -102,7 +102,7 @@ flowchart LR
 在全新的 Ubuntu 服务器上执行：
 
 ```bash
-curl -fsSL https://gitee.com/qusong0627/quantmind/raw/master/deploy/deploy.sh | sudo bash
+curl -fsSL https://gitee.com/qusong0627/quantmind/raw/master/deploy/quick-deploy.sh | sudo bash -s -- --yes
 ```
 
 部署完成后访问：`http://<服务器IP>`
@@ -317,19 +317,8 @@ npm run dev
 
 ### 生产部署
 
-```bash
-# 完整部署
-sudo ./deploy/deploy.sh
-
-# 仅后端
-sudo ./deploy/deploy.sh --backend-only
-
-# 仅前端
-sudo ./deploy/deploy.sh --frontend-only
-
-# 断点续传
-sudo ./deploy/deploy.sh --resume
-```
+快速部署命令与选项请参考上方「🚀 快速开始」章节。  
+完整参数说明与排障请参考 [deploy/README.md](deploy/README.md)。
 
 ### 数据目录
 
@@ -401,6 +390,14 @@ quantmind/
 - [Qlib](https://github.com/microsoft/qlib) — 微软量化投资平台
 - [LightGBM](https://github.com/microsoft/LightGBM) — 微软梯度提升框架
 - [FastAPI](https://fastapi.tiangolo.com/) — 现代高性能 Web 框架
+
+---
+
+## 💬 QQ 群
+
+<p align="center">
+  <img src="docs/images/1097406397.png" alt="QuantMind QQ 群二维码" width="260">
+</p>
 
 ---
 
