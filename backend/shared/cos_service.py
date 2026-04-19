@@ -20,7 +20,11 @@ class LocalStorageService:
     """Local file storage service for OSS edition."""
 
     def __init__(self):
-        self.local_storage_root = os.path.abspath(os.path.join(os.getcwd(), "data"))
+        # 优先使用环境变量 STORAGE_ROOT，否则使用 /data（Docker 挂载路径）
+        storage_root = os.getenv("STORAGE_ROOT", "/data")
+        if not os.path.isabs(storage_root):
+            storage_root = os.path.abspath(os.path.join(os.getcwd(), storage_root))
+        self.local_storage_root = storage_root
         if not os.path.exists(self.local_storage_root):
             os.makedirs(self.local_storage_root, exist_ok=True)
         logger.info(
