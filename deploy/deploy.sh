@@ -891,8 +891,8 @@ show_info() {
     echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
     echo -e "${YELLOW}💡 温馨提示${NC}"
-    echo -e "   如需使用完整回测、模型训练及推理服务，请前往 GitHub 主页下载完整数据包："
-    echo -e "   ${BLUE}https://github.com/anthropics/quantmind/releases${NC}"
+    echo -e "   如需使用完整回测、模型训练及推理服务，请下载离线数据包："
+    echo -e "   ${BLUE}https://www.quantmindai.cn/data-download${NC}"
     echo ""
 }
 
