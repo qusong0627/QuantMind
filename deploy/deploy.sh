@@ -17,9 +17,10 @@
 #   sudo ./deploy.sh --frontend-only    # 仅部署前端
 #   sudo ./deploy.sh --resume           # 从断点继续
 #   sudo ./deploy.sh --reset            # 重置进度重新部署
+#   sudo ./deploy.sh --force-sync       # 强制同步代码（覆盖本地修改）
 #===============================================================================
 
-set -e
+set -euo pipefail
 
 # 颜色输出
 RED='\033[0;31m'
@@ -30,10 +31,14 @@ NC='\033[0m'
 
 # 配置变量
 DEPLOY_DIR="/opt/quantmind"
-DATA_DIR="/opt/quantmind/data"
+PROJECT_DIR="${DEPLOY_DIR}/quantmind"
+DATA_DIR="${PROJECT_DIR}/data"
 REPO_URL="https://gitee.com/qusong0627/quantmind.git"
 NODE_VERSION="20.19.0"
 PROGRESS_FILE="/tmp/quantmind_deploy_progress"
+DOCKER_DAEMON_FILE="/etc/docker/daemon.json"
+DOCKER_DAEMON_BACKUP="/tmp/quantmind_docker_daemon_backup.json"
+DOCKER_DAEMON_EXISTED_FLAG="/tmp/quantmind_docker_daemon_existed"
 
 # Docker 镜像加速器列表（自动选择可用）
 DOCKER_MIRRORS=(
@@ -53,14 +58,30 @@ NPM_MIRRORS=(
 BACKEND_ONLY=false
 FRONTEND_ONLY=false
 AUTO_YES=false
+RESUME=false
+RESET=false
+FORCE_SYNC=false
 
 for arg in "$@"; do
     case $arg in
         --backend-only) BACKEND_ONLY=true ;;
         --frontend-only) FRONTEND_ONLY=true ;;
         --yes) AUTO_YES=true ;;
+        --resume) RESUME=true ;;
+        --reset) RESET=true ;;
+        --force-sync) FORCE_SYNC=true ;;
+        *)
+            echo "错误: 未知参数: $arg" >&2
+            echo "支持参数: --yes --backend-only --frontend-only --resume --reset --force-sync" >&2
+            exit 1
+            ;;
     esac
 done
+
+if $BACKEND_ONLY && $FRONTEND_ONLY; then
+    echo "错误: --backend-only 和 --frontend-only 不能同时使用" >&2
+    exit 1
+fi
 
 # 自动检测服务器IP
 detect_server_ip() {
@@ -178,6 +199,87 @@ select_npm_mirror() {
     echo "https://registry.npmjs.org"
 }
 
+backup_docker_daemon_config() {
+    if [[ -f "$DOCKER_DAEMON_EXISTED_FLAG" ]]; then
+        return
+    fi
+
+    if [[ -f "$DOCKER_DAEMON_FILE" ]]; then
+        cp "$DOCKER_DAEMON_FILE" "$DOCKER_DAEMON_BACKUP"
+        echo "1" > "$DOCKER_DAEMON_EXISTED_FLAG"
+    else
+        echo "0" > "$DOCKER_DAEMON_EXISTED_FLAG"
+    fi
+}
+
+restore_docker_daemon_config() {
+    [[ -f "$DOCKER_DAEMON_EXISTED_FLAG" ]] || return
+
+    local existed
+    existed="$(cat "$DOCKER_DAEMON_EXISTED_FLAG")"
+    if [[ "$existed" == "1" && -f "$DOCKER_DAEMON_BACKUP" ]]; then
+        cp "$DOCKER_DAEMON_BACKUP" "$DOCKER_DAEMON_FILE"
+    else
+        rm -f "$DOCKER_DAEMON_FILE"
+    fi
+
+    systemctl daemon-reload
+    systemctl restart docker
+}
+
+configure_docker_mirror() {
+    local mirror="$1"
+    backup_docker_daemon_config
+    mkdir -p "$(dirname "$DOCKER_DAEMON_FILE")"
+
+    python3 - "$DOCKER_DAEMON_FILE" "$mirror" << 'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+mirror = sys.argv[2]
+
+data = {}
+if path.exists():
+    raw = path.read_text(encoding="utf-8").strip()
+    if raw:
+        parsed = json.loads(raw)
+        if isinstance(parsed, dict):
+            data = parsed
+
+mirrors = data.get("registry-mirrors", [])
+if not isinstance(mirrors, list):
+    mirrors = []
+mirrors = [m for m in mirrors if isinstance(m, str) and m]
+if mirror not in mirrors:
+    mirrors.insert(0, mirror)
+
+data["registry-mirrors"] = mirrors
+path.write_text(json.dumps(data, ensure_ascii=False, indent=4) + "\n", encoding="utf-8")
+PY
+
+    systemctl daemon-reload
+    systemctl restart docker
+}
+
+ensure_frontend_prereqs() {
+    if [[ ! -d "$PROJECT_DIR/.git" ]]; then
+        log_warn "未检测到代码目录，先执行代码拉取"
+        step6_clone_code
+    fi
+
+    if ! command -v node &> /dev/null || [[ "$(node --version)" != "v${NODE_VERSION}" ]]; then
+        log_warn "Node.js 未安装或版本不匹配，先安装 Node.js"
+        step3_install_nodejs
+    fi
+
+    if ! command -v pm2 &> /dev/null; then
+        log_warn "PM2 未安装，先安装 PM2"
+        step4_install_pm2
+    fi
+}
+
 #===============================================================================
 # Step 1: 更新系统
 #===============================================================================
@@ -226,23 +328,15 @@ step2_install_docker() {
     fi
 
     # 配置 Docker 镜像加速器
-    local mirror=$(select_docker_mirror)
+    local mirror
+    mirror=$(select_docker_mirror)
     if [[ -n "$mirror" ]]; then
         log_info "配置 Docker 镜像加速器: $mirror"
-        mkdir -p /etc/docker
-        cat > /etc/docker/daemon.json << EOF
-{
-    "registry-mirrors": ["${mirror}"]
-}
-EOF
-        systemctl daemon-reload
-        if systemctl restart docker; then
+        if configure_docker_mirror "$mirror"; then
             log_info "Docker 镜像加速器配置成功"
         else
-            log_warn "Docker 镜像加速器配置失败，移除配置"
-            rm -f /etc/docker/daemon.json
-            systemctl daemon-reload
-            systemctl restart docker
+            log_warn "Docker 镜像加速器配置失败，恢复原配置"
+            restore_docker_daemon_config
         fi
         sleep 3
     fi
@@ -342,21 +436,30 @@ step5_install_nginx() {
 step6_clone_code() {
     log_step "Step 6: 克隆代码"
 
-    mkdir -p $DEPLOY_DIR
+    mkdir -p "$DEPLOY_DIR"
 
-    if [[ -d "$DEPLOY_DIR/quantmind" ]]; then
+    if [[ -d "$PROJECT_DIR/.git" ]]; then
         log_warn "代码目录已存在，执行更新..."
-        cd $DEPLOY_DIR/quantmind
+        cd "$PROJECT_DIR"
+        if [[ -n "$(git status --porcelain)" && "$FORCE_SYNC" != "true" ]]; then
+            log_error "检测到本地未提交变更，已停止自动更新以避免覆盖"
+            log_info "如需强制同步远端，请使用: sudo ./deploy.sh --force-sync"
+            exit 1
+        fi
         git fetch origin
-        git reset --hard origin/master
+        if [[ "$FORCE_SYNC" == "true" ]]; then
+            git reset --hard origin/master
+        else
+            git pull --ff-only origin master
+        fi
     else
         log_info "从 Gitee 克隆代码..."
-        cd $DEPLOY_DIR
+        cd "$DEPLOY_DIR"
         git clone $REPO_URL quantmind
         cd quantmind
     fi
 
-    chown -R ${SUDO_USER:-root}:${SUDO_USER:-root} $DEPLOY_DIR/quantmind
+    chown -R "${SUDO_USER:-root}:${SUDO_USER:-root}" "$PROJECT_DIR"
 
     log_info "目录: $(pwd)"
     log_info "分支: $(git branch --show-current)"
@@ -372,7 +475,7 @@ step6_clone_code() {
 step7_config_environment() {
     log_step "Step 7: 配置环境变量"
 
-    cd $DEPLOY_DIR/quantmind
+    cd "$PROJECT_DIR"
 
     if [[ -f ".env" ]]; then
         log_warn ".env 文件已存在，跳过创建"
@@ -410,8 +513,8 @@ EOF
         log_info ".env 文件创建完成"
     fi
 
-    mkdir -p $DATA_DIR/{postgres,redis,logs,models,backtest_results,feature_snapshots}
-    mkdir -p $DEPLOY_DIR/quantmind/db/feature_snapshots
+    mkdir -p "$DATA_DIR"/{postgres,redis,logs,models,backtest_results,feature_snapshots}
+    mkdir -p "$PROJECT_DIR/db/feature_snapshots"
     log_info "数据目录: $DATA_DIR"
 
     log_done "Step 7"
@@ -424,32 +527,20 @@ EOF
 step8_build_docker() {
     log_step "Step 8: 构建 Docker 镜像"
 
-    cd $DEPLOY_DIR/quantmind
+    cd "$PROJECT_DIR"
 
     log_info "构建 QuantMind OSS 镜像 (5-10分钟)..."
 
     # 尝试使用不同镜像源构建
     local build_success=false
-    local tried_mirrors=()
-
     for mirror in "${DOCKER_MIRRORS[@]}"; do
         if [[ -n "$mirror" ]]; then
             log_info "尝试使用镜像源: $mirror"
-
-            # 配置 Docker daemon 使用镜像加速
-            if [[ ! -f /etc/docker/daemon.json ]]; then
-                mkdir -p /etc/docker
-                echo "{\"registry-mirrors\": [\"$mirror\"]}" > /etc/docker/daemon.json
-                systemctl restart docker
-                sleep 3
-            else
-                # 检查是否已配置该镜像
-                if ! grep -q "$mirror" /etc/docker/daemon.json; then
-                    sed -i "s/\"registry-mirrors\": \[/\"registry-mirrors\": [\"$mirror\", /" /etc/docker/daemon.json
-                    systemctl restart docker
-                    sleep 3
-                fi
+            if ! configure_docker_mirror "$mirror"; then
+                log_warn "镜像源 $mirror 配置失败，尝试下一个..."
+                continue
             fi
+            sleep 3
 
             if docker build -t quantmind-oss:latest -f docker/Dockerfile.oss . 2>&1; then
                 build_success=true
@@ -457,7 +548,6 @@ step8_build_docker() {
                 break
             else
                 log_warn "镜像源 $mirror 构建失败，尝试下一个..."
-                tried_mirrors+=("$mirror")
             fi
         fi
     done
@@ -465,8 +555,7 @@ step8_build_docker() {
     # 如果所有镜像都失败，尝试不使用镜像加速
     if ! $build_success; then
         log_warn "所有镜像加速器均失败，尝试直接拉取..."
-        rm -f /etc/docker/daemon.json
-        systemctl restart docker
+        restore_docker_daemon_config
         sleep 3
 
         if docker build -t quantmind-oss:latest -f docker/Dockerfile.oss . 2>&1; then
@@ -491,13 +580,13 @@ step8_build_docker() {
 step9_start_database() {
     log_step "Step 9: 启动数据库服务"
 
-    cd $DEPLOY_DIR/quantmind
+    cd "$PROJECT_DIR"
 
     # 确保数据目录存在
-    mkdir -p $DATA_DIR/postgres $DATA_DIR/redis
+    mkdir -p "$DATA_DIR/postgres" "$DATA_DIR/redis"
 
     # 修复数据目录权限（Docker 容器内使用 999:999）
-    chown -R 999:999 $DATA_DIR/postgres $DATA_DIR/redis
+    chown -R 999:999 "$DATA_DIR/postgres" "$DATA_DIR/redis"
 
     log_info "启动数据库和 Redis..."
     docker compose up -d db redis
@@ -506,7 +595,7 @@ step9_start_database() {
     sleep 15
 
     # 再次修复权限（Docker 可能会重新创建目录）
-    chown -R 999:999 $DATA_DIR/postgres $DATA_DIR/redis
+    chown -R 999:999 "$DATA_DIR/postgres" "$DATA_DIR/redis"
 
     docker compose ps db redis
 
@@ -520,7 +609,7 @@ step9_start_database() {
 step10_init_database() {
     log_step "Step 10: 初始化数据库"
 
-    cd $DEPLOY_DIR/quantmind
+    cd "$PROJECT_DIR"
 
     log_info "等待数据库就绪..."
     sleep 5
@@ -556,10 +645,10 @@ step10_init_database() {
 step11_start_backend() {
     log_step "Step 11: 启动后端服务"
 
-    cd $DEPLOY_DIR/quantmind
+    cd "$PROJECT_DIR"
 
     # 再次修复权限（Docker 重启后可能需要）
-    chown -R 999:999 $DATA_DIR/postgres $DATA_DIR/redis
+    chown -R 999:999 "$DATA_DIR/postgres" "$DATA_DIR/redis"
 
     log_info "启动后端容器..."
     docker compose up -d quantmind celery-worker
@@ -579,9 +668,9 @@ step11_start_backend() {
 step12_install_frontend() {
     log_step "Step 12: 安装前端依赖"
 
-    cd $DEPLOY_DIR/quantmind
+    cd "$PROJECT_DIR"
 
-    chown -R ${SUDO_USER:-root}:${SUDO_USER:-root} .
+    chown -R "${SUDO_USER:-root}:${SUDO_USER:-root}" .
 
     # 选择最佳 npm 镜像
     local npm_mirror=$(select_npm_mirror)
@@ -610,9 +699,7 @@ EOF
     log_info "npm 镜像配置完成: $npm_mirror"
     log_info "安装 npm 依赖 (3-5分钟)..."
     # 添加 --loglevel=verbose 显示进度
-    sudo -u ${SUDO_USER:-root} npm install --loglevel=verbose 2>&1 | grep -E "http|fetch|package|WARN|ERR|done" | while read line; do
-        echo -e "\r$line"
-    done
+    sudo -u "${SUDO_USER:-root}" npm install --loglevel=verbose
 
     log_done "Step 12"
     save_progress "12"
@@ -624,7 +711,7 @@ EOF
 step13_build_frontend() {
     log_step "Step 13: 构建前端"
 
-    cd $DEPLOY_DIR/quantmind
+    cd "$PROJECT_DIR"
 
     # 确保 build 目录存在（Electron 构建需要 icon.ico）
     mkdir -p electron/build
@@ -633,7 +720,7 @@ step13_build_frontend() {
     fi
 
     log_info "构建生产版本..."
-    sudo -u ${SUDO_USER:-root} env VITE_API_BASE_URL="" npm run dashboard:build
+    sudo -u "${SUDO_USER:-root}" env VITE_API_BASE_URL="" npm run dashboard:build
 
     ls -la electron/dist-react/ 2>/dev/null | head -5 || log_warn "前端构建目录不存在"
 
@@ -647,7 +734,7 @@ step13_build_frontend() {
 step14_start_frontend() {
     log_step "Step 14: 启动前端服务"
 
-    cd $DEPLOY_DIR/quantmind
+    cd "$PROJECT_DIR"
 
     log_info "停止旧服务..."
     pm2 delete quantmind-web 2>/dev/null || true
@@ -656,7 +743,10 @@ step14_start_frontend() {
     pm2 start npm --name "quantmind-web" -- run dashboard:preview
 
     pm2 save
-    pm2 startup systemd -u ${SUDO_USER:-root} --hp /home/${SUDO_USER:-root} 2>/dev/null || true
+    local target_user="${SUDO_USER:-root}"
+    local target_home
+    target_home="$(getent passwd "$target_user" | cut -d: -f6)"
+    pm2 startup systemd -u "$target_user" --hp "${target_home:-/root}" 2>/dev/null || true
 
     pm2 status
 
@@ -671,8 +761,8 @@ step15_config_nginx() {
     log_step "Step 15: 配置 Nginx"
 
     # 创建 uploads 目录
-    mkdir -p $DEPLOY_DIR/quantmind/data/uploads
-    chown -R 1000:1001 $DEPLOY_DIR/quantmind/data/uploads
+    mkdir -p "$PROJECT_DIR/data/uploads"
+    chown -R "$(id -u "${SUDO_USER:-root}")":"$(id -g "${SUDO_USER:-root}")" "$PROJECT_DIR/data/uploads"
 
     log_info "创建 Nginx 配置..."
     cat > /etc/nginx/sites-available/quantmind << 'EOF'
@@ -743,7 +833,7 @@ step16_health_check() {
     log_step "Step 16: 健康检查"
 
     log_info "Docker 容器状态:"
-    docker compose -f $DEPLOY_DIR/quantmind/docker-compose.yml ps
+    docker compose -f "$PROJECT_DIR/docker-compose.yml" ps
 
     echo ""
     log_info "PM2 服务状态:"
@@ -789,7 +879,7 @@ step17_firewall() {
 show_info() {
     echo ""
     echo -e "${GREEN}╔══════════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${GREEN}║                    🎉 QuantMind 部署成功！                       ║${NC}"
+    echo -e "${GREEN}║                    🎉 QuantMInd 部署成功！                       ║${NC}"
     echo -e "${GREEN}╚══════════════════════════════════════════════════════════════════╝${NC}"
     echo ""
     echo -e "${YELLOW}📌 访问入口${NC}"
@@ -801,13 +891,13 @@ show_info() {
     echo -e "   密码:   ${GREEN}admin123${NC}"
     echo ""
     echo -e "${YELLOW}📋 常用命令${NC}"
-    echo -e "   查看后端日志: docker compose -f $DEPLOY_DIR/quantmind/docker-compose.yml logs -f"
+    echo -e "   查看后端日志: docker compose -f $PROJECT_DIR/docker-compose.yml logs -f"
     echo -e "   查看前端日志: pm2 logs quantmind-web"
-    echo -e "   重启后端服务: docker compose -f $DEPLOY_DIR/quantmind/docker-compose.yml restart"
+    echo -e "   重启后端服务: docker compose -f $PROJECT_DIR/docker-compose.yml restart"
     echo -e "   重启前端服务: pm2 restart quantmind-web"
     echo ""
     echo -e "${YELLOW}📁 目录信息${NC}"
-    echo -e "   部署目录: $DEPLOY_DIR/quantmind"
+    echo -e "   部署目录: $PROJECT_DIR"
     echo ""
     echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
@@ -827,23 +917,23 @@ show_welcome() {
     fi
     echo -e "${BLUE}"
     echo "╔══════════════════════════════════════════════════════════════════╗"
+    echo "║   QQQQ   U   U   AAAAA   N   N  TTTTT  M   M  III  N   N  DDDD   ║"
+    echo "║   Q   Q  U   U  A     A  NN  N   T    MM MM   I   NN  N  D   D   ║"
+    echo "║   Q   Q  U   U  AAAAAAA  N N N   T    M M M   I   N N N  D   D   ║"
+    echo "║   Q  QQ  U   U  A     A  N  NN   T    M   M   I   N  NN  D   D   ║"
+    echo "║   QQQ Q   UUU   A     A  N   N   T    M   M  III  N   N  DDDD    ║"
     echo "║                                                                  ║"
-    echo "║     ██████╗ ██╗   ██╗███████╗███╗   ██╗██╗   ██╗███╗   ███╗    ║"
-    echo "║    ██╔═══██╗██║   ██║██╔════╝████╗  ██║██║   ██║████╗ ████║    ║"
-    echo "║    ██║   ██║██║   ██║█████╗  ██╔██╗ ██║██║   ██║██╔████╔██║    ║"
-    echo "║    ██║▄▄ ██║██║   ██║██╔══╝  ██║╚██╗██║██║   ██║██║╚██╔╝██║    ║"
-    echo "║    ╚██████╔╝╚██████╔╝███████╗██║ ╚████║╚██████╔╝██║ ╚═╝ ██║    ║"
-    echo "║     ╚══▀▀═╝  ╚═════╝ ╚══════╝╚═╝  ╚═══╝ ╚═════╝ ╚═╝     ╚═╝    ║"
     echo "║                                                                  ║"
-    echo "║                    QuantMind 量化交易平台                        ║"
+    echo "║                                                                  ║"
+    echo "║                    QuantMInd 量化交易平台                        ║"
     echo "║                        OSS 开源版 v1.0                           ║"
     echo "╚══════════════════════════════════════════════════════════════════╝"
     echo -e "${NC}"
     echo ""
-    echo -e "${GREEN}🎉 Welcome! 欢迎部署 QuantMind 开源量化交易平台！${NC}"
+    echo -e "${GREEN}🎉 Welcome! 欢迎部署 QuantMInd 开源量化交易平台！${NC}"
     echo ""
     echo -e "${YELLOW}📌 项目简介${NC}"
-    echo "   QuantMind 是一款面向个人投资者的量化交易研究与回测平台。"
+    echo "   QuantMInd 是一款面向个人投资者的量化交易研究与回测平台。"
     echo "   支持策略编写、历史回测、参数优化、实盘交易等核心功能。"
     echo ""
     echo -e "${YELLOW}✨ 核心功能${NC}"
@@ -877,9 +967,9 @@ confirm_deploy() {
 
     # 检查是否为交互式终端
     if [[ ! -t 0 ]]; then
-        log_warn "检测到非交互式终端，自动继续部署"
-        log_info "如需手动确认，请使用: sudo ./deploy/deploy.sh --yes"
-        return 0
+        log_error "检测到非交互式终端，无法执行人工确认"
+        log_info "如需继续，请显式使用: sudo ./deploy.sh --yes"
+        exit 1
     fi
 
     echo -e -n "是否继续部署？ [y/N]: "
@@ -906,21 +996,32 @@ main() {
     check_root
     check_system
 
-    # 如果有上次部署进度，自动重置重新开始
+    # 处理部署进度
     CURRENT_STEP=$(get_progress)
-    if [[ "$CURRENT_STEP" != "0" ]]; then
-        log_warn "检测到上次部署进度: Step $CURRENT_STEP"
-        log_info "自动重置进度，重新开始部署..."
+    if ! [[ "$CURRENT_STEP" =~ ^[0-9]+$ ]]; then
+        log_warn "检测到非法进度值: $CURRENT_STEP，已重置为 0"
+        CURRENT_STEP=0
+    fi
+    if $RESET; then
         reset_progress
+        CURRENT_STEP=0
+    elif [[ "$CURRENT_STEP" != "0" ]]; then
+        if $RESUME; then
+            log_info "从 Step $CURRENT_STEP 继续部署"
+        else
+            log_warn "检测到历史部署进度: Step $CURRENT_STEP"
+            log_info "默认继续执行。使用 --reset 可从头部署，使用 --resume 可显式继续。"
+        fi
     fi
 
     # 根据部署模式执行步骤
     if $FRONTEND_ONLY; then
         log_info "仅部署前端..."
-        [[ $CURRENT_STEP -lt 12 ]] && step12_install_frontend
-        [[ $CURRENT_STEP -lt 13 ]] && step13_build_frontend
-        [[ $CURRENT_STEP -lt 14 ]] && step14_start_frontend
-        [[ $CURRENT_STEP -lt 15 ]] && step15_config_nginx
+        ensure_frontend_prereqs
+        step12_install_frontend
+        step13_build_frontend
+        step14_start_frontend
+        step15_config_nginx
     elif $BACKEND_ONLY; then
         log_info "仅部署后端..."
         [[ $CURRENT_STEP -lt 1 ]] && step1_update_system
@@ -953,7 +1054,7 @@ main() {
     fi
 
     show_info
-    rm -f $PROGRESS_FILE
+    rm -f "$PROGRESS_FILE" "$DOCKER_DAEMON_BACKUP" "$DOCKER_DAEMON_EXISTED_FLAG"
 }
 
 main "$@"
