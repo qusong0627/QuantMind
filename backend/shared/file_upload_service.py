@@ -242,8 +242,8 @@ class FileUploadService:
             # 生成唯一文件名
             unique_filename = f"{uuid.uuid4().hex}.{file_ext}"
 
-            # 确定存储文件夹
-            folder = f"uploads/{file_category}/{datetime.now().strftime('%Y/%m')}"
+            # 确定存储文件夹（不包含日期，日期由 cos_service._build_key 添加）
+            folder = f"uploads/{file_category}"
 
             # 提取文件元数据
             metadata = {}
