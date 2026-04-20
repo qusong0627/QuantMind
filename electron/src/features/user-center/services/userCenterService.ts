@@ -775,6 +775,37 @@ export class UserCenterService extends BaseApiClient {
   }
 
 
+  // ============ 手机号管理 ============
+
+  /**
+   * 发送手机验证码
+   * @param scene 验证码场景：bind_phone | change_phone_old | change_phone_new
+   * @param phone 手机号（change_phone_old 场景可不传）
+   */
+  async sendPhoneCode(scene: string, phone?: string): Promise<void> {
+    const payload: Record<string, any> = { scene };
+    if (phone) payload.phone = phone;
+    await this.post<void>('/auth/send-phone-code', payload);
+  }
+
+  /**
+   * 绑定手机号
+   */
+  async bindPhone(phone: string, code: string): Promise<void> {
+    await this.post<void>('/auth/bind-phone', { phone, code });
+  }
+
+  /**
+   * 更换手机号
+   */
+  async changePhone(oldCode: string, newPhone: string, newCode: string): Promise<void> {
+    await this.post<void>('/auth/change-phone', {
+      old_phone_code: oldCode,
+      new_phone: newPhone,
+      new_phone_code: newCode,
+    });
+  }
+
   // ============ 健康检查 ============
 
   /**

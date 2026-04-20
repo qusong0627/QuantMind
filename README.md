@@ -5,7 +5,11 @@
 <h1 align="center">QuantMind</h1>
 
 <p align="center">
-  <strong>新一代智能量化交易平台</strong>
+  <strong>新一代智能量化交易架构</strong>
+</p>
+
+<p align="center">
+  <strong>打通模型训练、回测、推理、实盘全流程闭环</strong>
 </p>
 
 <p align="center">

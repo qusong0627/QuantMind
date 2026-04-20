@@ -8,7 +8,7 @@ import { Form, Input, Button, message, Spin, Alert, Upload, Avatar, Modal, Steps
 import { UserOutlined, UploadOutlined } from '@ant-design/icons';
 import type { UserProfileUpdate } from '../types';
 import { useAuth } from '../../auth/hooks';
-import { userCenterService } from '../services/userCenterService';
+
 
 interface ProfilePageProps {
   userId: string;
@@ -18,15 +18,6 @@ const ProfilePage: React.FC<ProfilePageProps> = ({ userId }) => {
   const [form] = Form.useForm();
   const [isEditing, setIsEditing] = useState(false);
   const { user } = useAuth();
-  const [phoneModalOpen, setPhoneModalOpen] = useState(false);
-  const [phoneMode, setPhoneMode] = useState<'bind' | 'change'>('bind');
-  const [phoneStep, setPhoneStep] = useState(0);
-  const [phoneLoading, setPhoneLoading] = useState(false);
-  const [oldPhoneCode, setOldPhoneCode] = useState('');
-  const [newPhone, setNewPhone] = useState('');
-  const [newPhoneCode, setNewPhoneCode] = useState('');
-  const [bindPhone, setBindPhone] = useState('');
-  const [bindCode, setBindCode] = useState('');
 
   const {
     profile,
@@ -68,98 +59,6 @@ const ProfilePage: React.FC<ProfilePageProps> = ({ userId }) => {
     } catch (err: any) {
       console.error('❌ 保存失败:', err);
       message.error(err.message || '更新失败');
-    }
-  };
-
-  const openPhoneModal = () => {
-    const hasPhone = !!(profile?.phone && String(profile.phone).trim());
-    setPhoneMode(hasPhone ? 'change' : 'bind');
-    setPhoneStep(0);
-    setOldPhoneCode('');
-    setNewPhone('');
-    setNewPhoneCode('');
-    setBindPhone('');
-    setBindCode('');
-    setPhoneModalOpen(true);
-  };
-
-  const sendBindCode = async () => {
-    if (!bindPhone || bindPhone.trim().length < 6) {
-      message.warning('请输入手机号');
-      return;
-    }
-    setPhoneLoading(true);
-    try {
-      await userCenterService.sendPhoneCode('bind_phone', bindPhone.trim());
-      message.success('验证码已发送');
-    } catch (e: any) {
-      message.error(e?.message || '发送失败');
-    } finally {
-      setPhoneLoading(false);
-    }
-  };
-
-  const sendOldPhoneCode = async () => {
-    setPhoneLoading(true);
-    try {
-      await userCenterService.sendPhoneCode('change_phone_old');
-      message.success('验证码已发送到旧手机号');
-    } catch (e: any) {
-      message.error(e?.message || '发送失败');
-    } finally {
-      setPhoneLoading(false);
-    }
-  };
-
-  const sendNewPhoneCode = async () => {
-    if (!newPhone || newPhone.trim().length < 6) {
-      message.warning('请输入新手机号');
-      return;
-    }
-    setPhoneLoading(true);
-    try {
-      await userCenterService.sendPhoneCode('change_phone_new', newPhone.trim());
-      message.success('验证码已发送到新手机号');
-    } catch (e: any) {
-      message.error(e?.message || '发送失败');
-    } finally {
-      setPhoneLoading(false);
-    }
-  };
-
-  const submitBindPhone = async () => {
-    if (!bindPhone || !bindCode) {
-      message.warning('请输入手机号与验证码');
-      return;
-    }
-    setPhoneLoading(true);
-    try {
-      await userCenterService.bindPhone(bindPhone.trim(), bindCode.trim());
-      message.success('手机号绑定成功');
-      setPhoneModalOpen(false);
-      refetch();
-    } catch (e: any) {
-      message.error(e?.message || '绑定失败');
-    } finally {
-      setPhoneLoading(false);
-    }
-  };
-
-  const submitChangePhone = async () => {
-    if (!oldPhoneCode || !newPhone || !newPhoneCode) {
-      message.warning('请完整填写旧号验证码、新手机号、新号验证码');
-      return;
-    }
-    setPhoneLoading(true);
-    try {
-      await userCenterService.changePhone(oldPhoneCode.trim(), newPhone.trim(), newPhoneCode.trim());
-      message.success('手机号换绑成功');
-      setPhoneModalOpen(false);
-      refetch();
-    } catch (e: any) {
-      message.error(e?.message || '换绑失败');
-    } finally {
-      setPhoneLoading(false);
     }
   };
 
@@ -326,34 +225,11 @@ const ProfilePage: React.FC<ProfilePageProps> = ({ userId }) => {
                   />
                 </Form.Item>
 
-                <Form.Item
-                  name="phone"
-                  label={<span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">手机号</span>}
-                  style={{ marginBottom: 12 }}
-                >
-                  <Space.Compact style={{ width: '100%' }}>
-                    <Input
-                      placeholder="请输入手机号"
-                      className="rounded-xl border-gray-100 bg-slate-50/50"
-                      disabled
-                      style={{ flex: 1 }}
-                    />
-                    <Button
-                      size="small"
-                      type="link"
-                      onClick={openPhoneModal}
-                      style={{ fontWeight: 700 }}
-                    >
-                      {profile?.phone ? '换绑' : '绑定'}
-                    </Button>
-                  </Space.Compact>
-                </Form.Item>
-
-                <Form.Item
-                  name="location"
-                  label={<span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">所在地</span>}
-                  style={{ marginBottom: 12 }}
-                >
+              <Form.Item
+                name="location"
+                label={<span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">所在地</span>}
+                style={{ marginBottom: 12 }}
+              >
                   <Input
                     placeholder="例如: 北京"
                     className="rounded-xl border-gray-100 bg-slate-50/50"
@@ -425,97 +301,6 @@ const ProfilePage: React.FC<ProfilePageProps> = ({ userId }) => {
           </div>
         </div>
       </div>
-
-      <Modal
-        title={phoneMode === 'bind' ? '绑定手机号' : '换绑手机号'}
-        open={phoneModalOpen}
-        onCancel={() => setPhoneModalOpen(false)}
-        footer={null}
-        destroyOnHidden
-      >
-        {phoneMode === 'bind' ? (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-            <Steps
-              size="small"
-              current={0}
-              items={[{ title: '填写手机号' }, { title: '输入验证码' }]}
-            />
-            <Alert
-              type="info"
-              showIcon
-              message="绑定后将用于短信验证码登录与安全验证"
-            />
-            <Input
-              value={bindPhone}
-              onChange={(e) => setBindPhone(e.target.value)}
-              placeholder="新手机号"
-            />
-            <div style={{ display: 'flex', gap: 8 }}>
-              <Input
-                value={bindCode}
-                onChange={(e) => setBindCode(e.target.value)}
-                placeholder="短信验证码"
-              />
-              <Button loading={phoneLoading} onClick={sendBindCode}>
-                发送验证码
-              </Button>
-            </div>
-            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
-              <Button onClick={() => setPhoneModalOpen(false)}>取消</Button>
-              <Button type="primary" loading={phoneLoading} onClick={submitBindPhone}>
-                确认绑定
-              </Button>
-            </div>
-          </div>
-        ) : (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-            <Steps
-              size="small"
-              current={phoneStep}
-              items={[{ title: '验证旧手机号' }, { title: '验证新手机号' }, { title: '完成换绑' }]}
-            />
-            <Alert
-              type="warning"
-              showIcon
-              message="为保证安全，需要同时验证旧手机号与新手机号"
-            />
-
-            <div style={{ display: 'flex', gap: 8 }}>
-              <Input
-                value={oldPhoneCode}
-                onChange={(e) => setOldPhoneCode(e.target.value)}
-                placeholder="旧手机号验证码"
-              />
-              <Button loading={phoneLoading} onClick={sendOldPhoneCode}>
-                发送旧号验证码
-              </Button>
-            </div>
-
-            <Input
-              value={newPhone}
-              onChange={(e) => setNewPhone(e.target.value)}
-              placeholder="新手机号"
-            />
-            <div style={{ display: 'flex', gap: 8 }}>
-              <Input
-                value={newPhoneCode}
-                onChange={(e) => setNewPhoneCode(e.target.value)}
-                placeholder="新手机号验证码"
-              />
-              <Button loading={phoneLoading} onClick={sendNewPhoneCode}>
-                发送新号验证码
-              </Button>
-            </div>
-
-            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
-              <Button onClick={() => setPhoneModalOpen(false)}>取消</Button>
-              <Button type="primary" loading={phoneLoading} onClick={submitChangePhone}>
-                确认换绑
-              </Button>
-            </div>
-          </div>
-        )}
-      </Modal>
     </div>
   );
 };
