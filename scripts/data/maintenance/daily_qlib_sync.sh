@@ -37,8 +37,5 @@ echo "🚀 正在同步 Baostock 数据到数据库 market_data_daily..." >> "${
 echo "🚀 正在从数据库同步 Qlib 主数据 (qlib_data)..." >> "${LOG_FILE}"
 "${PYTHON_BIN}" scripts/data/ingestion/update_qlib_from_db.py --qlib-dir db/qlib_data --apply 2>&1 | tee -a "${LOG_FILE}"
 
-echo "🚀 正在从数据库同步 Alpha158 专用数据 (Alpha158_bin)..." >> "${LOG_FILE}"
-"${PYTHON_BIN}" scripts/data/ingestion/update_qlib_from_db.py --qlib-dir db/alpha158_bin --apply 2>&1 | tee -a "${LOG_FILE}"
-
 echo "✅ [$(date)] 所有同步任务执行完毕。" >> "${LOG_FILE}"
 echo "--------------------------------------------------------" >> "${LOG_FILE}"

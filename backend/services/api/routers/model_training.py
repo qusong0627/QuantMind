@@ -195,7 +195,7 @@ async def _resolve_requested_model(current_user: dict[str, Any], model_id: str):
 
 
 def _choose_data_dir(effective_model_id: str) -> str:
-    fallback_data_dir = os.getenv("QLIB_FALLBACK_DATA_PATH", "db/alpha158_bin")
+    fallback_data_dir = os.getenv("QLIB_FALLBACK_DATA_PATH", "db/qlib_data")
     primary_data_dir = os.getenv("QLIB_PRIMARY_DATA_PATH", "db/qlib_data")
     fallback_model_id = os.getenv("FALLBACK_MODEL_ID", "alpha158")
     if str(effective_model_id or "").strip() == fallback_model_id:

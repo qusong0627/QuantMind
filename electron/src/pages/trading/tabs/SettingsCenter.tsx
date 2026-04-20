@@ -186,27 +186,16 @@ const SettingsCenter: React.FC<SettingsCenterProps> = ({ userId, isActive }) => 
   };
 
   const handleDownloadQMT = async () => {
+    const downloadUrl = 'https://www.quantmindai.cn/qmt-service';
     try {
-      const res = await fetch(
-        `${apiGatewayBase}/api/v1/internal/strategy/bridge/download/agent/release?asset=installer`,
-        { headers: authHeader() }
-      );
-      if (!res.ok) {
-        throw new Error(`release download info failed: ${res.status}`);
-      }
-      const info: QMTAgentReleaseDownloadInfo = await res.json();
-      const asset = info.installer;
-      if (!asset?.download_url) {
-        throw new Error('installer download url missing');
-      }
       if (window.electronAPI?.openExternal) {
-        const result = await window.electronAPI.openExternal(asset.download_url);
+        const result = await window.electronAPI.openExternal(downloadUrl);
         if (!result?.success) {
           throw new Error(result?.error || 'open external browser failed');
         }
         return;
       }
-      window.open(asset.download_url, '_blank', 'noopener,noreferrer');
+      window.open(downloadUrl, '_blank', 'noopener,noreferrer');
     } catch (e) {
       console.error('Failed to download qmt agent client', e);
     }
@@ -337,7 +326,7 @@ const SettingsCenter: React.FC<SettingsCenterProps> = ({ userId, isActive }) => 
                     <span className="text-sm font-bold text-gray-800">下载独立 QMT Agent 包</span>
                   </div>
                   <p className="text-xs text-gray-500 leading-relaxed">
-                    下载后会跳转到后端签名地址，获取 Windows 安装器。
+                    跳转至 QuantMind 官网下载 Windows 安装器。
                   </p>
                 </div>
                 <button

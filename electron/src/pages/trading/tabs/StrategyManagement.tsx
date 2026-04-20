@@ -399,27 +399,25 @@ const StrategyManagement: React.FC<StrategyManagementProps> = ({
 
     const wsStatusText = formatWebSocketStatus(websocketStatus);
     const getConnectionSignalLevel = useCallback((label: string, value: string, ok?: boolean): 'red' | 'yellow' | 'green' => {
+        // 优先使用后端返回的 ok 状态判断
+        // ok=true: 绿色（链路正常）
+        // ok=false: 红色（链路异常）
+        // ok=undefined: 黄色（未获取/未知状态）
+        if (ok === true) {
+            return 'green';
+        }
+        if (ok === false) {
+            return 'red';
+        }
+        // ok 为 undefined/null 时，检查是否为连接中/重连中等过渡状态
         const normalized = `${label} ${value}`.toLowerCase();
-        const hasWarning = (
-            normalized.includes('warning')
-            || normalized.includes('warn')
-            || normalized.includes('延迟')
-            || normalized.includes('过高')
-            || normalized.includes('过期')
-            || normalized.includes('stale')
-            || normalized.includes('连接中')
+        const isTransitioning = (
+            normalized.includes('连接中')
             || normalized.includes('重连中')
             || normalized.includes('pending')
-            || normalized.includes('未获取')
-            || normalized.includes('未上报')
             || normalized.includes('初始化')
         );
-
-        if (ok === false) {
-            return hasWarning ? 'yellow' : 'red';
-        }
-
-        return hasWarning ? 'yellow' : 'green';
+        return isTransitioning ? 'yellow' : 'red';
     }, []);
 
     const envChecks = isGlobalSim

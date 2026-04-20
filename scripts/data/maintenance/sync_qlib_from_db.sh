@@ -32,10 +32,7 @@ echo "🚀 正在同步 Qlib 主数据 (qlib_data)..." >> "${LOG_FILE}"
 "${PYTHON_BIN}" scripts/data/ingestion/update_qlib_from_db.py --qlib-dir db/qlib_data --apply 2>&1 | tee -a "${LOG_FILE}"
 
 # --------------------------------------------------------------------
-# 从数据库同步到 Alpha158 专用数据目录
+# 从数据库同步到 Qlib 数据目录
 # --------------------------------------------------------------------
-echo "🚀 正在同步 Alpha158 专用数据 (alpha158_bin)..." >> "${LOG_FILE}"
-"${PYTHON_BIN}" scripts/data/ingestion/update_qlib_from_db.py --qlib-dir db/alpha158_bin --apply 2>&1 | tee -a "${LOG_FILE}"
-
 echo "✅ [$(date)] Qlib 数据转换任务完成。" >> "${LOG_FILE}"
 echo "--------------------------------------------------------" >> "${LOG_FILE}"

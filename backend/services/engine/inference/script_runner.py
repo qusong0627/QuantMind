@@ -126,7 +126,7 @@ class InferenceScriptRunner:
         self.fallback_data_dir = self._normalize_provider_uri(
             str(
                 fallback_data_dir
-                or os.getenv("QLIB_FALLBACK_DATA_PATH", "db/alpha158_bin")
+                or os.getenv("QLIB_FALLBACK_DATA_PATH", "db/qlib_data")
             ),
             prefer_alpha158=True,
         )
@@ -154,11 +154,11 @@ class InferenceScriptRunner:
         规则：
         1) 若能在候选路径中命中真实目录，返回该绝对路径；
         2) 相对路径默认转换为 /app/<path>；
-        3) alpha158 兜底场景优先尝试 /app/db/alpha158_bin（兼容历史大小写写法）。
+        3) 兜底场景优先尝试 /app/db/qlib_data。
         """
         raw = str(provider_uri or "").strip()
         if not raw:
-            raw = "db/alpha158_bin" if prefer_alpha158 else "db/qlib_data"
+            raw = "db/qlib_data"
 
         candidates: list[Path] = []
         p = Path(raw)
@@ -170,10 +170,8 @@ class InferenceScriptRunner:
 
         if prefer_alpha158:
             candidates = [
-                Path("/app/db/alpha158_bin"),
-                Path("/app/db/Alpha158_bin"),
-                Path("db/alpha158_bin"),
-                Path("db/Alpha158_bin"),
+                Path("/app/db/qlib_data"),
+                Path("db/qlib_data"),
                 *candidates,
             ]
 

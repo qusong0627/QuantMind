@@ -1,6 +1,6 @@
 """
 merge_ohlcv_to_training_data.py
-从 alpha158_bin 提取 OHLCV + 复权因子，合并写入 feature_snapshots 的每年 parquet。
+从 qlib_data 提取 OHLCV + 复权因子，合并写入 feature_snapshots 的每年 parquet。
 
 用法（在服务器 engine 容器内运行）：
   python3 /app/scripts/merge_ohlcv_to_training_data.py
@@ -25,7 +25,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ── 路径配置 ────────────────────────────────────────────────────────────────
-QLIB_DIR   = Path("/app/db/alpha158_bin")
+QLIB_DIR   = Path("/app/db/qlib_data")
 DATA_DIR   = Path("/app/db/feature_snapshots")
 CALENDAR   = QLIB_DIR / "calendars" / "day.txt"
 FEATURES_DIR = QLIB_DIR / "features"

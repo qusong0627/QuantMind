@@ -1,5 +1,6 @@
 import asyncio
 import multiprocessing as mp
+import os
 from contextlib import asynccontextmanager
 
 try:
@@ -120,6 +121,18 @@ async def lifespan(app: FastAPI):
         app.state.startup_healthy = False
         logger.error("trade background scanners start failed: %s", e, exc_info=True)
 
+    # 启动沙箱进程池（用于模拟盘）
+    try:
+        from backend.services.trade.sandbox.manager import sandbox_manager
+
+        pool_size = int(os.getenv("SANDBOX_POOL_SIZE", "1"))
+        sandbox_manager.pool_size = pool_size
+        sandbox_manager.start_pool()
+        logger.info("Sandbox worker pool started with %d workers", pool_size)
+    except Exception as e:
+        app.state.startup_healthy = False
+        logger.error("trade sandbox pool start failed: %s", e, exc_info=True)
+
     healthy = bool(app.state.startup_healthy and app.state.db_connected and app.state.redis_connected)
     set_service_health("quantmind-trade", healthy)
 
@@ -142,6 +155,15 @@ async def lifespan(app: FastAPI):
             await exec_consumer.stop()
         except Exception as e:
             logger.warning("trade execution stream consumer stop failed: %s", e)
+
+    # 停止沙箱进程池
+    try:
+        from backend.services.trade.sandbox.manager import sandbox_manager
+
+        sandbox_manager.stop_pool()
+        logger.info("Sandbox worker pool stopped")
+    except Exception as e:
+        logger.warning("trade sandbox pool stop failed: %s", e)
 
     try:
         await close_database()
