@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="QuantMind 离线数据下载 - 历史行情数据、因子数据下载">
+  <title>数据下载 - QuantMind</title>
+  <link rel="icon" type="image/x-icon" href="./public/logo.ico">
+  <link rel="stylesheet" href="./css/style.css">
+</head>
+<body>
+  <div class="layout">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <a href="./index.html" class="sidebar-logo">
+          <img src="./public/logo.ico" alt="QuantMind">
+          <span class="sidebar-logo-text">QuantMind</span>
+        </a>
+      </div>
+
+      <nav class="sidebar-nav">
+        <div class="nav-section">
+          <div class="nav-section-title">开始</div>
+          <a href="./index.html" class="nav-link">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+            首页
+          </a>
+          <a href="./quickstart.html" class="nav-link">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+            快速开始
+          </a>
+          <a href="./download.html" class="nav-link">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></svg>
+            下载安装
+          </a>
+        </div>
+
+        <div class="nav-section">
+          <div class="nav-section-title">文档</div>
+          <a href="./features.html" class="nav-link">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="7" height="7" x="3" y="3" rx="1"/><rect width="7" height="7" x="14" y="3" rx="1"/><rect width="7" height="7" x="14" y="14" rx="1"/><rect width="7" height="7" x="3" y="14" rx="1"/></svg>
+            功能特性
+          </a>
+          <a href="./api.html" class="nav-link">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m18 16 4-4-4-4"/><path d="m6 8-4 4 4 4"/><path d="m14.5 4-5 16"/></svg>
+            API 文档
+          </a>
+        </div>
+
+        <div class="nav-section">
+          <div class="nav-section-title">资源</div>
+          <a href="./data-download.html" class="nav-link active">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></svg>
+            数据下载
+          </a>
+          <a href="./faq.html" class="nav-link">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><path d="M12 17h.01"/></svg>
+            常见问题
+          </a>
+          <a href="./changelog.html" class="nav-link">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 8v4l3 3"/><circle cx="12" cy="12" r="10"/></svg>
+            更新日志
+          </a>
+        </div>
+
+        <div class="nav-section">
+          <div class="nav-section-title">法律</div>
+          <a href="./privacy.html" class="nav-link">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+            隐私政策
+          </a>
+          <a href="./terms.html" class="nav-link">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" x2="8" y1="13" y2="13"/><line x1="16" x2="8" y1="17" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
+            服务条款
+          </a>
+        </div>
+      </nav>
+
+      <div class="sidebar-footer">
+        <a href="https://github.com/qusong0627/quantmind" target="_blank" class="github-link">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.726.083-.726 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.214.694.825.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/></svg>
+          GitHub
+        </a>
+      </div>
+    </aside>
+
+    <!-- Mobile Header -->
+    <header class="mobile-header">
+      <button id="mobile-menu-btn" class="mobile-menu-btn">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" x2="20" y1="12" y2="12"/><line x1="4" x2="20" y1="6" y2="6"/><line x1="4" x2="20" y1="18" y2="18"/></svg>
+      </button>
+      <a href="./index.html" class="mobile-logo">
+        <img src="./public/logo.ico" alt="QuantMind">
+        <span>QuantMind</span>
+      </a>
+      <div style="width: 40px;"></div>
+    </header>
+
+    <!-- Overlay -->
+    <div class="overlay"></div>
+
+    <!-- Main Content -->
+    <main class="main">
+      <div class="content">
+        <header class="page-header">
+          <h1 class="page-title">数据下载</h1>
+          <p class="page-description">下载 QuantMind 历史行情数据与因子数据，支持离线使用。</p>
+        </header>
+
+        <!-- Download Link -->
+        <section class="section">
+          <h2>数据包下载</h2>
+          <div class="alert alert-info" style="margin-bottom: 24px;">
+            <div class="alert-title">夸克网盘下载地址</div>
+            <p style="font-size: 16px; margin-top: 8px;">
+              <a href="https://pan.quark.cn/s/98b9dd308bc8#/list/share" target="_blank" style="word-break: break-all;">
+                https://pan.quark.cn/s/98b9dd308bc8
+              </a>
+            </p>
+          </div>
+
+          <h3>数据包内容</h3>
+          <table>
+            <thead>
+              <tr>
+                <th>数据类型</th>
+                <th>说明</th>
+                <th>时间范围</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>日频行情</td>
+                <td>开高低收、成交量、成交额等</td>
+                <td>2010年至今</td>
+              </tr>
+              <tr>
+                <td>因子数据</td>
+                <td>146维特征因子库</td>
+                <td>2010年至今</td>
+              </tr>
+              <tr>
+                <td>股票池</td>
+                <td>沪深300、中证500、全市场等</td>
+                <td>持续更新</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <!-- Installation Guide -->
+        <section class="section">
+          <h2>安装说明</h2>
+          <div class="steps">
+            <div class="step">
+              <h3 class="step-title">下载数据包</h3>
+              <div class="step-content">
+                <p>从夸克网盘下载数据压缩包。</p>
+              </div>
+            </div>
+
+            <div class="step">
+              <h3 class="step-title">解压并替换目录</h3>
+              <div class="step-content">
+                <p>解压后替换项目根目录下的 <code>db</code> 和 <code>models</code> 目录：</p>
+                <div class="code-block">
+                  <div class="code-block-header"><span>目录结构</span></div>
+                  <pre><code>quantmind/
+├── db/                  # Qlib 数据目录
+│   ├── qlib_data/       # 股票特征数据
+│   │   ├── calendars/
+│   │   ├── instruments/
+│   │   └── features/
+│   └── feature_snapshots/
+├── models/              # 预训练模型
+│   └── model_preview/
+├── backend/
+└── ...</code></pre>
+                </div>
+              </div>
+            </div>
+
+            <div class="step">
+              <h3 class="step-title">验证数据</h3>
+              <div class="step-content">
+                <p>运行以下命令验证数据是否正确加载：</p>
+                <div class="code-block">
+                  <div class="code-block-header"><span>python</span></div>
+                  <pre><code>import qlib
+from qlib.data import D
+
+# 初始化 Qlib
+qlib.init(provider_uri="./db/qlib_data")
+
+# 测试数据加载
+df = D.features(["SH600519"], ["$close", "$volume"])
+print(df.head())</code></pre>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Update Info -->
+        <section class="section">
+          <h2>数据更新</h2>
+          <ul>
+            <li><strong>更新频率</strong>：每周周末更新</li>
+            <li><strong>更新方式</strong>：重新下载完整数据包覆盖即可</li>
+            <li><strong>增量更新</strong>：暂不支持，请下载完整包</li>
+          </ul>
+        </section>
+
+        <!-- Notes -->
+        <section class="section">
+          <h2>注意事项</h2>
+          <ul>
+            <li>数据仅供学习研究使用，不构成任何投资建议</li>
+            <li>数据可能存在延迟或错误，请以官方数据源为准</li>
+            <li>如需实时行情，请自行配置行情源（如 Tushare、AKShare）</li>
+          </ul>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <script src="./js/main.js"></script>
+</body>
+</html>

@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="QuantMind 快速开始指南 - 环境配置、安装步骤与第一个回测示例">
+  <title>快速开始 - QuantMind</title>
+  <link rel="icon" type="image/x-icon" href="./public/logo.ico">
+  <link rel="stylesheet" href="./css/style.css">
+</head>
+<body>
+  <div class="layout">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <a href="./index.html" class="sidebar-logo">
+          <img src="./public/logo.ico" alt="QuantMind">
+          <span class="sidebar-logo-text">QuantMind</span>
+        </a>
+      </div>
+
+      <nav class="sidebar-nav">
+        <div class="nav-section">
+          <div class="nav-section-title">开始</div>
+          <a href="./index.html" class="nav-link">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+            首页
+          </a>
+          <a href="./quickstart.html" class="nav-link active">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+            快速开始
+          </a>
+          <a href="./download.html" class="nav-link">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></svg>
+            下载安装
+          </a>
+        </div>
+
+        <div class="nav-section">
+          <div class="nav-section-title">文档</div>
+          <a href="./features.html" class="nav-link">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="7" height="7" x="3" y="3" rx="1"/><rect width="7" height="7" x="14" y="3" rx="1"/><rect width="7" height="7" x="14" y="14" rx="1"/><rect width="7" height="7" x="3" y="14" rx="1"/></svg>
+            功能特性
+          </a>
+          <a href="./api.html" class="nav-link">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m18 16 4-4-4-4"/><path d="m6 8-4 4 4 4"/><path d="m14.5 4-5 16"/></svg>
+            API 文档
+          </a>
+        </div>
+
+        <div class="nav-section">
+          <div class="nav-section-title">资源</div>
+          <a href="./data-download.html" class="nav-link">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></svg>
+            数据下载
+          </a>
+          <a href="./faq.html" class="nav-link">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><path d="M12 17h.01"/></svg>
+            常见问题
+          </a>
+          <a href="./changelog.html" class="nav-link">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 8v4l3 3"/><circle cx="12" cy="12" r="10"/></svg>
+            更新日志
+          </a>
+        </div>
+
+        <div class="nav-section">
+          <div class="nav-section-title">法律</div>
+          <a href="./privacy.html" class="nav-link">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+            隐私政策
+          </a>
+          <a href="./terms.html" class="nav-link">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" x2="8" y1="13" y2="13"/><line x1="16" x2="8" y1="17" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
+            服务条款
+          </a>
+        </div>
+      </nav>
+
+      <div class="sidebar-footer">
+        <a href="https://github.com/qusong0627/quantmind" target="_blank" class="github-link">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.726.083-.726 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.214.694.825.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/></svg>
+          GitHub
+        </a>
+      </div>
+    </aside>
+
+    <!-- Mobile Header -->
+    <header class="mobile-header">
+      <button id="mobile-menu-btn" class="mobile-menu-btn">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" x2="20" y1="12" y2="12"/><line x1="4" x2="20" y1="6" y2="6"/><line x1="4" x2="20" y1="18" y2="18"/></svg>
+      </button>
+      <a href="./index.html" class="mobile-logo">
+        <img src="./public/logo.ico" alt="QuantMind">
+        <span>QuantMind</span>
+      </a>
+      <div style="width: 40px;"></div>
+    </header>
+
+    <!-- Overlay -->
+    <div class="overlay"></div>
+
+    <!-- Main Content -->
+    <main class="main">
+      <div class="content">
+        <header class="page-header">
+          <h1 class="page-title">快速开始</h1>
+          <p class="page-description">本指南将帮助您在几分钟内完成 QuantMind 的安装并运行第一个回测。</p>
+        </header>
+
+        <!-- Requirements -->
+        <section class="section">
+          <h2>环境要求</h2>
+          <table>
+            <thead>
+              <tr>
+                <th>依赖</th>
+                <th>版本</th>
+                <th>说明</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Python</td>
+                <td><strong>3.10</strong></td>
+                <td>必须使用 Python 3.10，其他版本不兼容</td>
+              </tr>
+              <tr>
+                <td>pip</td>
+                <td>最新版</td>
+                <td>Python 包管理器</td>
+              </tr>
+              <tr>
+                <td>Git</td>
+                <td>任意版本</td>
+                <td>用于克隆仓库</td>
+              </tr>
+              <tr>
+                <td>内存（基础服务）</td>
+                <td>≥ 8GB</td>
+                <td>运行回测、API 服务等基础功能</td>
+              </tr>
+              <tr>
+                <td>内存（模型训练/推理）</td>
+                <td>≥ 64GB</td>
+                <td>模型训练与批量推理所需</td>
+              </tr>
+              <tr>
+                <td>磁盘</td>
+                <td>≥ 50GB</td>
+                <td>数据存储与模型文件</td>
+              </tr>
+            </tbody>
+          </table>
+          <div class="alert alert-info" style="margin-top: 16px;">
+            <div class="alert-title">注意</div>
+            <p>Python 3.11/3.12 等高版本存在部分依赖兼容性问题，请务必使用 Python 3.10。</p>
+          </div>
+        </section>
+
+        <!-- Installation Steps -->
+        <section class="section">
+          <h2>安装步骤</h2>
+          <div class="steps">
+            <div class="step">
+              <h3 class="step-title">克隆仓库</h3>
+              <div class="step-content">
+                <div class="code-block">
+                  <div class="code-block-header"><span>bash</span></div>
+                  <pre><code>git clone https://github.com/qusong0627/quantmind.git
+cd quantmind</code></pre>
+                </div>
+              </div>
+            </div>
+
+            <div class="step">
+              <h3 class="step-title">创建虚拟环境</h3>
+              <div class="step-content">
+                <div class="code-block">
+                  <div class="code-block-header"><span>bash</span></div>
+                  <pre><code># 使用 venv
+python -m venv .venv
+source .venv/bin/activate  # Linux/macOS
+# 或
+.venv\Scripts\activate     # Windows</code></pre>
+                </div>
+              </div>
+            </div>
+
+            <div class="step">
+              <h3 class="step-title">安装依赖</h3>
+              <div class="step-content">
+                <div class="code-block">
+                  <div class="code-block-header"><span>bash</span></div>
+                  <pre><code>pip install -r requirements.txt</code></pre>
+                </div>
+                <p class="text-muted mt-4">安装过程可能需要几分钟，请耐心等待。</p>
+              </div>
+            </div>
+
+            <div class="step">
+              <h3 class="step-title">下载数据</h3>
+              <div class="step-content">
+                <p>首次运行需要下载 Qlib 历史数据：</p>
+                <div class="alert alert-info" style="margin-bottom: 16px;">
+                  <div class="alert-title">数据下载地址</div>
+                  <p><a href="https://pan.quark.cn/s/98b9dd308bc8#/list/share" target="_blank">https://pan.quark.cn/s/98b9dd308bc8</a></p>
+                </div>
+                <p class="text-muted">解压后替换 <code>db</code> 和 <code>models</code> 目录。</p>
+              </div>
+            </div>
+
+            <div class="step">
+              <h3 class="step-title">初始化配置</h3>
+              <div class="step-content">
+                <div class="code-block">
+                  <div class="code-block-header"><span>bash</span></div>
+                  <pre><code>python scripts/init_config.py</code></pre>
+                </div>
+              </div>
+            </div>
+
+            <div class="step">
+              <h3 class="step-title">验证安装</h3>
+              <div class="step-content">
+                <div class="code-block">
+                  <div class="code-block-header"><span>bash</span></div>
+                  <pre><code>python -c "import qlib; print('Qlib version:', qlib.__version__)"</code></pre>
+                </div>
+                <p class="text-muted mt-4">如果输出了 Qlib 版本号，说明安装成功！</p>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- First Backtest -->
+        <section class="section">
+          <h2>运行第一个回测</h2>
+          <p>使用内置的示例策略快速体验回测功能：</p>
+          <div class="code-block">
+            <div class="code-block-header"><span>bash</span></div>
+            <pre><code># 运行示例策略回测
+python scripts/run_backtest.py \
+  --strategy examples/strategies/ma_cross.py \
+  --start-date 2023-01-01 \
+  --end-date 2023-12-31 \
+  --universe csi300</code></pre>
+          </div>
+
+          <h3>回测结果示例</h3>
+          <div class="code-block">
+            <div class="code-block-header"><span>输出</span></div>
+            <pre><code>========================================
+Backtest Report
+========================================
+Period:     2023-01-01 ~ 2023-12-31
+Universe:   CSI300
+Strategy:   MA Cross (5/20)
+
+Performance Metrics:
+  Total Return:    +15.6%
+  Annual Return:   +15.6%
+  Max Drawdown:    -8.2%
+  Sharpe Ratio:    1.42
+  Win Rate:        58.3%
+
+Trade Statistics:
+  Total Trades:    156
+  Avg Holding:     2.3 days
+  Profit Factor:   1.68
+========================================</code></pre>
+          </div>
+        </section>
+
+        <!-- Directory Structure -->
+        <section class="section">
+          <h2>目录结构</h2>
+          <div class="code-block">
+            <div class="code-block-header"><span>目录</span></div>
+            <pre><code>quantmind/
+├── backend/              # 后端服务
+│   ├── services/         # 业务服务
+│   │   ├── engine/       # 核心引擎
+│   │   ├── trade/        # 交易服务
+│   │   └── api/          # API 网关
+│   └── shared/           # 共享模块
+├── scripts/              # 脚本工具
+│   ├── run_backtest.py   # 回测入口
+│   ├── run_training.py   # 训练入口
+│   └── ...
+├── examples/             # 示例代码
+│   └── strategies/       # 示例策略
+├── models/               # 模型存储
+├── data/                 # 数据目录
+├── config/               # 配置文件
+└── requirements.txt      # Python 依赖</code></pre>
+          </div>
+        </section>
+
+        <!-- Next Steps -->
+        <section class="section">
+          <h2>下一步</h2>
+          <ul>
+            <li>查看 <a href="./features.html">功能特性</a> 了解更多能力</li>
+            <li>阅读 <a href="./api.html">API 文档</a> 学习接口调用</li>
+            <li>浏览 <a href="https://github.com/qusong0627/quantmind/tree/main/examples" target="_blank">示例代码</a> 学习策略编写</li>
+            <li>遇到问题？查看 <a href="./faq.html">常见问题</a></li>
+          </ul>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <script src="./js/main.js"></script>
+</body>
+</html>

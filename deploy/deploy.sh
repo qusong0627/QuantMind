@@ -892,7 +892,7 @@ show_info() {
     echo ""
     echo -e "${YELLOW}💡 温馨提示${NC}"
     echo -e "   如需使用完整回测、模型训练及推理服务，请下载离线数据包："
-    echo -e "   ${BLUE}https://www.quantmindai.cn/data-download${NC}"
+    echo -e "   ${BLUE}https://oss.quantmindai.cn/data-download.html${NC}"
     echo ""
 }
 

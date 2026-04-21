@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="QuantMind API 文档 - 认证方式、核心接口与请求响应示例">
+  <title>API 文档 - QuantMind</title>
+  <link rel="icon" type="image/x-icon" href="./public/logo.ico">
+  <link rel="stylesheet" href="./css/style.css">
+</head>
+<body>
+  <div class="layout">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <a href="./index.html" class="sidebar-logo">
+          <img src="./public/logo.ico" alt="QuantMind">
+          <span class="sidebar-logo-text">QuantMind</span>
+        </a>
+      </div>
+
+      <nav class="sidebar-nav">
+        <div class="nav-section">
+          <div class="nav-section-title">开始</div>
+          <a href="./index.html" class="nav-link">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+            首页
+          </a>
+          <a href="./quickstart.html" class="nav-link">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+            快速开始
+          </a>
+          <a href="./download.html" class="nav-link">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></svg>
+            下载安装
+          </a>
+        </div>
+
+        <div class="nav-section">
+          <div class="nav-section-title">文档</div>
+          <a href="./features.html" class="nav-link">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="7" height="7" x="3" y="3" rx="1"/><rect width="7" height="7" x="14" y="3" rx="1"/><rect width="7" height="7" x="14" y="14" rx="1"/><rect width="7" height="7" x="3" y="14" rx="1"/></svg>
+            功能特性
+          </a>
+          <a href="./api.html" class="nav-link active">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m18 16 4-4-4-4"/><path d="m6 8-4 4 4 4"/><path d="m14.5 4-5 16"/></svg>
+            API 文档
+          </a>
+        </div>
+
+        <div class="nav-section">
+          <div class="nav-section-title">资源</div>
+          <a href="./data-download.html" class="nav-link">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></svg>
+            数据下载
+          </a>
+          <a href="./faq.html" class="nav-link">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><path d="M12 17h.01"/></svg>
+            常见问题
+          </a>
+          <a href="./changelog.html" class="nav-link">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 8v4l3 3"/><circle cx="12" cy="12" r="10"/></svg>
+            更新日志
+          </a>
+        </div>
+
+        <div class="nav-section">
+          <div class="nav-section-title">法律</div>
+          <a href="./privacy.html" class="nav-link">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+            隐私政策
+          </a>
+          <a href="./terms.html" class="nav-link">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" x2="8" y1="13" y2="13"/><line x1="16" x2="8" y1="17" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
+            服务条款
+          </a>
+        </div>
+      </nav>
+
+      <div class="sidebar-footer">
+        <a href="https://github.com/qusong0627/quantmind" target="_blank" class="github-link">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.726.083-.726 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.214.694.825.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/></svg>
+          GitHub
+        </a>
+      </div>
+    </aside>
+
+    <!-- Mobile Header -->
+    <header class="mobile-header">
+      <button id="mobile-menu-btn" class="mobile-menu-btn">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" x2="20" y1="12" y2="12"/><line x1="4" x2="20" y1="6" y2="6"/><line x1="4" x2="20" y1="18" y2="18"/></svg>
+      </button>
+      <a href="./index.html" class="mobile-logo">
+        <img src="./public/logo.ico" alt="QuantMind">
+        <span>QuantMind</span>
+      </a>
+      <div style="width: 40px;"></div>
+    </header>
+
+    <!-- Overlay -->
+    <div class="overlay"></div>
+
+    <!-- Main Content -->
+    <main class="main">
+      <div class="content">
+        <header class="page-header">
+          <h1 class="page-title">API 文档</h1>
+          <p class="page-description">QuantMind 提供 RESTful API，支持策略管理、回测执行、模型推理等核心功能。</p>
+        </header>
+
+        <!-- Base URL -->
+        <section class="section">
+          <h2>基础信息</h2>
+          <table>
+            <tbody>
+              <tr>
+                <td><strong>Base URL</strong></td>
+                <td><code>http://localhost:8000/api/v1</code></td>
+              </tr>
+              <tr>
+                <td><strong>数据格式</strong></td>
+                <td>JSON</td>
+              </tr>
+              <tr>
+                <td><strong>字符编码</strong></td>
+                <td>UTF-8</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <div class="alert alert-info" style="margin-top: 16px;">
+            <div class="alert-title">在线 API 文档</div>
+            <p>QuantMind 后端基于 FastAPI 构建，提供完整的交互式 API 文档：</p>
+            <ul style="margin-top: 8px; margin-bottom: 0;">
+              <li><strong>Swagger UI</strong>：<a href="http://localhost:8000/docs" target="_blank">http://localhost:8000/docs</a> - 交互式调试</li>
+              <li><strong>ReDoc</strong>：<a href="http://localhost:8000/redoc" target="_blank">http://localhost:8000/redoc</a> - 美观的文档界面</li>
+            </ul>
+          </div>
+        </section>
+
+        <!-- Authentication -->
+        <section class="section">
+          <h2>认证方式</h2>
+          <p>API 使用 Bearer Token 认证，在请求头中携带 Access Token：</p>
+          <div class="code-block">
+            <div class="code-block-header"><span>http</span></div>
+            <pre><code>Authorization: Bearer &lt;access_token&gt;
+X-Tenant-Id: &lt;tenant_id&gt;</code></pre>
+          </div>
+
+          <h3>获取 Token</h3>
+          <div class="card">
+            <div class="card-title">
+              <span class="badge badge-primary">POST</span>
+              <code>/auth/login</code>
+            </div>
+            <p class="card-text">用户登录获取 Access Token</p>
+          </div>
+
+          <p><strong>请求体</strong></p>
+          <div class="code-block">
+            <div class="code-block-header"><span>json</span></div>
+            <pre><code>{
+  "username": "user@example.com",
+  "password": "your_password"
+}</code></pre>
+          </div>
+
+          <p><strong>响应</strong></p>
+          <div class="code-block">
+            <div class="code-block-header"><span>json</span></div>
+            <pre><code>{
+  "access_token": "eyJhbGciOiJIUzI1NiIs...",
+  "refresh_token": "eyJhbGciOiJIUzI1NiIs...",
+  "token_type": "bearer",
+  "expires_in": 3600
+}</code></pre>
+          </div>
+        </section>
+
+        <!-- Backtest API -->
+        <section class="section">
+          <h2>回测接口</h2>
+
+          <h3>创建回测任务</h3>
+          <div class="card">
+            <div class="card-title">
+              <span class="badge badge-primary">POST</span>
+              <code>/backtest/run</code>
+            </div>
+            <p class="card-text">提交回测任务并返回任务 ID</p>
+          </div>
+
+          <p><strong>请求体</strong></p>
+          <div class="code-block">
+            <div class="code-block-header"><span>json</span></div>
+            <pre><code>{
+  "strategy_type": "topk_dropout",
+  "start_date": "2023-01-01",
+  "end_date": "2023-12-31",
+  "initial_capital": 1000000,
+  "universe": "csi300",
+  "strategy_params": {
+    "topk": 30,
+    "n_drop": 5
+  }
+}</code></pre>
+          </div>
+
+          <p><strong>响应</strong></p>
+          <div class="code-block">
+            <div class="code-block-header"><span>json</span></div>
+            <pre><code>{
+  "backtest_id": "bt_20240101_abc123",
+  "status": "running",
+  "created_at": "2024-01-01T10:00:00Z"
+}</code></pre>
+          </div>
+
+          <h3>查询回测结果</h3>
+          <div class="card">
+            <div class="card-title">
+              <span class="badge" style="background-color: #dafbe1; color: #1a7f37;">GET</span>
+              <code>/backtest/{backtest_id}/result</code>
+            </div>
+            <p class="card-text">获取回测任务的结果</p>
+          </div>
+
+          <p><strong>响应</strong></p>
+          <div class="code-block">
+            <div class="code-block-header"><span>json</span></div>
+            <pre><code>{
+  "backtest_id": "bt_20240101_abc123",
+  "status": "completed",
+  "metrics": {
+    "total_return": 0.156,
+    "annual_return": 0.156,
+    "sharpe_ratio": 1.42,
+    "max_drawdown": -0.082,
+    "win_rate": 0.583
+  },
+  "equity_curve": [...],
+  "trades": [...]
+}</code></pre>
+          </div>
+        </section>
+
+        <!-- Model API -->
+        <section class="section">
+          <h2>模型接口</h2>
+
+          <h3>获取模型列表</h3>
+          <div class="card">
+            <div class="card-title">
+              <span class="badge" style="background-color: #dafbe1; color: #1a7f37;">GET</span>
+              <code>/models</code>
+            </div>
+            <p class="card-text">获取当前租户下的所有模型</p>
+          </div>
+
+          <h3>模型推理</h3>
+          <div class="card">
+            <div class="card-title">
+              <span class="badge badge-primary">POST</span>
+              <code>/inference/predict</code>
+            </div>
+            <p class="card-text">使用指定模型进行预测</p>
+          </div>
+
+          <p><strong>请求体</strong></p>
+          <div class="code-block">
+            <div class="code-block-header"><span>json</span></div>
+            <pre><code>{
+  "model_id": "model_qlib_v1",
+  "date": "2024-01-15",
+  "universe": "all"
+}</code></pre>
+          </div>
+
+          <p><strong>响应</strong></p>
+          <div class="code-block">
+            <div class="code-block-header"><span>json</span></div>
+            <pre><code>{
+  "status": "success",
+  "predictions": [
+    {"symbol": "SH600519", "score": 0.85},
+    {"symbol": "SZ000858", "score": 0.78},
+    ...
+  ],
+  "generated_at": "2024-01-15T18:00:00Z"
+}</code></pre>
+          </div>
+        </section>
+
+        <!-- Data API -->
+        <section class="section">
+          <h2>数据接口</h2>
+
+          <h3>获取因子数据</h3>
+          <div class="card">
+            <div class="card-title">
+              <span class="badge" style="background-color: #dafbe1; color: #1a7f37;">GET</span>
+              <code>/data/features</code>
+            </div>
+            <p class="card-text">获取指定日期的因子数据</p>
+          </div>
+
+          <p><strong>查询参数</strong></p>
+          <table>
+            <thead>
+              <tr>
+                <th>参数</th>
+                <th>类型</th>
+                <th>必填</th>
+                <th>说明</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>date</code></td>
+                <td>string</td>
+                <td>是</td>
+                <td>日期，格式 YYYY-MM-DD</td>
+              </tr>
+              <tr>
+                <td><code>symbols</code></td>
+                <td>string</td>
+                <td>否</td>
+                <td>股票代码，逗号分隔</td>
+              </tr>
+              <tr>
+                <td><code>features</code></td>
+                <td>string</td>
+                <td>否</td>
+                <td>因子名称，逗号分隔</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <!-- Error Codes -->
+        <section class="section">
+          <h2>错误码</h2>
+          <table>
+            <thead>
+              <tr>
+                <th>状态码</th>
+                <th>说明</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>400</code></td>
+                <td>请求参数错误</td>
+              </tr>
+              <tr>
+                <td><code>401</code></td>
+                <td>未授权，Token 无效或过期</td>
+              </tr>
+              <tr>
+                <td><code>403</code></td>
+                <td>禁止访问，权限不足</td>
+              </tr>
+              <tr>
+                <td><code>404</code></td>
+                <td>资源不存在</td>
+              </tr>
+              <tr>
+                <td><code>429</code></td>
+                <td>请求频率超限</td>
+              </tr>
+              <tr>
+                <td><code>500</code></td>
+                <td>服务器内部错误</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <script src="./js/main.js"></script>
+</body>
+</html>
