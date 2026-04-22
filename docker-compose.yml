@@ -137,6 +137,8 @@ services:
       - ./config:/app/config
       # 策略模板
       - ./strategy_templates:/app/strategy_templates
+      # 用户股票池文件 (AI策略生成)
+      - ./user_pools_local:/app/user_pools_local
       # 允许 API 容器调用宿主机 Docker 启动训练容器
       - /var/run/docker.sock:/var/run/docker.sock
     restart: unless-stopped
@@ -203,6 +205,8 @@ services:
       - ./config:/app/config
       # 策略模板
       - ./strategy_templates:/app/strategy_templates
+      # 用户股票池文件 (AI策略生成)
+      - ./user_pools_local:/app/user_pools_local
     command: celery -A backend.services.engine.qlib_app.celery_config:celery_app worker -Q qlib_backtest --loglevel=info --concurrency=2
     healthcheck:
       test: ["CMD-SHELL", "pgrep -f 'celery.*worker' || exit 1"]
