@@ -53,8 +53,13 @@ class QwenLLM:
         self.max_tokens = self._config.LLM_MAX_TOKENS
         self.temperature = self._config.LLM_TEMPERATURE
 
-    def generate_code(self, prompt: str, mode: str = "simple") -> tuple[str, dict[str, Any]]:
+    def generate_code(self, prompt: str, mode: str = "simple", api_key: str | None = None) -> tuple[str, dict[str, Any]]:
         """使用 OpenAI 兼容模式生成代码"""
+        # Use provided api_key or fall back to instance api_key
+        effective_api_key = api_key or self.api_key
+        if not effective_api_key:
+            raise RuntimeError("No API key available (neither provided nor in environment)")
+
         payload = {
             "model": self.model,
             "messages": [
@@ -68,7 +73,7 @@ class QwenLLM:
             "max_tokens": self.max_tokens,
         }
         headers = {
-            "Authorization": f"Bearer {self.api_key}",
+            "Authorization": f"Bearer {effective_api_key}",
             "Content-Type": "application/json",
         }
 
