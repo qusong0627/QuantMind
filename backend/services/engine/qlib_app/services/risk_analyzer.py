@@ -46,6 +46,25 @@ class RiskAnalyzer:
         except Exception:
             return None
 
+    @staticmethod
+    def _normalize_display_quantity(symbol: str, quantity: float) -> float:
+        """
+        统一交易展示数量：
+        1) 默认按整数股展示；
+        2) A 股（SH/SZ/BJ）若仅偏离整手极小值（如 2701/2702），自动回吸到 100 股整手，
+           避免复权因子日间微漂移导致的“买 2700 卖 2702”。
+        """
+        if not np.isfinite(quantity):
+            return 0.0
+
+        qty_int = int(round(float(quantity)))
+        symbol_upper = str(symbol or "").upper()
+        if symbol_upper.startswith(("SH", "SZ", "BJ")) and qty_int >= 100:
+            lot_rounded = int(round(qty_int / 100.0) * 100)
+            if abs(qty_int - lot_rounded) <= 2:
+                return float(lot_rounded)
+        return float(qty_int)
+
     @classmethod
     def _clamp_unreasonable_metric(cls, value: Any, *, abs_limit: float, metric_name: str) -> float | None:
         val = cls._to_finite_float(value)
@@ -91,10 +110,108 @@ class RiskAnalyzer:
         return factor_map
 
     @classmethod
+    def _trade_dedupe_key(cls, trade: dict[str, Any]) -> tuple[Any, ...] | None:
+        """构建交易去重键，兼容 exchange 与 strategy 两种写入格式。"""
+        if not isinstance(trade, dict):
+            return None
+        date_key = str(trade.get("date", ""))[:10]
+        symbol_key = str(trade.get("symbol", "")).upper()
+        action_key = str(trade.get("action", "")).strip().lower()
+        if not date_key or not symbol_key or not action_key:
+            return None
+
+        amount_val = cls._to_finite_float(
+            trade.get("totalAmount", trade.get("total_amount", trade.get("amount")))
+        )
+        commission_val = cls._to_finite_float(trade.get("commission")) or 0.0
+
+        if amount_val is not None:
+            # amount + commission 在双写场景下稳定一致，优先作为主键。
+            return (
+                "amount",
+                date_key,
+                symbol_key,
+                action_key,
+                round(float(amount_val), 2),
+                round(float(commission_val), 2),
+            )
+
+        price_val = cls._to_finite_float(trade.get("price", trade.get("adj_price")))
+        quantity_val = cls._to_finite_float(trade.get("quantity", trade.get("adj_quantity")))
+        if price_val is None and quantity_val is None:
+            return None
+
+        qty_key = cls._normalize_display_quantity(symbol_key, quantity_val) if quantity_val is not None else None
+        return (
+            "price_qty",
+            date_key,
+            symbol_key,
+            action_key,
+            round(float(price_val), 4) if price_val is not None else None,
+            int(round(float(qty_key))) if qty_key is not None else None,
+            round(float(commission_val), 2),
+        )
+
+    @classmethod
+    def _trade_record_score(cls, trade: dict[str, Any]) -> int:
+        """同一交易键冲突时，保留信息更完整的一条记录。"""
+        if not isinstance(trade, dict):
+            return 0
+        score = 0
+        for field in (
+            "totalAmount",
+            "amount",
+            "adj_price",
+            "adj_quantity",
+            "factor",
+            "cash_after",
+            "position_value_after",
+            "equity_after",
+            "balance",
+        ):
+            if cls._to_finite_float(trade.get(field)) is not None:
+                score += 1
+        return score
+
+    @classmethod
+    def _deduplicate_trades(cls, trades: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if not isinstance(trades, list) or not trades:
+            return trades
+        deduped: list[dict[str, Any]] = []
+        keyed_index: dict[tuple[Any, ...], int] = {}
+
+        for item in trades:
+            if not isinstance(item, dict):
+                continue
+            key = cls._trade_dedupe_key(item)
+            if key is None:
+                deduped.append(item)
+                continue
+            existing_idx = keyed_index.get(key)
+            if existing_idx is None:
+                keyed_index[key] = len(deduped)
+                deduped.append(item)
+                continue
+
+            prev_item = deduped[existing_idx]
+            if cls._trade_record_score(item) > cls._trade_record_score(prev_item):
+                deduped[existing_idx] = item
+
+        if len(deduped) != len(trades):
+            task_logger.info(
+                "deduplicate_trades",
+                "Deduplicated duplicated trades from mixed Redis writers",
+                before=len(trades),
+                after=len(deduped),
+            )
+        return deduped
+
+    @classmethod
     def normalize_trades_for_display(cls, trades: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if not isinstance(trades, list) or not trades:
             return trades
 
+        trades = cls._deduplicate_trades(trades)
         need_factor: list[tuple[str, str]] = []
         for t in trades:
             symbol = str(t.get("symbol", ""))
@@ -127,7 +244,17 @@ class RiskAnalyzer:
 
             display_price = price if price is not None else 0.0
             display_quantity = quantity if quantity is not None else 0.0
-            if factor_val is not None and factor_val > 0 and adj_price is not None and adj_quantity is not None:
+            quantity_is_integer_like = (
+                quantity is not None and np.isfinite(quantity) and abs(quantity - round(quantity)) <= 1e-6
+            )
+            should_restore = (
+                factor_val is not None
+                and factor_val > 0
+                and adj_price is not None
+                and adj_quantity is not None
+                and (quantity is None or not quantity_is_integer_like)
+            )
+            if should_restore:
                 display_price = adj_price / factor_val
                 display_quantity = adj_quantity * factor_val
 
@@ -136,7 +263,7 @@ class RiskAnalyzer:
                 total_amount = display_price * display_quantity
 
             row["price"] = float(display_price)
-            row["quantity"] = float(display_quantity)
+            row["quantity"] = cls._normalize_display_quantity(symbol, display_quantity)
             row["totalAmount"] = float(total_amount)
             row["adj_price"] = float(adj_price) if adj_price is not None else None
             row["adj_quantity"] = float(adj_quantity) if adj_quantity is not None else None
@@ -438,7 +565,7 @@ class RiskAnalyzer:
                         if isinstance(item, bytes):
                             item = item.decode("utf-8")
                         trades.append(json.loads(item))
-                    return trades
+                    return cls.normalize_trades_for_display(trades)
             except Exception as e:
                 task_logger.warning("read_trades_from_redis_failed", "Failed to read trades from Redis", error=str(e))
 
@@ -566,7 +693,7 @@ class RiskAnalyzer:
                         "symbol": row["symbol"],
                         "action": row["action"],
                         "price": float(display_price),
-                        "quantity": int(round(display_quantity)),
+                        "quantity": int(cls._normalize_display_quantity(row["symbol"], display_quantity)),
                         "totalAmount": float(total_amount),
                         "commission": float(row["commission"]),
                         "adj_price": float(adj_price),
@@ -668,9 +795,19 @@ class RiskAnalyzer:
             "market_state_window": request.market_state_window,
             "strategy_total_position": request.strategy_total_position,
         }
+
+        # 补全模型标识：优先从 signal_meta 提取推理引擎实际解析出的模型，否则回退到请求中的 model_id
         if signal_meta:
+            effective_model_id = signal_meta.get("effective_model_id")
+            if effective_model_id:
+                payload["model_id"] = effective_model_id
+            
             payload["signal_meta"] = signal_meta
-        if hasattr(request, "strategy_content"):
+            
+        if not payload.get("model_id") and hasattr(request, "model_id") and request.model_id:
+            payload["model_id"] = request.model_id
+
+        if hasattr(request, "strategy_content") and request.strategy_content:
             payload["strategy_content"] = request.strategy_content
         if hasattr(request, "strategy_id") and request.strategy_id:
             payload["strategy_id"] = request.strategy_id
@@ -796,6 +933,7 @@ class RiskAnalyzer:
 
         await report_progress(0.93, "正在深度解析交易明细与高级统计指标...")
         trades = cls._build_trades_list(portfolio_dict, backtest_id=backtest_id)
+        trades = cls.normalize_trades_for_display(trades)
         positions = cls._build_positions_list(portfolio_dict)
         trade_stats = cls._calculate_trade_stats(trades, daily_returns=daily_returns)
         advanced_stats = cls._calculate_advanced_trade_stats(trades, daily_returns=daily_returns)

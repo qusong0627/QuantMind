@@ -47,6 +47,17 @@ _OUR_KWARGS = {
 }
 
 
+def _normalize_display_quantity(symbol: str, quantity: float) -> int:
+    """A 股展示数量纠偏，避免复权因子日间漂移造成非整手抖动。"""
+    qty_int = int(round(float(quantity)))
+    symbol_upper = str(symbol or "").upper()
+    if symbol_upper.startswith(("SH", "SZ", "BJ")) and qty_int >= 100:
+        lot_rounded = int(round(qty_int / 100.0) * 100)
+        if abs(qty_int - lot_rounded) <= 2:
+            return lot_rounded
+    return qty_int
+
+
 class RedisLoggerMixin:
     """
     Redis 交易记录与进度追踪混入类
@@ -222,7 +233,7 @@ class RedisLoggerMixin:
                     "date": date_str,
                     "symbol": str(order.stock_id),
                     "action": direction,
-                    "quantity": int(round(display_quantity)),
+                    "quantity": _normalize_display_quantity(str(order.stock_id), display_quantity),
                     "price": float(display_price),
                     "commission": float(trade_cost),
                     "totalAmount": float(trade_val),

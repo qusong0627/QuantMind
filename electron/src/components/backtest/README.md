@@ -7,6 +7,10 @@
 - 修改本目录代码后请同步更新本 README
 
 ## 近期更新
+- 快速回测成交量“近整手抖动”修复（2026-04-22）：
+  - `QlibResultComponents` 的交易行归一化改为“显式 `price/quantity` 优先”；
+  - 仅在显式字段缺失时，才按 `adj_price/adj_quantity/factor` 回退还原；
+  - A 股成交量展示新增整手容差纠偏（容差 `<=2` 股），修复“买 2700 卖 2702”这类显示抖动。
 - Qlib 相关提示文案继续统一（2026-04-10）：
   - `StrategyPicker`、`StrategyTemplateModal`、`QlibStrategyConfigurator` 与 `QlibInfoBanner` 的标题 / 说明统一优化；
   - `QlibInfoBanner` 不再写死日期范围，改为以当前回测中心配置与后端数据覆盖为准；

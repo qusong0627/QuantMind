@@ -38,6 +38,9 @@
   - 新增作者关注接口：`getAuthorFollowStatus`、`followAuthor`、`unfollowAuthor`，用于社区详情页“关注作者”真实状态读写。
 - `backtestService` 轮询鉴权修复（2026-03-09）：
   - `pollStatus` 在 `catch` 阶段终态判定改为优先读取 `error.response.status`（401/403/404 直接终止轮询），避免仅依赖错误字符串导致的 401 重试刷屏。
+- `backtestService` 快速导出数量口径修复（2026-04-22）：
+  - `buildQuickTradeRows` 改为显式 `price/quantity` 优先，避免已有展示口径被 `adj_* * factor` 再次覆盖；
+  - A 股成交量新增整手容差纠偏（容差 `<=2` 股），减少复权因子日间微漂移导致的近整手抖动。
 - `backtestService` 完成态结果补全（2026-04-08）：
   - `pollStatus` 在 `completed` 状态下改为调用 `getResult(backtestId, false)`，确保回测结果页拿到完整交易明细而不是摘要数据；
   - 这样 `QlibResultDisplay` 的“调仓交易日”统计、交易详情弹窗和 CSV 导出可以复用同一份完整交易行数据。

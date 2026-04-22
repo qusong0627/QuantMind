@@ -429,6 +429,16 @@ const normalizeTradeRows = (
     ? Number(initialCapital)
     : null;
 
+  const normalizeQty = (symbol: string, qty: number): number => {
+    const qtyInt = Math.round(qty);
+    const upper = String(symbol || '').toUpperCase();
+    if ((upper.startsWith('SH') || upper.startsWith('SZ') || upper.startsWith('BJ')) && qtyInt >= 100) {
+      const lotRounded = Math.round(qtyInt / 100) * 100;
+      if (Math.abs(qtyInt - lotRounded) <= 2) return lotRounded;
+    }
+    return qtyInt;
+  };
+
   return trades.map((t) => {
     const factor = Number(t.factor);
     const hasValidFactor = Number.isFinite(factor) && factor > 0;
@@ -441,19 +451,21 @@ const normalizeTradeRows = (
     // 优先使用复权字段还原真实成交价，兼容旧后端直接返回复权 price 的场景。
     const hasAdjPrice = hasValidFactor && Number.isFinite(adjPrice);
     const hasAdjQuantity = hasValidFactor && Number.isFinite(adjQuantity);
+    const hasExplicitPrice = Number.isFinite(explicitPrice);
+    const hasExplicitQuantity = Number.isFinite(explicitQuantity);
 
-    const displayPrice = hasAdjPrice
+    const displayPrice = !hasExplicitPrice && hasAdjPrice
       ? adjPrice / factor
-      : Number.isFinite(explicitPrice)
+      : hasExplicitPrice
         ? explicitPrice
         : 0;
-    const displayQuantity = hasAdjQuantity
+    const displayQuantity = !hasExplicitQuantity && hasAdjQuantity
       ? adjQuantity * factor
-      : Number.isFinite(explicitQuantity)
+      : hasExplicitQuantity
         ? explicitQuantity
         : 0;
 
-    const qtyInt = Math.round(displayQuantity);
+    const qtyInt = normalizeQty(String(t.symbol || ''), displayQuantity);
     const amount = Number.isFinite(Number(t.totalAmount))
       ? Number(t.totalAmount)
       : displayPrice * displayQuantity;

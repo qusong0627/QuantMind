@@ -3,6 +3,14 @@
 用途：Qlib 服务的回测与分析业务逻辑实现。
 
 ## 近期更新
+- 交易流水双写去重修复（2026-04-22）：
+  - `RiskAnalyzer` 新增交易去重逻辑（`_deduplicate_trades`），按 `date/symbol/action/amount/commission` 主键优先合并 exchange 与 strategy 的重复记录；
+  - `normalize_trades_for_display` 与 `_build_trades_list` 统一接入去重，解决“当日买入金额统计翻倍（如 163 万）”问题；
+  - 结果构建阶段会在交易统计前先归一化去重，确保新回测保存的 `trades` 与 `total_trades` 不再受 Redis 双写影响。
+- 交易数量复权漂移修复（2026-04-22）：
+  - `RiskAnalyzer.normalize_trades_for_display` 与 `_parse_trades_df` 新增 A 股整手容差纠偏（默认容差 `<=2` 股）；
+  - 当 `adj_quantity * factor` 因交易日因子微漂移出现 `2701/2702` 这类近整手抖动时，会回吸到最近 `100` 股整手，避免“买 2700 卖 2702”；
+  - 同时保持非 A 股或明显非整手场景不受影响。
 - 策略加载与构建日志收口（2026-04-10）：
   - `user_strategy_loader.py`、`strategy_builder.py` 的关键读写/适配日志已统一为结构化事件格式；
   - 策略存储回退、文件系统兜底、参数补全与模板构建现在共用同一排障口径。

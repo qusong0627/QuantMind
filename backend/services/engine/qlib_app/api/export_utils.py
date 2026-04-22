@@ -13,6 +13,16 @@ def _to_finite_float(value: Any) -> float | None:
     return val
 
 
+def _normalize_display_quantity(symbol: str, quantity: float) -> int:
+    qty_int = int(round(float(quantity)))
+    symbol_upper = str(symbol or "").upper()
+    if symbol_upper.startswith(("SH", "SZ", "BJ")) and qty_int >= 100:
+        lot_rounded = int(round(qty_int / 100.0) * 100)
+        if abs(qty_int - lot_rounded) <= 2:
+            return lot_rounded
+    return qty_int
+
+
 def _build_quick_trade_rows(
     *,
     trades: list[dict[str, Any]],
@@ -50,11 +60,12 @@ def _build_quick_trade_rows(
 
         display_price = explicit_price if explicit_price is not None else 0.0
         display_quantity = explicit_quantity if explicit_quantity is not None else 0.0
-        if has_valid_factor and adj_price is not None and adj_quantity is not None:
+        should_restore = explicit_quantity is None and has_valid_factor and adj_price is not None and adj_quantity is not None
+        if should_restore:
             display_price = adj_price / factor
             display_quantity = adj_quantity * factor
 
-        qty_int = int(round(display_quantity))
+        qty_int = _normalize_display_quantity(str(trade.get("symbol", "")), display_quantity)
         amount = _to_finite_float(trade.get("totalAmount", trade.get("total_amount")))
         if amount is None:
             amount = display_price * display_quantity

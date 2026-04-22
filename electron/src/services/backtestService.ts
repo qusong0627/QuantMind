@@ -464,6 +464,16 @@ class BacktestService {
       this.toFiniteNumber((result as any)?.config?.initial_capital);
     let runningBalance: number | null = initialCapital;
 
+    const normalizeQty = (symbol: string, qty: number): number => {
+      const qtyInt = Math.round(qty);
+      const upper = String(symbol || '').toUpperCase();
+      if ((upper.startsWith('SH') || upper.startsWith('SZ') || upper.startsWith('BJ')) && qtyInt >= 100) {
+        const lotRounded = Math.round(qtyInt / 100) * 100;
+        if (Math.abs(qtyInt - lotRounded) <= 2) return lotRounded;
+      }
+      return qtyInt;
+    };
+
     return trades.map((t) => {
       const factor = this.toFiniteNumber((t as any)?.factor);
       const hasValidFactor = factor !== null && factor > 0;
@@ -478,12 +488,16 @@ class BacktestService {
 
       let displayPrice = explicitPrice ?? 0;
       let displayQty = explicitQty ?? 0;
-      if (hasValidFactor && adjPrice !== null && adjQty !== null) {
+      const hasExplicitPrice = explicitPrice !== null;
+      const hasExplicitQty = explicitQty !== null;
+      if (!hasExplicitPrice && hasValidFactor && adjPrice !== null && adjQty !== null) {
         displayPrice = adjPrice / factor;
+      }
+      if (!hasExplicitQty && hasValidFactor && adjPrice !== null && adjQty !== null) {
         displayQty = adjQty * factor;
       }
 
-      const qtyInt = Math.round(displayQty);
+      const qtyInt = normalizeQty(String((t as any)?.symbol || ''), displayQty);
       const amount =
         this.toFiniteNumber((t as any)?.totalAmount ?? (t as any)?.total_amount ?? (t as any)?.amount) ??
         displayPrice * displayQty;
