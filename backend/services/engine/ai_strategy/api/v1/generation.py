@@ -2,7 +2,6 @@
 
 import asyncio
 import hashlib
-import httpx
 import json
 import logging
 import os
@@ -129,31 +128,9 @@ async def _get_qlib_task(task_id: str) -> dict[str, Any] | None:
         return dict(task)
 
 
-async def _fetch_user_api_key(user_id: str, tenant_id: str = "default") -> str | None:
-    """Fetch user's personal LLM API key from user profile."""
+async def _generate_qlib_impl(body: GenerateQlibRequest, trace_id: str | None) -> GenerateQlibResponse:
     try:
-        from backend.shared.auth import get_internal_call_secret
-        # OSS 单容器模式使用 127.0.0.1
-        api_gateway = os.getenv("INTERNAL_API_GATEWAY_URL", "http://127.0.0.1:8000")
-        async with httpx.AsyncClient(timeout=3.0) as client:
-            headers = {
-                "X-Internal-Call": get_internal_call_secret(),
-                "X-User-Id": user_id,
-                "X-Tenant-Id": tenant_id
-            }
-            resp = await client.get(f"{api_gateway}/api/v1/profiles/{user_id}", headers=headers)
-            if resp.status_code == 200:
-                return resp.json().get("data", {}).get("ai_ide_api_key")
-    except Exception as e:
-        logger.warning(f"Could not fetch individual API key for user {user_id}: {e}")
-    return None
-
-
-async def _generate_qlib_impl(
-    body: GenerateQlibRequest, trace_id: str | None, user_id: str | None = None, tenant_id: str | None = None
-) -> GenerateQlibResponse:
-    try:
-        logger.info("generate_qlib started", extra={"trace_id": trace_id, "user_id": user_id})
+        logger.info("generate_qlib started", extra={"trace_id": trace_id})
 
         def _camel_to_snake(key: str) -> str:
             out: list[str] = []
@@ -208,36 +185,15 @@ async def _generate_qlib_impl(
             }
             return {k: v for k, v in (d or {}).items() if k not in drop and v is not None}
 
-        def _build_pool_file_url_from_key(pool_file_key: str, uploader) -> str:
-            key = (pool_file_key or "").strip()
-            if not key:
-                return ""
-            if key.startswith("http://") or key.startswith("https://") or key.startswith("file://"):
-                return key
-            base_url = os.getenv("TENCENT_COS_URL", "").strip().rstrip("/") or str(
-                getattr(uploader, "base_url", "") or ""
-            ).strip().rstrip("/")
-            if base_url:
-                return f"{base_url}/{key}"
-            bucket = str(getattr(uploader, "bucket", "") or "").strip()
-            region = str(getattr(uploader, "region", "") or "").strip()
-            if bucket and region:
-                return f"https://{bucket}.cos.{region}.myqcloud.com/{key}"
-            return key
-
-        def _persist_local_pool_file(pool_file_key: str, pool_text: str, user_id: str) -> str:
+        def _persist_local_pool_file(pool_text: str, user_id: str) -> str:
+            """保存股票池到本地文件"""
             content = str(pool_text or "")
             if not content.strip():
                 return ""
 
             local_root = Path(os.getenv("AI_STRATEGY_LOCAL_POOL_ROOT", "/app/user_pools_local"))
-            key = (pool_file_key or "").strip().lstrip("/")
-            if key:
-                parts = [p for p in key.split("/") if p not in ("", ".", "..")]
-                relative = Path(*parts) if parts else Path("stock_pool.txt")
-            else:
-                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                relative = Path(str(user_id or "default")) / ts / "stock_pool.txt"
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            relative = Path(str(user_id or "default")) / ts / "stock_pool.txt"
 
             local_path = (local_root / relative).resolve()
             local_path.parent.mkdir(parents=True, exist_ok=True)
@@ -304,19 +260,17 @@ async def _generate_qlib_impl(
         llm_provider = (os.getenv("LLM_PROVIDER_FORCE") or os.getenv("LLM_PROVIDER") or "qwen").strip().lower()
         llm_router = get_resilient_llm_router()
 
-        # Fetch user's personal API key if available
-        user_api_key = None
-        if user_id:
-            user_api_key = await _fetch_user_api_key(user_id, tenant_id or "default")
-            if user_api_key:
-                logger.info(f"Using user's personal API key for user {user_id}")
+        # 获取股票池内容：优先 pool_content，其次从 COS 读取 pool_file_key
+        pool_content = body.pool_content or ""
+        if not pool_content.strip() and body.pool_file_key:
+            try:
+                uploader = get_cos_uploader()
+                pool_content = await uploader.read_object(object_key=body.pool_file_key) or ""
+            except Exception as e:
+                logger.warning("Failed to read pool from COS: %s", e)
 
-        uploader = get_cos_uploader()
-        pool_file_url = (body.pool_file_url or "").strip() or _build_pool_file_url_from_key(
-            body.pool_file_key, uploader
-        )
-        pool_content = await uploader.read_object(object_key=body.pool_file_key)
-        pool_file_local = _persist_local_pool_file(body.pool_file_key, pool_content or "", body.user_id)
+        # 保存股票池到本地
+        pool_file_local = _persist_local_pool_file(pool_content, body.user_id) if pool_content.strip() else ""
 
         if strategy_type == "long_short_topk":
             strategy_class = "RedisLongShortTopkStrategy"
@@ -355,8 +309,6 @@ async def _generate_qlib_impl(
             - 选股数量 topk: {topk}
             - 每期剔除数 n_drop: {n_drop}（仅 TopkDropout 时有效）
             - 调仓周期 holding_period: {holding_period} 个交易日（对应 {rebalance_period}）
-            - 股票池Key: {body.pool_file_key}
-            - 股票池URL: {pool_file_url}
             - 股票池本地文件: {pool_file_local}
             - 选股条件: {body.conditions}
             - 附加说明: {body.custom_notes or "无"}
@@ -369,9 +321,7 @@ async def _generate_qlib_impl(
             - 禁止输出 markdown 代码块，只输出纯 Python 代码
 
             【标准输出格式（严格按此格式，只改参数值）】
-            POOL_FILE_KEY = "..."
-            POOL_FILE_URL = "..."
-            POOL_FILE_LOCAL = "..."
+            POOL_FILE = "..."
 
             STRATEGY_CONFIG = {{
                 "class": "{strategy_class}",
@@ -382,23 +332,16 @@ async def _generate_qlib_impl(
                     {n_drop_field}
                     {ls_fields}
                     "rebalance_days": {holding_period},
-                    "pool_file_key": "...",
-                    "pool_file_url": "...",
-                    "pool_file_local": "...",
+                    "pool_file": "...",
                 }},
             }}
             """
         ).strip()
         try:
-            code, _meta = await asyncio.to_thread(llm_router.generate_code, prompt, llm_provider, "simple", user_api_key)
+            code, _meta = await asyncio.to_thread(llm_router.generate_code, prompt, llm_provider, "simple")
             code = _strip_markdown_fences(code)
-            need_inject_header = any(var not in code for var in ("POOL_FILE_KEY", "POOL_FILE_URL", "POOL_FILE_LOCAL"))
-            if need_inject_header:
-                code = (
-                    f"POOL_FILE_KEY = {json.dumps(body.pool_file_key, ensure_ascii=False)}\n"
-                    f"POOL_FILE_URL = {json.dumps(pool_file_url, ensure_ascii=False)}\n"
-                    f"POOL_FILE_LOCAL = {json.dumps(pool_file_local, ensure_ascii=False)}\n\n" + code
-                )
+            if "POOL_FILE" not in code:
+                code = f"POOL_FILE = {json.dumps(pool_file_local, ensure_ascii=False)}\n\n" + code
             if "STRATEGY_CONFIG" not in code:
                 n_drop_entry = f'"n_drop": {n_drop},' if strategy_type == "TopkDropout" else ""
                 code += dedent(
@@ -413,9 +356,7 @@ async def _generate_qlib_impl(
                             {n_drop_entry}
                             {ls_fields}
                             "rebalance_days": {holding_period},
-                            "pool_file_key": {json.dumps(body.pool_file_key, ensure_ascii=False)},
-                            "pool_file_url": {json.dumps(pool_file_url, ensure_ascii=False)},
-                            "pool_file_local": {json.dumps(pool_file_local, ensure_ascii=False)},
+                            "pool_file": {json.dumps(pool_file_local, ensure_ascii=False)},
                         }},
                     }}
                     """
@@ -428,7 +369,6 @@ async def _generate_qlib_impl(
                         _local_repair_prompt(code, err),
                         llm_provider,
                         "simple",
-                        user_api_key,
                     )
                     code = _strip_markdown_fences(fixed)
                     ok, err = _syntax_check(code)
@@ -448,9 +388,7 @@ async def _generate_qlib_impl(
 
 @router.post("/generate-qlib", response_model=GenerateQlibResponse)
 async def generate_qlib(body: GenerateQlibRequest, request: Request):
-    user_id = str(getattr(request.state, "user", {}).get("user_id") or "").strip() or None
-    tenant_id = str(getattr(request.state, "user", {}).get("tenant_id") or "default").strip()
-    return await _generate_qlib_impl(body, _trace_id(request), user_id, tenant_id)
+    return await _generate_qlib_impl(body, _trace_id(request))
 
 
 @router.post("/generate-qlib/async", response_model=GenerateQlibTaskSubmitResponse)
@@ -479,7 +417,7 @@ async def submit_generate_qlib_task(body: GenerateQlibRequest, request: Request)
 
     async def _runner() -> None:
         await _save_qlib_task(task_id, {"status": "running"})
-        result = await _generate_qlib_impl(body.model_copy(deep=True), trace_id, body.user_id, tenant_id)
+        result = await _generate_qlib_impl(body.model_copy(deep=True), trace_id)
         status = "completed" if result.success else "failed"
         await _save_qlib_task(
             task_id,

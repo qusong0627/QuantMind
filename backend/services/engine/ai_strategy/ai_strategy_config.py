@@ -24,10 +24,12 @@ class AIStrategyConfig(BaseSettings):
 
     # ============ LLM配置 ============
     LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "qwen")
-    LLM_MODEL: str = os.getenv("QWEN_MODEL", "qwen-max")
-    LLM_API_KEY: str = os.getenv("QWEN_API_KEY", "")
+    LLM_MODEL: str = os.getenv("QWEN_MODEL", "qwen3.6-plus")
+    # 支持 DASHSCOPE_API_KEY（官方推荐）或 QWEN_API_KEY
+    LLM_API_KEY: str = os.getenv("DASHSCOPE_API_KEY") or os.getenv("QWEN_API_KEY", "")
+    # 使用官方 OpenAI 兼容模式 base_url
     LLM_API_BASE: str = os.getenv(
-        "QWEN_API_BASE",
+        "DASHSCOPE_BASE_URL",
         "https://dashscope.aliyuncs.com/compatible-mode/v1",
     )
     LLM_TEMPERATURE: float = 0.3  # 降低随机性，提高代码质量
@@ -126,14 +128,14 @@ class LLMProviderConfig:
 
     @staticmethod
     def get_qwen_config(base_config: AIStrategyConfig):
-        """千问配置（唯一支持的提供商）"""
+        """千问配置（使用官方 OpenAI 兼容模式）"""
         return {
-            "api_key": os.getenv("QWEN_API_KEY", ""),
+            "api_key": os.getenv("DASHSCOPE_API_KEY") or os.getenv("QWEN_API_KEY", ""),
             "api_url": os.getenv(
-                "QWEN_API_BASE",
+                "DASHSCOPE_BASE_URL",
                 "https://dashscope.aliyuncs.com/compatible-mode/v1",
             ),
-            "model": os.getenv("QWEN_MODEL", "qwen-max"),
+            "model": os.getenv("QWEN_MODEL", "qwen3.6-plus"),
             "temperature": base_config.LLM_TEMPERATURE,
             "max_tokens": base_config.LLM_MAX_TOKENS,
             "timeout": base_config.LLM_TIMEOUT,
@@ -286,15 +288,6 @@ def validate_required_config(config: AIStrategyConfig) -> None:
     Raises:
         ValueError: 当必需配置缺失时
     """
-    # 检测 mock API key（允许启动但会记录警告）
-    mock_key_patterns = ["mock-api-key", "not-configured", "placeholder"]
-    is_mock_key = any(pattern in config.LLM_API_KEY for pattern in mock_key_patterns)
-    if is_mock_key:
-        import logging
-        logging.getLogger(__name__).warning(
-            "⚠️ 检测到 mock API key，AI 功能将不可用。请在个人中心配置真实的 API key。"
-        )
-
     required_configs = {
         "LLM_API_KEY": config.LLM_API_KEY,
         "DATABASE_URL": config.DATABASE_URL,

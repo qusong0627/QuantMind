@@ -17,9 +17,6 @@ import requests
 if TYPE_CHECKING:
     from ..models import StrategyConversionRequest, StrategyConversionResponse
 
-import dashscope
-from dashscope import Generation
-
 from ..models import StrategyGenerationRequest, StrategyGenerationResult
 from .base import BaseLLMProvider, normalize_name
 
@@ -28,7 +25,7 @@ from .base import BaseLLMProvider, normalize_name
 
 
 class QwenLLM:
-    MOCK_KEY_PATTERNS = ["mock-api-key", "not-configured", "placeholder"]
+    """Qwen LLM - 使用 OpenAI 兼容模式"""
 
     def __init__(self):
         from ..ai_strategy_config import get_config as _gc
@@ -36,27 +33,30 @@ class QwenLLM:
         ai_strategy_config = _gc()
 
         self._config = ai_strategy_config
-        self.api_key = os.getenv("QWEN_API_KEY") or os.getenv("DASHSCOPE_API_KEY")
+        # 使用 DASHSCOPE_API_KEY（官方推荐）或兼容的 QWEN_API_KEY
+        self.api_key = os.getenv("DASHSCOPE_API_KEY") or os.getenv("QWEN_API_KEY")
         if not self.api_key:
-            raise RuntimeError("QWEN_API_KEY or DASHSCOPE_API_KEY not set in environment")
-        # 检测 mock key
-        if any(pattern in self.api_key for pattern in self.MOCK_KEY_PATTERNS):
-            raise RuntimeError(
-                "API Key 未配置真实密钥。请在个人中心配置您的 API Key。"
-            )
-        # OpenAI 兼容模式端点
-        base_url = self._config.LLM_API_BASE.rstrip("/")
-        self.endpoint = f"{base_url}/chat/completions"
+            raise RuntimeError("DASHSCOPE_API_KEY or QWEN_API_KEY not set in environment")
 
-    def generate_code(self, prompt: str, mode: str = "simple", api_key: str | None = None) -> tuple[str, dict[str, Any]]:
-        # Use provided api_key or fall back to instance api_key
-        effective_api_key = api_key or self.api_key
-        if not effective_api_key:
-            raise RuntimeError("No API key available (neither provided nor in environment)")
+        # 使用官方 OpenAI 兼容模式 base_url
+        base_url = os.getenv(
+            "DASHSCOPE_BASE_URL",
+            "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        )
+        self.base_url = str(base_url).rstrip("/")
+        self.endpoint = f"{self.base_url}/chat/completions"
 
-        # OpenAI 兼容模式请求格式
+        # 模型配置
+        self.model = os.getenv("QWEN_MODEL", "qwen3.6-plus")
+
+        # 生成参数
+        self.max_tokens = self._config.LLM_MAX_TOKENS
+        self.temperature = self._config.LLM_TEMPERATURE
+
+    def generate_code(self, prompt: str, mode: str = "simple") -> tuple[str, dict[str, Any]]:
+        """使用 OpenAI 兼容模式生成代码"""
         payload = {
-            "model": self._config.LLM_MODEL,
+            "model": self.model,
             "messages": [
                 {
                     "role": "system",
@@ -64,11 +64,11 @@ class QwenLLM:
                 },
                 {"role": "user", "content": prompt},
             ],
-            "max_tokens": self._config.LLM_MAX_TOKENS,
-            "temperature": self._config.LLM_TEMPERATURE,
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
         }
         headers = {
-            "Authorization": f"Bearer {effective_api_key}",
+            "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
 
@@ -80,16 +80,10 @@ class QwenLLM:
                 data = r.json()
 
                 # OpenAI 兼容模式返回格式
-                content = ""
-                if "choices" in data and len(data["choices"]) > 0:
-                    choice = data["choices"][0]
-                    if "message" in choice:
-                        content = choice["message"].get("content", "")
-                    elif "text" in choice:
-                        content = choice["text"]
+                content = (((data.get("choices") or [{}])[0]).get("message") or {}).get("content") or ""
 
                 meta = {
-                    "model_used": data.get("model", self._config.LLM_MODEL),
+                    "model_used": data.get("model", self.model),
                     "usage": data.get("usage", {}),
                     "request_id": data.get("id"),
                 }
@@ -103,27 +97,31 @@ class QwenLLM:
 
 
 # ---------------------------------------------------------------------------
-# 异步 Provider (原 providers/qwen_provider.py)
+# 异步 Provider (使用 OpenAI 兼容模式)
 # ---------------------------------------------------------------------------
 
 
 class QwenProvider(BaseLLMProvider):
-    """千问 LLM Provider"""
+    """千问 LLM Provider - 使用 OpenAI 兼容模式"""
 
     name: str = "qwen"
 
     def __init__(self):
-        self.api_key = os.getenv("QWEN_API_KEY", "")
-        self.model = os.getenv("QWEN_MODEL", "qwen-max")
+        # 使用 DASHSCOPE_API_KEY（官方推荐）或兼容的 QWEN_API_KEY
+        self.api_key = os.getenv("DASHSCOPE_API_KEY") or os.getenv("QWEN_API_KEY", "")
+        self.model = os.getenv("QWEN_MODEL", "qwen3.6-plus")
 
         if not self.api_key:
             import logging
-
-            logging.getLogger(__name__).warning("QWEN_API_KEY not set in environment")
+            logging.getLogger(__name__).warning("DASHSCOPE_API_KEY or QWEN_API_KEY not set in environment")
             return
 
-        # 设置 API Key
-        dashscope.api_key = self.api_key
+        # 使用官方 OpenAI 兼容模式 base_url
+        self.base_url = os.getenv(
+            "DASHSCOPE_BASE_URL",
+            "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        )
+        self.endpoint = f"{self.base_url.rstrip('/')}/chat/completions"
 
     async def generate(self, req: StrategyGenerationRequest) -> StrategyGenerationResult:
         """使用千问生成策略代码"""
@@ -134,26 +132,34 @@ class QwenProvider(BaseLLMProvider):
         prompt = self._build_prompt(req)
 
         try:
-            # 调用千问 API
-            response = Generation.call(
-                model=self.model,
-                messages=[
+            # 使用 OpenAI 兼容模式调用
+            payload = {
+                "model": self.model,
+                "messages": [
                     {
                         "role": "system",
                         "content": "你是一个量化交易策略专家，擅长生成高质量的Python策略代码。",
                     },
                     {"role": "user", "content": prompt},
                 ],
-                result_format="message",
-                temperature=0.3,
-                max_tokens=4000,
-            )
+                "temperature": 0.3,
+                "max_tokens": 4000,
+            }
+            headers = {
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            }
 
-            if response.status_code != 200:
-                raise RuntimeError(f"Qwen API调用失败: {response.message}")
+            import asyncio
+            def _call_api():
+                r = requests.post(self.endpoint, json=payload, headers=headers, timeout=180)
+                r.raise_for_status()
+                return r.json()
 
-            # 提取生成的内容
-            content = response.output.choices[0].message.content
+            data = await asyncio.to_thread(_call_api)
+
+            # OpenAI 兼容模式返回格式
+            content = (((data.get("choices") or [{}])[0]).get("message") or {}).get("content") or ""
 
             # 解析代码
             code = self._extract_code(content)
@@ -172,7 +178,7 @@ class QwenProvider(BaseLLMProvider):
                     "factors": ["千问生成"],
                     "risk_controls": [],
                     "assumptions": ["使用千问API生成"],
-                    "notes": f"model={self.model}, request_id={response.request_id}",
+                    "notes": f"model={self.model}, request_id={data.get('id')}",
                 },
                 provider="qwen",
             )
@@ -183,16 +189,25 @@ class QwenProvider(BaseLLMProvider):
     async def chat(self, messages: list, **kwargs) -> Any:
         """通用聊天接口"""
         try:
-            response = Generation.call(
-                model=self.model,
-                messages=messages,
-                result_format="message",
-                temperature=kwargs.get("temperature", 0.3),
-                max_tokens=kwargs.get("max_tokens", 4000),
-            )
-            if response.status_code != 200:
-                raise RuntimeError(f"Qwen API调用失败: {response.message}")
-            return response.output.choices[0].message
+            payload = {
+                "model": self.model,
+                "messages": messages,
+                "temperature": kwargs.get("temperature", 0.3),
+                "max_tokens": kwargs.get("max_tokens", 4000),
+            }
+            headers = {
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            }
+
+            import asyncio
+            def _call_api():
+                r = requests.post(self.endpoint, json=payload, headers=headers, timeout=180)
+                r.raise_for_status()
+                return r.json()
+
+            data = await asyncio.to_thread(_call_api)
+            return (((data.get("choices") or [{}])[0]).get("message") or {})
         except Exception as e:
             raise RuntimeError(f"Qwen聊天失败: {str(e)}")
 

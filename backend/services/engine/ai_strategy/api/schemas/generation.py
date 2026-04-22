@@ -24,8 +24,8 @@ class GenerateResponse(BaseModel):
 class GenerateQlibRequest(BaseModel):
     user_id: str
     conditions: dict[str, Any]
-    pool_file_key: str
-    pool_file_url: str | None = None
+    pool_content: str | None = None  # 股票池内容（直接传入股票代码，每行一个）
+    pool_file_key: str | None = None  # 兼容旧字段：COS key
     qlib_params: dict[str, Any] | None = None  # {strategy_type, topk, n_drop, rebalance_period}
     # 以下字段已废弃，保留向后兼容
     position_config: dict[str, Any] | None = None

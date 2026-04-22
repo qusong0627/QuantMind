@@ -35,10 +35,9 @@ _OUR_KWARGS = {
     "sell_cost",
     # 历史遗留字段（前端 QlibStrategyParams 曾存在的额外字段）
     "drop_thresh",
-    # 智能向导生成的股票池 / 调仓周期字段（由平台在上层消费，不传给 qlib BaseStrategy）
-    "pool_file_local",
-    "pool_file_key",
-    "pool_file_url",
+    # 股票池文件路径（由平台在上层消费，不传给 qlib BaseStrategy）
+    "pool_file",
+    # 融资融券相关字段
     "financing_rate",
     "borrow_rate",
     "max_short_exposure",

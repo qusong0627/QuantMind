@@ -153,42 +153,32 @@ class QlibBacktestServiceRuntimeMixin(QlibBacktestServiceQueryMixin):
             # --- Storage Resolution [END] ---
 
             # --- Pool File Resolution [START] ---
-            # If strategy code has POOL_FILE_LOCAL / POOL_FILE_URL / POOL_FILE_KEY,
-            # use it to override universe with local-first priority.
+            # If strategy code has POOL_FILE, use it to override universe.
             if request.strategy_content:
                 import re
 
-                pool_defs = re.findall(
-                    r'^(POOL_FILE_LOCAL|POOL_FILE_URL|POOL_FILE_KEY)\s*=\s*["\']([^"\']+)["\']',
+                pool_match = re.search(
+                    r'^POOL_FILE\s*=\s*["\']([^"\']+)["\']',
                     request.strategy_content,
                     re.MULTILINE,
                 )
-                if pool_defs:
-                    pool_refs: dict[str, str] = {}
-                    for var_name, var_value in pool_defs:
-                        pool_refs[var_name.strip()] = var_value.strip()
+                if pool_match:
+                    pool_file = pool_match.group(1).strip()
+                    task_log.info("resolve_pool_file", "从策略代码提取到股票池文件", pool_file=pool_file)
+                    try:
+                        from backend.shared.storage_resolver import get_storage_resolver
 
-                    for var_name in ("POOL_FILE_LOCAL", "POOL_FILE_URL", "POOL_FILE_KEY"):
-                        pool_file_ref = pool_refs.get(var_name, "")
-                        if not pool_file_ref:
-                            continue
-                        task_log.info("resolve_pool_file", "从策略代码提取到池文件引用", var_name=var_name, pool_file_ref=pool_file_ref)
-                        try:
-                            from backend.shared.storage_resolver import get_storage_resolver
-
-                            resolver = get_storage_resolver()
-                            local_pool_path = await resolver.resolve_to_local_path(pool_file_ref)
-                            request.universe = str(local_pool_path)
-                            task_log.info("pool_file_applied", "股票池已覆盖", universe=request.universe)
-                            break
-                        except Exception as pool_err:
-                            task_log.warning(
-                                "pool_resolution_failed",
-                                "Pool file resolution failed, keep trying fallback refs",
-                                var_name=var_name,
-                                pool_file_ref=pool_file_ref,
-                                error=pool_err,
-                            )
+                        resolver = get_storage_resolver()
+                        local_pool_path = await resolver.resolve_to_local_path(pool_file)
+                        request.universe = str(local_pool_path)
+                        task_log.info("pool_file_applied", "股票池已覆盖", universe=request.universe)
+                    except Exception as pool_err:
+                        task_log.warning(
+                            "pool_resolution_failed",
+                            "Pool file resolution failed",
+                            pool_file=pool_file,
+                            error=pool_err,
+                        )
             # --- Pool File Resolution [END] ---
 
             task_log.info("signal_raw", "原始signal配置", signal=request.strategy_params.signal)
