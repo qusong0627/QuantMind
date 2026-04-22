@@ -2,10 +2,34 @@
 AI策略生成服务配置
 """
 
+import json
 import os
 from functools import lru_cache
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def _load_ide_config_api_key() -> str:
+    """从 AI-IDE 的 config.json 读取用户配置的 API Key"""
+    # 尝试多个可能的数据目录
+    data_dirs = [
+        os.getenv("AI_IDE_DATA_DIR"),
+        "/app/data",  # Docker 容器内
+        os.path.join(os.path.dirname(__file__), "data"),
+    ]
+    for data_dir in data_dirs:
+        if not data_dir:
+            continue
+        config_path = os.path.join(data_dir, "config.json")
+        if os.path.exists(config_path):
+            try:
+                with open(config_path, encoding="utf-8") as f:
+                    config = json.load(f)
+                    if config.get("qwen_api_key"):
+                        return config["qwen_api_key"]
+            except Exception:
+                pass
+    return ""
 
 
 class AIStrategyConfig(BaseSettings):
@@ -129,8 +153,10 @@ class LLMProviderConfig:
     @staticmethod
     def get_qwen_config(base_config: AIStrategyConfig):
         """千问配置（使用官方 OpenAI 兼容模式）"""
+        # 优先级：config.json > DASHSCOPE_API_KEY > QWEN_API_KEY
+        api_key = _load_ide_config_api_key() or os.getenv("DASHSCOPE_API_KEY") or os.getenv("QWEN_API_KEY", "")
         return {
-            "api_key": os.getenv("DASHSCOPE_API_KEY") or os.getenv("QWEN_API_KEY", ""),
+            "api_key": api_key,
             "api_url": os.getenv(
                 "DASHSCOPE_BASE_URL",
                 "https://dashscope.aliyuncs.com/compatible-mode/v1",
