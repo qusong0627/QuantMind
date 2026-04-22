@@ -388,9 +388,77 @@ class ModelRegistryService:
                 },
             )
 
+    async def _ensure_fallback_model_record(self, *, tenant_id: str, user_id: str) -> None:
+        """确保 fallback 模型（如 alpha158）也被注册到用户模型列表。"""
+        tenant, user = self._normalize_owner(tenant_id=tenant_id, user_id=user_id)
+        now = datetime.now(timezone.utc)
+        async with get_session() as session:
+            exists = (
+                await session.execute(
+                    text(
+                        """
+                        SELECT 1
+                        FROM qm_user_models
+                        WHERE tenant_id = :tenant_id AND user_id = :user_id AND model_id = :model_id
+                        LIMIT 1
+                        """
+                    ),
+                    {"tenant_id": tenant, "user_id": user, "model_id": self.fallback_model_id},
+                )
+            ).first()
+            if exists:
+                return
+
+            # 检查 fallback 模型目录是否存在
+            fallback_dir = Path(self.fallback_model_dir)
+            if not fallback_dir.exists() or not fallback_dir.is_dir():
+                return
+
+            # 读取 metadata.json
+            meta_file = fallback_dir / "metadata.json"
+            metadata: dict[str, Any] = {}
+            if meta_file.exists():
+                try:
+                    metadata = json.loads(meta_file.read_text(encoding="utf-8"))
+                except Exception:
+                    metadata = {}
+
+            metadata.update({"system_default": True, "readonly": True})
+            metrics = metadata.get("performance_metrics", {})
+            model_file = self._find_system_model_file(fallback_dir, metadata)
+
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO qm_user_models (
+                        tenant_id, user_id, model_id, source_run_id, status, storage_path, model_file,
+                        metadata_json, metrics_json, is_default, created_at, updated_at, activated_at
+                    ) VALUES (
+                        :tenant_id, :user_id, :model_id, NULL, 'active', :storage_path, :model_file,
+                        CAST(:metadata_json AS JSONB), CAST(:metrics_json AS JSONB), FALSE,
+                        :created_at, :updated_at, NULL
+                    )
+                    ON CONFLICT (tenant_id, user_id, model_id) DO NOTHING
+                    """
+                ),
+                {
+                    "tenant_id": tenant,
+                    "user_id": user,
+                    "model_id": self.fallback_model_id,
+                    "storage_path": self.fallback_model_dir,
+                    "model_file": model_file,
+                    "metadata_json": json.dumps(metadata, ensure_ascii=False),
+                    "metrics_json": json.dumps(metrics, ensure_ascii=False),
+                    "created_at": now,
+                    "updated_at": now,
+                },
+            )
+
     async def list_models(self, *, tenant_id: str, user_id: str, include_archived: bool = False) -> list[dict[str, Any]]:
         tenant, user = self._normalize_owner(tenant_id=tenant_id, user_id=user_id)
         await self._ensure_system_default_record(tenant_id=tenant, user_id=user)
+        # 同时确保 fallback 模型（如 alpha158）也被注册
+        await self._ensure_fallback_model_record(tenant_id=tenant, user_id=user)
         where_extra = "" if include_archived else "AND status <> 'archived'"
         async with get_session(read_only=True) as session:
             rows = (
