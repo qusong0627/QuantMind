@@ -2533,6 +2533,46 @@ ALTER SEQUENCE public.real_account_ledger_daily_snapshots_id_seq OWNED BY public
 
 
 --
+-- Name: real_account_baselines; Type: TABLE; Schema: public; Owner: quantmind
+--
+
+CREATE TABLE public.real_account_baselines (
+    id integer NOT NULL,
+    tenant_id character varying(64) NOT NULL,
+    user_id character varying(64) NOT NULL,
+    account_id character varying(64) NOT NULL,
+    initial_equity numeric(18,4) NOT NULL DEFAULT 0,
+    first_snapshot_at timestamp with time zone NOT NULL,
+    source character varying(64) NOT NULL DEFAULT 'qmt_bridge_first_report'::character varying,
+    created_at timestamp with time zone DEFAULT now(),
+    updated_at timestamp with time zone DEFAULT now()
+);
+
+
+ALTER TABLE public.real_account_baselines OWNER TO quantmind;
+
+--
+-- Name: real_account_baselines_id_seq; Type: SEQUENCE; Schema: public; Owner: quantmind
+--
+
+CREATE SEQUENCE public.real_account_baselines_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+ALTER TABLE public.real_account_baselines_id_seq OWNER TO quantmind;
+
+--
+-- Name: real_account_baselines_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: quantmind
+--
+
+ALTER SEQUENCE public.real_account_baselines_id_seq OWNED BY public.real_account_baselines.id;
+
+--
 -- Name: real_account_snapshots; Type: TABLE; Schema: public; Owner: quantmind
 --
 
@@ -10681,6 +10721,22 @@ ALTER TABLE ONLY public.quotes
 
 ALTER TABLE ONLY public.real_account_ledger_daily_snapshots
     ADD CONSTRAINT real_account_ledger_daily_snapshots_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: real_account_baselines real_account_baselines_pkey; Type: CONSTRAINT; Schema: public; Owner: quantmind
+--
+
+ALTER TABLE ONLY public.real_account_baselines
+    ADD CONSTRAINT real_account_baselines_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: real_account_baselines uq_real_account_baseline; Type: CONSTRAINT; Schema: public; Owner: quantmind
+--
+
+ALTER TABLE ONLY public.real_account_baselines
+    ADD CONSTRAINT uq_real_account_baseline UNIQUE (tenant_id, user_id, account_id);
 
 
 --
