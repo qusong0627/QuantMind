@@ -182,7 +182,7 @@ def publish_notification(
 
     sql = text("""
         INSERT INTO notifications (
-            user_id, tenant_id, title, content, type, level, action_url, expires_at
+            user_id, tenant_id, title, content, notification_type, level, action_url, expires_at
         )
         VALUES (
             :user_id, :tenant_id, :title, :content, :type, :level, :action_url, :expires_at

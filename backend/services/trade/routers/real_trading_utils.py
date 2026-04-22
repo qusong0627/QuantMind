@@ -240,15 +240,15 @@ async def _fetch_active_portfolio_snapshot(
 ) -> dict | None:
     sid = str(strategy_id or "").strip()
 
-    try:
-        user_id_int = int(user_id)
-    except (TypeError, ValueError):
+    # user_id 在数据库中是 VARCHAR 类型，直接使用字符串查询
+    normalized_user_id = str(user_id or "").strip()
+    if not normalized_user_id:
         return None
 
     # 有 strategy_id 时精确匹配；否则取该用户最近的 portfolio
     base_where = [
         Portfolio.tenant_id == tenant_id,
-        Portfolio.user_id == user_id_int,
+        Portfolio.user_id == normalized_user_id,
         Portfolio.is_deleted.is_(False),
     ]
     if sid:

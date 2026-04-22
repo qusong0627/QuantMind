@@ -1855,7 +1855,7 @@ class ManualExecutionService:
                 .where(
                     and_(
                         Portfolio.tenant_id == tenant_id,
-                        Portfolio.user_id == int(user_id),
+                        Portfolio.user_id == user_id,
                         Portfolio.status == "active",
                         Portfolio.is_deleted == False,
                     )

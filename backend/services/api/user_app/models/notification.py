@@ -28,6 +28,7 @@ class Notification(Base):
     title = Column(String(128), nullable=False, comment="标题")
     content = Column(Text, nullable=False, comment="内容")
     type = Column(
+        "notification_type",  # 映射到数据库中的 notification_type 列
         String(32),
         default="system",
         index=True,

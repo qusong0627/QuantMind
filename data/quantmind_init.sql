@@ -1358,9 +1358,12 @@ CREATE TABLE public.notifications (
     title character varying(200) NOT NULL,
     content text,
     data jsonb DEFAULT '{}'::jsonb,
+    level character varying(16) DEFAULT 'info'::character varying,
+    action_url character varying(512),
     is_read boolean DEFAULT false,
     read_at timestamp with time zone,
-    created_at timestamp with time zone DEFAULT now()
+    created_at timestamp with time zone DEFAULT now(),
+    expires_at timestamp with time zone
 );
 
 
@@ -10145,7 +10148,7 @@ COPY public.user_subscriptions (id, user_id, tenant_id, plan_id, status, start_d
 --
 
 COPY public.users (id, user_id, tenant_id, username, email, phone_number, password_hash, is_active, is_verified, is_admin, is_locked, last_login_at, last_login_ip, login_count, created_at, updated_at, is_deleted, deleted_at) FROM stdin;
-1	admin	default	admin	admin@quantmind.local	\N	$2b$12$B/yjK9cT.wx4BlB9j.r/t.dADjCbmutIXoDM7PdKZmV6ypuYiiUvW	t	t	t	f	2026-04-19 15:40:27.957017+08	\N	44	2026-04-16 20:57:19.018279+08	2026-04-19 15:40:27.95638+08	f	\N
+10000001	10000001	default	admin	admin@quantmind.local	\N	$2b$12$B/yjK9cT.wx4BlB9j.r/t.dADjCbmutIXoDM7PdKZmV6ypuYiiUvW	t	t	t	f	2026-04-19 15:40:27.957017+08	\N	44	2026-04-16 20:57:19.018279+08	2026-04-19 15:40:27.95638+08	f	\N
 \.
 
 

@@ -31,7 +31,7 @@ class Order(Base, TimestampMixin):
 
     # Foreign keys
     tenant_id = Column(String(64), nullable=False, default="default", index=True)
-    user_id = Column(Integer, nullable=False, index=True)
+    user_id = Column(String(32), nullable=False, index=True)
     portfolio_id = Column(Integer, nullable=False, index=True)
     strategy_id = Column(Integer, nullable=True, index=True)
 

@@ -367,7 +367,13 @@ const StrategyManagement: React.FC<StrategyManagementProps> = ({
 
     const getCheckTone = useCallback((key: string): boolean | undefined => {
         const item = getMonitorItem(key);
-        return item?.ok;
+        if (!item) return undefined;
+        // 检查 message 是否包含 [WARNING]，如果有则返回 false（异常状态）
+        const messageStr = String(item.message || '');
+        if (messageStr.includes('[WARNING]')) {
+            return false;
+        }
+        return item.ok;
     }, [getMonitorItem]);
 
     const getQmtAgentDisplayMessage = useCallback((item?: PreflightCheckItem, fallback = '未获取'): string => {
@@ -432,22 +438,15 @@ const StrategyManagement: React.FC<StrategyManagementProps> = ({
             { label: 'QMT Agent', value: getEnvDisplayMessage('qmt_agent_online', '未获取'), ok: getCheckTone('qmt_agent_online'), title: getCheckMessage('qmt_agent_online') },
         ];
 
-    const connectionChecks = isGlobalSim
-        ? [
-            { label: 'Redis Signal', value: getCheckMessage('redis'), ok: getCheckTone('redis') },
-            { label: 'PostgreSQL', value: getCheckMessage('db'), ok: getCheckTone('db') },
-            { label: 'Data Feed', value: getCheckMessage('stream_series_freshness'), ok: getCheckTone('stream_series_freshness') },
-            { label: 'WebSocket', value: wsStatusText.label, ok: wsStatusText.ok },
-        ]
-        : [
-            { label: 'Redis Signal', value: getCheckMessage('redis'), ok: getCheckTone('redis') },
-            { label: 'PostgreSQL', value: getCheckMessage('db'), ok: getCheckTone('db') },
-            { label: 'Data Feed', value: getCheckMessage('stream_series_freshness'), ok: getCheckTone('stream_series_freshness') },
-            { label: 'WebSocket', value: wsStatusText.label, ok: wsStatusText.ok },
-        ].map((item) => ({
-            ...item,
-            level: getConnectionSignalLevel(item.label, item.value, item.ok),
-        }));
+    const connectionChecks = [
+        { label: 'Redis Signal', value: getCheckMessage('redis'), ok: getCheckTone('redis') },
+        { label: 'PostgreSQL', value: getCheckMessage('db'), ok: getCheckTone('db') },
+        { label: 'Data Feed', value: getCheckMessage('stream_series_freshness'), ok: getCheckTone('stream_series_freshness') },
+        { label: 'WebSocket', value: wsStatusText.label, ok: wsStatusText.ok },
+    ].map((item) => ({
+        ...item,
+        level: getConnectionSignalLevel(item.label, item.value, item.ok),
+    }));
     const connectionAttentionCount = connectionChecks.filter((item) => item.level !== 'green').length;
     const connectionHealthyCount = connectionChecks.length - connectionAttentionCount;
 

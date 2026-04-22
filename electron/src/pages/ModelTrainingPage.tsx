@@ -372,10 +372,10 @@ export const ModelTrainingPage: React.FC = () => {
                 </Card>
 
                 <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-                    <MetricCard label="特征数" value={`${featureCount}`} />
-                    <MetricCard label="预测周期" value={`T+${target.horizonDays}`} hint={target.mode} />
-                    <MetricCard label="数据集天数" value={`${totalDays}`} hint={`${trainDays}/${valDays}/${testDays}`} />
-                    <MetricCard label="状态" value={trainingStatus === 'draft' ? '待配置' : trainingStatus === 'running' ? '训练中' : '已完成'} />
+                    <MetricCard label="特征数" value={`${featureCount}`} centered />
+                    <MetricCard label="预测周期" value={`T+${target.horizonDays}`} hint={target.mode} centered />
+                    <MetricCard label="数据集天数" value={`${totalDays}`} hint={`${trainDays}/${valDays}/${testDays}`} centered />
+                    <MetricCard label="状态" value={trainingStatus === 'draft' ? '待配置' : trainingStatus === 'running' ? '训练中' : '已完成'} centered />
                 </div>
 
                 <AnimatePresence mode="wait">

@@ -114,9 +114,7 @@ async def update_dispatch_item_status(
 
     tenant_id = (x_tenant_id or "").strip() or "default"
     user_id = str(x_user_id).strip()
-    try:
-        user_id_int = int(user_id)
-    except ValueError:
+    if not user_id:
         raise HTTPException(status_code=400, detail="invalid x_user_id")
 
     order_status_map = {
@@ -172,7 +170,7 @@ async def update_dispatch_item_status(
     stmt = select(Order).where(
         and_(
             Order.tenant_id == tenant_id,
-            Order.user_id == user_id_int,
+            Order.user_id == user_id,
             Order.client_order_id == client_order_id,
         )
     )
@@ -895,7 +893,7 @@ async def upsert_qmt_account_snapshot(
         await _sync_qmt_account_to_db(
             db=db,
             tenant_id=ctx.tenant_id,
-            user_id=int(ctx.user_id),
+            user_id=ctx.user_id,
             total_asset=_to_float(portfolio_sync_payload.get("total_asset"), 0.0),
             available_cash=_to_float(portfolio_sync_payload.get("available_cash"), 0.0),
             frozen_cash=_to_float(portfolio_sync_payload.get("frozen_cash"), 0.0),
@@ -983,9 +981,7 @@ async def report_qmt_execution(
 ):
     if payload.account_id != ctx.account_id:
         raise HTTPException(status_code=403, detail="account_id mismatch")
-    try:
-        ctx_user_id = int(ctx.user_id)
-    except Exception:
+    if not ctx.user_id:
         raise HTTPException(status_code=400, detail="invalid bridge user_id")
 
     client_oid = str(payload.client_order_id or "").strip()
@@ -1007,7 +1003,7 @@ async def report_qmt_execution(
         select(Order).where(
             and_(
                 Order.tenant_id == ctx.tenant_id,
-                Order.user_id == ctx_user_id,
+                Order.user_id == ctx.user_id,
                 Order.client_order_id == client_oid,
             )
         )
@@ -1186,7 +1182,7 @@ async def report_qmt_execution(
                 select(Trade).where(
                     and_(
                         Trade.tenant_id == ctx.tenant_id,
-                        Trade.user_id == int(ctx.user_id),
+                        Trade.user_id == ctx.user_id,
                         Trade.exchange_trade_id == exchange_trade_id,
                     )
                 )
@@ -1195,7 +1191,7 @@ async def report_qmt_execution(
             if existing_trade is None:
                 trade = Trade(
                     tenant_id=ctx.tenant_id,
-                    user_id=int(ctx.user_id),
+                    user_id=ctx.user_id,
                     portfolio_id=order.portfolio_id,
                     order_id=order.order_id,
                     symbol=order.symbol,

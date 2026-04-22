@@ -353,13 +353,12 @@ async def stop_trading(
 
         # Clear active strategy in Redis
         redis.client.delete(_active_strategy_key(resolved_tenant_id, resolved_user_id))
-        
+
         # 同步更新数据库中 portfolio 的 run_status
         try:
-            user_id_int = int(resolved_user_id)
             stmt = select(Portfolio).where(
                 Portfolio.tenant_id == resolved_tenant_id,
-                Portfolio.user_id == user_id_int,
+                Portfolio.user_id == resolved_user_id,
                 Portfolio.run_status == "running",
                 Portfolio.is_deleted.is_(False),
             ).order_by(desc(Portfolio.updated_at)).limit(1)

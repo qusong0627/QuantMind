@@ -174,8 +174,8 @@ async def get_real_account_settings(
         tenant_id=resolved_tenant_id,
         user_id=resolved_user_id,
     )
-    resolved_account_id = str(current_snapshot.get("account_id") or resolved_user_id or "").strip()
-    
+    resolved_account_id = str((current_snapshot or {}).get("account_id") or resolved_user_id or "").strip()
+
     baseline = await _fetch_real_account_baseline(
         db,
         tenant_id=resolved_tenant_id,
@@ -213,7 +213,7 @@ async def update_real_account_settings(
         current_snapshot_data = await _fetch_latest_real_account_snapshot(
             db, tenant_id=resolved_tenant_id, user_id=resolved_user_id
         )
-        resolved_account_id = str(current_snapshot_data.get("account_id") or resolved_user_id or "").strip()
+        resolved_account_id = str((current_snapshot_data or {}).get("account_id") or resolved_user_id or "").strip()
         if not resolved_account_id:
             raise HTTPException(status_code=400, detail="未检测到该用户的实盘账户 ID，请确保 QMT Agent 已正常上报过一次数据")
 
@@ -241,7 +241,7 @@ async def update_real_account_settings(
             .where(
                 and_(
                     Portfolio.tenant_id == resolved_tenant_id,
-                    Portfolio.user_id == (int(resolved_user_id) if resolved_user_id.isdigit() else 0),
+                    Portfolio.user_id == resolved_user_id,
                     Portfolio.mode == "REAL"
                 )
             )

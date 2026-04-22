@@ -90,7 +90,12 @@ export const useWizardStore = create<WizardState & WizardActions>()(
       setRisk: (risk) => set({ risk }),
       setStrategyStyle: (strategyStyle) => set({ strategyStyle }),
       setPositionConfig: (positionConfig) => set({ positionConfig }),
-      setGenerated: (g) => set({ generated: g }),
+      setGenerated: (g) => set({
+        generated: g,
+        // 重新生成策略时重置保存状态和验证结果
+        saveStatus: { savedToCloud: false, downloadedLocally: false },
+        validationResult: null,
+      }),
       addCustomStock: (stock) => set((state) => {
         const exists = state.customPool?.some(s => s.symbol === stock.symbol);
         if (exists) return state;

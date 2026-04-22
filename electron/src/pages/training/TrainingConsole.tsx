@@ -133,8 +133,9 @@ export const TrainingConsole: React.FC<TrainingConsoleProps> = ({
                     : '待开始'
               }
               hint={`后端状态：${backendRunStatus || 'draft'} | T+${target.horizonDays} · ${target.mode}`}
+              centered
             />
-            <MetricCard label="总样本周期" value={`${totalDays} 天`} hint={`训练/验证/测试：${trainDays}/${valDays}/${testDays}`} />
+            <MetricCard label="总样本周期" value={`${totalDays} 天`} hint={`训练/验证/测试：${trainDays}/${valDays}/${testDays}`} centered />
           </div>
 
           <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
