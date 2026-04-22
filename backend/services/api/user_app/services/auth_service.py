@@ -495,6 +495,19 @@ class AuthService:
 
             logger.info(f"User registered: {user_id}")
 
+        # 为新用户自动注册系统模型
+        try:
+            from backend.shared.model_registry import model_registry_service
+            await model_registry_service._ensure_system_default_record(
+                tenant_id=user_data.tenant_id, user_id=user_id
+            )
+            await model_registry_service._ensure_fallback_model_record(
+                tenant_id=user_data.tenant_id, user_id=user_id
+            )
+            logger.info(f"System models registered for user: {user_id}")
+        except Exception as e:
+            logger.warning(f"Failed to register system models for user {user_id}: {e}")
+
         return await self._issue_tokens(
             user_id=user.user_id,
             tenant_id=user.tenant_id,
