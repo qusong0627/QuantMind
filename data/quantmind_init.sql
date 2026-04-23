@@ -2391,6 +2391,67 @@ CREATE TABLE public.qm_model_inference_settings (
 ALTER TABLE public.qm_model_inference_settings OWNER TO quantmind;
 
 --
+-- Name: engine_feature_runs; Type: TABLE; Schema: public; Owner: quantmind
+--
+
+CREATE TABLE public.engine_feature_runs (
+    id SERIAL PRIMARY KEY,
+    run_id VARCHAR(64) UNIQUE NOT NULL,
+    tenant_id VARCHAR(64) NOT NULL DEFAULT 'default',
+    user_id VARCHAR(64) NOT NULL,
+    trade_date DATE NOT NULL,
+    model_name VARCHAR(128),
+    model_version VARCHAR(128),
+    feature_version VARCHAR(128),
+    feature_dim INTEGER,
+    window_start TIMESTAMP,
+    window_end TIMESTAMP,
+    status VARCHAR(32) DEFAULT 'feature_ready',
+    expected_symbols INTEGER DEFAULT 0,
+    ready_symbols INTEGER DEFAULT 0,
+    missing_symbols INTEGER DEFAULT 0,
+    source VARCHAR(32) DEFAULT 'l2_batch',
+    checksum VARCHAR(128),
+    quality JSONB DEFAULT '{}',
+    error_message TEXT,
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW()
+);
+
+
+ALTER TABLE public.engine_feature_runs OWNER TO quantmind;
+
+--
+-- Name: engine_signal_scores; Type: TABLE; Schema: public; Owner: quantmind
+--
+
+CREATE TABLE public.engine_signal_scores (
+    id SERIAL PRIMARY KEY,
+    run_id VARCHAR(64) NOT NULL,
+    tenant_id VARCHAR(64) NOT NULL DEFAULT 'default',
+    user_id VARCHAR(64) NOT NULL,
+    trade_date DATE NOT NULL,
+    symbol VARCHAR(16) NOT NULL,
+    model_version VARCHAR(128),
+    feature_version VARCHAR(128),
+    light_score FLOAT,
+    tft_score FLOAT,
+    fusion_score FLOAT,
+    risk_weight FLOAT DEFAULT 1.0,
+    regime VARCHAR(32) DEFAULT 'normal',
+    score_rank INTEGER,
+    universe_tag VARCHAR(32),
+    signal_side VARCHAR(8),
+    expected_price FLOAT,
+    quality JSONB DEFAULT '{}',
+    created_at TIMESTAMP DEFAULT NOW(),
+    CONSTRAINT engine_signal_scores_unique UNIQUE (tenant_id, user_id, trade_date, symbol, model_version, feature_version, run_id)
+);
+
+
+ALTER TABLE public.engine_signal_scores OWNER TO quantmind;
+
+--
 -- Name: qm_strategy_model_bindings; Type: TABLE; Schema: public; Owner: quantmind
 --
 
@@ -11258,6 +11319,34 @@ CREATE INDEX idx_qm_model_inference_settings_owner ON public.qm_model_inference_
 --
 
 CREATE INDEX idx_qm_strategy_model_bindings_model ON public.qm_strategy_model_bindings USING btree (tenant_id, user_id, model_id);
+
+
+--
+-- Name: idx_signal_scores_run_id; Type: INDEX; Schema: public; Owner: quantmind
+--
+
+CREATE INDEX idx_signal_scores_run_id ON public.engine_signal_scores USING btree (run_id);
+
+
+--
+-- Name: idx_signal_scores_trade_date; Type: INDEX; Schema: public; Owner: quantmind
+--
+
+CREATE INDEX idx_signal_scores_trade_date ON public.engine_signal_scores USING btree (trade_date);
+
+
+--
+-- Name: idx_signal_scores_user; Type: INDEX; Schema: public; Owner: quantmind
+--
+
+CREATE INDEX idx_signal_scores_user ON public.engine_signal_scores USING btree (tenant_id, user_id);
+
+
+--
+-- Name: idx_feature_runs_user; Type: INDEX; Schema: public; Owner: quantmind
+--
+
+CREATE INDEX idx_feature_runs_user ON public.engine_feature_runs USING btree (tenant_id, user_id);
 
 
 --
