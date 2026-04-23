@@ -468,6 +468,18 @@ step6_clone_code() {
         else
             git pull --ff-only origin master
         fi
+    elif [[ -d "$PROJECT_DIR" ]]; then
+        # 目录存在但不是 git 仓库
+        if [[ "$FORCE_SYNC" == "true" ]]; then
+            log_warn "目录已存在但非 git 仓库，强制删除后重新克隆..."
+            rm -rf "$PROJECT_DIR"
+            git clone $REPO_URL "$PROJECT_DIR"
+            cd "$PROJECT_DIR"
+        else
+            log_error "目录 $PROJECT_DIR 已存在但不是 git 仓库"
+            log_info "请使用 --force-sync 强制删除后重新克隆"
+            exit 1
+        fi
     else
         log_info "从 Gitee 克隆代码..."
         git clone $REPO_URL "$PROJECT_DIR"
