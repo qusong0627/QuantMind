@@ -650,7 +650,7 @@ export const InferenceCenterPanel: React.FC<{
                   </Text>
                 </div>
                 <div className="flex flex-wrap justify-end gap-2">
-                  <Tag className="m-0 rounded-full border-0 bg-slate-100 text-slate-600 font-bold">模型 {precheck.model_id}</Tag>
+                  <Tag className="m-0 rounded-full border-0 bg-slate-100 text-slate-600 font-bold">{precheck.effective_model_id || precheck.model_id}</Tag>
                   <Tag className="m-0 rounded-full border-0 bg-blue-50 text-blue-700 font-bold">{precheck.prediction_trade_date}</Tag>
                 </div>
               </div>
@@ -740,7 +740,7 @@ export const InferenceCenterPanel: React.FC<{
             <div className="mt-3 grid grid-cols-2 gap-2">
               <div className="rounded-xl bg-white px-3 py-2 border border-slate-100">
                 <Text className="text-[10px] text-slate-400 font-black uppercase block">模型</Text>
-                <Text className="text-xs font-black text-slate-800 font-mono break-all">{latestInferenceRun.model_id || '—'}</Text>
+                <Text className="text-xs font-black text-slate-800 break-all">{modelDisplayName(model)}</Text>
               </div>
               <div className="rounded-xl bg-white px-3 py-2 border border-slate-100">
                 <Text className="text-[10px] text-slate-400 font-black uppercase block">更新时间</Text>
@@ -792,7 +792,7 @@ export const InferenceCenterPanel: React.FC<{
           <div className="flex-1 bg-slate-50 rounded-xl px-4 py-2 flex items-center gap-2 min-w-0">
             <Brain size={11} className="text-slate-400 flex-shrink-0" />
             <Text className="text-[10px] font-bold text-slate-400">模型：</Text>
-            <Text className="text-[10px] font-black text-slate-800 font-mono truncate">{model.model_id}</Text>
+            <Text className="text-[10px] font-black text-slate-800 truncate">{modelDisplayName(model)}</Text>
             {model.is_default && <Tag color="gold" className="text-[8px] font-black flex-shrink-0">默认</Tag>}
           </div>
           <Button
