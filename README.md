@@ -156,40 +156,6 @@ sudo bash deploy/deploy.sh --force-sync
 
 > **提示：** 如果提示 `command not found`，请使用 `sudo bash deploy/deploy.sh` 执行。
 
-### 常见问题
-
-**Q: 部署中断后如何继续？**
-
-```bash
-# 查看当前进度
-cat /tmp/quantmind_deploy_progress
-
-# 从断点继续
-sudo bash deploy/deploy.sh --resume
-```
-
-**Q: Docker 镜像拉取失败？**
-
-```bash
-# 手动配置镜像源
-sudo tee /etc/docker/daemon.json <<EOF
-{
-  "registry-mirrors": ["https://docker.1ms.run"]
-}
-EOF
-
-# 重启 Docker
-sudo systemctl daemon-reload
-sudo systemctl restart docker
-
-# 手动拉取镜像
-docker pull postgres:15-alpine
-docker pull redis:7-alpine
-
-# 继续部署
-sudo bash deploy/deploy.sh --resume
-```
-
 ### 手动部署
 
 ```bash
@@ -405,6 +371,40 @@ python backend/run_tests.py integration
 
 # 全量测试
 python backend/run_tests.py all
+```
+
+### 常见问题
+
+**Q: 部署中断后如何继续？**
+
+```bash
+# 查看当前进度
+cat /tmp/quantmind_deploy_progress
+
+# 从断点继续
+sudo bash deploy/deploy.sh --resume
+```
+
+**Q: Docker 镜像拉取失败？**
+
+```bash
+# 手动配置镜像源
+sudo tee /etc/docker/daemon.json <<EOF
+{
+  "registry-mirrors": ["https://docker.1ms.run"]
+}
+EOF
+
+# 重启 Docker
+sudo systemctl daemon-reload
+sudo systemctl restart docker
+
+# 手动拉取镜像
+docker pull postgres:15-alpine
+docker pull redis:7-alpine
+
+# 继续部署
+sudo bash deploy/deploy.sh --resume
 ```
 
 ---
