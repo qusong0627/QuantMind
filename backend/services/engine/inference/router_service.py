@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 from pathlib import Path
@@ -14,6 +15,34 @@ from .service import InferenceService
 logger = logging.getLogger(__name__)
 
 _NON_FEATURE_KEYS = {"symbol", "instrument", "timestamp", "datetime", "date"}
+
+
+def _get_model_data_dir(model_dir: Path) -> str:
+    """
+    从模型配置中获取推理数据目录。
+
+    优先级：
+    1. metadata.json 中的 qlib_data_path 字段（绝对路径）
+    2. metadata.json 中的 data_source 字段判断：
+       - "qlib" -> db/qlib_data
+       - "parquet" 或其他 -> db/feature_snapshots
+    3. 默认值 -> db/feature_snapshots
+    """
+    meta_file = Path(model_dir) / "metadata.json"
+    if meta_file.is_file():
+        try:
+            meta = json.loads(meta_file.read_text(encoding="utf-8"))
+            qlib_data_path = meta.get("qlib_data_path")
+            if qlib_data_path:
+                return qlib_data_path
+
+            data_source = str(meta.get("data_source", "")).lower()
+            if data_source == "qlib":
+                return "db/qlib_data"
+        except Exception:
+            pass
+
+    return "db/feature_snapshots"
 
 
 class InferenceRouterService:

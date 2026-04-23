@@ -194,13 +194,45 @@ async def _resolve_requested_model(current_user: dict[str, Any], model_id: str):
     return requested_model_id, resolved
 
 
-def _choose_data_dir(effective_model_id: str) -> str:
-    primary_data_dir = os.getenv("QLIB_PRIMARY_DATA_PATH", "db/feature_snapshots")
-    fallback_data_dir = os.getenv("QLIB_FALLBACK_DATA_PATH", "db/feature_snapshots")
-    fallback_model_id = os.getenv("FALLBACK_MODEL_ID", "alpha158")
-    if str(effective_model_id or "").strip() == fallback_model_id:
-        return fallback_data_dir
-    return primary_data_dir
+def _get_model_data_dir(model_dir: Path, metadata: dict | None = None) -> str:
+    """
+    从模型配置中获取推理数据目录。
+
+    优先级：
+    1. metadata.json 中的 qlib_data_path 字段（绝对路径）
+    2. metadata.json 中的 data_source 字段判断：
+       - "qlib" -> db/qlib_data
+       - "parquet" 或其他 -> db/feature_snapshots
+    3. 默认值 -> db/feature_snapshots
+    """
+    # 优先读取 metadata 中的 qlib_data_path
+    if metadata:
+        qlib_data_path = metadata.get("qlib_data_path")
+        if qlib_data_path:
+            return qlib_data_path
+
+        # 根据 data_source 判断
+        data_source = str(metadata.get("data_source", "")).lower()
+        if data_source == "qlib":
+            return "db/qlib_data"
+
+    # 尝试从模型目录读取 metadata.json
+    meta_file = model_dir / "metadata.json"
+    if meta_file.is_file():
+        try:
+            meta = json.loads(meta_file.read_text(encoding="utf-8"))
+            qlib_data_path = meta.get("qlib_data_path")
+            if qlib_data_path:
+                return qlib_data_path
+
+            data_source = str(meta.get("data_source", "")).lower()
+            if data_source == "qlib":
+                return "db/qlib_data"
+        except Exception:
+            pass
+
+    # 默认值
+    return "db/feature_snapshots"
 
 
 def _render_next_run(next_run_at: Any) -> str | None:
@@ -586,7 +618,7 @@ async def precheck_inference(
     data_trade_date = resolved_data_trade_date.isoformat()
     runner = InferenceScriptRunner(
         primary_model_dir=str(model_dir),
-        primary_data_dir=_choose_data_dir(resolved.effective_model_id),
+        primary_data_dir=_get_model_data_dir(model_dir),
         primary_model_id=resolved.effective_model_id,
     )
     prediction_trade_date = runner._resolve_prediction_trade_date(data_trade_date)
@@ -644,7 +676,7 @@ async def run_model_inference(
     data_trade_date = resolved_data_trade_date.isoformat()
     runner = InferenceScriptRunner(
         primary_model_dir=str(model_dir),
-        primary_data_dir=_choose_data_dir(resolved.effective_model_id),
+        primary_data_dir=_get_model_data_dir(model_dir),
         primary_model_id=resolved.effective_model_id,
     )
     prediction_trade_date = runner._resolve_prediction_trade_date(data_trade_date)
@@ -696,7 +728,7 @@ async def run_model_inference(
             "effective_model_id": resolved.effective_model_id,
             "active_model_id": resolved.effective_model_id,
             "model_source": resolved.model_source,
-            "active_data_source": _choose_data_dir(resolved.effective_model_id),
+            "active_data_source": _get_model_data_dir(model_dir),
             "requested_inference_date": requested_inference_date.isoformat(),
             "calendar_adjusted": calendar_adjusted,
             "data_trade_date": data_trade_date,
@@ -737,7 +769,7 @@ async def run_model_inference(
             active_model_id=resolved.effective_model_id,
             effective_model_id=resolved.effective_model_id,
             model_source=resolved.model_source,
-            active_data_source=_choose_data_dir(resolved.effective_model_id),
+            active_data_source=_get_model_data_dir(model_dir),
             result_payload=failure_payload,
         )
         await model_inference_persistence.record_run_to_settings(
@@ -774,7 +806,7 @@ async def run_model_inference(
             "effective_model_id": resolved.effective_model_id,
             "active_model_id": resolved.effective_model_id,
             "model_source": resolved.model_source,
-            "active_data_source": _choose_data_dir(resolved.effective_model_id),
+            "active_data_source": _get_model_data_dir(model_dir),
             "requested_inference_date": requested_inference_date.isoformat(),
             "calendar_adjusted": calendar_adjusted,
             "data_trade_date": data_trade_date,
@@ -815,7 +847,7 @@ async def run_model_inference(
             active_model_id=resolved.effective_model_id,
             effective_model_id=resolved.effective_model_id,
             model_source=resolved.model_source,
-            active_data_source=_choose_data_dir(resolved.effective_model_id),
+            active_data_source=_get_model_data_dir(model_dir),
             result_payload=failure_payload,
         )
         await model_inference_persistence.record_run_to_settings(
@@ -840,7 +872,7 @@ async def run_model_inference(
         "effective_model_id": resolved.effective_model_id,
         "active_model_id": result.active_model_id or resolved.effective_model_id,
         "model_source": result_model_source,
-        "active_data_source": result.active_data_source or _choose_data_dir(resolved.effective_model_id),
+        "active_data_source": result.active_data_source or _get_model_data_dir(model_dir),
         "requested_inference_date": requested_inference_date.isoformat(),
         "calendar_adjusted": calendar_adjusted,
         "data_trade_date": data_trade_date,
@@ -882,7 +914,7 @@ async def run_model_inference(
         active_model_id=result.active_model_id or resolved.effective_model_id,
         effective_model_id=result_effective_model_id,
         model_source=result_model_source,
-        active_data_source=result.active_data_source or _choose_data_dir(resolved.effective_model_id),
+        active_data_source=result.active_data_source or _get_model_data_dir(model_dir),
         result_payload=success_payload,
     )
     await model_inference_persistence.record_run_to_settings(
