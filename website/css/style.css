@@ -640,3 +640,17 @@ td {
 .mb-8 { margin-bottom: 32px; }
 .text-center { text-align: center; }
 .text-muted { color: var(--text-muted); }
+
+/* Architecture Diagram */
+.architecture-diagram {
+  margin: 24px 0;
+  text-align: center;
+}
+
+.architecture-svg {
+  max-width: 100%;
+  height: auto;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background-color: var(--bg-primary);
+}

@@ -1,15 +1,16 @@
-# 模型训练特征方案（7分类，约146维）
+# 模型训练特征方案（前端真实字段版，152维）
 
-## 1. 目标与边界
-- 目标：基于 `db/official_factors.duckdb` 的原始表，沉淀一套前后端统一的训练字段字典。
-- 维度规模：当前版本为 **146 维**（可视为“约 150 维”）。
-- 分类保持与前端一致：`momentum`、`volatility`、`volume`、`fund_flow`、`style`、`industry`、`microstructure`。
-- 设计原则：单一真值、版本化管理、训练/回测/推理同口径。
+## 1. 目标与口径
+- 本文档以前端训练页真实消费的特征目录为准。
+- 前端数据源：`GET /api/v1/models/feature-catalog`（用户态），管理员同源接口为 `GET /api/v1/admin/models/feature-catalog`。
+- 后端来源优先级：特征注册表（`qm_feature_set_*`）> 回退文件 `config/features/model_training_feature_catalog_v1.json`。
+- 当前生效版本：`qm_feature_set_v1_20260402`，总维度：**152**。
 
-## 2. 分类配额
+## 2. 分类配额（与前端目录一致）
 
 | 分类ID | 分类名 | 维度数 |
-|---|---:|---:|
+|---|---|---:|
+| `ohlcv` | 基础行情 | 6 |
 | `momentum` | 动量 | 24 |
 | `volatility` | 波动率 | 22 |
 | `volume` | 成交量 | 22 |
@@ -17,19 +18,32 @@
 | `style` | 风格因子 | 16 |
 | `industry` | 行业因子 | 20 |
 | `microstructure` | 微观结构 | 20 |
-| **合计** |  | **146** |
+| **合计** |  | **152** |
 
-## 3. 字段命名规范
-- 统一使用小写蛇形：`{category_prefix}_{semantic_name}`。
-- 所有字段在模型产物 `metadata.json` 中保存 `feature_columns` 有序列表。
-- 训练请求必须携带 `feature_set_version` + `selected_features`，后端按版本进行二次校验。
+## 3. 训练页固定规则（来自前端）
 
-## 4. 字段字典（含解释）
+- 训练最小基线特征（`TRAINING_BASE_FEATURES`，6项，后端可自动补齐）：
+  `mom_ret_1d, mom_ret_5d, mom_ret_20d, liq_volume, liq_amount, liq_turnover_os`
+- 前端预设特征（`PRESET_DEFAULT_FEATURES`，48项）：
+  `open, high, low, close, volume, factor, mom_ret_1d, mom_ret_5d, mom_ret_10d, mom_ret_20d, mom_ma_gap_5, mom_ma_gap_20, mom_macd_hist, mom_rsi_14, mom_kdj_k, mom_breakout_20d, vol_std_20, vol_atr_14, vol_parkinson_20, vol_gk_20, vol_rs_20, vol_downside_20, vol_realized_rv, vol_jump_zadj, liq_volume_ma_20, liq_volume_ratio_5, liq_amount_ma_20, liq_amount_ratio_5, liq_mfi_14, liq_amihud_20, liq_amihud_60, liq_accdist_20, flow_net_amount, flow_net_amount_ratio, flow_large_net_amount, flow_vpin, flow_vpin_ma_5, flow_vpin_ma_20, style_ln_mv_total, style_ln_mv_float, style_beta_20, style_beta_60, style_idio_vol_20, style_residual_ret_20, ind_ret_1d, ind_ret_20d, ind_strength_20, ind_momentum_rank_20`
 
-### 4.1 动量（`momentum`，24维）
+## 4. 字段清单（完整）
+
+### 4.1 基础行情（`ohlcv`，6维）
 
 | 编号 | 字段Key | 字段解释 | 计算口径（示例） | 原始来源表/字段 |
-|---:|---|---|---|---|
+|---|---|---|---|---|
+| feat_ohlcv_001 | `open` | 开盘价（复权） | `OpenPrice` | `股票历史日行情信息表后复权` |
+| feat_ohlcv_002 | `high` | 最高价（复权） | `HighPrice` | `股票历史日行情信息表后复权` |
+| feat_ohlcv_003 | `low` | 最低价（复权） | `LowPrice` | `股票历史日行情信息表后复权` |
+| feat_ohlcv_004 | `close` | 收盘价（复权） | `ClosePrice` | `股票历史日行情信息表后复权` |
+| feat_ohlcv_005 | `volume` | 成交量 | `Volume` | `股票历史日行情信息表后复权` |
+| feat_ohlcv_006 | `factor` | 复权因子 | `1.0` | `constant` |
+
+### 4.2 动量（`momentum`，24维）
+
+| 编号 | 字段Key | 字段解释 | 计算口径（示例） | 原始来源表/字段 |
+|---|---|---|---|---|
 | feat_001 | `mom_ret_1d` | 1日收益率动量 | `(C_t/C_{t-1})-1` | `股票历史日行情信息表后复权.ClosePrice` |
 | feat_002 | `mom_ret_3d` | 3日收益率动量 | `(C_t/C_{t-3})-1` | `股票历史日行情信息表后复权.ClosePrice` |
 | feat_003 | `mom_ret_5d` | 5日收益率动量 | `(C_t/C_{t-5})-1` | `股票历史日行情信息表后复权.ClosePrice` |
@@ -55,17 +69,17 @@
 | feat_023 | `mom_roc_12` | 12日变化率 | `C_t/C_{t-12}-1` | `股票历史日行情信息表后复权.ClosePrice` |
 | feat_024 | `mom_breakout_20d` | 20日突破强度 | `C_t/MAX(H,20)-1` | `股票历史日行情信息表后复权.HighPrice/ClosePrice` |
 
-### 4.2 波动率（`volatility`，22维）
+### 4.3 波动率（`volatility`，22维）
 
 | 编号 | 字段Key | 字段解释 | 计算口径（示例） | 原始来源表/字段 |
-|---:|---|---|---|---|
+|---|---|---|---|---|
 | feat_025 | `vol_std_5` | 5日收益率标准差 | `STD(ret,5)` | `股票历史日行情信息表后复权.ClosePrice` |
 | feat_026 | `vol_std_10` | 10日收益率标准差 | `STD(ret,10)` | `股票历史日行情信息表后复权.ClosePrice` |
 | feat_027 | `vol_std_20` | 20日收益率标准差 | `STD(ret,20)` | `股票历史日行情信息表后复权.ClosePrice` |
 | feat_028 | `vol_std_60` | 60日收益率标准差 | `STD(ret,60)` | `股票历史日行情信息表后复权.ClosePrice` |
 | feat_029 | `vol_atr_14` | ATR(14) | `MA(TR,14)` | `股票历史日行情信息表后复权.HighPrice/LowPrice/ClosePrice` |
 | feat_030 | `vol_atr_20` | ATR(20) | `MA(TR,20)` | `股票历史日行情信息表后复权.HighPrice/LowPrice/ClosePrice` |
-| feat_031 | `vol_true_range` | 真实波幅TR | `MAX(H-L,|H-PC|,|L-PC|)` | `股票历史日行情信息表后复权.HighPrice/LowPrice/ClosePrice` |
+| feat_031 | `vol_true_range` | 真实波幅TR | `MAX(H-L,\|H-PC\|,\|L-PC\|)` | `股票历史日行情信息表后复权.HighPrice/LowPrice/ClosePrice` |
 | feat_032 | `vol_parkinson_10` | Parkinson波动率10日 | `sqrt(sum((ln(H/L))^2)/(4nln2))` | `股票历史日行情信息表后复权.HighPrice/LowPrice` |
 | feat_033 | `vol_parkinson_20` | Parkinson波动率20日 | `同上窗口=20` | `股票历史日行情信息表后复权.HighPrice/LowPrice` |
 | feat_034 | `vol_gk_10` | Garman-Klass波动率10日 | `GK公式窗口10` | `股票历史日行情信息表后复权.OpenPrice/HighPrice/LowPrice/ClosePrice` |
@@ -74,18 +88,18 @@
 | feat_037 | `vol_rs_20` | Rogers-Satchell波动率20日 | `RS公式窗口20` | `股票历史日行情信息表后复权.OpenPrice/HighPrice/LowPrice/ClosePrice` |
 | feat_038 | `vol_downside_20` | 下行波动率20日 | `STD(min(ret,0),20)` | `股票历史日行情信息表后复权.ClosePrice` |
 | feat_039 | `vol_upside_20` | 上行波动率20日 | `STD(max(ret,0),20)` | `股票历史日行情信息表后复权.ClosePrice` |
-| feat_040 | `vol_realized_rv` | 已实现波动率RV | `HF RV当日值` | `个股已实现指标表日.RV` |
-| feat_041 | `vol_realized_rrv` | 稳健已实现波动率RRV | `HF RRV当日值` | `个股已实现指标表日.RRV` |
-| feat_042 | `vol_realized_rskew` | 已实现偏度RSkew | `HF RSkew当日值` | `个股已实现指标表日.RSkew` |
-| feat_043 | `vol_realized_rkurt` | 已实现峰度RKurt | `HF RKurt当日值` | `个股已实现指标表日.RKurt` |
-| feat_044 | `vol_jump_zadj` | 跳跃显著性Z值 | `HF Z_Adj当日值` | `个股跳跃指标表日.Z_Adj` |
-| feat_045 | `vol_jump_rjv_ratio` | 跳跃波动占比(RJV/RV) | `RJV/(RV+eps)` | `个股跳跃指标表日.RJV,RV` |
-| feat_046 | `vol_jump_sjv_ratio` | 符号跳跃占比(SJV/RV) | `SJV/(RV+eps)` | `个股跳跃指标表日.SJV,RV` |
+| feat_040 | `vol_realized_rv` | 已实现波动率RV (高频当日值，建议使用 Ref(...,1) 以防未来函数) | `HF RV当日值 (建议 Lag 1)` | `个股已实现指标表日.RV` |
+| feat_041 | `vol_realized_rrv` | 稳健已实现波动率RRV (高频当日值，建议使用 Ref(...,1) 以防未来函数) | `HF RRV当日值 (建议 Lag 1)` | `个股已实现指标表日.RRV` |
+| feat_042 | `vol_realized_rskew` | 已实现偏度RSkew (高频当日值，建议使用 Ref(...,1) 以防未来函数) | `HF RSkew当日值 (建议 Lag 1)` | `个股已实现指标表日.RSkew` |
+| feat_043 | `vol_realized_rkurt` | 已实现峰度RKurt (高频当日值，建议使用 Ref(...,1) 以防未来函数) | `HF RKurt当日值 (建议 Lag 1)` | `个股已实现指标表日.RKurt` |
+| feat_044 | `vol_jump_zadj` | 跳跃显著性Z值 (高频当日值，建议使用 Ref(...,1) 以防未来函数) | `HF Z_Adj当日值 (建议 Lag 1)` | `个股跳跃指标表日.Z_Adj` |
+| feat_045 | `vol_jump_rjv_ratio` | 跳跃波动占比(RJV/RV) (高频当日值，建议使用 Ref(...,1) 以防未来函数) | `RJV/(RV+eps) (建议 Lag 1)` | `个股跳跃指标表日.RJV,RV` |
+| feat_046 | `vol_jump_sjv_ratio` | 符号跳跃占比(SJV/RV) (高频当日值，建议使用 Ref(...,1) 以防未来函数) | `SJV/(RV+eps) (建议 Lag 1)` | `个股跳跃指标表日.SJV,RV` |
 
-### 4.3 成交量（`volume`，22维）
+### 4.4 成交量（`volume`，22维）
 
 | 编号 | 字段Key | 字段解释 | 计算口径（示例） | 原始来源表/字段 |
-|---:|---|---|---|---|
+|---|---|---|---|---|
 | feat_047 | `liq_turnover_os` | 流通换手率 | `ToverOs` | `个股换手率表日.ToverOs` |
 | feat_048 | `liq_turnover_tl` | 总股本换手率 | `ToverTl` | `个股换手率表日.ToverTl` |
 | feat_049 | `liq_volume` | 当日成交量 | `Volume_t` | `股票历史日行情信息表后复权.Volume` |
@@ -106,13 +120,13 @@
 | feat_064 | `liq_obv_60` | OBV趋势(60日) | `OBV窗口60` | `股票历史日行情信息表后复权.ClosePrice,Volume` |
 | feat_065 | `liq_mfi_14` | 资金流量指标MFI14 | `MFI窗口14` | `股票历史日行情信息表后复权.HighPrice,LowPrice,ClosePrice,Amount` |
 | feat_066 | `liq_accdist_20` | A/D累积线20日 | `AD窗口20` | `股票历史日行情信息表后复权.HighPrice,LowPrice,ClosePrice,Amount` |
-| feat_067 | `liq_amihud_20` | Amihud非流动性20日 | `MA(|ret|/Amount,20)` | `股票历史日行情信息表后复权.ClosePrice,Amount` |
-| feat_068 | `liq_amihud_60` | Amihud非流动性60日 | `MA(|ret|/Amount,60)` | `股票历史日行情信息表后复权.ClosePrice,Amount` |
+| feat_067 | `liq_amihud_20` | Amihud非流动性20日 | `MA(\|ret\|/Amount,20)` | `股票历史日行情信息表后复权.ClosePrice,Amount` |
+| feat_068 | `liq_amihud_60` | Amihud非流动性60日 | `MA(\|ret\|/Amount,60)` | `股票历史日行情信息表后复权.ClosePrice,Amount` |
 
-### 4.4 资金流（`fund_flow`，22维）
+### 4.5 资金流（`fund_flow`，22维）
 
 | 编号 | 字段Key | 字段解释 | 计算口径（示例） | 原始来源表/字段 |
-|---:|---|---|---|---|
+|---|---|---|---|---|
 | feat_069 | `flow_net_amount` | 总净流入额 | `B_Amount-S_Amount` | `个股买卖不平衡指标表日.B_Amount,S_Amount` |
 | feat_070 | `flow_net_amount_ratio` | 总净流入占比 | `(B_Amount-S_Amount)/(B_Amount+S_Amount)` | `个股买卖不平衡指标表日.B_Amount,S_Amount` |
 | feat_071 | `flow_large_net_amount` | 大单净流入额 | `B_Amount_L-S_Amount_L` | `个股买卖不平衡指标表日.B_Amount_L,S_Amount_L` |
@@ -136,10 +150,10 @@
 | feat_089 | `flow_esp_time` | 时间加权有效价差 | `Esp_time` | `个股买卖价差表日.Esp_time` |
 | feat_090 | `flow_pressure_index` | 资金压力指数 | `z(flow_net_amount)+z(VPIN)+z(Esp)` | `个股买卖不平衡指标表日 + 个股知情交易概率指标表日 + 个股买卖价差表日` |
 
-### 4.5 风格因子（`style`，16维）
+### 4.6 风格因子（`style`，16维）
 
 | 编号 | 字段Key | 字段解释 | 计算口径（示例） | 原始来源表/字段 |
-|---:|---|---|---|---|
+|---|---|---|---|---|
 | feat_091 | `style_ln_mv_total` | 总市值对数 | `ln(MarketValue)` | `股票历史日行情信息表后复权.MarketValue` |
 | feat_092 | `style_ln_mv_float` | 流通市值对数 | `ln(CirculatedMarketValue)` | `股票历史日行情信息表后复权.CirculatedMarketValue` |
 | feat_093 | `style_bp` | 账面市净率倒数(B/P) | `1/PB` | `相对价值指标.pb_ratio` |
@@ -157,10 +171,10 @@
 | feat_109 | `style_size_percentile` | 规模分位数 | `cs_percentile(ln_mv_total)` | `股票历史日行情信息表后复权.MarketValue` |
 | feat_110 | `style_value_percentile` | 价值分位数 | `cs_percentile(valuation_composite)` | `相对价值指标` |
 
-### 4.6 行业因子（`industry`，20维）
+### 4.7 行业因子（`industry`，20维）
 
 | 编号 | 字段Key | 字段解释 | 计算口径（示例） | 原始来源表/字段 |
-|---:|---|---|---|---|
+|---|---|---|---|---|
 | feat_111 | `ind_ret_1d` | 所属行业1日收益 | `industry_mean(ret,1d)` | `股票历史日行情信息表后复权.ChangeRatio + 公司文件.Indcd` |
 | feat_112 | `ind_ret_5d` | 所属行业5日收益 | `industry_mean(ret,5d)` | `股票历史日行情信息表后复权.ChangeRatio + 公司文件.Indcd` |
 | feat_113 | `ind_ret_10d` | 所属行业10日收益 | `industry_mean(ret,10d)` | `股票历史日行情信息表后复权.ChangeRatio + 公司文件.Indcd` |
@@ -182,10 +196,10 @@
 | feat_129 | `ind_code_l1` | 一级行业编码数值化 | `hash_or_dict_encode(Indcd level1)` | `公司文件.Indcd/Nindcd` |
 | feat_130 | `ind_code_l2` | 二级行业编码数值化 | `hash_or_dict_encode(Indcd level2)` | `公司文件.Nindcd/Nnindcd` |
 
-### 4.7 微观结构（`microstructure`，20维）
+### 4.8 微观结构（`microstructure`，20维）
 
 | 编号 | 字段Key | 字段解释 | 计算口径（示例） | 原始来源表/字段 |
-|---:|---|---|---|---|
+|---|---|---|---|---|
 | feat_131 | `micro_qsp_equal` | 报价价差(等权) | `Qsp_equal` | `个股买卖价差表日.Qsp_equal` |
 | feat_132 | `micro_esp_equal` | 有效价差(等权) | `Esp_equal` | `个股买卖价差表日.Esp_equal` |
 | feat_133 | `micro_aqsp_equal` | 报价价差(成交量加权) | `AQsp_equal` | `个股买卖价差表日.AQsp_equal` |
@@ -195,7 +209,7 @@
 | feat_137 | `micro_esp_volume` | 有效价差(成交量加权版本) | `Esp_Volume` | `个股买卖价差表日.Esp_Volume` |
 | feat_138 | `micro_qsp_amount` | 报价价差(成交额加权版本) | `Qsp_Amount` | `个股买卖价差表日.Qsp_Amount` |
 | feat_139 | `micro_esp_amount` | 有效价差(成交额加权版本) | `Esp_Amount` | `个股买卖价差表日.Esp_Amount` |
-| feat_140 | `micro_effective_spread` | 有效点差代理 | `2*|trade_price-mid_quote|/mid_quote` | `个股买卖价差表日 + 股票历史日行情信息表后复权` |
+| feat_140 | `micro_effective_spread` | 有效点差代理 | `2*\|trade_price-mid_quote\|/mid_quote` | `个股买卖价差表日 + 股票历史日行情信息表后复权` |
 | feat_141 | `micro_quoted_spread` | 报价点差代理 | `(ask-bid)/mid_quote` | `个股买卖价差表日相关字段` |
 | feat_142 | `micro_spread_vol_20` | 点差波动20日 | `STD(Esp_equal,20)` | `个股买卖价差表日.Esp_equal` |
 | feat_143 | `micro_imbalance_volume` | 成交量不平衡 | `(B_Volume-S_Volume)/(B_Volume+S_Volume)` | `个股买卖不平衡指标表日.B_Volume,S_Volume` |
@@ -207,15 +221,8 @@
 | feat_149 | `micro_jump_flag` | 跳跃事件标记 | `ISJump(0/1)` | `个股跳跃指标表日.ISJump` |
 | feat_150 | `micro_pressure_score` | 微观结构压力分 | `z(Esp)+z(VPIN)+z(imbalance_amount)` | `个股买卖价差表日 + 个股知情交易概率指标表日 + 个股买卖不平衡指标表日` |
 
-## 5. 更新与治理建议（定时调整）
-1. 新增字段仅进入 `draft` 版本，不直接覆盖线上版本。
-2. 每周或每月按 `effective_at` 发布新版本，并保留旧版本以支持历史回放。
-3. 前端始终通过接口拉取当前有效版本；禁止在页面硬编码字段。
-4. 后端训练、回测、推理都只认版本化字段列表与 checksum。
-5. 对删除字段使用 `deprecated` 标记，至少保留 1 个发布周期。
-
-## 6. 验收清单
-- [ ] 前端 7 分类与后端版本字典数量一致。
-- [ ] 模型 `metadata.json` 包含 `feature_set_version`、`feature_columns`、`schema_checksum`。
-- [ ] 使用同一字段版本完成训练与回测，指标可复现。
-- [ ] 推理输入维度与模型期望维度一致（维度门禁通过）。
+## 5. 治理与验收
+- 所有训练、回测、推理请求必须携带并落盘：`feature_set_version`、`feature_columns`、`schema_checksum`。
+- 前端不硬编码字段全集，以目录接口返回为准；字段顺序以接口 `order/order_no` 为准。
+- 新增字段进入新版本，旧版本保留至少一个发布周期用于回放。
+- 训练前执行白名单校验：提交特征必须属于当前生效目录。

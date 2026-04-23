@@ -46,10 +46,10 @@ DOCKER_DAEMON_EXISTED_FLAG="/tmp/quantmind_docker_daemon_existed"
 
 # Docker 镜像加速器列表（自动选择可用）
 DOCKER_MIRRORS=(
+    "https://naw1faud2gpqbs.xuanyuan.run"
     "https://docker.1ms.run"
     "https://docker.xuanyuan.live"
     "https://hub.rat.dev"
-    "https://naw1faud2gpqbs.xuanyuan.run"
 )
 
 # npm 镜像加速器列表（自动选择最快）
