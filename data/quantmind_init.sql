@@ -2342,18 +2342,29 @@ ALTER TABLE public.qm_market_calendar_day OWNER TO quantmind;
 --
 
 CREATE TABLE public.qm_model_inference_runs (
-    id character varying(64) NOT NULL,
-    user_id character varying(64) NOT NULL,
-    tenant_id character varying(64) DEFAULT 'default'::character varying NOT NULL,
-    model_id character varying(64),
-    status character varying(32) DEFAULT 'pending'::character varying NOT NULL,
-    config jsonb DEFAULT '{}'::jsonb NOT NULL,
-    result_path character varying(500),
-    metrics jsonb,
-    started_at timestamp with time zone,
-    completed_at timestamp with time zone,
-    created_at timestamp with time zone DEFAULT now(),
-    prediction_trade_date date
+    run_id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL DEFAULT 'default',
+    user_id TEXT NOT NULL,
+    model_id TEXT NOT NULL,
+    data_trade_date DATE NOT NULL,
+    prediction_trade_date DATE NOT NULL,
+    status TEXT NOT NULL,
+    signals_count INTEGER NOT NULL DEFAULT 0,
+    duration_ms INTEGER,
+    fallback_used BOOLEAN NOT NULL DEFAULT FALSE,
+    fallback_reason TEXT,
+    failure_stage TEXT,
+    error_message TEXT,
+    stdout TEXT,
+    stderr TEXT,
+    active_model_id TEXT,
+    effective_model_id TEXT,
+    model_source TEXT,
+    active_data_source TEXT,
+    request_json JSONB,
+    result_json JSONB,
+    created_at TIMESTAMPTZ NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL
 );
 
 
@@ -4352,7 +4363,7 @@ COPY public.qm_market_calendar_day (market, trade_date, is_trading_day, timezone
 -- Data for Name: qm_model_inference_runs; Type: TABLE DATA; Schema: public; Owner: quantmind
 --
 
-COPY public.qm_model_inference_runs (id, user_id, tenant_id, model_id, status, config, result_path, metrics, started_at, completed_at, created_at, prediction_trade_date) FROM stdin;
+COPY public.qm_model_inference_runs (run_id, tenant_id, user_id, model_id, data_trade_date, prediction_trade_date, status, signals_count, duration_ms, fallback_used, fallback_reason, failure_stage, error_message, stdout, stderr, active_model_id, effective_model_id, model_source, active_data_source, request_json, result_json, created_at, updated_at) FROM stdin;
 \.
 
 
@@ -10664,7 +10675,7 @@ ALTER TABLE ONLY public.qm_market_calendar_day
 --
 
 ALTER TABLE ONLY public.qm_model_inference_runs
-    ADD CONSTRAINT qm_model_inference_runs_pkey PRIMARY KEY (id);
+    ADD CONSTRAINT qm_model_inference_runs_pkey PRIMARY KEY (run_id);
 
 
 --
