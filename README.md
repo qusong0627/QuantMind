@@ -129,26 +129,29 @@ curl -fsSL https://gitee.com/qusong0627/quantmind/raw/master/deploy/quick-deploy
 ### 部署选项
 
 ```bash
+# 进入项目目录
+cd /opt/quantmind/quantmind
+
 # 完整部署（交互式确认）
-sudo ./deploy/deploy.sh
+sudo bash deploy/deploy.sh
 
 # 自动确认，无需交互
-sudo ./deploy/deploy.sh --yes
+sudo bash deploy/deploy.sh --yes
 
 # 仅部署后端
-sudo ./deploy/deploy.sh --backend-only
+sudo bash deploy/deploy.sh --backend-only
 
 # 仅部署前端
-sudo ./deploy/deploy.sh --frontend-only
+sudo bash deploy/deploy.sh --frontend-only
 
 # 断点续传（中断后继续）
-sudo ./deploy/deploy.sh --resume
+sudo bash deploy/deploy.sh --resume
 
 # 重置进度重新部署
-sudo ./deploy/deploy.sh --reset
+sudo bash deploy/deploy.sh --reset
 
 # 强制同步代码（覆盖本地修改）
-sudo ./deploy/deploy.sh --force-sync
+sudo bash deploy/deploy.sh --force-sync
 ```
 
 > **提示：** 如果提示 `command not found`，请使用 `sudo bash deploy/deploy.sh` 执行。
