@@ -130,7 +130,7 @@ curl -fsSL https://gitee.com/qusong0627/quantmind/raw/master/deploy/quick-deploy
 
 ```bash
 # 进入项目目录
-cd /opt/quantmind/quantmind
+cd /opt/quantmind
 
 # 完整部署（交互式确认）
 sudo bash deploy/deploy.sh

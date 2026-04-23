@@ -34,10 +34,8 @@ sudo ./deploy.sh
 ### 1. 克隆代码
 
 ```bash
-sudo mkdir -p /opt/quantmind
+sudo git clone https://gitee.com/qusong0627/quantmind.git /opt/quantmind
 cd /opt/quantmind
-sudo git clone https://gitee.com/qusong0627/quantmind.git
-cd quantmind
 ```
 
 ### 2. 执行部署脚本
@@ -101,13 +99,13 @@ sudo ./deploy/deploy.sh
 
 ```bash
 # 查看后端日志
-docker compose -f /opt/quantmind/quantmind/docker-compose.yml logs -f
+docker compose -f /opt/quantmind/docker-compose.yml logs -f
 
 # 查看前端日志
 pm2 logs quantmind-web
 
 # 重启后端
-docker compose -f /opt/quantmind/quantmind/docker-compose.yml restart
+docker compose -f /opt/quantmind/docker-compose.yml restart
 
 # 重启前端
 pm2 restart quantmind-web
@@ -116,7 +114,7 @@ pm2 restart quantmind-web
 systemctl restart nginx
 
 # 查看服务状态
-docker compose -f /opt/quantmind/quantmind/docker-compose.yml ps
+docker compose -f /opt/quantmind/docker-compose.yml ps
 pm2 status
 ```
 
@@ -124,11 +122,10 @@ pm2 status
 
 ```
 /opt/quantmind/
-├── quantmind/          # 代码目录
-│   ├── backend/        # 后端代码
-│   ├── electron/       # 前端代码
-│   ├── docker-compose.yml
-│   └── .env            # 环境配置
+├── backend/            # 后端代码
+├── electron/           # 前端代码
+├── docker-compose.yml
+├── .env                # 环境配置
 └── data/               # 数据目录
     ├── postgres/       # 数据库数据
     ├── redis/          # Redis 数据
@@ -189,7 +186,7 @@ tail -f /var/log/nginx/error.log
 ## 更新部署
 
 ```bash
-cd /opt/quantmind/quantmind
+cd /opt/quantmind
 
 # 拉取最新代码
 git pull origin master
@@ -208,7 +205,7 @@ pm2 restart quantmind-web
 
 ```bash
 # 停止服务
-docker compose -f /opt/quantmind/quantmind/docker-compose.yml down
+docker compose -f /opt/quantmind/docker-compose.yml down
 pm2 delete quantmind-web
 systemctl stop nginx
 

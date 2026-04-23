@@ -1,0 +1,8 @@
+{
+  "product_name": "QuantMind QMT Agent",
+  "app_id": "com.quantmind.qmt-agent",
+  "version": "1.0.1",
+  "publisher": "QuantMind",
+  "update_base_url": "https://cos.quantmind.cloud/qmt-agent/windows/release",
+  "notes": "独立部署的 QMT Agent 桌面版"
+}

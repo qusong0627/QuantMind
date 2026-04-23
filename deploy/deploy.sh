@@ -35,8 +35,7 @@ BLUE='\033[0;34m'
 NC='\033[0m'
 
 # 配置变量
-DEPLOY_DIR="/opt/quantmind"
-PROJECT_DIR="${DEPLOY_DIR}/quantmind"
+PROJECT_DIR="/opt/quantmind"
 DATA_DIR="${PROJECT_DIR}/data"
 REPO_URL="https://gitee.com/qusong0627/quantmind.git"
 NODE_VERSION="20.19.0"
@@ -455,8 +454,6 @@ step5_install_nginx() {
 step6_clone_code() {
     log_step "Step 6: 克隆代码"
 
-    mkdir -p "$DEPLOY_DIR"
-
     if [[ -d "$PROJECT_DIR/.git" ]]; then
         log_warn "代码目录已存在，执行更新..."
         cd "$PROJECT_DIR"
@@ -473,9 +470,8 @@ step6_clone_code() {
         fi
     else
         log_info "从 Gitee 克隆代码..."
-        cd "$DEPLOY_DIR"
-        git clone $REPO_URL quantmind
-        cd quantmind
+        git clone $REPO_URL "$PROJECT_DIR"
+        cd "$PROJECT_DIR"
     fi
 
     chown -R "${SUDO_USER:-root}:${SUDO_USER:-root}" "$PROJECT_DIR"
@@ -829,7 +825,7 @@ server {
 
     # 静态文件 (uploads)
     location /uploads/ {
-        alias /opt/quantmind/quantmind/data/uploads/;
+        alias /opt/quantmind/data/uploads/;
         expires 30d;
         add_header Cache-Control "public, immutable";
     }

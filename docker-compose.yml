@@ -118,7 +118,7 @@ services:
       - INTERNAL_CALL_SECRET=${INTERNAL_CALL_SECRET:-quantmind-internal-secret}
       - TRAINING_IMAGE=${TRAINING_IMAGE:-quantmind-oss:latest}
       - TRAINING_DOCKER_NETWORK=${TRAINING_DOCKER_NETWORK:-quantmind_quantmind-net}
-      - HOST_PROJECT_PATH=${HOST_PROJECT_PATH:-/opt/quantmind/quantmind}
+      - HOST_PROJECT_PATH=${HOST_PROJECT_PATH:-/opt/quantmind}
       - QUANTMIND_API_BASE_URL=${QUANTMIND_API_BASE_URL:-http://quantmind:8000}
 
       # Qwen/DashScope API (用于 AI 策略功能)

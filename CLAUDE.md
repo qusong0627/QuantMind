@@ -78,7 +78,7 @@ git add .
 git commit -m "descriptive message"
 
 # Deploy to quant-server
-ssh quant-server "cd /opt/quantmind/quantmind && git pull && docker-compose restart"
+ssh quant-server "cd /opt/quantmind && git pull && docker-compose restart"
 ```
 
 ## Key Files
