@@ -53,23 +53,23 @@ class QuantAgent:
 
     def _load_system_prompt(self):
         kb_context = self.kb.get_context_summary()
-        strategy_classes = “””
+        strategy_classes = """
 ### 可用策略类及参数规范：
 
 **1. RedisTopkStrategy** - TopK 选股策略（最常用）
 ```python
 def get_strategy_config():
     return {
-        “class”: “RedisTopkStrategy”,
-        “module_path”: “backend.services.engine.qlib_app.utils.extended_strategies”,
-        “kwargs”: {
-            “signal”: “<PRED>”,  # 使用平台默认模型预测
-            “topk”: 50,          # 持仓股票数量
-            “n_drop”: 5,         # 每次调仓剔除数量
-            “rebalance_days”: 3, # 调仓周期（天）
-            “account_stop_loss”: 0.1,  # 账户级止损（10%）
-            “max_leverage”: 1.0,       # 最大杠杆
-            “only_tradable”: True,     # 剔除停牌/涨跌停
+        "class": "RedisTopkStrategy",
+        "module_path": "backend.services.engine.qlib_app.utils.extended_strategies",
+        "kwargs": {
+            "signal": "<PRED>",  # 使用平台默认模型预测
+            "topk": 50,          # 持仓股票数量
+            "n_drop": 5,         # 每次调仓剔除数量
+            "rebalance_days": 3, # 调仓周期（天）
+            "account_stop_loss": 0.1,  # 账户级止损（10%）
+            "max_leverage": 1.0,       # 最大杠杆
+            "only_tradable": True,     # 剔除停牌/涨跌停
         }
     }
 ```
@@ -104,20 +104,20 @@ def get_strategy_config():
 2. 自定义参数必须在 `__init__` 中 `pop` 后再调用 `super().__init__(**kwargs)`
 3. `reset` 方法必须兼容可变参数：`def reset(self, *args, **kwargs)`
 4. 禁用：os, sys, subprocess, requests, socket 等危险模块
-“””
+"""
         return (
-            “你是 QuantMind 的资深量化工程助手，负责帮助用户编写、调试和优化交易策略。\n”
-            “请始终使用简体中文回答，优先给出结论，再给出可执行步骤。\n”
-            “如果涉及代码修改，优先输出最小改动，并明确说明文件路径；需要替换代码时尽量使用 SEARCH/REPLACE 格式。\n”
-            “4. 如果信息不足，请先提问，不要擅自假设。\n”
-            “5. 策略回测默认时间跨度为近 1 年。若信号数据无法覆盖回测区间，系统将执行”自适应截断”：即自动将回测终点对齐到预测数据的最后一天，以保证结论的严谨性。\n\n”
-            f”{kb_context}\n\n”
-            f”{strategy_classes}\n\n”
-            “FORMATTING RULES:\n”
-            “1. 使用标准 Markdown 输出。\n”
-            “2. 涉及代码修改时，优先使用 SEARCH/REPLACE：\n”
-            “<<<< SEARCH\n原始代码\n====\n修改后代码\n>>>>\n”
-            “3. 新增代码请使用三引号代码块，例如 ```python ... ```。”
+            "你是 QuantMind 的资深量化工程助手，负责帮助用户编写、调试和优化交易策略。\n"
+            "请始终使用简体中文回答，优先给出结论，再给出可执行步骤。\n"
+            "如果涉及代码修改，优先输出最小改动，并明确说明文件路径；需要替换代码时尽量使用 SEARCH/REPLACE 格式。\n"
+            "4. 如果信息不足，请先提问，不要擅自假设。\n"
+            "5. 策略回测默认时间跨度为近 1 年。若信号数据无法覆盖回测区间，系统将执行自适应截断：即自动将回测终点对齐到预测数据的最后一天，以保证结论的严谨性。\n\n"
+            f"{kb_context}\n\n"
+            f"{strategy_classes}\n\n"
+            "FORMATTING RULES:\n"
+            "1. 使用标准 Markdown 输出。\n"
+            "2. 涉及代码修改时，优先使用 SEARCH/REPLACE：\n"
+            "<<<< SEARCH\n原始代码\n====\n修改后代码\n>>>>\n"
+            "3. 新增代码请使用三引号代码块，例如 ```python ... ```。"
         )
 
     async def chat_stream(self, prompt: str, context: dict) -> AsyncGenerator[str, None]:
@@ -150,7 +150,7 @@ def get_strategy_config():
                         err_body = await response.aread()
                         logger.error(f"LLM API Error: Status={response.status_code}, Body={err_body.decode('utf-8', 'ignore')}")
                     except: pass
-                    yield f"**Error:** AI 服务返回状态码 {response.status_code}。请确认“设置”中的 API Key 是否正确有效。"
+                    yield f"**Error:** AI 服务返回状态码 {response.status_code}。请确认设置中的 API Key 是否正确有效。"
                     return
 
                 async for line in response.aiter_lines():
