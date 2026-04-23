@@ -26,7 +26,9 @@ services:
   redis:
     image: redis:7-alpine
     container_name: quantmind-redis
-    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru --databases 16
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru --databases 16 --bind 0.0.0.0
     volumes:
       - redis-data:/data
     healthcheck:
