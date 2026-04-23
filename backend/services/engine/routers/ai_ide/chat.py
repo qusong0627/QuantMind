@@ -16,11 +16,11 @@ router = APIRouter()
 class KnowledgeBase:
     def __init__(self, project_root: str):
         self.project_root = project_root
+        # 修正文档路径，确保与实际文件名匹配
         self.doc_paths = [
-            "docs/QuantMind_Qlib内部策略开发规范.md",
-            "docs/Qlib策略模板说明.md",
-            "docs/Qlib基础文档.md",
-            "GEMINI.md",
+            "docs/Qlib内部策略开发规范.md",
+            "docs/QuantMind_152维特征方案规范.md",
+            "docs/Qlib回测API集成指南.md",
         ]
         self.cached_context = ""
 
@@ -34,9 +34,12 @@ class KnowledgeBase:
                 try:
                     with open(full_path, encoding="utf-8") as f:
                         content = f.read()
-                        summary += f"\n-- From {doc_rel_path} --\n{content[:1500]}\n"
+                        # 增加截断长度以保留更多关键信息
+                        summary += f"\n-- From {doc_rel_path} --\n{content[:3000]}\n"
                 except Exception as e:
                     summary += f"\n-- Error reading {doc_rel_path}: {str(e)} --\n"
+            else:
+                summary += f"\n-- File not found: {doc_rel_path} --\n"
         self.cached_context = summary
         return summary
 
@@ -50,18 +53,71 @@ class QuantAgent:
 
     def _load_system_prompt(self):
         kb_context = self.kb.get_context_summary()
+        strategy_classes = “””
+### 可用策略类及参数规范：
+
+**1. RedisTopkStrategy** - TopK 选股策略（最常用）
+```python
+def get_strategy_config():
+    return {
+        “class”: “RedisTopkStrategy”,
+        “module_path”: “backend.services.engine.qlib_app.utils.extended_strategies”,
+        “kwargs”: {
+            “signal”: “<PRED>”,  # 使用平台默认模型预测
+            “topk”: 50,          # 持仓股票数量
+            “n_drop”: 5,         # 每次调仓剔除数量
+            “rebalance_days”: 3, # 调仓周期（天）
+            “account_stop_loss”: 0.1,  # 账户级止损（10%）
+            “max_leverage”: 1.0,       # 最大杠杆
+            “only_tradable”: True,     # 剔除停牌/涨跌停
+        }
+    }
+```
+
+**2. RedisLongShortTopkStrategy** - 多空策略
+- 参数：topk, short_topk, long_exposure(1.0), short_exposure(1.0), max_weight, min_score
+- 多头取预测分最高的 topk 只，空头取最低的 short_topk 只
+- 自动过滤非两融标的（空头侧）
+
+**3. RedisWeightStrategy** - 分数权重策略
+- 参数：signal, min_score(0.0), max_weight(0.05)
+- 按预测分数归一化分配权重
+
+**4. RedisVolatilityWeightedStrategy** - 波动率加权策略
+- 参数：topk, vol_lookback(20), max_weight(0.10), min_score
+- 低波动标的获得更高权重
+
+**5. RedisAdvancedAlphaStrategy** - 高级截面 Alpha 策略
+- 继承 RedisTopkStrategy，结合分数权重与 TopK-Dropout
+- 参数：max_weight(0.05), min_score(0.0)
+
+**6. RedisStopLossStrategy** - 止损止盈策略
+- 参数：stop_loss(-0.08), take_profit(0.15)
+- 持仓成本追踪，触发阈值强制卖出
+
+**7. RedisFullAlphaStrategy** - 全量截面策略
+- 参数：topk, max_weight(0.05)
+- 跌出 TopK 全部卖出，不可买入标的自动顺延补位
+
+### 策略开发规范：
+1. 必须使用 `get_strategy_config()` 或 `STRATEGY_CONFIG` 作为入口
+2. 自定义参数必须在 `__init__` 中 `pop` 后再调用 `super().__init__(**kwargs)`
+3. `reset` 方法必须兼容可变参数：`def reset(self, *args, **kwargs)`
+4. 禁用：os, sys, subprocess, requests, socket 等危险模块
+“””
         return (
-            "你是 QuantMind 的资深量化工程助手，负责帮助用户编写、调试和优化交易策略。\n"
-            "请始终使用简体中文回答，优先给出结论，再给出可执行步骤。\n"
-            "如果涉及代码修改，优先输出最小改动，并明确说明文件路径；需要替换代码时尽量使用 SEARCH/REPLACE 格式。\n"
-            "4. 如果信息不足，请先提问，不要擅自假设。\n"
-            "5. 策略回测默认时间跨度为近 1 年。若信号数据无法覆盖回测区间，系统将执行“自适应截断”：即自动将回测终点对齐到预测数据的最后一天，以保证结论的严谨性。\n\n"
-            f"{kb_context}\n\n"
-            "FORMATTING RULES:\n"
-            "1. 使用标准 Markdown 输出。\n"
-            "2. 涉及代码修改时，优先使用 SEARCH/REPLACE：\n"
-            "<<<< SEARCH\n原始代码\n====\n修改后代码\n>>>>\n"
-            "3. 新增代码请使用三引号代码块，例如 ```python ... ```。"
+            “你是 QuantMind 的资深量化工程助手，负责帮助用户编写、调试和优化交易策略。\n”
+            “请始终使用简体中文回答，优先给出结论，再给出可执行步骤。\n”
+            “如果涉及代码修改，优先输出最小改动，并明确说明文件路径；需要替换代码时尽量使用 SEARCH/REPLACE 格式。\n”
+            “4. 如果信息不足，请先提问，不要擅自假设。\n”
+            “5. 策略回测默认时间跨度为近 1 年。若信号数据无法覆盖回测区间，系统将执行”自适应截断”：即自动将回测终点对齐到预测数据的最后一天，以保证结论的严谨性。\n\n”
+            f”{kb_context}\n\n”
+            f”{strategy_classes}\n\n”
+            “FORMATTING RULES:\n”
+            “1. 使用标准 Markdown 输出。\n”
+            “2. 涉及代码修改时，优先使用 SEARCH/REPLACE：\n”
+            “<<<< SEARCH\n原始代码\n====\n修改后代码\n>>>>\n”
+            “3. 新增代码请使用三引号代码块，例如 ```python ... ```。”
         )
 
     async def chat_stream(self, prompt: str, context: dict) -> AsyncGenerator[str, None]:
