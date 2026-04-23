@@ -54,12 +54,11 @@ async def get_my_profile(
         # 如果档案不存在，创建一个
         profile = await profile_service.create_profile(user_id, current_user["tenant_id"])
 
+    # profile 已经是 dict，直接使用
     return {
         "code": 200,
         "message": "success",
-        "data": _filter_sensitive_profile_data(
-            UserProfileResponse.from_orm(profile).dict(), current_user, user_id
-        ),
+        "data": _filter_sensitive_profile_data(profile, current_user, user_id),
     }
 
 
@@ -75,12 +74,11 @@ async def update_my_profile(
     user_id = current_user["user_id"]
     profile = await profile_service.update_profile(user_id, current_user["tenant_id"], profile_data)
 
+    # profile 已经是 dict，直接使用
     return {
         "code": 200,
         "message": "success",
-        "data": _filter_sensitive_profile_data(
-            UserProfileResponse.from_orm(profile).dict(), current_user, user_id
-        ),
+        "data": _filter_sensitive_profile_data(profile, current_user, user_id),
     }
 
 
@@ -106,12 +104,11 @@ async def get_profile(
     if not profile:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="用户档案不存在")
 
+    # profile 已经是 dict，直接使用
     return {
         "code": 200,
         "message": "success",
-        "data": _filter_sensitive_profile_data(
-            UserProfileResponse.from_orm(profile).dict(), current_user, user_id
-        ),
+        "data": _filter_sensitive_profile_data(profile, current_user, user_id),
     }
 
 
@@ -137,10 +134,9 @@ async def update_profile(
     if not profile:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="用户档案不存在")
 
+    # profile 已经是 dict，直接使用
     return {
         "code": 200,
         "message": "success",
-        "data": _filter_sensitive_profile_data(
-            UserProfileResponse.from_orm(profile).dict(), current_user, user_id
-        ),
+        "data": _filter_sensitive_profile_data(profile, current_user, user_id),
     }

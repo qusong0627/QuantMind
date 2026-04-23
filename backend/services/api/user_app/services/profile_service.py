@@ -133,8 +133,8 @@ class ProfileService:
             # or if it's a connectivity issue that will be caught later
             pass
 
-    async def get_profile(self, user_id: str, tenant_id: str, use_cache: bool = True) -> UserProfile | None:
-        """获取用户档案"""
+    async def get_profile(self, user_id: str, tenant_id: str, use_cache: bool = True) -> dict | None:
+        """获取用户档案（返回 dict 避免 detached instance 问题）"""
         # 从数据库查询（主库，必要时可创建表）
         async with get_session(read_only=False) as session:
             await self._ensure_profile_table(session)
@@ -156,16 +156,37 @@ class ProfileService:
                 return None
 
             profile, username = row
-            # 动态附加 username 供 API 使用（Schema 会处理显示）
-            # 虽然 UserProfile 没这个字段，但我们可以手动挂载，Pydantic from_orm 会尝试读取
-            profile.username_at_runtime = username
 
-            if profile:
+            # 在 session 内将对象转换为 dict，避免 detached instance 问题
+            profile_dict = {
+                "user_id": profile.user_id,
+                "tenant_id": profile.tenant_id,
+                "display_name": profile.display_name,
+                "avatar_url": profile.avatar_url,
+                "bio": profile.bio,
+                "location": profile.location,
+                "website": profile.website,
+                "phone": profile.phone,
+                "trading_experience": profile.trading_experience,
+                "risk_tolerance": profile.risk_tolerance,
+                "investment_goal": profile.investment_goal,
+                "github_url": profile.github_url,
+                "twitter_handle": profile.twitter_handle,
+                "linkedin_url": profile.linkedin_url,
+                "preferences": profile.preferences,
+                "notification_settings": profile.notification_settings,
+                "ai_ide_api_key": profile.ai_ide_api_key,
+                "created_at": profile.created_at,
+                "updated_at": profile.updated_at,
+                "username_at_runtime": username,  # 附加用户名
+            }
+
+            if profile_dict:
                 # 如果没有头像，使用默认头像
-                if not profile.avatar_url:
-                    profile.avatar_url = DEFAULT_AVATAR_URL
+                if not profile_dict["avatar_url"]:
+                    profile_dict["avatar_url"] = DEFAULT_AVATAR_URL
                 else:
-                    profile.avatar_url = self._normalize_avatar_url(profile.avatar_url)
+                    profile_dict["avatar_url"] = self._normalize_avatar_url(profile_dict["avatar_url"])
                 if use_cache:
                     # 缓存档案
                     cache_key = f"profile:{tenant_id}:{user_id}"
@@ -178,10 +199,10 @@ class ProfileService:
                     except Exception:
                         logger.warning("Profile cache set failed", exc_info=True)
 
-            return profile
+            return profile_dict
 
-    async def create_profile(self, user_id: str, tenant_id: str) -> UserProfile:
-        """创建用户档案"""
+    async def create_profile(self, user_id: str, tenant_id: str) -> dict:
+        """创建用户档案（返回 dict 避免 detached instance 问题）"""
         async with get_session(read_only=False) as session:
             await self._ensure_profile_table(session)
             # 显式设置默认值，确保 Pydantic 校验通过
@@ -193,12 +214,35 @@ class ProfileService:
             await session.refresh(profile)
 
             logger.info(f"Profile created: {user_id}")
-            return profile
+
+            # 返回 dict
+            return {
+                "user_id": profile.user_id,
+                "tenant_id": profile.tenant_id,
+                "display_name": profile.display_name,
+                "avatar_url": profile.avatar_url or DEFAULT_AVATAR_URL,
+                "bio": profile.bio,
+                "location": profile.location,
+                "website": profile.website,
+                "phone": profile.phone,
+                "trading_experience": profile.trading_experience,
+                "risk_tolerance": profile.risk_tolerance,
+                "investment_goal": profile.investment_goal,
+                "github_url": profile.github_url,
+                "twitter_handle": profile.twitter_handle,
+                "linkedin_url": profile.linkedin_url,
+                "preferences": profile.preferences,
+                "notification_settings": profile.notification_settings,
+                "ai_ide_api_key": profile.ai_ide_api_key,
+                "created_at": profile.created_at,
+                "updated_at": profile.updated_at,
+                "username_at_runtime": None,
+            }
 
     async def update_profile(
         self, user_id: str, tenant_id: str, profile_data: UserProfileUpdate
-    ) -> UserProfile | None:
-        """更新用户档案"""
+    ) -> dict | None:
+        """更新用户档案（返回 dict 避免 detached instance 问题）"""
         async with get_session(read_only=False) as session:
             await self._ensure_profile_table(session)
             result = await session.execute(
@@ -234,7 +278,30 @@ class ProfileService:
                 logger.warning("Profile cache delete failed", exc_info=True)
 
             logger.info(f"Profile updated: {user_id}")
-            return profile
+
+            # 返回 dict
+            return {
+                "user_id": profile.user_id,
+                "tenant_id": profile.tenant_id,
+                "display_name": profile.display_name,
+                "avatar_url": profile.avatar_url or DEFAULT_AVATAR_URL,
+                "bio": profile.bio,
+                "location": profile.location,
+                "website": profile.website,
+                "phone": profile.phone,
+                "trading_experience": profile.trading_experience,
+                "risk_tolerance": profile.risk_tolerance,
+                "investment_goal": profile.investment_goal,
+                "github_url": profile.github_url,
+                "twitter_handle": profile.twitter_handle,
+                "linkedin_url": profile.linkedin_url,
+                "preferences": profile.preferences,
+                "notification_settings": profile.notification_settings,
+                "ai_ide_api_key": profile.ai_ide_api_key,
+                "created_at": profile.created_at,
+                "updated_at": profile.updated_at,
+                "username_at_runtime": None,
+            }
 
     async def update_avatar(self, user_id: str, tenant_id: str, avatar_url: str) -> UserProfile | None:
         """更新头像"""
