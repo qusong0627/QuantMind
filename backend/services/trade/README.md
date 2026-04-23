@@ -35,6 +35,10 @@
   - 根据策略参数与当前持仓生成“先卖后买”的委托草案；
   - 对无持仓卖出、缺参考价、预算不足等情况，不生成委托，改记入 `skipped_items`；
   - 买入数量按 A 股 100 股整手和可用现金预算计算，不再固定写死 100 股。
+- 正式执行语义（2026-04-23 更新）：
+  - 执行阶段改为“先提交卖单，再进入买单”；
+  - 卖单提交后会进入成交等待门控：默认最多等待 300 秒（`MANUAL_TASK_SELL_WAIT_TIMEOUT_SEC`），轮询间隔默认 3 秒（`MANUAL_TASK_SELL_WAIT_POLL_SEC`）；
+  - 等待结束后按“初始可用现金 + 卖单实际成交金额”重算买单数量，再提交买单，减少因卖单未成交导致的买单资金不足拒单。
 - 正式提交后，任务仍写入 `trade_manual_execution_tasks`，并由 `manual_execution_worker.py` 后台轮询消费，继续复用现有日志流 `qm:real-trading:manual-execution:*`。
 - 当前 `completed` 仍表示“派单完成/已完成提交尝试”，不等价于柜台最终成交；最终成交仍以后续订单状态和执行回报流为准。
 - 启动阶段会通过 `manual_execution_persistence.ensure_tables()` 自动补齐 `trade_manual_execution_tasks.progress` 列，兼容旧环境中缺少该列但运行期已读写进度值的历史表结构。

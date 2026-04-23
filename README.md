@@ -17,7 +17,7 @@
   <a href="#-快速开始">快速开始</a> •
   <a href="#-功能演示">功能演示</a> •
   <a href="#-技术架构">技术架构</a> •
-  <a href="#-部署指南">部署指南</a>
+  <a href="#-文档导航">文档导航</a>
 </p>
 
 <p align="center">
@@ -37,7 +37,7 @@
 
 - **LightGBM 模型** — 高性能梯度提升模型，专为金融时序预测优化
 - **Alpha158 因子集** — 158 个经典量化因子，覆盖动量、估值、质量等多维度
-- **自动化特征工程** — 48 维标准化特征，开箱即用
+- **自动化特征工程** — 51 维标准化特征，开箱即用
 
 ### 🎯 双引擎回测系统
 
@@ -126,53 +126,7 @@ curl -fsSL https://gitee.com/qusong0627/quantmind/raw/master/deploy/quick-deploy
 
 安装方法详见：[docs/数据包安装指南.md](docs/数据包安装指南.md)
 
-### 部署选项
-
-```bash
-# 进入项目目录
-cd /opt/quantmind
-
-# 完整部署（交互式确认）
-sudo bash deploy/deploy.sh
-
-# 自动确认，无需交互
-sudo bash deploy/deploy.sh --yes
-
-# 仅部署后端
-sudo bash deploy/deploy.sh --backend-only
-
-# 仅部署前端
-sudo bash deploy/deploy.sh --frontend-only
-
-# 断点续传（中断后继续）
-sudo bash deploy/deploy.sh --resume
-
-# 重置进度重新部署
-sudo bash deploy/deploy.sh --reset
-
-# 强制同步代码（覆盖本地修改）
-sudo bash deploy/deploy.sh --force-sync
-```
-
-> **提示：** 如果提示 `command not found`，请使用 `sudo bash deploy/deploy.sh` 执行。
-
-### 手动部署
-
-```bash
-# 克隆项目
-git clone https://gitee.com/qusong0627/quantmind.git
-cd quantmind
-
-# 执行部署脚本
-sudo ./deploy/deploy.sh
-```
-
-**部署内容：**
-- Docker & Docker Compose
-- PostgreSQL 15 + Redis 7
-- Node.js 20 + PM2 + Nginx
-- QuantMind 后端服务（4 个微服务）
-- QuantMind 前端应用
+> 📖 完整部署选项、常见问题 → [docs/部署指南.md](docs/部署指南.md)
 
 ---
 
@@ -326,37 +280,20 @@ flowchart TB
 | **消息队列** | Celery + Redis |
 | **容器化** | Docker + Docker Compose |
 
+> 📖 完整架构说明 → [docs/系统架构文档.md](docs/系统架构文档.md)
+
 ---
 
-## 📖 部署指南
+## 📚 文档导航
 
-### 开发环境
-
-```bash
-# 后端开发
-source .venv/bin/activate
-pip install -r requirements.txt
-python backend/main_oss.py
-
-# 前端开发
-npm install
-npm run dev
-```
-
-### 生产部署
-
-快速部署命令与选项请参考上方「🚀 快速开始」章节。  
-完整参数说明与排障请参考 [deploy/README.md](deploy/README.md)。
-
-### 数据目录
-
-| 目录 | 用途 | 说明 |
-|------|------|------|
-| `db/qlib_data/` | Qlib 回测数据 | 交易日历、标的列表、特征数据 |
-| `db/feature_snapshots/` | 模型训练数据 | Parquet 格式特征快照 |
-| `models/` | AI 模型文件 | 训练好的模型权重 |
-| `data/postgres/` | PostgreSQL 数据 | 持久化存储 |
-| `data/redis/` | Redis 数据 | 缓存与会话 |
+| 类别 | 文档 |
+|------|------|
+| **部署** | [部署指南](docs/部署指南.md) · [数据包安装](docs/数据包安装指南.md) · [Web部署](docs/Web部署指南.md) |
+| **开发** | [Electron编译](docs/Electron编译方案.md) · [开发环境](#-开发环境) |
+| **架构** | [系统架构](docs/系统架构文档.md) · [Qlib架构](docs/Qlib架构与回测原理.md) |
+| **策略** | [Alpha158训练](docs/alpha158训练计划.md) · [策略比较](docs/策略比较分析.md) · [多模型切换](docs/多模型训练与推理切换设计方案.md) |
+| **规范** | [Qlib策略开发](docs/Qlib内部策略开发规范.md) · [回测费用](docs/回测费用配置说明.md) |
+| **数据** | [高维特征存储](docs/高维特征存储与统一访问方案.md) · [152维特征方案](docs/QuantMind_152维特征方案规范.md) · [行情快照](docs/行情快照写入规范.md) |
 
 ---
 
@@ -373,39 +310,19 @@ python backend/run_tests.py integration
 python backend/run_tests.py all
 ```
 
-### 常见问题
-
-**Q: 部署中断后如何继续？**
+### 开发环境
 
 ```bash
-# 查看当前进度
-cat /tmp/quantmind_deploy_progress
+# 后端开发
+source .venv/bin/activate
+pip install -r requirements.txt
+python backend/main_oss.py
 
-# 从断点继续
-sudo bash deploy/deploy.sh --resume
+# 前端开发
+cd electron && npm install && npm run dev
 ```
 
-**Q: Docker 镜像拉取失败？**
-
-```bash
-# 手动配置镜像源
-sudo tee /etc/docker/daemon.json <<EOF
-{
-  "registry-mirrors": ["https://docker.1ms.run"]
-}
-EOF
-
-# 重启 Docker
-sudo systemctl daemon-reload
-sudo systemctl restart docker
-
-# 手动拉取镜像
-docker pull postgres:15-alpine
-docker pull redis:7-alpine
-
-# 继续部署
-sudo bash deploy/deploy.sh --resume
-```
+> 📖 部署常见问题 → [docs/部署指南.md#常见问题](docs/部署指南.md#常见问题)
 
 ---
 

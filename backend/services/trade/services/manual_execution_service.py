@@ -126,7 +126,7 @@ def _parse_iso_date(value: Any) -> date:
     except Exception as exc:
         raise HTTPException(
             status_code=400, detail=f"prediction_trade_date 非法: {exc}"
-        )
+        ) from exc
 
 
 def _normalize_trading_mode(value: Any) -> str:
@@ -170,6 +170,103 @@ def _manual_task_agent_protect_price_ratio() -> float:
     if ratio <= 0:
         return 0.002
     return min(ratio, 0.1)
+
+
+def _manual_task_sell_wait_timeout_sec() -> int:
+    timeout = _to_int(
+        os.getenv("MANUAL_TASK_SELL_WAIT_TIMEOUT_SEC", "300"),
+        300,
+    )
+    if timeout <= 0:
+        return 0
+    return min(timeout, 900)
+
+
+def _manual_task_sell_wait_poll_sec() -> float:
+    poll = _to_float(
+        os.getenv("MANUAL_TASK_SELL_WAIT_POLL_SEC", "3"),
+        3.0,
+    )
+    if poll <= 0:
+        return 3.0
+    return min(max(poll, 1.0), 10.0)
+
+
+def _order_status_text(value: Any) -> str:
+    raw = getattr(value, "value", value)
+    return str(raw or "").strip().lower()
+
+
+def _rebuild_buy_orders_with_budget(
+    *,
+    buy_orders: list[dict[str, Any]],
+    buy_budget: float,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], float]:
+    """
+    根据“卖出成交后可用资金”重算买单数量。
+    返回: (可执行买单, 新增跳过项, 预估剩余现金)
+    """
+    normalized_rows: list[dict[str, Any]] = []
+    skipped_items: list[dict[str, Any]] = []
+    remaining_budget = max(0.0, _to_float(buy_budget, 0.0))
+
+    for row in buy_orders:
+        if not isinstance(row, dict):
+            continue
+        symbol = str(row.get("symbol") or "").strip().upper()
+        if not symbol:
+            continue
+        normalized_rows.append(dict(row, symbol=symbol))
+
+    recalculated: list[dict[str, Any]] = []
+    for index, row in enumerate(normalized_rows):
+        slots = max(1, len(normalized_rows) - index)
+        per_slot_budget = remaining_budget / slots
+
+        symbol = row["symbol"]
+        reference_price = _to_float(
+            row.get("reference_price") or row.get("price"),
+            0.0,
+        )
+        if reference_price <= 0:
+            reference_price = _to_float(_get_realtime_price(symbol), 0.0)
+        if reference_price <= 0:
+            skipped_items.append(
+                {
+                    "symbol": symbol,
+                    "action": "BUY",
+                    "reason": "卖后买阶段缺少实时价格，无法重算买入数量",
+                    "source": "buy_signal",
+                }
+            )
+            continue
+
+        quantity = _floor_board_lot(per_slot_budget / reference_price)
+        if quantity <= 0:
+            skipped_items.append(
+                {
+                    "symbol": symbol,
+                    "action": "BUY",
+                    "reason": "卖后买阶段可用资金不足以买入 100 股",
+                    "source": "buy_signal",
+                }
+            )
+            continue
+
+        estimated_notional = round(quantity * reference_price, 2)
+        remaining_budget = max(0.0, remaining_budget - estimated_notional)
+
+        updated = dict(row)
+        updated["quantity"] = quantity
+        updated["reference_price"] = reference_price
+        updated["price"] = reference_price
+        updated["estimated_notional"] = estimated_notional
+        updated["reason"] = (
+            f"{str(row.get('reason') or '').strip()}；卖后买资金门控重算"
+        ).strip("；")
+        recalculated.append(updated)
+
+    return recalculated, skipped_items, remaining_budget
 
 
 def _stable_json(value: Any) -> str:
@@ -1558,10 +1655,6 @@ class ManualExecutionService:
             hosted_status.get("latest_default_model_id") or ""
         ).strip()
         target_horizon_days = _to_int(hosted_status.get("target_horizon_days"), 5)
-        data_trade_date = _parse_iso_date(hosted_status.get("data_trade_date"))
-        prediction_trade_date = _parse_iso_date(
-            hosted_status.get("prediction_trade_date")
-        )
         generation_start = _parse_iso_date(hosted_status.get("execution_window_start"))
         execution_deadline = _parse_iso_date(hosted_status.get("execution_window_end"))
         latest_run_id = str(hosted_status.get("latest_run_id") or "").strip()
@@ -1857,7 +1950,7 @@ class ManualExecutionService:
                         Portfolio.tenant_id == tenant_id,
                         Portfolio.user_id == user_id,
                         Portfolio.status == "active",
-                        Portfolio.is_deleted == False,
+                        Portfolio.is_deleted.is_(False),
                     )
                 )
                 .order_by(Portfolio.updated_at.desc())
@@ -1962,7 +2055,7 @@ class ManualExecutionService:
             sell_orders = list(execution_plan.get("sell_orders") or [])
             buy_orders = list(execution_plan.get("buy_orders") or [])
             skipped_items = list(execution_plan.get("skipped_items") or [])
-            plan_summary = execution_plan.get("summary") or {}
+            plan_summary = dict(execution_plan.get("summary") or {})
             actionable_orders = sell_orders + buy_orders
             if not actionable_orders:
                 error_msg = "调仓预案无可执行委托"
@@ -1989,6 +2082,9 @@ class ManualExecutionService:
             failed_count = 0
             first_error = ""
             total = len(actionable_orders)
+            submit_index = 0
+            submitted_sell_orders: list[dict[str, Any]] = []
+            runtime_plan_summary = dict(plan_summary)
 
             await manual_execution_persistence.update_task(
                 task_id=task_id,
@@ -2099,7 +2195,13 @@ class ManualExecutionService:
                 ),
             )
 
-            for index, row in enumerate(actionable_orders, start=1):
+            async def _submit_one_order(row: dict[str, Any], index: int) -> None:
+                nonlocal processed
+                nonlocal success_count
+                nonlocal failed_count
+                nonlocal first_error
+                nonlocal submitted_sell_orders
+
                 symbol = str(row.get("symbol") or "").strip().upper()
                 fusion_score = _to_float(row.get("fusion_score"), 0.0)
                 expected_price = _to_float(row.get("price"), 0.0)
@@ -2185,6 +2287,17 @@ class ManualExecutionService:
 
                     if is_success:
                         success_count += 1
+                        if side == "SELL":
+                            submitted_sell_orders.append(
+                                {
+                                    "symbol": symbol,
+                                    "client_order_id": str(
+                                        order_payload.get("client_order_id") or ""
+                                    ),
+                                    "order_id": str(order_id or ""),
+                                    "quantity": quantity,
+                                }
+                            )
                         line = f"  >> 提交完成: {symbol} | 订单ID: {order_id} | 派发类型: {execution}"
                         level = "info"
                     elif result.get("status") == "rejected":
@@ -2232,7 +2345,7 @@ class ManualExecutionService:
                         first_error = str(e)
 
                 processed = index
-                progress = int((processed / total) * 100)
+                progress = int((processed / max(total, 1)) * 100)
 
                 # 实时更新进度
                 if index % 5 == 0 or index == total:
@@ -2247,6 +2360,287 @@ class ManualExecutionService:
 
                 # 给日志流一点喘息时间，避免瞬间冲刷
                 await asyncio.sleep(0.05)
+
+            # Phase 1: 先提交卖单
+            if sell_orders:
+                manual_execution_log_stream.append_log(
+                    task_id=task_id,
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    level="info",
+                    stage="dispatching",
+                    status="running",
+                    line=f"进入卖单执行阶段，共 {len(sell_orders)} 笔卖单",
+                )
+                for row in sell_orders:
+                    submit_index += 1
+                    await _submit_one_order(row, submit_index)
+
+                sell_wait_timeout_sec = _manual_task_sell_wait_timeout_sec()
+                sell_wait_poll_sec = _manual_task_sell_wait_poll_sec()
+                actual_sell_filled_value = 0.0
+                actual_sell_filled_quantity = 0.0
+                sell_settled_count = 0
+                sell_timed_out = False
+
+                if submitted_sell_orders and sell_wait_timeout_sec > 0:
+                    manual_execution_log_stream.append_log(
+                        task_id=task_id,
+                        tenant_id=tenant_id,
+                        user_id=user_id,
+                        level="info",
+                        stage="dispatching",
+                        status="running",
+                        line=(
+                            "卖单提交完成，进入成交等待阶段："
+                            f"submitted={len(submitted_sell_orders)}，"
+                            f"timeout={sell_wait_timeout_sec}s，poll={sell_wait_poll_sec:.1f}s"
+                        ),
+                    )
+                    loop = asyncio.get_running_loop()
+                    start_ts = loop.time()
+                    deadline_ts = start_ts + float(sell_wait_timeout_sec)
+                    last_log_elapsed = -1
+
+                    sell_client_ids = [
+                        str(item.get("client_order_id") or "")
+                        for item in submitted_sell_orders
+                        if str(item.get("client_order_id") or "")
+                    ]
+                    while True:
+                        sell_status_rows = (
+                            (
+                                await db.execute(
+                                    select(
+                                        Order.client_order_id,
+                                        Order.status,
+                                        Order.filled_quantity,
+                                        Order.filled_value,
+                                    ).where(
+                                        and_(
+                                            Order.tenant_id == tenant_id,
+                                            Order.user_id == user_id,
+                                            Order.client_order_id.in_(sell_client_ids),
+                                        )
+                                    )
+                                )
+                            )
+                            .mappings()
+                            .all()
+                        )
+                        status_map = {
+                            str(row.get("client_order_id") or ""): row
+                            for row in sell_status_rows
+                        }
+
+                        settled_count = 0
+                        filled_qty_sum = 0.0
+                        filled_value_sum = 0.0
+                        for item in submitted_sell_orders:
+                            cid = str(item.get("client_order_id") or "")
+                            row = status_map.get(cid) or {}
+                            status_text = _order_status_text(row.get("status"))
+                            if status_text in {"filled", "cancelled", "rejected", "expired"}:
+                                settled_count += 1
+                            fill_qty = max(0.0, _to_float(row.get("filled_quantity"), 0.0))
+                            fill_value = max(0.0, _to_float(row.get("filled_value"), 0.0))
+                            filled_qty_sum += fill_qty
+                            filled_value_sum += fill_value
+
+                        actual_sell_filled_quantity = filled_qty_sum
+                        actual_sell_filled_value = filled_value_sum
+                        sell_settled_count = settled_count
+
+                        if settled_count >= len(submitted_sell_orders):
+                            manual_execution_log_stream.append_log(
+                                task_id=task_id,
+                                tenant_id=tenant_id,
+                                user_id=user_id,
+                                level="info",
+                                stage="dispatching",
+                                status="running",
+                                line=(
+                                    "卖单成交等待完成："
+                                    f"settled={settled_count}/{len(submitted_sell_orders)}，"
+                                    f"filled_qty={filled_qty_sum:.0f}，"
+                                    f"filled_amount={filled_value_sum:.2f}"
+                                ),
+                            )
+                            break
+
+                        now_ts = loop.time()
+                        elapsed = int(now_ts - start_ts)
+                        if now_ts >= deadline_ts:
+                            sell_timed_out = True
+                            manual_execution_log_stream.append_log(
+                                task_id=task_id,
+                                tenant_id=tenant_id,
+                                user_id=user_id,
+                                level="warning",
+                                stage="dispatching",
+                                status="running",
+                                line=(
+                                    "卖单成交等待超时，按当前已成交金额进入买单阶段："
+                                    f"settled={settled_count}/{len(submitted_sell_orders)}，"
+                                    f"filled_qty={filled_qty_sum:.0f}，"
+                                    f"filled_amount={filled_value_sum:.2f}"
+                                ),
+                            )
+                            break
+
+                        if elapsed // 30 > last_log_elapsed:
+                            last_log_elapsed = elapsed // 30
+                            manual_execution_log_stream.append_log(
+                                task_id=task_id,
+                                tenant_id=tenant_id,
+                                user_id=user_id,
+                                level="info",
+                                stage="dispatching",
+                                status="running",
+                                line=(
+                                    "卖单等待中："
+                                    f"elapsed={elapsed}s，"
+                                    f"settled={settled_count}/{len(submitted_sell_orders)}，"
+                                    f"filled_amount={filled_value_sum:.2f}"
+                                ),
+                            )
+
+                        await asyncio.sleep(
+                            min(
+                                sell_wait_poll_sec,
+                                max(0.2, deadline_ts - now_ts),
+                            )
+                        )
+                elif submitted_sell_orders:
+                    manual_execution_log_stream.append_log(
+                        task_id=task_id,
+                        tenant_id=tenant_id,
+                        user_id=user_id,
+                        level="warning",
+                        stage="dispatching",
+                        status="running",
+                        line="卖单等待超时参数<=0，已跳过等待阶段并直接进入买单",
+                    )
+                    sell_wait_timeout_sec = 0
+                    sell_wait_poll_sec = 0.0
+                    actual_sell_filled_value = 0.0
+                    actual_sell_filled_quantity = 0.0
+                    sell_settled_count = 0
+                    sell_timed_out = True
+                else:
+                    manual_execution_log_stream.append_log(
+                        task_id=task_id,
+                        tenant_id=tenant_id,
+                        user_id=user_id,
+                        level="warning",
+                        stage="dispatching",
+                        status="running",
+                        line="卖单阶段未产生成功提交的卖单，将直接进入买单阶段",
+                    )
+                    sell_wait_timeout_sec = _manual_task_sell_wait_timeout_sec()
+                    sell_wait_poll_sec = _manual_task_sell_wait_poll_sec()
+                    actual_sell_filled_value = 0.0
+                    actual_sell_filled_quantity = 0.0
+                    sell_settled_count = 0
+                    sell_timed_out = False
+
+                initial_cash = _to_float(runtime_plan_summary.get("available_cash"), 0.0)
+                buy_budget_after_sell = max(0.0, initial_cash + actual_sell_filled_value)
+                recalculated_buy_orders, buy_skipped_items, buy_remaining_cash = _rebuild_buy_orders_with_budget(
+                    buy_orders=buy_orders,
+                    buy_budget=buy_budget_after_sell,
+                )
+                if buy_skipped_items:
+                    skipped_items.extend(buy_skipped_items)
+                    manual_execution_log_stream.append_log(
+                        task_id=task_id,
+                        tenant_id=tenant_id,
+                        user_id=user_id,
+                        level="warning",
+                        stage="dispatching",
+                        status="running",
+                        line=f"买单重算后新增跳过 {len(buy_skipped_items)} 笔（资金不足或缺少行情）",
+                    )
+                buy_orders = recalculated_buy_orders
+
+                runtime_plan_summary.update(
+                    {
+                        "execution_phase": "sell_wait_buy",
+                        "sell_order_count": len(sell_orders),
+                        "buy_order_count": len(buy_orders),
+                        "skipped_count": len(skipped_items),
+                        "sell_wait_timeout_sec": sell_wait_timeout_sec,
+                        "sell_wait_poll_sec": sell_wait_poll_sec,
+                        "sell_wait_timed_out": bool(sell_timed_out),
+                        "sell_submitted_count": len(submitted_sell_orders),
+                        "sell_settled_count": sell_settled_count,
+                        "actual_sell_filled_quantity": round(
+                            actual_sell_filled_quantity, 4
+                        ),
+                        "actual_sell_filled_value": round(actual_sell_filled_value, 2),
+                        "buy_budget_after_sell_wait": round(buy_budget_after_sell, 2),
+                        "estimated_remaining_cash": round(buy_remaining_cash, 2),
+                    }
+                )
+
+                manual_execution_log_stream.append_log(
+                    task_id=task_id,
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    level="info",
+                    stage="dispatching",
+                    status="running",
+                    line=(
+                        "卖后买资金门控完成："
+                        f"buy_budget={buy_budget_after_sell:.2f}，"
+                        f"buy_orders={len(buy_orders)}"
+                    ),
+                )
+            else:
+                runtime_plan_summary.update(
+                    {
+                        "execution_phase": "buy_only",
+                        "sell_order_count": 0,
+                        "buy_order_count": len(buy_orders),
+                        "skipped_count": len(skipped_items),
+                    }
+                )
+                manual_execution_log_stream.append_log(
+                    task_id=task_id,
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    level="info",
+                    stage="dispatching",
+                    status="running",
+                    line="本次预案无卖单，直接进入买单阶段",
+                )
+
+            # Phase 2: 提交买单（若存在）
+            if buy_orders:
+                manual_execution_log_stream.append_log(
+                    task_id=task_id,
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    level="info",
+                    stage="dispatching",
+                    status="running",
+                    line=f"进入买单执行阶段，共 {len(buy_orders)} 笔买单",
+                )
+                for row in buy_orders:
+                    submit_index += 1
+                    await _submit_one_order(row, submit_index)
+            else:
+                manual_execution_log_stream.append_log(
+                    task_id=task_id,
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    level="warning",
+                    stage="dispatching",
+                    status="running",
+                    line="买单阶段无可执行委托（可能因卖单未成交释放资金）",
+                )
+
+            plan_summary = runtime_plan_summary
 
             result_payload = {
                 "success": failed_count == 0,

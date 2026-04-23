@@ -44,12 +44,15 @@ if ! $AUTO_YES; then
     esac
 fi
 
-# 下载部署脚本
-DEPLOY_DIR="/opt/quantmind"
-DEPLOY_SCRIPT="$DEPLOY_DIR/deploy.sh"
+# 下载部署脚本（使用临时目录，避免提前占用 /opt/quantmind）
+TMP_DEPLOY_DIR="$(mktemp -d /tmp/quantmind-deploy.XXXXXX)"
+DEPLOY_SCRIPT="$TMP_DEPLOY_DIR/deploy.sh"
 DEPLOY_URL="https://gitee.com/qusong0627/quantmind/raw/master/deploy/deploy.sh"
 EXPECTED_SHA256="${QUANTMIND_DEPLOY_SHA256:-}"
-mkdir -p $DEPLOY_DIR
+cleanup() {
+    rm -rf "$TMP_DEPLOY_DIR"
+}
+trap cleanup EXIT
 
 echo "下载部署脚本..."
 curl -fsSL "$DEPLOY_URL" -o "$DEPLOY_SCRIPT"

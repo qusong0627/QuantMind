@@ -1,7 +1,7 @@
 #!/bin/bash
 #===============================================================================
 # QuantMind 一键部署脚本 v4.2
-# 适用于 Ubuntu 20.04/22.04/24.04
+# 适用于 Ubuntu 22.04/24.04
 #
 # 特性:
 #   - 国内镜像加速 (Docker/Node.js/npm)
@@ -12,6 +12,7 @@
 # 使用方式:
 #   chmod +x deploy.sh
 #   sudo ./deploy.sh                    # 完整部署
+#   sudo ./deploy.sh 192.168.1.100      # 指定访问地址显示
 #   sudo ./deploy.sh --yes              # 自动确认，无需交互
 #   sudo ./deploy.sh --backend-only     # 仅部署后端
 #   sudo ./deploy.sh --frontend-only    # 仅部署前端
@@ -65,6 +66,7 @@ AUTO_YES=false
 RESUME=false
 RESET=false
 FORCE_SYNC=false
+SERVER_IP_OVERRIDE="${QUANTMIND_SERVER_IP:-}"
 
 for arg in "$@"; do
     case $arg in
@@ -74,10 +76,18 @@ for arg in "$@"; do
         --resume) RESUME=true ;;
         --reset) RESET=true ;;
         --force-sync) FORCE_SYNC=true ;;
-        *)
+        --*)
             echo "错误: 未知参数: $arg" >&2
-            echo "支持参数: --yes --backend-only --frontend-only --resume --reset --force-sync" >&2
+            echo "支持参数: --yes --backend-only --frontend-only --resume --reset --force-sync [server_ip]" >&2
             exit 1
+            ;;
+        *)
+            if [[ -z "$SERVER_IP_OVERRIDE" ]]; then
+                SERVER_IP_OVERRIDE="$arg"
+            else
+                echo "错误: 检测到多个服务器地址参数: $SERVER_IP_OVERRIDE, $arg" >&2
+                exit 1
+            fi
             ;;
     esac
 done
@@ -89,6 +99,11 @@ fi
 
 # 自动检测服务器IP
 detect_server_ip() {
+    if [[ -n "$SERVER_IP_OVERRIDE" ]]; then
+        echo "$SERVER_IP_OVERRIDE"
+        return
+    fi
+
     local public_ip=$(curl -s --connect-timeout 3 ifconfig.me 2>/dev/null || curl -s --connect-timeout 3 icanhazip.com 2>/dev/null)
     if [[ -n "$public_ip" && "$public_ip" != "127.0.0.1" ]]; then
         echo "$public_ip"
@@ -327,6 +342,11 @@ step2_install_docker() {
 
     if command -v docker &> /dev/null; then
         log_warn "Docker 已安装: $(docker --version)"
+        if ! docker compose version &> /dev/null; then
+            log_info "检测到 Docker 但缺少 Docker Compose 插件，正在安装..."
+            apt-get update -y
+            DEBIAN_FRONTEND=noninteractive apt-get install -y docker-compose-v2
+        fi
     else
         log_info "安装 Docker..."
 
@@ -359,7 +379,12 @@ step2_install_docker() {
         sleep 3
     fi
 
-    docker compose version &> /dev/null && log_info "Docker Compose: $(docker compose version)"
+    if docker compose version &> /dev/null; then
+        log_info "Docker Compose: $(docker compose version)"
+    else
+        log_error "Docker Compose 不可用，请检查 docker-compose-v2 安装状态"
+        exit 1
+    fi
 
     log_done "Step 2"
     save_progress "2"

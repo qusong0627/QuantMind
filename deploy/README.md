@@ -6,7 +6,7 @@
 
 ```bash
 # 一键部署
-curl -fsSL https://gitee.com/qusong0627/quantmind/raw/master/deploy/quick-deploy.sh | sudo bash
+curl -fsSL https://gitee.com/qusong0627/quantmind/raw/master/deploy/quick-deploy.sh | sudo bash -s -- --yes
 ```
 
 ## 指定服务器IP
