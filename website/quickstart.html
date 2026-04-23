@@ -207,7 +207,7 @@ source .venv/bin/activate  # Linux/macOS
               <div class="step-content">
                 <p>首次运行需要下载 Qlib 历史数据：</p>
                 <div class="alert alert-info" style="margin-bottom: 16px;">
-                  <div class="alert-title">数据下载地址</div>
+                  <div class="alert-title">数据下载地址（中国联通云盘，不限速）</div>
                   <p><a href="https://pan.wo.cn/s/1m1a5P31792" target="_blank">https://pan.wo.cn/s/1m1a5P31792</a></p>
                   <p style="margin-top: 4px; color: #666;">提取码：<code>eRgz</code></p>
                 </div>
@@ -235,45 +235,6 @@ source .venv/bin/activate  # Linux/macOS
                 <p class="text-muted mt-4">如果输出了 Qlib 版本号，说明安装成功！</p>
               </div>
             </div>
-          </div>
-        </section>
-
-        <!-- First Backtest -->
-        <section class="section">
-          <h2>运行第一个回测</h2>
-          <p>使用内置的示例策略快速体验回测功能：</p>
-          <div class="code-block">
-            <div class="code-block-header"><span>bash</span></div>
-            <pre><code># 运行示例策略回测
-python scripts/run_backtest.py \
-  --strategy examples/strategies/ma_cross.py \
-  --start-date 2023-01-01 \
-  --end-date 2023-12-31 \
-  --universe csi300</code></pre>
-          </div>
-
-          <h3>回测结果示例</h3>
-          <div class="code-block">
-            <div class="code-block-header"><span>输出</span></div>
-            <pre><code>========================================
-Backtest Report
-========================================
-Period:     2023-01-01 ~ 2023-12-31
-Universe:   CSI300
-Strategy:   MA Cross (5/20)
-
-Performance Metrics:
-  Total Return:    +15.6%
-  Annual Return:   +15.6%
-  Max Drawdown:    -8.2%
-  Sharpe Ratio:    1.42
-  Win Rate:        58.3%
-
-Trade Statistics:
-  Total Trades:    156
-  Avg Holding:     2.3 days
-  Profit Factor:   1.68
-========================================</code></pre>
           </div>
         </section>
 

@@ -112,12 +112,46 @@
           <p class="page-description">QuantMind 版本历史与功能变更记录。</p>
         </header>
 
-        <!-- v1.0.2 -->
+        <!-- v1.0.3 -->
         <section class="section">
           <h2>
-            <code>v1.0.2</code>
+            <code>v1.0.3</code>
             <span class="badge badge-success">最新</span>
           </h2>
+          <p class="text-muted">发布日期：2026-04-23</p>
+
+          <h3>新功能</h3>
+          <ul>
+            <li>新增 QMT Agent 功能介绍页面，详细说明架构原理与配置方法</li>
+            <li>新增 QMT Agent Windows 安装包下载（v1.0.0）</li>
+            <li>开放 Redis 端口支持外部程序访问</li>
+          </ul>
+
+          <h3>优化</h3>
+          <ul>
+            <li>简化部署目录结构，从 <code>/opt/quantmind/quantmind</code> 简化为 <code>/opt/quantmind</code></li>
+            <li>部署脚本增加镜像预拉取和重试机制，提高部署成功率</li>
+            <li>部署脚本自动检查并添加执行权限</li>
+            <li>市场数据推送脚本移除硬编码 Redis 配置，支持用户自定义</li>
+          </ul>
+
+          <h3>修复</h3>
+          <ul>
+            <li>修复 <code>qm_model_inference_runs</code> 表结构与代码不匹配问题</li>
+            <li>修正网站数据下载页面：云盘类型更正为联通云盘，目录结构更正</li>
+            <li>修正 FAQ 页面 QMT 对接文档链接</li>
+          </ul>
+
+          <h3>文档更新</h3>
+          <ul>
+            <li>更新 README 部署文档，添加常见问题解答</li>
+            <li>更新数据包下载地址为中国联通云盘（不限速）</li>
+          </ul>
+        </section>
+
+        <!-- v1.0.2 -->
+        <section class="section">
+          <h2><code>v1.0.2</code></h2>
           <p class="text-muted">发布日期：2025-04-21</p>
 
           <h3>新功能</h3>
