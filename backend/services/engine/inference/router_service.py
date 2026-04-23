@@ -25,8 +25,8 @@ class InferenceRouterService:
         self.fallback_model_id = os.getenv("FALLBACK_MODEL_ID", "alpha158")
         self.primary_model_dir = os.getenv("MODELS_PRODUCTION", "/app/models/production/model_qlib")
         self.fallback_model_dir = os.getenv("MODELS_FALLBACK_PRODUCTION", "/app/models/production/alpha158")
-        self.primary_data_source = os.getenv("QLIB_PRIMARY_DATA_PATH", "db/qlib_data")
-        self.fallback_data_source = os.getenv("QLIB_FALLBACK_DATA_PATH", "db/qlib_data")
+        self.primary_data_source = os.getenv("QLIB_PRIMARY_DATA_PATH", "db/feature_snapshots")
+        self.fallback_data_source = os.getenv("QLIB_FALLBACK_DATA_PATH", "db/feature_snapshots")
 
     def _resolve_data_source(self, model_id: str, model_source: str = "") -> str:
         if model_id == self.fallback_model_id:

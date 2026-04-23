@@ -121,12 +121,12 @@ class InferenceScriptRunner:
             )
         )
         self.primary_data_dir = self._normalize_provider_uri(
-            str(primary_data_dir or os.getenv("QLIB_PRIMARY_DATA_PATH", "db/qlib_data"))
+            str(primary_data_dir or os.getenv("QLIB_PRIMARY_DATA_PATH", "db/feature_snapshots"))
         )
         self.fallback_data_dir = self._normalize_provider_uri(
             str(
                 fallback_data_dir
-                or os.getenv("QLIB_FALLBACK_DATA_PATH", "db/qlib_data")
+                or os.getenv("QLIB_FALLBACK_DATA_PATH", "db/feature_snapshots")
             ),
             prefer_alpha158=True,
         )
@@ -154,11 +154,11 @@ class InferenceScriptRunner:
         规则：
         1) 若能在候选路径中命中真实目录，返回该绝对路径；
         2) 相对路径默认转换为 /app/<path>；
-        3) 兜底场景优先尝试 /app/db/qlib_data。
+        3) 兜底场景优先尝试 /app/db/feature_snapshots。
         """
         raw = str(provider_uri or "").strip()
         if not raw:
-            raw = "db/qlib_data"
+            raw = "db/feature_snapshots"
 
         candidates: list[Path] = []
         p = Path(raw)
@@ -170,8 +170,8 @@ class InferenceScriptRunner:
 
         if prefer_alpha158:
             candidates = [
-                Path("/app/db/qlib_data"),
-                Path("db/qlib_data"),
+                Path("/app/db/feature_snapshots"),
+                Path("db/feature_snapshots"),
                 *candidates,
             ]
 
