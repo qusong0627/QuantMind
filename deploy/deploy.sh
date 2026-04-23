@@ -1,6 +1,6 @@
 #!/bin/bash
 #===============================================================================
-# QuantMind 一键部署脚本 v4.1
+# QuantMind 一键部署脚本 v4.2
 # 适用于 Ubuntu 20.04/22.04/24.04
 #
 # 特性:
@@ -601,7 +601,54 @@ step9_start_database() {
 
     cd "$PROJECT_DIR"
 
-    # 使用 Docker 命名卷，无需手动设置权限
+    # 预拉取基础镜像（避免 docker compose 拉取失败）
+    log_info "预拉取基础镜像..."
+
+    local base_images=("postgres:15-alpine" "redis:7-alpine")
+    local pull_success=true
+
+    for image in "${base_images[@]}"; do
+        log_info "拉取镜像: $image"
+        local max_retries=3
+        local retry_count=0
+        local image_pulled=false
+
+        while [[ $retry_count -lt $max_retries ]]; do
+            if docker pull "$image" 2>&1; then
+                image_pulled=true
+                break
+            fi
+
+            retry_count=$((retry_count + 1))
+            log_warn "拉取失败，重试 $retry_count/$max_retries..."
+
+            # 尝试切换镜像源
+            if [[ $retry_count -lt $max_retries ]]; then
+                local mirror="${DOCKER_MIRRORS[$((retry_count % ${#DOCKER_MIRRORS[@]}))]}"
+                if [[ -n "$mirror" ]]; then
+                    log_info "尝试镜像源: $mirror"
+                    configure_docker_mirror "$mirror" || true
+                    sleep 5
+                fi
+            fi
+        done
+
+        if ! $image_pulled; then
+            log_error "镜像拉取失败: $image"
+            pull_success=false
+        fi
+    done
+
+    if ! $pull_success; then
+        log_error "基础镜像拉取失败，请检查网络连接"
+        log_info "可以尝试手动拉取："
+        log_info "  docker pull postgres:15-alpine"
+        log_info "  docker pull redis:7-alpine"
+        log_info "然后重新运行: sudo bash deploy/deploy.sh --resume"
+        exit 1
+    fi
+
+    # 启动数据库和 Redis
     log_info "启动数据库和 Redis..."
     docker compose up -d db redis
 
