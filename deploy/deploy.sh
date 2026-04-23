@@ -1,6 +1,6 @@
 #!/bin/bash
 #===============================================================================
-# QuantMind 一键部署脚本 v4.0
+# QuantMind 一键部署脚本 v4.1
 # 适用于 Ubuntu 20.04/22.04/24.04
 #
 # 特性:
@@ -19,6 +19,11 @@
 #   sudo ./deploy.sh --reset            # 重置进度重新部署
 #   sudo ./deploy.sh --force-sync       # 强制同步代码（覆盖本地修改）
 #===============================================================================
+
+# 自动添加执行权限（如果当前脚本没有执行权限）
+if [[ ! -x "$0" ]]; then
+    chmod +x "$0" 2>/dev/null || true
+fi
 
 set -euo pipefail
 
@@ -112,11 +117,25 @@ save_progress() { echo "$1" > $PROGRESS_FILE; }
 get_progress() { [[ -f $PROGRESS_FILE ]] && cat $PROGRESS_FILE || echo "0"; }
 reset_progress() { rm -f $PROGRESS_FILE; log_info "进度已重置"; }
 
+# 确保脚本有执行权限
+ensure_execute_permission() {
+    local script_path="$1"
+    if [[ ! -x "$script_path" ]]; then
+        log_warn "脚本缺少执行权限，正在添加..."
+        chmod +x "$script_path" 2>/dev/null || {
+            log_error "无法添加执行权限，请手动执行: chmod +x $script_path"
+            exit 1
+        }
+        log_info "执行权限已添加"
+    fi
+}
+
 # 检查 root 权限
 check_root() {
     if [[ $EUID -ne 0 ]]; then
         log_error "此脚本需要 root 权限运行"
         log_info "请使用: sudo ./deploy.sh"
+        log_info "或者使用: sudo bash deploy.sh"
         exit 1
     fi
 }
@@ -894,6 +913,11 @@ show_info() {
     echo -e "   如需使用完整回测、模型训练及推理服务，请下载离线数据包："
     echo -e "   ${BLUE}https://oss.quantmindai.cn/data-download.html${NC}"
     echo ""
+    echo -e "${YELLOW}🔧 断点续传${NC}"
+    echo -e "   如果部署中断，可使用以下命令继续："
+    echo -e "   ${GREEN}sudo ./deploy/deploy.sh --resume${NC}"
+    echo -e "   或 ${GREEN}sudo bash deploy/deploy.sh --resume${NC}"
+    echo ""
 }
 
 #===============================================================================
@@ -984,6 +1008,9 @@ main() {
 
     check_root
     check_system
+
+    # 确保脚本有执行权限
+    ensure_execute_permission "$0"
 
     # 处理部署进度
     CURRENT_STEP=$(get_progress)
