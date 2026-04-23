@@ -84,8 +84,21 @@ class StockIndexItem:
 
 class StockIndexStore:
     def __init__(self) -> None:
-        default_path = os.getenv("STOCK_INDEX_JSON_PATH", "data/stocks/stocks_index.json")
-        self.path = os.path.abspath(default_path)
+        # 支持多个备选路径，优先使用环境变量，然后尝试容器内挂载路径
+        candidate_paths = [
+            os.getenv("STOCK_INDEX_JSON_PATH"),
+            "/data/stocks/stocks_index.json",  # Docker 挂载路径
+            "data/stocks/stocks_index.json",   # 相对路径
+            "/app/data/stocks/stocks_index.json",  # 容器内绝对路径
+        ]
+        self.path = None
+        for p in candidate_paths:
+            if p and os.path.exists(p):
+                self.path = os.path.abspath(p)
+                break
+        if not self.path:
+            # 回退到默认路径（会在 _load_if_needed 中报错）
+            self.path = os.path.abspath(os.getenv("STOCK_INDEX_JSON_PATH", "data/stocks/stocks_index.json"))
         self._lock = RLock()
         self._mtime: float = -1.0
         self._items: list[StockIndexItem] = []
