@@ -129,8 +129,11 @@ curl -fsSL https://gitee.com/qusong0627/quantmind/raw/master/deploy/quick-deploy
 ### 部署选项
 
 ```bash
-# 完整部署
+# 完整部署（交互式确认）
 sudo ./deploy/deploy.sh
+
+# 自动确认，无需交互
+sudo ./deploy/deploy.sh --yes
 
 # 仅部署后端
 sudo ./deploy/deploy.sh --backend-only
@@ -143,6 +146,45 @@ sudo ./deploy/deploy.sh --resume
 
 # 重置进度重新部署
 sudo ./deploy/deploy.sh --reset
+
+# 强制同步代码（覆盖本地修改）
+sudo ./deploy/deploy.sh --force-sync
+```
+
+> **提示：** 如果提示 `command not found`，请使用 `sudo bash deploy/deploy.sh` 执行。
+
+### 常见问题
+
+**Q: 部署中断后如何继续？**
+
+```bash
+# 查看当前进度
+cat /tmp/quantmind_deploy_progress
+
+# 从断点继续
+sudo bash deploy/deploy.sh --resume
+```
+
+**Q: Docker 镜像拉取失败？**
+
+```bash
+# 手动配置镜像源
+sudo tee /etc/docker/daemon.json <<EOF
+{
+  "registry-mirrors": ["https://docker.1ms.run"]
+}
+EOF
+
+# 重启 Docker
+sudo systemctl daemon-reload
+sudo systemctl restart docker
+
+# 手动拉取镜像
+docker pull postgres:15-alpine
+docker pull redis:7-alpine
+
+# 继续部署
+sudo bash deploy/deploy.sh --resume
 ```
 
 ### 手动部署
