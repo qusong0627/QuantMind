@@ -300,19 +300,20 @@ const StrategyManagement: React.FC<StrategyManagementProps> = ({
                     : (signalSource?.source === 'mismatch'
                         ? '来源不匹配'
                         : '未就绪'))));
-    const signalSourceMessage = signalSource?.message
-        || (signalSource?.source === 'missing'
-            ? '未检测到当前用户默认模型的最新完成推理'
-            : (signalSource?.source === 'window_pending'
-                ? '当前默认模型最新推理结果尚未进入可执行窗口'
-                : (signalSource?.source === 'expired'
-                    ? '当前默认模型最新推理结果已超过可执行窗口'
-                    : (signalSource?.source === 'fallback'
-                        ? '当前默认模型最新推理数据来自兜底结果，自动托管已禁止使用兜底数据'
-                        : (signalSource?.source === 'mismatch'
-                            ? '当前默认模型最新推理数据不是用户默认模型来源，自动托管已拒绝'
-                            : '默认模型状态已获取')))));
-    
+    const signalSourceExplanation = signalSource?.available
+        ? '模型推理信号已就绪，可在执行窗口内自动触发托管交易'
+        : (signalSource?.source === 'missing'
+            ? '请先设置默认模型并完成至少一次推理，系统才能获取交易信号'
+            : (signalSource?.source === 'fallback'
+                ? '当前推理数据为兜底结果，为保障安全已暂停自动托管'
+                : (signalSource?.source === 'mismatch'
+                    ? '推理数据来源与默认模型不匹配，请重新运行推理'
+                    : (signalSource?.source === 'window_pending'
+                        ? '推理结果已就绪，但当前日期未进入可执行时间窗口'
+                        : (signalSource?.source === 'expired'
+                            ? '推理结果已超过执行有效期，请重新运行推理获取最新信号'
+                            : '等待模型推理结果...')))));
+
     const runtimeModeLabel = runtimeStatus === 'running'
         ? (runtimeMode === 'SHADOW'
             ? '影子运行中'
@@ -695,7 +696,7 @@ const StrategyManagement: React.FC<StrategyManagementProps> = ({
                                     <span className="text-[11px] text-slate-300">
                                         {latestInferenceRunLoading
                                             ? '请等待模型批次查询完成'
-                                            : (signalSourceMessage || '当前默认模型未返回可执行推理结果')}
+                                            : (signalSourceExplanation || '当前默认模型未返回可执行推理结果')}
                                     </span>
                                 </div>
                             )}
@@ -839,7 +840,7 @@ const StrategyManagement: React.FC<StrategyManagementProps> = ({
                                     <div className="min-w-0">
                                         <div className="text-[10px] font-black text-emerald-500 uppercase tracking-widest">默认模型推理反馈与诊断</div>
                                         <div className="mt-1 text-sm font-bold leading-relaxed text-slate-700">
-                                            {signalSourceMessage}
+                                            {signalSourceExplanation}
                                         </div>
                                     </div>
                                     <div className={`shrink-0 text-[10px] font-bold px-2 py-0.5 rounded-full border ${signalSourceBadgeTone}`}>
@@ -867,9 +868,11 @@ const StrategyManagement: React.FC<StrategyManagementProps> = ({
                                     </div>
                                 </div>
                                 <div className="rounded-xl bg-slate-50/70 p-3 border border-slate-100/50 shadow-sm">
-                                    <div className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">诊断状态</div>
+                                    <div className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">执行窗口</div>
                                     <div className="font-bold text-slate-700 text-xs truncate">
-                                        {signalSourceLabel}
+                                        {signalSource?.available
+                                            ? `${signalSource.execution_window_start?.slice(5) || '-'} ~ ${signalSource.execution_window_end?.slice(5) || '-'}`
+                                            : '不可用'}
                                     </div>
                                 </div>
                             </div>

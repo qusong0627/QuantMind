@@ -125,8 +125,10 @@ export interface RealTradingStatus {
     latest_signal_run_id?: string | null;
     signal_source_status?: {
         available: boolean;
-        source?: 'inference' | 'fallback' | 'missing' | string;
+        source?: 'inference' | 'fallback' | 'missing' | 'window_pending' | 'expired' | 'mismatch' | string;
         message?: string;
+        execution_window_start?: string;
+        execution_window_end?: string;
     } | null;
 }
 

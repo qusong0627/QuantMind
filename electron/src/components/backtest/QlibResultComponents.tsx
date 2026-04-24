@@ -92,7 +92,7 @@ export const QlibResultDisplay: React.FC<{ result: BacktestResult | QlibBacktest
       color: 'text-amber-600',
     },
     {
-      label: 'Alpha',
+      label: 'CAPM Alpha',
       value: formatPercent(result.alpha),
       color: getMarketColor(result.alpha),
     },
