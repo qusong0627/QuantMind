@@ -51,6 +51,7 @@ async def lifespan(app: FastAPI):
     snapshot_task = None
     ledger_settlement_task = None
     manual_execution_task = None
+    sandbox_signal_task = None
 
     try:
         await init_unified_config(service_name="quantmind-trade")
@@ -133,12 +134,23 @@ async def lifespan(app: FastAPI):
         app.state.startup_healthy = False
         logger.error("trade sandbox pool start failed: %s", e, exc_info=True)
 
+    # 启动沙箱信号消费者（将沙箱信号转换为模拟盘订单）
+    try:
+        from backend.services.trade.services.sandbox_signal_consumer import sandbox_signal_consumer
+
+        sandbox_signal_task = asyncio.create_task(sandbox_signal_consumer.start(), name="sandbox-signal-consumer")
+        app.state.sandbox_signal_consumer = sandbox_signal_consumer
+        logger.info("Sandbox signal consumer started")
+    except Exception as e:
+        app.state.startup_healthy = False
+        logger.error("trade sandbox signal consumer start failed: %s", e, exc_info=True)
+
     healthy = bool(app.state.startup_healthy and app.state.db_connected and app.state.redis_connected)
     set_service_health("quantmind-trade", healthy)
 
     yield
 
-    for task in (scanner_task, margin_task, snapshot_task, ledger_settlement_task, manual_execution_task):
+    for task in (scanner_task, margin_task, snapshot_task, ledger_settlement_task, manual_execution_task, sandbox_signal_task):
         if task is None:
             continue
         task.cancel()
@@ -155,6 +167,14 @@ async def lifespan(app: FastAPI):
             await exec_consumer.stop()
         except Exception as e:
             logger.warning("trade execution stream consumer stop failed: %s", e)
+
+    # 停止沙箱信号消费者
+    sandbox_consumer = getattr(app.state, "sandbox_signal_consumer", None)
+    if sandbox_consumer is not None:
+        try:
+            await sandbox_consumer.stop()
+        except Exception as e:
+            logger.warning("trade sandbox signal consumer stop failed: %s", e)
 
     # 停止沙箱进程池
     try:
