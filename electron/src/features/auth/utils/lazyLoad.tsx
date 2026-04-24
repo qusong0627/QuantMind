@@ -94,11 +94,15 @@ export const preloadAiIdeResources = async () => {
       // Prism 语言包依赖全局 Prism；必须先加载 core 并挂到全局，避免 "Prism is not defined"。
       const prismCore = await import('prismjs');
       const prismInstance = (prismCore as any).default || prismCore;
-      if (typeof globalThis !== 'undefined') {
+      if (typeof globalThis !== 'undefined' && !(globalThis as any).Prism) {
         (globalThis as any).Prism = prismInstance;
       }
-      if (typeof window !== 'undefined') {
-        (window as any).Prism = prismInstance;
+      if (typeof window !== 'undefined' && !(window as any).Prism) {
+        try {
+          (window as any).Prism = prismInstance;
+        } catch {
+          // window.Prism 可能已被设为只读，跳过
+        }
       }
 
       await Promise.all([
