@@ -420,7 +420,7 @@ const PersonalCenter: React.FC<PersonalCenterProps> = ({ tenantId, userId, statu
                                     </button>
                                 </div>
                                 <div className="mt-2 text-xs text-gray-500">
-                                    修改此金额会即时改变“总盈亏”的统计起点。59万盈亏目标建议对齐基准至 ~2100万。
+                                    修改此金额会即时改变“总盈亏”的统计起点。
                                 </div>
                             </div>
                         )}
