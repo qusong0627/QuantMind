@@ -385,8 +385,9 @@ async def preflight_check(
             else "未检测到账户快照",
         )
 
-    # 8~10) Stream 探针仅用于 REAL/SHADOW。SIMULATION 模式下直接跳过，避免无关噪音。
-    if mode in {"REAL", "SHADOW"}:
+    # 8~10) Stream 探针：REAL/SHADOW/SIMULATION 均检测行情质量
+    if mode in {"REAL", "SHADOW", "SIMULATION"}:
+        # 模拟盘也需要行情来计算成交金额，否则会用随机价格导致金额错误
         stream_required = True
         stream_symbols = _resolve_preflight_symbols()
         series_threshold_sec = int(os.getenv("PREFLIGHT_SERIES_STALE_THRESHOLD_SEC", "180"))
@@ -410,27 +411,52 @@ async def preflight_check(
                 latest_age_sec = age
                 break
             if latest_age_sec is None:
+                # 交易时段（9:15-15:00）严格检查，非交易时段仅警告
+                now = datetime.now(timezone.utc).replace(tzinfo=None)
+                is_trading_hours = (
+                    now.weekday() < 5
+                    and now.hour >= 9
+                    and (now.hour < 15 or (now.hour == 9 and now.minute >= 15))
+                )
+                passed = not is_trading_hours  # 交易时段无数据则失败
                 add_check(
                     "stream_series_freshness",
                     "Stream时序序列",
-                    True,  # 警告：不阻断启动
+                    passed,
                     stream_required,
-                    f"[WARNING] 未发现可用序列: sample_symbols={stream_symbols}",
+                    (
+                        f"[WARNING] 未发现可用序列: sample_symbols={stream_symbols}"
+                        + (f" (交易时段阻断)" if is_trading_hours else " (非交易时段放行)")
+                    ),
                     {
                         "sample_symbols": stream_symbols,
                         "stale_threshold_sec": series_threshold_sec,
                         "series_redis": f"{stream_redis_host}:{stream_redis_port}",
                         "source": data_source,
+                        "is_trading_hours": is_trading_hours,
                     },
                 )
             else:
                 ok = latest_age_sec <= series_threshold_sec
+                # 交易时段（9:15-15:00）严格检查，非交易时段仅警告
+                now = datetime.now(timezone.utc).replace(tzinfo=None)
+                is_trading_hours = (
+                    now.weekday() < 5
+                    and now.hour >= 9
+                    and (now.hour < 15 or (now.hour == 9 and now.minute >= 15))
+                )
+                passed = ok if is_trading_hours else True
                 add_check(
                     "stream_series_freshness",
                     "Stream时序序列",
-                    True,  # 警告：不阻断启动
+                    passed,
                     stream_required,
-                    (f"时序序列新鲜度正常（{latest_age_sec}s）" if ok else f"[WARNING] 时序序列延迟过高（{latest_age_sec}s）"),
+                    (
+                        f"时序序列新鲜度正常（{latest_age_sec}s）"
+                        if ok
+                        else f"[WARNING] 时序序列延迟过高（{latest_age_sec}s）"
+                        + (f" (交易时段阻断)" if is_trading_hours else " (非交易时段放行)")
+                    ),
                     {
                         "symbol": matched_symbol,
                         "series_key": matched_key,
@@ -438,6 +464,7 @@ async def preflight_check(
                         "stale_threshold_sec": series_threshold_sec,
                         "series_redis": f"{stream_redis_host}:{stream_redis_port}",
                         "source": data_source,
+                        "is_trading_hours": is_trading_hours,
                     },
                 )
         except Exception as e:

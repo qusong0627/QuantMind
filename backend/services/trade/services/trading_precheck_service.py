@@ -494,15 +494,24 @@ async def run_trading_readiness_precheck(
 
         try:
             stream_ok, stream_detail = _check_stream_series_freshness(redis_client)
+            # 交易时段（9:15-15:00）严格检查，非交易时段仅警告
+            now = datetime.now(timezone.utc).replace(tzinfo=None)
+            is_trading_hours = (
+                now.weekday() < 5  # 周一到周五
+                and now.hour >= 9
+                and (now.hour < 15 or (now.hour == 9 and now.minute >= 15))
+            )
+            passed = stream_ok if is_trading_hours else True
             checks.append(
                 _build_check(
                     "realtime_market_ready",
                     "实时行情服务已就绪",
-                    True,  # 警告：不阻断启动
+                    passed,
                     (
                         f"已就绪: {stream_detail}"
                         if stream_ok
                         else f"[WARNING] 行情不新鲜: {stream_detail}"
+                        + (f" (交易时段阻断)" if is_trading_hours else " (非交易时段放行)")
                     ),
                 )
             )
