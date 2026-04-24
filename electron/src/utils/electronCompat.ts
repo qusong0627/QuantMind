@@ -96,8 +96,12 @@ const electronAPI = {
 };
 
 // 注入到 window
-if (typeof window !== 'undefined') {
-  (window as any).electronAPI = (window as any).electronAPI || electronAPI;
+if (typeof window !== 'undefined' && !(window as any).electronAPI) {
+  try {
+    (window as any).electronAPI = electronAPI;
+  } catch {
+    // window.electronAPI 可能已被设为只读属性，跳过注入
+  }
 }
 
 export default electronAPI;
