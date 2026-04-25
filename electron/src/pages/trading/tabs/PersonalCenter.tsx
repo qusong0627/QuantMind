@@ -365,44 +365,55 @@ const PersonalCenter: React.FC<PersonalCenterProps> = ({ tenantId, userId, statu
                         </div>
                     </div>
 
-                        {tradingMode === 'simulation' ? (
-                            <div className="p-2 rounded-xl border border-gray-200">
-                                <div className="text-sm font-semibold text-gray-800 mb-1.5">
-                                    模拟盘初始金额
-                                </div>
-                                <input
-                                    type="number"
-                                    step={amountStep}
-                                    min={0}
-                                    value={draftInitialCash}
-                                    onChange={(e) => setDraftInitialCash(Number(e.target.value || 0))}
-                                    className="w-full px-3 py-2 rounded-xl border border-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
-                                    placeholder="请输入10万的整数倍"
-                                />
-                                <div className="mt-2 text-xs text-gray-500">
-                                    金额规则：{Math.floor(amountStep / 10000)}万为步长；每{cooldownDays}天仅可修改一次。
-                                </div>
-                                {lastModifiedAt && !canModifyAmount && (
-                                    <div className="mt-0.5 text-xs text-amber-600">
-                                        下次可修改时间：{nextModifyTime?.toLocaleString()}
+                    {tradingMode === 'simulation' ? (
+                            <div className="p-2.5 rounded-xl border border-gray-200 bg-white">
+                                <div className="flex items-center justify-between mb-2">
+                                    <div className="text-xs font-semibold text-gray-700">
+                                        模拟盘初始金额
                                     </div>
-                                )}
-                            </div>
-                        ) : (
-                            <div className="p-2 rounded-xl border border-gray-200">
-                                <div className="text-sm font-semibold text-gray-800 mb-1.5">
-                                    统计基准校准 (PnL Baseline)
+                                    <span className="text-[10px] text-gray-400">
+                                        步长 {Math.floor(amountStep / 10000)}万
+                                    </span>
                                 </div>
-                                <div className="flex gap-2">
+                                <div className="relative">
+                                    <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 text-xs">¥</span>
                                     <input
                                         type="number"
-                                        step={1000}
+                                        step={amountStep}
                                         min={0}
                                         value={draftInitialCash}
                                         onChange={(e) => setDraftInitialCash(Number(e.target.value || 0))}
-                                        className="flex-1 px-3 py-2 rounded-xl border border-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm font-mono"
-                                        placeholder="请输入实盘初始资金基准"
+                                        className="w-full pl-7 pr-3 py-1.5 h-9 rounded-lg border border-gray-200 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 focus:outline-none text-sm font-mono bg-gray-50 transition-all"
+                                        placeholder="请输入初始金额"
                                     />
+                                </div>
+                                <div className="mt-1.5 flex items-center justify-between text-[10px] text-gray-400">
+                                    <span>每 {cooldownDays} 天仅可修改一次</span>
+                                    {lastModifiedAt && !canModifyAmount && (
+                                        <span className="text-amber-500">
+                                            下次可修改：{nextModifyTime?.toLocaleString()}
+                                        </span>
+                                    )}
+                                </div>
+                            </div>
+                        ) : (
+                            <div className="p-2.5 rounded-xl border border-gray-200 bg-white">
+                                <div className="text-xs font-semibold text-gray-700 mb-2">
+                                    统计基准校准 (PnL Baseline)
+                                </div>
+                                <div className="flex gap-2">
+                                    <div className="relative flex-1">
+                                        <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 text-xs">¥</span>
+                                        <input
+                                            type="number"
+                                            step={1000}
+                                            min={0}
+                                            value={draftInitialCash}
+                                            onChange={(e) => setDraftInitialCash(Number(e.target.value || 0))}
+                                            className="w-full pl-7 pr-3 py-1.5 h-9 rounded-lg border border-gray-200 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 focus:outline-none text-sm font-mono bg-gray-50 transition-all"
+                                            placeholder="请输入实盘初始资金基准"
+                                        />
+                                    </div>
                                     <button
                                         onClick={() => {
                                             const brokerPnl = (status?.portfolio as any)?.broker_total_pnl || (status?.portfolio as any)?.total_pnl_raw || 0;
@@ -413,14 +424,14 @@ const PersonalCenter: React.FC<PersonalCenterProps> = ({ tenantId, userId, statu
                                                 message.info('已填充：根据券商盈亏推算的成本基准');
                                             }
                                         }}
-                                        className="px-3 py-2 bg-gray-100 hover:bg-gray-200 text-gray-600 rounded-xl text-xs font-medium transition-colors"
+                                        className="px-3 py-1.5 h-9 bg-gray-100 hover:bg-gray-200 text-gray-600 rounded-lg text-xs font-medium transition-colors whitespace-nowrap"
                                         title="根据券商上报的总盈亏反推基准"
                                     >
                                         对齐券商
                                     </button>
                                 </div>
-                                <div className="mt-2 text-xs text-gray-500">
-                                    修改此金额会即时改变“总盈亏”的统计起点。
+                                <div className="mt-1.5 text-[10px] text-gray-400">
+                                    修改此金额会即时改变"总盈亏"的统计起点
                                 </div>
                             </div>
                         )}

@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { message, Input, Button, Spin } from 'antd';
-import { Key, Save, Eye, EyeOff, CheckCircle, AlertCircle } from 'lucide-react';
+import { Key, Save, Eye, EyeOff, CheckCircle, AlertCircle, Trash2 } from 'lucide-react';
 import { userCenterService } from '../services/userCenterService';
 
 interface OtherSettingsProps {
@@ -16,7 +16,6 @@ export const OtherSettings: React.FC<OtherSettingsProps> = ({ userId, tenantId }
   const [isSaving, setIsSaving] = useState(false);
   const [showKey, setShowKey] = useState(false);
 
-  // 加载 API Key 状态
   useEffect(() => {
     loadApiKeyStatus();
   }, [userId]);
@@ -46,8 +45,7 @@ export const OtherSettings: React.FC<OtherSettingsProps> = ({ userId, tenantId }
     try {
       await userCenterService.saveLLMConfig(trimmedKey);
       message.success('API Key 保存成功');
-      setApiKey(''); // 清空输入
-      // 重新加载状态
+      setApiKey('');
       await loadApiKeyStatus();
     } catch (error: any) {
       console.error('Failed to save API key:', error);
@@ -75,7 +73,7 @@ export const OtherSettings: React.FC<OtherSettingsProps> = ({ userId, tenantId }
   if (isLoading) {
     return (
       <div className="w-full pt-1">
-        <div className="w-full rounded-2xl border border-gray-200 bg-white p-8 flex items-center justify-center min-h-[280px]">
+        <div className="w-full rounded-xl border border-gray-200 bg-white p-8 flex items-center justify-center min-h-[200px]">
           <Spin tip="加载中..." />
         </div>
       </div>
@@ -83,98 +81,108 @@ export const OtherSettings: React.FC<OtherSettingsProps> = ({ userId, tenantId }
   }
 
   return (
-    <div className="w-full pt-1 space-y-6">
-      {/* AI API Key 配置 */}
-      <div className="w-full rounded-2xl border border-gray-200 bg-white overflow-hidden">
-        {/* 标题 */}
-        <div className="px-6 py-4 border-b border-gray-100 bg-gradient-to-r from-indigo-50 to-purple-50">
-          <div className="flex items-center gap-3">
-            <div className="p-2 bg-indigo-100 rounded-lg">
-              <Key className="w-5 h-5 text-indigo-600" />
+    <div className="w-full pt-1 space-y-4">
+      <div className="rounded-xl border border-gray-200 bg-white overflow-hidden">
+        <div className="px-4 py-3 border-b border-gray-100 bg-gradient-to-r from-indigo-50/60 to-purple-50/60">
+          <div className="flex items-center gap-2.5">
+            <div className="p-1.5 bg-indigo-100 rounded-md">
+              <Key className="w-4 h-4 text-indigo-600" />
             </div>
             <div>
-              <h3 className="text-base font-bold text-gray-800">AI 服务配置</h3>
-              <p className="text-xs text-gray-500 mt-0.5">配置 Qwen API Key，用于 AI-IDE 智能助手和策略生成</p>
+              <h3 className="text-sm font-semibold text-gray-800">AI 服务配置</h3>
+              <p className="text-[11px] text-gray-500">Qwen API Key，用于 AI-IDE 和策略生成</p>
             </div>
           </div>
         </div>
 
-        {/* 内容 */}
-        <div className="p-6 space-y-4">
-          {/* 当前状态 */}
-          <div className="flex items-center gap-3 p-4 rounded-xl bg-gray-50">
-            {hasKey ? (
-              <>
-                <CheckCircle className="w-5 h-5 text-green-500" />
-                <div className="flex-1">
-                  <span className="text-sm text-gray-700">当前状态：</span>
-                  <span className="text-sm font-medium text-green-600">已配置</span>
-                  {maskedKey && (
-                    <span className="ml-2 text-xs text-gray-500 font-mono bg-white px-2 py-0.5 rounded">
-                      {maskedKey}
-                    </span>
-                  )}
-                </div>
-                <Button
-                  size="small"
-                  danger
-                  onClick={handleClearApiKey}
-                  loading={isSaving}
-                >
-                  清除
-                </Button>
-              </>
-            ) : (
-              <>
-                <AlertCircle className="w-5 h-5 text-amber-500" />
-                <div className="flex-1">
-                  <span className="text-sm text-gray-700">当前状态：</span>
-                  <span className="text-sm font-medium text-amber-600">未配置</span>
-                </div>
-              </>
+        <div className="p-4 space-y-3">
+          <div className={`flex items-center gap-2 px-3 py-2 rounded-xl text-xs ${hasKey ? 'bg-green-50 text-green-700 border border-green-100' : 'bg-amber-50 text-amber-700 border border-amber-100'}`}>
+            {hasKey ? <CheckCircle className="w-3.5 h-3.5 shrink-0" /> : <AlertCircle className="w-3.5 h-3.5 shrink-0" />}
+            <span className="font-medium">{hasKey ? '已配置' : '未配置'}</span>
+            {hasKey && maskedKey && (
+              <span className="font-mono text-gray-500 bg-white/60 px-1.5 py-0.5 rounded">{maskedKey}</span>
+            )}
+            {hasKey && (
+              <Button
+                type="text"
+                size="small"
+                danger
+                className="ml-auto !text-[11px] !px-2 !h-6"
+                icon={<Trash2 className="w-3 h-3" />}
+                onClick={handleClearApiKey}
+                loading={isSaving}
+              >
+                清除
+              </Button>
             )}
           </div>
 
-          {/* 输入新 Key */}
-          <div className="space-y-2">
-            <label className="text-sm font-medium text-gray-700">
-              {hasKey ? '更新 API Key' : '输入 API Key'}
-            </label>
-            <div className="flex gap-3">
-              <div className="flex-1 relative">
-                <Input
-                  type={showKey ? 'text' : 'password'}
-                  value={apiKey}
-                  onChange={(e) => setApiKey(e.target.value)}
-                  placeholder="sk-xxxxxxxxxxxxxxxx"
-                  style={{ borderRadius: '8px', paddingRight: '40px' }}
-                />
-                <button
-                  type="button"
-                  onClick={() => setShowKey(!showKey)}
-                  className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 z-10"
-                >
-                  {showKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                </button>
-              </div>
-              <Button
-                type="primary"
-                icon={<Save className="w-4 h-4" />}
-                onClick={handleSaveApiKey}
-                loading={isSaving}
-                disabled={!apiKey.trim()}
-                style={{ borderRadius: '8px' }}
+          <div className="flex gap-2 items-center">
+            <div className="relative w-1/2">
+              <Input
+                type={showKey ? 'text' : 'password'}
+                value={apiKey}
+                onChange={(e) => setApiKey(e.target.value)}
+                placeholder={hasKey ? '输入新 Key 以更新' : 'sk-xxxxxxxxxxxxxxxx'}
+                className="!pr-9 rounded-xl h-9"
+                onPressEnter={handleSaveApiKey}
+              />
+              <button
+                type="button"
+                onClick={() => setShowKey(!showKey)}
+                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 z-10"
               >
-                保存
-              </Button>
+                {showKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+              </button>
             </div>
+            <Button
+              type="primary"
+              icon={<Save className="w-4 h-4" />}
+              onClick={handleSaveApiKey}
+              loading={isSaving}
+              disabled={!apiKey.trim()}
+              className="rounded-xl h-9"
+            >
+              保存
+            </Button>
+          </div>
+            <Button
+              type="primary"
+              icon={<Save className="w-4 h-4" />}
+              onClick={handleSaveApiKey}
+              loading={isSaving}
+              disabled={!apiKey.trim()}
+              style={{ borderRadius: '8px', height: '36px' }}
+            >
+              保存
+            </Button>
+          </div>
+            <Button
+              type="primary"
+              icon={<Save className="w-4 h-4" />}
+              onClick={handleSaveApiKey}
+              loading={isSaving}
+              disabled={!apiKey.trim()}
+              style={{ borderRadius: '8px', height: '36px' }}
+            >
+              保存
+            </Button>
+          </div>
+            <Button
+              type="primary"
+              icon={<Save className="w-4 h-4" />}
+              onClick={handleSaveApiKey}
+              loading={isSaving}
+              disabled={!apiKey.trim()}
+              style={{ borderRadius: '8px', height: '36px' }}
+            >
+              保存
+            </Button>
           </div>
 
-          {/* 说明 */}
-          <div className="text-xs text-gray-500 space-y-1 pt-2 border-t border-gray-100">
-            <p>• API Key 将安全存储在您的个人档案中</p>
-            <p>• 用于 AI-IDE 智能助手对话和智能策略生成</p>
-            <p>• 获取 API Key：<a href="https://bailian.console.aliyun.com/" target="_blank" rel="noopener noreferrer" className="text-indigo-600 hover:underline">阿里云百炼控制台</a></p>
+          <div className="text-[11px] text-gray-400 space-y-0.5 pt-1 border-t border-gray-100">
+            <p>• API Key 安全存储在您的个人档案中</p>
+            <p>• 获取 Key：<a href="https://bailian.console.aliyun.com/" target="_blank" rel="noopener noreferrer" className="text-indigo-600 hover:underline">阿里云百炼控制台</a></p>
           </div>
         </div>
       </div>

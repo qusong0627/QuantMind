@@ -380,23 +380,6 @@ const RealTradingPage: React.FC = () => {
         return preflightResult.checks;
     }, [preflightResult, preflightStage, tradingReadinessResult]);
 
-    const coreCheckKeys = useMemo(() => new Set([
-        'signal_readiness',
-        'redis',
-        'db',
-        'stream_series_freshness',
-    ]), []);
-
-    const coreChecks = useMemo(
-        () => visiblePreflightChecks.filter((item) => coreCheckKeys.has(item.key)),
-        [visiblePreflightChecks, coreCheckKeys],
-    );
-
-    const detailChecks = useMemo(
-        () => visiblePreflightChecks.filter((item) => !coreCheckKeys.has(item.key)),
-        [visiblePreflightChecks, coreCheckKeys],
-    );
-
     const closePreflightModal = useCallback(() => {
         preflightRequestSeqRef.current += 1;
         setPreflightModalOpen(false);
@@ -651,6 +634,9 @@ const RealTradingPage: React.FC = () => {
                         : []),
                 ]}
                 width={760}
+                styles={{
+                    body: { maxHeight: '70vh', overflowY: 'auto' },
+                }}
             >
                 {preflightLoading ? (
                     <div className="space-y-3">
@@ -693,35 +679,37 @@ const RealTradingPage: React.FC = () => {
                             </div>
                         )}
                         <div className="space-y-2">
-                            {coreChecks.map((item) => (
-                                <div key={item.key} className="flex items-start gap-3 rounded-lg border border-gray-100 bg-gray-50 px-3 py-2">
-                                    <span className="flex-1 text-sm font-medium">{item.label}</span>
-                                    <Tag color={item.ok ? 'success' : 'error'}>
-                                        {item.ok ? '通过' : '阻断'}
-                                    </Tag>
-                                </div>
-                            ))}
-                            {detailChecks.length > 0 && (
+                            {visiblePreflightChecks.map((item) => (
                                 <Collapse
+                                    key={item.key}
                                     size="small"
                                     items={[{
-                                        key: 'details',
-                                        label: <span className="text-xs text-gray-500">更多详情（{detailChecks.length} 项）</span>,
+                                        key: item.key,
+                                        label: (
+                                            <div className="flex items-center gap-2">
+                                                <span className="text-sm font-medium">{item.label}</span>
+                                                <Tag color={item.ok ? 'success' : 'error'}>
+                                                    {item.ok ? '通过' : '阻断'}
+                                                </Tag>
+                                            </div>
+                                        ),
                                         children: (
                                             <div className="space-y-2">
-                                                {detailChecks.map((item) => (
-                                                    <div key={item.key} className="flex items-start gap-3 rounded-lg border border-gray-100 px-3 py-2">
-                                                        <span className="flex-1 text-sm">{item.label}</span>
-                                                        <Tag color={item.ok ? 'success' : 'error'}>
-                                                            {item.ok ? '通过' : '阻断'}
-                                                        </Tag>
+                                                <div className="text-sm text-gray-600">{item.message}</div>
+                                                {item.details && Object.keys(item.details).length > 0 && (
+                                                    <div className="rounded-md border border-gray-200 bg-gray-50 p-2">
+                                                        {Object.entries(item.details).map(([k, v]) => (
+                                                            <div key={k} className="text-xs text-gray-500 break-all">
+                                                                <span className="font-mono text-gray-700">{k}</span>: {typeof v === 'object' ? JSON.stringify(v) : String(v)}
+                                                            </div>
+                                                        ))}
                                                     </div>
-                                                ))}
+                                                )}
                                             </div>
                                         ),
                                     }]}
                                 />
-                            )}
+                            ))}
                         </div>
                     </div>
                 ) : preflightResult ? (
@@ -741,45 +729,42 @@ const RealTradingPage: React.FC = () => {
                         )}
                         {preflightResult.ready && pendingDeploy && (
                             <div className="rounded-md border border-blue-200 bg-blue-50 p-3 text-sm text-blue-700">
-                                自检已通过。请点击底部“{confirmStartLabel}”，确认后才会真正启动运行容器。
+                                自检已通过。请点击底部"{confirmStartLabel}"，确认后才会真正启动运行容器。
                             </div>
                         )}
                         <div className="space-y-2">
-                            {coreChecks.map((item) => (
-                                <div key={item.key} className="flex items-start gap-3 rounded-lg border border-gray-100 bg-gray-50 px-3 py-2">
-                                    <span className="flex-1 text-sm font-medium">{item.label}</span>
-                                    <Tag color={item.ok ? 'success' : (item.required ? 'error' : 'warning')}>
-                                        {item.ok ? '通过' : (item.required ? '阻断' : '警告')}
-                                    </Tag>
-                                </div>
+                            {visiblePreflightChecks.map((item) => (
+                                <Collapse
+                                    key={item.key}
+                                    size="small"
+                                    items={[{
+                                        key: item.key,
+                                        label: (
+                                            <div className="flex items-center gap-2">
+                                                <span className="text-sm">{item.label}</span>
+                                                <Tag color={item.ok ? 'success' : (item.required ? 'error' : 'warning')}>
+                                                    {item.ok ? '通过' : (item.required ? '阻断' : '警告')}
+                                                </Tag>
+                                            </div>
+                                        ),
+                                        children: (
+                                            <div className="space-y-2">
+                                                <div className="text-sm text-gray-600">{item.message}</div>
+                                                {item.details && Object.keys(item.details).length > 0 && (
+                                                    <div className="rounded-md border border-gray-200 bg-gray-50 p-2">
+                                                        {Object.entries(item.details).map(([k, v]) => (
+                                                            <div key={k} className="text-xs text-gray-500 break-all">
+                                                                <span className="font-mono text-gray-700">{k}</span>: {typeof v === 'object' ? JSON.stringify(v) : String(v)}
+                                                            </div>
+                                                        ))}
+                                                    </div>
+                                                )}
+                                            </div>
+                                        ),
+                                    }]}
+                                />
                             ))}
-                            {coreChecks.some((item) => !item.ok) && (
-                                <div className="text-xs text-gray-500">
-                                    {coreChecks.filter((item) => !item.ok).length} 项核心检查未通过，请处理后再启动
-                                </div>
-                            )}
                         </div>
-                        {detailChecks.length > 0 && (
-                            <Collapse
-                                size="small"
-                                items={[{
-                                    key: 'details',
-                                    label: <span className="text-xs text-gray-500">更多详情（{detailChecks.length} 项）</span>,
-                                    children: (
-                                        <div className="space-y-2">
-                                            {detailChecks.map((item) => (
-                                                <div key={item.key} className="flex items-start gap-3 rounded-lg border border-gray-100 px-3 py-2">
-                                                    <span className="flex-1 text-sm">{item.label}</span>
-                                                    <Tag color={item.ok ? 'success' : (item.required ? 'error' : 'warning')}>
-                                                        {item.ok ? '通过' : (item.required ? '阻断' : '警告')}
-                                                    </Tag>
-                                                </div>
-                                            ))}
-                                        </div>
-                                    ),
-                                }]}
-                            />
-                        )}
                     </div>
                 ) : (
                     <div className="text-sm text-gray-500">暂无自检结果</div>
