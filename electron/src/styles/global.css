@@ -44,8 +44,12 @@
   --loss-glow: rgba(16, 185, 129, 0.2);
 
   /* 导航系统 */
-  --nav-bg: rgba(255, 255, 255, 0.7);
-  --nav-active-bg: linear-gradient(135deg, rgba(99, 102, 241, 0.1), rgba(168, 85, 247, 0.1));
+  --nav-bg: rgba(248, 250, 252, 0.94);
+  --nav-border: rgba(148, 163, 184, 0.42);
+  --nav-icon: #40516a;
+  --nav-icon-hover: #0f172a;
+  --nav-label: #334155;
+  --nav-active-bg: linear-gradient(180deg, rgba(255, 255, 255, 0.78), rgba(239, 246, 255, 0.58));
 }
 
 /* 高级实用类 */
@@ -589,18 +593,21 @@ html.platform-win32.os-win10 .module-grid-container {
 
 .floating-nav-bar {
   position: relative;
+  isolation: isolate;
   width: fit-content;
   max-width: 100%;
   margin: 0 auto;
   padding: 7px 10px;
   border-radius: 999px;
   background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.82), rgba(245, 248, 255, 0.7));
-  backdrop-filter: blur(24px) saturate(165%);
-  border: 1px solid rgba(255, 255, 255, 0.72);
+    linear-gradient(180deg, rgba(255, 255, 255, 0.66), rgba(248, 250, 252, 0.44));
+  backdrop-filter: blur(30px) saturate(190%);
+  border: 1px solid var(--nav-border);
   box-shadow:
-    0 18px 34px rgba(15, 23, 42, 0.07),
-    inset 0 1px 0 rgba(255, 255, 255, 0.9);
+    0 24px 52px rgba(15, 23, 42, 0.18),
+    0 7px 18px rgba(15, 23, 42, 0.09),
+    inset 0 1px 0 rgba(255, 255, 255, 0.86),
+    inset 0 -1px 0 rgba(71, 85, 105, 0.16);
   display: flex;
   align-items: center;
   overflow-x: auto;
@@ -609,11 +616,41 @@ html.platform-win32.os-win10 .module-grid-container {
   pointer-events: auto;
 }
 
+.floating-nav-bar::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  z-index: 0;
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.48) inset,
+    0 12px 36px rgba(255, 255, 255, 0.18) inset,
+    0 -10px 26px rgba(71, 85, 105, 0.1) inset;
+}
+
+.floating-nav-bar::after {
+  content: '';
+  position: absolute;
+  inset: 1px;
+  border-radius: inherit;
+  pointer-events: none;
+  z-index: 0;
+  background:
+    linear-gradient(112deg, rgba(255, 255, 255, 0) 0%, rgba(255, 255, 255, 0.52) 17%, rgba(255, 255, 255, 0.12) 31%, rgba(255, 255, 255, 0) 48%),
+    radial-gradient(120% 90% at 18% 0%, rgba(255, 255, 255, 0.38), rgba(255, 255, 255, 0) 48%),
+    radial-gradient(70% 90% at 88% 100%, rgba(37, 99, 235, 0.12), rgba(37, 99, 235, 0) 56%);
+  opacity: 0.74;
+  mix-blend-mode: screen;
+}
+
 .floating-nav-bar::-webkit-scrollbar {
   display: none;
 }
 
 .nav-shell {
+  position: relative;
+  z-index: 1;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -670,17 +707,33 @@ html.platform-win32.os-win10 .module-grid-container {
 .nav-icon {
   width: 18px;
   height: 18px;
+  stroke-width: 2.15;
   color: var(--nav-icon);
-  transition: color 0.24s ease, transform 0.24s ease;
+  filter:
+    drop-shadow(0 1px 0 rgba(255, 255, 255, 0.96))
+    drop-shadow(0 -1px 0 rgba(15, 23, 42, 0.18))
+    drop-shadow(1px 0 0 rgba(255, 255, 255, 0.34))
+    drop-shadow(-1px 0 0 rgba(15, 23, 42, 0.08));
+  transition: color 0.24s ease, transform 0.24s ease, filter 0.24s ease, stroke-width 0.24s ease;
 }
 
 .nav-item:hover .nav-icon {
   color: var(--nav-icon-hover);
   transform: translateY(-0.5px);
+  stroke-width: 2.25;
+  filter:
+    drop-shadow(0 1px 0 rgba(255, 255, 255, 1))
+    drop-shadow(0 -1px 0 rgba(15, 23, 42, 0.24))
+    drop-shadow(0 6px 10px rgba(15, 23, 42, 0.1));
 }
 
 .nav-item.active .nav-icon {
   color: var(--primary-blue);
+  stroke-width: 2.25;
+  filter:
+    drop-shadow(0 1px 0 rgba(255, 255, 255, 0.98))
+    drop-shadow(0 -1px 0 rgba(29, 78, 216, 0.22))
+    drop-shadow(0 6px 12px rgba(37, 99, 235, 0.18));
 }
 
 .nav-label {
@@ -688,6 +741,9 @@ html.platform-win32.os-win10 .module-grid-container {
   font-weight: 600;
   letter-spacing: 0.01em;
   color: var(--nav-label);
+  text-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.92),
+    0 -1px 0 rgba(15, 23, 42, 0.08);
   text-align: center;
   white-space: nowrap;
   transition: color 0.24s ease, opacity 0.24s ease;
@@ -715,11 +771,15 @@ html.platform-win32.os-win10 .module-grid-container {
 .nav-active-bubble {
   border-radius: 18px;
   background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(241, 247, 255, 0.9));
-  border: 1px solid rgba(255, 255, 255, 0.92);
+    linear-gradient(128deg, rgba(255, 255, 255, 0.72), rgba(255, 255, 255, 0.16) 42%, rgba(219, 234, 254, 0.4)),
+    var(--nav-active-bg);
+  border: 1px solid rgba(255, 255, 255, 0.74);
   box-shadow:
-    0 10px 24px rgba(37, 99, 235, 0.12),
-    inset 0 1px 0 rgba(255, 255, 255, 0.96);
+    0 10px 24px rgba(37, 99, 235, 0.11),
+    inset 0 1px 0 rgba(255, 255, 255, 0.9),
+    inset 0 -1px 0 rgba(37, 99, 235, 0.1),
+    inset 10px 0 20px rgba(255, 255, 255, 0.18),
+    inset -10px 0 20px rgba(37, 99, 235, 0.08);
   overflow: hidden;
 }
 
@@ -737,9 +797,11 @@ html.platform-win32.os-win10 .module-grid-container {
 
 .nav-hover-bubble {
   border-radius: 18px;
-  background: rgba(255, 255, 255, 0.34);
-  border: 1px solid rgba(255, 255, 255, 0.58);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.72);
+  background: rgba(255, 255, 255, 0.36);
+  border: 1px solid rgba(255, 255, 255, 0.54);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.72),
+    inset 0 -1px 0 rgba(148, 163, 184, 0.12);
   pointer-events: none;
 }
 

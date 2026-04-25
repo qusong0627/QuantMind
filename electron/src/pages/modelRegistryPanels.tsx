@@ -585,8 +585,9 @@ export const AttributionAnalysisPanel: React.FC<{
   shapSummary: ModelShapSummaryResponse | null;
   loading: boolean;
   error?: string;
+  featureLabelMap?: Record<string, string>;
   onRefresh: () => void;
-}> = ({ model, shapSummary, loading, error, onRefresh }) => {
+}> = ({ model, shapSummary, loading, error, featureLabelMap = {}, onRefresh }) => {
   const meta = getMeta(model);
   const shapMeta = meta.shap && typeof meta.shap === 'object'
     ? meta.shap as Record<string, any>
@@ -601,11 +602,16 @@ export const AttributionAnalysisPanel: React.FC<{
   const file = String(shapSummary?.file || shapMeta.file || '—');
   const errorText = String(shapSummary?.error || shapMeta.error || error || '');
   const rows = (shapSummary?.items ?? []).filter((item) => item.feature);
+  const getFeatureLabel = (feature: string) => featureLabelMap[feature] || feature;
   const filteredRows = useMemo(() => {
     const query = featureQuery.trim().toLowerCase();
     if (!query) return rows;
-    return rows.filter((item) => item.feature.toLowerCase().includes(query));
-  }, [rows, featureQuery]);
+    return rows.filter((item) => {
+      const feature = item.feature.toLowerCase();
+      const label = getFeatureLabel(item.feature).toLowerCase();
+      return feature.includes(query) || label.includes(query);
+    });
+  }, [rows, featureQuery, featureLabelMap]);
 
   const statusCfg: Record<string, { text: string; cls: string }> = {
     completed: { text: '已完成', cls: 'bg-emerald-50 text-emerald-700' },
@@ -629,10 +635,11 @@ export const AttributionAnalysisPanel: React.FC<{
         return text;
       };
       const csvRows = [
-        ['rank', 'feature', 'mean_abs_shap', 'mean_shap', 'positive_ratio'],
+        ['rank', 'feature', 'feature_label', 'mean_abs_shap', 'mean_shap', 'positive_ratio'],
         ...filteredRows.map((item) => [
           String(item.rank),
           item.feature,
+          getFeatureLabel(item.feature),
           Number(item.mean_abs_shap || 0).toFixed(8),
           Number(item.mean_shap || 0).toFixed(8),
           Number(item.positive_ratio || 0).toFixed(8),
@@ -721,7 +728,7 @@ export const AttributionAnalysisPanel: React.FC<{
               value={featureQuery}
               onChange={(e) => setFeatureQuery(e.target.value)}
               prefix={<Search size={12} className="text-slate-400" />}
-              placeholder="搜索因子名（支持模糊匹配）"
+              placeholder="搜索因子名或中文解释（支持模糊匹配）"
               className="rounded-xl h-9 text-xs border-slate-200"
             />
           </div>
@@ -731,6 +738,7 @@ export const AttributionAnalysisPanel: React.FC<{
               rowKey="feature"
               pagination={{ pageSize: 12, showSizeChanger: false }}
               dataSource={filteredRows}
+              tableLayout="fixed"
               locale={{ emptyText: '没有匹配的因子，请调整搜索条件' }}
               columns={[
                 {
@@ -743,9 +751,22 @@ export const AttributionAnalysisPanel: React.FC<{
                 {
                   title: <span className="text-center block">因子</span>,
                   dataIndex: 'feature',
-                  width: 180,
+                  width: 220,
                   align: 'center',
-                  render: (value: string) => <Text className="text-xs font-mono font-black text-slate-800">{value}</Text>,
+                  render: (value: string) => {
+                    const label = getFeatureLabel(value);
+                    const translated = label !== value;
+                    return (
+                      <Tooltip title={translated ? `${label} (${value})` : value}>
+                        <div className="mx-auto w-full max-w-[200px] min-w-0 overflow-hidden">
+                          <Text className="block w-full truncate text-xs font-black text-slate-800">{label}</Text>
+                          {translated && (
+                            <Text className="block w-full truncate text-[10px] font-mono font-bold text-slate-400">{value}</Text>
+                          )}
+                        </div>
+                      </Tooltip>
+                    );
+                  },
                 },
                 {
                   title: <span className="text-center block">平均绝对贡献</span>,
