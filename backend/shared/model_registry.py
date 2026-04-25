@@ -582,11 +582,27 @@ class ModelRegistryService:
                 ),
                 {"tenant_id": tenant, "user_id": user, "updated_at": now},
             )
+
+            # 清除 system_default 标记，表明这是用户主动设置的默认模型
+            target_metadata = target.get("metadata_json") or {}
+            if isinstance(target_metadata, str):
+                try:
+                    target_metadata = json.loads(target_metadata)
+                except Exception:
+                    target_metadata = {}
+            elif not isinstance(target_metadata, dict):
+                target_metadata = {}
+            cleaned_metadata = {
+                k: v for k, v in target_metadata.items()
+                if k not in ("system_default", "readonly")
+            }
+
             await session.execute(
                 text(
                     """
                     UPDATE qm_user_models
-                    SET is_default = TRUE, activated_at = :activated_at, updated_at = :updated_at
+                    SET is_default = TRUE, activated_at = :activated_at, updated_at = :updated_at,
+                        metadata_json = CAST(:metadata_json AS JSONB)
                     WHERE tenant_id = :tenant_id AND user_id = :user_id AND model_id = :model_id
                     """
                 ),
@@ -596,6 +612,7 @@ class ModelRegistryService:
                     "model_id": mid,
                     "activated_at": now,
                     "updated_at": now,
+                    "metadata_json": json.dumps(cleaned_metadata, ensure_ascii=False),
                 },
             )
 
