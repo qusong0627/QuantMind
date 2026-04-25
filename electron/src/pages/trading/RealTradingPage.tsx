@@ -40,8 +40,26 @@ type TradingReadinessResult = {
     passed: boolean;
     checked_at: string;
     items: TradingReadinessCheckItem[];
+    trading_permission?: string;
+    signal_readiness?: {
+        message?: string;
+        latest_run_id?: string | null;
+        prediction_trade_date?: string | null;
+        signal_count?: number;
+        trading_permission?: string;
+    } | null;
 };
 const TRADING_MODE_PREF_KEY = 'qm:trading_mode_pref';
+
+const permissionTag = (permission?: string) => {
+    if (permission === 'observe_only') {
+        return <Tag color="processing" className="ml-2">观察态</Tag>;
+    }
+    if (permission === 'blocked') {
+        return <Tag color="error" className="ml-2">阻断</Tag>;
+    }
+    return <Tag color="success" className="ml-2">可交易</Tag>;
+};
 
 const getEnvTenantId = (): string => {
     const env = (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env;
@@ -80,7 +98,6 @@ const RealTradingPage: React.FC = () => {
     const [preflightLoadError, setPreflightLoadError] = useState<string | null>(null);
     const [preflightMode, setPreflightMode] = useState<DeployMode | null>(null);
     const [preflightStage, setPreflightStage] = useState<PreflightStage>('trading-readiness');
-    const [revealedPreflightCount, setRevealedPreflightCount] = useState(0);
     const [pendingDeploy, setPendingDeploy] = useState<PendingDeploy | null>(null);
     const [effectiveExecutionConfig, setEffectiveExecutionConfig] = useState<ExecutionConfig | null>(null);
     const [effectiveLiveTradeConfig, setEffectiveLiveTradeConfig] = useState<LiveTradeConfig | null>(null);
@@ -243,7 +260,10 @@ const RealTradingPage: React.FC = () => {
             }
 
             const modeText = mode === 'REAL' ? '实盘' : (mode === 'SHADOW' ? '影子' : '模拟');
-            message.success(`${modeText}部署请求已提交`);
+            const permissionText = startResp?.trading_permission === 'observe_only'
+                ? '（观察态，不自动下单）'
+                : '';
+            message.success(`${modeText}部署请求已提交${permissionText}`);
             fetchData();
             return true;
         } catch (err: unknown) {
@@ -257,6 +277,8 @@ const RealTradingPage: React.FC = () => {
                     passed: false,
                     checked_at: precheckFailure.checked_at || new Date().toISOString(),
                     items: precheckFailure.items,
+                    trading_permission: precheckFailure.trading_permission,
+                    signal_readiness: precheckFailure.signal_readiness,
                 });
             }
             message.error(realTradingService.getFriendlyError(err));
@@ -289,7 +311,6 @@ const RealTradingPage: React.FC = () => {
         setPreflightLoadError(null);
         setPreflightResult(null);
         setTradingReadinessResult(null);
-        setRevealedPreflightCount(0);
         setPendingDeploy({
             strategyId: wizardStrategy.id,
             mode,
@@ -310,10 +331,12 @@ const RealTradingPage: React.FC = () => {
                 message.error(`交易准备度检测未通过：${blockerText}`);
                 return;
             }
+            if (tradingReadiness.trading_permission === 'observe_only') {
+                message.info('当前没有可交易信号，将以观察态启动，不会自动下单');
+            }
 
             setPreflightStage('preflight');
             setPreflightLoading(true);
-            setRevealedPreflightCount(0);
             const preflight = await realTradingService.preflight(mode, userId, tenantId);
             if (requestSeq !== preflightRequestSeqRef.current) return;
             setPreflightResult(preflight);
@@ -354,43 +377,24 @@ const RealTradingPage: React.FC = () => {
             }));
         }
         if (!preflightResult) return [];
-        if (preflightResult.mode !== 'SIMULATION') return preflightResult.checks;
-        const simulationVisibleKeys = new Set([
-            'redis',
-            'db',
-            'internal_secret',
-            'user_id',
-            'inference_database_ready',
-        ]);
-        return preflightResult.checks.filter((item) =>
-            simulationVisibleKeys.has(item.key) || item.key.startsWith('simulation_')
-        );
+        return preflightResult.checks;
     }, [preflightResult, preflightStage, tradingReadinessResult]);
 
-    useEffect(() => {
-        if (preflightLoading) {
-            setRevealedPreflightCount(0);
-            return;
-        }
-        if (visiblePreflightChecks.length === 0) {
-            setRevealedPreflightCount(0);
-            return;
-        }
-        setRevealedPreflightCount(0);
-        let count = 0;
-        const timer = window.setInterval(() => {
-            count += 1;
-            setRevealedPreflightCount(Math.min(count, visiblePreflightChecks.length));
-            if (count >= visiblePreflightChecks.length) {
-                window.clearInterval(timer);
-            }
-        }, 90);
-        return () => window.clearInterval(timer);
-    }, [preflightLoading, preflightResult, visiblePreflightChecks]);
+    const coreCheckKeys = useMemo(() => new Set([
+        'signal_readiness',
+        'redis',
+        'db',
+        'stream_series_freshness',
+    ]), []);
 
-    const renderedPreflightChecks = useMemo<PreflightCheckItem[]>(
-        () => visiblePreflightChecks.slice(0, revealedPreflightCount),
-        [revealedPreflightCount, visiblePreflightChecks]
+    const coreChecks = useMemo(
+        () => visiblePreflightChecks.filter((item) => coreCheckKeys.has(item.key)),
+        [visiblePreflightChecks, coreCheckKeys],
+    );
+
+    const detailChecks = useMemo(
+        () => visiblePreflightChecks.filter((item) => !coreCheckKeys.has(item.key)),
+        [visiblePreflightChecks, coreCheckKeys],
     );
 
     const closePreflightModal = useCallback(() => {
@@ -681,31 +685,44 @@ const RealTradingPage: React.FC = () => {
                             <Tag color={tradingReadinessResult.passed ? 'success' : 'error'} className="ml-2">
                                 {tradingReadinessResult.passed ? '可继续启动' : '不可启动'}
                             </Tag>
+                            {permissionTag(tradingReadinessResult.trading_permission)}
                         </div>
-                        <Collapse
-                            items={renderedPreflightChecks.map((item) => ({
-                                key: item.key,
-                                label: (
-                                    <div className="flex items-center gap-2">
-                                        <span>{item.label}</span>
-                                        <Tag color={item.ok ? 'success' : 'error'}>
-                                            {item.ok ? '通过' : '阻断'}
-                                        </Tag>
-                                        <Tag>必需</Tag>
-                                    </div>
-                                ),
-                                children: (
-                                    <div className="space-y-2">
-                                        <div className="text-sm text-gray-600">{item.message}</div>
-                                    </div>
-                                ),
-                            }))}
-                        />
-                        {renderedPreflightChecks.length < visiblePreflightChecks.length && (
-                            <div className="text-xs text-gray-400">
-                                正在加载更多检查项（{renderedPreflightChecks.length}/{visiblePreflightChecks.length}）...
+                        {tradingReadinessResult.trading_permission === 'observe_only' && (
+                            <div className="rounded-md border border-blue-200 bg-blue-50 p-3 text-sm text-blue-700">
+                                {tradingReadinessResult.signal_readiness?.message || '当前缺少可交易信号，本次启动将只运行观察链路，不会自动下单。'}
                             </div>
                         )}
+                        <div className="space-y-2">
+                            {coreChecks.map((item) => (
+                                <div key={item.key} className="flex items-start gap-3 rounded-lg border border-gray-100 bg-gray-50 px-3 py-2">
+                                    <span className="flex-1 text-sm font-medium">{item.label}</span>
+                                    <Tag color={item.ok ? 'success' : 'error'}>
+                                        {item.ok ? '通过' : '阻断'}
+                                    </Tag>
+                                </div>
+                            ))}
+                            {detailChecks.length > 0 && (
+                                <Collapse
+                                    size="small"
+                                    items={[{
+                                        key: 'details',
+                                        label: <span className="text-xs text-gray-500">更多详情（{detailChecks.length} 项）</span>,
+                                        children: (
+                                            <div className="space-y-2">
+                                                {detailChecks.map((item) => (
+                                                    <div key={item.key} className="flex items-start gap-3 rounded-lg border border-gray-100 px-3 py-2">
+                                                        <span className="flex-1 text-sm">{item.label}</span>
+                                                        <Tag color={item.ok ? 'success' : 'error'}>
+                                                            {item.ok ? '通过' : '阻断'}
+                                                        </Tag>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        ),
+                                    }]}
+                                />
+                            )}
+                        </div>
                     </div>
                 ) : preflightResult ? (
                     <div className="space-y-3">
@@ -715,44 +732,53 @@ const RealTradingPage: React.FC = () => {
                             <Tag color={preflightResult.ready ? 'success' : 'error'} className="ml-2">
                                 {preflightResult.ready ? '可启动' : '不可启动'}
                             </Tag>
+                            {permissionTag(preflightResult.trading_permission)}
                         </div>
+                        {preflightResult.trading_permission === 'observe_only' && (
+                            <div className="rounded-md border border-blue-200 bg-blue-50 p-3 text-sm text-blue-700">
+                                {preflightResult.signal_readiness?.message || '当前缺少可交易信号，确认启动后将进入观察态，不会自动下单。'}
+                            </div>
+                        )}
                         {preflightResult.ready && pendingDeploy && (
                             <div className="rounded-md border border-blue-200 bg-blue-50 p-3 text-sm text-blue-700">
                                 自检已通过。请点击底部“{confirmStartLabel}”，确认后才会真正启动运行容器。
                             </div>
                         )}
-                        <Collapse
-                            items={renderedPreflightChecks.map((item) => ({
-                                key: item.key,
-                                label: (
-                                    <div className="flex items-center gap-2">
-                                        <span>{item.label}</span>
-                                        <Tag color={item.ok ? 'success' : (item.required ? 'error' : 'warning')}>
-                                            {item.ok ? '通过' : (item.required ? '阻断' : '警告')}
-                                        </Tag>
-                                        {item.required && <Tag>必需</Tag>}
-                                    </div>
-                                ),
-                                children: (
-                                    <div className="space-y-2">
-                                        <div className="text-sm text-gray-600">{item.message}</div>
-                                        {item.details && Object.keys(item.details).length > 0 && (
-                                            <div className="rounded-md border border-gray-200 bg-gray-50 p-2">
-                                                {Object.entries(item.details).map(([k, v]) => (
-                                                    <div key={k} className="text-xs text-gray-500 break-all">
-                                                        <span className="font-mono text-gray-700">{k}</span>: {typeof v === 'object' ? JSON.stringify(v) : String(v)}
-                                                    </div>
-                                                ))}
-                                            </div>
-                                        )}
-                                    </div>
-                                ),
-                            }))}
-                        />
-                        {renderedPreflightChecks.length < visiblePreflightChecks.length && (
-                            <div className="text-xs text-gray-400">
-                                正在加载更多检查项（{renderedPreflightChecks.length}/{visiblePreflightChecks.length}）...
-                            </div>
+                        <div className="space-y-2">
+                            {coreChecks.map((item) => (
+                                <div key={item.key} className="flex items-start gap-3 rounded-lg border border-gray-100 bg-gray-50 px-3 py-2">
+                                    <span className="flex-1 text-sm font-medium">{item.label}</span>
+                                    <Tag color={item.ok ? 'success' : (item.required ? 'error' : 'warning')}>
+                                        {item.ok ? '通过' : (item.required ? '阻断' : '警告')}
+                                    </Tag>
+                                </div>
+                            ))}
+                            {coreChecks.some((item) => !item.ok) && (
+                                <div className="text-xs text-gray-500">
+                                    {coreChecks.filter((item) => !item.ok).length} 项核心检查未通过，请处理后再启动
+                                </div>
+                            )}
+                        </div>
+                        {detailChecks.length > 0 && (
+                            <Collapse
+                                size="small"
+                                items={[{
+                                    key: 'details',
+                                    label: <span className="text-xs text-gray-500">更多详情（{detailChecks.length} 项）</span>,
+                                    children: (
+                                        <div className="space-y-2">
+                                            {detailChecks.map((item) => (
+                                                <div key={item.key} className="flex items-start gap-3 rounded-lg border border-gray-100 px-3 py-2">
+                                                    <span className="flex-1 text-sm">{item.label}</span>
+                                                    <Tag color={item.ok ? 'success' : (item.required ? 'error' : 'warning')}>
+                                                        {item.ok ? '通过' : (item.required ? '阻断' : '警告')}
+                                                    </Tag>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    ),
+                                }]}
+                            />
                         )}
                     </div>
                 ) : (
