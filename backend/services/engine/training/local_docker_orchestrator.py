@@ -25,6 +25,7 @@ from docker import DockerClient
 import yaml
 
 from backend.services.engine.training.training_log_stream import TrainingRunLogStream
+from backend.services.api.training_explain import DEFAULT_EXPLAIN_CFG
 
 logger = logging.getLogger(__name__)
 
@@ -148,6 +149,7 @@ class LocalDockerOrchestrator:
                 "slippage": context.get("slippage", 0.0005),
                 "deal_price": context.get("deal_price", "close"),
             },
+            "explain": payload.get("explain", DEFAULT_EXPLAIN_CFG),
             "output": {
                 "result_path": "/workspace/result.json",
                 "required_artifacts": payload.get(

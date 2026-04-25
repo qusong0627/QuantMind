@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { Button, Card, Tag, Typography, Empty, Spin, Progress, Divider, Input, Modal, Tabs, Switch, DatePicker, Table, Drawer, Badge, Tooltip, Collapse, Select, message } from 'antd';
 import { clsx } from 'clsx';
 import dayjs from 'dayjs';
@@ -16,6 +16,8 @@ import {
   InferenceRankingResult,
   AutoInferenceSettings,
   LatestInferenceRunInfo,
+  ModelShapSummaryResponse,
+  ModelShapSummaryItem,
 } from '../services/modelTrainingService';
 import {
   calcTimeSplitStats,
@@ -572,6 +574,215 @@ export const TrainingSourcePanel: React.FC<{
       ) : (
         <Empty description={<span className="text-xs text-slate-400">无法加载训练任务详情</span>} />
       )}
+    </div>
+  );
+};
+
+// ─── 归因分析面板 ────────────────────────────────────────────────────────────
+
+export const AttributionAnalysisPanel: React.FC<{
+  model: UserModelRecord;
+  shapSummary: ModelShapSummaryResponse | null;
+  loading: boolean;
+  error?: string;
+  onRefresh: () => void;
+}> = ({ model, shapSummary, loading, error, onRefresh }) => {
+  const meta = getMeta(model);
+  const shapMeta = meta.shap && typeof meta.shap === 'object'
+    ? meta.shap as Record<string, any>
+    : {};
+  const [featureQuery, setFeatureQuery] = useState('');
+  const [exporting, setExporting] = useState(false);
+
+  const status = String(shapSummary?.status || shapMeta.status || 'missing').toLowerCase();
+  const split = String(shapSummary?.split || shapMeta.split || '—');
+  const rowsUsed = Number(shapSummary?.rows_used ?? shapMeta.rows_used ?? 0);
+  const rowsRequested = Number(shapSummary?.rows_requested ?? shapMeta.rows_requested ?? 0);
+  const file = String(shapSummary?.file || shapMeta.file || '—');
+  const errorText = String(shapSummary?.error || shapMeta.error || error || '');
+  const rows = (shapSummary?.items ?? []).filter((item) => item.feature);
+  const filteredRows = useMemo(() => {
+    const query = featureQuery.trim().toLowerCase();
+    if (!query) return rows;
+    return rows.filter((item) => item.feature.toLowerCase().includes(query));
+  }, [rows, featureQuery]);
+
+  const statusCfg: Record<string, { text: string; cls: string }> = {
+    completed: { text: '已完成', cls: 'bg-emerald-50 text-emerald-700' },
+    disabled: { text: '已关闭', cls: 'bg-slate-100 text-slate-600' },
+    skipped: { text: '已跳过', cls: 'bg-amber-50 text-amber-700' },
+    failed: { text: '失败', cls: 'bg-rose-50 text-rose-700' },
+    missing: { text: '未产出', cls: 'bg-slate-100 text-slate-600' },
+  };
+  const currentStatus = statusCfg[status] ?? statusCfg.missing;
+
+  const handleExportCsv = async () => {
+    if (!filteredRows.length) {
+      message.warning('当前筛选结果为空，无可导出数据');
+      return;
+    }
+    setExporting(true);
+    try {
+      const escapeCsvCell = (value: unknown) => {
+        const text = value === null || value === undefined ? '' : String(value);
+        if (/[",\n\r]/.test(text)) return `"${text.replace(/"/g, '""')}"`;
+        return text;
+      };
+      const csvRows = [
+        ['rank', 'feature', 'mean_abs_shap', 'mean_shap', 'positive_ratio'],
+        ...filteredRows.map((item) => [
+          String(item.rank),
+          item.feature,
+          Number(item.mean_abs_shap || 0).toFixed(8),
+          Number(item.mean_shap || 0).toFixed(8),
+          Number(item.positive_ratio || 0).toFixed(8),
+        ]),
+      ];
+      const csv = csvRows.map((row) => row.map((cell) => escapeCsvCell(cell)).join(',')).join('\n');
+      const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `shap_summary_${model.model_id}_${split || 'unknown'}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      message.success(`已导出 ${filteredRows.length} 条 SHAP 因子贡献记录`);
+    } catch (err: any) {
+      message.error(`导出失败: ${err?.message || '未知错误'}`);
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  return (
+    <div className="pt-5 space-y-4">
+      <Card
+        className="rounded-3xl border-slate-100 shadow-sm"
+        title={
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <Brain size={14} className="text-violet-600" />
+              <span className="text-xs font-black text-slate-800 uppercase tracking-tighter">归因分析（SHAP）</span>
+            </div>
+            <Button size="small" className="rounded-xl font-bold text-xs" onClick={onRefresh} loading={loading}>
+              刷新
+            </Button>
+          </div>
+        }
+      >
+        <div className="space-y-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <Tag className={clsx('m-0 rounded-full border-0 font-bold', currentStatus.cls)}>{currentStatus.text}</Tag>
+            <Tag className="m-0 rounded-full border-0 bg-violet-50 text-violet-700 font-bold">样本来源 {split}</Tag>
+            <Tag className="m-0 rounded-full border-0 bg-slate-100 text-slate-600 font-bold">
+              样本 {rowsUsed}/{rowsRequested || '—'}
+            </Tag>
+            <Tag className="m-0 rounded-full border-0 bg-slate-100 text-slate-600 font-bold">{file}</Tag>
+          </div>
+          <Text className="block text-xs text-slate-700 leading-relaxed">
+            平均绝对贡献：因子影响幅度（越大越重要）｜ 平均方向贡献：正负抵消后的净效果（红=推高预测，绿=压低预测）｜ 正向占比：推高预测的样本比例
+          </Text>
+          {errorText && status !== 'completed' && (
+            <div className="rounded-2xl border border-rose-100 bg-rose-50 px-3 py-2">
+              <Text className="text-[11px] text-rose-700">错误信息：{errorText}</Text>
+            </div>
+          )}
+        </div>
+      </Card>
+
+      <Card
+        className="rounded-3xl border-slate-100 shadow-sm"
+        title={
+          <div className="flex items-center justify-between gap-3">
+            <span className="text-xs font-black uppercase text-slate-700">因子贡献榜</span>
+            <div className="flex items-center gap-2">
+              <Tag className="m-0 rounded-full border-0 bg-slate-100 text-slate-600 font-bold">
+                {filteredRows.length}/{rows.length}
+              </Tag>
+              <Button
+                size="small"
+                icon={<Download size={12} className={exporting ? 'animate-pulse' : ''} />}
+                className="rounded-xl text-xs font-bold"
+                onClick={handleExportCsv}
+                disabled={exporting || filteredRows.length === 0}
+                loading={exporting}
+              >
+                {exporting ? '导出中...' : '导出 CSV'}
+              </Button>
+            </div>
+          </div>
+        }
+      >
+        <Spin spinning={loading}>
+          <div className="mb-3">
+            <Input
+              value={featureQuery}
+              onChange={(e) => setFeatureQuery(e.target.value)}
+              prefix={<Search size={12} className="text-slate-400" />}
+              placeholder="搜索因子名（支持模糊匹配）"
+              className="rounded-xl h-9 text-xs border-slate-200"
+            />
+          </div>
+          {rows.length > 0 ? (
+            <Table<ModelShapSummaryItem>
+              size="small"
+              rowKey="feature"
+              pagination={{ pageSize: 12, showSizeChanger: false }}
+              dataSource={filteredRows}
+              locale={{ emptyText: '没有匹配的因子，请调整搜索条件' }}
+              columns={[
+                {
+                  title: <span className="text-center block">排名</span>,
+                  dataIndex: 'rank',
+                  width: 60,
+                  align: 'center',
+                  render: (value: number) => <Text className="text-xs font-black text-slate-700">{value}</Text>,
+                },
+                {
+                  title: <span className="text-center block">因子</span>,
+                  dataIndex: 'feature',
+                  width: 180,
+                  align: 'center',
+                  render: (value: string) => <Text className="text-xs font-mono font-black text-slate-800">{value}</Text>,
+                },
+                {
+                  title: <span className="text-center block">平均绝对贡献</span>,
+                  dataIndex: 'mean_abs_shap',
+                  width: 140,
+                  align: 'center',
+                  sorter: (a, b) => a.mean_abs_shap - b.mean_abs_shap,
+                  defaultSortOrder: 'descend',
+                  render: (value: number) => <Text className="text-xs font-black text-violet-700">{Number(value || 0).toFixed(6)}</Text>,
+                },
+                {
+                  title: <span className="text-center block">平均方向贡献</span>,
+                  dataIndex: 'mean_shap',
+                  width: 140,
+                  align: 'center',
+                  sorter: (a, b) => a.mean_shap - b.mean_shap,
+                  render: (value: number) => (
+                    <Text className={clsx('text-xs font-black', value >= 0 ? 'text-rose-500' : 'text-emerald-600')}>
+                      {Number(value || 0).toFixed(6)}
+                    </Text>
+                  ),
+                },
+                {
+                  title: <span className="text-center block">正向占比</span>,
+                  dataIndex: 'positive_ratio',
+                  width: 100,
+                  align: 'center',
+                  sorter: (a, b) => a.positive_ratio - b.positive_ratio,
+                  render: (value: number) => <Text className="text-xs text-slate-600">{(Number(value || 0) * 100).toFixed(2)}%</Text>,
+                },
+              ]}
+            />
+          ) : (
+            <Empty description={<span className="text-xs text-slate-400">当前模型暂无可展示的 SHAP 因子贡献数据</span>} />
+          )}
+        </Spin>
+      </Card>
     </div>
   );
 };

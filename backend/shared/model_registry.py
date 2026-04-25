@@ -1407,7 +1407,7 @@ class ModelRegistryService:
         # 2. 如果本地没有，则尝试从 COS 同步（原逻辑备份）
         cos = get_cos_service()
         source_prefix = f"models/candidates/{run_id}/"
-        required_all = ["model.lgb", "model.txt", "metadata.json", "pred.pkl", "config.yaml", "result.json"]
+        required_all = ["model.lgb", "model.txt", "metadata.json", "pred.pkl", "config.yaml", "result.json", "shap_summary.csv"]
         copied: list[str] = []
 
         for filename in required_all:

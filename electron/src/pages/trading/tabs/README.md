@@ -62,6 +62,8 @@ fetch(`${apiGatewayBase}/api/v1/api-keys/init`, { method: 'POST' });
 - `StrategyManagement.tsx` 的日志流框也已切换为浅色样式，保持与任务汇报卡一致的浅色视觉层级。
 - `StrategyManagement.tsx` 的“链路质量看板”和“自动化状态”已改成“上方总览 + 下方指标网格”的一致结构，减少纵向空洞与卡片层级跳变，让两张卡在同一行内更协调。
 - `StrategyManagement.tsx` 的“链路质量看板”左侧状态已改为纯色圆点图标，字段名统一为 `Redis Signal / PostgreSQL / Data Feed / WebSocket` 这类标准大小写命名，并收紧字距与行距，避免状态文案挤占换行。
+- `StrategyManagement.tsx` 的“环境监控”指标行已改为左侧信息、右侧状态的双栏布局，`正常/异常/未获取` 状态徽标在小卡片中线居中对齐。
+- `StrategyManagement.tsx` 的“自动托管就绪度”结论卡已把状态徽标限制在标题行，说明正文独占整行宽度；包含截止日期的文案会把 `截止日期=...` 单独下沉到第二行，并保护“可执行窗口”短语不被拆行。
 - `StrategyManagement.tsx` 顶部“影子模式”已改为开关样式的 `role="switch"` 控件，保留原逻辑但让控制条更紧凑，不再像传统 checkbox。
 - `StrategyManagement.tsx` 的“核心决策结果”卡已收敛为“默认模型最新推理”，只展示当前默认模型最近一次可用于托管的完成推理批次；空态改为“暂无可用推理批次”，并回显信号来源诊断。
 - `StrategyManagement.tsx` 的默认模型最新推理卡在 `run_id` 变化时会短暂显示 `NEW` 标签，帮助识别刚刷新出来的新推理批次。

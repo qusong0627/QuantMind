@@ -22,6 +22,7 @@ from backend.services.api.routers.admin.model_management import (
     _load_feature_catalog_from_db,
     _load_feature_catalog_from_file,
 )
+from backend.services.api.training_shap_summary import read_shap_summary_rows, to_int_or
 from backend.services.api.user_app.middleware.auth import get_current_user
 from backend.services.engine.inference.router_service import InferenceRouterService
 from backend.services.engine.inference.script_runner import InferenceScriptRunner
@@ -446,6 +447,74 @@ async def get_user_model(
     if not model:
         raise HTTPException(status_code=404, detail="Model not found")
     return model
+
+
+@router.get("/{model_id}/shap-summary", summary="获取模型 SHAP 因子贡献列表（用户态）")
+async def get_model_shap_summary(
+    model_id: str,
+    current_user: dict[str, Any] = Depends(get_current_user),
+):
+    tenant_id = str(current_user.get("tenant_id") or "default")
+    user_id = str(current_user.get("user_id") or current_user.get("sub") or "")
+    model = await model_registry_service.get_model(tenant_id=tenant_id, user_id=user_id, model_id=model_id)
+    if not model:
+        raise HTTPException(status_code=404, detail="Model not found")
+
+    metadata = model.get("metadata_json") if isinstance(model.get("metadata_json"), dict) else {}
+    shap_meta = metadata.get("shap") if isinstance(metadata.get("shap"), dict) else {}
+    storage_path = str(model.get("storage_path") or "").strip()
+    if not storage_path:
+        raise HTTPException(status_code=404, detail="模型目录不存在")
+    model_dir = Path(storage_path)
+    if not model_dir.exists() or not model_dir.is_dir():
+        raise HTTPException(status_code=404, detail="模型目录不存在")
+
+    shap_file_hint = str(shap_meta.get("file") or "").strip()
+    shap_file_name = Path(shap_file_hint).name if shap_file_hint else "shap_summary.csv"
+    shap_file = model_dir / shap_file_name
+    if not shap_file.is_file():
+        fallback = model_dir / "shap_summary.csv"
+        if fallback.is_file():
+            shap_file = fallback
+            shap_file_name = fallback.name
+
+    file_exists = shap_file.is_file()
+    items: list[dict[str, Any]] = []
+    parse_error = ""
+    if file_exists:
+        try:
+            items = read_shap_summary_rows(shap_file)
+        except Exception as exc:
+            logger.warning("failed to parse shap summary: model_id=%s err=%s", model_id, exc)
+            parse_error = str(exc)
+            items = []
+
+    status = str(shap_meta.get("status") or "").strip().lower()
+    if not status:
+        status = "completed" if file_exists and not parse_error else "missing"
+    elif parse_error:
+        status = "failed"
+
+    rows_requested = to_int_or(shap_meta.get("rows_requested"), 0)
+    rows_used = to_int_or(shap_meta.get("rows_used"), len(items))
+    error_text = str(shap_meta.get("error") or "").strip()
+    if parse_error:
+        error_text = parse_error
+    if not file_exists and not error_text and status not in {"disabled", "skipped"}:
+        error_text = "shap_summary_not_found"
+
+    return {
+        "model_id": model_id,
+        "status": status,
+        "split": str(shap_meta.get("split") or "").strip(),
+        "rows_requested": rows_requested,
+        "rows_used": rows_used,
+        "file": shap_file_name if file_exists else "",
+        "file_exists": file_exists,
+        "error": error_text,
+        "total": len(items),
+        "items": items,
+    }
 
 
 @router.post("/{model_id}/archive", summary="归档用户模型（用户态）")

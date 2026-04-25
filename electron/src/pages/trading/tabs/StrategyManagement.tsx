@@ -14,6 +14,13 @@ const formatDateTime = (raw?: string | null) => {
     return value.toLocaleString();
 };
 
+const shortenTextId = (raw?: string | null, head = 10, tail = 6) => {
+    const value = String(raw || '').trim();
+    if (!value) return '-';
+    if (value.length <= head + tail + 1) return value;
+    return `${value.slice(0, head)}...${value.slice(-tail)}`;
+};
+
 const formatTaskStatus = (value?: string | null) => {
     const status = String(value || '').toLowerCase();
     if (status === 'completed') return '已完成';
@@ -34,6 +41,118 @@ const taskStatusTone = (value?: string | null) => {
     }
     if (status === 'failed' || status === 'cancelled') return 'bg-rose-50 text-rose-700 border-rose-200';
     return 'bg-slate-50 text-slate-600 border-slate-200';
+};
+
+const formatInferenceStatus = (value?: string | null) => {
+    const status = String(value || '').trim().toLowerCase();
+    if (status === 'completed') return '完成';
+    if (status === 'running') return '执行中';
+    if (status === 'failed') return '失败';
+    return value || '-';
+};
+
+const inferenceStatusTone = (value?: string | null) => {
+    const status = String(value || '').trim().toLowerCase();
+    if (status === 'completed') return 'text-emerald-700 bg-emerald-50 border-emerald-200';
+    if (status === 'running') return 'text-blue-700 bg-blue-50 border-blue-200';
+    if (status === 'failed') return 'text-rose-700 bg-rose-50 border-rose-200';
+    return 'text-slate-700 bg-slate-50 border-slate-200';
+};
+
+const resolveAutomationNextAction = (signalSource?: RealTradingStatus['signal_source_status'] | null) => {
+    if (signalSource?.available) return '保持默认模型为当前生产源，等待自动托管执行';
+    const source = String(signalSource?.source || '').trim().toLowerCase();
+    if (source === 'missing') return '前往模型管理生成默认模型生产批次';
+    if (source === 'window_pending') return '等待生产批次进入执行窗口';
+    if (source === 'expired') return '重新生成默认模型生产批次';
+    if (source === 'fallback' || source === 'mismatch') return '改用生产链路生成批次（非调试/非兜底）';
+    return '检查默认模型和推理任务状态';
+};
+
+const resolveSignalSourcePresentation = (
+    signalSource?: RealTradingStatus['signal_source_status'] | null,
+) => {
+    if (signalSource?.available) {
+        return {
+            label: '已就绪',
+            badgeTone: 'bg-emerald-50 text-emerald-700 border-emerald-200',
+            stateText: '已就绪',
+            message: signalSource.message || '当前默认模型最新推理结果可用于自动托管',
+        };
+    }
+
+    const source = String(signalSource?.source || '').trim().toLowerCase();
+    switch (source) {
+        case 'missing':
+            return {
+                label: '缺少批次',
+                badgeTone: 'bg-amber-50 text-amber-700 border-amber-200',
+                stateText: '未就绪',
+                message: signalSource?.message || '未检测到当前用户默认模型的最新完成推理',
+            };
+        case 'window_pending':
+            return {
+                label: '窗口未到',
+                badgeTone: 'bg-sky-50 text-sky-700 border-sky-200',
+                stateText: '未到窗口',
+                message: signalSource?.message || '当前默认模型最新推理结果尚未进入可执行窗口',
+            };
+        case 'expired':
+            return {
+                label: '批次过期',
+                badgeTone: 'bg-rose-50 text-rose-700 border-rose-200',
+                stateText: '已过期',
+                message: signalSource?.message || '当前默认模型最新推理结果已超过可执行窗口',
+            };
+        case 'fallback':
+            return {
+                label: '兜底拦截',
+                badgeTone: 'bg-amber-50 text-amber-700 border-amber-200',
+                stateText: '兜底拦截',
+                message: signalSource?.message || '当前默认模型最新推理数据来自兜底结果，自动托管已禁止使用兜底数据',
+            };
+        case 'mismatch':
+            return {
+                label: '非生产批次',
+                badgeTone: 'bg-amber-50 text-amber-700 border-amber-200',
+                stateText: '仅接受生产批次',
+                message: signalSource?.message || '已找到默认模型的最新完成推理，但该批次属于调试链路或其他非生产来源，可能来自手动指定模型、策略绑定模型或系统回退。自动托管当前只接受生产来源的完成推理：user_default / explicit_system_model。',
+            };
+        default:
+            return {
+                label: '未就绪',
+                badgeTone: 'bg-amber-50 text-amber-700 border-amber-200',
+                stateText: '未就绪',
+                message: signalSource?.message || '默认模型状态已获取',
+            };
+    }
+};
+
+const renderSignalSourceMessage = (message: string) => {
+    const protectedPhrase = '可执行窗口';
+    const renderProtectedPhrase = (value: string) => {
+        if (!value.includes(protectedPhrase)) return value;
+
+        const parts = value.split(protectedPhrase);
+        return parts.map((part, index) => (
+            <React.Fragment key={`${part}-${index}`}>
+                {part}
+                {index < parts.length - 1 ? <span className="whitespace-nowrap">{protectedPhrase}</span> : null}
+            </React.Fragment>
+        ));
+    };
+
+    const deadlineMatch = message.match(/^(.*?)[，,]\s*(截止日期=.+)$/);
+    if (deadlineMatch) {
+        return (
+            <>
+                <span>{renderProtectedPhrase(deadlineMatch[1])}</span>
+                <span className="mt-0.5 block text-[11px] font-black text-slate-700">{deadlineMatch[2]}</span>
+            </>
+        );
+    }
+
+    return renderProtectedPhrase(message);
 };
 
 interface StrategyManagementProps {
@@ -88,6 +207,7 @@ const StrategyManagement: React.FC<StrategyManagementProps> = ({
     const [hostedLogs, setHostedLogs] = useState<string[]>([]);
     const [hostedLogsVisible, setHostedLogsVisible] = useState<boolean>(false);
     const [latestInferenceRunIsNew, setLatestInferenceRunIsNew] = useState(false);
+    const [batchRuleExpanded, setBatchRuleExpanded] = useState(false);
     const hostedCursorRef = useRef('0-0');
     const hostedLogsRef = useRef<string[]>([]);
     const latestInferenceRunIdRef = useRef<string | null>(null);
@@ -210,13 +330,101 @@ const StrategyManagement: React.FC<StrategyManagementProps> = ({
     useEffect(() => {
         const currentMode = tradingMode === 'simulation' ? 'SIMULATION' : 'REAL';
         let cancelled = false;
+        const SHARED_REAL_CHECK_KEYS = new Set(['stream_series_freshness']);
+
+        const normalizeTradingPrecheckItems = (items: Array<{ key: string; label: string; passed: boolean; detail: string }>): PreflightCheckItem[] => {
+            return items.map((item) => ({
+                key: item.key,
+                label: item.label,
+                ok: !!item.passed,
+                required: true,
+                message: item.detail || '',
+                details: { source: 'trading_precheck' },
+            }));
+        };
+
+        const mergeChecks = (primary: PreflightCheckItem[], fallback: PreflightCheckItem[]): PreflightCheckItem[] => {
+            const merged = new Map<string, PreflightCheckItem>();
+            for (const item of primary) {
+                if (!item?.key) continue;
+                merged.set(item.key, item);
+            }
+            for (const item of fallback) {
+                if (!item?.key) continue;
+                if (!merged.has(item.key)) {
+                    merged.set(item.key, item);
+                }
+            }
+            return Array.from(merged.values());
+        };
+
+        const overlayChecksByKey = (
+            base: PreflightCheckItem[],
+            fromReal: PreflightCheckItem[],
+            keys: Set<string>,
+        ): PreflightCheckItem[] => {
+            if (!keys.size) return base;
+            const byKey = new Map<string, PreflightCheckItem>();
+            for (const item of base) {
+                if (!item?.key) continue;
+                byKey.set(item.key, item);
+            }
+            for (const item of fromReal) {
+                if (!item?.key) continue;
+                if (keys.has(item.key)) {
+                    byKey.set(item.key, item);
+                }
+            }
+            return Array.from(byKey.values());
+        };
 
         const loadMonitor = async () => {
             try {
-                const result = await realTradingService.preflight(currentMode, userId, tenantId);
+                const [
+                    preflightResult,
+                    tradingPrecheckResult,
+                    realPreflightResult,
+                    realTradingPrecheckResult,
+                ] = await Promise.allSettled([
+                    realTradingService.preflight(currentMode, userId, tenantId),
+                    realTradingService.getTradingPrecheck(currentMode),
+                    currentMode === 'SIMULATION'
+                        ? realTradingService.preflight('REAL', userId, tenantId)
+                        : Promise.resolve(null),
+                    currentMode === 'SIMULATION'
+                        ? realTradingService.getTradingPrecheck('REAL')
+                        : Promise.resolve(null),
+                ]);
                 if (cancelled) return;
-                setMonitorChecks(Array.isArray(result?.checks) ? result.checks : []);
-                setMonitorCheckedAt(result?.checked_at || null);
+
+                const preflightChecks = (
+                    preflightResult.status === 'fulfilled' && Array.isArray(preflightResult.value?.checks)
+                ) ? preflightResult.value.checks : [];
+
+                const tradingPrecheckChecks = (
+                    tradingPrecheckResult.status === 'fulfilled' && Array.isArray(tradingPrecheckResult.value?.items)
+                ) ? normalizeTradingPrecheckItems(tradingPrecheckResult.value.items) : [];
+
+                const mergedChecks = mergeChecks(preflightChecks, tradingPrecheckChecks);
+                const realPreflightChecks = (
+                    realPreflightResult.status === 'fulfilled' && Array.isArray(realPreflightResult.value?.checks)
+                ) ? realPreflightResult.value.checks : [];
+                const realTradingPrecheckChecks = (
+                    realTradingPrecheckResult.status === 'fulfilled' && Array.isArray(realTradingPrecheckResult.value?.items)
+                ) ? normalizeTradingPrecheckItems(realTradingPrecheckResult.value.items) : [];
+                const mergedRealChecks = mergeChecks(realPreflightChecks, realTradingPrecheckChecks);
+
+                const finalChecks = currentMode === 'SIMULATION'
+                    ? overlayChecksByKey(mergedChecks, mergedRealChecks, SHARED_REAL_CHECK_KEYS)
+                    : mergedChecks;
+                setMonitorChecks(finalChecks);
+                setMonitorCheckedAt(
+                    (preflightResult.status === 'fulfilled' ? preflightResult.value?.checked_at : null)
+                    || (tradingPrecheckResult.status === 'fulfilled' ? tradingPrecheckResult.value?.checked_at : null)
+                    || (realPreflightResult.status === 'fulfilled' ? realPreflightResult.value?.checked_at : null)
+                    || (realTradingPrecheckResult.status === 'fulfilled' ? realTradingPrecheckResult.value?.checked_at : null)
+                    || null,
+                );
             } catch (e) {
                 if (cancelled) return;
                 console.warn('Failed to load strategy monitor snapshot', e);
@@ -267,52 +475,23 @@ const StrategyManagement: React.FC<StrategyManagementProps> = ({
     const hostedSignalCount = Number(latestHostedTask?.signal_count ?? latestHostedTaskPreviewSummary.signal_count ?? (hostedSuccessCount + hostedFailedCount + hostedSkippedCount));
     const hostedProgress = Number(latestHostedTask?.progress ?? latestHostedTaskSummary.progress ?? 0);
     const signalSource = status?.signal_source_status;
-    const signalSourceLabel = signalSource?.available
-        ? 'MODEL READY'
-        : (signalSource?.source === 'missing'
-            ? 'MODEL MISSING'
-            : (signalSource?.source === 'window_pending'
-                ? 'WINDOW PENDING'
-                : (signalSource?.source === 'expired'
-                    ? 'WINDOW EXPIRED'
-                    : (signalSource?.source === 'fallback'
-                        ? 'FALLBACK BLOCKED'
-                        : (signalSource?.source === 'mismatch'
-                            ? 'SOURCE MISMATCH'
-                            : 'MODEL UNAVAILABLE')))));
-    const signalSourceBadgeTone = signalSource?.available
-        ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
-        : (signalSource?.source === 'missing'
-            ? 'bg-amber-50 text-amber-700 border-amber-200'
-            : (signalSource?.source === 'window_pending'
-                ? 'bg-sky-50 text-sky-700 border-sky-200'
-                : (signalSource?.source === 'expired'
-                    ? 'bg-rose-50 text-rose-700 border-rose-200'
-                    : 'bg-amber-50 text-amber-700 border-amber-200')));
-    const signalSourceStateText = signalSource?.available
-        ? '已就绪'
-        : (signalSource?.source === 'window_pending'
-            ? '未到窗口'
-            : (signalSource?.source === 'expired'
-                ? '已过期'
-                : (signalSource?.source === 'fallback'
-                    ? '兜底拦截'
-                    : (signalSource?.source === 'mismatch'
-                        ? '来源不匹配'
-                        : '未就绪'))));
-    const signalSourceExplanation = signalSource?.available
-        ? '模型推理信号已就绪，可在执行窗口内自动触发托管交易'
-        : (signalSource?.source === 'missing'
-            ? '请先设置默认模型并完成至少一次推理，系统才能获取交易信号'
-            : (signalSource?.source === 'fallback'
-                ? '当前推理数据为兜底结果，为保障安全已暂停自动托管'
-                : (signalSource?.source === 'mismatch'
-                    ? '推理数据来源与默认模型不匹配，请重新运行推理'
-                    : (signalSource?.source === 'window_pending'
-                        ? '推理结果已就绪，但当前日期未进入可执行时间窗口'
-                        : (signalSource?.source === 'expired'
-                            ? '推理结果已超过执行有效期，请重新运行推理获取最新信号'
-                            : '等待模型推理结果...')))));
+    const signalSourcePresentation = useMemo(
+        () => resolveSignalSourcePresentation(signalSource),
+        [signalSource],
+    );
+    const signalSourceLabel = signalSourcePresentation.label;
+    const signalSourceBadgeTone = signalSourcePresentation.badgeTone;
+    const signalSourceStateText = signalSourcePresentation.stateText;
+    const signalSourceMessage = signalSourcePresentation.message;
+    const automationNextAction = useMemo(
+        () => resolveAutomationNextAction(signalSource),
+        [signalSource],
+    );
+    const hostedRunStatusLabel = status?.status === 'running'
+        ? '运行中'
+        : (status?.status === 'starting' ? '启动中' : '静态就绪');
+    const batchSummaryRunId = latestInferenceRun?.run_id || '';
+    const batchSummaryHasData = Boolean(batchSummaryRunId);
 
     const runtimeModeLabel = runtimeStatus === 'running'
         ? (runtimeMode === 'SHADOW'
@@ -355,27 +534,33 @@ const StrategyManagement: React.FC<StrategyManagementProps> = ({
         : '启动后显示';
 
     const monitorItemMap = useMemo(() => new Map(monitorChecks.map((item) => [item.key, item])), [monitorChecks]);
-    
+
     const getMonitorItem = useCallback(
         (key: string): PreflightCheckItem | undefined => monitorItemMap.get(key),
         [monitorItemMap],
     );
 
-    const getCheckMessage = useCallback((key: string, fallback = '未获取') => {
-        const item = getMonitorItem(key);
-        return item?.message || fallback;
-    }, [getMonitorItem]);
+    const pickMonitorItem = useCallback(
+        (keyOrKeys: string | string[]): PreflightCheckItem | undefined => {
+            const keys = Array.isArray(keyOrKeys) ? keyOrKeys : [keyOrKeys];
+            for (const key of keys) {
+                const item = getMonitorItem(key);
+                if (item) return item;
+            }
+            return undefined;
+        },
+        [getMonitorItem],
+    );
 
-    const getCheckTone = useCallback((key: string): boolean | undefined => {
-        const item = getMonitorItem(key);
-        if (!item) return undefined;
-        // 检查 message 是否包含 [WARNING]，如果有则返回 false（异常状态）
-        const messageStr = String(item.message || '');
-        if (messageStr.includes('[WARNING]')) {
-            return false;
-        }
-        return item.ok;
-    }, [getMonitorItem]);
+    const getCheckMessage = useCallback((keyOrKeys: string | string[], fallback = '未获取') => {
+        const item = pickMonitorItem(keyOrKeys);
+        return item?.message || fallback;
+    }, [pickMonitorItem]);
+
+    const getCheckTone = useCallback((keyOrKeys: string | string[]): boolean | undefined => {
+        const item = pickMonitorItem(keyOrKeys);
+        return item?.ok;
+    }, [pickMonitorItem]);
 
     const getQmtAgentDisplayMessage = useCallback((item?: PreflightCheckItem, fallback = '未获取'): string => {
         if (!item) return fallback;
@@ -387,12 +572,12 @@ const StrategyManagement: React.FC<StrategyManagementProps> = ({
         return '未上报';
     }, []);
 
-    const getEnvDisplayMessage = useCallback((key: string, fallback: string): string => {
-        const item = getMonitorItem(key);
+    const getEnvDisplayMessage = useCallback((keyOrKeys: string | string[], fallback: string): string => {
+        const item = pickMonitorItem(keyOrKeys);
         if (!item) return fallback;
-        if (key === 'qmt_agent_online') return getQmtAgentDisplayMessage(item, fallback);
+        if (item.key === 'qmt_agent_online') return getQmtAgentDisplayMessage(item, fallback);
         return item.ok ? '已就绪' : (item.message || '未就绪');
-    }, [getMonitorItem, getQmtAgentDisplayMessage]);
+    }, [pickMonitorItem, getQmtAgentDisplayMessage]);
 
     const formatWebSocketStatus = useCallback((value: WebSocketStatus): { label: string; ok: boolean } => {
         switch (value) {
@@ -406,32 +591,42 @@ const StrategyManagement: React.FC<StrategyManagementProps> = ({
 
     const wsStatusText = formatWebSocketStatus(websocketStatus);
     const getConnectionSignalLevel = useCallback((label: string, value: string, ok?: boolean): 'red' | 'yellow' | 'green' => {
-        // 优先使用后端返回的 ok 状态判断
-        // ok=true: 绿色（链路正常）
-        // ok=false: 红色（链路异常）
-        // ok=undefined: 黄色（未获取/未知状态）
-        if (ok === true) {
-            return 'green';
-        }
-        if (ok === false) {
-            return 'red';
-        }
-        // ok 为 undefined/null 时，检查是否为连接中/重连中等过渡状态
         const normalized = `${label} ${value}`.toLowerCase();
-        const isTransitioning = (
-            normalized.includes('连接中')
+        const hasWarning = (
+            normalized.includes('warning')
+            || normalized.includes('warn')
+            || normalized.includes('延迟')
+            || normalized.includes('过高')
+            || normalized.includes('过期')
+            || normalized.includes('stale')
+            || normalized.includes('连接中')
             || normalized.includes('重连中')
             || normalized.includes('pending')
+            || normalized.includes('未获取')
+            || normalized.includes('未上报')
             || normalized.includes('初始化')
         );
-        return isTransitioning ? 'yellow' : 'red';
+
+        if (ok === false) {
+            return hasWarning ? 'yellow' : 'red';
+        }
+
+        return hasWarning ? 'yellow' : 'green';
     }, []);
+
+    const toConnectionCheck = useCallback((item: { label: string; value: string; ok?: boolean }) => ({
+        ...item,
+        level: getConnectionSignalLevel(item.label, item.value, item.ok),
+    }), [getConnectionSignalLevel]);
+
+    const realtimeCheckKey: string = 'stream_series_freshness';
+    const dataFeedCheckKey: string = 'stream_series_freshness';
 
     const envChecks = isGlobalSim
         ? [
             { label: '推理模型', value: getEnvDisplayMessage('inference_database_ready', '未获取'), ok: getCheckTone('inference_database_ready'), title: getCheckMessage('inference_database_ready') },
             { label: '沙箱进程池', value: getEnvDisplayMessage('simulation_sandbox_pool', '未获取'), ok: getCheckTone('simulation_sandbox_pool'), title: getCheckMessage('simulation_sandbox_pool') },
-            { label: '实时行情', value: getEnvDisplayMessage('stream_series_freshness', '未获取'), ok: getCheckTone('stream_series_freshness'), title: getCheckMessage('stream_series_freshness') },
+            { label: '实时行情', value: getEnvDisplayMessage(realtimeCheckKey, '未获取'), ok: getCheckTone(realtimeCheckKey), title: getCheckMessage(realtimeCheckKey) },
         ]
         : [
             { label: 'Runner 镜像', value: getEnvDisplayMessage('strategy_runner_image', '未获取'), ok: getCheckTone('strategy_runner_image'), title: getCheckMessage('strategy_runner_image') },
@@ -439,15 +634,19 @@ const StrategyManagement: React.FC<StrategyManagementProps> = ({
             { label: 'QMT Agent', value: getEnvDisplayMessage('qmt_agent_online', '未获取'), ok: getCheckTone('qmt_agent_online'), title: getCheckMessage('qmt_agent_online') },
         ];
 
-    const connectionChecks = [
-        { label: 'Redis Signal', value: getCheckMessage('redis'), ok: getCheckTone('redis') },
-        { label: 'PostgreSQL', value: getCheckMessage('db'), ok: getCheckTone('db') },
-        { label: 'Data Feed', value: getCheckMessage('stream_series_freshness'), ok: getCheckTone('stream_series_freshness') },
-        { label: 'WebSocket', value: wsStatusText.label, ok: wsStatusText.ok },
-    ].map((item) => ({
-        ...item,
-        level: getConnectionSignalLevel(item.label, item.value, item.ok),
-    }));
+    const connectionChecks = isGlobalSim
+        ? [
+            { label: 'Redis Signal', value: getCheckMessage('redis'), ok: getCheckTone('redis') },
+            { label: 'PostgreSQL', value: getCheckMessage('db'), ok: getCheckTone('db') },
+            { label: 'Data Feed', value: getCheckMessage(dataFeedCheckKey), ok: getCheckTone(dataFeedCheckKey) },
+            { label: 'WebSocket', value: wsStatusText.label, ok: wsStatusText.ok },
+        ].map(toConnectionCheck)
+        : [
+            { label: 'Redis Signal', value: getCheckMessage('redis'), ok: getCheckTone('redis') },
+            { label: 'PostgreSQL', value: getCheckMessage('db'), ok: getCheckTone('db') },
+            { label: 'Data Feed', value: getCheckMessage(dataFeedCheckKey), ok: getCheckTone(dataFeedCheckKey) },
+            { label: 'WebSocket', value: wsStatusText.label, ok: wsStatusText.ok },
+        ].map(toConnectionCheck);
     const connectionAttentionCount = connectionChecks.filter((item) => item.level !== 'green').length;
     const connectionHealthyCount = connectionChecks.length - connectionAttentionCount;
 
@@ -635,68 +834,106 @@ const StrategyManagement: React.FC<StrategyManagementProps> = ({
                         </div>
                     </div>
 
-                    {/* Module 2: Engine Status */}
+                    {/* Module 2: Production Batch Summary */}
                     <div className="bg-white rounded-2xl p-6 border border-slate-100 shadow-sm flex flex-col">
-                        <div className="flex items-center justify-between gap-3 mb-6 h-9">
+                        <div className="flex items-center justify-between gap-3 mb-5 h-9">
                             <div className="flex items-center gap-3">
                                 <div className="p-2 bg-slate-50 rounded-lg">
                                     <Cpu className="text-slate-600" size={18} />
                                 </div>
                                 <div className="flex flex-col">
-                                    <h3 className="font-bold text-slate-800">默认模型最新推理</h3>
-                                    <span className="text-[10px] font-medium text-slate-400">
-                                        展示当前默认模型最近一次可用于托管的完成推理批次
-                                    </span>
+                                    <h3 className="font-bold text-slate-800">生产批次摘要</h3>
+                                    <span className="text-[10px] font-medium text-slate-400">固定展示关键字段，避免重复操作</span>
                                 </div>
                             </div>
                             <div className="flex items-center gap-2">
+                                <button
+                                    type="button"
+                                    onClick={() => setBatchRuleExpanded(!batchRuleExpanded)}
+                                    className={`w-5 h-5 inline-flex items-center justify-center rounded-full border text-[11px] font-black transition-colors ${
+                                        batchRuleExpanded
+                                            ? 'border-emerald-200 text-emerald-700 bg-emerald-50'
+                                            : 'border-slate-200 text-slate-400 hover:text-emerald-700 hover:border-emerald-200 hover:bg-emerald-50'
+                                    }`}
+                                    title={batchRuleExpanded ? '收起消费规则说明' : '展开消费规则说明'}
+                                >
+                                    ?
+                                </button>
                                 {latestInferenceRunIsNew && (
                                     <span className="text-[10px] font-black px-2 py-0.5 rounded-full border bg-amber-50 text-amber-700 border-amber-200">
                                         NEW
                                     </span>
                                 )}
-                                {latestInferenceRun?.run_id && (
+                                {batchSummaryHasData && (
                                     <span className={`text-[10px] font-black px-2 py-0.5 rounded-full border ${latestInferenceRun.matched_model === false ? 'bg-amber-50 text-amber-600 border-amber-200' : 'bg-emerald-50 text-emerald-600 border-emerald-200'}`}>
-                                        {latestInferenceRun.matched_model === false ? '模型不匹配' : '模型已就绪'}
+                                        {latestInferenceRun.matched_model === false ? '模型不匹配' : '批次已匹配'}
                                     </span>
                                 )}
                             </div>
                         </div>
                         <div className="flex-1">
-                            {latestInferenceRun?.run_id ? (
-                                <div className="grid grid-cols-2 gap-3">
-                                    <div className="col-span-2 rounded-xl bg-slate-50/70 p-3 border border-slate-100/50">
-                                        <div className="text-[10px] font-black text-slate-400 uppercase mb-1">最新推理 RUN_ID</div>
-                                        <div className="font-mono text-[10px] font-bold text-slate-700 truncate" title={latestInferenceRun.run_id}>
-                                            {latestInferenceRun.run_id}
+                            {batchRuleExpanded && (
+                                <div className="mb-3 rounded-lg border border-emerald-100 bg-emerald-50/60 px-3 py-2">
+                                    <div className="text-[11px] font-semibold text-emerald-800 leading-relaxed">
+                                        自动托管仅消费默认模型生产批次，不消费模型管理页生成的调试批次。
+                                    </div>
+                                </div>
+                            )}
+                            {batchSummaryHasData ? (
+                                <div className="space-y-3">
+                                    <div className="rounded-xl bg-slate-50/70 p-3 border border-slate-100/50">
+                                        <div className="grid grid-cols-2 gap-3">
+                                            <div>
+                                                <div className="text-[10px] font-black text-slate-400 uppercase mb-1">RUN_ID</div>
+                                                <div className="font-mono text-[11px] font-bold text-slate-700 truncate" title={batchSummaryRunId}>
+                                                    {shortenTextId(batchSummaryRunId)}
+                                                </div>
+                                            </div>
+                                            <div>
+                                                <div className="text-[10px] font-black text-slate-400 uppercase mb-1">交易日</div>
+                                                <div className="font-bold text-slate-700 text-xs truncate">
+                                                    {latestInferenceRun.prediction_trade_date || '-'}
+                                                </div>
+                                            </div>
+                                            <div>
+                                                <div className="text-[10px] font-black text-slate-400 uppercase mb-1">更新时间</div>
+                                                <div className="font-bold text-slate-700 text-xs truncate">
+                                                    {formatDateTime(latestInferenceRun.updated_at)}
+                                                </div>
+                                            </div>
+                                            <div>
+                                                <div className="text-[10px] font-black text-slate-400 uppercase mb-1">批次状态</div>
+                                                <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-black border ${inferenceStatusTone(latestInferenceRun.status)}`}>
+                                                    {formatInferenceStatus(latestInferenceRun.status)}
+                                                </span>
+                                            </div>
                                         </div>
                                     </div>
-                                    <div className="rounded-xl bg-slate-50/70 p-3 border border-slate-100/50">
-                                        <div className="text-[10px] font-black text-slate-400 uppercase mb-1">预测交易日</div>
-                                        <div className="font-bold text-slate-700 text-xs truncate">{latestInferenceRun.prediction_trade_date || '-'}</div>
-                                    </div>
-                                    <div className="rounded-xl bg-slate-50/70 p-3 border border-slate-100/50">
-                                        <div className="text-[10px] font-black text-slate-400 uppercase mb-1">预测状态</div>
-                                        <div className="font-bold text-slate-700 text-xs flex items-center gap-2 truncate">
-                                            <div className="w-1.5 h-1.5 rounded-full bg-emerald-500"></div>
-                                            {latestInferenceRun.status || '-'}
-                                        </div>
-                                    </div>
-                                    <div className="col-span-2 rounded-xl bg-slate-50/70 p-3 border border-slate-100/50">
-                                        <div className="text-[10px] font-black text-slate-400 uppercase mb-1">当前默认模型</div>
-                                        <div className="font-bold text-slate-600 text-xs truncate" title={effectiveModelDisplayName}>
-                                            {effectiveModelDisplayName}
+                                    <div className="rounded-xl border border-slate-100 bg-white p-3">
+                                        <div className="grid grid-cols-2 gap-2">
+                                            <div className="rounded-lg bg-slate-50 p-2.5 border border-slate-100">
+                                                <div className="text-[10px] font-black text-slate-400 uppercase mb-1">模型 ID</div>
+                                                <div className="text-[11px] font-bold text-slate-700 truncate" title={latestInferenceRun.model_id || '-'}>
+                                                    {latestInferenceRun.model_id || '-'}
+                                                </div>
+                                            </div>
+                                            <div className="rounded-lg bg-slate-50 p-2.5 border border-slate-100">
+                                                <div className="text-[10px] font-black text-slate-400 uppercase mb-1">目标日期</div>
+                                                <div className="text-[11px] font-bold text-slate-700 truncate">
+                                                    {latestInferenceRun.target_date || '-'}
+                                                </div>
+                                            </div>
                                         </div>
                                     </div>
                                 </div>
                             ) : (
-                                <div className="h-full flex flex-col items-center justify-center text-slate-400 text-xs gap-2 border border-dashed border-slate-100 rounded-xl min-h-[160px]">
-                                    <Cpu size={24} className="opacity-20" />
-                                    <span>{latestInferenceRunLoading ? '正在检索最新推理...' : '暂无可用推理批次'}</span>
-                                    <span className="text-[11px] text-slate-300">
+                                <div className="h-full flex flex-col items-center justify-center text-slate-400 text-xs gap-2 border border-dashed border-slate-100 rounded-xl min-h-[120px]">
+                                    <Cpu size={20} className="opacity-20" />
+                                    <span>{latestInferenceRunLoading ? '正在检索生产批次...' : '暂无可用生产批次'}</span>
+                                    <span className="text-[11px] text-slate-300 text-center px-2">
                                         {latestInferenceRunLoading
-                                            ? '请等待模型批次查询完成'
-                                            : (signalSourceExplanation || '当前默认模型未返回可执行推理结果')}
+                                            ? '请等待默认模型批次查询完成'
+                                            : (signalSourceMessage || '当前默认模型未返回可被自动托管消费的推理结果')}
                                     </span>
                                 </div>
                             )}
@@ -711,19 +948,21 @@ const StrategyManagement: React.FC<StrategyManagementProps> = ({
                             </div>
                             <h3 className="font-bold text-slate-800">环境监控</h3>
                         </div>
-                        <div className="flex-1 space-y-3">
-                            <div className="grid grid-cols-2 gap-3">
+                        <div className="flex-1 flex items-center">
+                            <div className="w-full grid grid-cols-2 gap-3">
                                 {envChecks.map((item) => (
-                                    <div key={item.label} className="col-span-2 rounded-xl bg-slate-50/70 p-3 border border-slate-100/50">
-                                        <div className="flex items-center justify-between mb-1.5">
-                                            <span className="text-[10px] font-black text-slate-400 uppercase">{item.label}</span>
-                                            <span className={`text-[11px] font-black flex items-center gap-1.5 ${item.ok ? 'text-green-600' : (item.ok === false ? 'text-rose-600' : 'text-gray-500')}`}>
-                                                <div className={`w-1.5 h-1.5 rounded-full ${item.ok ? 'bg-green-500' : (item.ok === false ? 'bg-rose-500' : 'bg-gray-400')}`}></div>
+                                    <div key={item.label} className="col-span-2 rounded-xl bg-slate-50/70 p-3 border border-slate-100/50 flex items-center justify-between gap-3 min-h-[62px]">
+                                        <div className="min-w-0">
+                                            <div className="text-[10px] font-black text-slate-400 uppercase mb-1.5">{item.label}</div>
+                                            <div className={`text-xs font-bold font-mono truncate ${item.ok === false ? 'text-rose-600' : 'text-slate-700'}`} title={item.value}>
+                                                {item.value || '-'}
+                                            </div>
+                                        </div>
+                                        <div className="shrink-0 self-center">
+                                            <span className={`text-[11px] font-black flex items-center gap-1.5 leading-none ${item.ok ? 'text-green-600' : (item.ok === false ? 'text-rose-600' : 'text-gray-500')}`}>
+                                                <div className={`w-1.5 h-1.5 rounded-full shrink-0 ${item.ok ? 'bg-green-500' : (item.ok === false ? 'bg-rose-500' : 'bg-gray-400')}`}></div>
                                                 {item.ok ? '正常' : (item.ok === false ? '异常' : '未获取')}
                                             </span>
-                                        </div>
-                                        <div className={`text-xs font-bold font-mono truncate ${item.ok === false ? 'text-rose-600' : 'text-slate-700'}`} title={item.value}>
-                                            {item.value || '-'}
                                         </div>
                                     </div>
                                 ))}
@@ -815,19 +1054,22 @@ const StrategyManagement: React.FC<StrategyManagementProps> = ({
                         </div>
                     </div>
 
-                    {/* Module 5: Automation Status */}
-                    <div className="bg-white rounded-2xl p-6 border border-slate-100 shadow-sm flex flex-col min-h-[320px]">
-                        <div className="flex items-center justify-between gap-3 mb-6 h-9">
+                    {/* Module 5: Automation Readiness */}
+                    <div className="bg-white rounded-2xl p-6 border border-slate-100 shadow-sm flex flex-col min-h-[240px]">
+                        <div className="flex items-center justify-between gap-3 mb-5 h-9">
                             <div className="flex items-center gap-3">
                                 <div className="p-2 bg-emerald-50 rounded-lg">
                                     <Clock3 className="text-emerald-600" size={18} />
                                 </div>
-                                <h3 className="font-bold text-slate-800">自动化状态</h3>
+                                <div className="flex flex-col">
+                                    <h3 className="font-bold text-slate-800">自动托管就绪度</h3>
+                                    <span className="text-[10px] font-medium text-slate-400">先看是否可执行，再看阻塞原因</span>
+                                </div>
                             </div>
                             <span className={`px-2 py-0.5 rounded-full text-[10px] font-black border ${
                                 signalSourceBadgeTone
                             }`}>
-                                {signalSourceLabel}
+                                {signalSourceStateText}
                             </span>
                         </div>
                         <div className="flex-1 space-y-4">
@@ -836,31 +1078,27 @@ const StrategyManagement: React.FC<StrategyManagementProps> = ({
                                     ? 'bg-emerald-50/35 border-emerald-100'
                                     : 'bg-slate-50/70 border-slate-100/50'
                             }`}>
-                                <div className="flex items-start justify-between gap-3 mb-2.5">
-                                    <div className="min-w-0">
-                                        <div className="text-[10px] font-black text-emerald-500 uppercase tracking-widest">默认模型推理反馈与诊断</div>
-                                        <div className="mt-1 text-sm font-bold leading-relaxed text-slate-700">
-                                            {signalSourceExplanation}
+                                <div className="space-y-2">
+                                    <div className="flex items-start justify-between gap-3">
+                                        <div className="min-w-0">
+                                            <div className="text-[10px] font-black text-emerald-500 uppercase tracking-widest">当前结论</div>
+                                            <div className="mt-1 text-base font-black leading-tight text-slate-800">
+                                                {signalSourceLabel}
+                                            </div>
+                                        </div>
+                                        <div className={`shrink-0 text-[10px] font-bold px-2 py-0.5 rounded-full border ${signalSourceBadgeTone}`}>
+                                            {signalSourceStateText}
                                         </div>
                                     </div>
-                                    <div className={`shrink-0 text-[10px] font-bold px-2 py-0.5 rounded-full border ${signalSourceBadgeTone}`}>
-                                        {signalSourceStateText}
+                                    <div className="text-xs font-bold leading-relaxed text-slate-700 whitespace-normal break-words">
+                                        {renderSignalSourceMessage(signalSourceMessage)}
                                     </div>
+                                </div>
+                                <div className="mt-3 text-[11px] font-semibold text-slate-600">
+                                    下一步：{automationNextAction}
                                 </div>
                             </div>
-                            <div className="grid grid-cols-2 gap-3">
-                                <div className="rounded-xl bg-slate-50/70 p-3 border border-slate-100/50 shadow-sm">
-                                    <div className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">最新推理批次</div>
-                                    <div className="font-mono text-[10px] font-bold text-slate-700 truncate" title={status?.latest_signal_run_id || 'UNKNOWN'}>
-                                        {status?.latest_signal_run_id || 'UNKNOWN'}
-                                    </div>
-                                </div>
-                                <div className="rounded-xl bg-slate-50/70 p-3 border border-slate-100/50 shadow-sm">
-                                    <div className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">托管运行状态</div>
-                                    <div className="font-bold text-slate-700 text-xs truncate">
-                                        {status?.status === 'running' ? '运行中' : '静态就绪'}
-                                    </div>
-                                </div>
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                                 <div className="rounded-xl bg-slate-50/70 p-3 border border-slate-100/50 shadow-sm">
                                     <div className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">当前默认模型</div>
                                     <div className="font-bold text-slate-600 text-xs truncate" title={effectiveModelDisplayName}>
@@ -868,11 +1106,9 @@ const StrategyManagement: React.FC<StrategyManagementProps> = ({
                                     </div>
                                 </div>
                                 <div className="rounded-xl bg-slate-50/70 p-3 border border-slate-100/50 shadow-sm">
-                                    <div className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">执行窗口</div>
+                                    <div className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">托管运行状态</div>
                                     <div className="font-bold text-slate-700 text-xs truncate">
-                                        {signalSource?.available
-                                            ? `${signalSource.execution_window_start?.slice(5) || '-'} ~ ${signalSource.execution_window_end?.slice(5) || '-'}`
-                                            : '不可用'}
+                                        {hostedRunStatusLabel}
                                     </div>
                                 </div>
                             </div>
