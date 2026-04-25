@@ -853,19 +853,22 @@ step14_start_frontend() {
 
     cd "$PROJECT_DIR"
 
-    log_info "停止旧服务..."
-    pm2 delete quantmind-web 2>/dev/null || true
-
-    log_info "启动新服务..."
-    pm2 start npm --name "quantmind-web" -- run dashboard:preview
-
-    pm2 save
     local target_user="${SUDO_USER:-root}"
     local target_home
     target_home="$(getent passwd "$target_user" | cut -d: -f6)"
+
+    log_info "停止旧服务..."
+    sudo -u "$target_user" pm2 delete quantmind-web 2>/dev/null || true
+
+    log_info "启动新服务..."
+    sudo -u "$target_user" pm2 start npm --name "quantmind-web" -- run dashboard:preview
+
+    sudo -u "$target_user" pm2 save
+
+    # startup 需要 root 权限写 systemd unit，但 target 用户与 PM2 进程保持一致
     pm2 startup systemd -u "$target_user" --hp "${target_home:-/root}" 2>/dev/null || true
 
-    pm2 status
+    sudo -u "$target_user" pm2 status
 
     log_done "Step 14"
     save_progress "14"
