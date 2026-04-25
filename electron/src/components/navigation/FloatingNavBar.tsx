@@ -105,15 +105,12 @@ export const FloatingNavBar: React.FC<FloatingNavBarProps> = ({ current, onChang
                         </motion.div>
                       </div>
 
-                      <AnimatePresence>
+                      <AnimatePresence initial={false}>
                         {isActive && (
                           <motion.div
                             layoutId="nav-active-bubble"
                             className="nav-active-bubble absolute inset-0 z-0"
-                            initial={{ opacity: 0, scale: 0.95 }}
-                            animate={{ opacity: 1, scale: 1 }}
-                            exit={{ opacity: 0, scale: 0.95 }}
-                            transition={{ type: "spring", bounce: 0.2, duration: 0.5 }}
+                            transition={{ type: "spring", bounce: 0.18, duration: 0.34 }}
                           >
                             <span className="nav-active-bar" aria-hidden="true" />
                           </motion.div>

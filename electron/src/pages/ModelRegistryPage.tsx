@@ -49,6 +49,11 @@ import {
   TimeItem,
   InfoCell,
 } from './modelRegistryPanels';
+import {
+  buildFeatureLabelMap,
+  DEFAULT_FEATURE_CATEGORIES,
+  toDynamicCategories,
+} from './training/trainingUtils';
 import { PAGE_LAYOUT } from '../config/pageLayout';
 const { Text } = Typography;
 
@@ -69,6 +74,8 @@ export const ModelRegistryPage: React.FC = () => {
   const [shapSummary, setShapSummary] = useState<ModelShapSummaryResponse | null>(null);
   const [shapLoading, setShapLoading] = useState(false);
   const [shapError, setShapError] = useState('');
+  const [featureLabelMap, setFeatureLabelMap] = useState<Record<string, string>>(() => buildFeatureLabelMap(DEFAULT_FEATURE_CATEGORIES));
+  const [featureCatalogLoaded, setFeatureCatalogLoaded] = useState(false);
   const [inferenceDate, setInferenceDate] = useState<dayjs.Dayjs | null>(dayjs().subtract(1, 'day'));
   const [inferenceRunning, setInferenceRunning] = useState(false);
   const [lastInferenceRun, setLastInferenceRun] = useState<InferenceRunRecord | null>(null);
@@ -180,6 +187,7 @@ export const ModelRegistryPage: React.FC = () => {
       loadTrainingRun(selectedModel.source_run_id);
     }
     if (key === 'attribution' && selectedModel && !shapSummary && !shapLoading) {
+      void loadFeatureLabelCatalog();
       void loadShapSummary(selectedModel.model_id);
     }
     if (key === 'inference' && selectedModel) {
@@ -210,6 +218,20 @@ export const ModelRegistryPage: React.FC = () => {
       setShapLoading(false);
     }
   }, []);
+
+  const loadFeatureLabelCatalog = useCallback(async () => {
+    if (featureCatalogLoaded) return;
+    try {
+      const catalog = await modelTrainingService.getFeatureCatalog();
+      const categories = toDynamicCategories(catalog);
+      if (categories.length > 0) {
+        setFeatureLabelMap(buildFeatureLabelMap(categories));
+      }
+      setFeatureCatalogLoaded(true);
+    } catch {
+      setFeatureCatalogLoaded(true);
+    }
+  }, [featureCatalogLoaded]);
 
   const loadPrecheck = useCallback(async (modelId: string, inferenceDate?: string) => {
     setInferencePrecheckLoading(true);
@@ -679,8 +701,10 @@ export const ModelRegistryPage: React.FC = () => {
                             shapSummary={shapSummary}
                             loading={shapLoading}
                             error={shapError}
+                            featureLabelMap={featureLabelMap}
                             onRefresh={() => {
                               if (selectedModel) {
+                                void loadFeatureLabelCatalog();
                                 void loadShapSummary(selectedModel.model_id);
                               }
                             }}

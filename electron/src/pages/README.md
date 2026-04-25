@@ -44,6 +44,8 @@
   - Linux: `AI-IDE_完整依赖安装说明_Linux.md`
 - `ModelRegistryPage.tsx` 已继续拆分：页面主文件仅保留状态与路由编排，模型注册纯函数迁入 `modelRegistryUtils.ts`，详情/训练溯源/推理中心/通用卡片迁入 `modelRegistryPanels.tsx`。
 - `ModelRegistryPage.tsx` 新增“归因分析”页签（位于“训练溯源”与“推理中心”之间），用于展示训练后 SHAP 因子贡献榜；页面会调用用户态接口读取 `shap_summary.csv` 并按 `mean_abs_shap` 列表排序展示，并支持按因子名搜索与“按当前筛选结果导出 CSV”。
+- `ModelRegistryPage.tsx` 的“归因分析”页签已复用模型训练页特征字典：因子贡献榜优先展示中文解释，保留原始字段名作为辅助信息；搜索与 CSV 导出同时包含字段名和中文解释。
+- `modelRegistryPanels.tsx` 的 SHAP 因子列已锁定宽度并启用单行截断，长中文解释通过悬浮提示查看，避免撑开贡献榜表格。
 - `modelRegistryUtils.ts` 中 `active/ready` 状态文案已从“运行中”调整为“已就绪”，避免把静态可用模型误解为正在执行训练或推理任务。
 - `modelRegistryUtils.ts` 中 `syncing` 状态文案已从“同步中”调整为“已同步”，避免把已落库的模型误解为仍在同步过程。
 - `modelRegistryPanels.tsx` 的训练日志区域高度已从 180px 提升到 360px，日志内容可见范围扩大一倍，便于排查训练过程中的 early stopping、告警与回调信息。
