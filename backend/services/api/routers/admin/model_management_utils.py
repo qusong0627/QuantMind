@@ -270,7 +270,10 @@ def _scan_feature_snapshot_coverage() -> dict[str, Any] | None:
     if not FEATURE_SNAPSHOT_DIR.exists() or not FEATURE_SNAPSHOT_DIR.is_dir():
         return None
 
+    # 支持两种文件命名模式: train_ready_*.parquet 和 model_features_*.parquet
     files = sorted(FEATURE_SNAPSHOT_DIR.glob("train_ready_*.parquet"))
+    if not files:
+        files = sorted(FEATURE_SNAPSHOT_DIR.glob("model_features_*.parquet"))
     if not files:
         return None
 
