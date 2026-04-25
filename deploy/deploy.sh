@@ -55,7 +55,6 @@ if [[ -n "$_PRIVATE_MIRROR" ]]; then
 fi
 DOCKER_MIRRORS+=(
     "https://docker.1ms.run"
-    "https://docker.xuanyuan.live"
     "https://hub.rat.dev"
 )
 
@@ -599,32 +598,43 @@ step8_build_docker() {
 
     log_info "构建 QuantMind OSS 镜像 (5-10分钟)..."
 
-    # 尝试使用不同镜像源构建
-    local build_success=false
-    for mirror in "${DOCKER_MIRRORS[@]}"; do
-        if [[ -n "$mirror" ]]; then
-            log_info "尝试使用镜像源: $(_mask_mirror "$mirror")"
-            if ! configure_docker_mirror "$mirror"; then
-                log_warn "镜像源 $(_mask_mirror "$mirror") 配置失败，尝试下一个..."
-                continue
-            fi
-            sleep 3
-
-            if docker build -t quantmind-oss:latest -f docker/Dockerfile.oss . 2>&1; then
-                build_success=true
-                log_info "构建成功，使用镜像源: $(_mask_mirror "$mirror")"
+    # 预选可用镜像源（只配置一次，避免反复重启 Docker）
+    local build_mirror
+    build_mirror=$(select_docker_mirror)
+    if [[ -n "$build_mirror" ]]; then
+        log_info "使用镜像源: $(_mask_mirror "$build_mirror")"
+        configure_docker_mirror "$build_mirror"
+        # 等待 Docker daemon 完全就绪
+        log_info "等待 Docker daemon 就绪..."
+        local docker_ready=false
+        for _ in $(seq 1 12); do
+            if docker info > /dev/null 2>&1; then
+                docker_ready=true
                 break
-            else
-                log_warn "镜像源 $(_mask_mirror "$mirror") 构建失败，尝试下一个..."
             fi
+            sleep 5
+        done
+        if ! $docker_ready; then
+            log_warn "Docker daemon 未在预期时间内就绪，继续尝试构建..."
         fi
-    done
+    fi
 
-    # 如果所有镜像都失败，尝试不使用镜像加速
+    local build_success=false
+    if docker build -t quantmind-oss:latest -f docker/Dockerfile.oss . 2>&1; then
+        build_success=true
+    fi
+
     if ! $build_success; then
-        log_warn "所有镜像加速器均失败，尝试直接拉取..."
+        log_warn "镜像加速构建失败，尝试恢复默认配置后重试..."
         restore_docker_daemon_config
-        sleep 3
+        local docker_ready=false
+        for _ in $(seq 1 12); do
+            if docker info > /dev/null 2>&1; then
+                docker_ready=true
+                break
+            fi
+            sleep 5
+        done
 
         if docker build -t quantmind-oss:latest -f docker/Dockerfile.oss . 2>&1; then
             build_success=true
@@ -633,6 +643,7 @@ step8_build_docker() {
 
     if ! $build_success; then
         log_error "Docker 镜像构建失败"
+        log_info "请检查网络连接后重试: sudo bash deploy/deploy.sh --resume"
         exit 1
     fi
 
@@ -781,10 +792,13 @@ step12_install_frontend() {
 
     # 配置 npm 镜像加速（包括 Electron、Puppeteer 等）
     log_info "配置 npm 镜像加速..."
-    NPMRC_FILE="/home/${SUDO_USER:-root}/.npmrc"
-    if [[ ! -f "$NPMRC_FILE" ]]; then
-        NPMRC_FILE="/root/.npmrc"
+    local target_user="${SUDO_USER:-root}"
+    local target_home
+    target_home="$(getent passwd "$target_user" | cut -d: -f6)" || true
+    if [[ -z "$target_home" ]]; then
+        target_home="/root"
     fi
+    NPMRC_FILE="${target_home}/.npmrc"
 
     # 写入完整配置（覆盖旧配置避免重复）
     cat > "$NPMRC_FILE" << EOF
@@ -802,8 +816,7 @@ EOF
 
     log_info "npm 镜像配置完成: $npm_mirror"
     log_info "安装 npm 依赖 (3-5分钟)..."
-    # 添加 --loglevel=verbose 显示进度
-    sudo -u "${SUDO_USER:-root}" npm install --loglevel=verbose
+    sudo -u "$target_user" npm install --loglevel=verbose
 
     log_done "Step 12"
     save_progress "12"
@@ -1089,7 +1102,7 @@ confirm_deploy() {
             ;;
         *)
             echo ""
-            log_info "部署已取消。如需帮助请访问: https://github.com/anthropics/quantmind"
+            log_info "部署已取消。如需帮助请访问: https://gitee.com/qusong0627/quantmind"
             exit 0
             ;;
     esac

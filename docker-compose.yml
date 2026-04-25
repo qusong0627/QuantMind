@@ -1,6 +1,8 @@
 # QuantMind OSS Edition - Docker Compose
 # 单镜像部署，所有服务运行在一个容器内
 
+name: quantmind
+
 services:
   # 1. 数据库 (PostgreSQL)
   db:

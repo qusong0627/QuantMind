@@ -16,12 +16,15 @@ echo "🚀 开始同步代码到 $SERVER..."
 echo "======================================================================"
 
 # 1. 使用 rsync 同步代码
-# 排除项: .git, .venv, node_modules, db, data, models, redis, htmlcov 等
+# 排除项: .git, .venv, node_modules, db, data, models 等（不包含运行时数据）
 rsync -avz --delete \
     --exclude='.git/' \
     --exclude='.venv/' \
     --exclude='node_modules/' \
-    --exclude='/electron/' \
+    --exclude='electron/node_modules/' \
+    --exclude='electron/dist/' \
+    --exclude='electron/dist-react/' \
+    --exclude='electron/dist-electron/' \
     --exclude='/dist/' \
     --exclude='/website/' \
     --exclude='/models/' \
@@ -60,12 +63,11 @@ fi
 # 2. 如果指定了服务，则重启对应容器
 if [ -n "$SERVICE" ]; then
     # 映射服务名称到 Docker Compose 中的真实 Service Name
+    # OSS 版使用单容器 (quantmind) + celery-worker
     case $SERVICE in
-        api)    DOCKER_SERVICE="api-server" ;;
-        trade)  DOCKER_SERVICE="trade-core" ;;
-        engine) DOCKER_SERVICE="engine-compute" ;;
-        stream) DOCKER_SERVICE="stream-gateway" ;;
-        *)      DOCKER_SERVICE="quantmind-$SERVICE" ;; # 回退逻辑
+        api|trade|engine|stream) DOCKER_SERVICE="quantmind" ;;
+        celery)                  DOCKER_SERVICE="celery-worker" ;;
+        *)                       DOCKER_SERVICE="quantmind" ;;
     esac
 
     echo -e "\n🔄 正在远程重启服务: $DOCKER_SERVICE..."
