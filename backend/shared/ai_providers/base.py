@@ -253,10 +253,19 @@ class BaseAIProvider(ABC):
 5. 预期性能评估
 
 代码要求：
-- 使用pandas, numpy等标准库
 - 包含清晰的注释
 - 实现完整的买入/卖出逻辑
 - 包含风险控制机制
+
+QuantMind / Qlib 平台规范（必须遵守）：
+1. 代码中必须提供 get_strategy_config() 或 STRATEGY_CONFIG 入口
+2. 推荐基类（选股用 RedisTopkStrategy，权重用 RedisWeightStrategy）：
+   导入路径: from backend.services.engine.qlib_app.utils.extended_strategies import RedisTopkStrategy, RedisWeightStrategy
+3. signal 默认使用 "<PRED>"
+4. 若重写 __init__，必须使用 kwargs.pop() 消费自定义参数，避免 unexpected keyword argument
+5. 若重写 reset，必须兼容 def reset(self, *args, **kwargs)
+6. generate_trade_decision 必须返回 TradeDecisionWO（不能返回 dict）
+7. 禁止使用 os, sys, subprocess, requests, urllib, socket 等危险模块
 """
 
         if request.custom_requirements:

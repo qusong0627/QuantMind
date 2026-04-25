@@ -95,11 +95,17 @@ class QuantAgent:
                             continue
 
     def _format_user_prompt(self, user_input: str, context: dict) -> str:
+        assistant_rules = str(context.get("assistant_rules", "") or "").strip()
         current_code = context.get("current_code", "")
         error_msg = context.get("error_msg", "")
         selection = context.get("selection", "")
+        file_path = str(context.get("file_path", "") or "").strip()
 
         prompt = f"User Request: {user_input}\n"
+        if assistant_rules:
+            prompt += f"\n[Development Rules]:\n{assistant_rules}\n"
+        if file_path:
+            prompt += f"\n[File Path]:\n{file_path}\n"
         if current_code:
             prompt += f"\n[Current Code Context]:\n```python\n{current_code}\n```\n"
         if selection:

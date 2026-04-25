@@ -303,6 +303,32 @@ class StrategyService:
         if system_prompt is None:
             system_prompt = "你是一个专业的量化交易专家。请返回JSON格式的策略代码，包含完整的交易逻辑。代码中使用简体中文注释，确保注释清晰易懂。"
 
+        # 简单 token 估算：中文约 1.5 char/token，英文约 4 char/token，取 2 char/token 作为上限估算
+        estimated_tokens = (len(system_prompt) + len(prompt)) // 2
+        max_tokens = 8000
+
+        # Qwen-max 上下文窗口约 32K tokens，Qwen-turbo 约 131K tokens
+        # 保守按 28K 输入上限估算，预留安全余量
+        input_token_limit = 25000
+        if estimated_tokens > input_token_limit:
+            logger.warning(
+                "Prompt may exceed model context window",
+                extra={
+                    "estimated_tokens": estimated_tokens,
+                    "input_limit": input_token_limit,
+                    "prompt_length": len(prompt),
+                    "system_prompt_length": len(system_prompt),
+                    "user_id": user_id,
+                },
+            )
+            # 截断用户 prompt 而非系统 prompt（规范约束在系统 prompt 中）
+            max_prompt_chars = max(500, (input_token_limit * 2) - len(system_prompt))
+            if len(prompt) > max_prompt_chars:
+                logger.warning(
+                    f"Truncating user prompt from {len(prompt)} to {max_prompt_chars} chars"
+                )
+                prompt = prompt[:max_prompt_chars] + "\n\n[提示内容因过长已被截断，核心约束已通过系统提示词注入]"
+
         response = await self.client.post(
             f"{self.api_url}/chat/completions",
             headers={
