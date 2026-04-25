@@ -172,6 +172,21 @@ class RedisTopkStrategy(DynamicRiskMixin, TopkDropoutStrategy, RedisLoggerMixin)
             except TypeError:
                 return super().reset()
 
+    def _safe_generate_trade_decision(self, execute_result=None):
+        """安全地生成交易决策，处理 get_deal_price 返回 None 的情况。"""
+        try:
+            return super().generate_trade_decision(execute_result)
+        except TypeError as e:
+            if "unsupported operand type(s) for /: 'float' and 'NoneType'" in str(e):
+                # 价格为 None，可能是股票停牌或数据缺失，跳过本次交易
+                StructuredTaskLogger(
+                    logger,
+                    "redis-topk-strategy",
+                    {"backtest_id": getattr(self, "backtest_id", None)},
+                ).warning("skip_trade_no_price", "Skip trade due to missing price data")
+                return TradeDecisionWO([], self)
+            raise
+
     def generate_trade_decision(self, execute_result=None):
         if hasattr(self, "check_account_stop_loss") and self.check_account_stop_loss():
             StructuredTaskLogger(
@@ -197,8 +212,8 @@ class RedisTopkStrategy(DynamicRiskMixin, TopkDropoutStrategy, RedisLoggerMixin)
                     {"backtest_id": getattr(self, "backtest_id", None), "rebalance_days": self.rebalance_days},
                 ).warning("rebalance_check_failed", "Error checking rebalance_days", error=e)
 
-        # Generate new orders
-        return super().generate_trade_decision(execute_result)
+        # Generate new orders (with safe handling for None prices)
+        return self._safe_generate_trade_decision(execute_result)
 
     def post_exe_step(self, execute_result=None):
         self.log_progress()
