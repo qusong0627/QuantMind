@@ -146,39 +146,6 @@ export const OtherSettings: React.FC<OtherSettingsProps> = ({ userId, tenantId }
               保存
             </Button>
           </div>
-            <Button
-              type="primary"
-              icon={<Save className="w-4 h-4" />}
-              onClick={handleSaveApiKey}
-              loading={isSaving}
-              disabled={!apiKey.trim()}
-              style={{ borderRadius: '8px', height: '36px' }}
-            >
-              保存
-            </Button>
-          </div>
-            <Button
-              type="primary"
-              icon={<Save className="w-4 h-4" />}
-              onClick={handleSaveApiKey}
-              loading={isSaving}
-              disabled={!apiKey.trim()}
-              style={{ borderRadius: '8px', height: '36px' }}
-            >
-              保存
-            </Button>
-          </div>
-            <Button
-              type="primary"
-              icon={<Save className="w-4 h-4" />}
-              onClick={handleSaveApiKey}
-              loading={isSaving}
-              disabled={!apiKey.trim()}
-              style={{ borderRadius: '8px', height: '36px' }}
-            >
-              保存
-            </Button>
-          </div>
 
           <div className="text-[11px] text-gray-400 space-y-0.5 pt-1 border-t border-gray-100">
             <p>• API Key 安全存储在您的个人档案中</p>
