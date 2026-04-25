@@ -16,7 +16,9 @@ from .real_trading_utils import (
     _resolve_runner_image_for_mode,
     _upsert_preflight_snapshot,
 )
-from backend.services.trade.services.manual_execution_service import manual_execution_service
+from backend.services.trade.services.signal_readiness_service import (
+    signal_readiness_service,
+)
 from backend.shared.trade_redis_keys import build_trade_agent_heartbeat_key
 
 router = APIRouter()
@@ -40,6 +42,20 @@ def _parse_snapshot_timestamp(raw: Any) -> float | None:
             parsed = parsed.replace(tzinfo=timezone.utc)
         return parsed.timestamp()
     return None
+
+
+def _is_cn_trading_hours() -> bool:
+    try:
+        from zoneinfo import ZoneInfo
+
+        now = datetime.now(ZoneInfo("Asia/Shanghai"))
+    except Exception:
+        now = datetime.now()
+    return (
+        now.weekday() < 5
+        and ((now.hour == 9 and now.minute >= 15) or (10 <= now.hour < 15))
+    )
+
 
 @router.get("/preflight")
 async def preflight_check(
@@ -126,33 +142,47 @@ async def preflight_check(
         )
 
     try:
-        hosted_status = await manual_execution_service.get_default_model_hosted_status(
+        signal_readiness = await signal_readiness_service.evaluate(
+            db,
+            redis_client=redis.client,
             tenant_id=resolved_tenant_id,
             user_id=resolved_user_id,
+            mode=mode,
         )
     except Exception as exc:
-        hosted_status = {
+        signal_readiness = {
             "available": False,
+            "blocking": mode == "REAL",
+            "trading_permission": "blocked" if mode == "REAL" else "observe_only",
             "message": f"读取默认模型托管状态失败: {exc}",
         }
         await db.rollback()
     add_check(
-        "signal_pipeline_enabled",
-        "自动托管默认模型",
-        bool(hosted_status.get("available")),
-        False,
-        str(hosted_status.get("message") or "默认模型托管状态正常"),
+        "signal_readiness",
+        "默认模型信号可交易",
+        not bool(signal_readiness.get("blocking")),
+        bool(signal_readiness.get("blocking")),
+        (
+            str(signal_readiness.get("message") or "默认模型信号状态正常")
+            if signal_readiness.get("available")
+            else (
+                f"[阻断] {signal_readiness.get('message')}"
+                if signal_readiness.get("blocking")
+                else f"[观察态] {signal_readiness.get('message')}"
+            )
+        ),
+        signal_readiness,
     )
     add_check(
         "latest_signal_run",
         "最新推理批次",
-        bool(hosted_status.get("latest_run_id")),
+        bool(signal_readiness.get("latest_run_id")),
         False,
         (
-            f"latest_run_id={hosted_status.get('latest_run_id')}"
-            if hosted_status.get("latest_run_id")
+            f"latest_run_id={signal_readiness.get('latest_run_id')}"
+            if signal_readiness.get("latest_run_id")
             else str(
-                hosted_status.get("message")
+                signal_readiness.get("message")
                 or "[WARNING] 未检测到当前用户默认模型的最新完成推理"
             )
         ),
@@ -392,7 +422,8 @@ async def preflight_check(
     # 8~10) Stream 探针：REAL/SHADOW/SIMULATION 均检测行情质量
     if mode in {"REAL", "SHADOW", "SIMULATION"}:
         # 模拟盘也需要行情来计算成交金额，否则会用随机价格导致金额错误
-        stream_required = True
+        is_trading_hours = _is_cn_trading_hours()
+        stream_required = is_trading_hours
         stream_symbols = _resolve_preflight_symbols()
         series_threshold_sec = int(os.getenv("PREFLIGHT_SERIES_STALE_THRESHOLD_SEC", "180"))
         try:
@@ -415,13 +446,6 @@ async def preflight_check(
                 latest_age_sec = age
                 break
             if latest_age_sec is None:
-                # 交易时段（9:15-15:00）严格检查，非交易时段仅警告
-                now = datetime.now(timezone.utc).replace(tzinfo=None)
-                is_trading_hours = (
-                    now.weekday() < 5
-                    and now.hour >= 9
-                    and (now.hour < 15 or (now.hour == 9 and now.minute >= 15))
-                )
                 passed = not is_trading_hours  # 交易时段无数据则失败
                 add_check(
                     "stream_series_freshness",
@@ -442,13 +466,6 @@ async def preflight_check(
                 )
             else:
                 ok = latest_age_sec <= series_threshold_sec
-                # 交易时段（9:15-15:00）严格检查，非交易时段仅警告
-                now = datetime.now(timezone.utc).replace(tzinfo=None)
-                is_trading_hours = (
-                    now.weekday() < 5
-                    and now.hour >= 9
-                    and (now.hour < 15 or (now.hour == 9 and now.minute >= 15))
-                )
                 passed = ok if is_trading_hours else True
                 add_check(
                     "stream_series_freshness",
@@ -537,17 +554,37 @@ async def preflight_check(
         quote_window_min = int(os.getenv("PREFLIGHT_QUOTE_WINDOW_MINUTES", "5"))
         quote_min_count = int(os.getenv("PREFLIGHT_QUOTE_MIN_COUNT", "5"))
         try:
-            quote_sql = text("""
+            quote_time_col = (
+                await db.execute(
+                    text("""
+                    SELECT column_name
+                    FROM information_schema.columns
+                    WHERE table_schema = 'public'
+                      AND table_name = 'quotes'
+                      AND column_name IN ('timestamp', 'trade_time', 'created_at')
+                    ORDER BY CASE column_name
+                        WHEN 'timestamp' THEN 1
+                        WHEN 'trade_time' THEN 2
+                        WHEN 'created_at' THEN 3
+                        ELSE 4
+                    END
+                    LIMIT 1
+                    """)
+                )
+            ).scalar()
+            if quote_time_col not in {"timestamp", "trade_time", "created_at"}:
+                raise RuntimeError("quotes table has no timestamp/trade_time/created_at column")
+            quote_sql = text(f"""
                 SELECT COUNT(1) AS cnt
                 FROM quotes
-                WHERE timestamp >= NOW() - make_interval(mins => :window)
+                WHERE {quote_time_col} >= NOW() - make_interval(mins => :window)
                 """)
             quote_cnt = int((await db.execute(quote_sql, {"window": quote_window_min})).scalar() or 0)
             quote_ok = quote_cnt >= quote_min_count
             add_check(
                 "stream_quote_persist_rate",
                 "Stream行情落库",
-                True,  # 警告：不阻断启动
+                quote_ok if is_trading_hours else True,
                 stream_required,
                 (
                     f"最近{quote_window_min}分钟落库 {quote_cnt} 条"
@@ -558,13 +595,15 @@ async def preflight_check(
                     "window_minutes": quote_window_min,
                     "recent_quote_count": quote_cnt,
                     "min_required_count": quote_min_count,
+                    "time_column": quote_time_col,
+                    "is_trading_hours": is_trading_hours,
                 },
             )
         except Exception as e:
             add_check(
                 "stream_quote_persist_rate",
                 "Stream行情落库",
-                False,
+                not is_trading_hours,
                 stream_required,
                 f"行情落库检测失败: {e}",
             )
@@ -740,6 +779,68 @@ async def preflight_check(
             },
         )
 
+        # 11.4 实时行情服务（SIMULATION 模式也需要）
+        try:
+            stream_symbols = _resolve_preflight_symbols()
+            stream_redis, stream_redis_host, stream_redis_port = _get_stream_series_redis_client()
+            stream_redis.ping()
+            matched_symbol = None
+            latest_age_sec = None
+            for symbol in stream_symbols:
+                key = f"market:series:{symbol}"
+                latest = stream_redis.zrevrange(key, 0, 0, withscores=True)
+                if latest:
+                    _, score = latest[0]
+                    age = max(0, int(time.time() - float(score)))
+                    if latest_age_sec is None or age < latest_age_sec:
+                        matched_symbol = symbol
+                        latest_age_sec = age
+            stream_ok = latest_age_sec is not None and latest_age_sec < 300
+            threshold_sec = 300
+            # 交易时段（9:15-15:00 工作日）严格检查，非交易时段仅警告
+            is_trading_hours = _is_cn_trading_hours()
+            stream_required = is_trading_hours
+            add_check(
+                "stream_series_freshness",
+                "实时行情服务",
+                stream_ok if is_trading_hours else True,
+                stream_required,
+                (
+                    f"行情新鲜（{matched_symbol} 延迟 {latest_age_sec}s）"
+                    if stream_ok
+                    else (
+                        f"行情不新鲜（{matched_symbol} 延迟 {latest_age_sec}s > {threshold_sec}s）"
+                        if matched_symbol
+                        else "未发现可用行情序列"
+                    )
+                ),
+                {
+                    "matched_symbol": matched_symbol,
+                    "age_seconds": latest_age_sec,
+                    "threshold_seconds": threshold_sec,
+                    "is_trading_hours": is_trading_hours,
+                    "series_redis": f"{stream_redis_host}:{stream_redis_port}",
+                },
+            )
+        except Exception as e:
+            is_trading_hours = _is_cn_trading_hours()
+            add_check(
+                "stream_series_freshness",
+                "实时行情服务",
+                not is_trading_hours,
+                is_trading_hours,
+                f"行情检测失败: {e}",
+            )
+
+    check_order: list[str] = []
+    checks_by_key: dict[str, dict] = {}
+    for item in checks:
+        key = str(item.get("key") or "")
+        if key and key not in checks_by_key:
+            check_order.append(key)
+        checks_by_key[key] = item
+    checks = [checks_by_key[key] for key in check_order]
+
     ready = all(item["ok"] for item in checks if item["required"])
 
     try:
@@ -760,6 +861,8 @@ async def preflight_check(
         "mode": mode,
         "user_id": resolved_user_id,
         "tenant_id": resolved_tenant_id,
+        "trading_permission": signal_readiness.get("trading_permission"),
+        "signal_readiness": signal_readiness,
         "checks": checks,
     }
 

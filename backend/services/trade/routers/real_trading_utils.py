@@ -190,6 +190,8 @@ class TradingPrecheckResponse(BaseModel):
     passed: bool
     checked_at: str
     items: list[TradingPrecheckItem]
+    trading_permission: str | None = None
+    signal_readiness: dict[str, Any] | None = None
 
 
 # 策略文件存储基准路径

@@ -179,6 +179,12 @@ async def start_trading(
                 user_id=resolved_user_id,
                 tenant_id=resolved_tenant_id,
             )
+        signal_readiness = readiness.get("signal_readiness") or {}
+        trading_permission = str(
+            readiness.get("trading_permission")
+            or signal_readiness.get("trading_permission")
+            or "trade_enabled"
+        )
         if not readiness.get("passed"):
             failed_items = [
                 item
@@ -195,8 +201,33 @@ async def start_trading(
                     "items": readiness.get("items", []),
                     "first_failed_reason": (first_failed or {}).get("detail")
                     or (first_failed or {}).get("label"),
+                    "signal_readiness": signal_readiness,
+                    "trading_permission": trading_permission,
                 },
             )
+        if trading_permission == "blocked":
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": "默认模型没有可交易的目标交易日推理信号，实盘启动已阻断",
+                    "precheck_failed": True,
+                    "checked_at": readiness.get("checked_at"),
+                    "items": readiness.get("items", []),
+                    "signal_readiness": signal_readiness,
+                    "trading_permission": trading_permission,
+                },
+            )
+        if trading_permission == "observe_only":
+            exec_config = {
+                **exec_config,
+                "trading_permission": "observe_only",
+                "auto_trade_enabled": False,
+            }
+            live_config = {
+                **live_config,
+                "trading_permission": "observe_only",
+                "auto_trade_enabled": False,
+            }
 
         run_id = f"run_{int(time.time())}"
         strategy_dir = get_strategy_path(resolved_user_id)
@@ -219,7 +250,11 @@ async def start_trading(
                 resolved_user_id,
                 file_path,
                 run_id=run_id,
-                exec_config={**exec_config, "trading_mode": mode},
+                exec_config={
+                    **exec_config,
+                    "trading_mode": mode,
+                    "trading_permission": trading_permission,
+                },
                 tenant_id=resolved_tenant_id,
                 live_trade_config=live_config,
             )
@@ -255,6 +290,8 @@ async def start_trading(
                     "strategy_name": strategy_name,
                     "execution_config": exec_config,
                     "live_trade_config": live_config,
+                    "trading_permission": trading_permission,
+                    "signal_readiness": signal_readiness,
                     "launch_result": result,
                 }
             ),
@@ -280,6 +317,8 @@ async def start_trading(
             "message": f"策略 {strategy_name} 已成功启动",
             "effective_execution_config": exec_config,
             "effective_live_trade_config": live_config,
+            "trading_permission": trading_permission,
+            "signal_readiness": signal_readiness,
             "k8s_result": result,
             "orchestration_mode": k8s_manager.mode,
         }
@@ -449,6 +488,8 @@ async def get_status(
     current_mode = "REAL"
     active_exec_config = None
     active_live_trade_config = None
+    trading_permission = "trade_enabled"
+    signal_readiness = None
     if active_strat_raw:
         try:
             active_data = json.loads(active_strat_raw)
@@ -474,6 +515,10 @@ async def get_status(
             active_exec_config = active_data.get("execution_config")
         if isinstance(active_data.get("live_trade_config"), dict):
             active_live_trade_config = active_data.get("live_trade_config")
+        if active_data.get("trading_permission"):
+            trading_permission = str(active_data.get("trading_permission"))
+        if isinstance(active_data.get("signal_readiness"), dict):
+            signal_readiness = active_data.get("signal_readiness")
         if active_data.get("strategy_name"):
             strategy_info = {
                 "id": active_strat_id,
@@ -570,6 +615,8 @@ async def get_status(
             "latest_hosted_task": latest_hosted_task,
             "latest_signal_run_id": latest_signal_run_id,
             "signal_source_status": signal_source_status,
+            "trading_permission": trading_permission,
+            "signal_readiness": signal_readiness,
         }
 
     if status is None:
@@ -591,6 +638,8 @@ async def get_status(
             "latest_hosted_task": latest_hosted_task,
             "latest_signal_run_id": latest_signal_run_id,
             "signal_source_status": signal_source_status,
+            "trading_permission": trading_permission,
+            "signal_readiness": signal_readiness,
         }
 
     if "error" in status:
@@ -613,6 +662,8 @@ async def get_status(
             "latest_hosted_task": latest_hosted_task,
             "latest_signal_run_id": latest_signal_run_id,
             "signal_source_status": signal_source_status,
+            "trading_permission": trading_permission,
+            "signal_readiness": signal_readiness,
         }
 
     state = "running" if status.get("available_replicas", 0) > 0 else "starting"
@@ -633,6 +684,8 @@ async def get_status(
         "latest_hosted_task": latest_hosted_task,
         "latest_signal_run_id": latest_signal_run_id,
         "signal_source_status": signal_source_status,
+        "trading_permission": trading_permission,
+        "signal_readiness": signal_readiness,
     }
 
 

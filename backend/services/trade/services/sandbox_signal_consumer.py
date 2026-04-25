@@ -33,6 +33,11 @@ _BATCH_SIZE = 50
 _POLL_INTERVAL = 0.2
 
 
+def _active_strategy_key(tenant_id: str, user_id: str) -> str:
+    tenant = (tenant_id or "").strip() or "default"
+    return f"trade:active_strategy:{tenant}:{str(user_id).zfill(8)}"
+
+
 class SandboxSignalConsumer:
     """
     消费沙箱信号并执行模拟盘订单。
@@ -101,12 +106,46 @@ class SandboxSignalConsumer:
             logger.info("[Sandbox Log %s] %s", strategy_id, sig.get("message"))
             return
 
+        if await self._is_observe_only(tenant_id, user_id):
+            logger.info(
+                "[SandboxSignalConsumer] 观察态跳过下单信号: tenant=%s user=%s strategy=%s type=%s",
+                tenant_id,
+                user_id,
+                strategy_id,
+                sig_type,
+            )
+            return
+
         if sig_type == "order_target_percent":
             await self._handle_order_target_percent(sig, tenant_id, user_id, strategy_id)
         elif sig_type == "order":
             await self._handle_direct_order(sig, tenant_id, user_id, strategy_id)
         else:
             logger.debug("[SandboxSignalConsumer] 未知信号类型: %s", sig_type)
+
+    async def _is_observe_only(self, tenant_id: str, user_id: str) -> bool:
+        if not redis_client.client:
+            return False
+        try:
+            raw = redis_client.client.get(_active_strategy_key(tenant_id, user_id))
+            if not raw:
+                return False
+            if isinstance(raw, bytes):
+                raw = raw.decode("utf-8")
+            data = json.loads(raw)
+            if not isinstance(data, dict):
+                return False
+            permission = str(data.get("trading_permission") or "").strip().lower()
+            if permission == "observe_only":
+                return True
+            execution_config = data.get("execution_config")
+            if isinstance(execution_config, dict):
+                if execution_config.get("auto_trade_enabled") is False:
+                    return True
+            return False
+        except Exception as exc:
+            logger.warning("[SandboxSignalConsumer] 读取交易权限失败: %s", exc)
+            return False
 
     async def _handle_order_target_percent(
         self, sig: dict[str, Any], tenant_id: str, user_id: str, strategy_id: str

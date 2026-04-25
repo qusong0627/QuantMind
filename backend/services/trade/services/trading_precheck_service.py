@@ -10,6 +10,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 import redis as redis_lib
 from backend.services.trade.services.k8s_manager import k8s_manager
+from backend.services.trade.services.signal_readiness_service import (
+    signal_readiness_service,
+)
 from backend.shared.trade_redis_keys import (
     pick_first_matching_key,
     trade_agent_heartbeat_key_candidates,
@@ -411,33 +414,62 @@ async def run_trading_readiness_precheck(
     vectorized_matcher_enabled = str(
         os.getenv("ENABLE_VECTORIZED_MATCHER", "false")
     ).strip().lower() in {"1", "true", "yes", "on"}
+    signal_pipeline_ok = signal_stream_publish_enabled or vectorized_matcher_enabled
+    # SIMULATION 模式仅警告，REAL/SHADOW 阻断
+    signal_pipeline_passed = signal_pipeline_ok if normalized_mode != "SIMULATION" else True
     checks.append(
         _build_check(
             "signal_pipeline_enabled",
             "自动托管信号链路已启用",
-            True,
+            signal_pipeline_passed,
             (
                 "ENABLE_SIGNAL_STREAM_PUBLISH=true"
                 if signal_stream_publish_enabled
                 else (
                     "ENABLE_VECTORIZED_MATCHER=true (fallback)"
                     if vectorized_matcher_enabled
-                    else "[WARNING] 未启用 signal stream publisher 或 vectorized matcher"
+                    else (
+                        "[阻断] 未启用 signal stream publisher 或 vectorized matcher"
+                        if normalized_mode != "SIMULATION"
+                        else "[WARNING] 未启用 signal stream publisher 或 vectorized matcher"
+                    )
                 )
             ),
         )
     )
-    latest_signal_run_key = f"qm:signal:latest:{tenant_id}:{user_id}"
-    latest_signal_run_id = str(redis_client.get(latest_signal_run_key) or "").strip()
+    try:
+        signal_readiness = await signal_readiness_service.evaluate(
+            db,
+            redis_client=redis_client,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            mode=normalized_mode,
+        )
+    except Exception as exc:
+        signal_readiness = {
+            "available": False,
+            "status": "check_error",
+            "message": f"读取默认模型信号就绪状态失败: {exc}",
+            "trading_permission": "blocked"
+            if normalized_mode == "REAL"
+            else "observe_only",
+            "blocking": normalized_mode == "REAL",
+        }
+        await db.rollback()
+    signal_passed = not bool(signal_readiness.get("blocking"))
     checks.append(
         _build_check(
-            "latest_signal_run",
-            "最新推理信号版本可见",
-            True,
+            "signal_readiness",
+            "默认模型信号可交易",
+            signal_passed,
             (
-                f"latest_run_id={latest_signal_run_id}"
-                if latest_signal_run_id
-                else f"[WARNING] 未检测到 {latest_signal_run_key}"
+                str(signal_readiness.get("message") or "默认模型信号状态正常")
+                if signal_readiness.get("available")
+                else (
+                    f"[阻断] {signal_readiness.get('message')}"
+                    if signal_readiness.get("blocking")
+                    else f"[观察态] {signal_readiness.get('message')}"
+                )
             ),
         )
     )
@@ -445,12 +477,13 @@ async def run_trading_readiness_precheck(
     if normalized_mode == "SIMULATION":
         try:
             model_ok, model_detail = _check_inference_model_exists()
+            # SIMULATION 模式推理模型仅警告，允许用户先配置系统
             checks.append(
                 _build_check(
                     "inference_database_ready",
                     "推理模型已就绪",
-                    model_ok,
-                    model_detail,
+                    True,  # 仅警告，不阻断
+                    model_detail if model_ok else f"[WARNING] {model_detail}",
                 )
             )
         except Exception as exc:
@@ -458,8 +491,8 @@ async def run_trading_readiness_precheck(
                 _build_check(
                     "inference_database_ready",
                     "推理模型已就绪",
-                    False,
-                    f"model_check_error={exc}",
+                    True,  # 仅警告，不阻断
+                    f"[WARNING] model_check_error={exc}",
                 )
             )
 
@@ -494,40 +527,49 @@ async def run_trading_readiness_precheck(
 
         try:
             stream_ok, stream_detail = _check_stream_series_freshness(redis_client)
-            # 交易时段（9:15-15:00）严格检查，非交易时段仅警告
+            # 交易时段（9:15-15:00 工作日）严格检查，非交易时段仅警告
             now = datetime.now(timezone.utc).replace(tzinfo=None)
             is_trading_hours = (
                 now.weekday() < 5  # 周一到周五
-                and now.hour >= 9
-                and (now.hour < 15 or (now.hour == 9 and now.minute >= 15))
+                and ((now.hour == 9 and now.minute >= 15) or (now.hour >= 10 and now.hour < 15))
             )
-            passed = stream_ok if is_trading_hours else True
+            stream_passed = stream_ok if is_trading_hours else True
             checks.append(
                 _build_check(
-                    "realtime_market_ready",
+                    "stream_series_freshness",
                     "实时行情服务已就绪",
-                    passed,
+                    stream_passed,
                     (
                         f"已就绪: {stream_detail}"
                         if stream_ok
-                        else f"[WARNING] 行情不新鲜: {stream_detail}"
-                        + (f" (交易时段阻断)" if is_trading_hours else " (非交易时段放行)")
+                        else (
+                            f"[阻断] 行情不新鲜: {stream_detail} (交易时段)"
+                            if is_trading_hours
+                            else f"[WARNING] 行情不新鲜: {stream_detail} (非交易时段)"
+                        )
                     ),
                 )
             )
         except Exception as exc:
+            now = datetime.now(timezone.utc).replace(tzinfo=None)
+            is_trading_hours = (
+                now.weekday() < 5
+                and ((now.hour == 9 and now.minute >= 15) or (now.hour >= 10 and now.hour < 15))
+            )
             checks.append(
                 _build_check(
-                    "realtime_market_ready",
+                    "stream_series_freshness",
                     "实时行情服务已就绪",
-                    True,  # 警告：不阻断启动
-                    f"[WARNING] stream_probe_error={exc}",
+                    not is_trading_hours,  # 交易时段异常则阻断，非交易时段放行
+                    f"[阻断] stream_probe_error={exc}" if is_trading_hours else f"[WARNING] stream_probe_error={exc}",
                 )
             )
         return {
             "passed": all(bool(item.get("passed")) for item in checks),
             "checked_at": datetime.now().isoformat(),
             "items": checks,
+            "signal_readiness": signal_readiness,
+            "trading_permission": signal_readiness.get("trading_permission"),
         }
 
     production_dir = Path(
@@ -590,15 +632,26 @@ async def run_trading_readiness_precheck(
     )
 
     stream_ok, stream_detail = _check_stream_series_freshness(redis_client)
+    # 交易时段（9:15-15:00 工作日）严格检查，非交易时段仅警告
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    is_trading_hours = (
+        now.weekday() < 5  # 周一到周五
+        and ((now.hour == 9 and now.minute >= 15) or (now.hour >= 10 and now.hour < 15))
+    )
+    stream_passed = stream_ok if is_trading_hours else True
     checks.append(
         _build_check(
-            "realtime_market_ready",
+            "stream_series_freshness",
             "实时行情服务已就绪",
-            True,  # 警告：不阻断启动
+            stream_passed,
             (
                 f"已就绪: {stream_detail}"
                 if stream_ok
-                else f"[WARNING] 行情不新鲜: {stream_detail}"
+                else (
+                    f"[阻断] 行情不新鲜: {stream_detail} (交易时段)"
+                    if is_trading_hours
+                    else f"[WARNING] 行情不新鲜: {stream_detail} (非交易时段)"
+                )
             ),
         )
     )
@@ -620,4 +673,6 @@ async def run_trading_readiness_precheck(
         "passed": all(bool(item.get("passed")) for item in checks),
         "checked_at": datetime.now().isoformat(),
         "items": checks,
+        "signal_readiness": signal_readiness,
+        "trading_permission": signal_readiness.get("trading_permission"),
     }

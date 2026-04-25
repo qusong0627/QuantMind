@@ -130,6 +130,8 @@ export interface RealTradingStatus {
         execution_window_start?: string;
         execution_window_end?: string;
     } | null;
+    trading_permission?: TradingPermission;
+    signal_readiness?: SignalReadiness | null;
 }
 
 export interface RealTradingLogs {
@@ -384,7 +386,26 @@ export interface StartTradingResponse {
     message?: string;
     effective_execution_config?: ExecutionConfig;
     effective_live_trade_config?: LiveTradeConfig;
+    trading_permission?: TradingPermission;
+    signal_readiness?: SignalReadiness | null;
     k8s_result?: any;
+}
+
+export type TradingPermission = 'trade_enabled' | 'observe_only' | 'blocked' | string;
+
+export interface SignalReadiness {
+    available?: boolean;
+    status?: string;
+    message?: string;
+    latest_run_id?: string | null;
+    data_trade_date?: string | null;
+    prediction_trade_date?: string | null;
+    execution_window_start?: string | null;
+    execution_window_end?: string | null;
+    signal_count?: number;
+    redis_latest_run_id?: string | null;
+    trading_permission?: TradingPermission;
+    blocking?: boolean;
 }
 
 export interface PreflightCheckItem {
@@ -402,6 +423,8 @@ export interface PreflightCheckResponse {
     user_id: string;
     tenant_id: string;
     checked_at?: string;
+    trading_permission?: TradingPermission;
+    signal_readiness?: SignalReadiness | null;
     checks: PreflightCheckItem[];
 }
 
@@ -416,6 +439,8 @@ export interface TradingPrecheckResult {
     passed: boolean;
     checked_at: string;
     items: TradingPrecheckItem[];
+    trading_permission?: TradingPermission;
+    signal_readiness?: SignalReadiness | null;
 }
 
 export interface TradingPrecheckFailure {
@@ -423,6 +448,8 @@ export interface TradingPrecheckFailure {
     checked_at?: string;
     items: TradingPrecheckItem[];
     first_failed_reason?: string;
+    trading_permission?: TradingPermission;
+    signal_readiness?: SignalReadiness | null;
 }
 
 function resolveErrorMessage(error: any): string {
@@ -550,6 +577,8 @@ export const realTradingService = {
             checked_at: typeof detail.checked_at === 'string' ? detail.checked_at : undefined,
             items: Array.isArray(detail.items) ? detail.items : [],
             first_failed_reason: typeof detail.first_failed_reason === 'string' ? detail.first_failed_reason : undefined,
+            trading_permission: typeof detail.trading_permission === 'string' ? detail.trading_permission : undefined,
+            signal_readiness: detail.signal_readiness && typeof detail.signal_readiness === 'object' ? detail.signal_readiness : null,
         };
     },
 

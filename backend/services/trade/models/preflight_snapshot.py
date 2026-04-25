@@ -1,12 +1,22 @@
 from datetime import datetime
 
-from sqlalchemy import Boolean, Column, Date, DateTime, Integer, JSON, String
+from sqlalchemy import Boolean, Column, Date, DateTime, Integer, JSON, String, UniqueConstraint
 
 from backend.services.trade.models.base import Base
 
 
 class PreflightSnapshot(Base):
     __tablename__ = "real_trading_preflight_snapshots"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id",
+            "user_id",
+            "trading_mode",
+            "snapshot_date",
+            name="uq_preflight_snapshot_daily",
+        ),
+    )
+
     id = Column(Integer, primary_key=True, autoincrement=True)
 
     tenant_id = Column(String(64), nullable=False, index=True)
