@@ -384,7 +384,7 @@ step2_install_docker() {
     local mirror
     mirror=$(select_docker_mirror)
     if [[ -n "$mirror" ]]; then
-        log_info "配置 Docker 镜像加速器: $mirror"
+        log_info "配置 Docker 镜像加速器: $(_mask_mirror "$mirror")"
         if configure_docker_mirror "$mirror"; then
             log_info "Docker 镜像加速器配置成功"
         else
