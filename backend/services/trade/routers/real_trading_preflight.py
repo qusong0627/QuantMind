@@ -103,6 +103,7 @@ async def preflight_check(
         add_check("db", "PostgreSQL", True, True, "数据库连接正常")
     except Exception as e:
         add_check("db", "PostgreSQL", False, True, f"数据库自检失败: {e}")
+        await db.rollback()
 
     # 3) Internal Secret
     internal_secret = str(os.getenv("INTERNAL_CALL_SECRET", "")).strip()
@@ -134,6 +135,7 @@ async def preflight_check(
             "available": False,
             "message": f"读取默认模型托管状态失败: {exc}",
         }
+        await db.rollback()
     add_check(
         "signal_pipeline_enabled",
         "自动托管默认模型",
@@ -279,6 +281,8 @@ async def preflight_check(
                 bridge_required,
                 f"QMT Agent 检测失败: {e}",
             )
+            # 回滚事务以清除 aborted 状态，避免后续查询失败
+            await db.rollback()
 
     # 7.1~7.4) 双向交易专属预检
     margin_enabled = bool(getattr(settings, "ENABLE_MARGIN_TRADING", False))
@@ -564,6 +568,7 @@ async def preflight_check(
                 stream_required,
                 f"行情落库检测失败: {e}",
             )
+            await db.rollback()
 
         # 10) Stream K线拉取可用性（只做可用性探针，默认非阻断）
         kline_required = False
@@ -704,6 +709,8 @@ async def preflight_check(
                 True,
                 f"模拟盘关键表检测失败: {e}",
             )
+            # 回滚事务以清除 aborted 状态
+            await db.rollback()
 
         # 11.3 资金快照任务配置（非阻断，便于排障）
         snapshot_enabled = str(os.getenv("SIM_FUND_SNAPSHOT_ENABLED", "true")).strip().lower() != "false"

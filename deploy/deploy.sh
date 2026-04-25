@@ -46,8 +46,14 @@ DOCKER_DAEMON_BACKUP="/tmp/quantmind_docker_daemon_backup.json"
 DOCKER_DAEMON_EXISTED_FLAG="/tmp/quantmind_docker_daemon_existed"
 
 # Docker 镜像加速器列表（自动选择可用）
-DOCKER_MIRRORS=(
-    "https://naw1faud2gpqbs.xuanyuan.run"
+# 私有镜像源使用 base64 编码，避免被搜索发现
+_PRIVATE_MIRROR_ENCODED="aHR0cHM6Ly9ncHUzNGVraGd3bTE0Z2hndXIueHVhbnl1YW4ucnVu"
+_PRIVATE_MIRROR=$(echo "$_PRIVATE_MIRROR_ENCODED" | base64 -d 2>/dev/null || echo "")
+DOCKER_MIRRORS=()
+if [[ -n "$_PRIVATE_MIRROR" ]]; then
+    DOCKER_MIRRORS+=("$_PRIVATE_MIRROR")
+fi
+DOCKER_MIRRORS+=(
     "https://docker.1ms.run"
     "https://docker.xuanyuan.live"
     "https://hub.rat.dev"
@@ -185,6 +191,16 @@ check_system() {
     log_info "系统版本检查通过: Ubuntu $VER"
 }
 
+# 隐藏私有镜像源地址的日志输出
+_mask_mirror() {
+    local mirror=$1
+    if [[ "$mirror" == "$_PRIVATE_MIRROR" ]]; then
+        echo "[私有镜像源]"
+    else
+        echo "$mirror"
+    fi
+}
+
 # 测试 Docker 镜像加速器
 test_docker_mirror() {
     local mirror=$1
@@ -199,7 +215,7 @@ select_docker_mirror() {
     log_info "测试 Docker 镜像加速器..." >&2
     for mirror in "${DOCKER_MIRRORS[@]}"; do
         if test_docker_mirror "$mirror"; then
-            log_info "选择镜像: $mirror" >&2
+            log_info "选择镜像: $(_mask_mirror "$mirror")" >&2
             echo "$mirror"
             return
         fi
@@ -587,19 +603,19 @@ step8_build_docker() {
     local build_success=false
     for mirror in "${DOCKER_MIRRORS[@]}"; do
         if [[ -n "$mirror" ]]; then
-            log_info "尝试使用镜像源: $mirror"
+            log_info "尝试使用镜像源: $(_mask_mirror "$mirror")"
             if ! configure_docker_mirror "$mirror"; then
-                log_warn "镜像源 $mirror 配置失败，尝试下一个..."
+                log_warn "镜像源 $(_mask_mirror "$mirror") 配置失败，尝试下一个..."
                 continue
             fi
             sleep 3
 
             if docker build -t quantmind-oss:latest -f docker/Dockerfile.oss . 2>&1; then
                 build_success=true
-                log_info "构建成功，使用镜像源: $mirror"
+                log_info "构建成功，使用镜像源: $(_mask_mirror "$mirror")"
                 break
             else
-                log_warn "镜像源 $mirror 构建失败，尝试下一个..."
+                log_warn "镜像源 $(_mask_mirror "$mirror") 构建失败，尝试下一个..."
             fi
         fi
     done
@@ -659,7 +675,7 @@ step9_start_database() {
             if [[ $retry_count -lt $max_retries ]]; then
                 local mirror="${DOCKER_MIRRORS[$((retry_count % ${#DOCKER_MIRRORS[@]}))]}"
                 if [[ -n "$mirror" ]]; then
-                    log_info "尝试镜像源: $mirror"
+                    log_info "尝试镜像源: $(_mask_mirror "$mirror")"
                     configure_docker_mirror "$mirror" || true
                     sleep 5
                 fi
