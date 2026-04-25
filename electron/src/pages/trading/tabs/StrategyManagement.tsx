@@ -88,7 +88,7 @@ const resolveSignalSourcePresentation = (
                 label: '缺少批次',
                 badgeTone: 'bg-amber-50 text-amber-700 border-amber-200',
                 stateText: '未就绪',
-                message: signalSource?.message || '未检测到当前用户默认模型的最新完成推理',
+                message: signalSource?.message || '当前默认模型尚无最新完成推理结果',
             };
         case 'window_pending':
             return {
@@ -933,7 +933,7 @@ const StrategyManagement: React.FC<StrategyManagementProps> = ({
                                     <span className="text-[11px] text-slate-300 text-center px-2">
                                         {latestInferenceRunLoading
                                             ? '请等待默认模型批次查询完成'
-                                            : (signalSourceMessage || '当前默认模型未返回可被自动托管消费的推理结果')}
+                                            : (signalSourceMessage || '当前默认模型尚无推理结果可被自动托管消费')}
                                     </span>
                                 </div>
                             )}

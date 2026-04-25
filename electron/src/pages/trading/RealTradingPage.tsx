@@ -107,6 +107,8 @@ const RealTradingPage: React.FC = () => {
     const [wizardStrategy, setWizardStrategy] = useState<StrategyFile | null>(null);
     const [wizardMode, setWizardMode] = useState<DeployMode>('REAL');
     const [confirmStarting, setConfirmStarting] = useState(false);
+    const [revealedItemCount, setRevealedItemCount] = useState(0);
+    const [isRevealing, setIsRevealing] = useState(false);
     const preflightRequestSeqRef = useRef(0);
     const isFetchingRef = useRef(false);
 
@@ -389,6 +391,8 @@ const RealTradingPage: React.FC = () => {
         setTradingReadinessResult(null);
         setPreflightResult(null);
         setConfirmStarting(false);
+        setRevealedItemCount(0);
+        setIsRevealing(false);
     }, []);
 
     const confirmStartLabel = useMemo(() => {
@@ -397,6 +401,30 @@ const RealTradingPage: React.FC = () => {
         if (pendingDeploy.mode === 'SHADOW') return '确认并启动影子运行';
         return '确认并启动实盘';
     }, [pendingDeploy]);
+
+    // 逐项展示检测结果：API 返回后逐个 reveal，而非一次性全部渲染
+    useEffect(() => {
+        const items = preflightResult?.checks || tradingReadinessResult?.items || [];
+        if (items.length === 0) return;
+
+        setRevealedItemCount(1);
+        setIsRevealing(true);
+
+        let count = 1;
+        const timer = setInterval(() => {
+            count++;
+            setRevealedItemCount(count);
+            if (count >= items.length) {
+                clearInterval(timer);
+                setIsRevealing(false);
+            }
+        }, 350);
+
+        return () => {
+            clearInterval(timer);
+            setIsRevealing(false);
+        };
+    }, [preflightResult, tradingReadinessResult]);
 
     const handleStop = async () => {
         // 允许在 running/starting 状态下停止，也允许在不确定状态下尝试停止（防止状态不同步）
@@ -648,8 +676,8 @@ const RealTradingPage: React.FC = () => {
                             <Spin size="small" />
                             <span className="ml-2 text-sm text-gray-600">
                                 {preflightStage === 'trading-readiness'
-                                    ? '正在逐项执行交易准备度检测，请稍候...'
-                                    : '交易准备度检测已通过，正在逐项执行启动前自检，请稍候...'}
+                                    ? '正在逐项检查交易准备度...'
+                                    : '交易准备度已通过，正在逐项检查启动条件...'}
                             </span>
                         </div>
                     </div>
@@ -679,7 +707,7 @@ const RealTradingPage: React.FC = () => {
                             </div>
                         )}
                         <div className="space-y-2">
-                            {visiblePreflightChecks.map((item) => (
+                            {visiblePreflightChecks.slice(0, revealedItemCount || visiblePreflightChecks.length).map((item) => (
                                 <Collapse
                                     key={item.key}
                                     size="small"
@@ -710,6 +738,12 @@ const RealTradingPage: React.FC = () => {
                                     }]}
                                 />
                             ))}
+                            {isRevealing && revealedItemCount < visiblePreflightChecks.length && (
+                                <div className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3">
+                                    <Spin size="small" />
+                                    <span className="ml-2 text-sm text-gray-500">正在逐一确认检测项...</span>
+                                </div>
+                            )}
                         </div>
                     </div>
                 ) : preflightResult ? (
@@ -729,11 +763,11 @@ const RealTradingPage: React.FC = () => {
                         )}
                         {preflightResult.ready && pendingDeploy && (
                             <div className="rounded-md border border-blue-200 bg-blue-50 p-3 text-sm text-blue-700">
-                                自检已通过。请点击底部"{confirmStartLabel}"，确认后才会真正启动运行容器。
+                                全部检测项已通过，请在底部点击确认启动。
                             </div>
                         )}
                         <div className="space-y-2">
-                            {visiblePreflightChecks.map((item) => (
+                            {visiblePreflightChecks.slice(0, revealedItemCount || visiblePreflightChecks.length).map((item) => (
                                 <Collapse
                                     key={item.key}
                                     size="small"
@@ -764,6 +798,12 @@ const RealTradingPage: React.FC = () => {
                                     }]}
                                 />
                             ))}
+                            {isRevealing && revealedItemCount < visiblePreflightChecks.length && (
+                                <div className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3">
+                                    <Spin size="small" />
+                                    <span className="ml-2 text-sm text-gray-500">正在逐一确认检测项...</span>
+                                </div>
+                            )}
                         </div>
                     </div>
                 ) : (
