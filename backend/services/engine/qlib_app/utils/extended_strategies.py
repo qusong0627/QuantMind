@@ -581,6 +581,20 @@ class RedisLongShortTopkStrategy(DynamicRiskMixin, WeightStrategyBase, RedisLogg
             return {}
         return combined.to_dict()
 
+    def _safe_generate_trade_decision(self, execute_result=None):
+        """安全地生成交易决策，处理 get_deal_price 返回 None 的情况。"""
+        try:
+            return super().generate_trade_decision(execute_result)
+        except TypeError as e:
+            if "unsupported operand type(s) for /: 'float' and 'NoneType'" in str(e):
+                StructuredTaskLogger(
+                    logger,
+                    "redis-long-short-topk",
+                    {"backtest_id": getattr(self, "backtest_id", None)},
+                ).warning("skip_trade_no_price", "Skip trade due to missing price data")
+                return TradeDecisionWO([], self)
+            raise
+
     def generate_trade_decision(self, execute_result=None):
         if hasattr(self, "check_account_stop_loss") and self.check_account_stop_loss():
             StructuredTaskLogger(
@@ -592,7 +606,7 @@ class RedisLongShortTopkStrategy(DynamicRiskMixin, WeightStrategyBase, RedisLogg
 
         if not self._should_rebalance(self.rebalance_days):
             return TradeDecisionWO([], self)
-        return super().generate_trade_decision(execute_result)
+        return self._safe_generate_trade_decision(execute_result)
 
     def post_exe_step(self, execute_result=None):
         self.log_progress()
@@ -652,7 +666,7 @@ class RedisSectorRotationStrategy(DynamicRiskMixin, TopkDropoutStrategy, RedisLo
         # 最终决定：我们不复用 TopkDropoutStrategy 的决策逻辑，而是自己实现一个简单的 SectorFilter 逻辑，
         # 然后手动构造 TradeDecision。这实际上把 TopkDropout 退化为了 SectorStrategy。
 
-        return super().generate_trade_decision(execute_result)
+        return self._safe_generate_trade_decision(execute_result)
 
     def _get_sector_momentum(self, trade_date) -> list[str]:
         """计算强势行业列表"""
@@ -913,7 +927,7 @@ class RedisVolatilityWeightedStrategy(RedisWeightStrategy):
             "redis-volatility-weighted",
             {"backtest_id": getattr(self, "backtest_id", None)},
         ).info("rebalance", "Rebalancing", step=current_step, rebalance_days=self.rebalance_days)
-        return super().generate_trade_decision(execute_result)
+        return self._safe_generate_trade_decision(execute_result)
 
     def _estimate_volatility(self, stocks: list[str], ref_date) -> pd.Series:
         """计算各标的近期日度已实现波动率；数据不足时回退中位数填充。"""

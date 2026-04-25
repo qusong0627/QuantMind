@@ -717,6 +717,21 @@ class RedisWeightStrategy(DynamicRiskMixin, SimpleWeightStrategy, RedisLoggerMix
 
         return super().generate_target_weight_position(score, current, trade_exchange, *args, **kwargs)
 
+    def _safe_generate_trade_decision(self, execute_result=None):
+        """安全地生成交易决策，处理 get_deal_price 返回 None 的情况。"""
+        try:
+            return super().generate_trade_decision(execute_result)
+        except TypeError as e:
+            if "unsupported operand type(s) for /: 'float' and 'NoneType'" in str(e):
+                from qlib.backtest.decision import TradeDecisionWO
+                StructuredTaskLogger(
+                    logger,
+                    "redis-weight-strategy",
+                    {"backtest_id": getattr(self, "backtest_id", None)},
+                ).warning("skip_trade_no_price", "Skip trade due to missing price data")
+                return TradeDecisionWO([], self)
+            raise
+
     def generate_trade_decision(self, execute_result=None):
         if not self._should_rebalance(self.rebalance_days):
             from qlib.backtest.decision import TradeDecisionWO
@@ -729,7 +744,7 @@ class RedisWeightStrategy(DynamicRiskMixin, SimpleWeightStrategy, RedisLoggerMix
             "redis-weight-strategy",
             {"rebalance_days": self.rebalance_days, "backtest_id": getattr(self, "backtest_id", None)},
         ).info("generate_orders", "Generating orders", step=current_step)
-        return super().generate_trade_decision(execute_result)
+        return self._safe_generate_trade_decision(execute_result)
 
     def post_exe_step(self, execute_result=None):
         self.log_progress()
