@@ -13,6 +13,7 @@ from pydantic import BaseModel
 from sqlalchemy import select, text
 
 from backend.services.api.routers.admin.db import TrainingJobRecord
+from backend.services.api.training_explain import normalize_explain
 from backend.services.api.user_app.middleware.auth import require_admin
 from backend.services.engine.training.local_docker_orchestrator import LocalDockerOrchestrator
 from backend.services.engine.training.training_log_stream import TrainingRunLogStream
@@ -256,6 +257,7 @@ def _normalize_payload(payload: dict[str, Any], allowed_features: list[str]) -> 
                 feature_categories.append(val)
 
     context = _normalize_context(payload.get("context", {}) or {})
+    explain = normalize_explain(payload.get("explain"))
 
     normalized: dict[str, Any] = {
         "job_name": str(payload.get("job_name", "unnamed")).strip() or "unnamed",
@@ -274,6 +276,7 @@ def _normalize_payload(payload: dict[str, Any], allowed_features: list[str]) -> 
         "effective_trade_date": effective_trade_date,
         "training_window": training_window,
         "context": context,
+        "explain": explain,
         "lgb_params": lgb_params,
     }
 

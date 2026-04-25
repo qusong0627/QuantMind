@@ -34,6 +34,27 @@ export interface UserModelRecord {
   activated_at?: string | null;
 }
 
+export interface ModelShapSummaryItem {
+  rank: number;
+  feature: string;
+  mean_abs_shap: number;
+  mean_shap: number;
+  positive_ratio: number;
+}
+
+export interface ModelShapSummaryResponse {
+  model_id: string;
+  status: string;
+  split?: string;
+  rows_requested: number;
+  rows_used: number;
+  file: string;
+  file_exists: boolean;
+  error?: string;
+  total: number;
+  items: ModelShapSummaryItem[];
+}
+
 // ─── 推理相关类型 ────────────────────────────────────────────────────────────
 
 export interface InferenceRunRecord {
@@ -269,6 +290,30 @@ class ModelTrainingService {
   async getUserModel(modelId: string): Promise<UserModelRecord> {
     const resp = await this.client.get<UserModelRecord>(`/models/${modelId}`);
     return resp.data;
+  }
+
+  async getModelShapSummary(modelId: string): Promise<ModelShapSummaryResponse> {
+    const resp = await this.client.get<ModelShapSummaryResponse>(`/models/${encodeURIComponent(modelId)}/shap-summary`);
+    const data = resp.data as any;
+    const rawItems = Array.isArray(data?.items) ? data.items : [];
+    return {
+      model_id: String(data?.model_id ?? modelId),
+      status: String(data?.status ?? 'missing'),
+      split: data?.split ? String(data.split) : undefined,
+      rows_requested: Number(data?.rows_requested ?? 0),
+      rows_used: Number(data?.rows_used ?? 0),
+      file: String(data?.file ?? ''),
+      file_exists: Boolean(data?.file_exists),
+      error: data?.error ? String(data.error) : undefined,
+      total: Number(data?.total ?? rawItems.length ?? 0),
+      items: rawItems.map((item: any, idx: number) => ({
+        rank: Number(item?.rank ?? idx + 1),
+        feature: String(item?.feature ?? ''),
+        mean_abs_shap: Number(item?.mean_abs_shap ?? 0),
+        mean_shap: Number(item?.mean_shap ?? 0),
+        positive_ratio: Number(item?.positive_ratio ?? 0),
+      })),
+    };
   }
 
   async archiveUserModel(modelId: string): Promise<UserModelRecord> {

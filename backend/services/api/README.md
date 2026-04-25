@@ -103,6 +103,7 @@
 - `POST /api/v1/admin/models/run-training` 新增请求参数规范化与校验：
   - 基础字段：`train_start/train_end/features/model_type/num_boost_round/val_ratio/lgb_params`；
   - 显式切分字段（可选）：`valid_start/valid_end/test_start/test_end`；
+  - 可解释性字段（可选）：`explain(enable_shap/shap_split/shap_sample_rows)`，默认开启 SHAP 汇总；
   - 产物要求（可选）：`required_artifacts`（默认 `model.bin/pred.pkl/metadata.json/result.json`）。
 - 当传入显式切分字段时，后端会强制校验时间顺序：
   `train_start <= train_end < valid_start <= valid_end < test_start <= test_end`。
@@ -133,6 +134,7 @@
   - `label_formula`、`effective_trade_date`、`training_window`
   - `early_stopping_rounds`
   - `context(initial_capital/benchmark/commission_rate/slippage/deal_price)`
+  - `explain(enable_shap/shap_split/shap_sample_rows)`（默认 `true/valid/30000`，`shap_sample_rows` 范围 `1000~100000`）
   - `feature_categories`、`generated_at`
 - 训练编排器 `config.yaml` 已新增 `label/context/early_stopping_rounds` 配置，并将回调地址切换到用户态路径 `/api/v1/models/training-runs/{run_id}/complete`。
 - 训练容器回收优化（2026-04-06）：在 `POST /api/v1/models/training-runs/{run_id}/complete` 回调落库后，API 侧会立即按容器名 `qm-train-{run_id}` 执行强制清理（`force + remove volumes`），避免训练完成后容器长期停留 `Exited`。
@@ -179,6 +181,7 @@
   - `GET /api/v1/models/default`
   - `PATCH /api/v1/models/default`
   - `GET /api/v1/models/{model_id}`
+  - `GET /api/v1/models/{model_id}/shap-summary`（读取模型目录 `shap_summary.csv`，返回结构化 SHAP 因子贡献列表）
   - `POST /api/v1/models/{model_id}/archive`
 - 新增用户态策略绑定接口：
   - `GET /api/v1/models/strategy-bindings/{strategy_id}`

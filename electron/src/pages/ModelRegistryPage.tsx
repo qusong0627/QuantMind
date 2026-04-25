@@ -24,6 +24,7 @@ import {
   InferenceRankingResult,
   AutoInferenceSettings,
   LatestInferenceRunInfo,
+  ModelShapSummaryResponse,
 } from '../services/modelTrainingService';
 import {
   calcTimeSplitStats,
@@ -42,6 +43,7 @@ import {
   ModelCard,
   ModelDetailPanel,
   TrainingSourcePanel,
+  AttributionAnalysisPanel,
   InferenceCenterPanel,
   MetricCard,
   TimeItem,
@@ -64,6 +66,9 @@ export const ModelRegistryPage: React.FC = () => {
   const [activeConfigTab, setActiveConfigTab] = useState<'meta' | 'metrics'>('meta');
   const [trainingRun, setTrainingRun] = useState<ModelTrainingRunStatus | null>(null);
   const [trainingRunLoading, setTrainingRunLoading] = useState(false);
+  const [shapSummary, setShapSummary] = useState<ModelShapSummaryResponse | null>(null);
+  const [shapLoading, setShapLoading] = useState(false);
+  const [shapError, setShapError] = useState('');
   const [inferenceDate, setInferenceDate] = useState<dayjs.Dayjs | null>(dayjs().subtract(1, 'day'));
   const [inferenceRunning, setInferenceRunning] = useState(false);
   const [lastInferenceRun, setLastInferenceRun] = useState<InferenceRunRecord | null>(null);
@@ -154,6 +159,9 @@ export const ModelRegistryPage: React.FC = () => {
   useEffect(() => {
     setMainTab('detail');
     setTrainingRun(null);
+    setShapSummary(null);
+    setShapLoading(false);
+    setShapError('');
     setLastInferenceRun(null);
     setInferenceHistory([]);
     setInferencePrecheck(null);
@@ -171,6 +179,9 @@ export const ModelRegistryPage: React.FC = () => {
     if (key === 'training' && selectedModel?.source_run_id && !trainingRun) {
       loadTrainingRun(selectedModel.source_run_id);
     }
+    if (key === 'attribution' && selectedModel && !shapSummary && !shapLoading) {
+      void loadShapSummary(selectedModel.model_id);
+    }
     if (key === 'inference' && selectedModel) {
       void refreshInferencePanel(selectedModel.model_id);
     }
@@ -183,6 +194,21 @@ export const ModelRegistryPage: React.FC = () => {
       setTrainingRun(run);
     } catch { setTrainingRun(null); }
     finally { setTrainingRunLoading(false); }
+  }, []);
+
+  const loadShapSummary = useCallback(async (modelId: string) => {
+    setShapLoading(true);
+    setShapError('');
+    try {
+      const summary = await modelTrainingService.getModelShapSummary(modelId);
+      setShapSummary(summary);
+    } catch (err: any) {
+      setShapSummary(null);
+      const detail = err?.response?.data?.detail;
+      setShapError(String(detail || err?.message || '加载 SHAP 归因结果失败'));
+    } finally {
+      setShapLoading(false);
+    }
   }, []);
 
   const loadPrecheck = useCallback(async (modelId: string, inferenceDate?: string) => {
@@ -640,6 +666,27 @@ export const ModelRegistryPage: React.FC = () => {
                           />
                         ),
                       }] : []),
+                      {
+                        key: 'attribution',
+                        label: (
+                          <span className="text-xs font-black uppercase tracking-widest px-1 flex items-center gap-1.5">
+                            <Brain size={11} />归因分析
+                          </span>
+                        ),
+                        children: (
+                          <AttributionAnalysisPanel
+                            model={selectedModel}
+                            shapSummary={shapSummary}
+                            loading={shapLoading}
+                            error={shapError}
+                            onRefresh={() => {
+                              if (selectedModel) {
+                                void loadShapSummary(selectedModel.model_id);
+                              }
+                            }}
+                          />
+                        ),
+                      },
                       {
                         key: 'inference',
                         label: (

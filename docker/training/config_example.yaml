@@ -25,6 +25,11 @@ model:
     bagging_freq: 5
     min_child_samples: 50
 
+explain:
+  enable_shap: true
+  shap_split: valid
+  shap_sample_rows: 30000
+
 output:
   result_path: /workspace/result.json
   cos_prefix: "models/candidates/train_20250101_001/"

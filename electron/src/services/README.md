@@ -22,6 +22,7 @@
   - 请求头统一透传 `Authorization` 与 `X-Tenant-Id`，并复用 `authService.handle401Error` 处理鉴权失效；
   - 训练入参改为页面全量参数透传（`target/label/context/early_stopping/feature_categories` 等），避免 admin 语义与用户态接口混用。
   - 新增用户模型管理能力：`listUserModels/getDefaultModel/setDefaultModel/getUserModel/archiveUserModel`；
+  - 新增 SHAP 归因读取能力：`getModelShapSummary`，对接 `/api/v1/models/{model_id}/shap-summary`，返回 `feature/mean_abs_shap/mean_shap/positive_ratio` 列表用于归因分析页展示；
   - 新增策略绑定能力：`getStrategyBinding/setStrategyBinding/deleteStrategyBinding`；
   - 训练结果可直接消费后端 `result.model_registration`（`model_id/status/error`）用于前端“同步状态 + 设默认”闭环。
   - 模型推理中心新增交易日历能力：
