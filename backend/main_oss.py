@@ -59,37 +59,57 @@ def get_service_ports() -> dict:
 def run_api_service(port: int, workers: int = 1):
     """运行 API 服务"""
     import uvicorn
-    from backend.services.api.main import app
 
     logger.info(f"Starting API service on port {port} with {workers} workers")
-    uvicorn.run(app, host="0.0.0.0", port=port, workers=workers, access_log=False)
+    uvicorn.run(
+        "backend.services.api.main:app",
+        host="0.0.0.0",
+        port=port,
+        workers=workers,
+        access_log=False,
+    )
 
 
 def run_engine_service(port: int, workers: int = 4):
     """运行 Engine 服务"""
     import uvicorn
-    from backend.services.engine.main import app
 
     logger.info(f"Starting Engine service on port {port} with {workers} workers")
-    uvicorn.run(app, host="0.0.0.0", port=port, workers=workers, access_log=False)
+    uvicorn.run(
+        "backend.services.engine.main:app",
+        host="0.0.0.0",
+        port=port,
+        workers=workers,
+        access_log=False,
+    )
 
 
 def run_trade_service(port: int, workers: int = 1):
     """运行 Trade 服务"""
     import uvicorn
-    from backend.services.trade.main import app
 
     logger.info(f"Starting Trade service on port {port} with {workers} workers")
-    uvicorn.run(app, host="0.0.0.0", port=port, workers=workers, access_log=False)
+    uvicorn.run(
+        "backend.services.trade.main:app",
+        host="0.0.0.0",
+        port=port,
+        workers=workers,
+        access_log=False,
+    )
 
 
 def run_stream_service(port: int, workers: int = 1):
     """运行 Stream 服务"""
     import uvicorn
-    from backend.services.stream.main import app
 
     logger.info(f"Starting Stream service on port {port} with {workers} workers")
-    uvicorn.run(app, host="0.0.0.0", port=port, workers=workers, access_log=False)
+    uvicorn.run(
+        "backend.services.stream.main:app",
+        host="0.0.0.0",
+        port=port,
+        workers=workers,
+        access_log=False,
+    )
 
 
 def run_single_service(service_name: str, port: int, workers: int = 1):
