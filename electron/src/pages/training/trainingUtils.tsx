@@ -250,6 +250,30 @@ export const TRAINING_BASE_FEATURES = [
   'mom_ret_1d', 'mom_ret_5d', 'mom_ret_20d', 'liq_volume', 'liq_amount', 'liq_turnover_os',
 ];
 
+export const EXTRA_FEATURE_LABELS: Record<string, string> = {
+  liq_volume: '当日成交量',
+  liq_amount: '当日成交额',
+  mom_rsi_14: 'RSI(14)',
+  mom_kdj_k: 'KDJ-K值',
+  mom_breakout_20d: '20日突破强度',
+  vol_downside_20: '下行波动率20日',
+  vol_jump_zadj: '跳跃波动Z值',
+  liq_mfi_14: '资金流量指标MFI(14)',
+  liq_amihud_60: 'Amihud非流动性60日',
+  liq_accdist_20: '20日累积派发指标',
+  flow_net_amount: '总净流入金额',
+  flow_large_net_amount: '大单净流入金额',
+  flow_vpin_ma_5: '5日平均VPIN',
+  flow_vpin_ma_20: '20日平均VPIN',
+  style_beta_20: '20日市场Beta',
+  style_idio_vol_20: '20日特质波动',
+  style_residual_ret_20: '20日残差收益',
+  ind_ret_1d: '所属行业1日收益',
+  ind_ret_20d: '所属行业20日收益',
+  ind_strength_20: '20日行业强度',
+  ind_momentum_rank_20: '20日行业动量排名',
+};
+
 export const FEATURE_CATEGORY_ICON_MAP: Record<string, React.ReactNode> = {
   momentum: <Zap size={14} />,
   volatility: <Activity size={14} />,
@@ -375,6 +399,16 @@ export const summarizeFeatureCategories = (features: string[], categories: Featu
   return categories
     .filter((category) => features.some((featureKey) => category.features.some((feature) => feature.key === featureKey)))
     .map((category) => category.name);
+};
+
+export const buildFeatureLabelMap = (categories: FeatureCategory[] = DEFAULT_FEATURE_CATEGORIES) => {
+  const labels: Record<string, string> = { ...EXTRA_FEATURE_LABELS };
+  categories.forEach((category) => {
+    category.features.forEach((feature) => {
+      if (feature.key && feature.label) labels[feature.key] = feature.label;
+    });
+  });
+  return labels;
 };
 
 export const toDynamicCategories = (catalog: AdminModelFeatureCatalog): FeatureCategory[] => {
