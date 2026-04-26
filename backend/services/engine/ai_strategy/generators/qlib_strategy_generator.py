@@ -245,15 +245,21 @@ class QlibStrategyCodeGenerator:
     def _auto_detect_strategy_type(self, requirement: dict[str, Any]) -> str:
         """自动检测策略类型"""
 
-        # 如果有明确的TopK参数，使用topk_dropout
         params = requirement.get("parameters", {})
-        if "topk" in params or "n_drop" in params:
-            return "topk_dropout"
+        desc = requirement.get("strategy_description", "").lower()
+        weight_param_names = {"min_score", "max_weight", "weight", "weights", "allocation"}
+
+        # 权重类参数优先于通用 topk 参数，避免 TopkWeight 被误判为 TopkDropout。
+        if any(name in params for name in weight_param_names):
+            return "weight_based"
 
         # 如果提到权重、配置、仓位分配，使用weight_based
-        desc = requirement.get("strategy_description", "").lower()
         if any(keyword in desc for keyword in ["权重", "weight", "配置", "allocation"]):
             return "weight_based"
+
+        # 如果有明确的 TopK / n_drop 参数，使用 topk_dropout
+        if "n_drop" in params or "topk" in params:
+            return "topk_dropout"
 
         # 默认使用topk_dropout（最常用）
         return "topk_dropout"
@@ -674,7 +680,7 @@ class {strategy_name}(WeightStrategyBase):
 
         # 2. 计算权重（示例：等权重）
         # 可以根据信号强度、风险等因素调整权重
-        top_stocks = valid_scores.nlargest(getattr(self, 'top_n', 30))
+        top_stocks = valid_scores.nlargest(getattr(self, 'topk', 30))
 
         # 等权重分配
         weights = pd.Series(1.0 / len(top_stocks), index=top_stocks.index)
@@ -770,11 +776,11 @@ class {strategy_name}(BaseSignalStrategy):
         Returns:
             pd.Series: 交易信号 (1: 买入, -1: 卖出, 0: 持有)
         """
-        # 示例逻辑：选择信号最强的前N只股票
+        # 示例逻辑：选择信号最强的前 topk 只股票
         signals = pd.Series(0, index=pred_score.index)
 
-        top_n = getattr(self, 'top_n', 30)
-        top_stocks = pred_score.nlargest(top_n)
+        topk = getattr(self, 'topk', 30)
+        top_stocks = pred_score.nlargest(topk)
         signals.loc[top_stocks.index] = 1
 
         return signals

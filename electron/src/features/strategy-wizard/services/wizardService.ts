@@ -196,7 +196,7 @@ export async function generateQlib(payload: {
   qlib_params: {
     strategy_type: 'TopkDropout' | 'TopkWeight';
     topk: number;
-    n_drop: number;
+    n_drop?: number;
     rebalance_days?: 1 | 3 | 5;
     rebalance_period?: 'daily' | 'weekly' | 'monthly';
   };

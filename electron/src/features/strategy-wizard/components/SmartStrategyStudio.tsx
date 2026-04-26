@@ -94,16 +94,21 @@ const SmartStrategyStudio: React.FC = () => {
       setGenerating(true);
       try {
         const userId = getWizardUserId();
+        const normalizedQlibParams = {
+          ...(qlibParams ?? { strategy_type: 'TopkDropout', topk: 10, n_drop: 2, rebalance_days: 5 }),
+          rebalance_days: resolveRebalanceDays(qlibParams),
+        };
+
+        if (normalizedQlibParams.strategy_type === 'TopkWeight') {
+          delete normalizedQlibParams.n_drop;
+        }
 
         const res = await generateQlib({
           user_id: userId,
           conditions: conditions || {},
           pool_file_key: poolFile.fileKey,
           pool_file_url: poolFile.fileUrl,
-          qlib_params: {
-            ...(qlibParams ?? { strategy_type: 'TopkDropout', topk: 10, n_drop: 2, rebalance_days: 5 }),
-            rebalance_days: resolveRebalanceDays(qlibParams),
-          },
+          qlib_params: normalizedQlibParams,
         });
 
         if (!res?.success || !res?.code) {
