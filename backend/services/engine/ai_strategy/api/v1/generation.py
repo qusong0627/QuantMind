@@ -41,6 +41,46 @@ _qlib_task_lock = asyncio.Lock()
 _qlib_tasks: dict[str, dict[str, Any]] = {}
 
 
+def _normalize_qlib_symbol(symbol: str) -> str:
+    code = str(symbol or "").strip()
+    if not code:
+        return ""
+    upper = code.upper()
+    if len(upper) == 8 and upper[:2] in {"SH", "SZ", "BJ"}:
+        return upper.lower()
+    if len(upper) == 9 and "." in upper:
+        left, right = upper.split(".", 1)
+        if len(left) == 6 and left.isdigit() and right in {"SH", "SZ", "BJ"}:
+            return f"{right}{left}".lower()
+    if len(upper) == 6 and upper.isdigit():
+        if upper.startswith(("6", "9")):
+            return f"sh{upper}"
+        if upper.startswith(("0", "2", "3")):
+            return f"sz{upper}"
+        if upper.startswith(("4", "8")):
+            return f"bj{upper}"
+    return code.lower()
+
+
+def _normalize_pool_content_for_qlib(pool_text: str) -> str:
+    lines: list[str] = []
+    for raw_line in str(pool_text or "").splitlines():
+        stripped = raw_line.strip()
+        if not stripped or stripped.startswith("#"):
+            lines.append(raw_line)
+            continue
+        if "\t" in stripped:
+            code, rest = stripped.split("\t", 1)
+            lines.append(f"{_normalize_qlib_symbol(code)}\t{rest}")
+        else:
+            parts = stripped.split(maxsplit=1)
+            if len(parts) == 2:
+                lines.append(f"{_normalize_qlib_symbol(parts[0])} {parts[1]}")
+            else:
+                lines.append(_normalize_qlib_symbol(stripped))
+    return "\n".join(lines) + ("\n" if str(pool_text or "").endswith("\n") else "")
+
+
 def _trace_id(request: Request | None) -> str | None:
     if not request:
         return None
@@ -187,7 +227,7 @@ async def _generate_qlib_impl(body: GenerateQlibRequest, trace_id: str | None) -
 
         def _persist_local_pool_file(pool_text: str, user_id: str) -> str:
             """保存股票池到本地文件"""
-            content = str(pool_text or "")
+            content = _normalize_pool_content_for_qlib(str(pool_text or ""))
             if not content.strip():
                 return ""
 

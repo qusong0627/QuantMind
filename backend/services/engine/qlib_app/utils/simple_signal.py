@@ -21,6 +21,27 @@ def _exclude_bj_instruments(codes):
     return [c for c in codes if not _is_bj_instrument(c)]
 
 
+def _normalize_qlib_symbol(code: str) -> str:
+    code_str = str(code or "").strip()
+    if not code_str:
+        return ""
+    upper = code_str.upper()
+    if len(upper) == 8 and upper[:2] in {"SH", "SZ", "BJ"}:
+        return upper.lower()
+    if len(upper) == 9 and "." in upper:
+        left, right = upper.split(".", 1)
+        if len(left) == 6 and left.isdigit() and right in {"SH", "SZ", "BJ"}:
+            return f"{right}{left}".lower()
+    if len(upper) == 6 and upper.isdigit():
+        if upper.startswith(("6", "9")):
+            return f"sh{upper}"
+        if upper.startswith(("0", "2", "3")):
+            return f"sz{upper}"
+        if upper.startswith(("4", "8")):
+            return f"bj{upper}"
+    return code_str.lower()
+
+
 class SimpleSignal(Signal):
     """
     A lightweight signal adapter that returns either a precomputed pred.pkl signal
@@ -82,7 +103,9 @@ class SimpleSignal(Signal):
                     continue
                 if "\t" in code:
                     code = code.split("\t", 1)[0].strip()
-                instruments.append(code)
+                normalized = _normalize_qlib_symbol(code)
+                if normalized:
+                    instruments.append(normalized)
         return _exclude_bj_instruments(instruments)
 
     def _get_universe_instruments(self) -> list[str]:
