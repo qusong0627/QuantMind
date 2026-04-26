@@ -99,6 +99,31 @@ def load_model(model_dir: Path, meta: dict) -> lgb.Booster:
 # 4. 数据加载
 # ═══════════════════════════════════════════════════════════════════════════
 
+def filter_untradable_rows(df: pd.DataFrame) -> pd.DataFrame:
+    """过滤不可交易记录（停牌、零成交等）。
+
+    剔除条件：
+    - close <= 0（价格异常）
+    - volume <= 0（零成交/停牌）
+    """
+    if df.empty:
+        return df
+
+    filtered = df.copy()
+
+    if "close" in filtered.columns:
+        filtered = filtered.loc[
+            pd.to_numeric(filtered["close"], errors="coerce") > 0
+        ].copy()
+
+    if "volume" in filtered.columns:
+        filtered = filtered.loc[
+            pd.to_numeric(filtered["volume"], errors="coerce") > 0
+        ].copy()
+
+    return filtered
+
+
 def load_date_data(trade_date: str, data_dir: Path, meta: dict) -> pd.DataFrame | None:
     """加载指定日期的特征数据。返回 None 表示该日期无数据（exit 2）。"""
     year = int(trade_date[:4])
@@ -115,7 +140,21 @@ def load_date_data(trade_date: str, data_dir: Path, meta: dict) -> pd.DataFrame 
         logger.warning("日期 %s 在 parquet 中无数据", trade_date)
         return None
 
-    logger.info("找到 %d 条记录，日期=%s", len(day_df), trade_date)
+    # 过滤不可交易记录（停牌、零成交等）
+    before_filter = len(day_df)
+    day_df = filter_untradable_rows(day_df)
+    after_filter = len(day_df)
+    if before_filter != after_filter:
+        logger.info(
+            "过滤不可交易记录: %d -> %d (剔除 %d 条)",
+            before_filter, after_filter, before_filter - after_filter
+        )
+
+    if len(day_df) == 0:
+        logger.warning("日期 %s 过滤后无可交易数据", trade_date)
+        return None
+
+    logger.info("找到 %d 条可交易记录，日期=%s", len(day_df), trade_date)
     return day_df
 
 
