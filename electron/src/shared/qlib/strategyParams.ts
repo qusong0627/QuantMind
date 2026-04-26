@@ -10,6 +10,60 @@ const COMMON_PARAM_KEYS = [
   'market_state_symbol',
 ] as const;
 
+/**
+ * 从策略代码中解析策略类型。
+ * 支持两种格式：
+ *   1. "class": "RedisTopkStrategy" -> "TopkDropout"
+ *   2. "class": "RedisWeightStrategy" -> "WeightStrategy"
+ */
+export function parseStrategyClassFromCode(code: string): string | null {
+  if (!code) return null;
+
+  // 匹配 STRATEGY_CONFIG 中的 class 字段
+  const classMatch = code.match(/"class"\s*:\s*"(\w+)"/);
+  if (!classMatch) return null;
+
+  const className = classMatch[1];
+
+  // 映射到前端策略类型
+  const classToType: Record<string, string> = {
+    RedisTopkStrategy: 'TopkDropout',
+    RedisWeightStrategy: 'WeightStrategy',
+    RedisStopLossStrategy: 'StopLoss',
+    RedisMomentumStrategy: 'momentum',
+    RedisAdaptiveStrategy: 'adaptive_drift',
+    TopkDropoutStrategy: 'TopkDropout',
+    WeightStrategy: 'WeightStrategy',
+  };
+
+  return classToType[className] || className;
+}
+
+/**
+ * 根据策略代码推导是否需要 n_drop 参数。
+ * 权重型策略（RedisWeightStrategy / WeightStrategy）不需要 n_drop。
+ */
+export function shouldShowNDrop(code: string | undefined, strategyType: string): boolean {
+  // long_short_topk 不显示 n_drop
+  if (strategyType === 'long_short_topk') return false;
+
+  // 从代码解析策略类
+  const parsedClass = parseStrategyClassFromCode(code || '');
+
+  // 权重型策略不显示 n_drop
+  if (parsedClass === 'WeightStrategy' || parsedClass === 'RedisWeightStrategy') {
+    return false;
+  }
+
+  // 已知不需要 n_drop 的策略类型
+  const noNDropTypes = ['alpha_cross_section', 'full_alpha_cross_section', 'score_weighted', 'VolatilityWeighted'];
+  if (noNDropTypes.includes(strategyType)) {
+    return false;
+  }
+
+  return true;
+}
+
 const resolveNDropByTopk = (topk: unknown): number | undefined => {
   const parsedTopk = Number(topk);
   if (!Number.isFinite(parsedTopk) || parsedTopk <= 0) return undefined;
@@ -134,7 +188,8 @@ function resolveTemplateParamKeys(strategyType: string, templates?: StrategyTemp
 export function sanitizeStrategyParams(
   strategyType: string,
   params?: QlibStrategyParams | null,
-  templates?: StrategyTemplate[]
+  templates?: StrategyTemplate[],
+  strategyCode?: string,
 ): QlibStrategyParams {
   const resolvedType = (strategyType || 'standard_topk') as QlibStrategyType | string;
   const defaults = getDefaultStrategyParams(resolvedType, templates);
@@ -157,5 +212,11 @@ export function sanitizeStrategyParams(
   if (resolvedType !== 'long_short_topk') {
     merged.enable_short_selling = false;
   }
+
+  // 权重型策略移除 n_drop 参数
+  if (!shouldShowNDrop(strategyCode, resolvedType)) {
+    delete merged.n_drop;
+  }
+
   return merged;
 }

@@ -2,6 +2,43 @@
 
 本模块负责生产模型加载与推理，默认目录为 `models/production`。
 
+## 修复记录（2026-04-26，停牌股票过滤）
+
+### 问题现象
+
+模型推理完成后，已停牌股票（volume=0 或 close<=0）仍可能排在结果前列。
+
+### 根因
+
+1. parquet 推理脚本未过滤不可交易记录
+2. 执行器直接接收子脚本输出，未做二次校验
+3. 旧版训练流水线自动生成的 inference.py 未包含过滤逻辑
+
+### 修复方案
+
+1. **模板层过滤**：`templates/inference_parquet.py` 新增 `filter_untradable_rows()` 函数
+   - 剔除 `close <= 0`（价格异常）
+   - 剔除 `volume <= 0`（零成交/停牌）
+
+2. **执行器自动刷新**：`script_runner.py` 新增 `_is_managed_parquet_template()` 识别逻辑
+   - 识别新版模板标题
+   - 识别旧版"由训练流水线自动生成"脚本
+   - 执行前自动覆盖为最新模板
+
+3. **训练流水线修复**：`docker/training/train.py` 改为复制统一模板
+   - 不再内联生成旧脚本
+   - 新训练模型天然使用最新模板
+
+4. **审计字段修正**：parquet 模型的 `active_data_source` 记录真实 parquet 目录
+
+### 相关文件
+
+- `backend/services/engine/inference/templates/inference_parquet.py`
+- `backend/services/engine/inference/script_runner.py`
+- `docker/training/train.py`
+- `models/production/model_qlib/inference.py`（兼容入口）
+- `backend/services/tests/test_engine_inference_unified_flow.py`（回归测试）
+
 ## 修复记录（2026-03-27，自动推理 Celery 任务）
 
 - 修复 `InferenceScriptRunner._query_dimension_readiness` 中 `SessionLocal` 未定义导致的自动任务异常：

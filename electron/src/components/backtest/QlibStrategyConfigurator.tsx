@@ -5,19 +5,24 @@
 import React from 'react';
 import { QlibStrategyParams } from '../../types/backtest/qlib';
 import { HelpCircle } from 'lucide-react';
+import { shouldShowNDrop } from '../../shared/qlib/strategyParams';
 
 interface Props {
   strategyType: string;
   params: QlibStrategyParams;
   onChange: (params: QlibStrategyParams) => void;
+  strategyCode?: string;
 }
 
-export const QlibStrategyConfigurator: React.FC<Props> = ({ strategyType, params, onChange }) => {
+export const QlibStrategyConfigurator: React.FC<Props> = ({ strategyType, params, onChange, strategyCode }) => {
   const isLongShortTopk = strategyType === 'long_short_topk';
   const paramMap = params as Record<string, unknown>;
   const hasParam = (key: string) => paramMap[key] !== undefined && paramMap[key] !== null;
   const getNumberParam = (key: string, fallback: number) =>
     typeof paramMap[key] === 'number' ? (paramMap[key] as number) : fallback;
+
+  // 判断是否应该显示 n_drop 参数
+  const showNDrop = shouldShowNDrop(strategyCode, strategyType);
 
   const KNOWN_PARAM_KEYS = new Set([
     'topk',
@@ -230,7 +235,7 @@ export const QlibStrategyConfigurator: React.FC<Props> = ({ strategyType, params
         {!isLongShortTopk && hasParam('topk') && (
           <>
             {renderTopK()}
-            {hasParam('n_drop') && renderNDrop()}
+            {showNDrop && hasParam('n_drop') && renderNDrop()}
           </>
         )}
 

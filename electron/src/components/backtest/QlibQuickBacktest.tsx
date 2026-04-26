@@ -145,12 +145,12 @@ export const QlibQuickBacktest: React.FC = () => {
 
     if (info?.source === 'template') {
       setStrategyType(info.id);
-      setStrategyParams(sanitizeStrategyParams(info.id, params));
+      setStrategyParams(sanitizeStrategyParams(info.id, params, undefined, info.code));
     } else {
       // 个人策略或上传策略，使用 CustomStrategy 运行
       // 这样后端会执行代码内容，而不是仅依赖 ID
       setStrategyType('CustomStrategy');
-      setStrategyParams(sanitizeStrategyParams('CustomStrategy', params || strategyParams));
+      setStrategyParams(sanitizeStrategyParams('CustomStrategy', params || strategyParams, undefined, info?.code));
     }
   };
 
@@ -312,7 +312,9 @@ export const QlibQuickBacktest: React.FC = () => {
       setStrategyParams(
         sanitizeStrategyParams(
           String(syncedType || strategyType || DEFAULT_TEMPLATE_ID),
-          syncedParams as QlibStrategyParams
+          syncedParams as QlibStrategyParams,
+          undefined,
+          strategyInfo?.code
         )
       );
     }
@@ -325,6 +327,7 @@ export const QlibQuickBacktest: React.FC = () => {
     backtestConfig.strategy_params,
     sharedConfig.qlib_strategy_params,
     strategyType,
+    strategyInfo?.code,
   ]);
 
   return (
@@ -466,6 +469,7 @@ export const QlibQuickBacktest: React.FC = () => {
             strategyType={strategyType as QlibStrategyType}
             params={strategyParams}
             onChange={setStrategyParams}
+            strategyCode={strategyInfo?.code}
           />
 
           {error && (

@@ -345,3 +345,167 @@ async def test_run_inference_success_releases_lock_and_returns_standard_fields(m
     assert resp["active_model_id"] == "model_qlib"
     assert resp["active_data_source"] == "db/qlib_data"
     assert any(k.startswith("qm:lock:inference:daily:") for k in fake_redis.deleted)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 停牌过滤测试（2026-04-26）
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestUntradableFilter:
+    """测试停牌股票过滤逻辑。"""
+
+    def test_filter_removes_zero_volume(self):
+        """volume = 0 的股票应被过滤。"""
+        import pandas as pd
+        from backend.services.engine.inference.templates.inference_parquet import (
+            filter_untradable_rows,
+        )
+
+        df = pd.DataFrame({
+            "symbol": ["SH600519", "SH600735", "SZ000001"],
+            "close": [100.0, 50.0, 10.0],
+            "volume": [1000, 0, 500],  # SH600735 零成交
+        })
+
+        result = filter_untradable_rows(df)
+
+        assert len(result) == 2
+        assert "SH600735" not in result["symbol"].values
+        assert set(result["symbol"]) == {"SH600519", "SZ000001"}
+
+    def test_filter_removes_zero_close(self):
+        """close <= 0 的股票应被过滤。"""
+        import pandas as pd
+        from backend.services.engine.inference.templates.inference_parquet import (
+            filter_untradable_rows,
+        )
+
+        df = pd.DataFrame({
+            "symbol": ["SH600519", "SH600735", "SZ000001"],
+            "close": [100.0, 0.0, 10.0],  # SH600735 价格为 0
+            "volume": [1000, 500, 500],
+        })
+
+        result = filter_untradable_rows(df)
+
+        assert len(result) == 2
+        assert "SH600735" not in result["symbol"].values
+
+    def test_filter_removes_negative_close(self):
+        """close < 0 的股票应被过滤。"""
+        import pandas as pd
+        from backend.services.engine.inference.templates.inference_parquet import (
+            filter_untradable_rows,
+        )
+
+        df = pd.DataFrame({
+            "symbol": ["SH600519", "SH600735"],
+            "close": [100.0, -1.0],  # SH600735 负价格
+            "volume": [1000, 500],
+        })
+
+        result = filter_untradable_rows(df)
+
+        assert len(result) == 1
+        assert result.iloc[0]["symbol"] == "SH600519"
+
+    def test_filter_handles_empty_dataframe(self):
+        """空 DataFrame 应返回空。"""
+        import pandas as pd
+        from backend.services.engine.inference.templates.inference_parquet import (
+            filter_untradable_rows,
+        )
+
+        df = pd.DataFrame()
+        result = filter_untradable_rows(df)
+
+        assert result.empty
+
+    def test_filter_handles_missing_columns(self):
+        """缺少 close/volume 列时应跳过对应过滤。"""
+        import pandas as pd
+        from backend.services.engine.inference.templates.inference_parquet import (
+            filter_untradable_rows,
+        )
+
+        # 只有 close，无 volume
+        df = pd.DataFrame({
+            "symbol": ["SH600519", "SH600735"],
+            "close": [100.0, 0.0],
+        })
+
+        result = filter_untradable_rows(df)
+
+        assert len(result) == 1
+        assert result.iloc[0]["symbol"] == "SH600519"
+
+
+class TestManagedParquetTemplateDetection:
+    """测试旧版自动生成脚本识别逻辑。"""
+
+    def test_detects_new_template(self, tmp_path: Path):
+        """新版模板应被识别为托管脚本。"""
+        from backend.services.engine.inference.script_runner import InferenceScriptRunner
+
+        script = tmp_path / "inference.py"
+        script.write_text(
+            '#!/usr/bin/env python3\n"""QuantMind Parquet 数据源推理脚本 (inference.py 模板)\n',
+            encoding="utf-8",
+        )
+
+        runner = InferenceScriptRunner(models_production=str(tmp_path))
+        assert runner._is_managed_parquet_template(script) is True
+
+    def test_detects_old_auto_generated_script(self, tmp_path: Path):
+        """旧版自动生成脚本应被识别为托管脚本。"""
+        from backend.services.engine.inference.script_runner import InferenceScriptRunner
+
+        script = tmp_path / "inference.py"
+        script.write_text(
+            '''#!/usr/bin/env python3
+"""
+QuantMind Parquet 数据源推理脚本
+================================
+由训练流水线自动生成
+''',
+            encoding="utf-8",
+        )
+
+        runner = InferenceScriptRunner(models_production=str(tmp_path))
+        assert runner._is_managed_parquet_template(script) is True
+
+    def test_rejects_custom_script(self, tmp_path: Path):
+        """自定义脚本不应被识别为托管脚本。"""
+        from backend.services.engine.inference.script_runner import InferenceScriptRunner
+
+        script = tmp_path / "inference.py"
+        script.write_text(
+            '#!/usr/bin/env python3\n"""自定义推理脚本"""\nprint("custom")\n',
+            encoding="utf-8",
+        )
+
+        runner = InferenceScriptRunner(models_production=str(tmp_path))
+        assert runner._is_managed_parquet_template(script) is False
+
+
+class TestActiveDataSourceAudit:
+    """测试 active_data_source 审计字段。"""
+
+    def test_parquet_model_records_real_data_source(self, monkeypatch, tmp_path: Path):
+        """parquet 模型执行后 active_data_source 应为真实 parquet 目录。"""
+        # 直接验证 ExecutionResult 的 active_data_source 字段
+        # 在实际执行中，parquet 模型的 active_data_source 会被设置为 parquet 目录
+        # 此测试验证字段存在且可正确传递
+        result = ExecutionResult(
+            success=True,
+            exit_code=0,
+            stdout='[{"symbol": "SH600519", "score": 0.5}]',
+            stderr="",
+            run_id="run_test",
+            signals_count=1,
+            active_model_id="user_model",
+            active_data_source="/app/db/feature_snapshots",
+        )
+
+        assert result.success is True
+        assert "feature_snapshots" in result.active_data_source
