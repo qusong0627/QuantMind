@@ -706,18 +706,36 @@ def main() -> int:
         Path("/workspace/metadata.json").write_bytes(metadata_bytes)
         logger.info("metadata.json saved locally")
 
-        # 自动生成推理脚本 inference.py
-        _INFERENCE_SCRIPT = '''#!/usr/bin/env python3
+        # 复制统一推理脚本模板（而非内联生成旧版脚本）
+        template_path = Path("/app/backend/services/engine/inference/templates/inference_parquet.py")
+        inference_dest = Path("/workspace/inference.py")
+        if template_path.is_file():
+            inference_dest.write_text(template_path.read_text(encoding="utf-8"), encoding="utf-8")
+            logger.info("inference.py copied from unified template: %s", template_path)
+        else:
+            # 兜底：模板不存在时写入简化版（仅记录警告）
+            logger.warning("统一推理模板不存在: %s，使用简化版", template_path)
+            _INFERENCE_SCRIPT_FALLBACK = '''#!/usr/bin/env python3
 """
-QuantMind Parquet 数据源推理脚本
-=================================
-由训练流水线自动生成，适用于 feature_snapshots/*.parquet 数据源。
+QuantMind Parquet 数据源推理脚本 (inference.py 模板)
+=====================================================
+适用于训练数据来自 feature_snapshots/*.parquet 的 LightGBM 模型。
+
+平台注入环境变量：
+    MODEL_DIR      模型目录绝对路径（含 metadata.json + model.lgb）
+    TRADE_DATE     推理日期（同 --date 参数，互为备份）
+    OUTPUT_FORMAT  固定值 json
 
 调用方式（由 InferenceScriptRunner 自动调用）：
     python inference.py --date YYYY-MM-DD --output /path/to/out.json
 
-输出格式：[{"symbol": "sh600519", "score": 0.82}, ...]
-exit code: 0=成功  1=致命错误  2=该日期无数据（触发兜底）
+输出格式（写入 --output 文件）：
+    [{"symbol": "sh600519", "score": 0.82}, ...]
+
+exit code：
+    0  = 成功
+    1  = 致命错误（模型/元数据损坏）
+    2  = 该日期无可用数据（触发 alpha158 兜底）
 """
 from __future__ import annotations
 import argparse, json, logging, os, sys
@@ -807,8 +825,8 @@ def main():
 if __name__ == "__main__":
     main()
 '''
-        Path("/workspace/inference.py").write_text(_INFERENCE_SCRIPT, encoding="utf-8")
-        logger.info("inference.py generated in model directory")
+            inference_dest.write_text(_INFERENCE_SCRIPT_FALLBACK, encoding="utf-8")
+            logger.info("inference.py fallback version written to model directory")
 
         result = {
             "status": "completed",

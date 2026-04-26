@@ -282,6 +282,58 @@ class InferenceScriptRunner:
                 pass
         return {}
 
+    def _is_managed_parquet_template(self, script_path: Path) -> bool:
+        """
+        判断 inference.py 是否为平台托管的 parquet 模板。
+
+        识别两类脚本：
+        1. 新版模板：标题含 "QuantMind Parquet 数据源推理脚本 (inference.py 模板)"
+        2. 旧版自动生成：标题含 "QuantMind Parquet 数据源推理脚本" 且说明含 "由训练流水线自动生成"
+        """
+        if not script_path.is_file():
+            return False
+        try:
+            content = script_path.read_text(encoding="utf-8", errors="ignore")[:2000]
+            # 新版模板标记
+            if "inference.py 模板" in content:
+                return True
+            # 旧版自动生成标记
+            if (
+                "QuantMind Parquet 数据源推理脚本" in content
+                and "由训练流水线自动生成" in content
+            ):
+                return True
+            return False
+        except Exception:
+            return False
+
+    def _refresh_parquet_template(self, script_path: Path) -> bool:
+        """
+        将旧版托管脚本覆盖为最新模板。
+
+        成功返回 True，失败返回 False。
+        """
+        template_path = Path(__file__).parent / "templates" / "inference_parquet.py"
+        if not template_path.is_file():
+            logger.warning(
+                "[InferenceScriptRunner] parquet 推理模板不存在: %s", template_path
+            )
+            return False
+        try:
+            script_path.write_text(
+                template_path.read_text(encoding="utf-8"), encoding="utf-8"
+            )
+            logger.info(
+                "[InferenceScriptRunner] 已刷新 parquet 推理脚本为最新模板: %s",
+                script_path,
+            )
+            return True
+        except Exception as exc:
+            logger.warning(
+                "[InferenceScriptRunner] 刷新推理脚本失败: %s", exc
+            )
+            return False
+
     def _try_deploy_parquet_template(self, script_path: Path) -> bool:
         """
         当 parquet 模型缺少 inference.py 时，自动从内置模板写入。
@@ -795,6 +847,13 @@ class InferenceScriptRunner:
                     prediction_trade_date=prediction_trade_date,
                 )
 
+        # 检查并刷新旧版托管 parquet 模板
+        primary_meta = self._read_primary_metadata()
+        data_source = str(primary_meta.get("data_source") or "").lower()
+        if data_source == "parquet" and self._is_managed_parquet_template(script_path):
+            # 托管模板：检查是否需要刷新为最新版本
+            self._refresh_parquet_template(script_path)
+
         run_id = f"run_{date.replace('-', '')}_{uuid.uuid4().hex[:8]}"
         logger.info(
             f"[InferenceScriptRunner] 启动推理脚本, run_id={run_id}, date={date}"
@@ -805,6 +864,14 @@ class InferenceScriptRunner:
         # 判断数据源：针对不同存储引擎执行对应的就绪检查
         primary_meta = self._read_primary_metadata()
         data_source = str(primary_meta.get("data_source") or "").lower()
+
+        # 解析实际数据目录（用于审计）
+        actual_data_source = self.primary_data_dir
+        if data_source == "parquet":
+            actual_data_source = str(
+                primary_meta.get("data_dir")
+                or os.getenv("MODEL_TRAINING_DATA_DIR", "/app/db/feature_snapshots")
+            )
 
         if data_source == "parquet":
             readiness = self._query_parquet_readiness(trade_date=date)
@@ -989,7 +1056,7 @@ class InferenceScriptRunner:
             run_id=run_id,
             signals=signals,
             active_model_id=self.primary_model_id,
-            active_data_source=self.primary_data_dir,
+            active_data_source=actual_data_source,
             data_trade_date=date,
             prediction_trade_date=prediction_trade_date,
         )

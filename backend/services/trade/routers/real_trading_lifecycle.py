@@ -233,6 +233,7 @@ async def start_trading(
         strategy_dir = get_strategy_path(resolved_user_id)
         os.makedirs(strategy_dir, exist_ok=True)
         file_path = os.path.join(strategy_dir, f"{run_id}.py")
+        code_str = ""  # 初始化，避免未定义
         if strategy_file:
             content = await strategy_file.read()
             with open(file_path, "wb") as f:
