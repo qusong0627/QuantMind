@@ -15,7 +15,7 @@ except FileNotFoundError:
     print(f"Warning: {position_file} not found, skipping patch")
     sys.exit(0)
 
-# 修复 calculate_stock_value 方法
+# 修复 calculate_stock_value 方法 (Position 类，约第410行)
 old_code = '''    def calculate_stock_value(self) -> float:
         stock_list = self.get_stock_list()
         value = 0
@@ -38,4 +38,9 @@ if old_code in content:
         f.write(content)
     print("Patched qlib position.py to handle None price")
 else:
-    print("qlib position.py already patched or code changed")
+    # 检查是否已经打过补丁
+    if 'price = self.position[stock_id].get("price")' in content:
+        print("qlib position.py already patched")
+    else:
+        print("ERROR: Target code not found, qlib version may have changed")
+        sys.exit(1)
