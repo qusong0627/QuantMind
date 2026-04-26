@@ -515,7 +515,18 @@ class RedisRecordingStrategy(DynamicRiskMixin, TopkDropoutStrategy, RedisLoggerM
             return TradeDecisionWO([], self)
 
         # Generate new orders (交易记录已移至 post_exe_step，此处不再重复记录)
-        trade_decision = super().generate_trade_decision(execute_result)
+        try:
+            trade_decision = super().generate_trade_decision(execute_result)
+        except TypeError as e:
+            if "unsupported operand type(s) for /: 'float' and 'NoneType'" in str(e):
+                from qlib.backtest.decision import TradeDecisionWO
+                StructuredTaskLogger(
+                    logger,
+                    "redis-recording-strategy",
+                    {"backtest_id": getattr(self, "backtest_id", None)},
+                ).warning("skip_trade_no_price", "Skip trade due to missing price data (suspended stock)")
+                return TradeDecisionWO([], self)
+            raise
         return trade_decision
 
     def reset(self, *args, **kwargs):
