@@ -48,6 +48,10 @@ RUN python -m pip install --upgrade pip setuptools wheel cython \
     && python -m pip install --no-cache-dir --root-user-action=ignore -r /tmp/requirements-ai.txt \
     && rm -f /tmp/requirements*.txt
 
+# 修复 qlib 0.9.7 bug: position.py 中 price=None 导致 TypeError
+COPY docker/patch_qlib.py /tmp/patch_qlib.py
+RUN python /tmp/patch_qlib.py && rm /tmp/patch_qlib.py
+
 # 复制源代码
 COPY backend backend
 COPY config config
