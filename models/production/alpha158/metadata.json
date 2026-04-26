@@ -61,5 +61,14 @@
   "notes": "模板文件：config.yaml, prepare_data.py, train.py。训练产物应保存 model_checkpoint.bin。",
   "trained_at": "2026-04-17 17:01:33",
   "model_path": "/root/qlib-main/model/19_T3_Alpha158_Base/model_checkpoint_v19.bin",
-  "prediction_path": "/root/qlib-main/model/19_T3_Alpha158_Base/pred_v19_test.pkl"
+  "prediction_path": "/app/models/production/alpha158/pred.pkl",
+  "pred_coverage_start": "2021-01-04",
+  "pred_coverage_end": "2026-04-24",
+  "pred_rows": 4374045,
+  "regenerated_at": "2026-04-26T10:44:29.599132",
+  "regeneration_config": {
+    "cpu_cores": 72,
+    "start_date": "2021-01-01",
+    "end_date": "2026-04-27"
+  }
 }

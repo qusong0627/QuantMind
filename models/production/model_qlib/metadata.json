@@ -245,9 +245,16 @@
     "test_rank_ic": 0.1341340862655188,
     "test_rank_icir": 1.0017719337244009
   },
-  "pred_coverage_start": "2016-01-04",
-  "pred_coverage_end": "2025-12-24",
-  "pred_rows": 9713283,
+  "pred_coverage_start": "2021-01-04",
+  "pred_coverage_end": "2026-04-24",
+  "pred_rows": 6273902,
   "generated_at": "2026-04-12T15:02:47.522968",
-  "elapsed_seconds": 168.35593175888062
+  "elapsed_seconds": 168.35593175888062,
+  "regenerated_at": "2026-04-26T10:08:38.049767",
+  "regeneration_config": {
+    "cpu_cores": 72,
+    "parallel_processes": 6,
+    "start_date": "2021-01-01",
+    "end_date": "2026-04-27"
+  }
 }
