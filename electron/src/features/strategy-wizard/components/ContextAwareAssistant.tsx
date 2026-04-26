@@ -7,7 +7,7 @@ import { FACTORS } from '../factors/dictionary';
 const { Text, Paragraph, Title } = Typography;
 
 export const ContextAwareAssistant: React.FC<{ step: number }> = ({ step }) => {
-  const { conditions, generated, pool } = useWizardStore();
+  const { conditions, generated, pool, qlibParams } = useWizardStore();
 
   // 提取当前相关的因子
   const activeFactors = useMemo(() => {
@@ -83,11 +83,14 @@ export const ContextAwareAssistant: React.FC<{ step: number }> = ({ step }) => {
         );
 
       case 2: // 交易规则
+        const isTopkDropout = (qlibParams?.strategy_type ?? 'TopkDropout') === 'TopkDropout';
         return (
           <Space direction="vertical" style={{ width: '100%' }}>
             <Card size="small" title="Qlib 参数提示" variant="borderless" styles={{ body: { padding: 12 } }}>
                <List size="small" dataSource={[
-                 { title: 'TopK / n_drop', desc: '建议先用 TopK=20~50、n_drop=3~10 作为稳定起点。' },
+                 isTopkDropout
+                   ? { title: 'TopK / n_drop', desc: '建议先用 TopK=20~50、n_drop=3~10 作为稳定起点。' }
+                   : { title: 'TopK / 权重上限', desc: '权重策略建议先用 TopK=20~50，并结合 max_weight、min_score 控制集中度。' },
                  { title: '调仓与风控', desc: '调仓周期可先用 5 日；结合止损/止盈与仓位上限控制回撤。' }
                ]} renderItem={item => (
                  <List.Item>

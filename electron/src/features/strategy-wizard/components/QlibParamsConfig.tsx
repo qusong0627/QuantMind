@@ -16,7 +16,17 @@ const QlibParamsConfig: React.FC<Props> = ({ onNext, onBack }) => {
   const params = qlibParams ?? { strategy_type: 'TopkDropout', topk: 10, n_drop: 2, rebalance_days: 5 };
   const normalizedRebalanceDays = resolveRebalanceDays(params);
 
-  const update = (patch: Partial<typeof params>) => setQlibParams({ ...params, ...patch });
+  const update = (patch: Partial<typeof params>) => {
+    const nextParams = { ...params, ...patch };
+
+    if (nextParams.strategy_type === 'TopkWeight') {
+      delete nextParams.n_drop;
+    } else if (typeof nextParams.n_drop !== 'number') {
+      nextParams.n_drop = 2;
+    }
+
+    setQlibParams(nextParams);
+  };
 
   return (
     <div style={{ maxWidth: 800, margin: '0 auto', padding: '0' }}>

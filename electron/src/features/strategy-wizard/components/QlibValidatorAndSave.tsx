@@ -223,7 +223,7 @@ const QlibValidatorAndSave: React.FC<Props> = ({ onBack }) => {
                     conditions,
                     stock_pool: pool,
                     pool_file_url: poolFile?.fileUrl,
-                    qlib_params: qlibParams,
+                    qlib_params: qp,
                     qlib_validated: Boolean(validationResult?.valid),
                     validation_result: validationResult,
                 },
@@ -291,18 +291,31 @@ const QlibValidatorAndSave: React.FC<Props> = ({ onBack }) => {
         return <CloseCircleOutlined className="text-red-500" />;
     };
 
-        // Mock策略代码（LLM生成完成前的占位）
-    const qp = qlibParams ?? { strategy_type: 'TopkDropout', topk: 10, n_drop: 2, rebalance_days: 5 };
-    const rebalanceDays = resolveRebalanceDays(qp);
+    const sanitizeQlibParams = (params?: typeof qlibParams) => {
+        const next = {
+            ...(params ?? { strategy_type: 'TopkDropout', topk: 10, n_drop: 2, rebalance_days: 5 }),
+            rebalance_days: resolveRebalanceDays(params),
+        };
+
+        if (next.strategy_type === 'TopkWeight') {
+            delete next.n_drop;
+        } else if (typeof next.n_drop !== 'number') {
+            next.n_drop = 2;
+        }
+
+        return next;
+    };
+
+    // Mock策略代码（LLM生成完成前的占位）
+    const qp = sanitizeQlibParams(qlibParams);
+    const rebalanceDays = qp.rebalance_days;
+    const nDropLine = qp.strategy_type === 'TopkDropout' ? `\n    "n_drop": ${qp.n_drop},` : '';
     const mockCode = `# QuantMind 智能策略
 # 生成时间: ${new Date().toLocaleString()}
 
-from qlib.contrib.strategy import TopkDropoutStrategy
-
 STRATEGY_CONFIG = {
     "strategy_type": "${qp.strategy_type}",
-    "topk": ${qp.topk},
-    "n_drop": ${qp.n_drop},
+    "topk": ${qp.topk},${nDropLine}
     "rebalance_days": ${rebalanceDays},
     "universe": "${pool?.items?.length || 0} stocks",
 }`;

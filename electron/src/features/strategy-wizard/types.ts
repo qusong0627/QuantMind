@@ -57,7 +57,7 @@ export interface RiskConfig {
 export interface QlibParams {
   strategy_type: 'TopkDropout' | 'TopkWeight';
   topk: number;
-  n_drop: number;
+  n_drop?: number;
   rebalance_days: 1 | 3 | 5;
   // 兼容历史缓存与旧接口字段
   rebalance_period?: 'daily' | 'weekly' | 'monthly';

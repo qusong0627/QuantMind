@@ -25,7 +25,7 @@
 
 ## 第三步：策略参数（Qlib 专用）
 - `SmartStrategyStudio.tsx` 左侧步骤提示文案已调整为：`Qlib专用参数（TopK / 调仓 / 风控）`，明确该步骤为 Qlib 参数配置入口。
-- `ContextAwareAssistant.tsx` 的“经典策略参考”卡片已替换为 `Qlib 参数提示`，内容聚焦 TopK/n_drop、调仓与风控建议。
+- `ContextAwareAssistant.tsx` 的“经典策略参考”卡片已替换为 `Qlib 参数提示`，并会按策略类型区分 TopK/n_drop 与权重策略提示，避免在 TopkWeight 场景继续展示无效的 n_drop 建议。
 - `QlibParamsConfig.tsx` 的调仓周期选项已与快速回测统一为：`每1天 / 每3天 / 每5天（推荐）`。
 - 第三步调仓周期选项改为复用共享常量（`electron/src/shared/qlib/rebalance.ts`），与快速回测共用同一份 `1/3/5` 交易日配置。
 

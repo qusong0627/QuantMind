@@ -240,10 +240,14 @@ async def _generate_qlib_impl(body: GenerateQlibRequest, trace_id: str | None) -
             local_path.write_text(content, encoding="utf-8")
             return str(local_path)
 
-        qp = body.qlib_params or {}
+        qp = dict(body.qlib_params or {})
         strategy_type = qp.get("strategy_type", "TopkDropout")
         topk = int(qp.get("topk", 10))
-        n_drop = int(qp.get("n_drop", 2))
+        n_drop = (
+            int(qp.get("n_drop", 2))
+            if strategy_type == "TopkDropout"
+            else None
+        )
         long_exposure = float(qp.get("long_exposure", 1.0))
         short_exposure = float(qp.get("short_exposure", 1.0))
         max_weight = float(qp.get("max_weight", 0.05))
@@ -263,11 +267,11 @@ async def _generate_qlib_impl(body: GenerateQlibRequest, trace_id: str | None) -
                 "trace_id": trace_id,
                 "strategy_type": strategy_type,
                 "topk": topk,
-                "n_drop": n_drop,
                 "long_exposure": long_exposure,
                 "short_exposure": short_exposure,
                 "rebalance_period": rebalance_period,
                 "rebalance_days": holding_period,
+                **({"n_drop": n_drop} if n_drop is not None else {}),
             },
         )
 
@@ -336,7 +340,7 @@ async def _generate_qlib_impl(body: GenerateQlibRequest, trace_id: str | None) -
             strategy_class = "RedisWeightStrategy"
             module_path = "backend.services.engine.qlib_app.utils.recording_strategy"
 
-        n_drop_field = f'"n_drop": {n_drop},' if strategy_type == "TopkDropout" else ""
+        n_drop_field = f'"n_drop": {n_drop},' if n_drop is not None else ""
         ls_fields = ""
         if strategy_type == "long_short_topk":
             ls_fields = dedent(
@@ -361,7 +365,11 @@ async def _generate_qlib_impl(body: GenerateQlibRequest, trace_id: str | None) -
 
             【策略参数】
             - 选股数量 topk: {topk}
-            - 每期剔除数 n_drop: {n_drop}（仅 TopkDropout 时有效）
+            {
+                f'- 每期剔除数 n_drop: {n_drop}（仅 TopkDropout 时有效）'
+                if n_drop is not None
+                else '- 当前为 TopkWeight，不要输出 n_drop 等 TopkDropout 专属参数'
+            }
             - 调仓周期 holding_period: {holding_period} 个交易日（对应 {rebalance_period}）
             - 股票池本地文件: {pool_file_local}
             - 选股条件: {body.conditions}
@@ -399,7 +407,11 @@ async def _generate_qlib_impl(body: GenerateQlibRequest, trace_id: str | None) -
             if "POOL_FILE" not in code:
                 code = f"POOL_FILE = {json.dumps(pool_file_local, ensure_ascii=False)}\n\n" + code
             if "STRATEGY_CONFIG" not in code:
-                n_drop_entry = f'"n_drop": {n_drop},' if strategy_type == "TopkDropout" else ""
+                n_drop_entry = (
+                    f'"n_drop": {n_drop},'
+                    if n_drop is not None
+                    else ""
+                )
                 code += dedent(
                     f"""
 
