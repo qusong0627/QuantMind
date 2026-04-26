@@ -1067,7 +1067,10 @@ export const InferenceCenterPanel: React.FC<{
                   lastRun.status === 'failed' ? 'text-rose-500' : 'text-emerald-500',
                 )}>
                   目标日：{lastRun.target_date} · 耗时 {(lastRun.duration_ms / 1000).toFixed(1)}s
-                  {lastRun.fallback_used ? ` · 已兜底${lastRun.fallback_reason ? `：${lastRun.fallback_reason}` : ''}` : ''}
+                  {(lastRun.model_switch_used ?? lastRun.fallback_used)
+                    ? ` · 已切换模型${(lastRun.model_switch_reason ?? lastRun.fallback_reason) ? `：${lastRun.model_switch_reason ?? lastRun.fallback_reason}` : ''}`
+                    : ''}
+                  {!(lastRun.model_switch_used ?? lastRun.fallback_used) && lastRun.execution_mode === 'independent_model' ? ' · 独立模型执行' : ''}
                 </Text>
               </div>
             </div>

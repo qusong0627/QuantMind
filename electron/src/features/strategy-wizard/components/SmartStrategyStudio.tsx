@@ -16,7 +16,7 @@ import { ContextAwareAssistant } from './ContextAwareAssistant';
 import QlibParamsConfig from './QlibParamsConfig';
 import QlibValidatorAndSave from './QlibValidatorAndSave';
 import { useWizardStore } from '../store/wizardStore';
-import { generateQlib, getActivePoolFile } from '../services/wizardService';
+import { generateQlib, getActivePoolFile, previewPoolFile } from '../services/wizardService';
 import { getWizardUserId } from '../utils/userId';
 import { resolveRebalanceDays } from '../../../shared/qlib/rebalance';
 
@@ -39,7 +39,9 @@ const SmartStrategyStudio: React.FC = () => {
     conditions,
     qlibParams,
     setGenerated,
+    setPool,
     setPoolFile,
+    setSelectedSymbols,
   } = useWizardStore();
 
   // 组件挂载时从数据库获取活跃的股票池文件
@@ -60,6 +62,24 @@ const SmartStrategyStudio: React.FC = () => {
             fileSize: res.pool_file.file_size,
             codeHash: res.pool_file.code_hash,
           });
+
+          if (res.pool_file.file_key) {
+            const preview = await previewPoolFile({
+              user_id: userId,
+              file_key: res.pool_file.file_key,
+            });
+
+            if (preview?.success) {
+              const items = Array.isArray(preview.items) ? preview.items : [];
+              setPool({
+                items,
+                summary: preview.summary || {},
+                charts: preview.charts || {},
+              });
+              setSelectedSymbols(items.map((item: any) => item.symbol));
+            }
+          }
+
           message.success('已自动加载上次保存的股票池');
         } else {
           console.log('[SmartStrategyStudio] 未找到活跃的股票池文件');

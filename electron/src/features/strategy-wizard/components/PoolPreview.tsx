@@ -81,6 +81,15 @@ export const PoolPreview = React.forwardRef<PoolPreviewHandle, { onNext: () => v
     loadPoolHistory(true);
   }, [loadPoolHistory]);
 
+  useEffect(() => {
+    if (poolFile?.fileKey) {
+      setHistorySelectedKey(poolFile.fileKey);
+      return;
+    }
+
+    setHistorySelectedKey('__current__');
+  }, [poolFile?.fileKey]);
+
   const handleSelectHistoryPool = async (fileKey: string) => {
     setHistorySelectedKey(fileKey);
     if (!fileKey || fileKey === '__current__') {

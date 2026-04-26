@@ -74,6 +74,9 @@ export interface InferenceRunRecord {
   prediction_trade_date?: string;
   fallback_used?: boolean;
   fallback_reason?: string;
+  execution_mode?: string;
+  model_switch_used?: boolean;
+  model_switch_reason?: string;
   failure_stage?: string;
   active_model_id?: string;
   effective_model_id?: string;
@@ -407,6 +410,9 @@ class ModelTrainingService {
       prediction_trade_date: raw?.prediction_trade_date ? String(raw.prediction_trade_date) : undefined,
       fallback_used: typeof raw?.fallback_used === 'boolean' ? raw.fallback_used : undefined,
       fallback_reason: raw?.fallback_reason ? String(raw.fallback_reason) : undefined,
+      execution_mode: raw?.execution_mode ? String(raw.execution_mode) : (raw?.result_json?.execution_mode ? String(raw.result_json.execution_mode) : undefined),
+      model_switch_used: typeof raw?.model_switch_used === 'boolean' ? raw.model_switch_used : (typeof raw?.result_json?.model_switch_used === 'boolean' ? raw.result_json.model_switch_used : undefined),
+      model_switch_reason: raw?.model_switch_reason ? String(raw.model_switch_reason) : (raw?.result_json?.model_switch_reason ? String(raw.result_json.model_switch_reason) : undefined),
       failure_stage: raw?.failure_stage ? String(raw.failure_stage) : undefined,
       active_model_id: raw?.active_model_id ? String(raw.active_model_id) : undefined,
       effective_model_id: raw?.effective_model_id ? String(raw.effective_model_id) : undefined,
