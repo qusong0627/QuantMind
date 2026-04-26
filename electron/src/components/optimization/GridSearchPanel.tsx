@@ -77,7 +77,7 @@ function mapMetrics(metrics?: GridMetrics): OptimizationTask['result'] | undefin
     annual_return: metrics.annual_return || 0,
     sharpe_ratio: metrics.sharpe_ratio || 0,
     max_drawdown: metrics.max_drawdown || 0,
-    information_ratio: metrics.alpha || 0,
+    alpha: metrics.alpha || 0,
   };
 }
 
@@ -422,6 +422,9 @@ export const GridSearchPanel: React.FC = () => {
     setTasks(initialTasks);
     abortControllerRef.current = new AbortController();
 
+    const initialTopk = Math.round((gridConfig.parameters.topk.min + gridConfig.parameters.topk.max) / 2);
+    const initialNDrop = Math.round((gridConfig.parameters.n_drop.min + gridConfig.parameters.n_drop.max) / 2);
+
     try {
       const response = await backtestService.optimizeQlibParameters(
         {
@@ -431,7 +434,7 @@ export const GridSearchPanel: React.FC = () => {
           initial_capital: gridConfig.initialCapital,
           user_id: getCurrentUserId(),
           qlib_strategy_type: 'TopkDropout',
-          qlib_strategy_params: { topk: 50, n_drop: 5 },
+          qlib_strategy_params: { topk: initialTopk, n_drop: initialNDrop },
           param_ranges: [
             {
               name: 'topk',

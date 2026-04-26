@@ -36,7 +36,9 @@ from backend.services.engine.qlib_app.services.optimization_service import (
     OptimizationCancelledError,
 )
 from backend.shared.auth import get_internal_call_secret
-from backend.services.engine.qlib_app.utils.structured_logger import StructuredTaskLogger
+from backend.services.engine.qlib_app.utils.structured_logger import (
+    StructuredTaskLogger,
+)
 
 logger = logging.getLogger(__name__)
 task_logger = StructuredTaskLogger(logger, "CeleryTasks")
@@ -48,9 +50,13 @@ REDIS_HOST = os.getenv("REDIS_HOST", "quantmind-redis")
 REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
 REDIS_PASSWORD = os.getenv("REDIS_PASSWORD")
 REDIS_DB = int(os.getenv("REDIS_DB", os.getenv("REDIS_DB_DEFAULT", 0)))
-OPTIMIZATION_LOCK_KEY = os.getenv("QLIB_OPTIMIZATION_LOCK_KEY", "qlib:optimization:global_lock")
+OPTIMIZATION_LOCK_KEY = os.getenv(
+    "QLIB_OPTIMIZATION_LOCK_KEY", "qlib:optimization:global_lock"
+)
 OPTIMIZATION_LOCK_TTL = int(os.getenv("QLIB_OPTIMIZATION_LOCK_TTL", "7200"))
-OPTIMIZATION_LOCK_WAIT_SECONDS = int(os.getenv("QLIB_OPTIMIZATION_LOCK_WAIT_SECONDS", "3"))
+OPTIMIZATION_LOCK_WAIT_SECONDS = int(
+    os.getenv("QLIB_OPTIMIZATION_LOCK_WAIT_SECONDS", "3")
+)
 optimization_persistence = OptimizationPersistence()
 
 
@@ -64,14 +70,18 @@ def _get_redis_client() -> redis.Redis | None:
             decode_responses=True,
         )
     except Exception as exc:
-        task_logger.error("redis_connect_failed", "Failed to connect to Redis", error=str(exc))
+        task_logger.error(
+            "redis_connect_failed", "Failed to connect to Redis", error=str(exc)
+        )
         return None
 
 
 def _try_acquire_optimization_lock(client: redis.Redis | None, owner: str) -> bool:
     if client is None:
         return True
-    return bool(client.set(OPTIMIZATION_LOCK_KEY, owner, nx=True, ex=OPTIMIZATION_LOCK_TTL))
+    return bool(
+        client.set(OPTIMIZATION_LOCK_KEY, owner, nx=True, ex=OPTIMIZATION_LOCK_TTL)
+    )
 
 
 def _release_optimization_lock(client: redis.Redis | None, owner: str) -> None:
@@ -86,7 +96,11 @@ def _release_optimization_lock(client: redis.Redis | None, owner: str) -> None:
     try:
         client.eval(script, 1, OPTIMIZATION_LOCK_KEY, owner)
     except Exception as exc:
-        task_logger.warning("optimization_lock_release_failed", "Failed to release optimization lock", error=str(exc))
+        task_logger.warning(
+            "optimization_lock_release_failed",
+            "Failed to release optimization lock",
+            error=str(exc),
+        )
 
 
 def _send_progress_update(data: dict[str, Any]):
@@ -96,7 +110,9 @@ def _send_progress_update(data: dict[str, Any]):
         headers = {"X-Internal-Call": get_internal_call_secret()}
         requests.post(url, json=data, headers=headers, timeout=1)
     except Exception as e:
-        task_logger.warning("progress_update_failed", "Failed to send progress update", error=str(e))
+        task_logger.warning(
+            "progress_update_failed", "Failed to send progress update", error=str(e)
+        )
 
 
 async def _persist_optimization_progress(
@@ -138,7 +154,11 @@ class TaskRedisLogHandler(logging.Handler):
                 decode_responses=True,
             )
         except Exception as e:
-            task_logger.error("redis_logging_connect_failed", "Failed to connect to Redis for logging", error=str(e))
+            task_logger.error(
+                "redis_logging_connect_failed",
+                "Failed to connect to Redis for logging",
+                error=str(e),
+            )
             self.redis_client = None
 
     def _push_text(self, text: str) -> None:
@@ -149,11 +169,15 @@ class TaskRedisLogHandler(logging.Handler):
             context_prefix = f"[{self.context_label}] " if self.context_label else ""
             lines = text.splitlines()
             if "\r" in text:
-                self.redis_client.rpush(self.key, f"[{timestamp}] {context_prefix}{text}")
+                self.redis_client.rpush(
+                    self.key, f"[{timestamp}] {context_prefix}{text}"
+                )
             else:
                 for line in lines:
                     if line.strip():
-                        self.redis_client.rpush(self.key, f"[{timestamp}] {context_prefix}{line}")
+                        self.redis_client.rpush(
+                            self.key, f"[{timestamp}] {context_prefix}{line}"
+                        )
             self.redis_client.expire(self.key, 3600)
         except Exception:
             pass
@@ -186,7 +210,12 @@ class TaskRedisLogHandler(logging.Handler):
 class TaskStreamAdapter(io.TextIOBase):
     """将 print/直接写入的文本转成任务日志。"""
 
-    def __init__(self, handler: TaskRedisLogHandler, original_stream=None, level: int = logging.INFO):
+    def __init__(
+        self,
+        handler: TaskRedisLogHandler,
+        original_stream=None,
+        level: int = logging.INFO,
+    ):
         self.handler = handler
         self.original_stream = original_stream
         self.level = level
@@ -235,8 +264,12 @@ class TaskLogCapture:
         if not self._attached:
             self.root_logger.addHandler(self.handler)
             self._attached = True
-        self.stdout_capture = TaskStreamAdapter(self.handler, self.original_stdout, level=logging.INFO)
-        self.stderr_capture = TaskStreamAdapter(self.handler, self.original_stderr, level=logging.ERROR)
+        self.stdout_capture = TaskStreamAdapter(
+            self.handler, self.original_stdout, level=logging.INFO
+        )
+        self.stderr_capture = TaskStreamAdapter(
+            self.handler, self.original_stderr, level=logging.ERROR
+        )
         sys.stdout = self.stdout_capture
         sys.stderr = self.stderr_capture
         return self
@@ -291,7 +324,9 @@ class CallbackTask(Task):
     """带回调的任务基类"""
 
     def on_success(self, retval, task_id, args, kwargs):
-        task_logger.info("celery_task_success", "Task finished successfully", task_id=task_id)
+        task_logger.info(
+            "celery_task_success", "Task finished successfully", task_id=task_id
+        )
 
     def on_failure(self, exc, task_id, args, kwargs, einfo):
         # Celery 传入的 einfo 不是 logging 期望的 exc_info 三元组时，会触发格式化异常。
@@ -301,7 +336,13 @@ class CallbackTask(Task):
             exc_info = einfo
         elif isinstance(exc, BaseException):
             exc_info = (type(exc), exc, exc.__traceback__)
-        task_logger.error("celery_task_failed", "Task failed", task_id=task_id, error=str(exc), exc_info=exc_info)
+        task_logger.error(
+            "celery_task_failed",
+            "Task failed",
+            task_id=task_id,
+            error=str(exc),
+            exc_info=exc_info,
+        )
 
 
 def _to_jsonable(payload: Any) -> Any:
@@ -348,7 +389,9 @@ def _resolve_provider_path(path: str) -> str:
     if os.path.isabs(path):
         return path
     # tasks.py 位于 backend/services/engine/qlib_app，下探 4 级回到项目根目录
-    root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", ".."))
+    root_dir = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "..", "..", "..")
+    )
     return os.path.normpath(os.path.join(root_dir, path))
 
 
@@ -381,7 +424,9 @@ def run_backtest_async(self, request_dict: dict[str, Any]) -> dict[str, Any]:
     task_log.info("开始异步回测")
 
     # 进度：0%
-    self.update_state(state="PROGRESS", meta={"progress": 0.0, "status": "initializing"})
+    self.update_state(
+        state="PROGRESS", meta={"progress": 0.0, "status": "initializing"}
+    )
     _send_progress_update(
         {
             "backtest_id": backtest_id,
@@ -431,8 +476,12 @@ def run_backtest_async(self, request_dict: dict[str, Any]) -> dict[str, Any]:
             try:
                 # 运行到这里说明回测无异常，策略逻辑闭环，可以标记为实盘可用
                 storage_svc = get_strategy_storage_service()
-                _run_async(storage_svc.mark_as_verified(request.strategy_id, request.user_id))
-                task_log.info(f"策略 {request.strategy_id} 回测成功，已开启实盘准入标识")
+                _run_async(
+                    storage_svc.mark_as_verified(request.strategy_id, request.user_id)
+                )
+                task_log.info(
+                    f"策略 {request.strategy_id} 回测成功，已开启实盘准入标识"
+                )
             except Exception as e:
                 task_log.warning(f"无法标记策略验证状态: {e}")
 
@@ -440,7 +489,9 @@ def run_backtest_async(self, request_dict: dict[str, Any]) -> dict[str, Any]:
         from backend.services.engine.qlib_app.cache_manager import get_cache_manager
 
         try:
-            get_cache_manager().invalidate_user_history(f"{tenant_id}:{request.user_id}")
+            get_cache_manager().invalidate_user_history(
+                f"{tenant_id}:{request.user_id}"
+            )
         except Exception as e:
             task_log.warning(f"Failed to invalidate cache: {e}")
 
@@ -452,9 +503,16 @@ def run_backtest_async(self, request_dict: dict[str, Any]) -> dict[str, Any]:
         full_error = traceback.format_exc()
         task_log.exception(f"Backtest failed: {exc}")
         # 避免以 FAILURE + 普通 dict 写入结果后端，触发 Celery 异常反序列化错误。
-        self.update_state(state="PROGRESS", meta={"status": "failed", "error": str(exc)})
+        self.update_state(
+            state="PROGRESS", meta={"status": "failed", "error": str(exc)}
+        )
         _send_progress_update(
-            {"backtest_id": backtest_id, "status": "failed", "error_message": str(exc), "full_error": full_error}
+            {
+                "backtest_id": backtest_id,
+                "status": "failed",
+                "error_message": str(exc),
+                "full_error": full_error,
+            }
         )
         raise
 
@@ -594,7 +652,9 @@ def run_optimization_async(self, request_dict: dict[str, Any]) -> dict[str, Any]
                 break
 
             queued_tasks = _run_async(
-                optimization_persistence.count_by_statuses(["running", "queued", "pending"])
+                optimization_persistence.count_by_statuses(
+                    ["running", "queued", "pending"]
+                )
             )
             queued_ahead = max(0, queued_tasks - 1)
             queued_message = (
@@ -698,7 +758,9 @@ def run_optimization_async(self, request_dict: dict[str, Any]) -> dict[str, Any]
                 "message": "网格优化已完成",
                 "total_tasks": total_tasks,
                 "completed_count": len(result_dict.get("all_results") or []),
-                "failed_count": max(0, total_tasks - len(result_dict.get("all_results") or [])),
+                "failed_count": max(
+                    0, total_tasks - len(result_dict.get("all_results") or [])
+                ),
                 "best_params": result_dict.get("best_params") or {},
                 "result": result_dict,
             },
@@ -708,10 +770,16 @@ def run_optimization_async(self, request_dict: dict[str, Any]) -> dict[str, Any]
                 optimization_id,
                 status="completed",
                 completed_count=len(result_dict.get("all_results") or []),
-                failed_count=max(0, total_tasks - len(result_dict.get("all_results") or [])),
+                failed_count=max(
+                    0, total_tasks - len(result_dict.get("all_results") or [])
+                ),
                 best_params=result_dict.get("best_params") or {},
                 best_metric_value=(
-                    (result_dict.get("all_results", [])[0].get("metrics", {}).get(result_dict.get("target_metric")))
+                    (
+                        result_dict.get("all_results", [])[0]
+                        .get("metrics", {})
+                        .get(result_dict.get("target_metric"))
+                    )
                     if result_dict.get("all_results")
                     else None
                 ),
@@ -732,7 +800,9 @@ def run_optimization_async(self, request_dict: dict[str, Any]) -> dict[str, Any]
                 "message": "Grid optimization completed",
                 "total_tasks": total_tasks,
                 "completed_count": len(result_dict.get("all_results") or []),
-                "failed_count": max(0, total_tasks - len(result_dict.get("all_results") or [])),
+                "failed_count": max(
+                    0, total_tasks - len(result_dict.get("all_results") or [])
+                ),
                 "best_params": result_dict.get("best_params") or {},
                 "result": result_dict,
             }
@@ -751,7 +821,7 @@ def run_optimization_async(self, request_dict: dict[str, Any]) -> dict[str, Any]
             "execution_time": 0,
         }
         self.update_state(
-            state="SUCCESS",
+            state="CANCELLED",
             meta={
                 "optimization_id": optimization_id,
                 "progress": 1.0,
@@ -819,7 +889,9 @@ def run_optimization_async(self, request_dict: dict[str, Any]) -> dict[str, Any]
     retry_backoff=True,
     retry_jitter=True,
 )
-def run_genetic_optimization_async(self, request_dict: dict[str, Any]) -> dict[str, Any]:
+def run_genetic_optimization_async(
+    self, request_dict: dict[str, Any]
+) -> dict[str, Any]:
     """异步执行遗传算法参数优化任务"""
     task_id = self.request.id
     optimization_id = request_dict.get("optimization_id")
@@ -873,7 +945,9 @@ def run_genetic_optimization_async(self, request_dict: dict[str, Any]) -> dict[s
 
         # 使用任务级日志上下文捕获日志
         log_key = f"{tenant_id}:{optimization_id}"
-        log_context = f"optimization_id={optimization_id} task_id={task_id} tenant_id={tenant_id}"
+        log_context = (
+            f"optimization_id={optimization_id} task_id={task_id} tenant_id={tenant_id}"
+        )
         with TaskLogCapture(log_key, context_label=log_context):
             result = _run_async(
                 service.run_optimization(
@@ -885,13 +959,46 @@ def run_genetic_optimization_async(self, request_dict: dict[str, Any]) -> dict[s
 
         result_dict = _to_jsonable(result)
 
-        self.update_state(state="SUCCESS", meta={"result": result_dict})
+        # 持久化遗传算法结果到数据库
+        total_individuals = request.population_size * request.generations
+        _run_async(
+            optimization_persistence.update_run(
+                optimization_id,
+                status="completed",
+                completed_count=total_individuals,
+                failed_count=0,
+                best_params=result_dict.get("best_params") or {},
+                best_metric_value=result_dict.get("best_fitness"),
+                result_summary={
+                    "best_params": result_dict.get("best_params") or {},
+                    "best_fitness": result_dict.get("best_fitness"),
+                    "target_metric": request.optimization_target,
+                    "execution_time": result_dict.get("execution_time"),
+                    "generations": len(result_dict.get("history") or []),
+                },
+                all_results=[],
+            )
+        )
+
+        self.update_state(
+            state="SUCCESS",
+            meta={
+                "optimization_id": optimization_id,
+                "progress": 1.0,
+                "status": "completed",
+                "message": "遗传优化已完成",
+                "best_params": result_dict.get("best_params") or {},
+                "result": result_dict,
+            },
+        )
         _send_progress_update(
             {
                 "backtest_id": optimization_id,
                 "optimization_id": optimization_id,
                 "progress": 1.0,
                 "status": "completed",
+                "message": "Genetic optimization completed",
+                "best_params": result_dict.get("best_params") or {},
                 "result": result_dict,
             }
         )
@@ -909,7 +1016,7 @@ def run_genetic_optimization_async(self, request_dict: dict[str, Any]) -> dict[s
             "execution_time": 0,
         }
         self.update_state(
-            state="SUCCESS",
+            state="CANCELLED",
             meta={
                 "optimization_id": optimization_id,
                 "progress": 1.0,
@@ -937,7 +1044,9 @@ def run_genetic_optimization_async(self, request_dict: dict[str, Any]) -> dict[s
         return cancelled_result
     except Exception as exc:
         task_log.exception(f"GA Optimization failed: {exc}")
-        self.update_state(state="PROGRESS", meta={"status": "failed", "error": str(exc)})
+        self.update_state(
+            state="PROGRESS", meta={"status": "failed", "error": str(exc)}
+        )
         _send_progress_update(
             {
                 "backtest_id": optimization_id,

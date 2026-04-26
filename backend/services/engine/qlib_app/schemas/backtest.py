@@ -6,7 +6,15 @@ from typing import Any, Dict, List, Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
-GRID_SEARCH_MAX_COMBINATIONS = 40
+GRID_SEARCH_MAX_COMBINATIONS = 100
+
+
+def count_param_values(param_min: float, param_max: float, param_step: float) -> int:
+    """计算参数范围内的取值数量，避免浮点数精度问题"""
+    if param_step <= 0:
+        return 0
+    # 使用 round 避免浮点数误差，例如 (0.3-0.1)/0.1 = 1.9999999
+    return int(round((param_max - param_min) / param_step)) + 1
 
 
 class QlibStrategyParams(BaseModel):
@@ -38,7 +46,10 @@ class QlibStrategyParams(BaseModel):
     max_short_exposure: float = Field(1.0, description="最大空头敞口", ge=0.0, le=3.0)
     max_leverage: float = Field(1.0, description="最大总杠杆", ge=0.0, le=5.0)
     account_stop_loss: float = Field(
-        0.2, description="账户爆仓止损线(净值低于初始资金该比例时强制平仓并停止交易)", ge=0.0, le=0.8
+        0.2,
+        description="账户爆仓止损线(净值低于初始资金该比例时强制平仓并停止交易)",
+        ge=0.0,
+        le=0.8,
     )
 
 
@@ -49,10 +60,13 @@ class QlibBacktestRequest(BaseModel):
 
     # 策略配置 (支持原生 ID 和前端模板 ID)
     strategy_type: str = Field(
-        "TopkDropout", description="策略类型 (如 TopkDropout, standard_topk, deep_time_series 等)"
+        "TopkDropout",
+        description="策略类型 (如 TopkDropout, standard_topk, deep_time_series 等)",
     )
 
-    strategy_params: QlibStrategyParams = Field(default_factory=QlibStrategyParams, description="策略参数")
+    strategy_params: QlibStrategyParams = Field(
+        default_factory=QlibStrategyParams, description="策略参数"
+    )
     strategy_content: str | None = Field(
         None,
         description="策略代码（仅用于 CustomStrategy 模式）",
@@ -64,8 +78,12 @@ class QlibBacktestRequest(BaseModel):
     is_third_party: bool = Field(False, description="是否为第三方/外置策略")
 
     # 时间范围
-    start_date: str = Field(..., description="开始日期 YYYY-MM-DD", pattern=r"^\d{4}-\d{2}-\d{2}$")
-    end_date: str = Field(..., description="结束日期 YYYY-MM-DD", pattern=r"^\d{4}-\d{2}-\d{2}$")
+    start_date: str = Field(
+        ..., description="开始日期 YYYY-MM-DD", pattern=r"^\d{4}-\d{2}-\d{2}$"
+    )
+    end_date: str = Field(
+        ..., description="结束日期 YYYY-MM-DD", pattern=r"^\d{4}-\d{2}-\d{2}$"
+    )
 
     # 回测配置
     use_vectorized: bool = Field(False, description="是否使用向量化极速回测加速")
@@ -79,10 +97,14 @@ class QlibBacktestRequest(BaseModel):
     stamp_duty: float = Field(0.0005, description="印花税率(仅卖出)", ge=0)
     transfer_fee: float = Field(0.00001, description="过户费率(仅SH)", ge=0)
     min_transfer_fee: float = Field(0.01, description="最低过户费(元)", ge=0)
-    impact_cost_coefficient: float = Field(0.0005, description="市场冲击成本系数(滑点模型)", ge=0)
+    impact_cost_coefficient: float = Field(
+        0.0005, description="市场冲击成本系数(滑点模型)", ge=0
+    )
 
     buy_cost: float | None = Field(None, description="买入综合费率", alias="open_cost")
-    sell_cost: float | None = Field(None, description="卖出综合费率", alias="close_cost")
+    sell_cost: float | None = Field(
+        None, description="卖出综合费率", alias="close_cost"
+    )
 
     user_id: str = Field("default", description="用户ID")
     tenant_id: str = Field("default", description="租户ID")
@@ -91,8 +113,12 @@ class QlibBacktestRequest(BaseModel):
     dynamic_position: bool = Field(False, description="是否启用动态仓位")
     style: str | None = Field(None, description="策略风格")
     market_state_symbol: str | None = Field(None, description="市场状态参考指数代码")
-    market_state_window: int = Field(20, description="市场状态滚动窗口（交易日）", ge=5, le=240)
-    strategy_total_position: float = Field(1.0, description="策略总资金占比", ge=0.0, le=1.0)
+    market_state_window: int = Field(
+        20, description="市场状态滚动窗口（交易日）", ge=5, le=240
+    )
+    strategy_total_position: float = Field(
+        1.0, description="策略总资金占比", ge=0.0, le=1.0
+    )
 
     seed: int | None = Field(None, description="随机种子")
     # NOTE: deal_price="close" 会使用当日收盘价成交。
@@ -102,12 +128,19 @@ class QlibBacktestRequest(BaseModel):
 
     # 无风险利率（年化），用于 Sharpe Ratio 和 CAPM Alpha 计算
     # 中国常用参考：银行一年期存款利率约 1.5%，货币基金约 2%
-    risk_free_rate: float = Field(0.02, description="无风险利率（年化，用于Sharpe/Alpha计算）", ge=0.0, le=0.2)
+    risk_free_rate: float = Field(
+        0.02, description="无风险利率（年化，用于Sharpe/Alpha计算）", ge=0.0, le=0.2
+    )
 
-    backtest_id: str | None = Field(None, description="回测任务ID（异步模式由服务端注入并透传）")
-    strategy_id: str | None = Field(None, description="关联的策略ID (用于持久化保存和AI修复覆盖)")
+    backtest_id: str | None = Field(
+        None, description="回测任务ID（异步模式由服务端注入并透传）"
+    )
+    strategy_id: str | None = Field(
+        None, description="关联的策略ID (用于持久化保存和AI修复覆盖)"
+    )
     history_source: Literal["manual", "optimization"] = Field(
-        "manual", description="历史来源标记：manual=普通回测，optimization=参数优化子任务"
+        "manual",
+        description="历史来源标记：manual=普通回测，optimization=参数优化子任务",
     )
 
 
@@ -228,7 +261,7 @@ class QlibOptimizationRequest(BaseModel):
     def total_combinations(self) -> int:
         total_combinations = 1
         for param in self.param_ranges:
-            count = int(round((param.max - param.min) / param.step)) + 1
+            count = count_param_values(param.min, param.max, param.step)
             if count <= 0:
                 raise ValueError(f"参数 {param.name} 未生成有效取值")
             total_combinations *= count

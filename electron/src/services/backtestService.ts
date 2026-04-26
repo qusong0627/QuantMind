@@ -260,6 +260,7 @@ export interface QlibOptimizationConfig {
   generations?: number;
   mutation_rate?: number;
   max_parallel?: number;
+  optimization_id?: string;
 
   // 费率参数
   commission?: number;
@@ -1057,6 +1058,7 @@ class BacktestService {
       const response = await this.client.post<OptimizationTaskResponse>(
         '/optimize/genetic',
         {
+          optimization_id: config.optimization_id,
           base_request: baseRequest,
           param_ranges: config.param_ranges,
           optimization_target: config.optimization_target,
@@ -1669,6 +1671,11 @@ class BacktestService {
           }
 
           if (state === 'SUCCESS') {
+            const result = (info as any).result ?? info;
+            resolve(result as T);
+            return;
+          }
+          if (state === 'CANCELLED') {
             const result = (info as any).result ?? info;
             resolve(result as T);
             return;

@@ -73,14 +73,17 @@ export const GeneticOptimizationPanel: React.FC = () => {
 
         abortControllerRef.current = new AbortController();
 
+        const optimizationId = crypto.randomUUID().replace(/-/g, '');
+        setOptimizationId(optimizationId);
+
         addLog(`准备开始遗传算法优化 (Population=${geneticConfig.ga.population_size}, Gens=${geneticConfig.ga.generations})`, 'info');
 
         try {
             // 构造请求
             const optimizationRequest = {
+                optimization_id: optimizationId,
                 base_request: {
-                    strategy_type: 'WeightedStrategy', // 强制指定
-                    // 初始默认值，实际会被GA覆盖
+                    strategy_type: 'WeightedStrategy',
                     strategy_params: { topk: 50, min_score: 0.02, max_weight: 0.1 },
                     start_date: geneticConfig.dateRange.startDate,
                     end_date: geneticConfig.dateRange.endDate,
@@ -119,6 +122,7 @@ export const GeneticOptimizationPanel: React.FC = () => {
             // 调用API
             const response = await backtestService.optimizeQlibParameters(
                 {
+                    optimization_id: optimizationRequest.optimization_id,
                     symbol: optimizationRequest.base_request.universe,
                     start_date: optimizationRequest.base_request.start_date,
                     end_date: optimizationRequest.base_request.end_date,
@@ -135,7 +139,6 @@ export const GeneticOptimizationPanel: React.FC = () => {
                 },
                 {
                     onTaskCreated: (id) => {
-                        setOptimizationId(id);
                         setCurrentTaskId(id);
                         addLog(`任务已创建，ID: ${id}`, 'success');
                     },

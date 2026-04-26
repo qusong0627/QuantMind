@@ -17,7 +17,9 @@ from backend.services.engine.qlib_app.services.backtest_service import (
 from backend.services.engine.qlib_app.services.optimization_service import (
     OptimizationCancelledError,
 )
-from backend.services.engine.qlib_app.utils.structured_logger import StructuredTaskLogger
+from backend.services.engine.qlib_app.utils.structured_logger import (
+    StructuredTaskLogger,
+)
 
 logger = logging.getLogger(__name__)
 task_logger = StructuredTaskLogger(logger, "GeneticOptimizationService")
@@ -76,7 +78,9 @@ class GeneticOptimizationService:
         )
 
         # 1. 初始化种群
-        population = self._init_population(request.population_size, request.param_ranges)
+        population = self._init_population(
+            request.population_size, request.param_ranges
+        )
         push_log("population_init", "初始化种群完成", population_size=len(population))
 
         history: list[GeneticHistoryRecord] = []
@@ -117,23 +121,47 @@ class GeneticOptimizationService:
         # 2. 迭代进化
         for gen in range(request.generations):
             if await check_is_cancelled():
-                push_log("cancelled", "遗传算法优化在代际迭代前被取消", generation=gen + 1)
+                push_log(
+                    "cancelled", "遗传算法优化在代际迭代前被取消", generation=gen + 1
+                )
                 raise OptimizationCancelledError("用户手动停止遗传优化任务")
 
-            push_log("generation_start", "开始评估代际", generation=gen + 1, total_generations=request.generations)
+            push_log(
+                "generation_start",
+                "开始评估代际",
+                generation=gen + 1,
+                total_generations=request.generations,
+            )
 
             # 2.1 评估适应度 (传递细粒度回调)
             fitness_scores = await self._evaluate_population(
-                population, request, optimization_id, on_individual_completed, check_is_cancelled
+                population,
+                request,
+                optimization_id,
+                on_individual_completed,
+                check_is_cancelled,
             )
 
-            push_log("generation_eval_done", "完成适应度评估", generation=gen + 1, evaluated=len(population))
+            push_log(
+                "generation_eval_done",
+                "完成适应度评估",
+                generation=gen + 1,
+                evaluated=len(population),
+            )
 
             # 2.2 记录统计信息
             valid_scores = [s for s in fitness_scores if s is not None]
             if not valid_scores:
-                push_log("generation_empty", f"第 {gen + 1} 代无有效结果，跳过", generation=gen + 1)
-                task_log.warning("generation_empty", "Generation has no valid results", generation=gen + 1)
+                push_log(
+                    "generation_empty",
+                    f"第 {gen + 1} 代无有效结果，跳过",
+                    generation=gen + 1,
+                )
+                task_log.warning(
+                    "generation_empty",
+                    "Generation has no valid results",
+                    generation=gen + 1,
+                )
                 continue
 
             max_fit = max(valid_scores)
@@ -191,7 +219,7 @@ class GeneticOptimizationService:
                         {
                             "optimization_id": optimization_id,
                             "status": "converged",
-                            "message": f"种群已收敛，在第 {gen+1} 代提前终止",
+                            "message": f"种群已收敛，在第 {gen + 1} 代提前终止",
                         }
                     )
                 break
@@ -202,7 +230,9 @@ class GeneticOptimizationService:
 
             # 2.3 精英保留 + 选择 + 交叉 + 变异（生成下一代）
             push_log("next_generation", "开始生成下一代", elite_count=2)
-            population = self._generate_next_generation(population, fitness_scores, request, elite_count=2)
+            population = self._generate_next_generation(
+                population, fitness_scores, request, elite_count=2
+            )
             push_log("next_generation_done", "下一代种群已生成", elite_count=2)
 
         execution_time = time.time() - start_time
@@ -210,7 +240,14 @@ class GeneticOptimizationService:
         # 3. 获取最优参数
         best_params = best_individual if best_individual else {}
 
-        push_log("complete", "遗传算法优化完成", best_params=best_params, best_fitness=f"{best_fitness:.4f}", generations=len(history), execution_time=f"{execution_time:.2f}")
+        push_log(
+            "complete",
+            "遗传算法优化完成",
+            best_params=best_params,
+            best_fitness=f"{best_fitness:.4f}",
+            generations=len(history),
+            execution_time=f"{execution_time:.2f}",
+        )
 
         return QlibGeneticOptimizationResult(
             optimization_id=optimization_id,
@@ -220,15 +257,9 @@ class GeneticOptimizationService:
             execution_time=execution_time,
         )
 
-        return QlibGeneticOptimizationResult(
-            optimization_id=optimization_id,
-            best_params=best_individual,
-            best_fitness=best_fitness,
-            history=history,
-            execution_time=execution_time,
-        )
-
-    def _init_population(self, size: int, ranges: list[OptimizationParamRange]) -> list[dict[str, Any]]:
+    def _init_population(
+        self, size: int, ranges: list[OptimizationParamRange]
+    ) -> list[dict[str, Any]]:
         """初始化随机种群"""
         population = []
         for _ in range(size):
@@ -273,7 +304,9 @@ class GeneticOptimizationService:
                     for k, v in params.items():
                         if hasattr(task_req.strategy_params, k):
                             # 类型转换
-                            val = int(v) if isinstance(v, float) and v.is_integer() else v
+                            val = (
+                                int(v) if isinstance(v, float) and v.is_integer() else v
+                            )
                             setattr(task_req.strategy_params, k, val)
 
                     # 运行回测
@@ -287,7 +320,9 @@ class GeneticOptimizationService:
 
                     return fitness
                 except Exception as e:
-                    task_logger.error("ga_eval_failed", "GA Eval failed", params=params, error=str(e))
+                    task_logger.error(
+                        "ga_eval_failed", "GA Eval failed", params=params, error=str(e)
+                    )
                     if on_complete:
                         on_complete()
                     return None
@@ -330,7 +365,9 @@ class GeneticOptimizationService:
         valid_pop = [(p, s) for p, s in zip(population, scores) if s is not None]
         if not valid_pop:
             # 如果没有有效个体，返回原种群
-            task_logger.warning("no_valid_individuals", "No valid individuals for next generation")
+            task_logger.warning(
+                "no_valid_individuals", "No valid individuals for next generation"
+            )
             return population
 
         # 按适应度降序排序
@@ -384,11 +421,19 @@ class GeneticOptimizationService:
         converged = all(s < threshold for s in recent_std)
 
         if converged:
-            task_logger.info("convergence_detected", "收敛检测", window=window, threshold=threshold, recent_std=recent_std)
+            task_logger.info(
+                "convergence_detected",
+                "收敛检测",
+                window=window,
+                threshold=threshold,
+                recent_std=recent_std,
+            )
 
         return converged
 
-    def _selection(self, population: list[dict], scores: list[float], k=3) -> list[dict]:
+    def _selection(
+        self, population: list[dict], scores: list[float], k=3
+    ) -> list[dict]:
         """锦标赛选择"""
         # 过滤无效个体
         valid_pop = []

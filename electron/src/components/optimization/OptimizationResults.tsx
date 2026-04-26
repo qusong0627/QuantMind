@@ -139,7 +139,7 @@ function getMetricValue(task: OptimizationTask, metric: string): number {
     annual_return: task.result.annual_return,
     sharpe_ratio: task.result.sharpe_ratio,
     max_drawdown: task.result.max_drawdown,
-    information_ratio: task.result.information_ratio,
+    alpha: task.result.alpha,
     total_return: task.result.annual_return,
   };
   return metricMap[metric] ?? 0;
@@ -150,7 +150,7 @@ function getMetricLabel(metric: string): string {
     annual_return: '年化收益率',
     sharpe_ratio: '夏普比率',
     max_drawdown: '最大回撤',
-    information_ratio: '信息比率',
+    alpha: 'Alpha',
     total_return: '总收益率',
   };
   return labels[metric] || metric;

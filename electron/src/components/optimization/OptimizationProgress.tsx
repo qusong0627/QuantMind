@@ -10,7 +10,7 @@ export interface OptimizationTask {
     annual_return: number;
     sharpe_ratio: number;
     max_drawdown: number;
-    information_ratio: number;
+    alpha: number;
   };
   error?: string;
   startTime?: number;
