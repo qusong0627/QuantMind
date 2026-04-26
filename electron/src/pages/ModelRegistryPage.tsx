@@ -939,8 +939,12 @@ export const ModelRegistryPage: React.FC = () => {
                     <Text className="text-xs font-black text-slate-800">{rankingResult.summary.signals_count}</Text>
                   </div>
                   <div>
-                    <Text className="text-[10px] text-slate-400 font-black uppercase block">兜底</Text>
-                    <Text className="text-xs font-black text-slate-800">{rankingResult.summary.fallback_used ? '是' : '否'}</Text>
+                    <Text className="text-[10px] text-slate-400 font-black uppercase block">模型切换</Text>
+                    <Text className="text-xs font-black text-slate-800">{(rankingResult.summary.model_switch_used ?? rankingResult.summary.fallback_used) ? '是' : '否'}</Text>
+                  </div>
+                  <div>
+                    <Text className="text-[10px] text-slate-400 font-black uppercase block">执行模式</Text>
+                    <Text className="text-xs font-black text-slate-800">{rankingResult.summary.execution_mode === 'independent_model' ? '独立模型' : rankingResult.summary.execution_mode === 'system_chain' ? '系统链路' : '—'}</Text>
                   </div>
                   <div>
                     <Text className="text-[10px] text-slate-400 font-black uppercase block">耗时</Text>
@@ -963,8 +967,8 @@ export const ModelRegistryPage: React.FC = () => {
                             <Text className="text-xs font-black text-slate-800">{rankingResult.summary.failure_stage || '—'}</Text>
                           </div>
                           <div className="rounded-xl border border-slate-100 bg-white p-3">
-                            <Text className="text-[10px] text-slate-400 font-black uppercase block">回退原因</Text>
-                            <Text className="text-xs font-black text-slate-800 break-all">{rankingResult.summary.fallback_reason || '—'}</Text>
+                            <Text className="text-[10px] text-slate-400 font-black uppercase block">模型切换原因</Text>
+                            <Text className="text-xs font-black text-slate-800 break-all">{rankingResult.summary.model_switch_reason || rankingResult.summary.fallback_reason || '—'}</Text>
                           </div>
                           <div className="rounded-xl border border-slate-100 bg-white p-3">
                             <Text className="text-[10px] text-slate-400 font-black uppercase block">实际模型</Text>

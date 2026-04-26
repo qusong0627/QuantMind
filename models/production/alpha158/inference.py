@@ -26,6 +26,68 @@ logging.basicConfig(
 )
 logger = logging.getLogger("Alpha158_V2")
 
+
+def _load_metadata(model_path: str) -> dict:
+    metadata_path = Path(model_path).with_name("metadata.json")
+    if not metadata_path.exists():
+        return {}
+
+    try:
+        return json.loads(metadata_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.warning("Failed to read metadata.json: %s", exc)
+        return {}
+
+
+def _has_qlib_calendar(data_path: Path) -> bool:
+    return (data_path / "calendars" / "day.txt").exists()
+
+
+def _resolve_qlib_data_path(raw_data_path: str, model_path: str) -> Path:
+    requested_path = Path(
+        str(raw_data_path or "").strip() or "/app/db/qlib_data"
+    )
+    metadata = _load_metadata(model_path)
+    metadata_qlib_path = str(metadata.get("qlib_data_path") or "").strip()
+    project_root = Path(__file__).resolve().parents[3]
+
+    candidates = [requested_path]
+    if "feature_snapshots" in requested_path.parts:
+        candidates.append(requested_path.parent / "qlib_data")
+    if metadata_qlib_path:
+        candidates.append(Path(metadata_qlib_path))
+    candidates.extend(
+        [
+            project_root / "db" / "qlib_data",
+            Path("/app/db/qlib_data"),
+            Path.cwd() / "db" / "qlib_data",
+        ]
+    )
+
+    seen = set()
+    normalized_candidates = []
+    for candidate in candidates:
+        candidate_str = str(candidate)
+        if candidate_str in seen:
+            continue
+        seen.add(candidate_str)
+        normalized_candidates.append(candidate)
+        if _has_qlib_calendar(candidate):
+            if candidate != requested_path:
+                logger.warning(
+                    "Resolved qlib data path from %s to %s",
+                    requested_path,
+                    candidate,
+                )
+            return candidate
+
+    tried = ", ".join(str(path) for path in normalized_candidates)
+    raise FileNotFoundError(
+        "qlib 日历文件不存在，已尝试路径: "
+        f"{tried}"
+    )
+
+
 class QlibBinaryLoader:
     def __init__(self, data_path):
         self.data_path = Path(data_path)
@@ -123,9 +185,15 @@ def main():
     args = parser.parse_args()
 
     logger.info("Alpha158 V2: Initializing Targeted Inference Pipeline")
-    
+
+    resolved_data_path = _resolve_qlib_data_path(
+        args.data_path,
+        args.model_path,
+    )
+    logger.info("Using qlib data path: %s", resolved_data_path)
+
     # 1. Load Data
-    loader = QlibBinaryLoader(args.data_path)
+    loader = QlibBinaryLoader(resolved_data_path)
     # Filter out BJ stocks from the loader's default symbols
     target_symbols = [s for s in loader.all_symbols if not (s.startswith("BJ") or s.startswith("bj"))]
     

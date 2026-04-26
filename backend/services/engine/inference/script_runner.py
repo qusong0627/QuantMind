@@ -71,6 +71,9 @@ class ExecutionResult:
     signals: list[dict] = field(default_factory=list)
     fallback_used: bool = False  # True = alpha158 兜底脚本实际执行
     fallback_reason: str = ""  # 触发兜底的原因描述
+    execution_mode: str = ""  # independent_model/system_chain
+    model_switch_used: bool = False
+    model_switch_reason: str = ""
     failure_stage: str = ""  # main_script/fallback_script/output_parse
     active_model_id: str = ""
     active_data_source: str = ""
@@ -85,7 +88,7 @@ class InferenceScriptRunner:
     1. 主模型推理脚本（默认 inference.py）
        - exit 0 → 成功
        - exit 1 → 致命失败，返回错误
-       - exit 2 → 数据质量不足，自动执行兜底模型脚本
+         - exit 2 → 数据质量不足；若允许跨模型 fallback，则执行兜底模型脚本
     2. 兜底模型推理脚本（默认 inference.py）
        - exit 0 → 兜底成功，结果标记 fallback_used=True
        - 非 0   → 兜底失败，返回错误
@@ -106,6 +109,7 @@ class InferenceScriptRunner:
         fallback_model_id: str | None = None,
         primary_script_name: str | None = None,
         fallback_script_name: str | None = None,
+        enable_fallback: bool = True,
     ):
         # `models_production` 为历史兼容参数，等价于 primary_model_dir。
         resolved_primary = (
@@ -126,7 +130,7 @@ class InferenceScriptRunner:
         self.fallback_data_dir = self._normalize_provider_uri(
             str(
                 fallback_data_dir
-                or os.getenv("QLIB_FALLBACK_DATA_PATH", "db/feature_snapshots")
+                or os.getenv("QLIB_FALLBACK_DATA_PATH", "db/qlib_data")
             ),
             prefer_alpha158=True,
         )
@@ -143,6 +147,39 @@ class InferenceScriptRunner:
             fallback_script_name
             or os.getenv("INFERENCE_FALLBACK_SCRIPT", "inference.py")
         )
+        self.enable_fallback = bool(enable_fallback)
+
+    def _fallback_disabled_result(
+        self,
+        *,
+        date: str,
+        run_id: str,
+        stderr: str,
+        error: str,
+        exit_code: int,
+        prediction_trade_date: str,
+    ) -> ExecutionResult:
+        return ExecutionResult(
+            success=False,
+            exit_code=exit_code,
+            stdout="",
+            stderr=stderr,
+            error=error,
+            run_id=run_id,
+            fallback_used=False,
+            failure_stage="main_script",
+            active_model_id=self.primary_model_id,
+            active_data_source=self.primary_data_dir,
+            data_trade_date=date,
+            prediction_trade_date=prediction_trade_date,
+        )
+
+    def _log_independent_failure(self, run_id: str, reason: str) -> None:
+        logger.warning(
+            "[InferenceScriptRunner] 独立模型执行未通过，直接返回失败, run_id=%s, reason=%s",
+            run_id,
+            reason,
+        )
 
     @staticmethod
     def _normalize_provider_uri(
@@ -154,11 +191,11 @@ class InferenceScriptRunner:
         规则：
         1) 若能在候选路径中命中真实目录，返回该绝对路径；
         2) 相对路径默认转换为 /app/<path>；
-        3) 兜底场景优先尝试 /app/db/feature_snapshots。
+        3) alpha158 兜底场景优先尝试 /app/db/qlib_data。
         """
         raw = str(provider_uri or "").strip()
         if not raw:
-            raw = "db/feature_snapshots"
+            raw = "db/qlib_data"
 
         candidates: list[Path] = []
         p = Path(raw)
@@ -170,8 +207,8 @@ class InferenceScriptRunner:
 
         if prefer_alpha158:
             candidates = [
-                Path("/app/db/feature_snapshots"),
-                Path("db/feature_snapshots"),
+                Path("/app/db/qlib_data"),
+                Path("db/qlib_data"),
                 *candidates,
             ]
 
@@ -831,6 +868,16 @@ class InferenceScriptRunner:
             else:
                 run_id = f"run_{date.replace('-', '')}_{uuid.uuid4().hex[:8]}"
                 fallback_reason = f"主模型推理脚本不存在: {script_path}"
+                if not self.enable_fallback:
+                    self._log_independent_failure(run_id, fallback_reason)
+                    return self._fallback_disabled_result(
+                        date=date,
+                        run_id=run_id,
+                        stderr=fallback_reason,
+                        error=fallback_reason,
+                        exit_code=1,
+                        prediction_trade_date=prediction_trade_date,
+                    )
                 logger.warning(
                     "[InferenceScriptRunner] 主模型脚本缺失，触发 alpha158 兜底, run_id=%s, reason=%s",
                     run_id,
@@ -892,6 +939,16 @@ class InferenceScriptRunner:
 
         if not readiness.get("ready", False):
             fallback_reason = f"主模型维度门禁未通过: {readiness.get('detail', 'N/A')}"
+            if not self.enable_fallback:
+                self._log_independent_failure(run_id, fallback_reason)
+                return self._fallback_disabled_result(
+                    date=date,
+                    run_id=run_id,
+                    stderr=fallback_reason,
+                    error=fallback_reason,
+                    exit_code=self._EXIT_DATA_QUALITY,
+                    prediction_trade_date=prediction_trade_date,
+                )
             logger.warning(
                 "[InferenceScriptRunner] 主模型数据维度不足，触发 alpha158 兜底, run_id=%s, reason=%s",
                 run_id,
@@ -979,6 +1036,16 @@ class InferenceScriptRunner:
                     if stderr.strip()
                     else "v10 数据质量不足"
                 )
+                if not self.enable_fallback:
+                    self._log_independent_failure(run_id, fallback_reason)
+                    return self._fallback_disabled_result(
+                        date=date,
+                        run_id=run_id,
+                        stderr=stderr,
+                        error=fallback_reason,
+                        exit_code=exit_code,
+                        prediction_trade_date=prediction_trade_date,
+                    )
                 logger.warning(
                     f"[InferenceScriptRunner] v10 数据质量不足 (exit=2)，启动 alpha158 兜底, run_id={run_id}"
                 )

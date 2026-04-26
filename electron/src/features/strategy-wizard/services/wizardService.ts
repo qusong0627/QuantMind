@@ -1,6 +1,7 @@
 import axios from 'axios';
 import { SERVICE_ENDPOINTS } from '../../../config/services';
 import type { Condition, BuyRule, SellRule, RiskConfig } from '../types';
+import { patchMissingStockNames } from '../utils/stockNameIndex';
 
 const client = axios.create({
   baseURL: SERVICE_ENDPOINTS.API_GATEWAY,
@@ -182,7 +183,11 @@ export async function listPoolFiles(payload: { user_id: string; limit?: number }
  */
 export async function previewPoolFile(payload: { user_id: string; file_key: string }) {
   const res = await client.post('/strategy/preview-pool-file', payload, { timeout: 60000 });
-  return res.data;
+  const data = res.data || {};
+  if (Array.isArray(data.items)) {
+    data.items = await patchMissingStockNames(data.items);
+  }
+  return data;
 }
 
 /**

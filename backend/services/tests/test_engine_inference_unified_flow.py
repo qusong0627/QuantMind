@@ -94,6 +94,121 @@ def test_runner_expected_feature_dim_from_metadata_feature_columns(tmp_path: Pat
     assert runner._resolve_expected_feature_dim() == 6
 
 
+def test_runner_alpha158_fallback_defaults_to_qlib_data(tmp_path: Path):
+    model_dir = tmp_path / "model_qlib"
+    model_dir.mkdir(parents=True, exist_ok=True)
+
+    runner = InferenceScriptRunner(models_production=str(model_dir))
+
+    assert runner.fallback_data_dir.endswith("db/qlib_data")
+
+
+def test_runner_can_disable_model_fallback(monkeypatch, tmp_path: Path):
+    model_dir = tmp_path / "alpha158"
+    model_dir.mkdir(parents=True, exist_ok=True)
+    (model_dir / "inference.py").write_text(
+        "#!/usr/bin/env python\nprint('main')\n",
+        encoding="utf-8",
+    )
+
+    runner = InferenceScriptRunner(
+        primary_model_dir=str(model_dir),
+        fallback_model_dir=str(model_dir),
+        primary_model_id="alpha158",
+        fallback_model_id="alpha158",
+        enable_fallback=False,
+    )
+
+    monkeypatch.setattr(runner, "_resolve_expected_feature_dim", lambda: 158)
+    monkeypatch.setattr(
+        runner,
+        "_query_dimension_readiness",
+        lambda trade_date, expected_dim: {"ready": False, "detail": "dim_not_ready"},
+    )
+
+    def _unexpected_fallback(**kwargs):
+        raise AssertionError("fallback should be disabled for independent models")
+
+    monkeypatch.setattr(runner, "_execute_fallback", _unexpected_fallback)
+
+    result = runner.execute("2026-03-20")
+
+    assert result.success is False
+    assert result.fallback_used is False
+    assert result.execution_mode == ""
+    assert result.model_switch_used is False
+    assert result.model_switch_reason == ""
+    assert result.active_model_id == "alpha158"
+    assert "dim_not_ready" in (result.error or "")
+
+
+def test_router_service_alpha158_fallback_defaults_to_qlib_data(monkeypatch):
+    monkeypatch.delenv("QLIB_FALLBACK_DATA_PATH", raising=False)
+
+    from backend.services.engine.inference.router_service import InferenceRouterService
+
+    service = InferenceRouterService()
+
+    assert service.fallback_data_source == "db/qlib_data"
+
+
+def test_router_service_explicit_alpha158_runs_independently(monkeypatch, tmp_path: Path):
+    from backend.services.engine.inference import router_service as router_module
+
+    primary_dir = tmp_path / "model_qlib"
+    primary_dir.mkdir(parents=True, exist_ok=True)
+    alpha_dir = tmp_path / "alpha158"
+    alpha_dir.mkdir(parents=True, exist_ok=True)
+    (alpha_dir / "metadata.json").write_text(
+        '{"data_source": "qlib", "qlib_data_path": "db/qlib_data"}',
+        encoding="utf-8",
+    )
+
+    captured: dict[str, object] = {}
+
+    class _FakeRunner:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def execute(self, date, tenant_id=None, user_id=None, redis_client=None):
+            return ExecutionResult(
+                success=True,
+                exit_code=0,
+                stdout="[]",
+                stderr="",
+                run_id="run_x",
+                active_model_id=str(captured.get("primary_model_id")),
+                active_data_source=str(captured.get("primary_data_dir")),
+            )
+
+    monkeypatch.setattr(router_module, "InferenceScriptRunner", _FakeRunner)
+
+    service = router_module.InferenceRouterService()
+    service.primary_model_dir = str(primary_dir)
+    service.fallback_model_dir = str(alpha_dir)
+
+    result = service.run_daily_inference_script(
+        date="2026-03-20",
+        tenant_id="default",
+        user_id="system",
+        resolved_model={
+            "effective_model_id": "alpha158",
+            "model_source": "explicit_system_model",
+            "storage_path": "",
+            "fallback_reason": "",
+        },
+    )
+
+    assert captured["primary_model_id"] == "alpha158"
+    assert str(captured["primary_model_dir"]).endswith("alpha158")
+    assert captured["primary_data_dir"] == "db/qlib_data"
+    assert captured["enable_fallback"] is False
+    assert result.active_model_id == "alpha158"
+    assert result.execution_mode == "independent_model"
+    assert result.model_switch_used is False
+    assert result.model_switch_reason == ""
+
+
 def test_runner_ready_threshold_is_adaptive(monkeypatch, tmp_path: Path):
     model_dir = tmp_path / "model_qlib"
     model_dir.mkdir(parents=True, exist_ok=True)

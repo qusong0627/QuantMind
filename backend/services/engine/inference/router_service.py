@@ -15,6 +15,40 @@ from .service import InferenceService
 logger = logging.getLogger(__name__)
 
 _NON_FEATURE_KEYS = {"symbol", "instrument", "timestamp", "datetime", "date"}
+_INDEPENDENT_MODEL_SOURCES = {
+    "explicit_model_id",
+    "strategy_binding",
+    "user_default",
+    "explicit_system_model",
+}
+
+
+def _build_execution_meta(
+    *,
+    fallback_used: bool,
+    fallback_reason: str,
+    active_model_id: str,
+    effective_model_id: str,
+    model_source: str,
+    independent_execution: bool | None = None,
+) -> dict[str, Any]:
+    if independent_execution is None:
+        independent_execution = model_source in _INDEPENDENT_MODEL_SOURCES
+
+    model_switch_used = bool(fallback_used) or (
+        bool(active_model_id)
+        and bool(effective_model_id)
+        and str(active_model_id) != str(effective_model_id)
+    )
+    return {
+        "execution_mode": (
+            "independent_model" if independent_execution else "system_chain"
+        ),
+        "model_switch_used": model_switch_used,
+        "model_switch_reason": (
+            str(fallback_reason or "") if model_switch_used else ""
+        ),
+    }
 
 
 def _get_model_data_dir(model_dir: Path) -> str:
@@ -55,7 +89,7 @@ class InferenceRouterService:
         self.primary_model_dir = os.getenv("MODELS_PRODUCTION", "/app/models/production/model_qlib")
         self.fallback_model_dir = os.getenv("MODELS_FALLBACK_PRODUCTION", "/app/models/production/alpha158")
         self.primary_data_source = os.getenv("QLIB_PRIMARY_DATA_PATH", "db/feature_snapshots")
-        self.fallback_data_source = os.getenv("QLIB_FALLBACK_DATA_PATH", "db/feature_snapshots")
+        self.fallback_data_source = os.getenv("QLIB_FALLBACK_DATA_PATH", "db/qlib_data")
 
     def _resolve_data_source(self, model_id: str, model_source: str = "") -> str:
         if model_id == self.fallback_model_id:
@@ -91,6 +125,7 @@ class InferenceRouterService:
         trace_id: str | None,
         model_source: str,
         effective_model_id: str,
+        independent_execution: bool | None = None,
     ) -> dict[str, Any]:
         result = self._enrich_result(
             raw,
@@ -100,6 +135,7 @@ class InferenceRouterService:
             active_data_source=active_data_source,
             model_source=model_source,
             effective_model_id=effective_model_id,
+            independent_execution=independent_execution,
         )
         logger.info(
             "[InferenceRouter] trace_id=%s active_model_id=%s effective_model_id=%s source=%s fallback_used=%s fallback_reason=%s status=%s",
@@ -174,10 +210,22 @@ class InferenceRouterService:
         active_data_source: str,
         model_source: str,
         effective_model_id: str,
+        independent_execution: bool | None = None,
     ) -> dict[str, Any]:
         result = dict(raw or {})
+        execution_meta = _build_execution_meta(
+            fallback_used=fallback_used,
+            fallback_reason=fallback_reason,
+            active_model_id=active_model_id,
+            effective_model_id=effective_model_id,
+            model_source=model_source,
+            independent_execution=independent_execution,
+        )
         result["fallback_used"] = bool(fallback_used)
         result["fallback_reason"] = str(fallback_reason or "")
+        result["execution_mode"] = execution_meta["execution_mode"]
+        result["model_switch_used"] = execution_meta["model_switch_used"]
+        result["model_switch_reason"] = execution_meta["model_switch_reason"]
         result["active_model_id"] = str(active_model_id)
         result["active_data_source"] = str(active_data_source)
         result["model_source"] = str(model_source or "")
@@ -223,6 +271,7 @@ class InferenceRouterService:
                 trace_id=trace_id,
                 model_source=model_source,
                 effective_model_id=effective_mid,
+                independent_execution=requested_model != self.primary_model_id,
             )
 
         dim_ready, dim_detail = self._dimension_gate(requested_model, data)
@@ -238,6 +287,7 @@ class InferenceRouterService:
                     trace_id=trace_id,
                     model_source=model_source,
                     effective_model_id=effective_mid,
+                    independent_execution=False,
                 )
             return self._finalize(
                 raw=fallback,
@@ -248,6 +298,7 @@ class InferenceRouterService:
                 trace_id=trace_id,
                 model_source=model_source,
                 effective_model_id=effective_mid,
+                independent_execution=False,
             )
 
         primary = self._predict_single_model(model_id=requested_model, data=data)
@@ -261,6 +312,7 @@ class InferenceRouterService:
                 trace_id=trace_id,
                 model_source=model_source,
                 effective_model_id=effective_mid,
+                independent_execution=False,
             )
 
         fallback = self._predict_single_model(model_id=self.fallback_model_id, data=data)
@@ -274,6 +326,7 @@ class InferenceRouterService:
                 trace_id=trace_id,
                 model_source=model_source,
                 effective_model_id=effective_mid,
+                independent_execution=False,
             )
 
         return self._finalize(
@@ -288,6 +341,7 @@ class InferenceRouterService:
             trace_id=trace_id,
             model_source=model_source,
             effective_model_id=effective_mid,
+            independent_execution=False,
         )
 
     def predict_with_fallback(
@@ -394,6 +448,7 @@ class InferenceRouterService:
                     trace_id=trace_id,
                     model_source=model_source,
                     effective_model_id=effective_model_id,
+                    independent_execution=True,
                 )
 
             chain_reason = (
@@ -448,14 +503,45 @@ class InferenceRouterService:
         storage_path = str(resolved.get("storage_path") or "").strip()
         fallback_reason = str(resolved.get("fallback_reason") or "")
 
-        primary_dir = storage_path if storage_path and Path(storage_path).exists() else self.primary_model_dir
-        primary_id = effective_model_id if primary_dir == storage_path else self.primary_model_id
-        fallback_dir = self.primary_model_dir if primary_id != self.primary_model_id else self.fallback_model_dir
-        fallback_id = self.primary_model_id if primary_id != self.primary_model_id else self.fallback_model_id
-        primary_data_dir = self.fallback_data_source if (
-            primary_id == self.fallback_model_id or Path(primary_dir).resolve() == Path(self.fallback_model_dir).resolve()
-        ) else self.primary_data_source
-        fallback_data_dir = self.fallback_data_source if fallback_id == self.fallback_model_id else primary_data_dir
+        explicit_storage_dir = storage_path if storage_path and Path(storage_path).exists() else ""
+        independent_execution = (
+            model_source in _INDEPENDENT_MODEL_SOURCES
+            or effective_model_id == self.fallback_model_id
+        )
+
+        if explicit_storage_dir:
+            primary_dir = explicit_storage_dir
+            primary_id = effective_model_id
+            primary_data_dir = _get_model_data_dir(Path(primary_dir))
+        elif effective_model_id == self.fallback_model_id:
+            primary_dir = self.fallback_model_dir
+            primary_id = self.fallback_model_id
+            primary_data_dir = _get_model_data_dir(Path(primary_dir))
+        else:
+            primary_dir = self.primary_model_dir
+            primary_id = self.primary_model_id
+            primary_data_dir = self.primary_data_source
+
+        if independent_execution:
+            fallback_dir = primary_dir
+            fallback_id = primary_id
+            fallback_data_dir = primary_data_dir
+        else:
+            fallback_dir = (
+                self.primary_model_dir
+                if primary_id != self.primary_model_id
+                else self.fallback_model_dir
+            )
+            fallback_id = (
+                self.primary_model_id
+                if primary_id != self.primary_model_id
+                else self.fallback_model_id
+            )
+            fallback_data_dir = (
+                self.fallback_data_source
+                if fallback_id == self.fallback_model_id
+                else primary_data_dir
+            )
 
         runner = InferenceScriptRunner(
             primary_model_dir=primary_dir,
@@ -464,11 +550,27 @@ class InferenceRouterService:
             fallback_data_dir=fallback_data_dir,
             primary_model_id=primary_id,
             fallback_model_id=fallback_id,
+            enable_fallback=not independent_execution,
         )
         result = runner.execute(date, tenant_id=tenant_id, user_id=user_id, redis_client=redis_client)
+        execution_meta = _build_execution_meta(
+            fallback_used=bool(result.fallback_used),
+            fallback_reason=result.fallback_reason or fallback_reason,
+            active_model_id=result.active_model_id,
+            effective_model_id=effective_model_id,
+            model_source=model_source,
+            independent_execution=independent_execution,
+        )
+        result.execution_mode = str(execution_meta["execution_mode"])
+        result.model_switch_used = bool(execution_meta["model_switch_used"])
+        result.model_switch_reason = str(execution_meta["model_switch_reason"])
 
-        # 若用户模型 -> model_qlib 两级仍失败，再补 alpha158 最后兜底。
-        if not result.success and primary_id not in {self.primary_model_id, self.fallback_model_id}:
+        # 仅共享系统链路保留最终 alpha158 补位；独立模型不参与模型间 fallback。
+        if (
+            not independent_execution
+            and not result.success
+            and primary_id not in {self.primary_model_id, self.fallback_model_id}
+        ):
             final_runner = InferenceScriptRunner(
                 primary_model_dir=self.fallback_model_dir,
                 fallback_model_dir=self.fallback_model_dir,
@@ -476,6 +578,7 @@ class InferenceRouterService:
                 fallback_data_dir=self.fallback_data_source,
                 primary_model_id=self.fallback_model_id,
                 fallback_model_id=self.fallback_model_id,
+                enable_fallback=False,
             )
             final_result = final_runner.execute(date, tenant_id=tenant_id, user_id=user_id, redis_client=redis_client)
             if final_result.success:
@@ -483,10 +586,29 @@ class InferenceRouterService:
                 reason = fallback_reason or result.fallback_reason or result.error or "fallback to alpha158"
                 final_result.fallback_reason = reason
                 final_result.active_model_id = self.fallback_model_id
+                final_meta = _build_execution_meta(
+                    fallback_used=True,
+                    fallback_reason=reason,
+                    active_model_id=self.fallback_model_id,
+                    effective_model_id=effective_model_id,
+                    model_source=model_source,
+                    independent_execution=False,
+                )
+                final_result.execution_mode = str(final_meta["execution_mode"])
+                final_result.model_switch_used = bool(
+                    final_meta["model_switch_used"]
+                )
+                final_result.model_switch_reason = str(
+                    final_meta["model_switch_reason"]
+                )
                 return final_result
 
-        if result.success and model_source in {"explicit_model_id", "strategy_binding", "user_default", "explicit_system_model"}:
+        if result.success and model_source in _INDEPENDENT_MODEL_SOURCES:
             result.active_model_id = effective_model_id
-            if fallback_reason and not result.fallback_reason:
+            if (
+                not independent_execution
+                and fallback_reason
+                and not result.fallback_reason
+            ):
                 result.fallback_reason = fallback_reason
         return result

@@ -88,6 +88,9 @@ class PipelineRunResult(BaseModel):
     fusion_rules: dict[str, Any] | None = None
     fallback_used: bool | None = None
     fallback_reason: str | None = None
+    execution_mode: str | None = None
+    model_switch_used: bool | None = None
+    model_switch_reason: str | None = None
     active_model_id: str | None = None
     effective_model_id: str | None = None
     model_source: str | None = None
@@ -114,6 +117,9 @@ class _RunRecord:
     fusion_rules: dict[str, Any] | None = None
     fallback_used: bool | None = None
     fallback_reason: str | None = None
+    execution_mode: str | None = None
+    model_switch_used: bool | None = None
+    model_switch_reason: str | None = None
     active_model_id: str | None = None
     effective_model_id: str | None = None
     model_source: str | None = None
@@ -155,6 +161,9 @@ class PipelineService:
             return {
                 "fallback_used": None,
                 "fallback_reason": None,
+                "execution_mode": None,
+                "model_switch_used": None,
+                "model_switch_reason": None,
                 "active_model_id": None,
                 "effective_model_id": None,
                 "model_source": None,
@@ -163,6 +172,9 @@ class PipelineService:
         return {
             "fallback_used": inference_result.get("fallback_used"),
             "fallback_reason": inference_result.get("fallback_reason"),
+            "execution_mode": inference_result.get("execution_mode"),
+            "model_switch_used": inference_result.get("model_switch_used"),
+            "model_switch_reason": inference_result.get("model_switch_reason"),
             "active_model_id": inference_result.get("active_model_id"),
             "effective_model_id": inference_result.get("effective_model_id"),
             "model_source": inference_result.get("model_source"),
@@ -260,6 +272,9 @@ class PipelineService:
             fusion_rules=result_json.get("fusion_rules"),
             fallback_used=result_json.get("fallback_used", infer_meta.get("fallback_used")),
             fallback_reason=result_json.get("fallback_reason", infer_meta.get("fallback_reason")),
+            execution_mode=result_json.get("execution_mode", infer_meta.get("execution_mode")),
+            model_switch_used=result_json.get("model_switch_used", infer_meta.get("model_switch_used")),
+            model_switch_reason=result_json.get("model_switch_reason", infer_meta.get("model_switch_reason")),
             active_model_id=result_json.get("active_model_id", infer_meta.get("active_model_id")),
             effective_model_id=result_json.get("effective_model_id", infer_meta.get("effective_model_id")),
             model_source=result_json.get("model_source", infer_meta.get("model_source")),
@@ -312,6 +327,9 @@ class PipelineService:
                 inference_meta = self._extract_inference_meta(inference_result)
                 rec.fallback_used = inference_meta.get("fallback_used")
                 rec.fallback_reason = inference_meta.get("fallback_reason")
+                rec.execution_mode = inference_meta.get("execution_mode")
+                rec.model_switch_used = inference_meta.get("model_switch_used")
+                rec.model_switch_reason = inference_meta.get("model_switch_reason")
                 rec.active_model_id = inference_meta.get("active_model_id")
                 rec.effective_model_id = inference_meta.get("effective_model_id")
                 rec.model_source = inference_meta.get("model_source")
@@ -394,6 +412,9 @@ class PipelineService:
                 "fusion_rules": rec.fusion_rules,
                 "fallback_used": rec.fallback_used,
                 "fallback_reason": rec.fallback_reason,
+                "execution_mode": rec.execution_mode,
+                "model_switch_used": rec.model_switch_used,
+                "model_switch_reason": rec.model_switch_reason,
                 "active_model_id": rec.active_model_id,
                 "effective_model_id": rec.effective_model_id,
                 "model_source": rec.model_source,
@@ -422,6 +443,9 @@ class PipelineService:
                     "fusion_rules": rec.fusion_rules,
                     "fallback_used": rec.fallback_used,
                     "fallback_reason": rec.fallback_reason,
+                    "execution_mode": rec.execution_mode,
+                    "model_switch_used": rec.model_switch_used,
+                    "model_switch_reason": rec.model_switch_reason,
                     "active_model_id": rec.active_model_id,
                     "effective_model_id": rec.effective_model_id,
                     "model_source": rec.model_source,
@@ -466,6 +490,9 @@ class PipelineService:
         infer_meta = self._extract_inference_meta(rec.inference_result)
         rec.fallback_used = result_json.get("fallback_used", infer_meta.get("fallback_used"))
         rec.fallback_reason = result_json.get("fallback_reason", infer_meta.get("fallback_reason"))
+        rec.execution_mode = result_json.get("execution_mode", infer_meta.get("execution_mode"))
+        rec.model_switch_used = result_json.get("model_switch_used", infer_meta.get("model_switch_used"))
+        rec.model_switch_reason = result_json.get("model_switch_reason", infer_meta.get("model_switch_reason"))
         rec.active_model_id = result_json.get("active_model_id", infer_meta.get("active_model_id"))
         rec.effective_model_id = result_json.get("effective_model_id", infer_meta.get("effective_model_id"))
         rec.model_source = result_json.get("model_source", infer_meta.get("model_source"))
