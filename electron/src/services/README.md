@@ -25,10 +25,10 @@
   - 新增 SHAP 归因读取能力：`getModelShapSummary`，对接 `/api/v1/models/{model_id}/shap-summary`，返回 `feature/mean_abs_shap/mean_shap/positive_ratio` 列表用于归因分析页展示；
   - 新增策略绑定能力：`getStrategyBinding/setStrategyBinding/deleteStrategyBinding`；
   - 训练结果可直接消费后端 `result.model_registration`（`model_id/status/error`）用于前端“同步状态 + 设默认”闭环。
-  - 模型推理中心新增交易日历能力：
-    - `checkTradingDay/nextTradingDay/prevTradingDay` 对接 `/api/v1/market-calendar/*`；
-    - `resolveInferenceDateByCalendar` 用于将非交易日自动校正到最近上一交易日；
-    - `calcTargetDateByCalendar` 用于按真实交易日历计算 `T+N` 目标日期。
+   - 模型推理中心新增交易日历能力：
+     - `checkTradingDay/nextTradingDay/prevTradingDay` 对接 `/api/v1/market-calendar/*`；
+     - `resolveInferenceDateByCalendar` 用于将非交易日自动校正到最近上一交易日；
+     - `calcTargetDateByCalendar` 用于按真实交易日历计算 `T+N` 目标日期。
 
 - `componentCodeGenerator` 性能报告模板文案口径更新（2026-03-09）：
   - 输出文案中的 `胜率` 调整为 `投资胜率`；

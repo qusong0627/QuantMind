@@ -3,6 +3,10 @@
 用途：Qlib 服务的回测与分析业务逻辑实现。
 
 ## 近期更新
+- 基础风险收益率样本口径修复（2026-04-27）：
+  - `basic_risk_service.py` 计算权益曲线日收益率时，不再将首个 `pct_change` 的 `NaN` 填成 `0%`；
+  - 现改为在清理 `Inf/NaN` 后直接丢弃首个无效样本，避免收益率分布、样本数、均值/中位数等统计被虚假的零收益污染；
+  - 新增 `backend/tests/test_basic_risk_service.py` 回归测试，覆盖“首个日收益不应伪造为 0%”与 histogram 样本数一致性。
 - 交易流水双写去重修复（2026-04-22）：
   - `RiskAnalyzer` 新增交易去重逻辑（`_deduplicate_trades`），按 `date/symbol/action/amount/commission` 主键优先合并 exchange 与 strategy 的重复记录；
   - `normalize_trades_for_display` 与 `_build_trades_list` 统一接入去重，解决“当日买入金额统计翻倍（如 163 万）”问题；

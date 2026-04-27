@@ -1199,7 +1199,7 @@ export const InferenceCenterPanel: React.FC<{
           locale={{ emptyText: historyLoading ? ' ' : '暂无推理记录，点击"执行推理"开始' }}
           columns={[
             {
-              title: '状态', dataIndex: 'status', width: 72,
+              title: '状态', dataIndex: 'status', width: 72, align: 'center',
               render: (s: string) => {
                 const cfgMap: Record<string, { icon: React.ReactNode; text: string; cls: string }> = {
                   completed: { icon: <CheckCircle2 size={11} />, text: '成功', cls: 'text-emerald-600' },
@@ -1207,33 +1207,39 @@ export const InferenceCenterPanel: React.FC<{
                   running: { icon: <Activity size={11} />, text: '进行中', cls: 'text-blue-500' },
                 };
                 const c = cfgMap[s] ?? { icon: <Clock size={11} />, text: s, cls: 'text-slate-400' };
-                return <span className={clsx('flex items-center gap-1 font-black text-[10px]', c.cls)}>{c.icon}{c.text}</span>;
+                return <span className={clsx('flex items-center justify-center gap-1 font-black text-[10px]', c.cls)}>{c.icon}{c.text}</span>;
               },
             },
             {
               title: '基准日期', dataIndex: 'inference_date',
-              render: (d: string) => <Text className="text-xs font-mono text-slate-600">{d}</Text>,
+              align: 'center',
+              render: (d: string) => <Text className="block text-center text-xs font-mono text-slate-600">{d}</Text>,
             },
             {
               title: '预测目标', dataIndex: 'target_date',
-              render: (d: string) => <Text className="text-xs font-mono font-black text-blue-600">{d}</Text>,
+              align: 'center',
+              render: (d: string) => <Text className="block text-center text-xs font-mono font-black text-blue-600">{d}</Text>,
             },
             {
               title: '信号数', dataIndex: 'signals_count',
+              align: 'center',
               render: (n: number, r: any) => r.status === 'failed'
-                ? <Tooltip title={r.error_msg}><Tag color="red" className="text-[9px] font-bold cursor-help">失败</Tag></Tooltip>
-                : <Text className="text-xs font-black text-slate-700">{n}</Text>,
+                ? <div className="text-center"><Tooltip title={r.error_msg}><Tag color="red" className="text-[9px] font-bold cursor-help">失败</Tag></Tooltip></div>
+                : <Text className="block text-center text-xs font-black text-slate-700">{n}</Text>,
             },
             {
               title: '耗时', dataIndex: 'duration_ms',
-              render: (ms: number) => <Text className="text-[10px] text-slate-400">{(ms / 1000).toFixed(1)}s</Text>,
+              align: 'center',
+              render: (ms: number) => <Text className="block text-center text-[10px] text-slate-400">{(ms / 1000).toFixed(1)}s</Text>,
             },
             {
-              title: '操作', key: 'action',
+              title: '操作', key: 'action', align: 'center',
               render: (_: any, r: InferenceRunRecord) => (
-                <Button type="link" size="small" className="font-black text-blue-600 p-0 text-[11px]" onClick={() => onViewRanking(r.run_id)}>
-                  查看详情
-                </Button>
+                <div className="text-center">
+                  <Button type="link" size="small" className="font-black text-blue-600 p-0 text-[11px]" onClick={() => onViewRanking(r.run_id)}>
+                    查看详情
+                  </Button>
+                </div>
               ),
             },
           ]}

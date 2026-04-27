@@ -153,8 +153,9 @@ class BasicRiskService:
             ).warning("equity_invalid", "equity_curve 全部为无效 value")
             return None
 
+        # 首个 pct_change 为 NaN，不应被当作真实 0% 收益写入分布与统计。
         returns = values.pct_change()
-        returns = returns.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+        returns = returns.replace([np.inf, -np.inf], np.nan).dropna()
 
         StructuredTaskLogger(
             logger,

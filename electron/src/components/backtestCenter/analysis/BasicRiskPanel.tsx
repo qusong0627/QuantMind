@@ -153,28 +153,32 @@ export const BasicRiskPanel: React.FC<BasicRiskPanelProps> = ({ backtestId }) =>
         </div>
 
         {/* Daily Returns Chart */}
-        <div className="bg-white rounded-2xl border border-gray-200 p-4">
+        <div className="bg-white rounded-2xl border border-gray-200 p-4 h-[460px] flex flex-col">
           <h3 className="text-sm font-medium text-gray-700 mb-4">每日收益率</h3>
           {hasSeriesData(data.daily_returns) ? (
-            <ReactECharts
-              option={getDailyReturnsOption(data.daily_returns)}
-              style={{ height: '300px' }}
-              opts={{ renderer: 'canvas' }}
-            />
+            <div className="flex-1 min-h-0">
+              <ReactECharts
+                option={getDailyReturnsOption(data.daily_returns)}
+                style={{ height: '100%' }}
+                opts={{ renderer: 'canvas' }}
+              />
+            </div>
           ) : (
             <EmptyChart />
           )}
         </div>
 
         {/* Returns Distribution Chart */}
-        <div className="bg-white rounded-2xl border border-gray-200 p-4">
+        <div className="bg-white rounded-2xl border border-gray-200 p-4 h-[460px] flex flex-col">
           <h3 className="text-sm font-medium text-gray-700 mb-4">收益率分布</h3>
           {hasHistogramData(data.returns_distribution) ? (
-            <ReactECharts
-              option={getReturnsDistributionOption(data.returns_distribution)}
-              style={{ height: '300px' }}
-              opts={{ renderer: 'canvas' }}
-            />
+            <div className="flex-1 min-h-0">
+              <ReactECharts
+                option={getReturnsDistributionOption(data.returns_distribution)}
+                style={{ height: '100%' }}
+                opts={{ renderer: 'canvas' }}
+              />
+            </div>
           ) : (
             <EmptyChart />
           )}
@@ -397,6 +401,14 @@ function getReturnsDistributionOption(data: { bins: number[]; counts: number[] }
     yAxis: {
       type: 'value',
       name: '频次',
+      nameLocation: 'end',
+      nameGap: 14,
+      nameTextStyle: {
+        color: '#6b7280',
+        fontSize: 11,
+        align: 'left',
+        padding: [0, 0, 2, 0],
+      },
     },
     series: [
       {
