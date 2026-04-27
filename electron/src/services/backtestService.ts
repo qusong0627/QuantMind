@@ -45,6 +45,9 @@ export interface BacktestConfig {
   market_state_symbol?: string;
   market_state_window?: number;
   strategy_total_position?: number;
+  signal_lag_days?: number;
+  allow_feature_signal_fallback?: boolean;
+  use_vectorized?: boolean;
 
   // 可选参数
   strategy_params?: Record<string, any>;
@@ -103,7 +106,7 @@ export interface BacktestResult {
   calmar_ratio?: number;
 
   // 相对基准指标
-  alpha?: number;
+  alpha?: number | null;
   beta?: number;
   correlation?: number;
   tracking_error?: number;
@@ -758,6 +761,16 @@ class BacktestService {
         config.market_state_symbol ?? strategyParams.market_state_symbol,
       style: config.style ?? strategyParams.style,
     };
+
+    if (config.signal_lag_days != null) {
+      payload.signal_lag_days = config.signal_lag_days;
+    }
+    if (typeof config.allow_feature_signal_fallback === 'boolean') {
+      payload.allow_feature_signal_fallback = config.allow_feature_signal_fallback;
+    }
+    if (typeof config.use_vectorized === 'boolean') {
+      payload.use_vectorized = config.use_vectorized;
+    }
 
     if (hasBuyCost) {
       payload.buy_cost = buyCost;

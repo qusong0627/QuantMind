@@ -37,6 +37,7 @@ _OUR_KWARGS = {
     "drop_thresh",
     # 股票池文件路径（由平台在上层消费，不传给 qlib BaseStrategy）
     "pool_file",
+    "pool_file_local",
     "pool_file_key",
     "pool_file_url",
     # AI/前端策略生成参数（由平台上层消费，不传给 qlib BaseStrategy）

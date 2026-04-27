@@ -183,7 +183,7 @@ class QlibBacktestServiceRuntimeMixin(QlibBacktestServiceQueryMixin):
 
             task_log.info("signal_raw", "原始signal配置", signal=request.strategy_params.signal)
             signal_data, signal_meta = await self._build_signal_data(request)
-            self._enforce_signal_quality(signal_meta)
+            self._enforce_signal_quality(signal_meta, request=request)
             is_dataframe = isinstance(signal_data, (pd.DataFrame, pd.Series))
             task_log.info(
                 "signal_built",
@@ -546,15 +546,24 @@ class QlibBacktestServiceRuntimeMixin(QlibBacktestServiceQueryMixin):
     def _build_pred_signal_meta(
         self, pred: pd.DataFrame, pred_path: str, request: QlibBacktestRequest
     ) -> dict[str, Any]:
-        datetime_index = pd.to_datetime(pred.index.get_level_values("datetime"))
+        lag_days = int(getattr(request, "signal_lag_days", 1) or 0)
+        effective_pred = self._lag_signal_frame(pred, lag_days)
+        datetime_index = (
+            pd.to_datetime(effective_pred.index.get_level_values("datetime"))
+            if len(effective_pred.index) > 0
+            else pd.DatetimeIndex([])
+        )
         max_available_date = datetime_index.max()
         task_logger.info("signal_meta_extraction", "提取信号元数据",
-                         max_date=str(max_available_date.date()) if not pd.isnull(max_available_date) else None)
+                          max_date=str(max_available_date.date()) if not pd.isnull(max_available_date) else None)
 
-        date_mask = (datetime_index >= pd.Timestamp(request.start_date)) & (
-            datetime_index <= pd.Timestamp(request.end_date)
+        date_mask = (
+            (datetime_index >= pd.Timestamp(request.start_date))
+            & (datetime_index <= pd.Timestamp(request.end_date))
+            if len(datetime_index) > 0
+            else []
         )
-        pred_in_range = pred.loc[date_mask]
+        pred_in_range = effective_pred.loc[date_mask] if len(datetime_index) > 0 else effective_pred.iloc[0:0]
         score = pred_in_range["score"] if "score" in pred_in_range.columns else pd.Series(dtype=float)
         nan_ratio = float(score.isna().mean()) if len(score) > 0 else 1.0
         return {
@@ -565,10 +574,31 @@ class QlibBacktestServiceRuntimeMixin(QlibBacktestServiceQueryMixin):
             "date_count": int(pred_in_range.index.get_level_values("datetime").nunique()),
             "instrument_count": int(pred_in_range.index.get_level_values("instrument").nunique()),
             "score_nan_ratio": nan_ratio,
+            "signal_lag_days": lag_days,
         }
 
-    def _enforce_signal_quality(self, signal_meta: dict[str, Any]) -> None:
+    @staticmethod
+    def _feature_fallback_allowed(request: QlibBacktestRequest | None = None) -> bool:
+        if request is not None and bool(getattr(request, "allow_feature_signal_fallback", False)):
+            return True
+        return os.getenv("QLIB_ALLOW_FEATURE_SIGNAL_FALLBACK", "false").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+
+    def _enforce_signal_quality(
+        self,
+        signal_meta: dict[str, Any],
+        request: QlibBacktestRequest | None = None,
+    ) -> None:
         source = signal_meta.get("source")
+        if source == "close_fallback" and not self._feature_fallback_allowed(request):
+            raise ValueError(
+                "信号质量预检失败：预测信号缺失且默认禁止回退到 $close。"
+                "如确需使用行情特征信号，请显式设置 allow_feature_signal_fallback=true。"
+            )
         require_pred = os.getenv("QLIB_BACKTEST_REQUIRE_PRED", "false").strip().lower() in {"1", "true", "yes", "on"}
         if source == "close_fallback" and require_pred:
             raise ValueError(
@@ -623,6 +653,7 @@ class QlibBacktestServiceRuntimeMixin(QlibBacktestServiceQueryMixin):
                         "source": "close_fallback",
                         "fallback_reason": "pred_pkl_invalid_type",
                         "pred_path": pred_path,
+                        "signal_lag_days": int(getattr(request, "signal_lag_days", 1) or 0),
                     }
 
                 if not (hasattr(pred, "index") and "datetime" in pred.index.names and "instrument" in pred.index.names):
@@ -645,6 +676,7 @@ class QlibBacktestServiceRuntimeMixin(QlibBacktestServiceQueryMixin):
                     "kwargs": {
                         "pred_path": pred_path,
                         "universe": request.universe,
+                        "signal_lag_days": int(getattr(request, "signal_lag_days", 1) or 0),
                     },
                 }, signal_meta
 
@@ -656,6 +688,7 @@ class QlibBacktestServiceRuntimeMixin(QlibBacktestServiceQueryMixin):
                     "kwargs": {
                         "metric": "$close",
                         "universe": request.universe,
+                        "signal_lag_days": int(getattr(request, "signal_lag_days", 1) or 0),
                     },
                 }, {
                     "source": "close_fallback",
@@ -786,13 +819,22 @@ class QlibBacktestServiceRuntimeMixin(QlibBacktestServiceQueryMixin):
                 pred_path=pred_path,
                 resolved_path=resolved_path,
             )
-            return "$close", {
+            return {
+                "class": "SimpleSignal",
+                "module_path": "backend.services.engine.qlib_app.utils.simple_signal",
+                "kwargs": {
+                    "metric": "$close",
+                    "universe": request.universe,
+                    "signal_lag_days": int(getattr(request, "signal_lag_days", 1) or 0),
+                },
+            }, {
                 **registry_meta,
                 "source": "close_fallback",
                 "fallback_reason": "pred_path_not_found",
                 "legacy_pred_path": resolved_path,
+                "signal_lag_days": int(getattr(request, "signal_lag_days", 1) or 0),
             }
-        elif feature.endswith(".pkl"):
+        elif feature.endswith((".pkl", ".parquet")):
             resolved_path = self._resolve_path(feature)
             if resolved_path and os.path.exists(resolved_path):
                 task_logger.info("load_prediction", "Loading prediction from path", feature=feature, resolved_path=resolved_path)
@@ -829,20 +871,55 @@ class QlibBacktestServiceRuntimeMixin(QlibBacktestServiceQueryMixin):
             )
             if df is None or df.empty:
                 raise ValueError("signal data is empty")
+            lag_days = int(getattr(request, "signal_lag_days", 1) or 0)
+            df = self._lag_signal_frame(df, lag_days)
             return df, {
                 "source": "feature_field",
                 "feature": feature,
                 "rows_in_range": int(len(df)),
                 "date_count": int(df.index.get_level_values("datetime").nunique()),
                 "instrument_count": int(df.index.get_level_values("instrument").nunique()),
+                "signal_lag_days": lag_days,
             }
         except Exception as exc:
             task_logger.warning("signal_build_failed", "Signal build failed", feature=feature, error=str(exc))
-            return "$close", {
+            return {
+                "class": "SimpleSignal",
+                "module_path": "backend.services.engine.qlib_app.utils.simple_signal",
+                "kwargs": {
+                    "metric": "$close",
+                    "universe": request.universe,
+                    "signal_lag_days": int(getattr(request, "signal_lag_days", 1) or 0),
+                },
+            }, {
                 "source": "close_fallback",
                 "fallback_reason": "feature_build_failed",
                 "feature": feature,
+                "signal_lag_days": int(getattr(request, "signal_lag_days", 1) or 0),
             }
+
+    @staticmethod
+    def _lag_signal_frame(data: pd.DataFrame | pd.Series, lag_days: int) -> pd.DataFrame | pd.Series:
+        if lag_days <= 0 or not isinstance(data.index, pd.MultiIndex) or "datetime" not in data.index.names:
+            return data
+        date_values = pd.to_datetime(data.index.get_level_values("datetime")).normalize()
+        unique_dates = pd.Index(date_values.unique()).sort_values()
+        if len(unique_dates) == 0:
+            return data
+        shifted_dates = unique_dates.to_series(index=unique_dates).shift(-lag_days)
+        mapped_dates = date_values.map(shifted_dates)
+        valid_mask = ~pd.isna(mapped_dates)
+        if not valid_mask.any():
+            return data.iloc[0:0]
+        result = data.loc[valid_mask].copy()
+        arrays = []
+        for name in result.index.names:
+            if name == "datetime":
+                arrays.append(pd.DatetimeIndex(mapped_dates[valid_mask]))
+            else:
+                arrays.append(result.index.get_level_values(name))
+        result.index = pd.MultiIndex.from_arrays(arrays, names=result.index.names)
+        return result.sort_index()
 
     def _cleanup_stale_runs(self, ttl_hours: int = 2) -> None:
         """清理内存中超过 ttl_hours 小时的已完成/失败任务，防止内存泄漏"""

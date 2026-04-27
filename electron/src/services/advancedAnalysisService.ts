@@ -119,7 +119,7 @@ export interface TradeStatsResponse {
 export interface BenchmarkMetrics {
   excess_return: number;
   beta: number;
-  alpha: number;
+  alpha: number | null;
   tracking_error: number;
   upside_capture: number;
   downside_capture: number;
@@ -285,6 +285,10 @@ function finiteOrZero(value: unknown): number {
   return Number.isFinite(value) ? Number(value) : 0;
 }
 
+function finiteOrNull(value: unknown): number | null {
+  return Number.isFinite(value) ? Number(value) : null;
+}
+
 function resolveUserId(explicitUserId?: string): string {
   if (explicitUserId?.trim()) return explicitUserId;
   const storedUser = authService.getStoredUser();
@@ -368,7 +372,7 @@ function sanitizeBenchmarkResponse(
     metrics: {
       excess_return: Number.isFinite(raw?.metrics?.excess_return) ? raw.metrics.excess_return : 0,
       beta: Number.isFinite(raw?.metrics?.beta) ? raw.metrics.beta : 0,
-      alpha: Number.isFinite(raw?.metrics?.alpha) ? raw.metrics.alpha : 0,
+      alpha: finiteOrNull(raw?.metrics?.alpha),
       tracking_error: Number.isFinite(raw?.metrics?.tracking_error) ? raw.metrics.tracking_error : 0,
       upside_capture: Number.isFinite(raw?.metrics?.upside_capture) ? raw.metrics.upside_capture : 0,
       downside_capture: Number.isFinite(raw?.metrics?.downside_capture) ? raw.metrics.downside_capture : 0,

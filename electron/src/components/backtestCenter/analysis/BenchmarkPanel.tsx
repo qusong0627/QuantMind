@@ -298,7 +298,7 @@ function getCaptureOption(data: BenchmarkComparisonResponse) {
 
 interface MetricCardProps {
   label: string;
-  value: number;
+  value: number | null;
   format: 'percent' | 'number';
   icon?: React.ComponentType<{ className?: string }>;
   useMarketColor?: boolean;
@@ -313,13 +313,22 @@ const MetricCard: React.FC<MetricCardProps> = ({
   useMarketColor = false,
   decimals = 2,
 }) => {
-  const marketColor = value > 0 ? 'text-red-600 bg-red-50' : value < 0 ? 'text-green-600 bg-green-50' : 'text-gray-600 bg-gray-50';
+  const hasFiniteValue = value != null && Number.isFinite(value);
+  const marketColor = hasFiniteValue
+    ? value > 0
+      ? 'text-red-600 bg-red-50'
+      : value < 0
+        ? 'text-green-600 bg-green-50'
+        : 'text-gray-600 bg-gray-50'
+    : 'text-gray-400 bg-gray-50';
   const neutralColor = 'text-orange-600 bg-orange-50';
-  const appliedColor = useMarketColor ? marketColor : neutralColor;
+  const appliedColor = hasFiniteValue ? (useMarketColor ? marketColor : neutralColor) : marketColor;
 
-  const formattedValue = format === 'percent'
-    ? `${(value * 100).toFixed(decimals)}%`
-    : value.toFixed(decimals);
+  const formattedValue = !hasFiniteValue
+    ? '-'
+    : format === 'percent'
+      ? `${(value * 100).toFixed(decimals)}%`
+      : value.toFixed(decimals);
 
   return (
     <div className="bg-white rounded-2xl border border-gray-200 p-4 hover:shadow-md transition-shadow flex flex-col items-center text-center relative overflow-hidden">

@@ -210,7 +210,9 @@ class MarketStateService:
         for idx in range(len(df)):
             if idx < window:
                 continue
-            date = df.iloc[idx]["datetime"]
+            if idx + 1 >= len(df):
+                continue
+            date = df.iloc[idx + 1]["datetime"]
             ret = roll_ret.iloc[idx]
             vol = roll_vol.iloc[idx]
             vratio = volume_ratio.iloc[idx]

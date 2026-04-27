@@ -21,27 +21,6 @@ def _exclude_bj_instruments(codes):
     return [c for c in codes if not _is_bj_instrument(c)]
 
 
-def _normalize_qlib_symbol(code: str) -> str:
-    code_str = str(code or "").strip()
-    if not code_str:
-        return ""
-    upper = code_str.upper()
-    if len(upper) == 8 and upper[:2] in {"SH", "SZ", "BJ"}:
-        return upper.lower()
-    if len(upper) == 9 and "." in upper:
-        left, right = upper.split(".", 1)
-        if len(left) == 6 and left.isdigit() and right in {"SH", "SZ", "BJ"}:
-            return f"{right}{left}".lower()
-    if len(upper) == 6 and upper.isdigit():
-        if upper.startswith(("6", "9")):
-            return f"sh{upper}"
-        if upper.startswith(("0", "2", "3")):
-            return f"sz{upper}"
-        if upper.startswith(("4", "8")):
-            return f"bj{upper}"
-    return code_str.lower()
-
-
 class SimpleSignal(Signal):
     """
     A lightweight signal adapter that returns either a precomputed pred.pkl signal
@@ -53,10 +32,12 @@ class SimpleSignal(Signal):
         metric: str = "$close",
         universe: str = "all",
         pred_path: str | None = None,
+        signal_lag_days: int = 1,
     ):
         self.metric = metric
         self.universe = universe
         self._pred_path = pred_path
+        self.signal_lag_days = max(0, int(signal_lag_days or 0))
         self._pred_series: pd.Series | None = None
         self._universe_codes: set[str] | None = None
         self._daily_cache: dict[pd.Timestamp, pd.Series] = {}
@@ -103,9 +84,7 @@ class SimpleSignal(Signal):
                     continue
                 if "\t" in code:
                     code = code.split("\t", 1)[0].strip()
-                normalized = _normalize_qlib_symbol(code)
-                if normalized:
-                    instruments.append(normalized)
+                instruments.append(code)
         return _exclude_bj_instruments(instruments)
 
     def _get_universe_instruments(self) -> list[str]:
@@ -151,6 +130,30 @@ class SimpleSignal(Signal):
         if series.index.names != ["datetime", "instrument"]:
             series.index = series.index.set_names(["datetime", "instrument"])
         return series.sort_index()
+
+    def _lag_series_by_trading_days(self, series: pd.Series) -> pd.Series:
+        if self.signal_lag_days <= 0 or series.empty:
+            return series
+        if not isinstance(series.index, pd.MultiIndex) or "datetime" not in series.index.names:
+            return series
+
+        date_values = pd.to_datetime(series.index.get_level_values("datetime")).normalize()
+        unique_dates = pd.Index(date_values.unique()).sort_values()
+        shifted_dates = unique_dates.to_series(index=unique_dates).shift(-self.signal_lag_days)
+        mapped_dates = date_values.map(shifted_dates)
+        valid_mask = ~pd.isna(mapped_dates)
+        if not valid_mask.any():
+            return series.iloc[0:0]
+
+        result = series.loc[valid_mask].copy()
+        arrays = []
+        for name in result.index.names:
+            if name == "datetime":
+                arrays.append(pd.DatetimeIndex(mapped_dates[valid_mask]))
+            else:
+                arrays.append(result.index.get_level_values(name))
+        result.index = pd.MultiIndex.from_arrays(arrays, names=result.index.names)
+        return result.sort_index()
 
     def _slice_time(self, series: pd.Series, start_time, end_time) -> pd.Series:
         if start_time is None and end_time is None:
@@ -232,6 +235,7 @@ class SimpleSignal(Signal):
                 return None
 
             series = self._normalize_series(series)
+            series = self._lag_series_by_trading_days(series)
             series = self._align_instrument_case(series)
             universe_codes = self._get_universe_code_set()
             if universe_codes:
@@ -332,32 +336,63 @@ class SimpleSignal(Signal):
     def get_signal(self, start_time, end_time):
         if self._pred_path:
             series = self._load_pred_series(start_time, end_time)
-            if series is not None and not series.empty:
-                dates = series.index.get_level_values("datetime")
-                target_date = dates.max() if len(dates) > 1 else dates.iloc[0]
-                daily = series.xs(target_date, level="datetime")
-                if not daily.empty:
-                    task_logger.debug(
-                        "return_pred_signal",
-                        "SimpleSignal returning pred signal",
-                        entries=len(daily),
-                        start_time=start_time,
-                        end_time=end_time,
-                        target_date=str(target_date),
-                        min=float(daily.min()),
-                        max=float(daily.max()),
-                        std=float(daily.std(ddof=0)),
-                    )
-                    return daily
+            if series is None:
+                task_logger.warning(
+                    "pred_signal_unavailable",
+                    "预测信号不可用，返回空信号而不是回退到行情特征",
+                    start_time=start_time,
+                    end_time=end_time,
+                    pred_path=self._pred_path,
+                )
+                return pd.Series(dtype=float)
+            if series.empty:
+                task_logger.info(
+                    "pred_signal_empty",
+                    "当前请求区间没有可交易预测信号，返回空信号",
+                    start_time=start_time,
+                    end_time=end_time,
+                    pred_path=self._pred_path,
+                )
+                return pd.Series(dtype=float)
+
+            dates = series.index.get_level_values("datetime")
+            target_date = dates.max() if len(dates) > 1 else dates.iloc[0]
+            daily = series.xs(target_date, level="datetime")
+            if daily.empty:
+                task_logger.info(
+                    "pred_signal_daily_empty",
+                    "预测信号切片为空，返回空信号",
+                    start_time=start_time,
+                    end_time=end_time,
+                    target_date=str(target_date),
+                )
+                return pd.Series(dtype=float)
+            task_logger.debug(
+                "return_pred_signal",
+                "SimpleSignal returning pred signal",
+                entries=len(daily),
+                start_time=start_time,
+                end_time=end_time,
+                target_date=str(target_date),
+                min=float(daily.min()),
+                max=float(daily.max()),
+                std=float(daily.std(ddof=0)),
+            )
+            return daily
 
         try:
             instruments = self._get_universe_instruments()
             if not instruments:
                 task_logger.warning("universe_empty_return_blank", "Universe 股票池为空，返回空信号", universe=self.universe)
                 return pd.Series(dtype=float)
-            df = D.features(instruments, [self.metric], start_time=start_time, end_time=end_time)
+            query_start = start_time
+            if self.signal_lag_days > 0 and start_time is not None:
+                query_start = pd.to_datetime(start_time) - pd.Timedelta(days=max(10, self.signal_lag_days * 10))
+            df = D.features(instruments, [self.metric], start_time=query_start, end_time=end_time)
             if df is not None and not df.empty:
                 series = df[self.metric]
+                series = self._normalize_series(series)
+                series = self._lag_series_by_trading_days(series)
                 if isinstance(series.index, pd.MultiIndex):
                     if "datetime" in series.index.names:
                         dates = series.index.get_level_values("datetime")

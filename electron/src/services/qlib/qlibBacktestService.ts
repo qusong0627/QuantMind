@@ -375,8 +375,15 @@ class QlibBacktestService {
         user_id: config.user_id,
         tenant_id: config.tenant_id || 'default',
         seed: config.seed,
-        use_vectorized: config.use_vectorized ?? true
+        use_vectorized: config.use_vectorized ?? false
       };
+
+      if (config.signal_lag_days != null) {
+        payload.signal_lag_days = config.signal_lag_days;
+      }
+      if (typeof config.allow_feature_signal_fallback === 'boolean') {
+        payload.allow_feature_signal_fallback = config.allow_feature_signal_fallback;
+      }
 
       // CustomStrategy 必须携带 strategy_content
       if (config.strategy_content?.trim()) {

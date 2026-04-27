@@ -49,6 +49,11 @@ class VectorizedBacktestEngine:
 
             sig_wide = signals["score"].unstack(level="instrument")
             price_wide = prices["$close"].unstack(level="instrument").reindex_like(sig_wide).ffill()
+            valid_dates = sig_wide.index.intersection(price_wide.dropna(how="all").index)
+            sig_wide = sig_wide.loc[valid_dates]
+            price_wide = price_wide.loc[valid_dates]
+            if len(sig_wide) < 2:
+                raise ValueError("vectorized backtest requires at least two aligned signal/price dates after lagging")
 
             # 2. Daily returns (next day return)
             # Ret_{t+1} = (P_{t+1} / P_{t}) - 1

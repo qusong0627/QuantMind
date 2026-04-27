@@ -2,7 +2,7 @@
  * QlibBacktestService 单元测试
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { qlibBacktestService, QlibBacktestError } from '../qlibBacktestService';
 import type { QlibBacktestConfig } from '../../../types/backtest/qlib';
 
@@ -77,6 +77,48 @@ describe('QlibBacktestService', () => {
   });
 
   describe('API参数验证', () => {
+    it('应该透传安全参数且默认关闭向量化', async () => {
+      const config: QlibBacktestConfig = {
+        symbol: '000001.SZ',
+        start_date: '2024-01-01',
+        end_date: '2024-12-31',
+        initial_capital: 1000000,
+        user_id: 'test_user',
+        qlib_strategy_type: 'TopkDropout',
+        qlib_strategy_params: {},
+        signal_lag_days: 0,
+        allow_feature_signal_fallback: true,
+      };
+      const service = qlibBacktestService as any;
+      const originalClient = service.client;
+      const originalRequestWithRetry = service.requestWithRetry;
+      const post = vi.fn().mockResolvedValue({
+        data: {
+          backtest_id: 'bt-1',
+          status: 'pending',
+          created_at: '2024-01-01T00:00:00Z',
+        },
+      });
+      service.client = { post };
+      service.requestWithRetry = async (requestFn: () => Promise<unknown>) => requestFn();
+
+      try {
+        await qlibBacktestService.runBacktest(config);
+      } finally {
+        service.client = originalClient;
+        service.requestWithRetry = originalRequestWithRetry;
+      }
+
+      expect(post).toHaveBeenCalledWith(
+        '/qlib/backtest',
+        expect.objectContaining({
+          signal_lag_days: 0,
+          allow_feature_signal_fallback: true,
+          use_vectorized: false,
+        }),
+      );
+    });
+
     it('getResult应该拒绝空的backtestId', async () => {
       await expect(qlibBacktestService.getResult('')).rejects.toThrow(
         QlibBacktestError

@@ -87,6 +87,8 @@ export interface QlibBacktestConfig {
   benchmark_symbol?: string;
   seed?: number;
   use_vectorized?: boolean;
+  signal_lag_days?: number;
+  allow_feature_signal_fallback?: boolean;
 }
 
 /** Qlib回测结果 */
@@ -110,7 +112,7 @@ export interface QlibBacktestResult {
   max_drawdown?: number;
   volatility?: number;
   sharpe_ratio?: number;
-  alpha?: number;
+  alpha?: number | null;
   beta?: number;
   information_ratio?: number;
   benchmark_return?: number;

@@ -190,7 +190,7 @@ class BenchmarkMetrics(BaseModel):
 
     excess_return: float = Field(..., description="超额收益")
     beta: float = Field(..., description="Beta系数")
-    alpha: float = Field(..., description="Alpha")
+    alpha: float | None = Field(None, description="Alpha")
     tracking_error: float = Field(..., description="跟踪误差")
     upside_capture: float = Field(..., description="上行捕获比")
     downside_capture: float = Field(..., description="下行捕获比")

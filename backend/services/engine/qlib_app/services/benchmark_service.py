@@ -22,6 +22,7 @@ from backend.services.engine.qlib_app.utils.qlib_utils import D
 from backend.services.engine.qlib_app.utils.structured_logger import StructuredTaskLogger
 
 logger = logging.getLogger(__name__)
+DEFAULT_RISK_FREE_RATE = 0.02
 
 
 class BenchmarkService:
@@ -65,13 +66,20 @@ class BenchmarkService:
 
             # 计算指标
             beta = self._calc_beta(aligned["strategy"], aligned["benchmark"])
-            alpha = float((aligned["strategy"] - beta * aligned["benchmark"]).mean() * 252)
-            tracking_error = float(excess.std(ddof=1) * np.sqrt(252))
-            correlation = float(aligned["strategy"].corr(aligned["benchmark"]))
+            alpha = self._calc_alpha(
+                aligned["strategy"],
+                aligned["benchmark"],
+                beta=beta,
+                risk_free_rate=DEFAULT_RISK_FREE_RATE,
+            )
+            tracking_error = self._to_finite_float(excess.std(ddof=1) * np.sqrt(252)) or 0.0
+            correlation = self._to_finite_float(aligned["strategy"].corr(aligned["benchmark"])) or 0.0
             strategy_cum = (1.0 + aligned["strategy"]).cumprod() - 1.0
             benchmark_cum = (1.0 + aligned["benchmark"]).cumprod() - 1.0
             excess_curve = strategy_cum - benchmark_cum
-            excess_return = float(excess_curve.iloc[-1]) if len(excess_curve) > 0 else 0.0
+            excess_return = self._to_finite_float(excess_curve.iloc[-1]) if len(excess_curve) > 0 else 0.0
+            if excess_return is None:
+                excess_return = 0.0
             upside_capture, downside_capture = self._calc_capture(aligned)
 
             metrics = BenchmarkMetrics(
@@ -164,17 +172,54 @@ class BenchmarkService:
         returns = np.random.normal(0.0004, 0.01, len(dates))
         return pd.Series(returns, index=dates)
 
+    @staticmethod
+    def _to_finite_float(value: object) -> float | None:
+        try:
+            val = float(value)
+        except (TypeError, ValueError):
+            return None
+        if np.isnan(val) or np.isinf(val):
+            return None
+        return val
+
+    @classmethod
+    def _annualize_compounded_return(cls, returns: pd.Series) -> float | None:
+        periods = len(returns)
+        if periods <= 0:
+            return None
+        compounded = cls._to_finite_float((1.0 + returns).prod())
+        if compounded is None or compounded <= 0:
+            return None
+        return cls._to_finite_float(compounded ** (252 / periods) - 1)
+
     def _calc_beta(self, strategy: pd.Series, benchmark: pd.Series) -> float:
         var = benchmark.var(ddof=1)
         if var == 0:
             return 0.0
-        return float(strategy.cov(benchmark) / var)
+        beta = self._to_finite_float(strategy.cov(benchmark) / var)
+        return beta if beta is not None else 0.0
+
+    def _calc_alpha(
+        self,
+        strategy: pd.Series,
+        benchmark: pd.Series,
+        beta: float,
+        risk_free_rate: float,
+    ) -> float | None:
+        strategy_annual = self._annualize_compounded_return(strategy)
+        benchmark_annual = self._annualize_compounded_return(benchmark)
+        if strategy_annual is None or benchmark_annual is None:
+            return None
+        alpha = strategy_annual - (risk_free_rate + beta * (benchmark_annual - risk_free_rate))
+        return self._to_finite_float(alpha)
 
     def _calc_capture(self, aligned: pd.DataFrame) -> tuple[float, float]:
         up = aligned[aligned["benchmark"] > 0]
         down = aligned[aligned["benchmark"] < 0]
         upside_base = up["benchmark"].mean() if not up.empty else 0.0
         downside_base = down["benchmark"].mean() if not down.empty else 0.0
-        upside = float(up["strategy"].mean() / upside_base) if upside_base else 0.0
-        downside = float(down["strategy"].mean() / downside_base) if downside_base else 0.0
+        upside = self._to_finite_float(up["strategy"].mean() / upside_base) if upside_base else 0.0
+        downside = self._to_finite_float(down["strategy"].mean() / downside_base) if downside_base else 0.0
+        upside = upside if upside is not None else 0.0
+        downside = downside if downside is not None else 0.0
         return upside, downside

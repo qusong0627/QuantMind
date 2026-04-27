@@ -125,6 +125,16 @@ class QlibBacktestRequest(BaseModel):
     # 若信号包含当日收盘价因子（如 $close），则存在前视偏差（Look-ahead Bias），
     # 会高估策略收益。生产环境建议改用 deal_price="open" 以避免偏差。
     deal_price: Literal["open", "close"] = Field("close", description="成交价格类型")
+    signal_lag_days: int = Field(
+        1,
+        description="信号生效滞后交易日数；默认 T 日信号在 T+1 生效，避免同日收盘信号同日成交",
+        ge=0,
+        le=5,
+    )
+    allow_feature_signal_fallback: bool = Field(
+        False,
+        description="是否允许预测信号缺失时回退到行情特征信号；默认禁止静默回退到 $close",
+    )
 
     # 无风险利率（年化），用于 Sharpe Ratio 和 CAPM Alpha 计算
     # 中国常用参考：银行一年期存款利率约 1.5%，货币基金约 2%
@@ -179,7 +189,7 @@ class QlibBacktestResult(BaseModel):
     annual_return: float | None = 0.0
     sharpe_ratio: float | None = 0.0
     max_drawdown: float | None = 0.0
-    alpha: float | None = 0.0
+    alpha: float | None = None
 
     total_return: float | None = None
     volatility: float | None = None

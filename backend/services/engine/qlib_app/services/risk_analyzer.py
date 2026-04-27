@@ -330,13 +330,21 @@ class RiskAnalyzer:
 
             # Beta
             bm_var = float(bm_r.var())
-            beta = float(np.cov(port_r.values, bm_r.values)[0][1] / bm_var) if bm_var > 0 else None
+            beta = float(port_r.cov(bm_r) / bm_var) if bm_var > 0 else None
 
             # Alpha (CAPM): alpha = Rp - [Rf + beta * (Rm - Rf)]
-            bm_annual = float((1 + bm_r.mean()) ** 252 - 1)
+            periods = len(aligned)
+            port_compounded = float((1.0 + port_r).prod())
+            bm_compounded = float((1.0 + bm_r).prod())
+            port_annual = (
+                float(port_compounded ** (252 / periods) - 1)
+                if periods > 0 and port_compounded > 0
+                else annual_return
+            )
+            bm_annual = float(bm_compounded ** (252 / periods) - 1) if periods > 0 and bm_compounded > 0 else None
             alpha = (
-                (annual_return - (risk_free_rate + beta * (bm_annual - risk_free_rate)))
-                if annual_return is not None and beta is not None
+                (port_annual - (risk_free_rate + beta * (bm_annual - risk_free_rate)))
+                if port_annual is not None and bm_annual is not None and beta is not None
                 else None
             )
 
@@ -457,7 +465,13 @@ class RiskAnalyzer:
                 df_trades["_dt"] = pd.to_datetime(df_trades[date_col])
 
             # 1. PNL 分布
-            pnl_series = pd.to_numeric(df_trades.get("pnl", df_trades.get("profit", 0.0)), errors="coerce").fillna(0.0)
+            if "pnl" in df_trades.columns:
+                raw_pnl = df_trades["pnl"]
+            elif "profit" in df_trades.columns:
+                raw_pnl = df_trades["profit"]
+            else:
+                raw_pnl = pd.Series(0.0, index=df_trades.index)
+            pnl_series = pd.to_numeric(raw_pnl, errors="coerce").fillna(0.0)
             if (pnl_series == 0).all() and daily_returns is not None:
                 # 兜底：使用收益率抽样模拟分布
                 pnl_series = daily_returns.sample(n=min(len(daily_returns), len(trades)), replace=True)
@@ -466,7 +480,12 @@ class RiskAnalyzer:
             pnl_distribution = {"bins": pnl_bins.tolist(), "counts": pnl_counts.tolist()}
 
             # 2. 持仓天数分布
-            holding_days = pd.to_numeric(df_trades.get("holding_days"), errors="coerce").dropna()
+            raw_holding_days = (
+                df_trades["holding_days"]
+                if "holding_days" in df_trades.columns
+                else pd.Series(dtype=float, index=df_trades.index)
+            )
+            holding_days = pd.to_numeric(raw_holding_days, errors="coerce").dropna()
             if holding_days.empty:
                 holding_days = pd.Series([1.0]) # 默认 1 天
 
@@ -1024,7 +1043,7 @@ class RiskAnalyzer:
             annual_return=float(annual_return) if annual_return is not None else 0.0,
             sharpe_ratio=float(sharpe_ratio) if sharpe_ratio is not None else 0.0,
             max_drawdown=float(max_drawdown) if max_drawdown is not None else 0.0,
-            alpha=float(risk_metrics["alpha"]) if risk_metrics["alpha"] is not None else 0.0,
+            alpha=float(risk_metrics["alpha"]) if risk_metrics["alpha"] is not None else None,
             total_return=float(total_return) if total_return is not None else None,
             volatility=float(volatility) if volatility is not None else None,
             information_ratio=(
