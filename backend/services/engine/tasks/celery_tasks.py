@@ -137,7 +137,7 @@ def auto_inference_if_needed() -> dict[str, Any]:
     SessionLimit = sa_sessionmaker(bind=sync_engine)
     db = SessionLimit()
 
-    # 2. 扫描活跃策略
+    # 2. 扫描活跃策略 + 用户自动推理设置
     try:
         # 查询所有活跃且绑定了策略的组合
         active_portfolios = db.execute(
@@ -147,16 +147,46 @@ def auto_inference_if_needed() -> dict[str, Any]:
             )
         ).all()
 
+        # 查询用户手动开启的自动推理设置（enabled=True）
+        auto_inference_settings = db.execute(
+            sa_text(
+                "SELECT tenant_id, user_id, model_id, schedule_time "
+                "FROM qm_model_inference_settings "
+                "WHERE enabled = TRUE"
+            )
+        ).all()
+
         # 总是包含一个系统级别的虚拟任务（全局默认模型）
-        tasks = [{"tenant_id": "default", "user_id": "system", "strategy_id": "global"}]
+        tasks = [{"tenant_id": "default", "user_id": "system", "strategy_id": "global", "model_id": None}]
         for p in active_portfolios:
             tasks.append({
                 "tenant_id": p.tenant_id,
                 "user_id": str(p.user_id),
-                "strategy_id": str(p.strategy_id or "default")
+                "strategy_id": str(p.strategy_id or "default"),
+                "model_id": None,
             })
 
-        logger.info("[AutoInference] 发现需检查的任务总数: %d", len(tasks))
+        # 添加用户自动推理设置任务
+        for s in auto_inference_settings:
+            tasks.append({
+                "tenant_id": s.tenant_id,
+                "user_id": str(s.user_id),
+                "strategy_id": None,  # 用户级别推理，不绑定特定策略
+                "model_id": str(s.model_id),
+            })
+
+        # 去重（同一 tenant_id + user_id 可能同时出现在 portfolios 和 settings 中）
+        seen = set()
+        unique_tasks = []
+        for t in tasks:
+            key = (t["tenant_id"], t["user_id"], t.get("strategy_id"), t.get("model_id"))
+            if key not in seen:
+                seen.add(key)
+                unique_tasks.append(t)
+        tasks = unique_tasks
+
+        logger.info("[AutoInference] 发现需检查的任务总数: %d (活跃策略=%d, 自动推理设置=%d)",
+                     len(tasks), len(active_portfolios), len(auto_inference_settings))
 
         results = []
         redis = None
@@ -171,7 +201,8 @@ def auto_inference_if_needed() -> dict[str, Any]:
         for task in tasks:
             tid = task["tenant_id"]
             uid = task["user_id"]
-            sid = task["strategy_id"]
+            sid = task.get("strategy_id")
+            mid = task.get("model_id")
 
             # 检查当日是否已完成 (DB 记录)
             # 对于全局任务，检查 source='inference_script'，对于策略，检查 strategy_id
@@ -188,17 +219,20 @@ def auto_inference_if_needed() -> dict[str, Any]:
                 continue
 
             # 尝试获取锁
-            if not _try_acquire_strategy_lock(f"{tid}:{uid}:{sid}", prediction_trade_date, "celery_auto"):
+            lock_scope = f"{tid}:{uid}:{sid or mid or 'default'}"
+            if not _try_acquire_strategy_lock(lock_scope, prediction_trade_date, "celery_auto"):
                 logger.info("[AutoInference] 任务锁冲突，跳过: tid=%s uid=%s", tid, uid)
                 continue
 
             try:
-                logger.info("[AutoInference] 正在执行任务: tenant=%s user=%s strategy=%s", tid, uid, sid)
+                logger.info("[AutoInference] 正在执行任务: tenant=%s user=%s strategy=%s model=%s",
+                            tid, uid, sid, mid)
                 exec_res = router_service.run_daily_inference_script(
                     date=data_trade_date,
                     tenant_id=tid,
                     user_id=uid,
                     strategy_id=None if sid == "global" else sid,
+                    model_id=mid,
                     redis_client=redis
                 )
                 results.append({
@@ -210,7 +244,7 @@ def auto_inference_if_needed() -> dict[str, Any]:
             finally:
                 # 释放锁
                 try:
-                    lock_key = f"{_INFERENCE_LOCK_KEY_PREFIX}:{tid}:{uid}:{sid}:{prediction_trade_date}"
+                    lock_key = f"{_INFERENCE_LOCK_KEY_PREFIX}:{lock_scope}:{prediction_trade_date}"
                     redis.delete(lock_key)
                 except: pass
 
