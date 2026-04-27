@@ -83,7 +83,7 @@ export const OtherSettings: React.FC<OtherSettingsProps> = ({ userId, tenantId }
   return (
     <div className="w-full pt-1 space-y-4">
       <div className="rounded-xl border border-gray-200 bg-white overflow-hidden">
-        <div className="px-4 py-3 border-b border-gray-100 bg-gradient-to-r from-indigo-50/60 to-purple-50/60">
+        <div className="p-4 space-y-3">
           <div className="flex items-center gap-2.5">
             <div className="p-1.5 bg-indigo-100 rounded-md">
               <Key className="w-4 h-4 text-indigo-600" />
@@ -93,9 +93,7 @@ export const OtherSettings: React.FC<OtherSettingsProps> = ({ userId, tenantId }
               <p className="text-[11px] text-gray-500">Qwen API Key，用于 AI-IDE 和策略生成</p>
             </div>
           </div>
-        </div>
 
-        <div className="p-4 space-y-3">
           <div className={`flex items-center gap-2 px-3 py-2 rounded-xl text-xs ${hasKey ? 'bg-green-50 text-green-700 border border-green-100' : 'bg-amber-50 text-amber-700 border border-amber-100'}`}>
             {hasKey ? <CheckCircle className="w-3.5 h-3.5 shrink-0" /> : <AlertCircle className="w-3.5 h-3.5 shrink-0" />}
             <span className="font-medium">{hasKey ? '已配置' : '未配置'}</span>
@@ -118,7 +116,7 @@ export const OtherSettings: React.FC<OtherSettingsProps> = ({ userId, tenantId }
           </div>
 
           <div className="flex gap-2 items-center">
-            <div className="relative w-1/2">
+            <div className="relative flex-1">
               <Input
                 type={showKey ? 'text' : 'password'}
                 value={apiKey}

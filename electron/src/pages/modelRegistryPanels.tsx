@@ -1146,27 +1146,23 @@ export const InferenceCenterPanel: React.FC<{
       }
     >
       <div className="space-y-3">
-        <div className="flex items-start gap-4 p-4 bg-indigo-50/70 rounded-2xl border border-indigo-100">
-          <Calendar size={14} className="text-indigo-400 mt-1 flex-shrink-0" />
-          <div className="flex-1">
-            <span className="text-xs font-black text-indigo-800 block mb-1">执行时机（定时生成生产批次）</span>
-            <span className="text-[11px] text-indigo-500 leading-relaxed block">
-              {autoSettings?.schedule_desc || `每个交易日 ${autoSettings?.schedule_time || '00:00'} 起进入队列，08:00 前待行情数据更新后自动触发`}
-            </span>
-            <div className="mt-2 py-1.5 px-2 bg-white/60 rounded-lg border border-indigo-100/50">
-              <span className="text-[10px] text-indigo-400 font-medium flex items-center gap-1.5">
-                <Activity size={10} /> 
-                数据就绪后自动按默认模型链路生成生产批次，确保信号在开盘前送达
+        {autoSettings?.schedule_desc && (
+          <div className="flex items-start gap-4 p-4 bg-indigo-50/70 rounded-2xl border border-indigo-100">
+            <Calendar size={14} className="text-indigo-400 mt-1 flex-shrink-0" />
+            <div className="flex-1">
+              <span className="text-xs font-black text-indigo-800 block mb-1">执行时机</span>
+              <span className="text-[11px] text-indigo-500 leading-relaxed block">
+                {autoSettings.schedule_desc}
               </span>
+              <div className="mt-2 py-1.5 px-2 bg-white/60 rounded-lg border border-indigo-100/50">
+                <span className="text-[10px] text-indigo-400 font-medium flex items-center gap-1.5">
+                  <Activity size={10} /> 
+                  数据就绪后自动按默认模型链路生成生产批次
+                </span>
+              </div>
             </div>
           </div>
-        </div>
-        <div className="rounded-2xl border border-indigo-100 bg-indigo-50/40 px-4 py-3">
-          <Text className="block text-[10px] font-black uppercase tracking-widest text-indigo-600">与手动入口的关系</Text>
-          <Text className="mt-1 block text-xs leading-relaxed text-indigo-800">
-            这里等价于定时执行"生成生产批次"。它不会生成调试批次，产出结果默认可被自动托管继续消费。
-          </Text>
-        </div>
+        )}
         <div className="grid grid-cols-2 gap-3">
           <div className="bg-slate-50 rounded-xl p-3">
             <Text className="text-[10px] text-slate-400 font-black uppercase block mb-1">上次生产批次</Text>

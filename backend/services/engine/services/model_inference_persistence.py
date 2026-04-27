@@ -64,7 +64,7 @@ class ModelInferencePersistence:
               user_id TEXT NOT NULL,
               model_id TEXT NOT NULL,
               enabled BOOLEAN NOT NULL DEFAULT FALSE,
-              schedule_time TEXT NOT NULL DEFAULT '09:30',
+              schedule_time TEXT NOT NULL DEFAULT '',
               last_run_id TEXT,
               last_run_json JSONB,
               next_run_at TIMESTAMPTZ,
@@ -95,11 +95,11 @@ class ModelInferencePersistence:
 
     @staticmethod
     def _schedule_desc(schedule_time: str) -> str:
-        return f"每个交易日 {schedule_time} 行情数据更新后自动触发"
+        return ""
 
     @staticmethod
     def _parse_schedule_time(schedule_time: str) -> tuple[int, int]:
-        raw = str(schedule_time or "09:30").strip()
+        raw = str(schedule_time or "").strip()
         try:
             hour_str, minute_str = raw.split(":", 1)
             hour = max(0, min(23, int(hour_str)))
@@ -148,7 +148,7 @@ class ModelInferencePersistence:
             if result.get(key) is not None:
                 result[key] = result[key].isoformat()
         result["last_run_json"] = ModelInferencePersistence._parse_json_field(result.get("last_run_json"))
-        schedule_time = str(result.get("schedule_time") or "09:30")
+        schedule_time = str(result.get("schedule_time") or "")
         result["schedule_desc"] = ModelInferencePersistence._schedule_desc(schedule_time)
         if result.get("next_run_at"):
             dt = result["next_run_at"]
@@ -392,7 +392,7 @@ class ModelInferencePersistence:
                       tenant_id, user_id, model_id, enabled, schedule_time, last_run_id, last_run_json,
                       next_run_at, created_at, updated_at
                     ) VALUES (
-                      :tenant_id, :user_id, :model_id, FALSE, '09:30', NULL, NULL, NULL, :created_at, :created_at
+                      :tenant_id, :user_id, :model_id, FALSE, '', NULL, NULL, NULL, :created_at, :created_at
                     )
                     ON CONFLICT (tenant_id, user_id, model_id) DO NOTHING
                     """
@@ -446,7 +446,7 @@ class ModelInferencePersistence:
         # 1. 确保记录存在 (通过 get_settings 进行幂等初始化)
         current = await self.get_settings(tenant_id=tenant_id, user_id=user_id, model_id=model_id)
 
-        next_schedule_time = str(schedule_time or current.get("schedule_time") or "09:30")
+        next_schedule_time = str(schedule_time or current.get("schedule_time") or "")
         next_run_at = self._compute_next_run_at(next_schedule_time) if enabled else None
         now = datetime.now(_SHANGHAI_TZ)
 
@@ -495,7 +495,7 @@ class ModelInferencePersistence:
         run_payload: dict[str, Any],
     ) -> dict[str, Any]:
         settings = await self.get_settings(tenant_id=tenant_id, user_id=user_id, model_id=model_id)
-        schedule_time = str(settings.get("schedule_time") or "09:30")
+        schedule_time = str(settings.get("schedule_time") or "")
         enabled = bool(settings.get("enabled"))
         next_run_at = self._compute_next_run_at(schedule_time) if enabled else None
         now = datetime.now(_SHANGHAI_TZ)

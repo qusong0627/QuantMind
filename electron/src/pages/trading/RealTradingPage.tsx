@@ -322,7 +322,12 @@ const RealTradingPage: React.FC = () => {
         setWizardOpen(false);
 
         try {
-            const tradingReadiness = await realTradingService.getTradingPrecheck(mode);
+            const tradingReadiness = await Promise.race([
+                realTradingService.getTradingPrecheck(mode),
+                new Promise<never>((_, reject) =>
+                    setTimeout(() => reject(new Error('交易准备度检测超时')), 1000)
+                ),
+            ]);
             if (requestSeq !== preflightRequestSeqRef.current) return;
             setTradingReadinessResult(tradingReadiness);
             setPreflightLoading(false);
@@ -339,7 +344,12 @@ const RealTradingPage: React.FC = () => {
 
             setPreflightStage('preflight');
             setPreflightLoading(true);
-            const preflight = await realTradingService.preflight(mode, userId, tenantId);
+            const preflight = await Promise.race([
+                realTradingService.preflight(mode, userId, tenantId),
+                new Promise<never>((_, reject) =>
+                    setTimeout(() => reject(new Error('启动前自检超时')), 1000)
+                ),
+            ]);
             if (requestSeq !== preflightRequestSeqRef.current) return;
             setPreflightResult(preflight);
             setPreflightLoading(false);
@@ -402,28 +412,13 @@ const RealTradingPage: React.FC = () => {
         return '确认并启动实盘';
     }, [pendingDeploy]);
 
-    // 逐项展示检测结果：API 返回后逐个 reveal，而非一次性全部渲染
+    // 检测结果全部展示，不做逐项 reveal（加快加载速度）
     useEffect(() => {
         const items = preflightResult?.checks || tradingReadinessResult?.items || [];
-        if (items.length === 0) return;
-
-        setRevealedItemCount(1);
-        setIsRevealing(true);
-
-        let count = 1;
-        const timer = setInterval(() => {
-            count++;
-            setRevealedItemCount(count);
-            if (count >= items.length) {
-                clearInterval(timer);
-                setIsRevealing(false);
-            }
-        }, 350);
-
-        return () => {
-            clearInterval(timer);
+        if (items.length > 0) {
+            setRevealedItemCount(items.length);
             setIsRevealing(false);
-        };
+        }
     }, [preflightResult, tradingReadinessResult]);
 
     const handleStop = async () => {
