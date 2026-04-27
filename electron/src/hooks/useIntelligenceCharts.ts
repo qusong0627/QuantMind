@@ -7,6 +7,7 @@ import { useWebSocket } from '../contexts/WebSocketContext';
 import { shouldUpdateByFingerprint, calcFingerprint } from '../utils/dataChange';
 import { refreshOrchestrator } from '../services/refreshOrchestrator';
 import { authService } from '../features/auth/services/authService';
+import { useAppSelector } from '../store';
 
 export interface ChartData {
     dailyReturn: ChartDataPoint[];
@@ -348,6 +349,7 @@ const getTradingDayWindow = async (anchorDate: string, count: number): Promise<s
 export const useIntelligenceCharts = (userId: string = 'current', options?: { autoRefresh?: boolean }) => {
     const autoFetchEnabled = options?.autoRefresh ?? chartsAutoFetchEnabled();
     const resolvedUserId = resolveChartUserId(userId);
+    const tradingMode = useAppSelector((state) => state.ui.tradingMode);
     const [data, setData] = useState<ChartData>({
         dailyReturn: [],
         tradeCount: [],
@@ -495,7 +497,7 @@ export const useIntelligenceCharts = (userId: string = 'current', options?: { au
             initializedRef.current = true;
             setLoading(false);
         }
-    }, [autoFetchEnabled, resolvedUserId]);
+    }, [autoFetchEnabled, resolvedUserId, tradingMode]);
 
     useEffect(() => {
         if (!autoFetchEnabled) {
@@ -504,6 +506,12 @@ export const useIntelligenceCharts = (userId: string = 'current', options?: { au
         }
         fetchData({ silent: false });
     }, [autoFetchEnabled, fetchData]);
+
+    useEffect(() => {
+        setLoading(true);
+        setData({ dailyReturn: [], tradeCount: [], positionRatio: [] });
+        fingerprintRef.current = null;
+    }, [tradingMode]);
 
     useEffect(() => {
         const unsubscribe = onMessage((type, payload) => {
