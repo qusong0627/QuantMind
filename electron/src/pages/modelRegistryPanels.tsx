@@ -29,9 +29,22 @@ import {
   getStatusConfig,
   isSystemModel,
   modelDisplayName,
+  modelIdToDisplayName,
   resolveMetricNumber,
 } from './modelRegistryUtils';
 const { Text } = Typography;
+
+const formatPanelDateTime = (raw?: string | null, fallback = '—') => {
+  const value = String(raw || '').trim();
+  if (!value) return fallback;
+  const parsed = dayjs(value);
+  if (parsed.isValid()) return parsed.format('YYYY-MM-DD HH:mm');
+  const native = new Date(value);
+  if (!Number.isNaN(native.getTime())) {
+    return dayjs(native).format('YYYY-MM-DD HH:mm');
+  }
+  return fallback;
+};
 
 // ─── 左侧模型卡片 ────────────────────────────────────────────────────────────
 export const ModelCard: React.FC<{
@@ -621,7 +634,6 @@ export const AttributionAnalysisPanel: React.FC<{
     missing: { text: '未产出', cls: 'bg-slate-100 text-slate-600' },
   };
   const currentStatus = statusCfg[status] ?? statusCfg.missing;
-
   const handleExportCsv = async () => {
     if (!filteredRows.length) {
       message.warning('当前筛选结果为空，无可导出数据');
@@ -819,6 +831,7 @@ export const InferenceCenterPanel: React.FC<{
   horizonDays: number;
   running: boolean;
   onRun: () => void;
+  onRunAsDefault?: () => void;
   lastRun: InferenceRunRecord | null;
   history: InferenceRunRecord[];
   historyLoading: boolean;
@@ -839,10 +852,16 @@ export const InferenceCenterPanel: React.FC<{
   onHistoryDateFilterChange: (value: dayjs.Dayjs | null) => void;
 }> = ({
   model, inferenceDate, onDateChange, targetDate, targetDateLoading, horizonDays,
-  running, onRun, lastRun, history, historyLoading, onViewRanking,
+  running, onRun, onRunAsDefault, lastRun, history, historyLoading, onViewRanking,
   autoSettings, autoSaving, onToggleAuto, latestInferenceRun, latestInferenceRunLoading, precheck, precheckLoading, onRefreshPrecheck,
   historyRunIdFilter, onHistoryRunIdFilterChange, historyStatusFilter, onHistoryStatusFilterChange, historyDateFilter, onHistoryDateFilterChange,
-}) => (
+}) => {
+  const currentModelName = modelDisplayName(model);
+  const latestRunModelLabel = latestInferenceRun?.model_id === model.model_id
+    ? currentModelName
+    : modelIdToDisplayName(latestInferenceRun?.model_id);
+
+  return (
   <div className="pt-5 space-y-5">
 
     {/* ── 前置检查 ── */}
@@ -882,7 +901,7 @@ export const InferenceCenterPanel: React.FC<{
                   </Text>
                 </div>
                 <div className="flex flex-wrap justify-end gap-2">
-                  <Tag className="m-0 rounded-full border-0 bg-slate-100 text-slate-600 font-bold">{precheck.effective_model_id || precheck.model_id}</Tag>
+                  <Tag className="m-0 rounded-full border-0 bg-slate-100 text-slate-600 font-bold">模型 {modelIdToDisplayName(precheck.model_id)}</Tag>
                   <Tag className="m-0 rounded-full border-0 bg-blue-50 text-blue-700 font-bold">{precheck.prediction_trade_date}</Tag>
                 </div>
               </div>
@@ -926,10 +945,10 @@ export const InferenceCenterPanel: React.FC<{
       title={
         <div className="flex items-center justify-between gap-3">
           <div className="flex items-center gap-2">
-            <Zap size={14} className="text-amber-500" />
+            <Zap size={14} className="text-emerald-500" />
             <span className="text-xs font-black text-slate-800 uppercase tracking-tighter">当前生效推理批次</span>
           </div>
-          <Tag className="m-0 rounded-full border-0 bg-amber-50 text-amber-600 font-black text-[9px]">
+          <Tag className="m-0 rounded-full border-0 bg-emerald-50 text-emerald-600 font-black text-[9px]">
             交易侧生效版本
           </Tag>
         </div>
@@ -939,7 +958,7 @@ export const InferenceCenterPanel: React.FC<{
         {latestInferenceRun?.run_id ? (
           <div className={clsx(
             'rounded-2xl border p-4',
-            latestInferenceRun.matched_model === false ? 'border-amber-100 bg-amber-50/60' : 'border-slate-100 bg-slate-50',
+            latestInferenceRun.matched_model === false ? 'border-emerald-100 bg-emerald-50/60' : 'border-slate-100 bg-slate-50',
           )}>
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div className="min-w-0">
@@ -962,7 +981,7 @@ export const InferenceCenterPanel: React.FC<{
                 {latestInferenceRun.matched_model !== null && (
                   <Tag className={clsx(
                     'm-0 rounded-full border-0 font-bold',
-                    latestInferenceRun.matched_model ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700',
+                    latestInferenceRun.matched_model ? 'bg-emerald-50 text-emerald-700' : 'bg-emerald-50 text-emerald-700',
                   )}>
                     {latestInferenceRun.matched_model ? '当前模型匹配' : '当前模型不匹配'}
                   </Tag>
@@ -972,11 +991,11 @@ export const InferenceCenterPanel: React.FC<{
             <div className="mt-3 grid grid-cols-2 gap-2">
               <div className="rounded-xl bg-white px-3 py-2 border border-slate-100">
                 <Text className="text-[10px] text-slate-400 font-black uppercase block">模型</Text>
-                <Text className="text-xs font-black text-slate-800 break-all">{modelDisplayName(model)}</Text>
+                <Text className="text-xs font-black text-slate-800 break-all" title={latestInferenceRun.model_id || ''}>{latestRunModelLabel}</Text>
               </div>
               <div className="rounded-xl bg-white px-3 py-2 border border-slate-100">
                 <Text className="text-[10px] text-slate-400 font-black uppercase block">更新时间</Text>
-                <Text className="text-xs font-black text-slate-800 font-mono break-all">{latestInferenceRun.updated_at || '—'}</Text>
+                <Text className="text-xs font-black text-slate-800 font-mono break-all">{formatPanelDateTime(latestInferenceRun.updated_at)}</Text>
               </div>
             </div>
           </div>
@@ -1024,9 +1043,21 @@ export const InferenceCenterPanel: React.FC<{
           <div className="flex-1 bg-slate-50 rounded-xl px-4 py-2 flex items-center gap-2 min-w-0">
             <Brain size={11} className="text-slate-400 flex-shrink-0" />
             <Text className="text-[10px] font-bold text-slate-400">模型：</Text>
-            <Text className="text-[10px] font-black text-slate-800 truncate">{modelDisplayName(model)}</Text>
+            <Text className="text-[10px] font-black text-slate-800 truncate" title={model.model_id}>{currentModelName}</Text>
             {model.is_default && <Tag color="gold" className="text-[8px] font-black flex-shrink-0">默认</Tag>}
           </div>
+          {model.is_default && onRunAsDefault && (
+            <Button
+              type="primary"
+              icon={<Zap size={13} />}
+              loading={running}
+              disabled={!inferenceDate || precheckLoading || !precheck?.passed}
+              className="rounded-xl h-10 px-4 bg-emerald-600 border-none font-black text-xs shadow-lg shadow-emerald-200 flex-shrink-0"
+              onClick={onRunAsDefault}
+            >
+              {running ? '推理中…' : '生成生产批次'}
+            </Button>
+          )}
           <Button
             type="primary"
             icon={<Play size={13} />}
@@ -1035,9 +1066,18 @@ export const InferenceCenterPanel: React.FC<{
             className="rounded-xl h-10 px-6 bg-blue-600 border-none font-black text-xs shadow-lg shadow-blue-200 flex-shrink-0"
             onClick={onRun}
           >
-            {running ? '推理中…' : '执行推理'}
+            {running ? '推理中…' : '生成调试批次'}
           </Button>
         </div>
+
+        {model.is_default && (
+          <div className="rounded-2xl border border-emerald-100 bg-emerald-50/60 px-4 py-3">
+            <Text className="block text-[10px] font-black uppercase tracking-widest text-emerald-600">生产 / 调试批次说明</Text>
+            <Text className="mt-1 block text-xs leading-relaxed text-emerald-800">
+              "生成生产批次"会按用户默认模型链路记账，产出的批次可直接进入自动托管；"生成调试批次"会按当前手动指定模型记账，只用于调试、比对和人工核查，不会被自动托管直接消费。
+            </Text>
+          </div>
+        )}
 
         {running && (
           <div className="space-y-1">
@@ -1067,10 +1107,7 @@ export const InferenceCenterPanel: React.FC<{
                   lastRun.status === 'failed' ? 'text-rose-500' : 'text-emerald-500',
                 )}>
                   目标日：{lastRun.target_date} · 耗时 {(lastRun.duration_ms / 1000).toFixed(1)}s
-                  {(lastRun.model_switch_used ?? lastRun.fallback_used)
-                    ? ` · 已切换模型${(lastRun.model_switch_reason ?? lastRun.fallback_reason) ? `：${lastRun.model_switch_reason ?? lastRun.fallback_reason}` : ''}`
-                    : ''}
-                  {!(lastRun.model_switch_used ?? lastRun.fallback_used) && lastRun.execution_mode === 'independent_model' ? ' · 独立模型执行' : ''}
+                  {lastRun.fallback_used ? ` · 已兜底${lastRun.fallback_reason ? `：${lastRun.fallback_reason}` : ''}` : ''}
                 </Text>
               </div>
             </div>
@@ -1093,9 +1130,9 @@ export const InferenceCenterPanel: React.FC<{
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <Clock size={14} className="text-indigo-500" />
-            <span className="text-xs font-black text-slate-800 uppercase tracking-tighter">自动推理</span>
+            <span className="text-xs font-black text-slate-800 uppercase tracking-tighter">自动生产批次</span>
             {autoSettings?.enabled && (
-              <Badge status="processing" text={<span className="text-[9px] font-bold text-blue-500">运行中</span>} />
+              <Badge status="processing" text={<span className="text-[9px] font-bold text-blue-500">已开启</span>} />
             )}
           </div>
           <Switch
@@ -1112,25 +1149,31 @@ export const InferenceCenterPanel: React.FC<{
         <div className="flex items-start gap-4 p-4 bg-indigo-50/70 rounded-2xl border border-indigo-100">
           <Calendar size={14} className="text-indigo-400 mt-1 flex-shrink-0" />
           <div className="flex-1">
-            <span className="text-xs font-black text-indigo-800 block mb-1">执行时机 (自动调度)</span>
+            <span className="text-xs font-black text-indigo-800 block mb-1">执行时机（定时生成生产批次）</span>
             <span className="text-[11px] text-indigo-500 leading-relaxed block">
-              每个交易日 03:00 - 08:00 自动扫描
+              {autoSettings?.schedule_desc || `每个交易日 ${autoSettings?.schedule_time || '00:00'} 起进入队列，08:00 前待行情数据更新后自动触发`}
             </span>
             <div className="mt-2 py-1.5 px-2 bg-white/60 rounded-lg border border-indigo-100/50">
               <span className="text-[10px] text-indigo-400 font-medium flex items-center gap-1.5">
                 <Activity size={10} /> 
-                数据就绪后自动按序触发推理，确保信号在开盘前送达
+                数据就绪后自动按默认模型链路生成生产批次，确保信号在开盘前送达
               </span>
             </div>
           </div>
         </div>
+        <div className="rounded-2xl border border-indigo-100 bg-indigo-50/40 px-4 py-3">
+          <Text className="block text-[10px] font-black uppercase tracking-widest text-indigo-600">与手动入口的关系</Text>
+          <Text className="mt-1 block text-xs leading-relaxed text-indigo-800">
+            这里等价于定时执行"生成生产批次"。它不会生成调试批次，产出结果默认可被自动托管继续消费。
+          </Text>
+        </div>
         <div className="grid grid-cols-2 gap-3">
           <div className="bg-slate-50 rounded-xl p-3">
-            <Text className="text-[10px] text-slate-400 font-black uppercase block mb-1">上次执行</Text>
+            <Text className="text-[10px] text-slate-400 font-black uppercase block mb-1">上次生产批次</Text>
             {autoSettings?.last_run ? (
               <>
                 <Text className="text-[10px] font-black text-slate-700 block">
-                  {new Date(autoSettings.last_run.created_at).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}
+                  {formatPanelDateTime(autoSettings.last_run.created_at, '时间未记录')}
                 </Text>
                 <Tag color={autoSettings.last_run.status === 'failed' ? 'red' : 'green'} className="text-[9px] font-bold mt-1">
                   {autoSettings.last_run.status === 'failed' ? '失败' : '成功'} · {autoSettings.last_run.signals_count} 支
@@ -1145,9 +1188,9 @@ export const InferenceCenterPanel: React.FC<{
             ) : <Text className="text-[10px] text-slate-300">尚未执行</Text>}
           </div>
           <div className="bg-slate-50 rounded-xl p-3">
-            <Text className="text-[10px] text-slate-400 font-black uppercase block mb-1">下次计划</Text>
+            <Text className="text-[10px] text-slate-400 font-black uppercase block mb-1">下次生产计划</Text>
             {autoSettings?.enabled && autoSettings.next_run
-              ? <Text className="text-[10px] font-black text-slate-700">{autoSettings.next_run}</Text>
+              ? <Text className="text-[10px] font-black text-slate-700">{formatPanelDateTime(autoSettings.next_run)}</Text>
               : <Text className="text-[10px] text-slate-300">—（未开启）</Text>}
           </div>
         </div>
@@ -1196,7 +1239,7 @@ export const InferenceCenterPanel: React.FC<{
           rowKey="run_id"
           pagination={false}
           dataSource={history}
-          locale={{ emptyText: historyLoading ? ' ' : '暂无推理记录，点击"执行推理"开始' }}
+          locale={{ emptyText: historyLoading ? ' ' : '暂无推理记录，可点击"生成生产批次"或"生成调试批次"开始' }}
           columns={[
             {
               title: '状态', dataIndex: 'status', width: 72, align: 'center',
@@ -1247,7 +1290,8 @@ export const InferenceCenterPanel: React.FC<{
       </Spin>
     </Card>
   </div>
-);
+  );
+};
 
 // ─── 通用子组件 ──────────────────────────────────────────────────────────────
 

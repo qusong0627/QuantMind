@@ -135,8 +135,19 @@ export function formatTrendLabel(current: number | null, previous: number | null
   return `较上段 ${deltaLabel}%`;
 }
 
+// 全局模型 ID -> 友好名称映射（在此添加更多条目以支持特殊显示）
+export const MODEL_ID_NAME_MAP: Record<string, string> = {
+  'mdl_train_20260426163638_c40ed8ff_314e9cfc': '26_T5_Alpha51_Base',
+};
+
+export function modelIdToDisplayName(modelId?: string | null, fallback?: string) {
+  if (!modelId) return fallback || '—';
+  return MODEL_ID_NAME_MAP[modelId] || modelId;
+}
+
 export function modelDisplayName(m: UserModelRecord): string {
-  return getMeta(m).display_name || m.model_id;
+  const meta = getMeta(m);
+  return modelIdToDisplayName(m.model_id, meta.display_name || m.model_id);
 }
 export function extractModelType(m: UserModelRecord): string {
   const raw = String(getMeta(m).model_type ?? '').toLowerCase();
