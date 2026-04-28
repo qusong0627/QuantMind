@@ -54,7 +54,7 @@ export const QlibQuickBacktest: React.FC = () => {
   const [initialCapital, setInitialCapital] = useState(1000000);
   const [benchmark, setBenchmark] = useState('SH000300');
   const [seed] = useState('');
-  const [dealPrice, setDealPrice] = useState<'open' | 'close'>('close');
+  const [dealPrice, setDealPrice] = useState<'open' | 'close'>('open');
   
   // 数据日期范围（从后端获取）
   const [dataMinDate, setDataMinDate] = useState<string | null>(null);
@@ -458,8 +458,8 @@ export const QlibQuickBacktest: React.FC = () => {
                   onChange={(e) => setDealPrice(e.target.value as 'open' | 'close')}
                   className="w-full px-3 py-2.5 bg-gray-50 border border-gray-200 rounded-xl text-sm focus:outline-none focus:border-blue-500"
                 >
-                  <option value="close">收盘价成交 (Close)</option>
                   <option value="open">开盘价成交 (Open)</option>
+                  <option value="close">收盘价成交 (Close)</option>
                 </select>
               </div>
             </div>

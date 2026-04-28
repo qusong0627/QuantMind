@@ -318,7 +318,7 @@ export const DEFAULT_CONTEXT: TrainingContext = {
   benchmark: 'SH000300',
   commissionRate: 0.00025,
   slippage: 0.0005,
-  dealPrice: 'close',
+  dealPrice: 'open',
 };
 
 export const DEFAULT_TARGET: TrainingTarget = {

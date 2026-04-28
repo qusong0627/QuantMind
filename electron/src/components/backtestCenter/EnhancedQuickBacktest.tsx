@@ -414,12 +414,12 @@ export const EnhancedQuickBacktest: React.FC = () => {
                 <div className="space-y-1">
                   <label className="text-sm font-medium text-gray-700">基准价格</label>
                   <select
-                    value={backtestConfig.deal_price || 'close'}
+                    value={backtestConfig.deal_price || 'open'}
                     onChange={(e) => updateBacktestConfig({ deal_price: e.target.value as any })}
                     className="w-full px-3 py-2 bg-white border border-gray-300 rounded-2xl text-sm focus:ring-2 focus:ring-blue-500 outline-none"
                   >
-                    <option value="close">收盘价 (Close)</option>
                     <option value="open">开盘价 (Open)</option>
+                    <option value="close">收盘价 (Close)</option>
                   </select>
                 </div>
               </div>
