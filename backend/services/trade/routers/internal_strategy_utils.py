@@ -291,6 +291,7 @@ async def _upsert_real_account_baseline(
     stmt = text(
         """
         INSERT INTO real_account_baselines (
+            id,
             tenant_id,
             user_id,
             account_id,
@@ -299,6 +300,7 @@ async def _upsert_real_account_baseline(
             source
         )
         VALUES (
+            DEFAULT,
             :tenant_id,
             :user_id,
             :account_id,

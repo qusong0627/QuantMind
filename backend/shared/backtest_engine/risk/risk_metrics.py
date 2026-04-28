@@ -103,7 +103,7 @@ class RiskMetrics:
 
         # 风险调整收益指标
         sharpe_ratio = self._calculate_sharpe_ratio(annual_return, volatility)
-        sortino_ratio = self._calculate_sortino_ratio(annual_return, downside_volatility)
+        sortino_ratio = self._calculate_sortino_ratio(annual_return, returns_array, lookback_period)
 
         # 基准相关指标
         beta = 0.0
@@ -164,13 +164,13 @@ class RiskMetrics:
 
     def _calculate_volatility(self, returns: np.ndarray, lookback_period: int) -> float:
         """计算年化波动率"""
-        return np.std(returns) * np.sqrt(lookback_period)
+        return np.std(returns, ddof=1) * np.sqrt(lookback_period)
 
     def _calculate_downside_volatility(self, returns: np.ndarray, lookback_period: int) -> float:
         """计算下行波动率"""
         downside_returns = returns[returns < 0]
         if len(downside_returns) > 0:
-            return np.std(downside_returns) * np.sqrt(lookback_period)
+            return np.std(downside_returns, ddof=1) * np.sqrt(lookback_period)
         return 0.0
 
     def _calculate_var(self, returns: np.ndarray) -> tuple[float, float]:
@@ -237,11 +237,16 @@ class RiskMetrics:
             return excess_return / volatility
         return 0.0
 
-    def _calculate_sortino_ratio(self, annual_return: float, downside_volatility: float) -> float:
-        """计算索提诺比率"""
-        if downside_volatility != 0:
+    def _calculate_sortino_ratio(self, annual_return: float, returns: np.ndarray, lookback_period: int) -> float:
+        """计算索提诺比率（下行基于 MAR=无风险利率）"""
+        daily_rf = self.risk_free_rate / lookback_period
+        downside_returns = returns[returns < daily_rf]
+        if len(downside_returns) == 0:
+            return 0.0
+        downside_deviation = np.std(downside_returns, ddof=1) * np.sqrt(lookback_period)
+        if downside_deviation != 0:
             excess_return = annual_return - self.risk_free_rate
-            return excess_return / downside_volatility
+            return excess_return / downside_deviation
         return 0.0
 
     def _calculate_beta_alpha(self, returns: np.ndarray, benchmark_returns: np.ndarray) -> tuple[float, float]:
@@ -273,7 +278,7 @@ class RiskMetrics:
             return 0.0
 
         excess_returns = returns - benchmark_returns
-        return np.std(excess_returns) * np.sqrt(lookback_period)
+        return np.std(excess_returns, ddof=1) * np.sqrt(lookback_period)
 
     def _calculate_information_ratio(self, annual_return: float, tracking_error: float) -> float:
         """计算信息比率"""
@@ -337,7 +342,7 @@ class RiskMetrics:
             window_returns = returns_array[i - window : i]
 
             # 滚动波动率
-            vol = np.std(window_returns) * np.sqrt(252)
+            vol = np.std(window_returns, ddof=1) * np.sqrt(252)
             rolling_volatility.append(vol)
 
             # 滚动夏普比率

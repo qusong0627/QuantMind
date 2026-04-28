@@ -129,9 +129,9 @@ class RiskManager:
         returns_array = np.array(portfolio_returns)
 
         # 计算风险指标
-        volatility = np.std(returns_array) * np.sqrt(252)  # 年化波动率
+        volatility = np.std(returns_array, ddof=1) * np.sqrt(252)  # 年化波动率
         downside_returns = returns_array[returns_array < 0]
-        downside_volatility = np.std(downside_returns) * np.sqrt(252) if len(downside_returns) > 0 else 0
+        downside_volatility = np.std(downside_returns, ddof=1) * np.sqrt(252) if len(downside_returns) > 0 else 0
 
         # VaR和CVaR
         var_95 = np.percentile(returns_array, 5)
@@ -146,7 +146,9 @@ class RiskManager:
         # 夏普比率
         excess_returns = returns_array - self.config.risk_free_rate / 252
         sharpe_ratio = (
-            np.mean(excess_returns) / np.std(excess_returns) * np.sqrt(252) if np.std(excess_returns) > 0 else 0
+            np.mean(excess_returns) / np.std(excess_returns, ddof=1) * np.sqrt(252)
+            if np.std(excess_returns, ddof=1) > 0
+            else 0
         )
 
         # 风险等级评估

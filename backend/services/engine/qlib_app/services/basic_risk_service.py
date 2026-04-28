@@ -244,7 +244,9 @@ class BasicRiskService:
                 "max_drawdown": self._finite_or_zero(max_drawdown),
             }
 
-    def _calculate_supplementary_metrics(self, returns: pd.Series, qlib_metrics: dict) -> dict:
+    def _calculate_supplementary_metrics(
+        self, returns: pd.Series, qlib_metrics: dict, risk_free_rate: float = 0.02
+    ) -> dict:
         """计算补充指标（高级风险指标）"""
         clean_returns = pd.Series(returns).replace([np.inf, -np.inf], np.nan).dropna()
         if clean_returns.empty:
@@ -258,7 +260,8 @@ class BasicRiskService:
 
         std = clean_returns.std(ddof=1)
         if std and std > 0:
-            sharpe_ratio = clean_returns.mean() / std * np.sqrt(annual_freq)
+            annualized_return = clean_returns.mean() * annual_freq
+            sharpe_ratio = (annualized_return - risk_free_rate) / (std * np.sqrt(annual_freq))
         else:
             sharpe_ratio = 0.0
 
@@ -270,11 +273,14 @@ class BasicRiskService:
         )
 
         # Sortino比率（下行风险调整收益）
-        downside_returns = clean_returns[clean_returns < 0]
+        # MAR = 最小可接受收益率，使用日化无风险利率
+        daily_rf = risk_free_rate / max(annual_freq, 1)
+        downside_returns = clean_returns[clean_returns < daily_rf]
         if len(downside_returns) > 0:
             downside_deviation = downside_returns.std(ddof=1)
+            annualized_downside = downside_deviation * np.sqrt(annual_freq)
             if downside_deviation and downside_deviation > 0:
-                sortino_ratio = clean_returns.mean() / downside_deviation * np.sqrt(annual_freq)
+                sortino_ratio = (annualized_return - risk_free_rate) / annualized_downside
             else:
                 sortino_ratio = 0.0
         else:

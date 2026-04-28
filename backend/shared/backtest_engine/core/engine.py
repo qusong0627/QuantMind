@@ -101,6 +101,7 @@ class BacktestEngine:
         self.slippage_rate = slippage_rate
         self.benchmark = benchmark
         self.enable_risk_management = enable_risk_management
+        self.risk_free_rate = 0.02  # 年化无风险利率
 
         # 核心组件
         self.portfolio = Portfolio(initial_cash)
@@ -640,11 +641,14 @@ class BacktestEngine:
 
         # 基础指标
         total_return = (self.portfolio.get_total_value() - self.initial_cash) / self.initial_cash
-        annual_return = total_return * (252 / len(returns))  # 假设252个交易日
+        years = len(returns) / 252
+        annual_return = (1 + total_return) ** (1 / max(years, 1 / 252)) - 1 if total_return > -1 else total_return
 
         # 风险指标
-        volatility = np.std(returns) * np.sqrt(252)
-        sharpe_ratio = annual_return / volatility if volatility > 0 else 0
+        volatility = np.std(returns, ddof=1) * np.sqrt(252)
+        sharpe_ratio = (
+            (annual_return - self.risk_free_rate) / volatility if volatility > 0 else 0
+        )
 
         # 回撤指标
         equity_values = [eq["total_value"] for eq in self.equity_curve]

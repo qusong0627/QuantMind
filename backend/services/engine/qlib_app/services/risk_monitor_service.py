@@ -184,11 +184,18 @@ class RealTimeRiskMonitor:
                 return {}
 
             # 计算基础风险指标
+            daily_std = float(returns.std(ddof=1))
+            annualized_return = float(returns.mean() * 252)
+            risk_free_rate = 0.02  # 年化无风险利率 2%
             metrics = {
                 "current_value": float(equity_curve.iloc[-1]),
                 "total_return": float(equity_curve.iloc[-1] / equity_curve.iloc[0] - 1),
-                "volatility": float(returns.std() * (252**0.5)),
-                "sharpe_ratio": float(returns.mean() / returns.std() * (252**0.5) if returns.std() > 0 else 0),
+                "volatility": float(daily_std * (252**0.5)),
+                "sharpe_ratio": float(
+                    (annualized_return - risk_free_rate) / (daily_std * (252**0.5))
+                    if daily_std > 0
+                    else 0
+                ),
                 "max_drawdown": float((equity_curve / equity_curve.cummax() - 1).min()),
                 "var_95": float(returns.quantile(0.05)),
                 "cvar_95": float(returns[returns <= returns.quantile(0.05)].mean()),

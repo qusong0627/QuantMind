@@ -22,8 +22,8 @@ export class PerformanceCalculator {
     startDate: Date,
     endDate: Date
   ): PerformanceMetrics {
-    const tradingDays = Math.floor((endDate.getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24));
-    const tradingYears = tradingDays / 365;
+    const tradingDays = equityCurve.returns.length;
+    const tradingYears = tradingDays / 252;
 
     // 基本统计
     const completedTrades = trades.filter(t => t.pnl !== undefined);
@@ -86,19 +86,23 @@ export class PerformanceCalculator {
 
   /**
    * 计算夏普比率
-   * 假设无风险利率为0
+   * Sharpe = (R_a - R_f) / σ_a
+   * 使用样本标准差 (n-1)，无风险利率默认 2%
    */
   private calculateSharpeRatio(returns: number[]): number {
     if (returns.length < 2) return 0;
 
-    const avgReturn = returns.reduce((sum, r) => sum + r, 0) / returns.length;
-    const variance = returns.reduce((sum, r) => sum + Math.pow(r - avgReturn, 2), 0) / returns.length;
+    const n = returns.length;
+    const avgReturn = returns.reduce((sum, r) => sum + r, 0) / n;
+    const variance = returns.reduce((sum, r) => sum + Math.pow(r - avgReturn, 2), 0) / (n - 1);
     const stdDev = Math.sqrt(variance);
 
     if (stdDev === 0) return 0;
 
-    // 年化夏普比率 (假设252个交易日)
-    return (avgReturn / stdDev) * Math.sqrt(252);
+    const annualizedReturn = avgReturn * 252;
+    const annualizedVol = stdDev * Math.sqrt(252);
+    const riskFreeRate = 0.02;
+    return (annualizedReturn - riskFreeRate) / annualizedVol;
   }
 
   /**
@@ -273,26 +277,29 @@ export class PerformanceCalculator {
 
   /**
    * 计算索提诺比率 (Sortino Ratio)
-   * 只考虑下行波动率
+   * 下行基于 MAR = 年化 2% 无风险利率
    */
-  calculateSortinoRatio(returns: number[], targetReturn: number = 0): number {
+  calculateSortinoRatio(returns: number[]): number {
     if (returns.length < 2) return 0;
 
     const avgReturn = returns.reduce((sum, r) => sum + r, 0) / returns.length;
-    const downside = returns.filter(r => r < targetReturn);
+    const dailyRf = 0.02 / 252;
+    const downside = returns.filter(r => r < dailyRf);
 
     if (downside.length === 0) return 0;
 
     const downsideVariance = downside.reduce(
-      (sum, r) => sum + Math.pow(r - targetReturn, 2),
+      (sum, r) => sum + Math.pow(r - dailyRf, 2),
       0
-    ) / downside.length;
+    ) / (downside.length - 1);
 
     const downsideDeviation = Math.sqrt(downsideVariance);
 
     if (downsideDeviation === 0) return 0;
 
-    return (avgReturn - targetReturn) / downsideDeviation * Math.sqrt(252);
+    const annualizedReturn = avgReturn * 252;
+    const annualizedDownside = downsideDeviation * Math.sqrt(252);
+    return (annualizedReturn - 0.02) / annualizedDownside;
   }
 
   /**

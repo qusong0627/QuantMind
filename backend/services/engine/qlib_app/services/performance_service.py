@@ -96,10 +96,13 @@ class PerformanceService:
         # 滚动波动率（年化）
         rolling_vol = returns.rolling(window=window).std() * np.sqrt(252)
 
-        # 滚动夏普比率（年化）
+        # 滚动夏普比率（年化，扣减无风险利率 2%）
         rolling_mean = returns.rolling(window=window).mean()
         rolling_std = returns.rolling(window=window).std()
-        rolling_sharpe = rolling_mean / rolling_std * np.sqrt(252)
+        annual_return = rolling_mean * 252
+        rolling_vol = rolling_std * np.sqrt(252)
+        risk_free_rate = 0.02
+        rolling_sharpe = (annual_return - risk_free_rate) / rolling_vol
 
         # 去除NaN值
         valid_indices = rolling_sharpe.notna()

@@ -896,7 +896,7 @@ class RiskAnalyzer:
                     if len(equity) > 1:
                         net_daily_returns = equity.pct_change().dropna()
                         if len(net_daily_returns) > 1:
-                            vol_value = net_daily_returns.std() * np.sqrt(252)
+                            vol_value = net_daily_returns.std(ddof=1) * np.sqrt(252)
                             volatility = cls._clean_nan(float(vol_value))
 
                     if volatility and volatility > 0:

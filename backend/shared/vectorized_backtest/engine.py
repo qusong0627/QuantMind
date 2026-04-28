@@ -86,7 +86,7 @@ class VectorizedBacktestEngine:
             years = (equity_curve.index[-1] - equity_curve.index[0]).days / 365.25 if len(equity_curve) > 1 else 1
             annual_return = (1 + total_return) ** (1 / max(years, 0.01)) - 1
 
-            daily_std = portfolio_daily_returns.std()
+            daily_std = portfolio_daily_returns.std(ddof=1)
             sharpe_ratio = (annual_return - 0.02) / (daily_std * np.sqrt(252)) if daily_std > 0 else 0.0
 
             rolling_max = equity_curve.cummax()
