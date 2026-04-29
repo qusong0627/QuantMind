@@ -372,6 +372,7 @@ class QlibBacktestServiceQueryMixin:
             "execution_time",
             "error_message",
             "full_error",
+            "model_name",
         ]
         results = await self._persistence.get_multiple_results(
             [id1, id2],

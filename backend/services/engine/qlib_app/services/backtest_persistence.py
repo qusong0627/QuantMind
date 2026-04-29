@@ -471,13 +471,19 @@ class BacktestPersistence:
             rows = await session.execute(
                 text(
                     """
-                    SELECT result_json, user_id, result_file_path, result_cos_key, backtest_id, tenant_id FROM qlib_backtest_runs
-                    WHERE backtest_id = ANY(:ids) AND result_json IS NOT NULL
+                    SELECT b.result_json, b.user_id, b.result_file_path, b.result_cos_key, b.backtest_id, b.tenant_id,
+                           m.metadata_json->>'display_name' AS model_name
+                    FROM qlib_backtest_runs b
+                    LEFT JOIN qm_user_models m
+                        ON m.model_id = (b.config_json->>'model_id')
+                        AND m.tenant_id = b.tenant_id
+                        AND m.user_id = b.user_id
+                    WHERE b.backtest_id = ANY(:ids) AND b.result_json IS NOT NULL
                     """
-                    + (" AND tenant_id = :tenant_id" if tenant_id else "")
-                    + (" AND user_id = :user_id" if user_id else "")
+                    + (" AND b.tenant_id = :tenant_id" if tenant_id else "")
+                    + (" AND b.user_id = :user_id" if user_id else "")
                     + """
-                    ORDER BY created_at DESC
+                    ORDER BY b.created_at DESC
                     """
                 ),
                 params,
@@ -497,6 +503,7 @@ class BacktestPersistence:
             result_cos_key = row[3]
             row_backtest_id = row[4]
             row_tenant_id = row[5]
+            row_model_name = row[6]
             payload = self._merge_summary_with_local(
                 summary_payload=item,
                 result_file_path=result_file_path if needs_local else None,
@@ -508,6 +515,8 @@ class BacktestPersistence:
             if not isinstance(payload, dict):
                 continue
             payload["user_id"] = uid
+            if row_model_name:
+                payload["model_name"] = row_model_name
 
             # 仅在需要时进行耗时的归一化
             trades = payload.get("trades")
@@ -524,7 +533,7 @@ class BacktestPersistence:
                 payload = {
                     k: v
                     for k, v in payload.items()
-                    if k in include_fields or k in ["backtest_id", "status", "created_at", "user_id"]
+                    if k in include_fields or k in ["backtest_id", "status", "created_at", "user_id", "model_name"]
                 }
 
             obj = QlibBacktestResult.parse_obj(payload)

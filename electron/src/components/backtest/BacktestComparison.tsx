@@ -414,12 +414,16 @@ interface BacktestCardProps {
 const BacktestCard: React.FC<BacktestCardProps> = ({ backtest, label }) => {
   const totalReturn = backtest.total_return || 0;
   const isProfit = totalReturn > 0;
+  const modelName = (backtest as any).model_name || '-';
 
   return (
     <div className="bg-gray-50 rounded-2xl p-6 border border-gray-200 flex flex-col items-center text-center">
       <div className="text-xs font-medium text-gray-500 mb-2 uppercase tracking-wider">{label}</div>
-      <div className="text-xl font-bold text-gray-800 mb-4 truncate w-full" title={resolveStrategyName(backtest)}>
+      <div className="text-xl font-bold text-gray-800 mb-1 truncate w-full" title={resolveStrategyName(backtest)}>
         {resolveStrategyName(backtest)}
+      </div>
+      <div className="text-xs text-gray-400 mb-3 truncate w-full" title={modelName}>
+        {modelName}
       </div>
       <div className="flex items-center justify-center gap-2 mb-3">
         {isProfit ? (
