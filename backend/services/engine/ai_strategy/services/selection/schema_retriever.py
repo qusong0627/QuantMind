@@ -108,14 +108,7 @@ STOCK_DAILY_LATEST_SCHEMA: list[SchemaColumn] = [
     SchemaColumn("stock_daily_latest", "is_st", "是否 ST (1/0)"),
     SchemaColumn("stock_daily_latest", "is_hs300", "是否沪深300成分股 (1/0)"),
     SchemaColumn("stock_daily_latest", "is_csi1000", "是否中证1000成分股 (1/0)"),
-    SchemaColumn(
-        "stock_daily_latest",
-        "listing_market",
-        "上市市场（如：上海证券交易所、深圳证券交易所）",
-    ),
-    SchemaColumn("stock_daily_latest", "nindnme", "申万行业/细分行业名称"),
     SchemaColumn("stock_daily_latest", "industry", "行业分类（如：半导体、互联网、银行、白酒等）"),
-    SchemaColumn("stock_daily_latest", "corp_nature", "企业性质（如：国有企业、民营企业）"),
 ]
 
 

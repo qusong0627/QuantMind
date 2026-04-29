@@ -16,9 +16,9 @@
 - `api` 代理到 `trade`：`/api/v1/orders/*`、`/api/v1/trades/*`、`/api/v1/portfolios/*`、`/api/v1/simulation/*`、`/api/v1/real-trading/*`。
 - `api` 代理到 `trade`：已补充 `/api/v1/internal/strategy/*`（用于 Agent 下载与内部策略网关转发）。
 - `OpenClaw` 旧后端模块已下线：`quantmind-api` 不再挂载历史 `/api/openclaw/*` 本地路由。
-- 当前测试接入方式：`quantmind-api` 新增 CoPaw 适配层，对前端统一暴露 `/api/v1/openclaw/*`，由网关转发到 `COPAW_BASE_URL`。当前代码默认值与生产建议值均为容器网络地址 `http://copaw:8088`，避免回退到历史外网端口。
+- 当前测试接入方式：`quantmind-api` 新增 QuantBot 适配层，对前端统一暴露 `/api/v1/openclaw/*`，由网关转发到 `COPAW_BASE_URL`。当前代码默认值与生产建议值均为容器网络地址 `http://quantbot:8088`，避免回退到历史外网端口。
 - 当前测试范围仅包含聊天、会话、历史消息与健康检查；不接入 cron jobs、模型、技能、工具、工作空间等管理能力。
-- 当前测试阶段不配置上游访问密钥，若后续 CoPaw 增加鉴权，统一在网关适配层补充，不由前端直连处理。
+- 当前测试阶段不配置上游访问密钥，若后续 QuantBot 增加鉴权，统一在网关适配层补充，不由前端直连处理。
 - 官网联系表单 `POST /api/v1/inquiry` 已直连 `quantmind-api`，提交内容会落到 `data/inquiries.json`，无需额外部署 website-server。
 - 管理员仪表盘 `GET /api/v1/admin/dashboard/metrics` 现会聚合 `quantmind-api`、`quantmind-trade`、`quantmind-engine`、`quantmind-stream` 的真实 `/health` 状态生成 `health_score`，并结合 API 启动时间计算 `uptime_days`；如探测全部失败则降级为 `0` 分和 `degraded` 状态。
 - 禁止范围：`api` 不直接承载计算引擎、交易撮合与行情推送实现。
@@ -258,15 +258,15 @@ python backend/services/api/scripts/build_stock_index.py
 - `bootstrap` 为幂等接口：若当前用户已有默认交易 Key，则返回最新一条 `access_key`；仅首次创建时返回明文 `secret_key`。
 - `rotate-secret` 会重置指定 `access_key` 的 `secret_key`，前端只在本次响应中展示一次。
 
-## OpenClaw CoPaw 接入（2026-03-18）
-- 新增 `backend/services/api/routers/copaw_proxy.py`：CoPaw 适配代理路由，通过 `httpx` 将前端请求转发到 `COPAW_BASE_URL`。生产环境通过 `docker-compose.server.yml` 显式注入 `http://copaw:8088`。
+## OpenClaw QuantBot 接入（2026-03-18）
+- 新增 `backend/services/api/routers/quantbot_proxy.py`：QuantBot 适配代理路由，通过 `httpx` 将前端请求转发到 `COPAW_BASE_URL`。生产环境通过 `docker-compose.server.yml` 显式注入 `http://quantbot:8088`。
 - 对外暴露 `/api/v1/openclaw/*` 共 11 个接口：`/chat`、`/push-messages`、`/sessions`（CRUD）、`/files/upload`、`/files`、`/files/{session_id}/{file_id}`、`/health`。
-- `/api/v1/openclaw/chat` 当前直接透传 CoPaw 的 SSE 响应给前端；前端不再依赖短轮询窗口模拟“流式”。
-- `/api/v1/openclaw/health` 当前固定返回 `components.api` 与 `components.copaw` 两段状态，前端不再依赖兼容分支推断网关或上游状态。
-- QuantBot 附件上传不走 COS，而是直接写入 `COPAW_SHARED_FILES_DIR` 指向的共享目录，并向 CoPaw 传递容器内可见路径 `COPAW_SHARED_VISIBLE_DIR/...`。
-- 生产环境推荐将 `copaw-data` volume 同时挂载到 `quantmind-api:/copaw-shared` 与 `copaw:/app/working`，保证 CoPaw 可直接读取用户上传的 PDF、Word、Excel、PPT、CSV、TXT、Markdown 等文件。
+- `/api/v1/openclaw/chat` 当前直接透传 QuantBot 的 SSE 响应给前端；前端不再依赖短轮询窗口模拟”流式”。
+- `/api/v1/openclaw/health` 当前固定返回 `components.api` 与 `components.quantbot` 两段状态，前端不再依赖兼容分支推断网关或上游状态。
+- QuantBot 附件上传不走 COS，而是直接写入 `COPAW_SHARED_FILES_DIR` 指向的共享目录，并向 QuantBot 传递容器内可见路径 `COPAW_SHARED_VISIBLE_DIR/...`。
+- 生产环境推荐将 `quantbot-data` volume 同时挂载到 `quantmind-api:/quantbot-shared` 与 `quantbot:/app/working`，保证 QuantBot 可直接读取用户上传的 PDF、Word、Excel、PPT、CSV、TXT、Markdown 等文件。
 - 当前测试阶段启用范围：聊天、会话管理、历史消息、健康检查；不接入 cron jobs、模型、技能、工具、工作空间等管理能力。
-- 测试阶段不配置上游访问密钥；如 CoPaw 后续增加鉴权，统一在 `copaw_proxy.py` 适配，不由前端承担。
+- 测试阶段不配置上游访问密钥；如 QuantBot 后续增加鉴权，统一在 `quantbot_proxy.py` 适配，不由前端承担。
 - 相关环境变量：`COPAW_BASE_URL`、`COPAW_CHANNEL`（默认 `console`）、`COPAW_TIMEOUT_SECONDS`（默认 `60`）、`COPAW_SHARED_FILES_DIR`（默认 `/copaw-shared`）、`COPAW_SHARED_VISIBLE_DIR`（默认 `/app/working`）、`OPENCLAW_MAX_FILE_SIZE_BYTES`（默认 `52428800`）。
 
 ## 管理端数据管理（2026-03-20）

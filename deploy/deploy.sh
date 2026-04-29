@@ -924,9 +924,9 @@ server {
         proxy_connect_timeout 75s;
     }
 
-    # WebSocket (注意: proxy_pass 不带末尾 /，保留完整路径)
+    # WebSocket（带末尾 /，自动去掉 /ws/ 前缀）
     location /ws/ {
-        proxy_pass http://127.0.0.1:8003;
+        proxy_pass http://127.0.0.1:8003/;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";

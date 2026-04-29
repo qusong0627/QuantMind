@@ -19,7 +19,7 @@ from backend.services.api.routers.proxy_error_mapping import (
 )
 from backend.services.api.user_app.middleware.auth import get_current_user
 
-router = APIRouter(tags=["OpenClaw-CoPaw"])
+router = APIRouter(tags=["QuantBot"])
 
 COPAW_BASE_URL = os.getenv("COPAW_BASE_URL", "http://copaw:8088").rstrip("/")
 COPAW_CHANNEL = os.getenv("COPAW_CHANNEL", "console")
@@ -28,13 +28,13 @@ COPAW_SHARED_FILES_DIR = os.getenv("COPAW_SHARED_FILES_DIR", "/copaw-shared").rs
 COPAW_SHARED_VISIBLE_DIR = os.getenv("COPAW_SHARED_VISIBLE_DIR", "/app/working").rstrip("/")
 OPENCLAW_MAX_FILE_SIZE_BYTES = int(os.getenv("OPENCLAW_MAX_FILE_SIZE_BYTES", str(50 * 1024 * 1024)))
 
-# CoPaw 上游认证信息
+# QuantBot 上游认证信息
 COPAW_AUTH_USERNAME = os.getenv("COPAW_AUTH_USERNAME", "")
 COPAW_AUTH_PASSWORD = os.getenv("COPAW_AUTH_PASSWORD", "")
 
 # 服务间令牌缓存
-_COPAW_TOKEN: str | None = None
-_COPAW_TOKEN_EXPIRY: float = 0
+_QUANTBOT_TOKEN: str | None = None
+_QUANTBOT_TOKEN_EXPIRY: float = 0
 
 _HOP_HEADERS = {
     "connection",
@@ -85,7 +85,7 @@ class OpenClawAttachment(BaseModel):
     file_name: str
     file_size: int = 0
     content_type: str = "application/octet-stream"
-    copaw_path: str
+    quantbot_path: str
     uploaded_at: str | None = None
 
 
@@ -129,7 +129,7 @@ def _resolve_user_id(current_user: dict, explicit_user_id: str | None = None) ->
     return str(resolved)
 
 
-def _copaw_url(path: str) -> str:
+def _quantbot_url(path: str) -> str:
     return f"{COPAW_BASE_URL}{path}"
 
 
@@ -139,14 +139,14 @@ def _safe_segment(value: str) -> str:
     return sanitized or "unknown"
 
 
-async def _get_copaw_token() -> str | None:
-    """获取并缓存 CoPaw 系统的 JWT 令牌"""
-    global _COPAW_TOKEN, _COPAW_TOKEN_EXPIRY
+async def _get_quantbot_token() -> str | None:
+    """获取并缓存 QuantBot 系统的 JWT 令牌"""
+    global _QUANTBOT_TOKEN, _QUANTBOT_TOKEN_EXPIRY
     now = time.time()
 
     # 如果缓存未过期（预留 60 秒缓冲区），直接返回
-    if _COPAW_TOKEN and now < (_COPAW_TOKEN_EXPIRY - 60):
-        return _COPAW_TOKEN
+    if _QUANTBOT_TOKEN and now < (_QUANTBOT_TOKEN_EXPIRY - 60):
+        return _QUANTBOT_TOKEN
 
     # 如果环境变量本身不存在 (None)，则报错；允许空字符串（表示无密码）
     if COPAW_AUTH_USERNAME is None or COPAW_AUTH_PASSWORD is None:
@@ -155,7 +155,7 @@ async def _get_copaw_token() -> str | None:
             detail="COPAW_AUTH_USERNAME or COPAW_AUTH_PASSWORD env vars are not set"
         )
 
-    print(f"[OpenClaw] Initiating service login to CoPaw for user: {COPAW_AUTH_USERNAME}")
+    print(f"[QuantBot] Initiating service login to QuantBot for user: {COPAW_AUTH_USERNAME}")
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.post(
@@ -166,25 +166,25 @@ async def _get_copaw_token() -> str | None:
                 }
             )
             if resp.status_code != 200:
-                print(f"[OpenClaw] CoPaw login failed: {resp.status_code} {resp.text}")
-                raise HTTPException(status_code=500, detail="CoPaw upstream login failed")
+                print(f"[QuantBot] QuantBot login failed: {resp.status_code} {resp.text}")
+                raise HTTPException(status_code=500, detail="QuantBot upstream login failed")
 
             data = resp.json()
             token = data.get("token")
             if not token:
-                print(f"[OpenClaw] CoPaw login returned NO token (Auth may be disabled). Response: {data}")
+                print(f"[QuantBot] QuantBot login returned NO token (Auth may be disabled). Response: {data}")
                 # 如果无 Token，返回 None 而不是抛出异常，以便后续尝试免密请求
                 return None
 
-            _COPAW_TOKEN = token
+            _QUANTBOT_TOKEN = token
             # 默认缓存 1 小时 (3600s)
-            _COPAW_TOKEN_EXPIRY = now + 3600
-            return _COPAW_TOKEN
+            _QUANTBOT_TOKEN_EXPIRY = now + 3600
+            return _QUANTBOT_TOKEN
     except Exception as e:
         if isinstance(e, HTTPException):
             raise e
-        print(f"[OpenClaw] Error during CoPaw login: {e}")
-        raise HTTPException(status_code=500, detail=f"Internal error authenticating with CoPaw: {str(e)}")
+        print(f"[QuantBot] Error during QuantBot login: {e}")
+        raise HTTPException(status_code=500, detail=f"Internal error authenticating with QuantBot: {str(e)}")
 
 
 def _attachments_root() -> Path:
@@ -247,7 +247,7 @@ def _normalize_attachment(attachment: dict[str, Any]) -> dict[str, Any]:
         "file_name": str(attachment.get("file_name") or ""),
         "file_size": int(attachment.get("file_size") or 0),
         "content_type": str(attachment.get("content_type") or "application/octet-stream"),
-        "copaw_path": str(attachment.get("copaw_path") or ""),
+        "quantbot_path": str(attachment.get("quantbot_path") or ""),
         "uploaded_at": str(attachment.get("uploaded_at") or _now_iso()),
     }
 
@@ -265,7 +265,7 @@ def _build_attachment_prompt(
         lines.append(
 
                 f"- 文件名: {attachment.original_name} | "
-                f"路径: {attachment.copaw_path} | "
+                f"路径: {attachment.quantbot_path} | "
                 f"类型: {attachment.content_type} | "
                 f"大小: {attachment.file_size} 字节"
 
@@ -285,7 +285,7 @@ def _validate_upload_filename(filename: str) -> str:
     return suffix
 
 
-async def _copaw_request(
+async def _quantbot_request(
     method: str,
     path: str,
     *,
@@ -301,7 +301,7 @@ async def _copaw_request(
     )
 
     # 获取服务间令牌
-    token = await _get_copaw_token()
+    token = await _get_quantbot_token()
 
     try:
         headers = {"Content-Type": "application/json"}
@@ -311,7 +311,7 @@ async def _copaw_request(
         async with httpx.AsyncClient(timeout=request_timeout) as client:
             response = await client.request(
                 method,
-                _copaw_url(path),
+                _quantbot_url(path),
                 params=params,
                 json=json_body,
                 headers=_sanitize_headers(
@@ -319,22 +319,22 @@ async def _copaw_request(
                 ),
             )
     except httpx.HTTPError as exc:
-        raise map_upstream_http_error("copaw", exc)
+        raise map_upstream_http_error("quantbot", exc)
 
     if response.status_code >= 400:
         body = response.text[:1000]
-        print(f"[OpenClaw] CoPaw error {response.status_code}: {body}")
+        print(f"[QuantBot] QuantBot error {response.status_code}: {body}")
 
         # 如果是 401，可能是 Token 失效，强制清空缓存以便下次重试
         if response.status_code == 401:
-            global _COPAW_TOKEN
-            _COPAW_TOKEN = None
+            global _QUANTBOT_TOKEN
+            _QUANTBOT_TOKEN = None
 
         raise HTTPException(
             status_code=response.status_code,
             detail={
-                "message": "copaw upstream returned error",
-                "service": "copaw",
+                "message": "quantbot upstream returned error",
+                "service": "quantbot",
                 "status_code": response.status_code,
                 "body": body,
             },
@@ -343,7 +343,7 @@ async def _copaw_request(
 
 
 async def _resolve_chat(user_id: str, session_id: str) -> dict[str, Any]:
-    response = await _copaw_request(
+    response = await _quantbot_request(
         "GET",
         "/api/chats",
         params={"user_id": user_id, "channel": COPAW_CHANNEL},
@@ -419,7 +419,7 @@ async def openclaw_chat(
     except HTTPException as exc:
         if exc.status_code != 404:
             raise
-    copaw_payload = {
+    quantbot_payload = {
         "input": [
             {
                 "role": "user",
@@ -440,7 +440,7 @@ async def openclaw_chat(
     }
 
     # 获取服务间令牌
-    token = await _get_copaw_token()
+    token = await _get_quantbot_token()
 
     try:
         client = httpx.AsyncClient(timeout=None)
@@ -450,19 +450,19 @@ async def openclaw_chat(
 
         request = client.build_request(
             "POST",
-            _copaw_url("/api/agent/process"),
-            json=copaw_payload,
+            _quantbot_url("/api/agent/process"),
+            json=quantbot_payload,
             headers=headers
         )
         response = await client.send(request, stream=True)
     except httpx.HTTPError as exc:
-        raise map_upstream_http_error("copaw", exc)
+        raise map_upstream_http_error("quantbot", exc)
 
     if response.status_code >= 400:
         # 如果是 401，强制清空 Token 缓存
         if response.status_code == 401:
-            global _COPAW_TOKEN
-            _COPAW_TOKEN = None
+            global _QUANTBOT_TOKEN
+            _QUANTBOT_TOKEN = None
 
         body = await response.aread()
         await response.aclose()
@@ -470,14 +470,14 @@ async def openclaw_chat(
         raise HTTPException(
             status_code=response.status_code,
             detail={
-                "message": "copaw upstream returned error",
-                "service": "copaw",
+                "message": "quantbot upstream returned error",
+                "service": "quantbot",
                 "status_code": response.status_code,
                 "body": body.decode("utf-8", errors="ignore")[:1000],
             },
         )
 
-    print(f"[OpenClaw] Chat request accepted: session_id={session_id}, user_id={user_id}")
+    print(f"[QuantBot] Chat request accepted: session_id={session_id}, user_id={user_id}")
 
     async def _cleanup() -> None:
         await response.aclose()
@@ -505,7 +505,7 @@ async def upload_openclaw_file(
     current_user: dict = Depends(get_current_user),
 ):
     # 调试日志：记录接收到的字段
-    print(f"[OpenClaw] File upload request - session_id: {session_id}, user_id: {user_id}, filename: {file.filename}, content_type: {file.content_type}")
+    print(f"[QuantBot] File upload request - session_id: {session_id}, user_id: {user_id}, filename: {file.filename}, content_type: {file.content_type}")
 
     resolved_user_id = _resolve_user_id(current_user, user_id)
     _validate_upload_filename(file.filename or "")
@@ -534,14 +534,14 @@ async def upload_openclaw_file(
             "file_name": stored_name,
             "file_size": len(data),
             "content_type": file.content_type or "application/octet-stream",
-            "copaw_path": (f"{_visible_session_dir(resolved_user_id, session_id)}/" f"{stored_name}"),
+            "quantbot_path": (f"{_visible_session_dir(resolved_user_id, session_id)}/" f"{stored_name}"),
             "uploaded_at": _now_iso(),
         }
     )
     attachments = _load_session_attachments(resolved_user_id, session_id)
     attachments.append(attachment)
     _save_session_attachments(resolved_user_id, session_id, attachments)
-    print(f"[OpenClaw] File uploaded successfully - file_id: {file_id}, path: {attachment['copaw_path']}")
+    print(f"[QuantBot] File uploaded successfully - file_id: {file_id}, path: {attachment['quantbot_path']}")
     return attachment
 
 
@@ -597,7 +597,7 @@ async def openclaw_push_messages(
     current_user: dict = Depends(get_current_user),
 ):
     user_id = _resolve_user_id(current_user)
-    response = await _copaw_request(
+    response = await _quantbot_request(
         "GET",
         "/api/console/push-messages",
         params={
@@ -616,7 +616,7 @@ async def list_openclaw_sessions(
     current_user: dict = Depends(get_current_user),
 ):
     user_id = _resolve_user_id(current_user)
-    response = await _copaw_request(
+    response = await _quantbot_request(
         "GET",
         "/api/chats",
         params={"user_id": user_id, "channel": COPAW_CHANNEL},
@@ -628,7 +628,7 @@ async def list_openclaw_sessions(
     elif isinstance(data, list):
         chats = data
     else:
-        print(f"[OpenClaw] Unexpected chats response format for user {user_id}: {type(data)}")
+        print(f"[QuantBot] Unexpected chats response format for user {user_id}: {type(data)}")
         chats = []
 
     return [_map_session(chat) for chat in chats if isinstance(chat, dict)]
@@ -648,7 +648,7 @@ async def create_openclaw_session(
         "channel": COPAW_CHANNEL,
         "meta": {"created_at": _now_iso(), "updated_at": _now_iso()},
     }
-    response = await _copaw_request("POST", "/api/chats", json_body=request_payload)
+    response = await _quantbot_request("POST", "/api/chats", json_body=request_payload)
     return _map_session(response.json() or request_payload)
 
 
@@ -662,7 +662,7 @@ async def get_openclaw_session_messages(
 ):
     user_id = _resolve_user_id(current_user)
     chat = await _resolve_chat(user_id, session_id)
-    response = await _copaw_request("GET", f"/api/chats/{chat['id']}")
+    response = await _quantbot_request("GET", f"/api/chats/{chat['id']}")
     data = response.json() or {}
     return {
         "session_id": session_id,
@@ -681,11 +681,11 @@ async def update_openclaw_session_title(
 ):
     user_id = _resolve_user_id(current_user, payload.user_id)
     chat = await _resolve_chat(user_id, session_id)
-    # CoPaw API 只接受 name 字段，不允许额外字段
+    # QuantBot API 只接受 name 字段，不允许额外字段
     request_payload = {
         "name": payload.title,
     }
-    await _copaw_request("PUT", f"/api/chats/{chat['id']}", json_body=request_payload)
+    await _quantbot_request("PUT", f"/api/chats/{chat['id']}", json_body=request_payload)
     return {"updated": True, "session_id": session_id, "title": payload.title}
 
 
@@ -699,7 +699,7 @@ async def delete_openclaw_session(
 ):
     user_id = _resolve_user_id(current_user)
     chat = await _resolve_chat(user_id, session_id)
-    await _copaw_request("DELETE", f"/api/chats/{chat['id']}")
+    await _quantbot_request("DELETE", f"/api/chats/{chat['id']}")
     return {"deleted": True, "session_id": session_id}
 
 
@@ -709,37 +709,37 @@ async def openclaw_health(current_user: dict = Depends(get_current_user)):
     started_at = time.perf_counter()
 
     gateway_status = "healthy"
-    copaw_status = "unhealthy"
-    copaw_error: str | None = None
+    quantbot_status = "unhealthy"
+    quantbot_error: str | None = None
     try:
-        response = await _copaw_request(
+        response = await _quantbot_request(
             "GET",
             "/api/chats",
             params={"channel": COPAW_CHANNEL},
             timeout=httpx.Timeout(connect=2.0, read=5.0, write=5.0, pool=2.0),
         )
         if response.status_code == 200:
-            copaw_status = "healthy"
+            quantbot_status = "healthy"
     except Exception as exc:
-        print(f"[OpenClaw] Health check upstream check failed: {exc}")
-        copaw_status = "unreachable"
-        copaw_error = str(exc)
+        print(f"[QuantBot] Health check upstream check failed: {exc}")
+        quantbot_status = "unreachable"
+        quantbot_error = str(exc)
 
     latency_ms = round((time.perf_counter() - started_at) * 1000, 2)
-    overall_status = "healthy" if copaw_status == "healthy" else "degraded"
+    overall_status = "healthy" if quantbot_status == "healthy" else "degraded"
     return {
         "status": overall_status,
-        "service": "openclaw-gateway",
+        "service": "quantbot-gateway",
         "timestamp": _now_iso(),
         "components": {
             "api": {
                 "status": gateway_status,
                 "latency_ms": latency_ms,
             },
-            "copaw": {
-                "status": copaw_status,
+            "quantbot": {
+                "status": quantbot_status,
                 "latency_ms": latency_ms,
-                "error": copaw_error,
+                "error": quantbot_error,
             },
         },
     }

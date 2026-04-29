@@ -690,10 +690,10 @@ def _simple_parse_text(text_input: str):
                 if alias and alias not in expanded_industry_terms:
                     expanded_industry_terms.append(alias)
 
-        # 行业匹配同时覆盖 industry（一级）与 nindnme（细分）两列，降低口径差异导致的漏召回。
+        # 行业匹配
         ind_clause = " OR ".join(
             [
-                f"industry ILIKE '%{_sql_quote(ind)}%' OR nindnme ILIKE '%{_sql_quote(ind)}%'"
+                f"industry ILIKE '%{_sql_quote(ind)}%'"
                 for ind in expanded_industry_terms
             ]
         )

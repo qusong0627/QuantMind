@@ -133,6 +133,11 @@ services:
       # 使用 mock key 允许服务启动，用户需在个人中心配置真实 API key
       - DASHSCOPE_API_KEY=${DASHSCOPE_API_KEY:-mock-api-key-not-configured}
       - QWEN_API_KEY=${QWEN_API_KEY:-mock-api-key-not-configured}
+
+      # QuantBot/CoPaw 代理（QwenPaw 机器人集成）
+      # 默认 http://copaw:8088，要求 qwenpaw 容器加入 quantmind_quantmind-net 网络并设置别名 copaw
+      # 部署后手动加入网络：docker network connect --alias copaw quantmind_quantmind-net qwenpaw
+      - COPAW_BASE_URL=${COPAW_BASE_URL:-http://copaw:8088}
     volumes:
       # 运行时数据
       - ./data:/data

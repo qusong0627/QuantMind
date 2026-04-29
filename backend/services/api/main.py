@@ -19,7 +19,7 @@ from backend.services.api.routers.asset import router as asset_router
 from backend.services.api.routers.admin import admin_router
 from backend.services.api.routers.ai_ide_proxy import router as ai_ide_proxy_router
 from backend.services.api.routers.community.router import router as community_router
-from backend.services.api.routers.copaw_proxy import router as copaw_proxy_router
+from backend.services.api.routers.quantbot_proxy import router as quantbot_proxy_router
 from backend.services.api.routers.engine_proxy import router as engine_proxy_router
 from backend.services.api.routers.files import router as files_router
 from backend.services.api.routers.model_training import router as model_training_router
@@ -129,7 +129,7 @@ app.include_router(asset_router, prefix="/api/v1/asset", tags=["Asset"])
 app.include_router(engine_proxy_router)
 app.include_router(trade_proxy_router)
 app.include_router(ai_ide_proxy_router)
-app.include_router(copaw_proxy_router)
+app.include_router(quantbot_proxy_router)
 
 # CORS
 app.add_middleware(
