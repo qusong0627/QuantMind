@@ -123,8 +123,6 @@ export const NotificationQuickCard: React.FC<NotificationQuickCardProps> = ({
       transition={{ duration: 0.2 }}
       style={expanded ? { height: '100%', overflow: 'hidden' } : undefined}
     >
-      <div className="absolute top-0 right-0 w-24 h-24 bg-gradient-to-bl from-orange-50 to-transparent rounded-bl-full opacity-50 pointer-events-none" />
-
       <style>{`.notification-modal-surface { border-radius: 12px; }`}</style>
 
       <div className="relative mb-3.5 z-10">

@@ -6,10 +6,18 @@ import { useFundData } from '../../hooks/useFundData';
 import { FundData } from '../../services/userService';
 
 
+const formatMoney = (value: number): string =>
+  value.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+const formatSignedMoney = (value: number): string => {
+  const sign = value >= 0 ? '+' : '';
+  return `${sign}￥${formatMoney(Math.abs(value))}`;
+};
+
 export const FundOverviewCard: React.FC = () => {
   const { data, loading, error, isSimulated, tradingMode } = useFundData({
     autoRefresh: true,
-    refreshInterval: 5000 // 实时数据刷新，缩短间隔
+    refreshInterval: 5000 // 实时数据刷新，间隔缩短
   });
 
   const cardTitle = tradingMode === 'real' ? '资金概览 (实盘账户)' : '资金概览 (模拟账户)';
@@ -80,7 +88,7 @@ export const FundOverviewCard: React.FC = () => {
             key={fundInfo.totalAsset}
             style={{ fontFamily: 'Outfit, sans-serif' }}
           >
-            ￥{fundInfo.totalAsset.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+            ￥{formatMoney(fundInfo.totalAsset)}
           </motion.div>
           <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest leading-none mt-0.5">Total Net Asset Value</div>
         </div>
@@ -91,7 +99,7 @@ export const FundOverviewCard: React.FC = () => {
           <div className="grid grid-cols-2 gap-2">
             <div title="统一基线口径，对应账户基线 initial_equity。" className="bg-slate-50 border border-slate-100 rounded-2xl p-3.5 hover:bg-slate-100 transition-colors flex flex-col items-center justify-center text-center">
               <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-0.5">{initialCapitalLabel}</div>
-              <div className="text-lg font-black text-slate-800 font-mono leading-tight">￥{fundInfo.initialCapital?.toLocaleString() || '100,000'}</div>
+              <div className="text-lg font-black text-slate-800 font-mono leading-tight">￥{fundInfo.initialCapital ? formatMoney(fundInfo.initialCapital) : '100,000.00'}</div>
             </div>
             <div title="统一日账本口径，对应 daily_pnl / today_pnl。" className="bg-slate-50 border border-slate-100 rounded-2xl p-3.5 hover:bg-slate-100 transition-colors flex flex-col items-center justify-center text-center">
               <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-0.5">今日盈亏</div>
@@ -99,7 +107,7 @@ export const FundOverviewCard: React.FC = () => {
                 <div className="text-lg font-black text-slate-300 font-mono leading-tight">--</div>
               ) : (
                 <div className={`text-lg font-black font-mono leading-tight ${fundInfo.todayPnL >= 0 ? 'text-[var(--profit-primary)]' : 'text-[var(--loss-primary)]'}`}>
-                  {fundInfo.todayPnL >= 0 ? '+' : ''}￥{fundInfo.todayPnL.toFixed(2)}
+                  {formatSignedMoney(fundInfo.todayPnL)}
                 </div>
               )}
             </div>
@@ -113,7 +121,7 @@ export const FundOverviewCard: React.FC = () => {
                 <div className="text-lg font-black text-slate-300 font-mono leading-tight">--</div>
               ) : (
                 <div className={`text-lg font-black font-mono leading-tight ${monthlyPnL >= 0 ? 'text-[var(--profit-primary)]' : 'text-[var(--loss-primary)]'}`}>
-                  {monthlyPnL >= 0 ? '+' : ''}￥{monthlyPnL.toFixed(2)}
+                  {formatSignedMoney(monthlyPnL)}
                 </div>
               )}
             </div>
@@ -123,7 +131,7 @@ export const FundOverviewCard: React.FC = () => {
                 <div className="text-lg font-black text-slate-300 font-mono leading-tight">--</div>
               ) : (
                 <div className={`text-lg font-black font-mono leading-tight ${(fundInfo.totalPnL || 0) >= 0 ? 'text-[var(--profit-primary)]' : 'text-[var(--loss-primary)]'}`}>
-                  {(fundInfo.totalPnL || 0) >= 0 ? '+' : ''}￥{(fundInfo.totalPnL || 0).toLocaleString()}
+                  {formatSignedMoney(fundInfo.totalPnL || 0)}
                 </div>
               )}
             </div>

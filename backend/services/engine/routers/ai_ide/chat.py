@@ -9,6 +9,8 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from .skill_engine import SkillEngine
+
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
@@ -55,6 +57,7 @@ class QuantAgent:
         self.base_url = base_url
         self.model = model
         self.kb = KnowledgeBase(project_root)
+        self.skill_engine = SkillEngine()
         self.system_prompt = self._load_system_prompt()
 
     def _load_system_prompt(self):
@@ -184,6 +187,18 @@ def get_strategy_config():
         if current_code: prompt += f"\n[Current Code]:\n```python\n{current_code}\n```\n"
         if selection: prompt += f"\n[Selection]:\n```python\n{selection}\n```\n"
         if error_msg: prompt += f"\n[Error]:\n{error_msg}\n"
+
+        # 注入 Skill 模板约束
+        skill_prompt = self.skill_engine.build_skill_prompt(user_input, context)
+        if skill_prompt:
+            prompt += f"\n\n[Skill Constraints]:\n{skill_prompt}\n"
+
+        # 注入错误修复指导
+        if error_msg:
+            error_injection = self.skill_engine.get_error_injection(error_msg)
+            if error_injection:
+                prompt += error_injection
+
         return prompt
 
 # --- API Router Logic ---

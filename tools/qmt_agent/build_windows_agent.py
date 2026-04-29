@@ -184,8 +184,8 @@ def zip_dist(version: str) -> Path:
         if REFERENCE_TEMPLATE_PATH.exists():
             shutil.copy2(REFERENCE_TEMPLATE_PATH, staging_dir / "qmt_agent_reference.py")
         config_payload = {
-            "api_base_url": "https://api.quantmind.cloud/api/v1",
-            "server_url": "wss://api.quantmind.cloud/ws/bridge",
+            "api_base_url": "http://localhost:8000/api/v1",
+            "server_url": "ws://localhost:8003/ws/bridge",
             "access_key": "",
             "secret_key": "",
             "account_id": "",

@@ -417,6 +417,15 @@ const AIIDEPage: React.FC = () => {
         if (lower.includes('api returned status 401')) {
             return 'AI 服务鉴权失败（401），请检查 API Key 是否正确，或是否与当前模型/服务商匹配。';
         }
+        if (lower.includes('404') || lower.includes('not found')) {
+            return 'AI-IDE 服务暂不可用，请检查服务是否启动或联系管理员。';
+        }
+        if (lower.includes('403') || lower.includes('forbidden')) {
+            return 'AI-IDE 服务访问被拒绝，请检查登录状态或权限配置。';
+        }
+        if (lower.includes('500') || lower.includes('internal server error')) {
+            return 'AI-IDE 服务内部错误，请稍后重试或联系管理员。';
+        }
         return msg || 'LLM 请求失败';
     };
 

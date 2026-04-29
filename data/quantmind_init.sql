@@ -2720,6 +2720,12 @@ ALTER TABLE public.real_account_baselines_id_seq OWNER TO quantmind;
 ALTER SEQUENCE public.real_account_baselines_id_seq OWNED BY public.real_account_baselines.id;
 
 --
+-- Name: real_account_baselines id; Type: DEFAULT; Schema: public; Owner: quantmind
+--
+
+ALTER TABLE ONLY public.real_account_baselines ALTER COLUMN id SET DEFAULT nextval('public.real_account_baselines_id_seq'::regclass);
+
+--
 -- Name: real_account_snapshots; Type: TABLE; Schema: public; Owner: quantmind
 --
 
