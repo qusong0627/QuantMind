@@ -19,6 +19,7 @@ REPO_URL="https://gitee.com/qusong0627/quantmind.git"
 FORCE_SYNC=false
 BACKEND_ONLY=false
 FRONTEND_ONLY=false
+HAS_ARGS=false
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -44,15 +45,19 @@ usage() {
   --backend-only   仅更新后端容器
   --frontend-only  仅更新前端
   --force-sync     强制覆盖本地未提交修改后再拉取
+  -backend-only    同 --backend-only
+  -frontend-only   同 --frontend-only
+  -force-sync      同 --force-sync
   -h, --help       显示帮助
 EOF
 }
 
 for arg in "$@"; do
+    HAS_ARGS=true
     case "$arg" in
-        --backend-only) BACKEND_ONLY=true ;;
-        --frontend-only) FRONTEND_ONLY=true ;;
-        --force-sync) FORCE_SYNC=true ;;
+        --backend-only|-backend-only) BACKEND_ONLY=true ;;
+        --frontend-only|-frontend-only) FRONTEND_ONLY=true ;;
+        --force-sync|-force-sync|-f) FORCE_SYNC=true ;;
         -h|--help)
             usage
             exit 0
@@ -64,6 +69,49 @@ for arg in "$@"; do
             ;;
     esac
 done
+
+choose_mode_by_number() {
+    if ! $HAS_ARGS && [[ -t 0 ]]; then
+        echo "请选择更新模式："
+        echo "  1) 标准更新（前后端）"
+        echo "  2) 强制同步更新（前后端，覆盖本地修改）"
+        echo "  3) 仅更新后端"
+        echo "  4) 仅更新前端"
+        echo "  0) 退出"
+        read -r -p "输入数字 [1]: " choice
+        choice="${choice:-1}"
+        case "$choice" in
+            1)
+                BACKEND_ONLY=false
+                FRONTEND_ONLY=false
+                FORCE_SYNC=false
+                ;;
+            2)
+                BACKEND_ONLY=false
+                FRONTEND_ONLY=false
+                FORCE_SYNC=true
+                ;;
+            3)
+                BACKEND_ONLY=true
+                FRONTEND_ONLY=false
+                ;;
+            4)
+                BACKEND_ONLY=false
+                FRONTEND_ONLY=true
+                ;;
+            0)
+                log_info "已退出"
+                exit 0
+                ;;
+            *)
+                log_error "无效选择: $choice"
+                exit 1
+                ;;
+        esac
+    fi
+}
+
+choose_mode_by_number
 
 if $BACKEND_ONLY && $FRONTEND_ONLY; then
     log_error "--backend-only 和 --frontend-only 不能同时使用"
@@ -138,9 +186,30 @@ git_sync() {
             git reset --hard HEAD
             git clean -fd
         else
-            log_error "检测到未提交修改，已停止更新"
-            log_info "如需强制覆盖，请追加参数: --force-sync"
-            exit 1
+            if [[ -t 0 ]]; then
+                log_warn "检测到未提交修改"
+                echo "请选择："
+                echo "  1) 终止更新（默认）"
+                echo "  2) 强制覆盖本地修改并继续"
+                read -r -p "输入数字 [1]: " dirty_choice
+                dirty_choice="${dirty_choice:-1}"
+                case "$dirty_choice" in
+                    2)
+                        log_warn "已选择强制覆盖，继续更新"
+                        git reset --hard HEAD
+                        git clean -fd
+                        ;;
+                    *)
+                        log_error "已终止更新"
+                        log_info "也可直接执行: sudo bash deploy/update.sh --force-sync"
+                        exit 1
+                        ;;
+                esac
+            else
+                log_error "检测到未提交修改，已停止更新"
+                log_info "如需强制覆盖，请追加参数: --force-sync"
+                exit 1
+            fi
         fi
     fi
 
