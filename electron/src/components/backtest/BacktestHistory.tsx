@@ -326,6 +326,9 @@ export const BacktestHistory: React.FC<BacktestHistoryProps> = ({
                     策略
                   </th>
                   <th className="px-6 py-3 text-center text-xs font-medium text-gray-600 uppercase tracking-wider">
+                    模型
+                  </th>
+                  <th className="px-6 py-3 text-center text-xs font-medium text-gray-600 uppercase tracking-wider">
                     回测期间
                   </th>
                   <th className="px-6 py-3 text-center text-xs font-medium text-gray-600 uppercase tracking-wider">
@@ -416,6 +419,9 @@ export const BacktestHistory: React.FC<BacktestHistoryProps> = ({
                   onClick={() => handleSort('created_at')}
                 >
                   策略
+                </th>
+                <th className="px-6 py-3 text-center text-xs font-medium text-gray-600 uppercase tracking-wider">
+                  模型
                 </th>
                 <th className="px-6 py-3 text-center text-xs font-medium text-gray-600 uppercase tracking-wider">
                   回测期间
@@ -655,6 +661,13 @@ const BacktestHistoryRow: React.FC<BacktestHistoryRowProps> = ({
       <td className="px-6 py-4 whitespace-nowrap max-w-[320px]">
         <span className="block truncate text-sm font-medium text-gray-800" title={resolveStrategyName(backtest)}>
           {resolveStrategyName(backtest)}
+        </span>
+      </td>
+
+      {/* 模型 */}
+      <td className="px-6 py-4 whitespace-nowrap text-center">
+        <span className="text-sm text-gray-700" title={(backtest as any).model_name || ''}>
+          {(backtest as any).model_name || '-'}
         </span>
       </td>
 

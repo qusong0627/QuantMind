@@ -364,23 +364,28 @@ class BacktestPersistence:
                 text(
                     """
                     SELECT
-                        backtest_id, user_id, tenant_id, status, created_at, completed_at, task_id,
-                        (result_json->>'annual_return')::float   AS annual_return,
-                        (result_json->>'sharpe_ratio')::float    AS sharpe_ratio,
-                        (result_json->>'max_drawdown')::float    AS max_drawdown,
-                        (result_json->>'total_return')::float    AS total_return,
-                        (result_json->>'volatility')::float      AS volatility,
-                        (result_json->>'total_trades')::int      AS total_trades,
-                        (result_json->>'win_rate')::float        AS win_rate,
-                        (result_json->>'profit_factor')::float   AS profit_factor,
-                        (result_json->>'execution_time')::float  AS execution_time,
-                        result_json->>'benchmark_symbol'         AS benchmark_symbol,
-                        (result_json->>'benchmark_return')::float AS benchmark_return,
-                        result_json->>'error_message'            AS error_message,
-                        config_json
-                    FROM qlib_backtest_runs
-                    WHERE user_id = :user_id
-                    """ + (" AND tenant_id = :tenant_id" if tenant_id else "") + " ORDER BY created_at DESC" + sql_limit
+                        b.backtest_id, b.user_id, b.tenant_id, b.status, b.created_at, b.completed_at, b.task_id,
+                        (b.result_json->>'annual_return')::float   AS annual_return,
+                        (b.result_json->>'sharpe_ratio')::float    AS sharpe_ratio,
+                        (b.result_json->>'max_drawdown')::float    AS max_drawdown,
+                        (b.result_json->>'total_return')::float    AS total_return,
+                        (b.result_json->>'volatility')::float      AS volatility,
+                        (b.result_json->>'total_trades')::int      AS total_trades,
+                        (b.result_json->>'win_rate')::float        AS win_rate,
+                        (b.result_json->>'profit_factor')::float   AS profit_factor,
+                        (b.result_json->>'execution_time')::float  AS execution_time,
+                        b.result_json->>'benchmark_symbol'         AS benchmark_symbol,
+                        (b.result_json->>'benchmark_return')::float AS benchmark_return,
+                        b.result_json->>'error_message'            AS error_message,
+                        b.config_json,
+                        m.metadata_json->>'display_name'           AS model_name
+                    FROM qlib_backtest_runs b
+                    LEFT JOIN qm_user_models m
+                        ON m.model_id = (b.config_json->>'model_id')
+                        AND m.tenant_id = b.tenant_id
+                        AND m.user_id = b.user_id
+                    WHERE b.user_id = :user_id
+                    """ + (" AND b.tenant_id = :tenant_id" if tenant_id else "") + " ORDER BY b.created_at DESC" + sql_limit
                 ),
                 params,
             )
@@ -409,6 +414,7 @@ class BacktestPersistence:
                 benchmark_return=row["benchmark_return"],
                 error_message=row["error_message"],
                 config=row["config_json"] if isinstance(row["config_json"], dict) else None,
+                model_name=row.get("model_name"),
             )
             results.append(obj)
         return results
