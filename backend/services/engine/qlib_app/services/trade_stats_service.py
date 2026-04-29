@@ -47,9 +47,16 @@ class TradeStatsService:
             if not result:
                 raise ValueError(f"回测结果不存在: {backtest_id}")
 
-            # 2. 检查是否有预计算结果
+            # 2. 检查是否有预计算结果（且 avg_holding_days 不是默认值 1.0）
             adv = getattr(result, "advanced_stats", None)
-            if adv and isinstance(adv, dict) and "pnl_distribution" in adv:
+            # 如果 avg_holding_days 是默认值 1.0，可能是旧数据，需要重新计算
+            use_precomputed = (
+                adv
+                and isinstance(adv, dict)
+                and "pnl_distribution" in adv
+                and adv.get("avg_holding_days", 1.0) != 1.0
+            )
+            if use_precomputed:
                 task_logger.info("precomputed", "使用预计算的交易统计指标", backtest_id=backtest_id, tenant_id=tenant_id)
 
                 # 提取指标
