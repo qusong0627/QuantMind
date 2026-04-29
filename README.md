@@ -113,7 +113,7 @@ curl -fsSL https://gitee.com/qusong0627/quantmind/raw/master/deploy/quick-deploy
 
 **默认账号：** `admin` / `admin123`
 
-### 一键更新（不动数据库）
+### 一键更新
 
 已部署服务器可直接执行远程更新脚本，自动拉取最新代码并重建前后端服务（不初始化、不清理数据库）：
 
@@ -121,18 +121,6 @@ curl -fsSL https://gitee.com/qusong0627/quantmind/raw/master/deploy/quick-deploy
 curl -fsSL https://gitee.com/qusong0627/quantmind/raw/master/deploy/update.sh | sudo bash
 ```
 
-可选参数：
-
-```bash
-# 仅更新后端
-curl -fsSL https://gitee.com/qusong0627/quantmind/raw/master/deploy/update.sh | sudo bash -s -- --backend-only
-
-# 仅更新前端
-curl -fsSL https://gitee.com/qusong0627/quantmind/raw/master/deploy/update.sh | sudo bash -s -- --frontend-only
-
-# 强制覆盖本地修改后更新
-curl -fsSL https://gitee.com/qusong0627/quantmind/raw/master/deploy/update.sh | sudo bash -s -- --force-sync
-```
 
 ### 离线数据包
 
