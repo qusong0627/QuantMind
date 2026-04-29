@@ -320,7 +320,7 @@ export const BacktestHistory: React.FC<BacktestHistoryProps> = ({
                     时间
                   </th>
                   <th
-                    className="px-6 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider cursor-pointer hover:text-gray-800"
+                    className="px-6 py-3 text-center text-xs font-medium text-gray-600 uppercase tracking-wider cursor-pointer hover:text-gray-800"
                     onClick={() => handleSort('created_at')}
                   >
                     策略
@@ -352,7 +352,7 @@ export const BacktestHistory: React.FC<BacktestHistoryProps> = ({
                   <th className="px-6 py-3 text-center text-xs font-medium text-gray-600 uppercase tracking-wider">
                     基准收益
                   </th>
-                  <th className="px-6 py-3 text-right text-xs font-medium text-gray-600 uppercase tracking-wider">
+                  <th className="px-6 py-3 text-center text-xs font-medium text-gray-600 uppercase tracking-wider">
                     操作
                   </th>
                 </tr>
@@ -415,7 +415,7 @@ export const BacktestHistory: React.FC<BacktestHistoryProps> = ({
                   时间
                 </th>
                 <th
-                  className="px-6 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider cursor-pointer hover:text-gray-800"
+                  className="px-6 py-3 text-center text-xs font-medium text-gray-600 uppercase tracking-wider cursor-pointer hover:text-gray-800"
                   onClick={() => handleSort('created_at')}
                 >
                   策略
@@ -447,7 +447,7 @@ export const BacktestHistory: React.FC<BacktestHistoryProps> = ({
                 <th className="px-6 py-3 text-center text-xs font-medium text-gray-600 uppercase tracking-wider">
                   基准收益
                 </th>
-                <th className="px-6 py-3 text-right text-xs font-medium text-gray-600 uppercase tracking-wider">
+                <th className="px-6 py-3 text-center text-xs font-medium text-gray-600 uppercase tracking-wider">
                   操作
                 </th>
               </tr>
