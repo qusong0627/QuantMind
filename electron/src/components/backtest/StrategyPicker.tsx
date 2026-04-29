@@ -41,8 +41,21 @@ export const StrategyPicker: React.FC<StrategyPickerProps> = ({
   hideUpload = false,
   initialStrategy,
 }) => {
+  const resolveActiveTab = (strategy: StrategyFile | null | undefined): 'upload' | 'personal' | 'template' => {
+    if (!strategy) {
+      return hideUpload ? 'template' : 'template';
+    }
+    if (strategy.source === 'template') {
+      return 'template';
+    }
+    if (strategy.source === 'upload') {
+      return hideUpload ? 'template' : 'upload';
+    }
+    return 'personal';
+  };
+
   const [activeTab, setActiveTab] = useState<'upload' | 'personal' | 'template'>(
-    initialStrategy ? 'personal' : (hideUpload ? 'template' : 'template')
+    resolveActiveTab(initialStrategy)
   );
   const [uploadedFile, setUploadedFile] = useState<File | null>(null);
   const [fileContent, setFileContent] = useState<string>('');
@@ -61,9 +74,9 @@ export const StrategyPicker: React.FC<StrategyPickerProps> = ({
   useEffect(() => {
     if (initialStrategy) {
       setSelectedStrategy(initialStrategy);
-      setActiveTab('personal');
+      setActiveTab(resolveActiveTab(initialStrategy));
     }
-  }, [initialStrategy]);
+  }, [initialStrategy, hideUpload]);
 
   useEffect(() => {
     if (activeTab !== 'template' || selectedTemplate) {

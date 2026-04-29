@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { LayoutDashboard, PieChart, FileText, Settings, User, HelpCircle, Settings2, Check, ClipboardList } from 'lucide-react';
+import { LayoutDashboard, PieChart, FileText, Settings, User, HelpCircle, ClipboardList } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { Button, Collapse, Modal, Spin, Tag, message } from 'antd';
 import TopBar from './components/TopBar';
@@ -91,7 +91,6 @@ const RealTradingPage: React.FC = () => {
     const tradingMode = useAppSelector((state) => state.ui.tradingMode);
     const [status, setStatus] = useState<RealTradingStatus | null>(null);
     const [accountInfo, setAccountInfo] = useState<AccountInfo | null>(null);
-    const [showModeSettings, setShowModeSettings] = useState(false);
     const [preflightResult, setPreflightResult] = useState<PreflightCheckResponse | null>(null);
     const [preflightModalOpen, setPreflightModalOpen] = useState(false);
     const [preflightLoading, setPreflightLoading] = useState(false);
@@ -228,7 +227,6 @@ const RealTradingPage: React.FC = () => {
     const resolvedOrchestrationMode: 'docker' | 'k8s' | undefined = isRuntimeActive
         ? status?.orchestration_mode
         : undefined;
-    const recommendedMode: TradingMode = resolveTradingAccountMode(status?.mode, tradingMode);
 
     const executeDeploy = useCallback(async (
         strategyId: string,
@@ -463,7 +461,6 @@ const RealTradingPage: React.FC = () => {
     const handleModeSwitch = (mode: TradingMode): void => {
         localStorage.setItem(TRADING_MODE_PREF_KEY, mode);
         dispatch(setTradingMode(mode));
-        setShowModeSettings(false);
     };
 
     const tabs: Array<{ id: ActiveTab; label: string; icon: LucideIcon }> = [
@@ -523,52 +520,32 @@ const RealTradingPage: React.FC = () => {
                                 href="https://www.quantmindai.cn/help"
                                 target="_blank"
                                 rel="noopener noreferrer"
-                                className="flex-1 flex items-center gap-3 px-4 py-3 rounded-2xl text-gray-600 hover:text-blue-600 hover:bg-blue-50 transition-colors"
+                                className="inline-flex items-center justify-center w-11 h-11 rounded-2xl text-gray-600 hover:text-blue-600 hover:bg-blue-50 transition-colors"
+                                title="帮助中心"
                             >
                                 <HelpCircle className="w-5 h-5" />
-                                <span className="text-sm">帮助中心</span>
                             </a>
                             <button
-                                onClick={() => setShowModeSettings(!showModeSettings)}
-                                className="p-3 rounded-2xl text-gray-600 hover:text-blue-600 hover:bg-blue-50 transition-colors"
-                                title="交易模式设置"
+                                onClick={() => handleModeSwitch(tradingMode === 'simulation' ? 'real' : 'simulation')}
+                                className="flex items-center gap-2 px-3 py-2.5 rounded-2xl border border-gray-200 text-gray-600 hover:text-blue-600 hover:border-blue-200 hover:bg-blue-50 transition-colors"
+                                title="切换实盘/模拟盘"
                             >
-                                <Settings2 className="w-5 h-5" />
+                                <span className="text-sm whitespace-nowrap">
+                                    {tradingMode === 'simulation' ? '模拟盘' : '实盘'}
+                                </span>
+                                <span
+                                    className={`relative inline-flex items-center h-5 w-9 rounded-full transition-colors duration-200 ${
+                                        tradingMode === 'simulation' ? 'bg-blue-600' : 'bg-gray-300'
+                                    }`}
+                                >
+                                    <span
+                                        className={`inline-block w-3.5 h-3.5 rounded-full bg-white shadow transform transition-transform duration-200 ${
+                                            tradingMode === 'simulation' ? 'translate-x-[18px]' : 'translate-x-[3px]'
+                                        }`}
+                                    />
+                                </span>
                             </button>
                         </div>
-
-                        {showModeSettings && (
-                            <div className="absolute bottom-[72px] left-4 right-4 rounded-2xl border border-gray-200 bg-white shadow-xl p-3 z-20">
-                                <div className="text-xs text-gray-500 mb-2">
-                                    智能推荐: {recommendedMode === 'real' ? '实盘' : '模拟盘'}
-                                </div>
-                                <div className="grid grid-cols-2 gap-2">
-                                    <button
-                                        onClick={() => handleModeSwitch('real')}
-                                        className={`flex items-center justify-center gap-1 px-3 py-2 rounded-xl text-sm font-medium border transition-colors ${tradingMode === 'real'
-                                            ? 'border-blue-500 bg-blue-50 text-blue-600'
-                                            : 'border-gray-200 text-gray-600 hover:bg-gray-50'
-                                            }`}
-                                    >
-                                        {tradingMode === 'real' && <Check size={14} />}
-                                        实盘
-                                    </button>
-                                    <button
-                                        onClick={() => handleModeSwitch('simulation')}
-                                        className={`flex items-center justify-center gap-1 px-3 py-2 rounded-xl text-sm font-medium border transition-colors ${tradingMode === 'simulation'
-                                            ? 'border-blue-500 bg-blue-50 text-blue-600'
-                                            : 'border-gray-200 text-gray-600 hover:bg-gray-50'
-                                            }`}
-                                    >
-                                        {tradingMode === 'simulation' && <Check size={14} />}
-                                        模拟盘
-                                    </button>
-                                </div>
-                                <div className="mt-2 text-[11px] text-gray-400">
-                                    实盘与模拟盘互斥，仅可二选一
-                                </div>
-                            </div>
-                        )}
                     </div>
                 </div>
 

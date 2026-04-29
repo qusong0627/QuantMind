@@ -505,16 +505,8 @@ const AIIDEPage: React.FC = () => {
         return () => window.removeEventListener('keydown', handleKeyDown);
     }, [editorContent, selectedFile, isRunning, isSaving]);
 
-    // Monaco Theme Sync
-    const [editorTheme, setEditorTheme] = React.useState('light');
-    React.useEffect(() => {
-        const isDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-        setEditorTheme(isDark ? 'vs-dark' : 'light');
-
-        const handler = (e: MediaQueryListEvent) => setEditorTheme(e.matches ? 'vs-dark' : 'light');
-        window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', handler);
-        return () => window.matchMedia('(prefers-color-scheme: dark)').removeEventListener('change', handler);
-    }, []);
+    // 固定浅色主题，不跟随系统深色模式
+    const editorTheme = 'light';
 
     const fetchLocalFileList = async (): Promise<FileItem[]> => {
         setIsLoadingFiles(true);

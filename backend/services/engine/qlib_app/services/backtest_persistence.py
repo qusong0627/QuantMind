@@ -378,7 +378,13 @@ class BacktestPersistence:
                         (b.result_json->>'benchmark_return')::float AS benchmark_return,
                         b.result_json->>'error_message'            AS error_message,
                         b.config_json,
-                        m.metadata_json->>'display_name'           AS model_name
+                        COALESCE(
+                            NULLIF(m.metadata_json->>'display_name', ''),
+                            NULLIF(m.metadata_json->>'name', ''),
+                            NULLIF(b.result_json->>'model_name', ''),
+                            NULLIF(b.config_json->>'model_id', ''),
+                            NULLIF(m.model_id, '')
+                        )                                          AS model_name
                     FROM qlib_backtest_runs b
                     LEFT JOIN qm_user_models m
                         ON m.model_id = (b.config_json->>'model_id')
@@ -472,7 +478,13 @@ class BacktestPersistence:
                 text(
                     """
                     SELECT b.result_json, b.user_id, b.result_file_path, b.result_cos_key, b.backtest_id, b.tenant_id,
-                           m.metadata_json->>'display_name' AS model_name
+                           COALESCE(
+                               NULLIF(m.metadata_json->>'display_name', ''),
+                               NULLIF(m.metadata_json->>'name', ''),
+                               NULLIF(b.result_json->>'model_name', ''),
+                               NULLIF(b.config_json->>'model_id', ''),
+                               NULLIF(m.model_id, '')
+                           ) AS model_name
                     FROM qlib_backtest_runs b
                     LEFT JOIN qm_user_models m
                         ON m.model_id = (b.config_json->>'model_id')

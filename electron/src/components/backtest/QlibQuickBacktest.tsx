@@ -382,9 +382,47 @@ export const QlibQuickBacktest: React.FC = () => {
           />
 
           <div className="space-y-5 rounded-2xl border border-gray-200 bg-white p-5">
-            <h3 className="flex items-center gap-2 font-bold text-gray-800 text-base">
-              <Settings2 className="w-4 h-4 text-gray-400" /> 基础配置
-            </h3>
+            <div className="flex items-start justify-between gap-3">
+              <h3 className="flex items-center gap-2 font-bold text-gray-800 text-base">
+                <Settings2 className="w-4 h-4 text-gray-400" /> 基础配置
+              </h3>
+              <div
+                className="relative flex items-center gap-2 shrink-0"
+                onMouseEnter={() => {
+                  tailTradeTimerRef.current = window.setTimeout(() => setShowTailTradeTooltip(true), 1000);
+                }}
+                onMouseLeave={() => {
+                  if (tailTradeTimerRef.current) { clearTimeout(tailTradeTimerRef.current); tailTradeTimerRef.current = null; }
+                  setShowTailTradeTooltip(false);
+                }}
+              >
+                <span className="text-[11px] text-gray-500">
+                  {tailTradeEnabled ? '尾盘' : '次日'}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setTailTradeEnabled(!tailTradeEnabled)}
+                  className={`relative inline-flex items-center h-5 w-9 rounded-full transition-colors duration-200 focus:outline-none ${
+                    tailTradeEnabled ? 'bg-blue-600' : 'bg-gray-300'
+                  }`}
+                  title=""
+                >
+                  <span
+                    className={`inline-block w-3.5 h-3.5 rounded-full bg-white shadow transform transition-transform duration-200 ${
+                      tailTradeEnabled ? 'translate-x-[18px]' : 'translate-x-[3px]'
+                    }`}
+                  />
+                </button>
+                {showTailTradeTooltip && (
+                  <div className="absolute top-full right-0 mt-2 px-2.5 py-1.5 bg-gray-900 text-white text-[11px] rounded-lg whitespace-nowrap z-50 shadow-lg">
+                    {tailTradeEnabled
+                      ? '尾盘交易：当日预测+收盘成交'
+                      : '次日生效：T+1预测+开盘成交'}
+                    <div className="absolute bottom-full right-3 border-4 border-transparent border-b-gray-900" />
+                  </div>
+                )}
+              </div>
+            </div>
 
             <div>
               <label className="block text-sm font-medium text-gray-600 mb-2">股票池 (Symbols)</label>
@@ -484,43 +522,6 @@ export const QlibQuickBacktest: React.FC = () => {
               <div>
                 <div className="flex items-center gap-2 mb-2">
                   <label className="text-sm font-medium text-gray-600">成交价格 (Deal Price)</label>
-                  {/* 尾盘交易模式开关 */}
-                  <div
-                    className="relative"
-                    onMouseEnter={() => {
-                      tailTradeTimerRef.current = window.setTimeout(() => setShowTailTradeTooltip(true), 1000);
-                    }}
-                    onMouseLeave={() => {
-                      if (tailTradeTimerRef.current) { clearTimeout(tailTradeTimerRef.current); tailTradeTimerRef.current = null; }
-                      setShowTailTradeTooltip(false);
-                    }}
-                  >
-                    <button
-                      type="button"
-                      onClick={() => setTailTradeEnabled(!tailTradeEnabled)}
-                      className={`relative inline-flex items-center h-5 w-9 rounded-full transition-colors duration-200 focus:outline-none ${
-                        tailTradeEnabled ? 'bg-blue-600' : 'bg-gray-300'
-                      }`}
-                      title=""
-                    >
-                      <span
-                        className={`inline-block w-3.5 h-3.5 rounded-full bg-white shadow transform transition-transform duration-200 ${
-                          tailTradeEnabled ? 'translate-x-[18px]' : 'translate-x-[3px]'
-                        }`}
-                      />
-                    </button>
-                    {showTailTradeTooltip && (
-                      <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-2.5 py-1.5 bg-gray-900 text-white text-[11px] rounded-lg whitespace-nowrap z-50 shadow-lg">
-                        {tailTradeEnabled
-                          ? '尾盘交易：当日预测+收盘成交'
-                          : '次日生效：T+1预测+开盘成交'}
-                        <div className="absolute top-full left-1/2 -translate-x-1/2 border-4 border-transparent border-t-gray-900" />
-                      </div>
-                    )}
-                  </div>
-                  <span className="text-[11px] text-gray-400 ml-auto">
-                    {tailTradeEnabled ? '尾盘' : '次日'}
-                  </span>
                 </div>
                 <select
                   value={getTailTradeDealPrice(tailTradeEnabled)}

@@ -1,5 +1,5 @@
 /**
- * CoPaw AI 助手客户端 (适配 QuantMind 网关)
+ * QuantBot AI 助手客户端 (适配 QuantMind 网关)
  * 路径: electron/src/services/copaw-client.ts
  */
 
@@ -65,7 +65,7 @@ export class CopawClient {
       if (!res.ok) throw new Error('Failed to list chats');
       return res.json();
     } catch (error) {
-      console.error('CoPaw listChats error:', error);
+      console.error('QuantBot listChats error:', error);
       return [];
     }
   }
@@ -143,7 +143,7 @@ export class CopawClient {
 
       options.onComplete?.(fullText);
     } catch (error) {
-      console.error('CoPaw sendMessage error:', error);
+      console.error('QuantBot sendMessage error:', error);
       options.onError?.(error);
     }
   }
@@ -160,7 +160,7 @@ export class CopawClient {
       const data = await res.json();
       return data.messages || [];
     } catch (error) {
-      console.error('CoPaw getChatHistory error:', error);
+      console.error('QuantBot getChatHistory error:', error);
       return [];
     }
   }

@@ -46,7 +46,7 @@ const initialGuides: GuideSectionType[] = [
     examples: [
       '读取这个 Excel 并生成统计图表',
       '创建一个每周一早上发送日报的定时任务',
-      '帮我配置 CoPaw 的钉钉频道接入',
+      '帮我配置 QuantBot 的钉钉频道接入',
     ],
     isExpanded: false,
   },

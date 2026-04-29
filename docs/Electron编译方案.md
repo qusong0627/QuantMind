@@ -255,20 +255,32 @@ interface Window {
 
 ## 6. 环境变量配置
 
-### 6.1 环境变量文件
+### 6.1 环境变量文件与优先级
 
 | 文件 | 用途 |
 |------|------|
 | `.env.example` | 环境变量模板 |
 | `.env.local` | 本地开发配置（不提交） |
+| `.env.production` | 生产构建配置（`vite build` 生效） |
+| `.env.template` | 推荐模板（复制后按环境修改） |
 | `.env` | 通用环境变量 |
+
+**Vite 优先级（高→低）**：
+1. `.env.local`
+2. `.env.[mode].local`
+3. `.env.[mode]`
+4. `.env`
+
+> 说明：`npm run dev` 使用 `development` 模式，通常以 `.env.local` 为准。
+> `npm run dashboard:build` / `vite build` 使用 `production` 模式，会读取 `.env.production`。
 
 ### 6.2 关键环境变量
 
 | 变量 | 说明 | 示例 |
 |------|------|------|
-| `VITE_API_BASE_URL` | 后端 API 地址 | `http://8.140.241.27:8000` |
-| `VITE_WS_BASE_URL` | WebSocket 地址 | `ws://8.140.241.27:8003` |
+| `VITE_API_BASE_URL` | 后端 API 地址 | `http://127.0.0.1:8000` |
+| `VITE_WS_BASE_URL` | WebSocket 地址 | `ws://127.0.0.1:8003/api/v1/ws/market` |
+| `VITE_USER_API_URL` | 用户认证 API 地址（可选） | `http://127.0.0.1:8000/api/v1` |
 | `VITE_API_URL` | 开发代理目标 | `http://localhost:8000` |
 | `VITE_PORT` | Vite 开发端口 | `3000` |
 | `VITE_DEV` | 开发模式标志 | `1` |
@@ -280,6 +292,39 @@ interface Window {
 以下变量在构建时被替换（OSS 版置空）：
 - `COS_SECRET_ID`, `COS_SECRET_KEY`, `COS_BUCKET`, `COS_REGION`
 - `TENCENT_SECRET_ID`, `TENCENT_SECRET_KEY`, `TENCENT_BUCKET`, `TENCENT_REGION`
+
+### 6.4 Electron 配置模板（推荐）
+
+```bash
+# 开发模式
+cp electron/.env.template electron/.env.local
+
+# 生产构建
+cp electron/.env.template electron/.env.production
+```
+
+模板核心项（示例）：
+
+```bash
+VITE_SERVICE_HOST=127.0.0.1
+VITE_HTTP_PROTOCOL=http
+VITE_API_BASE_URL=http://127.0.0.1:8000
+VITE_WS_BASE_URL=ws://127.0.0.1:8003/api/v1/ws/market
+```
+
+**建议**：不设置 `VITE_USER_API_URL`，让认证模块自动走 `VITE_API_BASE_URL + /api/v1`。
+如果必须设置，请写完整前缀：
+
+```bash
+VITE_USER_API_URL=http://127.0.0.1:8000/api/v1
+```
+
+本地另一个常见方案（Nginx 同域反向代理）：
+
+```bash
+VITE_API_BASE_URL=http://127.0.0.1
+VITE_WS_BASE_URL=ws://127.0.0.1/ws/api/v1/ws/market
+```
 
 ---
 
@@ -328,27 +373,24 @@ interface Window {
 
 ## 8. 完整编译流程
 
-### 8.1 环境准备
+### 8.1 环境准备（仓库根目录）
 
 ```bash
 # 1. 安装 Node.js（推荐 v20+）
 node -v  # >= 20.0.0
 
-# 2. 进入 electron 目录
-cd electron
-
-# 3. 安装依赖
+# 2. 在仓库根目录安装依赖（workspace）
 npm install
 
-# 4. 配置环境变量（可选）
-cp .env.example .env
-# 编辑 .env 设置后端地址
+# 3. 配置 Electron 开发环境变量
+cp electron/.env.example electron/.env.local
+# 编辑 electron/.env.local 设置后端地址
 ```
 
 ### 8.2 开发模式
 
 ```bash
-# 启动开发服务器（Vite + Electron 并发）
+# 在仓库根目录启动（Vite + Electron 并发）
 npm run dev
 
 # 访问地址：
@@ -575,8 +617,29 @@ CSC_IDENTITY_AUTO_DISCOVERY=false npm run build:package
 **问题**: API 请求 404
 ```bash
 # 检查环境变量
-cat .env.local
+cat electron/.env.local
 # 确认 VITE_API_BASE_URL 指向正确的后端地址
+```
+
+**问题**: 前端无法登录（`/auth/login` 404）
+```bash
+# 典型误配：VITE_USER_API_URL 缺少 /api/v1
+# 错误示例
+VITE_USER_API_URL=http://YOUR_SERVER_HOST
+
+# 正确示例
+VITE_USER_API_URL=http://YOUR_SERVER_HOST/api/v1
+# 或者直接不设置该变量（推荐）
+```
+
+认证服务会优先读取 `VITE_USER_API_URL`；若该变量存在但缺少 `/api/v1`，登录请求可能被发到错误路径导致失败。
+
+本地默认可直接使用：
+
+```bash
+VITE_API_BASE_URL=http://127.0.0.1:8000
+# 可选：
+VITE_USER_API_URL=http://127.0.0.1:8000/api/v1
 ```
 
 **问题**: WebSocket 连接失败

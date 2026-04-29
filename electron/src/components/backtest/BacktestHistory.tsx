@@ -627,6 +627,11 @@ const BacktestHistoryRow: React.FC<BacktestHistoryRowProps> = ({
   const initialCapital = resolveInitialCapital(backtest);
   const isProfit = totalReturn > 0;
   const isLoss = totalReturn < 0;
+  const modelDisplayName =
+    (backtest as any).model_name ||
+    (backtest as any).config?.model_id ||
+    (backtest as any).config?.effective_model_id ||
+    '-';
 
   return (
     <tr className="hover:bg-gray-50 transition-colors">
@@ -666,8 +671,8 @@ const BacktestHistoryRow: React.FC<BacktestHistoryRowProps> = ({
 
       {/* 模型 */}
       <td className="px-6 py-4 whitespace-nowrap text-center">
-        <span className="text-sm text-gray-700" title={(backtest as any).model_name || ''}>
-          {(backtest as any).model_name || '-'}
+        <span className="text-sm text-gray-700" title={modelDisplayName === '-' ? '' : modelDisplayName}>
+          {modelDisplayName}
         </span>
       </td>
 

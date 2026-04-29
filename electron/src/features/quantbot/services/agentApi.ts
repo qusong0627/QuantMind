@@ -1,5 +1,5 @@
 /**
- * QuantBot (CoPaw) API 服务 - 最终加固版
+ * QuantBot API 服务 - 最终加固版
  */
 
 import { apiClient } from '../../../services/api-client';
@@ -273,7 +273,7 @@ class QuantBotApiService {
     };
     const normalizedMessage = message.toLowerCase();
     if (code === 'PROVIDER_ERROR' && normalizedMessage.includes('no active model configured')) {
-      error.userMessage = '当前未配置可用模型，请先在 CoPaw 管理端启用一个模型后再试。';
+      error.userMessage = '当前未配置可用模型，请先在 QuantBot 管理端启用一个模型后再试。';
       error.recoverable = false;
     }
     error.code = code;

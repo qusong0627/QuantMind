@@ -137,7 +137,7 @@ const QuantBotPage: React.FC = () => {
         {/* 主要内容区域 - 三栏布局 */}
         <div className="flex-1 flex flex-col overflow-hidden bg-gray-50/30">
           <div className="mx-4 mt-3 mb-2 rounded-xl border border-amber-200 bg-amber-50 px-4 py-2 text-sm text-amber-700">
-            当前为 CoPaw 测试接入版本，已启用聊天与会话管理；任务系统与高级管理能力暂不开放。
+            当前为 QuantBot 测试接入版本，已启用聊天与会话管理；任务系统与高级管理能力暂不开放。
           </div>
           <div className="flex-1 flex overflow-hidden">
             <div className="w-[300px] bg-white border-r border-gray-200 flex flex-col overflow-hidden">

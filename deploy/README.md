@@ -201,6 +201,34 @@ npm run dashboard:build
 pm2 restart quantmind-web
 ```
 
+## 一键更新脚本（推荐）
+
+脚本位置：`deploy/update.sh`
+
+特点：
+- 自动从 Gitee 拉取最新代码
+- 自动重建后端与前端
+- 明确不执行数据库初始化，不删除数据库数据
+- 后端仅重建 `quantmind` 与 `celery-worker`，不重建 `db`/`redis`
+
+```bash
+cd /opt/quantmind
+sudo bash deploy/update.sh
+```
+
+可选参数：
+
+```bash
+# 仅更新后端
+sudo bash deploy/update.sh --backend-only
+
+# 仅更新前端
+sudo bash deploy/update.sh --frontend-only
+
+# 强制覆盖本地修改后更新（谨慎）
+sudo bash deploy/update.sh --force-sync
+```
+
 ## 卸载
 
 ```bash

@@ -41,7 +41,7 @@ const quickActions: QuickActionType[] = [
   },
   {
     label: '配置钉钉',
-    prompt: '请帮我配置 CoPaw 的钉钉频道接入，告诉我需要哪些参数',
+    prompt: '请帮我配置 QuantBot 的钉钉频道接入，告诉我需要哪些参数',
     icon: '💬',
     color: 'purple',
   },

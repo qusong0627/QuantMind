@@ -358,7 +358,47 @@ export const EnhancedQuickBacktest: React.FC = () => {
       <div className="flex-1 flex gap-6 p-6 overflow-hidden">
         {/* 左侧配置 */}
         <div className="w-[450px] flex flex-col gap-4 overflow-y-auto custom-scrollbar pr-2">
-          <ConfigSection title="基本配置" icon={SettingsIcon}>
+          <ConfigSection
+            title="基本配置"
+            icon={SettingsIcon}
+            headerExtra={
+              <div
+                className="relative flex items-center gap-2 shrink-0"
+                onMouseEnter={() => {
+                  tailTradeTimerRef.current = window.setTimeout(() => setShowTailTradeTooltip(true), 1000);
+                }}
+                onMouseLeave={() => {
+                  if (tailTradeTimerRef.current) { clearTimeout(tailTradeTimerRef.current); tailTradeTimerRef.current = null; }
+                  setShowTailTradeTooltip(false);
+                }}
+              >
+                <span className="text-[11px] text-gray-500">
+                  {tailTradeEnabled ? '尾盘' : '次日'}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setTailTradeEnabled(!tailTradeEnabled)}
+                  className={`relative inline-flex items-center h-5 w-9 rounded-full transition-colors duration-200 focus:outline-none ${
+                    tailTradeEnabled ? 'bg-blue-600' : 'bg-gray-300'
+                  }`}
+                >
+                  <span
+                    className={`inline-block w-3.5 h-3.5 rounded-full bg-white shadow transform transition-transform duration-200 ${
+                      tailTradeEnabled ? 'translate-x-[18px]' : 'translate-x-[3px]'
+                    }`}
+                  />
+                </button>
+                {showTailTradeTooltip && (
+                  <div className="absolute top-full right-0 mt-2 px-2.5 py-1.5 bg-gray-900 text-white text-[11px] rounded-lg whitespace-nowrap z-50 shadow-lg">
+                    {tailTradeEnabled
+                      ? '尾盘交易：当日预测+收盘成交'
+                      : '次日生效：T+1预测+开盘成交'}
+                    <div className="absolute bottom-full right-3 border-4 border-transparent border-b-gray-900" />
+                  </div>
+                )}
+              </div>
+            }
+          >
             <div className="space-y-3">
               <div className="space-y-1">
                 <label className="text-sm font-medium text-gray-700">股票池 (Symbols)</label>
@@ -429,42 +469,6 @@ export const EnhancedQuickBacktest: React.FC = () => {
                 <div className="space-y-1">
                   <div className="flex items-center gap-2">
                     <label className="text-sm font-medium text-gray-700">基准价格</label>
-                    {/* 尾盘交易模式开关 */}
-                    <div
-                      className="relative"
-                      onMouseEnter={() => {
-                        tailTradeTimerRef.current = window.setTimeout(() => setShowTailTradeTooltip(true), 1000);
-                      }}
-                      onMouseLeave={() => {
-                        if (tailTradeTimerRef.current) { clearTimeout(tailTradeTimerRef.current); tailTradeTimerRef.current = null; }
-                        setShowTailTradeTooltip(false);
-                      }}
-                    >
-                      <button
-                        type="button"
-                        onClick={() => setTailTradeEnabled(!tailTradeEnabled)}
-                        className={`relative inline-flex items-center h-5 w-9 rounded-full transition-colors duration-200 focus:outline-none ${
-                          tailTradeEnabled ? 'bg-blue-600' : 'bg-gray-300'
-                        }`}
-                      >
-                        <span
-                          className={`inline-block w-3.5 h-3.5 rounded-full bg-white shadow transform transition-transform duration-200 ${
-                            tailTradeEnabled ? 'translate-x-[18px]' : 'translate-x-[3px]'
-                          }`}
-                        />
-                      </button>
-                      {showTailTradeTooltip && (
-                        <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-2.5 py-1.5 bg-gray-900 text-white text-[11px] rounded-lg whitespace-nowrap z-50 shadow-lg">
-                          {tailTradeEnabled
-                            ? '尾盘交易：当日预测+收盘成交'
-                            : '次日生效：T+1预测+开盘成交'}
-                          <div className="absolute top-full left-1/2 -translate-x-1/2 border-4 border-transparent border-t-gray-900" />
-                        </div>
-                      )}
-                    </div>
-                    <span className="text-[11px] text-gray-400 ml-auto">
-                      {tailTradeEnabled ? '尾盘' : '次日'}
-                    </span>
                   </div>
                   <select
                     value={getTailTradeDealPrice(tailTradeEnabled)}
@@ -559,11 +563,14 @@ const RefreshCwIcon = ({ className }: { className?: string }) => (
   <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}><path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8" /><path d="M21 3v5h-5" /></svg>
 );
 
-const ConfigSection: React.FC<{ title: string; icon: any; children: React.ReactNode }> = ({ title, icon: Icon, children }) => (
+const ConfigSection: React.FC<{ title: string; icon: any; children: React.ReactNode; headerExtra?: React.ReactNode }> = ({ title, icon: Icon, children, headerExtra }) => (
   <div className="bg-white rounded-2xl border border-gray-200 p-4 shadow-sm">
-    <div className="flex items-center gap-2 mb-3">
-      <Icon className="w-5 h-5 text-gray-600" />
-      <h3 className="font-medium text-gray-800">{title}</h3>
+    <div className="flex items-start justify-between gap-3 mb-3">
+      <div className="flex items-center gap-2">
+        <Icon className="w-5 h-5 text-gray-600" />
+        <h3 className="font-medium text-gray-800">{title}</h3>
+      </div>
+      {headerExtra}
     </div>
     {children}
   </div>

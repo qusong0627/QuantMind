@@ -88,11 +88,11 @@ nginx -t && systemctl reload nginx
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `COPAW_BASE_URL` | `http://copaw:8088` | QuantBot/CoPaw 服务地址 |
+| `COPAW_BASE_URL` | `http://copaw:8088` | QuantBot 服务地址 |
 | `COPAW_CHANNEL` | `console` | 频道标识 |
 | `COPAW_TIMEOUT_SECONDS` | `60` | 请求超时（秒） |
-| `COPAW_AUTH_USERNAME` | （空） | CoPaw 认证用户名（如启用） |
-| `COPAW_AUTH_PASSWORD` | （空） | CoPaw 认证密码（如启用） |
+| `COPAW_AUTH_USERNAME` | （空） | QuantBot 认证用户名（如启用） |
+| `COPAW_AUTH_PASSWORD` | （空） | QuantBot 认证密码（如启用） |
 
 ### 网络连接
 
@@ -108,7 +108,7 @@ docker network connect --alias copaw quantmind_quantmind-net qwenpaw
 docker exec quantmind getent hosts copaw
 ```
 
-### 自定义 CoPaw 地址
+### 自定义 QuantBot 地址
 
 如果 QuantBot 部署在其他服务器，在 `docker-compose.yml` 或 `.env` 中设置：
 

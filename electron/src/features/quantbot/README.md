@@ -79,7 +79,7 @@ QuantBot 是 QuantMind 平台的智能助手，通过自然语言交互帮助用
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
 | `COPAW_BASE_URL` | `http://quantbot:8088` | QuantBot 上游地址（后端读取） |
-| `COPAW_CHANNEL` | `console` | CoPaw channel |
+| `COPAW_CHANNEL` | `console` | QuantBot channel |
 | `COPAW_TIMEOUT_SECONDS` | `60` | 上游请求超时（秒） |
 | `COPAW_SHARED_FILES_DIR` | `/quantbot-shared` | `quantmind-api` 容器内的共享卷挂载点 |
 | `COPAW_SHARED_VISIBLE_DIR` | `/app/working` | QuantBot 容器内读取附件时看到的根目录 |

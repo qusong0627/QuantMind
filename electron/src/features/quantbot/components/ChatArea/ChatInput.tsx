@@ -18,7 +18,7 @@ const getFriendlyQuantBotErrorMessage = (error: any): string => {
   const userMessage = String(error?.userMessage || '').trim();
   if (userMessage) return userMessage;
   if (code === 'PROVIDER_ERROR' && /no active model configured/i.test(message)) {
-    return '当前未配置可用模型，请先在 CoPaw 管理端启用一个模型后再试。';
+    return '当前未配置可用模型，请先在 QuantBot 管理端启用一个模型后再试。';
   }
   return message ? `对话中断: ${message}` : '对话中断: 上游服务暂时不可用';
 };
