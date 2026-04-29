@@ -32,20 +32,22 @@ interface StrategyPickerProps {
   ) => void;
   onValidationResult?: (result: StrategyValidationResult) => void;
   hideUpload?: boolean;
+  initialStrategy?: StrategyFile | null;
 }
 
 export const StrategyPicker: React.FC<StrategyPickerProps> = ({
   onStrategySelected,
   onValidationResult,
   hideUpload = false,
+  initialStrategy,
 }) => {
   const [activeTab, setActiveTab] = useState<'upload' | 'personal' | 'template'>(
-    hideUpload ? 'template' : 'template'
+    initialStrategy ? 'personal' : (hideUpload ? 'template' : 'template')
   );
   const [uploadedFile, setUploadedFile] = useState<File | null>(null);
   const [fileContent, setFileContent] = useState<string>('');
   const [personalStrategies, setPersonalStrategies] = useState<StrategyFile[]>([]);
-  const [selectedStrategy, setSelectedStrategy] = useState<StrategyFile | null>(null);
+  const [selectedStrategy, setSelectedStrategy] = useState<StrategyFile | null>(initialStrategy || null);
   const [isValidating, setIsValidating] = useState(false);
   const [validationResult, setValidationResult] = useState<StrategyValidationResult | null>(null);
   const [isLoading, setIsLoading] = useState(false);
@@ -54,6 +56,14 @@ export const StrategyPicker: React.FC<StrategyPickerProps> = ({
   const [strategyDescription, setStrategyDescription] = useState('');
   const [selectedTemplate, setSelectedTemplate] = useState<StrategyTemplate | null>(null);
   const [isTemplateModalOpen, setIsTemplateModalOpen] = useState(false);
+
+  // 当外部传入初始策略时，更新内部状态
+  useEffect(() => {
+    if (initialStrategy) {
+      setSelectedStrategy(initialStrategy);
+      setActiveTab('personal');
+    }
+  }, [initialStrategy]);
 
   useEffect(() => {
     if (activeTab !== 'template' || selectedTemplate) {

@@ -359,6 +359,7 @@ export const QlibQuickBacktest: React.FC = () => {
           <StrategyPicker
             onStrategySelected={handleStrategySelected}
             hideUpload={true}
+            initialStrategy={strategyInfo}
           />
 
           <div className="space-y-5 rounded-2xl border border-gray-200 bg-white p-5">
