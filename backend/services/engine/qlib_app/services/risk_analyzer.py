@@ -481,15 +481,20 @@ class RiskAnalyzer:
             pnl_counts, pnl_bins = np.histogram(pnl_series.dropna(), bins=20)
             pnl_distribution = {"bins": pnl_bins.tolist(), "counts": pnl_counts.tolist()}
 
-            # 2. 持仓天数分布
+            # 2. 持仓天数分布（优先使用 holding_days 字段，否则从买卖配对推导）
             raw_holding_days = (
                 df_trades["holding_days"]
                 if "holding_days" in df_trades.columns
                 else pd.Series(dtype=float, index=df_trades.index)
             )
             holding_days = pd.to_numeric(raw_holding_days, errors="coerce").dropna()
+
+            # 如果没有直接的 holding_days 字段，尝试从买卖配对推导
+            if holding_days.empty and "symbol" in df_trades.columns and "action" in df_trades.columns:
+                holding_days = cls._derive_holding_days_from_trades_for_stats(df_trades, date_col)
+
             if holding_days.empty:
-                holding_days = pd.Series([1.0]) # 默认 1 天
+                holding_days = pd.Series([1.0])  # 默认 1 天
 
             # 固定分箱：1-7天, 7-30天, 30-90天, 90-180天, 180-365天
             holding_bins = [1.0, 7.0, 30.0, 90.0, 180.0, 365.0]
@@ -541,6 +546,89 @@ class RiskAnalyzer:
         except Exception as e:
             task_logger.warning("calculate_advanced_trade_stats_failed", "Failed to calculate advanced trade stats", error=str(e))
             return {}
+
+    @classmethod
+    def _derive_holding_days_from_trades_for_stats(
+        cls, df_trades: pd.DataFrame, date_col: str | None
+    ) -> pd.Series:
+        """从买卖配对推导持仓天数（用于高级统计预计算）。"""
+        if date_col is None or "symbol" not in df_trades.columns or "action" not in df_trades.columns:
+            return pd.Series(dtype=float)
+
+        working = df_trades.copy()
+        working[date_col] = pd.to_datetime(working[date_col], errors="coerce")
+        working = working.dropna(subset=[date_col, "symbol", "action"])
+        if working.empty:
+            return pd.Series(dtype=float)
+
+        working["action_norm"] = working["action"].astype(str).str.lower().str.strip()
+        working = working[working["action_norm"].isin(["buy", "sell"])]
+        if working.empty:
+            return pd.Series(dtype=float)
+
+        # 抽样避免超大规模计算
+        if len(working) > 5000:
+            symbols = working["symbol"].unique()
+            sample_symbols = np.random.choice(symbols, size=min(len(symbols), 200), replace=False)
+            working = working[working["symbol"].isin(sample_symbols)]
+
+        qty_col = "quantity" if "quantity" in working.columns else None
+        if qty_col is not None:
+            working["qty"] = pd.to_numeric(working[qty_col], errors="coerce").abs()
+            working["qty"] = working["qty"].replace([np.inf, -np.inf], np.nan).fillna(1.0)
+            working.loc[working["qty"] <= 0, "qty"] = 1.0
+        else:
+            working["qty"] = 1.0
+
+        working = working.sort_values(by=[date_col], kind="mergesort")
+
+        open_lots: dict[str, list[dict[str, float | pd.Timestamp]]] = {}
+        holding_days_list: list[float] = []
+
+        records = working.to_dict("records")
+        for row in records:
+            symbol = str(row["symbol"])
+            action = str(row["action_norm"])
+            trade_date = row[date_col]
+            quantity = float(row["qty"])
+
+            if action == "buy":
+                if symbol not in open_lots:
+                    open_lots[symbol] = []
+                open_lots[symbol].append({"qty": quantity, "date": trade_date})
+                continue
+
+            if action != "sell":
+                continue
+
+            remaining = quantity
+            weighted_days = 0.0
+            matched_qty = 0.0
+
+            while remaining > 0 and open_lots.get(symbol):
+                lot = open_lots[symbol][0]
+                lot_qty = float(lot["qty"])
+                lot_date = lot["date"]
+                consume = min(remaining, lot_qty)
+
+                delta_days = (trade_date - lot_date).days
+                day_value = float(max(delta_days, 1))
+                weighted_days += day_value * consume
+                matched_qty += consume
+
+                remaining -= consume
+                lot_qty -= consume
+                if lot_qty <= 1e-8:
+                    open_lots[symbol].pop(0)
+                else:
+                    lot["qty"] = lot_qty
+
+            if matched_qty > 0:
+                holding_days_list.append(weighted_days / matched_qty)
+
+        if not holding_days_list:
+            return pd.Series(dtype=float)
+        return pd.Series(holding_days_list, dtype=float)
 
     @classmethod
     def _build_equity_curve(

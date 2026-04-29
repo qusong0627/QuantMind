@@ -515,7 +515,7 @@ const RealTradingPage: React.FC = () => {
 
                     {/* Bottom Help Center + Mode Switch */}
                     <div className="p-4 border-t border-gray-200 relative">
-                        <div className="flex items-center justify-end gap-2">
+                        <div className="flex items-center justify-between gap-2">
                             <a
                                 href="https://www.quantmindai.cn/help"
                                 target="_blank"
