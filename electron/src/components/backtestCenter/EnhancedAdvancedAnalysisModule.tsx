@@ -72,10 +72,13 @@ export const EnhancedAdvancedAnalysisModule: React.FC = () => {
 
   const backtestOptions = useMemo(
     () => [
-      ...backtestList.map((item) => ({
-        value: item.backtest_id,
-        label: `${resolveStrategyName(item)} | ${resolveBacktestPeriod(item)}`,
-      })),
+      ...backtestList.map((item) => {
+        const modelName = (item as any).model_name || '-';
+        return {
+          value: item.backtest_id,
+          label: `${resolveStrategyName(item)} | ${modelName} | ${resolveBacktestPeriod(item)}`,
+        };
+      }),
     ],
     [backtestList]
   );
