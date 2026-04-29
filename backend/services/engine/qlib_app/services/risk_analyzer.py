@@ -504,10 +504,39 @@ class RiskAnalyzer:
                     freq_series["dates"].append(period.to_timestamp().strftime("%Y-%m-%d"))
                     freq_series["values"].append(float(count))
 
+            # 4. 盈亏天数比：盈利交易日数 / 亏损交易日数
+            profit_loss_days_ratio = 0.0
+            if daily_returns is not None and len(daily_returns) > 0:
+                clean_returns = daily_returns.replace([np.inf, -np.inf], np.nan).dropna()
+                if not clean_returns.empty:
+                    win_days = int((clean_returns > 0).sum())
+                    loss_days = int((clean_returns < 0).sum())
+                    if loss_days > 0:
+                        profit_loss_days_ratio = float(win_days / loss_days)
+                    elif win_days > 0:
+                        profit_loss_days_ratio = float(win_days)
+
+            # 5. 平均持仓天数
+            avg_holding_days = float(holding_days.mean()) if not holding_days.empty else 1.0
+
+            # 6. 交易频率 (每月平均交易次数)
+            trade_frequency = 0.0
+            if freq_series["values"]:
+                # 使用实际月度数据计算平均
+                trade_frequency = float(np.mean(freq_series["values"]))
+            elif date_col and len(df_trades) > 0:
+                # 回退：基于交易记录数和日期范围估算
+                date_range_days = (df_trades["_dt"].max() - df_trades["_dt"].min()).days
+                months = max(int(date_range_days / 21), 1) if date_range_days > 0 else 1
+                trade_frequency = float(len(trades) / months)
+
             return {
                 "pnl_distribution": pnl_distribution,
                 "holding_days_distribution": holding_distribution,
-                "trade_frequency_series": freq_series
+                "trade_frequency_series": freq_series,
+                "profit_loss_days_ratio": profit_loss_days_ratio,
+                "avg_holding_days": avg_holding_days,
+                "trade_frequency": trade_frequency,
             }
         except Exception as e:
             task_logger.warning("calculate_advanced_trade_stats_failed", "Failed to calculate advanced trade stats", error=str(e))
