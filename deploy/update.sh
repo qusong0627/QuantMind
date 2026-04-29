@@ -36,6 +36,28 @@ log_step() {
     echo -e "${BLUE}========================================${NC}\n"
 }
 
+has_tty() {
+    [[ -r /dev/tty && -w /dev/tty ]]
+}
+
+tty_print() {
+    if has_tty; then
+        echo -e "$1" > /dev/tty
+    else
+        echo -e "$1"
+    fi
+}
+
+tty_read() {
+    local prompt="$1"
+    local var_name="$2"
+    if has_tty; then
+        read -r -p "$prompt" "$var_name" < /dev/tty
+    else
+        read -r -p "$prompt" "$var_name"
+    fi
+}
+
 usage() {
     cat <<'EOF'
 用法:
@@ -71,14 +93,14 @@ for arg in "$@"; do
 done
 
 choose_mode_by_number() {
-    if ! $HAS_ARGS && [[ -t 0 ]]; then
-        echo "请选择更新模式："
-        echo "  1) 标准更新（前后端）"
-        echo "  2) 强制同步更新（前后端，覆盖本地修改）"
-        echo "  3) 仅更新后端"
-        echo "  4) 仅更新前端"
-        echo "  0) 退出"
-        read -r -p "输入数字 [1]: " choice
+    if ! $HAS_ARGS && has_tty; then
+        tty_print "请选择更新模式："
+        tty_print "  1) 标准更新（前后端）"
+        tty_print "  2) 强制同步更新（前后端，覆盖本地修改）"
+        tty_print "  3) 仅更新后端"
+        tty_print "  4) 仅更新前端"
+        tty_print "  0) 退出"
+        tty_read "输入数字 [1]: " choice
         choice="${choice:-1}"
         case "$choice" in
             1)
@@ -186,12 +208,12 @@ git_sync() {
             git reset --hard HEAD
             git clean -fd
         else
-            if [[ -t 0 ]]; then
+            if has_tty; then
                 log_warn "检测到未提交修改"
-                echo "请选择："
-                echo "  1) 终止更新（默认）"
-                echo "  2) 强制覆盖本地修改并继续"
-                read -r -p "输入数字 [1]: " dirty_choice
+                tty_print "请选择："
+                tty_print "  1) 终止更新（默认）"
+                tty_print "  2) 强制覆盖本地修改并继续"
+                tty_read "输入数字 [1]: " dirty_choice
                 dirty_choice="${dirty_choice:-1}"
                 case "$dirty_choice" in
                     2)

@@ -115,21 +115,23 @@ curl -fsSL https://gitee.com/qusong0627/quantmind/raw/master/deploy/quick-deploy
 
 ### 一键更新（不动数据库）
 
-已部署服务器可执行以下命令，自动拉取最新代码并重建前后端服务（不初始化、不清理数据库）：
+已部署服务器可直接执行远程更新脚本，自动拉取最新代码并重建前后端服务（不初始化、不清理数据库）：
 
 ```bash
-cd /opt/quantmind
-sudo bash deploy/update.sh
+curl -fsSL https://gitee.com/qusong0627/quantmind/raw/master/deploy/update.sh | sudo bash
 ```
 
 可选参数：
 
 ```bash
 # 仅更新后端
-sudo bash deploy/update.sh --backend-only
+curl -fsSL https://gitee.com/qusong0627/quantmind/raw/master/deploy/update.sh | sudo bash -s -- --backend-only
 
 # 仅更新前端
-sudo bash deploy/update.sh --frontend-only
+curl -fsSL https://gitee.com/qusong0627/quantmind/raw/master/deploy/update.sh | sudo bash -s -- --frontend-only
+
+# 强制覆盖本地修改后更新
+curl -fsSL https://gitee.com/qusong0627/quantmind/raw/master/deploy/update.sh | sudo bash -s -- --force-sync
 ```
 
 ### 离线数据包
