@@ -329,6 +329,54 @@ ensure_frontend_prereqs() {
 }
 
 #===============================================================================
+# Docker Compose 插件安装（国内兼容，锁定 v2.19+）
+#===============================================================================
+_install_docker_compose_plugin() {
+    log_info "安装 Docker Compose 插件（v2.19+）..."
+
+    # 方案 1：阿里云 Docker CE 镜像源（国内可用，版本最新）
+    local codename
+    codename=$(lsb_release -cs 2>/dev/null || echo "focal")
+    local arch
+    arch=$(dpkg --print-architecture 2>/dev/null || echo "amd64")
+
+    if curl -fsSL --connect-timeout 5 "https://mirrors.aliyun.com/docker-ce/linux/ubuntu/dists/${codename}/stable/Release" > /dev/null 2>&1; then
+        log_info "使用阿里云 Docker CE 镜像源安装..."
+        curl -fsSL "https://mirrors.aliyun.com/docker-ce/linux/ubuntu/gpg" | \
+            gpg --dearmor -o /etc/apt/keyrings/docker.gpg 2>/dev/null
+        echo "deb [arch=${arch} signed-by=/etc/apt/keyrings/docker.gpg] https://mirrors.aliyun.com/docker-ce/linux/ubuntu ${codename} stable" > \
+            /etc/apt/sources.list.d/docker.list
+        apt-get update -y
+        DEBIAN_FRONTEND=noninteractive apt-get install -y docker-compose-plugin
+        if docker compose version &> /dev/null; then
+            log_info "Docker Compose 安装成功"
+            return 0
+        fi
+    fi
+
+    # 方案 2：直接下载二进制（GitHub Releases，可走代理）
+    # 锁定 v2.19 以上版本
+    local compose_ver="v2.30.3"
+    local compose_url
+    compose_url="https://github.com/docker/compose/releases/download/${compose_ver}/docker-compose-linux-${arch}"
+
+    log_info "通过二进制方式安装 Docker Compose ${compose_ver} ..."
+    local cli_plugins_dir="/usr/local/lib/docker/cli-plugins"
+    mkdir -p "$cli_plugins_dir"
+
+    if curl -fsSL --connect-timeout 10 -o "${cli_plugins_dir}/docker-compose" "$compose_url"; then
+        chmod +x "${cli_plugins_dir}/docker-compose"
+        if docker compose version &> /dev/null; then
+            log_info "Docker Compose ${compose_ver} 安装成功"
+            return 0
+        fi
+    fi
+
+    log_error "Docker Compose 安装失败，请手动安装 v2.19+ 版本"
+    return 1
+}
+
+#===============================================================================
 # Step 1: 更新系统
 #===============================================================================
 step1_update_system() {
@@ -359,25 +407,27 @@ step2_install_docker() {
         log_warn "Docker 已安装: $(docker --version)"
         if ! docker compose version &> /dev/null; then
             log_info "检测到 Docker 但缺少 Docker Compose 插件，正在安装..."
-            apt-get update -y
-            DEBIAN_FRONTEND=noninteractive apt-get install -y docker-compose-v2
+            _install_docker_compose_plugin
         fi
     else
         log_info "安装 Docker..."
 
-        # 优先使用 apt 安装（更稳定）
+        # 优先使用 Ubuntu apt 源安装 docker.io（兼容国内镜像源）
         apt-get update -y
-        DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io docker-compose-v2
+        DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io
 
         systemctl start docker
         systemctl enable docker
 
         if [[ -n "$SUDO_USER" ]]; then
-            usermod -aG docker $SUDO_USER
+            usermod -aG docker "$SUDO_USER"
             log_info "已将用户 $SUDO_USER 加入 docker 组"
         fi
 
         log_info "Docker 安装完成: $(docker --version)"
+
+        # 安装 Docker Compose 插件（需要 v2.19+ 支持 name: 字段）
+        _install_docker_compose_plugin
     fi
 
     # 配置 Docker 镜像加速器
@@ -396,8 +446,14 @@ step2_install_docker() {
 
     if docker compose version &> /dev/null; then
         log_info "Docker Compose: $(docker compose version)"
+        local compose_ver
+        compose_ver=$(docker compose version --short 2>/dev/null | sed 's/v//')
+        if [[ -n "$compose_ver" ]] && [[ "$(printf '%s\n' "2.19" "$compose_ver" | sort -V | head -1)" != "2.19" ]]; then
+            log_error "Docker Compose 版本 $compose_ver 过低，需要 v2.19+（支持 docker-compose.yml name: 字段）"
+            exit 1
+        fi
     else
-        log_error "Docker Compose 不可用，请检查 docker-compose-v2 安装状态"
+        log_error "Docker Compose 不可用，请检查安装状态"
         exit 1
     fi
 

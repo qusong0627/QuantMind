@@ -33,6 +33,7 @@ import { backtestService } from '../../services/backtestService';
 import { useWebSocket } from '../../utils/websocket';
 import { strategyTemplates, getTemplateById } from '../../constants/strategyTemplates';
 import { blendBacktestProgress, getBacktestStageMessage } from '../backtest/progressUtils';
+import { getStoredTailTradeMode, setStoredTailTradeMode, getTailTradeDealPrice, getTailTradeSignalLagDays, ALLOW_FEATURE_SIGNAL_FALLBACK } from '../../shared/qlib/tailTradeMode';
 
 const DEFAULT_TEMPLATE_ID = 'standard_topk';
 
@@ -62,6 +63,16 @@ export const EnhancedQuickBacktest: React.FC = () => {
   const [showHistory, setShowHistory] = useState(true);
   const [isComparing, setIsComparing] = useState(false);
   const [targetType, setTargetType] = useState<'single' | 'index'>('single');
+
+  // 尾盘交易模式开关（持久化）
+  const [tailTradeEnabled, setTailTradeEnabled] = useState<boolean>(() => getStoredTailTradeMode());
+  const [showTailTradeTooltip, setShowTailTradeTooltip] = useState(false);
+  const tailTradeTimerRef = useRef<number | null>(null);
+
+  // 切换开关时同步缓存
+  useEffect(() => {
+    setStoredTailTradeMode(tailTradeEnabled);
+  }, [tailTradeEnabled]);
 
   const backtestId = useRef<string>('');
 
@@ -235,6 +246,9 @@ export const EnhancedQuickBacktest: React.FC = () => {
         strategy_code: strategyCode,
         initial_capital: backtestConfig.initial_capital || 100000,
         user_id: backtestConfig.user_id || 'default',
+        deal_price: getTailTradeDealPrice(tailTradeEnabled),
+        signal_lag_days: getTailTradeSignalLagDays(tailTradeEnabled),
+        allow_feature_signal_fallback: ALLOW_FEATURE_SIGNAL_FALLBACK,
       } as any);
       backtestId.current = response.backtest_id;
       if (!isConnected) {
@@ -282,6 +296,7 @@ export const EnhancedQuickBacktest: React.FC = () => {
   useEffect(() => {
     return () => {
       stopSimulatedProgress();
+      if (tailTradeTimerRef.current) clearTimeout(tailTradeTimerRef.current);
     };
   }, []);
 
@@ -412,11 +427,52 @@ export const EnhancedQuickBacktest: React.FC = () => {
                   </select>
                 </div>
                 <div className="space-y-1">
-                  <label className="text-sm font-medium text-gray-700">基准价格</label>
+                  <div className="flex items-center gap-2">
+                    <label className="text-sm font-medium text-gray-700">基准价格</label>
+                    {/* 尾盘交易模式开关 */}
+                    <div
+                      className="relative"
+                      onMouseEnter={() => {
+                        tailTradeTimerRef.current = window.setTimeout(() => setShowTailTradeTooltip(true), 1000);
+                      }}
+                      onMouseLeave={() => {
+                        if (tailTradeTimerRef.current) { clearTimeout(tailTradeTimerRef.current); tailTradeTimerRef.current = null; }
+                        setShowTailTradeTooltip(false);
+                      }}
+                    >
+                      <button
+                        type="button"
+                        onClick={() => setTailTradeEnabled(!tailTradeEnabled)}
+                        className={`relative inline-flex items-center h-5 w-9 rounded-full transition-colors duration-200 focus:outline-none ${
+                          tailTradeEnabled ? 'bg-blue-600' : 'bg-gray-300'
+                        }`}
+                      >
+                        <span
+                          className={`inline-block w-3.5 h-3.5 rounded-full bg-white shadow transform transition-transform duration-200 ${
+                            tailTradeEnabled ? 'translate-x-[18px]' : 'translate-x-[3px]'
+                          }`}
+                        />
+                      </button>
+                      {showTailTradeTooltip && (
+                        <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-2.5 py-1.5 bg-gray-900 text-white text-[11px] rounded-lg whitespace-nowrap z-50 shadow-lg">
+                          {tailTradeEnabled
+                            ? '尾盘交易：当日预测+收盘成交'
+                            : '次日生效：T+1预测+开盘成交'}
+                          <div className="absolute top-full left-1/2 -translate-x-1/2 border-4 border-transparent border-t-gray-900" />
+                        </div>
+                      )}
+                    </div>
+                    <span className="text-[11px] text-gray-400 ml-auto">
+                      {tailTradeEnabled ? '尾盘' : '次日'}
+                    </span>
+                  </div>
                   <select
-                    value={backtestConfig.deal_price || 'open'}
+                    value={getTailTradeDealPrice(tailTradeEnabled)}
                     onChange={(e) => updateBacktestConfig({ deal_price: e.target.value as any })}
-                    className="w-full px-3 py-2 bg-white border border-gray-300 rounded-2xl text-sm focus:ring-2 focus:ring-blue-500 outline-none"
+                    disabled={tailTradeEnabled}
+                    className={`w-full px-3 py-2 bg-white border border-gray-300 rounded-2xl text-sm focus:ring-2 focus:ring-blue-500 outline-none ${
+                      tailTradeEnabled ? 'text-gray-400 cursor-not-allowed bg-gray-100' : ''
+                    }`}
                   >
                     <option value="open">开盘价 (Open)</option>
                     <option value="close">收盘价 (Close)</option>

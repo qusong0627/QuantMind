@@ -43,6 +43,7 @@ _OUR_KWARGS = {
     # AI/前端策略生成参数（由平台上层消费，不传给 qlib BaseStrategy）
     "condition",
     "conditions",
+    "selection_condition",
     "position_config",
     "style_params",
     # 融资融券相关字段
