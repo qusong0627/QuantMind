@@ -43,6 +43,7 @@ export const QlibQuickBacktest: React.FC = () => {
   const backendProgressRef = useRef<number>(0);
   const runStartedAtRef = useRef<number>(0);
   const backtestConfig = useBacktestCenterStore((state) => state.backtestConfig);
+  const activeModule = useBacktestCenterStore((state) => state.activeModule);
 
   // 策略相关状态
   const [strategyInfo, setStrategyInfo] = useState<StrategyFile | null>(null);
@@ -66,16 +67,25 @@ export const QlibQuickBacktest: React.FC = () => {
     getDefaultStrategyParams(DEFAULT_TEMPLATE_ID)
   );
 
+  // 追踪是否已处理过 localStorage 中的策略 ID
+  const pendingStrategyHandledRef = useRef(false);
+
   useEffect(() => {
+    // 仅在 quick-backtest 模块激活时检查 localStorage
+    if (activeModule !== 'quick-backtest') return;
+
     // 检查是否有从策略管理中心传递过来的策略ID
     const pendingId = localStorage.getItem('selected_backtest_strategy_id');
-    if (pendingId) {
+    if (pendingId && !pendingStrategyHandledRef.current) {
+      pendingStrategyHandledRef.current = true;
       localStorage.removeItem('selected_backtest_strategy_id');
       loadPendingStrategy(pendingId);
-    } else {
+    } else if (!strategyInfo && !pendingStrategyHandledRef.current) {
+      // 首次加载且无待处理策略时，加载默认模板
       if (!DEFAULT_TEMPLATE) {
         return;
       }
+      pendingStrategyHandledRef.current = true;
       setStrategyInfo({
         id: DEFAULT_TEMPLATE.id,
         name: DEFAULT_TEMPLATE.name,
@@ -86,7 +96,7 @@ export const QlibQuickBacktest: React.FC = () => {
         language: 'qlib',
       });
     }
-  }, []);
+  }, [activeModule]);
 
   // 获取 Qlib 数据日期范围
   useEffect(() => {

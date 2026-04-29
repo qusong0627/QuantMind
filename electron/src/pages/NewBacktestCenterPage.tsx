@@ -25,10 +25,16 @@ import { PAGE_LAYOUT } from '../config/pageLayout';
 
 export const NewBacktestCenterPage: React.FC = () => {
   const { activeModule, setActiveModule } = useBacktestCenterStore();
-  // 组件挂载时重置为默认模块(快速回测)
+  // 组件挂载时，仅在 activeModule 为空或无效时重置为默认模块
   useEffect(() => {
-    setActiveModule('quick-backtest');
-  }, [setActiveModule]);
+    const validModules: ModuleId[] = [
+      'quick-backtest', 'expert-mode', 'backtest-history',
+      'strategy-compare', 'parameter-optimize', 'strategy-management', 'advanced-analysis'
+    ];
+    if (!validModules.includes(activeModule)) {
+      setActiveModule('quick-backtest');
+    }
+  }, [activeModule, setActiveModule]);
 
   // 渲染对应模块内容
   const renderModuleContent = () => {

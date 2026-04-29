@@ -424,16 +424,18 @@ class RiskAnalyzer:
                     win_days = clean_returns[clean_returns > 0]
                     loss_days = clean_returns[clean_returns < 0]
                     win_rate = float(len(win_days) / len(clean_returns))
-                    if len(loss_days) > 0:
-                        avg_day_win = float(win_days.mean()) if len(win_days) > 0 else 0.0
-                        avg_day_loss = abs(float(loss_days.mean()))
-                        profit_factor = (
-                            float(avg_day_win / avg_day_loss)
-                            if avg_day_loss > 0
-                            else (float("inf") if avg_day_win > 0 else 0.0)
-                        )
+                    # 盈利因子使用传统标准计算：总盈利 / 总亏损
+                    sum_day_wins = float(win_days.sum()) if len(win_days) > 0 else 0.0
+                    sum_day_losses = float(abs(loss_days.sum())) if len(loss_days) > 0 else 0.0
+                    if sum_day_losses > 0:
+                        profit_factor = sum_day_wins / sum_day_losses
+                    elif sum_day_wins > 0:
+                        profit_factor = float("inf")
                     else:
-                        profit_factor = float("inf") if len(win_days) > 0 else 0.0
+                        profit_factor = 0.0
+                    # 平均盈利/亏损用于 avg_win/avg_loss 字段
+                    avg_win = sum_day_wins / len(win_days) if len(win_days) > 0 else 0.0
+                    avg_loss = sum_day_losses / len(loss_days) if len(loss_days) > 0 else 0.0
             except Exception as e:
                 task_logger.warning(
                     "fallback_trade_stats_failed",
