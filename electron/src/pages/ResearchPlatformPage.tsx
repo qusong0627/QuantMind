@@ -105,6 +105,7 @@ interface ResearchStockRow {
   profitGrowth?: number;
   rsi?: number;
   mainFlow?: number;
+  flowNetAmount?: number;
   instOwnership?: number;
   ma5?: number;
   ma10?: number;
@@ -659,7 +660,7 @@ export const ResearchPlatformPage: React.FC = () => {
     const loadUniverse = async () => {
       setOverviewLoading(true);
       try {
-        const result = await researchService.getResearchUniverse(selectedRunId, 1000, appliedFilters.excludeSt);
+        const result = await researchService.getResearchUniverse(selectedRunId, 1000);
         if (cancelled) return;
         setCandidatePool(
           (result.candidates || []).map((item: any) => ({
@@ -1052,6 +1053,28 @@ export const ResearchPlatformPage: React.FC = () => {
     () => filteredRows.find((item) => item.key === selectedStockKey) || null,
     [filteredRows, selectedStockKey]
   );
+
+  const radarMetrics = React.useMemo(() => {
+    if (!selectedStock) return null;
+
+    const clamp = (value: number, min: number, max: number): number => Math.max(min, Math.min(max, value));
+    const modelScore = clamp(safeNum(selectedStock.score, 0) * 100, 0, 100);
+    const valuationScore = clamp(100 - safeNum(selectedStock.pe, 0), 0, 100);
+    const profitabilityScore = clamp(Math.max(0, safeNum(selectedStock.roe, 0)) / 50 * 100, 0, 100);
+    const momentumScore = clamp(safeNum(selectedStock.rsi, 0), 0, 100);
+    const activityScore = clamp(safeNum(selectedStock.turnoverRate, 0) / 30 * 100, 0, 100);
+
+    return {
+      indicator: [
+        { name: '模型评分', max: 100 },
+        { name: '估值水平', max: 100 },
+        { name: '盈利能力', max: 100 },
+        { name: '动量强度', max: 100 },
+        { name: '活跃度', max: 100 },
+      ],
+      value: [modelScore, valuationScore, profitabilityScore, momentumScore, activityScore],
+    };
+  }, [selectedStock]);
 
 
   // 加载 K 线数据
@@ -2321,6 +2344,8 @@ export const ResearchPlatformPage: React.FC = () => {
                                     rsi: 0,
                                     mainFlow: 0,
                                     instOwnership: 0,
+                                    buyVol: 0,
+                                    sellVol: 0,
                                     ma5: 0,
                                     ma10: 0,
                                     maGap5: 0,
@@ -2386,6 +2411,8 @@ export const ResearchPlatformPage: React.FC = () => {
                                     rsi: 0,
                                     mainFlow: 0,
                                     instOwnership: 0,
+                                    buyVol: 0,
+                                    sellVol: 0,
                                     ma5: 0,
                                     ma10: 0,
                                     maGap5: 0,
@@ -2523,30 +2550,18 @@ export const ResearchPlatformPage: React.FC = () => {
                 <ReactECharts 
                   option={{
                     radar: {
-                      indicator: [
-                        { name: '模型评分', max: 1 },
-                        { name: '估值水平', max: 100 },
-                        { name: '盈利能力', max: 50 },
-                        { name: '动量强度', max: 100 },
-                        { name: '活跃度', max: 30 },
-                      ],
+                      indicator: radarMetrics?.indicator || [],
                       radius: '65%',
                       axisName: { color: '#94a3b8', fontSize: 10, fontWeight: 'bold' }
                     },
                     series: [{
                       type: 'radar',
-                      data: [{
-                        value: [
-                          selectedStock.score, 
-                          Math.min(selectedStock.pe, 100), 
-                          Math.min(selectedStock.roe, 50), 
-                          selectedStock.rsi, 
-                          selectedStock.turnoverRate
-                        ],
+                      data: radarMetrics ? [{
+                        value: radarMetrics.value,
                         name: '综合评分',
                         itemStyle: { color: '#3b82f6' },
                         areaStyle: { color: 'rgba(59, 130, 246, 0.2)' }
-                      }]
+                      }] : []
                     }]
                   }} 
                   style={{ height: '180px' }} 
@@ -2562,8 +2577,8 @@ export const ResearchPlatformPage: React.FC = () => {
                 {[
                   { label: 'MA5', val: fmt2(selectedStock.ma5) },
                   { label: 'MA10', val: fmt2(selectedStock.ma10) },
-                  { label: '主力流入', val: fmtMainFlowCn(selectedStock.mainFlow) },
-                  { label: '机构持仓', val: fmtPercent2(selectedStock.instOwnership) },
+                  { label: '资金净流入', val: fmtMainFlowCn(selectedStock.flowNetAmount) },
+                  { label: '主力资金', val: fmtMainFlowCn(selectedStock.mainFlow) },
                   { label: '利润增长', val: fmtPercent2(selectedStock.profitGrowth) }
                 ].map((i, idx) => (
                   <div key={idx} className="bg-slate-50/50 p-3 rounded-xl text-center border border-slate-50">

@@ -142,6 +142,7 @@ _SDL_SELECT = """
     COALESCE(sdl.ma20, 0) AS ma20,
     COALESCE(sdl.ma_gap_5, 0) AS ma_gap_5,
     COALESCE(sdl.main_flow, 0) AS main_flow,
+    COALESCE(sdl.flow_net_amount, 0) AS flow_net_amount,
     COALESCE(sdl.inst_ownership, 0) AS inst_ownership,
     COALESCE(sdl.profit_growth, 0) AS profit_growth,
     COALESCE(sdl.volume_ratio_5, 0) AS volume_ratio_5,
@@ -714,7 +715,9 @@ def _format_candidate_record(row: dict[str, Any]) -> dict[str, Any]:
         "isSt": bool(row.get("is_st")),
         "isTradable": bool(row.get("tradable_flag")),
         "mainFlow": main_flow_million,
-        "instOwnership": None,
+        "instOwnership": _serialize_float(row.get("inst_ownership")) or 0.0,
+        "buyVol": (_serialize_float(row.get("lrg_buy_vol")) or 0.0) / 1_000_000,
+        "sellVol": (_serialize_float(row.get("lrg_sell_vol")) or 0.0) / 1_000_000,
         "volumeBars": [],
         "thesis": row.get("thesis_summary") or "",
         "expectedPrice": _serialize_float(row.get("expected_price")),
@@ -739,8 +742,7 @@ async def _fetch_models(session: Any, tenant_id: str, user_id: str) -> list[dict
               REPLACE(snap.model_id, 'script_v1_', '') AS model_id,
               COALESCE(
                 NULLIF(TRIM(um.metadata_json->>'display_name'), ''),
-                NULLIF(TRIM(um.metadata_json->>'model_name'), ''),
-                REPLACE(snap.model_id, 'script_v1_', '')
+                NULLIF(TRIM(um.metadata_json->>'model_name'), '')
               ) AS model_display_name,
               COUNT(DISTINCT run_id) AS run_count,
               MAX(prediction_trade_date) AS latest_prediction_trade_date,
