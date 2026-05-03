@@ -14,7 +14,8 @@ from datetime import date, datetime
 from threading import RLock
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
+from pydantic import BaseModel
 from sqlalchemy import text
 
 from backend.services.api.user_app.middleware.auth import get_current_user
@@ -1374,6 +1375,159 @@ async def get_research_candidate_detail(
     }
 
 
+# ============ Pydantic 请求模型 ============
+
+class WatchlistAddRequest(BaseModel):
+    run_id: str | None = None
+    stock_name: str | None = None
+    features_snapshot: dict[str, Any] | None = None
+
+
+class PoolAddRequest(BaseModel):
+    run_id: str | None = None
+    stock_name: str | None = None
+    model_id: str | None = None
+    fusion_score: float | None = None
+    thesis_summary: str | None = None
+    features_snapshot: dict[str, Any] | None = None
+
+
+class SymbolsFeaturesRequest(BaseModel):
+    symbols: list[str]
+
+
+# ============ 建表保障 ============
+
+async def ensure_research_tables():
+    async with get_session() as session:
+        await session.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS qm_user_watchlist (
+                    tenant_id VARCHAR(64) NOT NULL,
+                    user_id VARCHAR(64) NOT NULL,
+                    symbol VARCHAR(20) NOT NULL,
+                    stock_name VARCHAR(128),
+                    source_run_id VARCHAR(64),
+                    features_snapshot JSONB,
+                    notes TEXT,
+                    tags JSONB,
+                    added_at TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW(),
+                    updated_at TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW(),
+                    PRIMARY KEY (tenant_id, user_id, symbol)
+                )
+                """
+            )
+        )
+        await session.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS qm_user_research_pool (
+                    tenant_id VARCHAR(64) NOT NULL,
+                    user_id VARCHAR(64) NOT NULL,
+                    symbol VARCHAR(20) NOT NULL,
+                    stock_name VARCHAR(128),
+                    source_run_id VARCHAR(64),
+                    model_id VARCHAR(128),
+                    fusion_score DOUBLE PRECISION,
+                    thesis_summary TEXT,
+                    status VARCHAR(32) DEFAULT 'pending',
+                    features_snapshot JSONB,
+                    notes TEXT,
+                    tags JSONB,
+                    added_at TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW(),
+                    updated_at TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW(),
+                    PRIMARY KEY (tenant_id, user_id, symbol)
+                )
+                """
+            )
+        )
+        await session.commit()
+
+
+# ============ 批量股票特征接口 ============
+
+@router.post("/symbols/features")
+async def get_symbols_features(
+    req: SymbolsFeaturesRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    tid = str(current_user["tenant_id"])
+    uid = str(current_user["user_id"])
+    symbols = [StockCodeUtil.to_prefix(s.strip()) for s in req.symbols if s.strip()]
+    if not symbols:
+        return {"code": 200, "data": {"items": []}}
+
+    vals = ", ".join(f"('{s}')" for s in symbols)
+    sql = f"""
+        WITH sym_list(raw_symbol) AS (VALUES {vals}),
+        pool_snap AS (
+            SELECT symbol, features_snapshot
+            FROM qm_user_research_pool
+            WHERE tenant_id = :tid AND user_id = :uid
+              AND symbol IN (SELECT raw_symbol FROM sym_list)
+        ),
+        watchlist_snap AS (
+            SELECT symbol, features_snapshot
+            FROM qm_user_watchlist
+            WHERE tenant_id = :tid AND user_id = :uid
+              AND symbol IN (SELECT raw_symbol FROM sym_list)
+        ),
+        snap AS (
+            SELECT
+                sym_list.raw_symbol AS symbol,
+                COALESCE(s.run_id, 'history') AS run_id,
+                COALESCE(
+                    s.fusion_score,
+                    (ps.features_snapshot->>'score')::double precision,
+                    (ws.features_snapshot->>'score')::double precision
+                ) AS fusion_score,
+                COALESCE(
+                    s.risk_flags,
+                    (ps.features_snapshot->'riskFlags')::jsonb,
+                    (ws.features_snapshot->'riskFlags')::jsonb
+                ) AS risk_flags,
+                COALESCE(
+                    s.thesis_summary,
+                    (ps.features_snapshot->>'thesis')::text,
+                    (ws.features_snapshot->>'thesis')::text
+                ) AS thesis_summary,
+                COALESCE(s.confidence_level, 'watch') AS confidence_level,
+                COALESCE(s.model_id, '') AS model_id,
+                0 AS score_rank,
+                0 AS consecutive_limit_up_days,
+                ROW_NUMBER() OVER (
+                    PARTITION BY sym_list.raw_symbol
+                    ORDER BY s.prediction_trade_date DESC NULLS LAST
+                ) AS rn
+            FROM sym_list
+            LEFT JOIN qm_user_research_pool ps
+                ON ps.tenant_id = :tid AND ps.user_id = :uid
+                AND ps.symbol = sym_list.raw_symbol
+            LEFT JOIN qm_user_watchlist ws
+                ON ws.tenant_id = :tid AND ws.user_id = :uid
+                AND ws.symbol = sym_list.raw_symbol
+            LEFT JOIN qm_research_candidate_snapshot s
+                ON s.symbol = sym_list.raw_symbol
+                AND s.tenant_id = :tid AND s.user_id = :uid
+        )
+        SELECT snap.*, {_SDL_SELECT},
+               COALESCE(sdl.pct_change, 0) AS latest_change_pct
+        FROM snap
+        LEFT JOIN LATERAL (
+            SELECT sdl.* FROM stock_daily_latest sdl
+            WHERE sdl.symbol = UPPER(snap.symbol)
+            ORDER BY sdl.trade_date DESC
+            LIMIT 1
+        ) sdl ON true
+        WHERE snap.rn = 1
+    """
+    async with get_session(read_only=True) as session:
+        result = await session.execute(text(sql), {"tid": tid, "uid": uid})
+        items = [_format_candidate_record(dict(r)) for r in result.mappings()]
+    return {"code": 200, "data": {"items": items}}
+
+
 # ============ 用户自选接口 ============
 
 @router.get("/watchlist")
@@ -1432,8 +1586,7 @@ async def get_user_watchlist(
 @router.post("/watchlist/{symbol}")
 async def add_to_watchlist(
     symbol: str,
-    run_id: str | None = Query(None, description="来源批次ID"),
-    stock_name: str | None = Query(None, description="股票名称"),
+    req: WatchlistAddRequest = Body(default_factory=WatchlistAddRequest),
     current_user: dict = Depends(get_current_user),
 ):
     """添加股票到自选"""
@@ -1444,15 +1597,25 @@ async def add_to_watchlist(
         await session.execute(
             text(
                 """
-                INSERT INTO qm_user_watchlist (tenant_id, user_id, symbol, stock_name, source_run_id, updated_at)
-                VALUES (:tenant_id, :user_id, :symbol, :stock_name, :run_id, NOW())
+                INSERT INTO qm_user_watchlist
+                    (tenant_id, user_id, symbol, stock_name, source_run_id, features_snapshot, updated_at)
+                VALUES
+                    (:tenant_id, :user_id, :symbol, :stock_name, :run_id, :features_snapshot, NOW())
                 ON CONFLICT (tenant_id, user_id, symbol) DO UPDATE SET
                   stock_name = COALESCE(EXCLUDED.stock_name, qm_user_watchlist.stock_name),
                   source_run_id = COALESCE(EXCLUDED.source_run_id, qm_user_watchlist.source_run_id),
+                  features_snapshot = COALESCE(EXCLUDED.features_snapshot, qm_user_watchlist.features_snapshot),
                   updated_at = NOW()
                 """
             ),
-            {"tenant_id": tenant_id, "user_id": user_id, "symbol": symbol, "stock_name": stock_name, "run_id": run_id},
+            {
+                "tenant_id": tenant_id,
+                "user_id": user_id,
+                "symbol": symbol,
+                "stock_name": req.stock_name,
+                "run_id": req.run_id,
+                "features_snapshot": json.dumps(req.features_snapshot) if req.features_snapshot else None,
+            },
         )
 
     return {"code": 200, "message": "已加入自选", "data": {"symbol": symbol}}
@@ -1552,32 +1715,31 @@ async def get_user_research_pool(
 @router.post("/pool/{symbol}")
 async def add_to_research_pool(
     symbol: str,
-    run_id: str | None = Query(None, description="来源批次ID"),
-    stock_name: str | None = Query(None, description="股票名称"),
-    model_id: str | None = Query(None, description="模型ID"),
-    fusion_score: float | None = Query(None, description="融合分数"),
-    thesis_summary: str | None = Query(None, description="论点摘要"),
+    req: PoolAddRequest = Body(default_factory=PoolAddRequest),
     current_user: dict = Depends(get_current_user),
 ):
     """添加股票到研究池"""
     tenant_id = str(current_user["tenant_id"])
     user_id = str(current_user["user_id"])
-    model_id = _normalize_model_id(model_id)
+    model_id = _normalize_model_id(req.model_id)
 
     async with get_session() as session:
         await session.execute(
             text(
                 """
                 INSERT INTO qm_user_research_pool
-                  (tenant_id, user_id, symbol, stock_name, source_run_id, model_id, fusion_score, thesis_summary, updated_at)
+                  (tenant_id, user_id, symbol, stock_name, source_run_id, model_id,
+                   fusion_score, thesis_summary, features_snapshot, updated_at)
                 VALUES
-                  (:tenant_id, :user_id, :symbol, :stock_name, :run_id, :model_id, :fusion_score, :thesis_summary, NOW())
+                  (:tenant_id, :user_id, :symbol, :stock_name, :run_id, :model_id,
+                   :fusion_score, :thesis_summary, :features_snapshot, NOW())
                 ON CONFLICT (tenant_id, user_id, symbol) DO UPDATE SET
                   stock_name = COALESCE(EXCLUDED.stock_name, qm_user_research_pool.stock_name),
                   source_run_id = COALESCE(EXCLUDED.source_run_id, qm_user_research_pool.source_run_id),
                   model_id = COALESCE(EXCLUDED.model_id, qm_user_research_pool.model_id),
                   fusion_score = COALESCE(EXCLUDED.fusion_score, qm_user_research_pool.fusion_score),
                   thesis_summary = COALESCE(EXCLUDED.thesis_summary, qm_user_research_pool.thesis_summary),
+                  features_snapshot = COALESCE(EXCLUDED.features_snapshot, qm_user_research_pool.features_snapshot),
                   updated_at = NOW()
                 """
             ),
@@ -1585,11 +1747,12 @@ async def add_to_research_pool(
                 "tenant_id": tenant_id,
                 "user_id": user_id,
                 "symbol": symbol,
-                "stock_name": stock_name,
-                "run_id": run_id,
+                "stock_name": req.stock_name,
+                "run_id": req.run_id,
                 "model_id": model_id,
-                "fusion_score": fusion_score,
-                "thesis_summary": thesis_summary,
+                "fusion_score": req.fusion_score,
+                "thesis_summary": req.thesis_summary,
+                "features_snapshot": json.dumps(req.features_snapshot) if req.features_snapshot else None,
             },
         )
 

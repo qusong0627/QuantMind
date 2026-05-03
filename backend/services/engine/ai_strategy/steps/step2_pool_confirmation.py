@@ -53,7 +53,10 @@ from .step1_stock_selection import (
 
 logger = logging.getLogger(__name__)
 TOTAL_MV_PER_YI = float(os.getenv("AI_STRATEGY_TOTAL_MV_PER_YI", "10000"))
-TOTAL_MV_TO_YUAN = 100000000.0 / TOTAL_MV_PER_YI
+# 当数据库存储单位为亿元时，TOTAL_MV_PER_YI=1，返回给前端时无需换算
+# 当数据库存储单位为万元时，TOTAL_MV_PER_YI=10000，需要乘以 100000000/10000=10000 转为元
+# 前端期望单位为亿元，所以这里不再做转换，直接返回数据库原值
+TOTAL_MV_TO_YI = 1.0  # 直接返回亿元
 
 
 def _get_table_columns(session, table_name: str) -> set[str]:
@@ -244,7 +247,7 @@ def _execute_raw_selection_sql(sql: str) -> tuple[list[PoolItem], date | None]:
 
                     metrics = {
                         # total_mv -> 元（默认 total_mv 为万元）
-                        "market_cap": float(market_cap or 0) * TOTAL_MV_TO_YUAN,
+                        "market_cap": float(market_cap or 0) * TOTAL_MV_TO_YI,
                         "pe": float(pe or 0),
                         "close": float(row_dict.get("close") or 0),
                         "pb": float(pb or 0),

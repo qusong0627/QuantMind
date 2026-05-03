@@ -137,6 +137,9 @@ services:
       - DASHSCOPE_API_KEY=${DASHSCOPE_API_KEY:-mock-api-key-not-configured}
       - QWEN_API_KEY=${QWEN_API_KEY:-mock-api-key-not-configured}
 
+      # 市值单位配置：数据库存储单位为亿元，1亿=1
+      - AI_STRATEGY_TOTAL_MV_PER_YI=1
+
       # QuantBot 代理（QwenPaw 机器人集成）
       # 默认 http://copaw:8088，要求 qwenpaw 容器加入 quantmind_quantmind-net 网络并设置别名 copaw
       # 部署后手动加入网络：docker network connect --alias copaw quantmind_quantmind-net qwenpaw

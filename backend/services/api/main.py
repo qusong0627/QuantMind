@@ -25,6 +25,7 @@ from backend.services.api.routers.model_training import router as model_training
 from backend.services.api.routers.research import router as research_router
 from backend.services.api.routers.stocks_search import router as stocks_search_router
 from backend.services.api.routers.trade_proxy import router as trade_proxy_router
+from backend.services.api.routers.ws_proxy import router as ws_proxy_router
 from backend.services.api.user_app.api.v1.api_keys import router as api_keys_router
 from backend.services.api.user_app.api.v1.subscriptions import (
     router as subscriptions_router,
@@ -71,6 +72,9 @@ async def lifespan(app: FastAPI):
         )
 
         await model_inference_persistence.ensure_tables()
+        from backend.services.api.routers.research import ensure_research_tables
+
+        await ensure_research_tables()
 
         logger.info("✅ QuantMind API initialized")
     except Exception as e:
@@ -96,8 +100,10 @@ install_error_contract_handlers(app)
 install_access_log_middleware(app, service_name="quantmind-api")
 
 # 2. 注册具体业务路由 (高优先级)
-os.makedirs("data/uploads", exist_ok=True)
-app.mount("/uploads", StaticFiles(directory="data/uploads"), name="uploads")
+# 使用环境变量或默认路径，Docker 容器中 /data/uploads，本地开发 data/uploads
+uploads_dir = os.environ.get("UPLOADS_DIR", "/data/uploads" if os.path.exists("/data/uploads") else "data/uploads")
+os.makedirs(uploads_dir, exist_ok=True)
+app.mount("/uploads", StaticFiles(directory=uploads_dir), name="uploads")
 app.include_router(auth.router, prefix="/api/v1", tags=["Auth"])
 app.include_router(community_router)
 app.include_router(users.router, prefix="/api/v1/users", tags=["Users"])
@@ -119,6 +125,7 @@ app.include_router(
 )
 
 # 3. 注册代理路由 (低优先级，兜底捕获)
+app.include_router(ws_proxy_router)  # WebSocket 代理，优先级最高
 app.include_router(engine_proxy_router)
 app.include_router(trade_proxy_router)
 app.include_router(ai_ide_proxy_router)

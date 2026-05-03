@@ -186,13 +186,27 @@ export class UserCenterService extends BaseApiClient {
 
     const storageBase = getConfiguredStorageDomain();
 
-    // 本地存储路径
-    if (input.startsWith('/uploads/') || input.startsWith('/data/')) {
-      const apiBase = (this.axiosInstance.defaults.baseURL || '').split('/api/v1')[0];
-      if (apiBase) {
-        return `${apiBase}${input}`;
+    // 本地存储路径（支持 /uploads/, /data/, data/uploads/ 等格式）
+    if (input.startsWith('/uploads/') || input.startsWith('/data/') || input.startsWith('data/uploads/')) {
+      // 将相对路径转换为绝对路径
+      let normalizedPath = input;
+      if (input.startsWith('data/uploads/')) {
+        normalizedPath = '/' + input.replace('data/', '');
       }
-      return input;
+
+      // 优先从 axios baseURL 提取
+      const axiosBase = this.axiosInstance.defaults.baseURL || '';
+      let apiBase = axiosBase.split('/api/v1')[0] || '';
+
+      // 如果 axios baseURL 为空，尝试从 SERVICE_ENDPOINTS 获取
+      if (!apiBase) {
+        apiBase = SERVICE_ENDPOINTS.USER_SERVICE.split('/api/v1')[0] || '';
+      }
+
+      if (apiBase) {
+        return `${apiBase}${normalizedPath}`;
+      }
+      return normalizedPath;
     }
 
     // 仅给了 key/path 的情况，统一补存储域名

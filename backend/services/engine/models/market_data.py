@@ -68,8 +68,8 @@ class MarketDataDaily(Base):
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), comment="最后更新时间")
 
     __table_args__ = (
-        Index("idx_market_data_date", "date"),
+        Index("idx_market_data_date", "trade_date"),
     )
 
     def __repr__(self):
-        return f"<MarketDataDaily(date={self.date}, symbol={self.symbol})>"
+        return f"<MarketDataDaily(trade_date={self.trade_date}, symbol={self.symbol})>"

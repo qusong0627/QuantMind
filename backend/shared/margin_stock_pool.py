@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import threading
 from dataclasses import dataclass
@@ -74,9 +75,40 @@ class MarginStockPoolService:
         suffix = self.source_path.suffix.lower()
         if suffix in {".xlsx", ".xls"}:
             return self._load_from_excel()
+        if suffix == ".json":
+            return self._load_from_json()
         if suffix == ".txt":
             return self._load_from_instrument_text()
         raise ValueError(f"不支持的融资融券股票池格式: {self.source_path}")
+
+    def _load_from_json(self) -> frozenset[str]:
+        """从 JSON 文件加载股票池"""
+        with open(self.source_path, encoding="utf-8") as f:
+            data = json.load(f)
+
+        # 支持两种 JSON 结构：
+        # 1. {"stocks": [{"股票代码": "300981", ...}, ...]}
+        # 2. {"symbols": ["SH600000", "SZ000001", ...]}
+        symbols: set[str] = set()
+
+        if "stocks" in data and isinstance(data["stocks"], list):
+            # 从 stocks 数组中提取股票代码
+            for stock in data["stocks"]:
+                # 尝试多种可能的字段名
+                for key in ["股票代码", "code", "symbol", "股票代码"]:
+                    if key in stock:
+                        normalized = normalize_symbol(str(stock[key]))
+                        if normalized:
+                            symbols.add(normalized)
+                        break
+        elif "symbols" in data and isinstance(data["symbols"], list):
+            # 直接使用 symbols 数组
+            for sym in data["symbols"]:
+                normalized = normalize_symbol(str(sym))
+                if normalized:
+                    symbols.add(normalized)
+
+        return frozenset(symbols)
 
     def _load_from_excel(self) -> frozenset[str]:
         df = pd.read_excel(self.source_path, dtype=str)

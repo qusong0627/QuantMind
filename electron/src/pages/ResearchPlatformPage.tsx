@@ -90,8 +90,8 @@ interface ResearchStockRow {
   name: string;
   score: number;
   latestChange: number;
-  nextDayReturn: number | null;
-  day3Return: number | null;
+  nextDayReturn?: number | null;
+  day3Return?: number | null;
   consecutiveLimitUpDays: number;
   volumeTrend3d: boolean;
   volumeTrend5d: boolean;
@@ -99,14 +99,16 @@ interface ResearchStockRow {
   amount: number;
   sector: string;
   concept: string;
-  pe: number;
-  roe: number;
-  profitGrowth: number;
-  rsi: number;
-  mainFlow: number;
-  instOwnership: number;
-  ma5: number;
-  ma10: number;
+  signal?: 'buy' | 'hold' | 'sell';
+  pe?: number;
+  roe?: number;
+  profitGrowth?: number;
+  rsi?: number;
+  mainFlow?: number;
+  instOwnership?: number;
+  ma5?: number;
+  ma10?: number;
+  ma20?: number;
   maGap5?: number;
   volRatio5?: number;
   return1d?: number;
@@ -365,6 +367,10 @@ export const ResearchPlatformPage: React.FC = () => {
   const [poolData, setPoolData] = React.useState<ResearchPoolRow[]>([]);
   const [poolLoading, setPoolLoading] = React.useState<boolean>(false);
   const [poolTotal, setPoolTotal] = React.useState<number>(0);
+
+  // 自选/研究池特征富化映射
+  const [watchlistFeatures, setWatchlistFeatures] = React.useState<Record<string, ResearchStockRow>>({});
+  const [poolFeatures, setPoolFeatures] = React.useState<Record<string, ResearchStockRow>>({});
 
   const [minScore, setMinScore] = React.useState<number>(DEFAULT_RESEARCH_FILTERS.minScore);
   const [limitUpDays, setLimitUpDays] = React.useState<number>(DEFAULT_RESEARCH_FILTERS.limitUpDays);
@@ -752,7 +758,7 @@ export const ResearchPlatformPage: React.FC = () => {
     };
     void loadWatchlist();
     return () => { cancelled = true; };
-  }, []);
+  }, [refreshNonce]);
 
   // 加载研究池数据（页面初始化时即加载，用于显示总数）
   React.useEffect(() => {
@@ -788,13 +794,42 @@ export const ResearchPlatformPage: React.FC = () => {
     };
     void loadPool();
     return () => { cancelled = true; };
-  }, []);
+  }, [refreshNonce]);
+
+  // 富化自选特征数据
+  React.useEffect(() => {
+    if (!watchlistData.length) {
+      setWatchlistFeatures({});
+      return;
+    }
+    const symbols = watchlistData.map(item => item.symbol);
+    researchService.getFeaturesBySymbols(symbols).then(features => {
+      const map: Record<string, ResearchStockRow> = {};
+      features.forEach(f => { map[f.code] = f; });
+      setWatchlistFeatures(map);
+    }).catch(() => setWatchlistFeatures({}));
+  }, [watchlistData]);
+
+  // 富化研究池特征数据
+  React.useEffect(() => {
+    if (!poolData.length) {
+      setPoolFeatures({});
+      return;
+    }
+    const symbols = poolData.map(item => item.symbol);
+    researchService.getFeaturesBySymbols(symbols).then(features => {
+      const map: Record<string, ResearchStockRow> = {};
+      features.forEach(f => { map[f.code] = f; });
+      setPoolFeatures(map);
+    }).catch(() => setPoolFeatures({}));
+  }, [poolData]);
     
   const handleAddToWatchlist = async (stock: ResearchStockRow) => {
     try {
       await researchService.addToWatchlist(stock.code, {
         runId: stock.runId,
         stockName: stock.name,
+        featuresSnapshot: stock as unknown as Record<string, unknown>,
       });
       message.success(`已加入自选: ${stock.name}`);
       setRefreshNonce(refreshNonce + 1);
@@ -812,12 +847,35 @@ export const ResearchPlatformPage: React.FC = () => {
         modelId: selectedModelId,
         fusionScore: stock.score,
         thesisSummary: stock.thesis,
+        featuresSnapshot: stock as unknown as Record<string, unknown>,
       });
       message.success(`已加入研究池: ${stock.name}`);
       setRefreshNonce(refreshNonce + 1);
     } catch (error) {
       console.error('Add to research pool failed', error);
       message.error('加入研究池失败');
+    }
+  };
+
+  const handleRemoveFromWatchlist = async (symbol: string, stockName: string | null) => {
+    try {
+      await researchService.removeFromWatchlist(symbol);
+      message.success(`已从自选移除: ${stockName || symbol}`);
+      setRefreshNonce(refreshNonce + 1);
+    } catch (error) {
+      console.error('Remove from watchlist failed', error);
+      message.error('移出自选失败');
+    }
+  };
+
+  const handleRemoveFromPool = async (symbol: string, stockName: string | null) => {
+    try {
+      await researchService.removeFromResearchPool(symbol);
+      message.success(`已从研究池移除: ${stockName || symbol}`);
+      setRefreshNonce(refreshNonce + 1);
+    } catch (error) {
+      console.error('Remove from pool failed', error);
+      message.error('移出研究池失败');
     }
   };
 
@@ -1370,53 +1428,260 @@ export const ResearchPlatformPage: React.FC = () => {
           </div>
         ),
       },
+    ],
+    []
+  );
+
+  const watchlistColumns = React.useMemo<ColumnsType<ResearchStockRow>>(
+    () => [
+      {
+        title: <span className="whitespace-nowrap">排名</span>,
+        dataIndex: 'rank',
+        width: 60,
+        align: 'center',
+        render: (value: number) => <span className="whitespace-nowrap font-bold text-slate-700">{value}</span>,
+      },
+      {
+        title: <span className="whitespace-nowrap">股票</span>,
+        key: 'stock',
+        width: 132,
+        align: 'center',
+        render: (_, record) => (
+          <div className="text-center whitespace-nowrap">
+            <div className="font-bold text-slate-900 whitespace-nowrap">{record.name}</div>
+            <div className="text-xs text-slate-500 whitespace-nowrap">{record.code}</div>
+          </div>
+        ),
+      },
+      {
+        title: <span className="whitespace-nowrap">模型分数</span>,
+        dataIndex: 'score',
+        width: 98,
+        align: 'center',
+        render: (value: number) => <span className="font-black text-blue-400 whitespace-nowrap">{value.toFixed(3)}</span>,
+      },
+      {
+        title: <span className="whitespace-nowrap">涨跌幅</span>,
+        dataIndex: 'latestChange',
+        width: 96,
+        align: 'center',
+        render: (value: number) => (
+          <span className={`whitespace-nowrap ${value >= 0 ? 'font-semibold text-rose-500' : 'font-semibold text-emerald-500'}`}>
+            {value >= 0 ? '+' : ''}{value.toFixed(2)}%
+          </span>
+        ),
+      },
+      {
+        title: <span className="whitespace-nowrap">换手率</span>,
+        dataIndex: 'turnoverRate',
+        width: 90,
+        align: 'center',
+        render: (value: number) => <span className="text-slate-600 font-medium whitespace-nowrap">{value.toFixed(2)}%</span>,
+      },
+      {
+        title: <span className="whitespace-nowrap">成交额</span>,
+        dataIndex: 'amount',
+        width: 108,
+        align: 'center',
+        render: (value: number) => <span className="text-slate-600 font-medium whitespace-nowrap">{value.toFixed(2)}亿</span>,
+      },
+      {
+        title: <span className="whitespace-nowrap">PE(TTM)</span>,
+        dataIndex: 'pe',
+        width: 92,
+        align: 'center',
+        render: (value: number) => <span className="text-slate-600 font-medium whitespace-nowrap">{value >= 0 ? value.toFixed(1) : '-'}</span>,
+      },
+      {
+        title: <span className="whitespace-nowrap">ROE(%)</span>,
+        dataIndex: 'roe',
+        width: 92,
+        align: 'center',
+        render: (value: number) => (
+          <span className="text-rose-500 font-bold whitespace-nowrap">
+            {value > -100 && value < 100 ? `${value.toFixed(1)}%` : '-'}
+          </span>
+        ),
+      },
+      {
+        title: <span className="whitespace-nowrap">RSI</span>,
+        dataIndex: 'rsi',
+        width: 76,
+        align: 'center',
+        render: (value: number) => (
+          <span className={`whitespace-nowrap ${value >= 70 ? 'text-rose-500 font-bold' : value <= 30 ? 'text-emerald-500' : 'text-slate-600'}`}>
+            {value ? value.toFixed(1) : '-'}
+          </span>
+        ),
+      },
+      {
+        title: <span className="whitespace-nowrap">行业</span>,
+        dataIndex: 'sector',
+        width: 100,
+        align: 'center',
+        ellipsis: true,
+      },
+      {
+        title: <span className="whitespace-nowrap">指数/状态</span>,
+        key: 'status',
+        width: 120,
+        align: 'center',
+        render: (_, record) => (
+          <div className="flex flex-wrap gap-1 justify-center">
+            {record.isSt && <Tag color="error" className="m-0 text-[10px] scale-90">ST</Tag>}
+            {record.isHs300 && <Tag color="blue" className="m-0 text-[10px] scale-90">HS300</Tag>}
+            {record.isCsi500 && <Tag color="cyan" className="m-0 text-[10px] scale-90">ZZ500</Tag>}
+            {record.isCsi1000 && <Tag color="purple" className="m-0 text-[10px] scale-90">ZZ1000</Tag>}
+          </div>
+        ),
+      },
       {
         title: <span className="whitespace-nowrap">操作</span>,
         key: 'actions',
-        width: 100,
+        width: 80,
         fixed: 'right',
         align: 'center',
         render: (_, record) => (
-          <div className="flex items-center justify-center gap-2" onClick={e => e.stopPropagation()}>
-            <Button 
-              size="small" 
-              type="text" 
-              icon={<Quote className="h-3.5 w-3.5 text-slate-400 hover:text-blue-500" />} 
-              onClick={() => handleAddToWatchlist(record)}
-              title="加入自选"
-            />
-            <Button 
-              size="small" 
-              type="text" 
-              icon={<Sparkles className="h-3.5 w-3.5 text-slate-400 hover:text-indigo-500" />} 
-              onClick={() => handleAddToResearchPool(record)}
-              title="加入研究池"
+          <div className="flex items-center justify-center" onClick={e => e.stopPropagation()}>
+            <Button
+              size="small"
+              type="text"
+              danger
+              icon={<span className="text-[10px]">移除</span>}
+              onClick={() => handleRemoveFromWatchlist(record.code, record.name)}
+              title="从自选移除"
             />
           </div>
-        )
+        ),
       },
     ],
-    []
+    [watchlistFeatures]
   );
 
-  const watchlistColumns = React.useMemo<ColumnsType<WatchlistRow>>(
+  const poolColumns = React.useMemo<ColumnsType<ResearchStockRow>>(
     () => [
-      { title: '股票代码', dataIndex: 'symbol', width: 100 },
-      { title: '股票名称', dataIndex: 'stockName', width: 120 },
-      { title: '加入时间', dataIndex: 'addedAt', width: 160 },
-      { title: '备注', dataIndex: 'notes', width: 150 },
+      {
+        title: <span className="whitespace-nowrap">排名</span>,
+        dataIndex: 'rank',
+        width: 60,
+        align: 'center',
+        render: (value: number) => <span className="whitespace-nowrap font-bold text-slate-700">{value}</span>,
+      },
+      {
+        title: <span className="whitespace-nowrap">股票</span>,
+        key: 'stock',
+        width: 132,
+        align: 'center',
+        render: (_, record) => (
+          <div className="text-center whitespace-nowrap">
+            <div className="font-bold text-slate-900 whitespace-nowrap">{record.name}</div>
+            <div className="text-xs text-slate-500 whitespace-nowrap">{record.code}</div>
+          </div>
+        ),
+      },
+      {
+        title: <span className="whitespace-nowrap">模型分数</span>,
+        dataIndex: 'score',
+        width: 98,
+        align: 'center',
+        render: (value: number) => <span className="font-black text-blue-400 whitespace-nowrap">{value.toFixed(3)}</span>,
+      },
+      {
+        title: <span className="whitespace-nowrap">涨跌幅</span>,
+        dataIndex: 'latestChange',
+        width: 96,
+        align: 'center',
+        render: (value: number) => (
+          <span className={`whitespace-nowrap ${value >= 0 ? 'font-semibold text-rose-500' : 'font-semibold text-emerald-500'}`}>
+            {value >= 0 ? '+' : ''}{value.toFixed(2)}%
+          </span>
+        ),
+      },
+      {
+        title: <span className="whitespace-nowrap">换手率</span>,
+        dataIndex: 'turnoverRate',
+        width: 90,
+        align: 'center',
+        render: (value: number) => <span className="text-slate-600 font-medium whitespace-nowrap">{value.toFixed(2)}%</span>,
+      },
+      {
+        title: <span className="whitespace-nowrap">成交额</span>,
+        dataIndex: 'amount',
+        width: 108,
+        align: 'center',
+        render: (value: number) => <span className="text-slate-600 font-medium whitespace-nowrap">{value.toFixed(2)}亿</span>,
+      },
+      {
+        title: <span className="whitespace-nowrap">PE(TTM)</span>,
+        dataIndex: 'pe',
+        width: 92,
+        align: 'center',
+        render: (value: number) => <span className="text-slate-600 font-medium whitespace-nowrap">{value >= 0 ? value.toFixed(1) : '-'}</span>,
+      },
+      {
+        title: <span className="whitespace-nowrap">ROE(%)</span>,
+        dataIndex: 'roe',
+        width: 92,
+        align: 'center',
+        render: (value: number) => (
+          <span className="text-rose-500 font-bold whitespace-nowrap">
+            {value > -100 && value < 100 ? `${value.toFixed(1)}%` : '-'}
+          </span>
+        ),
+      },
+      {
+        title: <span className="whitespace-nowrap">RSI</span>,
+        dataIndex: 'rsi',
+        width: 76,
+        align: 'center',
+        render: (value: number) => (
+          <span className={`whitespace-nowrap ${value >= 70 ? 'text-rose-500 font-bold' : value <= 30 ? 'text-emerald-500' : 'text-slate-600'}`}>
+            {value ? value.toFixed(1) : '-'}
+          </span>
+        ),
+      },
+      {
+        title: <span className="whitespace-nowrap">行业</span>,
+        dataIndex: 'sector',
+        width: 100,
+        align: 'center',
+        ellipsis: true,
+      },
+      {
+        title: <span className="whitespace-nowrap">指数/状态</span>,
+        key: 'status',
+        width: 120,
+        align: 'center',
+        render: (_, record) => (
+          <div className="flex flex-wrap gap-1 justify-center">
+            {record.isSt && <Tag color="error" className="m-0 text-[10px] scale-90">ST</Tag>}
+            {record.isHs300 && <Tag color="blue" className="m-0 text-[10px] scale-90">HS300</Tag>}
+            {record.isCsi500 && <Tag color="cyan" className="m-0 text-[10px] scale-90">ZZ500</Tag>}
+            {record.isCsi1000 && <Tag color="purple" className="m-0 text-[10px] scale-90">ZZ1000</Tag>}
+          </div>
+        ),
+      },
+      {
+        title: <span className="whitespace-nowrap">操作</span>,
+        key: 'actions',
+        width: 80,
+        fixed: 'right',
+        align: 'center',
+        render: (_, record) => (
+          <div className="flex items-center justify-center" onClick={e => e.stopPropagation()}>
+            <Button
+              size="small"
+              type="text"
+              danger
+              icon={<span className="text-[10px]">移除</span>}
+              onClick={() => handleRemoveFromPool(record.code, record.name)}
+              title="从研究池移除"
+            />
+          </div>
+        ),
+      },
     ],
-    []
-  );
-
-  const poolColumns = React.useMemo<ColumnsType<ResearchPoolRow>>(
-    () => [
-      { title: '股票代码', dataIndex: 'symbol', width: 90 },
-      { title: '股票名称', dataIndex: 'stockName', width: 100 },
-      { title: '状态', dataIndex: 'status', width: 80 },
-      { title: '模型分数', dataIndex: 'fusionScore', width: 80 },
-    ],
-    []
+    [poolFeatures]
   );
 
   // 导出 CSV
@@ -1606,7 +1871,7 @@ export const ResearchPlatformPage: React.FC = () => {
                                   checked={excludeSt} 
                                   onChange={(val) => {
                                     setExcludeSt(val);
-                                    setAppliedFilters(prev => ({ ...prev, excludeSt: val }));
+                                    setAppliedFilters({ ...appliedFilters, excludeSt: val });
                                   }} 
                                 />
                               </div>
@@ -1860,86 +2125,104 @@ export const ResearchPlatformPage: React.FC = () => {
                       <motion.div 
                         initial={{ opacity: 0, y: 15 }}
                         animate={{ opacity: 1, y: 0 }}
-                        className="glass-panel rounded-[32px] border border-white/60 p-6 mb-6 shadow-xl shadow-slate-200/50 flex-shrink-0"
+                        className="glass-panel rounded-[32px] border border-white/60 p-7 mb-6 shadow-xl shadow-slate-200/50 flex-shrink-0 bg-white/40"
                       >
-                        <div className="flex items-start justify-between gap-4">
-                          <div className="space-y-1 min-w-0">
+                        {/* 顶层：核心身份与状态 */}
+                        <div className="flex flex-col md:flex-row md:items-end justify-between gap-6 pb-6 border-b border-slate-100/60">
+                          <div className="space-y-3">
                             <div className="flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-slate-400">
                               <Sparkles className="h-3 w-3 text-blue-500" />
                               当前研究模型与批次
                             </div>
-                            <div className="flex items-center gap-3">
-                              <h2 className="text-2xl font-black text-slate-800 tracking-tight truncate">
+                            <div className="flex items-end gap-4">
+                              <h2 className="text-4xl font-black text-slate-900 tracking-tight leading-none">
                                 {availableModels.find(m => m.modelId === selectedModelId)?.name || '未选择模型'}
                               </h2>
-                              <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-xl bg-slate-100/80 border border-slate-200/50 text-[10px] font-bold text-slate-500">
+                              <div className="flex items-center gap-1.5 px-3 py-1 rounded-xl bg-slate-900 text-[11px] font-black text-white shadow-lg shadow-slate-900/20 mb-0.5">
                                 <Activity className="h-3 w-3" />
                                 {selectedRunId}
                               </div>
                             </div>
-                            <div className="flex flex-wrap items-center gap-2 pt-1">
-                              <div className="flex items-center gap-1.5 px-3 py-1 rounded-full bg-blue-50 text-blue-600 border border-blue-100 text-[11px] font-bold">
-                                <Target className="h-3.5 w-3.5" />
-                                推理日 <span className="opacity-80 ml-0.5">{availableRuns.find(r => r.runId === selectedRunId)?.inferenceDate || '-'}</span>
-                              </div>
-                              <div className="flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-50 text-emerald-600 border border-emerald-100 text-[11px] font-bold">
-                                <CandlestickChart className="h-3.5 w-3.5" />
-                                目标日 <span className="opacity-80 ml-0.5">{availableRuns.find(r => r.runId === selectedRunId)?.targetDate || '-'}</span>
-                              </div>
-                            </div>
                           </div>
                           
-                          <div className="flex-shrink-0">
-                            <Tag 
-                              color={hasPendingFilterChanges ? 'warning' : 'success'} 
-                              icon={hasPendingFilterChanges ? <RefreshCw className="h-3 w-3 animate-spin-slow" /> : <Search className="h-3 w-3" />}
-                              className="m-0 rounded-2xl border-none px-4 py-1.5 font-black text-[12px] shadow-sm uppercase tracking-wide"
-                            >
-                              {hasPendingFilterChanges ? '筛选待应用' : '筛选已同步'}
-                            </Tag>
+                          <div className="flex flex-wrap items-center gap-4">
+                            <div className="flex flex-col gap-1 pr-6 border-r border-slate-100">
+                              <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">执行周期</span>
+                              <div className="flex items-center gap-3">
+                                <div className="flex items-center gap-1.5 text-[12px] font-black text-slate-700">
+                                  <Target className="h-3.5 w-3.5 text-blue-500" />
+                                  {availableRuns.find(r => r.runId === selectedRunId)?.inferenceDate || '-'}
+                                </div>
+                                <div className="h-1 w-1 rounded-full bg-slate-300" />
+                                <div className="flex items-center gap-1.5 text-[12px] font-black text-slate-700">
+                                  <CandlestickChart className="h-3.5 w-3.5 text-emerald-500" />
+                                  {availableRuns.find(r => r.runId === selectedRunId)?.targetDate || '-'}
+                                </div>
+                              </div>
+                            </div>
+
+                            <div className="flex flex-col gap-1">
+                              <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">同步状态</span>
+                              <Tag 
+                                color={hasPendingFilterChanges ? 'warning' : 'success'} 
+                                icon={hasPendingFilterChanges ? <RefreshCw className="h-3 w-3 animate-spin-slow" /> : <Search className="h-3 w-3" />}
+                                className="m-0 rounded-xl border-none px-4 py-1.5 font-black text-[11px] shadow-sm uppercase tracking-wide flex items-center gap-1.5"
+                              >
+                                {hasPendingFilterChanges ? '待应用' : '已同步'}
+                              </Tag>
+                            </div>
                           </div>
                         </div>
 
-                        <div className="mt-5 flex flex-wrap gap-2">
-                          {selectedStockMatchedConditions.length > 0 ? (
-                            selectedStockMatchedConditions.map((condition, idx) => (
-                              <motion.span 
-                                key={idx}
-                                initial={{ opacity: 0, scale: 0.9 }}
-                                animate={{ opacity: 1, scale: 1 }}
-                                transition={{ delay: idx * 0.05 }}
-                                className="premium-tag px-3 py-1.5 rounded-xl text-[11px] font-bold text-slate-600 flex items-center gap-1.5"
-                              >
-                                <div className="h-1.5 w-1.5 rounded-full bg-blue-400" />
-                                {condition}
-                              </motion.span>
-                            ))
-                          ) : (
-                            <span className="text-[11px] font-bold text-slate-400 italic">未应用特定条件筛选</span>
-                          )}
-                        </div>
+                        {/* 下层：筛选条件与板块概览 */}
+                        <div className="pt-6 grid grid-cols-1 lg:grid-cols-12 gap-8 items-center">
+                          <div className="lg:col-span-7 space-y-3">
+                            <div className="text-[10px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-2">
+                              <Filter className="h-3 w-3" />
+                              当前生效筛选条件
+                            </div>
+                            <div className="flex flex-wrap gap-2">
+                              {selectedStockMatchedConditions.length > 0 ? (
+                                selectedStockMatchedConditions.map((condition, idx) => (
+                                  <motion.span 
+                                    key={idx}
+                                    whileHover={{ y: -2 }}
+                                    className="bg-slate-100/80 hover:bg-white px-3 py-1.5 rounded-xl text-[11px] font-bold text-slate-600 flex items-center gap-1.5 border border-slate-200/50 transition-colors shadow-sm"
+                                  >
+                                    <div className="h-1.5 w-1.5 rounded-full bg-blue-400" />
+                                    {condition}
+                                  </motion.span>
+                                ))
+                              ) : (
+                                <span className="text-[11px] font-bold text-slate-400 italic">未应用特定条件筛选</span>
+                              )}
+                            </div>
+                          </div>
 
-                        <div className="mt-6 pt-6 border-t border-slate-100/60 flex items-center gap-3">
-                          <span className="text-[13px] font-black text-slate-700 uppercase tracking-widest flex items-center gap-1.5 flex-shrink-0">
-                            <BarChart3 className="h-4 w-4 text-slate-500" />
-                            板块摘要
-                          </span>
-                          <div className="flex flex-wrap gap-2">
-                            {sectorBreakdown.slice(0, 4).map((item, idx) => (
-                              <motion.div 
-                                key={item.name}
-                                whileHover={{ scale: 1.05 }}
-                                className={`premium-tag ${idx === 0 ? 'premium-tag-blue' : idx === 1 ? 'premium-tag-purple' : ''} px-3 py-1.5 rounded-xl font-bold text-[11px] flex items-center gap-2`}
-                              >
-                                {item.name} 
-                                <span className="px-1.5 py-0.5 rounded-md bg-white/50 text-[10px]">{item.count}</span>
-                              </motion.div>
-                            ))}
-                            {sectorBreakdown.length > 4 && (
-                              <div className="px-2 text-[11px] font-bold text-slate-300 flex items-center">
-                                +{sectorBreakdown.length - 4} 更多行业
-                              </div>
-                            )}
+                          <div className="lg:col-span-5 space-y-3">
+                            <div className="text-[10px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-2">
+                              <BarChart3 className="h-3 w-3" />
+                              核心板块分布
+                            </div>
+                            <div className="flex flex-wrap gap-2">
+                              {sectorBreakdown.slice(0, 3).map((item, idx) => (
+                                <motion.div 
+                                  key={item.name}
+                                  whileHover={{ scale: 1.05 }}
+                                  className="bg-white/80 border border-slate-200 px-3 py-1.5 rounded-xl font-bold text-[11px] flex items-center gap-2 shadow-sm"
+                                >
+                                  <span className="text-slate-600">{item.name}</span>
+                                  <span className={`px-1.5 py-0.5 rounded-md text-[10px] ${idx === 0 ? 'bg-blue-500 text-white' : 'bg-slate-100 text-slate-500'}`}>
+                                    {item.count}
+                                  </span>
+                                </motion.div>
+                              ))}
+                              {sectorBreakdown.length > 3 && (
+                                <div className="px-2 text-[10px] font-black text-slate-400 flex items-center cursor-help" title={sectorBreakdown.slice(3).map(s => `${s.name}(${s.count})`).join(', ')}>
+                                  + {sectorBreakdown.length - 3} OTHERS
+                                </div>
+                              )}
+                            </div>
                           </div>
                         </div>
                       </motion.div>
@@ -2004,23 +2287,133 @@ export const ResearchPlatformPage: React.FC = () => {
                             />
                           )}
                           {activeDataSource === 'watchlist' && (
-                            <Table<WatchlistRow>
+                            <Table<ResearchStockRow>
                               className={FIELD_STYLES.table}
                               rowKey="key"
                               columns={watchlistColumns}
-                              dataSource={watchlistData.filter(item => !keyword || item.symbol.includes(keyword) || (item.stockName?.includes(keyword))).slice((watchlistPage - 1) * watchlistPageSize, watchlistPage * watchlistPageSize)}
+                              dataSource={watchlistData
+                                .filter(item => !keyword || item.symbol.includes(keyword) || (item.stockName?.includes(keyword) ?? false))
+                                .slice((watchlistPage - 1) * watchlistPageSize, watchlistPage * watchlistPageSize)
+                                .map((item, idx) => ({
+                                  ...(watchlistFeatures[item.symbol] || {
+                                    key: item.key,
+                                    code: item.symbol,
+                                    name: item.stockName || '-',
+                                    score: 0,
+                                    signal: 'hold' as SignalType,
+                                    latestChange: 0,
+                                    nextDayReturn: null,
+                                    day3Return: null,
+                                    consecutiveLimitUpDays: 0,
+                                    volumeTrend3d: false,
+                                    volumeTrend5d: false,
+                                    turnoverRate: 0,
+                                    amount: 0,
+                                    sector: '',
+                                    concept: '',
+                                    conceptTags: [],
+                                    indexTags: [],
+                                    riskFlags: [],
+                                    closePrice: 0,
+                                    pe: 0,
+                                    roe: 0,
+                                    profitGrowth: 0,
+                                    rsi: 0,
+                                    mainFlow: 0,
+                                    instOwnership: 0,
+                                    ma5: 0,
+                                    ma10: 0,
+                                    maGap5: 0,
+                                    maGap10: 0,
+                                    maGap20: 0,
+                                    volRatio5: 0,
+                                    return1d: 0,
+                                    pb: 0,
+                                    totalMv: 0,
+                                    floatMv: 0,
+                                    listedDays: 0,
+                                    return3d: 0,
+                                    isSt: false,
+                                    isTradable: true,
+                                    isHs300: false,
+                                    isCsi500: false,
+                                    isCsi1000: false,
+                                    thesis: '',
+                                    modelId: '',
+                                    runId: '',
+                                    rank: 0,
+                                  }),
+                                  rank: (watchlistPage - 1) * watchlistPageSize + idx + 1,
+                                  key: item.key,
+                                } as ResearchStockRow))}
                               loading={watchlistLoading}
                               pagination={false}
+                              scroll={{ x: 1200 }}
                             />
                           )}
                           {activeDataSource === 'pool' && (
-                            <Table<ResearchPoolRow>
+                            <Table<ResearchStockRow>
                               className={FIELD_STYLES.table}
                               rowKey="key"
                               columns={poolColumns}
-                              dataSource={poolData.filter(item => !keyword || item.symbol.includes(keyword) || (item.stockName?.includes(keyword))).slice((poolPage - 1) * poolPageSize, poolPage * poolPageSize)}
+                              dataSource={poolData
+                                .filter(item => !keyword || item.symbol.includes(keyword) || (item.stockName?.includes(keyword) ?? false))
+                                .slice((poolPage - 1) * poolPageSize, poolPage * poolPageSize)
+                                .map((item, idx) => ({
+                                  ...(poolFeatures[item.symbol] || {
+                                    key: item.key,
+                                    code: item.symbol,
+                                    name: item.stockName || '-',
+                                    score: item.fusionScore ?? 0,
+                                    signal: 'hold' as SignalType,
+                                    latestChange: 0,
+                                    nextDayReturn: null,
+                                    day3Return: null,
+                                    consecutiveLimitUpDays: 0,
+                                    volumeTrend3d: false,
+                                    volumeTrend5d: false,
+                                    turnoverRate: 0,
+                                    amount: 0,
+                                    sector: '',
+                                    concept: '',
+                                    conceptTags: [],
+                                    indexTags: [],
+                                    riskFlags: [],
+                                    closePrice: 0,
+                                    pe: 0,
+                                    roe: 0,
+                                    profitGrowth: 0,
+                                    rsi: 0,
+                                    mainFlow: 0,
+                                    instOwnership: 0,
+                                    ma5: 0,
+                                    ma10: 0,
+                                    maGap5: 0,
+                                    maGap10: 0,
+                                    maGap20: 0,
+                                    volRatio5: 0,
+                                    return1d: 0,
+                                    pb: 0,
+                                    totalMv: 0,
+                                    floatMv: 0,
+                                    listedDays: 0,
+                                    return3d: 0,
+                                    isSt: false,
+                                    isTradable: true,
+                                    isHs300: false,
+                                    isCsi500: false,
+                                    isCsi1000: false,
+                                    thesis: '',
+                                    modelId: '',
+                                    runId: '',
+                                    rank: 0,
+                                  }),
+                                  rank: (poolPage - 1) * poolPageSize + idx + 1,
+                                  key: item.key,
+                                } as ResearchStockRow))}
                               loading={poolLoading}
                               pagination={false}
+                              scroll={{ x: 1200 }}
                             />
                           )}
                         </div>

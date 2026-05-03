@@ -4,6 +4,7 @@ import fs from 'fs';
 
 interface AppConfig {
     pythonPath?: string;
+    serverUrl?: string;
     [key: string]: any;
 }
 

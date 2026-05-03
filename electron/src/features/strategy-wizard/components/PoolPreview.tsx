@@ -193,8 +193,8 @@ export const PoolPreview = React.forwardRef<PoolPreviewHandle, { onNext: () => v
   const marketCapYI = (v: any) => {
     const n = Number(v);
     if (!Number.isFinite(n)) return 0;
-    // 标准话术：接口返回 market_cap 使用元，前端展示统一换算为亿（/100000000）。
-    return n / 100000000;
+    // 数据库存储单位为亿元，直接返回
+    return n;
   };
   const capThresholdYi = 300; // 300亿阈值
   const capSmallCount = listForStats.filter((x) => marketCapYI(x?.metrics?.market_cap) < capThresholdYi).length;
@@ -428,7 +428,7 @@ export const PoolPreview = React.forwardRef<PoolPreviewHandle, { onNext: () => v
                     dataIndex: ['metrics', 'market_cap'],
                     width: 140,
                     align: 'center',
-                    render: (v) => v ? (v / 100000000).toFixed(2) : '-',
+                    render: (v) => v ? v.toFixed(2) : '-',
                     sorter: (a, b) => (a.metrics?.market_cap || 0) - (b.metrics?.market_cap || 0)
                   },
                   {

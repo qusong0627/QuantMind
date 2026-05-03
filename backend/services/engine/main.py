@@ -79,32 +79,18 @@ async def lifespan(app: FastAPI):
     # --- 此处 Yield，之后代码在启动后运行 ---
     yield
 
-    # 后台预热逻辑（不阻塞启动）
-    warmup_enabled = os.getenv("AI_STRATEGY_WARMUP", "true").strip().lower() not in (
-        "0",
-        "false",
-        "no",
-        "off",
-    )
+    # 启动预热向量解析/字段检索（2026-05-03：暂时关闭强制预热以加快启动速度）
+    warmup_enabled = os.getenv("AI_STRATEGY_WARMUP", "false").strip().lower() not in ("0", "false", "no", "off")
     if warmup_enabled:
-        async def _warmup_task():
-            timeout_raw = os.getenv("AI_STRATEGY_WARMUP_TIMEOUT_SECONDS", "120").strip()
-            try:
-                warmup_timeout_seconds = max(1.0, float(timeout_raw))
-            except ValueError:
-                warmup_timeout_seconds = 120.0
-            try:
-                await asyncio.wait_for(
-                    asyncio.to_thread(_run_ai_strategy_warmup_sync),
-                    timeout=warmup_timeout_seconds,
-                )
-                logger.info("✅ AI Strategy Warmup completed in background")
-            except asyncio.TimeoutError:
-                logger.warning(f"⚠️ AI Strategy Warmup timeout after {warmup_timeout_seconds}s")
-            except Exception as e:
-                logger.warning(f"⚠️ AI Strategy Warmup failed: {e}")
-        
-        asyncio.create_task(_warmup_task(), name="ai_strategy_warmup")
+        try:
+            from backend.services.engine.ai_strategy.services.startup_health import run_startup_health_checks
+            await run_startup_health_checks()
+            logger.info("✅ AI Strategy Warmup completed successfully")
+        except Exception as e:
+            app.state.startup_healthy = False
+            logger.error(f"❌ AI Strategy Warmup failed: {e}")
+    else:
+        logger.info("AI Strategy Warmup disabled by env")
 
     # --- 停止逻辑 ---
     if vm_task and not vm_task.done():

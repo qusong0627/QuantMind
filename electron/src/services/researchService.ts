@@ -243,12 +243,16 @@ class ResearchService {
 
   // ============ 自选接口 ============
 
-  async addToWatchlist(symbol: string, options?: { runId?: string; stockName?: string }): Promise<void> {
-    const params = new URLSearchParams();
-    if (options?.runId) params.append('run_id', options.runId);
-    if (options?.stockName) params.append('stock_name', options.stockName);
-    const url = params.toString() ? `/research/watchlist/${symbol}?${params}` : `/research/watchlist/${symbol}`;
-    await this.client.post(url);
+  async addToWatchlist(symbol: string, options?: {
+    runId?: string;
+    stockName?: string;
+    featuresSnapshot?: Record<string, unknown>;
+  }): Promise<void> {
+    await this.client.post(`/research/watchlist/${symbol}`, {
+      run_id: options?.runId,
+      stock_name: options?.stockName,
+      features_snapshot: options?.featuresSnapshot,
+    });
   }
 
   async removeFromWatchlist(symbol: string): Promise<void> {
@@ -268,15 +272,16 @@ class ResearchService {
     modelId?: string;
     fusionScore?: number;
     thesisSummary?: string;
+    featuresSnapshot?: Record<string, unknown>;
   }): Promise<void> {
-    const params = new URLSearchParams();
-    if (options?.runId) params.append('run_id', options.runId);
-    if (options?.stockName) params.append('stock_name', options.stockName);
-    if (options?.modelId) params.append('model_id', options.modelId);
-    if (options?.fusionScore !== undefined) params.append('fusion_score', String(options.fusionScore));
-    if (options?.thesisSummary) params.append('thesis_summary', options.thesisSummary);
-    const url = params.toString() ? `/research/pool/${symbol}?${params}` : `/research/pool/${symbol}`;
-    await this.client.post(url);
+    await this.client.post(`/research/pool/${symbol}`, {
+      run_id: options?.runId,
+      stock_name: options?.stockName,
+      model_id: options?.modelId,
+      fusion_score: options?.fusionScore,
+      thesis_summary: options?.thesisSummary,
+      features_snapshot: options?.featuresSnapshot,
+    });
   }
 
   async removeFromResearchPool(symbol: string): Promise<void> {
@@ -298,6 +303,17 @@ class ResearchService {
   async getKlineData(symbol: string, days = 60): Promise<KlineDataItem[]> {
     const resp = await this.client.get<KlineResponse>(`/research/kline/${symbol}?days=${days}`);
     return resp.data.data.items || [];
+  }
+
+  // ============ 批量股票特征接口 ============
+
+  async getFeaturesBySymbols(symbols: string[]): Promise<ResearchStockRow[]> {
+    if (!symbols || symbols.length === 0) return [];
+    const resp = await this.client.post<{ code: number; data: { items: ResearchStockRow[] } }>(
+      '/research/symbols/features',
+      { symbols }
+    );
+    return resp.data?.data?.items || [];
   }
 
   // ============ 兼容方法（对接模型中心） ============

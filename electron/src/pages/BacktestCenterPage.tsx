@@ -77,7 +77,7 @@ const BacktestDetailModal: React.FC<BacktestDetailModalProps> = ({ backtest: ini
     { label: '年化收益', value: `${((backtest.annual_return || 0) * 100).toFixed(2)}%`, icon: Activity, color: 'text-blue-600' },
     { label: '夏普比率', value: (backtest.sharpe_ratio || 0).toFixed(2), icon: Shield, color: 'text-purple-600' },
     { label: '最大回撤', value: `${((backtest.max_drawdown || 0) * 100).toFixed(2)}%`, icon: TrendingDown, color: 'text-orange-600' },
-    { label: '胜率', value: `${((backtest.win_rate || 0) * 100).toFixed(2)}%`, icon: Target, color: 'text-cyan-600' },
+    { label: '交易日盈亏占比', value: `${((backtest.win_rate || 0) * 100).toFixed(2)}%`, icon: Target, color: 'text-cyan-600' },
     { label: '盈亏比', value: (backtest.profit_factor || 0).toFixed(2), icon: DollarSign, color: 'text-yellow-600' },
   ];
 

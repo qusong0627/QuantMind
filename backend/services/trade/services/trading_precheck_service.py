@@ -348,57 +348,7 @@ async def run_trading_readiness_precheck(
     except Exception as exc:
         checks.append(_build_check("db", "PostgreSQL", False, f"数据库自检失败: {exc}"))
 
-    internal_secret = str(os.getenv("INTERNAL_CALL_SECRET", "")).strip()
-    checks.append(
-        _build_check(
-            "internal_secret",
-            "内部密钥",
-            bool(internal_secret),
-            "INTERNAL_CALL_SECRET 已配置"
-            if internal_secret
-            else "缺少 INTERNAL_CALL_SECRET 配置",
-        )
-    )
-
-    try:
-        int(str(user_id).strip())
-        checks.append(_build_check("user_id", "用户标识", True, "用户标识格式合法"))
-    except Exception:
-        checks.append(
-            _build_check(
-                "user_id", "用户标识", False, "当前用户ID不是数字，实盘执行链路可能失败"
-            )
-        )
-
-    signal_stream_publish_enabled = str(
-        os.getenv("ENABLE_SIGNAL_STREAM_PUBLISH", "false")
-    ).strip().lower() in {"1", "true", "yes", "on"}
-    vectorized_matcher_enabled = str(
-        os.getenv("ENABLE_VECTORIZED_MATCHER", "false")
-    ).strip().lower() in {"1", "true", "yes", "on"}
-    signal_pipeline_ok = signal_stream_publish_enabled or vectorized_matcher_enabled
-    # SIMULATION 模式仅警告，REAL/SHADOW 阻断
-    signal_pipeline_passed = signal_pipeline_ok if normalized_mode != "SIMULATION" else True
-    checks.append(
-        _build_check(
-            "signal_pipeline_enabled",
-            "自动托管信号链路已启用",
-            signal_pipeline_passed,
-            (
-                "ENABLE_SIGNAL_STREAM_PUBLISH=true"
-                if signal_stream_publish_enabled
-                else (
-                    "ENABLE_VECTORIZED_MATCHER=true (fallback)"
-                    if vectorized_matcher_enabled
-                    else (
-                        "[阻断] 未启用 signal stream publisher 或 vectorized matcher"
-                        if normalized_mode != "SIMULATION"
-                        else "[WARNING] 未启用 signal stream publisher 或 vectorized matcher"
-                    )
-                )
-            ),
-        )
-    )
+    # 信号就绪状态检查（合并了信号链路启用检查）
     try:
         signal_readiness = await signal_readiness_service.evaluate(
             db,
@@ -519,23 +469,7 @@ async def run_trading_readiness_precheck(
             "trading_permission": signal_readiness.get("trading_permission"),
         }
 
-    production_dir = Path(
-        os.getenv("MODELS_PRODUCTION", "/app/models/production/model_qlib")
-    )
-    model_exists = production_dir.exists() and production_dir.is_dir()
-    model_candidates = [
-        str(production_dir / "model.txt"),
-        str(production_dir / "metadata.json"),
-    ]
-    checks.append(
-        _build_check(
-            "production_model",
-            "生产模型存在",
-            model_exists,
-            f"model_dir={production_dir}; candidates={', '.join(model_candidates)}",
-        )
-    )
-
+    # REAL/SHADOW 模式：推理模型检查
     try:
         model_ok, model_detail = _check_inference_model_exists()
         checks.append(

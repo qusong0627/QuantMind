@@ -4,7 +4,7 @@
 
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { Link, useNavigate, useLocation } from 'react-router-dom';
-import { Card, Form, Input, Button, Checkbox, Alert, Spin, Typography, Divider, Space, message } from 'antd';
+import { Card, Form, Input, Button, Checkbox, Alert, Spin, Typography, Divider, Space, message, Modal } from 'antd';
 import {
   UserOutlined,
   LockOutlined,
@@ -12,6 +12,7 @@ import {
   EyeOutlined,
   EyeInvisibleOutlined,
   MailOutlined,
+  SettingOutlined,
 } from '@ant-design/icons';
 import { useAuth, useLoginForm } from '../hooks/useAuth';
 import { useAppDispatch } from '../../../store';
@@ -19,6 +20,7 @@ import { setUser } from '../store/authSlice';
 import { PageLoading } from './LoadingStates';
 import type { LoginCredentials } from '../types/auth.types';
 import { preloadAiIdeResources } from '../utils/lazyLoad';
+import { isElectronEnv, initDynamicServerUrl, setDynamicServerUrl, getDynamicServerUrl } from '../../../config/services';
 
 const { Title, Text } = Typography;
 
@@ -50,6 +52,14 @@ const LoginPage: React.FC = () => {
   const [isMobile, setIsMobile] = useState(false);
   const [passwordVisible, setPasswordVisible] = useState(false);
 
+  // Electron 环境检测和服务器配置
+  const [isElectron, setIsElectron] = useState(false);
+  const [showServerConfig, setShowServerConfig] = useState(false);
+  const [serverIp, setServerIp] = useState('');
+  const [configLoading, setConfigLoading] = useState(false);
+  const [showTip, setShowTip] = useState(false);
+  const hasCheckedConfig = useRef(false);
+
   // 检测移动端
   useEffect(() => {
     const checkMobile = () => {
@@ -60,6 +70,37 @@ const LoginPage: React.FC = () => {
     window.addEventListener('resize', checkMobile);
 
     return () => window.removeEventListener('resize', checkMobile);
+  }, []);
+
+  // Electron 环境检测和服务器配置初始化
+  useEffect(() => {
+    const checkEnv = async () => {
+      const isElectronApp = isElectronEnv();
+      setIsElectron(isElectronApp);
+
+      if (isElectronApp) {
+        await initDynamicServerUrl();
+        const savedUrl = getDynamicServerUrl();
+        if (savedUrl) {
+          // 提取 IP 部分（去掉 http:// 和端口）
+          try {
+            const url = new URL(savedUrl);
+            setServerIp(url.hostname);
+          } catch {
+            setServerIp(savedUrl.replace(/^https?:\/\//, '').split(':')[0]);
+          }
+        }
+
+        // 首次打开且未配置时显示提示
+        if (!hasCheckedConfig.current && !savedUrl) {
+          hasCheckedConfig.current = true;
+          setShowTip(true);
+          // 2秒后折叠提示
+          setTimeout(() => setShowTip(false), 2000);
+        }
+      }
+    };
+    checkEnv();
   }, []);
 
   useEffect(() => {
@@ -203,6 +244,43 @@ const LoginPage: React.FC = () => {
     form.submit();
   };
 
+  // 保存服务器配置
+  const handleSaveServerConfig = async () => {
+    const ip = serverIp.trim();
+    if (!ip) {
+      message.warning('请输入服务器 IP 地址');
+      return;
+    }
+
+    // 简单验证 IP 格式（支持 IP 或域名）
+    const ipPattern = /^(\d{1,3}\.){3}\d{1,3}$|^[a-zA-Z0-9][-a-zA-Z0-9.]*[a-zA-Z0-9]$/;
+    if (!ipPattern.test(ip)) {
+      message.warning('请输入有效的 IP 地址或域名');
+      return;
+    }
+
+    // 自动补全为 http://{ip}:8000
+    const fullUrl = `http://${ip}:8000`;
+
+    setConfigLoading(true);
+    try {
+      if (isElectron && (window as any).electronAPI) {
+        const result = await (window as any).electronAPI.setServerUrl(fullUrl);
+        if (result.success) {
+          setDynamicServerUrl(fullUrl);
+          message.success('服务器地址已保存');
+          setShowServerConfig(false);
+        } else {
+          message.error('保存失败：' + (result.error || '未知错误'));
+        }
+      }
+    } catch (e) {
+      message.error('保存配置时发生错误');
+    } finally {
+      setConfigLoading(false);
+    }
+  };
+
   // 响应式样式 - 现代化玻璃拟态设计
   const cardStyle = useMemo(() => ({
     width: '100%',
@@ -317,6 +395,67 @@ const LoginPage: React.FC = () => {
 
   return (
     <div style={containerStyle}>
+      {/* Electron 桌面端右上角设置按钮 */}
+      {isElectron && (
+        <div style={{
+          position: 'absolute',
+          top: '60px',
+          right: '20px',
+          zIndex: 100,
+        }}>
+          {/* 友好提示气泡 */}
+          {showTip && (
+            <div
+              style={{
+                position: 'absolute',
+                top: '100%',
+                right: 0,
+                marginTop: '8px',
+                padding: '8px 12px',
+                background: 'rgba(0, 0, 0, 0.75)',
+                color: 'white',
+                borderRadius: '6px',
+                fontSize: '13px',
+                whiteSpace: 'nowrap',
+                boxShadow: '0 2px 8px rgba(0,0,0,0.15)',
+              }}
+            >
+              请配置服务器地址
+              <div
+                style={{
+                  position: 'absolute',
+                  top: '-6px',
+                  right: '16px',
+                  width: 0,
+                  height: 0,
+                  borderLeft: '6px solid transparent',
+                  borderRight: '6px solid transparent',
+                  borderBottom: '6px solid rgba(0, 0, 0, 0.75)',
+                }}
+              />
+            </div>
+          )}
+          <Button
+            type="text"
+            icon={<SettingOutlined style={{ fontSize: '20px' }} />}
+            onClick={() => {
+              setShowTip(false);
+              setShowServerConfig(true);
+            }}
+            style={{
+              color: 'white',
+              background: 'rgba(255, 255, 255, 0.2)',
+              borderRadius: '8px',
+              width: '40px',
+              height: '40px',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+            }}
+          />
+        </div>
+      )}
+
       {/* 登录表单 */}
       <Card 
         className="login-card auth-rounded-card" 
@@ -550,6 +689,49 @@ const LoginPage: React.FC = () => {
           <span>© 2026 QuantMind</span>
         </Space>
       </div>
+
+      {/* 服务器配置弹窗 - 仅桌面端显示，定位到右上角 */}
+      <Modal
+        title="服务器设置"
+        open={showServerConfig}
+        onCancel={() => setShowServerConfig(false)}
+        footer={[
+          <Button key="cancel" onClick={() => setShowServerConfig(false)}>
+            取消
+          </Button>,
+          <Button key="save" type="primary" loading={configLoading} onClick={handleSaveServerConfig}>
+            保存
+          </Button>,
+        ]}
+        width={360}
+        style={{ position: 'fixed', top: 120, right: 20 }}
+        maskClosable={true}
+      >
+        <div style={{ marginBottom: '16px' }}>
+          <Text type="secondary">
+            请输入服务器 IP 地址，系统将自动补全为 http://{'{IP}'}:8000
+          </Text>
+        </div>
+        <Input
+          placeholder="192.168.1.100"
+          value={serverIp}
+          onChange={(e) => setServerIp(e.target.value)}
+          prefix={<SettingOutlined style={{ color: '#999' }} />}
+          size="large"
+        />
+        {serverIp && (
+          <div style={{ marginTop: '12px', padding: '8px 12px', background: '#f5f5f5', borderRadius: '6px' }}>
+            <Text type="secondary" style={{ fontSize: '13px' }}>
+              完整地址：http://{serverIp}:8000
+            </Text>
+          </div>
+        )}
+        <div style={{ marginTop: '12px' }}>
+          <Text type="secondary" style={{ fontSize: '12px' }}>
+            配置保存后将存储在本地，下次启动自动生效
+          </Text>
+        </div>
+      </Modal>
     </div>
   );
 };

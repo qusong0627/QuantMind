@@ -134,6 +134,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
    * 获取系统详细版本号 (用于区分 Win10/Win11)
    */
   getSystemVersion: () => process.getSystemVersion(),
+
+  /**
+   * 获取服务器配置地址
+   */
+  getServerUrl: () => ipcRenderer.invoke('config:get-server-url'),
+
+  /**
+   * 设置服务器配置地址
+   */
+  setServerUrl: (url: string) => ipcRenderer.invoke('config:set-server-url', url),
 });
 
 console.log('[preload] electronAPI exposed');
@@ -162,6 +172,8 @@ declare global {
       onUpdateError: (callback: (error: { message: string }) => void) => () => void;
       installUpdate: () => Promise<void>;
       checkForUpdates: () => Promise<{ checking: boolean; reason?: string; error?: string }>;
+      getServerUrl: () => Promise<string>;
+      setServerUrl: (url: string) => Promise<{ success: boolean; error?: string }>;
     };
   }
 }

@@ -54,13 +54,23 @@ export const ContextAwareAssistant: React.FC<{ step: number }> = ({ step }) => {
                   ),
                 }))}
               />
-            ) : (
+             ) : (
               <div style={{ marginTop: 16 }}>
                  <Divider plain orientation="left" style={{ margin: '12px 0', fontSize: 12 }}>常用因子速查</Divider>
-                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                   {FACTORS.slice(0, 8).map(f => (
-                     <Tag key={f.key} style={{ cursor: 'pointer' }}>{f.label}</Tag>
-                   ))}
+                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 12 }}>
+                   {[
+                     'market_cap', 'pe', 'roe', 'pct_change', 'turnover_rate', 
+                     'ma5', 'ma20', 'rsi_14', 'macd_hist', 'volume_trend_3d',
+                     'idx_hs300', 'idx_chinext', 'is_st', 'limit_up_today', 'industry'
+                   ].map(key => {
+                     const f = FACTORS.find(item => item.key === key);
+                     return f ? <Tag key={f.key} style={{ cursor: 'pointer', borderRadius: 4 }}>{f.label}</Tag> : null;
+                   })}
+                 </div>
+                 <div style={{ marginTop: 16, borderTop: '1px solid #f0f0f0', paddingTop: 12 }}>
+                   <Text type="secondary" style={{ fontSize: 12 }}>
+                     如需了解更多因子库，请访问帮助中心
+                   </Text>
                  </div>
               </div>
             )}

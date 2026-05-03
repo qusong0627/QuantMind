@@ -105,7 +105,7 @@ class Settings(BaseSettings):
         os.getenv("SHORT_ADMISSION_STRICT", "true").lower() == "true"
     )
     MARGIN_STOCK_POOL_PATH: str = os.getenv(
-        "MARGIN_STOCK_POOL_PATH", "data/融资融券.xlsx"
+        "MARGIN_STOCK_POOL_PATH", "data/融资融券.json"
     )
     MARGIN_SHORT_MARGIN_RATE: float = float(
         os.getenv("MARGIN_SHORT_MARGIN_RATE", "0.5")

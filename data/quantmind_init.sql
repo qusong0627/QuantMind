@@ -13404,6 +13404,50 @@ CREATE INDEX stock_daily_new_trade_date_idx ON ONLY public.stock_daily_latest US
 
 
 --
+-- Name: qm_user_watchlist; Type: TABLE; Schema: public; Owner: quantmind
+--
+
+CREATE TABLE public.qm_user_watchlist (
+    tenant_id character varying(64) NOT NULL,
+    user_id character varying(64) NOT NULL,
+    symbol character varying(20) NOT NULL,
+    stock_name character varying(128),
+    source_run_id character varying(64),
+    features_snapshot jsonb,
+    notes text,
+    tags jsonb,
+    added_at timestamp without time zone DEFAULT now(),
+    updated_at timestamp without time zone DEFAULT now()
+);
+
+
+ALTER TABLE public.qm_user_watchlist OWNER TO quantmind;
+
+--
+-- Name: qm_user_research_pool; Type: TABLE; Schema: public; Owner: quantmind
+--
+
+CREATE TABLE public.qm_user_research_pool (
+    tenant_id character varying(64) NOT NULL,
+    user_id character varying(64) NOT NULL,
+    symbol character varying(20) NOT NULL,
+    stock_name character varying(128),
+    source_run_id character varying(64),
+    model_id character varying(128),
+    fusion_score double precision,
+    thesis_summary text,
+    status character varying(32) DEFAULT 'pending'::character varying,
+    features_snapshot jsonb,
+    notes text,
+    tags jsonb,
+    added_at timestamp without time zone DEFAULT now(),
+    updated_at timestamp without time zone DEFAULT now()
+);
+
+
+ALTER TABLE public.qm_user_research_pool OWNER TO quantmind;
+
+--
 -- PostgreSQL database dump complete
 --
 

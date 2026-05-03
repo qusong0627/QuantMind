@@ -81,7 +81,7 @@ export const TradeStatsPanel: React.FC<TradeStatsPanelProps> = ({ backtestId }) 
 
   const metrics = [
     {
-      label: '胜率',
+      label: '交易日盈亏占比',
       value: data.metrics.win_rate,
       format: 'percent' as const,
       icon: TrendingUp,
@@ -132,7 +132,7 @@ export const TradeStatsPanel: React.FC<TradeStatsPanelProps> = ({ backtestId }) 
           <Info className="w-4 h-4 text-green-600 mt-0.5 flex-shrink-0" />
           <div className="text-xs text-green-700">
             <div className="font-medium mb-1">交易统计</div>
-            <div>统计单笔盈亏与持仓周期，刻画交易风格与执行节奏。</div>
+            <div>按交易日胜率口径，刻画交易风格与执行节奏。</div>
           </div>
         </div>
       </div>

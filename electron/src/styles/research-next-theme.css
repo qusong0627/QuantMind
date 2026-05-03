@@ -64,13 +64,15 @@
   text-transform: uppercase;
   font-size: 12px;
   letter-spacing: 0.05em;
+  padding-top: 8px !important;
+  padding-bottom: 8px !important;
 }
 
 .research-next-table .ant-table-tbody > tr > td {
   border-bottom: 1px solid rgba(241, 245, 249, 0.5) !important;
   color: #334155;
-  padding-top: 14px !important;
-  padding-bottom: 14px !important;
+  padding-top: 6px !important;
+  padding-bottom: 6px !important;
   transition: all 0.3s ease;
 }
 

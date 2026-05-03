@@ -68,9 +68,9 @@ class SQLGenerator:
         if table in {"stock_daily", "stock_daily_latest"}:
             return (
                 "SELECT\n"
-                "    code as symbol, stock_name as name, trade_date, close,\n"
+                "    symbol, stock_name as name, trade_date, close,\n"
                 "    total_mv, pe_ttm, pb, turnover_rate, pct_change,\n"
-                "    volume, turnover, is_st, is_hs300, is_csi1000\n"
+                "    volume, amount, is_st, idx_hs300, idx_zz1000\n"
                 f"FROM {table}\n"
                 "WHERE ..."
             )

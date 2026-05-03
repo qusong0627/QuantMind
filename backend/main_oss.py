@@ -129,6 +129,21 @@ def run_single_service(service_name: str, port: int, workers: int = 1):
     service_runners[service_name](port, workers)
 
 
+def run_celery_worker():
+    """运行 Celery Worker（处理异步回测任务）"""
+    from celery import concurrency
+    from backend.services.engine.qlib_app.celery_config import celery_app
+
+    logger.info("Starting Celery Worker for async backtest tasks")
+    # 使用 solo 模式单进程执行，避免多进程复杂度
+    celery_app.worker_main([
+        "worker",
+        "--loglevel=info",
+        "--concurrency=1",
+        "--pool=solo",
+    ])
+
+
 def run_all_services():
     """运行所有服务（多进程模式）"""
     ports = get_service_ports()
@@ -148,6 +163,12 @@ def run_all_services():
         p.start()
         processes.append((name, p))
         logger.info(f"Started {name} service (PID: {p.pid}) on port {port} with {workers} workers")
+
+    # 启动 Celery Worker 进程
+    celery_p = mp.Process(target=run_celery_worker, name="quantmind-celery")
+    celery_p.start()
+    processes.append(("celery", celery_p))
+    logger.info(f"Started celery worker (PID: {celery_p.pid})")
 
     logger.info("=" * 60)
     logger.info("QuantMind OSS Edition - All services started")

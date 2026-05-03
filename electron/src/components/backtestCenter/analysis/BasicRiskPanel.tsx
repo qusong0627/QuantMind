@@ -153,32 +153,28 @@ export const BasicRiskPanel: React.FC<BasicRiskPanelProps> = ({ backtestId }) =>
         </div>
 
         {/* Daily Returns Chart */}
-        <div className="bg-white rounded-2xl border border-gray-200 p-4 h-[460px] flex flex-col">
+        <div className="bg-white rounded-2xl border border-gray-200 p-4">
           <h3 className="text-sm font-medium text-gray-700 mb-4">每日收益率</h3>
           {hasSeriesData(data.daily_returns) ? (
-            <div className="flex-1 min-h-0">
-              <ReactECharts
-                option={getDailyReturnsOption(data.daily_returns)}
-                style={{ height: '100%' }}
-                opts={{ renderer: 'canvas' }}
-              />
-            </div>
+            <ReactECharts
+              option={getDailyReturnsOption(data.daily_returns)}
+              style={{ height: '300px' }}
+              opts={{ renderer: 'canvas' }}
+            />
           ) : (
             <EmptyChart />
           )}
         </div>
 
         {/* Returns Distribution Chart */}
-        <div className="bg-white rounded-2xl border border-gray-200 p-4 h-[460px] flex flex-col">
+        <div className="bg-white rounded-2xl border border-gray-200 p-4">
           <h3 className="text-sm font-medium text-gray-700 mb-4">收益率分布</h3>
           {hasHistogramData(data.returns_distribution) ? (
-            <div className="flex-1 min-h-0">
-              <ReactECharts
-                option={getReturnsDistributionOption(data.returns_distribution)}
-                style={{ height: '100%' }}
-                opts={{ renderer: 'canvas' }}
-              />
-            </div>
+            <ReactECharts
+              option={getReturnsDistributionOption(data.returns_distribution)}
+              style={{ height: '300px' }}
+              opts={{ renderer: 'canvas' }}
+            />
           ) : (
             <EmptyChart />
           )}

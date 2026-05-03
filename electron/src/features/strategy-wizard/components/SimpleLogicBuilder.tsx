@@ -3,7 +3,7 @@ import { Card, Button, Select, InputNumber, Space, Typography, Row, Col, Tag, Em
 import { PlusOutlined, DeleteOutlined, InfoCircleOutlined } from '@ant-design/icons';
 import { useWizardStore } from '../store/wizardStore';
 import type { Condition } from '../types';
-import { FACTORS } from '../factors/dictionary';
+import { FACTORS, FACTORS_BY_CATEGORY } from '../factors/dictionary';
 
 const { Text } = Typography;
 
@@ -22,6 +22,18 @@ const operators = [
   { label: '小于等于', value: '<=' },
   { label: '等于', value: '==' },
 ];
+
+// 获取因子的单位
+const getFactorUnit = (factorKey: string): string | undefined => {
+  const factor = FACTORS.find(f => f.key === factorKey);
+  return factor?.unit;
+};
+
+// 按类别分组的 Select 选项
+const factorOptions = Object.entries(FACTORS_BY_CATEGORY).map(([category, factors]) => ({
+  label: category,
+  options: factors.map(f => ({ label: f.label, value: f.key, unit: f.unit })),
+}));
 
 export const SimpleLogicBuilder: React.FC<{
   onChange?: (c: Condition) => void;
@@ -103,49 +115,53 @@ export const SimpleLogicBuilder: React.FC<{
         </Empty>
       ) : (
         <Space direction="vertical" style={{ width: '100%' }} size="middle">
-          {flatConditions.map((item, index) => (
-            <Card
-              key={item.id}
-              size="small"
-              styles={{ body: { padding: 12 } }}
-              variant="borderless"
-              style={{ background: '#f9f9f9', border: '1px solid #f0f0f0' }}
-            >
-              <Row gutter={12} align="middle">
-                <Col flex="30px">
-                  <Tag color="blue">{index + 1}</Tag>
-                </Col>
-                <Col flex="auto">
-                  <Space wrap>
-                    <Select
-                      value={item.factor}
-                      style={{ width: 160 }}
-                      onChange={(v) => updateCondition(item.id, 'factor', v)}
-                      options={FACTORS.map(f => ({ label: f.label, value: f.key, title: f.category }))}
-                      showSearch
-                      optionFilterProp="label"
-                    />
-                    <Select
-                      value={item.operator}
-                      style={{ width: 100 }}
-                      onChange={(v) => updateCondition(item.id, 'operator', v)}
-                      options={operators}
-                    />
-                    <InputNumber
-                      value={item.value}
-                      style={{ width: 120 }}
-                      onChange={(v) => updateCondition(item.id, 'value', v)}
-                      placeholder="数值"
-                    />
-                    {item.factor === 'market_cap' && <Text type="secondary" style={{ fontSize: 12 }}>亿</Text>}
-                  </Space>
-                </Col>
-                <Col flex="40px" style={{ textAlign: 'right' }}>
-                  <Button type="text" danger icon={<DeleteOutlined />} onClick={() => removeCondition(item.id)} />
-                </Col>
-              </Row>
-            </Card>
-          ))}
+          {flatConditions.map((item, index) => {
+            const unit = getFactorUnit(item.factor);
+            return (
+              <Card
+                key={item.id}
+                size="small"
+                styles={{ body: { padding: 12 } }}
+                variant="borderless"
+                style={{ background: '#f9f9f9', border: '1px solid #f0f0f0' }}
+              >
+                <Row gutter={12} align="middle">
+                  <Col flex="30px">
+                    <Tag color="blue">{index + 1}</Tag>
+                  </Col>
+                  <Col flex="auto">
+                    <Space wrap>
+                      <Select
+                        value={item.factor}
+                        style={{ width: 180 }}
+                        onChange={(v) => updateCondition(item.id, 'factor', v)}
+                        options={factorOptions}
+                        showSearch
+                        optionFilterProp="label"
+                        placeholder="选择因子"
+                      />
+                      <Select
+                        value={item.operator}
+                        style={{ width: 100 }}
+                        onChange={(v) => updateCondition(item.id, 'operator', v)}
+                        options={operators}
+                      />
+                      <InputNumber
+                        value={item.value}
+                        style={{ width: 120 }}
+                        onChange={(v) => updateCondition(item.id, 'value', v)}
+                        placeholder="数值"
+                      />
+                      {unit && <Text type="secondary" style={{ fontSize: 12 }}>{unit}</Text>}
+                    </Space>
+                  </Col>
+                  <Col flex="40px" style={{ textAlign: 'right' }}>
+                    <Button type="text" danger icon={<DeleteOutlined />} onClick={() => removeCondition(item.id)} />
+                  </Col>
+                </Row>
+              </Card>
+            );
+          })}
 
           <Button type="dashed" block icon={<PlusOutlined />} onClick={addCondition} style={{ height: 48 }}>
             添加筛选条件

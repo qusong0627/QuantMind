@@ -24,6 +24,47 @@ export const SERVICE_PORTS = {
 } as const;
 
 const ENV: Record<string, any> = typeof import.meta !== 'undefined' ? (import.meta as any).env || {} : {};
+
+// 动态服务器配置（桌面端用户设置）
+let dynamicServerUrl: string | null = null;
+
+/**
+ * 检测是否为 Electron 桌面环境
+ */
+export function isElectronEnv(): boolean {
+  return typeof window !== 'undefined' && typeof (window as any).electronAPI === 'object';
+}
+
+/**
+ * 初始化动态服务器配置（桌面端启动时调用）
+ */
+export async function initDynamicServerUrl(): Promise<void> {
+  if (isElectronEnv()) {
+    try {
+      const url = await (window as any).electronAPI.getServerUrl();
+      if (url && typeof url === 'string') {
+        dynamicServerUrl = url.replace(/\/+$/, '');
+      }
+    } catch (e) {
+      console.warn('[services] Failed to get server URL from config:', e);
+    }
+  }
+}
+
+/**
+ * 设置动态服务器配置（用户设置后调用）
+ */
+export function setDynamicServerUrl(url: string): void {
+  dynamicServerUrl = url ? url.replace(/\/+$/, '') : null;
+}
+
+/**
+ * 获取当前动态服务器配置
+ */
+export function getDynamicServerUrl(): string | null {
+  return dynamicServerUrl;
+}
+
 const HOST = ENV.VITE_SERVICE_HOST || '';
 const HTTP_PROTOCOL = ENV.VITE_HTTP_PROTOCOL || 'http';
 const WS_PROTOCOL = HTTP_PROTOCOL === 'https' ? 'wss' : 'ws';
@@ -39,8 +80,23 @@ export function normalizeBaseUrl(url: string): string {
 
 const API_BASE = normalizeBaseUrl(ENV.VITE_API_BASE_URL || '');
 
+/**
+ * 获取基础 URL（优先使用动态配置）
+ */
+function getBaseUrl(): string {
+  // 桌面端优先使用用户配置的服务器地址
+  if (dynamicServerUrl) {
+    return dynamicServerUrl;
+  }
+  return API_BASE;
+}
+
 // WebSocket URL 构建
 const getWebSocketUrl = () => {
+  // 桌面端使用动态配置
+  if (dynamicServerUrl) {
+    return `${dynamicServerUrl.replace(/^http/, 'ws')}/ws/api/v1/ws/market`;
+  }
   // 优先使用环境变量
   if (ENV.VITE_WS_BASE_URL || ENV.VITE_WEBSOCKET_MARKET_URL) {
     return ENV.VITE_WS_BASE_URL || ENV.VITE_WEBSOCKET_MARKET_URL;
@@ -54,15 +110,15 @@ const getWebSocketUrl = () => {
 };
 
 export const SERVICE_URLS = {
-  API_GATEWAY: normalizeBaseUrl(ENV.VITE_API_GATEWAY_URL) || API_BASE,
-  MARKET_DATA: normalizeBaseUrl(ENV.VITE_MARKET_DATA_API_URL) || API_BASE,
-  DATA_SERVICE: normalizeBaseUrl(ENV.VITE_DATA_SERVICE_API_URL) || API_BASE,
-  USER_SERVICE: normalizeBaseUrl(ENV.VITE_USER_API_URL) || API_BASE,
-  AI_STRATEGY: normalizeBaseUrl(ENV.VITE_AI_STRATEGY_API_URL) || API_BASE,
-  STOCK_QUERY: normalizeBaseUrl(ENV.VITE_STOCK_QUERY_API_URL) || API_BASE,
-  TRADING: normalizeBaseUrl(ENV.VITE_TRADING_API_URL) || API_BASE,
-  QLIB_SERVICE: normalizeBaseUrl(ENV.VITE_QLIB_SERVICE_URL) || API_BASE,
-  WEBSOCKET_MARKET: getWebSocketUrl(),
+  get API_GATEWAY() { return normalizeBaseUrl(ENV.VITE_API_GATEWAY_URL) || getBaseUrl(); },
+  get MARKET_DATA() { return normalizeBaseUrl(ENV.VITE_MARKET_DATA_API_URL) || getBaseUrl(); },
+  get DATA_SERVICE() { return normalizeBaseUrl(ENV.VITE_DATA_SERVICE_API_URL) || getBaseUrl(); },
+  get USER_SERVICE() { return normalizeBaseUrl(ENV.VITE_USER_API_URL) || getBaseUrl(); },
+  get AI_STRATEGY() { return normalizeBaseUrl(ENV.VITE_AI_STRATEGY_API_URL) || getBaseUrl(); },
+  get STOCK_QUERY() { return normalizeBaseUrl(ENV.VITE_STOCK_QUERY_API_URL) || getBaseUrl(); },
+  get TRADING() { return normalizeBaseUrl(ENV.VITE_TRADING_API_URL) || getBaseUrl(); },
+  get QLIB_SERVICE() { return normalizeBaseUrl(ENV.VITE_QLIB_SERVICE_URL) || getBaseUrl(); },
+  get WEBSOCKET_MARKET() { return getWebSocketUrl(); },
 } as const;
 
 // API路径配置

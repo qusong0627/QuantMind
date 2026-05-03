@@ -688,3 +688,18 @@ function setupAutoUpdater() {
     }
   }, 5000);
 }
+
+// 服务器配置 IPC 处理器
+ipcMain.handle('config:get-server-url', () => {
+  return configService.get('serverUrl') || '';
+});
+
+ipcMain.handle('config:set-server-url', (_event, url: string) => {
+  try {
+    configService.set('serverUrl', url);
+    return { success: true };
+  } catch (error) {
+    console.error('[main] Failed to set server URL:', error);
+    return { success: false, error: error instanceof Error ? error.message : '未知错误' };
+  }
+});
