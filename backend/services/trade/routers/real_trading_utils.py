@@ -1025,7 +1025,7 @@ def check_stream_series_freshness(redis_client=None) -> dict[str, Any]:
                 if latest_age_sec is None or age < latest_age_sec:
                     matched_symbol = symbol
                     latest_age_sec = age
-    except Exception as e:
+    except Exception:
         # 降级：尝试本地/交易 Redis
         if redis_client:
             try:

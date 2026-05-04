@@ -30,7 +30,7 @@ class SkillEngine:
         "STRATEGY_CONFIG", "get_strategy_config", "策略配置",
     ]
 
-    def __init__(self, templates_dir: Optional[str] = None):
+    def __init__(self, templates_dir: str | None = None):
         if templates_dir is None:
             templates_dir = os.path.join(os.path.dirname(__file__), "skill_templates")
         self.templates_dir = templates_dir

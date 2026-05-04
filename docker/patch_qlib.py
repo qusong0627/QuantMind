@@ -9,7 +9,7 @@ import sys
 position_file = '/usr/local/lib/python3.10/site-packages/qlib/backtest/position.py'
 
 try:
-    with open(position_file, 'r') as f:
+    with open(position_file) as f:
         content = f.read()
 except FileNotFoundError:
     print(f"Warning: {position_file} not found, skipping patch")

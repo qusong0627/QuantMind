@@ -99,7 +99,7 @@ async def upsert_real_account_daily_ledger(
 
     derived_daily_pnl = total_asset - day_open_equity if day_open_equity > 0 else today_pnl
     derived_monthly_pnl = total_asset - month_open_equity if month_open_equity > 0 else total_pnl
-    
+
     # 使用平台基准计算累计收益率，保证与仪表盘一致
     cumulative_pnl = total_asset - initial_equity if initial_equity > 0 else total_pnl
     total_return_pct = (cumulative_pnl / initial_equity * 100.0) if initial_equity > 0 else 0.0

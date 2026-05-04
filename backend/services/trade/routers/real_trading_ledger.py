@@ -182,10 +182,10 @@ async def get_real_account_settings(
         user_id=resolved_user_id,
         account_id=resolved_account_id,
     )
-    
+
     initial_equity = float(baseline["initial_equity"]) if baseline else 0.0
     last_modified_at = baseline["first_snapshot_at"].isoformat() if baseline and baseline.get("first_snapshot_at") else None
-    
+
     return RealAccountSettingsResponse(
         initial_equity=initial_equity,
         last_modified_at=last_modified_at,
@@ -196,8 +196,8 @@ async def get_real_account_settings(
 @router.put("/account/settings")
 async def update_real_account_settings(
     request: RealAccountSettingsRequest,
-    user_id: Optional[str] = None,
-    tenant_id: Optional[str] = None,
+    user_id: str | None = None,
+    tenant_id: str | None = None,
     auth: AuthContext = Depends(get_auth_context),
     db: AsyncSession = Depends(get_db),
 ):
@@ -256,7 +256,7 @@ async def update_real_account_settings(
     try:
         sh_tz = ZoneInfo("Asia/Shanghai")
         today_date = datetime.now(sh_tz).date()
-        
+
         ledger_stmt = select(RealAccountLedgerDailySnapshot).where(
             and_(
                 RealAccountLedgerDailySnapshot.tenant_id == resolved_tenant_id,
@@ -267,13 +267,13 @@ async def update_real_account_settings(
         ).limit(1)
         res_ledger = await db.execute(ledger_stmt)
         ledger = res_ledger.scalar_one_or_none()
-        
+
         if ledger:
             total_asset = float(ledger.total_asset or 0.0)
             initial_equity = float(request.initial_equity)
             new_cumulative_pnl = total_asset - initial_equity
             new_total_return_pct = (new_cumulative_pnl / initial_equity * 100.0) if initial_equity > 0 else 0.0
-            
+
             ledger.initial_equity = initial_equity
             ledger.total_return_pct = new_total_return_pct
             ledger.updated_at = datetime.utcnow()

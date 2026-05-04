@@ -88,7 +88,7 @@ class NotificationService:
         stmt = select(Notification).where(*filters).order_by(desc(Notification.created_at)).limit(limit).offset(offset)
         total_stmt = select(func.count(Notification.id)).where(*filters)
         unread_stmt = select(func.count(Notification.id)).where(*unread_filters)
-        
+
         # 统计未读分类分布 (确保分类图标总和 = 未读总数)
         stats_stmt = select(Notification.type, func.count(Notification.id)).where(*unread_filters).group_by(Notification.type)
 
@@ -98,11 +98,11 @@ class NotificationService:
                 notifications = result.scalars().all()
                 total = int((await self.session.execute(total_stmt)).scalar() or 0)
                 unread_count = int((await self.session.execute(unread_stmt)).scalar() or 0)
-                
+
                 # 获取未读分类汇总结果
                 stats_res = await self.session.execute(stats_stmt)
                 unread_type_counts = {str(row[0]): int(row[1]) for row in stats_res.all()}
-                
+
             except ProgrammingError as e:
                 # 兼容开发环境未执行通知表 migration 的场景，避免前端 500 风暴
                 if self._is_missing_notifications_table_error(e):

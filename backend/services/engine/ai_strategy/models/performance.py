@@ -18,7 +18,7 @@ class PerformanceMetric(BaseModel):
     unit: str = Field(..., description="单位")
     timestamp: datetime = Field(
         default_factory=datetime.utcnow, description="时间戳")
-    metadata: Dict[str, Any] = Field(default_factory=dict, description="元数据")
+    metadata: dict[str, Any] = Field(default_factory=dict, description="元数据")
 
 
 class ProviderPerformance(BaseModel):
@@ -51,8 +51,8 @@ class SystemPerformance(BaseModel):
     failed_requests: int = Field(..., description="失败请求数")
     avg_response_time: float = Field(..., description="平均响应时间(ms)")
     active_providers: int = Field(..., description="活跃Provider数量")
-    memory_usage: Optional[float] = Field(None, description="内存使用率")
-    cpu_usage: Optional[float] = Field(None, description="CPU使用率")
+    memory_usage: float | None = Field(None, description="内存使用率")
+    cpu_usage: float | None = Field(None, description="CPU使用率")
     uptime: int = Field(..., description="运行时间(秒)")
     last_updated: datetime = Field(
         default_factory=datetime.utcnow, description="最后更新时间"
@@ -82,8 +82,8 @@ class PerformanceHistory(BaseModel):
 
     provider_name: str = Field(..., description="Provider名称")
     time_range: str = Field(..., description="时间范围")
-    data_points: List[PerformanceMetric] = Field(..., description="数据点")
-    summary: Dict[str, float] = Field(..., description="汇总统计")
+    data_points: list[PerformanceMetric] = Field(..., description="数据点")
+    summary: dict[str, float] = Field(..., description="汇总统计")
 
 
 class PerformanceAlert(BaseModel):
@@ -100,16 +100,16 @@ class PerformanceAlert(BaseModel):
     created_at: datetime = Field(
         default_factory=datetime.utcnow, description="创建时间"
     )
-    resolved_at: Optional[datetime] = Field(None, description="解决时间")
+    resolved_at: datetime | None = Field(None, description="解决时间")
     status: str = Field("active", description="状态")
 
 
 class PerformanceQuery(BaseModel):
     """性能查询参数"""
 
-    provider_name: Optional[str] = Field(None, description="Provider名称")
+    provider_name: str | None = Field(None, description="Provider名称")
     time_range: str = Field("1h", description="时间范围")
-    metric_types: List[str] = Field(default_factory=list, description="指标类型")
-    start_time: Optional[datetime] = Field(None, description="开始时间")
-    end_time: Optional[datetime] = Field(None, description="结束时间")
+    metric_types: list[str] = Field(default_factory=list, description="指标类型")
+    start_time: datetime | None = Field(None, description="开始时间")
+    end_time: datetime | None = Field(None, description="结束时间")
     limit: int = Field(100, description="数据点数量限制")

@@ -63,7 +63,7 @@ class SimTrade(Base, TimestampMixin):
     executed_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, default=datetime.utcnow
     )
-    price_source: Mapped[Optional[str]] = mapped_column(
+    price_source: Mapped[str | None] = mapped_column(
         String(64), nullable=True)
 
     __table_args__ = (

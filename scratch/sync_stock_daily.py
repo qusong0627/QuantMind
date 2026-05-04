@@ -1,14 +1,13 @@
 import pandas as pd
 from sqlalchemy import create_engine
-import sys
 
 def sync_table():
     remote_url = "postgresql+psycopg2://quantmind:9d4e1f8a2c7b6035e8f1a9c2d4b7e6f0@210.16.175.87:5432/quantmind"
     local_url = "postgresql+psycopg2://quantmind:quantmind2026@localhost:5432/quantmind"
-    
+
     table_name = "stock_daily_latest"
-    
-    print(f"Connecting to remote database: 210.16.175.87")
+
+    print("Connecting to remote database: 210.16.175.87")
     try:
         remote_engine = create_engine(remote_url)
         print(f"Reading data from {table_name}...")
@@ -18,7 +17,7 @@ def sync_table():
         print(f"Error reading from remote: {e}")
         return
 
-    print(f"Connecting to local database: localhost")
+    print("Connecting to local database: localhost")
     try:
         local_engine = create_engine(local_url)
         print(f"Writing data to local {table_name} (replacing existing)...")

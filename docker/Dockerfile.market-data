@@ -17,8 +17,6 @@ COPY requirements/data.txt requirements/data.txt
 RUN pip install --upgrade pip && \
     pip install --no-cache-dir --default-timeout=1000 -r requirements/data.txt
 
-COPY scripts/redis/market_data_to_redis.py scripts/redis/market_data_to_redis.py
-
 ENV PYTHONPATH=/app
 
-CMD ["python", "scripts/redis/market_data_to_redis.py"]
+CMD ["echo", "该镜像已废弃，数据由官方服务器统一推送"]

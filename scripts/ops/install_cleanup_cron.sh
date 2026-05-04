@@ -3,9 +3,8 @@
 
 # 1. 设置基础路径
 PROJECT_ROOT=$(cd "$(dirname "$0")/.." && pwd)
-PYTHON_EXEC="$PROJECT_ROOT/.venv/bin/python"
-SCRIPT_PATH="$PROJECT_ROOT/scripts/cleanup_backtest_history.py"
-LOG_PATH="$PROJECT_ROOT/logs/cleanup_cron.log"
+echo "⚠️  该安装脚本已废弃，数据由官方服务器统一管理，无需本地定时清理。"
+exit 0
 
 echo "🔍 正在配置计划任务..."
 

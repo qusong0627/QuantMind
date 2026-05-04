@@ -4,7 +4,7 @@ import asyncio
 import logging
 import os
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from backend.services.engine.qlib_app.celery_config import celery_app
 from backend.services.engine.services.pipeline_service import PipelineService
@@ -46,7 +46,9 @@ from backend.services.engine.services.signal_generator import global_signal_gene
     max_retries=3,
     default_retry_delay=60,
 )
-def generate_global_signals(universe: str = "all", mock: bool = False) -> dict[str, Any]:
+def generate_global_signals(
+    universe: str = "all", mock: bool = False
+) -> dict[str, Any]:
     """Celery 任务：生成全市场 Alpha 预测信号 (10万并发架构核心)。"""
     # 计算上海时区当日日期作为锁键（与 Admin 手动触发共享同一把锁）
     from zoneinfo import ZoneInfo
@@ -61,9 +63,19 @@ def generate_global_signals(universe: str = "all", mock: bool = False) -> dict[s
         )
         return {"status": "skipped", "reason": "lock_held", "trade_date": trade_date}
 
-    logger.info("Global signal generation task started: universe=%s trade_date=%s", universe, trade_date)
-    result = _run_async(global_signal_generator.generate_and_broadcast(universe, mock=mock))
-    return {"status": "success" if result else "failed", "universe": universe, "trade_date": trade_date}
+    logger.info(
+        "Global signal generation task started: universe=%s trade_date=%s",
+        universe,
+        trade_date,
+    )
+    result = _run_async(
+        global_signal_generator.generate_and_broadcast(universe, mock=mock)
+    )
+    return {
+        "status": "success" if result else "failed",
+        "universe": universe,
+        "trade_date": trade_date,
+    }
 
 
 @celery_app.task(
@@ -74,7 +86,9 @@ def generate_global_signals(universe: str = "all", mock: bool = False) -> dict[s
 )
 def run_pipeline_run(self, run_id: str) -> dict[str, Any]:
     """Celery 任务：执行 pipeline run。"""
-    logger.info("Pipeline Celery task started: run_id=%s task_id=%s", run_id, self.request.id)
+    logger.info(
+        "Pipeline Celery task started: run_id=%s task_id=%s", run_id, self.request.id
+    )
     service = PipelineService()
     result = _run_async(service.execute_run(run_id))
     return result.model_dump()
@@ -130,8 +144,8 @@ def auto_inference_if_needed() -> dict[str, Any]:
     if "+asyncpg" in sync_db_url:
         sync_db_url = sync_db_url.replace("+asyncpg", "+psycopg2")
     if not sync_db_url or "postgresql" not in sync_db_url:
-         # 降级
-         sync_db_url = "postgresql+psycopg2://postgres:quantmind2026@quantmind-postgresql:5432/quantmind"
+        # 降级
+        sync_db_url = "postgresql+psycopg2://postgres:quantmind2026@quantmind-postgresql:5432/quantmind"
 
     sync_engine = sa_create_engine(sync_db_url, pool_pre_ping=True)
     SessionLimit = sa_sessionmaker(bind=sync_engine)
@@ -157,43 +171,65 @@ def auto_inference_if_needed() -> dict[str, Any]:
         ).all()
 
         # 总是包含一个系统级别的虚拟任务（全局默认模型）
-        tasks = [{"tenant_id": "default", "user_id": "system", "strategy_id": "global", "model_id": None}]
-        for p in active_portfolios:
-            tasks.append({
-                "tenant_id": p.tenant_id,
-                "user_id": str(p.user_id),
-                "strategy_id": str(p.strategy_id or "default"),
+        tasks = [
+            {
+                "tenant_id": "default",
+                "user_id": "system",
+                "strategy_id": "global",
                 "model_id": None,
-            })
+            }
+        ]
+        for p in active_portfolios:
+            tasks.append(
+                {
+                    "tenant_id": p.tenant_id,
+                    "user_id": str(p.user_id),
+                    "strategy_id": str(p.strategy_id or "default"),
+                    "model_id": None,
+                }
+            )
 
         # 添加用户自动推理设置任务
         for s in auto_inference_settings:
-            tasks.append({
-                "tenant_id": s.tenant_id,
-                "user_id": str(s.user_id),
-                "strategy_id": None,  # 用户级别推理，不绑定特定策略
-                "model_id": str(s.model_id),
-            })
+            tasks.append(
+                {
+                    "tenant_id": s.tenant_id,
+                    "user_id": str(s.user_id),
+                    "strategy_id": None,  # 用户级别推理，不绑定特定策略
+                    "model_id": str(s.model_id),
+                }
+            )
 
         # 去重（同一 tenant_id + user_id 可能同时出现在 portfolios 和 settings 中）
         seen = set()
         unique_tasks = []
         for t in tasks:
-            key = (t["tenant_id"], t["user_id"], t.get("strategy_id"), t.get("model_id"))
+            key = (
+                t["tenant_id"],
+                t["user_id"],
+                t.get("strategy_id"),
+                t.get("model_id"),
+            )
             if key not in seen:
                 seen.add(key)
                 unique_tasks.append(t)
         tasks = unique_tasks
 
-        logger.info("[AutoInference] 发现需检查的任务总数: %d (活跃策略=%d, 自动推理设置=%d)",
-                     len(tasks), len(active_portfolios), len(auto_inference_settings))
+        logger.info(
+            "[AutoInference] 发现需检查的任务总数: %d (活跃策略=%d, 自动推理设置=%d)",
+            len(tasks),
+            len(active_portfolios),
+            len(auto_inference_settings),
+        )
 
         results = []
         redis = None
         try:
             from backend.shared.redis_sentinel_client import get_redis_sentinel_client
+
             redis = get_redis_sentinel_client()
-        except: pass
+        except:
+            pass
 
         router_service = InferenceRouterService()
 
@@ -212,7 +248,7 @@ def auto_inference_if_needed() -> dict[str, Any]:
                     "WHERE trade_date = :d AND status = 'signal_ready' "
                     "AND tenant_id = :tid AND user_id = :uid LIMIT 1"
                 ),
-                {"d": prediction_trade_date, "tid": tid, "uid": uid}
+                {"d": prediction_trade_date, "tid": tid, "uid": uid},
             ).first()
 
             if exists:
@@ -220,39 +256,49 @@ def auto_inference_if_needed() -> dict[str, Any]:
 
             # 尝试获取锁
             lock_scope = f"{tid}:{uid}:{sid or mid or 'default'}"
-            if not _try_acquire_strategy_lock(lock_scope, prediction_trade_date, "celery_auto"):
+            if not _try_acquire_strategy_lock(
+                lock_scope, prediction_trade_date, "celery_auto"
+            ):
                 logger.info("[AutoInference] 任务锁冲突，跳过: tid=%s uid=%s", tid, uid)
                 continue
 
             try:
-                logger.info("[AutoInference] 正在执行任务: tenant=%s user=%s strategy=%s model=%s",
-                            tid, uid, sid, mid)
+                logger.info(
+                    "[AutoInference] 正在执行任务: tenant=%s user=%s strategy=%s model=%s",
+                    tid,
+                    uid,
+                    sid,
+                    mid,
+                )
                 exec_res = router_service.run_daily_inference_script(
                     date=data_trade_date,
                     tenant_id=tid,
                     user_id=uid,
                     strategy_id=None if sid == "global" else sid,
                     model_id=mid,
-                    redis_client=redis
+                    redis_client=redis,
                 )
-                results.append({
-                    "tenant_id": tid,
-                    "user_id": uid,
-                    "success": exec_res.success,
-                    "run_id": exec_res.run_id
-                })
+                results.append(
+                    {
+                        "tenant_id": tid,
+                        "user_id": uid,
+                        "success": exec_res.success,
+                        "run_id": exec_res.run_id,
+                    }
+                )
             finally:
                 # 释放锁
                 try:
                     lock_key = f"{_INFERENCE_LOCK_KEY_PREFIX}:{lock_scope}:{prediction_trade_date}"
                     redis.delete(lock_key)
-                except: pass
+                except:
+                    pass
 
         return {
             "status": "completed",
             "date": prediction_trade_date,
             "processed_count": len(results),
-            "details": results
+            "details": results,
         }
     except Exception as e:
         logger.exception("[AutoInference] 扫描/执行任务异常: %s", e)
@@ -266,7 +312,9 @@ def auto_inference_if_needed() -> dict[str, Any]:
     name="engine.tasks.run_strategy_backtest_loop",
     max_retries=0,
 )
-def run_strategy_backtest_loop(self, task_id: str, request_payload: dict[str, Any]) -> dict[str, Any]:
+def run_strategy_backtest_loop(
+    self, task_id: str, request_payload: dict[str, Any]
+) -> dict[str, Any]:
     """Celery 任务：执行策略-回测闭环。"""
     logger.info(
         "Strategy-backtest loop Celery task started: task_id=%s celery_id=%s",
@@ -301,7 +349,9 @@ def run_strategy_backtest_loop(self, task_id: str, request_payload: dict[str, An
 
         request = StrategyBacktestLoopRequest(**request_payload)
 
-        def _progress_callback(iteration: int, stage: Any, progress: float, best_score: float) -> None:
+        def _progress_callback(
+            iteration: int, stage: Any, progress: float, best_score: float
+        ) -> None:
             self.update_state(
                 state="STARTED",
                 meta={
@@ -322,7 +372,9 @@ def run_strategy_backtest_loop(self, task_id: str, request_payload: dict[str, An
         )
         strategy_request = StrategyRequest(
             prompt=request.prompt,
-            strategy_type=(StrategyType(request.strategy_type) if request.strategy_type else None),
+            strategy_type=(
+                StrategyType(request.strategy_type) if request.strategy_type else None
+            ),
             complexity_level=ComplexityLevel(request.complexity_level),
             target_assets=request.target_assets,
             timeframe=request.timeframe,
@@ -342,17 +394,23 @@ def run_strategy_backtest_loop(self, task_id: str, request_payload: dict[str, An
         )
 
         loop_manager = StrategyBacktestLoop(loop_config)
-        result = await loop_manager.run_loop(strategy_request, market_data, progress_callback=_progress_callback)
+        result = await loop_manager.run_loop(
+            strategy_request, market_data, progress_callback=_progress_callback
+        )
 
         best_strategy = {}
         performance_metrics = {}
         best_score = 0.0
         if result.best_iteration:
-            best_score = float(getattr(result.best_iteration, "performance_score", 0.0) or 0.0)
+            best_score = float(
+                getattr(result.best_iteration, "performance_score", 0.0) or 0.0
+            )
             if getattr(result.best_iteration, "strategy_response", None):
                 best_strategy = result.best_iteration.strategy_response.to_dict()
             if getattr(result.best_iteration, "backtest_result", None):
-                performance_metrics = result.best_iteration.backtest_result.performance_metrics or {}
+                performance_metrics = (
+                    result.best_iteration.backtest_result.performance_metrics or {}
+                )
 
         all_iterations = []
         for iteration in result.all_iterations:
@@ -416,94 +474,26 @@ def run_strategy_backtest_loop(self, task_id: str, request_payload: dict[str, An
             )
         )
         raise
+
+
 @celery_app.task(
     name="engine.tasks.sync_stock_daily_latest_task",
     max_retries=0,
 )
-def sync_stock_daily_latest_task(target_date: str | None = None, max_symbols: int = 0, apply: bool = True) -> dict[str, Any]:
+def sync_stock_daily_latest_task(
+    target_date: str | None = None, max_symbols: int = 0, apply: bool = True
+) -> dict[str, Any]:
     """
-    Celery 任务：从 Baostock 同步基础行情到 stock_daily_latest。
-    解决 Admin UI 手动触发时的 Gateway Timeout 问题。
+    [已废弃] 数据现由官方服务器统一推送，不再需要本地 Baostock 同步。
     """
-    import subprocess
-    import sys
-    import os
-    from pathlib import Path
-
-    project_root = Path(os.getcwd())
-    script_path = project_root / "scripts" / "data" / "ingestion" / "sync_market_data_daily_from_baostock.py"
-
-    if not script_path.exists():
-        logger.error("[SyncTask] 脚本不存在: %s", script_path)
-        return {"success": False, "error": "script_not_found"}
-
-    # 寻找 Python 解释器
-    python_candidates = [
-        project_root / ".venv" / "bin" / "python",
-        Path("/app/.venv/bin/python"),
-        Path(sys.executable),
-        Path("/usr/bin/python3"),
-    ]
-    python_exec = next((str(p) for p in python_candidates if p.exists()), sys.executable)
-
-    cmd = [python_exec, str(script_path)]
-    if target_date:
-        cmd.extend(["--target-date", target_date])
-    if max_symbols > 0:
-        cmd.extend(["--max-symbols", str(max_symbols)])
-    if apply:
-        cmd.append("--apply")
-
-    logger.info("[SyncTask] 启动同步脚本: %s", " ".join(cmd))
-
-    try:
-        proc = subprocess.run(
-            cmd,
-            cwd=str(project_root),
-            capture_output=True,
-            text=True,
-            timeout=3600, # 1小时
-            env=os.environ.copy(),
-        )
-        stdout = proc.stdout or ""
-        stderr = proc.stderr or ""
-
-        # 尝试解析输出中的 JSON
-        import json
-        parsed = {}
-        for line in reversed(stdout.splitlines()):
-            if line.strip().startswith("{") and line.strip().endswith("}"):
-                try:
-                    parsed = json.loads(line)
-                    break
-                except: continue
-
-        if proc.returncode != 0:
-            logger.error("[SyncTask] 脚本执行失败 exit=%d, stderr=%s", proc.returncode, stderr[:500])
-            return {
-                "success": False,
-                "exit_code": proc.returncode,
-                "error": parsed.get("error") or "execution_failed",
-                "stdout": stdout[-1000:],
-                "stderr": stderr[-1000:]
-            }
-
-        logger.info("[SyncTask] 同步成功")
-        return {
-            "success": True,
-            "exit_code": 0,
-            "result": parsed,
-            "stdout": stdout[-1000:]
-        }
-    except Exception as e:
-        logger.exception("[SyncTask] 任务执行异常")
-        return {"success": False, "error": str(e)}
+    logger.info("[SyncTask] 该任务已废弃，数据由官方服务器统一推送")
+    return {
+        "success": True,
+        "message": "数据同步任务已废弃，数据由官方服务器统一推送",
+        "deprecated": True,
+    }
 
 
-@celery_app.task(
-    name="engine.tasks.get_data_status_task",
-    max_retries=1,
-)
 def get_data_status_task() -> dict[str, Any]:
     """
     Celery 任务：扫描 Qlib 数据目录和数据库状态，并缓存结果。
@@ -559,7 +549,11 @@ def get_data_status_task() -> dict[str, Any]:
     calendar: list[str] = []
     if calendars_path.exists():
         try:
-            calendar = [x.strip() for x in calendars_path.read_text(encoding="utf-8").splitlines() if x.strip()]
+            calendar = [
+                x.strip()
+                for x in calendars_path.read_text(encoding="utf-8").splitlines()
+                if x.strip()
+            ]
             if calendar:
                 qlib_info["calendar_total_days"] = len(calendar)
                 qlib_info["calendar_start_date"] = calendar[0]
@@ -571,13 +565,18 @@ def get_data_status_task() -> dict[str, Any]:
     if instruments_all_path.exists():
         try:
             for line in instruments_all_path.read_text(encoding="utf-8").splitlines():
-                if not line.strip(): continue
+                if not line.strip():
+                    continue
                 code = line.split()[0].strip().upper()
                 qlib_info["instruments"]["total"] += 1
-                if code.startswith("SH"): qlib_info["instruments"]["sh"] += 1
-                elif code.startswith("SZ"): qlib_info["instruments"]["sz"] += 1
-                elif code.startswith("BJ"): qlib_info["instruments"]["bj"] += 1
-                else: qlib_info["instruments"]["other"] += 1
+                if code.startswith("SH"):
+                    qlib_info["instruments"]["sh"] += 1
+                elif code.startswith("SZ"):
+                    qlib_info["instruments"]["sz"] += 1
+                elif code.startswith("BJ"):
+                    qlib_info["instruments"]["bj"] += 1
+                else:
+                    qlib_info["instruments"]["other"] += 1
         except Exception as e:
             qlib_info["instruments_error"] = str(e)
 
@@ -606,7 +605,13 @@ def get_data_status_task() -> dict[str, Any]:
             if not close_bin.exists():
                 invalid_count += 1
                 if len(invalid_samples) < sample_size:
-                    invalid_samples.append({"symbol": inst, "reason": "missing_close_bin", "file": str(close_bin)})
+                    invalid_samples.append(
+                        {
+                            "symbol": inst,
+                            "reason": "missing_close_bin",
+                            "file": str(close_bin),
+                        }
+                    )
                 continue
 
             try:
@@ -614,7 +619,13 @@ def get_data_status_task() -> dict[str, Any]:
                 if size < 8:
                     invalid_count += 1
                     if len(invalid_samples) < sample_size:
-                        invalid_samples.append({"symbol": inst, "reason": "bin_too_small", "file": str(close_bin)})
+                        invalid_samples.append(
+                            {
+                                "symbol": inst,
+                                "reason": "bin_too_small",
+                                "file": str(close_bin),
+                            }
+                        )
                     continue
 
                 with close_bin.open("rb") as f:
@@ -640,7 +651,13 @@ def get_data_status_task() -> dict[str, Any]:
                 else:
                     older_count += 1
                     if len(older_samples) < sample_size:
-                        older_samples.append({"symbol": inst, "last_date": last_date, "lag_days": max(0, cal_len - 1 - end_idx)})
+                        older_samples.append(
+                            {
+                                "symbol": inst,
+                                "last_date": last_date,
+                                "lag_days": max(0, cal_len - 1 - end_idx),
+                            }
+                        )
             except:
                 invalid_count += 1
 
@@ -652,11 +669,11 @@ def get_data_status_task() -> dict[str, Any]:
         }
         qlib_info["topn_samples"] = {
             "sample_size": sample_size,
-            "older_samples": sorted(older_samples, key=lambda x: x["last_date"])[:sample_size],
+            "older_samples": sorted(older_samples, key=lambda x: x["last_date"])[
+                :sample_size
+            ],
             "invalid_samples": invalid_samples[:sample_size],
         }
-
-    db_info = {"trade_date": trade_date, "latest_trade_date": None, "latest_updated_at": None, "today_rows": 0, "feature_column_count": 0}
 
     # feature_snapshots 检测（替代 stock_daily_latest）
     feature_snapshots_info: dict[str, Any] = {
@@ -683,8 +700,13 @@ def get_data_status_task() -> dict[str, Any]:
     }
 
     try:
-        from backend.services.api.routers.admin.model_management_utils import _scan_feature_snapshots_status
-        feature_snapshots_info = _scan_feature_snapshots_status(target_date=trade_date, topn=20)
+        from backend.services.api.routers.admin.model_management_utils import (
+            _scan_feature_snapshots_status,
+        )
+
+        feature_snapshots_info = _scan_feature_snapshots_status(
+            target_date=trade_date, topn=20
+        )
     except Exception as e:
         feature_snapshots_info["error"] = str(e)
 
@@ -698,7 +720,7 @@ def get_data_status_task() -> dict[str, Any]:
     # 存入 Redis
     try:
         redis = get_redis_sentinel_client()
-        redis.set("qm:admin:data_status", json.dumps(result), ex=300) # 5分钟缓存
+        redis.set("qm:admin:data_status", json.dumps(result), ex=300)  # 5分钟缓存
     except Exception as e:
         logger.warning("Failed to cache data status to Redis: %s", e)
 

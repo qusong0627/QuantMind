@@ -9,7 +9,7 @@ import time
 import traceback
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any
 from uuid import uuid4
 
 import numpy as np
@@ -27,8 +27,12 @@ from backend.services.engine.qlib_app.services.market_state_service import (
 )
 from backend.services.engine.qlib_app.services.risk_analyzer import RiskAnalyzer
 from backend.services.engine.qlib_app.services.strategy_builder import StrategyFactory
-from backend.services.engine.qlib_app.services.strategy_templates import get_template_by_id
-from backend.services.engine.qlib_app.utils.margin_position import ensure_margin_backtest_support
+from backend.services.engine.qlib_app.services.strategy_templates import (
+    get_template_by_id,
+)
+from backend.services.engine.qlib_app.utils.margin_position import (
+    ensure_margin_backtest_support,
+)
 from backend.services.engine.qlib_app.utils.qlib_utils import (
     QLIB_BACKEND,
     D,
@@ -37,7 +41,9 @@ from backend.services.engine.qlib_app.utils.qlib_utils import (
     qlib,
 )
 from backend.services.engine.qlib_app.utils.strategy_adapter import StrategyAdapter
-from backend.services.engine.qlib_app.utils.structured_logger import StructuredTaskLogger
+from backend.services.engine.qlib_app.utils.structured_logger import (
+    StructuredTaskLogger,
+)
 from backend.shared.notification_publisher import publish_notification_async
 from backend.shared.utils import normalize_user_id
 from .backtest_service_query import QlibBacktestServiceQueryMixin
@@ -62,12 +68,14 @@ def _find_project_root() -> Path:
 
 
 PROJECT_ROOT = _find_project_root()
-task_logger.info("project_root_resolved", "Project root resolved", root=str(PROJECT_ROOT))
-
+task_logger.info(
+    "project_root_resolved", "Project root resolved", root=str(PROJECT_ROOT)
+)
 
 
 class QlibBacktestServiceRuntimeMixin(QlibBacktestServiceQueryMixin):
     """Qlib 回测运行逻辑 mixin"""
+
     async def run_backtest(self, request: QlibBacktestRequest) -> QlibBacktestResult:
         """运行回测"""
         self._cleanup_stale_runs()
@@ -75,7 +83,10 @@ class QlibBacktestServiceRuntimeMixin(QlibBacktestServiceQueryMixin):
         signal_meta: dict[str, Any] = {"source": "unknown"}
         result: QlibBacktestResult | None = None
         is_optimization_child = (
-            str(getattr(request, "history_source", "manual") or "manual").strip().lower() == "optimization"
+            str(getattr(request, "history_source", "manual") or "manual")
+            .strip()
+            .lower()
+            == "optimization"
         )
 
         backtest_id = getattr(request, "backtest_id", None) or uuid4().hex
@@ -132,24 +143,55 @@ class QlibBacktestServiceRuntimeMixin(QlibBacktestServiceQueryMixin):
                     or "stock_pool" in request.universe
                     or request.universe.startswith("cos://")
                 ):
-                    task_log.info("resolve_universe", "Resolving cloud universe key", universe=request.universe)
-                    local_pool_path = await resolver.resolve_to_local_path(request.universe)
+                    task_log.info(
+                        "resolve_universe",
+                        "Resolving cloud universe key",
+                        universe=request.universe,
+                    )
+                    local_pool_path = await resolver.resolve_to_local_path(
+                        request.universe
+                    )
                     request.universe = str(local_pool_path)
-                    task_log.info("resolve_universe_done", "Resolved universe to local path", universe=request.universe)
+                    task_log.info(
+                        "resolve_universe_done",
+                        "Resolved universe to local path",
+                        universe=request.universe,
+                    )
 
                 if request.strategy_content:
                     if request.strategy_content.isdigit():
-                        task_log.info("resolve_strategy", "Resolving DB strategy ID", strategy_content=request.strategy_content)
-                        local_strategy_path = await resolver.resolve_to_local_path(request.strategy_content)
-                        request.strategy_content = local_strategy_path.read_text(encoding="utf-8")
-                    elif "user_strategies/" in request.strategy_content or request.strategy_content.startswith(
-                        "cos://"
+                        task_log.info(
+                            "resolve_strategy",
+                            "Resolving DB strategy ID",
+                            strategy_content=request.strategy_content,
+                        )
+                        local_strategy_path = await resolver.resolve_to_local_path(
+                            request.strategy_content
+                        )
+                        request.strategy_content = local_strategy_path.read_text(
+                            encoding="utf-8"
+                        )
+                    elif (
+                        "user_strategies/" in request.strategy_content
+                        or request.strategy_content.startswith("cos://")
                     ):
-                        task_log.info("resolve_strategy", "Resolving COS strategy key", strategy_content=request.strategy_content)
-                        local_strategy_path = await resolver.resolve_to_local_path(request.strategy_content)
-                        request.strategy_content = local_strategy_path.read_text(encoding="utf-8")
+                        task_log.info(
+                            "resolve_strategy",
+                            "Resolving COS strategy key",
+                            strategy_content=request.strategy_content,
+                        )
+                        local_strategy_path = await resolver.resolve_to_local_path(
+                            request.strategy_content
+                        )
+                        request.strategy_content = local_strategy_path.read_text(
+                            encoding="utf-8"
+                        )
             except Exception as res_err:
-                task_log.exception("storage_resolution_failed", "Storage resolution failed", error=res_err)
+                task_log.exception(
+                    "storage_resolution_failed",
+                    "Storage resolution failed",
+                    error=res_err,
+                )
             # --- Storage Resolution [END] ---
 
             # --- Pool File Resolution [START] ---
@@ -164,14 +206,24 @@ class QlibBacktestServiceRuntimeMixin(QlibBacktestServiceQueryMixin):
                 )
                 if pool_match:
                     pool_file = pool_match.group(1).strip()
-                    task_log.info("resolve_pool_file", "从策略代码提取到股票池文件", pool_file=pool_file)
+                    task_log.info(
+                        "resolve_pool_file",
+                        "从策略代码提取到股票池文件",
+                        pool_file=pool_file,
+                    )
                     try:
                         from backend.shared.storage_resolver import get_storage_resolver
 
                         resolver = get_storage_resolver()
-                        local_pool_path = await resolver.resolve_to_local_path(pool_file)
+                        local_pool_path = await resolver.resolve_to_local_path(
+                            pool_file
+                        )
                         request.universe = str(local_pool_path)
-                        task_log.info("pool_file_applied", "股票池已覆盖", universe=request.universe)
+                        task_log.info(
+                            "pool_file_applied",
+                            "股票池已覆盖",
+                            universe=request.universe,
+                        )
                     except Exception as pool_err:
                         task_log.warning(
                             "pool_resolution_failed",
@@ -181,7 +233,9 @@ class QlibBacktestServiceRuntimeMixin(QlibBacktestServiceQueryMixin):
                         )
             # --- Pool File Resolution [END] ---
 
-            task_log.info("signal_raw", "原始signal配置", signal=request.strategy_params.signal)
+            task_log.info(
+                "signal_raw", "原始signal配置", signal=request.strategy_params.signal
+            )
             signal_data, signal_meta = await self._build_signal_data(request)
             self._enforce_signal_quality(signal_meta, request=request)
             is_dataframe = isinstance(signal_data, (pd.DataFrame, pd.Series))
@@ -196,14 +250,18 @@ class QlibBacktestServiceRuntimeMixin(QlibBacktestServiceQueryMixin):
             # --- 日期自适应校准 [START] ---
             # 必须在构建策略和交易所配置之前完成日期截断，否则会导致配置冲突
             from qlib.data import D
+
             full_cal = D.calendar()
             cal_max_ts = pd.Timestamp(full_cal[-1].date())
             end_ts = pd.Timestamp(request.end_date)
 
-            task_log.info("date_adjustment_start", "开始日期校准决策",
-                         requested_end=request.end_date,
-                         cal_max=str(cal_max_ts.date()),
-                         signal_source=signal_meta.get("source"))
+            task_log.info(
+                "date_adjustment_start",
+                "开始日期校准决策",
+                requested_end=request.end_date,
+                cal_max=str(cal_max_ts.date()),
+                signal_source=signal_meta.get("source"),
+            )
 
             try:
                 # 1. 模型预测信号截断 (核心约束)
@@ -233,12 +291,18 @@ class QlibBacktestServiceRuntimeMixin(QlibBacktestServiceQueryMixin):
 
                 # 重要：同步更新 request 对象，确保后续所有模块（交易所、分析器、日志）对齐
                 if request.end_date != actual_end_date:
-                    task_log.info("request_date_synchronized", "同步更新请求对象日期",
-                                 old=request.end_date, new=actual_end_date)
+                    task_log.info(
+                        "request_date_synchronized",
+                        "同步更新请求对象日期",
+                        old=request.end_date,
+                        new=actual_end_date,
+                    )
                     request.end_date = actual_end_date
 
             except Exception as cal_err:
-                task_log.error("date_decision_error", "日期决策逻辑异常", error=str(cal_err))
+                task_log.error(
+                    "date_decision_error", "日期决策逻辑异常", error=str(cal_err)
+                )
                 actual_end_date = request.end_date
             # --- 日期自适应校准 [END] ---
 
@@ -261,7 +325,11 @@ class QlibBacktestServiceRuntimeMixin(QlibBacktestServiceQueryMixin):
             task_log.info("strategy_adapted", "策略配置清理与适配完成")
 
             # 最终检查并替换 signal (无论是自定义代码还是预设策略)
-            if isinstance(strategy, dict) and "kwargs" in strategy and isinstance(strategy["kwargs"], dict):
+            if (
+                isinstance(strategy, dict)
+                and "kwargs" in strategy
+                and isinstance(strategy["kwargs"], dict)
+            ):
                 curr_signal = strategy["kwargs"].get("signal")
                 if isinstance(curr_signal, dict):
                     normalized_curr_signal = self._normalize_signal_config(curr_signal)
@@ -275,7 +343,8 @@ class QlibBacktestServiceRuntimeMixin(QlibBacktestServiceQueryMixin):
                         strategy["kwargs"]["signal"] = normalized_curr_signal
                         curr_signal = normalized_curr_signal
                 if (
-                    curr_signal == "<PRED>" or (isinstance(curr_signal, str) and curr_signal.startswith("$"))
+                    curr_signal == "<PRED>"
+                    or (isinstance(curr_signal, str) and curr_signal.startswith("$"))
                 ) and signal_data is not None:
                     strategy["kwargs"]["signal"] = signal_data
 
@@ -290,9 +359,15 @@ class QlibBacktestServiceRuntimeMixin(QlibBacktestServiceQueryMixin):
             }
 
             # 使用自定义 CnExchange
-            comm = request.buy_cost if request.buy_cost is not None else request.commission
+            comm = (
+                request.buy_cost if request.buy_cost is not None else request.commission
+            )
             tf = 0 if request.buy_cost is not None else request.transfer_fee
-            tax = (request.sell_cost - comm) if request.sell_cost is not None else request.stamp_duty
+            tax = (
+                (request.sell_cost - comm)
+                if request.sell_cost is not None
+                else request.stamp_duty
+            )
 
             enable_short_selling = self._should_enable_short_selling(request)
 
@@ -330,7 +405,9 @@ class QlibBacktestServiceRuntimeMixin(QlibBacktestServiceQueryMixin):
             }
 
             if request.universe and request.universe != "csi300":
-                task_log.info("custom_universe", "使用自定义股票池", universe=request.universe)
+                task_log.info(
+                    "custom_universe", "使用自定义股票池", universe=request.universe
+                )
                 # universe 只用于信号过滤，不传入 qlib.backtest()
                 # （qlib.backtest 不接受 universe 参数）
 
@@ -342,45 +419,65 @@ class QlibBacktestServiceRuntimeMixin(QlibBacktestServiceQueryMixin):
             )
 
             if "kwargs" in strategy:
-                task_log.info("strategy_kwargs", "最终策略配置参数", kwargs=strategy["kwargs"])
+                task_log.info(
+                    "strategy_kwargs", "最终策略配置参数", kwargs=strategy["kwargs"]
+                )
             task_log.info(
                 "rebalance_days",
                 "最终调仓周期参数",
-                rebalance_days=strategy["kwargs"].get("rebalance_days", "<missing; strategy default applies>"),
+                rebalance_days=strategy["kwargs"].get(
+                    "rebalance_days", "<missing; strategy default applies>"
+                ),
             )
 
             use_vect = getattr(request, "use_vectorized", False)
-            task_log.info("engine_mode", "回测引擎模式", use_vectorized=use_vect, mode="vectorized" if use_vect else "step")
+            task_log.info(
+                "engine_mode",
+                "回测引擎模式",
+                use_vectorized=use_vect,
+                mode="vectorized" if use_vect else "step",
+            )
 
             if use_vect:
                 task_log.info("vectorized_start", "启动驻留内存的极速向量化回测引擎")
-                from backend.shared.vectorized_backtest.engine import VectorizedBacktestEngine, VectorizedBacktestConfig
+                from backend.shared.vectorized_backtest.engine import (
+                    VectorizedBacktestEngine,
+                    VectorizedBacktestConfig,
+                )
 
                 if isinstance(signal_data, str) and signal_data.startswith("$"):
-                    raise ValueError("Vectorized backtest requires pre-computed predictions (DataFrame), not raw feature strings.")
+                    raise ValueError(
+                        "Vectorized backtest requires pre-computed predictions (DataFrame), not raw feature strings."
+                    )
 
                 price_df = D.features(
                     D.instruments(request.universe),
-                    ['$close'],
+                    ["$close"],
                     start_time=request.start_date,
-                    end_time=request.end_date
+                    end_time=request.end_date,
                 )
 
                 cfg = VectorizedBacktestConfig(
                     initial_capital=request.initial_capital,
                     commission=comm + tax + tf,
                     slippage=request.impact_cost_coefficient,
-                    topk=request.strategy_params.topk
+                    topk=request.strategy_params.topk,
                 )
 
                 v_engine = VectorizedBacktestEngine(cfg)
-                v_res = await asyncio.to_thread(v_engine.run_backtest, signals=signal_data, prices=price_df)
+                v_res = await asyncio.to_thread(
+                    v_engine.run_backtest, signals=signal_data, prices=price_df
+                )
 
                 if not v_res.success:
                     raise RuntimeError(f"向量化极速回测执行失败: {v_res.error_message}")
 
                 execution_time = time.time() - start_time
-                task_log.info("vectorized_done", "向量化极速回测完成", execution_time=f"{execution_time:.2f}")
+                task_log.info(
+                    "vectorized_done",
+                    "向量化极速回测完成",
+                    execution_time=f"{execution_time:.2f}",
+                )
 
                 result = QlibBacktestResult(
                     backtest_id=backtest_id,
@@ -394,7 +491,7 @@ class QlibBacktestServiceRuntimeMixin(QlibBacktestServiceQueryMixin):
                     max_drawdown=v_res.max_drawdown,
                     total_return=v_res.total_return,
                     win_rate=v_res.win_rate,
-                    execution_time=execution_time
+                    execution_time=execution_time,
                 )
             else:
                 portfolio_dict, indicator_dict = await asyncio.to_thread(
@@ -405,10 +502,14 @@ class QlibBacktestServiceRuntimeMixin(QlibBacktestServiceQueryMixin):
                 )
 
                 execution_time = time.time() - start_time
-                task_log.info("run_done", "回测完成", execution_time=f"{execution_time:.2f}")
+                task_log.info(
+                    "run_done", "回测完成", execution_time=f"{execution_time:.2f}"
+                )
 
                 # 使用 RiskAnalyzer 提取指标
-                async def analysis_progress_callback(val: float, msg: str | None = None):
+                async def analysis_progress_callback(
+                    val: float, msg: str | None = None
+                ):
                     await self._notify_progress(
                         backtest_id,
                         request.user_id,
@@ -554,8 +655,13 @@ class QlibBacktestServiceRuntimeMixin(QlibBacktestServiceQueryMixin):
             else pd.DatetimeIndex([])
         )
         max_available_date = datetime_index.max()
-        task_logger.info("signal_meta_extraction", "提取信号元数据",
-                          max_date=str(max_available_date.date()) if not pd.isnull(max_available_date) else None)
+        task_logger.info(
+            "signal_meta_extraction",
+            "提取信号元数据",
+            max_date=str(max_available_date.date())
+            if not pd.isnull(max_available_date)
+            else None,
+        )
 
         date_mask = (
             (datetime_index >= pd.Timestamp(request.start_date))
@@ -563,25 +669,43 @@ class QlibBacktestServiceRuntimeMixin(QlibBacktestServiceQueryMixin):
             if len(datetime_index) > 0
             else []
         )
-        pred_in_range = effective_pred.loc[date_mask] if len(datetime_index) > 0 else effective_pred.iloc[0:0]
-        score = pred_in_range["score"] if "score" in pred_in_range.columns else pd.Series(dtype=float)
+        pred_in_range = (
+            effective_pred.loc[date_mask]
+            if len(datetime_index) > 0
+            else effective_pred.iloc[0:0]
+        )
+        score = (
+            pred_in_range["score"]
+            if "score" in pred_in_range.columns
+            else pd.Series(dtype=float)
+        )
         nan_ratio = float(score.isna().mean()) if len(score) > 0 else 1.0
         return {
             "source": "pred_pkl",
             "pred_path": pred_path,
-            "max_signal_date": str(max_available_date.date()) if not pd.isnull(max_available_date) else None,
+            "max_signal_date": str(max_available_date.date())
+            if not pd.isnull(max_available_date)
+            else None,
             "rows_in_range": int(len(pred_in_range)),
-            "date_count": int(pred_in_range.index.get_level_values("datetime").nunique()),
-            "instrument_count": int(pred_in_range.index.get_level_values("instrument").nunique()),
+            "date_count": int(
+                pred_in_range.index.get_level_values("datetime").nunique()
+            ),
+            "instrument_count": int(
+                pred_in_range.index.get_level_values("instrument").nunique()
+            ),
             "score_nan_ratio": nan_ratio,
             "signal_lag_days": lag_days,
         }
 
     @staticmethod
     def _feature_fallback_allowed(request: QlibBacktestRequest | None = None) -> bool:
-        if request is not None and bool(getattr(request, "allow_feature_signal_fallback", False)):
+        if request is not None and bool(
+            getattr(request, "allow_feature_signal_fallback", False)
+        ):
             return True
-        return os.getenv("QLIB_ALLOW_FEATURE_SIGNAL_FALLBACK", "false").strip().lower() in {
+        return os.getenv(
+            "QLIB_ALLOW_FEATURE_SIGNAL_FALLBACK", "false"
+        ).strip().lower() in {
             "1",
             "true",
             "yes",
@@ -599,7 +723,9 @@ class QlibBacktestServiceRuntimeMixin(QlibBacktestServiceQueryMixin):
                 "信号质量预检失败：预测信号缺失且默认禁止回退到 $close。"
                 "如确需使用行情特征信号，请显式设置 allow_feature_signal_fallback=true。"
             )
-        require_pred = os.getenv("QLIB_BACKTEST_REQUIRE_PRED", "false").strip().lower() in {"1", "true", "yes", "on"}
+        require_pred = os.getenv(
+            "QLIB_BACKTEST_REQUIRE_PRED", "false"
+        ).strip().lower() in {"1", "true", "yes", "on"}
         if source == "close_fallback" and require_pred:
             raise ValueError(
                 f"信号质量预检失败：未使用模型预测信号，原因={signal_meta.get('fallback_reason', 'unknown')}"
@@ -618,13 +744,21 @@ class QlibBacktestServiceRuntimeMixin(QlibBacktestServiceQueryMixin):
         if rows <= 0:
             raise ValueError("信号质量预检失败：pred.pkl 在回测区间内无有效记录")
         if date_count < min_dates:
-            raise ValueError(f"信号质量预检失败：有效交易日不足（{date_count} < {min_dates}）")
+            raise ValueError(
+                f"信号质量预检失败：有效交易日不足（{date_count} < {min_dates}）"
+            )
         if instrument_count < min_instruments:
-            raise ValueError(f"信号质量预检失败：有效股票数不足（{instrument_count} < {min_instruments}）")
+            raise ValueError(
+                f"信号质量预检失败：有效股票数不足（{instrument_count} < {min_instruments}）"
+            )
         if nan_ratio > max_nan_ratio:
-            raise ValueError(f"信号质量预检失败：score 空值比例过高（{nan_ratio:.2%} > {max_nan_ratio:.2%}）")
+            raise ValueError(
+                f"信号质量预检失败：score 空值比例过高（{nan_ratio:.2%} > {max_nan_ratio:.2%}）"
+            )
 
-    def _load_pred_pkl(self, pred_path: str, request: QlibBacktestRequest) -> tuple[Any, dict[str, Any]]:
+    def _load_pred_pkl(
+        self, pred_path: str, request: QlibBacktestRequest
+    ) -> tuple[Any, dict[str, Any]]:
         from backend.services.engine.qlib_app.utils.qlib_utils import np_patch
 
         with np_patch():
@@ -636,28 +770,51 @@ class QlibBacktestServiceRuntimeMixin(QlibBacktestServiceQueryMixin):
                     score_col = "pred" if "pred" in raw.columns else raw.columns[-1]
                     pred = (
                         raw[["trade_date", "symbol", score_col]]
-                        .rename(columns={"trade_date": "datetime", "symbol": "instrument", score_col: "score"})
+                        .rename(
+                            columns={
+                                "trade_date": "datetime",
+                                "symbol": "instrument",
+                                score_col: "score",
+                            }
+                        )
                         .assign(datetime=lambda d: pd.to_datetime(d["datetime"]))
                         .set_index(["datetime", "instrument"])
                         .sort_index()
                     )
-                    task_logger.info("pred_parquet_loaded", "pred.parquet 加载并转换成功", rows=len(pred))
+                    task_logger.info(
+                        "pred_parquet_loaded",
+                        "pred.parquet 加载并转换成功",
+                        rows=len(pred),
+                    )
                 else:
                     pred = pd.read_pickle(pred_path)
                 if isinstance(pred, pd.Series):
                     pred = pred.to_frame("score")
 
                 if not isinstance(pred, pd.DataFrame):
-                    task_logger.warning("pred_format_invalid", "pred.pkl 格式错误", pred_type=type(pred).__name__)
+                    task_logger.warning(
+                        "pred_format_invalid",
+                        "pred.pkl 格式错误",
+                        pred_type=type(pred).__name__,
+                    )
                     return "$close", {
                         "source": "close_fallback",
                         "fallback_reason": "pred_pkl_invalid_type",
                         "pred_path": pred_path,
-                        "signal_lag_days": int(getattr(request, "signal_lag_days", 1) or 0),
+                        "signal_lag_days": int(
+                            getattr(request, "signal_lag_days", 1) or 0
+                        ),
                     }
 
-                if not (hasattr(pred, "index") and "datetime" in pred.index.names and "instrument" in pred.index.names):
-                    task_logger.warning("pred_index_invalid", "pred.pkl 索引必须包含 datetime 和 instrument")
+                if not (
+                    hasattr(pred, "index")
+                    and "datetime" in pred.index.names
+                    and "instrument" in pred.index.names
+                ):
+                    task_logger.warning(
+                        "pred_index_invalid",
+                        "pred.pkl 索引必须包含 datetime 和 instrument",
+                    )
                     return "$close", {
                         "source": "close_fallback",
                         "fallback_reason": "pred_pkl_invalid_index",
@@ -668,7 +825,10 @@ class QlibBacktestServiceRuntimeMixin(QlibBacktestServiceQueryMixin):
                     score_col = pred.columns[-1]
                     pred = pred.rename(columns={score_col: "score"})
 
-                task_logger.info("pred_pickle_loaded", "pred.pkl 加载成功，将直接使用文件中的预测作为信号")
+                task_logger.info(
+                    "pred_pickle_loaded",
+                    "pred.pkl 加载成功，将直接使用文件中的预测作为信号",
+                )
                 signal_meta = self._build_pred_signal_meta(pred, pred_path, request)
                 return {
                     "class": "SimpleSignal",
@@ -676,19 +836,28 @@ class QlibBacktestServiceRuntimeMixin(QlibBacktestServiceQueryMixin):
                     "kwargs": {
                         "pred_path": pred_path,
                         "universe": request.universe,
-                        "signal_lag_days": int(getattr(request, "signal_lag_days", 1) or 0),
+                        "signal_lag_days": int(
+                            getattr(request, "signal_lag_days", 1) or 0
+                        ),
                     },
                 }, signal_meta
 
             except Exception as exc:
-                task_logger.warning("load_pred_failed", "Load pred.pkl failed", pred_path=pred_path, error=str(exc))
+                task_logger.warning(
+                    "load_pred_failed",
+                    "Load pred.pkl failed",
+                    pred_path=pred_path,
+                    error=str(exc),
+                )
                 return {
                     "class": "SimpleSignal",
                     "module_path": "backend.services.engine.qlib_app.utils.simple_signal",
                     "kwargs": {
                         "metric": "$close",
                         "universe": request.universe,
-                        "signal_lag_days": int(getattr(request, "signal_lag_days", 1) or 0),
+                        "signal_lag_days": int(
+                            getattr(request, "signal_lag_days", 1) or 0
+                        ),
                     },
                 }, {
                     "source": "close_fallback",
@@ -740,7 +909,11 @@ class QlibBacktestServiceRuntimeMixin(QlibBacktestServiceQueryMixin):
                 }
             )
         except Exception as exc:
-            task_logger.warning("resolve_model_failed", "Resolve model from registry failed", error=str(exc))
+            task_logger.warning(
+                "resolve_model_failed",
+                "Resolve model from registry failed",
+                error=str(exc),
+            )
             meta["model_resolution"] = "failed"
             meta["fallback_reason"] = "model_registry_resolve_failed"
             meta["resolution_error"] = str(exc)
@@ -771,7 +944,9 @@ class QlibBacktestServiceRuntimeMixin(QlibBacktestServiceQueryMixin):
         meta["fallback_reason"] = "pred_pkl_not_found_in_model_storage"
         return None, meta
 
-    async def _build_signal_data(self, request: QlibBacktestRequest) -> tuple[Any, dict[str, Any]]:
+    async def _build_signal_data(
+        self, request: QlibBacktestRequest
+    ) -> tuple[Any, dict[str, Any]]:
         signal = self._normalize_signal_config(request.strategy_params.signal)
         if isinstance(signal, dict):
             # qlib 的可调用配置至少要有 class 或 func，module_path 不能单独作为合法信号配置。
@@ -793,14 +968,19 @@ class QlibBacktestServiceRuntimeMixin(QlibBacktestServiceQueryMixin):
         feature = signal.strip()
 
         if feature == "<PRED>":
-            registry_pred_path, registry_meta = await self._resolve_pred_path_from_model_registry(request)
+            (
+                registry_pred_path,
+                registry_meta,
+            ) = await self._resolve_pred_path_from_model_registry(request)
             if registry_pred_path and os.path.exists(registry_pred_path):
-                signal_data, signal_meta = self._load_pred_pkl(registry_pred_path, request)
+                signal_data, signal_meta = self._load_pred_pkl(
+                    registry_pred_path, request
+                )
                 return signal_data, {**registry_meta, **signal_meta}
 
             pred_path = os.getenv(
                 "QLIB_PRED_PATH",
-                "research/data_adapter/qlib_data/predictions/pred.pkl",
+                "db/qlib_data/predictions/pred.pkl",
             )
             resolved_path = self._resolve_path(pred_path)
             if resolved_path and os.path.exists(resolved_path):
@@ -810,7 +990,9 @@ class QlibBacktestServiceRuntimeMixin(QlibBacktestServiceQueryMixin):
                     **signal_meta,
                     "legacy_pred_path": resolved_path,
                 }
-                if merged_meta.get("source") == "pred_pkl" and not merged_meta.get("resolved_pred_path"):
+                if merged_meta.get("source") == "pred_pkl" and not merged_meta.get(
+                    "resolved_pred_path"
+                ):
                     merged_meta["resolved_pred_path"] = resolved_path
                 return signal_data, merged_meta
             task_logger.warning(
@@ -837,10 +1019,20 @@ class QlibBacktestServiceRuntimeMixin(QlibBacktestServiceQueryMixin):
         elif feature.endswith((".pkl", ".parquet")):
             resolved_path = self._resolve_path(feature)
             if resolved_path and os.path.exists(resolved_path):
-                task_logger.info("load_prediction", "Loading prediction from path", feature=feature, resolved_path=resolved_path)
+                task_logger.info(
+                    "load_prediction",
+                    "Loading prediction from path",
+                    feature=feature,
+                    resolved_path=resolved_path,
+                )
                 return self._load_pred_pkl(resolved_path, request)
             else:
-                task_logger.warning("model_file_missing", "Model file not found", feature=feature, resolved_path=resolved_path)
+                task_logger.warning(
+                    "model_file_missing",
+                    "Model file not found",
+                    feature=feature,
+                    resolved_path=resolved_path,
+                )
 
         if not feature.startswith("$"):
             feature = f"${feature}"
@@ -855,7 +1047,11 @@ class QlibBacktestServiceRuntimeMixin(QlibBacktestServiceQueryMixin):
                         if code and not code.startswith("#"):
                             instrument_list.append(code)
                 instrument_list = exclude_bj_instruments(instrument_list)
-                task_logger.info("pool_loaded", "从池文件加载股票", instrument_count=len(instrument_list))
+                task_logger.info(
+                    "pool_loaded",
+                    "从池文件加载股票",
+                    instrument_count=len(instrument_list),
+                )
             else:
                 instruments = D.instruments(request.universe)
                 instrument_list = D.list_instruments(instruments, as_list=True)
@@ -878,11 +1074,18 @@ class QlibBacktestServiceRuntimeMixin(QlibBacktestServiceQueryMixin):
                 "feature": feature,
                 "rows_in_range": int(len(df)),
                 "date_count": int(df.index.get_level_values("datetime").nunique()),
-                "instrument_count": int(df.index.get_level_values("instrument").nunique()),
+                "instrument_count": int(
+                    df.index.get_level_values("instrument").nunique()
+                ),
                 "signal_lag_days": lag_days,
             }
         except Exception as exc:
-            task_logger.warning("signal_build_failed", "Signal build failed", feature=feature, error=str(exc))
+            task_logger.warning(
+                "signal_build_failed",
+                "Signal build failed",
+                feature=feature,
+                error=str(exc),
+            )
             return {
                 "class": "SimpleSignal",
                 "module_path": "backend.services.engine.qlib_app.utils.simple_signal",
@@ -899,10 +1102,18 @@ class QlibBacktestServiceRuntimeMixin(QlibBacktestServiceQueryMixin):
             }
 
     @staticmethod
-    def _lag_signal_frame(data: pd.DataFrame | pd.Series, lag_days: int) -> pd.DataFrame | pd.Series:
-        if lag_days <= 0 or not isinstance(data.index, pd.MultiIndex) or "datetime" not in data.index.names:
+    def _lag_signal_frame(
+        data: pd.DataFrame | pd.Series, lag_days: int
+    ) -> pd.DataFrame | pd.Series:
+        if (
+            lag_days <= 0
+            or not isinstance(data.index, pd.MultiIndex)
+            or "datetime" not in data.index.names
+        ):
             return data
-        date_values = pd.to_datetime(data.index.get_level_values("datetime")).normalize()
+        date_values = pd.to_datetime(
+            data.index.get_level_values("datetime")
+        ).normalize()
         unique_dates = pd.Index(date_values.unique()).sort_values()
         if len(unique_dates) == 0:
             return data
@@ -934,4 +1145,6 @@ class QlibBacktestServiceRuntimeMixin(QlibBacktestServiceQueryMixin):
         for bid in stale:
             del self._runs[bid]
         if stale:
-            task_logger.debug("cleanup_stale_runs", "清理过期回测记录", count=len(stale))
+            task_logger.debug(
+                "cleanup_stale_runs", "清理过期回测记录", count=len(stale)
+            )

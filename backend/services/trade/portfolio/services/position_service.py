@@ -362,7 +362,7 @@ class PositionService:
         symbol = data.symbol.upper()
         price = Decimal(str(data.price))
         quantity = int(data.quantity)
-        
+
         # 细化费用核算：优先使用总费用字段，若无则累加各项
         if hasattr(data, 'total_fee') and data.total_fee is not None:
             total_fees = Decimal(str(data.total_fee))
@@ -375,10 +375,10 @@ class PositionService:
         side = (data.side or "").lower()
         if side not in ("buy", "sell"):
             raise ValueError("side 必须是 buy 或 sell")
-        
+
         position_side = data.position_side or PositionSide.LONG
         trade_action = data.trade_action
-        
+
         # 使用 with_for_update 锁定持仓
         pos_stmt = select(Position).where(
             and_(

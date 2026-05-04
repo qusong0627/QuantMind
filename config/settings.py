@@ -160,7 +160,7 @@ class Settings(BaseSettings):
         """根据版本返回功能开关"""
         is_oss = self.edition == "oss"
         is_enterprise = self.edition == "enterprise"
-        
+
         return {
             "edition": self.edition,
             "features": {

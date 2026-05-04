@@ -404,20 +404,20 @@ async def stop_trading(
             ).order_by(desc(Portfolio.updated_at)).limit(1)
             db_result = await db.execute(stmt)
             portfolio = db_result.scalars().first()
-            
+
             if portfolio:
                 old_status = portfolio.run_status
                 portfolio.run_status = "stopped"
                 portfolio.updated_at = datetime.utcnow()
                 await db.commit()
                 logger.info(
-                    f"Updated portfolio %d run_status: %s -> stopped",
+                    "Updated portfolio %d run_status: %s -> stopped",
                     portfolio.id, old_status
                 )
         except Exception as db_err:
             logger.warning("Failed to update portfolio run_status: %s", db_err)
             await db.rollback()
-        
+
         _schedule_user_notification(
             user_id=resolved_user_id,
             tenant_id=resolved_tenant_id,

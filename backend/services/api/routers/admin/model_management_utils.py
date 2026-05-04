@@ -427,16 +427,16 @@ def _scan_feature_snapshots_status(
                 if target_date:
                     target = date.fromisoformat(target_date)
                     symbol_latest_dates = last_df.groupby("symbol")["trade_date"].max().to_dict()
-                    
+
                     at_target_count = 0
                     older_count = 0
                     older_samples = []
-                    
+
                     for sym, latest_raw in sorted(symbol_latest_dates.items()):
                         try:
                             latest_dt = pd.to_datetime(latest_raw).date()
                         except Exception: continue
-                        
+
                         if latest_dt >= target:
                             at_target_count += 1
                         else:
@@ -447,7 +447,7 @@ def _scan_feature_snapshots_status(
                                     "last_date": latest_dt.isoformat(),
                                     "lag_days": (target - latest_dt).days,
                                 })
-                    
+
                     result["latest_date_coverage"] = {
                         "target_date": target_date,
                         "at_target_count": at_target_count,

@@ -1,12 +1,9 @@
-import asyncio
 import json
 import os
 import re
-import subprocess
-import sys
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 from zoneinfo import ZoneInfo
 
 try:
@@ -44,6 +41,7 @@ from .model_management_utils import (
 
 router = APIRouter()
 
+
 @router.get("/scan", summary="扫描本地模型目录")
 async def scan_model_directories(
     current_user: dict = Depends(require_admin),
@@ -55,7 +53,7 @@ async def scan_model_directories(
     try:
         dirs = _find_model_directories(MODELS_ROOT)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"扫描目录失败: {e}")
+        raise HTTPException(status_code=500, detail=f"扫描目录失败: {e}") from e
 
     results = []
     for d in dirs:
@@ -89,7 +87,9 @@ async def get_model_feature_catalog(
     if fallback:
         return _enrich_feature_catalog_with_data_coverage(fallback)
 
-    raise HTTPException(status_code=404, detail="未找到可用的特征字典（DB/文件均不可用）")
+    raise HTTPException(
+        status_code=404, detail="未找到可用的特征字典（DB/文件均不可用）"
+    )
 
 
 @router.get("/data-status", summary="查看当前数据状态（Qlib + 特征快照）")
@@ -139,6 +139,7 @@ async def get_data_status(
         if cal_xshg is None:
             return ref_date
         import pandas as pd
+
         ref_ts = pd.Timestamp(ref_date)
         past = cal_xshg.sessions[cal_xshg.sessions <= ref_ts]
         return past[-1].date() if len(past) else ref_date
@@ -147,6 +148,7 @@ async def get_data_status(
     if now_local.time() < datetime.strptime("09:30", "%H:%M").time():
         # 未到开盘时间，取昨天（或更早）的最后一个交易日
         import pandas as pd
+
         trade_date_obj = _latest_trading_session(
             pd.Timestamp(today) - pd.Timedelta(days=1)
         )
@@ -181,30 +183,41 @@ async def get_data_status(
     calendar: list[str] = []
     if calendars_path.exists():
         try:
-            calendar = [x.strip() for x in calendars_path.read_text(encoding="utf-8").splitlines() if x.strip()]
+            calendar = [
+                x.strip()
+                for x in calendars_path.read_text(encoding="utf-8").splitlines()
+                if x.strip()
+            ]
             if calendar:
                 qlib_info["calendar_total_days"] = len(calendar)
                 qlib_info["calendar_start_date"] = calendar[0]
                 qlib_info["calendar_last_date"] = calendar[-1]
                 qlib_info["latest_date_coverage"]["target_date"] = calendar[-1]
-        except Exception: pass
+        except Exception:
+            pass
 
     if instruments_all_path.exists():
         try:
             for line in instruments_all_path.read_text(encoding="utf-8").splitlines():
-                if not line.strip(): continue
+                if not line.strip():
+                    continue
                 code = line.split()[0].strip().upper()
                 qlib_info["instruments"]["total"] += 1
-                if code.startswith("SH"): qlib_info["instruments"]["sh"] += 1
-                elif code.startswith("SZ"): qlib_info["instruments"]["sz"] += 1
-                elif code.startswith("BJ"): qlib_info["instruments"]["bj"] += 1
-                else: qlib_info["instruments"]["other"] += 1
-        except Exception: pass
+                if code.startswith("SH"):
+                    qlib_info["instruments"]["sh"] += 1
+                elif code.startswith("SZ"):
+                    qlib_info["instruments"]["sz"] += 1
+                elif code.startswith("BJ"):
+                    qlib_info["instruments"]["bj"] += 1
+                else:
+                    qlib_info["instruments"]["other"] += 1
+        except Exception:
+            pass
 
     if features_root.exists() and features_root.is_dir():
         feature_dirs = [p for p in features_root.iterdir() if p.is_dir()]
         qlib_info["feature_dirs_total"] = len(feature_dirs)
-        qlib_info["sync_partial"] = True # 标记为部分同步结果
+        qlib_info["sync_partial"] = True  # 标记为部分同步结果
 
     # ========== Feature Snapshots 状态扫描 ==========
     feature_snapshots_info = _scan_feature_snapshots_status(
@@ -218,114 +231,35 @@ async def get_data_status(
         "qlib_data": qlib_info,
         "feature_snapshots": feature_snapshots_info,
         "async_trigger": bool(celery_app),
-        "message": "数据正在后台扫描中，请稍后刷新" if not refresh else "已触发强制刷新任务"
+        "message": "数据正在后台扫描中，请稍后刷新"
+        if not refresh
+        else "已触发强制刷新任务",
     }
 
-@router.post("/sync-stock-daily-latest", summary="手动触发 Baostock 同步基础行情到 stock_daily_latest")
+
+@router.post(
+    "/sync-stock-daily-latest",
+    summary="手动触发 Baostock 同步基础行情到 stock_daily_latest",
+)
 async def sync_stock_daily_latest(
     target_date: str | None = Query(None, description="目标日期 YYYY-MM-DD，默认今天"),
-    max_symbols: int = Query(0, ge=0, le=10000, description="仅处理前 N 个标的（0=全部）"),
+    max_symbols: int = Query(
+        0, ge=0, le=10000, description="仅处理前 N 个标的（0=全部）"
+    ),
     apply: bool = Query(True, description="是否执行写入（false=dry-run）"),
-    background: bool = Query(True, description="是否在后台执行（解决 504 超时业务推荐）"),
+    background: bool = Query(
+        True, description="是否在后台执行（解决 504 超时业务推荐）"
+    ),
     current_user: dict = Depends(require_admin),
 ):
     """
-    通过脚本触发从 Baostock 拉取基础日线并回填 stock_daily_latest。
+    [已废弃] 数据现由官方服务器统一推送，不再需要手动从 Baostock 同步。
     """
     _ = current_user
 
-    if background and celery_app:
-        try:
-            task = celery_app.send_task(
-                "engine.tasks.sync_market_data_daily_task",
-                args=[target_date, max_symbols, apply]
-            )
-            return {
-                "success": True,
-                "message": "同步任务已提交至后台处理 (Celery)",
-                "task_id": task.id,
-                "async": True
-            }
-        except Exception as e:
-            # 如果 Celery 触发失败，回退到同步执行或报错
-            print(f"Failed to send celery task: {e}")
-            # 继续尝试同步执行
-    project_root = Path(os.getcwd())
-    script_path = project_root / "scripts" / "data" / "ingestion" / "sync_market_data_daily_from_baostock.py"
-    if not script_path.exists():
-        raise HTTPException(status_code=404, detail=f"同步脚本不存在: {script_path}")
-
-    python_candidates = [
-        project_root / ".venv" / "bin" / "python",
-        Path("/app/.venv/bin/python"),
-        Path(sys.executable),
-        Path("/usr/bin/python3"),
-    ]
-    python_exec = None
-    for p in python_candidates:
-        if p.exists():
-            python_exec = str(p)
-            break
-    if not python_exec:
-        raise HTTPException(status_code=500, detail="未找到可用 Python 解释器")
-
-    cmd = [python_exec, str(script_path)]
-    if target_date:
-        cmd.extend(["--target-date", target_date])
-    if max_symbols > 0:
-        cmd.extend(["--max-symbols", str(max_symbols)])
-    if apply:
-        cmd.append("--apply")
-
-    timeout_sec = int(os.getenv("ADMIN_SYNC_MARKET_DATA_TIMEOUT_SEC", "3600"))
-    try:
-        proc = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda: subprocess.run(
-                cmd,
-                cwd=str(project_root),
-                capture_output=True,
-                text=True,
-                timeout=timeout_sec,
-                env=os.environ.copy(),
-            ),
-        )
-    except subprocess.TimeoutExpired:
-        raise HTTPException(status_code=504, detail=f"同步超时（>{timeout_sec}s）")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"同步执行失败: {e}")
-
-    stdout = (proc.stdout or "").strip()
-    stderr = (proc.stderr or "").strip()
-    parsed: dict[str, Any] = {}
-    for line in reversed(stdout.splitlines()):
-        line = line.strip()
-        if not line:
-            continue
-        if line.startswith("{") and line.endswith("}"):
-            try:
-                parsed = json.loads(line)
-                break
-            except Exception:
-                continue
-
-    if proc.returncode != 0:
-        return {
-            "success": False,
-            "exit_code": proc.returncode,
-            "error": parsed.get("error") or "sync_script_failed",
-            "stdout": stdout[-4000:],
-            "stderr": stderr[-4000:],
-            "result": parsed or None,
-        }
-
-    return {
-        "success": True,
-        "exit_code": 0,
-        "stdout": stdout[-2000:],
-        "stderr": stderr[-2000:],
-        "result": parsed or None,
-    }
+    raise HTTPException(
+        status_code=410, detail="该接口已废弃，数据由官方服务器统一推送，无需手动同步"
+    )
 
 
 @router.get("/precheck-inference", summary="生成明日信号前置检查")
@@ -388,8 +322,13 @@ async def precheck_inference(
     # 业务门禁：统一日期口径（数据交易日 + 预测生效交易日）
     tz = ZoneInfo("Asia/Shanghai")
     now_local = datetime.now(tz)
-    requested_data_trade_date_str, data_trade_date_str, prediction_trade_date_str, calendar_adjusted = (
-        await _resolve_inference_dates_with_calendar(current_user=current_user, now_local=now_local)
+    (
+        requested_data_trade_date_str,
+        data_trade_date_str,
+        prediction_trade_date_str,
+        calendar_adjusted,
+    ) = await _resolve_inference_dates_with_calendar(
+        current_user=current_user, now_local=now_local
     )
     trade_date_obj = date.fromisoformat(data_trade_date_str)
     checks.append(
@@ -493,7 +432,9 @@ async def precheck_inference(
                 .mappings()
                 .all()
             )
-            column_names = {str((row or {}).get("column_name") or "") for row in schema_columns}
+            column_names = {
+                str((row or {}).get("column_name") or "") for row in schema_columns
+            }
             has_features_json = "features" in column_names
             feature_columns = sorted(
                 [c for c in column_names if re.fullmatch(r"feature_\d+", c)],
@@ -508,7 +449,10 @@ async def precheck_inference(
                 )
             if feature_columns:
                 cols_dim_expr = " + ".join(
-                    [f"(CASE WHEN {col} IS NULL THEN 0 ELSE 1 END)" for col in feature_columns]
+                    [
+                        f"(CASE WHEN {col} IS NULL THEN 0 ELSE 1 END)"
+                        for col in feature_columns
+                    ]
                 )
                 dim_expr_candidates.append(f"({cols_dim_expr})")
 
@@ -559,8 +503,8 @@ async def precheck_inference(
     if data_stats:
         latest_trade_date = data_stats.get("latest_trade_date")
         today_rows = int(data_stats.get("today_rows") or 0)
-        required_ready_symbols, min_ready_symbols, min_ready_ratio, min_ready_floor = _resolve_ready_threshold(
-            today_rows
+        required_ready_symbols, min_ready_symbols, min_ready_ratio, min_ready_floor = (
+            _resolve_ready_threshold(today_rows)
         )
 
         checks.append(

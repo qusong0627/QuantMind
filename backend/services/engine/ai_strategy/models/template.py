@@ -38,7 +38,7 @@ class StrategyComponent(BaseModel):
     name: str = Field(..., description="组件名称")
     description: str = Field(..., description="组件描述")
     required: bool = Field(True, description="是否必需")
-    parameters: Dict[str, Any] = Field(
+    parameters: dict[str, Any] = Field(
         default_factory=dict, description="组件参数")
 
 
@@ -56,8 +56,8 @@ class TemplateMetadata(BaseModel):
     complexity: Literal["low", "medium",
                         "high"] = Field(..., description="复杂度")
     estimated_backtest_time: str = Field(..., description="预计回测时间")
-    dependencies: List[str] = Field(default_factory=list, description="依赖项")
-    performance: Dict[str, str] = Field(..., description="性能指标")
+    dependencies: list[str] = Field(default_factory=list, description="依赖项")
+    performance: dict[str, str] = Field(..., description="性能指标")
 
 
 class StrategyTemplate(BaseModel):
@@ -77,24 +77,24 @@ class StrategyTemplate(BaseModel):
     )
 
     # 模板特性
-    tags: List[str] = Field(default_factory=list, description="标签")
-    suitable_markets: List[MarketType] = Field(..., description="适用市场")
-    suitable_timeframes: List[Timeframe] = Field(..., description="适用时间框架")
-    suitable_risk_levels: List[RiskLevel] = Field(..., description="适用风险等级")
+    tags: list[str] = Field(default_factory=list, description="标签")
+    suitable_markets: list[MarketType] = Field(..., description="适用市场")
+    suitable_timeframes: list[Timeframe] = Field(..., description="适用时间框架")
+    suitable_risk_levels: list[RiskLevel] = Field(..., description="适用风险等级")
     min_capital: int = Field(..., description="最少资金")
     max_symbols: int = Field(..., description="最大股票数")
 
     # 必需组件
-    required_components: List[StrategyComponent] = Field(
+    required_components: list[StrategyComponent] = Field(
         ..., description="必需组件")
 
     # 默认参数
-    default_parameters: Dict[str, Any] = Field(
+    default_parameters: dict[str, Any] = Field(
         default_factory=dict, description="默认参数"
     )
 
     # 验证规则
-    validation_rules: List[ValidationRule] = Field(
+    validation_rules: list[ValidationRule] = Field(
         default_factory=list, description="验证规则"
     )
 
@@ -108,9 +108,9 @@ class TemplateMatch(BaseModel):
     template: StrategyTemplate = Field(..., description="匹配的模板")
     confidence: float = Field(..., ge=0, le=1, description="匹配置信度")
     reason: str = Field(..., description="匹配原因")
-    adaptations: List[str] = Field(default_factory=list, description="适配建议")
+    adaptations: list[str] = Field(default_factory=list, description="适配建议")
     score: float = Field(..., ge=0, le=1, description="匹配分数")
-    match_factors: Dict[str, float] = Field(
+    match_factors: dict[str, float] = Field(
         default_factory=dict, description="匹配因子"
     )
 
@@ -118,20 +118,20 @@ class TemplateMatch(BaseModel):
 class TemplateSearchFilter(BaseModel):
     """模板搜索过滤器"""
 
-    category: Optional[StrategyCategory] = None
-    risk_level: Optional[RiskLevel] = None
-    market: Optional[MarketType] = None
-    timeframe: Optional[Timeframe] = None
-    tags: Optional[List[str]] = None
-    min_capital: Optional[int] = None
-    max_symbols: Optional[int] = None
-    complexity: Optional[Literal["low", "medium", "high"]] = None
+    category: StrategyCategory | None = None
+    risk_level: RiskLevel | None = None
+    market: MarketType | None = None
+    timeframe: Timeframe | None = None
+    tags: list[str] | None = None
+    min_capital: int | None = None
+    max_symbols: int | None = None
+    complexity: Literal["low", "medium", "high"] | None = None
 
 
 class TemplateSearchResult(BaseModel):
     """模板搜索结果"""
 
-    templates: List[StrategyTemplate] = Field(..., description="模板列表")
+    templates: list[StrategyTemplate] = Field(..., description="模板列表")
     total: int = Field(..., description="总数")
     page: int = Field(..., description="页码")
     page_size: int = Field(..., description="页大小")
@@ -144,8 +144,8 @@ class TemplateSearchResult(BaseModel):
 class TemplateMatchRequest(BaseModel):
     """模板匹配请求"""
 
-    user_params: Dict[str, Any] = Field(..., description="用户参数")
-    user_description: Optional[str] = Field(None, description="用户描述")
+    user_params: dict[str, Any] = Field(..., description="用户参数")
+    user_description: str | None = Field(None, description="用户描述")
     max_results: int = Field(5, ge=1, le=20, description="最大结果数")
     min_confidence: float = Field(0.3, ge=0, le=1, description="最小置信度")
 
@@ -154,10 +154,10 @@ class TemplateMatchResponse(BaseModel):
     """模板匹配响应"""
 
     success: bool = Field(..., description="是否成功")
-    matches: List[TemplateMatch] = Field(..., description="匹配结果")
+    matches: list[TemplateMatch] = Field(..., description="匹配结果")
     total_matches: int = Field(..., description="匹配总数")
     processing_time: int = Field(..., description="处理时间(ms)")
-    suggestions: List[str] = Field(default_factory=list, description="建议")
+    suggestions: list[str] = Field(default_factory=list, description="建议")
 
 
 # 预定义的模板库
@@ -428,7 +428,7 @@ BUILTIN_TEMPLATES = [
 
 
 # 模板查找函数
-def get_template_by_id(template_id: str) -> Optional[StrategyTemplate]:
+def get_template_by_id(template_id: str) -> StrategyTemplate | None:
     """根据ID获取模板"""
     for template in BUILTIN_TEMPLATES:
         if template.id == template_id:
@@ -436,27 +436,27 @@ def get_template_by_id(template_id: str) -> Optional[StrategyTemplate]:
     return None
 
 
-def get_templates_by_category(category: StrategyCategory) -> List[StrategyTemplate]:
+def get_templates_by_category(category: StrategyCategory) -> list[StrategyTemplate]:
     """根据类别获取模板"""
     return [t for t in BUILTIN_TEMPLATES if t.category == category]
 
 
-def get_templates_by_risk_level(risk_level: RiskLevel) -> List[StrategyTemplate]:
+def get_templates_by_risk_level(risk_level: RiskLevel) -> list[StrategyTemplate]:
     """根据风险等级获取模板"""
     return [t for t in BUILTIN_TEMPLATES if risk_level in t.suitable_risk_levels]
 
 
-def get_templates_by_market(market: MarketType) -> List[StrategyTemplate]:
+def get_templates_by_market(market: MarketType) -> list[StrategyTemplate]:
     """根据市场获取模板"""
     return [t for t in BUILTIN_TEMPLATES if market in t.suitable_markets]
 
 
 def search_templates(
-    query: Optional[str] = None,
-    category: Optional[StrategyCategory] = None,
-    risk_level: Optional[RiskLevel] = None,
-    market: Optional[MarketType] = None,
-    complexity: Optional[str] = None,
+    query: str | None = None,
+    category: StrategyCategory | None = None,
+    risk_level: RiskLevel | None = None,
+    market: MarketType | None = None,
+    complexity: str | None = None,
     page: int = 1,
     page_size: int = 10,
 ) -> TemplateSearchResult:

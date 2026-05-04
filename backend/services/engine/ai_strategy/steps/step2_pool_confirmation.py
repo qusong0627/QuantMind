@@ -1,6 +1,7 @@
 """Step 2: 股票池确认 - 执行查询并展示结果"""
 
 import logging
+import math
 import os
 import re
 from datetime import date
@@ -57,6 +58,52 @@ TOTAL_MV_PER_YI = float(os.getenv("AI_STRATEGY_TOTAL_MV_PER_YI", "10000"))
 # 当数据库存储单位为万元时，TOTAL_MV_PER_YI=10000，需要乘以 100000000/10000=10000 转为元
 # 前端期望单位为亿元，所以这里不再做转换，直接返回数据库原值
 TOTAL_MV_TO_YI = 1.0  # 直接返回亿元
+
+
+def _serialize_float(v: Any) -> float | None:
+    """安全序列化浮点值，过滤 NaN/Inf 防止 JSON 序列化崩溃。"""
+    try:
+        if v is None:
+            return None
+        val = float(v)
+        if math.isfinite(val):
+            return val
+        return None
+    except (ValueError, TypeError):
+        return None
+
+
+def _normalize_symbol(symbol: str) -> str:
+    """将 symbol 统一转为大写前缀格式 (如 SZ300020)。
+
+    支持输入格式:
+    - 纯代码: 300020, 000720, 688287
+    - 小写前缀: sz300020, sh688287
+    - 大写前缀: SZ300020, SH688287
+    - 后缀格式: 300020.SZ, 300020.SZ
+    """
+    if not symbol:
+        return symbol
+    s = symbol.strip().upper()
+    # 已经是大写前缀格式
+    if re.match(r'^(SH|SZ|BJ)[0-9]{6}$', s):
+        return s
+    # 后缀格式: 300020.SZ -> SZ300020
+    m = re.match(r'^([0-9]{6})\.(SH|SZ|BJ)$', s)
+    if m:
+        return f"{m.group(2)}{m.group(1)}"
+    # 纯代码: 根据首位判断市场
+    m = re.match(r'^([0-9]{6})$', s)
+    if m:
+        code = m.group(1)
+        if code[0] in ('6', '9'):
+            return f"SH{code}"
+        elif code[0] in ('4', '8'):
+            return f"BJ{code}"
+        else:
+            return f"SZ{code}"
+    # 其他格式直接返回大写
+    return s
 
 
 def _get_table_columns(session, table_name: str) -> set[str]:
@@ -230,7 +277,7 @@ def _execute_raw_selection_sql(sql: str) -> tuple[list[PoolItem], date | None]:
                 row_dict = row._asdict() if hasattr(row, "_asdict") else None
 
                 if row_dict:
-                    symbol = str(row_dict.get("symbol") or row_dict.get("code") or "")
+                    symbol = _normalize_symbol(str(row_dict.get("symbol") or row_dict.get("code") or ""))
                     name = row_dict.get("name") or row_dict.get("code") or symbol
 
                     market_cap = row_dict.get("market_cap")
@@ -247,16 +294,16 @@ def _execute_raw_selection_sql(sql: str) -> tuple[list[PoolItem], date | None]:
 
                     metrics = {
                         # total_mv -> 元（默认 total_mv 为万元）
-                        "market_cap": float(market_cap or 0) * TOTAL_MV_TO_YI,
-                        "pe": float(pe or 0),
-                        "close": float(row_dict.get("close") or 0),
-                        "pb": float(pb or 0),
-                        "roe": float(row_dict.get("roe") or 0),
+                        "market_cap": (_serialize_float(market_cap) or 0.0) * TOTAL_MV_TO_YI,
+                        "pe": _serialize_float(pe) or 0.0,
+                        "close": _serialize_float(row_dict.get("close")) or 0.0,
+                        "pb": _serialize_float(pb) or 0.0,
+                        "roe": _serialize_float(row_dict.get("roe")) or 0.0,
                     }
                 else:
-                    symbol = str(row[0])
+                    symbol = _normalize_symbol(str(row[0]))
                     name = row[1] if len(row) > 1 else None
-                    metrics = {"close": float(row[2]) if len(row) > 2 else 0.0}
+                    metrics = {"close": _serialize_float(row[2]) if len(row) > 2 else 0.0}
 
                 items.append(PoolItem(symbol=symbol, name=name, metrics=metrics))
             return items, as_of_date
@@ -354,16 +401,16 @@ def _query_stock_pool(
             for row in result:
                 items.append(
                     PoolItem(
-                        symbol=row[0],
+                        symbol=_normalize_symbol(row[0]),
                         name=row[1],
                         metrics={
                             # total_mv -> 元（默认 total_mv 为万元）
-                            "market_cap": float(row[2] or 0) * TOTAL_MV_TO_YUAN,
-                            "pe": float(row[3] or 0),
-                            "pb": float(row[4] or 0),
-                            "close": float(row[5] or 0),
-                            "amount": float(row[6] or 0),
-                            "volume": float(row[7] or 0),
+                            "market_cap": (_serialize_float(row[2]) or 0.0) * TOTAL_MV_TO_YI,
+                            "pe": _serialize_float(row[3]) or 0.0,
+                            "pb": _serialize_float(row[4]) or 0.0,
+                            "close": _serialize_float(row[5]) or 0.0,
+                            "amount": _serialize_float(row[6]) or 0.0,
+                            "volume": _serialize_float(row[7]) or 0.0,
                         },
                     )
                 )

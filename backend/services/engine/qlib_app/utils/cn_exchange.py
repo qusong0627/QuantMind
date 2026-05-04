@@ -139,14 +139,14 @@ class CnExchange(Exchange):
         start_time: pd.Timestamp,
         end_time: pd.Timestamp,
         direction: OrderDir,
-        method: Optional[str] = "ts_data_last",
+        method: str | None = "ts_data_last",
     ) -> float | None:
         if direction == OrderDir.SELL:
             pstr = self.sell_price
         elif direction == OrderDir.BUY:
             pstr = self.buy_price
         else:
-            raise NotImplementedError(f"This type of input is not supported")
+            raise NotImplementedError("This type of input is not supported")
 
         deal_price = self._get_recent_valid_quote(stock_id, start_time, end_time, field=pstr, method=method or "ts_data_last")
         if method is not None and self._is_invalid_quote(deal_price):

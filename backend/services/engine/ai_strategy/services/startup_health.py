@@ -22,7 +22,7 @@ class StartupHealthState:
         self.errors.append(error)
         self.initialized = True
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "status": "healthy" if self.warmup_completed and not self.errors else "degraded",
             "warmup_completed": self.warmup_completed,
@@ -40,7 +40,7 @@ async def run_startup_health_checks():
     """执行启动健康检查与强制预热"""
     state = get_startup_health_state()
     logger.info("🚀 Starting AI Strategy startup health checks and mandatory warmup...")
-    
+
     try:
         from .selection.vector_parser import get_strategy_vector_parser
         from .selection.schema_retriever import get_schema_retriever
@@ -60,7 +60,7 @@ async def run_startup_health_checks():
 
         state.mark_completed()
         logger.info("✨ AI Strategy startup health checks completed successfully")
-        
+
     except Exception as e:
         error_msg = f"Startup health check failed: {str(e)}"
         logger.error(f"❌ {error_msg}")

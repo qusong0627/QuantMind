@@ -8,9 +8,9 @@ from pydantic import BaseModel, Field
 class PostBase(BaseModel):
     title: str
     content: str
-    category: Optional[str] = None
-    tags: Optional[List[str]] = Field(default_factory=list)
-    media: Optional[List[dict]] = Field(default_factory=list)
+    category: str | None = None
+    tags: list[str] | None = Field(default_factory=list)
+    media: list[dict] | None = Field(default_factory=list)
 
 
 class PostCreate(PostBase):
@@ -18,11 +18,11 @@ class PostCreate(PostBase):
 
 
 class PostUpdate(BaseModel):
-    title: Optional[str] = None
-    content: Optional[str] = None
-    category: Optional[str] = None
-    tags: Optional[List[str]] = None
-    media: Optional[List[dict]] = None
+    title: str | None = None
+    content: str | None = None
+    category: str | None = None
+    tags: list[str] | None = None
+    media: list[dict] | None = None
 
 
 class CommentBase(BaseModel):
@@ -30,8 +30,8 @@ class CommentBase(BaseModel):
 
 
 class CommentCreateIn(CommentBase):
-    parentId: Optional[int] = None
-    replyToId: Optional[int] = None
+    parentId: int | None = None
+    replyToId: int | None = None
 
 
 class CommentUpdate(CommentBase):
@@ -40,6 +40,6 @@ class CommentUpdate(CommentBase):
 
 class UploadResponse(BaseModel):
     url: str
-    thumbnail: Optional[str] = None
+    thumbnail: str | None = None
     filename: str
     size: int

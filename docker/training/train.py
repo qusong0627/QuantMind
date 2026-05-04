@@ -20,7 +20,6 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import os
 import sys
 import time
 from datetime import datetime
@@ -599,7 +598,7 @@ def main() -> int:
         features = list(dict.fromkeys(TRAINING_BASE_FEATURES + submitted_features))
         source_mode = str((cfg.get("data", {}) or {}).get("source_mode") or "LOCAL").strip().upper()
         local_data_dir = str((cfg.get("data", {}) or {}).get("local_dir") or "").strip() or None
-        explain_cfg = _normalize_explain_cfg((cfg.get("explain") or {}))
+        explain_cfg = _normalize_explain_cfg(cfg.get("explain") or {})
 
         df, valid_features = load_data(
             cfg["data"]["train_start"],

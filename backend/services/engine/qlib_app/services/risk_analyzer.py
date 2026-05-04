@@ -939,9 +939,9 @@ class RiskAnalyzer:
             effective_model_id = signal_meta.get("effective_model_id")
             if effective_model_id:
                 payload["model_id"] = effective_model_id
-            
+
             payload["signal_meta"] = signal_meta
-            
+
         if not payload.get("model_id") and hasattr(request, "model_id") and request.model_id:
             payload["model_id"] = request.model_id
 

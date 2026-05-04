@@ -1,9 +1,11 @@
 import logging
 import os
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any
 
-from backend.services.engine.qlib_app.utils.structured_logger import StructuredTaskLogger
+from backend.services.engine.qlib_app.utils.structured_logger import (
+    StructuredTaskLogger,
+)
 
 logger = logging.getLogger(__name__)
 task_logger = StructuredTaskLogger(logger, "StrategyAdapter")
@@ -18,7 +20,9 @@ class StrategyAdapter:
     def __init__(self, project_root: Path):
         self.project_root = project_root
 
-    def adapt(self, strategy_config: dict[str, Any], context: dict[str, Any] = None) -> dict[str, Any]:
+    def adapt(
+        self, strategy_config: dict[str, Any], context: dict[str, Any] = None
+    ) -> dict[str, Any]:
         """
         主适配入口
         :param strategy_config: 原始策略配置字典
@@ -40,15 +44,26 @@ class StrategyAdapter:
         # 4. 针对特定策略的“打补丁”逻辑
         if strategy_class in ("EnhancedIndexingStrategy", "EnhancedIndexing"):
             kwargs = self._adapt_enhanced_indexing(kwargs, context)
-        elif strategy_class in ("TopkDropoutStrategy", "RedisTopkStrategy", "RedisRecordingStrategy"):
+        elif strategy_class in (
+            "TopkDropoutStrategy",
+            "RedisTopkStrategy",
+            "RedisRecordingStrategy",
+        ):
             kwargs = self._adapt_topk_dropout(kwargs, context)
-        elif strategy_class in ("RedisWeightStrategy", "SimpleWeightStrategy", "RedisFullAlphaStrategy"):
+        elif strategy_class in (
+            "RedisWeightStrategy",
+            "SimpleWeightStrategy",
+            "RedisFullAlphaStrategy",
+        ):
             kwargs = self._adapt_weight_strategy(kwargs, context)
 
         # 5. 注入业务通用参数 (如 backtest_id 用于日志记录)
         if context and "backtest_id" in context:
             # 仅在支持记录的策略中注入 (匹配 Redis 前缀的策略类)
-            if strategy_class and (strategy_class.startswith("Redis") or strategy_class == "SimpleWeightStrategy"):
+            if strategy_class and (
+                strategy_class.startswith("Redis")
+                or strategy_class == "SimpleWeightStrategy"
+            ):
                 kwargs["backtest_id"] = context["backtest_id"]
 
         config["kwargs"] = kwargs
@@ -74,22 +89,33 @@ class StrategyAdapter:
                     kwargs[key] = expanded_val
         return kwargs
 
-    def _adapt_enhanced_indexing(self, kwargs: dict[str, Any], context: dict[str, Any] | None) -> dict[str, Any]:
+    def _adapt_enhanced_indexing(
+        self, kwargs: dict[str, Any], context: dict[str, Any] | None
+    ) -> dict[str, Any]:
         """增强指数策略适配逻辑"""
         # 1. 处理必选的 riskmodel_root
         if "riskmodel_root" not in kwargs:
             # 默认补全一个基于 universe 的路径
             universe = context.get("universe", "csi300") if context else "csi300"
-            default_path = self.project_root / f"research/data/risk_model/{universe}"
+            default_path = self.project_root / f"db/risk_model/{universe}"
             kwargs["riskmodel_root"] = str(default_path)
             os.makedirs(default_path, exist_ok=True)
-            task_logger.info("auto_fill_riskmodel_root", "Auto-filled missing riskmodel_root", riskmodel_root=kwargs["riskmodel_root"])
+            task_logger.info(
+                "auto_fill_riskmodel_root",
+                "Auto-filled missing riskmodel_root",
+                riskmodel_root=kwargs["riskmodel_root"],
+            )
 
         # 2. 移除该策略不支持的参数 (该策略基于权重优化，不支持 topk)
         for unsupported in ["topk", "n_drop", "buffer_margin"]:
             if unsupported in kwargs:
                 val = kwargs.pop(unsupported)
-                task_logger.warning("remove_unsupported_param", "Removed unsupported parameter for EnhancedIndexingStrategy", param=unsupported, value=val)
+                task_logger.warning(
+                    "remove_unsupported_param",
+                    "Removed unsupported parameter for EnhancedIndexingStrategy",
+                    param=unsupported,
+                    value=val,
+                )
 
         # 3. 默认补充更稳健的优化器参数（可被显式传入覆盖）
         optimizer_kwargs = kwargs.get("optimizer_kwargs")
@@ -107,7 +133,9 @@ class StrategyAdapter:
 
         return kwargs
 
-    def _adapt_topk_dropout(self, kwargs: dict[str, Any], context: dict[str, Any] | None) -> dict[str, Any]:
+    def _adapt_topk_dropout(
+        self, kwargs: dict[str, Any], context: dict[str, Any] | None
+    ) -> dict[str, Any]:
         """TopkDropout 策略适配逻辑"""
         # 确保关键参数存在
         if "topk" not in kwargs:
@@ -121,13 +149,20 @@ class StrategyAdapter:
             kwargs["n_drop"] = max(1, int(round(topk_num * 0.2)))
         return kwargs
 
-    def _adapt_weight_strategy(self, kwargs: dict[str, Any], context: dict[str, Any] | None) -> dict[str, Any]:
+    def _adapt_weight_strategy(
+        self, kwargs: dict[str, Any], context: dict[str, Any] | None
+    ) -> dict[str, Any]:
         """WeightStrategy 策略适配逻辑"""
         # 1. 移除不支持的参数 (WeightStrategy 不使用 n_drop)
         for unsupported in ["n_drop", "buffer_margin"]:
             if unsupported in kwargs:
                 val = kwargs.pop(unsupported)
-                task_logger.warning("remove_unsupported_param", "移除 WeightStrategy 不支持的参数", param=unsupported, value=val)
+                task_logger.warning(
+                    "remove_unsupported_param",
+                    "移除 WeightStrategy 不支持的参数",
+                    param=unsupported,
+                    value=val,
+                )
 
         # 2. 补充默认值
         kwargs.setdefault("topk", 50)  # 选股数量

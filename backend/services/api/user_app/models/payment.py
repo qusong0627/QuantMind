@@ -28,11 +28,11 @@ class PaymentTransaction(Base):
     transaction_id: Mapped[str] = mapped_column(
         String(128), nullable=False, unique=True, index=True
     )
-    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    metadata_info: Mapped[Optional[dict[str, Any]]] = mapped_column(
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    metadata_info: Mapped[dict[str, Any] | None] = mapped_column(
         JSON, nullable=True
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, default=datetime.now
     )
-    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

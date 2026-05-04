@@ -65,9 +65,9 @@ async def create_manual_execution(
 @router.get("")
 async def list_manual_executions(
     limit: int = Query(20, ge=1, le=100),
-    task_type: Optional[str] = Query(None),
-    task_source: Optional[str] = Query(None),
-    active_runtime_id: Optional[str] = Query(None),
+    task_type: str | None = Query(None),
+    task_source: str | None = Query(None),
+    active_runtime_id: str | None = Query(None),
     auth: AuthContext = Depends(get_auth_context),
 ):
     return await manual_execution_service.list_tasks(

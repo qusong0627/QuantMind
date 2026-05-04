@@ -91,7 +91,7 @@ const defaultBacktestConfig: Partial<BacktestConfig> = {
   slippage: 0.001,
   user_id: 'default_user',
   engine: 'qlib',
-  qlib_provider_uri: 'research/data_adapter/qlib_data',
+  qlib_provider_uri: 'db/qlib_data',
   qlib_region: 'cn',
 };
 

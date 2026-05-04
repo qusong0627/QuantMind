@@ -2,7 +2,6 @@
 import os
 import sys
 import logging
-import numpy as np
 import pandas as pd
 import lightgbm as lgb
 from pathlib import Path
@@ -36,11 +35,11 @@ def process_symbol(args):
         # Use the worker-local loader
         df = _worker_loader.load_market_data([symbol], start_date, end_date)
         if df.empty or len(df) < 100: return None
-        
+
         # Calculate features and labels
         feats = Alpha158Calculator.calculate(df)
         label = Alpha158Calculator.calculate_label(df)
-        
+
         combined = pd.concat([feats, label], axis=1)
         # Drop rows where label is NaN (trailing days)
         combined = combined.dropna(subset=['LABEL0'])
@@ -53,14 +52,14 @@ def main():
     # Updated Time Ranges
     start_date = "2019-01-01"
     end_date = "2026-03-31"
-    
+
     train_end_date = pd.Timestamp("2024-12-31")
     valid_end_date = pd.Timestamp("2025-06-30")
-    
+
     model_output = str(Path(__file__).parent / "alpha158.bin")
     data_path = "/app/db/qlib_data"
     log_file = str(Path(__file__).parent / "train.log")
-    
+
     # Also log to file
     file_handler = logging.FileHandler(log_file)
     file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
@@ -77,9 +76,9 @@ def main():
     # 1. Parallel Feature Engineering
     cores = min(cpu_count(), 64)
     logger.info("Using %d cores for parallel feature extraction...", cores)
-    
+
     tasks = [(sym, start_date, end_date) for sym in symbols]
-    
+
     all_dfs = []
     with Pool(processes=cores, initializer=init_worker, initargs=(data_path,)) as p:
         for i, res in enumerate(p.imap_unordered(process_symbol, tasks, chunksize=10)):
@@ -95,39 +94,39 @@ def main():
     logger.info("Combining data from %d symbols...", len(all_dfs))
     full_df = pd.concat(all_dfs).sort_index()
     del all_dfs # Free memory
-    
+
     logger.info("Final dataset shape: %s", full_df.shape)
-    
+
     # --- DUAL CROSS SECTIONAL NORMALIZATION ---
     logger.info("Applying cross-sectional percent rank normalization to features AND labels...")
-    
+
     # We rank everything except possibly indices/non-feature cols, but here we rank everything in the columns
     # Every column (including LABEL0) is converted to a percentile rank (0.0-1.0) within its day
     full_df = full_df.groupby(level='datetime').rank(pct=True)
-    
+
     logger.info("Dual cross-sectional rank normalization completed.")
     # ------------------------------------------
 
     # 2. Prepare Training/Validation/Testing split
     dt_values = full_df.index.get_level_values('datetime')
-    
+
     train_mask = dt_values <= train_end_date
     valid_mask = (dt_values > train_end_date) & (dt_values <= valid_end_date)
     test_mask  = dt_values > valid_end_date
-    
+
     train_data = full_df[train_mask]
     valid_data = full_df[valid_mask]
     test_data  = full_df[test_mask]
-    
+
     if train_data.empty or valid_data.empty or test_data.empty:
         logger.error("Empty split! Train: %d, Valid: %d, Test: %d", len(train_data), len(valid_data), len(test_data))
         sys.exit(1)
-    
+
     # Features & Labels
     X_train, y_train = train_data.drop(columns=['LABEL0']), train_data['LABEL0']
     X_valid, y_valid = valid_data.drop(columns=['LABEL0']), valid_data['LABEL0']
     X_test,  y_test  = test_data.drop(columns=['LABEL0']),  test_data['LABEL0']
-    
+
     logger.info("Train: %d, Valid: %d, Test: %d", len(y_train), len(y_valid), len(y_test))
 
     # 3. Training
@@ -163,18 +162,18 @@ def main():
     # 4. Save Model
     logger.info("Saving model to %s", model_output)
     gbm.save_model(model_output)
-    
+
     # 5. Evaluate IC on Multiple Segments
     def calculate_metrics(df_eval, tag="Validation"):
         logger.info(f"Evaluating metrics on {tag} set...")
         features = df_eval.drop(columns=['LABEL0'])
         labels = df_eval['LABEL0']
         preds = gbm.predict(features)
-        
+
         tmp = df_eval.copy()
         tmp['PRED'] = preds
         daily_ic = tmp.groupby(level='datetime').apply(lambda x: x['PRED'].corr(x['LABEL0'], method='spearman'))
-        
+
         mean_ic = daily_ic.mean()
         icir = mean_ic / daily_ic.std() if (daily_ic.std() != 0 and pd.notnull(daily_ic.std())) else 0.0
         logger.info("%s Mean IC: %.4f, ICIR: %.4f", tag, mean_ic, icir)
@@ -188,16 +187,16 @@ def main():
     import json
     meta_path = Path(__file__).parent / "metadata.json"
     if meta_path.exists():
-        with open(meta_path, 'r', encoding='utf-8') as f:
+        with open(meta_path, encoding='utf-8') as f:
             meta = json.load(f)
-            
+
         if 'performance_metrics' not in meta:
             meta['performance_metrics'] = {}
-            
+
         meta['performance_metrics']['train'] = train_metrics
         meta['performance_metrics']['valid'] = valid_metrics
         meta['performance_metrics']['test'] = test_metrics
-        
+
         # Update labels in metadata
         meta['train_start'] = "2019-01-01"
         meta['train_end']   = "2024-12-31"
@@ -206,26 +205,26 @@ def main():
         meta['test_start']  = "2025-07-01"
         meta['test_end']    = "2026-03-31"
         meta['trained_at']  = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
+
         with open(meta_path, 'w', encoding='utf-8') as f:
             json.dump(meta, f, indent=2, ensure_ascii=False)
     logger.info("metadata.json updated with 3-way split metrics.")
-    
+
     # 7. Generate Full Prediction File (pred.pkl) for Backtesting
     logger.info("Generating full prediction file for backtesting...")
     X_full = full_df.drop(columns=['LABEL0'])
     full_preds = gbm.predict(X_full)
-    
+
     # Create prediction DataFrame with standard Qlib index (datetime, symbol)
     pred_df = pd.DataFrame(
-        {'score': full_preds}, 
+        {'score': full_preds},
         index=X_full.index
     ).reorder_levels(['datetime', 'symbol']).sort_index()
-    
+
     pred_path = Path(__file__).parent / "pred.pkl"
     pred_df.to_pickle(str(pred_path))
     logger.info("Full prediction file saved to %s (Shape: %s)", pred_path, pred_df.shape)
-    
+
     logger.info("Training complete.")
 
 if __name__ == "__main__":

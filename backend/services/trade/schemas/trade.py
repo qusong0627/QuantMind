@@ -53,7 +53,7 @@ class TradeResponse(BaseModel):
             from datetime import timedelta
             shanghai_tz = timezone(timedelta(hours=8))
             aware_value = value.replace(tzinfo=shanghai_tz)
-            
+
         return aware_value.astimezone(timezone.utc).isoformat()
 
 

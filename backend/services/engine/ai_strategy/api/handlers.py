@@ -68,7 +68,7 @@ async def health_check_handler() -> dict[str, Any]:
         qwen_available = False
 
     startup_state = get_startup_health_state().to_dict()
-    
+
     return {
         "status": startup_state["status"],
         "service": "ai-strategy",

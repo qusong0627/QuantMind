@@ -3,7 +3,7 @@ export const BACKTEST_CONFIG = {
   SUPPORTED_ENGINES: ['qlib'] as const,
 
   QLIB: {
-    PROVIDER_URI: 'research/data_adapter/qlib_data',
+    PROVIDER_URI: 'db/qlib_data',
     REGION: 'cn',
     // 数据锁定范围 (2016-2025)
     DATA_START: '2016-01-01',

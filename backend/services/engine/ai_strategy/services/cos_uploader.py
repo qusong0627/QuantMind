@@ -97,7 +97,7 @@ class COSUploader:
 
         self.storage_mode = "local"
         self.is_local_mode = True
-        logger.info(f"COSUploader: storage_mode=local (OSS Edition)")
+        logger.info("COSUploader: storage_mode=local (OSS Edition)")
 
         default_root = "/app/data/strategies"
         storage_root = os.getenv("STORAGE_ROOT", default_root)
