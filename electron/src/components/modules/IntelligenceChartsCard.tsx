@@ -1,3 +1,4 @@
+// Triggering rebuild for mode-aware charts
 import React from 'react';
 import { Card } from '../common/Card';
 import { motion } from 'framer-motion';
@@ -6,6 +7,7 @@ import { Activity, Wifi, WifiOff } from 'lucide-react';
 import { EChartsChart } from '../common/EChartsChart';
 import { getChartOption } from '../../utils/chartOptions';
 import { useIntelligenceCharts } from '../../hooks/useIntelligenceCharts';
+import { useAppSelector } from '../../store';
 import { formatBackendTime } from '../../utils/format';
 
 // 图表区域占位 shimmer
@@ -14,6 +16,7 @@ const ChartShimmer: React.FC<{ className?: string }> = ({ className = '' }) => (
 );
 
 const IntelligenceChartsCard: React.FC = () => {
+  const tradingMode = useAppSelector((state) => state.ui.tradingMode);
   const {
     data: chartData,
     loading,
@@ -23,7 +26,7 @@ const IntelligenceChartsCard: React.FC = () => {
     hasDailyReturn,
     hasTradeCount,
     hasPositionRatio,
-  } = useIntelligenceCharts('current');
+  } = useIntelligenceCharts('current', { tradingMode });
   const { isConnected, status } = useWebSocket();
 
   const formatTimestamp = (timeStr: string | null) => {

@@ -7,7 +7,6 @@ import { useWebSocket } from '../contexts/WebSocketContext';
 import { shouldUpdateByFingerprint, calcFingerprint } from '../utils/dataChange';
 import { refreshOrchestrator } from '../services/refreshOrchestrator';
 import { authService } from '../features/auth/services/authService';
-import { useAppSelector } from '../store';
 
 export interface ChartData {
     dailyReturn: ChartDataPoint[];
@@ -346,10 +345,12 @@ const getTradingDayWindow = async (anchorDate: string, count: number): Promise<s
     return promise;
 };
 
-export const useIntelligenceCharts = (userId: string = 'current', options?: { autoRefresh?: boolean }) => {
+export const useIntelligenceCharts = (userId: string = 'current', options?: { autoRefresh?: boolean, tradingMode?: 'real' | 'simulation' }) => {
     const autoFetchEnabled = options?.autoRefresh ?? chartsAutoFetchEnabled();
     const resolvedUserId = resolveChartUserId(userId);
-    const tradingMode = useAppSelector((state) => state.ui.tradingMode);
+    const mode = options?.tradingMode || 'real';
+    const isLive = mode === 'real';
+
     const [data, setData] = useState<ChartData>({
         dailyReturn: [],
         tradeCount: [],
@@ -395,12 +396,15 @@ export const useIntelligenceCharts = (userId: string = 'current', options?: { au
         const silent = params?.silent ?? true;
 
         try {
+            // 根据模式动态选择接口
             const [dailyReturn, tradeCount, positionRatio, account, ledgerDaily] = await Promise.all([
                 portfolioService.getDailyReturns(resolvedUserId),
-                tradingService.getTradeStats(resolvedUserId, '1w'),
+                tradingService.getTradeStats(resolvedUserId, '1w', mode),
                 portfolioService.getPositionDistribution(resolvedUserId),
-                realTradingService.getAccount(resolvedUserId).catch(() => null),
-                realTradingService.getAccountLedgerDaily(30, resolvedUserId).catch(() => []),
+                realTradingService.getRuntimeAccount(resolvedUserId, 'default', mode).catch(() => null),
+                isLive 
+                    ? realTradingService.getAccountLedgerDaily(30, resolvedUserId).catch(() => [])
+                    : realTradingService.getSimulationDailySnapshots(30).catch(() => []),
             ]);
 
             let normalizedPositionRatio: PositionDistribution[] = [];
@@ -418,35 +422,55 @@ export const useIntelligenceCharts = (userId: string = 'current', options?: { au
             const ledgerPoints = Array.isArray(ledgerDaily)
                 ? ledgerDaily
                     .map((row: any) => {
-                        if (!row || typeof row.snapshot_date !== 'string') return null;
-                        const pctValue = Number(row.daily_return_pct);
-                        const ratioValue = Number(row.daily_return_ratio);
-                        const legacyPctValue = Number(row.daily_return);
-                        const returnValue = Number.isFinite(pctValue)
-                            ? pctValue
-                            : Number.isFinite(ratioValue)
-                                ? ratioValue * 100
-                                : Number.isFinite(legacyPctValue)
-                                    ? legacyPctValue
-                                    : Number.NaN;
+                        if (!row || (!row.snapshot_date && !row.timestamp)) return null;
+                        const date = row.snapshot_date || row.timestamp;
+                        
+                        let returnValue = Number.NaN;
+                        if (isLive) {
+                            // 实盘逻辑：使用百分比字段
+                            const pctValue = Number(row.daily_return_pct);
+                            const ratioValue = Number(row.daily_return_ratio);
+                            const legacyPctValue = Number(row.daily_return);
+                            returnValue = Number.isFinite(pctValue)
+                                ? pctValue
+                                : Number.isFinite(ratioValue)
+                                    ? ratioValue * 100
+                                    : Number.isFinite(legacyPctValue)
+                                        ? legacyPctValue
+                                        : Number.NaN;
+                        } else {
+                            // 模拟盘逻辑：计算 盈亏 / 初始权益
+                            const pnl = Number(row.today_pnl || row.daily_pnl || 0);
+                            const initial = Number(row.initial_capital || 1000000);
+                            returnValue = initial > 0 ? (pnl / initial) * 100 : 0;
+                        }
+
                         if (!Number.isFinite(returnValue)) return null;
                         return {
-                            timestamp: `${row.snapshot_date}T00:00:00Z`,
+                            timestamp: `${date.split('T')[0]}T00:00:00Z`,
                             value: returnValue,
-                            label: row.snapshot_kind === 'daily_ledger' ? '日账本收益率' : '账本日收益率',
+                            label: isLive ? '实盘收益率' : '模拟收益率',
                         } as ChartDataPoint;
                     })
                     .filter((item): item is ChartDataPoint => item !== null)
                 : [];
 
             const normalizedReturnPoints = ledgerPoints.length > 0 ? ledgerPoints : normalizeChartPoints(dailyReturn);
-            const fallbackAnchorDate = parseIsoDateFromTimestamp(new Date().toISOString()) || new Date().toISOString().slice(0, 10);
+            
+            // 修正日期锚点逻辑：始终以“今天”的交易日作为主轴，而不是以账本最后日期
+            const now = new Date();
+            const todayIso = now.toISOString().slice(0, 10);
+            const fallbackAnchorDate = parseIsoDateFromTimestamp(todayIso) || todayIso;
+            
+            // 只有当今天确实没有成交，且账本有更近的数据时（理论上不成立，因为账本通常落后于实时数据），才考虑使用账本日期
             const ledgerAnchorDate = parseIsoDateFromTimestamp(ledgerPoints[ledgerPoints.length - 1]?.timestamp || '');
+            
             const resolvedAnchor = await modelTrainingService.resolveInferenceDateByCalendar(
                 CHART_CALENDAR_MARKET,
-                ledgerAnchorDate || fallbackAnchorDate,
+                fallbackAnchorDate,
             );
-            const anchorTradingDate = resolvedAnchor.date || ledgerAnchorDate || fallbackAnchorDate;
+            
+            const anchorTradingDate = resolvedAnchor.date || fallbackAnchorDate;
             const [recentDailyTradingDates, recentTradeTradingDates] = await Promise.all([
                 getTradingDayWindow(anchorTradingDate, 30),
                 getTradingDayWindow(anchorTradingDate, 7),
@@ -497,7 +521,7 @@ export const useIntelligenceCharts = (userId: string = 'current', options?: { au
             initializedRef.current = true;
             setLoading(false);
         }
-    }, [autoFetchEnabled, resolvedUserId, tradingMode]);
+    }, [autoFetchEnabled, resolvedUserId, mode, isLive]);
 
     useEffect(() => {
         if (!autoFetchEnabled) {
@@ -506,12 +530,6 @@ export const useIntelligenceCharts = (userId: string = 'current', options?: { au
         }
         fetchData({ silent: false });
     }, [autoFetchEnabled, fetchData]);
-
-    useEffect(() => {
-        setLoading(true);
-        setData({ dailyReturn: [], tradeCount: [], positionRatio: [] });
-        fingerprintRef.current = null;
-    }, [tradingMode]);
 
     useEffect(() => {
         const unsubscribe = onMessage((type, payload) => {
@@ -566,7 +584,7 @@ export const useIntelligenceCharts = (userId: string = 'current', options?: { au
             return;
         }
         const unregister = refreshOrchestrator.register(
-            'intelligence-charts',
+            'intelligence-charts-' + mode,
             async () => {
                 await fetchData({ silent: true });
             },
@@ -574,7 +592,7 @@ export const useIntelligenceCharts = (userId: string = 'current', options?: { au
         );
 
         return unregister;
-    }, [autoFetchEnabled, fetchData]);
+    }, [autoFetchEnabled, fetchData, mode]);
 
     const hasDailyReturn = data.dailyReturn.length > 0;
     const hasTradeCount = data.tradeCount.length > 0;

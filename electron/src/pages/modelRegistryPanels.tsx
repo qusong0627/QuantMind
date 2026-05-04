@@ -1,12 +1,12 @@
-import React, { useMemo, useState } from 'react';
-import { Button, Card, Tag, Typography, Empty, Spin, Progress, Divider, Input, Modal, Tabs, Switch, DatePicker, Table, Drawer, Badge, Tooltip, Collapse, Select, message } from 'antd';
+import React, { useMemo, useState, useEffect } from 'react';
+import { Button, Card, Tag, Typography, Empty, Spin, Progress, Divider, Input, Modal, Tabs, Switch, DatePicker, Table, Drawer, Badge, Tooltip, Collapse, Select, Pagination, message } from 'antd';
 import { clsx } from 'clsx';
 import dayjs from 'dayjs';
 import {
   Layers, Star, RefreshCw, Search, Code, Calendar, Layers2,
   History, Archive, Brain, CheckCircle2, Clock, XCircle,
   ChevronRight, Play, Cpu, TrendingUp, Download, ChevronDown,
-  ChevronUp, Shield, Zap, Activity, ListFilter, AlertCircle,
+  ChevronUp, Shield, Zap, Activity, ListFilter, BarChart3, Info, AlertCircle,
 } from 'lucide-react';
 import {
   UserModelRecord,
@@ -17,7 +17,7 @@ import {
   AutoInferenceSettings,
   LatestInferenceRunInfo,
   ModelShapSummaryResponse,
-  ModelShapSummaryItem,
+  ModelShapSummaryItem, modelTrainingService,
 } from '../services/modelTrainingService';
 import {
   calcTimeSplitStats,
@@ -152,446 +152,301 @@ export const ModelDetailPanel: React.FC<{ model: UserModelRecord }> = ({ model }
       color: key === 'train' ? 'blue' : key === 'valid' ? 'indigo' : 'emerald',
       ic,
       icir,
-      trendLabel: formatTrendLabel(ic, previousIc, 4),
+      trendLabel: formatTrendLabel(ic, previousIc, 2),
     });
     previousIc = ic ?? previousIc;
   }
   const hasSplitIC = splitMetrics.length > 0;
-  const ic =
-    metrics.ic ??
-    metrics.IC ??
-    metrics.mean_ic ??
-    resolveMetricNumber(metadataMetrics, ['test_ic', 'val_ic', 'train_ic']) ??
-    null;
-  const icir =
-    metrics.icir ??
-    metrics.ICIR ??
-    metrics.IC_IR ??
-    resolveMetricNumber(metadataMetrics, ['test_rank_icir', 'val_rank_icir', 'test_icir', 'val_icir', 'train_rank_icir', 'train_icir']) ??
-    null;
+  const ic = metrics.ic ?? metrics.IC ?? metrics.mean_ic ?? resolveMetricNumber(metadataMetrics, ['test_ic', 'val_ic', 'train_ic']) ?? null;
+  const icir = metrics.icir ?? metrics.ICIR ?? metrics.IC_IR ?? resolveMetricNumber(metadataMetrics, ['test_rank_icir', 'val_rank_icir', 'test_icir', 'val_icir', 'train_rank_icir', 'train_icir']) ?? null;
   const hasIC = [ic, icir].some(v => v !== null);
+
   const horizonDays = meta.target_horizon_days ?? meta.horizon_days;
   const targetMode = String(meta.target_mode ?? '').toLowerCase();
   const labelFormula = meta.label_formula ?? meta.labelFormula;
-  const targetModeLabel = targetMode
-    ? targetMode === 'classification'
-      ? '分类'
-      : targetMode === 'regression' || targetMode === 'return'
-        ? '回归'
-        : targetMode
-    : '';
+  const targetModeLabel = targetMode ? (targetMode === 'classification' ? '分类' : (targetMode === 'regression' || targetMode === 'return' ? '回归' : targetMode)) : '';
   const features: string[] = Array.isArray(meta.features) ? meta.features : [];
   const modelParams = meta.model_params && typeof meta.model_params === 'object' ? meta.model_params as Record<string, any> : null;
   const KEY_PARAMS = ['num_leaves', 'learning_rate', 'max_depth', 'n_estimators', 'num_boost_round', 'subsample', 'colsample_bytree', 'reg_alpha', 'reg_lambda'];
   const importantParams = modelParams ? KEY_PARAMS.filter(k => modelParams[k] !== undefined) : [];
-  const otherParams = modelParams ? Object.entries(modelParams).filter(([k]) => !KEY_PARAMS.includes(k)) : [];
-  const FEAT_LIMIT = 20;
-  const shownFeatures = featExpanded ? features : features.slice(0, FEAT_LIMIT);
-  const icDecayGuide = '这里的“衰减值”指当前区间 IC 相对上一区间的变化率。经验上，绝对变化率 ≤ 5% 可视为优秀，5% - 15% 可视为合格，> 15% 建议重点关注。若为正值，表示较上段有所提升。';
+  
+  if (!hasSplitIC && !hasIC && !timePeriods) {
+    return (
+      <div className="pt-10">
+        <Empty description={<span className="text-xs text-slate-400 font-medium tracking-wider">该模型暂无详细训练指标或时间轴数据</span>} />
+      </div>
+    );
+  }
+
   return (
-    <div className="pt-5 space-y-5">
-      {/* IC 变化主视图 */}
-      {hasSplitIC ? (
-        <Card className="rounded-3xl border-slate-100 shadow-sm overflow-hidden" title={
-          <div className="flex items-center gap-2">
-            <Activity size={14} className="text-blue-600" />
-            <span className="text-xs font-black text-slate-800 uppercase tracking-tighter">训练期指标（IC 变化）</span>
-          </div>
-        }>
-          <div className="flex flex-wrap items-start justify-between gap-4">
-            <div className="space-y-1">
-              <div className="text-sm font-bold text-slate-800">训练集、验证集、测试集三段 IC 主线</div>
-              <div className="text-xs text-slate-500 leading-relaxed">
-                仅保留训练阶段可稳定计算的指标：各区间 IC 与 ICIR；回测型指标请在回测中心查看。
-              </div>
-            </div>
-            <div className="flex flex-wrap gap-2">
-              {splitMetrics.map((item) => (
-                <Tag
-                  key={item.key}
-                  className={clsx(
-                    'm-0 rounded-full border-0 font-bold',
-                    item.color === 'blue' && 'bg-blue-50 text-blue-700',
-                    item.color === 'indigo' && 'bg-indigo-50 text-indigo-700',
-                    item.color === 'emerald' && 'bg-emerald-50 text-emerald-700',
-                  )}
-                >
-                  {item.label} IC
-                </Tag>
-              ))}
-            </div>
-          </div>
-          <div className="mt-5 grid gap-4 lg:grid-cols-3">
+    <div className="pt-2">
+      <div className="grid grid-cols-12 gap-6 items-start">
+        <div className="col-span-7 space-y-5">
+          <div className="grid grid-cols-3 gap-4">
             {splitMetrics.map((item) => (
-              <div
-                key={item.key}
+              <div 
+                key={item.key} 
                 className={clsx(
-                  'relative overflow-hidden rounded-2xl border p-4 shadow-sm transition-shadow hover:shadow-md',
-                  item.color === 'blue' && 'border-blue-100 bg-blue-50/70',
-                  item.color === 'indigo' && 'border-indigo-100 bg-indigo-50/70',
-                  item.color === 'emerald' && 'border-emerald-100 bg-emerald-50/70',
+                  "rounded-2xl p-5 border relative group transition-all duration-300 shadow-sm hover:shadow-md",
+                  "bg-gradient-to-br",
+                  item.color === 'blue' ? 'from-blue-50/50 to-slate-100/80 border-blue-100/60' : 
+                  item.color === 'indigo' ? 'from-indigo-50/50 to-slate-100/80 border-indigo-100/60' : 
+                  'from-emerald-50/50 to-slate-100/80 border-emerald-100/60'
                 )}
               >
-                <div className={clsx(
-                  'absolute inset-x-0 top-0 h-1',
-                  item.color === 'blue' && 'bg-blue-500',
-                  item.color === 'indigo' && 'bg-indigo-500',
-                  item.color === 'emerald' && 'bg-emerald-500',
-                )} />
-                <div className="flex items-start justify-between gap-3">
-                  <div className="text-sm font-black tracking-[0.18em] text-slate-700">{item.label}</div>
+                <div className="flex items-center justify-between mb-3">
+                  <Text className="text-[10px] font-black text-slate-500 uppercase tracking-widest opacity-80">{item.label}</Text>
                   <div className={clsx(
-                    'rounded-xl border px-2.5 py-1 text-[10px] font-black',
-                    item.color === 'blue' && 'border-blue-100 bg-white text-blue-700',
-                    item.color === 'indigo' && 'border-indigo-100 bg-white text-indigo-700',
-                    item.color === 'emerald' && 'border-emerald-100 bg-white text-emerald-700',
-                  )}>
-                    ICIR {item.icir === null ? '—' : item.icir.toFixed(3)}
-                  </div>
+                    "h-2 w-2 rounded-full",
+                    item.color === 'blue' && 'bg-blue-500 shadow-[0_0_8px_rgba(59,130,246,0.4)]',
+                    item.color === 'indigo' && 'bg-indigo-500 shadow-[0_0_8px_rgba(99,102,241,0.4)]',
+                    item.color === 'emerald' && 'bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.4)]',
+                  )} />
                 </div>
-                <div className="mt-5 flex flex-col items-center justify-center text-center">
-                  <div className="text-2xl font-black text-slate-900 font-mono">
+                
+                <div className="flex flex-col items-center py-1">
+                  <Text className="text-3xl font-black text-slate-800 font-mono tracking-tighter mb-3 drop-shadow-sm">
                     {item.ic === null ? '—' : item.ic.toFixed(4)}
-                  </div>
-                  <div className={clsx(
-                    'mt-2 text-[10px] font-black',
-                    item.ic !== null && (item.ic >= 0 ? 'text-emerald-600' : 'text-red-500')
-                  )}>
-                    {item.trendLabel}
+                  </Text>
+                  
+                  <div className="flex flex-col items-center gap-1.5 w-full">
+                    <div className={clsx(
+                      "px-2 py-0.5 rounded text-[9px] font-black tracking-wider uppercase whitespace-nowrap shadow-sm",
+                      item.color === 'blue' ? 'bg-blue-600 text-white' : 
+                      item.color === 'indigo' ? 'bg-indigo-600 text-white' : 'bg-emerald-600 text-white'
+                    )}>
+                      IR {item.icir?.toFixed(3) || '—'}
+                    </div>
+
+                    <div className={clsx(
+                      "text-[9px] font-bold flex items-center justify-center gap-1 px-2 py-0.5 rounded-full border whitespace-nowrap bg-white/60 shadow-inner",
+                      item.trendLabel === '基线' ? 'border-slate-100 text-slate-400' :
+                      item.trendLabel.includes('+') ? 'border-rose-100 text-rose-600 bg-rose-50/50' : 'border-emerald-100 text-emerald-600 bg-emerald-50/50'
+                    )}>
+                      {item.trendLabel === '基线' ? <Activity size={8} /> : item.trendLabel.includes('+') ? <ChevronUp size={8} /> : <ChevronDown size={8} />}
+                      <span className="opacity-70">较上段</span>
+                      <span className="font-black">{item.trendLabel.replace(/[+-]/, '').replace('%', '')}{item.trendLabel === '基线' ? '' : '%'}</span>
+                    </div>
                   </div>
                 </div>
+                <BarChart3 size={40} className="absolute -bottom-1 -right-1 text-slate-400/5 group-hover:text-slate-400/10 transition-colors pointer-events-none" />
               </div>
             ))}
           </div>
-          <div className="mt-4 rounded-2xl border border-amber-100 bg-amber-50/70 px-4 py-3 text-xs leading-relaxed text-amber-900">
-            <span className="font-black">友情提示：</span>
-            {icDecayGuide}
-          </div>
-        </Card>
-      ) : hasIC ? (
-        <div className="space-y-3">
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-            <MetricCard label="IC" value={ic} digits={4} />
-            <MetricCard label="ICIR" value={icir} digits={3} />
-          </div>
-          <div className="rounded-2xl border border-amber-100 bg-amber-50/70 px-4 py-3 text-xs leading-relaxed text-amber-900">
-            <span className="font-black">友情提示：</span>
-            {icDecayGuide}
-          </div>
-        </div>
-      ) : null}
-      {/* 数据集划分 */}
-      {timePeriods && (() => {
-        const splitStats = calcTimeSplitStats(timePeriods);
-        const splitSegments = [
-          {
-            key: 'train',
-            label: '训练集',
-            range: timePeriods.train,
-            percent: splitStats.train.percent,
-            days: splitStats.train.days,
-            color: 'bg-blue-500',
-            surface: 'bg-blue-50/70',
-            border: 'border-blue-100',
-            text: 'text-blue-700',
-            note: '用于拟合模型权重',
-          },
-          ...(splitStats.val
-            ? [{
-                key: 'val',
-                label: '验证集',
-                range: timePeriods.val as [string, string],
-                percent: splitStats.val.percent,
-                days: splitStats.val.days,
-                color: 'bg-indigo-400',
-                surface: 'bg-indigo-50/70',
-                border: 'border-indigo-100',
-                text: 'text-indigo-700',
-                note: '用于早停与调参',
-              }]
-            : []),
-          ...(splitStats.test
-            ? [{
-                key: 'test',
-                label: '测试集',
-                range: timePeriods.test as [string, string],
-                percent: splitStats.test.percent,
-                days: splitStats.test.days,
-                color: 'bg-emerald-400',
-                surface: 'bg-emerald-50/70',
-                border: 'border-emerald-100',
-                text: 'text-emerald-700',
-                note: '用于 OOS 检验',
-              }]
-            : []),
-        ];
-        return (
-          <Card className="rounded-3xl border-slate-100 shadow-sm overflow-hidden" title={
-            <div className="flex items-center gap-2">
-              <Layers2 size={14} className="text-blue-600" />
-              <span className="text-xs font-black text-slate-800 uppercase tracking-tighter">数据集划分</span>
-            </div>
-          }>
-            <div className="flex flex-wrap items-start justify-between gap-4">
-              <div className="space-y-1">
-                <div className="text-sm font-bold text-slate-800">训练 / 验证 / 测试三段式切分</div>
-                <div className="text-xs text-slate-500 leading-relaxed">
-                  将数据窗口拆成可读的分区卡片，配合总览条直观看出样本配比、时间跨度和每段用途。
-                </div>
-              </div>
-              <div className="flex flex-wrap gap-2">
-                <Tag className="m-0 rounded-full border-0 bg-blue-50 text-blue-700 font-bold">总窗口 {splitStats.totalDays} 天</Tag>
-                <Tag className="m-0 rounded-full border-0 bg-slate-100 text-slate-600 font-bold">训练 {splitStats.train.percent}%</Tag>
-                {splitStats.val && <Tag className="m-0 rounded-full border-0 bg-slate-100 text-slate-600 font-bold">验证 {splitStats.val.percent}%</Tag>}
-                {splitStats.test && <Tag className="m-0 rounded-full border-0 bg-slate-100 text-slate-600 font-bold">测试 {splitStats.test.percent}%</Tag>}
-              </div>
-            </div>
-            <div className="mt-5 rounded-2xl border border-slate-100 bg-slate-50/80 p-4">
-              <div className="flex items-center justify-between text-[10px] font-black uppercase tracking-[0.22em] text-slate-400">
-                <span>配比总览</span>
-                <span>
-                  训练 {splitStats.train.percent}% ·
-                  {splitStats.val ? ` 验证 ${splitStats.val.percent}% ·` : ''}
-                  {splitStats.test ? ` 测试 ${splitStats.test.percent}%` : ''}
-                </span>
-              </div>
-              <div className="mt-3 h-3 w-full overflow-hidden rounded-full bg-slate-200">
-                <div className="flex h-full w-full">
-                  <div className="h-full bg-blue-500 transition-all" style={{ width: `${splitStats.train.percent}%` }} />
-                  {splitStats.val && <div className="h-full bg-indigo-400 transition-all" style={{ width: `${splitStats.val.percent}%` }} />}
-                  {splitStats.test && <div className="h-full bg-emerald-400 transition-all" style={{ width: `${splitStats.test.percent}%` }} />}
-                </div>
-              </div>
-              <div className="mt-3 grid grid-cols-1 gap-2 text-[10px] text-slate-500 sm:grid-cols-3">
-                <span>训练集：拟合模型权重</span>
-                <span>验证集：早停与调参</span>
-                <span className="sm:text-right">测试集：OOS 检验</span>
-              </div>
-            </div>
-            <div className="mt-5 grid gap-4 lg:grid-cols-3">
-              {splitSegments.map((segment) => (
-                <TimeItem
-                  key={segment.key}
-                  label={segment.label}
-                  range={segment.range}
-                  color={segment.color}
-                  percent={segment.percent}
-                  days={segment.days}
-                  note={segment.note}
-                  surface={segment.surface}
-                  border={segment.border}
-                  text={segment.text}
-                />
-              ))}
-            </div>
-          </Card>
-        );
-      })()}
-      {/* 训练目标 */}
-      {(horizonDays || targetMode || labelFormula) && (
-        <Card className="rounded-3xl border-slate-100 shadow-sm overflow-hidden" title={
-          <div className="flex items-center gap-2">
-            <Zap size={14} className="text-amber-500" />
-            <span className="text-xs font-black text-slate-800 uppercase tracking-tighter">训练目标</span>
-          </div>
-        }>
-          <div className="flex flex-wrap items-start justify-between gap-4">
-            <div className="space-y-1">
-              <div className="text-sm font-bold text-slate-800">标签口径、任务类型与目标周期统一展示</div>
-              <div className="text-xs text-slate-500 leading-relaxed">
-                训练目标与数据切分保持同一套视觉语言，减少页面上方信息块的割裂感。
-              </div>
-            </div>
-            <div className="flex flex-wrap gap-2">
-              {horizonDays && <Tag className="m-0 rounded-full border-0 bg-amber-50 text-amber-700 font-bold">T+{horizonDays} 天</Tag>}
-              {targetMode && (
-                <Tag className="m-0 rounded-full border-0 bg-slate-100 text-slate-600 font-bold">
-                  {targetMode === 'classification' ? '分类目标' : targetMode === 'regression' || targetMode === 'return' ? '回归目标' : targetMode}
-                </Tag>
-              )}
-              {labelFormula && <Tag className="m-0 rounded-full border-0 bg-blue-50 text-blue-700 font-bold">标签公式</Tag>}
-            </div>
-          </div>
-          <div className="mt-5 rounded-2xl border border-slate-100 bg-slate-50/80 p-4">
-            <div className="flex items-center justify-between text-[10px] font-black uppercase tracking-[0.22em] text-slate-400">
-              <span>训练目标总览</span>
-              <span>
-                {horizonDays ? `T+${horizonDays}` : '未设置'}
-                {targetModeLabel ? ` · ${targetModeLabel}` : ''}
-              </span>
-            </div>
 
-            <div className="mt-3 grid gap-4 lg:grid-cols-[0.82fr_0.82fr_1.36fr]">
-              {horizonDays && (
-                <div className="relative overflow-hidden rounded-2xl border border-amber-100 bg-amber-50/70 p-4 shadow-sm">
-                  <div className="absolute inset-x-0 top-0 h-1 bg-amber-500" />
-                  <div className="text-[10px] font-black uppercase tracking-[0.22em] text-amber-500">预测周期</div>
-                  <div className="mt-2 text-xl font-black text-slate-900">T+{horizonDays}</div>
-                  <div className="mt-1 text-xs text-slate-500">标签向前滚动的交易日数</div>
-                </div>
-              )}
-              {targetMode && (
-                <div className="relative overflow-hidden rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-                  <div className="absolute inset-x-0 top-0 h-1 bg-slate-400" />
-                  <div className="text-[10px] font-black uppercase tracking-[0.22em] text-slate-400">任务类型</div>
-                  <div className="mt-2 text-xl font-black text-slate-900">
-                    {targetModeLabel}
-                  </div>
-                  <div className="mt-1 text-xs text-slate-500">
-                    {targetMode === 'classification' ? '方向判断 / 离散标签' : '连续收益 / 数值标签'}
-                  </div>
-                </div>
-              )}
-              {labelFormula && (
-                <div className="relative overflow-hidden rounded-2xl border border-blue-100 bg-blue-50/70 p-4 shadow-sm">
-                  <div className="absolute inset-x-0 top-0 h-1 bg-blue-500" />
-                  <div className="text-[10px] font-black uppercase tracking-[0.22em] text-blue-500">标签公式</div>
-                  <div className="mt-2 rounded-xl border border-white bg-white px-3 py-2">
-                    <Text className="block text-[10px] font-black uppercase tracking-[0.22em] text-slate-400">FORMULA</Text>
-                    <Text className="mt-1 block text-[11px] font-mono font-black text-blue-700 break-all">
-                      {String(labelFormula)}
-                    </Text>
-                  </div>
-                  <div className="mt-1 text-xs text-slate-500">会同步写入训练请求和模型元数据</div>
-                </div>
-              )}
-            </div>
+          <div className="bg-slate-50/50 rounded-2xl p-4 border border-slate-100 flex gap-3 items-start">
+            <Info size={14} className="text-slate-400 mt-1" />
+            <Text className="text-[11px] text-slate-500 leading-relaxed">
+              <span className="font-bold text-slate-700">指标解读：</span>
+              训练集反映拟合能力，验证集用于参数选择，测试集代表实盘泛化。IC 衰减控制在 10% 以内视为模型鲁棒性良好。
+            </Text>
           </div>
-        </Card>
-      )}
 
-      {/* 特征列表 */}
-      {features.length > 0 && (
-        <Card className="rounded-3xl border-slate-100 shadow-sm" title={
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <ListFilter size={14} className="text-purple-500" />
-              <span className="text-xs font-black text-slate-800 uppercase tracking-tighter">特征列表</span>
+          {features.length > 0 && (
+            <div className="glass-panel rounded-3xl p-6 border border-slate-100/50">
+              <div className="flex items-center justify-between mb-4">
+                <div className="flex items-center gap-2">
+                  <div className="h-4 w-1 bg-violet-500 rounded-full" />
+                  <Text className="text-xs font-black text-slate-800 uppercase">特征工程资产 ({features.length})</Text>
+                </div>
+                <Input size="small" placeholder="过滤特征..." prefix={<Search size={10} />} className="w-32 rounded-lg text-[10px] border-slate-200" />
+              </div>
+              <div className="flex flex-wrap gap-1.5 max-h-[300px] overflow-y-auto custom-scrollbar">
+                {features.map((f, i) => (
+                  <Tag key={i} className="m-0 px-2 py-0.5 rounded-md border-0 bg-slate-100/80 text-slate-600 text-[10px] font-mono hover:bg-violet-50 hover:text-violet-600 transition-colors cursor-default">
+                    {f}
+                  </Tag>
+                ))}
+              </div>
             </div>
-            <Tag color="purple" className="font-bold text-[10px]">{features.length} 个特征</Tag>
-          </div>
-        }>
-          <div className="flex flex-wrap gap-1.5">
-            {shownFeatures.map((f, i) => (
-              <Tag key={i} className="rounded-lg bg-purple-50 border-purple-100 text-purple-700 text-[10px] font-mono font-bold">{f}</Tag>
-            ))}
-          </div>
-          {features.length > FEAT_LIMIT && (
-            <button
-              onClick={() => setFeatExpanded(!featExpanded)}
-              className="mt-3 flex items-center gap-1 text-[10px] font-black text-purple-500 hover:text-purple-700 transition-colors"
-            >
-              {featExpanded ? <ChevronUp size={11} /> : <ChevronDown size={11} />}
-              {featExpanded ? '收起' : `展开全部 ${features.length} 个特征`}
-            </button>
           )}
-        </Card>
-      )}
+        </div>
 
-      {/* 模型超参 */}
-      {modelParams && importantParams.length > 0 && (
-        <Card className="rounded-3xl border-slate-100 shadow-sm" title={
-          <div className="flex items-center gap-2">
-            <Zap size={14} className="text-orange-500" />
-            <span className="text-xs font-black text-slate-800 uppercase tracking-tighter">模型超参</span>
-          </div>
-        }>
-          <div className="grid grid-cols-3 gap-[25px]">
-            {importantParams.map(k => (
-              <div key={k} className="bg-orange-50 rounded-xl p-3">
-                <Text className="text-[9px] text-orange-400 font-black uppercase block">{k.replace(/_/g, ' ')}</Text>
-                <Text className="text-sm font-black text-slate-800">{String(modelParams[k])}</Text>
+        <div className="col-span-5 space-y-5">
+          <div className="glass-panel rounded-3xl p-5 border border-slate-100/50">
+            <Text className="text-[10px] font-black text-slate-400 uppercase tracking-widest block mb-4">模型配置 Profile</Text>
+            <div className="space-y-4">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2 text-slate-500"><Calendar size={13} /><Text className="text-xs font-medium">预测周期</Text></div>
+                <Text className="text-sm font-black text-slate-800">T + {horizonDays || '—'}</Text>
               </div>
-            ))}
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2 text-slate-500"><Zap size={13} /><Text className="text-xs font-medium">任务类型</Text></div>
+                <Tag className="m-0 bg-slate-100 border-0 text-slate-600 font-bold rounded-md px-2 py-0.5">{targetModeLabel || '未知'}</Tag>
+              </div>
+              <div className="pt-2 border-t border-dashed border-slate-100">
+                <div className="flex items-center gap-2 text-slate-500 mb-2"><Code size={13} /><Text className="text-xs font-medium">标签公式</Text></div>
+                <div className="bg-slate-50 rounded-xl p-3 border border-slate-100/50">
+                  <Text className="text-[10px] font-mono text-slate-500 break-all leading-relaxed block">{String(labelFormula || '—')}</Text>
+                </div>
+              </div>
+            </div>
           </div>
-          {otherParams.length > 0 && (
-            <Collapse ghost size="small" className="mt-3" items={[{
-              key: '1',
-              label: <span className="text-[10px] font-bold text-slate-400">其他参数（{otherParams.length}）</span>,
-              children: (
-                <div className="grid grid-cols-3 gap-2">
-                  {otherParams.map(([k, v]) => (
-                    <div key={k} className="bg-slate-50 rounded-lg p-2">
-                      <Text className="text-[9px] text-slate-400 font-black block">{k}</Text>
-                      <Text className="text-[10px] font-black text-slate-700 font-mono">{String(v)}</Text>
+
+          {timePeriods && (() => {
+            const splitStats = calcTimeSplitStats(timePeriods);
+            const segments = [
+              { label: '训练集', range: timePeriods.train, days: splitStats.train.days, color: 'bg-blue-500' },
+              ...(splitStats.val ? [{ label: '验证集', range: timePeriods.val, days: splitStats.val.days, color: 'bg-indigo-500' }] : []),
+              ...(splitStats.test ? [{ label: '测试集', range: timePeriods.test, days: splitStats.test.days, color: 'bg-emerald-500' }] : []),
+            ];
+            return (
+              <div className="glass-panel rounded-3xl p-5 border border-slate-100/50">
+                <div className="flex items-center justify-between mb-6">
+                  <Text className="text-[10px] font-black text-slate-400 uppercase tracking-widest">样本时间轴</Text>
+                  <Text className="text-[10px] font-black text-slate-800">{splitStats.totalDays}D Total</Text>
+                </div>
+                <div className="relative pl-6 space-y-8 before:absolute before:left-[11px] before:top-2 before:bottom-2 before:w-0.5 before:bg-slate-100">
+                  {segments.map((s, idx) => (
+                    <div key={idx} className="relative">
+                      <div className={clsx("absolute -left-[19px] top-1.5 h-2 w-2 rounded-full ring-4 ring-white", s.color)} />
+                      <div className="flex flex-col">
+                        <div className="flex items-center justify-between mb-1">
+                          <Text className="text-xs font-black text-slate-800">{s.label}</Text>
+                          <Text className="text-[10px] font-mono font-bold text-slate-400">{s.days} 天</Text>
+                        </div>
+                        <Text className="text-[10px] text-slate-400 font-mono mb-1">{s.range[0]} → {s.range[1]}</Text>
+                      </div>
                     </div>
                   ))}
                 </div>
-              ),
-            }]} />
-          )}
-        </Card>
-      )}
+              </div>
+            );
+          })()}
 
-      {!hasIC && !timePeriods && (
-        <Empty description={<span className="text-xs text-slate-400">暂无详细指标数据</span>} />
-      )}
+          {modelParams && importantParams.length > 0 && (
+            <div className="glass-panel rounded-3xl p-5 border border-slate-100/50">
+              <div className="flex items-center gap-2 mb-4">
+                <Text className="text-[10px] font-black text-slate-400 uppercase tracking-widest">核心超参 PARAMS</Text>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                {importantParams.map(k => (
+                  <div key={k} className="flex flex-col gap-0.5 p-2 bg-slate-50/50 rounded-xl border border-slate-100/50">
+                    <Text className="text-[8px] text-slate-400 uppercase truncate">{k.replace(/_/g, ' ')}</Text>
+                    <Text className="text-[11px] font-black text-slate-700">{String(modelParams[k])}</Text>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
     </div>
   );
 };
 
-// ─── 训练溯源面板 ────────────────────────────────────────────────────────────
 
 export const TrainingSourcePanel: React.FC<{
   model: UserModelRecord;
-  trainingRun: ModelTrainingRunStatus | null;
-  loading: boolean;
-}> = ({ model, trainingRun, loading }) => {
-  const result = (trainingRun?.result ?? {}) as Record<string, any>;
-  const reqPayload = (result.request_payload ?? {}) as Record<string, any>;
+}> = ({ model }) => {
+  const [runData, setRunData] = useState<ModelTrainingRunStatus | null>(null);
+  const [loading, setLoading] = useState(false);
+  const runId = model.source_run_id || '—';
+
+  useEffect(() => {
+    let isMounted = true;
+    if (model.source_run_id && model.source_run_id !== '—') {
+      setLoading(true);
+      modelTrainingService.getTrainingRun(model.source_run_id)
+        .then(data => {
+          if (isMounted) {
+            setRunData(data);
+            setLoading(false);
+          }
+        })
+        .catch(err => {
+          console.error("Failed to fetch logs:", err);
+          if (isMounted) setLoading(false);
+        });
+    }
+    return () => { isMounted = false; };
+  }, [model.source_run_id]);
+
+  const logs = runData?.logs || 'No logs available for this training run.';
+  const status = runData?.status || model.status || 'unknown';
 
   return (
-    <div className="pt-5 space-y-4">
-      <div className="flex items-center gap-3 p-4 bg-slate-50 rounded-2xl border border-slate-100">
-        <History size={15} className="text-slate-400" />
-        <div>
-          <Text className="text-[10px] text-slate-400 font-black uppercase block">训练任务 ID</Text>
-          <Text className="text-sm font-black text-slate-800 font-mono">{model.source_run_id}</Text>
-        </div>
-        <ChevronRight size={13} className="text-slate-300 ml-auto" />
-      </div>
-      {loading ? (
-        <div className="flex items-center justify-center py-16"><Spin /></div>
-      ) : trainingRun ? (
-        <>
-          <Card className="rounded-3xl border-slate-100 shadow-sm">
-            <div className="flex items-center gap-3 mb-4">
-              {trainingRun.status === 'completed'
-                ? <CheckCircle2 size={16} className="text-emerald-500" />
-                : trainingRun.status === 'failed'
-                  ? <XCircle size={16} className="text-red-500" />
-                  : <Activity size={16} className="text-blue-500" />}
-              <Text className="text-xs font-black text-slate-800">
-                {trainingRun.status === 'completed' ? '训练已完成' : trainingRun.status === 'failed' ? '训练失败' : `状态: ${trainingRun.status}`}
-              </Text>
-              {trainingRun.status === 'running' && <Progress percent={trainingRun.progress} size="small" className="flex-1 ml-4" />}
+    <div className="h-[calc(100vh-360px)] flex flex-col space-y-4 pt-6 pb-2 overflow-hidden">
+      {/* 顶部任务概览 */}
+      <div className="flex gap-4 shrink-0 px-1">
+        <div className="glass-panel flex-1 rounded-2xl p-4 border border-slate-100/50 flex items-center justify-between">
+          <div className="flex items-center gap-4">
+            <div className="bg-slate-500/10 p-2.5 rounded-xl text-slate-400">
+              <History size={20} />
             </div>
-            {Object.keys(reqPayload).length > 0 && (
-              <div className="grid grid-cols-3 gap-[25px]">
-                {reqPayload.model_type && <InfoCell label="模型类型" value={String(reqPayload.model_type)} />}
-                {reqPayload.num_boost_round && <InfoCell label="迭代轮数" value={String(reqPayload.num_boost_round)} />}
-                {Array.isArray(reqPayload.features) && <InfoCell label="特征数量" value={`${reqPayload.features.length} 个`} />}
-              </div>
-            )}
-          </Card>
-          {trainingRun.logs && (
-            <Card className="rounded-3xl border-slate-100 shadow-sm" title={<span className="text-xs font-black uppercase text-slate-700">训练日志</span>}>
-              <div className="bg-slate-900 rounded-xl p-4 max-h-[360px] overflow-y-auto custom-scrollbar">
-                <pre className="text-[10px] font-mono text-green-400 leading-relaxed whitespace-pre-wrap">
-                  {trainingRun.logs.split('\n').slice(-50).join('\n')}
-                </pre>
-              </div>
-            </Card>
+            <div>
+              <Text className="text-[10px] text-slate-400 font-black uppercase tracking-widest block mb-1">训练任务 ID</Text>
+              <Text className="text-sm font-mono font-bold text-slate-700">{runId}</Text>
+            </div>
+          </div>
+          <ChevronRight size={16} className="text-slate-300" />
+        </div>
+
+        <div className="glass-panel w-56 rounded-2xl p-4 border border-slate-100/50 flex items-center gap-3">
+          <div className={clsx(
+            "w-10 h-10 rounded-xl flex items-center justify-center",
+            status === 'completed' ? "bg-emerald-500/10 text-emerald-500" : "bg-blue-500/10 text-blue-500"
+          )}>
+            {loading ? <Spin size="small" /> : (status === 'completed' ? <CheckCircle2 size={22} /> : <Clock size={22} />)}
+          </div>
+          <div>
+            <Text className="text-[10px] text-slate-400 font-black uppercase tracking-widest block mb-0.5">任务状态</Text>
+            <Text className="text-sm font-black text-slate-800 uppercase">{status}</Text>
+          </div>
+        </div>
+      </div>
+
+      {/* 核心日志区 - 终端模拟器风格 */}
+      <div className="glass-panel flex-1 rounded-3xl border border-slate-100/50 flex flex-col overflow-hidden mx-1">
+        <div className="bg-slate-900/90 px-5 py-3 flex items-center justify-between border-b border-white/5 shrink-0">
+          <div className="flex items-center gap-2">
+            <div className="flex gap-1.5 mr-2">
+              <div className="w-2.5 h-2.5 rounded-full bg-rose-500/80" />
+              <div className="w-2.5 h-2.5 rounded-full bg-amber-500/80" />
+              <div className="w-2.5 h-2.5 rounded-full bg-emerald-500/80" />
+            </div>
+            <Code size={14} className="text-slate-400 ml-2" />
+            <Text className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Training Execution Logs</Text>
+          </div>
+          <div className="flex items-center gap-4">
+             <Text className="text-[9px] text-slate-500 font-mono">UTF-8 · Python 3.9</Text>
+             {status === 'running' && <div className="bg-emerald-500/20 px-2 py-0.5 rounded text-[9px] text-emerald-400 font-bold animate-pulse">LIVE</div>}
+          </div>
+        </div>
+        
+        <div className="flex-1 bg-slate-950/95 p-6 overflow-y-auto font-mono custom-scrollbar">
+          {loading ? (
+            <div className="h-full flex items-center justify-center">
+              <Spin tip="Loading logs..." />
+            </div>
+          ) : (
+            <pre className="text-[11px] leading-relaxed text-slate-300 whitespace-pre-wrap break-all">
+              {logs.split('\n').map((line, i) => {
+                const isNotice = line.includes('[NOTICE]');
+                const isError = line.includes('[ERROR]') || line.includes('Error');
+                return (
+                  <div key={i} className="mb-0.5 flex gap-4 hover:bg-white/5 transition-colors group">
+                    <span className="w-8 shrink-0 text-slate-600 text-right select-none text-[9px]">{i + 1}</span>
+                    <span className={clsx(
+                      "flex-1",
+                      isNotice && "text-emerald-400",
+                      isError && "text-rose-400 font-bold",
+                      !isNotice && !isError && "text-slate-300"
+                    )}>
+                      {line}
+                    </span>
+                  </div>
+                );
+              })}
+              <div className="h-4" />
+            </pre>
           )}
-        </>
-      ) : (
-        <Empty description={<span className="text-xs text-slate-400">无法加载训练任务详情</span>} />
-      )}
+        </div>
+      </div>
     </div>
   );
 };
 
-// ─── 归因分析面板 ────────────────────────────────────────────────────────────
 
 export const AttributionAnalysisPanel: React.FC<{
   model: UserModelRecord;
@@ -602,239 +457,151 @@ export const AttributionAnalysisPanel: React.FC<{
   onRefresh: () => void;
 }> = ({ model, shapSummary, loading, error, featureLabelMap = {}, onRefresh }) => {
   const meta = getMeta(model);
-  const shapMeta = meta.shap && typeof meta.shap === 'object'
-    ? meta.shap as Record<string, any>
-    : {};
-  const [featureQuery, setFeatureQuery] = useState('');
-  const [exporting, setExporting] = useState(false);
-
+  const shapMeta = meta.shap && typeof meta.shap === 'object' ? meta.shap as Record<string, any> : {};
+  
+  const rows = (shapSummary?.items || shapMeta.items || []) as ModelShapSummaryItem[];
   const status = String(shapSummary?.status || shapMeta.status || 'missing').toLowerCase();
   const split = String(shapSummary?.split || shapMeta.split || '—');
   const rowsUsed = Number(shapSummary?.rows_used ?? shapMeta.rows_used ?? 0);
-  const rowsRequested = Number(shapSummary?.rows_requested ?? shapMeta.rows_requested ?? 0);
-  const file = String(shapSummary?.file || shapMeta.file || '—');
-  const errorText = String(shapSummary?.error || shapMeta.error || error || '');
-  const rows = (shapSummary?.items ?? []).filter((item) => item.feature);
-  const getFeatureLabel = (feature: string) => featureLabelMap[feature] || feature;
-  const filteredRows = useMemo(() => {
-    const query = featureQuery.trim().toLowerCase();
-    if (!query) return rows;
-    return rows.filter((item) => {
-      const feature = item.feature.toLowerCase();
-      const label = getFeatureLabel(item.feature).toLowerCase();
-      return feature.includes(query) || label.includes(query);
-    });
-  }, [rows, featureQuery, featureLabelMap]);
 
-  const statusCfg: Record<string, { text: string; cls: string }> = {
-    completed: { text: '已完成', cls: 'bg-emerald-50 text-emerald-700' },
-    disabled: { text: '已关闭', cls: 'bg-slate-100 text-slate-600' },
-    skipped: { text: '已跳过', cls: 'bg-amber-50 text-amber-700' },
-    failed: { text: '失败', cls: 'bg-rose-50 text-rose-700' },
-    missing: { text: '暂无数据', cls: 'bg-slate-100 text-slate-600' },
-  };
-  const currentStatus = statusCfg[status] ?? statusCfg.missing;
-  const handleExportCsv = async () => {
-    if (!filteredRows.length) {
-      message.warning('当前筛选结果为空，无可导出数据');
-      return;
-    }
-    setExporting(true);
-    try {
-      const escapeCsvCell = (value: unknown) => {
-        const text = value === null || value === undefined ? '' : String(value);
-        if (/[",\n\r]/.test(text)) return `"${text.replace(/"/g, '""')}"`;
-        return text;
-      };
-      const csvRows = [
-        ['rank', 'feature', 'feature_label', 'mean_abs_shap', 'mean_shap', 'positive_ratio'],
-        ...filteredRows.map((item) => [
-          String(item.rank),
-          item.feature,
-          getFeatureLabel(item.feature),
-          Number(item.mean_abs_shap || 0).toFixed(8),
-          Number(item.mean_shap || 0).toFixed(8),
-          Number(item.positive_ratio || 0).toFixed(8),
-        ]),
-      ];
-      const csv = csvRows.map((row) => row.map((cell) => escapeCsvCell(cell)).join(',')).join('\n');
-      const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `shap_summary_${model.model_id}_${split || 'unknown'}.csv`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-      message.success(`已导出 ${filteredRows.length} 条 SHAP 因子贡献记录`);
-    } catch (err: any) {
-      message.error(`导出失败: ${err?.message || '未知错误'}`);
-    } finally {
-      setExporting(false);
-    }
-  };
+  const [searchText, setSearchText] = useState('');
+  const [currentPage, setCurrentPage] = useState(1);
+  const pageSize = 10; // 锁定 10 条
+
+  const filteredRows = rows.filter(r => 
+    r.feature.toLowerCase().includes(searchText.toLowerCase()) || 
+    (featureLabelMap[r.feature] && featureLabelMap[r.feature].includes(searchText))
+  );
+
+  const maxAbsShap = Math.max(...rows.map(r => r.mean_abs_shap || 0), 0.0001);
 
   return (
-    <div className="pt-5 space-y-4">
-      <Card
-        className="rounded-3xl border-slate-100 shadow-sm"
-        title={
-          <div className="flex items-center justify-between gap-3">
-            <div className="flex items-center gap-2">
-              <Brain size={14} className="text-violet-600" />
-              <span className="text-xs font-black text-slate-800 uppercase tracking-tighter">归因分析（SHAP）</span>
-            </div>
-            <Button size="small" className="rounded-xl font-bold text-xs" onClick={onRefresh} loading={loading}>
-              刷新
-            </Button>
+    <div className="h-[calc(100vh-300px)] flex flex-col space-y-3 overflow-hidden pt-6">
+      {/* 头部统计 */}
+      <div className="glass-panel rounded-2xl p-4 border border-slate-100/50 flex items-center justify-between shrink-0">
+        <div className="flex items-center gap-4">
+          <div className="bg-violet-500/10 p-2 rounded-xl text-violet-600">
+            <Brain size={18} />
           </div>
-        }
-      >
-        <div className="space-y-3">
-          <div className="flex flex-wrap items-center gap-2">
-            <Tag className={clsx('m-0 rounded-full border-0 font-bold', currentStatus.cls)}>{currentStatus.text}</Tag>
-            <Tag className="m-0 rounded-full border-0 bg-violet-50 text-violet-700 font-bold">样本来源 {split}</Tag>
-            <Tag className="m-0 rounded-full border-0 bg-slate-100 text-slate-600 font-bold">
-              样本 {rowsUsed}/{rowsRequested || '—'}
-            </Tag>
-            <Tag className="m-0 rounded-full border-0 bg-slate-100 text-slate-600 font-bold">{file}</Tag>
+          <div className="flex flex-col">
+            <Text className="text-xs font-black text-slate-800 uppercase tracking-tight">归因分析</Text>
+            <Text className="text-[10px] text-slate-400 font-medium">{split} · {rowsUsed} 样本</Text>
           </div>
-          <Text className="block text-xs text-slate-700 leading-relaxed">
-            平均绝对贡献：因子影响幅度（越大越重要）｜ 平均方向贡献：正负抵消后的净效果（红=推高预测，绿=压低预测）｜ 正向占比：推高预测的样本比例
-          </Text>
-          {errorText && status !== 'completed' && (
-            <div className={clsx(
-              "rounded-2xl border px-3 py-2",
-              status === 'failed' ? "border-rose-100 bg-rose-50" : "border-amber-100 bg-amber-50"
-            )}>
-              <div className="flex items-center gap-1.5">
-                <AlertCircle size={12} className={status === 'failed' ? "text-rose-500" : "text-amber-500"} />
-                <Text className={clsx("text-[11px] font-black", status === 'failed' ? "text-rose-700" : "text-amber-700")}>
-                  {status === 'failed' ? '分析失败' : '提示'}：
-                  {errorText === 'shap_summary_not_found' ? '暂无数据' : errorText}
-                </Text>
-              </div>
-              {errorText === 'shap_summary_not_found' && (
-                <Text className="mt-1 block text-[10px] text-amber-600/80 leading-relaxed">
-                  归因分析报告通常在模型训练完成后异步生成。若模型刚完成训练，请稍后刷新。
-                </Text>
-              )}
-            </div>
-          )}
+          <Tag color={status === 'completed' ? 'green' : 'blue'} className="m-0 border-0 text-[8px] font-black uppercase rounded-md h-4 leading-4 px-2">
+            {status === 'completed' ? '已完成' : status}
+          </Tag>
         </div>
-      </Card>
+        <Button onClick={onRefresh} loading={loading} size="small" className="rounded-full h-7 text-[10px] font-bold border-slate-200 px-4">刷新数据</Button>
+      </div>
 
-      <Card
-        className="rounded-3xl border-slate-100 shadow-sm"
-        title={
-          <div className="flex items-center justify-between gap-3">
-            <span className="text-xs font-black uppercase text-slate-700">因子贡献榜</span>
-            <div className="flex items-center gap-2">
-              <Tag className="m-0 rounded-full border-0 bg-slate-100 text-slate-600 font-bold">
-                {filteredRows.length}/{rows.length}
-              </Tag>
-              <Button
-                size="small"
-                icon={<Download size={12} className={exporting ? 'animate-pulse' : ''} />}
-                className="rounded-xl text-xs font-bold"
-                onClick={handleExportCsv}
-                disabled={exporting || filteredRows.length === 0}
-                loading={exporting}
-              >
-                {exporting ? '导出中...' : '导出 CSV'}
-              </Button>
-            </div>
-          </div>
-        }
-      >
-        <Spin spinning={loading}>
-          <div className="mb-3">
-            <Input
-              value={featureQuery}
-              onChange={(e) => setFeatureQuery(e.target.value)}
-              prefix={<Search size={12} className="text-slate-400" />}
-              placeholder="搜索因子名或中文解释（支持模糊匹配）"
-              className="rounded-xl h-9 text-xs border-slate-200"
-            />
-          </div>
-          {rows.length > 0 ? (
-            <Table<ModelShapSummaryItem>
-              size="small"
-              rowKey="feature"
-              pagination={{ pageSize: 12, showSizeChanger: false }}
-              dataSource={filteredRows}
-              tableLayout="fixed"
-              locale={{ emptyText: '没有匹配的因子，请调整搜索条件' }}
-              columns={[
-                {
-                  title: <span className="text-center block">排名</span>,
-                  dataIndex: 'rank',
-                  width: 60,
-                  align: 'center',
-                  render: (value: number) => <Text className="text-xs font-black text-slate-700">{value}</Text>,
+      {/* 因子榜 */}
+      <div className="glass-panel rounded-2xl p-4 border border-slate-100/50 flex flex-col flex-1 overflow-hidden">
+        <div className="flex items-center justify-between mb-4 shrink-0">
+          <Text className="text-[10px] font-black text-slate-400 uppercase tracking-widest opacity-60">影响力排行 (SHAP)</Text>
+          <Input
+            size="small"
+            placeholder="搜索因子..."
+            prefix={<Search size={10} className="text-slate-400" />}
+            className="w-48 h-7 rounded-lg border-slate-100 bg-slate-50/50 text-[10px]"
+            value={searchText}
+            onChange={e => setSearchText(e.target.value)}
+          />
+        </div>
+
+        <div className="flex-1 overflow-hidden">
+          <Table
+            size="small"
+            dataSource={filteredRows.slice((currentPage - 1) * pageSize, currentPage * pageSize)}
+            loading={loading}
+            tableLayout="fixed"
+            pagination={false}
+            rowKey="feature"
+            className="research-table"
+            columns={[
+              {
+                title: <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest text-center block">因子</span>,
+                key: 'feature',
+                width: 160,
+                align: 'center',
+                ellipsis: true,
+                render: (_, r) => (
+                  <div className="text-center px-1">
+                    <Text className="text-[11px] font-black text-slate-800 block truncate leading-tight">{featureLabelMap[r.feature] || r.feature}</Text>
+                    <Text className="text-[8px] text-slate-400 font-mono font-bold block truncate leading-none">{r.feature}</Text>
+                  </div>
+                ),
+              },
+              {
+                title: <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest block text-center">平均绝对贡献</span>,
+                dataIndex: 'mean_abs_shap',
+                key: 'mean_abs_shap',
+                width: 180, // 稍微加宽一点以容纳三个组件
+                align: 'center',
+                sorter: (a, b) => (a.mean_abs_shap || 0) - (b.mean_abs_shap || 0),
+                render: (v) => {
+                  const percent = Math.min((v / maxAbsShap) * 100, 100);
+                  return (
+                    <div className="flex items-center w-full px-2 gap-3">
+                      {/* 左图标 */}
+                      <BarChart3 size={14} className="text-violet-400 shrink-0" />
+                      {/* 居中进度条 */}
+                      <div className="flex-1 h-1.5 bg-slate-50 rounded-full overflow-hidden relative">
+                        <div className="h-full bg-violet-500 rounded-full" style={{ width: `${percent}%` }} />
+                      </div>
+                      {/* 文字右对齐 */}
+                      <Text className="text-[10px] font-mono font-black text-violet-600 shrink-0 w-[60px] text-right">
+                        {Number(v || 0).toFixed(6)}
+                      </Text>
+                    </div>
+                  );
                 },
-                {
-                  title: <span className="text-center block">因子</span>,
-                  dataIndex: 'feature',
-                  width: 220,
-                  align: 'center',
-                  render: (value: string) => {
-                    const label = getFeatureLabel(value);
-                    const translated = label !== value;
-                    return (
-                      <Tooltip title={translated ? `${label} (${value})` : value}>
-                        <div className="mx-auto w-full max-w-[200px] min-w-0 overflow-hidden">
-                          <Text className="block w-full truncate text-xs font-black text-slate-800">{label}</Text>
-                          {translated && (
-                            <Text className="block w-full truncate text-[10px] font-mono font-bold text-slate-400">{value}</Text>
-                          )}
-                        </div>
-                      </Tooltip>
-                    );
-                  },
-                },
-                {
-                  title: <span className="text-center block">平均绝对贡献</span>,
-                  dataIndex: 'mean_abs_shap',
-                  width: 140,
-                  align: 'center',
-                  sorter: (a, b) => a.mean_abs_shap - b.mean_abs_shap,
-                  defaultSortOrder: 'descend',
-                  render: (value: number) => <Text className="text-xs font-black text-violet-700">{Number(value || 0).toFixed(6)}</Text>,
-                },
-                {
-                  title: <span className="text-center block">平均方向贡献</span>,
-                  dataIndex: 'mean_shap',
-                  width: 140,
-                  align: 'center',
-                  sorter: (a, b) => a.mean_shap - b.mean_shap,
-                  render: (value: number) => (
-                    <Text className={clsx('text-xs font-black', value >= 0 ? 'text-rose-500' : 'text-emerald-600')}>
-                      {Number(value || 0).toFixed(6)}
+              },
+              {
+                title: <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest text-center block">方向</span>,
+                dataIndex: 'mean_shap',
+                key: 'mean_shap',
+                width: 90,
+                align: 'center',
+                render: (v) => (
+                  <div className="flex flex-col items-center leading-none">
+                    <Text className={clsx("text-[10px] font-mono font-black", v >= 0 ? "text-rose-500" : "text-emerald-500")}>
+                      {v >= 0 ? '+' : ''}{Number(v || 0).toFixed(6)}
                     </Text>
-                  ),
-                },
-                {
-                  title: <span className="text-center block">正向占比</span>,
-                  dataIndex: 'positive_ratio',
-                  width: 100,
-                  align: 'center',
-                  sorter: (a, b) => a.positive_ratio - b.positive_ratio,
-                  render: (value: number) => <Text className="text-xs text-slate-600">{(Number(value || 0) * 100).toFixed(2)}%</Text>,
-                },
-              ]}
-            />
-          ) : (
-            <Empty description={<span className="text-xs text-slate-400">暂无数据</span>} />
-          )}
-        </Spin>
-      </Card>
+                  </div>
+                ),
+              },
+              {
+                title: <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest text-right block pr-2">正向比</span>,
+                dataIndex: 'positive_ratio',
+                key: 'positive_ratio',
+                width: 80,
+                align: 'right',
+                render: (v) => (
+                  <div className="pr-2 text-right">
+                    <Text className="text-[10px] font-black text-slate-700">{(Number(v || 0) * 100).toFixed(1)}%</Text>
+                  </div>
+                ),
+              },
+            ]}
+          />
+        </div>
+
+        <div className="mt-auto pt-2 flex justify-end shrink-0">
+          <Pagination
+            current={currentPage}
+            pageSize={pageSize}
+            total={filteredRows.length}
+            onChange={setCurrentPage}
+            size="small"
+            showSizeChanger={false}
+            className="research-pagination"
+          />
+        </div>
+      </div>
     </div>
   );
 };
 
-// ─── 推理中心面板 ────────────────────────────────────────────────────────────
 
 export const InferenceCenterPanel: React.FC<{
   model: UserModelRecord;
@@ -875,435 +642,233 @@ export const InferenceCenterPanel: React.FC<{
     ? currentModelName
     : modelIdToDisplayName(latestInferenceRun?.model_id);
 
+  const [currentPage, setCurrentPage] = useState(1);
+  const pageSize = 5;
+  const paginatedHistory = history.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+
   return (
-  <div className="pt-5 space-y-5">
-
-    {/* ── 前置检查 ── */}
-    <Card
-      className="rounded-3xl border-slate-100 shadow-sm"
-      title={
-        <div className="flex items-center justify-between gap-3">
-          <div className="flex items-center gap-2">
-            <Shield size={14} className="text-emerald-500" />
-            <span className="text-xs font-black text-slate-800 uppercase tracking-tighter">前置检查</span>
-            {precheck && (
-              <Tag color={precheck.passed ? 'green' : 'red'} className="text-[9px] font-black">
-                {precheck.passed ? '通过' : '阻断'}
-              </Tag>
-            )}
-          </div>
-          <Button size="small" className="rounded-xl font-bold text-xs" onClick={onRefreshPrecheck} loading={precheckLoading}>
-            重新检查
-          </Button>
-        </div>
-      }
-    >
-      <Spin spinning={precheckLoading}>
-        {precheck ? (
-          <div className="space-y-4">
-            <div className={clsx(
-              'rounded-2xl border p-4',
-              precheck.passed ? 'border-emerald-100 bg-emerald-50/70' : 'border-rose-100 bg-rose-50/70',
-            )}>
-              <div className="flex items-center justify-between gap-3">
-                <div>
-                  <Text className={clsx('text-xs font-black block', precheck.passed ? 'text-emerald-700' : 'text-rose-700')}>
-                    {precheck.passed ? '全部硬门禁通过，可以执行推理' : '存在阻断项，请先处理后再执行'}
-                  </Text>
-                  <Text className="text-[10px] text-slate-500">
-                    检查时间：{new Date(precheck.checked_at).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}
-                  </Text>
+    <div className="pt-0 pb-10">
+      {/* 这里的 items-stretch 是关键，让左右两列等高 */}
+      <div className="grid grid-cols-12 gap-5 items-stretch">
+        {/* 左侧：任务执行流 */}
+        <div className="col-span-8 space-y-4 flex flex-col">
+          {/* 前置检查 */}
+          <div className="glass-panel rounded-3xl p-5 border border-slate-100/50">
+             <div className="flex items-center justify-between mb-5">
+                <div className="flex items-center gap-3">
+                  <div className="bg-emerald-500/10 p-2 rounded-xl text-emerald-600">
+                    <Shield size={18} />
+                  </div>
+                  <div className="flex flex-col">
+                    <Text className="text-sm font-black text-slate-800 uppercase tracking-tight leading-none mb-1">推理前置预检</Text>
+                    <Text className="text-[10px] text-slate-400">行情数据与模型依赖项状态</Text>
+                  </div>
                 </div>
-                <div className="flex flex-wrap justify-end gap-2">
-                  <Tag className="m-0 rounded-full border-0 bg-slate-100 text-slate-600 font-bold">模型 {modelIdToDisplayName(precheck.model_id)}</Tag>
-                  <Tag className="m-0 rounded-full border-0 bg-blue-50 text-blue-700 font-bold">{precheck.prediction_trade_date}</Tag>
-                </div>
-              </div>
-            </div>
-
-            <div className="grid gap-2">
-              {precheck.items.map((item) => (
-                <div
-                  key={item.key}
-                  className={clsx(
-                    'flex items-start justify-between gap-3 rounded-2xl border px-4 py-3',
-                    item.passed ? 'border-slate-100 bg-white' : 'border-rose-100 bg-rose-50/50',
-                  )}
+                <Button 
+                  onClick={onRefreshPrecheck} 
+                  loading={precheckLoading}
+                  className="rounded-full border-slate-200 text-[10px] font-bold h-8 px-4"
                 >
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-2">
-                      {item.passed ? <CheckCircle2 size={12} className="text-emerald-500 flex-shrink-0" /> : <XCircle size={12} className="text-rose-500 flex-shrink-0" />}
-                      <Text className="text-xs font-black text-slate-800">{item.label}</Text>
-                      <Tag className={clsx('m-0 rounded-full border-0 text-[9px] font-bold', item.severity === 'hard' ? 'bg-rose-50 text-rose-500' : 'bg-slate-100 text-slate-500')}>
-                        {item.severity === 'hard' ? '硬门禁' : '提示'}
+                  刷新检查
+                </Button>
+             </div>
+
+             <Spin spinning={precheckLoading}>
+               {precheck ? (
+                 <div className="space-y-4">
+                    <div className={clsx(
+                      "flex items-center justify-between p-3.5 rounded-2xl border",
+                      precheck.passed ? "bg-emerald-50/40 border-emerald-100/60" : "bg-rose-50/40 border-rose-100/60"
+                    )}>
+                      <div className="flex items-center gap-3">
+                        {precheck.passed ? <CheckCircle2 size={20} className="text-emerald-500" /> : <AlertCircle size={20} className="text-rose-500" />}
+                        <div>
+                          <Text className="text-xs font-black text-slate-800 block leading-tight">
+                            {precheck.passed ? "环境就绪" : "预检阻断"}
+                          </Text>
+                          <Text className="text-[10px] text-slate-500">
+                             数据截止: {precheck.prediction_trade_date} · {dayjs(precheck.checked_at).format('HH:mm')}
+                          </Text>
+                        </div>
+                      </div>
+                      <Tag color={precheck.passed ? 'green' : 'red'} className="m-0 px-3 py-0 rounded-full border-0 font-black text-[10px]">
+                        {precheck.passed ? 'PASS' : 'FAIL'}
                       </Tag>
                     </div>
-                    <Text className="mt-1 block text-[10px] text-slate-500 break-all">{item.detail}</Text>
-                  </div>
-                  <Tag color={item.passed ? 'green' : 'red'} className="m-0 rounded-full text-[9px] font-black">
-                    {item.passed ? '通过' : '未通过'}
-                  </Tag>
+
+                    <div className="grid grid-cols-2 gap-2.5">
+                      {precheck.items.map(item => (
+                        <div key={item.key} className="flex items-center justify-between p-2.5 bg-white/40 rounded-xl border border-slate-100/60">
+                          <div className="flex items-center gap-2 min-w-0">
+                            <div className={clsx("w-1 h-1 rounded-full shrink-0", item.passed ? "bg-emerald-500" : "bg-rose-500")} />
+                            <Text className="text-[11px] font-bold text-slate-700 truncate">{item.label}</Text>
+                          </div>
+                          {item.passed ? <CheckCircle2 size={12} className="text-emerald-400" /> : <AlertCircle size={12} className="text-rose-400" />}
+                        </div>
+                      ))}
+                    </div>
+                 </div>
+               ) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={<span className="text-xs">暂无预检</span>} />}
+             </Spin>
+          </div>
+
+          {/* 手动执行面板 */}
+          <div className="glass-panel rounded-3xl p-5 border border-slate-100/50 bg-blue-50/5 flex-1 flex flex-col">
+            <div className="flex items-center gap-3 mb-5">
+              <div className="bg-blue-500/10 p-2 rounded-xl text-blue-600">
+                <Play size={18} />
+              </div>
+              <Text className="text-sm font-black text-slate-800 uppercase tracking-tight leading-none">手动推理执行</Text>
+            </div>
+
+            <div className="grid grid-cols-12 gap-5 items-end mb-4">
+              <div className="col-span-4">
+                <Text className="text-[10px] font-black text-slate-400 uppercase mb-1.5 block tracking-widest pl-1">行情基准日</Text>
+                <DatePicker
+                  value={inferenceDate}
+                  onChange={onDateChange}
+                  disabledDate={d => d.isAfter(dayjs())}
+                  className="w-full rounded-xl h-10 border-slate-100 bg-white"
+                />
+              </div>
+              <div className="col-span-4">
+                <Text className="text-[10px] font-black text-slate-400 uppercase mb-1.5 block tracking-widest pl-1">预测目标 T+{horizonDays}</Text>
+                <div className="h-10 flex items-center px-4 bg-blue-50/20 rounded-xl border border-blue-100/40">
+                  <Calendar size={14} className="text-blue-400 mr-2" />
+                  <Text className="font-mono font-black text-sm text-blue-700">{targetDateLoading ? '...' : targetDate || '—'}</Text>
                 </div>
-              ))}
+              </div>
+              <div className="col-span-4 flex gap-2">
+                <Button 
+                  type="primary" 
+                  size="large"
+                  onClick={onRun}
+                  loading={running}
+                  disabled={!precheck?.passed}
+                  className="flex-1 rounded-xl h-10 bg-blue-600 border-0 font-bold shadow-md shadow-blue-100 text-xs"
+                >
+                  立即执行
+                </Button>
+                <Button 
+                  size="large"
+                  icon={<Star size={16} />}
+                  onClick={onRunAsDefault}
+                  className="rounded-xl h-10 w-10 border-slate-200 text-slate-400"
+                />
+              </div>
             </div>
-          </div>
-        ) : (
-          <Empty description={<span className="text-xs text-slate-400">暂无检查结果，点击右上角刷新</span>} />
-        )}
-      </Spin>
-    </Card>
 
-    {/* ── 当前生效推理批次 ── */}
-    <Card
-      className="rounded-3xl border-slate-100 shadow-sm"
-      title={
-        <div className="flex items-center justify-between gap-3">
-          <div className="flex items-center gap-2">
-            <Zap size={14} className="text-emerald-500" />
-            <span className="text-xs font-black text-slate-800 uppercase tracking-tighter">当前生效推理批次</span>
-          </div>
-          <Tag className="m-0 rounded-full border-0 bg-emerald-50 text-emerald-600 font-black text-[9px]">
-            交易侧生效版本
-          </Tag>
-        </div>
-      }
-    >
-      <Spin spinning={latestInferenceRunLoading}>
-        {latestInferenceRun?.run_id ? (
-          <div className={clsx(
-            'rounded-2xl border p-4',
-            latestInferenceRun.matched_model === false ? 'border-emerald-100 bg-emerald-50/60' : 'border-slate-100 bg-slate-50',
-          )}>
-            <div className="flex flex-wrap items-start justify-between gap-3">
-              <div className="min-w-0">
-                <Text className="text-[10px] text-slate-400 font-black uppercase block">run_id</Text>
-                <Text className="text-sm font-black text-slate-900 font-mono break-all">
-                  {latestInferenceRun.run_id}
-                </Text>
-              </div>
-              <div className="flex flex-wrap justify-end gap-2">
-                {latestInferenceRun.status && (
-                  <Tag className="m-0 rounded-full border-0 bg-blue-50 text-blue-700 font-bold">
-                    {latestInferenceRun.status}
-                  </Tag>
-                )}
-                {latestInferenceRun.prediction_trade_date && (
-                  <Tag className="m-0 rounded-full border-0 bg-emerald-50 text-emerald-700 font-bold">
-                    {latestInferenceRun.prediction_trade_date}
-                  </Tag>
-                )}
-                {latestInferenceRun.matched_model !== null && (
-                  <Tag className={clsx(
-                    'm-0 rounded-full border-0 font-bold',
-                    latestInferenceRun.matched_model ? 'bg-emerald-50 text-emerald-700' : 'bg-emerald-50 text-emerald-700',
-                  )}>
-                    {latestInferenceRun.matched_model ? '当前模型匹配' : '当前模型不匹配'}
-                  </Tag>
-                )}
-              </div>
-            </div>
-            <div className="mt-3 grid grid-cols-2 gap-2">
-              <div className="rounded-xl bg-white px-3 py-2 border border-slate-100">
-                <Text className="text-[10px] text-slate-400 font-black uppercase block">模型</Text>
-                <Text className="text-xs font-black text-slate-800 break-all" title={latestInferenceRun.model_id || ''}>{latestRunModelLabel}</Text>
-              </div>
-              <div className="rounded-xl bg-white px-3 py-2 border border-slate-100">
-                <Text className="text-[10px] text-slate-400 font-black uppercase block">更新时间</Text>
-                <Text className="text-xs font-black text-slate-800 font-mono break-all">{formatPanelDateTime(latestInferenceRun.updated_at)}</Text>
-              </div>
-            </div>
-          </div>
-        ) : (
-          <Empty description={<span className="text-xs text-slate-400">暂无当前生效推理批次</span>} />
-        )}
-      </Spin>
-    </Card>
-
-    {/* ── 手动推理卡片 ── */}
-    <Card
-      className="rounded-3xl border-slate-100 shadow-sm"
-      title={
-        <div className="flex items-center gap-2">
-          <Play size={14} className="text-blue-600" />
-          <span className="text-xs font-black text-slate-800 uppercase tracking-tighter">手动推理</span>
-        </div>
-      }
-    >
-      <div className="space-y-4">
-        <div className="grid grid-cols-2 gap-4">
-          <div>
-            <Text className="text-[10px] font-black text-slate-400 uppercase block mb-1.5">推理基准日期</Text>
-            <DatePicker
-              value={inferenceDate}
-              onChange={onDateChange}
-              disabledDate={d => d.isAfter(dayjs())}
-              className="w-full rounded-xl h-10 border-slate-200 text-xs"
-              placeholder="选择行情日期"
-            />
-          </div>
-          <div>
-            <Text className="text-[10px] font-black text-slate-400 uppercase block mb-1.5">
-              预测目标日期（T+{horizonDays}）
-            </Text>
-            <div className="h-10 flex items-center px-4 bg-blue-50/60 rounded-xl border border-blue-100">
-              <Calendar size={12} className="text-blue-400 mr-2 flex-shrink-0" />
-              <Text className="font-black text-sm text-blue-700">{targetDateLoading ? '计算中…' : targetDate}</Text>
-              <Tag className="ml-2 text-[8px] font-black bg-blue-100 border-none text-blue-500">下一交易日</Tag>
+            <div className="mt-auto flex items-start gap-2.5 p-3.5 bg-blue-50/40 rounded-2xl border border-blue-100/30">
+               <Info size={14} className="text-blue-400 mt-0.5 shrink-0" />
+               <Text className="text-[10px] text-blue-600/80 leading-relaxed">
+                 <span className="font-black mr-1">温馨提示：</span>
+                 手动运行的结果会记录为“手动任务”。如果你点亮星星设为“默认”，实盘交易将直接使用本次推理的结果。
+               </Text>
             </div>
           </div>
         </div>
 
-        <div className="flex items-center gap-3">
-          <div className="flex-1 bg-slate-50 rounded-xl px-4 py-2 flex items-center gap-2 min-w-0">
-            <Brain size={11} className="text-slate-400 flex-shrink-0" />
-            <Text className="text-[10px] font-bold text-slate-400">模型：</Text>
-            <Text className="text-[10px] font-black text-slate-800 truncate" title={model.model_id}>{currentModelName}</Text>
-            {model.is_default && <Tag color="gold" className="text-[8px] font-black flex-shrink-0">默认</Tag>}
-          </div>
-          {model.is_default && onRunAsDefault && (
-            <Button
-              type="primary"
-              icon={<Zap size={13} />}
-              loading={running}
-              disabled={!inferenceDate || precheckLoading || !precheck?.passed}
-              className="rounded-xl h-10 px-4 bg-emerald-600 border-none font-black text-xs shadow-lg shadow-emerald-200 flex-shrink-0"
-              onClick={onRunAsDefault}
-            >
-              {running ? '推理中…' : '生成生产批次'}
-            </Button>
-          )}
-          <Button
-            type="primary"
-            icon={<Play size={13} />}
-            loading={running}
-            disabled={!inferenceDate || precheckLoading || !precheck?.passed}
-            className="rounded-xl h-10 px-6 bg-blue-600 border-none font-black text-xs shadow-lg shadow-blue-200 flex-shrink-0"
-            onClick={onRun}
-          >
-            {running ? '推理中…' : '生成调试批次'}
-          </Button>
-        </div>
-
-        {model.is_default && (
-          <div className="rounded-2xl border border-emerald-100 bg-emerald-50/60 px-4 py-3">
-            <Text className="block text-[10px] font-black uppercase tracking-widest text-emerald-600">生产 / 调试批次说明</Text>
-            <Text className="mt-1 block text-xs leading-relaxed text-emerald-800">
-              "生成生产批次"会按用户默认模型链路记账，产出的批次可直接进入自动托管；"生成调试批次"会按当前手动指定模型记账，只用于调试、比对和人工核查，不会被自动托管直接消费。
-            </Text>
-          </div>
-        )}
-
-        {running && (
-          <div className="space-y-1">
-            <Text className="text-[10px] text-slate-400 font-bold">正在计算股票因子排名…</Text>
-            <Progress percent={99} status="active" size="small" strokeColor="#3b82f6" />
-          </div>
-        )}
-
-        {lastRun && !running && (
-          <div className={clsx(
-            'flex items-center justify-between px-4 py-3 rounded-2xl border',
-            lastRun.status === 'failed' ? 'bg-rose-50 border-rose-200' : 'bg-emerald-50 border-emerald-200',
-          )}>
-            <div className="flex items-center gap-2">
-              {lastRun.status === 'failed'
-                ? <XCircle size={15} className="text-rose-500" />
-                : <CheckCircle2 size={15} className="text-emerald-500" />}
-              <div>
-                <Text className={clsx(
-                  'text-xs font-black block',
-                  lastRun.status === 'failed' ? 'text-rose-800' : 'text-emerald-800',
-                )}>
-                  {lastRun.status === 'failed' ? '推理失败' : '推理完成'} · {lastRun.signals_count} 支信号
-                </Text>
-                <Text className={clsx(
-                  'text-[10px]',
-                  lastRun.status === 'failed' ? 'text-rose-500' : 'text-emerald-500',
-                )}>
-                  目标日：{lastRun.target_date} · 耗时 {(lastRun.duration_ms / 1000).toFixed(1)}s
-                  {lastRun.fallback_used ? ` · 已兜底${lastRun.fallback_reason ? `：${lastRun.fallback_reason}` : ''}` : ''}
-                </Text>
+        {/* 右侧：状态与历史 - 使用 flex-1 拉齐高度 */}
+        <div className="col-span-4 space-y-4 flex flex-col h-full">
+           <div className="glass-panel rounded-2xl p-4 border border-slate-100/50 bg-gradient-to-br from-white to-emerald-50/10">
+              <div className="flex items-center justify-between mb-3">
+                 <Text className="text-[9px] font-black text-slate-400 uppercase tracking-widest">当前实盘生效</Text>
+                 <Badge status="processing" text={<span className="text-[9px] font-black text-emerald-500 uppercase">Active</span>} />
               </div>
-            </div>
-            <Button size="small" className={clsx(
-              'rounded-xl font-black text-xs',
-              lastRun.status === 'failed' ? 'border-rose-300 text-rose-700' : 'border-emerald-300 text-emerald-700',
-            )}
-              onClick={() => onViewRanking(lastRun.run_id)}>
-              查看详情
-            </Button>
-          </div>
-        )}
-      </div>
-    </Card>
+              <Spin spinning={latestInferenceRunLoading}>
+                {latestInferenceRun?.run_id ? (
+                   <div className="bg-white/60 rounded-xl p-3 border border-emerald-100/30">
+                      <Text className="text-[10px] font-mono font-black text-slate-800 break-all leading-tight block mb-2">
+                         {latestInferenceRun.run_id.slice(0, 24)}...
+                      </Text>
+                      <div className="flex items-center gap-2">
+                        <Tag className="m-0 bg-emerald-500 text-white border-0 text-[8px] font-black px-1.5">{latestInferenceRun.prediction_trade_date}</Tag>
+                        <Text className="text-[8px] text-slate-400 font-mono italic">{dayjs(latestInferenceRun.updated_at).format('HH:mm')}</Text>
+                      </div>
+                   </div>
+                ) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} className="m-0" description={<span className="text-[9px]">无数据</span>} />}
+              </Spin>
+           </div>
 
-    {/* ── 自动推理设置 ── */}
-    <Card
-      className="rounded-3xl border-slate-100 shadow-sm"
-      title={
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <Clock size={14} className="text-indigo-500" />
-            <span className="text-xs font-black text-slate-800 uppercase tracking-tighter">自动生产批次</span>
-            {autoSettings?.enabled && (
-              <Badge status="processing" text={<span className="text-[9px] font-bold text-blue-500">已开启</span>} />
-            )}
-          </div>
-          <Switch
-            checked={autoSettings?.enabled ?? false}
-            loading={autoSaving}
-            onChange={onToggleAuto}
-            checkedChildren="开启"
-            unCheckedChildren="关闭"
-          />
-        </div>
-      }
-    >
-      <div className="space-y-3">
-        {autoSettings?.schedule_desc && (
-          <div className="flex items-start gap-4 p-4 bg-indigo-50/70 rounded-2xl border border-indigo-100">
-            <Calendar size={14} className="text-indigo-400 mt-1 flex-shrink-0" />
-            <div className="flex-1">
-              <span className="text-xs font-black text-indigo-800 block mb-1">执行时机</span>
-              <span className="text-[11px] text-indigo-500 leading-relaxed block">
-                {autoSettings.schedule_desc}
-              </span>
-              <div className="mt-2 py-1.5 px-2 bg-white/60 rounded-lg border border-indigo-100/50">
-                <span className="text-[10px] text-indigo-400 font-medium flex items-center gap-1.5">
-                  <Activity size={10} /> 
-                  数据就绪后自动按默认模型链路生成生产批次
-                </span>
-              </div>
-            </div>
-          </div>
-        )}
-        <div className="grid grid-cols-2 gap-3">
-          <div className="bg-slate-50 rounded-xl p-3">
-            <Text className="text-[10px] text-slate-400 font-black uppercase block mb-1">上次生产批次</Text>
-            {autoSettings?.last_run ? (
-              <>
-                <Text className="text-[10px] font-black text-slate-700 block">
-                  {formatPanelDateTime(autoSettings.last_run.created_at, '时间未记录')}
-                </Text>
-                <Tag color={autoSettings.last_run.status === 'failed' ? 'red' : 'green'} className="text-[9px] font-bold mt-1">
-                  {autoSettings.last_run.status === 'failed' ? '失败' : '成功'} · {autoSettings.last_run.signals_count} 支
-                </Tag>
-                {autoSettings.last_run.run_id && (
-                  <div className="mt-2">
-                    <Text className="text-[10px] text-slate-400 font-black uppercase block">run_id</Text>
-                    <Text className="text-[10px] font-mono text-slate-600 break-all">{autoSettings.last_run.run_id}</Text>
-                  </div>
-                )}
-              </>
-            ) : <Text className="text-[10px] text-slate-300">尚未执行</Text>}
-          </div>
-          <div className="bg-slate-50 rounded-xl p-3">
-            <Text className="text-[10px] text-slate-400 font-black uppercase block mb-1">下次生产计划</Text>
-            {autoSettings?.enabled && autoSettings.next_run
-              ? <Text className="text-[10px] font-black text-slate-700">{formatPanelDateTime(autoSettings.next_run)}</Text>
-              : <Text className="text-[10px] text-slate-300">—（未开启）</Text>}
-          </div>
-        </div>
-      </div>
-    </Card>
-
-    {/* ── 推理历史 ── */}
-    <Card
-      className="rounded-3xl border-slate-100 shadow-sm"
-      title={
-        <div className="flex items-center gap-2">
-          <History size={14} className="text-slate-500" />
-          <span className="text-xs font-black text-slate-800 uppercase tracking-tighter">推理历史</span>
-        </div>
-      }
-    >
-      <div className="mb-4 grid grid-cols-1 gap-3 lg:grid-cols-3">
-        <Input
-          value={historyRunIdFilter}
-          onChange={e => onHistoryRunIdFilterChange(e.target.value)}
-          placeholder="按 run_id 过滤"
-          className="rounded-xl h-9 text-xs border-slate-200"
-        />
-        <Select
-          value={historyStatusFilter}
-          onChange={value => onHistoryStatusFilterChange(value as 'all' | 'running' | 'completed' | 'failed')}
-          className="w-full"
-          size="middle"
-          options={[
-            { value: 'all', label: '全部状态' },
-            { value: 'running', label: '进行中' },
-            { value: 'completed', label: '成功' },
-            { value: 'failed', label: '失败' },
-          ]}
-        />
-        <DatePicker
-          value={historyDateFilter}
-          onChange={onHistoryDateFilterChange}
-          className="w-full rounded-xl h-9 border-slate-200 text-xs"
-          placeholder="按日期过滤"
-        />
-      </div>
-      <Spin spinning={historyLoading}>
-          <Table
-          size="small"
-          rowKey="run_id"
-          pagination={false}
-          dataSource={history}
-          locale={{ emptyText: historyLoading ? ' ' : '暂无推理记录，可点击"生成生产批次"或"生成调试批次"开始' }}
-          columns={[
-            {
-              title: '状态', dataIndex: 'status', width: 72, align: 'center',
-              render: (s: string) => {
-                const cfgMap: Record<string, { icon: React.ReactNode; text: string; cls: string }> = {
-                  completed: { icon: <CheckCircle2 size={11} />, text: '成功', cls: 'text-emerald-600' },
-                  failed: { icon: <XCircle size={11} />, text: '失败', cls: 'text-red-500' },
-                  running: { icon: <Activity size={11} />, text: '进行中', cls: 'text-blue-500' },
-                };
-                const c = cfgMap[s] ?? { icon: <Clock size={11} />, text: s, cls: 'text-slate-400' };
-                return <span className={clsx('flex items-center justify-center gap-1 font-black text-[10px]', c.cls)}>{c.icon}{c.text}</span>;
-              },
-            },
-            {
-              title: '基准日期', dataIndex: 'inference_date',
-              align: 'center',
-              render: (d: string) => <Text className="block text-center text-xs font-mono text-slate-600">{d}</Text>,
-            },
-            {
-              title: '预测目标', dataIndex: 'target_date',
-              align: 'center',
-              render: (d: string) => <Text className="block text-center text-xs font-mono font-black text-blue-600">{d}</Text>,
-            },
-            {
-              title: '信号数', dataIndex: 'signals_count',
-              align: 'center',
-              render: (n: number, r: any) => r.status === 'failed'
-                ? <div className="text-center"><Tooltip title={r.error_msg}><Tag color="red" className="text-[9px] font-bold cursor-help">失败</Tag></Tooltip></div>
-                : <Text className="block text-center text-xs font-black text-slate-700">{n}</Text>,
-            },
-            {
-              title: '耗时', dataIndex: 'duration_ms',
-              align: 'center',
-              render: (ms: number) => <Text className="block text-center text-[10px] text-slate-400">{(ms / 1000).toFixed(1)}s</Text>,
-            },
-            {
-              title: '操作', key: 'action', align: 'center',
-              render: (_: any, r: InferenceRunRecord) => (
-                <div className="text-center">
-                  <Button type="link" size="small" className="font-black text-blue-600 p-0 text-[11px]" onClick={() => onViewRanking(r.run_id)}>
-                    查看详情
-                  </Button>
+           <div className="glass-panel rounded-2xl p-4 border border-slate-100/50 flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <RefreshCw size={14} className={clsx("text-blue-500", autoSettings?.enabled && "animate-spin-slow")} />
+                <div>
+                  <Text className="text-[11px] font-bold text-slate-700 block leading-tight">自动调度</Text>
+                  <Text className="text-[9px] text-slate-400">16:30 自动执行</Text>
                 </div>
-              ),
-            },
-          ]}
-        />
-      </Spin>
-    </Card>
-  </div>
+              </div>
+              <Switch size="small" checked={autoSettings?.enabled} loading={autoSaving} onChange={onToggleAuto} className={autoSettings?.enabled ? 'bg-blue-600' : ''} />
+           </div>
+
+           {/* 历史记录卡片：通过 flex-1 撑满高度，与左侧对齐 */}
+           <div className="glass-panel rounded-2xl p-4 border border-slate-100/50 flex flex-col flex-1">
+              <div className="flex items-center justify-between mb-4">
+                <div className="flex items-center gap-2 text-slate-400">
+                  <History size={14} />
+                  <Text className="text-[10px] font-black uppercase tracking-widest">推理历史</Text>
+                </div>
+                <Select
+                  size="small"
+                  value={historyStatusFilter}
+                  onChange={onHistoryStatusFilterChange}
+                  className="w-24 h-7 text-[10px]"
+                  popupClassName="rounded-xl text-[11px]"
+                >
+                  <Select.Option value="all">全部批次</Select.Option>
+                  <Select.Option value="completed">推理成功</Select.Option>
+                  <Select.Option value="failed">执行失败</Select.Option>
+                </Select>
+              </div>
+
+              <div className="space-y-1.5 flex-1 pr-0.5">
+                {historyLoading ? <div className="text-center py-6"><Spin size="small" /></div> : 
+                 history.length === 0 ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={<span className="text-[9px]">暂无记录</span>} /> :
+                 paginatedHistory.map(run => (
+                  <div key={run.run_id} className="group flex items-center justify-between p-2.5 rounded-xl bg-slate-50/40 border border-slate-100/30 hover:bg-white hover:border-blue-100 transition-all cursor-pointer" onClick={() => onViewRanking(run.run_id)}>
+                    <div className="flex flex-col min-w-0">
+                      <div className="flex items-center gap-2 mb-0.5">
+                        <div className={clsx("w-1.5 h-1.5 rounded-full shrink-0", run.status === 'completed' ? 'bg-emerald-500' : run.status === 'running' ? 'bg-blue-500' : 'bg-rose-500')} />
+                        <Text className="text-[10px] font-mono font-bold text-slate-700 truncate w-24">{run.run_id}</Text>
+                      </div>
+                      <Text className="text-[9px] text-slate-400 pl-3.5">{run.prediction_trade_date}</Text>
+                    </div>
+                    <ChevronRight size={12} className="text-slate-200 group-hover:text-blue-400" />
+                  </div>
+                ))}
+              </div>
+
+              {/* 分页器：固定在卡片底部 */}
+              {history.length > pageSize && (
+                <div className="mt-auto pt-3 border-t border-slate-50 flex justify-center">
+                  <div className="flex items-center gap-3">
+                    <Button 
+                      size="small" 
+                      disabled={currentPage === 1} 
+                      onClick={(e) => { e.stopPropagation(); setCurrentPage(p => p - 1); }}
+                      className="border-0 bg-slate-100/50 hover:bg-slate-100 rounded-lg h-6 w-6 p-0 flex items-center justify-center text-slate-500"
+                    >
+                      <ChevronDown size={14} className="rotate-90" />
+                    </Button>
+                    <Text className="text-[10px] font-bold text-slate-400">{currentPage} / {Math.ceil(history.length / pageSize)}</Text>
+                    <Button 
+                      size="small" 
+                      disabled={currentPage >= Math.ceil(history.length / pageSize)} 
+                      onClick={(e) => { e.stopPropagation(); setCurrentPage(p => p + 1); }}
+                      className="border-0 bg-slate-100/50 hover:bg-slate-100 rounded-lg h-6 w-6 p-0 flex items-center justify-center text-slate-500"
+                    >
+                      <ChevronDown size={14} className="-rotate-90" />
+                    </Button>
+                  </div>
+                </div>
+              )}
+           </div>
+        </div>
+      </div>
+    </div>
   );
 };
 
-// ─── 通用子组件 ──────────────────────────────────────────────────────────────
 
 export const MetricCard: React.FC<{ label: string; value: any; digits?: number; color?: string; isLarge?: boolean }> = ({
   label, value, digits = 3, color = 'text-slate-800', isLarge = false,

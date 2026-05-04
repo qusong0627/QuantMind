@@ -268,13 +268,18 @@ class TradingService {
      * 获取交易统计数据 (用于图表)
      * @param userId 用户ID
      * @param range 时间范围
+     * @param tradingMode 交易模式
      */
-    async getTradeStats(userId: string, range = '1m'): Promise<ChartDataPoint[]> {
+    async getTradeStats(userId: string, range = '1m', tradingMode?: TradingMode): Promise<ChartDataPoint[]> {
         try {
-            const response = await this.client.get<TradeStatsSummaryResponse | ChartDataPoint[]>(API_ENDPOINTS.TRADING_STATS, {
+            const params: Record<string, unknown> = {
                 user_id: userId,
                 range
-            });
+            };
+            if (tradingMode) {
+                params['trading_mode'] = this.normalizeTradingMode(tradingMode);
+            }
+            const response = await this.client.get<TradeStatsSummaryResponse | ChartDataPoint[]>(API_ENDPOINTS.TRADING_STATS, params);
             if (Array.isArray(response)) {
                 return response;
             }
@@ -399,11 +404,11 @@ class TradingService {
         };
     }
 
-    private normalizeTradingMode(mode?: TradingMode): TradingMode | undefined {
+    private normalizeTradingMode(mode?: TradingMode): string | undefined {
         if (!mode) return undefined;
-        const normalized = String(mode).trim().toLowerCase();
-        if (normalized === 'real') return 'real';
-        if (normalized === 'simulation') return 'simulation';
+        const normalized = String(mode).trim().toUpperCase();
+        if (normalized === 'REAL') return 'REAL';
+        if (normalized === 'SIMULATION') return 'SIMULATION';
         return undefined;
     }
 

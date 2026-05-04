@@ -366,10 +366,27 @@ class PortfolioService {
                 throw new Error('No account data received');
             }
 
-            const totalAsset = this.pickFirstNumber(
+            let totalAsset = this.pickFirstNumber(
                 [account.total_asset],
-                useSimulation ? DEFAULT_INITIAL_CAPITAL : 0,
+                0,
             );
+
+            // 增强逻辑：如果实盘资产为 0 且非模拟盘，尝试从账本历史中拉取最后一次有效资产
+            if (!useSimulation && totalAsset <= 0) {
+                try {
+                    const history = await realTradingService.getAccountLedgerDaily(1, userId, tenantId);
+                    if (history && history.length > 0) {
+                        totalAsset = this.pickFirstNumber([history[0].total_asset], 0);
+                        console.info('Using fallback asset from ledger:', totalAsset);
+                    }
+                } catch (ledgerErr) {
+                    console.warn('Failed to fetch fallback asset from ledger:', ledgerErr);
+                }
+            }
+
+            if (totalAsset <= 0 && useSimulation) {
+                totalAsset = DEFAULT_INITIAL_CAPITAL;
+            }
 
             const metrics = (account && typeof account.metrics === 'object' && account.metrics)
                 ? account.metrics
@@ -379,9 +396,16 @@ class PortfolioService {
                 : {};
 
             let initialCapital = Number.isFinite(totalAsset)
-                ? Math.max(0, totalAsset - this.pickFirstNumber([account.total_pnl, metrics.total_pnl], 0))
+                ? Math.max(0, totalAsset - this.pickFirstNumber([account.total_pnl, account.total_pnl_raw, metrics.total_pnl], 0))
                 : 0;
             let initialCapitalEstimated = false;
+            
+            // 兜底：如果算出来的初始权益为 0 或与总资产相等，且数据库里有明确的 initial_equity 字段，则优先使用
+            const dbInitialEquity = this.pickFirstNumber([account.initial_equity], 0);
+            if (dbInitialEquity > 0 && (initialCapital <= 0 || initialCapital === totalAsset)) {
+                initialCapital = dbInitialEquity;
+            }
+
             if (useSimulation) {
                 try {
                     const settings = await realTradingService.getSimulationSettings();
@@ -406,13 +430,14 @@ class PortfolioService {
                 }
             }
 
-            const totalPnL = this.pickFirstNumber([account.total_pnl, metrics.total_pnl], 0);
-            const todayPnL = this.pickFirstNumber([account.daily_pnl, account.today_pnl, metrics.daily_pnl, metrics.today_pnl], 0);
-            const monthlyPnLValue = this.pickFirstNumber([account.monthly_pnl, metrics.monthly_pnl], Number.NaN);
+            const totalPnL = this.pickFirstNumber([account.total_pnl, account.total_pnl_raw, metrics.total_pnl], 0);
+            const todayPnL = this.pickFirstNumber([account.daily_pnl, account.today_pnl, account.today_pnl_raw, metrics.daily_pnl, metrics.today_pnl], 0);
+            const monthlyPnLValue = this.pickFirstNumber([account.monthly_pnl, account.monthly_pnl_raw, metrics.monthly_pnl], Number.NaN);
             const dayOpenEquity = this.pickFirstNumber(
                 [
                     account?.baseline?.day_open_equity,
                     account.day_open_equity,
+                    account.initial_equity, // 增加 initial_equity 作为日初权益的最后保底
                     metricsMeta?.baseline?.day_open_equity,
                 ],
                 0,

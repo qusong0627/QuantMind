@@ -1,10 +1,11 @@
 # stock_daily_latest 数据表维护文档
 
-> 生成时间：2026-05-02
+> 生成时间：2026-05-04
 > 数据范围：2026-01-05 ~ 2026-04-30
-> 总记录数：399,244 行
-> 股票数量：5,201 只
-> 最新复权示例：SH600519 贵州茅台 2026-04-24 收盘价 12,635.00 / 复权因子 8.6631 = 实际价格 1,458.49 元
+> 总记录数：415,014 行
+> 股票数量：5,208 只（已剔除B股、北交所股票）
+> 股票简称填充率：100%
+> 最新复权示例：SH600519 贵州茅台 2026-04-30 收盘价 12,014.32 / 复权因子 8.2297 = 实际价格 1,461.72 元
 
 ---
 
@@ -55,9 +56,9 @@
 | 39 | kdj_k | double | KDJ 指标 K 值 |
 | 40 | kdj_d | double | KDJ 指标 D 值 |
 | 41 | kdj_j | double | KDJ 指标 J 值 |
-| 42 | macd_dif | double | MACD DIF 线 |
-| 43 | macd_dea | double | MACD DEA 线 |
-| 44 | macd_hist | double | MACD 柱状值 |
+| 42 | macd_dif | double | MACD DIF 线，使用标准 EMA 方法计算 |
+| 43 | macd_dea | double | MACD DEA 线，使用标准 EMA 方法计算 |
+| 44 | macd_hist | double | MACD 柱状值，DIF - DEA 的 2 倍 |
 | 45 | vol_std_5 | double | 近 5 日波动率指标 |
 | 46 | vol_std_20 | double | 近 20 日波动率指标 |
 | 47 | vol_std_60 | double | 近 60 日波动率指标 |
@@ -136,7 +137,7 @@
 
 ---
 
-## 二、数据填充率明细（2026-05-02 更新）
+## 二、数据填充率明细（2026-05-04 更新）
 
 ### 2.1 填充率 100% (28 个字段) ✅
 
@@ -146,7 +147,7 @@
 | 基础行情 | open, high, low, close, volume |
 | 均线系统 | ma5, ma10, ma20, ma60 |
 | 均线偏离度 | ma_gap_5, ma_gap_10, ma_gap_20 |
-| MACD | macd_dif, macd_dea, macd_hist |
+| MACD | macd_dif, macd_dea, macd_hist (已修正为标准 EMA 方法) |
 | 均量/均额 | volume_ma_3, volume_ma_5, amount_ma_5 |
 | 涨跌停 | limit_up_today, consecutive_limit_up_days |
 | 其他 | listing_market, adj_factor, vol_atr_14, idx_all, idx_hs300, idx_zz500, idx_zz1000, idx_margin, idx_chinext |
@@ -306,6 +307,11 @@ python scripts/data/processing/verify_backfill.py
 
 | 日期 | 操作 | 说明 |
 |------|------|------|
+| 2026-05-04 | 股票简称补全 | 从 akshare 拉取最新股票快照，补全股票简称至 100% |
+| 2026-05-04 | 清理无效数据 | 删除 B股（78只）、北交所（312只）数据，共 14,346 条记录 |
+| 2026-05-04 | MACD 算法修正 | 将 MACD 指标从简化 SMA 方法修正为标准 EMA 方法，更新 211,620 条记录 |
+| 2026-05-04 | 技术指标重算 | 从 DuckDB 重新导出完整 OHLCV 数据（含正确复权因子），重算并更新 2026 年全部技术指标 |
+| 2026-05-04 | 数据导出 | 导出 stock_daily_latest 表为 CSV 压缩文件 |
 | 2026-05-02 | 移除 return_120d | 删除实用性不大的120日收益率字段 |
 | 2026-05-02 | 指标补全 | 使用 backfill 脚本补全 399,244 条记录的技术指标 |
 | 2026-05-02 | 字段注释补全 | 为生产库 `stock_daily_latest` 全部 90 个字段写入数据库注释 |
@@ -317,10 +323,10 @@ python scripts/data/processing/verify_backfill.py
 ## 七、数据库连接信息
 
 ```
-Host: 210.16.175.87
+Host: <your_database_host>
 Port: 5432
 Database: quantmind
-User: quantmind
+User: <your_database_user>
 Table: stock_daily_latest
 ```
 
