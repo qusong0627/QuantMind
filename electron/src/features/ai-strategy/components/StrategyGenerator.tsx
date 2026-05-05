@@ -103,7 +103,7 @@ export const StrategyGenerator: React.FC<StrategyGeneratorProps> = ({
         label: '策略描述',
         type: 'textarea',
         required: true,
-        placeholder: '请详细描述您想要的策略，例如：基于MACD指标的股票趋势跟踪策略...',
+        placeholder: '请详细描述您想要的策略，例如：股价突破20日均线且放量的趋势跟踪策略...',
         validation: [
           { type: 'required', message: '请输入策略描述' },
           { type: 'minLength', value: 10, message: '策略描述至少需要10个字符' },

@@ -181,7 +181,7 @@ class PromptTemplates:
 请按照以下JSON格式返回:
 {{
     "strategy_type": "策略类型 (trend_following/mean_reversion/arbitrage/breakout/momentum/other)",
-    "indicators": ["需要的技术指标列表，如: MA, MACD, RSI, BOLL, KDJ, ATR等"],
+    "indicators": ["需要的技术指标列表，如: MA, RSI, BOLL, KDJ, ATR, MACD等"],
     "timeframe": "时间周期 (1min/5min/15min/30min/1h/daily/weekly/monthly)",
     "symbols": ["股票范围，如: hs300, sz50, 具体股票代码等"],
     "entry_conditions": ["入场条件的自然语言描述"],
@@ -225,7 +225,7 @@ class PromptTemplates:
     "strategy_name": "策略名称",
     "strategy_description": "策略详细描述，包括策略原理、适用市场等",
     "entry_logic": {{
-        "conditions": ["具体的入场条件，如: MACD金叉且价格突破MA20"],
+        "conditions": ["具体的入场条件，如: 布林带下轨反弹且RSI超卖、均线多头排列放量突破等"],
         "logic": "条件组合逻辑 (AND表示所有条件满足, OR表示任一条件满足)"
     }},
     "exit_logic": {{

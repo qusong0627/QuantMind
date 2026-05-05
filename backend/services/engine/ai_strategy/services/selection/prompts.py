@@ -84,9 +84,9 @@ WHERE ...
 3. **市值处理**: 用户说"100亿"即 `total_mv > 10000000000` (单位为元)
 4. **日期处理**: 默认使用最新交易日：`trade_date = (SELECT MAX(trade_date) FROM stock_daily_latest)`
 
-### 金叉/死叉等时序条件实现示例
+### 金叉/死叉等时序条件实现示例（通用模式）
 
-**MACD金叉**（当前DIF上穿DEA）：
+**通用金叉/死叉模式**（以 MA5 上穿 MA20 为例，关键表达式: `t1.\`指标A\` > t1.\`指标B\` AND EXISTS(...t0.\`指标A\` <= t0.\`指标B\`...)`，替换指标字段名即可适配 MACD/KDJ/RSI 等各类金叉死叉场景）：
 ```sql
 SELECT
     t1.code as symbol, t1.stock_name as name, t1.trade_date, t1.close, t1.total_mv, t1.industry,
@@ -99,12 +99,12 @@ SELECT
     t1.sma5, t1.sma20, t1.sma60, t1.rsi
 FROM stock_daily_latest t1
 WHERE t1.trade_date = (SELECT MAX(trade_date) FROM stock_daily_latest)
-  AND t1.macd_dif > t1.macd_dea
+  AND t1.sma5 > t1.sma20
   AND EXISTS (
     SELECT 1 FROM stock_daily_latest t0
     WHERE t0.code = t1.code
       AND t0.trade_date < t1.trade_date
-      AND t0.macd_dif <= t0.macd_dea
+      AND t0.sma5 <= t0.sma20
     ORDER BY t0.trade_date DESC LIMIT 1
   )
 ```

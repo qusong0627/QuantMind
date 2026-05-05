@@ -1,8 +1,8 @@
+@import './research-next-theme.css';
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
-
-@import './research-next-theme.css';
 
 :root {
   /* 顶级量化平台 - 现代化视觉系统升级 */

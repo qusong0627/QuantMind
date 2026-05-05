@@ -42,22 +42,28 @@ class SkillEngine:
         返回列表中可能包含多个模板名，按优先级排序：
         - 主模板（traditional_indicator_backtest 或 qlib_model_strategy_config）
         - 防护模板（debug_guardrail，当有错误信息时）
+
+        仅当用户输入包含明确的技术意图关键词时，才注入策略模板。
+        普通对话、问候等不触发模板注入。
         """
-        templates = []
         user_lower = user_input.lower()
         error_msg = context.get("error_msg", "")
 
-        # 检测主意图
         traditional_score = sum(1 for kw in self.TRADITIONAL_KEYWORDS if kw.lower() in user_lower)
         model_score = sum(1 for kw in self.MODEL_KEYWORDS if kw.lower() in user_lower)
 
-        if model_score > traditional_score:
-            templates.append("qlib_model_strategy_config")
-        else:
-            templates.append("traditional_indicator_backtest")
+        templates = []
+
+        # 仅在有明确技术意图时才注入策略模板
+        if traditional_score > 0 or model_score > 0:
+            if model_score > traditional_score:
+                templates.append("qlib_model_strategy_config")
+            else:
+                templates.append("traditional_indicator_backtest")
+        # 否则不注入策略模板，让系统提示词主导对话风格
 
         # 如果有错误信息，叠加调试防护模板
-        if error_msg:
+        if error_msg and (traditional_score > 0 or model_score > 0):
             templates.append("debug_guardrail")
 
         return templates

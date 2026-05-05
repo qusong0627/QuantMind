@@ -110,7 +110,7 @@ export const AIStrategyGenerator: React.FC<AIStrategyGeneratorProps> = ({
             <textarea
               value={description}
               onChange={(e) => setDescription(e.target.value)}
-              placeholder="例如: 基于MACD金叉的买入策略，当MACD线上穿信号线时买入，下穿时卖出..."
+              placeholder="请描述策略逻辑，例如: 股价突破布林带下轨且成交量放大时买入，触及上轨时卖出..."
               className="w-full h-32 px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent resize-none text-gray-800 placeholder-gray-400"
               disabled={isGenerating}
             />

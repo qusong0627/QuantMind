@@ -279,7 +279,7 @@ export const EnhancedStrategyGenerator: React.FC<EnhancedStrategyGeneratorProps>
                     >
                       <TextArea
                         rows={4}
-                        placeholder="例如：基于MACD和RSI指标的趋势跟踪策略，当MACD金叉且RSI低于30时买入，MACD死叉或RSI高于70时卖出..."
+                        placeholder="请描述你想要的策略，例如：股价突破20日均线且成交量放大时买入，跌破10日均线卖出..."
                         showCount
                         maxLength={1000}
                       />

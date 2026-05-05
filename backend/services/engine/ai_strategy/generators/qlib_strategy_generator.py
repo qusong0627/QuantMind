@@ -172,7 +172,7 @@ class QlibStrategyCodeGenerator:
     "strategy_name": "策略名称（英文，如DoubleMAStrategy）",
     "strategy_description": "策略简短描述",
 
-    "indicators": ["需要的技术指标，如MA5、MA20、MACD等"],
+    "indicators": ["需要的技术指标，如MA5、RSI、BOLL、ATR、KDJ等"],
     "timeframe": "时间周期：daily/weekly/monthly",
     "universe": "股票池：csi300/csi500/all",
 
