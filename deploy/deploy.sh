@@ -334,7 +334,24 @@ ensure_frontend_prereqs() {
 _install_docker_compose_plugin() {
     log_info "安装 Docker Compose 插件（v2.19+）..."
 
-    # 方案 1：阿里云 Docker CE 镜像源（国内可用，版本最新）
+    # 方案 1：直接 apt 安装（Ubuntu 官方源，无需额外配置）
+    apt-get update -y
+    if DEBIAN_FRONTEND=noninteractive apt-get install -y docker-compose-plugin 2>/dev/null; then
+        if docker compose version &> /dev/null; then
+            log_info "Docker Compose 安装成功"
+            return 0
+        fi
+    fi
+
+    # 方案 2：尝试 docker-compose-v2 包名
+    if DEBIAN_FRONTEND=noninteractive apt-get install -y docker-compose-v2 2>/dev/null; then
+        if docker compose version &> /dev/null || docker-compose version &> /dev/null; then
+            log_info "Docker Compose 安装成功"
+            return 0
+        fi
+    fi
+
+    # 方案 3：阿里云 Docker CE 镜像源
     local codename
     codename=$(lsb_release -cs 2>/dev/null || echo "focal")
     local arch
@@ -350,24 +367,6 @@ _install_docker_compose_plugin() {
         DEBIAN_FRONTEND=noninteractive apt-get install -y docker-compose-plugin
         if docker compose version &> /dev/null; then
             log_info "Docker Compose 安装成功"
-            return 0
-        fi
-    fi
-
-    # 方案 2：直接下载二进制（GitHub Releases，可走代理）
-    # 锁定 v2.19 以上版本
-    local compose_ver="v2.30.3"
-    local compose_url
-    compose_url="https://github.com/docker/compose/releases/download/${compose_ver}/docker-compose-linux-${arch}"
-
-    log_info "通过二进制方式安装 Docker Compose ${compose_ver} ..."
-    local cli_plugins_dir="/usr/local/lib/docker/cli-plugins"
-    mkdir -p "$cli_plugins_dir"
-
-    if curl -fsSL --connect-timeout 10 -o "${cli_plugins_dir}/docker-compose" "$compose_url"; then
-        chmod +x "${cli_plugins_dir}/docker-compose"
-        if docker compose version &> /dev/null; then
-            log_info "Docker Compose ${compose_ver} 安装成功"
             return 0
         fi
     fi
