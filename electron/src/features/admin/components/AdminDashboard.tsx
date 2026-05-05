@@ -107,12 +107,14 @@ export const AdminDashboard: React.FC = () => {
         </div>
     );
 
-    const serviceStats = [
-        { name: 'API 网关', port: '8000', desc: '认证与统一网关', icon: <ApiOutlined />, load: 42, color: 'blue' },
-        { name: '推理引擎', port: '8001', desc: 'AI 推理与回测', icon: <ThunderboltOutlined />, load: 84, color: 'orange' },
-        { name: '交易核心', port: '8002', desc: '订单与持仓管理', icon: <SwapOutlined />, load: 18, color: 'emerald' },
-        { name: '实时行情', port: '8003', desc: '行情接入与推送', icon: <GlobalOutlined />, load: 31, color: 'indigo' },
-    ];
+    const serviceStats = metrics.services || [];
+
+    const iconMap: Record<string, React.ReactNode> = {
+        api: <ApiOutlined />,
+        engine: <ThunderboltOutlined />,
+        trade: <SwapOutlined />,
+        stream: <GlobalOutlined />,
+    };
 
     return (
         <div className="space-y-8 animate-in fade-in duration-500">
@@ -133,13 +135,13 @@ export const AdminDashboard: React.FC = () => {
 
             {/* Core Services Grid */}
             <Row gutter={[20, 20]}>
-                {serviceStats.map((s) => (
-                    <Col xs={24} sm={12} lg={6} key={s.name}>
+                {serviceStats.map((s, idx) => (
+                    <Col xs={24} sm={12} lg={6} key={s.name || idx}>
                         <Card className="rounded-2xl border-slate-200 shadow-sm hover:shadow-md transition-all">
                             <div className="flex items-center justify-between mb-4">
                                 <div className="flex items-center gap-3">
                                     <div className={`w-10 h-10 rounded-xl bg-slate-50 flex items-center justify-center text-slate-600 border border-slate-100`}>
-                                        {s.icon}
+                                        {iconMap[s.icon] || <ApiOutlined />}
                                     </div>
                                     <div>
                                         <div className="flex items-center gap-1.5">
@@ -215,56 +217,39 @@ export const AdminDashboard: React.FC = () => {
                     <div className="space-y-6">
                         <Title level={5} className="!m-0 !font-black !text-slate-800 text-xs opacity-50">最近事件</Title>
                         <Card className="rounded-2xl border-slate-200 shadow-sm p-2">
-                            <List
-                                itemLayout="horizontal"
-                                dataSource={[
-                                    { title: '新 API 节点加入集群', time: '2分钟前', type: 'success' },
-                                    { title: '策略执行完成', time: '14分钟前', type: 'info' },
-                                    { title: '市场数据同步开始', time: '45分钟前', type: 'info' },
-                                    { title: '引擎服务内存使用率偏高', time: '1小时前', type: 'warning' },
-                                    { title: '系统备份完成', time: '3小时前', type: 'success' },
-                                    { title: '新用户注册', time: '5小时前', type: 'info' },
-                                ]}
-                                renderItem={(item) => (
-                                    <List.Item className="!px-4 !py-3 hover:bg-slate-50 rounded-xl transition-all cursor-pointer">
-                                        <List.Item.Meta
-                                            avatar={
-                                                <div className={`mt-1.5 w-2 h-2 rounded-full ${
-                                                    item.type === 'success' ? 'bg-emerald-500' : 
-                                                    item.type === 'warning' ? 'bg-rose-500' : 'bg-blue-500'
-                                                }`} />
-                                            }
-                                            title={<span className="text-xs font-bold text-slate-700">{item.title}</span>}
-                                            description={<span className="text-[10px] text-slate-400 font-bold">{item.time}</span>}
-                                        />
-                                    </List.Item>
-                                )}
-                            />
-                            <div className="p-4 pt-2">
-                                <Button block className="rounded-xl border-slate-200 text-slate-500 font-bold text-xs h-10 hover:border-slate-800 hover:text-slate-800">
-                                    查看审计日志
-                                </Button>
-                            </div>
-                        </Card>
-
-                        <div className="bg-slate-900 rounded-3xl p-6 text-white overflow-hidden relative shadow-lg shadow-slate-200">
-                             <div className="relative z-10">
-                                <div className="flex items-center gap-2 mb-4">
-                                    <div className="w-8 h-8 rounded-lg bg-white/10 flex items-center justify-center text-white">
-                                        <DeploymentUnitOutlined />
+                            {metrics.recent_events && metrics.recent_events.length > 0 ? (
+                                <>
+                                    <List
+                                        itemLayout="horizontal"
+                                        dataSource={metrics.recent_events}
+                                        renderItem={(item: any) => (
+                                            <List.Item className="!px-4 !py-3 hover:bg-slate-50 rounded-xl transition-all cursor-pointer">
+                                                <List.Item.Meta
+                                                    avatar={
+                                                        <div className={`mt-1.5 w-2 h-2 rounded-full ${
+                                                            item.type === 'success' ? 'bg-emerald-500' : 
+                                                            item.type === 'warning' ? 'bg-rose-500' : 'bg-blue-500'
+                                                        }`} />
+                                                    }
+                                                    title={<span className="text-xs font-bold text-slate-700">{item.title}</span>}
+                                                    description={<span className="text-[10px] text-slate-400 font-bold">{item.time}</span>}
+                                                />
+                                            </List.Item>
+                                        )}
+                                    />
+                                    <div className="p-4 pt-2">
+                                        <Button block className="rounded-xl border-slate-200 text-slate-500 font-bold text-xs h-10 hover:border-slate-800 hover:text-slate-800">
+                                            查看审计日志
+                                        </Button>
                                     </div>
-                                    <Text className="text-white text-xs font-black">网络状态</Text>
+                                </>
+                            ) : (
+                                <div className="py-12 flex flex-col items-center justify-center">
+                                    <ClockCircleOutlined className="text-slate-300 text-3xl mb-3" />
+                                    <Text className="text-slate-400 font-bold text-xs">暂无事件记录</Text>
                                 </div>
-                                <div className="flex items-baseline gap-1 mb-1">
-                                    <span className="text-3xl font-black tracking-tighter">0.42</span>
-                                    <span className="text-white/40 font-bold text-xs">ms</span>
-                                </div>
-                                <Text className="text-white/40 text-[10px] font-bold block mb-4">平均 API 延迟</Text>
-                                <Progress percent={98} size="small" strokeColor="#10b981" trailColor="rgba(255,255,255,0.1)" strokeWidth={4} />
-                                <Text className="text-emerald-400 text-[10px] font-black block mt-2">可靠性极佳</Text>
-                             </div>
-                             <div className="absolute -bottom-6 -right-6 w-32 h-32 bg-white/5 rounded-full blur-3xl" />
-                        </div>
+                            )}
+                        </Card>
                     </div>
                 </Col>
             </Row>

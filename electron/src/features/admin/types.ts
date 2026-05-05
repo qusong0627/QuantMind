@@ -334,6 +334,19 @@ export interface DashboardMetrics {
         health_score: number;
         uptime_days: number;
     };
+    services?: Array<{
+        name: string;
+        port: string;
+        desc: string;
+        icon: string;
+        load: number;
+        color: string;
+    }>;
+    recent_events?: Array<{
+        title: string;
+        time: string;
+        type: 'success' | 'warning' | 'info';
+    }>;
 }
 
 export type AdminTab = 'dashboard' | 'users' | 'models' | 'data' | 'strategy-templates';
