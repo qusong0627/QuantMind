@@ -38,9 +38,8 @@ class PoolAddRequest(BaseModel):
     features_snapshot: dict[str, Any] | None = None
 
 # SQL 辅助：Join 条件与选择字段 (基于实际数据库列名映射)
-_SDL_JOIN_CONDITION = """
-(
-    sdl.symbol = CASE
+_NORM_SYMBOL = """
+    CASE
         WHEN snap.symbol ~* '^(SH|SZ|BJ)[0-9]{6}$' THEN UPPER(snap.symbol)
         WHEN snap.symbol ~* '^[0-9]{6}\\.(SH|SZ|BJ)$' THEN UPPER(RIGHT(snap.symbol, 2)) || LEFT(snap.symbol, 6)
         WHEN snap.symbol ~ '^[0-9]{6}$' AND LEFT(snap.symbol, 1) IN ('6', '9') THEN 'SH' || snap.symbol
@@ -48,6 +47,11 @@ _SDL_JOIN_CONDITION = """
         WHEN snap.symbol ~ '^[0-9]{6}$' THEN 'SZ' || snap.symbol
         ELSE UPPER(snap.symbol)
     END
+"""
+
+_SDL_JOIN_CONDITION = f"""
+(
+    sdl.symbol = {_NORM_SYMBOL}
 )
 """
 
@@ -284,7 +288,7 @@ async def _do_get_overview(tid: str, uid: str, model_id: str | None, run_id: str
                 OR sdl_base.trade_date = snap.prediction_trade_date
             )
         )
-        LEFT JOIN sdl_with_ret sdl_latest ON ({_SDL_JOIN_CONDITION.replace('sdl', 'sdl_latest')}) AND sdl_latest.trade_date = sdl_base.latest_date
+        LEFT JOIN sdl_with_ret sdl_latest ON ({_SDL_JOIN_CONDITION.replace('sdl', 'sdl_latest')}) AND sdl_latest.trade_date = COALESCE(sdl_base.latest_date, (SELECT MAX(trade_date) FROM stock_daily_latest WHERE symbol = {_NORM_SYMBOL}))
         LEFT JOIN sdl_with_ret sdl_next ON ({_SDL_JOIN_CONDITION.replace('sdl', 'sdl_next')}) AND sdl_next.trade_date = sdl_base.next_date
         LEFT JOIN sdl_with_ret sdl_3d ON ({_SDL_JOIN_CONDITION.replace('sdl', 'sdl_3d')}) AND sdl_3d.trade_date = sdl_base.date_3d
         WHERE {where} ORDER BY snap.score_rank ASC LIMIT :limit OFFSET :offset"""
@@ -469,7 +473,7 @@ async def get_symbols_features(req: SymbolsFeaturesRequest, current_user: dict =
                 OR sdl_base.trade_date = snap.prediction_trade_date
             )
         )
-        LEFT JOIN sdl_with_ret sdl_latest ON ({_SDL_JOIN_CONDITION.replace('sdl', 'sdl_latest')}) AND sdl_latest.trade_date = COALESCE(sdl_base.latest_date, (SELECT MAX(trade_date) FROM stock_daily_latest WHERE symbol = snap.symbol))
+        LEFT JOIN sdl_with_ret sdl_latest ON ({_SDL_JOIN_CONDITION.replace('sdl', 'sdl_latest')}) AND sdl_latest.trade_date = COALESCE(sdl_base.latest_date, (SELECT MAX(trade_date) FROM stock_daily_latest WHERE symbol = {_NORM_SYMBOL}))
         LEFT JOIN sdl_with_ret sdl_next ON ({_SDL_JOIN_CONDITION.replace('sdl', 'sdl_next')}) AND sdl_next.trade_date = sdl_base.next_date
         LEFT JOIN sdl_with_ret sdl_3d ON ({_SDL_JOIN_CONDITION.replace('sdl', 'sdl_3d')}) AND sdl_3d.trade_date = sdl_base.date_3d
         WHERE snap.rn = 1
