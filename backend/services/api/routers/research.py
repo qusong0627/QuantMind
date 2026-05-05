@@ -277,7 +277,13 @@ async def _do_get_overview(tid: str, uid: str, model_id: str | None, run_id: str
         sql = f"""WITH sdl_with_ret AS NOT MATERIALIZED ({_SDL_WITH_RET})
         SELECT snap.*, {_SDL_SELECT} 
         FROM qm_research_candidate_snapshot snap 
-        LEFT JOIN sdl_with_ret sdl_base ON ({_SDL_JOIN_CONDITION.replace('sdl', 'sdl_base')}) AND sdl_base.next_date = snap.prediction_trade_date
+        LEFT JOIN sdl_with_ret sdl_base ON (
+            {_SDL_JOIN_CONDITION.replace('sdl', 'sdl_base')}
+            AND (
+                sdl_base.next_date = snap.prediction_trade_date
+                OR sdl_base.trade_date = snap.prediction_trade_date
+            )
+        )
         LEFT JOIN sdl_with_ret sdl_latest ON ({_SDL_JOIN_CONDITION.replace('sdl', 'sdl_latest')}) AND sdl_latest.trade_date = sdl_base.latest_date
         LEFT JOIN sdl_with_ret sdl_next ON ({_SDL_JOIN_CONDITION.replace('sdl', 'sdl_next')}) AND sdl_next.trade_date = sdl_base.next_date
         LEFT JOIN sdl_with_ret sdl_3d ON ({_SDL_JOIN_CONDITION.replace('sdl', 'sdl_3d')}) AND sdl_3d.trade_date = sdl_base.date_3d
@@ -456,7 +462,13 @@ async def get_symbols_features(req: SymbolsFeaturesRequest, current_user: dict =
         )
         SELECT snap.*, {_SDL_SELECT} 
         FROM snap 
-        LEFT JOIN sdl_with_ret sdl_base ON ({_SDL_JOIN_CONDITION.replace('sdl', 'sdl_base')}) AND sdl_base.next_date = snap.prediction_trade_date
+        LEFT JOIN sdl_with_ret sdl_base ON (
+            {_SDL_JOIN_CONDITION.replace('sdl', 'sdl_base')}
+            AND (
+                sdl_base.next_date = snap.prediction_trade_date
+                OR sdl_base.trade_date = snap.prediction_trade_date
+            )
+        )
         LEFT JOIN sdl_with_ret sdl_latest ON ({_SDL_JOIN_CONDITION.replace('sdl', 'sdl_latest')}) AND sdl_latest.trade_date = COALESCE(sdl_base.latest_date, (SELECT MAX(trade_date) FROM stock_daily_latest WHERE symbol = snap.symbol))
         LEFT JOIN sdl_with_ret sdl_next ON ({_SDL_JOIN_CONDITION.replace('sdl', 'sdl_next')}) AND sdl_next.trade_date = sdl_base.next_date
         LEFT JOIN sdl_with_ret sdl_3d ON ({_SDL_JOIN_CONDITION.replace('sdl', 'sdl_3d')}) AND sdl_3d.trade_date = sdl_base.date_3d
