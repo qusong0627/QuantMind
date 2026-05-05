@@ -283,10 +283,7 @@ async def _do_get_overview(tid: str, uid: str, model_id: str | None, run_id: str
         FROM qm_research_candidate_snapshot snap 
         LEFT JOIN sdl_with_ret sdl_base ON (
             {_SDL_JOIN_CONDITION.replace('sdl', 'sdl_base')}
-            AND (
-                sdl_base.next_date = snap.prediction_trade_date
-                OR sdl_base.trade_date = snap.prediction_trade_date
-            )
+            AND sdl_base.next_date = snap.prediction_trade_date
         )
         LEFT JOIN sdl_with_ret sdl_latest ON ({_SDL_JOIN_CONDITION.replace('sdl', 'sdl_latest')}) AND sdl_latest.trade_date = COALESCE(sdl_base.latest_date, (SELECT MAX(trade_date) FROM stock_daily_latest WHERE symbol = {_NORM_SYMBOL}))
         LEFT JOIN sdl_with_ret sdl_next ON ({_SDL_JOIN_CONDITION.replace('sdl', 'sdl_next')}) AND sdl_next.trade_date = sdl_base.next_date
@@ -468,10 +465,7 @@ async def get_symbols_features(req: SymbolsFeaturesRequest, current_user: dict =
         FROM snap 
         LEFT JOIN sdl_with_ret sdl_base ON (
             {_SDL_JOIN_CONDITION.replace('sdl', 'sdl_base')}
-            AND (
-                sdl_base.next_date = snap.prediction_trade_date
-                OR sdl_base.trade_date = snap.prediction_trade_date
-            )
+            AND sdl_base.next_date = snap.prediction_trade_date
         )
         LEFT JOIN sdl_with_ret sdl_latest ON ({_SDL_JOIN_CONDITION.replace('sdl', 'sdl_latest')}) AND sdl_latest.trade_date = COALESCE(sdl_base.latest_date, (SELECT MAX(trade_date) FROM stock_daily_latest WHERE symbol = {_NORM_SYMBOL}))
         LEFT JOIN sdl_with_ret sdl_next ON ({_SDL_JOIN_CONDITION.replace('sdl', 'sdl_next')}) AND sdl_next.trade_date = sdl_base.next_date
