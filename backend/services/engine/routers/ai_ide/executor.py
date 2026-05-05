@@ -53,7 +53,7 @@ jobs = {}
 
 _DEFAULT_IMAGE = os.getenv("AI_IDE_RUNNER_IMAGE", "quantmind-oss:latest")
 _IMAGE = _DEFAULT_IMAGE
-_NETWORK = os.getenv("AI_IDE_DOCKER_NETWORK", "quantmind-network")
+_NETWORK = os.getenv("AI_IDE_DOCKER_NETWORK", "quantmind_quantmind-net")
 _SMOKE_CACHE_TTL = int(os.getenv("AI_IDE_SMOKE_CACHE_TTL_SECONDS", "1800"))
 _SMOKE_ALLOW_PULL = os.getenv(
     "AI_IDE_SMOKE_ALLOW_PULL", "true"
