@@ -404,11 +404,11 @@ class TradingService {
         };
     }
 
-    private normalizeTradingMode(mode?: TradingMode): string | undefined {
+    private normalizeTradingMode(mode?: TradingMode): TradingMode | undefined {
         if (!mode) return undefined;
-        const normalized = String(mode).trim().toUpperCase();
-        if (normalized === 'REAL') return 'REAL';
-        if (normalized === 'SIMULATION') return 'SIMULATION';
+        const normalized = String(mode).trim().toLowerCase();
+        if (normalized === 'real') return 'real';
+        if (normalized === 'simulation') return 'simulation';
         return undefined;
     }
 

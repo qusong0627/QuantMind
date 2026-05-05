@@ -1,6 +1,6 @@
 // 服务状态检测服务
 import axios from 'axios';
-import { SERVICE_PORTS } from '../config/services';
+import { SERVICE_PORTS, getDynamicServerUrl } from '../config/services';
 
 export interface ServiceStatus {
   name: string;
@@ -42,9 +42,16 @@ class StatusService {
   // 检测单个服务状态
   private async checkServiceStatus(port: number, path: string = '/'): Promise<ServiceStatus> {
     const startTime = Date.now();
+    const dynamicUrl = getDynamicServerUrl();
+    const baseUrl = dynamicUrl || `http://localhost:${port}`;
+    
+    // 确保 URL 包含协议，且避免重复端口（如果 dynamicUrl 已经包含了端口）
+    const finalUrl = baseUrl.startsWith('http') 
+      ? `${baseUrl.replace(/\/+$/, '')}${path}`
+      : `http://${baseUrl.replace(/\/+$/, '')}${path}`;
 
     try {
-      const response = await axios.get(`http://localhost:${port}${path}`, {
+      const response = await axios.get(finalUrl, {
         timeout: 5000,
         validateStatus: (status) => status < 500, // 接受2xx, 3xx, 4xx状态码
       });

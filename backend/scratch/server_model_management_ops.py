@@ -1,8 +1,6 @@
 import json
 import os
 import re
-import subprocess
-import sys
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
@@ -14,7 +12,6 @@ except Exception:
     xcals = None
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field
 from sqlalchemy import text
 
 from backend.services.api.user_app.middleware.auth import require_admin
@@ -43,20 +40,6 @@ from .model_management_utils import (
 )
 
 router = APIRouter()
-
-OFFICIAL_DATA_UPDATE_SCRIPT = (
-    Path(os.getcwd()) / "backend" / "scripts" / "sync_official_data_update.py"
-)
-
-
-class OfficialDataUpdateRequest(BaseModel):
-    api_base_url: str = Field(
-        default=os.getenv("OFFICIAL_DATA_UPDATE_API_BASE_URL", "https://www.quantmindai.cn/api/v1")
-    )
-    access_key: str = Field(min_length=6)
-    secret_key: str = Field(min_length=6)
-    version: str | None = Field(default=None)
-    dry_run: bool = Field(default=False)
 
 
 @router.get("/scan", summary="扫描本地模型目录")
@@ -277,68 +260,6 @@ async def sync_stock_daily_latest(
     raise HTTPException(
         status_code=410, detail="该接口已废弃，数据由官方服务器统一推送，无需手动同步"
     )
-
-
-@router.post(
-    "/sync-official-data-update",
-    summary="一键拉取并应用官方数据增量包",
-)
-async def sync_official_data_update(
-    payload: OfficialDataUpdateRequest,
-    current_user: dict = Depends(require_admin),
-):
-    _ = current_user
-
-    if not OFFICIAL_DATA_UPDATE_SCRIPT.exists():
-        raise HTTPException(
-            status_code=500,
-            detail=f"更新脚本不存在: {OFFICIAL_DATA_UPDATE_SCRIPT}",
-        )
-
-    cmd = [
-        sys.executable,
-        str(OFFICIAL_DATA_UPDATE_SCRIPT),
-        "--api-base-url",
-        payload.api_base_url.strip().rstrip("/"),
-        "--access-key",
-        payload.access_key.strip(),
-        "--secret-key",
-        payload.secret_key.strip(),
-    ]
-    if payload.version and payload.version.strip():
-        cmd.extend(["--version", payload.version.strip()])
-    if payload.dry_run:
-        cmd.append("--dry-run")
-
-    try:
-        proc = subprocess.run(
-            cmd,
-            cwd=os.getcwd(),
-            capture_output=True,
-            text=True,
-            timeout=1800,
-            check=False,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise HTTPException(
-            status_code=504,
-            detail=f"数据更新超时: {exc}",
-        ) from exc
-    except Exception as exc:
-        raise HTTPException(
-            status_code=500,
-            detail=f"执行数据更新脚本失败: {exc}",
-        ) from exc
-
-    result: dict[str, Any] = {
-        "success": proc.returncode == 0,
-        "exit_code": proc.returncode,
-        "stdout": proc.stdout[-12000:] if proc.stdout else "",
-        "stderr": proc.stderr[-12000:] if proc.stderr else "",
-    }
-    if proc.returncode != 0:
-        result["error"] = "官方数据同步失败，请查看 stderr。"
-    return result
 
 
 @router.get("/precheck-inference", summary="生成明日信号前置检查")

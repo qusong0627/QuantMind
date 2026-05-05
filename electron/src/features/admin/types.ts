@@ -307,6 +307,14 @@ export interface AdminMarketDataSyncResult {
     };
 }
 
+export interface AdminOfficialDataUpdateSyncResult {
+    success: boolean;
+    exit_code: number;
+    error?: string;
+    stdout?: string;
+    stderr?: string;
+}
+
 export interface DashboardMetrics {
     users: {
         total: number;

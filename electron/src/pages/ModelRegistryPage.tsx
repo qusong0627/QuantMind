@@ -683,8 +683,6 @@ export const ModelRegistryPage: React.FC = () => {
                         children: (
                           <TrainingSourcePanel
                             model={selectedModel}
-                            trainingRun={trainingRun}
-                            loading={trainingRunLoading}
                           />
                         ),
                       }] : []),

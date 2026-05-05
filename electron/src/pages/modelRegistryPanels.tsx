@@ -691,9 +691,9 @@ export const InferenceCenterPanel: React.FC<{
     ? currentModelName
     : modelIdToDisplayName(latestInferenceRun?.model_id);
 
-  const [currentPage, setCurrentPage] = useState(1);
+  const [historyPage, setHistoryPage] = useState(1);
   const pageSize = 5;
-  const paginatedHistory = history.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+  const paginatedHistory = history.slice((historyPage - 1) * pageSize, historyPage * pageSize);
 
   return (
     <div className="pt-0 pb-10">
@@ -917,17 +917,17 @@ export const InferenceCenterPanel: React.FC<{
                   <div className="flex items-center gap-3">
                     <Button 
                       size="small" 
-                      disabled={currentPage === 1} 
-                      onClick={(e) => { e.stopPropagation(); setCurrentPage(p => p - 1); }}
+                      disabled={historyPage === 1} 
+                      onClick={(e) => { e.stopPropagation(); setHistoryPage(historyPage - 1); }}
                       className="border-0 bg-slate-100/50 hover:bg-slate-100 rounded-lg h-6 w-6 p-0 flex items-center justify-center text-slate-500"
                     >
                       <ChevronDown size={14} className="rotate-90" />
                     </Button>
-                    <Text className="text-[10px] font-bold text-slate-400">{currentPage} / {Math.ceil(history.length / pageSize)}</Text>
+                    <Text className="text-[10px] font-bold text-slate-400">{historyPage} / {Math.ceil(history.length / pageSize)}</Text>
                     <Button 
                       size="small" 
-                      disabled={currentPage >= Math.ceil(history.length / pageSize)} 
-                      onClick={(e) => { e.stopPropagation(); setCurrentPage(p => p + 1); }}
+                      disabled={historyPage >= Math.ceil(history.length / pageSize)} 
+                      onClick={(e) => { e.stopPropagation(); setHistoryPage(historyPage + 1); }}
                       className="border-0 bg-slate-100/50 hover:bg-slate-100 rounded-lg h-6 w-6 p-0 flex items-center justify-center text-slate-500"
                     >
                       <ChevronDown size={14} className="-rotate-90" />

@@ -340,7 +340,11 @@ python backend/services/api/scripts/build_stock_index.py
 ## 管理端数据管理（2026-03-20）
 
 - 新增管理员数据概览接口：`GET /api/v1/admin/models/data-status`。
-- 新增管理员手动同步接口：`POST /api/v1/admin/models/sync-market-data-daily`（触发 `scripts/data/ingestion/sync_market_data_daily_from_baostock.py`，将 Baostock 基础行情回填到 `market_data_daily`）。
+- `POST /api/v1/admin/models/sync-market-data-daily` 已废弃（统一由官方服务器推送，不再走 Baostock 手动补数）。
+- 新增管理员官方增量同步接口：`POST /api/v1/admin/models/sync-official-data-update`。
+  - 入参：`api_base_url`、`access_key`、`secret_key`、可选 `version`、`dry_run`。
+  - 执行脚本：`backend/scripts/sync_official_data_update.py`。
+  - 同步范围：`db/feature_snapshots`、`db/qlib_data`、`docs/stock_daily_latest_维护文档.md` 与 `db_deltas/stock_daily_latest*.parquet`（upsert）。
 - 接口用于统一查看当前数据状态，返回两部分：
   - `qlib_data`：`db/qlib_data` 的日历范围、标的数量（SH/SZ/BJ）、特征目录数量、最新交易日覆盖统计（`at_target_count/older_count/invalid_count`）。
   - `market_data_daily`：数据库侧最新交易日、最新更新时间、当日行数、`feature_*` 列数量。

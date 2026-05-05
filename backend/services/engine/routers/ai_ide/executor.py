@@ -713,6 +713,7 @@ def _run_module_backtest(module):
     print("[SYSTEM] 开始执行回测...")
     start_time = time.time()
 
+    try:
         if strategy_obj is not None:
             portfolio_dict, indicator_dict = safe_backtest(
                 strategy=strategy_obj,

@@ -131,11 +131,11 @@ const getWebSocketUrl = () => {
   const persisted = getDynamicServerUrl();
   // 桌面端使用动态配置
   if (persisted) {
-    return `${persisted.replace(/^http/, 'ws')}/ws/api/v1/ws/market`;
+    return `${persisted.replace(/^http/, 'ws')}/api/v1/ws/market`;
   }
   const gateway = getBaseUrl();
   if (gateway) {
-    return `${gateway.replace(/^http/, 'ws')}/ws/api/v1/ws/market`;
+    return `${gateway.replace(/^http/, 'ws')}/api/v1/ws/market`;
   }
   // Web 部署使用相对路径，通过 Nginx 代理
   if (typeof window !== 'undefined') {

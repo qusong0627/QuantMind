@@ -61,6 +61,18 @@
   - `从Baostock补基础数据`：调用 `POST /api/v1/admin/models/sync-market-data-daily`，手动触发 Baostock 基础数据回填 `market_data_daily`。
 - 支持手动刷新，便于日常巡检“增量补数是否完成”。
 
+## 数据管理：官方增量同步（2026-05-05）
+
+- 数据管理页新增“官方增量更新配置”卡片：
+  - 支持填写 `API Base URL`、`Access Key`、`Secret Key`、可选 `Version`；
+  - 支持“生成配置脚本”，便于运维直接在服务器执行；
+  - 支持“一键更新”，调用后端 `POST /api/v1/admin/models/sync-official-data-update` 触发增量包拉取与应用。
+- 后端执行脚本：`backend/scripts/sync_official_data_update.py`，用于：
+  - 调用 `/api/v1/data-updates/latest|{version}` 获取签名下载信息；
+  - 下载并解压 `bundle`；
+  - 同步 `db/feature_snapshots`、`db/qlib_data`、`docs`；
+  - 若包含 `db_deltas/stock_daily_latest*.parquet`，执行数据库 upsert。
+
 ## 预测管理：预测批次查询
 
 - 管理后台新增“预测管理”页签：

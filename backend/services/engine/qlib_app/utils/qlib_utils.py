@@ -14,6 +14,46 @@ from backend.services.engine.qlib_app.utils.structured_logger import StructuredT
 
 task_logger = StructuredTaskLogger(logger, "QlibUtils")
 
+# --- 放宽逻辑：Qlib 强力补丁 (Monkey Patch) ---
+def apply_qlib_loose_patches():
+    try:
+        import qlib.utils.resam as resam
+        from qlib.data import D
+        from qlib.utils.time import Freq
+        
+        # 1. 禁用 get_higher_eq_freq_feature 的 1min 回退逻辑
+        # 原逻辑在失败时会强行试 1min，导致没有分钟数据时崩溃
+        original_get_higher = resam.get_higher_eq_freq_feature
+        def patched_get_higher(instruments, fields, start_time, end_time, freq):
+            try:
+                return D.features(instruments, fields, start_time, end_time, freq=freq)
+            except Exception as e:
+                logger.warning(f"Qlib Patch: get_higher_eq_freq_feature failed for {freq}, skipping 1min fallback. Error: {e}")
+                import pandas as pd
+                return pd.DataFrame(), None
+        resam.get_higher_eq_freq_feature = patched_get_higher
+
+        # 2. 软化 Freq 校验
+        # 允许某些非标准格式在日线回测中不直接崩溃
+        original_freq_parse = Freq.parse
+        @classmethod
+        def patched_freq_parse(cls, freq):
+            try:
+                return original_freq_parse(freq)
+            except Exception:
+                if freq in [None, "", "day", "daily"]:
+                    return 1, "day"
+                logger.warning(f"Qlib Patch: Unsupported freq '{freq}' detected, defaulting to 'day'")
+                return 1, "day"
+        Freq.parse = patched_freq_parse
+        
+        logger.info("✅ Qlib 宽松逻辑补丁已注入 (已禁用 1min 回退并软化频率校验)")
+    except Exception as e:
+        logger.error(f"❌ 注入 Qlib 补丁失败: {e}")
+
+# 立即执行补丁
+apply_qlib_loose_patches()
+
 
 def _disabled_benchmark_series(start_time: Any = None) -> pd.Series:
     """构造一个“空影响”的基准序列，避免 qlib 在 benchmark=None 时回退到默认 SH000300。"""

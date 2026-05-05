@@ -13,6 +13,7 @@ import {
     AdminPredictionDetailResult,
     AdminDataStatusResult,
     AdminMarketDataSyncResult,
+    AdminOfficialDataUpdateSyncResult,
     StrategyTemplateAdmin,
     StrategyTemplateUpsertRequest,
 } from '../types';
@@ -212,6 +213,27 @@ class AdminService {
                 },
                 timeout: 3600000,
             },
+        );
+        return resp.data;
+    }
+
+    async syncOfficialDataUpdate(params: {
+        apiBaseUrl: string;
+        accessKey: string;
+        secretKey: string;
+        version?: string;
+        dryRun?: boolean;
+    }): Promise<AdminOfficialDataUpdateSyncResult> {
+        const resp = await this.axiosInstance.post<AdminOfficialDataUpdateSyncResult>(
+            '/admin/models/sync-official-data-update',
+            {
+                api_base_url: params.apiBaseUrl,
+                access_key: params.accessKey,
+                secret_key: params.secretKey,
+                version: params.version?.trim() || null,
+                dry_run: params.dryRun ?? false,
+            },
+            { timeout: 1800000 },
         );
         return resp.data;
     }

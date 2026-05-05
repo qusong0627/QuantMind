@@ -1,17 +1,41 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Alert, Button, Card, Col, Descriptions, Row, Space, Spin, Statistic, Table, Tag, message } from 'antd';
-import { DatabaseOutlined, ReloadOutlined } from '@ant-design/icons';
+import { Alert, Button, Card, Col, Descriptions, Input, Row, Space, Spin, Statistic, Table, Tag, message, Typography, Progress, Divider, Tooltip, Empty } from 'antd';
+import { 
+    DatabaseOutlined, 
+    ReloadOutlined, 
+    CloudSyncOutlined, 
+    CheckCircleFilled, 
+    WarningFilled, 
+    FileTextOutlined,
+    ThunderboltOutlined,
+    CompassOutlined,
+    LineChartOutlined,
+    InfoCircleOutlined,
+    CodeOutlined,
+    SafetyCertificateOutlined,
+    UserOutlined
+} from '@ant-design/icons';
 import dayjs from 'dayjs';
 import { adminService } from '../services/adminService';
 import {
     AdminFeatureSnapshotsOlderSample,
     AdminFeatureSnapshotsInvalidSample,
-    AdminDataStatusResult
+    AdminDataStatusResult,
+    AdminOfficialDataUpdateSyncResult,
 } from '../types';
+
+const { Title, Text, Paragraph } = Typography;
 
 export const AdminDataManagement: React.FC = () => {
     const [loading, setLoading] = useState(false);
     const [data, setData] = useState<AdminDataStatusResult | null>(null);
+    const [syncLoading, setSyncLoading] = useState(false);
+    const [syncResult, setSyncResult] = useState<AdminOfficialDataUpdateSyncResult | null>(null);
+    const [apiBaseUrl, setApiBaseUrl] = useState('https://www.quantmindai.cn/api/v1');
+    const [accessKey, setAccessKey] = useState('');
+    const [secretKey, setSecretKey] = useState('');
+    const [version, setVersion] = useState('');
+    const [configScript, setConfigScript] = useState('');
 
     const loadDataStatus = async (refresh = false) => {
         setLoading(true);
@@ -19,13 +43,11 @@ export const AdminDataManagement: React.FC = () => {
             const resp = await adminService.getDataStatus(refresh);
             setData(resp);
             if (refresh) {
-                message.success(resp.message || '已触发后台扫描任务，请稍后再次刷新查看完整结果。');
-            } else if (resp.from_cache) {
-                // message.info('从缓存加载数据状态');
+                message.success(resp.message || '后台扫描任务已启动，请稍后刷新查看最新状态');
             }
         } catch (err: unknown) {
             const msg = err instanceof Error ? err.message : '未知错误';
-            message.error(`加载数据状态失败: ${msg}`);
+            message.error(`数据状态同步失败: ${msg}`);
         } finally {
             setLoading(false);
         }
@@ -37,7 +59,7 @@ export const AdminDataManagement: React.FC = () => {
 
     const qlib = data?.qlib_data;
     const snapshots = data?.feature_snapshots;
-    const checkedAt = data?.checked_at ? dayjs(data.checked_at).format('YYYY-MM-DD HH:mm:ss') : '—';
+    const checkedAt = data?.checked_at ? dayjs(data.checked_at).format('HH:mm:ss') : '—';
     const olderSamples = snapshots?.topn_samples?.older_samples || [];
     const invalidSamples = snapshots?.topn_samples?.invalid_samples || [];
     const sampleSize = snapshots?.topn_samples?.sample_size || 20;
@@ -52,258 +74,404 @@ export const AdminDataManagement: React.FC = () => {
 
     const olderColumns = [
         {
-            title: '标的',
+            title: 'SYMBOL',
             dataIndex: 'symbol',
             key: 'symbol',
-            width: 140,
-            render: (v: string) => <span className="font-mono font-bold">{v}</span>,
+            width: 100,
+            render: (v: string) => <span className="font-mono font-black text-indigo-600">{v}</span>,
         },
         {
-            title: '最后日期',
+            title: 'LATEST DATE',
             dataIndex: 'last_date',
             key: 'last_date',
-            width: 140,
+            width: 120,
+            render: (v: string) => <Text className="font-mono text-slate-500">{v}</Text>
         },
         {
-            title: '滞后交易日数',
+            title: 'LAG DAYS',
             dataIndex: 'lag_days',
             key: 'lag_days',
-            width: 120,
-            render: (v: number) => <Tag color={v > 60 ? 'red' : v > 10 ? 'orange' : 'gold'}>{v}</Tag>,
+            width: 100,
+            align: 'right' as const,
+            render: (v: number) => (
+                <Tag color={v > 60 ? '#f43f5e' : v > 10 ? '#f59e0b' : '#10b981'} className="m-0 border-none font-bold rounded-lg px-2">
+                    {v}d
+                </Tag>
+            ),
         },
     ];
 
     const invalidColumns = [
         {
-            title: '标的',
+            title: 'SYMBOL',
             dataIndex: 'symbol',
             key: 'symbol',
-            width: 140,
-            render: (v: string) => <span className="font-mono font-bold">{v}</span>,
+            width: 100,
+            render: (v: string) => <span className="font-mono font-black text-rose-600">{v}</span>,
         },
         {
-            title: '原因',
+            title: 'REASON',
             dataIndex: 'reason',
             key: 'reason',
-            width: 220,
-            render: (v: string) => <Tag color="red">{v}</Tag>,
+            render: (v: string) => <Tag color="error" className="m-0 border-none rounded-md px-2 text-[11px] font-bold uppercase tracking-tight">{v}</Tag>,
         },
         {
-            title: '文件',
+            title: 'FILE PATH',
             dataIndex: 'file',
             key: 'file',
             ellipsis: true as const,
-            render: (v?: string) => v || '—',
+            render: (v?: string) => <Text className="text-slate-400 font-mono text-[10px] italic">{v || '—'}</Text>,
         },
     ];
 
+    const handleGenerateScript = () => {
+        const lines = [
+            '#!/usr/bin/env bash',
+            'set -e',
+            '# QuantMind Data Sync Script',
+            `export OFFICIAL_DATA_API_URL="${apiBaseUrl.trim()}"`,
+            `export ACCESS_KEY="${accessKey.trim()}"`,
+            `export SECRET_KEY="${secretKey.trim()}"`,
+            '',
+            'python backend/scripts/sync_official_data_update.py \\',
+            `  --api-base-url "${apiBaseUrl.trim()}" \\`,
+            `  --access-key "${accessKey.trim()}" \\`,
+            `  --secret-key "${secretKey.trim()}"${version.trim() ? ` \\ \n  --version "${version.trim()}"` : ''}`,
+        ];
+        setConfigScript(lines.join('\n'));
+        message.success('脚本配置已生成');
+    };
+
+    const handleSyncOfficialData = async () => {
+        if (!accessKey.trim() || !secretKey.trim()) {
+            message.warning('鉴权凭证（Access/Secret Key）不能为空');
+            return;
+        }
+        setSyncLoading(true);
+        try {
+            const resp = await adminService.syncOfficialDataUpdate({
+                apiBaseUrl: apiBaseUrl.trim(),
+                accessKey: accessKey.trim(),
+                secretKey: secretKey.trim(),
+                version: version.trim() || undefined,
+            });
+            setSyncResult(resp);
+            if (resp.success) {
+                message.success('数据全自动增量同步已启动');
+                await loadDataStatus(true);
+            } else {
+                message.error(resp.error || '同步任务执行异常');
+            }
+        } catch (err: unknown) {
+            const msg = err instanceof Error ? err.message : '未知网络错误';
+            message.error(`同步失败: ${msg}`);
+        } finally {
+            setSyncLoading(false);
+        }
+    };
+
     return (
-        <div className="space-y-6">
-            <div className="flex justify-between items-center">
+        <div className="space-y-10 animate-in fade-in slide-in-from-bottom-4 duration-700">
+            {/* Header Section */}
+            <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-6">
                 <div>
-                    <h3 className="text-xl font-black text-slate-800 tracking-tight">数据管理</h3>
-                    <p className="text-slate-400 text-xs mt-1 italic">查看 Qlib 文件数据与特征快照状态</p>
+                    <Title level={1} className="!m-0 !font-black !text-4xl !tracking-tighter !text-slate-900 uppercase">
+                        Data Management
+                    </Title>
+                    <div className="flex items-center mt-2 space-x-3">
+                        <Tag className="rounded-full bg-slate-100 border-none text-slate-500 font-bold px-3">
+                            NODE: QUANT-OSS-01
+                        </Tag>
+                        <Text className="text-slate-400 font-medium text-sm flex items-center">
+                            <InfoCircleOutlined className="mr-1.5" />
+                            最后扫描时间: <span className="text-indigo-500 font-bold ml-1">{checkedAt}</span>
+                        </Text>
+                    </div>
                 </div>
-                <Space>
-                    <Tag color="blue">检查时间: {checkedAt}</Tag>
+                <Space size="middle">
                     <Button
                         type="primary"
-                        icon={<ReloadOutlined />}
-                        className="rounded-xl h-10 px-5 bg-orange-600 border-none font-bold"
+                        icon={<ThunderboltOutlined />}
+                        className="rounded-2xl h-11 px-8 bg-indigo-600 border-none font-bold shadow-lg shadow-indigo-100"
                         loading={loading}
                         onClick={() => loadDataStatus(true)}
                     >
-                        强制刷新
+                        Force Deep Scan
                     </Button>
                     <Button
                         icon={<ReloadOutlined />}
-                        className="rounded-xl h-10 px-5 border-slate-200 text-slate-700 font-bold"
+                        className="rounded-2xl h-11 px-8 border-slate-200 text-slate-600 font-bold hover:bg-slate-50 transition-all"
                         loading={loading}
                         onClick={() => loadDataStatus(false)}
                     >
-                        刷新
+                        Refresh
                     </Button>
                 </Space>
             </div>
 
-            {loading && !data ? (
-                <div className="h-48 flex items-center justify-center">
-                    <Spin />
-                </div>
-            ) : null}
-
-            {data ? (
-                <>
-                    <Row gutter={16}>
-                        <Col span={6}>
-                            <Card variant="borderless" className="rounded-2xl shadow-sm">
-                                <Statistic title="Qlib 最新交易日" value={qlib?.calendar_last_date || '—'} />
-                            </Card>
-                        </Col>
-                        <Col span={6}>
-                            <Card variant="borderless" className="rounded-2xl shadow-sm">
-                                <Statistic title="特征快照最新日期" value={snapshots?.max_date || '—'} />
-                            </Card>
-                        </Col>
-                        <Col span={6}>
-                            <Card variant="borderless" className="rounded-2xl shadow-sm">
-                                <Statistic title="Parquet 文件数" value={snapshots?.file_count ?? 0} />
-                            </Card>
-                        </Col>
-                        <Col span={6}>
-                            <Card variant="borderless" className="rounded-2xl shadow-sm">
-                                <Statistic title="最新日覆盖率" value={coverageRate} suffix="%" />
-                            </Card>
-                        </Col>
-                    </Row>
-
-                    {!qlib?.exists ? (
-                        <Alert
-                            type="error"
-                            showIcon
-                            message="未检测到 qlib_data 目录"
-                            description={qlib?.qlib_dir || '路径未知'}
+            {/* Quick Stats Grid */}
+            <Row gutter={[24, 24]}>
+                <Col xs={24} sm={12} lg={6}>
+                    <Card className="rounded-[2rem] border-none shadow-xl shadow-slate-200/40 bg-white group overflow-hidden">
+                        <div className="absolute top-0 right-0 w-24 h-24 bg-blue-500 opacity-[0.03] rounded-bl-[4rem]" />
+                        <Statistic 
+                            title={<span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Qlib Calendar Last</span>} 
+                            value={qlib?.calendar_last_date || '—'} 
+                            valueStyle={{ fontWeight: 900, letterSpacing: '-0.02em', color: '#1e293b' }}
+                            prefix={<CompassOutlined className="text-blue-500 mr-2" />}
                         />
-                    ) : null}
-                    {!snapshots?.exists ? (
-                        <Alert
-                            type="warning"
-                            showIcon
-                            message="未检测到 feature_snapshots 目录"
-                            description={snapshots?.snapshot_dir || '路径未知'}
-                        />
-                    ) : null}
-
-                    <Card
-                        variant="borderless"
-                        className="rounded-2xl shadow-sm"
-                        title={
-                            <Space>
-                                <DatabaseOutlined />
-                                <span className="font-bold">Qlib 数据概览</span>
-                            </Space>
-                        }
-                    >
-                        <Descriptions column={2} size="small" bordered>
-                            <Descriptions.Item label="Qlib 路径">{qlib?.qlib_dir || '—'}</Descriptions.Item>
-                            <Descriptions.Item label="交易日总数">{qlib?.calendar_total_days ?? 0}</Descriptions.Item>
-                            <Descriptions.Item label="日历开始">{qlib?.calendar_start_date || '—'}</Descriptions.Item>
-                            <Descriptions.Item label="日历结束">{qlib?.calendar_last_date || '—'}</Descriptions.Item>
-                            <Descriptions.Item label="标的总数">{qlib?.instruments?.total ?? 0}</Descriptions.Item>
-                            <Descriptions.Item label="特征目录总数">{qlib?.feature_dirs_total ?? 0}</Descriptions.Item>
-                            <Descriptions.Item label="SH 标的">{qlib?.instruments?.sh ?? 0}</Descriptions.Item>
-                            <Descriptions.Item label="SZ 标的">{qlib?.instruments?.sz ?? 0}</Descriptions.Item>
-                            <Descriptions.Item label="BJ 标的">{qlib?.instruments?.bj ?? 0}</Descriptions.Item>
-                            <Descriptions.Item label="其它标的">{qlib?.instruments?.other ?? 0}</Descriptions.Item>
-                        </Descriptions>
                     </Card>
+                </Col>
+                <Col xs={24} sm={12} lg={6}>
+                    <Card className="rounded-[2rem] border-none shadow-xl shadow-slate-200/40 bg-white group overflow-hidden">
+                        <div className="absolute top-0 right-0 w-24 h-24 bg-indigo-500 opacity-[0.03] rounded-bl-[4rem]" />
+                        <Statistic 
+                            title={<span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Snapshot Latest</span>} 
+                            value={snapshots?.max_date || '—'} 
+                            valueStyle={{ fontWeight: 900, letterSpacing: '-0.02em', color: '#1e293b' }}
+                            prefix={<LineChartOutlined className="text-indigo-500 mr-2" />}
+                        />
+                    </Card>
+                </Col>
+                <Col xs={24} sm={12} lg={6}>
+                    <Card className="rounded-[2rem] border-none shadow-xl shadow-slate-200/40 bg-white group overflow-hidden">
+                        <div className="absolute top-0 right-0 w-24 h-24 bg-emerald-500 opacity-[0.03] rounded-bl-[4rem]" />
+                        <Statistic 
+                            title={<span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Parquet Volume</span>} 
+                            value={snapshots?.file_count ?? 0} 
+                            suffix="Files"
+                            valueStyle={{ fontWeight: 900, letterSpacing: '-0.02em', color: '#1e293b' }}
+                            prefix={<DatabaseOutlined className="text-emerald-500 mr-2" />}
+                        />
+                    </Card>
+                </Col>
+                <Col xs={24} sm={12} lg={6}>
+                    <Card className="rounded-[2rem] border-none shadow-xl shadow-slate-200/40 bg-white group overflow-hidden">
+                        <div className="flex flex-col">
+                            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2">Coverage Efficiency</span>
+                            <div className="flex items-center space-x-4">
+                                <Progress 
+                                    type="circle" 
+                                    percent={coverageRate} 
+                                    width={48} 
+                                    strokeWidth={12}
+                                    strokeColor={{ '0%': '#6366f1', '100%': '#10b981' }}
+                                    format={() => <span className="text-[10px] font-black text-slate-700">{Math.round(coverageRate)}%</span>}
+                                />
+                                <div>
+                                    <div className="text-2xl font-black text-slate-800 tracking-tight">{coverageRate}%</div>
+                                    <div className="text-[10px] font-bold text-emerald-500">OPTIMAL</div>
+                                </div>
+                            </div>
+                        </div>
+                    </Card>
+                </Col>
+            </Row>
 
+            {/* Main Content Area */}
+            <Row gutter={[32, 32]}>
+                <Col span={24} lg={15} className="space-y-8">
+                    {/* Qlib Section */}
                     <Card
-                        variant="borderless"
-                        className="rounded-2xl shadow-sm"
                         title={
-                            <Space>
-                                <DatabaseOutlined />
-                                <span className="font-bold">特征快照概览</span>
-                            </Space>
+                            <div className="flex items-center space-x-3 py-1">
+                                <div className="w-8 h-8 rounded-lg bg-blue-50 flex items-center justify-center text-blue-600">
+                                    <DatabaseOutlined />
+                                </div>
+                                <span className="font-black text-slate-800 tracking-tight text-lg uppercase">Qlib Infrastructure Details</span>
+                            </div>
                         }
+                        className="rounded-[2.5rem] border-none shadow-2xl shadow-slate-200/30"
+                        bodyStyle={{ padding: '32px' }}
                     >
-                        {!snapshots?.exists ? (
-                            <Alert type="warning" showIcon message="目录不存在或无 parquet 文件" />
+                        {!qlib?.exists ? (
+                            <Alert
+                                type="error"
+                                showIcon
+                                message={<span className="font-bold">Missing Qlib Directory</span>}
+                                description={<span className="text-xs italic opacity-70">{qlib?.qlib_dir || 'Path undefined'}</span>}
+                                className="rounded-2xl"
+                            />
                         ) : (
-                            <>
-                                <Descriptions column={2} size="small" bordered>
-                                    <Descriptions.Item label="快照目录">{snapshots?.snapshot_dir || '—'}</Descriptions.Item>
-                                    <Descriptions.Item label="Parquet 文件数">{snapshots?.file_count ?? 0}</Descriptions.Item>
-                                    <Descriptions.Item label="成功扫描">{snapshots?.scanned_files ?? 0}</Descriptions.Item>
-                                    <Descriptions.Item label="扫描失败">{snapshots?.failed_files ?? 0}</Descriptions.Item>
-                                    <Descriptions.Item label="数据开始日期">{snapshots?.min_date || '—'}</Descriptions.Item>
-                                    <Descriptions.Item label="数据结束日期">{snapshots?.max_date || '—'}</Descriptions.Item>
-                                    <Descriptions.Item label="总行数">{snapshots?.total_rows?.toLocaleString() ?? 0}</Descriptions.Item>
-                                    <Descriptions.Item label="错误">
-                                        {snapshots?.error ? <Tag color="red">{snapshots.error}</Tag> : <Tag color="green">无</Tag>}
-                                    </Descriptions.Item>
-                                </Descriptions>
-
-                                {snapshots?.suggested_periods ? (
-                                    <div className="mt-4">
-                                        <h4 className="font-bold text-slate-700 mb-2">建议训练/验证/测试划分</h4>
-                                        <Descriptions column={3} size="small" bordered>
-                                            <Descriptions.Item label="训练集">
-                                                {snapshots.suggested_periods.train[0]} ~ {snapshots.suggested_periods.train[1]}
-                                            </Descriptions.Item>
-                                            <Descriptions.Item label="验证集">
-                                                {snapshots.suggested_periods.val[0]} ~ {snapshots.suggested_periods.val[1]}
-                                            </Descriptions.Item>
-                                            <Descriptions.Item label="测试集">
-                                                {snapshots.suggested_periods.test[0]} ~ {snapshots.suggested_periods.test[1]}
-                                            </Descriptions.Item>
-                                        </Descriptions>
+                            <div className="grid grid-cols-2 md:grid-cols-3 gap-y-8 gap-x-12">
+                                {[
+                                    { label: 'Qlib Path', value: qlib.qlib_dir, span: 3, full: true },
+                                    { label: 'Total Calendar Days', value: qlib.calendar_total_days },
+                                    { label: 'Calendar Span', value: `${qlib.calendar_start_date} → ${qlib.calendar_last_date}`, span: 2 },
+                                    { label: 'Total Instruments', value: qlib.instruments?.total, highlight: true },
+                                    { label: 'Feature Directories', value: qlib.feature_dirs_total },
+                                    { label: 'Exchange Dist', value: `SH: ${qlib.instruments?.sh} | SZ: ${qlib.instruments?.sz} | BJ: ${qlib.instruments?.bj}`, span: 3, italic: true }
+                                ].map((item, i) => (
+                                    <div key={i} className={`flex flex-col space-y-1 ${item.span === 3 ? 'col-span-full' : item.span === 2 ? 'col-span-2' : ''}`}>
+                                        <Text className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">{item.label}</Text>
+                                        <Text className={`text-slate-800 ${item.full ? 'font-mono text-xs break-all' : 'font-black text-lg'} ${item.highlight ? 'text-indigo-600' : ''} ${item.italic ? 'italic text-slate-500' : ''}`}>
+                                            {item.value ?? '—'}
+                                        </Text>
                                     </div>
-                                ) : null}
-                            </>
+                                ))}
+                            </div>
                         )}
                     </Card>
 
-                    {snapshots?.exists && snapshots.latest_date_coverage ? (
-                        <Card variant="borderless" className="rounded-2xl shadow-sm" title={<span className="font-bold">最新日期覆盖</span>}>
-                            <Descriptions column={2} size="small" bordered>
-                                <Descriptions.Item label="目标日期">
-                                    {snapshots?.latest_date_coverage?.target_date || '—'}
-                                </Descriptions.Item>
-                                <Descriptions.Item label="已覆盖 (at_target)">
-                                    {snapshots?.latest_date_coverage?.at_target_count ?? 0}
-                                </Descriptions.Item>
-                                <Descriptions.Item label="较旧 (older)">
-                                    {snapshots?.latest_date_coverage?.older_count ?? 0}
-                                </Descriptions.Item>
-                                <Descriptions.Item label="无效 (invalid)">
-                                    {snapshots?.latest_date_coverage?.invalid_count ?? 0}
-                                </Descriptions.Item>
-                            </Descriptions>
-                        </Card>
-                    ) : null}
+                    {/* Snapshots Section */}
+                    <Card
+                        title={
+                            <div className="flex items-center space-x-3 py-1">
+                                <div className="w-8 h-8 rounded-lg bg-indigo-50 flex items-center justify-center text-indigo-600">
+                                    <FileTextOutlined />
+                                </div>
+                                <span className="font-black text-slate-800 tracking-tight text-lg uppercase">Feature Snapshot Analytics</span>
+                            </div>
+                        }
+                        className="rounded-[2.5rem] border-none shadow-2xl shadow-slate-200/30"
+                        bodyStyle={{ padding: '32px' }}
+                    >
+                        {!snapshots?.exists ? (
+                            <Empty description="No Snapshot Data Detected" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+                        ) : (
+                            <div className="space-y-10">
+                                <div className="grid grid-cols-2 md:grid-cols-4 gap-y-8">
+                                    {[
+                                        { label: 'Total Rows', value: snapshots.total_rows?.toLocaleString(), color: 'text-indigo-600' },
+                                        { label: 'Scanned Success', value: snapshots.scanned_files, color: 'text-emerald-500' },
+                                        { label: 'Scan Failures', value: snapshots.failed_files, color: 'text-rose-500' },
+                                        { label: 'Data Integrity', value: snapshots.error ? 'CRITICAL' : 'OPTIMAL', color: snapshots.error ? 'text-rose-500' : 'text-emerald-500' }
+                                    ].map((item, i) => (
+                                        <div key={i} className="flex flex-col">
+                                            <Text className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">{item.label}</Text>
+                                            <Text className={`font-black text-xl tracking-tighter ${item.color}`}>{item.value ?? '—'}</Text>
+                                        </div>
+                                    ))}
+                                </div>
 
-                    {snapshots?.exists && (olderSamples.length > 0 || invalidSamples.length > 0) ? (
-                        <Row gutter={16}>
-                            <Col span={12}>
-                                <Card
-                                    variant="borderless"
-                                    className="rounded-2xl shadow-sm"
-                                    title={<span className="font-bold">异常标的 Top{sampleSize}：数据滞后（older）</span>}
-                                >
-                                    <Table<AdminFeatureSnapshotsOlderSample>
-                                        size="small"
-                                        pagination={false}
-                                        rowKey={(r) => `${r.symbol}-${r.last_date}`}
-                                        dataSource={olderSamples}
-                                        columns={olderColumns}
-                                        locale={{ emptyText: '暂无滞后样本' }}
-                                        scroll={{ y: 320 }}
-                                    />
-                                </Card>
-                            </Col>
-                            <Col span={12}>
-                                <Card
-                                    variant="borderless"
-                                    className="rounded-2xl shadow-sm"
-                                    title={<span className="font-bold">异常文件 Top{sampleSize}：读取失败（invalid）</span>}
-                                >
-                                    <Table<AdminFeatureSnapshotsInvalidSample>
-                                        size="small"
-                                        pagination={false}
-                                        rowKey={(r) => `${r.symbol}-${r.reason}-${r.file || ''}`}
-                                        dataSource={invalidSamples}
-                                        columns={invalidColumns}
-                                        locale={{ emptyText: '暂无无效样本' }}
-                                        scroll={{ y: 320 }}
-                                    />
-                                </Card>
-                            </Col>
-                        </Row>
-                    ) : null}
-                </>
-            ) : null}
+                                {snapshots.suggested_periods && (
+                                    <div className="p-6 rounded-3xl bg-slate-50 border border-slate-100">
+                                        <div className="flex items-center space-x-2 mb-4">
+                                            <CompassOutlined className="text-slate-400" />
+                                            <span className="text-xs font-black text-slate-600 uppercase tracking-widest">Recommended Training Periods</span>
+                                        </div>
+                                        <div className="flex flex-wrap gap-4">
+                                            {Object.entries(snapshots.suggested_periods).map(([key, period]: [string, any]) => (
+                                                <div key={key} className="flex-1 min-w-[140px] p-4 bg-white rounded-2xl shadow-sm border border-slate-100">
+                                                    <Text className="text-[10px] font-bold text-slate-400 uppercase block mb-1">{key} set</Text>
+                                                    <Text className="font-mono text-[11px] font-black text-slate-700">{period[0]} ~ {period[1]}</Text>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+                        )}
+                    </Card>
+                </Col>
+
+                <Col span={24} lg={9} className="space-y-8">
+                    {/* Sync Panel */}
+                    <Card
+                        className="rounded-[2.5rem] border-none shadow-2xl shadow-indigo-900/10 bg-gradient-to-br from-slate-800 to-slate-900"
+                        bodyStyle={{ padding: '32px' }}
+                    >
+                        <div className="flex items-center justify-between mb-8">
+                            <div className="flex items-center space-x-3">
+                                <CloudSyncOutlined className="text-indigo-400 text-2xl" />
+                                <span className="text-white font-black text-xl uppercase tracking-tight">Sync Engine</span>
+                            </div>
+                            <Tooltip title="Secure Connection Active">
+                                <Tag color="success" className="m-0 bg-emerald-500/20 text-emerald-400 border-none rounded-full px-3 py-0.5 text-[10px] font-bold">SECURE</Tag>
+                            </Tooltip>
+                        </div>
+
+                        <div className="space-y-5">
+                            <div className="space-y-1.5">
+                                <Text className="text-[10px] font-bold text-indigo-300 uppercase tracking-widest ml-1 opacity-70">Access Key</Text>
+                                <Input 
+                                    prefix={<UserOutlined className="text-indigo-400/50" />}
+                                    value={accessKey} 
+                                    onChange={e => setAccessKey(e.target.value)} 
+                                    className="h-12 bg-white/5 border-white/10 rounded-xl text-white font-mono text-sm focus:bg-white/10" 
+                                    placeholder="qm_live_..."
+                                />
+                            </div>
+                            <div className="space-y-1.5">
+                                <Text className="text-[10px] font-bold text-indigo-300 uppercase tracking-widest ml-1 opacity-70">Secret Key</Text>
+                                <Input.Password 
+                                    prefix={<SafetyCertificateOutlined className="text-indigo-400/50" />}
+                                    value={secretKey} 
+                                    onChange={e => setSecretKey(e.target.value)} 
+                                    className="h-12 bg-white/5 border-white/10 rounded-xl text-white font-mono text-sm focus:bg-white/10" 
+                                    placeholder="••••••••••••"
+                                />
+                            </div>
+                            <Button 
+                                type="primary" 
+                                block 
+                                className="h-12 rounded-xl bg-indigo-500 hover:bg-indigo-600 border-none font-black text-base shadow-lg shadow-indigo-500/20 mt-4 transition-all"
+                                loading={syncLoading}
+                                onClick={handleSyncOfficialData}
+                            >
+                                START DATA HYDRATION
+                            </Button>
+                            <div className="flex justify-center space-x-4">
+                                <Button type="link" onClick={handleGenerateScript} className="text-indigo-300/60 font-bold text-xs hover:text-white uppercase tracking-widest px-0">
+                                    <CodeOutlined className="mr-1" /> Config Script
+                                </Button>
+                            </div>
+                        </div>
+
+                        {configScript && (
+                            <div className="mt-8 relative animate-in fade-in slide-in-from-top-2">
+                                <div className="absolute top-3 right-3 z-10">
+                                    <Tag className="bg-white/10 border-none text-white/40 text-[9px] font-black uppercase">Shell Script</Tag>
+                                </div>
+                                <Input.TextArea
+                                    className="bg-black/40 border-none rounded-2xl text-indigo-200 font-mono text-[11px] leading-relaxed p-6"
+                                    rows={8}
+                                    value={configScript}
+                                    readOnly
+                                />
+                            </div>
+                        )}
+                    </Card>
+
+                    {/* Issue Tracker cards */}
+                    {snapshots?.exists && (olderSamples.length > 0 || invalidSamples.length > 0) && (
+                        <div className="space-y-6">
+                            <Card 
+                                title={<span className="font-black text-rose-500 tracking-tight uppercase text-sm flex items-center"><WarningFilled className="mr-2" /> Data Lags (Top {sampleSize})</span>}
+                                className="rounded-3xl border-none shadow-xl shadow-slate-200/20"
+                                bodyStyle={{ padding: '0 12px 12px' }}
+                            >
+                                <Table<AdminFeatureSnapshotsOlderSample>
+                                    size="small"
+                                    pagination={false}
+                                    rowKey={(r) => `${r.symbol}-${r.last_date}`}
+                                    dataSource={olderSamples}
+                                    columns={olderColumns}
+                                    className="custom-table"
+                                    locale={{ emptyText: 'No lag detected' }}
+                                    scroll={{ y: 240 }}
+                                />
+                            </Card>
+                            <Card 
+                                title={<span className="font-black text-slate-400 tracking-tight uppercase text-sm flex items-center"><InfoCircleOutlined className="mr-2" /> Invalid Files</span>}
+                                className="rounded-3xl border-none shadow-xl shadow-slate-200/20"
+                                bodyStyle={{ padding: '0 12px 12px' }}
+                            >
+                                <Table<AdminFeatureSnapshotsInvalidSample>
+                                    size="small"
+                                    pagination={false}
+                                    rowKey={(r) => `${r.symbol}-${r.reason}-${r.file || ''}`}
+                                    dataSource={invalidSamples}
+                                    columns={invalidColumns}
+                                    className="custom-table"
+                                    locale={{ emptyText: 'All files healthy' }}
+                                    scroll={{ y: 240 }}
+                                />
+                            </Card>
+                        </div>
+                    )}
+                </Col>
+            </Row>
         </div>
     );
 };
