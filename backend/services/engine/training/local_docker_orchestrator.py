@@ -29,7 +29,7 @@ from backend.services.api.training_explain import DEFAULT_EXPLAIN_CFG
 
 logger = logging.getLogger(__name__)
 
-_TRAINING_IMAGE = (os.getenv("TRAINING_IMAGE") or "quantmind-ml-runtime:latest").strip()
+_TRAINING_IMAGE = (os.getenv("TRAINING_IMAGE") or "quantmind-oss:latest").strip()
 _CALLBACK_TIMEOUT = int(os.getenv("TRAINING_CALLBACK_TIMEOUT_SECONDS", "600"))
 _POLL_INTERVAL = 10  # 秒
 _CALLBACK_CHECK_INTERVAL = int(

@@ -52,6 +52,8 @@ _OUR_KWARGS = {
     "max_short_exposure",
     "max_leverage",
     "account_stop_loss",
+    # 调仓周期（各策略自行 pop 使用，不传给 BaseStrategy）
+    "rebalance_days",
 }
 
 

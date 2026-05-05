@@ -708,6 +708,15 @@ class RedisStopLossStrategy(DynamicRiskMixin, TopkDropoutStrategy, RedisLoggerMi
         self.holding_cost = {}
         for k in _OUR_KWARGS:
             kwargs.pop(k, None)
+        # 安全兜底：移除所有 Qlib BaseStrategy 不认识的剩余参数，避免意外传递
+        for k in list(kwargs.keys()):
+            if k not in ("topk", "n_drop", "method_sell", "method_buy",
+                         "hold_thresh", "only_tradable", "forbid_all_trade_at_limit",
+                         "signal", "model", "dataset", "risk_degree",
+                         "trade_exchange", "level_infra", "common_infra",
+                         "outer_trade_decision"):
+                logger.warning("stripping unexpected kwarg: %s", k)
+                kwargs.pop(k, None)
         # 全局规则：选股时剔除涨停/跌停/停牌股
         kwargs.setdefault("only_tradable", True)
         super().__init__(*args, **kwargs)

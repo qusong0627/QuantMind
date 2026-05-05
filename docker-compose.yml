@@ -208,6 +208,13 @@ services:
       # 回测结果存储目录（使用共享卷）
       - QLIB_BACKTEST_RESULT_DIR=/data/backtest_results
 
+      # 本地 Docker 训练编排（模型训练）
+      - INTERNAL_CALL_SECRET=${INTERNAL_CALL_SECRET:-quantmind-internal-secret}
+      - TRAINING_IMAGE=${TRAINING_IMAGE:-quantmind-oss:latest}
+      - TRAINING_DOCKER_NETWORK=${TRAINING_DOCKER_NETWORK:-quantmind_quantmind-net}
+      - HOST_PROJECT_PATH=${HOST_PROJECT_PATH:-/opt/quantmind}
+      - QUANTMIND_API_BASE_URL=${QUANTMIND_API_BASE_URL:-http://quantmind:8000}
+
       # 回测进度回调地址（OSS 模式使用 quantmind 容器名）
       - BACKTEST_PROGRESS_URL=http://quantmind:8001
 

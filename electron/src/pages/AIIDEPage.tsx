@@ -1242,7 +1242,7 @@ const AIIDEPage: React.FC = () => {
                     method: 'POST',
                     body: JSON.stringify({ 
                         filename: executeFilename,
-                        file_id: selectedFile.path,
+                        content: editorContent,
                     })
                 }, true);
             } else {

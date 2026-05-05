@@ -35,7 +35,7 @@ _TRAINING_BASE_FEATURES = [
 ]
 _training_log_stream = TrainingRunLogStream()
 DEFAULT_TRAINING_IMAGE = (
-    os.getenv("TRAINING_IMAGE") or "quantmind-ml-runtime:latest"
+    os.getenv("TRAINING_IMAGE") or "quantmind-oss:latest"
 ).strip()
 
 
