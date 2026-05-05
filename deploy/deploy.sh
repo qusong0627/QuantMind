@@ -632,6 +632,9 @@ STORAGE_ROOT=${DATA_DIR}
 
 DEBUG=false
 LOG_LEVEL=INFO
+
+# 引擎服务 Worker 数量 (解决 AI-IDE 多进程状态同步问题)
+ENGINE_WORKERS=1
 EOF
 
         log_info ".env 文件创建完成"

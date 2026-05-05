@@ -695,7 +695,7 @@ def _run_module_backtest(module):
         "class": "SimulatorExecutor",
         "module_path": "qlib.backtest.executor",
         "kwargs": {
-            "time_per_step": "day",
+            "time_per_step": "d",
             "generate_portfolio_metrics": True,
         },
     }
@@ -708,22 +708,23 @@ def _run_module_backtest(module):
     }
 
     # 7. 执行回测
-    from qlib.backtest import backtest
+    from backend.services.engine.qlib_app.utils.qlib_utils import backtest as safe_backtest
 
     print("[SYSTEM] 开始执行回测...")
     start_time = time.time()
 
-    try:
         if strategy_obj is not None:
-            portfolio_dict, indicator_dict = backtest(
+            portfolio_dict, indicator_dict = safe_backtest(
                 strategy=strategy_obj,
                 executor=executor,
+                freq="d",
                 **backtest_config,
             )
         else:
-            portfolio_dict, indicator_dict = backtest(
+            portfolio_dict, indicator_dict = safe_backtest(
                 strategy=strategy_dict,
                 executor=executor,
+                freq="d",
                 **backtest_config,
             )
 
