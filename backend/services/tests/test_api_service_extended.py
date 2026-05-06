@@ -248,7 +248,7 @@ class TestAPIExtendedIntegration:
                 assert payload["pagination"]["total"] == 3
                 assert payload["pagination"]["hasMore"] is True
                 assert "LEAD(sdl.close, 1)" in session_ref["value"].overview_sql
-                assert "sdl_target.trade_date = snap.prediction_trade_date" in session_ref["value"].overview_sql
+                assert "sdl_run.trade_date = snap.data_trade_date" in session_ref["value"].overview_sql
             finally:
                 app.dependency_overrides.clear()
 

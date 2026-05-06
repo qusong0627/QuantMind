@@ -47,7 +47,7 @@ def test_format_candidate_record_keeps_missing_returns_nullable():
 
 
 @pytest.mark.asyncio
-async def test_do_get_overview_uses_prediction_date_market_snapshot(monkeypatch):
+async def test_do_get_overview_uses_run_date_market_snapshot(monkeypatch):
     captured = {"sql": ""}
 
     class _FakeSession:
@@ -82,15 +82,15 @@ async def test_do_get_overview_uses_prediction_date_market_snapshot(monkeypatch)
                         "fusion_score": 0.0629,
                         "stock_name": "山东玻纤",
                         "industry": "制造业",
-                        "latest_change_pct": -1.96,
-                        "turnover_rate": 9.04,
-                        "amount": 514795284.0,
+                        "latest_change_pct": 10.0,
+                        "turnover_rate": 2.82,
+                        "amount": 163853711.47,
                         "total_mv": 922090646.95,
                         "float_mv": 500000000.0,
                         "listed_days": 800,
-                        "close_price": 12.127,
+                        "close_price": 12.37,
                         "return_1d": -0.0196443007,
-                        "return_3d": -0.0509,
+                        "return_3d": -0.0507,
                         "concept_tags": ["玻纤"],
                         "index_tags": ["中证1000"],
                         "risk_flags": [],
@@ -117,10 +117,10 @@ async def test_do_get_overview_uses_prediction_date_market_snapshot(monkeypatch)
     )
 
     item = result["items"][0]
-    assert item["latestChange"] == pytest.approx(-1.96)
+    assert item["latestChange"] == pytest.approx(10.0)
     assert item["nextDayReturn"] == pytest.approx(-1.96443007)
-    assert item["day3Return"] == pytest.approx(-5.09)
+    assert item["day3Return"] == pytest.approx(-5.07)
     assert "LEAD(sdl.close, 1)" in captured["sql"]
     assert "LEAD(sdl.close, 3)" in captured["sql"]
-    assert "sdl_target.trade_date = snap.prediction_trade_date" in captured["sql"]
+    assert "sdl_run.trade_date = snap.data_trade_date" in captured["sql"]
     assert "DISTINCT ON (symbol)" not in captured["sql"]

@@ -50,73 +50,73 @@ def _norm_symbol_sql(symbol_expr: str) -> str:
     """
 
 
-_SDL_SELECT_BY_TARGET_DATE = """
-    COALESCE(sdl_target.stock_name, '') AS stock_name,
-    COALESCE(sdl_target.industry, '') AS industry,
-    COALESCE(sdl_target.close, 0) AS close_price,
-    COALESCE(sdl_target.pe_ttm, 0) AS pe,
-    COALESCE(sdl_target.pb, 0) AS pb,
-    COALESCE(sdl_target.roe, 0) AS roe,
-    COALESCE(sdl_target.turnover_rate, 0) AS turnover_rate,
-    COALESCE(sdl_target.amount, 0) AS amount,
-    COALESCE(sdl_target.total_mv, 0) AS total_mv,
-    COALESCE(sdl_target.float_mv, 0) AS float_mv,
-    COALESCE(sdl_target.listed_days, 0) AS listed_days,
-    COALESCE(sdl_target.is_st, 0) <> 0 AS is_st,
-    COALESCE(sdl_target.idx_hs300, 0) <> 0 AS is_hs300,
-    COALESCE(sdl_target.idx_zz1000, 0) <> 0 AS is_csi1000,
-    COALESCE(sdl_target.pct_change, 0) * 100 AS latest_change_pct,
+_SDL_SELECT_BY_RUN_DATE = """
+    COALESCE(sdl_run.stock_name, '') AS stock_name,
+    COALESCE(sdl_run.industry, '') AS industry,
+    COALESCE(sdl_run.close, 0) AS close_price,
+    COALESCE(sdl_run.pe_ttm, 0) AS pe,
+    COALESCE(sdl_run.pb, 0) AS pb,
+    COALESCE(sdl_run.roe, 0) AS roe,
+    COALESCE(sdl_run.turnover_rate, 0) AS turnover_rate,
+    COALESCE(sdl_run.amount, 0) AS amount,
+    COALESCE(sdl_run.total_mv, 0) AS total_mv,
+    COALESCE(sdl_run.float_mv, 0) AS float_mv,
+    COALESCE(sdl_run.listed_days, 0) AS listed_days,
+    COALESCE(sdl_run.is_st, 0) <> 0 AS is_st,
+    COALESCE(sdl_run.idx_hs300, 0) <> 0 AS is_hs300,
+    COALESCE(sdl_run.idx_zz1000, 0) <> 0 AS is_csi1000,
+    COALESCE(sdl_run.pct_change, 0) * 100 AS latest_change_pct,
     CASE
-        WHEN NULLIF(sdl_target.close, 0) IS NULL OR sdl_target.close_next_1d IS NULL THEN NULL
-        ELSE sdl_target.close_next_1d / NULLIF(sdl_target.close, 0) - 1
+        WHEN NULLIF(sdl_run.close, 0) IS NULL OR sdl_run.close_next_1d IS NULL THEN NULL
+        ELSE sdl_run.close_next_1d / NULLIF(sdl_run.close, 0) - 1
     END AS return_1d,
     CASE
-        WHEN NULLIF(sdl_target.close, 0) IS NULL OR sdl_target.close_next_3d IS NULL THEN NULL
-        ELSE sdl_target.close_next_3d / NULLIF(sdl_target.close, 0) - 1
+        WHEN NULLIF(sdl_run.close, 0) IS NULL OR sdl_run.close_next_3d IS NULL THEN NULL
+        ELSE sdl_run.close_next_3d / NULLIF(sdl_run.close, 0) - 1
     END AS return_3d,
-    COALESCE(sdl_target.ma5, 0) AS ma5,
-    COALESCE(sdl_target.ma10, 0) AS ma10,
-    COALESCE(sdl_target.ma_gap_5, 0) AS ma_gap_5,
-    COALESCE(sdl_target.ma_gap_10, 0) AS ma_gap_10,
-    COALESCE(sdl_target.ma_gap_20, 0) AS ma_gap_20,
-    COALESCE(sdl_target.rsi_14, sdl_target.rsi_6, 0) AS rsi,
-    COALESCE(sdl_target.rsi_14, 0) AS rsi_14,
-    COALESCE(sdl_target.vol_atr_14, 0) AS atr,
-    COALESCE(sdl_target.macd_hist, 0) AS macd_hist,
-    COALESCE(sdl_target.volume_ratio_5, 0) AS volume_ratio_5,
-    COALESCE(sdl_target.volume_ratio_20, 0) AS volume_ratio_20,
-    COALESCE(sdl_target.volume_trend_3d, FALSE) AS volume_trend_3d,
-    COALESCE(sdl_target.main_flow, 0) AS main_flow,
-    COALESCE(sdl_target.flow_net_amount, 0) AS flow_net_amount,
-    COALESCE(sdl_target.inst_ownership, 0) AS inst_ownership,
-    COALESCE(sdl_target.profit_growth, 0) AS profit_growth,
+    COALESCE(sdl_run.ma5, 0) AS ma5,
+    COALESCE(sdl_run.ma10, 0) AS ma10,
+    COALESCE(sdl_run.ma_gap_5, 0) AS ma_gap_5,
+    COALESCE(sdl_run.ma_gap_10, 0) AS ma_gap_10,
+    COALESCE(sdl_run.ma_gap_20, 0) AS ma_gap_20,
+    COALESCE(sdl_run.rsi_14, sdl_run.rsi_6, 0) AS rsi,
+    COALESCE(sdl_run.rsi_14, 0) AS rsi_14,
+    COALESCE(sdl_run.vol_atr_14, 0) AS atr,
+    COALESCE(sdl_run.macd_hist, 0) AS macd_hist,
+    COALESCE(sdl_run.volume_ratio_5, 0) AS volume_ratio_5,
+    COALESCE(sdl_run.volume_ratio_20, 0) AS volume_ratio_20,
+    COALESCE(sdl_run.volume_trend_3d, FALSE) AS volume_trend_3d,
+    COALESCE(sdl_run.main_flow, 0) AS main_flow,
+    COALESCE(sdl_run.flow_net_amount, 0) AS flow_net_amount,
+    COALESCE(sdl_run.inst_ownership, 0) AS inst_ownership,
+    COALESCE(sdl_run.profit_growth, 0) AS profit_growth,
     COALESCE(
       to_jsonb(array_remove(ARRAY[
-        CASE WHEN COALESCE(sdl_target.concept_ai, 0) <> 0 THEN 'AI' END,
-        CASE WHEN COALESCE(sdl_target.concept_chip, 0) <> 0 THEN '芯片' END,
-        CASE WHEN COALESCE(sdl_target.concept_new_energy, 0) <> 0 THEN '新能源' END,
-        CASE WHEN COALESCE(sdl_target.concept_pv, 0) <> 0 THEN '光伏' END,
-        CASE WHEN COALESCE(sdl_target.concept_lithium, 0) <> 0 THEN '锂电' END,
-        CASE WHEN COALESCE(sdl_target.concept_military, 0) <> 0 THEN '军工' END,
-        CASE WHEN COALESCE(sdl_target.concept_medical, 0) <> 0 THEN '医药' END,
-        CASE WHEN COALESCE(sdl_target.concept_fintech, 0) <> 0 THEN '金融科技' END,
-        CASE WHEN COALESCE(sdl_target.concept_consumption, 0) <> 0 THEN '消费' END,
-        CASE WHEN COALESCE(sdl_target.concept_state_owned, 0) <> 0 THEN '国企改革' END
+        CASE WHEN COALESCE(sdl_run.concept_ai, 0) <> 0 THEN 'AI' END,
+        CASE WHEN COALESCE(sdl_run.concept_chip, 0) <> 0 THEN '芯片' END,
+        CASE WHEN COALESCE(sdl_run.concept_new_energy, 0) <> 0 THEN '新能源' END,
+        CASE WHEN COALESCE(sdl_run.concept_pv, 0) <> 0 THEN '光伏' END,
+        CASE WHEN COALESCE(sdl_run.concept_lithium, 0) <> 0 THEN '锂电' END,
+        CASE WHEN COALESCE(sdl_run.concept_military, 0) <> 0 THEN '军工' END,
+        CASE WHEN COALESCE(sdl_run.concept_medical, 0) <> 0 THEN '医药' END,
+        CASE WHEN COALESCE(sdl_run.concept_fintech, 0) <> 0 THEN '金融科技' END,
+        CASE WHEN COALESCE(sdl_run.concept_consumption, 0) <> 0 THEN '消费' END,
+        CASE WHEN COALESCE(sdl_run.concept_state_owned, 0) <> 0 THEN '国企改革' END
       ]::text[], NULL)),
       '[]'::jsonb
     ) AS concept_tags,
     COALESCE(
       to_jsonb(array_remove(ARRAY[
-        CASE WHEN COALESCE(sdl_target.idx_hs300, 0) <> 0 THEN '沪深300' END,
-        CASE WHEN COALESCE(sdl_target.idx_zz1000, 0) <> 0 THEN '中证1000' END,
-        CASE WHEN COALESCE(sdl_target.idx_chinext, 0) <> 0 THEN '创业板指数' END,
-        CASE WHEN COALESCE(sdl_target.idx_margin, 0) <> 0 THEN '两融标的' END,
-        CASE WHEN COALESCE(sdl_target.idx_all, 0) <> 0 THEN '全市场' END
+        CASE WHEN COALESCE(sdl_run.idx_hs300, 0) <> 0 THEN '沪深300' END,
+        CASE WHEN COALESCE(sdl_run.idx_zz1000, 0) <> 0 THEN '中证1000' END,
+        CASE WHEN COALESCE(sdl_run.idx_chinext, 0) <> 0 THEN '创业板指数' END,
+        CASE WHEN COALESCE(sdl_run.idx_margin, 0) <> 0 THEN '两融标的' END,
+        CASE WHEN COALESCE(sdl_run.idx_all, 0) <> 0 THEN '全市场' END
       ]::text[], NULL)),
       '[]'::jsonb
     ) AS index_tags,
-    sdl_target.trade_date AS latest_trade_date,
-    COALESCE(sdl_target.consecutive_limit_up_days, 0) AS consecutive_limit_up_days_sdl
+    sdl_run.trade_date AS latest_trade_date,
+    COALESCE(sdl_run.consecutive_limit_up_days, 0) AS consecutive_limit_up_days_sdl
 """
 
 # 兼容 symbols/features 接口：保留最新行情快照查询
@@ -316,7 +316,7 @@ async def _fetch_summary(session, where: str, params: dict[str, Any]) -> dict[st
             FROM qm_research_candidate_snapshot snap
             LEFT JOIN stock_daily_latest sdl ON (
                 sdl.symbol = {_norm_symbol_sql("snap.symbol")}
-                AND sdl.trade_date = snap.prediction_trade_date
+                AND sdl.trade_date = snap.data_trade_date
             )
             WHERE {where}
             """
@@ -420,11 +420,11 @@ async def _do_get_overview(tid: str, uid: str, model_id: str | None, run_id: str
             INNER JOIN snap_symbols ss ON ss.symbol = sdl.symbol
             WHERE sdl.volume > 0
         )
-        SELECT snap.*, {_SDL_SELECT_BY_TARGET_DATE}
+        SELECT snap.*, {_SDL_SELECT_BY_RUN_DATE}
         FROM snap_page snap
-        LEFT JOIN sdl_window sdl_target
-            ON sdl_target.symbol = {_norm_symbol_sql("snap.symbol")}
-           AND sdl_target.trade_date = snap.prediction_trade_date
+        LEFT JOIN sdl_window sdl_run
+            ON sdl_run.symbol = {_norm_symbol_sql("snap.symbol")}
+           AND sdl_run.trade_date = snap.data_trade_date
         ORDER BY snap.score_rank ASC
         """
         result = await session.execute(text(sql), params)
