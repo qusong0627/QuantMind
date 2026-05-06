@@ -4,14 +4,14 @@
 # 功能：
 #   1. 从 Gitee 拉取最新代码
 #   2. 重建后端容器（仅 quantmind/celery-worker）
-#   3. 重建前端并重启 PM2 + vite dev server
-#   4. 自动修复 .env.production 中硬编码的本地地址
-#   5. 构建产物验证（防硬编码 127.0.0.1）
+#   3. 自动修复 .env.production 中硬编码的本地地址
+#   4. 构建产物验证（防硬编码 127.0.0.1）
 #
 # 重要说明：
 #   - 不会执行数据库初始化
 #   - 不会删除数据库数据
 #   - 不会重建 db/redis 容器
+#   - 不包含前端构建（前端需单独部署）
 #===============================================================================
 
 set -euo pipefail
@@ -19,8 +19,6 @@ set -euo pipefail
 PROJECT_DIR="/opt/quantmind"
 REPO_URL="https://gitee.com/qusong0627/quantmind.git"
 FORCE_SYNC=false
-BACKEND_ONLY=false
-FRONTEND_ONLY=false
 HAS_ARGS=false
 
 RED='\033[0;31m'
@@ -74,11 +72,7 @@ usage() {
   sudo bash deploy/update.sh [选项]
 
 选项:
-  --backend-only   仅更新后端容器
-  --frontend-only  仅更新前端
   --force-sync     强制覆盖本地未提交修改后再拉取
-  -backend-only    同 --backend-only
-  -frontend-only   同 --frontend-only
   -force-sync      同 --force-sync
   -h, --help       显示帮助
 EOF
@@ -87,8 +81,6 @@ EOF
 for arg in "$@"; do
     HAS_ARGS=true
     case "$arg" in
-        --backend-only|-backend-only) BACKEND_ONLY=true ;;
-        --frontend-only|-frontend-only) FRONTEND_ONLY=true ;;
         --force-sync|-force-sync|-f) FORCE_SYNC=true ;;
         -h|--help)
             usage
@@ -105,31 +97,17 @@ done
 choose_mode_by_number() {
     if ! $HAS_ARGS && has_tty; then
         tty_print "请选择更新模式："
-        tty_print "  1) 标准更新（前后端）"
-        tty_print "  2) 强制同步更新（前后端，覆盖本地修改）"
-        tty_print "  3) 仅更新后端"
-        tty_print "  4) 仅更新前端"
+        tty_print "  1) 标准更新（后端）"
+        tty_print "  2) 强制同步更新（后端，覆盖本地修改）"
         tty_print "  0) 退出"
         tty_read "输入数字 [1]: " choice
         choice="${choice:-1}"
         case "$choice" in
             1)
-                BACKEND_ONLY=false
-                FRONTEND_ONLY=false
                 FORCE_SYNC=false
                 ;;
             2)
-                BACKEND_ONLY=false
-                FRONTEND_ONLY=false
                 FORCE_SYNC=true
-                ;;
-            3)
-                BACKEND_ONLY=true
-                FRONTEND_ONLY=false
-                ;;
-            4)
-                BACKEND_ONLY=false
-                FRONTEND_ONLY=true
                 ;;
             0)
                 log_info "已退出"
@@ -145,18 +123,7 @@ choose_mode_by_number() {
 
 choose_mode_by_number
 
-if $BACKEND_ONLY && $FRONTEND_ONLY; then
-    log_error "--backend-only 和 --frontend-only 不能同时使用"
-    exit 1
-fi
-
-if ! $BACKEND_ONLY && ! $FRONTEND_ONLY; then
-    UPDATE_BACKEND=true
-    UPDATE_FRONTEND=true
-else
-    UPDATE_BACKEND=$BACKEND_ONLY
-    UPDATE_FRONTEND=$FRONTEND_ONLY
-fi
+UPDATE_BACKEND=true
 
 check_root() {
     if [[ $EUID -ne 0 ]]; then
@@ -277,66 +244,6 @@ update_backend() {
     log_info "后端容器更新完成（db/redis 未重建）"
 }
 
-fix_frontend_env() {
-    # 确保生产构建不硬编码 127.0.0.1，使用相对路径让 vite proxy/nginx 转发
-    local env_file="$PROJECT_DIR/electron/.env.production"
-    if [[ -f "$env_file" ]]; then
-        if grep -qE '^\s*VITE_API_BASE_URL\s*=\s*http://127\.0\.0\.1:8000' "$env_file"; then
-            log_warn "检测到 .env.production 硬编码了 VITE_API_BASE_URL=http://127.0.0.1:8000"
-            log_info "自动注释以使用相对路径（服务器部署推荐）"
-            sed -i 's|^\(VITE_API_BASE_URL\s*=\s*http://127\.0\.0\.1:8000\)|#\1|' "$env_file"
-        fi
-    fi
-}
-
-verify_frontend_build() {
-    # 验证生产构建产物不含硬编码的 127.0.0.1:8000
-    local dist_dir="$PROJECT_DIR/electron/dist-react/assets"
-    if [[ -d "$dist_dir" ]]; then
-        local hardcoded
-        hardcoded="$(grep -rl '127\.0\.0\.1:8000' "$dist_dir"/*.js 2>/dev/null | head -3)"
-        if [[ -n "$hardcoded" ]]; then
-            log_error "构建产物中发现硬编码的 127.0.0.1:8000，前端将无法连接服务器后端！"
-            log_error "受影响的文件: $hardcoded"
-            exit 1
-        fi
-        log_info "构建验证通过：产物中无硬编码本地地址"
-    fi
-}
-
-restart_vite_dev() {
-    # 重启 vite dev server（如果存在）
-    local vite_pid
-    vite_pid="$(lsof -t -i:3000 2>/dev/null | head -1)"
-    if [[ -n "$vite_pid" ]]; then
-        log_info "检测到 vite dev server (PID: $vite_pid)，正在重启..."
-        kill "$vite_pid" 2>/dev/null
-        sleep 1
-        run_as_deploy_user "nohup npm run dev:web > /tmp/frontend-dev.log 2>&1 &"
-        log_info "vite dev server 已重启"
-    fi
-}
-
-update_frontend() {
-    log_step "更新前端"
-    cd "$PROJECT_DIR"
-
-    fix_frontend_env
-
-    npm install
-    npm run dashboard:build
-
-    verify_frontend_build
-
-    log_info "重启前端服务..."
-    run_as_deploy_user "if pm2 describe quantmind-web >/dev/null 2>&1; then pm2 restart quantmind-web; else pm2 start npm --name quantmind-web -- run dashboard:preview; fi"
-    run_as_deploy_user "pm2 save >/dev/null 2>&1 || true"
-
-    restart_vite_dev
-
-    log_info "前端更新完成"
-}
-
 wait_http_ok() {
     local url="$1"
     local max_retry="${2:-30}"
@@ -356,22 +263,11 @@ wait_http_ok() {
 health_check() {
     log_step "健康检查"
 
-    if $UPDATE_BACKEND; then
-        if wait_http_ok "http://127.0.0.1:8000/health" 40 2; then
-            log_info "后端健康检查通过: http://127.0.0.1:8000/health"
-        else
-            log_error "后端健康检查失败，请检查容器日志"
-            exit 1
-        fi
-    fi
-
-    if $UPDATE_FRONTEND; then
-        if wait_http_ok "http://127.0.0.1:3000" 40 2; then
-            log_info "前端健康检查通过: http://127.0.0.1:3000"
-        else
-            log_error "前端健康检查失败，请检查 PM2 日志"
-            exit 1
-        fi
+    if wait_http_ok "http://127.0.0.1:8000/health" 40 2; then
+        log_info "后端健康检查通过: http://127.0.0.1:8000/health"
+    else
+        log_error "后端健康检查失败，请检查容器日志"
+        exit 1
     fi
 }
 
@@ -379,26 +275,14 @@ main() {
     check_root
     check_project_dir
     check_cmd git
+    check_cmd docker
     check_cmd curl
     check_runtime_files
-
-    if $UPDATE_BACKEND; then
-        check_cmd docker
-        detect_compose_cmd
-    fi
-    if $UPDATE_FRONTEND; then
-        check_cmd npm
-        check_cmd pm2
-    fi
+    detect_compose_cmd
 
     git_sync
 
-    if $UPDATE_BACKEND; then
-        update_backend
-    fi
-    if $UPDATE_FRONTEND; then
-        update_frontend
-    fi
+    update_backend
 
     health_check
 
