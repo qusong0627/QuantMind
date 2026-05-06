@@ -3,11 +3,8 @@ import axios from 'axios';
 import { authService } from '../features/auth/services/authService';
 import { SERVICE_ENDPOINTS, SERVICE_URLS } from '../config/services';
 
-export const API_BASE_URL = SERVICE_ENDPOINTS.AI_STRATEGY;
-export const BACKTEST_API_BASE_URL = SERVICE_URLS.ENGINE_SERVICE;
-
-const resolveBacktestBaseURL = () => String(SERVICE_URLS.ENGINE_SERVICE || '').replace(/\/+$/, '');
-
+// 改为动态解析函数，确保用户配置 IP 后能实时生效
+// 创建axios实例
 export const apiClient = axios.create({
   timeout: 300000,
   headers: {
@@ -15,12 +12,17 @@ export const apiClient = axios.create({
   },
 });
 
+// 创建回测服务专用客户端
 export const backtestClient = axios.create({
   timeout: 180000,
   headers: {
     'Content-Type': 'application/json',
   },
 });
+
+// 动态解析函数定义
+const resolveAiStrategyBaseURL = () => String(SERVICE_ENDPOINTS.AI_STRATEGY || '').replace(/\/+$/, '');
+const resolveBacktestBaseURL = () => String(SERVICE_URLS.ENGINE_SERVICE || '').replace(/\/+$/, '');
 
 apiClient.interceptors.request.use(
   (config) => {

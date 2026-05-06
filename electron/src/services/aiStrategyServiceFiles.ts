@@ -40,8 +40,12 @@ export class AIStrategyServiceFilesMixin extends AIStrategyServiceHelpersMixin {
     }
 
     try {
+      const token = authService.getAccessToken();
       const response = await fetch(`${SERVICE_ENDPOINTS.API_GATEWAY}/files/upload`, {
         method: 'POST',
+        headers: {
+          ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
+        },
         body: formData,
       });
 
@@ -125,7 +129,12 @@ export class AIStrategyServiceFilesMixin extends AIStrategyServiceHelpersMixin {
     }
 
     try {
-      const response = await fetch(`${SERVICE_ENDPOINTS.API_GATEWAY}/files/list?${searchParams.toString()}`);
+      const token = authService.getAccessToken();
+      const response = await fetch(`${SERVICE_ENDPOINTS.API_GATEWAY}/files/list?${searchParams.toString()}`, {
+        headers: {
+          ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
+        }
+      });
 
       if (!response.ok) {
         throw new Error('获取文件列表失败');
@@ -164,10 +173,12 @@ export class AIStrategyServiceFilesMixin extends AIStrategyServiceHelpersMixin {
   // 删除文件
   async deleteFile(fileKey: string, userId?: string): Promise<void> {
     try {
+      const token = authService.getAccessToken();
       const response = await fetch(`${SERVICE_ENDPOINTS.API_GATEWAY}/files/delete`, {
         method: 'DELETE',
         headers: {
           'Content-Type': 'application/json',
+          ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
         },
         body: JSON.stringify({
           file_key: fileKey,

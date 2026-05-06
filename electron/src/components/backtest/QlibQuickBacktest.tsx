@@ -396,22 +396,23 @@ export const QlibQuickBacktest: React.FC = () => {
                   setShowTailTradeTooltip(false);
                 }}
               >
-                <span className="text-[11px] text-gray-500">
-                  {tailTradeEnabled ? '尾盘' : '次日'}
-                </span>
                 <button
                   type="button"
                   onClick={() => setTailTradeEnabled(!tailTradeEnabled)}
-                  className={`relative inline-flex items-center h-5 w-9 rounded-full transition-colors duration-200 focus:outline-none ${
-                    tailTradeEnabled ? 'bg-blue-600' : 'bg-gray-300'
+                  className={`flex items-center gap-2 px-2.5 py-1 rounded-full border transition-all duration-200 ${
+                    tailTradeEnabled
+                      ? 'bg-blue-50 border-blue-200 text-blue-700'
+                      : 'bg-gray-50 border-gray-200 text-gray-600 hover:bg-gray-100'
                   }`}
-                  title=""
                 >
-                  <span
-                    className={`inline-block w-3.5 h-3.5 rounded-full bg-white shadow transform transition-transform duration-200 ${
-                      tailTradeEnabled ? 'translate-x-[18px]' : 'translate-x-[3px]'
-                    }`}
-                  />
+                  <span className="text-[11px] font-bold">尾盘交易</span>
+                  <span className={`px-1.5 py-0.5 rounded-lg text-[9px] font-black min-w-[28px] text-center transition-all ${
+                    tailTradeEnabled
+                      ? 'bg-blue-600 text-white'
+                      : 'bg-white text-gray-500 border border-gray-100 shadow-sm'
+                  }`}>
+                    {tailTradeEnabled ? 'ON' : 'OFF'}
+                  </span>
                 </button>
                 {showTailTradeTooltip && (
                   <div className="absolute top-full right-0 mt-2 px-2.5 py-1.5 bg-gray-900 text-white text-[11px] rounded-lg whitespace-nowrap z-50 shadow-lg">

@@ -132,14 +132,19 @@ def get_current_user(
             }
 
     # 2. 常规 JWT 校验
-    if not credentials:
+    token = None
+    if credentials:
+        token = credentials.credentials
+    else:
+        # 兼容 SSE (EventSource) 不支持 Header 的情况，尝试从 Query 参数获取
+        token = request.query_params.get("token")
+
+    if not token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Missing authentication credentials",
             headers={"WWW-Authenticate": "Bearer"},
         )
-
-    token = credentials.credentials
     payload = auth_manager.verify_token(token)
 
     user_id = payload.get("sub")

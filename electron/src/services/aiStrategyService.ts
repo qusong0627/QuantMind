@@ -12,9 +12,9 @@ import { AIStrategyServiceFilesMixin } from './aiStrategyServiceFiles';
 
 // 基础配置 - 使用统一端口配置
 import { SERVICE_ENDPOINTS, SERVICE_URLS } from '../config/services';
-const API_BASE_URL = SERVICE_ENDPOINTS.AI_STRATEGY;
-const BACKTEST_API_BASE_URL = SERVICE_URLS.ENGINE_SERVICE;
 
+// 动态解析函数定义，确保在用户配置 IP 后能实时获取最新地址
+const resolveAiStrategyBaseURL = () => String(SERVICE_ENDPOINTS.AI_STRATEGY || '').replace(/\/+$/, '');
 const resolveBacktestBaseURL = () => String(SERVICE_URLS.ENGINE_SERVICE || '').replace(/\/+$/, '');
 
 // 创建axios实例
@@ -577,7 +577,13 @@ class AIStrategyService extends AIStrategyServiceFilesMixin {
         user_id: 'desktop-user'
       });
 
-      const eventSource = new EventSource(`${API_BASE_URL}/strategy/generate/stream?${queryParams.toString()}`);
+      // 由于原生 EventSource 不支持 Header，我们将 Token 放入 Query 参数中
+      const token = authService.getAccessToken();
+      if (token) {
+        queryParams.append('token', token);
+      }
+      
+      const eventSource = new EventSource(`${resolveAiStrategyBaseURL()}/strategy/generate/stream?${queryParams.toString()}`);
 
       const strategy: Strategy = {
         id: this.generateId(),
