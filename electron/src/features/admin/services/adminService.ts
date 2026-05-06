@@ -12,7 +12,6 @@ import {
     AdminPredictionListResult,
     AdminPredictionDetailResult,
     AdminDataStatusResult,
-    AdminMarketDataSyncResult,
     AdminOfficialDataUpdateSyncResult,
     StrategyTemplateAdmin,
     StrategyTemplateUpsertRequest,
@@ -193,27 +192,6 @@ class AdminService {
             params: { refresh },
             timeout: 120000, // 增加超时到 2 分钟，确保扫描大目录不超时
         });
-        return resp.data;
-    }
-
-    async syncMarketDataDaily(params?: {
-        targetDate?: string;
-        maxSymbols?: number;
-        apply?: boolean;
-    }): Promise<AdminMarketDataSyncResult> {
-        const resp = await this.axiosInstance.post<AdminMarketDataSyncResult>(
-            '/admin/models/sync-market-data-daily',
-            null,
-            {
-                params: {
-                    target_date: params?.targetDate,
-                    max_symbols: params?.maxSymbols ?? 0,
-                    apply: params?.apply ?? true,
-                    background: true,
-                },
-                timeout: 3600000,
-            },
-        );
         return resp.data;
     }
 

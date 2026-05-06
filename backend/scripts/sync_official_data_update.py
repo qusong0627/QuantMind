@@ -9,8 +9,6 @@ import os
 import shutil
 import subprocess
 import sys
-import tempfile
-import urllib.error
 import urllib.request
 from datetime import datetime
 from pathlib import Path
@@ -29,11 +27,25 @@ def _sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
+def _sha256_bytes(content: bytes) -> str:
+    return hashlib.sha256(content).hexdigest()
+
+
+def _parse_json_object(content: bytes, label: str) -> dict[str, Any]:
+    try:
+        payload = json.loads(content.decode("utf-8"))
+    except Exception as exc:
+        raise RuntimeError(f"{label} 不是有效 JSON: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"{label} 不是有效 JSON 对象")
+    return payload
+
+
 def _http_get_json(url: str, headers: dict[str, str]) -> dict[str, Any]:
     req = urllib.request.Request(url, headers=headers, method="GET")
     with urllib.request.urlopen(req, timeout=60) as resp:
-        data = resp.read().decode("utf-8")
-    payload = json.loads(data)
+        data = resp.read()
+    payload = _parse_json_object(data, "官方数据更新 API 响应")
     if isinstance(payload, dict) and isinstance(payload.get("data"), dict):
         return payload["data"]
     if isinstance(payload, dict):
@@ -41,11 +53,45 @@ def _http_get_json(url: str, headers: dict[str, str]) -> dict[str, Any]:
     raise RuntimeError("Invalid JSON payload from official data update API")
 
 
+def _download_bytes(url: str) -> bytes:
+    req = urllib.request.Request(url, method="GET")
+    with urllib.request.urlopen(req, timeout=300) as resp:
+        return resp.read()
+
+
 def _download_file(url: str, target: Path) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
-    req = urllib.request.Request(url, method="GET")
-    with urllib.request.urlopen(req, timeout=300) as resp, target.open("wb") as f:
-        shutil.copyfileobj(resp, f)
+    target.write_bytes(_download_bytes(url))
+
+
+def _manifest_file_by_kind(files: list[dict[str, Any]], kind: str) -> dict[str, Any] | None:
+    for item in files:
+        if isinstance(item, dict) and str(item.get("kind") or "").strip() == kind:
+            return item
+    return None
+
+
+def _assert_entry_consistency(
+    api_entry: dict[str, Any] | None,
+    manifest_entry: dict[str, Any] | None,
+    kind: str,
+) -> None:
+    if api_entry is None or manifest_entry is None:
+        return
+    for field in ("name", "sha256", "kind"):
+        api_value = str(api_entry.get(field) or "").strip()
+        manifest_value = str(manifest_entry.get(field) or "").strip()
+        if api_value and manifest_value and api_value != manifest_value:
+            raise RuntimeError(
+                f"{kind} 元数据不一致: API 返回的 {field}={api_value}，"
+                f"manifest.json 中为 {manifest_value}"
+            )
+    api_size = api_entry.get("size")
+    manifest_size = manifest_entry.get("size")
+    if api_size is not None and manifest_size is not None and int(api_size) != int(manifest_size):
+        raise RuntimeError(
+            f"{kind} 元数据不一致: API 返回的 size={api_size}，manifest.json 中为 {manifest_size}"
+        )
 
 
 def _sync_dir(src: Path, dst: Path) -> int:
@@ -72,6 +118,107 @@ def _to_python_value(v: Any) -> Any:
         except Exception:
             return v
     return v
+
+
+def _normalize_iso_date(value: Any) -> str | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = pd.to_datetime(raw, errors="coerce")
+        if pd.isna(parsed):
+            return None
+        return parsed.date().isoformat()
+    except Exception:
+        return None
+
+
+def _scan_local_qlib_last_date(project_root: Path) -> str | None:
+    calendars_path = project_root / "db" / "qlib_data" / "calendars" / "day.txt"
+    if not calendars_path.exists():
+        return None
+    try:
+        lines = [
+            line.strip()
+            for line in calendars_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        return _normalize_iso_date(lines[-1]) if lines else None
+    except Exception:
+        return None
+
+
+def _scan_local_feature_snapshots_last_date(project_root: Path) -> str | None:
+    snapshot_dir = project_root / "db" / "feature_snapshots"
+    if not snapshot_dir.exists():
+        return None
+    files = sorted(snapshot_dir.glob("*.parquet"))
+    if not files:
+        return None
+    for parquet_file in reversed(files):
+        try:
+            df = pd.read_parquet(parquet_file, columns=["trade_date"], engine="pyarrow")
+            if df.empty:
+                continue
+            last_date = pd.to_datetime(df["trade_date"], errors="coerce").max()
+            if pd.isna(last_date):
+                continue
+            return last_date.date().isoformat()
+        except Exception:
+            continue
+    return None
+
+
+async def _scan_local_stock_daily_latest_last_date() -> str | None:
+    db_host = os.getenv("DB_HOST", "127.0.0.1")
+    db_port = int(os.getenv("DB_PORT", "5432"))
+    db_name = os.getenv("DB_NAME", "quantmind")
+    db_user = os.getenv("DB_USER", "quantmind")
+    db_password = os.getenv("DB_PASSWORD", "quantmind2026")
+
+    conn = await asyncpg.connect(
+        host=db_host,
+        port=db_port,
+        database=db_name,
+        user=db_user,
+        password=db_password,
+    )
+    try:
+        row = await conn.fetchrow("SELECT MAX(trade_date) AS max_trade_date FROM stock_daily_latest")
+        if not row:
+            return None
+        return _normalize_iso_date(row["max_trade_date"])
+    finally:
+        await conn.close()
+
+
+def _scan_local_status(project_root: Path) -> dict[str, Any]:
+    qlib_last_date = _scan_local_qlib_last_date(project_root)
+    feature_last_date = _scan_local_feature_snapshots_last_date(project_root)
+    stock_last_date = asyncio.run(_scan_local_stock_daily_latest_last_date())
+
+    available_dates = [d for d in (qlib_last_date, feature_last_date, stock_last_date) if d]
+    overall_watermark = min(available_dates) if available_dates else None
+
+    return {
+        "qlib_data_last_date": qlib_last_date,
+        "feature_snapshots_last_date": feature_last_date,
+        "stock_daily_latest_last_date": stock_last_date,
+        "overall_watermark_trade_date": overall_watermark,
+    }
+
+
+def _should_skip_download(local_status: dict[str, Any], remote_trade_date: str | None) -> bool:
+    if not remote_trade_date:
+        return False
+    available_dates = [
+        local_status.get("qlib_data_last_date"),
+        local_status.get("feature_snapshots_last_date"),
+        local_status.get("stock_daily_latest_last_date"),
+    ]
+    if not all(available_dates):
+        return False
+    return min(str(x) for x in available_dates if x) >= remote_trade_date
 
 
 async def _upsert_stock_daily_latest(parquet_path: Path) -> int:
@@ -163,6 +310,7 @@ def main() -> int:
     parser.add_argument("--secret-key", required=True)
     parser.add_argument("--version", default="")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--force", action="store_true", help="忽略本地日期检查，强制下载并应用远端版本")
     args = parser.parse_args()
 
     project_root = Path(__file__).resolve().parents[2]
@@ -181,7 +329,10 @@ def main() -> int:
 
     payload = _http_get_json(endpoint, headers=headers)
     version = str(payload.get("version") or args.version or "unknown")
+    remote_trade_date = _normalize_iso_date(payload.get("trade_date"))
     files = payload.get("files") if isinstance(payload.get("files"), list) else []
+    manifest_meta = payload.get("manifest") if isinstance(payload.get("manifest"), dict) else {}
+    local_status = _scan_local_status(project_root)
     bundle_entry = None
     manifest_entry = None
     for f in files:
@@ -194,10 +345,67 @@ def main() -> int:
     if bundle_entry is None:
         raise RuntimeError("官方响应中缺少 bundle 文件")
 
+    result: dict[str, Any] = {
+        "success": True,
+        "version": version,
+        "trade_date": remote_trade_date,
+        "dry_run": bool(args.dry_run),
+        "skipped": False,
+        "skip_reason": "",
+        "local_status": local_status,
+        "manifest_json_verified": False,
+        "manifest_parquet_verified": False,
+        "applied": {
+            "feature_files": 0,
+            "qlib_files": 0,
+            "docs_files": 0,
+            "stock_daily_latest_rows": 0,
+        },
+    }
+
+    if not args.force and _should_skip_download(local_status, remote_trade_date):
+        result["skipped"] = True
+        result["skip_reason"] = "local_data_already_covers_remote_trade_date"
+        print(json.dumps(result, ensure_ascii=False))
+        return 0
+
     download_dir = project_root / "tmp" / "official_data_updates" / version / "download"
     extract_dir = project_root / "tmp" / "official_data_updates" / version / "extract"
     bundle_name = str(bundle_entry.get("name") or f"update_{version}.tar.zst")
     bundle_path = download_dir / bundle_name
+    manifest_json_path = download_dir / "manifest.json"
+
+    manifest_json = None
+    manifest_url = str(manifest_meta.get("url") or "").strip()
+    if manifest_url:
+        manifest_json_bytes = _download_bytes(manifest_url)
+        expected_manifest_sha = str(manifest_meta.get("sha256") or "").strip().lower()
+        if expected_manifest_sha:
+            actual_manifest_sha = _sha256_bytes(manifest_json_bytes)
+            if actual_manifest_sha != expected_manifest_sha:
+                raise RuntimeError("manifest.json sha256 校验失败")
+        manifest_json_path.parent.mkdir(parents=True, exist_ok=True)
+        manifest_json_path.write_bytes(manifest_json_bytes)
+        manifest_json = _parse_json_object(manifest_json_bytes, "官方 manifest.json")
+        manifest_version = str(manifest_json.get("version") or "").strip()
+        if manifest_version and manifest_version != version:
+            raise RuntimeError(
+                f"版本不一致: API 返回 version={version}，manifest.json 中为 {manifest_version}"
+            )
+        manifest_files = manifest_json.get("files")
+        if not isinstance(manifest_files, list) or not manifest_files:
+            raise RuntimeError("manifest.json 缺少 files 列表")
+        _assert_entry_consistency(
+            bundle_entry,
+            _manifest_file_by_kind(manifest_files, "bundle"),
+            "bundle",
+        )
+        _assert_entry_consistency(
+            manifest_entry,
+            _manifest_file_by_kind(manifest_files, "manifest"),
+            "manifest",
+        )
+        result["manifest_json_verified"] = True
 
     _download_file(str(bundle_entry["url"]), bundle_path)
     expected_sha = str(bundle_entry.get("sha256") or "").strip().lower()
@@ -209,19 +417,13 @@ def main() -> int:
     if manifest_entry and manifest_entry.get("url"):
         manifest_path = download_dir / "manifest.parquet"
         _download_file(str(manifest_entry["url"]), manifest_path)
-
-    result: dict[str, Any] = {
-        "success": True,
-        "version": version,
-        "bundle_size": bundle_path.stat().st_size,
-        "dry_run": bool(args.dry_run),
-        "applied": {
-            "feature_files": 0,
-            "qlib_files": 0,
-            "docs_files": 0,
-            "stock_daily_latest_rows": 0,
-        },
-    }
+        expected_manifest_parquet_sha = str(manifest_entry.get("sha256") or "").strip().lower()
+        if expected_manifest_parquet_sha:
+            actual_manifest_parquet_sha = _sha256_file(manifest_path)
+            if actual_manifest_parquet_sha != expected_manifest_parquet_sha:
+                raise RuntimeError("manifest.parquet sha256 校验失败")
+        result["manifest_parquet_verified"] = True
+    result["bundle_size"] = bundle_path.stat().st_size
 
     if args.dry_run:
         print(json.dumps(result, ensure_ascii=False))

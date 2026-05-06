@@ -58,7 +58,7 @@
   - `market_data_daily` 最新交易日、最新更新时间、今日行数、`feature_*` 列数；
   - “最新交易日是否与系统交易日一致”状态标签。
 - 页面操作：
-  - `从Baostock补基础数据`：调用 `POST /api/v1/admin/models/sync-market-data-daily`，手动触发 Baostock 基础数据回填 `market_data_daily`。
+  - 旧的 `从Baostock补基础数据` 链路已废弃，当前统一使用官方增量包同步，不再推荐手动从 Baostock 回填。
 - 支持手动刷新，便于日常巡检“增量补数是否完成”。
 
 ## 数据管理：官方增量同步（2026-05-05）

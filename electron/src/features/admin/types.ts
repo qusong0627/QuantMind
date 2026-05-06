@@ -286,27 +286,6 @@ export interface AdminDataStatusResult {
     message?: string;
 }
 
-export interface AdminMarketDataSyncResult {
-    success: boolean;
-    async?: boolean;
-    task_id?: string;
-    exit_code: number;
-    error?: string;
-    stdout?: string;
-    stderr?: string;
-    result?: {
-        success?: boolean;
-        mode?: string;
-        requested_date?: string;
-        effective_trade_date?: string;
-        symbols_total?: number;
-        symbols_ok?: number;
-        symbols_failed?: number;
-        rows_upserted?: number;
-        error_samples?: Array<{ symbol: string; error: string }>;
-    };
-}
-
 export interface AdminOfficialDataUpdateSyncResult {
     success: boolean;
     exit_code: number;

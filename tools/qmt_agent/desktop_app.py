@@ -2147,7 +2147,7 @@ class DesktopApp(QMainWindow):
         btn_layout.addStretch()
         button_box = QDialogButtonBox()
         open_web_btn = QPushButton("打开在线帮助")
-        open_web_btn.clicked.connect(lambda: QDesktopServices.openUrl(QUrl("https://www.quantmindai.cn/help")))
+        open_web_btn.clicked.connect(lambda: QDesktopServices.openUrl(QUrl("https://api.quantmind.cloud/help")))
         copy_btn = QPushButton("复制帮助内容")
 
         def _copy_help() -> None:

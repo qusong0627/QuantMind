@@ -21,6 +21,7 @@ from backend.services.api.user_app.middleware.auth import require_admin
 from backend.services.engine.inference.script_runner import InferenceScriptRunner
 from backend.shared.database_manager_v2 import get_session
 from backend.shared.redis_sentinel_client import get_redis_sentinel_client
+from backend.shared.trading_calendar import calendar_service
 
 try:
     from backend.services.engine.qlib_app.celery_config import celery_app
@@ -51,7 +52,7 @@ OFFICIAL_DATA_UPDATE_SCRIPT = (
 
 class OfficialDataUpdateRequest(BaseModel):
     api_base_url: str = Field(
-        default=os.getenv("OFFICIAL_DATA_UPDATE_API_BASE_URL", "https://www.quantmindai.cn/api/v1")
+        default=os.getenv("OFFICIAL_DATA_UPDATE_API_BASE_URL", "https://api.quantmind.cloud/api/v1")
     )
     access_key: str = Field(min_length=6)
     secret_key: str = Field(min_length=6)
@@ -146,112 +147,128 @@ async def get_data_status(
             print(f"Failed to trigger background task: {e}")
 
     # 3. 实时辅助扫描（作为 fallback 或首次加载的快速反馈）
-    now_local = datetime.now(ZoneInfo("Asia/Shanghai"))
+    try:
+        now_local = datetime.now(ZoneInfo("Asia/Shanghai"))
+        tenant_id = str(current_user.get("tenant_id") or "default")
+        user_id = str(current_user.get("user_id") or current_user.get("sub") or "admin")
 
-    # 获取目标日期规则（兼容非交易日：周末/节假日）
-    cal_xshg = xcals.get_calendar("XSHG") if xcals else None
+        if now_local.time() < datetime.strptime("09:30", "%H:%M").time():
+            # 未到开盘时间，取上一交易日
+            trade_date_obj = await calendar_service.prev_trading_day(
+                market="SSE",
+                trade_date=now_local.date(),
+                tenant_id=tenant_id,
+                user_id=user_id
+            )
+        else:
+            # 已过开盘时间，取今天（若是交易日）或更早的最后一个交易日
+            is_td = await calendar_service.is_trading_day(
+                market="SSE",
+                trade_date=now_local.date(),
+                tenant_id=tenant_id,
+                user_id=user_id
+            )
+            if is_td:
+                trade_date_obj = now_local.date()
+            else:
+                trade_date_obj = await calendar_service.prev_trading_day(
+                    market="SSE",
+                    trade_date=now_local.date(),
+                    tenant_id=tenant_id,
+                    user_id=user_id
+                )
+        trade_date = trade_date_obj.isoformat()
 
-    def _latest_trading_session(ref_date) -> date:
-        """返回 ref_date 当天或之前最近的一个交易日。"""
-        if cal_xshg is None:
-            return ref_date
-        import pandas as pd
+        # ========== Qlib 数据状态扫描 ==========
+        qlib_data_dir = Path(os.getcwd()) / "db" / "qlib_data"
+        calendars_path = qlib_data_dir / "calendars" / "day.txt"
+        instruments_all_path = qlib_data_dir / "instruments" / "all.txt"
+        features_root = qlib_data_dir / "features"
 
-        ref_ts = pd.Timestamp(ref_date)
-        past = cal_xshg.sessions[cal_xshg.sessions <= ref_ts]
-        return past[-1].date() if len(past) else ref_date
+        qlib_info: dict[str, Any] = {
+            "qlib_dir": str(qlib_data_dir),
+            "exists": qlib_data_dir.exists() and qlib_data_dir.is_dir(),
+            "calendar_total_days": 0,
+            "calendar_start_date": None,
+            "calendar_last_date": None,
+            "instruments": {"total": 0, "sh": 0, "sz": 0, "bj": 0, "other": 0},
+            "feature_dirs_total": 0,
+            "feature_dirs_sh_sz_bj": 0,
+            "latest_date_coverage": {
+                "target_date": None,
+                "at_target_count": 0,
+                "older_count": 0,
+                "invalid_count": 0,
+            },
+        }
 
-    today = now_local.date()
-    if now_local.time() < datetime.strptime("09:30", "%H:%M").time():
-        # 未到开盘时间，取昨天（或更早）的最后一个交易日
-        import pandas as pd
+        calendar: list[str] = []
+        if calendars_path.exists():
+            try:
+                calendar = [
+                    x.strip()
+                    for x in calendars_path.read_text(encoding="utf-8").splitlines()
+                    if x.strip()
+                ]
+                if calendar:
+                    qlib_info["calendar_total_days"] = len(calendar)
+                    qlib_info["calendar_start_date"] = calendar[0]
+                    qlib_info["calendar_last_date"] = calendar[-1]
+                    qlib_info["latest_date_coverage"]["target_date"] = calendar[-1]
+            except Exception:
+                pass
 
-        trade_date_obj = _latest_trading_session(
-            pd.Timestamp(today) - pd.Timedelta(days=1)
+        if instruments_all_path.exists():
+            try:
+                for line in instruments_all_path.read_text(encoding="utf-8").splitlines():
+                    if not line.strip():
+                        continue
+                    code = line.split()[0].strip().upper()
+                    qlib_info["instruments"]["total"] += 1
+                    if code.startswith("SH"):
+                        qlib_info["instruments"]["sh"] += 1
+                    elif code.startswith("SZ"):
+                        qlib_info["instruments"]["sz"] += 1
+                    elif code.startswith("BJ"):
+                        qlib_info["instruments"]["bj"] += 1
+                    else:
+                        qlib_info["instruments"]["other"] += 1
+            except Exception:
+                pass
+
+        if features_root.exists() and features_root.is_dir():
+            feature_dirs = [p for p in features_root.iterdir() if p.is_dir()]
+            qlib_info["feature_dirs_total"] = len(feature_dirs)
+            qlib_info["sync_partial"] = True  # 标记为部分同步结果
+
+        # ========== Feature Snapshots 状态扫描 ==========
+        feature_snapshots_info = _scan_feature_snapshots_status(
+            target_date=trade_date,
+            topn=20,
         )
-    else:
-        # 已过开盘时间，取今天或更早的最后一个交易日
-        trade_date_obj = _latest_trading_session(today)
-    trade_date = trade_date_obj.isoformat()
 
-    # ========== Qlib 数据状态扫描 ==========
-    qlib_data_dir = Path(os.getcwd()) / "db" / "qlib_data"
-    calendars_path = qlib_data_dir / "calendars" / "day.txt"
-    instruments_all_path = qlib_data_dir / "instruments" / "all.txt"
-    features_root = qlib_data_dir / "features"
-
-    qlib_info: dict[str, Any] = {
-        "qlib_dir": str(qlib_data_dir),
-        "exists": qlib_data_dir.exists() and qlib_data_dir.is_dir(),
-        "calendar_total_days": 0,
-        "calendar_start_date": None,
-        "calendar_last_date": None,
-        "instruments": {"total": 0, "sh": 0, "sz": 0, "bj": 0, "other": 0},
-        "feature_dirs_total": 0,
-        "feature_dirs_sh_sz_bj": 0,
-        "latest_date_coverage": {
-            "target_date": None,
-            "at_target_count": 0,
-            "older_count": 0,
-            "invalid_count": 0,
-        },
-    }
-
-    calendar: list[str] = []
-    if calendars_path.exists():
-        try:
-            calendar = [
-                x.strip()
-                for x in calendars_path.read_text(encoding="utf-8").splitlines()
-                if x.strip()
-            ]
-            if calendar:
-                qlib_info["calendar_total_days"] = len(calendar)
-                qlib_info["calendar_start_date"] = calendar[0]
-                qlib_info["calendar_last_date"] = calendar[-1]
-                qlib_info["latest_date_coverage"]["target_date"] = calendar[-1]
-        except Exception:
-            pass
-
-    if instruments_all_path.exists():
-        try:
-            for line in instruments_all_path.read_text(encoding="utf-8").splitlines():
-                if not line.strip():
-                    continue
-                code = line.split()[0].strip().upper()
-                qlib_info["instruments"]["total"] += 1
-                if code.startswith("SH"):
-                    qlib_info["instruments"]["sh"] += 1
-                elif code.startswith("SZ"):
-                    qlib_info["instruments"]["sz"] += 1
-                elif code.startswith("BJ"):
-                    qlib_info["instruments"]["bj"] += 1
-                else:
-                    qlib_info["instruments"]["other"] += 1
-        except Exception:
-            pass
-
-    if features_root.exists() and features_root.is_dir():
-        feature_dirs = [p for p in features_root.iterdir() if p.is_dir()]
-        qlib_info["feature_dirs_total"] = len(feature_dirs)
-        qlib_info["sync_partial"] = True  # 标记为部分同步结果
-
-    # ========== Feature Snapshots 状态扫描 ==========
-    feature_snapshots_info = _scan_feature_snapshots_status(
-        target_date=trade_date,
-        topn=20,
-    )
-
-    return {
-        "checked_at": now_local.isoformat(),
-        "trade_date": trade_date,
-        "qlib_data": qlib_info,
-        "feature_snapshots": feature_snapshots_info,
-        "async_trigger": bool(celery_app),
-        "message": "数据正在后台扫描中，请稍后刷新"
-        if not refresh
-        else "已触发强制刷新任务",
-    }
+        return {
+            "checked_at": now_local.isoformat(),
+            "trade_date": trade_date,
+            "qlib_data": qlib_info,
+            "feature_snapshots": feature_snapshots_info,
+            "async_trigger": bool(celery_app),
+            "message": "数据正在后台扫描中，请稍后刷新"
+            if not refresh
+            else "已触发强制刷新任务",
+        }
+    except Exception as e:
+        import traceback
+        error_msg = f"Data status scanning failed: {str(e)}"
+        print(error_msg)
+        print(traceback.format_exc())
+        return {
+            "error": error_msg,
+            "checked_at": datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(),
+            "qlib_data": {"exists": False},
+            "feature_snapshots": {"exists": False},
+            "message": f"状态扫描异常: {str(e)}"
+        }
 
 
 @router.post(

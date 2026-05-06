@@ -31,7 +31,7 @@ export const AdminDataManagement: React.FC = () => {
     const [data, setData] = useState<AdminDataStatusResult | null>(null);
     const [syncLoading, setSyncLoading] = useState(false);
     const [syncResult, setSyncResult] = useState<AdminOfficialDataUpdateSyncResult | null>(null);
-    const [apiBaseUrl, setApiBaseUrl] = useState('https://www.quantmindai.cn/api/v1');
+    const [apiBaseUrl, setApiBaseUrl] = useState('https://api.quantmind.cloud/api/v1');
     const [accessKey, setAccessKey] = useState('');
     const [secretKey, setSecretKey] = useState('');
     const [version, setVersion] = useState('');
@@ -253,7 +253,7 @@ export const AdminDataManagement: React.FC = () => {
                                 <Progress 
                                     type="circle" 
                                     percent={coverageRate} 
-                                    width={48} 
+                                    size={48} 
                                     strokeWidth={12}
                                     strokeColor={{ '0%': '#6366f1', '100%': '#10b981' }}
                                     format={() => <span className="text-[10px] font-black text-slate-700">{Math.round(coverageRate)}%</span>}
@@ -282,7 +282,7 @@ export const AdminDataManagement: React.FC = () => {
                             </div>
                         }
                         className="rounded-[2.5rem] border-none shadow-2xl shadow-slate-200/30"
-                        bodyStyle={{ padding: '32px' }}
+                        styles={{ body: { padding: '32px' } }}
                     >
                         {!qlib?.exists ? (
                             <Alert
@@ -324,7 +324,7 @@ export const AdminDataManagement: React.FC = () => {
                             </div>
                         }
                         className="rounded-[2.5rem] border-none shadow-2xl shadow-slate-200/30"
-                        bodyStyle={{ padding: '32px' }}
+                        styles={{ body: { padding: '32px' } }}
                     >
                         {!snapshots?.exists ? (
                             <Empty description="暂无快照数据" image={Empty.PRESENTED_IMAGE_SIMPLE} />
@@ -368,51 +368,53 @@ export const AdminDataManagement: React.FC = () => {
                 <Col span={24} lg={9} className="space-y-8">
                     {/* Sync Panel */}
                     <Card
-                        className="rounded-[2.5rem] border-none shadow-2xl shadow-indigo-900/10 bg-gradient-to-br from-slate-800 to-slate-900"
-                        bodyStyle={{ padding: '32px' }}
+                        className="rounded-[2.5rem] border-none shadow-xl shadow-slate-200/40 bg-white"
+                        styles={{ body: { padding: '32px' } }}
                     >
                         <div className="flex items-center justify-between mb-8">
                             <div className="flex items-center space-x-3">
-                                <CloudSyncOutlined className="text-indigo-400 text-2xl" />
-                                <span className="text-white font-black text-xl uppercase tracking-tight">同步引擎</span>
+                                <div className="w-10 h-10 rounded-xl bg-indigo-50 flex items-center justify-center">
+                                    <CloudSyncOutlined className="text-indigo-600 text-xl" />
+                                </div>
+                                <span className="text-slate-800 font-black text-xl uppercase tracking-tight">同步引擎</span>
                             </div>
                             <Tooltip title="安全连接已激活">
-                                <Tag color="success" className="m-0 bg-emerald-500/20 text-emerald-400 border-none rounded-full px-3 py-0.5 text-[10px] font-bold">安全</Tag>
+                                <Tag className="m-0 bg-emerald-50 text-emerald-600 border-none rounded-full px-3 py-0.5 text-[10px] font-bold">安全</Tag>
                             </Tooltip>
                         </div>
 
                         <div className="space-y-5">
                             <div className="space-y-1.5">
-                                <Text className="text-[10px] font-bold text-indigo-300 uppercase tracking-widest ml-1 opacity-70">Access Key</Text>
+                                <Text className="text-[10px] font-bold text-slate-400 uppercase tracking-widest ml-1">Access Key</Text>
                                 <Input 
                                     prefix={<UserOutlined className="text-indigo-400/50" />}
                                     value={accessKey} 
                                     onChange={e => setAccessKey(e.target.value)} 
-                                    className="h-12 bg-white/5 border-white/10 rounded-xl text-white font-mono text-sm focus:bg-white/10" 
+                                    className="h-12 bg-slate-50 border-slate-100 rounded-xl text-slate-700 font-mono text-sm focus:bg-white transition-all" 
                                     placeholder="qm_live_..."
                                 />
                             </div>
                             <div className="space-y-1.5">
-                                <Text className="text-[10px] font-bold text-indigo-300 uppercase tracking-widest ml-1 opacity-70">Secret Key</Text>
+                                <Text className="text-[10px] font-bold text-slate-400 uppercase tracking-widest ml-1">Secret Key</Text>
                                 <Input.Password 
                                     prefix={<SafetyCertificateOutlined className="text-indigo-400/50" />}
                                     value={secretKey} 
                                     onChange={e => setSecretKey(e.target.value)} 
-                                    className="h-12 bg-white/5 border-white/10 rounded-xl text-white font-mono text-sm focus:bg-white/10" 
+                                    className="h-12 bg-slate-50 border-slate-100 rounded-xl text-slate-700 font-mono text-sm focus:bg-white transition-all" 
                                     placeholder="••••••••••••"
                                 />
                             </div>
                             <Button 
                                 type="primary" 
                                 block 
-                                className="h-12 rounded-xl bg-indigo-500 hover:bg-indigo-600 border-none font-black text-base shadow-lg shadow-indigo-500/20 mt-4 transition-all"
+                                className="h-12 rounded-xl bg-indigo-600 hover:bg-indigo-700 border-none font-black text-base shadow-lg shadow-indigo-100 mt-4 transition-all"
                                 loading={syncLoading}
                                 onClick={handleSyncOfficialData}
                             >
                                 启动数据同步
                             </Button>
                             <div className="flex justify-center space-x-4">
-                                <Button type="link" onClick={handleGenerateScript} className="text-indigo-300/60 font-bold text-xs hover:text-white uppercase tracking-widest px-0">
+                                <Button type="link" onClick={handleGenerateScript} className="text-indigo-600 font-bold text-xs hover:text-indigo-700 uppercase tracking-widest px-0">
                                     <CodeOutlined className="mr-1" /> 生成配置脚本
                                 </Button>
                             </div>
@@ -421,10 +423,10 @@ export const AdminDataManagement: React.FC = () => {
                         {configScript && (
                             <div className="mt-8 relative animate-in fade-in slide-in-from-top-2">
                                 <div className="absolute top-3 right-3 z-10">
-                                    <Tag className="bg-white/10 border-none text-white/40 text-[9px] font-black uppercase">Shell 脚本</Tag>
+                                    <Tag className="bg-slate-200/50 border-none text-slate-500 text-[9px] font-black uppercase">Shell 脚本</Tag>
                                 </div>
                                 <Input.TextArea
-                                    className="bg-black/40 border-none rounded-2xl text-indigo-200 font-mono text-[11px] leading-relaxed p-6"
+                                    className="bg-slate-50 border-slate-100 rounded-2xl text-indigo-700 font-mono text-[11px] leading-relaxed p-6"
                                     rows={8}
                                     value={configScript}
                                     readOnly
@@ -439,7 +441,7 @@ export const AdminDataManagement: React.FC = () => {
                             <Card 
                                 title={<span className="font-black text-rose-500 tracking-tight uppercase text-sm flex items-center"><WarningFilled className="mr-2" /> 数据滞后（Top {sampleSize}）</span>}
                                 className="rounded-3xl border-none shadow-xl shadow-slate-200/20"
-                                bodyStyle={{ padding: '0 12px 12px' }}
+                                styles={{ body: { padding: '0 12px 12px' } }}
                             >
                                 <Table<AdminFeatureSnapshotsOlderSample>
                                     size="small"
@@ -455,7 +457,7 @@ export const AdminDataManagement: React.FC = () => {
                             <Card 
                                 title={<span className="font-black text-slate-400 tracking-tight uppercase text-sm flex items-center"><InfoCircleOutlined className="mr-2" /> 无效文件</span>}
                                 className="rounded-3xl border-none shadow-xl shadow-slate-200/20"
-                                bodyStyle={{ padding: '0 12px 12px' }}
+                                styles={{ body: { padding: '0 12px 12px' } }}
                             >
                                 <Table<AdminFeatureSnapshotsInvalidSample>
                                     size="small"

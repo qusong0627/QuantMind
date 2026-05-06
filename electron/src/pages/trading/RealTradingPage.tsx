@@ -517,7 +517,7 @@ const RealTradingPage: React.FC = () => {
                     <div className="p-4 border-t border-gray-200 relative">
                         <div className="flex items-center justify-between gap-1">
                             <a
-                                href="https://www.quantmindai.cn/help"
+                                href="https://api.quantmind.cloud/help"
                                 target="_blank"
                                 rel="noopener noreferrer"
                                 className="inline-flex items-center gap-1 px-2 py-2 rounded-xl text-gray-600 hover:text-blue-600 hover:bg-blue-50 transition-colors flex-shrink-0"

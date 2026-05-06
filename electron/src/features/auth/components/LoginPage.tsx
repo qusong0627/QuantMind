@@ -687,9 +687,9 @@ const LoginPage: React.FC = () => {
         }}
       >
         <Space split={<span style={{ color: 'rgba(255,255,255,0.4)', margin: '0 8px' }}>|</span>}>
-          <a href="https://www.quantmindai.cn/privacy" target="_blank" rel="noopener noreferrer" style={{ color: 'white', cursor: 'pointer', transition: 'all 0.3s ease', textDecoration: 'none' }} onMouseEnter={(e) => e.currentTarget.style.color = '#1890ff'} onMouseLeave={(e) => e.currentTarget.style.color = 'white'}>隐私政策</a>
-          <a href="https://www.quantmindai.cn/terms" target="_blank" rel="noopener noreferrer" style={{ color: 'white', cursor: 'pointer', transition: 'all 0.3s ease', textDecoration: 'none' }} onMouseEnter={(e) => e.currentTarget.style.color = '#1890ff'} onMouseLeave={(e) => e.currentTarget.style.color = 'white'}>服务条款</a>
-          <a href="https://www.quantmindai.cn/help" target="_blank" rel="noopener noreferrer" style={{ color: 'white', cursor: 'pointer', transition: 'all 0.3s ease', textDecoration: 'none' }} onMouseEnter={(e) => e.currentTarget.style.color = '#1890ff'} onMouseLeave={(e) => e.currentTarget.style.color = 'white'}>帮助中心</a>
+          <a href="https://api.quantmind.cloud/privacy" target="_blank" rel="noopener noreferrer" style={{ color: 'white', cursor: 'pointer', transition: 'all 0.3s ease', textDecoration: 'none' }} onMouseEnter={(e) => e.currentTarget.style.color = '#1890ff'} onMouseLeave={(e) => e.currentTarget.style.color = 'white'}>隐私政策</a>
+          <a href="https://api.quantmind.cloud/terms" target="_blank" rel="noopener noreferrer" style={{ color: 'white', cursor: 'pointer', transition: 'all 0.3s ease', textDecoration: 'none' }} onMouseEnter={(e) => e.currentTarget.style.color = '#1890ff'} onMouseLeave={(e) => e.currentTarget.style.color = 'white'}>服务条款</a>
+          <a href="https://api.quantmind.cloud/help" target="_blank" rel="noopener noreferrer" style={{ color: 'white', cursor: 'pointer', transition: 'all 0.3s ease', textDecoration: 'none' }} onMouseEnter={(e) => e.currentTarget.style.color = '#1890ff'} onMouseLeave={(e) => e.currentTarget.style.color = 'white'}>帮助中心</a>
           <span>© 2026 QuantMind</span>
         </Space>
       </div>

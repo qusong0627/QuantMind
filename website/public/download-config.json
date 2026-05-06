@@ -1,7 +1,7 @@
 {
   "version": "1.0.4",
   "releaseDate": "2026-05-05",
-  "website": "https://oss.quantmindai.cn",
+  "website": "https://oss.quantmind.cloud",
   "downloads": {
     "windows": {
       "name": "Windows 客户端",
@@ -33,7 +33,7 @@
     }
   },
   "dataPackage": {
-    "url": "https://oss.quantmindai.cn/data-download.html",
+    "url": "https://oss.quantmind.cloud/data-download.html",
     "size": "约 8.7GB"
   }
 }

@@ -186,7 +186,7 @@ const SettingsCenter: React.FC<SettingsCenterProps> = ({ userId, isActive }) => 
   };
 
   const handleDownloadQMT = async () => {
-    const downloadUrl = 'https://oss.quantmindai.cn/qmt-agent.html';
+    const downloadUrl = 'https://oss.quantmind.cloud/qmt-agent.html';
     try {
       if (window.electronAPI?.openExternal) {
         const result = await window.electronAPI.openExternal(downloadUrl);

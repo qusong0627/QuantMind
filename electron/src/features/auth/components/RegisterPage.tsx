@@ -469,9 +469,9 @@ const RegisterPage: React.FC = () => {
               <InfoCircleOutlined />
               <span style={{ fontSize: '12px' }}>
                 注册即表示您同意我们的
-                <a href="https://www.quantmindai.cn/terms" target="_blank" rel="noopener noreferrer" style={{ margin: '0 4px' }}>服务条款</a>
+                <a href="https://api.quantmind.cloud/terms" target="_blank" rel="noopener noreferrer" style={{ margin: '0 4px' }}>服务条款</a>
                 和
-                <a href="https://www.quantmindai.cn/privacy" target="_blank" rel="noopener noreferrer" style={{ margin: '0 4px' }}>隐私政策</a>
+                <a href="https://api.quantmind.cloud/privacy" target="_blank" rel="noopener noreferrer" style={{ margin: '0 4px' }}>隐私政策</a>
               </span>
             </Space>
           }
@@ -506,9 +506,9 @@ const RegisterPage: React.FC = () => {
           }}
         >
           <Space split={<span style={{ color: 'rgba(255,255,255,0.3)' }}>|</span>}>
-            <a href="https://www.quantmindai.cn/privacy" target="_blank" rel="noopener noreferrer" style={{ color: 'white', textDecoration: 'none' }}>隐私政策</a>
-            <a href="https://www.quantmindai.cn/terms" target="_blank" rel="noopener noreferrer" style={{ color: 'white', textDecoration: 'none' }}>服务条款</a>
-            <a href="https://www.quantmindai.cn/help" target="_blank" rel="noopener noreferrer" style={{ color: 'white', textDecoration: 'none' }}>帮助中心</a>
+            <a href="https://api.quantmind.cloud/privacy" target="_blank" rel="noopener noreferrer" style={{ color: 'white', textDecoration: 'none' }}>隐私政策</a>
+            <a href="https://api.quantmind.cloud/terms" target="_blank" rel="noopener noreferrer" style={{ color: 'white', textDecoration: 'none' }}>服务条款</a>
+            <a href="https://api.quantmind.cloud/help" target="_blank" rel="noopener noreferrer" style={{ color: 'white', textDecoration: 'none' }}>帮助中心</a>
             <span>© 2026 QuantMind</span>
           </Space>
         </div>

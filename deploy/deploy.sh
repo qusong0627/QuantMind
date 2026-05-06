@@ -20,7 +20,7 @@
 #
 # 注意:
 #   前端已集成到桌面客户端，部署完成后请下载客户端配置服务器地址使用
-#   客户端下载: https://oss.quantmindai.cn/desktop-download.html
+#   客户端下载: https://oss.quantmind.cloud/desktop-download.html
 #===============================================================================
 
 # 自动添加执行权限（如果当前脚本没有执行权限）
@@ -1071,7 +1071,7 @@ show_info() {
     echo -e "   QuantMind 采用桌面客户端 + 后端服务架构，请下载桌面客户端"
     echo -e "   并配置服务器地址 ${BLUE}${SERVER_IP}${NC} 即可体验完整功能。"
     echo ""
-    echo -e "   下载地址: ${BLUE}https://oss.quantmindai.cn/desktop-download.html${NC}"
+    echo -e "   下载地址: ${BLUE}https://oss.quantmind.cloud/desktop-download.html${NC}"
     echo ""
     echo -e "${YELLOW}🔑 默认管理员账号${NC}"
     echo -e "   用户名: ${GREEN}admin${NC}"
@@ -1085,7 +1085,7 @@ show_info() {
     echo ""
     echo -e "${YELLOW}💡 温馨提示${NC}"
     echo -e "   如需使用完整回测、模型训练及推理服务，请下载离线数据包："
-    echo -e "   ${BLUE}https://oss.quantmindai.cn/data-download.html${NC}"
+    echo -e "   ${BLUE}https://oss.quantmind.cloud/data-download.html${NC}"
     echo ""
 }
 
@@ -1136,7 +1136,7 @@ show_welcome() {
     echo ""
     echo -e "${YELLOW}🖥️ 访问方式${NC}"
     echo "   部署完成后，请下载桌面客户端并配置服务器地址即可使用。"
-    echo "   客户端下载: https://oss.quantmindai.cn/desktop-download.html"
+    echo "   客户端下载: https://oss.quantmind.cloud/desktop-download.html"
     echo ""
     echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
@@ -1204,7 +1204,7 @@ main() {
     # 根据部署模式执行步骤
     if $FRONTEND_ONLY; then
         log_warn "前端已集成到桌面客户端，不再支持独立 Web 部署"
-        log_info "请下载桌面客户端: https://oss.quantmindai.cn/desktop-download.html"
+        log_info "请下载桌面客户端: https://oss.quantmind.cloud/desktop-download.html"
         exit 0
     elif $BACKEND_ONLY; then
         log_info "仅部署后端..."
