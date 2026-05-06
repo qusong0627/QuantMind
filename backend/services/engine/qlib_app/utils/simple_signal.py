@@ -84,7 +84,7 @@ class SimpleSignal(Signal):
                     continue
                 if "\t" in code:
                     code = code.split("\t", 1)[0].strip()
-                instruments.append(code)
+                instruments.append(code.upper())
         return _exclude_bj_instruments(instruments)
 
     def _get_universe_instruments(self) -> list[str]:
