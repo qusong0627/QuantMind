@@ -77,7 +77,7 @@ class QlibDataService {
   private cache: DataCache;
 
   constructor() {
-    this.baseUrl = SERVICE_URLS.QLIB_SERVICE;
+    this.baseUrl = SERVICE_URLS.ENGINE_SERVICE;
     this.client = axios.create({
       baseURL: this.baseUrl,
       timeout: 30000,

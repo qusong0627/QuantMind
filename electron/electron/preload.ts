@@ -136,6 +136,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getSystemVersion: () => process.getSystemVersion(),
 
   /**
+   * 检测是否在 Electron 环境中
+   */
+  isElectron: () => true,
+
+  /**
    * 获取服务器配置地址
    */
   getServerUrl: () => ipcRenderer.invoke('config:get-server-url'),

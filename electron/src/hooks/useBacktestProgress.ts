@@ -87,7 +87,7 @@ export function useBacktestProgress(
     try {
       // 从环境变量或配置获取 WebSocket URL
       const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const wsHost = SERVICE_URLS.QLIB_SERVICE.replace(/^http(s)?:\/\//, '');
+      const wsHost = SERVICE_URLS.ENGINE_SERVICE.replace(/^http(s)?:\/\//, '');
       const wsUrl = `${wsProtocol}//${wsHost}/ws/backtest/${backtestId}`;
 
       console.log(`🔗 连接 WebSocket: ${wsUrl}`);

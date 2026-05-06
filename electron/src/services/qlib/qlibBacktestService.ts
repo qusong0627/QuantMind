@@ -234,7 +234,7 @@ class QlibBacktestService {
 
   constructor() {
     // 使用统一配置的服务地址（重定向到 Strategy Service 8003）
-    this.baseUrl = `${SERVICE_URLS.QLIB_SERVICE}/api/v1`;
+    this.baseUrl = `${SERVICE_URLS.ENGINE_SERVICE}/api/v1`;
     this.client = axios.create({
       baseURL: this.baseUrl,
       timeout: 180000,
@@ -594,7 +594,7 @@ class QlibBacktestService {
 
     // 构建WebSocket URL
     const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsBaseUrl = SERVICE_URLS.QLIB_SERVICE.replace(/^http(s)?:\/\//, '');
+    const wsBaseUrl = SERVICE_URLS.ENGINE_SERVICE.replace(/^http(s)?:\/\//, '');
     const wsUrl = `${wsProtocol}//${wsBaseUrl}/api/v1/ws/backtest/${backtestId}`;
 
     console.log('[QlibBacktest] Connecting to:', wsUrl);

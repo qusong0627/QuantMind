@@ -4,20 +4,22 @@ import { Minus, X, RefreshCw, Download, AlertCircle } from 'lucide-react';
 type UpdateState = 'idle' | 'checking' | 'available' | 'downloading' | 'downloaded' | 'error';
 
 export const TitleBar: React.FC = () => {
-  const [platform, setPlatform] = useState<string>('');
+  const [isElectron, setIsElectron] = useState(() => !!(window as any).electronAPI);
+  const [platform, setPlatform] = useState<string>(() => (window as any).electronAPI?.getPlatform?.() || '');
   const [updateState, setUpdateState] = useState<UpdateState>('idle');
   const [downloadProgress, setDownloadProgress] = useState<number>(0);
   const [updateVersion, setUpdateVersion] = useState<string>('');
   const [errorMessage, setErrorMessage] = useState<string>('');
-  const [isElectron, setIsElectron] = useState(false);
 
   useEffect(() => {
-    // 更可靠的 Electron 环境检测：检查 process.type 或 electronAPI 的原生实现
-    const isElectronEnv = typeof (window as any).process !== 'undefined' && (window as any).process?.type === 'renderer';
-    setIsElectron(isElectronEnv);
-
+    const isElectronEnv = !!(window as any).electronAPI;
     if (!isElectronEnv) return;
-    setPlatform(window.electronAPI.getPlatform());
+    
+    // 确保平台信息最新
+    const currentPlatform = window.electronAPI.getPlatform();
+    if (currentPlatform !== platform) {
+      setPlatform(currentPlatform);
+    }
 
     const cleanups: (() => void)[] = [];
 
@@ -146,7 +148,7 @@ export const TitleBar: React.FC = () => {
           </div>
         )}
 
-        {platform !== '' && (
+        {isElectron && (
           <div className="flex h-full">
             <button
               onClick={handleMinimize}

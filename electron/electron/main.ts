@@ -242,7 +242,7 @@ function createWindow() {
     icon: process.platform === 'darwin'
       ? path.join(__dirname, 'logo.icns')
       : process.platform === 'win32'
-        ? path.join(__dirname, 'logo.png')
+        ? path.join(__dirname, 'logo.ico')
         : path.join(__dirname, 'logo.png'),
     webPreferences: {
       preload: preloadPath,
