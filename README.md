@@ -181,6 +181,14 @@ curl -fsSL https://gitee.com/qusong0627/quantmind/raw/master/deploy/update.sh | 
 
 每日自动推理生成交易信号，支持手动触发、信号导出、历史回溯。
 
+### 🔍 投研平台
+
+<p align="center">
+  <img src="docs/images/research.png" alt="Research Platform" width="80%">
+</p>
+
+聚合展示候选股票、模型分数、涨跌幅与多周期收益，支持批次切换、量化筛选与投研决策。
+
 ### 💹 实盘交易
 
 <p align="center">
