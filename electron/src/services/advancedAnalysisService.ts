@@ -8,7 +8,7 @@ import axios, { AxiosInstance } from 'axios';
 import { SERVICE_URLS } from '../config/services';
 import { authService } from '../features/auth/services/authService';
 
-const resolveApiBaseURL = () => String(SERVICE_URLS.QLIB_SERVICE || '').replace(/\/+$/, '');
+const resolveApiBaseURL = () => String(SERVICE_URLS.ENGINE_SERVICE || '').replace(/\/+$/, '');
 
 // 创建axios实例
 const apiClient: AxiosInstance = axios.create({

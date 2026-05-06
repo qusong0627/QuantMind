@@ -9,8 +9,8 @@ import { SERVICE_URLS } from '../config/services';
 import { authService } from '../features/auth/services/authService';
 
 // API基础配置
-const resolveApiBaseURL = () => `${String(SERVICE_URLS.QLIB_SERVICE || '').replace(/\/+$/, '')}/api/v1/qlib`;
-const WS_BASE_URL = SERVICE_URLS.QLIB_SERVICE.replace(/^http(s)?:\/\//, '');
+const resolveApiBaseURL = () => `${String(SERVICE_URLS.ENGINE_SERVICE || '').replace(/\/+$/, '')}/api/v1/qlib`;
+const WS_BASE_URL = SERVICE_URLS.ENGINE_SERVICE.replace(/^http(s)?:\/\//, '');
 
 // 创建axios实例
 const apiClient: AxiosInstance = axios.create({

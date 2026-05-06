@@ -159,8 +159,8 @@ def _load_help_text() -> str:
 def default_config() -> dict[str, Any]:
     hostname = socket.gethostname()
     return {
-        "api_base_url": "http://localhost:8000/api/v1",
-        "server_url": "ws://localhost:8003/ws/bridge",
+        "api_base_url": "https://api.quantmind.cloud/api/v1",
+        "server_url": "wss://api.quantmind.cloud/ws/bridge",
         "access_key": "",
         "secret_key": "",
         "account_id": "",
@@ -1460,8 +1460,8 @@ class DesktopApp(QMainWindow):
 
         # Cloud connection
         _, f1 = _section("云端连接")
-        _field(f1, "API 地址", "api_base_url", "http://localhost:8000/api/v1")
-        _field(f1, "WebSocket 地址", "server_url", "ws://localhost:8003/ws/bridge")
+        _field(f1, "API 地址", "api_base_url", "https://api.quantmind.cloud/api/v1")
+        _field(f1, "WebSocket 地址", "server_url", "wss://api.quantmind.cloud/ws/bridge")
         _field(f1, "Access Key", "access_key")
         _field(f1, "Secret Key", "secret_key", password=True)
 
@@ -2147,7 +2147,7 @@ class DesktopApp(QMainWindow):
         btn_layout.addStretch()
         button_box = QDialogButtonBox()
         open_web_btn = QPushButton("打开在线帮助")
-        open_web_btn.clicked.connect(lambda: QDesktopServices.openUrl(QUrl("https://api.quantmind.cloud/help")))
+        open_web_btn.clicked.connect(lambda: QDesktopServices.openUrl(QUrl("https://www.quantmindai.cn/help")))
         copy_btn = QPushButton("复制帮助内容")
 
         def _copy_help() -> None:

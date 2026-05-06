@@ -4,10 +4,9 @@ import { authService } from '../features/auth/services/authService';
 import { SERVICE_ENDPOINTS, SERVICE_URLS } from '../config/services';
 
 export const API_BASE_URL = SERVICE_ENDPOINTS.AI_STRATEGY;
-export const BACKTEST_API_BASE_URL = SERVICE_URLS.QLIB_SERVICE;
+export const BACKTEST_API_BASE_URL = SERVICE_URLS.ENGINE_SERVICE;
 
-const resolveAiStrategyBaseURL = () => String(SERVICE_ENDPOINTS.AI_STRATEGY || '').replace(/\/+$/, '');
-const resolveBacktestBaseURL = () => String(SERVICE_URLS.QLIB_SERVICE || '').replace(/\/+$/, '');
+const resolveBacktestBaseURL = () => String(SERVICE_URLS.ENGINE_SERVICE || '').replace(/\/+$/, '');
 
 export const apiClient = axios.create({
   timeout: 300000,

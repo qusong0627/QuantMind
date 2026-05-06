@@ -13,9 +13,9 @@ import { AIStrategyServiceFilesMixin } from './aiStrategyServiceFiles';
 // 基础配置 - 使用统一端口配置
 import { SERVICE_ENDPOINTS, SERVICE_URLS } from '../config/services';
 const API_BASE_URL = SERVICE_ENDPOINTS.AI_STRATEGY;
-const BACKTEST_API_BASE_URL = SERVICE_URLS.QLIB_SERVICE;
-const resolveAiStrategyBaseURL = () => String(SERVICE_ENDPOINTS.AI_STRATEGY || '').replace(/\/+$/, '');
-const resolveBacktestBaseURL = () => String(SERVICE_URLS.QLIB_SERVICE || '').replace(/\/+$/, '');
+const BACKTEST_API_BASE_URL = SERVICE_URLS.ENGINE_SERVICE;
+
+const resolveBacktestBaseURL = () => String(SERVICE_URLS.ENGINE_SERVICE || '').replace(/\/+$/, '');
 
 // 创建axios实例
 const apiClient = axios.create({

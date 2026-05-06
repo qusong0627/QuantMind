@@ -14,7 +14,7 @@
     "build": "npm run build:react && npm run build:electron",
     "build:react": "node ../scripts/frontend/copy-monaco-assets.js && vite build",
     "build:react:win": "node ../scripts/frontend/copy-monaco-assets.js && vite build",
-    "build:electron": "npx tsc -p tsconfig.electron.json && node -e \"const fs=require('fs');const d='dist-electron/electron';fs.mkdirSync(d,{recursive:true});const cp=(s,t)=>fs.existsSync(s)?(fs.copyFileSync(s,t),true):false;cp('build/icon.ico',d+'/logo.ico')||cp('public/favicon.ico',d+'/logo.ico');cp('public/logo.png',d+'/logo.png');\"",
+    "build:electron": "npx tsc -p tsconfig.electron.json && node -e \"const fs=require('fs');const d='dist-electron/electron';fs.mkdirSync(d,{recursive:true});const cp=(s,t)=>fs.existsSync(s)?(fs.copyFileSync(s,t),true):false;cp('build/logo.ico',d+'/logo.ico')||cp('public/favicon.ico',d+'/logo.ico');cp('public/logo.png',d+'/logo.png');\"",
     "build:package": "npm run build:react && npm run build:electron && cross-env CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --publish=never",
     "build:package:win": "cross-env CSC_IDENTITY_AUTO_DISCOVERY=false node scripts/package-win.js",
     "build:package:win:dir": "cross-env CSC_IDENTITY_AUTO_DISCOVERY=false QUANTMIND_WIN_DIR_ONLY=1 node scripts/package-win.js",
@@ -71,7 +71,7 @@
           ]
         }
       ],
-      "icon": "build/icon.icns",
+      "icon": "logo.icns",
       "identity": null,
       "hardenedRuntime": false,
       "gatekeeperAssess": false
@@ -109,7 +109,7 @@
         }
       ],
       "category": "Finance",
-      "icon": "build/icons"
+      "icon": "logo.png"
     },
     "nsis": {
       "oneClick": true,
