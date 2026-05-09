@@ -336,7 +336,8 @@ class QMTAgent:
                 settle_deadline = time.time() + settle_seconds
         return False
 
-    def on_open(self, _ws) -> None:
+    def on_open(self, *args, **kwargs) -> None:
+        # 兼容 websocket-client 不同版本：旧版传 (ws)，新版对 bound method 不传 ws。
         logger.info("bridge websocket connected")
         with self._state_lock:
             self.runtime_state = "running"
@@ -457,7 +458,15 @@ class QMTAgent:
         except Exception as exc:
             logger.exception("cancel order failed: %s", exc)
 
-    def on_message(self, _ws, message: str) -> None:
+    def on_message(self, *args, **kwargs) -> None:
+        # 兼容 websocket-client 不同版本：旧版传 (ws, message)，新版对 bound method 只传 (message)。
+        if not args:
+            return
+        message = args[-1]
+        if not isinstance(message, (str, bytes, bytearray)):
+            return
+        if isinstance(message, (bytes, bytearray)):
+            message = message.decode("utf-8", errors="ignore")
         data = json.loads(message)
         msg_type = data.get("type")
         if msg_type == "order":
@@ -467,12 +476,21 @@ class QMTAgent:
             payload = data.get("payload", {}) or {}
             self._enqueue_dispatch("cancel", payload, priority=0)
 
-    def on_error(self, _ws, error: Any) -> None:
+    def on_error(self, *args, **kwargs) -> None:
+        # 兼容 websocket-client 不同版本：旧版传 (ws, error)，新版对 bound method 只传 (error)。
+        error = args[-1] if args else "unknown error"
         with self._state_lock:
             self.last_error = str(error)
         logger.warning("bridge websocket error: %s", error)
 
-    def on_close(self, _ws, code: Any, msg: Any) -> None:
+    def on_close(self, *args, **kwargs) -> None:
+        # 兼容 websocket-client 不同版本：旧版传 (ws, code, msg)，新版对 bound method 只传 (code, msg)。
+        code: Any = None
+        msg: Any = None
+        if len(args) >= 2:
+            code, msg = args[-2], args[-1]
+        elif len(args) == 1:
+            code = args[0]
         with self._state_lock:
             if not self.stop_event.is_set():
                 self.runtime_state = "reconnecting"

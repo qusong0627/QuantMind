@@ -31,6 +31,7 @@ STARTUP_CHAIN_FILES = [
     TOOL_ROOT / "reporter.py",
     TOOL_ROOT / "_callback.py",
     TOOL_ROOT / "triage.py",
+    TOOL_ROOT / "updater.py",
 ]
 ZIP_PACKAGE_FILES = [
     "qmt_agent.py",
@@ -50,6 +51,7 @@ ZIP_PACKAGE_FILES = [
     "config.py",
     "reporter.py",
     "triage.py",
+    "updater.py",
     "theme.qss",
 ]
 
@@ -102,6 +104,7 @@ def audit_startup_chain_imports() -> None:
         "reporter",
         "_callback",
         "triage",
+        "updater",
     }
     allowed_external = {"PySide6", "requests", "websocket", "xtquant", "winreg"}
     unexpected: set[str] = set()
@@ -130,6 +133,7 @@ def audit_startup_chain_imports() -> None:
 
 
 def smoke_test_desktop_chain() -> None:
+    DIST_ROOT.mkdir(parents=True, exist_ok=True)
     smoke_dir = Path(tempfile.mkdtemp(prefix="qmt_agent_smoke_", dir=str(DIST_ROOT)))
     try:
         for filename in (
@@ -142,6 +146,7 @@ def smoke_test_desktop_chain() -> None:
             "reporter.py",
             "_callback.py",
             "triage.py",
+            "updater.py",
             "__init__.py",
         ):
             shutil.copy2(TOOL_ROOT / filename, smoke_dir / filename)
