@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 """删除 db/ 下所有 ._ 开头的 macOS 资源分支文件"""
-import os
 from pathlib import Path
 
 root = Path(__file__).resolve().parent.parent / "db"
