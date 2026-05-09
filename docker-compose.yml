@@ -93,6 +93,9 @@ services:
       - STORAGE_MODE=local
       - STORAGE_ROOT=/data
 
+      # 融资融券股票池文件路径（容器内）
+      - MARGIN_STOCK_POOL_PATH=/data/融资融券.json
+
       # 服务端口
       - API_PORT=8000
       - ENGINE_PORT=8001
@@ -204,6 +207,9 @@ services:
       # 存储配置
       - STORAGE_MODE=local
       - STORAGE_ROOT=/data
+
+      # 融资融券股票池文件路径（容器内）
+      - MARGIN_STOCK_POOL_PATH=/data/融资融券.json
 
       # 策略模板目录
       - STRATEGY_TEMPLATES_DIR=/app/strategy_templates
