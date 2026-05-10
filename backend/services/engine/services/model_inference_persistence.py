@@ -279,6 +279,38 @@ class ModelInferencePersistence:
                 },
             )
 
+    async def delete_run(
+        self,
+        *,
+        run_id: str,
+        tenant_id: str,
+        user_id: str,
+    ) -> dict[str, Any]:
+        """删除推理运行记录及其关联的全部信号数据。"""
+        async with get_session() as session:
+            await session.execute(
+                text("DELETE FROM engine_signal_scores WHERE run_id = :run_id AND tenant_id = :tenant_id AND user_id = :user_id"),
+                {"run_id": run_id, "tenant_id": tenant_id, "user_id": user_id},
+            )
+            await session.execute(
+                text("DELETE FROM qm_research_candidate_snapshot WHERE run_id = :run_id AND tenant_id = :tenant_id AND user_id = :user_id"),
+                {"run_id": run_id, "tenant_id": tenant_id, "user_id": user_id},
+            )
+            await session.execute(
+                text("DELETE FROM engine_feature_runs WHERE run_id = :run_id AND tenant_id = :tenant_id AND user_id = :user_id"),
+                {"run_id": run_id, "tenant_id": tenant_id, "user_id": user_id},
+            )
+            await session.execute(
+                text("UPDATE qm_model_inference_settings SET last_run_id = NULL, last_run_json = NULL, updated_at = NOW() WHERE tenant_id = :tenant_id AND user_id = :user_id AND last_run_id = :run_id"),
+                {"tenant_id": tenant_id, "user_id": user_id, "run_id": run_id},
+            )
+            result = await session.execute(
+                text("DELETE FROM qm_model_inference_runs WHERE run_id = :run_id AND tenant_id = :tenant_id AND user_id = :user_id"),
+                {"run_id": run_id, "tenant_id": tenant_id, "user_id": user_id},
+            )
+            await session.commit()
+            return {"deleted": result.rowcount > 0, "run_id": run_id}
+
     async def get_run(
         self,
         *,

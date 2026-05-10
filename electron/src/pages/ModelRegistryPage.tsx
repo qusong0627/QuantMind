@@ -447,6 +447,28 @@ export const ModelRegistryPage: React.FC = () => {
     finally { setRankingLoading(false); }
   };
 
+  const handleDeleteInferenceRun = (runId: string) => {
+    Modal.confirm({
+      title: '确认删除推理记录？',
+      content: `将删除 ${runId} 及其关联的全部信号数据，操作不可恢复。`,
+      okText: '确认删除',
+      okType: 'danger',
+      cancelText: '取消',
+      onOk: async () => {
+        const ok = await modelTrainingService.deleteInferenceRun(runId);
+        if (ok) {
+          message.success('已删除');
+          if (selectedModel) {
+            void loadInferenceHistory(selectedModel.model_id);
+            void loadLatestInferenceRun(selectedModel.model_id);
+          }
+        } else {
+          message.error('删除失败');
+        }
+      },
+    });
+  };
+
   const handleExportCSV = () => {
     if (!rankingResult || rankingResult.rankings.length === 0) {
       message.warning('暂无可导出的排名数据');
@@ -730,6 +752,7 @@ export const ModelRegistryPage: React.FC = () => {
                             history={inferenceHistory}
                             historyLoading={inferenceHistoryLoading}
                             onViewRanking={handleViewRanking}
+                            onDeleteRun={handleDeleteInferenceRun}
                             autoSettings={autoSettings}
                             autoSaving={autoSaving}
                             onToggleAuto={handleToggleAuto}

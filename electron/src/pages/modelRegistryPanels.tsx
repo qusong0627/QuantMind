@@ -5,7 +5,7 @@ import dayjs from 'dayjs';
 import {
   Layers, Star, RefreshCw, Search, Code, Calendar, Layers2,
   History, Archive, Brain, CheckCircle2, Clock, XCircle,
-  ChevronRight, Play, Cpu, TrendingUp, Download, ChevronDown,
+  ChevronRight, Play, Cpu, Trash2, TrendingUp, Download, ChevronDown,
   ChevronUp, Shield, Zap, Activity, ListFilter, BarChart3, Info, AlertCircle,
 } from 'lucide-react';
 import {
@@ -666,6 +666,7 @@ export const InferenceCenterPanel: React.FC<{
   history: InferenceRunRecord[];
   historyLoading: boolean;
   onViewRanking: (runId: string) => void;
+  onDeleteRun?: (runId: string) => void;
   autoSettings: AutoInferenceSettings | null;
   autoSaving: boolean;
   onToggleAuto: (enabled: boolean) => void;
@@ -682,7 +683,7 @@ export const InferenceCenterPanel: React.FC<{
   onHistoryDateFilterChange: (value: dayjs.Dayjs | null) => void;
 }> = ({
   model, inferenceDate, onDateChange, targetDate, targetDateLoading, horizonDays,
-  running, onRun, onRunAsDefault, lastRun, history, historyLoading, onViewRanking,
+  running, onRun, onRunAsDefault, lastRun, history, historyLoading, onViewRanking, onDeleteRun,
   autoSettings, autoSaving, onToggleAuto, latestInferenceRun, latestInferenceRunLoading, precheck, precheckLoading, onRefreshPrecheck,
   historyRunIdFilter, onHistoryRunIdFilterChange, historyStatusFilter, onHistoryStatusFilterChange, historyDateFilter, onHistoryDateFilterChange,
 }) => {
@@ -899,14 +900,24 @@ export const InferenceCenterPanel: React.FC<{
                  history.length === 0 ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={<span className="text-[9px]">暂无记录</span>} /> :
                  paginatedHistory.map(run => (
                   <div key={run.run_id} className="group flex items-center justify-between p-2.5 rounded-xl bg-slate-50/40 border border-slate-100/30 hover:bg-white hover:border-blue-100 transition-all cursor-pointer" onClick={() => onViewRanking(run.run_id)}>
-                    <div className="flex flex-col min-w-0">
+                    <div className="flex flex-col min-w-0 flex-1">
                       <div className="flex items-center gap-2 mb-0.5">
                         <div className={clsx("w-1.5 h-1.5 rounded-full shrink-0", run.status === 'completed' ? 'bg-emerald-500' : run.status === 'running' ? 'bg-blue-500' : 'bg-rose-500')} />
                         <Text className="text-[10px] font-mono font-bold text-slate-700 truncate w-24">{run.run_id}</Text>
                       </div>
                       <Text className="text-[9px] text-slate-400 pl-3.5">{run.prediction_trade_date}</Text>
                     </div>
-                    <ChevronRight size={12} className="text-slate-200 group-hover:text-blue-400" />
+                    <div className="flex items-center gap-1">
+                      <Button
+                        size="small"
+                        type="text"
+                        className="border-0 h-6 w-6 p-0 flex items-center justify-center text-slate-300 hover:!text-red-500"
+                        onClick={(e) => { e.stopPropagation(); onDeleteRun?.(run.run_id); }}
+                      >
+                        <Trash2 size={13} />
+                      </Button>
+                      <ChevronRight size={12} className="text-slate-200 group-hover:text-blue-400" />
+                    </div>
                   </div>
                 ))}
               </div>

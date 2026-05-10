@@ -510,6 +510,15 @@ class ModelTrainingService {
     };
   }
 
+  async deleteInferenceRun(runId: string): Promise<boolean> {
+    try {
+      await this.client.delete(`/models/inference/runs/${runId}`);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   async getAutoInferenceSettings(modelId: string): Promise<AutoInferenceSettings> {
     const resp = await this.client.get<AutoInferenceSettings>(`/models/inference/settings/${modelId}`);
     const data = resp.data as any;
