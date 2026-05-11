@@ -221,6 +221,8 @@ const PersonalCenter: React.FC<PersonalCenterProps> = ({ tenantId, userId, statu
             const files = Array.from(e.target.files);
             setOcrFiles([...ocrFiles, ...files]);
         }
+        // Reset the input value so the same file can be selected again
+        e.target.value = '';
     };
 
     return (

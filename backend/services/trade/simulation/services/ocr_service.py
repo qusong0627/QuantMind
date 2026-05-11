@@ -32,7 +32,7 @@ class SimulationOCRService:
                 base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
             )
         
-        self.model_name = "qwen-vl-plus" # Or qwen-vl-max for better performance
+        self.model_name = "qwen-vl-max" # Or qwen-vl-max for better performance
 
     async def analyze_images(self, image_data_list: List[bytes]) -> List[Dict[str, Any]]:
         """

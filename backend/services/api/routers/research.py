@@ -85,7 +85,7 @@ _SDL_SELECT_BY_RUN_DATE = """
     COALESCE(sdl_run.macd_hist, 0) AS macd_hist,
     COALESCE(sdl_run.volume_ratio_5, 0) AS volume_ratio_5,
     COALESCE(sdl_run.volume_ratio_20, 0) AS volume_ratio_20,
-    COALESCE(sdl_run.volume_trend_3d, 0) <> 0 AS volume_trend_3d,
+    COALESCE(sdl_run.volume_trend_3d, 0) > 0 AS volume_trend_3d,
     COALESCE(sdl_run.main_flow, 0) AS main_flow,
     COALESCE(sdl_run.flow_net_amount, 0) AS flow_net_amount,
     COALESCE(sdl_run.inst_ownership, 0) AS inst_ownership,
@@ -129,7 +129,9 @@ _SDL_LATEST_SIMPLE = """
         main_flow, flow_net_amount, inst_ownership, profit_growth,
         concept_ai, concept_chip, concept_new_energy, concept_pv, concept_lithium,
         concept_military, concept_medical, concept_fintech, concept_consumption, concept_state_owned,
-        consecutive_limit_up_days
+        consecutive_limit_up_days,
+        LEAD(close, 1) OVER (PARTITION BY symbol ORDER BY trade_date) AS close_next_1d,
+        LEAD(close, 3) OVER (PARTITION BY symbol ORDER BY trade_date) AS close_next_3d
     FROM stock_daily_latest
     WHERE volume > 0
     ORDER BY symbol, trade_date DESC
@@ -157,8 +159,14 @@ _SDL_SELECT_SIMPLE = """
     COALESCE(sdl_latest.idx_hs300, 0) <> 0 AS is_hs300,
     COALESCE(sdl_latest.idx_zz1000, 0) <> 0 AS is_csi1000,
     COALESCE(sdl_latest.pct_change, 0) * 100 AS latest_change_pct,
-    0 AS return_1d,
-    0 AS return_3d,
+    CASE
+        WHEN NULLIF(sdl_latest.close, 0) IS NULL OR sdl_latest.close_next_1d IS NULL THEN NULL
+        ELSE sdl_latest.close_next_1d / NULLIF(sdl_latest.close, 0) - 1
+    END AS return_1d,
+    CASE
+        WHEN NULLIF(sdl_latest.close, 0) IS NULL OR sdl_latest.close_next_3d IS NULL THEN NULL
+        ELSE sdl_latest.close_next_3d / NULLIF(sdl_latest.close, 0) - 1
+    END AS return_3d,
     COALESCE(sdl_latest.ma5, 0) AS ma5,
     COALESCE(sdl_latest.ma10, 0) AS ma10,
     COALESCE(sdl_latest.ma_gap_5, 0) AS ma_gap_5,
@@ -280,7 +288,7 @@ def _format_candidate_record(row: dict[str, Any]) -> dict[str, Any]:
         "macdHist": _serialize_float(row.get("macd_hist")) or 0.0,
         "volRatio5": _serialize_float(row.get("volume_ratio_5")) or 0.0,
         "volRatio20": _serialize_float(row.get("volume_ratio_20")) or 0.0,
-        "volumeTrend3d": bool(row.get("volume_trend_3d")),
+        "volumeTrend3d": (_serialize_float(row.get("volume_trend_3d")) or 0.0) > 0,
         "volumeTrend5d": False,
         "return1d": return_1d_pct,
         "return3d": return_3d_pct,
@@ -626,18 +634,17 @@ async def get_stock_kline(symbol: str, days: int = Query(60), current_user: dict
     async with get_session(read_only=True) as session:
         # 针对 stock_daily_latest 的查询优化
         res = await session.execute(
-            text(f"SELECT trade_date, open, high, low, close, volume, adj_factor FROM stock_daily_latest WHERE symbol = :s ORDER BY trade_date DESC LIMIT :l"), 
+            text(f"SELECT trade_date, open, high, low, close, volume FROM stock_daily_latest WHERE symbol = :s ORDER BY trade_date DESC LIMIT :l"), 
             {"s": s, "l": days}
         )
         items = []
         for r in res:
-            f = float(r[6]) if r[6] else 1.0
             items.append({
                 "date": str(r[0]), 
-                "open": round(float(r[1]) / f, 2), 
-                "high": round(float(r[2]) / f, 2), 
-                "low": round(float(r[3]) / f, 2), 
-                "close": round(float(r[4]) / f, 2), 
+                "open": round(float(r[1]), 2), 
+                "high": round(float(r[2]), 2), 
+                "low": round(float(r[3]), 2), 
+                "close": round(float(r[4]), 2), 
                 "volume": float(r[5])
             })
         items.reverse()

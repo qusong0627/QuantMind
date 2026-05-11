@@ -1120,6 +1120,11 @@ export const ResearchPlatformPage: React.FC = () => {
     const dates = klineData.map((d) => d.date);
     const ohlc = klineData.map((d) => [d.open, d.close, d.low, d.high]);
     const volumes = klineData.map((d) => d.volume);
+
+    const predictionMatch = selectedRunId.match(/run_(\d{4})(\d{2})(\d{2})/);
+    const predictionDate = predictionMatch ? `${predictionMatch[1]}-${predictionMatch[2]}-${predictionMatch[3]}` : null;
+    const predictionIdx = predictionDate ? dates.indexOf(predictionDate) : -1;
+
     return {
       animation: false,
       tooltip: {
@@ -1137,6 +1142,7 @@ export const ResearchPlatformPage: React.FC = () => {
           return `
             <div style="font-size: 11px;">
               <div style="font-weight: bold; margin-bottom: 4px;">${d.date}</div>
+              ${idx === predictionIdx ? '<div style="color: #f59e0b; font-weight: bold; margin-bottom: 4px;">[ 预测基准日 ]</div>' : ''}
               <div>开盘: ${d.open.toFixed(2)}</div>
               <div>收盘: ${d.close.toFixed(2)}</div>
               <div>最高: ${d.high.toFixed(2)}</div>
@@ -1165,6 +1171,17 @@ export const ResearchPlatformPage: React.FC = () => {
           type: 'candlestick',
           data: ohlc,
           itemStyle: { color: '#ef4444', color0: '#22c55e', borderColor: '#ef4444', borderColor0: '#22c55e' },
+          markPoint: predictionIdx !== -1 ? {
+            symbol: 'path://M0,0 L10,0 L5,10 Z',
+            symbolSize: [12, 12],
+            symbolOffset: [0, -10],
+            itemStyle: { color: '#f59e0b' },
+            data: [{
+              coord: [predictionIdx, ohlc[predictionIdx][3]],
+              value: '预测',
+              label: { show: false }
+            }]
+          } : undefined
         },
         {
           name: '成交量',
@@ -1181,7 +1198,7 @@ export const ResearchPlatformPage: React.FC = () => {
         },
       ],
     };
-  }, [klineData]);
+  }, [klineData, selectedRunId]);
 
   const sectorBreakdown = React.useMemo(() => {
     const counter = new Map<string, number>();
@@ -1202,9 +1219,11 @@ export const ResearchPlatformPage: React.FC = () => {
         counter.set(item.sector, (counter.get(item.sector) || 0) + 1);
       }
     });
-    return Array.from(counter.entries())
+    const result = Array.from(counter.entries())
       .map(([name, count]) => ({ value: name, label: `${name} (${count})` }))
-      .sort((left, right) => right.label.localeCompare(left.label));
+      .sort((left, right) => left.label.localeCompare(right.label));
+    console.log('[Research] Available sectors:', result);
+    return result;
   }, [candidatePool]);
 
   // 从候选池提取可用的概念选项
@@ -1218,10 +1237,12 @@ export const ResearchPlatformPage: React.FC = () => {
         counter.set(tag, (counter.get(tag) || 0) + 1);
       });
     });
-    return Array.from(counter.entries())
+    const result = Array.from(counter.entries())
       .map(([name, count]) => ({ value: name, label: `${name} (${count})` }))
-      .sort((left, right) => right.label.localeCompare(left.label))
+      .sort((left, right) => left.label.localeCompare(right.label))
       .slice(0, 50); // 限制选项数量
+    console.log('[Research] Available concepts:', result);
+    return result;
   }, [candidatePool, overview]);
 
   const availableIndexOptions = React.useMemo(() => {
@@ -2629,7 +2650,7 @@ export const ResearchPlatformPage: React.FC = () => {
                   { label: '次日收益', val: fmtNullableSignedPercent2(selectedStock.nextDayReturn) },
                   { label: '3日收益', val: fmtNullableSignedPercent2(selectedStock.day3Return) },
                   { label: '行业', val: selectedStock.sector || '-' },
-                  { label: '概念', val: (selectedStock.conceptTags || []).slice(0, 3).join(' / ') || selectedStock.concept || '-' },
+                  { label: '概念', val: (selectedStock.conceptTags && selectedStock.conceptTags.length > 0) ? selectedStock.conceptTags.join(' / ') : (selectedStock.concept || '-') },
                   { label: '指数', val: (selectedStock.indexTags || []).slice(0, 3).join(' / ') || '-' },
                   { label: '总市值', val: `${safeNum(selectedStock.totalMv, 0).toFixed(2)} 亿` },
                   { label: '流通市值', val: `${safeNum(selectedStock.floatMv, 0).toFixed(2)} 亿` },
