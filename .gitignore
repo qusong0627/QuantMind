@@ -64,6 +64,7 @@ electron/out/
 .traeignore
 .antigravityignore
 .workbuddy/
+.claude/
 
 # ==============================================================================
 # 4. Data, ML & Results

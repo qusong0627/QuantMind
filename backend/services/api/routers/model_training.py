@@ -1088,6 +1088,18 @@ async def get_model_inference_run_detail(
     }
 
 
+@router.delete("/inference/runs/{run_id}", summary="删除推理运行记录（用户态）")
+async def delete_model_inference_run(
+    run_id: str,
+    current_user: dict[str, Any] = Depends(get_current_user),
+):
+    tenant_id, user_id = _owner_scope(current_user)
+    delete = await model_inference_persistence.delete_run(run_id=run_id, tenant_id=tenant_id, user_id=user_id)
+    if not delete.get("deleted"):
+        raise HTTPException(status_code=404, detail="推理批次不存在或已删除")
+    return delete
+
+
 @router.get("/inference/settings/{model_id}", summary="获取模型自动推理设置（用户态）")
 async def get_model_inference_settings(
     model_id: str,
