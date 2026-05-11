@@ -169,3 +169,4 @@ website/download-config.json
 /db/custom/
 /db/feature_snapshots/
 /db/qlib_data/
+/models/users/
