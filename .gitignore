@@ -111,18 +111,6 @@ userdata/
 research/data/
 research/data_adapter/qlib_data/
 research/data_adapter/processed/
-models/*
-!models/.gitkeep
-!models/production
-models/production/*
-!models/production/.gitkeep
-!models/production/alpha158
-!models/production/alpha158/**
-!models/production/model_qlib
-!models/production/model_qlib/**
-models/production/model_qlib/pred.parquet
-!backend/services/*/models/
-!backend/services/*/*/models/
 
 # Test Coverage Artifacts
 .coverage
@@ -150,9 +138,6 @@ run/*.pid
 .ssh/
 /db/*.sql
 /redis
-/models/model64
-/models/model48
-/models/model_preview
 /data/ai_ide/tmp_run
 /electron/icon.iconset
 # ==============================================================================
@@ -171,13 +156,16 @@ redis/data/appendonlydir/appendonly.aof.2.incr.aof
 electron/public/fonts/AlibabaPuHuiTi-Bold.ttf
 electron/public/fonts/AlibabaPuHuiTi-Regular.ttf
 data/ai_ide/config.json
-/db/*.sql
-/redis
-/models/model64
-/models/model48
-/models/model_preview
+ /db/*.sql
+ /redis
 db/diagram/postgresql_schema.dot
 db/backups/*.gz
 db/feature_snapshots/*.parquet
 !db/feature_snapshots/*.json
 website/download-config.json
+
+# Ignore db subdirectories
+/db/backups/
+/db/custom/
+/db/feature_snapshots/
+/db/qlib_data/
