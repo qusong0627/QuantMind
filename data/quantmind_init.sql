@@ -7255,7 +7255,8 @@ CREATE TABLE public.user_profiles (
     twitter_handle character varying(64),
     linkedin_url character varying(256),
     notification_settings jsonb DEFAULT '{}'::jsonb,
-    ai_ide_api_key character varying(128)
+    ai_ide_api_key character varying(128),
+    api_key text
 );
 
 
@@ -8755,8 +8756,8 @@ COPY public.user_audit_logs (id, user_id, tenant_id, action, resource, resource_
 -- Data for Name: user_profiles; Type: TABLE DATA; Schema: public; Owner: quantmind
 --
 
-COPY public.user_profiles (id, user_id, tenant_id, nickname, avatar_url, bio, preferences, created_at, updated_at, display_name, location, website, phone, trading_experience, risk_tolerance, investment_goal, github_url, twitter_handle, linkedin_url, notification_settings, ai_ide_api_key) FROM stdin;
-34	10000001	default	\N	data/uploads/default_avatar.png	\N	{}	2026-05-02 13:03:44.253291+00	2026-05-02 15:25:50.749815+00	\N	\N	\N	\N	intermediate	medium	\N	\N	\N	\N	{}	\N
+COPY public.user_profiles (id, user_id, tenant_id, nickname, avatar_url, bio, preferences, created_at, updated_at, display_name, location, website, phone, trading_experience, risk_tolerance, investment_goal, github_url, twitter_handle, linkedin_url, notification_settings, ai_ide_api_key, api_key) FROM stdin;
+34	10000001	default	\N	data/uploads/default_avatar.png	\N	{}	2026-05-02 13:03:44.253291+00	2026-05-02 15:25:50.749815+00	\N	\N	\N	\N	intermediate	medium	\N	\N	\N	\N	{}	\N	\N
 \.
 
 
@@ -12274,4 +12275,3 @@ GRANT USAGE ON SCHEMA public TO quantmind;
 --
 
 \unrestrict A6yow9GXpjaPdE4nqy3fX6gPKaCKxmHsAfrMoxT5lcuFT3BvFYav1gflstrULrw
-

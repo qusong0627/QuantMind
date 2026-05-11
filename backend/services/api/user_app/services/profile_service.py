@@ -110,18 +110,12 @@ class ProfileService:
         """
         确保 user_profiles 表存在（不存在时创建）
         """
-        if not (settings.DEBUG or settings.AUTO_CREATE_PROFILE_TABLE):
-            return
-
-        if ProfileService._profile_table_checked:
-            return
-
         try:
-            # Use session connection directly to run sync DDL
-            await session.connection().run_sync(
-                lambda sync_conn: UserProfile.__table__.create(bind=sync_conn, checkfirst=True)
-            )
-            ProfileService._profile_table_checked = True
+            # 仅在显式开启时尝试自动建表，避免生产环境误创建。
+            if (settings.DEBUG or settings.AUTO_CREATE_PROFILE_TABLE) and not ProfileService._profile_table_checked:
+                conn = await session.connection()
+                await conn.run_sync(lambda sync_conn: UserProfile.__table__.create(bind=sync_conn, checkfirst=True))
+                ProfileService._profile_table_checked = True
 
             if not ProfileService._profile_columns_checked:
                 # 幂等补列：兼容历史库没有 api_key 字段的场景

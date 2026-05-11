@@ -219,6 +219,10 @@ COMMENT ON COLUMN public.stock_daily_latest.concept_lithium IS '锂电概念（0
 -- ============================================================
 -- 升级完成验证
 -- ============================================================
+-- 兼容历史库：补齐 user_profiles.api_key（用户级，全系统通用 API Key）
+ALTER TABLE public.user_profiles
+    ADD COLUMN IF NOT EXISTS api_key text;
+
 -- 验证 stock_daily_latest 表列数应为 89 列
 SELECT COUNT(*) AS column_count 
 FROM information_schema.columns 
