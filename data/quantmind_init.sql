@@ -5461,7 +5461,7 @@ CREATE TABLE public.stock_daily_latest (
     micro_imbalance_volume double precision,
     micro_jump_flag smallint,
     roe double precision,
-    volume_trend_3d boolean,
+    volume_trend_3d double precision,
     adj_factor double precision DEFAULT 1.0,
     volume_ma_3 double precision,
     idx_all integer DEFAULT 1,
@@ -5945,7 +5945,7 @@ COMMENT ON COLUMN public.stock_daily_latest.roe IS '净资产收益率 ROE（小
 -- Name: COLUMN stock_daily_latest.volume_trend_3d; Type: COMMENT; Schema: public; Owner: quantmind
 --
 
-COMMENT ON COLUMN public.stock_daily_latest.volume_trend_3d IS '3日成交量递增标志';
+COMMENT ON COLUMN public.stock_daily_latest.volume_trend_3d IS '3日成交量趋势分值';
 
 
 --
@@ -6149,7 +6149,7 @@ CREATE TABLE public.stock_daily_new_2026_01 (
     micro_imbalance_volume double precision,
     micro_jump_flag smallint,
     roe double precision,
-    volume_trend_3d boolean,
+    volume_trend_3d double precision,
     adj_factor double precision DEFAULT 1.0,
     volume_ma_3 double precision,
     idx_all integer DEFAULT 1,
@@ -6255,7 +6255,7 @@ CREATE TABLE public.stock_daily_new_2026_02 (
     micro_imbalance_volume double precision,
     micro_jump_flag smallint,
     roe double precision,
-    volume_trend_3d boolean,
+    volume_trend_3d double precision,
     adj_factor double precision DEFAULT 1.0,
     volume_ma_3 double precision,
     idx_all integer DEFAULT 1,
@@ -6361,7 +6361,7 @@ CREATE TABLE public.stock_daily_new_2026_03 (
     micro_imbalance_volume double precision,
     micro_jump_flag smallint,
     roe double precision,
-    volume_trend_3d boolean,
+    volume_trend_3d double precision,
     adj_factor double precision DEFAULT 1.0,
     volume_ma_3 double precision,
     idx_all integer DEFAULT 1,
@@ -6467,7 +6467,7 @@ CREATE TABLE public.stock_daily_new_2026_04 (
     micro_imbalance_volume double precision,
     micro_jump_flag smallint,
     roe double precision,
-    volume_trend_3d boolean,
+    volume_trend_3d double precision,
     adj_factor double precision DEFAULT 1.0,
     volume_ma_3 double precision,
     idx_all integer DEFAULT 1,

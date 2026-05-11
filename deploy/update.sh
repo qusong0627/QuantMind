@@ -3,13 +3,15 @@
 # QuantMind 一键更新脚本（Docker 版）
 # 功能：
 #   1. 从 Gitee 拉取最新代码
-#   2. 重建后端容器（仅 quantmind/celery-worker）
-#   3. 自动修复 .env.production 中硬编码的本地地址
-#   4. 构建产物验证（防硬编码 127.0.0.1）
+#   2. 执行数据库升级脚本（如有）
+#   3. 重建后端容器（仅 quantmind/celery-worker）
+#   4. 自动修复 .env.production 中硬编码的本地地址
+#   5. 构建产物验证（防硬编码 127.0.0.1）
 #
 # 重要说明：
-#   - 不会执行数据库初始化
-#   - 不会删除数据库数据
+#   - 数据库升级脚本位于 data/upgrade_v*.sql
+#   - 升级脚本会备份并自动执行最新版本
+#   - 不会删除数据库数据（除非升级脚本明确说明）
 #   - 不会重建 db/redis 容器
 #   - 不包含前端构建（前端需单独部署）
 #===============================================================================
@@ -223,6 +225,90 @@ git_sync() {
     log_info "代码同步完成（$branch）"
 }
 
+upgrade_database() {
+    log_step "检查数据库升级脚本"
+    cd "$PROJECT_DIR"
+
+    local upgrade_dir="data"
+    if [[ ! -d "$upgrade_dir" ]]; then
+        log_info "未找到 data 目录，跳过数据库升级"
+        return 0
+    fi
+
+    # 查找最新的升级脚本（按版本号排序）
+    local latest_upgrade
+    latest_upgrade="$(ls -1 "${upgrade_dir}"/upgrade_v*.sql 2>/dev/null | sort -V | tail -n1 || true)"
+
+    if [[ -z "$latest_upgrade" ]]; then
+        log_info "未找到升级脚本（upgrade_v*.sql），跳过数据库升级"
+        return 0
+    fi
+
+    local upgrade_file
+    upgrade_file="$(basename "$latest_upgrade")"
+    log_info "发现升级脚本: $upgrade_file"
+
+    # 提取版本号
+    local version
+    version="$(echo "$upgrade_file" | grep -oP 'v\K[0-9]+\.[0-9]+\.[0-9]+' || echo "unknown")"
+
+    # 检查是否已执行过该版本升级
+    local version_key="db_upgrade_${version//./_}"
+    local applied
+    applied="$(docker exec quantmind-db psql -U quantmind -d quantmind -t -A -c "SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_name = 'db_upgrade_log' AND version = '${version}');" 2>/dev/null || echo "false")"
+
+    if [[ "$applied" == "t" ]]; then
+        log_info "版本 $version 已升级过，跳过"
+        return 0
+    fi
+
+    # 确认是否执行升级
+    if has_tty; then
+        tty_print "即将执行数据库升级: $upgrade_file"
+        tty_print "  版本: $version"
+        tty_print "  注意：升级前请确保已备份数据库！"
+        tty_read "是否继续？[y/N]: " confirm
+        confirm="${confirm:-N}"
+        if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
+            log_warn "已跳过数据库升级"
+            return 0
+        fi
+    fi
+
+    # 自动备份
+    log_info "正在备份数据库..."
+    local backup_file="/tmp/quantmind_backup_$(date +%Y%m%d_%H%M%S).sql"
+    if docker exec quantmind-db pg_dump -U quantmind quantmind > "$backup_file" 2>/dev/null; then
+        log_info "数据库备份成功: $backup_file"
+    else
+        log_error "数据库备份失败，已终止升级"
+        log_info "请手动备份后再执行升级"
+        exit 1
+    fi
+
+    # 执行升级
+    log_info "正在执行升级脚本: $upgrade_file"
+    if docker exec -i quantmind-db psql -U quantmind -d quantmind < "${upgrade_dir}/${upgrade_file}" 2>&1; then
+        log_info "数据库升级成功（版本 $version）"
+
+        # 记录升级日志
+        docker exec quantmind-db psql -U quantmind -d quantmind -c "
+            CREATE TABLE IF NOT EXISTS db_upgrade_log (
+                version VARCHAR(32) PRIMARY KEY,
+                applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                script_name VARCHAR(255)
+            );
+            INSERT INTO db_upgrade_log (version, script_name) VALUES ('${version}', '${upgrade_file}')
+            ON CONFLICT (version) DO NOTHING;
+        " 2>/dev/null || true
+    else
+        log_error "数据库升级失败！"
+        log_error "备份文件位置: $backup_file"
+        log_info "如需回滚，请执行: psql -U quantmind -d quantmind < $backup_file"
+        exit 1
+    fi
+}
+
 run_as_deploy_user() {
     local cmd="$1"
     local deploy_user="${SUDO_USER:-root}"
@@ -313,12 +399,14 @@ main() {
 
     git_sync
 
+    upgrade_database
+
     update_backend
 
     health_check
 
     log_step "更新完成"
-    log_info "本次更新未执行任何数据库初始化或清库操作。"
+    log_info "本次更新已自动检查并执行数据库升级脚本（如有）。"
 }
 
 main "$@"
