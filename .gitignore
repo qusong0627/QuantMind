@@ -5,16 +5,9 @@
 env/
 venv/
 ENV/
-bin/
-include/
-lib/
-lib64/
-share/
-pyvenv.cfg
 .python-version
 node_modules/
 .npm/
-package-lock.json.bak
 *.local
 /__pycache__/
 # ==============================================================================
@@ -71,14 +64,6 @@ electron/out/
 # ==============================================================================
 logs/
 *.log
-npm-debug.log*
-yarn-debug.log*
-
-# ML Tracking
-mlruns/
-mlflow/
-.mlflow/
-
 # Databases
 *.duckdb
 *.duckdb.tmp/
@@ -88,8 +73,6 @@ mlflow/
 *.db-journal
 *.db-wal
 *.db-shm
-user_center.db
-user_center.db.*
 
 # Qlib & Large Data Files
 db/qlib_data/**/*.bin
@@ -157,11 +140,8 @@ redis/data/appendonlydir/appendonly.aof.2.incr.aof
 electron/public/fonts/AlibabaPuHuiTi-Bold.ttf
 electron/public/fonts/AlibabaPuHuiTi-Regular.ttf
 data/ai_ide/config.json
- /db/*.sql
- /redis
 db/diagram/postgresql_schema.dot
 db/backups/*.gz
-db/feature_snapshots/*.parquet
 !db/feature_snapshots/*.json
 website/download-config.json
 
