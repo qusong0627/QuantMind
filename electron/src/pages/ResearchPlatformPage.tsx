@@ -1117,16 +1117,43 @@ export const ResearchPlatformPage: React.FC = () => {
   // K 线图表配置
   const klineOption = React.useMemo(() => {
     if (!klineData.length) return null;
+    
+    // 提取预测日期基准线
+    const predictionMatch = selectedRunId.match(/run_(\d{4})(\d{2})(\d{2})/);
+    const predictionDate = predictionMatch ? `${predictionMatch[1]}-${predictionMatch[2]}-${predictionMatch[3]}` : null;
+
     const dates = klineData.map((d) => d.date);
     const ohlc = klineData.map((d) => [d.open, d.close, d.low, d.high]);
     const volumes = klineData.map((d) => d.volume);
 
-    const predictionMatch = selectedRunId.match(/run_(\d{4})(\d{2})(\d{2})/);
-    const predictionDate = predictionMatch ? `${predictionMatch[1]}-${predictionMatch[2]}-${predictionMatch[3]}` : null;
-    const predictionIdx = predictionDate ? dates.indexOf(predictionDate) : -1;
+    // 计算移动平均线
+    const calculateMA = (dayCount: number) => {
+      const result = [];
+      for (let i = 0, len = klineData.length; i < len; i++) {
+        if (i < dayCount - 1) {
+          result.push('-');
+          continue;
+        }
+        let sum = 0;
+        for (let j = 0; j < dayCount; j++) {
+          sum += klineData[i - j].close;
+        }
+        result.push(+(sum / dayCount).toFixed(2));
+      }
+      return result;
+    };
 
+    const ma5 = calculateMA(5);
+    const ma10 = calculateMA(10);
+    
     return {
       animation: false,
+      legend: {
+        show: true,
+        data: ['K线', 'MA5', 'MA10'],
+        top: 0,
+        textStyle: { color: '#64748b', fontSize: 10, fontWeight: 'bold' }
+      },
       tooltip: {
         trigger: 'axis',
         axisPointer: { type: 'cross' },
@@ -1139,21 +1166,28 @@ export const ResearchPlatformPage: React.FC = () => {
           const idx = params[0].dataIndex;
           const d = klineData[idx];
           if (!d) return '';
-          return `
+          
+          let html = `
             <div style="font-size: 11px;">
-              <div style="font-weight: bold; margin-bottom: 4px;">${d.date}</div>
-              ${idx === predictionIdx ? '<div style="color: #f59e0b; font-weight: bold; margin-bottom: 4px;">[ 预测基准日 ]</div>' : ''}
-              <div>开盘: ${d.open.toFixed(2)}</div>
-              <div>收盘: ${d.close.toFixed(2)}</div>
-              <div>最高: ${d.high.toFixed(2)}</div>
-              <div>最低: ${d.low.toFixed(2)}</div>
-              <div>成交量: ${(d.volume / 10000).toFixed(2)}万</div>
+              <div style="font-weight: bold; margin-bottom: 4px;">${d.date} ${d.date === predictionDate ? '<span style="color: #3b82f6;">[预测基准]</span>' : ''}</div>
+              <div style="display: grid; grid-template-cols: 1fr 1fr; gap: 8px;">
+                <div>开盘: ${d.open.toFixed(2)}</div>
+                <div>收盘: ${d.close.toFixed(2)}</div>
+                <div>最高: ${d.high.toFixed(2)}</div>
+                <div>最低: ${d.low.toFixed(2)}</div>
+              </div>
+              <div style="margin-top: 4px; border-top: 1px solid #eee; pt: 4px;">
+                <span style="color: #6366f1;">MA5: ${ma5[idx] === '-' ? '-' : ma5[idx]}</span>
+                <span style="color: #f59e0b; margin-left: 8px;">MA10: ${ma10[idx] === '-' ? '-' : ma10[idx]}</span>
+              </div>
+              <div style="color: #64748b; margin-top: 2px;">成交量: ${(d.volume / 10000).toFixed(2)}万</div>
             </div>
           `;
+          return html;
         },
       },
       grid: [
-        { left: '8%', right: '4%', top: '8%', height: '55%' },
+        { left: '8%', right: '4%', top: '15%', height: '50%' },
         { left: '8%', right: '4%', top: '72%', height: '18%' },
       ],
       xAxis: [
@@ -1171,17 +1205,47 @@ export const ResearchPlatformPage: React.FC = () => {
           type: 'candlestick',
           data: ohlc,
           itemStyle: { color: '#ef4444', color0: '#22c55e', borderColor: '#ef4444', borderColor0: '#22c55e' },
-          markPoint: predictionIdx !== -1 ? {
-            symbol: 'path://M0,0 L10,0 L5,10 Z',
-            symbolSize: [12, 12],
-            symbolOffset: [0, -10],
-            itemStyle: { color: '#f59e0b' },
+          markLine: predictionDate ? {
+            symbol: ['none', 'none'],
             data: [{
-              coord: [predictionIdx, ohlc[predictionIdx][3]],
-              value: '预测',
-              label: { show: false }
+              xAxis: predictionDate,
+              label: {
+                show: true,
+                position: 'end',
+                formatter: '预测日期',
+                backgroundColor: '#3b82f6',
+                color: '#fff',
+                padding: [2, 4],
+                borderRadius: 4,
+                fontSize: 10,
+                fontWeight: 'bold'
+              },
+              lineStyle: {
+                color: '#3b82f6',
+                type: 'dashed',
+                width: 2,
+                opacity: 0.8
+              }
             }]
           } : undefined
+        },
+        {
+          name: 'MA5',
+          type: 'line',
+          data: ma5,
+          smooth: true,
+          showSymbol: false,
+          lineStyle: { opacity: 0.8, width: 1, color: '#6366f1' },
+          itemStyle: { color: '#6366f1' }
+        },
+        {
+          name: 'MA10',
+          type: 'line',
+          data: ma10,
+          smooth: true,
+          showSymbol: false,
+          lineStyle: { opacity: 0.8, width: 1, color: '#f59e0b' },
+          itemStyle: { color: '#f59e0b' }
         },
         {
           name: '成交量',
