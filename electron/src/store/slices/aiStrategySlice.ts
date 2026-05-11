@@ -26,7 +26,7 @@ export type ValidationError = {
 import { TemplateMatch } from '../../types/template';
 
 // 从原Recoil atoms.ts导入的类型定义
-export type DashboardTab = 'dashboard' | 'strategy' | 'backtest' | 'trading' | 'community' | 'profile' | 'agent' | 'ai-ide' | 'admin' | 'model-training' | 'model-registry' | 'research';
+export type DashboardTab = 'dashboard' | 'strategy' | 'backtest' | 'trading' | 'profile' | 'agent' | 'ai-ide' | 'admin' | 'model-training' | 'model-registry' | 'research';
 
 // 创建兼容的StrategyParams接口，保持原有字段但使用正确的类型
 export interface AIStrategyParams extends Omit<StrategyParams, 'style'> {

@@ -391,7 +391,7 @@ async def chat_completions(request: Request, item: ChatRequest):
             from sqlalchemy import text
             async with get_session(read_only=True) as session:
                 result = await session.execute(
-                    text("SELECT ai_ide_api_key FROM user_profiles WHERE user_id = :user_id"),
+                    text("SELECT api_key FROM user_profiles WHERE user_id = :user_id"),
                     {"user_id": user_id}
                 )
                 row = result.fetchone()

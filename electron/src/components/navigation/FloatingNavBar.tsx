@@ -7,7 +7,6 @@ import {
   FlaskConical,
   LayoutDashboard,
   LineChart,
-  MessagesSquare,
   Orbit,
   Search,
   ShieldCheck,
@@ -41,7 +40,6 @@ export const FloatingNavBar: React.FC<FloatingNavBarProps> = ({ current, onChang
     { id: 'model-registry', label: '模型管理', icon: Boxes },
     { id: 'research', label: '投研平台', icon: Search },
     { id: 'trading', label: '实盘交易', icon: ArrowLeftRight },
-    { id: 'community', label: '策略社区', icon: MessagesSquare },
     { id: 'profile', label: '个人中心', icon: CircleUserRound }
   ];
 
@@ -52,7 +50,7 @@ export const FloatingNavBar: React.FC<FloatingNavBarProps> = ({ current, onChang
   const groupedNavItems: NavItemConfig[][] = [
     navItems.filter((item) => ['dashboard', 'strategy', 'ai-ide', 'backtest', 'agent'].includes(item.id)),
     navItems.filter((item) => ['model-training', 'model-registry', 'research', 'trading'].includes(item.id)),
-    navItems.filter((item) => ['community', 'profile', 'admin'].includes(item.id))
+    navItems.filter((item) => ['profile', 'admin'].includes(item.id))
   ].filter((group) => group.length > 0);
 
   return (

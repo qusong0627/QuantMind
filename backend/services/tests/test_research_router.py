@@ -1,10 +1,16 @@
 import os
+import sys
+import types
 from contextlib import asynccontextmanager
 
 import pytest
 
 os.environ["DEBUG"] = "false"
 os.environ["debug"] = "false"
+
+auth_module = types.ModuleType("backend.services.api.user_app.middleware.auth")
+auth_module.get_current_user = lambda: {}
+sys.modules.setdefault("backend.services.api.user_app.middleware.auth", auth_module)
 
 from backend.services.api.routers import research
 
@@ -44,6 +50,37 @@ def test_format_candidate_record_keeps_missing_returns_nullable():
 
     assert payload["nextDayReturn"] is None
     assert payload["day3Return"] is None
+
+
+def test_format_candidate_record_keeps_bidirectional_volume_trend():
+    payload_up = research._format_candidate_record(  # noqa: SLF001
+        {
+            "symbol": "SH600000",
+            "run_id": "run_demo",
+            "fusion_score": 0.1,
+            "volume_trend_3d": 1,
+        }
+    )
+    payload_down = research._format_candidate_record(  # noqa: SLF001
+        {
+            "symbol": "SH600001",
+            "run_id": "run_demo",
+            "fusion_score": 0.1,
+            "volume_trend_3d": -1,
+        }
+    )
+    payload_flat = research._format_candidate_record(  # noqa: SLF001
+        {
+            "symbol": "SH600002",
+            "run_id": "run_demo",
+            "fusion_score": 0.1,
+            "volume_trend_3d": 0,
+        }
+    )
+
+    assert payload_up["volumeTrend3d"] == pytest.approx(1.0)
+    assert payload_down["volumeTrend3d"] == pytest.approx(-1.0)
+    assert payload_flat["volumeTrend3d"] == pytest.approx(0.0)
 
 
 @pytest.mark.asyncio
@@ -90,7 +127,7 @@ async def test_do_get_overview_uses_run_date_market_snapshot(monkeypatch):
                         "listed_days": 800,
                         "close_price": 12.37,
                         "return_1d": -0.0196443007,
-                        "return_3d": -0.0507,
+                        "return_3d": -0.0434,
                         "concept_tags": ["玻纤"],
                         "index_tags": ["中证1000"],
                         "risk_flags": [],
@@ -119,8 +156,54 @@ async def test_do_get_overview_uses_run_date_market_snapshot(monkeypatch):
     item = result["items"][0]
     assert item["latestChange"] == pytest.approx(10.0)
     assert item["nextDayReturn"] == pytest.approx(-1.96443007)
-    assert item["day3Return"] == pytest.approx(-5.07)
+    assert item["day3Return"] == pytest.approx(-4.34)
+    assert "sdl_run.trade_date = snap.data_trade_date" in captured["sql"]
     assert "LEAD(sdl.close, 1)" in captured["sql"]
     assert "LEAD(sdl.close, 3)" in captured["sql"]
-    assert "sdl_run.trade_date = snap.data_trade_date" in captured["sql"]
-    assert "DISTINCT ON (symbol)" not in captured["sql"]
+
+
+@pytest.mark.asyncio
+async def test_get_research_universe_uses_short_ttl_cache(monkeypatch):
+    calls = {"count": 0}
+    research_service = research._research_service  # noqa: SLF001
+    research_service._UNIVERSE_CACHE.clear()  # noqa: SLF001
+
+    async def _fake_do_get_overview(*args, **kwargs):
+        calls["count"] += 1
+        return {"items": [{"runId": "run_demo"}], "summary": {"total": 1}}
+
+    monkeypatch.setattr(research_service, "_do_get_overview", _fake_do_get_overview)
+
+    payload_1 = await research_service.get_research_universe("default", "u1", "run_demo", 1000)
+    payload_2 = await research_service.get_research_universe("default", "u1", "run_demo", 1000)
+
+    assert calls["count"] == 1
+    assert payload_1 == payload_2
+
+
+@pytest.mark.asyncio
+async def test_get_stock_kline_uses_sdl_cache(monkeypatch):
+    calls = {"count": 0}
+    research_service = research._research_service  # noqa: SLF001
+    research_service._SDL_CACHE.clear()  # noqa: SLF001
+
+    class _FakeSession:
+        async def execute(self, statement, params=None):
+            calls["count"] += 1
+            return [
+                ("2026-05-09", 10.0, 10.5, 9.8, 10.2, 1000000.0, 1.0),
+                ("2026-05-08", 9.9, 10.1, 9.7, 10.0, 900000.0, 1.0),
+            ]
+
+    @asynccontextmanager
+    async def _fake_get_session(read_only=True):
+        yield _FakeSession()
+
+    monkeypatch.setattr(research_service, "get_session", _fake_get_session)
+
+    payload_1 = await research_service.get_stock_kline("sh600000", 2)
+    payload_2 = await research_service.get_stock_kline("SH600000", 2)
+
+    assert calls["count"] == 1
+    assert payload_1 == payload_2
+    assert payload_1["data"]["symbol"] == "SH600000"

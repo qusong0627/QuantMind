@@ -456,23 +456,6 @@ export class UserCenterService extends BaseApiClient {
   }
 
   /**
-   * 从社区导入策略
-   */
-  async importStrategyFromCommunity(data: {
-    strategy_name: string;
-    strategy_type: string;
-    description?: string;
-    config?: Record<string, any>;
-    tags?: string[];
-    notes?: string;
-    source: 'community';
-    source_post_id: number;
-    performance_summary?: any;
-  }): Promise<UserStrategy> {
-    return this.post<UserStrategy>(`/strategies/import`, data);
-  }
-
-  /**
    * 管理用户策略（添加/删除/收藏/归档/启用/禁用）
    */
   async manageUserStrategy(

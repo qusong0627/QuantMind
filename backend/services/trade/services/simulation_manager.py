@@ -143,47 +143,31 @@ return cjson.encode({success=true})
             "cooldown_days": cooldown_days,
         }
 
-    async def set_settings(
+    async def set_initial_cash(
         self,
         user_id: int,
-        tenant_id: str,
         initial_cash: float,
-        *,
-        amount_step: int = 100_000,
-        cooldown_days: int = 30,
-    ) -> dict[str, Any]:
+        tenant_id: str = "default",
+    ) -> None:
+        """Update initial_cash in settings (used when syncing holdings)."""
         tenant_id = self._normalize_tenant(tenant_id)
-        if initial_cash < amount_step or int(initial_cash) % amount_step != 0:
-            return {
-                "success": False,
-                "error": f"INITIAL_CASH_INVALID_STEP:{amount_step}",
-            }
-
-        current = await self.get_settings(
-            user_id=user_id,
-            tenant_id=tenant_id,
-            cooldown_days=cooldown_days,
-        )
-        if not current.get("can_modify", True):
-            return {
-                "success": False,
-                "error": "INITIAL_CASH_COOLDOWN",
-                "next_allowed_modified_at": current.get("next_allowed_modified_at"),
-            }
-
-        payload = {
-            "initial_cash": float(initial_cash),
-            "last_modified_at": self._utc_now().isoformat(),
-        }
         key = self._get_settings_key(user_id, tenant_id)
-        write_json_cache(self.redis, key, payload)
 
-        latest = await self.get_settings(
-            user_id=user_id,
-            tenant_id=tenant_id,
-            cooldown_days=cooldown_days,
+        # 读取现有 settings，保留其他字段
+        data = read_json_cache(self.redis, key) or {}
+        data["initial_cash"] = float(initial_cash)
+        data["last_modified_at"] = self._utc_now().isoformat()
+
+        write_json_cache(self.redis, key, data)
+        logger.info(
+            "Updated simulation settings initial_cash for tenant=%s user=%s to %.2f",
+            tenant_id,
+            user_id,
+            initial_cash,
         )
-        return {"success": True, "data": latest}
+
+    # set_settings removed as initial cash modification is deprecated.
+
 
     async def init_account(
         self,
@@ -217,7 +201,7 @@ return cjson.encode({success=true})
         return account_data
 
     async def get_account(self, user_id: int, tenant_id: str = "default") -> dict[str, Any] | None:
-        """Get simulation account state."""
+        """Get simulation account state. Returns None if account not initialized."""
         if not self.redis.client:
             return None
 
@@ -225,8 +209,7 @@ return cjson.encode({success=true})
         key = self._get_key(user_id, tenant_id)
         data = read_json_cache(self.redis, key)
 
-        if not data:
-            return await self.init_account(user_id, tenant_id=tenant_id)
+        # 不再自动初始化，返回 None 表示账户未创建
         return data
 
     async def update_balance(
@@ -248,8 +231,9 @@ return cjson.encode({success=true})
         tenant_id = self._normalize_tenant(tenant_id)
         key = self._get_key(user_id, tenant_id)
 
+        # 如果账户不存在，先初始化（交易时需要账户存在）
         if not self.redis.client.get(key):
-            await self.get_account(user_id, tenant_id=tenant_id)
+            await self.init_account(user_id, tenant_id=tenant_id)
 
         if (
             is_margin_trade

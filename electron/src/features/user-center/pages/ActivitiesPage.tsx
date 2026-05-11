@@ -2,7 +2,7 @@
  * 活动历史页面
  * Activities History Page
  *
- * 展示用户的所有活动记录，包括个人中心和社区活动
+ * 展示用户的所有活动记录
  *
  * @author QuantMind Team
  * @date 2025-12-02
@@ -25,7 +25,6 @@ import {
   formatActivityTime,
 } from '../../../shared/types/activity';
 import { userCenterService } from '../services/userCenterService';
-import { communityService } from '../../../services/communityService';
 
 const { Option } = Select;
 
@@ -71,23 +70,9 @@ export const ActivitiesPage: React.FC<ActivitiesPageProps> = ({ userId }) => {
   const loadActivities = async () => {
     setLoading(true);
     try {
-      // 并行加载个人中心活动和社区活动
-      const [userActivities, communityActivities] = await Promise.all([
-        loadUserCenterActivities(userId),
-        loadCommunityActivities(userId),
-      ]);
-
-      const allActivities = [...userActivities, ...communityActivities];
-
-      // 按时间排序
-      allActivities.sort((a, b) =>
-        new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
-      );
-
-      setActivities(allActivities);
-
-      // 计算统计数据
-      calculateStats(allActivities);
+      const userActivities = await loadUserCenterActivities(userId);
+      setActivities(userActivities);
+      calculateStats(userActivities);
     } catch (error) {
       console.error('加载活动失败:', error);
     } finally {
@@ -138,63 +123,6 @@ export const ActivitiesPage: React.FC<ActivitiesPageProps> = ({ userId }) => {
       ];
     } catch (error) {
       console.error('加载个人中心活动失败:', error);
-      return [];
-    }
-  };
-
-  // 加载社区活动（模拟数据）
-  const loadCommunityActivities = async (userId: string): Promise<Activity[]> => {
-    try {
-      // TODO: 调用真实API
-      // const response = await communityService.getUserActivities(userId);
-      // return response.data;
-
-      // 模拟数据
-      return [
-        {
-          id: '3',
-          user_id: userId,
-          type: ActivityType.POST_CREATE,
-          source: ActivitySource.COMMUNITY,
-          title: '发布了帖子',
-          description: '[策略分享] 双均线交叉策略实战详解',
-          created_at: new Date(Date.now() - 7200000).toISOString(),
-          metadata: {
-            post_id: 123,
-            post_title: '[策略分享] 双均线交叉策略实战详解',
-            post_category: '策略',
-          },
-        },
-        {
-          id: '4',
-          user_id: userId,
-          type: ActivityType.POST_LIKE,
-          source: ActivitySource.COMMUNITY,
-          title: '点赞了帖子',
-          description: '量化交易新手指南',
-          created_at: new Date(Date.now() - 10800000).toISOString(),
-          metadata: {
-            post_id: 456,
-            post_title: '量化交易新手指南',
-          },
-        },
-        {
-          id: '5',
-          user_id: userId,
-          type: ActivityType.STRATEGY_IMPORT,
-          source: ActivitySource.COMMUNITY,
-          title: '导入了社区策略',
-          description: '多因子选股策略',
-          created_at: new Date(Date.now() - 86400000).toISOString(),
-          metadata: {
-            strategy_id: 'community_789',
-            strategy_name: '多因子选股策略',
-            strategy_type: '多因子',
-          },
-        },
-      ];
-    } catch (error) {
-      console.error('加载社区活动失败:', error);
       return [];
     }
   };
@@ -345,7 +273,6 @@ export const ActivitiesPage: React.FC<ActivitiesPageProps> = ({ userId }) => {
           >
             <Option value="all">所有来源</Option>
             <Option value={ActivitySource.USER_CENTER}>个人中心</Option>
-            <Option value={ActivitySource.COMMUNITY}>策略社区</Option>
             <Option value={ActivitySource.BACKTEST}>回测系统</Option>
           </Select>
 
@@ -358,8 +285,6 @@ export const ActivitiesPage: React.FC<ActivitiesPageProps> = ({ userId }) => {
             <Option value="all">所有类型</Option>
             <Option value={ActivityType.STRATEGY_CREATE}>创建策略</Option>
             <Option value={ActivityType.STRATEGY_SHARE}>分享策略</Option>
-            <Option value={ActivityType.POST_CREATE}>发布帖子</Option>
-            <Option value={ActivityType.POST_LIKE}>点赞帖子</Option>
           </Select>
         </div>
 

@@ -23,8 +23,6 @@ import configReducer from '../features/user-center/store/configSlice';
 // 导入OpenClaw模块切片
 import { chatReducer, taskReducer } from '../features/quantbot/store';
 
-// 导入社区模块切片
-
 // 配置 Store
 const store = configureStore({
   reducer: {

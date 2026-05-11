@@ -160,6 +160,16 @@
 - 投研候选池查询性能修复（2026-05-02）：
   - `stock_daily_latest` 联表条件改为直接使用 `sdl.symbol = 转换后的快照 symbol`，避免 `UPPER(sdl.symbol)` 使 `symbol/trade_date` 索引失效；
   - 修复 `GET /api/v1/research/universe?run_id=...` 在 2600+ 候选批次上耗时数分钟、导致前端 30 秒超时的问题。
+- 投研模块结构重构（2026-05-11，接口不变）：
+  - `routers/research.py` 已收敛为薄路由，仅负责参数接收与鉴权上下文透传；
+  - 查询与序列化逻辑迁移至 `routers/research_service.py`；
+  - 请求体模型迁移至 `routers/research_schemas.py`，便于后续分层维护与单测扩展。
+- 投研候选收益口径修复（2026-05-11）：
+  - `GET /api/v1/research/universe` 的 `nextDayReturn/day3Return` 改为基于 `stock_daily_latest.close` 计算未来 1/3 交易日收益，避免误用当日涨跌字段导致收益展示失真；
+  - 为避免窗口函数全表扫描，收益计算仅在当前分页候选 `symbol + data_trade_date` 的受限时间窗内执行，保持前端 30 秒超时约束内可返回。
+- 投研候选池进一步提速（2026-05-11）：
+  - 新增短 TTL 热点缓存（按 `tenant_id + user_id + run_id + limit` 维度缓存 90 秒），重复刷新同一批次时可直接命中，减少数据库压力。
+  - `stock_daily_latest` 热点查询新增本地短缓存（120 秒）：覆盖 `POST /api/v1/research/symbols/features?lite=true` 与 `GET /api/v1/research/kline/{symbol}` 的高频读取场景，按 `symbol/trade_date` 相关键复用，降低行情表重复访问。
 
 ## 用户态模型训练闭环（2026-04-04）
 

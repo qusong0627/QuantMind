@@ -3,7 +3,6 @@ import { ApiResponse } from '../../auth/types/auth.types';
 import {
     DashboardMetrics,
     AdminUser,
-    CommunityPost,
     AIModel,
     ModelScanResult,
     ModelDirectoryInfo,
@@ -111,28 +110,6 @@ class AdminService {
     async toggleUserStatus(userId: string): Promise<boolean> {
         const resp = await this.axiosInstance.post<any>(`/admin/users/${userId}/toggle-status`);
         return resp.data.code === 200;
-    }
-
-    // Community
-    async listPosts(page = 1, pageSize = 20): Promise<{ items: CommunityPost[], total: number }> {
-        const resp = await this.axiosInstance.get<ApiResponse<any>>('/admin/community/posts', {
-            params: { page, page_size: pageSize }
-        });
-        const data = this.unwrap(resp.data) as any;
-        return {
-            items: data.items,
-            total: data.pagination.total
-        };
-    }
-
-    async moderatePost(postId: number, update: { pinned?: boolean, featured?: boolean }): Promise<void> {
-        const resp = await this.axiosInstance.patch<ApiResponse>(`/admin/community/posts/${postId}`, update);
-        this.unwrap(resp.data);
-    }
-
-    async deletePost(postId: number): Promise<void> {
-        const resp = await this.axiosInstance.delete<ApiResponse>(`/admin/community/posts/${postId}`);
-        this.unwrap(resp.data);
     }
 
     // Model Management

@@ -7,7 +7,6 @@ const tabs: { key: DashboardTab; label: string }[] = [
   { key: 'strategy', label: '智能策略' },
   { key: 'backtest', label: '策略回测' },
   { key: 'trading', label: '实盘交易' },
-  { key: 'community', label: '策略社区' },
   { key: 'profile', label: '个人中心' }
 ];
 

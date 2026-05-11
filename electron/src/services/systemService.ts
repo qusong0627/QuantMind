@@ -1,9 +1,8 @@
 import { apiClient } from './api-client';
 
 export interface SystemCapabilities {
-  edition: 'oss' | 'community' | 'enterprise';
+  edition: 'oss' | 'enterprise';
   features: {
-    community: boolean;
     sms: boolean;
     cos: boolean;
     multi_strategy: boolean;

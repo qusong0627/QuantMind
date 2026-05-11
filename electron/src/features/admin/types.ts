@@ -9,20 +9,6 @@ export interface AdminUser {
     created_at: string;
 }
 
-export interface CommunityPost {
-    id: number;
-    tenant_id: string;
-    author_id: string;
-    title: string;
-    category: string;
-    views: number;
-    likes: number;
-    comments: number;
-    pinned: boolean;
-    featured: boolean;
-    created_at: string;
-}
-
 export interface AIModel {
     id: number;
     name: string;

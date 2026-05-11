@@ -387,6 +387,37 @@ async def run_trading_readiness_precheck(
     )
 
     if normalized_mode == "SIMULATION":
+        # 默认模型检测（检查用户是否配置了默认模型）
+        try:
+            from backend.shared.model_registry import model_registry_service
+
+            default_model = await model_registry_service.get_default_model(
+                tenant_id=tenant_id,
+                user_id=user_id,
+            )
+            model_configured = bool(default_model)
+            checks.append(
+                _build_check(
+                    "default_model_configured",
+                    "默认模型已配置",
+                    model_configured,
+                    (
+                        f"默认模型已配置 (model_id={default_model.get('model_id')})"
+                        if model_configured
+                        else "未配置默认模型，请先在模型管理中设置默认模型"
+                    ),
+                )
+            )
+        except Exception as exc:
+            checks.append(
+                _build_check(
+                    "default_model_configured",
+                    "默认模型已配置",
+                    False,
+                    f"default_model_check_error={exc}",
+                )
+            )
+
         try:
             model_ok, model_detail = _check_inference_model_exists()
             # SIMULATION 模式推理模型仅警告，允许用户先配置系统

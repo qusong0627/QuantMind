@@ -1,19 +1,11 @@
 import axios, { AxiosInstance } from 'axios';
 import { SERVICE_ENDPOINTS } from '../config/services';
 import { authService } from '../features/auth/services/authService';
+import type { ResearchModelOption, ResearchStockRow } from '../features/research/types';
+export type { ResearchModelOption, ResearchStockRow } from '../features/research/types';
 
 export type ResearchSignal = 'buy' | 'hold' | 'sell';
 export type ResearchConfidence = 'high' | 'medium' | 'watch';
-
-export interface ResearchModelOption {
-  modelId: string;
-  name: string;
-  style: string;
-  description: string;
-  runCount?: number;
-  latestPredictionDate?: string | null;
-  lastUpdatedAt?: string | null;
-}
 
 export interface ResearchRunOption {
   runId: string;
@@ -25,63 +17,6 @@ export interface ResearchRunOption {
   stockCount?: number;
   avgScore?: number;
   lastUpdatedAt?: string | null;
-}
-
-export interface ResearchStockRow {
-  key: string;
-  modelId: string;
-  runId: string;
-  rank: number;
-  code: string;
-  name: string;
-  score: number;
-  signal: ResearchSignal;
-  latestChange: number;
-  nextDayReturn?: number | null;
-  day3Return?: number | null;
-  consecutiveLimitUpDays: number;
-  volumeTrend3d: boolean;
-  volumeTrend5d: boolean;
-  turnoverRate: number;
-  amount: number;
-  marketCap: number;
-  sector: string;
-  concept: string;
-  conceptTags: string[];
-  indexTags?: string[];
-  confidence: ResearchConfidence;
-  hitReasons: string[];
-  riskFlags: string[];
-  closePrice: number;
-  volumeBars: number[];
-  thesis: string;
-  pe?: number;
-  roe?: number;
-  profitGrowth?: number;
-  rsi?: number;
-  mainFlow?: number;
-  instOwnership?: number;
-  ma5?: number;
-  ma10?: number;
-  ma20?: number;
-  maGap5?: number;
-  maGap10?: number;
-  maGap20?: number;
-  volRatio5?: number;
-  return1d?: number;
-  return3d?: number;
-  pb?: number;
-  totalMv?: number;
-  floatMv?: number;
-  listedDays?: number;
-  atr?: number;
-  macdHist?: number;
-  kdjJ?: number;
-  isSt?: boolean;
-  isTradable?: boolean;
-  isHs300?: boolean;
-  isCsi500?: boolean;
-  isCsi1000?: boolean;
 }
 
 export interface ResearchOverviewData {
@@ -129,7 +64,6 @@ export interface ResearchOverviewQuery {
   sortBy?: 'score' | 'latest_change' | 'amount' | 'turnover_rate' | 'consecutive_limit_up_days' | 'updated_at';
   limit?: number;
   offset?: number;
-  excludeSt?: boolean;
 }
 
 interface ResearchOverviewResponse {
@@ -172,7 +106,7 @@ class ResearchService {
   constructor() {
     this.client = axios.create({
       baseURL: this.baseURL,
-      timeout: 30000,
+      timeout: 120000,
       headers: {
         'Content-Type': 'application/json',
       },
@@ -229,7 +163,6 @@ class ResearchService {
     append('sort_by', query.sortBy);
     append('limit', query.limit);
     append('offset', query.offset);
-    append('exclude_st', query.excludeSt);
 
     (query.sectors || []).forEach((sector) => append('sectors', sector));
     (query.concepts || []).forEach((concept) => append('concepts', concept));
@@ -243,15 +176,11 @@ class ResearchService {
 
   // ============ 自选接口 ============
 
-  async addToWatchlist(symbol: string, options?: {
-    runId?: string;
-    stockName?: string;
-    featuresSnapshot?: Record<string, unknown>;
-  }): Promise<void> {
+  async addToWatchlist(symbol: string, options?: { runId?: string; stockName?: string; featuresSnapshot?: any }): Promise<void> {
     await this.client.post(`/research/watchlist/${symbol}`, {
       run_id: options?.runId,
       stock_name: options?.stockName,
-      features_snapshot: options?.featuresSnapshot,
+      features_snapshot: options?.featuresSnapshot
     });
   }
 
@@ -272,7 +201,7 @@ class ResearchService {
     modelId?: string;
     fusionScore?: number;
     thesisSummary?: string;
-    featuresSnapshot?: Record<string, unknown>;
+    featuresSnapshot?: any;
   }): Promise<void> {
     await this.client.post(`/research/pool/${symbol}`, {
       run_id: options?.runId,
@@ -280,7 +209,7 @@ class ResearchService {
       model_id: options?.modelId,
       fusion_score: options?.fusionScore,
       thesis_summary: options?.thesisSummary,
-      features_snapshot: options?.featuresSnapshot,
+      features_snapshot: options?.featuresSnapshot
     });
   }
 
@@ -298,22 +227,18 @@ class ResearchService {
     return resp.data.data;
   }
 
+  async getFeaturesBySymbols(symbols: string[], options?: { lite?: boolean }): Promise<ResearchStockRow[]> {
+    if (!symbols || symbols.length === 0) return [];
+    const lite = options?.lite ? '?lite=true' : '';
+    const resp = await this.client.post<{ data: { items: ResearchStockRow[] } }>(`/research/symbols/features${lite}`, { symbols });
+    return resp.data?.data?.items || [];
+  }
+
   // ============ K 线数据接口 ============
 
   async getKlineData(symbol: string, days = 60): Promise<KlineDataItem[]> {
     const resp = await this.client.get<KlineResponse>(`/research/kline/${symbol}?days=${days}`);
     return resp.data.data.items || [];
-  }
-
-  // ============ 批量股票特征接口 ============
-
-  async getFeaturesBySymbols(symbols: string[]): Promise<ResearchStockRow[]> {
-    if (!symbols || symbols.length === 0) return [];
-    const resp = await this.client.post<{ code: number; data: { items: ResearchStockRow[] } }>(
-      '/research/symbols/features',
-      { symbols }
-    );
-    return resp.data?.data?.items || [];
   }
 
   // ============ 兼容方法（对接模型中心） ============
@@ -340,9 +265,9 @@ class ResearchService {
     }
   }
 
-  async getResearchUniverse(runId: string, limit = 200, excludeSt = false): Promise<{ candidates: any[], summary: any }> {
+  async getResearchUniverse(runId: string, limit: number = 2000, offset: number = 0): Promise<{ candidates: any[], summary: any }> {
     const resp = await this.client.get<ResearchUniverseResponse>(
-      `/research/universe?run_id=${encodeURIComponent(runId)}&limit=${limit}&exclude_st=${excludeSt}`
+      `/research/universe?run_id=${encodeURIComponent(runId)}&limit=${limit}&offset=${offset}`
     );
     const data = resp.data.data;
     return {

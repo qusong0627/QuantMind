@@ -54,7 +54,7 @@ async def get_llm_config(request: Request):
             if resp.status_code == 200:
                 body = resp.json()
                 data = body.get("data", {})
-                key = data.get("ai_ide_api_key")
+                key = data.get("api_key")
                 has_key = bool(key and key.strip())
                 masked = f"{key[:3]}****{key[-4:]}" if has_key and len(key) > 8 else ""
                 return {
@@ -94,7 +94,7 @@ async def save_llm_config(request: Request, config: LLMConfig):
             resp = await client.put(
                 f"{api_gateway}/api/v1/profiles/{user_id}",
                 headers=headers,
-                json={"ai_ide_api_key": new_key},
+                json={"api_key": new_key},
             )
             if resp.status_code != 200:
                 logger.error(f"Failed to update profile for user {user_id}: {resp.text}")

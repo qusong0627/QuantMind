@@ -511,7 +511,40 @@ async def preflight_check(
     # 11) 模拟盘专用：沙箱进程池与关键表可用性
     simulation_required = mode == "SIMULATION"
     if simulation_required:
-        # 11.0 推理模型就绪度（检查生产模型目录是否有模型文件）
+        # 11.0 默认模型检测（检查用户是否配置了默认模型）
+        try:
+            from backend.shared.model_registry import model_registry_service
+
+            default_model = await model_registry_service.get_default_model(
+                tenant_id=resolved_tenant_id,
+                user_id=resolved_user_id,
+            )
+            model_configured = bool(default_model)
+            add_check(
+                "default_model_configured",
+                "默认模型已配置",
+                model_configured,
+                True,
+                (
+                    f"默认模型已配置 (model_id={default_model.get('model_id')})"
+                    if model_configured
+                    else "未配置默认模型，请先在模型管理中设置默认模型"
+                ),
+                {
+                    "model_id": default_model.get("model_id") if model_configured else None,
+                    "model_name": default_model.get("model_name") if model_configured else None,
+                },
+            )
+        except Exception as e:
+            add_check(
+                "default_model_configured",
+                "默认模型已配置",
+                False,
+                True,
+                f"默认模型检测失败: {e}",
+            )
+
+        # 11.1 推理模型就绪度（检查生产模型目录是否有模型文件）
         try:
             model_ok, model_detail = _check_inference_model_exists()
             add_check(
@@ -530,7 +563,7 @@ async def preflight_check(
                 f"推理模型检测失败: {e}",
             )
 
-        # 11.1 沙箱进程池
+        # 11.2 沙箱进程池
         try:
             from backend.services.trade.sandbox.manager import sandbox_manager
 
@@ -559,7 +592,7 @@ async def preflight_check(
                 f"沙箱进程池检测失败: {e}",
             )
 
-        # 11.2 模拟盘关键表（防止库被清空后启动才报错）
+        # 11.3 模拟盘关键表（防止库被清空后启动才报错）
         try:
             table_probe_sql = text("""
                 SELECT
@@ -604,7 +637,7 @@ async def preflight_check(
             # 回滚事务以清除 aborted 状态
             await db.rollback()
 
-        # 11.3 资金快照任务配置（非阻断，便于排障）
+        # 11.4 资金快照任务配置（非阻断，便于排障）
         snapshot_enabled = str(os.getenv("SIM_FUND_SNAPSHOT_ENABLED", "true")).strip().lower() != "false"
         interval_raw = str(os.getenv("SIM_FUND_SNAPSHOT_INTERVAL_SECONDS", "300")).strip()
         try:

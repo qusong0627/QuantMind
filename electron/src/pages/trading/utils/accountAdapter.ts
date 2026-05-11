@@ -141,6 +141,30 @@ export const buildTradingTopBarAccountInfo = (
   accountInfo: AccountInfo | null,
   status: RealTradingStatus | null,
 ): TradingTopBarAccountInfo => {
+  // 检查账户是否未初始化（模拟盘未创建）
+  const isNotInitialized = (accountInfo as any)?.account_not_initialized === true;
+
+  // 如果账户未初始化，返回全零数据
+  if (isNotInitialized) {
+    return {
+      total_asset: 0,
+      initial_equity: 0,
+      day_open_equity: 0,
+      month_open_equity: 0,
+      cash: 0,
+      market_value: 0,
+      frozen: 0,
+      daily_pnl: 0,
+      daily_pnl_percent: 0,
+      floating_pnl: 0,
+      floating_pnl_percent: 0,
+      total_pnl: 0,
+      total_pnl_percent: 0,
+      position_ratio: 0,
+      position_count: 0,
+    };
+  }
+
   const totalAsset = toFiniteNumber(accountInfo?.total_asset, 0);
   const cash = toFiniteNumber(accountInfo?.cash ?? (accountInfo as any)?.available_cash, 0);
   const marketValue = toFiniteNumber(accountInfo?.market_value, 0);

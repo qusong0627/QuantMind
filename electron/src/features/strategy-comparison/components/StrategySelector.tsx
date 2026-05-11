@@ -2,18 +2,17 @@
  * 策略选择器组件
  * Strategy Selector for Comparison
  *
- * 支持选择个人策略和社区策略进行对比
+ * 支持选择个人策略进行对比
  *
  * @author QuantMind Team
  * @date 2025-12-02
  */
 
 import React, { useState, useEffect } from 'react';
-import { Select, Tag, Space, Button, Tabs, List, Card, Empty, Input, Spin } from 'antd';
+import { Select, Tag, Space, Button, List, Card, Empty, Input, Spin } from 'antd';
 import { PlusOutlined, CloseCircleOutlined, SearchOutlined } from '@ant-design/icons';
-import type { StrategyComparisonItem, StrategySource } from '../../../shared/types/strategyComparison';
+import type { StrategyComparisonItem } from '../../../shared/types/strategyComparison';
 
-const { TabPane } = Tabs;
 const { Search } = Input;
 
 export interface StrategySelectorProps {
@@ -31,7 +30,6 @@ interface StrategyListItem {
   id: string;
   name: string;
   type: string;
-  source: StrategySource;
   annual_return?: number;
   sharpe_ratio?: number;
   created_at: string;
@@ -47,26 +45,17 @@ export const StrategySelector: React.FC<StrategySelectorProps> = ({
   userId,
 }) => {
   const [visible, setVisible] = useState(false);
-  const [activeTab, setActiveTab] = useState<'personal' | 'community'>('personal');
   const [searchQuery, setSearchQuery] = useState('');
   const [loading, setLoading] = useState(false);
 
   const [personalStrategies, setPersonalStrategies] = useState<StrategyListItem[]>([]);
-  const [communityStrategies, setCommunityStrategies] = useState<StrategyListItem[]>([]);
 
   // 加载个人策略列表
   useEffect(() => {
-    if (visible && activeTab === 'personal') {
+    if (visible) {
       loadPersonalStrategies();
     }
-  }, [visible, activeTab]);
-
-  // 加载社区策略列表
-  useEffect(() => {
-    if (visible && activeTab === 'community') {
-      loadCommunityStrategies();
-    }
-  }, [visible, activeTab]);
+  }, [visible]);
 
   const loadPersonalStrategies = async () => {
     setLoading(true);
@@ -80,7 +69,6 @@ export const StrategySelector: React.FC<StrategySelectorProps> = ({
           id: 'ps_001',
           name: '双均线交叉策略',
           type: 'CTA',
-          source: 'personal',
           annual_return: 15.6,
           sharpe_ratio: 1.38,
           created_at: '2025-01-15',
@@ -89,7 +77,6 @@ export const StrategySelector: React.FC<StrategySelectorProps> = ({
           id: 'ps_002',
           name: '动量策略',
           type: '趋势跟踪',
-          source: 'personal',
           annual_return: 12.3,
           sharpe_ratio: 1.15,
           created_at: '2025-02-01',
@@ -98,7 +85,6 @@ export const StrategySelector: React.FC<StrategySelectorProps> = ({
           id: 'ps_003',
           name: '均值回归策略',
           type: '均值回归',
-          source: 'personal',
           annual_return: 8.9,
           sharpe_ratio: 0.85,
           created_at: '2024-12-20',
@@ -108,42 +94,6 @@ export const StrategySelector: React.FC<StrategySelectorProps> = ({
       setPersonalStrategies(mockStrategies);
     } catch (error) {
       console.error('加载个人策略失败:', error);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const loadCommunityStrategies = async () => {
-    setLoading(true);
-    try {
-      // TODO: 调用真实API
-      // const response = await communityService.getStrategyPosts();
-
-      // 模拟数据
-      const mockStrategies: StrategyListItem[] = [
-        {
-          id: 'cs_001',
-          name: '多因子选股策略',
-          type: '多因子',
-          source: 'community',
-          annual_return: 18.2,
-          sharpe_ratio: 1.52,
-          created_at: '2025-01-10',
-        },
-        {
-          id: 'cs_002',
-          name: '期权套利策略',
-          type: '套利',
-          source: 'community',
-          annual_return: 10.5,
-          sharpe_ratio: 1.28,
-          created_at: '2024-12-15',
-        },
-      ];
-
-      setCommunityStrategies(mockStrategies);
-    } catch (error) {
-      console.error('加载社区策略失败:', error);
     } finally {
       setLoading(false);
     }
@@ -166,15 +116,15 @@ export const StrategySelector: React.FC<StrategySelectorProps> = ({
     }
 
     // TODO: 调用API获取完整策略数据
-    // const fullStrategy = await loadFullStrategyData(strategy.id, strategy.source);
+    // const fullStrategy = await loadFullStrategyData(strategy.id);
 
     // 模拟完整数据
     const fullStrategy: StrategyComparisonItem = {
       strategy_id: strategy.id,
       strategy_name: strategy.name,
       strategy_type: strategy.type,
-      source: strategy.source,
-      source_label: strategy.source === 'personal' ? '个人策略' : '社区策略',
+      source: 'personal',
+      source_label: '个人策略',
       created_at: strategy.created_at,
       basic_info: {
         market: ['期货'],
@@ -297,11 +247,11 @@ export const StrategySelector: React.FC<StrategySelectorProps> = ({
           {selectedStrategies.map(strategy => (
             <Tag
               key={strategy.strategy_id}
-              color={strategy.source === 'personal' ? 'blue' : 'purple'}
+              color="blue"
               closable
               onClose={() => handleRemoveStrategy(strategy.strategy_id)}
             >
-              {strategy.source === 'personal' ? '🏠' : '🌐'} {strategy.strategy_name}
+              {strategy.strategy_name}
             </Tag>
           ))}
 
@@ -335,53 +285,26 @@ export const StrategySelector: React.FC<StrategySelectorProps> = ({
             </Button>
           }
         >
-          <Tabs activeKey={activeTab} onChange={(key) => setActiveTab(key as any)}>
-            <TabPane tab="个人策略" key="personal">
-              <Search
-                placeholder="搜索策略..."
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                style={{ marginBottom: 16 }}
-                prefix={<SearchOutlined />}
-                allowClear
+          <Search
+            placeholder="搜索策略..."
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            style={{ marginBottom: 16 }}
+            prefix={<SearchOutlined />}
+            allowClear
+          />
+
+          <Spin spinning={loading}>
+            {filterStrategies(personalStrategies).length === 0 ? (
+              <Empty description="暂无个人策略" />
+            ) : (
+              <List
+                dataSource={filterStrategies(personalStrategies)}
+                renderItem={renderStrategyItem}
+                style={{ maxHeight: 400, overflow: 'auto' }}
               />
-
-              <Spin spinning={loading}>
-                {filterStrategies(personalStrategies).length === 0 ? (
-                  <Empty description="暂无个人策略" />
-                ) : (
-                  <List
-                    dataSource={filterStrategies(personalStrategies)}
-                    renderItem={renderStrategyItem}
-                    style={{ maxHeight: 400, overflow: 'auto' }}
-                  />
-                )}
-              </Spin>
-            </TabPane>
-
-            <TabPane tab="社区策略" key="community">
-              <Search
-                placeholder="搜索策略..."
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                style={{ marginBottom: 16 }}
-                prefix={<SearchOutlined />}
-                allowClear
-              />
-
-              <Spin spinning={loading}>
-                {filterStrategies(communityStrategies).length === 0 ? (
-                  <Empty description="暂无社区策略" />
-                ) : (
-                  <List
-                    dataSource={filterStrategies(communityStrategies)}
-                    renderItem={renderStrategyItem}
-                    style={{ maxHeight: 400, overflow: 'auto' }}
-                  />
-                )}
-              </Spin>
-            </TabPane>
-          </Tabs>
+            )}
+          </Spin>
         </Card>
       )}
     </div>

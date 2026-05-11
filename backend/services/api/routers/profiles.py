@@ -30,7 +30,7 @@ def _filter_sensitive_profile_data(data: dict, current_user: dict, target_user_i
 
     if not (is_internal or is_owner):
         # 否则剔除敏感字段
-        data.pop("ai_ide_api_key", None)
+        data.pop("api_key", None)
         # 手机号脱敏处理
         if data.get("phone"):
             p = data["phone"]

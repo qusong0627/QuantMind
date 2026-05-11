@@ -94,8 +94,8 @@ class UserProfileUpdate(BaseModel):
     )
     risk_tolerance: str | None = Field(None, pattern="^(low|medium|high)$")
     investment_goal: str | None = Field(None, max_length=128)
-    ai_ide_api_key: str | None = Field(
-        None, max_length=2048, description="AI-IDE API Key"
+    api_key: str | None = Field(
+        None, max_length=2048, description="API Key（全系统通用）"
     )
 
 
@@ -137,7 +137,7 @@ class UserProfileResponse(BaseModel):
     trading_experience: str | None = None
     risk_tolerance: str | None = None
     investment_goal: str | None
-    ai_ide_api_key: str | None = Field(None, description="AI-IDE API Key")
+    api_key: str | None = Field(None, description="API Key（全系统通用）")
     created_at: datetime
     updated_at: datetime | None
 

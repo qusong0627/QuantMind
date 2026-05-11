@@ -58,7 +58,7 @@ export const NotificationQuickCard: React.FC<NotificationQuickCardProps> = ({
       return;
     }
     
-    const internalTargets = ['dashboard', 'strategy', 'trading', 'community', 'profile', 'ai-ide'] as const;
+    const internalTargets = ['dashboard', 'strategy', 'trading', 'profile', 'ai-ide'] as const;
     if (internalTargets.includes(target as typeof internalTargets[number])) {
       dispatch(setCurrentTab(target as typeof internalTargets[number]));
       return;

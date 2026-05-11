@@ -110,7 +110,7 @@ class UserProfile(Base):
     # 配置信息
     preferences = Column(JSON, default={}, comment="用户偏好设置(JSON)")
     notification_settings = Column(JSON, default={}, comment="通知设置(JSON)")
-    ai_ide_api_key = Column(Text, comment="AI-IDE API Key（用户级）")
+    api_key = Column(Text, comment="API Key（用户级，全系统通用）")
 
     # 审计字段
     created_at = Column(
