@@ -101,7 +101,7 @@ def run_pipeline_run(self, run_id: str) -> dict[str, Any]:
 )
 def auto_inference_if_needed() -> dict[str, Any]:
     """
-    Celery Beat 定时任务：每日 22:00 自动扫描并执行所有活跃策略的推理。
+    Celery Beat 定时任务：交易日 00:00 自动扫描并执行所有活跃策略的推理。
 
     逻辑：
     1. 获取所有处于 'running' 状态且绑定了策略的投资组合。

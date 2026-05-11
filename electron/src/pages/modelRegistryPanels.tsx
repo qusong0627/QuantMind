@@ -1,11 +1,11 @@
 import React, { useMemo, useState, useEffect } from 'react';
-import { Button, Card, Tag, Typography, Empty, Spin, Progress, Divider, Input, Modal, Tabs, Switch, DatePicker, Table, Drawer, Badge, Tooltip, Collapse, Select, Pagination, message } from 'antd';
+import { Button, Card, Tag, Typography, Empty, Spin, Progress, Divider, Input, Modal, Tabs, Switch, DatePicker, Table, Drawer, Badge, Tooltip, Collapse, Select, Pagination, message, Space } from 'antd';
 import { clsx } from 'clsx';
 import dayjs from 'dayjs';
 import {
   Layers, Star, RefreshCw, Search, Code, Calendar, Layers2,
   History, Archive, Brain, CheckCircle2, Clock, XCircle,
-  ChevronRight, Play, Cpu, Trash2, TrendingUp, Download, ChevronDown,
+  ChevronRight, Play, Cpu, TrendingUp, Download, ChevronDown,
   ChevronUp, Shield, Zap, Activity, ListFilter, BarChart3, Info, AlertCircle,
 } from 'lucide-react';
 import {
@@ -96,7 +96,7 @@ export const ModelCard: React.FC<{
       </div>
       <div className="flex items-center gap-1.5 mt-1 opacity-70">
         <Text className="text-[9px] text-slate-400 font-mono font-bold">{mt}</Text>
-        {fc && <><Divider type="vertical" className="m-0 h-2 border-slate-300" /><Text className="text-[9px] text-slate-400 font-mono font-bold">{fc}维</Text></>}
+        {fc && <><span className="inline-block h-2 w-px bg-slate-300 mx-1" /><Text className="text-[9px] text-slate-400 font-mono font-bold">{fc}维</Text></>}
       </div>
     </div>
   );
@@ -249,7 +249,6 @@ export const ModelDetailPanel: React.FC<{ model: UserModelRecord }> = ({ model }
                   <div className="h-4 w-1 bg-violet-500 rounded-full" />
                   <Text className="text-xs font-black text-slate-800 uppercase">特征工程资产 ({features.length})</Text>
                 </div>
-                <Input size="small" placeholder="过滤特征..." prefix={<Search size={10} />} className="w-32 rounded-lg text-[10px] border-slate-200" />
               </div>
               <div className="flex flex-wrap gap-1.5 max-h-[300px] overflow-y-auto custom-scrollbar">
                 {features.map((f, i) => (
@@ -338,32 +337,40 @@ export const ModelDetailPanel: React.FC<{ model: UserModelRecord }> = ({ model }
 
 export const TrainingSourcePanel: React.FC<{
   model: UserModelRecord;
-}> = ({ model }) => {
+  trainingRun?: ModelTrainingRunStatus | null;
+  loading?: boolean;
+}> = ({ model, trainingRun, loading: externalLoading = false }) => {
   const [runData, setRunData] = useState<ModelTrainingRunStatus | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [localLoading, setLocalLoading] = useState(false);
   const runId = model.source_run_id || '—';
+  const useExternalRun = trainingRun !== undefined;
 
   useEffect(() => {
+    if (useExternalRun) {
+      return;
+    }
     let isMounted = true;
     if (model.source_run_id && model.source_run_id !== '—') {
-      setLoading(true);
+      setLocalLoading(true);
       modelTrainingService.getTrainingRun(model.source_run_id)
         .then(data => {
           if (isMounted) {
             setRunData(data);
-            setLoading(false);
+            setLocalLoading(false);
           }
         })
         .catch(err => {
           console.error("Failed to fetch logs:", err);
-          if (isMounted) setLoading(false);
+          if (isMounted) setLocalLoading(false);
         });
     }
     return () => { isMounted = false; };
-  }, [model.source_run_id]);
+  }, [model.source_run_id, useExternalRun]);
 
-  const logs = runData?.logs || 'No logs available for this training run.';
-  const status = runData?.status || model.status || 'unknown';
+  const effectiveRunData = useExternalRun ? trainingRun : runData;
+  const isLoading = useExternalRun ? externalLoading : localLoading;
+  const logs = effectiveRunData?.logs || 'No logs available for this training run.';
+  const status = effectiveRunData?.status || model.status || 'unknown';
 
   return (
     <div className="h-[calc(100vh-360px)] flex flex-col space-y-4 pt-6 pb-2 overflow-hidden">
@@ -387,7 +394,7 @@ export const TrainingSourcePanel: React.FC<{
             "w-10 h-10 rounded-xl flex items-center justify-center",
             status === 'completed' ? "bg-emerald-500/10 text-emerald-500" : "bg-blue-500/10 text-blue-500"
           )}>
-            {loading ? <Spin size="small" /> : (status === 'completed' ? <CheckCircle2 size={22} /> : <Clock size={22} />)}
+            {isLoading ? <Spin size="small" /> : (status === 'completed' ? <CheckCircle2 size={22} /> : <Clock size={22} />)}
           </div>
           <div>
             <Text className="text-[10px] text-slate-400 font-black uppercase tracking-widest block mb-0.5">任务状态</Text>
@@ -415,7 +422,7 @@ export const TrainingSourcePanel: React.FC<{
         </div>
         
         <div className="flex-1 bg-slate-950/95 p-6 overflow-y-auto font-mono custom-scrollbar">
-          {loading ? (
+          {isLoading ? (
             <div className="h-full flex items-center justify-center">
               <Spin />
             </div>
@@ -464,6 +471,36 @@ export const AttributionAnalysisPanel: React.FC<{
   const split = String(shapSummary?.split || shapMeta.split || '—');
   const rowsUsed = Number(shapSummary?.rows_used ?? shapMeta.rows_used ?? 0);
 
+  const handleExport = () => {
+    if (!rows || rows.length === 0) {
+      message.warning('暂无数据可导出');
+      return;
+    }
+    try {
+      const headers = ['因子名称', '原始代码', '平均绝对贡献(SHAP)', '平均贡献(方向)', '正向比'];
+      const csvRows = rows.map(r => [
+        `"${featureLabelMap[r.feature] || r.feature}"`,
+        `"${r.feature}"`,
+        r.mean_abs_shap?.toFixed(8) || '0',
+        r.mean_shap?.toFixed(8) || '0',
+        ((r.positive_ratio || 0) * 100).toFixed(2) + '%'
+      ]);
+      const csvContent = [headers.join(','), ...csvRows.map(row => row.join(','))].join('\n');
+      const blob = new Blob(['\uFEFF' + csvContent], { type: 'text/csv;charset=utf-8;' });
+      const link = document.createElement('a');
+      const url = URL.createObjectURL(blob);
+      link.setAttribute('href', url);
+      link.setAttribute('download', `attribution_${model.name}_${dayjs().format('YYYYMMDD')}.csv`);
+      link.style.visibility = 'hidden';
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      message.success('导出成功');
+    } catch (err) {
+      message.error('导出失败');
+    }
+  };
+
   const [searchText, setSearchText] = useState('');
   const [currentPage, setCurrentPage] = useState(1);
   const pageSize = 10;
@@ -480,9 +517,6 @@ export const AttributionAnalysisPanel: React.FC<{
       {/* 头部统计 */}
       <div className="glass-panel rounded-2xl p-5 border border-slate-200 bg-white shadow-sm flex items-center justify-between shrink-0">
         <div className="flex items-center gap-4">
-          <div className="bg-violet-500/10 p-2.5 rounded-xl text-violet-600">
-            <Brain size={20} />
-          </div>
           <div className="flex flex-col">
             <Text className="text-sm font-black text-slate-800 uppercase tracking-tight">归因分析报告</Text>
             <Text className="text-[11px] text-slate-400 font-medium">{split} 数据集 · {rowsUsed} 个训练样本</Text>
@@ -491,7 +525,10 @@ export const AttributionAnalysisPanel: React.FC<{
             {status === 'completed' ? '分析就绪' : status}
           </Tag>
         </div>
-        <Button onClick={onRefresh} loading={loading} size="small" className="rounded-full h-8 text-[11px] font-bold border-slate-300 px-6 hover:border-violet-400 hover:text-violet-600 transition-all">刷新数据</Button>
+        <Space>
+          <Button onClick={onRefresh} loading={loading} size="small" className="rounded-full h-8 text-[11px] font-bold border-slate-300 px-6 hover:border-violet-400 hover:text-violet-600 transition-all">刷新数据</Button>
+          <Button onClick={handleExport} icon={<Download size={14} />} size="small" className="rounded-full h-8 text-[11px] font-bold border-slate-300 px-6 hover:border-blue-400 hover:text-blue-600 transition-all">数据导出</Button>
+        </Space>
       </div>
 
       {/* 核心内容区 */}
@@ -666,7 +703,6 @@ export const InferenceCenterPanel: React.FC<{
   history: InferenceRunRecord[];
   historyLoading: boolean;
   onViewRanking: (runId: string) => void;
-  onDeleteRun?: (runId: string) => void;
   autoSettings: AutoInferenceSettings | null;
   autoSaving: boolean;
   onToggleAuto: (enabled: boolean) => void;
@@ -683,7 +719,7 @@ export const InferenceCenterPanel: React.FC<{
   onHistoryDateFilterChange: (value: dayjs.Dayjs | null) => void;
 }> = ({
   model, inferenceDate, onDateChange, targetDate, targetDateLoading, horizonDays,
-  running, onRun, onRunAsDefault, lastRun, history, historyLoading, onViewRanking, onDeleteRun,
+  running, onRun, onRunAsDefault, lastRun, history, historyLoading, onViewRanking,
   autoSettings, autoSaving, onToggleAuto, latestInferenceRun, latestInferenceRunLoading, precheck, precheckLoading, onRefreshPrecheck,
   historyRunIdFilter, onHistoryRunIdFilterChange, historyStatusFilter, onHistoryStatusFilterChange, historyDateFilter, onHistoryDateFilterChange,
 }) => {
@@ -692,9 +728,9 @@ export const InferenceCenterPanel: React.FC<{
     ? currentModelName
     : modelIdToDisplayName(latestInferenceRun?.model_id);
 
-  const [historyPage, setHistoryPage] = useState(1);
+  const [currentPage, setCurrentPage] = useState(1);
   const pageSize = 5;
-  const paginatedHistory = history.slice((historyPage - 1) * pageSize, historyPage * pageSize);
+  const paginatedHistory = history.slice((currentPage - 1) * pageSize, currentPage * pageSize);
 
   return (
     <div className="pt-0 pb-10">
@@ -869,7 +905,7 @@ export const InferenceCenterPanel: React.FC<{
                 <RefreshCw size={14} className={clsx("text-blue-500", autoSettings?.enabled && "animate-spin-slow")} />
                 <div>
                   <Text className="text-[11px] font-bold text-slate-700 block leading-tight">自动调度</Text>
-                  <Text className="text-[9px] text-slate-400">22:00 自动执行</Text>
+                  <Text className="text-[9px] text-slate-400">下一个交易日 00:00 自动执行</Text>
                 </div>
               </div>
               <Switch size="small" checked={autoSettings?.enabled} loading={autoSaving} onChange={onToggleAuto} className={autoSettings?.enabled ? 'bg-blue-600' : ''} />
@@ -900,24 +936,14 @@ export const InferenceCenterPanel: React.FC<{
                  history.length === 0 ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={<span className="text-[9px]">暂无记录</span>} /> :
                  paginatedHistory.map(run => (
                   <div key={run.run_id} className="group flex items-center justify-between p-2.5 rounded-xl bg-slate-50/40 border border-slate-100/30 hover:bg-white hover:border-blue-100 transition-all cursor-pointer" onClick={() => onViewRanking(run.run_id)}>
-                    <div className="flex flex-col min-w-0 flex-1">
+                    <div className="flex flex-col min-w-0">
                       <div className="flex items-center gap-2 mb-0.5">
                         <div className={clsx("w-1.5 h-1.5 rounded-full shrink-0", run.status === 'completed' ? 'bg-emerald-500' : run.status === 'running' ? 'bg-blue-500' : 'bg-rose-500')} />
                         <Text className="text-[10px] font-mono font-bold text-slate-700 truncate w-24">{run.run_id}</Text>
                       </div>
                       <Text className="text-[9px] text-slate-400 pl-3.5">{run.prediction_trade_date}</Text>
                     </div>
-                    <div className="flex items-center gap-1">
-                      <Button
-                        size="small"
-                        type="text"
-                        className="border-0 h-6 w-6 p-0 flex items-center justify-center text-slate-300 hover:!text-red-500"
-                        onClick={(e) => { e.stopPropagation(); onDeleteRun?.(run.run_id); }}
-                      >
-                        <Trash2 size={13} />
-                      </Button>
-                      <ChevronRight size={12} className="text-slate-200 group-hover:text-blue-400" />
-                    </div>
+                    <ChevronRight size={12} className="text-slate-200 group-hover:text-blue-400" />
                   </div>
                 ))}
               </div>
@@ -928,17 +954,17 @@ export const InferenceCenterPanel: React.FC<{
                   <div className="flex items-center gap-3">
                     <Button 
                       size="small" 
-                      disabled={historyPage === 1} 
-                      onClick={(e) => { e.stopPropagation(); setHistoryPage(historyPage - 1); }}
+                      disabled={currentPage === 1} 
+                      onClick={(e) => { e.stopPropagation(); setCurrentPage(currentPage - 1); }}
                       className="border-0 bg-slate-100/50 hover:bg-slate-100 rounded-lg h-6 w-6 p-0 flex items-center justify-center text-slate-500"
                     >
                       <ChevronDown size={14} className="rotate-90" />
                     </Button>
-                    <Text className="text-[10px] font-bold text-slate-400">{historyPage} / {Math.ceil(history.length / pageSize)}</Text>
+                    <Text className="text-[10px] font-bold text-slate-400">{currentPage} / {Math.ceil(history.length / pageSize)}</Text>
                     <Button 
                       size="small" 
-                      disabled={historyPage >= Math.ceil(history.length / pageSize)} 
-                      onClick={(e) => { e.stopPropagation(); setHistoryPage(historyPage + 1); }}
+                      disabled={currentPage >= Math.ceil(history.length / pageSize)} 
+                      onClick={(e) => { e.stopPropagation(); setCurrentPage(currentPage + 1); }}
                       className="border-0 bg-slate-100/50 hover:bg-slate-100 rounded-lg h-6 w-6 p-0 flex items-center justify-center text-slate-500"
                     >
                       <ChevronDown size={14} className="-rotate-90" />

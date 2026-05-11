@@ -95,18 +95,21 @@ class ModelInferencePersistence:
 
     @staticmethod
     def _schedule_desc(schedule_time: str) -> str:
-        return ""
+        hour, minute = ModelInferencePersistence._parse_schedule_time(schedule_time)
+        return f"下一个交易日 {hour:02d}:{minute:02d} 自动执行"
 
     @staticmethod
     def _parse_schedule_time(schedule_time: str) -> tuple[int, int]:
         raw = str(schedule_time or "").strip()
+        if not raw:
+            return 0, 0
         try:
             hour_str, minute_str = raw.split(":", 1)
             hour = max(0, min(23, int(hour_str)))
             minute = max(0, min(59, int(minute_str)))
             return hour, minute
         except Exception:
-            return 9, 30
+            return 0, 0
 
     @classmethod
     def _compute_next_run_at(cls, schedule_time: str, reference: datetime | None = None) -> datetime:
@@ -114,19 +117,15 @@ class ModelInferencePersistence:
         if now.tzinfo is None:
             now = now.replace(tzinfo=_SHANGHAI_TZ)
         hour, minute = cls._parse_schedule_time(schedule_time)
-        scheduled_today = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
 
         try:
             cal = xcals.get_calendar("XSHG")
-            if cal.is_session(now.date()) and now < scheduled_today:
-                return scheduled_today
             next_session = cal.next_session(now.date())
             next_date = next_session.date() if hasattr(next_session, "date") else next_session
             return datetime.combine(next_date, time(hour, minute), tzinfo=_SHANGHAI_TZ)
         except Exception:
-            if now < scheduled_today:
-                return scheduled_today
-            return scheduled_today + timedelta(days=1)  # type: ignore[name-defined]
+            scheduled_next = (now + timedelta(days=1)).replace(hour=hour, minute=minute, second=0, microsecond=0)
+            return scheduled_next
 
     @staticmethod
     def _row_to_run(row: dict[str, Any]) -> dict[str, Any]:
@@ -424,7 +423,7 @@ class ModelInferencePersistence:
                       tenant_id, user_id, model_id, enabled, schedule_time, last_run_id, last_run_json,
                       next_run_at, created_at, updated_at
                     ) VALUES (
-                      :tenant_id, :user_id, :model_id, FALSE, '', NULL, NULL, NULL, :created_at, :created_at
+                      :tenant_id, :user_id, :model_id, FALSE, '00:00', NULL, NULL, NULL, :created_at, :created_at
                     )
                     ON CONFLICT (tenant_id, user_id, model_id) DO NOTHING
                     """
@@ -478,7 +477,7 @@ class ModelInferencePersistence:
         # 1. 确保记录存在 (通过 get_settings 进行幂等初始化)
         current = await self.get_settings(tenant_id=tenant_id, user_id=user_id, model_id=model_id)
 
-        next_schedule_time = str(schedule_time or current.get("schedule_time") or "")
+        next_schedule_time = str(schedule_time or current.get("schedule_time") or "00:00")
         next_run_at = self._compute_next_run_at(next_schedule_time) if enabled else None
         now = datetime.now(_SHANGHAI_TZ)
 
