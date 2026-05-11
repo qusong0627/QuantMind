@@ -447,28 +447,6 @@ export const ModelRegistryPage: React.FC = () => {
     finally { setRankingLoading(false); }
   };
 
-  const handleDeleteInferenceRun = (runId: string) => {
-    Modal.confirm({
-      title: '确认删除推理记录？',
-      content: `将删除 ${runId} 及其关联的全部信号数据，操作不可恢复。`,
-      okText: '确认删除',
-      okType: 'danger',
-      cancelText: '取消',
-      onOk: async () => {
-        const ok = await modelTrainingService.deleteInferenceRun(runId);
-        if (ok) {
-          message.success('已删除');
-          if (selectedModel) {
-            void loadInferenceHistory(selectedModel.model_id);
-            void loadLatestInferenceRun(selectedModel.model_id);
-          }
-        } else {
-          message.error('删除失败');
-        }
-      },
-    });
-  };
-
   const handleExportCSV = () => {
     if (!rankingResult || rankingResult.rankings.length === 0) {
       message.warning('暂无可导出的排名数据');
@@ -705,14 +683,16 @@ export const ModelRegistryPage: React.FC = () => {
                         children: (
                           <TrainingSourcePanel
                             model={selectedModel}
+                            trainingRun={trainingRun}
+                            loading={trainingRunLoading}
                           />
                         ),
                       }] : []),
                       {
                         key: 'attribution',
                         label: (
-                          <span className="text-xs font-black uppercase tracking-widest px-1 flex items-center gap-1.5">
-                            <Brain size={11} />归因分析
+                          <span className="text-xs font-black uppercase tracking-widest px-1 flex items-center">
+                            归因分析
                           </span>
                         ),
                         children: (
@@ -752,7 +732,6 @@ export const ModelRegistryPage: React.FC = () => {
                             history={inferenceHistory}
                             historyLoading={inferenceHistoryLoading}
                             onViewRanking={handleViewRanking}
-                            onDeleteRun={handleDeleteInferenceRun}
                             autoSettings={autoSettings}
                             autoSaving={autoSaving}
                             onToggleAuto={handleToggleAuto}
@@ -889,12 +868,12 @@ export const ModelRegistryPage: React.FC = () => {
       <Drawer
         open={rankingOpen}
         onClose={() => { setRankingOpen(false); setRankingResult(null); }}
-        width={580}
         closable={false}
-        zIndex={20000}
-        styles={{ 
-          header: { padding: '16px 20px', borderBottom: '1px solid #f8fafc' },
-          body: { padding: '24px' } 
+        zIndex={1000}
+        styles={{
+          wrapper: { width: 580 },
+          header: { padding: '31px 20px 16px 20px', borderBottom: '1px solid #f8fafc' },
+          body: { padding: '24px' }
         }}
         title={
           <div className="flex items-center gap-3 min-w-0">
