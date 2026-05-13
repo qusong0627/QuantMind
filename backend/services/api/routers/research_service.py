@@ -286,7 +286,7 @@ def _format_candidate_record(row: dict[str, Any]) -> dict[str, Any]:
         "consecutiveLimitUpDays": _serialize_int(row.get("consecutive_limit_up_days"))
         or _serialize_int(row.get("consecutive_limit_up_days_sdl"))
         or 0,
-        "turnoverRate": _serialize_float(row.get("turnover_rate")) or 0.0,
+        "turnoverRate": _serialize_float(row.get("turnover_rate") * 100 if row.get("turnover_rate") else 0.0) or 0.0,
         "amount": round(to_yi(row.get("amount")), 4),
         "marketCap": round(to_yi(row.get("total_mv")), 2),
         "totalMv": round(to_yi(row.get("total_mv")), 2),

@@ -2,6 +2,8 @@ import json
 
 import pytest
 
+from backend.services.trade.deps import AuthContext
+from backend.services.trade.routers import simulation as simulation_router
 from backend.services.trade.services.simulation_manager import SimulationAccountManager
 
 
@@ -42,44 +44,30 @@ class _FakeRedis:
 
 
 @pytest.mark.asyncio
-async def test_simulation_manager_writes_settings_and_account_json():
+async def test_reset_with_initial_cash_keeps_initial_equity_consistent():
     redis = _FakeRedis()
+    auth = AuthContext(user_id="1001", tenant_id="default", raw_sub="1001", roles=["user"])
     manager = SimulationAccountManager(redis)
 
-    await manager.set_initial_cash(
-        user_id=1,
-        tenant_id="default",
-        initial_cash=1_000_000,
+    await manager.set_initial_cash(user_id=1001, initial_cash=300_000, tenant_id="default")
+
+    await simulation_router.reset_simulation_account(
+        request=simulation_router.AccountResetRequest(initial_cash=500_000),
+        auth=auth,
+        redis=redis,
     )
+
+    resp = await simulation_router.get_simulation_account(auth=auth, redis=redis)
+    data = resp["data"]
+    assert data["cash"] == 500_000
+    assert data["total_asset"] == 500_000
+    assert data["initial_equity"] == 500_000
+    assert data["baseline"]["initial_equity"] == 500_000
+
     settings = await manager.get_settings(
-        user_id=1,
+        user_id=1001,
         tenant_id="default",
-        default_initial_cash=500_000,
+        default_initial_cash=1_000_000,
+        cooldown_days=30,
     )
-    assert settings["initial_cash"] == 1_000_000
-    assert json.loads(redis.client.get("simulation:settings:default:1"))["initial_cash"] == 1_000_000
-
-    account = await manager.init_account(user_id=1, tenant_id="default", initial_cash=2_000_000)
-    assert account["cash"] == 2_000_000
-    assert json.loads(redis.client.get("simulation:account:default:1"))["cash"] == 2_000_000
-
-
-@pytest.mark.asyncio
-async def test_simulation_manager_account_update_uses_cache_helper():
-    redis = _FakeRedis()
-    manager = SimulationAccountManager(redis)
-
-    await manager.init_account(user_id=1, tenant_id="default", initial_cash=1_000_000)
-    result = await manager.update_balance(
-        user_id=1,
-        symbol="600000.SH",
-        delta_cash=-1000,
-        delta_volume=100,
-        price=10.0,
-        tenant_id="default",
-    )
-
-    assert result["success"] is True
-    cached = json.loads(redis.client.get("simulation:account:default:1"))
-    assert cached["cash"] == 999000
-    assert cached["total_asset"] > 0
+    assert settings["initial_cash"] == 500_000

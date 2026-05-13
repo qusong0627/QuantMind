@@ -34,11 +34,19 @@
 - 预案计算语义：
   - 根据策略参数与当前持仓生成“先卖后买”的委托草案；
   - 对无持仓卖出、缺参考价、预算不足等情况，不生成委托，改记入 `skipped_items`；
-  - 买入数量按 A 股 100 股整手和可用现金预算计算，不再固定写死 100 股。
-- 正式执行语义（2026-04-23 更新）：
-  - 执行阶段改为“先提交卖单，再进入买单”；
-  - 卖单提交后会进入成交等待门控：默认最多等待 300 秒（`MANUAL_TASK_SELL_WAIT_TIMEOUT_SEC`），轮询间隔默认 3 秒（`MANUAL_TASK_SELL_WAIT_POLL_SEC`）；
-  - 等待结束后按“初始可用现金 + 卖单实际成交金额”重算买单数量，再提交买单，减少因卖单未成交导致的买单资金不足拒单。
+  - 买入数量按板块最小手数（主板/创业板/北交所默认 100，科创板默认 200）与可用现金预算计算。
+- 正式执行语义（2026-05-13 更新）：
+  - 执行阶段改为“先批量提交卖单，再等待下一次账户上报，再提交买单”；
+  - “下一次账户上报”定义为：`snapshot_at` 严格晚于卖单提交完成后读取到的基线快照时间；
+  - 等待账户上报超时默认 120 秒（`MANUAL_TASK_WAIT_NEXT_ACCOUNT_TIMEOUT_SECONDS`），轮询间隔默认 3 秒（`MANUAL_TASK_ACCOUNT_POLL_INTERVAL_SECONDS`）；
+  - 一旦捕获下一次账户上报，买单预算以该快照 `available_cash` 为准，并按原顺序 + 板块最小手数重算买单数量；
+  - 买单全部提交后进入观察窗（默认 300 秒，`MANUAL_TASK_BUY_CANCEL_TIMEOUT_SECONDS`），超时后对未完全成交买单（`SUBMITTED/PARTIALLY_FILLED`）统一发起撤单请求；
+  - 任务结果摘要新增 `snapshot_wait_seconds`、`buy_budget_from_snapshot`、`buy_cancel_requested_count`、`buy_cancel_targets` 等字段，便于前端与运维审计。
+- 风控与整手口径收敛（2026-05-13）：
+  - 手动任务买单重算已按板块最小手数取整：主板/创业板/北交所默认 100，科创板默认 200（与 `RiskService` 一致）；
+  - `TradingEngine.check_order_risk` 在 `REAL` 模式下会优先读取最新账户快照 `available_cash` 作为购买力校验资金，减少“预案可买但风控按旧组合现金拒单”的口径不一致。
+- 兼容说明：
+  - `MANUAL_TASK_SELL_WAIT_TIMEOUT_SEC` / `MANUAL_TASK_SELL_WAIT_POLL_SEC` / `MANUAL_TASK_SELL_BUY_INTERVAL_SECONDS` 仅保留历史兼容含义，当前链路不再依赖这些参数。
 - 正式提交后，任务仍写入 `trade_manual_execution_tasks`，并由 `manual_execution_worker.py` 后台轮询消费，继续复用现有日志流 `qm:real-trading:manual-execution:*`。
 - 当前 `completed` 仍表示“派单完成/已完成提交尝试”，不等价于柜台最终成交；最终成交仍以后续订单状态和执行回报流为准。
 - 启动阶段会通过 `manual_execution_persistence.ensure_tables()` 自动补齐 `trade_manual_execution_tasks.progress` 列，兼容旧环境中缺少该列但运行期已读写进度值的历史表结构。
@@ -241,8 +249,9 @@ psql "$DATABASE_URL" -f backend/migrations/add_margin_trading_fields.sql
 - P3 日志基线：统一访问日志字段 `service/request_id/tenant_id/user_id/method/path/status/duration_ms`。
 - P3 指标基线：新增 `/metrics`（Prometheus），统一暴露 `quantmind_service_health_status{service="quantmind-trade"}` 与 `quantmind_service_degraded{service="quantmind-trade"}`。
 - P3 健康语义：`/health` 在数据库/Redis 等关键依赖初始化失败时返回 `status=degraded`，并同步到服务健康指标。
-- P6 深度 E2E 修复：`simulation` 订单/成交模型的枚举字段改为按枚举值（小写）持久化，
-  避免写入 PostgreSQL enum 时出现 `BUY/SELL` 与 `buy/sell` 不匹配。
+- P6 深度 E2E 修复：`simulation` 订单/成交模型与线上 PostgreSQL enum 口径对齐：
+  `orderside/ordertype/orderstatus` 继续使用小写值，
+  `tradingmode` 统一使用大写值（`SIMULATION`），并保留接口层大小写兼容（`simulation/SIMULATION` 均可）。
 - 禁止范围：`trade` 不负责策略生成/推理/回测，不承担行情采集与推送职责。
 
 ## 成交统计接口扩展（2026-03-09）
@@ -267,6 +276,8 @@ psql "$DATABASE_URL" -f backend/migrations/add_margin_trading_fields.sql
 - 启动行为：`quantmind-trade` 启动后自动拉起后台任务周期采集（默认每 300 秒执行一次）。
 - `/api/v1/simulation/account` 在账户不存在时会优先读取 `simulation/settings.initial_cash` 自动初始化，避免账户回退到默认 100 万导致设置与账户口径不一致。
 - `/api/v1/simulation/reset` 与首次自动初始化都会立即触发一次当日资金快照采集，确保“保存/重置后”的历史资金口径及时落库。
+- `/api/v1/simulation/reset` 在显式传入 `initial_cash` 时会同步更新 `simulation/settings.initial_cash`，确保 `simulation/account.initial_equity` 与账户现金口径一致。
+- 模拟撮合新增涨跌停/停牌约束：`涨停不可买`、`跌停不可卖`、`停牌不可交易`；行情无显式布尔标记时会结合盘口与涨跌停价近似判断，避免“应拒单却成交”。
 - 新增接口：
   - `GET /api/v1/simulation/snapshots/daily?days=30`：查询当前用户日快照历史。
   - `POST /api/v1/simulation/snapshots/capture`：手动触发一次采集（按天 upsert）。

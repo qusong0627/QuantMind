@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -12,6 +12,13 @@ from backend.services.trade.services.manual_execution_service import (
     PreparedManualExecution,
     _build_execution_plan_from_signals,
     _build_preview_hash,
+    _manual_task_account_poll_interval_seconds,
+    _manual_task_buy_cancel_timeout_seconds,
+    _manual_task_wait_next_account_timeout_seconds,
+    _parse_iso_datetime,
+    _rebuild_buy_orders_with_budget,
+    _resolve_board_lot_size,
+    _should_request_cancel_for_buy_status,
 )
 from backend.services.trade.services.manual_execution_persistence import manual_execution_persistence
 
@@ -442,3 +449,86 @@ async def test_get_default_model_hosted_status_accepts_explicit_system_model(mon
     assert status["source"] == "explicit_system_model"
     assert status["reason_code"] == "ready"
     assert status["latest_run_id"] == "run_explicit_system"
+
+
+def test_parse_iso_datetime_supports_z_suffix_and_naive_value():
+    parsed_z = _parse_iso_datetime("2026-05-13T10:00:00Z")
+    parsed_naive = _parse_iso_datetime("2026-05-13T10:00:00")
+
+    assert parsed_z == datetime(2026, 5, 13, 10, 0, 0, tzinfo=timezone.utc)
+    assert parsed_naive == datetime(2026, 5, 13, 10, 0, 0, tzinfo=timezone.utc)
+    assert _parse_iso_datetime("") is None
+
+
+def test_manual_task_account_poll_config_bounds(monkeypatch):
+    monkeypatch.setenv("MANUAL_TASK_WAIT_NEXT_ACCOUNT_TIMEOUT_SECONDS", "0")
+    monkeypatch.setenv("MANUAL_TASK_ACCOUNT_POLL_INTERVAL_SECONDS", "999")
+    monkeypatch.setenv("MANUAL_TASK_BUY_CANCEL_TIMEOUT_SECONDS", "-1")
+
+    assert _manual_task_wait_next_account_timeout_seconds() == 1
+    assert _manual_task_account_poll_interval_seconds() == 10.0
+    assert _manual_task_buy_cancel_timeout_seconds() == 1
+
+
+def test_rebuild_buy_orders_with_budget_uses_snapshot_cash_budget():
+    recalculated, skipped, remaining_cash = _rebuild_buy_orders_with_budget(
+        buy_orders=[
+            {
+                "symbol": "600000.SH",
+                "quantity": 100,
+                "price": 10.0,
+                "reference_price": 10.0,
+                "reason": "原始买单A",
+            },
+            {
+                "symbol": "600001.SH",
+                "quantity": 100,
+                "price": 20.0,
+                "reference_price": 20.0,
+                "reason": "原始买单B",
+            },
+        ],
+        buy_budget=2500.0,
+    )
+
+    assert len(recalculated) == 1
+    assert recalculated[0]["symbol"] == "600000.SH"
+    assert recalculated[0]["quantity"] == 100
+    assert len(skipped) == 1
+    assert skipped[0]["symbol"] == "600001.SH"
+    assert remaining_cash == pytest.approx(1500.0)
+    assert "账户快照资金重算" in str(recalculated[0].get("reason") or "")
+
+
+def test_should_request_cancel_for_buy_status():
+    assert _should_request_cancel_for_buy_status("submitted") is True
+    assert _should_request_cancel_for_buy_status("partially_filled") is True
+    assert _should_request_cancel_for_buy_status("filled") is False
+    assert _should_request_cancel_for_buy_status("cancelled") is False
+
+
+def test_resolve_board_lot_size_matches_risk_rule():
+    assert _resolve_board_lot_size("688217.SH") == 200
+    assert _resolve_board_lot_size("300001.SZ") == 100
+    assert _resolve_board_lot_size("000001.SZ") == 100
+
+
+def test_build_execution_plan_uses_star_board_lot_size_for_buy():
+    account_snapshot = {"available_cash": 1_000_000.0, "positions": []}
+    signal_rows = [
+        {
+            "symbol": "688217.SH",
+            "fusion_score": 0.95,
+            "signal_side": "buy",
+            "expected_price": 25.0,
+        }
+    ]
+    plan = _build_execution_plan_from_signals(
+        signal_rows=signal_rows,
+        strategy_params={"strategy_type": "alpha_cross_section", "topk": 1},
+        account_snapshot=account_snapshot,
+    )
+
+    assert plan["buy_orders"]
+    assert plan["buy_orders"][0]["quantity"] >= 200
+    assert plan["buy_orders"][0]["quantity"] % 200 == 0

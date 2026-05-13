@@ -23,6 +23,7 @@ except ImportError:  # pragma: no cover - optional in local/unit test env
     xcals = None
 
 from backend.services.trade.redis_client import get_redis
+from backend.services.trade.trade_config import settings
 from backend.shared.database_manager_v2 import get_session
 from backend.shared.fundamental_aligner import fundamental_aligner
 from backend.shared.strategy_storage import get_strategy_storage_service
@@ -173,19 +174,19 @@ def _manual_task_agent_protect_price_ratio() -> float:
     return min(ratio, 0.1)
 
 
-def _manual_task_sell_wait_timeout_sec() -> int:
+def _manual_task_wait_next_account_timeout_seconds() -> int:
     timeout = _to_int(
-        os.getenv("MANUAL_TASK_SELL_WAIT_TIMEOUT_SEC", "300"),
-        300,
+        os.getenv("MANUAL_TASK_WAIT_NEXT_ACCOUNT_TIMEOUT_SECONDS", "120"),
+        120,
     )
     if timeout <= 0:
-        return 0
+        return 1
     return min(timeout, 900)
 
 
-def _manual_task_sell_wait_poll_sec() -> float:
+def _manual_task_account_poll_interval_seconds() -> float:
     poll = _to_float(
-        os.getenv("MANUAL_TASK_SELL_WAIT_POLL_SEC", "3"),
+        os.getenv("MANUAL_TASK_ACCOUNT_POLL_INTERVAL_SECONDS", "3"),
         3.0,
     )
     if poll <= 0:
@@ -193,9 +194,38 @@ def _manual_task_sell_wait_poll_sec() -> float:
     return min(max(poll, 1.0), 10.0)
 
 
+def _manual_task_buy_cancel_timeout_seconds() -> int:
+    timeout = _to_int(
+        os.getenv("MANUAL_TASK_BUY_CANCEL_TIMEOUT_SECONDS", "300"),
+        300,
+    )
+    if timeout <= 0:
+        return 1
+    return min(timeout, 1800)
+
+
+def _parse_iso_datetime(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    text_value = str(value or "").strip()
+    if not text_value:
+        return None
+    if text_value.endswith("Z"):
+        text_value = f"{text_value[:-1]}+00:00"
+    try:
+        parsed = datetime.fromisoformat(text_value)
+    except Exception:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
 def _order_status_text(value: Any) -> str:
     raw = getattr(value, "value", value)
     return str(raw or "").strip().lower()
+
+
+def _should_request_cancel_for_buy_status(status_text: str) -> bool:
+    return status_text in {"submitted", "partially_filled"}
 
 
 def _rebuild_buy_orders_with_budget(
@@ -242,13 +272,14 @@ def _rebuild_buy_orders_with_budget(
             )
             continue
 
-        quantity = _floor_board_lot(per_slot_budget / reference_price)
+        lot_size = _resolve_board_lot_size(symbol)
+        quantity = _floor_board_lot(per_slot_budget / reference_price, lot_size)
         if quantity <= 0:
             skipped_items.append(
                 {
                     "symbol": symbol,
                     "action": "BUY",
-                    "reason": "卖后买阶段可用资金不足以买入 100 股",
+                    "reason": f"卖后买阶段可用资金不足以买入最小手数 {lot_size} 股",
                     "source": "buy_signal",
                 }
             )
@@ -263,7 +294,7 @@ def _rebuild_buy_orders_with_budget(
         updated["price"] = reference_price
         updated["estimated_notional"] = estimated_notional
         updated["reason"] = (
-            f"{str(row.get('reason') or '').strip()}；卖后买资金门控重算"
+            f"{str(row.get('reason') or '').strip()}；账户快照资金重算"
         ).strip("；")
         recalculated.append(updated)
 
@@ -278,6 +309,25 @@ def _floor_board_lot(quantity: float, lot_size: int = 100) -> int:
     if quantity <= 0:
         return 0
     return int(quantity // lot_size) * lot_size
+
+
+def _resolve_board_lot_size(symbol: str) -> int:
+    s = str(symbol or "").strip().upper()
+    code = s.split(".", 1)[0]
+    if code.startswith("SH") and len(code) > 2:
+        code = code[2:]
+    elif code.startswith("SZ") and len(code) > 2:
+        code = code[2:]
+    elif code.startswith("BJ") and len(code) > 2:
+        code = code[2:]
+
+    if code.startswith("688"):
+        return max(1, int(getattr(settings, "MIN_LOT_STAR_BOARD", 200)))
+    if code.startswith("30"):
+        return max(1, int(getattr(settings, "MIN_LOT_GEM_BOARD", 100)))
+    if s.endswith(".BJ") or code.startswith(("8", "9")):
+        return max(1, int(getattr(settings, "MIN_LOT_BJ_BOARD", 100)))
+    return max(1, int(getattr(settings, "MIN_LOT_MAIN_BOARD", 100)))
 
 
 def _build_preview_hash(payload: dict[str, Any]) -> str:
@@ -613,13 +663,14 @@ def _build_execution_plan_from_signals(
             estimated_notional = 0.0
             reason = "缺少实时价格，无法估算买入数量"
         else:
-            quantity = _floor_board_lot(per_slot_budget / ref_price)
+            lot_size = _resolve_board_lot_size(str(row["symbol"]))
+            quantity = _floor_board_lot(per_slot_budget / ref_price, lot_size)
             if quantity <= 0:
                 skipped_items.append(
                     {
                         "symbol": row["symbol"],
                         "action": "BUY",
-                        "reason": "预算不足以买入 100 股",
+                        "reason": f"预算不足以买入最小手数 {lot_size} 股",
                         "source": "buy_signal",
                     }
                 )
@@ -2147,7 +2198,11 @@ class ManualExecutionService:
             total = len(actionable_orders)
             submit_index = 0
             submitted_sell_orders: list[dict[str, Any]] = []
+            submitted_buy_orders: list[dict[str, Any]] = []
             runtime_plan_summary = dict(plan_summary)
+            from .trading_engine import TradingEngine
+
+            trading_engine = TradingEngine(db, get_redis())
 
             await manual_execution_persistence.update_task(
                 task_id=task_id,
@@ -2264,6 +2319,7 @@ class ManualExecutionService:
                 nonlocal failed_count
                 nonlocal first_error
                 nonlocal submitted_sell_orders
+                nonlocal submitted_buy_orders
 
                 symbol = str(row.get("symbol") or "").strip().upper()
                 fusion_score = _to_float(row.get("fusion_score"), 0.0)
@@ -2361,6 +2417,17 @@ class ManualExecutionService:
                                     "quantity": quantity,
                                 }
                             )
+                        elif side == "BUY":
+                            submitted_buy_orders.append(
+                                {
+                                    "symbol": symbol,
+                                    "client_order_id": str(
+                                        order_payload.get("client_order_id") or ""
+                                    ),
+                                    "order_id": str(order_id or ""),
+                                    "quantity": quantity,
+                                }
+                            )
                         line = f"  >> 提交完成: {symbol} | 订单ID: {order_id} | 派发类型: {execution}"
                         level = "info"
                     elif result.get("status") == "rejected":
@@ -2439,14 +2506,24 @@ class ManualExecutionService:
                     submit_index += 1
                     await _submit_one_order(row, submit_index)
 
-                sell_wait_timeout_sec = _manual_task_sell_wait_timeout_sec()
-                sell_wait_poll_sec = _manual_task_sell_wait_poll_sec()
-                actual_sell_filled_value = 0.0
-                actual_sell_filled_quantity = 0.0
-                sell_settled_count = 0
-                sell_timed_out = False
+                snapshot_wait_timeout_sec = (
+                    _manual_task_wait_next_account_timeout_seconds()
+                )
+                account_poll_interval_sec = (
+                    _manual_task_account_poll_interval_seconds()
+                )
+                snapshot_wait_seconds = 0
 
-                if submitted_sell_orders and sell_wait_timeout_sec > 0:
+                baseline_snapshot = await self._load_latest_account_snapshot(
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                )
+                baseline_snapshot_at = _parse_iso_datetime(
+                    (baseline_snapshot or {}).get("snapshot_at")
+                )
+                next_snapshot: dict[str, Any] | None = baseline_snapshot
+
+                if submitted_sell_orders:
                     manual_execution_log_stream.append_log(
                         task_id=task_id,
                         tenant_id=tenant_id,
@@ -2455,104 +2532,90 @@ class ManualExecutionService:
                         stage="dispatching",
                         status="running",
                         line=(
-                            "卖单提交完成，进入成交等待阶段："
+                            "卖单提交完成，等待下一次账户上报："
                             f"submitted={len(submitted_sell_orders)}，"
-                            f"timeout={sell_wait_timeout_sec}s，poll={sell_wait_poll_sec:.1f}s"
+                            f"timeout={snapshot_wait_timeout_sec}s，"
+                            f"poll={account_poll_interval_sec:.1f}s"
                         ),
                     )
                     loop = asyncio.get_running_loop()
                     start_ts = loop.time()
-                    deadline_ts = start_ts + float(sell_wait_timeout_sec)
+                    deadline_ts = start_ts + float(snapshot_wait_timeout_sec)
                     last_log_elapsed = -1
 
-                    sell_client_ids = [
-                        str(item.get("client_order_id") or "")
-                        for item in submitted_sell_orders
-                        if str(item.get("client_order_id") or "")
-                    ]
                     while True:
-                        sell_status_rows = (
-                            (
-                                await db.execute(
-                                    select(
-                                        Order.client_order_id,
-                                        Order.status,
-                                        Order.filled_quantity,
-                                        Order.filled_value,
-                                    ).where(
-                                        and_(
-                                            Order.tenant_id == tenant_id,
-                                            Order.user_id == user_id,
-                                            Order.client_order_id.in_(sell_client_ids),
-                                        )
-                                    )
-                                )
-                            )
-                            .mappings()
-                            .all()
-                        )
-                        status_map = {
-                            str(row.get("client_order_id") or ""): row
-                            for row in sell_status_rows
-                        }
-
-                        settled_count = 0
-                        filled_qty_sum = 0.0
-                        filled_value_sum = 0.0
-                        for item in submitted_sell_orders:
-                            cid = str(item.get("client_order_id") or "")
-                            row = status_map.get(cid) or {}
-                            status_text = _order_status_text(row.get("status"))
-                            if status_text in {"filled", "cancelled", "rejected", "expired"}:
-                                settled_count += 1
-                            fill_qty = max(0.0, _to_float(row.get("filled_quantity"), 0.0))
-                            fill_value = max(0.0, _to_float(row.get("filled_value"), 0.0))
-                            filled_qty_sum += fill_qty
-                            filled_value_sum += fill_value
-
-                        actual_sell_filled_quantity = filled_qty_sum
-                        actual_sell_filled_value = filled_value_sum
-                        sell_settled_count = settled_count
-
-                        if settled_count >= len(submitted_sell_orders):
-                            manual_execution_log_stream.append_log(
-                                task_id=task_id,
-                                tenant_id=tenant_id,
-                                user_id=user_id,
-                                level="info",
-                                stage="dispatching",
-                                status="running",
-                                line=(
-                                    "卖单成交等待完成："
-                                    f"settled={settled_count}/{len(submitted_sell_orders)}，"
-                                    f"filled_qty={filled_qty_sum:.0f}，"
-                                    f"filled_amount={filled_value_sum:.2f}"
-                                ),
-                            )
-                            break
-
                         now_ts = loop.time()
                         elapsed = int(now_ts - start_ts)
                         if now_ts >= deadline_ts:
-                            sell_timed_out = True
+                            error_msg = (
+                                "等待账户上报超时，已终止买单阶段："
+                                f"timeout={snapshot_wait_timeout_sec}s"
+                            )
                             manual_execution_log_stream.append_log(
                                 task_id=task_id,
                                 tenant_id=tenant_id,
                                 user_id=user_id,
-                                level="warning",
+                                level="error",
                                 stage="dispatching",
-                                status="running",
-                                line=(
-                                    "卖单成交等待超时，按当前已成交金额进入买单阶段："
-                                    f"settled={settled_count}/{len(submitted_sell_orders)}，"
-                                    f"filled_qty={filled_qty_sum:.0f}，"
-                                    f"filled_amount={filled_value_sum:.2f}"
-                                ),
+                                status="failed",
+                                line=error_msg,
                             )
-                            break
+                            await manual_execution_persistence.update_task(
+                                task_id=task_id,
+                                status="failed",
+                                stage="dispatching",
+                                error_stage="account_snapshot_wait",
+                                error_message=error_msg,
+                                result_payload={
+                                    "success": False,
+                                    "task_id": task_id,
+                                    "task_type": task_type,
+                                    "run_id": run_id,
+                                    "model_id": prepared.model_id,
+                                    "strategy_id": strategy_id,
+                                    "strategy_name": prepared.strategy_name,
+                                    "stage": "dispatching",
+                                    "stage_label": _stage_label("dispatching"),
+                                    "error_stage": "account_snapshot_wait",
+                                    "error_stage_label": "等待账户上报",
+                                    "error": error_msg,
+                                    "preview_summary": {
+                                        **runtime_plan_summary,
+                                        "snapshot_wait_timeout_seconds": snapshot_wait_timeout_sec,
+                                        "snapshot_wait_seconds": elapsed,
+                                        "account_poll_interval_seconds": account_poll_interval_sec,
+                                    },
+                                },
+                            )
+                            manual_execution_log_stream.update_state(
+                                task_id=task_id,
+                                tenant_id=tenant_id,
+                                user_id=user_id,
+                                stage="dispatching",
+                                status="failed",
+                                error_stage="account_snapshot_wait",
+                                error_message=error_msg,
+                            )
+                            return
 
-                        if elapsed // 30 > last_log_elapsed:
-                            last_log_elapsed = elapsed // 30
+                        latest_snapshot = await self._load_latest_account_snapshot(
+                            tenant_id=tenant_id,
+                            user_id=user_id,
+                        )
+                        latest_snapshot_at = _parse_iso_datetime(
+                            (latest_snapshot or {}).get("snapshot_at")
+                        )
+                        has_next_snapshot = (
+                            latest_snapshot is not None
+                            and latest_snapshot_at is not None
+                            and (
+                                baseline_snapshot_at is None
+                                or latest_snapshot_at > baseline_snapshot_at
+                            )
+                        )
+                        if has_next_snapshot:
+                            snapshot_wait_seconds = elapsed
+                            next_snapshot = latest_snapshot
                             manual_execution_log_stream.append_log(
                                 task_id=task_id,
                                 tenant_id=tenant_id,
@@ -2561,35 +2624,35 @@ class ManualExecutionService:
                                 stage="dispatching",
                                 status="running",
                                 line=(
-                                    "卖单等待中："
+                                    "已检测到下一次账户上报："
+                                    f"wait={snapshot_wait_seconds}s，"
+                                    f"snapshot_at={latest_snapshot.get('snapshot_at')}"
+                                ),
+                            )
+                            break
+
+                        if elapsed // 15 > last_log_elapsed:
+                            last_log_elapsed = elapsed // 15
+                            manual_execution_log_stream.append_log(
+                                task_id=task_id,
+                                tenant_id=tenant_id,
+                                user_id=user_id,
+                                level="info",
+                                stage="dispatching",
+                                status="running",
+                                line=(
+                                    "等待账户上报中："
                                     f"elapsed={elapsed}s，"
-                                    f"settled={settled_count}/{len(submitted_sell_orders)}，"
-                                    f"filled_amount={filled_value_sum:.2f}"
+                                    f"baseline_snapshot_at={str((baseline_snapshot or {}).get('snapshot_at') or '-')}"
                                 ),
                             )
 
                         await asyncio.sleep(
                             min(
-                                sell_wait_poll_sec,
+                                account_poll_interval_sec,
                                 max(0.2, deadline_ts - now_ts),
                             )
                         )
-                elif submitted_sell_orders:
-                    manual_execution_log_stream.append_log(
-                        task_id=task_id,
-                        tenant_id=tenant_id,
-                        user_id=user_id,
-                        level="warning",
-                        stage="dispatching",
-                        status="running",
-                        line="卖单等待超时参数<=0，已跳过等待阶段并直接进入买单",
-                    )
-                    sell_wait_timeout_sec = 0
-                    sell_wait_poll_sec = 0.0
-                    actual_sell_filled_value = 0.0
-                    actual_sell_filled_quantity = 0.0
-                    sell_settled_count = 0
-                    sell_timed_out = True
                 else:
                     manual_execution_log_stream.append_log(
                         task_id=task_id,
@@ -2598,20 +2661,45 @@ class ManualExecutionService:
                         level="warning",
                         stage="dispatching",
                         status="running",
-                        line="卖单阶段未产生成功提交的卖单，将直接进入买单阶段",
+                        line="卖单阶段未产生成功提交的卖单，使用当前账户快照继续买单阶段",
                     )
-                    sell_wait_timeout_sec = _manual_task_sell_wait_timeout_sec()
-                    sell_wait_poll_sec = _manual_task_sell_wait_poll_sec()
-                    actual_sell_filled_value = 0.0
-                    actual_sell_filled_quantity = 0.0
-                    sell_settled_count = 0
-                    sell_timed_out = False
 
-                initial_cash = _to_float(runtime_plan_summary.get("available_cash"), 0.0)
-                buy_budget_after_sell = max(0.0, initial_cash + actual_sell_filled_value)
+                if not next_snapshot:
+                    error_msg = "未获取到可用账户快照，无法继续买单重算"
+                    manual_execution_log_stream.append_log(
+                        task_id=task_id,
+                        tenant_id=tenant_id,
+                        user_id=user_id,
+                        level="error",
+                        stage="dispatching",
+                        status="failed",
+                        line=error_msg,
+                    )
+                    await manual_execution_persistence.update_task(
+                        task_id=task_id,
+                        status="failed",
+                        stage="dispatching",
+                        error_stage="account_snapshot_wait",
+                        error_message=error_msg,
+                    )
+                    manual_execution_log_stream.update_state(
+                        task_id=task_id,
+                        tenant_id=tenant_id,
+                        user_id=user_id,
+                        stage="dispatching",
+                        status="failed",
+                        error_stage="account_snapshot_wait",
+                        error_message=error_msg,
+                    )
+                    return
+
+                buy_budget_from_snapshot = _to_float(
+                    next_snapshot.get("available_cash") or next_snapshot.get("cash"),
+                    0.0,
+                )
                 recalculated_buy_orders, buy_skipped_items, buy_remaining_cash = _rebuild_buy_orders_with_budget(
                     buy_orders=buy_orders,
-                    buy_budget=buy_budget_after_sell,
+                    buy_budget=buy_budget_from_snapshot,
                 )
                 if buy_skipped_items:
                     skipped_items.extend(buy_skipped_items)
@@ -2628,20 +2716,17 @@ class ManualExecutionService:
 
                 runtime_plan_summary.update(
                     {
-                        "execution_phase": "sell_wait_buy",
+                        "execution_phase": "sell_snapshot_poll_buy",
                         "sell_order_count": len(sell_orders),
                         "buy_order_count": len(buy_orders),
                         "skipped_count": len(skipped_items),
-                        "sell_wait_timeout_sec": sell_wait_timeout_sec,
-                        "sell_wait_poll_sec": sell_wait_poll_sec,
-                        "sell_wait_timed_out": bool(sell_timed_out),
                         "sell_submitted_count": len(submitted_sell_orders),
-                        "sell_settled_count": sell_settled_count,
-                        "actual_sell_filled_quantity": round(
-                            actual_sell_filled_quantity, 4
-                        ),
-                        "actual_sell_filled_value": round(actual_sell_filled_value, 2),
-                        "buy_budget_after_sell_wait": round(buy_budget_after_sell, 2),
+                        "snapshot_wait_timeout_seconds": snapshot_wait_timeout_sec,
+                        "account_poll_interval_seconds": account_poll_interval_sec,
+                        "snapshot_wait_seconds": snapshot_wait_seconds,
+                        "baseline_snapshot_at": (baseline_snapshot or {}).get("snapshot_at"),
+                        "used_snapshot_at": (next_snapshot or {}).get("snapshot_at"),
+                        "buy_budget_from_snapshot": round(buy_budget_from_snapshot, 2),
                         "estimated_remaining_cash": round(buy_remaining_cash, 2),
                     }
                 )
@@ -2654,8 +2739,8 @@ class ManualExecutionService:
                     stage="dispatching",
                     status="running",
                     line=(
-                        "卖后买资金门控完成："
-                        f"buy_budget={buy_budget_after_sell:.2f}，"
+                        "使用最新可用资金重算买单："
+                        f"buy_budget={buy_budget_from_snapshot:.2f}，"
                         f"buy_orders={len(buy_orders)}"
                     ),
                 )
@@ -2702,6 +2787,88 @@ class ManualExecutionService:
                     status="running",
                     line="买单阶段无可执行委托（可能因卖单未成交释放资金）",
                 )
+
+            buy_cancel_timeout_sec = _manual_task_buy_cancel_timeout_seconds()
+            buy_cancel_requested_count = 0
+            buy_cancel_targets: list[dict[str, Any]] = []
+            if submitted_buy_orders:
+                manual_execution_log_stream.append_log(
+                    task_id=task_id,
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    level="info",
+                    stage="dispatching",
+                    status="running",
+                    line=(
+                        "买单已提交，进入超时撤单观察窗："
+                        f"submitted={len(submitted_buy_orders)}，timeout={buy_cancel_timeout_sec}s"
+                    ),
+                )
+                await asyncio.sleep(float(buy_cancel_timeout_sec))
+
+                buy_client_ids = [
+                    str(item.get("client_order_id") or "")
+                    for item in submitted_buy_orders
+                    if str(item.get("client_order_id") or "")
+                ]
+                if buy_client_ids:
+                    buy_order_rows = (
+                        await db.execute(
+                            select(Order).where(
+                                and_(
+                                    Order.tenant_id == tenant_id,
+                                    Order.user_id == user_id,
+                                    Order.client_order_id.in_(buy_client_ids),
+                                )
+                            )
+                        )
+                    ).scalars().all()
+                    order_map = {
+                        str(getattr(order, "client_order_id", "") or ""): order
+                        for order in buy_order_rows
+                    }
+                    for item in submitted_buy_orders:
+                        client_order_id = str(item.get("client_order_id") or "")
+                        order = order_map.get(client_order_id)
+                        if not order:
+                            continue
+                        status_text = _order_status_text(getattr(order, "status", ""))
+                        if not _should_request_cancel_for_buy_status(status_text):
+                            continue
+                        cancelled = await trading_engine.cancel_order_execution(order)
+                        if not cancelled:
+                            continue
+                        buy_cancel_requested_count += 1
+                        buy_cancel_targets.append(
+                            {
+                                "symbol": str(getattr(order, "symbol", "") or ""),
+                                "order_id": str(getattr(order, "order_id", "") or ""),
+                                "client_order_id": client_order_id,
+                                "status_before_cancel": status_text,
+                            }
+                        )
+
+                manual_execution_log_stream.append_log(
+                    task_id=task_id,
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    level="info",
+                    stage="dispatching",
+                    status="running",
+                    line=(
+                        "超时撤单统计："
+                        f"submitted_buy={len(submitted_buy_orders)}，"
+                        f"cancel_requested={buy_cancel_requested_count}"
+                    ),
+                )
+
+            runtime_plan_summary.update(
+                {
+                    "buy_cancel_timeout_seconds": buy_cancel_timeout_sec,
+                    "buy_cancel_requested_count": buy_cancel_requested_count,
+                    "buy_cancel_targets": buy_cancel_targets,
+                }
+            )
 
             plan_summary = runtime_plan_summary
 

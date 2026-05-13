@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.services.trade.deps import AuthContext, get_auth_context, get_db, get_redis
 from backend.services.trade.redis_client import RedisClient
-from backend.services.trade.simulation.models.order import OrderStatus
+from backend.services.trade.simulation.models.order import OrderStatus, TradingMode
 from backend.services.trade.simulation.schemas.order import (
     SimOrderCancelRequest,
     SimOrderCreate,
@@ -24,11 +24,14 @@ from backend.services.trade.simulation.services.simulation_manager import (
 router = APIRouter()
 
 
-def _require_user_id(raw_user_id: str) -> str:
-    """获取用户ID (字符串类型，兼容 'admin' 等非数字ID)"""
+def _require_int_user_id(raw_user_id: str) -> int:
+    """获取用户ID（模拟盘订单模型要求 int）"""
     if not raw_user_id:
         raise HTTPException(status_code=400, detail="Invalid user_id in token")
-    return raw_user_id
+    try:
+        return int(raw_user_id)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Invalid user_id in token")
 
 
 @router.post("/orders", response_model=SimOrderResponse, status_code=status.HTTP_201_CREATED)
@@ -38,7 +41,7 @@ async def create_order(
     db: AsyncSession = Depends(get_db),
     redis: RedisClient = Depends(get_redis),
 ):
-    if data.trading_mode.value != "simulation":
+    if data.trading_mode != TradingMode.SIMULATION:
         raise HTTPException(
             status_code=400,
             detail="Simulation service only accepts trading_mode=simulation",
@@ -48,7 +51,7 @@ async def create_order(
     manager = SimulationAccountManager(redis)
     engine = SimulationExecutionEngine(db, manager)
 
-    user_id = _require_user_id(auth.user_id)
+    user_id = _require_int_user_id(auth.user_id)
     order = await order_service.create_order(auth.tenant_id, user_id, data)
     order.status = OrderStatus.SUBMITTED
     await db.commit()
@@ -77,7 +80,7 @@ async def list_orders(
     auth: AuthContext = Depends(get_auth_context),
     db: AsyncSession = Depends(get_db),
 ):
-    user_id = _require_user_id(auth.user_id)
+    user_id = _require_int_user_id(auth.user_id)
     service = SimOrderService(db)
     return await service.list_orders(
         auth.tenant_id,
@@ -98,7 +101,7 @@ async def get_order(
     auth: AuthContext = Depends(get_auth_context),
     db: AsyncSession = Depends(get_db),
 ):
-    user_id = _require_user_id(auth.user_id)
+    user_id = _require_int_user_id(auth.user_id)
     service = SimOrderService(db)
     order = await service.get_order(auth.tenant_id, user_id, order_id)
     if not order:
@@ -113,7 +116,7 @@ async def cancel_order(
     auth: AuthContext = Depends(get_auth_context),
     db: AsyncSession = Depends(get_db),
 ):
-    user_id = _require_user_id(auth.user_id)
+    user_id = _require_int_user_id(auth.user_id)
     service = SimOrderService(db)
     order = await service.get_order(auth.tenant_id, user_id, order_id)
     if not order:

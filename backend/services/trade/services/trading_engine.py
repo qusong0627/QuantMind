@@ -424,6 +424,9 @@ class TradingEngine:
 
         available_cash = 0.0
         portfolio_value = 0.0
+        trading_mode_value = str(
+            getattr(getattr(order, "trading_mode", None), "value", getattr(order, "trading_mode", ""))
+        ).upper()
         try:
             portfolio_stmt = (
                 select(Portfolio)
@@ -444,6 +447,34 @@ class TradingEngine:
                 portfolio_value = float(portfolio.total_value or 0.0)
         except Exception as e:
             logger.warning(f"Failed to read portfolio cash from DB: {e}")
+
+        # REAL 模式优先使用最新账户快照的 available_cash，与手动任务买单预算口径一致。
+        if trading_mode_value == "REAL":
+            try:
+                from backend.services.trade.routers.real_trading_utils import (
+                    _fetch_latest_real_account_snapshot,
+                )
+
+                latest_snapshot = await _fetch_latest_real_account_snapshot(
+                    self.db,
+                    tenant_id=str(getattr(order, "tenant_id", "") or "default"),
+                    user_id=str(user_id),
+                )
+                if latest_snapshot:
+                    snapshot_cash = float(
+                        latest_snapshot.get("available_cash")
+                        or latest_snapshot.get("cash")
+                        or 0.0
+                    )
+                    snapshot_total_asset = float(
+                        latest_snapshot.get("total_asset") or 0.0
+                    )
+                    if snapshot_cash > 0:
+                        available_cash = snapshot_cash
+                    if snapshot_total_asset > 0 and portfolio_value <= 0:
+                        portfolio_value = snapshot_total_asset
+            except Exception as e:
+                logger.warning(f"Failed to read available_cash from snapshot: {e}")
 
         # 兼容兜底：若本地库读取不到，再尝试旧远程接口。
         if available_cash <= 0:

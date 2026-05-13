@@ -210,6 +210,10 @@ async def reset_simulation_account(
             detail=f"初始金额必须为{int(SIM_AMOUNT_STEP / 10000)}万元的整数倍",
         )
 
+    # 当显式传入 initial_cash 时，同步更新 settings，保证后续 initial_equity 口径一致。
+    if request.initial_cash is not None:
+        await manager.set_initial_cash(auth.user_id, initial_cash, tenant_id=auth.tenant_id)
+
     account = await manager.init_account(auth.user_id, initial_cash, tenant_id=auth.tenant_id)
     await _capture_simulation_snapshot(redis)
     return {"success": True, "message": "Simulation account reset", "data": account}

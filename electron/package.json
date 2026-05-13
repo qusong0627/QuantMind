@@ -44,6 +44,12 @@
     "buildDependenciesFromSource": false,
     "appId": "com.quantmind.dashboard",
     "productName": "QuantMind量化助手",
+    "publish": [
+      {
+        "provider": "generic",
+        "url": "https://cos.quantmind.cloud/update/oss"
+      }
+    ],
     "files": [
       "dist-react/**/*",
       "dist-electron/**/*"
@@ -112,13 +118,19 @@
       "icon": "logo.png"
     },
     "nsis": {
-      "oneClick": true,
+      "oneClick": false,
       "perMachine": false,
-      "allowToChangeInstallationDirectory": false,
+      "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
+      "runAfterFinish": true,
+      "deleteAppDataOnUninstall": true,
+      "displayLanguageSelector": false,
       "installerIcon": "logo.ico",
-      "uninstallerIcon": "logo.ico"
+      "uninstallerIcon": "logo.ico",
+      "differentialPackage": true,
+      "compression": "lzma",
+      "compressionLevel": 9
     },
     "portable": {
       "artifactName": "${productName} ${version} Portable.${ext}",

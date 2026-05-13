@@ -304,7 +304,17 @@ const SmartStrategyStudio: React.FC = () => {
               background: '#fff'
             }}
           >
-            <div className="flex flex-col h-full">
+            <div 
+              className="flex flex-col h-full m-3 shadow-xl overflow-hidden"
+              style={{
+                background: 'rgba(255, 255, 255, 0.4)',
+                backdropFilter: 'blur(20px) saturate(160%)',
+                WebkitBackdropFilter: 'blur(20px) saturate(160%)',
+                borderRadius: '32px',
+                border: '1px solid rgba(148, 163, 184, 0.35)',
+                boxShadow: '0 8px 32px 0 rgba(0, 0, 0, 0.05)'
+              }}
+            >
               <div style={{ flex: 1, overflow: 'auto', padding: '24px 12px 12px' }}>
                 <Steps
                   direction="vertical"

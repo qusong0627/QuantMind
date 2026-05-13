@@ -11,6 +11,7 @@ from sqlalchemy import DateTime, Enum, Float, Index, Integer, String
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
+from backend.services.trade.models.enums import _CaseInsensitiveEnum
 from backend.services.trade.simulation.models import Base, TimestampMixin
 
 
@@ -32,8 +33,8 @@ class OrderStatus(str, enum.Enum):
     REJECTED = "rejected"
 
 
-class TradingMode(str, enum.Enum):
-    SIMULATION = "simulation"
+class TradingMode(_CaseInsensitiveEnum):
+    SIMULATION = "SIMULATION"
 
 
 class SimOrder(Base, TimestampMixin):

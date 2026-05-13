@@ -25,6 +25,72 @@ import { resolveRebalanceDays } from '../../../shared/qlib/rebalance';
 const { Header, Content, Sider, Footer } = Layout;
 const { Title, Text } = Typography;
 
+interface StepFlowProps {
+  steps: Array<{ title: string; icon: React.ReactNode; description: string }>;
+  currentStep: number;
+  setCurrentStep: (step: number) => void;
+}
+
+const StepFlow = React.memo(({ steps, currentStep, setCurrentStep }: StepFlowProps) => {
+  return (
+    <div className="relative py-8 px-5">
+      <div className="flex flex-col gap-4 relative">
+        {steps.map((step, index) => {
+          const isActive = currentStep === index;
+          return (
+            <motion.div 
+              layout
+              key={index}
+              onClick={() => setCurrentStep(index)}
+              className={`
+                relative group cursor-pointer p-4 rounded-2xl
+                ${isActive ? 'bg-gradient-to-br from-blue-100/60 via-blue-50/30 to-white shadow-[0_10px_30px_rgba(59,130,246,0.18)] border border-blue-200/60' : 'hover:bg-slate-50 border border-transparent'}
+              `}
+              transition={{ duration: 0.35, ease: [0.4, 0, 0.2, 1] }}
+            >
+              {/* 活跃状态的侧边指示器 - 仅在活跃时显示，不使用 layoutId 以减少渲染开销 */}
+              {isActive && (
+                <div className="absolute left-0 top-4 bottom-4 w-1 bg-blue-500 rounded-r-full" />
+              )}
+
+              <div className="flex-1 min-w-0 pt-0.5">
+                <div className={`
+                  text-[10px] font-bold uppercase tracking-wider mb-1 transition-colors
+                  ${isActive ? 'text-blue-500' : 'text-slate-300'}
+                `}>
+                  Step 0{index + 1}
+                </div>
+                <div className={`
+                  text-sm font-bold transition-all
+                  ${isActive ? 'text-slate-900' : 'text-slate-500'}
+                `}>
+                  {step.title}
+                </div>
+                
+                <AnimatePresence initial={false}>
+                  {isActive && (
+                    <motion.div
+                      initial={{ height: 0, opacity: 0 }}
+                      animate={{ height: 'auto', opacity: 1 }}
+                      exit={{ height: 0, opacity: 0 }}
+                      transition={{ duration: 0.3, ease: [0.4, 0, 0.2, 1] }}
+                      className="overflow-hidden"
+                    >
+                      <div className="text-[11px] text-slate-400 mt-2 leading-relaxed">
+                        {step.description}
+                      </div>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+              </div>
+            </motion.div>
+          );
+        })}
+      </div>
+    </div>
+  );
+});
+
 const SmartStrategyStudioV2: React.FC = () => {
   const { token } = theme.useToken();
   const [currentStep, setCurrentStep] = useState(0);
@@ -139,65 +205,12 @@ const SmartStrategyStudioV2: React.FC = () => {
     }
   };
 
-  const StepFlow = () => {
-    return (
-      <div className="relative py-8 px-5">
-        <div className="flex flex-col gap-4 relative">
-          {steps.map((step, index) => {
-            const isActive = currentStep === index;
-            
-            return (
-              <div 
-                key={index}
-                onClick={() => setCurrentStep(index)}
-                className={`
-                  relative group cursor-pointer p-4 rounded-2xl transition-all duration-300
-                  ${isActive ? 'bg-white shadow-[0_10px_30px_rgba(59,130,246,0.08)] border border-blue-50' : 'hover:bg-slate-50'}
-                `}
-              >
-                {/* 活跃状态的侧边指示器 - 仅在活跃时显示，不使用 layoutId 以减少渲染开销 */}
-                {isActive && (
-                  <div className="absolute left-0 top-4 bottom-4 w-1 bg-blue-500 rounded-r-full" />
-                )}
-
-                <div className="flex-1 min-w-0 pt-0.5">
-                  <div className={`
-                    text-[10px] font-bold uppercase tracking-wider mb-1 transition-colors
-                    ${isActive ? 'text-blue-500' : 'text-slate-300'}
-                  `}>
-                    Step 0{index + 1}
-                  </div>
-                  <div className={`
-                    text-sm font-bold transition-all
-                    ${isActive ? 'text-slate-900' : 'text-slate-500'}
-                  `}>
-                    {step.title}
-                  </div>
-                  
-                  {isActive && (
-                    <motion.div 
-                      initial={{ opacity: 0 }}
-                      animate={{ opacity: 1 }}
-                      className="text-[11px] text-slate-400 mt-2 leading-relaxed"
-                    >
-                      {step.description}
-                    </motion.div>
-                  )}
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      </div>
-    );
-  };
-
   const canProceed = (stepIndex: number) => {
     if (stepIndex === 0) {
-      return workingPool.length > 0;
+      return (workingPool || []).length > 0;
     }
     if (stepIndex === 1) {
-      return workingPool.length > 0;
+      return (workingPool || []).length > 0;
     }
     return true;
   };
@@ -317,10 +330,20 @@ const SmartStrategyStudioV2: React.FC = () => {
               background: '#fff'
             }}
           >
-            <div className="flex flex-col h-full overflow-hidden">
+            <div 
+              className="flex flex-col h-full overflow-hidden m-3 shadow-xl"
+              style={{
+                background: 'rgba(255, 255, 255, 0.4)',
+                backdropFilter: 'blur(20px) saturate(160%)',
+                WebkitBackdropFilter: 'blur(20px) saturate(160%)',
+                borderRadius: '32px',
+                border: '1px solid rgba(148, 163, 184, 0.35)',
+                boxShadow: '0 8px 32px 0 rgba(0, 0, 0, 0.05)'
+              }}
+            >
               {/* 1. 流程图区域 60% */}
               <div style={{ height: '62%', overflowY: 'auto', borderBottom: '1px solid #f1f5f9' }} className="no-scrollbar">
-                <StepFlow />
+                <StepFlow steps={steps} currentStep={currentStep} setCurrentStep={setCurrentStep} />
               </div>
 
               {/* 2. 智能助手区域 40% */}

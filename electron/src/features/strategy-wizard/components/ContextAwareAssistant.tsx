@@ -15,7 +15,7 @@ export const ContextAwareAssistant: React.FC<{ step: number }> = ({ step }) => {
       case 0: // 选股条件
         return (
           <Space orientation="vertical" style={{ width: '100%' }}>
-            <div className="bg-blue-50 p-3 rounded-xl border border-blue-100 mb-2">
+            <div className="bg-gradient-to-br from-blue-100/60 via-blue-50/30 to-white p-3 rounded-xl border border-blue-200/60 mb-2">
               <Space align="start" size={8}>
                 <BulbOutlined className="text-blue-500 mt-1 text-sm" />
                 <Text className="text-xs leading-relaxed text-blue-800">
