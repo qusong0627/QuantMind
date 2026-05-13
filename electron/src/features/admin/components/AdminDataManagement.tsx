@@ -31,7 +31,7 @@ export const AdminDataManagement: React.FC = () => {
     const [data, setData] = useState<AdminDataStatusResult | null>(null);
     const [syncLoading, setSyncLoading] = useState(false);
     const [syncResult, setSyncResult] = useState<AdminOfficialDataUpdateSyncResult | null>(null);
-    const [apiBaseUrl, setApiBaseUrl] = useState('https://api.quantmind.cloud/api/v1');
+    const [apiBaseUrl, setApiBaseUrl] = useState('https://www.quantmindai.cn/api/v1');
     const [accessKey, setAccessKey] = useState('');
     const [secretKey, setSecretKey] = useState('');
     const [version, setVersion] = useState('');

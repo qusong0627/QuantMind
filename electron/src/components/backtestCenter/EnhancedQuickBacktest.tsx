@@ -162,7 +162,7 @@ export const EnhancedQuickBacktest: React.FC = () => {
     if (!backtestId.current) return '';
     // 从 backtestService 获取基准 WS 地址
     const baseWs = (backtestService as any).wsUrl || '';
-    // 确保 path 正确：如果是云端 wss://api.quantmind.cloud/ws，则拼接 /backtest/{id}
+    // 确保 path 正确：如果是云端 wss://www.quantmindai.cn/ws，则拼接 /backtest/{id}
     // 如果是开发环境已包含 /api/v1，则继续拼接
     const separator = baseWs.endsWith('/') ? '' : '/';
     return `${baseWs}${separator}backtest/${backtestId.current}`;

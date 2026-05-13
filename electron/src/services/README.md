@@ -82,7 +82,7 @@
   - 新增 `clearNotifications(days?)`，对接后端 `POST /api/v1/notifications/clear`，支持按时间窗口批量清除。
 - `marketDataService` 股票接口路径与 CORS 兼容修复（2026-03-20）：
   - 股票搜索/详情/热门/快速搜索/筛选/行业列表接口统一从 `/api/stocks/*` 切换为 `/api/v1/stocks/*`，与网关收敛路由保持一致；
-  - 解决本地开发源 `http://127.0.0.1:3000` 直连 `https://api.quantmind.cloud` 时，旧路径触发预检但无有效 `Access-Control-Allow-Origin` 导致的 `ERR_NETWORK`。
+  - 解决本地开发源 `http://127.0.0.1:3000` 直连 `https://www.quantmindai.cn` 时，旧路径触发预检但无有效 `Access-Control-Allow-Origin` 导致的 `ERR_NETWORK`。
   - `getStockDetail` 已切换为标准详情路径 `/api/v1/stocks/{symbol}`，并在详情接口异常时自动回退到 `/api/v1/stocks/search` 做名称匹配，降低持仓页“股票名称显示为代码”的概率。
 
 - 旧本地通知中心链路已移除（2026-03-10）：
