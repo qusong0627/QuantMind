@@ -261,6 +261,22 @@ async def _generate_qlib_impl(body: GenerateQlibRequest, trace_id: str | None) -
         llm_provider = (os.getenv("LLM_PROVIDER_FORCE") or os.getenv("LLM_PROVIDER") or "qwen").strip().lower()
         llm_router = get_resilient_llm_router()
 
+        # 从数据库获取用户配置的 API Key
+        user_api_key = None
+        if body.user_id:
+            try:
+                db = get_db()
+                with db.connect() as conn:
+                    row = conn.execute(
+                        text("SELECT api_key FROM user_profiles WHERE user_id = :uid"),
+                        {"uid": body.user_id}
+                    ).fetchone()
+                    if row and row[0]:
+                        user_api_key = row[0]
+                        logger.info("Loaded user API key from database for user_id=%s", body.user_id)
+            except Exception as e:
+                logger.warning("Failed to load user API key from database: %s", e)
+
         # 获取股票池内容：优先 pool_content，其次从 COS 读取 pool_file_key
         pool_content = body.pool_content or ""
         if not pool_content.strip() and body.pool_file_key:
@@ -339,7 +355,7 @@ async def _generate_qlib_impl(body: GenerateQlibRequest, trace_id: str | None) -
             """
         ).strip()
         try:
-            code, _meta = await asyncio.to_thread(llm_router.generate_code, prompt, llm_provider, "simple")
+            code, _meta = await asyncio.to_thread(llm_router.generate_code, prompt, llm_provider, "simple", api_key=user_api_key)
             code = _strip_markdown_fences(code)
             if "POOL_FILE" not in code:
                 code = f"POOL_FILE = {json.dumps(pool_file_local, ensure_ascii=False)}\n\n" + code
@@ -370,6 +386,7 @@ async def _generate_qlib_impl(body: GenerateQlibRequest, trace_id: str | None) -
                         _local_repair_prompt(code, err),
                         llm_provider,
                         "simple",
+                        api_key=user_api_key,
                     )
                     code = _strip_markdown_fences(fixed)
                     ok, err = _syntax_check(code)

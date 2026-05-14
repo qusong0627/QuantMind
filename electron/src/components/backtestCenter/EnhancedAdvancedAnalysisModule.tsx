@@ -17,7 +17,7 @@ import {
 } from 'lucide-react';
 import { Select } from 'antd';
 import { useBacktestCenterStore } from '../../stores/backtestCenterStore';
-import { backtestService, type BacktestResult } from '../../services/backtestService';
+import type { BacktestResult } from '../../services/backtestService';
 import { BasicRiskPanel } from './analysis/BasicRiskPanel';
 import { TradeStatsPanel } from './analysis/TradeStatsPanel';
 import { BenchmarkPanel } from './analysis/BenchmarkPanel';
@@ -99,6 +99,7 @@ export const EnhancedAdvancedAnalysisModule: React.FC = () => {
         return;
       }
 
+      const { backtestService } = await import('../../services/backtestService');
       const list = await backtestService.getHistory(String(resolvedUserId), {
         page: 1,
         page_size: 20,

@@ -1,6 +1,6 @@
 import axios from 'axios';
 import { SERVICE_ENDPOINTS } from '../../../config/services';
-import { queryPool, savePoolFile, listPoolFiles, previewPoolFile, deletePoolFile } from './wizardService';
+// 按需加载 wizardService 中的网络方法，避免静态/动态导入冲突
 import { getWizardUserId } from '../utils/userId';
 
 const client = axios.create({
@@ -44,6 +44,7 @@ export interface SavedPoolVersionV2 {
  */
 export async function fetchWorkingPoolByDsl(dsl: string): Promise<WorkingPoolItemV2[]> {
   // 1. 获取查询结果
+  const { queryPool } = await import('./wizardService');
   const res = await queryPool({ dsl });
   const items = Array.isArray(res?.items) ? res.items : [];
   const mapped = items.map((x: any) => ({
@@ -131,6 +132,7 @@ export async function listSavedPoolVersions(): Promise<SavedPoolVersionV2[]> {
 
 export async function loadSavedPoolSymbols(fileKey: string): Promise<string[]> {
   const userId = getWizardUserId();
+  const { previewPoolFile } = await import('./wizardService');
   const res = await previewPoolFile({ user_id: userId, file_key: fileKey });
   if (!res?.success || !Array.isArray(res?.items)) return [];
   return res.items.map((x: any) => String(x?.symbol || '').trim()).filter(Boolean);
@@ -138,6 +140,7 @@ export async function loadSavedPoolSymbols(fileKey: string): Promise<string[]> {
 
 export async function deleteSavedPoolVersion(fileKey: string): Promise<boolean> {
   const userId = getWizardUserId();
+  const { deletePoolFile } = await import('./wizardService');
   const res = await deletePoolFile({ user_id: userId, file_key: fileKey, file_url: '' });
   return res?.success === true;
 }

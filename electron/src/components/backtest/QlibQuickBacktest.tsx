@@ -8,7 +8,7 @@ import {
   Play, RefreshCw, BarChart3, Settings2, Info, AlertCircle, Copy, Check, ExternalLink, CalendarRange
 } from 'lucide-react';
 
-import { backtestService, BacktestConfig } from '../../services/backtestService';
+import type { BacktestConfig } from '../../services/backtestService';
 import { QlibBacktestResult, QlibStrategyParams, QlibStrategyType } from '../../types/backtest/qlib';
 import { BACKTEST_CONFIG } from '../../config/backtest';
 import { QlibStrategyConfigurator } from './QlibStrategyConfigurator';
@@ -117,6 +117,7 @@ export const QlibQuickBacktest: React.FC = () => {
   // 获取 Qlib 数据日期范围
   useEffect(() => {
     const fetchDataRange = async () => {
+      const { backtestService } = await import('../../services/backtestService');
       const result = await backtestService.getQlibDataRange();
       if (result.exists && result.min_date && result.max_date) {
         setDataMinDate(result.min_date);
@@ -261,6 +262,7 @@ export const QlibQuickBacktest: React.FC = () => {
       };
 
       setLastConfig(config);
+      const { backtestService } = await import('../../services/backtestService');
       const response = await backtestService.runBacktest(config);
 
       if (response.status === 'completed') {
@@ -301,12 +303,15 @@ export const QlibQuickBacktest: React.FC = () => {
 
     // 发送到后端日志
     const storedUser = authService.getStoredUser() as any;
-    backtestService.logError({
-      backtest_id: backtestId,
-      message: msg,
-      user_id: String(normalizeUserId(storedUser?.id ?? storedUser?.user_id) || 'unknown'),
-      stack: traceback || new Error().stack
-    }).catch(console.error);
+    (async () => {
+      const { backtestService } = await import('../../services/backtestService');
+      backtestService.logError({
+        backtest_id: backtestId,
+        message: msg,
+        user_id: String(normalizeUserId(storedUser?.id ?? storedUser?.user_id) || 'unknown'),
+        stack: traceback || new Error().stack
+      }).catch(console.error);
+    })();
   };
 
   useEffect(() => {

@@ -6,7 +6,7 @@ import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { X, TrendingUp, TrendingDown, DollarSign, Shield, Target, Activity, RefreshCw } from 'lucide-react';
 import { BacktestHistory } from '../components/backtest/BacktestHistory';
-import { BacktestResult, backtestService } from '../services/backtestService';
+import type { BacktestResult } from '../services/backtestService';
 import { useBacktestStore } from '../stores/backtestStore';
 import ReactECharts from 'echarts-for-react';
 import { PAGE_LAYOUT } from '../config/pageLayout';
@@ -60,6 +60,7 @@ const BacktestDetailModal: React.FC<BacktestDetailModalProps> = ({ backtest: ini
       if (initialBacktest.backtest_id) {
         setIsLoadingFull(true);
         try {
+          const { backtestService } = await import('../services/backtestService');
           const fullResult = await backtestService.getResult(initialBacktest.backtest_id, true);
           setBacktest({ ...initialBacktest, ...fullResult });
         } catch (err) {

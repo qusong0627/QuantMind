@@ -7,7 +7,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import Editor from '@monaco-editor/react';
 import { Play, RefreshCw, Code2, Settings2, BarChart3, Info, AlertCircle, Upload, Cloud, CalendarRange } from 'lucide-react';
 
-import { backtestService, BacktestConfig, BacktestResult } from '../../services/backtestService';
+import type { BacktestConfig, BacktestResult } from '../../services/backtestService';
 import { strategyManagementService } from '../../services/strategyManagementService';
 import { QlibBacktestResult, QlibStrategyParams } from '../../types/backtest/qlib';
 import { BACKTEST_CONFIG } from '../../config/backtest';
@@ -187,6 +187,7 @@ export const QlibExpertBacktest: React.FC = () => {
         commission: 0.00025,
       };
 
+      const { backtestService } = await import('../../services/backtestService');
       const response = await backtestService.runBacktest(config);
 
       if (response.status === 'completed') {
@@ -236,6 +237,7 @@ export const QlibExpertBacktest: React.FC = () => {
   // 获取 Qlib 数据日期范围
   useEffect(() => {
     const fetchDataRange = async () => {
+      const { backtestService } = await import('../../services/backtestService');
       const result = await backtestService.getQlibDataRange();
       if (result.exists && result.min_date && result.max_date) {
         setDataMinDate(result.min_date);

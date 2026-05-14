@@ -9,8 +9,7 @@
  */
 
 import { useQuery, useMutation, useQueryClient, UseQueryOptions, UseMutationOptions } from '@tanstack/react-query';
-import {
-  backtestService,
+import type {
   BacktestConfig,
   BacktestResult,
   HistoryFilter,
@@ -78,10 +77,11 @@ export function useBacktestResult(
 ) {
   return useQuery<BacktestResult, Error>({
     queryKey: backtestKeys.result(backtestId || ''),
-    queryFn: () => {
+    queryFn: async () => {
       if (!backtestId) {
         throw new Error('回测ID不能为空');
       }
+      const { backtestService } = await import('../services/backtestService');
       return backtestService.getResult(backtestId);
     },
     ...defaultQueryConfig,
@@ -100,7 +100,10 @@ export function useBacktestHistory(
 ) {
   return useQuery<BacktestResult[], Error>({
     queryKey: backtestKeys.historyFiltered(userId, filter),
-    queryFn: () => backtestService.getHistory(userId, filter),
+    queryFn: async () => {
+      const { backtestService } = await import('../services/backtestService');
+      return backtestService.getHistory(userId, filter);
+    },
     ...historyQueryConfig,
     ...options,
   });
@@ -117,13 +120,14 @@ export function useBacktestComparison(
 ) {
   return useQuery<ComparisonResult, Error>({
     queryKey: backtestKeys.comparisonForUser(userId, backtestId1 || '', backtestId2 || ''),
-    queryFn: () => {
+    queryFn: async () => {
       if (!backtestId1 || !backtestId2) {
         throw new Error('对比需要两个回测ID');
       }
       if (!userId) {
         throw new Error('用户ID不能为空');
       }
+      const { backtestService } = await import('../services/backtestService');
       return backtestService.compareBacktests(backtestId1, backtestId2, userId);
     },
     ...defaultQueryConfig,
@@ -141,10 +145,11 @@ export function useOptimizationResult(
 ) {
   return useQuery<OptimizationResult, Error>({
     queryKey: backtestKeys.optimization(optimizationId || ''),
-    queryFn: () => {
+    queryFn: async () => {
       if (!optimizationId) {
         throw new Error('优化ID不能为空');
       }
+      const { backtestService } = await import('../services/backtestService');
       return backtestService.getOptimizationResult(optimizationId);
     },
     ...defaultQueryConfig,
@@ -164,10 +169,11 @@ export function useMarketData(
 ) {
   return useQuery<MarketData, Error>({
     queryKey: backtestKeys.marketData(symbol || '', startDate, endDate),
-    queryFn: () => {
+    queryFn: async () => {
       if (!symbol) {
         throw new Error('股票代码不能为空');
       }
+      const { backtestService } = await import('../services/backtestService');
       return backtestService.getMarketData(symbol, startDate, endDate);
     },
     ...marketDataQueryConfig,
@@ -189,7 +195,7 @@ export function useRunBacktest(
   const queryClient = useQueryClient();
 
   return useMutation<BacktestResult, Error, BacktestConfig>({
-    mutationFn: (config) => backtestService.runBacktest(config),
+    mutationFn: (config) => import('../services/backtestService').then(m => m.backtestService.runBacktest(config)),
     onSuccess: (data) => {
       console.log('✅ 回测任务已提交:', data.backtest_id);
 
@@ -216,7 +222,7 @@ export function useDeleteBacktest(
   const queryClient = useQueryClient();
 
   return useMutation<void, Error, { id: string; userId?: string }, { previousHistory: [any, any][] }>({
-    mutationFn: ({ id, userId: targetUserId }) => backtestService.deleteBacktest(id, targetUserId || userId),
+    mutationFn: ({ id, userId: targetUserId }) => import('../services/backtestService').then(m => m.backtestService.deleteBacktest(id, targetUserId || userId)),
     onMutate: async (backtestId) => {
       // 取消正在进行的查询
       await queryClient.cancelQueries({ queryKey: backtestKeys.history() });
@@ -266,7 +272,7 @@ export function useBatchDeleteBacktests(
 
   return useMutation<void, Error, { id: string; userId?: string }[], { previousHistory: [any, any][] }>({
     mutationFn: async (targets) => {
-      await Promise.all(targets.map((t) => backtestService.deleteBacktest(t.id, t.userId || userId)));
+      await Promise.all(targets.map((t) => import('../services/backtestService').then(m => m.backtestService.deleteBacktest(t.id, t.userId || userId))));
     },
     onMutate: async (targets) => {
       await queryClient.cancelQueries({ queryKey: backtestKeys.history() });
@@ -316,8 +322,7 @@ export function useOptimizeParameters(
   const queryClient = useQueryClient();
 
   return useMutation<OptimizationResult, Error, OptimizationMutationInput>({
-    mutationFn: ({ config, progress }) =>
-      backtestService.optimizeParameters(config, progress),
+    mutationFn: ({ config, progress }) => import('../services/backtestService').then(m => m.backtestService.optimizeParameters(config, progress)),
     onSuccess: (data) => {
       console.log('✅ 参数优化已提交:', data.optimization_id);
 
@@ -347,6 +352,7 @@ export function useExportCSV(
 ) {
   return useMutation<Blob, Error, { backtestId: string; filename?: string }>({
     mutationFn: async ({ backtestId, filename }) => {
+      const { backtestService } = await import('../services/backtestService');
       const blob = await backtestService.exportCSV(backtestId);
       backtestService.downloadFile(blob, filename || `backtest-${backtestId}.csv`);
       return blob;
@@ -369,6 +375,7 @@ export function useExportJSON(
 ) {
   return useMutation<Blob, Error, { backtestId: string; filename?: string }>({
     mutationFn: async ({ backtestId, filename }) => {
+      const { backtestService } = await import('../services/backtestService');
       const blob = await backtestService.exportJSON(backtestId);
       backtestService.downloadFile(blob, filename || `backtest-${backtestId}.json`);
       return blob;
@@ -398,9 +405,12 @@ export function usePrefetchBacktestResult() {
   const queryClient = useQueryClient();
 
   return (backtestId: string) => {
-    queryClient.prefetchQuery({
+      queryClient.prefetchQuery({
       queryKey: backtestKeys.result(backtestId),
-      queryFn: () => backtestService.getResult(backtestId),
+      queryFn: async () => {
+        const { backtestService } = await import('../services/backtestService');
+        return backtestService.getResult(backtestId);
+      },
       ...defaultQueryConfig,
     });
   };
@@ -415,7 +425,10 @@ export function usePrefetchMarketData() {
   return (symbol: string, startDate: string, endDate: string) => {
     queryClient.prefetchQuery({
       queryKey: backtestKeys.marketData(symbol, startDate, endDate),
-      queryFn: () => backtestService.getMarketData(symbol, startDate, endDate),
+      queryFn: async () => {
+        const { backtestService } = await import('../services/backtestService');
+        return backtestService.getMarketData(symbol, startDate, endDate);
+      },
       ...marketDataQueryConfig,
     });
   };

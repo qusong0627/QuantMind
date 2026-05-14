@@ -30,7 +30,7 @@ import {
   SettingOutlined
 } from '@ant-design/icons';
 import { useWizardV2Store } from '../store/wizardV2Store';
-import { previewPoolFile, deletePoolFile } from '../services/wizardService';
+// 使用按需导入以避免与其他模块的静态/动态导入冲突
 import { loadFeaturesBySymbolsInBatches } from '../utils/featureEnrichment';
 import { getWizardUserId } from '../utils/userId';
 import dayjs from 'dayjs';
@@ -132,6 +132,7 @@ export const StockPoolLibrary: React.FC = () => {
     setLoadingId(pool.id);
     try {
       const userId = getWizardUserId();
+      const { previewPoolFile } = await import('../services/wizardService');
       const res = await previewPoolFile({ user_id: userId, file_key: pool.id });
       
       if (res.success && res.items) {
@@ -238,6 +239,7 @@ export const StockPoolLibrary: React.FC = () => {
                     message.loading({ content: '正在清空...', key: 'clearPools' });
                     try {
                       const userId = getWizardUserId();
+                      const { deletePoolFile } = await import('../services/wizardService');
                       for (const p of userStockPools) {
                         await deletePoolFile({ user_id: userId, file_key: p.id, file_url: '' });
                       }

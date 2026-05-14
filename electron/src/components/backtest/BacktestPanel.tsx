@@ -4,8 +4,7 @@
  */
 
 import React, { useState } from 'react';
-import { Strategy, BacktestConfig, BacktestResult, OHLCV } from '../../types/backtest';
-import { backtestService } from '../../services/backtestService';
+import type { Strategy, BacktestConfig, BacktestResult, OHLCV } from '../../types/backtest';
 import { BacktestEngine } from '../../services/backtest';
 import { StrategyEditor } from './StrategyEditor';
 import { EquityCurveChart } from './EquityCurve';
@@ -40,6 +39,7 @@ export const BacktestPanel: React.FC = () => {
       }
 
       // 获取真实行情数据
+      const { backtestService } = await import('../../services/backtestService');
       const marketData = await backtestService.getMarketData(
         config.symbol,
         config.startDate,

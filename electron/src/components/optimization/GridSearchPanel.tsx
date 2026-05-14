@@ -1,8 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AlertCircle, ChevronLeft, ChevronRight, Clock3, RefreshCw } from 'lucide-react';
 
-import {
-  backtestService,
+import type {
   OptimizationHistoryDetail,
   OptimizationHistoryItem,
   OptimizationRunStatus,
@@ -251,6 +250,7 @@ export const GridSearchPanel: React.FC = () => {
   const checkWorkerHealth = useCallback(async () => {
     setIsCheckingWorker(true);
     try {
+      const { backtestService } = await import('../../services/backtestService');
       const health = await backtestService.getQlibHealth();
       const redisOk = health?.redis_ok === true;
       setWorkerReady(redisOk);
@@ -266,6 +266,7 @@ export const GridSearchPanel: React.FC = () => {
   const loadHistory = useCallback(async () => {
     setHistoryLoading(true);
     try {
+      const { backtestService } = await import('../../services/backtestService');
       const items = await backtestService.getOptimizationHistory(HISTORY_LIMIT);
       setHistoryItems(items);
       if (!selectedOptimizationIdRef.current && items[0]?.optimization_id) {
@@ -284,6 +285,7 @@ export const GridSearchPanel: React.FC = () => {
   const loadDetail = useCallback(async (optimizationId: string) => {
     setDetailLoading(true);
     try {
+      const { backtestService } = await import('../../services/backtestService');
       const detail = await backtestService.getOptimizationDetail(optimizationId);
       setSelectedDetail(detail);
       const derivedConfig = deriveGridConfigFromHistory(detail);
@@ -335,6 +337,7 @@ export const GridSearchPanel: React.FC = () => {
     
     setClearingHistory(true);
     try {
+      const { backtestService } = await import('../../services/backtestService');
       await backtestService.clearOptimizationHistory();
       setHistoryItems([]);
       setSelectedOptimizationId(null);
@@ -359,6 +362,7 @@ export const GridSearchPanel: React.FC = () => {
       setIsRunning(true);
       isAbortedRef.current = false;
       try {
+        const { backtestService } = await import('../../services/backtestService');
         const response = await backtestService.watchOptimizationTask<any>(taskId, {
           signal: abortControllerRef.current.signal,
           onProgress: async (progress, status, info) => {
@@ -372,6 +376,7 @@ export const GridSearchPanel: React.FC = () => {
               if (detailId) {
                 setSelectedOptimizationId(detailId);
                 selectedOptimizationIdRef.current = detailId;
+                const { backtestService } = await import('../../services/backtestService');
                 const detail = await backtestService.getOptimizationDetail(detailId);
                 setSelectedDetail(detail);
                 applyHistoryDetail(detail);
@@ -426,6 +431,7 @@ export const GridSearchPanel: React.FC = () => {
     const initialNDrop = Math.round((gridConfig.parameters.n_drop.min + gridConfig.parameters.n_drop.max) / 2);
 
     try {
+      const { backtestService } = await import('../../services/backtestService');
       const response = await backtestService.optimizeQlibParameters(
         {
           symbol: 'all',
@@ -529,6 +535,7 @@ export const GridSearchPanel: React.FC = () => {
     const optimizationId = currentOptimizationId || selectedOptimizationIdRef.current;
     if (taskId) {
       try {
+        const { backtestService } = await import('../../services/backtestService');
         await backtestService.stopTask(taskId);
         await loadHistory();
         if (optimizationId) {

@@ -12,7 +12,7 @@ import {
 import { useWizardV2Store } from '../store/wizardV2Store';
 import type { ValidationCheck, ValidationResult } from '../types';
 import { useAuth } from '../../auth/hooks';
-import { deletePoolFile, saveToCloud } from '../services/wizardService';
+// 按需导入 wizardService 的方法，避免静态/动态导入混用导致的打包警告
 import { QLIB_REBALANCE_DAY_LABEL, resolveRebalanceDays } from '../../../shared/qlib/rebalance';
 
 const { Title, Text, Paragraph } = Typography;
@@ -223,6 +223,7 @@ const QlibValidatorAndSave: React.FC<Props> = ({ onBack }) => {
                 }
             };
 
+            const { saveToCloud } = await import('../services/wizardService');
             const res = await saveToCloud(payload as any);
 
             if (!res?.success) {

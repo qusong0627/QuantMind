@@ -36,7 +36,7 @@ import { message, Modal, Input } from 'antd';
 import { clsx } from 'clsx';
 import { authService } from '../features/auth/services/authService';
 import { strategyManagementService } from '../services/strategyManagementService';
-import { backtestService } from '../services/backtestService';
+// backtestService loaded dynamically to avoid mixed static/dynamic import warnings
 import { modelTrainingService } from '../services/modelTrainingService';
 import HelpCenterLink from '../components/common/HelpCenterLink';
 import type { BacktestResult } from '../services/backtestService';
@@ -1316,6 +1316,7 @@ const AIIDEPage: React.FC = () => {
             appendLogLine('检测到模块型策略，自动转入 Qlib 回测。');
 
             const payload = buildDefaultQlibBacktestConfig(strategyCode);
+            const { backtestService } = await import('../services/backtestService');
             const submitted = await backtestService.runBacktest(payload as any);
             const backtestId = submitted.backtest_id;
             const taskId = submitted.task_id || null;
@@ -1523,6 +1524,7 @@ const AIIDEPage: React.FC = () => {
             if (runModeRef.current === 'qlib') {
                 if (runTaskIdRef.current) {
                     try {
+                        const { backtestService } = await import('../services/backtestService');
                         await backtestService.stopTask(runTaskIdRef.current);
                     } catch (taskErr) {
                         console.warn('Stop Qlib task failed', taskErr);

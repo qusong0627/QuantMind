@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { User, Activity, Server, Clock, Shield, Database, Settings2, RefreshCw, DownloadCloud, Link2Off, Camera, Upload, Trash2, CheckCircle2 } from 'lucide-react';
 import { message, Modal } from 'antd';
-import { AccountInfo, RealTradingStatus, realTradingService } from '../../../services/realTradingService';
+import type { AccountInfo, RealTradingStatus } from '../../../services/realTradingService';
 import { strategyManagementService } from '../../../services/strategyManagementService';
 import { userCenterService } from '../../../features/user-center/services/userCenterService';
 import { authService } from '../../../features/auth/services/authService';
@@ -85,11 +85,13 @@ const PersonalCenter: React.FC<PersonalCenterProps> = ({ tenantId, userId, statu
         setLoadingSettings(true);
         try {
             const runtimeMode = resolveTradingAccountMode(status?.mode, tradingMode);
+            const { realTradingService } = await import('../../../services/realTradingService');
             const accountResp = await realTradingService.getRuntimeAccount(userId, tenantId, runtimeMode).catch(() => null);
 
             if (!mounted) return;
 
             if (tradingMode === 'simulation') {
+                const { realTradingService } = await import('../../../services/realTradingService');
                 const settings = await realTradingService.getSimulationSettings();
                 if (settings) {
                     const value = Number(settings.initial_cash || 1_000_000);
@@ -99,6 +101,7 @@ const PersonalCenter: React.FC<PersonalCenterProps> = ({ tenantId, userId, statu
                 }
             } else {
                 // Real Mode: Restore settings
+                const { realTradingService } = await import('../../../services/realTradingService');
                 const settings = await realTradingService.getRealAccountSettings();
                 if (settings) {
                     const value = Number(settings.initial_equity || 0);
@@ -135,6 +138,7 @@ const PersonalCenter: React.FC<PersonalCenterProps> = ({ tenantId, userId, statu
     const handleResetSimulation = async () => {
         setResettingSimulation(true);
         try {
+            const { realTradingService } = await import('../../../services/realTradingService');
             const account = await realTradingService.resetSimulationAccount(
                 userId,
                 configuredInitialCash,
@@ -157,6 +161,7 @@ const PersonalCenter: React.FC<PersonalCenterProps> = ({ tenantId, userId, statu
             return;
         }
         try {
+            const { realTradingService } = await import('../../../services/realTradingService');
             const success = await realTradingService.updateRealAccountSettings(draftInitialCash);
             if (success) {
                 setConfiguredInitialCash(draftInitialCash);
@@ -171,6 +176,7 @@ const PersonalCenter: React.FC<PersonalCenterProps> = ({ tenantId, userId, statu
     const handleUnbindQmt = async () => {
         setIsUnbinding(true);
         try {
+            const { realTradingService } = await import('../../../services/realTradingService');
             const result = await realTradingService.unbindQmtAgent();
             if (result.success) {
                 message.success(result.message);
@@ -198,6 +204,7 @@ const PersonalCenter: React.FC<PersonalCenterProps> = ({ tenantId, userId, statu
             const formData = new FormData();
             ocrFiles.forEach(file => formData.append('images', file));
             
+            const { realTradingService } = await import('../../../services/realTradingService');
             const res = await realTradingService.analyzeHoldingImages(formData);
             if (res.success) {
                 setOcrResults(res.data || []);
@@ -217,6 +224,7 @@ const PersonalCenter: React.FC<PersonalCenterProps> = ({ tenantId, userId, statu
         if (ocrResults.length === 0) return;
         setIsSyncingHoldings(true);
         try {
+            const { realTradingService } = await import('../../../services/realTradingService');
             const success = await realTradingService.syncSimulationHoldings(ocrResults);
             if (success) {
                 message.success('持仓同步成功，模拟账户已更新');

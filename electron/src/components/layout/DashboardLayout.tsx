@@ -3,10 +3,11 @@ import { useSelector } from 'react-redux';
 import { selectCurrentTab } from '../../store/slices/aiStrategySlice';
 import { ModuleGrid } from './ModuleGrid';
 import { NewBacktestCenterPage } from '../../pages/NewBacktestCenterPage';
-import UserCenterPage from '../../features/user-center/pages/UserCenterPage';
-import RealTradingPage from '../../pages/trading/RealTradingPage';
-import QuantBotPage from '../../features/quantbot/pages/QuantBotPage';
 import { MarketWeatherBackground } from './MarketWeatherBackground';
+
+const UserCenterPage = React.lazy(() => import('../../features/user-center/pages/UserCenterPage'));
+const RealTradingPage = React.lazy(() => import('../../pages/trading/RealTradingPage'));
+const QuantBotPage = React.lazy(() => import('../../features/quantbot/pages/QuantBotPage'));
 
 interface DashboardLayoutProps {
   modules: any[];
@@ -36,21 +37,27 @@ export const DashboardLayout: React.FC<DashboardLayoutProps> = ({ modules, onLay
         );
       case 'agent':
         return (
-          <div className="w-full h-full flex items-center justify-center">
-            <QuantBotPage />
-          </div>
+          <React.Suspense fallback={<div className="w-full h-full flex items-center justify-center" />}>
+            <div className="w-full h-full flex items-center justify-center">
+              <QuantBotPage />
+            </div>
+          </React.Suspense>
         );
       case 'trading':
         return (
-          <div className="w-full h-full">
-            <RealTradingPage />
-          </div>
+          <React.Suspense fallback={<div className="w-full h-full" />}>
+            <div className="w-full h-full">
+              <RealTradingPage />
+            </div>
+          </React.Suspense>
         );
       case 'profile':
         return (
-          <div className="w-full h-full flex items-center justify-center">
-            <UserCenterPage />
-          </div>
+          <React.Suspense fallback={<div className="w-full h-full flex items-center justify-center" />}>
+            <div className="w-full h-full flex items-center justify-center">
+              <UserCenterPage />
+            </div>
+          </React.Suspense>
         );
       default:
         return <ModuleGrid modules={modules} onLayoutChange={onLayoutChange} />;

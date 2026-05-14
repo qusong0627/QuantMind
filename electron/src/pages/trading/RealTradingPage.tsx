@@ -10,10 +10,9 @@ import PersonalCenter from './tabs/PersonalCenter';
 import PositionMonitor from './tabs/PositionMonitor';
 import TradingHistory from './tabs/TradingHistory';
 import SettingsCenter from './tabs/SettingsCenter';
-import { realTradingService, RealTradingStatus, AccountInfo, PreflightCheckResponse } from '../../services/realTradingService';
+import type { RealTradingStatus, AccountInfo, PreflightCheckResponse, PreflightCheckItem } from '../../services/realTradingService';
 import { strategyManagementService } from '../../services/strategyManagementService';
 import { authService } from '../../features/auth/services/authService';
-import type { PreflightCheckItem } from '../../services/realTradingService';
 import type { StrategyFile } from '../../types/backtest/strategy';
 import { useAppDispatch, useAppSelector } from '../../store';
 import { setTradingMode } from '../../store/slices/uiSlice';
@@ -133,6 +132,7 @@ const RealTradingPage: React.FC = () => {
 
         isFetchingRef.current = true;
         try {
+            const { realTradingService } = await import('../../services/realTradingService');
             const statusData = await realTradingService.getStatus(userId, tradingMode, tenantId);
             const runtimeMode = resolveTradingAccountMode(statusData?.mode, tradingMode);
             const accountData = await realTradingService.getRuntimeAccount(userId, tenantId, runtimeMode).catch(() => null);
@@ -236,6 +236,7 @@ const RealTradingPage: React.FC = () => {
         liveTradeConfig: LiveTradeConfig,
     ): Promise<boolean> => {
         try {
+            const { realTradingService } = await import('../../services/realTradingService');
             const startResp = await realTradingService.start(
                 userId,
                 strategyId,
@@ -268,6 +269,7 @@ const RealTradingPage: React.FC = () => {
             fetchData();
             return true;
         } catch (err: unknown) {
+            const { realTradingService } = await import('../../services/realTradingService');
             const precheckFailure = realTradingService.extractTradingPrecheckFailure(err);
             if (precheckFailure) {
                 setPreflightStage('trading-readiness');
@@ -321,6 +323,7 @@ const RealTradingPage: React.FC = () => {
         setWizardOpen(false);
 
         try {
+            const { realTradingService } = await import('../../services/realTradingService');
             const tradingReadiness = await Promise.race([
                 realTradingService.getTradingPrecheck(mode),
                 new Promise<never>((_, reject) =>
@@ -369,6 +372,7 @@ const RealTradingPage: React.FC = () => {
             message.success('自检通过，请确认后启动运行容器');
         } catch (err: unknown) {
             if (requestSeq !== preflightRequestSeqRef.current) return;
+            const { realTradingService } = await import('../../services/realTradingService');
             const friendly = realTradingService.getFriendlyError(err);
             setPreflightLoadError(friendly);
             setPreflightLoading(false);

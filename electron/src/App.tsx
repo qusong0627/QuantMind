@@ -26,7 +26,7 @@ import { initDynamicServerUrl } from './config/services';
 // 认证相关组件
 import AppRoutes from './features/auth/AppRoutes';
 import { useAuth } from './features/auth/hooks/useAuth';
-import { ProtectedRoute } from './features/auth/components';
+import { LazyProtectedRoute as ProtectedRoute } from './features/auth/utils/lazyLoad';
 import { preloadAiIdeResources } from './features/auth/utils/lazyLoad';
 
 import './styles/global.css';

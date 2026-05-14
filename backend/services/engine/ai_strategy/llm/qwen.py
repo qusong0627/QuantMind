@@ -27,14 +27,14 @@ from .base import BaseLLMProvider, normalize_name
 class QwenLLM:
     """Qwen LLM - 使用 OpenAI 兼容模式"""
 
-    def __init__(self):
+    def __init__(self, api_key: str | None = None):
         from ..ai_strategy_config import get_config as _gc
 
         ai_strategy_config = _gc()
 
         self._config = ai_strategy_config
-        # 使用 DASHSCOPE_API_KEY（官方推荐）或兼容的 QWEN_API_KEY
-        self.api_key = os.getenv("DASHSCOPE_API_KEY") or os.getenv("QWEN_API_KEY")
+        # 优先使用传入的 api_key，否则从环境变量读取
+        self.api_key = api_key or os.getenv("DASHSCOPE_API_KEY") or os.getenv("QWEN_API_KEY")
         if not self.api_key:
             raise RuntimeError("DASHSCOPE_API_KEY or QWEN_API_KEY not set in environment")
 

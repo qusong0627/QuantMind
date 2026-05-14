@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { Save, X, Code, CheckCircle, FileText } from 'lucide-react';
-import { backtestService } from '../../services/backtestService';
+// backtestService will be loaded dynamically when saving
 import { GridSearchConfig } from './ParameterGrid';
 
 interface Props {
@@ -87,6 +87,7 @@ STRATEGY_CONFIG = {
 
         try {
             const code = generateCode();
+            const { backtestService } = await import('../../services/backtestService');
             await backtestService.saveStrategy({
                 code,
                 name,

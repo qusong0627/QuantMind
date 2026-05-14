@@ -1,7 +1,6 @@
 import React, { useCallback, useMemo, useRef, useState } from 'react';
 import { FileText, Search, Download, TrendingUp, TrendingDown, Clock, CheckCircle, XCircle, ChevronLeft, ChevronRight, AlertTriangle, Activity, RotateCcw, ChevronDown } from 'lucide-react';
 import { Dropdown, message } from 'antd';
-import { realTradingService } from '../../../services/realTradingService';
 import type { Order } from '../../../services/realTradingService';
 import { marketDataService } from '../../../services/marketDataService';
 import { csvExporter } from '../../../services/export';
@@ -92,6 +91,7 @@ const TradingHistory: React.FC<TradingHistoryProps> = ({ userId, isActive, tradi
         loadingRef.current = true;
 
         try {
+            const { realTradingService } = await import('../../../services/realTradingService');
             const rangeQuery = buildDateRange(timeRange);
             const allOrders: Order[] = [];
             let offset = 0;

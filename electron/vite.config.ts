@@ -7,6 +7,21 @@ const apiBase = process.env.VITE_API_URL || process.env.VITE_API_BASE_URL || '';
 const wsBase = process.env.VITE_WS_BASE_URL || '';
 
 export default defineConfig(({ mode }) => {
+  const getPackageName = (id: string) => {
+    const nodeModulesIndex = id.lastIndexOf('/node_modules/');
+    if (nodeModulesIndex < 0) return null;
+
+    const modulePath = id.slice(nodeModulesIndex + '/node_modules/'.length);
+    const segments = modulePath.split('/');
+    if (!segments[0]) return null;
+
+    if (segments[0].startsWith('@') && segments.length >= 2) {
+      return `${segments[0]}/${segments[1]}`;
+    }
+
+    return segments[0];
+  };
+
   return {
     base: mode === 'production' ? './' : '/',
     plugins: [react()],
@@ -46,7 +61,30 @@ export default defineConfig(({ mode }) => {
       rollupOptions: {
         input: {
           main: 'index.html'
-        }
+        },
+        output: {
+          manualChunks(id) {
+            if (!id.includes('node_modules')) {
+              return undefined;
+            }
+
+            if (id.includes('@monaco-editor') || id.includes('monaco-editor')) return 'vendor-monaco';
+            if (id.includes('echarts')) return 'vendor-echarts';
+            if (id.includes('framer-motion')) return 'vendor-motion';
+            if (id.includes('react-router')) return 'vendor-router';
+            if (id.includes('date-fns')) return 'vendor-datefns';
+            if (id.includes('prismjs')) return 'vendor-prism';
+            if (id.includes('react-markdown') || id.includes('remark-gfm')) return 'vendor-markdown';
+            if (id.includes('lucide-react')) return 'vendor-icons';
+
+            const packageName = getPackageName(id);
+            if (!packageName) {
+              return undefined;
+            }
+
+            return `vendor-${packageName.replace('@', '').replace('/', '-')}`;
+          },
+        },
       }
     },
     server: {

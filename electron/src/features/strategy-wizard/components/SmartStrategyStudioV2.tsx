@@ -18,7 +18,7 @@ import QlibParamsConfig from './QlibParamsConfig';
 import QlibValidatorAndSave from './QlibValidatorAndSave';
 import { useWizardV2Store } from '../store/wizardV2Store';
 import { PAGE_LAYOUT } from '../../../config/pageLayout';
-import { generateQlib } from '../services/wizardService';
+// 按需加载 wizardService 中的网络方法，避免静态/动态导入冲突
 import { getWizardUserId } from '../utils/userId';
 import { resolveRebalanceDays } from '../../../shared/qlib/rebalance';
 
@@ -137,6 +137,7 @@ const SmartStrategyStudioV2: React.FC = () => {
       setGenerating(true);
       try {
         const userId = getWizardUserId();
+        const { generateQlib } = await import('../services/wizardService');
         const res = await generateQlib({
           user_id: userId,
           conditions: conditions || {},
@@ -426,7 +427,7 @@ const SmartStrategyStudioV2: React.FC = () => {
             {/* 核心卡片容器 - 严格对齐回测中心 */}
             <Content
               style={{
-                padding: '24px',
+                padding: 0,
                 overflowY: 'auto',
                 position: 'relative',
                 flex: 1
@@ -435,9 +436,10 @@ const SmartStrategyStudioV2: React.FC = () => {
                 <div 
                   className="bg-white overflow-hidden"
                   style={{
+                    margin: '12px 24px 24px 24px',
                     padding: 24,
                     borderRadius: '32px',
-                    minHeight: 'calc(100% - 20px)',
+                    minHeight: 'calc(100% - 36px)',
                     display: 'flex',
                     flexDirection: 'column'
                   }}

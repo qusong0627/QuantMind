@@ -112,7 +112,7 @@ export const SimpleLogicBuilder: React.FC<{
   };
 
   return (
-    <div style={{ padding: 12 }}>
+    <div style={{ padding: 0 }}>
       {flatConditions.length === 0 ? (
         <Empty
           image={Empty.PRESENTED_IMAGE_SIMPLE}
@@ -121,7 +121,7 @@ export const SimpleLogicBuilder: React.FC<{
           <Button type="primary" icon={<PlusOutlined />} onClick={addCondition}>添加第一个条件</Button>
         </Empty>
       ) : (
-        <Space orientation="vertical" style={{ width: '100%' }} size="middle">
+        <Space direction="vertical" style={{ width: '100%' }} size="middle">
           {flatConditions.map((item, index) => {
             const unit = getFactorUnit(item.factor);
             return (

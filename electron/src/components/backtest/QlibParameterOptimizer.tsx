@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { Settings, Play, TrendingUp, AlertCircle } from 'lucide-react';
 import ReactECharts from 'echarts-for-react';
-import { backtestService } from '../../services/backtestService';
+// backtestService will be loaded dynamically when needed
 import { QlibBacktestConfig, QlibStrategyParams } from '../../types/backtest/qlib';
 import { MultiStockCodeInput } from './MultiStockCodeInput';
 import { BACKTEST_CONFIG } from '../../config/backtest';
@@ -125,6 +125,7 @@ export const QlibParameterOptimizer: React.FC = () => {
       // My implementation: Backend API reads Redis, Frontend polls Backend API.
 
       // Let's rely on the service to handle log polling.
+      const { backtestService } = await import('../../services/backtestService');
       const res = await backtestService.optimizeQlibParameters(
         {
           symbol: config.symbol,

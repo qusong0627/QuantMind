@@ -8,7 +8,7 @@ import {
 } from 'lucide-react';
 import ReactECharts from 'echarts-for-react';
 import { QlibBacktestResult, QlibBacktestConfig } from '../../types/backtest/qlib';
-import { BacktestResult, BacktestConfig, backtestService } from '../../services/backtestService';
+import type { BacktestResult, BacktestConfig } from '../../services/backtestService';
 import { backtestClient } from '../../services/aiStrategyClients';
 
 type Trade = {
@@ -126,20 +126,20 @@ export const QlibResultDisplay: React.FC<{ result: BacktestResult | QlibBacktest
 
     let cancelled = false;
     setIsLoadingTrades(true);
-    backtestService
-      .getTrades(backtestId)
-      .then((payload) => {
+    (async () => {
+      try {
+        const { backtestService } = await import('../../services/backtestService');
+        const payload = await backtestService.getTrades(backtestId);
         if (cancelled) return;
         setLazyTrades(Array.isArray(payload?.trades) ? (payload.trades as Trade[]) : []);
-      })
-      .catch((err) => {
+      } catch (err) {
         console.warn('加载回测交易明细失败:', err);
         if (cancelled) return;
         setLazyTrades([]);
-      })
-      .finally(() => {
+      } finally {
         if (!cancelled) setIsLoadingTrades(false);
-      });
+      }
+    })();
 
     return () => {
       cancelled = true;
@@ -171,6 +171,7 @@ export const QlibResultDisplay: React.FC<{ result: BacktestResult | QlibBacktest
     if (backtestId) {
       setIsExporting(true);
       try {
+        const { backtestService } = await import('../../services/backtestService');
         const blob = await backtestService.exportCSV(backtestId);
         backtestService.downloadFile(blob, filename);
         return;
@@ -185,6 +186,7 @@ export const QlibResultDisplay: React.FC<{ result: BacktestResult | QlibBacktest
     let rows = tradeRows;
     if (!rows.length && backtestId) {
       try {
+        const { backtestService } = await import('../../services/backtestService');
         const detail = await backtestService.getTrades(backtestId);
         const detailedTrades = Array.isArray(detail?.trades) ? (detail.trades as Trade[]) : [];
         rows = normalizeTradeRows(detailedTrades, initialCapital, equityCurve as any[]);

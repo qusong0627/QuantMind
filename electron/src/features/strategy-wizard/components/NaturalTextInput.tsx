@@ -11,7 +11,7 @@ import {
 import { motion, AnimatePresence } from 'framer-motion';
 import { useWizardV2Store } from '../store/wizardV2Store';
 import { fetchWorkingPoolByDsl, syncWorkingPoolToBackend } from '../services/wizardV2Service';
-import { parseConditions, parseText, queryPool } from '../services/wizardService';
+// 按需加载 wizardService 的网络与解析方法，避免静态与动态导入混用导致的打包警告
 import { FACTORS } from '../factors/dictionary';
 import { SimpleLogicBuilder } from './SimpleLogicBuilder';
 import { CustomStockSelector } from './CustomStockSelector';
@@ -53,6 +53,7 @@ export const NaturalTextInput: React.FC<{ onNext: () => void }> = ({ onNext }) =
     setLoading(true);
     setMatchedCount(null);
     try {
+      const { parseText } = await import('../services/wizardService');
       const parsed = await parseText(text);
       
       // 针对数据库按“元”存储的情况，修复 DSL 中的单位换算（AI 通常输出以“亿”为单位的数字）
@@ -142,6 +143,7 @@ export const NaturalTextInput: React.FC<{ onNext: () => void }> = ({ onNext }) =
     }
     setLoading(true);
     try {
+      const { parseConditions, queryPool } = await import('../services/wizardService');
       const parsed = await parseConditions({ conditions });
       const poolRes = await queryPool({ dsl: parsed.dsl });
       if (!poolRes.items || poolRes.items.length === 0) {
@@ -168,7 +170,7 @@ export const NaturalTextInput: React.FC<{ onNext: () => void }> = ({ onNext }) =
   };
 
   return (
-    <div className="max-w-[1200px] mx-auto p-2">
+    <div className="w-full p-2">
       <div className="mb-8">
         <Tabs
           activeKey={activeTab}

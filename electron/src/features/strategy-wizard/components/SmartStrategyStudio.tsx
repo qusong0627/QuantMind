@@ -17,7 +17,7 @@ import QlibParamsConfig from './QlibParamsConfig';
 import QlibValidatorAndSave from './QlibValidatorAndSave';
 import { useWizardStore } from '../store/wizardStore';
 import { PAGE_LAYOUT } from '../../../config/pageLayout';
-import { generateQlib, getActivePoolFile, previewPoolFile } from '../services/wizardService';
+// 使用按需导入 wizardService 的方法，避免静态和动态导入混用
 import { getWizardUserId } from '../utils/userId';
 import { resolveRebalanceDays } from '../../../shared/qlib/rebalance';
 
@@ -51,6 +51,7 @@ const SmartStrategyStudio: React.FC = () => {
       try {
         const userId = getWizardUserId();
 
+        const { getActivePoolFile } = await import('../services/wizardService');
         const res = await getActivePoolFile({ user_id: userId });
 
         if (res?.success && res?.pool_file) {
@@ -65,6 +66,7 @@ const SmartStrategyStudio: React.FC = () => {
           });
 
           if (res.pool_file.file_key) {
+            const { previewPoolFile } = await import('../services/wizardService');
             const preview = await previewPoolFile({
               user_id: userId,
               file_key: res.pool_file.file_key,
@@ -124,6 +126,7 @@ const SmartStrategyStudio: React.FC = () => {
           delete normalizedQlibParams.n_drop;
         }
 
+        const { generateQlib } = await import('../services/wizardService');
         const res = await generateQlib({
           user_id: userId,
           conditions: conditions || {},
@@ -398,7 +401,7 @@ const SmartStrategyStudio: React.FC = () => {
             {/* 核心卡片容器 - 严格对齐回测中心 */}
             <Content
               style={{
-                padding: '24px',
+                padding: 0,
                 overflowY: 'auto',
                 position: 'relative',
                 flex: 1
@@ -413,9 +416,10 @@ const SmartStrategyStudio: React.FC = () => {
                   transition={{ duration: 0.2 }}
                   className="bg-white overflow-hidden"
                   style={{
+                    margin: '12px 24px 24px 24px',
                     padding: 24,
                     borderRadius: '32px',
-                    minHeight: 'calc(100% - 20px)',
+                    minHeight: 'calc(100% - 36px)',
                     display: 'flex',
                     flexDirection: 'column'
                   }}

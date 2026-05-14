@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { Terminal, RefreshCw, Filter, AlertCircle } from 'lucide-react';
-import { realTradingService } from '../../../services/realTradingService';
+// 按需加载 realTradingService
 
 interface TradingLogsProps {
     tenantId: string;
@@ -17,6 +17,7 @@ const TradingLogs: React.FC<TradingLogsProps> = ({ tenantId, userId, isActive })
     const fetchLogs = async () => {
         setLoading(true);
         try {
+            const { realTradingService } = await import('../../../services/realTradingService');
             const data = await realTradingService.getLogs(userId, 200, tenantId);
             setLogs(data.logs);
         } catch (e) {

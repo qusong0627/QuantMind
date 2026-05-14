@@ -3,7 +3,7 @@ import { Play, Square, CheckCircle, Activity, Cpu, FileText, RefreshCw, AlertCir
 import { Input, Select, message } from 'antd';
 import { strategyManagementService } from '../../../services/strategyManagementService';
 import { modelTrainingService, UserModelRecord, LatestInferenceRunInfo } from '../../../services/modelTrainingService';
-import { realTradingService, RealTradingStatus, PreflightCheckItem } from '../../../services/realTradingService';
+import type { RealTradingStatus, PreflightCheckItem } from '../../../services/realTradingService';
 import { websocketService, WebSocketStatus } from '../../../services/websocketService';
 import { StrategyFile } from '../../../types/backtest/strategy';
 
@@ -126,6 +126,11 @@ const resolveSignalSourcePresentation = (
                 message: signalSource?.message || '默认模型状态已获取',
             };
     }
+};
+
+const loadRealTradingService = async () => {
+    const module = await import('../../../services/realTradingService');
+    return module.realTradingService;
 };
 
 const renderSignalSourceMessage = (message: string) => {
@@ -380,6 +385,7 @@ const StrategyManagement: React.FC<StrategyManagementProps> = ({
 
         const loadMonitor = async () => {
             try {
+                const realTradingService = await loadRealTradingService();
                 const [
                     preflightResult,
                     tradingPrecheckResult,
@@ -659,6 +665,7 @@ const StrategyManagement: React.FC<StrategyManagementProps> = ({
     const loadHostedLogs = useCallback(async (taskId: string, reset = false) => {
         if (!taskId) return;
         try {
+            const realTradingService = await loadRealTradingService();
             const result = await realTradingService.getManualExecutionLogs(
                 taskId,
                 reset ? '0-0' : hostedCursorRef.current,

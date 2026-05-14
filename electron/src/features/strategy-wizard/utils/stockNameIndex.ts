@@ -9,7 +9,7 @@ type StockIndexPayload = {
   items?: StockIndexEntry[];
 };
 
-const STOCK_INDEX_URL = new URL('../../../../../data/stocks/stocks_index.json', import.meta.url).href;
+const STOCK_INDEX_URL = '/data/stocks/stocks_index.json';
 
 let stockNameMapPromise: Promise<Map<string, string>> | null = null;
 

@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { GeneticParamForm, GeneticConfig } from './GeneticParamForm';
-import { backtestService } from '../../services/backtestService';
+// backtestService will be loaded dynamically to avoid mixed static/dynamic import warnings
 import { AlertCircle, TrendingUp, Activity, BarChart2 } from 'lucide-react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 import { authService } from '../../features/auth/services/authService';
@@ -120,6 +120,7 @@ export const GeneticOptimizationPanel: React.FC = () => {
             };
 
             // 调用API
+            const { backtestService } = await import('../../services/backtestService');
             const response = await backtestService.optimizeQlibParameters(
                 {
                     optimization_id: optimizationRequest.optimization_id,
@@ -221,12 +222,13 @@ export const GeneticOptimizationPanel: React.FC = () => {
         isAbortedRef.current = true;
         const taskId = currentTaskId;
         if (taskId) {
-            try {
-                await backtestService.stopTask(taskId);
-                addLog(`已发送停止信号: ${taskId}`, 'warning');
-            } catch (error) {
-                console.warn('停止遗传优化任务失败', error);
-            }
+                try {
+                    const { backtestService } = await import('../../services/backtestService');
+                    await backtestService.stopTask(taskId);
+                    addLog(`已发送停止信号: ${taskId}`, 'warning');
+                } catch (error) {
+                    console.warn('停止遗传优化任务失败', error);
+                }
         }
         if (abortControllerRef.current) {
             abortControllerRef.current.abort();

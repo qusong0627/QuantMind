@@ -10,7 +10,7 @@
 
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { strategyService, Strategy, StrategyStatus, ApiResponse, StrategyActionResponse } from '../services/strategyService';
-import { realTradingService, RealTradingStatus } from '../services/realTradingService';
+import type { RealTradingStatus } from '../services/realTradingService';
 import { shouldUpdateByFingerprint } from '../utils/dataChange';
 import { refreshOrchestrator } from '../services/refreshOrchestrator';
 import {
@@ -104,6 +104,7 @@ export const useStrategies = (options: UseStrategiesOptions = {}): UseStrategies
 
             let rtStatus: RealTradingStatus | null = null;
             try {
+                const { realTradingService } = await import('../services/realTradingService');
                 rtStatus = await realTradingService.getStatus('');
             } catch {
                 return list;

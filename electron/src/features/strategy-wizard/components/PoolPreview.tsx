@@ -332,7 +332,7 @@ export const PoolPreview = React.forwardRef<PoolPreviewHandle, { onNext: () => v
   };
 
   return (
-    <div style={{ padding: 12 }}>
+    <div style={{ padding: 0 }}>
       <Row gutter={24}>
         <Col span={16}>
           <Card
@@ -400,7 +400,7 @@ export const PoolPreview = React.forwardRef<PoolPreviewHandle, { onNext: () => v
           </Card>
         </Col>
         <Col span={8}>
-          <Space orientation="vertical" style={{ width: '100%' }} size="large">
+          <Space direction="vertical" style={{ width: '100%' }} size="large">
             <Card variant="borderless" title="统计概览">
               {dataSource.length === 0 ? (
                 <Alert type="info" showIcon title="尚未生成股票池，请返回上一步完成解析。" />

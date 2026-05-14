@@ -39,12 +39,13 @@ class DeepseekLLM:
     - DEEPSEEK_MODEL
     """
 
-    def __init__(self) -> None:
+    def __init__(self, api_key: str | None = None) -> None:
         from ..ai_strategy_config import get_config as _gc
 
         ai_strategy_config = _gc()
 
-        api_key = os.getenv("DEEPSEEK_API_KEY")
+        # 优先使用传入的 api_key，否则从环境变量读取
+        api_key = api_key or os.getenv("DEEPSEEK_API_KEY")
         if not api_key:
             raise RuntimeError("DEEPSEEK_API_KEY not set in environment")
 

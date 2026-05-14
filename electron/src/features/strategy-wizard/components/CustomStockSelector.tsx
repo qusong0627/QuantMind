@@ -5,7 +5,7 @@ import { StockPoolLibrary } from './StockPoolLibrary';
 
 export const CustomStockSelector: React.FC = () => {
   return (
-    <div style={{ height: 'calc(100vh - 280px)', padding: '0 8px', marginBottom: 20 }}>
+    <div style={{ height: '100%', padding: '0', marginBottom: 20 }}>
       <Row gutter={20} style={{ height: '100%' }}>
         {/* 左侧：资产库 (更紧凑) */}
         <Col span={6} style={{ height: '100%' }}>

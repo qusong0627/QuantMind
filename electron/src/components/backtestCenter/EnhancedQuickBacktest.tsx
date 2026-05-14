@@ -29,7 +29,7 @@ import {
 } from 'lucide-react';
 import ReactECharts from 'echarts-for-react';
 import { useBacktestCenterStore } from '../../stores/backtestCenterStore';
-import { backtestService } from '../../services/backtestService';
+// backtestService will be loaded dynamically where needed
 import { useWebSocket } from '../../utils/websocket';
 import { strategyTemplates, getTemplateById } from '../../constants/strategyTemplates';
 import { blendBacktestProgress, getBacktestStageMessage } from '../backtest/progressUtils';
@@ -75,6 +75,7 @@ export const EnhancedQuickBacktest: React.FC = () => {
   }, [tailTradeEnabled]);
 
   const backtestId = useRef<string>('');
+  const backtestWsBaseRef = useRef<string>('');
 
   // 初始加载
   useEffect(() => {
@@ -160,8 +161,8 @@ export const EnhancedQuickBacktest: React.FC = () => {
   // 获取 WebSocket 地址逻辑优化
   const getFullWsUrl = () => {
     if (!backtestId.current) return '';
-    // 从 backtestService 获取基准 WS 地址
-    const baseWs = (backtestService as any).wsUrl || '';
+    // 从已缓存的 backtestService baseUrl 获取基准 WS 地址
+    const baseWs = backtestWsBaseRef.current || '';
     // 确保 path 正确：如果是云端 wss://www.quantmindai.cn/ws，则拼接 /backtest/{id}
     // 如果是开发环境已包含 /api/v1，则继续拼接
     const separator = baseWs.endsWith('/') ? '' : '/';
@@ -240,6 +241,8 @@ export const EnhancedQuickBacktest: React.FC = () => {
     setProgressMessage('准备中...');
     startSimulatedProgress();
     try {
+      const { backtestService } = await import('../../services/backtestService');
+      backtestWsBaseRef.current = (backtestService as any).wsUrl || '';
       const response = await backtestService.runBacktest({
         ...backtestConfig,
         symbol: backtestConfig.symbol || '',
@@ -280,6 +283,7 @@ export const EnhancedQuickBacktest: React.FC = () => {
 
   const handleLoadResult = async (id: string) => {
     try {
+      const { backtestService } = await import('../../services/backtestService');
       const data = await backtestService.getResult(id);
       setResult(data);
       setProgress(100);

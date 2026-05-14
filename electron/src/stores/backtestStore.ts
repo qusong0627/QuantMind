@@ -10,7 +10,7 @@
 
 import { create } from 'zustand';
 import { devtools, persist } from 'zustand/middleware';
-import { backtestService, BacktestConfig, BacktestResult, HistoryFilter } from '../services/backtestService';
+import type { BacktestConfig, BacktestResult, HistoryFilter } from '../services/backtestService';
 import { Strategy } from '../state/atoms';
 
 // ============================================================================
@@ -201,6 +201,7 @@ export const useBacktestStore = create<BacktestState>()(
             };
 
             // 提交回测
+            const { backtestService } = await import('../services/backtestService');
             const result = await backtestService.runBacktest(backtestConfig);
 
             console.log('✅ 回测任务已提交:', result.backtest_id);
@@ -237,6 +238,7 @@ export const useBacktestStore = create<BacktestState>()(
           console.log('📊 加载回测结果:', backtestId);
 
           try {
+            const { backtestService } = await import('../services/backtestService');
             const result = await backtestService.getResult(backtestId);
             set({ currentBacktest: result });
           } catch (error: any) {
@@ -257,6 +259,7 @@ export const useBacktestStore = create<BacktestState>()(
 
           try {
             const { historyFilter } = get();
+            const { backtestService } = await import('../services/backtestService');
             const history = await backtestService.getHistory(userId, historyFilter);
 
             set({
@@ -321,7 +324,10 @@ export const useBacktestStore = create<BacktestState>()(
           try {
             await Promise.all(
               selectedBacktestIds.map((id) =>
-                backtestService.deleteBacktest(id, config.user_id || 'default')
+                (async () => {
+                  const { backtestService } = await import('../services/backtestService');
+                  return backtestService.deleteBacktest(id, config.user_id || 'default');
+                })()
               )
             );
 
@@ -344,6 +350,7 @@ export const useBacktestStore = create<BacktestState>()(
           console.log('🗑️  删除回测:', backtestId);
 
           try {
+            const { backtestService } = await import('../services/backtestService');
             await backtestService.deleteBacktest(backtestId, config.user_id || 'default');
 
             // 从历史中移除
@@ -367,6 +374,7 @@ export const useBacktestStore = create<BacktestState>()(
           // 先断开旧连接
           get().disconnectProgress();
 
+          const { backtestService } = await import('../services/backtestService');
           const ws = backtestService.connectProgress(backtestId, {
             onProgress: (progress, message) => {
               set({

@@ -16,7 +16,7 @@ import {
 } from 'lucide-react';
 import { BacktestHistory, resolveStrategyName } from '../backtest/BacktestHistory';
 import { useBacktestCenterStore } from '../../stores/backtestCenterStore';
-import { BacktestResult } from '../../services/backtestService';
+import type { BacktestResult } from '../../services/backtestService';
 import { authService } from '../../features/auth/services/authService';
 import { normalizeUserId } from '../../features/strategy-wizard/utils/userId';
 

@@ -31,7 +31,7 @@ import {
   Table,
 } from 'lucide-react';
 import { useBacktestHistory, useDeleteBacktest, useBatchDeleteBacktests, useExportCSV, useExportJSON } from '../../hooks/useBacktestQueries';
-import { BacktestResult, HistoryFilter } from '../../services/backtestService';
+import type { BacktestResult, HistoryFilter } from '../../services/backtestService';
 import { format } from 'date-fns';
 import { zhCN } from 'date-fns/locale';
 

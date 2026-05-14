@@ -28,7 +28,7 @@ import {
   X,
 } from 'lucide-react';
 import { useOptimizeParameters, useOptimizationResult } from '../../hooks/useBacktestQueries';
-import { OptimizationConfig, OptimizationResult } from '../../services/backtestService';
+import type { OptimizationConfig, OptimizationResult } from '../../services/backtestService';
 import { Strategy } from '../../state/atoms';
 
 interface ParameterOptimizationProps {

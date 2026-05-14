@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { portfolioService, ChartDataPoint, PositionDistribution } from '../services/portfolioService';
 import { tradingService } from '../services/tradingService';
-import { realTradingService } from '../services/realTradingService';
+// 按需加载 realTradingService，避免静态/动态导入冲突并减小首包
 import { modelTrainingService } from '../services/modelTrainingService';
 import { useWebSocket } from '../contexts/WebSocketContext';
 import { shouldUpdateByFingerprint, calcFingerprint } from '../utils/dataChange';
@@ -397,6 +397,7 @@ export const useIntelligenceCharts = (userId: string = 'current', options?: { au
 
         try {
             // 根据模式动态选择接口
+            const { realTradingService } = await import('../services/realTradingService');
             const [dailyReturn, tradeCount, positionRatio, account, ledgerDaily] = await Promise.all([
                 portfolioService.getDailyReturns(resolvedUserId, '1m', mode),
                 tradingService.getTradeStats(resolvedUserId, '1w', mode),

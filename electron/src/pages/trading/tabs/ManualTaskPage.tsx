@@ -20,13 +20,12 @@ import {
     extractModelType, 
 } from '../../modelRegistryUtils';
 import { normalizeStockCode } from '../../../utils/portfolioUtils';
-import {
-    realTradingService,
-    type ManualExecutionLogEntry,
-    type ManualExecutionLogSnapshot,
-    type ManualExecutionPreview,
-    type ManualExecutionPreviewOrder,
-    type ManualExecutionTaskRecord,
+import type {
+    ManualExecutionLogEntry,
+    ManualExecutionLogSnapshot,
+    ManualExecutionPreview,
+    ManualExecutionPreviewOrder,
+    ManualExecutionTaskRecord,
 } from '../../../services/realTradingService';
 import type { StrategyFile } from '../../../types/backtest/strategy';
 
@@ -39,6 +38,11 @@ interface ManualTaskPageProps {
 
 const STEP_TITLES = ['选择模型', '选择推理批次', '选择策略', '生成调仓预案', '确认提交'];
 const TERMINAL_STATUSES = new Set(['completed', 'failed']);
+
+const loadRealTradingService = async () => {
+    const module = await import('../../../services/realTradingService');
+    return module.realTradingService;
+};
 
 /** 解析训练窗口范围字符串 (格式: "2020-01-01 -> 2020-12-31 | ...") */
 const parseTrainingWindowRanges = (raw: unknown): Array<[string, string]> => {
@@ -320,6 +324,7 @@ const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack }) 
     const refreshTask = useCallback(async (taskId: string) => {
         if (!taskId) return null;
         try {
+            const realTradingService = await loadRealTradingService();
             const task = await realTradingService.getManualExecution(taskId);
             setSelectedTask(task);
             return task;
@@ -332,6 +337,7 @@ const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack }) 
     const loadTaskLogs = useCallback(async (taskId: string, afterId = '0-0', reset = false) => {
         if (!taskId) return;
         try {
+            const realTradingService = await loadRealTradingService();
             const result = await realTradingService.getManualExecutionLogs(taskId, afterId, 200);
             setSnapshot(result.snapshot || null);
             cursorRef.current = result.next_id || afterId;
@@ -436,6 +442,7 @@ const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack }) 
         }
         setPreviewLoading(true);
         try {
+            const realTradingService = await loadRealTradingService();
             const result = await realTradingService.previewManualExecution({
                 model_id: effectiveModelId,
                 run_id: selectedRunId,
@@ -461,6 +468,7 @@ const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack }) 
         }
         setSubmitting(true);
         try {
+            const realTradingService = await loadRealTradingService();
             const result = await realTradingService.createManualExecution({
                 model_id: effectiveModelId,
                 run_id: selectedRunId,

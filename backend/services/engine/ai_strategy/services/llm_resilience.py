@@ -37,6 +37,7 @@ class ResilientLLMRouter:
         self._provider_factories = provider_factories or self._build_default_factories()
         self._providers: dict[str, Any] = {}
         self._providers_lock = threading.Lock()
+        self._user_api_keys: dict[str, str] = {}  # user_id -> api_key cache
 
         self.max_retries = max_retries if max_retries is not None else int(os.getenv("LLM_PROVIDER_MAX_RETRIES", "2"))
         self.retry_base_seconds = (
@@ -91,8 +92,12 @@ class ResilientLLMRouter:
                 uniq.append(name)
         return uniq
 
-    def _get_provider(self, name: str) -> Any:
+    def _get_provider(self, name: str, api_key: str | None = None) -> Any:
         with self._providers_lock:
+            # 如果有 api_key，创建带 api_key 的 provider 实例
+            if api_key:
+                return self._provider_factories[name](api_key=api_key)
+            # 否则使用默认实例（从环境变量读取）
             if name not in self._providers:
                 self._providers[name] = self._provider_factories[name]()
             return self._providers[name]
@@ -126,7 +131,7 @@ class ResilientLLMRouter:
                 state.opened_until = time.time() + self.circuit_open_seconds
 
     def generate_code(
-        self, prompt: str, preferred: str | None = None, mode: str = "simple"
+        self, prompt: str, preferred: str | None = None, mode: str = "simple", api_key: str | None = None
     ) -> tuple[str, dict[str, Any]]:
         self._acquire_rate_limit()
         providers = self._provider_order(preferred)
@@ -144,7 +149,7 @@ class ResilientLLMRouter:
                     continue
 
                 try:
-                    provider = self._get_provider(provider_name)
+                    provider = self._get_provider(provider_name, api_key=api_key)
                 except Exception as e:  # noqa: BLE001
                     self._record_failure(provider_name)
                     reasons.append(f"{provider_name}: init_failed={e}")

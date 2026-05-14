@@ -91,29 +91,6 @@ export const preloadAiIdeResources = async () => {
 
   aiIdePreloadPromise = (async () => {
     try {
-      // Prism 语言包依赖全局 Prism；必须先加载 core 并挂到全局，避免 "Prism is not defined"。
-      const prismCore = await import('prismjs');
-      const prismInstance = (prismCore as any).default || prismCore;
-      if (typeof globalThis !== 'undefined' && !(globalThis as any).Prism) {
-        (globalThis as any).Prism = prismInstance;
-      }
-      if (typeof window !== 'undefined' && !(window as any).Prism) {
-        try {
-          (window as any).Prism = prismInstance;
-        } catch {
-          // window.Prism 可能已被设为只读，跳过
-        }
-      }
-
-      await Promise.all([
-        import('../../../pages/AIIDEPage'),
-        import('@monaco-editor/react'),
-        import('@monaco-editor/loader').then((mod) => mod.default.init()).catch(() => undefined),
-        import('prismjs/components/prism-python'),
-        import('prismjs/components/prism-bash'),
-        import('prismjs/components/prism-json'),
-      ]);
-
       warmMonacoStaticAssets();
 
       // 非阻塞预热：仅在 Electron 环境下调用

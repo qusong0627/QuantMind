@@ -6,14 +6,13 @@
 import React from 'react';
 import { Routes, Route, Navigate } from 'react-router-dom';
 import {
-  LoginPage,
-  RegisterPage,
-  ForgotPasswordPage,
-  ResetPasswordPage,
-  MFAVerificationPage,
-  MFASetupPage,
-  PageLoading
-} from './components';
+  LazyLoginPage,
+  LazyRegisterPage,
+  LazyForgotPasswordPage,
+  LazyResetPasswordPage,
+} from './utils/lazyLoad';
+import MFAVerificationPage from './components/MFAVerificationPage';
+import MFASetupPage from './components/MFASetupPage';
 
 const AppRoutes: React.FC = () => {
   console.log('AppRoutes: 组件渲染，当前路径:', window.location.pathname);
@@ -21,10 +20,10 @@ const AppRoutes: React.FC = () => {
   return (
     <Routes>
       {/* 公开认证路由 */}
-      <Route path="login" element={<LoginPage />} />
-      <Route path="register" element={<RegisterPage />} />
-      <Route path="forgot-password" element={<ForgotPasswordPage />} />
-      <Route path="reset-password" element={<ResetPasswordPage />} />
+      <Route path="login" element={<LazyLoginPage />} />
+      <Route path="register" element={<LazyRegisterPage />} />
+      <Route path="forgot-password" element={<LazyForgotPasswordPage />} />
+      <Route path="reset-password" element={<LazyResetPasswordPage />} />
       <Route path="mfa/verify" element={<MFAVerificationPage />} />
       <Route path="mfa/setup" element={<MFASetupPage />} />
 
