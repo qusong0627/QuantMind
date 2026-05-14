@@ -304,43 +304,62 @@ async def sync_official_data_update(
 ):
     _ = current_user
 
-    # OSS 部署模式：在 Docker 容器内执行同步脚本
-    # 脚本路径在容器内为 /app/scripts/data/maintenance/run_daily_pg_parquet_and_qlib_sync.sh
-    script_path = "/app/scripts/data/maintenance/run_daily_pg_parquet_and_qlib_sync.sh"
+    # OSS 部署模式：直接在当前容器内执行 Python 同步脚本
+    # 脚本路径在容器内为 /app/scripts/data/maintenance/
+    scripts_dir = Path("/app/scripts/data/maintenance")
 
-    # 使用 docker exec 在 quantmind 容器内执行
-    cmd = ["docker", "exec", "quantmind", "bash", script_path]
+    # 按顺序执行同步步骤
+    steps = [
+        ("Step 1: 同步 stock_daily_latest", "sync_stock_daily_latest_from_parquet.py"),
+        ("Step 2: 同步 qlib_data", "sync_qlib_from_fundamental_parquet.py"),
+    ]
 
-    try:
-        # 给同步任务更长的超时时间（30分钟）
-        proc = subprocess.run(
-            cmd,
-            cwd=os.getcwd(),
-            capture_output=True,
-            text=True,
-            timeout=1800,
-            check=False,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise HTTPException(
-            status_code=504,
-            detail=f"全量同步任务执行超时（30分钟）: {exc}",
-        ) from exc
-    except Exception as exc:
-        raise HTTPException(
-            status_code=500,
-            detail=f"执行同步脚本失败: {exc}",
-        ) from exc
+    results = []
+    for step_name, script_name in steps:
+        script_path = scripts_dir / script_name
+        if not script_path.exists():
+            results.append({
+                "step": step_name,
+                "success": False,
+                "error": f"脚本不存在: {script_path}",
+            })
+            continue
 
-    result: dict[str, Any] = {
-        "success": proc.returncode == 0,
-        "exit_code": proc.returncode,
-        "stdout": proc.stdout[-12000:] if proc.stdout else "",
-        "stderr": proc.stderr[-12000:] if proc.stderr else "",
+        cmd = ["python", str(script_path)]
+        try:
+            proc = subprocess.run(
+                cmd,
+                cwd="/app",
+                capture_output=True,
+                text=True,
+                timeout=1800,
+                check=False,
+            )
+            results.append({
+                "step": step_name,
+                "success": proc.returncode == 0,
+                "exit_code": proc.returncode,
+                "stdout": proc.stdout[-2000:] if proc.stdout else "",
+                "stderr": proc.stderr[-2000:] if proc.stderr else "",
+            })
+        except subprocess.TimeoutExpired as exc:
+            results.append({
+                "step": step_name,
+                "success": False,
+                "error": f"执行超时: {exc}",
+            })
+        except Exception as exc:
+            results.append({
+                "step": step_name,
+                "success": False,
+                "error": str(exc),
+            })
+
+    all_success = all(r.get("success", False) for r in results)
+    return {
+        "success": all_success,
+        "steps": results,
     }
-    if proc.returncode != 0:
-        result["error"] = "日常全量同步任务执行失败，请检查 stderr 日志。"
-    return result
 
 
 @router.get("/precheck-inference", summary="生成明日信号前置检查")
