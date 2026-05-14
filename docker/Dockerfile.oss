@@ -22,11 +22,11 @@ WORKDIR /app
 # 配置 APT 镜像源
 RUN set -eux; \
     if [ -f /etc/apt/sources.list.d/debian.sources ]; then \
-      sed -i 's/deb.debian.org/${APT_MIRROR}/g' /etc/apt/sources.list.d/debian.sources; \
-      sed -i 's/security.debian.org/${APT_MIRROR}/g' /etc/apt/sources.list.d/debian.sources; \
+      sed -i "s/deb.debian.org/${APT_MIRROR}/g" /etc/apt/sources.list.d/debian.sources; \
+      sed -i "s/security.debian.org/${APT_MIRROR}/g" /etc/apt/sources.list.d/debian.sources; \
     else \
-      sed -i 's/deb.debian.org/${APT_MIRROR}/g' /etc/apt/sources.list; \
-      sed -i 's/security.debian.org/${APT_MIRROR}/g' /etc/apt/sources.list; \
+      sed -i "s/deb.debian.org/${APT_MIRROR}/g" /etc/apt/sources.list; \
+      sed -i "s/security.debian.org/${APT_MIRROR}/g" /etc/apt/sources.list; \
     fi
 
 # 安装系统依赖
