@@ -981,7 +981,9 @@ export const realTradingService = {
         }
     },
 
-    analyzeHoldingImages: async (formData: FormData): Promise<{ success: boolean; message?: string; data?: any[] }> => {
+    analyzeHoldingImages: async (
+        formData: FormData
+    ): Promise<{ success: boolean; message?: string; data?: any[]; available_cash?: number }> => {
         const token = authService.getAccessToken();
         const response = await axios.post(`${SERVICE_URLS.API_GATEWAY}/simulation/sync/ocr`, formData, {
             headers: {
@@ -993,9 +995,13 @@ export const realTradingService = {
         return response.data;
     },
 
-    syncSimulationHoldings: async (holdings: any[]): Promise<boolean> => {
+    syncSimulationHoldings: async (holdings: any[], availableCash?: number): Promise<boolean> => {
         const token = authService.getAccessToken();
-        const response = await axios.post(`${SERVICE_URLS.API_GATEWAY}/simulation/sync/confirm`, { holdings }, {
+        const payload: Record<string, any> = { holdings };
+        if (typeof availableCash === 'number' && Number.isFinite(availableCash)) {
+            payload.available_cash = availableCash;
+        }
+        const response = await axios.post(`${SERVICE_URLS.API_GATEWAY}/simulation/sync/confirm`, payload, {
             headers: token ? new AxiosHeaders({ Authorization: `Bearer ${token}` }) : undefined,
             timeout: 30000,
         });

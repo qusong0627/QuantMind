@@ -14,7 +14,7 @@ export const ContextAwareAssistant: React.FC<{ step: number }> = ({ step }) => {
     switch (step) {
       case 0: // 选股条件
         return (
-          <Space orientation="vertical" style={{ width: '100%' }}>
+          <Space direction="vertical" style={{ width: '100%' }}>
             <div className="bg-gradient-to-br from-blue-100/60 via-blue-50/30 to-white p-3 rounded-xl border border-blue-200/60 mb-2">
               <Space align="start" size={8}>
                 <BulbOutlined className="text-blue-500 mt-1 text-sm" />
@@ -28,7 +28,7 @@ export const ContextAwareAssistant: React.FC<{ step: number }> = ({ step }) => {
 
       case 1: // 股票池
         return (
-          <Space orientation="vertical" style={{ width: '100%' }}>
+          <Space direction="vertical" style={{ width: '100%' }}>
             <div style={{ background: '#f6ffed', padding: 12, borderRadius: 6, border: '1px solid #b7eb8f' }}>
               <Space align="start">
                 <InfoCircleOutlined style={{ color: '#52c41a', marginTop: 4 }} />
@@ -44,9 +44,9 @@ export const ContextAwareAssistant: React.FC<{ step: number }> = ({ step }) => {
       case 2: // 交易规则
         const isTopkDropout = (qlibParams?.strategy_type ?? 'TopkDropout') === 'TopkDropout';
         return (
-          <Space orientation="vertical" style={{ width: '100%' }}>
+          <Space direction="vertical" style={{ width: '100%' }}>
             <Card size="small" title="Qlib 参数提示" variant="borderless" styles={{ body: { padding: 12 } }}>
-              <Space orientation="vertical" size={8} style={{ width: '100%' }}>
+              <Space direction="vertical" size={8} style={{ width: '100%' }}>
                 {(isTopkDropout
                   ? [
                     { title: 'TopK / n_drop', desc: '建议先用 TopK=20~50、n_drop=3~10 作为稳定起点。' },

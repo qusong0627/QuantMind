@@ -185,6 +185,24 @@ async def _generate_qlib_impl(body: GenerateQlibRequest, trace_id: str | None) -
             }
             return {k: v for k, v in (d or {}).items() if k not in drop and v is not None}
 
+        def _dedupe_condition_tree(node: Any) -> Any:
+            if not isinstance(node, dict):
+                return node
+            out = dict(node)
+            children = out.get("children")
+            if isinstance(children, list):
+                normalized = [_dedupe_condition_tree(ch) for ch in children]
+                deduped: list[Any] = []
+                seen: set[str] = set()
+                for ch in normalized:
+                    key = json.dumps(ch, ensure_ascii=False, sort_keys=True)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    deduped.append(ch)
+                out["children"] = deduped
+            return out
+
         def _persist_local_pool_file(pool_text: str, user_id: str) -> str:
             """保存股票池到本地文件"""
             content = str(pool_text or "")
@@ -265,14 +283,13 @@ async def _generate_qlib_impl(body: GenerateQlibRequest, trace_id: str | None) -
         user_api_key = None
         if body.user_id:
             try:
-                db = get_db()
-                with db.connect() as conn:
-                    row = conn.execute(
+                with get_db() as db:
+                    row = db.execute(
                         text("SELECT api_key FROM user_profiles WHERE user_id = :uid"),
-                        {"uid": body.user_id}
+                        {"uid": body.user_id},
                     ).fetchone()
                     if row and row[0]:
-                        user_api_key = row[0]
+                        user_api_key = str(row[0]).strip()
                         logger.info("Loaded user API key from database for user_id=%s", body.user_id)
             except Exception as e:
                 logger.warning("Failed to load user API key from database: %s", e)
@@ -378,6 +395,12 @@ async def _generate_qlib_impl(body: GenerateQlibRequest, trace_id: str | None) -
                     }}
                     """
                 ).strip()
+
+            # 兜底：强制使用前端传入的选股条件，避免 LLM 生成重复/漂移条件
+            if body.conditions:
+                normalized_conditions = _dedupe_condition_tree(body.conditions)
+                cond_json = json.dumps(normalized_conditions, ensure_ascii=False, separators=(",", ":"))
+                code += f"\nSTRATEGY_CONFIG['kwargs']['selection_condition']={cond_json}\n"
             ok, err = _syntax_check(code)
             if not ok:
                 for _ in range(2):

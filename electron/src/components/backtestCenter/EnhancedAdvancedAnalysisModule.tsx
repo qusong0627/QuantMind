@@ -104,10 +104,14 @@ export const EnhancedAdvancedAnalysisModule: React.FC = () => {
         page: 1,
         page_size: 20,
       });
+      const rawList = Array.isArray(list) ? list : [];
+      const analysisReadyList = rawList.filter((item: any) => item?.analysis_ready !== false);
 
-      setBacktestList(Array.isArray(list) ? list : []);
-      if (Array.isArray(list) && list.length > 0) {
-        setBacktestId(backtestId || list[0].backtest_id);
+      setBacktestList(analysisReadyList);
+      if (analysisReadyList.length > 0) {
+        setBacktestId(backtestId || analysisReadyList[0].backtest_id);
+      } else {
+        setBacktestId('');
       }
     } catch (error) {
       console.error('Failed to load backtest list:', error);

@@ -490,7 +490,7 @@ export const AttributionAnalysisPanel: React.FC<{
       const link = document.createElement('a');
       const url = URL.createObjectURL(blob);
       link.setAttribute('href', url);
-      link.setAttribute('download', `attribution_${model.name}_${dayjs().format('YYYYMMDD')}.csv`);
+      link.setAttribute('download', `attribution_${modelDisplayName(model)}_${dayjs().format('YYYYMMDD')}.csv`);
       link.style.visibility = 'hidden';
       document.body.appendChild(link);
       link.click();

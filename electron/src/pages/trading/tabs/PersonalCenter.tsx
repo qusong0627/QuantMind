@@ -50,6 +50,7 @@ const PersonalCenter: React.FC<PersonalCenterProps> = ({ tenantId, userId, statu
     const [ocrLoading, setOcrLoading] = useState(false);
     const [ocrFiles, setOcrFiles] = useState<File[]>([]);
     const [ocrResults, setOcrResults] = useState<any[]>([]);
+    const [ocrAvailableCash, setOcrAvailableCash] = useState<number | undefined>(undefined);
     const [isSyncingHoldings, setIsSyncingHoldings] = useState(false);
     const [snapshotNotice, setSnapshotNotice] = useState<string | null>(null);
     const snapshotNoticeTimerRef = useRef<number | null>(null);
@@ -208,6 +209,7 @@ const PersonalCenter: React.FC<PersonalCenterProps> = ({ tenantId, userId, statu
             const res = await realTradingService.analyzeHoldingImages(formData);
             if (res.success) {
                 setOcrResults(res.data || []);
+                setOcrAvailableCash(typeof (res as any).available_cash === 'number' ? (res as any).available_cash : undefined);
                 message.success(`识别成功，发现 ${res.data?.length || 0} 只股票`);
             } else {
                 message.error(res.message || '识别失败');
@@ -225,12 +227,13 @@ const PersonalCenter: React.FC<PersonalCenterProps> = ({ tenantId, userId, statu
         setIsSyncingHoldings(true);
         try {
             const { realTradingService } = await import('../../../services/realTradingService');
-            const success = await realTradingService.syncSimulationHoldings(ocrResults);
+            const success = await realTradingService.syncSimulationHoldings(ocrResults, ocrAvailableCash);
             if (success) {
                 message.success('持仓同步成功，模拟账户已更新');
                 setOcrModalOpen(false);
                 setOcrFiles([]);
                 setOcrResults([]);
+                setOcrAvailableCash(undefined);
                 loadAccountSettings();
                 window.dispatchEvent(new CustomEvent('refresh-account-data'));
             }

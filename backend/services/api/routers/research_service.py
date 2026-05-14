@@ -90,7 +90,7 @@ _SDL_SELECT_BY_RUN_DATE = """
     COALESCE(sdl_run.macd_hist, 0) AS macd_hist,
     COALESCE(sdl_run.volume_ratio_5, 0) AS volume_ratio_5,
     COALESCE(sdl_run.volume_ratio_20, 0) AS volume_ratio_20,
-    COALESCE(sdl_run.volume_trend_3d, 0) AS volume_trend_3d,
+    COALESCE(sdl_run.volume_trend_3d, sdl_run.volume_trend_3d_calc) AS volume_trend_3d,
     COALESCE(sdl_run.main_flow, 0) AS main_flow,
     COALESCE(sdl_run.flow_net_amount, 0) AS flow_net_amount,
     COALESCE(sdl_run.inst_ownership, 0) AS inst_ownership,
@@ -275,6 +275,10 @@ def _format_candidate_record(row: dict[str, Any]) -> dict[str, Any]:
     return_1d_pct = return_1d * 100 if return_1d is not None else None
     return_3d_pct = return_3d * 100 if return_3d is not None else None
 
+    snapshot_turnover_rate = _serialize_float(row.get("snapshot_turnover_rate"))
+    live_turnover_rate = _serialize_float(row.get("turnover_rate") or 0.0) or 0.0
+    resolved_turnover_rate = snapshot_turnover_rate if snapshot_turnover_rate is not None else live_turnover_rate
+
     return {
         "key": f"{run_id}:{symbol}",
         "modelId": row.get("model_id"),
@@ -287,7 +291,7 @@ def _format_candidate_record(row: dict[str, Any]) -> dict[str, Any]:
         "consecutiveLimitUpDays": _serialize_int(row.get("consecutive_limit_up_days"))
         or _serialize_int(row.get("consecutive_limit_up_days_sdl"))
         or 0,
-        "turnoverRate": _serialize_float(row.get("turnover_rate") or 0.0) or 0.0,
+        "turnoverRate": resolved_turnover_rate,
         "amount": round(to_yi(row.get("amount")), 4),
         "marketCap": round(to_yi(row.get("total_mv")), 2),
         "totalMv": round(to_yi(row.get("total_mv")), 2),
@@ -313,7 +317,7 @@ def _format_candidate_record(row: dict[str, Any]) -> dict[str, Any]:
         "macdHist": _serialize_float(row.get("macd_hist")) or 0.0,
         "volRatio5": _serialize_float(row.get("volume_ratio_5")) or 0.0,
         "volRatio20": _serialize_float(row.get("volume_ratio_20")) or 0.0,
-        "volumeTrend3d": _serialize_float(row.get("volume_trend_3d")) or 0.0,
+        "volumeTrend3d": _serialize_float(row.get("volume_trend_3d")),
         "volumeTrend5d": False,
         "return1d": return_1d_pct,
         "return3d": return_3d_pct,
@@ -474,6 +478,12 @@ async def _do_get_overview(
                 sdl.volume_ratio_5,
                 sdl.volume_ratio_20,
                 sdl.volume_trend_3d,
+                CASE
+                    WHEN LAG(sdl.volume, 3) OVER (PARTITION BY sdl.symbol ORDER BY sdl.trade_date) > 0
+                    THEN (sdl.volume::double precision - LAG(sdl.volume, 3) OVER (PARTITION BY sdl.symbol ORDER BY sdl.trade_date)::double precision)
+                         / LAG(sdl.volume, 3) OVER (PARTITION BY sdl.symbol ORDER BY sdl.trade_date)::double precision
+                    ELSE NULL
+                END AS volume_trend_3d_calc,
                 sdl.main_flow,
                 sdl.flow_net_amount,
                 sdl.inst_ownership,
@@ -494,7 +504,7 @@ async def _do_get_overview(
             INNER JOIN snap_symbols ss ON ss.symbol = sdl.symbol
             CROSS JOIN snap_date_bounds b
             WHERE sdl.volume > 0
-              AND sdl.trade_date >= b.min_trade_date
+              AND sdl.trade_date >= (b.min_trade_date - INTERVAL '10 day')
               AND sdl.trade_date <= (b.max_trade_date + INTERVAL '20 day')
         )
         SELECT snap.*, {_SDL_SELECT_BY_RUN_DATE}
@@ -757,7 +767,8 @@ async def get_symbols_features(tid: str, uid: str, symbols: list[str], lite: boo
                     COALESCE(stock_name, '') AS stock_name,
                     COALESCE(close, 0) AS close_price,
                     COALESCE(pe_ttm, 0) AS pe,
-                    COALESCE(total_mv, 0) AS total_mv
+                    COALESCE(total_mv, 0) AS total_mv,
+                    COALESCE(turnover_rate, 0) AS turnover_rate
                 FROM stock_daily_latest
                 WHERE trade_date = (SELECT trade_date FROM latest_trade)
                   AND volume > 0
@@ -768,7 +779,8 @@ async def get_symbols_features(tid: str, uid: str, symbols: list[str], lite: boo
                 sdl.stock_name,
                 sdl.close_price,
                 sdl.pe,
-                sdl.total_mv
+                sdl.total_mv,
+                sdl.turnover_rate
             FROM sym_list
             LEFT JOIN sdl ON sdl.symbol = {_norm_symbol_sql("sym_list.raw_symbol")}
         """
@@ -795,6 +807,7 @@ async def get_symbols_features(tid: str, uid: str, symbols: list[str], lite: boo
                    COALESCE(s.run_id, 'history') as run_id,
                    s.prediction_trade_date,
                    COALESCE(s.fusion_score, (ps.features_snapshot->>'score')::double precision, (ws.features_snapshot->>'score')::double precision) as fusion_score,
+                   COALESCE((ps.features_snapshot->>'turnoverRate')::double precision, (ws.features_snapshot->>'turnoverRate')::double precision) as snapshot_turnover_rate,
                    COALESCE(s.risk_flags, (ps.features_snapshot->'riskFlags')::jsonb, (ws.features_snapshot->'riskFlags')::jsonb) as risk_flags,
                    COALESCE(s.thesis_summary, (ps.features_snapshot->>'thesis')::text, (ws.features_snapshot->>'thesis')::text) as thesis_summary,
                    ROW_NUMBER() OVER(PARTITION BY sym_list.raw_symbol ORDER BY s.prediction_trade_date DESC NULLS LAST) as rn

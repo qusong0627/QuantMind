@@ -153,6 +153,87 @@ def auto_inference_if_needed() -> dict[str, Any]:
 
     # 2. 扫描活跃策略 + 用户自动推理设置
     try:
+        # 调度留痕表（自动任务可观测性）
+        db.execute(
+            sa_text(
+                """
+                CREATE TABLE IF NOT EXISTS qm_model_inference_dispatch_logs (
+                  id BIGSERIAL PRIMARY KEY,
+                  trigger_source TEXT NOT NULL,
+                  tenant_id TEXT NOT NULL,
+                  user_id TEXT NOT NULL,
+                  strategy_id TEXT,
+                  model_id TEXT,
+                  data_trade_date DATE,
+                  prediction_trade_date DATE,
+                  status TEXT NOT NULL,
+                  reason_code TEXT,
+                  reason_detail TEXT,
+                  run_id TEXT,
+                  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+                """
+            )
+        )
+        db.execute(
+            sa_text(
+                """
+                CREATE INDEX IF NOT EXISTS idx_qm_inf_dispatch_owner_created
+                  ON qm_model_inference_dispatch_logs (tenant_id, user_id, created_at DESC);
+                """
+            )
+        )
+        db.execute(
+            sa_text(
+                """
+                CREATE INDEX IF NOT EXISTS idx_qm_inf_dispatch_status_created
+                  ON qm_model_inference_dispatch_logs (status, created_at DESC);
+                """
+            )
+        )
+        db.commit()
+
+        def _write_dispatch_log(
+            *,
+            tenant_id: str,
+            user_id: str,
+            strategy_id: str | None,
+            model_id: str | None,
+            status: str,
+            reason_code: str | None = None,
+            reason_detail: str | None = None,
+            run_id: str | None = None,
+        ) -> None:
+            db.execute(
+                sa_text(
+                    """
+                    INSERT INTO qm_model_inference_dispatch_logs (
+                      trigger_source, tenant_id, user_id, strategy_id, model_id,
+                      data_trade_date, prediction_trade_date,
+                      status, reason_code, reason_detail, run_id, created_at
+                    ) VALUES (
+                      :trigger_source, :tenant_id, :user_id, :strategy_id, :model_id,
+                      :data_trade_date, :prediction_trade_date,
+                      :status, :reason_code, :reason_detail, :run_id, NOW()
+                    )
+                    """
+                ),
+                {
+                    "trigger_source": "celery_auto_inference_if_needed",
+                    "tenant_id": str(tenant_id or "default"),
+                    "user_id": str(user_id or ""),
+                    "strategy_id": strategy_id,
+                    "model_id": model_id,
+                    "data_trade_date": data_trade_date,
+                    "prediction_trade_date": prediction_trade_date,
+                    "status": status,
+                    "reason_code": reason_code,
+                    "reason_detail": reason_detail,
+                    "run_id": run_id,
+                },
+            )
+            db.commit()
+
         # 查询所有活跃且绑定了策略的组合
         active_portfolios = db.execute(
             sa_text(
@@ -252,6 +333,15 @@ def auto_inference_if_needed() -> dict[str, Any]:
             ).first()
 
             if exists:
+                _write_dispatch_log(
+                    tenant_id=tid,
+                    user_id=uid,
+                    strategy_id=sid,
+                    model_id=mid,
+                    status="skipped",
+                    reason_code="ALREADY_DONE",
+                    reason_detail="engine_feature_runs already has signal_ready record for target trade date",
+                )
                 continue
 
             # 尝试获取锁
@@ -260,6 +350,15 @@ def auto_inference_if_needed() -> dict[str, Any]:
                 lock_scope, prediction_trade_date, "celery_auto"
             ):
                 logger.info("[AutoInference] 任务锁冲突，跳过: tid=%s uid=%s", tid, uid)
+                _write_dispatch_log(
+                    tenant_id=tid,
+                    user_id=uid,
+                    strategy_id=sid,
+                    model_id=mid,
+                    status="skipped",
+                    reason_code="LOCK_HELD",
+                    reason_detail=f"lock scope conflict: {lock_scope}",
+                )
                 continue
 
             try:
@@ -286,6 +385,28 @@ def auto_inference_if_needed() -> dict[str, Any]:
                         "run_id": exec_res.run_id,
                     }
                 )
+                _write_dispatch_log(
+                    tenant_id=tid,
+                    user_id=uid,
+                    strategy_id=sid,
+                    model_id=mid,
+                    status="success" if exec_res.success else "failed",
+                    reason_code=None if exec_res.success else "EXECUTION_FAILED",
+                    reason_detail=None if exec_res.success else str(getattr(exec_res, "message", "") or ""),
+                    run_id=getattr(exec_res, "run_id", None),
+                )
+            except Exception as task_exc:
+                _write_dispatch_log(
+                    tenant_id=tid,
+                    user_id=uid,
+                    strategy_id=sid,
+                    model_id=mid,
+                    status="failed",
+                    reason_code="EXCEPTION",
+                    reason_detail=str(task_exc),
+                    run_id=None,
+                )
+                raise
             finally:
                 # 释放锁
                 try:

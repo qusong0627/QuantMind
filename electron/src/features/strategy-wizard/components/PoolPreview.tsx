@@ -403,7 +403,7 @@ export const PoolPreview = React.forwardRef<PoolPreviewHandle, { onNext: () => v
           <Space direction="vertical" style={{ width: '100%' }} size="large">
             <Card variant="borderless" title="统计概览">
               {dataSource.length === 0 ? (
-                <Alert type="info" showIcon title="尚未生成股票池，请返回上一步完成解析。" />
+                <Alert type="info" showIcon message="尚未生成股票池，请返回上一步完成解析。" />
               ) : (
                 <Row gutter={16}>
                   <Col span={12}>
@@ -411,7 +411,7 @@ export const PoolPreview = React.forwardRef<PoolPreviewHandle, { onNext: () => v
                       title="选出股票"
                       value={selectedSymbols?.length || 0}
                       suffix="只"
-                      styles={{ content: { fontSize: 20, fontWeight: 600, color: '#1e293b' } }}
+                      valueStyle={{ fontSize: 20, fontWeight: 600, color: '#1e293b' }}
                     />
                   </Col>
                   <Col span={12}>
@@ -420,7 +420,7 @@ export const PoolPreview = React.forwardRef<PoolPreviewHandle, { onNext: () => v
                       value={((selectedSymbols?.length || 0) / 6017) * 100}
                       suffix="%"
                       precision={2}
-                      styles={{ content: { fontSize: 20, fontWeight: 600, color: '#1e293b' } }}
+                      valueStyle={{ fontSize: 20, fontWeight: 600, color: '#1e293b' }}
                     />
                   </Col>
                 </Row>
@@ -504,7 +504,7 @@ export const PoolPreview = React.forwardRef<PoolPreviewHandle, { onNext: () => v
               render: (_: any, row: any) => (
                 <Space>
                   <span>{row.name || '未命名股票池'}</span>
-                  {historySelectedKey === (row.id || row.file_key) && <Tag variant="filled" color="blue">当前使用</Tag>}
+                  {historySelectedKey === (row.id || row.file_key) && <Tag color="blue">当前使用</Tag>}
                 </Space>
               ),
             },

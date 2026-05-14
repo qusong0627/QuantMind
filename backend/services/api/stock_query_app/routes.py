@@ -102,7 +102,7 @@ async def get_stock_info(symbol: str):
             "Stock info retrieved successfully",
             extra={
                 "symbol": symbol,
-                "name": stock_info.get("name", ""),
+                "stock_name": stock_info.get("name", ""),
                 "price": stock_info.get("price", 0),
             },
         )

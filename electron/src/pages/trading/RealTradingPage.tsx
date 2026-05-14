@@ -11,7 +11,6 @@ import PositionMonitor from './tabs/PositionMonitor';
 import TradingHistory from './tabs/TradingHistory';
 import SettingsCenter from './tabs/SettingsCenter';
 import type { RealTradingStatus, AccountInfo, PreflightCheckResponse, PreflightCheckItem } from '../../services/realTradingService';
-import { strategyManagementService } from '../../services/strategyManagementService';
 import { authService } from '../../features/auth/services/authService';
 import type { StrategyFile } from '../../types/backtest/strategy';
 import { useAppDispatch, useAppSelector } from '../../store';
@@ -248,6 +247,7 @@ const RealTradingPage: React.FC = () => {
 
             // 10万并发架构核心：激活策略至 Redis 匹配池
             try {
+                const { strategyManagementService } = await import('../../services/strategyManagementService');
                 await strategyManagementService.activateStrategy(strategyId);
                 console.info('Strategy configuration activated in Redis pool');
             } catch (actErr: unknown) {
@@ -434,11 +434,13 @@ const RealTradingPage: React.FC = () => {
         }
         try {
             const currentStrategyId = status?.strategy?.id;
+            const { realTradingService } = await import('../../services/realTradingService');
             await realTradingService.stop(userId, tenantId);
 
             // 10万并发架构核心：从 Redis 匹配池移除策略
             if (currentStrategyId) {
                 try {
+                    const { strategyManagementService } = await import('../../services/strategyManagementService');
                     await strategyManagementService.deactivateStrategy(currentStrategyId);
                 } catch (deactErr) {
                     console.warn('Strategy deactivation in Redis failed:', deactErr);
@@ -450,6 +452,7 @@ const RealTradingPage: React.FC = () => {
             setEffectiveLiveTradeConfig(null);
             fetchData();
         } catch (err: unknown) {
+            const { realTradingService } = await import('../../services/realTradingService');
             const errorMsg = realTradingService.getFriendlyError(err);
             // 如果是404或策略未运行，给出更友好的提示
             if (errorMsg.includes('404') || errorMsg.includes('未运行') || errorMsg.includes('not running')) {

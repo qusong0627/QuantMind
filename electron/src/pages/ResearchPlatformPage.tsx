@@ -1298,7 +1298,10 @@ export const ResearchPlatformPage: React.FC = () => {
         width: 92,
         align: 'center',
         render: (value: number | null | undefined) => {
-          const trend = Number(value || 0);
+          if (value === null || value === undefined || Number.isNaN(Number(value))) {
+            return <span className="text-slate-300 font-medium">-</span>;
+          }
+          const trend = Number(value);
           if (trend > 0) {
             return <Tag color="orange" className="rounded-lg border-none font-bold">递增</Tag>;
           }

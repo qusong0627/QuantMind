@@ -19,6 +19,7 @@ from typing import List, Optional
 from sqlalchemy import or_
 
 from backend.shared.cache import CacheManager
+from backend.shared.stock_utils import StockCodeUtil
 
 from .models import (
     MarketType,
@@ -42,17 +43,32 @@ logger = logging.getLogger(__name__)
 @lru_cache(maxsize=1)
 def _load_stock_index_items() -> list[dict]:
     """Load stock index json once for fallback name lookup."""
-    path = os.getenv("STOCK_INDEX_JSON_PATH", "data/stocks/stocks_index.json")
-    abs_path = os.path.abspath(path)
-    if not os.path.exists(abs_path):
-        return []
-    try:
-        with open(abs_path, encoding="utf-8") as f:
-            payload = json.load(f)
-        items = payload.get("items")
-        return items if isinstance(items, list) else []
-    except Exception:
-        return []
+    candidates = []
+    env_path = str(os.getenv("STOCK_INDEX_JSON_PATH", "")).strip()
+    if env_path:
+        candidates.append(env_path)
+    candidates.extend(
+        [
+            "data/stocks/stocks_index.json",
+            "/app/data/stocks/stocks_index.json",
+            "/data/stocks/stocks_index.json",
+        ]
+    )
+
+    for path in candidates:
+        abs_path = os.path.abspath(path)
+        if not os.path.exists(abs_path):
+            continue
+        try:
+            with open(abs_path, encoding="utf-8") as f:
+                payload = json.load(f)
+            items = payload.get("items")
+            if isinstance(items, list):
+                logger.info("Loaded stock index from %s, items=%s", abs_path, len(items))
+                return items
+        except Exception:
+            continue
+    return []
 
 
 def _lookup_stock_from_index(code: str) -> dict | None:
@@ -60,13 +76,23 @@ def _lookup_stock_from_index(code: str) -> dict | None:
     if not text:
         return None
 
-    pure = text.split(".", 1)[0]
+    prefix = StockCodeUtil.to_prefix(text)
+    suffix = StockCodeUtil.to_suffix(prefix)
+    pure = suffix.split(".", 1)[0] if "." in suffix else text.split(".", 1)[0]
+    candidates = {text, prefix, suffix, pure}
+
     for item in _load_stock_index_items():
         if not isinstance(item, dict):
             continue
         symbol = str(item.get("symbol") or "").strip().upper()
         item_code = str(item.get("code") or "").strip().upper()
-        if symbol == text or item_code == pure:
+        item_exchange = str(item.get("exchange") or "").strip().upper()
+        item_prefix = StockCodeUtil.to_prefix(symbol or f"{item_exchange}{item_code}")
+        item_suffix = StockCodeUtil.to_suffix(item_prefix)
+        item_pure = item_suffix.split(".", 1)[0] if "." in item_suffix else item_code
+        item_candidates = {symbol, item_code, item_prefix, item_suffix, item_pure}
+
+        if candidates & item_candidates:
             exchange = str(item.get("exchange") or "").strip().upper()
             formatted = symbol or (f"{exchange}{item_code}" if item_code and exchange else item_code)
             return {

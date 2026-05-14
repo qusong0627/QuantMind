@@ -183,7 +183,22 @@ const StratifiedReturnsChart: React.FC<{ data: any[] }> = ({ data }) => {
 const BacktestTradesSection: React.FC<{ backtestId: string }> = ({ backtestId }) => {
   const [data, setData] = useState<{ trades: any[], positions: any[] } | null>(null);
   const [loading, setLoading] = useState(true);
-  React.useEffect(() => { if (backtestId) backtestService.getTrades(backtestId).then(setData).catch(console.error).finally(() => setLoading(false)); }, [backtestId]);
+  React.useEffect(() => {
+    const fetchTrades = async () => {
+      if (backtestId) {
+        try {
+          const { backtestService } = await import('../services/backtestService');
+          const res = await backtestService.getTrades(backtestId);
+          setData(res);
+        } catch (err) {
+          console.error(err);
+        } finally {
+          setLoading(false);
+        }
+      }
+    };
+    fetchTrades();
+  }, [backtestId]);
   if (loading) return <div className="py-20 text-center text-gray-400">正在获取流水数据...</div>;
   if (!data || data.trades.length === 0) return <div className="py-20 text-center text-gray-400">暂无成交记录</div>;
   return (
