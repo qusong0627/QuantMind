@@ -512,6 +512,25 @@ class COSUploader:
                 with open(file_path, encoding="utf-8") as f:
                     return f.read()
 
+            if object_key and self.is_local_mode:
+                # local 模式下兼容读取 object_key，避免上层仅传 key 时读取失败
+                parts = [p for p in object_key.strip("/").split("/") if p]
+                candidate_paths: list[Path] = []
+                if len(parts) >= 4 and parts[0] == "user_pools":
+                    # user_pools/{user_id}/{timestamp}/stock_pool.txt -> {root}/user_{user_id}/{timestamp}/stock_pool.txt
+                    candidate_paths.append(self.local_storage_path / f"user_{parts[1]}" / parts[2] / parts[3])
+                elif len(parts) >= 4 and parts[0] == "user_strategies":
+                    # user_strategies/{user_id}/{strategy_id}/strategy.py -> {root}/user_{user_id}/{strategy_id}.py
+                    candidate_paths.append(self.local_storage_path / f"user_{parts[1]}" / f"{parts[2]}.py")
+
+                # 兜底：尝试直接拼接 key 路径
+                candidate_paths.append(self.local_storage_path / object_key.strip("/"))
+
+                for p in candidate_paths:
+                    if p.exists():
+                        with open(p, encoding="utf-8") as f:
+                            return f.read()
+
             if object_key and not self.is_local_mode:
 
                 def _read_from_cos_sync() -> str:

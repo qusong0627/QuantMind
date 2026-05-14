@@ -200,7 +200,8 @@ async def preview_pool_file(body: PreviewPoolFileRequest):
                 return PreviewPoolFileResponse(success=False, error="股票池不存在或无权限访问")
 
             uploader = get_cos_uploader()
-            content = await uploader.read_object(object_key=rec.file_key)
+            # 兼容 local/cos 双模式：local 优先使用 file_url，cos 使用 file_key
+            content = await uploader.read_object(url=rec.file_url, object_key=rec.file_key)
 
             instruments: list[str] = []
             seen = set()
