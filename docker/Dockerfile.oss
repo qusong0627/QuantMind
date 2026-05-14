@@ -3,9 +3,10 @@
 
 FROM python:3.10-slim-bookworm
 
-# pip 镜像源参数（构建时可传入）
+# 镜像源参数（构建时可传入）
 ARG PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
 ARG PIP_TRUSTED_HOST=mirrors.aliyun.com
+ARG APT_MIRROR=mirrors.aliyun.com
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -21,11 +22,11 @@ WORKDIR /app
 # 配置 APT 镜像源
 RUN set -eux; \
     if [ -f /etc/apt/sources.list.d/debian.sources ]; then \
-      sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list.d/debian.sources; \
-      sed -i 's/security.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list.d/debian.sources; \
+      sed -i 's/deb.debian.org/${APT_MIRROR}/g' /etc/apt/sources.list.d/debian.sources; \
+      sed -i 's/security.debian.org/${APT_MIRROR}/g' /etc/apt/sources.list.d/debian.sources; \
     else \
-      sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list; \
-      sed -i 's/security.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list; \
+      sed -i 's/deb.debian.org/${APT_MIRROR}/g' /etc/apt/sources.list; \
+      sed -i 's/security.debian.org/${APT_MIRROR}/g' /etc/apt/sources.list; \
     fi
 
 # 安装系统依赖

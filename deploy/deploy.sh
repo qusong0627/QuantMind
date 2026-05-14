@@ -4,8 +4,8 @@
 # 适用于 Ubuntu 22.04/24.04
 #
 # 特性:
-#   - 国内镜像加速 (Docker, npm, pip)
-#   - 支持 pip 镜像源选择（阿里云/腾讯云）
+#   - 国内镜像加速 (Docker, npm, pip, apt)
+#   - 支持镜像源选择（阿里云/腾讯云，pip 和 apt 统一）
 #   - 支持断点续传
 #   - 自动健康检查
 #
@@ -20,8 +20,8 @@
 #   sudo ./deploy.sh --force-sync       # 强制同步代码（覆盖本地修改）
 #
 # 环境变量:
-#   QUANTMIND_PIP_MIRROR  # 指定 pip 镜像源（跳过交互选择）
-#                         # 例如: QUANTMIND_PIP_MIRROR=https://mirrors.aliyun.com/pypi/simple/
+#   QUANTMIND_MIRROR     # 指定镜像源（跳过交互选择）
+#                         # 可选值: aliyun, tencent
 #
 # 注意:
 #   前端已集成到桌面客户端，部署完成后请下载客户端配置服务器地址使用
@@ -71,10 +71,10 @@ NPM_MIRRORS=(
     "https://mirrors.cloud.tencent.com/npm"
 )
 
-# pip 镜像源配置（用户选择）
-PIP_MIRROR_ALIYUN="https://mirrors.aliyun.com/pypi/simple/"
-PIP_MIRROR_TENCENT="https://mirrors.cloud.tencent.com/pypi/simple/"
-PIP_MIRROR_URL="${QUANTMIND_PIP_MIRROR:-}"
+# 镜像源配置（用户选择，pip 和 apt 统一）
+MIRROR_ALIYUN="aliyun"
+MIRROR_TENCENT="tencent"
+MIRROR_CHOICE="${QUANTMIND_MIRROR:-}"
 
 # 解析参数
 BACKEND_ONLY=false
@@ -667,13 +667,31 @@ step8_build_docker() {
     cd "$PROJECT_DIR"
 
     log_info "构建 QuantMind OSS 镜像 (5-10分钟)..."
-    log_info "使用 pip 镜像源: $PIP_MIRROR_URL"
+    log_info "使用镜像源: $MIRROR_CHOICE (pip 和 apt 统一)"
+
+    # 根据选择设置具体的镜像地址
+    local pip_index_url
+    local pip_trusted_host
+    local apt_mirror
+
+    case "$MIRROR_CHOICE" in
+        tencent)
+            pip_index_url="https://mirrors.cloud.tencent.com/pypi/simple/"
+            pip_trusted_host="mirrors.cloud.tencent.com"
+            apt_mirror="mirrors.cloud.tencent.com"
+            ;;
+        aliyun|*)
+            pip_index_url="https://mirrors.aliyun.com/pypi/simple/"
+            pip_trusted_host="mirrors.aliyun.com"
+            apt_mirror="mirrors.aliyun.com"
+            ;;
+    esac
 
     # 预选可用镜像源（只配置一次，避免反复重启 Docker）
     local build_mirror
     build_mirror=$(select_docker_mirror)
     if [[ -n "$build_mirror" ]]; then
-        log_info "使用镜像源: $(_mask_mirror "$build_mirror")"
+        log_info "使用 Docker 镜像源: $(_mask_mirror "$build_mirror")"
         configure_docker_mirror "$build_mirror"
         # 等待 Docker daemon 完全就绪
         log_info "等待 Docker daemon 就绪..."
@@ -690,15 +708,12 @@ step8_build_docker() {
         fi
     fi
 
-    # 提取 trusted host
-    local pip_trusted_host
-    pip_trusted_host=$(echo "$PIP_MIRROR_URL" | sed -E 's|https?://([^/]+).*|\1|')
-
     local build_success=false
     if docker build \
         -t quantmind-oss:latest \
-        --build-arg PIP_INDEX_URL="$PIP_MIRROR_URL" \
+        --build-arg PIP_INDEX_URL="$pip_index_url" \
         --build-arg PIP_TRUSTED_HOST="$pip_trusted_host" \
+        --build-arg APT_MIRROR="$apt_mirror" \
         -f docker/Dockerfile.oss . 2>&1; then
         build_success=true
     fi
@@ -717,9 +732,13 @@ step8_build_docker() {
 
         if docker build \
             -t quantmind-oss:latest \
-            --build-arg PIP_INDEX_URL="$PIP_MIRROR_URL" \
+            --build-arg PIP_INDEX_URL="$pip_index_url" \
             --build-arg PIP_TRUSTED_HOST="$pip_trusted_host" \
+            --build-arg APT_MIRROR="$apt_mirror" \
             -f docker/Dockerfile.oss . 2>&1; then
+            build_success=true
+        fi
+    fi
             build_success=true
         fi
     fi
@@ -1165,30 +1184,30 @@ show_welcome() {
     echo ""
 }
 
-# 选择 pip 镜像源
-select_pip_mirror() {
+# 选择镜像源（pip 和 apt 统一）
+select_mirror() {
     # 如果已通过环境变量设置，直接使用
-    if [[ -n "$PIP_MIRROR_URL" ]]; then
-        log_info "使用环境变量指定的 pip 镜像源: $PIP_MIRROR_URL"
+    if [[ -n "$MIRROR_CHOICE" ]]; then
+        log_info "使用环境变量指定的镜像源: $MIRROR_CHOICE"
         return 0
     fi
 
     # 自动确认模式，默认使用阿里云
     if $AUTO_YES; then
-        PIP_MIRROR_URL="$PIP_MIRROR_ALIYUN"
-        log_info "自动模式，使用阿里云 pip 镜像源"
+        MIRROR_CHOICE="$MIRROR_ALIYUN"
+        log_info "自动模式，使用阿里云镜像源"
         return 0
     fi
 
     # 检查是否为交互式终端
     if [[ ! -t 0 ]]; then
-        log_warn "非交互式终端，使用默认阿里云 pip 镜像源"
-        PIP_MIRROR_URL="$PIP_MIRROR_ALIYUN"
+        log_warn "非交互式终端，使用默认阿里云镜像源"
+        MIRROR_CHOICE="$MIRROR_ALIYUN"
         return 0
     fi
 
     echo ""
-    echo -e "${YELLOW}请选择 pip 镜像源（用于 Docker 镜像构建）:${NC}"
+    echo -e "${YELLOW}请选择镜像源（用于 Docker 镜像构建，pip 和 apt 统一）:${NC}"
     echo "  1) 阿里云镜像源 (推荐)"
     echo "  2) 腾讯云镜像源"
     echo ""
@@ -1196,16 +1215,16 @@ select_pip_mirror() {
     read -r choice
     case "${choice:-1}" in
         1)
-            PIP_MIRROR_URL="$PIP_MIRROR_ALIYUN"
-            log_info "已选择阿里云 pip 镜像源"
+            MIRROR_CHOICE="$MIRROR_ALIYUN"
+            log_info "已选择阿里云镜像源"
             ;;
         2)
-            PIP_MIRROR_URL="$PIP_MIRROR_TENCENT"
-            log_info "已选择腾讯云 pip 镜像源"
+            MIRROR_CHOICE="$MIRROR_TENCENT"
+            log_info "已选择腾讯云镜像源"
             ;;
         *)
-            log_warn "无效选择，使用默认阿里云 pip 镜像源"
-            PIP_MIRROR_URL="$PIP_MIRROR_ALIYUN"
+            log_warn "无效选择，使用默认阿里云镜像源"
+            MIRROR_CHOICE="$MIRROR_ALIYUN"
             ;;
     esac
 }
@@ -1248,8 +1267,8 @@ main() {
     check_root
     check_system
 
-    # 选择 pip 镜像源（在系统更新前）
-    select_pip_mirror
+    # 选择镜像源（在系统更新前，pip 和 apt 统一）
+    select_mirror
 
     # 确保脚本有执行权限
     ensure_execute_permission "$0"
