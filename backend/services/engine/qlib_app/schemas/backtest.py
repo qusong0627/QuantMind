@@ -186,6 +186,7 @@ class QlibBacktestResult(BaseModel):
     config: dict[str, Any] | None = None
     task_id: str | None = None
     model_name: str | None = None  # 模型名称
+    analysis_ready: bool | None = None
 
     annual_return: float | None = 0.0
     sharpe_ratio: float | None = 0.0

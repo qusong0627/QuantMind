@@ -377,6 +377,13 @@ class BacktestPersistence:
                         b.result_json->>'benchmark_symbol'         AS benchmark_symbol,
                         (b.result_json->>'benchmark_return')::float AS benchmark_return,
                         b.result_json->>'error_message'            AS error_message,
+                        b.result_file_path                          AS result_file_path,
+                        CASE
+                            WHEN jsonb_typeof(b.result_json->'equity_curve') = 'array'
+                                 AND jsonb_array_length(b.result_json->'equity_curve') > 1
+                            THEN true
+                            ELSE false
+                        END                                         AS has_summary_equity,
                         b.config_json,
                         COALESCE(
                             NULLIF(m.metadata_json->>'display_name', ''),
@@ -421,6 +428,13 @@ class BacktestPersistence:
                 error_message=row["error_message"],
                 config=row["config_json"] if isinstance(row["config_json"], dict) else None,
                 model_name=row.get("model_name"),
+                analysis_ready=(
+                    str(row["status"] or "").lower() == "completed"
+                    and (
+                        bool(row.get("has_summary_equity"))
+                        or (bool(row.get("result_file_path")) and Path(str(row.get("result_file_path"))).exists())
+                    )
+                ),
             )
             results.append(obj)
         return results

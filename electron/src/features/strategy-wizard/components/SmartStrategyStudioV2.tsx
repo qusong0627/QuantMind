@@ -116,7 +116,7 @@ const SmartStrategyStudioV2: React.FC = () => {
     fetchSavedPools();
   }, [fetchWorkingPool, fetchSavedPools]);
 
-  const prev = useCallback(() => setCurrentStep(prevStep => Math.max(prevStep - 1, 0)), []);
+  const prev = useCallback(() => setCurrentStep(Math.max(currentStep - 1, 0)), [currentStep]);
 
   const next = useCallback(async () => {
     if (currentStep === 0) {
@@ -165,7 +165,7 @@ const SmartStrategyStudioV2: React.FC = () => {
       }
     }
     
-    setCurrentStep(prev => Math.min(prev + 1, 3));
+    setCurrentStep(Math.min(currentStep + 1, 3));
   }, [currentStep, activePoolVersionId, conditions, qlibParams, setGenerated]);
 
   const steps = useMemo(() => [
@@ -229,7 +229,7 @@ const SmartStrategyStudioV2: React.FC = () => {
         }
         open={generating}
         closable={false}
-        mask={{ closable: false }}
+        maskClosable={false}
         footer={null}
         centered
         styles={{
@@ -461,7 +461,7 @@ const SmartStrategyStudioV2: React.FC = () => {
               borderTop: '1px solid #e2e8f0',
               zIndex: 10
             }}>
-              <Space separator={<div className="inline-block h-4 w-px bg-gray-300 mx-2" />}>
+              <Space split={<div className="inline-block h-4 w-px bg-gray-300 mx-2" />}>
                 <div className="flex items-center gap-2">
                   <div className={`w-2 h-2 rounded-full ${generated?.code ? 'bg-green-500' : 'bg-amber-500 animate-pulse'}`} />
                   <Text type="secondary" className="text-xs">状态: {generated?.code ? '已生成' : '草稿'}</Text>

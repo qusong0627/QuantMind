@@ -53,7 +53,7 @@ export interface ResearchStockRow {
   nextDayReturn?: number | null;
   day3Return?: number | null;
   consecutiveLimitUpDays: number;
-  volumeTrend3d: number;
+  volumeTrend3d: number | null;
   volumeTrend5d: boolean;
   turnoverRate: number;
   amount: number;

@@ -368,7 +368,7 @@ export const useBacktestStore = create<BacktestState>()(
         },
 
         // ========== WebSocket 管理 ==========
-        connectProgress: (backtestId) => {
+        connectProgress: async (backtestId) => {
           console.log('🔗 建立 WebSocket 连接:', backtestId);
 
           // 先断开旧连接

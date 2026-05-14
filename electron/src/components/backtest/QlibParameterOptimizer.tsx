@@ -384,6 +384,7 @@ export const QlibParameterOptimizer: React.FC = () => {
               onClick={async () => {
                   if (taskId) {
                       try {
+                          const { backtestService } = await import('../../services/backtestService');
                           await backtestService.stopTask(taskId);
                           appendLog('正在停止任务...');
                       } catch (e: any) {

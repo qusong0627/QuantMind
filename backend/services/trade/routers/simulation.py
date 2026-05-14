@@ -20,10 +20,61 @@ from backend.shared.stock_utils import StockCodeUtil
 import logging
 import httpx
 from sqlalchemy import text
+import pandas as pd
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+FUNDAMENTAL_PARQUET_PATH = "/app/db/custom/fundamental_aligned.parquet"
+_PARQUET_LATEST_PRICE_MAP: dict[str, float] | None = None
+
+
+def _load_latest_price_map_from_parquet() -> dict[str, float]:
+    global _PARQUET_LATEST_PRICE_MAP
+    if _PARQUET_LATEST_PRICE_MAP is not None:
+        return _PARQUET_LATEST_PRICE_MAP
+
+    try:
+        df = pd.read_parquet(
+            FUNDAMENTAL_PARQUET_PATH,
+            columns=["trade_date", "symbol", "close", "adj_factor"],
+        )
+        if df.empty:
+            _PARQUET_LATEST_PRICE_MAP = {}
+            return _PARQUET_LATEST_PRICE_MAP
+
+        latest_trade_date = df["trade_date"].max()
+        latest_df = df[df["trade_date"] == latest_trade_date].copy()
+        latest_df = latest_df.dropna(subset=["symbol", "close"])
+
+        _PARQUET_LATEST_PRICE_MAP = {
+            str(row["symbol"]): float(row["close"])
+            for _, row in latest_df.iterrows()
+        }
+        logger.info(
+            "Loaded OCR price map from parquet: %s symbols, latest_trade_date=%s",
+            len(_PARQUET_LATEST_PRICE_MAP),
+            latest_trade_date,
+        )
+    except Exception as e:
+        logger.error(f"Failed to load price map from parquet: {e}", exc_info=True)
+        _PARQUET_LATEST_PRICE_MAP = {}
+
+    return _PARQUET_LATEST_PRICE_MAP
+
+
+async def _get_latest_close_from_sdl(symbol: str) -> float:
+    """
+    从 fundamental_aligned.parquet 最新交易日读取未复权现价。
+    """
+    try:
+        price_map = _load_latest_price_map_from_parquet()
+        return float(price_map.get(symbol) or 0.0)
+    except Exception as e:
+        logger.error(f"Failed to fetch parquet price for {symbol}: {e}")
+
+    return 0.0
 
 
 async def _get_latest_price(symbol: str) -> float:
@@ -47,26 +98,9 @@ async def _get_latest_price(symbol: str) -> float:
 
     # Level 2: 数据库兜底
     if price <= 0:
-        try:
-            db_manager = get_db_manager()
-            # 数据库 stock_daily_latest 使用 Prefix 格式 (SH600191)
-            query = text("""
-                SELECT close, adj_factor FROM stock_daily_latest 
-                WHERE symbol = :symbol 
-                ORDER BY trade_date DESC LIMIT 1
-            """)
-            
-            async with db_manager.get_master_session() as session:
-                result = await session.execute(query, {"symbol": symbol})
-                row = result.fetchone()
-                if row:
-                    hfq_close = float(row[0])
-                    adj_factor = float(row[1] or 1.0)
-                    # 计算名义价格 (除权价)
-                    price = hfq_close / adj_factor if adj_factor > 0 else hfq_close
-                    logger.info(f"Fallback to DB nominal price for {symbol}: {price} (Hfq: {hfq_close}, Adj: {adj_factor})")
-        except Exception as e:
-            logger.error(f"Database fallback failed for {symbol}: {e}")
+        price = await _get_latest_close_from_sdl(symbol)
+        if price > 0:
+            logger.info(f"Fallback to SDL close for {symbol}: {price}")
             
     return price
 
@@ -100,6 +134,33 @@ async def _resolve_symbol_by_name(name: str) -> Optional[str]:
     return None
 
 
+async def _resolve_user_api_key(user_id: str) -> Optional[str]:
+    """从 user_profiles 读取用户级 API Key，兼容常见 user_id 形态。"""
+    uid = str(user_id or "").strip()
+    if not uid:
+        return None
+
+    candidates = [uid]
+    if uid.isdigit():
+        candidates.extend([uid.zfill(8), str(int(uid))])
+
+    try:
+        db_manager = get_db_manager()
+        query = text("SELECT api_key FROM user_profiles WHERE user_id = :uid LIMIT 1")
+        async with db_manager.get_master_session() as session:
+            for cand in candidates:
+                row = await session.execute(query, {"uid": cand})
+                found = row.fetchone()
+                if found and found[0]:
+                    key = str(found[0]).strip()
+                    if key:
+                        return key
+    except Exception as e:
+        logger.warning(f"Failed to resolve user API key for OCR, user_id={uid}: {e}")
+
+    return None
+
+
 DEFAULT_INITIAL_CASH = 1_000_000.0
 SIM_AMOUNT_STEP = 100_000
 COOLDOWN_DAYS = 30
@@ -113,6 +174,7 @@ class HoldingItem(BaseModel):
     symbol: str
     quantity: float
     name: Optional[str] = None
+    current_price: Optional[float] = None
 
 
 class SyncHoldingsRequest(BaseModel):
@@ -312,17 +374,18 @@ async def ocr_sync_holdings(
     auth: AuthContext = Depends(get_auth_context),
     redis: RedisClient = Depends(get_redis),
 ):
-    ocr_service = SimulationOCRService()
+    user_api_key = await _resolve_user_api_key(str(auth.user_id))
+    ocr_service = SimulationOCRService(api_key=user_api_key)
     image_data = []
     for img in images:
         content = await img.read()
         image_data.append(content)
         
     ocr_result = await ocr_service.analyze_images(image_data)
-    recognized_items = ocr_result.get("holdings", [])
-    available_cash = ocr_result.get("available_cash")
+    recognized_items = ocr_result if isinstance(ocr_result, list) else (ocr_result.get("holdings", []) if isinstance(ocr_result, dict) else [])
+    available_cash = ocr_result.get("available_cash") if isinstance(ocr_result, dict) else None
     
-    # 4. 后处理：纠偏代码 & 获取实时行情
+    # 4. 后处理：纠偏代码 & 统一价格口径（OCR 识别价优先，后端仅兜底）
     results = []
     
     for item in recognized_items:
@@ -336,7 +399,15 @@ async def ocr_sync_holdings(
             logger.warning(f"Skipping holding {name}: Symbol could not be resolved.")
             continue
             
-        current_price = await _get_latest_price(symbol)
+        raw_price = item.get("current_price")
+        try:
+            current_price = float(raw_price or 0)
+        except (TypeError, ValueError):
+            current_price = 0.0
+
+        # OCR 未识别到有效价格时，才用后端价格源兜底
+        if current_price <= 0:
+            current_price = await _get_latest_close_from_sdl(symbol)
             
         results.append({
             **item,
@@ -363,14 +434,19 @@ async def confirm_holding_sync(
     逻辑：根据识别出的股票和数量，拉取当前最新市价，并重新计算账户初始金额，使同步后的盈亏对齐。
     """
     manager = SimulationAccountManager(redis)
-    market_url = settings.MARKET_DATA_SERVICE_URL.rstrip("/")
     
     # 1. 预先获取所有股票的最新价格并计算总市值
     sync_positions = []
     total_market_value = 0.0
     
     for item in request.holdings:
-        price = await _get_latest_price(item.symbol)
+        # 与预览一致：优先使用前端回传的 OCR 识别价，仅在缺失时兜底
+        try:
+            price = float(item.current_price or 0)
+        except (TypeError, ValueError):
+            price = 0.0
+        if price <= 0:
+            price = await _get_latest_close_from_sdl(item.symbol)
         
         if price <= 0:
             raise HTTPException(
