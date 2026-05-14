@@ -172,14 +172,14 @@ class QuantMindWarmup:
                 description="预热热门股票数据",
                 fetch_func=self._fetch_stock_data,
                 keys=[
-                    "stock:600000.SH",  # 浦发银行
-                    "stock:600519.SH",  # 贵州茅台
-                    "stock:000001.SZ",  # 平安银行
-                    "stock:000002.SZ",  # 万科A
-                    "stock:000858.SZ",  # 五粮液
-                    "stock:601318.SH",  # 中国平安
-                    "stock:601398.SH",  # 工商银行
-                    "stock:601939.SH",  # 建设银行
+                    "stock:SH600000",  # 浦发银行
+                    "stock:SH600519",  # 贵州茅台
+                    "stock:SZ000001",  # 平安银行
+                    "stock:SZ000002",  # 万科A
+                    "stock:SZ000858",  # 五粮液
+                    "stock:SH601318",  # 中国平安
+                    "stock:SH601398",  # 工商银行
+                    "stock:SH601939",  # 建设银行
                 ],
                 ttl=600,  # 10分钟
                 priority=5,
@@ -193,12 +193,12 @@ class QuantMindWarmup:
                 description="预热市场指数数据",
                 fetch_func=self._fetch_index_data,
                 keys=[
-                    "index:000001.SH",  # 上证指数
-                    "index:399001.SZ",  # 深证成指
-                    "index:399006.SZ",  # 创业板指
-                    "index:000300.SH",  # 沪深300
-                    "index:000016.SH",  # 上证50
-                    "index:000905.SH",  # 中证500
+                    "index:SH000001",  # 上证指数
+                    "index:SZ399001",  # 深证成指
+                    "index:SZ399006",  # 创业板指
+                    "index:SH000300",  # 沪深300
+                    "index:SH000016",  # 上证50
+                    "index:SH000905",  # 中证500
                 ],
                 ttl=300,  # 5分钟
                 priority=5,
@@ -341,7 +341,7 @@ class QuantMindWarmup:
             "name": f"{industry}行业",
             "stock_count": 100,
             "avg_pe": 15.5,
-            "top_stocks": ["600000.SH", "600519.SH", "000001.SZ"],
+            "top_stocks": ["SH600000", "SH600519", "SZ000001"],
         }
 
     async def run_warmup(self, parallel: bool = True) -> dict[str, Any]:

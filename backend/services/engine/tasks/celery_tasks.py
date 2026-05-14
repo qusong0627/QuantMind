@@ -387,7 +387,7 @@ def run_strategy_backtest_loop(
         end_date = datetime.now()
         start_date = end_date - timedelta(days=730)
         market_data = await market_data_service.get_market_data(
-            symbols=request.target_assets or ["000001.SZ"],
+            symbols=request.target_assets or ["SZ000001"],
             start_date=start_date,
             end_date=end_date,
             timeframe=request.timeframe,

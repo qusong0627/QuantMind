@@ -57,7 +57,7 @@ class DataFrequency(Enum):
 class StockInfo:
     """股票基础信息"""
 
-    code: str  # 股票代码 (000001.SZ)
+    code: str  # 股票代码 (SZ000001)
     name: str  # 股票名称
     market: MarketType  # 市场类型
     industry: str | None = None  # 所属行业
@@ -526,4 +526,4 @@ def format_stock_code(code: str, market: MarketType) -> str:
     Returns:
         str: 格式化后的代码，如 '000001.SZ'
     """
-    return f"{code}.{market.value}"
+    return f"{market.value}{code}"

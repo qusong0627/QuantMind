@@ -95,7 +95,7 @@ class AIStrategyConfig(BaseSettings):
     BACKTEST_INITIAL_CASH: float = 1_000_000  # 初始资金100万
     BACKTEST_COMMISSION: float = 0.0003  # 佣金0.03%
     BACKTEST_SLIPPAGE: float = 0.001  # 滑点0.1%
-    BACKTEST_BENCHMARK: str = "000300.SH"  # 沪深300基准
+    BACKTEST_BENCHMARK: str = "SH000300"  # 沪深300基准
 
     # ============ Redis配置 (缓存) ============
     REDIS_HOST: str = os.getenv("REDIS_HOST", "localhost")

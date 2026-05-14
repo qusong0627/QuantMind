@@ -17,6 +17,7 @@ import redis.asyncio as aioredis
 
 from ..market_config import settings
 from .data_source import DataSourceAdapter
+from backend.shared.stock_utils import StockCodeUtil
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +32,7 @@ class RemoteRedisDataSource(DataSourceAdapter):
         self._host = (settings.REDIS_HOST or "quantmind-redis").strip()
         self._port = int(settings.REDIS_PORT or 6379)
         self._password = (settings.REDIS_PASSWORD or "").strip() or None
+        self._db = int(settings.REDIS_DB or 3)
         self._client: aioredis.Redis | None = None
 
     def _get_client(self) -> aioredis.Redis:
@@ -39,6 +41,7 @@ class RemoteRedisDataSource(DataSourceAdapter):
                 host=self._host,
                 port=self._port,
                 password=self._password,
+                db=self._db,
                 decode_responses=True,
                 socket_connect_timeout=3,
                 socket_timeout=5,
@@ -47,38 +50,10 @@ class RemoteRedisDataSource(DataSourceAdapter):
 
     def _normalize_symbol(self, symbol: str) -> str:
         """
-        将各种内部 symbol 格式统一为 Redis key 中的 {code}.{market} 格式
-
-        支持:
-            600000       → 600000.SH
-            000001       → 000001.SZ
-            sh600000     → 600000.SH
-            sz000001     → 000001.SZ
-            600000.SH    → 600000.SH  (pass-through)
+        统一转换为 Prefix 格式 (SH600000)
+        遵循 AGENTS.md 强制规范
         """
-        s = symbol.strip().upper()
-
-        # 已是 {code}.{market} 格式
-        if "." in s:
-            return s
-
-        # sh/sz/bj 前缀格式
-        if s.startswith("SH"):
-            return f"{s[2:]}.SH"
-        if s.startswith("SZ"):
-            return f"{s[2:]}.SZ"
-        if s.startswith("BJ"):
-            return f"{s[2:]}.BJ"
-
-        # 纯代码，按首位推断市场
-        if s.startswith("6"):
-            return f"{s}.SH"
-        elif s.startswith(("0", "2", "3")):
-            return f"{s}.SZ"
-        elif s.startswith(("4", "8", "9")):  # 北交所 / 老三板
-            return f"{s}.BJ"
-        else:
-            return f"{s}.SH"
+        return StockCodeUtil.to_prefix(symbol)
 
     def _to_snapshot_symbol(self, normalized_symbol: str) -> str:
         """
@@ -107,33 +82,47 @@ class RemoteRedisDataSource(DataSourceAdapter):
 
         client = self._get_client()
         normalized_map = {self._normalize_symbol(s): s for s in symbols}
-        snapshot_keys = [
-            f"market:snapshot:{self._to_snapshot_symbol(n)}"
-            for n in normalized_map.keys()
-        ]
-        legacy_keys = [f"stock:{n}" for n in normalized_map.keys()]
+        
+        # 批量构建查询 Key 列表 (全路径组合，增加容错性)
+        # 每个 normalized symbol 会产生 3 个 candidate snapshot keys:
+        # 1. market:snapshot:sh600000 (规范小写前缀)
+        # 2. market:snapshot:SH600000 (规范大写前缀)
+        # 3. stock:600000.SH (Legacy 后缀格式)
+        
+        pipeline_keys = []
+        symbol_key_count = 3
+        for n in normalized_map.keys():
+            # n 已经是 SH600000 格式
+            prefix = n[:2].lower() # sh
+            code = n[2:] # 600000
+            legacy = f"{code}.{n[:2].upper()}" # 600000.SH
+            
+            pipeline_keys.append(f"market:snapshot:{prefix}{code}")
+            pipeline_keys.append(f"market:snapshot:{n}")
+            pipeline_keys.append(f"stock:{legacy}")
 
         try:
-            # 优先读取规范 key；缺失时回退 legacy key
             async with client.pipeline(transaction=False) as pipe:
-                for key in snapshot_keys:
-                    pipe.hgetall(key)
-                for key in legacy_keys:
+                for key in pipeline_keys:
                     pipe.hgetall(key)
                 results = await pipe.execute()
         except Exception as e:
             logger.error(f"[RemoteRedis] 批量读取失败: {e}")
             return []
 
-        split = len(snapshot_keys)
-        snapshot_results = results[:split]
-        legacy_results = results[split:]
-
         final_quotes = []
         now_ts = time.time()
 
         for idx, (normalized, original_symbol) in enumerate(normalized_map.items()):
-            data = snapshot_results[idx] or legacy_results[idx]
+            # 每个 symbol 对应 3 个结果，取第一个非空的
+            start_idx = idx * symbol_key_count
+            data = None
+            for offset in range(symbol_key_count):
+                candidate = results[start_idx + offset]
+                if candidate:
+                    data = candidate
+                    break
+            
             if not data:
                 continue
 

@@ -80,7 +80,7 @@ class StrategyBacktestLoop:
 
         total = max(1, int(self.config.max_iterations))
         prompt_factor = min(1.5, max(0.5, len(strategy_request.prompt) / 120.0))
-        symbols = strategy_request.target_assets or market_data.get("symbols") or ["000001.SZ"]
+        symbols = strategy_request.target_assets or market_data.get("symbols") or ["SZ000001"]
 
         for i in range(1, total + 1):
             iter_start = time.perf_counter()

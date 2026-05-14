@@ -52,6 +52,7 @@ from backend.services.trade.trade_config import settings
 from backend.shared.margin_stock_pool import get_margin_stock_pool_service
 from backend.shared.notification_publisher import publish_notification_async
 from backend.shared.strategy_storage import get_strategy_storage_service
+from backend.shared.stock_utils import StockCodeUtil
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -934,9 +935,9 @@ def _parse_bridge_report_ts(report: dict) -> float | None:
 
 
 def _resolve_preflight_symbols() -> list[str]:
-    raw = str(os.getenv("PREFLIGHT_STREAM_SYMBOLS", "000001.SZ,600000.SH")).strip()
+    raw = str(os.getenv("PREFLIGHT_STREAM_SYMBOLS", "SZ000001,SH600000")).strip()
     symbols = [item.strip() for item in raw.split(",") if item.strip()]
-    return symbols or ["000001.SZ", "600000.SH"]
+    return symbols or ["SZ000001", "SH600000"]
 
 
 @lru_cache(maxsize=1)
@@ -1017,26 +1018,28 @@ def check_stream_series_freshness(redis_client=None) -> dict[str, Any]:
     try:
         stream_redis.ping()
         for symbol in stream_symbols:
-            key = f"market:series:{symbol}"
+            normalized = StockCodeUtil.to_prefix(symbol)
+            key = f"market:series:{normalized}"
             latest = stream_redis.zrevrange(key, 0, 0, withscores=True)
             if latest:
                 _, score = latest[0]
                 age = max(0, int(time.time() - float(score)))
                 if latest_age_sec is None or age < latest_age_sec:
-                    matched_symbol = symbol
+                    matched_symbol = normalized
                     latest_age_sec = age
     except Exception:
         # 降级：尝试本地/交易 Redis
         if redis_client:
             try:
                 for symbol in stream_symbols:
-                    key = f"market:series:{symbol}"
+                    normalized = StockCodeUtil.to_prefix(symbol)
+                    key = f"market:series:{normalized}"
                     latest = redis_client.zrevrange(key, 0, 0, withscores=True)
                     if latest:
                         _, score = latest[0]
                         age = max(0, int(time.time() - float(score)))
                         if latest_age_sec is None or age < latest_age_sec:
-                            matched_symbol = symbol
+                            matched_symbol = normalized
                             latest_age_sec = age
             except Exception:
                 pass
