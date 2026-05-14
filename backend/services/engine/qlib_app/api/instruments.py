@@ -67,11 +67,11 @@ def _load_qlib_instruments() -> list[dict[str, str]]:
                 start_date = parts[1]
                 end_date = parts[2]
 
-                # 格式转换: SH600000 -> 600000.SH
+                # 保持原始前缀格式: SH600000
                 if len(symbol) >= 8:
                     market = symbol[:2]  # SH, SZ, BJ
                     code = symbol[2:]  # 600000
-                    formatted_symbol = f"{code}.{market}"
+                    formatted_symbol = symbol
                 else:
                     formatted_symbol = symbol
                     code = symbol

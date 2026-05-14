@@ -53,13 +53,16 @@ npm run dashboard:build  # Production build
 - **Shared modules**: `backend/shared/` contains cross-service code (DB manager, Redis client, config, logging)
 - **Strategy storage**: `backend/shared/strategy_storage.py` is the single entry point for all strategy CRUD operations
 
-## Stock Code Standardization
+## Stock Code Standardization (CRITICAL)
 
-- **Mandatory Format**: Prefix-based (e.g., `SH600036`).
-- **Forbidden Format**: Suffix-based (e.g., `600036.SH`).
+- **Mandatory Format**: Prefix-based (e.g., `SH600036`). **All internal Redis keys, database fields, and API parameters MUST use this format.**
+- **Forbidden Format**: Suffix-based (e.g., `600036.SH`). **Do NOT use this format in any new code or configuration.**
 - **Normalization Utilities**: 
   - **Backend**: `backend/shared/stock_utils.py` -> `StockCodeUtil.to_prefix(code)`
   - **Frontend**: `electron/src/utils/portfolioUtils.ts` -> `normalizeStockCode(code)`
+- **Redis Key Patterns**:
+  - Snapshot: `market:snapshot:sh600036` (lowercase prefix for snapshot keys)
+  - Series: `market:series:SH600036` (Standard Prefix-based for sequences)
 - **Market Auto-Identification**:
   - `SH`: 6xxxxx, 9xxxxx
   - `SZ`: 0xxxxx, 3xxxxx, 2xxxxx

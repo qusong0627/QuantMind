@@ -111,7 +111,7 @@ class Settings(BaseSettings):
     REMOTE_QUOTE_REDIS_PASSWORD: str = Field(default=MARKET_REDIS_PASSWORD)
 
     # 无订阅时的保活拉取标的，确保时序/落库链路持续有数据
-    STREAM_WARMUP_SYMBOLS: str = "000001.SZ,600000.SH"
+    STREAM_WARMUP_SYMBOLS: str = "SZ000001,SH600000"
 
     # Cache TTL (seconds)
     CACHE_TTL_QUOTE: int = 1

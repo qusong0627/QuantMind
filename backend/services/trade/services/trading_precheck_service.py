@@ -83,9 +83,9 @@ def _get_stream_series_redis_client():
 
 
 def _resolve_probe_symbols() -> list[str]:
-    raw = str(os.getenv("PREFLIGHT_STREAM_SYMBOLS", "000001.SZ,600000.SH")).strip()
+    raw = str(os.getenv("PREFLIGHT_STREAM_SYMBOLS", "SZ000001,SH600000")).strip()
     symbols = [item.strip() for item in raw.split(",") if item.strip()]
-    return symbols or ["000001.SZ", "600000.SH"]
+    return symbols or ["SZ000001", "SH600000"]
 
 
 def _parse_bridge_report_ts(report: dict[str, Any]) -> float | None:

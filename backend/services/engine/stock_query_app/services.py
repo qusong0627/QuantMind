@@ -68,7 +68,7 @@ def _lookup_stock_from_index(code: str) -> dict | None:
         item_code = str(item.get("code") or "").strip().upper()
         if symbol == text or item_code == pure:
             exchange = str(item.get("exchange") or "").strip().upper()
-            formatted = symbol or (f"{item_code}.{exchange}" if item_code and exchange else item_code)
+            formatted = symbol or (f"{exchange}{item_code}" if item_code and exchange else item_code)
             return {
                 "code": formatted,
                 "name": str(item.get("name") or formatted),
@@ -223,7 +223,7 @@ class StockQueryService:
         status = status_map.get(record.status, TradeStatus.TRADING)
 
         code = record.stock_code or ""
-        formatted_code = f"{code}.{exchange}" if exchange else code
+        formatted_code = f"{exchange}{code}" if exchange else code
 
         return StockInfo(
             code=formatted_code,

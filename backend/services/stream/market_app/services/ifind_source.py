@@ -32,9 +32,9 @@ class IFindDataSource(DataSourceAdapter):
         获取实时行情
 
         Args:
-            symbol: 股票代码 (e.g. "000001.SZ", "600000.SH")
+            symbol: 股票代码 (e.g. "SZ000001", "SH600000")
                     iFind format is usually just the code with suffix.
-                    Our internal symbol might be "000001" or "sz000001".
+                    Our internal symbol might be "SZ000001".
                     Need to normalize.
         """
         try:
@@ -152,7 +152,7 @@ class IFindDataSource(DataSourceAdapter):
     def _format_symbol(self, symbol: str) -> str:
         """
         将内部 symbol 转换为 iFind 格式
-        Input: "000001" (assumed), "sz000001", "sh600000"
+        Input: "SZ000001", "SH600000"
         Output: "000001.SZ", "600000.SH"
         """
         s = symbol.lower()

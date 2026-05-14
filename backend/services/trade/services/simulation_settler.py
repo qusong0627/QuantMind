@@ -152,8 +152,8 @@ class SimulationSettler:
         """已废弃：仅供本地调试使用，生产环境请勿调用"""
         await asyncio.sleep(0.5)
         return {
-            "600519.SH": 0.2,
-            "000001.SZ": 0.1,
+            "SH600519": 0.2,
+            "SZ000001": 0.1,
         }
 
 

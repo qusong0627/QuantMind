@@ -72,9 +72,8 @@ async def lifespan(app: FastAPI):
         )
 
         await model_inference_persistence.ensure_tables()
-        from backend.services.api.routers.research import ensure_research_tables
-
-        await ensure_research_tables()
+        # from backend.services.api.routers.research import ensure_research_tables
+        # await ensure_research_tables()
 
         logger.info("✅ QuantMind API initialized")
     except Exception as e:
