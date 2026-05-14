@@ -16,6 +16,7 @@ import {
   Sparkles,
   Target,
 } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
 import ReactECharts from 'echarts-for-react';
 import {
   Button,
@@ -178,6 +179,7 @@ const RangeInput: React.FC<{
 };
 
 export const ResearchPlatformPage: React.FC = () => {
+  const navigate = useNavigate();
   const [availableModels, setAvailableModels] = React.useState<ResearchModelOption[]>([]);
   const [selectedModelId, setSelectedModelId] = React.useState<string>('');
   const [modelsLoading, setModelsLoading] = React.useState<boolean>(true);
@@ -462,11 +464,11 @@ export const ResearchPlatformPage: React.FC = () => {
         if (models.length > 0 && !selectedModelId) {
           setSelectedModelId(models[0].modelId);
         } else if (models.length === 0) {
-          setModelsError('暂无可用模型，请先在模型管理中训练或上传模型');
+          setModelsError('暂无已生成推理批次的模型结果。请前往“模型管理”中心执行推理，生成的候选池建议将在此实时呈现。');
         }
       } catch (error) {
         console.error('[ResearchPlatformPage] load models failed:', error);
-        if (!cancelled) setModelsError('模型列表加载失败，请检查网络连接后重试');
+        if (!cancelled) setModelsError('投研模型数据加载失败，请检查网络连接后重试');
       } finally {
         if (!cancelled) setModelsLoading(false);
       }
@@ -496,7 +498,7 @@ export const ResearchPlatformPage: React.FC = () => {
           setSelectedRunId(runs[0].runId);
         } else {
           setSelectedRunId('');
-          setRunsError('该模型暂无推理批次，请先在模型管理中对当前模型执行推理');
+          setRunsError('当前模型暂无推理批次。请前往“模型管理”对该模型执行推理任务。');
         }
       } catch (error) {
         console.error('[ResearchPlatformPage] load runs failed:', error);
@@ -1716,7 +1718,7 @@ export const ResearchPlatformPage: React.FC = () => {
   return (
     <>
       <div className={`${PAGE_LAYOUT.outerClass} research-platform-page`}>
-        <div className={`${PAGE_LAYOUT.frameClass} overflow-y-auto custom-scrollbar`}>
+        <div className={`${PAGE_LAYOUT.frameClass}`}>
           <header className={`${PAGE_LAYOUT.headerClass}`} style={{ height: `${PAGE_LAYOUT.headerHeight}px` }}>
             <div className="flex items-center gap-3">
               <div className="flex h-9 w-9 items-center justify-center rounded-2xl bg-gradient-to-br from-blue-500 via-indigo-500 to-violet-400 text-white shadow-lg shadow-blue-900/20">
@@ -1747,9 +1749,9 @@ export const ResearchPlatformPage: React.FC = () => {
             </div>
           </header>
 
-          <div className="flex-1 flex flex-col">
-            <div className={`${PAGE_LAYOUT.contentOuterClass}`}>
-              <div className="grid gap-4 2xl:grid-cols-[320px_minmax(0,1fr)] xl:grid-cols-[300px_minmax(0,1fr)]">
+          <div className="flex-1 min-h-0 flex flex-col">
+            <div className={`${PAGE_LAYOUT.contentOuterClass} flex-1 min-h-0`}>
+              <div className="grid gap-4 2xl:grid-cols-[320px_minmax(0,1fr)] xl:grid-cols-[300px_minmax(0,1fr)] h-full">
                 {/* 左侧侧边栏 - 吸顶且固定高度 */}
                 <div className="flex flex-col gap-4 sticky top-4 h-[calc(100vh-120px)] z-30">
                   <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm flex-shrink-0">
@@ -1764,16 +1766,6 @@ export const ResearchPlatformPage: React.FC = () => {
                         {modelsLoading ? (
                           <div className="flex items-center gap-2 px-3 py-2 text-xs text-slate-400">
                             <Spin size="small" /> 加载中...
-                          </div>
-                        ) : modelsError ? (
-                          <div className="rounded-lg border border-amber-200 bg-amber-50 p-3">
-                            <div className="text-xs text-amber-700 mb-2">{modelsError}</div>
-                            <button
-                              onClick={() => { setModelsError(null); setRefreshNonce(refreshNonce + 1); }}
-                              className="text-xs font-bold text-amber-700 underline hover:text-amber-900"
-                            >
-                              重试
-                            </button>
                           </div>
                         ) : (
                           <Select
@@ -1796,16 +1788,6 @@ export const ResearchPlatformPage: React.FC = () => {
                         ) : runsLoading ? (
                           <div className="flex items-center gap-2 px-3 py-2 text-xs text-slate-400">
                             <Spin size="small" /> 加载中...
-                          </div>
-                        ) : runsError ? (
-                          <div className="rounded-lg border border-amber-200 bg-amber-50 p-3">
-                            <div className="text-xs text-amber-700 mb-2">{runsError}</div>
-                            <button
-                              onClick={() => { setRunsError(null); setRefreshNonce(refreshNonce + 1); }}
-                              className="text-xs font-bold text-amber-700 underline hover:text-amber-900"
-                            >
-                              重试
-                            </button>
                           </div>
                         ) : (
                           <Select
@@ -2101,7 +2083,7 @@ export const ResearchPlatformPage: React.FC = () => {
 
                 {/* 右侧主内容 */}
                 <motion.div
-                  className="flex flex-col gap-4 min-w-0 flex-1 pb-20"
+                  className="flex flex-col gap-4 min-w-0 flex-1 overflow-y-auto custom-scrollbar pb-20 pr-2"
                   initial="hidden"
                   animate="visible"
                   variants={{
