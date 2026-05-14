@@ -61,6 +61,7 @@ _SDL_SELECT_BY_RUN_DATE = """
     COALESCE(sdl_run.pe_ttm, 0) AS pe,
     COALESCE(sdl_run.pb, 0) AS pb,
     COALESCE(sdl_run.roe, 0) AS roe,
+    COALESCE(sdl_run.adj_factor, 1) AS adj_factor,
     COALESCE(sdl_run.turnover_rate, 0) AS turnover_rate,
     COALESCE(sdl_run.amount, 0) AS amount,
     COALESCE(sdl_run.total_mv, 0) AS total_mv,
@@ -286,7 +287,7 @@ def _format_candidate_record(row: dict[str, Any]) -> dict[str, Any]:
         "consecutiveLimitUpDays": _serialize_int(row.get("consecutive_limit_up_days"))
         or _serialize_int(row.get("consecutive_limit_up_days_sdl"))
         or 0,
-        "turnoverRate": _serialize_float(row.get("turnover_rate") * 100 if row.get("turnover_rate") else 0.0) or 0.0,
+        "turnoverRate": _serialize_float(row.get("turnover_rate") or 0.0) or 0.0,
         "amount": round(to_yi(row.get("amount")), 4),
         "marketCap": round(to_yi(row.get("total_mv")), 2),
         "totalMv": round(to_yi(row.get("total_mv")), 2),
@@ -301,8 +302,8 @@ def _format_candidate_record(row: dict[str, Any]) -> dict[str, Any]:
         "pe": _serialize_float(row.get("pe")) or 0.0,
         "pb": _serialize_float(row.get("pb")) or 0.0,
         "roe": round((_serialize_float(row.get("roe")) or 0.0), 4),
-        "ma5": _serialize_float(row.get("ma5")) or 0.0,
-        "ma10": _serialize_float(row.get("ma10")) or 0.0,
+        "ma5": (_serialize_float(row.get("ma5")) or 0.0) / (_serialize_float(row.get("adj_factor")) or 1.0),
+        "ma10": (_serialize_float(row.get("ma10")) or 0.0) / (_serialize_float(row.get("adj_factor")) or 1.0),
         "maGap5": _serialize_float(row.get("ma_gap_5")) or 0.0,
         "maGap10": _serialize_float(row.get("ma_gap_10")) or 0.0,
         "maGap20": _serialize_float(row.get("ma_gap_20")) or 0.0,
@@ -318,7 +319,7 @@ def _format_candidate_record(row: dict[str, Any]) -> dict[str, Any]:
         "return3d": return_3d_pct,
         "nextDayReturn": return_1d_pct,
         "day3Return": return_3d_pct,
-        "mainFlow": (_serialize_float(row.get("main_flow")) or 0.0) / 100.0,
+        "mainFlow": (_serialize_float(row.get("main_flow")) or 0.0) / 1000000.0,
         "flowNetAmount": (_serialize_float(row.get("flow_net_amount")) or 0.0) / 1000000.0,
         "instOwnership": (_serialize_float(row.get("inst_ownership")) or 0.0) / 1000000.0,
         "profitGrowth": _serialize_float(row.get("profit_growth")) or 0.0,
@@ -449,6 +450,7 @@ async def _do_get_overview(
                 sdl.pe_ttm,
                 sdl.pb,
                 sdl.roe,
+                sdl.adj_factor,
                 sdl.turnover_rate,
                 sdl.amount,
                 sdl.total_mv,
@@ -830,14 +832,13 @@ async def get_stock_kline(symbol: str, days: int) -> dict[str, Any]:
         )
         items = []
         for r in res:
-            factor = float(r[6]) if r[6] else 1.0
             items.append(
                 {
                     "date": str(r[0]),
-                    "open": round(float(r[1]) / factor, 2),
-                    "high": round(float(r[2]) / factor, 2),
-                    "low": round(float(r[3]) / factor, 2),
-                    "close": round(float(r[4]) / factor, 2),
+                    "open": round(float(r[1]), 2),
+                    "high": round(float(r[2]), 2),
+                    "low": round(float(r[3]), 2),
+                    "close": round(float(r[4]), 2),
                     "volume": float(r[5]),
                 }
             )

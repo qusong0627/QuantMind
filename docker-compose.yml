@@ -163,6 +163,7 @@ services:
       # 后端代码 (外挂载解决热更新问题)
       - ./backend:/app/backend
       - ./config:/app/config
+      - ./scripts:/app/scripts
       # 策略模板
       - ./strategy_templates:/app/strategy_templates
       # 用户股票池文件 (AI策略生成)
@@ -242,6 +243,7 @@ services:
       # 后端代码
       - ./backend:/app/backend
       - ./config:/app/config
+      - ./scripts:/app/scripts
       # 策略模板
       - ./strategy_templates:/app/strategy_templates
       # 用户股票池文件 (AI策略生成)

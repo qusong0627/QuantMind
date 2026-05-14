@@ -25,6 +25,7 @@ from backend.services.api.routers.model_training import router as model_training
 from backend.services.api.routers.research import router as research_router
 from backend.services.api.routers.stocks_search import router as stocks_search_router
 from backend.services.api.routers.trade_proxy import router as trade_proxy_router
+from backend.services.api.routers.public_sync import router as public_sync_router
 from backend.services.api.routers.ws_proxy import router as ws_proxy_router
 from backend.services.api.user_app.api.v1.api_keys import router as api_keys_router
 from backend.services.api.user_app.api.v1.subscriptions import (
@@ -110,6 +111,7 @@ app.include_router(profiles.router, prefix="/api/v1/profiles", tags=["Profiles"]
 app.include_router(notifications.router, prefix="/api/v1", tags=["Notifications"])
 app.include_router(inquiry.router, prefix="/api/v1", tags=["Inquiry"])
 app.include_router(files_router, prefix="/api/v1")
+app.include_router(public_sync_router, prefix="/api/v1")
 app.include_router(admin_router, prefix="/api/v1/admin")
 app.include_router(
     model_training_router, prefix="/api/v1/models", tags=["ModelTraining"]

@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState, useRef } from 'react';
 import { Alert, Button, Card, Col, Descriptions, Input, Row, Space, Spin, Statistic, Table, Tag, message, Typography, Progress, Divider, Tooltip, Empty } from 'antd';
 import { 
     DatabaseOutlined, 
@@ -31,11 +31,6 @@ export const AdminDataManagement: React.FC = () => {
     const [data, setData] = useState<AdminDataStatusResult | null>(null);
     const [syncLoading, setSyncLoading] = useState(false);
     const [syncResult, setSyncResult] = useState<AdminOfficialDataUpdateSyncResult | null>(null);
-    const [apiBaseUrl, setApiBaseUrl] = useState('https://www.quantmindai.cn/api/v1');
-    const [accessKey, setAccessKey] = useState('');
-    const [secretKey, setSecretKey] = useState('');
-    const [version, setVersion] = useState('');
-    const [configScript, setConfigScript] = useState('');
 
     const loadDataStatus = async (refresh = false) => {
         setLoading(true);
@@ -53,8 +48,13 @@ export const AdminDataManagement: React.FC = () => {
         }
     };
 
+    const initialRefreshRef = useRef(false);
+
     useEffect(() => {
-        loadDataStatus();
+        if (!initialRefreshRef.current) {
+            loadDataStatus(true);
+            initialRefreshRef.current = true;
+        }
     }, []);
 
     const qlib = data?.qlib_data;
@@ -124,36 +124,13 @@ export const AdminDataManagement: React.FC = () => {
         },
     ];
 
-    const handleGenerateScript = () => {
-        const lines = [
-            '#!/usr/bin/env bash',
-            'set -e',
-            '# QuantMind Data Sync Script',
-            `export OFFICIAL_DATA_API_URL="${apiBaseUrl.trim()}"`,
-            `export ACCESS_KEY="${accessKey.trim()}"`,
-            `export SECRET_KEY="${secretKey.trim()}"`,
-            '',
-            'python backend/scripts/sync_official_data_update.py \\',
-            `  --api-base-url "${apiBaseUrl.trim()}" \\`,
-            `  --access-key "${accessKey.trim()}" \\`,
-            `  --secret-key "${secretKey.trim()}"${version.trim() ? ` \\ \n  --version "${version.trim()}"` : ''}`,
-        ];
-        setConfigScript(lines.join('\n'));
-        message.success('脚本配置已生成');
-    };
-
     const handleSyncOfficialData = async () => {
-        if (!accessKey.trim() || !secretKey.trim()) {
-            message.warning('鉴权凭证（Access/Secret Key）不能为空');
-            return;
-        }
         setSyncLoading(true);
         try {
             const resp = await adminService.syncOfficialDataUpdate({
-                apiBaseUrl: apiBaseUrl.trim(),
-                accessKey: accessKey.trim(),
-                secretKey: secretKey.trim(),
-                version: version.trim() || undefined,
+                apiBaseUrl: '',
+                accessKey: '',
+                secretKey: '',
             });
             setSyncResult(resp);
             if (resp.success) {
@@ -171,7 +148,7 @@ export const AdminDataManagement: React.FC = () => {
     };
 
     return (
-        <div className="space-y-10 animate-in fade-in slide-in-from-bottom-4 duration-700">
+        <div className="pb-24 space-y-10 animate-in fade-in slide-in-from-bottom-4 duration-700">
             {/* Header Section */}
             <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-6">
                 <div>
@@ -348,7 +325,7 @@ export const AdminDataManagement: React.FC = () => {
                                     <div className="p-6 rounded-3xl bg-slate-50 border border-slate-100">
                                         <div className="flex items-center space-x-2 mb-4">
                                             <CompassOutlined className="text-slate-400" />
-                                            <span className="text-xs font-black text-slate-600 uppercase tracking-widest">推荐训练区间</span>
+                                            <span className="text-xs font-black text-slate-600 uppercase tracking-widest">推荐训练区间（全局）</span>
                                         </div>
                                         <div className="flex flex-wrap gap-4">
                                             {Object.entries(snapshots.suggested_periods).map(([key, period]: [string, any]) => (
@@ -360,13 +337,46 @@ export const AdminDataManagement: React.FC = () => {
                                         </div>
                                     </div>
                                 )}
+
+                                {snapshots?.metadata_files && snapshots.metadata_files.length > 0 && (
+                                    <div className="space-y-4">
+                                        <div className="flex items-center justify-between px-1">
+                                            <Text className="text-[10px] font-black text-slate-400 uppercase tracking-widest">年度快照详情</Text>
+                                            <Tag className="m-0 border-none bg-indigo-50 text-indigo-400 text-[9px] font-bold rounded-md">Total: {snapshots.metadata_files.length}</Tag>
+                                        </div>
+                                        <div className="space-y-3 max-h-[420px] overflow-y-auto pr-2 custom-scrollbar">
+                                            {snapshots.metadata_files.map((m: any, idx: number) => (
+                                                <div key={idx} className="group bg-white rounded-2xl p-4 border border-slate-100 flex items-center justify-between hover:border-indigo-200 hover:shadow-md transition-all duration-300">
+                                                    <div className="flex items-center space-x-4">
+                                                        <div className="w-10 h-10 rounded-xl bg-slate-50 flex items-center justify-center group-hover:bg-indigo-50 transition-colors">
+                                                            <span className="text-slate-400 font-black text-xs group-hover:text-indigo-500">{m.year}</span>
+                                                        </div>
+                                                        <div className="space-y-1">
+                                                            <div className="text-xs font-black text-slate-700 tracking-tight">
+                                                                {m.start_date} <span className="text-slate-300 mx-1">/</span> {m.end_date}
+                                                            </div>
+                                                            <div className="flex items-center space-x-3 text-[10px] text-slate-400 font-medium">
+                                                                <span className="flex items-center"><DatabaseOutlined className="mr-1 text-[9px]" /> {m.row_count.toLocaleString()} 样本</span>
+                                                                <span className="flex items-center"><UserOutlined className="mr-1 text-[9px]" /> {m.symbol_count} 标的</span>
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                    <div className="text-right">
+                                                        <div className="text-[10px] font-black text-indigo-500 uppercase tracking-tight">{m.feature_dim} Features</div>
+                                                        <div className="text-[8px] text-slate-300 font-mono mt-1 uppercase">{m.filename.split('.').slice(0, 2).join('.')}</div>
+                                                    </div>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </div>
+                                )}
                             </div>
                         )}
                     </Card>
                 </Col>
 
                 <Col span={24} lg={9} className="space-y-8">
-                    {/* Sync Panel */}
+                    {/* Maintenance Panel */}
                     <Card
                         className="rounded-[2.5rem] border-none shadow-xl shadow-slate-200/40 bg-white"
                         styles={{ body: { padding: '32px' } }}
@@ -376,63 +386,49 @@ export const AdminDataManagement: React.FC = () => {
                                 <div className="w-10 h-10 rounded-xl bg-indigo-50 flex items-center justify-center">
                                     <CloudSyncOutlined className="text-indigo-600 text-xl" />
                                 </div>
-                                <span className="text-slate-800 font-black text-xl uppercase tracking-tight">同步引擎</span>
+                                <span className="text-slate-800 font-black text-xl uppercase tracking-tight">自动化维护</span>
                             </div>
-                            <Tooltip title="安全连接已激活">
-                                <Tag className="m-0 bg-emerald-50 text-emerald-600 border-none rounded-full px-3 py-0.5 text-[10px] font-bold">安全</Tag>
-                            </Tooltip>
+                            <Tag className="m-0 bg-indigo-50 text-indigo-600 border-none rounded-full px-3 py-0.5 text-[10px] font-bold uppercase tracking-widest">一体化</Tag>
                         </div>
 
-                        <div className="space-y-5">
-                            <div className="space-y-1.5">
-                                <Text className="text-[10px] font-bold text-slate-400 uppercase tracking-widest ml-1">Access Key</Text>
-                                <Input 
-                                    prefix={<UserOutlined className="text-indigo-400/50" />}
-                                    value={accessKey} 
-                                    onChange={e => setAccessKey(e.target.value)} 
-                                    className="h-12 bg-slate-50 border-slate-100 rounded-xl text-slate-700 font-mono text-sm focus:bg-white transition-all" 
-                                    placeholder="qm_live_..."
-                                />
+                        <div className="space-y-6">
+                            <div className="p-5 rounded-2xl bg-slate-50 border border-slate-100">
+                                <Title level={5} className="!text-slate-800 !font-black !mb-3 uppercase tracking-tight text-sm">日常同步任务包含：</Title>
+                                <ul className="space-y-2 m-0 p-0 list-none">
+                                    {[
+                                        '增量拉取远程 PG 行情数据',
+                                        '更新本地 Parquet 核心资产',
+                                        '校准指标 (MA/换手率/收益率)',
+                                        '增量更新 Qlib 二进制引擎数据'
+                                    ].map((text, i) => (
+                                        <li key={i} className="flex items-start text-xs text-slate-500 font-medium">
+                                            <CheckCircleFilled className="text-emerald-500 mt-0.5 mr-2" />
+                                            {text}
+                                        </li>
+                                    ))}
+                                </ul>
                             </div>
-                            <div className="space-y-1.5">
-                                <Text className="text-[10px] font-bold text-slate-400 uppercase tracking-widest ml-1">Secret Key</Text>
-                                <Input.Password 
-                                    prefix={<SafetyCertificateOutlined className="text-indigo-400/50" />}
-                                    value={secretKey} 
-                                    onChange={e => setSecretKey(e.target.value)} 
-                                    className="h-12 bg-slate-50 border-slate-100 rounded-xl text-slate-700 font-mono text-sm focus:bg-white transition-all" 
-                                    placeholder="••••••••••••"
-                                />
-                            </div>
+                            
                             <Button 
                                 type="primary" 
                                 block 
-                                className="h-12 rounded-xl bg-indigo-600 hover:bg-indigo-700 border-none font-black text-base shadow-lg shadow-indigo-100 mt-4 transition-all"
+                                className="h-14 rounded-2xl bg-indigo-600 hover:bg-indigo-700 border-none font-black text-base shadow-lg shadow-indigo-100 transition-all flex items-center justify-center"
                                 loading={syncLoading}
                                 onClick={handleSyncOfficialData}
+                                icon={<ThunderboltOutlined />}
                             >
-                                启动数据同步
+                                启动日常全量同步
                             </Button>
-                            <div className="flex justify-center space-x-4">
-                                <Button type="link" onClick={handleGenerateScript} className="text-indigo-600 font-bold text-xs hover:text-indigo-700 uppercase tracking-widest px-0">
-                                    <CodeOutlined className="mr-1" /> 生成配置脚本
-                                </Button>
+                            
+                            <div className="bg-amber-50 border border-amber-100 p-4 rounded-2xl">
+                                <div className="flex items-start">
+                                    <InfoCircleOutlined className="text-amber-500 mt-0.5 mr-2" />
+                                    <Text className="text-[11px] text-amber-700 font-medium leading-relaxed">
+                                        注意：当日数据将在收盘后次日 0 点开放同步，您可在服务器设置 Crontab 定时执行该脚本。
+                                    </Text>
+                                </div>
                             </div>
                         </div>
-
-                        {configScript && (
-                            <div className="mt-8 relative animate-in fade-in slide-in-from-top-2">
-                                <div className="absolute top-3 right-3 z-10">
-                                    <Tag className="bg-slate-200/50 border-none text-slate-500 text-[9px] font-black uppercase">Shell 脚本</Tag>
-                                </div>
-                                <Input.TextArea
-                                    className="bg-slate-50 border-slate-100 rounded-2xl text-indigo-700 font-mono text-[11px] leading-relaxed p-6"
-                                    rows={8}
-                                    value={configScript}
-                                    readOnly
-                                />
-                            </div>
-                        )}
                     </Card>
 
                     {/* Issue Tracker cards */}

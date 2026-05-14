@@ -119,15 +119,6 @@ const AdminPage: React.FC = () => {
                 {/* HeaderBar */}
                 <header className="h-16 bg-white border-b border-slate-200 px-8 flex items-center justify-between shrink-0">
                     <div className="flex items-center gap-6">
-                        <Button 
-                            type="text"
-                            icon={<ArrowLeftOutlined />} 
-                            onClick={() => navigate('/dashboard')}
-                            className="text-slate-500 font-bold text-xs flex items-center hover:bg-slate-50 rounded-lg h-9 px-3"
-                        >
-                            返回平台
-                        </Button>
-                        <Divider type="vertical" className="h-4 border-slate-200" />
                         <div className="flex items-center gap-2">
                             <Tag color="success" className="m-0 border-none rounded-full px-3 text-[10px] font-black uppercase bg-emerald-50 text-emerald-600">基础设施正常</Tag>
                         </div>

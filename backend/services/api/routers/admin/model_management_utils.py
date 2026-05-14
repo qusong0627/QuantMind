@@ -342,29 +342,7 @@ def _scan_feature_snapshots_status(
     topn: int = 20,
 ) -> dict[str, Any]:
     """
-    扫描 db/feature_snapshots 目录下的 parquet 文件状态，用于管理后台数据管理页面。
-
-    Parameters
-    ----------
-    target_date : str | None
-        目标日期（YYYY-MM-DD），用于计算最新日期覆盖率。默认使用当前交易日。
-    topn : int
-        返回异常样本的最大数量。
-
-    Returns
-    -------
-    dict containing:
-        - exists: 目录是否存在
-        - snapshot_dir: 目录路径
-        - file_count: parquet 文件数量
-        - scanned_files: 成功扫描的文件数
-        - failed_files: 扫描失败的文件数
-        - total_rows: 总行数
-        - min_date: 最小日期
-        - max_date: 最大日期
-        - latest_date_coverage: 最新日期覆盖情况
-        - topn_samples: 异常样本（older/invalid）
-        - suggested_periods: 建议的训练/验证/测试划分
+    重构：直接读取 11 个年份的 metadata.json 文件，提取关键信息。
     """
     result: dict[str, Any] = {
         "exists": False,
@@ -375,6 +353,7 @@ def _scan_feature_snapshots_status(
         "total_rows": 0,
         "min_date": None,
         "max_date": None,
+        "metadata_files": [],
         "latest_date_coverage": {
             "target_date": target_date,
             "at_target_count": 0,
@@ -394,76 +373,67 @@ def _scan_feature_snapshots_status(
 
     result["exists"] = True
 
-    # 查找所有 parquet 文件
-    files = sorted(FEATURE_SNAPSHOT_DIR.glob("*.parquet"))
-    result["file_count"] = len(files)
+    # 1. 扫描所有的 metadata.json 文件
+    json_files = sorted(FEATURE_SNAPSHOT_DIR.glob("*.metadata.json"), reverse=True)
+    result["file_count"] = len(json_files)
 
-    if not files:
-        return result
+    metadata_list = []
+    total_rows = 0
+    all_min_date = None
+    all_max_date = None
 
-    try:
-        import pandas as pd
-    except Exception:
-        result["error"] = "pandas not available"
-        return result
+    for jf in json_files:
+        data = _read_json_safe(str(jf))
+        if not data:
+            continue
 
-    # 优化点 1：只扫描第一个和最后一个文件来获取日期范围
-    if len(files) > 0:
-        # 获取最小日期（第一个文件）
+        m_year = data.get("year")
+        s_date = data.get("output_start_date")
+        e_date = data.get("output_end_date")
+        r_count = data.get("row_count") or 0
+        f_count = data.get("implemented_feature_count") or 0
+        sym_count = data.get("symbol_count") or 0
+
+        total_rows += r_count
+
+        # 更新全局日期范围
+        if s_date:
+            all_min_date = s_date if all_min_date is None else min(all_min_date, s_date)
+        if e_date:
+            all_max_date = e_date if all_max_date is None else max(all_max_date, e_date)
+
+        metadata_list.append({
+            "year": m_year,
+            "start_date": s_date,
+            "end_date": e_date,
+            "row_count": r_count,
+            "feature_dim": f_count,
+            "symbol_count": sym_count,
+            "filename": jf.name
+        })
+
+    result["metadata_files"] = metadata_list
+    result["scanned_files"] = len(metadata_list)
+    result["total_rows"] = total_rows
+    result["min_date"] = all_min_date
+    result["max_date"] = all_max_date
+
+    # 2. 计算建议的训练/验证/测试划分
+    if all_min_date and all_max_date:
         try:
-            first_df = pd.read_parquet(files[0], columns=["trade_date"], engine="pyarrow")
-            if not first_df.empty:
-                min_date = pd.to_datetime(first_df["trade_date"].min(), errors="coerce").date()
-        except Exception: pass
+            min_d = date.fromisoformat(all_min_date)
+            max_d = date.fromisoformat(all_max_date)
+            result["suggested_periods"] = _build_suggested_periods(min_d, max_d)
 
-        # 获取最大日期（最后一个文件）
-        try:
-            last_df = pd.read_parquet(files[-1], columns=["trade_date", "symbol"], engine="pyarrow")
-            if not last_df.empty:
-                date_series = pd.to_datetime(last_df["trade_date"], errors="coerce")
-                max_date = date_series.max().date()
-
-                # 计算最新日期覆盖率（仅基于最后一个文件，这在按年/按月分区时是合理的性能折中）
-                if target_date:
-                    target = date.fromisoformat(target_date)
-                    symbol_latest_dates = last_df.groupby("symbol")["trade_date"].max().to_dict()
-
-                    at_target_count = 0
-                    older_count = 0
-                    older_samples = []
-
-                    for sym, latest_raw in sorted(symbol_latest_dates.items()):
-                        try:
-                            latest_dt = pd.to_datetime(latest_raw).date()
-                        except Exception: continue
-
-                        if latest_dt >= target:
-                            at_target_count += 1
-                        else:
-                            older_count += 1
-                            if len(older_samples) < topn:
-                                older_samples.append({
-                                    "symbol": str(sym),
-                                    "last_date": latest_dt.isoformat(),
-                                    "lag_days": (target - latest_dt).days,
-                                })
-
-                    result["latest_date_coverage"] = {
-                        "target_date": target_date,
-                        "at_target_count": at_target_count,
-                        "older_count": older_count,
-                        "invalid_count": 0,
-                    }
-                    result["topn_samples"]["older_samples"] = older_samples
-        except Exception: pass
-
-    # 统计总行数（轻量化，如果文件多则只估算或跳过耗时操作）
-    result["scanned_files"] = len(files)
-    result["total_rows"] = 0 # 为了性能，不再逐个读取文件统计行数，除非有缓存
-
-    # 计算建议的训练/验证/测试划分
-    if min_date and max_date:
-        result["suggested_periods"] = _build_suggested_periods(min_date, max_date)
+            # 计算简单的覆盖率（基于最新年份数据）
+            if target_date and metadata_list:
+                latest = metadata_list[0]
+                if latest["end_date"] >= target_date:
+                    result["latest_date_coverage"]["at_target_count"] = latest["symbol_count"]
+                else:
+                    result["latest_date_coverage"]["older_count"] = latest["symbol_count"]
+        except Exception:
+            pass
 
     return result
 

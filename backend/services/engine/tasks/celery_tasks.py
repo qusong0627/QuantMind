@@ -494,6 +494,7 @@ def sync_stock_daily_latest_task(
     }
 
 
+@celery_app.task(name="engine.tasks.get_data_status_task")
 def get_data_status_task() -> dict[str, Any]:
     """
     Celery 任务：扫描 Qlib 数据目录和数据库状态，并缓存结果。

@@ -248,6 +248,16 @@ export interface AdminFeatureSnapshotsSuggestedPeriods {
     test: [string, string];
 }
 
+export interface AdminFeatureSnapshotMetadata {
+    year: number;
+    start_date: string;
+    end_date: string;
+    row_count: number;
+    feature_dim: number;
+    symbol_count: number;
+    filename: string;
+}
+
 export interface AdminFeatureSnapshotsStatus {
     exists: boolean;
     snapshot_dir: string;
@@ -257,6 +267,7 @@ export interface AdminFeatureSnapshotsStatus {
     total_rows: number;
     min_date: string | null;
     max_date: string | null;
+    metadata_files?: AdminFeatureSnapshotMetadata[];
     latest_date_coverage: AdminFeatureSnapshotsLatestCoverage;
     topn_samples?: AdminFeatureSnapshotsTopNSamples;
     suggested_periods?: AdminFeatureSnapshotsSuggestedPeriods;
