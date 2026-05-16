@@ -129,14 +129,14 @@ _SDL_SELECT_BY_RUN_DATE = """
       ]::text[], NULL)),
       '[]'::jsonb
     ) AS index_tags,
-    sdl_run.trade_date AS latest_trade_date,
+    COALESCE(sdl_run.trade_date, '1970-01-01') AS latest_trade_date,
     COALESCE(sdl_run.consecutive_limit_up_days, 0) AS consecutive_limit_up_days_sdl
 """
 
 
 _SDL_LATEST = """
     SELECT DISTINCT ON (symbol) symbol, trade_date, stock_name, industry,
-        close, pct_change, pe_ttm, pb, roe, turnover_rate, amount, total_mv, float_mv, listed_days, is_st,
+        close, pct_change, pe_ttm, pb, roe, adj_factor, turnover_rate, amount, total_mv, float_mv, listed_days, is_st,
         idx_hs300, idx_zz1000, idx_chinext, idx_margin, idx_all,
         ma5, ma10, ma_gap_5, ma_gap_10, ma_gap_20,
         rsi_14, rsi_6, vol_atr_14, macd_hist, volume_ratio_5, volume_ratio_20, volume_trend_3d,
@@ -218,7 +218,8 @@ _SDL_SELECT_SIMPLE = """
       '[]'::jsonb
     ) AS index_tags,
     sdl_latest.trade_date AS latest_trade_date,
-    COALESCE(sdl_latest.consecutive_limit_up_days, 0) AS consecutive_limit_up_days_sdl
+    COALESCE(sdl_latest.consecutive_limit_up_days, 0) AS consecutive_limit_up_days_sdl,
+    COALESCE(sdl_latest.adj_factor, 1) AS adj_factor
 """
 
 
@@ -249,9 +250,25 @@ def _serialize_int(v: Any) -> int | None:
         return None
 
 
+def _to_nominal_price(numeric_price: Any, adj_factor: Any) -> float:
+    numeric_price = _serialize_float(numeric_price) or 0.0
+    numeric_adj_factor = _serialize_float(adj_factor) or 1.0
+    return round(numeric_price / numeric_adj_factor, 2)
+
+
+def _resolve_stock_name(row, symbol):
+    # Try all possible name fields
+    for field in ["stock_name", "name"]:
+        val = row.get(field)
+        if val and val != symbol:
+            return val
+    return symbol
+
+
 def _format_candidate_record(row: dict[str, Any]) -> dict[str, Any]:
     symbol = str(row.get("symbol") or "unknown")
     run_id = str(row.get("run_id") or "unknown")
+    stock_name = _resolve_stock_name(row, symbol)
 
     def to_yi(v):
         val = _serialize_float(v) or 0.0
@@ -272,8 +289,24 @@ def _format_candidate_record(row: dict[str, Any]) -> dict[str, Any]:
     risk_flags = parse_json(row.get("risk_flags"))
     return_1d = _serialize_float(row.get("return_1d"))
     return_3d = _serialize_float(row.get("return_3d"))
-    return_1d_pct = return_1d * 100 if return_1d is not None else None
-    return_3d_pct = return_3d * 100 if return_3d is not None else None
+    
+    # 启发式修正今日涨跌幅 100x bug
+    def fix_pct(v):
+        val = _serialize_float(v) or 0.0
+        if abs(val) > 1.0:
+            return val
+        return val * 100.0
+
+    return_1d_pct = fix_pct(return_1d) if return_1d is not None else None
+    return_3d_pct = fix_pct(return_3d) if return_3d is not None else None
+
+    # 计算今日涨跌幅 (Latest Change)
+    latest_change = _serialize_float(row.get("latest_change_pct")) or 0.0
+    # 启发式修正 100x bug: 如果绝对值大于 1.0 (如 5.92 表示 5.92%)，则认为已经百分号化
+    if abs(latest_change) > 1.0:
+        latest_change_pct = latest_change
+    else:
+        latest_change_pct = latest_change * 100.0
 
     snapshot_turnover_rate = _serialize_float(row.get("snapshot_turnover_rate"))
     live_turnover_rate = _serialize_float(row.get("turnover_rate") or 0.0) or 0.0
@@ -285,9 +318,9 @@ def _format_candidate_record(row: dict[str, Any]) -> dict[str, Any]:
         "runId": run_id,
         "rank": _serialize_int(row.get("score_rank")) or 0,
         "code": symbol,
-        "name": row.get("stock_name") or symbol,
+        "name": stock_name,
         "score": _serialize_float(row.get("fusion_score")) or 0.0,
-        "latestChange": _serialize_float(row.get("latest_change_pct")) or 0.0,
+        "latestChange": latest_change_pct,
         "consecutiveLimitUpDays": _serialize_int(row.get("consecutive_limit_up_days"))
         or _serialize_int(row.get("consecutive_limit_up_days_sdl"))
         or 0,
@@ -302,7 +335,7 @@ def _format_candidate_record(row: dict[str, Any]) -> dict[str, Any]:
         "conceptTags": concept_tags if isinstance(concept_tags, list) else [],
         "indexTags": index_tags if isinstance(index_tags, list) else [],
         "riskFlags": risk_flags if isinstance(risk_flags, list) else [],
-        "closePrice": _serialize_float(row.get("close_price")) or 0.0,
+        "closePrice": _to_nominal_price(row.get("close_price"), row.get("adj_factor")),
         "pe": _serialize_float(row.get("pe")) or 0.0,
         "pb": _serialize_float(row.get("pb")) or 0.0,
         "roe": round((_serialize_float(row.get("roe")) or 0.0), 4),
@@ -700,7 +733,7 @@ async def add_to_research_pool(
             text(
                 "INSERT INTO qm_user_research_pool "
                 "(tenant_id, user_id, symbol, stock_name, source_run_id, model_id, fusion_score, thesis_summary, features_snapshot, updated_at) "
-                "VALUES (:tid, :uid, :s, :n, :rid, :mid, :fs, :ts, :f, NOW()) "
+                "(VALUES (:tid, :uid, :s, :n, :rid, :mid, :fs, :ts, :f, NOW())) "
                 "ON CONFLICT (tenant_id, user_id, symbol) DO UPDATE SET features_snapshot = EXCLUDED.features_snapshot, updated_at = NOW()"
             ),
             {
@@ -727,73 +760,17 @@ async def remove_from_research_pool(tid: str, uid: str, symbol: str) -> dict[str
     return {"code": 200, "message": "success"}
 
 
-_SYMBOL_NORM_SQL = """
-    CASE
-        WHEN UPPER(col) ~ '^(SH|SZ|BJ)[0-9]{6}$' THEN UPPER(col)
-        WHEN col ~ '^[0-9]{6}$' AND LEFT(col, 1) IN ('6', '9') THEN 'SH' || col
-        WHEN col ~ '^[0-9]{6}$' AND LEFT(col, 1) IN ('4', '8') THEN 'BJ' || col
-        WHEN col ~ '^[0-9]{6}$' THEN 'SZ' || col
-        ELSE UPPER(col)
-    END
-"""
-
-
 async def get_symbols_features(tid: str, uid: str, symbols: list[str], lite: bool) -> dict[str, Any]:
     normalized_symbols = [StockCodeUtil.to_prefix(s.strip()) for s in symbols if s.strip()]
     if not normalized_symbols:
         return {"code": 200, "data": {"items": []}}
 
     vals = ", ".join(f"('{s}')" for s in normalized_symbols)
-    norm = _SYMBOL_NORM_SQL.replace("col", "symbol")
-    norm_s = _SYMBOL_NORM_SQL.replace("col", "s.symbol")
+    norm = _norm_symbol_sql("symbol")
 
-    if lite:
-        cache_symbols = ",".join(sorted(set(normalized_symbols)))
-        cache_key = f"sdl-lite:{cache_symbols}"
-        cached = _get_local_cache(_SDL_CACHE, cache_key, _SDL_CACHE_TTL_SECONDS)
-        if cached is not None:
-            return cached
-
-        lite_sql = f"""
-            WITH sym_list(raw_symbol) AS (VALUES {vals}),
-            latest_trade AS (
-                SELECT MAX(trade_date) AS trade_date
-                FROM stock_daily_latest
-            ),
-            sdl AS (
-                SELECT
-                    symbol,
-                    trade_date,
-                    COALESCE(stock_name, '') AS stock_name,
-                    COALESCE(close, 0) AS close_price,
-                    COALESCE(pe_ttm, 0) AS pe,
-                    COALESCE(total_mv, 0) AS total_mv,
-                    COALESCE(turnover_rate, 0) AS turnover_rate
-                FROM stock_daily_latest
-                WHERE trade_date = (SELECT trade_date FROM latest_trade)
-                  AND volume > 0
-            )
-            SELECT
-                sym_list.raw_symbol AS symbol,
-                'lite'::text AS run_id,
-                sdl.stock_name,
-                sdl.close_price,
-                sdl.pe,
-                sdl.total_mv,
-                sdl.turnover_rate
-            FROM sym_list
-            LEFT JOIN sdl ON sdl.symbol = {_norm_symbol_sql("sym_list.raw_symbol")}
-        """
-        async with get_session(read_only=True) as session:
-            res = await session.execute(text(lite_sql))
-            items = [_format_candidate_record(dict(r)) for r in res.mappings()]
-        payload = {"code": 200, "data": {"items": items}}
-        _set_local_cache(_SDL_CACHE, cache_key, payload, _SDL_CACHE_MAX_ENTRIES)
-        return payload
-
+    # 简化逻辑：直接读取数据库中的快照，不再进行实时关联或计算
     sql = f"""
         WITH sym_list(raw_symbol) AS (VALUES {vals}),
-        sdl_latest AS ({_SDL_LATEST}),
         pool_norm AS (
             SELECT symbol, features_snapshot, ({norm}) AS prefix_symbol
             FROM qm_user_research_pool WHERE tenant_id = :tid AND user_id = :uid
@@ -801,30 +778,30 @@ async def get_symbols_features(tid: str, uid: str, symbols: list[str], lite: boo
         watchlist_norm AS (
             SELECT symbol, features_snapshot, ({norm}) AS prefix_symbol
             FROM qm_user_watchlist WHERE tenant_id = :tid AND user_id = :uid
-        ),
-        snap AS (
-            SELECT sym_list.raw_symbol AS symbol,
-                   COALESCE(s.run_id, 'history') as run_id,
-                   s.prediction_trade_date,
-                   COALESCE(s.fusion_score, (ps.features_snapshot->>'score')::double precision, (ws.features_snapshot->>'score')::double precision) as fusion_score,
-                   COALESCE((ps.features_snapshot->>'turnoverRate')::double precision, (ws.features_snapshot->>'turnoverRate')::double precision) as snapshot_turnover_rate,
-                   COALESCE(s.risk_flags, (ps.features_snapshot->'riskFlags')::jsonb, (ws.features_snapshot->'riskFlags')::jsonb) as risk_flags,
-                   COALESCE(s.thesis_summary, (ps.features_snapshot->>'thesis')::text, (ws.features_snapshot->>'thesis')::text) as thesis_summary,
-                   ROW_NUMBER() OVER(PARTITION BY sym_list.raw_symbol ORDER BY s.prediction_trade_date DESC NULLS LAST) as rn
-            FROM sym_list
-            LEFT JOIN pool_norm ps ON ps.prefix_symbol = sym_list.raw_symbol
-            LEFT JOIN watchlist_norm ws ON ws.prefix_symbol = sym_list.raw_symbol
-            LEFT JOIN qm_research_candidate_snapshot s ON ({norm_s}) = sym_list.raw_symbol AND s.tenant_id = :tid AND s.user_id = :uid
         )
-        SELECT snap.*, {_SDL_SELECT_SIMPLE}
-        FROM snap
-        LEFT JOIN sdl_latest ON {_sdl_join_condition()}
-        WHERE snap.rn = 1
+        SELECT 
+            sym_list.raw_symbol AS symbol,
+            COALESCE(ps.features_snapshot, ws.features_snapshot) as snapshot
+        FROM sym_list
+        LEFT JOIN pool_norm ps ON ps.prefix_symbol = sym_list.raw_symbol
+        LEFT JOIN watchlist_norm ws ON ws.prefix_symbol = sym_list.raw_symbol
     """
     async with get_session(read_only=True) as session:
-        res = await session.execute(text(sql), {"tid": tid, "uid": uid})
-        items = [_format_candidate_record(dict(r)) for r in res.mappings()]
-    return {"code": 200, "data": {"items": items}}
+        result = await session.execute(text(sql), {"tid": tid, "uid": uid})
+        items = []
+        for r in result.mappings():
+            snap = r["snapshot"]
+            if not snap:
+                continue
+            if isinstance(snap, str):
+                try:
+                    snap = json.loads(snap)
+                except Exception:
+                    continue
+            # 确保 symbol 一致
+            snap["code"] = r["symbol"]
+            items.append(snap)
+        return {"code": 200, "data": {"items": items}}
 
 
 async def get_stock_kline(symbol: str, days: int) -> dict[str, Any]:
@@ -845,13 +822,14 @@ async def get_stock_kline(symbol: str, days: int) -> dict[str, Any]:
         )
         items = []
         for r in res:
+            adj_factor = r[6]
             items.append(
                 {
                     "date": str(r[0]),
-                    "open": round(float(r[1]), 2),
-                    "high": round(float(r[2]), 2),
-                    "low": round(float(r[3]), 2),
-                    "close": round(float(r[4]), 2),
+                    "open": _to_nominal_price(r[1], adj_factor),
+                    "high": _to_nominal_price(r[2], adj_factor),
+                    "low": _to_nominal_price(r[3], adj_factor),
+                    "close": _to_nominal_price(r[4], adj_factor),
                     "volume": float(r[5]),
                 }
             )

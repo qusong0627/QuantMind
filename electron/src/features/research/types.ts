@@ -50,6 +50,7 @@ export interface ResearchStockRow {
   name: string;
   score: number;
   latestChange: number;
+  totalReturn?: number | null;
   nextDayReturn?: number | null;
   day3Return?: number | null;
   consecutiveLimitUpDays: number;

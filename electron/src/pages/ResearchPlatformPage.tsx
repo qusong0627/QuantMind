@@ -16,7 +16,6 @@ import {
   Sparkles,
   Target,
 } from 'lucide-react';
-import { useNavigate } from 'react-router-dom';
 import ReactECharts from 'echarts-for-react';
 import {
   Button,
@@ -31,7 +30,6 @@ import {
   Segmented,
   Select,
   Slider,
-  Spin,
   Switch,
   Table,
   Tag,
@@ -72,7 +70,6 @@ import {
 import '../styles/research-next-theme.css';
 
 const { Text, Title, Paragraph } = Typography;
-const FULL_UNIVERSE_REQUEST_LIMIT = 10000;
 
 const ResearchMetricCard: React.FC<{
   icon: any;
@@ -179,17 +176,16 @@ const RangeInput: React.FC<{
 };
 
 export const ResearchPlatformPage: React.FC = () => {
-  const navigate = useNavigate();
   const [availableModels, setAvailableModels] = React.useState<ResearchModelOption[]>([]);
   const [selectedModelId, setSelectedModelId] = React.useState<string>('');
-  const [modelsLoading, setModelsLoading] = React.useState<boolean>(true);
-  const [modelsError, setModelsError] = React.useState<string | null>(null);
   const [availableRuns, setAvailableRuns] = React.useState<ResearchRunOption[]>([]);
   const [selectedRunId, setSelectedRunId] = React.useState<string>('');
-  const [runsLoading, setRunsLoading] = React.useState<boolean>(false);
-  const [runsError, setRunsError] = React.useState<string | null>(null);
   const [candidatePool, setCandidatePool] = React.useState<ResearchStockRow[]>([]);
   const [overviewLoading, setOverviewLoading] = React.useState<boolean>(false);
+  const [modelsLoading, setModelsLoading] = React.useState<boolean>(false);
+  const [modelsError, setModelsError] = React.useState<string | null>(null);
+  const [runsLoading, setRunsLoading] = React.useState<boolean>(false);
+  const [runsError, setRunsError] = React.useState<string | null>(null);
   const [syncing, setSyncing] = React.useState<boolean>(false);
   const [keyword, setKeyword] = React.useState<string>('');
   const [activeDataSource, setActiveDataSource] = React.useState<DataSourceTab>('candidates');
@@ -463,27 +459,23 @@ export const ResearchPlatformPage: React.FC = () => {
         setAvailableModels(models);
         if (models.length > 0 && !selectedModelId) {
           setSelectedModelId(models[0].modelId);
-        } else if (models.length === 0) {
-          setModelsError('暂无已生成推理批次的模型结果。请前往“模型管理”中心执行推理，生成的候选池建议将在此实时呈现。');
         }
       } catch (error) {
         console.error('[ResearchPlatformPage] load models failed:', error);
-        if (!cancelled) setModelsError('投研模型数据加载失败，请检查网络连接后重试');
+        setModelsError('加载模型列表失败');
       } finally {
         if (!cancelled) setModelsLoading(false);
       }
     };
     void loadModels();
     return () => { cancelled = true; };
-  }, [refreshNonce]);
+  }, []);
 
   // 模型切换时加载批次
   React.useEffect(() => {
     if (!selectedModelId) {
       setAvailableRuns([]);
       setSelectedRunId('');
-      setRunsLoading(false);
-      setRunsError(null);
       return;
     }
     let cancelled = false;
@@ -498,11 +490,10 @@ export const ResearchPlatformPage: React.FC = () => {
           setSelectedRunId(runs[0].runId);
         } else {
           setSelectedRunId('');
-          setRunsError('当前模型暂无推理批次。请前往“模型管理”对该模型执行推理任务。');
         }
       } catch (error) {
         console.error('[ResearchPlatformPage] load runs failed:', error);
-        if (!cancelled) setRunsError('推理批次加载失败，请检查网络连接后重试');
+        setRunsError('加载推理批次失败');
       } finally {
         if (!cancelled) setRunsLoading(false);
       }
@@ -521,7 +512,7 @@ export const ResearchPlatformPage: React.FC = () => {
     const loadUniverse = async () => {
       setOverviewLoading(true);
       try {
-        const result = await researchService.getResearchUniverse(selectedRunId, FULL_UNIVERSE_REQUEST_LIMIT);
+        const result = await researchService.getResearchUniverse(selectedRunId, 10000);
         if (cancelled) return;
         setCandidatePool(
           (result.candidates || []).map((item: any) => ({
@@ -950,7 +941,7 @@ export const ResearchPlatformPage: React.FC = () => {
     const loadKline = async () => {
       setKlineLoading(true);
       try {
-        const data = await researchService.getKlineData(normalizeSymbol(selectedStock.code), 60);
+        const data = await researchService.getKlineData(normalizeSymbol(selectedStock.code), 120);
         if (cancelled) return;
         setKlineData(data);
       } catch (error) {
@@ -1041,19 +1032,67 @@ export const ResearchPlatformPage: React.FC = () => {
         { left: '8%', right: '4%', top: '72%', height: '18%' },
       ],
       xAxis: [
-        { type: 'category', data: dates, boundaryGap: false, axisLine: { onZero: false }, splitLine: { show: false }, min: 'dataMin', max: 'dataMax' },
-        { type: 'category', gridIndex: 1, data: dates, boundaryGap: false, axisLine: { onZero: false }, axisTick: { show: false }, splitLine: { show: false }, axisLabel: { show: false }, min: 'dataMin', max: 'dataMax' },
+        { type: 'category', data: dates, boundaryGap: true, axisLine: { onZero: false }, splitLine: { show: false }, min: 'dataMin', max: 'dataMax' },
+        { type: 'category', gridIndex: 1, data: dates, boundaryGap: true, axisLine: { onZero: false }, axisTick: { show: false }, splitLine: { show: false }, axisLabel: { show: false }, min: 'dataMin', max: 'dataMax' },
       ],
       yAxis: [
         { scale: true, splitArea: { show: true } },
         { scale: true, gridIndex: 1, splitNumber: 2, axisLabel: { show: false }, axisLine: { show: false }, axisTick: { show: false }, splitLine: { show: false } },
       ],
-      dataZoom: [{ type: 'inside', xAxisIndex: [0, 1], start: 50, end: 100 }],
+      dataZoom: [{
+        type: 'inside',
+        xAxisIndex: [0, 1],
+        start: (() => {
+          if (!predictionDate || dates.length <= 1) return 0;
+          const idx = dates.indexOf(predictionDate);
+          if (idx === -1) return 0;
+          
+          // 目标范围：左右各 30 天，总计 60 天
+          let startIdx = idx - 30;
+          let endIdx = idx + 30;
+          
+          // 如果右侧不足（即 endIdx 超过了数据总量），向左推移以保持 60 天跨度
+          if (endIdx > dates.length - 1) {
+            const overflow = endIdx - (dates.length - 1);
+            endIdx = dates.length - 1;
+            startIdx = Math.max(0, startIdx - overflow);
+          }
+          
+          // 如果左侧不足，向右补齐
+          if (startIdx < 0) {
+            startIdx = 0;
+            endIdx = Math.min(dates.length - 1, startIdx + 60);
+          }
+          
+          const totalPoints = dates.length - 1;
+          return totalPoints > 0 ? (startIdx / totalPoints) * 100 : 0;
+        })(),
+        end: (() => {
+          if (!predictionDate || dates.length <= 1) return 100;
+          const idx = dates.indexOf(predictionDate);
+          if (idx === -1) return 100;
+          
+          let startIdx = idx - 30;
+          let endIdx = idx + 30;
+          
+          if (endIdx > dates.length - 1) {
+            endIdx = dates.length - 1;
+          }
+          if (startIdx < 0) {
+            startIdx = 0;
+            endIdx = Math.min(dates.length - 1, startIdx + 60);
+          }
+          
+          const totalPoints = dates.length - 1;
+          return totalPoints > 0 ? (endIdx / totalPoints) * 100 : 100;
+        })()
+      }],
       series: [
         {
           name: 'K线',
           type: 'candlestick',
           data: ohlc,
+          barMaxWidth: 20,
           itemStyle: { color: '#ef4444', color0: '#22c55e', borderColor: '#ef4444', borderColor0: '#22c55e' },
           markLine: predictionDate ? {
             symbol: ['none', 'none'],
@@ -1103,6 +1142,7 @@ export const ResearchPlatformPage: React.FC = () => {
           xAxisIndex: 1,
           yAxisIndex: 1,
           data: volumes,
+          barMaxWidth: 20,
           itemStyle: {
             color: (params: any) => {
               const d = klineData[params.dataIndex];
@@ -1452,13 +1492,16 @@ export const ResearchPlatformPage: React.FC = () => {
       {
         title: <span className="whitespace-nowrap">涨跌幅</span>,
         dataIndex: 'latestChange',
-        width: 96,
+        width: 102,
         align: 'center',
-        render: (value: number) => (
-          <span className={`whitespace-nowrap ${value >= 0 ? 'font-semibold text-rose-500' : 'font-semibold text-emerald-500'}`}>
-            {value >= 0 ? '+' : ''}{value.toFixed(2)}%
-          </span>
-        ),
+        render: (value: number) => {
+          const displayValue = Math.abs(value) > 1.0 ? value : value * 100;
+          return (
+            <span className={`whitespace-nowrap font-bold ${displayValue >= 0 ? 'text-rose-500' : 'text-emerald-500'}`}>
+              {displayValue >= 0 ? '+' : ''}{displayValue.toFixed(2)}%
+            </span>
+          );
+        },
       },
       {
         title: <span className="whitespace-nowrap">换手率</span>,
@@ -1578,13 +1621,16 @@ export const ResearchPlatformPage: React.FC = () => {
       {
         title: <span className="whitespace-nowrap">涨跌幅</span>,
         dataIndex: 'latestChange',
-        width: 96,
+        width: 102,
         align: 'center',
-        render: (value: number) => (
-          <span className={`whitespace-nowrap ${value >= 0 ? 'font-semibold text-rose-500' : 'font-semibold text-emerald-500'}`}>
-            {value >= 0 ? '+' : ''}{value.toFixed(2)}%
-          </span>
-        ),
+        render: (value: number) => {
+          const displayValue = Math.abs(value) > 1.0 ? value : value * 100;
+          return (
+            <span className={`whitespace-nowrap font-bold ${displayValue >= 0 ? 'text-rose-500' : 'text-emerald-500'}`}>
+              {displayValue >= 0 ? '+' : ''}{displayValue.toFixed(2)}%
+            </span>
+          );
+        },
       },
       {
         title: <span className="whitespace-nowrap">换手率</span>,
@@ -1718,7 +1764,7 @@ export const ResearchPlatformPage: React.FC = () => {
   return (
     <>
       <div className={`${PAGE_LAYOUT.outerClass} research-platform-page`}>
-        <div className={`${PAGE_LAYOUT.frameClass}`}>
+        <div className={`${PAGE_LAYOUT.frameClass} overflow-y-auto custom-scrollbar`}>
           <header className={`${PAGE_LAYOUT.headerClass}`} style={{ height: `${PAGE_LAYOUT.headerHeight}px` }}>
             <div className="flex items-center gap-3">
               <div className="flex h-9 w-9 items-center justify-center rounded-2xl bg-gradient-to-br from-blue-500 via-indigo-500 to-violet-400 text-white shadow-lg shadow-blue-900/20">
@@ -1749,9 +1795,9 @@ export const ResearchPlatformPage: React.FC = () => {
             </div>
           </header>
 
-          <div className="flex-1 min-h-0 flex flex-col">
-            <div className={`${PAGE_LAYOUT.contentOuterClass} flex-1 min-h-0`}>
-              <div className="grid gap-4 2xl:grid-cols-[320px_minmax(0,1fr)] xl:grid-cols-[300px_minmax(0,1fr)] h-full">
+          <div className="flex-1 flex flex-col">
+            <div className={`${PAGE_LAYOUT.contentOuterClass}`}>
+              <div className="grid gap-4 2xl:grid-cols-[320px_minmax(0,1fr)] xl:grid-cols-[300px_minmax(0,1fr)]">
                 {/* 左侧侧边栏 - 吸顶且固定高度 */}
                 <div className="flex flex-col gap-4 sticky top-4 h-[calc(100vh-120px)] z-30">
                   <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm flex-shrink-0">
@@ -1763,44 +1809,39 @@ export const ResearchPlatformPage: React.FC = () => {
                     <div className="space-y-4">
                       <div>
                         <div className="mb-2 text-xs font-semibold text-slate-500">研究模型</div>
-                        {modelsLoading ? (
-                          <div className="flex items-center gap-2 px-3 py-2 text-xs text-slate-400">
-                            <Spin size="small" /> 加载中...
-                          </div>
-                        ) : (
-                          <Select
-                            className={`w-full ${FIELD_STYLES.select} mb-3`}
-                            value={selectedModelId}
-                            onChange={setSelectedModelId}
-                            placeholder="请选择投研模型"
-                            options={availableModels.map((item) => ({
-                              value: item.modelId,
-                              label: item.name,
-                            }))}
-                          />
-                        )}
+                        <Select
+                          className={`w-full ${FIELD_STYLES.select} mb-1`}
+                          value={selectedModelId}
+                          onChange={setSelectedModelId}
+                          loading={modelsLoading}
+                          placeholder="请选择投研模型"
+                          options={availableModels.map((item) => ({
+                            value: item.modelId,
+                            label: item.name,
+                          }))}
+                        />
+                        {modelsError && <div className="text-[10px] text-red-500 mb-2">{modelsError}</div>}
                       </div>
 
                       <div>
                         <div className="mb-2 text-xs font-semibold text-slate-500">推理批次</div>
-                        {!selectedModelId ? (
-                          <div className="text-xs text-slate-400 px-1">请先选择模型</div>
-                        ) : runsLoading ? (
-                          <div className="flex items-center gap-2 px-3 py-2 text-xs text-slate-400">
-                            <Spin size="small" /> 加载中...
+                        <Select
+                          className={`w-full ${FIELD_STYLES.select} mb-1`}
+                          value={selectedRunId}
+                          onChange={setSelectedRunId}
+                          loading={runsLoading}
+                          placeholder="选择推理批次"
+                          options={availableRuns.map((item) => ({
+                            value: item.runId,
+                            label: `${item.inferenceDate} · ${item.runId.slice(-8)}`,
+                          }))}
+                        />
+                        {!runsLoading && !runsError && availableRuns.length === 0 && (
+                          <div className="text-[10px] text-amber-600 mb-2">
+                            暂无历史推理数据，请先在模型训练/模型管理中生成推理批次。
                           </div>
-                        ) : (
-                          <Select
-                            className={`w-full ${FIELD_STYLES.select}`}
-                            value={selectedRunId}
-                            onChange={setSelectedRunId}
-                            placeholder="选择推理批次"
-                            options={availableRuns.map((item) => ({
-                              value: item.runId,
-                              label: `${item.inferenceDate} · ${item.runId.slice(-8)}`,
-                            }))}
-                          />
                         )}
+                        {runsError && <div className="text-[10px] text-red-500 mb-2">{runsError}</div>}
                       </div>
 
                       <div>
@@ -2083,7 +2124,7 @@ export const ResearchPlatformPage: React.FC = () => {
 
                 {/* 右侧主内容 */}
                 <motion.div
-                  className="flex flex-col gap-4 min-w-0 flex-1 overflow-y-auto custom-scrollbar pb-20 pr-2"
+                  className="flex flex-col gap-4 min-w-0 flex-1 pb-20"
                   initial="hidden"
                   animate="visible"
                   variants={{
@@ -2301,6 +2342,7 @@ export const ResearchPlatformPage: React.FC = () => {
                                   score: 0,
                                   signal: 'hold' as SignalType,
                                   latestChange: 0,
+                                  totalReturn: null,
                                   nextDayReturn: null,
                                   day3Return: null,
                                   consecutiveLimitUpDays: 0,
@@ -2367,6 +2409,7 @@ export const ResearchPlatformPage: React.FC = () => {
                                   score: item.fusionScore ?? 0,
                                   signal: 'hold' as SignalType,
                                   latestChange: 0,
+                                  totalReturn: null,
                                   nextDayReturn: null,
                                   day3Return: null,
                                   consecutiveLimitUpDays: 0,
@@ -2467,6 +2510,7 @@ export const ResearchPlatformPage: React.FC = () => {
         width={1040}
         open={detailModalOpen}
         onCancel={() => setDetailModalOpen(false)}
+        destroyOnHidden
         title={selectedStock ? (
           <div className="flex items-center justify-between pr-8">
             <div className="flex items-center gap-2">
@@ -2595,7 +2639,13 @@ export const ResearchPlatformPage: React.FC = () => {
               {klineLoading ? (
                 <div className="flex h-[240px] items-center justify-center text-slate-400">加载中...</div>
               ) : klineOption ? (
-                <ReactECharts option={klineOption} style={{ height: '240px' }} notMerge lazyUpdate />
+                <ReactECharts
+                  key={`${selectedStock?.code}-${selectedRunId}`}
+                  option={klineOption}
+                  style={{ height: '240px' }}
+                  notMerge
+                  lazyUpdate
+                />
               ) : (
                 <div className="flex h-[240px] items-center justify-center text-slate-400 text-xs">暂无 K 线数据</div>
               )}
