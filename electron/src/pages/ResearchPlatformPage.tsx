@@ -1446,10 +1446,10 @@ export const ResearchPlatformPage: React.FC = () => {
       {
         title: <span className="whitespace-nowrap">指数/状态</span>,
         key: 'status',
-        width: 120,
+        width: 160,
         align: 'center',
         render: (_, record) => (
-          <div className="flex flex-wrap gap-1 justify-center">
+          <div className="flex flex-wrap gap-1 justify-center whitespace-nowrap">
             {record.isSt && <Tag color="error" className="m-0 text-[10px] scale-90">ST</Tag>}
             {record.isHs300 && <Tag color="blue" className="m-0 text-[10px] scale-90">HS300</Tag>}
             {record.isCsi500 && <Tag color="cyan" className="m-0 text-[10px] scale-90">ZZ500</Tag>}
@@ -1556,10 +1556,10 @@ export const ResearchPlatformPage: React.FC = () => {
       {
         title: <span className="whitespace-nowrap">指数/状态</span>,
         key: 'status',
-        width: 120,
+        width: 160,
         align: 'center',
         render: (_, record) => (
-          <div className="flex flex-wrap gap-1 justify-center">
+          <div className="flex flex-wrap gap-1 justify-center whitespace-nowrap">
             {record.isSt && <Tag color="error" className="m-0 text-[10px] scale-90">ST</Tag>}
             {record.isHs300 && <Tag color="blue" className="m-0 text-[10px] scale-90">HS300</Tag>}
             {record.isCsi500 && <Tag color="cyan" className="m-0 text-[10px] scale-90">ZZ500</Tag>}
@@ -1685,10 +1685,10 @@ export const ResearchPlatformPage: React.FC = () => {
       {
         title: <span className="whitespace-nowrap">指数/状态</span>,
         key: 'status',
-        width: 120,
+        width: 160,
         align: 'center',
         render: (_, record) => (
-          <div className="flex flex-wrap gap-1 justify-center">
+          <div className="flex flex-wrap gap-1 justify-center whitespace-nowrap">
             {record.isSt && <Tag color="error" className="m-0 text-[10px] scale-90">ST</Tag>}
             {record.isHs300 && <Tag color="blue" className="m-0 text-[10px] scale-90">HS300</Tag>}
             {record.isCsi500 && <Tag color="cyan" className="m-0 text-[10px] scale-90">ZZ500</Tag>}
