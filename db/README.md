@@ -21,7 +21,6 @@ db/
 ## 1. custom/ — 投研对齐产物 (Single Source of Truth)
 
 **内容**：`fundamental_aligned.parquet` 是 QuantMind 的核心高维数据集。它深度整合了 2016-2026 年全市场所有标的的行情（OHLCV）、89 维深度因子（估值、质量、技术指标）、资金流向、微观结构以及行业概念标签。
-**新增口径字段（2026-05-16）**：在保留现有前复权 `open/high/low/close` 的同时，数据管道会补充不复权字段 `raw_open/raw_high/raw_low/raw_close/raw_volume/raw_amount`，默认仅用于回溯与审计，不参与前端默认读取。
 
 **核心价值**：
 - **快捷带入参数**：专为 Qlib 回测和实盘策略设计。用户在编写策略逻辑时，无需自行编写复杂的特征计算代码或进行多表关联（Join），直接调用数据即可。

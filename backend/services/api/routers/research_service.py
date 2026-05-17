@@ -70,7 +70,7 @@ _SDL_SELECT_BY_RUN_DATE = """
     COALESCE(sdl_run.is_st, 0) <> 0 AS is_st,
     COALESCE(sdl_run.idx_hs300, 0) <> 0 AS is_hs300,
     COALESCE(sdl_run.idx_zz1000, 0) <> 0 AS is_csi1000,
-    COALESCE(sdl_run.pct_change, 0) * 100 AS latest_change_pct,
+    COALESCE(sdl_run.pct_change, 0) AS latest_change_pct,
     CASE
         WHEN NULLIF(sdl_run.close, 0) IS NULL OR sdl_run.close_next_1d IS NULL THEN NULL
         ELSE sdl_run.close_next_1d / NULLIF(sdl_run.close, 0) - 1
@@ -164,7 +164,7 @@ _SDL_SELECT_SIMPLE = """
     COALESCE(sdl_latest.is_st, 0) <> 0 AS is_st,
     COALESCE(sdl_latest.idx_hs300, 0) <> 0 AS is_hs300,
     COALESCE(sdl_latest.idx_zz1000, 0) <> 0 AS is_csi1000,
-    COALESCE(sdl_latest.pct_change * 100, 0) AS latest_change_pct,
+    COALESCE(sdl_latest.pct_change, 0) AS latest_change_pct,
     0 AS return_1d,
     0 AS return_3d,
     COALESCE(sdl_latest.ma5, 0) AS ma5,
@@ -289,24 +289,7 @@ def _format_candidate_record(row: dict[str, Any]) -> dict[str, Any]:
     risk_flags = parse_json(row.get("risk_flags"))
     return_1d = _serialize_float(row.get("return_1d"))
     return_3d = _serialize_float(row.get("return_3d"))
-    
-    # 启发式修正今日涨跌幅 100x bug
-    def fix_pct(v):
-        val = _serialize_float(v) or 0.0
-        if abs(val) > 1.0:
-            return val
-        return val * 100.0
-
-    return_1d_pct = fix_pct(return_1d) if return_1d is not None else None
-    return_3d_pct = fix_pct(return_3d) if return_3d is not None else None
-
-    # 计算今日涨跌幅 (Latest Change)
-    latest_change = _serialize_float(row.get("latest_change_pct")) or 0.0
-    # 启发式修正 100x bug: 如果绝对值大于 1.0 (如 5.92 表示 5.92%)，则认为已经百分号化
-    if abs(latest_change) > 1.0:
-        latest_change_pct = latest_change
-    else:
-        latest_change_pct = latest_change * 100.0
+    latest_change_pct = _serialize_float(row.get("latest_change_pct")) or 0.0
 
     snapshot_turnover_rate = _serialize_float(row.get("snapshot_turnover_rate"))
     live_turnover_rate = _serialize_float(row.get("turnover_rate") or 0.0) or 0.0
@@ -352,10 +335,10 @@ def _format_candidate_record(row: dict[str, Any]) -> dict[str, Any]:
         "volRatio20": _serialize_float(row.get("volume_ratio_20")) or 0.0,
         "volumeTrend3d": _serialize_float(row.get("volume_trend_3d")),
         "volumeTrend5d": False,
-        "return1d": return_1d_pct,
-        "return3d": return_3d_pct,
-        "nextDayReturn": return_1d_pct,
-        "day3Return": return_3d_pct,
+        "return1d": return_1d,
+        "return3d": return_3d,
+        "nextDayReturn": return_1d,
+        "day3Return": return_3d,
         "mainFlow": (_serialize_float(row.get("main_flow")) or 0.0) / 1000000.0,
         "flowNetAmount": (_serialize_float(row.get("flow_net_amount")) or 0.0) / 1000000.0,
         "instOwnership": (_serialize_float(row.get("inst_ownership")) or 0.0) / 1000000.0,

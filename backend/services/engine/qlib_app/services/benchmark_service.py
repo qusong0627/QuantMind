@@ -18,6 +18,7 @@ from backend.services.engine.qlib_app.schemas.analysis import (
 from backend.services.engine.qlib_app.services.backtest_persistence import (
     BacktestPersistence,
 )
+from backend.services.engine.qlib_app.utils.benchmark_symbol import benchmark_candidates
 from backend.services.engine.qlib_app.utils.qlib_utils import D
 from backend.services.engine.qlib_app.utils.structured_logger import StructuredTaskLogger
 
@@ -133,21 +134,16 @@ class BenchmarkService:
                 start_date = dates[0].strftime("%Y-%m-%d")
                 end_date = dates[-1].strftime("%Y-%m-%d")
 
-                # Qlib 基准代码通常是 SH000300 等
-                df = D.features(
-                    [benchmark_id],
-                    ["$close"],
-                    start_time=start_date,
-                    end_time=end_date,
-                )
-                if df is None or df.empty:
-                    # 如果 Qlib 查不到，尝试默认 fallback (沪深300)
+                df = None
+                for candidate in benchmark_candidates(benchmark_id):
                     df = D.features(
-                        ["SH000300"],
+                        [candidate],
                         ["$close"],
                         start_time=start_date,
                         end_time=end_date,
                     )
+                    if df is not None and not df.empty:
+                        break
 
                 if df is not None and not df.empty:
                     df = df.droplevel(level="instrument")

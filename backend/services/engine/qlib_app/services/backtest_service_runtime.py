@@ -33,6 +33,9 @@ from backend.services.engine.qlib_app.services.strategy_templates import (
 from backend.services.engine.qlib_app.utils.margin_position import (
     ensure_margin_backtest_support,
 )
+from backend.services.engine.qlib_app.utils.benchmark_symbol import (
+    normalize_benchmark_symbol,
+)
 from backend.services.engine.qlib_app.utils.qlib_utils import (
     QLIB_BACKEND,
     D,
@@ -109,6 +112,7 @@ class QlibBacktestServiceRuntimeMixin(QlibBacktestServiceQueryMixin):
             "user_id": request.user_id,
             "tenant_id": request.tenant_id,
         }
+        request.benchmark = normalize_benchmark_symbol(request.benchmark)
         if not is_optimization_child:
             await self._persistence.save_run(
                 backtest_id=backtest_id,

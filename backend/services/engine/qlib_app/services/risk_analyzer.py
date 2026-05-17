@@ -13,6 +13,7 @@ from backend.services.engine.qlib_app.schemas.backtest import (
     QlibBacktestResult,
     QlibPortfolioMetrics,
 )
+from backend.services.engine.qlib_app.utils.benchmark_symbol import benchmark_candidates
 from backend.services.engine.qlib_app.utils.qlib_utils import D
 from backend.services.engine.qlib_app.utils.structured_logger import StructuredTaskLogger
 from backend.shared.redis_sentinel_client import get_redis_sentinel_client
@@ -275,12 +276,16 @@ class RiskAnalyzer:
     @staticmethod
     def _compute_benchmark_return(benchmark: str, start_date: str, end_date: str) -> float | None:
         try:
-            df = D.features(
-                [benchmark],
-                ["$close"],
-                start_time=start_date,
-                end_time=end_date,
-            )
+            df = None
+            for candidate in benchmark_candidates(benchmark):
+                df = D.features(
+                    [candidate],
+                    ["$close"],
+                    start_time=start_date,
+                    end_time=end_date,
+                )
+                if df is not None and not df.empty:
+                    break
             if df is None or df.empty:
                 return None
             df = df.droplevel(level="instrument")
@@ -312,7 +317,11 @@ class RiskAnalyzer:
         risk_free_rate: float = 0.02,
     ) -> dict[str, float | None]:
         try:
-            bm_df = D.features([benchmark], ["$close"], start_time=start_date, end_time=end_date)
+            bm_df = None
+            for candidate in benchmark_candidates(benchmark):
+                bm_df = D.features([candidate], ["$close"], start_time=start_date, end_time=end_date)
+                if bm_df is not None and not bm_df.empty:
+                    break
             if bm_df is None or bm_df.empty:
                 return {"alpha": None, "beta": None, "information_ratio": None}
 

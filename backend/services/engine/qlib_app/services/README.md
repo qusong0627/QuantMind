@@ -197,6 +197,9 @@
 - 交易统计稳定性修复：`TradeStatsService` 兼容 `date/datetime/created_at` 等字段并统一映射为 `trade_date`，修复高级分析“交易统计”报错 `KeyError: 'trade_date'`。
 - 基准对比口径修复：`BenchmarkService` 从简单累加改为复利累计曲线（`(1+r).cumprod()-1`），并增加异常收益率清洗（`inf` 去除 + 区间裁剪），修复“超额收益/跟踪误差异常放大”问题。
 - 基准数据源修复：`BenchmarkService` 改为统一使用 `qlib_utils.D`（真实 qlib 优先，按环境变量决定是否回退 mock），避免误用本地 `qlib_mock` 导致基准曲线异常。
+- 基准代码命名空间兼容（2026-05-17）：
+  - 新增 `utils/benchmark_symbol.py`，统一将 `csi300/csi500/csi1000/000300/000905/000852` 等别名映射到 `IDX_SH000300/IDX_SH000905/IDX_SH000852`；
+  - `BacktestRuntime`、`RiskAnalyzer`、`BenchmarkService` 均改为“IDX 优先 + 旧代码兜底”查找，避免指数与个股代码冲突后基准收益读取失败。
 - 风险分析统计回退增强：当交易流水缺少 `pnl/profit` 字段时，`win_rate/profit_factor` 自动回退到日收益序列估算，避免回测详情长期显示 0。
 - 回测持久化增强：`qlib_backtest_runs` 按 `user_id + tenant_id` 自动裁剪，仅保留最近 10 条记录；历史查询服务层也统一按创建时间倒序返回最近 10 条，确保前端“回测历史”稳定展示最新结果。
 - 修复 Celery 进程中 `<PRED>` 信号模块导入失败：
