@@ -4,7 +4,7 @@ import { clsx } from 'clsx';
 import dayjs from 'dayjs';
 import {
   Layers, Star, RefreshCw, Search, Code, Calendar, Layers2,
-  History, Archive, Brain, CheckCircle2, Clock, XCircle,
+  History, Archive, Brain, CheckCircle2, Clock, XCircle, Trash2,
   ChevronRight, Play, Cpu, TrendingUp, Download, ChevronDown,
   ChevronUp, Shield, Zap, Activity, ListFilter, BarChart3, Info, AlertCircle,
 } from 'lucide-react';
@@ -718,11 +718,13 @@ export const InferenceCenterPanel: React.FC<{
   onHistoryStatusFilterChange: (value: 'all' | 'running' | 'completed' | 'failed') => void;
   historyDateFilter: dayjs.Dayjs | null;
   onHistoryDateFilterChange: (value: dayjs.Dayjs | null) => void;
+  onDeleteHistory?: (runId: string) => void;
 }> = ({
   model, inferenceDate, onDateChange, targetDate, targetDateLoading, horizonDays,
   running, onRun, onRunAsDefault, isDefault, lastRun, history, historyLoading, onViewRanking,
   autoSettings, autoSaving, onToggleAuto, latestInferenceRun, latestInferenceRunLoading, precheck, precheckLoading, onRefreshPrecheck,
   historyRunIdFilter, onHistoryRunIdFilterChange, historyStatusFilter, onHistoryStatusFilterChange, historyDateFilter, onHistoryDateFilterChange,
+  onDeleteHistory,
 }) => {
   const currentModelName = modelDisplayName(model);
   const latestRunModelLabel = latestInferenceRun?.model_id === model.model_id
@@ -957,7 +959,20 @@ export const InferenceCenterPanel: React.FC<{
                       </div>
                       <Text className="text-[9px] text-slate-400 pl-3.5">{run.prediction_trade_date}</Text>
                     </div>
-                    <ChevronRight size={12} className="text-slate-200 group-hover:text-blue-400" />
+                    <div className="flex items-center gap-1">
+                      <Button
+                        size="small"
+                        type="text"
+                        danger
+                        icon={<Trash2 size={12} />}
+                        className="opacity-0 group-hover:opacity-100 transition-opacity p-0 h-6 w-6 flex items-center justify-center hover:bg-rose-50 rounded-lg"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onDeleteHistory?.(run.run_id);
+                        }}
+                      />
+                      <ChevronRight size={12} className="text-slate-200 group-hover:text-blue-400" />
+                    </div>
                   </div>
                 ))}
               </div>

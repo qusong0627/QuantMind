@@ -7,6 +7,7 @@ import argparse
 import logging
 import math
 import os
+import re
 from pathlib import Path
 from urllib.parse import quote
 
@@ -24,6 +25,15 @@ logging.basicConfig(
 )
 LOGGER = logging.getLogger("sync_stock_daily_latest")
 
+RAW_OHLCV_COLUMNS: dict[str, str] = {
+    "raw_open": "DOUBLE PRECISION",
+    "raw_high": "DOUBLE PRECISION",
+    "raw_low": "DOUBLE PRECISION",
+    "raw_close": "DOUBLE PRECISION",
+    "raw_volume": "DOUBLE PRECISION",
+    "raw_amount": "DOUBLE PRECISION",
+}
+
 INT_COLUMNS = {
     "listed_days",
     "is_st",
@@ -33,6 +43,7 @@ INT_COLUMNS = {
     "micro_jump_flag",
     "idx_all",
     "idx_hs300",
+    "idx_zz500",
     "idx_zz1000",
     "idx_margin",
     "idx_chinext",
@@ -48,9 +59,34 @@ INT_COLUMNS = {
     "concept_lithium",
 }
 
+INDEX_SYMBOLS = {
+    "SH000001",
+    "SH000016",
+    "SH000300",  # 沪深300
+    "SH000688",
+    "SH000852",  # 中证1000
+    "SH000905",  # 中证500
+    "SH000906",
+    "SH000985",
+    "SZ399001",
+    "SZ399005",
+    "SZ399006",
+    "SZ399300",
+    "SZ399905",
+    "SZ399906",
+}
+
+STOCK_SYMBOL_PATTERN = re.compile(r"^(SH|SZ|BJ)\d{6}$")
+
 
 def project_root() -> Path:
     return Path(__file__).resolve().parents[3]
+
+
+import sys
+ROOT = project_root()
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 
 def normalize_db_url(raw: str) -> str:
@@ -115,9 +151,40 @@ def get_table_columns(engine) -> list[str]:
     return [row[0] for row in rows]
 
 
+def ensure_raw_columns(engine) -> None:
+    with engine.begin() as conn:
+        for col, col_type in RAW_OHLCV_COLUMNS.items():
+            conn.execute(text(f"ALTER TABLE public.stock_daily_latest ADD COLUMN IF NOT EXISTS {col} {col_type}"))
+
+
 def load_incremental_frame(parquet_path: Path, local_max_date: pd.Timestamp | None) -> pd.DataFrame:
     frame = pd.read_parquet(parquet_path)
     frame["trade_date"] = pd.to_datetime(frame["trade_date"])
+
+    # 导库口径：stock_daily_latest 仅保留股票，排除所有指数命名空间与指数代码
+    if "symbol" in frame.columns:
+        sym = frame["symbol"].astype(str).str.upper().str.strip()
+        is_stock = sym.map(lambda s: bool(STOCK_SYMBOL_PATTERN.match(s)))
+        is_index = sym.str.startswith("IDX_") | sym.isin(INDEX_SYMBOLS)
+        frame = frame[is_stock & (~is_index)].copy()
+
+    required = {"open", "high", "low", "close", "adj_factor"}
+    if required.issubset(frame.columns):
+        adj = pd.to_numeric(frame["adj_factor"], errors="coerce").fillna(1.0)
+        adj = adj.where(adj > 0, 1.0)
+        if "raw_open" not in frame.columns:
+            frame["raw_open"] = pd.to_numeric(frame["open"], errors="coerce") * adj
+        if "raw_high" not in frame.columns:
+            frame["raw_high"] = pd.to_numeric(frame["high"], errors="coerce") * adj
+        if "raw_low" not in frame.columns:
+            frame["raw_low"] = pd.to_numeric(frame["low"], errors="coerce") * adj
+        if "raw_close" not in frame.columns:
+            frame["raw_close"] = pd.to_numeric(frame["close"], errors="coerce") * adj
+    if "volume" in frame.columns and "raw_volume" not in frame.columns:
+        frame["raw_volume"] = pd.to_numeric(frame["volume"], errors="coerce")
+    if "amount" in frame.columns and "raw_amount" not in frame.columns:
+        frame["raw_amount"] = pd.to_numeric(frame["amount"], errors="coerce")
+
     if local_max_date is not None:
         frame = frame[frame["trade_date"] > local_max_date].copy()
     return frame.sort_values(["trade_date", "symbol"]).reset_index(drop=True)
@@ -201,6 +268,7 @@ def main() -> None:
     db_url = get_database_url(args.database_url)
     engine = create_engine(db_url)
 
+    ensure_raw_columns(engine)
     table_columns = get_table_columns(engine)
     local_rows, local_min, local_max = get_table_coverage(engine)
     LOGGER.info(

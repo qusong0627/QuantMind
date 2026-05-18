@@ -39,6 +39,12 @@ db/
 
 **内容**：Qlib 原生二进制格式数据，供 Qlib 引擎直接调用进行回测计算。主要包含 `calendars/` (交易日历) 和 `features/` (基础 OHLCV 二进制)。
 
+**复权方式**：
+- **后复权价格**：用于计算收益率、技术指标等，确保价格序列连续可比
+- **不复权价格**：用于获取实际成交价格，反映真实交易成本
+
+> **说明**：后复权价格适合策略回测中的收益计算，不复权价格适合模拟实盘交易时的下单价格。
+
 ---
 
 ## 4. backups/ — 数据库备份与导入
@@ -62,10 +68,10 @@ TRUNCATE TABLE stock_daily_latest;
 如果数据库运行在 Docker 容器中（默认容器名为 `quantmind-postgresql`）：
 ```bash
 # 1. 拷贝 CSV 到容器
-docker cp db/backups/stock_daily_latest_2026_full.csv quantmind-postgresql:/tmp/
+docker cp db/backups/stock_daily_latest.csv quantmind-postgresql:/tmp/
 
 # 2. 执行导入命令
-docker exec -it quantmind-postgresql psql -U postgres -d quantmind -c "\COPY stock_daily_latest FROM '/tmp/stock_daily_latest_2026_full.csv' WITH (FORMAT csv, HEADER true, NULL '')"
+docker exec -it quantmind-postgresql psql -U postgres -d quantmind -c "\COPY stock_daily_latest FROM '/tmp/stock_daily_latest.csv' WITH (FORMAT csv, HEADER true, NULL '')"
 ```
 
 #### 方法 C：自动化同步脚本

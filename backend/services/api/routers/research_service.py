@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import time
 from datetime import date, datetime
 from typing import Any
@@ -11,6 +12,7 @@ from typing import Any
 from sqlalchemy import text
 
 from backend.shared.database_manager_v2 import get_session
+from backend.shared.redis_sentinel_client import get_redis_sentinel_client
 from backend.shared.stock_utils import StockCodeUtil
 
 _UNIVERSE_CACHE_TTL_SECONDS = 90
@@ -19,6 +21,140 @@ _UNIVERSE_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 _SDL_CACHE_TTL_SECONDS = 120
 _SDL_CACHE_MAX_ENTRIES = 512
 _SDL_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+_SDL_REDIS_YEAR = int(os.getenv("RESEARCH_SDL_REDIS_YEAR", "2026"))
+_SDL_REDIS_TTL_SECONDS = int(os.getenv("RESEARCH_SDL_REDIS_TTL_SECONDS", str(36 * 3600)))
+
+
+def _redis_get_json(key: str) -> dict[str, Any] | None:
+    try:
+        redis = get_redis_sentinel_client()
+        raw = redis.get(key)
+        if not raw:
+            return None
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8", errors="ignore")
+        parsed = json.loads(raw)
+        return parsed if isinstance(parsed, dict) else None
+    except Exception:
+        return None
+
+
+def _redis_set_json(key: str, value: dict[str, Any], ttl_seconds: int) -> None:
+    try:
+        redis = get_redis_sentinel_client()
+        payload = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        redis.setex(key, ttl_seconds, payload)
+    except Exception:
+        return
+
+
+def _sdl_redis_key(trade_date: date) -> str:
+    return f"qm:research:sdl:{trade_date.isoformat()}:v2"
+
+
+async def _load_sdl_day_map(session, trade_date: date) -> dict[str, dict[str, Any]]:
+    if trade_date.year != _SDL_REDIS_YEAR:
+        return {}
+
+    cache_key = _sdl_redis_key(trade_date)
+    cached = _redis_get_json(cache_key)
+    if cached and "symbols" in cached and isinstance(cached["symbols"], dict):
+        symbols = cached["symbols"]
+        return symbols if isinstance(symbols, dict) else {}
+
+    sql = """
+        SELECT
+            symbol,
+            COALESCE(stock_name, '') AS stock_name,
+            COALESCE(industry, '') AS industry,
+            COALESCE(close, 0) AS close_price,
+            COALESCE(pe_ttm, 0) AS pe,
+            COALESCE(pb, 0) AS pb,
+            COALESCE(roe, 0) AS roe,
+            COALESCE(adj_factor, 1) AS adj_factor,
+            COALESCE(turnover_rate, 0) * 100 AS turnover_rate,
+            COALESCE(amount, 0) AS amount,
+            COALESCE(total_mv, 0) AS total_mv,
+            COALESCE(float_mv, 0) AS float_mv,
+            COALESCE(listed_days, 0) AS listed_days,
+            COALESCE(is_st, 0) <> 0 AS is_st,
+            COALESCE(idx_hs300, 0) <> 0 AS is_hs300,
+            COALESCE(idx_zz500, 0) <> 0 AS is_csi500,
+            COALESCE(idx_zz1000, 0) <> 0 AS is_csi1000,
+            COALESCE(pct_change, 0) AS latest_change_pct,
+            return_1d,
+            return_3d,
+            COALESCE(ma5, 0) AS ma5,
+            COALESCE(ma10, 0) AS ma10,
+            COALESCE(ma_gap_5, 0) AS ma_gap_5,
+            COALESCE(ma_gap_10, 0) AS ma_gap_10,
+            COALESCE(ma_gap_20, 0) AS ma_gap_20,
+            COALESCE(rsi_14, rsi_6, 0) AS rsi,
+            COALESCE(rsi_14, 0) AS rsi_14,
+            COALESCE(vol_atr_14, 0) AS atr,
+            COALESCE(macd_hist, 0) AS macd_hist,
+            COALESCE(volume_ratio_5, 0) AS volume_ratio_5,
+            COALESCE(volume_ratio_20, 0) AS volume_ratio_20,
+            COALESCE(volume_trend_3d, 0) AS volume_trend_3d,
+            COALESCE(main_flow, 0) AS main_flow,
+            COALESCE(flow_net_amount, 0) AS flow_net_amount,
+            COALESCE(inst_ownership, 0) AS inst_ownership,
+            COALESCE(profit_growth, 0) AS profit_growth,
+            COALESCE(
+              (
+                SELECT to_jsonb(array_agg(tag))
+                FROM (
+                  SELECT tag
+                  FROM (
+                    VALUES
+                      ('AI', COALESCE(concept_ai, 0)),
+                      ('芯片', COALESCE(concept_chip, 0)),
+                      ('新能源', COALESCE(concept_new_energy, 0)),
+                      ('光伏', COALESCE(concept_pv, 0)),
+                      ('锂电', COALESCE(concept_lithium, 0)),
+                      ('军工', COALESCE(concept_military, 0)),
+                      ('医药', COALESCE(concept_medical, 0)),
+                      ('金融科技', COALESCE(concept_fintech, 0)),
+                      ('消费', COALESCE(concept_consumption, 0)),
+                      ('国企改革', COALESCE(concept_state_owned, 0))
+                  ) AS concept_scores(tag, score)
+                  WHERE score > 0
+                  ORDER BY score DESC
+                  LIMIT 3
+                ) ranked_tags
+              ),
+              '[]'::jsonb
+            ) AS concept_tags,
+            COALESCE(
+              to_jsonb(array_remove(ARRAY[
+                CASE WHEN COALESCE(idx_hs300, 0) <> 0 THEN '沪深300' END,
+                CASE WHEN COALESCE(idx_zz500, 0) <> 0 THEN '中证500' END,
+                CASE WHEN COALESCE(idx_zz1000, 0) <> 0 THEN '中证1000' END,
+                CASE WHEN COALESCE(idx_chinext, 0) <> 0 THEN '创业板指数' END,
+                CASE WHEN COALESCE(idx_margin, 0) <> 0 THEN '两融标的' END,
+                CASE WHEN COALESCE(idx_all, 0) <> 0 THEN '全市场' END
+              ]::text[], NULL)),
+              '[]'::jsonb
+            ) AS index_tags,
+            COALESCE(consecutive_limit_up_days, 0) AS consecutive_limit_up_days_sdl
+        FROM stock_daily_latest
+        WHERE trade_date = :trade_date
+          AND volume > 0
+    """
+    res = await session.execute(text(sql), {"trade_date": trade_date})
+    symbol_map: dict[str, dict[str, Any]] = {}
+    for row in res.mappings():
+        payload = dict(row)
+        symbol = StockCodeUtil.to_prefix(str(payload.get("symbol") or ""))
+        if symbol:
+            symbol_map[symbol] = payload
+
+    _redis_set_json(
+        cache_key,
+        {"trade_date": trade_date.isoformat(), "symbols": symbol_map, "created_at": datetime.now().isoformat()},
+        _SDL_REDIS_TTL_SECONDS,
+    )
+    return symbol_map
 
 
 def _get_local_cache(cache: dict[str, tuple[float, dict[str, Any]]], key: str, ttl_seconds: int) -> dict[str, Any] | None:
@@ -69,6 +205,7 @@ _SDL_SELECT_BY_RUN_DATE = """
     COALESCE(sdl_run.listed_days, 0) AS listed_days,
     COALESCE(sdl_run.is_st, 0) <> 0 AS is_st,
     COALESCE(sdl_run.idx_hs300, 0) <> 0 AS is_hs300,
+    COALESCE(sdl_run.idx_zz500, 0) <> 0 AS is_csi500,
     COALESCE(sdl_run.idx_zz1000, 0) <> 0 AS is_csi1000,
     COALESCE(sdl_run.pct_change, 0) AS latest_change_pct,
     CASE
@@ -104,8 +241,9 @@ _SDL_SELECT_BY_RUN_DATE = """
             VALUES
               ('AI', COALESCE(sdl_run.concept_ai, 0)),
               ('芯片', COALESCE(sdl_run.concept_chip, 0)),
-              ('新能源', COALESCE(sdl_run.concept_new_energy, 0)),
+              ('新能源', COALESCE(concept_new_energy, 0)),
               ('光伏', COALESCE(sdl_run.concept_pv, 0)),
+              ('锂电', COALESCE(sdl_run.concept_lithium, 0)),
               ('军工', COALESCE(sdl_run.concept_military, 0)),
               ('医药', COALESCE(sdl_run.concept_medical, 0)),
               ('金融科技', COALESCE(sdl_run.concept_fintech, 0)),
@@ -122,6 +260,7 @@ _SDL_SELECT_BY_RUN_DATE = """
     COALESCE(
       to_jsonb(array_remove(ARRAY[
         CASE WHEN COALESCE(sdl_run.idx_hs300, 0) <> 0 THEN '沪深300' END,
+        CASE WHEN COALESCE(sdl_run.idx_zz500, 0) <> 0 THEN '中证500' END,
         CASE WHEN COALESCE(sdl_run.idx_zz1000, 0) <> 0 THEN '中证1000' END,
         CASE WHEN COALESCE(sdl_run.idx_chinext, 0) <> 0 THEN '创业板指数' END,
         CASE WHEN COALESCE(sdl_run.idx_margin, 0) <> 0 THEN '两融标的' END,
@@ -137,7 +276,7 @@ _SDL_SELECT_BY_RUN_DATE = """
 _SDL_LATEST = """
     SELECT DISTINCT ON (symbol) symbol, trade_date, stock_name, industry,
         close, pct_change, pe_ttm, pb, roe, adj_factor, turnover_rate, amount, total_mv, float_mv, listed_days, is_st,
-        idx_hs300, idx_zz1000, idx_chinext, idx_margin, idx_all,
+        idx_hs300, idx_zz500, idx_zz1000, idx_chinext, idx_margin, idx_all,
         ma5, ma10, ma_gap_5, ma_gap_10, ma_gap_20,
         rsi_14, rsi_6, vol_atr_14, macd_hist, volume_ratio_5, volume_ratio_20, volume_trend_3d,
         main_flow, flow_net_amount, inst_ownership, profit_growth,
@@ -163,6 +302,7 @@ _SDL_SELECT_SIMPLE = """
     COALESCE(sdl_latest.listed_days, 0) AS listed_days,
     COALESCE(sdl_latest.is_st, 0) <> 0 AS is_st,
     COALESCE(sdl_latest.idx_hs300, 0) <> 0 AS is_hs300,
+    COALESCE(sdl_latest.idx_zz500, 0) <> 0 AS is_csi500,
     COALESCE(sdl_latest.idx_zz1000, 0) <> 0 AS is_csi1000,
     COALESCE(sdl_latest.pct_change, 0) AS latest_change_pct,
     0 AS return_1d,
@@ -194,6 +334,7 @@ _SDL_SELECT_SIMPLE = """
               ('芯片', COALESCE(sdl_latest.concept_chip, 0)),
               ('新能源', COALESCE(sdl_latest.concept_new_energy, 0)),
               ('光伏', COALESCE(sdl_latest.concept_pv, 0)),
+              ('锂电', COALESCE(sdl_latest.concept_lithium, 0)),
               ('军工', COALESCE(sdl_latest.concept_military, 0)),
               ('医药', COALESCE(sdl_latest.concept_medical, 0)),
               ('金融科技', COALESCE(sdl_latest.concept_fintech, 0)),
@@ -210,6 +351,7 @@ _SDL_SELECT_SIMPLE = """
     COALESCE(
       to_jsonb(array_remove(ARRAY[
         CASE WHEN COALESCE(sdl_latest.idx_hs300, 0) <> 0 THEN '沪深300' END,
+        CASE WHEN COALESCE(sdl_latest.idx_zz500, 0) <> 0 THEN '中证500' END,
         CASE WHEN COALESCE(sdl_latest.idx_zz1000, 0) <> 0 THEN '中证1000' END,
         CASE WHEN COALESCE(sdl_latest.idx_chinext, 0) <> 0 THEN '创业板指数' END,
         CASE WHEN COALESCE(sdl_latest.idx_margin, 0) <> 0 THEN '两融标的' END,
@@ -348,6 +490,7 @@ def _format_candidate_record(row: dict[str, Any]) -> dict[str, Any]:
         "thesis": row.get("thesis_summary") or "",
         "updatedAt": _serialize_date(row.get("updated_at")),
         "isHs300": bool(row.get("is_hs300")),
+        "isCsi500": bool(row.get("is_csi500")),
         "isCsi1000": bool(row.get("is_csi1000")),
     }
 
@@ -478,6 +621,7 @@ async def _do_get_overview(
                 sdl.listed_days,
                 sdl.is_st,
                 sdl.idx_hs300,
+                sdl.idx_zz500,
                 sdl.idx_zz1000,
                 sdl.idx_chinext,
                 sdl.idx_margin,
@@ -508,6 +652,7 @@ async def _do_get_overview(
                 sdl.concept_chip,
                 sdl.concept_new_energy,
                 sdl.concept_pv,
+                sdl.concept_lithium,
                 sdl.concept_military,
                 sdl.concept_medical,
                 sdl.concept_fintech,
@@ -621,13 +766,59 @@ async def get_research_overview(
     return {"code": 200, "data": {"items": data["items"], "summary": data["summary"]}}
 
 
+async def _do_get_universe_with_sdl_redis(
+    tid: str, uid: str, run_id: str, limit: int, offset: int
+) -> dict[str, Any] | None:
+    params = {"tid": tid, "uid": uid, "rid": run_id, "limit": limit, "offset": offset}
+    where = "snap.tenant_id = :tid AND snap.user_id = :uid AND snap.run_id = :rid"
+    async with get_session(read_only=True) as session:
+        snap_sql = f"""
+            SELECT snap.*
+            FROM qm_research_candidate_snapshot snap
+            WHERE {where}
+            ORDER BY snap.score_rank ASC
+            LIMIT :limit OFFSET :offset
+        """
+        snap_rows = (await session.execute(text(snap_sql), params)).mappings().all()
+        if not snap_rows:
+            summary = await _fetch_summary(session, where, params, include_market_stats=False)
+            return {"items": [], "summary": summary}
+
+        trade_dates = {row.get("data_trade_date") for row in snap_rows}
+        if len(trade_dates) != 1:
+            return None
+        trade_date = next(iter(trade_dates))
+        if not isinstance(trade_date, date) or trade_date.year != _SDL_REDIS_YEAR:
+            return None
+
+        sdl_map = await _load_sdl_day_map(session, trade_date)
+        if not sdl_map:
+            return None
+
+        merged_rows: list[dict[str, Any]] = []
+        for row in snap_rows:
+            snap = dict(row)
+            symbol = StockCodeUtil.to_prefix(str(snap.get("symbol") or ""))
+            merged = dict(snap)
+            sdl = sdl_map.get(symbol)
+            if sdl:
+                merged.update(sdl)
+            merged_rows.append(merged)
+
+        items = [_format_candidate_record(r) for r in merged_rows]
+        summary = await _fetch_summary(session, where, params, include_market_stats=False)
+        return {"items": items, "summary": summary}
+
+
 async def get_research_universe(tid: str, uid: str, run_id: str, limit: int, offset: int = 0) -> dict[str, Any]:
     cache_key = f"{tid}:{uid}:{run_id}:{limit}:{offset}"
     cached = _get_local_cache(_UNIVERSE_CACHE, cache_key, _UNIVERSE_CACHE_TTL_SECONDS)
     if cached is not None:
         return cached
 
-    data = await _do_get_overview(tid, uid, None, run_id, limit, offset, include_market_stats=False)
+    data = await _do_get_universe_with_sdl_redis(tid, uid, run_id, limit, offset)
+    if data is None:
+        data = await _do_get_overview(tid, uid, None, run_id, limit, offset, include_market_stats=False)
     payload = {"code": 200, "data": {"items": data["items"], "summary": data["summary"]}}
     _set_local_cache(_UNIVERSE_CACHE, cache_key, payload, _UNIVERSE_CACHE_MAX_ENTRIES)
     return payload

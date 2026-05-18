@@ -145,6 +145,19 @@ async def lifespan(app: FastAPI):
         app.state.startup_healthy = False
         logger.error("trade sandbox signal consumer start failed: %s", e, exc_info=True)
 
+    # 启动模拟盘定时调度器
+    simulation_scheduler_task = None
+    try:
+        enabled = os.getenv("ENABLE_SIMULATION_SCHEDULER", "false").lower() in {"1", "true", "yes", "on"}
+        if enabled:
+            from backend.services.trade.simulation.scheduler import simulation_scheduler
+
+            await simulation_scheduler.start()
+            app.state.simulation_scheduler = simulation_scheduler
+            logger.info("Simulation scheduler started")
+    except Exception as e:
+        logger.error("trade simulation scheduler start failed: %s", e, exc_info=True)
+
     healthy = bool(app.state.startup_healthy and app.state.db_connected and app.state.redis_connected)
     set_service_health("quantmind-trade", healthy)
 
@@ -175,6 +188,14 @@ async def lifespan(app: FastAPI):
             await sandbox_consumer.stop()
         except Exception as e:
             logger.warning("trade sandbox signal consumer stop failed: %s", e)
+
+    # 停止模拟盘调度器
+    simulation_scheduler = getattr(app.state, "simulation_scheduler", None)
+    if simulation_scheduler is not None:
+        try:
+            await simulation_scheduler.stop()
+        except Exception as e:
+            logger.warning("trade simulation scheduler stop failed: %s", e)
 
     # 停止沙箱进程池
     try:

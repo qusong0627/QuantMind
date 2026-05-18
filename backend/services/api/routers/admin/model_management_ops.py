@@ -309,12 +309,14 @@ async def sync_official_data_update(
     scripts_dir = Path("/app/scripts/data/maintenance")
     processing_dir = Path("/app/scripts/data/processing")
 
-    # 按顺序执行同步步骤（完整流程：远程PG → parquet → qlib/stock_daily → 收益计算）
+    # 按顺序执行同步步骤（完整流程：远程PG → parquet → stock_daily → 指数行情 → 回填连板 → 收益计算 → 同步 qlib_data）
     steps = [
-        ("Step 0: 从远程PG拉取最新数据", "sync_parquets_from_remote_pg.py"),
-        ("Step 1: 同步 qlib_data", "sync_qlib_from_fundamental_parquet.py"),
-        ("Step 2: 同步 stock_daily_latest", "sync_stock_daily_latest_from_parquet.py"),
-        ("Step 3: 滚动计算一日/三日收益", "../processing/backfill_return_fields.py"),
+        ("Step 1/6: 从远程PG拉取最新数据", "sync_parquets_from_remote_pg.py"),
+        ("Step 2/6: 同步 stock_daily_latest", "sync_stock_daily_latest_from_parquet.py"),
+        ("Step 3/6: 从 Qlib features 同步指数行情", "sync_index_ohlcv_from_qlib_features.py"),
+        ("Step 4/6: 回填连板天数", "backfill_consecutive_limit_up_days.py"),
+        ("Step 5/6: 滚动计算一日/三日收益", "../processing/backfill_return_fields.py"),
+        ("Step 6/6: 同步 qlib_data", "sync_qlib_from_fundamental_parquet.py"),
     ]
 
     results = []
@@ -333,10 +335,12 @@ async def sync_official_data_update(
             })
             continue
 
-        # 收益计算脚本需要 --recent-days 参数
+        # 收益计算脚本需要 --recent-days 参数，连板回填脚本需要 --apply 参数
         cmd = ["python", str(script_path)]
         if "backfill_return" in script_name:
-            cmd.extend(["--recent-days", "5"])
+            cmd.extend(["--recent-days", "10"])
+        elif "backfill_consecutive" in script_name:
+            cmd.append("--apply")
 
         try:
             proc = subprocess.run(
