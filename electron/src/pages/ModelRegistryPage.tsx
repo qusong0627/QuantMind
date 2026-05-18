@@ -447,6 +447,33 @@ export const ModelRegistryPage: React.FC = () => {
     finally { setRankingLoading(false); }
   };
 
+  const handleDeleteHistory = (runId: string) => {
+    Modal.confirm({
+      title: '删除推理历史',
+      content: `确定要删除推理批次 "${runId}" 吗？此操作将同步删除关联的预测信号，且不可撤销。`,
+      okText: '确定删除',
+      okButtonProps: { danger: true },
+      cancelText: '取消',
+      onOk: async () => {
+        try {
+          await modelTrainingService.deleteInferenceHistory(runId);
+          message.success('推理历史已删除');
+          if (selectedModel) {
+            void loadInferenceHistory(selectedModel.model_id, {
+              runId: historyRunIdFilter || undefined,
+              status: historyStatusFilter === 'all' ? undefined : historyStatusFilter,
+              inferenceDate: historyDateFilter ? historyDateFilter.format('YYYY-MM-DD') : undefined,
+              page: 1,
+              pageSize: 20,
+            });
+          }
+        } catch (err: any) {
+          message.error(`删除失败: ${err?.message ?? '未知错误'}`);
+        }
+      },
+    });
+  };
+
   const handleExportCSV = () => {
     if (!rankingResult || rankingResult.rankings.length === 0) {
       message.warning('暂无可导出的排名数据');
@@ -752,6 +779,7 @@ export const ModelRegistryPage: React.FC = () => {
                             onHistoryStatusFilterChange={setHistoryStatusFilter}
                             historyDateFilter={historyDateFilter}
                             onHistoryDateFilterChange={setHistoryDateFilter}
+                            onDeleteHistory={handleDeleteHistory}
                           />
                         ),
                       },

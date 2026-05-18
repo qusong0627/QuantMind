@@ -44,6 +44,12 @@ def project_root() -> Path:
     return Path(__file__).resolve().parents[3]
 
 
+import sys
+ROOT = project_root()
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+
 def normalize_db_url(raw: str) -> str:
     url = raw.strip()
     if url.startswith("postgresql+asyncpg://"):
@@ -157,6 +163,31 @@ def fetch_incremental_rows(
         result["ind_code_l1"] = pd.to_numeric(result["ind_code_l1"], errors="coerce")
 
     return result
+
+
+def enrich_with_raw_ohlcv(frame: pd.DataFrame) -> pd.DataFrame:
+    """为前复权 OHLCV 数据补充不复权字段。"""
+    if frame.empty:
+        return frame
+
+    df = frame.copy()
+    required = {"open", "high", "low", "close", "adj_factor"}
+    if required.issubset(df.columns):
+        adj = pd.to_numeric(df["adj_factor"], errors="coerce").fillna(1.0)
+        adj = adj.where(adj > 0, 1.0)
+        for src, dst in (
+            ("open", "raw_open"),
+            ("high", "raw_high"),
+            ("low", "raw_low"),
+            ("close", "raw_close"),
+        ):
+            if dst not in df.columns:
+                df[dst] = pd.to_numeric(df[src], errors="coerce") * adj
+    if "volume" in df.columns and "raw_volume" not in df.columns:
+        df["raw_volume"] = pd.to_numeric(df["volume"], errors="coerce")
+    if "amount" in df.columns and "raw_amount" not in df.columns:
+        df["raw_amount"] = pd.to_numeric(df["amount"], errors="coerce")
+    return df
 
 
 def write_merged_parquet(
@@ -330,6 +361,8 @@ def sync_one(engine, spec: SyncSpec, chunk_size: int, dry_run: bool) -> None:
         return
 
     incoming = fetch_incremental_rows(engine, spec.source_table, selected_columns, local_max, chunk_size)
+    if spec.source_table == "fundamental_aligned":
+        incoming = enrich_with_raw_ohlcv(incoming)
     LOGGER.info("%s incremental rows fetched=%s", spec.source_table, len(incoming))
     if dry_run:
         return

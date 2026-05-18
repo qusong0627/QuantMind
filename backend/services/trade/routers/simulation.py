@@ -1,6 +1,5 @@
 from datetime import date
 from decimal import Decimal
-from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status, File, UploadFile
 from pydantic import BaseModel
@@ -14,6 +13,7 @@ from backend.services.trade.simulation.services.simulation_manager import (
     SimulationAccountManager,
 )
 from backend.services.trade.simulation.services.ocr_service import SimulationOCRService
+from backend.services.trade.simulation.engine import simulation_engine
 from backend.services.trade.trade_config import settings
 from backend.shared.database_manager_v2 import get_db_manager
 from backend.shared.stock_utils import StockCodeUtil
@@ -85,7 +85,7 @@ async def _get_latest_price(symbol: str) -> float:
     """
     market_url = settings.MARKET_DATA_SERVICE_URL.rstrip("/")
     price = 0.0
-    
+
     # Level 1: 实时行情
     try:
         async with httpx.AsyncClient(timeout=3.0) as client:
@@ -101,27 +101,27 @@ async def _get_latest_price(symbol: str) -> float:
         price = await _get_latest_close_from_sdl(symbol)
         if price > 0:
             logger.info(f"Fallback to SDL close for {symbol}: {price}")
-            
+
     return price
 
 
-async def _resolve_symbol_by_name(name: str) -> Optional[str]:
+async def _resolve_symbol_by_name(name: str) -> str | None:
     """
     通过股票名称反查标准 Prefix 代码
     """
     if not name:
         return None
-        
+
     try:
         db_manager = get_db_manager()
         # 清理名称中的特殊字符，如 *ST
         clean_name = name.replace("*", "").strip()
         query = text("""
-            SELECT symbol FROM stock_daily_latest 
+            SELECT symbol FROM stock_daily_latest
             WHERE stock_name LIKE :name
             ORDER BY trade_date DESC LIMIT 1
         """)
-        
+
         async with db_manager.get_master_session() as session:
             # 先试完全匹配
             result = await session.execute(query, {"name": f"%{clean_name}%"})
@@ -130,11 +130,11 @@ async def _resolve_symbol_by_name(name: str) -> Optional[str]:
                 return row[0]
     except Exception as e:
         logger.error(f"Failed to resolve symbol for name {name}: {e}")
-        
+
     return None
 
 
-async def _resolve_user_api_key(user_id: str) -> Optional[str]:
+async def _resolve_user_api_key(user_id: str) -> str | None:
     """从 user_profiles 读取用户级 API Key，兼容常见 user_id 形态。"""
     uid = str(user_id or "").strip()
     if not uid:
@@ -173,13 +173,13 @@ class AccountResetRequest(BaseModel):
 class HoldingItem(BaseModel):
     symbol: str
     quantity: float
-    name: Optional[str] = None
-    current_price: Optional[float] = None
+    name: str | None = None
+    current_price: float | None = None
 
 
 class SyncHoldingsRequest(BaseModel):
-    holdings: List[HoldingItem]
-    available_cash: Optional[float] = None
+    holdings: list[HoldingItem]
+    available_cash: float | None = None
 
 
 # SimulationSettingsRequest removed as it is deprecated.
@@ -219,7 +219,7 @@ async def get_simulation_settings(
         cooldown_days=COOLDOWN_DAYS,
     )
     return {
-        "success": True, 
+        "success": True,
         "data": {
             "initial_cash": data.get("initial_cash", DEFAULT_INITIAL_CASH),
             "can_modify": False, # Modification deprecated
@@ -370,7 +370,7 @@ async def list_simulation_fund_snapshots(
     ]
 @router.post("/sync/ocr")
 async def ocr_sync_holdings(
-    images: List[UploadFile] = File(...),
+    images: list[UploadFile] = File(...),
     auth: AuthContext = Depends(get_auth_context),
     redis: RedisClient = Depends(get_redis),
 ):
@@ -380,25 +380,25 @@ async def ocr_sync_holdings(
     for img in images:
         content = await img.read()
         image_data.append(content)
-        
+
     ocr_result = await ocr_service.analyze_images(image_data)
     recognized_items = ocr_result if isinstance(ocr_result, list) else (ocr_result.get("holdings", []) if isinstance(ocr_result, dict) else [])
     available_cash = ocr_result.get("available_cash") if isinstance(ocr_result, dict) else None
-    
+
     # 4. 后处理：纠偏代码 & 统一价格口径（OCR 识别价优先，后端仅兜底）
     results = []
-    
+
     for item in recognized_items:
         original_symbol = item.get("symbol")
         name = item.get("name")
-        
+
         # 优先使用 OCR 识别出的代码（已在服务层通过 stocks_index.json 对齐）
         symbol = original_symbol if original_symbol else await _resolve_symbol_by_name(name)
-        
+
         if not symbol:
             logger.warning(f"Skipping holding {name}: Symbol could not be resolved.")
             continue
-            
+
         raw_price = item.get("current_price")
         try:
             current_price = float(raw_price or 0)
@@ -408,16 +408,16 @@ async def ocr_sync_holdings(
         # OCR 未识别到有效价格时，才用后端价格源兜底
         if current_price <= 0:
             current_price = await _get_latest_close_from_sdl(symbol)
-            
+
         results.append({
             **item,
             "symbol": symbol,
             "current_price": current_price,
             "market_value": round(current_price * item["quantity"], 2)
         })
-            
+
     return {
-        "success": True, 
+        "success": True,
         "data": results,
         "available_cash": available_cash
     }
@@ -434,11 +434,11 @@ async def confirm_holding_sync(
     逻辑：根据识别出的股票和数量，拉取当前最新市价，并重新计算账户初始金额，使同步后的盈亏对齐。
     """
     manager = SimulationAccountManager(redis)
-    
+
     # 1. 预先获取所有股票的最新价格并计算总市值
     sync_positions = []
     total_market_value = 0.0
-    
+
     for item in request.holdings:
         # 与预览一致：优先使用前端回传的 OCR 识别价，仅在缺失时兜底
         try:
@@ -447,13 +447,13 @@ async def confirm_holding_sync(
             price = 0.0
         if price <= 0:
             price = await _get_latest_close_from_sdl(item.symbol)
-        
+
         if price <= 0:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"无法获取股票 {item.symbol} 的实时价格或历史收盘价，同步中止。请检查代码是否正确。"
             )
-        
+
         total_market_value += price * item.quantity
         sync_positions.append({
             "symbol": item.symbol,
@@ -484,8 +484,142 @@ async def confirm_holding_sync(
             delta_volume=pos["quantity"],
             price=pos["price"]
         )
-            
+
     # 5. 捕获快照
     await _capture_simulation_snapshot(redis)
-    
+
     return {"success": True, "message": f"持仓同步成功，初始资产已对齐至 {calculated_initial_cash:,.2f}"}
+
+
+class BindStrategyRequest(BaseModel):
+    strategy_id: str
+
+
+class StrategyParams(BaseModel):
+    """策略参数，前端可覆盖"""
+    topk: int | None = None
+    weight_mode: str | None = None  # "equal" | "score_weighted" | "custom"
+    custom_weights: dict[str, float] | None = None
+    min_score: float | None = None
+    max_position_pct: float | None = None
+    lot_size: int | None = None
+
+
+class RunRebalanceRequest(BaseModel):
+    strategy_id: str | None = None
+    run_id: str | None = None
+    params: StrategyParams | None = None  # 前端可传递策略参数覆盖
+
+
+@router.post("/bind-strategy")
+async def bind_strategy(
+    request: BindStrategyRequest,
+    auth: AuthContext = Depends(get_auth_context),
+    redis: RedisClient = Depends(get_redis),
+):
+    """
+    绑定策略到模拟盘账户。
+    绑定后，定时调度器会自动执行该策略的调仓。
+    """
+    manager = SimulationAccountManager(redis)
+
+    # 确保账户存在
+    account = await manager.get_account(auth.user_id, tenant_id=auth.tenant_id)
+    if not account:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="模拟盘账户不存在，请先重置账户",
+        )
+
+    # 更新账户的策略绑定
+    import json
+    account["strategy_id"] = request.strategy_id
+    key = f"simulation:account:{auth.tenant_id}:{auth.user_id}"
+    redis.client.set(key, json.dumps(account))
+
+    logger.info(
+        "模拟盘绑定策略: tenant=%s user=%s strategy=%s",
+        auth.tenant_id,
+        auth.user_id,
+        request.strategy_id,
+    )
+
+    return {
+        "success": True,
+        "message": f"策略 {request.strategy_id} 已绑定",
+    }
+
+
+@router.post("/run")
+async def run_rebalance(
+    request: RunRebalanceRequest,
+    auth: AuthContext = Depends(get_auth_context),
+    redis: RedisClient = Depends(get_redis),
+):
+    """
+    手动触发一次模拟盘调仓。
+
+    Args:
+        strategy_id: 策略 ID，若不传则使用账户绑定的策略
+        run_id: 信号批次 ID，若不传则使用最新信号
+        params: 策略参数，可覆盖策略配置中的参数
+            - topk: TopK 数量
+            - weight_mode: 权重模式 ("equal" | "score_weighted" | "custom")
+            - custom_weights: 自定义权重 {symbol: weight}
+            - min_score: 最小得分阈值
+            - max_position_pct: 单只股票最大仓位比例
+            - lot_size: 最小交易单位
+    """
+    manager = SimulationAccountManager(redis)
+
+    # 获取账户
+    account = await manager.get_account(auth.user_id, tenant_id=auth.tenant_id)
+    if not account:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="模拟盘账户不存在，请先重置账户",
+        )
+
+    # 确定策略 ID
+    strategy_id = request.strategy_id or account.get("strategy_id")
+    if not strategy_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="未指定策略，请先绑定策略或传入 strategy_id",
+        )
+
+    # 构建策略参数覆盖
+    params_override = None
+    if request.params:
+        params_override = {
+            "topk": request.params.topk,
+            "weight_mode": request.params.weight_mode,
+            "custom_weights": request.params.custom_weights,
+            "min_score": request.params.min_score,
+            "max_position_pct": request.params.max_position_pct,
+            "lot_size": request.params.lot_size,
+        }
+
+    # 执行调仓
+    report = await simulation_engine.run_cycle(
+        tenant_id=auth.tenant_id,
+        user_id=str(auth.user_id),
+        strategy_id=strategy_id,
+        run_id=request.run_id,
+        params_override=params_override,
+    )
+
+    return {
+        "success": report.error is None,
+        "message": report.error or "调仓执行完成",
+        "data": {
+            "run_id": report.run_id,
+            "signal_count": report.signal_count,
+            "order_count": report.order_count,
+            "filled_count": report.filled_count,
+            "rejected_count": report.rejected_count,
+            "total_commission": report.total_commission,
+            "orders": report.orders,
+            "account": report.account_snapshot,
+        },
+    }
