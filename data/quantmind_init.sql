@@ -5457,16 +5457,16 @@ CREATE TABLE public.stock_daily_latest (
     ind_code_l1 text,
     ind_code_l2 text,
     label double precision,
-    concept_ai integer,
-    concept_chip integer,
-    concept_new_energy integer,
-    concept_pv integer,
-    concept_military integer,
-    concept_medical integer,
-    concept_fintech integer,
-    concept_consumption integer,
-    concept_state_owned integer,
-    concept_lithium integer,
+    concept_ai double precision,
+    concept_chip double precision,
+    concept_new_energy double precision,
+    concept_pv double precision,
+    concept_military double precision,
+    concept_medical double precision,
+    concept_fintech double precision,
+    concept_consumption double precision,
+    concept_state_owned double precision,
+    concept_lithium double precision,
     main_flow double precision,
     inst_ownership double precision,
     lrg_trd_tolbuynum double precision,
@@ -5474,20 +5474,27 @@ CREATE TABLE public.stock_daily_latest (
     flow_net_amount double precision,
     b_volume double precision,
     s_volume double precision,
-    idx_all integer,
-    idx_hs300 integer,
-    idx_zz1000 integer,
-    idx_margin integer,
-    idx_chinext integer,
+    idx_all double precision,
+    idx_hs300 double precision,
+    idx_zz1000 double precision,
+    idx_margin double precision,
+    idx_chinext double precision,
     micro_effective_spread double precision,
     micro_imbalance_volume double precision,
     micro_jump_flag double precision,
-    consecutive_limit_up_days integer,
-    limit_up_today integer,
-    limit_down_today integer,
-    profit_growth double precision
-)
-PARTITION BY RANGE (trade_date);
+    consecutive_limit_up_days double precision,
+    limit_up_today double precision,
+    limit_down_today double precision,
+    profit_growth double precision,
+    raw_open double precision,
+    raw_high double precision,
+    raw_low double precision,
+    raw_close double precision,
+    raw_volume double precision,
+    raw_amount double precision,
+    idx_zz500 double precision,
+    CONSTRAINT stock_daily_latest_pkey PRIMARY KEY (trade_date, symbol)
+);
 
 
 ALTER TABLE public.stock_daily_latest OWNER TO quantmind;
@@ -5496,7 +5503,7 @@ ALTER TABLE public.stock_daily_latest OWNER TO quantmind;
 -- Name: TABLE stock_daily_latest; Type: COMMENT; Schema: public; Owner: quantmind
 --
 
-COMMENT ON TABLE public.stock_daily_latest IS '股票日线行情最新数据（分区表），包含行情、技术指标、基本面、概念标签等综合字段';
+COMMENT ON TABLE public.stock_daily_latest IS '股票日线行情最新数据，包含行情、技术指标、基本面、概念标签等综合字段';
 
 
 --
