@@ -593,7 +593,51 @@ async def get_status(
     )
 
     if current_mode == "SIMULATION" and strategy_info:
-        # 纯模拟盘：只要 Redis 有记录，就认为是运行中
+        simulation_runtime_alive = False
+        simulation_runtime_msg = None
+        strategy_id_for_runtime = str(active_strat_id or "").strip()
+        if strategy_id_for_runtime:
+            try:
+                from backend.services.trade.sandbox.manager import sandbox_manager
+
+                simulation_runtime_alive = sandbox_manager.is_strategy_running(
+                    resolved_tenant_id,
+                    resolved_user_id,
+                    strategy_id_for_runtime,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Simulation runtime health check failed: tenant=%s user=%s strategy=%s error=%s",
+                    resolved_tenant_id,
+                    resolved_user_id,
+                    strategy_id_for_runtime,
+                    exc,
+                )
+                simulation_runtime_msg = "模拟盘运行状态校验失败，请稍后重试"
+
+        if not simulation_runtime_alive:
+            return {
+                "status": "not_running",
+                "message": simulation_runtime_msg
+                or "检测到模拟策略标记，但沙箱运行进程未存活，请重新启动模拟盘",
+                "user_id": resolved_user_id,
+                "mode": "SIMULATION",
+                "orchestration_mode": k8s_manager.mode,
+                "strategy": strategy_info,
+                "execution_config": active_exec_config,
+                "live_trade_config": active_live_trade_config,
+                "daily_pnl": portfolio_snapshot["daily_pnl"]
+                if portfolio_snapshot
+                else None,
+                "daily_return": portfolio_snapshot["daily_return"]
+                if portfolio_snapshot
+                else None,
+                "portfolio": portfolio_snapshot,
+                "latest_hosted_task": latest_hosted_task,
+                "latest_signal_run_id": latest_signal_run_id,
+                "signal_source_status": signal_source_status,
+            }
+
         return {
             "status": "running",
             "user_id": resolved_user_id,
@@ -617,8 +661,6 @@ async def get_status(
             "latest_hosted_task": latest_hosted_task,
             "latest_signal_run_id": latest_signal_run_id,
             "signal_source_status": signal_source_status,
-            "trading_permission": trading_permission,
-            "signal_readiness": signal_readiness,
         }
 
     if status is None:

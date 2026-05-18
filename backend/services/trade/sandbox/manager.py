@@ -1,9 +1,8 @@
 import multiprocessing as mp
 import os
 import signal
-import time
 import uuid
-from typing import Dict, Optional
+from typing import Any
 
 from backend.services.trade.sandbox.worker import sandbox_worker_main
 from backend.shared.logging_config import get_logger
@@ -36,17 +35,63 @@ class SandboxPlatformManager:
         self._active_runs: dict[str, int] = {}
         self._initialized = True
 
+    @staticmethod
+    def _strategy_key(tenant_id: str, user_id: str, strategy_id: str) -> str:
+        return f"{tenant_id}_{user_id}_{strategy_id}"
+
+    def _spawn_worker(self) -> int:
+        q = mp.Queue()
+        p = mp.Process(target=sandbox_worker_main, args=(q,), daemon=True)
+        p.start()
+        self._workers[p.pid] = p
+        self._task_queues[p.pid] = q
+        return p.pid
+
+    def _purge_dead_workers(self) -> None:
+        dead_pids = [pid for pid, proc in self._workers.items() if not proc.is_alive()]
+        if not dead_pids:
+            return
+
+        for pid in dead_pids:
+            self._workers.pop(pid, None)
+            queue = self._task_queues.pop(pid, None)
+            if queue is not None:
+                try:
+                    queue.close()
+                except Exception:
+                    pass
+
+        stale_keys = [key for key, pid in self._active_runs.items() if pid in dead_pids]
+        for key in stale_keys:
+            self._active_runs.pop(key, None)
+
+        logger.warning(
+            "Sandbox workers exited unexpectedly: dead_pids=%s stale_strategies=%s",
+            dead_pids,
+            stale_keys,
+        )
+
+    def _ensure_pool_capacity(self) -> None:
+        self._purge_dead_workers()
+        missing = max(0, self.pool_size - len(self._workers))
+        for _ in range(missing):
+            self._spawn_worker()
+
+    def _select_idle_worker_pid(self) -> int | None:
+        busy_pids = set(self._active_runs.values())
+        idle_pids = [
+            pid
+            for pid, proc in self._workers.items()
+            if proc.is_alive() and pid not in busy_pids
+        ]
+        if not idle_pids:
+            return None
+        return sorted(idle_pids)[0]
+
     def start_pool(self):
         """拉起进程池"""
         logger.info(f"Starting Sandbox Worker Pool with {self.pool_size} workers...")
-
-        for i in range(self.pool_size):
-            q = mp.Queue()
-            p = mp.Process(target=sandbox_worker_main, args=(q,), daemon=True)
-            p.start()
-            self._workers[p.pid] = p
-            self._task_queues[p.pid] = q
-
+        self._ensure_pool_capacity()
         logger.info(f"Sandbox Worker Pool started. PIDs: {list(self._workers.keys())}")
 
     def stop_pool(self):
@@ -59,6 +104,12 @@ class SandboxPlatformManager:
             p.join(timeout=3)
             if p.is_alive():
                 p.terminate()
+            q = self._task_queues.get(pid)
+            if q is not None:
+                try:
+                    q.close()
+                except Exception:
+                    pass
 
         self._workers.clear()
         self._task_queues.clear()
@@ -75,20 +126,25 @@ class SandboxPlatformManager:
         live_trade_config: dict | None = None,
     ) -> str:
         """分发策略到其中一个空闲的 Worker，返回 run_id"""
-        # 简单的随机/轮询找一个没满的工作队列，或者粗略绑定
-        # 为了简单，当前找到队列中最空闲或直接随便选一个
-        # 在真实高并发场景，需要跟踪 worker 的 busy 状态
-
-        # 随机哈希一个 pid
-        pids = list(self._workers.keys())
-        if not pids:
+        self._ensure_pool_capacity()
+        if not self._workers:
             raise RuntimeError("Sandbox Worker Pool is empty.")
 
+        key = self._strategy_key(tenant_id, user_id, strategy_id)
+        if self.is_strategy_running(tenant_id, user_id, strategy_id):
+            logger.warning(
+                "Simulation strategy is already running, restarting it: tenant=%s user=%s strategy=%s",
+                tenant_id,
+                user_id,
+                strategy_id,
+            )
+            self.stop_strategy(tenant_id, user_id, strategy_id)
+
+        assigned_pid = self._select_idle_worker_pid()
+        if assigned_pid is None:
+            raise RuntimeError("No idle sandbox worker available.")
+
         run_id = str(uuid.uuid4())
-
-        # 找出活跃度最低的 (简单拿 keys，这里没做精确空闲判定)
-        assigned_pid = pids[hash(user_id) % len(pids)]
-
         task = {
             "tenant_id": tenant_id,
             "user_id": user_id,
@@ -100,7 +156,7 @@ class SandboxPlatformManager:
         }
 
         self._task_queues[assigned_pid].put(task)
-        self._active_runs[f"{tenant_id}_{user_id}_{strategy_id}"] = assigned_pid
+        self._active_runs[key] = assigned_pid
         logger.info(
             f"Submitted simulation strategy {strategy_id} for user {user_id} to Sandbox Process PID {assigned_pid}"
         )
@@ -108,35 +164,71 @@ class SandboxPlatformManager:
 
     def stop_strategy(self, tenant_id: str, user_id: str, strategy_id: str) -> bool:
         """请求停止策略：由于当前一个进程在阻塞循环，停止的最暴力/安全方式是杀掉那个进程然后起一个替补"""
-        key = f"{tenant_id}_{user_id}_{strategy_id}"
+        self._purge_dead_workers()
+        key = self._strategy_key(tenant_id, user_id, strategy_id)
         if key not in self._active_runs:
             logger.warning(f"Strategy {strategy_id} is not tracked as running in sandbox.")
             return False
 
         pid = self._active_runs[key]
-        if pid in self._workers:
-            p = self._workers[pid]
-            # 杀掉重起
-            os.kill(pid, signal.SIGTERM)
-            p.join(timeout=2)
-            if p.is_alive():
-                os.kill(pid, signal.SIGKILL)
+        process = self._workers.get(pid)
+        if process is None or not process.is_alive():
+            self._active_runs.pop(key, None)
+            logger.warning(
+                "Sandbox strategy mapping found but process already exited: strategy=%s pid=%s",
+                strategy_id,
+                pid,
+            )
+            return False
 
-            # 移除旧的，补一个新的
-            del self._workers[pid]
-            q = self._task_queues.pop(pid)
+        shared_keys = [k for k, mapped_pid in self._active_runs.items() if mapped_pid == pid]
+        if len(shared_keys) > 1:
+            # 历史版本可能把多个策略映射到同一 PID；避免一次 stop 误杀其他用户策略。
+            self._active_runs.pop(key, None)
+            logger.error(
+                "Refusing to kill shared sandbox worker pid=%s for strategy=%s; shared_keys=%s",
+                pid,
+                strategy_id,
+                shared_keys,
+            )
+            return False
 
-            logger.info(f"Sandbox Worker {pid} killed for stopping strategy {strategy_id}. Respawning a new worker.")
+        os.kill(pid, signal.SIGTERM)
+        process.join(timeout=2)
+        if process.is_alive():
+            os.kill(pid, signal.SIGKILL)
 
-            new_q = mp.Queue()
-            new_p = mp.Process(target=sandbox_worker_main, args=(new_q,), daemon=True)
-            new_p.start()
-            self._workers[new_p.pid] = new_p
-            self._task_queues[new_p.pid] = new_q
+        self._workers.pop(pid, None)
+        queue = self._task_queues.pop(pid, None)
+        if queue is not None:
+            try:
+                queue.close()
+            except Exception:
+                pass
 
-            del self._active_runs[key]
-            return True
-        return False
+        for stale_key in [k for k, mapped_pid in self._active_runs.items() if mapped_pid == pid]:
+            self._active_runs.pop(stale_key, None)
+
+        new_pid = self._spawn_worker()
+        logger.info(
+            "Sandbox Worker %s killed for stopping strategy %s. Respawned worker pid=%s.",
+            pid,
+            strategy_id,
+            new_pid,
+        )
+        return True
+
+    def is_strategy_running(self, tenant_id: str, user_id: str, strategy_id: str) -> bool:
+        self._purge_dead_workers()
+        key = self._strategy_key(tenant_id, user_id, strategy_id)
+        pid = self._active_runs.get(key)
+        if pid is None:
+            return False
+        process: Any = self._workers.get(pid)
+        alive = bool(process and process.is_alive())
+        if not alive:
+            self._active_runs.pop(key, None)
+        return alive
 
 
 sandbox_manager = SandboxPlatformManager()
