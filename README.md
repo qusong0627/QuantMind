@@ -251,7 +251,7 @@ flowchart TB
     subgraph Storage["💾 数据层"]
         PG[("PostgreSQL<br/>数据库")]
         Redis[("Redis<br/>缓存")]
-        Local[("本地存储<br/>/data")]
+        Local[("本地存储<br/>/db")]
     end
 
     subgraph External["🌐 外部服务"]
