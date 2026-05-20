@@ -92,6 +92,11 @@ def read_bin(bin_path: Path, calendar: list[pd.Timestamp]) -> pd.Series:
         return pd.Series(dtype="float64")
     start_idx = struct.unpack("<I", raw[:4])[0]
     arr = pd.Series(pd.array(struct.unpack(f"<{(len(raw) - 4) // 4}f", raw[4:]), dtype="Float32")).astype("float64")
+    # 如果 start_idx 异常（大于 calendar 长度），则从 0 开始读取
+    # 这通常发生在指数数据的 bin 文件中
+    if start_idx >= len(calendar):
+        LOGGER.debug("Abnormal start_idx=%d for %s, resetting to 0", start_idx, bin_path)
+        start_idx = 0
     if start_idx >= len(calendar) or arr.empty:
         return pd.Series(dtype="float64")
     end_idx = min(start_idx + len(arr), len(calendar))
