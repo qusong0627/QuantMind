@@ -114,26 +114,39 @@ def auto_inference_if_needed() -> dict[str, Any]:
     from sqlalchemy import create_engine as sa_create_engine
     from sqlalchemy import text as sa_text
     from sqlalchemy.orm import sessionmaker as sa_sessionmaker
-    import exchange_calendars as xcals
+    from backend.shared.trading_calendar import calendar_service
     from backend.services.engine.inference.router_service import InferenceRouterService
 
     now_local = datetime.now(ZoneInfo("Asia/Shanghai"))
-    cal = xcals.get_calendar("XSHG")
 
     # 确定特征日期 (data_trade_date) 和预测日期 (prediction_trade_date)
     # 如果开盘前运行，T 是上一个交易日，T+1 是今日
     # 如果开盘后运行，T 是今日，T+1 是下一个交易日
     if now_local.time() < datetime.strptime("09:30", "%H:%M").time():
-        data_trade_date_obj = cal.previous_session(now_local.date()).date()
+        data_trade_date_obj = _run_async(
+            calendar_service.prev_trading_day(
+                market="SSE", trade_date=now_local.date(), tenant_id="default", user_id="*"
+            )
+        )
     else:
         data_trade_date_obj = now_local.date()
 
     data_trade_date = data_trade_date_obj.isoformat()
-    prediction_trade_date = cal.next_session(data_trade_date_obj).date().isoformat()
+    prediction_trade_date_obj = _run_async(
+        calendar_service.next_trading_day(
+            market="SSE", trade_date=data_trade_date_obj, tenant_id="default", user_id="*"
+        )
+    )
+    prediction_trade_date = prediction_trade_date_obj.isoformat()
 
     # 0. 排除非交易日
     try:
-        if not cal.is_session(data_trade_date):
+        is_td = _run_async(
+            calendar_service.is_trading_day(
+                market="SSE", trade_date=data_trade_date_obj, tenant_id="default", user_id="*"
+            )
+        )
+        if not is_td:
             logger.info("[AutoInference] 非交易日，跳过。date=%s", data_trade_date)
             return {"status": "skipped", "reason": "not_a_trading_day"}
     except Exception as e:
