@@ -56,6 +56,22 @@ async def lifespan(app: FastAPI):
         logger.error(f"❌ Qlib runtime bootstrap failed: {e}")
 
     try:
+        from backend.services.engine.qlib_app.services.rd_agent_persistence import RDAgentFactorPersistence
+
+        await RDAgentFactorPersistence().ensure_tables()
+    except Exception as e:
+        app.state.startup_healthy = False
+        logger.error(f"❌ RD-Agent factors table ensure failed: {e}")
+
+    try:
+        from backend.services.engine.quantbot.task_store import QuantBotTaskStore
+
+        await QuantBotTaskStore().ensure_tables()
+    except Exception as e:
+        app.state.startup_healthy = False
+        logger.error(f"❌ QuantBot tasks table ensure failed: {e}")
+
+    try:
         from backend.shared.model_registry import model_registry_service
 
         await model_registry_service.ensure_tables()
@@ -171,11 +187,31 @@ async def auth_middleware(request: Request, call_next):
 
     # 所有 /api/v1/* 业务路由必须通过内部密钥或有效的用户身份。
     # 只有在内部密钥不匹配且用户身份也缺失的情况下才报错（OPTIONS 放行）。
+    # 额外：对于需要用户上下文的业务路由（backtest/strategies/inference/analysis/selection），
+    # 即使内部密钥匹配，也必须提供 user_id，否则下游会报 "Missing authenticated user context"。
     if method != "OPTIONS" and path.startswith("/api/v1/"):
         if internal_secret != expected_secret and not user_id:
             return JSONResponse(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 content={"detail": "Authentication required (Invalid internal secret or missing user context)"},
+            )
+        # 需要用户上下文的受保护路由列表
+        protected_prefixes = (
+            "/api/v1/qlib/",
+            "/api/v1/strategies/",
+            "/api/v1/inference/",
+            "/api/v1/analysis/",
+            "/api/v1/selection/",
+            "/api/v1/strategy/",
+            "/api/v1/backtest/",
+            "/api/v1/rd-agent/",
+            "/api/v1/pipeline/",
+            "/api/v1/admin/",
+        )
+        if not user_id and any(path.startswith(p) for p in protected_prefixes):
+            return JSONResponse(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                content={"detail": "需要登录。请确认您的登录状态并重试。"},
             )
 
     if user_id:
@@ -294,6 +330,24 @@ try:
     logger.info("✅ Cloud AI-IDE routers loaded")
 except ImportError as e:
     logger.error(f"❌ Failed to load Cloud AI-IDE routers: {e}")
+
+
+try:
+    from backend.services.engine.routers.rd_agent import router as rd_agent_router
+
+    app.include_router(rd_agent_router)
+    logger.info("✅ RD-Agent integration routers loaded")
+except ImportError as e:
+    logger.error(f"❌ Failed to load RD-Agent routers: {e}")
+
+
+try:
+    from backend.services.engine.routers.quantbot_router import router as quantbot_router
+
+    app.include_router(quantbot_router)
+    logger.info("✅ QuantBot router loaded")
+except ImportError as e:
+    logger.error(f"❌ Failed to load QuantBot router: {e}")
 
 
 @app.get("/health")
