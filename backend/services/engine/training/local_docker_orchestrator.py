@@ -36,26 +36,36 @@ _CALLBACK_CHECK_INTERVAL = int(
     os.getenv("TRAINING_CALLBACK_CHECK_INTERVAL_SECONDS", "2")
 )
 _DOCKER_NETWORK = os.getenv("TRAINING_DOCKER_NETWORK", "quantmind-network")
-_HOST_PROJECT_PATH = Path(
-    os.getenv("HOST_PROJECT_PATH")
-    or os.getenv("TRAINING_HOST_PROJECT_PATH")
-    or "/home/ubuntu/quantmind"
-).expanduser()
+# ── 路径配置（Docker-in-Docker 场景）────────────────────────────────────────────
+# API 容器通过 /var/run/docker.sock 与宿主机 Docker daemon 通信。
+# Docker daemon 需要的 volume 路径是 docker-compose.yml 中 bind mount 的
+# 宿主机端路径（即 ./data 展开后的绝对路径）。
+#
+# 已知映射（来自 docker-compose.yml）：
+#   ./data:/data        → 宿主机 <compose_dir>/data  ←→ 容器 /data
+#   ./backend:/app/backend  → 宿主机 <compose_dir>/backend  ←→ 容器 /app/backend
+
 _LOCAL_DATA_MOUNT_DIR = "/tmp/feature_snapshots"
-_LOCAL_DATA_PATH = str(
-    Path(
-        os.getenv(
-            "TRAINING_LOCAL_DATA_PATH",
-            str(_HOST_PROJECT_PATH / "db" / "feature_snapshots"),
-        )
-    )
-)
-_TRAINING_SCRIPT_HOST_PATH = Path(
-    os.getenv(
-        "TRAINING_SCRIPT_HOST_PATH",
-        str(_HOST_PROJECT_PATH / "docker" / "training" / "train.py"),
-    )
-).expanduser()
+
+# 宿主机 compose 工作目录
+_raw = (os.getenv("HOST_PROJECT_PATH") or "").strip()
+if _raw and _raw != ".":
+    _HOST_PROJECT_PATH = Path(_raw).resolve()
+else:
+    # 退化为当前工作目录（容器内通常为 /app）
+    _HOST_PROJECT_PATH = Path.cwd().resolve()
+
+# 数据目录：feature_snapshots 在 /app/db/feature_snapshots（来自 ./db:/app/db 挂载）
+# Docker volume host path 需要宿主机绝对路径
+if Path("/app/db/feature_snapshots").exists():
+    _LOCAL_DATA_PATH = str(_HOST_PROJECT_PATH / "db" / "feature_snapshots")
+elif Path("/data/feature_snapshots").exists():
+    _LOCAL_DATA_PATH = str(_HOST_PROJECT_PATH / "data" / "feature_snapshots")
+else:
+    _LOCAL_DATA_PATH = str(_HOST_PROJECT_PATH / "db" / "feature_snapshots")
+
+# 训练脚本：./docker/training/train.py 挂载到容器内 /app/docker/training/
+_TRAINING_SCRIPT_HOST_PATH = str(_HOST_PROJECT_PATH / "docker" / "training" / "train.py")
 
 
 class LocalDockerOrchestrator:
@@ -227,49 +237,76 @@ class LocalDockerOrchestrator:
                 user_id = "unknown"
                 tenant_id = "default"
 
-        # ── 准备本地模型存储路径 ────────────────────────────────────────────────
-        # 必须与 ModelRegistryService.register_model_from_training_run 的路径逻辑一致
+        # ── 准备训练工作目录 ────────────────────────────────────────────────────
+        # 使用 /data/training_jobs/{run_id} 作为训练容器的工作目录。
+        # /data 是 docker-compose 中 ./data:/data 的挂载点，
+        # API 容器写入的文件对宿主机和训练容器都可见。
+        # 这避免了 _HOST_PROJECT_PATH 在容器内外指向不同文件系统的问题。
         from backend.shared.model_registry import model_registry_service
 
         model_id = model_registry_service.build_model_id_from_run(run_id)
 
+        # API 容器内的模型注册路径（用于回调后注册模型）
         user_models_root = Path(model_registry_service.user_models_root)
         internal_models_root = (
             user_models_root
             if user_models_root.is_absolute()
             else Path("/app") / user_models_root
         )
-        host_models_root = (
-            user_models_root
-            if user_models_root.is_absolute()
-            else (_HOST_PROJECT_PATH / user_models_root)
-        )
         internal_output_dir = internal_models_root / tenant_id / user_id / model_id
-        host_output_dir = host_models_root / tenant_id / user_id / model_id
 
-        # 强制创建目录（容器内路径用于回调热路径，宿主机路径用于 docker -v）
+        # 训练容器工作目录：使用 /data 挂载点下的路径
+        # API 容器内路径：/data/training_jobs/{run_id}（通过 ./data:/data 挂载）
+        # 宿主机路径：/opt/quantmind/data/training_jobs/{run_id}（Docker daemon 需要）
+        container_work_dir = Path("/data") / "training_jobs" / run_id
+
+        _compose_dir = _HOST_PROJECT_PATH if _HOST_PROJECT_PATH.is_absolute() else Path.cwd()
+        host_output_dir = _compose_dir / "data" / "training_jobs" / run_id
+
+        # 强制创建目录（使用容器内路径，确保 API 容器可写入）
         os.makedirs(internal_output_dir, exist_ok=True)
-        os.makedirs(host_output_dir, exist_ok=True)
+        os.makedirs(container_work_dir, exist_ok=True)
         logger.info(
-            "[%s] Local model output directory prepared: %s",
+            "[%s] Training work directory prepared: %s (host mount: %s)",
+            run_id,
+            container_work_dir,
+            host_output_dir,
+        )
+        logger.info(
+            "[%s] Model registry path prepared: %s",
             run_id,
             internal_output_dir,
         )
 
-        # ── 提前将 config.yaml 写入本地目录 ───────────────────────────────────
-        local_config_path = internal_output_dir / "config.yaml"
+        # ── 提前将 config.yaml 写入训练工作目录 ─────────────────────────────
+        # 写入 container_work_dir（容器内 /data/training_jobs/{run_id}/），
+        # 该目录通过 bind mount 与宿主机 /opt/quantmind/data/training_jobs/{run_id}/ 同步，
+        # 会被 Docker 挂载为训练容器的 /workspace
+        config_path = container_work_dir / "config.yaml"
         try:
-            with open(local_config_path, "w", encoding="utf-8") as f:
+            with open(config_path, "w", encoding="utf-8") as f:
                 yaml.dump(config, f, allow_unicode=True, default_flow_style=False)
-            logger.info("[%s] Config saved locally: %s", run_id, local_config_path)
+                f.flush()
+                os.fsync(f.fileno())
+            logger.info("[%s] Config saved: %s", run_id, config_path)
+            # Verify the file is visible (bind mount propagation)
+            if not config_path.exists():
+                raise RuntimeError(f"Config file not visible after write: {config_path}")
         except Exception as e:
-            logger.warning("[%s] Failed to save config locally: %s", run_id, e)
+            logger.error("[%s] Failed to save config: %s", run_id, e)
+            raise
 
         # 始终挂载本地数据目录（宿主机路径，API 容器内 os.path.exists 无法感知）
         volumes: dict[str, dict[str, str]] = {
             str(host_output_dir): {"bind": "/workspace", "mode": "rw"},
             str(_LOCAL_DATA_PATH): {"bind": _LOCAL_DATA_MOUNT_DIR, "mode": "ro"},
         }
+        logger.info(
+            "[%s] Training workspace mounted: %s (host) -> /workspace (container writes to %s)",
+            run_id,
+            host_output_dir,
+            container_work_dir,
+        )
         logger.info(
             "[%s] Local data path mounted: %s -> %s",
             run_id,
@@ -287,9 +324,10 @@ class LocalDockerOrchestrator:
             _TRAINING_SCRIPT_HOST_PATH,
         )
         logger.info(
-            "[%s] PERSISTENCE Local output mounted: %s -> /workspace",
+            "[%s] PERSISTENCE Local output mounted: %s (host) -> /workspace (container: %s)",
             run_id,
             host_output_dir,
+            container_work_dir,
         )
         logger.info("[%s] Final volumes config: %s", run_id, volumes)
 
