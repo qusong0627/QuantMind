@@ -94,8 +94,6 @@ export default function App() {
   const publicRoutes = [
     '/auth/login',
     '/auth/register',
-    '/auth/forgot-password',
-    '/auth/reset-password',
     '/auth/mfa/verify',
     '/auth/mfa/setup'
   ];

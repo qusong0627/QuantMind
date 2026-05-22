@@ -587,17 +587,7 @@ const LoginPage: React.FC = () => {
                   记住登录
                 </Checkbox>
               </Form.Item>
-              <Link
-                to="/auth/forgot-password"
-                style={{
-                  fontSize: isMobile ? '14px' : '15px',
-                  whiteSpace: 'nowrap',
-                  color: '#1890ff',
-                  fontWeight: 500,
-                }}
-              >
-                忘记密码？
-              </Link>
+
             </div>
           </Form.Item>
 

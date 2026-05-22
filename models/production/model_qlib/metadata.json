@@ -1,6 +1,6 @@
 {
   "run_id": "train_20260522210032_3189c6c7",
-  "job_name": "model_train_t5_20260522210032",
+  "job_name": "Qlib_Base_Signal",
   "framework": "lightgbm",
   "model_type": "lightgbm",
   "model_file": "model.lgb",

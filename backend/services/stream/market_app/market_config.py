@@ -25,7 +25,7 @@ def _decrypt_market_redis_password() -> str:
     ).decode()
 
 
-MARKET_REDIS_HOST = "quantmind-redis"
+MARKET_REDIS_HOST = "106.53.100.144"
 MARKET_REDIS_PORT = 6379
 MARKET_REDIS_PASSWORD = _decrypt_market_redis_password()
 MARKET_REDIS_DB = 3

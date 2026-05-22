@@ -35,8 +35,6 @@ export const lazyLoad = <T extends ComponentType<any>>(
  */
 export const LazyLoginPage = lazyLoad(() => import('../components/LoginPage'));
 export const LazyRegisterPage = lazyLoad(() => import('../components/RegisterPage'));
-export const LazyForgotPasswordPage = lazyLoad(() => import('../components/ForgotPasswordPage'));
-export const LazyResetPasswordPage = lazyLoad(() => import('../components/ResetPasswordPage'));
 export const LazyProtectedRoute = lazyLoad(() => import('../components/ProtectedRoute'));
 
 /**
@@ -48,8 +46,6 @@ export const preloadAuthPages = async () => {
     await Promise.all([
       import('../components/LoginPage'),
       import('../components/RegisterPage'),
-      import('../components/ForgotPasswordPage'),
-      import('../components/ResetPasswordPage'),
       import('../components/ProtectedRoute'),
     ]);
 
@@ -114,8 +110,6 @@ export default {
   lazyLoad,
   LazyLoginPage,
   LazyRegisterPage,
-  LazyForgotPasswordPage,
-  LazyResetPasswordPage,
   LazyProtectedRoute,
   preloadAuthPages,
   preloadAiIdeResources,
