@@ -105,10 +105,18 @@ class LocalDockerOrchestrator:
             next_progress = max(next_progress, 42)
         if "split mode:" in text or "val_ratio mode:" in text:
             next_progress = max(next_progress, 50)
+        if "did not meet early stopping" in text or "early stopping, best iteration" in text:
+            next_progress = max(next_progress, 70)
         if "training finished" in text:
-            next_progress = max(next_progress, 86)
-        if "result report saved" in text:
-            next_progress = max(next_progress, 92)
+            next_progress = max(next_progress, 80)
+        if "model saved" in text or "model.lgb" in text:
+            next_progress = max(next_progress, 85)
+        if "predictions saved" in text or "pred.parquet" in text or "pred.pkl" in text:
+            next_progress = max(next_progress, 90)
+        if "result.json" in text or "result report saved" in text:
+            next_progress = max(next_progress, 95)
+        if "metadata.json saved" in text or "inference.py" in text:
+            next_progress = max(next_progress, 98)
         return min(99, next_progress)
 
     # ── 构造 config.yaml 内容 ───────────────────────────────────────────────────
@@ -461,6 +469,39 @@ class LocalDockerOrchestrator:
                 tail_logs = c.logs(tail=100).decode("utf-8", errors="replace")
 
                 if exit_code == 0:
+                    # 容器成功退出：将训练产物复制到模型注册目录，
+                    # 供 complete_training_run → register_model_from_training_run 使用。
+                    try:
+                        import shutil
+                        from backend.shared.model_registry import model_registry_service
+
+                        user_models_root = Path(model_registry_service.user_models_root)
+                        internal_models_root = (
+                            user_models_root
+                            if user_models_root.is_absolute()
+                            else Path("/app") / user_models_root
+                        )
+                        internal_model_dir = (
+                            internal_models_root / tenant_id / user_id / model_id
+                        )
+                        internal_model_dir.mkdir(parents=True, exist_ok=True)
+
+                        # 从训练工作目录复制产物到模型注册目录
+                        for artifact in ("model.lgb", "metadata.json", "pred.parquet",
+                                         "pred.pkl", "config.yaml", "result.json",
+                                         "inference.py", "shap_summary.csv"):
+                            src = container_work_dir / artifact
+                            if src.exists():
+                                shutil.copy2(str(src), str(internal_model_dir / artifact))
+
+                        logger.info(
+                            "[%s] Training artifacts copied to %s",
+                            run_id,
+                            internal_model_dir,
+                        )
+                    except Exception as copy_err:
+                        logger.warning("[%s] Failed to copy artifacts: %s", run_id, copy_err)
+
                     async with get_session() as db:
                         r = await db.get(TrainingJobRecord, run_id)
                         if r:
