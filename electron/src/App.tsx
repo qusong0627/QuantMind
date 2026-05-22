@@ -44,6 +44,7 @@ const ResearchPlatformPage = lazy(() => import('./pages/ResearchPlatformPage').t
 const RealTradingPage = lazy(() => import('./pages/trading/RealTradingPage'));
 const AdminPage = lazy(() => import('./features/admin/AdminPage'));
 const AdminDashboard = lazy(() => import('./features/admin/components/AdminDashboard').then(m => ({ default: m.AdminDashboard })));
+const AdminMarketMonitor = lazy(() => import('./features/admin/components/AdminMarketMonitor').then(m => ({ default: m.AdminMarketMonitor })));
 const AdminUserTable = lazy(() => import('./features/admin/components/AdminUserTable').then(m => ({ default: m.AdminUserTable })));
 const AdminModelManagement = lazy(() => import('./features/admin/components/AdminModelManagement').then(m => ({ default: m.AdminModelManagement })));
 const AdminDataManagement = lazy(() => import('./features/admin/components/AdminDataManagement').then(m => ({ default: m.AdminDataManagement })));
@@ -492,7 +493,7 @@ export default function App() {
                     <Route path="inference" element={<div className="p-8 text-center text-slate-400">推理监控页面开发中...</div>} />
                     <Route path="orders" element={<div className="p-8 text-center text-slate-400">订单管理页面开发中...</div>} />
                     <Route path="risk" element={<div className="p-8 text-center text-slate-400">风险控制页面开发中...</div>} />
-                    <Route path="quotes" element={<div className="p-8 text-center text-slate-400">行情源监控页面开发中...</div>} />
+                    <Route path="quotes" element={<AdminMarketMonitor />} />
                     <Route path="settings" element={<div className="p-8 text-center text-slate-400">系统设置页面开发中...</div>} />
                   </Route>
 

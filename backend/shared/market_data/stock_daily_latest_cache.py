@@ -9,7 +9,7 @@ from datetime import date, datetime
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy import text
-from backend.shared.database_manager_v2 import get_session
+from backend.shared.market_db_manager import get_market_session
 from backend.shared.redis_sentinel_client import get_redis_sentinel_client
 from backend.shared.stock_utils import StockCodeUtil
 
@@ -17,8 +17,8 @@ logger = logging.getLogger(__name__)
 
 # Redis Key 前缀
 CACHE_KEY_PREFIX = "qm:stock_latest"
-# 缓存有效期：24 小时 (通常在每日盘后更新时刷新)
-CACHE_TTL = 86400 
+# 缓存有效期：30 分钟
+CACHE_TTL = 1800 
 
 class StockDailyLatestCache:
     """stock_daily_latest 表缓存管理器"""
@@ -50,7 +50,7 @@ class StockDailyLatestCache:
             logger.warning(f"Failed to read cache for {symbol}: {e}")
 
         # 缓存未命中，从数据库读取
-        async with get_session() as session:
+        async with get_market_session() as session:
             result = await session.execute(
                 text("SELECT * FROM stock_daily_latest WHERE symbol = :s ORDER BY trade_date DESC LIMIT 1"),
                 {"s": symbol}
@@ -94,7 +94,7 @@ class StockDailyLatestCache:
 
         # 2. 缺失部分从数据库补偿
         if missing_symbols:
-            async with get_session() as session:
+            async with get_market_session() as session:
                 # 注意：这里使用 IN 查询，且只取最新日期的数据
                 # 为了性能，建议数据库有 (symbol, trade_date) 的联合索引
                 query = text("""
@@ -117,7 +117,7 @@ class StockDailyLatestCache:
     async def warmup_cache(self) -> int:
         """预热缓存：将全市场最新行情载入 Redis"""
         logger.info("Starting stock_daily_latest cache warmup...")
-        async with get_session() as session:
+        async with get_market_session() as session:
             # 获取全市场最新的记录（每个 symbol 仅取日期最大的一条）
             result = await session.execute(text("""
                 SELECT DISTINCT ON (symbol) * 

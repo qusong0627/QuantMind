@@ -234,3 +234,60 @@ async def get_dashboard_metrics(
                 "system": _build_system_metrics(health_score, uptime_days, services),
             },
         )
+
+
+@router.get("/market-sources", response_model=ApiResponse)
+async def get_market_sources_status(
+    current_user: dict = Depends(require_admin),
+):
+    """
+    获取行情数据源状态 (在线库 106 + 离线库 139)
+    """
+    from sqlalchemy import text
+    from backend.shared.database_manager_v2 import get_session
+    from backend.services.api.routers.admin.model_management_ops import get_data_status
+    
+    online_status = {
+        "status": "checking",
+        "latest_date": None,
+        "row_count": 0,
+        "error": None
+    }
+    
+    try:
+        # Check Online Source (106 PostgreSQL)
+        async with get_session(read_only=True) as session:
+            # Check stock_daily_latest
+            sql_max = text("SELECT MAX(trade_date) FROM stock_daily_latest")
+            res_max = await session.execute(sql_max)
+            max_date = res_max.scalar()
+            
+            if max_date:
+                sql_count = text("SELECT COUNT(*) FROM stock_daily_latest WHERE trade_date = :d")
+                res_count = await session.execute(sql_count, {"d": max_date})
+                row_count = res_count.scalar() or 0
+                
+                online_status["latest_date"] = max_date.isoformat() if hasattr(max_date, 'isoformat') else str(max_date)
+                online_status["row_count"] = row_count
+                online_status["status"] = "healthy" if row_count > 4000 else "degraded"
+            else:
+                online_status["status"] = "empty"
+    except Exception as e:
+        logger.error(f"106 DB connection failed: {e}")
+        online_status["status"] = "unreachable"
+        online_status["error"] = str(e)
+        
+    try:
+        # Check Offline Source (139 Sync Parquet & Qlib)
+        offline_status_raw = await get_data_status(refresh=False, current_user=current_user)
+    except Exception as e:
+        logger.error(f"139 Offline status check failed: {e}")
+        offline_status_raw = {"error": str(e), "message": "Failed to check offline status"}
+
+    data = {
+        "online_source": online_status,
+        "offline_source": offline_status_raw
+    }
+
+    return ApiResponse(success=True, code=200, message="获取成功", data=data)
+

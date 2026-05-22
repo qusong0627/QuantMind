@@ -172,6 +172,11 @@ class AdminService {
         return resp.data;
     }
 
+    async getMarketSourcesStatus(): Promise<any> {
+        const resp = await this.axiosInstance.get<any>('/admin/dashboard/market-sources');
+        return resp.data;
+    }
+
     async syncOfficialDataUpdate(params: {
         apiBaseUrl: string;
         accessKey: string;

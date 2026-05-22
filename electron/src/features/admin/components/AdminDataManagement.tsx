@@ -321,22 +321,6 @@ export const AdminDataManagement: React.FC = () => {
                                     ))}
                                 </div>
 
-                                {snapshots.suggested_periods && (
-                                    <div className="p-6 rounded-3xl bg-slate-50 border border-slate-100">
-                                        <div className="flex items-center space-x-2 mb-4">
-                                            <CompassOutlined className="text-slate-400" />
-                                            <span className="text-xs font-black text-slate-600 uppercase tracking-widest">推荐训练区间（全局）</span>
-                                        </div>
-                                        <div className="flex flex-wrap gap-4">
-                                            {Object.entries(snapshots.suggested_periods).map(([key, period]: [string, any]) => (
-                                                <div key={key} className="flex-1 min-w-[140px] p-4 bg-white rounded-2xl shadow-sm border border-slate-100">
-                                                    <Text className="text-[10px] font-bold text-slate-400 uppercase block mb-1">{key} 集</Text>
-                                                    <Text className="font-mono text-[11px] font-black text-slate-700">{period[0]} ~ {period[1]}</Text>
-                                                </div>
-                                            ))}
-                                        </div>
-                                    </div>
-                                )}
 
                                 {snapshots?.metadata_files && snapshots.metadata_files.length > 0 && (
                                     <div className="space-y-4">
@@ -396,10 +380,8 @@ export const AdminDataManagement: React.FC = () => {
                                 <Title level={5} className="!text-slate-800 !font-black !mb-3 uppercase tracking-tight text-sm">日常同步任务包含：</Title>
                                 <ul className="space-y-2 m-0 p-0 list-none">
                                     {[
-                                        '增量拉取远程 PG 行情数据',
-                                        '更新本地 Parquet 核心资产',
-                                        '校准指标 (MA/换手率/收益率)',
-                                        '增量更新 Qlib 二进制引擎数据'
+                                        '增量拉取远程 PG 特征与基础资产',
+                                        '增量更新本地 Qlib 二进制引擎'
                                     ].map((text, i) => (
                                         <li key={i} className="flex items-start text-xs text-slate-500 font-medium">
                                             <CheckCircleFilled className="text-emerald-500 mt-0.5 mr-2" />

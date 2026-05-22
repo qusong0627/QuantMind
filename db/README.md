@@ -50,31 +50,17 @@ db/
 ## 4. backups/ — 数据库备份与导入
 
 ### 4.1 核心备份文件
-- `stock_daily_latest_2026_full.csv`: 2026 年全量对齐数据（89列），对应数据库中的核心事实表 `stock_daily_latest`。
+- `stock_daily_latest.sql`: 最新导出的 PostgreSQL 备份文件，包含 `stock_daily_latest` 表结构与全量数据。
 
 ### 4.2 导入方法 (PostgreSQL)
 
-#### 方法 A：使用 SQL `COPY` (推荐，性能最高)
-在数据库终端执行以下命令：
-```sql
--- 1. 清空旧数据（可选）
-TRUNCATE TABLE stock_daily_latest;
-
--- 2. 导入 CSV
-\COPY stock_daily_latest FROM 'db/backups/stock_daily_latest_2026_full.csv' WITH (FORMAT csv, HEADER true, NULL '');
-```
-
-#### 方法 B：Docker 环境一键导入
-如果数据库运行在 Docker 容器中（默认容器名为 `quantmind-postgresql`）：
+#### 方法 A：使用导出的 SQL 脚本还原
+如果您需要通过新导出的 `.sql` 文件恢复数据，可直接执行：
 ```bash
-# 1. 拷贝 CSV 到容器
-docker cp db/backups/stock_daily_latest.csv quantmind-postgresql:/tmp/
-
-# 2. 执行导入命令
-docker exec -it quantmind-postgresql psql -U postgres -d quantmind -c "\COPY stock_daily_latest FROM '/tmp/stock_daily_latest.csv' WITH (FORMAT csv, HEADER true, NULL '')"
+docker exec -i quantmind-db psql -U quantmind -d quantmind < db/backups/stock_daily_latest.sql
 ```
 
-#### 方法 C：自动化同步脚本
+#### 方法 B：自动化同步脚本
 直接运行项目内置的同步工具，无需手动操作 CSV：
 ```bash
 python scripts/sync_parquet_to_pg.py

@@ -208,6 +208,30 @@ class RedisSentinelClient:
                     logger.error(f"Redis GET failed on master for key {key}: {e2}")
             return None
 
+    def mget(self, keys: list[str], use_slave: bool = True) -> list[bytes | None]:
+        """
+        批量获取缓存值
+
+        Args:
+            keys: 缓存键列表
+            use_slave: 是否使用从库读取
+
+        Returns:
+            缓存值列表，顺序与keys一致
+        """
+        try:
+            self._ensure_connection()
+            client = self._slave_client if use_slave and self._slave_client else self._master_client
+            return client.mget(keys)
+        except Exception as e:
+            logger.error(f"Redis MGET failed for keys {keys}: {e}")
+            if use_slave and self._slave_client:
+                try:
+                    return self._master_client.mget(keys)
+                except Exception as e2:
+                    logger.error(f"Redis MGET failed on master: {e2}")
+            return [None] * len(keys)
+
     def set(self, key: str, value: bytes, ex: int | None = None, nx: bool = False) -> bool:
         """
         设置缓存值

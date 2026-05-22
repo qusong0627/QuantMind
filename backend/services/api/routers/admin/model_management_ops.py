@@ -309,14 +309,10 @@ async def sync_official_data_update(
     scripts_dir = Path("/app/scripts/data/maintenance")
     processing_dir = Path("/app/scripts/data/processing")
 
-    # 按顺序执行同步步骤（完整流程：远程PG → parquet → stock_daily → 指数行情 → 回填连板 → 收益计算 → 同步 qlib_data）
+    # 简化后的同步步骤：只拉取远端特征快照和底层数据，并转换给 qlib_data
     steps = [
-        ("Step 1/6: 从远程PG拉取最新数据", "sync_parquets_from_remote_pg.py"),
-        ("Step 2/6: 同步 stock_daily_latest", "sync_stock_daily_latest_from_parquet.py"),
-        ("Step 3/6: 从 Qlib features 同步指数行情", "sync_index_ohlcv_from_qlib_features.py"),
-        ("Step 4/6: 回填连板天数", "backfill_consecutive_limit_up_days.py"),
-        ("Step 5/6: 滚动计算一日/三日收益", "../processing/backfill_return_fields.py"),
-        ("Step 6/6: 同步 qlib_data", "sync_qlib_from_fundamental_parquet.py"),
+        ("Step 1/2: 从远程PG拉取最新 Parquet 数据", "sync_parquets_from_remote_pg.py"),
+        ("Step 2/2: 同步 qlib_data 二进制引擎", "sync_qlib_from_fundamental_parquet.py"),
     ]
 
     results = []

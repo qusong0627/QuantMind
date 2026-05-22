@@ -12,6 +12,7 @@ from typing import Any
 from sqlalchemy import text
 
 from backend.shared.database_manager_v2 import get_session
+from backend.shared.market_db_manager import get_market_session
 from backend.shared.redis_sentinel_client import get_redis_sentinel_client
 from backend.shared.stock_utils import StockCodeUtil
 
@@ -22,7 +23,7 @@ _SDL_CACHE_TTL_SECONDS = 120
 _SDL_CACHE_MAX_ENTRIES = 512
 _SDL_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 _SDL_REDIS_YEAR = int(os.getenv("RESEARCH_SDL_REDIS_YEAR", "2026"))
-_SDL_REDIS_TTL_SECONDS = int(os.getenv("RESEARCH_SDL_REDIS_TTL_SECONDS", str(36 * 3600)))
+_SDL_REDIS_TTL_SECONDS = int(os.getenv("RESEARCH_SDL_REDIS_TTL_SECONDS", "1800"))
 
 
 def _redis_get_json(key: str) -> dict[str, Any] | None:
@@ -141,9 +142,18 @@ async def _load_sdl_day_map(session, trade_date: date) -> dict[str, dict[str, An
         WHERE trade_date = :trade_date
           AND volume > 0
     """
-    res = await session.execute(text(sql), {"trade_date": trade_date})
+    async with get_market_session() as m_session:
+        res = await m_session.execute(text(sql), {"trade_date": trade_date})
+        rows = res.mappings().all()
+        
+        if not rows:
+            # Fallback to the absolute latest date available
+            fallback_sql = sql.replace("WHERE trade_date = :trade_date", "WHERE trade_date = (SELECT MAX(trade_date) FROM stock_daily_latest)")
+            res = await m_session.execute(text(fallback_sql))
+            rows = res.mappings().all()
+
     symbol_map: dict[str, dict[str, Any]] = {}
-    for row in res.mappings():
+    for row in rows:
         payload = dict(row)
         symbol = StockCodeUtil.to_prefix(str(payload.get("symbol") or ""))
         if symbol:
@@ -502,20 +512,16 @@ async def _fetch_summary(
         summary_sql = f"""
             SELECT
                 COUNT(*) AS total_count,
-                COUNT(*) FILTER (WHERE (sdl.close > 0)) AS tradable_count,
-                COUNT(*) FILTER (WHERE (sdl.idx_hs300 <> 0)) AS hs300_count,
-                COUNT(*) FILTER (WHERE (sdl.idx_zz1000 <> 0)) AS zz1000_count,
-                COUNT(*) FILTER (WHERE (sdl.idx_margin <> 0)) AS margin_count,
-                COUNT(*) FILTER (WHERE (sdl.idx_chinext <> 0)) AS chinext_count,
+                COUNT(*) AS tradable_count,
+                0 AS hs300_count,
+                0 AS zz1000_count,
+                0 AS margin_count,
+                0 AS chinext_count,
                 AVG(COALESCE(snap.fusion_score, 0)) AS avg_score,
                 COUNT(*) FILTER (WHERE COALESCE(snap.confidence_level, 'watch') = 'high') AS high_confidence_count,
                 COUNT(*) FILTER (WHERE COALESCE(snap.fusion_score, 0) >= 0.05) AS strong_count,
                 MAX(snap.updated_at) AS last_updated_at
             FROM qm_research_candidate_snapshot snap
-            LEFT JOIN stock_daily_latest sdl ON (
-                sdl.symbol = {_norm_symbol_sql("snap.symbol")}
-                AND sdl.trade_date = snap.data_trade_date
-            )
             WHERE {where}
         """
     else:
@@ -584,99 +590,37 @@ async def _do_get_overview(
         params["rid"] = run_id
 
     async with get_session(read_only=True) as session:
-        sql = f"""
-        WITH snap_page AS (
+        snap_sql = f"""
             SELECT snap.*
             FROM qm_research_candidate_snapshot snap
             WHERE {where}
             ORDER BY snap.score_rank ASC
             LIMIT :limit OFFSET :offset
-        ),
-        snap_symbols AS (
-            SELECT DISTINCT snap.symbol AS symbol
-            FROM snap_page snap
-        ),
-        snap_date_bounds AS (
-            SELECT
-                MIN(snap.data_trade_date) AS min_trade_date,
-                MAX(snap.data_trade_date) AS max_trade_date
-            FROM snap_page snap
-        ),
-        sdl_run AS (
-            SELECT
-                sdl.symbol,
-                sdl.trade_date,
-                sdl.stock_name,
-                sdl.industry,
-                sdl.close,
-                sdl.pct_change,
-                sdl.pe_ttm,
-                sdl.pb,
-                sdl.roe,
-                sdl.adj_factor,
-                sdl.turnover_rate,
-                sdl.amount,
-                sdl.total_mv,
-                sdl.float_mv,
-                sdl.listed_days,
-                sdl.is_st,
-                sdl.idx_hs300,
-                sdl.idx_zz500,
-                sdl.idx_zz1000,
-                sdl.idx_chinext,
-                sdl.idx_margin,
-                sdl.idx_all,
-                sdl.ma5,
-                sdl.ma10,
-                sdl.ma_gap_5,
-                sdl.ma_gap_10,
-                sdl.ma_gap_20,
-                sdl.rsi_14,
-                sdl.rsi_6,
-                sdl.vol_atr_14,
-                sdl.macd_hist,
-                sdl.volume_ratio_5,
-                sdl.volume_ratio_20,
-                sdl.volume_trend_3d,
-                CASE
-                    WHEN LAG(sdl.volume, 3) OVER (PARTITION BY sdl.symbol ORDER BY sdl.trade_date) > 0
-                    THEN (sdl.volume::double precision - LAG(sdl.volume, 3) OVER (PARTITION BY sdl.symbol ORDER BY sdl.trade_date)::double precision)
-                         / LAG(sdl.volume, 3) OVER (PARTITION BY sdl.symbol ORDER BY sdl.trade_date)::double precision
-                    ELSE NULL
-                END AS volume_trend_3d_calc,
-                sdl.main_flow,
-                sdl.flow_net_amount,
-                sdl.inst_ownership,
-                sdl.profit_growth,
-                sdl.concept_ai,
-                sdl.concept_chip,
-                sdl.concept_new_energy,
-                sdl.concept_pv,
-                sdl.concept_lithium,
-                sdl.concept_military,
-                sdl.concept_medical,
-                sdl.concept_fintech,
-                sdl.concept_consumption,
-                sdl.concept_state_owned,
-                sdl.consecutive_limit_up_days,
-                LEAD(sdl.close, 1) OVER (PARTITION BY sdl.symbol ORDER BY sdl.trade_date) AS close_next_1d,
-                LEAD(sdl.close, 3) OVER (PARTITION BY sdl.symbol ORDER BY sdl.trade_date) AS close_next_3d
-            FROM stock_daily_latest sdl
-            INNER JOIN snap_symbols ss ON ss.symbol = sdl.symbol
-            CROSS JOIN snap_date_bounds b
-            WHERE sdl.volume > 0
-              AND sdl.trade_date >= (b.min_trade_date - INTERVAL '10 day')
-              AND sdl.trade_date <= (b.max_trade_date + INTERVAL '20 day')
-        )
-        SELECT snap.*, {_SDL_SELECT_BY_RUN_DATE}
-        FROM snap_page snap
-        LEFT JOIN sdl_run
-            ON sdl_run.symbol = {_norm_symbol_sql("snap.symbol")}
-           AND sdl_run.trade_date = snap.data_trade_date
-        ORDER BY snap.score_rank ASC
         """
-        result = await session.execute(text(sql), params)
-        items = [_format_candidate_record(dict(r)) for r in result.mappings()]
+        result = await session.execute(text(snap_sql), params)
+        snap_rows = result.mappings().all()
+
+        if not snap_rows:
+            summary = await _fetch_summary(session, where, params, include_market_stats=include_market_stats)
+            return {"items": [], "summary": summary}
+
+        trade_dates = {row.get("data_trade_date") for row in snap_rows if isinstance(row.get("data_trade_date"), date)}
+
+        sdl_maps = {}
+        for td in trade_dates:
+            sdl_maps[td] = await _load_sdl_day_map(session, td)
+
+        merged_rows = []
+        for row in snap_rows:
+            snap = dict(row)
+            symbol = StockCodeUtil.to_prefix(str(snap.get("symbol") or ""))
+            td = snap.get("data_trade_date")
+            merged = dict(snap)
+            if td in sdl_maps and symbol in sdl_maps[td]:
+                merged.update(sdl_maps[td][symbol])
+            merged_rows.append(merged)
+
+        items = [_format_candidate_record(r) for r in merged_rows]
         summary = await _fetch_summary(session, where, params, include_market_stats=include_market_stats)
     return {"items": items, "summary": summary}
 
