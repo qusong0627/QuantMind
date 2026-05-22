@@ -1,6 +1,6 @@
 {
   "run_id": "train_20260522210032_3189c6c7",
-  "job_name": "Qlib_Base_Signal",
+  "job_name": "model_train_t5_20260522210032",
   "framework": "lightgbm",
   "model_type": "lightgbm",
   "model_file": "model.lgb",
@@ -246,7 +246,5 @@
     "elapsed_seconds": 6.6389000415802
   },
   "generated_at": "2026-05-22T13:06:12.042530",
-  "elapsed_seconds": 113.4215018749237,
-  "model_name": "Qlib_Base_Signal",
-  "display_name": "Qlib_Base_Signal"
+  "elapsed_seconds": 113.4215018749237
 }
