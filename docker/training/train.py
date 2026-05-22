@@ -485,7 +485,9 @@ def train_model(df: pd.DataFrame, features: list[str], cfg: dict) -> tuple:
             "请调整 train/valid/test 时间窗口，确保三段均与可用数据重叠。"
         )
 
+    # 计算填充值：使用训练集特征中位数，过滤掉 NaN（全 NaN 列用 0.0 填充）
     fill_values = train_df[features].median().to_dict()
+    fill_values = {k: (v if not (isinstance(v, float) and np.isnan(v)) else 0.0) for k, v in fill_values.items()}
 
     def _fill(frame: pd.DataFrame) -> np.ndarray:
         x = frame[features].copy()
