@@ -25,12 +25,41 @@ _SDL_CACHE_MAX_ENTRIES = 512
 _SDL_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 _SDL_REDIS_YEAR = int(os.getenv("RESEARCH_SDL_REDIS_YEAR", "2026"))
 _SDL_REDIS_TTL_SECONDS = int(os.getenv("RESEARCH_SDL_REDIS_TTL_SECONDS", "1800"))
+_SDL_TABLE = os.getenv("RESEARCH_SDL_TABLE", "stock_daily_latest_2026_cache")
 _STOCK_META_CACHE: dict[str, dict[str, str]] = {}
 _STOCK_META_CACHE_MTIME: float | None = None
-_STOCK_INDEX_JSON_PATH = os.getenv(
-    "STOCK_INDEX_JSON_PATH",
-    str(Path(__file__).resolve().parents[4] / "data" / "stocks" / "stocks_index.json"),
+_DEFAULT_STOCK_INDEX_JSON_PATH = str(
+    Path(__file__).resolve().parents[4] / "data" / "stocks" / "stocks_index.json"
 )
+_STOCK_INDEX_JSON_PATH = os.getenv("STOCK_INDEX_JSON_PATH", _DEFAULT_STOCK_INDEX_JSON_PATH)
+
+
+def _resolve_stock_index_json_path() -> Path | None:
+    candidates: list[str] = []
+    env_path = str(os.getenv("STOCK_INDEX_JSON_PATH", "")).strip()
+    if env_path:
+        candidates.append(env_path)
+    candidates.extend(
+        [
+            _STOCK_INDEX_JSON_PATH,
+            _DEFAULT_STOCK_INDEX_JSON_PATH,
+            "/data/stocks/stocks_index.json",
+            "/app/data/stocks/stocks_index.json",
+        ]
+    )
+    seen: set[str] = set()
+    for raw in candidates:
+        path_str = str(raw or "").strip()
+        if not path_str or path_str in seen:
+            continue
+        seen.add(path_str)
+        p = Path(path_str)
+        try:
+            if p.exists() and p.is_file():
+                return p
+        except Exception:
+            continue
+    return None
 
 
 def _redis_get_json(key: str) -> dict[str, Any] | None:
@@ -70,7 +99,7 @@ async def _load_sdl_day_map(session, trade_date: date) -> dict[str, dict[str, An
         symbols = cached["symbols"]
         return symbols if isinstance(symbols, dict) else {}
 
-    sql = """
+    sql = f"""
         SELECT
             symbol,
             COALESCE(stock_name, '') AS stock_name,
@@ -145,30 +174,45 @@ async def _load_sdl_day_map(session, trade_date: date) -> dict[str, dict[str, An
               '[]'::jsonb
             ) AS index_tags,
             COALESCE(consecutive_limit_up_days, 0) AS consecutive_limit_up_days_sdl
-        FROM stock_daily_latest
+        FROM {_SDL_TABLE}
         WHERE trade_date = :trade_date
           AND volume > 0
     """
+    used_trade_date = trade_date
+    fallback_used = False
+    trade_date_param = trade_date.isoformat() if isinstance(trade_date, date) else str(trade_date)
     async with get_market_session() as m_session:
-        res = await m_session.execute(text(sql), {"trade_date": trade_date})
+        res = await m_session.execute(text(sql), {"trade_date": trade_date_param})
         rows = res.mappings().all()
-        
         if not rows:
-            # Fallback to the absolute latest date available
-            fallback_sql = sql.replace("WHERE trade_date = :trade_date", "WHERE trade_date = (SELECT MAX(trade_date) FROM stock_daily_latest)")
-            res = await m_session.execute(text(fallback_sql))
-            rows = res.mappings().all()
+            fallback_date_res = await m_session.execute(
+                text(f"SELECT MAX(trade_date) FROM {_SDL_TABLE}")
+            )
+            fallback_date = fallback_date_res.scalar()
+            if isinstance(fallback_date, date):
+                fallback_used = True
+                used_trade_date = fallback_date
+                res = await m_session.execute(text(sql), {"trade_date": fallback_date.isoformat()})
+                rows = res.mappings().all()
 
     symbol_map: dict[str, dict[str, Any]] = {}
     for row in rows:
         payload = dict(row)
+        payload["_sdl_trade_date"] = used_trade_date.isoformat() if isinstance(used_trade_date, date) else None
+        payload["_sdl_fallback"] = fallback_used
         symbol = StockCodeUtil.to_prefix(str(payload.get("symbol") or ""))
         if symbol:
             symbol_map[symbol] = payload
 
     _redis_set_json(
         cache_key,
-        {"trade_date": trade_date.isoformat(), "symbols": symbol_map, "created_at": datetime.now().isoformat()},
+        {
+            "trade_date": trade_date.isoformat(),
+            "used_trade_date": used_trade_date.isoformat() if isinstance(used_trade_date, date) else None,
+            "fallback_used": fallback_used,
+            "symbols": symbol_map,
+            "created_at": datetime.now().isoformat(),
+        },
         _SDL_REDIS_TTL_SECONDS,
     )
     return symbol_map
@@ -290,7 +334,7 @@ _SDL_SELECT_BY_RUN_DATE = """
 """
 
 
-_SDL_LATEST = """
+_SDL_LATEST = f"""
     SELECT DISTINCT ON (symbol) symbol, trade_date, stock_name, industry,
         close, pct_change, pe_ttm, pb, roe, adj_factor, turnover_rate, amount, total_mv, float_mv, listed_days, is_st,
         idx_hs300, idx_zz500, idx_zz1000, idx_chinext, idx_margin, idx_all,
@@ -300,7 +344,7 @@ _SDL_LATEST = """
         concept_ai, concept_chip, concept_new_energy, concept_pv, concept_lithium, concept_military,
         concept_medical, concept_fintech, concept_consumption, concept_state_owned,
         consecutive_limit_up_days
-    FROM stock_daily_latest
+    FROM {_SDL_TABLE}
     WHERE volume > 0
     ORDER BY symbol, trade_date DESC
 """
@@ -455,7 +499,9 @@ def _resolve_stock_meta_from_index(symbol: str) -> dict[str, str] | None:
     if not symbol_norm:
         return None
 
-    path = Path(_STOCK_INDEX_JSON_PATH)
+    path = _resolve_stock_index_json_path()
+    if path is None:
+        return None
     try:
         stat = path.stat()
     except Exception:
@@ -527,6 +573,14 @@ def _format_candidate_record(row: dict[str, Any]) -> dict[str, Any]:
     return_1d = _serialize_float(row.get("return_1d"))
     return_3d = _serialize_float(row.get("return_3d"))
     latest_change_pct = _serialize_float(row.get("latest_change_pct")) or 0.0
+    market_join_status = str(row.get("_market_join_status") or "unknown")
+    null_reasons: list[str] = []
+    if market_join_status == "missing_trade_date":
+        null_reasons.append("market_data_trade_date_missing")
+    if return_1d is None:
+        null_reasons.append("return_1d_unavailable")
+    if return_3d is None:
+        null_reasons.append("return_3d_unavailable")
 
     snapshot_turnover_rate = _serialize_float(row.get("snapshot_turnover_rate"))
     live_turnover_rate = _serialize_float(row.get("turnover_rate") or 0.0) or 0.0
@@ -576,6 +630,8 @@ def _format_candidate_record(row: dict[str, Any]) -> dict[str, Any]:
         "return3d": return_3d,
         "nextDayReturn": return_1d,
         "day3Return": return_3d,
+        "nullReason": null_reasons,
+        "marketJoinStatus": market_join_status,
         "mainFlow": (_serialize_float(row.get("main_flow")) or 0.0) / 1000000.0,
         "flowNetAmount": (_serialize_float(row.get("flow_net_amount")) or 0.0) / 1000000.0,
         "instOwnership": (_serialize_float(row.get("inst_ownership")) or 0.0) / 1000000.0,
@@ -696,6 +752,10 @@ async def _do_get_overview(
             sdl_maps[td] = await _load_sdl_day_map(session, td)
 
         merged_rows = []
+        missing_trade_date_count = 0
+        fallback_trade_date_count = 0
+        missing_return_1d_count = 0
+        missing_return_3d_count = 0
         for row in snap_rows:
             snap = dict(row)
             symbol = StockCodeUtil.to_prefix(str(snap.get("symbol") or ""))
@@ -703,10 +763,28 @@ async def _do_get_overview(
             merged = dict(snap)
             if td in sdl_maps and symbol in sdl_maps[td]:
                 merged.update(sdl_maps[td][symbol])
+                if merged.get("_sdl_fallback"):
+                    merged["_market_join_status"] = "matched_fallback_trade_date"
+                    fallback_trade_date_count += 1
+                else:
+                    merged["_market_join_status"] = "matched"
+            else:
+                merged["_market_join_status"] = "missing_trade_date"
+                missing_trade_date_count += 1
+            if merged.get("return_1d") is None:
+                missing_return_1d_count += 1
+            if merged.get("return_3d") is None:
+                missing_return_3d_count += 1
             merged_rows.append(merged)
 
         items = [_format_candidate_record(r) for r in merged_rows]
         summary = await _fetch_summary(session, where, params, include_market_stats=include_market_stats)
+        summary["warnings"] = {
+            "market_data_missing_for_trade_date": missing_trade_date_count,
+            "market_data_fallback_trade_date": fallback_trade_date_count,
+            "return_1d_unavailable": missing_return_1d_count,
+            "return_3d_unavailable": missing_return_3d_count,
+        }
     return {"items": items, "summary": summary}
 
 
@@ -826,6 +904,10 @@ async def _do_get_universe_with_sdl_redis(
             return None
 
         merged_rows: list[dict[str, Any]] = []
+        missing_trade_date_count = 0
+        fallback_trade_date_count = 0
+        missing_return_1d_count = 0
+        missing_return_3d_count = 0
         for row in snap_rows:
             snap = dict(row)
             symbol = StockCodeUtil.to_prefix(str(snap.get("symbol") or ""))
@@ -833,10 +915,28 @@ async def _do_get_universe_with_sdl_redis(
             sdl = sdl_map.get(symbol)
             if sdl:
                 merged.update(sdl)
+                if merged.get("_sdl_fallback"):
+                    merged["_market_join_status"] = "matched_fallback_trade_date"
+                    fallback_trade_date_count += 1
+                else:
+                    merged["_market_join_status"] = "matched"
+            else:
+                merged["_market_join_status"] = "missing_trade_date"
+                missing_trade_date_count += 1
+            if merged.get("return_1d") is None:
+                missing_return_1d_count += 1
+            if merged.get("return_3d") is None:
+                missing_return_3d_count += 1
             merged_rows.append(merged)
 
         items = [_format_candidate_record(r) for r in merged_rows]
         summary = await _fetch_summary(session, where, params, include_market_stats=False)
+        summary["warnings"] = {
+            "market_data_missing_for_trade_date": missing_trade_date_count,
+            "market_data_fallback_trade_date": fallback_trade_date_count,
+            "return_1d_unavailable": missing_return_1d_count,
+            "return_3d_unavailable": missing_return_3d_count,
+        }
         return {"items": items, "summary": summary}
 
 
@@ -1015,11 +1115,13 @@ async def get_stock_kline(symbol: str, days: int) -> dict[str, Any]:
     if cached is not None:
         return cached
 
-    async with get_session(read_only=True) as session:
+    norm_symbol_sql = _norm_symbol_sql("symbol")
+    async with get_market_session() as session:
         res = await session.execute(
             text(
-                "SELECT trade_date, open, high, low, close, volume, adj_factor FROM stock_daily_latest "
-                "WHERE symbol = (CASE WHEN :s ~* '^(SH|SZ|BJ)[0-9]{6}$' THEN UPPER(:s) ELSE :s END) "
+                f"SELECT trade_date, open, high, low, close, volume, adj_factor FROM {_SDL_TABLE} "
+                f"WHERE {norm_symbol_sql} = :s "
+                "AND COALESCE(volume, 0) > 0 "
                 "ORDER BY trade_date DESC LIMIT :l"
             ),
             {"s": normalized_symbol, "l": days},
