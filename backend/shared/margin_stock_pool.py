@@ -157,7 +157,7 @@ _SERVICES: dict[str, MarginStockPoolService] = {}
 
 def get_margin_stock_pool_service(source_path: str | Path | None = None) -> MarginStockPoolService:
     root = Path(__file__).resolve().parents[2]
-    resolved = Path(source_path) if source_path else root / "data" / "融资融券.xlsx"
+    resolved = Path(source_path) if source_path else root / "data" / "融资融券.json"
     service_key = str(resolved.resolve())
     service = _SERVICES.get(service_key)
     if service is None:

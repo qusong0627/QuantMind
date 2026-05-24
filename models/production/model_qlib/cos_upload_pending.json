@@ -1,0 +1,43 @@
+{
+  "cos_prefix": "models/candidates/train_20260525002710_2ffd187d/",
+  "bucket": "quantmind-1255718505",
+  "files": [
+    {
+      "local": "model.lgb",
+      "key": "models/candidates/train_20260525002710_2ffd187d/model.lgb",
+      "content_type": "application/octet-stream"
+    },
+    {
+      "local": "pred.parquet",
+      "key": "models/candidates/train_20260525002710_2ffd187d/pred.parquet",
+      "content_type": "application/octet-stream"
+    },
+    {
+      "local": "pred.pkl",
+      "key": "models/candidates/train_20260525002710_2ffd187d/pred.pkl",
+      "content_type": "application/octet-stream"
+    },
+    {
+      "local": "metadata.json",
+      "key": "models/candidates/train_20260525002710_2ffd187d/metadata.json",
+      "content_type": "application/json"
+    },
+    {
+      "local": "config.yaml",
+      "key": "models/candidates/train_20260525002710_2ffd187d/config.yaml",
+      "content_type": "application/x-yaml"
+    },
+    {
+      "local": "result.json",
+      "key": "models/candidates/train_20260525002710_2ffd187d/result.json",
+      "content_type": "application/json"
+    },
+    {
+      "local": "shap_summary.csv",
+      "key": "models/candidates/train_20260525002710_2ffd187d/shap_summary.csv",
+      "content_type": "text/csv"
+    }
+  ],
+  "created_at": "2026-05-24T16:32:52.075895",
+  "uploaded": false
+}

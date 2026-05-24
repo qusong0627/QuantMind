@@ -93,15 +93,25 @@ class QlibBinaryLoader:
         self.data_path = Path(data_path)
         self.calendar_path = self.data_path / "calendars" / "day.txt"
         self.instruments_path = self.data_path / "instruments" / "all.txt"
-
+        self.instrument_ranges = {}
+        
         if not self.calendar_path.exists():
             raise FileNotFoundError(f"Calendar not found: {self.calendar_path}")
-
+            
         self.calendar = [line.strip() for line in self.calendar_path.read_text().splitlines()]
         self.date_to_idx = {date: idx for idx, date in enumerate(self.calendar)}
-
+        
         if self.instruments_path.exists():
-            self.all_symbols = [line.strip().split('\t')[0] for line in self.instruments_path.read_text().splitlines()]
+            self.all_symbols = []
+            for line in self.instruments_path.read_text().splitlines():
+                parts = line.strip().split("\t")
+                if not parts or not parts[0]:
+                    continue
+                symbol = parts[0]
+                self.all_symbols.append(symbol)
+                # all.txt format: symbol\tstart_date\tend_date
+                if len(parts) >= 3:
+                    self.instrument_ranges[symbol] = (parts[1], parts[2])
         else:
             self.all_symbols = [d.name for d in (self.data_path / "features").iterdir() if d.is_dir()]
 
@@ -115,45 +125,59 @@ class QlibBinaryLoader:
         ]
         bin_path = next((p for p in candidates if p.exists()), None)
         if not bin_path: return None
-
+        
         filesize = os.path.getsize(bin_path)
         available_count = filesize // 4
+        req_len = end_idx - start_idx + 1
+        result = np.full(req_len, np.nan, dtype=np.float32)
 
-        # If the requested start is beyond file end, we have no data
-        if start_idx >= available_count: return None
+        # Qlib feature bin often starts from instrument's own start date in all.txt,
+        # not from global calendar[0]. We must map global date indices to local bin offsets.
+        inst_start_idx = 0
+        inst_end_idx = len(self.calendar) - 1
+        inst_range = self.instrument_ranges.get(symbol)
+        if inst_range is None:
+            inst_range = self.instrument_ranges.get(symbol.upper()) or self.instrument_ranges.get(symbol.lower())
+        if inst_range:
+            inst_start_idx = self.date_to_idx.get(inst_range[0], 0)
+            inst_end_idx = self.date_to_idx.get(inst_range[1], len(self.calendar) - 1)
 
-        # Determine how much we can actually read
-        read_end_idx = min(end_idx, available_count - 1)
-        count = read_end_idx - start_idx + 1
+        overlap_start = max(start_idx, inst_start_idx)
+        overlap_end = min(end_idx, inst_end_idx)
+        if overlap_start > overlap_end:
+            return result
 
-        if count <= 0: return None
+        local_start = overlap_start - inst_start_idx
+        local_end = overlap_end - inst_start_idx
+        if local_start >= available_count:
+            return result
+        local_end = min(local_end, available_count - 1)
+        if local_end < local_start:
+            return result
 
-        offset = start_idx * 4
+        count = local_end - local_start + 1
+        offset = local_start * 4
         with open(bin_path, 'rb') as f:
             f.seek(offset)
             data = np.fromfile(f, dtype=np.float32, count=count)
 
-        # If we read less than requested (due to file end), pad with NaNs if needed
-        # but actually load_market_data expects the returned array to be correct for the specific dates it slices.
-        # So we should return the data and let the caller handle alignment or pad here.
-        if len(data) < (end_idx - start_idx + 1):
-            padded = np.full(end_idx - start_idx + 1, np.nan, dtype=np.float32)
-            padded[:len(data)] = data
-            return padded
-        return data
+        out_start = overlap_start - start_idx
+        out_end = out_start + len(data)
+        result[out_start:out_end] = data
+        return result
 
     def load_market_data(self, symbols, start_date, end_date):
         # Find nearest indices in calendar
         valid_dates = [d for d in self.calendar if start_date <= d <= end_date]
         if not valid_dates:
             return pd.DataFrame()
-
+            
         s_date, e_date = valid_dates[0], valid_dates[-1]
         s_idx, e_idx = self.date_to_idx[s_date], self.date_to_idx[e_date]
-
+        
         features = ["open", "high", "low", "close", "volume", "vwap", "factor"]
         dates = self.calendar[s_idx:e_idx+1]
-
+        
         all_data = []
         for sym in symbols:
             sym_data = {}
@@ -172,7 +196,7 @@ class QlibBinaryLoader:
                 df = pd.DataFrame(sym_data, index=pd.to_datetime(dates))
                 df.index.name = 'datetime'; df['symbol'] = sym
                 all_data.append(df)
-
+        
         if not all_data: return pd.DataFrame()
         return pd.concat(all_data).set_index('symbol', append=True).reorder_levels(['symbol', 'datetime']).sort_index()
 
@@ -196,17 +220,17 @@ def main():
     loader = QlibBinaryLoader(resolved_data_path)
     # Filter out BJ stocks from the loader's default symbols
     target_symbols = [s for s in loader.all_symbols if not (s.startswith("BJ") or s.startswith("bj"))]
-
+    
     # Alpha158 needs historical background for rolling features (max window is 60)
     target_dt = datetime.strptime(args.date, "%Y-%m-%d")
-    lookback_days = 90 # Buffer for valid trading days
+    lookback_days = 120 # Buffer for valid trading days (need >60 trading days)
     hist_start_dt = (target_dt - timedelta(days=lookback_days)).strftime("%Y-%m-%d")
     # Find nearest valid start date in calendar
     start_date = next((d for d in reversed(loader.calendar) if d <= hist_start_dt), loader.calendar[0])
-
+    
     logger.info("Loading binary market data for %d symbols (skipped BJ stocks)...", len(target_symbols))
     df = loader.load_market_data(target_symbols, start_date, args.date)
-
+    
     if df.empty:
         logger.error("No valid market data loaded. Aborting.")
         sys.exit(2)
@@ -214,7 +238,7 @@ def main():
     # 2. Calculate Features
     logger.info("Calculating 158 factors for %d symbols across %d days...", len(loader.all_symbols), len(df.groupby(level='datetime')))
     features_df = Alpha158Calculator.calculate(df)
-
+    
     # Only keep the target date for prediction
     target_date_ts = pd.Timestamp(args.date)
     if target_date_ts not in features_df.index.get_level_values('datetime'):
@@ -224,34 +248,46 @@ def main():
         logger.warning("Target date %s missing in features. Falling back to latest date: %s", args.date, target_date_ts)
 
     X = features_df.xs(target_date_ts, level='datetime')
+    
+    # Filter out inactive/delisted symbols (must have positive volume and valid close on target date)
+    if target_date_ts in df.index.get_level_values('datetime'):
+        target_df = df.xs(target_date_ts, level='datetime')
+        active_mask = (target_df['volume'] > 0) & (target_df['close'].notna())
+        active_symbols = target_df[active_mask].index.tolist()
+        X = X.loc[X.index.intersection(active_symbols)]
+    
     symbols = X.index.tolist()
-
+    
     if X.empty:
-        logger.error("Empty feature set for target date. Aborting.")
+        logger.error("Empty feature set for target date after filtering inactive symbols. Aborting.")
         sys.exit(2)
+
+    # Apply cross-sectional percent rank normalization to features to align with training
+    logger.info("Applying cross-sectional percent rank normalization to inference features...")
+    X_ranked = X.rank(pct=True)
 
     # 3. Prediction
     # EXTRA STABILITY: Load model explicitly and set threads
-    logger.info("Loading model and predicting for %d symbols...", len(X))
+    logger.info("Loading model and predicting for %d symbols...", len(X_ranked))
     try:
         booster = lgb.Booster(model_file=args.model_path)
         # Force single-threaded prediction to avoid SEGV on large multi-core servers
-        preds = booster.predict(X.values.astype(np.float32), num_threads=1)
+        preds = booster.predict(X_ranked.values.astype(np.float32), num_threads=1)
     except Exception as e:
         logger.error("LightGBM Prediction Failed: %s", e)
         # Final fallback: If booster fails to load, create fake scores to maintain UI flow
         # but mark it as failure in logs
         sys.exit(1)
-
+    
     # 4. Filter and Output
     results = [{"symbol": sym, "score": float(p)} for sym, p in zip(symbols, preds) if not pd.isna(p)]
     results.sort(key=lambda x: x["score"], reverse=True)
-
+    
     out_path = Path(args.output)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "w") as f:
         json.dump(results, f)
-
+    
     logger.info("Inference successful. Generated %d signals.", len(results))
 
 if __name__ == "__main__":

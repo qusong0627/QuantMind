@@ -24,24 +24,24 @@
   },
   "performance_metrics": {
     "train": {
-      "mean_ic": 0.0793,
-      "icir": 0.7607
+      "mean_ic": 0.1061,
+      "icir": 0.7901
     },
     "valid": {
-      "mean_ic": 0.0711,
-      "icir": 0.4997
+      "mean_ic": 0.0645,
+      "icir": 0.3769
     },
     "test": {
-      "mean_ic": 0.0542,
-      "icir": 0.4028
+      "mean_ic": 0.054,
+      "icir": 0.3312
     }
   },
-  "train_start": "2019-01-01",
+  "train_start": "2019-01-02",
   "train_end": "2024-12-31",
-  "valid_start": "2025-01-01",
-  "valid_end": "2025-06-30",
-  "test_start": "2025-07-01",
-  "test_end": "2026-03-31",
+  "valid_start": "2025-01-07",
+  "valid_end": "2025-08-15",
+  "test_start": "2025-08-21",
+  "test_end": "2026-05-12",
   "qlib_data_path": "/app/db/qlib_data",
   "files": {
     "config": "config.yaml",
@@ -59,12 +59,12 @@
     "pred_file": "pred.pkl"
   },
   "notes": "模板文件：config.yaml, prepare_data.py, train.py。训练产物应保存 model_checkpoint.bin。",
-  "trained_at": "2026-04-17 17:01:33",
+  "trained_at": "2026-05-25 00:02:12",
   "model_path": "/root/qlib-main/model/19_T3_Alpha158_Base/model_checkpoint_v19.bin",
   "prediction_path": "/app/models/production/alpha158/pred.pkl",
   "pred_coverage_start": "2021-01-04",
   "pred_coverage_end": "2026-04-24",
-  "pred_rows": 4374045,
+  "pred_rows": 6651039,
   "regenerated_at": "2026-04-26T10:44:29.599132",
   "regeneration_config": {
     "cpu_cores": 72,

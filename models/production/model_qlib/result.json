@@ -1,19 +1,19 @@
 {
   "status": "completed",
-  "run_id": "train_20260522210032_3189c6c7",
-  "job_name": "model_train_t5_20260522210032",
+  "run_id": "train_20260525002710_2ffd187d",
+  "job_name": "model_train_t5_20260525002710",
   "metrics": {
     "train": {
-      "rmse": 0.28604439525305136,
-      "auc": 0.557180817511956
+      "rmse": 0.28565445931356925,
+      "auc": 0.5619921603734319
     },
     "val": {
-      "rmse": 0.28708227576531997,
-      "auc": 0.5443865827190594
+      "rmse": 0.28696033227960716,
+      "auc": 0.5464953739368745
     },
     "test": {
-      "rmse": 0.28684991767877227,
-      "auc": 0.5490448014270619
+      "rmse": 0.28681676312779797,
+      "auc": 0.5490307005378754
     }
   },
   "artifacts": [
@@ -48,11 +48,11 @@
   ],
   "summary": {
     "status": "训练完成",
-    "message": "训练完成，best_iteration=253，产物已保存本地，待凌晨3:00上传至COS"
+    "message": "训练完成，best_iteration=341，产物已保存本地，待凌晨3:00上传至COS"
   },
   "metadata": {
-    "run_id": "train_20260522210032_3189c6c7",
-    "job_name": "model_train_t5_20260522210032",
+    "run_id": "train_20260525002710_2ffd187d",
+    "job_name": "model_train_t5_20260525002710",
     "framework": "lightgbm",
     "model_type": "lightgbm",
     "model_file": "model.lgb",
@@ -261,32 +261,32 @@
       "ind_value_rank": 0.5
     },
     "train_start": "2016-01-04",
-    "train_end": "2023-04-09",
-    "val_start": "2023-04-14",
-    "val_end": "2024-10-28",
-    "test_start": "2024-11-02",
-    "test_end": "2026-05-21",
+    "train_end": "2023-04-10",
+    "val_start": "2023-04-15",
+    "val_end": "2024-10-29",
+    "test_start": "2024-11-03",
+    "test_end": "2026-05-22",
     "data_source": "parquet",
-    "best_iteration": 253,
+    "best_iteration": 341,
     "target_horizon_days": 5,
     "target_mode": "return",
     "label_formula": "label = future_return(T, T+5) = open(T+5) / open(T) - 1",
-    "effective_trade_date": "2024-11-03",
-    "training_window": "2016-01-04 → 2023-04-09 | 2023-04-10 → 2024-10-28 | 2024-10-29 → 2026-05-21",
+    "effective_trade_date": "2024-11-04",
+    "training_window": "2016-01-04 → 2023-04-10 | 2023-04-11 → 2024-10-29 | 2024-10-30 → 2026-05-22",
     "metrics": {
-      "train_ic": 0.13794392583755763,
-      "train_rank_ic": 0.12202875097059568,
-      "train_rank_icir": 1.075563584567573,
-      "val_ic": 0.1050406318283096,
-      "val_rank_ic": 0.08632911761851084,
-      "val_rank_icir": 0.5757059411658884,
-      "test_ic": 0.11278563835278277,
-      "test_rank_ic": 0.10193227303586742,
-      "test_rank_icir": 0.7314501989299868
+      "train_ic": 0.1485092809593945,
+      "train_rank_ic": 0.13104266710094903,
+      "train_rank_icir": 1.1501040575134016,
+      "val_ic": 0.10887127321032586,
+      "val_rank_ic": 0.09079522998879262,
+      "val_rank_icir": 0.5694257762111319,
+      "test_ic": 0.11342130911167071,
+      "test_rank_ic": 0.10193078139373368,
+      "test_rank_icir": 0.6816317886746569
     },
     "pred_coverage_start": "2016-01-04",
-    "pred_coverage_end": "2026-05-14",
-    "pred_rows": 10585545,
+    "pred_coverage_end": "2026-05-15",
+    "pred_rows": 10590811,
     "shap": {
       "enabled": true,
       "status": "completed",
@@ -295,11 +295,11 @@
       "rows_used": 30000,
       "file": "shap_summary.csv",
       "error": "",
-      "elapsed_seconds": 6.6389000415802
+      "elapsed_seconds": 15.623228788375854
     },
-    "generated_at": "2026-05-22T13:06:12.042530",
-    "elapsed_seconds": 113.4215018749237
+    "generated_at": "2026-05-24T16:32:52.059157",
+    "elapsed_seconds": 136.85704898834229
   },
   "error": "",
-  "logs": "val_rmse=0.287082, val_auc=0.544387"
+  "logs": "val_rmse=0.286960, val_auc=0.546495"
 }

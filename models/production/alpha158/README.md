@@ -22,6 +22,10 @@
 
 推理运行时
 - `inference.py` 现对线上同步推理主动收敛并行度，避免单次请求在 Qlib 特征构建阶段 fork 大量子进程导致 API 超时或容器被 OOM/Kill。
+- `inference.py` 已修复按“全局交易日索引”直接读取个股 bin 文件导致的新股/短历史标的丢失问题：
+  - 现按 `instruments/all.txt` 的 `start_date/end_date` 映射到个股本地 bin 偏移；
+  - 对不重叠日期自动补 NaN，不再误判为“无效标的”并整只剔除；
+  - 该修复可显著提升全市场覆盖率，避免推理结果长期停留在 2000+ 只。
 - 默认推理运行参数：
   - `ALPHA158_INFERENCE_THREADS=4`
   - `ALPHA158_INFERENCE_KERNELS=1`
