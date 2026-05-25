@@ -85,7 +85,6 @@ db/qlib_csv/
 db/*.tar.gz
 db.tar.gz
 *.bin
-*.pkl
 *.parquet
 *.csv
 !backend/tests/**/*.csv
