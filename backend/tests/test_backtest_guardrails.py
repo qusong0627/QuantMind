@@ -40,7 +40,7 @@ def test_enforce_signal_quality_blocks_implicit_close_fallback():
     service = QlibBacktestService()
     request = types.SimpleNamespace(allow_feature_signal_fallback=False)
 
-    with pytest.raises(ValueError, match="禁止回退到 \\$close"):
+    with pytest.raises(ValueError, match="预测信号缺失"):
         service._enforce_signal_quality(
             {"source": "close_fallback", "fallback_reason": "pred_path_not_found"},
             request=request,

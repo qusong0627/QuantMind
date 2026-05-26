@@ -245,15 +245,26 @@ class RiskAnalyzer:
 
             display_price = price if price is not None else 0.0
             display_quantity = quantity if quantity is not None else 0.0
+            # 兼容性处理：
+            # - 新数据（修复后）：写入层已正确存储真实不复权价格和真实股数，无需还原
+            # - 旧数据（修复前）：写入层存的是 adj_price（真实价格）但 price 字段可能被错误缩小，
+            #   quantity 存的是 adj_quantity（复权单位），需要还原
+            # 检测条件：quantity 非整数（复权单位特征）或 price 明显偏小（被错误除以 factor）
             quantity_is_integer_like = (
                 quantity is not None and np.isfinite(quantity) and abs(quantity - round(quantity)) <= 1e-6
+            )
+            # 如果 quantity 不是整数且 adj_quantity 存在，说明可能是旧数据
+            # 或者 price 存在但明显小于 adj_price（被错误除以 factor），也需要还原
+            price_looks_adjusted = (
+                price is not None and adj_price is not None and factor_val is not None and factor_val > 0
+                and price < adj_price * 0.9  # price 明显小于 adj_price，说明被错误缩小了
             )
             should_restore = (
                 factor_val is not None
                 and factor_val > 0
                 and adj_price is not None
                 and adj_quantity is not None
-                and (quantity is None or not quantity_is_integer_like)
+                and ((quantity is None or not quantity_is_integer_like) or price_looks_adjusted)
             )
             if should_restore:
                 display_price = adj_price / factor_val
@@ -824,11 +835,15 @@ class RiskAnalyzer:
 
                 adj_price = float(row["adj_price"])
                 adj_quantity = float(row["adj_quantity"])
+                # 写入层已正确存储真实不复权价格和真实股数，无需再做 factor 转换
+                # 但保留兼容性：如果 quantity 非整数或 adj_quantity 明显与 quantity 不符，还原
                 display_price = adj_price
                 display_quantity = adj_quantity
                 if factor_val is not None and factor_val > 0:
-                    display_price = adj_price / factor_val
-                    display_quantity = adj_quantity * factor_val
+                    # adj_quantity 若非整数，说明可能是旧数据存的复权单位，需要还原
+                    if not np.isfinite(adj_quantity) or abs(adj_quantity - round(adj_quantity)) > 1e-6:
+                        display_price = adj_price / factor_val
+                        display_quantity = adj_quantity * factor_val
 
                 total_amount = row["trade_val"]
                 if total_amount is None:

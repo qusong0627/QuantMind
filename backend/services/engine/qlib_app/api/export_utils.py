@@ -1,5 +1,6 @@
 """Qlib 回测导出工具"""
 
+import numpy as np
 from typing import Any, Optional
 
 
@@ -60,7 +61,21 @@ def _build_quick_trade_rows(
 
         display_price = explicit_price if explicit_price is not None else 0.0
         display_quantity = explicit_quantity if explicit_quantity is not None else 0.0
-        should_restore = explicit_quantity is None and has_valid_factor and adj_price is not None and adj_quantity is not None
+        # 兼容性处理：
+        # - 新数据：写入层已正确存储，无需还原
+        # - 旧数据：需要根据 adj_price/adj_quantity 和 factor 还原
+        quantity_is_integer_like = (
+            explicit_quantity is not None and np.isfinite(explicit_quantity)
+            and abs(explicit_quantity - round(explicit_quantity)) <= 1e-6
+        )
+        price_looks_adjusted = (
+            explicit_price is not None and adj_price is not None and factor is not None and factor > 0
+            and explicit_price < adj_price * 0.9
+        )
+        should_restore = (
+            has_valid_factor and adj_price is not None and adj_quantity is not None
+            and ((explicit_quantity is None or not quantity_is_integer_like) or price_looks_adjusted)
+        )
         if should_restore:
             display_price = adj_price / factor
             display_quantity = adj_quantity * factor

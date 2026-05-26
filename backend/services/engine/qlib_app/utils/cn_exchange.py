@@ -69,6 +69,32 @@ class CnExchange(Exchange):
             except Exception as e:
                 task_logger.warning("redis_client_init_failed", "Failed to initialize Redis client in CnExchange", error=str(e))
 
+    def round_amount_by_trade_unit(
+        self,
+        deal_amount: float,
+        factor: float | None = None,
+        stock_id: str | None = None,
+        start_time: pd.Timestamp = None,
+        end_time: pd.Timestamp = None,
+    ) -> float:
+        """
+        强制 A 股整手取整（100股/手），不受 Qlib 全局 trade_w_adj_price 影响。
+        - trade_w_adj_price=True ：deal_amount 是真实股数，直接整百取整
+        - trade_w_adj_price=False：deal_amount 是复权调整单位，
+                                   先 ×factor 得真实股数，整百取整，再 ÷factor 转回
+        精度偏移量用 1e-5（非 Qlib 原版的 0.1），避免浮点误差引发假阳性向上取整。
+        """
+        trade_unit = self.trade_unit or 100
+
+        if self.trade_w_adj_price:
+            rounded = (float(deal_amount) + 1e-5) // trade_unit * trade_unit
+            return max(0.0, rounded)
+        else:
+            f_val = float(factor) if factor is not None and not np.isnan(factor) else 1.0
+            raw_amount = deal_amount * f_val
+            rounded_raw = (raw_amount + 1e-5) // trade_unit * trade_unit
+            return max(0.0, rounded_raw) / f_val
+
     @staticmethod
     def _is_invalid_quote(value: object) -> bool:
         if value is None:
@@ -198,15 +224,26 @@ class CnExchange(Exchange):
         if self.redis_client and trade_val > 0:
             try:
                 action = "buy" if order.direction == OrderDir.BUY else "sell"
+                factor_val = getattr(order, "factor", None)
+                # Qlib 在 trade_w_adj_price=False 模式下，deal_amount 是复权调整单位（adjusted units）
+                # 需要乘以 factor 还原为真实股数
+                if factor_val and float(factor_val) > 0 and not self.trade_w_adj_price:
+                    real_quantity = float(order.deal_amount) * float(factor_val)
+                else:
+                    real_quantity = float(order.deal_amount)
                 trade_record = {
                     "date": order.start_time.strftime("%Y-%m-%d"),
                     "symbol": str(order.stock_id),
                     "action": action,
-                    "price": float(trade_price),
-                    "quantity": float(order.deal_amount),
+                    "price": float(trade_price),  # 真实不复权市价
+                    "quantity": real_quantity,  # 存储真实股数
                     "amount": float(trade_val),
                     "commission": float(trade_cost),
                     "timestamp": datetime.now().isoformat(),
+                    # 保留复权口径字段，便于对账
+                    "adj_price": float(trade_price),
+                    "adj_quantity": float(order.deal_amount),
+                    "factor": float(factor_val) if factor_val else None,
                 }
                 self.redis_client.rpush(self.trades_key, json.dumps(trade_record))
             except Exception:

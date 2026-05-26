@@ -232,13 +232,13 @@ class RedisLoggerMixin:
                     except Exception:
                         factor_val = None
 
-                # Qlib 内部成交通常使用复权口径（price/amount 受 factor 影响）。
-                # 对外展示时转成更贴近日线行情的非复权口径，避免与行情终端收盘价对不上。
-                display_price = adj_price
+                # Qlib 内部成交通常使用复权口径（amount 受 factor 影响）。
+                # 当 trade_w_adj_price=False 时，price 是真实不复权市价，直接使用；
+                # quantity（deal_amount）是复权调整单位，需要 ×factor 还原为真实股数。
+                display_price = adj_price  # 真实不复权价格，直接使用
                 display_quantity = adj_quantity
-                if factor_val is not None and factor_val > 0:
-                    display_price = adj_price / factor_val
-                    display_quantity = adj_quantity * factor_val
+                if factor_val is not None and factor_val > 0 and not self.trade_exchange.trade_w_adj_price:
+                    display_quantity = adj_quantity * factor_val  # 还原真实股数
 
                 record = {
                     "date": date_str,

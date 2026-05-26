@@ -232,9 +232,9 @@
     "test_rank_ic": 0.10193078139373368,
     "test_rank_icir": 0.6816317886746569
   },
-  "pred_coverage_start": "2021-01-04",
+  "pred_coverage_start": "2016-01-04",
   "pred_coverage_end": "2026-05-15",
-  "pred_rows": 6445059,
+  "pred_rows": 10590811,
   "shap": {
     "enabled": true,
     "status": "completed",
