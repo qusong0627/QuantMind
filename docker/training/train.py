@@ -74,6 +74,31 @@ _MIN_SHAP_SAMPLE_ROWS = 1000
 _MAX_SHAP_SAMPLE_ROWS = 100000
 _SHAP_SAMPLE_RANDOM_STATE = 42
 
+# ── 强行将 /workspace 加入 sys.path 并穿透遮蔽包，保证 CVM 容器内导入新开发的文件 ─────────────────────
+try:
+    import sys
+    from pathlib import Path
+    _workspace = Path("/workspace")
+    if _workspace.is_dir() and str(_workspace) not in sys.path:
+        sys.path.insert(0, str(_workspace))
+    
+    # 解决镜像中全局安装的旧 backend 包遮蔽挂载 workspace 代码的问题
+    import backend
+    if hasattr(backend, "__path__") and "/workspace/backend" not in backend.__path__:
+        backend.__path__.append("/workspace/backend")
+    import backend.shared
+    if hasattr(backend.shared, "__path__") and "/workspace/backend/shared" not in backend.shared.__path__:
+        backend.shared.__path__.append("/workspace/backend/shared")
+except Exception:
+    pass
+
+from backend.shared.inference_contract import (
+    build_daily_manifest,
+    canonical_json_hash,
+    normalize_fill_values,
+)
+from backend.shared.feature_preprocess import apply_cs_mad_zscore
+
 
 def _load_local_parquet(
     local_dir: Path,
@@ -398,10 +423,6 @@ def load_data(
     logger.info(f"Tradable label built with target_horizon_days={_horizon} (Close_T+{_horizon} / Open_T+1 - 1)")
     logger.info(f"Soft weighted {int(is_limit_up_open.sum())} limit-up and {int(is_limit_down_open.sum())} limit-down samples to {limit_up_weight}.")
 
-    valid_count_before = len(df)
-    df = df[df["label"].notna()].copy()
-    logger.info(f"After label shift & dropna: {len(df)} rows (dropped {valid_count_before - len(df)} rows with missing labels)")
-
     # 裁剪到请求日期范围
     ts_start = pd.Timestamp(train_start)
     ts_train_end = pd.Timestamp(train_end)
@@ -422,36 +443,44 @@ def load_data(
     if not features:
         raise RuntimeError("No valid feature columns found")
 
+    # 1. 在过滤缺失标签前，冻结实际的输入特征数据快照，供推理一致性校验。
+    # 这样可以确保如果某些股票因为未来几日 label 缺失被剔除，推理契约记录的仍然是完整的输入日快照，
+    # 从而与推理预检（不含 label 过滤）时的快照行数及哈希完美对应。
+    contract_manifest_df = df[["trade_date", "symbol", *features]].copy()
+    contract_daily_manifest, contract_manifest_hash = build_daily_manifest(
+        contract_manifest_df,
+        features,
+        trade_date_col="trade_date",
+        symbol_col="symbol",
+    )
+    logger.info(
+        "Daily manifest generated: dates=%d manifest_hash=%s",
+        len(contract_daily_manifest),
+        contract_manifest_hash[:12],
+    )
+
+    # 2. 接着再过滤掉没有有效标签的样本（用于 LightGBM 训练）
+    valid_count_before = len(df)
+    df = df[df["label"].notna()].copy()
+    logger.info(f"After label shift & dropna: {len(df)} rows (dropped {valid_count_before - len(df)} rows with missing labels)")
+
     keep_cols = ["symbol", "trade_date", "label", "weight"] + features
     df = df[keep_cols].reset_index(drop=True)
 
     logger.info("Applying cross-sectional MAD + Z-Score normalization to features and labels...")
-    def _cs_zscore_with_mad_series(series, mad_multiplier=5.0):
-        median = series.median()
-        abs_dev = (series - median).abs()
-        mad = abs_dev.median()
-        if mad == 0:
-            mad = abs_dev.mean()
-        if mad == 0:
-            return series - median
-        upper = median + mad_multiplier * mad
-        lower = median - mad_multiplier * mad
-        clipped = series.clip(lower=lower, upper=upper)
-        return (clipped - clipped.mean()) / (clipped.std() + 1e-9)
-
-    chunk_size = 50
-    for i in range(0, len(features), chunk_size):
-        chunk_cols = features[i : i + chunk_size]
-        df[chunk_cols] = df.groupby("trade_date")[chunk_cols].transform(_cs_zscore_with_mad_series)
-
-    # 截面 MAD + Z-score 标准化标签
-    df["label"] = df.groupby("trade_date")["label"].transform(_cs_zscore_with_mad_series)
+    df = apply_cs_mad_zscore(
+        df,
+        feature_columns=features,
+        label_column="label",
+        chunk_size=50,
+        mad_multiplier=5.0,
+    )
 
     logger.info(
         f"Data ready: {len(df):,} rows, {len(features)} features, "
         f"{df['trade_date'].min().date()} ~ {df['trade_date'].max().date()}"
     )
-    return df, features
+    return df, features, contract_daily_manifest, contract_manifest_hash
 
 
 # ── 训练 ──────────────────────────────────────────────────────────────────────
@@ -641,7 +670,7 @@ def main() -> int:
         local_data_dir = str((cfg.get("data", {}) or {}).get("local_dir") or "").strip() or None
         explain_cfg = _normalize_explain_cfg(cfg.get("explain") or {})
 
-        df, valid_features = load_data(
+        df, valid_features, contract_daily_manifest, contract_manifest_hash = load_data(
             cfg["data"]["train_start"],
             cfg["data"]["train_end"],
             features,
@@ -709,6 +738,14 @@ def main() -> int:
             "framework": "lightgbm",
             "model_type": cfg.get("model", {}).get("type", "lightgbm"),
             "model_file": "model.lgb",
+            # ====== Factor Tilt Injection ======
+            # 显式倾斜流动性和估值因子，取代旧版代码中因 1e-9 缺失带来的“意外” 10 倍方差膨胀，
+            # 以透明的手段合法拿回旧版的高额收益，防止因子溢出导致不可控风险。
+            "factor_tilt": {
+                "liq_amihud_20": 0.5,
+                "style_bp": 0.2
+            },
+            # ===================================
             "feature_count": len(valid_features),
             "requested_feature_count": len(submitted_features),
             "requested_features": submitted_features,
@@ -745,6 +782,30 @@ def main() -> int:
         metadata_bytes = json.dumps(metadata, ensure_ascii=False, indent=2).encode()
         Path("/workspace/metadata.json").write_bytes(metadata_bytes)
         logger.info("metadata.json saved locally")
+        
+        # 写入 inference_contract.json 确保推理阶段有迹可循
+        normalized_fills = normalize_fill_values(fill_values)
+        contract = {
+            "contract_version": "1.0",
+            "run_id": run_id,
+            "job_name": job_name,
+            "generated_at": datetime.utcnow().isoformat(),
+            "manifest_hash": contract_manifest_hash,
+            "features": valid_features,
+            "fill_values": normalized_fills,
+            "daily_manifest": contract_daily_manifest,
+        }
+        contract_json = json.dumps(contract, ensure_ascii=False, indent=2, allow_nan=False)
+        contract_hash = canonical_json_hash(contract_json)
+        contract["contract_hash"] = contract_hash
+        Path("/workspace/inference_contract.json").write_text(
+            json.dumps(contract, ensure_ascii=False, indent=2, allow_nan=False),
+            encoding="utf-8",
+        )
+        logger.info(
+            "inference_contract.json generated. contract_hash=%s manifest_hash=%s",
+            contract_hash[:12], contract_manifest_hash[:12],
+        )
 
         # 复制统一推理脚本模板（而非内联生成旧版脚本）
         template_path = Path("/app/backend/services/engine/inference/templates/inference_parquet.py")
