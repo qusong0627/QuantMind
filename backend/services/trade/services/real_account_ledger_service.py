@@ -316,6 +316,9 @@ async def backfill_daily_ledgers_from_snapshots(
         day = getattr(row, "snapshot_date", None)
         if day is None or day in latest_per_day:
             continue
+        if _to_float(getattr(row, "total_asset", None), 0.0) <= 0:
+            # 跳过零资产快照（桥空响应时段），避免把 0 写进账本
+            continue
         latest_per_day[day] = row
         if len(latest_per_day) >= max(1, min(days, 3650)):
             break

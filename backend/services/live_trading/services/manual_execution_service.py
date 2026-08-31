@@ -1273,11 +1273,16 @@ class ManualExecutionService:
                 ),
             }
         latest_model_source = str(latest_run.get("model_source") or "").strip()
-        # 允许的来源：默认模型/显式系统模型，以及"显式指定的恰好就是默认模型"
-        # （用户在前端显式选择默认模型触发推理时 model_source=explicit_model_id，信号来源仍是该默认模型）
+        # 允许的来源：默认模型/显式系统模型。
+        # 兼容：只要 run 的 model_id 就是默认模型，来源标签无论缺失（部分推理路径不写
+        # model_source）还是 explicit_model_id/strategy_binding（前端显式选择/策略绑定
+        # 触发），信号都算默认模型产出，归一到 user_default。
         allowed_sources = {"user_default", "explicit_system_model"}
         run_model_id = str(latest_run.get("model_id") or "").strip()
-        if latest_model_source in {"explicit_model_id", "strategy_binding"} and run_model_id == default_model_id:
+        if (
+            latest_model_source not in allowed_sources
+            and run_model_id == default_model_id
+        ):
             latest_model_source = "user_default"
         if latest_model_source not in allowed_sources:
             return {

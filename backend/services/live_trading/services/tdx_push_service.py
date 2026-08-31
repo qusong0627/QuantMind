@@ -281,6 +281,25 @@ class TdxPushService:
         if market_value <= 0 and positions:
             market_value = round(sum(float(x.get("market_value") or 0) for x in positions), 2)
 
+        # 零资产守卫：桥返回空账户（开盘前后/桥未就绪）时不落库，
+        # 避免 0 资产快照污染日终账本与收益计算（与 qmt 链路 is_inconsistent_zero_total_snapshot 同语义）。
+        if total_asset <= 0 and cash <= 0 and market_value <= 0:
+            logger.info(
+                "[TdxPush] 桥返回空账户 asset=%.2f cash=%.2f mv=%.2f，跳过落库",
+                total_asset,
+                cash,
+                market_value,
+            )
+            return {
+                "success": True,
+                "skipped": True,
+                "reason": "empty_account",
+                "total_asset": total_asset,
+                "cash": cash,
+                "market_value": market_value,
+                "position_count": len(positions),
+            }
+
         from datetime import date, datetime, timezone
 
         from sqlalchemy import insert
@@ -322,6 +341,81 @@ class TdxPushService:
                 tenant_id=tenant_id,
                 user_id=user_id,
                 now=now,
+            )
+            # —— 日终账本同步（与 qmt 链路共用 upsert_real_account_daily_ledger）——
+            # tdx 桥不提供当日盈亏，用派生口径：今日盈亏 = 总资产 - 上一交易日收盘权益；
+            # 首日无上一交易日则退化到今日首条快照。口径与 internal_strategy_utils 一致。
+            from sqlalchemy import select
+
+            from backend.services.trade.services.real_account_ledger_service import (
+                upsert_real_account_daily_ledger,
+            )
+
+            async def _first_asset(*where) -> float | None:
+                stmt = (
+                    select(RealAccountSnapshot.total_asset)
+                    .where(
+                        RealAccountSnapshot.tenant_id == tenant_id,
+                        RealAccountSnapshot.user_id == (user_id or "0"),
+                        RealAccountSnapshot.account_id == account_id,
+                        *where,
+                    )
+                    .order_by(
+                        RealAccountSnapshot.snapshot_at.asc(),
+                        RealAccountSnapshot.id.asc(),
+                    )
+                    .limit(1)
+                )
+                row = (await db.execute(stmt)).first()
+                return float(row[0]) if row and row[0] else None
+
+            prev_day_stmt = (
+                select(RealAccountSnapshot.total_asset)
+                .where(
+                    RealAccountSnapshot.tenant_id == tenant_id,
+                    RealAccountSnapshot.user_id == (user_id or "0"),
+                    RealAccountSnapshot.account_id == account_id,
+                    RealAccountSnapshot.snapshot_date < snapshot_date,
+                )
+                .order_by(
+                    RealAccountSnapshot.snapshot_at.desc(),
+                    RealAccountSnapshot.id.desc(),
+                )
+                .limit(1)
+            )
+            prev_row = (await db.execute(prev_day_stmt)).first()
+            prev_close_equity = (
+                float(prev_row[0]) if prev_row and prev_row[0] else None
+            )
+            day_open_equity = prev_close_equity or await _first_asset(
+                RealAccountSnapshot.snapshot_date == snapshot_date
+            )
+            month_open_equity = await _first_asset(
+                RealAccountSnapshot.snapshot_month == snapshot_month
+            )
+            initial_equity = await _first_asset() or total_asset
+            today_pnl = total_asset - (day_open_equity or total_asset)
+            total_pnl = total_asset - (initial_equity or total_asset)
+
+            await upsert_real_account_daily_ledger(
+                db,
+                tenant_id=tenant_id,
+                user_id=user_id or "0",
+                account_id=account_id,
+                snapshot_at=now,
+                snapshot_date=snapshot_date,
+                total_asset=total_asset,
+                cash=cash,
+                market_value=market_value,
+                initial_equity=initial_equity or total_asset,
+                day_open_equity=day_open_equity or total_asset,
+                month_open_equity=month_open_equity or total_asset,
+                today_pnl=today_pnl,
+                total_pnl=total_pnl,
+                floating_pnl=0.0,
+                position_count=len(positions),
+                source="tdx_bridge",
+                payload_json=payload,
             )
             await db.commit()
         logger.info(

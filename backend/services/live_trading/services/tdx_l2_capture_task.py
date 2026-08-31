@@ -379,10 +379,14 @@ def compute_l2_factors(
     if len(samples) >= 6:
         prices = [s[5] for s in samples]
         rets = [abs((b - a) / a) for a, b in zip(prices, prices[1:]) if a > 0]
-        half = max(len(rets) // 2, 1)
-        cur_rv = sum(rets[-half:]) / half
-        day_rv = sum(rets) / len(rets)
-        factors["micro_zone_rv_ratio_close"] = round(_clip(cur_rv / (day_rv + 1e-9), 0, 10), 6)
+        if rets:
+            half = max(len(rets) // 2, 1)
+            cur_rv = sum(rets[-half:]) / half
+            day_rv = sum(rets) / len(rets)
+            factors["micro_zone_rv_ratio_close"] = round(_clip(cur_rv / (day_rv + 1e-9), 0, 10), 6)
+        else:
+            # 全部价格 ≤ 0（收盘后/停牌快照）→ 无收益序列，置 None 而非除零崩溃
+            factors["micro_zone_rv_ratio_close"] = None
     else:
         factors["micro_zone_rv_ratio_close"] = None
 
