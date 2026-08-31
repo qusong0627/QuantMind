@@ -70,6 +70,21 @@ python3 <repo>/skills/stock-picks/scripts/pick_candidates.py --top 30 --json --n
 **硬过滤**：① 无融合分数剔除；② 仓位门 `position_score>0 或 行业百分位≥80%`（避免大盘空仓日推满仓）；③ 默认排除 ST。
 未含维度（如当日无 news.json、L2 分区缺失）时该维中性 0.5，`picks.md` 头部会标注「未含：L2, 新闻」——报告里要声明，不能假装都有。
 
+### 第 2.5 步：候选 × 新闻增强（本 skill 脚本，推荐必做）
+
+对候选池逐只拉 Huntly/RSS 聚合新闻（近 24h，含 LLM 情感标注），
+产出「分数 + 新闻 + 情绪」合并表，**新闻直接修正推荐**：
+
+```bash
+python3 <repo>/skills/stock-picks/scripts/picks_with_news.py --top 10                  # 最新日期
+python3 <repo>/skills/stock-picks/scripts/picks_with_news.py --date 20260831 --top 15 # 指定日期
+python3 <repo>/skills/stock-picks/scripts/picks_with_news.py --json                    # 供上游脚本解析
+```
+
+产出：`data/reports/stock_picks/{YYYYMMDD}_picks_news.md`。
+标注规则：**★ 新闻强化** = 近 24h ≥2 利好且多于利空（报告里可上调推荐）；**⚠ 利空警示** = ≥2 利空且多于利好（必须下调或剔除，哪怕分数高）；无新闻 = 分数为准不渲染情绪。
+**写报告时新闻详情逐条引用**（标题/来源/北京时间/利好利空），且与第 3 步深分的 L7 新闻层互相印证——两边都有的消息是重点。
+
 ### 第 3 步：Top N 深分（复用 [[stock-market-analysis]]）
 
 对候选榜前 5~10 只跑 9 层深分，取 `--json` 输出供报告引用：
