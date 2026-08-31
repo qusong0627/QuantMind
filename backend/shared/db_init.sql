@@ -2249,3 +2249,78 @@ ON CONFLICT (user_id) DO NOTHING;
 -- ========================
 -- DONE - 所有缺失表已创建
 -- ========================
+
+-- ========================
+-- 33.5 ORDER_HISTORY（历史委托归档表，多交易所）
+-- ========================
+-- 设计说明：
+--   1. 目的：持久化历史委托。桥/券商接口的当日委托列表有上限，历史委托会滚出
+--      实时列表（TDX 桥只支持当日委托查询），本表作为不可变归档防丢失。
+--   2. 多交易所：market (CN/HK/US/FUTURES/CRYPTO) + exchange (SSE/SZSE/BSE/HKEX/
+--      NASDAQ/NYSE/AMEX/SHFE/DCE/CZCE/CFFEX/INE/CRYPTO) 双维度。
+--   3. 多券商：broker_type (tdx/futu/tiger/ib/qmt/manual)。
+--   4. 幂等：UNIQUE (broker_type, exchange_order_id, trade_date)，重复归档用
+--      ON CONFLICT DO NOTHING 跳过。
+--   5. raw_payload JSONB 保留券商原始报文，字段差异不丢数据。
+CREATE TABLE IF NOT EXISTS order_history (
+    id                  SERIAL PRIMARY KEY,
+    history_id          UUID NOT NULL UNIQUE,
+    tenant_id           VARCHAR(64) NOT NULL DEFAULT 'default',
+    user_id             VARCHAR(32) NOT NULL,
+    account_id          VARCHAR(64),
+    portfolio_id        INTEGER NOT NULL DEFAULT 0,
+    strategy_id         INTEGER,
+
+    -- 市场/交易所维度
+    market              VARCHAR(16) NOT NULL,
+    exchange            VARCHAR(16) NOT NULL,
+    currency            VARCHAR(8) NOT NULL DEFAULT 'CNY',
+    broker_type         VARCHAR(16) NOT NULL,
+
+    -- 标的
+    symbol              VARCHAR(32) NOT NULL,
+    symbol_name         VARCHAR(64),
+
+    -- 委托内容
+    side                VARCHAR(8) NOT NULL,
+    order_type          VARCHAR(16) NOT NULL DEFAULT 'market',
+    status              VARCHAR(20) NOT NULL,
+    quantity            FLOAT NOT NULL,
+    filled_quantity     FLOAT NOT NULL DEFAULT 0,
+    price               FLOAT,
+    average_price       FLOAT,
+    stop_price          FLOAT,
+
+    -- 金额与费用
+    order_value         FLOAT NOT NULL DEFAULT 0,
+    filled_value        FLOAT NOT NULL DEFAULT 0,
+    commission          FLOAT NOT NULL DEFAULT 0,
+    stamp_duty          FLOAT NOT NULL DEFAULT 0,
+    transfer_fee        FLOAT NOT NULL DEFAULT 0,
+    total_fee           FLOAT NOT NULL DEFAULT 0,
+
+    -- 时间
+    trade_date          TIMESTAMP NOT NULL,
+    submitted_at        TIMESTAMP,
+    filled_at           TIMESTAMP,
+    cancelled_at        TIMESTAMP,
+    expired_at          TIMESTAMP,
+    archived_at         TIMESTAMP NOT NULL DEFAULT NOW(),
+
+    -- 溯源
+    client_order_id     VARCHAR(100),
+    exchange_order_id   VARCHAR(100),
+    source              VARCHAR(32) NOT NULL DEFAULT 'bridge',
+    remarks             VARCHAR(500),
+    raw_payload         JSONB,
+
+    created_at          TIMESTAMP NOT NULL DEFAULT NOW(),
+    updated_at          TIMESTAMP NOT NULL DEFAULT NOW(),
+    UNIQUE (broker_type, exchange_order_id, trade_date)
+);
+
+CREATE INDEX IF NOT EXISTS idx_order_history_market_exchange ON order_history (market, exchange);
+CREATE INDEX IF NOT EXISTS idx_order_history_symbol_date ON order_history (symbol, trade_date);
+CREATE INDEX IF NOT EXISTS idx_order_history_user_status ON order_history (user_id, status);
+CREATE INDEX IF NOT EXISTS idx_order_history_archived ON order_history (archived_at);
+
