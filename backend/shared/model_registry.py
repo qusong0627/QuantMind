@@ -2031,6 +2031,20 @@ class ModelRegistryService:
             "shap_summary.csv",
         ]
 
+        # 多模型模式：metadata.json 里 saved_models 记录了全部基模型文件名
+        # （model_gru.pth / model_mlp.pkl 等新后缀名不在静态白名单），动态展开补全
+        for predefined_dir in (target_dir, Path("/data") / "training_jobs" / run_id):
+            meta_path = predefined_dir / "metadata.json"
+            if meta_path.is_file():
+                try:
+                    saved = json.loads(meta_path.read_text(encoding="utf-8")).get("saved_models") or {}
+                    artifact_names.extend(
+                        v for v in saved.values() if v not in artifact_names
+                    )
+                except Exception:
+                    pass
+                break
+
         copied: list[str] = []
         for source_dir in (target_dir, Path("/data") / "training_jobs" / run_id):
             if not source_dir.exists() or not source_dir.is_dir():

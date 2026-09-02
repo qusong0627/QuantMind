@@ -965,7 +965,7 @@ class InferenceScriptRunner:
                     run_id,
                     fallback_reason,
                 )
-                if not self.enable_fallback:
+                if not self.enable_fallback or model_market not in ("CN", "A"):
                     return ExecutionResult(
                         success=False,
                         exit_code=1,
@@ -1043,7 +1043,7 @@ class InferenceScriptRunner:
                 run_id,
                 fallback_reason,
             )
-            if not self.enable_fallback:
+            if not self.enable_fallback or model_market not in ("CN", "A"):
                 return ExecutionResult(
                     success=False,
                     exit_code=1,
@@ -1156,7 +1156,7 @@ class InferenceScriptRunner:
                 logger.warning(
                     f"[InferenceScriptRunner] v10 数据质量不足 (exit=2)，启动 alpha158 兜底, run_id={run_id}"
                 )
-                if not self.enable_fallback:
+                if not self.enable_fallback or model_market not in ("CN", "A"):
                     return ExecutionResult(
                         success=False,
                         exit_code=exit_code,

@@ -3047,6 +3047,43 @@ _QUANTDB_NAMES_CACHE_AT = 0.0
 _QUANTDB_NAMES_TTL = 600.0
 
 
+_QUANTHK_NAMES_CACHE: dict[str, str] | None = None
+_QUANTHK_NAMES_CACHE_AT = 0.0
+_QUANTHK_NAMES_TTL = 600.0
+
+
+def _load_quanthk_hk_names() -> dict[str, str]:
+    """从 quanthk security_master 加载 {suffix_symbol(0700.HK): 中文名}。"""
+    global _QUANTHK_NAMES_CACHE, _QUANTHK_NAMES_CACHE_AT  # noqa: PLW0603
+    import time
+
+    now = time.monotonic()
+    if (
+        _QUANTHK_NAMES_CACHE is not None
+        and now - _QUANTHK_NAMES_CACHE_AT < _QUANTHK_NAMES_TTL
+    ):
+        return _QUANTHK_NAMES_CACHE
+    from backend.services.engine.data_platform.quanthk_hub import _resolve_quanthk_data_dir
+
+    result: dict[str, str] = {}
+    try:
+        import duckdb
+
+        con = duckdb.connect()
+        try:
+            rows = con.execute(
+                "SELECT symbol, cn_name FROM read_parquet("
+                f"'{_resolve_quanthk_data_dir()}/2_base_sector/security_master/data.parquet')"
+            ).fetchall()
+            result = {str(sym): str(cn) for sym, cn in rows if cn}
+        finally:
+            con.close()
+    except Exception as exc:  # noqa: BLE001 - 名称表缺失不影响主流程
+        logger.warning("quanthk security_master 读取失败: %s", exc)
+    _QUANTHK_NAMES_CACHE, _QUANTHK_NAMES_CACHE_AT = result, now
+    return result
+
+
 def _load_quantdb_stock_names() -> dict[str, str]:
     """从 QuantDB instrument_list 加载 {prefix_symbol: 股票简称}。"""
     global _QUANTDB_NAMES_CACHE, _QUANTDB_NAMES_CACHE_AT  # noqa: PLW0603
@@ -3279,19 +3316,27 @@ async def get_model_inference_run_detail(
     try:
         from backend.shared.stock_utils import StockCodeUtil
 
-        name_map = _load_quantdb_stock_names()
+        # 港股模型（mdl_hk_ 前缀）用 quanthk security_master 名称表，其余走 QuantDB
+        hk_model = str(run.get("model_id") or "").startswith("mdl_hk_")
+        name_map = _load_quanthk_hk_names() if hk_model else {}
+        cn_map = {} if hk_model else _load_quantdb_stock_names()
         for item in signals:
             if item.get("stock_name"):
                 continue
             sym = str(item.get("symbol") or "").strip()
             if not sym:
                 continue
-            prefix = StockCodeUtil.to_prefix(sym)
-            nm = name_map.get(prefix) if prefix else None
+            if hk_model:
+                # engine_signal_scores.symbol 为纯数字（0700），拼 .HK 匹配 master
+                suffix = f"{sym}.HK" if sym.isdigit() and not sym.endswith(".HK") else sym
+                nm = name_map.get(suffix.upper()) or name_map.get(suffix)
+            else:
+                prefix = StockCodeUtil.to_prefix(sym)
+                nm = cn_map.get(prefix) if prefix else None
             if nm:
                 item["stock_name"] = nm
     except Exception as exc:  # pragma: no cover - 名称兜底失败不影响主流程
-        logger.warning("回填 QuantDB 股票简称失败: %s", exc)
+        logger.warning("回填股票简称失败: %s", exc)
 
     summary = dict(run)
     summary["rows_count"] = len(signals)

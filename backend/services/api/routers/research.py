@@ -52,6 +52,58 @@ async def _do_get_overview(  # noqa: SLF001
         _research_service.get_session = original_get_session
 
 
+_HK_STOCK_NAMES_CACHE: dict[str, tuple[float, dict[str, str]]] = {}
+
+
+@router.get("/stock-names")
+async def get_stock_names(
+    market: str = Query("CN", description="CN 或 HK；CN 走 instrument 表，HK 走 quanthk security_master"),
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    """返回该市场全量证券代码→中文名映射（前端推理排名/联想展示用，约 2800 条）。
+
+    HK: quanthk/security_master（2807 只全市场）；CN: instrument 简表兼容。
+    """
+    import time as _time
+
+    _ = current_user
+    market = market.upper()
+    cache = _HK_STOCK_NAMES_CACHE.get(market)
+    if cache and _time.time() - cache[0] < 1800:
+        return {"market": market, "names": cache[1], "cached": True}
+
+    names: dict[str, str] = {}
+    if market == "HK":
+        from backend.services.engine.data_platform.quanthk_hub import _resolve_quanthk_data_dir
+
+        qdir = _resolve_quanthk_data_dir()
+        import duckdb
+
+        con = duckdb.connect()
+        try:
+            rows = con.execute(
+                "SELECT symbol, cn_name FROM read_parquet("
+                f"'{qdir}/2_base_sector/security_master/data.parquet')"
+            ).fetchall()
+            names = {
+                str(sym): str(cn) for sym, cn in rows if cn and str(cn).strip()
+            }
+        finally:
+            con.close()
+    else:
+        async with get_session(read_only=True) as session:
+            from sqlalchemy import text as _text
+
+            rows = (
+                await session.execute(
+                    _text("SELECT symbol, name FROM instrument LIMIT 6000")
+                )
+            ).fetchall()
+            names = {str(r[0]): str(r[1]) for r in rows if r[1]}
+    _HK_STOCK_NAMES_CACHE[market] = (_time.time(), names)
+    return {"market": market, "names": names, "cached": False}
+
+
 @router.get("/models")
 async def get_available_models(
     market: str | None = Query(None),

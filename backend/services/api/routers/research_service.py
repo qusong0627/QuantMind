@@ -2161,26 +2161,35 @@ def _quantdb_kline_items(normalized_symbol: str, days: int) -> list[dict[str, An
 
 async def get_stock_kline(symbol: str, days: int) -> dict[str, Any]:
     normalized_symbol = StockCodeUtil.to_prefix(symbol)
+    # 市场推断：港股后缀 0700.HK → HK 走 quanthk / stock_daily_latest_hk；
+    # A 股前缀/6 位走原有 QuantDB / stock_daily_latest 链路
+    is_hk = normalized_symbol.upper().endswith(".HK")
 
     # 当前价格统一走 QuantDB（不复权真实价），避免 stock_daily_latest 空表/复权口径不一致
-    qd_items = _quantdb_kline_items(normalized_symbol, days)
-    if qd_items:
-        payload = {"code": 200, "data": {"symbol": normalized_symbol, "items": qd_items}}
-        _set_local_cache(_SDL_CACHE, f"sdl-kline:{normalized_symbol}:{days}", payload, _SDL_CACHE_MAX_ENTRIES)
-        return payload
+    if not is_hk:
+        qd_items = _quantdb_kline_items(normalized_symbol, days)
+        if qd_items:
+            payload = {"code": 200, "data": {"symbol": normalized_symbol, "items": qd_items}}
+            _set_local_cache(_SDL_CACHE, f"sdl-kline:{normalized_symbol}:{days}", payload, _SDL_CACHE_MAX_ENTRIES)
+            return payload
 
     cache_key = f"sdl-kline:{normalized_symbol}:{days}"
     cached = _get_local_cache(_SDL_CACHE, cache_key, _SDL_CACHE_TTL_SECONDS)
     if cached is not None:
         return cached
 
+    # 港股：stock_daily_latest_hk（quanthk 最新交易日全量，symbol 为 0700.HK 后缀式）
     # 表里 stock_daily_latest.symbol 实际可能是后缀格式（"600519.SH"）或前缀格式
     # （"SH600519"）。统一两边都走 _norm_symbol_sql 归一化为前缀格式后再比较，
     # 才能匹配上当前数据（5536 个股票全部为后缀格式存储）。
+    if is_hk:
+        cond_where = """symbol = :s"""
+    else:
+        cond_where = f'{_norm_symbol_sql("symbol")} = {_norm_symbol_sql(":s")}'
     sql = f"""
         SELECT trade_date, open, high, low, close, volume, adj_factor
-        FROM stock_daily_latest
-        WHERE {_norm_symbol_sql("symbol")} = {_norm_symbol_sql(":s")}
+        FROM {"stock_daily_latest_hk" if is_hk else "stock_daily_latest"}
+        WHERE {cond_where}
         ORDER BY trade_date DESC LIMIT :l
     """
 
@@ -2211,7 +2220,11 @@ async def get_stock_kline(symbol: str, days: int) -> dict[str, Any]:
     if not items:
         try:
             import aiohttp
-            ts_code = normalized_symbol.lower()
+            if is_hk:
+                code5 = normalized_symbol.upper().replace(".HK", "").zfill(5)
+                ts_code = f"hk{code5}"
+            else:
+                ts_code = normalized_symbol.lower()
             url = f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param={ts_code},day,,,{days},qfq"
             async with aiohttp.ClientSession() as client:
                 async with client.get(url, timeout=aiohttp.ClientTimeout(total=6)) as resp:

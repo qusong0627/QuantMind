@@ -2338,12 +2338,14 @@ def _train_dl(
         if inner_model is not None:
             inner_model.load_state_dict(best_state)
 
-    # 保存模型
-    torch.save(best_state, str(output_dir / "model.pth"))
-    logger.info("DL model saved: model.pth (best_epoch=%d, best_score=%.6f)", best_epoch, best_score)
+    # 保存模型（多模型模式必须带后缀：所有 DL 共用一个 output_dir，
+    # 单写 model.pth 会互相覆盖，最后只剩最后一个模型的权重）
+    torch.save(best_state, str(output_dir / f"model_{model_type}.pth"))
+    logger.info("DL model saved: model_%s.pth (best_epoch=%d, best_score=%.6f)", model_type, best_epoch, best_score)
 
     # DL 元数据 (供推理重建模型)
     dl_metadata = {
+        "model_type": model_type,
         "model_class_name": cls_name,
         "model_params": {k: v for k, v in model_params.items() if k not in ("GPU", "n_epochs", "lr", "batch_size", "early_stop", "metric")},
         "is_sequence_model": is_ts,
@@ -2568,9 +2570,9 @@ def _train_nativetft(
         logger.warning("NativeTFT best_state 为 None（可能 val_score 全 NaN），使用最终权重")
         best_state = copy.deepcopy(model.state_dict())
 
-    # 保存模型
-    torch.save(best_state, str(output_dir / "model.pth"))
-    logger.info("NativeTFT saved: model.pth (best_epoch=%d, best_ic=%.6f)", best_epoch, best_score)
+    # 保存模型（多模型模式带后缀，避免覆盖同目录其他 DL 权重）
+    torch.save(best_state, str(output_dir / f"model_{model_type}.pth"))
+    logger.info("NativeTFT saved: model_%s.pth (best_epoch=%d, best_ic=%.6f)", model_type, best_epoch, best_score)
 
     dl_metadata = {
         "model_type": "NativeTFT",
@@ -2659,8 +2661,14 @@ def _predict_dl(
     model_params["GPU"] = 0 if torch.cuda.is_available() else -1
     model_obj = model_cls(**model_params)
 
-    # 加载权重
-    model_path = model_dir / "model.pth"
+    # 加载权重（多模型模式保存为 model_{type}.pth；旧模型兼容回退 model.pth）
+    _mt = str(dl_metadata.get("model_type") or "").lower()
+    if _mt:
+        model_path = model_dir / f"model_{_mt}.pth"
+        if not model_path.exists():
+            model_path = model_dir / "model.pth"
+    else:
+        model_path = model_dir / "model.pth"
     if not model_path.exists():
         raise FileNotFoundError(f"model.pth not found at {model_path}")
 
@@ -2849,7 +2857,10 @@ def _predict_nativetft(
     infer_device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     logger.info("NativeTFT inference device: %s", infer_device)
     model = _NativeTFTNet().to(infer_device)
-    model_path = model_dir / "model.pth"
+    # 多模型模式保存为 model_nativetft.pth（兼容旧单模型 model.pth）
+    model_path = model_dir / "model_nativetft.pth"
+    if not model_path.exists():
+        model_path = model_dir / "model.pth"
     if not model_path.exists():
         raise FileNotFoundError(f"model.pth not found at {model_path}")
     state_dict = torch.load(str(model_path), map_location=infer_device)
@@ -2957,8 +2968,9 @@ def _save_model(model: Any, model_type: str, out_dir: Path) -> str:
         # hybrid_gru_tree 由专用训练管线保存 gru_encoder.pth + 树模型文件
         if model_type == "hybrid_gru_tree":
             return "model.pkl"
-        # DL 模型在 _train_dl() 中已保存 model.pth，此处仅返回文件名
-        return "model.pth"
+        # DL 模型在 _train_dl() 中已保存 model_{type}.pth，此处仅返回文件名，
+        # 4235 行统一改名循环发现同名时跳过（不再覆盖/错配权重）
+        return f"model_{model_type}.pth"
     else:
         import pickle
         path = out_dir / "model.pkl"

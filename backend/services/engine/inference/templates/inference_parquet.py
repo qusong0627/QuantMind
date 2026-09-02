@@ -93,6 +93,8 @@ def parse_args():
     p.add_argument("--data-dir", type=str,
                    default=os.getenv("MODEL_TRAINING_DATA_DIR", _DEFAULT_DATA_DIR),
                    help="训练数据 parquet 目录")
+    p.add_argument("--market", type=str, default=None,
+                   help="市场（脚本运行器注入，如 HK/US；覆盖 metadata.context.market）")
     return p.parse_args()
 
 
@@ -604,6 +606,11 @@ def main():
 
     # 1. 元数据
     meta  = load_metadata(model_dir)
+    # 脚本运行器对非 CN 市场注入 --market（HK/US/...），覆盖元数据市场归属，
+    # 确保数据解析（因子直读/快照）走对应市场的数据管线
+    if args.market:
+        meta.setdefault("context", {})["market"] = args.market.upper()
+        logger.info("  market    : %s (CLI 注入)", args.market)
     logger.info("  run_id    : %s", meta.get("run_id", "unknown"))
     logger.info("  features  : %d", len(meta.get("feature_columns") or meta.get("features", [])))
 

@@ -43,10 +43,11 @@ function BoardCard({ icon, title, subtitle, right, children }: {
 }
 
 /** 大盘均线过滤卡片：上证指数 vs MA20 → 强制空仓信号 */
-function MarketMAFilterCard({ filter }: { filter?: MarketMAFilter }) {
+function MarketMAFilterCard({ filter, isHk = false }: { filter?: MarketMAFilter; isHk?: boolean }) {
+  const indexName = isHk ? '恒生指数' : '上证指数';
   if (!filter || filter.close === null || filter.close === undefined) {
     return (
-      <BoardCard icon={<Shield size={16} className="text-slate-400" />} title="大盘均线过滤" subtitle="上证指数 vs 20日均线">
+      <BoardCard icon={<Shield size={16} className="text-slate-400" />} title="大盘均线过滤" subtitle={`${indexName} vs 20日均线`}>
         <div className="flex justify-center py-2">
           <Text className="text-xs text-slate-400">暂无指数数据</Text>
         </div>
@@ -59,7 +60,7 @@ function MarketMAFilterCard({ filter }: { filter?: MarketMAFilter }) {
     <BoardCard
       icon={<Shield size={16} className={below ? 'text-rose-500' : 'text-emerald-500'} />}
       title="大盘均线过滤"
-      subtitle={`${filter.ref_date} · 上证指数`}
+      subtitle={`${filter.ref_date} · ${isHk ? '恒生指数' : '上证指数'}`}
       right={below ? (
         <Tag color="red" className="m-0 rounded-full text-xs font-black px-3 py-0.5">跌破 MA20 · 强制空仓</Tag>
       ) : (
@@ -269,7 +270,7 @@ function PitfallCard({ marketSignal, belowMa20, fakeCount }: {
 }
 
 /** 负分分析卡片：做空候选 / 错杀候选 / 负分分布 / 行业差异 */
-function NegativeAnalysisCard({ na }: { na?: NegativeAnalysis }) {
+function NegativeAnalysisCard({ na, isHk = false }: { na?: NegativeAnalysis; isHk?: boolean }) {
   if (!na || na.negative_count === 0) return null;
   const tierColor: Record<string, string> = {
     微盘: 'text-rose-600 bg-rose-50 border-rose-100',
@@ -283,7 +284,7 @@ function NegativeAnalysisCard({ na }: { na?: NegativeAnalysis }) {
     <BoardCard
       icon={<ArrowDownRight size={16} className="text-rose-500" />}
       title="负分分析"
-      subtitle="做空/回避决策矩阵 · 微盘+低分做空 · 大盘负分常被错杀"
+      subtitle={isHk ? "做空/回避决策矩阵 · 小市值+低分做空 · 高市值负分常被错杀" : "做空/回避决策矩阵 · 微盘+低分做空 · 大盘负分常被错杀"}
       right={
         <div className="flex items-center gap-2">
           <Tag color="red" className="m-0 rounded-full text-xs font-black px-3 py-0.5">负分 {na.negative_count} 只 ({na.negative_pct}%)</Tag>
@@ -330,7 +331,7 @@ function NegativeAnalysisCard({ na }: { na?: NegativeAnalysis }) {
         </div>
         <div className="rounded-2xl border border-blue-100 bg-blue-50/50 px-4 py-3">
           <div className="flex items-center justify-between mb-2">
-            <Text className="text-xs font-black text-blue-600">错杀候选（大盘/超大盘负分）</Text>
+            <Text className="text-xs font-black text-blue-600">{isHk ? "错杀候选（高市值负分）" : "错杀候选（大盘/超大盘负分）"}</Text>
             <Text className="font-black font-mono text-sm text-blue-600">{na.mistake_candidates_count}</Text>
           </div>
           {na.mistake_candidates_count === 0 ? (
@@ -399,13 +400,18 @@ function NegativeAnalysisCard({ na }: { na?: NegativeAnalysis }) {
   );
 }
 
-export const StrategyDashboard: React.FC<Props> = ({ summary }) => {
+export const StrategyDashboard: React.FC<Props & { market?: string }> = ({
+  summary,
+  market = 'CN',
+}) => {
+  const isHk = market === 'HK';
   const maFilter = summary.market_ma_filter;
+  const maCard = maFilter ? <MarketMAFilterCard filter={maFilter} isHk={isHk} /> : null;
   return (
     <div className="space-y-4">
       {/* 第一行：市场总览（大盘均线 + 行业轮动） */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        <MarketMAFilterCard filter={maFilter} />
+        {maCard}
         <RotationHint stats={summary.industry_top1} strongCount={summary.strong_industry_count} signal={summary.market_signal} />
       </div>
 
@@ -418,7 +424,7 @@ export const StrategyDashboard: React.FC<Props> = ({ summary }) => {
       />
 
       {/* 负分分析 */}
-      <NegativeAnalysisCard na={summary.negative_analysis} />
+      <NegativeAnalysisCard isHk={isHk} na={summary.negative_analysis} />
 
       {/* 避坑清单 */}
       <PitfallCard

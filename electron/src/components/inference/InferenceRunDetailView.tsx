@@ -50,6 +50,14 @@ export const InferenceRunDetailView: React.FC<Props> = ({ runId, result, loading
       onNavigateDate(d.format('YYYY-MM-DD'));
     }
   }, [onNavigateDate]);
+  // 市场推断：按模型 ID 前缀（mdl_hk_ → 港股；缺省 CN），驱动筛选文案/列口径
+  const detailMarket = useMemo(() => {
+    const mid = String(result?.summary?.model_id || '');
+    if (mid.startsWith('mdl_hk_')) return 'HK';
+    if (mid.startsWith('mdl_us_')) return 'US';
+    return 'CN';
+  }, [result]);
+  const isHk = detailMarket === 'HK';
   const [stockModal, setStockModal] = useState<{
     symbol: string;
     name: string;
@@ -144,13 +152,21 @@ export const InferenceRunDetailView: React.FC<Props> = ({ runId, result, loading
         options: result.summary.score_buckets.map(b => ({ value: b.key, label: `${b.label} · ${b.action}` })),
       });
     }
-    const negOptions = [
-      { value: 'neg_extreme', label: '极端负分 ≤-0.20' },
-      { value: 'neg_short', label: '做空候选 · 微盘/小盘≤-0.15' },
-      { value: 'neg_mistake', label: '错杀候选 · 大盘/超大盘负分' },
-      { value: 'neg_resistant', label: '抗跌行业 · 银行/半导体' },
-      { value: 'neg_general', label: '一般负分' },
-    ];
+    const negOptions = isHk
+      ? [
+          { value: 'neg_extreme', label: '极端负分 ≤-0.20' },
+          { value: 'neg_short', label: '做空候选 · 小市值≤-0.15' },
+          { value: 'neg_mistake', label: '错杀候选 · 高市值负分' },
+          { value: 'neg_resistant', label: '防御性行业负分' },
+          { value: 'neg_general', label: '一般负分' },
+        ]
+      : [
+          { value: 'neg_extreme', label: '极端负分 ≤-0.20' },
+          { value: 'neg_short', label: '做空候选 · 微盘/小盘≤-0.15' },
+          { value: 'neg_mistake', label: '错杀候选 · 大盘/超大盘负分' },
+          { value: 'neg_resistant', label: '抗跌行业 · 银行/半导体' },
+          { value: 'neg_general', label: '一般负分' },
+        ];
     groups.push({ label: '负分标注', options: negOptions });
     return groups;
   }, [result]);
@@ -165,13 +181,22 @@ export const InferenceRunDetailView: React.FC<Props> = ({ runId, result, loading
   ];
 
   // 市值分档选项
-  const capOptions = [
-    { value: '微盘', label: '微盘 <30亿' },
-    { value: '小盘', label: '小盘 30-100亿' },
-    { value: '中盘', label: '中盘 100-300亿' },
-    { value: '大盘', label: '大盘 300-1000亿' },
-    { value: '超大盘', label: '超大盘 >1000亿' },
-  ];
+  // 市值分档：港股按港元市值口径（数据标注缺失时筛选自然无匹配，文案先行对齐）
+  const capOptions = isHk
+    ? [
+        { value: '微盘', label: '微盘 <20亿' },
+        { value: '小盘', label: '小盘 20-100亿' },
+        { value: '中盘', label: '中盘 100-300亿' },
+        { value: '大盘', label: '大盘 300-1000亿' },
+        { value: '超大盘', label: '超大盘 >1000亿' },
+      ]
+    : [
+        { value: '微盘', label: '微盘 <30亿' },
+        { value: '小盘', label: '小盘 30-100亿' },
+        { value: '中盘', label: '中盘 100-300亿' },
+        { value: '大盘', label: '大盘 300-1000亿' },
+        { value: '超大盘', label: '超大盘 >1000亿' },
+      ];
 
   // 综合筛选（融合模型分数为 [-1,1] 时，桶阈值来自后端 score_buckets 的自适应分位数）
   const filteredRankings = useMemo(() => {
@@ -288,7 +313,7 @@ export const InferenceRunDetailView: React.FC<Props> = ({ runId, result, loading
       ) : result ? (
         <div className="space-y-3">
           {/* 策略驾驶舱：BoardCard 自带卡片外壳，不再套 glass-panel 避免双层嵌套显乱 */}
-          {result.summary && <StrategyDashboard summary={result.summary} />}
+          {result.summary && <StrategyDashboard summary={result.summary} market={detailMarket} />}
           {result.summary?.board_top1 && result.summary.board_top1.length > 0 && (
             <div className="glass-panel rounded-3xl p-5 border border-slate-100/50">
               <div className="flex items-center justify-between mb-3">
@@ -622,9 +647,9 @@ export const InferenceRunDetailView: React.FC<Props> = ({ runId, result, loading
                     );
                   },
                 },
-                {
+                ...(isHk ? [] : [{
                   title: '板块', dataIndex: 'board', width: 76,
-                  render: (b: string) => {
+                  render: (v: string) => {
                     const map: Record<string, { color: string; label: string }> = {
                       沪主板: { color: 'red', label: '沪主板' },
                       深主板: { color: 'blue', label: '深主板' },
@@ -633,11 +658,11 @@ export const InferenceRunDetailView: React.FC<Props> = ({ runId, result, loading
                       科创板: { color: 'purple', label: '科创板' },
                       北交所: { color: 'cyan', label: '北交所' },
                     };
-                    const c = map[b];
+                    const c = map[v];
                     if (!c) return <Text className="text-[11px] text-slate-300">—</Text>;
                     return <Tag color={c.color} className="text-[11px] font-black m-0">{c.label}</Tag>;
                   },
-                },
+                }]),
                 {
                   title: '行业', dataIndex: 'industry', width: 96,
                   render: (ind: string) => (
@@ -658,7 +683,7 @@ export const InferenceRunDetailView: React.FC<Props> = ({ runId, result, loading
                     };
                     const c = tmap[tier];
                     return (
-                      <Tooltip title={r.market_cap_yi ? `${r.market_cap_yi.toFixed(1)} 亿` : '市值未知'}>
+                      <Tooltip title={r.market_cap_yi ? `${r.market_cap_yi.toFixed(1)} ${isHk ? '亿港元' : '亿'}` : '市值未知'}>
                         {c ? (
                           <span className={clsx('inline-block rounded-lg border px-2 py-0.5 text-[11px] font-black', c.cls)}>{tier}</span>
                         ) : (
