@@ -1,4 +1,12 @@
-/** Qlib 数据管理（仅 A 股 CN）：查看 Qlib 数据集状态，通过 QuantDB SDK 更新 / 本地重建 */
+/** Qlib 数据管理（CN / HK / US / CRYPTO / FUTURES）：查看 Qlib 数据集状态，从本地 parquet 更新 / 重建 */
+
+const QLIB_MARKETS = [
+  { key: 'CN', label: 'A股' },
+  { key: 'HK', label: '港股' },
+  { key: 'US', label: '美股' },
+  { key: 'CRYPTO', label: '区块链' },
+  { key: 'FUTURES', label: '期货' },
+];
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Alert, Button, Card, Descriptions, Modal, Progress, Space, Table, Tag, Typography, message,
@@ -15,6 +23,13 @@ const { Title, Text } = Typography;
 const RUNNING_STATUS = ['running', 'cancelling'];
 
 const JOB_COLUMNS: ColumnsType<QlibJob> = [
+  {
+    title: '市场', key: 'market', width: 90,
+    render: (_, r) => {
+      const m = /qlib-\w+-(\w+)-20/.exec(r.job_id || '');
+      return m ? <Tag color="blue">{m[1]}</Tag> : '—';
+    },
+  },
   { title: '任务', dataIndex: 'kind', width: 110, render: () => '本地重建 Qlib' },
   {
     title: '状态', dataIndex: 'status', width: 110,
@@ -36,6 +51,7 @@ const JOB_COLUMNS: ColumnsType<QlibJob> = [
 ];
 
 export const AdminQlibDataPanel: React.FC = () => {
+  const [market, setMarket] = useState('CN');
   const [status, setStatus] = useState<QlibStatus | null>(null);
   const [jobs, setJobs] = useState<QlibJob[]>([]);
   const [loading, setLoading] = useState(false);
@@ -44,9 +60,9 @@ export const AdminQlibDataPanel: React.FC = () => {
   const hasRunning = useMemo(() => jobs.some((j) => RUNNING_STATUS.includes(j.status)), [jobs]);
   const activeJobId = useMemo(() => jobs.find((j) => RUNNING_STATUS.includes(j.status))?.job_id, [jobs]);
 
-  const loadStatus = useCallback(async () => {
+  const loadStatus = useCallback(async (mk: string) => {
     try {
-      setStatus(await dataPlatformService.getQlibStatus());
+      setStatus(await dataPlatformService.getQlibStatus(mk));
     } catch (e: any) {
       const code = e?.code || e?.response?.status;
       // 网络瞬断（容器重启）静默退避，不刷 error toast
@@ -66,15 +82,15 @@ export const AdminQlibDataPanel: React.FC = () => {
     }
   }, []);
 
-  const refresh = useCallback(() => {
+  const refresh = useCallback((mk: string) => {
     setLoading(true);
-    Promise.all([loadStatus(), loadJobs()]).finally(() => setLoading(false));
+    Promise.all([loadStatus(mk), loadJobs()]).finally(() => setLoading(false));
   }, [loadStatus, loadJobs]);
 
   useEffect(() => {
-    refresh();
+    refresh(market);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [market]);
 
   // 有运行中任务时轮询进度（指数退避 + 页面不可见暂停）
   useEffect(() => {
@@ -87,7 +103,7 @@ export const AdminQlibDataPanel: React.FC = () => {
         return;
       }
       try {
-        await Promise.all([loadStatus(), loadJobs()]);
+        await Promise.all([loadStatus(market), loadJobs()]);
         attempt = 0;
       } catch {
         attempt += 1;
@@ -110,8 +126,8 @@ export const AdminQlibDataPanel: React.FC = () => {
       onOk: async () => {
         setActing(true);
         try {
-          await dataPlatformService.updateQlibFromSdk();
-          message.success('已提交 Qlib 增量重建任务');
+          await dataPlatformService.updateQlibFromSdk(market);
+          message.success(`已提交 [${market}] Qlib 增量重建任务`);
           loadJobs();
         } catch (e: any) {
           message.error(e?.response?.data?.detail || '提交更新失败');
@@ -152,16 +168,29 @@ export const AdminQlibDataPanel: React.FC = () => {
           <div>
             <div className="flex items-center gap-3">
               <Title level={4} className="!m-0 !font-black !text-slate-800 tracking-tight">Qlib 数据管理</Title>
-              {ready !== undefined && <Tag color={ready ? 'green' : 'red'} className="!m-0 rounded-full font-black">{ready ? 'Qlib 就绪' : '未就绪'}</Tag>}
-              <Tag className="m-0 rounded-full font-black">A 股 CN</Tag>
+              {status?.enabled === false && <Tag color="default" className="!m-0 rounded-full font-black">市场未启用</Tag>}
+              {status?.enabled !== false && ready !== undefined && <Tag color={ready ? 'green' : 'red'} className="!m-0 rounded-full font-black">{ready ? 'Qlib 就绪' : '未就绪'}</Tag>}
+              <div className="flex items-center gap-1 rounded-full bg-slate-100 p-0.5">
+                {QLIB_MARKETS.map((m) => (
+                  <button
+                    key={m.key}
+                    onClick={() => setMarket(m.key)}
+                    className={`px-3 py-1 rounded-full text-[11px] font-extrabold transition-all ${
+                      market === m.key ? 'bg-white text-indigo-700 shadow-2xs border border-indigo-200' : 'text-slate-500 hover:text-slate-800'
+                    }`}
+                  >
+                    {m.label}
+                  </button>
+                ))}
+              </div>
             </div>
             <Text className="text-slate-400 text-xs mt-1 block">
-              查看当前系统 Qlib 数据集状态，从本地 parquet 增量重建缓存。
+              查看当前系统 Qlib 数据集状态，从本地 parquet 增量重建缓存（支持五市场切换）。
             </Text>
           </div>
         </div>
         <Space>
-          <Button icon={<ReloadOutlined />} loading={loading} onClick={refresh}>刷新</Button>
+          <Button icon={<ReloadOutlined />} loading={loading} onClick={() => refresh(market)}>刷新</Button>
         </Space>
       </div>
 

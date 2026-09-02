@@ -283,6 +283,7 @@ export interface QuantDBDiffResult {
 
 // ---- Qlib 数据管理 ----
 export interface QlibStatus {
+    enabled?: boolean;
     market: string;
     qlib_dir: string;
     ready: boolean;
@@ -777,15 +778,15 @@ class DataPlatformService {
     }
 
     // ---- Qlib 数据管理（仅 A 股 CN） ----
-    async getQlibStatus(): Promise<QlibStatus> {
-        const resp = await this.axiosInstance.get('/admin/data-platform/qlib/status', {
+    async getQlibStatus(market = 'CN'): Promise<QlibStatus> {
+        const resp = await this.axiosInstance.get(`/admin/data-platform/qlib/status?market=${market}`, {
             timeout: 60000,
         });
         return this.unwrap(resp);
     }
 
-    async updateQlibFromSdk(): Promise<{ job: QlibJob }> {
-        const resp = await this.axiosInstance.post('/admin/data-platform/qlib/update-from-sdk', null, {
+    async updateQlibFromSdk(market = 'CN'): Promise<{ job: QlibJob }> {
+        const resp = await this.axiosInstance.post(`/admin/data-platform/qlib/update-from-sdk?market=${market}`, null, {
             timeout: 30000,
         });
         return this.unwrap(resp);

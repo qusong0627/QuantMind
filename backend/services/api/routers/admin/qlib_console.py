@@ -1,4 +1,4 @@
-"""Qlib 数据管理控制台（仅 A 股 CN）。
+"""Qlib 数据管理控制台（CN / HK / US / CRYPTO / FUTURES 五市场）。
 
 提供 Qlib 缓存的状态查询、从本地 parquet 重建、以及通过 QuantDB SDK
 先同步 parquet 再重建 Qlib 的一键更新。任务进度复用 Redis 基建
@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from datetime import date, datetime
 from pathlib import Path
@@ -35,18 +36,42 @@ def _now_iso() -> str:
     return datetime.now().isoformat()
 
 
-def _resolve_cn_qlib_dir() -> Path:
-    """A 股 Qlib 目录统一走 qlib_paths 解析。"""
+def _resolve_qlib_dir(market: str) -> Path:
+    """按市场解析 Qlib 缓存目录（统一走 qlib_paths：/data/qlib/{market}_data 优先，
+    回退各市场 .qlib_cache/。均与实际读取路径一致）。"""
     from backend.shared.qlib_paths import resolve_qlib_provider_uri
 
-    return Path(resolve_qlib_provider_uri("CN"))
+    return Path(resolve_qlib_provider_uri(market))
 
 
-def _latest_parquet_date() -> str | None:
-    """daily_forward 最新分区日期（YYYYMMDD）。"""
-    from backend.scripts.quantdb_daily_sync import QUANTDB_DATA_DIR
+_MARKET_DATA_DIR_ENV = {
+    "CN": "QM_QUANTDB_DATA_DIR",
+    "HK": "QM_QUANTHK_DATA_DIR",
+    "US": "QM_QUANTUS_DATA_DIR",
+    "CRYPTO": "QM_QUANTBC_DATA_DIR",
+    "FUTURES": "QM_QUANTFUTURES_DATA_DIR",
+}
 
-    fwd = QUANTDB_DATA_DIR / "1_kline_data" / "daily_forward"
+
+def _latest_parquet_date(market: str = "CN") -> str | None:
+    """该市场日线 daily_forward 最新分区日期（YYYYMMDD）。"""
+    market = market.upper()
+    if market == "CN":
+        from backend.scripts.quantdb_daily_sync import QUANTDB_DATA_DIR
+
+        data_dir = QUANTDB_DATA_DIR
+    else:
+        from backend.services.engine.data_platform import quanthk_hub, quantus_hub, quantbc_hub, quantfutures_hub
+
+        data_dir = {
+            "HK": quanthk_hub._resolve_quanthk_data_dir(),
+            "US": quantus_hub._resolve_quantus_data_dir(),
+            "CRYPTO": quantbc_hub._resolve_quantbc_data_dir(),
+            "FUTURES": quantfutures_hub._resolve_quantfutures_data_dir(),
+        }.get(market)
+    if not data_dir:
+        return None
+    fwd = Path(data_dir) / "1_kline_data" / "daily_forward"
     if not fwd.is_dir():
         return None
     parts = [p.name for p in fwd.glob("dt=*")]
@@ -56,22 +81,39 @@ def _latest_parquet_date() -> str | None:
     return latest[len("dt="):] if latest.startswith("dt=") else None
 
 
-@router.get("/status", summary="查询 A 股 Qlib 缓存状态")
+def _market_enabled(market: str) -> bool:
+    """市场是否启用（CRYPTO 受 ENABLE_CRYPTO 屏蔽、FUTURES 受 ENABLE_FUTURES 屏蔽）。"""
+    if market == "CRYPTO":
+        return os.getenv("ENABLE_CRYPTO", "false").strip().lower() in {"1", "true", "yes"}
+    if market == "FUTURES":
+        return os.getenv("ENABLE_FUTURES", "true").strip().lower() in {"1", "true", "yes"}
+    return True
+
+
+_MARKET_SCAN_IDS = {
+    "CN": "a_share", "HK": "hong_kong", "US": "us_stock",
+    "CRYPTO": "crypto", "FUTURES": "futures",
+}
+
+
+@router.get("/status", summary="查询指定市场 Qlib 缓存状态")
 async def get_qlib_status(
+    market: str = Query("CN", description="市场: CN/HK/US/CRYPTO/FUTURES"),
     current_user: dict = Depends(require_admin),
 ) -> dict[str, Any]:
-    """返回 CN Qlib 缓存状态，并对比 parquet 上游给出滞后提示。"""
+    """返回指定市场 Qlib 缓存状态，并对比 parquet 上游给出滞后提示。"""
     _ = current_user
-    qlib_dir = _resolve_cn_qlib_dir()
+    market = market.upper()
+    qlib_dir = _resolve_qlib_dir(market)
 
     from backend.services.api.routers.admin.data_status_scanner import _scan_qlib_info
     from backend.shared.qlib_paths import is_qlib_provider_ready
 
     ready = is_qlib_provider_ready(qlib_dir)
-    info = _scan_qlib_info(qlib_dir, "a_share")
+    info = _scan_qlib_info(qlib_dir, _MARKET_SCAN_IDS.get(market, market.lower()))
 
     qlib_last = info.get("calendar_last_date")
-    parquet_latest = _latest_parquet_date()
+    parquet_latest = _latest_parquet_date(market)
     lag_days = None
     lag_hint = None
     if qlib_last and parquet_latest:
@@ -87,7 +129,8 @@ async def get_qlib_status(
             lag_hint = None
 
     return {
-        "market": "CN",
+        "market": market,
+        "enabled": _market_enabled(market),
         "qlib_dir": str(qlib_dir),
         "ready": ready,
         "qlib_data": info,
@@ -98,16 +141,16 @@ async def get_qlib_status(
     }
 
 
-def _build_from_parquet_job(job_id: str, incremental: bool) -> None:
+def _build_from_parquet_job(job_id: str, market: str, incremental: bool) -> None:
     """在系统实际使用的 Qlib 缓存路径上增量/全量重建（不另起新路径）。"""
-    quantdb_sync_jobs.upsert_job(job_id, stage="qlib_build", current="开始构建 Qlib", progress=0)
+    quantdb_sync_jobs.upsert_job(job_id, stage="qlib_build", current=f"[{market}] 开始构建 Qlib", progress=0)
     try:
         from backend.services.engine.qlib_data_builder import QlibDataBuilder
 
         # 目标目录取 resolve_qlib_provider_uri：即系统当前实际读取的缓存，
-        # 避免 build 默认指到 /data/qlib/cn_data 再重建一份并行缓存从而遮蔽完整数据。
-        qlib_dir = _resolve_cn_qlib_dir()
-        builder = QlibDataBuilder.for_market("CN", qlib_dir=qlib_dir)
+        # 避免 build 默认指到别处再重建一份并行缓存从而遮蔽完整数据。
+        qlib_dir = _resolve_qlib_dir(market)
+        builder = QlibDataBuilder.for_market(market, qlib_dir=qlib_dir)
         build_result = builder.build_all(incremental=incremental)
         status = builder.get_status()
         quantdb_sync_jobs.upsert_job(
@@ -130,14 +173,14 @@ def _build_from_parquet_job(job_id: str, incremental: bool) -> None:
         )
 
 
-def _sync_from_sdk_job(job_id: str) -> None:
-    """从本地 parquet 增量重建 Qlib（本地 quantdb 已有独立同步流程，不再走 SDK 下载）。"""
-    quantdb_sync_jobs.upsert_job(job_id, stage="qlib_build", current="开始从本地 parquet 重建 Qlib", progress=5)
+def _sync_from_sdk_job(job_id: str, market: str) -> None:
+    """从本地 parquet 增量重建 Qlib（本地数据已有独立同步流程，不再走 SDK 下载）。"""
+    quantdb_sync_jobs.upsert_job(job_id, stage="qlib_build", current=f"[{market}] 开始从本地 parquet 重建 Qlib", progress=5)
     try:
         from backend.services.engine.qlib_data_builder import QlibDataBuilder
 
-        qlib_dir = _resolve_cn_qlib_dir()
-        builder = QlibDataBuilder.for_market("CN", qlib_dir=qlib_dir)
+        qlib_dir = _resolve_qlib_dir(market)
+        builder = QlibDataBuilder.for_market(market, qlib_dir=qlib_dir)
         build_result = builder.build_all(incremental=True)
         qlib_status = builder.get_status()
         quantdb_sync_jobs.upsert_job(
@@ -160,8 +203,8 @@ def _sync_from_sdk_job(job_id: str) -> None:
         )
 
 
-def _launch_job(kind: str, target) -> dict[str, Any]:
-    job_id = f"qlib-{kind}-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+def _launch_job(kind: str, market: str, target) -> dict[str, Any]:
+    job_id = f"qlib-{kind}-{market}-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
     job = {
         "job_id": job_id,
         "kind": kind,
@@ -183,19 +226,23 @@ def _launch_job(kind: str, target) -> dict[str, Any]:
 
 @router.post("/build", summary="从本地 parquet 构建/重建 Qlib")
 async def build_qlib(
+    market: str = Query("CN", description="市场: CN/HK/US/CRYPTO/FUTURES"),
     incremental: bool = Query(True, description="是否增量更新（false=全量重建）"),
     current_user: dict = Depends(require_admin),
 ) -> dict[str, Any]:
     _ = current_user
-    return _launch_job("build", lambda jid: _build_from_parquet_job(jid, incremental))
+    market = market.upper()
+    return _launch_job("build", market, lambda jid: _build_from_parquet_job(jid, market, incremental))
 
 
-@router.post("/update-from-sdk", summary="通过 QuantDB SDK 同步并更新 Qlib")
+@router.post("/update-from-sdk", summary="从本地 parquet 增量更新 Qlib")
 async def update_qlib_from_sdk(
+    market: str = Query("CN", description="市场: CN/HK/US/CRYPTO/FUTURES"),
     current_user: dict = Depends(require_admin),
 ) -> dict[str, Any]:
     _ = current_user
-    return _launch_job("sdk_update", _sync_from_sdk_job)
+    market = market.upper()
+    return _launch_job("sdk_update", market, lambda jid: _sync_from_sdk_job(jid, market))
 
 
 @router.get("/jobs", summary="Qlib 任务列表")
