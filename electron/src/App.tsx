@@ -38,12 +38,26 @@ import './styles/ai-strategy-theme.css';
 const UserCenterPage = lazy(() => import('./features/user-center/pages/UserCenterPage'));
 const StrategyComparisonPage = lazy(() => import('./features/strategy-comparison/pages/StrategyComparisonPage'));
 const MarketAnalysisPage = lazy(() => import('./features/market-analysis/pages/MarketAnalysisPage').then(m => ({ default: m.MarketAnalysisPage })));
+const MarketAnalysisHkPage = lazy(() => import('./features/market-analysis-hk/pages/MarketAnalysisHkPage').then(m => ({ default: m.MarketAnalysisHkPage })));
+
+/** 市场分析路由包装：跟随大盘分析顶部市场切换器（选 A股 → A股版，选 港股 → 港股版） */
+const MarketAnalysisByMarket: React.FC = () => {
+  const market = useSelector(selectCurrentMarket);
+  return market === 'HK' ? <MarketAnalysisHkPage /> : <MarketAnalysisPage />;
+};
 const QuantBotPage = lazy(() => import('./features/quantbot/pages/QuantBotPage'));
 const AIIDEPage = lazy(() => import('./pages/AIIDEPage'));
 const ModelTrainingPage = lazy(() => import('./pages/ModelTrainingPage'));
 const ModelRegistryPage = lazy(() => import('./pages/ModelRegistryPage'));
 const ModelHubPage = lazy(() => import('./pages/ModelHubPage'));
 const InferenceCenterPage = lazy(() => import('./pages/InferenceCenterPage'));
+const InferenceCenterHkPage = lazy(() => import('./pages/InferenceCenterHkPage'));
+
+/** 推理中心路由包装：跟随顶部市场切换器（A股 → A股版；港股 → 港股独立页） */
+const InferenceCenterByMarket: React.FC = () => {
+  const market = useSelector(selectCurrentMarket);
+  return market === 'HK' ? <InferenceCenterHkPage /> : <InferenceCenterPage />;
+};
 const StockTerminalPage = lazy(() => import('./features/stock-terminal/pages/StockTerminalPage'));
 const ResearchPlatformPage = lazy(() => import('./pages/ResearchPlatformPage').then(m => ({ default: m.default || m.ResearchPlatformPage })));
 const RealTradingPage = lazy(() => import('./pages/trading/RealTradingPage'));
@@ -553,12 +567,12 @@ export default function App() {
                     }
                   />
 
-                  {/* 市场分析平台受保护路由 */}
+                  {/* 市场分析平台受保护路由（跟随顶部市场切换器渲染对应市场） */}
                   <Route
                     path="/market-analysis"
                     element={
                       <ProtectedRoute>
-                        <MarketAnalysisPage />
+                        <MarketAnalysisByMarket />
                       </ProtectedRoute>
                     }
                   />
@@ -613,7 +627,7 @@ export default function App() {
                     path="/inference-center"
                     element={
                       <ProtectedRoute>
-                        <InferenceCenterPage />
+                        <InferenceCenterByMarket />
                       </ProtectedRoute>
                     }
                   />
