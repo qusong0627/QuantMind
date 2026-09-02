@@ -1,4 +1,4 @@
-/** 个股终端 K 线图：主图（蜡烛+MA/BOLL+指数叠加+交易/参考线）+ 副图（VOL/MACD/KDJ/RSI）+ 推理分数副图（多模型+策略提醒+参考线） */
+/** 个股终端 K 线图：主图（蜡烛+MA/BOLL+指数叠加+推理分数右侧轴+交易/参考线）+ 副图（VOL/MACD/KDJ/RSI） */
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import ReactECharts from 'echarts-for-react';
@@ -89,6 +89,13 @@ const AXIS_LABEL = { fontSize: 10, color: '#64748b' };
 const AXIS_LINE = { lineStyle: { color: '#e2e8f0' } };
 const SPLIT_LINE = { lineStyle: { color: '#f1f5f9' } };
 const SUB_HEIGHT = 84;  // 每个副图高度 px（VOL/MACD 等）
+/** 周起点（周一为起点）。周/月周期下把分数对齐到所属周 */
+function weekKey(date: string): string {
+  const d = new Date(date + 'T00:00:00');
+  const day = (d.getDay() + 6) % 7;
+  d.setDate(d.getDate() - day);
+  return d.toISOString().slice(0, 10);
+}
 /** 默认黄金线（策略 v2.0 主板黄金买入区间 0.10-0.12 的下沿） */
 const DEFAULT_REF_LINE: RefLine = { id: 'default-golden', value: 0.10, label: '黄金线', color: '#10b981' };
 
@@ -101,8 +108,6 @@ interface Props {
   signals?: SignalPoint[];
   btEquity?: { date: string; equity: number }[];
   scoreSeries?: ScoreSeries[];
-  scorePoints?: { date: string; value: number }[]; // 推理分数副图（日线下方）
-  showScoreSubplot?: boolean;
   alerts?: AlertPoint[];
   trades?: TradeMarker[];
   refLines?: RefLine[];
@@ -111,7 +116,7 @@ interface Props {
 
 export function KlineChart({
   bars, config, overlays, height = 460, period = 'daily',
-  signals = [], btEquity = [], scoreSeries = [], scorePoints, showScoreSubplot = false, alerts = [], trades = [], refLines = [], onBarClick,
+  signals = [], btEquity = [], scoreSeries = [], alerts = [], trades = [], refLines = [], onBarClick,
 }: Props) {
   // 自适应容器高度：图表铺满父容器（个股终端 K 线卡内部空间），不再写死 320 留下大片空白；
   // 未测量到时回退 height 属性（其它定高调用方）
@@ -160,14 +165,9 @@ export function KlineChart({
     const GAP = 28;                    // 主图与第一个副图间距
     const SUB_GAP = 24;                // 副图之间间距
     const TOP = 24;                    // 顶部留出图例行
-    const hasScoreSubplot = !!(showScoreSubplot && scorePoints?.length);
-    // 分数副图高度按整图高度动态取 ≈1/3（K线主图区约 2/3，随窗口等比缩放）
-    const scoreSubH = hasScoreSubplot ? Math.max(90, Math.round((chartH - TOP - GAP - 26) / 3)) : 0;
-    const subCount = config.subplots.length + (hasScoreSubplot ? 1 : 0);
+    const subCount = config.subplots.length;
     const subTotal = subCount > 0
-      ? (config.subplots.length * SUB_HEIGHT
-          + (hasScoreSubplot ? scoreSubH : 0)
-          + (subCount - 1) * SUB_GAP)
+      ? config.subplots.length * SUB_HEIGHT + (subCount - 1) * SUB_GAP
       : 0;
     const mainH = Math.max(140, chartH - TOP - GAP - subTotal - 26);
     const grids: any[] = [];
@@ -338,70 +338,28 @@ export function KlineChart({
       subTop += SUB_HEIGHT + SUB_GAP;
     });
 
-    // ── 推理分数副图（日线下方独立副图，日线指标下方）──
-    if (hasScoreSubplot && scorePoints?.length) {
-      const gi = grids.length;
-      const xi = xAxes.length;
-      const yi = yAxes.length;
-      grids.push({ left: GRID_L, right: GRID_R, top: subTop, height: scoreSubH });
-      const showLabel = true;
-      xAxes.push({
-        type: 'category', gridIndex: gi, data: dates, boundaryGap: true,
-        axisLine: AXIS_LINE, axisTick: { show: false },
-        axisLabel: { ...AXIS_LABEL, color: '#94a3b8' },
-      });
-      const vals = scorePoints.map((p) => p.value);
-      const lo = Math.min(...vals);
-      const hi = Math.max(...vals);
-      const span = hi - lo;
-      const pad = span > 1e-9 ? span * 0.15 : Math.max(0.002, Math.abs(hi) * 0.3);
-      yAxes.push({ type: 'value', gridIndex: gi, scale: true, axisLabel: { ...AXIS_LABEL, formatter: (v: number) => Number(v).toFixed(3) }, axisLine: { lineStyle: { color: '#6366f1' } }, splitLine: SPLIT_LINE });
-      gridAxes[gi] = { x: xi, y: yi };
-      const scoreMap = new Map(scorePoints.map((p) => [p.date, p.value]));
-      // 周Key：与 StockTerminalPage 保持一致（周一为周起点）
-      const _weekKey = (d: string) => {
-        const dt = new Date(d + 'T00:00:00');
-        const day = (dt.getDay() + 6) % 7;
-        dt.setDate(dt.getDate() - day);
-        return dt.toISOString().slice(0, 10);
-      };
-      series.push({
-        name: '推理分数', type: 'line', xAxisIndex: xi, yAxisIndex: yi,
-        data: bars.map((b) => {
-          if (period === 'daily') {
-            const v = scoreMap.get(b.date);
-            return v != null ? Number(v.toFixed(3)) : null;
-          }
-          // 周/月：取该周期内最后一条分数
-          let last: number | null = null;
-          for (const p of scorePoints) {
-            if (period === 'weekly') {
-              if (_weekKey(p.date) === _weekKey(b.date)) last = p.value;
-            } else if (p.date.slice(0, 7) === b.date.slice(0, 7)) {
-              last = p.value;
-            }
-          }
-          return last != null ? Number(last.toFixed(3)) : null;
-        }),
-        symbol: 'none', lineStyle: { width: 1.4, color: '#6366f1' }, itemStyle: { color: '#6366f1' }, areaStyle: { color: 'rgba(99,102,241,0.08)' }, z: 5, connectNulls: false,
-      });
-      // 0 轴参考线
-      series[series.length - 1].markLine = {
-        silent: true, symbol: 'none',
-        data: [{ yAxis: 0, lineStyle: { color: '#94a3b8', type: 'dashed', width: 1 }, label: { formatter: '0', fontSize: 9, color: '#94a3b8' } }],
-      } as any;
-      subTop += scoreSubH + SUB_GAP;
-    }
-
-    // ── 推理分数：叠加到主图，共用主图 x 轴 + 右侧分数轴（scoreYI）──
+    // ── 推理分数：叠加到主图，共用主图 x 轴 + 右侧分数轴（scoreYI），与 K 线日期天然对齐 ──
     if (scoreSeries.length) {
       scoreSeries.forEach(sr => {
         const scoreMap = new Map(sr.points.map(p => [p.date, p.fusion]));
         series.push({
           name: `分数·${sr.model.slice(0, 10)}`, type: 'line', xAxisIndex: 0, yAxisIndex: scoreYI,
           data: bars.map(b => {
-            const f = scoreMap.get(b.date);
-            return f != null ? Number(f) : null;
+            // 日线精确到日；周/月取该周期内最后一条可用分数（周期落在 K 线日期上）
+            if (period === 'daily') {
+              const f = scoreMap.get(b.date);
+              return f != null ? Number(f) : null;
+            }
+            let last: number | null = null;
+            for (const p of sr.points) {
+              if (p.fusion == null) continue;
+              if (period === 'weekly') {
+                if (weekKey(p.date) === weekKey(b.date)) last = p.fusion;
+              } else if (p.date.slice(0, 7) === b.date.slice(0, 7)) {
+                last = p.fusion;
+              }
+            }
+            return last != null ? Number(last) : null;
           }),
           symbol: 'circle', symbolSize: 5, connectNulls: false,
           lineStyle: { width: 1.6, color: sr.color }, itemStyle: { color: sr.color, borderColor: '#fff', borderWidth: 1 },
@@ -507,6 +465,15 @@ export function KlineChart({
                 continue;
               }
             }
+            // 推理分数：保留四位小数（与右侧分数轴刻度精度一致）
+            if (name.startsWith('分数·')) {
+              const v = Array.isArray(data) ? (data as any)[1] ?? data : (p as any).value ?? data;
+              const num = typeof v === 'number' ? v : Number(Array.isArray(v) ? v[1] : v);
+              if (Number.isFinite(num)) {
+                html += `<div>${name}: <b>${Number(num).toFixed(4)}</b></div>`;
+                continue;
+              }
+            }
             // 其他系列按默认展示，数值类保留三位
             const raw = (p as any).value ?? data;
             const numVal = Array.isArray(raw) ? raw[1] : raw;
@@ -534,7 +501,7 @@ export function KlineChart({
       ],
       series,
     };
-  }, [bars, config, overlays, chartH, signals, btEquity, scoreSeries, scorePoints, showScoreSubplot, period, alerts, trades, refLines]);
+  }, [bars, config, overlays, chartH, signals, btEquity, scoreSeries, period, alerts, trades, refLines]);
 
   const onEvents = onBarClick ? {
     click: (params: any) => {

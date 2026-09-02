@@ -1,5 +1,5 @@
-/** 个股终端 — 搜索驱动展示：顶部搜索 + 左右布局（左上K线/左下推理分 + 右详情） */
-import { useCallback, useEffect, useState } from 'react';
+/** 个股终端 — 搜索驱动展示：顶部搜索 + 左右布局（左 K线大图·推理分数叠右侧轴 + 右详情） */
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { CandlestickChart, Search, Layers, Building2, Database, TrendingUp, TrendingDown } from 'lucide-react';
 import { message, Select } from 'antd';
 import { PAGE_LAYOUT } from '../../../config/pageLayout';
@@ -8,7 +8,7 @@ import { stockTerminalService, type KlineAdjust } from '../services/stockTermina
 import { modelTrainingService } from '../../../services/modelTrainingService';
 import { StockSearchBar } from '../components/StockSearchBar';
 import { type Point as ScorePoint } from '../components/InferenceScoreChart';
-import { KlineChart } from '../components/kline/KlineChart';
+import { KlineChart, type ScoreSeries } from '../components/kline/KlineChart';
 import { OverviewTab } from '../components/OverviewTab';
 import { FinancialsTab, ValuationTab, ChipFlowTab, MarginTab, SentimentTab, HoldersTab } from '../components/tabs/P2Tabs';
 import { NewsTab } from '../components/tabs/NewsTab';
@@ -82,8 +82,18 @@ export default function StockTerminalPage() {
   const [modelName, setModelName] = useState<string>('');
   const [scoreLast, setScoreLast] = useState<{ value: number; date: string; up: boolean } | null>(null);
 
-  // 拉起推理分数：喂给 K 线分数副图 + 顶部最近分数 + 模型下拉列表。
-  // 不渲染独立折线图组件，分数统一由 K 线副图承载（与主图同轴缩放）。
+  // 当前选中模型（默认=默认模型）分数 → 转成 K线主图右侧分数轴序列（单模型一条线）
+  const scoreSeries = useMemo<ScoreSeries[]>(() => {
+    if (!scorePoints.length) return [];
+    return [{
+      model: modelName || modelId || '默认模型',
+      color: '#6366f1',
+      points: scorePoints.map((p) => ({ date: p.date, fusion: p.value, side: p.side })),
+    }];
+  }, [scorePoints, modelName, modelId]);
+
+  // 拉起推理分数：喂给 K线右侧分数轴 + 顶部最近分数 + 模型下拉列表。
+  // 不渲染独立折线图组件，分数线叠加在 K线主图右侧分数轴（与 K线同日期对齐）。
   useEffect(() => {
     if (!selected) {
       setScorePoints([]);
@@ -164,8 +174,8 @@ export default function StockTerminalPage() {
     };
   }, [selected, signalDate]);
 
-  // K线随选中+周期+复权方式联动；锁定最长 2 年——以当前日期向前推 2 年的精确区间拉取，
-  // 周/月由日K重采样。不传 days：后端只传 days 时会按 days×2 自然日回溯，区间会超出 2 年。
+  // K线随选中+周期+复权方式联动；就近约一年（≈245 根日K）取数，统一保留最近 200 根，
+  // 周/月由日K重采样。不传 days：后端只传 days 时会按 days×2 自然日回溯，区间会超出一年。
   useEffect(() => {
     if (!selected) {
       setBars([]);
@@ -175,16 +185,17 @@ export default function StockTerminalPage() {
     setBarsLoading(true);
     const endD = new Date();
     const startD = new Date(endD);
-    startD.setFullYear(startD.getFullYear() - 2);
+    startD.setFullYear(startD.getFullYear() - 1);
     const iso = (d: Date) => d.toISOString().slice(0, 10);
     stockTerminalService
       .getDailyKline(selected.symbol, 500, adjust, iso(startD), iso(endD))
       .then((items) => {
         if (cancelled) return;
-        if (period !== 'daily' && items.length) {
-          setBars(resampleBars(items, period));
+        const daily = items.slice(-200);
+        if (period !== 'daily' && daily.length) {
+          setBars(resampleBars(daily, period));
         } else {
-          setBars(items);
+          setBars(daily);
         }
       })
       .catch(() => {
@@ -204,18 +215,22 @@ export default function StockTerminalPage() {
   const up = (profile?.pct_change ?? selected?.pct_change ?? 0) >= 0;
 
   return (
-    <div className={PAGE_LAYOUT.outerClass}>
+    /* 底部 pb-[84px]：给悬浮 Dock 菜单栏（64px）留出空间，避免遮挡 K线图底部的缩放条 */
+    <div className="w-full h-full bg-[#f8fafc] px-6 pt-6 pb-[84px] flex flex-col overflow-hidden">
       <div className={PAGE_LAYOUT.frameClass}>
-        {/* 顶栏 */}
+        {/* 顶栏：标题 + 居中搜索框（原独立搜索行并入顶部，K线图整体上移）+ 价格/模型 */}
         <header className={PAGE_LAYOUT.headerClass} style={{ height: `${PAGE_LAYOUT.headerHeight}px` }}>
-          <div className="flex items-center gap-3 min-w-0">
+          <div className="flex items-center gap-3 min-w-0 shrink-0">
             <div className="w-10 h-10 bg-gradient-to-br from-blue-500 to-violet-500 rounded-2xl flex items-center justify-center shadow-lg shrink-0">
               <CandlestickChart className="w-5 h-5 text-white" />
             </div>
-            <div className="flex items-center gap-2.5 ml-1 min-w-0">
-              <h1 className="text-xl font-bold text-slate-800 tracking-tight">个股终端</h1>
-              <div className="h-4 w-[1px] bg-slate-200 self-center shrink-0" />
-              <span className="text-sm font-medium text-slate-500 hidden sm:inline truncate">搜索个股 · K线 · 推理分 · 详情</span>
+            <div className="flex items-center min-w-0">
+              <h1 className="text-lg font-bold text-slate-800 tracking-tight whitespace-nowrap">个股终端</h1>
+            </div>
+          </div>
+          <div className="flex-1 min-w-0 px-3">
+            <div className="max-w-[560px] mx-auto">
+              <StockSearchBar onSelect={handleSelect} watchlistSymbols={watchlist} />
             </div>
           </div>
           {selected && (
@@ -242,11 +257,6 @@ export default function StockTerminalPage() {
           )}
         </header>
 
-        {/* 顶部搜索条 */}
-        <div className="shrink-0 bg-white border-b border-gray-200 px-6 py-3">
-          <StockSearchBar onSelect={handleSelect} watchlistSymbols={watchlist} />
-        </div>
-
         {/* 主体 */}
         {!selected ? (
           <div className="flex-1 flex flex-col items-center justify-center gap-3 bg-gray-50/50 p-8 text-center">
@@ -265,7 +275,7 @@ export default function StockTerminalPage() {
           </div>
         ) : (
           <div className="flex flex-1 min-h-0 overflow-hidden bg-gray-50/50 p-4 gap-4">
-            {/* 左侧：K线（含推理分数副图） */}
+            {/* 左侧：K线大图（推理分数叠在右侧刻度，与 K线日期对齐） */}
             <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
               {/* K线卡 */}
               <div className="flex-1 min-h-0 flex flex-col rounded-3xl bg-white border border-purple-100/80 shadow-sm overflow-hidden">
@@ -320,7 +330,7 @@ export default function StockTerminalPage() {
                     <div className="h-full flex items-center justify-center text-xs text-slate-400">K线加载中…</div>
                   ) : bars.length ? (
                     <div className="flex-1 min-h-0">
-                      <KlineChart bars={bars} config={{ ma: true, boll: false, subplots: ['vol'] }} overlays={[]} period={period} scorePoints={scorePoints.map((p) => ({ date: p.date, value: p.value }))} showScoreSubplot={true} />
+                      <KlineChart bars={bars} config={{ ma: true, boll: false, subplots: ['vol'] }} overlays={[]} period={period} scoreSeries={scoreSeries} />
                     </div>
                   ) : (
                     <div className="h-full flex items-center justify-center text-xs text-slate-400">暂无K线</div>
