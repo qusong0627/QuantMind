@@ -157,6 +157,79 @@ def _load_universe(asof: str | None = None) -> tuple[pd.DataFrame, str]:
         return df, trade_date
 
 
+_UNIVERSE_HK_CACHE: dict[str, Any] = {"df": None, "ts": 0.0, "trade_date": ""}
+_UNIVERSE_HK_TTL = 300.0
+
+
+def _load_universe_hk(asof: str | None = None) -> tuple[pd.DataFrame, str]:
+    """港股全市场快照：quanthk = security_master(名称) + sdl_hk(OHLCV/涨跌) +
+    akshare_profile(行业) + l1_factors(总市值)。列与 CN universe 对齐子集。"""
+    now = time.time()
+    cached = _UNIVERSE_HK_CACHE["df"]
+    if cached is not None and now - _UNIVERSE_HK_CACHE["ts"] < _UNIVERSE_HK_TTL and not asof:
+        return cached, _UNIVERSE_HK_CACHE["trade_date"]
+    from backend.services.engine.data_platform.quanthk_hub import _resolve_quanthk_data_dir
+
+    qdir = _resolve_quanthk_data_dir()
+    import duckdb
+
+    con = duckdb.connect()
+    try:
+        sdl = con.execute(
+            "SELECT symbol, trade_date, close, pct_change FROM read_parquet("
+            f"'{qdir}/2_base_sector/../2_base_sector/daily_placeholder', hive_partitioning=1)"
+        ) if False else None
+        # sdl_hk 是 PG 表；这里直接读 quanthk 日线/因子拼装（与 CN parquet 同构思路）
+        parts = sorted(p.name for p in (qdir / "1_kline_data" / "daily_forward").glob("dt=*"))
+        latest = parts[-1]
+        df_day = latest[3:]
+        k = con.execute(
+            "SELECT symbol, close FROM read_parquet("
+            f"'{qdir}/1_kline_data/daily_forward/dt={df_day}/data.parquet')"
+        ).fetchdf()
+        # 涨跌幅用前一交易日（无官方 pct 表时 close 环比，与行情口径一致）
+        prev = parts[-2][3:]
+        kp = con.execute(
+            "SELECT symbol, close AS prev_close FROM read_parquet("
+            f"'{qdir}/1_kline_data/daily_forward/dt={prev}/data.parquet')"
+        ).fetchdf()
+        k = k.merge(kp, on="symbol", how="left")
+        k["pct_change"] = (k["close"] / k["prev_close"] - 1) * 100
+        names = con.execute(
+            "SELECT symbol, cn_name FROM read_parquet("
+            f"'{qdir}/2_base_sector/security_master/data.parquet')"
+        ).fetchdf()
+        prof = con.execute(
+            "SELECT symbol, 所属行业 FROM read_parquet("
+            f"'{qdir}/2_base_sector/akshare_profile/*.parquet', union_by_name=true)"
+        ).fetchdf().rename(columns={"所属行业": "rs_hyname"})
+        mv = con.execute(
+            "SELECT symbol, total_mv FROM read_parquet("
+            f"'{qdir}/6_ml_datasets/l1_factors/dt={df_day}/data.parquet')"
+        ).fetchdf()
+        df = k.merge(names, on="symbol", how="left")
+        df = df.merge(prof, on="symbol", how="left")
+        df = df.merge(mv, on="symbol", how="left")
+        df = df.rename(columns={
+            "cn_name": "Name", "total_mv": "Zsz",
+        })
+        df["Symbol"] = df["symbol"]
+        df["exchange"] = "HK"
+        df["trade_date"] = str(df_day)
+        df = df[df["close"].fillna(0) > 0].copy()
+        # 与 CN universe 对齐的兼容列（港股无板块/静态估值，空值兜底）
+        df["board"] = ""
+        for _c in ("Ltsz", "DynaPE", "PB_MRQ"):
+            df[_c] = None
+        cols = ["Symbol", "Name", "close", "pct_change", "Zsz", "rs_hyname",
+                "exchange", "trade_date", "board", "Ltsz", "DynaPE", "PB_MRQ"]
+        df = df[[c for c in cols if c in df.columns]]
+    finally:
+        con.close()
+    _UNIVERSE_HK_CACHE.update({"df": df, "ts": time.time(), "trade_date": str(df_day)})
+    return df, str(df_day)
+
+
 def _rebuild_universe(asof: str | None) -> tuple[pd.DataFrame, str]:
     """universe 重建（读 instrument_detail + technical_indicators 两 parquet + merge）。"""
     d = _quantdb_dir()
@@ -1415,16 +1488,27 @@ async def list_stocks(
     # 日历点选历史日时 close/pct_change 也读该日快照（左右整页随日期联动）
     # _load_universe 同步读 parquet+merge，跑在 event loop 上会阻塞全部并发请求
     # （单 worker uvicorn），挪到线程池执行，list 接口并发不再互相排队
-    df, trade_date = await asyncio.to_thread(_load_universe, asof=date)
-
     m = market.upper()
-    if m in ("SH", "SZ", "BJ"):
-        df = df[df["exchange"] == m]
+    if m == "HK":
+        # 港股：数据源 quanthk（security_master/sdl/因子），信号来自 HK 推理 run
+        df, trade_date = await asyncio.to_thread(_load_universe_hk, asof=date)
+    else:
+        df, trade_date = await asyncio.to_thread(_load_universe, asof=date)
+        if m in ("SH", "SZ", "BJ"):
+            df = df[df["exchange"] == m]
     if industry:
         df = df[df["rs_hyname"] == industry]
     if q and q.strip():
         kw = q.strip()
-        df = df[df["Symbol"].str.contains(kw, case=False, regex=False, na=False) | df["Name"].astype(str).str.contains(kw, case=False, regex=False, na=False)]
+        if m == "HK":
+            # 港股代码 5 位（00700）与 4 位（0700.HK）等价：数字部分去前导零互配
+            digits = "".join(ch for ch in kw if ch.isdigit())
+            norm = digits.lstrip("0") if digits else ""
+            sym_part = df["Symbol"].str.replace(".HK", "", regex=False).str.lstrip("0")
+            hit_sym = df["Symbol"].str.contains(kw, case=False, regex=False, na=False) | sym_part.str.contains(norm, regex=False, na=False) if norm else False
+            df = df[hit_sym | df["Name"].astype(str).str.contains(kw, case=False, regex=False, na=False)]
+        else:
+            df = df[df["Symbol"].str.contains(kw, case=False, regex=False, na=False) | df["Name"].astype(str).str.contains(kw, case=False, regex=False, na=False)]
     if only_st:
         df = df[_st_mask(df)]
     if exclude_st:

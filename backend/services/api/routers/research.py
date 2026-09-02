@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 import backend.services.api.routers.research_service as _research_service
@@ -53,6 +55,17 @@ async def _do_get_overview(  # noqa: SLF001
 
 
 _HK_STOCK_NAMES_CACHE: dict[str, tuple[float, dict[str, str]]] = {}
+
+
+@router.get("/hk/stock-detail")
+async def get_hk_stock_detail(
+    symbol: str = Query(..., description="港股代码，如 0700.HK 或 0700"),
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    """港股个股详情聚合：CCASS 席位 / 南向持股 / 估值 / 分红 / 财务 / 分析师。"""
+    from backend.services.api.market_analysis_hk import quanthk_feed as _hk_feed
+
+    return await asyncio.to_thread(_hk_feed.get_stock_detail, symbol)
 
 
 @router.get("/stock-names")

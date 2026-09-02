@@ -1018,6 +1018,194 @@ def get_dividend_calendar(days: int = 60, limit: int = 40) -> dict[str, Any]:
     return cached("hk_dividend_calendar", _load)
 
 
+def get_stock_detail(symbol: str) -> dict[str, Any]:
+    """个股综合详情（港股右侧面板）— CCASS 席位 / 南向持股 / 估值 / 分红 / 财务 / 分析师。
+
+    聚合 quanthk 各本地数据集，供 /research/hk/stock-detail 一次拉取。
+    """
+    from datetime import date, timedelta
+
+    sym = symbol.upper()
+    if not sym.endswith(".HK"):
+        sym = sym + ".HK"
+    names = _name_map()
+    name = names.get(sym, sym)
+    result: dict[str, Any] = {
+        "symbol": sym, "name": name,
+        "ccass": {"trade_date": "", "total_pct": 0.0, "top": []},
+        "south": {"trade_date": "", "holding_pct": None, "holding_quantity": None,
+                  "d1": None, "d5": None, "d20": None, "series": []},
+        "valuation": {}, "dividend": [], "financial": {}, "analyst": {},
+    }
+
+    # 1) CCASS 席位（前 10）与汇总
+    try:
+        cc = get_ccass_holding(sym, limit=10)
+        result["ccass"]["trade_date"] = cc.get("trade_date", "")
+        result["ccass"]["top"] = [
+            {"participant_id": it["participant_id"], "participant_name": it["participant_name"],
+             "holding_pct": it["holding_pct"]} for it in cc.get("items", [])
+        ]
+        result["ccass"]["total_pct"] = round(sum(it["holding_pct"] for it in cc.get("items", [])), 2)
+    except Exception as exc:
+        logger.warning("[quanthk_feed] stock_detail ccass(%s): %s", sym, exc)
+
+    # 2) 南向持股：最新 + 5/20 日变化 + 近 20 日序列
+    try:
+        raw = _read_south_safe()
+        if not raw.empty:
+            raw = raw[raw["symbol"] == sym].copy()
+            raw["query_date"] = raw["query_date"].astype(str)
+            raw = raw.sort_values("query_date")
+            if not raw.empty:
+                latest = raw.iloc[-1]
+                result["south"]["trade_date"] = str(latest["query_date"])[:10]
+                result["south"]["holding_pct"] = round(float(latest["holding_percentage"]) * 100, 3)
+                result["south"]["holding_quantity"] = int(latest["holding_quantity"])
+                pct_col = raw["holding_percentage"].astype(float) * 100
+                result["south"]["d1"] = round(float(pct_col.iloc[-1] - pct_col.iloc[-2]), 3) if len(pct_col) >= 2 else None
+                result["south"]["d5"] = round(float(pct_col.iloc[-1] - pct_col.iloc[-6]), 3) if len(pct_col) >= 6 else None
+                result["south"]["d20"] = round(float(pct_col.iloc[-1] - pct_col.iloc[-21]), 3) if len(pct_col) >= 21 else None
+                _tail = raw.iloc[-20:]
+                result["south"]["series"] = [
+                    {"date": str(r.query_date)[:10], "pct": round(float(r.holding_percentage) * 100, 2)}
+                    for r in _tail.itertuples(index=False)
+                ]
+    except Exception as exc:
+        logger.warning("[quanthk_feed] stock_detail south(%s): %s", sym, exc)
+
+    # 3) 估值快照（akshare_valuation + financial）
+    try:
+        v = _q(
+            'SELECT symbol, "市盈率-TTM", "市净率-MRQ", "市销率-TTM", published_at FROM read_parquet('
+            f"'{DATA_DIR}/2_base_sector/akshare_valuation/*.parquet', union_by_name=true)"
+        )
+        row = v[v["symbol"] == sym]
+        if not row.empty:
+            r = row.iloc[0]
+            result["valuation"].update({
+                "pe_ttm": round(float(r["市盈率-TTM"]), 2) if pd.notna(r["市盈率-TTM"]) else None,
+                "pb": round(float(r["市净率-MRQ"]), 2) if pd.notna(r["市净率-MRQ"]) else None,
+                "ps_ttm": round(float(r["市销率-TTM"]), 2) if pd.notna(r["市销率-TTM"]) else None,
+                "published_at": str(r.get("published_at", ""))[:10],
+            })
+        f = _q(
+            'SELECT symbol, "股息率TTM(%)", "总市值(港元)", "市盈率", "市净率", "股东权益回报率(%)" '
+            'FROM read_parquet('
+            f"'{DATA_DIR}/2_base_sector/akshare_financial/*.parquet', union_by_name=true)"
+        )
+        rowf = f[f["symbol"] == sym]
+        if not rowf.empty:
+            rf = rowf.iloc[0]
+            result["valuation"].update({
+                "dividend_yield": round(float(rf["股息率TTM(%)"]), 2) if pd.notna(rf["股息率TTM(%)"]) else None,
+                "total_mv_yi": round(float(rf["总市值(港元)"]) / 1e8, 1) if pd.notna(rf["总市值(港元)"]) else None,
+            })
+            result["financial"] = {
+                "roe": round(float(rf["股东权益回报率(%)"]), 2) if pd.notna(rf["股东权益回报率(%)"]) else None,
+            }
+    except Exception as exc:
+        logger.warning("[quanthk_feed] stock_detail valuation(%s): %s", sym, exc)
+
+    # 4) 财务速览（营收/净利/毛利率/每股股息）
+    try:
+        f2 = _q(
+            'SELECT symbol, "营业总收入", "净利润", "销售净利率(%)", "每股股息TTM(港元)", "基本每股收益(元)" '
+            'FROM read_parquet('
+            f"'{DATA_DIR}/2_base_sector/akshare_financial/*.parquet', union_by_name=true)"
+        )
+        rowf2 = f2[f2["symbol"] == sym]
+        if not rowf2.empty:
+            r2 = rowf2.iloc[0]
+            result["financial"].update({
+                "revenue": float(r2["营业总收入"]) if pd.notna(r2["营业总收入"]) else None,
+                "net_profit": float(r2["净利润"]) if pd.notna(r2["净利润"]) else None,
+                "net_margin": round(float(r2["销售净利率(%)"]), 2) if pd.notna(r2["销售净利率(%)"]) else None,
+                "dps_ttm": round(float(r2["每股股息TTM(港元)"]), 4) if pd.notna(r2["每股股息TTM(港元)"]) else None,
+                "eps": round(float(r2["基本每股收益(元)"]), 4) if pd.notna(r2["基本每股收益(元)"]) else None,
+            })
+    except Exception as exc:
+        logger.warning("[quanthk_feed] stock_detail financial(%s): %s", sym, exc)
+
+    # 5) 分红历史（近 12 条）
+    try:
+        # dividend 表 symbol 存在 5 位（00700）与 4 位（0700.HK）两种格式：归一化互查
+        _digits = "".join(ch for ch in sym if ch.isdigit()).lstrip("0")
+        _alt = f"{_digits}.HK" if _digits else sym
+        _q5 = _digits.zfill(5)
+        d = _q(
+            "SELECT ex_date, pay_date, plan, dividend, trade_date FROM read_parquet("
+            f"'{DATA_DIR}/3_financial_data/dividend/*.parquet', union_by_name=true"
+            ") WHERE symbol IN ('"
+            + sym
+            + "', '"
+            + _alt
+            + "', '"
+            + _q5
+            + "')"
+        )
+        if not d.empty:
+            # 两种 schema 并存：akshare 详表有 ex_date/plan；yahoo 历史仅 trade_date/dividend。
+            # 以「除息日（缺省用 trade_date）降序」合并展示完整派息历史。
+            def _d(row):
+                v = row.ex_date if pd.notna(row.ex_date) else row.trade_date
+                return pd.to_datetime(v) if pd.notna(v) else pd.NaT
+
+            d = d.copy()
+            d["disp_date"] = d.apply(_d, axis=1)
+            d = d[d["disp_date"].notna()].sort_values("disp_date", ascending=False)
+            result["dividend"] = [
+                {
+                    "ex_date": str(r.disp_date.date()),
+                    "pay_date": str(r.pay_date)[:10] if pd.notna(r.pay_date) else "",
+                    "plan": str(r.plan) if pd.notna(r.plan) else "",
+                    "dividend": round(float(r.dividend), 4) if pd.notna(r.dividend) else None,
+                }
+                for r in d.head(12).itertuples(index=False)
+            ]
+    except Exception as exc:
+        logger.warning("[quanthk_feed] stock_detail dividend(%s): %s", sym, exc)
+
+    # 6) 分析师：目标价 + 评级
+    try:
+        pt = _q(
+            "SELECT mean, high, low FROM read_parquet("
+            f"'{DATA_DIR}/4_analyst/analyst_price_targets/*.parquet', union_by_name=true"
+            ") WHERE symbol = '"
+            + sym
+            + "'"
+        )
+        if not pt.empty:
+            r = pt.iloc[0]
+            result["analyst"]["price_target"] = {
+                "mean": round(float(r["mean"]), 2) if pd.notna(r["mean"]) else None,
+                "high": round(float(r["high"]), 2) if pd.notna(r["high"]) else None,
+                "low": round(float(r["low"]), 2) if pd.notna(r["low"]) else None,
+            }
+        rec = _q(
+            "SELECT period, strongBuy, buy, hold, sell, strongSell FROM read_parquet("
+            f"'{DATA_DIR}/4_analyst/recommendations/*.parquet', union_by_name=true"
+            ") WHERE symbol = '"
+            + sym
+            + "'"
+        )
+        if not rec.empty:
+            rec = rec.sort_values("period", ascending=False).iloc[0]
+            buys = float(rec["strongBuy"] or 0) + float(rec["buy"] or 0)
+            holds = float(rec["hold"] or 0)
+            sells = float(rec["sell"] or 0) + float(rec["strongSell"] or 0)
+            total = buys + holds + sells
+            result["analyst"]["recommendation"] = {
+                "period": str(rec["period"]),
+                "buy": buys, "hold": holds, "sell": sells,
+                "buy_ratio": round(buys / total * 100, 1) if total else None,
+            }
+    except Exception as exc:
+        logger.warning("[quanthk_feed] stock_detail analyst(%s): %s", sym, exc)
+
+    return cached(f"hk_stock_detail_{sym}", lambda: result, ttl=300.0)
+
+
 # ---- 8. 行业轮动（多周期强弱） ----
 
 

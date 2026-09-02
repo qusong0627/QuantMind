@@ -59,6 +59,13 @@ const InferenceCenterByMarket: React.FC = () => {
   return market === 'HK' ? <InferenceCenterHkPage /> : <InferenceCenterPage />;
 };
 const StockTerminalPage = lazy(() => import('./features/stock-terminal/pages/StockTerminalPage'));
+const StockTerminalHkPage = lazy(() => import('./features/stock-terminal-hk/pages/StockTerminalPage'));
+
+/** 个股终端路由包装：跟随顶部市场切换器（A股 → A股版；港股 → 港股独立版） */
+const StockTerminalByMarket: React.FC = () => {
+  const market = useSelector(selectCurrentMarket);
+  return market === 'HK' ? <StockTerminalHkPage /> : <StockTerminalPage />;
+};
 const ResearchPlatformPage = lazy(() => import('./pages/ResearchPlatformPage').then(m => ({ default: m.default || m.ResearchPlatformPage })));
 const RealTradingPage = lazy(() => import('./pages/trading/RealTradingPage'));
 const AdminPage = lazy(() => import('./features/admin/AdminPage'));
@@ -635,7 +642,7 @@ export default function App() {
                     path="/stock-terminal"
                     element={
                       <ProtectedRoute>
-                        <StockTerminalPage />
+                        <StockTerminalByMarket />
                       </ProtectedRoute>
                     }
                   />
