@@ -417,6 +417,10 @@ class FutuBroker(_StreamQuoteMixin, BaseBroker):
                 success=bool(data.get("success")),
                 exchange_order_id=str(data.get("order_id", "")),
                 message=str(data.get("message", "")),
+                # SIMULATE MARKET 单即时成交（dealt_qty>0）；透传给 trading_engine
+                # 即时落成交，否则富途模拟成交不会进 ledger。
+                filled_quantity=float(data.get("filled_quantity") or 0),
+                filled_price=float(data.get("filled_price") or 0),
             )
         except Exception as e:  # noqa: BLE001
             logger.error("[FutuBroker] place_order %s failed: %s", symbol, e)
