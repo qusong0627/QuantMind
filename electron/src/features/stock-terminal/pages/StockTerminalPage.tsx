@@ -1,5 +1,5 @@
-/** 个股终端 — 搜索驱动展示：顶部搜索 + 左右布局（左 K线大图·推理分数叠右侧轴 + 右详情） */
-import { useCallback, useEffect, useMemo, useState } from 'react';
+/** 个股终端 — 搜索驱动展示：顶部搜索 + 左右布局（左 K线大图·推理分数底部副图 + 右详情） */
+import { useCallback, useEffect, useState } from 'react';
 import { CandlestickChart, Search, Layers, Building2, Database, TrendingUp, TrendingDown } from 'lucide-react';
 import { message, Select } from 'antd';
 import { PAGE_LAYOUT } from '../../../config/pageLayout';
@@ -8,7 +8,7 @@ import { stockTerminalService, type KlineAdjust } from '../services/stockTermina
 import { modelTrainingService } from '../../../services/modelTrainingService';
 import { StockSearchBar } from '../components/StockSearchBar';
 import { type Point as ScorePoint } from '../components/InferenceScoreChart';
-import { KlineChart, type ScoreSeries } from '../components/kline/KlineChart';
+import { KlineChart } from '../components/kline/KlineChart';
 import { OverviewTab } from '../components/OverviewTab';
 import { FinancialsTab, ValuationTab, ChipFlowTab, MarginTab, SentimentTab, HoldersTab } from '../components/tabs/P2Tabs';
 import { NewsTab } from '../components/tabs/NewsTab';
@@ -82,18 +82,8 @@ export default function StockTerminalPage() {
   const [modelName, setModelName] = useState<string>('');
   const [scoreLast, setScoreLast] = useState<{ value: number; date: string; up: boolean } | null>(null);
 
-  // 当前选中模型（默认=默认模型）分数 → 转成 K线主图右侧分数轴序列（单模型一条线）
-  const scoreSeries = useMemo<ScoreSeries[]>(() => {
-    if (!scorePoints.length) return [];
-    return [{
-      model: modelName || modelId || '默认模型',
-      color: '#6366f1',
-      points: scorePoints.map((p) => ({ date: p.date, fusion: p.value, side: p.side })),
-    }];
-  }, [scorePoints, modelName, modelId]);
-
-  // 拉起推理分数：喂给 K线右侧分数轴 + 顶部最近分数 + 模型下拉列表。
-  // 不渲染独立折线图组件，分数线叠加在 K线主图右侧分数轴（与 K线同日期对齐）。
+  // 拉起推理分数：喂给 K线底部分数副图 + 顶部最近分数 + 模型下拉列表。
+  // 不渲染独立折线图组件，分数统一由 K线底部副图承载（与主图同 x 轴对齐）。
   useEffect(() => {
     if (!selected) {
       setScorePoints([]);
@@ -174,8 +164,8 @@ export default function StockTerminalPage() {
     };
   }, [selected, signalDate]);
 
-  // K线随选中+周期+复权方式联动；就近约一年（≈245 根日K）取数，统一保留最近 200 根，
-  // 周/月由日K重采样。不传 days：后端只传 days 时会按 days×2 自然日回溯，区间会超出一年。
+  // K线随选中+周期+复权方式联动；取数回 2 年（≈500 根）不硬截断——首屏由 dataZoom
+  // 聚焦最近 200 根，滑条可向左拖回看更早日期；周/月由日K重采样。
   useEffect(() => {
     if (!selected) {
       setBars([]);
@@ -185,17 +175,16 @@ export default function StockTerminalPage() {
     setBarsLoading(true);
     const endD = new Date();
     const startD = new Date(endD);
-    startD.setFullYear(startD.getFullYear() - 1);
+    startD.setFullYear(startD.getFullYear() - 2);
     const iso = (d: Date) => d.toISOString().slice(0, 10);
     stockTerminalService
       .getDailyKline(selected.symbol, 500, adjust, iso(startD), iso(endD))
       .then((items) => {
         if (cancelled) return;
-        const daily = items.slice(-200);
-        if (period !== 'daily' && daily.length) {
-          setBars(resampleBars(daily, period));
+        if (period !== 'daily' && items.length) {
+          setBars(resampleBars(items, period));
         } else {
-          setBars(daily);
+          setBars(items);
         }
       })
       .catch(() => {
@@ -213,6 +202,9 @@ export default function StockTerminalPage() {
   }, [selected, period, adjust]);
 
   const up = (profile?.pct_change ?? selected?.pct_change ?? 0) >= 0;
+
+  // 首屏缩放窗口：默认聚焦最近 200 根；根数不足 200 时全显（周/月重采样后根数少）
+  const zoomStart = bars.length > 200 ? Number((100 - (200 / bars.length) * 100).toFixed(1)) : 0;
 
   return (
     /* 底部 pb-[84px]：给悬浮 Dock 菜单栏（64px）留出空间，避免遮挡 K线图底部的缩放条 */
@@ -275,7 +267,7 @@ export default function StockTerminalPage() {
           </div>
         ) : (
           <div className="flex flex-1 min-h-0 overflow-hidden bg-gray-50/50 p-4 gap-4">
-            {/* 左侧：K线大图（推理分数叠在右侧刻度，与 K线日期对齐） */}
+            {/* 左侧：K线大图（推理分数在底部独立副图，与主图 x 轴对齐） */}
             <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
               {/* K线卡 */}
               <div className="flex-1 min-h-0 flex flex-col rounded-3xl bg-white border border-purple-100/80 shadow-sm overflow-hidden">
@@ -330,7 +322,7 @@ export default function StockTerminalPage() {
                     <div className="h-full flex items-center justify-center text-xs text-slate-400">K线加载中…</div>
                   ) : bars.length ? (
                     <div className="flex-1 min-h-0">
-                      <KlineChart bars={bars} config={{ ma: true, boll: false, subplots: ['vol'] }} overlays={[]} period={period} scoreSeries={scoreSeries} />
+                      <KlineChart bars={bars} config={{ ma: true, boll: false, subplots: ['vol'] }} overlays={[]} period={period} scorePoints={scorePoints.map((p) => ({ date: p.date, value: p.value }))} showScoreSubplot={true} zoomStart={zoomStart} zoomEnd={100} />
                     </div>
                   ) : (
                     <div className="h-full flex items-center justify-center text-xs text-slate-400">暂无K线</div>
