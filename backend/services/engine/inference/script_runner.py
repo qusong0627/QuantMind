@@ -1682,6 +1682,15 @@ class InferenceScriptRunner:
                         asyncio.create_task(_push_to_tdx())
 
                     # === 滚动买卖检查 (分数>2.2买/掉下2.2卖/大盘MA20过滤) ===
+                    # A 股专属链路：HK/US 等市场信号不推通达信（market 参数即 universe_tag 市场）
+                    if market and str(market).upper() not in ("A", "CN", ""):
+                        logger.info(
+                            "[InferenceScriptRunner] 非 A 股市场跳过 TDX 滚动推送 "
+                            "market=%s run=%s",
+                            market,
+                            run_id,
+                        )
+                        return
                     from backend.services.live_trading.services.tdx_rolling_trade_service import (
                         tdx_rolling_trader,
                     )

@@ -43,8 +43,18 @@ def merge_signals_into_pred(
     rows = []
     for d, signals in signals_by_date:
         for s in signals or []:
-            sym = StockCodeUtil.to_prefix(str(s.get("symbol", "")))
-            if not re.match(r"^(SH|SZ|BJ)\d{6}$", sym):
+            raw = str(s.get("symbol", "")).strip()
+            sym = StockCodeUtil.to_prefix(raw)
+            if re.match(r"^(SH|SZ|BJ)\d{6}$", sym):
+                pass  # A 股路径不变
+            elif raw.endswith((".HK", ".hk")) or raw.isdigit():
+                # 港股：pred.parquet symbol 为 4位+.HK（0700.HK），非 A 股前缀式
+                sym = StockCodeUtil.to_hk_suffix(
+                    raw[:-3] if raw.endswith((".HK", ".hk")) else raw
+                )
+                if not re.match(r"^\d{4,5}\.HK$", sym, re.IGNORECASE):
+                    continue
+            else:
                 continue
             try:
                 score = float(s.get("score"))
