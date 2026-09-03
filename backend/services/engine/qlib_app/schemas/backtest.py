@@ -8,6 +8,49 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 GRID_SEARCH_MAX_COMBINATIONS = 100
 
+# 市场 → 回测默认值（A股标准为历史默认；港股：佣金 0.03% min3 HKD、印花 0.1% 卖出单边
+# 简化口径与模拟盘 HK_RULES 一致、无过户费、基准恒生指数）。仅填充未显式传参的字段。
+_MARKET_FEE_DEFAULTS: dict[str, dict[str, float | str]] = {
+    "CN": {
+        "commission": 0.00025,
+        "min_commission": 5.0,
+        "stamp_duty": 0.0005,
+        "transfer_fee": 0.00001,
+        "min_transfer_fee": 0.01,
+        "impact_cost_coefficient": 0.0005,
+        "benchmark": "SH000300",
+    },
+    "HK": {
+        "commission": 0.0003,
+        "min_commission": 3.0,
+        "stamp_duty": 0.001,
+        "transfer_fee": 0.0,
+        "min_transfer_fee": 0.0,
+        "impact_cost_coefficient": 0.0005,
+        "benchmark": "HSI",
+    },
+}
+
+
+def infer_market_from_request(qlib_provider_uri: str | None, qlib_region: str | None) -> str:
+    """由请求字段轻量推断市场（CN 兜底）。HK 识别：uri 含 hk_data/quanthk 或 region=hk。"""
+    uri = (qlib_provider_uri or "").lower()
+    region = (qlib_region or "").lower()
+    if region == "hk" or "hk_data" in uri or "quanthk" in uri:
+        return "HK"
+    if region in ("us", "crypto", "futures") or "us_data" in uri or "bc_data" in uri or "futures_data" in uri:
+        return region.upper()
+    return "CN"
+
+
+def apply_market_defaults(request: "QlibBacktestRequest") -> None:
+    """按市场填充未显式传参的费率与基准字段（显式值优先；市场默认取 _MARKET_FEE_DEFAULTS）。"""
+    market = infer_market_from_request(request.qlib_provider_uri, request.qlib_region)
+    defaults = _MARKET_FEE_DEFAULTS.get(market, _MARKET_FEE_DEFAULTS["CN"])
+    for field, value in defaults.items():
+        if getattr(request, field) is None:
+            setattr(request, field, value)
+
 
 def count_param_values(param_min: float, param_max: float, param_step: float) -> int:
     """计算参数范围内的取值数量，避免浮点数精度问题"""
@@ -88,17 +131,18 @@ class QlibBacktestRequest(BaseModel):
     # 回测配置
     use_vectorized: bool = Field(False, description="是否使用向量化极速回测加速")
     initial_capital: float = Field(100_000_000, description="初始资金", gt=0)
-    benchmark: str = Field("SH000300", description="基准指数", alias="benchmark_symbol")
+    # 默认值按市场在 model_validator 填充（CN=SH000300；HK=HSI）；None 或缺省 = 服务端补默认
+    benchmark: str | None = Field(None, description="基准指数", alias="benchmark_symbol")
     universe: str = Field("all", description="股票池")
 
-    # 交易成本费率（A股标准）
-    commission: float = Field(0.00025, description="券商佣金费率", ge=0)
-    min_commission: float = Field(5.0, description="最低佣金(元)", ge=0)
-    stamp_duty: float = Field(0.0005, description="印花税率(仅卖出)", ge=0)
-    transfer_fee: float = Field(0.00001, description="过户费率(仅SH)", ge=0)
-    min_transfer_fee: float = Field(0.01, description="最低过户费(元)", ge=0)
-    impact_cost_coefficient: float = Field(
-        0.0005, description="市场冲击成本系数(滑点模型)", ge=0
+    # 交易成本费率（None = 按市场默认，见 _MARKET_FEE_DEFAULTS；A股标准为历史默认值）
+    commission: float | None = Field(None, description="券商佣金费率", ge=0)
+    min_commission: float | None = Field(None, description="最低佣金(元)", ge=0)
+    stamp_duty: float | None = Field(None, description="印花税率(仅卖出口径)", ge=0)
+    transfer_fee: float | None = Field(None, description="过户费率(仅SH)", ge=0)
+    min_transfer_fee: float | None = Field(None, description="最低过户费(元)", ge=0)
+    impact_cost_coefficient: float | None = Field(
+        None, description="市场冲击成本系数(滑点模型)", ge=0
     )
 
     buy_cost: float | None = Field(None, description="买入综合费率", alias="open_cost")
@@ -145,6 +189,8 @@ class QlibBacktestRequest(BaseModel):
                 "请使用 signal_lag_days=1 + deal_price=open (标准口径) 或 "
                 "signal_lag_days=1 + deal_price=close (尾盘模式)。"
             )
+        # 费率/基准市场默认（显式传参优先；A股缺省值 = 历史默认，行为不变）
+        apply_market_defaults(self)
         return self
     allow_feature_signal_fallback: bool = Field(
         False,

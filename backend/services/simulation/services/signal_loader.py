@@ -13,6 +13,29 @@ from sqlalchemy.ext.asyncio import AsyncSession
 logger = logging.getLogger(__name__)
 
 
+def _market_where(market: str | None) -> str:
+    """engine_signal_scores 市场过滤条件（universe_tag；历史老行 NULL 视为 CN）。
+
+    market 缺省（None）返回空串 = 不加条件（旧行为逐字节不变）。
+    """
+    if not market:
+        return ""
+    m = str(market).upper()
+    if m in ("A", "CN"):
+        return " AND (universe_tag IS NULL OR universe_tag = 'CN')"
+    # 非 CN（HK）：当日新行看 universe_tag；HK 历史老行（无 tag）按模型桶兜底
+    return " AND (universe_tag = 'HK' OR feature_version LIKE 'script_v1_mdl_hk_%')"
+
+
+def _to_market_symbol(symbol: str, market: str | None) -> str:
+    """港股信号 symbol 归一为 0001.HK 后缀（下游行情/规则/众数推断自洽）；其余原样。"""
+    if not market or str(market).upper() != "HK":
+        return symbol
+    from backend.shared.stock_utils import StockCodeUtil
+
+    return StockCodeUtil.to_hk_suffix(symbol)
+
+
 @dataclass
 class SignalScore:
     """信号得分数据结构"""
@@ -38,6 +61,7 @@ class SignalLoader:
         run_id: str | None = None,
         min_score: float = 0.0,
         limit: int | None = None,
+        market: str | None = None,
     ) -> list[SignalScore]:
         """
         加载最新信号。
@@ -55,15 +79,17 @@ class SignalLoader:
         """
         tenant = (tenant_id or "").strip() or "default"
         uid = str(user_id or "").strip()
+        mkt_clause = _market_where(market)
 
         if run_id:
-            query = text("""
+            query = text(f"""
                 SELECT symbol, fusion_score, trade_date, run_id, tenant_id, user_id
                 FROM engine_signal_scores
                 WHERE tenant_id = :tenant_id
                   AND user_id = :user_id
                   AND run_id = :run_id
                   AND fusion_score >= :min_score
+                  {mkt_clause}
                 ORDER BY fusion_score DESC
                 LIMIT :limit
             """)
@@ -75,16 +101,17 @@ class SignalLoader:
                 "limit": limit or 1000,
             }
         else:
-            query = text("""
+            query = text(f"""
                 SELECT symbol, fusion_score, trade_date, run_id, tenant_id, user_id
                 FROM engine_signal_scores
                 WHERE tenant_id = :tenant_id
                   AND user_id = :user_id
                   AND trade_date = (
                       SELECT MAX(trade_date) FROM engine_signal_scores
-                      WHERE tenant_id = :tenant_id AND user_id = :user_id
+                      WHERE tenant_id = :tenant_id AND user_id = :user_id{mkt_clause}
                   )
                   AND fusion_score >= :min_score
+                  {mkt_clause}
                 ORDER BY fusion_score DESC
                 LIMIT :limit
             """)
@@ -100,7 +127,7 @@ class SignalLoader:
             rows = result.fetchall()
             signals = [
                 SignalScore(
-                    symbol=str(row[0]).upper(),
+                    symbol=_to_market_symbol(str(row[0]).upper(), market),
                     score=float(row[1]),
                     trade_date=row[2],
                     run_id=str(row[3]),
@@ -117,6 +144,9 @@ class SignalLoader:
                 run_id or "latest",
             )
             if signals or run_id:
+                return signals
+            # 非 CN 市场无信号时不允许回退 CN pred.parquet（A 股兜底源）
+            if market and str(market).upper() not in ("A", "CN"):
                 return signals
             # 取最新批次路径且信号表为空（如被后续补推覆盖清空）：回退默认模型
             # pred.parquet 数据日截面，与手动任务信号加载共用同一兜底源。
@@ -194,6 +224,7 @@ class SignalLoader:
         run_id: str | None = None,
         min_score: float = 0.0,
         limit: int | None = None,
+        market: str | None = None,
     ) -> list[SignalScore]:
         """加载**指定交易日**的信号（时光回放用）。
 
@@ -211,6 +242,9 @@ class SignalLoader:
             "trade_date = :trade_date",
             "fusion_score >= :min_score",
         ]
+        mkt_clause = _market_where(market)
+        if mkt_clause:
+            conditions.append(mkt_clause[5:])  # 去掉前导 " AND "
         params: dict[str, Any] = {
             "tenant_id": tenant,
             "user_id": uid,
@@ -234,7 +268,7 @@ class SignalLoader:
             rows = (await db.execute(query, params)).fetchall()
             signals = [
                 SignalScore(
-                    symbol=str(row[0]).upper(),
+                    symbol=_to_market_symbol(str(row[0]).upper(), market),
                     score=float(row[1]),
                     trade_date=row[2],
                     run_id=str(row[3]),
@@ -264,6 +298,7 @@ class SignalLoader:
         db: AsyncSession,
         tenant_id: str,
         user_id: str,
+        market: str | None = None,
     ) -> str | None:
         """
         获取最新的 run_id。
@@ -271,11 +306,13 @@ class SignalLoader:
         tenant = (tenant_id or "").strip() or "default"
         uid = str(user_id or "").strip()
 
-        query = text("""
+        mkt_clause = _market_where(market)
+        query = text(f"""
             SELECT run_id
             FROM engine_signal_scores
             WHERE tenant_id = :tenant_id
               AND user_id = :user_id
+              {mkt_clause}
             ORDER BY trade_date DESC, created_at DESC
             LIMIT 1
         """)
@@ -294,6 +331,7 @@ class SignalLoader:
         user_id: str,
         symbols: list[str],
         run_id: str | None = None,
+        market: str | None = None,
     ) -> dict[str, float]:
         """
         按指定股票代码加载信号得分。
@@ -307,15 +345,17 @@ class SignalLoader:
         tenant = (tenant_id or "").strip() or "default"
         uid = str(user_id or "").strip()
         normalized_symbols = [s.upper() for s in symbols]
+        mkt_clause = _market_where(market)
 
         if run_id:
-            query = text("""
+            query = text(f"""
                 SELECT symbol, fusion_score
                 FROM engine_signal_scores
                 WHERE tenant_id = :tenant_id
                   AND user_id = :user_id
                   AND run_id = :run_id
                   AND symbol = ANY(:symbols)
+                  {mkt_clause}
             """)
             params = {
                 "tenant_id": tenant,
@@ -324,16 +364,17 @@ class SignalLoader:
                 "symbols": normalized_symbols,
             }
         else:
-            query = text("""
+            query = text(f"""
                 SELECT symbol, fusion_score
                 FROM engine_signal_scores
                 WHERE tenant_id = :tenant_id
                   AND user_id = :user_id
                   AND trade_date = (
                       SELECT MAX(trade_date) FROM engine_signal_scores
-                      WHERE tenant_id = :tenant_id AND user_id = :user_id
+                      WHERE tenant_id = :tenant_id AND user_id = :user_id{mkt_clause}
                   )
                   AND symbol = ANY(:symbols)
+                  {mkt_clause}
             """)
             params = {
                 "tenant_id": tenant,
@@ -344,7 +385,10 @@ class SignalLoader:
         try:
             result = await db.execute(query, params)
             rows = result.fetchall()
-            return {str(row[0]).upper(): float(row[1]) for row in rows}
+            return {
+                _to_market_symbol(str(row[0]).upper(), market): float(row[1])
+                for row in rows
+            }
         except Exception as e:
             logger.error("SignalLoader: 按股票加载信号失败 %s", e)
             return {}

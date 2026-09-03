@@ -112,17 +112,43 @@ class ModelInferencePersistence:
             return 0, 0
 
     @classmethod
-    def _compute_next_run_at(cls, schedule_time: str, reference: datetime | None = None) -> datetime:
-        now = reference or datetime.now(_SHANGHAI_TZ)
+    def _market_of_model(cls, model_id: str) -> str:
+        """按模型 ID 前缀推断市场（mdl_hk_* → HK；缺省 CN）。"""
+        mid = str(model_id or "").lower()
+        if "mdl_hk_" in mid:
+            return "HK"
+        if "mdl_us_" in mid:
+            return "US"
+        if "mdl_crypto_" in mid:
+            return "CRYPTO"
+        return "CN"
+
+    @classmethod
+    def _compute_next_run_at(
+        cls,
+        schedule_time: str,
+        reference: datetime | None = None,
+        market: str | None = None,
+    ) -> datetime:
+        # 交易日历按市场（HK 用 XHKG；缺省 CN/XSHG 行为不变）
+        xcal_name = {"HK": "XHKG", "US": "XNYS", "CRYPTO": "XNYS"}.get(
+            str(market or "").upper(), "XSHG"
+        )
+        tz_name = {"HK": "Asia/Hong_Kong", "US": "America/New_York"}.get(
+            str(market or "").upper(), "Asia/Shanghai"
+        )
+        now = reference or datetime.now(ZoneInfo(tz_name))
         if now.tzinfo is None:
-            now = now.replace(tzinfo=_SHANGHAI_TZ)
+            now = now.replace(tzinfo=ZoneInfo(tz_name))
         hour, minute = cls._parse_schedule_time(schedule_time)
 
         try:
-            cal = xcals.get_calendar("XSHG")
+            cal = xcals.get_calendar(xcal_name)
             next_session = cal.next_session(now.date())
             next_date = next_session.date() if hasattr(next_session, "date") else next_session
-            return datetime.combine(next_date, time(hour, minute), tzinfo=_SHANGHAI_TZ)
+            return datetime.combine(
+                next_date, time(hour, minute), tzinfo=ZoneInfo(tz_name)
+            )
         except Exception:
             scheduled_next = (now + timedelta(days=1)).replace(hour=hour, minute=minute, second=0, microsecond=0)
             return scheduled_next
@@ -490,7 +516,13 @@ class ModelInferencePersistence:
         current = await self.get_settings(tenant_id=tenant_id, user_id=user_id, model_id=model_id)
 
         next_schedule_time = str(schedule_time or current.get("schedule_time") or "00:00")
-        next_run_at = self._compute_next_run_at(next_schedule_time) if enabled else None
+        next_run_at = (
+            self._compute_next_run_at(
+                next_schedule_time, market=self._market_of_model(model_id)
+            )
+            if enabled
+            else None
+        )
         now = datetime.now(_SHANGHAI_TZ)
 
         last_run_id = (last_run or {}).get("run_id")
@@ -540,7 +572,13 @@ class ModelInferencePersistence:
         settings = await self.get_settings(tenant_id=tenant_id, user_id=user_id, model_id=model_id)
         schedule_time = str(settings.get("schedule_time") or "")
         enabled = bool(settings.get("enabled"))
-        next_run_at = self._compute_next_run_at(schedule_time) if enabled else None
+        next_run_at = (
+            self._compute_next_run_at(
+                schedule_time, market=self._market_of_model(model_id)
+            )
+            if enabled
+            else None
+        )
         now = datetime.now(_SHANGHAI_TZ)
         async with get_session() as session:
             await session.execute(

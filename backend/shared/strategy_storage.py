@@ -558,6 +558,7 @@ class StrategyStorageService:
         category: str | None = None,
         search: str | None = None,
         tags: builtins.list[str] | None = None,
+        market: str | None = None,
     ) -> builtins.list[dict[str, Any]]:
         # strategies.user_id 为整数（users.id），需先解析业务 user_id（如 'admin'）
         uid_int = _ensure_int_user_id(user_id)
@@ -569,7 +570,21 @@ class StrategyStorageService:
                        code_hash, tags, is_verified, execution_config, created_at, updated_at
                 FROM strategies WHERE user_id = :uid AND status != '{_STATUS_ARCHIVED}'
             """
-            rows = session.execute(text(sql), {"uid": uid_int}).fetchall()
+            market_clause = ""
+            query_params: dict[str, Any] = {"uid": uid_int}
+            if market:
+                # 市场过滤（市场存 parameters.jsonb.market；历史无 market 行一律视为 A 股）
+                mkt = str(market).upper()
+                if mkt in ("A", "CN"):
+                    market_clause = (
+                        " AND (parameters->>'market' IS NULL"
+                        " OR UPPER(parameters->>'market') IN ('A','CN'))"
+                    )
+                else:
+                    market_clause = " AND UPPER(parameters->>'market') = :mkt"
+                    query_params["mkt"] = mkt
+            sql += market_clause
+            rows = session.execute(text(sql), query_params).fetchall()
             return [
                 {
                     "id": str(r[0]),

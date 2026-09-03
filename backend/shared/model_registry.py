@@ -52,6 +52,50 @@ class ResolvedModel:
         }
 
 
+_MARKET_ALIASES: dict[str, frozenset[str]] = {
+    "CN": frozenset({"CN", "A", "A_SHARE", "A股", "CHINA"}),
+    "HK": frozenset({"HK", "HONG_KONG", "港股"}),
+    "US": frozenset({"US", "美股"}),
+    "CRYPTO": frozenset({"CRYPTO", "加密", "加密货币"}),
+    "FUTURES": frozenset({"FUTURES", "期货"}),
+}
+
+
+def _canonical_market(value: Any) -> str:
+    """市场标识规范化（缺省/未知一律 CN）。"""
+    raw = str(value or "").upper().strip()
+    if not raw:
+        return "CN"
+    for canonical, hits in _MARKET_ALIASES.items():
+        if raw in hits:
+            return canonical
+    return "CN"
+
+
+def _model_market_of(model: dict[str, Any]) -> str:
+    """模型记录 → 市场（metadata_json.market > context.market > model_id mdl_{market}_ 前缀）。"""
+    meta = model.get("metadata_json") or {}
+    if isinstance(meta, str):
+        try:
+            meta = json.loads(meta)
+        except Exception:  # noqa: BLE001
+            meta = {}
+    raw = ""
+    if isinstance(meta, dict):
+        raw = str(meta.get("market") or "")
+        if not raw:
+            ctx = meta.get("context")
+            if isinstance(ctx, dict):
+                raw = str(ctx.get("market") or "")
+    if not raw:
+        mid = str(model.get("model_id") or "").lower()
+        for market in ("hk", "us", "crypto", "futures", "cn"):
+            if f"mdl_{market}_" in mid:
+                raw = market
+                break
+    return _canonical_market(raw)
+
+
 class ModelRegistryService:
     def __init__(self) -> None:
         raw_user_models_root = Path(os.getenv("USER_MODELS_ROOT", "models/users"))
@@ -992,11 +1036,18 @@ class ModelRegistryService:
         user_id: str,
         strategy_id: str | None = None,
         model_id: str | None = None,
+        market: str | None = None,
     ) -> ResolvedModel:
         tenant, user = self._normalize_owner(tenant_id=tenant_id, user_id=user_id)
         await self._ensure_system_default_record(tenant_id=tenant, user_id=user)
 
         reason_parts: list[str] = []
+        # market 约束：传入时逐层校验模型市场，不匹配跳过该层；
+        # 不传（None）= 旧行为逐字节不变（CN 兜底）
+        wanted_market = _canonical_market(market) if market else None
+
+        def _market_ok(item: dict[str, Any]) -> bool:
+            return wanted_market is None or _model_market_of(item) == wanted_market
 
         async def _load_ready(mid: str) -> dict[str, Any] | None:
             item = await self.get_model(tenant_id=tenant, user_id=user, model_id=mid)
@@ -1010,28 +1061,37 @@ class ModelRegistryService:
         if explicit_id:
             system_record = await self._resolve_system_model_record(explicit_id)
             if system_record:
-                return ResolvedModel(
-                    effective_model_id=str(
-                        system_record.get("model_id") or explicit_id
-                    ),
-                    model_source="explicit_system_model",
-                    fallback_used=False,
-                    fallback_reason="",
-                    storage_path=str(system_record.get("storage_path") or ""),
-                    model_file=str(system_record.get("model_file") or ""),
-                    status=str(system_record.get("status") or "active"),
+                if _market_ok(system_record):
+                    return ResolvedModel(
+                        effective_model_id=str(
+                            system_record.get("model_id") or explicit_id
+                        ),
+                        model_source="explicit_system_model",
+                        fallback_used=False,
+                        fallback_reason="",
+                        storage_path=str(system_record.get("storage_path") or ""),
+                        model_file=str(system_record.get("model_file") or ""),
+                        status=str(system_record.get("status") or "active"),
+                    )
+                reason_parts.append(
+                    f"explicit system model={explicit_id} market mismatch"
                 )
 
             explicit = await _load_ready(explicit_id)
             if explicit:
-                return ResolvedModel(
-                    effective_model_id=explicit_id,
-                    model_source="explicit_model_id",
-                    fallback_used=False,
-                    fallback_reason="",
-                    storage_path=str(explicit.get("storage_path") or ""),
-                    model_file=str(explicit.get("model_file") or ""),
-                    status=str(explicit.get("status") or "ready"),
+                if _market_ok(explicit):
+                    return ResolvedModel(
+                        effective_model_id=explicit_id,
+                        model_source="explicit_model_id",
+                        fallback_used=False,
+                        fallback_reason="",
+                        storage_path=str(explicit.get("storage_path") or ""),
+                        model_file=str(explicit.get("model_file") or ""),
+                        status=str(explicit.get("status") or "ready"),
+                    )
+                reason_parts.append(
+                    f"explicit model_id={explicit_id} market mismatch "
+                    f"(need {wanted_market})"
                 )
             reason_parts.append(f"explicit model_id={explicit_id} not ready")
 
@@ -1044,20 +1104,27 @@ class ModelRegistryService:
                 binding_model_id = str(binding.get("model_id") or "")
                 bound = await _load_ready(binding_model_id)
                 if bound:
-                    return ResolvedModel(
-                        effective_model_id=binding_model_id,
-                        model_source="strategy_binding",
-                        fallback_used=False,
-                        fallback_reason="",
-                        storage_path=str(bound.get("storage_path") or ""),
-                        model_file=str(bound.get("model_file") or ""),
-                        status=str(bound.get("status") or "ready"),
+                    if _market_ok(bound):
+                        return ResolvedModel(
+                            effective_model_id=binding_model_id,
+                            model_source="strategy_binding",
+                            fallback_used=False,
+                            fallback_reason="",
+                            storage_path=str(bound.get("storage_path") or ""),
+                            model_file=str(bound.get("model_file") or ""),
+                            status=str(bound.get("status") or "ready"),
+                        )
+                    reason_parts.append(
+                        f"strategy binding model_id={binding_model_id} "
+                        f"market mismatch (need {wanted_market})"
                     )
                 reason_parts.append(
                     f"strategy binding model_id={binding_model_id} not ready"
                 )
 
-        default = await self.get_default_model(tenant_id=tenant, user_id=user)
+        default = await self.get_default_model(
+            tenant_id=tenant, user_id=user, market=wanted_market
+        )
         if default:
             default_id = str(default.get("model_id") or "")
             return ResolvedModel(
@@ -1071,7 +1138,8 @@ class ModelRegistryService:
             )
 
         fallback_reason = "; ".join(reason_parts).strip()
-        if self.primary_model_id and Path(self.primary_model_dir).is_dir():
+        # system 兜底模型为 CN 生产模型：显式约束非 CN 市场时不再落 CN 链
+        if (wanted_market is None or wanted_market == "CN") and self.primary_model_id and Path(self.primary_model_dir).is_dir():
             if fallback_reason:
                 fallback_reason = f"{fallback_reason}; fallback to system model"
             else:
@@ -1191,24 +1259,29 @@ class ModelRegistryService:
         return self._row_to_model(dict(row)) if row else None
 
     def _get_default_model_sync(
-        self, *, tenant_id: str, user_id: str
+        self, *, tenant_id: str, user_id: str, market: str | None = None
     ) -> dict[str, Any] | None:
         tenant, user = self._normalize_owner(tenant_id=tenant_id, user_id=user_id)
+        market_clause = ""
+        params: dict[str, Any] = {"tenant_id": tenant, "user_id": user}
+        if market:
+            market_clause = " AND COALESCE(metadata_json->>'market', 'CN') = :market"
+            params["market"] = str(market).upper().strip()
         with get_db() as session:
             row = (
                 session.execute(
                     text(
-                        """
+                        f"""
                         SELECT tenant_id, user_id, model_id, source_run_id, status, storage_path, model_file,
                                metadata_json, metrics_json, is_default, created_at, updated_at, activated_at
                         FROM qm_user_models
                         WHERE tenant_id = :tenant_id AND user_id = :user_id
-                          AND is_default = TRUE AND status IN ('ready', 'active')
+                          AND is_default = TRUE AND status IN ('ready', 'active'){market_clause}
                         ORDER BY activated_at DESC NULLS LAST, updated_at DESC
                         LIMIT 1
                         """
                     ),
-                    {"tenant_id": tenant, "user_id": user},
+                    params,
                 )
                 .mappings()
                 .first()
@@ -1247,10 +1320,16 @@ class ModelRegistryService:
         user_id: str,
         strategy_id: str | None = None,
         model_id: str | None = None,
+        market: str | None = None,
     ) -> dict[str, Any]:
         tenant, user = self._normalize_owner(tenant_id=tenant_id, user_id=user_id)
 
         reason_parts: list[str] = []
+        # market 约束：传入时逐层校验模型市场，不匹配跳过该层（None = 旧行为）
+        wanted_market = _canonical_market(market) if market else None
+
+        def _market_ok(item: dict[str, Any]) -> bool:
+            return wanted_market is None or _model_market_of(item) == wanted_market
 
         def _load_ready(mid: str) -> dict[str, Any] | None:
             item = self._get_model_sync(tenant_id=tenant, user_id=user, model_id=mid)
@@ -1264,29 +1343,38 @@ class ModelRegistryService:
         if explicit_id:
             system_record = self._resolve_system_model_record_sync(explicit_id)
             if system_record:
-                return ResolvedModel(
-                    effective_model_id=str(
-                        system_record.get("model_id") or explicit_id
-                    ),
-                    model_source="explicit_system_model",
-                    fallback_used=False,
-                    fallback_reason="",
-                    storage_path=str(system_record.get("storage_path") or ""),
-                    model_file=str(system_record.get("model_file") or ""),
-                    status=str(system_record.get("status") or "active"),
-                ).to_dict()
+                if _market_ok(system_record):
+                    return ResolvedModel(
+                        effective_model_id=str(
+                            system_record.get("model_id") or explicit_id
+                        ),
+                        model_source="explicit_system_model",
+                        fallback_used=False,
+                        fallback_reason="",
+                        storage_path=str(system_record.get("storage_path") or ""),
+                        model_file=str(system_record.get("model_file") or ""),
+                        status=str(system_record.get("status") or "active"),
+                    ).to_dict()
+                reason_parts.append(
+                    f"explicit system model={explicit_id} market mismatch"
+                )
 
             explicit = _load_ready(explicit_id)
             if explicit:
-                return ResolvedModel(
-                    effective_model_id=explicit_id,
-                    model_source="explicit_model_id",
-                    fallback_used=False,
-                    fallback_reason="",
-                    storage_path=str(explicit.get("storage_path") or ""),
-                    model_file=str(explicit.get("model_file") or ""),
-                    status=str(explicit.get("status") or "ready"),
-                ).to_dict()
+                if _market_ok(explicit):
+                    return ResolvedModel(
+                        effective_model_id=explicit_id,
+                        model_source="explicit_model_id",
+                        fallback_used=False,
+                        fallback_reason="",
+                        storage_path=str(explicit.get("storage_path") or ""),
+                        model_file=str(explicit.get("model_file") or ""),
+                        status=str(explicit.get("status") or "ready"),
+                    ).to_dict()
+                reason_parts.append(
+                    f"explicit model_id={explicit_id} market mismatch "
+                    f"(need {wanted_market})"
+                )
             reason_parts.append(f"explicit model_id={explicit_id} not ready")
 
         sid = str(strategy_id or "").strip()
@@ -1298,20 +1386,27 @@ class ModelRegistryService:
                 binding_model_id = str(binding.get("model_id") or "")
                 bound = _load_ready(binding_model_id)
                 if bound:
-                    return ResolvedModel(
-                        effective_model_id=binding_model_id,
-                        model_source="strategy_binding",
-                        fallback_used=False,
-                        fallback_reason="",
-                        storage_path=str(bound.get("storage_path") or ""),
-                        model_file=str(bound.get("model_file") or ""),
-                        status=str(bound.get("status") or "ready"),
-                    ).to_dict()
+                    if _market_ok(bound):
+                        return ResolvedModel(
+                            effective_model_id=binding_model_id,
+                            model_source="strategy_binding",
+                            fallback_used=False,
+                            fallback_reason="",
+                            storage_path=str(bound.get("storage_path") or ""),
+                            model_file=str(bound.get("model_file") or ""),
+                            status=str(bound.get("status") or "ready"),
+                        ).to_dict()
+                    reason_parts.append(
+                        f"strategy binding model_id={binding_model_id} "
+                        f"market mismatch (need {wanted_market})"
+                    )
                 reason_parts.append(
                     f"strategy binding model_id={binding_model_id} not ready"
                 )
 
-        default = self._get_default_model_sync(tenant_id=tenant, user_id=user)
+        default = self._get_default_model_sync(
+            tenant_id=tenant, user_id=user, market=wanted_market
+        )
         if default:
             default_id = str(default.get("model_id") or "")
             return ResolvedModel(
@@ -1325,7 +1420,8 @@ class ModelRegistryService:
             ).to_dict()
 
         fallback_reason = "; ".join(reason_parts).strip()
-        if self.primary_model_id and Path(self.primary_model_dir).is_dir():
+        # system 兜底模型为 CN 生产模型：显式约束非 CN 市场时不再落 CN 链
+        if (wanted_market is None or wanted_market == "CN") and self.primary_model_id and Path(self.primary_model_dir).is_dir():
             if fallback_reason:
                 fallback_reason = f"{fallback_reason}; fallback to system model"
             else:

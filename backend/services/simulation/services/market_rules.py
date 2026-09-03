@@ -186,11 +186,16 @@ def infer_market(symbol: str) -> Market:
     return Market.CN
 
 
-def infer_market_from_symbols(symbols: list[str]) -> Market:
+def infer_market_from_symbols(
+    symbols: list[str], *, market_hint: Market | str | None = None
+) -> Market:
     """从一批信号标的推断共同市场（同一策略的信号来自同一模型/市场）。
 
-    逐个推断后取众数；空列表回退 CN。
+    提供 market_hint（激活策略的 parameters.market）时直接使用——
+    港股信号 symbol 为裸数字（DB 契约），无法靠众数推断；其余走逐个推断取众数。
     """
+    if market_hint is not None:
+        return normalize_market(market_hint)
     if not symbols:
         return Market.CN
     counts: dict[Market, int] = {}

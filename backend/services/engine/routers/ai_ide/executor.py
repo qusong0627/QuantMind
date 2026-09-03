@@ -117,6 +117,7 @@ def _build_runner_environment(
         "qlib_provider_uri": "AI_IDE_BACKTEST_PROVIDER_URI",
         "qlib_region": "AI_IDE_BACKTEST_REGION",
         "benchmark": "AI_IDE_BACKTEST_BENCHMARK",
+        "market": "AI_IDE_BACKTEST_MARKET",
     }
     for meta_key, env_key in meta_env_map.items():
         value = str(request_meta.get(meta_key) or "").strip()
@@ -172,6 +173,7 @@ class StartRequest(BaseModel):
     qlib_provider_uri: str | None = None
     qlib_region: str | None = None
     benchmark: str | None = None
+    market: str | None = None  # CN/HK/US/CRYPTO/FUTURES（回测费率/规则市场默认用）
 
 
 class SmokeImageRequest(BaseModel):
@@ -717,16 +719,18 @@ def _run_module_backtest(module):
     end_date = os.getenv("AI_IDE_BACKTEST_END_DATE", datetime.now().strftime("%Y-%m-%d"))
     initial_capital = float(os.getenv("AI_IDE_BACKTEST_INITIAL_CAPITAL", "1000000"))
     universe = os.getenv("AI_IDE_BACKTEST_UNIVERSE", "all")
-    benchmark = os.getenv("AI_IDE_BACKTEST_BENCHMARK", "SH000300")
+    benchmark = os.getenv("AI_IDE_BACKTEST_BENCHMARK")  # None → 服务端按市场补默认
     model_id = os.getenv("AI_IDE_BACKTEST_MODEL_ID", "").strip() or None
     strategy_id = os.getenv("AI_IDE_BACKTEST_STRATEGY_ID", "").strip() or None
     run_id = os.getenv("AI_IDE_BACKTEST_RUN_ID", "").strip() or None
-    commission = float(os.getenv("AI_IDE_BACKTEST_COMMISSION", "0.00025"))
-    min_commission = float(os.getenv("AI_IDE_BACKTEST_MIN_COMMISSION", "5.0"))
-    stamp_duty = float(os.getenv("AI_IDE_BACKTEST_STAMP_DUTY", "0.0005"))
-    transfer_fee = float(os.getenv("AI_IDE_BACKTEST_TRANSFER_FEE", "0.00001"))
-    min_transfer_fee = float(os.getenv("AI_IDE_BACKTEST_MIN_TRANSFER_FEE", "0.01"))
-    impact_cost_coefficient = float(os.getenv("AI_IDE_BACKTEST_IMPACT_COST_COEFFICIENT", "0.0005"))
+    # 费率字段：env 缺省时置 None，由 QlibBacktestRequest 按市场（qlib_provider_uri）补默认
+    _fenv = lambda k: float(os.getenv(k)) if os.getenv(k) is not None else None  # noqa: E731
+    commission = _fenv("AI_IDE_BACKTEST_COMMISSION")
+    min_commission = _fenv("AI_IDE_BACKTEST_MIN_COMMISSION")
+    stamp_duty = _fenv("AI_IDE_BACKTEST_STAMP_DUTY")
+    transfer_fee = _fenv("AI_IDE_BACKTEST_TRANSFER_FEE")
+    min_transfer_fee = _fenv("AI_IDE_BACKTEST_MIN_TRANSFER_FEE")
+    impact_cost_coefficient = _fenv("AI_IDE_BACKTEST_IMPACT_COST_COEFFICIENT")
     signal_lag_days = int(os.getenv("AI_IDE_BACKTEST_SIGNAL_LAG_DAYS", "1"))
     deal_price = os.getenv("AI_IDE_BACKTEST_DEAL_PRICE", "close")
     risk_free_rate = float(os.getenv("AI_IDE_BACKTEST_RISK_FREE_RATE", "0.02"))

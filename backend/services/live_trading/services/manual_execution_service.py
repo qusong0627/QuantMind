@@ -1459,6 +1459,7 @@ class ManualExecutionService:
                         WHERE run_id = :run_id
                           AND tenant_id = :tenant_id
                           AND user_id = :user_id
+                          AND (universe_tag IS NULL OR universe_tag = 'CN')
                         ORDER BY fusion_score DESC NULLS LAST, symbol ASC
                         """
                         ),

@@ -216,6 +216,7 @@ class TdxRollingTradeService:
                         WHERE run_id = :run_id
                           AND tenant_id = :tenant_id
                           AND user_id = :user_id
+                          AND (universe_tag IS NULL OR universe_tag = 'CN')
                         """
                     ),
                     {"run_id": selected_run, "tenant_id": tenant_id, "user_id": user_id},

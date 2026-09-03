@@ -88,6 +88,7 @@ async def _load_signal_day(
             s.trade_date = (
                 SELECT MAX(trade_date) FROM engine_signal_scores
                 WHERE tenant_id = :tenant_id AND user_id = :user_id
+                  AND (universe_tag IS NULL OR universe_tag = 'CN')
             )
         """
 
@@ -95,7 +96,8 @@ async def _load_signal_day(
         f"""
         SELECT s.symbol, s.fusion_score, s.trade_date
         FROM engine_signal_scores s
-        WHERE s.tenant_id = :tenant_id AND s.user_id = :user_id AND {where}
+        WHERE s.tenant_id = :tenant_id AND s.user_id = :user_id
+          AND (s.universe_tag IS NULL OR s.universe_tag = 'CN') AND {where}
         ORDER BY s.fusion_score DESC
         """
     )
@@ -388,6 +390,7 @@ async def selection_history(
         SELECT trade_date, symbol, fusion_score
         FROM engine_signal_scores
         WHERE tenant_id = :tenant_id AND user_id = :user_id
+          AND (universe_tag IS NULL OR universe_tag = 'CN')
           AND trade_date BETWEEN :from AND :to
         ORDER BY trade_date, fusion_score DESC
         """
@@ -880,6 +883,7 @@ async def _run_score_calibration(
             SELECT trade_date, symbol, fusion_score, score_rank
             FROM engine_signal_scores
             WHERE tenant_id = :tenant_id AND user_id = :user_id
+              AND (universe_tag IS NULL OR universe_tag = 'CN')
               AND fusion_score IS NOT NULL
               {extra_where}
             ORDER BY trade_date DESC

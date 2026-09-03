@@ -129,6 +129,17 @@ class SkillEngine:
         if not parts:
             return ""
 
+        # 非 CN 市场追加「禁止 A 股规则」护栏模板（A 股不注入，零影响）
+        if market not in ("", "CN"):
+            guard = self.load_template("hk_market_guardrail")
+            if guard:
+                guard = (
+                    guard.replace("{{PROVIDER_URI}}", market_cfg["provider_uri"])
+                    .replace("{{MARKET_REGION}}", market_cfg["region"])
+                    .replace("{{MARKET_REGION_UPPER}}", market_cfg["region_upper"])
+                )
+                parts.append(f"### hk_market_guardrail\n{guard}")
+
         return "\n\n---\n\n".join(parts)
 
     def get_error_injection(self, error_msg: str, market: str = "CN") -> str:

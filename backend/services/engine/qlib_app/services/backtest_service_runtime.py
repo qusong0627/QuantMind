@@ -505,19 +505,30 @@ class QlibBacktestServiceRuntimeMixin(QlibBacktestServiceQueryMixin):
             # 费率口径统一：无论走聚合费率(buy_cost/sell_cost)还是明细费率路径，
             # 过户费均按明细费率计算，佣金从聚合买入费率中剥离过户费部分，
             # 避免两条路径沪市费用口径不一致。
-            comm = (
-                request.buy_cost if request.buy_cost is not None else request.commission
-            )
+            market = self._infer_backtest_market(request)
+            buy_cost = request.buy_cost
+            sell_cost = request.sell_cost
+            if market == "HK" and (buy_cost is not None or sell_cost is not None):
+                # 港股禁聚合口径（明细与双边印花聚合并存会重复计提），忽略聚合字段走明细默认
+                task_log.warning(
+                    "hk_aggregated_fee_ignored",
+                    "港股回测忽略聚合费率 buy_cost/sell_cost，改用市场明细默认",
+                    buy_cost=buy_cost,
+                    sell_cost=sell_cost,
+                )
+                buy_cost = None
+                sell_cost = None
+            comm = buy_cost if buy_cost is not None else request.commission
             tf = request.transfer_fee
-            if request.buy_cost is not None:
+            if buy_cost is not None:
                 # 聚合买入费率 = 佣金 + 过户费（前端口径），剥离出纯佣金
-                comm = max(0.0, request.buy_cost - request.transfer_fee)
+                comm = max(0.0, buy_cost - request.transfer_fee)
             tax = (
-                (request.sell_cost - request.buy_cost)
-                if request.sell_cost is not None and request.buy_cost is not None
+                (sell_cost - buy_cost)
+                if sell_cost is not None and buy_cost is not None
                 else (
-                    (request.sell_cost - request.commission)
-                    if request.sell_cost is not None
+                    (sell_cost - request.commission)
+                    if sell_cost is not None
                     else request.stamp_duty
                 )
             )
@@ -541,6 +552,8 @@ class QlibBacktestServiceRuntimeMixin(QlibBacktestServiceQueryMixin):
                     "impact_cost_coefficient": request.impact_cost_coefficient,
                     "backtest_id": backtest_id,
                     "allow_short_selling": enable_short_selling,
+                    # 港股无涨跌停：不读 $change 判停牌限制（防未来 HK 缓存补 change 后被 9.5% 误拦）
+                    "has_price_limits": market != "HK",
                 },
             }
             pos_type = "Position"
@@ -643,15 +656,19 @@ class QlibBacktestServiceRuntimeMixin(QlibBacktestServiceQueryMixin):
                 )
 
                 # Load $change for limit-up/limit-down detection
-                try:
-                    change_df = D.features(
-                        vectorized_universe,
-                        ["$change"],
-                        start_time=request.start_date,
-                        end_time=request.end_date,
-                    )
-                except Exception:
-                    change_df = None
+                # （仅 CN 缓存有 change.day.bin；HK/US 等无涨跌停市场直接跳过，
+                #   省去对全部标的的逐目录探测开销）
+                change_df = None
+                if market == "CN":
+                    try:
+                        change_df = D.features(
+                            vectorized_universe,
+                            ["$change"],
+                            start_time=request.start_date,
+                            end_time=request.end_date,
+                        )
+                    except Exception:
+                        change_df = None
 
                 cfg = VectorizedBacktestConfig(
                     initial_capital=request.initial_capital,

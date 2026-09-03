@@ -217,6 +217,7 @@ class SignalReadinessService:
                         WHERE tenant_id = :tenant_id
                           AND user_id = :user_id
                           AND run_id = :run_id
+                          AND (universe_tag IS NULL OR universe_tag = 'CN')
                         """
                     ),
                     {

@@ -342,6 +342,80 @@ class QuantHKDataHub(QuantDBDataHub):
             return pd.DataFrame()
         return pd.read_parquet(file_path)
 
+    # ---- 港股股票池（QLib instruments 池文件数据源，qlib_data_builder 消费） ----
+    UNIVERSE_MAP: dict[str, str | None] = {
+        "hsgt": None,  # 港股通成分（hsgt_membership.parquet，621 只）
+        "hsgt_10_index": None,  # 中证港股通系列 10 指数成分并集（index_weights/）
+        "val_top50": None,  # 总市值 Top50
+        "val_top100": None,  # 总市值 Top100
+        "val_top300": None,  # 总市值 Top300
+    }
+
+    UNIVERSE_NAMES: dict[str, str] = {
+        "hsgt": "港股通成分",
+        "hsgt_10_index": "中证港股通指数系列",
+        "val_top50": "市值 Top50",
+        "val_top100": "市值 Top100",
+        "val_top300": "市值 Top300",
+    }
+
+    def fetch_universe_stocks(self, universe: str):
+        """返回股票池成分 DataFrame[symbol]，symbol 为 4 位+.HK 规范格式。
+
+        - hsgt：港股通成分名单（表格已带规范 symbol 列，5 位显示码 代码 列作兜底）
+        - hsgt_10_index：index_weights/ 下全部指数权重文件取 symbol 并集
+          （月频快照，取全量并集而非最新时点，成分随指数调整自动跟随）
+        - val_topN：5_technical_derived/valuation 总市值降序取前 N；
+          valuation 最新分区可能整列 NULL（同日快照未写完），
+          逐分区回退直到取满 N 或扫尽（兜底上一完整快照）
+        """
+        import glob
+
+        import pandas as pd
+
+        base = self._data_dir / "2_base_sector"
+        if universe == "hsgt":
+            path = base / "hsgt_membership.parquet"
+            if not path.exists():
+                return self._empty_df()
+            df = pd.read_parquet(path)
+            if "symbol" in df.columns:
+                return pd.DataFrame({"symbol": df["symbol"].dropna()})
+            # 旧版无 symbol 列：5 位显示码（01918）→ to_hk_suffix
+            if "代码" in df.columns:
+                from backend.shared.stock_utils import StockCodeUtil
+
+                out = [StockCodeUtil.to_hk_suffix(str(c)) for c in df["代码"].dropna()]
+                return pd.DataFrame({"symbol": out})
+            return self._empty_df()
+
+        if universe == "hsgt_10_index":
+            files = sorted(glob.glob(str(base / "index_weights" / "*.parquet")))
+            if not files:
+                return self._empty_df()
+            frames = [pd.read_parquet(f) for f in files]
+            df = pd.concat(frames, ignore_index=True)
+            if "symbol" not in df.columns:
+                return self._empty_df()
+            return pd.DataFrame({"symbol": df["symbol"].dropna().drop_duplicates()})
+
+        if universe.startswith("val_top"):
+            n = int(universe[len("val_top"):])
+            files = sorted(
+                glob.glob(str(self._data_dir / "5_technical_derived" / "valuation" / "dt=*" / "data.parquet")),
+                reverse=True,  # 新分区优先
+            )
+            for f in files:
+                df = pd.read_parquet(f, columns=["symbol", "total_mv"])
+                df = df[df["total_mv"].notna() & (df["total_mv"] > 0)]
+                if len(df) >= n:
+                    df = df.sort_values("total_mv", ascending=False).head(n)
+                    return pd.DataFrame({"symbol": df["symbol"].dropna()})
+                # 该分区有效市值不足 N 时继续回退到更早分区
+            return self._empty_df()
+
+        return self._empty_df()
+
     # ---- 通用数据段读取（分红/财务/评级/持仓/期权等） ----
     DATASET_DIRS = {
         "dividend": "3_financial_data/dividend",

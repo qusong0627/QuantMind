@@ -28,10 +28,15 @@ STRATEGY_MARKET_CONTEXT: dict[str, str] = {
         "费用：佣金约 0.03%、印花税卖出 0.05%。默认基准指数 SH000300。"
     ),
     "HK": (
-        "港股市场。标的符号：4位数字+.HK（0001.HK = 长和、0700.HK = 腾讯）。"
-        "回转交易 T+0（当日买入当日可卖，交收 T+2 不影响卖出）。"
-        "最小交易单位：每手股数按个股 board lot（各股不同），无涨跌停限制。"
-        "费用：佣金约 0.03%、印花税 0.1%（双边）。货币 HKD。默认基准指数 HSI。"
+        "港股市场。标的符号：HKEX 显示码去前导零后 4 位 + .HK（0001.HK = 长和、"
+        "0700.HK = 腾讯），8 开头创业板保留 5 位；QLib 数据内 instrument 一律 "
+        "hk_ 前缀（hk_0700.HK），股票池/信号对齐用带前缀的 qlib instrument 名。"
+        "回转交易 T+0（当日买入当日可卖，交收 T+2 不影响卖出），无涨跌停限制。"
+        "最小交易单位：每手股数按个股 board lot（平台暂未接入，按 1 股简化）——不要写 100 股整手。"
+        "费用：佣金约 0.03%（最低 3 HKD）、印花税 0.1% 卖出单边简化计提、无过户费。货币 HKD。默认基准指数 HSI。"
+        "平台港股因子库 = l1_factors（约 190 列：OHLCV/动量/波动率/流动性/资金流/风格/行业）+ "
+        "ccass_factors（CCASS 集中度）+ south_factors（南向持股）。"
+        "禁止套用 A 股规则：T+1、100 股整手、涨跌停、ST 过滤、过户费、印花税单边不适用。"
     ),
     "US": (
         "美股市场。标的符号：纯字母 ticker（AAPL / MSFT / NVDA）。"
@@ -381,9 +386,12 @@ def get_strategy_config():
         if skill_prompt:
             prompt += f"\n\n[Skill Constraints]:\n{skill_prompt}\n"
 
-        # 注入错误修复指导
+        # 注入错误修复指导（按市场取 provider 口径，缺省 CN 与旧行为一致）
         if error_msg:
-            error_injection = self.skill_engine.get_error_injection(error_msg)
+            error_market = str(context.get("market", "") or "").strip().upper() or "CN"
+            error_injection = self.skill_engine.get_error_injection(
+                error_msg, market=error_market
+            )
             if error_injection:
                 prompt += error_injection
 

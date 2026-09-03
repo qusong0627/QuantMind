@@ -100,6 +100,7 @@ class SimulationEngine:
         strategy_id: str,
         run_id: str | None = None,
         params_override: dict[str, Any] | None = None,
+        market: str | None = None,
     ) -> ExecutionReport:
         """
         执行一次模拟盘调仓周期。
@@ -110,6 +111,8 @@ class SimulationEngine:
             strategy_id: 策略 ID
             run_id: 指定信号批次 ID，若 None 则取最新
             params_override: 前端传递的策略参数覆盖
+            market: 策略市场提示（激活策略 parameters.market）。
+                   港股信号 symbol 为裸数字无法靠众数推断，须由调用方显式传入。
 
         Returns:
             执行报告
@@ -130,12 +133,13 @@ class SimulationEngine:
         try:
             db_manager = get_db_manager()
             async with db_manager.session() as db:
-                # 1. 加载信号
+                # 1. 加载信号（market 提示时按市场过滤；缺省旧行为）
                 signals = await self.signal_loader.load_latest_signals(
                     db=db,
                     tenant_id=tenant,
                     user_id=uid,
                     run_id=run_id,
+                    market=market,
                 )
                 report.signal_count = len(signals)
 
@@ -151,7 +155,10 @@ class SimulationEngine:
 
                 # 1.5 市场推断：同一策略的信号来自同一模型/市场，按信号代码
                 # 众数确定本轮行情源、交易规则与账户维度。
-                market = infer_market_from_symbols([s.symbol for s in signals])
+                # 港股信号为裸数字（DB 契约）——由激活策略的 market 提示直接指定。
+                market = infer_market_from_symbols(
+                    [s.symbol for s in signals], market_hint=market
+                )
                 logger.info(
                     "SimulationEngine: market=%s (from %d signals)",
                     market.value,

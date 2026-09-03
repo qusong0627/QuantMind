@@ -712,6 +712,7 @@ async def _check_strategy_alerts(
                         SELECT symbol, fusion_score
                         FROM engine_signal_scores
                         WHERE run_id = :run_id AND tenant_id = :tenant_id AND user_id = :user_id
+                          AND (universe_tag IS NULL OR universe_tag = 'CN')
                         """
                     ),
                     {"run_id": run_id, "tenant_id": tenant_id, "user_id": user_id},

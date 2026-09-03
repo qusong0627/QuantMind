@@ -495,6 +495,7 @@ class InferenceRouterService:
         resolved_model: dict[str, Any] | None = None,
         redis_client=None,
         symbols: list[str] | None = None,
+        market: str | None = None,
     ) -> ExecutionResult:
         if resolved_model is not None:
             resolved = dict(resolved_model)
@@ -504,11 +505,26 @@ class InferenceRouterService:
                 user_id=str(user_id),
                 strategy_id=str(strategy_id) if strategy_id is not None else None,
                 model_id=model_id,
+                market=market,
             )
         effective_model_id = str(resolved.get("effective_model_id") or self.primary_model_id)
         model_source = str(resolved.get("model_source") or "")
         storage_path = str(resolved.get("storage_path") or "").strip()
         fallback_reason = str(resolved.get("fallback_reason") or "")
+
+        # 显式市场约束（HK 等）下解析不到该市场模型时失败退出，
+        # 不再落 CN 生产模型链（避免港股策略悄悄跑 A 股模型/数据）
+        if market and str(market).upper() not in ("A", "CN", ""):
+            if model_source == "none":
+                return ExecutionResult(
+                    success=False,
+                    run_id="",
+                    signals_count=0,
+                    fallback_used=False,
+                    fallback_reason=(
+                        f"market={market} 无可用模型: {fallback_reason or '未配置模型'}"
+                    ),
+                )
 
         explicit_storage_dir = storage_path if storage_path and Path(storage_path).exists() else ""
         independent_execution = (

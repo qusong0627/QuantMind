@@ -301,9 +301,9 @@ class QlibDataBuilder:
 
         logger.info("Qlib[%s] instruments: %d symbols -> %s", self._market, len(qlib_symbols), inst_file)
 
-        # 各市场股票池成分文件（仅 A 股有 UNIVERSE_MAP，其他市场跳过）
+        # 各市场股票池成分文件（hub 定义 UNIVERSE_MAP 即生成；CN 行为不变，其他市场新增 map 即生效）
         universes = getattr(self._hub, "UNIVERSE_MAP", {}) or {}
-        if self._market == "CN" and universes:
+        if universes:
             self._build_universe_instruments(inst_dir, start_date, end_date, set(qlib_symbols))
         return len(qlib_symbols)
 

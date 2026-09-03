@@ -135,6 +135,7 @@ async def _trigger_inference_after_activate(*, strategy_id: str, tenant_id: str,
             user_id=user_id,
             strategy_id=strategy_id,
             redis_client=redis,
+            market=market,
         )
         StructuredTaskLogger(
             logger,
@@ -438,6 +439,7 @@ async def list_user_strategies(
     category: str | None = Query(None),
     search: str | None = Query(None),
     tags: str | None = Query(None),
+    market: str | None = Query(None, description="按市场过滤策略列表（A/CN/HK/US...；缺省不过滤）"),
 ):
     """获取当前用户的策略列表。如果是新用户则自动初始化模板。"""
     try:
@@ -449,11 +451,14 @@ async def list_user_strategies(
         tag_list = tags.split(",") if tags else None
         tenant_id = _get_tenant_id(request)
 
-        items = await asyncio.to_thread(svc.list, user_id=user_id, category=category, search=search, tags=tag_list)
+        items = await asyncio.to_thread(
+            svc.list, user_id=user_id, category=category, search=search, tags=tag_list, market=market
+        )
 
-        if not items and not search and not tags:
+        # 港股无市场专属模板：市场过滤时跳过自动同步（避免给港股用户灌 A 股模板）
+        if not items and not search and not tags and market not in ("HK", "hk"):
             await _perform_sync(user_id)
-            items = await asyncio.to_thread(svc.list, user_id=user_id)
+            items = await asyncio.to_thread(svc.list, user_id=user_id, market=market)
 
         backtest_summaries = await _fetch_latest_backtest_summaries(user_id=user_id, tenant_id=tenant_id)
         trading_status = await _fetch_real_trading_status(request)

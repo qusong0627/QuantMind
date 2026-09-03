@@ -894,6 +894,7 @@ class InferenceScriptRunner:
             signals,
             active_model_id=self.fallback_model_id,
             data_trade_date=date,
+            market="CN",  # alpha158 兜底仅 CN 链路
         )
 
         if redis_client is not None:
@@ -1252,6 +1253,8 @@ class InferenceScriptRunner:
         )
 
         # 写库 + 发布 Redis Stream（partial=单股补推时局部覆盖，不整桶删除）
+        # universe_tag 标注市场（HK 推理 → 'HK'），老行 NULL=CN；A 股路径值 'CN' 与历史等价
+        persist_market = "CN" if model_market in ("A", "") else model_market
         self._persist_and_publish(
             run_id,
             prediction_trade_date,
@@ -1261,6 +1264,7 @@ class InferenceScriptRunner:
             active_model_id=self.primary_model_id,
             data_trade_date=date,
             partial=partial_applied,
+            market=persist_market,
         )
 
         # 写 Redis 完成标记
@@ -1521,6 +1525,7 @@ class InferenceScriptRunner:
         active_model_id: str | None = None,
         data_trade_date: str | None = None,
         partial: bool = False,
+        market: str | None = None,
     ) -> None:
         """
         将推理结果写入 engine_signal_scores 并发布到 Redis Stream。
@@ -1587,6 +1592,7 @@ class InferenceScriptRunner:
                     signal_sides=signal_sides,
                     raw_symbols=raw_symbols,
                     partial=partial,
+                    market=market,
                 )
             # 信号落库后：按当日截面算 position_score（凯利仓位建议）写回 quality JSONB。
             # 失败不影响主流程（信号已落库），仅告警。
@@ -1736,6 +1742,7 @@ class InferenceScriptRunner:
         confidence_list: list[float] | None = None,
         raw_symbols: list[str] | None = None,
         partial: bool = False,
+        market: str | None = None,
     ) -> None:
         """写库逻辑（在 _INFER_PERSIST_LOCK 保护下执行）。
 
@@ -1891,12 +1898,12 @@ class InferenceScriptRunner:
         score_sql = text("""
             INSERT INTO engine_signal_scores (
                 run_id, tenant_id, user_id, trade_date, symbol,
-                model_version, feature_version,
+                model_version, feature_version, universe_tag,
                 light_score, tft_score, fusion_score, risk_weight, regime,
                 signal_side, expected_price, quality, created_at
             ) VALUES (
                 :run_id, :tenant_id, :user_id, :trade_date, :symbol,
-                'inference_script', :feature_version,
+                'inference_script', :feature_version, :universe_tag,
                 NULL, NULL, :score, 1.0, 'normal',
                 :signal_side, :expected_price, CAST(:quality AS jsonb), NOW()
             )
@@ -1907,6 +1914,8 @@ class InferenceScriptRunner:
                 expected_price = EXCLUDED.expected_price,
                 quality = EXCLUDED.quality
         """)
+        # universe_tag 市场标注：HK/US 等非 CN 写入市场大写；A 股路径 'CN'（老行 NULL 视为 CN）
+        universe_tag = "CN" if market in (None, "", "A") else str(market).upper()
         has_consensus = consensus_list is not None and len(consensus_list) == len(symbols)
         has_zfusion = zfusion_list is not None and len(zfusion_list) == len(symbols)
         has_detail = detail_list is not None and len(detail_list) == len(symbols)
@@ -1954,6 +1963,7 @@ class InferenceScriptRunner:
                     "trade_date": prediction_trade_date,
                     "symbol": sym,
                     "feature_version": feature_version,
+                    "universe_tag": universe_tag,
                     "score": score,
                     "signal_side": signal_side,
                     "expected_price": expected_price,

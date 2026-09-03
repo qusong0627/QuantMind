@@ -37,6 +37,8 @@ class CnExchange(Exchange):
         impact_cost_coefficient: float = 0.0005,  # 市场冲击成本系数（与 Schema 默认值保持一致）
         backtest_id: str | None = None,  # 新增 backtest_id 用于关联交易记录
         allow_short_selling: bool = False,
+        has_price_limits: bool = True,  # HK/US 等无涨跌停市场传 False（防未来补 change 数据后被误拦）
+        stamp_duty_on_sell_only: bool = True,  # 港股印花按卖出单边计提简化（与模拟盘 HK_RULES 同口径）
         **kwargs,
     ):
         # Pass dummy costs to super because we will calculate our own
@@ -49,6 +51,8 @@ class CnExchange(Exchange):
         self.impact_cost_coefficient = impact_cost_coefficient
         self.backtest_id = backtest_id
         self.allow_short_selling = bool(allow_short_selling)
+        self.has_price_limits = bool(has_price_limits)
+        self.stamp_duty_on_sell_only = bool(stamp_duty_on_sell_only)
 
         # Redis client for logging trades
         self.redis_client = None
@@ -237,9 +241,9 @@ class CnExchange(Exchange):
         if stock_id.upper().startswith("SH"):
             tf = max(trade_val * self.transfer_fee, self.min_transfer_fee)
 
-        # 3. Stamp Duty (Sell only)
+        # 3. Stamp Duty（A 股仅卖出；港股简化同口径卖出单边计提）
         tax = 0.0
-        if direction == OrderDir.SELL:
+        if not self.stamp_duty_on_sell_only or direction == OrderDir.SELL:
             tax = trade_val * self.stamp_duty
 
         # 4. Market Impact Cost (Slippage)
@@ -333,6 +337,9 @@ class CnExchange(Exchange):
 
         Returns True if the stock is at price limit (NOT tradable).
         """
+        if not self.has_price_limits:
+            # 无涨跌停市场（HK/US 等）：永远可交易
+            return False
         try:
             change = self.quote.get_data(
                 stock_id, start_time, end_time, field="$change", method="ts_data_last"
