@@ -202,7 +202,7 @@ export const QlibExpertBacktest: React.FC = () => {
         strategy_params: { topk: 50, n_drop: 5 }, // 专家模式默认参数
         benchmark_symbol: benchmark,
         strategy_code: codeToRun,
-        commission: 0.00025,
+        // 费率不在此写死：后端按市场默认（A股万2.5/min5；港股万3/min3HKD+印花0.1%卖）
         qlib_provider_uri: marketConfig.qlibProviderUri,
         qlib_region: marketConfig.qlibRegion,
       };
@@ -567,7 +567,7 @@ Qlib 引擎会优先解析 STRATEGY_CONFIG 或 get_strategy_config()。
 2. 当前系统默认口径
 --------------------
 - 初始资金：专家模式 UI 默认 100 万；若走后端接口，请显式传入 initial_capital。
-- 基准指数：默认 SH000300。
+- 基准指数：默认 {currentMarket === 'HK' ? marketConfig.benchmark + '（' + marketConfig.benchmarkName + '）' : 'SH000300'}。
 - 成交价格：后端默认 close；若要降低前视偏差，建议显式切换为 open。
 - 交易参数：topk=50、n_drop=5、rebalance_days=3 是常见默认值，但前端显式输入优先。
 

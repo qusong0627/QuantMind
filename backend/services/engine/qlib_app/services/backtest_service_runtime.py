@@ -636,6 +636,18 @@ class QlibBacktestServiceRuntimeMixin(QlibBacktestServiceQueryMixin):
                     raise ValueError(
                         "向量化极速回测信号为空或缺少 score 列，无法执行。"
                     )
+                # 信号裁剪到回测区间：pred 常为全历史大表（如港股 2016→今 500 万行），
+                # 全量传入会让引擎 valid_dates 交集/ffill 极端退化（实测 0 成交 0 收益）。
+                # 已含 signal_lag 平移的日期（+1 交易日），裁剪按请求区间上界即可。
+                if "datetime" in pred_df.index.names:
+                    pred_df = pred_df[
+                        (pred_df.index.get_level_values("datetime") >= request.start_date)
+                        & (pred_df.index.get_level_values("datetime") <= request.end_date)
+                    ]
+                    if pred_df.empty:
+                        raise ValueError(
+                            "信号裁剪到回测区间后为空，请检查 pred 日期覆盖或调整回测区间。"
+                        )
                 if signal_meta.get("source") == "pred_pkl":
                     self._enforce_signal_quality(signal_meta, request=request)
 
@@ -1036,8 +1048,16 @@ class QlibBacktestServiceRuntimeMixin(QlibBacktestServiceQueryMixin):
 
     @staticmethod
     def _to_qlib_prefix_code(code: str) -> str:
-        """将股票代码转为 qlib 前缀格式（sh600000 / sz000001 / bj920000）。"""
-        s = str(code or "").strip().lower()
+        """将股票代码转为 qlib 前缀格式（sh600000 / sz000001 / bj920000 / hk_0001.HK / us_aapl）。
+
+        注意：非 CN 市场的 qlib instrument 保留原符号大小写（hk_0001.HK），
+        只有 features 目录强制小写——这里必须与 instruments 池文件的写法一致。
+        """
+        raw = str(code or "").strip()
+        # 港股后缀: 0001.HK / 1022.HK → hk_0001.HK（保留 .HK 大小写）
+        if raw.endswith((".HK", ".hk")) and raw[:-3].isdigit():
+            return "hk_" + raw
+        s = raw.lower()
         if not s:
             return s
         # 已是 qlib 小写前缀格式
@@ -1048,9 +1068,20 @@ class QlibBacktestServiceRuntimeMixin(QlibBacktestServiceQueryMixin):
             parts = s.split(".")
             if len(parts) == 2 and len(parts[0]) == 6 and parts[0].isdigit():
                 return parts[1].lower() + parts[0]
+            # 港股后缀: 0001.HK / 1022.HK → hk_0001.hk
+            if len(parts) == 2 and parts[1] == "hk" and parts[0].isdigit():
+                return "hk_" + s
+            # 美股带点后缀: BRK.B → us_brk.b
+            if len(parts) == 2 and parts[0].isalpha() and len(parts[0]) <= 6 and len(parts[1]) <= 2:
+                return "us_" + s
         # 前缀大写: SH600036 → sh600036
         if len(s) == 8 and s[:2] in {"sh", "sz", "bj"}:
             return s
+        # 美股 ticker: aapl → us_aapl（已带市场前缀的不会重复加）
+        if s.isalpha() and 1 <= len(s) <= 8 and not s.startswith(
+            ("sh", "sz", "bj", "us_", "hk_", "bc_", "fut_")
+        ):
+            return "us_" + s
         # 纯6位数字: 600036 → sh600036
         if s.isdigit() and len(s) == 6:
             if s.startswith(("6", "9")):

@@ -29,7 +29,7 @@ export interface BacktestConfig {
   start_date: string;
   end_date: string;
   initial_capital: number;
-  commission: number;
+  commission?: number; // 缺省由后端按市场默认（A股万2.5/min5；港股万3/min3HKD+印花0.1%卖）
   user_id: string;
   engine?: 'qlib';
   qlib_provider_uri?: string;

@@ -12,9 +12,11 @@ router = APIRouter()
 class CreateItemRequest(BaseModel):
     name: str
     dir: str | None = None
+    parameters: dict[str, Any] | None = None  # 市场等元数据（parameters.market 供策略库隔离）
 
 class SaveRequest(BaseModel):
     content: str
+    parameters: dict[str, Any] | None = None
 
 class SetRootRequest(BaseModel):
     path: str
@@ -35,16 +37,17 @@ async def set_root(request: Request, body: SetRootRequest):
 
 
 @router.get("/list")
-async def list_files(request: Request, path: str = ""):
+async def list_files(request: Request, path: str = "", market: str | None = None):
     """
     列出策略工作区。在云端模式下，每个策略记录对应一个文件。
+    market 过滤：切到港股时只列港股策略（CN 不传 = 现状全量）。
     """
     try:
         user_id = _get_user_id(request)
         svc = get_strategy_storage_service()
 
         # 获取用户的所有策略
-        items = svc.list(user_id=user_id)
+        items = svc.list(user_id=user_id, market=market)
 
         # 将策略项映射为 IDE 文件项
         ide_items = []
@@ -83,7 +86,12 @@ async def create_file(request: Request, item: CreateItemRequest):
             user_id=user_id,
             name=name,
             code="# New Strategy\n",
-            metadata={"status": "DRAFT", "description": "Created via Cloud IDE", "dir": item.dir or ""}
+            metadata={
+                "status": "DRAFT",
+                "description": "Created via Cloud IDE",
+                "dir": item.dir or "",
+                "parameters": item.parameters or {},
+            }
         )
         return {"status": "success", "id": res["id"]}
     except Exception as e:
@@ -162,6 +170,10 @@ async def save_content(request: Request, file_id: str, item: SaveRequest):
         if not existing:
              raise HTTPException(status_code=404, detail="Strategy not found")
 
+        merged_parameters = {
+            **(existing.get("parameters") or {}),
+            **(item.parameters or {}),
+        }
         await svc.save(
             user_id=user_id,
             strategy_id=sid,
@@ -170,7 +182,7 @@ async def save_content(request: Request, file_id: str, item: SaveRequest):
             metadata={
                 "description": existing.get("description"),
                 "tags": existing.get("tags"),
-                "parameters": existing.get("parameters"),
+                "parameters": merged_parameters,
                 "is_verified": existing.get("is_verified", False)
             }
         )

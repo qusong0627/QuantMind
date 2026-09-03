@@ -45,7 +45,10 @@ const CloudStrategyManagement: React.FC = () => {
         setLoading(true);
         try {
             // 2026-02-14 统一架构：使用 strategyManagementService 获取
-            const items = await strategyManagementService.loadStrategies();
+            const items = await strategyManagementService.loadStrategies(
+              undefined,
+              localStorage.getItem('qm:current_market') || undefined,
+            );
             
             // 转换为 UserStrategy 格式以适配表格（以当前类型定义为准：使用 name 字段）
             const mapped: UserStrategy[] = items.map((item: any) => ({

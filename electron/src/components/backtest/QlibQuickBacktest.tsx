@@ -42,6 +42,11 @@ const MARKET_UNIVERSE_PRESETS: Record<string, { label: string; value: string }[]
   ],
   HK: [
     { label: '全部港股', value: 'all' },
+    { label: '港股通成分', value: 'hsgt' },
+    { label: '港股通指数系列', value: 'hsgt_10_index' },
+    { label: '市值 Top50', value: 'val_top50' },
+    { label: '市值 Top100', value: 'val_top100' },
+    { label: '市值 Top300', value: 'val_top300' },
   ],
   US: [
     { label: '全部美股', value: 'all' },

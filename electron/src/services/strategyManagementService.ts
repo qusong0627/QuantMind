@@ -241,9 +241,11 @@ class StrategyManagementService {
   /**
    * 从个人中心加载策略列表
    */
-  async loadStrategies(_userId?: string): Promise<StrategyFile[]> {
+  async loadStrategies(_userId?: string, market?: string): Promise<StrategyFile[]> {
     try {
-      const response = await this.client.get('/api/v1/strategies');
+      const response = await this.client.get('/api/v1/strategies', {
+        params: market && market !== 'CN' ? { market } : undefined,
+      });
       const data = this.unwrapResponse<any>(response.data);
       // 后端 StrategyListResponse 格式: { total: number, strategies: [...] }
       const items = Array.isArray(data?.strategies)

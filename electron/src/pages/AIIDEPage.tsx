@@ -104,7 +104,25 @@ const AI_IDE_UNAVAILABLE_HINTS = [
 ] as const;
 
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-const AI_ASSISTANT_DEVELOPMENT_RULES = [
+
+/** AI 开发规则按市场注入（A 股规则逐字不变；港股给港股口径） */
+const getAssistantRules = (market: string): string => {
+  const cnRules = AI_ASSISTANT_DEVELOPMENT_RULES_CN;
+  if (market !== 'HK') return cnRules;
+  return [
+    '1. 使用简体中文回答，先给结论，再给步骤。',
+    '2. 涉及代码修改时，优先输出最小改动，并明确文件路径。',
+    '3. 不要直接假设上下文不足；信息不全时先提问。',
+    '4. 回答尽量简洁、可执行，避免长篇空话。',
+    '5. 默认回测时间跨度设定为近 1 年；若信号覆盖不足，系统将自动自适应截断，请知悉并提示用户。',
+    '6. 港股代码：4 位数字 + .HK（0001.HK / 0700.HK），8 开头创业板保留 5 位；QLib instrument 一律 hk_ 前缀（hk_0700.HK），池/信号对齐用带前缀名。',
+    '7. 港股制度：T+0（当日可卖，T+2 交收不影响）；无涨跌停；每手按个股 board lot（平台按 1 股简化，不要写 100 股整手）。',
+    '8. 港股费用：佣金约 0.03%（最低 3 HKD）、印花税 0.1% 卖出单边简化、无过户费；币种 HKD；默认基准 HSI。',
+    '9. 港股因子 = l1_factors + ccass_factors + south_factors；禁止套用 A 股规则（T+1/整手/涨跌停/ST/过户费）。',
+  ].join('\n');
+};
+
+const AI_ASSISTANT_DEVELOPMENT_RULES_CN = [
     '1. 使用简体中文回答，先给结论，再给步骤。',
     '2. 涉及代码修改时，优先输出最小改动，并明确文件路径。',
     '3. 不要直接假设上下文不足；信息不全时先提问。',
@@ -481,7 +499,10 @@ const AIIDEPage: React.FC = () => {
     const fetchRemoteStrategies = async () => {
         setIsLoadingRemote(true);
         try {
-            const items = await strategyManagementService.loadStrategies(userId);
+            const items = await strategyManagementService.loadStrategies(
+                userId,
+                currentMarket,
+              );
             // 适配字段映射：StrategyFile 转换为 RemoteStrategy (主要是 name 字段)
             const remoteItems: RemoteStrategy[] = items.map(item => ({
                 id: item.id,
@@ -548,7 +569,8 @@ const AIIDEPage: React.FC = () => {
     const fetchLocalFileList = async (): Promise<FileItem[]> => {
         setIsLoadingFiles(true);
         try {
-            const res = await apiFetch(`/files/list`);
+            const mktParam = currentMarket && currentMarket !== 'CN' ? `?market=${currentMarket}` : '';
+            const res = await apiFetch(`/files/list${mktParam}`);
             if (!res.ok) {
                 const err = await res.json().catch(() => ({}));
                 const errMsg = formatError(err) || `文件列表加载失败(${res.status})`;
@@ -577,7 +599,10 @@ const AIIDEPage: React.FC = () => {
             try {
                 await apiFetch(`/files/${encodeURI(selectedFile.path)}`, {
                     method: 'POST',
-                    body: JSON.stringify({ content: editorContent })
+                    body: JSON.stringify({
+                        content: editorContent,
+                        parameters: { market: currentMarket === 'CN' ? 'A' : currentMarket },
+                    })
                 }, true);
                 message.success('本地文件已保存');
                 setTimeout(() => setIsSaving(false), 500);
@@ -616,7 +641,8 @@ const AIIDEPage: React.FC = () => {
                 code: editorContent,
                 description: `Created from AI-IDE: ${selectedFile.name}`,
                 tags: ['AI-IDE', 'Local-Import'],
-                source: 'personal'
+                source: 'personal',
+                parameters: { market: currentMarket === 'CN' ? 'A' : currentMarket },
             });
             message.success({ content: '已保存到云端策略库', key: 'upload' });
         } catch (err: any) {
@@ -659,7 +685,11 @@ const AIIDEPage: React.FC = () => {
 
             const payload = createMode === 'folder'
                 ? { name: finalName, dir: currentDir || undefined }
-                : { name: finalName, dir: currentDir || undefined };
+                : {
+                    name: finalName,
+                    dir: currentDir || undefined,
+                    parameters: { market: currentMarket === 'CN' ? 'A' : currentMarket },
+                  };
 
             const res = await apiFetch(createPath, {
                 method: 'POST',
@@ -1304,7 +1334,7 @@ const AIIDEPage: React.FC = () => {
                     history: history,
                     role: assistantRole,
                     extra_context: {
-                        assistant_rules: AI_ASSISTANT_DEVELOPMENT_RULES,
+                        assistant_rules: getAssistantRules(currentMarket),
                         assistant_mode: 'strict',
                         market: currentMarket,
                         market_name: marketConfig.label,

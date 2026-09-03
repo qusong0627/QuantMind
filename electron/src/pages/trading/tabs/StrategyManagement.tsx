@@ -283,7 +283,10 @@ const StrategyManagement: React.FC<StrategyManagementProps> = ({
         setLoading(true);
         setError(null);
         try {
-            const list = await strategyManagementService.loadStrategies(userId);
+            const list = await strategyManagementService.loadStrategies(
+              userId,
+              currentMarket,
+            );
             setStrategies(list);
         } catch (e) {
             console.error("Failed to load strategies", e);

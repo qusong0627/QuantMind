@@ -164,3 +164,24 @@ def test_cn_exchange_stamp_both_sides_when_sell_only_disabled():
     assert abs((cost_sell - cost_buy) - 100_000.0 * 0.001) < 1.0
     # 港股无 SH 过户费
     assert cost_buy < 100_000.0 * 0.00031
+
+# ---- Qlib 代码对齐（HK 信号→池文件 instrument） ----
+
+def test_to_qlib_prefix_code_hk_and_us():
+    """pred 信号代码 → qlib 池文件形态（港股保留 .HK 大小写，与 instruments 一致）。"""
+    qlib = pytest.importorskip("qlib")
+    import importlib
+
+    rt = importlib.import_module(
+        "backend.services.engine.qlib_app.services.backtest_service_runtime"
+    )
+    M = rt.QlibBacktestServiceRuntimeMixin
+    assert M._to_qlib_prefix_code("0001.HK") == "hk_0001.HK"
+    assert M._to_qlib_prefix_code("0700.HK") == "hk_0700.HK"
+    assert M._to_qlib_prefix_code("hk_0001.HK") == "hk_0001.HK"  # 已带前缀短路
+    assert M._to_qlib_prefix_code("600036.SH") == "sh600036"  # A 股不变
+    assert M._to_qlib_prefix_code("000300.SH") == "sh000300"
+    assert M._to_qlib_prefix_code("SH600036") == "sh600036"
+    assert M._to_qlib_prefix_code("600036") == "sh600036"
+    assert M._to_qlib_prefix_code("AAPL") == "us_aapl"
+    assert M._to_qlib_prefix_code("us_aapl") == "us_aapl"

@@ -72,7 +72,10 @@ export const StrategyManagementModule: React.FC = () => {
     const loadStrategies = async () => {
         setLoading(true);
         try {
-            const items = await strategyManagementService.loadStrategies();
+            const items = await strategyManagementService.loadStrategies(
+              undefined,
+              localStorage.getItem('qm:current_market') || undefined,
+            );
             const mapped: Strategy[] = items.map((item: any) => ({
                 id: item.id,
                 name: item.name,

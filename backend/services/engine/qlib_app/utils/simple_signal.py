@@ -339,6 +339,14 @@ class SimpleSignal(Signal):
                         return "BJ" + code_str
                 return code_str
 
+            def to_hk_qlib_code(code: str) -> str:
+                """港股后缀: 0700.HK → hk_0700.HK（qlib instruments 为小写前缀 + 原后缀大小写）。"""
+                c = str(code or "").strip()
+                up = c.upper()
+                if up.endswith(".HK") and up[:-3].isdigit():
+                    return "hk_" + up
+                return c
+
             # 尝试各种转换策略，选重叠率最高的
             candidates = [
                 ("raw", lambda s: str(s)),
@@ -346,6 +354,7 @@ class SimpleSignal(Signal):
                 ("upper", lambda s: str(s).upper()),
                 ("qlib_upper", to_qlib_code),
                 ("qlib_lower", lambda s: to_qlib_code(s).lower()),
+                ("hk_qlib", to_hk_qlib_code),
             ]
 
             best_name = "raw"

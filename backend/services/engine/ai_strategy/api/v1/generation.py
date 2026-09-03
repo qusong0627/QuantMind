@@ -213,11 +213,19 @@ async def _generate_qlib_impl(body: GenerateQlibRequest, trace_id: str | None) -
                 out["children"] = deduped
             return out
 
-        def _persist_local_pool_file(pool_text: str, user_id: str) -> str:
-            """保存股票池到本地文件"""
+        def _persist_local_pool_file(pool_text: str, user_id: str, market: str | None = None) -> str:
+            """保存股票池到本地文件。
+
+            HK：写到 HK qlib 缓存 instruments/（应用容器与 AI-IDE 子容器都能读到，
+            user_pools_local 不在子容器挂载内），内容转 Qlib instrument 行格式
+            （hk_0001.HK\tstart\tend）；其余市场保持现状。
+            """
             content = str(pool_text or "")
             if not content.strip():
                 return ""
+
+            if str(market or "").upper() == "HK":
+                return _persist_hk_pool_file(content, user_id)
 
             local_root = Path(os.getenv("AI_STRATEGY_LOCAL_POOL_ROOT", "/app/user_pools_local"))
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -227,6 +235,35 @@ async def _generate_qlib_impl(body: GenerateQlibRequest, trace_id: str | None) -
             local_path.parent.mkdir(parents=True, exist_ok=True)
             local_path.write_text(content, encoding="utf-8")
             return str(local_path)
+
+        def _persist_hk_pool_file(pool_text: str, user_id: str) -> str:
+            """港股池 → {hk_cache}/instruments/user_{uid}_{ts}.txt（QLib instrument 行）。"""
+            from backend.shared.stock_utils import StockCodeUtil
+
+            hk_root = Path(
+                os.getenv("QM_QUANTHK_DATA_DIR", "/data/quanthk")
+            ) / ".qlib_cache" / "hk_data"
+            inst_dir = hk_root / "instruments"
+            inst_dir.mkdir(parents=True, exist_ok=True)
+            # 起止边界与 all.txt 首行一致（同源日历）
+            start_date, end_date = "1980-01-02", "2026-12-31"
+            try:
+                header = (inst_dir / "all.txt").read_text(encoding="utf-8").splitlines()[0].split("\t")
+                if len(header) >= 3:
+                    start_date, end_date = header[1], header[2]
+            except Exception:  # noqa: BLE001 - 边界缺失按保守值
+                pass
+            lines = []
+            for sym in pool_text.splitlines():
+                s = sym.strip()
+                if not s:
+                    continue
+                hk_sym = s if s.endswith(".HK") else StockCodeUtil.to_hk_suffix(s)
+                lines.append(f"hk_{hk_sym}\t{start_date}\t{end_date}")
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            fname = f"user_{str(user_id or 'default')}_{ts}.txt"
+            (inst_dir / fname).write_text("\n".join(lines) + "\n", encoding="utf-8")
+            return str(inst_dir / fname)
 
         qp = body.qlib_params or {}
         strategy_type = qp.get("strategy_type", "TopkDropout")
@@ -314,7 +351,11 @@ async def _generate_qlib_impl(body: GenerateQlibRequest, trace_id: str | None) -
                 logger.warning("Failed to read pool from COS: %s", e)
 
         # 保存股票池到本地
-        pool_file_local = _persist_local_pool_file(pool_content, body.user_id) if pool_content.strip() else ""
+        pool_file_local = (
+            _persist_local_pool_file(pool_content, body.user_id, market=body.market)
+            if pool_content.strip()
+            else ""
+        )
 
         if strategy_type == "long_short_topk":
             strategy_class = "RedisLongShortTopkStrategy"
