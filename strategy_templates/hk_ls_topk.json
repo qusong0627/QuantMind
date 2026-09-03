@@ -1,0 +1,46 @@
+{
+  "id": "hk_ls_topk",
+  "name": "港股多空对冲",
+  "description": "做多最高分 Top-K 同时做空最低分 Top-K，弱市中性化，波动敞口更低（适合港股期权/两融账户）。",
+  "category": "advanced",
+  "difficulty": "advanced",
+  "params": [
+    {
+      "name": "topk",
+      "description": "多头标的数",
+      "default": 50,
+      "min": 10,
+      "max": 200
+    },
+    {
+      "name": "short_topk",
+      "description": "空头标的数",
+      "default": 50,
+      "min": 10,
+      "max": 200
+    },
+    {
+      "name": "rebalance_days",
+      "description": "调仓周期",
+      "default": 5,
+      "min": 1,
+      "max": 20
+    }
+  ],
+  "execution_defaults": {},
+  "live_defaults": {
+    "rebalance_days": 5,
+    "enabled_sessions": [
+      "PM"
+    ],
+    "sell_time": "15:50",
+    "buy_time": "15:58",
+    "sell_first": true
+  },
+  "live_config_tips": [
+    "港股多空对冲：港股调仓建议放在尾盘（15:50 后），避开午间波动的交易时段。"
+  ],
+  "markets": [
+    "hong_kong"
+  ]
+}

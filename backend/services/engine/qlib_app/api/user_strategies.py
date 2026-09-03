@@ -325,6 +325,12 @@ async def _perform_sync(user_id: str):
         if any(s["name"] == t.name for s in existing):
             continue
 
+        params = {"strategy_type": t.id, "topk": 50, "signal": "<PRED>"}
+        # 市场专属模板（strategy_templates/*.json markets 字段）标注市场，
+        # 港股模板写 market=HK 供策略库按市场过滤；A 股（markets 为空）不写 = 现状
+        if t.markets and "hong_kong" in t.markets and "a_share" not in t.markets:
+            params["market"] = "HK"
+
         await svc.save(
             user_id=user_id,
             name=t.name,
@@ -334,7 +340,7 @@ async def _perform_sync(user_id: str):
                 "tags": [t.category, t.difficulty, "SystemSync"],
                 "status": "ACTIVE",
                 "is_verified": True,
-                "parameters": {"strategy_type": t.id, "topk": 50, "signal": "<PRED>"},
+                "parameters": params,
             },
         )
         synced_count += 1

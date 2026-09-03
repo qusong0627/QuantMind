@@ -1,0 +1,39 @@
+{
+  "id": "hk_alpha_weighted",
+  "name": "港股 Alpha 加权",
+  "description": "按模型预测分比例分配资金权重、分高者重仓的旗舰策略，捕捉港股截面 Alpha。",
+  "category": "advanced",
+  "difficulty": "intermediate",
+  "params": [
+    {
+      "name": "topk",
+      "description": "参与权重标的数",
+      "default": 50,
+      "min": 10,
+      "max": 200
+    },
+    {
+      "name": "max_weight",
+      "description": "单票持仓上限",
+      "default": 0.04,
+      "min": 0.01,
+      "max": 0.2
+    }
+  ],
+  "execution_defaults": {},
+  "live_defaults": {
+    "rebalance_days": 3,
+    "enabled_sessions": [
+      "PM"
+    ],
+    "sell_time": "15:50",
+    "buy_time": "15:58",
+    "sell_first": true
+  },
+  "live_config_tips": [
+    "港股 Alpha 加权：港股调仓建议放在尾盘（15:50 后），避开午间波动的交易时段。"
+  ],
+  "markets": [
+    "hong_kong"
+  ]
+}

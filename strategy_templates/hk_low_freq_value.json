@@ -1,0 +1,39 @@
+{
+  "id": "hk_low_freq_value",
+  "name": "港股月频价值",
+  "description": "月频调仓 + 分数加权的低频价值路线：减少无效换手与费用侵蚀，适合长线资金。",
+  "category": "basic",
+  "difficulty": "intermediate",
+  "params": [
+    {
+      "name": "topk",
+      "description": "参与权重标的数",
+      "default": 40,
+      "min": 10,
+      "max": 100
+    },
+    {
+      "name": "rebalance_days",
+      "description": "调仓周期（交易日，约月度）",
+      "default": 20,
+      "min": 10,
+      "max": 60
+    }
+  ],
+  "execution_defaults": {},
+  "live_defaults": {
+    "rebalance_days": 20,
+    "enabled_sessions": [
+      "PM"
+    ],
+    "sell_time": "15:50",
+    "buy_time": "15:58",
+    "sell_first": true
+  },
+  "live_config_tips": [
+    "港股月频价值：港股调仓建议放在尾盘（15:50 后），避开午间波动的交易时段。"
+  ],
+  "markets": [
+    "hong_kong"
+  ]
+}

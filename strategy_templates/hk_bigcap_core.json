@@ -1,0 +1,39 @@
+{
+  "id": "hk_bigcap_core",
+  "name": "恒指核心持仓",
+  "description": "高集中度蓝筹路线：Top 15 等权核心持仓，低换手长持，跟踪港股大盘超额。",
+  "category": "basic",
+  "difficulty": "beginner",
+  "params": [
+    {
+      "name": "topk",
+      "description": "持仓股票总数",
+      "default": 15,
+      "min": 5,
+      "max": 30
+    },
+    {
+      "name": "rebalance_days",
+      "description": "调仓周期",
+      "default": 5,
+      "min": 1,
+      "max": 20
+    }
+  ],
+  "execution_defaults": {},
+  "live_defaults": {
+    "rebalance_days": 5,
+    "enabled_sessions": [
+      "PM"
+    ],
+    "sell_time": "15:50",
+    "buy_time": "15:58",
+    "sell_first": true
+  },
+  "live_config_tips": [
+    "恒指核心持仓：港股调仓建议放在尾盘（15:50 后），避开午间波动的交易时段。"
+  ],
+  "markets": [
+    "hong_kong"
+  ]
+}

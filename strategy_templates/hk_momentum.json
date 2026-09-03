@@ -1,0 +1,46 @@
+{
+  "id": "hk_momentum",
+  "name": "港股动量先锋",
+  "description": "融合模型预测与 20 日动量加权的港股趋势策略，顺势而为，吃趋势主升段。",
+  "category": "advanced",
+  "difficulty": "intermediate",
+  "params": [
+    {
+      "name": "topk",
+      "description": "持仓股票总数",
+      "default": 30,
+      "min": 5,
+      "max": 100
+    },
+    {
+      "name": "momentum_period",
+      "description": "动量回看天数",
+      "default": 20,
+      "min": 5,
+      "max": 60
+    },
+    {
+      "name": "momentum_weight",
+      "description": "动量因子权重",
+      "default": 0.3,
+      "min": 0.0,
+      "max": 0.6
+    }
+  ],
+  "execution_defaults": {},
+  "live_defaults": {
+    "rebalance_days": 3,
+    "enabled_sessions": [
+      "PM"
+    ],
+    "sell_time": "15:50",
+    "buy_time": "15:58",
+    "sell_first": true
+  },
+  "live_config_tips": [
+    "港股动量先锋：港股调仓建议放在尾盘（15:50 后），避开午间波动的交易时段。"
+  ],
+  "markets": [
+    "hong_kong"
+  ]
+}

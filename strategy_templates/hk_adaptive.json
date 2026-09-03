@@ -1,0 +1,37 @@
+{
+  "id": "hk_adaptive",
+  "name": "港股自适应调仓",
+  "description": "集成环境建模自动识别港股牛熊阶段，动态调整选股宽度与仓位，应对风格漂移与系统性回撤。",
+  "category": "advanced",
+  "difficulty": "advanced",
+  "params": [
+    {
+      "name": "topk",
+      "description": "基准选股数量",
+      "default": 50,
+      "min": 10,
+      "max": 100
+    },
+    {
+      "name": "dynamic_position",
+      "description": "开启环境自适应仓位",
+      "default": "True"
+    }
+  ],
+  "execution_defaults": {},
+  "live_defaults": {
+    "rebalance_days": 3,
+    "enabled_sessions": [
+      "PM"
+    ],
+    "sell_time": "15:50",
+    "buy_time": "15:58",
+    "sell_first": true
+  },
+  "live_config_tips": [
+    "港股自适应调仓：港股调仓建议放在尾盘（15:50 后），避开午间波动的交易时段。"
+  ],
+  "markets": [
+    "hong_kong"
+  ]
+}

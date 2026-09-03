@@ -1,0 +1,39 @@
+{
+  "id": "hk_dts",
+  "name": "港股深度时序增强",
+  "description": "面向 GRU/LSTM 深度时序模型的港股策略形态，信号平滑、长周期持仓，适合模型分数驱动的趋势段。",
+  "category": "advanced",
+  "difficulty": "intermediate",
+  "params": [
+    {
+      "name": "topk",
+      "description": "持仓股票总数",
+      "default": 30,
+      "min": 5,
+      "max": 100
+    },
+    {
+      "name": "rebalance_days",
+      "description": "调仓周期",
+      "default": 5,
+      "min": 1,
+      "max": 20
+    }
+  ],
+  "execution_defaults": {},
+  "live_defaults": {
+    "rebalance_days": 5,
+    "enabled_sessions": [
+      "PM"
+    ],
+    "sell_time": "15:50",
+    "buy_time": "15:58",
+    "sell_first": true
+  },
+  "live_config_tips": [
+    "港股深度时序增强：港股调仓建议放在尾盘（15:50 后），避开午间波动的交易时段。"
+  ],
+  "markets": [
+    "hong_kong"
+  ]
+}

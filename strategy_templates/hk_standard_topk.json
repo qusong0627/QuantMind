@@ -1,0 +1,40 @@
+{
+  "id": "hk_standard_topk",
+  "name": "港股精选 Top-K",
+  "description": "最经典的港股量化选股逻辑：每日截面排名精选 Top-K 等权持仓，覆盖蓝筹与新经济龙头，低换手稳健。",
+  "category": "basic",
+  "difficulty": "beginner",
+  "params": [
+    {
+      "name": "topk",
+      "description": "持仓股票总数",
+      "default": 40,
+      "min": 5,
+      "max": 100
+    },
+    {
+      "name": "rebalance_days",
+      "description": "调仓周期（交易日）",
+      "default": 3,
+      "min": 1,
+      "max": 20
+    }
+  ],
+  "execution_defaults": {},
+  "live_defaults": {
+    "rebalance_days": 3,
+    "enabled_sessions": [
+      "PM"
+    ],
+    "sell_time": "15:50",
+    "buy_time": "15:58",
+    "sell_first": true,
+    "order_type": "LIMIT"
+  },
+  "live_config_tips": [
+    "港股精选 Top-K：港股调仓建议放在尾盘（15:50 后），避开午间波动的交易时段。"
+  ],
+  "markets": [
+    "hong_kong"
+  ]
+}

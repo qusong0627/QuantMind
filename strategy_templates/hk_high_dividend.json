@@ -1,0 +1,39 @@
+{
+  "id": "hk_high_dividend",
+  "name": "港股高股息收息",
+  "description": "聚焦高分预测 + 低换手的高股息防御路线：Top-K 少而精、长周期持有，弱市抗跌、吃息分红。",
+  "category": "basic",
+  "difficulty": "beginner",
+  "params": [
+    {
+      "name": "topk",
+      "description": "持仓股票总数",
+      "default": 20,
+      "min": 5,
+      "max": 50
+    },
+    {
+      "name": "rebalance_days",
+      "description": "调仓周期（交易日，建议 ≥10）",
+      "default": 10,
+      "min": 3,
+      "max": 40
+    }
+  ],
+  "execution_defaults": {},
+  "live_defaults": {
+    "rebalance_days": 10,
+    "enabled_sessions": [
+      "PM"
+    ],
+    "sell_time": "15:50",
+    "buy_time": "15:58",
+    "sell_first": true
+  },
+  "live_config_tips": [
+    "港股高股息收息：港股调仓建议放在尾盘（15:50 后），避开午间波动的交易时段。"
+  ],
+  "markets": [
+    "hong_kong"
+  ]
+}

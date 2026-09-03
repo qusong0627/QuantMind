@@ -1,0 +1,39 @@
+{
+  "id": "hk_score_weighted",
+  "name": "港股得分加权",
+  "description": "权重 = 分数 / 总分且单票封顶的均衡加权策略，分散度更高，适合稳健配置。",
+  "category": "basic",
+  "difficulty": "beginner",
+  "params": [
+    {
+      "name": "topk",
+      "description": "参与权重标的数",
+      "default": 30,
+      "min": 5,
+      "max": 100
+    },
+    {
+      "name": "max_weight",
+      "description": "单票持仓上限",
+      "default": 0.06,
+      "min": 0.01,
+      "max": 0.2
+    }
+  ],
+  "execution_defaults": {},
+  "live_defaults": {
+    "rebalance_days": 5,
+    "enabled_sessions": [
+      "PM"
+    ],
+    "sell_time": "15:50",
+    "buy_time": "15:58",
+    "sell_first": true
+  },
+  "live_config_tips": [
+    "港股得分加权：港股调仓建议放在尾盘（15:50 后），避开午间波动的交易时段。"
+  ],
+  "markets": [
+    "hong_kong"
+  ]
+}

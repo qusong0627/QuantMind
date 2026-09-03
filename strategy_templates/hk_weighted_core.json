@@ -1,0 +1,39 @@
+{
+  "id": "hk_weighted_core",
+  "name": "港股核心加权",
+  "description": "中等集中度的分数加权策略：Top 25 单票上限 8%，在分散与弹性间取平衡。",
+  "category": "basic",
+  "difficulty": "beginner",
+  "params": [
+    {
+      "name": "topk",
+      "description": "参与权重标的数",
+      "default": 25,
+      "min": 5,
+      "max": 60
+    },
+    {
+      "name": "max_weight",
+      "description": "单票持仓上限",
+      "default": 0.08,
+      "min": 0.02,
+      "max": 0.2
+    }
+  ],
+  "execution_defaults": {},
+  "live_defaults": {
+    "rebalance_days": 5,
+    "enabled_sessions": [
+      "PM"
+    ],
+    "sell_time": "15:50",
+    "buy_time": "15:58",
+    "sell_first": true
+  },
+  "live_config_tips": [
+    "港股核心加权：港股调仓建议放在尾盘（15:50 后），避开午间波动的交易时段。"
+  ],
+  "markets": [
+    "hong_kong"
+  ]
+}

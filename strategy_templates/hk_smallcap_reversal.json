@@ -1,0 +1,40 @@
+{
+  "id": "hk_smallcap_reversal",
+  "name": "港股中小盘轮动",
+  "description": "宽池高频轮动：Top 60 中小盘等权、2 日调仓，捕捉港股中小市值与题材轮动的高弹性。",
+  "category": "advanced",
+  "difficulty": "advanced",
+  "params": [
+    {
+      "name": "topk",
+      "description": "持仓股票总数",
+      "default": 60,
+      "min": 20,
+      "max": 200
+    },
+    {
+      "name": "rebalance_days",
+      "description": "调仓周期",
+      "default": 2,
+      "min": 1,
+      "max": 5
+    }
+  ],
+  "execution_defaults": {},
+  "live_defaults": {
+    "rebalance_days": 2,
+    "enabled_sessions": [
+      "AM",
+      "PM"
+    ],
+    "sell_time": "15:50",
+    "buy_time": "15:58",
+    "sell_first": true
+  },
+  "live_config_tips": [
+    "港股中小盘轮动：港股调仓建议放在尾盘（15:50 后），避开午间波动的交易时段。"
+  ],
+  "markets": [
+    "hong_kong"
+  ]
+}

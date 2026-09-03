@@ -1,0 +1,46 @@
+{
+  "id": "hk_stop_loss",
+  "name": "港股止损止盈",
+  "description": "在港股精选 Top-K 上叠加硬性止损/止盈：浮亏 -12% 或浮盈 +25% 即强制平仓，守住利润与本金。",
+  "category": "basic",
+  "difficulty": "beginner",
+  "params": [
+    {
+      "name": "topk",
+      "description": "持仓股票总数",
+      "default": 30,
+      "min": 5,
+      "max": 100
+    },
+    {
+      "name": "stop_loss",
+      "description": "止损阈值(负)",
+      "default": -0.12,
+      "min": -0.3,
+      "max": -0.01
+    },
+    {
+      "name": "take_profit",
+      "description": "止盈阈值(正)",
+      "default": 0.25,
+      "min": 0.05,
+      "max": 0.5
+    }
+  ],
+  "execution_defaults": {},
+  "live_defaults": {
+    "rebalance_days": 3,
+    "enabled_sessions": [
+      "PM"
+    ],
+    "sell_time": "15:50",
+    "buy_time": "15:58",
+    "sell_first": true
+  },
+  "live_config_tips": [
+    "港股止损止盈：港股调仓建议放在尾盘（15:50 后），避开午间波动的交易时段。"
+  ],
+  "markets": [
+    "hong_kong"
+  ]
+}
