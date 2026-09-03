@@ -1649,6 +1649,14 @@ class InferenceScriptRunner:
             # === 推送到通达信 (Top N 选股: 板块 + 预警 + 消息) ===
             if os.getenv("ENABLE_TDX_PUSH", "").strip().lower() == "true":
                 try:
+                    # A 股专属推送：HK/US 等市场信号不推通达信（读取侧已有 CN 门，源头再挡一次）
+                    if market and str(market).upper() not in ("A", "CN", ""):
+                        logger.info(
+                            "[InferenceScriptRunner] 非 A 股市场跳过 TDX 选股推送 market=%s run=%s",
+                            market,
+                            run_id,
+                        )
+                        return
                     import asyncio
 
                     from backend.services.live_trading.services.tdx_signal_push_service import (
