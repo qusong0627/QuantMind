@@ -19,6 +19,11 @@ import type {
   HkSouthOverview,
   HkSouthSectorItem,
   HkValuationRanking,
+  InstitutionalMovers,
+  InstitutionalOverview,
+  InstitutionalParticipants,
+  InstitutionalStockDetail,
+  InstitutionalSuggestItem,
 } from '../types';
 
 const HK_API = `${SERVICE_ENDPOINTS.USER_SERVICE}/market-analysis-hk`;
@@ -115,5 +120,43 @@ export function getProfitLeaders(limit = 10): Promise<HkProfitLeaders> {
 export function refreshMarket(): Promise<{ status: string; trade_date: string; message: string }> {
   return fetch(`${HK_API}/refresh`, { method: 'POST', headers: authHeaders() }).then((res) =>
     res.json(),
+  );
+}
+// ---- 机构持仓分析 ----
+
+export function getInstitutionalOverview(): Promise<InstitutionalOverview> {
+  return getJson<InstitutionalOverview>('/institutional/overview');
+}
+
+export function getInstitutionalMovers(
+  category: string,
+  window: number,
+  direction: 'increase' | 'decrease',
+  limit = 20,
+): Promise<InstitutionalMovers> {
+  return getJson<InstitutionalMovers>(
+    `/institutional/movers?category=${encodeURIComponent(category)}&window=${window}&direction=${direction}&limit=${limit}`,
+  );
+}
+
+export function getInstitutionalStock(symbol: string): Promise<InstitutionalStockDetail> {
+  return getJson<InstitutionalStockDetail>(
+    `/institutional/stock?symbol=${encodeURIComponent(symbol)}`,
+  );
+}
+
+export function getInstitutionalSuggest(q: string, limit = 10): Promise<InstitutionalSuggestItem[]> {
+  return getJson<InstitutionalSuggestItem[]>(
+    `/institutional/stocks/suggest?q=${encodeURIComponent(q)}&limit=${limit}`,
+  );
+}
+
+export function getInstitutionalParticipants(
+  category = 'all',
+  q = '',
+  limit = 50,
+): Promise<InstitutionalParticipants> {
+  return getJson<InstitutionalParticipants>(
+    `/institutional/participants?category=${encodeURIComponent(category)}&q=${encodeURIComponent(q)}&limit=${limit}`,
   );
 }

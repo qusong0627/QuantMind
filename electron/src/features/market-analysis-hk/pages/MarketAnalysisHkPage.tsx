@@ -6,7 +6,7 @@
 
 import React, { useCallback, useEffect, useState } from 'react';
 import {
-  Sparkles, Clock, RefreshCw, Zap, Activity, Waves, Building2, Coins, Layers, Landmark,
+  Sparkles, Clock, RefreshCw, Zap, Activity, Waves, Building2, Coins, Layers, Landmark, Briefcase,
 } from 'lucide-react';
 import { message } from 'antd';
 import { ShenwanHeatmapChart, ShenwanSectorItem } from '../../market-analysis/components/ShenwanHeatmapChart';
@@ -21,6 +21,7 @@ import { HkDividendCalendarPanel } from '../components/HkDividendCalendarPanel';
 import { HkRotationPanel } from '../components/HkRotationPanel';
 import { HkSectorValuationPanel } from '../components/HkSectorValuationPanel';
 import { HkAhPanel } from '../components/HkAhPanel';
+import { HkInstitutionalPanel } from '../components/HkInstitutionalPanel';
 import {
   getBreadth, getHeatmap, getIndicesOverview, getStatus, refreshMarket,
 } from '../services/api';
@@ -32,6 +33,7 @@ const NAV_TABS = [
   { id: 'south', label: '南向资金', icon: Waves },
   { id: 'valuation', label: '估值主题', icon: Coins },
   { id: 'rotation', label: '轮动 & AH', icon: Layers },
+  { id: 'institutional', label: '机构持仓', icon: Briefcase },
 ];
 
 export const MarketAnalysisHkPage: React.FC = () => {
@@ -218,6 +220,7 @@ export const MarketAnalysisHkPage: React.FC = () => {
           </div>
         </div>
       )}
+      {activeTab === 'institutional' && <HkInstitutionalPanel />}
     </div>
   );
 };

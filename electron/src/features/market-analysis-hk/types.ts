@@ -221,3 +221,123 @@ export interface HkFeedStatus {
   industry_count: number;
   south_files: number;
 }
+/** 机构持仓分析 —— 资金属性分类（内资 / 港资 / 外资·欧美 / 外资·亚太） */
+
+export type InstitutionalCategoryId =
+  | 'cn_broker'
+  | 'southbound'
+  | 'hk'
+  | 'us_eu'
+  | 'apac'
+  | 'other';
+
+export type InstitutionalKind = 'settlement' | 'broker' | 'custodian' | 'other';
+
+export interface InstitutionalCategoryStat {
+  category: InstitutionalCategoryId;
+  label: string;
+  kind: InstitutionalKind;
+  holding_qty: number;
+  value_yi: number; // 估算持仓市值（亿）
+  pct_of_disclosed: number; // 占全部披露席位市值 %
+  d1_qty: number; // 1 日持仓量变化
+  d1_yi: number; // 1 日市值变化（亿）
+}
+
+export interface InstitutionalOverview {
+  trade_date: string;
+  south_date: string;
+  stock_count: number;
+  disclosed_value_yi: number;
+  categories: InstitutionalCategoryStat[];
+  change_stats: { window: number; increased: number; decreased: number };
+  hkscc_nominees: { value_yi: number; noted: boolean };
+}
+
+export interface InstitutionalMoverItem {
+  symbol: string;
+  name: string;
+  price: number | null;
+  hold_yi: number;
+  hold_pct: number;
+  delta_qty: number;
+  delta_yi: number;
+  delta_pct_abs: number;
+  first_seen: boolean; // 基期不在前 50 席位（新进）
+}
+
+export interface InstitutionalMovers {
+  trade_date: string;
+  base_date: string;
+  window: number;
+  category: string;
+  direction: 'increase' | 'decrease';
+  items: InstitutionalMoverItem[];
+}
+
+export interface InstitutionalDelta {
+  window: number;
+  delta_qty: number;
+  delta_yi: number;
+  delta_pct_abs: number;
+}
+
+export interface InstitutionalStockCategory {
+  category: InstitutionalCategoryId;
+  label: string;
+  kind: InstitutionalKind;
+  holding_qty: number;
+  value_yi: number;
+  pct_of_total: number;
+  deltas: InstitutionalDelta[];
+}
+
+export interface InstitutionalParticipant {
+  participant_id: string | null;
+  participant_name: string;
+  category: string;
+  kind: string;
+  holding_quantity: number;
+  holding_pct: number | null;
+  delta_5d_qty: number;
+  delta_20d_qty: number;
+  delta_60d_qty: number;
+}
+
+export interface InstitutionalTrendSeries {
+  category: string;
+  label: string;
+  values: number[];
+}
+
+export interface InstitutionalStockDetail {
+  symbol: string;
+  name: string;
+  trade_date: string;
+  south_pct: number | null;
+  price: number | null;
+  disclosed_pct: number;
+  categories: InstitutionalStockCategory[];
+  participants: InstitutionalParticipant[];
+  trend: { dates: string[]; series: InstitutionalTrendSeries[] };
+}
+
+export interface InstitutionalParticipantItem {
+  participant_id: string;
+  participant_name: string;
+  category: string;
+  kind: string;
+  hold_yi: number;
+  stocks: number;
+}
+
+export interface InstitutionalParticipants {
+  trade_date: string;
+  total: number;
+  items: InstitutionalParticipantItem[];
+}
+
+export interface InstitutionalSuggestItem {
+  symbol: string;
+  name: string;
+}

@@ -267,6 +267,85 @@ async def get_profit_leaders(
         raise _fatal(exc) from exc
 
 
+# ---- 机构持仓分析 ----
+
+_INST_CATEGORIES = "^(all|cn_broker|southbound|hk|us_eu|apac|other)$"
+
+
+@router.get("/institutional/overview")
+async def get_institutional_overview(
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    """市场机构持仓结构：按资金属性分类的持仓市值 / 占比 / 5 日增减持家数。"""
+    _ = current_user
+    try:
+        return await asyncio.to_thread(feed.get_institutional_overview)
+    except Exception as exc:
+        raise _fatal(exc) from exc
+
+
+@router.get("/institutional/movers")
+async def get_institutional_movers(
+    category: str = Query(default="all", pattern=_INST_CATEGORIES),
+    window: int = Query(default=5, ge=1, le=60),
+    direction: str = Query(default="increase", pattern="^(increase|decrease)$"),
+    limit: int = Query(default=20, ge=5, le=50),
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    """机构增减持榜：窗口间某资金属性分类净增/净减的股票排行。"""
+    _ = current_user
+    try:
+        return await asyncio.to_thread(
+            feed.get_institutional_movers, category, window, direction, limit
+        )
+    except Exception as exc:
+        raise _fatal(exc) from exc
+
+
+@router.get("/institutional/stock")
+async def get_institutional_stock(
+    symbol: str = Query(..., description="个股代码，如 0700.HK 或 0700"),
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    """个股机构持仓：分类结构 + 参与者明细 + 南向口径 + 60 日分类持仓趋势。"""
+    _ = current_user
+    try:
+        return await asyncio.to_thread(feed.get_institutional_stock, symbol)
+    except Exception as exc:
+        raise _fatal(exc) from exc
+
+
+@router.get("/institutional/stocks/suggest")
+async def get_institutional_stock_suggest(
+    q: str = Query(..., min_length=1, max_length=30),
+    limit: int = Query(default=10, ge=1, le=20),
+    current_user: dict = Depends(get_current_user),
+) -> list[dict]:
+    """个股搜索建议（symbol 前缀 / 中英文名，简繁双字形）。"""
+    _ = current_user
+    try:
+        return await asyncio.to_thread(feed.get_institutional_stock_suggest, q, limit)
+    except Exception as exc:
+        raise _fatal(exc) from exc
+
+
+@router.get("/institutional/participants")
+async def get_institutional_participants(
+    category: str = Query(default="all", pattern=_INST_CATEGORIES),
+    q: str = Query(default="", max_length=60),
+    limit: int = Query(default=50, ge=5, le=200),
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    """参与者分类审计：席位/名称 → 分类/性质/最新日持仓，支持分类与关键词过滤。"""
+    _ = current_user
+    try:
+        return await asyncio.to_thread(
+            feed.get_institutional_participants, category, q, limit
+        )
+    except Exception as exc:
+        raise _fatal(exc) from exc
+
+
 # ---- 手动刷新 ----
 
 

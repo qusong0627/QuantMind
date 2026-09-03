@@ -24,6 +24,14 @@ from collections.abc import Iterable
 import duckdb
 import pandas as pd
 
+from backend.services.api.market_analysis_hk.institutional_classifier import (
+    CATEGORY_HKSCC,
+    CATEGORY_ORDER,
+    CATEGORY_SOUTHBOUND,
+    category_label,
+    classify,
+    load_overrides,
+)
 from backend.services.api.market_analysis_shared.caching import cached, clear_cache
 from backend.services.api.market_analysis_shared.display import fmt_yi, pct, safe_float
 from backend.services.api.market_analysis_shared.market_days import (
@@ -1323,3 +1331,634 @@ def feed_status() -> dict[str, Any]:
         "industry_count": len(_industry_map()),
         "south_files": len(_south_file_list()),
     }
+
+
+# ---- 7. 机构持仓分析（CCASS 席位 × 资金属性分类） ----
+#
+# 口径（与 institutional_classifier 配套，均基于 ccass_top50 单源）：
+# - 分类：内资（cn_broker=中資券商 + southbound=港股通A席）/ 港资（默认桶）/
+#   外资·欧美 us_eu / 外资·亚太 apac / 其他 other；香港中央結算(代理人) 防御类不参与加总
+# - 增减持 = 席位持仓量跨分区差分（5/20/60 个 ccass 分区），含过户/结算噪音；
+#   估算市值 = 数量 × 最新收盘价（不复权口径，除净日有偏差）
+# - 南向（hsgt_south）不参与加总：港股通持股已在 CCASS 的 A 席内，仅作交叉校验
+
+INST_OVERRIDE_REL = "2_base_sector/institutional_overrides.parquet"
+INST_TREND_DAYS = 61  # 个股趋势序列最近分区数（含当前 = 60+1）
+INST_WINDOWS = (5, 20, 60)
+
+# 搜索用简繁字形折叠表（证券简称高频字；数据侧为简体，用户可能输繁体）
+_SC_TC_PAIRS: tuple[tuple[str, str], ...] = (
+    ("腾", "騰"), ("讯", "訊"), ("汇", "匯"), ("丰", "豐"), ("银", "銀"),
+    ("证", "證"), ("东", "東"), ("亚", "亞"), ("电", "電"), ("铁", "鐵"),
+    ("药", "藥"), ("医", "醫"), ("华", "華"), ("车", "車"), ("贸", "貿"),
+    ("险", "險"), ("园", "園"), ("运", "運"), ("农", "農"), ("湾", "灣"),
+    ("龙", "龍"), ("台", "臺"), ("万", "萬"), ("亿", "億"), ("风", "風"),
+    ("财", "財"), ("长", "長"), ("广", "廣"), ("国", "國"), ("门", "門"),
+    ("开", "開"), ("发", "發"), ("达", "達"), ("团", "團"), ("产", "產"),
+    ("实", "實"), ("业", "業"), ("债", "債"), ("权", "權"), ("机", "機"),
+    ("胜", "勝"), ("环", "環"), ("气", "氣"), ("矿", "礦"), ("护", "護"),
+    ("网", "網"), ("飞", "飛"), ("阳", "陽"), ("馆", "館"),
+    ("宁", "寧"), ("万", "萬"), ("卫", "衛"), ("宝", "寶"), ("滨", "濱"),
+    ("济", "濟"), ("苏", "蘇"), ("沪", "滬"), ("深", "深"), ("星", "星"),
+    ("变", "變"), ("态", "態"), ("极", "極"), ("远", "遠"), ("进", "進"),
+    ("续", "續"), ("车", "車"), ("联", "聯"), ("华", "華"), ("复", "復"),
+    ("丰", "豐"), ("丽", "麗"), ("杰", "傑"), ("优", "優"), ("势", "勢"),
+    ("拟", "擬"), ("价", "價"), ("额", "額"), ("营", "營"), ("义", "義"),
+    ("礼", "禮"), ("劲", "勁"), ("丽", "麗"), ("洁", "潔"), ("乐", "樂"),
+    ("欢", "歡"), ("观", "觀"), ("款", "款"), ("间", "間"), ("门", "門"),
+    ("动", "動"), ("际", "際"), ("设", "設"), ("协", "協"), ("领", "領"),
+    ("岛", "島"), ("润", "潤"), ("维", "維"), ("创", "創"), ("鹏", "鵬"),
+    ("声", "聲"), ("兴", "興"), ("凤", "鳳"), ("仓", "倉"), ("捞", "撈"),
+    ("师", "師"), ("烟", "煙"), ("导", "導"), ("货", "貨"), ("图", "圖"),
+    ("书", "書"), ("纽", "紐"), ("约", "約"), ("云", "雲"), ("货", "貨"),
+    ("当", "當"), ("时", "時"), ("样", "樣"), ("关", "關"), ("买", "買"),
+    ("卖", "賣"), ("线", "線"), ("红", "紅"), ("绿", "綠"), ("帮", "幫"),
+    ("邮", "郵"), ("铁", "鐵"), ("窝", "窩"), ("涛", "濤"), ("桥", "橋"),
+)
+# 繁体异体字 → 简体（如 証/證 同为繁，各自对应 证）
+_EXTRA_TC_SC: tuple[tuple[str, str], ...] = (
+    ("証", "证"), ("昇", "升"), ("恆", "恒"), ("羣", "群"), ("峯", "峰"),
+    ("裏", "里"), ("裡", "里"), ("啓", "启"), ("爲", "为"), ("螞", "蚂"),
+    ("滙", "汇"), ("贛", "赣"), ("鋭", "锐"), ("峯", "峰"), ("盃", "杯"),
+)
+
+
+def _build_fold_maps() -> tuple[dict[str, str], dict[str, str]]:
+    sc2tc = dict(_SC_TC_PAIRS)
+    tc2sc = {tc: sc for sc, tc in _SC_TC_PAIRS}
+    for tc, sc in _EXTRA_TC_SC:
+        tc2sc[tc] = sc
+    return sc2tc, tc2sc
+
+
+_SC2TC, _TC2SC = _build_fold_maps()
+_SC_TO_TC_MAP = str.maketrans("".join(_SC2TC), "".join(_SC2TC[k] for k in _SC2TC))
+_TC_TO_SC_MAP = str.maketrans("".join(_TC2SC), "".join(_TC2SC[k] for k in _TC2SC))
+
+
+def _text_variants(text: str) -> set[str]:
+    """输入文本的简繁字形变体（原样 + 简→繁 + 繁→简）。"""
+    return {
+        text,
+        text.translate(_SC_TO_TC_MAP),
+        text.translate(_TC_TO_SC_MAP),
+    }
+
+
+def _ccass_top_dates(n: int) -> list[str]:
+    """ccass_top50 自身单位分区日历最近 n 天（升序；n<=0 返空）。"""
+    dates = list_partition_dates(CCASS_TOP50_REL, DATA_DIR)
+    return dates[-n:] if n > 0 else []
+
+
+def _latest_ccass_top_date() -> str | None:
+    d = _ccass_top_dates(1)
+    return d[-1] if d else None
+
+
+def _load_ccass_window(dates: list[str]) -> pd.DataFrame:
+    """读取指定日期的 CCASS 明细（内部列裁剪 + 类型清洗）。"""
+    if not dates:
+        return pd.DataFrame()
+    dt_in = partition_dates_to_sql(dates)
+    df = _q(
+        "SELECT stock_code, participant_id, participant_name, holding_quantity, "
+        "holding_percentage, dt FROM read_parquet("
+        f"'{DATA_DIR / CCASS_TOP50_REL}/dt=*/data.parquet', hive_partitioning=1) "
+        f"WHERE dt IN ({dt_in})"
+    )
+    if df.empty:
+        return df
+    df["dt"] = df["dt"].astype(str)  # hive 分区列 int64 → str
+    df = df[df["stock_code"].astype(str).str.endswith(".HK")].copy()
+    df["holding_quantity"] = df["holding_quantity"].fillna(0).astype("int64")
+    return df
+
+
+def _participant_registry() -> dict[tuple[str | None, str], tuple[str, str]]:
+    """(participant_id, participant_name) → (category, kind) 名册。
+
+    近 10 个分区 DISTINCT 全量参与者（≈500 家），人工覆盖表优先，
+    规则未收录的新席位在聚合时即时 classify() 兜底。缓存 6 小时。
+    """
+    def _load() -> dict[tuple[str | None, str], tuple[str, str]]:
+        dates = _ccass_top_dates(10)
+        if not dates:
+            return {}
+        dt_in = partition_dates_to_sql(dates)
+        df = _q(
+            "SELECT DISTINCT participant_id, participant_name FROM read_parquet("
+            f"'{DATA_DIR / CCASS_TOP50_REL}/dt=*/data.parquet', hive_partitioning=1) "
+            f"WHERE dt IN ({dt_in})"
+        )
+        overrides = load_overrides(DATA_DIR)
+        out: dict[tuple[str | None, str], tuple[str, str]] = {}
+        for r in df.itertuples(index=False):
+            pid = None if pd.isna(r.participant_id) else str(r.participant_id)
+            nm = "" if pd.isna(r.participant_name) else str(r.participant_name)
+            out[(pid, nm)] = classify(pid, nm, overrides)
+        return out
+
+    return cached("hk_inst_participants", _load, ttl=6 * 3600)
+
+
+def _apply_categories(df: pd.DataFrame) -> pd.DataFrame:
+    """给 CCASS 明细行附加 category/kind 两列（名册 merge，未收录行即时兜底）。"""
+    out = df.copy()
+    out["_pid"] = out["participant_id"].map(
+        lambda v: None if pd.isna(v) else str(v)
+    )
+    out["_nm"] = out["participant_name"].map(
+        lambda v: "" if pd.isna(v) else str(v)
+    )
+    reg = _participant_registry()
+    if reg:
+        reg_df = pd.DataFrame(
+            [
+                {"_pid": pid, "_nm": nm, "category": cat, "kind": kind}
+                for (pid, nm), (cat, kind) in reg.items()
+            ]
+        )
+        out = out.merge(reg_df, on=["_pid", "_nm"], how="left")
+    else:
+        out["category"] = pd.NA
+        out["kind"] = pd.NA
+    miss = out["category"].isna()
+    if miss.any():
+        overrides = load_overrides(DATA_DIR)
+        for idx in out.index[miss]:
+            pid = out.at[idx, "_pid"]
+            nm = out.at[idx, "_nm"]
+            cat, kind = classify(pid, nm, overrides)
+            out.at[idx, "category"] = cat
+            out.at[idx, "kind"] = kind
+    return out.drop(columns=["_pid", "_nm"])
+
+
+def _inst_prices() -> dict[str, float]:
+    """symbol → 最新收盘价（缺失为 0，估算市值兜底）。"""
+    df = _latest_prices()
+    if df.empty:
+        return {}
+    return {
+        str(s): float(c) if pd.notna(c) and float(c) > 0 else 0.0
+        for s, c in zip(df["symbol"], df["close"], strict=True)
+    }
+
+
+def _inst_window_delta(
+    dates: list[str], category: str
+) -> tuple[pd.DataFrame, set[str], set[str]]:
+    """窗口两端（dates[0] vs dates[-1]）按股票聚合的增减持差分。
+
+    返回 (delta_df[index=stock_code, cur_qty, hold_pct, delta_qty, delta_pct],
+    base_seen, cur_seen)。category="all" 聚合除 hkscc 外的全部机构席位。
+    """
+    df = _load_ccass_window(dates)
+    if df.empty:
+        return pd.DataFrame(), set(), set()
+    df = _apply_categories(df)
+    if category != "all":
+        df = df[df["category"] == category]
+    else:
+        df = df[df["category"] != CATEGORY_HKSCC]
+    cur_dt, base_dt = dates[-1], dates[0]
+    cur = df[df["dt"] == cur_dt]
+    base = df[df["dt"] == base_dt]
+    cur_seen = set(cur["stock_code"].astype(str))
+    base_seen = set(base["stock_code"].astype(str))
+    piv_q = df.pivot_table(
+        index="stock_code", columns="dt", values="holding_quantity",
+        aggfunc="sum", fill_value=0,
+    )
+    piv_p = df.pivot_table(
+        index="stock_code", columns="dt", values="holding_percentage",
+        aggfunc="sum", fill_value=0,
+    )
+    if cur_dt not in piv_q.columns or base_dt not in piv_q.columns:
+        return pd.DataFrame(), base_seen, cur_seen
+    delta = pd.DataFrame(
+        {
+            "cur_qty": piv_q[cur_dt].astype("int64"),
+            "hold_pct": (piv_p[cur_dt] * 100).round(2),
+            "delta_qty": (piv_q[cur_dt] - piv_q[base_dt]).astype("int64"),
+            "delta_pct": ((piv_p[cur_dt] - piv_p[base_dt]) * 100).round(2),
+        }
+    ).reset_index()
+    return delta, base_seen, cur_seen
+
+
+def get_institutional_overview() -> dict[str, Any]:
+    """市场机构持仓结构：全市场按资金属性分类的持仓市值 / 占比 / 5 日增减持家数。"""
+
+    def _load():
+        empty = {
+            "trade_date": "", "south_date": "", "stock_count": 0,
+            "disclosed_value_yi": 0.0, "categories": [],
+            "change_stats": {"window": 5, "increased": 0, "decreased": 0},
+            "hkscc_nominees": {"value_yi": 0.0, "noted": False},
+        }
+        dates = _ccass_top_dates(6)  # 最新 + 5 日窗口
+        if len(dates) < 2:
+            return empty
+        df = _load_ccass_window(dates)
+        if df.empty:
+            return empty
+        df = _apply_categories(df)
+        prices = _inst_prices()
+        df["close"] = df["stock_code"].map(lambda s: prices.get(str(s), 0.0))
+        df["value"] = df["holding_quantity"] * df["close"]
+
+        cur_dt, base_dt = dates[-1], dates[0]
+        cur = df[df["dt"] == cur_dt]
+        base = df[df["dt"] == base_dt]
+        total_value = float(cur["value"].sum())
+        hkscc = cur[cur["category"] == CATEGORY_HKSCC]
+
+        rows = []
+        for cat in CATEGORY_ORDER:
+            c = cur[cur["category"] == cat]
+            b = base[base["category"] == cat]
+            qty = int(c["holding_quantity"].sum())
+            val = float(c["value"].sum())
+            base_qty = int(b["holding_quantity"].sum()) if len(b) else 0
+            base_val = float(b["value"].sum()) if len(b) else 0.0
+            kinds = c["kind"].dropna()
+            dom_kind = kinds.mode().iloc[0] if len(kinds) else "broker"
+            rows.append(
+                {
+                    "category": cat,
+                    "label": category_label(cat),
+                    "kind": str(dom_kind),
+                    "holding_qty": qty,
+                    "value_yi": round(val / 1e8, 2),
+                    "pct_of_disclosed": round(val / total_value * 100, 2)
+                    if total_value > 0 else 0.0,
+                    "d1_qty": int(qty - base_qty),
+                    "d1_yi": round((val - base_val) / 1e8, 2),
+                }
+            )
+
+        deltas = (cur.groupby("stock_code")["holding_quantity"].sum()
+                  - base.groupby("stock_code")["holding_quantity"].sum())
+        south_dates = list_partition_dates(SOUTH_REL, DATA_DIR)
+        return {
+            "trade_date": to_iso(cur_dt),
+            "south_date": to_iso(south_dates[-1]) if south_dates else "",
+            "stock_count": int(cur["stock_code"].nunique()),
+            "disclosed_value_yi": round(total_value / 1e8, 2),
+            "categories": rows,
+            "change_stats": {
+                "window": 5,
+                "increased": int((deltas > 0).sum()),
+                "decreased": int((deltas < 0).sum()),
+            },
+            "hkscc_nominees": {
+                "value_yi": round(float(hkscc["value"].sum()) / 1e8, 2),
+                "noted": bool(len(hkscc)),
+            },
+        }
+
+    return cached("hk_inst_overview", _load)
+
+
+def get_institutional_movers(
+    category: str = "all", window: int = 5,
+    direction: str = "increase", limit: int = 20,
+) -> dict[str, Any]:
+    """机构增减持榜：窗口间某资金属性分类净增/净减的股票排行。"""
+
+    def _load():
+        empty = {
+            "trade_date": "", "base_date": "", "window": window,
+            "category": category, "direction": direction, "items": [],
+        }
+        dates = _ccass_top_dates(window + 1)
+        if len(dates) < 2:
+            return empty
+        delta_df, base_seen, cur_seen = _inst_window_delta(dates, category)
+        if delta_df.empty:
+            return empty
+        names = _name_map()
+        prices = _inst_prices()
+        items = []
+        for r in delta_df.itertuples(index=False):
+            dq = int(r.delta_qty)
+            if direction == "increase" and dq <= 0:
+                continue
+            if direction == "decrease" and dq >= 0:
+                continue
+            sym = str(r.stock_code)
+            px = prices.get(sym, 0.0)
+            items.append(
+                {
+                    "symbol": sym,
+                    "name": names.get(sym, sym),
+                    "price": round(px, 2) if px > 0 else None,
+                    "hold_yi": round(r.cur_qty * px / 1e8, 2),
+                    "hold_pct": float(r.hold_pct),
+                    "delta_qty": dq,
+                    "delta_yi": round(dq * px / 1e8, 2),
+                    "delta_pct_abs": float(r.delta_pct),
+                    "first_seen": sym in (cur_seen - base_seen),
+                }
+            )
+        items.sort(key=lambda x: abs(x["delta_yi"]), reverse=True)
+        return {
+            "trade_date": to_iso(dates[-1]),
+            "base_date": to_iso(dates[0]),
+            "window": window,
+            "category": category,
+            "direction": direction,
+            "items": items[:limit],
+        }
+
+    return cached(f"hk_inst_movers_{category}_{window}_{direction}_{limit}", _load)
+
+
+def get_institutional_stock(symbol: str) -> dict[str, Any]:
+    """个股机构持仓：分类结构 + 参与者明细 + 南向口径 + 分类持仓趋势。"""
+
+    def _load():
+        sym = symbol.upper()
+        if not sym.endswith(".HK"):
+            sym = sym + ".HK"
+        empty = {
+            "symbol": sym, "name": sym, "trade_date": "", "south_pct": None,
+            "price": None, "disclosed_pct": 0.0, "categories": [],
+            "participants": [], "trend": {"dates": [], "series": []},
+        }
+        names = _name_map()
+        empty["name"] = names.get(sym, sym)
+        dates = _ccass_top_dates(INST_TREND_DAYS)
+        if not dates:
+            return empty
+        dt_in = partition_dates_to_sql(dates)
+        df = _q(
+            "SELECT stock_code, participant_id, participant_name, holding_quantity, "
+            "holding_percentage, dt FROM read_parquet("
+            f"'{DATA_DIR / CCASS_TOP50_REL}/dt=*/data.parquet', hive_partitioning=1) "
+            f"WHERE dt IN ({dt_in}) AND stock_code = '{sym}'"
+        )
+        if df.empty:
+            return empty
+        df["dt"] = df["dt"].astype(str)
+        df["holding_quantity"] = df["holding_quantity"].fillna(0).astype("int64")
+        df = _apply_categories(df)
+        prices = _inst_prices()
+        px = prices.get(sym, 0.0)
+        cur_dt = dates[-1]
+        cur = df[df["dt"] == cur_dt]
+        total_pct = float(cur["holding_percentage"].fillna(0).sum()) * 100
+
+        def _base_pct(cat: str, base_dt: str) -> float:
+            sub = df[(df["dt"] == base_dt) & (df["category"] == cat)]
+            return float(sub["holding_percentage"].fillna(0).sum()) * 100
+
+        cat_rows = []
+        cat_agg = (
+            cur.groupby("category")["holding_quantity"].sum()
+        )
+        for cat in CATEGORY_ORDER:
+            if cat not in cat_agg.index or cat_agg[cat] == 0:
+                continue
+            c = cur[cur["category"] == cat]
+            qty = int(cat_agg[cat])
+            pct = float(c["holding_percentage"].fillna(0).sum()) * 100
+            kinds = c["kind"].dropna()
+            dom_kind = str(kinds.mode().iloc[0]) if len(kinds) else "broker"
+            deltas = []
+            for w in INST_WINDOWS:
+                if len(dates) <= w:
+                    continue
+                base_dt = dates[-1 - w]
+                bq = int(
+                    df[(df["dt"] == base_dt) & (df["category"] == cat)][
+                        "holding_quantity"
+                    ].sum()
+                )
+                deltas.append(
+                    {
+                        "window": w,
+                        "delta_qty": int(qty - bq),
+                        "delta_yi": round((qty - bq) * px / 1e8, 2),
+                        "delta_pct_abs": round(pct - _base_pct(cat, base_dt), 2),
+                    }
+                )
+            cat_rows.append(
+                {
+                    "category": cat,
+                    "label": category_label(cat),
+                    "kind": dom_kind,
+                    "holding_qty": qty,
+                    "value_yi": round(qty * px / 1e8, 2),
+                    "pct_of_total": round(pct, 2),
+                    "deltas": deltas,
+                }
+            )
+
+        # 参与者明细（前 50 席位，含 5/20/60 日 Δ）
+        def _pid_key(pid: Any, nm: Any) -> tuple[Any, str]:
+            p = None if pd.isna(pid) else str(pid)
+            n = "" if pd.isna(nm) else str(nm)
+            return (p, n)
+
+        base_keys: dict[tuple[Any, str], dict[str, int]] = {}
+        for w in INST_WINDOWS:
+            if len(dates) <= w:
+                continue
+            base_dt = dates[-1 - w]
+            sub = df[df["dt"] == base_dt]
+            base_keys[w] = {
+                _pid_key(r.participant_id, r.participant_name): int(
+                    r.holding_quantity
+                )
+                for r in sub.itertuples(index=False)
+            }
+        participants = []
+        for r in cur.sort_values("holding_quantity", ascending=False).itertuples(
+            index=False
+        ):
+            pid = None if pd.isna(r.participant_id) else str(r.participant_id)
+            nm = "" if pd.isna(r.participant_name) else str(r.participant_name)
+            part = {
+                "participant_id": pid,
+                "participant_name": str(r.participant_name),
+                "category": str(r.category),
+                "kind": str(r.kind),
+                "holding_quantity": int(r.holding_quantity),
+                "holding_pct": round(float(r.holding_percentage or 0.0) * 100, 3),
+            }
+            for w in INST_WINDOWS:
+                base = base_keys.get(w, {})
+                part[f"delta_{w}d_qty"] = int(
+                    part["holding_quantity"] - base.get(_pid_key(pid, nm), 0)
+                )
+            participants.append(part)
+
+        # 分类持仓趋势（按分区日历对齐，缺日为 0）
+        cats_in_trend = [c for c in CATEGORY_ORDER if c in df["category"].unique()]
+        cats_in_trend += [c for c in df["category"].unique() if c not in CATEGORY_ORDER]
+        series = []
+        for cat in cats_in_trend:
+            sub = (
+                df[df["category"] == cat]
+                .groupby("dt")["holding_quantity"]
+                .sum()
+                .reindex(dates)
+                .fillna(0)
+                .astype("int64")
+            )
+            series.append(
+                {
+                    "category": cat,
+                    "label": category_label(cat),
+                    "values": sub.tolist(),
+                }
+            )
+        south_pct = next(
+            (r["pct_of_total"] for r in cat_rows if r["category"] == CATEGORY_SOUTHBOUND),
+            None,
+        )
+        return {
+            "symbol": sym,
+            "name": names.get(sym, sym),
+            "trade_date": to_iso(cur_dt),
+            "south_pct": south_pct,
+            "price": round(px, 2) if px > 0 else None,
+            "disclosed_pct": round(total_pct, 2),
+            "categories": cat_rows,
+            "participants": participants,
+            "trend": {
+                "dates": [to_iso(d) for d in dates],
+                "series": series,
+            },
+        }
+
+    return cached(f"hk_inst_stock_{symbol.upper()}", _load)
+
+
+def _inst_name_pool() -> dict[str, str]:
+    """symbol → 搜索名池：master 简体中文名 + CCASS 繁体 stock_name + 英文名（合并）。"""
+
+    def _load() -> dict[str, str]:
+        pool: dict[str, list[str]] = {}
+        try:
+            master = _q(
+                "SELECT symbol, cn_name, en_name FROM read_parquet("
+                f"'{DATA_DIR / RM_GLOB}')"
+            )
+            for r in master.itertuples(index=False):
+                sym = str(r.symbol)
+                names = []
+                if pd.notna(r.cn_name):
+                    names.append(str(r.cn_name))
+                if pd.notna(r.en_name):
+                    names.append(str(r.en_name))
+                pool[sym] = names
+        except Exception as exc:  # noqa: BLE001 - 主表缺失时降级仅用 CCASS 名
+            logger.warning("[quanthk_feed] security_master 读取失败: %s", exc)
+        d = _latest_ccass_top_date()
+        if d:
+            try:
+                cc = _q(
+                    "SELECT DISTINCT stock_code, stock_name FROM read_parquet("
+                    f"'{DATA_DIR / CCASS_TOP50_REL}/dt=*/data.parquet', "
+                    "hive_partitioning=1) WHERE dt = " + d
+                )
+                for r in cc.itertuples(index=False):
+                    sym = str(r.stock_code)
+                    if pd.notna(r.stock_name):
+                        pool.setdefault(sym, [])
+                        if str(r.stock_name) not in pool[sym]:
+                            pool[sym].append(str(r.stock_name))
+            except Exception:  # noqa: BLE001 - 昵称池降级
+                pass
+        return {sym: " ".join(names).lower() for sym, names in pool.items()}
+
+    return cached("hk_inst_name_pool", _load, ttl=6 * 3600)
+
+
+def get_institutional_stock_suggest(keyword: str, limit: int = 10) -> list[dict[str, Any]]:
+    """证券名模糊搜索（symbol 前缀 / 中文名包含·简繁双字形 / 英文名前缀）。"""
+    kw = (keyword or "").strip().lower()
+    if not kw:
+        return []
+
+    def _load() -> list[dict[str, Any]]:
+        pool = _inst_name_pool()
+        kw_variants = _text_variants(kw)
+        rows = []
+        for sym, haystack in pool.items():
+            if (
+                sym.startswith(kw)
+                or sym.lstrip("0").startswith(kw)
+                or any(kv in hv for kv in kw_variants for hv in _text_variants(haystack))
+            ):
+                cn = haystack.split(" ")[0]
+                rows.append({"symbol": sym, "name": cn or sym})
+        rows.sort(
+            key=lambda x: (
+                not x["symbol"].lower().startswith(kw),
+                not x["name"].startswith(keyword.strip()),
+                x["symbol"],
+            )
+        )
+        return rows[:limit]
+
+    return cached(f"hk_inst_suggest_{kw}_{limit}", _load)
+
+
+def get_institutional_participants(
+    category: str = "all", q: str = "", limit: int = 50,
+) -> dict[str, Any]:
+    """参与者分类审计：全量席位/名称 → 分类/性质/最新日持仓市值，支持过滤。"""
+
+    def _load():
+        empty = {"trade_date": "", "total": 0, "items": []}
+        d = _latest_ccass_top_date()
+        if not d:
+            return empty
+        df = _load_ccass_window([d])
+        if df.empty:
+            return empty
+        df = _apply_categories(df)
+        prices = _inst_prices()
+        df["close"] = df["stock_code"].map(lambda s: prices.get(str(s), 0.0))
+        df["value"] = df["holding_quantity"] * df["close"]
+        if category != "all":
+            df = df[df["category"] == category]
+        kw = q.strip().lower()
+        kw_variants = _text_variants(kw)
+        grouped = df.groupby(["participant_id", "participant_name"], dropna=False)
+        items = []
+        for (pid, nm), g in grouped:
+            pid_s = "" if pd.isna(pid) else str(pid)
+            nm_s = "" if pd.isna(nm) else str(nm)
+            if kw:
+                nm_variants = _text_variants(nm_s.lower())
+                name_hit = any(
+                    kv in hv for kv in kw_variants for hv in nm_variants
+                )
+                if kw not in pid_s.lower() and not name_hit:
+                    continue
+            cat = str(g["category"].iloc[0])
+            kind = str(g["kind"].iloc[0])
+            items.append(
+                {
+                    "participant_id": pid_s,
+                    "participant_name": nm_s,
+                    "category": cat,
+                    "kind": kind,
+                    "hold_yi": round(float(g["value"].sum()) / 1e8, 2),
+                    "stocks": int(g["stock_code"].nunique()),
+                }
+            )
+        items.sort(key=lambda x: x["hold_yi"], reverse=True)
+        return {
+            "trade_date": to_iso(d),
+            "total": len(items),
+            "items": items[:limit],
+        }
+
+    return cached(f"hk_inst_participants_{category}_{q.lower()}_{limit}", _load)
