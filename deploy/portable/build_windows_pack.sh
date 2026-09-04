@@ -32,8 +32,10 @@ fail() { echo -e "\033[31m[build-win]\033[0m $*" >&2; exit 1; }
 dl()   { curl -fL --retry 3 --progress-bar -o "$2" "$1"; }
 
 # 解析 python-build-standalone 最新 release（API 限流时降级到重定向 + expanded_assets）
+# 可传多个候选 pattern（先旧式 -shared-install_only，再无 shared 的新式），
+# 匹配用 endswith(pattern.tar.gz) 精确尾部，天然排除 *_stripped 变体。
 resolve_pbs_asset() {
-    local pattern="$1" tag="" asset=""
+    local tag="" asset=""
     tag="$(curl -fsSL --retry 2 https://api.github.com/repos/astral-sh/python-build-standalone/releases/latest 2>/dev/null \
         | python3 -c 'import json,sys
 try: print(json.load(sys.stdin)["tag_name"])
@@ -47,19 +49,28 @@ except Exception: pass' 2>/dev/null || true)"
     asset="$(curl -fsSL "https://api.github.com/repos/astral-sh/python-build-standalone/releases/tags/$tag" 2>/dev/null \
         | python3 -c '
 import json, sys
-pattern = sys.argv[1]
+patterns = sys.argv[1:]
 try:
     for a in json.load(sys.stdin)["assets"]:
         n = a["name"]
-        if n.startswith("cpython-3.10.") and pattern in n and n.endswith(".tar.gz"):
-            print(n); break
-except Exception: pass' "$pattern" 2>/dev/null || true)"
+        if not n.startswith("cpython-3.10."):
+            continue
+        for p in patterns:
+            if n.endswith(p + ".tar.gz"):
+                print(n); raise SystemExit
+except SystemExit:
+    pass
+except Exception:
+    pass' "$@" 2>/dev/null || true)"
     if [ -z "$asset" ]; then
-        asset="$(curl -fsSL "https://github.com/astral-sh/python-build-standalone/releases/expanded_assets/$tag" \
-            | grep -oE "cpython-3\.10\.[0-9]+[^\"<]*${pattern}\.tar\.gz\"" \
-            | sed 's/"$//' | head -1 || true)"
+        for p in "$@"; do
+            asset="$(curl -fsSL "https://github.com/astral-sh/python-build-standalone/releases/expanded_assets/$tag" \
+                | grep -oE "cpython-3\.10\.[0-9]+[^\"<]*${p}\.tar\.gz\"" \
+                | sed 's/"$//' | head -1 || true)"
+            [ -n "$asset" ] && break
+        done
     fi
-    [ -n "$asset" ] || fail "未找到 cpython-3.10 资产 (pattern=$pattern, tag=$tag)"
+    [ -n "$asset" ] || fail "未找到 cpython-3.10 资产 (patterns: $*, tag=$tag)"
     PBS_TAG="$tag"
     PBS_ASSET="$asset"
 }
@@ -75,7 +86,7 @@ AVAIL_KB=$(df -k "$BUILD" | awk 'NR==2{print $4}')
 # ── 1. 内嵌 Windows Python (python-build-standalone) ────────
 if [ ! -f "$STAGE/runtime/python/python.exe" ]; then
     log "下载 python-build-standalone (windows-x64) ..."
-    resolve_pbs_asset "x86_64-pc-windows-msvc-shared-install_only"
+    resolve_pbs_asset "x86_64-pc-windows-msvc-shared-install_only" "x86_64-pc-windows-msvc-install_only"
     log "  $PBS_ASSET (release $PBS_TAG)"
     dl "https://github.com/astral-sh/python-build-standalone/releases/download/$PBS_TAG/$PBS_ASSET" \
        "$BUILD/cache/$PBS_ASSET"

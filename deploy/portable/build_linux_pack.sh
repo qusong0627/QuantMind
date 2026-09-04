@@ -57,7 +57,8 @@ ver, pattern = sys.argv[1], sys.argv[2]
 try:
     for a in json.load(sys.stdin)["assets"]:
         n = a["name"]
-        if n.startswith(f"cpython-{ver}.") and pattern in n and n.endswith(".tar.gz"):
+        # endswith 精确尾部匹配，排除 *_stripped 变体与 sha256 文件
+        if n.startswith(f"cpython-{ver}.") and n.endswith(pattern + ".tar.gz"):
             print(n); break
 except Exception: pass' "$ver" "$pattern" 2>/dev/null || true)"
     if [ -z "$asset" ]; then
