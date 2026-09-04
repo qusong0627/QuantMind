@@ -105,6 +105,17 @@ COMBINED="$BUILD/requirements-win-combined.txt"
     for p in $EXTRA_WIN_PKGS; do echo "$p"; done
 } > "$COMBINED"
 
+# futu-api 只发布 macosx/linux 预编译包，PyPI 无 win_amd64 wheel；
+# 后端 broker 导入为可选（try/except），Windows 包直接剔除，否则整条镜像链必败
+WIN_REQ_1="$BUILD/requirements-win-1.txt"
+WIN_REQ_2="$BUILD/requirements-win-2.txt"
+WIN_REQ_3="$BUILD/requirements-win-3.txt"
+sed '/^futu-api/d' "$COMBINED" > "$WIN_REQ_1"
+sed '/^futu-api/d' "$REPO_ROOT/requirements/production.txt" > "$WIN_REQ_2"
+sed '/^futu-api/d' "$REPO_ROOT/requirements/ai.txt" > "$WIN_REQ_3"
+# 本机网络实测阿里云 ≈90kB/s（4GB 需 ~13h），官方源可达数 MB/s，故官方优先
+PIP_FALLBACKS=("https://pypi.org/simple/" "https://mirrors.aliyun.com/pypi/simple/" "https://pypi.tuna.tsinghua.edu.cn/simple/")
+
 if [ ! -f "$SITE_PKG/fastapi/__init__.py" ]; then
     WHEELS="$BUILD/wheels-win"
     download_wheels_with_index() {
@@ -114,23 +125,27 @@ if [ ! -f "$SITE_PKG/fastapi/__init__.py" ]; then
             --platform win_amd64 --python-version 3.10 --implementation cp \
             --only-binary=:all: \
             --extra-index-url "$TORCH_INDEX" \
-            -r "$COMBINED" &&
+            -r "$WIN_REQ_1" &&
         PIP_INDEX_URL="$idx" python3 -m pip download -d "$WHEELS" \
             --platform win_amd64 --python-version 3.10 --implementation cp \
             --only-binary=:all: \
-            -r "$REPO_ROOT/requirements/production.txt" &&
+            -r "$WIN_REQ_2" &&
         PIP_INDEX_URL="$idx" python3 -m pip download -d "$WHEELS" \
             --platform win_amd64 --python-version 3.10 --implementation cp \
             --only-binary=:all: \
-            -r "$REPO_ROOT/requirements/ai.txt"
+            -r "$WIN_REQ_3"
     }
-    WIN_PIP_OK=0
-    for _idx in "${PIP_FALLBACKS[@]}"; do
-        log "使用镜像 $_idx 下载 win_amd64 wheels（约 3-4GB）..."
-        if download_wheels_with_index "$_idx"; then WIN_PIP_OK=1; break; fi
-        log "镜像 $_idx 下载失败，切换下一个 ..."
-    done
-    [ "$WIN_PIP_OK" = "1" ] || fail "所有 PyPI 镜像下载 wheels 均失败"
+    if [ -n "$(ls -A "$WHEELS" 2>/dev/null)" ]; then
+        log "检测到已下载的 wheels（$(ls "$WHEELS" | wc -l) 个），跳过下载"
+    else
+        WIN_PIP_OK=0
+        for _idx in "${PIP_FALLBACKS[@]}"; do
+            log "使用镜像 $_idx 下载 win_amd64 wheels（约 3-4GB）..."
+            if download_wheels_with_index "$_idx"; then WIN_PIP_OK=1; break; fi
+            log "镜像 $_idx 下载失败，切换下一个 ..."
+        done
+        [ "$WIN_PIP_OK" = "1" ] || fail "所有 PyPI 镜像下载 wheels 均失败"
+    fi
 
     log "安装到目标 site-packages ..."
     # 与 Dockerfile 一致：三个文件顺序覆盖安装（存在 redis 等版本重叠，合并解析会冲突）
@@ -138,17 +153,17 @@ if [ ! -f "$SITE_PKG/fastapi/__init__.py" ]; then
         --target "$SITE_PKG" \
         --platform win_amd64 --python-version 3.10 --implementation cp \
         --only-binary=:all: \
-        -r "$COMBINED"
+        -r "$WIN_REQ_1"
     python3 -m pip install --no-index --find-links "$WHEELS" \
         --target "$SITE_PKG" \
         --platform win_amd64 --python-version 3.10 --implementation cp \
         --only-binary=:all: \
-        -r "$REPO_ROOT/requirements/production.txt"
+        -r "$WIN_REQ_2"
     python3 -m pip install --no-index --find-links "$WHEELS" \
         --target "$SITE_PKG" \
         --platform win_amd64 --python-version 3.10 --implementation cp \
         --only-binary=:all: \
-        -r "$REPO_ROOT/requirements/ai.txt"
+        -r "$WIN_REQ_3"
     rm -rf "$WHEELS"
 fi
 
