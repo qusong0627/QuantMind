@@ -110,42 +110,53 @@ COMBINED="$BUILD/requirements-win-combined.txt"
 WIN_REQ_1="$BUILD/requirements-win-1.txt"
 WIN_REQ_2="$BUILD/requirements-win-2.txt"
 WIN_REQ_3="$BUILD/requirements-win-3.txt"
-sed '/^futu-api/d' "$COMBINED" > "$WIN_REQ_1"
-sed '/^futu-api/d' "$REPO_ROOT/requirements/production.txt" > "$WIN_REQ_2"
-sed '/^futu-api/d' "$REPO_ROOT/requirements/ai.txt" > "$WIN_REQ_3"
+sed -e '/^futu-api/d' -e '/^qstock/d' "$COMBINED" > "$WIN_REQ_1"
+sed -e '/^futu-api/d' -e '/^qstock/d' "$REPO_ROOT/requirements/production.txt" > "$WIN_REQ_2"
+sed -e '/^futu-api/d' -e '/^qstock/d' "$REPO_ROOT/requirements/ai.txt" > "$WIN_REQ_3"
 # 本机网络实测阿里云 ≈90kB/s（4GB 需 ~13h），官方源可达数 MB/s，故官方优先
 PIP_FALLBACKS=("https://pypi.org/simple/" "https://mirrors.aliyun.com/pypi/simple/" "https://pypi.tuna.tsinghua.edu.cn/simple/")
 
 if [ ! -f "$SITE_PKG/fastapi/__init__.py" ]; then
     WHEELS="$BUILD/wheels-win"
+    # jsonpath/jieba(akshare/qstock 依赖)在 PyPI 只有 sdist 无 wheel，
+    # --only-binary 下解析必败；本地预构建一次纯 py wheel（幂等缓存），
+    # 每次镜像尝试开始时复制进 WHEELS 供 find-links 解析与 no-index 安装使用
+    SDIST_WHEELS="$BUILD/cache/wheels-sdist"
+    mkdir -p "$SDIST_WHEELS"
+    for _sd_pkg in 'jsonpath==0.82.2' 'jieba==0.42.1' 'PyExecJS==1.5.1'; do
+        _sd_name="${_sd_pkg%%==*}"
+        # pip 产出的 wheel 文件名是规范小写（pyexecjs-*.whl），须大小写不敏感判断
+        if ! find "$SDIST_WHEELS" -maxdepth 1 -iname "${_sd_name}-*.whl" | grep -q .; then
+            log "预构建 ${_sd_pkg} 纯 py wheel（sdist-only 包）..."
+            PIP_INDEX_URL="https://pypi.org/simple/" python3 -m pip wheel \
+                --no-deps --no-cache-dir -w "$SDIST_WHEELS" "$_sd_pkg"
+        fi
+    done
     download_wheels_with_index() {
         local idx="$1"
         rm -rf "$WHEELS"; mkdir -p "$WHEELS"
+        cp "$SDIST_WHEELS"/*.whl "$WHEELS/" 2>/dev/null || true
         PIP_INDEX_URL="$idx" python3 -m pip download -d "$WHEELS" \
             --platform win_amd64 --python-version 3.10 --implementation cp \
-            --only-binary=:all: \
+            --only-binary=:all: --find-links "$WHEELS" \
             --extra-index-url "$TORCH_INDEX" \
             -r "$WIN_REQ_1" &&
         PIP_INDEX_URL="$idx" python3 -m pip download -d "$WHEELS" \
             --platform win_amd64 --python-version 3.10 --implementation cp \
-            --only-binary=:all: \
+            --only-binary=:all: --find-links "$WHEELS" \
             -r "$WIN_REQ_2" &&
         PIP_INDEX_URL="$idx" python3 -m pip download -d "$WHEELS" \
             --platform win_amd64 --python-version 3.10 --implementation cp \
-            --only-binary=:all: \
+            --only-binary=:all: --find-links "$WHEELS" \
             -r "$WIN_REQ_3"
     }
-    if [ -n "$(ls -A "$WHEELS" 2>/dev/null)" ]; then
-        log "检测到已下载的 wheels（$(ls "$WHEELS" | wc -l) 个），跳过下载"
-    else
-        WIN_PIP_OK=0
-        for _idx in "${PIP_FALLBACKS[@]}"; do
-            log "使用镜像 $_idx 下载 win_amd64 wheels（约 3-4GB）..."
-            if download_wheels_with_index "$_idx"; then WIN_PIP_OK=1; break; fi
-            log "镜像 $_idx 下载失败，切换下一个 ..."
-        done
-        [ "$WIN_PIP_OK" = "1" ] || fail "所有 PyPI 镜像下载 wheels 均失败"
-    fi
+    WIN_PIP_OK=0
+    for _idx in "${PIP_FALLBACKS[@]}"; do
+        log "使用镜像 $_idx 下载 win_amd64 wheels（约 3-4GB）..."
+        if download_wheels_with_index "$_idx"; then WIN_PIP_OK=1; break; fi
+        log "镜像 $_idx 下载失败，切换下一个 ..."
+    done
+    [ "$WIN_PIP_OK" = "1" ] || fail "所有 PyPI 镜像下载 wheels 均失败"
 
     log "安装到目标 site-packages ..."
     # 与 Dockerfile 一致：三个文件顺序覆盖安装（存在 redis 等版本重叠，合并解析会冲突）
