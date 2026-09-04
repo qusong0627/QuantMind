@@ -19,6 +19,8 @@ import {
   ChevronRight,
 } from 'lucide-react';
 import { strategyManagementService } from '../../services/strategyManagementService';
+import { useAppSelector } from '../../store';
+import { selectCurrentMarket } from '../../store/slices/uiSlice';
 import { StrategyFile, StrategyValidationResult } from '../../types/backtest/strategy';
 import { QlibStrategyParams } from '../../types/backtest/qlib';
 import { QLIB_STRATEGY_TEMPLATES, StrategyTemplate } from '../../data/qlibStrategyTemplates';
@@ -178,19 +180,20 @@ export const StrategyPicker: React.FC<StrategyPickerProps> = ({
     }
   };
 
-  // 加载个人策略列表
+  // 加载个人策略列表：跟随全局市场（切换市场时重载，避免港股策略残留在 A 股视图）
+  const currentMarket = useAppSelector(selectCurrentMarket);
   useEffect(() => {
     if (activeTab === 'personal') {
       loadPersonalStrategies();
     }
-  }, [activeTab]);
+  }, [activeTab, currentMarket]);
 
   const loadPersonalStrategies = async () => {
     setIsLoading(true);
     try {
       const strategies = await strategyManagementService.loadStrategies(
         undefined,
-        localStorage.getItem('qm:current_market') || 'CN',
+        currentMarket,
       );
       setPersonalStrategies(strategies);
     } catch (error: any) {

@@ -18,6 +18,7 @@ import { ParameterOptimizationModule } from '../components/backtestCenter/Parame
 import { StrategyManagementModule } from '../components/backtestCenter/StrategyManagementModule';
 import { EnhancedAdvancedAnalysisModule } from '../components/backtestCenter/EnhancedAdvancedAnalysisModule';
 import { useBacktestCenterStore, ModuleId } from '../stores/backtestCenterStore';
+import { MarketSelector } from '../components/layout/MarketSelector';
 import { Bell } from 'lucide-react';
 import { PAGE_LAYOUT } from '../config/pageLayout';
 
@@ -96,6 +97,7 @@ export const NewBacktestCenterPage: React.FC = () => {
 
           {/* 右侧工具按钮 */}
           <div className="flex items-center gap-2">
+            <MarketSelector />
             <button className="p-2 hover:bg-gray-100 rounded-2xl transition-colors">
               <Bell className="w-5 h-5 text-gray-600" />
             </button>

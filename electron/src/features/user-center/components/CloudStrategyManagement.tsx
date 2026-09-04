@@ -11,6 +11,8 @@ import {
 import { userCenterService } from '../services/userCenterService';
 import { strategyManagementService } from '../../../services/strategyManagementService';
 import { useAuth } from '../../../features/auth/hooks';
+import { useAppSelector } from '../../../store';
+import { selectCurrentMarket } from '../../../store/slices/uiSlice';
 import type { UserStrategy } from '../types';
 
 const { confirm } = Modal;
@@ -30,6 +32,7 @@ const formatCreatedAt = (raw: unknown): string => {
 
 const CloudStrategyManagement: React.FC = () => {
     const { user } = useAuth();
+    const currentMarket = useAppSelector(selectCurrentMarket);
     const [loading, setLoading] = useState(false);
     const [syncing, setSyncing] = useState(false);
     const [strategies, setStrategies] = useState<UserStrategy[]>([]);
@@ -45,9 +48,10 @@ const CloudStrategyManagement: React.FC = () => {
         setLoading(true);
         try {
             // 2026-02-14 统一架构：使用 strategyManagementService 获取
+            // 按全局市场过滤（跟随顶栏市场切换），避免港股策略混入 A 股列表
             const items = await strategyManagementService.loadStrategies(
               undefined,
-              localStorage.getItem('qm:current_market') || undefined,
+              currentMarket,
             );
             
             // 转换为 UserStrategy 格式以适配表格（以当前类型定义为准：使用 name 字段）
@@ -74,7 +78,7 @@ const CloudStrategyManagement: React.FC = () => {
 
     useEffect(() => {
         fetchStrategies();
-    }, [user]);
+    }, [user, currentMarket]);
 
     const handleDelete = (strategy: UserStrategy) => {
         confirm({

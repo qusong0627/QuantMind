@@ -27,6 +27,8 @@ import {
 import { message, Modal } from 'antd';
 import { strategyManagementService } from '../../services/strategyManagementService';
 import { useBacktestCenterStore } from '../../stores/backtestCenterStore';
+import { useAppSelector } from '../../store';
+import { selectCurrentMarket } from '../../store/slices/uiSlice';
 import { setCurrentTab } from '../../store/slices/aiStrategySlice';
 
 interface Strategy {
@@ -57,9 +59,11 @@ export const StrategyManagementModule: React.FC = () => {
     const [deleteModalVisible, setDeleteModalVisible] = useState(false);
     const [selectedStrategy, setSelectedStrategy] = useState<Strategy | null>(null);
 
+    // 切换市场时重新加载：策略库按全局市场隔离，避免港股策略混入 A 股视图
+    const currentMarket = useAppSelector(selectCurrentMarket);
     useEffect(() => {
         loadStrategies();
-    }, [filter]);
+    }, [filter, currentMarket]);
 
     const normalizeStatus = (status?: string): Strategy['status'] => {
         const value = String(status || '').toLowerCase();
@@ -74,7 +78,7 @@ export const StrategyManagementModule: React.FC = () => {
         try {
             const items = await strategyManagementService.loadStrategies(
               undefined,
-              localStorage.getItem('qm:current_market') || undefined,
+              currentMarket,
             );
             const mapped: Strategy[] = items.map((item: any) => ({
                 id: item.id,
