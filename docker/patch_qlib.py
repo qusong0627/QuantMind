@@ -6,7 +6,12 @@
 """
 import sys
 
-position_file = '/usr/local/lib/python3.10/site-packages/qlib/backtest/position.py'
+# 允许外部指定 qlib 安装路径（便携版打包时 site-packages 不在系统默认位置）
+_position_file = (
+    sys.argv[1] if len(sys.argv) > 1
+    else "/usr/local/lib/python3.10/site-packages/qlib/backtest/position.py"
+)
+position_file = _position_file
 
 try:
     with open(position_file) as f:

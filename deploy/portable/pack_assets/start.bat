@@ -1,0 +1,175 @@
+@echo off
+rem ============================================================
+rem QuantMind 便携版 一键启动（Windows x64）
+rem 双击运行即可；停止请运行 stop.bat
+rem ============================================================
+setlocal
+chcp 65001 >nul
+cd /d "%~dp0"
+set "ROOT=%~dp0"
+
+rem ---- 可修改的端口配置（与 pack.env 对应）----
+set "QM_PG_PORT=5432"
+set "QM_REDIS_PORT=6379"
+set "QM_API_PORT=8000"
+set "QM_ENGINE_PORT=8001"
+set "QM_TRADE_PORT=8002"
+set "QM_STREAM_PORT=8003"
+
+set "STORAGE_ROOT=%ROOT%data"
+set "PYTHON=%ROOT%runtime\python\python.exe"
+set "PGBIN=%ROOT%pgsql\bin"
+set "PATH=%ROOT%redis;%PGBIN%;%PATH%"
+
+if not exist "%PYTHON%" (
+    echo [!] 找不到 %PYTHON%，请确认便携包完整解压。
+    pause
+    exit /b 1
+)
+
+rem ---- 运行目录 ----
+if not exist "%ROOT%logs" md "%ROOT%logs" >nul 2>&1
+if not exist "%ROOT%run" md "%ROOT%run" >nul 2>&1
+for %%D in (models uploads strategies reports backtest_results hf qlib_data quantdb quantus quanthk quantbc quantfutures) do (
+    if not exist "%STORAGE_ROOT%\%%D" md "%STORAGE_ROOT%\%%D" >nul 2>&1
+)
+
+rem ---- 随机密钥（首次生成，之后复用）----
+if not exist "%ROOT%run\secrets.cmd" (
+    powershell -NoProfile -Command ^
+      "$a=[guid]::NewGuid().ToString('N')+[guid]::NewGuid().ToString('N');" ^
+      "'set SECRET_KEY='+$a.Substring(0,64) | Out-File -Encoding ascii '%ROOT%run\secrets.cmd';" ^
+      "'set JWT_SECRET_KEY='+$a.Substring(0,64) | Out-File -Encoding ascii -Append '%ROOT%run\secrets.cmd';" ^
+      "'set INTERNAL_CALL_SECRET='+$a.Substring(0,64) | Out-File -Encoding ascii -Append '%ROOT%run\secrets.cmd'"
+)
+if exist "%ROOT%run\secrets.cmd" call "%ROOT%run\secrets.cmd"
+
+rem ---- 后端环境变量（与 docker-compose 保持一致）----
+set "APP_EDITION=oss"
+set "APP_ENV=production"
+set "SERVICE_MODE=all"
+set "TZ=Asia/Shanghai"
+set "PYTHONPATH=%ROOT%"
+set "DB_DRIVER=asyncpg"
+set "DB_HOST=127.0.0.1"
+set "DB_PORT=%QM_PG_PORT%"
+set "DB_NAME=quantmind"
+set "DB_USER=quantmind"
+set "DB_PASSWORD=quantmind2026"
+set "DATABASE_URL=postgresql+asyncpg://quantmind:quantmind2026@127.0.0.1:%QM_PG_PORT%/quantmind"
+set "POSTGRES_HOST=127.0.0.1"
+set "POSTGRES_PORT=%QM_PG_PORT%"
+set "POSTGRES_USER=quantmind"
+set "POSTGRES_PASSWORD=quantmind2026"
+set "POSTGRES_DB=quantmind"
+set "REDIS_HOST=127.0.0.1"
+set "REDIS_PORT=%QM_REDIS_PORT%"
+set "STORAGE_MODE=local"
+set "MARGIN_STOCK_POOL_PATH=%STORAGE_ROOT%\融资融券.json"
+set "QUANTMIND_ENABLE_WEB_UPDATE=false"
+set "API_PORT=%QM_API_PORT%"
+set "ENGINE_PORT=%QM_ENGINE_PORT%"
+set "TRADE_PORT=%QM_TRADE_PORT%"
+set "STREAM_PORT=%QM_STREAM_PORT%"
+set "API_WORKERS=1"
+set "ENGINE_WORKERS=1"
+set "TRADE_WORKERS=1"
+set "STREAM_WORKERS=1"
+set "TRADE_SERVICE_URL=http://127.0.0.1:%QM_TRADE_PORT%"
+set "ENGINE_SERVICE_URL=http://127.0.0.1:%QM_ENGINE_PORT%"
+set "AI_IDE_SERVICE_URL=http://127.0.0.1:%QM_ENGINE_PORT%"
+set "STREAM_SERVICE_URL=http://127.0.0.1:%QM_STREAM_PORT%"
+set "MARKET_DATA_SERVICE_URL=http://127.0.0.1:%QM_STREAM_PORT%"
+set "STRATEGY_SERVICE_URL=http://127.0.0.1:%QM_ENGINE_PORT%"
+set "PORTFOLIO_SERVICE_URL=http://127.0.0.1:%QM_TRADE_PORT%"
+set "USER_SERVICE_URL=http://127.0.0.1:%QM_TRADE_PORT%"
+set "REAL_TRADING_SERVICE_URL=http://127.0.0.1:%QM_TRADE_PORT%"
+set "ENABLE_TDX_PUSH=false"
+set "ENABLE_REAL_TRADING=false"
+set "DEBUG=false"
+set "LOG_LEVEL=INFO"
+set "STRATEGY_TEMPLATES_DIR=%ROOT%strategy_templates"
+set "QLIB_BACKTEST_RESULT_DIR=%STORAGE_ROOT%\backtest_results"
+set "QLIB_BACKTEST_KERNELS=1"
+set "QM_REPORTS_DIR=%STORAGE_ROOT%\reports"
+set "TRADING_AGENTS_RESULTS_DIR=%STORAGE_ROOT%\reports\trading_agents"
+set "QM_WEB_DIST_DIR=%ROOT%web"
+set "HF_HOME=%STORAGE_ROOT%\hf"
+set "MPLCONFIGDIR=%ROOT%run\mpl"
+set "ENABLE_CRYPTO=false"
+set "QM_QUANTDB_DATA_DIR=%STORAGE_ROOT%\quantdb"
+set "QM_QUANTUS_DATA_DIR=%STORAGE_ROOT%\quantus"
+set "QM_QUANTHK_DATA_DIR=%STORAGE_ROOT%\quanthk"
+set "QM_QUANTBC_DATA_DIR=%STORAGE_ROOT%\quantbc"
+set "QM_QUANTFUTURES_DATA_DIR=%STORAGE_ROOT%\quantfutures"
+if not defined LLM_API_KEY set "LLM_API_KEY=not-configured"
+
+echo [QuantMind] 检查 PostgreSQL ...
+if not exist "%ROOT%pgdata\PG_VERSION" (
+    echo [QuantMind] 首次运行：初始化 PostgreSQL 数据目录 ...
+    echo quantmind2026> "%ROOT%run\pg_pw.txt"
+    "%PGBIN%\initdb.exe" -D "%ROOT%pgdata" -U quantmind -A scram-sha-256 --pwfile="%ROOT%run\pg_pw.txt" -E UTF8 --no-locale >nul
+    del "%ROOT%run\pg_pw.txt"
+)
+"%PYTHON%" "%ROOT%pg_setup.py" wait --timeout 1 >nul 2>&1
+if errorlevel 1 (
+    echo [QuantMind] 启动 PostgreSQL (端口 %QM_PG_PORT%) ...
+    "%PGBIN%\pg_ctl.exe" -D "%ROOT%pgdata" -l "%ROOT%logs\postgres.log" -o "-p %QM_PG_PORT% -c listen_addresses=127.0.0.1" start >nul
+)
+"%PYTHON%" "%ROOT%pg_setup.py" wait --timeout 60 >nul 2>&1
+if errorlevel 1 (
+    echo [!] PostgreSQL 启动失败（端口 %QM_PG_PORT% 可能被占用），见 logs\postgres.log
+    pause
+    exit /b 1
+)
+"%PYTHON%" "%ROOT%pg_setup.py" ensure-db >nul 2>&1
+if errorlevel 1 (
+    echo [!] 创建数据库失败，见 logs\postgres.log
+    pause
+    exit /b 1
+)
+echo [QuantMind] PostgreSQL 就绪
+
+echo [QuantMind] 检查 Redis ...
+"%ROOT%redis\redis-cli.exe" -p %QM_REDIS_PORT% ping 2>nul | findstr PONG >nul
+if errorlevel 1 (
+    echo [QuantMind] 启动 Redis (端口 %QM_REDIS_PORT%) ...
+    start "QuantMind-Redis" /min cmd /c ""%ROOT%redis\redis-server.exe" --port %QM_REDIS_PORT% --bind 127.0.0.1 --dir "%ROOT%run" > "%ROOT%logs\redis.log" 2>&1"
+    set /a TRY=0
+)
+:waitredis
+"%ROOT%redis\redis-cli.exe" -p %QM_REDIS_PORT% ping 2>nul | findstr PONG >nul
+if errorlevel 1 (
+    set /a TRY+=1
+    if %TRY% lss 15 ( timeout /t 1 /nobreak >nul & goto waitredis )
+    echo [!] Redis 启动失败，见 logs\redis.log
+    pause
+    exit /b 1
+)
+echo [QuantMind] Redis 就绪
+
+echo [QuantMind] 启动 QuantMind 后端 (api:%QM_API_PORT% engine:%QM_ENGINE_PORT% trade:%QM_TRADE_PORT% stream:%QM_STREAM_PORT%) ...
+start "QuantMind-Backend" /min cmd /c "cd /d "%ROOT%" && "%PYTHON%" backend\main_oss.py > "%ROOT%logs\backend.log" 2>&1"
+echo [QuantMind] 启动 Celery 回测队列 ...
+start "QuantMind-CeleryWorker" /min cmd /c "cd /d "%ROOT%" && "%PYTHON%" -m celery -A backend.services.engine.qlib_app.celery_config:celery_app worker -Q qlib_backtest_srv --loglevel=info --concurrency=2 --pool=solo > "%ROOT%logs\celery-worker.log" 2>&1"
+start "QuantMind-CeleryBeat" /min cmd /c "cd /d "%ROOT%" && "%PYTHON%" -m celery -A backend.services.engine.qlib_app.celery_config:celery_app beat --loglevel=info --schedule="%ROOT%run\celerybeat-schedule" > "%ROOT%logs\celery-beat.log" 2>&1"
+
+echo [QuantMind] 等待服务就绪（首次启动需初始化数据库，可能需要 1-2 分钟）...
+set /a TRY=0
+:waithttp
+curl -fsS -m 2 http://127.0.0.1:%QM_API_PORT%/health >nul 2>&1
+if errorlevel 1 (
+    set /a TRY+=1
+    if %TRY% lss 180 ( timeout /t 1 /nobreak >nul & goto waithttp )
+    echo [!] 服务启动超时，请查看 logs\backend.log
+    pause
+    exit /b 1
+)
+
+echo ==============================================
+echo [QuantMind] 已启动: http://127.0.0.1:%QM_API_PORT%/
+echo ==============================================
+start "" http://127.0.0.1:%QM_API_PORT%/
+echo [QuantMind] 服务在后台运行；停止请运行 stop.bat
+timeout /t 5 >nul
+endlocal

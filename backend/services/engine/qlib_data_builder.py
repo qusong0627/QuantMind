@@ -108,33 +108,43 @@ class QlibDataBuilder:
         from backend.services.engine.data_platform import quantus_hub, quanthk_hub, quantbc_hub, quantfutures_hub
 
         market_upper = market.upper()
+        _qlib_sub = {
+            "CN": "cn_data",
+            "US": "us_data",
+            "HK": "hk_data",
+            "CRYPTO": "bc_data",
+            "FUTURES": "futures_data",
+        }[market_upper]
         if market_upper == "CN":
             if data_dir is None:
                 data_dir = _resolve_cn_data_dir()
             hub = QuantDBDataHub(data_dir)
-            default_qlib = Path("/data/qlib/cn_data")
         elif market_upper == "US":
             if data_dir is None:
                 data_dir = quantus_hub._resolve_quantus_data_dir()
             hub = quantus_hub.QuantUSDataHub(data_dir)
-            default_qlib = Path("/data/qlib/us_data")
         elif market_upper == "HK":
             if data_dir is None:
                 data_dir = quanthk_hub._resolve_quanthk_data_dir()
             hub = quanthk_hub.QuantHKDataHub(data_dir)
-            default_qlib = Path("/data/qlib/hk_data")
         elif market_upper == "CRYPTO":
             if data_dir is None:
                 data_dir = quantbc_hub._resolve_quantbc_data_dir()
             hub = quantbc_hub.QuantBCDataHub(data_dir)
-            default_qlib = Path("/data/qlib/bc_data")
         elif market_upper == "FUTURES":
             if data_dir is None:
                 data_dir = quantfutures_hub._resolve_quantfutures_data_dir()
             hub = quantfutures_hub.QuantFuturesDataHub(data_dir)
-            default_qlib = Path("/data/qlib/futures_data")
         else:
             raise ValueError(f"未知市场: {market_upper}")
+
+        # 默认输出目录：容器布局(/data/qlib)存在时沿用；否则写入
+        # {data_dir}/.qlib_cache/（裸机/便携部署无 /data 写权限，
+        # 且 resolve_qlib_provider_uri 识别 .qlib_cache 路径，读写一致）
+        if Path("/data/qlib").is_dir():
+            default_qlib = Path(f"/data/qlib/{_qlib_sub}")
+        else:
+            default_qlib = Path(data_dir) / ".qlib_cache" / _qlib_sub
 
         return cls(hub, qlib_dir or default_qlib, market=market_upper)
 

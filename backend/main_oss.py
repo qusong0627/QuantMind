@@ -59,13 +59,32 @@ if not os.getenv("INTERNAL_CALL_SECRET"):
 # features_real 是实际数据目录，Qlib 期望 features/
 # 通过 qlib_paths 统一解析，优先 QuantDB 缓存路径
 from backend.shared.qlib_paths import resolve_qlib_provider_uri
+
 _qlib_cn = resolve_qlib_provider_uri()
 if os.path.isdir(_qlib_cn):
     _features = os.path.join(_qlib_cn, "features")
     _features_real = os.path.join(_qlib_cn, "features_real")
     if os.path.isdir(_features_real) and not os.path.isdir(_features):
-        os.symlink(_features_real, _features)
-        logger.info("Created symlink: %s -> %s", _features, _features_real)
+        try:
+            if sys.platform == "win32":
+                # Windows 下 os.symlink 需要管理员/开发者模式，目录联接(junction)免权限
+                import subprocess
+
+                subprocess.run(
+                    ["cmd", "/c", "mklink", "/J", _features, _features_real],
+                    check=True,
+                    capture_output=True,
+                )
+            else:
+                os.symlink(_features_real, _features)
+            logger.info("Created symlink: %s -> %s", _features_real, _features)
+        except Exception:
+            logger.warning(
+                "Failed to link qlib features dir %s -> %s",
+                _features_real,
+                _features,
+                exc_info=True,
+            )
 
 
 def get_workers_config() -> dict:
@@ -367,6 +386,14 @@ def run_all_services():
                 logger.warning(f"Force killed {name} service")
 
 
+def _sql_file(rel_under_backend: str) -> str:
+    """定位启动期 SQL 文件：优先容器 /app 布局，回退代码相对布局（便携版/裸机）。"""
+    p = os.path.join("/app/backend", rel_under_backend)
+    if os.path.isfile(p):
+        return p
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), rel_under_backend)
+
+
 def _ensure_database_schema():
     """启动前自动检测并创建缺失的数据库表。
 
@@ -375,7 +402,7 @@ def _ensure_database_schema():
     """
     import subprocess
 
-    init_sql = "/app/backend/shared/db_init.sql"
+    init_sql = _sql_file("shared/db_init.sql")
     if not os.path.isfile(init_sql):
         logger.warning("数据库初始化 SQL 未找到: %s，跳过自动建表", init_sql)
         return
@@ -421,7 +448,9 @@ def _ensure_market_analysis_tables(env: dict) -> None:
     """
     import subprocess
 
-    migration_sql = "/app/backend/services/api/market_analysis/migrations/001_create_market_analysis.sql"
+    migration_sql = _sql_file(
+        "services/api/market_analysis/migrations/001_create_market_analysis.sql"
+    )
     if not os.path.isfile(migration_sql):
         logger.debug("市场分析建表 SQL 未找到: %s", migration_sql)
         return
@@ -449,7 +478,7 @@ def _ensure_market_analysis_tables(env: dict) -> None:
 
 def _ensure_database_schema_python():
     """psql 不可用时的回退方案：用 Python psycopg2 执行初始化 SQL。"""
-    init_sql = "/app/backend/shared/db_init.sql"
+    init_sql = _sql_file("shared/db_init.sql")
     if not os.path.isfile(init_sql):
         return
 
@@ -469,7 +498,9 @@ def _ensure_database_schema_python():
         with conn.cursor() as cur:
             cur.execute(sql)
             # 市场分析建表（qm_market_sectors 等，不在 db_init.sql 内）
-            market_sql = "/app/backend/services/api/market_analysis/migrations/001_create_market_analysis.sql"
+            market_sql = _sql_file(
+                "services/api/market_analysis/migrations/001_create_market_analysis.sql"
+            )
             if os.path.isfile(market_sql):
                 with open(market_sql) as f:
                     cur.execute(f.read())

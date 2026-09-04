@@ -7,7 +7,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from backend.services.api.routers import (
@@ -164,6 +164,19 @@ install_access_log_middleware(app, service_name="quantmind-api")
 uploads_dir = os.environ.get("UPLOADS_DIR", "/data/uploads" if os.path.exists("/data/uploads") else "data/uploads")
 os.makedirs(uploads_dir, exist_ok=True)
 app.mount("/uploads", StaticFiles(directory=uploads_dir), name="uploads")
+
+# 便携版/一体化部署：设置 QM_WEB_DIST_DIR 后由 API 服务直接伺服前端构建产物，
+# 不依赖独立的 nginx/web 容器。未设置时行为与原来完全一致。
+_WEB_DIST_DIR = Path(os.getenv("QM_WEB_DIST_DIR", "")).resolve() if os.getenv("QM_WEB_DIST_DIR") else None
+
+# SPA 静态资源挂载注册在业务路由之前：/assets 必须优先于 qwenpaw_ui_proxy
+# 等路由中的 /assets 通配代理（后者上游在便携部署中不存在，会 502）
+if _WEB_DIST_DIR and (_WEB_DIST_DIR / "assets").is_dir():
+    app.mount(
+        "/assets",
+        StaticFiles(directory=_WEB_DIST_DIR / "assets"),
+        name="web-assets",
+    )
 
 # 文档静态资源（供管理后台"打开部署指南"等链接使用）
 # 容器内 /app/docs（由 docker bind mount 挂入），本地开发用仓库根 docs/
@@ -405,12 +418,32 @@ async def health_check():
 
 @app.get("/")
 async def root():
+    if _WEB_DIST_DIR and (_WEB_DIST_DIR / "index.html").is_file():
+        return FileResponse(_WEB_DIST_DIR / "index.html")
     return {"message": "QuantMind API Service V2 is running"}
 
 
 @app.get("/metrics")
 async def metrics():
     return build_metrics_response()
+
+
+if _WEB_DIST_DIR and _WEB_DIST_DIR.is_dir():
+    # SPA 兜底路由（注册在所有 API 路由之后，避免抢占 /health、/api 等既有路由；
+    # /assets 静态挂载已提前注册，见文件前段）
+
+    @app.get("/{spa_path:path}", include_in_schema=False)
+    async def web_spa(spa_path: str):
+        candidate = (_WEB_DIST_DIR / spa_path).resolve()
+        # 只允许命中 dist 目录内的真实文件，其余回退到 index.html（前端路由）
+        if (
+            spa_path
+            and ".." not in spa_path
+            and candidate.is_file()
+            and candidate.is_relative_to(_WEB_DIST_DIR)
+        ):
+            return FileResponse(candidate)
+        return FileResponse(_WEB_DIST_DIR / "index.html")
 
 
 if __name__ == "__main__":

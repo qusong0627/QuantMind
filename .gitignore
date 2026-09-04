@@ -264,3 +264,7 @@ backend/scripts/evaluate_signal_factors.py
 # 内部发布脚本（含 COS 上传，不进开源仓库）
 scripts/publish_electron_to_cos.py
 REFACTOR_PLAN.md
+
+# 便携版打包产物
+deploy/portable/build/
+deploy/portable/dist/
