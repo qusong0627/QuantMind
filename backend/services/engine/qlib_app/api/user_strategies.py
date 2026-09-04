@@ -319,16 +319,44 @@ async def _perform_sync(user_id: str):
 
     templates = get_all_templates()
     synced_count = 0
+    retagged_count = 0
+
+    def _retag_hk(name: str) -> bool:
+        """给历史同步但缺 market 标记的港股模板补打 HK 标（幂等，SQL 带守卫）。"""
+        try:
+            uid_int = _ensure_int_user_id(user_id)
+            with get_db() as session:
+                session.execute(
+                    text(
+                        "UPDATE strategies "
+                        "SET parameters = jsonb_set(parameters, '{market}', '\"HK\"', true) "
+                        "WHERE user_id = :uid AND name = :name "
+                        "AND (parameters->>'market' IS NULL)"
+                    ),
+                    {"uid": uid_int, "name": name},
+                )
+                session.commit()
+            return True
+        except Exception:
+            return False
+
     for t in templates:
         # 检查是否已存在同名策略 (同步 DB 调用，放线程池)
         existing = await asyncio.to_thread(svc.list, user_id=user_id, search=t.name)
-        if any(s["name"] == t.name for s in existing):
+        match = next((s for s in existing if s["name"] == t.name), None)
+        is_hk_only = bool(t.markets and "hong_kong" in t.markets and "a_share" not in t.markets)
+
+        if match is not None:
+            # 旧库补标：历史同步的港股模板可能缺 market 标记，会混进 A 股策略库视图。
+            # SQL 内带 (parameters->>'market' IS NULL) 守卫，幂等可重复执行。
+            if is_hk_only and await asyncio.to_thread(_retag_hk, t.name):
+                retagged_count += 1
             continue
 
         params = {"strategy_type": t.id, "topk": 50, "signal": "<PRED>"}
         # 市场专属模板（strategy_templates/*.json markets 字段）标注市场，
         # 港股模板写 market=HK 供策略库按市场过滤；A 股（markets 为空）不写 = 现状
-        if t.markets and "hong_kong" in t.markets and "a_share" not in t.markets:
+        if is_hk_only:
             params["market"] = "HK"
 
         await svc.save(
@@ -344,6 +372,10 @@ async def _perform_sync(user_id: str):
             },
         )
         synced_count += 1
+    if retagged_count:
+        StructuredTaskLogger(logger, "user-strategies", {"user_id": user_id}).info(
+            "sync_retag", f"为 {retagged_count} 个历史同步的港股模板补打市场标记"
+        )
     return synced_count
 
 

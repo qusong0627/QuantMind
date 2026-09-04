@@ -244,7 +244,8 @@ class StrategyManagementService {
   async loadStrategies(_userId?: string, market?: string): Promise<StrategyFile[]> {
     try {
       const response = await this.client.get('/api/v1/strategies', {
-        params: market && market !== 'CN' ? { market } : undefined,
+        // CN/A 也要传：后端会把港股模板(market=HK)排除在 A 股视图外，缺省则全量返回
+        params: market ? { market } : undefined,
       });
       const data = this.unwrapResponse<any>(response.data);
       // 后端 StrategyListResponse 格式: { total: number, strategies: [...] }
