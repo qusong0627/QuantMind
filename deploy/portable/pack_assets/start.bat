@@ -30,6 +30,17 @@ if not exist "%PYTHON%" (
 rem ---- 运行目录 ----
 if not exist "%ROOT%logs" md "%ROOT%logs" >nul 2>&1
 if not exist "%ROOT%run" md "%ROOT%run" >nul 2>&1
+echo [%date% %time%] start.bat 启动 (工作目录 %ROOT%) >> "%ROOT%logs\startup.log" 2>nul
+
+rem ---- 网络共享路径检测：PG/Redis 在 SMB 上无法运行，提示拷贝本地 ----
+if "%ROOT:~0,2%"=="\\" (
+    echo [!] 检测到从网络共享路径(\\...)运行，PostgreSQL 在共享盘上无法工作。
+    echo     请把整个 QuantMind-Portable-win-x64 文件夹拷贝到本机磁盘后再运行。
+    echo     例如: C:\QuantMind
+    pause
+    exit /b 2
+)
+
 for %%D in (models uploads strategies reports backtest_results hf qlib_data quantdb quantus quanthk quantbc quantfutures) do (
     if not exist "%STORAGE_ROOT%\%%D" md "%STORAGE_ROOT%\%%D" >nul 2>&1
 )
@@ -141,6 +152,7 @@ if errorlevel 1 (
     exit /b 1
 )
 echo [QuantMind] PostgreSQL 就绪
+echo [%date% %time%] PostgreSQL 就绪 >> "%ROOT%logs\startup.log" 2>nul
 
 echo [QuantMind] 检查 Redis ...
 "%ROOT%redis\redis-cli.exe" -p %QM_REDIS_PORT% ping 2>nul | findstr PONG >nul
@@ -159,8 +171,10 @@ if errorlevel 1 (
     exit /b 1
 )
 echo [QuantMind] Redis 就绪
+echo [%date% %time%] Redis 就绪 >> "%ROOT%logs\startup.log" 2>nul
 
 echo [QuantMind] 启动 QuantMind 后端 (api:%QM_API_PORT% engine:%QM_ENGINE_PORT% trade:%QM_TRADE_PORT% stream:%QM_STREAM_PORT%) ...
+echo [%date% %time%] 拉起后端/worker 进程 >> "%ROOT%logs\startup.log" 2>nul
 start "QuantMind-Backend" /min cmd /c "cd /d "%ROOT%" && "%PYTHON%" backend\main_oss.py > "%ROOT%logs\backend.log" 2>&1"
 echo [QuantMind] 启动 Celery 回测队列 ...
 start "QuantMind-CeleryWorker" /min cmd /c "cd /d "%ROOT%" && "%PYTHON%" -m celery -A backend.services.engine.qlib_app.celery_config:celery_app worker -Q qlib_backtest_srv --loglevel=info --concurrency=2 --pool=solo > "%ROOT%logs\celery-worker.log" 2>&1"
@@ -173,7 +187,8 @@ curl -fsS -m 2 http://127.0.0.1:%QM_API_PORT%/health >nul 2>&1
 if errorlevel 1 (
     set /a TRY+=1
     if %TRY% lss 180 ( timeout /t 1 /nobreak >nul & goto waithttp )
-    echo [!] 服务启动超时，请查看 logs\backend.log
+    echo [!] 服务启动超时，请查看 logs\backend.log 与 logs\startup.log
+    echo [%date% %time%] 服务启动超时 >> "%ROOT%logs\startup.log" 2>nul
     pause
     exit /b 1
 )
@@ -181,7 +196,10 @@ if errorlevel 1 (
 echo ==============================================
 echo [QuantMind] 已启动: http://127.0.0.1:%QM_API_PORT%/
 echo ==============================================
+echo [%date% %time%] 服务就绪，打开浏览器 >> "%ROOT%logs\startup.log" 2>nul
 start "" http://127.0.0.1:%QM_API_PORT%/
 echo [QuantMind] 服务在后台运行；停止请运行 stop.bat
-timeout /t 5 >nul
+echo [QuantMind] 启动过程记录见 logs\startup.log，服务日志见 logs\backend.log
+echo [QuantMind] 本窗口可手动关闭
+pause >nul
 endlocal
