@@ -2,7 +2,7 @@
 # QuantMind 便携版 GPU 增补安装脚本
 # 用法: 把 GPU 增补包解压到便携包根目录，然后 bash install_gpu.sh
 #
-# 效果: 包内 torch 从 CPU 版(2.9.1+cpu)切换为 CUDA 版(2.9.1+cu128，含全部 CUDA 运行库)
+# 效果: 包内 torch 从 CPU 版切换为 CUDA 版（与 quantmind-oss-gpu GPU 镜像同版本，含全套 CUDA 运行库）
 #
 # ── 显卡/驱动要求 ──────────────────────────────────────────
 #   * NVIDIA 显卡，架构 RTX 20 系(Turing)及更新：20/30/40/50 系、
