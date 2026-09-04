@@ -36,8 +36,7 @@ const AdminPage: React.FC = () => {
                 { key: 'data', label: '数据集目录' },
                 { key: 'qlib', label: 'Qlib 数据管理' },
                 { key: 'quotes', label: '数据源监控' },
-                { key: 'news', label: 'RSS源管理' },
-                { key: 'tags', label: '标签管理' },
+                { key: 'news', label: '新闻情感' },
             ]
         },
         { 
@@ -57,7 +56,7 @@ const AdminPage: React.FC = () => {
                 { key: 'models', label: '模型管理' },
                 { key: 'feature-catalog', label: '特征字典' },
                 { key: 'rd-agent', label: 'AlphaAgent因子' },
-                { key: 'inference', label: '推理监控（未开发）' },
+                { key: 'inference', label: '推理监控（开发中）' },
             ]
         },
         {
@@ -75,11 +74,11 @@ const AdminPage: React.FC = () => {
             icon: <SwapOutlined />, 
             label: '交易核心', 
             children: [
-                { key: 'orders', label: '订单管理（未开发）' },
-                { key: 'risk', label: '风险控制（未开发）' },
+                { key: 'orders', label: '订单管理（开发中）' },
+                { key: 'risk', label: '风险控制（开发中）' },
             ]
         },
-        { key: 'settings', icon: <SettingOutlined />, label: '系统设置（未开发）' },
+        { key: 'settings', icon: <SettingOutlined />, label: '系统设置（开发中）' },
     ];
 
     const currentKey = location.pathname.split('/').pop() || 'overview';
@@ -141,7 +140,7 @@ const AdminPage: React.FC = () => {
                 </header>
 
                 {/* Content Container */}
-                <main className="flex-1 overflow-y-auto p-6 bg-slate-50/50">
+                <main className="flex-1 overflow-y-auto px-6 pt-6 pb-[60px] bg-slate-50/50">
                     {/* 资讯监控 / RD 因子挖掘等大屏页面用全宽，其余保留 1400px 阅读宽度 */}
                     <div
                         className={

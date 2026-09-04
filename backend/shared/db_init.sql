@@ -229,6 +229,7 @@ CREATE TABLE IF NOT EXISTS news_article_enrichment (
     enriched_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     model_version       VARCHAR(64) NOT NULL,
     title_hash          BIGINT,
+    title               TEXT,
     error               TEXT,
     -- extended columns from migrations
     countries           TEXT[]      NOT NULL DEFAULT '{}',

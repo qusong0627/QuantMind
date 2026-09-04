@@ -4,23 +4,33 @@
  * 对 finance_lexicon 表的 CRUD 操作：查看 / 新增 / 编辑 / 删除 / 启禁用
  */
 
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Button,
+  Card,
+  Col,
   Form,
   Input,
   InputNumber,
   Modal,
   Popconfirm,
+  Row,
   Select,
   Space,
+  Statistic,
   Switch,
   Table,
   Tag,
   Typography,
   message,
 } from 'antd';
-import { DeleteOutlined, EditOutlined, PlusOutlined, ReloadOutlined, TagsOutlined } from '@ant-design/icons';
+import {
+  DeleteOutlined,
+  EditOutlined,
+  PlusOutlined,
+  ReloadOutlined,
+  TagsOutlined,
+} from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import { newsService, type LexiconTag } from '../../news/services/newsService';
 
@@ -91,6 +101,20 @@ export const AdminTagManagement: React.FC = () => {
   useEffect(() => {
     loadTags();
   }, [loadTags]);
+
+  // 统计概览（基于当前加载列表前端统计；如需全局统计再加后端接口）
+  const stats = useMemo(() => {
+    const enabled = tags.filter((t) => t.enabled).length;
+    const kindCount: Record<string, number> = {};
+    tags.forEach((t) => {
+      kindCount[t.kind] = (kindCount[t.kind] || 0) + 1;
+    });
+    const topKind = Object.entries(kindCount).sort((a, b) => b[1] - a[1])[0];
+    const topKindLabel = topKind
+      ? (KIND_OPTIONS.find((o) => o.value === topKind[0])?.label ?? topKind[0])
+      : '—';
+    return { enabled, disabled: total - enabled, topKind, topKindLabel };
+  }, [tags, total]);
 
   const handleCreate = () => {
     setEditingTag(null);
@@ -231,62 +255,88 @@ export const AdminTagManagement: React.FC = () => {
   ];
 
   return (
-    <div>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-          <TagsOutlined style={{ fontSize: 20, color: '#6366f1' }} />
-          <Title level={5} style={{ margin: 0 }}>标签管理</Title>
-          <Text type="secondary" style={{ fontSize: 12 }}>finance_lexicon ({total} 条)</Text>
+    <div className="p-6 space-y-4">
+      {/* 顶部标题与统计 */}
+      <div className="flex items-center justify-between pb-1">
+        <div>
+          <Title level={4} style={{ margin: 0, fontWeight: 700 }}>
+            <TagsOutlined style={{ marginRight: 8, color: '#6366f1' }} />
+            标签管理
+          </Title>
+          <Text type="secondary" style={{ fontSize: 13 }}>
+            新闻情感 / 事件词条词典（finance_lexicon）· 支持情感词、事件实体、部门词条维护
+          </Text>
         </div>
         <Space>
-          <Button icon={<ReloadOutlined />} onClick={loadTags}>刷新</Button>
-          <Button type="primary" icon={<PlusOutlined />} onClick={handleCreate}>新增词条</Button>
+          <Button icon={<ReloadOutlined />} onClick={loadTags} style={{ borderRadius: 6 }}>刷新</Button>
+          <Button type="primary" icon={<PlusOutlined />} onClick={handleCreate} style={{ borderRadius: 6 }}>新增词条</Button>
         </Space>
       </div>
 
-      <div style={{ display: 'flex', gap: 12, marginBottom: 12, flexWrap: 'wrap' }}>
-        <Select
-          allowClear
-          placeholder="按标签类型筛选"
-          value={filterEventTag}
-          onChange={(v) => { setFilterEventTag(v); setPage(1); }}
-          options={EVENT_TAG_OPTIONS}
-          style={{ minWidth: 160 }}
-        />
-        <Select
-          allowClear
-          placeholder="按情感/事件筛选"
-          value={filterKind}
-          onChange={(v) => { setFilterKind(v); setPage(1); }}
-          options={KIND_OPTIONS}
-          style={{ minWidth: 160 }}
-        />
-        <Input.Search
-          allowClear
-          placeholder="搜索词条..."
-          value={filterKeyword}
-          onChange={(e) => setFilterKeyword(e.target.value)}
-          onSearch={() => { setPage(1); loadTags(); }}
-          style={{ width: 240 }}
-        />
-      </div>
+      {/* 统计概览卡片 */}
+      <Row gutter={14}>
+        <Col span={8}>
+          <Card size="small" variant="borderless" style={{ background: '#eef2ff', borderRadius: 10 }}>
+            <Statistic title="词条总数" value={total} suffix="条" valueStyle={{ color: '#4338ca', fontWeight: 700 }} style={{ textAlign: 'center' }} />
+          </Card>
+        </Col>
+        <Col span={8}>
+          <Card size="small" variant="borderless" style={{ background: '#f0fdf4', borderRadius: 10 }}>
+            <Statistic title="已启用" value={stats.enabled} suffix="条" valueStyle={{ color: '#16a34a', fontWeight: 700 }} style={{ textAlign: 'center' }} />
+          </Card>
+        </Col>
+        <Col span={8}>
+          <Card size="small" variant="borderless" style={{ background: '#fff7ed', borderRadius: 10 }}>
+            <Statistic title="最多类型" value={stats.topKindLabel} suffix={stats.topKind ? `(${stats.topKind[1]} 条)` : ''} valueStyle={{ color: '#d97706', fontWeight: 700 }} style={{ textAlign: 'center' }} />
+          </Card>
+        </Col>
+      </Row>
 
-      <Table
-        rowKey="id"
-        columns={columns}
-        dataSource={tags}
-        loading={loading}
-        size="small"
-        pagination={{
-          current: page,
-          pageSize,
-          total,
-          showSizeChanger: true,
-          showTotal: (t) => `共 ${t} 条`,
-          onChange: (p, ps) => { setPage(p); setPageSize(ps); },
-        }}
-        scroll={{ y: 'calc(var(--app-h) - 340px)' }}
-      />
+      {/* 筛选栏 */}
+      <Card styles={{ body: { padding: 0 } }} style={{ borderRadius: 10, overflow: 'hidden', border: '1px solid #e2e8f0' }}>
+        <div className="flex flex-wrap items-center gap-3 px-4 py-3 border-b border-slate-100 bg-slate-50/50">
+          <Select
+            allowClear
+            placeholder="按标签类型筛选"
+            value={filterEventTag}
+            onChange={(v) => { setFilterEventTag(v); setPage(1); }}
+            options={EVENT_TAG_OPTIONS}
+            style={{ minWidth: 160 }}
+          />
+          <Select
+            allowClear
+            placeholder="按情感/事件筛选"
+            value={filterKind}
+            onChange={(v) => { setFilterKind(v); setPage(1); }}
+            options={KIND_OPTIONS}
+            style={{ minWidth: 160 }}
+          />
+          <Input.Search
+            allowClear
+            placeholder="搜索词条..."
+            value={filterKeyword}
+            onChange={(e) => setFilterKeyword(e.target.value)}
+            onSearch={() => { setPage(1); loadTags(); }}
+            style={{ width: 240 }}
+          />
+        </div>
+
+        <Table
+          rowKey="id"
+          columns={columns}
+          dataSource={tags}
+          loading={loading}
+          size="middle"
+          pagination={{
+            current: page,
+            pageSize,
+            total,
+            showSizeChanger: true,
+            showTotal: (t) => `共 ${t} 条`,
+            onChange: (p, ps) => { setPage(p); setPageSize(ps); },
+          }}
+        />
+      </Card>
 
       <Modal
         title={editingTag ? '编辑词条' : '新增词条'}

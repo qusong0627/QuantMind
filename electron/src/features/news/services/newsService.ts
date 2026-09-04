@@ -220,6 +220,21 @@ class NewsService {
     return (r as any).data ?? (r as any);
   }
 
+  /** FinBERT 中文金融情感模型健康状态（管理后台诊断面板） */
+  async adminFinbertStatus(): Promise<{
+    available: boolean;
+    use_finbert: boolean;
+    model: string;
+    device: number;
+    sample_inference: { label: string; confidence: number } | null;
+    db_total_24h: number;
+    db_finbert_ratio_24h: number | null;
+    tip: string;
+  }> {
+    const r = await apiClient.get('/news/enrichment/finbert-status');
+    return (r as any).data ?? (r as any);
+  }
+
   async toggleStar(id: number, starred: boolean): Promise<void> {
     await apiClient.post(`/news/articles/${id}/star`, null, { params: { starred } });
   }

@@ -84,12 +84,6 @@ INFRA_SERVICES = [
         "port": int(os.getenv("ADMIN_DASHBOARD_HUNTLY_PORT", "80")),
         "desc": "Huntly RSS 阅读器 (8090)",
     },
-    {
-        "service": "dashboard",
-        "host": os.getenv("ADMIN_DASHBOARD_DASHBOARD_HOST", "quantmind-dashboard"),
-        "port": int(os.getenv("ADMIN_DASHBOARD_DASHBOARD_PORT", "8501")),
-        "desc": "Streamlit 数据看板 (8501)",
-    },
 ]
 
 
@@ -380,13 +374,11 @@ async def get_dashboard_metrics(
             """,
             )
 
-            # 4. 内容统计 (社区)
-            content_row = await _safe_fetch_one(
+            # 4. 模型统计 (用户训练产出的模型)
+            model_row = await _safe_fetch_one(
                 session,
                 """
-                SELECT 
-                    (SELECT COUNT(*) FROM community_posts) as posts,
-                    (SELECT COUNT(*) FROM community_comments) as comments
+                SELECT COUNT(*) as total FROM qm_user_models
             """,
             )
 
@@ -404,9 +396,8 @@ async def get_dashboard_metrics(
                     "live": strategy_row.get("live") or 0,
                     "backtesting": backtest_row.get("backtesting") or 0,
                 },
-                "content": {
-                    "posts": content_row.get("posts") or 0,
-                    "comments": content_row.get("comments") or 0,
+                "models": {
+                    "total": model_row.get("total") or 0,
                 },
                 "system": _build_system_metrics(health_score, uptime_days, services),
             }
@@ -424,7 +415,7 @@ async def get_dashboard_metrics(
             data={
                 "users": {"total": 0, "active": 0, "new_today": 0},
                 "strategies": {"total": 0, "live": 0, "backtesting": 0},
-                "content": {"posts": 0, "comments": 0},
+                "models": {"total": 0},
                 "system": _build_system_metrics(health_score, uptime_days, services),
             },
         )

@@ -76,10 +76,9 @@ const AdminDataManagement = lazy(() => import('./features/admin/components/Admin
 const AdminQlibDataPanel = lazy(() => import('./features/admin/components/AdminQlibDataPanel').then(m => ({ default: m.AdminQlibDataPanel })));
 const AdminStrategyTemplates = lazy(() => import('./features/admin/components/AdminStrategyTemplates').then(m => ({ default: m.AdminStrategyTemplates })));
 const AdminNewsPage = lazy(() => import('./features/news/components/NewsPanel').then(m => ({ default: m.NewsPanel })));
-const AdminRssSources = lazy(() => import('./features/admin/components/AdminRssSources').then(m => ({ default: m.AdminRssSources })));
 const AdminRDAgentFactors = lazy(() => import('./features/admin/components/AdminRDAgentFactors').then(m => ({ default: m.AdminRDAgentFactors })));
 const AdminDataPlatform = lazy(() => import('./features/admin/components/AdminDataPlatform').then(m => ({ default: m.AdminDataPlatform })));
-const AdminTagManagement = lazy(() => import('./features/admin/components/AdminTagManagement').then(m => ({ default: m.AdminTagManagement })));
+const AdminNewsEmotion = lazy(() => import('./features/admin/components/AdminNewsEmotion').then(m => ({ default: m.default })));
 const AdminFeatureCatalog = lazy(() => import('./features/admin/components/AdminFeatureCatalog').then(m => ({ default: m.AdminFeatureCatalog })));
 const AdminTrainingDatasets = lazy(() => import('./features/admin/components/AdminTrainingDatasets').then(m => ({ default: m.AdminTrainingDatasets })));
 const AdminAutoDLNodes = lazy(() => import('./features/admin/components/AdminAutoDLNodes').then(m => ({ default: m.AdminAutoDLNodes })));
@@ -725,8 +724,9 @@ export default function App() {
                     <Route path="data" element={<Suspense fallback={<Spin size="large" />}><AdminDataManagement /></Suspense>} />
                     <Route path="qlib" element={<Suspense fallback={<Spin size="large" />}><AdminQlibDataPanel /></Suspense>} />
                     <Route path="strategies" element={<Suspense fallback={<Spin size="large" />}><AdminStrategyTemplates /></Suspense>} />
-                    <Route path="news" element={<Suspense fallback={<Spin size="large" />}><AdminRssSources /></Suspense>} />
-                    <Route path="tags" element={<Suspense fallback={<Spin size="large" />}><AdminTagManagement /></Suspense>} />
+                    <Route path="news" element={<Suspense fallback={<Spin size="large" />}><AdminNewsEmotion /></Suspense>} />
+                    <Route path="tags" element={<Navigate to="/admin/news" replace />} />
+                    <Route path="finbert" element={<Navigate to="/admin/news" replace />} />
                     <Route path="rd-agent" element={<Suspense fallback={<Spin size="large" />}><AdminRDAgentFactors /></Suspense>} />
                     <Route path="feature-catalog" element={<Suspense fallback={<Spin size="large" />}><AdminFeatureCatalog /></Suspense>} />
                     <Route path="autodl-nodes" element={<Suspense fallback={<Spin size="large" />}><AdminAutoDLNodes /></Suspense>} />

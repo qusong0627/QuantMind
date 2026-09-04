@@ -114,6 +114,14 @@ include = ["rdagent*"]
 # 大量包目录缺 __init__.py，显式 packages=["rdagent"] 会漏装导致 import 失败）
 namespaces = true
 
+[tool.setuptools.package-data]
+# 关键：setuptools 默认只打包 .py，会漏装 rdagent 运行期依赖的数据文件
+# （scenarios/*/share.yaml、prompts *.yaml、*.md/*.txt 模板、azsync.sh 等）。
+# 缺失会让 DockerConf.populate_exclude_chmod_paths 加载 share.yaml 时抛
+# FileNotFoundError（如 scenarios.finetune.share），导致 RDLoop 无法启动。
+# 每个被发现的（含 namespace）包目录都会应用下列 glob，覆盖分散的数据文件。
+"*" = ["*.yaml", "*.yml", "*.md", "*.txt", "*.sh", "*.json", "*.png", "*.ipynb", "*.example", "*.csv"]
+
 [tool.setuptools.dynamic]
 dependencies = {file = ["requirements.txt"]}
 

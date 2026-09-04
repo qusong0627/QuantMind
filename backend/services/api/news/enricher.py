@@ -370,12 +370,19 @@ def run_enrichment_batch(limit: int = 200) -> int:
                     long_text = fetch_page_content(client, pid)
                     if long_text and len(long_text) > len(short_text):
                         short_text = long_text
+                # 每篇独立事务：任何单篇 SQL 出错都不应把连接带进 aborted 状态
+                # 从而让后续整批陪葬（'current transaction is aborted'）。
+                # 失败后必须 rollback 清空残留事务，否则同连接后续语句全部失败。
                 try:
+                    conn.rollback()
                     result = enrich_article(pid, title, short_text)
                     _upsert_enrichment(conn, result, _title_hash(title), title)
+                    conn.commit()
                     n_ok += 1
                 except Exception as e:
+                    conn.rollback()
                     logger.warning("enrich page=%d 失败: %s", pid, e)
+                    # 回滚后再尝试写 error 记录，失败同样回滚
                     try:
                         _upsert_enrichment(conn, EnrichmentResult(
                             huntly_page_id=pid,
@@ -388,9 +395,11 @@ def run_enrichment_batch(limit: int = 200) -> int:
                             model_version=MODEL_VERSION,
                             error=str(e)[:500],
                         ), _title_hash(title), title)
+                        conn.commit()
                     except Exception:
-                        pass
-        conn.commit()
+                        conn.rollback()
+        # 最外层不再统一 commit（已逐篇提交）；仅清理可能残留的事务
+        conn.rollback()
 
     logger.info(
         "news enrich batch 完成: pending=%d, ok=%d, cost=%.2fs",
@@ -570,6 +579,12 @@ def run_full_rebuild(force: bool = False) -> int:
 
             def _flush_pg_error(cur_conn, pid: int, e: Exception, title: str | None):
                 logger.warning("rebuild page=%d 失败: %s", pid, e)
+                # 失败后必须 rollback，否则连接进入 aborted 状态，后续语句全报
+                # 'current transaction is aborted'
+                try:
+                    cur_conn.rollback()
+                except Exception:
+                    pass
                 try:
                     _upsert_enrichment(cur_conn, EnrichmentResult(
                         huntly_page_id=pid,
@@ -583,7 +598,10 @@ def run_full_rebuild(force: bool = False) -> int:
                         error=str(e)[:500],
                     ), _title_hash(title), title)
                 except Exception:
-                    pass
+                    try:
+                        cur_conn.rollback()
+                    except Exception:
+                        pass
 
             def _flush(chunk_items):
                 nonlocal n_ok, n_fail

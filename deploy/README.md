@@ -4,15 +4,15 @@
 
 | 方式 | 适用场景 | 入口 |
 | --- | --- | --- |
-| 完整离线部署 | 迁移完整业务数据、模型与 Qlib 数据；网络不稳定 | `offline-deploy.sh` |
-| 在线源码部署 | 新服务器可稳定访问代码和镜像仓库 | `deploy.sh` |
+| 完整部署 | 从 CDN 下载完整业务数据、模型与 Qlib 数据包，一键迁移；开箱即用 | `full-deploy.sh` |
+| 在线源码部署 | 新服务器可稳定访问代码和镜像仓库，部署后另行准备数据 | `deploy.sh` |
 | 一键更新 | 已部署服务器更新代码和核心服务 | `update.sh` |
 
 所有脚本支持 Ubuntu 22.04 / 24.04，默认项目目录为 `/opt/quantmind`。
 
-## 完整离线部署
+## 完整部署
 
-离线包 CDN 目录默认是 `https://cdn.quantmind.cloud/quantmind-offline`，应包含：
+完整部署包 CDN 目录默认是 `https://cdn.quantmind.cloud/quantmind-offline`，应包含：
 
 ```text
 SHA256SUMS
@@ -24,16 +24,16 @@ README.txt
 ```
 
 ```bash
-curl -fsSL https://gitee.com/qusong0627/QuantMind/raw/master/deploy/offline-deploy.sh | sudo bash
+curl -fsSL https://gitee.com/qusong0627/QuantMind/raw/master/deploy/full-deploy.sh | sudo bash
 ```
 
-可覆盖离线包地址、代码分支或 Docker 加速地址：
+可覆盖完整部署包地址、代码分支或 Docker 加速地址：
 
 ```bash
 sudo QUANTMIND_OFFLINE_BASE_URL='https://example.com/quantmind-offline' \
   QUANTMIND_REF='master' \
   QUANTMIND_DOCKER_MIRROR='https://你的镜像加速域名' \
-  bash deploy/offline-deploy.sh
+  bash deploy/full-deploy.sh
 ```
 
 脚本默认保留已有 Qlib、业务目录、数据库和 QwenPaw 卷。确认需要覆盖时再传入：
@@ -89,5 +89,4 @@ curl http://127.0.0.1:8000/health
 | Web | 3000 |
 | API / Engine / Trade / Stream | 8000 / 8001 / 8002 / 8003 |
 | Data Gateway | 8004 |
-| Dashboard | 8501 |
 | Huntly / RSSHub / QwenPaw | 8090 / 1200 / 8088 |

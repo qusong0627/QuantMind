@@ -142,13 +142,13 @@ QuantMind 2.0 围绕五大方向升级：
 
 | 方式 | 脚本 | 场景 |
 | --- | --- | --- |
-| 完整离线部署 | `offline-deploy.sh` | 迁移完整业务数据/模型/Qlib 数据；网络不稳定 |
+| 完整部署 | `full-deploy.sh` | 从 CDN 下载完整业务数据/模型/Qlib 数据包，开箱即用 |
 | 在线源码部署 | `deploy.sh` | 新服务器可稳定访问代码与镜像仓库 |
 | 一键更新 | `update.sh` | 已部署服务器更新代码与核心服务 |
 
-**完整离线部署**（一条命令）：
+**完整部署**（一条命令）：
 ```bash
-curl -fsSL https://gitee.com/qusong0627/QuantMind/raw/master/deploy/offline-deploy.sh | sudo bash
+curl -fsSL https://gitee.com/qusong0627/QuantMind/raw/master/deploy/full-deploy.sh | sudo bash
 ```
 离线包内置：预构建镜像（`images.tar.zst`）、业务数据（`data-system.tar.zst`）、PostgreSQL 初始化备份（`postgres-all.sql.zst`）、QwenPaw 模型卷。
 
@@ -159,7 +159,7 @@ curl -fsSL https://gitee.com/qusong0627/QuantMind/raw/master/deploy/offline-depl
 
 **一键更新**：`sudo bash deploy/update.sh`（保留 PostgreSQL、Redis、`data/`、`models/`、`db/qlib_data/`，不丢失数据库与模型资产）。
 
-**服务端口**：api 8000 / engine 8001 / trade 8002 / stream 8003 / data gateway 8004 / dashboard 8501。
+**服务端口**：api 8000 / engine 8001 / trade 8002 / stream 8003 / data gateway 8004。
 
 ---
 
@@ -204,7 +204,7 @@ curl -fsSL https://gitee.com/qusong0627/QuantMind/raw/master/deploy/offline-depl
 | 模型训练/推理 | `backend/services/api/routers/model_training.py`、`backend/services/engine/inference/` | `electron/src/pages/training/`、`electron/src/pages/ModelRegistryPage.tsx` |
 | 模型注册中心 | `backend/shared/model_registry.py` | — |
 | 数据同步客户端 | `scripts/data/update_client.py` | 【个人中心】➔【数据平台】 |
-| 一键部署 | `deploy/offline-deploy.sh`、`deploy.sh`、`update.sh` | — |
+| 一键部署 | `deploy/full-deploy.sh`、`deploy.sh`、`update.sh` | — |
 | 模型广场 | 网关代理 `/api/v1/hub/models` | `electron/src/pages/ModelHubPage.tsx` |
 
 ---

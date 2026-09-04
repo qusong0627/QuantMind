@@ -6,7 +6,7 @@
  *
  * 加载策略：
  * - Web 浏览器端：通过当前域名的 /api/v1/qwenpaw-ui/ 反向代理（局域网访问同样适用）
- * - Electron 桌面端：通过用户配置的服务器地址代理；未配置时回退本机 8089
+ * - Electron 桌面端：通过用户配置的服务器地址代理；未配置时回退本机 8088
  */
 
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';

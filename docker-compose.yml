@@ -125,9 +125,10 @@ services:
       # 融资融券股票池文件路径（容器内）
       - MARGIN_STOCK_POOL_PATH=/data/融资融券.json
 
-      # 系统一键更新（web 控制台「更新系统」）。默认关闭；开启表示允许管理后台
-      # 通过 docker socket 执行宿主 deploy/update.sh（≈宿主机 root 能力，见部署说明）。
-      - QUANTMIND_ENABLE_WEB_UPDATE=${QUANTMIND_ENABLE_WEB_UPDATE:-false}
+      # 系统一键更新（web 控制台「更新系统」）。默认开启；如需关闭可设
+      # QUANTMIND_ENABLE_WEB_UPDATE=false。开启表示允许管理后台通过 docker socket
+      # 执行宿主 deploy/update.sh（≈宿主机 root 能力，见部署说明）。
+      - QUANTMIND_ENABLE_WEB_UPDATE=${QUANTMIND_ENABLE_WEB_UPDATE:-true}
 
       # 服务端口
       - API_PORT=8000
@@ -293,6 +294,8 @@ services:
       - ./logs:/app/logs
       # 后端代码 (外挂载解决热更新问题)
       - ./backend:/app/backend
+      # 内置文档（供管理后台「打开部署指南」等渲染 /static/docs 使用）
+      - ./docs:/app/docs:ro
       - ./config:/app/config
       - ./scripts:/app/scripts
       # AlphaAgent 包源码（容器内 Python 通过 PYTHONPATH=/app 直接 import）
@@ -548,46 +551,6 @@ services:
       timeout: 5s
       retries: 3
       start_period: 20s
-    restart: unless-stopped
-    networks:
-      - quantmind-net
-
-  # 5c. Dashboard (OpenBB + Streamlit 数据看板)
-  dashboard:
-    image: quantmind-dashboard:latest
-    build:
-      context: .
-      dockerfile: docker/Dockerfile.dashboard
-    container_name: quantmind-dashboard
-    depends_on:
-      db:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    ports:
-      - "${DASHBOARD_PORT:-8501}:8501"
-    environment:
-      - TZ=Asia/Shanghai
-      - DB_HOST=db
-      - DB_PORT=5432
-      - DB_NAME=${DB_NAME:-quantmind}
-      - DB_USER=${DB_USER:-quantmind}
-      - DB_PASSWORD=${DB_PASSWORD:-quantmind2026}
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - HUNTLY_BASE_URL=http://quantmind-huntly
-      - HUNTLY_USERNAME=${HUNTLY_USERNAME:-changeme}
-      - HUNTLY_PASSWORD=${HUNTLY_PASSWORD:-changeme}
-    volumes:
-      - ./data:/data
-      - ./db:/app/db
-      - ./dashboard:/app/dashboard
-    healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:8501/_stcore/health >/dev/null 2>&1 || exit 1"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 30s
     restart: unless-stopped
     networks:
       - quantmind-net

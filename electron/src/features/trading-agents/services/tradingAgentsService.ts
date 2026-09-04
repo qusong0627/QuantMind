@@ -1,12 +1,19 @@
 /** TradingAgents API service */
 
 import type { AnalysisProgress, AnalysisReport, AnalysisHistoryItem, LLMProvider } from '../types';
+import { SERVICE_URLS } from '../../../config/services';
 
-const ENGINE_BASE = '/api/v1/trading-agents';
+// 用前端配置的服务器地址（桌面端设置 / 环境变量），不走 vite 代理，随用户配置 IP 变化
+const ENGINE_BASE = (): string => `${SERVICE_URLS.API_GATEWAY}/api/v1/trading-agents`;
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
-  const resp = await fetch(`${ENGINE_BASE}${path}`, {
-    headers: { 'Content-Type': 'application/json' },
+  const token = localStorage.getItem('access_token');
+  const resp = await fetch(`${ENGINE_BASE()}${path}`, {
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...((options?.headers as Record<string, string>) || {}),
+    },
     ...options,
   });
   if (!resp.ok) {
@@ -55,5 +62,5 @@ export async function getConfig(): Promise<{ providers: LLMProvider[] }> {
 }
 
 export function getDownloadUrl(analysisId: string): string {
-  return `${ENGINE_BASE}/download/${analysisId}`;
+  return `${ENGINE_BASE()}/download/${analysisId}`;
 }

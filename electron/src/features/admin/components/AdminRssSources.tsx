@@ -399,6 +399,7 @@ export const AdminRssSources: React.FC = () => {
               value={rows.length}
               suffix="个"
               valueStyle={{ color: '#1d39c4', fontWeight: 700 }}
+              style={{ textAlign: 'center' }}
             />
           </Card>
         </Col>
@@ -409,6 +410,7 @@ export const AdminRssSources: React.FC = () => {
               value={folders.filter((f) => f.id != null).length}
               suffix="组"
               valueStyle={{ color: '#389e0d', fontWeight: 700 }}
+              style={{ textAlign: 'center' }}
             />
           </Card>
         </Col>
@@ -419,6 +421,7 @@ export const AdminRssSources: React.FC = () => {
               value={totalInboxCount}
               suffix="篇"
               valueStyle={{ color: '#d46b08', fontWeight: 700 }}
+              style={{ textAlign: 'center' }}
             />
           </Card>
         </Col>

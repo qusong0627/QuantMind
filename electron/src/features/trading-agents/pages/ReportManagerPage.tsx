@@ -20,8 +20,10 @@ import {
 } from 'lucide-react';
 import PdfPreview from '../components/PdfPreview';
 import { Modal } from 'antd';
+import { SERVICE_URLS } from '../../../config/services';
 
-const ENGINE_BASE = '/api/v1/trading-agents';
+// 用前端配置的服务器地址（桌面端设置 / 环境变量），不走 vite 代理，随用户配置 IP 变化
+const ENGINE_BASE = (): string => `${SERVICE_URLS.API_GATEWAY}/api/v1/trading-agents`;
 
 /** PDF 预览错误边界：单个 PDF 渲染失败不拖垮整个页面 */
 class PdfErrorBoundary extends React.Component<{ children: React.ReactNode }, { error: string | null }> {
@@ -75,8 +77,13 @@ interface FileListResponse {
 }
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
-  const resp = await fetch(`${ENGINE_BASE}${path}`, {
-    headers: { 'Content-Type': 'application/json' },
+  const token = localStorage.getItem('access_token');
+  const resp = await fetch(`${ENGINE_BASE()}${path}`, {
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...((options?.headers as Record<string, string>) || {}),
+    },
     ...options,
   });
   if (!resp.ok) {
@@ -648,7 +655,7 @@ const ReportManagerPage: React.FC<ReportManagerPageProps> = ({
                 <FileText className="w-4 h-4 text-indigo-600" />
                 <span className="text-xs font-bold text-slate-800">{selected}</span>
                 <a
-                  href={`${ENGINE_BASE}/files/pdf/${encodeURIComponent(selected)}`}
+                  href={`${ENGINE_BASE()}/files/pdf/${encodeURIComponent(selected)}`}
                   target="_blank"
                   rel="noreferrer"
                   className="ml-auto px-3 py-1 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-bold transition-colors shadow-2xs no-underline"
@@ -660,7 +667,7 @@ const ReportManagerPage: React.FC<ReportManagerPageProps> = ({
                 <PdfErrorBoundary>
                   <PdfPreview
                     key={previewKey}
-                    url={`${ENGINE_BASE}/files/pdf/${encodeURIComponent(selected)}`}
+                    url={`${ENGINE_BASE()}/files/pdf/${encodeURIComponent(selected)}`}
                     filename={selected}
                   />
                 </PdfErrorBoundary>

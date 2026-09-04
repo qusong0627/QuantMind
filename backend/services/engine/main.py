@@ -128,6 +128,19 @@ async def lifespan(app: FastAPI):
         logger.warning(f"⚠️ QuantDB warm-up failed (non-fatal): {e}")
 
     # --- 此处 Yield，之后代码在 shutdown 时运行 ---
+    try:
+        from backend.shared.system_events import record_system_event_async
+
+        ok = bool(getattr(app.state, "startup_healthy", True))
+        await record_system_event_async(
+            event_type="service_lifecycle",
+            level="info" if ok else "error",
+            source="quantmind-engine",
+            title="推理引擎服务启动完成" if ok else "推理引擎服务启动异常",
+            message="QuantMind Engine 启动完成" if ok else "Engine 启动存在初始化失败，请检查日志",
+        )
+    except Exception:  # noqa: BLE001 - 事件记录非关键路径
+        pass
     yield
 
     # --- 停止逻辑 ---
@@ -137,6 +150,18 @@ async def lifespan(app: FastAPI):
             await asyncio.wait_for(vm_task, timeout=5.0)
         except Exception:
             vm_task.cancel()
+    try:
+        from backend.shared.system_events import record_system_event
+
+        record_system_event(
+            event_type="service_lifecycle",
+            level="info",
+            source="quantmind-engine",
+            title="推理引擎服务关闭",
+            message="QuantMind Engine 正常关闭",
+        )
+    except Exception:  # noqa: BLE001 - 事件记录非关键路径
+        pass
     logger.info("🔚 QuantMind Engine shutdown complete")
 
 

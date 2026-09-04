@@ -237,6 +237,19 @@ async def lifespan(app: FastAPI):
     healthy = bool(app.state.startup_healthy and app.state.db_connected and app.state.redis_connected)
     set_service_health("quantmind-trade", healthy)
 
+    try:
+        from backend.shared.system_events import record_system_event_async
+
+        await record_system_event_async(
+            event_type="service_lifecycle",
+            level="info" if healthy else "error",
+            source="quantmind-trade",
+            title="交易核心启动完成" if healthy else "交易核心启动异常",
+            message="QuantMind Trade 启动完成" if healthy else "Trade 启动存在初始化失败，请检查日志",
+        )
+    except Exception:  # noqa: BLE001 - 事件记录非关键路径
+        pass
+
     yield
 
     for task in (scanner_task, margin_task, snapshot_task, ledger_settlement_task, manual_execution_task, sandbox_signal_task, tdx_account_sync_task, tdx_quote_feed_task, tdx_l2_capture_task, tdx_l2_realtime_task, t1_unlock_task, corp_action_task):
@@ -299,6 +312,19 @@ async def lifespan(app: FastAPI):
         redis_client.close()
     except Exception as e:
         logger.warning("trade redis close failed: %s", e)
+
+    try:
+        from backend.shared.system_events import record_system_event
+
+        record_system_event(
+            event_type="service_lifecycle",
+            level="info",
+            source="quantmind-trade",
+            title="交易核心关闭",
+            message="QuantMind Trade 正常关闭",
+        )
+    except Exception:  # noqa: BLE001 - 事件记录非关键路径
+        pass
 
 
 app = FastAPI(

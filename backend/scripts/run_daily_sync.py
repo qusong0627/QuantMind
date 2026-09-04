@@ -417,6 +417,28 @@ def show_status():
 
 
 # ---------------------------------------------------------------------------
+# 系统事件记录
+# ---------------------------------------------------------------------------
+
+def _record_sync_event(market: str, ok: bool, reason: str = "", failed_steps: list | None = None) -> None:
+    """把一次日常数据同步的成功/失败落成一条 system_events（data_sync）。失败不阻断主流程。"""
+    try:
+        from backend.shared.system_events import record_system_event
+
+        failed_steps = failed_steps or []
+        record_system_event(
+            event_type="data_sync",
+            level="info" if ok else "error",
+            source="sync",
+            title=f"日常数据同步{'完成' if ok else '失败'}（{market}）",
+            message=reason or (f"市场 {market} 同步完成，失败步骤: {', '.join(failed_steps)}" if failed_steps else f"市场 {market} 同步完成"),
+            meta={"market": market, "ok": ok, "failed_steps": failed_steps, "reason": reason},
+        )
+    except Exception as e:  # noqa: BLE001 - 事件记录非关键路径
+        log.warning("记录数据同步事件失败: %s", e)
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -468,16 +490,23 @@ def main():
     only_steps = [s.strip() for s in args.only.split(",") if s.strip()] if args.only else None
     symbols = [s.strip() for s in args.symbols.split(",") if s.strip()] if args.symbols else None
 
-    results = run_full_sync(
-        market=args.market,
-        quick=args.quick,
-        only_steps=only_steps,
-        symbols=symbols,
-        calibrate_days=args.calibrate_days,
-    )
+    sync_market = args.market
+    try:
+        results = run_full_sync(
+            market=sync_market,
+            quick=args.quick,
+            only_steps=only_steps,
+            symbols=symbols,
+            calibrate_days=args.calibrate_days,
+        )
+    except Exception as exc:  # noqa: BLE001 - 失败也要落一条事件
+        _record_sync_event(sync_market, ok=False, reason=str(exc))
+        raise
 
     # Exit with error code if any step failed
     error_count = sum(1 for s in results["steps"].values() if s.get("status") == "error")
+    _record_sync_event(sync_market, ok=error_count == 0,
+                       failed_steps=[k for k, v in results["steps"].items() if v.get("status") == "error"])
     return 1 if error_count > 0 else 0
 
 

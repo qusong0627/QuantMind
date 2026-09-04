@@ -2,12 +2,12 @@
 
 本目录是 QuantMind OSS 源码，不保证包含业务数据、模型或 Qlib 数据。需要迁移完整业务环境时，请使用 CDN 发布的 `quantmind-offline` 离线包，而不是仅复制源码。
 
-## 推荐方式：完整离线部署
+## 推荐方式：完整部署
 
-离线包包含 Docker 镜像、PostgreSQL 业务备份、模型、业务文件和 Qlib 数据。在 Ubuntu 22.04 / 24.04 上执行：
+完整部署包包含 Docker 镜像、PostgreSQL 业务备份、模型、业务文件和 Qlib 数据。在 Ubuntu 22.04 / 24.04 上执行：
 
 ```bash
-curl -fsSL https://gitee.com/qusong0627/QuantMind/raw/master/deploy/offline-deploy.sh | sudo bash
+curl -fsSL https://gitee.com/qusong0627/QuantMind/raw/master/deploy/full-deploy.sh | sudo bash
 ```
 
 默认 CDN 地址为 `https://cdn.quantmind.cloud/quantmind-offline`。详情见 [deploy/README.md](deploy/README.md)。

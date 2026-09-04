@@ -54,8 +54,9 @@ export const PublishModelModal: React.FC<PublishModelModalProps> = ({
       const maxDrawdown = resolveMetricNumber(metrics, ['max_drawdown']) || 0;
       const calmar = resolveMetricNumber(metrics, ['calmar_ratio', 'calmar']) || 0;
 
-      // 1. 申请上传凭据
-      const ticket = await modelHubService.createUploadTicket({
+      // 由后端打包本地模型目录（tar.gz）并上传广场，前端只传元数据与 model_id
+      const result = await modelHubService.publishLocalModel({
+        model_id: currentModel.model_id,
         name: values.name,
         description: values.description,
         market: meta?.market || 'CN',
@@ -68,33 +69,15 @@ export const PublishModelModal: React.FC<PublishModelModalProps> = ({
         annual_return: annualReturn,
         max_drawdown: maxDrawdown,
         calmar_ratio: calmar,
-        equity_curve: (currentModel as any)?.equity_curve || [],
-        factors_summary: meta?.features || [],
-        file_size_bytes: 1024 * 1024 * 12, // 预估或实际大小
         visibility: values.visibility || 'public',
       });
-
-      // 2. 模拟直传或触发后台直传
-      if (ticket.upload_url) {
-        try {
-          await fetch(ticket.upload_url, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/gzip' },
-            body: new Blob(['quantmind_model_binary']),
-          });
-        } catch (e) {
-          console.warn('COS PUT direct payload:', e);
-        }
-      }
-
-      // 3. 激活发布
-      await modelHubService.publishModel(ticket.model_id);
 
       message.success('模型已成功发布至社区模型广场！');
       onSuccess?.();
       onClose();
     } catch (err: any) {
-      message.error(`发布失败: ${err?.message || '未知错误'}`);
+      const detail = err?.response?.data?.detail || err?.message;
+      message.error(`发布失败: ${detail || '未知错误'}`);
     } finally {
       setPublishing(false);
     }

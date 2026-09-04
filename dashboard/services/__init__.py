@@ -1,1 +1,0 @@
-# QuantMind Dashboard Services

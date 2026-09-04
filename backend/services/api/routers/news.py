@@ -1665,6 +1665,83 @@ async def enrichment_rebuild_all(force: bool = Query(False, description="true=�
         raise HTTPException(status_code=500, detail=f"rebuild failed: {e}")
 
 
+@router.get("/enrichment/finbert-status")
+async def enrichment_finbert_status():
+    """FinBERT 中文金融情感模型健康状态（供管理后台/前端诊断面板）。
+
+    返回：
+      - available: 模型是否已就绪（加载成功且未失败）
+      - use_finbert: 进程级是否启用了 FinBERT（CPU 镜像默认关闭，GPU 镜像默认开启）
+      - model: 当前配置的模型名/路径
+      - device: 推理设备（-1=CPU, 0=GPU0）
+      - last_inference_label/conf: 最近一次推理样本（若无则 None）
+      - recent_db: 近 24h enrich 表里 +finbert 后缀占比（真实"是否生效"指标）
+      - tips: 根据状态给出可执行的下一步建议
+    """
+    try:
+        from backend.services.api.news import sentiment as sentiment_mod
+    except Exception as e:
+        return {"available": False, "use_finbert": False, "error": f"import failed: {e}"}
+
+    available = bool(sentiment_mod.is_available())
+    use_finbert = bool(sentiment_mod.USE_FINBERT)
+
+    # 最近一次推理样本（可选）
+    sample = None
+    try:
+        label, conf = sentiment_mod.score("公司发布重大利好公告，净利润大幅增长")
+        if label is not None and conf is not None:
+            sample = {"label": label, "confidence": round(float(conf), 4)}
+    except Exception:
+        pass
+
+    # DB 真实生效占比（近 24h 写入是否带 +finbert 后缀）
+    db_ratio = None
+    db_total_24h = 0
+    try:
+        import os
+        import psycopg2
+        with psycopg2.connect(
+            host=os.getenv("POSTGRES_HOST", "quantmind-db"),
+            port=int(os.getenv("POSTGRES_PORT", "5432")),
+            user=os.getenv("POSTGRES_USER", "quantmind"),
+            password=os.getenv("POSTGRES_PASSWORD", "quantmind2026"),
+            dbname=os.getenv("POSTGRES_DB", "quantmind"),
+        ) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT COUNT(*), "
+                    "  COUNT(*) FILTER (WHERE model_version LIKE '%%+finbert') "
+                    "FROM news_article_enrichment "
+                    "WHERE enriched_at >= NOW() - INTERVAL '24 hours'"
+                )
+                total, with_finbert = cur.fetchone()
+                db_total_24h = int(total or 0)
+                if total and int(total) > 0:
+                    db_ratio = round(int(with_finbert) / int(total), 4)
+    except Exception:
+        pass
+
+    # 状态语义
+    if not use_finbert:
+        tip = "FinBERT 在当前环境被关闭（CPU 镜像默认）。如需启用：设 NEWS_USE_FINBERT=true 并部署 GPU 镜像或安装 CPU 版 torch。"
+    elif not available:
+        tip = "FinBERT 已启用但加载失败，请执行 python3 backend/scripts/download_finbert.py 下载权重；详见 docs/FinBERT 中文金融情感模型.md。"
+    else:
+        tip = "FinBERT 已就绪，可在新闻资讯/标签管理中观察带 +finbert 后缀的 model_version。"
+
+    return {
+        "available": available,
+        "use_finbert": use_finbert,
+        "model": sentiment_mod.DEFAULT_MODEL,
+        "device": sentiment_mod.DEVICE,
+        "sample_inference": sample,
+        "db_total_24h": db_total_24h,
+        "db_finbert_ratio_24h": db_ratio,
+        "tip": tip,
+    }
+
+
 @router.get("/enrichment/rebuild-progress")
 async def enrichment_rebuild_progress():
     """查询全量重建进度."""

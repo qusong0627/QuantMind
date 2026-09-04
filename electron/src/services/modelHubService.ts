@@ -82,21 +82,29 @@ class ModelHubService {
       timeout: 30000,
       headers: { 'Content-Type': 'application/json' },
     });
+  }
 
-    this.axiosInstance.interceptors.request.use((config) => {
-      // 优先从 localStorage 提取用户配置的 QuantDB API Key
-      const quantdbApiKey = localStorage.getItem('quantdb_api_key') || localStorage.getItem('quantdb_key');
-      if (quantdbApiKey) {
-        config.headers['X-API-Key'] = quantdbApiKey.trim();
-      }
-
-      // 如果未配置 QuantDB API Key，透传当前平台的 Bearer Token
-      const token = authService.getAccessToken();
-      if (token && !config.headers['Authorization']) {
-        config.headers['Authorization'] = `Bearer ${token}`;
-      }
-      return config;
+  /**
+   * 写操作（上传/发布/点赞/下架）经平台网关代理转发到模型广场，
+   * 由后端注入服务端已配置的 QUANTDB_API_KEY，前端无需携带明文 Key。
+   */
+  private async gatewayWrite<T>(
+    method: 'post' | 'delete',
+    path: string,
+    data?: unknown,
+  ): Promise<T> {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    const token = authService.getAccessToken();
+    if (token) {
+      headers['Authorization'] = `Bearer ${token}`;
+    }
+    const resp = await axios.request<T>({
+      method,
+      url: `${SERVICE_ENDPOINTS.API_GATEWAY}${path}`,
+      data,
+      headers,
     });
+    return resp.data;
   }
 
   private getQuantDBApiHost(): string {
@@ -164,16 +172,36 @@ class ModelHubService {
    * 申请上传直传凭证
    */
   async createUploadTicket(payload: CreateUploadTicketPayload): Promise<UploadTicketResponse> {
-    const resp = await this.axiosInstance.post('/api/v1/hub/models/upload-ticket', payload);
-    return resp.data;
+    return this.gatewayWrite('post', '/hub/models/upload-ticket', payload);
   }
 
   /**
    * 确认上传完成并激活模型
    */
   async publishModel(modelId: string): Promise<{ message: string; model_id: string }> {
-    const resp = await this.axiosInstance.post(`/api/v1/hub/models/${modelId}/publish`);
-    return resp.data;
+    return this.gatewayWrite('post', `/hub/models/${modelId}/publish`);
+  }
+
+  /**
+   * 发布本地模型到广场（后端打包 tar.gz → 上传 COS → 激活发布）
+   */
+  async publishLocalModel(payload: {
+    model_id: string;
+    name: string;
+    description?: string;
+    market?: string;
+    algorithm?: string;
+    target_horizon?: string;
+    target_mode?: string;
+    test_ic?: number;
+    rank_ic?: number;
+    sharpe_ratio?: number;
+    annual_return?: number;
+    max_drawdown?: number;
+    calmar_ratio?: number;
+    visibility?: string;
+  }): Promise<{ success: boolean; model_id: string; packaged_size: number; detail: any }> {
+    return this.gatewayWrite('post', '/hub/publish-local', payload);
   }
 
   /**
@@ -188,16 +216,14 @@ class ModelHubService {
    * 为模型点赞
    */
   async likeModel(modelId: string): Promise<{ message: string; model_id: string }> {
-    const resp = await this.axiosInstance.post(`/api/v1/hub/models/${modelId}/like`);
-    return resp.data;
+    return this.gatewayWrite('post', `/hub/models/${modelId}/like`);
   }
 
   /**
    * 下架或删除模型
    */
   async deleteModel(modelId: string): Promise<{ message: string; model_id: string }> {
-    const resp = await this.axiosInstance.delete(`/api/v1/hub/models/${modelId}`);
-    return resp.data;
+    return this.gatewayWrite('delete', `/hub/models/${modelId}`);
   }
 }
 

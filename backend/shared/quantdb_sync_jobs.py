@@ -19,6 +19,47 @@ def _redis():
     return redis.from_url(url, socket_timeout=3)
 
 
+# ---------------------------------------------------------------------------
+# 任务级分布式锁（构建类任务：Qlib 重建等）
+# 用 owner token 支持进程重启后的安全回收与防并发。
+# ---------------------------------------------------------------------------
+
+def acquire_lock(key: str, token: str, ttl: int = TTL) -> bool:
+    """NX 抢占锁。成功返回 True，已被他人持有返回 False。"""
+    r = _redis()
+    try:
+        return bool(r.set(key, token, nx=True, ex=ttl))
+    except Exception:
+        return False
+
+
+def keep_lock(key: str, token: str, ttl: int = TTL) -> None:
+    """续期锁，仅当锁仍归属本 token 时刷新 TTL（心跳）。"""
+    r = _redis()
+    try:
+        if r.get(key) == token.encode("utf-8"):
+            r.expire(key, ttl)
+    except Exception:
+        pass
+
+
+def release_lock(key: str, token: str) -> None:
+    """释放锁，仅当锁仍归属本 token 时删除（CAS，避免误删他人刚抢到的锁）。"""
+    r = _redis()
+    try:
+        cas = r.register_script(
+            "if redis.call('get', KEYS[1]) == ARGV[1] then "
+            "return redis.call('del', KEYS[1]) else return 0 end"
+        )
+        cas(keys=[key], args=[token])
+    except Exception:  # noqa: BLE001 - 释放失败由 TTL 兜底
+        try:
+            if r.get(key) == token.encode("utf-8"):
+                r.delete(key)
+        except Exception:
+            pass
+
+
 def _now_iso() -> str:
     return datetime.now().isoformat()
 

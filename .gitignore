@@ -16,6 +16,8 @@ node_modules/
 __pycache__/
 *.py[cod]
 *$py.class
+# deploy/update.sh 的镜像构建状态目录（记录依赖签名，不入库）
+/.update/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
@@ -184,8 +186,8 @@ db/db.zip
 !/data/
 /data/*
 !/data/stocks/
-# 数据库升级脚本：需入库，当前内容临时清空占位
-!/data/upgrade_v1.0.1.sql
+# 数据库升级脚本：需入库，随版本新增（v1.0.N）
+!/data/upgrade_v*.sql
 /db/*
 !/db/sql/
 /db/sql/*
@@ -261,3 +263,4 @@ backend/scripts/evaluate_signal_factors.py
 
 # 内部发布脚本（含 COS 上传，不进开源仓库）
 scripts/publish_electron_to_cos.py
+REFACTOR_PLAN.md

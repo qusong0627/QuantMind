@@ -8,7 +8,7 @@ loguru
 fire
 fuzzywuzzy
 openai
-litellm>=1.73,<1.98  # to support `from litellm import get_valid_models`; <1.98: 1.98.0+ uses typing.NotRequired (py3.11+) at import, crashes py3.10
+litellm>=1.73,<1.98  # >=1.73 for `from litellm import get_valid_models`; <1.98 because newer litellm uses typing.NotRequired (Python 3.11+) while the base image is py3.10 (runtime backport: docker/litellm_sitecustomize.py)
 azure.identity
 pyarrow
 rich

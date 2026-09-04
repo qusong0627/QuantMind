@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# QuantMind 在线部署下载器。完整数据迁移请使用 offline-deploy.sh。
+# QuantMind 在线部署下载器。完整数据迁移请使用 full-deploy.sh。
 
 set -Eeuo pipefail
 

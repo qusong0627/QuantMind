@@ -38,6 +38,48 @@ _LOCK_TTL = 70  # 采样锁 TTL，略大于间隔，避免锁残留
 
 _sampler_task: asyncio.Task | None = None
 
+# ---- 阈值告警配置 ---------------------------------------------------------
+_THRESHOLDS = {
+    "disk": 90,
+    "mem": 90,
+    "cpu": 90,
+}
+_ALERT_COOLDOWN = 600  # 同类型告警最短间隔（秒），避免每次采样刷屏
+_alert_last: dict[str, float] = {}
+
+
+def _maybe_node_alert(workload: dict) -> None:
+    """CPU/内存/磁盘超阈值时落一条 node_alert 系统事件（带冷却去重）。"""
+    now = time.time()
+    values = {
+        "cpu": workload.get("cpu_percent"),
+        "mem": workload.get("memory_percent"),
+        "disk": workload.get("disk_percent"),
+    }
+    for kind, threshold in _THRESHOLDS.items():
+        v = values.get(kind)
+        if v is None or v < threshold:
+            continue
+        if now - _alert_last.get(kind, 0) < _ALERT_COOLDOWN:
+            continue
+        _alert_last[kind] = now
+        try:
+            from backend.shared.system_events import record_system_event
+
+            record_system_event(
+                event_type="node_alert",
+                level="warning",
+                source="quantmind-api",
+                title=f"节点{KIND_LABELS.get(kind, kind)}负载告警",
+                message=f"{KIND_LABELS.get(kind, kind)}使用率 {v:.1f}% 超出阈值 {threshold}%",
+                meta={"kind": kind, "value": v, "threshold": threshold, **values},
+            )
+        except Exception:  # noqa: BLE001 - 事件记录非关键路径
+            pass
+
+
+KIND_LABELS = {"disk": "磁盘", "mem": "内存", "cpu": "CPU"}
+
 
 def _sample_static() -> None:
     """同步采集一个点并写入 Redis 滚动序列（由锁保证唯一写者）。"""
@@ -58,6 +100,7 @@ def _sample_static() -> None:
 
     try:
         workload = _get_host_workload()
+        _maybe_node_alert(workload)
         raw = client.get(_KEY)
         series = json.loads(raw.decode("utf-8")) if raw else []
         series.append(

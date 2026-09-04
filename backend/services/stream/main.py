@@ -298,6 +298,20 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("🧹 Quote cleanup disabled by QUOTE_CLEANUP_ENABLED=false")
 
+    try:
+        from backend.shared.system_events import record_system_event_async
+
+        ok = bool(getattr(app.state, "startup_healthy", True))
+        await record_system_event_async(
+            event_type="service_lifecycle",
+            level="info" if ok else "error",
+            source="quantmind-stream",
+            title="行情服务启动完成" if ok else "行情服务启动异常",
+            message="QuantMind Stream 启动完成" if ok else "Stream 启动存在初始化失败，请检查日志",
+        )
+    except Exception:  # noqa: BLE001 - 事件记录非关键路径
+        pass
+
     yield
 
     cleanup_stop = getattr(app.state, "quote_cleanup_stop", None)
@@ -312,6 +326,18 @@ async def lifespan(app: FastAPI):
 
     await ws_server.stop()
     await close_db()
+    try:
+        from backend.shared.system_events import record_system_event
+
+        record_system_event(
+            event_type="service_lifecycle",
+            level="info",
+            source="quantmind-stream",
+            title="行情服务关闭",
+            message="QuantMind Stream 正常关闭",
+        )
+    except Exception:  # noqa: BLE001 - 事件记录非关键路径
+        pass
     logger.info("🔚 QuantMind Stream shutdown complete")
 
 

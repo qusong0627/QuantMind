@@ -227,7 +227,7 @@ def _download_object(client, dataset: str, cat_id: str, key: str, target: Path, 
     return h_sha.hexdigest(), h_md5.hexdigest(), size
 
 
-def _sync_v2_dataset(client, state, cat_id: str, dataset: str, progress_cb: Callable | None = None) -> tuple[int, int]:
+def _sync_v2_dataset(client, state, cat_id: str, dataset: str, progress_cb: Callable | None = None, should_cancel: Callable[[], bool] | None = None) -> tuple[int, int]:
     """同步 V2 分区数据集。跳过 patches，不校验服务端 size 声明。
 
     先走 releases 增量，再用 manifest 补漏——服务端可能已将新数据写入 manifest
@@ -346,6 +346,12 @@ def _sync_v2_dataset(client, state, cat_id: str, dataset: str, progress_cb: Call
                 log.info("[V2] %s: %d/%d", dataset, done, len(pending))
                 if progress_cb:
                     progress_cb("file", dataset=dataset, done=done, total=len(pending))
+            # 协作式取消：当前文件已落盘登记，再停止后续新任务。
+            if should_cancel and should_cancel():
+                pool.shutdown(wait=False, cancel_futures=True)
+                log.info("[V2] %s: 收到取消信号，当前文件完成后停止 (%d/%d)", dataset, done, len(pending))
+                state.commit()
+                return done, errors
 
     if releases:
         state.execute(
@@ -357,7 +363,7 @@ def _sync_v2_dataset(client, state, cat_id: str, dataset: str, progress_cb: Call
     return done, errors
 
 
-def _sync_v1_dataset(client, state, cat_id: str, dataset: str, progress_cb: Callable | None = None) -> tuple[int, int]:
+def _sync_v1_dataset(client, state, cat_id: str, dataset: str, progress_cb: Callable | None = None, should_cancel: Callable[[], bool] | None = None) -> tuple[int, int]:
     """同步 V1 全量数据集。用 etag(md5) 校验，跳过服务端 size 声明。"""
     manifest = client.query_manifest(category_id=cat_id, sub_category=dataset)
     if not manifest:
@@ -448,6 +454,12 @@ def _sync_v1_dataset(client, state, cat_id: str, dataset: str, progress_cb: Call
             done += 1
             if progress_cb and done % 100 == 0:
                 progress_cb("file", dataset=dataset, done=done, total=len(pending))
+            # 协作式取消：当前文件已落盘登记，再停止后续新任务。
+            if should_cancel and should_cancel():
+                pool.shutdown(wait=False, cancel_futures=True)
+                log.info("[V1] %s: 收到取消信号，当前文件完成后停止 (%d/%d)", dataset, done, len(pending))
+                state.commit()
+                return done, errors
 
     state.commit()
     if progress_cb:
@@ -539,7 +551,7 @@ def reseed_state(datasets: list[dict] | None = None) -> dict:
     return summary
 
 
-def sync_parquet(datasets: list[dict] | None = None, *, dry_run: bool = False, progress_cb: Callable | None = None) -> dict:
+def sync_parquet(datasets: list[dict] | None = None, *, dry_run: bool = False, progress_cb: Callable | None = None, should_cancel: Callable[[], bool] | None = None) -> dict:
     """增量同步 QuantDB parquet 数据。
 
     不走 SDK 的 sync_dataset()：服务端 manifest 的 size 声明与实际文件不符
@@ -559,14 +571,19 @@ def sync_parquet(datasets: list[dict] | None = None, *, dry_run: bool = False, p
 
     for idx, ds in enumerate(datasets):
         sub, cat_id = ds["sub_category"], ds["category_id"]
+        # 协作式取消：开始下一数据集前检查，取消则跳过剩余全部数据集。
+        if should_cancel and should_cancel():
+            results["cancelled"] = True
+            log.info("[quantdb] 收到取消信号，停止剩余数据集（已处理 %d/%d）", idx, len(datasets))
+            break
         is_v2 = ds in V2_DATASETS
         if progress_cb:
             progress_cb("dataset_start", dataset=sub, index=idx, total=len(datasets))
         try:
             if is_v2:
-                done, errs = _sync_v2_dataset(client, state, cat_id, sub, progress_cb=progress_cb)
+                done, errs = _sync_v2_dataset(client, state, cat_id, sub, progress_cb=progress_cb, should_cancel=should_cancel)
             else:
-                done, errs = _sync_v1_dataset(client, state, cat_id, sub, progress_cb=progress_cb)
+                done, errs = _sync_v1_dataset(client, state, cat_id, sub, progress_cb=progress_cb, should_cancel=should_cancel)
             if progress_cb:
                 progress_cb("dataset_done", dataset=sub, synced=done, errors=errs)
             if done:
@@ -1016,6 +1033,7 @@ def run_daily_sync(
     full: bool = False,
     dry_run: bool = False,
     progress_cb: Callable | None = None,
+    should_cancel: Callable[[], bool] | None = None,
 ) -> dict:
     """执行每日同步流程。"""
     result = {
@@ -1034,12 +1052,12 @@ def run_daily_sync(
         if datasets:
             all_ds = V2_DATASETS + V1_DATASETS
             ds_list = [ds for ds in all_ds if ds["sub_category"] in datasets]
-        result["parquet"] = sync_parquet(ds_list, dry_run=dry_run, progress_cb=progress_cb)
+        result["parquet"] = sync_parquet(ds_list, dry_run=dry_run, progress_cb=progress_cb, should_cancel=should_cancel)
 
         # 上游历史 L1 分区只有因子，不含 OHLCV。每次同步后修复最近窗口，
         # 防止增量文件重新覆盖后让训练标签再次为空；历史全量由专用脚本执行。
         includes_l1 = datasets is None or "l1_factors" in datasets
-        if includes_l1 and not dry_run:
+        if includes_l1 and not dry_run and not (should_cancel and should_cancel()):
             try:
                 from backend.scripts.backfill_l1_ohlcv import backfill_l1_ohlcv
 
@@ -1242,6 +1260,25 @@ def main():
     )
 
     log.info("Result: %s", json.dumps(result, indent=2, ensure_ascii=False, default=str))
+
+    # 落一条系统事件（data_sync），失败不阻断主流程
+    try:
+        from backend.shared.system_events import record_system_event
+
+        record_system_event(
+            event_type="data_sync",
+            level="info",
+            source="sync",
+            title="QuantDB 数据同步完成",
+            message=(
+                "parquet 同步完成，PG 填充" + ("完成" if not args.skip_pg else "跳过") +
+                "，Qlib 缓存" + ("完成" if not args.skip_qlib else "跳过")
+            ),
+            meta={"market": "quantdb", "datasets": datasets, "dry_run": args.dry_run},
+        )
+    except Exception as exc:  # noqa: BLE001 - 事件记录非关键路径
+        log.warning("记录数据同步事件失败: %s", exc)
+
     return 0
 
 
@@ -1253,4 +1290,18 @@ if __name__ == "__main__":
         sys.exit(1)
     except Exception as e:
         log.error("FATAL: %s", e, exc_info=True)
+        # 同步异常也要落一条 error 系统事件
+        try:
+            from backend.shared.system_events import record_system_event
+
+            record_system_event(
+                event_type="data_sync",
+                level="error",
+                source="sync",
+                title="QuantDB 数据同步失败",
+                message=str(e),
+                meta={"market": "quantdb", "error": str(e)},
+            )
+        except Exception as exc:  # noqa: BLE001 - 事件记录非关键路径
+            log.warning("记录数据同步失败事件失败: %s", exc)
         sys.exit(1)

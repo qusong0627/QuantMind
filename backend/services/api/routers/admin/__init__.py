@@ -19,6 +19,7 @@ from .quantdb_factor_catalog import router as quantdb_factor_catalog_router
 from .qlib_console import router as qlib_console_router
 from .system_update import router as system_update_router
 from .node_history import router as node_history_router
+from .system_events import router as system_events_router
 
 admin_router = APIRouter()
 admin_router.include_router(
@@ -77,4 +78,7 @@ admin_router.include_router(
 )
 admin_router.include_router(
     node_history_router, prefix="/dashboard", tags=["Admin-NodeHistory"]
+)
+admin_router.include_router(
+    system_events_router, prefix="/system-events", tags=["Admin-SystemEvents"]
 )

@@ -151,27 +151,45 @@ class QlibDataBuilder:
         *,
         incremental: bool = True,
         symbols: list[str] | None = None,
+        progress_cb=None,
     ) -> dict:
         """构建全部 Qlib 数据。
+
+        Args:
+            progress_cb: 可选 `progress_cb(progress:int)`（0-100），按阶段与特征批次回调，
+                         供上层展示进度与维持任务心跳。回调异常被吞掉，不影响构建。
 
         Returns:
             {"calendar": int, "instruments": int, "features": int, "skipped": int}
         """
+        def _notify(p: int) -> None:
+            if callable(progress_cb):
+                try:
+                    progress_cb(max(0, min(100, p)))
+                except Exception:  # noqa: BLE001 - 进度回调非关键路径
+                    pass
+
         if not self._hub.available:
             raise RuntimeError(f"数据目录不可用: {self._hub.data_dir}")
 
         result: dict = {}
 
         # 1. 构建交易日历
+        _notify(2)
         result["calendar"] = self.build_calendar()
 
         # 2. 构建标的列表
+        _notify(5)
         result["instruments"] = self.build_instruments()
 
         # 3. 构建特征 binary
-        feat_result = self.build_features(symbols=symbols, incremental=incremental)
+        _notify(8)
+        feat_result = self.build_features(
+            symbols=symbols, incremental=incremental, progress_cb=progress_cb
+        )
         result["features"] = feat_result["updated"]
         result["skipped"] = feat_result["skipped"]
+        _notify(95)
 
         logger.info(
             "QlibDataBuilder[%s] 完成: calendar=%d, instruments=%d, features=%d, skipped=%d",
@@ -308,11 +326,14 @@ class QlibDataBuilder:
         return len(qlib_symbols)
 
     def _collect_raw_symbols(self) -> set[str]:
-        """收集原生 symbol 列表：优先 hub.fetch_stock_list，否则从 parquet 推导。
+        """收集原生 symbol 列表：优先 hub.fetch_stock_list，其次从行情 parquet 全量推导。
 
         额外补充 A 股指数（CN_QLIB_INDEX_SYMBOLS），让指数进入 instruments 与 features。
         """
         symbols: set[str] = set()
+
+        # 1) 优先基础股票列表（如 2_base_sector/instrument_detail），记录是否取到真正的股票
+        stock_list_loaded = False
         try:
             df = self._hub.fetch_stock_list()
             if df is not None and not df.empty:
@@ -326,38 +347,42 @@ class QlibDataBuilder:
                         qs = self._to_qlib_symbol(str(sym))
                         if qs:
                             symbols.add(qs)
+                    stock_list_loaded = len(symbols) > 0
         except Exception as exc:  # noqa: BLE001
-            logger.warning("%s fetch_stock_list 失败，回退 parquet 推导: %s", self._market, exc)
+            logger.warning("%s fetch_stock_list 失败，改从行情 parquet 推导: %s", self._market, exc)
 
-        # A 股额外纳入指定指数（index_daily）
+        # 2) 基础列表缺失/为空时，从 daily_forward 行情分区全量推导（依赖 K 线，不受基础表缺失影响）
+        if not stock_list_loaded:
+            fwd = self._hub.data_dir / "1_kline_data" / "daily_forward"
+            if fwd.is_dir():
+                import duckdb
+
+                try:
+                    con = duckdb.connect(config={"memory_limit": "4GB", "threads": "2"})
+                    try:
+                        df = con.execute(
+                            f"SELECT DISTINCT symbol FROM read_parquet('{fwd / 'dt=*' / 'data.parquet'}', hive_partitioning=1)"
+                        ).fetchdf()
+                    finally:
+                        con.close()
+                    for sym in df["symbol"].dropna().unique():
+                        qs = self._to_qlib_symbol(str(sym))
+                        if qs:
+                            symbols.add(qs)
+                    logger.info(
+                        "%s 基础股票列表缺失，已从行情 parquet 推导 %d 个标的",
+                        self._market, len(symbols),
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("从 parquet 推导标的失败: %s", exc)
+
+        # 3) A 股额外纳入指定指数（无论走哪条路径都补充）
         if self._market == "CN":
             for idx_code in CN_QLIB_INDEX_SYMBOLS:
                 qs = self._to_qlib_symbol(idx_code)
                 if qs:
                     symbols.add(qs)
 
-        if symbols:
-            return symbols
-
-        # 从 daily_forward parquet 推导
-        fwd = self._hub.data_dir / "1_kline_data" / "daily_forward"
-        if fwd.is_dir():
-            import duckdb
-
-            try:
-                con = duckdb.connect(config={"memory_limit": "4GB", "threads": "2"})
-                try:
-                    df = con.execute(
-                        f"SELECT DISTINCT symbol FROM read_parquet('{fwd / 'dt=*' / 'data.parquet'}', hive_partitioning=1)"
-                    ).fetchdf()
-                finally:
-                    con.close()
-                for sym in df["symbol"].dropna().unique():
-                    qs = self._to_qlib_symbol(str(sym))
-                    if qs:
-                        symbols.add(qs)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("从 parquet 推导标的失败: %s", exc)
         return symbols
 
     def _build_universe_instruments(
@@ -397,6 +422,7 @@ class QlibDataBuilder:
         *,
         incremental: bool = True,
         batch_size: int = 100,
+        progress_cb=None,
     ) -> dict:
         """从 parquet 后复权 K 线生成 features/*.day.bin。
 
@@ -410,7 +436,7 @@ class QlibDataBuilder:
         if not symbols:
             return {"updated": 0, "skipped": 0}
 
-        result = self.build_features_bulk(symbols=symbols)
+        result = self.build_features_bulk(symbols=symbols, progress_cb=progress_cb)
 
         # A 股指数不在 daily_* 行情分区中，bulk 读不到，单独补建（仅 3 只，开销极小）
         if self._market == "CN":
@@ -481,7 +507,11 @@ class QlibDataBuilder:
             logger.warning("Qlib[%s] %s 除权事件异常: %s", self._market, qlib_sym, msg)
         return f.to_numpy(dtype=np.float64)
 
-    def build_features_bulk(self, symbols: list[str] | None = None) -> dict:
+    def build_features_bulk(
+        self,
+        symbols: list[str] | None = None,
+        progress_cb=None,
+    ) -> dict:
         """一次扫描全市场 parquet，按标的分组写 bin。
 
         - CN: ``close_bin = 未复权价 x 乘法因子``，因子由 dividend_factors 除权
@@ -558,7 +588,16 @@ class QlibDataBuilder:
 
         updated = skipped = 0
         factor_fallback = 0
+        total_syms = int(df["symbol"].nunique()) if not df.empty else 0
+        processed = 0
         for qdb_sym, group in df.groupby("symbol", sort=False):
+            processed += 1
+            # 特征阶段占据总耗时主体（8~95%）：按批次上报进度，让上层看到"在动"并续心跳
+            if callable(progress_cb) and total_syms and (processed % 20 == 0 or processed == total_syms):
+                try:
+                    progress_cb(int(8 + 87 * processed / total_syms))
+                except Exception:  # noqa: BLE001 - 进度回调非关键路径
+                    pass
             qlib_sym = self._to_qlib_symbol(qdb_sym)
             positions = group["ci"].values
             start_idx = int(positions.min())

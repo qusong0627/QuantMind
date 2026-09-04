@@ -13,17 +13,17 @@ For the current Chinese documentation and product screenshots, see [README.md](R
 
 ## Deployment
 
-Ubuntu 22.04 / 24.04 is supported. The recommended production method is the complete offline package, which includes Docker images, PostgreSQL business data, models, and Qlib data.
+Ubuntu 22.04 / 24.04 is supported. The recommended production method is the complete deployment package, which includes Docker images, PostgreSQL business data, models, and Qlib data.
 
 ```bash
-# Complete offline deployment
-curl -fsSL https://gitee.com/qusong0627/QuantMind/raw/master/deploy/offline-deploy.sh | sudo bash
+# Complete deployment (full package from CDN, production-ready)
+curl -fsSL https://gitee.com/qusong0627/QuantMind/raw/master/deploy/full-deploy.sh | sudo bash
 
 # Online source deployment
 curl -fsSL https://gitee.com/qusong0627/QuantMind/raw/master/deploy/deploy.sh | sudo bash
 ```
 
-The default offline package URL is `https://cdn.quantmind.cloud/quantmind-offline`. To update an existing server:
+The default complete package URL is `https://cdn.quantmind.cloud/quantmind-offline`. To update an existing server:
 
 ```bash
 cd /opt/quantmind
@@ -34,7 +34,6 @@ sudo bash deploy/update.sh
 | --- | --- |
 | Web | `http://<server-ip>:3000` |
 | API docs | `http://<server-ip>:8000/docs` |
-| Dashboard | `http://<server-ip>:8501` |
 
 See [deploy/README.md](deploy/README.md) for package recovery and deployment options.
 

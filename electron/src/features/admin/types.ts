@@ -334,9 +334,8 @@ export interface DashboardMetrics {
         live: number;
         backtesting: number;
     };
-    content: {
-        posts: number;
-        comments: number;
+    models: {
+        total: number;
     };
     system: {
         health_score: number;

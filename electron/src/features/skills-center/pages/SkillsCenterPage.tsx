@@ -12,8 +12,10 @@ import PromptsLibrary from '../components/PromptsLibrary';
 import ReportManagerPage from '../../trading-agents/pages/ReportManagerPage';
 import PdfPreview from '../../trading-agents/components/PdfPreview';
 import { PROMPTS } from '../prompts.generated';
+import { SERVICE_URLS } from '../../../config/services';
 
-const ENGINE_BASE = '/api/v1/trading-agents';
+// 用前端配置的服务器地址（桌面端设置 / 环境变量），不走 vite 代理，随用户配置 IP 变化
+const ENGINE_BASE = (): string => `${SERVICE_URLS.API_GATEWAY}/api/v1/trading-agents`;
 
 const SkillsCenterPage: React.FC = () => {
   const [previewFile, setPreviewFile] = useState<string | null>(null);
@@ -70,7 +72,7 @@ const SkillsCenterPage: React.FC = () => {
       >
         {previewFile && (
           <PdfPreview
-            url={`${ENGINE_BASE}/files/pdf/${encodeURIComponent(previewFile)}`}
+            url={`${ENGINE_BASE()}/files/pdf/${encodeURIComponent(previewFile)}`}
             filename={previewFile}
             height="calc(100vh - 220px)"
           />

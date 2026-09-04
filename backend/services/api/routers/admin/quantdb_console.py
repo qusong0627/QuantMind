@@ -697,6 +697,7 @@ def _run_sync_job(job_id: str, req: SyncDatasetsRequest) -> None:
             skip_qlib=True,      # Qlib 单独处理
             skip_snapshot=True,  # snapshot 单独处理
             progress_cb=_on_progress,
+            should_cancel=_cancelled,
         )
     except Exception as exc:  # noqa: BLE001
         logger.error("quantdb sync job %s: parquet sync failed: %s", job_id, exc, exc_info=True)
@@ -712,6 +713,7 @@ def _run_sync_job(job_id: str, req: SyncDatasetsRequest) -> None:
     sources_info = sync_result.get("sources") or {}
 
     results = []
+    cancelled = _cancelled()
     for name in req.datasets:
         src = sources_info.get(name)
         if src is not None:
@@ -722,6 +724,9 @@ def _run_sync_job(job_id: str, req: SyncDatasetsRequest) -> None:
                 results.append({"dataset": name, "status": "synced", "downloaded": src.get("synced", 1)})
             else:
                 results.append({"dataset": name, "status": "up_to_date", "downloaded": 0})
+        elif cancelled:
+            results.append({"dataset": name, "status": "skipped", "downloaded": 0,
+                            "reason": "用户取消"})
         elif any(name in str(e) for e in errors):
             results.append({"dataset": name, "status": "failed", "downloaded": 0, "error": next((e for e in errors if name in str(e)), "unknown")})
         elif synced_count > 0:
@@ -733,9 +738,10 @@ def _run_sync_job(job_id: str, req: SyncDatasetsRequest) -> None:
         job = _jobs.get(job_id)
         if job is not None:
             job["results"] = results
-            job["done"] = len(req.datasets)
+            # 实际处理进度：已处理并经 sync 完成的数据集；若有 skipped（取消跳过）不计入 done。
+            job["done"] = sum(1 for r in results if r.get("status") in ("synced", "up_to_date"))
 
-    if _cancelled():
+    if cancelled:
         _job_update(job_id, status="cancelled", current=None, finished_at=_now_iso())
         return
 

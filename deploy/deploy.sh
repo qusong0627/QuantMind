@@ -7,7 +7,7 @@ set -Eeuo pipefail
 PROJECT_DIR="${QUANTMIND_PROJECT_DIR:-/opt/quantmind}"
 REPO_URL="${QUANTMIND_REPO_URL:-https://gitee.com/qusong0627/QuantMind.git}"
 REF="${QUANTMIND_REF:-master}"
-DOCKER_MIRROR="${QUANTMIND_DOCKER_MIRROR:-https://fx07btib0z92d2dhxl.xuanyuan.run}"
+DOCKER_MIRROR="${QUANTMIND_DOCKER_MIRROR:-https://vmx3wfa8ih592aat3z.xuanyuan.run}"
 # 国内网络加速：pip 源（构建镜像时经 build-arg 注入 Dockerfile，覆盖默认清华源）
 PIP_MIRROR="${QUANTMIND_PIP_MIRROR:-https://pypi.tuna.tsinghua.edu.cn/simple/}"
 PIP_TRUSTED_HOST="${QUANTMIND_PIP_TRUSTED_HOST:-pypi.tuna.tsinghua.edu.cn}"
@@ -106,6 +106,9 @@ DB_PASSWORD=$(openssl rand -hex 24)
 SECRET_KEY=$(openssl rand -hex 32)
 JWT_SECRET_KEY=$(openssl rand -hex 32)
 STORAGE_MODE=local
+# 系统一键更新（Web 控制台「更新系统」）：docker socket 已挂载，默认开启。
+# 如需关闭，改此行后 `docker compose up -d --force-recreate quantmind` 生效。
+QUANTMIND_ENABLE_WEB_UPDATE=true
 EOF
 }
 

@@ -13,17 +13,17 @@ QuantMind 是面向中國 A 股量化研究與交易的一體化平台，將資�
 
 ## 部署
 
-支援 Ubuntu 22.04 / 24.04。正式環境建議使用完整離線包，其中包含 Docker 映像、PostgreSQL 業務資料、模型及 Qlib 資料。
+支援 Ubuntu 22.04 / 24.04。正式環境建議使用完整部署包，其中包含 Docker 映像、PostgreSQL 業務資料、模型及 Qlib 資料。
 
 ```bash
-# 完整離線部署
-curl -fsSL https://gitee.com/qusong0627/QuantMind/raw/master/deploy/offline-deploy.sh | sudo bash
+# 完整線上部署（自 CDN 下載完整包，開箱即用）
+curl -fsSL https://gitee.com/qusong0627/QuantMind/raw/master/deploy/full-deploy.sh | sudo bash
 
 # 線上原始碼部署
 curl -fsSL https://gitee.com/qusong0627/QuantMind/raw/master/deploy/deploy.sh | sudo bash
 ```
 
-預設離線包位址為 `https://cdn.quantmind.cloud/quantmind-offline`。更新既有伺服器：
+預設完整包位址為 `https://cdn.quantmind.cloud/quantmind-offline`。更新既有伺服器：
 
 ```bash
 cd /opt/quantmind
@@ -34,7 +34,6 @@ sudo bash deploy/update.sh
 | --- | --- |
 | Web | `http://<伺服器 IP>:3000` |
 | API 文件 | `http://<伺服器 IP>:8000/docs` |
-| Dashboard | `http://<伺服器 IP>:8501` |
 
 離線包還原與進階選項請見 [deploy/README.md](deploy/README.md)。
 

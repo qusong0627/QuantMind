@@ -24,7 +24,7 @@ main 容器已挂载 /var/run/docker.sock。因此这里借 **docker socket HTTP
 
 安全
 ----
-功能默认关闭，仅当操作者显式开启 QUANTMIND_ENABLE_WEB_UPDATE=true 且 docker socket
+功能默认开启；如需关闭设 QUANTMIND_ENABLE_WEB_UPDATE=false。开启且 docker socket
 存在时才可用。挂载 docker.sock 的容器本就拥有宿主 root 级能力，故该接口：
   - 强校验 require_admin；
   - 可选 QUANTMIND_UPDATE_TOKEN，开启后必须携带匹配的 X-Update-Token；
@@ -50,12 +50,15 @@ logger = logging.getLogger(__name__)
 router = APIRouter(dependencies=[Depends(require_admin)])  # 路由器级认证兜底
 
 # ---- 运行时配置（默认值面向 Ubuntu/Debian 宿主）----------------------
-_ENABLED = os.getenv("QUANTMIND_ENABLE_WEB_UPDATE", "").strip().lower() in {
-    "1",
-    "true",
-    "yes",
-    "on",
-}
+# 默认开启（web 控制台「更新系统」）；仅当显式设 false/0/no/off 时关闭。
+def _enabled_from_env() -> bool:
+    v = os.getenv("QUANTMIND_ENABLE_WEB_UPDATE", "").strip().lower()
+    if v == "":
+        return True  # 未设置 → 默认开启
+    return v not in {"0", "false", "no", "off"}
+
+
+_ENABLED = _enabled_from_env()
 _TOKEN = os.getenv("QUANTMIND_UPDATE_TOKEN", "").strip()
 _PROJECT_DIR = os.getenv("QUANTMIND_PROJECT_DIR", "/opt/quantmind")
 _SOCKET = os.getenv("DOCKER_SOCKET_PATH", "/var/run/docker.sock")
