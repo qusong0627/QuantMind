@@ -434,6 +434,11 @@ if _WEB_DIST_DIR and _WEB_DIST_DIR.is_dir():
 
     @app.get("/{spa_path:path}", include_in_schema=False)
     async def web_spa(spa_path: str):
+        # API 与已知资源前缀缺失时必须 404，绝不能回退 index.html——
+        # 否则前端拿到 200 + HTML 当 JSON 解析会直接崩溃
+        first = spa_path.split("/", 1)[0]
+        if first in ("api", "uploads", "static", "docs"):
+            raise HTTPException(status_code=404)
         candidate = (_WEB_DIST_DIR / spa_path).resolve()
         # 只允许命中 dist 目录内的真实文件，其余回退到 index.html（前端路由）
         if (
@@ -443,6 +448,9 @@ if _WEB_DIST_DIR and _WEB_DIST_DIR.is_dir():
             and candidate.is_relative_to(_WEB_DIST_DIR)
         ):
             return FileResponse(candidate)
+        # 带文件扩展名的未命中路径（不存在的 js/css 等）同样 404
+        if "." in spa_path.rsplit("/", 1)[-1]:
+            raise HTTPException(status_code=404)
         return FileResponse(_WEB_DIST_DIR / "index.html")
 
 
