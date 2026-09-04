@@ -24,6 +24,7 @@ CUDA_INDEX="https://download.pytorch.org/whl/cu128"
 TORCH_GPU="${TORCH_GPU:-torch==2.9.1}"
 
 log()  { echo -e "\033[36m[build-win-gpu]\033[0m $(date '+%H:%M:%S') $*"; }
+ok()   { echo -e "\033[32m[build-win-gpu]\033[0m $(date '+%H:%M:%S') $*"; }
 fail() { echo -e "\033[31m[build-win-gpu]\033[0m $*" >&2; exit 1; }
 
 [ -f "$STAGE_MAIN/runtime/python/python.exe" ] || fail "Win 主包尚未构建（缺 runtime），先跑 build_windows_pack.sh"
@@ -57,7 +58,10 @@ for whl in glob.glob(r"$WHEELS_GPU/*.whl"):
 PYEOF
 
     [ -d "$TARGET_SP/torch" ] || fail "payload 缺少 torch 目录"
-    [ -d "$TARGET_SP/nvidia" ] || fail "payload 缺少 nvidia 运行库，组装结果不是 CUDA 版"
+    # Windows 的 cu128 torch wheel 自包含 CUDA 运行库(torch/lib 内 dll)，无独立 nvidia 目录
+    if ! ls "$TARGET_SP/torch/lib/" 2>/dev/null | grep -qiE "cudnn|cublas|cufft|curand|cusparse|nvToolsExt|c10_cuda"; then
+        fail "payload torch/lib 未发现 CUDA 运行库，组装结果不是 CUDA 版"
+    fi
     touch "$PAYLOAD/.payload_done"
 fi
 
