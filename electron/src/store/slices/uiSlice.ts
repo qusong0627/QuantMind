@@ -22,6 +22,11 @@ const savedMarket = localStorage.getItem(MARKET_PREF_KEY);
 const validMarkets: AppMarket[] = (['CN', 'US', 'HK', 'CRYPTO', 'FUTURES'] as AppMarket[]).filter((m) => isMarketEnabled(m));
 const initialMarket: AppMarket =
   validMarkets.includes(savedMarket as AppMarket) ? (savedMarket as AppMarket) : 'CN';
+// 确保市场偏好键始终有值：策略库/回测中心等按 localStorage 过滤策略列表的模块，
+// 键缺失时会退化为「不过滤」从而把港股策略混进 A 股视图
+if (!validMarkets.includes(savedMarket as AppMarket)) {
+  localStorage.setItem(MARKET_PREF_KEY, initialMarket);
+}
 
 const initialState: UIState = {
   theme: 'light',

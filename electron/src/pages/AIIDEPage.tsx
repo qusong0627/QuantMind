@@ -569,7 +569,8 @@ const AIIDEPage: React.FC = () => {
     const fetchLocalFileList = async (): Promise<FileItem[]> => {
         setIsLoadingFiles(true);
         try {
-            const mktParam = currentMarket && currentMarket !== 'CN' ? `?market=${currentMarket}` : '';
+            // CN/A 也要传 market：后端按 parameters.market 排除港股（缺省则全量混列）
+            const mktParam = currentMarket ? `?market=${currentMarket}` : '';
             const res = await apiFetch(`/files/list${mktParam}`);
             if (!res.ok) {
                 const err = await res.json().catch(() => ({}));

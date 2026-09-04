@@ -188,7 +188,10 @@ export const StrategyPicker: React.FC<StrategyPickerProps> = ({
   const loadPersonalStrategies = async () => {
     setIsLoading(true);
     try {
-      const strategies = await strategyManagementService.loadStrategies();
+      const strategies = await strategyManagementService.loadStrategies(
+        undefined,
+        localStorage.getItem('qm:current_market') || 'CN',
+      );
       setPersonalStrategies(strategies);
     } catch (error: any) {
       console.error('加载策略失败:', error);
