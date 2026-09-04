@@ -118,6 +118,13 @@ export TRADING_AGENTS_RESULTS_DIR="$STORAGE_ROOT/reports/trading_agents"
 export QM_WEB_DIST_DIR="$ROOT/web"
 export HF_HOME="$STORAGE_ROOT/hf"
 export MPLCONFIGDIR="$ROOT/run/mpl"
+# 预置模型（随包分发）：系统生产模型 + FinBERT 中文情绪（RSS 新闻情绪识别）
+# 情绪识别默认开启（与 docker 一致）；CPU 机器如需关闭: pack.env 里 NEWS_USE_FINBERT=0
+export USER_MODELS_ROOT="$ROOT/models/users"   # 必须绝对路径（相对路径会被拼 /app 前缀）
+export MODELS_PRODUCTION="$ROOT/models/production"
+export FINBERT_ZH_MODEL="${FINBERT_ZH_MODEL:-$ROOT/models/finbert-zh-base}"
+export NEWS_USE_FINBERT="${NEWS_USE_FINBERT:-true}"
+# FINBERT_DEVICE 不设默认：留空由代码自判定（GPU 可用则用 GPU），pack.env 可覆盖
 export ENABLE_CRYPTO="${ENABLE_CRYPTO:-false}"
 export QM_QUANTDB_DATA_DIR="$STORAGE_ROOT/quantdb"
 export QM_QUANTUS_DATA_DIR="$STORAGE_ROOT/quantus"

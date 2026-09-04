@@ -1192,9 +1192,11 @@ async def get_available_models(tid: str, uid: str, market: str | None = None) ->
         # 扫描磁盘真实模型目录（自动发现并接入已训练模型）
         import glob
         from pathlib import Path
-        disk_model_metas = glob.glob(f"/app/models/users/{tid}/{uid}/*/metadata.json")
+        # 便携/裸机部署没有 /app 容器路径，用 USER_MODELS_ROOT 解析用户模型根
+        users_root = os.getenv("USER_MODELS_ROOT", "/app/models/users").rstrip("/")
+        disk_model_metas = glob.glob(f"{users_root}/{tid}/{uid}/*/metadata.json")
         if not disk_model_metas:
-            disk_model_metas = glob.glob("/app/models/users/*/*/*/metadata.json")
+            disk_model_metas = glob.glob(f"{users_root}/*/*/*/metadata.json")
         
         seen_mids = {m["modelId"] for m in models}
         for mp in disk_model_metas:
