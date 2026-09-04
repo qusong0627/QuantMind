@@ -126,6 +126,22 @@ export QM_QUANTBC_DATA_DIR="$STORAGE_ROOT/quantbc"
 export QM_QUANTFUTURES_DATA_DIR="$STORAGE_ROOT/quantfutures"
 # AI 功能未配置密钥时用占位值放行启动（真实密钥写 pack.env，重启生效）
 export LLM_API_KEY="${LLM_API_KEY:-not-configured}"
+# 后台管理健康面板探测目标 → 便携包真实地址（Docker 版的默认值是容器名/固定端口）
+export ADMIN_DASHBOARD_API_HEALTH_URL="http://127.0.0.1:${QM_API_PORT}/health"
+export ADMIN_DASHBOARD_ENGINE_HEALTH_URL="http://127.0.0.1:${QM_ENGINE_PORT}/health"
+export ADMIN_DASHBOARD_TRADE_HEALTH_URL="http://127.0.0.1:${QM_TRADE_PORT}/health"
+export ADMIN_DASHBOARD_STREAM_HEALTH_URL="http://127.0.0.1:${QM_STREAM_PORT}/health"
+export ADMIN_DASHBOARD_DB_HOST="127.0.0.1"
+export ADMIN_DASHBOARD_DB_PORT="$QM_PG_PORT"
+export ADMIN_DASHBOARD_REDIS_HOST="127.0.0.1"
+export ADMIN_DASHBOARD_REDIS_PORT="$QM_REDIS_PORT"
+# Docker 专属组件便携版没有，从面板剔除避免误报（qwenpaw/huntly 若在包内会被启动）
+export ADMIN_DASHBOARD_DISABLED_SERVICES="${ADMIN_DASHBOARD_DISABLED_SERVICES:-data_gateway,web,rsshub}"
+export ADMIN_DASHBOARD_QWENPAW_HOST="127.0.0.1"
+export ADMIN_DASHBOARD_QWENPAW_PORT="${QM_QWENPAW_PORT:-8088}"
+export ADMIN_DASHBOARD_HUNTLY_HOST="127.0.0.1"
+export ADMIN_DASHBOARD_HUNTLY_PORT="${QM_HUNTLY_PORT:-8090}"
+export REDIS_URL="redis://127.0.0.1:${QM_REDIS_PORT}"
 mkdir -p "$MPLCONFIGDIR"
 
 PYTHON="$ROOT/runtime/python/bin/python3"
@@ -177,6 +193,49 @@ fi
 "$ROOT/redis/redis-cli" -h 127.0.0.1 -p "$QM_REDIS_PORT" ping 2>/dev/null | grep -q PONG \
     || fail "Redis 启动失败，见 logs/redis.log"
 ok "Redis 就绪"
+
+# ── 2b. Huntly（新闻聚合，内嵌 JRE，可选组件）────────────────
+HUNTLY_PID=""
+HUNTLY_PORT="${QM_HUNTLY_PORT:-8090}"
+export HUNTLY_BASE_URL="http://127.0.0.1:${HUNTLY_PORT}"
+if [ -x "$ROOT/huntly/jre/bin/java" ] && [ -f "$ROOT/huntly/server.jar" ]; then
+    if curl -fsS -m 2 "http://127.0.0.1:${HUNTLY_PORT}/" >/dev/null 2>&1; then
+        log "Huntly 已在运行（端口 $HUNTLY_PORT），跳过启动"
+    else
+        log "启动 Huntly (端口 $HUNTLY_PORT，首次启动初始化约 30 秒) ..."
+        mkdir -p "$STORAGE_ROOT/huntly"
+        setsid "$ROOT/huntly/jre/bin/java" -Xmx512m -jar "$ROOT/huntly/server.jar" \
+            --huntly.dataDir="$STORAGE_ROOT/huntly/" --server.port="$HUNTLY_PORT" \
+            > "$ROOT/logs/huntly.log" 2>&1 &
+        HUNTLY_PID=$!
+        [ "$BG" = "1" ] && echo "$HUNTLY_PID" > "$ROOT/run/huntly.pid"
+    fi
+else
+    log "Huntly 未包含在包内，新闻聚合功能降级"
+fi
+
+# ── 2c. QwenPaw（AI 助手，独立 Python 3.11 运行时，可选组件）──
+QWENPAW_PID=""
+QWENPAW_PORT="${QM_QWENPAW_PORT:-8088}"
+export QWENPAW_BASE_URL="http://127.0.0.1:${QWENPAW_PORT}"
+export QWENPAW_SHARED_FILES_DIR="${QWENPAW_SHARED_FILES_DIR:-$STORAGE_ROOT/qwenpaw-shared}"
+export QWENPAW_SHARED_VISIBLE_DIR="${QWENPAW_SHARED_VISIBLE_DIR:-$STORAGE_ROOT/qwenpaw-working}"
+mkdir -p "$QWENPAW_SHARED_FILES_DIR" "$QWENPAW_SHARED_VISIBLE_DIR" "$STORAGE_ROOT/qwenpaw-home"
+if [ -x "$ROOT/qwenpaw_runtime/python/bin/python3" ]; then
+    if curl -fsS -m 2 "http://127.0.0.1:${QWENPAW_PORT}/" >/dev/null 2>&1; then
+        log "QwenPaw 已在运行（端口 $QWENPAW_PORT），跳过启动"
+    else
+        log "启动 QwenPaw (端口 $QWENPAW_PORT) ..."
+        setsid env HOME="$STORAGE_ROOT/qwenpaw-home" \
+            "$ROOT/qwenpaw_runtime/python/bin/python3" -m qwenpaw app \
+            --host 127.0.0.1 --port "$QWENPAW_PORT" \
+            > "$ROOT/logs/qwenpaw.log" 2>&1 &
+        QWENPAW_PID=$!
+        [ "$BG" = "1" ] && echo "$QWENPAW_PID" > "$ROOT/run/qwenpaw.pid"
+    fi
+else
+    log "QwenPaw 未包含在包内，AI 助手功能降级"
+fi
 
 # ── 启动后端（前台模式等待就绪；后台模式直接放行）────────────
 BG=0
@@ -230,6 +289,8 @@ kill_group() {
 
 cleanup() {
     log "正在停止全部服务 ..."
+    kill_group "$QWENPAW_PID"
+    kill_group "$HUNTLY_PID"
     kill_group "$CELERY_BEAT_PID"
     kill_group "$CELERY_WORKER_PID"
     kill_group "$BACKEND_PID"

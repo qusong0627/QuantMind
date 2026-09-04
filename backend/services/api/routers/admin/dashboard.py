@@ -86,6 +86,15 @@ INFRA_SERVICES = [
     },
 ]
 
+# 便携/精简部署：允许通过环境变量剔除不存在的组件（如 data_gateway,web,qwenpaw,rsshub）
+# 避免面板对未部署组件一直报「不可达 0%」造成误解
+_DISABLED_INFRA = {
+    s.strip()
+    for s in os.getenv("ADMIN_DASHBOARD_DISABLED_SERVICES", "").split(",")
+    if s.strip()
+}
+INFRA_SERVICES = [s for s in INFRA_SERVICES if s["service"] not in _DISABLED_INFRA]
+
 
 def _get_host_workload() -> dict[str, Any]:
     """采集宿主机/容器真实 CPU、内存与磁盘负载。"""

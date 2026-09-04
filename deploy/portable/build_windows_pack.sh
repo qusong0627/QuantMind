@@ -225,6 +225,9 @@ rm -rf "$STAGE/backend/scratch" "$STAGE/backend/htmlcov" "$STAGE/backend/coverag
 rm -rf "$STAGE/web"
 mkdir -p "$STAGE/web"
 cp -a "$REPO_ROOT/electron/dist-react/." "$STAGE/web/"
+# 便携版 UI 与 API 同源伺服：清掉硬编码的网关地址，改走相对路径
+find "$STAGE/web/assets" -name '*.js' -type f \
+    -exec sed -i 's#http://127\.0\.0\.1:8000##g' {} +
 
 cp "$REPO_ROOT/docker/training/train.py" "$STAGE/train.py"
 cp "$REPO_ROOT/docker/training/preprocessing.py" "$STAGE/preprocessing.py"

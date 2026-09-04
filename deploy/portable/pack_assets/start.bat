@@ -103,6 +103,16 @@ set "QM_QUANTHK_DATA_DIR=%STORAGE_ROOT%\quanthk"
 set "QM_QUANTBC_DATA_DIR=%STORAGE_ROOT%\quantbc"
 set "QM_QUANTFUTURES_DATA_DIR=%STORAGE_ROOT%\quantfutures"
 if not defined LLM_API_KEY set "LLM_API_KEY=not-configured"
+rem 后台管理健康面板探测目标 + 剔除便携版没有的 Docker 组件（Windows 版暂不含 Huntly）
+set "ADMIN_DASHBOARD_API_HEALTH_URL=http://127.0.0.1:%QM_API_PORT%/health"
+set "ADMIN_DASHBOARD_ENGINE_HEALTH_URL=http://127.0.0.1:%QM_ENGINE_PORT%/health"
+set "ADMIN_DASHBOARD_TRADE_HEALTH_URL=http://127.0.0.1:%QM_TRADE_PORT%/health"
+set "ADMIN_DASHBOARD_STREAM_HEALTH_URL=http://127.0.0.1:%QM_STREAM_PORT%/health"
+set "ADMIN_DASHBOARD_DB_HOST=127.0.0.1"
+set "ADMIN_DASHBOARD_DB_PORT=%QM_PG_PORT%"
+set "ADMIN_DASHBOARD_REDIS_HOST=127.0.0.1"
+set "ADMIN_DASHBOARD_REDIS_PORT=%QM_REDIS_PORT%"
+set "ADMIN_DASHBOARD_DISABLED_SERVICES=data_gateway,web,qwenpaw,rsshub,huntly"
 
 echo [QuantMind] 检查 PostgreSQL ...
 if not exist "%ROOT%pgdata\PG_VERSION" (

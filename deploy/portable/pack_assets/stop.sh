@@ -20,6 +20,8 @@ stop_pidfile() {
 
 stop_pidfile "$ROOT/run/celery-beat.pid"   "Celery beat"
 stop_pidfile "$ROOT/run/celery-worker.pid" "Celery worker"
+stop_pidfile "$ROOT/run/qwenpaw.pid"       "QwenPaw"
+stop_pidfile "$ROOT/run/huntly.pid"        "Huntly"
 stop_pidfile "$ROOT/run/backend.pid"       "后端服务"
 
 sleep 2

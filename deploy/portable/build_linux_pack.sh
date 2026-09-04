@@ -39,7 +39,7 @@ dl()   { curl -fL --retry 3 --progress-bar -o "$2" "$1"; }
 # 解析 python-build-standalone 最新 release 的 tag 与资产名
 # API 限流时自动降级：releases/latest 重定向拿 tag + expanded_assets 页面拿资产名
 resolve_pbs_asset() {
-    local pattern="$1" tag="" asset=""
+    local ver="$1" pattern="$2" tag="" asset=""
     tag="$(curl -fsSL --retry 2 https://api.github.com/repos/astral-sh/python-build-standalone/releases/latest 2>/dev/null \
         | python3 -c 'import json,sys
 try: print(json.load(sys.stdin)["tag_name"])
@@ -53,20 +53,20 @@ except Exception: pass' 2>/dev/null || true)"
     asset="$(curl -fsSL "https://api.github.com/repos/astral-sh/python-build-standalone/releases/tags/$tag" 2>/dev/null \
         | python3 -c '
 import json, sys
-pattern = sys.argv[1]
+ver, pattern = sys.argv[1], sys.argv[2]
 try:
     for a in json.load(sys.stdin)["assets"]:
         n = a["name"]
-        if n.startswith("cpython-3.10.") and pattern in n and n.endswith(".tar.gz"):
+        if n.startswith(f"cpython-{ver}.") and pattern in n and n.endswith(".tar.gz"):
             print(n); break
-except Exception: pass' "$pattern" 2>/dev/null || true)"
+except Exception: pass' "$ver" "$pattern" 2>/dev/null || true)"
     if [ -z "$asset" ]; then
         # 结尾引号用于排除 *.tar.gz.sha256 文件
         asset="$(curl -fsSL "https://github.com/astral-sh/python-build-standalone/releases/expanded_assets/$tag" \
-            | grep -oE "cpython-3\.10\.[0-9]+[^\"<]*${pattern}\.tar\.gz\"" \
+            | grep -oE "cpython-${ver}\.[0-9]+[^\"<]*${pattern}\.tar\.gz\"" \
             | sed 's/"$//' | head -1 || true)"
     fi
-    [ -n "$asset" ] || fail "未找到 cpython-3.10 资产 (pattern=$pattern, tag=$tag)"
+    [ -n "$asset" ] || fail "未找到 cpython-$ver 资产 (pattern=$pattern, tag=$tag)"
     PBS_TAG="$tag"
     PBS_ASSET="$asset"
 }
@@ -83,7 +83,7 @@ AVAIL_KB=$(df -k "$BUILD" | awk 'NR==2{print $4}')
 # ── 1. 内嵌 Python (python-build-standalone) ────────────────
 if [ ! -x "$STAGE/runtime/python/bin/python3" ]; then
     log "下载 python-build-standalone 运行时 ..."
-    resolve_pbs_asset "x86_64-unknown-linux-gnu-install_only"
+    resolve_pbs_asset "3.10" "x86_64-unknown-linux-gnu-install_only"
     log "  $PBS_ASSET (release $PBS_TAG)"
     dl "https://github.com/astral-sh/python-build-standalone/releases/download/$PBS_TAG/$PBS_ASSET" \
        "$BUILD/cache/$PBS_ASSET"
@@ -190,6 +190,55 @@ if [ ! -x "$STAGE/pgsql/bin/initdb" ]; then
 fi
 "$STAGE/pgsql/bin/initdb" --version
 
+# ── 5b. Huntly（新闻聚合，Java jar + JRE，从本地 docker 镜像提取）──
+if [ ! -f "$STAGE/huntly/server.jar" ]; then
+    if docker images lcomplete/huntly:latest --format '{{.Repository}}' 2>/dev/null | grep -q huntly; then
+        log "提取 Huntly（server.jar + JRE）..."
+        _HC="$(docker create lcomplete/huntly:latest)"
+        docker cp "$_HC":/app/server.jar "$BUILD/cache/huntly_server.jar"
+        docker cp "$_HC":/opt/java/openjdk "$BUILD/cache/huntly_jre"
+        docker rm "$_HC" >/dev/null 2>&1 || true
+        mkdir -p "$STAGE/huntly"
+        cp "$BUILD/cache/huntly_server.jar" "$STAGE/huntly/server.jar"
+        rm -rf "$BUILD/cache/huntly_jre_jre" 2>/dev/null || true
+        cp -a "$BUILD/cache/huntly_jre" "$STAGE/huntly/jre"
+        # 瘦身：编译器/调试器用不到
+        rm -f "$STAGE/huntly/jre/bin/javac" "$STAGE/huntly/jre/bin/javadoc" \
+              "$STAGE/huntly/jre/bin/javap" "$STAGE/huntly/jre/bin/jshell" \
+              "$STAGE/huntly/jre/bin/jdb" "$STAGE/huntly/jre/lib/src.zip" 2>/dev/null || true
+        ok "Huntly 已就绪 ($(du -sh "$STAGE/huntly" | cut -f1))"
+    else
+        log "警告: 本地无 lcomplete/huntly 镜像，跳过 Huntly（新闻聚合降级）"
+    fi
+fi
+[ -f "$STAGE/huntly/server.jar" ] && "$STAGE/huntly/jre/bin/java" -version 2>&1 | head -1
+
+# ── 5c. QwenPaw（AI 助手，独立 Python 3.11 运行时，从本地 docker 镜像提取）──
+if [ ! -x "$STAGE/qwenpaw_runtime/python/bin/python3" ]; then
+    if docker images agentscope/qwenpaw:latest --format '{{.Repository}}' 2>/dev/null | grep -q qwenpaw; then
+        log "提取 QwenPaw（独立 Python 3.11 运行时 + site-packages）..."
+        resolve_pbs_asset "3.11" "x86_64-unknown-linux-gnu-install_only"
+        if [ ! -f "$BUILD/cache/$PBS_ASSET" ]; then
+            dl "https://github.com/astral-sh/python-build-standalone/releases/download/$PBS_TAG/$PBS_ASSET" \
+               "$BUILD/cache/$PBS_ASSET"
+        fi
+        rm -rf "$STAGE/qwenpaw_runtime"
+        mkdir -p "$STAGE/qwenpaw_runtime"
+        tar -xzf "$BUILD/cache/$PBS_ASSET" -C "$STAGE/qwenpaw_runtime"
+        _QC="$(docker create agentscope/qwenpaw:latest)"
+        rm -rf "$BUILD/cache/qwenpaw_sp" && mkdir -p "$BUILD/cache/qwenpaw_sp"
+        docker cp "$_QC":/app/venv/lib/python3.11/site-packages/. "$BUILD/cache/qwenpaw_sp/"
+        docker rm "$_QC" >/dev/null 2>&1 || true
+        QSP="$STAGE/qwenpaw_runtime/python/lib/python3.11/site-packages"
+        cp -a "$BUILD/cache/qwenpaw_sp/." "$QSP/"
+        # qwenpaw 在镜像内非 editable 安装于 site-packages，与 PBS 3.11 兼容（cp311 wheel）
+        "$STAGE/qwenpaw_runtime/python/bin/python3" -c "import qwenpaw; print('  qwenpaw OK:', qwenpaw.__file__)"
+        ok "QwenPaw 运行时就绪 ($(du -sh "$STAGE/qwenpaw_runtime" | cut -f1))"
+    else
+        log "警告: 本地无 agentscope/qwenpaw 镜像，跳过 QwenPaw（AI 助手降级）"
+    fi
+fi
+
 # ── 6. 源码与前端产物 ────────────────────────────────────────
 log "复制源码与前端产物 ..."
 for d in backend config strategy_templates; do
@@ -202,6 +251,10 @@ rm -rf "$STAGE/backend/scratch" "$STAGE/backend/htmlcov" "$STAGE/backend/coverag
 rm -rf "$STAGE/web"
 mkdir -p "$STAGE/web"
 cp -a "$REPO_ROOT/electron/dist-react/." "$STAGE/web/"
+# 便携版 UI 与 API 同源伺服：清掉构建产物里硬编码的网关地址
+# （默认 http://127.0.0.1:8000，便携部署中会跨域打到别的实例），改走相对路径
+find "$STAGE/web/assets" -name '*.js' -type f \
+    -exec sed -i 's#http://127\.0\.0\.1:8000##g' {} +
 
 # 远程训练节点脚本（与镜像 /app 对齐）
 cp "$REPO_ROOT/docker/training/train.py" "$STAGE/train.py"
