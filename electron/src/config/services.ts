@@ -67,9 +67,18 @@ function persistServerUrl(url: string | null): void {
 
 /**
  * 检测是否为 Electron 桌面环境
+ *
+ * 仅当真正具备桌面端服务器配置能力（preload 暴露 getServerUrl）才算。
+ * 注意: web 模式会经 electronCompat 注入兼容 stub（无 getServerUrl），
+ * 若按 typeof electronAPI === 'object' 判断会把浏览器误认为桌面端，
+ * 导致 API 基址落入 127.0.0.1:8000 兜底 → 跨源 CORS → 登录失败。
  */
 export function isElectronEnv(): boolean {
-  return typeof window !== 'undefined' && typeof (window as any).electronAPI === 'object';
+  return (
+    typeof window !== 'undefined' &&
+    typeof (window as any).electronAPI === 'object' &&
+    typeof (window as any).electronAPI?.getServerUrl === 'function'
+  );
 }
 
 /**
