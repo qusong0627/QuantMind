@@ -123,7 +123,8 @@ if [ ! -f "$SITE_PKG/fastapi/__init__.py" ]; then
     # 每次镜像尝试开始时复制进 WHEELS 供 find-links 解析与 no-index 安装使用
     SDIST_WHEELS="$BUILD/cache/wheels-sdist"
     mkdir -p "$SDIST_WHEELS"
-    for _sd_pkg in 'jsonpath==0.82.2' 'jieba==0.42.1' 'PyExecJS==1.5.1'; do
+    # 注: pyqlib(ai.txt)依赖的 gym 同为 sdist-only，一并预构建
+    for _sd_pkg in 'jsonpath==0.82.2' 'jieba==0.42.1' 'PyExecJS==1.5.1' 'gym==0.26.2'; do
         _sd_name="${_sd_pkg%%==*}"
         # pip 产出的 wheel 文件名是规范小写（pyexecjs-*.whl），须大小写不敏感判断
         if ! find "$SDIST_WHEELS" -maxdepth 1 -iname "${_sd_name}-*.whl" | grep -q .; then
