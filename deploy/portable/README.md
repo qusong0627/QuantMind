@@ -48,6 +48,12 @@ QuantMind-Portable-xxx/
 bash deploy/portable/build_linux_pack.sh
 # 成品: deploy/portable/dist/QuantMind-Portable-linux-x64.tar.gz
 
+# GPU 增补包（可选，约 40 分钟，下载 CUDA 版 torch ~2.5GB）
+# 依赖主包已构建；构建机有 NVIDIA 驱动时会实测 CUDA
+bash deploy/portable/build_gpu_addon.sh
+# 成品: deploy/portable/dist/QuantMind-Portable-gpu-addon-linux-x64.tar.gz (~1.6G)
+# 用户侧: 增补包解压到便携包根目录 → bash install_gpu.sh → torch 切换为 CUDA 版
+
 # Windows 包（交叉组装，成品必须在真机 Windows 验证）
 bash deploy/portable/build_windows_pack.sh
 # 成品: deploy/portable/dist/QuantMind-Portable-win-x64.zip

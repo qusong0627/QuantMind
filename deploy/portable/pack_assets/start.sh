@@ -198,6 +198,9 @@ ok "Redis 就绪"
 HUNTLY_PID=""
 HUNTLY_PORT="${QM_HUNTLY_PORT:-8090}"
 export HUNTLY_BASE_URL="http://127.0.0.1:${HUNTLY_PORT}"
+# API 服务连 Huntly 的登录凭据（RSS 源添加依赖 signin；可用 pack.env 覆盖）
+export HUNTLY_USERNAME="${HUNTLY_USERNAME:-admin}"
+export HUNTLY_PASSWORD="${HUNTLY_PASSWORD:-admin123}"
 if [ -x "$ROOT/huntly/jre/bin/java" ] && [ -f "$ROOT/huntly/server.jar" ]; then
     if curl -fsS -m 2 "http://127.0.0.1:${HUNTLY_PORT}/" >/dev/null 2>&1; then
         log "Huntly 已在运行（端口 $HUNTLY_PORT），跳过启动"

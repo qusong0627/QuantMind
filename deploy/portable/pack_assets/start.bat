@@ -113,6 +113,8 @@ set "ADMIN_DASHBOARD_DB_PORT=%QM_PG_PORT%"
 set "ADMIN_DASHBOARD_REDIS_HOST=127.0.0.1"
 set "ADMIN_DASHBOARD_REDIS_PORT=%QM_REDIS_PORT%"
 set "ADMIN_DASHBOARD_DISABLED_SERVICES=data_gateway,web,qwenpaw,rsshub,huntly"
+set "HUNTLY_USERNAME=admin"
+set "HUNTLY_PASSWORD=admin123"
 
 echo [QuantMind] 检查 PostgreSQL ...
 if not exist "%ROOT%pgdata\PG_VERSION" (

@@ -39,6 +39,19 @@
 - **PostgreSQL 拒绝启动（Linux）**：不要用 root 运行 start.sh。
 - **日志**：全部在 `logs/` 目录（backend.log / postgres.log / redis.log / celery-*.log）。
 
+## GPU 加速（可选增补包）
+
+默认包里的 PyTorch 是 CPU 版。若有单独下载的 **GPU 增补包**（QuantMind-Portable-gpu-addon）：
+
+1. 把增补包解压到便携包根目录（install_gpu.sh 会出现在根目录）
+2. 执行 `bash install_gpu.sh`，脚本自动切换 torch 为 CUDA 版并自检
+3. 重启后端生效
+
+显卡要求：**RTX 20 系（Turing）及更新**的 NVIDIA 卡（20/30/40/50 系、A100/H100 等专业卡均可）；
+GTX 10 系及更老架构不支持。驱动 ≥ 525（`nvidia-smi` 能输出即可）；
+CUDA 运行库随增补包附带，无需安装 CUDA Toolkit，磁盘需预留 6GB。
+回退 CPU 版：`bash runtime/python/bin/python3 -m pip install 'torch==2.9.1+cpu' --index-url https://download.pytorch.org/whl/cpu`
+
 ## 目录说明
 
 ```
