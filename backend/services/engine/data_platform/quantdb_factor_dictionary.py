@@ -64,6 +64,10 @@ _GROUPS = (
     # ── 港股持仓结构与南向资金 ──
     ("ca_", "holding_structure", "持仓结构", 1500),
     ("sb_", "holding_structure", "持仓结构", 1500),
+    # Alpha 库（2026-08-29 接入）: 三套经典价量因子
+    ("a101_", "alpha101", "经典Alpha101", 1600),
+    ("gtja_", "gtja191", "GTJA191价量", 1700),
+    ("a158_", "alpha158", "Alpha158多窗", 1800),
 )
 
 # High-value exact descriptions. The token renderer below covers documented
@@ -201,6 +205,24 @@ def _render_name(column: str) -> str:
         (r"micro_liquidity_amihud_(\d+)", "{0}日 Amihud 非流动性"),
         (r"micro_zone_vol_ratio_T(\d+)", "T{0} 时段成交量占比"),
         (r"vol_realized_(\d+)min", "{0}分钟已实现波动率"),
+        # Alpha 库命名（2026-08-29 接入）
+        (r"a101_(\d{3})", "Alpha101 #\1（Kakushadze 101 Formulaic Alphas）"),
+        (r"gtja_(\d{3})", "GTJA191 #\1（国泰君安短周期价量因子）"),
+        (r"a158_KMID", "K线实体比"),
+        (r"a158_KLEN", "K线振幅比"),
+        (r"a158_KMID2", "实体占振幅比"),
+        (r"a158_KUP", "上影线比"),
+        (r"a158_KUP2", "上影线占振幅比"),
+        (r"a158_KLOW", "下影线比"),
+        (r"a158_KLOW2", "下影线占振幅比"),
+        (r"a158_KSFT", "K线重心偏移"),
+        (r"a158_KSFT2", "K线重心偏移归一化"),
+        (r"a158_OPEN0", "开盘相对收盘"),
+        (r"a158_HIGH0", "最高相对收盘"),
+        (r"a158_LOW0", "最低相对收盘"),
+        (r"a158_VWAP0", "VWAP相对收盘"),
+        (r"a158_(ROC|MA|BETA|RSQR|RESI|STD|MAX|MIN|QTLU|QTLD|RANK|RSV|IMAX|IMIN|IMXD|CORR|CORD|CNTP|CNTN|CNTD|SUMP|SUMN|SUMD|VMA|VSTD|WVMA|VSUMP|VSUMN|VSUMD)(\d+)",
+         "{0} 因子（{1} 日窗口）"),
     )
     for pattern, template in patterns:
         match = re.fullmatch(pattern, column)

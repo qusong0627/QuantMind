@@ -74,6 +74,7 @@ FACTOR_SOURCE_LABELS = {
     "l1_l2_factors": "L1 + L2 合并宽表",
     "ccass_factors": "CCASS 持仓结构",
     "south_factors": "南向资金结构",
+    "alpha_library": "Alpha 库因子",
 }
 
 _SCHEMA_SQL = """

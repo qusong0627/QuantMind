@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Literal
 from collections.abc import Iterable
 
+import numpy as np
 import pandas as pd
 
 from backend.shared.stock_utils import StockCodeUtil
@@ -33,6 +34,7 @@ FACTOR_SOURCE_DIRS: dict[FactorSource, str] = {
     "l1_l2_factors": "6_ml_datasets/l1_l2_factors",
     "ccass_factors": "6_ml_datasets/ccass_factors",
     "south_factors": "6_ml_datasets/south_factors",
+    "alpha_library": "6_ml_datasets/alpha_library",
 }
 DAILY_BACKWARD_DIR = "1_kline_data/daily_backward"
 DEFAULT_FACTOR_SOURCE: FactorSource = "l1_factors"
@@ -40,7 +42,7 @@ DEFAULT_FACTOR_SOURCE: FactorSource = "l1_factors"
 # ── 市场 → 可用因子源映射（后台「模型训练数据集」与训练页数据源选择共用）───────
 # 各市场 6_ml_datasets/ 下实际存在的训练直读数据集。
 MARKET_FACTOR_SOURCES: dict[str, tuple[FactorSource, ...]] = {
-    "CN": ("l1_factors", "l2_factors", "l1_l2_factors"),
+    "CN": ("l1_factors", "l2_factors", "l1_l2_factors", "alpha_library"),
     "HK": ("l1_factors", "ccass_factors", "south_factors"),
     "US": ("l1_factors",),
     "CRYPTO": ("l1_factors",),
@@ -322,8 +324,8 @@ class QuantDBFactorReader:
 
         schema_hash = hashlib.sha256("\n".join(columns).encode()).hexdigest()
         missing = [column for column in REQUIRED_COLUMNS if column not in columns]
-        if "date" in missing and "dt" in columns:
-            missing.remove("date")  # dt 分区列即日期（HK l1_factors 无 date 列）
+        if "date" in missing and ("dt" in columns or "time" in columns):
+            missing.remove("date")  # dt 分区列或 time 列即日期（HK l1_factors/alpha_library 无 date 列）
         reason = None
         if missing and set(missing) <= set(OHLCV_COLUMNS):
             # 次要源（ccass/south）：OHLCV 由同目录 l1_factors 补给，标签可构建。
@@ -384,9 +386,10 @@ class QuantDBFactorReader:
         cols = set(columns)
         if "date" in cols:
             return 'CAST("date" AS DATE)'
-        # Compatibility only.  New factor sources must publish the date column.
         if "dt" in cols:
             return "strptime(CAST(\"dt\" AS VARCHAR), '%Y%m%d')::DATE"
+        if "time" in cols:
+            return 'CAST("time" AS DATE)'
         raise QuantDBFactorError("Factor source has neither date nor dt")
 
     @staticmethod
@@ -397,6 +400,8 @@ class QuantDBFactorReader:
             return f'CAST({alias}."date" AS DATE)'
         if "dt" in cols:
             return f"strptime(CAST({alias}.\"dt\" AS VARCHAR), '%Y%m%d')::DATE"
+        if "time" in cols:
+            return f'CAST({alias}."time" AS DATE)'
         raise QuantDBFactorError("Factor source has neither date nor dt")
 
     def assert_ready(
@@ -487,17 +492,21 @@ class QuantDBFactorReader:
                         # 源内行情列优先，缺失部分由补给表补齐
                         # （CN: daily_backward 后复权日线；HK: l1_factors）。
                         selected.append(
-                            f"COALESCE({factor_column}, k.{_quote(column)}) AS {_quote(column)}"
+                            f"CAST(COALESCE({factor_column}, k.{_quote(column)}) AS FLOAT) AS {_quote(column)}"
                         )
                     else:
-                        selected.append(f"{factor_column} AS {_quote(column)}")
+                        selected.append(f"CAST({factor_column} AS FLOAT) AS {_quote(column)}")
                 elif ohlcv_join:
                     # 源无此行情列：直接取补给表（ccass/south 场景）
-                    selected.append(f"k.{_quote(column)} AS {_quote(column)}")
+                    selected.append(f"CAST(k.{_quote(column)} AS FLOAT) AS {_quote(column)}")
+        # 数值因子列在 DuckDB 侧直接降为 FLOAT(float32)：
+        # 429 因子 × 全历史长表在 float64 下 ≈ 42GB+，超出训练容器 48GB mem_limit
+        # 会被 OOM(SIGKILL 137) 杀死（2026-08-29 实测 train_20260829065659_af1fcf16）。
+        # 训练/推理/IC 计算全部接受 float32，精度损失可忽略；调用方无需再降精度。
         selected.extend(
-            f"f.{_quote(source_column)} AS {_quote(feature)}"
+            f"CAST(f.{_quote(source_column)} AS FLOAT) AS {_quote(feature)}"
             if source_column != feature
-            else f"f.{_quote(feature)}"
+            else f"CAST(f.{_quote(feature)} AS FLOAT) AS {_quote(feature)}"
             for feature, source_column in source_columns.items()
         )
         start_s, end_s = str(start)[:10], str(end)[:10]
@@ -515,25 +524,60 @@ class QuantDBFactorReader:
                     " ON k.symbol = f.symbol"
                     f" AND CAST(k.dt AS VARCHAR) = strftime({date_expr}, '%Y%m%d')"
                 )
-            sql = (
+            base_sql = (
                 f"SELECT {', '.join(selected)} FROM {from_clause} "
                 f"WHERE {date_expr} BETWEEN CAST(? AS DATE) AND CAST(? AS DATE)"
             )
-            frame = con.execute(sql, [start_s, end_s]).fetchdf()
+            # ── 预分配 + 分块读取（2026-08-29 修复）───────────────────────
+            # 全历史 × 429 因子 float32 帧 ≈ 22GB。单次 fetchdf 峰值实测
+            # 53.9GB；分块+pd.concat 峰值仍 50.2GB（concat 复制累积帧），
+            # 均超出训练容器 48GB mem_limit 被 OOM(SIGKILL 137) 杀死。
+            # 方案：先 count 总行数 → 预分配 float32 numpy → 按月查询、
+            # 块内清洗后直接填入，零复制累积，峰值 ≈ 最终帧 + 单块。
+            count_sql = (
+                f"SELECT count(*) FROM {from_clause} "
+                f"WHERE {date_expr} BETWEEN CAST(? AS DATE) AND CAST(? AS DATE)"
+            )
+            total_rows = int(con.execute(count_sql, [start_s, end_s]).fetchone()[0])
+            factor_names = list(source_columns.keys())
+            ohlcv_names = [c for c in OHLCV_COLUMNS if c in status.columns]
+            sym_arr = np.empty(total_rows, dtype=object)
+            date_arr = np.empty(total_rows, dtype="datetime64[ns]")
+            factor_arr = np.empty((total_rows, len(factor_names)), dtype=np.float32)
+            ohlcv_arr = np.empty((total_rows, len(ohlcv_names)), dtype=np.float32)
+            pos = 0
+            date_list = self.available_dates(source, start=start_s, end=end_s)
+            for month in sorted({d[:7] for d in date_list}):
+                month_days = [d for d in date_list if d.startswith(month)]
+                m_lo, m_hi = month_days[0], month_days[-1]  # 实际交易日边界
+                chunk = con.execute(base_sql, [m_lo, m_hi]).fetchdf()
+                chunk["trade_date"] = pd.to_datetime(chunk["trade_date"], errors="coerce")
+                chunk = chunk.dropna(subset=["symbol", "trade_date"]).drop_duplicates(
+                    subset=["symbol", "trade_date"], keep="last"
+                )
+                chunk["symbol"] = chunk["symbol"].map(
+                    lambda value: StockCodeUtil.to_prefix(str(value))
+                )
+                n = len(chunk)
+                if n == 0:
+                    continue
+                sym_arr[pos:pos + n] = chunk["symbol"].values
+                date_arr[pos:pos + n] = chunk["trade_date"].values
+                for i, name in enumerate(factor_names):
+                    factor_arr[pos:pos + n, i] = chunk[name].values
+                for i, name in enumerate(ohlcv_names):
+                    ohlcv_arr[pos:pos + n, i] = chunk[name].values
+                pos += n
+            frame = pd.DataFrame(
+                {
+                    "symbol": sym_arr[:pos],
+                    "trade_date": date_arr[:pos],
+                    **{name: factor_arr[:pos, i] for i, name in enumerate(factor_names)},
+                    **{name: ohlcv_arr[:pos, i] for i, name in enumerate(ohlcv_names)},
+                }
+            )
         finally:
             con.close()
-        frame["trade_date"] = pd.to_datetime(frame["trade_date"], errors="coerce")
-        # 先剔除空 symbol/日期，再归一化代码格式：str(None) 会把缺失值变成
-        # "None" 字符串绕过 dropna（HK l1 坏分区曾缺 symbol 列，整日静默残留）。
-        frame = frame.dropna(subset=["symbol", "trade_date"]).drop_duplicates(
-            subset=["symbol", "trade_date"], keep="last"
-        )
-        # QuantDB may publish either suffix or prefix codes.  QuantMind's
-        # canonical internal representation is the prefix form (SH600036),
-        # including model inputs, prediction outputs, and persistence keys.
-        frame["symbol"] = frame["symbol"].map(
-            lambda value: StockCodeUtil.to_prefix(str(value))
-        )
         return frame
 
     def read_day(

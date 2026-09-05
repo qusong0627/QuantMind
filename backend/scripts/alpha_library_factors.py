@@ -326,15 +326,16 @@ def RTS(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def SCALE(df: pd.DataFrame, k: float = 1.0) -> pd.DataFrame:
-    """按日缩放使 sum(|x|) = k（当日截面）。"""
-    df = _as_df(df)
+    """按日缩放使 sum(|x|) = k（当日截面）。inf 视为缺失。"""
+    df = _as_df(df).replace([np.inf, -np.inf], np.nan)
     s = df.abs().sum(axis=1).replace(0, np.nan)
     return df.div(s, axis=0) * k
 
 
 def IN(df: pd.DataFrame, ind_onehot: np.ndarray) -> pd.DataFrame:
-    """行业中性化: 当日截面内减行业均值（128 行业）。ind_onehot: (n_sym, n_ind) 列归一化。"""
-    df = _as_df(df)
+    """行业中性化: 当日截面内减行业均值（128 行业）。ind_onehot: (n_sym, n_ind) 列归一化。
+    ⚠️ inf 必须先行转为 NaN（否则 inf×0=NaN 会污染整行行业均值，2026-08-29 实测）。"""
+    df = _as_df(df).replace([np.inf, -np.inf], np.nan)
     vals = df.values
     if np.isnan(vals).all():
         return df.copy()
@@ -445,7 +446,7 @@ def compute_a101(W: dict[str, pd.DataFrame], ind_map: pd.Series, mv: pd.DataFram
     def put(n: int, x) -> None:
         if isinstance(x, np.ndarray):
             x = _wrap(c, x)
-        F[f"a101_{n:03d}"] = x
+        F[f"a101_{n:03d}"] = x.replace([np.inf, -np.inf], np.nan)
 
     inner1 = _wrap(c, np.where((ret < 0).values, STD(ret, 20).values, c.values))
     put(1, R(TSARGMAX(inner1 ** 2, 5)) - 0.5)
@@ -623,7 +624,7 @@ def compute_gtja(W: dict[str, pd.DataFrame], bench_open: pd.Series, bench_close:
     def put(n: int, x) -> None:
         if isinstance(x, np.ndarray):
             x = _wrap(c, x)
-        F[f"gtja_{n:03d}"] = x
+        F[f"gtja_{n:03d}"] = x.replace([np.inf, -np.inf], np.nan)
 
     dc1 = (c - dc).abs()
     up = np.maximum(c - dc, 0.0)
@@ -1069,7 +1070,7 @@ def write_labels(factors: dict[str, pd.DataFrame], *, start_dt: str = "20160101"
         dt_str = pd.Timestamp(dt).strftime("%Y%m%d")
         if dt_str < start_dt:
             continue
-        day = pd.DataFrame({n: arr[:, k] for n, arr in zip(names, arrs)}, index=syms)
+        day = pd.DataFrame({n: arr[k, :] for n, arr in zip(names, arrs)}, index=syms)
         day = day.reset_index().rename(columns={"index": "symbol"})
         day.insert(1, "time", pd.Timestamp(dt))
         dt_dir = LABELS_OUT / f"dt={dt_str}"
@@ -1152,14 +1153,18 @@ def smoke_test() -> None:
     log.info("[roundtrip] partition %s: %d rows × %d cols ✓", last_dt, back.shape[0], back.shape[1])
 
     # 6) 滑窗因子非 NaN 率（防跨列掩码污染回归：2026-08-29 bug）
-    #    数据最全的老股票，近期滑窗因子应有 >90% 非 NaN
+    #    数据最全的老股票，近期滑窗因子应有 >90% 非 NaN。
+    #    a101_100 例外：内含 corr(close, rank(adv20), 5)，50 只烟熏集排名粒度粗
+    #    （adv20 排名粘滞 → 窗口内恒定时 rolling corr 除零得 NaN，数据固有属性；
+    #    全市场 5554 只下实测 NaN≈6%）。此处只断言其未被整列污染（>30%）。
     rich_sym = W["close"].notna().sum().idxmax()
     recent = dates[-60:]
-    for name in ["a158_RANK20", "a158_IMAX20", "a101_013", "gtja_103", "a158_BETA20"]:
+    for name, thr in [("a158_RANK20", 0.9), ("a158_IMAX20", 0.9), ("a101_013", 0.9),
+                      ("a101_100", 0.3), ("gtja_103", 0.9), ("a158_BETA20", 0.9)]:
         vals = F[name].loc[recent, rich_sym]
         ratio = vals.notna().mean()
-        assert ratio > 0.9, f"{name} non-NaN ratio={ratio:.3f} for {rich_sym}"
-    log.info("[sliding] rich-symbol sliding factors non-NaN > 90%%: %s ✓", rich_sym)
+        assert ratio > thr, f"{name} non-NaN ratio={ratio:.3f} for {rich_sym}"
+    log.info("[sliding] rich-symbol sliding factors non-NaN check: %s ✓", rich_sym)
     log.info("SMOKE PASSED ✓")
 
 
