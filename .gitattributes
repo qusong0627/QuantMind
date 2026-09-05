@@ -15,3 +15,6 @@ Dockerfile* text eol=lf
 *.json text eol=lf
 *.ts text eol=lf
 *.tsx text eol=lf
+
+# Windows 批处理必须 CRLF（中文系统 cmd 按 GBK 解析 UTF-8/LF 会错乱闪退）
+*.bat text eol=crlf
