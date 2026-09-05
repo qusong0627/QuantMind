@@ -264,8 +264,8 @@ cp "$REPO_ROOT/docker/training/parallel_utils.py" "$STAGE/parallel_utils.py"
 
 # ── 7. 启动脚本与文档 ────────────────────────────────────────
 log "写入启动脚本与说明 ..."
-cp "$HERE/pack_assets/start.sh" "$HERE/pack_assets/stop.sh" "$HERE/pack_assets/sync_from_git.sh" "$STAGE/"
-cp "$HERE/pack_assets/start.bat" "$HERE/pack_assets/stop.bat" "$HERE/pack_assets/sync_from_git.bat" "$STAGE/"
+cp "$HERE/pack_assets/start.sh" "$HERE/pack_assets/stop.sh" "$HERE/pack_assets/sync_from_git.sh" "$HERE/pack_assets/restore_backup.sh" "$STAGE/"
+cp "$HERE/pack_assets/start.bat" "$HERE/pack_assets/stop.bat" "$HERE/pack_assets/sync_from_git.bat" "$HERE/pack_assets/restore_backup.bat" "$STAGE/"
 cp "$HERE/pack_assets/pg_setup.py" "$STAGE/"
 cp "$HERE/pack_assets/pack.env.example" "$STAGE/pack.env.example"
 cp "$HERE/pack_assets/README-portable.md" "$STAGE/README.md"
