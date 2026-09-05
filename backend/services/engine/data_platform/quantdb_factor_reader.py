@@ -46,6 +46,17 @@ MARKET_FACTOR_SOURCES: dict[str, tuple[FactorSource, ...]] = {
     "CRYPTO": ("l1_factors",),
     "FUTURES": ("l1_factors",),
 }
+
+# ── 6_ml_datasets 下不参与训练直读的目录（“刷新字段”自动发现时排除）─────────────
+# - features_daily：含未来收益标签列（return_Nd）与 OHLCV 重复列，作为特征会泄漏；
+# - alpha_library_labels：纯标签库；
+# - alpha_library：历史策略预计算 Alpha 库（如需纳入训练直读，从本集合移除即可）。
+# 其余新增因子目录（如未来上线的 xxx_factors）无需改代码，刷新字段即自动注册。
+EXCLUDED_TRAIN_DATASETS: frozenset[str] = frozenset({
+    "features_daily",
+    "alpha_library_labels",
+    "alpha_library",
+})
 DEFAULT_FACTOR_SOURCE_BY_MARKET: dict[str, FactorSource] = {
     "CN": "l1_factors",
     "HK": "l1_factors",
@@ -165,17 +176,38 @@ class QuantDBFactorReader:
         else:
             self.data_dir = market_data_dir(market)
 
-    @staticmethod
-    def validate_source(source: str) -> FactorSource:
+    def validate_source(self, source: str) -> str:
+        """校验并放行因子数据集名。
+
+        - 静态注册目录（FACTOR_SOURCE_DIRS）直接放行；
+        - 未注册目录只要真实存在于该市场 6_ml_datasets/ 且命名合规即放行
+          —— 未来新增因子数据集（如 xxx_factors）无需改代码；
+        - 排除清单（EXCLUDED_TRAIN_DATASETS）与非法命名给出明确拒绝原因。
+        """
         if source not in FACTOR_SOURCE_DIRS:
-            allowed = ", ".join(FACTOR_SOURCE_DIRS)
-            raise QuantDBFactorError(
-                f"Unsupported factor source {source!r}; expected one of {allowed}"
-            )
-        return source  # type: ignore[return-value]
+            if source in EXCLUDED_TRAIN_DATASETS:
+                raise QuantDBFactorError(
+                    f"Factor dataset {source!r} is excluded from direct training "
+                    "(see EXCLUDED_TRAIN_DATASETS in quantdb_factor_reader)"
+                )
+            if not _IDENTIFIER.fullmatch(source):
+                raise QuantDBFactorError(f"Invalid factor dataset name: {source!r}")
+            root = self.data_dir / "6_ml_datasets" / source
+            if not root.is_dir():
+                raise QuantDBFactorError(
+                    f"Unsupported factor source {source!r}; expected one of "
+                    f"{', '.join(FACTOR_SOURCE_DIRS)} or a dataset directory under "
+                    f"{self.data_dir / '6_ml_datasets'}"
+                )
+        return source
 
     def source_path(self, source: str) -> Path:
-        return self.data_dir / FACTOR_SOURCE_DIRS[self.validate_source(source)]
+        mapped = FACTOR_SOURCE_DIRS.get(source)
+        if mapped is not None:
+            return self.data_dir / mapped
+        # 动态目录：注册表外的 6_ml_datasets 子目录（validate 校验命名/排除清单）
+        self.validate_source(source)
+        return self.data_dir / "6_ml_datasets" / source
 
     def _files(self, source: str) -> list[Path]:
         root = self.source_path(source)
@@ -319,8 +351,33 @@ class QuantDBFactorReader:
         )
 
     def discover(self, market: str | None = None) -> dict[str, dict]:
-        sources = FACTOR_SOURCE_DIRS if market is None else sources_for_market(market)
+        """扫描因子数据集的 schema（后台“刷新字段”调用）。
+
+        - market=None：扫描全部静态注册目录（跨市场工具场景）；
+        - market 给定：静态注册目录 + 该市场 6_ml_datasets 下自动发现的新目录
+          （排除 EXCLUDED_TRAIN_DATASETS），未来新增因子数据集无需改代码。
+        """
+        if market is None:
+            sources = list(FACTOR_SOURCE_DIRS)
+        else:
+            sources = self.discover_market_sources(market)
         return {source: self.describe(source).to_dict() for source in sources}
+
+    def discover_market_sources(self, market: str | None = None) -> list[str]:
+        """静态注册 + 该市场数据根 6_ml_datasets 下自动发现的数据集列表。"""
+        known = list(sources_for_market(market))
+        root = self.data_dir / "6_ml_datasets"
+        if not root.is_dir():
+            return known
+        dynamic: list[str] = []
+        for child in sorted(root.iterdir()):
+            name = child.name
+            if not child.is_dir() or name.startswith("_") or not _IDENTIFIER.fullmatch(name):
+                continue
+            if name in FACTOR_SOURCE_DIRS or name in EXCLUDED_TRAIN_DATASETS or name in known:
+                continue
+            dynamic.append(name)
+        return known + dynamic
 
     @staticmethod
     def _date_expression(columns: Iterable[str]) -> str:

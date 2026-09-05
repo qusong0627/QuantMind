@@ -16,6 +16,7 @@ from sqlalchemy import text
 from backend.services.api.user_app.middleware.auth import require_admin
 from backend.services.engine.data_platform.quantdb_factor_reader import (
     DEFAULT_FACTOR_SOURCE,
+    EXCLUDED_TRAIN_DATASETS,
     FACTOR_SOURCE_DIRS,
     KEY_COLUMNS,
     REQUIRED_COLUMNS,
@@ -162,7 +163,17 @@ class MappingUpdate(BaseModel):
 
 
 def _validate_source(source: str) -> str:
-    if source not in _VALID_SOURCE:
+    """因子源校验：静态注册源直接放行；其余按命名规则放行动态数据集。
+
+    动态目录（未来新增的 6_ml_datasets/xxx_factors）由“刷新字段”扫描注册进
+    qm_quantdb_factor_source_status 后即可建目录/发布；读取层
+    QuantDBFactorReader.validate_source 会二次校验目录真实存在与排除清单。
+    """
+    if source in _VALID_SOURCE:
+        return source
+    if source in EXCLUDED_TRAIN_DATASETS or not re.fullmatch(
+        r"[A-Za-z_][A-Za-z0-9_]*", source
+    ):
         raise HTTPException(status_code=400, detail=f"Unknown factor source: {source}")
     return source
 
@@ -238,7 +249,17 @@ async def _cached_factor_sources(
     cached = {str(row["dataset_id"]): dict(row) for row in rows}
     sources: dict[str, dict[str, Any]] = {}
     reader = QuantDBFactorReader(market=market)
-    for source in sources_for_market(market):
+    # 静态注册源恒展示；已扫描过的动态数据集（含目录后来移除的）按目录真实
+    # 存在过滤，避免历史行残留导致页面出现幽灵源
+    known = list(sources_for_market(market))
+    extras = [
+        dataset
+        for dataset in cached
+        if dataset not in known
+        and dataset not in EXCLUDED_TRAIN_DATASETS
+        and (reader.data_dir / "6_ml_datasets" / dataset).is_dir()
+    ]
+    for source in known + extras:
         row = cached.get(source)
         if not row:
             sources[source] = _unrefreshed_source_status(source, market)
