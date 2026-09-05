@@ -63,6 +63,14 @@ class RemoteSSHOrchestrator(TrainingOrchestrator):
             self.docker_image = str(node_config.get("docker_image") or "quantmind-oss:latest")
             self.gpus = str(node_config.get("gpus") or "").strip()
             self.quantdb_dir = str(node_config.get("quantdb_dir") or "/data/quantdb")
+            # 免 Docker 直跑节点（executor=process）：服务器节点包形态
+            # pack_root 包根；runtime_python 内嵌解释器；env_file 装载包环境
+            # （QUANTDB_API_KEY / QM_*_DATA_DIR 等，密钥只留在服务器侧）
+            self.executor = str(node_config.get("executor") or "docker").lower()
+            self.pack_root = str(node_config.get("pack_root") or "").rstrip("/")
+            self.runtime_python = str(node_config.get("runtime_python") or "").strip()
+            self.env_file = str(node_config.get("env_file") or "train_env.sh").strip()
+            self.sync_cmd = str(node_config.get("sync_cmd") or "").strip()
         else:
             self.host = _env_or("TRAINING_AUTODL_HOST", "")
             self.port = int(_env_or("TRAINING_AUTODL_SSH_PORT", "22"))
@@ -75,6 +83,11 @@ class RemoteSSHOrchestrator(TrainingOrchestrator):
             # AutoDL 节点需安装 nvidia-container-toolkit 才能使用 GPU
             self.gpus = _env_or("TRAINING_AUTODL_GPUS", "").strip()
             self.quantdb_dir = _env_or("TRAINING_AUTODL_QUANTDB_DIR", "/data/quantdb")
+            self.executor = _env_or("TRAINING_AUTODL_EXECUTOR", "docker").lower()
+            self.pack_root = _env_or("TRAINING_AUTODL_PACK_ROOT", "").rstrip("/")
+            self.runtime_python = _env_or("TRAINING_AUTODL_RUNTIME_PYTHON", "")
+            self.env_file = _env_or("TRAINING_AUTODL_ENV_FILE", "train_env.sh")
+            self.sync_cmd = _env_or("TRAINING_AUTODL_SYNC_CMD", "")
         self.api_base = _env_or("QUANTMIND_API_BASE_URL", "http://quantmind-api:8000")
         # 主节点局域网地址（供远端容器回调）；为空则回退 api_base（可能不可达）
         self.master_host = _env_or("TRAINING_MASTER_HOST", "")
@@ -335,14 +348,25 @@ class RemoteSSHOrchestrator(TrainingOrchestrator):
             # 6_ml_datasets 数据不在同步清单内，硬走会把本地 CN 目录误当
             # 目标市场数据源（静默用错数据）。显式拒绝而非兜底。
             market = str((config.get("context") or {}).get("market") or "CN").upper()
-            if direct_source and market != "CN":
+            is_process = self.executor == "process"
+            # docker 编排的 QuantDB 直读仍仅限 CN(远端同步清单限制);免 Docker 节点包
+            # 自带各市场数据根 + sync_factors.sh(服务器侧维护市场因子同步),放行全市场
+            if direct_source and market != "CN" and not is_process:
                 raise RuntimeError(
                     f"远程节点暂不支持 {market} 市场 QuantDB 直读训练，"
                     "请选择本地 Docker 节点，或取消数据源直读（快照路径）"
                 )
-            config["data"]["local_dir"] = "/tmp/quantdb" if direct_source else "/tmp/feature_snapshots"
-            if direct_source:
-                config["data"]["quantdb_dir"] = "/tmp/quantdb"
+            if is_process:
+                # 免 Docker：数据与产物走远端真实路径（市场 env 由包内 train_env.sh 提供）
+                config["data"]["local_dir"] = f"{self.work_dir}/feature_snapshots"
+                if direct_source:
+                    config["data"]["local_dir"] = str(self.quantdb_dir or self.work_dir)
+                if config.get("output"):
+                    config["output"]["result_path"] = f"{self.work_dir}/result.json"
+            else:
+                config["data"]["local_dir"] = "/tmp/quantdb" if direct_source else "/tmp/feature_snapshots"
+                if direct_source:
+                    config["data"]["quantdb_dir"] = "/tmp/quantdb"
             config["callback"]["url"] = self._callback_url(run_id)
 
             # 2. 确保远端工作目录结构
@@ -351,11 +375,22 @@ class RemoteSSHOrchestrator(TrainingOrchestrator):
                 f"{self.work_dir}/templates {self.work_dir}/modules"
             )
 
-            # 3. Only direct source data is synced on AutoDL.  The node owns
-            # /data/quantdb and its SDK state, so no raw parquet is copied from
-            # the coordinator.  Operators may override the command for a custom
-            # SDK installation with TRAINING_AUTODL_QUANTDB_SYNC_CMD.
-            if direct_source:
+            # 3. 直读源数据同步（免 Docker 节点交给包内 sync_factors.sh <market>，
+            #    市场数据根/凭据/同步器全在服务器侧，编排器只传市场名）
+            if direct_source and is_process:
+                if not self.pack_root:
+                    raise RuntimeError(
+                        "免 Docker 节点（executor=process）必须配置 pack_root（服务器节点包根目录）"
+                    )
+                sync_sh = f"{self.pack_root}/sync_factors.sh"
+                code, out, err = await self._ssh_exec(
+                    f"test -x {sync_sh} && cd {self.pack_root} && bash sync_factors.sh {market}",
+                    timeout=1800,
+                )
+                if code != 0:
+                    raise RuntimeError(f"远端因子同步失败(sync_factors.sh): {err or out}")
+                self._log(run_id, f"[SYNC] 远端因子源已就绪({market}): {direct_source}", progress=15)
+            elif direct_source:
                 sync_cmd = _env_or(
                     "TRAINING_AUTODL_QUANTDB_SYNC_CMD",
                     "python /app/backend/scripts/quantdb_daily_sync.py",
@@ -407,9 +442,16 @@ class RemoteSSHOrchestrator(TrainingOrchestrator):
                 await self._rsync_push(par_script, f"{self.work_dir}/parallel_utils.py")
                 self._log(run_id, "[SYNC] parallel_utils.py 已同步")
             if direct_source:
+                # docker: rsync 后挂载覆盖镜像内置路径；免 Docker：推成 backend 同
+                # 相对路径，PYTHONPATH 以 work_dir 优先 → 与主节点同版本(含新数据集自动发现)
+                dest_dir = (
+                    f"{self.work_dir}/backend/services/engine/data_platform"
+                    if is_process
+                    else f"{self.work_dir}/modules/"
+                )
                 for module in (self._resolve_quantdb_factor_reader(), self._resolve_quantdb_hub()):
                     if module:
-                        await self._rsync_push(module, f"{self.work_dir}/modules/")
+                        await self._rsync_push(module, dest_dir)
                 self._log(run_id, "[SYNC] QuantDB 直读 Reader 已同步")
 
             # 统一推理模板 inference_parquet.py 也推送并挂载，
@@ -421,23 +463,106 @@ class RemoteSSHOrchestrator(TrainingOrchestrator):
                 )
                 self._log(run_id, "[SYNC] inference_parquet.py 模板已同步")
 
-            # 5. 远端启动训练容器
-            self._log(run_id, "[SYSTEM] 在 AutoDL 启动训练容器...", progress=20)
-            container_name = f"qm-train-{run_id}"
-            docker_cmd = self._build_docker_run_cmd(container_name, direct_source=direct_source)
-            code, out, err = await self._ssh_exec(docker_cmd, timeout=120)
+            # 5. 远端启动执行（容器 或 免 Docker runtime python）
+            label = f"qm-train-{run_id}"
+            if is_process:
+                code, out, err = await self._launch_process_job(run_id, label, direct_source=direct_source)
+            else:
+                self._log(run_id, "[SYSTEM] 在 AutoDL 启动训练容器...", progress=20)
+                docker_cmd = self._build_docker_run_cmd(label, direct_source=direct_source)
+                code, out, err = await self._ssh_exec(docker_cmd, timeout=120)
             if code != 0:
-                raise RuntimeError(f"远端 docker run 失败: {err or out}")
-            container_id = (out or "").strip()[:12]
-            self._log(run_id, f"[SYSTEM] 训练容器已启动: {container_name} ({container_id})", progress=22)
+                raise RuntimeError(f"远端训练启动失败: {err or out}")
+            self._log(run_id, f"[SYSTEM] 远端训练已启动: {label}", progress=22)
 
             # 6. 后台轮询训练进度
             REGISTRY.register(
-                self._poll_remote(run_id, container_name)
+                self._poll_remote(run_id, label) if not is_process
+                else self._poll_process(run_id, label)
             )
         except Exception as exc:  # noqa: BLE001
             logger.error("[%s] 远程训练编排失败: %s", run_id, exc, exc_info=True)
             self._log(run_id, f"[ERROR] 远程训练编排失败: {exc}", status="failed", progress=0)
+
+    # ── 免 Docker 执行（executor=process：服务器节点包 runtime python） ──────────
+
+    def _process_runtime(self) -> str:
+        """远端 runtime 解释器（默认节点包 layout: {pack_root}/runtime/bin/python3）。"""
+        if self.runtime_python:
+            return self.runtime_python
+        if not self.pack_root:
+            raise RuntimeError("executor=process 节点必须配置 pack_root 或 runtime_python")
+        return f"{self.pack_root}/runtime/bin/python3"
+
+    def _process_env_file(self) -> str:
+        """包内环境文件（train_env.sh，装载 QUANTDB_API_KEY / QM_*_DATA_DIR）。"""
+        if self.env_file.startswith("/"):
+            return self.env_file
+        if not self.pack_root:
+            return self.env_file
+        return f"{self.pack_root}/{self.env_file}"
+
+    async def _launch_process_job(self, run_id: str, label: str, *, direct_source: str) -> tuple[int, str, str]:
+        """在远端以 runtime python 直跑 train.py（setsid 后台 + pid 文件 + 日志文件）。"""
+        work = self.work_dir
+        runtime = self._process_runtime()
+        env_sh = self._process_env_file()
+        py_path = f"PYTHONPATH={work}:{self.pack_root}" if self.pack_root else f"PYTHONPATH={work}"
+        run_cmd = (
+            f"mkdir -p {work} && cd {work} && "
+            f"{{ [ -f {env_sh} ] && . {env_sh} || true; }} && "
+            f"{py_path} TRAINING_WORKSPACE_DIR={work} "
+            f"setsid {runtime} {work}/train.py --config {work}/config.yaml "
+            f"> {work}/train.log 2>&1 < /dev/null & echo $! > {work}/train.pid"
+        )
+        self._log(run_id, "[SYSTEM] 在远端启动 runtime 训练(免 Docker)...", progress=20)
+        return await self._ssh_exec(run_cmd, timeout=90)
+
+    async def _poll_process(self, run_id: str, label: str) -> None:
+        """轮询远端 runtime 训练(日志文件 + pid 存活)，完成后拉产物/注册。"""
+        work = self.work_dir
+        seen_lines: set[str] = set()
+        progress = 22
+        try:
+            while True:
+                code, out, err = await self._ssh_exec(
+                    f"tail -n {self._LOG_TAIL_LINES} {work}/train.log 2>/dev/null",
+                    timeout=120,
+                )
+                for line in (out + err).splitlines():
+                    line = line.strip()
+                    if not line or line in seen_lines:
+                        continue
+                    seen_lines.add(line)
+                    progress = max(progress, LocalDockerProgress.infer(line, progress))
+                    self._log(run_id, line, progress=progress)
+
+                alive_code, alive_out, _ = await self._ssh_exec(
+                    f"kill -0 $(cat {work}/train.pid 2>/dev/null) 2>/dev/null && echo A || echo G",
+                    timeout=60,
+                )
+                if "A" in (alive_out or ""):
+                    await asyncio.sleep(self._POLL_INTERVAL)
+                    continue
+
+                # 进程已结束：以 result.json 判定成败（与容器 exit_code=0 语义一致）
+                has_code, has_out, _ = await self._ssh_exec(
+                    f"test -f {work}/result.json && echo Y || echo N", timeout=60
+                )
+                self._log(run_id, "[SYSTEM] 远端训练进程已结束，处理产物...", status="waiting_callback", progress=95)
+                await self._pull_artifacts(run_id)
+                if "Y" in (has_out or ""):
+                    self._log(run_id, "[SYSTEM] 模型产物已回传，等待模型注册...", progress=97)
+                    await self._trigger_registration(run_id)
+                else:
+                    self._log(run_id, "[ERROR] 远端训练未产出 result.json，判定失败", status="failed", progress=0)
+                await self._ssh_exec(f"rm -f {work}/train.pid 2>/dev/null || true", timeout=60)
+                return
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.error("[%s] 远端 runtime 轮询异常: %s", run_id, exc, exc_info=True)
+            self._log(run_id, f"[ERROR] 远端 runtime 轮询异常: {exc}", status="failed", progress=progress)
 
     async def _poll_remote(self, run_id: str, container_name: str) -> None:
         """轮询远端容器日志，解析进度，完成后拉取产物。"""

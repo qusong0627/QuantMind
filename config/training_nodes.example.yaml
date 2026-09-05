@@ -31,3 +31,18 @@ nodes: []
   #   work_dir: "/workspace"
   #   docker_image: "quantmind-train:latest"
   #   gpus: "all"
+  # ── 免 Docker 服务器节点包示例(executor=process) ─────────────
+  # 服务器上跑「训练节点一键包」(内嵌 runtime + backend + sync_factors.sh),
+  # 主节点以 SSH + runtime python 直跑训练,不依赖远端 docker。
+  # - id: node-cn-1
+  #   name: "节点包(CN)"
+  #   host: "1.2.3.4"
+  #   port: 22
+  #   user: "root"
+  #   ssh_password: ""
+  #   executor: "process"        # docker=镜像容器编排(默认) / process=免Docker直跑
+  #   pack_root: "/opt/qm-train-node"   # 服务器节点包根(runtime/bin/python3 + backend/ + sync_factors.sh)
+  #   runtime_python: ""          # 缺省取 {pack_root}/runtime/bin/python3
+  #   env_file: "train_env.sh"    # 包内环境(QUANTDB_API_KEY / QM_*_DATA_DIR),留服务器侧
+  #   work_dir: "/opt/qm-train-node/workspace"   # 训练产物/日志目录
+  #   quantdb_dir: "/opt/qm-train-node/data/quantdb"   # CN 数据根(含 6_ml_datasets)
