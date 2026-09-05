@@ -1,14 +1,15 @@
 @echo off
 rem ============================================================
-rem QuantMind Portable One-Click Start (Windows x64)
-rem Double-click to start; use stop.bat to stop.
-rem NOTE: ASCII only on purpose (CRLF) - safe on any codepage.
+rem QuantMind Portable One-Click Start (Windows x64)  v3-flat
+rem Flat goto style: no nested parenthesized blocks, no caret
+rem continuations. Safer across cmd versions/codepages.
 rem ============================================================
 setlocal
 cd /d "%~dp0"
 set "ROOT=%~dp0"
+echo MARK-A
 
-rem ---- adjustable ports (mirror pack.env) ----
+rem ---- ports ----
 set "QM_PG_PORT=5432"
 set "QM_REDIS_PORT=6379"
 set "QM_API_PORT=8000"
@@ -21,43 +22,35 @@ set "PYTHON=%ROOT%runtime\python\python.exe"
 set "PGBIN=%ROOT%pgsql\bin"
 set "PATH=%ROOT%redis;%PGBIN%;%PATH%"
 
-if not exist "%PYTHON%" (
-    echo [!] python.exe not found: %PYTHON%
-    echo     Make sure the package is fully extracted to a LOCAL disk.
-    pause
-    exit /b 1
-)
+if exist "%PYTHON%" goto :py_ok
+echo [!] python.exe not found: %PYTHON%
+echo     Make sure the package is fully extracted to a LOCAL disk.
+pause
+exit /b 1
+:py_ok
+echo MARK-B
 
-rem ---- runtime dirs ----
-if not exist "%ROOT%logs" md "%ROOT%logs" >nul 2>&1
-if not exist "%ROOT%run" md "%ROOT%run" >nul 2>&1
-echo [%date% %time%] start.bat begin (root %ROOT%) >> "%ROOT%logs\startup.log" 2>nul
+mkdir "%ROOT%logs" 2>nul
+mkdir "%ROOT%run" 2>nul
+echo [%date% %time%] start.bat v3 begin (root %ROOT%) >> "%ROOT%logs\startup.log" 2>nul
 
-rem ---- network share guard: PostgreSQL cannot run on SMB ----
-if "%ROOT:~0,2%"=="\\" (
-    echo [!] Detected a network share path (\\...).
-    echo     PostgreSQL/Redis cannot run on SMB shares.
-    echo     Please copy the whole QuantMind-Portable-win-x64 folder
-    echo     to a local disk, e.g. C:\QuantMind, then run again.
-    pause
-    exit /b 2
-)
+if not "%ROOT:~0,2%"=="\\" goto :not_share
+echo [!] Detected a network share path.
+echo     PostgreSQL/Redis cannot run on SMB shares.
+echo     Please copy the whole folder to a local disk, e.g. C:\QuantMind
+pause
+exit /b 2
+:not_share
 
-for %%D in (models uploads strategies reports backtest_results hf qlib_data quantdb quantus quanthk quantbc quantfutures) do (
-    if not exist "%STORAGE_ROOT%\%%D" md "%STORAGE_ROOT%\%%D" >nul 2>&1
-)
+for %%D in (models uploads strategies reports backtest_results hf qlib_data quantdb quantus quanthk quantbc quantfutures) do if not exist "%STORAGE_ROOT%\%%D" mkdir "%STORAGE_ROOT%\%%D"
 
-rem ---- secrets (generate once, reuse afterwards) ----
-if not exist "%ROOT%run\secrets.cmd" (
-    powershell -NoProfile -Command ^
-      "$a=[guid]::NewGuid().ToString('N')+[guid]::NewGuid().ToString('N');" ^
-      "'set SECRET_KEY='+$a.Substring(0,64) | Out-File -Encoding ascii '%ROOT%run\secrets.cmd';" ^
-      "'set JWT_SECRET_KEY='+$a.Substring(0,64) | Out-File -Encoding ascii -Append '%ROOT%run\secrets.cmd';" ^
-      "'set INTERNAL_CALL_SECRET='+$a.Substring(0,64) | Out-File -Encoding ascii -Append '%ROOT%run\secrets.cmd'"
-)
+if exist "%ROOT%run\secrets.cmd" goto :secrets_ok
+powershell -NoProfile -Command "$a=[guid]::NewGuid().ToString('N')+[guid]::NewGuid().ToString('N'); ('set SECRET_KEY='+$a.Substring(0,64)) | Out-File -Encoding ascii '%ROOT%run\secrets.cmd'; ('set JWT_SECRET_KEY='+$a.Substring(0,64)) | Out-File -Encoding ascii -Append '%ROOT%run\secrets.cmd'; ('set INTERNAL_CALL_SECRET='+$a.Substring(0,64)) | Out-File -Encoding ascii -Append '%ROOT%run\secrets.cmd'"
+:secrets_ok
 if exist "%ROOT%run\secrets.cmd" call "%ROOT%run\secrets.cmd"
+echo MARK-C
 
-rem ---- backend env (aligns with docker-compose) ----
+rem ---- env ----
 set "APP_EDITION=oss"
 set "APP_ENV=production"
 set "SERVICE_MODE=all"
@@ -126,72 +119,77 @@ set "ADMIN_DASHBOARD_REDIS_PORT=%QM_REDIS_PORT%"
 set "ADMIN_DASHBOARD_DISABLED_SERVICES=data_gateway,web,qwenpaw,rsshub,huntly"
 set "HUNTLY_USERNAME=admin"
 set "HUNTLY_PASSWORD=admin123"
+echo MARK-D
 
 echo [QuantMind] Checking PostgreSQL ...
-if not exist "%ROOT%pgdata\PG_VERSION" (
-    echo [QuantMind] First run: initializing PostgreSQL data dir ...
-    echo quantmind2026> "%ROOT%run\pg_pw.txt"
-    "%PGBIN%\initdb.exe" -D "%ROOT%pgdata" -U quantmind -A scram-sha-256 --pwfile="%ROOT%run\pg_pw.txt" -E UTF8 --no-locale >nul
-    del "%ROOT%run\pg_pw.txt" >nul 2>&1
-)
+if exist "%ROOT%pgdata\PG_VERSION" goto :pg_started
+echo [QuantMind] First run: initializing PostgreSQL data dir ...
+echo quantmind2026> "%ROOT%run\pg_pw.txt"
+"%PGBIN%\initdb.exe" -D "%ROOT%pgdata" -U quantmind -A scram-sha-256 --pwfile="%ROOT%run\pg_pw.txt" -E UTF8 --no-locale
+del "%ROOT%run\pg_pw.txt" 2>nul
+:pg_started
 "%PYTHON%" "%ROOT%pg_setup.py" wait --timeout 1 >nul 2>&1
-if errorlevel 1 (
-    echo [QuantMind] Starting PostgreSQL (port %QM_PG_PORT%) ...
-    "%PGBIN%\pg_ctl.exe" -D "%ROOT%pgdata" -l "%ROOT%logs\postgres.log" -o "-p %QM_PG_PORT% -c listen_addresses=127.0.0.1" start >nul
-)
+if not errorlevel 1 goto :pg_ready
+echo [QuantMind] Starting PostgreSQL (port %QM_PG_PORT%) ...
+"%PGBIN%\pg_ctl.exe" -D "%ROOT%pgdata" -l "%ROOT%logs\postgres.log" -o "-p %QM_PG_PORT% -c listen_addresses=127.0.0.1" start
+:pg_ready
 "%PYTHON%" "%ROOT%pg_setup.py" wait --timeout 60 >nul 2>&1
-if errorlevel 1 (
-    echo [!] PostgreSQL failed to start (port %QM_PG_PORT% busy?), see logs\postgres.log
-    pause
-    exit /b 1
-)
+if not errorlevel 1 goto :pg_ok
+echo [!] PostgreSQL failed to start, see logs\postgres.log
+pause
+exit /b 1
+:pg_ok
 "%PYTHON%" "%ROOT%pg_setup.py" ensure-db >nul 2>&1
-if errorlevel 1 (
-    echo [!] Failed to create database, see logs\postgres.log
-    pause
-    exit /b 1
-)
+if not errorlevel 1 goto :pg_ok2
+echo [!] ensure-db failed, see logs\postgres.log
+pause
+exit /b 1
+:pg_ok2
 echo [QuantMind] PostgreSQL ready
 echo [%date% %time%] PostgreSQL ready >> "%ROOT%logs\startup.log" 2>nul
+echo MARK-E
 
 echo [QuantMind] Checking Redis ...
 "%ROOT%redis\redis-cli.exe" -p %QM_REDIS_PORT% ping 2>nul | findstr PONG >nul
-if errorlevel 1 (
-    echo [QuantMind] Starting Redis (port %QM_REDIS_PORT%) ...
-    start "QuantMind-Redis" /min cmd /c ""%ROOT%redis\redis-server.exe" --port %QM_REDIS_PORT% --bind 127.0.0.1 --dir "%ROOT%run" > "%ROOT%logs\redis.log" 2>&1"
-    set /a TRY=0
-)
-:waitredis
+if not errorlevel 1 goto :redis_ready
+echo [QuantMind] Starting Redis (port %QM_REDIS_PORT%) ...
+start "QuantMind-Redis" /min cmd /c ""%ROOT%redis\redis-server.exe" --port %QM_REDIS_PORT% --bind 127.0.0.1 --dir "%ROOT%run""
+set TRY=0
+:redis_wait
 "%ROOT%redis\redis-cli.exe" -p %QM_REDIS_PORT% ping 2>nul | findstr PONG >nul
-if errorlevel 1 (
-    set /a TRY+=1
-    if %TRY% lss 15 ( timeout /t 1 /nobreak >nul & goto waitredis )
-    echo [!] Redis failed to start, see logs\redis.log
-    pause
-    exit /b 1
-)
+if not errorlevel 1 goto :redis_ready
+set /a TRY+=1
+if %TRY% GEQ 15 goto :redis_fail
+timeout /t 1 /nobreak >nul
+goto :redis_wait
+:redis_fail
+echo [!] Redis failed to start, see logs\redis.log
+pause
+exit /b 1
+:redis_ready
 echo [QuantMind] Redis ready
 echo [%date% %time%] Redis ready >> "%ROOT%logs\startup.log" 2>nul
+echo MARK-F
 
 echo [QuantMind] Starting QuantMind backend (api:%QM_API_PORT% engine:%QM_ENGINE_PORT% trade:%QM_TRADE_PORT% stream:%QM_STREAM_PORT%) ...
-echo [%date% %time%] spawning backend/workers >> "%ROOT%logs\startup.log" 2>nul
 start "QuantMind-Backend" /min cmd /c "cd /d "%ROOT%" && "%PYTHON%" backend\main_oss.py > "%ROOT%logs\backend.log" 2>&1"
-echo [QuantMind] Starting Celery backtest queue ...
 start "QuantMind-CeleryWorker" /min cmd /c "cd /d "%ROOT%" && "%PYTHON%" -m celery -A backend.services.engine.qlib_app.celery_config:celery_app worker -Q qlib_backtest_srv --loglevel=info --concurrency=2 --pool=solo > "%ROOT%logs\celery-worker.log" 2>&1"
 start "QuantMind-CeleryBeat" /min cmd /c "cd /d "%ROOT%" && "%PYTHON%" -m celery -A backend.services.engine.qlib_app.celery_config:celery_app beat --loglevel=info --schedule="%ROOT%run\celerybeat-schedule" > "%ROOT%logs\celery-beat.log" 2>&1"
 
 echo [QuantMind] Waiting for services (first run may take 1-2 min) ...
-set /a TRY=0
-:waithttp
+set TRY=0
+:http_wait
 curl -fsS -m 2 http://127.0.0.1:%QM_API_PORT%/health >nul 2>&1
-if errorlevel 1 (
-    set /a TRY+=1
-    if %TRY% lss 180 ( timeout /t 1 /nobreak >nul & goto waithttp )
-    echo [!] Service start timeout, see logs\backend.log and logs\startup.log
-    echo [%date% %time%] service start timeout >> "%ROOT%logs\startup.log" 2>nul
-    pause
-    exit /b 1
-)
+if not errorlevel 1 goto :http_ok
+set /a TRY+=1
+if %TRY% GEQ 180 goto :http_fail
+timeout /t 1 /nobreak >nul
+goto :http_wait
+:http_fail
+echo [!] Service start timeout, see logs\backend.log and logs\startup.log
+pause
+exit /b 1
+:http_ok
 
 echo ==============================================
 echo [QuantMind] Ready: http://127.0.0.1:%QM_API_PORT%/
@@ -201,5 +199,5 @@ start "" http://127.0.0.1:%QM_API_PORT%/
 echo [QuantMind] Services run in background; stop with stop.bat
 echo [QuantMind] Logs: logs\startup.log (boot), logs\backend.log (service)
 echo [QuantMind] You may close this window now.
-pause >nul
+pause
 endlocal
