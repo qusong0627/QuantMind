@@ -880,7 +880,7 @@ class RemoteSSHOrchestrator(TrainingOrchestrator):
         )
         # 与本地编排器一致：镜像 bake 的依赖可能落后于仓库（如 QuantDB 直读所需
         # 的 duckdb），启动前探测补齐；包已存在时探测跳过、零开销。
-        _bootstrap_pkgs = _env_or("TRAINING_BOOTSTRAP_PIP", "duckdb pyqlib").split()
+        _bootstrap_pkgs = _env_or("TRAINING_BOOTSTRAP_PIP", "duckdb pyqlib optuna").split()
         bootstrap_cmd = " && ".join(
             f"python -c 'import importlib,sys; importlib.import_module(sys.argv[1])' {pkg} 2>/dev/null "
             f"|| python -m pip install -q --disable-pip-version-check {pkg} || exit 1"

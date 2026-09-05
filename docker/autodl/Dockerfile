@@ -50,7 +50,7 @@ RUN python -m pip install --upgrade pip setuptools wheel \
            --extra-index-url ${PIP_INDEX_URL}; \
        fi \
     && python -m pip install --no-cache-dir --root-user-action=ignore \
-        lightgbm xgboost catboost scikit-learn scipy pandas numpy pyarrow requests pyyaml
+        lightgbm xgboost catboost scikit-learn scipy pandas numpy pyarrow requests pyyaml optuna
 
 # 业务代码：训练脚本 + 特征生成脚本
 # （train.py 会由编排器 rsync 覆盖挂载，这里提供镜像内置兜底）
