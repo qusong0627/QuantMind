@@ -10,6 +10,8 @@ from .quantfutures_console import router as quantfutures_console_router
 from .model_management import router as model_management_router
 from .model_management_ops import router as model_management_ops_router
 from .admin_training import router as admin_training_router
+from backend.services.api.routers.training_per_model import build_per_model_router
+from backend.services.api.user_app.middleware.auth import require_admin
 from .strategy_templates import router as strategy_templates_router
 from .users import router as users_router
 from .alpha_factor_pipeline import router as alpha_factor_pipeline_router
@@ -27,6 +29,9 @@ admin_router.include_router(
 )
 admin_router.include_router(
     admin_training_router, prefix="/models", tags=["Admin-ModelTraining"]
+)
+admin_router.include_router(
+    build_per_model_router(require_admin), prefix="/models", tags=["Admin-ModelTraining"]
 )
 admin_router.include_router(
     model_management_router, prefix="/models", tags=["Admin-ModelManagement"]

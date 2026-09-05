@@ -32,6 +32,8 @@ from backend.services.api.routers.files import router as files_router
 from backend.services.api.market_analysis.router import router as market_analysis_router
 from backend.services.api.routers.market_kline import router as market_kline_router
 from backend.services.api.routers.model_training import router as model_training_router
+from backend.services.api.routers.training_per_model import build_per_model_router
+from backend.services.api.user_app.middleware.auth import get_current_user
 from backend.services.api.routers.news import router as news_router
 from backend.services.api.routers.research import router as research_router
 from backend.services.api.routers.stocks_search import router as stocks_search_router
@@ -355,6 +357,11 @@ app.include_router(public_sync_router, prefix="/api/v1")
 app.include_router(admin_router, prefix="/api/v1/admin")
 app.include_router(
     model_training_router, prefix="/api/v1/models", tags=["ModelTraining"]
+)
+app.include_router(
+    build_per_model_router(get_current_user),
+    prefix="/api/v1/models",
+    tags=["ModelTraining"],
 )
 app.include_router(research_router)
 app.include_router(stocks_search_router)
