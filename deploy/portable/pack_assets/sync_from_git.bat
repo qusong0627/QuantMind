@@ -26,18 +26,32 @@ if errorlevel 1 goto :dl_fail
 where git >nul 2>&1
 if errorlevel 1 goto :dl_fail
 if defined REPO goto :repo_ok
-echo [!] git is ready, but no repo auto-detected.
-echo     Clones tried: QM_REPO_ROOT / user home / C:\QuantMind-src /
-echo     a quantmind-src folder NEXT TO this package.
+echo [sync] git is ready, but no local clone found next to the package.
+echo     I can clone it for you now (recommended, one-time ~hundreds MB):
+echo       target: %PACK%\..\quantmind-src
+echo       source: https://gitee.com/qusong0627/QuantMind.git  branch: master
+set /p DO_CLONE=Auto-clone now? [y/n]:
+if /I "%DO_CLONE%"=="y" goto :auto_clone
+if /I "%DO_CLONE%"=="yes" goto :auto_clone
 echo.
-echo     HOW TO FIX - one-time setup:
-echo     1. In Explorer go to:  %PACK%\..
-echo     2. Open a terminal there and run:
-echo        git clone -b master --single-branch https://gitee.com/qusong0627/QuantMind.git quantmind-src
-echo        (private repo? use the URL the maintainer gave you)
-echo     3. Run this script again - it will auto-find the clone.
-echo.
-echo     Or skip git entirely: ask the maintainer for a patch zip.
+echo     Skipped. To do it manually later:
+echo       cd /d %PACK%\..
+echo       git clone -b master --single-branch https://gitee.com/qusong0627/QuantMind.git quantmind-src
+echo     then rerun this script. Private repo? use the maintainer URL.
+echo     No git at all? ask the maintainer for a patch zip.
+pause
+exit /b 1
+:auto_clone
+echo [sync] cloning into %PACK%\..\quantmind-src ...
+git clone -b master --single-branch https://gitee.com/qusong0627/QuantMind.git "%PACK%\..\quantmind-src"
+if errorlevel 1 goto :clone_fail
+set "REPO=%PACK%\..\quantmind-src"
+echo [sync] clone OK.
+goto :repo_ok
+:clone_fail
+echo [!] clone failed - check internet or repo access.
+echo     If it asked for credentials, the repo is private: ask the
+echo     maintainer for access or a different URL, then rerun.
 pause
 exit /b 1
 :dl_fail
