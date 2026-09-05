@@ -1,14 +1,14 @@
 @echo off
 rem ============================================================
-rem QuantMind 便携版 一键启动（Windows x64）
-rem 双击运行即可；停止请运行 stop.bat
+rem QuantMind Portable One-Click Start (Windows x64)
+rem Double-click to start; use stop.bat to stop.
+rem NOTE: ASCII only on purpose (CRLF) - safe on any codepage.
 rem ============================================================
 setlocal
-chcp 65001 >nul
 cd /d "%~dp0"
 set "ROOT=%~dp0"
 
-rem ---- 可修改的端口配置（与 pack.env 对应）----
+rem ---- adjustable ports (mirror pack.env) ----
 set "QM_PG_PORT=5432"
 set "QM_REDIS_PORT=6379"
 set "QM_API_PORT=8000"
@@ -22,21 +22,23 @@ set "PGBIN=%ROOT%pgsql\bin"
 set "PATH=%ROOT%redis;%PGBIN%;%PATH%"
 
 if not exist "%PYTHON%" (
-    echo [!] 找不到 %PYTHON%，请确认便携包完整解压。
+    echo [!] python.exe not found: %PYTHON%
+    echo     Make sure the package is fully extracted to a LOCAL disk.
     pause
     exit /b 1
 )
 
-rem ---- 运行目录 ----
+rem ---- runtime dirs ----
 if not exist "%ROOT%logs" md "%ROOT%logs" >nul 2>&1
 if not exist "%ROOT%run" md "%ROOT%run" >nul 2>&1
-echo [%date% %time%] start.bat 启动 (工作目录 %ROOT%) >> "%ROOT%logs\startup.log" 2>nul
+echo [%date% %time%] start.bat begin (root %ROOT%) >> "%ROOT%logs\startup.log" 2>nul
 
-rem ---- 网络共享路径检测：PG/Redis 在 SMB 上无法运行，提示拷贝本地 ----
+rem ---- network share guard: PostgreSQL cannot run on SMB ----
 if "%ROOT:~0,2%"=="\\" (
-    echo [!] 检测到从网络共享路径(\\...)运行，PostgreSQL 在共享盘上无法工作。
-    echo     请把整个 QuantMind-Portable-win-x64 文件夹拷贝到本机磁盘后再运行。
-    echo     例如: C:\QuantMind
+    echo [!] Detected a network share path (\\...).
+    echo     PostgreSQL/Redis cannot run on SMB shares.
+    echo     Please copy the whole QuantMind-Portable-win-x64 folder
+    echo     to a local disk, e.g. C:\QuantMind, then run again.
     pause
     exit /b 2
 )
@@ -45,7 +47,7 @@ for %%D in (models uploads strategies reports backtest_results hf qlib_data quan
     if not exist "%STORAGE_ROOT%\%%D" md "%STORAGE_ROOT%\%%D" >nul 2>&1
 )
 
-rem ---- 随机密钥（首次生成，之后复用）----
+rem ---- secrets (generate once, reuse afterwards) ----
 if not exist "%ROOT%run\secrets.cmd" (
     powershell -NoProfile -Command ^
       "$a=[guid]::NewGuid().ToString('N')+[guid]::NewGuid().ToString('N');" ^
@@ -55,7 +57,7 @@ if not exist "%ROOT%run\secrets.cmd" (
 )
 if exist "%ROOT%run\secrets.cmd" call "%ROOT%run\secrets.cmd"
 
-rem ---- 后端环境变量（与 docker-compose 保持一致）----
+rem ---- backend env (aligns with docker-compose) ----
 set "APP_EDITION=oss"
 set "APP_ENV=production"
 set "SERVICE_MODE=all"
@@ -76,7 +78,6 @@ set "POSTGRES_DB=quantmind"
 set "REDIS_HOST=127.0.0.1"
 set "REDIS_PORT=%QM_REDIS_PORT%"
 set "STORAGE_MODE=local"
-set "MARGIN_STOCK_POOL_PATH=%STORAGE_ROOT%\融资融券.json"
 set "QUANTMIND_ENABLE_WEB_UPDATE=false"
 set "API_PORT=%QM_API_PORT%"
 set "ENGINE_PORT=%QM_ENGINE_PORT%"
@@ -114,7 +115,6 @@ set "QM_QUANTHK_DATA_DIR=%STORAGE_ROOT%\quanthk"
 set "QM_QUANTBC_DATA_DIR=%STORAGE_ROOT%\quantbc"
 set "QM_QUANTFUTURES_DATA_DIR=%STORAGE_ROOT%\quantfutures"
 if not defined LLM_API_KEY set "LLM_API_KEY=not-configured"
-rem 后台管理健康面板探测目标 + 剔除便携版没有的 Docker 组件（Windows 版暂不含 Huntly）
 set "ADMIN_DASHBOARD_API_HEALTH_URL=http://127.0.0.1:%QM_API_PORT%/health"
 set "ADMIN_DASHBOARD_ENGINE_HEALTH_URL=http://127.0.0.1:%QM_ENGINE_PORT%/health"
 set "ADMIN_DASHBOARD_TRADE_HEALTH_URL=http://127.0.0.1:%QM_TRADE_PORT%/health"
@@ -127,37 +127,37 @@ set "ADMIN_DASHBOARD_DISABLED_SERVICES=data_gateway,web,qwenpaw,rsshub,huntly"
 set "HUNTLY_USERNAME=admin"
 set "HUNTLY_PASSWORD=admin123"
 
-echo [QuantMind] 检查 PostgreSQL ...
+echo [QuantMind] Checking PostgreSQL ...
 if not exist "%ROOT%pgdata\PG_VERSION" (
-    echo [QuantMind] 首次运行：初始化 PostgreSQL 数据目录 ...
+    echo [QuantMind] First run: initializing PostgreSQL data dir ...
     echo quantmind2026> "%ROOT%run\pg_pw.txt"
     "%PGBIN%\initdb.exe" -D "%ROOT%pgdata" -U quantmind -A scram-sha-256 --pwfile="%ROOT%run\pg_pw.txt" -E UTF8 --no-locale >nul
-    del "%ROOT%run\pg_pw.txt"
+    del "%ROOT%run\pg_pw.txt" >nul 2>&1
 )
 "%PYTHON%" "%ROOT%pg_setup.py" wait --timeout 1 >nul 2>&1
 if errorlevel 1 (
-    echo [QuantMind] 启动 PostgreSQL (端口 %QM_PG_PORT%) ...
+    echo [QuantMind] Starting PostgreSQL (port %QM_PG_PORT%) ...
     "%PGBIN%\pg_ctl.exe" -D "%ROOT%pgdata" -l "%ROOT%logs\postgres.log" -o "-p %QM_PG_PORT% -c listen_addresses=127.0.0.1" start >nul
 )
 "%PYTHON%" "%ROOT%pg_setup.py" wait --timeout 60 >nul 2>&1
 if errorlevel 1 (
-    echo [!] PostgreSQL 启动失败（端口 %QM_PG_PORT% 可能被占用），见 logs\postgres.log
+    echo [!] PostgreSQL failed to start (port %QM_PG_PORT% busy?), see logs\postgres.log
     pause
     exit /b 1
 )
 "%PYTHON%" "%ROOT%pg_setup.py" ensure-db >nul 2>&1
 if errorlevel 1 (
-    echo [!] 创建数据库失败，见 logs\postgres.log
+    echo [!] Failed to create database, see logs\postgres.log
     pause
     exit /b 1
 )
-echo [QuantMind] PostgreSQL 就绪
-echo [%date% %time%] PostgreSQL 就绪 >> "%ROOT%logs\startup.log" 2>nul
+echo [QuantMind] PostgreSQL ready
+echo [%date% %time%] PostgreSQL ready >> "%ROOT%logs\startup.log" 2>nul
 
-echo [QuantMind] 检查 Redis ...
+echo [QuantMind] Checking Redis ...
 "%ROOT%redis\redis-cli.exe" -p %QM_REDIS_PORT% ping 2>nul | findstr PONG >nul
 if errorlevel 1 (
-    echo [QuantMind] 启动 Redis (端口 %QM_REDIS_PORT%) ...
+    echo [QuantMind] Starting Redis (port %QM_REDIS_PORT%) ...
     start "QuantMind-Redis" /min cmd /c ""%ROOT%redis\redis-server.exe" --port %QM_REDIS_PORT% --bind 127.0.0.1 --dir "%ROOT%run" > "%ROOT%logs\redis.log" 2>&1"
     set /a TRY=0
 )
@@ -166,40 +166,40 @@ if errorlevel 1 (
 if errorlevel 1 (
     set /a TRY+=1
     if %TRY% lss 15 ( timeout /t 1 /nobreak >nul & goto waitredis )
-    echo [!] Redis 启动失败，见 logs\redis.log
+    echo [!] Redis failed to start, see logs\redis.log
     pause
     exit /b 1
 )
-echo [QuantMind] Redis 就绪
-echo [%date% %time%] Redis 就绪 >> "%ROOT%logs\startup.log" 2>nul
+echo [QuantMind] Redis ready
+echo [%date% %time%] Redis ready >> "%ROOT%logs\startup.log" 2>nul
 
-echo [QuantMind] 启动 QuantMind 后端 (api:%QM_API_PORT% engine:%QM_ENGINE_PORT% trade:%QM_TRADE_PORT% stream:%QM_STREAM_PORT%) ...
-echo [%date% %time%] 拉起后端/worker 进程 >> "%ROOT%logs\startup.log" 2>nul
+echo [QuantMind] Starting QuantMind backend (api:%QM_API_PORT% engine:%QM_ENGINE_PORT% trade:%QM_TRADE_PORT% stream:%QM_STREAM_PORT%) ...
+echo [%date% %time%] spawning backend/workers >> "%ROOT%logs\startup.log" 2>nul
 start "QuantMind-Backend" /min cmd /c "cd /d "%ROOT%" && "%PYTHON%" backend\main_oss.py > "%ROOT%logs\backend.log" 2>&1"
-echo [QuantMind] 启动 Celery 回测队列 ...
+echo [QuantMind] Starting Celery backtest queue ...
 start "QuantMind-CeleryWorker" /min cmd /c "cd /d "%ROOT%" && "%PYTHON%" -m celery -A backend.services.engine.qlib_app.celery_config:celery_app worker -Q qlib_backtest_srv --loglevel=info --concurrency=2 --pool=solo > "%ROOT%logs\celery-worker.log" 2>&1"
 start "QuantMind-CeleryBeat" /min cmd /c "cd /d "%ROOT%" && "%PYTHON%" -m celery -A backend.services.engine.qlib_app.celery_config:celery_app beat --loglevel=info --schedule="%ROOT%run\celerybeat-schedule" > "%ROOT%logs\celery-beat.log" 2>&1"
 
-echo [QuantMind] 等待服务就绪（首次启动需初始化数据库，可能需要 1-2 分钟）...
+echo [QuantMind] Waiting for services (first run may take 1-2 min) ...
 set /a TRY=0
 :waithttp
 curl -fsS -m 2 http://127.0.0.1:%QM_API_PORT%/health >nul 2>&1
 if errorlevel 1 (
     set /a TRY+=1
     if %TRY% lss 180 ( timeout /t 1 /nobreak >nul & goto waithttp )
-    echo [!] 服务启动超时，请查看 logs\backend.log 与 logs\startup.log
-    echo [%date% %time%] 服务启动超时 >> "%ROOT%logs\startup.log" 2>nul
+    echo [!] Service start timeout, see logs\backend.log and logs\startup.log
+    echo [%date% %time%] service start timeout >> "%ROOT%logs\startup.log" 2>nul
     pause
     exit /b 1
 )
 
 echo ==============================================
-echo [QuantMind] 已启动: http://127.0.0.1:%QM_API_PORT%/
+echo [QuantMind] Ready: http://127.0.0.1:%QM_API_PORT%/
 echo ==============================================
-echo [%date% %time%] 服务就绪，打开浏览器 >> "%ROOT%logs\startup.log" 2>nul
+echo [%date% %time%] ready, opening browser >> "%ROOT%logs\startup.log" 2>nul
 start "" http://127.0.0.1:%QM_API_PORT%/
-echo [QuantMind] 服务在后台运行；停止请运行 stop.bat
-echo [QuantMind] 启动过程记录见 logs\startup.log，服务日志见 logs\backend.log
-echo [QuantMind] 本窗口可手动关闭
+echo [QuantMind] Services run in background; stop with stop.bat
+echo [QuantMind] Logs: logs\startup.log (boot), logs\backend.log (service)
+echo [QuantMind] You may close this window now.
 pause >nul
 endlocal

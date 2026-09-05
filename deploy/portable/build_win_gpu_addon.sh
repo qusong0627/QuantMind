@@ -67,6 +67,15 @@ fi
 
 # ── 2. 压缩 payload + 生成安装脚本（zip 布局与 linux tar 版同构）─
 cp "$HERE/pack_assets/install_gpu.bat" "$PAYLOAD/install_gpu.bat"
+# .bat 必须 ASCII+CRLF：中文系统 cmd 以 GBK 解析 UTF-8+LF 的 bat 会错乱闪退
+python3 - "$PAYLOAD/install_gpu.bat" <<'PYEOF'
+import sys
+f = sys.argv[1]
+text = open(f, encoding="utf-8", errors="replace").read()
+text = text.replace("\r\n", "\n").replace("\r", "\n").replace("\n", "\r\n")
+open(f, "w", encoding="ascii", errors="replace", newline="").write(text)
+print("  [bat-crlf]", f.split("/")[-1])
+PYEOF
 if [ ! -f "$PAYLOAD/gpu_payload.zip" ]; then
     log "压缩 payload (runtime) ..."
     (cd "$PAYLOAD" && python3 -m zipfile -c gpu_payload.zip runtime)

@@ -273,6 +273,18 @@ cp "$REPO_ROOT/docker/training/parallel_utils.py" "$STAGE/parallel_utils.py"
 
 cp "$HERE/pack_assets/start.sh" "$HERE/pack_assets/stop.sh" "$STAGE/"
 cp "$HERE/pack_assets/start.bat" "$HERE/pack_assets/stop.bat" "$STAGE/"
+# .bat 必须 ASCII+CRLF：中文系统 cmd 以 GBK 解析 UTF-8+LF 的 bat 会整段错乱闪退
+python3 - "$STAGE" <<'PYEOF'
+import glob, sys
+stage = sys.argv[1]
+for f in glob.glob(stage + "/*.bat"):
+    raw = open(f, "rb").read()
+    text = raw.decode("utf-8", "replace")
+    text = text.replace("\r\n", "\n").replace("\r", "\n").replace("\n", "\r\n")
+    text = text.encode("ascii", "replace").decode("ascii")
+    open(f, "wb").write(text.encode("ascii"))
+    print("  [bat-crlf]", f.split("/")[-1])
+PYEOF
 cp "$HERE/pack_assets/pg_setup.py" "$STAGE/"
 cp "$HERE/pack_assets/pack.env.example" "$STAGE/pack.env.example"
 cp "$HERE/pack_assets/README-portable.md" "$STAGE/README.md"
