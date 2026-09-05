@@ -56,7 +56,10 @@ echo [gpu] Uninstalling CPU torch ...
 
 echo [gpu] Extracting CUDA torch + runtime - about 3GB, 1-3 minutes...
 echo [%date% %time%] extracting payload >> "%LOG%"
-"%PY%" -c "import zipfile; zipfile.ZipFile(r'%CD%\gpu_payload.zip').extractall(r'%CD%')" >> "%LOG%" 2>&1
+rem -S: skip sitecustomize/litellm import so markupsafe pyd is NOT loaded
+rem into this process - otherwise the extractor locks the very file it
+rem must overwrite (self-lock PermissionError on _speedups pyd).
+"%PY%" -S -c "import zipfile; zipfile.ZipFile(r'%CD%\gpu_payload.zip').extractall(r'%CD%')" >> "%LOG%" 2>&1
 if errorlevel 1 goto :extract_fail
 
 echo [gpu] Self check ...
