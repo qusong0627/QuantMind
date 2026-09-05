@@ -135,6 +135,12 @@ mkdir -p "$STAGE/data" "$STAGE/logs" "$STAGE/run" "$STAGE/models" "$STAGE/strate
 cp -a "$REPO_ROOT/backend" "$STAGE/"
 cp -a "$REPO_ROOT/electron/dist-react" "$STAGE/web"
 cp -a "$REPO_ROOT/strategy_templates/." "$STAGE/strategy_templates/" 2>/dev/null || true
+# 训练脚本三件套复制到包根（与 Windows/Linux 包对齐；直跑训练需要新版 train.py）
+for f in train.py preprocessing.py parallel_utils.py; do
+    if [ -f "$REPO_ROOT/docker/training/$f" ]; then
+        cp -f "$REPO_ROOT/docker/training/$f" "$STAGE/$f"
+    fi
+done
 cp "$HERE/pack_assets/start.command" "$HERE/pack_assets/stop.command" "$HERE/pack_assets/pg_setup.py" "$STAGE/"
 cp "$HERE/pack_assets/pack.env.example" "$STAGE/"
 chmod +x "$STAGE/start.command" "$STAGE/stop.command"

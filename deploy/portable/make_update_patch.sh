@@ -17,7 +17,9 @@ HERE="$REPO_ROOT/deploy/portable"
 DIST="$HERE/dist"
 BASE="${1:-HEAD~1}"
 
-CODE_PREFIXES="backend/ config/ strategy_templates/ scripts/ pack.env.example pg_setup.py train.py preprocessing.py parallel_utils.py parallel_utils.py"
+CODE_PREFIXES="backend/ config/ strategy_templates/ scripts/ pack.env.example pg_setup.py"
+# 根级训练脚本：仓库在 docker/training/ 下，补丁必须落到包根同名文件
+ROOT_SCRIPT_MAP="docker/training/train.py:train.py docker/training/preprocessing.py:preprocessing.py docker/training/parallel_utils.py:parallel_utils.py"
 # pack_assets 里的 bat 落到包根(便携包根目录的启动脚本)
 BAT_MAP="pack_assets/start.bat:start.bat pack_assets/stop.bat:stop.bat pack_assets/install_gpu.bat:install_gpu.bat"
 
@@ -37,6 +39,14 @@ for f in $(git diff --name-only "$BASE"..HEAD -- $CODE_PREFIXES); do
 done
 # 2) bat 映射到包根
 for pair in $BAT_MAP; do
+    src="${pair%%:*}"; dst="${pair##*:}"
+    if git diff --quiet "$BASE"..HEAD -- "$src" 2>/dev/null; then continue; fi
+    mkdir -p "$STAGE"
+    cp "$src" "$STAGE/$dst"
+    changed=1
+done
+# 2b) docker/training 三件套 → 包根 train.py / preprocessing.py / parallel_utils.py
+for pair in $ROOT_SCRIPT_MAP; do
     src="${pair%%:*}"; dst="${pair##*:}"
     if git diff --quiet "$BASE"..HEAD -- "$src" 2>/dev/null; then continue; fi
     mkdir -p "$STAGE"

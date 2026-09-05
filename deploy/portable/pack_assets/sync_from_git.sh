@@ -114,6 +114,17 @@ for d in backend config strategy_templates; do
         cp -a "$REPO/$d/." "$PACK/$d/"
     fi
 done
+# 训练脚本三件套：构建时由 docker/training/ 复制到包根。直跑训练逻辑在
+# train.py 内（TRAINING_WORKSPACE_DIR 等），同步必须一并刷新，否则旧 train.py
+# 会把产物写死 /workspace 导致直跑失败。
+if [ -f "$REPO/docker/training/train.py" ]; then
+    cp -f "$REPO/docker/training/train.py" "$PACK/train.py"
+    cp -f "$REPO/docker/training/preprocessing.py" "$PACK/preprocessing.py"
+    cp -f "$REPO/docker/training/parallel_utils.py" "$PACK/parallel_utils.py"
+    echo "[sync] training scripts refreshed (train.py / preprocessing.py / parallel_utils.py)"
+else
+    echo "[sync] note: repo docker/training missing - package train.py NOT refreshed"
+fi
 # web/（前端构建产物，随 git 跟踪）：镜像覆盖并清掉旧 chunk，避免 UI 残留
 if [ -f "$REPO/web/index.html" ]; then
     if command -v rsync >/dev/null 2>&1; then
