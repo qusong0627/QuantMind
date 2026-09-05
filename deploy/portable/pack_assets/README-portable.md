@@ -39,6 +39,7 @@
 - **PostgreSQL 拒绝启动（Linux）**：不要用 root 运行 start.sh。
 - **日志**：全部在 `logs/` 目录（backend.log / postgres.log / redis.log / celery-*.log）。
 - **同步更新代码后启动失败**：sync 脚本覆盖前会自动把当前可运行代码备份到包内 `backups/`，此时运行包根 `restore_backup.bat`（Windows）或 `./restore_backup.sh`（Linux/WSL）即可恢复同步前的状态，再重新启动。
+- **同步代码后网页还是旧界面**：2026-09 起 `web/`（前端构建产物）已随代码仓库一起跟踪，`sync_from_git` 会自动镜像覆盖到包内 `web/`。若更新后界面未变，先 **Ctrl+Shift+R** 强刷浏览器；若仍旧，说明包内 sync 脚本是旧版（无 web 步骤），联系维护者拿新版脚本或 `web-update-*.zip` 手动覆盖。
 
 ## GPU 加速（可选增补包）
 
@@ -60,7 +61,7 @@ runtime/   内嵌 Python 3.10 + 全部依赖（勿动）
 pgsql/     便携 PostgreSQL 15（勿动）
 redis/     便携 Redis（勿动）
 backend/   后端源码
-web/       前端构建产物
+web/       前端构建产物（2026-09 起随 git 同步更新）
 data/      全部运行数据（行情 parquet、模型、报告、备份等）
 pgdata/    PostgreSQL 数据库文件（自动生成）
 logs/ run/ 日志与运行时文件

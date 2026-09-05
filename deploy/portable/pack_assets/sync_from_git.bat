@@ -119,9 +119,13 @@ robocopy "%PACK%\config" "%BACKUP%\config" /E /XD __pycache__ /NFL /NDL /NJH /NJ
 set "BRC2=%errorlevel%"
 robocopy "%PACK%\strategy_templates" "%BACKUP%\strategy_templates" /E /XD __pycache__ /NFL /NDL /NJH /NJS
 set "BRC3=%errorlevel%"
+set "BRC4=0"
+if exist "%PACK%\web\index.html" robocopy "%PACK%\web" "%BACKUP%\web" /E /XD __pycache__ /NFL /NDL /NJH /NJS
+if errorlevel 1 set "BRC4=%errorlevel%"
 if %BRC1% GEQ 8 goto :backup_fail
 if %BRC2% GEQ 8 goto :backup_fail
 if %BRC3% GEQ 8 goto :backup_fail
+if %BRC4% GEQ 8 goto :backup_fail
 echo [sync] backup OK - if the new code fails to start you can restore it.
 :skip_backup
 
@@ -132,10 +136,17 @@ robocopy "%REPO%\config" "%PACK%\config" /E /NFL /NDL /NJH /NJS
 set "RC2=%errorlevel%"
 robocopy "%REPO%\strategy_templates" "%PACK%\strategy_templates" /E /NFL /NDL /NJH /NJS
 set "RC3=%errorlevel%"
+rem web = prebuilt frontend tracked in repo (since 2026-09): mirror into package
+set "RC4=0"
+if exist "%REPO%\web\index.html" robocopy "%REPO%\web" "%PACK%\web" /MIR /NFL /NDL /NJH /NJS
+if errorlevel 1 set "RC4=%errorlevel%"
+if not exist "%REPO%\web\index.html" echo [sync] note: repo web/index.html missing - frontend sync skipped
 for /d /r "%PACK%\backend" %%d in (__pycache__) do rd /s /q "%%d" 2>nul
 if %RC1% GEQ 8 goto :copy_fail
 if %RC2% GEQ 8 goto :copy_fail
 if %RC3% GEQ 8 goto :copy_fail
+if %RC4% GEQ 8 goto :copy_fail
+if exist "%REPO%\web\index.html" echo [sync] web assets updated (UI changes are in this sync)
 
 rem ---- summary ----
 mkdir "%PACK%\logs" 2>nul

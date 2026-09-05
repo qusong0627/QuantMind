@@ -8,13 +8,13 @@
 #
 # What it does:
 #   git pull (origin <branch>)
-#   copy backend/ config/ strategy_templates/ into the package
+#   copy backend/ config/ strategy_templates/ web/ into the package
 #   clear __pycache__ (stale bytecode protection)
 #   ask you to restart with start.sh
 #
 # NOTE: runtime/models/data are NOT in git - code updates only.
-# Frontend artifacts (dist-react/web) are NOT in git; sync web/
-# separately if an update includes UI changes.
+# web/ (frontend build artifacts) IS tracked on the <branch> since
+# 2026-09 and synced with rsync --delete (stale chunks removed).
 # ============================================================
 set -u
 cd "$(dirname "$0")" || exit 1
@@ -93,13 +93,13 @@ mkdir -p "$PACK/backups"
 BK_FILE=""
 if command -v tar >/dev/null 2>&1; then
     BK_FILE="$PACK/backups/code-backup-$(date +%Y%m%d-%H%M%S).tar.gz"
-    tar czf "$BK_FILE" -C "$PACK" --exclude='__pycache__' backend config strategy_templates 2>/dev/null
+    tar czf "$BK_FILE" -C "$PACK" --exclude='__pycache__' backend config strategy_templates web 2>/dev/null
     [ -f "$BK_FILE" ] || BK_FILE=""
 fi
 if [ -z "$BK_FILE" ]; then
     BK_FILE="$PACK/backups/code-backup-$(date +%Y%m%d-%H%M%S)"
     mkdir -p "$BK_FILE"
-    for d in backend config strategy_templates; do
+    for d in backend config strategy_templates web; do
         [ -d "$PACK/$d" ] && cp -a "$PACK/$d" "$BK_FILE/"
     done
 fi
@@ -107,13 +107,27 @@ fi
 ls -1dt "$PACK"/backups/code-backup-* 2>/dev/null | tail -n +6 | xargs -r rm -rf 2>/dev/null || true
 echo "[sync] backup OK: $BK_FILE"
 
-echo "[sync] copying backend / config / strategy_templates ..."
+echo "[sync] copying backend / config / strategy_templates / web ..."
 for d in backend config strategy_templates; do
     if [ -d "$REPO/$d" ]; then
         mkdir -p "$PACK/$d"
         cp -a "$REPO/$d/." "$PACK/$d/"
     fi
 done
+# web/（前端构建产物，随 git 跟踪）：镜像覆盖并清掉旧 chunk，避免 UI 残留
+if [ -f "$REPO/web/index.html" ]; then
+    if command -v rsync >/dev/null 2>&1; then
+        mkdir -p "$PACK/web"
+        rsync -a --delete "$REPO/web/" "$PACK/web/"
+    else
+        rm -rf "$PACK/web"
+        mkdir -p "$PACK/web"
+        cp -a "$REPO/web/." "$PACK/web/"
+    fi
+    echo "[sync] web assets updated (前端 UI 变更已随本次同步生效)"
+else
+    echo "[sync] note: repo has no web/index.html - frontend sync skipped"
+fi
 
 echo "[sync] clearing __pycache__ ..."
 find "$PACK/backend" -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || true
@@ -129,4 +143,3 @@ echo "  Files changed : $N_FILES"
 echo "  History      : logs/sync_history.log"
 echo "============================================"
 echo "[sync] Done. Restart with: ./start.sh"
-echo "[sync] UI updates? sync web/ from the maintainer or rebuild dist-react."
