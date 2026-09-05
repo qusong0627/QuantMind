@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <title>QuantMind 智能控制中心</title>
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' blob:; worker-src 'self' blob:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data: http: https: blob:; connect-src 'self' http: https: ws: wss:; frame-src 'self' http: https:;" />
+    <meta name="color-scheme" content="light" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Outfit:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;700&family=Noto+Sans+SC:wght@400;500;700&display=swap" rel="stylesheet" />
+    <style>
+      html, body, #root {
+        width: 100%;
+        height: 100%;
+        margin: 0;
+        padding: 0;
+      }
+
+      body {
+        font-family: Inter, "Noto Sans SC", "Source Han Sans SC", "思源黑体", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 25%, #f093fb 50%, #f5576c 75%, #4facfe 100%);
+        background-size: 400% 400%;
+        animation: qmGradientShift 15s ease infinite;
+      }
+
+      /* React 挂载后由 main.tsx 给 body 加上 .qm-loaded，让底部 Dock 区域承接页面底色
+         （与 .app-main 渐变末端 #e2e8f0 保持一致，避免浏览器视口白色从透明层透出） */
+      body.qm-loaded {
+        background: #e2e8f0;
+        animation: none;
+      }
+
+      .qm-boot {
+        min-height: 100%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: #fff;
+      }
+
+      .qm-boot-spinner {
+        width: 28px;
+        height: 28px;
+        border: 3px solid rgba(255, 255, 255, 0.28);
+        border-top-color: #ffffff;
+        border-radius: 50%;
+        animation: qmSpin 1s linear infinite;
+      }
+
+      @keyframes qmSpin {
+        to { transform: rotate(360deg); }
+      }
+
+      @keyframes qmGradientShift {
+        0% { background-position: 0% 50%; }
+        50% { background-position: 100% 50%; }
+        100% { background-position: 0% 50%; }
+      }
+    </style>
+    <script type="module" crossorigin src="./assets/main-D7HpimFt.js"></script>
+    <link rel="modulepreload" crossorigin href="./assets/vendor-react-BnUVYK_7.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-scheduler-CWG1rEj-.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-react-dom-lnpw6qsm.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-use-sync-external-store-Db_IPEPW.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-react-redux-DF-O4G2C.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-recoil-BtFkChDw.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-babel-runtime-DZvhQt1U.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-react-is-FIeMBKkH.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-rc-util-CaMgJ36L.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-emotion-hash-WldOFDRm.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-emotion-unitless-BWzHn38B.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-stylis-D5iaQeiq.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-ant-design-cssinjs-gJJtmbln.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-ant-design-cssinjs-utils-BHTjn8QB.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-classnames-Cb5U__RF.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-resize-observer-polyfill-D6qJbdzf.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-rc-resize-observer-DbXzzL7A.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-ant-design-icons-svg-Ow3Ys8KO.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-ant-design-fast-color-C7sY6E5Y.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-ant-design-colors-SabrvfNu.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-clsx-B-dksMZM.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-rc-component-util-B5fRXr4q.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-ant-design-icons-D5ptx37H.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-rc-motion-CdQkptkd.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-rc-collapse-CAnxdivW.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-rc-overflow-BF4XrDNm.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-dayjs-DVTWd-kk.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-rc-component-portal-C7tnclIZ.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-rc-component-trigger-CfNxG7JU.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-rc-picker-BG0iIMsG.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-rc-dropdown-CdXLdvT5.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-rc-menu-B3vChtQY.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-rc-tabs-BAKpi-Ms.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-rc-virtual-list-WfbNeuMp.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-rc-select-qsqwgMiq.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-rc-segmented-B_dkvZI5.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-rc-component-mini-decimal-rND7dr_c.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-rc-input-CxCSRek1.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-rc-input-number-BJLFak8h.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-rc-slider-DEkmFy7D.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-rc-component-color-picker-B7xS-Epc.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-rc-drawer-Dcho_qBk.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-rc-component-async-validator-Cr5GMrJR.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-rc-field-form-CkcDGAgR.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-rc-dialog-DdWHbxVL.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-rc-notification-DEyc3uhZ.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-rc-tooltip-Dpn-b_YC.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-rc-steps-qn3b-0Tg.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-rc-switch-DF48cQb2.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-rc-component-context-Ce2Cajd3.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-rc-table-B8C46Jnc.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-rc-tree-D_IRPv25.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-rc-checkbox-CFyD_LoY.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-compute-scroll-into-view-Bl8rNFhg.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-scroll-into-view-if-needed-D5b_oRbX.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-rc-pagination-BI8kG2WB.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-throttle-debounce-CUWDS_la.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-rc-textarea-CN7sAliw.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-toggle-selection-DGa8lynz.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-copy-to-clipboard-D66TGxs4.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-rc-upload-Ck2gShgY.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-rc-progress-BXaag_LP.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-antd-DVyzIg2S.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-redux-CgpFPjH3.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-immer-BDzVaAxM.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-redux-thunk-ClJT1hhx.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-reduxjs-toolkit-CA6vuKeH.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-axios-BUZisX26.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-motion-utils-DBsP9okC.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-motion-dom-D5VY27l4.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-motion-DOxZvd0z.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-icons-CEhqfEQo.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-tanstack-query-core-CmFOykSR.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-tanstack-react-query-CUSoqOYv.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-fast-deep-equal-5bkXQsPj.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-tslib-Dp5RCTZF.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-zrender-3eTsp45l.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-size-sensor-lmfSCoi5.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-lodash-DFnNtRpw.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-decimal.js-light-DQE-3iDJ.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-prop-types-DJsP-qCT.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-fast-equals-CqUluVxK.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-react-smooth-YfoMGv-o.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-tiny-invariant-BaFNuDhB.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-d3-path-CimkQT29.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-d3-shape-UAiSD6R2.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-internmap-BkD7Hj8s.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-d3-array-g_qRI3rN.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-d3-time-Bu5S_Fai.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-d3-time-format-8BLUG52v.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-d3-color-9lF95FHy.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-d3-interpolate-BPXZzoDY.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-d3-format-CzD4bSOQ.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-d3-scale-BCFZCwh9.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-victory-vendor-ZkoB1rmZ.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-eventemitter3-B2u3VDCu.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-echarts-CV46WzRr.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-zustand-BO0utdH6.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-router-DwHkAgod.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-state-local-BBNhjlcY.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-monaco-CxOo9ruU.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-memoize-one-CcMeOnPo.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-react-window-BSU5CnEh.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-yocto-queue-Bex18xLv.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-p-limit-O_xUe21q.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-datefns-DXc_lrcL.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-base64-js-DRz5BQNA.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-ieee754-DqQQEDOD.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-buffer-eA9LZnEf.js">
+    <link rel="stylesheet" crossorigin href="./assets/main-UHpys16s.css">
+  </head>
+  <body>
+    <div id="root">
+      <div class="qm-boot">
+        <div class="qm-boot-spinner" aria-label="Loading"></div>
+      </div>
+    </div>
+  </body>
+</html>
