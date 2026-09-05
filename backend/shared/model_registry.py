@@ -1663,6 +1663,15 @@ class ModelRegistryService:
             "error": sync_error or "",
             "storage_path": str(model_dir.resolve()),
             "model_file": model_file,
+            # 软门禁暂留时非空：完成回调据此如实提示（训练成功、待手动激活），
+            # 而不是误报“模型注册失败”。
+            "gate_reasons": gate_reasons,
+            "message": (
+                f"样本外质量门禁：{'；'.join(gate_reasons)}，未自动激活。"
+                "请人工评估后在模型管理页手动激活。"
+                if gate_triggered
+                else ""
+            ),
         }
 
     async def register_ensemble_model(

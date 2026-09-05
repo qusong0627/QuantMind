@@ -1171,6 +1171,39 @@ def _verify_internal_call_secret(provided: str) -> None:
         )
 
 
+def _registration_outcome(registration: dict[str, Any]) -> tuple[str, dict[str, Any], str]:
+    """由注册结果判定训练 run 状态（纯函数，可单测）。
+
+    - ready → completed。
+    - candidate + gate_reasons（软门禁暂留）：训练本身成功，模型待手动激活，
+      run 保持 completed，summary 如实提示，不再误报“模型注册失败”。
+    - 其余（failed / 无原因的 candidate）→ failed。
+    返回 (run_status, summary, error)。
+    """
+    status = str(registration.get("status") or "")
+    if status == "ready":
+        return "completed", {}, ""
+    gate_reasons = [
+        str(r).strip() for r in (registration.get("gate_reasons") or []) if str(r).strip()
+    ]
+    if status == "candidate" and gate_reasons:
+        message = str(registration.get("message") or "").strip() or (
+            f"样本外质量门禁：{'；'.join(gate_reasons)}，未自动激活。"
+            "请人工评估后在模型管理页手动激活。"
+        )
+        return (
+            "completed",
+            {"status": "质量门禁暂留候选", "message": message},
+            "",
+        )
+    reg_error = str(registration.get("error") or "model registration failed").strip()
+    return (
+        "failed",
+        {"status": "模型注册失败", "message": reg_error},
+        reg_error,
+    )
+
+
 async def complete_training_run(
     run_id: str,
     result: dict[str, Any],
@@ -1213,14 +1246,13 @@ async def complete_training_run(
                     result_payload=normalized_result,
                 )
                 normalized_result["model_registration"] = registration
-                if str(registration.get("status") or "") != "ready":
+                outcome, summary, reg_error = _registration_outcome(registration)
+                if outcome == "failed":
                     status = "failed"
-                    reg_error = str(registration.get("error") or "model registration failed").strip()
                     normalized_result["error"] = reg_error
-                    normalized_result["summary"] = {
-                        "status": "模型注册失败",
-                        "message": reg_error,
-                    }
+                    normalized_result["summary"] = summary
+                elif summary:
+                    normalized_result["summary"] = summary
             except Exception as exc:
                 status = "failed"
                 normalized_result["model_registration"] = {
