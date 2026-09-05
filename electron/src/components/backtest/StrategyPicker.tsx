@@ -610,9 +610,10 @@ export const StrategyPicker: React.FC<StrategyPickerProps> = ({
               <ChevronRight className="w-4 h-4" />
             </button>
 
-            {/* 模板选择弹窗 */}
+            {/* 模板选择弹窗（列表按当前市场隔离，避免港股模板混入 A 股视图） */}
             <StrategyTemplateModal
               isOpen={isTemplateModalOpen}
+              market={currentMarket}
               currentTemplateId={selectedTemplate?.id}
               onSelect={(template) => {
                 handleSelectTemplate(template);

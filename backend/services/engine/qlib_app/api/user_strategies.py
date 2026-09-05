@@ -33,6 +33,7 @@ except ImportError:
 from backend.services.engine.qlib_app.services.strategy_templates import (
     get_all_templates,
     invalidate_templates_cache,
+    template_applies_to_market,
 )
 from backend.services.engine.qlib_app.utils.structured_logger import StructuredTaskLogger
 
@@ -702,11 +703,20 @@ async def update_strategy(strategy_id: str, request: Request, body: StrategyUpda
 
 
 @router.get("/templates")
-async def list_strategy_templates(response: Response):
-    """获取所有预置策略模板（动态从 strategy_templates/ 目录加载）。"""
+async def list_strategy_templates(
+    response: Response,
+    market: str | None = Query(None, description="按市场过滤模板（CN/A/HK/US/CRYPTO；缺省返回全部，向后兼容）"),
+):
+    """获取预置策略模板（动态从 strategy_templates/ 目录加载，可按市场过滤）。
+
+    market 缺省时返回全部模板；传 market 时按模板 markets 标记匹配
+    （无标记的历史 A 股模板仅出现在 CN/A 视图，避免港股模板混入 A 股选择器）。
+    """
     # 与后端 TTL 对齐，告知客户端最多缓存 60s
     response.headers["Cache-Control"] = "max-age=60, public"
     templates = await asyncio.to_thread(get_all_templates)
+    if market:
+        templates = [t for t in templates if template_applies_to_market(t, market)]
     return {"templates": [t.model_dump() for t in templates]}
 
 

@@ -18,11 +18,15 @@ import {
 import { StrategyTemplate } from '../../data/qlibStrategyTemplates';
 import { strategyTemplateService } from '../../features/strategy-wizard/services/strategyTemplateService';
 import { registerRuntimeTemplates } from '../../shared/qlib/strategyParams';
+import { getMarketConfig } from '../../config/marketConfig';
+import type { AppMarket } from '../../store/slices/uiSlice';
 
 type TemplateCategory = 'all' | 'basic' | 'advanced' | 'risk_control';
 
 interface StrategyTemplateModalProps {
   isOpen: boolean;
+  /** 当前市场（CN/HK/US/CRYPTO）：模板列表按市场隔离，缺省返回全部（旧行为） */
+  market?: AppMarket;
   currentTemplateId?: string;
   onSelect: (template: StrategyTemplate) => void;
   onClose: () => void;
@@ -30,6 +34,7 @@ interface StrategyTemplateModalProps {
 
 export const StrategyTemplateModal: React.FC<StrategyTemplateModalProps> = ({
   isOpen,
+  market,
   currentTemplateId,
   onSelect,
   onClose,
@@ -45,8 +50,8 @@ export const StrategyTemplateModal: React.FC<StrategyTemplateModalProps> = ({
     try {
       // forceRefresh 时绕过 sessionStorage 缓存，直接拉后端最新数据
       const data = forceRefresh
-        ? await strategyTemplateService.refresh()
-        : await strategyTemplateService.getTemplates();
+        ? await strategyTemplateService.refresh(market)
+        : await strategyTemplateService.getTemplates(market);
 
       // 前端兜底排序：按难度排序 (入门 -> 中级 -> 高级)，相同难度按 id 排序
       const difficultyWeight: Record<string, number> = {
@@ -69,14 +74,15 @@ export const StrategyTemplateModal: React.FC<StrategyTemplateModalProps> = ({
     } finally {
       setIsLoading(false);
     }
-  }, []);
+  }, [market]);
 
-  // 每次弹窗打开时实时拉取后端数据
+  // 每次弹窗打开时实时拉取后端数据；市场切换时同样重拉（按市场隔离模板）
   useEffect(() => {
     if (isOpen) {
+      setCategory('all');
       loadTemplates(true);
     }
-  }, [isOpen, loadTemplates]);
+  }, [isOpen, market, loadTemplates]);
 
   // ESC 关闭
   useEffect(() => {
@@ -135,6 +141,11 @@ export const StrategyTemplateModal: React.FC<StrategyTemplateModalProps> = ({
           <div className="flex items-center gap-2">
             <BookOpen className="w-5 h-5 text-blue-600" />
             <h2 className="text-base font-semibold text-gray-800">选择策略模板</h2>
+            {market && (
+              <span className="text-xs px-2 py-0.5 rounded-full bg-blue-50 text-blue-600 font-medium">
+                {getMarketConfig(market).label}
+              </span>
+            )}
             {templates.length > 0 && (
               <span className="text-xs text-gray-400">共 {templates.length} 个模板</span>
             )}

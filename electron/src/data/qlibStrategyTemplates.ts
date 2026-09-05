@@ -20,9 +20,34 @@ export interface StrategyTemplate {
     min?: number;
     max?: number;
   }[];
+  /** 适用市场标记（a_share/hong_kong/us_stock/crypto）；缺省=历史 A 股模板 */
+  markets?: string[];
   execution_defaults?: Record<string, unknown>;
   live_defaults?: Record<string, unknown>;
   live_config_tips?: string[];
+}
+
+/**
+ * 按市场过滤模板（与服务端 template_applies_to_market 语义一致）。
+ * - market 缺省或未知 → 不过滤（向后兼容全量）
+ * - CN/A股：无 markets 标记的历史模板 + 显式 a_share
+ * - HK/US/CRYPTO：仅含对应显式标记的模板
+ */
+export function filterTemplatesByMarket(
+  templates: StrategyTemplate[],
+  market?: string
+): StrategyTemplate[] {
+  const mkt = String(market || '').toUpperCase();
+  if (mkt !== 'CN' && mkt !== 'US' && mkt !== 'HK' && mkt !== 'CRYPTO') {
+    return templates;
+  }
+  const hasToken = (t: StrategyTemplate, token: string) =>
+    (t.markets || []).some((m) => m.toUpperCase() === token);
+  if (mkt === 'CN') {
+    return templates.filter((t) => !t.markets || t.markets.length === 0 || hasToken(t, 'A_SHARE'));
+  }
+  const want = mkt === 'US' ? 'US_STOCK' : mkt === 'HK' ? 'HONG_KONG' : 'CRYPTO';
+  return templates.filter((t) => hasToken(t, want));
 }
 
 /**

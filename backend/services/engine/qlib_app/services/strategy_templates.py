@@ -52,7 +52,50 @@ class StrategyTemplate(BaseModel):
     execution_defaults: dict[str, Any] = {}
     live_defaults: dict[str, Any] = {}
     live_config_tips: list[str] = []
-    markets: list[str] = []  # a_share, hong_kong, us_stock, crypto; 空列表表示适用所有市场
+    markets: list[str] = []  # a_share, hong_kong, us_stock, crypto
+    # 注意：markets 为空 = 历史 A 股模板，仅出现在 A 股视图（template_applies_to_market）；
+    # 需要进入港股等其他视图的模板必须显式列出 markets。
+
+
+# ---------------------------------------------------------------------------
+# 市场匹配
+# ---------------------------------------------------------------------------
+
+
+def _canonical_market(market: str | None) -> str | None:
+    """将市场查询参数归一化为模板标记 token。
+
+    别名映射：CN/A/a_share → a_share；HK/hong_kong → hong_kong；
+    US/us_stock → us_stock；CRYPTO/crypto → crypto。
+    无法识别时返回 None（调用方视为不过滤，向后兼容全量列表）。
+    """
+    raw = str(market or "").strip().lower().replace("-", "_")
+    if not raw:
+        return None
+    if raw in {"a", "cn", "a_share", "ashare"}:
+        return "a_share"
+    if raw in {"hk", "hong_kong"}:
+        return "hong_kong"
+    if raw in {"us", "us_stock"}:
+        return "us_stock"
+    if raw in {"crypto"}:
+        return "crypto"
+    return None
+
+
+def template_applies_to_market(template: StrategyTemplate, market: str | None) -> bool:
+    """判断模板是否属于指定市场视图（供 GET /strategies/templates?market= 过滤）。
+
+    - market 缺省或无法识别 → 不过滤（返回 True，保持旧全量行为）；
+    - 无 markets 标记的历史 A 股模板 → 仅出现在 A 股视图，避免混入港股等视图；
+    - 显式标记的模板 → 仅出现在含对应标记的市场视图（大小写不敏感）。
+    """
+    canonical = _canonical_market(market)
+    if canonical is None:
+        return True
+    if not template.markets:
+        return canonical == "a_share"
+    return canonical in {token.strip().lower() for token in template.markets}
 
 
 # ---------------------------------------------------------------------------
