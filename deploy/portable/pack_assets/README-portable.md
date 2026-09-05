@@ -38,7 +38,7 @@
 - **Windows 双击 start.bat 一闪而过**：右键"以管理员身份运行"一次，或检查是否被杀毒软件拦截。
 - **PostgreSQL 拒绝启动（Linux）**：不要用 root 运行 start.sh。
 - **日志**：全部在 `logs/` 目录（backend.log / postgres.log / redis.log / celery-*.log）。
-- **同步更新代码后启动失败**：sync 脚本覆盖前会自动把当前可运行代码备份到包内 `backups/`，此时运行包根 `restore_backup.bat`（Windows）或 `./restore_backup.sh`（Linux/WSL）即可恢复同步前的状态，再重新启动。
+- **同步更新代码后启动失败**：sync 脚本覆盖前会自动把当前可运行代码备份到包内 `backups/`，此时运行包根 `restore_backup.bat`（Windows）或 `./restore_backup.sh`（Linux/WSL）即可恢复同步前的状态（含前端 web；旧备份无 web 时保留现有前端），再重新启动。
 - **同步代码后网页还是旧界面**：2026-09 起 `web/`（前端构建产物）已随代码仓库一起跟踪，`sync_from_git` 会自动镜像覆盖到包内 `web/`。若更新后界面未变，先 **Ctrl+Shift+R** 强刷浏览器；若仍旧，说明包内 sync 脚本是旧版（无 web 步骤），联系维护者拿新版脚本或 `web-update-*.zip` 手动覆盖。
 
 ## GPU 加速（可选增补包）

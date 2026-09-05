@@ -28,6 +28,17 @@ sleep 1
 
 echo "[restore] replacing backend / config / strategy_templates ..."
 rm -rf "$PACK/backend" "$PACK/config" "$PACK/strategy_templates"
+# web(前端)随 2026-09 起的备份一并恢复;旧备份无 web 时保持现有前端不动
+HAS_WEB=0
+if [ -f "$NEWEST/web/index.html" ]; then
+    HAS_WEB=1
+elif [ "${NEWEST##*.}" = "gz" ] && tar tzf "$NEWEST" web/index.html >/dev/null 2>&1; then
+    HAS_WEB=1
+fi
+if [ "$HAS_WEB" = "1" ]; then
+    echo "[restore] replacing web (frontend) ..."
+    rm -rf "$PACK/web"
+fi
 case "$NEWEST" in
     *.tar.gz)
         tar xzf "$NEWEST" -C "$PACK" || { echo "[!] extract failed"; exit 1; }
@@ -36,6 +47,9 @@ case "$NEWEST" in
         for d in backend config strategy_templates; do
             [ -d "$NEWEST/$d" ] && cp -a "$NEWEST/$d" "$PACK/"
         done
+        if [ "$HAS_WEB" = "1" ]; then
+            [ -d "$NEWEST/web" ] && cp -a "$NEWEST/web" "$PACK/"
+        fi
         ;;
 esac
 

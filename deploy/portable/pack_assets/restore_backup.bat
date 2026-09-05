@@ -53,9 +53,22 @@ if exist "%PACK%\strategy_templates" goto :del_fail
 robocopy "%BACKUP%\strategy_templates" "%PACK%\strategy_templates" /E /XD __pycache__ /NFL /NDL /NJH /NJS
 set "RRC3=%errorlevel%"
 
+set "RRC4=0"
+if not exist "%BACKUP%\web\index.html" goto :web_skip
+echo [restore] replacing web (frontend) ...
+if exist "%PACK%\web" rmdir /s /q "%PACK%\web"
+if exist "%PACK%\web" goto :del_fail
+robocopy "%BACKUP%\web" "%PACK%\web" /E /NFL /NDL /NJH /NJS
+set "RRC4=%errorlevel%"
+:web_skip
+if exist "%BACKUP%\web\index.html" goto :web_checked
+echo [restore] backup has no web - leaving current frontend untouched
+:web_checked
+
 if %RRC1% GEQ 8 goto :copy_fail
 if %RRC2% GEQ 8 goto :copy_fail
 if %RRC3% GEQ 8 goto :copy_fail
+if %RRC4% GEQ 8 goto :copy_fail
 
 echo.
 echo [restore] DONE - the previous working code is back.
@@ -67,7 +80,7 @@ pause
 exit /b 0
 
 :del_fail
-echo [!] cannot delete %PACK%\backend - a file is locked.
+echo [!] cannot delete a package folder - a file is locked.
 echo     Close all QuantMind windows and any Explorer windows
 echo     that are inside the package folder, then rerun.
 pause
