@@ -194,7 +194,7 @@ start "QuantMind-CeleryBeat" /min cmd /c "cd /d "%ROOT%" && "%PYTHON%" -m celery
 rem ---- optional components (huntly RSS / qwenpaw AI) ----
 mkdir "%ROOT%data\huntly" 2>nul
 if exist "%ROOT%huntly\server.jar" if exist "%ROOT%huntly\jre\bin\java.exe" (
-    start "QuantMind-Huntly" /min cmd /c ""%ROOT%huntly\jre\bin\java.exe" -Xmx512m -jar "%ROOT%huntly\server.jar" --huntly.dataDir="%ROOT%data\huntly\" --server.port=%QM_HUNTLY_PORT% > "%ROOT%logs\huntly.log" 2>&1"
+    start "QuantMind-Huntly" /min cmd /c ""%ROOT%huntly\jre\bin\java.exe" -Xmx512m -jar "%ROOT%huntly\server.jar" --huntly.dataDir="%ROOT%data\huntly" --server.port=%QM_HUNTLY_PORT% > "%ROOT%logs\huntly.log" 2>&1"
 )
 if exist "%ROOT%qwenpaw_runtime\python\python.exe" (
     if not exist "%ROOT%data\qwenpaw-home" mkdir "%ROOT%data\qwenpaw-home"
