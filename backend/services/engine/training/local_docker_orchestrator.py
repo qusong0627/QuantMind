@@ -520,115 +520,126 @@ class LocalDockerOrchestrator(TrainingOrchestrator):
         payload["_valid_features"] = valid_features
         payload["_missing_features"] = missing_features
 
-        config: dict[str, Any] = {
-            "run_id": run_id,
-            "job_name": payload.get("job_name", "unnamed"),
-            "data": {
-                "train_start": payload.get("train_start", "2022-01-01"),
-                "train_end": payload.get("train_end", "2024-12-31"),
-                "features": valid_features,
-                "source_mode": data_source_mode,
-                "local_dir": market_mount_dir if factor_source else (
-                    _LOCAL_DATA_MOUNT_DIR if data_source_mode == "LOCAL" else None
-                ),
-                "factor_source": factor_source or None,
-                "factor_catalog_version": str(payload.get("factor_catalog_version") or "") or None,
-                "factor_schema_hash": source_status.schema_hash if factor_source else None,
-                "factor_field_sources": dict(payload.get("factor_field_sources") or {}),
-                "factor_catalog_published_at": str(payload.get("factor_catalog_published_at") or "") or None,
-                "factor_coverage": dict(payload.get("factor_coverage") or {}),
-                "quantdb_dir": market_mount_dir if factor_source else None,
-            },
-            "model": {
-                "type": payload.get("model_type", "lightgbm"),
-                "types": payload.get("model_types"),
-                "ensemble": payload.get("ensemble", "none"),
-                "prediction_mode": payload.get("prediction_mode", "point"),
-                "num_boost_round": payload.get("num_boost_round", 1000),
-                "early_stopping_rounds": payload.get("early_stopping_rounds", 100),
-                "val_ratio": payload.get("val_ratio", 0.15),
-                "params": payload.get("lgb_params", {}),
-                "xgb_params": {
-                    k: v
-                    for k, v in payload.get("xgb_params", {}).items()
-                    # LightGBM max_depth=-1 convention is invalid for XGBoost; drop it
-                    if not (k == "max_depth" and isinstance(v, (int, float)) and v < 0)
-                },
-                "catboost_params": payload.get("catboost_params", {}),
-                "dl_params": payload.get("dl_params", {}),
-            },
-            "label": {
-                "target_horizon_days": payload.get("target_horizon_days", 1),
-                "target_mode": payload.get("target_mode", "return"),
-                "label_formula": payload.get("label_formula", ""),
-                "effective_trade_date": payload.get("effective_trade_date", ""),
-                "training_window": payload.get("training_window", ""),
-            },
-            "context": {
-                "initial_capital": context.get("initial_capital", 1_000_000),
-                "benchmark": context.get("benchmark", "SH000300"),
-                "commission_rate": context.get("commission_rate", 0.00025),
-                "slippage": context.get("slippage", 0.0005),
-                "deal_price": context.get("deal_price", "close"),
-                "market": context.get("market", "CN"),
-                "industry_as_feature": context.get("industry_as_feature", False),
-            },
-            "explain": payload.get("explain", DEFAULT_EXPLAIN_CFG),
-            "output": {
-                "result_path": "/workspace/result.json",
-                "required_artifacts": payload.get(
-                    "required_artifacts",
-                    ["model.lgb", "pred.pkl", "metadata.json", "result.json"],
-                ),
-            },
-            "callback": {
-                "url": f"{self.api_base}/api/v1/models/training-runs/{run_id}/complete",
-                "secret": self.internal_secret,
-            },
-            "cache": {"dir": "/tmp" if data_source_mode == "LOCAL" else None},
-        }
-        # 显式时间段切分（valid_start/end 优先于 val_ratio）
-        split_fields: list[str] = ["valid_start", "valid_end", "test_start", "test_end"]
-        if all(payload.get(k) for k in split_fields):
-            config["split"] = {
-                "train": [payload.get("train_start"), payload.get("train_end")],
-                "valid": [payload.get("valid_start"), payload.get("valid_end")],
-                "test": [payload.get("test_start"), payload.get("test_end")],
-            }
-            config["model"]["val_ratio"] = None
-
-        # WFA 稳定性诊断配置（可选，透传给训练脚本）
-        if payload.get("wfa") and isinstance(payload.get("wfa"), dict):
-            config["wfa"] = payload["wfa"]
-
-        # 训练时长预算（分钟），透传给训练脚本供阶段级超时检查
-        try:
-            config["max_time_minutes"] = max(10, int(payload.get("max_time_minutes") or 120))
-        except Exception:
-            config["max_time_minutes"] = 120
+        from backend.shared.training.schemas import (
+            CallbackCfg,
+            ContextCfg,
+            DataCfg,
+            LabelCfg,
+            ModelCfg,
+            OutputCfg,
+            SplitCfg,
+            TrainingConfig,
+            dump_contract_dict,
+        )
 
         # 特征准入自动化：默认启用 IC/ICIR 因子筛选（剔除无信号特征），
         # 前端/请求显式指定 factor_selection 时以显式配置为准。
         fs_cfg = payload.get("factor_selection")
         if isinstance(fs_cfg, dict):
-            config["factor_selection"] = fs_cfg
+            factor_selection = fs_cfg
         elif str(payload.get("auto_feature_filter", "true")).lower() in ("1", "true", "yes", "on"):
-            config["factor_selection"] = {
+            factor_selection = {
                 "method": "ic_icir",
                 "n_top": 80,
                 "ic_threshold": 0.01,
                 "icir_threshold": 0.15,
                 "correlation_threshold": 0.9,
             }
+        else:
+            factor_selection = None
 
         # 特征截面预处理配置（P1）：默认关闭，兼容旧模型；显式开启后
         # train.py 对特征做 per-(trade_date,feature) 中位数填充+缩尾+Z-score。
         pp_cfg = payload.get("preprocessing")
         if isinstance(pp_cfg, dict):
-            config["preprocessing"] = pp_cfg
+            preprocessing = pp_cfg
         elif str(payload.get("enable_cross_sectional_prep", "false")).lower() in ("1", "true", "yes", "on"):
-            config["preprocessing"] = {"enabled": True, "winsor": True}
-        # B1：过 TrainingConfig 校验门（通过则返回 model_dump，parsed 等价；失败回退原 dict）。
+            preprocessing = {"enabled": True, "winsor": True}
+        else:
+            preprocessing = None
+
+        # 收尾 1 纯 schema 产出：config.yaml 一律由 TrainingConfig 构造 + 序列化，
+        # 手拼 dict 已删除。非法输入在此 fail-fast（422 上游已保证合法）。
+        try:
+            training_config = TrainingConfig(
+                run_id=run_id,
+                job_name=payload.get("job_name", "unnamed"),
+                data=DataCfg(
+                    train_start=payload.get("train_start", "2022-01-01"),
+                    train_end=payload.get("train_end", "2024-12-31"),
+                    features=valid_features,
+                    source_mode=data_source_mode,
+                    local_dir=market_mount_dir if factor_source else (
+                        _LOCAL_DATA_MOUNT_DIR if data_source_mode == "LOCAL" else None
+                    ),
+                    factor_source=factor_source or None,
+                    factor_catalog_version=str(payload.get("factor_catalog_version") or "") or None,
+                    factor_schema_hash=source_status.schema_hash if factor_source else None,
+                    factor_field_sources=dict(payload.get("factor_field_sources") or {}),
+                    factor_catalog_published_at=str(payload.get("factor_catalog_published_at") or "") or None,
+                    factor_coverage=dict(payload.get("factor_coverage") or {}),
+                    quantdb_dir=market_mount_dir if factor_source else None,
+                ),
+                model=ModelCfg(
+                    type=payload.get("model_type", "lightgbm"),
+                    types=payload.get("model_types"),
+                    ensemble=payload.get("ensemble", "none"),
+                    prediction_mode=payload.get("prediction_mode", "point"),
+                    num_boost_round=payload.get("num_boost_round", 1000),
+                    early_stopping_rounds=payload.get("early_stopping_rounds", 100),
+                    val_ratio=payload.get("val_ratio", 0.15),
+                    params=payload.get("lgb_params", {}),
+                    xgb_params=payload.get("xgb_params", {}),
+                    catboost_params=payload.get("catboost_params", {}),
+                    dl_params=payload.get("dl_params", {}),
+                ),
+                label=LabelCfg(
+                    target_horizon_days=payload.get("target_horizon_days", 1),
+                    target_mode=payload.get("target_mode", "return"),
+                    label_formula=payload.get("label_formula", ""),
+                    effective_trade_date=payload.get("effective_trade_date", ""),
+                    training_window=payload.get("training_window", ""),
+                ),
+                context=ContextCfg(
+                    initial_capital=context.get("initial_capital", 1_000_000),
+                    benchmark=context.get("benchmark", "SH000300"),
+                    commission_rate=context.get("commission_rate", 0.00025),
+                    slippage=context.get("slippage", 0.0005),
+                    deal_price=context.get("deal_price", "close"),
+                    market=context.get("market", "CN"),
+                    industry_as_feature=context.get("industry_as_feature", False),
+                ),
+                explain=payload.get("explain", DEFAULT_EXPLAIN_CFG),
+                output=OutputCfg(
+                    result_path="/workspace/result.json",
+                    required_artifacts=payload.get(
+                        "required_artifacts",
+                        ["model.lgb", "pred.pkl", "metadata.json", "result.json"],
+                    ),
+                ),
+                callback=CallbackCfg(
+                    url=f"{self.api_base}/api/v1/models/training-runs/{run_id}/complete",
+                    secret=self.internal_secret,
+                ),
+                cache={"dir": "/tmp" if data_source_mode == "LOCAL" else None},
+                wfa=payload.get("wfa") if isinstance(payload.get("wfa"), dict) else None,
+                max_time_minutes=payload.get("max_time_minutes"),
+                factor_selection=factor_selection,
+                preprocessing=preprocessing,
+            )
+        except Exception as exc:
+            raise RuntimeError(f"[{run_id}] TrainingConfig construction failed: {exc}") from exc
+        config = dump_contract_dict(training_config)
+        # 显式时间段切分（valid_start/end 优先于 val_ratio）
+        split_fields: list[str] = ["valid_start", "valid_end", "test_start", "test_end"]
+        if all(payload.get(k) for k in split_fields):
+            config["split"] = SplitCfg(
+                train=[payload.get("train_start"), payload.get("train_end")],
+                valid=[payload.get("valid_start"), payload.get("valid_end")],
+                test=[payload.get("test_start"), payload.get("test_end")],
+            ).model_dump()
+            config["model"]["val_ratio"] = None
+        # 收尾门：复核最终形状（构造即契约，此处恒通过；保留作回归哨兵）。
         return _validate_config_dict(run_id, config)
 
     # ── 启动训练任务 ─────────────────────────────────────────────────────────────
