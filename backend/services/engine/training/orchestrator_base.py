@@ -32,7 +32,10 @@ class TrainingOrchestrator(ABC):
 def get_orchestrator(node_id: str | None = None) -> TrainingOrchestrator:
     """根据 node_id 返回对应训练编排器。
 
-    - node_id 为空 / "local" → LocalDockerOrchestrator（默认，现有逻辑）
+    - node_id 为空 / "local" → 本地编排器（按运行时自动选择）：
+      - Docker daemon 可达 → LocalDockerOrchestrator（容器训练，服务器部署默认）
+      - 便携包等免 Docker 环境 → LocalProcessOrchestrator（同运行时 python 直跑）
+      TRAINING_EXECUTOR=docker|process 可显式覆盖自动选择。
     - node_id 以 "autodl" 开头 → RemoteSSHOrchestrator（AutoDL 远程 GPU）
       按 node_id 从节点配置表（config/training_nodes.yaml）取 SSH 参数，
       支持多台 AutoDL 各自独立配置。
@@ -43,6 +46,13 @@ def get_orchestrator(node_id: str | None = None) -> TrainingOrchestrator:
 
         node_config = get_node_config(node_id)
         return RemoteSSHOrchestrator(node_id=node_id, node_config=node_config)
+
+    from backend.shared.training_runtime import resolve_training_executor
+
+    if resolve_training_executor().get("executor") == "process":
+        from backend.services.engine.training.local_process_orchestrator import LocalProcessOrchestrator
+
+        return LocalProcessOrchestrator()
     from backend.services.engine.training.local_docker_orchestrator import LocalDockerOrchestrator
 
     return LocalDockerOrchestrator()

@@ -233,14 +233,16 @@ async def list_training_nodes(
     nodes = [{
         "id": "local",
         "type": "local",
-        "name": "本地 Docker",
-        "description": "本机 GPU / CPU 容器训练",
+        # 名称随执行环境变化：Docker daemon 可达 → 本地 Docker；
+        # 便携包等免 Docker 部署 → 本地直跑（由 collect_local 探测填充）
+        "name": local_status.get("node_name") or "本地 Docker",
+        "description": local_status.get("node_description") or "本机 GPU / CPU 容器训练",
         "available": local_online,
         "online": local_online,
         "readiness": local_readiness,
         "readiness_label": local_status.get("readiness_label", "本地就绪"),
         "gpu_summary": local_status.get("gpu_summary", "本地设备"),
-        "status_desc": local_status.get("status_desc", "本机容器环境"),
+        "status_desc": local_status.get("status_desc", "本机执行环境"),
         "error": local_status.get("error") or local_status.get("docker_error"),
         "status": local_status,
     }]

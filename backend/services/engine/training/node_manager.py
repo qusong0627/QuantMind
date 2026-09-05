@@ -422,38 +422,59 @@ cat /proc/loadavg 2>/dev/null | awk '{print $1}'
         except Exception:
             pass
 
-        # 3. 探测本地 Docker、独立训练镜像与容器
+        # 3. 探测本地执行环境：Docker daemon（训练镜像 + qm-train-* 容器），
+        #    或便携包等免 Docker 部署的本机 python 直跑条件
         # 与 local_docker_orchestrator 的 _TRAINING_IMAGE 保持一致（TRAINING_IMAGE 环境变量，
         # .env 可配置）；只检查硬编码的 quantmind-trainer:latest 会在自定义训练镜像
         # （如 quantmind-oss-gpu:latest）时误报"未安装"，导致前端禁止开始训练。
         training_image = (os.getenv("TRAINING_IMAGE") or "quantmind-trainer:latest").strip()
         result["training_image"] = training_image
         result["image_installed"] = False
+        result["executor"] = "docker"
 
-        try:
-            from docker import DockerClient
-            client = await asyncio.to_thread(DockerClient.from_env)
-            await asyncio.to_thread(client.ping)
-            result["docker_available"] = True
+        from backend.shared.training_runtime import resolve_training_executor
 
-            # 校验是否已安装实际配置的训练容器镜像（TRAINING_IMAGE）
-            try:
-                await asyncio.to_thread(client.images.get, training_image)
-                result["image_installed"] = True
-            except Exception:
-                result["image_installed"] = False
-
-            # 检查是否有 qm-train-* 容器
-            all_containers = await asyncio.to_thread(client.containers.list, all=True)
-            train_containers = []
-            for c in all_containers:
-                if c.name and c.name.startswith("qm-train-"):
-                    train_containers.append({"name": c.name, "status": c.status})
-            result["containers"] = train_containers
-            result["training_active"] = any(c["status"] == "running" for c in train_containers)
-        except Exception as docker_err:
+        probe = await asyncio.to_thread(resolve_training_executor)
+        if probe.get("executor") == "process":
+            # 免 Docker 部署：本机 python 直跑 train.py（镜像/容器探测无意义）
+            result["executor"] = "process"
             result["docker_available"] = False
-            result["docker_error"] = str(docker_err)
+            result["process_ready"] = bool(probe.get("script")) and not bool(probe.get("missing"))
+            result["process_script"] = probe.get("script")
+            result["node_name"] = "本地直跑(免Docker)"
+            result["node_description"] = "本机 python 进程直跑训练（无需 Docker）"
+            if not result["process_ready"]:
+                result["docker_error"] = (
+                    "Docker daemon 未运行，且本机直跑条件不齐"
+                    f"（train.py: {'存在' if probe.get('script') else '缺失'}；"
+                    f"依赖缺失: {', '.join(probe.get('missing') or []) or '无'}）"
+                )
+        else:
+            try:
+                from docker import DockerClient
+                client = await asyncio.to_thread(DockerClient.from_env)
+                await asyncio.to_thread(client.ping)
+                result["docker_available"] = True
+                result["docker_error"] = None
+
+                # 校验是否已安装实际配置的训练容器镜像（TRAINING_IMAGE）
+                try:
+                    await asyncio.to_thread(client.images.get, training_image)
+                    result["image_installed"] = True
+                except Exception:
+                    result["image_installed"] = False
+
+                # 检查是否有 qm-train-* 容器
+                all_containers = await asyncio.to_thread(client.containers.list, all=True)
+                train_containers = []
+                for c in all_containers:
+                    if c.name and c.name.startswith("qm-train-"):
+                        train_containers.append({"name": c.name, "status": c.status})
+                result["containers"] = train_containers
+                result["training_active"] = any(c["status"] == "running" for c in train_containers)
+            except Exception as docker_err:
+                result["docker_available"] = False
+                result["docker_error"] = str(docker_err)
 
         # 4. 探测本地 GPU (nvidia-smi / torch)
         gpus: list[dict[str, Any]] = []
@@ -573,18 +594,32 @@ cat /proc/loadavg 2>/dev/null | awk '{print $1}'
             status["status_desc"] = status.get("error") or "无法建立通信连接"
             return status
 
-        # 本地模式：先检查 Docker 引擎与独立训练镜像
+        # 本地模式：先检查执行环境（Docker 引擎+训练镜像，或免 Docker 本机直跑）
         if status.get("is_local"):
-            if not status.get("docker_available"):
-                status["readiness"] = "offline"
-                status["readiness_label"] = "Docker 未运行"
-                status["status_desc"] = f"未连接到 Docker: {status.get('docker_error') or '服务未运行'}"
-                return status
-            if not status.get("image_installed"):
-                status["readiness"] = "warning"
-                status["readiness_label"] = "待安装训练镜像"
-                status["status_desc"] = f"未安装独立训练镜像 {status.get('training_image', 'quantmind-trainer:latest')} (需先构建/拉取)"
-                return status
+            if status.get("executor") == "process":
+                if not status.get("process_ready"):
+                    # 用 offline 而非 warning：前端 warning 分支展示的是
+                    # "docker build 训练镜像" 提示，与本机直跑场景不符；
+                    # offline 分支直接展示下方的详细原因文案
+                    status["readiness"] = "offline"
+                    status["readiness_label"] = "直跑环境未就绪"
+                    status["status_desc"] = (
+                        status.get("docker_error")
+                        or "本机直跑条件不齐（训练脚本或运行时依赖缺失）"
+                    )
+                    return status
+                # 直跑模式不要求 Docker：跳过镜像检查，直接评估 GPU / 资源
+            else:
+                if not status.get("docker_available"):
+                    status["readiness"] = "offline"
+                    status["readiness_label"] = "Docker 未运行"
+                    status["status_desc"] = f"未连接到 Docker: {status.get('docker_error') or '服务未运行'}"
+                    return status
+                if not status.get("image_installed"):
+                    status["readiness"] = "warning"
+                    status["readiness_label"] = "待安装训练镜像"
+                    status["status_desc"] = f"未安装独立训练镜像 {status.get('training_image', 'quantmind-trainer:latest')} (需先构建/拉取)"
+                    return status
 
         # 检查是否训练中
         if status.get("training_active"):
@@ -619,6 +654,12 @@ cat /proc/loadavg 2>/dev/null | awk '{print $1}'
             mem_mb = status.get("mem_total_mb") or 0
             mem_str = f" · 内存 {round(mem_mb / 1024, 1)}GB" if mem_mb > 0 else ""
             status["status_desc"] = f"CPU 训练模式{mem_str} · 磁盘可用 {disk_free_gb}GB"
+
+        # 直跑模式补充标注（与 Docker 容器训练区分，前端按状态文案展示）
+        if status.get("is_local") and status.get("executor") == "process":
+            desc = str(status.get("status_desc") or "").strip()
+            if desc and "本机直跑" not in desc:
+                status["status_desc"] = desc + " · 本机直跑"
 
         # 如果磁盘不足 5GB 则 warning
         if disk_total_kb > 0 and disk_free_gb < 5.0:

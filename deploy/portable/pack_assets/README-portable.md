@@ -31,6 +31,17 @@
 - 美股（QuantUS）/ 港股（QuantHK）/ 期货（QuantFutures）：按需
 - 若拿到了离线数据包，直接把内容放进 `data/quantdb`、`data/quanthk` 等目录即可，无需联网同步
 
+## 模型训练（免 Docker 本机直跑）
+
+本包**不需要 Docker**：模型训练（「训练中心」页面）会以本机内嵌 Python 直接执行
+`train.py`，训练页节点显示为「本地直跑(免Docker)」即就绪可用；安装了 GPU 增补包后
+DL 模型自动使用 CUDA，未装则 CPU 训练（耗时更长，可勾选多周期分批执行）。
+
+- 训练任务数据目录：`data/training_jobs/<run_id>/`，产物注册进「模型管理」。
+- 如需强制走容器训练，可设置 `TRAINING_EXECUTOR=docker`（本机须已装 Docker Desktop
+  并构建训练镜像）；AutoDL 远程节点在训练页直接选用即可，与 Docker 部署一致。
+- 训练日志在训练页实时查看；训练中的任务重启包后会自动从断点状态恢复调度。
+
 ## 常见问题
 
 - **端口被占用**：编辑 `pack.env`（或 start.bat 顶部）修改端口。

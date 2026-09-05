@@ -2127,9 +2127,15 @@ class ModelRegistryService:
             "shap_summary.csv",
         ]
 
+        # 任务工作目录：容器部署沿用 /data/training_jobs/{run_id}；
+        # 便携包等免 Docker 部署按 STORAGE_ROOT 落位（与本地直跑编排器写盘同源）
+        from backend.shared.training_runtime import training_jobs_dir
+
+        job_dir = training_jobs_dir(run_id)
+
         # 多模型模式：metadata.json 里 saved_models 记录了全部基模型文件名
         # （model_gru.pth / model_mlp.pkl 等新后缀名不在静态白名单），动态展开补全
-        for predefined_dir in (target_dir, Path("/data") / "training_jobs" / run_id):
+        for predefined_dir in (target_dir, job_dir):
             meta_path = predefined_dir / "metadata.json"
             if meta_path.is_file():
                 try:
@@ -2142,7 +2148,7 @@ class ModelRegistryService:
                 break
 
         copied: list[str] = []
-        for source_dir in (target_dir, Path("/data") / "training_jobs" / run_id):
+        for source_dir in (target_dir, job_dir):
             if not source_dir.exists() or not source_dir.is_dir():
                 continue
             for filename in artifact_names:
