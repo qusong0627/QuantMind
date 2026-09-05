@@ -19,7 +19,7 @@ setlocal
 cd /d "%~dp0"
 set "PACK=%CD%"
 if defined QM_REPO_ROOT (set "REPO=%QM_REPO_ROOT%") else (set "REPO=C:\QuantMind-src")
-set "BRANCH=next"
+set "BRANCH=main"
 
 if not exist "%REPO%\.git" (
     echo [!] git repo not found at %REPO%

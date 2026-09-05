@@ -20,7 +20,7 @@ set -u
 cd "$(dirname "$0")" || exit 1
 PACK="$(pwd)"
 REPO="${QM_REPO_ROOT:-$HOME/quantmind-src}"
-BRANCH="${QM_SYNC_BRANCH:-next}"
+BRANCH="${QM_SYNC_BRANCH:-main}"
 
 if [ ! -d "$REPO/.git" ]; then
     echo "[!] git repo not found at $REPO"
