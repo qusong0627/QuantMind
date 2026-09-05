@@ -321,12 +321,10 @@ def _normalize_payload(payload: dict[str, Any], allowed_features: list[str]) -> 
     if target_mode not in _ALLOWED_TARGET_MODE:
         raise HTTPException(status_code=422, detail="target_mode must be one of: return, classification")
 
-    label_formula = str(payload.get("label_formula") or "").strip()
+    # label_formula/training_window 取 req 清洗值；effective 日期形状 schema 已验，此处复核。
     effective_trade_date = str(payload.get("effective_trade_date") or "").strip()
     if effective_trade_date:
         _parse_date(effective_trade_date, "effective_trade_date")
-
-    training_window = str(payload.get("training_window") or "").strip()
 
     raw_feature_categories = payload.get("feature_categories", []) or []
     feature_categories: list[str] = []
