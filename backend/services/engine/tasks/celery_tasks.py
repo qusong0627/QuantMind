@@ -889,6 +889,7 @@ def backfill_inference_quality(horizon_days: int = 5, limit: int = 500) -> dict[
     data_trade_date <= 当前- horizon 且未在 qm_model_inference_quality 的日期。
     """
     from datetime import timedelta
+    from sqlalchemy import text
     from backend.services.engine.inference.inference_quality_backfill import (
         inference_quality_backfill,
     )
@@ -1080,7 +1081,13 @@ def dispatch_market_sync() -> dict[str, Any]:
         return {"status": "failed", "error": str(e)}
 
 
-@celery_app.task(name="engine.tasks.run_market_scheduled_sync")
+@celery_app.task(
+    name="engine.tasks.run_market_scheduled_sync",
+    # 数据回补日可能超过全局 3600s 限制（HK 2807 只 K线全量回拉），
+    # 定时同步任务单独放宽到 2 小时；K线增量早退后日常运行只需几分钟
+    soft_time_limit=6900,
+    hard_time_limit=7200,
+)
 def run_market_scheduled_sync(market: str, cfg: dict[str, Any]) -> dict[str, Any]:
     """执行某市场的定时同步（由 dispatch_market_sync 派发）。"""
     try:

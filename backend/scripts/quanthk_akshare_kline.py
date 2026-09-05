@@ -148,6 +148,30 @@ def sync(
     min_date = start.strftime("%Y%m%d")
 
     syms = symbols or _stock_list()
+
+    # 增量早退：最新分区已含今天，说明每晚同步已把当日数据落盘，
+    # 再全量拉 2807 只×9 天只会白耗 40-60 分钟并拖垮整条 CCASS/南向链路。
+    # 分区分批写入在各股抓取完成后统一进行，被超时杀掉的任务不会留下半截分区，
+    # 故「最新分区 == 今天」可安全视为已最新。
+    newest = max(existing) if existing else ""
+    if newest >= end.strftime("%Y%m%d"):
+        log.info(
+            "日线已最新（最新分区 %s，今天 %s），跳过全量拉取",
+            newest, end.strftime("%Y%m%d"),
+        )
+        return {
+            "status": "up_to_date", "newest_partition": newest,
+            "stocks": len(syms), "existing_partitions": len(existing),
+        }
+    # 只补「最新分区之后」的日期：夜间正常增量只抓今天一天；落盘延迟/长假后
+    # 自动变成多日回补（仍全量抓取后按此日期过滤，数据不重不漏）。
+    if newest:
+        nxt = (
+            datetime.strptime(newest, "%Y%m%d") + timedelta(days=1)
+        ).strftime("%Y%m%d")
+        if nxt > min_date:
+            min_date = nxt
+
     log.info("待同步标的: %d 只，最近 %d 天 (从 %s)", len(syms), days, min_date)
 
     if dry_run:

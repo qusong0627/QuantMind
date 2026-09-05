@@ -70,6 +70,24 @@ def _south_source_result(days: int) -> dict[str, Any]:
         return {"status": "error", "error": str(exc)}
 
 
+def _ccass_source_result(days: int) -> dict[str, Any]:
+    """CCASS 机构持仓原始数据同步（增量爬虫，受数据源勾选控制）。"""
+    try:
+        from backend.shared.data_source_config import is_source_enabled
+
+        enabled = is_source_enabled("HK", "ccass_top50")
+    except Exception:  # noqa: BLE001
+        enabled = True
+    if not enabled:
+        return {"status": "skipped", "reason": "未勾选 CCASS"}
+    try:
+        from backend.scripts.quanthk_ccass_sync import run as ccass_sync
+
+        return ccass_sync(days=days)
+    except Exception as exc:  # noqa: BLE001
+        return {"status": "error", "error": str(exc)}
+
+
 def _refresh_l1_dataset(result: dict[str, Any], *, days: int) -> None:
     """K线更新后增量重算 L1 因子日频分区（训练直连数据集）。"""
     try:
@@ -106,12 +124,22 @@ def run(*, days: int = 5, symbols: str | None = None, datasets: list[str] | None
     result: dict[str, Any] = {"market": "HK", "days": days, "datasets": datasets or []}
 
     if not datasets:
-        # 全量定时路径：核心数据(K线→南向→L1→南向因子)先落盘保证每晚必达，
+        # 全量定时路径：核心数据(K线→南向→L1→CCASS→南向/CCASS因子)先落盘保证每晚必达，
         # 雅虎元数据段(估值快照/财务序列/分析师)最后执行——任务有 3600s 硬限制，
         # 若被截断只损失元数据增量，次日续跑；雅虎必须 skip_kline(K线口径铁律)。
         _sync_akshare_kline(result, days=days, symbols=symbols)
         result["sources"] = {"hsgt_south": _south_source_result(days=days)}
         _refresh_l1_dataset(result, days=days)
+        # CCASS 机构持仓：HKEX 披露晚到（T+1~T+2），每晚增量补齐；
+        # 脚本按交易日增量、已存在分区跳过，数据齐全时秒级完成
+        result["ccass"] = _ccass_source_result(days=days)
+        # 个股预测/研究服务的 PG 快照（stock_daily_latest_hk）刷新最新交易日
+        try:
+            from backend.scripts.quanthk_sdl_sync import sync_day as _sdl_sync
+
+            result["sdl_hk"] = _sdl_sync()
+        except Exception as exc:  # noqa: BLE001
+            result["sdl_hk"] = {"status": "error", "error": str(exc)}
         result["yahoo"] = _yahoo_run("HK", days=days, symbols=symbols, fast=fast, skip_kline=True)
         # 本地信号因子(南向/CCASS)在原始数据全部落盘后统一增量刷新
         _refresh_signal_datasets(result)
