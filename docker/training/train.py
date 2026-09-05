@@ -44,6 +44,15 @@ logging.basicConfig(
 )
 logger = logging.getLogger("quantmind.train")
 
+# ── 训练工作目录 ──────────────────────────────────────────────────────────────
+# Docker 编排把宿主机任务目录 bind mount 到 /workspace（默认值）；
+# 免 Docker 本机直跑（LocalProcessOrchestrator）时容器挂载不存在，编排器通过
+# TRAINING_WORKSPACE_DIR 环境变量把工作目录指到本机真实路径（如
+# {STORAGE_ROOT}/training_jobs/{run_id}）。产物（model.*、metadata、pred 等）
+# 一律写到这里，与 config.output.result_path 同目录。
+_WORKSPACE_ENV = (os.getenv("TRAINING_WORKSPACE_DIR") or "").strip()
+WORKSPACE_DIR = Path(_WORKSPACE_ENV) if _WORKSPACE_ENV else WORKSPACE_DIR
+
 
 # ── 硬件环境检测 ──────────────────────────────────────────────────────────────
 def detect_hardware() -> dict[str, Any]:
@@ -3070,7 +3079,7 @@ def train_model(df: pd.DataFrame, features: list[str], cfg: dict, hardware: dict
         model = _train_mlp(cfg, features, X_train, y_train, X_val, y_val)
     elif model_type == "nativetft":
         dl_params = model_cfg.get("dl_params", {})
-        output_dir = Path("/workspace")
+        output_dir = WORKSPACE_DIR
         model, train_m, val_m, dl_metadata = _train_nativetft(
             model_type, train_df, val_df, features, dl_params, output_dir, hardware=hardware
         )
@@ -3119,7 +3128,7 @@ def train_model(df: pd.DataFrame, features: list[str], cfg: dict, hardware: dict
         )
     elif model_type in _DL_MODEL_TYPES:
         dl_params = model_cfg.get("dl_params", {})
-        output_dir = Path("/workspace")
+        output_dir = WORKSPACE_DIR
         model, train_m, val_m, dl_metadata = _train_dl(
             model_type, train_df, val_df, features, dl_params, output_dir, hardware=hardware
         )
@@ -3596,7 +3605,7 @@ def _train_single_model(
     elif model_type == "mlp":
         model = _train_mlp(cfg, features, X_train, y_train, X_val, y_val)
     elif model_type == "nativetft":
-        output_dir = Path("/workspace")
+        output_dir = WORKSPACE_DIR
         dl_params = model_cfg.get("dl_params", {})
         model, train_m, val_m, dl_metadata = _train_nativetft(
             model_type, train_df, val_df, features, dl_params, output_dir, hardware=hardware
@@ -3632,7 +3641,7 @@ def _train_single_model(
             "elapsed": elapsed,
         }
     elif model_type in _DL_MODEL_TYPES:
-        output_dir = Path("/workspace")
+        output_dir = WORKSPACE_DIR
         dl_params = model_cfg.get("dl_params", {})
         model, train_m, val_m, dl_metadata = _train_dl(
             model_type, train_df, val_df, features, dl_params, output_dir, hardware=hardware
@@ -4005,13 +4014,13 @@ def train_stacking(
         **{f"oof_{mt}": oof_preds[mt] for mt in model_types},
         "label": train_df[label_col],
     })
-    oof_path = Path("/workspace/oof_predictions.parquet")
+    oof_path = WORKSPACE_DIR / "oof_predictions.parquet"
     oof_df.to_parquet(oof_path, engine="pyarrow", compression="zstd", index=False)
     logger.info("OOF predictions saved to %s", oof_path)
 
     # 保存元学习器
     import pickle
-    meta_model_path = Path("/workspace/meta_model.pkl")
+    meta_model_path = WORKSPACE_DIR / "meta_model.pkl"
     with open(meta_model_path, "wb") as f:
         pickle.dump({
             "model": meta_model,
@@ -4098,7 +4107,7 @@ def main() -> int:
     result: dict = {}
     callback_url    = ""
     callback_secret = ""
-    result_path = Path("/workspace/result.json")
+    result_path = WORKSPACE_DIR / "result.json"
 
     try:
         if not cfg_path.exists():
@@ -4107,7 +4116,7 @@ def main() -> int:
 
         run_id          = cfg.get("run_id", "unknown")
         job_name        = cfg.get("job_name", "unnamed")
-        result_path     = Path(cfg.get("output", {}).get("result_path", "/workspace/result.json"))
+        result_path     = Path(cfg.get("output", {}).get("result_path", str(WORKSPACE_DIR / "result.json")))
         callback_url    = cfg.get("callback", {}).get("url", "")
         callback_secret = cfg.get("callback", {}).get("secret", "")
 
@@ -4235,7 +4244,7 @@ def main() -> int:
             is_stacking = multi_result.get("ensemble_method") == "stacking"
 
             # 保存各基模型
-            workspace = Path("/workspace")
+            workspace = WORKSPACE_DIR
             saved_models: dict[str, str] = {}
             for mt, res in multi_result["models"].items():
                 suffix_map = {"lightgbm": "_lgb", "xgboost": "_xgb", "catboost": "_cbm", "linear": "_lin"}
@@ -4279,7 +4288,7 @@ def main() -> int:
                     best_iteration = None
 
             # 保存预测
-            pred_path = Path("/workspace/pred.parquet")
+            pred_path = WORKSPACE_DIR / "pred.parquet"
             pred_df.to_parquet(pred_path, engine="pyarrow", compression="zstd", index=False)
             logger.info(f"Predictions saved to {pred_path}")
 
@@ -4290,7 +4299,7 @@ def main() -> int:
                 .set_index(["datetime", "instrument"])
                 .sort_index()
             )
-            pred_pkl_path = Path("/workspace/pred.pkl")
+            pred_pkl_path = WORKSPACE_DIR / "pred.pkl"
             pred_qlib.to_pickle(pred_pkl_path)
             logger.info(f"Backtest-compatible pred.pkl saved ({len(pred_qlib):,} rows)")
 
@@ -4302,7 +4311,7 @@ def main() -> int:
             shap_info: dict[str, Any] = {"enabled": False, "status": "disabled"}
             if "lightgbm" in multi_result["models"]:
                 lgb_res = multi_result["models"]["lightgbm"]
-                shap_summary_path = Path("/workspace/shap_summary.csv")
+                shap_summary_path = WORKSPACE_DIR / "shap_summary.csv"
                 shap_info = _compute_shap_summary(
                     model=lgb_res["model"],
                     split_frames=lgb_res["split_frames"],
@@ -4394,12 +4403,12 @@ def main() -> int:
                 metadata.update(dl_metadata)
 
             metadata_bytes = json.dumps(_sanitize_nan_inf(metadata), ensure_ascii=False, indent=2).encode()
-            Path("/workspace/metadata.json").write_bytes(metadata_bytes)
+            (WORKSPACE_DIR / "metadata.json").write_bytes(metadata_bytes)
             logger.info("metadata.json saved locally")
 
             # 复制推理脚本模板
             template_path = Path("/app/backend/services/engine/inference/templates/inference_parquet.py")
-            inference_dest = Path("/workspace/inference.py")
+            inference_dest = WORKSPACE_DIR / "inference.py"
             if template_path.is_file():
                 inference_dest.write_text(template_path.read_text(encoding="utf-8"), encoding="utf-8")
                 logger.info("inference.py copied from unified template: %s", template_path)
@@ -4441,7 +4450,7 @@ def main() -> int:
                     {"name": "meta_model.pkl", "local": "/workspace/meta_model.pkl"},
                     {"name": "oof_predictions.parquet", "local": "/workspace/oof_predictions.parquet"},
                 ])
-            if shap_info.get("status") == "completed" and Path("/workspace/shap_summary.csv").exists():
+            if shap_info.get("status") == "completed" and (WORKSPACE_DIR / "shap_summary.csv").exists():
                 result["artifacts"].append({"name": "shap_summary.csv", "local": "/workspace/shap_summary.csv"})
 
         else:
@@ -4480,7 +4489,7 @@ def main() -> int:
             logger.info("Training finished in %.2fs, best_iteration=%s, model_type=%s", elapsed, best_iteration, actual_model_type)
 
             # 保存模型（多框架）
-            workspace = Path("/workspace")
+            workspace = WORKSPACE_DIR
             model_filename = _save_model(model, actual_model_type, workspace)
             logger.info(f"Model saved to {workspace / model_filename}")
             quantile_model_files: dict[str, str] = {}
@@ -4494,7 +4503,7 @@ def main() -> int:
                 logger.info("Quantile model artifacts saved: %s", quantile_model_files)
 
             # 保存预测结果（parquet 压缩用于存档，比 pickle 小 ~10x）
-            pred_path = Path("/workspace/pred.parquet")
+            pred_path = WORKSPACE_DIR / "pred.parquet"
             pred_df.to_parquet(pred_path, engine="pyarrow", compression="zstd", index=False)
             logger.info(f"Predictions saved to {pred_path} ({pred_path.stat().st_size/1024/1024:.1f} MB)")
 
@@ -4507,11 +4516,11 @@ def main() -> int:
                 .set_index(["datetime", "instrument"])
                 .sort_index()
             )
-            pred_pkl_path = Path("/workspace/pred.pkl")
+            pred_pkl_path = WORKSPACE_DIR / "pred.pkl"
             pred_qlib.to_pickle(pred_pkl_path)
             logger.info(f"Backtest-compatible pred.pkl saved ({pred_pkl_path.stat().st_size/1024/1024:.1f} MB, {len(pred_qlib):,} rows)")
 
-            shap_summary_path = Path("/workspace/shap_summary.csv")
+            shap_summary_path = WORKSPACE_DIR / "shap_summary.csv"
             # SHAP: pred_contrib 仅支持 LightGBM；其他框架暂跳过
             if actual_model_type != "lightgbm":
                 explain_cfg_shap = {**explain_cfg, "enable_shap": False}
@@ -4612,12 +4621,12 @@ def main() -> int:
                 metadata.update(dl_metadata)
 
             metadata_bytes = json.dumps(_sanitize_nan_inf(metadata), ensure_ascii=False, indent=2).encode()
-            Path("/workspace/metadata.json").write_bytes(metadata_bytes)
+            (WORKSPACE_DIR / "metadata.json").write_bytes(metadata_bytes)
             logger.info("metadata.json saved locally")
 
             # 复制统一推理脚本模板（而非内联生成旧版脚本）
             template_path = Path("/app/backend/services/engine/inference/templates/inference_parquet.py")
-            inference_dest = Path("/workspace/inference.py")
+            inference_dest = WORKSPACE_DIR / "inference.py"
             if template_path.is_file():
                 inference_dest.write_text(template_path.read_text(encoding="utf-8"), encoding="utf-8")
                 logger.info("inference.py copied from unified template: %s", template_path)

@@ -197,6 +197,9 @@ class LocalProcessOrchestrator(LocalDockerOrchestrator):
         env.update({
             "INTERNAL_CALL_SECRET": self.internal_secret,
             "USE_LOCAL_DATA": "true",
+            # train.py 产物目录：容器模式固定 /workspace（bind mount），
+            # 直跑模式无挂载，必须指到本机任务目录，否则 model.lgb 写盘失败
+            "TRAINING_WORKSPACE_DIR": str(work_dir),
             "TRAINING_LOCAL_DATA_DIR": str(snap_root or data_root),
             "TRAINING_CACHE_DIR": str(work_dir / "cache"),
             "TRAIN_IC_WORKERS": os.getenv("TRAIN_IC_WORKERS", ""),
@@ -351,6 +354,19 @@ class LocalProcessOrchestrator(LocalDockerOrchestrator):
         tail_text = "\n".join(tail)
 
         if exit_code == 0:
+            # 竞态：train.py 的回调可能先于我们读到 EOF 完成（完整注册/终态写入）。
+            # 重新读当前状态，已 completed/failed 则直接收尾，避免把终态覆写回
+            # waiting_callback 后死等 10 分钟（Callback timeout 才判失败）。
+            async with get_session(read_only=True) as db:
+                cur = await db.get(TrainingJobRecord, run_id)
+                cur_status = str(cur.status or "") if cur else ""
+            if cur_status in {"completed", "failed"}:
+                logger.info(
+                    "[%s] callback already finalized status=%s, skip waiting_callback",
+                    run_id, cur_status,
+                )
+                return
+
             async with get_session() as db:
                 r = await db.get(TrainingJobRecord, run_id)
                 if r:

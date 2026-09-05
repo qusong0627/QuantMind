@@ -12,8 +12,9 @@ Docker-in-Docker 起 TRAINING_IMAGE 容器）与 AutoDL 远程 SSH。便携一�
 
 规则：
 - TRAINING_EXECUTOR=auto|docker|process 显式覆盖（auto 为默认）；
-- auto：Docker daemon 可达且已安装训练镜像 → docker；否则本机具备训练脚本
-  + 依赖 → process（覆盖"装了 Docker 却未构建训练镜像"的便携包场景）；
+- auto：Docker daemon + 训练镜像就绪且 /data 可写（compose 部署语义）→
+  docker；其余环境（便携包裸机、容器内 /data 不可写等）→ 本机具备训练脚本
+  + 依赖即 process 直跑（Docker 编排硬编码 /data、quantmind-network）；
 - 任务目录：TRAINING_JOBS_DIR 显式覆盖；容器部署沿用 /data/training_jobs
   （compose STORAGE_ROOT=/data），本机部署沿用 {STORAGE_ROOT}/training_jobs。
 
@@ -124,10 +125,14 @@ def resolve_training_executor(*, include_docker_error: bool = False) -> dict[str
     - script: 直跑脚本路径或 None；missing：直跑缺失的依赖包列表
 
     auto 规则：
-    1. Docker daemon 可达且已安装训练镜像 → docker（服务器部署默认）；
-    2. daemon 不可达，或可达但镜像未安装 → 本机具备训练脚本 + 运行时依赖
-       时回退 process 直跑（便携包默认路径，也覆盖"装了 Docker 忘建镜像"）；
-    3. 两者都不可用 → 仍标记 docker，readiness 层给出可操作的提示文案。
+    1. Docker daemon + 训练镜像就绪且 /data 挂载可写（compose 部署）→ docker
+       （容器语义：任务目录 /data/training_jobs 与 quantmind-network 齐备）；
+    2. 其它情形（便携包等裸机、或容器内 /data 不可写）→ 本机具备训练脚本 +
+       运行时依赖即 process 直跑——LocalDockerOrchestrator 硬编码容器路径
+       /data 与容器网络，不满足语义时必然 PermissionError/网络缺失；
+    3. 两者都不可用 → 仍标记 docker，readiness 层给出可操作的提示文案；
+    裸机要强制容器训练须显式 TRAINING_EXECUTOR=docker（自行准备数据目录
+    与网络，一般仅测试用途）。
     """
     forced = (os.getenv("TRAINING_EXECUTOR") or "").strip().lower()
     if forced not in ("", "auto", "docker", "process"):
@@ -160,12 +165,15 @@ def resolve_training_executor(*, include_docker_error: bool = False) -> dict[str
     result["image_present"] = image_present
     result["docker_error"] = None if docker_ok else (err or "Docker daemon 未运行")
 
-    if docker_ok and image_present:
+    # 容器编排依赖 compose 语义：/data 挂载点可写（任务目录 /data/training_jobs
+    # 由编排器创建）与 quantmind-network。仅在满足时选择 Docker；便携包等裸机
+    # （或容器内 /data 不可写/不存在）即使宿主 Docker 可用也不选容器编排，
+    # 避免 /data/training_jobs 创建 PermissionError 卡死训练。
+    if docker_ok and image_present and _docker_compose_semantics_ready():
         result["executor"] = "docker"
         return result
 
-    # Docker 不可达，或 daemon 在跑但训练镜像未安装：
-    # 本机具备直跑条件（脚本 + 依赖）时回退本机 python 直跑
+    # Docker 不可用 / 无 compose 语义：本机具备直跑条件（脚本 + 依赖）即回落直跑
     _fill_process_checks(result)
     if result.get("script") is not None and not result.get("missing"):
         result["executor"] = "process"
@@ -180,7 +188,12 @@ def resolve_training_executor(*, include_docker_error: bool = False) -> dict[str
             + ("缺失 " + ", ".join(result.get("missing") or []) if result.get("missing") else "齐全")
             + "）"
         )
-        if docker_ok:
+        if docker_ok and image_present:
+            result["docker_error"] = (
+                f"当前环境缺少容器编排所需 /data 挂载（非 compose 部署），无法使用"
+                f"容器训练，且本机直跑条件不齐{condition_text}"
+            )
+        elif docker_ok:
             result["docker_error"] = (
                 f"未安装独立训练镜像 {training_image_name()}，且本机直跑条件不齐"
                 f"{condition_text}（构建镜像或让运行时具备直跑依赖）"
@@ -190,6 +203,17 @@ def resolve_training_executor(*, include_docker_error: bool = False) -> dict[str
                 f"Docker daemon 未运行，且本机缺少直跑训练条件{condition_text}"
             )
     return result
+
+
+def _docker_compose_semantics_ready() -> bool:
+    """compose 容器语义是否齐备：/data 挂载存在且对当前用户可写。"""
+    data_dir = Path("/data")
+    if not data_dir.is_dir():
+        return False
+    try:
+        return os.access("/data", os.W_OK)
+    except OSError:
+        return False
 
 
 def _fill_process_checks(result: dict[str, Any]) -> None:
