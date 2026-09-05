@@ -4093,6 +4093,18 @@ def main() -> int:
             raise RuntimeError(f"Config file not found: {cfg_path}")
         cfg = yaml.safe_load(cfg_path.read_text())
 
+        # B1 配置校验门：与 api 侧同一 TrainingConfig 双端复用，非法枚举等纯输入
+        # 错误在启动秒级失败，而不是数据加载后才抛。校验只做 gate，不改写 cfg，
+        # 下游逻辑零改动。兼容镜像（无 backend/shared）降级跳过。
+        try:
+            from backend.shared.training.schemas import TrainingConfig
+
+            TrainingConfig.from_dict(cfg)
+        except ImportError:
+            logger.warning("training schemas unavailable (compat image); skip config validation")
+        except Exception as exc:
+            raise RuntimeError(f"Invalid training config: {exc}") from exc
+
         run_id          = cfg.get("run_id", "unknown")
         job_name        = cfg.get("job_name", "unnamed")
         result_path     = Path(cfg.get("output", {}).get("result_path", "/workspace/result.json"))

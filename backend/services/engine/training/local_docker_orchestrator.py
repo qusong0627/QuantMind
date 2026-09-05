@@ -187,6 +187,21 @@ _PREPROCESSING_HOST_PATH = str(_HOST_PROJECT_PATH / "docker" / "training" / "pre
 # 多核因子筛选：train.py 顶层 `from parallel_utils import ...`，需与 train.py 一并挂载
 _PARALLEL_UTILS_HOST_PATH = str(_HOST_PROJECT_PATH / "docker" / "training" / "parallel_utils.py")
 
+def _validate_config_dict(run_id: str, config: dict) -> dict:
+    """B1 schema 门：config.yaml 经 TrainingConfig 校验后返回契约字典。
+
+    - 校验通过：返回 dump_contract_dict（parsed 与输入相等；key 顺序/整数浮点写法
+      可能不同，消费者一律 yaml.safe_load，不影响）。
+    - 校验失败：记 warning 并回退原手拼 dict（fail-open，行为不变；B2 再收紧）。
+    """
+    try:
+        from backend.shared.training.schemas import TrainingConfig, dump_contract_dict
+
+        return dump_contract_dict(TrainingConfig.from_dict(config))
+    except Exception as exc:
+        logger.warning("[%s] TrainingConfig validation failed, fallback legacy dict: %s", run_id, exc)
+        return config
+
 
 class LocalDockerOrchestrator(TrainingOrchestrator):
     def __init__(self):
@@ -613,7 +628,8 @@ class LocalDockerOrchestrator(TrainingOrchestrator):
             config["preprocessing"] = pp_cfg
         elif str(payload.get("enable_cross_sectional_prep", "false")).lower() in ("1", "true", "yes", "on"):
             config["preprocessing"] = {"enabled": True, "winsor": True}
-        return config
+        # B1：过 TrainingConfig 校验门（通过则返回 model_dump，parsed 等价；失败回退原 dict）。
+        return _validate_config_dict(run_id, config)
 
     # ── 启动训练任务 ─────────────────────────────────────────────────────────────
     async def launch_training_job(self, run_id: str, payload: dict = None) -> None:
