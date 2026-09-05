@@ -14,7 +14,7 @@ description: 构建 QuantMind 免 Docker 一键便携包(Linux/Ubuntu+WSL2 与 W
 |---|---|---|
 | `QuantMind-Portable-linux-x64.tar.gz` | Ubuntu/WSL2 | 主包,含 models/Huntly/QwenPaw |
 | `QuantMind-Portable-gpu-addon-linux-x64.tar.gz` | Linux | 解压到包根 → `bash install_gpu.sh` |
-| `QuantMind-Portable-win-x64.zip` | Windows x64 | CPU 版;不含 models/Huntly/QwenPaw(精简) |
+| `QuantMind-Portable-win-x64.zip` | Windows x64 | 主包,含 models/Huntly/QwenPaw(与 Linux 对齐) |
 | `QuantMind-Portable-gpu-addon-win-x64.zip` | Windows | 解压到包根 → 双击 `install_gpu.bat` |
 
 macOS(M 系列):`build_macos_pack.sh` 已备,**必须在一台 Mac 上跑**(Redis 无 darwin 预编译,需 Mac 本机 clang 编译),产物需 `xattr -dr com.apple.quarantine`。
@@ -50,7 +50,7 @@ macOS(M 系列):`build_macos_pack.sh` 已备,**必须在一台 Mac 上跑**(Redi
 5. **pip --only-binary 下 Win 依赖解析**:sdist-only 老包(jsonpath/jieba/PyExecJS/gym)由脚本预构建纯 py wheel 注入 `--find-links`;**futu-api/qstock 无 win wheel 已在 Win 清单剔除**(后端均为可选导入/未注册遗留适配器)
 6. **python-build-standalone 命名漂移**:2026-09 起 Windows 资产去掉 `-shared-` 段;脚本用多 pattern + 精确尾部匹配(endswith .tar.gz)防 `_stripped` 误选
 7. **rd-agent(因子演化)在 Win 包降级**(依赖无法 win 解析,脚本按设计跳过并警告)
-8. Linux/WSL2 与 Win 内容差异:Win 精简版不含 models/Huntly/QwenPaw(如需对齐另行加)
+8. Linux 与 Win 内容已对齐(models/Huntly/QwenPaw 两平台同款;RSSHub 均为外置)
 
 9. **覆盖式解压自锁陷阱**: 便携包 runtime python 经 sitecustomize 启动即导入 litellm→markupsafe,
    解压进程要覆盖 site-packages 里 markupsafe 的 pyd 时会**自己锁自己**(PermissionError,
