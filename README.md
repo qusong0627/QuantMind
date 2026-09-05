@@ -285,9 +285,9 @@ quantmind/
 ## 交流社区
 
 <p align="center">
-  <img src="docs/images/QQ2.png" alt="QuantMind 交流群二维码" width="220">
+  <img src="docs/images/1097406397.png" alt="QuantMind 交流群二维码" width="220">
   <br/>
-  <b>QQ 交流群号：1029189565</b>
+  <b>QQ 交流群号：1097406397</b>
   <br/>
   <i>欢迎加入社群交流量化算法、模型调优与部署心得！</i>
 </p>

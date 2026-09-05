@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 import time
@@ -442,7 +443,9 @@ async def preflight_check(
     if mode in {"REAL", "SHADOW", "SIMULATION"}:
         # 1. Stream时序序列 (SIMULATION 可回退日线开盘价撮合，不阻断)
         try:
-            res = check_stream_series_freshness(
+            # 同步 Redis + 本地日线探测，放线程里跑，避免阻塞事件循环
+            res = await asyncio.to_thread(
+                check_stream_series_freshness,
                 redis_client=redis.client,
                 allow_quantdb_fallback=(mode in {"SIMULATION", "REAL"}),
             )
@@ -466,7 +469,8 @@ async def preflight_check(
 
         # 2. Stream行情落库 (SIMULATION 回退日线，不阻断)
         try:
-            res = check_stream_quote_persist_rate(
+            res = await asyncio.to_thread(
+                check_stream_quote_persist_rate,
                 redis_client=redis.client,
                 allow_quantdb_fallback=(mode in {"SIMULATION", "REAL"}),
             )

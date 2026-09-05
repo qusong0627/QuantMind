@@ -2,6 +2,7 @@
 Synthetic execution engine for simulation orders.
 """
 
+import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import datetime
@@ -218,7 +219,7 @@ class SimulationExecutionEngine:
 
         # Level 2.5: 本地日线兜底（QuantDB parquet）— Redis 不可用时以开盘价撮合
         # 模拟盘核心兜底：直读本地不复权日线，用开盘价作为撮合价，不依赖实时流
-        try:
+        def _local_daily_snapshot() -> MarketSnapshot | None:
             from backend.services.simulation.services.local_market_data import get_local_market_data
             from backend.services.simulation.services.market_rules import infer_market
             from datetime import date as _date
@@ -236,6 +237,13 @@ class SimulationExecutionEngine:
                 if bar and bar.close > 0:
                     logger.info("Fallback to LocalMarketData close for %s %s: close=%s", symbol, d, bar.close)
                     return MarketSnapshot(price=float(bar.close), price_source="local_daily_close")
+            return None
+
+        try:
+            # 直读分区文件是同步磁盘 IO，放线程里跑，避免阻塞事件循环
+            local_snapshot = await asyncio.to_thread(_local_daily_snapshot)
+            if local_snapshot is not None:
+                return local_snapshot
         except Exception as e:
             logger.warning("LocalMarketData fallback failed for %s: %s", symbol, e)
 

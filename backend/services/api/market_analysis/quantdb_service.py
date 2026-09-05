@@ -6,12 +6,15 @@
 - 资金流：l2_factors（行业与个股资金净流向，最新交易日）
 - 标签：sector_concept/sector_members + instrument_detail（真实行业/概念成分股）
 
-数据来源统一走 backend.shared.data_dir 解析，兼容容器内 /data/quantdb 与仓库 data/quantdb。
+取数口径与 quantdb_feed 对齐：交易日走 dt=YYYYMMDD 目录枚举，查询只打开真正
+需要的分区文件（read_parquet 精确路径数组），参考表按源文件 mtime 缓存；
+不用 ``SELECT DISTINCT dt`` / ``dt=*`` 全量 glob 去枚举上千个 parquet。
 单位口径遵循 quantdb-fields 技能：个股 amount=万元、l2 flow=元、指数 volume=手。
 """
 from __future__ import annotations
 
 import logging
+import threading
 from datetime import date, datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
@@ -19,6 +22,7 @@ from typing import Any
 
 import pandas as pd
 
+from backend.services.engine.data_platform.quantdb_hub import QuantDBDataHub
 from backend.shared.market_breadth import (
     CAT_LIMIT_DOWN,
     CAT_LIMIT_UP,
@@ -38,45 +42,199 @@ from backend.shared.market_breadth import (
 
 logger = logging.getLogger(__name__)
 
+_duck_local = threading.local()
+
+# 分区数据集（dt=YYYYMMDD/data.parquet）相对数据根的路径
+_DAILY_REL = "1_kline_data/daily_unadjusted"
+_INDEX_DAILY_REL = "1_kline_data/index_daily"
+_TECH_REL = "5_technical_derived/technical_indicators"
+_L2_REL = "6_ml_datasets/l2_factors"
+_MEMBERS_REL = "2_base_sector/sector_concept/sector_members.parquet"
+_INSTRUMENT_DIR = "2_base_sector/instrument_detail"
+
+
+def _hub() -> QuantDBDataHub:
+    """与 quantdb_feed 共用的 QuantDB 数据中枢单例。"""
+    return QuantDBDataHub.get_instance()
+
 
 def _data_dir() -> Path:
+    """QuantDB 数据根目录。
+
+    解析口径交给 QuantDBDataHub（QM_QUANTDB_DATA_DIR → 容器 /data/quantdb →
+    本地盘符 → 仓库 data/quantdb）。此前这里只自己探两个硬编码候选，与数据平台
+    实际挂载点不一致时整页查不到数据。
+    """
+    try:
+        return _hub().data_dir
+    except Exception as exc:  # pragma: no cover - hub 不可用时兜底
+        logger.warning("QuantDBDataHub 数据目录解析失败，回退默认候选: %s", exc)
     for cand in (Path("/data/quantdb"), Path("data/quantdb")):
         if (cand / "1_kline_data").is_dir():
             return cand
     return Path("/data/quantdb")
 
 
-def _read(sql: str) -> pd.DataFrame:
-    """直读 QuantDB parquet（DuckDB）。"""
-    import duckdb
+def _sql_rel(rel: str = "") -> str:
+    """拼 SQL 字面量用的 posix 路径（Windows 反斜杠会打断 DuckDB 的 glob）。"""
+    path = _data_dir() / rel if rel else _data_dir()
+    return str(path).replace("\\", "/")
 
-    conn = duckdb.connect()
+
+def _partition_dates(rel_path: str) -> list[str]:
+    """分区目录名即 dt 值：一次目录扫描得到降序交易日，不碰任何 parquet 内容。"""
     try:
-        return conn.execute(sql).df()
-    finally:
-        conn.close()
+        dd = _data_dir() / rel_path
+        if not dd.is_dir():
+            return []
+        dates: list[str] = []
+        for entry in dd.iterdir():
+            name = entry.name
+            if not name.startswith("dt="):
+                continue
+            value = name[3:]
+            if value.isdigit() and entry.is_dir():
+                dates.append(value)
+        return sorted(dates, reverse=True)
+    except OSError as exc:
+        logger.warning("读取分区日期列表失败 %s: %s", rel_path, exc)
+        return []
 
 
-def _latest_trade_date() -> str:
-    df = _read(
-        f"SELECT max(dt) AS dt FROM read_parquet('{_data_dir()}/1_kline_data/daily_unadjusted/dt=*/data.parquet', hive_partitioning=true)"
+def _as_dt(value: Any) -> str | None:
+    """校验外部传入的交易日（YYYYMMDD）；非法值返回 None，避免拼进 SQL。"""
+    text = str(value or "").strip().replace("-", "")
+    return text if text.isdigit() and len(text) == 8 else None
+
+
+def _conn():
+    """线程内复用的裸 DuckDB 连接。
+
+    本模块的查询全部是显式路径的 ``read_parquet([...])``，不需要 DataHub 那套
+    预挂载视图；走 ``hub.query()`` 会在每个新工作线程上先 CREATE 13 个
+    ``dt=*/*.parquet + union_by_name`` 视图（实测首次查询 35s）。这里只留一个
+    空连接，既复用 parquet 元数据缓存，又不为用不到的视图买单。
+    """
+    conn = getattr(_duck_local, "conn", None)
+    if conn is None:
+        import duckdb
+
+        conn = duckdb.connect()
+        _duck_local.conn = conn
+    return conn
+
+
+def _read(sql: str) -> pd.DataFrame:
+    """执行查询；失败返回空表，由调用方短路，不把异常抛给接口层。"""
+    try:
+        return _conn().execute(sql).fetchdf()
+    except Exception as exc:
+        logger.warning("QuantDB 查询失败: %s", exc)
+        return pd.DataFrame()
+
+
+def _read_partitioned(rel_path: str, dates: list[str], cols: str) -> pd.DataFrame:
+    """按精确分区路径读取指定交易日。
+
+    与 ``dt=*`` glob + ``WHERE dt IN (...)`` 等价，但 DuckDB 不必枚举全部分区：
+    daily_unadjusted 两天实测 0.78s → 0.007s，index_daily 三十天 1.92s → 0.017s。
+    """
+    base = _data_dir() / rel_path
+    existing = [d for d in dates if (base / f"dt={d}").is_dir()]
+    if len(existing) != len(dates):
+        logger.debug("分区缺失跳过 %s: %d/%d 天", rel_path, len(dates) - len(existing), len(dates))
+    if not existing:
+        return pd.DataFrame()
+    paths = ", ".join(f"'{_sql_rel(rel_path)}/dt={d}/*.parquet'" for d in existing)
+    return _read(
+        f"SELECT {cols}, dt FROM read_parquet([{paths}], hive_partitioning=true)"
     )
-    return str(df.iloc[0]["dt"])
 
 
-def _trading_days(end: str, n: int) -> list[str]:
+@lru_cache(maxsize=8)
+def _read_ref_cached(rel: str, stamp: int) -> pd.DataFrame:
+    """参考表读取；``stamp`` 为源文件 mtime_ns，仅参与缓存键。"""
+    del stamp
+    return _read(f"SELECT * FROM read_parquet('{_sql_rel(rel)}')")
+
+
+def _ref_frame(rel: str) -> pd.DataFrame:
+    """按数据版本缓存参考表（板块成分 7.9 万行 / 标的快照 5566 行）。"""
+    path = _data_dir() / rel
+    if not path.exists():
+        logger.warning("市场分析参考表缺失: %s", path)
+        return pd.DataFrame()
+    try:
+        stamp = path.stat().st_mtime_ns
+    except OSError:
+        return _read_ref_cached(rel, 0)
+    return _read_ref_cached(rel, stamp).copy()
+
+
+def _instrument_rel() -> str | None:
+    """标的快照文件名（instrument_detail / instrument_list 两份都存在过）。"""
+    for fname in ("instrument_detail.parquet", "instrument_list.parquet"):
+        if (_data_dir() / _INSTRUMENT_DIR / fname).exists():
+            return f"{_INSTRUMENT_DIR}/{fname}"
+    return None
+
+
+def _instrument_frame() -> pd.DataFrame:
+    rel = _instrument_rel()
+    return _ref_frame(rel) if rel else pd.DataFrame()
+
+
+def _pick_col(df: pd.DataFrame, *names: str) -> str | None:
+    for name in names:
+        if name in df.columns:
+            return name
+    return None
+
+
+def _str_key_map(df: pd.DataFrame, key: str, value: str) -> dict[str, Any]:
+    """DataFrame 两列 → {str(key): value}；两列同源，长度必然一致。"""
+    return dict(zip(df[key].astype(str), df[value], strict=True))
+
+
+def _latest_trade_date() -> str | None:
+    """最新交易日（YYYYMMDD），以 daily_unadjusted 实际分区为准。"""
+    dates = _partition_dates(_DAILY_REL)
+    if dates:
+        return dates[0]
+    # 兜底：目录枚举不可用时退回全分区扫描（慢，但保持可用）
     df = _read(
-        f"SELECT DISTINCT dt FROM read_parquet('{_data_dir()}/1_kline_data/daily_unadjusted/dt=*/data.parquet', hive_partitioning=true)"
-        f" WHERE dt <= '{end}' ORDER BY dt DESC LIMIT {n}"
+        f"SELECT max(dt) AS dt FROM read_parquet('{_sql_rel(_DAILY_REL)}/dt=*/data.parquet',"
+        " hive_partitioning=true)"
     )
-    return [str(v) for v in df["dt"].tolist()]
+    if df.empty or df.iloc[0]["dt"] is None:
+        return None
+    return str(int(df.iloc[0]["dt"]))
+
+
+def _trading_days(end: str | None, n: int) -> list[str]:
+    """截至 end 的最近 n 个交易日（降序，[0] 为最新）。"""
+    end_dt = _as_dt(end)
+    dates = _partition_dates(_DAILY_REL)
+    if dates:
+        if end_dt:
+            dates = [d for d in dates if d <= end_dt]
+        return dates[:n]
+    cond = f"WHERE dt <= {end_dt}" if end_dt else ""
+    df = _read(
+        f"SELECT DISTINCT dt FROM read_parquet('{_sql_rel(_DAILY_REL)}/dt=*/data.parquet',"
+        f" hive_partitioning=true) {cond} ORDER BY dt DESC LIMIT {int(n)}"
+    )
+    return [] if df.empty else [str(int(v)) for v in df["dt"].tolist()]
 
 
 def _load_st_names() -> set[str]:
-    df = _read(
-        f"SELECT Symbol, Name FROM read_parquet('{_data_dir()}/2_base_sector/instrument_detail/instrument_detail.parquet')"
-    )
-    return {s for s, n in zip(df["Symbol"], df["Name"]) if "ST" in str(n)}
+    """ST 标的集合（按名称含 ST 判定，与旧实现口径一致）。"""
+    df = _instrument_frame()
+    sym = _pick_col(df, "Symbol", "symbol")
+    name = _pick_col(df, "Name", "name")
+    if df.empty or sym is None or name is None:
+        return set()
+    return {str(s) for s, n in zip(df[sym], df[name], strict=True) if "ST" in str(n)}
 
 
 # ---------------------------------------------------------------------------
@@ -98,24 +256,22 @@ _INDEXES: list[tuple[str, str]] = [
 
 def indices_overview(trade_date: str | None = None) -> list[dict[str, Any]]:
     """大盘核心指数快照（最新交易日）。"""
-    td = trade_date or _latest_trade_date()
+    td = _as_dt(trade_date) or _latest_trade_date()
+    if not td:
+        return []
     dts = _trading_days(td, 30)
     if not dts:
         return []
-    dt_in = ",".join(f"'{d}'" for d in dts)
-    sym_in = ",".join(f"'{s}'" for _, s in _INDEXES)
-    df = _read(
-        f"SELECT symbol, dt, high, low, close, preClose, amount FROM read_parquet("
-        f"'{_data_dir()}/1_kline_data/index_daily/dt=*/data.parquet', hive_partitioning=true, union_by_name=true)"
-        f" WHERE dt IN ({dt_in}) AND symbol IN ({sym_in})"
-    )
+    df = _read_partitioned(_INDEX_DAILY_REL, dts, "symbol, high, low, close, amount")
+    if df.empty:
+        return []
+    df["dt"] = df["dt"].astype(str)
     out: list[dict[str, Any]] = []
     for name, sym in _INDEXES:
         sub = df[df["symbol"] == sym].sort_values("dt")
         if sub.empty:
             continue
-        closes = sub["close"]
-        # preClose 全 NULL → 用 close 序列自算
+        # index_daily 没有 preClose 列，涨跌幅用 close 序列自算
         today = sub.iloc[-1]
         prev_close = float(sub["close"].iloc[-2]) if len(sub) >= 2 else None
         pct = round((float(today["close"]) / prev_close - 1) * 100, 2) if prev_close else 0.0
@@ -141,25 +297,25 @@ def indices_overview(trade_date: str | None = None) -> list[dict[str, Any]]:
 
 def market_breadth_stats(trade_date: str | None = None) -> dict[str, Any]:
     """涨跌家数 / 涨停跌停 / 量能（复用 daily-review 的涨跌停规则）。"""
-    td = trade_date or _latest_trade_date()
+    td = _as_dt(trade_date) or _latest_trade_date()
+    if not td:
+        return {}
     dts = _trading_days(td, 2)
     if len(dts) < 2:
         return {}
     prev, cur = dts[1], dts[0]
 
     st_set = _load_st_names()
-    dt_in = ",".join(f"'{d}'" for d in dts)
-    unadj = _read(
-        f"SELECT symbol, dt, open, high, low, close, volume, amount FROM read_parquet("
-        f"'{_data_dir()}/1_kline_data/daily_unadjusted/dt=*/data.parquet', hive_partitioning=true)"
-        f" WHERE dt IN ({dt_in})"
+    unadj = _read_partitioned(
+        _DAILY_REL, dts, "symbol, open, high, low, close, volume, amount"
     )
+    if unadj.empty:
+        return {}
     unadj["dt"] = unadj["dt"].astype(str)
-    tech = _read(
-        f"SELECT symbol, dt, pct_change FROM read_parquet("
-        f"'{_data_dir()}/5_technical_derived/technical_indicators/dt=*/data.parquet', hive_partitioning=true)"
-        f" WHERE dt IN ('{cur}')"
-    )
+    tech = _read_partitioned(_TECH_REL, [cur], "symbol, pct_change")
+    if tech.empty:
+        tech = pd.DataFrame(columns=["symbol", "pct_change"])
+    tech["symbol"] = tech["symbol"].astype(str)
     today = unadj[unadj["dt"] == cur].merge(
         unadj[unadj["dt"] == prev][["symbol", "close"]].rename(columns={"close": "prev_close"}),
         on="symbol",
@@ -197,14 +353,11 @@ def market_breadth_stats(trade_date: str | None = None) -> dict[str, Any]:
     dts12 = _trading_days(td, 12)
     max_streak = 0
     if limit_up > 0:
-        dt_in12 = ",".join(f"'{d}'" for d in dts12)
         syms = today[today["category"] == CAT_LIMIT_UP]["symbol"].tolist()
-        sym_in = ",".join(f"'{s}'" for s in syms)
-        tech12 = _read(
-            f"SELECT symbol, dt, pct_change FROM read_parquet("
-            f"'{_data_dir()}/5_technical_derived/technical_indicators/dt=*/data.parquet', hive_partitioning=true)"
-            f" WHERE dt IN ({dt_in12}) AND symbol IN ({sym_in})"
-        )
+        tech12 = _read_partitioned(_TECH_REL, dts12, "symbol, pct_change")
+        if tech12.empty:
+            tech12 = pd.DataFrame(columns=["symbol", "dt", "pct_change"])
+        tech12 = tech12[tech12["symbol"].astype(str).isin({str(s) for s in syms})]
         tech12["dt"] = tech12["dt"].astype(str)
         st_map = today.set_index("symbol")["is_st"].to_dict()
         from backend.shared.market_breadth import streak_from_tail
@@ -241,19 +394,47 @@ def market_breadth_stats(trade_date: str | None = None) -> dict[str, Any]:
 _FLOW_COLS = ["flow_net_amount", "flow_super_net", "flow_large_net", "flow_medium_net", "flow_small_net"]
 
 
-def _load_l2_flow() -> pd.DataFrame:
-    """读取 l2 最新分区资金流（单位：元）。"""
+def _l2_latest_dt() -> str | None:
+    """最新有 L2 资金流的交易日（目录枚举，不扫全部分区）。"""
+    dates = _partition_dates(_L2_REL)
+    if dates:
+        return dates[0]
+    # 兜底同样只用显式路径：本模块的连接没有挂载任何 hub 视图
     df = _read(
-        f"SELECT symbol, dt, {','.join(_FLOW_COLS)} FROM read_parquet("
-        f"'{_data_dir()}/6_ml_datasets/l2_factors/dt=*/data.parquet', hive_partitioning=true)"
+        f"SELECT max(dt) AS dt FROM read_parquet('{_sql_rel(_L2_REL)}/dt=*/data.parquet',"
+        " hive_partitioning=true)"
     )
+    if df.empty or df.iloc[0]["dt"] is None:
+        return None
+    return str(int(df.iloc[0]["dt"]))
+
+
+def _load_l2_flow(dt: str | None = None) -> pd.DataFrame:
+    """读取指定（默认最新）交易日资金流（单位：元）。
+
+    旧实现 ``FROM read_parquet('l2_factors/dt=*/data.parquet')`` 不带 dt 条件，
+    每次请求都要读全历史（本机实测 885 个分区 / 8.2GB / 451 万行 / 22.5s），
+    而所有调用方只取其中一天；单日精确分区实测 0.04s。
+    """
+    day = dt or _l2_latest_dt()
+    if not day:
+        return pd.DataFrame(columns=["symbol", *_FLOW_COLS, "dt"])
+    df = _read(
+        f"SELECT symbol, {', '.join(_FLOW_COLS)}, dt FROM read_parquet("
+        f"'{_sql_rel(_L2_REL)}/dt={day}/*.parquet', hive_partitioning=true)"
+    )
+    if df.empty:
+        return df
     df["dt"] = df["dt"].astype(str)
     return df
 
 
-def _l2_latest_dt() -> str:
-    df = _load_l2_flow()
-    return str(df["dt"].max()) if not df.empty else ""
+def _sector_industry_members() -> pd.DataFrame:
+    """申万一级行业成分（板块成分表按 mtime 缓存后再过滤）。"""
+    members = _load_sector_members()
+    if members.empty or "SectorType" not in members.columns:
+        return pd.DataFrame()
+    return members[members["SectorType"].astype(str) == "行业板块(一级)"]
 
 
 def money_flow_period(period: str = "1d", dimension: str = "sector") -> list[dict[str, Any]]:
@@ -263,18 +444,17 @@ def money_flow_period(period: str = "1d", dimension: str = "sector") -> list[dic
     为准并标注截至日，绝不乘系数伪造多周期。
     个股级（stock）返回真实收盘价与涨跌幅。
     """
-    df = _load_l2_flow()
-    if df.empty:
+    latest = _l2_latest_dt()
+    if not latest:
         return []
-    latest = str(df["dt"].max())
-    day = df[df["dt"] == latest].copy()
+    day = _load_l2_flow(latest)
+    if day.empty:
+        return []
 
     if dimension == "sector":
-        members = _read(
-            f"SELECT SectorCode, SectorName, SectorType, Symbol FROM read_parquet("
-            f"'{_data_dir()}/2_base_sector/sector_concept/sector_members.parquet')"
-            f" WHERE SectorType = '行业板块(一级)'"
-        )
+        members = _sector_industry_members()
+        if members.empty:
+            return []
         merged = day.merge(members, left_on="symbol", right_on="Symbol", how="inner")
         agg = (
             merged.groupby(["SectorCode", "SectorName"])
@@ -294,33 +474,21 @@ def money_flow_period(period: str = "1d", dimension: str = "sector") -> list[dic
         ]
 
     # stock 维度：真实收盘价 + 涨跌幅
+    name_map = _load_instrument_names()
     td = _latest_trade_date()
-    names = _read(
-        f"SELECT Symbol, Name FROM read_parquet('{_data_dir()}/2_base_sector/instrument_detail/instrument_detail.parquet')"
-    )
-    name_map = dict(zip(names["Symbol"], names["Name"]))
-    syms = day["symbol"].tolist()
-    sym_in = ",".join(f"'{s}'" for s in syms)
-    kline = _read(
-        f"SELECT symbol, close FROM read_parquet("
-        f"'{_data_dir()}/1_kline_data/daily_unadjusted/dt={td}/data.parquet')"
-        f" WHERE symbol IN ({sym_in})"
-    )
-    close_map = dict(zip(kline["symbol"], kline["close"]))
+    close_map: dict[str, float] = {}
     pct_map: dict[str, float] = {}
-    try:
-        tech = _read(
-            f"SELECT symbol, pct_change FROM read_parquet("
-            f"'{_data_dir()}/5_technical_derived/technical_indicators/dt={td}/data.parquet')"
-            f" WHERE symbol IN ({sym_in})"
-        )
-        pct_map = dict(zip(tech["symbol"], tech["pct_change"]))
-    except Exception:
-        pass
+    if td:
+        kline = _read_partitioned(_DAILY_REL, [td], "symbol, close")
+        if not kline.empty:
+            close_map = dict(zip(kline["symbol"].astype(str), kline["close"], strict=True))
+        tech = _read_partitioned(_TECH_REL, [td], "symbol, pct_change")
+        if not tech.empty:
+            pct_map = dict(zip(tech["symbol"].astype(str), tech["pct_change"], strict=True))
     day = day.sort_values("flow_net_amount", ascending=False)
     out = []
     for _, r in day.head(31).iterrows():
-        sym = r["symbol"]
+        sym = str(r["symbol"])
         out.append(
             {
                 "symbol": sym,
@@ -339,39 +507,24 @@ def stock_money_flow(limit: int = 20) -> list[dict[str, Any]]:
 
     单位：flow_* 为元；close_price 为元（不复权）；pct_change 为 %。
     """
-    df = _load_l2_flow()
-    if df.empty:
+    latest = _l2_latest_dt()
+    if not latest:
         return []
-    latest = str(df["dt"].max())
-    day = df[df["dt"] == latest].copy().sort_values("flow_net_amount", ascending=False)
+    day = _load_l2_flow(latest).sort_values("flow_net_amount", ascending=False)
+    if day.empty:
+        return []
 
-    names = _read(
-        f"SELECT Symbol, Name FROM read_parquet('{_data_dir()}/2_base_sector/instrument_detail/instrument_detail.parquet')"
-    )
-    name_map = dict(zip(names["Symbol"], names["Name"]))
+    name_map = _load_instrument_names()
 
-    # 当日真实行情：收盘价（不复权）+ 涨跌幅（%）
-    syms = day.head(limit)["symbol"].tolist()
-    sym_in = ",".join(f"'{s}'" for s in syms)
+    # 当日真实行情：收盘价（不复权）+ 涨跌幅（%），只取排行榜涉及的分区
     close_map: dict[str, float] = {}
     pct_map: dict[str, float] = {}
-    try:
-        kline = _read(
-            f"SELECT symbol, close FROM read_parquet("
-            f"'{_data_dir()}/1_kline_data/daily_unadjusted/dt={latest}/data.parquet') WHERE symbol IN ({sym_in})"
-        )
-        close_map = dict(zip(kline["symbol"], kline["close"]))
-    except Exception:
-        pass
-    try:
-        tech = _read(
-            f"SELECT symbol, pct_change FROM read_parquet("
-            f"'{_data_dir()}/5_technical_derived/technical_indicators/dt={latest}/data.parquet')"
-            f" WHERE symbol IN ({sym_in})"
-        )
-        pct_map = dict(zip(tech["symbol"], tech["pct_change"]))
-    except Exception:
-        pass
+    kline = _read_partitioned(_DAILY_REL, [latest], "symbol, close")
+    if not kline.empty:
+        close_map = _str_key_map(kline, "symbol", "close")
+    tech = _read_partitioned(_TECH_REL, [latest], "symbol, pct_change")
+    if not tech.empty:
+        pct_map = _str_key_map(tech, "symbol", "pct_change")
 
     out = []
     for _, r in day.head(limit).iterrows():
@@ -398,16 +551,15 @@ def stock_money_flow(limit: int = 20) -> list[dict[str, Any]]:
 
 def money_flow_sankey() -> dict[str, Any]:
     """主力/散户资金流向桑基图（l2 真实行业资金流，单位：元）。"""
-    df = _load_l2_flow()
-    if df.empty:
+    latest = _l2_latest_dt()
+    if not latest:
         return {"nodes": [], "links": [], "trade_date": ""}
-    latest = str(df["dt"].max())
-    day = df[df["dt"] == latest].copy()
-    members = _read(
-        f"SELECT SectorCode, SectorName, SectorType, Symbol FROM read_parquet("
-        f"'{_data_dir()}/2_base_sector/sector_concept/sector_members.parquet')"
-        f" WHERE SectorType = '行业板块(一级)'"
-    )
+    day = _load_l2_flow(latest)
+    if day.empty:
+        return {"nodes": [], "links": [], "trade_date": ""}
+    members = _sector_industry_members()
+    if members.empty:
+        return {"nodes": [], "links": [], "trade_date": latest}
     merged = day.merge(members, left_on="symbol", right_on="Symbol", how="inner")
     agg = merged.groupby("SectorName").agg(
         super=("flow_super_net", "sum"),
@@ -456,48 +608,51 @@ def money_flow_sankey() -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 def _load_sector_members() -> pd.DataFrame:
-    return _read(
-        f"SELECT SectorCode, SectorName, SectorType, Symbol FROM read_parquet("
-        f"'{_data_dir()}/2_base_sector/sector_concept/sector_members.parquet')"
-    )
+    """板块成分表（7.9 万行；按源文件 mtime 缓存，同一天内多次调用只读一次）。"""
+    return _ref_frame(_MEMBERS_REL)
 
 
 def _load_instrument_names() -> dict[str, str]:
-    df = _read(
-        f"SELECT Symbol, Name FROM read_parquet('{_data_dir()}/2_base_sector/instrument_detail/instrument_detail.parquet')"
-    )
-    return dict(zip(df["Symbol"], df["Name"]))
+    df = _instrument_frame()
+    sym = _pick_col(df, "Symbol", "symbol")
+    name = _pick_col(df, "Name", "name")
+    if df.empty or sym is None or name is None:
+        return {}
+    return dict(zip(df[sym].astype(str), df[name], strict=True))
 
 
 def stocks_by_tag(tag: str, limit: int = 30) -> dict[str, Any]:
     """根据标签查个股（真实板块成分 + 真实名称 + 最新成交/涨跌幅）。"""
     members = _load_sector_members()
+    if members.empty or "SectorName" not in members.columns:
+        return {"tag": tag, "total": 0, "items": []}
     matched = members[members["SectorName"].astype(str).str.contains(tag, case=False, na=False)]
     if matched.empty:
         return {"tag": tag, "total": 0, "items": []}
 
     symbols = matched["Symbol"].unique()[:limit].tolist()
     td = _latest_trade_date()
-    sym_in = ",".join(f"'{s}'" for s in symbols)
-    tech = _read(
-        f"SELECT symbol, pct_change FROM read_parquet("
-        f"'{_data_dir()}/5_technical_derived/technical_indicators/dt={td}/data.parquet')"
-        f" WHERE symbol IN ({sym_in})"
-    )
-    tech_map = dict(zip(tech["symbol"], tech["pct_change"]))
+    wanted = {str(s) for s in symbols}
+    tech_map: dict[str, float] = {}
+    if td:
+        tech = _read_partitioned(_TECH_REL, [td], "symbol, pct_change")
+        if not tech.empty:
+            tech = tech[tech["symbol"].astype(str).isin(wanted)]
+            tech_map = _str_key_map(tech, "symbol", "pct_change")
     names = _load_instrument_names()
 
     items = []
     for i, sym in enumerate(symbols):
+        key = str(sym)
         items.append(
             {
-                "symbol": sym,
-                "name": names.get(sym, f"成分股_{i+1}"),
+                "symbol": key,
+                "name": names.get(key, f"成分股_{i + 1}"),
                 "close_price": None,
-                "pct_change": round(float(tech_map[sym]), 2) if sym in tech_map else None,
+                "pct_change": round(float(tech_map[key]), 2) if key in tech_map else None,
                 "market_cap": None,
                 "net_inflow": None,
-                "trade_date": td,
+                "trade_date": td or "",
             }
         )
     return {"tag": tag, "total": len(symbols), "items": items}
@@ -506,14 +661,15 @@ def stocks_by_tag(tag: str, limit: int = 30) -> dict[str, Any]:
 def tags_by_stock(symbol: str) -> dict[str, Any]:
     """根据个股查标签（真实行业/概念归属）。"""
     members = _load_sector_members()
+    if members.empty or "Symbol" not in members.columns:
+        return {"symbol": symbol, "stock_name": "", "tags": {}, "total": 0}
+    names = _load_instrument_names()
     if symbol.endswith((".SH", ".SZ", ".BJ")) or symbol.isdigit():
         # 后缀或纯数字 → 匹配 Symbol
         matched = members[members["Symbol"].astype(str).str.contains(symbol, case=False, na=False)]
     else:
         # 名称 → 先映射代码再匹配
-        names = _load_instrument_names()
-        sym_by_name = {v: k for k, v in names.items()}
-        code = sym_by_name.get(symbol)
+        code = {v: k for k, v in names.items()}.get(symbol)
         matched = members[members["Symbol"] == code] if code else pd.DataFrame()
     if matched.empty:
         return {"symbol": symbol, "stock_name": "", "tags": {}, "total": 0}
@@ -529,7 +685,7 @@ def tags_by_stock(symbol: str) -> dict[str, Any]:
         tags_by_type[k] = list(dict.fromkeys(tags_by_type[k]))
     return {
         "symbol": symbol,
-        "stock_name": _load_instrument_names().get(str(matched.iloc[0]["Symbol"]), ""),
+        "stock_name": names.get(str(matched.iloc[0]["Symbol"]), ""),
         "tags": tags_by_type,
         "total": int(matched["Symbol"].nunique()),
     }

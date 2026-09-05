@@ -1037,10 +1037,12 @@ def _check_quantdb_latest_daily(market: str = "CN") -> tuple[bool, str]:
     market_upper = str(market or "CN").upper()
     try:
         from backend.services.simulation.services.local_market_data import (
-            LocalMarketData,
+            get_local_market_data,
         )
 
-        market_data = LocalMarketData(market=market_upper)
+        # 必须走进程内共享实例：每次 new 一个 LocalMarketData 会丢掉交易日与
+        # 按日行情缓存，健康检查就会反复重新枚举交易日（旧实现每次都付全表扫描）。
+        market_data = get_local_market_data(market_upper)
         latest_date = market_data.latest_trade_date()
         if latest_date is None:
             return False, f"{market_upper} 市场数据库无可用日线"

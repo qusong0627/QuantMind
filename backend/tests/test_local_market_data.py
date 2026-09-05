@@ -398,3 +398,143 @@ class TestBuildDate:
         bar = lmd.get_bar("SH600036", date(2026, 7, 20))
         assert bar is not None
         assert bar.symbol == "600036.SH"
+
+
+# ======================================================================
+# 分区直读：交易日枚举 + 单日取数（真实 tmp_path parquet）
+# ======================================================================
+
+class _FakeHub:
+    """只暴露 LocalMarketData 需要的三个成员，不碰 DuckDB。"""
+
+    def __init__(self, data_dir):
+        self.data_dir = data_dir
+        self.queries: list[str] = []
+        self._detail = pd.DataFrame()
+
+    def query(self, sql: str) -> pd.DataFrame:
+        self.queries.append(sql)
+        return pd.DataFrame()
+
+    def fetch_stock_list(self) -> pd.DataFrame:
+        return self._detail
+
+
+def _write_partition(root, dt_int: int, rows: pd.DataFrame | None) -> None:
+    """按数据平台落盘布局写 dt=<YYYYMMDD>/data.parquet。"""
+    part = root / "1_kline_data" / "daily_unadjusted" / f"dt={dt_int}"
+    part.mkdir(parents=True, exist_ok=True)
+    if rows is None:  # 同步中断：只留下空目录
+        return
+    rows.to_parquet(part / "data.parquet", index=False)
+
+
+_DAILY = pd.DataFrame({
+    "symbol": ["600036.SH", "000001.SZ"],
+    "time": pd.to_datetime(["2026-07-17", "2026-07-17"]),
+    "open": [38.5, 11.5],
+    "high": [39.0, 11.9],
+    "low": [38.0, 11.4],
+    "close": [38.65, 11.8],
+    "vol_in_stock": [1e6, 2e6],
+    "amount": [1e3, 2e3],
+})
+
+
+class TestPartitionSessions:
+    def test_sessions_come_from_partition_dirs_without_duckdb(self, tmp_path):
+        hub = _FakeHub(tmp_path)
+        for dt_int in (20260720, 20260717, 20260721):
+            _write_partition(tmp_path, dt_int, _DAILY)
+        lmd = LocalMarketData(hub=hub, market="CN")
+
+        assert lmd._sessions() == [20260717, 20260720, 20260721]
+        # 关键回归点：交易日枚举绝不走 "SELECT DISTINCT dt"（全分区扫描）
+        assert hub.queries == []
+
+    def test_trailing_empty_partition_is_dropped(self, tmp_path):
+        for dt_int in (20260720, 20260721):
+            _write_partition(tmp_path, dt_int, _DAILY)
+        _write_partition(tmp_path, 20260722, None)  # 空目录
+        lmd = LocalMarketData(hub=_FakeHub(tmp_path), market="CN")
+
+        assert lmd._sessions() == [20260720, 20260721]
+        assert lmd.latest_trade_date() == date(2026, 7, 21)
+
+    def test_flat_per_symbol_files_are_ignored(self, tmp_path):
+        # daily_unadjusted 目录同时存在 5000+ 个 per-symbol 平铺文件，
+        # 它们不是交易日分区，不能进 sessions
+        _write_partition(tmp_path, 20260720, _DAILY)
+        (tmp_path / "1_kline_data" / "daily_unadjusted" / "600036.SH.parquet").write_bytes(b"x")
+        lmd = LocalMarketData(hub=_FakeHub(tmp_path), market="CN")
+
+        assert lmd._sessions() == [20260720]
+
+    def test_sessions_are_cached_then_refreshed_after_ttl(self, tmp_path):
+        _write_partition(tmp_path, 20260720, _DAILY)
+        lmd = LocalMarketData(hub=_FakeHub(tmp_path), market="CN")
+        assert lmd._sessions() == [20260720]
+
+        _write_partition(tmp_path, 20260721, _DAILY)
+        assert lmd._sessions() == [20260720]  # TTL 内仍用缓存
+
+        with patch(
+            "backend.services.simulation.services.local_market_data._SESSIONS_TTL_SEC", 0.0
+        ):
+            assert lmd._sessions() == [20260720, 20260721]
+
+    def test_non_hive_layout_falls_back_to_view(self):
+        hub = MagicMock()
+        hub.query.return_value = pd.DataFrame({"dt": [20260717, 20260720]})
+        lmd = LocalMarketData(hub=hub, market="HK")
+
+        assert lmd._sessions() == [20260717, 20260720]
+        sql = hub.query.call_args_list[0].args[0]
+        assert "DISTINCT dt" in sql and "qhk_daily_forward" in sql
+
+
+class TestPartitionScan:
+    def test_build_date_reads_only_target_partitions(self, tmp_path):
+        _write_partition(tmp_path, 20260717, _DAILY)
+        _write_partition(tmp_path, 20260720, _DAILY.assign(close=[39.31, 12.1]))
+        # 干扰分区：既不该被读、也不该进交易日（无数据）
+        _write_partition(tmp_path, 20260719, None)
+        hub = _FakeHub(tmp_path)
+        lmd = LocalMarketData(hub=hub, market="CN")
+
+        bars = lmd.load_date(date(2026, 7, 20))
+
+        assert hub.queries == []  # 全程不碰 DuckDB
+        assert bars["600036.SH"].close == 39.31
+        assert bars["600036.SH"].pre_close == 38.65  # 来自 dt=20260717
+        assert bars["600036.SH"].limit_up == 42.52  # 38.65*1.1=42.515 → 四舍五入到分
+        assert bars["000001.SZ"].pre_close == 11.8
+        assert bars["600036.SH"].volume == 1e6  # vol_in_stock 别名已归一
+
+    def test_missing_partition_returns_empty_without_view_query(self, tmp_path):
+        _write_partition(tmp_path, 20260720, _DAILY)
+        hub = _FakeHub(tmp_path)
+        lmd = LocalMarketData(hub=hub, market="CN")
+
+        assert lmd.load_date(date(2026, 7, 2)) == {}
+        assert hub.queries == []
+
+    def test_bad_columns_fall_back_to_view(self, tmp_path):
+        _write_partition(tmp_path, 20260720, pd.DataFrame({"foo": [1]}))
+        hub = _FakeHub(tmp_path)
+        hub.query = lambda sql: pd.DataFrame({
+            "symbol": ["600036.SH"],
+            "dt": [20260720],
+            "open": [38.6],
+            "high": [39.2],
+            "low": [38.4],
+            "close": [38.91],
+            "volume": [1e6],
+            "amount": [1e3],
+        })
+        lmd = LocalMarketData(hub=hub, market="CN")
+        lmd._session_dates = [20260720]
+
+        bars = lmd._build_date(date(2026, 7, 20))
+
+        assert bars["600036.SH"].close == 38.91

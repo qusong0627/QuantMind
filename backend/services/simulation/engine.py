@@ -333,7 +333,7 @@ class SimulationEngine:
         as_of: date | None = None,
         market: Any = None,
     ) -> dict[str, Quote]:
-        """从本地市场数据批量获取行情（一次 DuckDB 扫描替代逐 symbol HTTP）。
+        """从本地市场数据批量获取行情（一次分区直读替代逐 symbol HTTP）。
 
         as_of 指定基准交易日，仅时光回放会传；不传即按今天，活路径行为不变。
         """
@@ -342,7 +342,8 @@ class SimulationEngine:
 
         market_data = get_local_market_data(market)
         trade_date = as_of or datetime.now().date()
-        bars = market_data.load_date(trade_date, symbols=symbols)
+        # 直读本地分区是同步磁盘 IO，放线程里跑，避免阻塞事件循环
+        bars = await asyncio.to_thread(market_data.load_date, trade_date, symbols)
 
         quotes: dict[str, Quote] = {}
         for sym, bar in bars.items():

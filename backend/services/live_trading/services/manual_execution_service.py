@@ -131,29 +131,23 @@ def _get_realtime_price(symbol: str) -> float | None:
     return _get_quantdb_last_close(symbol)
 
 
-_local_market_data = None
-
-
 def _get_quantdb_last_close(symbol: str) -> float | None:
     """从 QuantDB 本地日线读取最近交易日收盘价（与模拟撮合同源）。
 
-    复用模块级 LocalMarketData 实例：其内部按日缓存全市场日线，
+    复用进程内共享的 LocalMarketData 实例：其内部按日缓存全市场日线与交易日，
     避免逐股新建实例重复扫描全市场 parquet（pred.parquet 回退场景下
     批量取价是预览耗时数十秒的主因）。
     """
-    global _local_market_data
     try:
         from backend.services.simulation.services.local_market_data import (
-            LocalMarketData,
+            get_local_market_data,
         )
         from backend.shared.stock_utils import StockCodeUtil
 
         suffix = StockCodeUtil.to_suffix(symbol)
         if not suffix:
             return None
-        if _local_market_data is None:
-            _local_market_data = LocalMarketData()
-        market_data = _local_market_data
+        market_data = get_local_market_data()
         latest_date = market_data.latest_trade_date()
         if latest_date is None:
             return None

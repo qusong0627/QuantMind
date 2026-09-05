@@ -326,10 +326,11 @@ class TdxSignalPushService:
             return result
         try:
             from backend.services.simulation.services.local_market_data import (
-                LocalMarketData,
+                get_local_market_data,
             )
 
-            market_data = LocalMarketData()
+            # 进程内共享实例：复用交易日枚举与按日行情缓存
+            market_data = get_local_market_data()
             latest_date = market_data.latest_trade_date()
             if latest_date is None:
                 return result

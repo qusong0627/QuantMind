@@ -148,6 +148,12 @@ def _build_container_spec(image: str) -> dict:
             "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
             f"QUANTMIND_PROJECT_DIR={_PROJECT_DIR}",
             f"DOCKER_CLI_PLUGINS={_COMPOSE_PLUGIN_DIR}",
+            # 受信项目目录，避免 updater 容器内 git 因 UID 归属差异触发
+            # dubious ownership 校验，导致所有 git 命令失败、被误判为"未提交改动"。
+            # 见 GIT_CONFIG_COUNT 系列：https://git-scm.com/docs/git
+            "GIT_CONFIG_COUNT=1",
+            "GIT_CONFIG_KEY_0=safe.directory",
+            f"GIT_CONFIG_VALUE_0={_PROJECT_DIR}",
         ],
         "HostConfig": {
             "Binds": binds,

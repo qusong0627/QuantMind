@@ -14,6 +14,7 @@ T+1 偏移说明：
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import uuid
@@ -215,7 +216,7 @@ class ReplaySignalLoader:
             return []
 
         # T+1 偏移：trade_date 生效的信号来自上一交易日（数据日）的分数
-        sessions = get_local_market_data()._sessions()
+        sessions = await asyncio.to_thread(get_local_market_data()._sessions)
         td_int = int(trade_date.strftime("%Y%m%d"))
         before = [d for d in sessions if d < td_int]
         if not before:

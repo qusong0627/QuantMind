@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import math
 import uuid
@@ -385,7 +386,14 @@ class ReplayDayRunner:
             trade_date=trade_date,
         )
         wanted = sorted(set(held) | {s.symbol for s in signals})
-        bars = self._market_data.load_date(trade_date, symbols=wanted) if wanted else {}
+        # 行情直读是同步磁盘 IO，放线程里跑，避免阻塞事件循环
+        bars = (
+            await asyncio.to_thread(
+                self._market_data.load_date, trade_date, wanted
+            )
+            if wanted
+            else {}
+        )
         return account_data, signals, bars
 
     async def propose_day(

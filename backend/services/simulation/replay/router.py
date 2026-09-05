@@ -11,6 +11,7 @@ GET    /strategy-templates         可选策略模板（含参数定义，供前
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from datetime import date
@@ -407,7 +408,8 @@ async def create_session(
         )
 
     market_data = get_local_market_data()
-    sessions = market_data._sessions()
+    # 目录枚举虽已降到毫秒级，仍是同步磁盘 IO，放线程里跑，不占用事件循环
+    sessions = await asyncio.to_thread(market_data._sessions)
     if not sessions:
         raise HTTPException(503, "本地行情数据不可用")
 
@@ -699,7 +701,7 @@ async def step_session(
 
     # 更新游标
     market_data = get_local_market_data()
-    sessions = market_data._sessions()
+    sessions = await asyncio.to_thread(market_data._sessions)
     row.cursor_date = row.next_date
     row.sessions_done += 1
     row.next_date = _compute_next_date(

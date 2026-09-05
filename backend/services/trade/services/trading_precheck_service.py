@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import time
@@ -495,7 +496,9 @@ async def run_trading_readiness_precheck(
 
         try:
             from backend.services.live_trading.routers.real_trading_utils import check_stream_series_freshness
-            res = check_stream_series_freshness(
+            # 同步 Redis + 本地日线探测，放线程里跑，避免阻塞事件循环
+            res = await asyncio.to_thread(
+                check_stream_series_freshness,
                 redis_client=redis_client,
                 allow_quantdb_fallback=(normalized_mode == "SIMULATION"),
                 market=market,
@@ -577,8 +580,11 @@ async def run_trading_readiness_precheck(
 
     from backend.services.live_trading.routers.real_trading_utils import check_stream_series_freshness
     # REAL 模式同样回退 QuantDB 日线兜底：TDX 通道无实时行情流时仍可交易
-    res = check_stream_series_freshness(
-        redis_client=redis_client, allow_quantdb_fallback=True, market=market
+    res = await asyncio.to_thread(
+        check_stream_series_freshness,
+        redis_client=redis_client,
+        allow_quantdb_fallback=True,
+        market=market,
     )
     checks.append(
         _build_check(
