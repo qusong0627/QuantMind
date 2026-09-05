@@ -11,6 +11,10 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT"
 
+# ── 启动模式（必须最先解析：Huntly/QwenPaw 块会按 BG 落 pid 文件）──
+BG=0
+[ "${1:-}" = "--bg" ] && BG=1
+
 UNAME_S="$(uname -s)"
 UNAME_M="$(uname -m)"
 
@@ -248,8 +252,6 @@ else
 fi
 
 # ── 启动后端（前台模式等待就绪；后台模式直接放行）────────────
-BG=0
-[ "${1:-}" = "--bg" ] && BG=1
 
 BACKEND_PID=""
 CELERY_WORKER_PID=""
