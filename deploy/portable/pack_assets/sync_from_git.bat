@@ -10,16 +10,28 @@ for %%R in ("%QM_REPO_ROOT%" "%USERPROFILE%\quantmind-src" "%USERPROFILE%\QuantM
     if exist "%%~fR\.git" set "REPO=%%~fR"
 )
 echo [sync] begin - pack: %PACK%
+where git >nul 2>&1
+if errorlevel 1 goto :git_missing
 if defined REPO goto :repo_ok
-echo [!] no git repo auto-detected.
+echo [!] git is installed, but no repo auto-detected.
 echo     Clones tried: QM_REPO_ROOT / user home / C:\QuantMind-src /
 echo     a quantmind-src folder NEXT TO this package.
-echo     Easiest: clone next to the package, e.g.
-echo       cd /d %PACK%\..
-echo       git clone -b main --single-branch https://gitee.com/qusong0627/QuantMind.git quantmind-src
-echo     then run this file again. Or set QM_REPO_ROOT to your clone.
+echo.
+echo     HOW TO FIX - one-time setup:
+echo     1. In Explorer go to:  %PACK%\..
+echo     2. Open a terminal there and run:
+echo        git clone -b main --single-branch https://gitee.com/qusong0627/QuantMind.git quantmind-src
+echo        (private repo? use the URL the maintainer gave you)
+echo     3. Run this script again - it will auto-find the clone.
+echo.
+echo     Or skip git entirely: ask the maintainer for a patch zip.
 pause
 exit /b 1
+:git_missing
+echo [!] git is NOT installed on this machine.
+echo     Install it first from https://git-scm.com/download/win
+echo     (next-next-next install, then close and reopen this window),
+echo     then run this script again.
 :repo_ok
 echo [sync] repo: %REPO%  branch: %BRANCH%
 

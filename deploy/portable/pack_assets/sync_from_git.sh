@@ -26,11 +26,21 @@ for cand in "${QM_REPO_ROOT:-}" "$HOME/quantmind-src" "$HOME/QuantMind" "/opt/qu
     if [ -n "$cand" ] && [ -d "$cand/.git" ]; then REPO="$cand"; break; fi
 done
 
+if ! command -v git >/dev/null 2>&1; then
+    echo "[!] git is NOT installed."
+    echo "    Install:  sudo apt install -y git   (Ubuntu/Debian)"
+    echo "    then run this script again."
+    exit 1
+fi
+
 if [ -z "$REPO" ]; then
-    echo "[!] no git repo auto-detected."
-    echo "    Easiest: clone next to the package, e.g."
+    echo "[!] git is installed, but no repo auto-detected."
+    echo "    Clones tried: QM_REPO_ROOT / ~/quantmind-src / next to package."
+    echo
+    echo "    HOW TO FIX - one-time setup:"
     echo "      cd $PACK/.."
     echo "      git clone -b main --single-branch https://gitee.com/qusong0627/QuantMind.git quantmind-src"
+    echo "      (private repo? use the URL the maintainer gave you)"
     echo "    then run this script again. Or: export QM_REPO_ROOT=/path/to/quantmind"
     exit 1
 fi
