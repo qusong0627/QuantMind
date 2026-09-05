@@ -18,6 +18,7 @@ config.yaml 结构：
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 import gc
 import json
 import logging
@@ -144,6 +145,69 @@ _DL_MODEL_TYPES = {"gru", "lstm", "alstm", "transformer", "tabnet", "tcn", "nati
 _CUSTOM_DL_MODEL_TYPES = {"nativetft", "mlp", "hybrid_gru_tree"}  # 非 Qlib 的自定义 DL 模型
 _ALL_MODEL_TYPES = _TREE_MODEL_TYPES | _DL_MODEL_TYPES
 _ENSEMBLE_MODEL_TYPES = _TREE_MODEL_TYPES - {"linear"}  # 可参与集成的树模型
+
+# ── B2 模型注册表：GBDT/sklearn 组查表分派，取代分派点手写 if/elif ─────────────
+# 约束：复用 _save_model/_predict_with_model/_get_model_framework 单点，Trainer 禁止
+# 自行落盘（产物契约逐字节不变）。DL 组（B3）签名分裂，本期不进表。
+
+
+@dataclass
+class Trainer:
+    name: str
+    train_fn: Any  # 6 参签名 (cfg, features, X_train, y_train, X_val, y_val)
+    framework: str = "unknown"
+
+
+MODEL_REGISTRY: dict[str, Trainer] = {}
+
+
+def register_trainer(name: str, *, framework: str = "unknown"):
+    """装饰器：集中注册，取代分派点 if/elif 链。"""
+
+    def deco(fn):
+        MODEL_REGISTRY[name] = Trainer(name=name, train_fn=fn, framework=framework)
+        return fn
+
+    return deco
+
+
+def _use_old_dispatch() -> bool:
+    """A/B 对齐窗口：TRAINING_OLD_DISPATCH=1 时走旧 if/elif。"""
+    return os.getenv("TRAINING_OLD_DISPATCH", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _dispatch_gbdt_sklearn(
+    cfg: dict,
+    model_type: str,
+    features: list[str],
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    X_val: np.ndarray,
+    y_val: np.ndarray,
+) -> Any:
+    """GBDT/sklearn 组统一分派：lightgbm/xgboost/catboost/linear/random_forest/mlp。
+
+    optuna 预搜索与分位分支保留在调用方原逻辑中，此处只替换裸训练函数选择。
+    """
+    if _use_old_dispatch():
+        if model_type == "lightgbm":
+            return _train_lgb(cfg, features, X_train, y_train, X_val, y_val)
+        elif model_type == "xgboost":
+            return _train_xgb(cfg, features, X_train, y_train, X_val, y_val)
+        elif model_type == "catboost":
+            return _train_catboost(cfg, features, X_train, y_train, X_val, y_val)
+        elif model_type == "linear":
+            return _train_linear(cfg, features, X_train, y_train, X_val, y_val)
+        elif model_type == "random_forest":
+            return _train_rf(cfg, features, X_train, y_train, X_val, y_val)
+        elif model_type == "mlp":
+            return _train_mlp(cfg, features, X_train, y_train, X_val, y_val)
+        raise ValueError(f"Unsupported model_type: {model_type}")
+    trainer = MODEL_REGISTRY.get(model_type)
+    if trainer is None:
+        raise ValueError(f"Unsupported model_type: {model_type}")
+    return trainer.train_fn(cfg, features, X_train, y_train, X_val, y_val)
+
 
 TRAINING_BASE_FEATURES: list[str] = [
     "mom_ret_1d",
@@ -1628,6 +1692,7 @@ def _lgb_rank_ic_feval(preds: np.ndarray, dataset: lgb.Dataset) -> tuple[str, fl
         return "rank_ic", 0.0, True
 
 
+@register_trainer("lightgbm", framework="lightgbm")
 def _train_lgb(cfg: dict, features: list[str], X_train: np.ndarray, y_train: np.ndarray,
                X_val: np.ndarray, y_val: np.ndarray) -> Any:
     """LightGBM 训练。"""
@@ -1781,6 +1846,7 @@ def _train_lgb_quantiles(
     return models, calibration
 
 
+@register_trainer("xgboost", framework="xgboost")
 def _train_xgb(cfg: dict, features: list[str], X_train: np.ndarray, y_train: np.ndarray,
                X_val: np.ndarray, y_val: np.ndarray) -> Any:
     """XGBoost 训练。"""
@@ -1819,6 +1885,7 @@ def _train_xgb(cfg: dict, features: list[str], X_train: np.ndarray, y_train: np.
     return model
 
 
+@register_trainer("catboost", framework="catboost")
 def _train_catboost(cfg: dict, features: list[str], X_train: np.ndarray, y_train: np.ndarray,
                     X_val: np.ndarray, y_val: np.ndarray) -> Any:
     """CatBoost 训练。支持 cat_features（行业编码等类别特征）。"""
@@ -1872,6 +1939,7 @@ def _train_catboost(cfg: dict, features: list[str], X_train: np.ndarray, y_train
     return model
 
 
+@register_trainer("linear", framework="sklearn")
 def _train_linear(cfg: dict, features: list[str], X_train: np.ndarray, y_train: np.ndarray,
                   X_val: np.ndarray, y_val: np.ndarray) -> Any:
     """线性基线：收益任务用 Ridge，分类任务用 LogisticRegression。"""
@@ -1888,6 +1956,7 @@ def _train_linear(cfg: dict, features: list[str], X_train: np.ndarray, y_train: 
     return model
 
 
+@register_trainer("random_forest", framework="sklearn")
 def _train_rf(cfg: dict, features: list[str], X_train: np.ndarray, y_train: np.ndarray,
               X_val: np.ndarray, y_val: np.ndarray) -> Any:
     """随机森林：Bagging 基线，用于对比 Boosting 是否真优于 Bagging。
@@ -1918,6 +1987,7 @@ def _train_rf(cfg: dict, features: list[str], X_train: np.ndarray, y_train: np.n
     return model
 
 
+@register_trainer("mlp", framework="sklearn")
 def _train_mlp(cfg: dict, features: list[str], X_train: np.ndarray, y_train: np.ndarray,
                X_val: np.ndarray, y_val: np.ndarray) -> Any:
     """MLP 基线：神经网络最简对照，验证 RNN/Transformer 是否真优于全连接。
@@ -3044,18 +3114,11 @@ def train_model(df: pd.DataFrame, features: list[str], cfg: dict, hardware: dict
             # P50 intentionally remains the platform score used by ranking/trading.
             model = quantile_models["p50"]
             quantile_result = {"models": quantile_models, "calibration": calibration}
-        elif model_type == "lightgbm":
-            model = _train_lgb(cfg, features, X_train, y_train, X_val, y_val)
-        elif model_type == "xgboost":
-            model = _train_xgb(cfg, features, X_train, y_train, X_val, y_val)
-        elif model_type == "catboost":
-            model = _train_catboost(cfg, features, X_train, y_train, X_val, y_val)
-    elif model_type == "linear":
-        model = _train_linear(cfg, features, X_train, y_train, X_val, y_val)
-    elif model_type == "random_forest":
-        model = _train_rf(cfg, features, X_train, y_train, X_val, y_val)
-    elif model_type == "mlp":
-        model = _train_mlp(cfg, features, X_train, y_train, X_val, y_val)
+        else:
+            # B2：树组查表分派（optuna 预搜索与分位分支保持原逻辑）
+            model = _dispatch_gbdt_sklearn(cfg, model_type, features, X_train, y_train, X_val, y_val)
+    elif model_type in ("linear", "random_forest", "mlp"):
+        model = _dispatch_gbdt_sklearn(cfg, model_type, features, X_train, y_train, X_val, y_val)
     elif model_type == "nativetft":
         dl_params = model_cfg.get("dl_params", {})
         output_dir = Path("/workspace")
@@ -3571,18 +3634,10 @@ def _train_single_model(
                     _model_cfg["catboost_params"] = {**(_model_cfg.get("catboost_params") or {}), **_best}
                 _merge_cfg["model"] = _model_cfg
                 cfg = _merge_cfg
-        if model_type == "lightgbm":
-            model = _train_lgb(cfg, features, X_train, y_train, X_val, y_val)
-        elif model_type == "xgboost":
-            model = _train_xgb(cfg, features, X_train, y_train, X_val, y_val)
-        elif model_type == "catboost":
-            model = _train_catboost(cfg, features, X_train, y_train, X_val, y_val)
-    elif model_type == "linear":
-        model = _train_linear(cfg, features, X_train, y_train, X_val, y_val)
-    elif model_type == "random_forest":
-        model = _train_rf(cfg, features, X_train, y_train, X_val, y_val)
-    elif model_type == "mlp":
-        model = _train_mlp(cfg, features, X_train, y_train, X_val, y_val)
+        # B2：树组查表分派（optuna 预搜索保持原逻辑）
+        model = _dispatch_gbdt_sklearn(cfg, model_type, features, X_train, y_train, X_val, y_val)
+    elif model_type in ("linear", "random_forest", "mlp"):
+        model = _dispatch_gbdt_sklearn(cfg, model_type, features, X_train, y_train, X_val, y_val)
     elif model_type == "nativetft":
         output_dir = Path("/workspace")
         dl_params = model_cfg.get("dl_params", {})
