@@ -127,6 +127,13 @@ set "HUNTLY_USERNAME=admin"
 set "HUNTLY_PASSWORD=admin123"
 set "QM_HUNTLY_PORT=8090"
 set "QM_QWENPAW_PORT=8088"
+rem local service endpoints (otherwise backend/health falls back to docker names)
+set "HUNTLY_BASE_URL=http://127.0.0.1:%QM_HUNTLY_PORT%"
+set "QWENPAW_BASE_URL=http://127.0.0.1:%QM_QWENPAW_PORT%"
+set "ADMIN_DASHBOARD_HUNTLY_HOST=127.0.0.1"
+set "ADMIN_DASHBOARD_HUNTLY_PORT=%QM_HUNTLY_PORT%"
+set "ADMIN_DASHBOARD_QWENPAW_HOST=127.0.0.1"
+set "ADMIN_DASHBOARD_QWENPAW_PORT=%QM_QWENPAW_PORT%"
 echo MARK-D
 
 echo [QuantMind] Checking PostgreSQL ...
