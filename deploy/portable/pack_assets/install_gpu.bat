@@ -33,14 +33,20 @@ echo [%date% %time%] gpu install begin >> "%LOG%"
 echo [gpu] Current torch:
 "%PY%" -c "import torch; print('  torch', torch.__version__)" >> "%LOG%" 2>&1
 "%PY%" -c "import torch; print('  torch', torch.__version__)" 2>&1
-if errorlevel 1 (
-    echo [!] torch import failed - full error above and in %LOG%.
-    echo     If error mentions missing DLL, install Microsoft VC Redist x64
-    echo     from aka.ms/vs/17/release/vc_redist.x64.exe and retry.
-    echo     If torch is simply absent, re-extract the main pack first.
-    pause
-    exit /b 1
-)
+if not errorlevel 1 goto :torch_ok
+echo [!] torch import failed - full error above and in %LOG%.
+echo     If error mentions missing DLL, install Microsoft VC Redist x64
+echo     from aka.ms/vs/17/release/vc_redist.x64.exe and retry.
+echo     NOTE: if this pack was already attempted once, CPU torch may have
+echo     been uninstalled while CUDA extract failed (file-in-use). That is
+echo     expected here - we continue and extract CUDA torch directly.
+echo     If the error is something else, abort by closing this window.
+echo [gpu] continuing anyway (payload present, CPU torch absent is normal
+echo        after a previous interrupted install) ...
+goto :proceed
+:torch_ok
+echo [gpu] CPU torch present, will uninstall then extract CUDA version.
+:proceed
 
 echo [gpu] Uninstalling CPU torch ...
 "%PY%" -m pip uninstall -y torch >> "%LOG%" 2>&1
