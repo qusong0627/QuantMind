@@ -19,7 +19,7 @@
 set -u
 cd "$(dirname "$0")" || exit 1
 PACK="$(pwd)"
-BRANCH="${QM_SYNC_BRANCH:-main}"
+BRANCH="${QM_SYNC_BRANCH:-master}"
 REPO=""
 # auto-detect: env > home > sibling-next-to-package
 for cand in "${QM_REPO_ROOT:-}" "$HOME/quantmind-src" "$HOME/QuantMind" "/opt/quantmind-src" "$PACK/../quantmind-src" "$PACK/../QuantMind"; do
@@ -39,7 +39,7 @@ if [ -z "$REPO" ]; then
     echo
     echo "    HOW TO FIX - one-time setup:"
     echo "      cd $PACK/.."
-    echo "      git clone -b main --single-branch https://gitee.com/qusong0627/QuantMind.git quantmind-src"
+    echo "      git clone -b master --single-branch https://gitee.com/qusong0627/QuantMind.git quantmind-src"
     echo "      (private repo? use the URL the maintainer gave you)"
     echo "    then run this script again. Or: export QM_REPO_ROOT=/path/to/quantmind"
     exit 1

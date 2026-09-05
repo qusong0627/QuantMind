@@ -3,7 +3,7 @@ rem QuantMind portable: sync code from local git clone into package
 setlocal
 cd /d "%~dp0"
 set "PACK=%CD%"
-set "BRANCH=main"
+set "BRANCH=master"
 set "REPO="
 rem auto-detect: env > user home > common path > next to package
 for %%R in ("%QM_REPO_ROOT%" "%USERPROFILE%\quantmind-src" "%USERPROFILE%\QuantMind" "C:\QuantMind-src" "%PACK%\..\quantmind-src" "%PACK%\..\QuantMind" "%PACK%\..\src\quantmind-src") do (
@@ -20,7 +20,7 @@ echo.
 echo     HOW TO FIX - one-time setup:
 echo     1. In Explorer go to:  %PACK%\..
 echo     2. Open a terminal there and run:
-echo        git clone -b main --single-branch https://gitee.com/qusong0627/QuantMind.git quantmind-src
+echo        git clone -b master --single-branch https://gitee.com/qusong0627/QuantMind.git quantmind-src
 echo        (private repo? use the URL the maintainer gave you)
 echo     3. Run this script again - it will auto-find the clone.
 echo.
