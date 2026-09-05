@@ -62,14 +62,16 @@ build_autodl_remote() {
     warn "删除旧镜像 ${IMAGE_NAME}（若存在）..."
     SSH_CMD "docker rmi -f ${IMAGE_NAME} 2>/dev/null; echo done" || { error "SSH 连接失败，请检查 AutoDL 配置"; return 1; }
 
-    # 2. git 拉取源码
-    info "AutoDL 上 git 拉取源码..."
+    # 2. git 拉取源码（分支可经 AUTODL_GIT_BRANCH 覆盖，默认 master 稳定版；
+    #    开发/修复管线在 next 时构建前设 AUTODL_GIT_BRANCH=next）
+    info "AutoDL 上 git 拉取源码（分支 ${AUTODL_GIT_BRANCH:-master}）..."
+    local BRANCH="${AUTODL_GIT_BRANCH:-master}"
     SSH_CMD "mkdir -p ${SRC_DIR} && cd ${SRC_DIR} && \
-        (git rev-parse --git-dir >/dev/null 2>&1 && git fetch origin && git reset --hard origin/master) || \
-        (git clone ${GIT_URL} . && git checkout master 2>/dev/null || true)" || { error "git 拉取失败"; return 1; }
+        (git rev-parse --git-dir >/dev/null 2>&1 && git fetch origin && git reset --hard origin/${BRANCH}) || \
+        (git clone ${GIT_URL} . && git checkout ${BRANCH} 2>/dev/null || true)" || { error "git 拉取失败"; return 1; }
 
-    # 3. 选择 torch 版本（本地询问，远端按此构建）
-    TORCH_DEVICE=gpu
+    # 3. 选择 torch 版本（可经 AUTODL_TORCH_DEVICE 覆盖：gpu=完整 CUDA / cpu=CPU 版）
+    TORCH_DEVICE="${AUTODL_TORCH_DEVICE:-gpu}"
     if declare -f select_torch_config >/dev/null 2>&1; then
         select_torch_config
     fi

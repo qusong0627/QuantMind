@@ -217,7 +217,9 @@ class NodeStatus:
     """从 AutoDL 节点采集实时状态（SSH）。"""
 
     _SSH_TIMEOUT = 15
+    # 非交互 SSH 的 PATH 极简(可能无 /usr/bin),前置标准 PATH 防 nvidia-smi/docker 误判
     _COLLECT_CMD = r"""
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH
 set -e
 echo "===SYS==="
 nproc
@@ -378,7 +380,8 @@ cat /proc/loadavg 2>/dev/null | awk '{print $1}'
 
         # 网络延迟：ping 一次网关（尽力而为）
         result["ping_ms"] = None
-        result = cls.assess_readiness(result)
+        # 注意：_parse 是 @staticmethod，不能用 cls（曾致 NameError → 远程节点永远 offline）
+        result = NodeStatus.assess_readiness(result)
         return result
 
     @classmethod
