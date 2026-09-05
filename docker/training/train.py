@@ -190,6 +190,7 @@ def _dispatch_gbdt_sklearn(
     optuna 预搜索与分位分支保留在调用方原逻辑中，此处只替换裸训练函数选择。
     """
     if _use_old_dispatch():
+        logger.info("B2 old-dispatch path for %s", model_type)
         if model_type == "lightgbm":
             return _train_lgb(cfg, features, X_train, y_train, X_val, y_val)
         elif model_type == "xgboost":
