@@ -186,6 +186,8 @@ _TRAINING_SCRIPT_HOST_PATH = str(_HOST_PROJECT_PATH / "docker" / "training" / "t
 _PREPROCESSING_HOST_PATH = str(_HOST_PROJECT_PATH / "docker" / "training" / "preprocessing.py")
 # 多核因子筛选：train.py 顶层 `from parallel_utils import ...`，需与 train.py 一并挂载
 _PARALLEL_UTILS_HOST_PATH = str(_HOST_PROJECT_PATH / "docker" / "training" / "parallel_utils.py")
+# 模型训练器包：train.py 顶层 `from model_trainers... import ...`，整目录挂载
+_TRAINERS_HOST_PATH = str(_HOST_PROJECT_PATH / "docker" / "training" / "model_trainers")
 
 def _validate_config_dict(run_id: str, config: dict) -> dict:
     """B1 schema 门：config.yaml 经 TrainingConfig 校验后返回契约字典。
@@ -823,6 +825,13 @@ class LocalDockerOrchestrator(TrainingOrchestrator):
         # 多核因子筛选；与 train.py 一样无条件挂载（路径可见性限制同上）。
         volumes[str(_PARALLEL_UTILS_HOST_PATH)] = {
             "bind": "/app/parallel_utils.py",
+            "mode": "ro",
+        }
+        # model_trainers/ 包与 train.py 同目录导入（`from model_trainers... import ...`）；
+        # 整目录无条件挂载（路径可见性限制同上，目录不存在时 Docker 会创建空目录，
+        # 此时训练容器 import 失败 fail-fast，见 train.py 顶层 import）。
+        volumes[str(_TRAINERS_HOST_PATH)] = {
+            "bind": "/app/model_trainers",
             "mode": "ro",
         }
         # backend 代码同步挂载：训练镜像内 bake 的 backend 落后于仓库时会缺新模块

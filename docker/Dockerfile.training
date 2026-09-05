@@ -12,6 +12,7 @@ RUN pip install --no-cache-dir --root-user-action=ignore pyyaml
 COPY docker/training/train.py /app/train.py
 COPY docker/training/preprocessing.py /app/preprocessing.py
 COPY docker/training/parallel_utils.py /app/parallel_utils.py
+COPY docker/training/model_trainers /app/model_trainers
 
 # 不设置 ENTRYPOINT，保留默认 CMD 用于本地调试
 CMD ["python", "/app/train.py"]

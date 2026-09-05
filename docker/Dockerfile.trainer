@@ -73,6 +73,7 @@ COPY backend /app/backend
 # 拷贝训练脚本及预处理函数
 COPY docker/training/train.py /app/train.py
 COPY docker/training/preprocessing.py /app/preprocessing.py
+COPY docker/training/model_trainers /app/model_trainers
 
 # 预创建挂载目录
 RUN mkdir -p /workspace /data/features /data/quantdb /app/models /tmp

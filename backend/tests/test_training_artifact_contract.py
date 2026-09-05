@@ -75,6 +75,14 @@ def _set_consts(tree: ast.Module, name: str) -> set[str]:
             isinstance(t, ast.Name) and t.id == name for t in node.targets
         ):
             return {e.value for e in node.value.elts if isinstance(e, ast.Constant)}
+    # B4 拆包：类型集合已迁入 model_trainers/registry.py，此处回退查找
+    reg_path = REPO_ROOT / "docker" / "training" / "model_trainers" / "registry.py"
+    reg_tree = ast.parse(reg_path.read_text(encoding="utf-8"))
+    for node in ast.walk(reg_tree):
+        if isinstance(node, ast.Assign) and any(
+            isinstance(t, ast.Name) and t.id == name for t in node.targets
+        ):
+            return {e.value for e in node.value.elts if isinstance(e, ast.Constant)}
     raise AssertionError(f"{name} not found")
 
 

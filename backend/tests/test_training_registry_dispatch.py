@@ -13,6 +13,8 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 TRAIN_PY = REPO_ROOT / "docker" / "training" / "train.py"
+REGISTRY_PY = REPO_ROOT / "docker" / "training" / "model_trainers" / "registry.py"
+GBDT_PY = REPO_ROOT / "docker" / "training" / "model_trainers" / "trainers_gbdt.py"
 
 GBDT_SIX = {
     "_train_lgb",
@@ -35,6 +37,14 @@ EXPECTED_REGISTRY = {
 
 def _load_tree() -> ast.Module:
     return ast.parse(TRAIN_PY.read_text(encoding="utf-8"))
+
+
+def _load_registry_tree() -> ast.Module:
+    return ast.parse(REGISTRY_PY.read_text(encoding="utf-8"))
+
+
+def _load_gbdt_tree() -> ast.Module:
+    return ast.parse(GBDT_PY.read_text(encoding="utf-8"))
 
 
 def _funcs(tree: ast.Module) -> dict[str, ast.FunctionDef]:
@@ -61,7 +71,7 @@ def _calls_dispatch(fn: ast.FunctionDef) -> bool:
 
 
 def test_registry_covers_gbdt_six_with_frameworks():
-    tree = _load_tree()
+    tree = _load_gbdt_tree()
     found: dict[str, str] = {}
     for node in ast.walk(tree):
         if not isinstance(node, ast.FunctionDef):
@@ -80,6 +90,21 @@ def test_registry_covers_gbdt_six_with_frameworks():
                         fw = kw.value.value
                 found[dec.args[0].value] = fw
     assert found == EXPECTED_REGISTRY
+    # B4 拆包：训练器定义已不在 train.py，train.py 只保留 import 复用
+    train_names = {
+        n.name for n in ast.walk(_load_tree()) if isinstance(n, ast.FunctionDef)
+    }
+    for name in (
+        "_train_lgb",
+        "_train_xgb",
+        "_train_catboost",
+        "_train_linear",
+        "_train_rf",
+        "_train_mlp",
+        "_train_dl",
+        "_train_nativetft",
+    ):
+        assert name not in train_names, name
 
 
 def test_dispatch_points_use_registry_not_direct_calls():
@@ -105,11 +130,12 @@ def test_wfa_single_keeps_direct_calls_out_of_scope():
 def test_fallback_switch_and_error_path_exist():
     # B4：fallback 已删除（B2/B3 A/B 全过）。锁定清理完成态：
     # 无开关引用、无旧链路标记；两分派器未知类型仍 ValueError。
-    src = TRAIN_PY.read_text(encoding="utf-8")
-    assert "TRAINING_OLD_DISPATCH" not in src
-    assert "old-dispatch path" not in src
-    assert "_use_old_dispatch" not in src
-    funcs = _funcs(_load_tree())
+    for path in (TRAIN_PY, REGISTRY_PY, GBDT_PY):
+        src = path.read_text(encoding="utf-8")
+        assert "TRAINING_OLD_DISPATCH" not in src, path
+        assert "old-dispatch path" not in src, path
+        assert "_use_old_dispatch" not in src, path
+    funcs = _funcs(_load_registry_tree())
     for name in ("_dispatch_gbdt_sklearn", "_dispatch_dl"):
         assert any(isinstance(n, ast.Raise) for n in ast.walk(funcs[name])), name
 
@@ -149,7 +175,7 @@ def _direct_dl_calls(fn: ast.FunctionDef) -> set[str]:
 
 
 def test_registry_loop_covers_all_dl_minus_mlp():
-    tree = _load_tree()
+    tree = _load_registry_tree()
     dl_types = _parse_dl_model_types(tree)
     assert dl_types == {
         "gru",
@@ -162,7 +188,7 @@ def test_registry_loop_covers_all_dl_minus_mlp():
         "mlp",
         "hybrid_gru_tree",
     }
-    src = TRAIN_PY.read_text(encoding="utf-8")
+    src = REGISTRY_PY.read_text(encoding="utf-8")
     # 注册循环：自动覆盖 _DL_MODEL_TYPES，mlp 例外（B2 已覆盖），nativetft 特化
     assert "for _dl_name in sorted(_DL_MODEL_TYPES)" in src
     assert 'if _dl_name == "mlp"' in src
@@ -198,7 +224,7 @@ def test_dl_dispatch_sites_have_correct_single_flags():
 
 
 def test_dl_dispatch_rejects_non_dl():
-    funcs = _funcs(_load_tree())
+    funcs = _funcs(_load_registry_tree())
     disp = funcs["_dispatch_dl"]
     assert any(isinstance(n, ast.Raise) for n in ast.walk(disp))
     assert (
@@ -211,6 +237,6 @@ def test_dl_dispatch_rejects_non_dl():
         is False
     )  # 无递归
     # adapter 内复用单点预测/落盘，不自行落盘
-    src = TRAIN_PY.read_text(encoding="utf-8")
+    src = REGISTRY_PY.read_text(encoding="utf-8")
     adapter_src = src[src.index("class DLAdapter:") : src.index("def _dispatch_dl(")]
     assert "_save_model" not in adapter_src
