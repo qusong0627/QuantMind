@@ -10,10 +10,23 @@ for %%R in ("%QM_REPO_ROOT%" "%USERPROFILE%\quantmind-src" "%USERPROFILE%\QuantM
     if exist "%%~fR\.git" set "REPO=%%~fR"
 )
 echo [sync] begin - pack: %PACK%
+set "PATH=%PACK%\tools\git\cmd;%PATH%"
 where git >nul 2>&1
-if errorlevel 1 goto :git_missing
+if not errorlevel 1 goto :git_ready
+if exist "%PACK%\tools\git\cmd\git.exe" goto :git_ready
+echo [sync] git not found - downloading portable git (one-time, ~45MB)...
+curl -L --retry 2 -o "%TEMP%\QuantMind-mingit.zip" "https://github.com/git-for-windows/git/releases/download/v2.49.0.windows.1/MinGit-2.49.0-64-bit.zip"
+if errorlevel 1 goto :dl_fail
+mkdir "%PACK%\tools" 2>nul
+tar -xf "%TEMP%\QuantMind-mingit.zip" -C "%PACK%\tools"
+if exist "%PACK%\tools\git\cmd\git.exe" goto :git_ready
+powershell -NoProfile -Command "Expand-Archive -Force '%TEMP%\QuantMind-mingit.zip' '%PACK%\tools'"
+if errorlevel 1 goto :dl_fail
+:git_ready
+where git >nul 2>&1
+if errorlevel 1 goto :dl_fail
 if defined REPO goto :repo_ok
-echo [!] git is installed, but no repo auto-detected.
+echo [!] git is ready, but no repo auto-detected.
 echo     Clones tried: QM_REPO_ROOT / user home / C:\QuantMind-src /
 echo     a quantmind-src folder NEXT TO this package.
 echo.
@@ -27,11 +40,12 @@ echo.
 echo     Or skip git entirely: ask the maintainer for a patch zip.
 pause
 exit /b 1
-:git_missing
-echo [!] git is NOT installed on this machine.
-echo     Install it first from https://git-scm.com/download/win
-echo     (next-next-next install, then close and reopen this window),
-echo     then run this script again.
+:dl_fail
+echo [!] automatic git download failed.
+echo     Check internet, then rerun. Or install git manually from
+echo     https://git-scm.com/download/win and rerun this script.
+pause
+exit /b 1
 :repo_ok
 echo [sync] repo: %REPO%  branch: %BRANCH%
 

@@ -27,11 +27,18 @@ for cand in "${QM_REPO_ROOT:-}" "$HOME/quantmind-src" "$HOME/QuantMind" "/opt/qu
 done
 
 if ! command -v git >/dev/null 2>&1; then
-    echo "[!] git is NOT installed."
-    echo "    Install:  sudo apt install -y git   (Ubuntu/Debian)"
-    echo "    then run this script again."
-    exit 1
+    echo "[!] git not found - trying to install it automatically..."
+    if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+        sudo apt-get update -qq 2>/dev/null
+        sudo apt-get install -y git 2>&1 | tail -2
+    else
+        echo "    Automatic install needs passwordless sudo."
+        echo "    Either run:  sudo apt install -y git"
+        echo "    and rerun this script, or ask the maintainer for a patch zip."
+        exit 1
+    fi
 fi
+command -v git >/dev/null 2>&1 || { echo "[!] git install failed - rerun after installing git."; exit 1; }
 
 if [ -z "$REPO" ]; then
     echo "[!] git is installed, but no repo auto-detected."
