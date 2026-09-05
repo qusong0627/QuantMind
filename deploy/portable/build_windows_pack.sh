@@ -302,6 +302,40 @@ GIT_REV="$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo unknow
     echo "note=cross-assembled on linux; verify on real Windows before distribution"
 } > "$STAGE/VERSION"
 
+# ── 5b. 与 Linux 包对齐的可选组件 ────────────────────────────
+LINUX_STAGE="$BUILD/QuantMind-Portable-linux-x64"
+# models(预置 A股模型+FinBERT)为纯数据,直接复用 Linux 包内容
+if [ -d "$LINUX_STAGE/models" ] && [ ! -e "$STAGE/models/.qm_models_ok" ]; then
+    log "对齐 Linux 包: 复制 models (预置模型+FinBERT) ..."
+    rm -rf "$STAGE/models"; mkdir -p "$STAGE/models"
+    cp -a "$LINUX_STAGE/models/." "$STAGE/models/"
+    [ -d "$STAGE/models/production" ] && touch "$STAGE/models/.qm_models_ok"
+fi
+# huntly(RSS 阅读): server.jar 平台无关;JRE 用 Adoptium Windows x64
+if [ -d "$LINUX_STAGE/huntly" ] && [ ! -x "$STAGE/huntly/jre/bin/java.exe" ]; then
+    log "对齐 Linux 包: 组装 Huntly (jar + Windows JRE) ..."
+    mkdir -p "$STAGE/huntly"
+    cp -a "$LINUX_STAGE/huntly/server.jar" "$STAGE/huntly/server.jar"
+    if [ ! -x "$STAGE/huntly/jre/bin/java.exe" ]; then
+        JRE_ZIP="$BUILD/cache/temurin-jre17-win-x64.zip"
+        [ -f "$JRE_ZIP" ] || dl "https://api.adoptium.net/v3/binary/latest/17/ga/windows/x64/jre/hotspot/normal/eclipse" "$JRE_ZIP"
+        rm -rf "$BUILD/cache/jre-extract"; mkdir -p "$BUILD/cache/jre-extract"
+        python3 -m zipfile -e "$JRE_ZIP" "$BUILD/cache/jre-extract/"
+        JRE_DIR="$(find "$BUILD/cache/jre-extract" -maxdepth 1 -type d -name 'jdk-*' -o -maxdepth 1 -type d -name 'jre-*' | head -1)"
+        [ -n "$JRE_DIR" ] && [ -d "$JRE_DIR/bin" ] || JRE_DIR="$(find "$BUILD/cache/jre-extract" -mindepth 1 -maxdepth 1 -type d | head -1)"
+        rm -rf "$STAGE/huntly/jre"; mkdir -p "$STAGE/huntly/jre"
+        cp -a "$JRE_DIR/." "$STAGE/huntly/jre/"
+    fi
+    [ -x "$STAGE/huntly/jre/bin/java.exe" ] || log "警告: Huntly JRE 组装失败（跳过高亮目录）"
+fi
+# qwenpaw(Win 运行时由 build_win_qwenpaw_runtime.sh 预构建到 build/qwenpaw-runtime-win)
+if [ -d "$BUILD/qwenpaw-runtime-win/python" ] && [ ! -e "$STAGE/qwenpaw_runtime/.qm_ok" ]; then
+    log "对齐 Linux 包: 组装 QwenPaw Win 运行时 ..."
+    rm -rf "$STAGE/qwenpaw_runtime"; mkdir -p "$STAGE/qwenpaw_runtime"
+    cp -a "$BUILD/qwenpaw-runtime-win/." "$STAGE/qwenpaw_runtime/"
+    touch "$STAGE/qwenpaw_runtime/.qm_ok"
+fi
+
 # ── 6. 打包 ─────────────────────────────────────────────────
 mkdir -p "$DIST"
 if [ "${SKIP_TAR:-0}" = "1" ]; then

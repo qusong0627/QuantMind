@@ -51,8 +51,7 @@ if exist "%ROOT%run\secrets.cmd" call "%ROOT%run\secrets.cmd"
 echo MARK-C
 
 rem ---- env ----
-rem UTF-8 模式: 中文 Windows 默认 GBK, 不开启会读 SQL/打日志报错
-rem ('gbk' codec ... / UnicodeEncodeError) 导致建表失败与日志刷屏
+rem UTF-8 mode required on zh-CN Windows (GBK breaks SQL/seed/logging)
 set "PYTHONUTF8=1"
 set "PYTHONIOENCODING=utf-8"
 set "PYTHONLEGACYWINDOWSSTDIO="
@@ -123,9 +122,11 @@ set "ADMIN_DASHBOARD_DB_HOST=127.0.0.1"
 set "ADMIN_DASHBOARD_DB_PORT=%QM_PG_PORT%"
 set "ADMIN_DASHBOARD_REDIS_HOST=127.0.0.1"
 set "ADMIN_DASHBOARD_REDIS_PORT=%QM_REDIS_PORT%"
-set "ADMIN_DASHBOARD_DISABLED_SERVICES=data_gateway,web,qwenpaw,rsshub,huntly"
+set "ADMIN_DASHBOARD_DISABLED_SERVICES=data_gateway,web,rsshub"
 set "HUNTLY_USERNAME=admin"
 set "HUNTLY_PASSWORD=admin123"
+set "QM_HUNTLY_PORT=8090"
+set "QM_QWENPAW_PORT=8088"
 echo MARK-D
 
 echo [QuantMind] Checking PostgreSQL ...
@@ -183,16 +184,34 @@ start "QuantMind-Backend" /min cmd /c "cd /d "%ROOT%" && "%PYTHON%" backend\main
 start "QuantMind-CeleryWorker" /min cmd /c "cd /d "%ROOT%" && "%PYTHON%" -m celery -A backend.services.engine.qlib_app.celery_config:celery_app worker -Q qlib_backtest_srv --loglevel=info --concurrency=2 --pool=solo > "%ROOT%logs\celery-worker.log" 2>&1"
 start "QuantMind-CeleryBeat" /min cmd /c "cd /d "%ROOT%" && "%PYTHON%" -m celery -A backend.services.engine.qlib_app.celery_config:celery_app beat --loglevel=info --schedule="%ROOT%run\celerybeat-schedule" > "%ROOT%logs\celery-beat.log" 2>&1"
 
+rem ---- optional components (huntly RSS / qwenpaw AI) ----
+mkdir "%ROOT%data\huntly" 2>nul
+if exist "%ROOT%huntly\server.jar" if exist "%ROOT%huntly\jre\bin\java.exe" (
+    start "QuantMind-Huntly" /min cmd /c ""%ROOT%huntly\jre\bin\java.exe" -Xmx512m -jar "%ROOT%huntly\server.jar" --huntly.dataDir="%ROOT%data\huntly\" --server.port=%QM_HUNTLY_PORT% > "%ROOT%logs\huntly.log" 2>&1"
+)
+if exist "%ROOT%qwenpaw_runtime\python\python.exe" (
+    if not exist "%ROOT%data\qwenpaw-home" mkdir "%ROOT%data\qwenpaw-home"
+    start "QuantMind-QwenPaw" /min cmd /c "cd /d "%ROOT%" && "%ROOT%qwenpaw_runtime\python\python.exe" -m qwenpaw app --host 127.0.0.1 --port %QM_QWENPAW_PORT% > "%ROOT%logs\qwenpaw.log" 2>&1"
+)
+
 echo [QuantMind] Waiting for services (first run may take 1-2 min) ...
+echo [QuantMind] Progress: dots each second, percent every 15s
 set TRY=0
 :http_wait
 curl -fsS -m 2 http://127.0.0.1:%QM_API_PORT%/health >nul 2>&1
 if not errorlevel 1 goto :http_ok
 set /a TRY+=1
+set /a MOD=TRY %% 15
+if not %MOD%==0 goto :dot_only
+set /a PCT=TRY*100/180
+<nul set /p "=[%PCT%%%] "
+:dot_only
+<nul set /p "=."
 if %TRY% GEQ 180 goto :http_fail
 timeout /t 1 /nobreak >nul
 goto :http_wait
 :http_fail
+echo.
 echo [!] Service start timeout, see logs\backend.log and logs\startup.log
 pause
 exit /b 1
@@ -203,8 +222,14 @@ echo [QuantMind] Ready: http://127.0.0.1:%QM_API_PORT%/
 echo ==============================================
 echo [%date% %time%] ready, opening browser >> "%ROOT%logs\startup.log" 2>nul
 start "" http://127.0.0.1:%QM_API_PORT%/
-echo [QuantMind] Services run in background; stop with stop.bat
-echo [QuantMind] Logs: logs\startup.log (boot), logs\backend.log (service)
-echo [QuantMind] You may close this window now.
+echo.
+echo [QuantMind] ============================================
+echo [QuantMind] CLOSING THIS WINDOW IS SAFE - all services
+echo [QuantMind] keep running in the background.
+echo [QuantMind] To STOP everything later: double-click
+echo [QuantMind] stop.bat (stops backend/celery/redis/pg/
+echo [QuantMind] huntly/qwenpaw). Re-start: start.bat again.
+echo [QuantMind] Logs: logs\backend.log / logs\startup.log
+echo [QuantMind] ============================================
 pause
 endlocal

@@ -13,6 +13,8 @@ taskkill /FI "WINDOWTITLE eq QuantMind-CeleryBeat*" /T /F >nul 2>&1
 taskkill /FI "WINDOWTITLE eq QuantMind-CeleryWorker*" /T /F >nul 2>&1
 taskkill /FI "WINDOWTITLE eq QuantMind-Backend*" /T /F >nul 2>&1
 taskkill /FI "WINDOWTITLE eq QuantMind-Redis*" /T /F >nul 2>&1
+taskkill /FI "WINDOWTITLE eq QuantMind-Huntly*" /T /F >nul 2>&1
+taskkill /FI "WINDOWTITLE eq QuantMind-QwenPaw*" /T /F >nul 2>&1
 
 "%ROOT%redis\redis-cli.exe" -p 6379 shutdown nosave >nul 2>&1 && echo [stop] Redis stopped
 if exist "%ROOT%pgdata\PG_VERSION" (
