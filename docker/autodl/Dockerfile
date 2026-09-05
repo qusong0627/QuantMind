@@ -46,7 +46,7 @@ RUN python -m pip install --upgrade pip setuptools wheel \
        else \
          echo "安装 CPU 版 torch"; \
          python -m pip install --no-cache-dir --root-user-action=ignore "torch==2.9.1+cpu" \
-           --index-url https://mirrors.aliyun.com/pytorch-wheels/cpu \
+           --index-url https://download.pytorch.org/whl/cpu \
            --extra-index-url ${PIP_INDEX_URL}; \
        fi \
     && python -m pip install --no-cache-dir --root-user-action=ignore \
