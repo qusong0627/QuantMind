@@ -77,6 +77,21 @@ cd 仓库根 && backend 依赖环境下 python -c \
 - GPU 要求:RTX 20 系+(sm_75+)、驱动 ≥525;Win cu128 torch 自包含(库在 torch/lib 内);Linux 增补包从本地 `quantmind-oss-gpu:latest` 镜像提取
 - 版本检查:`electron/package.json` version;便携包含 `VERSION` 文件
 
+## 更新与分发路径(改代码后怎么给到用户)
+
+原则:**git 提交永远先做;打包只发生在「从零分发」时。**
+
+| 场景 | 方式 | 要不要打包 |
+|---|---|---|
+| 自己机器/已解压实例调试 | 覆盖 backend/(+web/),stop→start | 否 |
+| 老用户小更新(仅 .py bug) | 补丁 zip(只含改动文件)或直接覆盖 backend/ | 否(可出几 MB 补丁) |
+| 老用户前端改动 | 同步重建后的 `web/`(dist-react 产物) | 否 |
+| 源码同步用户(已有包 + git) | git pull backend → stop→start;前端需本地 `npm run build:react` 或同步 web/ | 否 |
+| 依赖变更(requirements/runtime/torch/模型/start.bat) | 全量或定向重发对应部分 | 是(或定向包) |
+| 新用户 | 全量 zip 下载解压 | 是 |
+
+提醒:包内 backend 为源码直跑,代码即更新;但 runtime/models/data 不进 git,别指望代码库同步覆盖它们。
+
 ## 维护备注
 
 - 本技能背后的踩坑史见 memory:`portable-pack-no-docker`、`portable-win-bat-crlf-ascii`
