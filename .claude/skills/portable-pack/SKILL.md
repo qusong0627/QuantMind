@@ -43,10 +43,23 @@ macOS(M 系列):`build_macos_pack.sh` 已备,**必须在一台 Mac 上跑**(Redi
    - 中文系统 cmd 按 GBK 解码 UTF-8+LF 的 bat → 行结构错乱:报 `'chcp'/'ROOT' 不是内部或外部命令`、`此时不应有 .`、窗口闪退
    - 构建脚本已内嵌强制转换段(cp 后 python 转 CRLF+ASCII);手工加 bat 内容只用英文
 2. **start.bat 必须扁平 goto 风格**:禁止嵌套括号块、`^` 多行续行、块内 `&` 链——部分 cmd 版本致命解析错误导致静默闪退。保持 `if ... goto :label` + 顶层 label
-3. **pip --only-binary 下 Win 依赖解析**:sdist-only 老包(jsonpath/jieba/PyExecJS/gym)由脚本预构建纯 py wheel 注入 `--find-links`;**futu-api/qstock 无 win wheel 已在 Win 清单剔除**(后端均为可选导入/未注册遗留适配器)
-4. **python-build-standalone 命名漂移**:2026-09 起 Windows 资产去掉 `-shared-` 段;脚本用多 pattern + 精确尾部匹配(endswith .tar.gz)防 `_stripped` 误选
-5. **rd-agent(因子演化)在 Win 包降级**(依赖无法 win 解析,脚本按设计跳过并警告)
-6. Linux/WSL2 与 Win 内容差异:Win 精简版不含 models/Huntly/QwenPaw(如需对齐另行加)
+3. **中文 Windows 必须 PYTHONUTF8=1**(start.bat 环境变量,已加):
+   - 不加则 Python 默认 GBK:读建表 SQL `'gbk' codec can't decode` → **整库建表失败**(orders/quotes/system_events 全缺,后台扫描器疯狂刷 UndefinedTable,像"全坏了"实为一个根因);admin seed 写 ✅ emoji 也炸;日志 UnicodeEncodeError 刷屏
+   - 同时设 PYTHONIOENCODING=utf-8,并补 REDIS_URL(缺失时 celery 同步调度连 'redis' 主机名失败)
+4. **PydanticUndefinedAnnotation 崩溃模式**:`from __future__ import annotations` 下 FastAPI 在装饰路由时立即解析类型——**路由引用的 Pydantic 模型必须定义在路由之前**(quantdb_console 的 DataSourcesRequest 曾定义在后部 → api 5 次崩溃后放弃,窗口显示 Service start timeout)。改后端后出包前必须做 import 冒烟(见下)
+5. **pip --only-binary 下 Win 依赖解析**:sdist-only 老包(jsonpath/jieba/PyExecJS/gym)由脚本预构建纯 py wheel 注入 `--find-links`;**futu-api/qstock 无 win wheel 已在 Win 清单剔除**(后端均为可选导入/未注册遗留适配器)
+6. **python-build-standalone 命名漂移**:2026-09 起 Windows 资产去掉 `-shared-` 段;脚本用多 pattern + 精确尾部匹配(endswith .tar.gz)防 `_stripped` 误选
+7. **rd-agent(因子演化)在 Win 包降级**(依赖无法 win 解析,脚本按设计跳过并警告)
+8. Linux/WSL2 与 Win 内容差异:Win 精简版不含 models/Huntly/QwenPaw(如需对齐另行加)
+
+## 构建冒烟(出包前必做)
+
+```bash
+# 后端 import 冒烟: 能加载全部路由即无 PydanticUndefinedAnnotation 类崩溃
+cd 仓库根 && backend 依赖环境下 python -c \
+  "import backend.services.api.main, backend.services.engine.main, backend.services.trade.main, backend.services.stream.main; print('imports OK')"
+# 前端产物新鲜度: 改过 electron/src 后必须 npm run build:react(见上)
+```
 
 ## 真机验证清单(每次出包必须)
 
@@ -54,6 +67,7 @@ macOS(M 系列):`build_macos_pack.sh` 已备,**必须在一台 Mac 上跑**(Redi
 - Win 双击 `start.bat`:窗口驻留,依次 PostgreSQL→Redis→后端,最终 `Ready: http://127.0.0.1:8000/` 自动开浏览器,登录 `admin/admin123`
 - 启动过程看 `logs\startup.log`,服务错误看 `logs\backend.log`
 - 验证点:登录页 / 回测中心顶部市场切换 A股(策略列表只出 A股)/ 数据管理同步 / stop.bat 能停
+- 启动成功信号:窗口到 Ready;backend.log 无 `crashed too many times`、无 `UnicodeEncodeError/'gbk' codec`、无成片 `UndefinedTable`(三者任一出现=有根因没修)
 - 闪退排查:PowerShell 里 `.\start.bat` 或用 cmd 跑,报错不会闪;再不行放探针 MARK
 - 分发前先真机完整跑一轮(Win 包是 Linux 交叉组装,打包脚本头部自带的警告是认真的)
 
