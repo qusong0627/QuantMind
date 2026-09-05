@@ -19,7 +19,7 @@
 set -u
 cd "$(dirname "$0")" || exit 1
 PACK="$(pwd)"
-BRANCH="${QM_SYNC_BRANCH:-master}"
+BRANCH="${QM_SYNC_BRANCH:-next}"
 URL="${QM_REPO_URL:-https://gitee.com/qusong0627/QuantMind.git}"
 BEFORE="" N_COMMITS=0 N_FILES=0
 # write permission pre-check
@@ -54,7 +54,7 @@ if [ -z "$REPO" ]; then
     read -r -p "Auto-clone now? [y/n]: " DO_CLONE
     if [ "$DO_CLONE" = "y" ] || [ "$DO_CLONE" = "Y" ] || [ "$DO_CLONE" = "yes" ]; then
         echo "[sync] cloning..."
-        git clone -b "$BRANCH" --single-branch "$URL" "$PACK/../quantmind-src" || {
+        git clone -b "$BRANCH" "$URL" "$PACK/../quantmind-src" || {
             echo "[!] clone failed - check internet, or repo needs credentials."
             echo "    Private repo? ask the maintainer for access or another URL."
             exit 1; }
@@ -62,7 +62,7 @@ if [ -z "$REPO" ]; then
     else
         echo "    Manual clone later:"
         echo "      cd $PACK/.."
-        echo "      git clone -b $BRANCH --single-branch $URL quantmind-src"
+        echo "      git clone -b $BRANCH $URL quantmind-src"
         echo "    then rerun. Private repo? ask the maintainer."
         exit 1
     fi
@@ -72,6 +72,8 @@ echo "[sync] repo: $REPO  branch: $BRANCH"
 BEFORE="$(git -C "$REPO" rev-parse HEAD 2>/dev/null)"
 echo "[sync] pulling latest code ..."
 git -C "$REPO" fetch origin || { echo "[!] fetch failed"; exit 1; }
+git -C "$REPO" fetch origin "$BRANCH:refs/remotes/origin/$BRANCH" 2>/dev/null \
+    || echo "[sync] warning: prefetch of $BRANCH failed, checkout will tell if it matters"
 git -C "$REPO" checkout "$BRANCH" 2>/dev/null || true
 git -C "$REPO" pull origin "$BRANCH" || { echo "[!] pull failed - check network/credentials"; exit 1; }
 N_COMMITS="$(git -C "$REPO" rev-list --count "${BEFORE}..HEAD" 2>/dev/null || echo 0)"

@@ -6,7 +6,7 @@ rem ============================================================
 setlocal
 cd /d "%~dp0"
 set "PACK=%CD%"
-set "BRANCH=master"
+set "BRANCH=next"
 set "URL=https://gitee.com/qusong0627/QuantMind.git"
 set "REPO="
 set "GITOK=0"
@@ -60,14 +60,14 @@ if /I "%DO_CLONE%"=="yes" goto :auto_clone
 echo.
 echo     Skipped. Manual clone later:
 echo       cd /d %PACK%\..
-echo       git clone -b %BRANCH% --single-branch %URL% quantmind-src
+echo       git clone -b %BRANCH% %URL% quantmind-src
 echo     then rerun this script. Private repo? ask the maintainer for URL/access.
 echo     No git at all? ask the maintainer for a patch zip.
 pause
 exit /b 1
 :auto_clone
 echo [sync] cloning...
-git clone -b %BRANCH% --single-branch %URL% "%PACK%\..\quantmind-src"
+git clone -b %BRANCH% %URL% "%PACK%\..\quantmind-src"
 if errorlevel 1 goto :clone_fail
 set "REPO=%PACK%\..\quantmind-src"
 echo [sync] clone OK.
@@ -80,6 +80,8 @@ for /f "delims=" %%H in ('git -C "%REPO%" rev-parse HEAD 2^>nul') do set "BEFORE
 echo [sync] step 1/5 fetch...
 git -C "%REPO%" fetch origin
 if errorlevel 1 goto :git_fail
+git -C "%REPO%" fetch origin %BRANCH%:refs/remotes/origin/%BRANCH%
+if errorlevel 1 echo [sync] warning: prefetch of %BRANCH% failed, checkout will tell if it matters
 echo [sync] step 2/5 checkout...
 git -C "%REPO%" checkout %BRANCH%
 if errorlevel 1 goto :git_fail
