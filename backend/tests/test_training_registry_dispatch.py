@@ -103,21 +103,15 @@ def test_wfa_single_keeps_direct_calls_out_of_scope():
 
 
 def test_fallback_switch_and_error_path_exist():
-    tree = _load_tree()
-    funcs = _funcs(tree)
-    assert "_dispatch_gbdt_sklearn" in funcs and "_use_old_dispatch" in funcs
+    # B4：fallback 已删除（B2/B3 A/B 全过）。锁定清理完成态：
+    # 无开关引用、无旧链路标记；两分派器未知类型仍 ValueError。
     src = TRAIN_PY.read_text(encoding="utf-8")
-    assert "TRAINING_OLD_DISPATCH" in src
-    raises = [
-        n for n in ast.walk(funcs["_dispatch_gbdt_sklearn"]) if isinstance(n, ast.Raise)
-    ]
-    assert raises, "unknown model_type must raise ValueError"
-    assert any(
-        isinstance(n, ast.Call)
-        and isinstance(n.func, ast.Name)
-        and n.func.id == "_use_old_dispatch"
-        for n in ast.walk(funcs["_dispatch_gbdt_sklearn"])
-    )
+    assert "TRAINING_OLD_DISPATCH" not in src
+    assert "old-dispatch path" not in src
+    assert "_use_old_dispatch" not in src
+    funcs = _funcs(_load_tree())
+    for name in ("_dispatch_gbdt_sklearn", "_dispatch_dl"):
+        assert any(isinstance(n, ast.Raise) for n in ast.walk(funcs[name])), name
 
 
 # ── B3：DL/TFT 组 ──────────────────────────────────────────────────────────
@@ -199,8 +193,8 @@ def test_dl_dispatch_sites_have_correct_single_flags():
                 and kw["single"].value is want_single
             )
             assert isinstance(kw["t_start"], ast.Name)
-        # fallback 原体保留：直接 _train_dl/_train_nativetft 调用仍在
-        assert _direct_dl_calls(funcs[fname]) == DL_DIRECT, fname
+        # B4：fallback 原体已删除，分派点内不再直调 _train_dl/_train_nativetft
+        assert _direct_dl_calls(funcs[fname]) == set(), fname
 
 
 def test_dl_dispatch_rejects_non_dl():

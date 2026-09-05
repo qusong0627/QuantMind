@@ -175,11 +175,6 @@ def register_trainer(name: str, *, framework: str = "unknown", is_dl: bool = Fal
     return deco
 
 
-def _use_old_dispatch() -> bool:
-    """A/B 对齐窗口：TRAINING_OLD_DISPATCH=1 时走旧 if/elif。"""
-    return os.getenv("TRAINING_OLD_DISPATCH", "").strip().lower() in ("1", "true", "yes", "on")
-
-
 def _dispatch_gbdt_sklearn(
     cfg: dict,
     model_type: str,
@@ -192,22 +187,8 @@ def _dispatch_gbdt_sklearn(
     """GBDT/sklearn 组统一分派：lightgbm/xgboost/catboost/linear/random_forest/mlp。
 
     optuna 预搜索与分位分支保留在调用方原逻辑中，此处只替换裸训练函数选择。
+    B4：旧 if/elif fallback 已删除（B2 A/B 全过），未知类型直接 ValueError。
     """
-    if _use_old_dispatch():
-        logger.info("B2 old-dispatch path for %s", model_type)
-        if model_type == "lightgbm":
-            return _train_lgb(cfg, features, X_train, y_train, X_val, y_val)
-        elif model_type == "xgboost":
-            return _train_xgb(cfg, features, X_train, y_train, X_val, y_val)
-        elif model_type == "catboost":
-            return _train_catboost(cfg, features, X_train, y_train, X_val, y_val)
-        elif model_type == "linear":
-            return _train_linear(cfg, features, X_train, y_train, X_val, y_val)
-        elif model_type == "random_forest":
-            return _train_rf(cfg, features, X_train, y_train, X_val, y_val)
-        elif model_type == "mlp":
-            return _train_mlp(cfg, features, X_train, y_train, X_val, y_val)
-        raise ValueError(f"Unsupported model_type: {model_type}")
     trainer = MODEL_REGISTRY.get(model_type)
     if trainer is None:
         raise ValueError(f"Unsupported model_type: {model_type}")
@@ -350,10 +331,7 @@ def _dispatch_dl(
     cfg, model_type, features, train_df, val_df, test_df, df, fill_values, hardware,
     *, single, t_start,
 ):
-    """B3：DL/TFT 组查表分派。fallback 走各分支原体（调用方保留原代码）。
-
-    TRAINING_OLD_DISPATCH=1 时调用方直接走原分支体，不进此函数。
-    """
+    """B3：DL/TFT 组查表分派（B4 已删除旧分支 fallback，见 git 历史）。"""
     trainer = MODEL_REGISTRY.get(model_type)
     if trainer is None or not trainer.is_dl:
         raise ValueError(f"Unsupported DL model_type: {model_type}")
@@ -3290,111 +3268,9 @@ def train_model(df: pd.DataFrame, features: list[str], cfg: dict, hardware: dict
     elif model_type in ("linear", "random_forest", "mlp"):
         model = _dispatch_gbdt_sklearn(cfg, model_type, features, X_train, y_train, X_val, y_val)
     elif model_type == "nativetft":
-        if not _use_old_dispatch():
-            return _dispatch_dl(cfg, model_type, features, train_df, val_df, test_df, df, fill_values, hardware, single=False, t_start=train_t0)
-        logger.info("B3 old-dispatch path for %s", model_type)
-        dl_params = model_cfg.get("dl_params", {})
-        output_dir = Path("/workspace")
-        model, train_m, val_m, dl_metadata = _train_nativetft(
-            model_type, train_df, val_df, features, dl_params, output_dir, hardware=hardware
-        )
-        train_elapsed = time.time() - train_t0
-        logger.info("Training finished in %.2fs (%s)", train_elapsed, model_type)
-        logger.info(f"Val IC={val_m['ic']:.4f}")
-
-        y_full_pred = _predict_nativetft(output_dir, df, features, dl_metadata)
-        full_pred_df = df[["symbol", "trade_date", "label"]].copy()
-        # 时序 DL 预测返回 DataFrame(symbol,trade_date,pred)，按 key 对齐合并
-        full_pred_df = full_pred_df.merge(
-            y_full_pred[["symbol", "trade_date", "pred"]],
-            on=["symbol", "trade_date"], how="left",
-        )
-        full_pred_df["split"] = "train"
-        full_pred_df.loc[
-            (full_pred_df["trade_date"] >= val_df["trade_date"].min()) &
-            (full_pred_df["trade_date"] <= val_df["trade_date"].max()),
-            "split",
-        ] = "valid"
-        full_pred_df.loc[
-            (full_pred_df["trade_date"] >= test_df["trade_date"].min()) &
-            (full_pred_df["trade_date"] <= test_df["trade_date"].max()),
-            "split",
-        ] = "test"
-
-        test_mask = full_pred_df["split"] == "test"
-        y_test_pred = full_pred_df.loc[test_mask, "pred"].values
-        y_test_true = full_pred_df.loc[test_mask, "label"].values
-        test_m = _compute_metrics(test_df, y_test_true.astype("float32"), y_test_pred.astype("float32"))
-
-        return (
-            model,
-            fill_values,
-            train_m,
-            val_m,
-            test_m,
-            full_pred_df.reset_index(drop=True),
-            {
-                "train": train_df.reset_index(drop=True),
-                "valid": val_df.reset_index(drop=True),
-                "test": test_df.reset_index(drop=True),
-            },
-            model_type,
-            dl_metadata,
-        )
+        return _dispatch_dl(cfg, model_type, features, train_df, val_df, test_df, df, fill_values, hardware, single=False, t_start=train_t0)
     elif model_type in _DL_MODEL_TYPES:
-        if not _use_old_dispatch():
-            return _dispatch_dl(cfg, model_type, features, train_df, val_df, test_df, df, fill_values, hardware, single=False, t_start=train_t0)
-        logger.info("B3 old-dispatch path for %s", model_type)
-        dl_params = model_cfg.get("dl_params", {})
-        output_dir = Path("/workspace")
-        model, train_m, val_m, dl_metadata = _train_dl(
-            model_type, train_df, val_df, features, dl_params, output_dir, hardware=hardware
-        )
-        train_elapsed = time.time() - train_t0
-        logger.info("Training finished in %.2fs (%s)", train_elapsed, model_type)
-        logger.info(f"Val IC={val_m['ic']:.4f}")
-
-        # DL 模型生成全窗口预测
-        y_full_pred = _predict_dl(output_dir, df, features, dl_metadata)
-        full_pred_df = df[["symbol", "trade_date", "label"]].copy()
-        # 时序 DL 预测返回 DataFrame(symbol,trade_date,pred)，按 key 对齐合并
-        full_pred_df = full_pred_df.merge(
-            y_full_pred[["symbol", "trade_date", "pred"]],
-            on=["symbol", "trade_date"], how="left",
-        )
-        full_pred_df["split"] = "train"
-        full_pred_df.loc[
-            (full_pred_df["trade_date"] >= val_df["trade_date"].min()) &
-            (full_pred_df["trade_date"] <= val_df["trade_date"].max()),
-            "split",
-        ] = "valid"
-        full_pred_df.loc[
-            (full_pred_df["trade_date"] >= test_df["trade_date"].min()) &
-            (full_pred_df["trade_date"] <= test_df["trade_date"].max()),
-            "split",
-        ] = "test"
-
-        # 计算 test 集指标
-        test_mask = full_pred_df["split"] == "test"
-        y_test_pred = full_pred_df.loc[test_mask, "pred"].values
-        y_test_true = full_pred_df.loc[test_mask, "label"].values
-        test_m = _compute_metrics(test_df, y_test_true.astype("float32"), y_test_pred.astype("float32"))
-
-        return (
-            model,
-            fill_values,
-            train_m,
-            val_m,
-            test_m,
-            full_pred_df.reset_index(drop=True),
-            {
-                "train": train_df.reset_index(drop=True),
-                "valid": val_df.reset_index(drop=True),
-                "test": test_df.reset_index(drop=True),
-            },
-            model_type,
-            dl_metadata,
-        )
+        return _dispatch_dl(cfg, model_type, features, train_df, val_df, test_df, df, fill_values, hardware, single=False, t_start=train_t0)
     else:
         raise ValueError(f"Unsupported model_type: {model_type}")
 
@@ -3783,7 +3659,6 @@ def _train_single_model(
     logger.info("--- Training %s ---", model_type)
     t0 = time.time()
 
-    model_cfg = cfg.get("model", {})
     _optuna_result = None
     fill_values, X_train, y_train, X_val, y_val, _fill = _prepare_arrays(
         train_df, val_df, features, prep_cfg=cfg.get("preprocessing") or {}
@@ -3815,84 +3690,9 @@ def _train_single_model(
     elif model_type in ("linear", "random_forest", "mlp"):
         model = _dispatch_gbdt_sklearn(cfg, model_type, features, X_train, y_train, X_val, y_val)
     elif model_type == "nativetft":
-        if not _use_old_dispatch():
-            return _dispatch_dl(cfg, model_type, features, train_df, val_df, test_df, df, fill_values, hardware, single=True, t_start=t0)
-        logger.info("B3 old-dispatch path for %s", model_type)
-        output_dir = Path("/workspace")
-        dl_params = model_cfg.get("dl_params", {})
-        model, train_m, val_m, dl_metadata = _train_nativetft(
-            model_type, train_df, val_df, features, dl_params, output_dir, hardware=hardware
-        )
-        y_full_pred = _predict_nativetft(output_dir, df, features, dl_metadata)
-        full_pred_df = df[["symbol", "trade_date", "label"]].copy()
-        # 时序 DL 预测返回 DataFrame(symbol,trade_date,pred)，按 key 对齐合并
-        full_pred_df = full_pred_df.merge(
-            y_full_pred[["symbol", "trade_date", "pred"]],
-            on=["symbol", "trade_date"], how="left",
-        )
-        full_pred_df["split"] = "train"
-        full_pred_df.loc[
-            (full_pred_df["trade_date"] >= val_df["trade_date"].min()) &
-            (full_pred_df["trade_date"] <= val_df["trade_date"].max()), "split"] = "valid"
-        full_pred_df.loc[
-            (full_pred_df["trade_date"] >= test_df["trade_date"].min()) &
-            (full_pred_df["trade_date"] <= test_df["trade_date"].max()), "split"] = "test"
-        test_mask = full_pred_df["split"] == "test"
-        y_test_pred = full_pred_df.loc[test_mask, "pred"].values
-        y_test_true = full_pred_df.loc[test_mask, "label"].values
-        test_m = _compute_metrics(test_df, y_test_true.astype("float32"), y_test_pred.astype("float32"))
-        elapsed = time.time() - t0
-        return {
-            "model_type": model_type,
-            "model": model,
-            "fill_values": fill_values,
-            "train_m": train_m,
-            "val_m": val_m,
-            "test_m": test_m,
-            "dl_metadata": dl_metadata,
-            "full_pred_df": full_pred_df,
-            "elapsed": elapsed,
-        }
+        return _dispatch_dl(cfg, model_type, features, train_df, val_df, test_df, df, fill_values, hardware, single=True, t_start=t0)
     elif model_type in _DL_MODEL_TYPES:
-        if not _use_old_dispatch():
-            return _dispatch_dl(cfg, model_type, features, train_df, val_df, test_df, df, fill_values, hardware, single=True, t_start=t0)
-        logger.info("B3 old-dispatch path for %s", model_type)
-        output_dir = Path("/workspace")
-        dl_params = model_cfg.get("dl_params", {})
-        model, train_m, val_m, dl_metadata = _train_dl(
-            model_type, train_df, val_df, features, dl_params, output_dir, hardware=hardware
-        )
-        y_full_pred = _predict_dl(output_dir, df, features, dl_metadata)
-        full_pred_df = df[["symbol", "trade_date", "label"]].copy()
-        # 时序 DL 预测返回 DataFrame(symbol,trade_date,pred)，按 key 对齐合并
-        full_pred_df = full_pred_df.merge(
-            y_full_pred[["symbol", "trade_date", "pred"]],
-            on=["symbol", "trade_date"], how="left",
-        )
-        full_pred_df["split"] = "train"
-        full_pred_df.loc[
-            (full_pred_df["trade_date"] >= val_df["trade_date"].min()) &
-            (full_pred_df["trade_date"] <= val_df["trade_date"].max()), "split"] = "valid"
-        full_pred_df.loc[
-            (full_pred_df["trade_date"] >= test_df["trade_date"].min()) &
-            (full_pred_df["trade_date"] <= test_df["trade_date"].max()), "split"] = "test"
-        test_mask = full_pred_df["split"] == "test"
-        y_test_pred = full_pred_df.loc[test_mask, "pred"].values
-        y_test_true = full_pred_df.loc[test_mask, "label"].values
-        test_m = _compute_metrics(test_df, y_test_true.astype("float32"), y_test_pred.astype("float32"))
-        elapsed = time.time() - t0
-        return {
-            "model_type": model_type,
-            "model": model,
-            "fill_values": fill_values,
-            "train_m": train_m,
-            "val_m": val_m,
-            "test_m": test_m,
-            "pred_df": full_pred_df.reset_index(drop=True),
-            "split_frames": {"train": train_df.reset_index(drop=True), "valid": val_df.reset_index(drop=True), "test": test_df.reset_index(drop=True)},
-            "dl_metadata": dl_metadata,
-            "elapsed": elapsed,
-        }
+        return _dispatch_dl(cfg, model_type, features, train_df, val_df, test_df, df, fill_values, hardware, single=True, t_start=t0)
     else:
         raise ValueError(f"Unsupported model_type: {model_type}")
 

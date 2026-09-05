@@ -952,8 +952,6 @@ class LocalDockerOrchestrator(TrainingOrchestrator):
                     # 透传树模型线程数覆盖（不设置时 train.py 默认 -1 用满所有核心）。
                     # 宿主环境可设 TRAIN_NTHREADS=4 限流，避免训练抢破产线/行情等其它服务。
                     "TRAIN_NTHREADS": os.getenv("TRAIN_NTHREADS", ""),
-                    # B2 A/B 对齐窗口：TRAINING_OLD_DISPATCH=1 时训练容器走旧 if/elif 分派。
-                    "TRAINING_OLD_DISPATCH": os.getenv("TRAINING_OLD_DISPATCH", ""),
                 },
                 volumes=volumes,
                 network=_DOCKER_NETWORK,
