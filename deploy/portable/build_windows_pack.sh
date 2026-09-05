@@ -271,8 +271,8 @@ cp "$REPO_ROOT/docker/training/train.py" "$STAGE/train.py"
 cp "$REPO_ROOT/docker/training/preprocessing.py" "$STAGE/preprocessing.py"
 cp "$REPO_ROOT/docker/training/parallel_utils.py" "$STAGE/parallel_utils.py"
 
-cp "$HERE/pack_assets/start.sh" "$HERE/pack_assets/stop.sh" "$STAGE/"
-cp "$HERE/pack_assets/start.bat" "$HERE/pack_assets/stop.bat" "$STAGE/"
+cp "$HERE/pack_assets/start.sh" "$HERE/pack_assets/stop.sh" "$HERE/pack_assets/sync_from_git.sh" "$STAGE/"
+cp "$HERE/pack_assets/start.bat" "$HERE/pack_assets/stop.bat" "$HERE/pack_assets/sync_from_git.bat" "$STAGE/"
 # .bat 必须 ASCII+CRLF：中文系统 cmd 以 GBK 解析 UTF-8+LF 的 bat 会整段错乱闪退
 python3 - "$STAGE" <<'PYEOF'
 import glob, sys
