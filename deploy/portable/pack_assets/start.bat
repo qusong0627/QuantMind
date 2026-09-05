@@ -51,6 +51,11 @@ if exist "%ROOT%run\secrets.cmd" call "%ROOT%run\secrets.cmd"
 echo MARK-C
 
 rem ---- env ----
+rem UTF-8 模式: 中文 Windows 默认 GBK, 不开启会读 SQL/打日志报错
+rem ('gbk' codec ... / UnicodeEncodeError) 导致建表失败与日志刷屏
+set "PYTHONUTF8=1"
+set "PYTHONIOENCODING=utf-8"
+set "PYTHONLEGACYWINDOWSSTDIO="
 set "APP_EDITION=oss"
 set "APP_ENV=production"
 set "SERVICE_MODE=all"
@@ -70,6 +75,8 @@ set "POSTGRES_PASSWORD=quantmind2026"
 set "POSTGRES_DB=quantmind"
 set "REDIS_HOST=127.0.0.1"
 set "REDIS_PORT=%QM_REDIS_PORT%"
+set "REDIS_URL=redis://127.0.0.1:%QM_REDIS_PORT%"
+set "REDIS_PASSWORD="
 set "STORAGE_MODE=local"
 set "QUANTMIND_ENABLE_WEB_UPDATE=false"
 set "API_PORT=%QM_API_PORT%"
