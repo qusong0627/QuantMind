@@ -5,6 +5,7 @@ config.yaml 的 key 天然一致。B1 只做 ``TrainingConfig``（config.yaml �
 入参编排层（``pause_others/horizons/...``）保持现状，见 REFACTOR_TRAINING_B §3.3。
 """
 
-from backend.shared.training.schemas import TrainingConfig
+from backend.shared.training.request import ContextRequest, TrainingRequest
+from backend.shared.training.schemas import TrainingConfig, dump_contract_dict
 
-__all__ = ["TrainingConfig"]
+__all__ = ["ContextRequest", "TrainingConfig", "TrainingRequest", "dump_contract_dict"]
