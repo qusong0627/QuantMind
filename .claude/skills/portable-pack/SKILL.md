@@ -52,6 +52,11 @@ macOS(M 系列):`build_macos_pack.sh` 已备,**必须在一台 Mac 上跑**(Redi
 7. **rd-agent(因子演化)在 Win 包降级**(依赖无法 win 解析,脚本按设计跳过并警告)
 8. Linux/WSL2 与 Win 内容差异:Win 精简版不含 models/Huntly/QwenPaw(如需对齐另行加)
 
+9. **覆盖式解压自锁陷阱**: 便携包 runtime python 经 sitecustomize 启动即导入 litellm→markupsafe,
+   解压进程要覆盖 site-packages 里 markupsafe 的 pyd 时会**自己锁自己**(PermissionError,
+   停服务/杀进程都无效)。凡需覆盖 site-packages 的操作用 `python -S`(跳过 site 导入,
+   纯 stdlib zipfile 解压即可)——install_gpu.bat 已固化
+
 ## 构建冒烟(出包前必做)
 
 ```bash
