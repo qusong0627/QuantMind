@@ -22,33 +22,24 @@ from backend.services.engine.training.training_log_stream import TrainingRunLogS
 from backend.services.engine.data_platform.quantdb_factor_reader import QuantDBFactorReader
 from backend.shared.database_manager_v2 import get_session
 from backend.shared.model_registry import model_registry_service
+from backend.shared.training.request import (
+    ALLOWED_TARGET_MODE as _ALLOWED_TARGET_MODE,
+    clamp_int as _clamp_int,
+    coerce_float as _coerce_float,
+    parse_date as _parse_date,
+    resolve_market as _resolve_market,
+)
 
 router = APIRouter(dependencies=[Depends(require_admin)])  # 路由器级认证兜底
 logger = logging.getLogger(__name__)
 _FEATURE_CATALOG_FALLBACK = Path(os.getcwd()) / "config" / "features" / "model_training_feature_catalog_v1.json"
-_ALLOWED_TARGET_MODE = {"return", "classification"}
-_ALLOWED_DEAL_PRICE = {"open", "close"}
-_ALLOWED_MODEL_TYPES = {
-    # Tree models (Tier 1) — share same tabular data pipeline
-    "lightgbm", "xgboost", "catboost", "linear", "random_forest",
-    # Deep learning models (Tier 2) — require sequential data / Qlib
-    "gru", "lstm", "alstm", "transformer", "tabnet", "tcn",
-    # Custom DL models (Tier 3) — non-Qlib PyTorch models
-    "nativetft", "mlp", "hybrid_gru_tree",
-}
 _TREE_MODEL_TYPES = {"lightgbm", "xgboost", "catboost", "linear", "random_forest"}
 _DL_MODEL_TYPES = {"gru", "lstm", "alstm", "transformer", "tabnet", "tcn", "nativetft", "mlp", "hybrid_gru_tree"}
 # 市场 → exchange_calendars 日历名。CRYPTO 为 7x24 无休市，不在此映射中。
 _MARKET_TO_XCAL = {"CN": "XSHG", "US": "XNYS", "HK": "XHKG"}
 
 
-def _clamp_int(value: Any, default: int, lo: int, hi: int) -> int:
-    """安全地把输入转成 int 并 clamp 到 [lo, hi]。"""
-    try:
-        n = int(value)
-    except Exception:
-        n = default
-    return max(lo, min(hi, n))
+# _clamp_int 下沉至 backend.shared.training.request（单源），此处 import 复用。
 
 
 def _shift_trading_days_back(anchor: datetime, n_days: int, market: str) -> tuple[datetime, bool]:
@@ -114,23 +105,7 @@ def _resolve_admin_scope(
     return resolved_tenant, resolved_user
 
 
-def _parse_date(date_str: str, field: str) -> datetime:
-    try:
-        return datetime.fromisoformat(date_str)
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=422, detail=f"Invalid date for {field}: {date_str}") from exc
-
-
-def _coerce_float(value: Any) -> float | None:
-    try:
-        if value is None:
-            return None
-        f = float(value)
-        if f != f or f in (float("inf"), float("-inf")):  # NaN/Inf 视为无效
-            return None
-        return f
-    except Exception:
-        return None
+# _parse_date / _coerce_float 下沉至 backend.shared.training.request（单源），此处 import 复用。
 
 
 def _feature_market_declarations() -> dict[str, list[str]]:
@@ -260,104 +235,41 @@ async def _load_allowed_features(market: str | None = None) -> list[str]:
     return _load_allowed_features_from_file(market=market)
 
 
-def _normalize_context(context: dict[str, Any]) -> dict[str, Any]:
-    if not isinstance(context, dict):
-        raise HTTPException(status_code=422, detail="context must be an object")
-
-    initial_capital = _coerce_float(context.get("initial_capital"))
-    if initial_capital is None:
-        initial_capital = _coerce_float(context.get("initialCapital"))
-    initial_capital = initial_capital if initial_capital is not None else 1_000_000.0
-    if initial_capital <= 0:
-        raise HTTPException(status_code=422, detail="context.initial_capital must be > 0")
-
-    benchmark = str(context.get("benchmark") or "SH000300").strip() or "SH000300"
-
-    commission_rate = _coerce_float(context.get("commission_rate"))
-    if commission_rate is None:
-        commission_rate = _coerce_float(context.get("commissionRate"))
-    commission_rate = commission_rate if commission_rate is not None else 0.00025
-    if commission_rate < 0:
-        raise HTTPException(status_code=422, detail="context.commission_rate must be >= 0")
-
-    slippage = _coerce_float(context.get("slippage"))
-    slippage = slippage if slippage is not None else 0.0005
-    if slippage < 0:
-        raise HTTPException(status_code=422, detail="context.slippage must be >= 0")
-
-    deal_price = str(context.get("deal_price") or context.get("dealPrice") or "close").strip().lower()
-    if deal_price not in _ALLOWED_DEAL_PRICE:
-        raise HTTPException(status_code=422, detail="context.deal_price must be one of: open, close")
-
-    market = _resolve_market(context.get("market"), benchmark)
-    return {
-        "initial_capital": initial_capital,
-        "benchmark": benchmark,
-        "commission_rate": commission_rate,
-        "slippage": slippage,
-        "deal_price": deal_price,
-        "market": market,
-        "industry_as_feature": bool(context.get("industry_as_feature", False)),
-    }
-
-
-def _resolve_market(raw_market: Any, benchmark: str) -> str:
-    """解析目标市场。
-
-    优先使用显式 market 字段；缺失或非法时从 benchmark 推断，
-    最终回退到 CN（A股），保持向后兼容。
-    """
-    market = str(raw_market or "").strip().upper()
-    if market in ("CN", "US", "HK", "CRYPTO", "FUTURES"):
-        return market
-    _BENCHMARK_MARKET = {
-        "HSI": "HK", "HSCEI": "HK", "HSTECH": "HK",
-        "SPX": "US", "NDX": "US", "DJI": "US", "IXIC": "US",
-        "BTC": "CRYPTO", "ETH": "CRYPTO",
-        "CL": "FUTURES", "RB": "FUTURES", "AU": "FUTURES", "CU": "FUTURES",
-    }
-    return _BENCHMARK_MARKET.get(str(benchmark or "").upper(), "CN")
-
-
-def _normalize_prediction_mode(raw: Any) -> str:
-    """归一化分位推理模式；非法值回落 point。"""
-    mode = str(raw or "point").strip().lower()
-    return mode if mode in ("point", "quantile") else "point"
+# _normalize_context / _resolve_market / _normalize_prediction_mode 已下沉至
+# backend.shared.training.request（单源），此处 import 复用；context 清洗走 req.context。
 
 
 def _normalize_payload(payload: dict[str, Any], allowed_features: list[str]) -> dict[str, Any]:
-    if not isinstance(payload, dict):
-        raise HTTPException(status_code=422, detail="Payload must be a JSON object")
+    from backend.shared.training.request import TrainingRequest
 
-    model_type = str(payload.get("model_type", "lightgbm")).strip().lower()
-    if model_type not in _ALLOWED_MODEL_TYPES:
-        raise HTTPException(
-            status_code=422,
-            detail=f"Unsupported model_type: {model_type}. Allowed: {sorted(_ALLOWED_MODEL_TYPES)}",
-        )
+    # 收尾 2：纯输入校验收敛进 TrainingRequest（422 与现状逐字相同）；
+    # 本函数只做 DB 耦合校验与推导装配。
+    req = TrainingRequest.validate_request(payload)
 
-    # 多模型支持：model_types 列表
-    model_types: list[str] | None = None
-    raw_model_types = payload.get("model_types")
-    if raw_model_types and isinstance(raw_model_types, list):
-        model_types = [str(t).strip().lower() for t in raw_model_types if str(t).strip()]
-        for mt in model_types:
-            if mt not in _ALLOWED_MODEL_TYPES:
-                raise HTTPException(
-                    status_code=422,
-                    detail=f"Unsupported model_type in model_types: {mt}. Allowed: {sorted(_ALLOWED_MODEL_TYPES)}",
-                )
-        # 多模型时，model_type 取第一个作为主模型（向后兼容）
-        if model_types:
-            model_type = model_types[0]
+    if allowed_features:
+        allowed_set = set(allowed_features)
+        invalid = [feature for feature in req.features if feature not in allowed_set]
+        if invalid:
+            sample = ", ".join(invalid[:8])
+            raise HTTPException(
+                status_code=422,
+                detail=f"Unknown features: {sample}. Please refresh feature catalog and retry.",
+            )
 
-    ensemble_method = str(payload.get("ensemble", "none")).strip().lower()
-    if ensemble_method not in ("none", "stacking", "blending", "voting"):
-        ensemble_method = "none"
+    # 多模型支持：model_types[0] 作为主模型（向后兼容）
+    model_type = req.model_type
+    model_types = req.model_types
+    if model_types:
+        model_type = model_types[0]
+
+    # LightGBM max_depth=-1 convention is invalid for XGBoost; strip it
+    xgb_params = dict(req.xgb_params)
+    if isinstance(xgb_params.get("max_depth"), (int, float)) and xgb_params["max_depth"] < 0:
+        xgb_params = {k: v for k, v in xgb_params.items() if k != "max_depth"}
 
     # ── WFA 稳定性诊断配置（可选） ──
     wfa_config = None
-    raw_wfa = payload.get("wfa")
+    raw_wfa = req.wfa
     if raw_wfa:
         if not isinstance(raw_wfa, dict):
             raise HTTPException(status_code=422, detail="wfa must be an object")
@@ -376,68 +288,8 @@ def _normalize_payload(payload: dict[str, Any], allowed_features: list[str]) -> 
             "max_train_end": str(raw_wfa.get("max_train_end") or "").strip(),
         }
 
-    display_name = str(payload.get("display_name") or payload.get("job_name") or "unnamed").strip() or "unnamed"
-    if len(display_name) > 128:
-        raise HTTPException(status_code=422, detail="display_name must be at most 128 characters")
+    # display/日期/数值/特征/params 校验已收敛进 TrainingRequest；多周期推导见下。
 
-    train_start = str(payload.get("train_start", "2023-01-11")).strip()
-    train_end = str(payload.get("train_end", "2024-12-31")).strip()
-    dt_train_start = _parse_date(train_start, "train_start")
-    dt_train_end = _parse_date(train_end, "train_end")
-    if dt_train_start >= dt_train_end:
-        raise HTTPException(status_code=422, detail="train_start must be earlier than train_end")
-
-    val_ratio = float(payload.get("val_ratio", 0.15))
-    if not (0.01 <= val_ratio <= 0.5):
-        raise HTTPException(status_code=422, detail="val_ratio must be between 0.01 and 0.5")
-
-    num_boost_round = int(payload.get("num_boost_round", 1000))
-    if not (10 <= num_boost_round <= 20000):
-        raise HTTPException(status_code=422, detail="num_boost_round must be between 10 and 20000")
-
-    early_stopping_rounds = int(payload.get("early_stopping_rounds", 100))
-    if not (1 <= early_stopping_rounds <= 5000):
-        raise HTTPException(status_code=422, detail="early_stopping_rounds must be between 1 and 5000")
-
-    raw_features = payload.get("features", []) or []
-    if not isinstance(raw_features, list):
-        raise HTTPException(status_code=422, detail="features must be a string array")
-    features: list[str] = []
-    for item in raw_features:
-        val = str(item).strip()
-        if val and val not in features:
-            features.append(val)
-    if len(features) > 600:
-        raise HTTPException(status_code=422, detail="features length cannot exceed 600")
-    if allowed_features:
-        allowed_set = set(allowed_features)
-        invalid = [feature for feature in features if feature not in allowed_set]
-        if invalid:
-            sample = ", ".join(invalid[:8])
-            raise HTTPException(
-                status_code=422,
-                detail=f"Unknown features: {sample}. Please refresh feature catalog and retry.",
-            )
-
-    lgb_params = payload.get("lgb_params", {}) or {}
-    if not isinstance(lgb_params, dict):
-        raise HTTPException(status_code=422, detail="lgb_params must be an object")
-
-    # Model-specific params (only validate the one matching model_type)
-    xgb_params = payload.get("xgb_params", {}) or {}
-    if not isinstance(xgb_params, dict):
-        raise HTTPException(status_code=422, detail="xgb_params must be an object")
-    # LightGBM max_depth=-1 convention is invalid for XGBoost; strip it
-    if isinstance(xgb_params.get("max_depth"), (int, float)) and xgb_params["max_depth"] < 0:
-        xgb_params = {k: v for k, v in xgb_params.items() if k != "max_depth"}
-
-    catboost_params = payload.get("catboost_params", {}) or {}
-    if not isinstance(catboost_params, dict):
-        raise HTTPException(status_code=422, detail="catboost_params must be an object")
-
-    dl_params = payload.get("dl_params", {}) or {}
-    if not isinstance(dl_params, dict):
-        raise HTTPException(status_code=422, detail="dl_params must be an object")
 
     target_horizon_days = int(payload.get("target_horizon_days", 1))
     if not (1 <= target_horizon_days <= 30):
@@ -484,36 +336,36 @@ def _normalize_payload(payload: dict[str, Any], allowed_features: list[str]) -> 
             if val and val not in feature_categories:
                 feature_categories.append(val)
 
-    context = _normalize_context(payload.get("context", {}) or {})
+    context = req.context
     explain = normalize_explain(payload.get("explain"))
 
     normalized: dict[str, Any] = {
-        "job_name": str(payload.get("job_name", "unnamed")).strip() or "unnamed",
-        "display_name": display_name,
+        "job_name": req.job_name,
+        "display_name": req.display_name,
         "model_type": model_type,
-        "train_start": train_start,
-        "train_end": train_end,
-        "val_ratio": val_ratio,
-        "num_boost_round": num_boost_round,
-        "early_stopping_rounds": early_stopping_rounds,
-        "features": features,
+        "train_start": req.train_start,
+        "train_end": req.train_end,
+        "val_ratio": req.val_ratio,
+        "num_boost_round": req.num_boost_round,
+        "early_stopping_rounds": req.early_stopping_rounds,
+        "features": req.features,
         "feature_categories": feature_categories,
         "target_horizon_days": target_horizon_days,
-        "target_mode": target_mode,
-        "label_formula": label_formula,
-        "effective_trade_date": effective_trade_date,
-        "training_window": training_window,
+        "target_mode": req.target_mode,
+        "label_formula": req.label_formula,
+        "effective_trade_date": req.effective_trade_date,
+        "training_window": req.training_window,
         "context": context,
         "explain": explain,
-        "lgb_params": lgb_params,
+        "lgb_params": req.lgb_params,
         "xgb_params": xgb_params,
-        "catboost_params": catboost_params,
-        "dl_params": dl_params,
-        "ensemble": ensemble_method,
+        "catboost_params": req.catboost_params,
+        "dl_params": req.dl_params,
+        "ensemble": req.ensemble,
         # 分位推理模式透传：此前被白名单剥掉，orchestrator 收不到
         # prediction_mode 永远回落 point，导致训练时选了「收益率分位推理」
         # 但模型 metadata 始终是 point，推理中心提示未启用分位推理。
-        "prediction_mode": _normalize_prediction_mode(payload.get("prediction_mode")),
+        "prediction_mode": req.prediction_mode,
     }
     # Stacking 集成参数 + Optuna 超参搜索 + 截面预处理（显式透传）
     if "n_folds" in payload:
