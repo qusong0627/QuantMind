@@ -26,7 +26,6 @@ EXPECTED_SAVE_MAPPING = {
     "catboost": "model.cbm",
     "linear": "model.pkl",
     "mlp": "model.pkl",
-    "hybrid_gru_tree": "model.pkl",
     "gru": "model.pth",
     "lstm": "model.pth",
     "alstm": "model.pth",
@@ -53,7 +52,6 @@ EXPECTED_FRAMEWORKS = {
     "tcn": "pytorch",
     "nativetft": "pytorch",
     "mlp": "pytorch",
-    "hybrid_gru_tree": "pytorch",
 }
 
 EXPECTED_REQUIRED_ARTIFACTS = ["model.lgb", "pred.pkl", "metadata.json", "result.json"]

@@ -1672,9 +1672,6 @@ def _save_model(model: Any, model_type: str, out_dir: Path) -> str:
             with open(path, "wb") as f:
                 pickle.dump(model, f)
             return "model.pkl"
-        # hybrid_gru_tree 由专用训练管线保存 gru_encoder.pth + 树模型文件
-        if model_type == "hybrid_gru_tree":
-            return "model.pkl"
         # DL 模型在 _train_dl() 中已保存 model.pth，此处仅返回文件名
         return "model.pth"
     else:
@@ -1703,7 +1700,6 @@ def _get_model_framework(model_type: str) -> str:
         "tcn": "pytorch",
         "nativetft": "pytorch",
         "mlp": "pytorch",
-        "hybrid_gru_tree": "pytorch",
     }
     return mapping.get(model_type, "unknown")
 

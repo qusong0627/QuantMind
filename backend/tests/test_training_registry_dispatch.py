@@ -186,7 +186,6 @@ def test_registry_loop_covers_all_dl_minus_mlp():
         "tcn",
         "nativetft",
         "mlp",
-        "hybrid_gru_tree",
     }
     src = REGISTRY_PY.read_text(encoding="utf-8")
     # 注册循环：自动覆盖 _DL_MODEL_TYPES，mlp 例外（B2 已覆盖），nativetft 特化

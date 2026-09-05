@@ -17,8 +17,8 @@ export type SplitKey = 'train' | 'val' | 'test';
 export type DealPrice = 'open' | 'close';
 export type TimePeriodMap = Record<SplitKey, [Dayjs, Dayjs]>;
 
-// 模型类型定义
-export type ModelType = 'lightgbm' | 'xgboost' | 'catboost' | 'linear' | 'random_forest' | 'gru' | 'lstm' | 'alstm' | 'transformer' | 'tabnet' | 'tcn' | 'nativetft' | 'mlp' | 'hybrid_gru_tree';
+// 模型类型定义（hybrid_gru_tree：QLIB map 无实现，已剔除）
+export type ModelType = 'lightgbm' | 'xgboost' | 'catboost' | 'linear' | 'random_forest' | 'gru' | 'lstm' | 'alstm' | 'transformer' | 'tabnet' | 'tcn' | 'nativetft' | 'mlp';
 export type ModelCategory = 'tree' | 'linear' | 'deep_learning';
 
 export interface ModelTypeOption {

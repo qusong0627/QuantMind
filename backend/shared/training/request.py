@@ -36,7 +36,8 @@ ALLOWED_MODEL_TYPES = frozenset(
         "tcn",
         "nativetft",
         "mlp",
-        "hybrid_gru_tree",
+        # hybrid_gru_tree：QLIB map 无实现，标准入口不可训练（2026-09 实测 KeyError），
+        # 已从可选项剔除；有专用管线实现后再加回。
     }
 )
 ALLOWED_TARGET_MODE = {"return", "classification"}

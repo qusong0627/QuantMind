@@ -34,7 +34,7 @@ ModelType = Literal[
     "tabnet",
     "tcn",
     "nativetft",
-    "hybrid_gru_tree",
+    # hybrid_gru_tree：QLIB map 无实现，已从可选项剔除（见 request.ALLOWED_MODEL_TYPES）。
 ]
 
 

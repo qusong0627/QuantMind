@@ -27,9 +27,9 @@ logger = logging.getLogger("quantmind.train")
 
 _TREE_MODEL_TYPES = {"lightgbm", "xgboost", "catboost", "linear", "random_forest"}
 
-_DL_MODEL_TYPES = {"gru", "lstm", "alstm", "transformer", "tabnet", "tcn", "nativetft", "mlp", "hybrid_gru_tree"}
+_DL_MODEL_TYPES = {"gru", "lstm", "alstm", "transformer", "tabnet", "tcn", "nativetft", "mlp"}
 
-_CUSTOM_DL_MODEL_TYPES = {"nativetft", "mlp", "hybrid_gru_tree"}  # 非 Qlib 的自定义 DL 模型
+_CUSTOM_DL_MODEL_TYPES = {"nativetft", "mlp"}  # 非 Qlib 的自定义 DL 模型（hybrid 已剔除，未实现）
 
 _ALL_MODEL_TYPES = _TREE_MODEL_TYPES | _DL_MODEL_TYPES
 
