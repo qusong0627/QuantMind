@@ -262,6 +262,47 @@ cat /proc/loadavg 2>/dev/null | awk '{print $1}'
             "host": node.get("host"),
             "online": False,
         }
+        # 免 Docker 节点(executor=process):探测包内 runtime 与数据根,不走 docker
+        if str(node.get("executor") or "").lower() == "process":
+            pack_root = str(node.get("pack_root") or "")
+            runtime = str(node.get("runtime_python") or "").strip() or (
+                f"{pack_root}/runtime/bin/python3" if pack_root else ""
+            )
+            if not runtime:
+                result["error"] = "executor=process 节点缺少 pack_root/runtime_python"
+                return cls.assess_readiness(result)
+            probe = (
+                f"echo ===SYS===; {runtime} --version 2>&1 | head -1; nproc; "
+                f"echo ===DOCKER===; echo no-docker; echo ===NET===; cat /proc/loadavg 2>/dev/null | awk '{{print $1}}'"
+            )
+            proc = await asyncio.create_subprocess_exec(
+                *cls._build_ssh(node),
+                probe,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=cls._SSH_TIMEOUT)
+            except asyncio.TimeoutError:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+                result["error"] = "SSH 连接超时"
+                return cls.assess_readiness(result)
+            if proc.returncode not in (0, None):
+                result["error"] = (stderr or stdout).decode(errors="replace")[:200]
+                return cls.assess_readiness(result)
+            out = stdout.decode(errors="replace")
+            if "Python" not in out:
+                result["error"] = "包内 runtime python 探测失败"
+                return cls.assess_readiness(result)
+            result["online"] = True
+            result["gpus"] = []
+            result["containers"] = []
+            result["training_active"] = False
+            result["runtime"] = next((l for l in out.splitlines() if "Python" in l), "").strip()
+            return cls.assess_readiness(result)
         proc = await asyncio.create_subprocess_exec(
             *cls._build_ssh(node),
             cls._COLLECT_CMD,

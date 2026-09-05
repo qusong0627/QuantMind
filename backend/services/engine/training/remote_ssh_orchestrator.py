@@ -308,8 +308,27 @@ class RemoteSSHOrchestrator(TrainingOrchestrator):
             await _set_parent("failed", 0, f"[MH] 多周期远程训练失败: {exc}\n")
 
     async def test_connection(self) -> dict:
-        """测试 SSH 连接 + 远端 docker 可用性。"""
+        """测试 SSH 连接 + 远端执行环境(docker 或免 Docker runtime)。"""
         results = {}
+        if self.executor == "process":
+            runtime = self._process_runtime()
+            env_sh = self._process_env_file()
+            cmd = (
+                f"echo OK && {{ [ -f {env_sh} ] && . {env_sh} || true; }} && "
+                f"{runtime} --version 2>&1 | head -1 && "
+                f"test -f {self.pack_root}/sync_factors.sh && echo sync_factors=OK"
+            )
+            code, out, err = await self._ssh_exec(cmd)
+            results["ssh"] = code == 0 and "OK" in out
+            results["docker"] = False
+            results["runtime"] = code == 0 and "Python" in (out + err)
+            if code == 0:
+                results["host"] = self.host
+                results["detail"] = (out + err).strip()
+            else:
+                results["error"] = (err or out).strip()
+            return results
+
         code, out, err = await self._ssh_exec("echo OK && docker --version 2>&1 | head -1")
         results["ssh"] = code == 0 and "OK" in out
         results["docker"] = code == 0 and "Docker" in (out + err)
