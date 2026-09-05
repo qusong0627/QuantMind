@@ -186,9 +186,12 @@ def _train_catboost(cfg: dict, features: list[str], X_train: np.ndarray, y_train
     params["thread_count"] = _TRAIN_NTHREAD
     # 可复现性：注入全局 seed
     params.setdefault("random_seed", int((cfg.get("seed") or 42)))
-    # iterations 覆盖 num_boost_round
+    # iterations 覆盖 num_boost_round；CatBoost 禁止 iterations/num_boost_round/
+    # n_estimators/num_trees 并存，用户显式传入冲突键时一律清掉（否则直接抛错）。
     if "iterations" not in model_cfg.get("catboost_params", {}):
         params["iterations"] = int(model_cfg.get("num_boost_round", 1000))
+    for _conflict_key in ("num_boost_round", "n_estimators", "num_trees"):
+        params.pop(_conflict_key, None)
 
     # 识别类别特征（ind_code_l1 等）
     cat_feature_indices = []
