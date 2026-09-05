@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import shlex
 from pathlib import Path
 from typing import Any
 
@@ -262,19 +263,37 @@ cat /proc/loadavg 2>/dev/null | awk '{print $1}'
             "host": node.get("host"),
             "online": False,
         }
-        # 免 Docker 节点(executor=process):探测包内 runtime 与数据根,不走 docker
+        # 免 Docker 节点(executor=process):探测包内 runtime/GPU/活跃训练任务
         if str(node.get("executor") or "").lower() == "process":
             pack_root = str(node.get("pack_root") or "")
             runtime = str(node.get("runtime_python") or "").strip() or (
                 f"{pack_root}/runtime/bin/python3" if pack_root else ""
             )
+            work_dir = str(node.get("work_dir") or "")
             if not runtime:
                 result["error"] = "executor=process 节点缺少 pack_root/runtime_python"
                 return cls.assess_readiness(result)
+            # GPU 探测与容器版同款(PATH 前置防极简 PATH 漏 nvidia-smi);
+            # 活跃任务 = 该节点 work_dir 下正在跑的 train.py(进程级,非 docker ps)
             probe = (
-                f"echo ===SYS===; {runtime} --version 2>&1 | head -1; nproc; "
-                f"echo ===DOCKER===; echo no-docker; echo ===NET===; cat /proc/loadavg 2>/dev/null | awk '{{print $1}}'"
+                "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH; "
+                "echo ===SYS===; "
+                f"{shlex.quote(runtime)} --version 2>&1 | head -1; nproc; "
+                "echo ===GPU===; "
+                "if command -v nvidia-smi >/dev/null 2>&1; then "
+                "  nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total,temperature.gpu,name "
+                "    --format=csv,noheader,nounits 2>&1 || echo gpu-error; "
+                "else echo no-gpu; fi; "
+                "echo ===DOCKER===; "
             )
+            if work_dir:
+                probe += (
+                    f"if ps -ef | grep -v grep | grep -q 'train.py --config {shlex.quote(work_dir)}/'; "
+                    "then echo 'local-run|running'; else echo no-docker; fi; "
+                )
+            else:
+                probe += "echo no-docker; "
+            probe += "echo ===NET===; cat /proc/loadavg 2>/dev/null | awk '{print $1}'"
             proc = await asyncio.create_subprocess_exec(
                 *cls._build_ssh(node),
                 probe,
@@ -297,12 +316,8 @@ cat /proc/loadavg 2>/dev/null | awk '{print $1}'
             if "Python" not in out:
                 result["error"] = "包内 runtime python 探测失败"
                 return cls.assess_readiness(result)
-            result["online"] = True
-            result["gpus"] = []
-            result["containers"] = []
-            result["training_active"] = False
-            result["runtime"] = next((l for l in out.splitlines() if "Python" in l), "").strip()
-            return cls.assess_readiness(result)
+            # 与容器版同走 _parse:GPU 列表/活跃任务/readiness 标签统一解析
+            return cls._parse(out, result)
         proc = await asyncio.create_subprocess_exec(
             *cls._build_ssh(node),
             cls._COLLECT_CMD,
