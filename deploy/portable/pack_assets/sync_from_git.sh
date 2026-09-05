@@ -19,12 +19,19 @@
 set -u
 cd "$(dirname "$0")" || exit 1
 PACK="$(pwd)"
-REPO="${QM_REPO_ROOT:-$HOME/quantmind-src}"
 BRANCH="${QM_SYNC_BRANCH:-main}"
+REPO=""
+# auto-detect: env > home > sibling-next-to-package
+for cand in "${QM_REPO_ROOT:-}" "$HOME/quantmind-src" "$HOME/QuantMind" "/opt/quantmind-src" "$PACK/../quantmind-src" "$PACK/../QuantMind"; do
+    if [ -n "$cand" ] && [ -d "$cand/.git" ]; then REPO="$cand"; break; fi
+done
 
-if [ ! -d "$REPO/.git" ]; then
-    echo "[!] git repo not found at $REPO"
-    echo "    Edit REPO in this file or: export QM_REPO_ROOT=/path/to/quantmind"
+if [ -z "$REPO" ]; then
+    echo "[!] no git repo auto-detected."
+    echo "    Easiest: clone next to the package, e.g."
+    echo "      cd $PACK/.."
+    echo "      git clone -b main --single-branch https://gitee.com/qusong0627/QuantMind.git quantmind-src"
+    echo "    then run this script again. Or: export QM_REPO_ROOT=/path/to/quantmind"
     exit 1
 fi
 

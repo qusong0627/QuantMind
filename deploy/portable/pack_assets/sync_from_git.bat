@@ -4,13 +4,20 @@ setlocal
 cd /d "%~dp0"
 set "PACK=%CD%"
 set "BRANCH=main"
-set "REPO=C:\QuantMind-src"
-if defined QM_REPO_ROOT set "REPO=%QM_REPO_ROOT%"
+set "REPO="
+rem auto-detect: env > user home > common path > next to package
+for %%R in ("%QM_REPO_ROOT%" "%USERPROFILE%\quantmind-src" "%USERPROFILE%\QuantMind" "C:\QuantMind-src" "%PACK%\..\quantmind-src" "%PACK%\..\QuantMind" "%PACK%\..\src\quantmind-src") do (
+    if exist "%%~fR\.git" set "REPO=%%~fR"
+)
 echo [sync] begin - pack: %PACK%
-
-if exist "%REPO%\.git" goto :repo_ok
-echo [!] git repo not found at %REPO%
-echo     Edit REPO line in this file, or run:  set QM_REPO_ROOT=C:\path\to\quantmind
+if defined REPO goto :repo_ok
+echo [!] no git repo auto-detected.
+echo     Clones tried: QM_REPO_ROOT / user home / C:\QuantMind-src /
+echo     a quantmind-src folder NEXT TO this package.
+echo     Easiest: clone next to the package, e.g.
+echo       cd /d %PACK%\..
+echo       git clone -b main --single-branch https://gitee.com/qusong0627/QuantMind.git quantmind-src
+echo     then run this file again. Or set QM_REPO_ROOT to your clone.
 pause
 exit /b 1
 :repo_ok
