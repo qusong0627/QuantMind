@@ -171,6 +171,10 @@ echo   Backup       : backups\code-backup
 echo   History      : logs\sync_history.log
 echo ============================================
 echo [sync] Done. Restart with start.bat
+rem customer update zips (repo deploy\portable\updates): mirror into package updates\
+mkdir "%PACK%\updates" 2>nul
+if exist "%REPO%\deploy\portable\updates\*.zip" copy /Y "%REPO%\deploy\portable\updates\*.zip" "%PACK%\updates\" >nul
+echo [sync] customer update zips mirrored to updates\
 echo [sync] Start failed? Restore the previous working code:
 echo        double-click restore_backup.bat, then start.bat again
 pause

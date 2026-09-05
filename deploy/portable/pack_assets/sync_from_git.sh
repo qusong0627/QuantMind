@@ -140,6 +140,16 @@ else
     echo "[sync] note: repo has no web/index.html - frontend sync skipped"
 fi
 
+# 客户更新件（增量补丁 zip，随仓库 updates/ 分发）：镜像到包内 updates/
+# 目录，部署机可直接取件发客户，无需从 git 深处翻找
+mkdir -p "$PACK/updates"
+if ls "$REPO"/deploy/portable/updates/*.zip >/dev/null 2>&1; then
+    cp -f "$REPO"/deploy/portable/updates/*.zip "$PACK/updates/" 2>/dev/null
+    echo "[sync] customer update zips mirrored ($(ls "$PACK"/updates/*.zip 2>/dev/null | wc -l) files)"
+else
+    echo "[sync] note: repo deploy/portable/updates has no zip"
+fi
+
 echo "[sync] clearing __pycache__ ..."
 find "$PACK/backend" -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || true
 
