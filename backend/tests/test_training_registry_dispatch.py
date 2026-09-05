@@ -118,3 +118,105 @@ def test_fallback_switch_and_error_path_exist():
         and n.func.id == "_use_old_dispatch"
         for n in ast.walk(funcs["_dispatch_gbdt_sklearn"])
     )
+
+
+# ── B3：DL/TFT 组 ──────────────────────────────────────────────────────────
+
+DL_DIRECT = {"_train_dl", "_train_nativetft"}
+
+
+def _parse_dl_model_types(tree: ast.Module) -> set[str]:
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and any(
+            isinstance(t, ast.Name) and t.id == "_DL_MODEL_TYPES" for t in node.targets
+        ):
+            return {e.value for e in node.value.elts if isinstance(e, ast.Constant)}
+    raise AssertionError("_DL_MODEL_TYPES not found")
+
+
+def _dispatch_dl_calls(fn: ast.FunctionDef) -> list[ast.Call]:
+    return [
+        n
+        for n in ast.walk(fn)
+        if isinstance(n, ast.Call)
+        and isinstance(n.func, ast.Name)
+        and n.func.id == "_dispatch_dl"
+    ]
+
+
+def _direct_dl_calls(fn: ast.FunctionDef) -> set[str]:
+    return {
+        n.func.id
+        for n in ast.walk(fn)
+        if isinstance(n, ast.Call)
+        and isinstance(n.func, ast.Name)
+        and n.func.id in DL_DIRECT
+    }
+
+
+def test_registry_loop_covers_all_dl_minus_mlp():
+    tree = _load_tree()
+    dl_types = _parse_dl_model_types(tree)
+    assert dl_types == {
+        "gru",
+        "lstm",
+        "alstm",
+        "transformer",
+        "tabnet",
+        "tcn",
+        "nativetft",
+        "mlp",
+        "hybrid_gru_tree",
+    }
+    src = TRAIN_PY.read_text(encoding="utf-8")
+    # 注册循环：自动覆盖 _DL_MODEL_TYPES，mlp 例外（B2 已覆盖），nativetft 特化
+    assert "for _dl_name in sorted(_DL_MODEL_TYPES)" in src
+    assert 'if _dl_name == "mlp"' in src
+    assert '"nativetft" if _dl_name == "nativetft" else "dl"' in src
+    funcs = _funcs(tree)
+    assert "DLAdapter" in [
+        n.name for n in ast.walk(tree) if isinstance(n, ast.ClassDef)
+    ]
+    adapter = next(
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, ast.ClassDef) and n.name == "DLAdapter"
+    )
+    methods = {n.name for n in adapter.body if isinstance(n, ast.FunctionDef)}
+    assert {"run_nativetft", "run_dl"} <= methods
+    assert "_dispatch_dl" in funcs
+
+
+def test_dl_dispatch_sites_have_correct_single_flags():
+    funcs = _funcs(_load_tree())
+    for fname, want_single in (("train_model", False), ("_train_single_model", True)):
+        calls = _dispatch_dl_calls(funcs[fname])
+        assert len(calls) == 2, (fname, len(calls))
+        for call in calls:
+            kw = {k.arg: k.value for k in call.keywords}
+            assert (
+                isinstance(kw["single"], ast.Constant)
+                and kw["single"].value is want_single
+            )
+            assert isinstance(kw["t_start"], ast.Name)
+        # fallback 原体保留：直接 _train_dl/_train_nativetft 调用仍在
+        assert _direct_dl_calls(funcs[fname]) == DL_DIRECT, fname
+
+
+def test_dl_dispatch_rejects_non_dl():
+    funcs = _funcs(_load_tree())
+    disp = funcs["_dispatch_dl"]
+    assert any(isinstance(n, ast.Raise) for n in ast.walk(disp))
+    assert (
+        any(
+            isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Name)
+            and n.func.id == "_dispatch_dl"
+            for n in ast.walk(disp)
+        )
+        is False
+    )  # 无递归
+    # adapter 内复用单点预测/落盘，不自行落盘
+    src = TRAIN_PY.read_text(encoding="utf-8")
+    adapter_src = src[src.index("class DLAdapter:") : src.index("def _dispatch_dl(")]
+    assert "_save_model" not in adapter_src
