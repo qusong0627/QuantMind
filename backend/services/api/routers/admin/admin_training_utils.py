@@ -423,6 +423,10 @@ def _normalize_payload(payload: dict[str, Any], allowed_features: list[str]) -> 
         normalized["factor_catalog_published_at"] = str(payload.get("factor_catalog_published_at") or "")
         normalized["factor_coverage"] = dict(payload.get("factor_coverage") or {})
 
+    # 训练起止（split gap 推导用； TrainingRequest 已校验可解析，此处不再抛错）
+    dt_train_start = _parse_date(req.train_start, "train_start")
+    dt_train_end = _parse_date(req.train_end, "train_end")
+
     explicit_fields = ["valid_start", "valid_end", "test_start", "test_end"]
     has_explicit_split = any(payload.get(k) for k in explicit_fields)
     if has_explicit_split:
