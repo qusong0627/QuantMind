@@ -20,6 +20,15 @@ set -u
 cd "$(dirname "$0")" || exit 1
 PACK="$(pwd)"
 BRANCH="${QM_SYNC_BRANCH:-master}"
+URL="${QM_REPO_URL:-https://gitee.com/qusong0627/QuantMind.git}"
+BEFORE="" N_COMMITS=0 N_FILES=0
+# write permission pre-check
+if ! touch "$PACK/.qm_write_test" 2>/dev/null; then
+    echo "[!] CANNOT WRITE to package folder - read-only or locked."
+    echo "    Move the package to a normal local folder and retry."
+    exit 1
+fi
+rm -f "$PACK/.qm_write_test"
 REPO=""
 # auto-detect: env > home > sibling-next-to-package
 for cand in "${QM_REPO_ROOT:-}" "$HOME/quantmind-src" "$HOME/QuantMind" "/opt/quantmind-src" "$PACK/../quantmind-src" "$PACK/../QuantMind"; do
@@ -41,22 +50,32 @@ fi
 command -v git >/dev/null 2>&1 || { echo "[!] git install failed - rerun after installing git."; exit 1; }
 
 if [ -z "$REPO" ]; then
-    echo "[!] git is installed, but no repo auto-detected."
-    echo "    Clones tried: QM_REPO_ROOT / ~/quantmind-src / next to package."
-    echo
-    echo "    HOW TO FIX - one-time setup:"
-    echo "      cd $PACK/.."
-    echo "      git clone -b master --single-branch https://gitee.com/qusong0627/QuantMind.git quantmind-src"
-    echo "      (private repo? use the URL the maintainer gave you)"
-    echo "    then run this script again. Or: export QM_REPO_ROOT=/path/to/quantmind"
-    exit 1
+    echo "[sync] no local clone found next to the package."
+    read -r -p "Auto-clone now? [y/n]: " DO_CLONE
+    if [ "$DO_CLONE" = "y" ] || [ "$DO_CLONE" = "Y" ] || [ "$DO_CLONE" = "yes" ]; then
+        echo "[sync] cloning..."
+        git clone -b "$BRANCH" --single-branch "$URL" "$PACK/../quantmind-src" || {
+            echo "[!] clone failed - check internet, or repo needs credentials."
+            echo "    Private repo? ask the maintainer for access or another URL."
+            exit 1; }
+        REPO="$PACK/../quantmind-src"
+    else
+        echo "    Manual clone later:"
+        echo "      cd $PACK/.."
+        echo "      git clone -b $BRANCH --single-branch $URL quantmind-src"
+        echo "    then rerun. Private repo? ask the maintainer."
+        exit 1
+    fi
 fi
 
 echo "[sync] repo: $REPO  branch: $BRANCH"
+BEFORE="$(git -C "$REPO" rev-parse HEAD 2>/dev/null)"
 echo "[sync] pulling latest code ..."
 git -C "$REPO" fetch origin || { echo "[!] fetch failed"; exit 1; }
 git -C "$REPO" checkout "$BRANCH" 2>/dev/null || true
 git -C "$REPO" pull origin "$BRANCH" || { echo "[!] pull failed - check network/credentials"; exit 1; }
+N_COMMITS="$(git -C "$REPO" rev-list --count "${BEFORE}..HEAD" 2>/dev/null || echo 0)"
+N_FILES="$(git -C "$REPO" diff --name-only "${BEFORE}..HEAD" 2>/dev/null | wc -l)"
 
 echo "[sync] stopping services ..."
 if [ -x "$PACK/stop.sh" ]; then
@@ -78,6 +97,15 @@ done
 echo "[sync] clearing __pycache__ ..."
 find "$PACK/backend" -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || true
 
+mkdir -p "$PACK/logs"
+echo "$(date '+%F %T') | commits=$N_COMMITS files=$N_FILES" >> "$PACK/logs/sync_history.log"
 echo
+echo "============================================"
+echo "[sync] UPDATE SUMMARY"
+if [ "$N_COMMITS" = "0" ]; then echo "  No new commits - already up to date."; fi
+if [ "$N_COMMITS" != "0" ]; then echo "  New commits : $N_COMMITS"; fi
+echo "  Files changed : $N_FILES"
+echo "  History      : logs/sync_history.log"
+echo "============================================"
 echo "[sync] Done. Restart with: ./start.sh"
 echo "[sync] UI updates? sync web/ from the maintainer or rebuild dist-react."
