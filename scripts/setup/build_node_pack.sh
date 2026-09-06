@@ -129,6 +129,10 @@ PACK="$(cd "$(dirname "$0")" && pwd)"
 RUNTIME="${PACK}/runtime/python/bin/python3"
 [ -x "$RUNTIME" ] || RUNTIME="${PACK}/runtime/bin/python3"
 cd "$WORK" || exit 2
+# 清理上次训练残留,防止编排器把旧 result.json 误判为本次成功
+rm -f "${WORK}/result.json" "${WORK}/train.pid" "${WORK}/train.log" \
+      "${WORK}"/model.* "${WORK}"/pred.* "${WORK}"/metadata.json \
+      "${WORK}"/inference.py "${WORK}"/shap_summary.csv 2>/dev/null || true
 [ -f "${PACK}/train_env.sh" ] && . "${PACK}/train_env.sh" || true
 PYTHONPATH="${WORK}:${PACK}" TRAINING_WORKSPACE_DIR="${WORK}" setsid "$RUNTIME" "${WORK}/train.py" --config "${WORK}/config.yaml" > "${WORK}/train.log" 2>&1 < /dev/null &
 echo $! > "${WORK}/train.pid"

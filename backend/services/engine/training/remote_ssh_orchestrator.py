@@ -589,17 +589,26 @@ class RemoteSSHOrchestrator(TrainingOrchestrator):
                     await asyncio.sleep(self._POLL_INTERVAL)
                     continue
 
-                # 进程已结束：以 result.json 判定成败（与容器 exit_code=0 语义一致）
-                has_code, has_out, _ = await self._ssh_exec(
-                    f"test -f {work}/result.json && echo Y || echo N", timeout=60
+                # 进程已结束:以 result.json 且 run_id 匹配本次判定成败
+                # (防止 workspace 残留的旧 result.json 造成误判成功)
+                check_cmd = (
+                    f"grep -q '\"run_id\": \"{run_id}\"' {work}/result.json 2>/dev/null "
+                    f"&& echo Y || echo N"
                 )
-                self._log(run_id, "[SYSTEM] 远端训练进程已结束，处理产物...", status="waiting_callback", progress=95)
-                await self._pull_artifacts(run_id)
-                if "Y" in (has_out or ""):
+                has_code, has_out, _ = await self._ssh_exec(check_cmd, timeout=60)
+                run_matched = "Y" in (has_out or "")
+                if run_matched:
+                    self._log(run_id, "[SYSTEM] 远端训练进程已结束，拉取并注册产物...", status="waiting_callback", progress=95)
+                    await self._pull_artifacts(run_id)
                     self._log(run_id, "[SYSTEM] 模型产物已回传，等待模型注册...", progress=97)
                     await self._trigger_registration(run_id)
                 else:
-                    self._log(run_id, "[ERROR] 远端训练未产出 result.json，判定失败", status="failed", progress=0)
+                    self._log(
+                        run_id,
+                        "[ERROR] 远端训练结束但 result.json 缺失或 run_id 不匹配(可能被中断/残留旧产物),判定失败",
+                        status="failed",
+                        progress=0,
+                    )
                 await self._ssh_exec(f"rm -f {work}/train.pid 2>/dev/null || true", timeout=60)
                 return
         except asyncio.CancelledError:
