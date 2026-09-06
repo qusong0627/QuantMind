@@ -98,16 +98,18 @@ const WorkflowSummary: React.FC<{ model: ModelDirectoryInfo }> = ({ model }) => 
             <Descriptions.Item label="策略类">{port}</Descriptions.Item>
             <Descriptions.Item label="训练开始">{model.train_start || '—'}</Descriptions.Item>
             <Descriptions.Item label="训练结束">{model.train_end || '—'}</Descriptions.Item>
-            <Descriptions.Item label="训练目标">
+            <Descriptions.Item label="训练目标" style={{ textAlign: 'center' }} contentStyle={{ textAlign: 'center' }}>
                 {targetMeta.horizonDays ? (
-                    <Space size={4}>
-                        <Tag color="blue" className="m-0 font-bold">
-                            T+{targetMeta.horizonDays}
-                        </Tag>
-                        <span className="text-[10px] text-slate-500">
-                            {targetMeta.targetMode === 'classification' ? '分类' : '回归'}
-                        </span>
-                    </Space>
+                    <div className="flex justify-center">
+                        <Space size={4} align="center">
+                            <Tag color="blue" className="m-0 font-bold">
+                                T+{targetMeta.horizonDays}
+                            </Tag>
+                            <span className="text-[10px] text-slate-500">
+                                {targetMeta.targetMode === 'classification' ? '分类' : '回归'}
+                            </span>
+                        </Space>
+                    </div>
                 ) : '—'}
             </Descriptions.Item>
             <Descriptions.Item label="标签公式">
@@ -374,6 +376,7 @@ export const AdminModelManagement: React.FC = () => {
         {
             title: '训练目标',
             key: 'target',
+            align: 'center' as const,
             render: (_: any, r: ModelDirectoryInfo) => {
                 const targetMeta = resolveTrainingTargetMeta(r.metadata);
                 if (!targetMeta.horizonDays) {
@@ -381,15 +384,15 @@ export const AdminModelManagement: React.FC = () => {
                 }
 
                 return (
-                    <div className="flex flex-col gap-1">
-                        <Tag color="blue" className="m-0 w-fit font-bold">
+                    <div className="flex flex-col gap-1 items-center text-center">
+                        <Tag color="blue" className="m-0 font-bold">
                             T+{targetMeta.horizonDays}
                         </Tag>
                         <span className="text-[10px] text-slate-500">
                             {targetMeta.targetMode === 'classification' ? '分类' : '回归'}
                         </span>
                         {targetMeta.labelFormula && (
-                            <Text code className="text-[10px] break-all">
+                            <Text code className="text-[10px] break-all text-center">
                                 {targetMeta.labelFormula}
                             </Text>
                         )}
@@ -808,18 +811,20 @@ export const AdminModelManagement: React.FC = () => {
                                     return opt && opt.value !== 'all' ? <Tag color={opt.color}>{opt.label}</Tag> : '—';
                                 })()}
                             </Descriptions.Item>
-                            <Descriptions.Item label="训练目标">
+                            <Descriptions.Item label="训练目标" style={{ textAlign: 'center' }} contentStyle={{ textAlign: 'center' }}>
                                 {(() => {
                                     const targetMeta = resolveTrainingTargetMeta(detailModel.metadata);
                                     return targetMeta.horizonDays ? (
-                                        <Space size={4}>
-                                            <Tag color="blue" className="m-0 font-bold">
-                                                T+{targetMeta.horizonDays}
-                                            </Tag>
-                                            <span className="text-[10px] text-slate-500">
-                                                {targetMeta.targetMode === 'classification' ? '分类' : '回归'}
-                                            </span>
-                                        </Space>
+                                        <div className="flex justify-center">
+                                            <Space size={4} align="center">
+                                                <Tag color="blue" className="m-0 font-bold">
+                                                    T+{targetMeta.horizonDays}
+                                                </Tag>
+                                                <span className="text-[10px] text-slate-500">
+                                                    {targetMeta.targetMode === 'classification' ? '分类' : '回归'}
+                                                </span>
+                                            </Space>
+                                        </div>
                                     ) : '—';
                                 })()}
                             </Descriptions.Item>

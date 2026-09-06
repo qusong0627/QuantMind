@@ -26,6 +26,8 @@ def merge_signals_into_pred(
     - 临时文件 + 原子替换，避免并发读到半写文件
     - 默认不凭单日数据创建残缺历史（create_if_missing=False 时文件
       不存在直接返回 0）
+    - 合并的同时刷新「按日物化分片」（pred_daily/dt=YYYYMMDD/data.parquet），
+      供投研平台按日直读单日截面，避免重复全文件扫描
 
     返回本次写入的行数。
     """
@@ -95,4 +97,48 @@ def merge_signals_into_pred(
             con.close()
         except Exception:
             pass
+
+    # 刷新按日物化分片：合并后的当日截面直接落盘，投研平台无需再从全量重提。
+    _refresh_pred_daily(parquet_file, new_df)
     return len(new_df)
+
+
+def _refresh_pred_daily(parquet_file: Path, new_df) -> None:
+    """把本次写入的每日截面刷新到 pred_daily/dt=YYYYMMDD/data.parquet。
+
+    物化分片是投研平台的读取加速层（惰性物化 + 推理合并后主动刷新），
+    仅保存 symbol/pred 两列，已剔除 B 股/北交所/指数（与投研口径一致）。
+    """
+    import os
+    import tempfile
+
+    import pandas as pd
+
+    if new_df.empty or "trade_date" not in new_df.columns:
+        return
+    daily_dir = parquet_file.parent / "pred_daily"
+    for d, grp in new_df.groupby(new_df["trade_date"].dt.normalize()):
+        date_str = d.strftime("%Y-%m-%d")
+        rows = []
+        for _, r in grp.iterrows():
+            sym = str(r.get("symbol", ""))
+            if not re.match(r"^(SH|SZ|BJ)\d{6}$", sym):
+                continue
+            if sym.startswith("SH000") or sym.startswith("SZ399"):
+                continue
+            if sym.startswith("SH900") or sym.startswith("SZ200"):
+                continue
+            if sym.startswith("BJ"):
+                continue
+            pred_val = r.get("pred")
+            if pred_val is None or (isinstance(pred_val, float) and pd.isna(pred_val)):
+                continue
+            rows.append({"symbol": sym, "score": float(pred_val)})
+        if not rows:
+            continue
+        part = daily_dir / f"dt={date_str.replace('-', '')}" / "data.parquet"
+        part.parent.mkdir(parents=True, exist_ok=True)
+        tmp_fd, tmp_path = tempfile.mkstemp(dir=str(part.parent), suffix=".parquet.tmp")
+        os.close(tmp_fd)
+        pd.DataFrame(rows).to_parquet(tmp_path, index=False)
+        os.replace(tmp_path, str(part))

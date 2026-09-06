@@ -41,7 +41,15 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-require_root() { [[ $EUID -eq 0 ]] || die '请使用 sudo 执行'; }
+require_root() {
+    if [[ $EUID -eq 0 ]]; then return; fi
+    # 无 sudo 时：若用户在 docker 组且对项目目录可写，仅告警后继续；否则再阻断
+    if groups 2>/dev/null | grep -qw docker && [[ -w "$PROJECT_DIR" ]] && docker ps >/dev/null 2>&1; then
+        log "提示: 未使用 sudo，但检测到 docker 权限正常，继续执行"
+        return
+    fi
+    log "提示: 未使用 sudo 且 docker 权限不足，尝试继续（失败请改用 sudo 或将用户加入 docker 组）"
+}
 require_project() {
     [[ -d "$PROJECT_DIR/.git" ]] || die "不是 Git 部署目录: $PROJECT_DIR"
     [[ -f "$PROJECT_DIR/docker-compose.yml" ]] || die "缺少 docker-compose.yml: $PROJECT_DIR"
@@ -67,7 +75,7 @@ backup_database() {
     # 从 .env 读库凭据（脚本自身环境变量里 DB_PASSWORD 几乎必为空，须显式加载 .env）
     pg_user="$(grep -E '^DB_USER=' "$PROJECT_DIR/.env" 2>/dev/null | head -1 | cut -d= -f2- | tr -d \"\' || echo quantmind)"
     pg_db="$(grep -E '^DB_NAME=' "$PROJECT_DIR/.env" 2>/dev/null | head -1 | cut -d= -f2- | tr -d \"\' || echo quantmind)"
-    pg_pass="$(grep -E '^(DB_PASSWORD|POSTGRES_PASSWORD)=' "$PROJECT_DIR/.env" 2>/dev/null | head -1 | cut -d= -f2- | tr -d \"\' | head -c 200)"
+    pg_pass="$(grep -E '^(DB_PASSWORD|POSTGRES_PASSWORD)=' "$PROJECT_DIR/.env" 2>/dev/null | head -1 | cut -d= -f2- | tr -d \"\' | head -c 200 || echo '')"
     if [[ -z "$pg_pass" ]]; then
         pg_pass="${POSTGRES_PASSWORD:-${DB_PASSWORD:-quantmind2026}}"
     fi
@@ -345,8 +353,11 @@ main() {
 
     # 健康检查：API + celery worker/beat 均就绪才算升级成功。
     # 仅 curl API 不充分——API 可能 200 而 celery 起崩。
+    # 时序注意：容器是 --force-recreate 重建，celery healthcheck 为
+    # StartPeriod=60s + Interval=30s + Retries=3，最坏 ~150s 才判 healthy，
+    # 因此等待窗口必须 ≥ 180s，否则升级成功后仍会误报"未就绪"。
     local attempt
-    for attempt in {1..30}; do
+    for attempt in {1..90}; do
         # 容器带 healthcheck 时校验为 healthy；无 healthcheck 的基础设施（db/redis）不校验
         local hk
         api_ok=false; celery_ok=false; beat_ok=false
@@ -373,7 +384,7 @@ main() {
     if [[ "$(docker inspect --format '{{.State.Health.Status}}' quantmind-db 2>/dev/null)" != "healthy" ]]; then
         docker logs --tail 50 quantmind-db >&2 || true
     fi
-    die 'API/celery 未在 60s 内就绪，请根据上述日志排查'
+    die 'API/celery 未在 180s 内就绪，请根据上述日志排查'
 }
 
 main

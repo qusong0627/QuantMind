@@ -9,7 +9,7 @@ import { useNavigate } from 'react-router-dom';
 import { StockListItem, StockProfile, KlineBar } from '../../types';
 import { stockTerminalService } from '../../services/stockTerminalService';
 import { researchService } from '../../../../services/researchService';
-import { KlineChart, IndicatorConfig, IndexOverlay, SignalPoint, ScoreSeries, TradeMarker, RefLine, AlertPoint, OVERLAY_COLORS, SubplotType } from './KlineChart';
+import { KlineChart, IndicatorConfig, IndexOverlay, SignalPoint, ScoreSeries, TradeMarker, RefLine, OVERLAY_COLORS, SubplotType } from './KlineChart';
 import { KlineReplay } from './KlineReplay';
 import { ChartBacktestPanel, ChartBacktestData } from '../ChartBacktestPanel';
 import { toPrefix } from '../StockSidebar';
@@ -73,7 +73,7 @@ export function KlineWorkspace({ stock, profile, height = 460, onSelectStock }: 
   // 参考线（按模型 localStorage 持久化）
   const [refLines, setRefLines] = useState<RefLine[]>([]);
   const [refLineModal, setRefLineModal] = useState(false);
-  const [newRefLine, setNewRefLine] = useState({ value: 0.1, label: '可买', color: '#10b981' });
+  const [newRefLine, setNewRefLine] = useState({ value: 0.1, label: '', color: '#10b981' });
   // 股票导航：上一股/下一股（分数降序列表）+ 搜索
   const [navList, setNavList] = useState<StockListItem[]>([]);
   const [searchText, setSearchText] = useState('');
@@ -337,74 +337,11 @@ export function KlineWorkspace({ stock, profile, height = 460, onSelectStock }: 
   // 当前模型分数序列（策略统计/提醒基于第一条活跃模型）
   const primaryScores = activeScoreSeries.length ? activeScoreSeries[0].points : [];
 
-  // 策略提醒规则引擎（选股策略 v2.0，同 StockScoreChart）
-  const strategyAlerts = useMemo<AlertPoint[]>(() => {
-    const sorted = primaryScores
-      .filter(p => p.fusion !== null && p.fusion !== undefined)
-      .sort((a, b) => a.date.localeCompare(b.date));
-    const board = stock.board || '';
-    const isMainBoard = board.includes('主板');
-    const negTag = (() => {
-      const last = sorted[sorted.length - 1];
-      return last && last.fusion !== null && last.fusion <= -0.20 ? '极端负分' : '';
-    })();
-    const out: AlertPoint[] = [];
-    for (let i = 0; i < sorted.length; i++) {
-      const sc = Number(sorted[i].fusion);
-      const date = sorted[i].date;
-      const prev = i > 0 ? Number(sorted[i - 1].fusion) : null;
-      const next = i < sorted.length - 1 ? Number(sorted[i + 1].fusion) : null;
-      // 第1组：分数区间
-      if (sc >= 0.10 && sc < 0.12) {
-        out.push({ date, severity: 'positive', message: isMainBoard ? '黄金买入区间（0.10-0.12·主板）' : '黄金区间（0.10-0.12）', score: sc });
-      } else if (sc >= 0.12 && sc < 0.15) {
-        out.push({ date, severity: 'warning', message: '可选但警惕追高（0.12-0.15）', score: sc });
-      } else if (sc >= 0.15 && sc < 0.20) {
-        out.push({ date, severity: 'warning', message: '高分谨慎区（0.15-0.20）', score: sc });
-      } else if (sc >= 0.20) {
-        out.push({ date, severity: 'danger', message: '极端高分，样本极少，勿追', score: sc });
-      } else if (sc <= -0.20) {
-        out.push({ date, severity: 'danger', message: '极端负分（≤-0.20）', score: sc });
-      } else if (sc <= -0.15) {
-        out.push({ date, severity: 'danger', message: '负分做空候选（≤-0.15）', score: sc });
-      }
-      // 第2组：3天趋势
-      if (prev !== null && next !== null) {
-        if (prev < sc && sc > next) out.push({ date, severity: 'positive', message: '先升后降·最佳买点', score: sc });
-        else if (prev < sc && sc < next) out.push({ date, severity: 'warning', message: '连续上升·过热不追', score: sc });
-        else if (prev > sc && sc > next) out.push({ date, severity: 'info', message: '连续下降·信号衰退', score: sc });
-      }
-      // 第3组：市值分档 + 负分
-      if (sc <= -0.15 && capTier === '微盘') out.push({ date, severity: 'danger', message: '微盘+负分·做空首选（下跌概率68-72%）', score: sc });
-      else if (sc <= -0.15 && capTier === '大盘') out.push({ date, severity: 'info', message: '大盘+负分·可能错杀，关注', score: sc });
-      if (negTag === '极端负分' && capTier === '微盘') out.push({ date, severity: 'danger', message: '极端负分微盘·下跌概率77.7%', score: sc });
-      // 第4组：板块过滤
-      if (board.includes('科创') && sc >= 0.15) out.push({ date, severity: 'warning', message: '科创板高分不追（胜率仅47%）', score: sc });
-      else if (board.includes('北交')) out.push({ date, severity: 'warning', message: '北交所排除·流动性差', score: sc });
-      else if (sc >= 0.12 && sc < 0.20 && !isMainBoard) out.push({ date, severity: 'warning', message: `非主板高分（${board || '未知'}）·谨慎`, score: sc });
-    }
-    // 同日去重：保留 severity 最高的
-    const rank = { danger: 3, warning: 2, positive: 1, info: 0 };
-    const byDate = new Map<string, AlertPoint>();
-    for (const a of out) {
-      const ex = byDate.get(a.date);
-      if (!ex || rank[a.severity] > rank[ex.severity]) byDate.set(a.date, a);
-    }
-    return [...byDate.values()].sort((a, b) => a.date.localeCompare(b.date));
-  }, [primaryScores, stock, capTier]);
 
-  // 策略汇总统计：黄金/危险/负分/买入信号 各多少天
+  // 推理日统计
   const strategySummary = useMemo(() => {
     const scored = primaryScores.filter(p => p.fusion !== null && p.fusion !== undefined);
-    let golden = 0, danger = 0, buyPoint = 0, neg = 0;
-    for (const p of scored) {
-      const sc = Number(p.fusion);
-      if (sc >= 0.10 && sc < 0.12) golden++;
-      if (sc <= -0.15) neg++;
-      if (sc <= -0.20 || sc >= 0.20) danger++;
-      if (p.side?.toUpperCase() === 'BUY') buyPoint++;
-    }
-    return { total: scored.length, golden, danger, buyPoint, neg };
+    return { total: scored.length };
   }, [primaryScores]);
 
   // 当前分数 + 最近推理日
@@ -592,26 +529,14 @@ export function KlineWorkspace({ stock, profile, height = 460, onSelectStock }: 
               <span className="text-slate-400">当前分数</span>
               <b className="font-mono text-indigo-600">{Number(latestScore.fusion).toFixed(4)}</b>
               <span className="text-slate-300">|</span>
-              <Tag color="green" className="m-0 rounded-full text-[9px] font-bold px-2">黄金区间 {strategySummary.golden}天</Tag>
-              <Tag color="volcano" className="m-0 rounded-full text-[9px] font-bold px-2">危险分 {strategySummary.danger}天</Tag>
-              <Tag color="red" className="m-0 rounded-full text-[9px] font-bold px-2">负分 {strategySummary.neg}天</Tag>
-              <Tag color="blue" className="m-0 rounded-full text-[9px] font-bold px-2">买入信号 {strategySummary.buyPoint}天</Tag>
               <span className="text-slate-500">共 <b className="text-slate-700">{strategySummary.total}</b> 推理日</span>
             </>
           )}
           {indexStatus && (
             <>
               <span className="text-slate-300">|</span>
-              <span className={indexStatus.below ? 'text-emerald-600 font-bold' : 'text-rose-600 font-bold'}>
-                {indexStatus.below ? '📉 大盘空' : '📈 大盘多'}
-              </span>
-              <span className="text-slate-500 font-mono">上证{indexStatus.latestClose} / MA20 {indexStatus.ma20}</span>
+              <span className={`${indexStatus.below ? 'text-emerald-600' : 'text-rose-600'} font-mono`}>上证{indexStatus.latestClose} / MA20 {indexStatus.ma20} · 指数{indexStatus.below ? '低于' : '高于'}MA20</span>
             </>
-          )}
-          {strategyAlerts.length > 0 && (
-            <Tooltip title={strategyAlerts.slice(-8).reverse().map(a => `${a.date} ${a.message}`).join('\n')}>
-              <Tag color="purple" className="m-0 rounded-full text-[9px] font-bold px-2 cursor-pointer">策略提醒 {strategyAlerts.length}条</Tag>
-            </Tooltip>
           )}
         </div>
       )}
@@ -623,7 +548,7 @@ export function KlineWorkspace({ stock, profile, height = 460, onSelectStock }: 
             <TrendingUp className="w-4 h-4 animate-pulse text-blue-400" /> 加载 K 线数据…
           </div>
         ) : bars.length ? (
-          <KlineChart bars={visibleBars} config={config} overlays={overlays} height={height - 30} signals={signalOn ? signals : []} btEquity={btData?.points ?? []} scoreSeries={activeScoreSeries} alerts={strategyAlerts} trades={trades} refLines={refLines} onBarClick={(bar) => setTradeModal({ bar })} />
+          <KlineChart bars={visibleBars} config={config} overlays={overlays} height={height - 30} signals={signalOn ? signals : []} btEquity={btData?.points ?? []} scoreSeries={activeScoreSeries} trades={trades} refLines={refLines} onBarClick={(bar) => setTradeModal({ bar })} />
         ) : (
           <div className="h-full flex flex-col items-center justify-center gap-2 text-slate-400">
             <Activity className="w-8 h-8 opacity-40" />
@@ -685,14 +610,14 @@ export function KlineWorkspace({ stock, profile, height = 460, onSelectStock }: 
           <div className="flex items-center gap-2">
             <InputNumber value={newRefLine.value} onChange={(v) => setNewRefLine({ ...newRefLine, value: v ?? 0 })}
               size="small" step={0.05} style={{ width: 90 }} />
-            <Input placeholder="标签（如 可买/热门/危险）" value={newRefLine.label} size="small"
+            <Input placeholder="参考线名称" value={newRefLine.label} size="small"
               onChange={(e) => setNewRefLine({ ...newRefLine, label: e.target.value })} style={{ flex: 1 }} />
             <Select value={newRefLine.color} onChange={(c) => setNewRefLine({ ...newRefLine, color: c })} size="small"
               options={[
-                { value: '#10b981', label: '绿·可买' },
-                { value: '#f59e0b', label: '橙·谨慎' },
-                { value: '#ef4444', label: '红·危险' },
-                { value: '#6366f1', label: '紫·提示' },
+                { value: '#10b981', label: '绿' },
+                { value: '#f59e0b', label: '橙' },
+                { value: '#ef4444', label: '红' },
+                { value: '#6366f1', label: '紫' },
               ]} style={{ width: 100 }} />
           </div>
           <Button size="small" type="primary" onClick={() => {

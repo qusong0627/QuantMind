@@ -3,7 +3,7 @@
  */
 
 import { createSlice, createAsyncThunk, PayloadAction } from '@reduxjs/toolkit';
-import { userCenterService } from '../services/userCenterService';
+import { strategyManagementService } from '../../../services/strategyManagementService';
 import type {
   UserStrategy,
   StrategyUpdate,
@@ -69,12 +69,43 @@ export const fetchUserStrategies = createAsyncThunk(
     { rejectWithValue }
   ) => {
     try {
-      const response = await userCenterService.getUserStrategies(userId, {
+      // 统一管理：唯一入口为 strategyManagementService（后台策略管理）
+      const items = await strategyManagementService.loadStrategies();
+      // 前端服务已按策略类型过滤，状态过滤在前端完成以保持兼容
+      let filtered: any[] = items as any[];
+      if (status) {
+        filtered = filtered.filter((s: any) => String(s.status || '').toLowerCase() === String(status).toLowerCase());
+      }
+      // 映射为 UserStrategy 以兼容现有类型
+      const mapped: UserStrategy[] = filtered.map((s: any) => ({
+        id: String(s.id),
+        user_id: String(userId),
+        strategy_id: String(s.id),
+        name: s.name,
+        strategy_type: (s.parameters?.strategy_type as any) || 'custom',
+        status: (s.status as StrategyStatus) || 'draft',
+        is_favorite: false,
+        performance_summary: { total_return: 0, total_return_pct: 0, sharpe_ratio: 0, max_drawdown: 0, win_rate: 0, profit_factor: 0, avg_trade_duration: 0, total_trades: 0 },
+        tags: s.tags || [],
+        created_at: s.created_at || new Date().toISOString(),
+        updated_at: s.updated_at || s.created_at || new Date().toISOString(),
+        code: s.code || '',
+        is_verified: !!(s as any).is_verified,
+        is_system: !!(s as any).is_system,
+        parameters: s.parameters || {},
+        execution_config: s.execution_config,
+        cos_url: s.cos_url,
+      } as unknown as UserStrategy));
+      const start = (page - 1) * pageSize;
+      const paged = mapped.slice(start, start + pageSize);
+      const resp: PaginatedResponse<UserStrategy> = {
+        items: paged,
+        total: mapped.length,
         page,
         page_size: pageSize,
-        status,
-      });
-      return response;
+        total_pages: Math.max(1, Math.ceil(mapped.length / pageSize)),
+      };
+      return resp;
     } catch (error: any) {
       return rejectWithValue(error.message || 'Failed to fetch strategies');
     }
@@ -91,8 +122,27 @@ export const fetchStrategyDetail = createAsyncThunk(
     { rejectWithValue }
   ) => {
     try {
-      const strategy = await userCenterService.getStrategyDetail(userId, strategyId);
-      return strategy;
+      const s: any = await strategyManagementService.getStrategy(strategyId);
+      const mapped = {
+        id: String(s.id),
+        user_id: String(userId),
+        strategy_id: String(s.id),
+        name: s.name,
+        strategy_type: (s.parameters?.strategy_type as any) || 'custom',
+        status: (s.status as StrategyStatus) || 'draft',
+        is_favorite: false,
+        performance_summary: { total_return: 0, total_return_pct: 0, sharpe_ratio: 0, max_drawdown: 0, win_rate: 0, profit_factor: 0, avg_trade_duration: 0, total_trades: 0 },
+        tags: s.tags || [],
+        created_at: s.created_at || new Date().toISOString(),
+        updated_at: s.updated_at || s.created_at || new Date().toISOString(),
+        code: s.code || '',
+        is_verified: !!s.is_verified,
+        is_system: !!s.is_system,
+        parameters: s.parameters || {},
+        execution_config: s.execution_config,
+        cos_url: s.cos_url,
+      } as unknown as UserStrategy;
+      return mapped;
     } catch (error: any) {
       return rejectWithValue(error.message || 'Failed to fetch strategy detail');
     }
@@ -109,8 +159,29 @@ export const createStrategy = createAsyncThunk(
     { rejectWithValue }
   ) => {
     try {
-      const strategy = await userCenterService.createStrategy(userId, data);
-      return strategy;
+      const s: any = await strategyManagementService.saveStrategy({
+        name: (data as any).name,
+        code: (data as any).code || '',
+        description: (data as any).description || '',
+        tags: (data as any).tags || [],
+        parameters: (data as any).parameters || {},
+      } as any);
+      const mapped = {
+        id: String(s.id),
+        user_id: String(userId),
+        strategy_id: String(s.id),
+        name: s.name,
+        strategy_type: (s.parameters?.strategy_type as any) || 'custom',
+        status: 'draft' as StrategyStatus,
+        is_favorite: false,
+        performance_summary: { total_return: 0, total_return_pct: 0, sharpe_ratio: 0, max_drawdown: 0, win_rate: 0, profit_factor: 0, avg_trade_duration: 0, total_trades: 0 },
+        tags: s.tags || [],
+        created_at: s.created_at || new Date().toISOString(),
+        updated_at: s.updated_at || new Date().toISOString(),
+        code: s.code || (data as any).code || '',
+        parameters: s.parameters || (data as any).parameters || {},
+      } as unknown as UserStrategy;
+      return mapped;
     } catch (error: any) {
       return rejectWithValue(error.message || 'Failed to create strategy');
     }
@@ -135,8 +206,31 @@ export const updateStrategy = createAsyncThunk(
     { rejectWithValue }
   ) => {
     try {
-      const strategy = await userCenterService.updateStrategy(userId, strategyId, data);
-      return strategy;
+      const s: any = await strategyManagementService.updateStrategy(strategyId, {
+        name: (data as any).name,
+        description: (data as any).description,
+        code: (data as any).code,
+        tags: (data as any).tags,
+      } as any);
+      // 兼容后端返回空的情况，回退为本地合并
+      if (s && s.id) {
+        return {
+          id: String(s.id),
+          user_id: String(userId),
+          strategy_id: String(s.id),
+          name: s.name,
+          strategy_type: (s.parameters?.strategy_type as any) || 'custom',
+          status: (s.status as StrategyStatus) || 'draft',
+          is_favorite: false,
+          performance_summary: { total_return: 0, total_return_pct: 0, sharpe_ratio: 0, max_drawdown: 0, win_rate: 0, profit_factor: 0, avg_trade_duration: 0, total_trades: 0 },
+          tags: s.tags || [],
+          created_at: s.created_at || new Date().toISOString(),
+          updated_at: s.updated_at || new Date().toISOString(),
+          code: s.code || (data as any).code || '',
+          parameters: s.parameters || {},
+        } as unknown as UserStrategy;
+      }
+      return { id: strategyId, user_id: String(userId), strategy_id: String(strategyId), is_favorite: false, performance_summary: { total_return: 0, total_return_pct: 0, sharpe_ratio: 0, max_drawdown: 0, win_rate: 0, profit_factor: 0, avg_trade_duration: 0, total_trades: 0 }, ...(data as any) } as unknown as UserStrategy;
     } catch (error: any) {
       return rejectWithValue(error.message || 'Failed to update strategy');
     }
@@ -153,7 +247,7 @@ export const deleteStrategy = createAsyncThunk(
     { rejectWithValue }
   ) => {
     try {
-      await userCenterService.deleteStrategy(userId, strategyId);
+      await strategyManagementService.deleteStrategy(strategyId);
       return { strategyId };
     } catch (error: any) {
       return rejectWithValue(error.message || 'Failed to delete strategy');
@@ -171,12 +265,14 @@ export const enableStrategy = createAsyncThunk(
     { rejectWithValue }
   ) => {
     try {
-      const strategy = await userCenterService.manageUserStrategy(
-        userId,
-        strategyId,
-        'enable'
-      );
-      return strategy;
+      await strategyManagementService.activateStrategy(strategyId);
+      const s: any = await strategyManagementService.getStrategy(strategyId);
+      return {
+        id: String(s.id),
+        name: s.name,
+        status: 'live_trading' as StrategyStatus,
+        updated_at: s.updated_at || new Date().toISOString(),
+      } as UserStrategy;
     } catch (error: any) {
       return rejectWithValue(error.message || 'Failed to enable strategy');
     }
@@ -193,12 +289,14 @@ export const disableStrategy = createAsyncThunk(
     { rejectWithValue }
   ) => {
     try {
-      const strategy = await userCenterService.manageUserStrategy(
-        userId,
-        strategyId,
-        'disable'
-      );
-      return strategy;
+      await strategyManagementService.deactivateStrategy(strategyId);
+      const s: any = await strategyManagementService.getStrategy(strategyId);
+      return {
+        id: String(s.id),
+        name: s.name,
+        status: 'draft' as StrategyStatus,
+        updated_at: s.updated_at || new Date().toISOString(),
+      } as UserStrategy;
     } catch (error: any) {
       return rejectWithValue(error.message || 'Failed to disable strategy');
     }

@@ -1,7 +1,7 @@
 {
   "name": "QuantMind",
   "private": true,
-  "version": "2.3.3",
+  "version": "2.3.5",
   "description": "QuantMind 智能控制中心桌面端 (Electron + React + Vite)",
   "main": "dist-electron/electron/main.js",
   "type": "commonjs",

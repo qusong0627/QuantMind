@@ -83,6 +83,8 @@ export interface AdminModelFeatureItem {
     feature_id: string;
     key: string;
     feature_name: string;
+    /** 用户可编辑的长描述（≤500字），空时前端回退到字典解释 */
+    explanation?: string;
     formula: string;
     source_table_fields: string;
     enabled: boolean;

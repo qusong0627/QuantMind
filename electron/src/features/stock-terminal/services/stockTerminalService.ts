@@ -1,7 +1,7 @@
 /** 个股终端 API 服务 */
 
 import axios, { AxiosInstance } from 'axios';
-import { SERVICE_ENDPOINTS } from '../../../config/services';
+import { SERVICE_ENDPOINTS, resolveWebSafeServiceBase } from '../../../config/services';
 import { authService } from '../../auth/services/authService';
 import { KlineBar, StockListResponse, StockProfile } from '../types';
 
@@ -10,7 +10,10 @@ export type KlineAdjust = 'qfq' | 'hfq' | 'none';
 
 class StockTerminalService {
   private get client(): AxiosInstance {
-    const baseURL = (import.meta as any).env?.VITE_USER_API_URL || SERVICE_ENDPOINTS.API_GATEWAY || SERVICE_ENDPOINTS.USER_SERVICE;
+    const baseURL = resolveWebSafeServiceBase(
+      (import.meta as any).env?.VITE_USER_API_URL,
+      SERVICE_ENDPOINTS.API_GATEWAY || SERVICE_ENDPOINTS.USER_SERVICE,
+    );
     const client = axios.create({ baseURL, timeout: 30000 });
     client.interceptors.request.use((config) => {
       const token = authService.getAccessToken();

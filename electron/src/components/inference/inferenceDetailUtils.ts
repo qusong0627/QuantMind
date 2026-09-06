@@ -1,5 +1,6 @@
 import { message } from 'antd';
 import type { InferenceRankingResult } from '../../services/modelTrainingService';
+import { buildCsvText, downloadCsvFile } from '../../utils/csvExport';
 
 /** 把 stdout/stderr 按行拆分：ERROR/CRITICAL/TRACEBACK 归入错误输出，其余归入标准输出。 */
 export function splitInferenceLogs(stdout?: string | null, stderr?: string | null): {
@@ -41,27 +42,18 @@ export function exportRankingCsv(result: InferenceRankingResult): boolean {
     message.warning('暂无可导出的排名数据');
     return false;
   }
-  const rows = [
-    ['排名', '股票代码', '股票名称', '预测得分', '信号'],
-    ...result.rankings.map(r => [r.rank, r.code, r.name, r.score, r.signal]),
-  ];
-  const escapeCsvCell = (value: unknown) => {
-    const raw = value === null || value === undefined ? '' : String(value);
-    if (!/[",\n\r]/.test(raw)) return raw;
-    return `"${raw.replace(/"/g, '""')}"`;
-  };
+  const rows: unknown[][] = result.rankings.map(r => [r.rank, r.code, r.name, r.score, r.signal]);
   try {
-    const csv = rows.map(r => r.map(escapeCsvCell).join(',')).join('\n');
-    const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `ranking_${result.target_date || 'result'}_${result.summary?.run_id || 'run'}.csv`;
-    a.style.display = 'none';
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+    const csv = buildCsvText(
+      ['排名', '股票代码', '股票名称', '预测得分', '信号'],
+      rows,
+      { textColumns: [1], filename: '' },
+    );
+    const ok = downloadCsvFile(
+      csv,
+      `ranking_${result.target_date || 'result'}_${result.summary?.run_id || 'run'}.csv`,
+    );
+    if (!ok) throw new Error('下载失败');
     message.success(`已导出 ${result.rankings.length} 条排名数据`);
     return true;
   } catch (err: any) {

@@ -400,7 +400,6 @@ export function ScoreCalendar({ symbol, onBarClick, selectedDate, modelId, onInf
               } ${c.today ? 'ring-2 ring-blue-400 ring-offset-1' : ''} ${c.active ? 'ring-2 ring-amber-500 ring-offset-1' : ''}`}
             >
               {c.day}
-              {c.value != null && <span className="text-[7px] opacity-80">{c.side === 'BUY' ? 'B' : c.side === 'SELL' ? 'S' : ''}</span>}
             </button>
           ))}
           {cells.length === 0 && (
@@ -438,7 +437,6 @@ export function ScoreCalendar({ symbol, onBarClick, selectedDate, modelId, onInf
           <span className="w-3 h-3 rounded-sm bg-emerald-300" />
           <span className="w-3 h-3 rounded-sm bg-emerald-500" />
           <span className="w-3 h-3 rounded-sm bg-emerald-600" />
-          <span className="ml-1">B=买入 S=卖出</span>
         </div>
       </div>
     </div>

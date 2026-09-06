@@ -123,7 +123,7 @@ export function InferenceScoreChart({ symbol, modelId, selectedDate, onPointClic
       },
       dataZoom: [
         { type: 'inside' as const, xAxisIndex: 0, start: 0, end: 100 },
-        { type: 'slider' as const, xAxisIndex: 0, bottom: 0, height: 14, borderColor: '#e2e8f0', fillerColor: 'rgba(99,102,241,0.08)' },
+        { type: 'slider' as const, xAxisIndex: 0, bottom: 6, height: 18, borderColor: '#e2e8f0', fillerColor: 'rgba(99,102,241,0.08)' },
       ],
       series: [
         {

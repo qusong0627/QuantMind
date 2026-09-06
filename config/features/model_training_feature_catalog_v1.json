@@ -2,7 +2,7 @@
   "version": "v2.0",
   "version_name": "QM Feature Set v2.1 (L2/microstructure unlocked, 20260820)",
   "description": "完整 QuantDB 特征集 (daily_forward + features_daily + l1_factors + l2_factors), 164 个可用特征",
-  "feature_count": 529,
+  "feature_count": 534,
   "categories": [
     {
       "id": "ohlcv",
@@ -28,7 +28,9 @@
           "default_selected": true,
           "coverage_ratio": 1.0,
           "measured_ic": -0.0234,
-          "measured_icir": -0.133
+          "measured_icir": -0.133,
+          "feature_name": "开盘价（复权）",
+          "explanation": ""
         },
         {
           "feature_id": "feat_ohlcv_002",
@@ -48,7 +50,9 @@
           "default_selected": true,
           "coverage_ratio": 1.0,
           "measured_ic": -0.0246,
-          "measured_icir": -0.139
+          "measured_icir": -0.139,
+          "feature_name": "最高价（复权）",
+          "explanation": ""
         },
         {
           "feature_id": "feat_ohlcv_003",
@@ -68,7 +72,9 @@
           "default_selected": true,
           "coverage_ratio": 1.0,
           "measured_ic": -0.023,
-          "measured_icir": -0.131
+          "measured_icir": -0.131,
+          "feature_name": "最低价（复权）",
+          "explanation": ""
         },
         {
           "feature_id": "feat_ohlcv_004",
@@ -88,7 +94,9 @@
           "default_selected": true,
           "coverage_ratio": 1.0,
           "measured_ic": -0.0239,
-          "measured_icir": -0.136
+          "measured_icir": -0.136,
+          "feature_name": "收盘价（复权）",
+          "explanation": ""
         },
         {
           "feature_id": "feat_ohlcv_005",
@@ -108,7 +116,9 @@
           "default_selected": true,
           "coverage_ratio": 1.0,
           "measured_ic": -0.0427,
-          "measured_icir": -0.345
+          "measured_icir": -0.345,
+          "feature_name": "成交量",
+          "explanation": ""
         },
         {
           "feature_id": "feat_ohlcv_005",
@@ -126,7 +136,9 @@
           "order_no": 6,
           "default_selected": false,
           "coverage_ratio": 1.0,
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "通用因子桶(待细分)",
+          "explanation": ""
         }
       ]
     },
@@ -154,7 +166,9 @@
           "default_selected": true,
           "coverage_ratio": 0.9999,
           "measured_ic": -0.011,
-          "measured_icir": -0.064
+          "measured_icir": -0.064,
+          "feature_name": "1日收益率动量",
+          "explanation": ""
         },
         {
           "feature_id": "feat_momentum_001",
@@ -174,7 +188,9 @@
           "default_selected": true,
           "coverage_ratio": 0.9998,
           "measured_ic": -0.0267,
-          "measured_icir": -0.144
+          "measured_icir": -0.144,
+          "feature_name": "3日收益率",
+          "explanation": ""
         },
         {
           "feature_id": "feat_003",
@@ -194,7 +210,9 @@
           "default_selected": true,
           "coverage_ratio": 0.9997,
           "measured_ic": -0.033,
-          "measured_icir": -0.17
+          "measured_icir": -0.17,
+          "feature_name": "5日收益率动量",
+          "explanation": ""
         },
         {
           "feature_id": "feat_momentum_003",
@@ -214,7 +232,9 @@
           "default_selected": true,
           "coverage_ratio": 0.9993,
           "measured_ic": -0.0432,
-          "measured_icir": -0.227
+          "measured_icir": -0.227,
+          "feature_name": "10日收益率",
+          "explanation": ""
         },
         {
           "feature_id": "feat_005",
@@ -234,7 +254,9 @@
           "default_selected": true,
           "coverage_ratio": 0.9986,
           "measured_ic": -0.049,
-          "measured_icir": -0.254
+          "measured_icir": -0.254,
+          "feature_name": "20日收益率动量",
+          "explanation": ""
         },
         {
           "feature_id": "feat_006",
@@ -254,7 +276,9 @@
           "default_selected": true,
           "coverage_ratio": 0.9957,
           "measured_ic": -0.043,
-          "measured_icir": -0.224
+          "measured_icir": -0.224,
+          "feature_name": "60日收益率动量",
+          "explanation": ""
         },
         {
           "feature_id": "feat_momentum_006",
@@ -274,7 +298,9 @@
           "default_selected": true,
           "coverage_ratio": 0.9917,
           "measured_ic": -0.0395,
-          "measured_icir": -0.214
+          "measured_icir": -0.214,
+          "feature_name": "120日收益率",
+          "explanation": ""
         },
         {
           "feature_id": "feat_008",
@@ -294,7 +320,9 @@
           "default_selected": true,
           "coverage_ratio": 0.9997,
           "measured_ic": -0.0256,
-          "measured_icir": -0.137
+          "measured_icir": -0.137,
+          "feature_name": "收盘价偏离5日均线",
+          "explanation": ""
         },
         {
           "feature_id": "feat_momentum_008",
@@ -314,7 +342,9 @@
           "default_selected": true,
           "coverage_ratio": 0.9994,
           "measured_ic": -0.0395,
-          "measured_icir": -0.204
+          "measured_icir": -0.204,
+          "feature_name": "收盘价偏离10日均线",
+          "explanation": ""
         },
         {
           "feature_id": "feat_010",
@@ -334,7 +364,9 @@
           "default_selected": true,
           "coverage_ratio": 0.9987,
           "measured_ic": -0.0476,
-          "measured_icir": -0.246
+          "measured_icir": -0.246,
+          "feature_name": "收盘价偏离20日均线",
+          "explanation": ""
         },
         {
           "feature_id": "feat_011",
@@ -352,7 +384,9 @@
           "order_no": 7,
           "default_selected": false,
           "coverage_ratio": 0.9958,
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "收盘价偏离60日均线",
+          "explanation": ""
         },
         {
           "feature_id": "feat_momentum_011",
@@ -370,7 +404,9 @@
           "order_no": 12,
           "default_selected": false,
           "coverage_ratio": 0.9918,
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "收盘价偏离120日均线",
+          "explanation": ""
         },
         {
           "feature_id": "feat_momentum_012",
@@ -390,7 +426,9 @@
           "default_selected": true,
           "coverage_ratio": 0.9992,
           "measured_ic": -0.0464,
-          "measured_icir": -0.238
+          "measured_icir": -0.238,
+          "feature_name": "动量 指数均线 偏离 12",
+          "explanation": ""
         },
         {
           "feature_id": "feat_momentum_013",
@@ -410,7 +448,9 @@
           "default_selected": true,
           "coverage_ratio": 0.9983,
           "measured_ic": -0.0549,
-          "measured_icir": -0.28
+          "measured_icir": -0.28,
+          "feature_name": "动量 指数均线 偏离 26",
+          "explanation": ""
         },
         {
           "feature_id": "feat_momentum_014",
@@ -430,7 +470,9 @@
           "default_selected": true,
           "coverage_ratio": 0.9983,
           "measured_ic": -0.0411,
-          "measured_icir": -0.236
+          "measured_icir": -0.236,
+          "feature_name": "动量 MACD DIF",
+          "explanation": ""
         },
         {
           "feature_id": "feat_momentum_015",
@@ -450,7 +492,9 @@
           "default_selected": true,
           "coverage_ratio": 0.9977,
           "measured_ic": -0.0293,
-          "measured_icir": -0.1505
+          "measured_icir": -0.1505,
+          "feature_name": "动量 MACD DEA",
+          "explanation": ""
         },
         {
           "feature_id": "feat_017",
@@ -470,7 +514,9 @@
           "default_selected": true,
           "coverage_ratio": 0.9977,
           "measured_ic": -0.0294,
-          "measured_icir": -0.1585
+          "measured_icir": -0.1585,
+          "feature_name": "MACD柱值",
+          "explanation": ""
         },
         {
           "feature_id": "feat_momentum_017",
@@ -490,7 +536,9 @@
           "default_selected": true,
           "coverage_ratio": 0.9997,
           "measured_ic": -0.0439,
-          "measured_icir": -0.266
+          "measured_icir": -0.266,
+          "feature_name": "6日 RSI 相对强弱指标",
+          "explanation": ""
         },
         {
           "feature_id": "feat_019",
@@ -510,7 +558,9 @@
           "default_selected": true,
           "coverage_ratio": 0.9991,
           "measured_ic": -0.0507,
-          "measured_icir": -0.302
+          "measured_icir": -0.302,
+          "feature_name": "RSI(14)",
+          "explanation": ""
         },
         {
           "feature_id": "feat_020",
@@ -530,7 +580,9 @@
           "default_selected": true,
           "coverage_ratio": 0.9995,
           "measured_ic": -0.0242,
-          "measured_icir": -0.148
+          "measured_icir": -0.148,
+          "feature_name": "KDJ-K",
+          "explanation": ""
         },
         {
           "feature_id": "feat_momentum_020",
@@ -550,7 +602,9 @@
           "default_selected": true,
           "coverage_ratio": 0.9995,
           "measured_ic": -0.0244,
-          "measured_icir": -0.151
+          "measured_icir": -0.151,
+          "feature_name": "动量 KDJ d",
+          "explanation": ""
         },
         {
           "feature_id": "feat_momentum_021",
@@ -570,7 +624,9 @@
           "default_selected": true,
           "coverage_ratio": 0.9995,
           "measured_ic": -0.0185,
-          "measured_icir": -0.115
+          "measured_icir": -0.115,
+          "feature_name": "动量 KDJ j",
+          "explanation": ""
         },
         {
           "feature_id": "feat_momentum_022",
@@ -588,7 +644,9 @@
           "order_no": 23,
           "default_selected": false,
           "coverage_ratio": 0.9992,
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "动量 roc 12",
+          "explanation": ""
         },
         {
           "feature_id": "feat_024",
@@ -606,7 +664,9 @@
           "order_no": 11,
           "default_selected": false,
           "coverage_ratio": 0.9987,
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "20日突破强度",
+          "explanation": ""
         },
         {
           "feature_id": "feat_alpha158_sump20",
@@ -621,7 +681,9 @@
           ],
           "order_no": 24,
           "default_selected": true,
-          "coverage_ratio": 0.99
+          "coverage_ratio": 0.99,
+          "feature_name": "过去20个交易日中收盘上涨的天数",
+          "explanation": ""
         },
         {
           "feature_id": "feat_alpha158_sumn20",
@@ -636,7 +698,9 @@
           ],
           "order_no": 25,
           "default_selected": true,
-          "coverage_ratio": 0.99
+          "coverage_ratio": 0.99,
+          "feature_name": "过去20个交易日中收盘下跌的天数",
+          "explanation": ""
         },
         {
           "feature_id": "feat_alpha158_sumd20",
@@ -651,7 +715,9 @@
           ],
           "order_no": 26,
           "default_selected": true,
-          "coverage_ratio": 0.99
+          "coverage_ratio": 0.99,
+          "feature_name": "过去20日上涨天数减下跌天数",
+          "explanation": ""
         },
         {
           "feature_id": "feat_alpha158_sump30",
@@ -666,7 +732,9 @@
           ],
           "order_no": 27,
           "default_selected": true,
-          "coverage_ratio": 0.99
+          "coverage_ratio": 0.99,
+          "feature_name": "过去30个交易日中收盘上涨的天数",
+          "explanation": ""
         },
         {
           "feature_id": "feat_alpha158_sumn30",
@@ -681,7 +749,9 @@
           ],
           "order_no": 28,
           "default_selected": true,
-          "coverage_ratio": 0.99
+          "coverage_ratio": 0.99,
+          "feature_name": "过去30个交易日中收盘下跌的天数",
+          "explanation": ""
         },
         {
           "feature_id": "feat_alpha158_sumd30",
@@ -696,7 +766,9 @@
           ],
           "order_no": 29,
           "default_selected": true,
-          "coverage_ratio": 0.99
+          "coverage_ratio": 0.99,
+          "feature_name": "过去30日上涨天数减下跌天数",
+          "explanation": ""
         },
         {
           "feature_id": "feat_alpha158_sump60",
@@ -711,7 +783,9 @@
           ],
           "order_no": 30,
           "default_selected": true,
-          "coverage_ratio": 0.99
+          "coverage_ratio": 0.99,
+          "feature_name": "过去60个交易日中收盘上涨的天数",
+          "explanation": ""
         },
         {
           "feature_id": "feat_alpha158_sumn60",
@@ -726,7 +800,9 @@
           ],
           "order_no": 31,
           "default_selected": true,
-          "coverage_ratio": 0.99
+          "coverage_ratio": 0.99,
+          "feature_name": "过去60个交易日中收盘下跌的天数",
+          "explanation": ""
         },
         {
           "feature_id": "feat_alpha158_sumd60",
@@ -741,7 +817,9 @@
           ],
           "order_no": 32,
           "default_selected": true,
-          "coverage_ratio": 0.99
+          "coverage_ratio": 0.99,
+          "feature_name": "过去60日上涨天数减下跌天数",
+          "explanation": ""
         },
         {
           "feature_id": "feat_alpha158_rank5",
@@ -756,7 +834,9 @@
           ],
           "order_no": 33,
           "default_selected": true,
-          "coverage_ratio": 0.99
+          "coverage_ratio": 0.99,
+          "feature_name": "当前日收益在过去5日收益中的分位排名",
+          "explanation": ""
         },
         {
           "feature_id": "feat_alpha158_rank10",
@@ -771,7 +851,9 @@
           ],
           "order_no": 34,
           "default_selected": true,
-          "coverage_ratio": 0.99
+          "coverage_ratio": 0.99,
+          "feature_name": "当前日收益在过去10日收益中的分位排名",
+          "explanation": ""
         },
         {
           "feature_id": "feat_alpha158_rank20",
@@ -786,7 +868,9 @@
           ],
           "order_no": 35,
           "default_selected": true,
-          "coverage_ratio": 0.99
+          "coverage_ratio": 0.99,
+          "feature_name": "当前日收益在过去20日收益中的分位排名",
+          "explanation": ""
         },
         {
           "feature_id": "feat_alpha158_rank30",
@@ -801,7 +885,9 @@
           ],
           "order_no": 36,
           "default_selected": true,
-          "coverage_ratio": 0.99
+          "coverage_ratio": 0.99,
+          "feature_name": "当前日收益在过去30日收益中的分位排名",
+          "explanation": ""
         },
         {
           "feature_id": "feat_alpha158_rank60",
@@ -816,7 +902,9 @@
           ],
           "order_no": 37,
           "default_selected": true,
-          "coverage_ratio": 0.99
+          "coverage_ratio": 0.99,
+          "feature_name": "当前日收益在过去60日收益中的分位排名",
+          "explanation": ""
         }
       ]
     },
@@ -844,7 +932,9 @@
           "default_selected": true,
           "coverage_ratio": 0.9997,
           "measured_ic": -0.0536,
-          "measured_icir": -0.3
+          "measured_icir": -0.3,
+          "feature_name": "5日收益率标准差",
+          "explanation": ""
         },
         {
           "feature_id": "feat_volatility_001",
@@ -864,7 +954,9 @@
           "default_selected": true,
           "coverage_ratio": 0.9994,
           "measured_ic": -0.0571,
-          "measured_icir": -0.252
+          "measured_icir": -0.252,
+          "feature_name": "10日收益率标准差",
+          "explanation": ""
         },
         {
           "feature_id": "feat_027",
@@ -884,7 +976,9 @@
           "default_selected": true,
           "coverage_ratio": 0.9987,
           "measured_ic": -0.05,
-          "measured_icir": -0.223
+          "measured_icir": -0.223,
+          "feature_name": "20日收益率标准差",
+          "explanation": ""
         },
         {
           "feature_id": "feat_028",
@@ -904,7 +998,9 @@
           "default_selected": true,
           "coverage_ratio": 0.9958,
           "measured_ic": -0.0396,
-          "measured_icir": -0.159
+          "measured_icir": -0.159,
+          "feature_name": "60日收益率标准差",
+          "explanation": ""
         },
         {
           "feature_id": "feat_029",
@@ -924,7 +1020,9 @@
           "default_selected": true,
           "coverage_ratio": 0.9991,
           "measured_ic": -0.0413,
-          "measured_icir": -0.2
+          "measured_icir": -0.2,
+          "feature_name": "ATR(14)",
+          "explanation": ""
         },
         {
           "feature_id": "feat_volatility_005",
@@ -944,7 +1042,9 @@
           "default_selected": true,
           "coverage_ratio": 0.9987,
           "measured_ic": -0.0379,
-          "measured_icir": -0.185
+          "measured_icir": -0.185,
+          "feature_name": "20日平均真实波幅",
+          "explanation": ""
         },
         {
           "feature_id": "feat_volatility_006",
@@ -964,7 +1064,9 @@
           "default_selected": true,
           "coverage_ratio": 1.0,
           "measured_ic": -0.0514,
-          "measured_icir": -0.266
+          "measured_icir": -0.266,
+          "feature_name": "vol true range",
+          "explanation": ""
         },
         {
           "feature_id": "feat_volatility_007",
@@ -984,7 +1086,9 @@
           "default_selected": true,
           "coverage_ratio": 0.9994,
           "measured_ic": -0.0638,
-          "measured_icir": -0.266
+          "measured_icir": -0.266,
+          "feature_name": "10日 Parkinson 波动率",
+          "explanation": ""
         },
         {
           "feature_id": "feat_033",
@@ -1004,7 +1108,9 @@
           "default_selected": true,
           "coverage_ratio": 0.9987,
           "measured_ic": -0.0556,
-          "measured_icir": -0.223
+          "measured_icir": -0.223,
+          "feature_name": "Parkinson波动率20日",
+          "explanation": ""
         },
         {
           "feature_id": "feat_volatility_009",
@@ -1022,7 +1128,9 @@
           "order_no": 10,
           "default_selected": false,
           "coverage_ratio": 0.9994,
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "vol Garman-Klass 波动率 10",
+          "explanation": ""
         },
         {
           "feature_id": "feat_volatility_010",
@@ -1042,7 +1150,9 @@
           "default_selected": true,
           "coverage_ratio": 0.9987,
           "measured_ic": -0.0567,
-          "measured_icir": -0.2116
+          "measured_icir": -0.2116,
+          "feature_name": "vol Garman-Klass 波动率 20",
+          "explanation": ""
         },
         {
           "feature_id": "feat_volatility_011",
@@ -1060,7 +1170,9 @@
           "order_no": 12,
           "default_selected": false,
           "coverage_ratio": 0.9994,
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "vol rs 10",
+          "explanation": ""
         },
         {
           "feature_id": "feat_volatility_012",
@@ -1080,7 +1192,9 @@
           "default_selected": true,
           "coverage_ratio": 0.9987,
           "measured_ic": -0.055,
-          "measured_icir": -0.228
+          "measured_icir": -0.228,
+          "feature_name": "vol rs 20",
+          "explanation": ""
         },
         {
           "feature_id": "feat_038",
@@ -1098,7 +1212,9 @@
           "order_no": 5,
           "default_selected": false,
           "coverage_ratio": 0.9987,
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "下行波动率20日",
+          "explanation": ""
         },
         {
           "feature_id": "feat_039",
@@ -1116,7 +1232,9 @@
           "order_no": 6,
           "default_selected": false,
           "coverage_ratio": 0.9987,
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "上行波动率20日",
+          "explanation": ""
         },
         {
           "feature_id": "feat_040",
@@ -1135,7 +1253,9 @@
           "order_no": 7,
           "default_selected": false,
           "coverage_ratio": 0.9974,
-          "coverage_note": "仅 2026 年起有数据 (l2_factors)，跨年训练前请确认覆盖范围"
+          "coverage_note": "仅 2026 年起有数据 (l2_factors)，跨年训练前请确认覆盖范围",
+          "feature_name": "已实现波动率RV (高频当日值，建议使用 Ref(...,1) 以防未来函数)",
+          "explanation": ""
         },
         {
           "feature_id": "feat_041",
@@ -1154,7 +1274,9 @@
           "order_no": 8,
           "default_selected": false,
           "coverage_ratio": 0.9974,
-          "coverage_note": "仅 2026 年起有数据 (l2_factors)，跨年训练前请确认覆盖范围"
+          "coverage_note": "仅 2026 年起有数据 (l2_factors)，跨年训练前请确认覆盖范围",
+          "feature_name": "稳健已实现波动率RRV (高频当日值，建议使用 Ref(...,1) 以防未来函数)",
+          "explanation": ""
         },
         {
           "feature_id": "feat_042",
@@ -1173,7 +1295,9 @@
           "order_no": 9,
           "default_selected": false,
           "coverage_ratio": 0.9972,
-          "coverage_note": "仅 2026 年起有数据 (l2_factors)，跨年训练前请确认覆盖范围"
+          "coverage_note": "仅 2026 年起有数据 (l2_factors)，跨年训练前请确认覆盖范围",
+          "feature_name": "已实现偏度RSkew (高频当日值，建议使用 Ref(...,1) 以防未来函数)",
+          "explanation": ""
         },
         {
           "feature_id": "feat_volatility_018",
@@ -1191,7 +1315,9 @@
           ],
           "order_no": 19,
           "default_selected": false,
-          "coverage_ratio": 0.9972
+          "coverage_ratio": 0.9972,
+          "feature_name": "vol realized 已实现峰度",
+          "explanation": ""
         },
         {
           "feature_id": "feat_044",
@@ -1209,7 +1335,9 @@
           "order_no": 10,
           "default_selected": false,
           "coverage_ratio": 0.9974,
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "跳跃显著性Z值 (高频当日值，建议使用 Ref(...,1) 以防未来函数)",
+          "explanation": ""
         },
         {
           "feature_id": "feat_volatility_020",
@@ -1227,7 +1355,9 @@
           "order_no": 21,
           "default_selected": false,
           "coverage_ratio": 0.982,
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "vol 跳跃 rjv 比率",
+          "explanation": ""
         },
         {
           "feature_id": "feat_volatility_021",
@@ -1245,7 +1375,9 @@
           "order_no": 22,
           "default_selected": false,
           "coverage_ratio": 0.982,
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "vol 跳跃 sjv 比率",
+          "explanation": ""
         },
         {
           "feature_id": "feat_volatility_vol_realized_5min",
@@ -1259,7 +1391,9 @@
           ],
           "order_no": 23,
           "default_selected": true,
-          "coverage_ratio": 0.99
+          "coverage_ratio": 0.99,
+          "feature_name": "5分钟已实现波动率",
+          "explanation": ""
         },
         {
           "feature_id": "feat_volatility_vol_realized_sjv",
@@ -1273,7 +1407,9 @@
           ],
           "order_no": 24,
           "default_selected": true,
-          "coverage_ratio": 0.99
+          "coverage_ratio": 0.99,
+          "feature_name": "连续/跳跃波动率分解-跳跃成分",
+          "explanation": ""
         },
         {
           "feature_id": "feat_volatility_vol_realized_jump",
@@ -1287,7 +1423,9 @@
           ],
           "order_no": 25,
           "default_selected": true,
-          "coverage_ratio": 0.99
+          "coverage_ratio": 0.99,
+          "feature_name": "跳跃波动率",
+          "explanation": ""
         },
         {
           "feature_id": "feat_volatility_vol_skew",
@@ -1301,7 +1439,9 @@
           ],
           "order_no": 26,
           "default_selected": true,
-          "coverage_ratio": 0.99
+          "coverage_ratio": 0.99,
+          "feature_name": "收益率偏度",
+          "explanation": "分钟成交量分布的偏斜程度"
         },
         {
           "feature_id": "feat_volatility_vol_kurtosis",
@@ -1315,7 +1455,9 @@
           ],
           "order_no": 27,
           "default_selected": true,
-          "coverage_ratio": 0.99
+          "coverage_ratio": 0.99,
+          "feature_name": "收益率峰度",
+          "explanation": "分钟成交量分布的尖峰程度"
         },
         {
           "feature_id": "feat_volatility_vol_persistence",
@@ -1329,7 +1471,9 @@
           ],
           "order_no": 28,
           "default_selected": true,
-          "coverage_ratio": 0.99
+          "coverage_ratio": 0.99,
+          "feature_name": "波动率持续性",
+          "explanation": ""
         },
         {
           "feature_id": "feat_volatility_vol_up_down_ratio",
@@ -1343,7 +1487,9 @@
           ],
           "order_no": 29,
           "default_selected": true,
-          "coverage_ratio": 0.99
+          "coverage_ratio": 0.99,
+          "feature_name": "涨跌量比",
+          "explanation": ""
         },
         {
           "feature_id": "feat_alpha158_max5",
@@ -1358,7 +1504,9 @@
           ],
           "order_no": 30,
           "default_selected": true,
-          "coverage_ratio": 0.99
+          "coverage_ratio": 0.99,
+          "feature_name": "过去5日最高价相对当前价的偏离",
+          "explanation": ""
         },
         {
           "feature_id": "feat_alpha158_min5",
@@ -1373,7 +1521,9 @@
           ],
           "order_no": 31,
           "default_selected": true,
-          "coverage_ratio": 0.99
+          "coverage_ratio": 0.99,
+          "feature_name": "过去5日最低价相对当前价的偏离",
+          "explanation": ""
         },
         {
           "feature_id": "feat_alpha158_max10",
@@ -1388,7 +1538,9 @@
           ],
           "order_no": 32,
           "default_selected": true,
-          "coverage_ratio": 0.99
+          "coverage_ratio": 0.99,
+          "feature_name": "过去10日最高价相对当前价的偏离",
+          "explanation": ""
         },
         {
           "feature_id": "feat_alpha158_min10",
@@ -1403,7 +1555,9 @@
           ],
           "order_no": 33,
           "default_selected": true,
-          "coverage_ratio": 0.99
+          "coverage_ratio": 0.99,
+          "feature_name": "过去10日最低价相对当前价的偏离",
+          "explanation": ""
         },
         {
           "feature_id": "feat_alpha158_max20",
@@ -1418,7 +1572,9 @@
           ],
           "order_no": 34,
           "default_selected": true,
-          "coverage_ratio": 0.99
+          "coverage_ratio": 0.99,
+          "feature_name": "过去20日最高价相对当前价的偏离",
+          "explanation": ""
         },
         {
           "feature_id": "feat_alpha158_min20",
@@ -1433,7 +1589,9 @@
           ],
           "order_no": 35,
           "default_selected": true,
-          "coverage_ratio": 0.99
+          "coverage_ratio": 0.99,
+          "feature_name": "过去20日最低价相对当前价的偏离",
+          "explanation": ""
         },
         {
           "feature_id": "feat_alpha158_max30",
@@ -1448,7 +1606,9 @@
           ],
           "order_no": 36,
           "default_selected": true,
-          "coverage_ratio": 0.99
+          "coverage_ratio": 0.99,
+          "feature_name": "过去30日最高价相对当前价的偏离",
+          "explanation": ""
         },
         {
           "feature_id": "feat_alpha158_min30",
@@ -1463,7 +1623,9 @@
           ],
           "order_no": 37,
           "default_selected": true,
-          "coverage_ratio": 0.99
+          "coverage_ratio": 0.99,
+          "feature_name": "过去30日最低价相对当前价的偏离",
+          "explanation": ""
         },
         {
           "feature_id": "feat_alpha158_max60",
@@ -1478,7 +1640,9 @@
           ],
           "order_no": 38,
           "default_selected": true,
-          "coverage_ratio": 0.99
+          "coverage_ratio": 0.99,
+          "feature_name": "过去60日最高价相对当前价的偏离",
+          "explanation": ""
         },
         {
           "feature_id": "feat_alpha158_min60",
@@ -1493,7 +1657,9 @@
           ],
           "order_no": 39,
           "default_selected": true,
-          "coverage_ratio": 0.99
+          "coverage_ratio": 0.99,
+          "feature_name": "过去60日最低价相对当前价的偏离",
+          "explanation": ""
         },
         {
           "feature_id": "feat_volatility_1001",
@@ -1507,7 +1673,9 @@
           ],
           "order_no": 1001,
           "default_selected": false,
-          "coverage_ratio": 0.9495
+          "coverage_ratio": 0.9495,
+          "feature_name": "量价因子",
+          "explanation": "当日最高价与最低价的相对振幅"
         },
         {
           "feature_id": "feat_volatility_1002",
@@ -1521,7 +1689,9 @@
           ],
           "order_no": 1002,
           "default_selected": false,
-          "coverage_ratio": 0.9483
+          "coverage_ratio": 0.9483,
+          "feature_name": "量价因子",
+          "explanation": "近20日单日振幅的统计水平"
         },
         {
           "feature_id": "feat_volatility_1003",
@@ -1535,7 +1705,9 @@
           ],
           "order_no": 1003,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "量价因子",
+          "explanation": "分钟成交量分布的不均匀程度"
         },
         {
           "feature_id": "feat_volatility_1004",
@@ -1549,7 +1721,9 @@
           ],
           "order_no": 1004,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "量价因子",
+          "explanation": ""
         },
         {
           "feature_id": "feat_volatility_1005",
@@ -1563,7 +1737,9 @@
           ],
           "order_no": 1005,
           "default_selected": false,
-          "coverage_ratio": 0.947
+          "coverage_ratio": 0.947,
+          "feature_name": "量价因子",
+          "explanation": ""
         },
         {
           "feature_id": "feat_volatility_1006",
@@ -1577,7 +1753,9 @@
           ],
           "order_no": 1006,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "量价因子",
+          "explanation": ""
         },
         {
           "feature_id": "feat_volatility_1007",
@@ -1591,7 +1769,9 @@
           ],
           "order_no": 1007,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "已实现波动率（日内）",
+          "explanation": ""
         },
         {
           "feature_id": "feat_volatility_1008",
@@ -1605,7 +1785,9 @@
           ],
           "order_no": 1008,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "已实现波动率（日内）",
+          "explanation": ""
         },
         {
           "feature_id": "feat_volatility_1009",
@@ -1619,7 +1801,9 @@
           ],
           "order_no": 1009,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "已实现波动率（日内）",
+          "explanation": ""
         },
         {
           "feature_id": "feat_volatility_1010",
@@ -1633,7 +1817,9 @@
           ],
           "order_no": 1010,
           "default_selected": false,
-          "coverage_ratio": 0.9432
+          "coverage_ratio": 0.9432,
+          "feature_name": "已实现波动率（日内）",
+          "explanation": ""
         },
         {
           "feature_id": "feat_volatility_1011",
@@ -1647,7 +1833,9 @@
           ],
           "order_no": 1011,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "已实现波动率（日内）",
+          "explanation": ""
         },
         {
           "feature_id": "feat_volatility_1012",
@@ -1661,7 +1849,9 @@
           ],
           "order_no": 1012,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "已实现波动率（日内）",
+          "explanation": ""
         },
         {
           "feature_id": "feat_volatility_1013",
@@ -1675,7 +1865,9 @@
           ],
           "order_no": 1013,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "量价因子",
+          "explanation": "单位时间内的成交笔数"
         },
         {
           "feature_id": "feat_volatility_1014",
@@ -1689,7 +1881,9 @@
           ],
           "order_no": 1014,
           "default_selected": false,
-          "coverage_ratio": 0.9997
+          "coverage_ratio": 0.9997,
+          "feature_name": "量价因子",
+          "explanation": ""
         },
         {
           "feature_id": "feat_volatility_1015",
@@ -1703,7 +1897,9 @@
           ],
           "order_no": 1015,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "成交分布（日内）",
+          "explanation": ""
         },
         {
           "feature_id": "feat_volatility_1016",
@@ -1717,7 +1913,9 @@
           ],
           "order_no": 1016,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "成交分布（日内）",
+          "explanation": ""
         },
         {
           "feature_id": "feat_volatility_1017",
@@ -1731,7 +1929,9 @@
           ],
           "order_no": 1017,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "成交分布（日内）",
+          "explanation": ""
         },
         {
           "feature_id": "feat_volatility_1018",
@@ -1745,7 +1945,9 @@
           ],
           "order_no": 1018,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "成交分布（日内）",
+          "explanation": ""
         },
         {
           "feature_id": "feat_volatility_1019",
@@ -1759,7 +1961,9 @@
           ],
           "order_no": 1019,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "成交分布（日内）",
+          "explanation": ""
         }
       ]
     },
@@ -1785,7 +1989,9 @@
           "order_no": 3,
           "default_selected": false,
           "coverage_ratio": 0.9973,
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "流通换手率",
+          "explanation": "当日成交量/流通股本"
         },
         {
           "feature_id": "feat_liquidity_001",
@@ -1803,7 +2009,9 @@
           "order_no": 2,
           "default_selected": false,
           "coverage_ratio": 0.9973,
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "换手率等权均值",
+          "explanation": ""
         },
         {
           "feature_id": "feat_049",
@@ -1823,7 +2031,9 @@
           "default_selected": true,
           "coverage_ratio": 1.0,
           "measured_ic": -0.0427,
-          "measured_icir": -0.345
+          "measured_icir": -0.345,
+          "feature_name": "当日成交量",
+          "explanation": "当日成交量"
         },
         {
           "feature_id": "feat_liquidity_003",
@@ -1843,7 +2053,9 @@
           "default_selected": true,
           "coverage_ratio": 0.9997,
           "measured_ic": -0.0349,
-          "measured_icir": -0.284
+          "measured_icir": -0.284,
+          "feature_name": "5日均成交量",
+          "explanation": ""
         },
         {
           "feature_id": "feat_liquidity_004",
@@ -1861,7 +2073,9 @@
           "order_no": 5,
           "default_selected": false,
           "coverage_ratio": 0.9994,
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "10日均成交量",
+          "explanation": ""
         },
         {
           "feature_id": "feat_liquidity_005",
@@ -1881,7 +2095,9 @@
           "default_selected": true,
           "coverage_ratio": 0.9987,
           "measured_ic": -0.0238,
-          "measured_icir": -0.198
+          "measured_icir": -0.198,
+          "feature_name": "20日均成交量",
+          "explanation": ""
         },
         {
           "feature_id": "feat_053",
@@ -1901,7 +2117,9 @@
           "default_selected": true,
           "coverage_ratio": 0.9986,
           "measured_ic": -0.031,
-          "measured_icir": -0.337
+          "measured_icir": -0.337,
+          "feature_name": "量比(5日)",
+          "explanation": ""
         },
         {
           "feature_id": "feat_liquidity_007",
@@ -1921,7 +2139,9 @@
           "default_selected": true,
           "coverage_ratio": 0.9984,
           "measured_ic": -0.0493,
-          "measured_icir": -0.448
+          "measured_icir": -0.448,
+          "feature_name": "成交量20日斜率",
+          "explanation": ""
         },
         {
           "feature_id": "feat_055",
@@ -1941,7 +2161,9 @@
           "default_selected": true,
           "coverage_ratio": 1.0,
           "measured_ic": -0.0709,
-          "measured_icir": -0.423
+          "measured_icir": -0.423,
+          "feature_name": "当日成交额",
+          "explanation": "当日成交额"
         },
         {
           "feature_id": "feat_liquidity_009",
@@ -1961,7 +2183,9 @@
           "default_selected": true,
           "coverage_ratio": 0.9997,
           "measured_ic": -0.0546,
-          "measured_icir": -0.3039
+          "measured_icir": -0.3039,
+          "feature_name": "5日均成交额",
+          "explanation": ""
         },
         {
           "feature_id": "feat_liquidity_010",
@@ -1979,7 +2203,9 @@
           "order_no": 11,
           "default_selected": false,
           "coverage_ratio": 0.9994,
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "10日均成交额",
+          "explanation": ""
         },
         {
           "feature_id": "feat_liquidity_011",
@@ -1999,7 +2225,9 @@
           "default_selected": true,
           "coverage_ratio": 0.9987,
           "measured_ic": -0.0495,
-          "measured_icir": -0.296
+          "measured_icir": -0.296,
+          "feature_name": "20日均成交额",
+          "explanation": ""
         },
         {
           "feature_id": "feat_liquidity_012",
@@ -2019,7 +2247,9 @@
           "default_selected": true,
           "coverage_ratio": 0.9986,
           "measured_ic": -0.0307,
-          "measured_icir": -0.317
+          "measured_icir": -0.317,
+          "feature_name": "成交额5日斜率",
+          "explanation": ""
         },
         {
           "feature_id": "feat_liquidity_013",
@@ -2037,7 +2267,9 @@
           "order_no": 14,
           "default_selected": false,
           "coverage_ratio": 0.9984,
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "成交额20日斜率",
+          "explanation": ""
         },
         {
           "feature_id": "feat_liquidity_014",
@@ -2051,7 +2283,9 @@
           ],
           "order_no": 15,
           "default_selected": false,
-          "coverage_ratio": 0.1538
+          "coverage_ratio": 0.1538,
+          "feature_name": "成交笔数",
+          "explanation": ""
         },
         {
           "feature_id": "feat_liquidity_015",
@@ -2065,7 +2299,9 @@
           ],
           "order_no": 16,
           "default_selected": false,
-          "coverage_ratio": 0.0988
+          "coverage_ratio": 0.0988,
+          "feature_name": "平均单笔成交额",
+          "explanation": ""
         },
         {
           "feature_id": "feat_liquidity_016",
@@ -2085,7 +2321,9 @@
           "default_selected": true,
           "coverage_ratio": 0.9987,
           "measured_ic": -0.0355,
-          "measured_icir": -0.354
+          "measured_icir": -0.354,
+          "feature_name": "20日OBV能量潮",
+          "explanation": "基于成交量累计的能量潮指标20日口径"
         },
         {
           "feature_id": "feat_liquidity_017",
@@ -2103,7 +2341,9 @@
           "order_no": 18,
           "default_selected": false,
           "coverage_ratio": 0.9958,
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "60日OBV能量潮",
+          "explanation": ""
         },
         {
           "feature_id": "feat_065",
@@ -2123,7 +2363,9 @@
           "default_selected": true,
           "coverage_ratio": 0.9983,
           "measured_ic": -0.0362,
-          "measured_icir": -0.288
+          "measured_icir": -0.288,
+          "feature_name": "资金流量指标MFI14",
+          "explanation": "基于典型价格与成交量的资金流强弱指标"
         },
         {
           "feature_id": "feat_liquidity_019",
@@ -2141,7 +2383,9 @@
           "order_no": 20,
           "default_selected": false,
           "coverage_ratio": 0.9987,
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "20日累积/派发线(ADL)",
+          "explanation": ""
         },
         {
           "feature_id": "feat_067",
@@ -2159,7 +2403,9 @@
           "order_no": 6,
           "default_selected": false,
           "coverage_ratio": 0.9892,
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "Amihud非流动性20日",
+          "explanation": "近20日|收益|/成交额均值的对数口径，衡量价格冲击"
         },
         {
           "feature_id": "feat_liquidity_021",
@@ -2177,7 +2423,9 @@
           "order_no": 22,
           "default_selected": false,
           "coverage_ratio": 0.9726,
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "60日Amihud非流动性",
+          "explanation": ""
         },
         {
           "feature_id": "feat_liq_001",
@@ -2193,7 +2441,9 @@
           "default_selected": true,
           "coverage_ratio": 1.0,
           "measured_ic": 0.2211,
-          "measured_icir": 0.6
+          "measured_icir": 0.6,
+          "feature_name": "成交量/20日均量",
+          "explanation": ""
         },
         {
           "feature_id": "feat_liq_002",
@@ -2213,7 +2463,9 @@
           "default_selected": true,
           "coverage_ratio": 1.0,
           "measured_ic": -0.0252,
-          "measured_icir": -0.184
+          "measured_icir": -0.184,
+          "feature_name": "3日均量",
+          "explanation": ""
         },
         {
           "feature_id": "feat_liq_003",
@@ -2229,7 +2481,9 @@
           "default_selected": true,
           "coverage_ratio": 1.0,
           "measured_ic": -0.0324,
-          "measured_icir": -0.3545
+          "measured_icir": -0.3545,
+          "feature_name": "3日成交量趋势",
+          "explanation": ""
         },
         {
           "feature_id": "feat_liquidity_amount_ma_5",
@@ -2249,7 +2503,9 @@
           "default_selected": true,
           "coverage_ratio": 0.9997,
           "measured_ic": -0.0544,
-          "measured_icir": -0.3027
+          "measured_icir": -0.3027,
+          "feature_name": "成交额5日均(原始口径, 覆盖率优于 liq_amount_ma_5)",
+          "explanation": ""
         },
         {
           "feature_id": "feat_liquidity_1020",
@@ -2263,7 +2519,9 @@
           ],
           "order_no": 1020,
           "default_selected": false,
-          "coverage_ratio": 0.9495
+          "coverage_ratio": 0.9495,
+          "feature_name": "换手率因子",
+          "explanation": ""
         },
         {
           "feature_id": "feat_liquidity_1021",
@@ -2277,7 +2535,9 @@
           ],
           "order_no": 1021,
           "default_selected": false,
-          "coverage_ratio": 0.9492
+          "coverage_ratio": 0.9492,
+          "feature_name": "换手率因子",
+          "explanation": ""
         },
         {
           "feature_id": "feat_liquidity_1022",
@@ -2291,7 +2551,9 @@
           ],
           "order_no": 1022,
           "default_selected": false,
-          "coverage_ratio": 0.9489
+          "coverage_ratio": 0.9489,
+          "feature_name": "换手率因子",
+          "explanation": ""
         },
         {
           "feature_id": "feat_liquidity_1023",
@@ -2305,7 +2567,9 @@
           ],
           "order_no": 1023,
           "default_selected": false,
-          "coverage_ratio": 0.9494
+          "coverage_ratio": 0.9494,
+          "feature_name": "换手率因子",
+          "explanation": ""
         },
         {
           "feature_id": "feat_liquidity_1024",
@@ -2319,7 +2583,9 @@
           ],
           "order_no": 1024,
           "default_selected": false,
-          "coverage_ratio": 0.9494
+          "coverage_ratio": 0.9494,
+          "feature_name": "换手率因子",
+          "explanation": ""
         },
         {
           "feature_id": "feat_liquidity_1025",
@@ -2333,7 +2599,9 @@
           ],
           "order_no": 1025,
           "default_selected": false,
-          "coverage_ratio": 0.9476
+          "coverage_ratio": 0.9476,
+          "feature_name": "换手率因子",
+          "explanation": ""
         },
         {
           "feature_id": "feat_liquidity_1026",
@@ -2347,7 +2615,9 @@
           ],
           "order_no": 1026,
           "default_selected": false,
-          "coverage_ratio": 0.9482
+          "coverage_ratio": 0.9482,
+          "feature_name": "累计换手率",
+          "explanation": ""
         },
         {
           "feature_id": "feat_liquidity_1027",
@@ -2361,7 +2631,9 @@
           ],
           "order_no": 1027,
           "default_selected": false,
-          "coverage_ratio": 0.9492
+          "coverage_ratio": 0.9492,
+          "feature_name": "累计换手率",
+          "explanation": ""
         },
         {
           "feature_id": "feat_liquidity_1028",
@@ -2375,7 +2647,9 @@
           ],
           "order_no": 1028,
           "default_selected": false,
-          "coverage_ratio": 0.9489
+          "coverage_ratio": 0.9489,
+          "feature_name": "换手率因子",
+          "explanation": ""
         },
         {
           "feature_id": "feat_liquidity_1029",
@@ -2389,7 +2663,9 @@
           ],
           "order_no": 1029,
           "default_selected": false,
-          "coverage_ratio": 0.9488
+          "coverage_ratio": 0.9488,
+          "feature_name": "换手率因子",
+          "explanation": ""
         },
         {
           "feature_id": "feat_liquidity_1030",
@@ -2403,7 +2679,9 @@
           ],
           "order_no": 1030,
           "default_selected": false,
-          "coverage_ratio": 0.9488
+          "coverage_ratio": 0.9488,
+          "feature_name": "换手率因子",
+          "explanation": ""
         },
         {
           "feature_id": "feat_liquidity_1031",
@@ -2417,7 +2695,9 @@
           ],
           "order_no": 1031,
           "default_selected": false,
-          "coverage_ratio": 0.9489
+          "coverage_ratio": 0.9489,
+          "feature_name": "换手率因子",
+          "explanation": ""
         },
         {
           "feature_id": "feat_liquidity_1032",
@@ -2431,7 +2711,9 @@
           ],
           "order_no": 1032,
           "default_selected": false,
-          "coverage_ratio": 0.9494
+          "coverage_ratio": 0.9494,
+          "feature_name": "换手率因子",
+          "explanation": ""
         },
         {
           "feature_id": "feat_liquidity_1033",
@@ -2445,7 +2727,9 @@
           ],
           "order_no": 1033,
           "default_selected": false,
-          "coverage_ratio": 0.9489
+          "coverage_ratio": 0.9489,
+          "feature_name": "换手率因子",
+          "explanation": ""
         },
         {
           "feature_id": "feat_liquidity_1034",
@@ -2459,7 +2743,9 @@
           ],
           "order_no": 1034,
           "default_selected": false,
-          "coverage_ratio": 0.9489
+          "coverage_ratio": 0.9489,
+          "feature_name": "换手率因子",
+          "explanation": ""
         },
         {
           "feature_id": "feat_liquidity_1035",
@@ -2473,7 +2759,9 @@
           ],
           "order_no": 1035,
           "default_selected": false,
-          "coverage_ratio": 0.9488
+          "coverage_ratio": 0.9488,
+          "feature_name": "换手率因子",
+          "explanation": "(当日换手率-20日均值)/20日标准差，捕捉换手率异常放大"
         }
       ]
     },
@@ -2500,7 +2788,9 @@
           "order_no": 1,
           "default_selected": false,
           "coverage_ratio": 0.9951,
-          "coverage_note": "仅 2026 年起有数据 (l2_factors)，跨年训练前请确认覆盖范围"
+          "coverage_note": "仅 2026 年起有数据 (l2_factors)，跨年训练前请确认覆盖范围",
+          "feature_name": "总净流入额",
+          "explanation": ""
         },
         {
           "feature_id": "feat_070",
@@ -2518,7 +2808,9 @@
           "order_no": 2,
           "default_selected": false,
           "coverage_ratio": 0.9951,
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "总净流入占比",
+          "explanation": ""
         },
         {
           "feature_id": "feat_071",
@@ -2536,7 +2828,9 @@
           "order_no": 3,
           "default_selected": false,
           "coverage_ratio": 0.9951,
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "大单净流入额",
+          "explanation": ""
         },
         {
           "feature_id": "feat_fund_flow_003",
@@ -2551,7 +2845,9 @@
           "order_no": 4,
           "default_selected": false,
           "coverage_ratio": 0.8948,
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "资金流 大单 净流入 比率",
+          "explanation": ""
         },
         {
           "feature_id": "feat_fund_flow_004",
@@ -2566,7 +2862,9 @@
           "order_no": 5,
           "default_selected": false,
           "coverage_ratio": 0.9951,
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "资金流 中单 净流入 成交额",
+          "explanation": ""
         },
         {
           "feature_id": "feat_fund_flow_005",
@@ -2581,7 +2879,9 @@
           "order_no": 6,
           "default_selected": false,
           "coverage_ratio": 0.9906,
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "资金流 中单 净流入 比率",
+          "explanation": ""
         },
         {
           "feature_id": "feat_fund_flow_006",
@@ -2596,7 +2896,9 @@
           "order_no": 7,
           "default_selected": false,
           "coverage_ratio": 0.9951,
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "资金流 小单 净流入 成交额",
+          "explanation": ""
         },
         {
           "feature_id": "feat_fund_flow_007",
@@ -2611,7 +2913,9 @@
           "order_no": 8,
           "default_selected": false,
           "coverage_ratio": 0.9916,
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "资金流 小单 净流入 比率",
+          "explanation": ""
         },
         {
           "feature_id": "feat_fund_flow_008",
@@ -2629,7 +2933,9 @@
           "order_no": 9,
           "default_selected": false,
           "coverage_ratio": 0.9951,
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "资金流 净流入 委托 次数",
+          "explanation": ""
         },
         {
           "feature_id": "feat_fund_flow_009",
@@ -2647,7 +2953,9 @@
           "order_no": 10,
           "default_selected": false,
           "coverage_ratio": 0.9951,
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "资金流 净流入 委托 比率",
+          "explanation": ""
         },
         {
           "feature_id": "feat_fund_flow_010",
@@ -2662,7 +2970,9 @@
           "order_no": 11,
           "default_selected": false,
           "coverage_ratio": 0.9951,
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "资金流 大单 净流入 委托",
+          "explanation": ""
         },
         {
           "feature_id": "feat_fund_flow_011",
@@ -2677,7 +2987,9 @@
           "order_no": 12,
           "default_selected": false,
           "coverage_ratio": 0.8948,
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "资金流 大单 委托 比率",
+          "explanation": ""
         },
         {
           "feature_id": "feat_081",
@@ -2695,7 +3007,9 @@
           "order_no": 4,
           "default_selected": false,
           "coverage_ratio": 0.9975,
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "VPIN当日值",
+          "explanation": ""
         },
         {
           "feature_id": "feat_082",
@@ -2713,7 +3027,9 @@
           "order_no": 5,
           "default_selected": false,
           "coverage_ratio": 0.9955,
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "VPIN五日均值",
+          "explanation": ""
         },
         {
           "feature_id": "feat_083",
@@ -2731,7 +3047,9 @@
           "order_no": 6,
           "default_selected": false,
           "coverage_ratio": 0.9891,
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "VPIN二十日均值",
+          "explanation": ""
         },
         {
           "feature_id": "feat_fund_flow_015",
@@ -2749,7 +3067,9 @@
           "order_no": 16,
           "default_selected": false,
           "coverage_ratio": 0.996,
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "资金流 VPIN delta 5",
+          "explanation": ""
         },
         {
           "feature_id": "feat_fund_flow_016",
@@ -2764,7 +3084,9 @@
           "order_no": 17,
           "default_selected": false,
           "coverage_ratio": 0.9951,
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "资金流 qsp",
+          "explanation": ""
         },
         {
           "feature_id": "feat_fund_flow_017",
@@ -2779,7 +3101,9 @@
           "order_no": 18,
           "default_selected": false,
           "coverage_ratio": 0.9951,
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "资金流 esp",
+          "explanation": ""
         },
         {
           "feature_id": "feat_fund_flow_018",
@@ -2794,7 +3118,9 @@
           "order_no": 19,
           "default_selected": false,
           "coverage_ratio": 0.9951,
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "资金流 aqsp",
+          "explanation": ""
         },
         {
           "feature_id": "feat_fund_flow_019",
@@ -2809,7 +3135,9 @@
           "order_no": 20,
           "default_selected": false,
           "coverage_ratio": 0.9949,
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "资金流 qsp 时间加权",
+          "explanation": ""
         },
         {
           "feature_id": "feat_fund_flow_020",
@@ -2824,7 +3152,9 @@
           "order_no": 21,
           "default_selected": false,
           "coverage_ratio": 0.9949,
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "资金流 esp 时间加权",
+          "explanation": ""
         },
         {
           "feature_id": "feat_090",
@@ -2842,7 +3172,9 @@
           "order_no": 7,
           "default_selected": false,
           "coverage_ratio": 0.9952,
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "资金压力指数",
+          "explanation": ""
         },
         {
           "feature_id": "feat_fund_flow_flow_net_ratio",
@@ -2857,7 +3189,9 @@
           "order_no": 23,
           "default_selected": true,
           "coverage_ratio": 0.99,
-          "coverage_note": "仅 2026 年起有数据 (l2_factors)，跨年训练前请确认覆盖范围"
+          "coverage_note": "仅 2026 年起有数据 (l2_factors)，跨年训练前请确认覆盖范围",
+          "feature_name": "总净流入占比",
+          "explanation": ""
         },
         {
           "feature_id": "feat_fund_flow_flow_large_net",
@@ -2872,7 +3206,9 @@
           "order_no": 24,
           "default_selected": true,
           "coverage_ratio": 0.99,
-          "coverage_note": "仅 2026 年起有数据 (l2_factors)，跨年训练前请确认覆盖范围"
+          "coverage_note": "仅 2026 年起有数据 (l2_factors)，跨年训练前请确认覆盖范围",
+          "feature_name": "大单净流入",
+          "explanation": ""
         },
         {
           "feature_id": "feat_fund_flow_flow_medium_net",
@@ -2886,7 +3222,9 @@
           ],
           "order_no": 25,
           "default_selected": true,
-          "coverage_ratio": 0.99
+          "coverage_ratio": 0.99,
+          "feature_name": "中单净流入",
+          "explanation": ""
         },
         {
           "feature_id": "feat_fund_flow_flow_small_net",
@@ -2900,7 +3238,9 @@
           ],
           "order_no": 26,
           "default_selected": true,
-          "coverage_ratio": 0.99
+          "coverage_ratio": 0.99,
+          "feature_name": "小单净流入",
+          "explanation": ""
         },
         {
           "feature_id": "feat_fund_flow_flow_super_net",
@@ -2914,7 +3254,9 @@
           ],
           "order_no": 27,
           "default_selected": true,
-          "coverage_ratio": 0.99
+          "coverage_ratio": 0.99,
+          "feature_name": "超大单净流入",
+          "explanation": ""
         },
         {
           "feature_id": "feat_fund_flow_flow_large_ratio",
@@ -2928,7 +3270,9 @@
           ],
           "order_no": 28,
           "default_selected": true,
-          "coverage_ratio": 0.99
+          "coverage_ratio": 0.99,
+          "feature_name": "大单流入占比",
+          "explanation": ""
         },
         {
           "feature_id": "feat_fund_flow_flow_medium_ratio",
@@ -2942,7 +3286,9 @@
           ],
           "order_no": 29,
           "default_selected": true,
-          "coverage_ratio": 0.99
+          "coverage_ratio": 0.99,
+          "feature_name": "中单流入占比",
+          "explanation": ""
         },
         {
           "feature_id": "feat_fund_flow_flow_small_ratio",
@@ -2956,7 +3302,9 @@
           ],
           "order_no": 30,
           "default_selected": true,
-          "coverage_ratio": 0.99
+          "coverage_ratio": 0.99,
+          "feature_name": "小单流入占比",
+          "explanation": ""
         },
         {
           "feature_id": "feat_fund_flow_flow_imbalance_volume",
@@ -2971,7 +3319,9 @@
           "order_no": 31,
           "default_selected": true,
           "coverage_ratio": 0.99,
-          "coverage_note": "仅 2026 年起有数据 (l2_factors)，跨年训练前请确认覆盖范围"
+          "coverage_note": "仅 2026 年起有数据 (l2_factors)，跨年训练前请确认覆盖范围",
+          "feature_name": "委托量不平衡",
+          "explanation": ""
         },
         {
           "feature_id": "feat_fund_flow_flow_consistency",
@@ -2985,7 +3335,9 @@
           ],
           "order_no": 32,
           "default_selected": true,
-          "coverage_ratio": 0.99
+          "coverage_ratio": 0.99,
+          "feature_name": "资金流一致性",
+          "explanation": ""
         },
         {
           "feature_id": "feat_fund_flow_flow_money_flow_index",
@@ -2999,7 +3351,9 @@
           ],
           "order_no": 33,
           "default_selected": true,
-          "coverage_ratio": 0.99
+          "coverage_ratio": 0.99,
+          "feature_name": "资金流量指数",
+          "explanation": ""
         },
         {
           "feature_id": "feat_fund_flow_flow_big_trade_ratio",
@@ -3013,7 +3367,9 @@
           ],
           "order_no": 34,
           "default_selected": true,
-          "coverage_ratio": 0.99
+          "coverage_ratio": 0.99,
+          "feature_name": "大单成交占比",
+          "explanation": ""
         },
         {
           "feature_id": "feat_fund_flow_micro_vpin_8",
@@ -3027,7 +3383,9 @@
           ],
           "order_no": 35,
           "default_selected": true,
-          "coverage_ratio": 0.99
+          "coverage_ratio": 0.99,
+          "feature_name": "VPIN(8桶)",
+          "explanation": ""
         },
         {
           "feature_id": "feat_fund_flow_micro_vpin_20",
@@ -3042,7 +3400,9 @@
           "order_no": 36,
           "default_selected": true,
           "coverage_ratio": 0.99,
-          "coverage_note": "仅 2026 年起有数据 (l2_factors)，跨年训练前请确认覆盖范围"
+          "coverage_note": "仅 2026 年起有数据 (l2_factors)，跨年训练前请确认覆盖范围",
+          "feature_name": "VPIN(20桶)",
+          "explanation": ""
         },
         {
           "feature_id": "feat_fund_flow_micro_vpin_50",
@@ -3056,7 +3416,9 @@
           ],
           "order_no": 37,
           "default_selected": true,
-          "coverage_ratio": 0.99
+          "coverage_ratio": 0.99,
+          "feature_name": "VPIN(50桶)",
+          "explanation": ""
         },
         {
           "feature_id": "feat_fund_flow_micro_vpin_ma_5",
@@ -3071,7 +3433,9 @@
           "order_no": 38,
           "default_selected": true,
           "coverage_ratio": 0.99,
-          "coverage_note": "仅 2026 年起有数据 (l2_factors)，跨年训练前请确认覆盖范围"
+          "coverage_note": "仅 2026 年起有数据 (l2_factors)，跨年训练前请确认覆盖范围",
+          "feature_name": "VPIN 5日均值",
+          "explanation": ""
         },
         {
           "feature_id": "feat_fund_flow_micro_vpin_ma_20",
@@ -3085,7 +3449,9 @@
           ],
           "order_no": 39,
           "default_selected": true,
-          "coverage_ratio": 0.99
+          "coverage_ratio": 0.99,
+          "feature_name": "VPIN 20日均值",
+          "explanation": ""
         },
         {
           "feature_id": "feat_fund_flow_micro_vpin_delta_5",
@@ -3099,7 +3465,9 @@
           ],
           "order_no": 40,
           "default_selected": true,
-          "coverage_ratio": 0.99
+          "coverage_ratio": 0.99,
+          "feature_name": "VPIN 5日变化",
+          "explanation": ""
         },
         {
           "feature_id": "feat_fund_flow_micro_pin",
@@ -3113,7 +3481,9 @@
           ],
           "order_no": 41,
           "default_selected": true,
-          "coverage_ratio": 0.99
+          "coverage_ratio": 0.99,
+          "feature_name": "PIN知情交易概率",
+          "explanation": ""
         },
         {
           "feature_id": "feat_fund_flow_1036",
@@ -3127,7 +3497,9 @@
           ],
           "order_no": 1036,
           "default_selected": false,
-          "coverage_ratio": 0.9478
+          "coverage_ratio": 0.9478,
+          "feature_name": "收盘时段成交占比",
+          "explanation": "当前成交额在近期区间中的相对位置"
         },
         {
           "feature_id": "feat_fund_flow_1037",
@@ -3141,7 +3513,9 @@
           ],
           "order_no": 1037,
           "default_selected": false,
-          "coverage_ratio": 0.9488
+          "coverage_ratio": 0.9488,
+          "feature_name": "近10日成交额新高天数",
+          "explanation": ""
         },
         {
           "feature_id": "feat_fund_flow_1038",
@@ -3155,7 +3529,9 @@
           ],
           "order_no": 1038,
           "default_selected": false,
-          "coverage_ratio": 0.9495
+          "coverage_ratio": 0.9495,
+          "feature_name": "成交额对数",
+          "explanation": "当日成交额的对数，衡量资金活跃度"
         },
         {
           "feature_id": "feat_fund_flow_1039",
@@ -3169,7 +3545,9 @@
           ],
           "order_no": 1039,
           "default_selected": false,
-          "coverage_ratio": 0.9489
+          "coverage_ratio": 0.9489,
+          "feature_name": "N日平均成交额",
+          "explanation": ""
         },
         {
           "feature_id": "feat_fund_flow_1040",
@@ -3183,7 +3561,9 @@
           ],
           "order_no": 1040,
           "default_selected": false,
-          "coverage_ratio": 0.9494
+          "coverage_ratio": 0.9494,
+          "feature_name": "N日平均成交额",
+          "explanation": ""
         },
         {
           "feature_id": "feat_fund_flow_1041",
@@ -3197,7 +3577,9 @@
           ],
           "order_no": 1041,
           "default_selected": false,
-          "coverage_ratio": 0.9476
+          "coverage_ratio": 0.9476,
+          "feature_name": "N日平均成交额",
+          "explanation": ""
         },
         {
           "feature_id": "feat_fund_flow_1042",
@@ -3211,7 +3593,9 @@
           ],
           "order_no": 1042,
           "default_selected": false,
-          "coverage_ratio": 0.9482
+          "coverage_ratio": 0.9482,
+          "feature_name": "N日净资金流（成交额口径）",
+          "explanation": ""
         },
         {
           "feature_id": "feat_fund_flow_1043",
@@ -3225,7 +3609,9 @@
           ],
           "order_no": 1043,
           "default_selected": false,
-          "coverage_ratio": 0.9492
+          "coverage_ratio": 0.9492,
+          "feature_name": "N日净资金流（成交额口径）",
+          "explanation": ""
         },
         {
           "feature_id": "feat_fund_flow_1044",
@@ -3239,7 +3625,9 @@
           ],
           "order_no": 1044,
           "default_selected": false,
-          "coverage_ratio": 0.9489
+          "coverage_ratio": 0.9489,
+          "feature_name": "成交额比值（短/长窗口）",
+          "explanation": ""
         },
         {
           "feature_id": "feat_fund_flow_1045",
@@ -3253,7 +3641,9 @@
           ],
           "order_no": 1045,
           "default_selected": false,
-          "coverage_ratio": 0.9494
+          "coverage_ratio": 0.9494,
+          "feature_name": "成交额比值（短/长窗口）",
+          "explanation": ""
         },
         {
           "feature_id": "feat_fund_flow_1046",
@@ -3267,7 +3657,9 @@
           ],
           "order_no": 1046,
           "default_selected": false,
-          "coverage_ratio": 0.9489
+          "coverage_ratio": 0.9489,
+          "feature_name": "成交额比值（短/长窗口）",
+          "explanation": ""
         },
         {
           "feature_id": "feat_fund_flow_1047",
@@ -3281,7 +3673,9 @@
           ],
           "order_no": 1047,
           "default_selected": false,
-          "coverage_ratio": 0.9489
+          "coverage_ratio": 0.9489,
+          "feature_name": "成交额偏度",
+          "explanation": ""
         },
         {
           "feature_id": "feat_fund_flow_1048",
@@ -3295,7 +3689,9 @@
           ],
           "order_no": 1048,
           "default_selected": false,
-          "coverage_ratio": 0.9483
+          "coverage_ratio": 0.9483,
+          "feature_name": "上涨日成交额占比",
+          "explanation": ""
         },
         {
           "feature_id": "feat_fund_flow_1049",
@@ -3309,7 +3705,9 @@
           ],
           "order_no": 1049,
           "default_selected": false,
-          "coverage_ratio": 0.9492
+          "coverage_ratio": 0.9492,
+          "feature_name": "上涨日成交额占比",
+          "explanation": ""
         },
         {
           "feature_id": "feat_fund_flow_1050",
@@ -3323,7 +3721,9 @@
           ],
           "order_no": 1050,
           "default_selected": false,
-          "coverage_ratio": 0.9488
+          "coverage_ratio": 0.9488,
+          "feature_name": "成交额/波动比",
+          "explanation": ""
         },
         {
           "feature_id": "feat_fund_flow_1051",
@@ -3337,7 +3737,9 @@
           ],
           "order_no": 1051,
           "default_selected": false,
-          "coverage_ratio": 0.9489
+          "coverage_ratio": 0.9489,
+          "feature_name": "成交额20日Z分数",
+          "explanation": "当前成交额相对近20日均值的标准化偏离"
         },
         {
           "feature_id": "feat_fund_flow_1052",
@@ -3351,7 +3753,9 @@
           ],
           "order_no": 1052,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "主动买入金额",
+          "explanation": ""
         },
         {
           "feature_id": "feat_fund_flow_1053",
@@ -3365,7 +3769,9 @@
           ],
           "order_no": 1053,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "主动买入占比",
+          "explanation": ""
         },
         {
           "feature_id": "feat_fund_flow_1054",
@@ -3379,7 +3785,9 @@
           ],
           "order_no": 1054,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "主动卖出金额",
+          "explanation": ""
         },
         {
           "feature_id": "feat_fund_flow_1055",
@@ -3393,7 +3801,9 @@
           ],
           "order_no": 1055,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "主动卖出占比",
+          "explanation": ""
         },
         {
           "feature_id": "feat_fund_flow_1056",
@@ -3407,7 +3817,9 @@
           ],
           "order_no": 1056,
           "default_selected": false,
-          "coverage_ratio": 0.4531
+          "coverage_ratio": 0.4531,
+          "feature_name": "L2资金流因子",
+          "explanation": ""
         }
       ]
     },
@@ -3433,7 +3845,9 @@
           "order_no": 1,
           "default_selected": false,
           "coverage_ratio": 1.0,
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "总市值对数",
+          "explanation": ""
         },
         {
           "feature_id": "feat_092",
@@ -3451,7 +3865,9 @@
           "order_no": 2,
           "default_selected": false,
           "coverage_ratio": 1.0,
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "流通市值对数",
+          "explanation": ""
         },
         {
           "feature_id": "feat_093",
@@ -3469,7 +3885,9 @@
           "order_no": 7,
           "default_selected": false,
           "coverage_ratio": 0.9791,
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "账面市净率倒数(B/P)",
+          "explanation": ""
         },
         {
           "feature_id": "feat_094",
@@ -3487,7 +3905,9 @@
           "order_no": 8,
           "default_selected": false,
           "coverage_ratio": 0.6888,
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "盈利收益率(E/P)",
+          "explanation": ""
         },
         {
           "feature_id": "feat_style_004",
@@ -3502,7 +3922,9 @@
           "order_no": 5,
           "default_selected": false,
           "coverage_ratio": 1.0,
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "style smb",
+          "explanation": ""
         },
         {
           "feature_id": "feat_style_005",
@@ -3517,7 +3939,9 @@
           "order_no": 6,
           "default_selected": false,
           "coverage_ratio": 1.0,
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "style hml",
+          "explanation": ""
         },
         {
           "feature_id": "feat_style_006",
@@ -3532,7 +3956,9 @@
           "order_no": 7,
           "default_selected": false,
           "coverage_ratio": 1.0,
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "style mkt premium",
+          "explanation": ""
         },
         {
           "feature_id": "feat_102",
@@ -3552,7 +3978,9 @@
           "default_selected": true,
           "coverage_ratio": 0.9987,
           "measured_ic": -0.0137,
-          "measured_icir": -0.059
+          "measured_icir": -0.059,
+          "feature_name": "20日市场Beta",
+          "explanation": ""
         },
         {
           "feature_id": "feat_103",
@@ -3572,7 +4000,9 @@
           "default_selected": true,
           "coverage_ratio": 0.9958,
           "measured_ic": -0.019,
-          "measured_icir": -0.074
+          "measured_icir": -0.074,
+          "feature_name": "60日市场Beta",
+          "explanation": ""
         },
         {
           "feature_id": "feat_style_009",
@@ -3592,7 +4022,9 @@
           "default_selected": true,
           "coverage_ratio": 0.9918,
           "measured_ic": -0.0181,
-          "measured_icir": -0.07
+          "measured_icir": -0.07,
+          "feature_name": "120日市场 Beta",
+          "explanation": ""
         },
         {
           "feature_id": "feat_105",
@@ -3612,7 +4044,9 @@
           "default_selected": true,
           "coverage_ratio": 0.9974,
           "measured_ic": -0.0545,
-          "measured_icir": -0.269
+          "measured_icir": -0.269,
+          "feature_name": "20日特质波动",
+          "explanation": ""
         },
         {
           "feature_id": "feat_style_011",
@@ -3632,7 +4066,9 @@
           "default_selected": true,
           "coverage_ratio": 0.9918,
           "measured_ic": -0.0431,
-          "measured_icir": -0.188
+          "measured_icir": -0.188,
+          "feature_name": "60日特质波动率",
+          "explanation": ""
         },
         {
           "feature_id": "feat_107",
@@ -3652,7 +4088,9 @@
           "default_selected": true,
           "coverage_ratio": 0.9974,
           "measured_ic": -0.0468,
-          "measured_icir": -0.298
+          "measured_icir": -0.298,
+          "feature_name": "20日残差收益",
+          "explanation": "剔除市场Beta后的特质收益累计，残差动量因子"
         },
         {
           "feature_id": "feat_style_013",
@@ -3667,7 +4105,9 @@
           "order_no": 14,
           "default_selected": false,
           "coverage_ratio": 0.6958,
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "style valuation composite",
+          "explanation": ""
         },
         {
           "feature_id": "feat_style_014",
@@ -3682,7 +4122,9 @@
           "order_no": 15,
           "default_selected": false,
           "coverage_ratio": 1.0,
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "style 规模 percentile",
+          "explanation": ""
         },
         {
           "feature_id": "feat_style_015",
@@ -3697,7 +4139,9 @@
           "order_no": 16,
           "default_selected": false,
           "coverage_ratio": 0.6958,
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "style value percentile",
+          "explanation": ""
         },
         {
           "feature_id": "feat_style_style_size_20",
@@ -3713,7 +4157,9 @@
           "default_selected": true,
           "coverage_ratio": 0.99,
           "measured_ic": -0.0115,
-          "measured_icir": -0.052
+          "measured_icir": -0.052,
+          "feature_name": "规模因子20日",
+          "explanation": ""
         },
         {
           "feature_id": "feat_style_style_value_20",
@@ -3729,7 +4175,9 @@
           "default_selected": true,
           "coverage_ratio": 0.99,
           "measured_ic": 0.0367,
-          "measured_icir": 0.23
+          "measured_icir": 0.23,
+          "feature_name": "价值因子20日",
+          "explanation": ""
         },
         {
           "feature_id": "feat_style_1057",
@@ -3743,7 +4191,9 @@
           ],
           "order_no": 1057,
           "default_selected": false,
-          "coverage_ratio": 0.9983
+          "coverage_ratio": 0.9983,
+          "feature_name": "20日Beta（对市场）",
+          "explanation": ""
         }
       ]
     },
@@ -3769,7 +4219,9 @@
           "order_no": 1,
           "default_selected": false,
           "coverage_ratio": 0.9998,
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "所属行业1日收益",
+          "explanation": ""
         },
         {
           "feature_id": "feat_industry_001",
@@ -3785,7 +4237,9 @@
           "order_no": 2,
           "default_selected": false,
           "coverage_ratio": 0.9998,
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "ind 收益率 5d",
+          "explanation": ""
         },
         {
           "feature_id": "feat_industry_002",
@@ -3801,7 +4255,9 @@
           "order_no": 3,
           "default_selected": false,
           "coverage_ratio": 0.9998,
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "ind 收益率 10d",
+          "explanation": ""
         },
         {
           "feature_id": "feat_114",
@@ -3819,7 +4275,9 @@
           "order_no": 2,
           "default_selected": false,
           "coverage_ratio": 0.9998,
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "所属行业20日收益",
+          "explanation": ""
         },
         {
           "feature_id": "feat_industry_004",
@@ -3835,7 +4293,9 @@
           "order_no": 5,
           "default_selected": false,
           "coverage_ratio": 0.9998,
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "ind vol 20",
+          "explanation": ""
         },
         {
           "feature_id": "feat_industry_005",
@@ -3851,7 +4311,9 @@
           "order_no": 6,
           "default_selected": false,
           "coverage_ratio": 0.9998,
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "ind 换手率 20",
+          "explanation": ""
         },
         {
           "feature_id": "feat_industry_006",
@@ -3867,7 +4329,9 @@
           "order_no": 7,
           "default_selected": false,
           "coverage_ratio": 0.9998,
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "ind 成交额 20",
+          "explanation": ""
         },
         {
           "feature_id": "feat_118",
@@ -3887,7 +4351,9 @@
           "default_selected": true,
           "coverage_ratio": 0.9986,
           "measured_ic": -0.0404,
-          "measured_icir": -0.289
+          "measured_icir": -0.289,
+          "feature_name": "个股相对行业强度20日",
+          "explanation": "个股20日收益-所属行业20日均值收益，行业内的超额强度"
         },
         {
           "feature_id": "feat_industry_008",
@@ -3904,7 +4370,9 @@
           "default_selected": true,
           "coverage_ratio": 0.9957,
           "measured_ic": -0.0343,
-          "measured_icir": -0.245
+          "measured_icir": -0.245,
+          "feature_name": "ind strength 60",
+          "explanation": ""
         },
         {
           "feature_id": "feat_industry_009",
@@ -3921,7 +4389,9 @@
           "default_selected": true,
           "coverage_ratio": 0.9998,
           "measured_ic": -0.0224,
-          "measured_icir": -0.165
+          "measured_icir": -0.165,
+          "feature_name": "ind dispersion 20",
+          "explanation": ""
         },
         {
           "feature_id": "feat_industry_010",
@@ -3937,7 +4407,9 @@
           "order_no": 11,
           "default_selected": false,
           "coverage_ratio": 0.9998,
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "ind up breadth 20",
+          "explanation": ""
         },
         {
           "feature_id": "feat_industry_011",
@@ -3953,7 +4425,9 @@
           "order_no": 12,
           "default_selected": false,
           "coverage_ratio": 0.9998,
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "ind down breadth 20",
+          "explanation": ""
         },
         {
           "feature_id": "feat_industry_012",
@@ -3969,7 +4443,9 @@
           "order_no": 13,
           "default_selected": false,
           "coverage_ratio": 0.9987,
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "ind relative 成交量 20",
+          "explanation": ""
         },
         {
           "feature_id": "feat_industry_013",
@@ -3985,7 +4461,9 @@
           "order_no": 14,
           "default_selected": false,
           "coverage_ratio": 0.9987,
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "ind relative 波动率 20",
+          "explanation": ""
         },
         {
           "feature_id": "feat_industry_014",
@@ -4001,7 +4479,9 @@
           "order_no": 15,
           "default_selected": false,
           "coverage_ratio": 0.9699,
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "ind relative 资金流 20",
+          "explanation": ""
         },
         {
           "feature_id": "feat_126",
@@ -4019,7 +4499,9 @@
           "order_no": 4,
           "default_selected": false,
           "coverage_ratio": 0.9998,
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "行业动量排名",
+          "explanation": ""
         },
         {
           "feature_id": "feat_industry_016",
@@ -4035,7 +4517,9 @@
           "order_no": 17,
           "default_selected": false,
           "coverage_ratio": 0.9998,
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "ind value rank",
+          "explanation": ""
         },
         {
           "feature_id": "feat_industry_017",
@@ -4051,7 +4535,9 @@
           "order_no": 18,
           "default_selected": false,
           "coverage_ratio": 0.9998,
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "ind 规模 rank",
+          "explanation": ""
         },
         {
           "feature_id": "feat_industry_018",
@@ -4068,7 +4554,9 @@
           "order_no": 19,
           "default_selected": false,
           "coverage_ratio": 0.9998,
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "ind code l1",
+          "explanation": ""
         },
         {
           "feature_id": "feat_industry_019",
@@ -4085,7 +4573,9 @@
           "order_no": 20,
           "default_selected": false,
           "coverage_ratio": 0.9998,
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "ind code l2",
+          "explanation": ""
         },
         {
           "feature_id": "feat_industry_ind_ret_5",
@@ -4101,7 +4591,9 @@
           "default_selected": true,
           "coverage_ratio": 0.99,
           "measured_ic": -0.0129,
-          "measured_icir": -0.078
+          "measured_icir": -0.078,
+          "feature_name": "行业5日收益",
+          "explanation": ""
         },
         {
           "feature_id": "feat_industry_ind_ret_10",
@@ -4117,7 +4609,9 @@
           "default_selected": true,
           "coverage_ratio": 0.99,
           "measured_ic": -0.0192,
-          "measured_icir": -0.117
+          "measured_icir": -0.117,
+          "feature_name": "行业10日收益",
+          "explanation": ""
         },
         {
           "feature_id": "feat_industry_ind_ret_20",
@@ -4133,7 +4627,9 @@
           "default_selected": true,
           "coverage_ratio": 0.99,
           "measured_ic": -0.0245,
-          "measured_icir": -0.149
+          "measured_icir": -0.149,
+          "feature_name": "行业20日收益",
+          "explanation": ""
         },
         {
           "feature_id": "feat_industry_ind_rotation_speed_20",
@@ -4149,7 +4645,9 @@
           "default_selected": true,
           "coverage_ratio": 0.99,
           "measured_ic": 0.0029,
-          "measured_icir": 0.036
+          "measured_icir": 0.036,
+          "feature_name": "行业轮动速度",
+          "explanation": ""
         },
         {
           "feature_id": "feat_industry_ind_breadth_up_20",
@@ -4165,7 +4663,9 @@
           "default_selected": true,
           "coverage_ratio": 0.99,
           "measured_ic": -0.0184,
-          "measured_icir": -0.129
+          "measured_icir": -0.129,
+          "feature_name": "行业上涨广度",
+          "explanation": ""
         },
         {
           "feature_id": "feat_industry_ind_volume_ratio_20",
@@ -4181,7 +4681,9 @@
           "default_selected": true,
           "coverage_ratio": 0.99,
           "measured_ic": -0.0163,
-          "measured_icir": -0.098
+          "measured_icir": -0.098,
+          "feature_name": "行业量比",
+          "explanation": ""
         },
         {
           "feature_id": "feat_industry_ind_crowding_20",
@@ -4197,7 +4699,9 @@
           "default_selected": true,
           "coverage_ratio": 0.99,
           "measured_ic": -0.0163,
-          "measured_icir": -0.099
+          "measured_icir": -0.099,
+          "feature_name": "行业拥挤度",
+          "explanation": ""
         },
         {
           "feature_id": "feat_industry_ind_netflow_rank_20",
@@ -4211,7 +4715,9 @@
           ],
           "order_no": 28,
           "default_selected": false,
-          "coverage_ratio": 0.99
+          "coverage_ratio": 0.99,
+          "feature_name": "行业资金流排名",
+          "explanation": ""
         },
         {
           "feature_id": "feat_industry_ind_relative_pe",
@@ -4227,7 +4733,9 @@
           "default_selected": true,
           "coverage_ratio": 0.99,
           "measured_ic": -0.0097,
-          "measured_icir": -0.054
+          "measured_icir": -0.054,
+          "feature_name": "行业相对PE",
+          "explanation": ""
         },
         {
           "feature_id": "feat_industry_ind_concentration",
@@ -4243,7 +4751,9 @@
           "default_selected": true,
           "coverage_ratio": 0.99,
           "measured_ic": 0.0019,
-          "measured_icir": 0.017
+          "measured_icir": 0.017,
+          "feature_name": "行业集中度",
+          "explanation": ""
         },
         {
           "feature_id": "feat_industry_ind_relative_momentum_20",
@@ -4259,7 +4769,9 @@
           "default_selected": true,
           "coverage_ratio": 0.99,
           "measured_ic": -0.0245,
-          "measured_icir": -0.149
+          "measured_icir": -0.149,
+          "feature_name": "行业相对动量",
+          "explanation": ""
         },
         {
           "feature_id": "feat_industry_ind_momentum_decay",
@@ -4275,7 +4787,9 @@
           "default_selected": true,
           "coverage_ratio": 0.99,
           "measured_ic": 0.0186,
-          "measured_icir": 0.116
+          "measured_icir": 0.116,
+          "feature_name": "行业动量衰减",
+          "explanation": ""
         }
       ]
     },
@@ -4297,7 +4811,9 @@
           ],
           "order_no": 1,
           "default_selected": false,
-          "coverage_ratio": 0.9951
+          "coverage_ratio": 0.9951,
+          "feature_name": "qsp 等权",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_001",
@@ -4311,7 +4827,9 @@
           ],
           "order_no": 2,
           "default_selected": false,
-          "coverage_ratio": 0.9951
+          "coverage_ratio": 0.9951,
+          "feature_name": "esp 等权",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_002",
@@ -4326,7 +4844,9 @@
           "order_no": 3,
           "default_selected": false,
           "coverage_ratio": 0.9951,
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "aqsp 等权",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_003",
@@ -4340,7 +4860,9 @@
           ],
           "order_no": 4,
           "default_selected": false,
-          "coverage_ratio": 0.9949
+          "coverage_ratio": 0.9949,
+          "feature_name": "qsp 时间加权",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_004",
@@ -4354,7 +4876,9 @@
           ],
           "order_no": 5,
           "default_selected": false,
-          "coverage_ratio": 0.9949
+          "coverage_ratio": 0.9949,
+          "feature_name": "esp 时间加权",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_005",
@@ -4368,7 +4892,9 @@
           ],
           "order_no": 6,
           "default_selected": false,
-          "coverage_ratio": 0.9951
+          "coverage_ratio": 0.9951,
+          "feature_name": "qsp 成交量",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_006",
@@ -4382,7 +4908,9 @@
           ],
           "order_no": 7,
           "default_selected": false,
-          "coverage_ratio": 0.9951
+          "coverage_ratio": 0.9951,
+          "feature_name": "esp 成交量",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_007",
@@ -4397,7 +4925,9 @@
           "order_no": 8,
           "default_selected": false,
           "coverage_ratio": 0.9951,
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "qsp 成交额",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_008",
@@ -4412,7 +4942,9 @@
           "order_no": 9,
           "default_selected": false,
           "coverage_ratio": 0.9951,
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "esp 成交额",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_009",
@@ -4427,7 +4959,9 @@
           "order_no": 10,
           "default_selected": false,
           "coverage_ratio": 0.9951,
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "有效 价差",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_010",
@@ -4442,7 +4976,9 @@
           "order_no": 11,
           "default_selected": false,
           "coverage_ratio": 0.9951,
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "quoted 价差",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_011",
@@ -4457,7 +4993,9 @@
           "order_no": 12,
           "default_selected": false,
           "coverage_ratio": 0.9572,
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "价差 vol 20",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_012",
@@ -4472,7 +5010,9 @@
           "order_no": 13,
           "default_selected": false,
           "coverage_ratio": 0.9951,
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "不平衡度 成交量",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_013",
@@ -4487,7 +5027,9 @@
           "order_no": 14,
           "default_selected": false,
           "coverage_ratio": 0.9951,
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "不平衡度 成交额",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_014",
@@ -4502,7 +5044,9 @@
           "order_no": 15,
           "default_selected": false,
           "coverage_ratio": 0.9951,
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "不平衡度 次数",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_015",
@@ -4517,7 +5061,9 @@
           "order_no": 16,
           "default_selected": false,
           "coverage_ratio": 0.8948,
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "不平衡度 大单",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_016",
@@ -4532,7 +5078,9 @@
           "order_no": 17,
           "default_selected": false,
           "coverage_ratio": 0.9906,
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "不平衡度 中单",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_017",
@@ -4547,7 +5095,9 @@
           "order_no": 18,
           "default_selected": false,
           "coverage_ratio": 0.9916,
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "不平衡度 小单",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_018",
@@ -4561,7 +5111,9 @@
           ],
           "order_no": 19,
           "default_selected": false,
-          "coverage_ratio": 0.9974
+          "coverage_ratio": 0.9974,
+          "feature_name": "跳跃 标记",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_019",
@@ -4576,7 +5128,9 @@
           "order_no": 20,
           "default_selected": false,
           "coverage_ratio": 0.9952,
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "pressure 评分",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_micro_amihud_illiquidity",
@@ -4591,7 +5145,9 @@
           "order_no": 21,
           "default_selected": true,
           "coverage_ratio": 0.99,
-          "coverage_note": "仅 2026 年起有数据 (l2_factors)，跨年训练前请确认覆盖范围"
+          "coverage_note": "仅 2026 年起有数据 (l2_factors)，跨年训练前请确认覆盖范围",
+          "feature_name": "Amihud非流动性",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_micro_kyle_lambda",
@@ -4605,7 +5161,9 @@
           ],
           "order_no": 22,
           "default_selected": true,
-          "coverage_ratio": 0.99
+          "coverage_ratio": 0.99,
+          "feature_name": "Kyle Lambda价格冲击",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_micro_price_impact_large",
@@ -4619,7 +5177,9 @@
           ],
           "order_no": 23,
           "default_selected": true,
-          "coverage_ratio": 0.99
+          "coverage_ratio": 0.99,
+          "feature_name": "大单价格冲击",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_micro_impact_cost",
@@ -4633,7 +5193,9 @@
           ],
           "order_no": 24,
           "default_selected": true,
-          "coverage_ratio": 0.99
+          "coverage_ratio": 0.99,
+          "feature_name": "冲击成本",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_micro_impact_elasticity",
@@ -4647,7 +5209,9 @@
           ],
           "order_no": 25,
           "default_selected": true,
-          "coverage_ratio": 0.99
+          "coverage_ratio": 0.99,
+          "feature_name": "冲击弹性",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_micro_aqsp",
@@ -4661,7 +5225,9 @@
           ],
           "order_no": 26,
           "default_selected": true,
-          "coverage_ratio": 0.99
+          "coverage_ratio": 0.99,
+          "feature_name": "调整报价价差",
+          "explanation": "调整后的报价价差指标"
         },
         {
           "feature_id": "feat_microstructure_micro_aesp",
@@ -4675,7 +5241,9 @@
           ],
           "order_no": 27,
           "default_selected": true,
-          "coverage_ratio": 0.99
+          "coverage_ratio": 0.99,
+          "feature_name": "调整有效价差",
+          "explanation": "调整后的有效价差指标"
         },
         {
           "feature_id": "feat_microstructure_micro_qsp_vol_20",
@@ -4689,7 +5257,9 @@
           ],
           "order_no": 28,
           "default_selected": true,
-          "coverage_ratio": 0.99
+          "coverage_ratio": 0.99,
+          "feature_name": "报价价差波动20日",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_micro_esp_vol_20",
@@ -4703,7 +5273,9 @@
           ],
           "order_no": 29,
           "default_selected": true,
-          "coverage_ratio": 0.99
+          "coverage_ratio": 0.99,
+          "feature_name": "有效价差波动20日",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_micro_spread_slope_1_5",
@@ -4717,7 +5289,9 @@
           ],
           "order_no": 30,
           "default_selected": true,
-          "coverage_ratio": 0.99
+          "coverage_ratio": 0.99,
+          "feature_name": "价差斜率1-5档",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_micro_bid_ask_vol_ratio",
@@ -4731,7 +5305,9 @@
           ],
           "order_no": 31,
           "default_selected": true,
-          "coverage_ratio": 0.99
+          "coverage_ratio": 0.99,
+          "feature_name": "买卖量比",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_micro_depth_imbalance_1",
@@ -4745,7 +5321,9 @@
           ],
           "order_no": 32,
           "default_selected": true,
-          "coverage_ratio": 0.99
+          "coverage_ratio": 0.99,
+          "feature_name": "1档深度不平衡",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_micro_depth_imbalance_5",
@@ -4760,7 +5338,9 @@
           "order_no": 33,
           "default_selected": true,
           "coverage_ratio": 0.99,
-          "coverage_note": "仅 2026 年起有数据 (l2_factors)，跨年训练前请确认覆盖范围"
+          "coverage_note": "仅 2026 年起有数据 (l2_factors)，跨年训练前请确认覆盖范围",
+          "feature_name": "5档深度不平衡",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_micro_depth_slope",
@@ -4774,7 +5354,9 @@
           ],
           "order_no": 34,
           "default_selected": true,
-          "coverage_ratio": 0.99
+          "coverage_ratio": 0.99,
+          "feature_name": "深度斜率",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_micro_order_flow_toxicity",
@@ -4788,7 +5370,9 @@
           ],
           "order_no": 35,
           "default_selected": true,
-          "coverage_ratio": 0.99
+          "coverage_ratio": 0.99,
+          "feature_name": "订单流毒性",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_micro_informed_ratio",
@@ -4802,7 +5386,9 @@
           ],
           "order_no": 36,
           "default_selected": true,
-          "coverage_ratio": 0.99
+          "coverage_ratio": 0.99,
+          "feature_name": "知情交易者比例",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_micro_jump_count_1pct",
@@ -4816,7 +5402,9 @@
           ],
           "order_no": 37,
           "default_selected": true,
-          "coverage_ratio": 0.99
+          "coverage_ratio": 0.99,
+          "feature_name": "跳跃次数(1%阈值)",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_micro_open_gap",
@@ -4830,7 +5418,9 @@
           ],
           "order_no": 38,
           "default_selected": true,
-          "coverage_ratio": 0.99
+          "coverage_ratio": 0.99,
+          "feature_name": "开盘缺口",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_micro_trade_buy_pressure",
@@ -4844,7 +5434,9 @@
           ],
           "order_no": 39,
           "default_selected": true,
-          "coverage_ratio": 0.99
+          "coverage_ratio": 0.99,
+          "feature_name": "买方压力",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_micro_trade_sell_pressure",
@@ -4858,7 +5450,9 @@
           ],
           "order_no": 40,
           "default_selected": true,
-          "coverage_ratio": 0.99
+          "coverage_ratio": 0.99,
+          "feature_name": "卖方压力",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1058",
@@ -4872,7 +5466,9 @@
           ],
           "order_no": 1058,
           "default_selected": false,
-          "coverage_ratio": 0.9449
+          "coverage_ratio": 0.9449,
+          "feature_name": "买单撤单率",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1059",
@@ -4886,7 +5482,9 @@
           ],
           "order_no": 1059,
           "default_selected": false,
-          "coverage_ratio": 0.9058
+          "coverage_ratio": 0.9058,
+          "feature_name": "撤单聚集度",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1060",
@@ -4900,7 +5498,9 @@
           ],
           "order_no": 1060,
           "default_selected": false,
-          "coverage_ratio": 0.86
+          "coverage_ratio": 0.86,
+          "feature_name": "撤单距盘口深度",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1061",
@@ -4914,7 +5514,9 @@
           ],
           "order_no": 1061,
           "default_selected": false,
-          "coverage_ratio": 0.9076
+          "coverage_ratio": 0.9076,
+          "feature_name": "高频撤单占比",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1062",
@@ -4928,7 +5530,9 @@
           ],
           "order_no": 1062,
           "default_selected": false,
-          "coverage_ratio": 0.9302
+          "coverage_ratio": 0.9302,
+          "feature_name": "撤单方向不平衡",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1063",
@@ -4942,7 +5546,9 @@
           ],
           "order_no": 1063,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "撤单前挂单存活时间",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1064",
@@ -4956,7 +5562,9 @@
           ],
           "order_no": 1064,
           "default_selected": false,
-          "coverage_ratio": 0.9222
+          "coverage_ratio": 0.9222,
+          "feature_name": "撤单后价格变动",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1065",
@@ -4970,7 +5578,9 @@
           ],
           "order_no": 1065,
           "default_selected": false,
-          "coverage_ratio": 0.9282
+          "coverage_ratio": 0.9282,
+          "feature_name": "撤单价偏离",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1066",
@@ -4984,7 +5594,9 @@
           ],
           "order_no": 1066,
           "default_selected": false,
-          "coverage_ratio": 0.9449
+          "coverage_ratio": 0.9449,
+          "feature_name": "总撤单率",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1067",
@@ -4998,7 +5610,9 @@
           ],
           "order_no": 1067,
           "default_selected": false,
-          "coverage_ratio": 0.9449
+          "coverage_ratio": 0.9449,
+          "feature_name": "卖单撤单率",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1068",
@@ -5012,7 +5626,9 @@
           ],
           "order_no": 1068,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "幌骗(Spoofing)撤单信号",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1069",
@@ -5026,7 +5642,9 @@
           ],
           "order_no": 1069,
           "default_selected": false,
-          "coverage_ratio": 0.9456
+          "coverage_ratio": 0.9456,
+          "feature_name": "委托失衡（时序/盘中）",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1070",
@@ -5040,7 +5658,9 @@
           ],
           "order_no": 1070,
           "default_selected": false,
-          "coverage_ratio": 0.9432
+          "coverage_ratio": 0.9432,
+          "feature_name": "委托失衡（时序/盘中）",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1071",
@@ -5054,7 +5674,9 @@
           ],
           "order_no": 1071,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "委托失衡（时序/盘中）",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1072",
@@ -5068,7 +5690,9 @@
           ],
           "order_no": 1072,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "委托失衡（时序/盘中）",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1073",
@@ -5082,7 +5706,9 @@
           ],
           "order_no": 1073,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "委托失衡（时序/盘中）",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1074",
@@ -5096,7 +5722,9 @@
           ],
           "order_no": 1074,
           "default_selected": false,
-          "coverage_ratio": 0.932
+          "coverage_ratio": 0.932,
+          "feature_name": "委托失衡（时序/盘中）",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1075",
@@ -5110,7 +5738,9 @@
           ],
           "order_no": 1075,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "大单成交占比",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1076",
@@ -5124,7 +5754,9 @@
           ],
           "order_no": 1076,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "订单到达速率",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1077",
@@ -5138,7 +5770,9 @@
           ],
           "order_no": 1077,
           "default_selected": false,
-          "coverage_ratio": 0.9282
+          "coverage_ratio": 0.9282,
+          "feature_name": "盘口重建速度",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1078",
@@ -5152,7 +5786,9 @@
           ],
           "order_no": 1078,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "订单存活时间P50",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1079",
@@ -5166,7 +5802,9 @@
           ],
           "order_no": 1079,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "订单存活时间P90",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1080",
@@ -5180,7 +5818,9 @@
           ],
           "order_no": 1080,
           "default_selected": false,
-          "coverage_ratio": 0.9449
+          "coverage_ratio": 0.9449,
+          "feature_name": "订单不平衡",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1081",
@@ -5194,7 +5834,9 @@
           ],
           "order_no": 1081,
           "default_selected": false,
-          "coverage_ratio": 0.9449
+          "coverage_ratio": 0.9449,
+          "feature_name": "大单订单占比",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1082",
@@ -5208,7 +5850,9 @@
           ],
           "order_no": 1082,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "订单质量",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1083",
@@ -5222,7 +5866,9 @@
           ],
           "order_no": 1083,
           "default_selected": false,
-          "coverage_ratio": 0.9449
+          "coverage_ratio": 0.9449,
+          "feature_name": "订单微观属性",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1084",
@@ -5236,7 +5882,9 @@
           ],
           "order_no": 1084,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "订单微观属性",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1085",
@@ -5250,7 +5898,9 @@
           ],
           "order_no": 1085,
           "default_selected": false,
-          "coverage_ratio": 0.4849
+          "coverage_ratio": 0.4849,
+          "feature_name": "L2微观结构-逆向选择",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1086",
@@ -5264,7 +5914,9 @@
           ],
           "order_no": 1086,
           "default_selected": false,
-          "coverage_ratio": 0.4759
+          "coverage_ratio": 0.4759,
+          "feature_name": "L2微观结构-逆向选择",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1087",
@@ -5278,7 +5930,9 @@
           ],
           "order_no": 1087,
           "default_selected": false,
-          "coverage_ratio": 0.4757
+          "coverage_ratio": 0.4757,
+          "feature_name": "L2微观结构-集合竞价",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1088",
@@ -5292,7 +5946,9 @@
           ],
           "order_no": 1088,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "L2微观结构-集合竞价",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1089",
@@ -5306,7 +5962,9 @@
           ],
           "order_no": 1089,
           "default_selected": false,
-          "coverage_ratio": 0.9432
+          "coverage_ratio": 0.9432,
+          "feature_name": "L2微观结构-收盘竞价",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1090",
@@ -5320,7 +5978,9 @@
           ],
           "order_no": 1090,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "L2微观结构-收盘挤压",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1091",
@@ -5334,7 +5994,9 @@
           ],
           "order_no": 1091,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "L2微观结构-盘口深度",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1092",
@@ -5348,7 +6010,9 @@
           ],
           "order_no": 1092,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "L2微观结构-盘口深度",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1093",
@@ -5362,7 +6026,9 @@
           ],
           "order_no": 1093,
           "default_selected": false,
-          "coverage_ratio": 0.9429
+          "coverage_ratio": 0.9429,
+          "feature_name": "L2微观结构-盘口深度",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1094",
@@ -5376,7 +6042,9 @@
           ],
           "order_no": 1094,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "L2微观结构-盘口深度",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1095",
@@ -5390,7 +6058,9 @@
           ],
           "order_no": 1095,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "L2微观结构-盘口深度",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1096",
@@ -5404,7 +6074,9 @@
           ],
           "order_no": 1096,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "L2微观结构-盘口深度",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1097",
@@ -5418,7 +6090,9 @@
           ],
           "order_no": 1097,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "L2微观结构-盘口深度",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1098",
@@ -5432,7 +6106,9 @@
           ],
           "order_no": 1098,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "L2微观结构-盘口深度",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1099",
@@ -5446,7 +6122,9 @@
           ],
           "order_no": 1099,
           "default_selected": false,
-          "coverage_ratio": 0.9412
+          "coverage_ratio": 0.9412,
+          "feature_name": "L2微观结构-盘口深度",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1100",
@@ -5460,7 +6138,9 @@
           ],
           "order_no": 1100,
           "default_selected": false,
-          "coverage_ratio": 0.9452
+          "coverage_ratio": 0.9452,
+          "feature_name": "L2微观结构-盘口深度",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1101",
@@ -5474,7 +6154,9 @@
           ],
           "order_no": 1101,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "L2微观结构-盘口深度",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1102",
@@ -5488,7 +6170,9 @@
           ],
           "order_no": 1102,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "L2微观结构-盘口深度",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1103",
@@ -5502,7 +6186,9 @@
           ],
           "order_no": 1103,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "L2微观结构-盘口深度",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1104",
@@ -5516,7 +6202,9 @@
           ],
           "order_no": 1104,
           "default_selected": false,
-          "coverage_ratio": 0.9389
+          "coverage_ratio": 0.9389,
+          "feature_name": "L2微观结构-盘口深度",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1105",
@@ -5530,7 +6218,9 @@
           ],
           "order_no": 1105,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "L2微观结构-盘口深度",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1106",
@@ -5544,7 +6234,9 @@
           ],
           "order_no": 1106,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "L2微观结构-盘口深度",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1107",
@@ -5558,7 +6250,9 @@
           ],
           "order_no": 1107,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "L2微观结构-盘口深度",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1108",
@@ -5572,7 +6266,9 @@
           ],
           "order_no": 1108,
           "default_selected": false,
-          "coverage_ratio": 0.9454
+          "coverage_ratio": 0.9454,
+          "feature_name": "L2微观结构-价格冲击",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1109",
@@ -5586,7 +6282,9 @@
           ],
           "order_no": 1109,
           "default_selected": false,
-          "coverage_ratio": 0.9455
+          "coverage_ratio": 0.9455,
+          "feature_name": "L2微观结构-价格冲击",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1110",
@@ -5600,7 +6298,9 @@
           ],
           "order_no": 1110,
           "default_selected": false,
-          "coverage_ratio": 0.4843
+          "coverage_ratio": 0.4843,
+          "feature_name": "L2微观结构-信息份额",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1111",
@@ -5614,7 +6314,9 @@
           ],
           "order_no": 1111,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "L2微观结构-价格跳变",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1112",
@@ -5628,7 +6330,9 @@
           ],
           "order_no": 1112,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "L2微观结构-价格跳变",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1113",
@@ -5642,7 +6346,9 @@
           ],
           "order_no": 1113,
           "default_selected": false,
-          "coverage_ratio": 0.4902
+          "coverage_ratio": 0.4902,
+          "feature_name": "L2微观结构-价格跳变",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1114",
@@ -5656,7 +6362,9 @@
           ],
           "order_no": 1114,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "L2微观结构-价格跳变",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1115",
@@ -5670,7 +6378,9 @@
           ],
           "order_no": 1115,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "L2微观结构-价格跳变",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1116",
@@ -5684,7 +6394,9 @@
           ],
           "order_no": 1116,
           "default_selected": false,
-          "coverage_ratio": 0.4327
+          "coverage_ratio": 0.4327,
+          "feature_name": "L2微观结构-价格跳变",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1117",
@@ -5698,7 +6410,9 @@
           ],
           "order_no": 1117,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "L2微观结构-微观流动性",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1118",
@@ -5712,7 +6426,9 @@
           ],
           "order_no": 1118,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "L2微观结构-微观流动性",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1119",
@@ -5726,7 +6442,9 @@
           ],
           "order_no": 1119,
           "default_selected": false,
-          "coverage_ratio": 0.9432
+          "coverage_ratio": 0.9432,
+          "feature_name": "L2微观结构-微观流动性",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1120",
@@ -5740,7 +6458,9 @@
           ],
           "order_no": 1120,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "L2微观结构-微观流动性",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1121",
@@ -5754,7 +6474,9 @@
           ],
           "order_no": 1121,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "L2微观结构-微观流动性",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1122",
@@ -5768,7 +6490,9 @@
           ],
           "order_no": 1122,
           "default_selected": false,
-          "coverage_ratio": 0.946
+          "coverage_ratio": 0.946,
+          "feature_name": "L2微观结构-微观流动性",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1123",
@@ -5782,7 +6506,9 @@
           ],
           "order_no": 1123,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "L2微观结构-微观流动性",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1124",
@@ -5796,7 +6522,9 @@
           ],
           "order_no": 1124,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "L2微观结构-微观流动性",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1125",
@@ -5810,7 +6538,9 @@
           ],
           "order_no": 1125,
           "default_selected": false,
-          "coverage_ratio": 0.4849
+          "coverage_ratio": 0.4849,
+          "feature_name": "L2微观结构-微观流动性",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1126",
@@ -5824,7 +6554,9 @@
           ],
           "order_no": 1126,
           "default_selected": false,
-          "coverage_ratio": 0.9455
+          "coverage_ratio": 0.9455,
+          "feature_name": "L2微观结构-微观流动性",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1127",
@@ -5838,7 +6570,9 @@
           ],
           "order_no": 1127,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "L2微观结构-微观流动性",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1128",
@@ -5852,7 +6586,9 @@
           ],
           "order_no": 1128,
           "default_selected": false,
-          "coverage_ratio": 0.9454
+          "coverage_ratio": 0.9454,
+          "feature_name": "L2微观结构-微观流动性",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1129",
@@ -5866,7 +6602,9 @@
           ],
           "order_no": 1129,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "L2微观结构-微观流动性",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1130",
@@ -5880,7 +6618,9 @@
           ],
           "order_no": 1130,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "L2微观结构-微观流动性",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1131",
@@ -5894,7 +6634,9 @@
           ],
           "order_no": 1131,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "L2微观结构-微观流动性",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1132",
@@ -5908,7 +6650,9 @@
           ],
           "order_no": 1132,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "L2微观结构-微观流动性",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1133",
@@ -5922,7 +6666,9 @@
           ],
           "order_no": 1133,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "L2微观结构-午休跳空",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1134",
@@ -5936,7 +6682,9 @@
           ],
           "order_no": 1134,
           "default_selected": false,
-          "coverage_ratio": 0.2147
+          "coverage_ratio": 0.2147,
+          "feature_name": "L2微观结构-订单不平衡",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1135",
@@ -5950,7 +6698,9 @@
           ],
           "order_no": 1135,
           "default_selected": false,
-          "coverage_ratio": 0.4849
+          "coverage_ratio": 0.4849,
+          "feature_name": "L2微观结构-价格发现",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1136",
@@ -5964,7 +6714,9 @@
           ],
           "order_no": 1136,
           "default_selected": false,
-          "coverage_ratio": 0.4849
+          "coverage_ratio": 0.4849,
+          "feature_name": "L2微观结构因子",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1137",
@@ -5978,7 +6730,9 @@
           ],
           "order_no": 1137,
           "default_selected": false,
-          "coverage_ratio": 0.938
+          "coverage_ratio": 0.938,
+          "feature_name": "L2微观结构-买卖价差",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1138",
@@ -5992,7 +6746,9 @@
           ],
           "order_no": 1138,
           "default_selected": false,
-          "coverage_ratio": 0.9429
+          "coverage_ratio": 0.9429,
+          "feature_name": "L2微观结构-买卖价差",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1139",
@@ -6006,7 +6762,9 @@
           ],
           "order_no": 1139,
           "default_selected": false,
-          "coverage_ratio": 0.4849
+          "coverage_ratio": 0.4849,
+          "feature_name": "L2微观结构-买卖价差",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1140",
@@ -6020,7 +6778,9 @@
           ],
           "order_no": 1140,
           "default_selected": false,
-          "coverage_ratio": 0.9421
+          "coverage_ratio": 0.9421,
+          "feature_name": "L2微观结构-买卖价差",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1141",
@@ -6034,7 +6794,9 @@
           ],
           "order_no": 1141,
           "default_selected": false,
-          "coverage_ratio": 0.9457
+          "coverage_ratio": 0.9457,
+          "feature_name": "L2微观结构-买卖价差",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1142",
@@ -6048,7 +6810,9 @@
           ],
           "order_no": 1142,
           "default_selected": false,
-          "coverage_ratio": 0.9397
+          "coverage_ratio": 0.9397,
+          "feature_name": "L2微观结构-买卖价差",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1143",
@@ -6062,7 +6826,9 @@
           ],
           "order_no": 1143,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "L2微观结构-买卖价差",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1144",
@@ -6076,7 +6842,9 @@
           ],
           "order_no": 1144,
           "default_selected": false,
-          "coverage_ratio": 0.9459
+          "coverage_ratio": 0.9459,
+          "feature_name": "L2微观结构-买卖价差",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1145",
@@ -6090,7 +6858,9 @@
           ],
           "order_no": 1145,
           "default_selected": false,
-          "coverage_ratio": 0.9455
+          "coverage_ratio": 0.9455,
+          "feature_name": "L2微观结构-买卖价差",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1146",
@@ -6104,7 +6874,9 @@
           ],
           "order_no": 1146,
           "default_selected": false,
-          "coverage_ratio": 0.4849
+          "coverage_ratio": 0.4849,
+          "feature_name": "L2微观结构-订单流毒性",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1147",
@@ -6118,7 +6890,9 @@
           ],
           "order_no": 1147,
           "default_selected": false,
-          "coverage_ratio": 0.4844
+          "coverage_ratio": 0.4844,
+          "feature_name": "L2微观结构-订单流毒性",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1148",
@@ -6132,7 +6906,9 @@
           ],
           "order_no": 1148,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "L2微观结构-成交序列",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1149",
@@ -6146,7 +6922,9 @@
           ],
           "order_no": 1149,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "L2微观结构-成交序列",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1150",
@@ -6160,7 +6938,9 @@
           ],
           "order_no": 1150,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "L2微观结构-成交序列",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1151",
@@ -6174,7 +6954,9 @@
           ],
           "order_no": 1151,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "L2微观结构-成交序列",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1152",
@@ -6188,7 +6970,9 @@
           ],
           "order_no": 1152,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "L2微观结构-成交序列",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1153",
@@ -6202,7 +6986,9 @@
           ],
           "order_no": 1153,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "L2微观结构-成交序列",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1154",
@@ -6216,7 +7002,9 @@
           ],
           "order_no": 1154,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "L2微观结构-成交序列",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1155",
@@ -6230,7 +7018,9 @@
           ],
           "order_no": 1155,
           "default_selected": false,
-          "coverage_ratio": 0.9459
+          "coverage_ratio": 0.9459,
+          "feature_name": "L2微观结构-成交序列",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1156",
@@ -6244,7 +7034,9 @@
           ],
           "order_no": 1156,
           "default_selected": false,
-          "coverage_ratio": 0.9462
+          "coverage_ratio": 0.9462,
+          "feature_name": "L2微观结构-成交序列",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1157",
@@ -6258,7 +7050,9 @@
           ],
           "order_no": 1157,
           "default_selected": false,
-          "coverage_ratio": 0.9468
+          "coverage_ratio": 0.9468,
+          "feature_name": "L2微观结构-成交序列",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1158",
@@ -6272,7 +7066,9 @@
           ],
           "order_no": 1158,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "L2微观结构-成交序列",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1159",
@@ -6286,7 +7082,9 @@
           ],
           "order_no": 1159,
           "default_selected": false,
-          "coverage_ratio": 0.9455
+          "coverage_ratio": 0.9455,
+          "feature_name": "L2微观结构-量价同步",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1160",
@@ -6300,7 +7098,9 @@
           ],
           "order_no": 1160,
           "default_selected": false,
-          "coverage_ratio": 0.4849
+          "coverage_ratio": 0.4849,
+          "feature_name": "L2微观结构-VPIN 毒性",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1161",
@@ -6314,7 +7114,9 @@
           ],
           "order_no": 1161,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "L2微观结构-VPIN 毒性",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1162",
@@ -6328,7 +7130,9 @@
           ],
           "order_no": 1162,
           "default_selected": false,
-          "coverage_ratio": 0.4849
+          "coverage_ratio": 0.4849,
+          "feature_name": "L2微观结构-VPIN 毒性",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1163",
@@ -6342,7 +7146,9 @@
           ],
           "order_no": 1163,
           "default_selected": false,
-          "coverage_ratio": 0.4849
+          "coverage_ratio": 0.4849,
+          "feature_name": "L2微观结构-VPIN 毒性",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1164",
@@ -6356,7 +7162,9 @@
           ],
           "order_no": 1164,
           "default_selected": false,
-          "coverage_ratio": 0.4849
+          "coverage_ratio": 0.4849,
+          "feature_name": "L2微观结构-VPIN 毒性",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1165",
@@ -6370,7 +7178,9 @@
           ],
           "order_no": 1165,
           "default_selected": false,
-          "coverage_ratio": 0.4844
+          "coverage_ratio": 0.4844,
+          "feature_name": "L2微观结构-VPIN 毒性",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1166",
@@ -6384,7 +7194,9 @@
           ],
           "order_no": 1166,
           "default_selected": false,
-          "coverage_ratio": 0.4849
+          "coverage_ratio": 0.4849,
+          "feature_name": "L2微观结构-VPIN 毒性",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1167",
@@ -6398,7 +7210,9 @@
           ],
           "order_no": 1167,
           "default_selected": false,
-          "coverage_ratio": 0.4849
+          "coverage_ratio": 0.4849,
+          "feature_name": "L2微观结构-VPIN 毒性",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1168",
@@ -6412,7 +7226,9 @@
           ],
           "order_no": 1168,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "L2微观结构-VPIN 毒性",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1169",
@@ -6426,7 +7242,9 @@
           ],
           "order_no": 1169,
           "default_selected": false,
-          "coverage_ratio": 0.4849
+          "coverage_ratio": 0.4849,
+          "feature_name": "L2微观结构-VPIN 毒性",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1170",
@@ -6440,7 +7258,9 @@
           ],
           "order_no": 1170,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "L2微观结构-VPIN 毒性",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1171",
@@ -6454,7 +7274,9 @@
           ],
           "order_no": 1171,
           "default_selected": false,
-          "coverage_ratio": 0.9455
+          "coverage_ratio": 0.9455,
+          "feature_name": "L2微观结构-VPIN 毒性",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1172",
@@ -6468,7 +7290,9 @@
           ],
           "order_no": 1172,
           "default_selected": false,
-          "coverage_ratio": 0.944
+          "coverage_ratio": 0.944,
+          "feature_name": "L2微观结构-VPIN 毒性",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1173",
@@ -6482,7 +7306,9 @@
           ],
           "order_no": 1173,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "L2微观结构-日内时段分布",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1174",
@@ -6496,7 +7322,9 @@
           ],
           "order_no": 1174,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "L2微观结构-日内时段分布",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1175",
@@ -6510,7 +7338,9 @@
           ],
           "order_no": 1175,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "L2微观结构-日内时段分布",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1176",
@@ -6524,7 +7354,9 @@
           ],
           "order_no": 1176,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "L2微观结构-日内时段分布",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1177",
@@ -6538,7 +7370,9 @@
           ],
           "order_no": 1177,
           "default_selected": false,
-          "coverage_ratio": 0.9459
+          "coverage_ratio": 0.9459,
+          "feature_name": "L2微观结构-日内时段分布",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1178",
@@ -6552,7 +7386,9 @@
           ],
           "order_no": 1178,
           "default_selected": false,
-          "coverage_ratio": 0.9459
+          "coverage_ratio": 0.9459,
+          "feature_name": "L2微观结构-日内时段分布",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1179",
@@ -6566,7 +7402,9 @@
           ],
           "order_no": 1179,
           "default_selected": false,
-          "coverage_ratio": 0.942
+          "coverage_ratio": 0.942,
+          "feature_name": "L2微观结构-日内时段分布",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1180",
@@ -6580,7 +7418,9 @@
           ],
           "order_no": 1180,
           "default_selected": false,
-          "coverage_ratio": 0.9459
+          "coverage_ratio": 0.9459,
+          "feature_name": "L2微观结构-日内时段分布",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1181",
@@ -6594,7 +7434,9 @@
           ],
           "order_no": 1181,
           "default_selected": false,
-          "coverage_ratio": 0.9419
+          "coverage_ratio": 0.9419,
+          "feature_name": "L2微观结构-日内时段分布",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1182",
@@ -6608,7 +7450,9 @@
           ],
           "order_no": 1182,
           "default_selected": false,
-          "coverage_ratio": 0.9421
+          "coverage_ratio": 0.9421,
+          "feature_name": "L2微观结构-日内时段分布",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1183",
@@ -6622,7 +7466,9 @@
           ],
           "order_no": 1183,
           "default_selected": false,
-          "coverage_ratio": 0.9457
+          "coverage_ratio": 0.9457,
+          "feature_name": "L2微观结构-日内时段分布",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1184",
@@ -6636,7 +7482,9 @@
           ],
           "order_no": 1184,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "L2微观结构-日内时段分布",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1185",
@@ -6650,7 +7498,9 @@
           ],
           "order_no": 1185,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "L2微观结构-日内时段分布",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1186",
@@ -6664,7 +7514,9 @@
           ],
           "order_no": 1186,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "L2微观结构-日内时段分布",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1187",
@@ -6678,7 +7530,9 @@
           ],
           "order_no": 1187,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "L2微观结构-日内时段分布",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1188",
@@ -6692,7 +7546,9 @@
           ],
           "order_no": 1188,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "L2微观结构-日内时段分布",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1189",
@@ -6706,7 +7562,9 @@
           ],
           "order_no": 1189,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "L2微观结构-日内时段分布",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1190",
@@ -6720,7 +7578,9 @@
           ],
           "order_no": 1190,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "L2微观结构-日内时段分布",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1191",
@@ -6734,7 +7594,9 @@
           ],
           "order_no": 1191,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "L2微观结构-日内时段分布",
+          "explanation": ""
         },
         {
           "feature_id": "feat_microstructure_1192",
@@ -6748,7 +7610,9 @@
           ],
           "order_no": 1192,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "L2微观结构-日内时段分布",
+          "explanation": ""
         }
       ]
     },
@@ -6772,7 +7636,9 @@
           "default_selected": true,
           "coverage_ratio": 0.95,
           "tag": "正向",
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "GTJA Alpha16: -TSMAX(RANK(CORR(rank(vol),rank(vwap),5)),5)",
+          "explanation": ""
         },
         {
           "feature_id": "feat_gtja_001",
@@ -6788,7 +7654,9 @@
           "default_selected": true,
           "coverage_ratio": 0.95,
           "tag": "正向",
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "GTJA Alpha32: -SUM(RANK(CORR(rank(high),rank(vol),3)),3)",
+          "explanation": ""
         },
         {
           "feature_id": "feat_gtja_002",
@@ -6804,7 +7672,9 @@
           "default_selected": true,
           "coverage_ratio": 0.95,
           "tag": "正向",
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "GTJA Alpha62: -CORR(high, rank(vol), 5)",
+          "explanation": ""
         },
         {
           "feature_id": "feat_gtja_003",
@@ -6820,7 +7690,9 @@
           "default_selected": true,
           "coverage_ratio": 0.95,
           "tag": "正向 - 最强",
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "GTJA Alpha83: -RANK(COV(rank(high), rank(vol), 5))",
+          "explanation": ""
         },
         {
           "feature_id": "feat_gtja_004",
@@ -6836,7 +7708,9 @@
           "default_selected": true,
           "coverage_ratio": 0.95,
           "tag": "正向",
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "GTJA Alpha90: -RANK(CORR(rank(vwap), rank(vol), 5))",
+          "explanation": ""
         },
         {
           "feature_id": "feat_gtja_005",
@@ -6852,7 +7726,9 @@
           "default_selected": true,
           "coverage_ratio": 0.95,
           "tag": "正向",
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "GTJA Alpha99: -RANK(COV(rank(close), rank(vol), 5))",
+          "explanation": ""
         },
         {
           "feature_id": "feat_gtja_006",
@@ -6868,7 +7744,9 @@
           "default_selected": true,
           "coverage_ratio": 0.95,
           "tag": "反向",
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "GTJA Alpha36: RANK(SUM(CORR(rank(vol),rank(vwap),6),2))",
+          "explanation": ""
         },
         {
           "feature_id": "feat_gtja_007",
@@ -6884,7 +7762,9 @@
           "default_selected": true,
           "coverage_ratio": 0.95,
           "tag": "反向/分行情",
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "GTJA Alpha70: STD(AMOUNT, 6)",
+          "explanation": ""
         },
         {
           "feature_id": "feat_gtja_008",
@@ -6900,7 +7780,9 @@
           "default_selected": true,
           "coverage_ratio": 0.95,
           "tag": "反向",
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "GTJA Alpha74: RANK(CORR(SUM(price,20),SUM(MA(vol,40),20),7))+...",
+          "explanation": ""
         },
         {
           "feature_id": "feat_gtja_009",
@@ -6916,7 +7798,9 @@
           "default_selected": true,
           "coverage_ratio": 0.95,
           "tag": "反向/分行情",
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "GTJA Alpha150: (close+high+low)/3 * volume",
+          "explanation": ""
         },
         {
           "feature_id": "feat_gtja_010",
@@ -6932,7 +7816,9 @@
           "default_selected": true,
           "coverage_ratio": 0.95,
           "tag": "反向",
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "GTJA Alpha176: CORR(rank(KDJ_RSV_12), rank(vol), 6)",
+          "explanation": ""
         },
         {
           "feature_id": "feat_gtja_011",
@@ -6948,7 +7834,9 @@
           "default_selected": true,
           "coverage_ratio": 0.95,
           "tag": "反向",
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "GTJA Alpha179: RANK(CORR(vwap,vol,4))*RANK(CORR(rank(low),rank(MA(vol,50)),12))",
+          "explanation": ""
         },
         {
           "feature_id": "feat_gtja_012",
@@ -6964,7 +7852,9 @@
           "default_selected": true,
           "coverage_ratio": 0.95,
           "tag": "分行情（牛市增强）",
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "GTJA Alpha42: -RANK(STD(high,10)) * CORR(high,vol,10)",
+          "explanation": ""
         },
         {
           "feature_id": "feat_gtja_013",
@@ -6980,7 +7870,9 @@
           "default_selected": true,
           "coverage_ratio": 0.95,
           "tag": "分行情",
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "GTJA Alpha95: STD(AMOUNT, 20)",
+          "explanation": ""
         },
         {
           "feature_id": "feat_gtja_014",
@@ -6996,7 +7888,9 @@
           "default_selected": true,
           "coverage_ratio": 0.95,
           "tag": "分行情",
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "GTJA Alpha158: (high-low)/close (基于 EMA(close,15) 推导)",
+          "explanation": ""
         },
         {
           "feature_id": "feat_gtja_015",
@@ -7012,7 +7906,9 @@
           "default_selected": true,
           "coverage_ratio": 0.95,
           "tag": "分行情（牛熊 flip）",
-          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充"
+          "disabled_reason": "数据源中暂无此列，待后续计算或数据补充",
+          "feature_name": "GTJA Alpha159: 多周期 RSV 加权（牛熊反转因子）",
+          "explanation": ""
         }
       ],
       "availability": "pending_data",
@@ -7038,7 +7934,9 @@
           "default_selected": true,
           "coverage_ratio": 0.99,
           "measured_ic": -0.0287,
-          "measured_icir": -0.184
+          "measured_icir": -0.184,
+          "feature_name": "20日获利比例",
+          "explanation": ""
         },
         {
           "feature_id": "feat_chip_chip_profit_ratio_60",
@@ -7054,7 +7952,9 @@
           "default_selected": true,
           "coverage_ratio": 0.99,
           "measured_ic": -0.0352,
-          "measured_icir": -0.224
+          "measured_icir": -0.224,
+          "feature_name": "60日获利比例",
+          "explanation": ""
         },
         {
           "feature_id": "feat_chip_chip_profit_ratio_120",
@@ -7070,7 +7970,9 @@
           "default_selected": true,
           "coverage_ratio": 0.99,
           "measured_ic": -0.0371,
-          "measured_icir": -0.234
+          "measured_icir": -0.234,
+          "feature_name": "120日获利比例",
+          "explanation": ""
         },
         {
           "feature_id": "feat_chip_chip_concentration_20",
@@ -7086,7 +7988,9 @@
           "default_selected": true,
           "coverage_ratio": 0.99,
           "measured_ic": -0.0435,
-          "measured_icir": -0.185
+          "measured_icir": -0.185,
+          "feature_name": "20日筹码集中度",
+          "explanation": "筹码成本分布90%区间宽度/现价。数值越小筹码越集中"
         },
         {
           "feature_id": "feat_chip_chip_peak_distance",
@@ -7102,7 +8006,9 @@
           "default_selected": true,
           "coverage_ratio": 0.99,
           "measured_ic": -0.0332,
-          "measured_icir": -0.2
+          "measured_icir": -0.2,
+          "feature_name": "筹码峰距离",
+          "explanation": ""
         },
         {
           "feature_id": "feat_chip_chip_floating_ratio",
@@ -7116,7 +8022,9 @@
           ],
           "order_no": 6,
           "default_selected": false,
-          "coverage_ratio": 0.99
+          "coverage_ratio": 0.99,
+          "feature_name": "浮动筹码比例",
+          "explanation": ""
         },
         {
           "feature_id": "feat_chip_chip_cost_90_width",
@@ -7132,7 +8040,9 @@
           "default_selected": true,
           "coverage_ratio": 0.99,
           "measured_ic": -0.0387,
-          "measured_icir": -0.189
+          "measured_icir": -0.189,
+          "feature_name": "90%筹码宽度",
+          "explanation": "筹码成本分布P95-P5的区间宽度（元）"
         },
         {
           "feature_id": "feat_chip_chip_profit_delta_5",
@@ -7148,7 +8058,9 @@
           "default_selected": true,
           "coverage_ratio": 0.99,
           "measured_ic": -0.0089,
-          "measured_icir": -0.066
+          "measured_icir": -0.066,
+          "feature_name": "5日获利变化",
+          "explanation": ""
         }
       ]
     },
@@ -7172,7 +8084,9 @@
           "default_selected": true,
           "coverage_ratio": 0.99,
           "measured_ic": -0.0126,
-          "measured_icir": -0.091
+          "measured_icir": -0.091,
+          "feature_name": "概念热度评分",
+          "explanation": ""
         },
         {
           "feature_id": "feat_concept_concept_momentum_top3",
@@ -7188,7 +8102,9 @@
           "default_selected": true,
           "coverage_ratio": 0.99,
           "measured_ic": -0.0176,
-          "measured_icir": -0.093
+          "measured_icir": -0.093,
+          "feature_name": "概念动量Top3",
+          "explanation": ""
         },
         {
           "feature_id": "feat_concept_concept_exposure_top1",
@@ -7204,7 +8120,9 @@
           "default_selected": true,
           "coverage_ratio": 0.99,
           "measured_ic": -0.0712,
-          "measured_icir": -0.565
+          "measured_icir": -0.565,
+          "feature_name": "概念暴露度Top1",
+          "explanation": ""
         },
         {
           "feature_id": "feat_concept_concept_rotation_score",
@@ -7220,7 +8138,9 @@
           "default_selected": true,
           "coverage_ratio": 0.99,
           "measured_ic": -0.0078,
-          "measured_icir": -0.073
+          "measured_icir": -0.073,
+          "feature_name": "概念轮动评分",
+          "explanation": ""
         },
         {
           "feature_id": "feat_concept_concept_crowding_max",
@@ -7236,7 +8156,9 @@
           "default_selected": true,
           "coverage_ratio": 0.99,
           "measured_ic": -0.005,
-          "measured_icir": -0.032
+          "measured_icir": -0.032,
+          "feature_name": "概念拥挤度最大值",
+          "explanation": ""
         },
         {
           "feature_id": "feat_concept_concept_diversity",
@@ -7252,7 +8174,9 @@
           "default_selected": true,
           "coverage_ratio": 0.99,
           "measured_ic": -0.0029,
-          "measured_icir": -0.02
+          "measured_icir": -0.02,
+          "feature_name": "概念分散度",
+          "explanation": ""
         },
         {
           "feature_id": "feat_concept_concept_flow_rank",
@@ -7266,7 +8190,9 @@
           ],
           "order_no": 7,
           "default_selected": false,
-          "coverage_ratio": 0.99
+          "coverage_ratio": 0.99,
+          "feature_name": "概念资金流排名",
+          "explanation": ""
         },
         {
           "feature_id": "feat_concept_concept_leader_score",
@@ -7282,7 +8208,9 @@
           "default_selected": true,
           "coverage_ratio": 0.99,
           "measured_ic": -0.077,
-          "measured_icir": -0.518
+          "measured_icir": -0.518,
+          "feature_name": "概念龙头评分",
+          "explanation": ""
         },
         {
           "feature_id": "feat_concept_concept_cross_sector",
@@ -7298,7 +8226,9 @@
           "default_selected": true,
           "coverage_ratio": 0.99,
           "measured_ic": 0.0,
-          "measured_icir": 0.0
+          "measured_icir": 0.0,
+          "feature_name": "跨板块概念数",
+          "explanation": ""
         },
         {
           "feature_id": "feat_concept_concept_volume_ratio",
@@ -7314,7 +8244,9 @@
           "default_selected": true,
           "coverage_ratio": 0.99,
           "measured_ic": -0.0059,
-          "measured_icir": -0.035
+          "measured_icir": -0.035,
+          "feature_name": "概念量比",
+          "explanation": ""
         }
       ]
     },
@@ -7338,7 +8270,9 @@
           "default_selected": true,
           "coverage_ratio": 0.99,
           "measured_ic": -0.0441,
-          "measured_icir": -0.195
+          "measured_icir": -0.195,
+          "feature_name": "布林带宽度",
+          "explanation": "布林带上下轨距离，衡量波动区间"
         },
         {
           "feature_id": "feat_technical_tech_bb_pos",
@@ -7354,7 +8288,9 @@
           "default_selected": true,
           "coverage_ratio": 0.99,
           "measured_ic": -0.0436,
-          "measured_icir": -0.267
+          "measured_icir": -0.267,
+          "feature_name": "布林带位置",
+          "explanation": "收盘价在布林带中的相对位置（0=下轨，1=上轨）"
         },
         {
           "feature_id": "feat_technical_tech_cci_20",
@@ -7374,7 +8310,9 @@
           "default_selected": true,
           "coverage_ratio": 0.99,
           "measured_ic": -0.0403,
-          "measured_icir": -0.251
+          "measured_icir": -0.251,
+          "feature_name": "CCI(20)",
+          "explanation": "顺势指标。大于100超买，小于-100超卖"
         },
         {
           "feature_id": "feat_technical_tech_adx_14",
@@ -7390,7 +8328,9 @@
           "default_selected": true,
           "coverage_ratio": 0.99,
           "measured_ic": -0.0164,
-          "measured_icir": -0.141
+          "measured_icir": -0.141,
+          "feature_name": "ADX(14)",
+          "explanation": "平均趋向指数，衡量趋势强度（大于25为强趋势）"
         },
         {
           "feature_id": "feat_technical_tech_vol_price_corr_20",
@@ -7406,7 +8346,9 @@
           "default_selected": true,
           "coverage_ratio": 0.99,
           "measured_ic": -0.0313,
-          "measured_icir": -0.308
+          "measured_icir": -0.308,
+          "feature_name": "量价相关性20日",
+          "explanation": ""
         },
         {
           "feature_id": "feat_tech_001",
@@ -7426,7 +8368,9 @@
           "default_selected": true,
           "coverage_ratio": 1.0,
           "measured_ic": 0.5021,
-          "measured_icir": 1.2
+          "measured_icir": 1.2,
+          "feature_name": "RSI(6)",
+          "explanation": ""
         },
         {
           "feature_id": "feat_tech_002",
@@ -7446,7 +8390,9 @@
           "default_selected": true,
           "coverage_ratio": 1.0,
           "measured_ic": 0.1305,
-          "measured_icir": 0.4
+          "measured_icir": 0.4,
+          "feature_name": "MACD柱值",
+          "explanation": ""
         },
         {
           "feature_id": "feat_tech_003",
@@ -7466,7 +8412,9 @@
           "default_selected": true,
           "coverage_ratio": 1.0,
           "measured_ic": -0.0258,
-          "measured_icir": -0.1398
+          "measured_icir": -0.1398,
+          "feature_name": "KDJ-D",
+          "explanation": ""
         },
         {
           "feature_id": "feat_technical_1193",
@@ -7480,7 +8428,9 @@
           ],
           "order_no": 1193,
           "default_selected": false,
-          "coverage_ratio": 1.0
+          "coverage_ratio": 1.0,
+          "feature_name": "成交额（元）",
+          "explanation": ""
         },
         {
           "feature_id": "feat_technical_1194",
@@ -7494,7 +8444,9 @@
           ],
           "order_no": 1194,
           "default_selected": false,
-          "coverage_ratio": 0.9993
+          "coverage_ratio": 0.9993,
+          "feature_name": "KDJ 指标 K/J 线",
+          "explanation": ""
         },
         {
           "feature_id": "feat_technical_1195",
@@ -7508,7 +8460,9 @@
           ],
           "order_no": 1195,
           "default_selected": false,
-          "coverage_ratio": 0.9993
+          "coverage_ratio": 0.9993,
+          "feature_name": "KDJ 指标 K/J 线",
+          "explanation": ""
         },
         {
           "feature_id": "feat_technical_1196",
@@ -7522,7 +8476,9 @@
           ],
           "order_no": 1196,
           "default_selected": false,
-          "coverage_ratio": 0.9992
+          "coverage_ratio": 0.9992,
+          "feature_name": "N日均线（后复权）",
+          "explanation": ""
         },
         {
           "feature_id": "feat_technical_1197",
@@ -7536,7 +8492,9 @@
           ],
           "order_no": 1197,
           "default_selected": false,
-          "coverage_ratio": 0.9984
+          "coverage_ratio": 0.9984,
+          "feature_name": "N日均线（后复权）",
+          "explanation": ""
         },
         {
           "feature_id": "feat_technical_1198",
@@ -7550,7 +8508,9 @@
           ],
           "order_no": 1198,
           "default_selected": false,
-          "coverage_ratio": 0.9997
+          "coverage_ratio": 0.9997,
+          "feature_name": "N日均线（后复权）",
+          "explanation": ""
         },
         {
           "feature_id": "feat_technical_1199",
@@ -7564,7 +8524,9 @@
           ],
           "order_no": 1199,
           "default_selected": false,
-          "coverage_ratio": 0.9951
+          "coverage_ratio": 0.9951,
+          "feature_name": "N日均线（后复权）",
+          "explanation": ""
         },
         {
           "feature_id": "feat_technical_1200",
@@ -7578,7 +8540,9 @@
           ],
           "order_no": 1200,
           "default_selected": false,
-          "coverage_ratio": 0.9992
+          "coverage_ratio": 0.9992,
+          "feature_name": "收盘价相对N日均线的乖离",
+          "explanation": ""
         },
         {
           "feature_id": "feat_technical_1201",
@@ -7592,7 +8556,9 @@
           ],
           "order_no": 1201,
           "default_selected": false,
-          "coverage_ratio": 0.9984
+          "coverage_ratio": 0.9984,
+          "feature_name": "收盘价相对N日均线的乖离",
+          "explanation": ""
         },
         {
           "feature_id": "feat_technical_1202",
@@ -7606,7 +8572,9 @@
           ],
           "order_no": 1202,
           "default_selected": false,
-          "coverage_ratio": 0.9997
+          "coverage_ratio": 0.9997,
+          "feature_name": "收盘价相对N日均线的乖离",
+          "explanation": ""
         },
         {
           "feature_id": "feat_technical_1203",
@@ -7620,7 +8588,9 @@
           ],
           "order_no": 1203,
           "default_selected": false,
-          "coverage_ratio": 1.0
+          "coverage_ratio": 1.0,
+          "feature_name": "MACD DIF/DEA",
+          "explanation": ""
         },
         {
           "feature_id": "feat_technical_1204",
@@ -7634,7 +8604,9 @@
           ],
           "order_no": 1204,
           "default_selected": false,
-          "coverage_ratio": 1.0
+          "coverage_ratio": 1.0,
+          "feature_name": "MACD DIF/DEA",
+          "explanation": ""
         },
         {
           "feature_id": "feat_technical_1205",
@@ -7648,7 +8620,9 @@
           ],
           "order_no": 1205,
           "default_selected": false,
-          "coverage_ratio": 0.9486
+          "coverage_ratio": 0.9486,
+          "feature_name": "14日资金流量指标 MFI",
+          "explanation": "基于典型价格与成交量的资金流强弱指标"
         },
         {
           "feature_id": "feat_technical_1206",
@@ -7662,7 +8636,9 @@
           ],
           "order_no": 1206,
           "default_selected": false,
-          "coverage_ratio": 0.9483
+          "coverage_ratio": 0.9483,
+          "feature_name": "20日 OBV 斜率",
+          "explanation": "能量潮指标近20日趋势斜率"
         },
         {
           "feature_id": "feat_technical_1207",
@@ -7676,7 +8652,9 @@
           ],
           "order_no": 1207,
           "default_selected": false,
-          "coverage_ratio": 0.9999
+          "coverage_ratio": 0.9999,
+          "feature_name": "日涨跌幅",
+          "explanation": ""
         },
         {
           "feature_id": "feat_technical_1208",
@@ -7690,7 +8668,9 @@
           ],
           "order_no": 1208,
           "default_selected": false,
-          "coverage_ratio": 0.9999
+          "coverage_ratio": 0.9999,
+          "feature_name": "14日 RSI",
+          "explanation": ""
         },
         {
           "feature_id": "feat_technical_1209",
@@ -7704,7 +8684,9 @@
           ],
           "order_no": 1209,
           "default_selected": false,
-          "coverage_ratio": 0.9483
+          "coverage_ratio": 0.9483,
+          "feature_name": "收盘价距20日新高的位置",
+          "explanation": "收盘价相对20日最高价的位置"
         },
         {
           "feature_id": "feat_technical_1210",
@@ -7718,7 +8700,9 @@
           ],
           "order_no": 1210,
           "default_selected": false,
-          "coverage_ratio": 0.9483
+          "coverage_ratio": 0.9483,
+          "feature_name": "20日最大回撤",
+          "explanation": "近20日价格路径的最大回撤幅度"
         },
         {
           "feature_id": "feat_technical_1211",
@@ -7732,7 +8716,9 @@
           ],
           "order_no": 1211,
           "default_selected": false,
-          "coverage_ratio": 0.9471
+          "coverage_ratio": 0.9471,
+          "feature_name": "成交量加权均价 VWAP",
+          "explanation": "收盘价相对成交量加权平均价的偏离"
         }
       ]
     },
@@ -7756,7 +8742,9 @@
           "default_selected": true,
           "coverage_ratio": 0.99,
           "measured_ic": -0.066,
-          "measured_icir": -0.313
+          "measured_icir": -0.313,
+          "feature_name": "1日换手率",
+          "explanation": "当日换手率（旧版 L1 命名）"
         },
         {
           "feature_id": "feat_fundamental_fun_turnover_5",
@@ -7772,7 +8760,9 @@
           "default_selected": true,
           "coverage_ratio": 0.99,
           "measured_ic": -0.0577,
-          "measured_icir": -0.265
+          "measured_icir": -0.265,
+          "feature_name": "5日换手率",
+          "explanation": "近5日换手率均值（旧版 L1 命名）"
         },
         {
           "feature_id": "feat_fundamental_fun_turnover_20",
@@ -7788,7 +8778,9 @@
           "default_selected": true,
           "coverage_ratio": 0.99,
           "measured_ic": -0.0451,
-          "measured_icir": -0.199
+          "measured_icir": -0.199,
+          "feature_name": "20日换手率",
+          "explanation": "近20日换手率均值（旧版 L1 命名）"
         },
         {
           "feature_id": "feat_fundamental_fun_mv",
@@ -7804,7 +8796,9 @@
           "default_selected": true,
           "coverage_ratio": 0.99,
           "measured_ic": -0.0115,
-          "measured_icir": -0.052
+          "measured_icir": -0.052,
+          "feature_name": "市值",
+          "explanation": "市值取对数口径（旧版 L1 命名，同 fun_float_mv）"
         },
         {
           "feature_id": "feat_fundamental_fun_total_mv",
@@ -7820,7 +8814,9 @@
           "default_selected": true,
           "coverage_ratio": 0.99,
           "measured_ic": -0.0182,
-          "measured_icir": -0.078
+          "measured_icir": -0.078,
+          "feature_name": "总市值",
+          "explanation": "ln(不复权收盘价×总股本)。使用时需 exp() 还原为元"
         },
         {
           "feature_id": "feat_fundamental_fun_pe",
@@ -7836,7 +8832,9 @@
           "default_selected": true,
           "coverage_ratio": 0.99,
           "measured_ic": -0.0071,
-          "measured_icir": -0.095
+          "measured_icir": -0.095,
+          "feature_name": "PE",
+          "explanation": "总市值/净利润TTM，倍数"
         },
         {
           "feature_id": "feat_fundamental_fun_pb",
@@ -7852,7 +8850,9 @@
           "default_selected": true,
           "coverage_ratio": 0.99,
           "measured_ic": -0.0368,
-          "measured_icir": -0.227
+          "measured_icir": -0.227,
+          "feature_name": "PB",
+          "explanation": "总市值/净资产，倍数"
         },
         {
           "feature_id": "feat_fundamental_fun_bp",
@@ -7868,7 +8868,9 @@
           "default_selected": true,
           "coverage_ratio": 0.99,
           "measured_ic": 0.0367,
-          "measured_icir": 0.23
+          "measured_icir": 0.23,
+          "feature_name": "BP",
+          "explanation": "1/市净率。价值因子，越高越偏价值"
         },
         {
           "feature_id": "feat_fundamental_fun_ep",
@@ -7884,7 +8886,9 @@
           "default_selected": true,
           "coverage_ratio": 0.99,
           "measured_ic": 0.0256,
-          "measured_icir": 0.1294
+          "measured_icir": 0.1294,
+          "feature_name": "EP",
+          "explanation": "净利润TTM/总市值。市盈率的倒数"
         },
         {
           "feature_id": "feat_fundamental_fun_mv_rank",
@@ -7900,7 +8904,9 @@
           "default_selected": true,
           "coverage_ratio": 0.99,
           "measured_ic": -0.0115,
-          "measured_icir": -0.052
+          "measured_icir": -0.052,
+          "feature_name": "市值排名",
+          "explanation": "流通市值的当日全市场百分位（0~1），规模因子代表"
         },
         {
           "feature_id": "feat_fundamental_fun_value_zscore",
@@ -7916,7 +8922,9 @@
           "default_selected": true,
           "coverage_ratio": 0.99,
           "measured_ic": 0.0352,
-          "measured_icir": 0.198
+          "measured_icir": 0.198,
+          "feature_name": "价值Z-Score",
+          "explanation": "(E/P与B/P各自截面Z分数的均值)。综合估值，越高越便宜"
         },
         {
           "feature_id": "feat_fundamental_fun_roe",
@@ -7932,7 +8940,9 @@
           "default_selected": true,
           "coverage_ratio": 0.99,
           "measured_ic": 0.0067,
-          "measured_icir": 0.043
+          "measured_icir": 0.043,
+          "feature_name": "ROE",
+          "explanation": "净利润TTM/净资产×100。百分数值（11.76=11.76%）"
         },
         {
           "feature_id": "feat_fundamental_fun_peg",
@@ -7948,7 +8958,9 @@
           "default_selected": true,
           "coverage_ratio": 0.99,
           "measured_ic": 0.0006,
-          "measured_icir": 0.022
+          "measured_icir": 0.022,
+          "feature_name": "PEG",
+          "explanation": "市盈率/净利润增长率。小于1常被视为成长性未被充分定价"
         },
         {
           "feature_id": "feat_fundamental_010",
@@ -7964,7 +8976,9 @@
           "default_selected": true,
           "coverage_ratio": 0.95,
           "measured_ic": 0.0139,
-          "measured_icir": 0.05
+          "measured_icir": 0.05,
+          "feature_name": "股息率",
+          "explanation": ""
         },
         {
           "feature_id": "feat_fundamental_ps_ttm",
@@ -7980,7 +8994,9 @@
           "default_selected": true,
           "coverage_ratio": 0.9897,
           "measured_ic": -0.0308,
-          "measured_icir": -0.1997
+          "measured_icir": -0.1997,
+          "feature_name": "市销率(TTM): 总市值/营业收入TTM",
+          "explanation": ""
         },
         {
           "feature_id": "feat_fundamental_1212",
@@ -7994,7 +9010,9 @@
           ],
           "order_no": 1212,
           "default_selected": false,
-          "coverage_ratio": 0.9988
+          "coverage_ratio": 0.9988,
+          "feature_name": "年度净利润",
+          "explanation": ""
         },
         {
           "feature_id": "feat_fundamental_1213",
@@ -8008,7 +9026,9 @@
           ],
           "order_no": 1213,
           "default_selected": false,
-          "coverage_ratio": 1.0
+          "coverage_ratio": 1.0,
+          "feature_name": "流通股本",
+          "explanation": ""
         },
         {
           "feature_id": "feat_fundamental_1214",
@@ -8022,7 +9042,9 @@
           ],
           "order_no": 1214,
           "default_selected": false,
-          "coverage_ratio": 0.9998
+          "coverage_ratio": 0.9998,
+          "feature_name": "净资产",
+          "explanation": ""
         },
         {
           "feature_id": "feat_fundamental_1215",
@@ -8036,7 +9058,9 @@
           ],
           "order_no": 1215,
           "default_selected": false,
-          "coverage_ratio": 1.0
+          "coverage_ratio": 1.0,
+          "feature_name": "流通市值",
+          "explanation": ""
         },
         {
           "feature_id": "feat_fundamental_1216",
@@ -8050,7 +9074,9 @@
           ],
           "order_no": 1216,
           "default_selected": false,
-          "coverage_ratio": 0.9495
+          "coverage_ratio": 0.9495,
+          "feature_name": "财务指标（流通市值/净利润增速）",
+          "explanation": "ln(不复权收盘价×流通股本)。衡量规模，使用时需 exp() 还原"
         },
         {
           "feature_id": "feat_fundamental_1217",
@@ -8064,7 +9090,9 @@
           ],
           "order_no": 1217,
           "default_selected": false,
-          "coverage_ratio": 0.9461
+          "coverage_ratio": 0.9461,
+          "feature_name": "财务指标（流通市值/净利润增速）",
+          "explanation": "净利润同比增长速度"
         },
         {
           "feature_id": "feat_fundamental_1218",
@@ -8078,7 +9106,9 @@
           ],
           "order_no": 1218,
           "default_selected": false,
-          "coverage_ratio": 0.9984
+          "coverage_ratio": 0.9984,
+          "feature_name": "净利润 TTM",
+          "explanation": ""
         },
         {
           "feature_id": "feat_fundamental_1219",
@@ -8092,7 +9122,9 @@
           ],
           "order_no": 1219,
           "default_selected": false,
-          "coverage_ratio": 0.9998
+          "coverage_ratio": 0.9998,
+          "feature_name": "市净率",
+          "explanation": ""
         },
         {
           "feature_id": "feat_fundamental_1220",
@@ -8106,7 +9138,9 @@
           ],
           "order_no": 1220,
           "default_selected": false,
-          "coverage_ratio": 0.9988
+          "coverage_ratio": 0.9988,
+          "feature_name": "市盈率 TTM/静态",
+          "explanation": ""
         },
         {
           "feature_id": "feat_fundamental_1221",
@@ -8120,7 +9154,9 @@
           ],
           "order_no": 1221,
           "default_selected": false,
-          "coverage_ratio": 0.9984
+          "coverage_ratio": 0.9984,
+          "feature_name": "市盈率 TTM/静态",
+          "explanation": ""
         },
         {
           "feature_id": "feat_fundamental_1222",
@@ -8134,7 +9170,9 @@
           ],
           "order_no": 1222,
           "default_selected": false,
-          "coverage_ratio": 0.9981
+          "coverage_ratio": 0.9981,
+          "feature_name": "营业收入 TTM",
+          "explanation": ""
         },
         {
           "feature_id": "feat_fundamental_1223",
@@ -8148,7 +9186,9 @@
           ],
           "order_no": 1223,
           "default_selected": false,
-          "coverage_ratio": 1.0
+          "coverage_ratio": 1.0,
+          "feature_name": "总股本",
+          "explanation": ""
         },
         {
           "feature_id": "feat_fundamental_1224",
@@ -8162,7 +9202,9 @@
           ],
           "order_no": 1224,
           "default_selected": false,
-          "coverage_ratio": 1.0
+          "coverage_ratio": 1.0,
+          "feature_name": "总市值",
+          "explanation": ""
         }
       ]
     },
@@ -8186,7 +9228,9 @@
           "coverage_ratio": 0.9,
           "measured_ic": -0.0219,
           "measured_icir": -0.833,
-          "direction": -1
+          "direction": -1,
+          "feature_name": "Top50参与人数量（少=筹码集中，负向）",
+          "explanation": "CCASS Top50 参与人数量（少=筹码集中，负向）"
         },
         {
           "feature_id": "feat_holding_002",
@@ -8203,7 +9247,9 @@
           "coverage_ratio": 0.9,
           "measured_ic": 0.0196,
           "measured_icir": 0.768,
-          "direction": 1
+          "direction": 1,
+          "feature_name": "披露内份额HHI集中度（正向）",
+          "explanation": "Top50 披露份额赫芬达尔指数，越高筹码越集中"
         },
         {
           "feature_id": "feat_holding_003",
@@ -8220,7 +9266,9 @@
           "coverage_ratio": 0.9,
           "measured_ic": 0.0422,
           "measured_icir": 0.535,
-          "direction": 1
+          "direction": 1,
+          "feature_name": "Top50名次20日重叠率（稳定=长线布局）",
+          "explanation": "参与人名单与 20 个交易日前的 Jaccard 重叠率"
         },
         {
           "feature_id": "feat_holding_004",
@@ -8237,7 +9285,9 @@
           "coverage_ratio": 0.9,
           "measured_ic": -0.0311,
           "measured_icir": -0.503,
-          "direction": -1
+          "direction": -1,
+          "feature_name": "券商散户线占比（负向）",
+          "explanation": "券商类参与人披露份额合计"
         },
         {
           "feature_id": "feat_holding_005",
@@ -8254,7 +9304,9 @@
           "coverage_ratio": 0.9,
           "measured_ic": -0.0209,
           "measured_icir": -0.45,
-          "direction": -1
+          "direction": -1,
+          "feature_name": "披露覆盖度（负向）",
+          "explanation": "Top50 参与人披露比例合计（衡量披露质量）"
         },
         {
           "feature_id": "feat_holding_006",
@@ -8271,7 +9323,9 @@
           "coverage_ratio": 0.9,
           "measured_ic": 0.0217,
           "measured_icir": 0.332,
-          "direction": 1
+          "direction": 1,
+          "feature_name": "大行托管占披露比（外资线，正向）",
+          "explanation": "托管行类参与人占披露份额比例"
         },
         {
           "feature_id": "feat_holding_007",
@@ -8288,7 +9342,9 @@
           "coverage_ratio": 0.9,
           "measured_ic": -0.0213,
           "measured_icir": -0.186,
-          "direction": -1
+          "direction": -1,
+          "feature_name": "南向(中国结算双席位)持股占比（负向）",
+          "explanation": "港股通席位（A00003/A00004）披露份额合计"
         },
         {
           "feature_id": "feat_holding_008",
@@ -8305,7 +9361,112 @@
           "coverage_ratio": 0.9,
           "measured_ic": 0.0226,
           "measured_icir": 0.216,
-          "direction": 1
+          "direction": 1,
+          "feature_name": "南向持股数量（正向）",
+          "explanation": "港股通持股数量（正向）"
+        }
+      ]
+    },
+    {
+      "id": "custom",
+      "name": "自建因子",
+      "order": 12,
+      "feature_count": 5,
+      "features": [
+        {
+          "feature_id": "feat_custom_001",
+          "key": "custom_ret_1d",
+          "description": "自定义1日涨跌幅",
+          "feature_name": "自定义1日涨跌幅",
+          "explanation": "当日收盘价相对前收的涨跌幅，演示用（OHLCV直接计算）",
+          "formula": "(close / pre_close) - 1",
+          "source": "OHLCV演示",
+          "enabled": true,
+          "markets": [
+            "CN",
+            "HK",
+            "US",
+            "CRYPTO",
+            "FUTURES"
+          ],
+          "order_no": 1,
+          "default_selected": false
+        },
+        {
+          "feature_id": "feat_custom_002",
+          "key": "custom_amp_1d",
+          "description": "自定义1日振幅",
+          "feature_name": "自定义1日振幅",
+          "explanation": "当日最高最低价相对前收的振幅，演示用",
+          "formula": "(high - low) / pre_close",
+          "source": "OHLCV演示",
+          "enabled": true,
+          "markets": [
+            "CN",
+            "HK",
+            "US",
+            "CRYPTO",
+            "FUTURES"
+          ],
+          "order_no": 2,
+          "default_selected": false
+        },
+        {
+          "feature_id": "feat_custom_003",
+          "key": "custom_close_pos",
+          "description": "自定义收盘位置",
+          "feature_name": "自定义收盘位置",
+          "explanation": "收盘价在当日最高最低区间中的相对位置（0=最低，1=最高），演示用",
+          "formula": "(close - low) / (high - low)",
+          "source": "OHLCV演示",
+          "enabled": true,
+          "markets": [
+            "CN",
+            "HK",
+            "US",
+            "CRYPTO",
+            "FUTURES"
+          ],
+          "order_no": 3,
+          "default_selected": false
+        },
+        {
+          "feature_id": "feat_custom_004",
+          "key": "custom_vol_ratio_5",
+          "description": "自定义5日量比",
+          "feature_name": "自定义5日量比",
+          "explanation": "当日成交量与近5日均量的比值，演示用",
+          "formula": "volume / mean(volume, 5)",
+          "source": "OHLCV演示",
+          "enabled": true,
+          "markets": [
+            "CN",
+            "HK",
+            "US",
+            "CRYPTO",
+            "FUTURES"
+          ],
+          "order_no": 4,
+          "default_selected": false
+        },
+        {
+          "feature_id": "feat_custom_005",
+          "key": "custom_amt_ma_5",
+          "description": "自定义5日成交额均线",
+          "feature_name": "自定义5日成交额均线",
+          "explanation": "近5日成交额均值，衡量短期资金活跃度，演示用",
+          "formula": "mean(amount, 5)",
+          "source": "OHLCV演示",
+          "enabled": true,
+          "markets": [
+            "CN",
+            "HK",
+            "US",
+            "CRYPTO",
+            "FUTURES"
+          ],
+          "order_no": 5,
+          "default_selected": false
         }
       ]
     }

@@ -476,6 +476,21 @@ class RemoteSSHOrchestrator(TrainingOrchestrator):
             if par_script:
                 await self._rsync_push(par_script, f"{self.work_dir}/parallel_utils.py")
                 self._log(run_id, "[SYNC] parallel_utils.py 已同步")
+            # model_trainers/ 包（注册表/训练器拆包）与 train.py 同目录顶层 import，需一并推送
+            trainers_dir = self._resolve_trainers_dir()
+            if trainers_dir:
+                await self._rsync_push(trainers_dir, f"{self.work_dir}/model_trainers/", is_dir=True)
+                self._log(run_id, "[SYNC] model_trainers/ 已同步")
+            # diagnostics/ 包（漂移/SHAP/小工具拆包）与 train.py 同目录顶层 import，需一并推送
+            diagnostics_dir = self._resolve_diagnostics_dir()
+            if diagnostics_dir:
+                await self._rsync_push(diagnostics_dir, f"{self.work_dir}/diagnostics/", is_dir=True)
+                self._log(run_id, "[SYNC] diagnostics/ 已同步")
+            # data/ 包（数据加载/切分/筛选拆包）与 train.py 同目录顶层 import，需一并推送
+            data_dir = self._resolve_data_dir()
+            if data_dir:
+                await self._rsync_push(data_dir, f"{self.work_dir}/data/", is_dir=True)
+                self._log(run_id, "[SYNC] data/ 已同步")
             if direct_source:
                 # docker: rsync 后挂载覆盖镜像内置路径；免 Docker：推成 backend 同
                 # 相对路径，PYTHONPATH 以 work_dir 优先 → 与主节点同版本(含新数据集自动发现)
@@ -947,6 +962,9 @@ class RemoteSSHOrchestrator(TrainingOrchestrator):
             f"-v {self.work_dir}/train.py:/app/train.py:ro "
             f"-v {self.work_dir}/preprocessing.py:/app/preprocessing.py:ro "
             f"-v {self.work_dir}/parallel_utils.py:/app/parallel_utils.py:ro "
+            f"-v {self.work_dir}/model_trainers:/app/model_trainers:ro "
+            f"-v {self.work_dir}/diagnostics:/app/diagnostics:ro "
+            f"-v {self.work_dir}/data:/app/data:ro "
             f"-v {self.work_dir}/templates:/app/backend/services/engine/inference/templates:ro "
             + (f"-v {self.work_dir}/modules/quantdb_factor_reader.py:/app/backend/services/engine/data_platform/quantdb_factor_reader.py:ro " if direct_source else "")
             + (f"-v {self.work_dir}/modules/quantdb_hub.py:/app/backend/services/engine/data_platform/quantdb_hub.py:ro " if direct_source else "")
@@ -1000,6 +1018,42 @@ class RemoteSSHOrchestrator(TrainingOrchestrator):
         ]
         for p in candidates:
             if Path(p).exists():
+                return p
+        return None
+
+    def _resolve_trainers_dir(self) -> str | None:
+        """定位本地 model_trainers/ 包目录（train.py 顶层 import）。"""
+        candidates = [
+            str(Path(__file__).resolve().parents[3] / "docker" / "training" / "model_trainers"),
+            "/app/docker/training/model_trainers",
+            "/app/model_trainers",
+        ]
+        for p in candidates:
+            if Path(p).is_dir():
+                return p
+        return None
+
+    def _resolve_diagnostics_dir(self) -> str | None:
+        """定位本地 diagnostics/ 包目录（train.py 顶层 import）。"""
+        candidates = [
+            str(Path(__file__).resolve().parents[3] / "docker" / "training" / "diagnostics"),
+            "/app/docker/training/diagnostics",
+            "/app/diagnostics",
+        ]
+        for p in candidates:
+            if Path(p).is_dir():
+                return p
+        return None
+
+    def _resolve_data_dir(self) -> str | None:
+        """定位本地 data/ 包目录（train.py 顶层 import）。"""
+        candidates = [
+            str(Path(__file__).resolve().parents[3] / "docker" / "training" / "data"),
+            "/app/docker/training/data",
+            "/app/data",
+        ]
+        for p in candidates:
+            if Path(p).is_dir():
                 return p
         return None
 

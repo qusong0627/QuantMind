@@ -130,6 +130,103 @@ def _market_allows_feature(market: str | None, declared: list[str]) -> bool:
     return market_upper in declared
 
 
+# ---------- 统一分类口径（B 特征字典 → A 训练目录）-----------------------------
+# 训练消费侧（用户训练页）展示用：把 B 的 15 分类归一到 A 的 17 分类，避免同屏两套名字。
+# 仅重组 categories 分组，不改动任何特征字段；admin 读写回路保持原生口径（见函数注释）。
+_UNIFIED_CATEGORY_ORDER: dict[str, tuple[str, int]] = {
+    "momentum": ("动量", 100),
+    "volatility": ("波动与风险", 200),
+    "volume_turnover": ("成交量与换手率", 220),
+    "money_flow": ("成交额与资金", 300),
+    "turnover": ("换手与流动性", 400),
+    "technical": ("技术指标", 500),
+    "fundamental": ("基本面与估值", 600),
+    "style": ("截面风格", 700),
+    "industry": ("行业轮动", 800),
+    "chip": ("筹码分布", 900),
+    "concept": ("概念板块", 1000),
+    "money_flow_l2": ("逐笔资金流", 1100),
+    "order_flow": ("撤单与委托流", 1200),
+    "toxicity": ("信息不对称与毒性", 1300),
+    "microstructure": ("价差与微观结构", 1400),
+    "holding_structure": ("持仓结构", 1500),
+    "other": ("其他因子", 9999),
+}
+
+_B_TO_A_CATEGORY: dict[str, str] = {
+    "momentum": "momentum",
+    "volatility": "volatility",
+    "fund_flow": "money_flow",
+    "technical": "technical",
+    "fundamental": "fundamental",
+    "style": "style",
+    "industry": "industry",
+    "chip": "chip",
+    "concept": "concept",
+    "microstructure": "microstructure",
+    "holding": "holding_structure",
+    "gtja": "technical",
+}
+
+
+def unify_feature_catalog_categories(catalog: dict[str, Any] | None) -> dict[str, Any] | None:
+    """把 B 特征字典目录按 A 训练目录口径重组，仅训练消费侧调用。
+
+    - gtja→technical、holding→holding_structure、fund_flow→money_flow 等静态映射
+    - liquidity 按因子 key 经 quantdb 字典前缀规则逐个归位（未知前缀兜底 turnover）
+    - ohlcv / custom 为 B 专属分组，原样透出（保留原名与原排序）
+    """
+    if not isinstance(catalog, dict):
+        return catalog
+    categories = catalog.get("categories")
+    if not isinstance(categories, list):
+        return catalog
+    try:
+        from backend.services.engine.data_platform.quantdb_factor_dictionary import (
+            _group as _dict_group,
+        )
+    except Exception:
+        _dict_group = None  # type: ignore[assignment]
+
+    grouped: dict[str, dict[str, Any]] = {}
+    for cat in categories:
+        if not isinstance(cat, dict):
+            continue
+        orig_id = str(cat.get("id") or "")
+        orig_order = int(cat.get("order") or 0)
+        for feat in cat.get("features", []) or []:
+            if not isinstance(feat, dict):
+                continue
+            fkey = str(feat.get("key") or "")
+            if orig_id == "liquidity" and fkey and _dict_group is not None:
+                try:
+                    gid, _gname, _gorder = _dict_group(fkey)
+                except Exception:
+                    gid = "other"
+                target = gid if gid in _UNIFIED_CATEGORY_ORDER and gid != "other" else "turnover"
+            elif orig_id in ("ohlcv", "custom"):
+                target = orig_id
+            else:
+                target = _B_TO_A_CATEGORY.get(orig_id, "other")
+            if target in _UNIFIED_CATEGORY_ORDER:
+                tname, torder = _UNIFIED_CATEGORY_ORDER[target]
+            elif target == "custom":
+                tname, torder = str(cat.get("name") or target), 9998
+            else:
+                tname, torder = str(cat.get("name") or target), orig_order
+            node = grouped.get(target)
+            if node is None:
+                node = grouped[target] = {
+                    "id": target, "name": tname, "order": torder,
+                    "feature_count": 0, "features": [],
+                }
+            node["features"].append(feat)
+            node["feature_count"] += 1
+    out = dict(catalog)
+    out["categories"] = sorted(grouped.values(), key=lambda x: x["order"])
+    return out
+
+
 def _load_feature_catalog_from_file(path: str = FEATURE_CATALOG_FALLBACK, market: str | None = None) -> dict[str, Any] | None:
     """从本地 JSON 回退加载特征字典（用于 DB 未初始化场景）。
 
@@ -167,11 +264,13 @@ def _load_feature_catalog_from_file(path: str = FEATURE_CATALOG_FALLBACK, market
                     "feature_id": str(feat.get("feature_id") or ""),
                     "key": f_key,
                     "feature_name": str(feat.get("description") or feat.get("feature_name") or f_key),
+                    "explanation": str(feat.get("explanation") or feat.get("detail") or ""),
                     "formula": str(feat.get("formula") or ""),
                     "source_table_fields": str(feat.get("source") or feat.get("source_table_fields") or ""),
                     "enabled": bool(feat.get("enabled", True)),
                     "order_no": int(feat.get("order_no") or len(features) + 1),
                     "default_selected": bool(feat.get("default_selected", False)),
+                    "markets": market_map.get(f_key, []),
                 }
             )
         if not features:
@@ -220,31 +319,60 @@ async def _load_feature_catalog_from_db(market: str | None = None) -> dict[str, 
         if not version_row:
             return None
 
-        rows = (
-            await session.execute(
-                text(
-                    """
-                    SELECT
-                        c.category_id,
-                        c.category_name,
-                        c.sort_order,
-                        i.order_no,
-                        i.enabled,
-                        d.feature_id,
-                        d.feature_key,
-                        d.feature_name,
-                        d.formula,
-                        d.source_table_fields
-                    FROM qm_feature_set_item i
-                    JOIN qm_feature_definition d ON d.feature_key = i.feature_key
-                    JOIN qm_feature_category c ON c.category_id = i.category_id
-                    WHERE i.version_id = :version_id
-                    ORDER BY c.sort_order ASC, i.order_no ASC
-                    """
-                ),
-                {"version_id": version_row["version_id"]},
-            )
-        ).mappings().all()
+        try:
+            rows = (
+                await session.execute(
+                    text(
+                        """
+                        SELECT
+                            c.category_id,
+                            c.category_name,
+                            c.sort_order,
+                            i.order_no,
+                            i.enabled,
+                            d.feature_id,
+                            d.feature_key,
+                            d.feature_name,
+                            d.formula,
+                            d.source_table_fields,
+                            d.explanation
+                        FROM qm_feature_set_item i
+                        JOIN qm_feature_definition d ON d.feature_key = i.feature_key
+                        JOIN qm_feature_category c ON c.category_id = i.category_id
+                        WHERE i.version_id = :version_id
+                        ORDER BY c.sort_order ASC, i.order_no ASC
+                        """
+                    ),
+                    {"version_id": version_row["version_id"]},
+                )
+            ).mappings().all()
+        except Exception:
+            # 迁移前老库无 explanation 列，回退到无描述查询
+            rows = (
+                await session.execute(
+                    text(
+                        """
+                        SELECT
+                            c.category_id,
+                            c.category_name,
+                            c.sort_order,
+                            i.order_no,
+                            i.enabled,
+                            d.feature_id,
+                            d.feature_key,
+                            d.feature_name,
+                            d.formula,
+                            d.source_table_fields
+                        FROM qm_feature_set_item i
+                        JOIN qm_feature_definition d ON d.feature_key = i.feature_key
+                        JOIN qm_feature_category c ON c.category_id = i.category_id
+                        WHERE i.version_id = :version_id
+                        ORDER BY c.sort_order ASC, i.order_no ASC
+                        """
+                    ),
+                    {"version_id": version_row["version_id"]},
+                )
+            ).mappings().all()
 
         if not rows:
             return None
@@ -269,10 +397,12 @@ async def _load_feature_catalog_from_db(market: str | None = None) -> dict[str, 
                     "feature_id": str(r["feature_id"] or ""),
                     "key": f_key,
                     "feature_name": str(r["feature_name"] or f_key or ""),
+                    "explanation": str((r["explanation"] if "explanation" in r else "") or ""),
                     "formula": str(r["formula"] or ""),
                     "source_table_fields": str(r["source_table_fields"] or ""),
                     "enabled": bool(r["enabled"]),
                     "order_no": int(r["order_no"] or 0),
+                    "markets": market_map.get(f_key, []),
                 }
             )
             cat_map[cid]["feature_count"] += 1
@@ -332,6 +462,7 @@ def _normalize_market_key(market: str | None) -> str:
         "US": "us_stock", "US_STOCK": "us_stock",
         "CRYPTO": "crypto", "BC": "crypto",
         "FUTURES": "futures",
+        "CUSTOM": "custom",
     }
     if raw in mapping:
         return mapping[raw]

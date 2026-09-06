@@ -6,7 +6,9 @@ import asyncio
 import re
 import uuid
 import json
+import os
 from datetime import date, datetime, timezone
+from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -33,6 +35,43 @@ router = APIRouter(dependencies=[Depends(require_admin)])
 
 _VALID_SOURCE = set(FACTOR_SOURCE_DIRS)
 _VALID_STATUS = {"draft", "published", "archived"}
+
+_B_FEATURE_EXPLANATIONS: dict[str, str] = {}
+_B_FEATURE_EXPLANATIONS_MTIME: float = 0.0
+
+
+def _feature_explanations() -> dict[str, str]:
+    """特征字典（B）{feature_key: explanation} 映射，供 A 目录回退展示用户编辑的长描述。
+
+    B 页保存的用户解释优先于代码字典；文件缺失/解析失败时返回空映射，
+    A 行为保持不变。按 mtime 缓存，避免每次请求读盘。
+    """
+    global _B_FEATURE_EXPLANATIONS, _B_FEATURE_EXPLANATIONS_MTIME
+    path = Path(os.getcwd()) / "config" / "features" / "model_training_feature_catalog_v1.json"
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return {}
+    if _B_FEATURE_EXPLANATIONS and mtime == _B_FEATURE_EXPLANATIONS_MTIME:
+        return _B_FEATURE_EXPLANATIONS
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    mapping: dict[str, str] = {}
+    for cat in raw.get("categories", []) or []:
+        if not isinstance(cat, dict):
+            continue
+        for feat in cat.get("features", []) or []:
+            if not isinstance(feat, dict):
+                continue
+            key = str(feat.get("key") or "").strip()
+            expl = str(feat.get("explanation") or "").strip()
+            if key and expl and key not in mapping:
+                mapping[key] = expl
+    _B_FEATURE_EXPLANATIONS = mapping
+    _B_FEATURE_EXPLANATIONS_MTIME = mtime
+    return mapping
 
 # 新建草稿时的默认勾选集（default_selected）。
 # 挑选原则（共 48 个，基于 l1_l2_factors 实际发现字段）：
@@ -327,6 +366,7 @@ async def _catalog_payload(session, version: dict[str, Any], source_dataset: str
         ORDER BY category_name, sort_order, feature_key
     """), {"version_id": version["version_id"], "source_dataset": source_dataset})).mappings().all()
     categories: dict[str, dict[str, Any]] = {}
+    b_explanations = _feature_explanations()
     for row in rows:
         # 兼容早期草稿：曾错误地把 dictionary.explanation 存入
         # display_name。训练页卡片只应显示短名称，完整说明留给后台编辑。
@@ -337,6 +377,13 @@ async def _catalog_payload(session, version: dict[str, Any], source_dataset: str
             if "具体计算口径" in stored_display_name
             else stored_display_name
         )
+        # 长描述优先级：B 特征字典用户编辑 > 代码字典精确条目；模板化
+        # 兜底文案（含“具体计算口径”）不透出，留空由前端提示补充。
+        fkey = str(row["feature_key"])
+        doc_expl = str(dictionary.get("explanation") or "")
+        if "具体计算口径" in doc_expl:
+            doc_expl = ""
+        explanation = b_explanations.get(fkey) or doc_expl
         category = categories.setdefault(str(row["category_id"]), {
             "id": str(row["category_id"]), "name": str(row["category_name"]),
             "order": len(categories), "feature_count": 0, "features": [],
@@ -347,7 +394,7 @@ async def _catalog_payload(session, version: dict[str, Any], source_dataset: str
             "source_column": str(row["source_column"]), "enabled": bool(row["enabled"]),
             "default_selected": bool(row["default_selected"]), "required": bool(row["required"]),
             "category_id": str(row["category_id"]), "category_name": str(row["category_name"]),
-            "order_no": int(row["sort_order"]),
+            "order_no": int(row["sort_order"]), "explanation": explanation,
         })
         category["feature_count"] += 1
     return {
@@ -753,9 +800,10 @@ async def clone_factor_catalog(version_id: str, payload: CatalogVersionClone, cu
 async def seed_draft_mappings(version_id: str, current_user: dict = Depends(require_admin)):
     """Convenience endpoint: add all discovered factor columns to a draft as mappings.
 
-    新建草稿后：全部发现字段默认启用（enabled=True），
-    其中 DEFAULT_SELECTED_FACTORS 里的 48 个核心因子额外默认勾选
-    （default_selected=True），其余因子由管理员手动勾选。
+    新建草稿后：全部发现字段默认启用（enabled=True）。
+    default_selected 默认勾选仅适用于 CN 市场（48 核心集基于 CN l1_l2
+    实际字段挑选）；HK/CUSTOM 等市场默认全不勾选，由管理员按实际
+    发现字段手动勾选，避免把不存在的 CN 因子带入训练。
     """
     _ = current_user
     async with get_session() as session:
@@ -774,13 +822,16 @@ async def seed_draft_mappings(version_id: str, current_user: dict = Depends(requ
         """), {"market": version["market"], "dataset_id": version["source_dataset"]})).scalars().all()
         count = 0
         default_selected_count = 0
+        market_defaults = (
+            DEFAULT_SELECTED_FACTORS if str(version["market"]).upper() == "CN" else frozenset()
+        )
         for column in fields:
             if column in KEY_COLUMNS or column in REQUIRED_COLUMNS:
                 continue
             definition = definition_for(str(column))
             cat_id = str(definition["category_id"])
             cat_name = str(definition["category_name"])
-            is_default_selected = str(column) in DEFAULT_SELECTED_FACTORS
+            is_default_selected = str(column) in market_defaults
             await session.execute(text("""
                 INSERT INTO qm_training_factor_mapping
                  (mapping_id, version_id, source_dataset, source_column, feature_key, display_name,

@@ -35,20 +35,20 @@ export const CAP_TIER_OPTIONS = [
 export const TREND_OPTIONS = [
   { value: '连续上升', label: '连续上升' },
   { value: '连续下降', label: '连续下降' },
-  { value: '先升后降', label: '先升后降 · 最佳买点' },
+  { value: '先升后降', label: '先升后降' },
   { value: '上升', label: '单日上升' },
   { value: '下降', label: '单日下降' },
   { value: '持平', label: '持平' },
 ];
 export const BUCKET_OPTIONS: { value: string; label: string; min?: number; max?: number }[] = [
-  { value: 'golden', label: '黄金区间 0.10-0.12', min: 0.10, max: 0.12 },
-  { value: 'optional', label: '可选 0.12-0.15', min: 0.12, max: 0.15 },
-  { value: 'caution', label: '谨慎 0.15-0.20', min: 0.15, max: 0.20 },
-  { value: 'extreme', label: '极端高分 ≥0.20', min: 0.20 },
-  { value: 'neg_extreme', label: '极端负分 ≤-0.20', max: -0.20 },
-  { value: 'neg_short', label: '做空候选 ≤-0.15', max: -0.15 },
-  { value: 'pos', label: '全部正分 ≥0', min: 0 },
-  { value: 'neg', label: '全部负分 <0', max: 0 },
+  { value: 'golden', label: '0.10-0.12', min: 0.10, max: 0.12 },
+  { value: 'optional', label: '0.12-0.15', min: 0.12, max: 0.15 },
+  { value: 'caution', label: '0.15-0.20', min: 0.15, max: 0.20 },
+  { value: 'extreme', label: '≥0.20', min: 0.20 },
+  { value: 'neg_extreme', label: '≤-0.20', max: -0.20 },
+  { value: 'neg_short', label: '≤-0.15', max: -0.15 },
+  { value: 'pos', label: '≥0', min: 0 },
+  { value: 'neg', label: '<0', max: 0 },
 ];
 
 export function bucketScoreRange(bucket?: string): { min?: number; max?: number } {
@@ -99,7 +99,6 @@ export function StockFilterPanel({ filters, onChange, total, fullTotal, models: 
     if (bd) activeChips.push({ key: 'bucket', label: `分数 ${bd.label}`, clear: () => set({ bucket: undefined, scoreMin: undefined }) });
     if (filters.trend) activeChips.push({ key: 'trend', label: `趋势 ${filters.trend}`, clear: () => set({ trend: undefined }) });
     if (filters.industry) activeChips.push({ key: 'industry', label: `行业 ${filters.industry}`, clear: () => set({ industry: undefined }) });
-    if (filters.side) activeChips.push({ key: 'side', label: `信号 ${filters.side}`, clear: () => set({ side: undefined }) });
   }
   if (filters.concept) activeChips.push({ key: 'concept', label: `概念 ${filters.concept}`, clear: () => set({ concept: undefined }) });
   if (filters.indexCode) activeChips.push({ key: 'index', label: `宽基 ${filters.indexName ?? filters.indexCode}`, clear: () => set({ indexCode: undefined, indexName: undefined }) });

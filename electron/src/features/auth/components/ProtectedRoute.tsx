@@ -5,10 +5,11 @@
 import React, { ReactNode } from 'react';
 import { useNavigate, useLocation, Navigate } from 'react-router-dom';
 import { Spin, Result, Button } from 'antd';
-import { LockOutlined } from '@ant-design/icons';
+import { LockOutlined, CloudServerOutlined } from '@ant-design/icons';
 import { useRequireAuth, useRequireRole } from '../hooks/useAuth';
-import { useAppDispatch } from '../../../store';
-import { logout } from '../store/authSlice';
+import { useAppDispatch, useAppSelector } from '../../../store';
+import { logout, retryAuthInit } from '../store/authSlice';
+import { getDynamicServerUrl, initDynamicServerUrl } from '../../../config/services';
 
 interface ProtectedRouteProps {
   children: ReactNode;
@@ -28,12 +29,17 @@ const ProtectedRoute: React.FC<ProtectedRouteProps> = ({
   const dispatch = useAppDispatch();
   const { isAuthenticated, isLoading, user } = useRequireAuth();
   const { hasRole } = useRequireRole(requiredRole);
+  const serverUnreachable = useAppSelector((state) => state.auth.serverUnreachable);
 
-  // ✅ 检查localStorage中的Token
-  const hasToken = !!localStorage.getItem('access_token');
+  // 重试连接：先重新探测服务器地址（换 IP 后旧地址会失效），再重置认证状态重试
+  const handleRetry = async () => {
+    await initDynamicServerUrl();
+    dispatch(retryAuthInit());
+  };
 
-  // 如果有Token但Hook未识别，尝试刷新认证状态
-  const effectiveAuth = isAuthenticated || hasToken;
+  // 认证唯一依据是 Redux 已校验状态。localStorage 里有旧 token 不代表已登录——
+  // 服务器不可达/初始化失败时不得放行，避免后端关闭后“登录成功看缓存数据”。
+  const effectiveAuth = isAuthenticated;
 
   // 加载中
   if (isLoading) {
@@ -50,6 +56,65 @@ const ProtectedRoute: React.FC<ProtectedRouteProps> = ({
         <Spin size="large" tip="验证身份中...">
           <div style={{ height: 100 }} />
         </Spin>
+      </div>
+    );
+  }
+
+  // 服务器不可达：整页提示 + 重试，不进入缓存数据
+  if (serverUnreachable && !effectiveAuth) {
+    const serverUrl = getDynamicServerUrl() || '未配置';
+    return (
+      <div
+        style={{
+          height: '100vh',
+          width: '100%',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          background: 'var(--bg-main, #f8fafc)',
+          padding: '24px',
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          zIndex: 1000,
+        }}
+      >
+        <Result
+          icon={<CloudServerOutlined style={{ fontSize: 64, color: '#faad14' }} />}
+          title="服务器不可达"
+          subTitle={
+            <span>
+              无法连接到后端服务器（{serverUrl}），请确认服务器已启动或网络正常。
+              <br />
+              已保留你的登录令牌与服务器配置，恢复后可直接重试，无需重新配置。
+            </span>
+          }
+          extra={
+            <div style={{ display: 'flex', gap: 12, justifyContent: 'center' }}>
+              <Button
+                type="primary"
+                size="large"
+                onClick={() => void handleRetry()}
+              >
+                重试连接
+              </Button>
+              <Button
+                size="large"
+                onClick={() => navigate('/auth/login', { replace: true })}
+              >
+                返回登录页
+              </Button>
+            </div>
+          }
+          style={{
+            background: 'white',
+            padding: '72px 48px',
+            borderRadius: '48px',
+            boxShadow: '0 25px 60px -15px rgba(15, 23, 42, 0.12)',
+            maxWidth: '640px',
+            width: '100%',
+          }}
+        />
       </div>
     );
   }

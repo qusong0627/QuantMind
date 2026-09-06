@@ -16,11 +16,14 @@ import {
     StrategyTemplateUpsertRequest,
 } from '../types';
 import { authService } from '../../auth/services/authService';
-import { SERVICE_ENDPOINTS } from '../../../config/services';
+import { SERVICE_ENDPOINTS, resolveWebSafeServiceBase } from '../../../config/services';
 
 class AdminService {
     private axiosInstance: AxiosInstance;
-    private readonly baseURL = (import.meta as any).env?.VITE_USER_API_URL || SERVICE_ENDPOINTS.USER_SERVICE;
+    private readonly baseURL = resolveWebSafeServiceBase(
+        (import.meta as any).env?.VITE_USER_API_URL,
+        SERVICE_ENDPOINTS.USER_SERVICE,
+    );
     private metrics401Locked = false;
 
     constructor() {
@@ -198,8 +201,10 @@ class AdminService {
         return resp.data;
     }
 
-    async getModelFeatureCatalog(): Promise<AdminModelFeatureCatalog> {
-        const resp = await this.axiosInstance.get<AdminModelFeatureCatalog>('/admin/models/feature-catalog');
+    async getModelFeatureCatalog(market?: string): Promise<AdminModelFeatureCatalog> {
+        const resp = await this.axiosInstance.get<AdminModelFeatureCatalog>('/admin/models/feature-catalog', {
+            params: market ? { market } : {},
+        });
         return resp.data;
     }
 
@@ -588,6 +593,16 @@ class AdminService {
     }> {
         const resp = await this.axiosInstance.get('/admin/system/update/status', { timeout: 15000 });
         return this.unwrap(resp.data);
+    }
+
+    // FinBERT 开关（独立控制按键）
+    async getFinbertStatus(): Promise<{ enabled: boolean; device: number; model: string; model_ready: boolean; model_failed: boolean }> {
+        const resp = await this.axiosInstance.get('/admin/finbert/status');
+        return resp.data?.data ?? resp.data;
+    }
+    async setFinbertEnabled(enabled: boolean): Promise<{ enabled: boolean; model_ready: boolean }> {
+        const resp = await this.axiosInstance.post('/admin/finbert/toggle', { enabled });
+        return resp.data?.data ?? resp.data;
     }
 }
 

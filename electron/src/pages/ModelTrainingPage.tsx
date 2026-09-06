@@ -37,7 +37,7 @@ const TRAINING_MODULES = [
 const TRAINING_PAGE_BOTTOM_SAFE_CLASS = 'pb-[30px]';
 // 直读 ML 数据集训练的市场（数据源选择 + 目录版本门禁），与后端
 // quantdb_factor_reader.MARKET_FACTOR_SOURCES 保持一致。
-const QUANTDB_DIRECT_MARKETS = ['CN', 'HK', 'US', 'FUTURES', 'CRYPTO'];
+const QUANTDB_DIRECT_MARKETS = ['CN', 'HK', 'US', 'FUTURES', 'CRYPTO', 'CUSTOM'];
 const isQuantDBMarket = (market: string) => QUANTDB_DIRECT_MARKETS.includes(market);
 let draftRestoreNoticeShown = false;
 
@@ -95,6 +95,9 @@ function formReducer(state: FormState, action: FormAction): FormState {
       if (!action.payload) return { ...state, draftHydrated: true };
       const p = action.payload;
       const restoredParams = { ...DEFAULT_PARAMS, ...p.params };
+      // 单选模型：历史草稿若存有多选，只保留主模型
+      restoredParams.model_types = [restoredParams.model_type];
+      restoredParams.ensemble_method = 'none';
       if (!p.params?.model_types && p.params?.model_type) {
         restoredParams.model_types = [p.params.model_type];
       }
@@ -165,7 +168,7 @@ export const ModelTrainingPage: React.FC = () => {
     target: DEFAULT_TARGET,
     params: DEFAULT_PARAMS,
     context: DEFAULT_CONTEXT,
-    displayName: buildAutoDisplayName(dayjs(), DEFAULT_TARGET, 0),
+    displayName: buildAutoDisplayName(dayjs(), DEFAULT_TARGET, 0, undefined, currentMarket, DEFAULT_PARAMS.model_type),
     displayNameMode: 'auto' as const,
     draftHydrated: false,
   });
@@ -226,8 +229,8 @@ export const ModelTrainingPage: React.FC = () => {
 
   const featureCount = selectedFeatures.length;
   const autoDisplayName = useMemo(
-    () => buildAutoDisplayName(dayjs(), target, featureCount, undefined, currentMarket),
-    [target, featureCount, currentMarket]
+    () => buildAutoDisplayName(dayjs(), target, featureCount, undefined, currentMarket, params.model_type),
+    [target, featureCount, currentMarket, params.model_type]
   );
   const trainDays = useMemo(() => daysBetween(timePeriods.train), [timePeriods.train]);
   const valDays = useMemo(() => daysBetween(timePeriods.val), [timePeriods.val]);

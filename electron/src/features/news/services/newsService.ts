@@ -302,6 +302,11 @@ class NewsService {
     return (r as any).data ?? (r as any);
   }
 
+  async purgeOld(hours = 24): Promise<{ ok: boolean; deleted_pages: number; deleted_enrichments: number; cutoff_local: string }> {
+    const r = await apiClient.post('/news/admin/purge-old', null, { params: { hours } });
+    return (r as any).data ?? (r as any);
+  }
+
   // ---------- Admin: 标签管理 (finance_lexicon CRUD) ----------
 
   async adminListTags(params: {

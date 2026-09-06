@@ -231,34 +231,9 @@ def _latest_rows(
     （100+ 列）按需取 2~3 列，避免整表扫描拖慢投研页面。
     返回 {symbol: row_dict}；视图不存在或无数据时返回空字典（优雅降级）。
     """
-    quoted = ", ".join(f"'{s}'" for s in symbols)
-    if dt is not None:
-        dt_cond = f"dt BETWEEN {dt - _DT_LOOKBACK} AND {dt}"
-    else:
-        dt_cond = f"dt >= (SELECT MAX(dt) - {_DT_LOOKBACK} FROM {view})"
-    if columns:
-        select_cols = ["symbol"] + [f'"{c}"' for c in columns]
-        inner_sel = ", ".join(
-            select_cols + ["ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY dt DESC) AS rn"]
-        )
-        outer_sel = ", ".join(select_cols)
-    else:
-        inner_sel = "*, ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY dt DESC) AS rn"
-        outer_sel = "*"
-    sql = f"""
-        SELECT {outer_sel} FROM (
-            SELECT {inner_sel}
-            FROM {view}
-            WHERE symbol IN ({quoted})
-              AND {dt_cond}
-        ) WHERE rn = 1
-    """
-    try:
-        df = _get_hub().query(sql)
-    except Exception as exc:
-        logger.debug("QuantDB 视图 %s 查询失败（跳过）: %s", view, exc)
-        return {}
-
+    df = _get_hub().fetch_latest_rows(
+        view, symbols, dt=dt, lookback=_DT_LOOKBACK, columns=columns
+    )
     if df.empty:
         return {}
     return {str(row["symbol"]): dict(row) for _, row in df.iterrows()}

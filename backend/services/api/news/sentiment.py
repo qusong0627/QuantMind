@@ -32,9 +32,121 @@ DEVICE = int(os.getenv("FINBERT_DEVICE", "-1"))
 # 显式设置 NEWS_USE_FINBERT=true/false 可覆盖默认行为。
 _USE_FINBERT_ENV = os.getenv("NEWS_USE_FINBERT", "").strip().lower()
 USE_FINBERT = _USE_FINBERT_ENV == "true" if _USE_FINBERT_ENV else DEVICE >= 0
+
+# 运行时开关持久化：/data/finbert/enabled（bind 到宿主 /opt/quantmind/data，重启不丢）
+_RUNTIME_TOGGLE_PATH = os.getenv("FINBERT_TOGGLE_PATH", "/data/finbert/enabled")
+_RUNTIME_OVERRIDE: bool | None = None  # 内存缓存，API 写入后即时生效，无需重启
+_RUNTIME_MTIME: float = 0.0
 # 加载失败后的重试冷却（秒）：transformers 依赖补齐 / 网络恢复后能自动生效，
 # 而不是一次失败永久锁死到下次进程重启
 _RETRY_AFTER = float(os.getenv("FINBERT_RETRY_AFTER", "300"))
+# 运行时开关持久化辅助
+def _read_runtime_toggle() -> bool | None:
+    """从持久化文件读取开关，缺失或非法返回 None（回退到环境变量）。"""
+    global _RUNTIME_MTIME
+    try:
+        from pathlib import Path
+
+        p = Path(_RUNTIME_TOGGLE_PATH)
+        if not p.is_file():
+            return None
+        # 轻量 mtime 缓存：同秒内不重复读
+        try:
+            mtime = p.stat().st_mtime
+            if mtime == _RUNTIME_MTIME and _RUNTIME_OVERRIDE is not None:
+                return _RUNTIME_OVERRIDE
+        except Exception:
+            pass
+        raw = p.read_text(encoding="utf-8").strip().lower()
+        if raw in ("1", "true", "yes", "on"):
+            try:
+                _RUNTIME_MTIME = p.stat().st_mtime
+            except Exception:
+                pass
+            return True
+        if raw in ("0", "false", "no", "off"):
+            try:
+                _RUNTIME_MTIME = p.stat().st_mtime
+            except Exception:
+                pass
+            return False
+        return None
+    except Exception:
+        return None
+
+
+def is_model_installed() -> bool:
+    """模型是否已离线安装（目录存在且含权重）。未安装时直接关闭，不做后台扫描。"""
+    try:
+        from pathlib import Path
+
+        p = Path(DEFAULT_MODEL)
+        if not p.is_dir():
+            return False
+        if not (p / "config.json").is_file():
+            return False
+        for name in ("model.safetensors", "pytorch_model.bin", "model.bin", "model.onnx"):
+            if (p / name).is_file():
+                return True
+        return False
+    except Exception:
+        return False
+
+
+def is_finbert_enabled() -> bool:
+    """当前是否启用 FinBERT（含运行时文件开关，优先于环境变量）。未安装时一律视为关闭。"""
+    if not is_model_installed():
+        return False
+    if _RUNTIME_OVERRIDE is not None:
+        return _RUNTIME_OVERRIDE
+    file_val = _read_runtime_toggle()
+    if file_val is not None:
+        return file_val
+    return USE_FINBERT
+
+
+def set_finbert_enabled(enabled: bool) -> bool:
+    """设置运行时开关并持久化到文件，即时生效，无需重启。未安装时拒绝开启。"""
+    global _RUNTIME_OVERRIDE, _RUNTIME_MTIME
+    if enabled and not is_model_installed():
+        logger.warning("FinBERT 模型未安装（%s 缺失），拒绝开启", DEFAULT_MODEL)
+        return False
+    _RUNTIME_OVERRIDE = bool(enabled)
+    try:
+        from pathlib import Path
+
+        p = Path(_RUNTIME_TOGGLE_PATH)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("true" if enabled else "false", encoding="utf-8")
+        try:
+            _RUNTIME_MTIME = p.stat().st_mtime
+        except Exception:
+            pass
+        logger.info("FinBERT 运行时开关已%s", "开启" if enabled else "关闭")
+        # 开启时若模型未加载则触发后台加载
+        if enabled:
+            _ensure_loading()
+        return True
+    except Exception as exc:
+        logger.warning("FinBERT 开关持久化失败: %s", exc)
+        return False
+
+
+def get_finbert_status() -> dict:
+    """供管理后台查询的完整状态。"""
+    return {
+        "enabled": is_finbert_enabled(),
+        "env_enabled": USE_FINBERT,
+        "device": DEVICE,
+        "model": DEFAULT_MODEL,
+        "installed": is_model_installed(),
+        "model_ready": _model_ready,
+        "model_failed": _model_failed,
+        "override": _RUNTIME_OVERRIDE,
+        "toggle_path": _RUNTIME_TOGGLE_PATH,
+    }
+
+
 # 模型加载在后台线程进行，避免阻塞第一个 enrich 任务几十秒
 _MODEL_LOAD_THREAD = None
 
@@ -91,10 +203,10 @@ def _try_load() -> None:
 def _ensure_loading() -> None:
     """确保模型在后台线程加载中（幂等，并发安全）。"""
     global _MODEL_LOAD_THREAD, _model_failed
-    if _model_ready or not USE_FINBERT:
+    if _model_ready or not is_finbert_enabled():
         return
     with _model_lock:
-        if _model_ready or not USE_FINBERT:
+        if _model_ready or not is_finbert_enabled():
             return
         # 失败后冷却期内不重试
         if _model_failed and time.monotonic() - _last_fail_at < _RETRY_AFTER:
@@ -113,7 +225,7 @@ def _load_worker() -> None:
 
 def score(text: str) -> Tuple[str | None, float | None]:
     """返回 (label, confidence)。模型未就绪/失败返回 (None, None)。"""
-    if not USE_FINBERT:
+    if not is_finbert_enabled():
         return None, None
     if not _model_ready:
         _ensure_loading()  # 后台启动加载，本次先返回 None（用字典法兜底）
@@ -141,7 +253,7 @@ def score_batch(texts: list[str]) -> list[tuple[str | None, float | None]]:
 
     输入顺序与输出一一对应；空文本及模型未就绪/失败时对应位置返回 (None, None)。
     """
-    if not USE_FINBERT or not texts:
+    if not is_finbert_enabled() or not texts:
         return [(None, None)] * len(texts)
     if not _model_ready:
         _ensure_loading()

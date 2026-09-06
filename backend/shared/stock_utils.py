@@ -2,19 +2,18 @@ import re
 from typing import Optional
 
 class StockCodeUtil:
-    """股票代码标准化工具类。
+    """股票代码标准化工具类（分层口径，禁止跨层混用）。
 
-    QuantMind 规范格式: suffix 型 600036.SH
-    - suffix 格式 (600036.SH) 为唯一规范格式，所有新代码应使用此格式
-    - prefix 格式 (SH600036) 保留向后兼容，新代码不应使用
-    - qlib 格式 (sh600036) 仅用于 Qlib 迁移桥接
+    - QuantDB parquet / Qlib / 行情数据层: suffix 型 600036.SH
+      （Qlib 桥接用全小写 sh600036，见 to_qlib）
+    - PG 数据库字段 / Redis 键 / 前端 / Strategy Lab SDK / 大多数 API: prefix 型 SH600036
+    - 层边界必须经本工具显式转换（to_suffix / to_prefix / to_qlib），禁止散落手写切片；
+      suffix 与 prefix 混用查询会静默查空。
     """
 
     @staticmethod
     def to_suffix(code: str) -> str:
-        """转换为规范 suffix 格式 600036.SH
-
-        这是 QuantMind 的唯一规范格式，所有新代码应优先使用。
+        """转换为 suffix 格式 600036.SH（QuantDB parquet / Qlib / 行情层口径）。
 
         Examples:
             - 'SH600000' -> '600000.SH'
@@ -53,7 +52,7 @@ class StockCodeUtil:
 
     @staticmethod
     def to_prefix(code: str) -> str:
-        """转换为 prefix 格式 SH600000 (向后兼容，新代码请用 to_suffix)
+        """转换为 prefix 格式 SH600000（PG / Redis / 前端 / API 层口径）。
 
         Examples:
             - '600000.SH' -> 'SH600000'
@@ -139,5 +138,5 @@ class StockCodeUtil:
 
     @staticmethod
     def normalize_list(codes: list[str]) -> list[str]:
-        """批量标准化为 suffix 格式（规范格式）"""
+        """批量标准化为 suffix 格式（QuantDB 层口径）"""
         return [StockCodeUtil.to_suffix(c) for c in codes if c]

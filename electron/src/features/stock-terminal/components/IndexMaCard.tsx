@@ -56,7 +56,7 @@ export function IndexMaCard({ date }: Props) {
           </div>
         </div>
         <span className={`text-[10px] font-black shrink-0 ${up ? 'text-rose-500' : 'text-emerald-600'}`}>
-          {up ? 'MA20 上方 · 可持仓' : 'MA20 下方 · 观望'}
+          {up ? 'MA20 上方' : 'MA20 下方'}
         </span>
       </div>
 
@@ -84,10 +84,6 @@ export function IndexMaCard({ date }: Props) {
         ))}
       </div>
 
-      {/* 结论文案 */}
-      <span className={`text-[9px] font-bold px-1.5 py-1 rounded-md shrink-0 ${up ? 'bg-rose-50 text-rose-500' : 'bg-emerald-50 text-emerald-600'}`}>
-        {ma.status}
-      </span>
-    </div>
+      </div>
   );
 }

@@ -50,8 +50,8 @@ export const StrategyTemplateModal: React.FC<StrategyTemplateModalProps> = ({
     try {
       // forceRefresh 时绕过 sessionStorage 缓存，直接拉后端最新数据
       const data = forceRefresh
-        ? await strategyTemplateService.refresh(market)
-        : await strategyTemplateService.getTemplates(market);
+        ? await strategyTemplateService.refresh()
+        : await strategyTemplateService.getTemplates();
 
       // 前端兜底排序：按难度排序 (入门 -> 中级 -> 高级)，相同难度按 id 排序
       const difficultyWeight: Record<string, number> = {

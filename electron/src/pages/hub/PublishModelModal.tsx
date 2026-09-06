@@ -38,6 +38,16 @@ export const PublishModelModal: React.FC<PublishModelModalProps> = ({
   const meta = currentModel ? getMeta(currentModel) : null;
   const metrics = currentModel ? getMetrics(currentModel) : null;
 
+  const normalizeTargetMode = (raw?: string) => {
+    const s = String(raw || '').trim().toLowerCase();
+    if (['classification', 'regression', 'ranking'].includes(s)) return s;
+    if (['return', 'continuous', 'value', 'regress'].includes(s)) return 'regression';
+    if (s.includes('rank')) return 'ranking';
+    if (s.includes('class')) return 'classification';
+    if (s.includes('regress')) return 'regression';
+    return 'classification';
+  };
+
   const handlePublish = async () => {
     try {
       const values = await form.validateFields();
@@ -61,8 +71,8 @@ export const PublishModelModal: React.FC<PublishModelModalProps> = ({
         description: values.description,
         market: meta?.market || 'CN',
         algorithm: meta?.algorithm || meta?.model_type || 'CatBoost',
-        target_horizon: meta?.target_horizon || 'T+5',
-        target_mode: meta?.target_mode || 'classification',
+        target_horizon: (meta?.target_horizon || 'T+5').toString().trim() || 'T+5',
+        target_mode: normalizeTargetMode(meta?.target_mode as string),
         test_ic: testIC,
         rank_ic: rankIC,
         sharpe_ratio: sharpe,

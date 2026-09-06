@@ -1018,3 +1018,9 @@ html.platform-win32.os-win10 .module-grid-container {
 .ant-drawer .ant-select .ant-select-selector {
   border-radius: 8px !important;
 }
+
+/* 特征字典搜索框：输入文字与 placeholder 居中对齐 */
+.admin-page .feature-search-center input.ant-input,
+.admin-page .feature-search-center input.ant-input::placeholder {
+  text-align: center;
+}

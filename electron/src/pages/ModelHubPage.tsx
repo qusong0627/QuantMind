@@ -3,7 +3,7 @@ import {
   Award, BarChart3, Clock3, Compass, Download, Filter, RefreshCw,
   Search, Sparkles, Target, ArrowLeft
 } from 'lucide-react';
-import { Input, Button, Select, Tag, Spin, Empty, Pagination, message } from 'antd';
+import { Input, Button, Select, Tag, Spin, Empty, Pagination, Modal, message } from 'antd';
 import { useNavigate } from 'react-router-dom';
 import { clsx } from 'clsx';
 import { modelHubService, HubModelItem } from '../services/modelHubService';
@@ -33,6 +33,9 @@ export const ModelHubPage: React.FC = () => {
   const [showPublishModal, setShowPublishModal] = useState(false);
   const [userModels, setUserModels] = useState<UserModelRecord[]>([]);
   const [importingId, setImportingId] = useState<string | null>(null);
+  // 导入命名确认框：默认填广场公开名（COS 原始命名），允许用户改名
+  const [importTarget, setImportTarget] = useState<HubModelItem | null>(null);
+  const [importName, setImportName] = useState('');
 
   // 加载广场模型列表
   const fetchHubModels = useCallback(async () => {
@@ -77,30 +80,51 @@ export const ModelHubPage: React.FC = () => {
     loadLocalUserModels();
   }, [loadLocalUserModels]);
 
-  // 获取后端签发的下载地址，不再伪造“已导入”结果。
-  const handleImportModel = async (model: HubModelItem) => {
+  // 后端一键导入：下载 COS 包 → 解压 → 注册为本地模型，可直接在“我的模型”中推理
+  // 命名优先级：弹窗输入名 > 广场公开名 > 包内自带名（后端最终裁决）
+  const openImportModal = (model: HubModelItem) => {
+    setImportTarget(model);
+    setImportName(model.name || '');
+  };
+
+  const doImportModel = async (model: HubModelItem, localName?: string) => {
     try {
       setImportingId(model.id);
-      message.loading({ content: `正在获取 "${model.name}" 的下载地址...`, key: 'hub_import' });
+      const showName = (localName || '').trim() || model.name;
+      message.loading({ content: `正在导入 "${showName}" 到本地模型库...`, key: 'hub_import' });
 
-      // 1. 请求下载直链
-      const ticket = await modelHubService.getDownloadTicket(model.id);
-      if (!ticket?.download_url) {
-        throw new Error('未能获取到有效的下载直链');
+      const result = await modelHubService.importRemoteModel(model.id, (localName || '').trim() || undefined);
+      if (!result?.model_id) {
+        throw new Error('导入返回缺少 model_id');
       }
-
-      window.open(ticket.download_url, '_blank', 'noopener,noreferrer');
+      const displayName = (result as any)?.display_name || showName;
 
       message.success({
-        content: `已开始下载 "${model.name}" 的模型包。`,
+        content: result.already_exists
+          ? `模型 "${displayName}" 已存在于本地（${result.model_id}）`
+          : `已导入为本地模型 ${displayName}（${result.model_id}），可在“模型管理”中查看与推理`,
         key: 'hub_import',
-        duration: 4,
+        duration: 5,
       });
 
       // 刷新下载计数
       fetchHubModels();
     } catch (err: any) {
-      message.error({ content: `导入失败: ${err?.message || '未知异常'}`, key: 'hub_import' });
+      const detail = err?.response?.data?.detail || err?.message || '未知异常';
+      // 共享模型尚未发布或包异常时，兜底提供直接下载
+      if (String(detail).includes('下载地址为空') || String(detail).includes('模型包')) {
+        try {
+          const ticket = await modelHubService.getDownloadTicket(model.id);
+          if (ticket?.download_url) {
+            window.open(ticket.download_url, '_blank', 'noopener,noreferrer');
+            message.info({ content: '已为你打开浏览器直接下载模型包', key: 'hub_import' });
+            return;
+          }
+        } catch {
+          // ignore fallback error
+        }
+      }
+      message.error({ content: `导入失败: ${detail}`, key: 'hub_import' });
     } finally {
       setImportingId(null);
     }
@@ -187,17 +211,20 @@ export const ModelHubPage: React.FC = () => {
               <span>筛选:</span>
             </div>
 
-            {/* 市场过滤 */}
+            {/* 市场过滤（与 OSS 6 市场一致） */}
             <Select
               size="small"
               value={selectedMarket}
               onChange={(v) => { setSelectedMarket(v); setPage(1); }}
-              className="min-w-28 font-medium"
+              className="min-w-32 font-medium"
               options={[
                 { value: 'ALL', label: '全部市场' },
                 { value: 'CN', label: 'A股市场' },
                 { value: 'US', label: '美股市场' },
                 { value: 'HK', label: '港股市场' },
+                { value: 'CRYPTO', label: '加密市场' },
+                { value: 'FUTURES', label: '期货市场' },
+                { value: 'CUSTOM', label: '自定义市场' },
               ]}
             />
 
@@ -298,7 +325,7 @@ export const ModelHubPage: React.FC = () => {
                     setSelectedModelForDetail(m);
                     setShowDetailDrawer(true);
                   }}
-                  onImport={handleImportModel}
+                  onImport={openImportModal}
                   onLike={handleLike}
                   importing={importingId === model.id}
                 />
@@ -333,9 +360,40 @@ export const ModelHubPage: React.FC = () => {
           setShowDetailDrawer(false);
           setSelectedModelForDetail(null);
         }}
-        onImport={handleImportModel}
+        onImport={openImportModal}
         importing={importingId === selectedModelForDetail?.id}
       />
+
+      {/* ═══ 导入命名确认框 ═══ */}
+      <Modal
+        title={<span className="font-black text-slate-800">导入模型到本地</span>}
+        open={!!importTarget}
+        onCancel={() => setImportTarget(null)}
+        okText="确认导入"
+        cancelText="取消"
+        confirmLoading={!!importTarget && importingId === importTarget.id}
+        onOk={() => {
+          if (importTarget) {
+            const t = importTarget;
+            setImportTarget(null);
+            void doImportModel(t, importName);
+          }
+        }}
+      >
+        <p className="text-xs text-slate-500 mb-2">
+          广场公开名：<span className="font-bold text-slate-700">{importTarget?.name}</span>
+        </p>
+        <Input
+          value={importName}
+          onChange={(e) => setImportName(e.target.value)}
+          placeholder="本地展示名（默认使用广场公开名）"
+          maxLength={64}
+          className="rounded-xl"
+        />
+        <p className="text-[11px] text-slate-400 mt-2 !mb-0">
+          留空则直接使用广场公开名；本地 model_id 将自动生成可读 slug。
+        </p>
+      </Modal>
 
       {/* ═══ 发布模型弹窗 ═══ */}
       <PublishModelModal

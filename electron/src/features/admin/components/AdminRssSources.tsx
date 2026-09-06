@@ -306,13 +306,16 @@ export const AdminRssSources: React.FC = () => {
       dataIndex: 'subscribeUrl',
       key: 'subscribeUrl',
       ellipsis: true,
-      render: (u) => (
-        <Tooltip title={u}>
-          <Text type="secondary" copyable={{ tooltips: ['复制链接', '已复制'] }} ellipsis style={{ maxWidth: 360 }}>
-            {u}
-          </Text>
-        </Tooltip>
-      ),
+      render: (_: any, row: any) => {
+        const u = row?.subscribeUrl || row?.subscribe_url || row?.url || '';
+        return (
+          <Tooltip title={u || '暂无地址'}>
+            <Text type="secondary" copyable={u ? { tooltips: ['复制链接', '已复制'], text: u } : undefined} ellipsis style={{ maxWidth: 360 }}>
+              {u || <span style={{ color: '#94a3b8' }}>—</span>}
+            </Text>
+          </Tooltip>
+        );
+      },
     },
     {
       title: '所属分类',

@@ -13,7 +13,7 @@ export const IntelligenceAlertsCard: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [alerts, setAlerts] = useState<Alert[]>([
     { type: 'risk', message: '中国平安波动率异常', time: '14:25', priority: 'high' },
-    { type: 'opportunity', message: '发现买入机会：招商银行', time: '14:20', priority: 'medium' },
+    { type: 'opportunity', message: '招商银行：多因子分数回升', time: '14:20', priority: 'medium' },
     { type: 'strategy', message: 'AI策略A收益率达到预期', time: '14:15', priority: 'low' },
     { type: 'market', message: '沪深300突破阻力位', time: '14:10', priority: 'medium' }
   ]);

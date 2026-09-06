@@ -147,10 +147,13 @@ def test_market_source_mapping_and_defaults():
     assert normalize_market("hk") == "HK"
     assert normalize_market("A_SHARE") == "CN"
     assert normalize_market(None) == "CN"
+    assert normalize_market("custom") == "CUSTOM"
     assert sources_for_market("HK") == ["l1_factors", "ccass_factors", "south_factors"]
     assert sources_for_market("US") == ["l1_factors"]
+    assert sources_for_market("CUSTOM") == ["l1_factors"]
     assert default_source_for("HK") == "l1_factors"
     assert default_source_for("CN") == "l1_factors"
+    assert default_source_for("CUSTOM") == "l1_factors"
 
 
 def test_hk_l1_dt_date_alias_ready_and_read(tmp_path):
@@ -189,3 +192,24 @@ def test_secondary_source_without_donor_is_not_ready(tmp_path):
     assert set(status.missing_required) == set(
         ("open", "high", "low", "close", "volume", "amount")
     )
+
+
+# ── 自定义市场：仅扫描因子，不强制 OHLCV ──────────────────────────────────────
+
+
+def test_custom_market_scan_only_without_ohlcv(tmp_path):
+    _write_factor_partition(
+        tmp_path,
+        "l1_factors",
+        pd.DataFrame(
+            {"symbol": ["MY001", "MY002"], "date": ["2024-01-02", "2024-01-02"], "my_alpha": [1.0, 2.0]}
+        ),
+        "20240102",
+    )
+    # 同一份无 OHLCV 数据：CN 口径拒绝，CUSTOM 口径仅扫描即 ready
+    with pytest.raises(QuantDBFactorError, match="not ready"):
+        QuantDBFactorReader(tmp_path).assert_ready("l1_factors")
+    status = QuantDBFactorReader(tmp_path, market="CUSTOM").describe("l1_factors")
+    assert status.ready
+    assert status.missing_required == []
+    assert "my_alpha" in status.columns

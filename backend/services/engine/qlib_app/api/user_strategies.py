@@ -33,7 +33,6 @@ except ImportError:
 from backend.services.engine.qlib_app.services.strategy_templates import (
     get_all_templates,
     invalidate_templates_cache,
-    template_applies_to_market,
 )
 from backend.services.engine.qlib_app.utils.structured_logger import StructuredTaskLogger
 
@@ -136,7 +135,6 @@ async def _trigger_inference_after_activate(*, strategy_id: str, tenant_id: str,
             user_id=user_id,
             strategy_id=strategy_id,
             redis_client=redis,
-            market=market,
         )
         StructuredTaskLogger(
             logger,
@@ -283,82 +281,21 @@ async def _fetch_latest_backtest_summaries(user_id: str, tenant_id: str) -> dict
 async def _perform_sync(user_id: str):
     """
     执行模板同步的内部逻辑：将内置模板同步到用户的个人策略数据库。
+    统一管理：仅通过 StrategyStorageService 写入，禁止直连 SQL；去重键为 strategy_type==template.id。
     同步 DB 操作通过 asyncio.to_thread 避免阻塞事件循环。
     """
     svc = get_strategy_storage_service()
-    from sqlalchemy import text
-
-    from backend.shared.strategy_storage import _ensure_int_user_id, get_db
-
-    # 彻底清理残留：如果用户已有"抗下行 Alpha 策略"，则将其移除
-    # 避免因名称冲突导致的新模板(多空TopK)无法同步
-    def _cleanup_old_templates():
-        try:
-            uid_int = _ensure_int_user_id(user_id)
-            with get_db() as session:
-                session.execute(
-                    text("DELETE FROM strategies WHERE user_id = :uid AND name = '抗下行 Alpha 策略'"), {"uid": uid_int}
-                )
-                session.execute(
-                    text("DELETE FROM strategies WHERE user_id = :uid AND parameters->>'strategy_type' = 'downside_alpha'"),
-                    {"uid": uid_int},
-                )
-                session.commit()
-            return True
-        except Exception:
-            return False
-
-    cleanup_ok = await asyncio.to_thread(_cleanup_old_templates)
-    if cleanup_ok:
-        StructuredTaskLogger(logger, "user-strategies", {"user_id": user_id}).info(
-            "sync_cleanup", "清理旧模板", strategy="抗下行 Alpha 策略/downside_alpha"
-        )
-    else:
-        StructuredTaskLogger(logger, "user-strategies", {"user_id": user_id}).warning(
-            "sync_cleanup_failed", "Failed to cleanup obsolete strategy in sync"
-        )
 
     templates = get_all_templates()
     synced_count = 0
-    retagged_count = 0
-
-    def _retag_hk(name: str) -> bool:
-        """给历史同步但缺 market 标记的港股模板补打 HK 标（幂等，SQL 带守卫）。"""
-        try:
-            uid_int = _ensure_int_user_id(user_id)
-            with get_db() as session:
-                session.execute(
-                    text(
-                        "UPDATE strategies "
-                        "SET parameters = jsonb_set(parameters, '{market}', '\"HK\"', true) "
-                        "WHERE user_id = :uid AND name = :name "
-                        "AND (parameters->>'market' IS NULL)"
-                    ),
-                    {"uid": uid_int, "name": name},
-                )
-                session.commit()
-            return True
-        except Exception:
-            return False
-
     for t in templates:
-        # 检查是否已存在同名策略 (同步 DB 调用，放线程池)
-        existing = await asyncio.to_thread(svc.list, user_id=user_id, search=t.name)
-        match = next((s for s in existing if s["name"] == t.name), None)
-        is_hk_only = bool(t.markets and "hong_kong" in t.markets and "a_share" not in t.markets)
-
-        if match is not None:
-            # 旧库补标：历史同步的港股模板可能缺 market 标记，会混进 A 股策略库视图。
-            # SQL 内带 (parameters->>'market' IS NULL) 守卫，幂等可重复执行。
-            if is_hk_only and await asyncio.to_thread(_retag_hk, t.name):
-                retagged_count += 1
+        # 去重：按 parameters.strategy_type == template.id 判重，避免同名误判
+        existing = await asyncio.to_thread(svc.list, user_id=user_id)
+        if any((s.get("parameters") or {}).get("strategy_type") == t.id for s in existing):
             continue
-
-        params = {"strategy_type": t.id, "topk": 50, "signal": "<PRED>"}
-        # 市场专属模板（strategy_templates/*.json markets 字段）标注市场，
-        # 港股模板写 market=HK 供策略库按市场过滤；A 股（markets 为空）不写 = 现状
-        if is_hk_only:
-            params["market"] = "HK"
+        # 兼容旧数据：同名已存在也跳过，避免重复克隆
+        if any(s.get("name") == t.name for s in existing):
+            continue
 
         await svc.save(
             user_id=user_id,
@@ -369,14 +306,10 @@ async def _perform_sync(user_id: str):
                 "tags": [t.category, t.difficulty, "SystemSync"],
                 "status": "ACTIVE",
                 "is_verified": True,
-                "parameters": params,
+                "parameters": {"strategy_type": t.id, "topk": 50, "signal": "<PRED>"},
             },
         )
         synced_count += 1
-    if retagged_count:
-        StructuredTaskLogger(logger, "user-strategies", {"user_id": user_id}).info(
-            "sync_retag", f"为 {retagged_count} 个历史同步的港股模板补打市场标记"
-        )
     return synced_count
 
 
@@ -478,7 +411,6 @@ async def list_user_strategies(
     category: str | None = Query(None),
     search: str | None = Query(None),
     tags: str | None = Query(None),
-    market: str | None = Query(None, description="按市场过滤策略列表（A/CN/HK/US...；缺省不过滤）"),
 ):
     """获取当前用户的策略列表。如果是新用户则自动初始化模板。"""
     try:
@@ -490,14 +422,7 @@ async def list_user_strategies(
         tag_list = tags.split(",") if tags else None
         tenant_id = _get_tenant_id(request)
 
-        items = await asyncio.to_thread(
-            svc.list, user_id=user_id, category=category, search=search, tags=tag_list, market=market
-        )
-
-        # 港股无市场专属模板：市场过滤时跳过自动同步（避免给港股用户灌 A 股模板）
-        if not items and not search and not tags and market not in ("HK", "hk"):
-            await _perform_sync(user_id)
-            items = await asyncio.to_thread(svc.list, user_id=user_id, market=market)
+        items = await asyncio.to_thread(svc.list, user_id=user_id, category=category, search=search, tags=tag_list)
 
         backtest_summaries = await _fetch_latest_backtest_summaries(user_id=user_id, tenant_id=tenant_id)
         trading_status = await _fetch_real_trading_status(request)
@@ -599,6 +524,8 @@ async def list_user_strategies(
                     last_signal_at=summary.get("created_at"),
                     execution_latency_ms=execution_latency_ms,
                     parameters=item.get("parameters") or {},
+                    category=item.get("tags", [None])[0] if item.get("tags") and item.get("is_system") else "db_stored",
+                    is_system=bool(item.get("is_system", False)),
                 )
             )
 
@@ -703,20 +630,11 @@ async def update_strategy(strategy_id: str, request: Request, body: StrategyUpda
 
 
 @router.get("/templates")
-async def list_strategy_templates(
-    response: Response,
-    market: str | None = Query(None, description="按市场过滤模板（CN/A/HK/US/CRYPTO；缺省返回全部，向后兼容）"),
-):
-    """获取预置策略模板（动态从 strategy_templates/ 目录加载，可按市场过滤）。
-
-    market 缺省时返回全部模板；传 market 时按模板 markets 标记匹配
-    （无标记的历史 A 股模板仅出现在 CN/A 视图，避免港股模板混入 A 股选择器）。
-    """
+async def list_strategy_templates(response: Response):
+    """获取所有预置策略模板（动态从 strategy_templates/ 目录加载）。"""
     # 与后端 TTL 对齐，告知客户端最多缓存 60s
     response.headers["Cache-Control"] = "max-age=60, public"
     templates = await asyncio.to_thread(get_all_templates)
-    if market:
-        templates = [t for t in templates if template_applies_to_market(t, market)]
     return {"templates": [t.model_dump() for t in templates]}
 
 

@@ -394,6 +394,39 @@ async def get_dashboard_metrics(
             health_score, services = await _collect_system_health()
             uptime_days = _get_uptime_days(request)
 
+            # 最近事件：从 system_events 取最新 8 条供前端时间线
+            recent_events: list[dict] = []
+            try:
+                ev_rows = await session.execute(
+                    text(
+                        """
+                        SELECT title, level, created_at
+                        FROM system_events
+                        ORDER BY created_at DESC, id DESC
+                        LIMIT 8
+                        """
+                    )
+                )
+                for r in ev_rows.mappings().all():
+                    ts = r.get("created_at")
+                    # 前端期望 time 为可读字符串，type 映射 level
+                    lvl = str(r.get("level") or "info")
+                    type_map = {"info": "success", "warning": "warning", "error": "warning", "critical": "warning"}
+                    recent_events.append(
+                        {
+                            "title": r.get("title") or "",
+                            "time": ts.strftime("%Y-%m-%d %H:%M") if hasattr(ts, "strftime") else str(ts or ""),
+                            "type": type_map.get(lvl, "info"),
+                        }
+                    )
+            except Exception as exc:
+                logger.warning("Admin dashboard recent_events query skipped: %s", exc)
+                try:
+                    await session.rollback()
+                except Exception:
+                    pass
+                recent_events = []
+
             data = {
                 "users": {
                     "total": user_row.get("total") or 0,
@@ -409,6 +442,7 @@ async def get_dashboard_metrics(
                     "total": model_row.get("total") or 0,
                 },
                 "system": _build_system_metrics(health_score, uptime_days, services),
+                "recent_events": recent_events,
             }
         return ApiResponse(success=True, code=200, message="获取成功", data=data)
     except Exception as e:
@@ -426,6 +460,7 @@ async def get_dashboard_metrics(
                 "strategies": {"total": 0, "live": 0, "backtesting": 0},
                 "models": {"total": 0},
                 "system": _build_system_metrics(health_score, uptime_days, services),
+                "recent_events": [],
             },
         )
 

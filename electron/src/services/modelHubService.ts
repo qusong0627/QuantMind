@@ -205,11 +205,24 @@ class ModelHubService {
   }
 
   /**
-   * 获取下载直链
+   * 获取下载直链（仅作备用；常规导入应走后端 importRemoteModel 落库）
    */
   async getDownloadTicket(modelId: string): Promise<DownloadTicketResponse> {
     const resp = await this.axiosInstance.get(`/api/v1/hub/models/${modelId}/download-ticket`);
     return resp.data;
+  }
+
+  /**
+   * 从广场导入模型为本地模型（后端下载 COS 包 → 解压 → 注册到 qm_user_models）
+   */
+  async importRemoteModel(
+    hubModelId: string,
+    localName?: string,
+  ): Promise<{ success: boolean; model_id: string; display_name?: string; storage_path: string; model_file: string; already_exists?: boolean }> {
+    return this.gatewayWrite('post', '/hub/import-remote', {
+      hub_model_id: hubModelId,
+      ...(localName ? { local_name: localName } : {}),
+    });
   }
 
   /**

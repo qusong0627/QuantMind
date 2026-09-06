@@ -1,6 +1,6 @@
 // 服务状态检测服务
 import axios from 'axios';
-import { SERVICE_PORTS, getDynamicServerUrl } from '../config/services';
+import { SERVICE_PORTS, getDynamicServerUrl, isElectronEnv } from '../config/services';
 
 export interface ServiceStatus {
   name: string;
@@ -42,13 +42,19 @@ class StatusService {
   // 检测单个服务状态
   private async checkServiceStatus(port: number, path: string = '/'): Promise<ServiceStatus> {
     const startTime = Date.now();
-    const dynamicUrl = getDynamicServerUrl();
-    const baseUrl = dynamicUrl || `http://localhost:${port}`;
-    
-    // 确保 URL 包含协议，且避免重复端口（如果 dynamicUrl 已经包含了端口）
-    const finalUrl = baseUrl.startsWith('http') 
-      ? `${baseUrl.replace(/\/+$/, '')}${path}`
-      : `http://${baseUrl.replace(/\/+$/, '')}${path}`;
+    // Web 端无按端口直连概念（统一经 Nginx /api/ 反代），用相对路径探测网关即可，
+    // 避免 axios 直连 localhost/127.0.0.1:8000 刷屏 ERR_CONNECTION_REFUSED
+    const finalUrl = !isElectronEnv()
+      ? '/api/v1/health'
+      : (() => {
+        const dynamicUrl = getDynamicServerUrl();
+        const baseUrl = dynamicUrl || `http://localhost:${port}`;
+
+        // 确保 URL 包含协议，且避免重复端口（如果 dynamicUrl 已经包含了端口）
+        return baseUrl.startsWith('http')
+          ? `${baseUrl.replace(/\/+$/, '')}${path}`
+          : `http://${baseUrl.replace(/\/+$/, '')}${path}`;
+      })();
 
     try {
       const response = await axios.get(finalUrl, {

@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Button, Card, Divider, Checkbox, Tag, Empty, Typography } from 'antd';
+import { Button, Card, Divider, Checkbox, Tag, Empty, Typography, Tooltip } from 'antd';
 import { Database, ShieldCheck, ChevronRight, Lock } from 'lucide-react';
 import { clsx } from 'clsx';
 import { AnimatePresence, motion } from 'framer-motion';
@@ -172,7 +172,7 @@ export const FeatureSelector: React.FC<FeatureSelectorProps> = ({
                             const value = feature.key;
                             const isMandatory = TRAINING_BASE_FEATURES.includes(value);
                             const checked = isMandatory || selectedFeatures.includes(value);
-                            return (
+                            const tile = (
                               <div
                                 key={value}
                                 className={clsx(
@@ -203,6 +203,11 @@ export const FeatureSelector: React.FC<FeatureSelectorProps> = ({
                                 </div>
                               </div>
                             );
+                            return feature.explanation ? (
+                              <Tooltip key={value} title={feature.explanation} placement="topLeft" mouseEnterDelay={0.4}>
+                                {tile}
+                              </Tooltip>
+                            ) : tile;
                           })}
                         </div>
                       </div>

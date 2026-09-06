@@ -119,6 +119,7 @@ PY
 COPY docker/training/train.py /app/train.py
 COPY docker/training/preprocessing.py /app/preprocessing.py
 COPY docker/training/parallel_utils.py /app/parallel_utils.py
+COPY docker/training/model_trainers /app/model_trainers
 
 # 复制源代码
 COPY backend backend

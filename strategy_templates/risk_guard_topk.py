@@ -24,6 +24,5 @@ STRATEGY_CONFIG = {
         "f_ma_gap_20_min": -0.12,
         "f_pe_ttm_min": 0.0,
         "f_pe_ttm_max": 80.0,
-        "market_state_symbol": "SH000300",
     }
 }

@@ -41,12 +41,14 @@ DEFAULT_FACTOR_SOURCE: FactorSource = "l1_factors"
 
 # ── 市场 → 可用因子源映射（后台「模型训练数据集」与训练页数据源选择共用）───────
 # 各市场 6_ml_datasets/ 下实际存在的训练直读数据集。
+# CUSTOM 为用户自传市场：仅做因子扫描，不强制 OHLCV 完备性（见 describe）。
 MARKET_FACTOR_SOURCES: dict[str, tuple[FactorSource, ...]] = {
     "CN": ("l1_factors", "l2_factors", "l1_l2_factors", "alpha_library"),
     "HK": ("l1_factors", "ccass_factors", "south_factors"),
     "US": ("l1_factors",),
     "CRYPTO": ("l1_factors",),
     "FUTURES": ("l1_factors",),
+    "CUSTOM": ("l1_factors",),
 }
 
 # ── 6_ml_datasets 下不参与训练直读的目录（“刷新字段”自动发现时排除）─────────────
@@ -65,6 +67,7 @@ DEFAULT_FACTOR_SOURCE_BY_MARKET: dict[str, FactorSource] = {
     "US": "l1_factors",
     "CRYPTO": "l1_factors",
     "FUTURES": "l1_factors",
+    "CUSTOM": "l1_factors",
 }
 # 各市场数据根目录环境变量（容器内路径，本地编排器挂载后亦可见）
 MARKET_DATA_DIR_ENV: dict[str, str] = {
@@ -73,6 +76,7 @@ MARKET_DATA_DIR_ENV: dict[str, str] = {
     "US": "QM_QUANTUS_DATA_DIR",
     "CRYPTO": "QM_QUANTBC_DATA_DIR",
     "FUTURES": "QM_QUANTFUTURES_DATA_DIR",
+    "CUSTOM": "QM_QUANTCUSTOM_DATA_DIR",
 }
 MARKET_DATA_DIR_DEFAULT: dict[str, str] = {
     "CN": "/data/quantdb",
@@ -80,6 +84,7 @@ MARKET_DATA_DIR_DEFAULT: dict[str, str] = {
     "US": "/data/quantus",
     "CRYPTO": "/data/quantbc",
     "FUTURES": "/data/quantfutures",
+    "CUSTOM": "/data/quantcustom",
 }
 # 次要因子源（ccass/south 等）不含 OHLCV，标签构建所需的行情列由同目录
 # l1_factors 补给（各市场 l1_factors 均带 OHLCV）。
@@ -177,6 +182,9 @@ class QuantDBFactorReader:
             self.data_dir = Path(data_dir)
         else:
             self.data_dir = market_data_dir(market)
+        # 仅扫描模式判定用：CUSTOM 市场只扫描因子列，不强制 OHLCV。
+        # 显式传 data_dir 且未传 market 时保持 CN 口径（历史行为不变）。
+        self.market = normalize_market(market) if market is not None else "CN"
 
     def validate_source(self, source: str) -> str:
         """校验并放行因子数据集名。
@@ -324,7 +332,11 @@ class QuantDBFactorReader:
 
         schema_hash = hashlib.sha256("\n".join(columns).encode()).hexdigest()
         missing = [column for column in REQUIRED_COLUMNS if column not in columns]
-        if "date" in missing and ("dt" in columns or "time" in columns):
+        if self.market == "CUSTOM":
+            # 自定义市场（用户自传数据）：仅扫描因子列，不强制 OHLCV 完备性。
+            # 有分区文件即 ready；标签构建仍需数据源自带 close 列，否则训练时按缺列报错。
+            missing = []
+        elif "date" in missing and ("dt" in columns or "time" in columns):
             missing.remove("date")  # dt 分区列或 time 列即日期（HK l1_factors/alpha_library 无 date 列）
         reason = None
         if missing and set(missing) <= set(OHLCV_COLUMNS):

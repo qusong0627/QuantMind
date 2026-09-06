@@ -15,6 +15,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 TRAIN_SCRIPT = ROOT / "docker" / "training" / "train.py"
+# P2 拆包：select_top_factors 及报告组装已迁入 data/factor_selection.py，
+# 函数级断言读新家；写入 metadata 的 count 断言仍读 train.py（main 未动）。
+FACTOR_SELECTION_PY = ROOT / "docker" / "training" / "data" / "factor_selection.py"
 ADMIN_TRAINING_UTILS = ROOT / "backend" / "services" / "api" / "routers" / "admin" / "admin_training_utils.py"
 
 if str(ROOT) not in sys.path:
@@ -37,7 +40,7 @@ def _load_module_safe(rel_path: str, alias: str):
 
 
 def test_select_top_factors_returns_structured_report() -> None:
-    source = TRAIN_SCRIPT.read_text(encoding="utf-8")
+    source = FACTOR_SELECTION_PY.read_text(encoding="utf-8")
 
     # 函数签名：返回 (selected, report) 二元组
     assert "def select_top_factors(" in source
@@ -52,7 +55,7 @@ def test_select_top_factors_returns_structured_report() -> None:
 
 
 def test_every_feature_reports_an_explicit_reason() -> None:
-    source = TRAIN_SCRIPT.read_text(encoding="utf-8")
+    source = FACTOR_SELECTION_PY.read_text(encoding="utf-8")
     # 每个特征必须有 status + reason（入选或明确淘汰原因），不允许空洞
     assert '"status": "selected" if feat in selected_set else "rejected"' in source
     assert '"reason": "通过全部筛选" if feat in selected_set else' in source
@@ -61,12 +64,13 @@ def test_every_feature_reports_an_explicit_reason() -> None:
 
 
 def test_selection_report_is_logged_and_persisted_to_metadata() -> None:
-    source = TRAIN_SCRIPT.read_text(encoding="utf-8")
+    source = FACTOR_SELECTION_PY.read_text(encoding="utf-8")
     # 漏斗摘要日志（非空洞）
     assert "def _log_factor_selection_summary(report: dict[str, Any]) -> None:" in source
     assert "Factor selection funnel:" in source
     # 报告写入结果元数据（两个 metadata dict：多模型 + 单模型）
-    assert source.count('"factor_selection": factor_selection_report') >= 2
+    train_source = TRAIN_SCRIPT.read_text(encoding="utf-8")
+    assert train_source.count('"factor_selection": factor_selection_report') >= 2
 
 
 def test_factor_selection_thresholds_forwarded_to_train_script() -> None:

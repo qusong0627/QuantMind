@@ -2,7 +2,6 @@
 
 import React, { useState } from 'react';
 import { ANALYST_SECTIONS, type AnalysisProgress } from '../types';
-import { SignalCard } from './SignalCard';
 
 interface ReportViewerProps {
   progress: AnalysisProgress;
@@ -20,14 +19,6 @@ export const ReportViewer: React.FC<ReportViewerProps> = ({ progress }) => {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
-      {/* Signal Card */}
-      <SignalCard
-        signal={progress.signal || 'HOLD'}
-        ticker={progress.ticker}
-        tradeDate={progress.trade_date}
-        elapsed={progress.elapsed}
-      />
-
       {/* Stats */}
       <div style={{
         display: 'flex',

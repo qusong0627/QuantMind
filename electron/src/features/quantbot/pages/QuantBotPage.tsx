@@ -13,9 +13,31 @@ import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react'
 import { Bot, RefreshCw, Wifi, WifiOff, ExternalLink, AlertTriangle } from 'lucide-react';
 import { isElectronEnv, SERVICE_URLS } from '../../../config/services';
 
-const QWENPAW_UI_PATH = '/api/v1/qwenpaw-ui/';
 /** 无任何服务器配置时的兜底地址（QwenPaw 容器宿主映射端口） */
 const QWENPAW_LOCAL_FALLBACK_URL = 'http://127.0.0.1:8088/';
+
+/** QwenPaw 直连 Web UI 端口（服务器上 qwenpaw 容器的宿主映射端口） */
+const QWENPAW_DIRECT_PORT = 8088;
+
+/**
+ * 推导 QwenPaw 直连 Web UI 地址（供“在外部浏览器打开”使用）。
+ * 基于已配置的 API 网关地址（如 http://1.2.3.4:8000）取同名主机、换到 8088 端口，
+ * 直接打开 qwenpaw 容器自身托管的界面；未配置网关时回退本机。
+ */
+export function getQwenPawDirectUrl(): string {
+  const gateway = SERVICE_URLS.API_GATEWAY;
+  if (!gateway) return QWENPAW_LOCAL_FALLBACK_URL;
+  try {
+    const u = new URL(gateway);
+    u.port = String(QWENPAW_DIRECT_PORT);
+    u.pathname = '/';
+    u.search = '';
+    u.hash = '';
+    return u.toString();
+  } catch {
+    return `${gateway.replace(/\/+$/, '')}:${QWENPAW_DIRECT_PORT}/`;
+  }
+}
 
 /** iframe 加载超时时间（毫秒） */
 const IFRAME_LOAD_TIMEOUT_MS = 15_000;
@@ -29,18 +51,17 @@ const QuantBotPage: React.FC = () => {
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const embedUrl = useMemo(() => {
-    // Web 环境：页面由服务器（Nginx 等）托管，QwenPaw 一律走当前域名的
-    // /api/v1/qwenpaw-ui/ 反向代理，避免按 hostname 拼 8088 端口导致拒绝连接。
-    if (!isElectronEnv()) {
-      return QWENPAW_UI_PATH;
+    // Electron：qwenpaw 部署在用户配置的远端服务器，直连其 8088。
+    // 直连时 qwenpaw SPA 自身的 /api 与 WebSocket 都走 ip:8088 同源，
+    // 实时推送可原生工作，无需网关代理及其路径重写。
+    if (isElectronEnv()) {
+      return getQwenPawDirectUrl();
     }
 
-    // Electron 的页面宿主通常是 localhost，但 QwenPaw 部署在用户配置的
-    // 远端服务器。因此桌面端不能根据 window.location.hostname 回退到
-    // 127.0.0.1:8088；必须优先使用已配置的 API 网关代理。
-    const gateway = SERVICE_URLS.API_GATEWAY;
-    if (gateway) {
-      return `${gateway}${QWENPAW_UI_PATH}`;
+    // Web：qwenpaw 部署在提供页面的同一台服务器，按当前主机名直连 8088，
+    // 避免走网关代理导致实时（WebSocket）链路不稳定。
+    if (typeof window !== 'undefined' && window.location?.hostname) {
+      return `http://${window.location.hostname}:8088/`;
     }
 
     return QWENPAW_LOCAL_FALLBACK_URL;
@@ -62,8 +83,8 @@ const QuantBotPage: React.FC = () => {
   }, [clearTimer]);
 
   const handleOpenExternal = useCallback(() => {
-    window.open(embedUrl, '_blank');
-  }, [embedUrl]);
+    window.open(getQwenPawDirectUrl(), '_blank');
+  }, []);
 
   const handleIframeLoad = useCallback(() => {
     clearTimer();

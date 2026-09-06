@@ -323,10 +323,14 @@ class AIStrategyService extends BaseService {
    * 获取策略模板
    */
   async getStrategyTemplates(category?: string): Promise<StrategyTemplate[]> {
+    // 统一管理：模板统一经 /api/v1/strategies/templates（与 strategyTemplateService 对齐）
+    // 旧前缀 /api/v1/templates 已废弃
     try {
       const params = category ? { category } : {};
-      const response = await this.apiClient.get('/api/v1/templates', params);
-      return response.data as StrategyTemplate[];
+      const response = await this.apiClient.get('/api/v1/strategies/templates', params);
+      const data: any = response.data;
+      if (Array.isArray(data?.templates)) return data.templates as StrategyTemplate[];
+      return data as StrategyTemplate[];
     } catch (error) {
       this.handleServiceError(error, 'getStrategyTemplates');
     }

@@ -73,6 +73,43 @@ def save_strategy(result, request_desc: str, market: str, risk_level: str, user_
     if not isinstance(result, StrategyGenerationResult):
         return
 
+    # 统一管理：优先写入共享存储
+    try:
+        import asyncio as _asyncio
+
+        from backend.shared.strategy_storage import get_strategy_storage_service
+
+        code_tmp = result.artifacts[0].code if result.artifacts else ""
+        try:
+            _loop = _asyncio.get_running_loop()
+        except RuntimeError:
+            _loop = None
+        _svc = get_strategy_storage_service()
+        _coro = _svc.save(
+            user_id=str(user_id or "0"),
+            name=result.strategy_name,
+            code=code_tmp,
+            metadata={
+                "description": request_desc,
+                "strategy_type": "CUSTOM",
+                "status": "DRAFT",
+                "parameters": {"market": market, "risk_level": risk_level, "source": "ai_strategy_storage_compat"},
+                "tags": ["ai_generated", f"market:{market}"],
+            },
+        )
+        if _loop and _loop.is_running():
+            import concurrent.futures as _cf
+
+            with _cf.ThreadPoolExecutor() as _ex:
+                _sid = _ex.submit(_asyncio.run, _coro).result(timeout=15).get("id")
+        else:
+            _sid = _asyncio.run(_coro).get("id")  # type: ignore
+        if _sid:
+            logger.info("策略已写入共享存储 strategies.id=%s (compat from ai_strategy.storage.database)", _sid)
+            return _sid
+    except Exception as _e:
+        logger.warning(f"共享存储写入失败，回落到 ai_strategies 镜像: {_e}")
+
     session = SessionLocal()
     try:
         # 生成策略ID

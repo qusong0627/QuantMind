@@ -1,3 +1,11 @@
+"""
+⚠️  DEPRECATED — 统一管理收敛中
+此模块的 ai_strategies 表为遗留孤岛，新代码禁止写入。
+所有新策略必须经 backend.shared.strategy_storage.StrategyStorageService（PG strategies + COS）。
+本模块已改为兼容层：save_* 会优先写入共享存储，ai_strategies 仅作只读镜像保留一版本后下线。
+"""
+
+import asyncio
 import json
 import logging
 import os
@@ -126,6 +134,44 @@ def save_strategy(result, request_desc: str, market: str, risk_level: str, user_
 
     if not isinstance(result, StrategyGenerationResult):
         return
+
+    # 统一管理：优先写入共享存储（PG strategies + COS），ai_strategies 仅镜像
+    _shared_id: str | None = None
+    try:
+        from backend.shared.strategy_storage import get_strategy_storage_service
+
+        code_tmp = result.artifacts[0].code if result.artifacts else ""
+        # 共享存储为异步，兼容同步调用方
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        svc = get_strategy_storage_service()
+        coro = svc.save(
+            user_id=str(user_id or "0"),
+            name=result.strategy_name,
+            code=code_tmp,
+            metadata={
+                "description": request_desc,
+                "strategy_type": "CUSTOM",
+                "status": "DRAFT",
+                "parameters": {"market": market, "risk_level": risk_level, "source": "ai_strategy_compat"},
+                "tags": ["ai_generated", f"market:{market}"],
+            },
+        )
+        if loop and loop.is_running():
+            # 在已有事件循环中，提交到线程池避免嵌套
+            import concurrent.futures
+
+            with concurrent.futures.ThreadPoolExecutor() as ex:
+                _shared_id = ex.submit(asyncio.run, coro).result(timeout=15).get("id")
+        else:
+            _shared_id = asyncio.run(coro).get("id")  # type: ignore
+        if _shared_id:
+            logger.info("策略已写入共享存储 strategies.id=%s (compat from ai_strategies.save_strategy)", _shared_id)
+            return _shared_id
+    except Exception as e:
+        logger.warning(f"共享存储写入失败，回落到 ai_strategies 镜像: {e}")
 
     session = SessionLocal()
     try:

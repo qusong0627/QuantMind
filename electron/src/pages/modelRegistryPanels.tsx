@@ -980,13 +980,13 @@ export const InferenceCenterPanel: React.FC<{
                   </div>
                   <div className="flex flex-col">
                     <Text className="text-sm font-black text-slate-800 uppercase tracking-tight leading-none mb-1">推理前置预检</Text>
-                    <Text className="text-[10px] text-slate-400">行情数据与模型依赖项状态</Text>
+                    <Text className="text-xs text-slate-500">行情数据与模型依赖项状态</Text>
                   </div>
                 </div>
                 <Button 
                   onClick={onRefreshPrecheck} 
                   loading={precheckLoading}
-                  className="rounded-full border-slate-200 text-[10px] font-bold h-8 px-4"
+                  className="rounded-full border-slate-200 text-xs font-bold h-8 px-4"
                 >
                   刷新检查
                 </Button>
@@ -1005,12 +1005,12 @@ export const InferenceCenterPanel: React.FC<{
                           <Text className="text-xs font-black text-slate-800 block leading-tight">
                             {precheck.passed ? "环境就绪" : "预检阻断"}
                           </Text>
-                          <Text className="text-[10px] text-slate-500">
-                             数据截止: {precheck.prediction_trade_date} · {dayjs(precheck.checked_at).format('HH:mm')}
-                          </Text>
-                        </div>
-                      </div>
-                      <Tag color={precheck.passed ? 'green' : 'red'} className="m-0 px-3 py-0 rounded-full border-0 font-black text-[10px]">
+                           <Text className="text-xs text-slate-500">
+                             数据截止: {precheck.data_trade_date}
+                           </Text>
+                         </div>
+                       </div>
+                       <Tag color={precheck.passed ? 'green' : 'red'} className="m-0 px-3 py-0 rounded-full border-0 font-black text-xs">
                         {precheck.passed ? 'PASS' : 'FAIL'}
                       </Tag>
                     </div>
@@ -1020,9 +1020,9 @@ export const InferenceCenterPanel: React.FC<{
                         <div key={item.key} className="flex items-center justify-between p-2.5 bg-white/40 rounded-xl border border-slate-100/60">
                           <div className="flex items-center gap-2 min-w-0">
                             <div className={clsx("w-1 h-1 rounded-full shrink-0", item.passed ? "bg-emerald-500" : "bg-rose-500")} />
-                            <Text className="text-[11px] font-bold text-slate-700 truncate">{item.label}</Text>
-                          </div>
-                          {item.passed ? <CheckCircle2 size={12} className="text-emerald-400" /> : <AlertCircle size={12} className="text-rose-400" />}
+                            <Text className="text-xs font-bold text-slate-700 truncate">{item.label}</Text>
+                           </div>
+                           {item.passed ? <CheckCircle2 size={14} className="text-emerald-400" /> : <AlertCircle size={14} className="text-rose-400" />}
                         </div>
                       ))}
                     </div>
@@ -1042,7 +1042,7 @@ export const InferenceCenterPanel: React.FC<{
 
             <div className="grid grid-cols-12 gap-5 items-end mb-4">
               <div className="col-span-4">
-                <Text className="text-[10px] font-black text-slate-400 uppercase mb-1.5 block tracking-widest pl-1">行情基准日</Text>
+                <Text className="text-xs font-bold text-slate-500 mb-1.5 block pl-1">行情基准日</Text>
                 <DatePicker
                   value={inferenceDate}
                   onChange={onDateChange}
@@ -1051,7 +1051,7 @@ export const InferenceCenterPanel: React.FC<{
                 />
               </div>
               <div className="col-span-4">
-                <Text className="text-[10px] font-black text-slate-400 uppercase mb-1.5 block tracking-widest pl-1">预测目标 T+{horizonDays}</Text>
+                <Text className="text-xs font-bold text-slate-500 mb-1.5 block pl-1">预测目标 T+{horizonDays}</Text>
                 <div className="h-10 flex items-center px-4 bg-blue-50/20 rounded-xl border border-blue-100/40">
                   <Calendar size={14} className="text-blue-400 mr-2" />
                   <Text className="font-mono font-black text-sm text-blue-700">{targetDateLoading ? '...' : targetDate || '—'}</Text>
@@ -1092,7 +1092,7 @@ export const InferenceCenterPanel: React.FC<{
 
             <div className="mt-auto flex items-start gap-2.5 p-3.5 bg-blue-50/40 rounded-2xl border border-blue-100/30">
                <Info size={14} className="text-blue-400 mt-0.5 shrink-0" />
-               <Text className="text-[10px] text-blue-600/80 leading-relaxed">
+                <Text className="text-xs text-blue-700 leading-relaxed">
                  <span className="font-black mr-1">温馨提示：</span>
                  手动运行的结果会记录为”手动任务”。如果你点亮星星设为”默认”，模拟交易将直接使用本次推理的结果。
                </Text>
@@ -1104,18 +1104,18 @@ export const InferenceCenterPanel: React.FC<{
         <div className="col-span-4 space-y-4 flex flex-col h-full">
            <div className="glass-panel rounded-2xl p-4 border border-slate-100/50 bg-gradient-to-br from-white to-emerald-50/10">
               <div className="flex items-center justify-between mb-3">
-                 <Text className="text-[9px] font-black text-slate-400 uppercase tracking-widest">当前模拟生效</Text>
-                 {(() => {
-                    const todayStr = dayjs().format('YYYY-MM-DD');
-                    const isEffective = latestInferenceRun?.run_id && 
-                                      latestInferenceRun.prediction_trade_date && 
-                                      latestInferenceRun.prediction_trade_date >= todayStr;
-                    
-                    return isEffective ? (
-                      <Badge status="processing" text={<span className="text-[9px] font-black text-emerald-500 uppercase">Active</span>} />
-                    ) : (
-                      <Badge status="default" text={<span className="text-[9px] font-black text-slate-400 uppercase">Inactive</span>} />
-                    );
+                  <Text className="text-xs font-bold text-slate-500">当前模拟生效</Text>
+                  {(() => {
+                     const todayStr = dayjs().format('YYYY-MM-DD');
+                     const isEffective = latestInferenceRun?.run_id && 
+                                       latestInferenceRun.prediction_trade_date && 
+                                       latestInferenceRun.prediction_trade_date >= todayStr;
+                     
+                     return isEffective ? (
+                       <Badge status="processing" text={<span className="text-xs font-bold text-emerald-600 uppercase">Active</span>} />
+                     ) : (
+                       <Badge status="default" text={<span className="text-xs font-bold text-slate-400 uppercase">Inactive</span>} />
+                     );
                  })()}
               </div>
               <Spin spinning={latestInferenceRunLoading}>
@@ -1126,22 +1126,22 @@ export const InferenceCenterPanel: React.FC<{
                                     latestInferenceRun.prediction_trade_date >= todayStr;
 
                   return isEffective ? (
-                    <div className="bg-white/60 rounded-xl p-3 border border-emerald-100/30">
-                        <Text className="text-[10px] font-mono font-black text-slate-800 break-all leading-tight block mb-2">
-                           {latestInferenceRun.run_id.slice(0, 24)}...
-                        </Text>
-                        <div className="flex items-center gap-2">
-                          <Tag className="m-0 bg-emerald-500 text-white border-0 text-[8px] font-black px-1.5">{latestInferenceRun.prediction_trade_date}</Tag>
-                          <Text className="text-[8px] text-slate-400 font-mono italic">{dayjs(latestInferenceRun.updated_at).format('HH:mm')}</Text>
-                        </div>
-                    </div>
-                  ) : (
-                    <div className="py-4 flex flex-col items-center justify-center bg-slate-50/50 rounded-xl border border-dashed border-slate-200">
-                      <Clock size={16} className="text-slate-300 mb-2" />
-                      <Text className="text-[9px] text-slate-400 font-bold">暂无当前生效推理</Text>
-                      <Text className="text-[8px] text-slate-300 mt-0.5">请手动执行最新行情推理</Text>
-                    </div>
-                  );
+                     <div className="bg-white/60 rounded-xl p-3 border border-emerald-100/30">
+                         <Text className="text-xs font-mono font-bold text-slate-800 break-all leading-tight block mb-2">
+                            {latestInferenceRun.run_id.slice(0, 24)}...
+                         </Text>
+                         <div className="flex items-center gap-2">
+                           <Tag className="m-0 bg-emerald-500 text-white border-0 text-xs font-bold px-1.5">{latestInferenceRun.prediction_trade_date}</Tag>
+                           <Text className="text-xs text-slate-500 font-mono italic">{dayjs(latestInferenceRun.updated_at).format('HH:mm')}</Text>
+                         </div>
+                     </div>
+                   ) : (
+                     <div className="py-4 flex flex-col items-center justify-center bg-slate-50/50 rounded-xl border border-dashed border-slate-200">
+                       <Clock size={16} className="text-slate-300 mb-2" />
+                       <Text className="text-xs text-slate-500 font-bold">暂无当前生效推理</Text>
+                       <Text className="text-xs text-slate-400 mt-0.5">请手动执行最新行情推理</Text>
+                     </div>
+                   );
                 })()}
               </Spin>
            </div>
@@ -1149,18 +1149,18 @@ export const InferenceCenterPanel: React.FC<{
             {/* 本次推理排名 - 固定高度 420px + 内部滚动，展示前200 */}
             <div className="glass-panel rounded-2xl p-4 border border-slate-100/50 bg-white flex flex-col overflow-hidden shrink-0" style={{ height: 420 }}>
                <div className="flex items-center justify-between mb-3 shrink-0">
-                 <Text className="text-[9px] font-black text-slate-400 uppercase tracking-widest">本次推理排名</Text>
-                 {rankingLoading && <Spin size="small" />}
-                 {!rankingLoading && rankingResult && (
-                   <Tag className="m-0 border-0 text-[9px] font-black px-2 rounded-md bg-blue-50 text-blue-600">
+                  <Text className="text-xs font-bold text-slate-500">本次推理排名</Text>
+                  {rankingLoading && <Spin size="small" />}
+                  {!rankingLoading && rankingResult && (
+                    <Tag className="m-0 border-0 text-xs font-bold px-2 rounded-md bg-blue-50 text-blue-600">
                      {rankingResult.target_date} · {rankingResult.rankings.length} 只 · 显示前200
                    </Tag>
                  )}
                </div>
                {rankingLoading ? (
-                 <div className="flex-1 flex items-center justify-center py-8">
-                   <Text className="text-[10px] text-slate-400">正在加载排名...</Text>
-                 </div>
+                  <div className="flex-1 flex items-center justify-center py-8">
+                    <Text className="text-xs text-slate-500">正在加载排名...</Text>
+                  </div>
                ) : topRankings.length > 0 ? (
                  <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar -mx-1 px-1 overscroll-contain">
                   <div className="flex flex-col gap-1">
@@ -1170,27 +1170,29 @@ export const InferenceCenterPanel: React.FC<{
                         className="flex items-center gap-2 px-2 py-1.5 rounded-lg bg-slate-50/70 border border-slate-100/60 hover:bg-blue-50/40 transition-colors"
                       >
                         <span className={clsx(
-                          'w-5 h-5 rounded-md flex items-center justify-center text-[9px] font-black shrink-0',
+                          'w-6 h-6 rounded-md flex items-center justify-center text-xs font-bold shrink-0',
                           r.rank <= 3 ? 'bg-rose-500 text-white' : 'bg-slate-200 text-slate-600',
                         )}>
                           {r.rank}
                         </span>
                         <div className="min-w-0 flex-1">
                           <div className="flex items-center gap-1.5">
-                            <Text className="text-[11px] font-black text-slate-800 font-mono truncate">{r.code}</Text>
-                            <Text className="text-[10px] text-slate-500 truncate">{r.name || ''}</Text>
+                            <Text className="text-xs font-bold text-slate-800 font-mono truncate">{r.code}</Text>
+                            <Text className="text-xs text-slate-500 truncate">{r.name || ''}</Text>
                           </div>
                           {r.industry && (
-                            <Text className="text-[8px] text-slate-400 truncate block">{r.industry}</Text>
+                            <Text className="text-xs text-slate-400 truncate block">{r.industry}</Text>
                           )}
                         </div>
                         <div className="flex flex-col items-end shrink-0">
-                          <Text className={clsx('text-[11px] font-mono font-black', r.score >= 0 ? 'text-rose-600' : 'text-emerald-600')}>
+                          <Text className={clsx('text-sm font-mono font-bold', r.score >= 0 ? 'text-rose-600' : 'text-emerald-600')}>
                             {r.score.toFixed(4)}
                           </Text>
-                          <Text className={clsx('text-[8px] font-black', r.signal === 'buy' ? 'text-rose-500' : r.signal === 'sell' ? 'text-emerald-500' : 'text-slate-400')}>
-                            {r.signal === 'buy' ? '买入' : r.signal === 'sell' ? '卖出' : '观望'}
-                          </Text>
+                          {r.signal === 'buy' ? (
+                            <Text className="text-xs font-bold text-rose-500">↑</Text>
+                          ) : r.signal === 'sell' ? (
+                            <Text className="text-xs font-bold text-emerald-500">↓</Text>
+                          ) : null}
                         </div>
                       </div>
                     ))}
@@ -1199,7 +1201,7 @@ export const InferenceCenterPanel: React.FC<{
               ) : (
                 <div className="flex-1 flex flex-col items-center justify-center py-8 bg-slate-50/50 rounded-xl border border-dashed border-slate-200">
                   <TrendingUp size={16} className="text-slate-300 mb-2" />
-                  <Text className="text-[9px] text-slate-400 font-bold">执行单日推理后显示排名</Text>
+                  <Text className="text-xs text-slate-500 font-bold">执行单日推理后显示排名</Text>
                 </div>
               )}
            </div>
@@ -1208,8 +1210,8 @@ export const InferenceCenterPanel: React.FC<{
               <div className="flex items-center gap-3">
                 <RefreshCw size={14} className={clsx("text-blue-500", autoSettings?.enabled && "animate-spin-slow")} />
                 <div>
-                  <Text className="text-[11px] font-bold text-slate-700 block leading-tight">自动调度</Text>
-                  <Text className="text-[9px] text-slate-400">次日 00:00 起进入任务队列</Text>
+                  <Text className="text-xs font-bold text-slate-700 block leading-tight">自动调度</Text>
+                  <Text className="text-xs text-slate-400">次日 00:00 起进入任务队列</Text>
                 </div>
               </div>
               <Switch size="small" checked={autoSettings?.enabled} loading={autoSaving} onChange={onToggleAuto} className={autoSettings?.enabled ? 'bg-blue-600' : ''} />
@@ -1225,7 +1227,7 @@ export const MetricCard: React.FC<{ label: string; value: any; digits?: number; 
   label, value, digits = 3, color = 'text-slate-800', isLarge = false,
 }) => (
   <div className="bg-white border border-slate-100 rounded-2xl p-4 shadow-sm hover:shadow-md transition-shadow flex min-h-[112px] flex-col items-center justify-center text-center">
-    <Text className="text-[10px] text-slate-400 font-black uppercase tracking-widest block mb-1 w-full text-center">{label}</Text>
+    <Text className="text-xs text-slate-500 font-bold uppercase tracking-widest block mb-1 w-full text-center">{label}</Text>
     <Text className={clsx('font-black tracking-tighter block w-full', isLarge ? 'text-2xl' : 'text-xl', color)}>
       {value === null || value === undefined ? '—' : typeof value === 'number' ? value.toFixed(digits) : value}
     </Text>

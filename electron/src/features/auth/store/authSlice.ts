@@ -25,6 +25,7 @@ const initialState: AuthState & {
   isAuthenticated: false,
   isLoading: false,
   isInitialized: false,
+  serverUnreachable: false,
   user: null,
   token: null,
   refreshToken: null,
@@ -94,6 +95,14 @@ export const initializeAuth = createAsyncThunk(
             )
           ]);
           const token = authService.getAccessToken();
+          if (!user) {
+            // token 已被 401/403 清掉 → 未登录；token 还在却拿不到用户 →
+            // 服务器不可达（getCurrentUser 网络失败返回 null 而非抛错），不得放行。
+            if (token) {
+              return { user: null, token: null, serverUnreachable: true };
+            }
+            return { user: null, token: null };
+          }
 
           return {
             user,
@@ -101,17 +110,14 @@ export const initializeAuth = createAsyncThunk(
           };
         } catch (error) {
           console.error('获取用户信息失败（含超时）:', error);
-          // 仅 401/403 清除 token（已在 getCurrentUser 内部处理），网络错误/超时不丢失登录态
+          // 仅 401/403 清除 token（已在 getCurrentUser 内部处理）。
+          // 网络错误/超时 = 服务器不可达：绝不拿本地缓存冒充已登录，
+          // 打标后由路由层展示离线页，token 保留以便恢复后免登。
           const status = (error as any)?.response?.status;
           if (status === 401 || status === 403) {
             authService.clearTokens();
           } else {
-            // 网络故障/超时：保留令牌，让 ProtectedRoute 靠 hasToken 兜底
-            const token = authService.getAccessToken();
-            const user = authService.getStoredUser();
-            if (token && user) {
-              return { user, token };
-            }
+            return { user: null, token: null, serverUnreachable: true };
           }
           return { user: null, token: null };
         }
@@ -365,6 +371,15 @@ const authSlice = createSlice({
       state.error = null;
     },
 
+    // 离线重试：重置初始化标记，useAuth 的 effect 会自动重跑 initializeAuth。
+    // 注意不清除 token，服务器恢复后可直接免登。
+    retryAuthInit: (state) => {
+      state.isInitialized = false;
+      state.isLoading = false;
+      state.serverUnreachable = false;
+      state.error = null;
+    },
+
     updateLastActivity: (state) => {
       state.lastActivity = Date.now();
     },
@@ -420,6 +435,7 @@ const authSlice = createSlice({
         state.user = action.payload.user;
         state.token = action.payload.token;
         state.isAuthenticated = !!action.payload.token;
+        state.serverUnreachable = !!(action.payload as { serverUnreachable?: boolean }).serverUnreachable;
         state.error = null;
         state.isInitialized = true;
       })
@@ -461,13 +477,13 @@ const authSlice = createSlice({
         state.token = action.payload.token;
         state.refreshToken = action.payload.refreshToken;
         state.tokenExpiryTime = action.payload.tokenExpiryTime;
+        state.serverUnreachable = false;
       })
       .addCase(login.rejected, (state, action) => {
         state.isLoading = false;
         state.loginForm.isSubmitting = false;
         state.error = action.payload as string;
       });
-
     // 短信验证码登录
     builder
       .addCase(loginWithSmsCode.pending, (state) => {
@@ -530,6 +546,7 @@ const authSlice = createSlice({
         state.isLoading = false;
         state.error = null;
         state.isInitialized = true;
+        state.serverUnreachable = false;
         // 重置表单
         state.loginForm = initialState.loginForm;
         state.registerForm = initialState.registerForm;
@@ -609,6 +626,7 @@ export const {
   setAuthState,
   setCredentials,
   setUser,
+  retryAuthInit,
 } = authSlice.actions;
 
 // 导出 reducer

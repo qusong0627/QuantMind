@@ -64,8 +64,12 @@ def _get_sync_session_factory():
     global _sync_engine, _sync_session_factory
     if _sync_session_factory is None:
         db_url = _build_sync_db_url()
-        _sync_engine = create_engine(db_url, pool_size=5, max_overflow=2, pool_pre_ping=True)
-        _sync_session_factory = _sessionmaker(bind=_sync_engine, autocommit=False, autoflush=False)
+        _sync_engine = create_engine(
+            db_url, pool_size=5, max_overflow=2, pool_pre_ping=True
+        )
+        _sync_session_factory = _sessionmaker(
+            bind=_sync_engine, autocommit=False, autoflush=False
+        )
     return _sync_session_factory
 
 
@@ -217,13 +221,15 @@ class StrategyStorageService:
         if self._has_cos_key_col is not None:
             return self._has_cos_key_col
         try:
-            exists = session.execute(text("""
+            exists = session.execute(
+                text("""
                     SELECT EXISTS (
                         SELECT 1
                         FROM information_schema.columns
                         WHERE table_name = 'strategies' AND column_name = 'cos_key'
                     )
-                    """)).scalar()
+                    """)
+            ).scalar()
             self._has_cos_key_col = bool(exists)
         except Exception as e:
             logger.warning(f"探测 strategies.cos_key 失败，按不存在处理: {e}")
@@ -237,7 +243,9 @@ class StrategyStorageService:
         try:
             self._cos = TencentCOSService()
             if not self._cos.client:
-                logger.warning("COS client not initialized (missing credentials), falling back to local mode")
+                logger.warning(
+                    "COS client not initialized (missing credentials), falling back to local mode"
+                )
                 self._cos = None
         except Exception as e:
             logger.warning(f"COS service init failed: {e}")
@@ -311,7 +319,9 @@ class StrategyStorageService:
 
         now = datetime.now(timezone.utc)
         tags = _parse_tags(metadata.get("tags", []))
-        description = metadata.get("description") or f"Updated ({now.strftime('%Y-%m-%d %H:%M')})"
+        description = (
+            metadata.get("description") or f"Updated ({now.strftime('%Y-%m-%d %H:%M')})"
+        )
         strategy_type = metadata.get("strategy_type") or "CUSTOM"
         status = metadata.get("status") or _STATUS_DRAFT
         config = metadata.get("config") or {}
@@ -355,7 +365,7 @@ class StrategyStorageService:
                     UPDATE strategies SET
                         name = :name, description = :desc,
                         code = :code, cos_url = :cos_url,
-                        { "cos_key = :cos_key," if has_cos_key else "" }
+                        {"cos_key = :cos_key," if has_cos_key else ""}
                         code_hash = :code_hash, file_size = :file_size,
                         config = CAST(:config AS jsonb),
                         parameters = CAST(:params AS jsonb),
@@ -372,7 +382,7 @@ class StrategyStorageService:
                     INSERT INTO strategies (
                         user_id, name, description, strategy_type, status,
                         config, parameters, execution_config, code, cos_url, 
-                        { "cos_key," if has_cos_key else "" }
+                        {"cos_key," if has_cos_key else ""}
                         code_hash, file_size,
                         tags, is_public, shared_users,
                         backtest_count, view_count, like_count, version, is_verified,
@@ -381,7 +391,7 @@ class StrategyStorageService:
                         :uid, :name, :desc, :stype, :status,
                         CAST(:config AS jsonb), CAST(:params AS jsonb), CAST(:exec_config AS jsonb),
                         :code, :cos_url,
-                        { ":cos_key," if has_cos_key else "" }
+                        {":cos_key," if has_cos_key else ""}
                         :code_hash, :file_size,
                         :tags, :is_public, CAST('[]' AS jsonb),
                         :backtest_count, :view_count, :like_count, :version, :is_verified,
@@ -416,8 +426,24 @@ class StrategyStorageService:
             except Exception as e:
                 logger.error(f"COS 上传失败: {e}")
 
-        db_id = self._db_upsert(user_id, strategy_id, name, code, cos_key, cos_url, file_size, hash_val, metadata)
-        return {"id": db_id, "cos_key": cos_key, "cos_url": cos_url, "code_hash": hash_val, "file_size": file_size}
+        db_id = self._db_upsert(
+            user_id,
+            strategy_id,
+            name,
+            code,
+            cos_key,
+            cos_url,
+            file_size,
+            hash_val,
+            metadata,
+        )
+        return {
+            "id": db_id,
+            "cos_key": cos_key,
+            "cos_url": cos_url,
+            "code_hash": hash_val,
+            "file_size": file_size,
+        }
 
     async def get(
         self, strategy_id: Any, user_id: str | None = None, resolve_code: bool = False
@@ -425,7 +451,9 @@ class StrategyStorageService:
         # 1. 检查是否为系统内置策略 (sys_ 开头)
         if isinstance(strategy_id, str) and strategy_id.startswith("sys_"):
             try:
-                from backend.services.engine.qlib_app.services.strategy_templates import get_template_by_id
+                from backend.services.engine.qlib_app.services.strategy_templates import (
+                    get_template_by_id,
+                )
 
                 # 关键修复：移除 sys_ 前缀后再去模板库查找
                 real_template_id = strategy_id.replace("sys_", "")
@@ -439,7 +467,11 @@ class StrategyStorageService:
                         "description": template.description,
                         "code": template.code,
                         "is_verified": True,
-                        "parameters": {"strategy_type": real_template_id, "topk": 50, "signal": "<PRED>"},
+                        "parameters": {
+                            "strategy_type": real_template_id,
+                            "topk": 50,
+                            "signal": "<PRED>",
+                        },
                         "tags": ["system", "template"],
                     }
             except Exception as e:
@@ -487,19 +519,29 @@ class StrategyStorageService:
         uid_int = _ensure_int_user_id(user_id)
         with get_db() as session:
             session.execute(
-                text("UPDATE strategies SET is_verified = TRUE, updated_at = :now WHERE id = :sid AND user_id = :uid"),
-                {"sid": int(strategy_id), "uid": uid_int, "now": datetime.now(timezone.utc)},
+                text(
+                    "UPDATE strategies SET is_verified = TRUE, updated_at = :now WHERE id = :sid AND user_id = :uid"
+                ),
+                {
+                    "sid": int(strategy_id),
+                    "uid": uid_int,
+                    "now": datetime.now(timezone.utc),
+                },
             )
             return True
 
-    def update_lifecycle_status(self, strategy_id: Any, user_id: str, status: str) -> bool:
+    def update_lifecycle_status(
+        self, strategy_id: Any, user_id: str, status: str
+    ) -> bool:
         """
         更新策略生命周期状态（draft/repository/live_trading -> DB status）。
         返回是否命中并更新到记录。
         """
         sid_text = str(strategy_id or "").strip()
         if not sid_text.isdigit():
-            logger.warning("update_lifecycle_status skip non-numeric strategy_id=%s", sid_text)
+            logger.warning(
+                "update_lifecycle_status skip non-numeric strategy_id=%s", sid_text
+            )
             return False
         normalized = _normalize_lifecycle_status(status)
         uid_int = _ensure_int_user_id(user_id)
@@ -548,7 +590,7 @@ class StrategyStorageService:
         with get_db() as session:
             session.execute(
                 text("DELETE FROM strategies WHERE id = :sid AND user_id = :uid"),
-                {"sid": int(strategy_id), "uid": uid_int}
+                {"sid": int(strategy_id), "uid": uid_int},
             )
         return True
 
@@ -559,33 +601,51 @@ class StrategyStorageService:
         search: str | None = None,
         tags: builtins.list[str] | None = None,
         market: str | None = None,
+        include_templates: bool = False,
     ) -> builtins.list[dict[str, Any]]:
         # strategies.user_id 为整数（users.id），需先解析业务 user_id（如 'admin'）
+        # 统一管理：category/search/tags 在此层生效，避免上层各自为政
         uid_int = _ensure_int_user_id(user_id)
         with get_db() as session:
             has_cos_key = self._has_cos_key_column(session)
             cos_key_expr = "cos_key" if has_cos_key else "NULL::text as cos_key"
+            where = ["user_id = :uid", f"status != '{_STATUS_ARCHIVED}'"]
+            params: dict[str, Any] = {"uid": uid_int}
+            if category:
+                where.append(
+                    "(tags::text ILIKE :cat_like OR parameters::text ILIKE :cat_like OR config::text ILIKE :cat_like)"
+                )
+                params["cat_like"] = f"%{category}%"
+            if search:
+                where.append(
+                    "(name ILIKE :search OR description ILIKE :search OR code ILIKE :search)"
+                )
+                params["search"] = f"%{search}%"
+            if tags:
+                for idx, t in enumerate(tags):
+                    key = f"tag_{idx}"
+                    where.append(f"tags::text ILIKE :{key}")
+                    params[key] = f"%{t}%"
+            where_sql = " AND ".join(where)
             sql = f"""
                 SELECT id, name, description, status, cos_url, {cos_key_expr},
-                       code_hash, tags, is_verified, execution_config, created_at, updated_at
-                FROM strategies WHERE user_id = :uid AND status != '{_STATUS_ARCHIVED}'
+                       code_hash, tags, is_verified, execution_config, created_at, updated_at,
+                       parameters, config
+                FROM strategies WHERE {where_sql} ORDER BY updated_at DESC
             """
-            market_clause = ""
-            query_params: dict[str, Any] = {"uid": uid_int}
+            # 市场过滤（市场存 parameters.jsonb.market；历史无 market 行一律视为 A 股）
             if market:
-                # 市场过滤（市场存 parameters.jsonb.market；历史无 market 行一律视为 A 股）
                 mkt = str(market).upper()
                 if mkt in ("A", "CN"):
-                    market_clause = (
+                    sql += (
                         " AND (parameters->>'market' IS NULL"
                         " OR UPPER(parameters->>'market') IN ('A','CN'))"
                     )
                 else:
-                    market_clause = " AND UPPER(parameters->>'market') = :mkt"
-                    query_params["mkt"] = mkt
-            sql += market_clause
-            rows = session.execute(text(sql), query_params).fetchall()
-            return [
+                    sql += " AND UPPER(parameters->>'market') = :mkt"
+                    params["mkt"] = mkt
+            rows = session.execute(text(sql), params).fetchall()
+            items = [
                 {
                     "id": str(r[0]),
                     "name": r[1],
@@ -597,9 +657,38 @@ class StrategyStorageService:
                     "tags": _parse_tags(r[7]),
                     "created_at": r[10].isoformat() if r[10] else None,
                     "updated_at": r[11].isoformat() if r[11] else None,
+                    "parameters": r[12] or {},
+                    "config": r[13] or {},
                 }
                 for r in rows
             ]
+            if include_templates:
+                try:
+                    from backend.services.engine.qlib_app.services.strategy_templates import (
+                        get_all_templates,
+                    )
+
+                    for t in get_all_templates():
+                        items.append(
+                            {
+                                "id": f"sys_{t.id}",
+                                "name": t.name,
+                                "description": t.description,
+                                "status": "ACTIVE",
+                                "cos_url": None,
+                                "is_verified": True,
+                                "execution_config": {},
+                                "tags": ["system", "template", t.category],
+                                "created_at": None,
+                                "updated_at": None,
+                                "parameters": {"strategy_type": t.id},
+                                "config": {},
+                                "is_system": True,
+                            }
+                        )
+                except Exception as e:
+                    logger.warning(f"include_templates failed: {e}")
+            return items
 
 
 # ---------------------------------------------------------------------------

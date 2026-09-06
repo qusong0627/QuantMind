@@ -106,12 +106,11 @@ export const strategyLabService = {
   },
 
   // ---------------------------------------------------------------------------
-  // Strategy CRUD — delegates to /api/v1/strategies on the engine service
-  // Uses raw axios (not the `client` instance) because `client` has a baseURL
-  // interceptor that would double-prepend the path.
+  // Strategy CRUD — 统一管理：已收敛到 strategyManagementService（唯一入口）
+  // 本服务的 CRUD 保留为兼容层，实际转发到 strategyManagementService
   // ---------------------------------------------------------------------------
 
-  /** Build full URL for strategy CRUD endpoints. */
+  /** Build full URL for strategy CRUD endpoints. @deprecated 使用 strategyManagementService */
   strategiesUrl(path = ''): string {
     const base = String(SERVICE_URLS.ENGINE_SERVICE || '').replace(/\/+$/, '');
     return `${base}/api/v1/strategies${path}`;
@@ -123,16 +122,13 @@ export const strategyLabService = {
     return token ? { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' } : { 'Content-Type': 'application/json' };
   },
 
-  /** List user's saved strategies. */
+  /** List user's saved strategies. @deprecated 使用 strategyManagementService.loadStrategies() */
   async listStrategies(): Promise<Array<{
     id: string; name: string; description: string; code: string;
     tags: string[]; language: string; created_at?: string; updated_at?: string;
   }>> {
-    const resp = await axios.get(this.strategiesUrl(), { headers: this.authHeaders() });
-    const data = (resp as any)?.data ?? resp;
-    const items = Array.isArray(data?.strategies) ? data.strategies
-      : Array.isArray(data?.items) ? data.items
-      : Array.isArray(data) ? data : [];
+    const { strategyManagementService } = await import('../../../services/strategyManagementService');
+    const items: any[] = await (strategyManagementService as any).loadStrategies();
     return items.map((s: any) => ({
       id: String(s.strategy_id ?? s.id ?? ''),
       name: s.name ?? '',
@@ -145,15 +141,14 @@ export const strategyLabService = {
     }));
   },
 
-  /** Load a single strategy by id (with code). */
+  /** Load a single strategy by id (with code). @deprecated 使用 strategyManagementService */
   async loadStrategy(strategyId: string): Promise<{
     id: string; name: string; description: string; code: string; tags: string[];
   }> {
-    const resp = await axios.get(this.strategiesUrl(`/${strategyId}`), {
-      headers: this.authHeaders(),
-      params: { resolve_code: true },
-    });
-    const data = (resp as any)?.data ?? resp;
+    const { strategyManagementService } = await import('../../../services/strategyManagementService');
+    const data: any = await (strategyManagementService as any).getStrategy?.(strategyId)
+      ?? await (strategyManagementService as any).loadStrategy?.(strategyId)
+      ?? (await axios.get(this.strategiesUrl(`/${strategyId}`), { headers: this.authHeaders(), params: { resolve_code: true } }).then(r => (r as any)?.data ?? r));
     return {
       id: String(data?.strategy_id ?? data?.id ?? strategyId),
       name: data?.name ?? '',
@@ -163,34 +158,32 @@ export const strategyLabService = {
     };
   },
 
-  /** Save a new strategy. */
+  /** Save a new strategy. @deprecated 使用 strategyManagementService.saveStrategy() */
   async saveStrategy(name: string, code: string, description = '', tags: string[] = []): Promise<{
     id: string; name: string;
   }> {
-    const resp = await axios.post(this.strategiesUrl(), {
-      name,
-      code,
-      description,
-      category: 'strategy_lab',
-      author: '用户',
-      tags,
-      parameters: {},
-    }, { headers: this.authHeaders() });
-    const data = (resp as any)?.data ?? resp;
+    const { strategyManagementService } = await import('../../../services/strategyManagementService');
+    const data: any = await (strategyManagementService as any).saveStrategy({ name, code, description, tags, category: 'strategy_lab', parameters: {} });
     return {
       id: String(data?.strategy_id ?? data?.id ?? ''),
       name: data?.name ?? name,
     };
   },
 
-  /** Update an existing strategy. */
+  /** Update an existing strategy. @deprecated 使用 strategyManagementService */
   async updateStrategy(strategyId: string, updates: { name?: string; code?: string; description?: string }): Promise<void> {
+    const { strategyManagementService } = await import('../../../services/strategyManagementService');
+    if ((strategyManagementService as any).updateStrategy) {
+      await (strategyManagementService as any).updateStrategy(strategyId, updates);
+      return;
+    }
     await axios.put(this.strategiesUrl(`/${strategyId}`), updates, { headers: this.authHeaders() });
   },
 
-  /** Delete a strategy. */
+  /** Delete a strategy. @deprecated 使用 strategyManagementService */
   async deleteStrategy(strategyId: string): Promise<void> {
-    await axios.delete(this.strategiesUrl(`/${strategyId}`), { headers: this.authHeaders() });
+    const { strategyManagementService } = await import('../../../services/strategyManagementService');
+    await (strategyManagementService as any).deleteStrategy(strategyId);
   },
 
   // ---------------------------------------------------------------------------

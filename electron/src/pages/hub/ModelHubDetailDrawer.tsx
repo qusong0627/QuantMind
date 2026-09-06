@@ -29,8 +29,11 @@ export const ModelHubDetailDrawer: React.FC<ModelHubDetailDrawerProps> = ({
     ? model.factors_summary
     : (model.factors_summary as any)?.items || [];
 
+  const fmtNum = (v: unknown, d = 2) => typeof v === 'number' && Number.isFinite(v as number) ? (v as number).toFixed(d) : '—';
+  const fmtPct = (v: unknown, d = 1) => typeof v === 'number' && Number.isFinite(v as number) ? `${((v as number) * 100).toFixed(d)}%` : '—';
   const formattedSize = (bytes?: number) => {
-    if (!bytes || bytes <= 0) return '—';
+    if (typeof bytes !== 'number' || !Number.isFinite(bytes) || bytes <= 0) return '—';
+    if (bytes < 1024) return `${bytes} B`;
     if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
     return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   };
@@ -119,20 +122,15 @@ export const ModelHubDetailDrawer: React.FC<ModelHubDetailDrawerProps> = ({
           <div className="text-xs text-slate-400">
             大小：{formattedSize(model.file_size_bytes)} · 下载：{model.downloads_count || 0} 次
           </div>
-          <div className="flex gap-2">
-            <Button className="rounded-xl font-bold" onClick={onClose}>
-              关闭
-            </Button>
-            <Button
-              type="primary"
-              icon={<Download size={14} />}
-              loading={importing}
-              className="rounded-xl bg-blue-600 hover:bg-blue-500 font-bold px-5 border-none shadow-sm"
-              onClick={() => onImport(model)}
-            >
-              下载模型包
-            </Button>
-          </div>
+          <Button
+            type="primary"
+            icon={<Download size={14} />}
+            loading={importing}
+            className="rounded-xl bg-blue-600 hover:bg-blue-500 font-bold px-5 border-none shadow-sm"
+            onClick={() => onImport(model)}
+          >
+            一键导入为本地模型
+          </Button>
         </div>
       }
     >
@@ -173,46 +171,40 @@ export const ModelHubDetailDrawer: React.FC<ModelHubDetailDrawerProps> = ({
             <div className="bg-slate-50 p-3 rounded-xl border border-slate-100 text-center">
               <div className="text-[10px] text-slate-400 font-semibold">夏普比率 (Sharpe)</div>
               <div className="text-base font-black text-slate-800 mt-0.5">
-                {model.sharpe_ratio ? model.sharpe_ratio.toFixed(2) : '—'}
+                {fmtNum(model.sharpe_ratio, 2)}
               </div>
             </div>
             <div className="bg-slate-50 p-3 rounded-xl border border-slate-100 text-center">
               <div className="text-[10px] text-slate-400 font-semibold">测试集 IC</div>
               <div className="text-base font-black text-slate-800 mt-0.5">
-                {model.test_ic ? model.test_ic.toFixed(3) : '—'}
+                {fmtNum(model.test_ic, 3)}
               </div>
             </div>
             <div className="bg-slate-50 p-3 rounded-xl border border-slate-100 text-center">
               <div className="text-[10px] text-slate-400 font-semibold">Rank IC</div>
               <div className="text-base font-black text-slate-800 mt-0.5">
-                {model.rank_ic ? model.rank_ic.toFixed(3) : '—'}
+                {fmtNum(model.rank_ic, 3)}
               </div>
             </div>
             <div className="bg-slate-50 p-3 rounded-xl border border-slate-100 text-center">
               <div className="text-[10px] text-slate-400 font-semibold">年化收益率</div>
               <div className="text-sm font-black text-red-600 mt-0.5">
-                {model.annual_return ? `${(model.annual_return * 100).toFixed(1)}%` : '—'}
+                {fmtPct(model.annual_return, 1)}
               </div>
             </div>
             <div className="bg-slate-50 p-3 rounded-xl border border-slate-100 text-center">
               <div className="text-[10px] text-slate-400 font-semibold">最大回撤</div>
               <div className="text-sm font-black text-slate-700 mt-0.5">
-                {model.max_drawdown ? `${(model.max_drawdown * 100).toFixed(1)}%` : '—'}
+                {fmtPct(model.max_drawdown, 1)}
               </div>
             </div>
             <div className="bg-slate-50 p-3 rounded-xl border border-slate-100 text-center">
               <div className="text-[10px] text-slate-400 font-semibold">卡玛比率 (Calmar)</div>
               <div className="text-sm font-black text-slate-800 mt-0.5">
-                {model.calmar_ratio ? model.calmar_ratio.toFixed(2) : '—'}
+                {fmtNum(model.calmar_ratio, 2)}
               </div>
             </div>
           </div>
-        </div>
-
-        {/* 净值走势图 */}
-        <div>
-          <h5 className="text-xs font-black uppercase text-slate-400 tracking-wider mb-2">历史回测净值曲线</h5>
-          {renderDetailChart(model.equity_curve)}
         </div>
 
         {/* 特征与因子依赖清单 */}
@@ -227,7 +219,7 @@ export const ModelHubDetailDrawer: React.FC<ModelHubDetailDrawerProps> = ({
           </div>
 
           {factorList.length > 0 ? (
-            <div className="flex flex-wrap gap-1.5 max-h-36 overflow-y-auto p-3 bg-slate-50 rounded-2xl border border-slate-100 custom-scrollbar">
+            <div className="flex flex-wrap gap-1.5 max-h-[300px] overflow-y-auto p-3 bg-slate-50 rounded-2xl border border-slate-100 custom-scrollbar">
               {factorList.map((factor, idx) => (
                 <Tag key={idx} className="!text-[11px] !px-2 !py-0.5 !rounded-md !bg-white !border-slate-200 text-slate-600 font-mono">
                   {factor}
@@ -246,8 +238,8 @@ export const ModelHubDetailDrawer: React.FC<ModelHubDetailDrawerProps> = ({
           type="info"
           showIcon
           className="rounded-xl text-xs"
-          message="下载说明"
-          description="点击下载后将获取模型包。请按模型包内说明完成本地安装与注册，再在模型中心或推理中心使用。"
+          message="一键导入说明"
+          description="点击导入后，后端将自动下载模型包、解压并注册为本地模型，完成后可在「模型管理 → 我的模型」中直接用于推理，无需手动安装。"
         />
       </div>
     </Drawer>

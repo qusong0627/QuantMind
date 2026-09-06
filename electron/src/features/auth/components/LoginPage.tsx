@@ -15,13 +15,12 @@ import {
   SettingOutlined,
 } from '@ant-design/icons';
 import { useAuth, useLoginForm } from '../hooks/useAuth';
-import { useAppDispatch } from '../../../store';
+import { useAppDispatch, useAppSelector } from '../../../store';
 import { setUser } from '../store/authSlice';
 import { PageLoading } from './LoadingStates';
 import type { LoginCredentials } from '../types/auth.types';
 import { preloadAiIdeResources } from '../utils/lazyLoad';
 import { isElectronEnv, initDynamicServerUrl, setDynamicServerUrl, getDynamicServerUrl } from '../../../config/services';
-import HelpCenterLink from '../../../components/common/HelpCenterLink';
 
 const { Title, Text } = Typography;
 
@@ -48,6 +47,8 @@ const LoginPage: React.FC = () => {
   const [loginError, setLoginError] = useState<string | null>(null);
   const [isInitialLoading, setIsInitialLoading] = useState(true);
   const autoLoginAttempted = useRef(false);
+  // 后端不可达时展示整页内提示（配置保留，用户可检查服务器或稍后重试）
+  const serverUnreachable = useAppSelector((state) => state.auth.serverUnreachable);
 
   // 响应式设计
   const [isMobile, setIsMobile] = useState(false);
@@ -491,6 +492,19 @@ const LoginPage: React.FC = () => {
           initialValues={{ remember_me: true }}
         >
           {/* 错误提示 */}
+          {serverUnreachable && (
+            <Alert
+              message={`服务器不可达（${getDynamicServerUrl() || '未配置'}），请确认后端已启动。你的服务器配置已保留，恢复后直接登录即可。`}
+              type="warning"
+              showIcon
+              style={{
+                marginBottom: '24px',
+                borderRadius: '12px',
+                border: 'none',
+                background: 'rgba(250, 173, 20, 0.1)',
+              }}
+            />
+          )}
           {loginError && (
             <Alert
               message={loginError}
@@ -697,10 +711,8 @@ const LoginPage: React.FC = () => {
           <Space split={<span style={{ color: 'rgba(255,255,255,0.4)', margin: '0 8px' }}>|</span>}>
           <a href="https://www.quantmindai.cn/privacy" target="_blank" rel="noopener noreferrer" style={{ color: 'white', cursor: 'pointer', transition: 'all 0.3s ease', textDecoration: 'none' }} onMouseEnter={(e) => e.currentTarget.style.color = '#1890ff'} onMouseLeave={(e) => e.currentTarget.style.color = 'white'}>隐私政策</a>
           <a href="https://www.quantmindai.cn/terms" target="_blank" rel="noopener noreferrer" style={{ color: 'white', cursor: 'pointer', transition: 'all 0.3s ease', textDecoration: 'none' }} onMouseEnter={(e) => e.currentTarget.style.color = '#1890ff'} onMouseLeave={(e) => e.currentTarget.style.color = 'white'}>服务条款</a>
-          {/* 使用统一 HelpCenterLink，保留白色样式 */}
-          <span>
-            <HelpCenterLink variant="white" showIcon={false} />
-          </span>
+          {/* 帮助文档：与左右两项保持完全一致的裸链接样式，避免组件自带内边距导致间隔不均 */}
+          <a href="https://oss.quantmindai.cn/desktop-download.html" target="_blank" rel="noopener noreferrer" style={{ color: 'white', cursor: 'pointer', transition: 'all 0.3s ease', textDecoration: 'none' }} onMouseEnter={(e) => e.currentTarget.style.color = '#1890ff'} onMouseLeave={(e) => e.currentTarget.style.color = 'white'}>帮助文档</a>
           <span>© 2026 QuantMind</span>
         </Space>
       </div>

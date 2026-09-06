@@ -9,7 +9,6 @@
     {"name": "n_drop", "description": "每期替换数量", "default": 10, "min": 0, "max": 200},
     {"name": "rebalance_days", "description": "调仓周期（交易日）", "default": 3, "min": 1, "max": 60},
     {"name": "market_state_window", "description": "大盘状态判定窗口（交易日）", "default": 20, "min": 5, "max": 120},
-    {"name": "market_state_symbol", "description": "市场状态参考指数（支持 SH000300 / SH000905 / SH000852）", "default": "SH000300"},
     {"name": "industry_cap_ratio", "description": "单行业持仓上限占比", "default": 0.3, "min": 0.1, "max": 0.6},
     {"name": "f_total_mv_min", "description": "总市值下限（元）", "default": 2000000000, "min": 100000000, "max": 100000000000},
     {"name": "f_float_mv_min", "description": "流通市值下限（元）", "default": 500000000, "min": 100000000, "max": 100000000000},

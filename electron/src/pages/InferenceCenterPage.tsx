@@ -40,7 +40,6 @@ import { StockForecastChart } from '../features/inference-center/components/Stoc
 import { FeatureDriversPanel } from '../features/inference-center/components/FeatureDriversPanel';
 import { ModelConsensusPanel } from '../features/inference-center/components/ModelConsensusPanel';
 import { InferenceHistoryPanel } from '../components/inference/InferenceHistoryPanel';
-import { InferenceBacktestModule } from '../components/backtestCenter/InferenceBacktestModule';
 import { useAppSelector } from '../store';
 import { selectCurrentMarket } from '../store/slices/uiSlice';
 import { getMarketConfig } from '../config/marketConfig';
@@ -72,7 +71,7 @@ export const InferenceCenterPage: React.FC = () => {
   // ─────────────────────────────────────────────────────────────
   // 模块 1：市场截面推理 (Cross-Section Inference) 状态
   // ─────────────────────────────────────────────────────────────
-  const [crossSectionMode, setCrossSectionMode] = useState<'single' | 'history' | 'backtest'>('single');
+  const [crossSectionMode, setCrossSectionMode] = useState<'single' | 'history'>('single');
   const [registeredModels, setRegisteredModels] = useState<UserModelRecord[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
   const [selectedModelId, setSelectedModelId] = useState<string>(initialModelId);
@@ -196,14 +195,19 @@ export const InferenceCenterPage: React.FC = () => {
     return Number(meta?.target_horizon_days ?? meta?.target_horizon ?? 5);
   }, [selectedModel]);
 
-  // 截面推理：Precheck
+  // 截面推理：Precheck（基准日跟随后端的数据回退，避免输入框与实际数据日不一致）
   const loadPrecheck = useCallback(async (modelId: string, checkDate?: string) => {
     setInferencePrecheckLoading(true);
     try {
       const resp = await modelTrainingService.precheckInference(modelId, checkDate);
       setInferencePrecheck(resp);
-      if (resp?.prediction_trade_date) {
-        setInferenceTargetDate(resp.prediction_trade_date);
+      // 后端在请求日无数据时会自动回退到最新可用数据日（data_trade_date），
+      // 输入框必须同步，否则“行情基准日”显示的日期与实际推理用的数据日脱节。
+      // 预测目标 T+N 由 loadInferenceTargetDate 按回退后的基准日重算，这里不再复写。
+      const resolvedDataDate = resp?.data_trade_date;
+      if (resolvedDataDate && checkDate && resolvedDataDate !== checkDate) {
+        setInferenceDate(dayjs(resolvedDataDate));
+        message.info(`所选日期 ${checkDate} 无可用数据，已回退到最新数据日 ${resolvedDataDate}`);
       }
       return resp;
     } catch {
@@ -530,7 +534,7 @@ export const InferenceCenterPage: React.FC = () => {
   return (
     <div className="w-full h-full bg-[#f8fafc] p-6 flex flex-col overflow-hidden font-sans box-border select-none">
       {/* 顶部主切换栏 */}
-      <div className="flex items-center justify-between bg-white border border-gray-200 rounded-2xl px-6 py-3 mb-4 shadow-2xs shrink-0">
+      <div className="flex items-center justify-between bg-white border border-gray-200 rounded-2xl px-6 h-[68px] mb-4 shadow-2xs shrink-0">
         <div className="flex items-center gap-3">
           <div className="w-10 h-10 rounded-2xl bg-gradient-to-tr from-blue-600 to-indigo-500 flex items-center justify-center text-white shadow-md shadow-blue-200">
             <Cpu className="w-5 h-5" />
@@ -538,11 +542,11 @@ export const InferenceCenterPage: React.FC = () => {
           <div>
             <div className="flex items-center gap-2">
               <h1 className="text-base font-black text-slate-800 m-0 tracking-tight">模型推理中心</h1>
-              <Tag color="blue" className="rounded-full text-[10px] font-bold border-0 px-2 py-0">
+              <Tag color="blue" className="rounded-full text-xs font-bold border-0 px-2 py-0">
                 {currentMarket === 'CN' ? 'A股市场' : currentMarket}
               </Tag>
             </div>
-            <p className="text-[11px] text-slate-400 m-0">生产级截面批量打分 · 单标的特征归因与共识走势预测</p>
+            <p className="text-xs text-slate-500 m-0">生产级截面批量打分 · 单标的特征归因与共识走势预测</p>
           </div>
         </div>
 
@@ -580,44 +584,56 @@ export const InferenceCenterPage: React.FC = () => {
       {/* ================= 模式 1：市场截面推理 ================= */}
       {topTab === 'cross-section' && (
         <div className="flex-1 min-h-0 bg-white border border-gray-200 shadow-sm rounded-[28px] flex flex-col overflow-hidden">
-          {/* 模型选择与二级导航 Bar */}
-          <div className="px-6 py-3.5 border-b border-gray-200 bg-slate-50/50 flex flex-wrap items-center justify-between gap-4 shrink-0">
+          {/* 模型选择与二级导航 Bar（与顶部栏同高 68px） */}
+          <div className="px-6 h-[68px] border-b border-gray-200 bg-slate-50/50 flex flex-wrap items-center justify-between gap-4 shrink-0">
             {/* 模型选择 */}
-            <div className="flex items-center gap-3">
-              <span className="text-xs font-bold text-slate-500 flex items-center gap-1.5">
-                <Database size={14} className="text-blue-500" />
-                当前推理模型:
+            <div className="flex items-center gap-2.5">
+              <span className="text-xs font-bold text-slate-500 flex items-center gap-1.5 whitespace-nowrap">
+                <Database size={14} className="text-blue-600" />
+                当前推理模型
               </span>
-              <Select
-                value={selectedModelId}
-                onChange={setSelectedModelId}
-                loading={modelsLoading}
-                className="w-72"
-                options={registeredModels.map((m) => ({
-                  value: m.model_id,
-                  label: (
-                    <div className="flex items-center justify-between text-xs">
-                      <span className="font-semibold truncate">{modelDisplayName(m)}</span>
-                      {m.is_default && (
-                        <Tag color="gold" className="!mr-0 text-[10px] scale-90">默认</Tag>
-                      )}
-                    </div>
-                  ),
-                }))}
-              />
+              <div className="flex items-center bg-white border border-slate-200 rounded-xl px-2 h-9 shadow-sm">
+                <Select
+                  value={selectedModelId}
+                  onChange={setSelectedModelId}
+                  loading={modelsLoading}
+                  variant="borderless"
+                  className="!w-80 [&_.ant-select-selection-item]:text-[13px] [&_.ant-select-selection-item]:font-bold [&_.ant-select-selection-item]:text-slate-800"
+                  options={registeredModels.map((m) => ({
+                    value: m.model_id,
+                    label: (
+                      <div className="flex items-center justify-between text-[13px]">
+                        <span className="font-semibold truncate">{modelDisplayName(m)}</span>
+                        {m.is_default && (
+                          <Tag color="gold" className="!mr-0 text-xs">默认</Tag>
+                        )}
+                      </div>
+                    ),
+                  }))}
+                />
+              </div>
               {selectedModel && (
-                <div className="flex items-center gap-2 text-[11px] text-slate-500 bg-white px-3 py-1 rounded-xl border border-slate-200">
-                  <span>架构: <strong className="text-slate-700 font-mono">{extractModelType(selectedModel)}</strong></span>
-                  <span className="text-slate-300">|</span>
-                  <span>目标: <strong className="text-blue-600 font-mono">T+{horizonDays}</strong></span>
-                  {selectedModel.is_default && (
-                    <>
-                      <span className="text-slate-300">|</span>
-                      <span className="text-amber-600 font-bold flex items-center gap-0.5">
-                        <Star size={11} fill="currentColor" /> 默认生效
+                <div className="flex items-center gap-2">
+                  <div className="bg-slate-50 border border-slate-200 rounded-xl px-3 h-9 flex items-center gap-1.5 whitespace-nowrap">
+                    <span className="text-xs font-bold text-slate-500">架构</span>
+                    <span className="text-[13px] font-black text-slate-900 font-mono">{extractModelType(selectedModel)}</span>
+                  </div>
+                  <div className="bg-slate-50 border border-slate-200 rounded-xl px-3 h-9 flex items-center gap-1.5 whitespace-nowrap">
+                    <span className="text-xs font-bold text-slate-500">目标</span>
+                    <span className="text-[13px] font-black text-blue-700 font-mono">T+{horizonDays}</span>
+                  </div>
+                  <div className={clsx(
+                    'border rounded-xl px-3 h-9 flex items-center whitespace-nowrap',
+                    selectedModel.is_default ? 'bg-amber-50 border-amber-200' : 'bg-slate-50 border-slate-200'
+                  )}>
+                    {selectedModel.is_default ? (
+                      <span className="text-xs font-bold text-amber-600 flex items-center gap-1">
+                        <Star size={12} fill="currentColor" /> 默认生效
                       </span>
-                    </>
-                  )}
+                    ) : (
+                      <span className="text-xs text-slate-400">非默认模型</span>
+                    )}
+                  </div>
                 </div>
               )}
             </div>
@@ -639,14 +655,6 @@ export const InferenceCenterPage: React.FC = () => {
                 onClick={() => setCrossSectionMode('history')}
               >
                 推理历史
-              </Button>
-              <Button
-                size="small"
-                type={crossSectionMode === 'backtest' ? 'primary' : 'default'}
-                className={clsx('rounded-xl text-xs font-bold h-8 px-4', crossSectionMode === 'backtest' ? 'bg-amber-600 border-amber-600' : 'border-slate-200')}
-                onClick={() => setCrossSectionMode('backtest')}
-              >
-                推理回测
               </Button>
             </div>
           </div>
@@ -692,10 +700,8 @@ export const InferenceCenterPage: React.FC = () => {
                 onHistoryDateFilterChange={setHistoryDateFilter}
                 onDeleteHistory={handleDeleteHistory}
               />
-            ) : crossSectionMode === 'history' ? (
-              <InferenceHistoryPanel modelId={selectedModel.model_id} onDelete={handleDeleteHistory} />
             ) : (
-              <InferenceBacktestModule modelId={selectedModel.model_id} />
+              <InferenceHistoryPanel modelId={selectedModel.model_id} onDelete={handleDeleteHistory} />
             )}
           </div>
         </div>
@@ -939,6 +945,11 @@ export const InferenceCenterPage: React.FC = () => {
                 </div>
               ) : prediction ? (
                 <div className="flex-1 min-h-0 flex flex-col gap-4">
+                  {prediction.forecast_warning && (
+                    <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-2.5 text-xs font-semibold text-amber-800">
+                      {prediction.forecast_warning}
+                    </div>
+                  )}
                   <div className="grid grid-cols-1 lg:grid-cols-3 gap-4" style={{ height: '420px', minHeight: '420px' }}>
                     <div className="lg:col-span-2 bg-white rounded-2xl border border-gray-200 shadow-xs flex flex-col overflow-hidden">
                       <StockForecastChart

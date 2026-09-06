@@ -19,7 +19,7 @@ import logging
 import os
 import sqlite3
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import quote, urlsplit
 
@@ -865,6 +865,21 @@ async def admin_list_folders(request: Request):
     ) or []
 
     # 索引：folder_id -> connectors（folder_id=None 视为未分组）
+    # 补充订阅地址：folder-connectors 仅含 id/name/icon/inboxCount，需从 SQLite 补 subscribe_url
+    subscribe_map: dict[int, str] = {}
+    if _huntly_sqlite_available():
+        try:
+            with _huntly_sqlite() as sconn:
+                cur = sconn.cursor()
+                cur.execute("SELECT id, subscribe_url FROM connector")
+                for row in cur.fetchall():
+                    try:
+                        subscribe_map[int(row["id"])] = str(row["subscribe_url"] or "")
+                    except Exception:
+                        continue
+        except Exception as exc:
+            logger.warning("补齐订阅地址失败: %s", exc)
+
     conn_by_folder: dict[int | None, list[dict]] = {}
     seen_folder_ids: set[int | None] = set()
     for f in ffc:
@@ -872,6 +887,7 @@ async def admin_list_folders(request: Request):
         conn_by_folder[fid] = [
             {
                 **item,
+                "subscribeUrl": item.get("subscribeUrl") or subscribe_map.get(int(item.get("id") or 0), ""),
                 "iconUrl": _public_connector_icon_url(item.get("iconUrl"), request),
             }
             for item in (f.get("connectorItems") or [])
@@ -1799,6 +1815,61 @@ async def admin_list_tags(
         return {"items": items, "total": total, "page": page, "page_size": page_size}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"list tags failed: {e}")
+
+
+@router.post("/admin/purge-old")
+async def admin_purge_old(hours: int = Query(24, ge=1, le=720)):
+    """一键清理超过 N 小时的资讯（Huntly SQLite + PG enrichment）。
+
+    前端“清理”按钮直连此接口，默认 hours=24。
+    返回 {deleted_pages, deleted_enrichments, cutoff_local}。
+    """
+    from datetime import datetime as _dt
+    cutoff_dt = _dt.now(_HUNTLY_TZ) - timedelta(hours=int(hours))
+    cutoff_local = cutoff_dt.strftime("%Y-%m-%d %H:%M:%S.000")
+    deleted_pages = 0
+    deleted_contents = 0
+    deleted_enrich = 0
+    page_ids: list[int] = []
+    if _huntly_sqlite_available():
+        try:
+            wconn = sqlite3.connect(HUNTLY_SQLITE_PATH, timeout=10.0, check_same_thread=False)
+            wconn.row_factory = sqlite3.Row
+            cur = wconn.cursor()
+            cur.execute("SELECT id FROM page WHERE connected_at < ?", (cutoff_local,))
+            page_ids = [int(r[0]) for r in cur.fetchall()]
+            if page_ids:
+                # 先删正文表，避免 FK 残留
+                try:
+                    placeholders = ",".join(["?"] * len(page_ids))
+                    cur.execute(f"DELETE FROM page_article_content WHERE page_id IN ({placeholders})", page_ids)
+                    deleted_contents = cur.rowcount if cur.rowcount != -1 else 0
+                except Exception as exc:
+                    logger.warning("purge page_article_content 失败: %s", exc)
+                cur.execute(f"DELETE FROM page WHERE id IN ({','.join(['?']*len(page_ids))})", page_ids)
+                deleted_pages = cur.rowcount if cur.rowcount != -1 else len(page_ids)
+                wconn.commit()
+            wconn.close()
+        except Exception as exc:
+            logger.error("purge huntly pages 失败: %s", exc)
+            raise HTTPException(status_code=500, detail=f"purge failed: {exc}")
+    # 同步清理 PG enrichment
+    if page_ids:
+        try:
+            with _pg_conn() as conn, conn.cursor() as cur:
+                cur.execute("DELETE FROM news_article_enrichment WHERE huntly_page_id = ANY(%s)", (page_ids,))
+                deleted_enrich = cur.rowcount if cur.rowcount != -1 else 0
+                conn.commit()
+        except Exception as exc:
+            logger.warning("purge enrichment 失败: %s", exc)
+    return {
+        "ok": True,
+        "hours": int(hours),
+        "cutoff_local": cutoff_local,
+        "deleted_pages": deleted_pages,
+        "deleted_contents": deleted_contents,
+        "deleted_enrichments": deleted_enrich,
+    }
 
 
 @router.post("/admin/tags")

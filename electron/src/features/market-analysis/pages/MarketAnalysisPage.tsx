@@ -11,6 +11,7 @@ import { TagLookupPanel } from '../components/TagLookupPanel';
 import { CapitalFlowHorizontalBarChart, FlowItem } from '../components/CapitalFlowHorizontalBarChart';
 import { Tag as TagIcon } from 'lucide-react';
 import { SERVICE_ENDPOINTS } from '../../../config/services';
+import { PAGE_LAYOUT } from '../../../config/pageLayout';
 
 const MARKET_ANALYSIS_API = `${SERVICE_ENDPOINTS.USER_SERVICE}/market-analysis`;
 
@@ -333,42 +334,38 @@ export const MarketAnalysisPage: React.FC = () => {
   ];
 
   return (
-    <div
-      className={`w-full h-full ${activeTab === 'panorama' || activeTab === 'tag-lookup' ? 'overflow-hidden' : 'overflow-y-auto'} bg-slate-50/60 px-5 pt-4 pb-28 flex flex-col gap-2.5 font-sans`}
-      style={
-        // stock-flow 内部自滚动，不套用上下淡出遮罩，避免首尾内容被遮挡；panorama/tag-lookup 不滚动，保留装饰性淡出
-        activeTab === 'stock-flow'
-          ? undefined
-          : {
-              WebkitMaskImage: 'linear-gradient(to bottom, transparent 0%, rgba(0,0,0,0.25) 10px, rgba(0,0,0,0.75) 20px, black 32px, black calc(100% - 28px), rgba(0,0,0,0.75) calc(100% - 16px), rgba(0,0,0,0.25) calc(100% - 8px), transparent 100%)',
-              maskImage: 'linear-gradient(to bottom, transparent 0%, rgba(0,0,0,0.25) 10px, rgba(0,0,0,0.75) 20px, black 32px, black calc(100% - 28px), rgba(0,0,0,0.75) calc(100% - 16px), rgba(0,0,0,0.25) calc(100% - 8px), transparent 100%)',
-            }
-      }
-    >
-        {/* 🌟 紧凑 Banner 顶栏 */}
-        <div className="relative rounded-2xl bg-gradient-to-r from-purple-100/90 via-indigo-50/80 to-purple-50/90 text-slate-900 px-5 py-2.5 shadow-xs border border-purple-200/60 flex items-center justify-between gap-4">
-          <div className="flex items-center gap-3">
-            <span className="px-3 py-0.5 rounded-full bg-purple-600/10 text-purple-700 border border-purple-200 text-xs font-extrabold font-mono flex items-center gap-1.5 shadow-2xs whitespace-nowrap">
-              <Sparkles className="w-3.5 h-3.5 text-purple-600" />
-              <span>QuantDB 2.0 数据引擎</span>
-            </span>
-            <h1 className="text-base font-extrabold tracking-tight bg-gradient-to-r from-purple-950 via-indigo-900 to-slate-900 bg-clip-text text-transparent whitespace-nowrap">
-              全市场多维数据分析与资金链全景
-            </h1>
+    <div className={PAGE_LAYOUT.outerClass}>
+      <div className={PAGE_LAYOUT.frameClass}>
+        {/* 🌟 统一顶栏 60px */}
+        <header
+          className={PAGE_LAYOUT.headerClass}
+          style={{ height: `${PAGE_LAYOUT.headerHeight}px` }}
+        >
+          <div className="flex items-center gap-3 min-w-0">
+            <div className="w-10 h-10 bg-gradient-to-br from-purple-600 via-indigo-600 to-purple-700 rounded-2xl flex items-center justify-center shadow-md shrink-0">
+              <Activity className="w-5 h-5 text-white" />
+            </div>
+            <div className="flex items-center gap-2.5 min-w-0">
+              <h1 className="text-lg font-bold text-slate-800 tracking-tight whitespace-nowrap">市场分析</h1>
+              <span className="hidden sm:inline-flex px-2.5 py-0.5 rounded-full bg-purple-50 text-purple-700 border border-purple-200/80 text-[11px] font-bold font-mono items-center gap-1">
+                <Sparkles className="w-3 h-3 text-purple-600" />
+                <span>QuantDB 2.0 数据引擎</span>
+              </span>
+            </div>
           </div>
 
           <div className="flex items-center gap-2.5 flex-shrink-0">
             {dataDate && (
               <span
                 title="行情数据对应的最新交易日"
-                className="hidden md:flex items-center gap-1.5 px-3 py-1 rounded-full bg-white/80 text-slate-600 border border-purple-200/70 text-[11px] font-extrabold font-mono whitespace-nowrap shadow-2xs"
+                className="hidden lg:flex items-center gap-1.5 px-3 py-1 rounded-full bg-slate-50 text-slate-600 border border-slate-200/70 text-[11px] font-bold font-mono whitespace-nowrap"
               >
                 <Clock className="w-3 h-3 text-purple-500" />
                 <span>数据日期:</span>
-                <span className="text-purple-700">{dataDate}</span>
+                <span className="text-purple-700 font-extrabold">{dataDate}</span>
               </span>
             )}
-            <div className="relative w-60">
+            <div className="relative w-48 sm:w-60">
               <Input
                 prefix={<Search className="w-3.5 h-3.5 text-purple-400 mr-1.5" />}
                 placeholder="全局搜索行业或股票..."
@@ -376,7 +373,7 @@ export const MarketAnalysisPage: React.FC = () => {
                 onChange={(e) => { setSearchQuery(e.target.value); setIsSearchOpen(true); }}
                 onFocus={() => setIsSearchOpen(true)}
                 onBlur={() => setTimeout(() => setIsSearchOpen(false), 150)}
-                className="rounded-xl border border-purple-200/80 bg-white text-xs text-slate-800 placeholder-slate-400 py-1.5 px-3.5 shadow-2xs hover:border-purple-300 focus:bg-white focus:ring-2 focus:ring-purple-100 transition-all"
+                className="rounded-xl border border-purple-200/80 bg-slate-50/60 text-xs text-slate-800 placeholder-slate-400 py-1 px-3 shadow-2xs hover:border-purple-300 focus:bg-white focus:ring-2 focus:ring-purple-100 transition-all"
               />
               {isSearchOpen && searchQuery.trim() && searchResults.length > 0 && (
                 <div className="absolute left-0 right-0 top-full mt-1.5 bg-white rounded-xl border border-purple-100 shadow-xl z-50 overflow-hidden max-h-80 overflow-y-auto">
@@ -396,14 +393,14 @@ export const MarketAnalysisPage: React.FC = () => {
             </div>
 
             {/* 🎯 快照历史日期选择器 */}
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-1.5">
               <DatePicker
                 allowClear
                 value={snapDate ? dayjs(snapDate) : null}
                 onChange={(d) => setSnapDate(d ? d.format('YYYY-MM-DD') : undefined)}
                 disabledDate={(d) => (snapDates.length > 0 ? !snapDates.includes(d.format('YYYY-MM-DD')) : false)}
                 placeholder="快照日期(默认最新)"
-                className="!w-44"
+                className="!w-36 sm:!w-40"
                 size="small"
                 suffixIcon={<Clock className="w-3 h-3 text-purple-400" />}
               />
@@ -418,7 +415,7 @@ export const MarketAnalysisPage: React.FC = () => {
             <button
               onClick={handleTriggerAnalysis}
               disabled={analyzing}
-              className={`flex items-center gap-1.5 px-4 py-1.5 rounded-full text-xs font-extrabold shadow-md transition-all duration-200 whitespace-nowrap cursor-pointer ${
+              className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-full text-xs font-extrabold shadow-md transition-all duration-200 whitespace-nowrap cursor-pointer ${
                 analyzing
                   ? 'bg-purple-400 text-white cursor-wait opacity-80'
                   : 'bg-gradient-to-r from-purple-600 via-indigo-600 to-purple-700 hover:from-purple-500 hover:to-indigo-500 active:scale-95 text-white shadow-purple-600/30'
@@ -433,40 +430,41 @@ export const MarketAnalysisPage: React.FC = () => {
               <span>{analyzing ? '正在分析…' : '市场分析'}</span>
             </button>
           </div>
+        </header>
+
+        {/* 📊 二级控制条：五大核心指数快照 + 功能 Tabs 导航 */}
+        <div className="flex-shrink-0 bg-slate-50/70 border-b border-gray-100 px-6 py-2.5 flex flex-col gap-2.5">
+          <BroadMarketHeader indices={indices} loading={loading} />
+          <div className="flex items-center justify-between pt-0.5">
+            <div className="flex items-center gap-1.5 overflow-x-auto">
+              {navTabs.map((tab) => {
+                const Icon = tab.icon;
+                const isActive = activeTab === tab.id;
+                return (
+                  <button
+                    key={tab.id}
+                    onClick={() => setActiveTab(tab.id)}
+                    className={`flex items-center gap-1.5 px-4 py-1.5 rounded-full text-xs font-bold transition-all duration-200 whitespace-nowrap ${
+                      isActive
+                        ? 'bg-purple-600 text-white shadow-md shadow-purple-600/25 scale-[1.01]'
+                        : 'bg-white text-slate-600 hover:text-slate-900 hover:bg-slate-100/80 border border-slate-200/80 shadow-2xs'
+                    }`}
+                  >
+                    <Icon className="w-3.5 h-3.5" />
+                    <span>{tab.label}</span>
+                  </button>
+                );
+              })}
+            </div>
+            <span className="text-[11px] text-slate-400 font-mono hidden sm:inline-block">
+              数据更新于: {updateTime || '刚刚'}
+            </span>
+          </div>
         </div>
 
-        {/* 📊 五大核心指数快照 */}
-        <BroadMarketHeader indices={indices} loading={loading} />
-
-        {/* 📌 功能切换 Tabs 导航栏 */}
-        <div className="flex items-center justify-between border-b border-purple-100/80 pb-1 pt-0.5">
-        <div className="flex items-center gap-2 overflow-x-auto p-1">
-          {navTabs.map((tab) => {
-            const Icon = tab.icon;
-            const isActive = activeTab === tab.id;
-            return (
-              <button
-                key={tab.id}
-                onClick={() => setActiveTab(tab.id)}
-                className={`flex items-center gap-2 px-5 py-2 rounded-full text-xs font-extrabold transition-all duration-200 whitespace-nowrap ${
-                  isActive
-                    ? 'bg-purple-600 text-white shadow-lg shadow-purple-600/30 scale-[1.02]'
-                    : 'bg-white/90 text-slate-600 hover:text-slate-900 hover:bg-slate-100 border border-slate-200/80 shadow-2xs hover:shadow-xs'
-                }`}
-              >
-                <Icon className="w-3.5 h-3.5" />
-                <span>{tab.label}</span>
-              </button>
-            );
-          })}
-        </div>
-
-        <span className="text-[11px] text-slate-400 font-mono hidden sm:inline-block">
-          数据更新于: {updateTime || '刚刚'}
-        </span>
-      </div>
-
-      {/* 📊 资金流向全景主功能页 (含 1日/3日/5日/10日/20日 横向柱状图) */}
+        {/* 📈 主内容区：全景看板禁用外部滚动条，保证 100% 紧凑铺满 */}
+        <div className={`flex-1 min-h-0 ${activeTab === 'panorama' || activeTab === 'tag-lookup' ? 'overflow-hidden p-4' : 'overflow-y-auto p-6 pb-20'} flex flex-col gap-3.5 bg-[#f8fafc] custom-scrollbar`}>
+          {/* 📊 资金流向全景主功能页 (含 1日/3日/5日/10日/20日 横向柱状图) */}
       {activeTab === 'flow-bar' && (
         <div className="flex flex-col gap-4">
           {/* 🛠️ 控制中心工具栏 Toolbar */}
@@ -600,7 +598,6 @@ export const MarketAnalysisPage: React.FC = () => {
                   <span className="w-2.5 h-2.5 rounded-full bg-purple-600 animate-pulse" />
                   <h3 className="text-sm font-extrabold text-slate-900">
                     {period.toUpperCase()} 资金净流入/净流出{flowDimension === 'sector' ? '板块' : '个股'}排行榜
-                    {chartViewMode === 'treemap' && `（包含 ${treemapData.length || 0} 个分析板块）`}
                   </h3>
                 </div>
                 <span className="text-xs text-slate-400 font-mono">
@@ -702,8 +699,8 @@ export const MarketAnalysisPage: React.FC = () => {
 
       {/* ── 原有其他页面内容维持完备 ── */}
       {activeTab === 'panorama' && (
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-stretch">
-          <div className="lg:col-span-5 flex flex-col justify-between gap-4">
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-3.5 items-stretch flex-1 min-h-0 overflow-hidden">
+          <div className="lg:col-span-5 flex flex-col justify-between gap-3 min-h-0">
             <MarketBreadthCard
               advanceCount={breadth?.advance_count}
               declineCount={breadth?.decline_count}
@@ -714,7 +711,7 @@ export const MarketAnalysisPage: React.FC = () => {
               profitEffect={breadth?.profit_effect}
               limitUpBrokenRatio={breadth?.limit_up_broken_ratio}
             />
-            <div className="flex flex-col gap-2.5 bg-white/95 backdrop-blur-md rounded-3xl p-5 border border-purple-100/80 shadow-md shadow-purple-500/5">
+            <div className="flex flex-col gap-2 bg-white/95 backdrop-blur-md rounded-2xl p-3.5 border border-purple-100/80 shadow-md shadow-purple-500/5 min-h-0 flex-1 justify-between">
               <div className="flex items-center justify-between">
                 <h3 className="text-xs font-extrabold text-slate-800 flex items-center gap-1.5">
                   <TrendingUp className="w-3.5 h-3.5 text-purple-600" />
@@ -731,15 +728,17 @@ export const MarketAnalysisPage: React.FC = () => {
             </div>
           </div>
 
-          <div className="lg:col-span-7 bg-white/95 backdrop-blur-md rounded-3xl p-5 border border-purple-100/80 shadow-md shadow-purple-500/5 flex flex-col justify-between">
-            <div className="flex items-center justify-between border-b border-purple-100/60 pb-3 mb-1">
+          <div className="lg:col-span-7 bg-white/95 backdrop-blur-md rounded-2xl p-3.5 border border-purple-100/80 shadow-md shadow-purple-500/5 flex flex-col min-h-0 justify-between">
+            <div className="flex items-center justify-between border-b border-purple-100/60 pb-2 mb-1 shrink-0">
               <h3 className="text-xs font-extrabold text-slate-900 flex items-center gap-1.5">
                 <Layers className="w-3.5 h-3.5 text-purple-600" />
-                <span>通达信二级分类热力矩形图谱（包含 {heatmapData.length || 0} 个分析板块）</span>
+                <span>通达信二级分类热力矩形图谱</span>
               </h3>
               <span className="text-[10px] text-slate-400 font-mono">市值权重 vs 涨跌幅</span>
             </div>
-            <ShenwanHeatmapChart data={heatmapData} height={530} />
+            <div className="flex-1 min-h-0">
+              <ShenwanHeatmapChart data={heatmapData} height="100%" />
+            </div>
           </div>
         </div>
       )}
@@ -809,11 +808,13 @@ export const MarketAnalysisPage: React.FC = () => {
         </div>
       )}
 
-      {activeTab === 'tag-lookup' && (
-        <div className="flex-1 min-h-0 overflow-hidden flex flex-col">
-          <TagLookupPanel />
+          {activeTab === 'tag-lookup' && (
+            <div className="flex-1 min-h-0 overflow-hidden flex flex-col">
+              <TagLookupPanel />
+            </div>
+          )}
         </div>
-      )}
+      </div>
     </div>
   );
 };

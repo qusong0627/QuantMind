@@ -38,6 +38,7 @@ import {
   ArrowDownOutlined,
   ArrowUpOutlined,
   BellOutlined,
+  DeleteOutlined,
   FilterOutlined,
   FireOutlined,
   GlobalOutlined,
@@ -237,9 +238,10 @@ export const NewsPanel: React.FC = () => {
   const [checkedKeys, setCheckedKeys] = useState<React.Key[]>([]);
   const [_, forceTick] = useState(0);
 
-  // —— rebuild state ——
+  // —— rebuild / purge state ——
   const [rebuilding, setRebuilding] = useState(false);
   const [rebuildingAll, setRebuildingAll] = useState(false);
+  const [purging, setPurging] = useState(false);
   const [rebuildProgress, setRebuildProgress] = useState<{
     running: boolean;
     total: number;
@@ -419,6 +421,31 @@ export const NewsPanel: React.FC = () => {
       },
     });
   }, [startRebuildPolling]);
+
+  const handlePurgeOld = useCallback(() => {
+    Modal.confirm({
+      title: '清理 24 小时前资讯',
+      width: 440,
+      content: (
+        <div>
+          <p>将删除 <b>超过 24 小时</b> 的资讯正文与标签（Huntly + enrichment）。</p>
+          <p style={{ color: '#ef4444', fontSize: 12 }}>此操作不可恢复，近期（24h 内）文章不受影响。</p>
+        </div>
+      ),
+      okText: '确认清理', cancelText: '取消',
+      okButtonProps: { danger: true },
+      onOk: async () => {
+        setPurging(true);
+        try {
+          const r = await newsService.purgeOld(24);
+          message.success({ content: `已清理 ${r.deleted_pages} 篇 / 标签 ${r.deleted_enrichments} 条`, key: 'purge-old', duration: 4 });
+          await Promise.all([loadArticles(), loadStats(), loadSources()]);
+        } catch (e: any) {
+          message.error({ content: e?.response?.data?.detail || '清理失败', key: 'purge-old' });
+        } finally { setPurging(false); }
+      },
+    });
+  }, [loadArticles, loadStats, loadSources]);
 
   // —— effects ——
   useEffect(() => { checkHealth(); loadSources(); loadStats(); }, [checkHealth, loadSources, loadStats]);
@@ -697,123 +724,125 @@ export const NewsPanel: React.FC = () => {
   return (
     <div className="news-panel">
       <div className="news-frame">
-        {/* ===== Toolbar (Integrated Header) ===== */}
+        {/* ===== Toolbar (2-row aligned) ===== */}
         <div className="news-toolbar">
-        <BellOutlined style={{ color: '#6366f1', fontSize: 18 }} />
-        <Title level={5} style={{ margin: 0, fontSize: 15, whiteSpace: 'nowrap' }}>资讯监控</Title>
-        <Tag color={health?.huntly_status === 'up' ? 'green' : 'red'} style={{ margin: 0 }}>{health?.huntly_status === 'up' ? '已连接' : '未连接'}</Tag>
-        <Tooltip title={latestPublishedAt ? `最新发布于 ${new Date(latestPublishedAt).toLocaleString('zh-CN')}` : '暂无'}>
-          <Tag icon={<SyncOutlined spin={loading} />} color="processing" style={{ margin: 0 }}>最新：{formatRelative(latestPublishedAt)}</Tag>
-        </Tooltip>
-
-        <Segmented
-          size="small"
-          value={f.feedMode}
-          onChange={(v) => updateF({ feedMode: v as FeedMode })}
-          options={[
-            { label: <span><GlobalOutlined /> 全部</span>, value: 'all' },
-            { label: <span><ThunderboltOutlined /> 事件</span>, value: 'events' },
-            { label: <span><StarFilled style={{ color: '#fbbf24', fontSize: 12 }} /> 收藏</span>, value: 'starred' },
-          ]}
-          style={{ flexShrink: 0 }}
-        />
-
-        <Input
-          allowClear
-          size="small"
-          prefix={<SearchOutlined style={{ color: '#94a3b8' }} />}
-          placeholder="搜索标题/内容/股票/标签..."
-          value={f.keyword}
-          onChange={(e) => updateF({ keyword: e.target.value })}
-          style={{ width: 220, flexShrink: 0 }}
-        />
-
-        <Segmented
-          size="small"
-          value={f.sentiment}
-          onChange={(v) => updateF({ sentiment: v as SentimentFilter })}
-          options={[
-            { label: '全部', value: 'any' },
-            { label: <span style={{ color: COLOR_BULLISH }}>利好</span>, value: 'bullish' },
-            { label: <span style={{ color: COLOR_BEARISH }}>利空</span>, value: 'bearish' },
-            { label: <span style={{ color: COLOR_NEUTRAL }}>中性</span>, value: 'neutral' },
-          ]}
-          style={{ flexShrink: 0 }}
-        />
-
-        <Tooltip title="仅显示强信号 (|情感分|>=0.5)">
-          <Button size="small" type={f.strongOnly ? 'primary' : 'default'} danger={f.strongOnly}
-            icon={<FireOutlined />} onClick={() => updateF({ strongOnly: !f.strongOnly })}>强信号</Button>
-        </Tooltip>
-
-        <Segmented
-          size="small"
-          value={f.datePreset}
-          onChange={(v) => {
-            const today = dayjs().endOf('day');
-            let range: [Dayjs | null, Dayjs | null] = null;
-            switch (v) {
-              case 'all': range = null; break;
-              case '1d': range = [dayjs().startOf('day'), today]; break;
-              case '3d': range = [dayjs().subtract(2, 'day').startOf('day'), today]; break;
-              case '7d': range = [dayjs().subtract(6, 'day').startOf('day'), today]; break;
-              case '30d': range = [dayjs().subtract(29, 'day').startOf('day'), today]; break;
-            }
-            updateF({
-              datePreset: v as string,
-              dateRange: range ? [range[0]!.toISOString(), range[1]!.toISOString()] : [null, null],
-            });
-          }}
-          options={[
-            { label: '不限', value: 'all' },
-            { label: '今日', value: '1d' },
-            { label: '近3日', value: '3d' },
-            { label: '近7日', value: '7d' },
-            { label: '近30日', value: '30d' },
-          ]}
-          style={{ flexShrink: 0 }}
-        />
-
-        <Select
-          size="small"
-          value={f.sort}
-          onChange={(v) => updateF({ sort: v as SortMode })}
-          options={SORT_OPTIONS.map((o) => ({ value: o.value, label: o.label as any }))}
-          style={{ width: 130, flexShrink: 0 }}
-        />
-
-        <Tooltip title={`高级筛选${activeFilterCount > 0 ? ` (${activeFilterCount} 项激活)` : ''}`}>
-          <Button size="small" icon={<FilterOutlined />}
-            type={activeFilterCount > 0 ? 'primary' : 'default'}
-            ghost={activeFilterCount > 0}
-            onClick={() => updateF({ advancedOpen: !f.advancedOpen })}>
-            筛选{activeFilterCount > 0 ? `(${activeFilterCount})` : ''}
-          </Button>
-        </Tooltip>
-
-        <div style={{ flex: 1 }} />
-
-        <Badge count={totalUnread} overflowCount={9999} style={{ backgroundColor: '#6366f1' }} />
-
-        <Tooltip title="立即刷新">
-          <Button size="small" type="primary" ghost icon={<ReloadOutlined spin={loading} />} onClick={handleRefresh}>刷新</Button>
-        </Tooltip>
-        <Tooltip title="重建标签">
-          <Button size="small" ghost danger icon={<SyncOutlined spin={rebuilding} />} loading={rebuilding} onClick={handleRebuildTags}>重建</Button>
-        </Tooltip>
-        <Tooltip title="一键重建全部">
-          <Button size="small" type="primary" danger ghost icon={<SyncOutlined spin={rebuildingAll} />} loading={rebuildingAll} onClick={handleRebuildAll}>
-            {rebuildingAll && rebuildProgress && rebuildProgress.total > 0 ? `${rebuildProgress.processed}/${rebuildProgress.total}` : '全量'}
-          </Button>
-        </Tooltip>
-        {health?.huntly_base_url && (
-          <Tooltip title="Huntly 后台">
-            <a href={`${SERVICE_ENDPOINTS.USER_SERVICE}/news/huntly-ui/`} target="_blank" rel="noreferrer" style={{ fontSize: 12, color: '#6366f1', whiteSpace: 'nowrap' }}>
-              <LinkOutlined /> 后台
-            </a>
-          </Tooltip>
-        )}
-      </div>
+          {/* Row 1: header + actions */}
+          <div className="news-toolbar-row news-toolbar-head">
+            <div className="news-toolbar-left">
+              <div className="w-9 h-9 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-2xl flex items-center justify-center shadow-md shrink-0">
+                <BellOutlined style={{ color: '#ffffff', fontSize: 16 }} />
+              </div>
+              <Title level={5} style={{ margin: 0, fontSize: 16, fontWeight: 700, whiteSpace: 'nowrap' }}>RSS信息流</Title>
+              <Tag color={health?.huntly_status === 'up' ? 'green' : 'red'} style={{ margin: 0 }}>{health?.huntly_status === 'up' ? '已连接' : '未连接'}</Tag>
+              <Tooltip title={latestPublishedAt ? `最新发布于 ${new Date(latestPublishedAt).toLocaleString('zh-CN')}` : '暂无'}>
+                <Tag icon={<SyncOutlined spin={loading} />} color="processing" style={{ margin: 0 }}>最新：{formatRelative(latestPublishedAt)}</Tag>
+              </Tooltip>
+              <Badge count={totalUnread} overflowCount={9999} style={{ backgroundColor: '#6366f1' }} className="news-toolbar-badge" />
+            </div>
+            <div className="news-toolbar-actions">
+              <Tooltip title="立即刷新">
+                <Button size="small" type="primary" ghost icon={<ReloadOutlined spin={loading} />} onClick={handleRefresh}>刷新</Button>
+              </Tooltip>
+              <Tooltip title="重建标签">
+                <Button size="small" ghost danger icon={<SyncOutlined spin={rebuilding} />} loading={rebuilding} onClick={handleRebuildTags}>重建</Button>
+              </Tooltip>
+              <Tooltip title="一键重建全部">
+                <Button size="small" type="primary" danger ghost icon={<SyncOutlined spin={rebuildingAll} />} loading={rebuildingAll} onClick={handleRebuildAll}>
+                  {rebuildingAll && rebuildProgress && rebuildProgress.total > 0 ? `${rebuildProgress.processed}/${rebuildProgress.total}` : '全量'}
+                </Button>
+              </Tooltip>
+              <Tooltip title="一键清理超过 24 小时的资讯（不可恢复）">
+                <Button size="small" danger icon={<DeleteOutlined />} loading={purging} onClick={handlePurgeOld}>清理</Button>
+              </Tooltip>
+              {health?.huntly_base_url && (
+                <Tooltip title="Huntly 后台">
+                  <a href={`${SERVICE_ENDPOINTS.USER_SERVICE}/news/huntly-ui/`} target="_blank" rel="noreferrer" style={{ fontSize: 12, color: '#6366f1', whiteSpace: 'nowrap' }}>
+                    <LinkOutlined /> 后台
+                  </a>
+                </Tooltip>
+              )}
+            </div>
+          </div>
+          {/* Row 2: filters — always aligned */}
+          <div className="news-toolbar-row news-toolbar-filters">
+            <Segmented
+              size="small"
+              value={f.feedMode}
+              onChange={(v) => updateF({ feedMode: v as FeedMode })}
+              options={[
+                { label: <span><GlobalOutlined /> 全部</span>, value: 'all' },
+                { label: <span><ThunderboltOutlined /> 事件</span>, value: 'events' },
+                { label: <span><StarFilled style={{ color: '#fbbf24', fontSize: 12 }} /> 收藏</span>, value: 'starred' },
+              ]}
+            />
+            <Input
+              allowClear
+              size="small"
+              prefix={<SearchOutlined style={{ color: '#94a3b8' }} />}
+              placeholder="搜索标题/内容/股票/标签..."
+              value={f.keyword}
+              onChange={(e) => updateF({ keyword: e.target.value })}
+              style={{ width: 220 }}
+            />
+            <Segmented
+              size="small"
+              value={f.sentiment}
+              onChange={(v) => updateF({ sentiment: v as SentimentFilter })}
+              options={[
+                { label: '全部', value: 'any' },
+                { label: <span style={{ color: COLOR_BULLISH }}>利好</span>, value: 'bullish' },
+                { label: <span style={{ color: COLOR_BEARISH }}>利空</span>, value: 'bearish' },
+                { label: <span style={{ color: COLOR_NEUTRAL }}>中性</span>, value: 'neutral' },
+              ]}
+            />
+            <Tooltip title="仅显示强信号 (|情感分|>=0.5)">
+              <Button size="small" type={f.strongOnly ? 'primary' : 'default'} danger={f.strongOnly}
+                icon={<FireOutlined />} onClick={() => updateF({ strongOnly: !f.strongOnly })}>强信号</Button>
+            </Tooltip>
+            <div style={{ flex: 1 }} />
+            <Segmented
+              size="small"
+              value={f.datePreset}
+              onChange={(v) => {
+                const today = dayjs().endOf('day');
+                let range: [Dayjs | null, Dayjs | null] = null;
+                switch (v) {
+                  case 'all': range = null; break;
+                  case '1d': range = [dayjs().startOf('day'), today]; break;
+                  case '3d': range = [dayjs().subtract(2, 'day').startOf('day'), today]; break;
+                  case '7d': range = [dayjs().subtract(6, 'day').startOf('day'), today]; break;
+                  case '30d': range = [dayjs().subtract(29, 'day').startOf('day'), today]; break;
+                }
+                updateF({
+                  datePreset: v as string,
+                  dateRange: range ? [range[0]!.toISOString(), range[1]!.toISOString()] : [null, null],
+                });
+              }}
+              options={[
+                { label: '不限', value: 'all' },
+                { label: '今日', value: '1d' },
+                { label: '近3日', value: '3d' },
+                { label: '近7日', value: '7d' },
+                { label: '近30日', value: '30d' },
+              ]}
+            />
+            <Select
+              size="small"
+              value={f.sort}
+              onChange={(v) => updateF({ sort: v as SortMode })}
+              options={SORT_OPTIONS.map((o) => ({ value: o.value, label: o.label as any }))}
+              style={{ width: 130 }}
+            />
+            <Tooltip title={`高级筛选${activeFilterCount > 0 ? ` (${activeFilterCount} 项激活)` : ''}`}>
+              <Button size="small" icon={<FilterOutlined />}
+                type={activeFilterCount > 0 ? 'primary' : 'default'}
+                ghost={activeFilterCount > 0}
+                onClick={() => updateF({ advancedOpen: !f.advancedOpen })}>
+                筛选{activeFilterCount > 0 ? `(${activeFilterCount})` : ''}
+              </Button>
+            </Tooltip>
+          </div>
+        </div>
 
       {/* ===== 分类导航：词典大类 + 全部高频事件标签（含文章数），点击按 event_tags 筛选 ===== */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 2, padding: '4px 16px', borderBottom: '1px solid rgba(226,232,240,0.8)', background: 'rgba(255,255,255,0.85)', flexWrap: 'wrap' }}>
@@ -1018,14 +1047,7 @@ export const NewsPanel: React.FC = () => {
                   );
                 }} />
               </div>
-              <div className="news-pagination-bar">
-                <Space size="small">
-                  <Tooltip title="上一页"><Button size="small" icon={<ArrowUpOutlined />} disabled={currentPage <= 1 || loading} onClick={() => setCurrentPage(Math.max(1, currentPage - 1))} /></Tooltip>
-                  <Tooltip title="下一页"><Button size="small" icon={<ArrowDownOutlined />} disabled={currentPage >= Math.max(1, Math.ceil(totalArticles / pageSize)) || loading} onClick={() => setCurrentPage(currentPage + 1)} /></Tooltip>
-                  <Text type="secondary" style={{ fontSize: 12, whiteSpace: 'nowrap' }}>
-                    第 <Text strong>{currentPage}</Text>/{Math.max(1, Math.ceil(totalArticles / pageSize))} 页 · 共 <Text strong style={{ color: '#6366f1' }}>{totalArticles.toLocaleString()}</Text> 条
-                  </Text>
-                </Space>
+              <div className="news-pagination-bar news-pagination-bar--centered">
                 <Pagination size="small" current={currentPage} pageSize={pageSize} total={totalArticles}
                   showSizeChanger showQuickJumper showLessItems
                   pageSizeOptions={['20', '50', '100', '200']}

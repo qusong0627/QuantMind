@@ -15,11 +15,11 @@ export interface ScoreBucketKey {
 
 /** 选股策略的分数区间定义（与后端 score_buckets 一致） */
 export const STRATEGY_BUCKETS: ScoreBucketKey[] = [
-  { key: 'lt_010', label: '< 0.10', action: '不买 · 信号太弱', test: s => s < 0.10, color: 'slate' },
-  { key: 'gold', label: '0.10-0.12', action: '首选 · 黄金区间', test: s => s >= 0.10 && s < 0.12, color: 'emerald' },
-  { key: 'opt_012_015', label: '0.12-0.15', action: '可选 · 主板优先', test: s => s >= 0.12 && s < 0.15, color: 'amber' },
-  { key: 'warn_015_020', label: '0.15-0.20', action: '谨慎 · 仅强市', test: s => s >= 0.15 && s < 0.20, color: 'orange' },
-  { key: 'gte_020', label: '≥ 0.20', action: '极谨慎 · 样本少', test: s => s >= 0.20, color: 'rose' },
+  { key: 'lt_010', label: '< 0.10', action: '分数 < 0.10', test: s => s < 0.10, color: 'slate' },
+  { key: 'gold', label: '0.10-0.12', action: '分数 0.10-0.12', test: s => s >= 0.10 && s < 0.12, color: 'emerald' },
+  { key: 'opt_012_015', label: '0.12-0.15', action: '分数 0.12-0.15', test: s => s >= 0.12 && s < 0.15, color: 'amber' },
+  { key: 'warn_015_020', label: '0.15-0.20', action: '分数 0.15-0.20', test: s => s >= 0.15 && s < 0.20, color: 'orange' },
+  { key: 'gte_020', label: '≥ 0.20', action: '分数 ≥ 0.20', test: s => s >= 0.20, color: 'rose' },
 ];
 
 interface Props {
@@ -340,7 +340,7 @@ export const ScoreDistributionPanel: React.FC<Props> = ({ dist, rankings, active
           {/* 负分集中行业 */}
           {negStats.topIndustries.length > 0 && (
             <div>
-              <Text className="block text-[11px] text-slate-400 font-bold mb-1">负分集中行业（下跌持续 · 做空参考）</Text>
+              <Text className="block text-[11px] text-slate-400 font-bold mb-1">负分集中行业（下跌持续）</Text>
               <div className="flex flex-wrap gap-1.5">
                 {negStats.topIndustries.map(x => (
                   <Tag key={x.industry} className="m-0 rounded-full border-0 bg-rose-50 text-rose-600 font-bold text-[11px] px-2 py-0.5">

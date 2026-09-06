@@ -1154,8 +1154,10 @@ async def get_available_models(tid: str, uid: str, market: str | None = None) ->
         sql = text("""
             SELECT um.model_id,
                    COALESCE(um.metadata_json->>'display_name', um.metadata_json->>'model_name') AS display_name,
-                   um.metadata_json->>'framework' AS framework,
-                   um.metadata_json->>'model_type' AS model_type,
+                    um.metadata_json->>'framework' AS framework,
+                    um.metadata_json->>'model_type' AS model_type,
+                    um.metadata_json->>'target_mode' AS target_mode,
+                    um.metadata_json->>'prediction_mode' AS prediction_mode,
                    um.metadata_json->'metrics' AS metrics,
                    um.metrics_json AS metrics_json,
                    EXISTS (
@@ -1184,6 +1186,8 @@ async def get_available_models(tid: str, uid: str, market: str | None = None) ->
                     "name": name,
                     "framework": r["framework"] or "",
                     "modelType": r["model_type"] or "",
+                    "targetMode": r["target_mode"] or "",
+                    "predictionMode": r["prediction_mode"] or "",
                     "ic": _extract_ic(r["metrics"], r["metrics_json"]),
                     "hasInference": bool(r["has_inference"]),
                 }
@@ -1216,6 +1220,8 @@ async def get_available_models(tid: str, uid: str, market: str | None = None) ->
                         "name": name,
                         "framework": meta.get("framework") or "lightgbm",
                         "modelType": meta.get("model_type") or meta.get("framework") or "lightgbm",
+                        "targetMode": meta.get("target_mode") or "",
+                        "predictionMode": meta.get("prediction_mode") or "",
                         "ic": _extract_ic(metrics, meta.get("metrics_json")) or 0.128,
                         "hasInference": (p.parent / "inference.py").is_file(),
                     })
@@ -1273,13 +1279,109 @@ def _pred_parquet_file(storage_path: str) -> Path | None:
     return None
 
 
+# pred.parquet 按日物化分片目录：{model_dir}/pred_daily/dt=YYYYMMDD/data.parquet。
+# 惰性物化——首次读到某交易日截面时从全量 pred.parquet 提取该日并落盘，
+# 后续直读单日小文件，避免每次对全历史单文件做全扫描 + RANK()。
+_PRED_DAILY_DIR_NAME = "pred_daily"
+
+
+def _pred_day_partition(parquet_file: Path, trade_date: str) -> Path:
+    """按日物化分片路径（trade_date YYYY-MM-DD → dt=YYYYMMDD）。"""
+    dt_val = trade_date.replace("-", "")
+    return parquet_file.parent / _PRED_DAILY_DIR_NAME / f"dt={dt_val}" / "data.parquet"
+
+
+def _pred_day_partition_valid(parquet_file: Path, part: Path) -> bool:
+    """物化分片有效性：pred.parquet 未被再次修改（merge 会整文件重写）。"""
+    try:
+        return part.is_file() and parquet_file.stat().st_mtime_ns <= part.stat().st_mtime_ns
+    except OSError:
+        return False
+
+
+def _materialize_pred_day(parquet_file: Path, trade_date: str) -> Path | None:
+    """从全量 pred.parquet 提取某交易日截面并原子落盘为按日分片。
+
+    返回物化分片路径；失败返回 None（调用方回退全量查询）。
+    口径与 _read_model_pred_day 一致：剔除 B 股/北交所/指数，symbol 转前缀式。
+    """
+    part = _pred_day_partition(parquet_file, trade_date)
+    if _pred_day_partition_valid(parquet_file, part):
+        return part
+    import duckdb
+    import tempfile
+
+    con = duckdb.connect()
+    try:
+        cols = [
+            r[0]
+            for r in con.execute(
+                f"SELECT * FROM read_parquet('{str(parquet_file)}') LIMIT 0"
+            ).description
+        ]
+        score_col = next((c for c in ("pred", "fusion_score", "score") if c in cols), None)
+        date_col = (
+            "trade_date" if "trade_date" in cols else "date" if "date" in cols else None
+        )
+        sym_col = next((c for c in ("symbol", "instrument") if c in cols), None)
+        if not (score_col and date_col and sym_col):
+            return None
+        rows = con.execute(
+            f"""
+            SELECT CAST({sym_col} AS VARCHAR) AS sym,
+                   CAST({score_col} AS DOUBLE) AS sc
+            FROM read_parquet('{str(parquet_file)}')
+            WHERE CAST({date_col} AS DATE) = CAST('{trade_date}' AS DATE)
+              AND CAST({score_col} AS DOUBLE) IS NOT NULL
+              AND NOT (
+                  UPPER(CAST({sym_col} AS VARCHAR)) LIKE 'SH000%'
+                  OR UPPER(CAST({sym_col} AS VARCHAR)) LIKE 'SZ399%'
+                  OR UPPER(CAST({sym_col} AS VARCHAR)) LIKE 'SH900%'
+                  OR UPPER(CAST({sym_col} AS VARCHAR)) LIKE 'SZ200%'
+                  OR UPPER(CAST({sym_col} AS VARCHAR)) LIKE 'BJ%'
+              )
+            """
+        ).fetchall()
+        if not rows:
+            return None
+        symbols: list[str] = []
+        scores: list[float] = []
+        for r in rows:
+            symbol = StockCodeUtil.to_prefix(str(r[0] or ""))
+            if not re.match(r"^(SH|SZ|BJ)\d{6}$", symbol):
+                continue
+            symbols.append(symbol)
+            scores.append(float(r[1]))
+        if not symbols:
+            return None
+        import pandas as pd
+
+        df = pd.DataFrame({"symbol": symbols, "score": scores})
+        df = df.sort_values("symbol").reset_index(drop=True)
+        part.parent.mkdir(parents=True, exist_ok=True)
+        tmp_fd, tmp_path = tempfile.mkstemp(dir=str(part.parent), suffix=".parquet.tmp")
+        os.close(tmp_fd)
+        df.to_parquet(tmp_path, index=False)
+        os.replace(tmp_path, str(part))
+        return part
+    except Exception as exc:
+        logger.warning("pred.parquet 物化 %s 失败: %s", trade_date, exc)
+        return None
+    finally:
+        try:
+            con.close()
+        except Exception:
+            pass
+
+
 def _read_model_pred_day(storage_path: str, trade_date: str) -> list[dict[str, Any]]:
     """读模型 pred.parquet 某交易日的全市场分数截面（含排名）。
 
     投研批次日历选中日期后的个股列表数据源（B 套）。排名口径与
     engine_signal_scores / 个股分数曲线对齐：剔除 B 股（SH900/SZ200）、
     北交所（BJ）、指数（SH000/SZ399）。symbol 统一转前缀式。
-    带 mtime 键控的进程内缓存，避免反复扫描大 parquet。
+    优先读按日物化分片（单日小文件直读 + RANK），分片缺失时从全量提取
+    并物化，之后重复请求直读分片。带 mtime 键控的进程内缓存兜底。
     """
     import time as _time
 
@@ -1296,42 +1398,23 @@ def _read_model_pred_day(storage_path: str, trade_date: str) -> list[dict[str, A
         return hit[1]
 
     rows: list[dict[str, Any]] = []
-    import duckdb
+    part = _materialize_pred_day(parquet_file, trade_date)
+    if part is not None:
+        # 单日分片直读 + 截面 RANK（分片已剔除 B/北交所/指数）
+        import duckdb
 
-    con = duckdb.connect()
-    try:
-        cols = [
-            r[0]
-            for r in con.execute(
-                f"SELECT * FROM read_parquet('{str(parquet_file)}') LIMIT 0"
-            ).description
-        ]
-        score_col = next((c for c in ("pred", "fusion_score", "score") if c in cols), None)
-        date_col = (
-            "trade_date" if "trade_date" in cols else "date" if "date" in cols else None
-        )
-        sym_col = next((c for c in ("symbol", "instrument") if c in cols), None)
-        if score_col and date_col and sym_col:
-            # 先全市场截面算 RANK（regexp_extract 抽连续数字段兼容前/后缀式）
+        con = duckdb.connect()
+        try:
             res = con.execute(
-                f"""
+                """
                 WITH d AS (
-                    SELECT CAST({sym_col} AS VARCHAR) AS sym,
-                           CAST({score_col} AS DOUBLE) AS sc,
-                           RANK() OVER (ORDER BY CAST({score_col} AS DOUBLE) DESC) AS rk
-                    FROM read_parquet('{str(parquet_file)}')
-                    WHERE CAST({date_col} AS DATE) = CAST('{trade_date}' AS DATE)
-                      AND CAST({score_col} AS DOUBLE) IS NOT NULL
-                      AND NOT (
-                          UPPER(CAST({sym_col} AS VARCHAR)) LIKE 'SH000%'
-                          OR UPPER(CAST({sym_col} AS VARCHAR)) LIKE 'SZ399%'
-                          OR UPPER(CAST({sym_col} AS VARCHAR)) LIKE 'SH900%'
-                          OR UPPER(CAST({sym_col} AS VARCHAR)) LIKE 'SZ200%'
-                          OR UPPER(CAST({sym_col} AS VARCHAR)) LIKE 'BJ%'
-                      )
+                    SELECT symbol AS sym, score AS sc,
+                           RANK() OVER (ORDER BY score DESC) AS rk
+                    FROM read_parquet(?)
                 )
                 SELECT sym, sc, rk FROM d ORDER BY rk ASC
-                """
+                """,
+                [str(part)],
             ).fetchall()
             for r in res:
                 symbol = StockCodeUtil.to_prefix(str(r[0] or ""))
@@ -1340,13 +1423,68 @@ def _read_model_pred_day(storage_path: str, trade_date: str) -> list[dict[str, A
                 rows.append(
                     {"symbol": symbol, "score": float(r[1]), "rank": int(r[2])}
                 )
-    except Exception:
-        rows = []
-    finally:
-        try:
-            con.close()
         except Exception:
-            pass
+            rows = []
+        finally:
+            try:
+                con.close()
+            except Exception:
+                pass
+        if not rows:
+            part = None  # 分片读失败，回退全量查询
+
+    if part is None:
+        import duckdb
+
+        con = duckdb.connect()
+        try:
+            cols = [
+                r[0]
+                for r in con.execute(
+                    f"SELECT * FROM read_parquet('{str(parquet_file)}') LIMIT 0"
+                ).description
+            ]
+            score_col = next((c for c in ("pred", "fusion_score", "score") if c in cols), None)
+            date_col = (
+                "trade_date" if "trade_date" in cols else "date" if "date" in cols else None
+            )
+            sym_col = next((c for c in ("symbol", "instrument") if c in cols), None)
+            if score_col and date_col and sym_col:
+                # 先全市场截面算 RANK（regexp_extract 抽连续数字段兼容前/后缀式）
+                res = con.execute(
+                    f"""
+                    WITH d AS (
+                        SELECT CAST({sym_col} AS VARCHAR) AS sym,
+                               CAST({score_col} AS DOUBLE) AS sc,
+                               RANK() OVER (ORDER BY CAST({score_col} AS DOUBLE) DESC) AS rk
+                        FROM read_parquet('{str(parquet_file)}')
+                        WHERE CAST({date_col} AS DATE) = CAST('{trade_date}' AS DATE)
+                          AND CAST({score_col} AS DOUBLE) IS NOT NULL
+                          AND NOT (
+                              UPPER(CAST({sym_col} AS VARCHAR)) LIKE 'SH000%'
+                              OR UPPER(CAST({sym_col} AS VARCHAR)) LIKE 'SZ399%'
+                              OR UPPER(CAST({sym_col} AS VARCHAR)) LIKE 'SH900%'
+                              OR UPPER(CAST({sym_col} AS VARCHAR)) LIKE 'SZ200%'
+                              OR UPPER(CAST({sym_col} AS VARCHAR)) LIKE 'BJ%'
+                          )
+                    )
+                    SELECT sym, sc, rk FROM d ORDER BY rk ASC
+                    """
+                ).fetchall()
+                for r in res:
+                    symbol = StockCodeUtil.to_prefix(str(r[0] or ""))
+                    if not re.match(r"^(SH|SZ|BJ)\d{6}$", symbol):
+                        continue
+                    rows.append(
+                        {"symbol": symbol, "score": float(r[1]), "rank": int(r[2])}
+                    )
+        except Exception:
+            rows = []
+        finally:
+            try:
+                con.close()
+            except Exception:
+                pass
 
     if len(_PRED_DAY_CACHE) > 64:
         _PRED_DAY_CACHE.clear()
@@ -1354,17 +1492,36 @@ def _read_model_pred_day(storage_path: str, trade_date: str) -> list[dict[str, A
     return rows
 
 
+_PRED_DATES_CACHE: dict[str, tuple[float, list[str]]] = {}
+_PRED_DATES_CACHE_TTL = 600.0
+
+
 def _read_model_pred_dates(storage_path: str) -> list[str]:
     """读模型 pred.parquet 的去重交易日列表（投研批次日历的数据源）。
 
     与推理覆盖统计同源（B 套数据）：pred.parquet 的 trade_date 即数据日 T，
     含训练期测试集预测 + 逐日推理/补全追加的真实分数。
-    """
-    import duckdb
 
+    注意：日历必须覆盖全量文件中的全部交易日（不能只看物化分片，否则未
+    访问过的日期会从日历中消失），故总是回退全量 DISTINCT 扫描；按日物化
+    分片只加速「读某日截面」，不影响日期枚举。带 mtime 键控的进程缓存
+    避免每次请求都全量扫描大 parquet。
+    """
     parquet_file = _pred_parquet_file(storage_path)
     if parquet_file is None:
         return []
+
+    try:
+        mtime = parquet_file.stat().st_mtime
+    except OSError:
+        mtime = 0.0
+    cache_key = f"{parquet_file}|{int(mtime)}"
+    hit = _PRED_DATES_CACHE.get(cache_key)
+    if hit and time.time() - hit[0] < _PRED_DATES_CACHE_TTL:
+        return hit[1]
+
+    import duckdb
+
     con = duckdb.connect()
     try:
         cols = [
@@ -1382,7 +1539,7 @@ def _read_model_pred_dates(storage_path: str) -> list[str]:
             f"SELECT DISTINCT CAST({date_col} AS DATE) AS d "
             f"FROM read_parquet('{str(parquet_file)}') ORDER BY d"
         ).fetchall()
-        return [str(r[0])[:10] for r in rows if r[0] is not None]
+        dates = [str(r[0])[:10] for r in rows if r[0] is not None]
     except Exception:
         return []
     finally:
@@ -1390,6 +1547,11 @@ def _read_model_pred_dates(storage_path: str) -> list[str]:
             con.close()
         except Exception:
             pass
+
+    if len(_PRED_DATES_CACHE) > 64:
+        _PRED_DATES_CACHE.clear()
+    _PRED_DATES_CACHE[cache_key] = (time.time(), dates)
+    return dates
 
 
 async def get_inference_runs(tid: str, uid: str, model_id: str) -> dict[str, Any]:
@@ -2258,6 +2420,10 @@ _SHAP_TIMEOUT_SEC = 8.0
 _SHAP_MAX_DRIVERS = 6
 _SHAP_MIN_DRIVERS = 3  # 真值特征少于 3 个上榜则放弃 SHAP，降级启发式
 
+# predict-stock 分位扇形宽度门禁：|p90-p10| 超过该值视为训练塌缩或口径错位，
+# 禁止换算成价格扇形（rank 口径边缘分位数约为 ±0.4，远超正常收益区间）。
+_FORECAST_QUANTILE_WIDTH_GATE = 0.30
+
 _SNAPSHOT_MARKET_FILE = {
     "CN": None,  # CN 按年分文件 model_features_{year}.parquet
     "HK": "model_features_hk.parquet",
@@ -2532,6 +2698,9 @@ async def predict_single_stock(
         sel.get("name") or sel.get("modelName") or "LightGBM Alpha-158 增强模型"
     )
     chosen_model_type = sel.get("modelType") or sel.get("model_type") or "lightgbm"
+    # 分位扇形口径：仅 target_mode=return 的分位值才是收益率，可换算成价格；
+    # rank/score 口径未知时留空，由宽度门禁兜底。
+    chosen_target_mode = str(sel.get("targetMode") or sel.get("target_mode") or "").strip().lower()
 
     # “开始预测推理”必须实际执行注册模型，不能用页面侧或服务侧的公式伪造结果。
     # 延迟导入避免 research/model_training 路由在应用启动阶段发生循环导入。
@@ -2701,6 +2870,7 @@ async def predict_single_stock(
     p50_ret = round(fusion_score, 4)
     confidence = 0.0
     forecast_curve: list[dict[str, Any]] = []
+    forecast_warning: str | None = None
     curr_p = latest_close if latest_close > 0 else 100.0
     quantile_prediction: dict[str, Any] | None = None
     if main_row is not None:
@@ -2720,17 +2890,33 @@ async def predict_single_stock(
                         p10_ret, p50_ret, p90_ret = sorted(values)
                         quantile_prediction = candidate
                         confidence = float(candidate.get("calibrated_coverage") or 0.0)
-                        target_day = date.fromisoformat(resolved_date) + timedelta(days=max(1, int(horizon)))
-                        forecast_curve = [{
-                            "step": int(horizon),
-                            "date": target_day.isoformat(),
-                            "p10": round(p10_ret * 100, 4),
-                            "p50": round(p50_ret * 100, 4),
-                            "p90": round(p90_ret * 100, 4),
-                            "predicted_price": round(curr_p * (1 + p50_ret), 4),
-                            "upper_price": round(curr_p * (1 + p90_ret), 4),
-                            "lower_price": round(curr_p * (1 + p10_ret), 4),
-                        }]
+                        # 门禁1：口径分流 —— 非 return 口径的分位值不是收益率，
+                        # 禁止换算成价格扇形（如 rank 口径边缘分位数 ±0.4）。
+                        if chosen_target_mode and chosen_target_mode != "return":
+                            forecast_warning = (
+                                f"该模型目标口径为 {chosen_target_mode}，分位值非收益率，"
+                                "已隐藏价格区间扇形；仅展示信号分数。"
+                            )
+                            quantile_prediction = None
+                        # 门禁2：区间宽度 —— |p90-p10| 超限视为训练塌缩或口径错位。
+                        elif (p90_ret - p10_ret) > _FORECAST_QUANTILE_WIDTH_GATE:
+                            forecast_warning = (
+                                f"分位区间过宽（P90-P10={(p90_ret - p10_ret) * 100:.1f}%），"
+                                "疑似分位训练塌缩或标签口径错位，已隐藏价格区间扇形。"
+                            )
+                            quantile_prediction = None
+                        else:
+                            target_day = date.fromisoformat(resolved_date) + timedelta(days=max(1, int(horizon)))
+                            forecast_curve = [{
+                                "step": int(horizon),
+                                "date": target_day.isoformat(),
+                                "p10": round(p10_ret * 100, 4),
+                                "p50": round(p50_ret * 100, 4),
+                                "p90": round(p90_ret * 100, 4),
+                                "predicted_price": round(curr_p * (1 + p50_ret), 4),
+                                "upper_price": round(curr_p * (1 + p90_ret), 4),
+                                "lower_price": round(curr_p * (1 + p10_ret), 4),
+                            }]
                 except (KeyError, TypeError, ValueError):
                     quantile_prediction = None
 
@@ -2780,6 +2966,7 @@ async def predict_single_stock(
         "p50_return": round(p50_ret * 100, 2),
         "p90_return": round(p90_ret * 100, 2) if quantile_prediction else None,
         "forecast_curve": forecast_curve,
+        "forecast_warning": forecast_warning,
         "drivers": drivers,
         "consensus": consensus,
         "consensus_score": consensus_score,

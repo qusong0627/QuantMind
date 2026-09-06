@@ -41,7 +41,11 @@ from backend.scripts.market_snapshot.schema_adapter import (
     q as _q,
 )
 
-DEFAULT_OUT_DIR = Path(os.getcwd()) / "data" / "market-analysis"
+DEFAULT_OUT_DIR = (
+    Path(os.getenv("QM_MARKET_SNAPSHOT_DIR", "")).resolve()
+    if os.getenv("QM_MARKET_SNAPSHOT_DIR")
+    else Path(os.getcwd()) / "data" / "market-analysis"
+)
 
 INDEX_OVERVIEW = [
     {"symbol": "000001.SH", "name": "上证指数"},

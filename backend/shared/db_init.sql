@@ -535,6 +535,7 @@ CREATE TABLE IF NOT EXISTS qm_feature_definition (
     feature_id          UUID,
     feature_key         VARCHAR PRIMARY KEY,
     feature_name        VARCHAR,
+    explanation         TEXT DEFAULT '',
     formula             TEXT,
     category_id         VARCHAR REFERENCES qm_feature_category (category_id),
     source_table_fields TEXT,

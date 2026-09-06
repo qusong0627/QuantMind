@@ -241,7 +241,8 @@ async def update_feature_catalog(
     if not isinstance(categories, list):
         raise HTTPException(status_code=400, detail="categories must be a list")
 
-    # 计算总特征数
+    valid_markets = {"CN", "HK", "US", "CRYPTO", "FUTURES", "CUSTOM"}
+    # 计算总特征数 + 归一化 explanation/markets
     total_features = 0
     for cat in categories:
         features = cat.get("features", [])
@@ -250,6 +251,23 @@ async def update_feature_catalog(
                 status_code=400,
                 detail=f"Category '{cat.get('id')}' features must be a list",
             )
+        for feat in features:
+            if not isinstance(feat, dict):
+                continue
+            expl = str(feat.get("explanation") or feat.get("detail") or "")
+            if len(expl) > 500:
+                raise HTTPException(status_code=400, detail=f"Feature '{feat.get('key')}' explanation 超过500字")
+            feat["explanation"] = expl
+            markets = feat.get("markets")
+            if isinstance(markets, list):
+                cleaned = [str(m).upper() for m in markets if str(m).strip()]
+                unknown = [m for m in cleaned if m not in valid_markets]
+                if unknown:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Feature '{feat.get('key')}' 含非法市场: {','.join(unknown)}",
+                    )
+                feat["markets"] = cleaned
         cat["feature_count"] = len(features)
         total_features += len(features)
     catalog["feature_count"] = total_features
@@ -1124,232 +1142,3 @@ async def delete_backtest_history(
     if not deleted:
         raise HTTPException(status_code=404, detail=f"回测记录 {run_id} 未找到")
     return {"status": "ok", "deleted": run_id}
-
-
-class InferenceBacktestStrategyParams(BaseModel):
-    """选股策略参数（默认值 = 平衡型）。"""
-
-    entry_threshold: float = Field(default=0.09, description="行业avgTop1入场线")
-    exit_threshold: float = Field(default=0.06, description="行业avgTop1空仓线")
-    strong_industry_min: int = Field(default=2, description="强行业数下限")
-    score_min: float = Field(default=0.10, description="个股分数下限")
-    score_max: float = Field(default=0.12, description="个股分数上限")
-    max_hold_days: int = Field(default=5, description="最长持有交易日")
-    take_profit: float = Field(default=0.08, description="止盈比例")
-    stop_loss: float = Field(default=0.05, description="止损比例")
-    max_positions: int = Field(default=5, description="最大持仓数")
-    daily_select_max: int = Field(default=5, description="每日新选股上限")
-    initial_capital: float = Field(default=100_000.0, description="初始资金")
-    main_board_only: bool = Field(default=True, description="仅主板")
-    exclude_limit_moves: bool = Field(default=True, description="剔除涨跌停")
-    exclude_st: bool = Field(default=True, description="剔除ST")
-    use_index_ma20_filter: bool = Field(default=True, description="大盘MA20过滤")
-
-
-class InferenceBacktestRequest(BaseModel):
-    model_id: str = Field(..., description="模型ID")
-    start_date: str = Field(..., description="回测起始日期 YYYY-MM-DD")
-    end_date: str = Field(..., description="回测结束日期 YYYY-MM-DD")
-    signal_mode: str = Field(
-        default="realtime", description="realtime=逐日推理 | stored=读已有信号"
-    )
-    strategy: InferenceBacktestStrategyParams = Field(
-        default_factory=InferenceBacktestStrategyParams
-    )
-    model_config = {"protected_namespaces": ()}
-
-
-@router.post("/inference-backtest", summary="推理回测（选股策略事件驱动）")
-async def run_inference_backtest(
-    request: InferenceBacktestRequest,
-    current_user: dict = Depends(require_admin),
-):
-    """
-    基于推理信号 + 选股策略的事件驱动回测。
-
-    signal_mode=stored: 直接读 engine_signal_scores 已有推理信号（快，覆盖有限）。
-    signal_mode=realtime: 逐日跑模型推理生成信号（慢，覆盖任意区间）。
-    """
-    from backend.services.engine.inference.inference_backtest_service import (
-        StrategyConfig,
-        run_inference_backtest,
-    )
-
-    # 构建策略配置
-    s = request.strategy
-    config = StrategyConfig(
-        entry_threshold=s.entry_threshold,
-        exit_threshold=s.exit_threshold,
-        strong_industry_min=s.strong_industry_min,
-        score_min=s.score_min,
-        score_max=s.score_max,
-        max_hold_days=s.max_hold_days,
-        take_profit=s.take_profit,
-        stop_loss=s.stop_loss,
-        max_positions=s.max_positions,
-        daily_select_max=s.daily_select_max,
-        initial_capital=s.initial_capital,
-        main_board_only=s.main_board_only,
-        exclude_limit_moves=s.exclude_limit_moves,
-        exclude_st=s.exclude_st,
-        use_index_ma20_filter=s.use_index_ma20_filter,
-        signal_mode=request.signal_mode,
-    )
-
-    model_dir = next(
-        (Path(d) for d in _find_model_directories(MODELS_ROOT) if Path(d).name == request.model_id),
-        None,
-    )
-    if model_dir is None:
-        raise HTTPException(status_code=404, detail=f"模型 {request.model_id} 未找到")
-    data_dir, model_meta = _model_data_context(model_dir)
-
-    # 信号提供者：stored 模式读 engine_signal_scores
-    signal_provider = None
-    if request.signal_mode == "stored":
-        signal_provider = _make_stored_signal_provider(request.model_id)
-
-    try:
-        import asyncio
-
-        result = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda: run_inference_backtest(
-                model_id=request.model_id,
-                start_date=request.start_date,
-                end_date=request.end_date,
-                data_dir=data_dir,
-                model_meta=model_meta,
-                config=config,
-                signal_provider=signal_provider,
-            ),
-        )
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"推理回测执行失败: {exc}") from exc
-
-    if result.status == "error":
-        raise HTTPException(
-            status_code=400,
-            detail=str(
-                result.errors[0].get("error") if result.errors else "推理回测失败"
-            ),
-        )
-
-    return _serialize_backtest_result(result)
-
-
-def _make_stored_signal_provider(model_id: str):
-    """stored 模式信号提供者：从 engine_signal_scores 读该模型的已有推理信号。
-
-    一次性预取全部信号到内存 dict（按 trade_date 索引），provider 只查内存。
-    用 psycopg2 同步连接读取，避免在 FastAPI async 事件循环里调用 asyncio.run()
-    （会导致 RuntimeError: asyncio.run() cannot be called from a running event loop）。
-    """
-    import os
-
-    import psycopg2
-
-    conn_params = {
-        "host": os.getenv("DB_HOST", "db"),
-        "port": int(os.getenv("DB_PORT", "5432")),
-        "dbname": os.getenv("DB_NAME", "quantmind"),
-        "user": os.getenv("DB_USER", "quantmind"),
-        "password": os.getenv("DB_PASSWORD", ""),
-    }
-
-    by_date: dict[str, list[dict[str, Any]]] = {}
-    try:
-        conn = psycopg2.connect(**conn_params)
-        try:
-            cur = conn.cursor()
-            cur.execute(
-                """
-                SELECT e.trade_date::text, e.symbol, e.fusion_score AS score
-                FROM engine_signal_scores e
-                JOIN qm_model_inference_runs r ON e.run_id = r.run_id
-                WHERE r.model_id = %s
-                ORDER BY e.trade_date, e.fusion_score DESC
-                """,
-                (model_id,),
-            )
-            for trade_date, symbol, score in cur.fetchall():
-                if score is None:
-                    continue
-                by_date.setdefault(trade_date, []).append(
-                    {"symbol": str(symbol), "score": float(score)}
-                )
-            cur.close()
-        finally:
-            conn.close()
-    except Exception as exc:
-        logger = __import__("logging").getLogger(__name__)
-        logger.warning("预取推理信号失败 (model=%s): %s", model_id, exc)
-
-    def provider(trade_date: str):
-        import pandas as pd
-
-        records = by_date.get(trade_date, [])
-        return pd.DataFrame(records)
-
-    return provider
-
-
-def _serialize_backtest_result(result: Any) -> dict[str, Any]:
-    """序列化回测结果（dataclass → dict，处理 numpy 标量）。"""
-    import numpy as np
-
-    def _clean(v: Any) -> Any:
-        if isinstance(v, (np.floating, np.integer)):
-            return v.item()
-        if isinstance(v, float):
-            return round(v, 6)
-        if isinstance(v, dict):
-            return {k: _clean(val) for k, val in v.items()}
-        if isinstance(v, list):
-            return [_clean(x) for x in v]
-        return v
-
-    return {
-        "status": result.status,
-        "metrics": _clean(result.metrics),
-        "daily_selections": [
-            {
-                "trade_date": ds.trade_date,
-                "market_state": ds.market_state,
-                "industry_avg_top1": round(float(ds.industry_avg_top1), 6),
-                "strong_industry_count": ds.strong_industry_count,
-                "index_above_ma20": ds.index_above_ma20,
-                "selections": [
-                    {
-                        "symbol": p["symbol"],
-                        "score": round(float(p["score"]), 6),
-                        "industry": p["industry"],
-                    }
-                    for p in ds.selections
-                ],
-            }
-            for ds in result.daily_selections
-        ],
-        "trades": [
-            {
-                "date": t.date,
-                "symbol": t.symbol,
-                "name": t.name,
-                "side": t.side,
-                "price": round(float(t.price), 4),
-                "shares": t.shares,
-                "amount": round(float(t.amount), 2),
-                "industry": t.industry,
-                "score": round(float(t.score), 6),
-                "reason": t.reason,
-                "profit_pct": round(float(t.profit_pct), 6),
-                "hold_days": t.hold_days,
-            }
-            for t in result.trades
-        ],
-        "nav_curve": _clean(result.nav_curve),
-        "monthly_returns": _clean(result.monthly_returns),
-        "industry_rotation": result.industry_rotation,
-        "errors": result.errors,
-        "warnings": result.warnings,
-    }

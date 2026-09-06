@@ -1,5 +1,5 @@
 import axios, { AxiosInstance } from 'axios';
-import { SERVICE_ENDPOINTS } from '../config/services';
+import { SERVICE_ENDPOINTS, resolveWebSafeServiceBase } from '../config/services';
 import { authService } from '../features/auth/services/authService';
 import type { ResearchModelOption, ResearchStockRow } from '../features/research/types';
 export type { ResearchModelOption, ResearchStockRow } from '../features/research/types';
@@ -104,7 +104,10 @@ interface ResearchUniverseResponse {
 
 class ResearchService {
   private client: AxiosInstance;
-  private readonly baseURL = (import.meta as any).env?.VITE_USER_API_URL || SERVICE_ENDPOINTS.USER_SERVICE;
+  private readonly baseURL = resolveWebSafeServiceBase(
+    (import.meta as any).env?.VITE_USER_API_URL,
+    SERVICE_ENDPOINTS.USER_SERVICE,
+  );
 
   constructor() {
     this.client = axios.create({

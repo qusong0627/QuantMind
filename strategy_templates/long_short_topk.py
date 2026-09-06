@@ -12,7 +12,6 @@ STRATEGY_CONFIG = {
         "max_weight": 0.05,
         "long_exposure": 1.0,
         "short_exposure": 1.0,
-        "rebalance_days": 5,
-        "enable_short_selling": True
+        "rebalance_days": 5
     }
 }

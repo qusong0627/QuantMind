@@ -111,7 +111,7 @@ export const InferenceCoveragePanel: React.FC<{ modelId: string }> = ({ modelId 
   const handleBackfill = () => {
     Modal.confirm({
       title: '一键补全推理历史',
-      content: `将从 ${coverage?.max_date ?? '—'} 的下一交易日起补至 ${coverage?.latest_trade_date ?? '最新交易日'}，共 ${gapCount} 个交易日，逐日推理并追加到 pred.parquet。是否继续？`,
+      content: `将补齐检测到的 ${gapCount} 个缺口交易日（含历史中间空洞），并逐日推理追加到 pred.parquet。是否继续？`,
       okText: '开始补全',
       cancelText: '取消',
       centered: false,

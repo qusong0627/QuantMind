@@ -1,6 +1,6 @@
 import axios, { AxiosInstance, AxiosRequestConfig, AxiosResponse } from 'axios';
 import { authService } from '../../auth/services/authService';
-import { SERVICE_ENDPOINTS, SERVICE_URLS } from '../../../config/services';
+import { SERVICE_ENDPOINTS, SERVICE_URLS, resolveWebSafeServiceBase } from '../../../config/services';
 import { getConfiguredStorageDomain } from '../constants/avatar';
 import type {
   UserProfile,
@@ -186,10 +186,11 @@ class BaseApiClient {
  */
 export class UserCenterService extends BaseApiClient {
   protected override getRuntimeBaseURL(): string {
-    const envBase =
-      import.meta.env.VITE_USER_CENTER_API_URL ||
-      import.meta.env.VITE_USER_API_URL ||
-      SERVICE_URLS.USER_SERVICE;
+    // Web 端强制相对路径，避免构建时 VITE_* 固化导致外网直连 127.0.0.1
+    const envBase = resolveWebSafeServiceBase(
+      import.meta.env.VITE_USER_CENTER_API_URL || import.meta.env.VITE_USER_API_URL || undefined,
+      SERVICE_URLS.USER_SERVICE || '/api/v1',
+    );
 
     const normalizedBaseURL = String(envBase || '').replace(/\/+$/, '');
     return normalizedBaseURL.endsWith('/api/v1')

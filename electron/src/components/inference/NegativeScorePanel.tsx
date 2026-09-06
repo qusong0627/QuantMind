@@ -12,6 +12,7 @@ import {
   ShortCandidate,
   MissedReference,
 } from '../../services/stockPickingService';
+import { buildCsvText, downloadCsvFile } from '../../utils/csvExport';
 
 const { Text } = Typography;
 
@@ -68,7 +69,7 @@ export const NegativeScorePanel: React.FC = () => {
     { title: '板块', dataIndex: 'board', width: 70, render: (v: string) => (
       <Tag color={BOARD_COLOR[v] ?? 'default'} className="rounded-md text-[9px] m-0">{v}</Tag>
     )},
-    { title: '做空理由', dataIndex: 'short_reason', render: (v: string) => (
+    { title: '负分依据', dataIndex: 'short_reason', render: (v: string) => (
       <span className="text-[10px] text-slate-500">{v}</span>
     )},
   ];
@@ -109,14 +110,10 @@ export const NegativeScorePanel: React.FC = () => {
     const rows = data.short_candidates.map(c => [
       c.symbol, c.name, c.score, c.cap, c.board, c.short_reason,
     ]);
-    const csv = [header, ...rows].map(r => r.join(',')).join('\n');
-    const blob = new Blob([`﻿${csv}`], { type: 'text/csv;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `做空候选_${data.meta.trade_date ?? 'today'}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
+    const csv = buildCsvText(header, rows, { textColumns: [0], filename: '' });
+    if (downloadCsvFile(csv, `负分候选_${data.meta.trade_date ?? 'today'}.csv`)) {
+      message.success(`已导出 ${rows.length} 条负分候选`);
+    }
   };
 
   if (loading && !data) {
@@ -129,7 +126,7 @@ export const NegativeScorePanel: React.FC = () => {
       <div className="flex items-center justify-between gap-3">
         <div className="flex items-center gap-2 text-[10px] text-slate-400">
           <TrendingDown size={13} className="text-red-500" />
-          <span className="font-black tracking-widest">负分多空参考</span>
+          <span className="font-black tracking-widest">负分标的分析</span>
           <span className="text-slate-300">|</span>
           <span>负分标的 {data?.meta?.negative_count ?? '—'} 只</span>
         </div>
@@ -157,7 +154,7 @@ export const NegativeScorePanel: React.FC = () => {
               <div className="flex items-center gap-2">
                 <span className="text-xs font-black tracking-widest">分数 × 市值 分布矩阵</span>
                 <Tag color="default" className="rounded-md m-0 text-[9px]">
-                  做空聚焦微盘/小盘分数≤-0.15
+                  微盘/小盘分数≤-0.15
                 </Tag>
               </div>
             }
@@ -190,7 +187,7 @@ export const NegativeScorePanel: React.FC = () => {
             className="rounded-2xl border-slate-100 shadow-sm"
             title={
               <div className="flex items-center gap-2">
-                <span className="text-xs font-black tracking-widest">做空 / 回避候选</span>
+                <span className="text-xs font-black tracking-widest">负分聚焦（微盘/小盘）</span>
                 <Tag color="red" className="rounded-md m-0 text-[9px]">{data.short_candidates.length} 只</Tag>
               </div>
             }
@@ -206,7 +203,7 @@ export const NegativeScorePanel: React.FC = () => {
             {data.short_candidates.length === 0 ? (
               <Empty
                 image={Empty.PRESENTED_IMAGE_SIMPLE}
-                description={<span className="text-xs text-slate-400">无满足条件的做空标的</span>}
+                description={<span className="text-xs text-slate-400">无负分标的</span>}
                 className="py-8"
               />
             ) : (
@@ -226,7 +223,7 @@ export const NegativeScorePanel: React.FC = () => {
             title={
               <div className="flex items-center gap-2">
                 <ShieldCheck size={13} className="text-emerald-500" />
-                <span className="text-xs font-black tracking-widest">负分错杀参考（大盘/科创板）</span>
+                <span className="text-xs font-black tracking-widest">大盘/科创板负分参考</span>
                 <Tag color="green" className="rounded-md m-0 text-[9px]">{data.missed_reference.length} 只</Tag>
               </div>
             }
@@ -235,7 +232,7 @@ export const NegativeScorePanel: React.FC = () => {
             {data.missed_reference.length === 0 ? (
               <Empty
                 image={Empty.PRESENTED_IMAGE_SIMPLE}
-                description={<span className="text-xs text-slate-400">无错杀标的</span>}
+                description={<span className="text-xs text-slate-400">无相关标的</span>}
                 className="py-8"
               />
             ) : (
@@ -254,8 +251,8 @@ export const NegativeScorePanel: React.FC = () => {
             <div className="flex items-start gap-2 text-[11px] text-amber-800">
               <TrendingDown size={13} className="mt-0.5 flex-shrink-0" />
               <span>
-                <Text strong>研究结论：</Text>
-                负分不是铁板一块的下跌信号。做空聚焦微盘/小盘 + 分数≤-0.15（T+5下跌概率68.6%）；大盘/超大盘/科创板负分往往被错杀（超大盘-0.13~-0.14上涨概率56.8%）；轻负分(&gt;-0.06)无信息。当前信号日 {data.meta.trade_date} 负分最深 {data.short_candidates?.[0]?.score?.toFixed(4) ?? '—'}。
+                <Text strong>负分统计：</Text>
+                下跌概率随市值分档分化：微盘/小盘 分数≤-0.15（T+5下跌概率68.6%）；大盘/超大盘/科创板负分相对抗跌（超大盘-0.13~-0.14上涨概率56.8%）；轻负分(&gt;-0.06)信息量低。当前信号日 {data.meta.trade_date} 负分最深 {data.short_candidates?.[0]?.score?.toFixed(4) ?? '—'}。
               </span>
             </div>
           </Card>

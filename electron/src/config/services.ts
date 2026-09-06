@@ -101,83 +101,68 @@ export async function isServerReachable(url: string, timeoutMs = 8000): Promise<
 }
 
 /**
- * 清理失效的服务器配置（本地缓存 + 桌面端配置文件）
- */
-async function clearStaleServerUrl(reason: string): Promise<void> {
-  console.warn(`[services] 服务器地址失效，清除缓存配置: ${reason}`);
-  persistServerUrl(null);
-  if (typeof window !== 'undefined' && (window as any).electronAPI?.setServerUrl) {
-    try {
-      await (window as any).electronAPI.setServerUrl('');
-    } catch (e) {
-      console.warn('[services] 清除桌面配置文件失败（忽略）:', e);
-    }
-  }
-}
-
-/**
  * 初始化动态服务器配置（桌面端启动时调用）
- * 优先级：持久化配置 > Electron 配置文件 > 桌面端默认本地地址
+ * 优先级：持久化配置 > 旧版缓存 > Electron 配置文件 > 桌面端默认本地地址
  *
  * 关键约定：健康检查失败**绝不删除**用户已保存的服务器地址。
  * 后端可能正处于重启/冷启动/网络抖动，探测失败只打日志、保留配置并继续使用，
- * 避免“隔段时间保存的 IP 丢失、需重新配置”的问题。
+ * 避免“隔段时间保存的 IP 丢失、需重新配置”的问题。删除配置只能由用户手动操作。
+ *
+ * 新增策略：持久化地址探测不可达时，不直接采用它，而是继续回退探测其它候选地址
+ * （旧版缓存 / 配置文件 / 本地默认），若找到可达地址则自动采用并迁移持久化配置，
+ * 解决“服务器换 IP 后客户端仍连旧地址导致卡在登录/加载”的问题。
  */
 export async function initDynamicServerUrl(): Promise<void> {
-  // 1. 持久化配置：若探测可达则采用；若确认不可达，清除缓存并回退本机默认，
-  //    避免换 IP/克隆部署到新机器后始终连旧地址导致“验证身份”卡死。
   const persisted = readPersistedServerUrl();
+  const legacy = readLegacyPersistedServerUrl();
+
+  // 1. 持久化配置：可达则采用；不可达则继续探测其它候选，不立即采用
   if (persisted) {
-    const ok = await isServerReachable(persisted);
-    if (ok) {
+    const persistedOk = await isServerReachable(persisted);
+    if (persistedOk) {
       dynamicServerUrl = persisted;
       return;
     }
-    console.warn(`[services] 服务器 ${persisted} 探测未通过，清除配置并回退本地默认后端`);
-    await clearStaleServerUrl(`换 IP 后旧地址 ${persisted} 不可达`);
-  }
-
-  // 2. 旧 key（quantmind_server_url）遗留缓存迁移：可达才采用，失效仅清旧 key（不动新 key）
-  const legacy = readLegacyPersistedServerUrl();
-  if (legacy) {
-    const ok = await isServerReachable(legacy);
-    if (ok) {
+    console.warn(`[services] 持久化服务器 ${persisted} 当前不可达，继续探测其它候选地址`);
+  } else if (legacy) {
+    // 2. 旧 key 遗留缓存：可达则采用并迁移到新 key；不可达则继续探测
+    const legacyOk = await isServerReachable(legacy);
+    if (legacyOk) {
       dynamicServerUrl = legacy;
       persistServerUrl(legacy);
       return;
     }
-    try {
-      localStorage.removeItem(LEGACY_SERVER_URL_STORAGE_KEY);
-    } catch { /* ignore */ }
-    console.warn(`[services] 旧版服务器地址失效，清除缓存: ${legacy}`);
+    console.warn(`[services] 旧版服务器地址当前不可达，保留缓存: ${legacy}`);
   }
 
-  // 3. Electron 配置文件：同样采用 + 后台探测日志，不清除
+  // 3. 候选地址集合：配置文件 + 本地默认（去重、剔除已确认不可达的持久化/旧缓存）
+  const candidates: string[] = [];
   if (isElectronEnv()) {
     try {
       const url = await (window as any).electronAPI.getServerUrl();
       if (url && typeof url === 'string') {
-        const normalized = url.replace(/\/+$/, '');
-        dynamicServerUrl = normalized;
-        persistServerUrl(normalized);
-        void isServerReachable(normalized).then((ok) => {
-          if (!ok) console.warn(`[services] 配置文件服务器 ${normalized} 探测未通过（可能暂不可达），保留并继续使用`);
-        });
-        return;
+        candidates.push(url.replace(/\/+$/, ''));
       }
     } catch (e) {
       console.warn('[services] Failed to get server URL from config:', e);
     }
+  }
+  candidates.push(DEFAULT_ELECTRON_API_BASE);
 
-    // 4. 兜底：本地 OSS Docker 后端
-    if (!dynamicServerUrl) {
-      const ok = await isServerReachable(DEFAULT_ELECTRON_API_BASE);
-      if (ok) {
-        dynamicServerUrl = DEFAULT_ELECTRON_API_BASE;
-        persistServerUrl(DEFAULT_ELECTRON_API_BASE);
-      }
+  // 4. 逐个探测候选，取第一个可达地址；找到后自动迁移持久化配置
+  for (const url of [...new Set(candidates)]) {
+    const ok = await isServerReachable(url);
+    if (ok) {
+      dynamicServerUrl = url;
+      persistServerUrl(url);
+      console.warn(`[services] 已自动切换到可达服务器 ${url}`);
+      return;
     }
   }
+
+  // 5. 全部不可达：保留原持久化配置继续使用（后端可能重启中），不删除
+  dynamicServerUrl = persisted || legacy || candidates[0] || DEFAULT_ELECTRON_API_BASE;
+  if (persisted) persistServerUrl(persisted);
 }
 
 /**
@@ -212,8 +197,14 @@ const API_BASE = normalizeBaseUrl(ENV.VITE_API_BASE_URL || '');
 
 /**
  * 获取基础 URL（优先使用动态配置）
+ * Web 端（非 Electron）强制返回空字符串以走相对路径 `/api/v1`，经 Nginx 反代到 quantmind:8000，
+ * 避免构建时 VITE_* 固化为 localhost 导致外网 IP 无法登录；桌面端不受影响
  */
 function getBaseUrl(): string {
+  // Web 浏览器走相对路径，不受构建时环境变量影响
+  if (!isElectronEnv()) {
+    return '';
+  }
   // 桌面端优先使用用户配置的服务器地址
   if (dynamicServerUrl) {
     return dynamicServerUrl;
@@ -226,10 +217,7 @@ function getBaseUrl(): string {
     return API_BASE;
   }
   // Electron 桌面端兜底：本地 OSS Docker 后端（避免 file:// 下相对路径请求全部失败）
-  if (isElectronEnv()) {
-    return DEFAULT_ELECTRON_API_BASE;
-  }
-  return API_BASE;
+  return DEFAULT_ELECTRON_API_BASE;
 }
 
 // WebSocket URL 构建
@@ -256,23 +244,31 @@ const getWebSocketUrl = () => {
 };
 
 export const SERVICE_URLS = {
-  get API_GATEWAY() { return normalizeBaseUrl(ENV.VITE_API_GATEWAY_URL) || getBaseUrl(); },
-  get MARKET_DATA() { return normalizeBaseUrl(ENV.VITE_MARKET_DATA_API_URL) || getBaseUrl(); },
-  get DATA_SERVICE() { return normalizeBaseUrl(ENV.VITE_DATA_SERVICE_API_URL) || getBaseUrl(); },
-  get USER_SERVICE() { return normalizeBaseUrl(ENV.VITE_USER_API_URL) || getBaseUrl(); },
-  get AI_STRATEGY() { return normalizeBaseUrl(ENV.VITE_AI_STRATEGY_API_URL) || getBaseUrl(); },
-  get STOCK_QUERY() { return normalizeBaseUrl(ENV.VITE_STOCK_QUERY_API_URL) || getBaseUrl(); },
-  get TRADING() { return normalizeBaseUrl(ENV.VITE_TRADING_API_URL) || getBaseUrl(); },
-  get QLIB_SERVICE() { return normalizeBaseUrl(ENV.VITE_QLIB_SERVICE_URL) || getBaseUrl(); },
-  get ENGINE_SERVICE() { return normalizeBaseUrl(ENV.VITE_ENGINE_SERVICE_URL) || getBaseUrl(); },
+  get API_GATEWAY() { return !isElectronEnv() ? '' : (normalizeBaseUrl(ENV.VITE_API_GATEWAY_URL) || getBaseUrl()); },  get MARKET_DATA() { return !isElectronEnv() ? '' : (normalizeBaseUrl(ENV.VITE_MARKET_DATA_API_URL) || getBaseUrl()); },
+  get DATA_SERVICE() { return !isElectronEnv() ? '' : (normalizeBaseUrl(ENV.VITE_DATA_SERVICE_API_URL) || getBaseUrl()); },
+  get USER_SERVICE() { return !isElectronEnv() ? '' : (normalizeBaseUrl(ENV.VITE_USER_API_URL) || getBaseUrl()); },
+  get AI_STRATEGY() { return !isElectronEnv() ? '' : (normalizeBaseUrl(ENV.VITE_AI_STRATEGY_API_URL) || getBaseUrl()); },
+  get STOCK_QUERY() { return !isElectronEnv() ? '' : (normalizeBaseUrl(ENV.VITE_STOCK_QUERY_API_URL) || getBaseUrl()); },
+  get TRADING() { return !isElectronEnv() ? '' : (normalizeBaseUrl(ENV.VITE_TRADING_API_URL) || getBaseUrl()); },
+  get QLIB_SERVICE() { return !isElectronEnv() ? '' : (normalizeBaseUrl(ENV.VITE_QLIB_SERVICE_URL) || getBaseUrl()); },
+  get ENGINE_SERVICE() { return !isElectronEnv() ? '' : (normalizeBaseUrl(ENV.VITE_ENGINE_SERVICE_URL) || getBaseUrl()); },
   get WEBSOCKET_MARKET() { return getWebSocketUrl(); },
 } as const;
+
+/**
+ * Web 安全的服务 base 解析：Web（非 Electron）一律返回相对路径 fallback（通常是 `/api/v1`），
+ * 忽略构建时固化的 VITE_* 绝对地址与 localStorage 旧缓存，避免外网 IP 下直连 127.0.0.1:8000；
+ * 桌面端保持原逻辑（VITE_* > 共享配置）。
+ */
+export function resolveWebSafeServiceBase(envVal: string | undefined, fallback: string): string {
+  if (!isElectronEnv()) return fallback;
+  return normalizeBaseUrl(envVal || '') || fallback;
+}
 
 // API路径配置
 export const API_PATHS = {
   V1: '/api/v1',
-  HEALTH: '/health',
-  STRATEGIES: '/strategies',
+  HEALTH: '/health',  STRATEGIES: '/strategies',
   MARKET_DATA: '/market-data',
   USER: '/user',
   FILES: '/files',

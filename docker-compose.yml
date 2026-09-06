@@ -249,6 +249,8 @@ services:
       - QM_QUANTBC_DATA_DIR=/data/quantbc
       # QuantFutures 本地数据中枢（期货/贵金属，akshare 摄取）
       - QM_QUANTFUTURES_DATA_DIR=/data/quantfutures
+      # QuantCustom 用户自传市场（自定义因子，parquet 自传后经后台字段发现扫描）
+      - QM_QUANTCUSTOM_DATA_DIR=/data/quantcustom
       # 生产环境屏蔽区块链（CRYPTO）市场：默认 false 关闭 crypto 适配器，开发可用 ENABLE_CRYPTO=true 开启
       - ENABLE_CRYPTO=${ENABLE_CRYPTO:-false}
 

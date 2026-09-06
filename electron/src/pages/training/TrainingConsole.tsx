@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import dayjs from 'dayjs';
 import { Card, Divider, Alert, Progress, Tabs, Empty, Typography, Button, Tag, message, Tooltip } from 'antd';
 import { Play, FileText, LayoutGrid, Copy, Terminal, CheckCircle2, Layers, Calendar, Target, Clock, ArrowDown } from 'lucide-react';
 import { clsx } from 'clsx';
@@ -47,6 +48,13 @@ const SectionHeader: React.FC<{ title: string; desc: string; icon?: React.ReactN
     </div>
   </div>
 );
+
+/** 样本切分区间只展示日期（ISO 自带的时间与时区偏移不展示，用本地时区回吐日期避免差一天） */
+const formatDateOnly = (value?: string): string => {
+  if (!value) return '—';
+  const parsed = dayjs(value);
+  return parsed.isValid() ? parsed.format('YYYY-MM-DD') : value.slice(0, 10);
+};
 
 const MetricCard: React.FC<{
   label: string;
@@ -275,7 +283,7 @@ export const TrainingConsole: React.FC<TrainingConsoleProps> = ({
                 <div className="rounded-xl bg-slate-50 p-2.5 border border-slate-100 col-span-2">
                   <div className="text-[10px] text-slate-400 font-semibold mb-1">样本切分区间</div>
                   <div className="text-slate-600 font-mono text-[11px] truncate">
-                    {requestPreview.timePeriods?.train?.[0] || '—'} ~ {requestPreview.timePeriods?.test?.[1] || '—'}
+                    {formatDateOnly(requestPreview.timePeriods?.train?.[0])} ~ {formatDateOnly(requestPreview.timePeriods?.test?.[1])}
                   </div>
                 </div>
               </div>

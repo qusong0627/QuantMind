@@ -97,6 +97,9 @@ export interface AuthState {
   isAuthenticated: boolean;
   isLoading: boolean;
   isInitialized: boolean;
+  // 服务器不可达（初始化时网络错误/超时）：有旧 token 也不得视为已登录，
+  // UI 应展示离线提示而非进入缓存数据。
+  serverUnreachable: boolean;
   user: User | null;
   token: string | null;
   refreshToken: string | null;

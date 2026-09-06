@@ -3,9 +3,8 @@ import {
   Button, Card, Tag, Typography, Empty, Spin, Table, Select, message, Checkbox,
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
-import { clsx } from 'clsx';
 import {
-  RefreshCw, TrendingUp, Minus, Download, ShieldAlert,
+  RefreshCw, TrendingUp, Minus, Download,
   BarChart as BarChartIcon,
 } from 'lucide-react';
 import {
@@ -18,6 +17,7 @@ import {
   StrategyPreset,
   CandidateStock,
 } from '../../services/stockPickingService';
+import { buildCsvText, downloadCsvFile } from '../../utils/csvExport';
 
 const { Text } = Typography;
 
@@ -98,25 +98,18 @@ export const StockPickingPanel: React.FC = () => {
       const meta = TREND_COLOR[v] ?? TREND_COLOR['趋势未知'];
       return <Tag color={meta.color} className="rounded-md text-[10px] m-0">{meta.label}</Tag>;
     }},
-    { title: '买入理由', dataIndex: 'buy_reason', render: (v: string) => (
-      <span className="text-[10px] text-slate-500">{v}</span>
-    )},
   ];
 
   const handleExportCsv = () => {
     if (!data?.candidates?.length) return;
-    const header = ['symbol', 'name', 'score', 'industry', 'trend', 'buy_reason'];
+    const header = ['symbol', 'name', 'score', 'industry', 'trend'];
     const rows = data.candidates.map(c => [
-      c.symbol, c.name, c.score, c.industry, c.trend, c.buy_reason,
+      c.symbol, c.name, c.score, c.industry, c.trend,
     ]);
-    const csv = [header, ...rows].map(r => r.join(',')).join('\n');
-    const blob = new Blob([`﻿${csv}`], { type: 'text/csv;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `选股_${data.meta.trade_date ?? 'today'}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
+    const csv = buildCsvText(header, rows, { textColumns: [0], filename: '' });
+    if (downloadCsvFile(csv, `选股_${data.meta.trade_date ?? 'today'}.csv`)) {
+      message.success(`已导出 ${rows.length} 条候选`);
+    }
   };
 
   if (loading && !data) {
@@ -150,7 +143,7 @@ export const StockPickingPanel: React.FC = () => {
               onChange={e => handleIgnoreMa20Change(e.target.checked)}
               className="ml-2 text-[10px]"
             >
-              忽略MA20强制入场
+              忽略MA20过滤
             </Checkbox>
           </div>
         </div>
@@ -172,7 +165,7 @@ export const StockPickingPanel: React.FC = () => {
       ) : (
         <>
           {/* 市场状态卡片 */}
-          <div className="grid grid-cols-3 gap-3">
+          <div className="grid grid-cols-2 gap-3">
             <Card
               className="rounded-2xl border-slate-100 shadow-sm"
               styles={{ body: { padding: '16px 20px', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', textAlign: 'center' } }}
@@ -214,23 +207,7 @@ export const StockPickingPanel: React.FC = () => {
                 </div>
               </div>
             </Card>
-            <Card
-              className="rounded-2xl border-slate-100 shadow-sm"
-              styles={{ body: { padding: '16px 20px', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', textAlign: 'center' } }}
-            >
-              <div className="flex items-center gap-1.5 mb-2">
-                <ShieldAlert size={13} className="text-amber-500" />
-                <span className="text-[10px] font-black tracking-widest text-slate-400">仓位建议</span>
-              </div>
-              <div className="flex items-baseline justify-center gap-2">
-                <span className={clsx('text-xl font-black', market?.should_enter ? 'text-emerald-600' : 'text-slate-400')}>
-                  {market?.position ?? '—'}
-                </span>
-                <span className="text-[9px] text-slate-400">{market?.should_enter ? '可入场' : '空仓观望'}</span>
-              </div>
-              <div className="mt-1 text-[10px] text-slate-400">{market?.position_reason}</div>
-            </Card>
-          </div>
+            </div>
 
           {/* 行业 Top1 排行 */}
           <Card
@@ -240,7 +217,7 @@ export const StockPickingPanel: React.FC = () => {
             extra={
               <div className="flex items-center gap-2 text-[10px] text-slate-400">
                 {STRATEGY_PRESETS.find(p => p.key === strategy) && (
-                  <>入场线 ≥ {STRATEGY_PRESETS.find(p => p.key === strategy)!.entry}</>
+                  <>参考阈值 ≥ {STRATEGY_PRESETS.find(p => p.key === strategy)!.entry}</>
                 )}
               </div>
             }
@@ -291,7 +268,7 @@ export const StockPickingPanel: React.FC = () => {
             title={
               <div className="flex items-center gap-2">
                 <span className="text-xs font-black tracking-widest">候选股票</span>
-                <Tag color={market?.should_enter ? 'green' : 'default'} className="rounded-md m-0 text-[9px]">
+                <Tag color="default" className="rounded-md m-0 text-[9px]">
                   {data.candidates.length} 只
                 </Tag>
               </div>
@@ -305,16 +282,10 @@ export const StockPickingPanel: React.FC = () => {
               )
             }
           >
-            {!market?.should_enter ? (
+            {data.candidates.length === 0 ? (
               <Empty
                 image={Empty.PRESENTED_IMAGE_SIMPLE}
-                description={<span className="text-xs text-slate-400">未入场 · {market?.position_reason}</span>}
-                className="py-12"
-              />
-            ) : data.candidates.length === 0 ? (
-              <Empty
-                image={Empty.PRESENTED_IMAGE_SIMPLE}
-                description={<span className="text-xs text-slate-400">入场信号存在，但无股票通过全部过滤</span>}
+                description={<span className="text-xs text-slate-400">无股票通过全部过滤</span>}
                 className="py-12"
               />
             ) : (

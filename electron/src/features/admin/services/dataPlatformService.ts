@@ -1,6 +1,6 @@
 import axios, { AxiosInstance } from 'axios';
 import { authService } from '../../auth/services/authService';
-import { SERVICE_ENDPOINTS } from '../../../config/services';
+import { SERVICE_ENDPOINTS, resolveWebSafeServiceBase } from '../../../config/services';
 
 /** 健康矩阵单元格 */
 export interface HealthCell {
@@ -330,8 +330,10 @@ export interface QlibJob {
 
 class DataPlatformService {
     private axiosInstance: AxiosInstance;
-    private readonly baseURL =
-        (import.meta as any).env?.VITE_USER_API_URL || SERVICE_ENDPOINTS.USER_SERVICE;
+    private readonly baseURL = resolveWebSafeServiceBase(
+        (import.meta as any).env?.VITE_USER_API_URL,
+        SERVICE_ENDPOINTS.USER_SERVICE,
+    );
 
     constructor() {
         this.axiosInstance = axios.create({

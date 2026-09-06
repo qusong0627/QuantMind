@@ -54,12 +54,6 @@ export function toPrefix(symbol: string): string {
   return ex && code ? `${ex}${code}` : symbol;
 }
 
-const SIDE_COLOR: Record<string, string> = {
-  BUY: 'bg-rose-50 text-rose-600',
-  SELL: 'bg-emerald-50 text-emerald-600',
-  HOLD: 'bg-slate-50 text-slate-400',
-};
-
 /** 持仓来源徽标样式：模拟=蓝、实盘=紫、双持仓=靛蓝 */
 const POSITION_BADGE: Record<PositionKind, { cls: string; label: string; title: string }> = {
   SIM: { cls: 'bg-sky-100 text-sky-700 border-sky-200', label: '模拟', title: '模拟盘持仓' },
@@ -88,11 +82,11 @@ export function boardToneOf(board?: string): string {
   return board ? (BOARD_TONE[board] ?? 'bg-slate-50 text-slate-500 border-slate-200') : 'bg-slate-50 text-slate-400 border-slate-200';
 }
 
-/** 仓位信号着色：0=灰禁 / 0.1~0.5 淡红 / 0.5~0.8 中红 / 0.8~0.99 深红白字。
- *  A 股涨红跌绿，仓位建议越高越红。 */
+/** 仓位数值着色：0=低 / 0.1~0.5 淡红 / 0.5~0.8 中红 / 0.8~0.99 深红白字。
+ *  A 股涨红跌绿，数值越高色调越深。 */
 export function positionToneOf(v: number | null | undefined): { cls: string; txt: string } {
   if (v == null) return { cls: 'bg-slate-50 text-slate-300 border-slate-100', txt: '--' };
-  if (v <= 0) return { cls: 'bg-slate-100 text-slate-400 border-slate-200', txt: '禁' };
+  if (v <= 0) return { cls: 'bg-slate-100 text-slate-400 border-slate-200', txt: '0%' };
   if (v < 0.5) return { cls: 'bg-rose-50 text-rose-500 border-rose-200', txt: `${Math.round(v * 100)}%` };
   if (v < 0.8) return { cls: 'bg-rose-200 text-rose-700 border-rose-300', txt: `${Math.round(v * 100)}%` };
   return { cls: 'bg-rose-600 text-white border-rose-700', txt: `${Math.round(v * 100)}%` };
@@ -221,14 +215,13 @@ export function StockSidebar({ selected, onSelect, watchlistSymbols, positions =
   );
 
   // 单一 grid 贯穿表头+每行，所有列严格对齐。
-  // 列：排名 | 股票 | 走势(微缩折线) | 板块·分 | 行业·分 | 市值·分 | 趋势 | 得分 | 仓位 | 信号
-  const GRID = 'grid grid-cols-[24px_1.4fr_48px_56px_70px_50px_42px_56px_38px_30px] gap-1';
+  // 列：排名 | 股票 | 走势(微缩折线) | 板块·分 | 行业·分 | 市值·分 | 趋势 | 得分 | 仓位
+  const GRID = 'grid grid-cols-[24px_1.4fr_48px_56px_70px_50px_42px_56px_38px] gap-1';
 
-  const SIDE_LABEL: Record<string, string> = { BUY: '买入', SELL: '卖出', HOLD: '持有' };
   /** 得分档表头短名（列宽有限） */
   const BUCKET_SHORT: Record<string, string> = {
-    golden: '黄金', optional: '可选', caution: '谨慎', extreme: '极端高',
-    neg_extreme: '极端低', neg_short: '做空', pos: '正分', neg: '负分',
+    golden: '0.10-0.12', optional: '0.12-0.15', caution: '0.15-0.20', extreme: '≥0.20',
+    neg_extreme: '≤-0.20', neg_short: '≤-0.15', pos: '≥0', neg: '<0',
   };
 
   /** 表头列筛选下拉（板块/行业/市值/趋势/得分/信号），长菜单限高滚动避免盖住整个列表 */
@@ -248,7 +241,7 @@ export function StockSidebar({ selected, onSelect, watchlistSymbols, positions =
       }}
     >
       <button className={`flex items-center justify-center gap-0.5 px-0.5 rounded transition-colors ${current ? 'text-blue-600 font-black' : 'hover:text-blue-500'}`}>
-        <span className="truncate">{current ? (SIDE_LABEL[current] ?? current) : placeholder}</span>
+        <span className="truncate">{current ?? placeholder}</span>
         <ChevronDown className="w-2.5 h-2.5 shrink-0 opacity-60" />
       </button>
     </Dropdown>
@@ -387,8 +380,7 @@ export function StockSidebar({ selected, onSelect, watchlistSymbols, positions =
         <span className="text-center">{headerDropdown(fac('trend', TREND_OPTIONS), filters.trend, v => onFiltersChange({ ...filters, trend: v }), '趋势')}</span>
         <span className="text-right">{headerDropdown(fac('bucket', BUCKET_OPTIONS), filters.bucket, v => onFiltersChange({ ...filters, bucket: v, scoreMin: undefined }),
           filters.bucket ? (BUCKET_SHORT[filters.bucket] ?? '得分') : '得分')}</span>
-        <span className="text-center" title="仓位信号：0=不入场（低于行业头部/大盘空仓），0.1~0.99=建议投入比例（半凯利）">仓位</span>
-        <span className="text-center">{headerDropdown(fac('side', [{ value: 'BUY', label: '买入' }, { value: 'SELL', label: '卖出' }, { value: 'HOLD', label: '持有' }]), filters.side, v => onFiltersChange({ ...filters, side: v }), '信号')}</span>
+        <span className="text-center" title="仓位数值：0=极低，0.1~0.99=数值越高色调越深">仓位</span>
       </div>
 
       {/* 股票列表 */}
@@ -472,30 +464,21 @@ export function StockSidebar({ selected, onSelect, watchlistSymbols, positions =
                 <span className={`text-right text-[12px] font-mono font-bold ${(it.fusion ?? 0) >= 0 ? 'text-blue-600' : 'text-slate-400'}`}>
                   {it.fusion != null ? `+${(it.fusion).toFixed(3)}`.replace('+-', '-') : '--'}
                 </span>
-                {/* 仓位信号 */}
+                {/* 仓位数值 */}
                 <span className="text-center">
                   {(() => {
                     const ps = it.position_score;
                     const tone = positionToneOf(ps);
                     const pct = it.pct_industry;
-                    const empty = it.market_empty;
                     const tip = ps == null
-                      ? '该日无仓位信号（未推理或缺失基准）'
-                      : ps <= 0
-                        ? (empty ? '大盘空仓信号，不入场' : (pct != null && pct < 0.8 ? `行业百分位 ${(pct * 100).toFixed(0)}% < 80%，不入场` : '不入场'))
-                        : `建议投入 ${Math.round(ps * 100)}%（半凯利）· 行业百分位 ${pct != null ? (pct * 100).toFixed(0) + '%' : '--'}`;
+                      ? '该日无仓位数据（未推理或缺失基准）'
+                      : `仓位数值 ${(ps * 100).toFixed(0)}%${pct != null ? ` · 行业百分位 ${(pct * 100).toFixed(0)}%` : ''}`;
                     return (
                       <span className={`inline-block text-[10px] font-bold rounded px-0.5 py-0.5 border ${tone.cls}`} title={tip}>
                         {tone.txt}
                       </span>
                     );
                   })()}
-                </span>
-                {/* 信号方向 */}
-                <span className="text-center">
-                  <span className={`text-[10px] rounded px-1 py-0.5 font-bold ${SIDE_COLOR[it.side ?? 'HOLD'] ?? SIDE_COLOR.HOLD}`}>
-                    {(it.side ?? 'HOLD') === 'HOLD' ? '-' : it.side}
-                  </span>
                 </span>
               </button>
             );

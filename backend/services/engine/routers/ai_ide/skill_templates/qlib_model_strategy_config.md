@@ -39,10 +39,8 @@ STRATEGY_CONFIG = get_strategy_config()
 - RedisTopkStrategy：TopK 选股（最常用）
 - RedisLongShortTopkStrategy：多空策略
 - RedisWeightStrategy：分数权重策略
-- RedisVolatilityWeightedStrategy：波动率加权策略
 - RedisAdvancedAlphaStrategy：高级截面 Alpha 策略
 - RedisStopLossStrategy：止损止盈策略
-- RedisFullAlphaStrategy：全量截面策略
 
 禁止：
 - 使用占位路径

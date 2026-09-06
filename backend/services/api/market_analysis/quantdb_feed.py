@@ -92,6 +92,14 @@ def _q(sql: str) -> pd.DataFrame:
         return pd.DataFrame()
 
 
+def _read_partitioned(rel_path: str, days: list[str], cols: str) -> pd.DataFrame:
+    """按精确分区路径读取指定交易日（避免 dt=* glob 全分区枚举）。
+
+    days 中实际缺失的分区自动跳过；返回表含 dt 列（hive_partitioning）。
+    """
+    return _hub()._read_partitioned(rel_path, days, cols=cols)
+
+
 def _available() -> bool:
     """数据目录可用性。"""
     try:
@@ -155,8 +163,7 @@ def _market_pct_snapshot() -> tuple[str | None, pd.DataFrame]:
     if len(days) < 2:
         return days[0] if days else None, pd.DataFrame()
 
-    dt_in = ",".join(days[:2])
-    k = _q(f"SELECT symbol, dt, close, amount FROM qdb_daily_unadjusted WHERE dt IN ({dt_in})")
+    k = _read_partitioned("1_kline_data/daily_unadjusted", days[:2], "symbol, close, amount")
     if k.empty:
         return days[0], pd.DataFrame()
     k["dt"] = k["dt"].astype(str)
@@ -171,7 +178,7 @@ def _market_pct_snapshot() -> tuple[str | None, pd.DataFrame]:
     if len(cols) >= 2 and cols[-1] == cur_day:
         calc = ((p[cols[-1]] / p[cols[-2]] - 1) * 100).rename("pct_calc").rename_axis("symbol").reset_index()
         snap = snap.merge(calc, on="symbol", how="left")
-        off = _q(f"SELECT symbol, pct_change FROM qdb_technical_indicators WHERE dt = {cur_day}")
+        off = _read_partitioned("5_technical_derived/technical_indicators", [cur_day], "symbol, pct_change")
         if not off.empty:
             snap = snap.merge(off, on="symbol", how="left")
             snap["pct_change"] = snap["pct_change"].where(snap["pct_change"].notna(), snap["pct_calc"])
@@ -202,13 +209,13 @@ def _load_l2_flow(days: list[str]) -> pd.DataFrame:
     """读取指定交易日的 L2 资金流明细。"""
     if not days:
         return pd.DataFrame()
-    dt_in = ",".join(days)
-    return _q(
-        "SELECT symbol, dt, "
+    return _read_partitioned(
+        "6_ml_datasets/l2_factors",
+        days,
+        "symbol, "
         "flow_net_amount, flow_buy_amount, flow_sell_amount, flow_net_ratio, "
         "flow_super_net, flow_large_net, flow_medium_net, flow_small_net, "
-        "flow_large_ratio, flow_medium_ratio, flow_small_ratio, flow_money_flow_index "
-        f"FROM qdb_l2_factors WHERE dt IN ({dt_in})"
+        "flow_large_ratio, flow_medium_ratio, flow_small_ratio, flow_money_flow_index",
     )
 
 
@@ -216,15 +223,10 @@ def _load_prices(days: list[str]) -> pd.DataFrame:
     """读取收盘价（不复权）与官方涨跌幅。days 按降序传入。"""
     if not days:
         return pd.DataFrame()
-    dt_in = ",".join(days)
-    k = _q(
-        f"SELECT symbol, dt, close FROM qdb_daily_unadjusted WHERE dt IN ({dt_in})"
-    )
+    k = _read_partitioned("1_kline_data/daily_unadjusted", days, "symbol, close")
     if k.empty:
         return k
-    t = _q(
-        f"SELECT symbol, dt, pct_change FROM qdb_technical_indicators WHERE dt IN ({dt_in})"
-    )
+    t = _read_partitioned("5_technical_derived/technical_indicators", days, "symbol, pct_change")
     k["dt"] = k["dt"].astype(str)
     if not t.empty:
         t["dt"] = t["dt"].astype(str)
@@ -746,15 +748,12 @@ def get_indices_overview() -> list[dict[str, Any]]:
         days = _trading_days(latest, 30)
         if not days:
             return []
-        dt_in = ",".join(days)
-        sym_in = ",".join(f"'{item['symbol']}'" for item in INDEX_OVERVIEW)
-        df = _q(
-            f"SELECT symbol, dt, close, amount FROM qdb_index_daily "
-            f"WHERE dt IN ({dt_in}) AND symbol IN ({sym_in})"
-        )
+        df = _read_partitioned("1_kline_data/index_daily", days, "symbol, close, amount")
         if df.empty:
             return []
-
+        df = df[df["symbol"].isin({item["symbol"] for item in INDEX_OVERVIEW})]
+        if df.empty:
+            return []
         df["dt"] = df["dt"].astype(str)
         result: list[dict[str, Any]] = []
         # 参考日以指数自身最新可用交易日为准，避免 index_daily 落后于最新交易日

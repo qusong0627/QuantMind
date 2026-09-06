@@ -39,6 +39,9 @@ dist/
 out/
 electron/dist/
 electron/out/
+!web/
+!web/dist/
+!web/dist/**
 .deploy_tmp/
 .deploy_fix/
 *.docker-build-lock

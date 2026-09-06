@@ -12,7 +12,7 @@
 import React, { useEffect, useMemo, useState, useRef } from 'react';
 import * as echarts from 'echarts';
 import ReactECharts from 'echarts-for-react';
-import { Empty, Spin, Tag, Typography, Table, Button, InputNumber, Modal, Slider, Select, Input, Space, Switch } from 'antd';
+import { Empty, Spin, Tag, Typography, Table, Button, InputNumber, Modal, Select, Input, Space, Switch } from 'antd';
 import clsx from 'clsx';
 import axios from 'axios';
 import { modelTrainingService, StockScoreHistoryItem } from '../../services/modelTrainingService';
@@ -75,20 +75,6 @@ interface Position {
   buyPrice: number;
   shares: number;
 }
-
-interface StrategyAlert {
-  date: string;
-  severity: 'positive' | 'warning' | 'danger' | 'info';
-  message: string;
-  score: number;
-}
-
-const SEVERITY_COLOR: Record<StrategyAlert['severity'], string> = {
-  positive: '#10b981', // 绿 - 买点/利好
-  warning: '#f59e0b',  // 橙 - 谨慎/过热
-  danger: '#ef4444',   // 红 - 危险/做空
-  info: '#6366f1',     // 紫 - 提示
-};
 
 const baseURL =
   (import.meta as any).env?.VITE_USER_API_URL || SERVICE_ENDPOINTS.USER_SERVICE;
@@ -159,15 +145,15 @@ function annotateScore(score: number, wideScale = false, scoreMin?: number, scor
     if (score >= -0.30) return { label: '低分区', color: '#f97316' };
     return { label: '最低分', color: '#e11d48' };
   }
-  if (score >= 0.20) return { label: '极谨慎', color: '#f43f5e' };
-  if (score >= 0.15) return { label: '谨慎', color: '#f97316' };
-  if (score >= 0.12) return { label: '可选', color: '#f59e0b' };
-  if (score >= 0.10) return { label: '黄金区间', color: '#10b981' };
-  if (score >= 0) return { label: '弱信号', color: '#94a3b8' };
-  if (score <= -0.20) return { label: '极端负分', color: '#e11d48' };
-  if (score <= -0.15) return { label: '做空候选', color: '#f43f5e' };
-  if (score <= -0.06) return { label: '中负分', color: '#f97316' };
-  return { label: '轻负分', color: '#94a3b8' };
+  if (score >= 0.20) return { label: '高分区', color: '#f43f5e' };
+  if (score >= 0.15) return { label: '较高分区', color: '#f97316' };
+  if (score >= 0.12) return { label: '中等偏高', color: '#f59e0b' };
+  if (score >= 0.10) return { label: '中等分区', color: '#10b981' };
+  if (score >= 0) return { label: '中低分区', color: '#94a3b8' };
+  if (score <= -0.20) return { label: '低分区', color: '#e11d48' };
+  if (score <= -0.15) return { label: '较低分区', color: '#f43f5e' };
+  if (score <= -0.06) return { label: '低分区', color: '#f97316' };
+  return { label: '中低分区', color: '#94a3b8' };
 }
 
 export const StockScoreChart: React.FC<Props> = ({ symbol, name, stockInfo, market = 'A', days = 3650, height = 420, wideScale = false, modelId }) => {
@@ -326,105 +312,10 @@ export const StockScoreChart: React.FC<Props> = ({ symbol, name, stockInfo, mark
     return scoreItems.filter(x => x.trade_date >= sDate && x.trade_date <= eDate);
   }, [scoreItems, replayEnabled, startIdx, replayIdx, klineItems]);
 
-  /* ---- 策略提醒规则引擎 ---- */
-  // 基于每日分数/市值/板块/趋势，按选股策略 v2.0 规则匹配，产出提醒
-  const strategyAlerts = useMemo<StrategyAlert[]>(() => {
-    const alerts: StrategyAlert[] = [];
-    // 按日期升序排列，用于推导 3 天趋势（T-1 → T → T+1）
-    const sorted = [...visibleScores]
-      .filter(s => s.fusion_score !== null && s.fusion_score !== undefined)
-      .sort((a, b) => a.trade_date.localeCompare(b.trade_date));
-
-    const board = stockInfo?.board || '';
-    const isMainBoard = board.includes('主板');
-    const tier = stockInfo?.market_cap_tier || '';
-    const negTag = stockInfo?.negative_tag || '';
-
-    for (let i = 0; i < sorted.length; i++) {
-      const s = sorted[i];
-      const score = Number(s.fusion_score);
-      const date = s.trade_date;
-      const prev = i > 0 ? Number(sorted[i - 1].fusion_score) : null;
-      const next = i < sorted.length - 1 ? Number(sorted[i + 1].fusion_score) : null;
-
-      // ── 第1组：分数区间（映射策略第2节） ──
-      if (score >= 0.10 && score < 0.12 && isMainBoard) {
-        alerts.push({ date, severity: 'positive', message: '黄金买入区间（0.10-0.12·主板）', score });
-      } else if (score >= 0.10 && score < 0.12) {
-        alerts.push({ date, severity: 'positive', message: '黄金区间（0.10-0.12）', score });
-      } else if (score >= 0.12 && score < 0.15) {
-        alerts.push({ date, severity: 'warning', message: '可选但警惕追高（0.12-0.15）', score });
-      } else if (score >= 0.15 && score < 0.20) {
-        alerts.push({ date, severity: 'warning', message: '高分谨慎区（0.15-0.20）', score });
-      } else if (score >= 0.20) {
-        alerts.push({ date, severity: 'danger', message: '极端高分，样本极少，勿追', score });
-      } else if (score <= -0.20) {
-        alerts.push({ date, severity: 'danger', message: '极端负分（≤-0.20）', score });
-      } else if (score <= -0.15) {
-        alerts.push({ date, severity: 'danger', message: '负分做空候选（≤-0.15）', score });
-      }
-
-      // ── 第2组：3天趋势（策略第3节） ──
-      if (prev !== null && next !== null) {
-        const rising = prev < score && score > next;
-        if (rising) {
-          alerts.push({ date, severity: 'positive', message: '先升后降·最佳买点', score });
-        } else if (prev < score && score < next) {
-          alerts.push({ date, severity: 'warning', message: '连续上升·过热不追', score });
-        } else if (prev > score && score > next) {
-          alerts.push({ date, severity: 'info', message: '连续下降·信号衰退', score });
-        }
-      }
-
-      // ── 第3组：市值分档（策略第4节 + 负分分析） ──
-      if (score <= -0.15 && tier === '微盘') {
-        alerts.push({ date, severity: 'danger', message: '微盘+负分·做空首选（下跌概率68-72%）', score });
-      } else if (score <= -0.15 && tier === '大盘') {
-        alerts.push({ date, severity: 'info', message: '大盘+负分·可能错杀，关注', score });
-      }
-      if (negTag === '极端负分' && tier === '微盘') {
-        alerts.push({ date, severity: 'danger', message: '极端负分微盘·下跌概率77.7%', score });
-      }
-
-      // ── 第4组：板块过滤（策略第4节） ──
-      if (board.includes('科创') && score >= 0.15) {
-        alerts.push({ date, severity: 'warning', message: '科创板高分不追（胜率仅47%）', score });
-      } else if (board.includes('北交')) {
-        alerts.push({ date, severity: 'warning', message: '北交所排除·流动性差', score });
-      } else if (score >= 0.12 && score < 0.20 && !isMainBoard) {
-        alerts.push({ date, severity: 'warning', message: `非主板高分（${board || '未知'}）·谨慎`, score });
-      }
-    }
-
-    // 去重：同一天多条提醒合并为一行（优先保留 severity 最高的）
-    const byDate = new Map<string, StrategyAlert>();
-    const rank = { danger: 3, warning: 2, positive: 1, info: 0 };
-    for (const a of alerts) {
-      const existing = byDate.get(a.date);
-      if (!existing || rank[a.severity] > rank[existing.severity]) {
-        byDate.set(a.date, a);
-      }
-    }
-    return [...byDate.values()].sort((a, b) => a.date.localeCompare(b.date));
-  }, [visibleScores, stockInfo]);
-
-  const strategyAlertsByDate = useMemo(() => {
-    const m = new Map<string, StrategyAlert>();
-    for (const a of strategyAlerts) m.set(a.date, a);
-    return m;
-  }, [strategyAlerts]);
 
   // 策略汇总统计：N 天中黄金/危险/买点各多少天
   const strategySummary = useMemo(() => {
     const scored = visibleScores.filter(s => s.fusion_score !== null && s.fusion_score !== undefined);
-    let golden = 0, danger = 0, buyPoint = 0, neg = 0;
-    for (const s of scored) {
-      const sc = Number(s.fusion_score);
-      if (sc >= 0.10 && sc < 0.12) golden++;
-      if (sc <= -0.15) { neg++; }
-      if (sc <= -0.20 || (sc >= 0.20)) danger++;
-      if (s.signal_side?.toUpperCase() === 'BUY') buyPoint++;
-    }
     const board = stockInfo?.board || '';
     const tier = stockInfo?.market_cap_tier || '';
     const negTag = stockInfo?.negative_tag || '';
@@ -433,39 +324,8 @@ export const StockScoreChart: React.FC<Props> = ({ symbol, name, stockInfo, mark
     if (board.includes('北交')) staticWarnings.push('北交所');
     if (tier === '微盘') staticWarnings.push('微盘');
     if (negTag) staticWarnings.push(negTag);
-    return { total: scored.length, golden, danger, buyPoint, neg, staticWarnings };
+    return { total: scored.length, staticWarnings };
   }, [visibleScores, stockInfo]);
-
-  /* ---- 收益计算 ---- */
-  // 会计口径：买入记成本，卖出按平均成本实现盈亏，剩余持仓按现价计浮动盈亏。
-  // 总盈亏 = 已实现 + 浮动；总收益% = 总盈亏 / 累计买入投入。
-  const stats = useMemo(() => {
-    let realizedPnl = 0;
-    let cost = 0;
-    let shares = 0;
-    const ordered = [...trades].sort((a, b) => a.date.localeCompare(b.date));
-    for (const t of ordered) {
-      if (t.side === 'buy') {
-        cost += t.price * t.shares;
-        shares += t.shares;
-      } else if (shares > 0) {
-        const avgCost = cost / shares;
-        realizedPnl += (t.price - avgCost) * t.shares;
-        cost -= avgCost * t.shares;
-        shares -= t.shares;
-      }
-    }
-    // 现价：回放时用当前可见的最后收盘价，非回放用最后K线收盘价
-    const lastVisible = visibleKline[visibleKline.length - 1] || klineItems[klineItems.length - 1];
-    const curPrice = lastVisible?.close ?? 0;
-    // 浮动盈亏 = 剩余持仓市值 - 剩余成本（不能把市值当盈利）
-    const holdingValue = curPrice * shares;
-    const unrealizedPnl = holdingValue - cost;
-    const totalInvested = ordered.filter(t => t.side === 'buy').reduce((s, t) => s + t.price * t.shares, 0);
-    const pnl = realizedPnl + unrealizedPnl;
-    const pnlPct = totalInvested > 0 ? (pnl / totalInvested) * 100 : 0;
-    return { realizedPnl, unrealizedPnl, holdingValue, curPrice, remainingShares: shares, pnl, pnlPct, totalInvested };
-  }, [trades, klineItems, visibleKline]);
 
   /* ---- 交易操作 ---- */
   const doBuy = () => {
@@ -590,19 +450,8 @@ export const StockScoreChart: React.FC<Props> = ({ symbol, name, stockInfo, mark
       });
     }
 
-    // 策略提醒标记：分数折线 yAxisIndex=1（分数轴 -0.3~0.3），
-    // 在分数点上方/下方偏移避免与折线点重叠
-    const alertScatter: any[] = [];
-    for (const a of strategyAlerts) {
-      const idx = dates.indexOf(a.date);
-      if (idx < 0) continue;
-      alertScatter.push({
-        value: [idx, a.score + (a.severity === 'positive' ? 0.018 : a.severity === 'danger' ? -0.018 : 0)],
-        date: a.date, message: a.message, severity: a.severity,
-      });
-    }
-
-    // 分数轴范围：按实际分数动态扩展，避免融合模型高分(如 2.7)被固定 [-1,1] 截断
+    // 分数轴范围：始终按实际分数动态收紧（留 15% 边距），
+    // 让分数波动占满纵向空间；无数据时回退到固定范围
     const allScores = visibleScores
       .map(s => Number(s.fusion_score))
       .filter(v => !Number.isNaN(v) && v !== null && v !== undefined);
@@ -611,11 +460,14 @@ export const StockScoreChart: React.FC<Props> = ({ symbol, name, stockInfo, mark
     if (allScores.length > 0) {
       const dataMin = Math.min(...allScores);
       const dataMax = Math.max(...allScores);
-      // 融合模型/高分模型：按实际分布扩展（留 10% 边距）
-      if (wideScale || dataMax > 1.0 || dataMin < -1.0) {
-        const pad = Math.max((dataMax - dataMin) * 0.1, 0.05);
-        scoreMin = Math.floor((dataMin - pad) * 2) / 2;
-        scoreMax = Math.ceil((dataMax + pad) * 2) / 2;
+      const pad = Math.max((dataMax - dataMin) * 0.15, 0.005);
+      scoreMin = Math.floor((dataMin - pad) * 100) / 100;
+      scoreMax = Math.ceil((dataMax + pad) * 100) / 100;
+      if (scoreMax - scoreMin < 0.01) {
+        // 全相等兜底：以该值为中心展开
+        const c = (scoreMax + scoreMin) / 2;
+        scoreMin = Math.floor((c - 0.005) * 100) / 100;
+        scoreMax = Math.ceil((c + 0.005) * 100) / 100;
       }
     }
     return {
@@ -640,15 +492,10 @@ export const StockScoreChart: React.FC<Props> = ({ symbol, name, stockInfo, mark
               html += `<div>当日排名 #${s.score_rank}</div>`;
             }
           }
-          if (s?.signal_side) html += `<div>信号 ${s.signal_side}</div>`;
-          const alert = strategyAlertsByDate.get(d);
-          if (alert) {
-            html += `<div style="margin-top:4px;padding-top:4px;border-top:1px solid #e2e8f0;color:${SEVERITY_COLOR[alert.severity]};font-weight:bold;font-size:10px">📌 ${alert.message}</div>`;
-          }
           return html;
         },
       },
-      legend: { data: ['K线', '推理分数', '模拟交易', '策略提醒', ...(indexData ? ['上证指数', '上证MA20'] : [])], textStyle: { fontSize: 10 }, top: 0 },
+      legend: { data: ['K线', '推理分数', '模拟交易', ...(indexData ? ['上证指数', '上证MA20'] : [])], textStyle: { fontSize: 10 }, top: 0 },
       grid: { left: 8, right: 8, top: 28, bottom: 20, containLabel: true },
       xAxis: {
         type: 'category',
@@ -664,7 +511,16 @@ export const StockScoreChart: React.FC<Props> = ({ symbol, name, stockInfo, mark
           // 分数轴范围：按实际分数动态扩展（融合模型高分如 2.7 不被截断）
           min: scoreMin,
           max: scoreMax,
-          axisLabel: { fontSize: 9, color: '#94a3b8', formatter: (v: number) => v.toFixed(1) },
+          axisLabel: {
+            fontSize: 9, color: '#94a3b8',
+            // 轴收紧后刻度自适应小数位，避免 -0.0/0.0 这种无效刻度
+            formatter: (v: number) => {
+              const span = scoreMax - scoreMin;
+              if (span < 0.1) return v.toFixed(3);
+              if (span < 1) return v.toFixed(2);
+              return v.toFixed(1);
+            },
+          },
           splitLine: { show: false },
         },
         // 第三轴：上证指数（右外侧，青色），用于大盘趋势叠加
@@ -717,11 +573,11 @@ export const StockScoreChart: React.FC<Props> = ({ symbol, name, stockInfo, mark
                 ? [
                     { yAxis: 0.50, lineStyle: { color: '#f43f5e', type: 'dashed', width: 1.5 }, label: { formatter: '高分线 0.50', fontSize: 9, position: 'insideEndTop' } },
                     { yAxis: -0.50, lineStyle: { color: '#10b981', type: 'dashed', width: 1.5 }, label: { formatter: '低分线 -0.50', fontSize: 9, position: 'insideEndBottom' } },
-                  ]
+                  ].filter(l => l.yAxis >= scoreMin && l.yAxis <= scoreMax)
                 : [
-                    { yAxis: 0.10, lineStyle: { color: '#10b981', type: 'dashed', width: 1.5 }, label: { formatter: '黄金线 0.10', fontSize: 9, position: 'insideEndTop' } },
-                    { yAxis: -0.15, lineStyle: { color: '#f43f5e', type: 'dashed', width: 1.5 }, label: { formatter: '做空线 -0.15', fontSize: 9, position: 'insideEndBottom' } },
-                  ],
+                    { yAxis: 0.10, lineStyle: { color: '#10b981', type: 'dashed', width: 1.5 }, label: { formatter: '参考 0.10', fontSize: 9, position: 'insideEndTop' } },
+                    { yAxis: -0.15, lineStyle: { color: '#f43f5e', type: 'dashed', width: 1.5 }, label: { formatter: '参考 -0.15', fontSize: 9, position: 'insideEndBottom' } },
+                  ].filter(l => l.yAxis >= scoreMin && l.yAxis <= scoreMax),
           },
         },
         {
@@ -733,19 +589,6 @@ export const StockScoreChart: React.FC<Props> = ({ symbol, name, stockInfo, mark
           label: { show: true, position: 'top', fontSize: 9, formatter: (p: any) => `${p.data?.side === 'sell' ? '卖' : '买'}` },
           tooltip: {
             formatter: (p: any) => `<div>${p.data?.date} <b>${p.data?.side === 'sell' ? '卖出' : '买入'}</b> @${p.data?.price?.toFixed(2)}</div>`,
-          },
-        },
-        {
-          name: '策略提醒', type: 'scatter',
-          data: alertScatter,
-          yAxisIndex: 1,  // 分数轴（-0.3~0.3），与分数折线同轴
-          symbolSize: 16,
-          symbol: (p: any) => p.data?.severity === 'positive' ? 'pin' :
-                              p.data?.severity === 'danger' ? 'triangle' : 'diamond',
-          itemStyle: { color: (p: any) => SEVERITY_COLOR[p.data?.severity], borderColor: '#ffffff', borderWidth: 1.5 },
-          zlevel: 3,
-          tooltip: {
-            formatter: (p: any) => `<div><b>${p.data?.date}</b><br/><span style="color:${SEVERITY_COLOR[p.data?.severity]};font-weight:bold">📌 ${p.data?.message}</span></div>`,
           },
         },
         // 上证指数 + MA20 叠加（第三轴 yAxisIndex=2）
@@ -781,40 +624,38 @@ export const StockScoreChart: React.FC<Props> = ({ symbol, name, stockInfo, mark
         ] : []),
       ],
     };
-  }, [visibleKline, visibleScores, trades, replayEnabled, strategyAlerts, strategyAlertsByDate, defaultZoom, refLines, indexData]);
+  }, [visibleKline, visibleScores, trades, replayEnabled, defaultZoom, refLines, indexData]);
 
   // 打开回放时：点击逻辑绑定到 visibleKline 的索引
   const onEvents = useMemo(() => ({ click: onChartClick }), [clickableDates]);
-
-  const replayDate = clickableDates[Math.min(replayIdx, clickableDates.length - 1)]?.date || '';
 
   return (
     <div className="space-y-3">
       {/* 股票信息卡 */}
       <div className="rounded-2xl border border-slate-100 bg-slate-50/60 px-4 py-3 grid grid-cols-2 sm:grid-cols-6 gap-3">
-        <div>
+        <div className="text-center">
           <Text className="block text-[11px] text-slate-400 font-black uppercase">股票</Text>
           <Text className="block text-xs font-black text-slate-800">{name || symbol}</Text>
         </div>
-        <div>
+        <div className="text-center">
           <Text className="block text-[11px] text-slate-400 font-black uppercase">板块</Text>
           <Text className="block text-xs font-black text-slate-700">{stockInfo?.board || '—'}</Text>
         </div>
-        <div>
+        <div className="text-center">
           <Text className="block text-[11px] text-slate-400 font-black uppercase">行业</Text>
           <Text className="block text-xs font-black text-slate-700">{stockInfo?.industry || '—'}</Text>
         </div>
-        <div>
+        <div className="text-center">
           <Text className="block text-[11px] text-slate-400 font-black uppercase">市值</Text>
           <Text className="block text-xs font-black text-slate-700">
             {stockInfo?.market_cap_tier ? `${stockInfo.market_cap_tier}${stockInfo.market_cap_yi ? ` ${stockInfo.market_cap_yi}亿` : ''}` : '—'}
           </Text>
         </div>
-        <div>
+        <div className="text-center">
           <Text className="block text-[11px] text-slate-400 font-black uppercase">当前排名</Text>
           <Text className="block text-xs font-black text-slate-700">#{stockInfo?.rank ?? '—'}</Text>
         </div>
-        <div>
+        <div className="text-center">
           <Text className="block text-[11px] text-slate-400 font-black uppercase">当前分数</Text>
           <Text className={clsx('block text-xs font-black', (stockInfo?.score ?? 0) >= 0 ? 'text-rose-600' : 'text-emerald-600')}>
             {stockInfo?.score?.toFixed(4) ?? '—'}
@@ -827,10 +668,6 @@ export const StockScoreChart: React.FC<Props> = ({ symbol, name, stockInfo, mark
         <Text className="text-[11px] text-slate-400 font-black uppercase flex-shrink-0">策略</Text>
         {strategySummary.total > 0 ? (
           <>
-            <Tag color="green" className="m-0 rounded-full text-[11px] font-bold px-2">黄金区间 {strategySummary.golden}天</Tag>
-            <Tag color="volcano" className="m-0 rounded-full text-[11px] font-bold px-2">危险分 {strategySummary.danger}天</Tag>
-            <Tag color="red" className="m-0 rounded-full text-[11px] font-bold px-2">负分 {strategySummary.neg}天</Tag>
-            <Tag color="blue" className="m-0 rounded-full text-[11px] font-bold px-2">买入信号 {strategySummary.buyPoint}天</Tag>
             <Tag color="geekblue" className="m-0 rounded-full text-[11px] font-bold px-2">共 {strategySummary.total} 推理日</Tag>
           </>
         ) : (
@@ -844,10 +681,9 @@ export const StockScoreChart: React.FC<Props> = ({ symbol, name, stockInfo, mark
 
         {/* 大盘状态：上证指数 vs MA20 */}
         {indexData && indexData.latest_close != null && (
-          <Tag className={clsx('m-0 rounded-full text-[11px] font-bold px-2', indexData.below_ma20 ? 'bg-rose-50 text-rose-600 border-rose-200' : 'bg-emerald-50 text-emerald-600 border-emerald-200')}>
-            {indexData.below_ma20 ? '📉 大盘空' : '📈 大盘多'} 上证{indexData.latest_close}
-            {indexData.latest_ma20 != null ? ` / MA20 ${indexData.latest_ma20}` : ''}
-          </Tag>
+          <span className={clsx('m-0 rounded-full text-[11px] font-bold px-2', indexData.below_ma20 ? 'bg-rose-50 text-rose-600 border-rose-200' : 'bg-emerald-50 text-emerald-600 border-emerald-200')}>
+            上证{indexData.latest_close}{indexData.latest_ma20 != null ? ` / MA20 ${indexData.latest_ma20}` : ''} · 指数{indexData.below_ma20 ? '低于' : '高于'}MA20
+          </span>
         )}
 
         {/* 模型选择器：靠右，切换不同模型推理分数 */}
@@ -874,68 +710,6 @@ export const StockScoreChart: React.FC<Props> = ({ symbol, name, stockInfo, mark
             )}
           </div>
         )}
-      </div>
-
-      {/* 回放 + 收益工具条 */}
-      <div className="flex flex-wrap items-center gap-3 rounded-xl border border-slate-100 bg-white px-3 py-2">
-        <Button size="small" type={replayEnabled ? 'default' : 'primary'} onClick={() => {
-          if (replayEnabled) {
-            setReplayEnabled(false);
-          } else {
-            // 开启回放：从开始日期显示，推进到开始日期
-            setReplayIdx(startIdx);
-            setReplayEnabled(true);
-          }
-        }} className="rounded-lg text-xs font-bold h-7 px-3">
-          {replayEnabled ? '退出回放' : '开始回放'}
-        </Button>
-        {replayEnabled && klineItems.length > 0 && (
-          <>
-            {/* 开始日期选择 */}
-            <div className="flex items-center gap-1.5">
-              <Text className="text-[11px] text-slate-400 font-bold flex-shrink-0">开始日期</Text>
-              <input
-                type="date"
-                value={klineItems[Math.min(startIdx, klineItems.length - 1)]?.date || ''}
-                min={klineItems[0]?.date || ''}
-                max={klineItems[klineItems.length - 1]?.date || ''}
-                onChange={(e) => {
-                  const v = e.target.value;
-                  if (!v) return;
-                  const idx = klineItems.findIndex(k => k.date === v);
-                  if (idx >= 0) { setStartIdx(idx); setReplayIdx(Math.max(idx, replayIdx)); }
-                }}
-                className="rounded-lg border border-slate-200 text-xs font-mono px-2 py-1 h-7"
-              />
-            </div>
-            {/* 推进控制 */}
-            <div className="flex items-center gap-1.5 flex-1 min-w-[220px]">
-              <Text className="text-[11px] text-slate-400 font-bold flex-shrink-0">当前</Text>
-              <Slider
-                min={Math.min(startIdx, klineItems.length - 1)}
-                max={klineItems.length - 1}
-                value={Math.min(replayIdx, klineItems.length - 1)}
-                onChange={(v) => setReplayIdx(v as number)}
-                className="flex-1"
-                tooltip={{ formatter: (v: any) => klineItems[v]?.date }}
-              />
-              <Text className="text-xs font-mono text-slate-600 flex-shrink-0 w-24">{replayDate}</Text>
-              <Button size="small" onClick={() => setReplayIdx(Math.min(replayIdx + 1, klineItems.length - 1))}
-                className="rounded-lg text-xs font-bold h-7 px-2.5 flex-shrink-0">下一步</Button>
-            </div>
-          </>
-        )}
-        <div className="flex items-center gap-3 text-xs font-mono text-slate-600 flex-shrink-0">
-          <span>持仓 <b className="text-slate-800">{stats.remainingShares}</b> 股</span>
-          {stats.remainingShares > 0 && (
-            <span>市值 <b className="text-slate-800">{stats.holdingValue.toFixed(2)}</b>（现价 {stats.curPrice.toFixed(2)}）</span>
-          )}
-          <span>已实现 <b className={clsx(stats.realizedPnl >= 0 ? 'text-rose-600' : 'text-emerald-600')}>{stats.realizedPnl >= 0 ? '+' : ''}{stats.realizedPnl.toFixed(2)}</b></span>
-          {stats.remainingShares > 0 && (
-            <span>浮动 <b className={clsx(stats.unrealizedPnl >= 0 ? 'text-rose-600' : 'text-emerald-600')}>{stats.unrealizedPnl >= 0 ? '+' : ''}{stats.unrealizedPnl.toFixed(2)}</b></span>
-          )}
-          <span>总收益 <b className={clsx(stats.pnl >= 0 ? 'text-rose-600' : 'text-emerald-600')}>{stats.pnl >= 0 ? '+' : ''}{stats.pnl.toFixed(2)} ({stats.pnlPct >= 0 ? '+' : ''}{stats.pnlPct.toFixed(2)}%)</b></span>
-        </div>
       </div>
 
       {/* K 线图 */}
@@ -967,13 +741,10 @@ export const StockScoreChart: React.FC<Props> = ({ symbol, name, stockInfo, mark
 
       {/* 分数区间图例 */}
       <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
-        <span className="rounded-md bg-emerald-50 text-emerald-600 px-1.5 py-0.5 font-bold">黄金 0.10-0.12</span>
-        <span className="rounded-md bg-amber-50 text-amber-600 px-1.5 py-0.5 font-bold">可选 0.12-0.15</span>
-        <span className="rounded-md bg-orange-50 text-orange-600 px-1.5 py-0.5 font-bold">谨慎 0.15-0.20</span>
-        <span className="rounded-md bg-rose-50 text-rose-600 px-1.5 py-0.5 font-bold">做空 ≤-0.15</span>
-        <span className="rounded-md bg-violet-50 text-violet-600 px-1.5 py-0.5 font-bold">▲买入 ▼卖出</span>
-        <span className="rounded-md bg-emerald-50 text-emerald-600 px-1.5 py-0.5 font-bold">📌买点提示</span>
-        <span className="rounded-md bg-amber-50 text-amber-600 px-1.5 py-0.5 font-bold">◆风险提示</span>
+        <span className="rounded-md bg-emerald-50 text-emerald-600 px-1.5 py-0.5 font-bold">高分区 0.10-0.12</span>
+        <span className="rounded-md bg-amber-50 text-amber-600 px-1.5 py-0.5 font-bold">中高分 0.12-0.15</span>
+        <span className="rounded-md bg-orange-50 text-orange-600 px-1.5 py-0.5 font-bold">中分区 0.15-0.20</span>
+        <span className="rounded-md bg-rose-50 text-rose-600 px-1.5 py-0.5 font-bold">低分区 ≤-0.15</span>
         <Button
           size="small"
           className="rounded-lg text-[11px] font-bold h-6 px-2 ml-auto"
@@ -1033,7 +804,7 @@ export const StockScoreChart: React.FC<Props> = ({ symbol, name, stockInfo, mark
       >
         <div className="space-y-3">
           <Text className="block text-xs text-slate-400">
-            在分数轴上画虚线，标注不同分数对应的含义（可买 / 热门 / 危险等）。同一模型的股票共用此配置。每行左侧开关可单独控制该线的显示/隐藏。
+            在分数轴上画虚线，标注不同分数对应的分档名称。同一模型的股票共用此配置。每行左侧开关可单独控制该线的显示/隐藏。
           </Text>
           {refLines.length === 0 && (
             <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50/60 px-4 py-6 text-center">
@@ -1054,7 +825,7 @@ export const StockScoreChart: React.FC<Props> = ({ symbol, name, stockInfo, mark
               <Input
                 size="small"
                 value={l.label}
-                placeholder="名称（如 可买/热门/危险）"
+                placeholder="参考线名称"
                 className="w-28 text-xs"
                 onChange={e => {
                   const next = refLines.map((x, i) => i === idx ? { ...x, label: e.target.value } : x);
@@ -1237,12 +1008,6 @@ const ScoreCalendar: React.FC<{
             >
               <div className="flex items-center justify-between">
                 <Text className={clsx('text-[11px] font-mono', it ? 'text-slate-600 font-bold' : 'text-slate-300')}>{day}</Text>
-                {it?.signal_side && (
-                  <Tag color={it.signal_side.toUpperCase() === 'SELL' ? 'green' : it.signal_side.toUpperCase() === 'BUY' ? 'red' : 'default'}
-                    className="m-0 rounded-full text-[7px] font-black px-1">
-                    {it.signal_side.toUpperCase() === 'SELL' ? '空' : it.signal_side.toUpperCase() === 'BUY' ? '多' : '持'}
-                  </Tag>
-                )}
               </div>
               {it ? (
                 <>

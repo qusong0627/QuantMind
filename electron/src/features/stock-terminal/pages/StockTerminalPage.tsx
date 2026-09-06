@@ -207,12 +207,12 @@ export default function StockTerminalPage() {
   const zoomStart = bars.length > 200 ? Number((100 - (200 / bars.length) * 100).toFixed(1)) : 0;
 
   return (
-    /* 底部 pb-[84px]：给悬浮 Dock 菜单栏（64px）留出空间，避免遮挡 K线图底部的缩放条 */
-    <div className="w-full h-full bg-[#f8fafc] px-6 pt-6 pb-[84px] flex flex-col overflow-hidden">
+    /* 统一标准全屏卡片布局（PAGE_LAYOUT 标准外框） */
+    <div className={PAGE_LAYOUT.outerClass}>
       <div className={PAGE_LAYOUT.frameClass}>
-        {/* 顶栏：标题 + 居中搜索框（原独立搜索行并入顶部，K线图整体上移）+ 价格/模型 */}
-        <header className={PAGE_LAYOUT.headerClass} style={{ height: `${PAGE_LAYOUT.headerHeight}px` }}>
-          <div className="flex items-center gap-3 min-w-0 shrink-0">
+        {/* 顶栏：标题 + 居中搜索框（1fr auto 1fr 网格保证搜索框视口严格居中，不随右侧内容宽度偏移）+ 价格/模型 */}
+        <header className={PAGE_LAYOUT.headerClass} style={{ height: `${PAGE_LAYOUT.headerHeight}px`, display: 'grid', gridTemplateColumns: '1fr auto 1fr', alignItems: 'center' }}>
+          <div className="flex items-center gap-3 min-w-0 justify-self-start">
             <div className="w-10 h-10 bg-gradient-to-br from-blue-500 to-violet-500 rounded-2xl flex items-center justify-center shadow-lg shrink-0">
               <CandlestickChart className="w-5 h-5 text-white" />
             </div>
@@ -220,13 +220,11 @@ export default function StockTerminalPage() {
               <h1 className="text-lg font-bold text-slate-800 tracking-tight whitespace-nowrap">个股终端</h1>
             </div>
           </div>
-          <div className="flex-1 min-w-0 px-3">
-            <div className="max-w-[560px] mx-auto">
-              <StockSearchBar onSelect={handleSelect} watchlistSymbols={watchlist} />
-            </div>
+          <div className="justify-self-center min-w-0 w-full max-w-[560px]">
+            <StockSearchBar onSelect={handleSelect} watchlistSymbols={watchlist} />
           </div>
           {selected && (
-            <div className="hidden md:flex items-center gap-2 text-[11px] text-slate-500 shrink-0">
+            <div className="hidden md:flex items-center gap-2 text-[11px] text-slate-500 justify-self-end">
               <span className="font-mono font-bold text-slate-700">{selected.symbol}</span>
               <span className="text-slate-300">·</span>
               <span className={`font-mono font-bold ${up ? 'text-rose-500' : 'text-emerald-500'}`}>
@@ -237,9 +235,10 @@ export default function StockTerminalPage() {
                 size="small"
                 style={{ width: 130 }}
                 placeholder="默认模型"
-                value={modelId}
-                onChange={setModelId}
+                value={modelId ?? undefined}
+                onChange={(v) => setModelId(v === 'default' ? undefined : (v as string | undefined))}
                 popupMatchSelectWidth={false}
+                allowClear
                 options={[
                   { value: 'default', label: '默认模型' },
                   ...scoreModels.map((m) => ({ value: m.model_id, label: m.display_name || m.model_id })),
@@ -415,7 +414,7 @@ export default function StockTerminalPage() {
                     ))}
                   </div>
                 </div>
-                <div className="flex-1 min-h-0 overflow-y-auto p-3 bg-gray-50/30 custom-scrollbar">
+                <div className="flex-1 min-h-0 overflow-y-auto p-3 pb-16 bg-gray-50/30 custom-scrollbar">
                   <div className={detailTab === 'overview' ? '[&>div]:!grid-cols-1 [&>div]:!gap-3' : ''}>
                     {detailTab === 'overview' && <OverviewTab profile={profile} />}
                     {detailTab === 'financials' && <FinancialsTab symbol={selected.symbol} asof={signalDate} />}

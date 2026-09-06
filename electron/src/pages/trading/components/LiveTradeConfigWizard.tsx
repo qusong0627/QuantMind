@@ -94,7 +94,7 @@ const LiveTradeConfigWizard: React.FC<Props> = ({
 
   const issues = useMemo(() => validateLiveTradeConfig(liveTradeConfig), [liveTradeConfig]);
   const tips = strategyDefaults?.live_config_tips || [];
-  const modeLabel = mode === 'SIMULATION' ? '模拟盘' : (mode === 'SHADOW' ? '影子模式' : '模拟');
+  const modeLabel = mode === 'SIMULATION' ? '模拟盘' : (mode === 'SHADOW' ? '影子模式' : '实盘');
   const orderTypeLabel = liveTradeConfig.order_type === 'LIMIT' ? '限价' : '市价';
 
   const summaryRows = useMemo(

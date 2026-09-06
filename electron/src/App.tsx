@@ -23,7 +23,7 @@ import { refreshOrchestrator } from './services/refreshOrchestrator';
 import { useTradingModeInitialization } from './hooks/useTradingModeInitialization';
 import { useMarketReset } from './hooks/useMarketReset';
 import { authService } from './features/auth/services/authService';
-import { initDynamicServerUrl } from './config/services';
+import { initDynamicServerUrl, isElectronEnv } from './config/services';
 
 // 认证相关组件
 import AppRoutes from './features/auth/AppRoutes';
@@ -76,12 +76,12 @@ const AdminDataManagement = lazy(() => import('./features/admin/components/Admin
 const AdminQlibDataPanel = lazy(() => import('./features/admin/components/AdminQlibDataPanel').then(m => ({ default: m.AdminQlibDataPanel })));
 const AdminStrategyTemplates = lazy(() => import('./features/admin/components/AdminStrategyTemplates').then(m => ({ default: m.AdminStrategyTemplates })));
 const AdminNewsPage = lazy(() => import('./features/news/components/NewsPanel').then(m => ({ default: m.NewsPanel })));
-const AdminRDAgentFactors = lazy(() => import('./features/admin/components/AdminRDAgentFactors').then(m => ({ default: m.AdminRDAgentFactors })));
 const AdminDataPlatform = lazy(() => import('./features/admin/components/AdminDataPlatform').then(m => ({ default: m.AdminDataPlatform })));
 const AdminNewsEmotion = lazy(() => import('./features/admin/components/AdminNewsEmotion').then(m => ({ default: m.default })));
 const AdminFeatureCatalog = lazy(() => import('./features/admin/components/AdminFeatureCatalog').then(m => ({ default: m.AdminFeatureCatalog })));
 const AdminTrainingDatasets = lazy(() => import('./features/admin/components/AdminTrainingDatasets').then(m => ({ default: m.AdminTrainingDatasets })));
 const AdminAutoDLNodes = lazy(() => import('./features/admin/components/AdminAutoDLNodes').then(m => ({ default: m.AdminAutoDLNodes })));
+const AdminSystemSettings = lazy(() => import('./features/admin/components/AdminSystemSettings').then(m => ({ default: m.AdminSystemSettings })));
 const ComingSoonPage = lazy(() => import('./features/admin/components/ComingSoonPage').then(m => ({ default: m.ComingSoonPage })));
 const AlphaResearchPage = lazy(() => import('./features/alpha-research/pages/AlphaResearchPage'));
 const SkillsCenterPage = lazy(() => import('./features/skills-center/pages/SkillsCenterPage'));
@@ -303,7 +303,11 @@ export default function App() {
 
     const bootstrapServerConfig = async () => {
       try {
-        await initDynamicServerUrl();
+        // Web 端走 Nginx 相对路径，跳过桌面端 localStorage 旧地址探测，
+        // 否则会 fetch 已缓存的 http://127.0.0.1:8000/health 并报 ERR_CONNECTION_REFUSED
+        if (isElectronEnv()) {
+          await initDynamicServerUrl();
+        }
       } catch (error) {
         logger.warn('初始化服务器地址失败，将继续使用默认配置:', error);
       } finally {
@@ -665,11 +669,9 @@ export default function App() {
                     path="/rss-news"
                     element={
                       <ProtectedRoute>
-                        <div style={{ height: '100%', width: '100%', display: 'flex', flexDirection: 'column' }}>
-                          <Suspense fallback={<Spin size="large" />}>
-                            <AdminNewsPage />
-                          </Suspense>
-                        </div>
+                        <Suspense fallback={<Spin size="large" />}>
+                          <AdminNewsPage />
+                        </Suspense>
                       </ProtectedRoute>
                     }
                   />
@@ -727,7 +729,6 @@ export default function App() {
                     <Route path="news" element={<Suspense fallback={<Spin size="large" />}><AdminNewsEmotion /></Suspense>} />
                     <Route path="tags" element={<Navigate to="/admin/news" replace />} />
                     <Route path="finbert" element={<Navigate to="/admin/news" replace />} />
-                    <Route path="rd-agent" element={<Suspense fallback={<Spin size="large" />}><AdminRDAgentFactors /></Suspense>} />
                     <Route path="feature-catalog" element={<Suspense fallback={<Spin size="large" />}><AdminFeatureCatalog /></Suspense>} />
                     <Route path="autodl-nodes" element={<Suspense fallback={<Spin size="large" />}><AdminAutoDLNodes /></Suspense>} />
                     <Route path="training-datasets" element={<Suspense fallback={<Spin size="large" />}><AdminTrainingDatasets /></Suspense>} />
@@ -736,7 +737,7 @@ export default function App() {
                     <Route path="orders" element={<ComingSoonPage title="订单管理" />} />
                     <Route path="risk" element={<ComingSoonPage title="风险控制" />} />
                     <Route path="quotes" element={<Suspense fallback={<Spin size="large" />}><AdminDataPlatform /></Suspense>} />
-                    <Route path="settings" element={<ComingSoonPage title="系统设置" />} />
+                    <Route path="settings" element={<Suspense fallback={<Spin size="large" />}><AdminSystemSettings /></Suspense>} />
                   </Route>
 
                   {/* 主应用路由 - 仪表盘等 */}

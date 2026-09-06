@@ -166,7 +166,8 @@ export const QlibQuickBacktest: React.FC = () => {
       setModelsLoading(true);
       try {
         const [userResp, sysModels] = await Promise.all([
-          modelTrainingService.listUserModels(true),
+          // 回测选模型：只要可用模型，已归档的不应出现（管理页才需要 includeArchived）
+          modelTrainingService.listUserModels(false),
           modelTrainingService.listSystemModels(),
         ]);
         const sysItems: UserModelRecord[] = (sysModels ?? []).map((sm) => {
@@ -215,9 +216,10 @@ export const QlibQuickBacktest: React.FC = () => {
     loadModels();
   }, []);
 
-  // 按当前市场过滤模型
+  // 按当前市场过滤模型（已归档模型一律排除，防止参与回测）
   const filteredModels = useMemo(() => {
     return models.filter((m) => {
+      if (String(m.status || '').toLowerCase() === 'archived') return false;
       const meta = (m.metadata_json || {}) as Record<string, any>;
       const raw = String(meta.market || '').toUpperCase();
       const ctx = meta.context;

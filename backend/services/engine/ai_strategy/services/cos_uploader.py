@@ -730,8 +730,10 @@ def get_cos_uploader() -> COSUploader:
 
 
 # 策略保存服务（结合COS和数据库）
+# ⚠️  兼容层：此处的 StrategyStorageService 已收敛为对共享存储的 API 转发。
+# 新代码请直接使用 backend.shared.strategy_storage.get_strategy_storage_service()
 class StrategyStorageService:
-    """策略存储服务（完整流程）"""
+    """策略存储服务（完整流程） — 已收敛为共享存储 API 转发的兼容层"""
 
     def __init__(self):
         # 使用 STORAGE_MODE 决定 local 或 cos

@@ -23,7 +23,7 @@ function loadHistory(): string[] {
   }
 }
 
-export function StockSearchBar({ onSelect, watchlistSymbols, placeholder = '搜索股票代码 / 名称，如 600519 或 贵州茅台' }: Props) {
+export function StockSearchBar({ onSelect, watchlistSymbols, placeholder = '搜索股票代码 / 名称' }: Props) {
   const [q, setQ] = useState('');
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -214,7 +214,7 @@ export function StockSearchBar({ onSelect, watchlistSymbols, placeholder = '搜�
                 <span className="text-[11px] font-bold text-slate-500">输入关键词开始搜索</span>
               </div>
               <div className="px-1 text-[11px] text-slate-400 leading-relaxed">
-                支持代码（如 600519.SH / 600519）、名称、拼音首字母；不输入时不加载全量列表。
+                支持代码、名称、拼音首字母；不输入时不加载全量列表。
               </div>
             </div>
           )}

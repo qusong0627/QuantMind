@@ -1,7 +1,7 @@
 {
   "id": "adaptive_drift",
   "name": "自适应动态调仓策略 (Concept Drift)",
-  "description": "集成环境建模，自动识别牛熊阶段。动态调整选股宽度与仓位，应对风格漂移。",
+  "description": "模型信号 Top-K 选股，宽选股宽度与灵活换手，应对风格漂移。",
   "category": "basic",
   "difficulty": "intermediate",
   "params": [
@@ -11,11 +11,6 @@
       "default": 50,
       "min": 10,
       "max": 100
-    },
-    {
-      "name": "dynamic_position",
-      "description": "开启环境自适应仓位",
-      "default": "True"
     }
   ],
   "execution_defaults": {},

@@ -747,39 +747,49 @@ async def list_remote_strategies(user_id: str):
                     except Exception:
                         pass
 
-            old_rows = session.execute(
-                text(
-                    """
-                    SELECT id, strategy_name, description, tags, file_size, created_at, updated_at
-                    FROM user_strategies
-                    WHERE user_id = :uid
-                    ORDER BY created_at DESC
-                    """
-                ),
-                {"uid": user_id},
-            ).fetchall()
-            for r in old_rows:
-                sid = str(r[0])
-                if sid in seen_ids:
-                    continue
-                tags = r[3] or []
-                if isinstance(tags, str):
-                    try:
-                        tags = json.loads(tags)
-                    except Exception:
-                        tags = []
-                items.append(
-                    {
-                        "id": sid,
-                        "strategy_name": r[1],
-                        "description": r[2],
-                        "tags": tags,
-                        "file_size": int(r[4] or 0),
-                        "created_at": r[5].isoformat() if r[5] else None,
-                        "updated_at": r[6].isoformat() if r[6] else None,
-                        "source": "ai_strategy_cloud",
-                    }
-                )
+            # 兼容层：user_strategies 为遗留表，新写入已停止，仅作只读镜像，下一版本移除
+            try:
+                old_rows = session.execute(
+                    text(
+                        """
+                        SELECT id, strategy_name, description, tags, file_size, created_at, updated_at
+                        FROM user_strategies
+                        WHERE user_id = :uid
+                        ORDER BY created_at DESC
+                        """
+                    ),
+                    {"uid": user_id},
+                ).fetchall()
+                for r in old_rows:
+                    sid = str(r[0])
+                    if sid in seen_ids:
+                        continue
+                    tags = r[3] or []
+                    if isinstance(tags, str):
+                        try:
+                            tags = json.loads(tags)
+                        except Exception:
+                            tags = []
+                    items.append(
+                        {
+                            "id": sid,
+                            "strategy_name": r[1],
+                            "description": r[2],
+                            "tags": tags,
+                            "file_size": int(r[4] or 0),
+                            "created_at": r[5].isoformat() if r[5] else None,
+                            "updated_at": r[6].isoformat() if r[6] else None,
+                            "source": "ai_strategy_cloud",
+                        }
+                    )
+                if old_rows:
+                    logger.warning("list_remote_strategies: %d items from legacy user_strategies (deprecated)", len(old_rows))
+            except Exception as _leg_e:
+                logger.debug(f"legacy user_strategies read skipped: {_leg_e}")
+                try:
+                    session.rollback()
+                except Exception:
+                    pass
         return {"success": True, "items": items}
     except Exception as e:
         logger.error("List remote strategies failed: %s", e, exc_info=True)

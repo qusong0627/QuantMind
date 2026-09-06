@@ -1,6 +1,6 @@
 import React from 'react';
-import { Card, Divider, Input, Button, Row, Col, InputNumber, Select, Alert, Typography, Tag, Checkbox, Switch, Tooltip } from 'antd';
-import { Settings2, MonitorPlay, TreePine, Cpu, Ruler, AlertTriangle } from 'lucide-react';
+import { Card, Divider, Input, Button, Row, Col, InputNumber, Select, Alert, Typography, Tag, Radio, Switch, Tooltip } from 'antd';
+import { Settings2, MonitorPlay, TreePine, Cpu, Ruler } from 'lucide-react';
 import { clsx } from 'clsx';
 import {
   TrainingParams,
@@ -9,10 +9,7 @@ import {
   WfaConfig,
   DealPrice,
   ModelType,
-  ModelCategory,
-  ModelTypeOption,
   MODEL_TYPE_OPTIONS,
-  EnsembleMethod,
   MODEL_DL_DEFAULTS,
 } from './trainingUtils';
 import type { AppMarket } from '../../store/slices/uiSlice';
@@ -93,7 +90,13 @@ export const ParameterConfig: React.FC<ParameterConfigProps> = ({
   const benchmarkOptions = MARKET_BENCHMARKS[market] || MARKET_BENCHMARKS.CN;
   const isMultiHorizon = (target.horizonDaysList?.length ?? 0) >= 2;
   const isSingleLgb = params.model_types.length === 1 && params.model_type === 'lightgbm';
-  const quantileDisabled = market !== 'CN' || !isSingleLgb || isMultiHorizon;
+  const isReturnTarget = target.mode === 'return';
+  // 分位推理：后端仅支持 A 股单 LightGBM 回归模型（train.py _validate_quantile_config）
+  const quantileDisabled = market !== 'CN' || !isSingleLgb || isMultiHorizon || !isReturnTarget;
+  // WFA 诊断：后端仅支持树模型 + 线性，其余直接 skip（train.py _train_wfa_single）
+  const wfaSupported = ['lightgbm', 'xgboost', 'catboost', 'linear'].includes(params.model_type);
+  // 行业编码：仅 CatBoost 声明 cat_features 做类别处理，其余模型无此口径
+  const isCatboost = params.model_type === 'catboost';
   return (
     <div className="grid gap-4 xl:grid-cols-[1fr_0.9fr]">
       <Card className="rounded-3xl border-slate-200 shadow-sm" styles={{ body: { padding: 20 } }}>
@@ -108,29 +111,34 @@ export const ParameterConfig: React.FC<ParameterConfigProps> = ({
           <Card className="rounded-2xl border-slate-200" size="small" title="模型类型">
             <div className="space-y-3">
               <div className="text-xs text-slate-500">
-                选择训练模型。树模型适合快速实验，线性模型作为基线 sanity check，深度学习模型在大数据集上潜力更大。支持多选进行集成训练。
+                一次训练一个模型。树模型适合快速实验，线性模型作为基线 sanity check，深度学习模型在大数据集上潜力更大。
               </div>
-              <Checkbox.Group
-                value={params.model_types}
+              <Radio.Group
+                value={params.model_type}
                 className="w-full"
-                onChange={(checkedValues) => {
-                  const selected = checkedValues as ModelType[];
-                  if (selected.length === 0) return;
-                  const primary = selected[0];
+                onChange={(event) => {
+                  const selected = event.target.value as ModelType;
                   // 切换模型类型时，自动填充该模型的推荐 DL 默认参数
-                  const dlDefaults = MODEL_DL_DEFAULTS[primary] || {};
+                  const dlDefaults = MODEL_DL_DEFAULTS[selected] || {};
                   // 对于非 DL 模型，不覆盖已设置的 DL 参数
                   const updated: TrainingParams = {
                     ...params,
-                    model_type: primary,
-                    model_types: selected,
-                    ensemble_method: selected.length > 1 ? (params.ensemble_method || 'none') : 'none',
-                    prediction_mode: selected.length === 1 && primary === 'lightgbm' ? params.prediction_mode : 'point',
+                    model_type: selected,
+                    model_types: [selected],
+                    ensemble_method: 'none',
+                    prediction_mode: selected === 'lightgbm' ? params.prediction_mode : 'point',
                   };
                   if (dlDefaults.dl_hidden_size !== undefined) {
                     Object.assign(updated, dlDefaults);
                   }
                   onParamsChange(updated);
+                  // 切换到不支持的模型时，自动关闭右侧已开的开关，避免提交无效组合
+                  if (selected !== 'catboost' && context.industry_as_feature) {
+                    onContextChange({ ...context, industry_as_feature: false });
+                  }
+                  if (!['lightgbm', 'xgboost', 'catboost', 'linear'].includes(selected) && wfa?.enabled) {
+                    onWfaChange?.({ ...wfa, enabled: false });
+                  }
                 }}
               >
                 <div className="space-y-3">
@@ -139,18 +147,23 @@ export const ParameterConfig: React.FC<ParameterConfigProps> = ({
                   </div>
                   <div className="grid grid-cols-2 gap-x-4 gap-y-2 pl-1">
                     {MODEL_TYPE_OPTIONS.filter(m => m.category === 'tree').map(m => (
-                      <Checkbox
+                      <Radio
                         key={m.value}
                         value={m.value}
-                        className="!inline-flex !items-center [&_.ant-checkbox]:top-0 [&_.ant-checkbox]:self-center"
+                        className="!inline-flex !items-start [&_.ant-radio]:top-1 [&_.ant-radio]:self-start"
                       >
-                        <span className="inline-flex items-center flex-wrap gap-x-1.5 leading-normal">
-                          <Tooltip title={m.tooltip} placement="topLeft" styles={{ root: { maxWidth: 360 } }}>
-                            <span className="text-sm cursor-help border-b border-dashed border-slate-300 font-medium text-slate-700">{m.label}</span>
-                          </Tooltip>
+                        <span className="inline-flex flex-col gap-0.5 leading-normal">
+                          <span className="inline-flex items-center gap-1.5">
+                            <Tooltip title={m.tooltip} placement="topLeft" styles={{ root: { maxWidth: 360 } }}>
+                              <span className="text-sm cursor-help border-b border-dashed border-slate-300 font-medium text-slate-700">{m.label}</span>
+                            </Tooltip>
+                            <Tag color={m.framework === 'pytorch' ? 'orange' : 'blue'} className="!m-0 rounded-md px-1 text-[10px] leading-4">
+                              {m.framework === 'pytorch' ? 'GPU' : 'CPU'}
+                            </Tag>
+                          </span>
                           <span className="text-xs text-slate-400">{m.description}</span>
                         </span>
-                      </Checkbox>
+                      </Radio>
                     ))}
                   </div>
                   <div className="text-xs font-medium text-slate-600 flex items-center gap-1">
@@ -158,18 +171,23 @@ export const ParameterConfig: React.FC<ParameterConfigProps> = ({
                   </div>
                   <div className="grid grid-cols-2 gap-x-4 gap-y-2 pl-1">
                     {MODEL_TYPE_OPTIONS.filter(m => m.category === 'linear').map(m => (
-                      <Checkbox
+                      <Radio
                         key={m.value}
                         value={m.value}
-                        className="!inline-flex !items-center [&_.ant-checkbox]:top-0 [&_.ant-checkbox]:self-center"
+                        className="!inline-flex !items-start [&_.ant-radio]:top-1 [&_.ant-radio]:self-start"
                       >
-                        <span className="inline-flex items-center flex-wrap gap-x-1.5 leading-normal">
-                          <Tooltip title={m.tooltip} placement="topLeft" styles={{ root: { maxWidth: 360 } }}>
-                            <span className="text-sm cursor-help border-b border-dashed border-slate-300 font-medium text-slate-700">{m.label}</span>
-                          </Tooltip>
+                        <span className="inline-flex flex-col gap-0.5 leading-normal">
+                          <span className="inline-flex items-center gap-1.5">
+                            <Tooltip title={m.tooltip} placement="topLeft" styles={{ root: { maxWidth: 360 } }}>
+                              <span className="text-sm cursor-help border-b border-dashed border-slate-300 font-medium text-slate-700">{m.label}</span>
+                            </Tooltip>
+                            <Tag color={m.framework === 'pytorch' ? 'orange' : 'blue'} className="!m-0 rounded-md px-1 text-[10px] leading-4">
+                              {m.framework === 'pytorch' ? 'GPU' : 'CPU'}
+                            </Tag>
+                          </span>
                           <span className="text-xs text-slate-400">{m.description}</span>
                         </span>
-                      </Checkbox>
+                      </Radio>
                     ))}
                   </div>
                   <div className="text-xs font-medium text-slate-600 flex items-center gap-1">
@@ -177,112 +195,30 @@ export const ParameterConfig: React.FC<ParameterConfigProps> = ({
                   </div>
                   <div className="grid grid-cols-2 gap-x-4 gap-y-2 pl-1">
                     {MODEL_TYPE_OPTIONS.filter(m => m.category === 'deep_learning').map(m => (
-                      <Checkbox
+                      <Radio
                         key={m.value}
                         value={m.value}
-                        className="!inline-flex !items-center [&_.ant-checkbox]:top-0 [&_.ant-checkbox]:self-center"
+                        className="!inline-flex !items-start [&_.ant-radio]:top-1 [&_.ant-radio]:self-start"
                       >
-                        <span className="inline-flex items-center flex-wrap gap-x-1.5 leading-normal">
-                          <Tooltip title={m.tooltip} placement="topLeft" styles={{ root: { maxWidth: 360 } }}>
-                            <span className="text-sm cursor-help border-b border-dashed border-slate-300 font-medium text-slate-700">{m.label}</span>
-                          </Tooltip>
+                        <span className="inline-flex flex-col gap-0.5 leading-normal">
+                          <span className="inline-flex items-center gap-1.5">
+                            <Tooltip title={m.tooltip} placement="topLeft" styles={{ root: { maxWidth: 360 } }}>
+                              <span className="text-sm cursor-help border-b border-dashed border-slate-300 font-medium text-slate-700">{m.label}</span>
+                            </Tooltip>
+                            <Tag color={m.framework === 'pytorch' ? 'orange' : 'blue'} className="!m-0 rounded-md px-1 text-[10px] leading-4">
+                              {m.framework === 'pytorch' ? 'GPU' : 'CPU'}
+                            </Tag>
+                          </span>
                           <span className="text-xs text-slate-400">{m.description}</span>
                         </span>
-                      </Checkbox>
+                      </Radio>
                     ))}
                   </div>
                 </div>
-              </Checkbox.Group>
-              {params.model_types.length > 1 && (
-                <div className="flex flex-wrap gap-1.5">
-                  {params.model_types.map(mt => {
-                    const opt = MODEL_TYPE_OPTIONS.find(m => m.value === mt);
-                    return (
-                      <Tag key={mt} color="blue" className="rounded-lg">
-                        {opt?.label ?? mt}
-                      </Tag>
-                    );
-                  })}
-                </div>
-              )}
-              {(() => {
-                const hasTree = params.model_types.some(mt => {
-                  const opt = MODEL_TYPE_OPTIONS.find(m => m.value === mt);
-                  return opt?.category === 'tree' || opt?.category === 'linear';
-                });
-                const hasDL = params.model_types.some(mt => {
-                  const opt = MODEL_TYPE_OPTIONS.find(m => m.value === mt);
-                  return opt?.category === 'deep_learning';
-                });
-                return hasTree && hasDL;
-              })() && (
-                <Alert
-                  type="warning"
-                  showIcon
-                  icon={<AlertTriangle size={14} />}
-                  message="树模型与深度学习模型混合训练时，集成方法暂不支持，将分别独立训练"
-                  className="rounded-xl"
-                />
-              )}
-              {params.model_types.length > 1 && !(() => {
-                const hasTree = params.model_types.some(mt => {
-                  const opt = MODEL_TYPE_OPTIONS.find(m => m.value === mt);
-                  return opt?.category === 'tree' || opt?.category === 'linear';
-                });
-                const hasDL = params.model_types.some(mt => {
-                  const opt = MODEL_TYPE_OPTIONS.find(m => m.value === mt);
-                  return opt?.category === 'deep_learning';
-                });
-                return hasTree && hasDL;
-              })() && (
-                <div className="space-y-1">
-                  <div className="text-xs text-slate-500">集成方法</div>
-                  <Select
-                    value={params.ensemble_method}
-                    className="w-full"
-                    onChange={(value) => onParamsChange({ ...params, ensemble_method: value as EnsembleMethod })}
-                    options={[
-                      { label: '无集成 (各自独立训练)', value: 'none' },
-                      { label: 'Stacking 集成', value: 'stacking' },
-                    ]}
-                  />
-                </div>
-              )}
-              {params.ensemble_method === 'stacking' && (
-                <Row gutter={[12, 12]}>
-                  <Col span={12}>
-                    <div className="space-y-1">
-                      <div className="text-xs text-slate-500">OOF 折数 (n_folds)</div>
-                      <InputNumber
-                        value={params.n_folds ?? 3}
-                        min={2}
-                        max={10}
-                        step={1}
-                        className="w-full"
-                        onChange={(v) => onParamsChange({ ...params, n_folds: Number(v ?? 3) })}
-                      />
-                      <div className="text-[10px] text-slate-400">时序扩展窗口折数，越多越稳但越慢</div>
-                    </div>
-                  </Col>
-                  <Col span={12}>
-                    <div className="space-y-1">
-                      <div className="text-xs text-slate-500">元学习器正则 (alpha)</div>
-                      <InputNumber
-                        value={params.meta_alpha ?? 1.0}
-                        min={0.01}
-                        max={100}
-                        step={0.5}
-                        className="w-full"
-                        onChange={(v) => onParamsChange({ ...params, meta_alpha: Number(v ?? 1.0) })}
-                      />
-                      <div className="text-[10px] text-slate-400">Ridge 元学习器 L2 系数，越大越保守</div>
-                    </div>
-                  </Col>
-                </Row>
-              )}
+              </Radio.Group>
               {params.model_types.some(mt => {
                 const opt = MODEL_TYPE_OPTIONS.find(m => m.value === mt);
-                return opt?.category === 'deep_learning';
+                return opt?.framework === 'pytorch';
               }) && (
                 <Alert
                   type="info"
@@ -297,7 +233,7 @@ export const ParameterConfig: React.FC<ParameterConfigProps> = ({
           <Card className="rounded-2xl border-slate-200" size="small" title="模型命名">
             <div className="space-y-2">
               <div className="text-xs text-slate-500">
-                display_name 用于模型管理页展示和训练结果命名，自动规则为“日期_T+N_模型维度_版本”。
+                display_name 用于模型管理页展示和训练结果命名，自动规则为“模型_日期_T+N_模型维度_版本”。
               </div>
               <div className="flex items-center gap-2">
                 <Input
@@ -366,7 +302,6 @@ export const ParameterConfig: React.FC<ParameterConfigProps> = ({
                     {[
                       ['num_leaves', '叶子数', { min: 1, max: 1024, step: 1 }],
                       ['min_data_in_leaf', '叶子最小样本', { min: 1, max: 10000, step: 1 }],
-                      ['min_child_samples', '子节点最小样本', { min: 1, max: 10000, step: 1 }],
                       ['path_smooth', '路径平滑', { min: 0, max: 10, step: 0.1 }],
                       ['bagging_freq', 'Bagging 频率', { min: 0, max: 100, step: 1 }],
                       ['lambda_l1', 'L1 正则', { min: 0, max: 10, step: 0.1 }],
@@ -557,6 +492,55 @@ export const ParameterConfig: React.FC<ParameterConfigProps> = ({
                 </>
               )}
 
+              {/* RandomForest 专属参数 */}
+              {params.model_types.includes('random_forest') && (
+                <>
+                  <div className="text-xs font-medium text-slate-500 border-t pt-3">随机森林超参</div>
+                  <Row gutter={[12, 12]}>
+                    <Col span={12}>
+                      <div className="space-y-1">
+                        <div className="text-xs text-slate-500">树的数量 (n_estimators)</div>
+                        <InputNumber
+                          value={params.rf_n_estimators ?? 300}
+                          min={10}
+                          max={2000}
+                          step={10}
+                          className="w-full"
+                          onChange={(v) => onParamsChange({ ...params, rf_n_estimators: Number(v ?? 300) })}
+                        />
+                      </div>
+                    </Col>
+                    <Col span={12}>
+                      <div className="space-y-1">
+                        <div className="text-xs text-slate-500">最大深度 (max_depth)</div>
+                        <InputNumber
+                          value={params.rf_max_depth ?? 12}
+                          min={1}
+                          max={64}
+                          step={1}
+                          className="w-full"
+                          onChange={(v) => onParamsChange({ ...params, rf_max_depth: Number(v ?? 12) })}
+                        />
+                      </div>
+                    </Col>
+                    <Col span={12}>
+                      <div className="space-y-1">
+                        <div className="text-xs text-slate-500">分裂特征数 (max_features)</div>
+                        <Select
+                          value={params.rf_max_features ?? 'sqrt'}
+                          className="w-full"
+                          onChange={(value) => onParamsChange({ ...params, rf_max_features: value })}
+                          options={[
+                            { label: 'sqrt（默认）', value: 'sqrt' },
+                            { label: 'log2', value: 'log2' },
+                          ]}
+                        />
+                      </div>
+                    </Col>
+                  </Row>
+                </>
+              )}
+
               {/* 深度学习模型参数 */}
               {params.model_types.some(mt => {
                 const opt = MODEL_TYPE_OPTIONS.find(m => m.value === mt);
@@ -597,10 +581,8 @@ export const ParameterConfig: React.FC<ParameterConfigProps> = ({
                         </div>
                       </Col>
                     ))}
-                  </Row>
-                  {/* DL 模型专属参数：按主模型动态显示 */}
-                  {params.model_type === 'tcn' && (
-                    <Row gutter={[12, 12]} className="mt-3">
+                    {/* DL 模型专属参数：并进主网格，与序列长度凑成一行 */}
+                    {params.model_type === 'tcn' && (
                       <Col span={12}>
                         <div className="space-y-1">
                           <div className="text-xs text-slate-500">卷积核大小 (kernel_size)</div>
@@ -615,10 +597,8 @@ export const ParameterConfig: React.FC<ParameterConfigProps> = ({
                           <div className="text-[10px] text-slate-400">增大到 7+ 捕捉更长期依赖</div>
                         </div>
                       </Col>
-                    </Row>
-                  )}
-                  {params.model_type === 'nativetft' && (
-                    <Row gutter={[12, 12]} className="mt-3">
+                    )}
+                    {params.model_type === 'nativetft' && (
                       <Col span={12}>
                         <div className="space-y-1">
                           <div className="text-xs text-slate-500">注意力头数 (num_heads)</div>
@@ -633,8 +613,8 @@ export const ParameterConfig: React.FC<ParameterConfigProps> = ({
                           <div className="text-[10px] text-slate-400">需能被隐藏维度整除</div>
                         </div>
                       </Col>
-                    </Row>
-                  )}
+                    )}
+                  </Row>
                 </>
               )}
             </div>
@@ -718,13 +698,17 @@ export const ParameterConfig: React.FC<ParameterConfigProps> = ({
                   将行业编码作为特征加入模型，CatBoost 原生支持类别特征
                 </div>
               </div>
-              <Tooltip title="将行业编码作为特征加入模型，CatBoost原生支持类别特征">
+              <Tooltip title="将行业编码作为特征加入模型，仅 CatBoost 会按类别特征原生处理">
                 <Switch
                   checked={!!context.industry_as_feature}
+                  disabled={!isCatboost}
                   onChange={(checked) => onContextChange({ ...context, industry_as_feature: checked })}
                 />
               </Tooltip>
             </div>
+            {!isCatboost && (
+              <div className="mt-2 text-[11px] text-amber-600">行业类别特征仅 CatBoost 原生支持，当前模型不可用。</div>
+            )}
           </div>
 
           {/* ── 特征截面预处理 ── */}
@@ -764,7 +748,7 @@ export const ParameterConfig: React.FC<ParameterConfigProps> = ({
             </div>
             {isMultiHorizon ? (
               <div className="mt-2 text-[11px] text-amber-600">多周期训练模式下，后端按周期分别产出模型且融合子任务不生成分位模型，故禁用收益率分位推理。</div>
-            ) : (market !== 'CN' || !isSingleLgb) ? (
+            ) : (market !== 'CN' || !isSingleLgb || !isReturnTarget) ? (
               <div className="mt-2 text-[11px] text-amber-600">首版仅支持 A 股单 LightGBM；目标类型还需选择“回归目标（未来收益率）”。</div>
             ) : null}
           </div>
@@ -845,9 +829,13 @@ export const ParameterConfig: React.FC<ParameterConfigProps> = ({
                 </div>
                 <Switch
                   checked={!!wfa?.enabled}
+                  disabled={!wfaSupported}
                   onChange={(checked) => onWfaChange({ ...(wfa || { enabled: false, strategy: 'rolling', nWindows: 4, trainYears: 3, valMonths: 12, stepMonths: 12 }), enabled: checked })}
                 />
               </div>
+              {!wfaSupported && (
+                <div className="mt-2 text-[11px] text-amber-600">WFA 诊断仅支持树模型与线性模型（LightGBM / XGBoost / CatBoost / Ridge），当前模型后端会直接跳过。</div>
+              )}
 
               {wfa?.enabled && (
                 <>
@@ -924,45 +912,6 @@ export const ParameterConfig: React.FC<ParameterConfigProps> = ({
               )}
             </div>
           )}
-
-          {/* ── Optuna 自动超参搜索 ── */}
-          <div className="rounded-2xl border border-indigo-100 bg-white px-3 py-2">
-            <div className="flex items-center justify-between gap-3">
-              <div className="space-y-0.5">
-                <div className="text-xs font-semibold text-slate-700">Optuna 自动超参搜索</div>
-                <div className="text-[11px] text-slate-400 leading-relaxed">
-                  自动搜索树模型最优超参（LGB/XGB/CatBoost），以验证集 Rank ICIR 为目标。开启后训练耗时约 ×trial 数
-                </div>
-              </div>
-              <Switch
-                checked={!!params.optunaEnabled}
-                onChange={(checked) => onParamsChange({ ...params, optunaEnabled: checked })}
-              />
-            </div>
-            {params.optunaEnabled && (
-              <div className="mt-3 flex items-center gap-2">
-                <span className="text-xs text-slate-500">搜索次数</span>
-                <InputNumber
-                  value={params.optunaTrials ?? 20}
-                  min={10}
-                  max={100}
-                  step={5}
-                  className="w-28"
-                  onChange={(v) => onParamsChange({ ...params, optunaTrials: Number(v ?? 20) })}
-                />
-                <span className="text-[10px] text-slate-400">默认 20 次，耗时约为普通训练的 20 倍</span>
-              </div>
-            )}
-            {params.optunaEnabled && isMultiHorizon && (
-              <Alert
-                className="mt-2 rounded-lg border-amber-100 bg-amber-50/60"
-                type="warning"
-                showIcon
-                message="Optuna 与多周期训练叠加会显著放大耗时"
-                description={`每次超参搜索 ×{params.optunaTrials ?? 20} 次 × 多周期 {(target.horizonDaysList?.length ?? 0)} 个周期 + 1 个融合模型，总耗时约为普通训练的 {((params.optunaTrials ?? 20) * ((target.horizonDaysList?.length ?? 0) + 1)).toFixed(0)} 倍，可能触发训练超时。建议缩短搜索次数或关闭其一。`}
-              />
-            )}
-          </div>
 
           <Alert
             type="warning"

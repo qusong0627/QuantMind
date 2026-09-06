@@ -25,6 +25,7 @@ from backend.services.api.routers.admin.model_management import (
 )
 from backend.services.api.routers.admin.model_management_utils import (
     _enrich_feature_catalog_with_data_coverage_async,
+    unify_feature_catalog_categories,
 )
 from backend.services.api.routers.admin.quantdb_factor_catalog import (
     load_quantdb_training_catalog,
@@ -49,6 +50,7 @@ from backend.services.engine.services.model_inference_persistence import (
 )
 from backend.shared.database_manager_v2 import get_session
 from backend.shared.inference_stats import compute_score_distribution
+from backend.shared.inference_coverage import find_inference_gap_dates
 from backend.shared.model_registry import model_registry_service
 from backend.shared.redis_sentinel_client import get_redis_sentinel_client
 from backend.shared.trading_calendar import calendar_service
@@ -636,6 +638,11 @@ async def get_model_feature_catalog(
     if not catalog:
         catalog = _load_feature_catalog_from_file(market=market)
 
+    if catalog:
+        # 训练消费侧按 A 训练目录口径统一分组（B 的 gtja/liquidity/holding 等归位）；
+        # admin 读写回路保持 B 原生口径，不受影响。
+        catalog = unify_feature_catalog_categories(catalog)
+
     if not catalog:
         raise HTTPException(
             status_code=404, detail="未找到可用的特征字典（DB/文件均不可用）"
@@ -946,8 +953,8 @@ async def get_model_market_regime(
                 }
     if not model:
         raise HTTPException(status_code=404, detail="Model not found")
-    # 阈值 0.08/0.02 对 Top20 均值更敏感（全市场均值恒≈0/全负），仅 90 日
-    bull_thr, bear_thr = 0.08, 0.02
+    # 全市场均值量级小（Top100 均值约 0.02~0.05，全市场约低一个量级），阈值相应下调
+    bull_thr, bear_thr = 0.01, 0.0
     series: list[dict[str, Any]] = []
 
     def _regime_point(
@@ -974,7 +981,7 @@ async def get_model_market_regime(
 
     try:
         # ── 主路径：读 pred.parquet（全市场截面，B 套）──────────────────────
-        # 大盘分析反映「模型对全市场 Top100 的打分均值」。pred.parquet 是全市场
+        # 大盘分析反映「模型对全市场的打分均值」。pred.parquet 是全市场
         # 稳定分数源；engine_signal_scores 会被个股推理（仅持久化个别标点）污染，
         # 若以其为主会导致「大盘分析只显示个股数据」。故优先读 pred.parquet。
         storage_path = str(model.get("storage_path") or "").strip()
@@ -1016,19 +1023,14 @@ async def get_model_market_regime(
                     )
                     if score_col and date_col:
                         q = f"""
-                            SELECT CAST(trade_date AS VARCHAR) AS trade_date,
-                                   AVG(CAST(score AS DOUBLE))::DOUBLE AS avg_score,
-                                   MEDIAN(CAST(score AS DOUBLE))::DOUBLE AS median_score,
+                            SELECT CAST({date_col} AS VARCHAR) AS trade_date,
+                                   AVG(CAST({score_col} AS DOUBLE))::DOUBLE AS avg_score,
+                                   MEDIAN(CAST({score_col} AS DOUBLE))::DOUBLE AS median_score,
                                    COUNT(*)::INTEGER AS cnt
-                            FROM (
-                                SELECT {date_col} AS trade_date, CAST({score_col} AS DOUBLE) AS score,
-                                       ROW_NUMBER() OVER (PARTITION BY {date_col} ORDER BY CAST({score_col} AS DOUBLE) DESC) AS rn
-                                FROM read_parquet('{str(parquet_file)}')
-                                WHERE CAST({score_col} AS DOUBLE) IS NOT NULL
-                            )
-                            WHERE rn <= 100
-                            GROUP BY trade_date
-                            ORDER BY trade_date DESC
+                            FROM read_parquet('{str(parquet_file)}')
+                            WHERE CAST({score_col} AS DOUBLE) IS NOT NULL
+                            GROUP BY {date_col}
+                            ORDER BY {date_col} DESC
                             LIMIT {int(window)}
                         """
                         rows2 = con.execute(q).fetchall()
@@ -1061,13 +1063,11 @@ async def get_model_market_regime(
                                        PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY top.fusion_score)::float AS median_score,
                                        COUNT(*)::int AS cnt
                                 FROM qm_model_inference_runs r
-                                JOIN LATERAL (
-                                    SELECT s.fusion_score
-                                    FROM engine_signal_scores s
-                                    WHERE s.run_id = r.run_id AND s.tenant_id = r.tenant_id AND s.user_id = r.user_id
-                                    ORDER BY s.fusion_score DESC
-                                    LIMIT 100
-                                ) top ON true
+                                 JOIN LATERAL (
+                                     SELECT s.fusion_score
+                                     FROM engine_signal_scores s
+                                     WHERE s.run_id = r.run_id AND s.tenant_id = r.tenant_id AND s.user_id = r.user_id
+                                 ) top ON true
                                 WHERE r.tenant_id = :tenant_id AND r.user_id = :user_id
                                   AND r.model_id = :model_id AND r.status = 'completed'
                                 GROUP BY r.data_trade_date
@@ -1365,22 +1365,11 @@ async def get_inference_coverage(
         min_date, max_date = dates[0], dates[-1]
         latest = _latest_trading_date()
         # 生成交易日缺口；上限截至 QuantDB 因子数据已产出日（因子 T+1 更新，
-        # 当日数据未产出不算缺口），避免一键补全对无数据日做注定失败的推理
+        # 当日数据未产出不算缺口），避免一键补全对无数据日做注定失败的推理。
+        # 必须扫描 [min_date, gap_end] 全区间，不能只从 max_date 向后补；
+        # 否则中间某日推理失败后，即使后续日期已存在也会永久漏补。
         gap_end = min(latest, _quantdb_latest_factor_date() or latest)
-        try:
-            import exchange_calendars as xcals
-            import pandas as pd
-
-            cal = xcals.get_calendar("XSHG")
-            start = pd.Timestamp(max_date) + pd.Timedelta(days=1)
-            end = pd.Timestamp(gap_end)
-            if start <= end:
-                sessions = cal.sessions_in_range(start, end)
-                gap = [d.strftime("%Y-%m-%d") for d in sessions]
-            else:
-                gap = []
-        except Exception:
-            gap = []
+        gap = find_inference_gap_dates(dates, gap_end)
         return {
             "model_id": model_id,
             "min_date": min_date,
@@ -3037,6 +3026,20 @@ async def list_model_inference_runs(
                     or ""
                 )
             it.update(compute_market_signals(sigs))
+            # 分数分布（正/负/零分标的数 + 均值，供历史列表直接展示；
+            # 列表场景不需要直方图，去掉以减小 payload）
+            try:
+                dist_scores = [
+                    float(s["fusion_score"])
+                    for s in sigs
+                    if s.get("fusion_score") is not None
+                ]
+            except (TypeError, ValueError):
+                dist_scores = []
+            dist = compute_score_distribution(dist_scores)
+            if dist:
+                dist.pop("histogram", None)
+                it["score_distribution"] = dist
     return result
 
 
@@ -4240,23 +4243,62 @@ async def get_stock_inference_history(
     else:
         board = "其他"
 
-    # 曲线只展示单一模型（个股终端不传 model_id → 用户默认模型），不再返回历史涉及的多模型列表
+    # 曲线模型下拉：返回该用户全部可用模型（供个股终端切换），而非仅当前分数对应的单一模型
     models: list[dict[str, Any]] = []
-    if pred_model:
-        pmeta = pred_model.get("metadata_json") or {}
-        if not isinstance(pmeta, dict):
-            pmeta = {}
-        models.append(
-            {
-                "model_id": str(pred_model.get("model_id") or ""),
-                "display_name": pmeta.get("display_name")
-                or pmeta.get("model_name")
-                or "",
-                "is_default": bool(pred_model.get("is_default")),
-                "train_start": str(pmeta.get("train_start") or "")[:10],
-                "train_end": str(pmeta.get("train_end") or "")[:10],
-            }
+    try:
+        from backend.shared.model_registry import model_registry_service
+
+        all_models = await model_registry_service.list_models(
+            tenant_id=tenant_id, user_id=user_id
         )
+        for m in all_models:
+            pmeta = m.get("metadata_json") or {}
+            if not isinstance(pmeta, dict):
+                pmeta = {}
+            models.append(
+                {
+                    "model_id": str(m.get("model_id") or ""),
+                    "display_name": pmeta.get("display_name")
+                    or pmeta.get("model_name")
+                    or str(m.get("model_id") or ""),
+                    "is_default": bool(m.get("is_default")),
+                    "train_start": str(pmeta.get("train_start") or "")[:10],
+                    "train_end": str(pmeta.get("train_end") or "")[:10],
+                }
+            )
+        # 若用户暂无模型记录（历史数据），回退到单模型兜底
+        if not models and pred_model:
+            pmeta = pred_model.get("metadata_json") or {}
+            if not isinstance(pmeta, dict):
+                pmeta = {}
+            models.append(
+                {
+                    "model_id": str(pred_model.get("model_id") or ""),
+                    "display_name": pmeta.get("display_name")
+                    or pmeta.get("model_name")
+                    or "",
+                    "is_default": bool(pred_model.get("is_default")),
+                    "train_start": str(pmeta.get("train_start") or "")[:10],
+                    "train_end": str(pmeta.get("train_end") or "")[:10],
+                }
+            )
+    except Exception as _e:
+        logger.debug(f"加载模型列表失败，回退单模型: {_e}")
+        if pred_model:
+            pmeta = pred_model.get("metadata_json") or {}
+            if not isinstance(pmeta, dict):
+                pmeta = {}
+            models.append(
+                {
+                    "model_id": str(pred_model.get("model_id") or ""),
+                    "display_name": pmeta.get("display_name")
+                    or pmeta.get("model_name")
+                    or "",
+                    "is_default": bool(pred_model.get("is_default")),
+                    "train_start": str(pmeta.get("train_start") or "")[:10],
+                    "train_end": str(pmeta.get("train_end") or "")[:10],
+                }
+            )
 
     return {
         "symbol": sym,

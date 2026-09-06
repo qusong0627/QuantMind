@@ -17,8 +17,8 @@ export type SplitKey = 'train' | 'val' | 'test';
 export type DealPrice = 'open' | 'close';
 export type TimePeriodMap = Record<SplitKey, [Dayjs, Dayjs]>;
 
-// 模型类型定义
-export type ModelType = 'lightgbm' | 'xgboost' | 'catboost' | 'linear' | 'random_forest' | 'gru' | 'lstm' | 'alstm' | 'transformer' | 'tabnet' | 'tcn' | 'nativetft' | 'mlp' | 'hybrid_gru_tree';
+// 模型类型定义（hybrid_gru_tree：QLIB map 无实现，已剔除）
+export type ModelType = 'lightgbm' | 'xgboost' | 'catboost' | 'linear' | 'random_forest' | 'gru' | 'lstm' | 'alstm' | 'transformer' | 'tabnet' | 'tcn' | 'nativetft' | 'mlp';
 export type ModelCategory = 'tree' | 'linear' | 'deep_learning';
 
 export interface ModelTypeOption {
@@ -47,7 +47,7 @@ export const MODEL_TYPE_OPTIONS: ModelTypeOption[] = [
     tooltip: '多层感知机基线：验证 GRU/LSTM/Transformer 的时序建模是否真的带来增益。若 MLP 在扁平特征上 IC 已接近 GRU，说明时序结构不重要，可直接用树模型。默认结构 [64,32]，L2 正则，早停。' },
   // 深度学习模型
   { value: 'gru', label: 'GRU', category: 'deep_learning', description: '门控循环单元，时序建模性价比最高', framework: 'pytorch',
-    tooltip: '默认 20 日滚动窗口（step_len=20），捕捉动量反转模式。对波动率因子（vol_std_*、vol_parkinson_*）时序衰减敏感。GPU 训练约 10-20 分钟，是最推荐的 DL 入门模型。数据量 < 50 万行时慎用，容易过拟合。' },
+    tooltip: '默认 20 日滚动窗口（dl_step_len=20），捕捉动量反转模式。对波动率因子（vol_std_*、vol_parkinson_*）时序衰减敏感。GPU 训练约 10-20 分钟，是最推荐的 DL 入门模型。数据量 < 50 万行时慎用，容易过拟合。' },
   { value: 'lstm', label: 'LSTM', category: 'deep_learning', description: '长短期记忆网络', framework: 'pytorch',
     tooltip: '比 GRU 多一个门控单元，理论记忆更长，但 QuantMind A 股数据实测 IC 提升有限（<5%），训练慢约 40%。适合训练窗口 > 5 年的大数据集。如果 GRU 已经效果好，LSTM 通常不会明显更好。' },
   { value: 'alstm', label: 'ALSTM', category: 'deep_learning', description: '带注意力的LSTM', framework: 'pytorch',
@@ -90,7 +90,6 @@ export interface TrainingParams {
   // LightGBM specific (optional, falls back to shared learning_rate/max_depth)
   lgb_learning_rate?: number;
   lgb_max_depth?: number;
-  min_child_samples?: number;
   path_smooth?: number;
   bagging_freq?: number;
   // XGBoost specific
@@ -111,6 +110,10 @@ export interface TrainingParams {
   cb_iterations?: number;
   // Linear specific
   linear_alpha?: number;
+  // RandomForest specific（后端从 dl_params 直读 n_estimators/max_depth/max_features）
+  rf_n_estimators?: number;
+  rf_max_depth?: number;
+  rf_max_features?: string;
   // DL specific
   dl_hidden_size?: number;
   dl_num_layers?: number;
@@ -126,9 +129,6 @@ export interface TrainingParams {
   /** Stacking 集成参数 */
   n_folds?: number;
   meta_alpha?: number;
-  /** Optuna 自动超参搜索 */
-  optunaEnabled?: boolean;
-  optunaTrials?: number;
   /** 点预测（默认）或 P10/P50/P90 收益率分位推理。 */
   prediction_mode?: 'point' | 'quantile';
 }
@@ -331,6 +331,8 @@ export interface FeatureOption {
   label: string;
   /** 后端 catalog 标记的默认勾选状态。新 schema 才有，老前端兼容性为可选。*/
   defaultSelected?: boolean;
+  /** B 特征字典用户编辑的长描述（A 目录回退合并后透出），缺省为空。*/
+  explanation?: string;
 }
 
 export interface FeatureCategory {
@@ -580,7 +582,6 @@ export const DEFAULT_PARAMS: TrainingParams = {
   num_leaves: 31,
   max_depth: -1,
   min_data_in_leaf: 300,
-  min_child_samples: 150,
   path_smooth: 1.0,
   bagging_freq: 5,
   lambda_l1: 0.5,
@@ -606,6 +607,10 @@ export const DEFAULT_PARAMS: TrainingParams = {
   cb_od_wait: 100,
   // Linear
   linear_alpha: 3.0,
+  // RandomForest
+  rf_n_estimators: 300,
+  rf_max_depth: 12,
+  rf_max_features: 'sqrt',
   // DL
   dl_hidden_size: 64,
   dl_num_layers: 2,
@@ -619,9 +624,6 @@ export const DEFAULT_PARAMS: TrainingParams = {
   // Stacking 集成
   n_folds: 3,
   meta_alpha: 1.0,
-  // Optuna
-  optunaEnabled: false,
-  optunaTrials: 20,
 };
 
 /** 各 DL 模型的推荐默认参数，切换模型时自动填充 */
@@ -899,13 +901,31 @@ export const buildEffectiveTradeDate = (target: TrainingTarget, referenceDate: D
   return referenceDate.add(target.horizonDays, 'day').format('YYYY-MM-DD');
 };
 
-export const buildAutoDisplayName = (referenceDate: Dayjs, target: TrainingTarget, featureCount: number, version = DEFAULT_MODEL_VERSION, market?: string) => {
+/** 模型短码（自动命名前缀），与后端 MODEL_FRAMEWORK 口径一致，按 model_type 取 */
+export const MODEL_SHORT_NAMES: Record<string, string> = {
+  lightgbm: 'LGB',
+  xgboost: 'XGB',
+  catboost: 'CB',
+  linear: 'Ridge',
+  random_forest: 'RF',
+  mlp: 'MLP',
+  gru: 'GRU',
+  lstm: 'LSTM',
+  alstm: 'ALSTM',
+  transformer: 'TF',
+  tabnet: 'TabNet',
+  tcn: 'TCN',
+  nativetft: 'TFT',
+};
+
+export const buildAutoDisplayName = (referenceDate: Dayjs, target: TrainingTarget, featureCount: number, version = DEFAULT_MODEL_VERSION, market?: string, modelType?: string) => {
   const dateToken = referenceDate.format('DD');
   const horizons = target.horizonDaysList?.filter((h) => h >= 1) ?? [];
   const returnToken = horizons.length >= 2 ? `T${horizons.join('_')}` : `T${target.horizonDays}`;
   const dimensionToken = `Alpha${Math.max(1, featureCount)}`;
   const marketSuffix = market ? `_${market.toUpperCase()}` : '';
-  return `${dateToken}_${returnToken}_${dimensionToken}_${version}${marketSuffix}`;
+  const modelPrefix = modelType ? `${MODEL_SHORT_NAMES[modelType] ?? modelType.toUpperCase()}_` : '';
+  return `${modelPrefix}${dateToken}_${returnToken}_${dimensionToken}_${version}${marketSuffix}`;
 };
 
 export const summarizeFeatureCategories = (features: string[], categories: FeatureCategory[]) => {
@@ -950,6 +970,10 @@ export const toDynamicCategories = (catalog: AdminModelFeatureCatalog): FeatureC
         .map((feature) => ({
           key: feature.key,
           label: compactCatalogFeatureLabel(feature.feature_name || feature.key, feature.key),
+          explanation:
+            typeof (feature as { explanation?: unknown }).explanation === 'string'
+              ? ((feature as { explanation?: string }).explanation || undefined)
+              : undefined,
           // catalog 透传 default_selected（缺失/null 时按 undefined 处理，
           // 由调用方决定 fallback 行为）
           defaultSelected:
@@ -1013,7 +1037,7 @@ export const buildTrainingRequest = (
   const trainingWindow = `${formatRange(timePeriods.train)} | ${formatRange(timePeriods.val)} | ${formatRange(timePeriods.test)}`;
   const resolvedContext = market ? { ...context, market: market as TrainingContext['market'] } : context;
   return {
-    displayName: displayName.trim() || buildAutoDisplayName(dayjs(), target, finalFeatures.length, undefined, market),
+    displayName: displayName.trim() || buildAutoDisplayName(dayjs(), target, finalFeatures.length, undefined, market, params.model_type),
     selectedFeatures: finalFeatures,
     featureCategories: summarizeFeatureCategories(finalFeatures, categories),
     target,
@@ -1105,7 +1129,6 @@ export const buildBackendTrainingPayload = (
       num_leaves: request.params.num_leaves,
       max_depth: request.params.lgb_max_depth ?? request.params.max_depth,
       min_data_in_leaf: request.params.min_data_in_leaf,
-      min_child_samples: request.params.min_child_samples,
       path_smooth: request.params.path_smooth,
       bagging_freq: request.params.bagging_freq,
       lambda_l1: request.params.lambda_l1,
@@ -1141,10 +1164,23 @@ export const buildBackendTrainingPayload = (
       n_epochs: request.params.dl_n_epochs ?? 200,
       batch_size: request.params.dl_batch_size ?? 4000,
       lr: request.params.dl_lr ?? 0.0001,
-      step_len: request.params.dl_step_len ?? 20,
+      dl_step_len: request.params.dl_step_len ?? 20,
       kernel_size: request.params.tcn_kernel_size ?? 5,
       num_heads: request.params.tft_num_heads ?? 4,
-      alpha: request.params.linear_alpha ?? 3.0,
+      // alpha 是 Ridge 线性模型的正则槽位；MLP/RF/DL 各有自己的默认值，
+      // 常驻透传会把 linear 的 3.0 串味过去（如 MLP 本应 1e-3），故仅 linear 发送。
+      ...(modelType === 'linear' ? { alpha: request.params.linear_alpha ?? 3.0 } : {}),
+      // DL 早停：主训练路径读 dl_params.early_stopping_rounds，顶层键树模型用，
+      // 此处透传后 DL 也能响应通用区「早停轮数」（GBDT/线性/RF/MLP 不读此键，无影响）。
+      early_stopping_rounds: request.params.early_stopping_rounds,
+      // 随机森林：后端从 dl_params 直读，无专属容器键（见 per_model.py 注释）。
+      ...(modelType === 'random_forest'
+        ? {
+            n_estimators: request.params.rf_n_estimators ?? 300,
+            max_depth: request.params.rf_max_depth ?? 12,
+            max_features: request.params.rf_max_features ?? 'sqrt',
+          }
+        : {}),
     },
   };
 
@@ -1154,14 +1190,6 @@ export const buildBackendTrainingPayload = (
     // Stacking 集成参数
     payload.n_folds = request.params.n_folds ?? 3;
     payload.meta_alpha = request.params.meta_alpha ?? 1.0;
-  }
-
-  // Optuna 自动超参搜索
-  if (request.params.optunaEnabled) {
-    payload.optuna = {
-      enabled: true,
-      n_trials: request.params.optunaTrials ?? 20,
-    };
   }
 
   // WFA 稳定性诊断配置

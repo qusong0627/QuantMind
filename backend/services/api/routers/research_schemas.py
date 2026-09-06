@@ -95,6 +95,7 @@ class SingleStockPredictionResponse(BaseModel):
     p50_return: float | None = None
     p90_return: float | None = None
     forecast_curve: list[ForecastPoint]
+    forecast_warning: str | None = None
     drivers: list[FeatureDriverItem]
     consensus: list[ModelConsensusItem]
     consensus_score: float

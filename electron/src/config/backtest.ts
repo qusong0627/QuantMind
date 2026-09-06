@@ -3,7 +3,7 @@
  *
  * 规则（以 2026-08-31 为例）：
  *   - DEFAULT_END   = 今天 - 7 天（如 2026-08-24），确保日线数据已落盘稳定
- *   - DEFAULT_START = DEFAULT_END 前推 6 个月（如 2026-02-24）
+ *   - DEFAULT_START = DEFAULT_END 前推 1 年（如 2025-08-24）
  */
 function toISODate(d: Date): string {
   const y = d.getFullYear();
@@ -21,7 +21,7 @@ export function getDefaultBacktestEndDate(): string {
 export function getDefaultBacktestStartDate(): string {
   const d = new Date();
   d.setDate(d.getDate() - 7);
-  d.setMonth(d.getMonth() - 6);
+  d.setFullYear(d.getFullYear() - 1);
   return toISODate(d);
 }
 
@@ -35,7 +35,7 @@ export const BACKTEST_CONFIG = {
     // 数据覆盖范围（起始固定；结束动态=一周前，与 QuantDB 每日更新节奏对齐）
     DATA_START: '2016-01-01',
     DATA_END: getDefaultBacktestEndDate(),
-    // 默认回测范围（动态：结束=一周前，开始=结束前推6个月）
+    // 默认回测范围（动态：结束=一周前，开始=结束前推1年）
     DEFAULT_START: getDefaultBacktestStartDate(),
     DEFAULT_END: getDefaultBacktestEndDate(),
 

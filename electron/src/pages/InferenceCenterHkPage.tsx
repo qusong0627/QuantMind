@@ -40,7 +40,6 @@ import { StockForecastChart } from '../features/inference-center/components/Stoc
 import { FeatureDriversPanel } from '../features/inference-center/components/FeatureDriversPanel';
 import { ModelConsensusPanel } from '../features/inference-center/components/ModelConsensusPanel';
 import { InferenceHistoryPanel } from '../components/inference/InferenceHistoryPanel';
-import { InferenceBacktestModule } from '../components/backtestCenter/InferenceBacktestModule';
 import { useAppSelector } from '../store';
 
 import { getMarketConfig } from '../config/marketConfig';
@@ -72,7 +71,7 @@ export const InferenceCenterHkPage: React.FC = () => {
   // ─────────────────────────────────────────────────────────────
   // 模块 1：市场截面推理 (Cross-Section Inference) 状态
   // ─────────────────────────────────────────────────────────────
-  const [crossSectionMode, setCrossSectionMode] = useState<'single' | 'history' | 'backtest'>('single');
+  const [crossSectionMode, setCrossSectionMode] = useState<'single' | 'history'>('single');
   const [registeredModels, setRegisteredModels] = useState<UserModelRecord[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
   const [selectedModelId, setSelectedModelId] = useState<string>(initialModelId);
@@ -636,14 +635,6 @@ export const InferenceCenterHkPage: React.FC = () => {
               >
                 推理历史
               </Button>
-              <Button
-                size="small"
-                type={crossSectionMode === 'backtest' ? 'primary' : 'default'}
-                className={clsx('rounded-xl text-xs font-bold h-8 px-4', crossSectionMode === 'backtest' ? 'bg-amber-600 border-amber-600' : 'border-slate-200')}
-                onClick={() => setCrossSectionMode('backtest')}
-              >
-                推理回测
-              </Button>
             </div>
           </div>
 
@@ -688,10 +679,8 @@ export const InferenceCenterHkPage: React.FC = () => {
                 onHistoryDateFilterChange={setHistoryDateFilter}
                 onDeleteHistory={handleDeleteHistory}
               />
-            ) : crossSectionMode === 'history' ? (
-              <InferenceHistoryPanel modelId={selectedModel.model_id} onDelete={handleDeleteHistory} />
             ) : (
-              <InferenceBacktestModule modelId={selectedModel.model_id} />
+              <InferenceHistoryPanel modelId={selectedModel.model_id} onDelete={handleDeleteHistory} />
             )}
           </div>
         </div>

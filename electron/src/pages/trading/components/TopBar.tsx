@@ -1,5 +1,5 @@
 import React from 'react';
-import { Wallet, Wifi, Activity } from 'lucide-react';
+import { Wallet, Wifi, Activity, Layers, Cpu, Server } from 'lucide-react';
 
 interface AccountInfo {
     total_asset: number;
@@ -126,7 +126,7 @@ const TopBar: React.FC<TopBarProps> = ({ accountInfo, isConnected, strategyStatu
     ];
 
     return (
-        <div className="flex flex-col gap-2.5 p-4 px-6 bg-white">
+        <div className="flex flex-col gap-2 p-4 px-6 bg-white h-full w-full min-h-0">
             {/* Header: Title, Tags, and Status Indicators */}
             <div className="flex items-center justify-between gap-3">
                 <div className="flex items-center gap-2.5">
@@ -135,15 +135,18 @@ const TopBar: React.FC<TopBarProps> = ({ accountInfo, isConnected, strategyStatu
                     </div>
                     <div className="flex items-baseline gap-2">
                         <span className="text-base font-bold text-slate-800 tracking-tight">资产概览</span>
-                        <span className="text-xs font-semibold px-2 py-0.5 rounded-md bg-slate-100 text-slate-700 border border-slate-200">
-                            {modeLabel}
-                        </span>
                     </div>
-                    <span className={`px-2 py-0.5 rounded-md text-xs font-medium border ${runModeTone}`}>
-                        {runModeLabel}
+                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-slate-50 border border-slate-200/80 rounded-full text-xs text-slate-600 font-medium">
+                        <Layers size={13} className="text-slate-400" />
+                        <span>{modeLabel}</span>
                     </span>
-                    <span className={`px-2 py-0.5 rounded-md text-xs font-medium border ${deployChannelTone}`}>
-                        {deployChannelLabel}
+                    <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border ${runModeTone}`}>
+                        <Cpu size={13} />
+                        <span>{runModeLabel}</span>
+                    </span>
+                    <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border ${deployChannelTone}`}>
+                        <Server size={13} />
+                        <span>{deployChannelLabel}</span>
                     </span>
                 </div>
 
@@ -159,8 +162,8 @@ const TopBar: React.FC<TopBarProps> = ({ accountInfo, isConnected, strategyStatu
                 </div>
             </div>
 
-            {/* 早期 8 卡片模式：桌面端固定 4×2，较窄屏幕自然折行。 */}
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+            {/* 8 卡片弹性填满 30% 区域：桌面端固定 4×2，较窄屏幕自然折行。 */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 sm:grid-rows-2 gap-2 flex-1 min-h-0">
                 {metrics.map((metric) => {
                     const pnl = metric.pnl || 0;
                     const valueClass = metric.highlight ? getPnLColor(pnl) : 'text-slate-900';
@@ -168,7 +171,7 @@ const TopBar: React.FC<TopBarProps> = ({ accountInfo, isConnected, strategyStatu
                         <div
                             key={metric.label}
                             title={metric.hint}
-                            className="flex min-h-[82px] flex-col items-center justify-center rounded-2xl border border-slate-200 bg-slate-50/80 p-2.5 text-center transition-all hover:bg-white hover:shadow-xs"
+                            className="flex min-h-0 h-full flex-col items-center justify-center rounded-2xl border border-slate-200 bg-slate-50/80 p-2 text-center transition-all hover:bg-white hover:shadow-xs overflow-hidden"
                         >
                             <span className="mb-1 text-[11px] font-bold tracking-wide text-slate-600">
                                 {metric.label}

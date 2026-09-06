@@ -379,14 +379,10 @@ def compute_l2_factors(
     if len(samples) >= 6:
         prices = [s[5] for s in samples]
         rets = [abs((b - a) / a) for a, b in zip(prices, prices[1:]) if a > 0]
-        if rets:
-            half = max(len(rets) // 2, 1)
-            cur_rv = sum(rets[-half:]) / half
-            day_rv = sum(rets) / len(rets)
-            factors["micro_zone_rv_ratio_close"] = round(_clip(cur_rv / (day_rv + 1e-9), 0, 10), 6)
-        else:
-            # 全部价格 ≤ 0（收盘后/停牌快照）→ 无收益序列，置 None 而非除零崩溃
-            factors["micro_zone_rv_ratio_close"] = None
+        half = max(len(rets) // 2, 1)
+        cur_rv = sum(rets[-half:]) / half
+        day_rv = sum(rets) / len(rets)
+        factors["micro_zone_rv_ratio_close"] = round(_clip(cur_rv / (day_rv + 1e-9), 0, 10), 6)
     else:
         factors["micro_zone_rv_ratio_close"] = None
 
@@ -538,7 +534,7 @@ def _redis_set_json(key: str, value: dict) -> None:
 
 async def run_tdx_l2_capture_task(interval_sec: int = 0) -> None:
     """L2 因子采集主循环：候选池+持仓轮询 → 13 因子 → PG + Redis。"""
-    global _last_watchlist  # 兜底候选池跨循环沿用（读+写同函数内，无 global 会 UnboundLocalError）
+    global _last_watchlist  # 跨周期保留候选池；否则赋值语句使其被当局部变量，空池时 UnboundLocalError
     from backend.services.live_trading.services.tdx_rolling_trade_service import (
         TdxRollingTradeService,
     )

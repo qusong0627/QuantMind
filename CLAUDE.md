@@ -78,13 +78,13 @@ npm run dashboard:build  # 生产环境构建
   - `update_feature_parquet.py` - 151 维特征计算（动量/波动率/流动性/资金流/风格）
 - **新闻/RSS**：Huntly + RSSHub 聚合财经新闻，经 API 服务代理访问
 
-## 股票代码标准化
+## 股票代码标准化（分层口径，禁止跨层混用）
 
-- **标准格式**：前缀式（如 `SH600036`），用于内部存储、Redis 键与 API 参数
-- **禁止引入** `600036.SH` 这类后缀式标识
+- **QuantDB parquet / Qlib / 行情数据层**：后缀式（如 `600036.SH`，Qlib 桥接用全小写 `sh600036`），否则静默查空
+- **PG 数据库字段 / Redis 键 / 前端 / Strategy Lab SDK / 大多数 API**：前缀式（如 `SH600036`）
 - **标准化工具**：
-  - 后端：`backend/shared/stock_utils.py` → `StockCodeUtil.to_prefix(code)`
-  - 前端：`electron/src/utils/portfolioUtils.ts` → `normalizeStockCode(code)`
+  - 后端：`backend/shared/stock_utils.py` → `StockCodeUtil.to_suffix(code)` / `.to_prefix(code)` / `.to_qlib(code)`
+  - 前端：`electron/src/utils/portfolioUtils.ts` → `normalizeStockCode(code)`（输出前缀式）
 - **市场自动识别**：
   - `SH`：6xxxxx、9xxxxx
   - `SZ`：0xxxxx、3xxxxx、2xxxxx
@@ -130,6 +130,12 @@ ssh ${SSH_TARGET} "cd ${PROJECT_DIR} && sudo bash deploy/update.sh"
 ```
 
 Electron 前端在本地开发时使用 Vite HMR；修改 `electron/src` 后运行 `npm run typecheck` 即可，不需要复制构建产物到服务器的 `web` 容器。
+
+### Web 前端部署（Nginx 预编译）
+- **预编译目录**：`web/dist` 已纳入版本（`.gitignore` 放行 `!web/dist/**`），本地 `npm run dashboard:build` 后 `cp -r electron/dist-react/* web/dist/` 并提交，服务器 `git pull` 即更新，无需在服务器构建 `node`
+- **服务**：`web` 容器 `nginx:alpine`（`docker-compose.yml:web`），挂载 `./web/dist:/usr/share/nginx/html:ro` + `./docker/web/nginx.conf:ro`，反代 `/api/ → quantmind:8000`、`/ws/ → quantmind:8003`，`resolver 127.0.0.11` 动态解析
+- **更新**：`git pull && docker compose up -d web`（或 `restart web`），前端日常开发仍用 `npm run dev` HMR，无需每次重建
+- **构建过滤**：`deploy/update.sh` 仅在 `requirements*.txt`/`Dockerfile` 变更时重建后端镜像，前端走 `web/dist` Volume，与后端构建解耦
 
 ## 关键文件
 

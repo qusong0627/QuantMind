@@ -1,5 +1,7 @@
 /**
  * 回测状态管理 Store (Zustand)
+ * ⚠️  统一管理：策略列表真源为 strategiesSlice + strategyManagementService
+ * 本 store 的 selectedStrategy 仅为回测配置的临时选中态，不作策略真源
  *
  * 功能：
  * - 管理当前回测状态

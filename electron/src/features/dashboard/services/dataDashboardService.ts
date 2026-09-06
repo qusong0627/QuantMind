@@ -1,6 +1,6 @@
 import axios, { AxiosInstance } from 'axios';
 import { authService } from '../../auth/services/authService';
-import { SERVICE_ENDPOINTS } from '../../../config/services';
+import { SERVICE_ENDPOINTS, resolveWebSafeServiceBase } from '../../../config/services';
 
 /* ---- Types ---- */
 
@@ -64,8 +64,10 @@ export interface RealtimeQuote {
 
 class DataDashboardService {
     private client: AxiosInstance;
-    private baseURL =
-        (import.meta as any).env?.VITE_USER_API_URL || SERVICE_ENDPOINTS.USER_SERVICE;
+    private baseURL = resolveWebSafeServiceBase(
+        (import.meta as any).env?.VITE_USER_API_URL,
+        SERVICE_ENDPOINTS.USER_SERVICE,
+    );
 
     constructor() {
         this.client = axios.create({

@@ -4,7 +4,7 @@ import HelpCenterLink from '../../components/common/HelpCenterLink';
 import type { LucideIcon } from 'lucide-react';
 import { Button, Collapse, Modal, Spin, Tag, message } from 'antd';
 import TopBar from './components/TopBar';
-import StrategyManagement from './tabs/StrategyManagement';
+import TopologyConsole from './tabs/StrategyConsole/TopologyConsole';
 import ManualTaskPage from './tabs/ManualTaskPage';
 import PersonalCenter from './tabs/PersonalCenter';
 import PositionMonitor from './tabs/PositionMonitor';
@@ -497,8 +497,8 @@ const RealTradingPage: React.FC = () => {
         <div className="w-full h-full bg-[#f8fafc] p-6 flex flex-col overflow-hidden font-sans box-border">
             {/* Unified Frame Container with 32px Border Radius (BacktestCenter Style) */}
             <div className="bg-white border border-gray-200 shadow-sm w-full h-full rounded-[32px] flex flex-col overflow-hidden">
-                {/* Integrated Top Header - Account Overview */}
-                <div className="shrink-0 bg-white border-b border-gray-200 overflow-hidden z-10">
+                {/* Integrated Top Header - Account Overview（占可用高度 3/10） */}
+                <div className="flex-[3] min-h-0 flex flex-col bg-white border-b border-gray-200 overflow-hidden z-10">
                     <TopBar
                         isConnected={!!status}
                         strategyStatus={strategyStatus}
@@ -511,8 +511,8 @@ const RealTradingPage: React.FC = () => {
                     />
                 </div>
 
-                {/* Bottom Section - Sidebar & Content */}
-                <div className="flex-1 min-h-0 flex overflow-hidden">
+                {/* Bottom Section - Sidebar & Content（占可用高度 7/10） */}
+                <div className="flex-[7] min-h-0 flex overflow-hidden">
                     {/* Left Sidebar - Navigation */}
                     <div className="w-[200px] flex flex-col border-r border-gray-200 bg-white shrink-0">
                         <div className="flex-1 overflow-y-auto py-3.5 px-3 space-y-1.5 custom-scrollbar">
@@ -571,18 +571,15 @@ const RealTradingPage: React.FC = () => {
                     {/* Right Content Area */}
                     <div className="flex-1 overflow-hidden relative bg-gray-50/50">
                     {activeTab === 'manage' && (
-                        <StrategyManagement
-                            tenantId={tenantId}
-                            userId={userId}
-                            tradingMode={tradingMode}
-                            status={status}
-                            onDeploy={handleDeploy}
-                            onStop={handleStop}
-                            onOpenManualTask={() => setActiveTab('manual-task')}
-                            isRunning={strategyStatus === 'running' || strategyStatus === 'starting'}
-                            activeExecutionConfig={effectiveExecutionConfig}
-                            activeLiveTradeConfig={effectiveLiveTradeConfig}
-                        />
+                            <TopologyConsole
+                                tenantId={tenantId}
+                                userId={userId}
+                                tradingMode={tradingMode}
+                                onDeploy={handleDeploy}
+                                onStop={handleStop}
+                                onOpenManualTask={() => setActiveTab('manual-task')}
+                                onOpenHistory={() => setActiveTab('history')}
+                            />
                     )}
                     {activeTab === 'manual-task' && (
                         <ManualTaskPage tenantId={tenantId} userId={userId} tradingMode={tradingMode} onBack={() => setActiveTab('manage')} />

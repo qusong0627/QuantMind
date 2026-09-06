@@ -313,12 +313,7 @@ export const ModelScoreResearch: React.FC<Props> = ({ modelId }) => {
               {data.meta?.backtest_days ?? '-'}天 · {(data as any)?.total_samples?.toLocaleString() ?? '-'}样本 · {(data as any)?.latest_trade_date ?? '-'}
             </Tag>
           )}
-          {data?.recommended_band && (
-            <Tag color="green" className="rounded-full text-[9px] font-bold">
-              ★ 推荐 {data.recommended_band.score_band}
-            </Tag>
-          )}
-        </div>
+          </div>
         {/* 方向自检横幅 */}
         {(data as any)?.direction_check && (() => {
           const dc = (data as any).direction_check;
@@ -378,7 +373,7 @@ export const ModelScoreResearch: React.FC<Props> = ({ modelId }) => {
             {/* 最优分数区间（按胜率反推） */}
             {(data as any).winrate_zones && (data as any).winrate_zones.status === 'success' && (
               <div className="rounded-2xl border border-emerald-100 bg-emerald-50/30 p-4 shadow-sm">
-                <SectionTitle idx={2} color="#059669">最优分数区间（先统计胜率 → 反推做多/做空最优段）</SectionTitle>
+                <SectionTitle idx={2} color="#059669">最优分数区间（按历史胜率统计分档）</SectionTitle>
                 <div className="space-y-1">
                   {((data as any).winrate_zones.zones || []).map((z: any, i: number) => {
                     const isLong = z.label?.includes('做多');
@@ -387,7 +382,7 @@ export const ModelScoreResearch: React.FC<Props> = ({ modelId }) => {
                         <div className="flex items-center gap-2">
                           <Tag className="m-0 border-0 text-[9px] font-bold"
                             color={isLong ? 'red' : 'green'}>
-                            {isLong ? '做多' : '做空'}
+                            {isLong ? '上升' : '下降'}
                           </Tag>
                           <span className="font-black text-slate-700">T+{z.horizon} {z.score_min.toFixed(3)}~{z.score_max.toFixed(3)}</span>
                         </div>
@@ -415,7 +410,7 @@ export const ModelScoreResearch: React.FC<Props> = ({ modelId }) => {
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
                   <div>
                     <div className="mb-1 text-[9px] font-bold text-emerald-600">
-                      买入区间（胜率最高）共 {((data as any).condition_zones.buy_zones || []).length} 段
+                      上升胜率最高区间，共 {((data as any).condition_zones.buy_zones || []).length} 段
                     </div>
                     <div className="space-y-0.5 max-h-72 overflow-y-auto pr-1 custom-scrollbar">
                       {(((data as any).condition_zones.buy_zones || [])).slice(0, 15).map((z: any, i: number) => (
@@ -435,7 +430,7 @@ export const ModelScoreResearch: React.FC<Props> = ({ modelId }) => {
                   </div>
                   <div>
                     <div className="mb-1 text-[9px] font-bold text-rose-600">
-                      卖出/回避区间（下跌最高）共 {((data as any).condition_zones.sell_zones || []).length} 段
+                      下跌概率最高区间，共 {((data as any).condition_zones.sell_zones || []).length} 段
                     </div>
                     <div className="space-y-0.5 max-h-72 overflow-y-auto pr-1 custom-scrollbar">
                       {(((data as any).condition_zones.sell_zones || [])).slice(0, 15).map((z: any, i: number) => (
@@ -491,9 +486,9 @@ export const ModelScoreResearch: React.FC<Props> = ({ modelId }) => {
                             <div key={i} className="py-0.5 text-[9px]">
                               <div className="font-bold text-slate-700 truncate">{x.name}</div>
                               <div className="font-mono text-[9px]">
-                                <span className="text-emerald-600">买{x.buy.score_min.toFixed(2)}~{x.buy.score_max.toFixed(2)}胜{x.buy.win_rate}%均{x.buy.avg_ret > 0 ? '+' : ''}{x.buy.avg_ret}%</span>
+                                <span className="text-emerald-600">升{x.buy.score_min.toFixed(2)}~{x.buy.score_max.toFixed(2)}胜{x.buy.win_rate}%均{x.buy.avg_ret > 0 ? '+' : ''}{x.buy.avg_ret}%</span>
                                 <span className="text-slate-300"> | </span>
-                                <span className="text-rose-600">避{x.sell.score_min.toFixed(2)}~{x.sell.score_max.toFixed(2)}跌{x.sell.down_prob}%</span>
+                                <span className="text-rose-600">跌{x.sell.score_min.toFixed(2)}~{x.sell.score_max.toFixed(2)}跌{x.sell.down_prob}%</span>
                               </div>
                             </div>
                           ))}
@@ -568,33 +563,6 @@ export const ModelScoreResearch: React.FC<Props> = ({ modelId }) => {
               )}
             </div>
 
-            {/* 大盘信号：全市场分数 → 次日指数红绿概率 */}
-            {data.market_signal && data.market_signal.status === 'success' && (
-              <div className="rounded-2xl border border-slate-100 bg-white p-4 shadow-sm">
-                <SectionTitle idx={10} color="#0ea5e9">大盘信号（全市场分数均值 → 次日上证红/绿概率）</SectionTitle>
-                {data.market_signal.baseline && (
-                  <div className="mb-2 text-[10px] text-slate-500">
-                    基线：{data.market_signal.baseline.days}天 红盘率 {data.market_signal.baseline.red_prob}% / 次日均涨跌 {data.market_signal.baseline.avg_next_chg}%
-                  </div>
-                )}
-                <div className="space-y-1">
-                  {data.market_signal.signal_table?.map(row => {
-                    const better = row.red_prob > (data.market_signal?.baseline?.red_prob ?? 50);
-                    return (
-                      <div key={row.condition} className="flex items-center justify-between text-[10px]">
-                        <span className="font-bold text-slate-600">{row.condition}</span>
-                        <span className="font-mono">
-                          <span style={{ color: numColor(better ? 1 : -1) }}>红盘 {row.red_prob}%</span>
-                          <span className="text-slate-400"> / 绿盘 {row.green_prob}% / {row.days}天 / 均涨跌 </span>
-                          <span style={{ color: numColor(row.avg_next_chg) }}>{row.avg_next_chg}%</span>
-                        </span>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
-
             {data.warnings && data.warnings.length > 0 && (
               <Alert type="warning" message={data.warnings.join('；')} className="!text-[10px]" />
             )}
@@ -623,11 +591,6 @@ export const ModelScoreResearch: React.FC<Props> = ({ modelId }) => {
                   </span>
                 </div>
                 <div className="flex items-center gap-2 flex-shrink-0">
-                  {h.recommended_band && (
-                    <Tag className="m-0 border-0 bg-emerald-50 text-emerald-600 text-[9px] font-bold">
-                      推荐 {h.recommended_band}
-                    </Tag>
-                  )}
                   {h.latest_trade_date && (
                     <span className="text-slate-400 font-mono">{h.latest_trade_date}</span>
                   )}

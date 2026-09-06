@@ -67,8 +67,8 @@ export const MarketRegimePanel: React.FC<{ modelId: string }> = ({ modelId }) =>
             key: 'explain',
             label: <span className="text-xs font-black text-slate-700 flex items-center gap-1.5"><Info size={12} className="text-blue-500"/>口径说明</span>,
             children: <div className="text-xs text-slate-600 leading-relaxed space-y-1">
-              <div>均分 = 当日 Top100 高分 `pred / fusion_score` 均值（与个股终端一致，回退读 `pred.parquet`）。</div>
-              <div>仅展示最近 90 交易日，曲线反映模型对当天最看好 100 只的平均打分走势。</div>
+              <div>均分 = 当日全市场 `pred / fusion_score` 均值（与个股终端一致，回退读 `pred.parquet`）。</div>
+              <div>仅展示最近 90 交易日，曲线反映模型对全市场整体的平均打分走势。</div>
             </div>,
           }]}
         />
@@ -78,7 +78,7 @@ export const MarketRegimePanel: React.FC<{ modelId: string }> = ({ modelId }) =>
         <Card size="small" className="rounded-2xl text-center">
           <div className="text-[11px] text-slate-400 font-bold">最新均分</div>
           <div className="text-lg font-mono font-black text-blue-600">{Number(current?.avg_score ?? 0).toFixed(4)}</div>
-          <div className="text-[11px] text-slate-500 mt-1">{current?.trade_date} · Top100</div>
+          <div className="text-[11px] text-slate-500 mt-1">{current?.trade_date} · 全市场 {current?.count} 只</div>
         </Card>
         <Card size="small" className="rounded-2xl text-center">
           <div className="text-[11px] text-slate-400 font-bold">样本</div>
@@ -90,7 +90,7 @@ export const MarketRegimePanel: React.FC<{ modelId: string }> = ({ modelId }) =>
       <Card className="rounded-2xl" size="small">
         <div className="flex items-center gap-2 mb-2">
           <TrendingUp size={14} className="text-blue-500" />
-          <Text className="text-xs font-black text-slate-700">Top100 均分时序</Text>
+          <Text className="text-xs font-black text-slate-700">全市场均分时序</Text>
         </div>
         {option && <ReactECharts option={option} style={{ height: 320 }} />}
       </Card>

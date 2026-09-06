@@ -1,6 +1,8 @@
 /**
  * AI策略状态管理切片
  * 整合了原Recoil状态管理功能
+ * ⚠️  统一管理：策略列表真源已收敛到 features/user-center/store/strategiesSlice + strategyManagementService
+ * 本 slice 的 strategies/currentStrategy 仅作 AI 生成中间态镜像，新代码禁止作为策略列表真源
  */
 
 import { createSlice, createAsyncThunk, PayloadAction } from '@reduxjs/toolkit';
@@ -397,16 +399,22 @@ export const saveStrategy = createAsyncThunk(
 export const fetchStrategies = createAsyncThunk(
   'aiStrategy/fetchStrategies',
   async (_, { rejectWithValue }) => {
+    // 统一管理：已收敛到 strategyManagementService；本 thunk 保留为兼容镜像，真源为 strategiesSlice
     try {
-      const response = await fetch('/api/v1/strategies');
-
-      if (!response.ok) {
-        const error = await response.json();
-        return rejectWithValue(error.message || '获取策略列表失败');
-      }
-
-      const data = await response.json();
-      return data.data;
+      const { strategyManagementService } = await import('../../services/strategyManagementService');
+      const items: any[] = await strategyManagementService.loadStrategies();
+      // 映射为 AIStrategy 以兼容旧调用方
+      return items.map((s: any) => ({
+        id: String(s.id),
+        name: s.name,
+        description: s.description || '',
+        code: s.code || '',
+        status: s.status || 'draft',
+        created_at: s.created_at,
+        updated_at: s.updated_at,
+        tags: s.tags || [],
+        parameters: s.parameters || {},
+      }));
     } catch (error) {
       return rejectWithValue(error instanceof Error ? error.message : '网络错误');
     }

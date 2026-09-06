@@ -8,6 +8,7 @@ import {
 } from 'lucide-react';
 import axios from 'axios';
 import { SERVICE_ENDPOINTS } from '../../config/services';
+import { buildCsvText, downloadCsvFile } from '../../utils/csvExport';
 
 interface StockResult {
     symbol: string;
@@ -350,9 +351,9 @@ export const StockSelectionPanel: React.FC<StockSelectionPanelProps> = ({
 
     const handleExport = () => {
         const selectedData = results.filter(s => selectedStocks.has(s.symbol));
-        const csv = [
-            ['股票代码', '股票名称', '市盈率', '市净率', '市值(万)', 'ROE(%)', '成交额(万)', '收盘价'].join(','),
-            ...selectedData.map(s => [
+        const csv = buildCsvText(
+            ['股票代码', '股票名称', '市盈率', '市净率', '市值(万)', 'ROE(%)', '成交额(万)', '收盘价'],
+            selectedData.map(s => [
                 s.symbol,
                 s.name,
                 s.pe_ratio?.toFixed(2) || '-',
@@ -360,15 +361,11 @@ export const StockSelectionPanel: React.FC<StockSelectionPanelProps> = ({
                 s.market_cap?.toFixed(0) || '-',
                 s.roe?.toFixed(2) || '-',
                 s.turnover?.toFixed(0) || '-',
-                s.close?.toFixed(2) || '-'
-            ].join(','))
-        ].join('\n');
-
-        const blob = new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8;' });
-        const link = document.createElement('a');
-        link.href = URL.createObjectURL(blob);
-        link.download = `选股结果_${new Date().toISOString().split('T')[0]}.csv`;
-        link.click();
+                s.close?.toFixed(2) || '-',
+            ]),
+            { textColumns: [0], filename: '' },
+        );
+        downloadCsvFile(csv, `选股结果_${new Date().toISOString().split('T')[0]}.csv`);
     };
 
     const formatNumber = (num: number | undefined, decimals = 2): string => {

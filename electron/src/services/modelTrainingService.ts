@@ -1,5 +1,5 @@
 import axios, { AxiosInstance } from 'axios';
-import { SERVICE_ENDPOINTS } from '../config/services';
+import { SERVICE_ENDPOINTS, resolveWebSafeServiceBase } from '../config/services';
 import { authService } from '../features/auth/services/authService';
 import {
   AdminModelFeatureCatalog,
@@ -493,7 +493,10 @@ export interface SystemModelRecord {
 
 class ModelTrainingService {
   private client: AxiosInstance;
-  private readonly baseURL = (import.meta as any).env?.VITE_USER_API_URL || SERVICE_ENDPOINTS.USER_SERVICE;
+  private readonly baseURL = resolveWebSafeServiceBase(
+    (import.meta as any).env?.VITE_USER_API_URL,
+    SERVICE_ENDPOINTS.USER_SERVICE,
+  );
 
   constructor() {
     this.client = axios.create({
@@ -504,7 +507,10 @@ class ModelTrainingService {
     });
 
     this.client.interceptors.request.use((config) => {
-      config.baseURL = String((import.meta as any).env?.VITE_USER_API_URL || SERVICE_ENDPOINTS.USER_SERVICE);
+      config.baseURL = resolveWebSafeServiceBase(
+        (import.meta as any).env?.VITE_USER_API_URL,
+        SERVICE_ENDPOINTS.USER_SERVICE,
+      );
       return config;
     });
 
@@ -1035,17 +1041,6 @@ class ModelTrainingService {
   }
 
   // ── 批量多日推理 ──
-
-  async runInferenceBacktest(params: {
-    model_id: string;
-    start_date: string;
-    end_date: string;
-    signal_mode: 'realtime' | 'stored';
-    strategy: Record<string, unknown>;
-  }): Promise<Record<string, any>> {
-    const resp = await this.client.post('/admin/models/inference-backtest', params, { timeout: 600000 });
-    return resp.data;
-  }
 
   async submitBatchInference(params: BatchInferenceRequest): Promise<BatchInferenceRecord> {
     const resp = await this.client.post<BatchInferenceRecord>('/models/inference/batch', params);

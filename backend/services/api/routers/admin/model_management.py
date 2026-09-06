@@ -16,7 +16,7 @@ from zoneinfo import ZoneInfo
 import httpx
 import yaml
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, Field
 from sqlalchemy import select, text
 try:
     import exchange_calendars as xcals
@@ -649,72 +649,3 @@ async def ensure_admin_tables():
     """确保管理员相关表存在 - 已禁用自动建表"""
     # 表结构由 quantmind_init.sql 初始化
     pass
-
-
-class InferenceBacktestAliasRequest(BaseModel):
-    """推理回测请求（/models 前缀别名，复用 /data 下的实现）。"""
-
-    model_id: str = Field(..., description="模型ID")
-    start_date: str = Field(..., description="回测起始日期 YYYY-MM-DD")
-    end_date: str = Field(..., description="回测结束日期 YYYY-MM-DD")
-    signal_mode: str = Field(default="stored", description="realtime=逐日推理 | stored=读已有信号")
-    strategy: dict[str, Any] = Field(default_factory=dict, description="策略参数")
-    model_config = ConfigDict(protected_namespaces=())
-
-
-@router.post("/inference-backtest", summary="推理回测（选股策略事件驱动，/models 别名）")
-async def run_inference_backtest_alias(
-    request: InferenceBacktestAliasRequest,
-    current_user: dict = Depends(require_admin),
-):
-    """推理回测 — 与 /admin/data/inference-backtest 同实现，路径兼容前端。"""
-    from .model_management_ops import (
-        InferenceBacktestRequest,
-        InferenceBacktestStrategyParams,
-        _make_stored_signal_provider,
-        _serialize_backtest_result,
-    )
-    from backend.services.engine.inference.inference_backtest_service import (
-        StrategyConfig,
-        run_inference_backtest,
-    )
-
-    strategy = request.strategy or {}
-    s = InferenceBacktestStrategyParams(**strategy)
-    config = StrategyConfig(
-        entry_threshold=s.entry_threshold,
-        exit_threshold=s.exit_threshold,
-        strong_industry_min=s.strong_industry_min,
-        score_min=s.score_min,
-        score_max=s.score_max,
-        max_hold_days=s.max_hold_days,
-        take_profit=s.take_profit,
-        stop_loss=s.stop_loss,
-        max_positions=s.max_positions,
-        daily_select_max=s.daily_select_max,
-        initial_capital=s.initial_capital,
-        main_board_only=s.main_board_only,
-        exclude_limit_moves=s.exclude_limit_moves,
-        exclude_st=s.exclude_st,
-        use_index_ma20_filter=s.use_index_ma20_filter,
-        signal_mode=request.signal_mode,
-    )
-    data_dir = Path(os.getcwd()) / "db" / "feature_snapshots"
-    signal_provider = None
-    if request.signal_mode == "stored":
-        signal_provider = _make_stored_signal_provider(request.model_id)
-
-    result = await asyncio.get_event_loop().run_in_executor(
-        None,
-        lambda: run_inference_backtest(
-            model_id=request.model_id,
-            start_date=request.start_date,
-            end_date=request.end_date,
-            data_dir=data_dir,
-            config=config,
-            signal_provider=signal_provider,
-        ),
-    )
-    if result.status == "error":
-        raise HTTPException(status_code=400, detail=str(result.errors[0].get("error") if result.errors else "推理回测失败"))
-    return _serialize_backtest_result(result)

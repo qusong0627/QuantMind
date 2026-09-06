@@ -14,21 +14,6 @@ export const ModelConsensusPanel: React.FC<ModelConsensusPanelProps> = ({
   consensusScore,
   selectedCount = 0,
 }) => {
-  const getRatingBadge = (rating: string) => {
-    switch (rating) {
-      case 'STRONG_BUY':
-        return <span className="text-[10px] font-black text-rose-700 bg-rose-50 border border-rose-200 px-2 py-0.5 rounded-md">强烈看多</span>;
-      case 'BUY':
-        return <span className="text-[10px] font-bold text-red-600 bg-red-50 border border-red-200 px-2 py-0.5 rounded-md">偏多</span>;
-      case 'HOLD':
-        return <span className="text-[10px] font-bold text-slate-600 bg-slate-100 border border-slate-200 px-2 py-0.5 rounded-md">观望</span>;
-      case 'SELL':
-        return <span className="text-[10px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-md">看空</span>;
-      default:
-        return <span className="text-[10px] font-bold text-slate-600 bg-slate-100 border border-slate-200 px-2 py-0.5 rounded-md">{rating}</span>;
-    }
-  };
-
   return (
     <div className="flex flex-col h-full bg-white/70 backdrop-blur-md rounded-2xl p-5 border border-white/80 shadow-sm">
       <div className="flex items-center justify-between pb-3 border-b border-slate-100 mb-3">
@@ -92,7 +77,6 @@ export const ModelConsensusPanel: React.FC<ModelConsensusPanelProps> = ({
                   <div className="w-2 h-2 rounded-full bg-blue-500" />
                   <span className="text-xs font-bold text-slate-800 truncate">{item.model_name}</span>
                 </div>
-                {getRatingBadge(item.rating)}
               </div>
 
               <div className="flex items-center justify-between pt-2 border-t border-slate-50">

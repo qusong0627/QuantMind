@@ -157,7 +157,39 @@ async def lifespan(app: FastAPI):
             run_simulation_corporate_action_task(),
             name="simulation-corporate-action",
         )
-        # simulation_fund_snapshot_task 已删除（自动重置导致手动任务后金额被重置为 0）
+        # 模拟盘资金快照只读周期采集（仅 capture_all upsert，不做 init/reset；
+        # 旧 simulation_fund_snapshot_task 已删除，此处用 fund_snapshot_service 内
+        # 已有的 SimulationFundSnapshotWorker 重建定时持久化，避免 Redis 丢失）。
+        try:
+            from backend.services.simulation.services.fund_snapshot_service import (
+                SimulationFundSnapshotWorker,
+            )
+
+            sim_snapshot_enabled = os.getenv(
+                "SIM_FUND_SNAPSHOT_ENABLED", "true"
+            ).strip().lower() not in {"0", "false", "no", "off"}
+            if sim_snapshot_enabled:
+                sim_snapshot_interval = int(
+                    os.getenv("SIM_FUND_SNAPSHOT_INTERVAL_SECONDS", "300")
+                )
+                sim_fund_snapshot_worker = SimulationFundSnapshotWorker(
+                    redis_client, interval_seconds=sim_snapshot_interval
+                )
+                await sim_fund_snapshot_worker.start()
+                app.state.sim_fund_snapshot_worker = sim_fund_snapshot_worker
+                logger.info(
+                    "Simulation fund snapshot worker started (interval=%ss)",
+                    sim_fund_snapshot_worker.interval_seconds,
+                )
+            else:
+                logger.info(
+                    "Simulation fund snapshot worker disabled "
+                    "(SIM_FUND_SNAPSHOT_ENABLED=false)"
+                )
+        except Exception as e:
+            logger.error(
+                "trade sim fund snapshot worker start failed: %s", e, exc_info=True
+            )
         from backend.services.live_trading.services.tdx_l2_capture_task import run_tdx_l2_capture_task
         from backend.services.live_trading.services.tdx_l2_realtime import run_tdx_l2_realtime_task
 
@@ -285,6 +317,14 @@ async def lifespan(app: FastAPI):
             await simulation_scheduler.stop()
         except Exception as e:
             logger.warning("trade simulation scheduler stop failed: %s", e)
+
+    # 停止模拟盘资金快照周期采集
+    sim_snapshot_worker = getattr(app.state, "sim_fund_snapshot_worker", None)
+    if sim_snapshot_worker is not None:
+        try:
+            await sim_snapshot_worker.stop()
+        except Exception as e:
+            logger.warning("trade sim fund snapshot worker stop failed: %s", e)
 
     # 停止模拟盘策略级托管调度器
     hosted_scheduler = getattr(app.state, "simulation_hosted_scheduler", None)
