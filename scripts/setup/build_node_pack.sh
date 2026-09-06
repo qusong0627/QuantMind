@@ -102,7 +102,8 @@ case "$MARKET" in
     mkdir -p "$QM_QUANTDB_DATA_DIR"
     echo "[sync] CN 因子同步 → $QM_QUANTDB_DATA_DIR"
     export PYTHONPATH="$NODE_ROOT/backend"
-    "$RUNTIME" backend/scripts/quantdb_daily_sync.py --parquet-only \
+    # 必须 cd 到包根再跑:quantdb_daily_sync 内部用相对路径,任意 cwd 调用都会挂
+    cd "$NODE_ROOT" && "$RUNTIME" backend/scripts/quantdb_daily_sync.py --parquet-only \
         --datasets l1_factors,l2_factors,l1_l2_factors
     ;;
   HK|US)
