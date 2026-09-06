@@ -142,8 +142,10 @@ class RemoteSSHOrchestrator(TrainingOrchestrator):
             raise
         return proc.returncode or 0, stdout.decode(errors="replace"), stderr.decode(errors="replace")
 
-    async def _rsync_push(self, local_path: str, remote_dir: str, *, is_dir: bool = False) -> None:
-        """rsync 推送本地文件/目录到远端目录。"""
+    async def _rsync_push(
+        self, local_path: str, remote_dir: str, *, is_dir: bool = False, delete: bool = False
+    ) -> None:
+        """rsync 推送本地文件/目录到远端目录（目录镜像可选 --delete）。"""
         ssh_opt = f"ssh -o StrictHostKeyChecking=no -p {self.port}"
         if self.ssh_password:
             ssh_opt = f"sshpass -p {self.ssh_password} " + ssh_opt
@@ -153,7 +155,7 @@ class RemoteSSHOrchestrator(TrainingOrchestrator):
             "rsync", "-avz", "--partial",
             "-e", ssh_opt,
         ]
-        if is_dir:
+        if is_dir and delete:
             cmd += ["--delete"]
         src = local_path.rstrip("/") + ("/" if is_dir else "")
         dst = f"{self.user}@{self.host}:{remote_dir}"
@@ -395,12 +397,26 @@ class RemoteSSHOrchestrator(TrainingOrchestrator):
             )
 
             # 3. 直读源数据同步（免 Docker 节点交给包内 sync_factors.sh <market>，
-            #    市场数据根/凭据/同步器全在服务器侧，编排器只传市场名）
+            #    市场数据根/凭据/同步器全在服务器侧,编排器只传市场名）
             if direct_source and is_process:
                 if not self.pack_root:
                     raise RuntimeError(
                         "免 Docker 节点（executor=process）必须配置 pack_root（服务器节点包根目录）"
                     )
+                # L2 升级链路:同步器/共享模块每次训练前按主节点版本刷新(约 16MB),
+                # 数据同步逻辑更新无需重打包/动实例
+                repo_root = next(
+                    (p for p in Path(__file__).resolve().parents
+                     if (p / "docker" / "training" / "train.py").exists()),
+                    Path(__file__).resolve().parents[3],
+                )
+                for sub in ("scripts", "shared"):
+                    src_dir = repo_root / "backend" / sub
+                    if src_dir.is_dir():
+                        await self._rsync_push(
+                            str(src_dir), f"{self.pack_root}/backend/{sub}", is_dir=True
+                        )
+                self._log(run_id, "[SYNC] 同步器/共享模块已随主节点版本刷新", progress=14)
                 sync_sh = f"{self.pack_root}/sync_factors.sh"
                 code, out, err = await self._ssh_exec(
                     f"test -x {sync_sh} && cd {self.pack_root} && bash sync_factors.sh {market}",
