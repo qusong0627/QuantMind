@@ -532,7 +532,19 @@ class RemoteSSHOrchestrator(TrainingOrchestrator):
             raise RuntimeError("executor=process 节点必须配置 pack_root")
         run_cmd = f"cd {self.pack_root} && bash run_one.sh {self.work_dir}"
         self._log(run_id, "[SYSTEM] 在远端启动 runtime 训练(免 Docker)...", progress=20)
-        return await self._ssh_exec(run_cmd, timeout=60)
+        try:
+            code, out, err = await self._ssh_exec(run_cmd, timeout=120)
+        except asyncio.TimeoutError:
+            code, out, err = 255, "", "ssh timeout"
+        if code != 0:
+            # 实例高负载下 ssh 偶发 255/超时:重试一次再失败
+            self._log(run_id, f"[SYSTEM] 启动偶发失败(code={code}),5 秒后重试...", progress=20)
+            await asyncio.sleep(5)
+            try:
+                code, out, err = await self._ssh_exec(run_cmd, timeout=120)
+            except asyncio.TimeoutError:
+                code, out, err = 255, "", "ssh timeout(retry)"
+        return code, out, err
 
     async def _poll_process(self, run_id: str, label: str) -> None:
         """轮询远端 runtime 训练(日志文件 + pid 存活)，完成后拉产物/注册。"""
