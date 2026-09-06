@@ -59,6 +59,9 @@ bash .claude/skills/autodl/scripts/autodl.sh create <gpu_spec_uuid> [data_center
 
 ## 与 QuantMind 训练节点包的标准流程
 
+> 完整图文步骤见仓库教程:`docs/remote-training-node-tutorial.md`
+> (节点包部署/密钥/节点注册/训练中心操作/运维/FAQ)
+
 1. `list` 找目标实例 / `create 4090-p`(或所需规格)→ 等 `status=running`
 2. `snapshot <uuid>` 取 ssh_command/root_password/ssh_port
 3. `scp qm-train-node-<date>.tar.gz` 到实例并解压,`bash start_node.sh` 自检
