@@ -118,6 +118,24 @@ echo "[sync] 因子就绪"
 EOF
 chmod +x "$NODE/sync_factors.sh"
 
+# ── 5b. run_one.sh(远端启动器:内部 setsid 脱离,ssh 毫秒返回;编排器按此调用) ──
+cat > "$NODE/run_one.sh" <<'EOF'
+#!/usr/bin/env bash
+# 节点包训练启动器:ssh 侧只等本脚本毫秒返回,训练进程 setsid 后台脱离
+# 用法: bash run_one.sh <work_dir>
+set -u
+WORK="${1:?usage: run_one.sh <work_dir>}"
+PACK="$(cd "$(dirname "$0")" && pwd)"
+RUNTIME="${PACK}/runtime/python/bin/python3"
+[ -x "$RUNTIME" ] || RUNTIME="${PACK}/runtime/bin/python3"
+cd "$WORK" || exit 2
+[ -f "${PACK}/train_env.sh" ] && . "${PACK}/train_env.sh" || true
+PYTHONPATH="${WORK}:${PACK}" TRAINING_WORKSPACE_DIR="${WORK}" setsid "$RUNTIME" "${WORK}/train.py" --config "${WORK}/config.yaml" > "${WORK}/train.log" 2>&1 < /dev/null &
+echo $! > "${WORK}/train.pid"
+exit 0
+EOF
+chmod +x "$NODE/run_one.sh"
+
 # ── 6. start_node.sh(自检 + 引导) ─────────────────────────────
 cat > "$NODE/start_node.sh" <<'EOF'
 #!/usr/bin/env bash

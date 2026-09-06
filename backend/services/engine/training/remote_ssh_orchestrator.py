@@ -522,20 +522,17 @@ class RemoteSSHOrchestrator(TrainingOrchestrator):
         return f"{self.pack_root}/{self.env_file}"
 
     async def _launch_process_job(self, run_id: str, label: str, *, direct_source: str) -> tuple[int, str, str]:
-        """在远端以 runtime python 直跑 train.py（setsid 后台 + pid 文件 + 日志文件）。"""
-        work = self.work_dir
-        runtime = self._process_runtime()
-        env_sh = self._process_env_file()
-        py_path = f"PYTHONPATH={work}:{self.pack_root}" if self.pack_root else f"PYTHONPATH={work}"
-        run_cmd = (
-            f"mkdir -p {work} && cd {work} && "
-            f"{{ [ -f {env_sh} ] && . {env_sh} || true; }} && "
-            f"{py_path} TRAINING_WORKSPACE_DIR={work} "
-            f"setsid {runtime} {work}/train.py --config {work}/config.yaml "
-            f"> {work}/train.log 2>&1 < /dev/null & echo $! > {work}/train.pid"
-        )
+        """在远端以 runtime python 直跑 train.py。
+
+        经节点包 run_one.sh 启动:ssh 只等脚本毫秒返回(脚本内部 setsid
+        后台脱离 + pid 文件 + 日志文件);不要用内联 '... & echo' —— sshd
+        会因训练进程持有通道而挂到超时(真机实测 TimeoutError)。
+        """
+        if not self.pack_root:
+            raise RuntimeError("executor=process 节点必须配置 pack_root")
+        run_cmd = f"cd {self.pack_root} && bash run_one.sh {self.work_dir}"
         self._log(run_id, "[SYSTEM] 在远端启动 runtime 训练(免 Docker)...", progress=20)
-        return await self._ssh_exec(run_cmd, timeout=90)
+        return await self._ssh_exec(run_cmd, timeout=60)
 
     async def _poll_process(self, run_id: str, label: str) -> None:
         """轮询远端 runtime 训练(日志文件 + pid 存活)，完成后拉产物/注册。"""
