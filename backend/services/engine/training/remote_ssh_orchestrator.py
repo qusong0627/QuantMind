@@ -567,6 +567,7 @@ class RemoteSSHOrchestrator(TrainingOrchestrator):
         work = self.work_dir
         seen_lines: set[str] = set()
         progress = 22
+        dead_streak = 0  # 连续确认进程结束的次数(ssh 抖动不算)
         try:
             while True:
                 code, out, err = await self._ssh_exec(
@@ -585,9 +586,20 @@ class RemoteSSHOrchestrator(TrainingOrchestrator):
                     f"kill -0 $(cat {work}/train.pid 2>/dev/null) 2>/dev/null && echo A || echo G",
                     timeout=60,
                 )
-                if "A" in (alive_out or ""):
+                alive_txt = (alive_out or "").strip()
+                if "A" in alive_txt:
+                    dead_streak = 0
                     await asyncio.sleep(self._POLL_INTERVAL)
                     continue
+                if alive_code != 0 or "G" not in alive_txt:
+                    # ssh 失败或空响应 = 抖动:不判死,继续观察(曾致误杀存活训练)
+                    await asyncio.sleep(self._POLL_INTERVAL)
+                    continue
+                dead_streak += 1
+                if dead_streak < 3:
+                    await asyncio.sleep(self._POLL_INTERVAL)
+                    continue
+                # 连续 3 次确认 G → 进程真结束
 
                 # 进程已结束:以 result.json 且 run_id 匹配本次判定成败
                 # (防止 workspace 残留的旧 result.json 造成误判成功)
