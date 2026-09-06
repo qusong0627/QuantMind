@@ -7,7 +7,7 @@
 # 可选环境变量：
 #   QUANTMIND_MANIFEST_SHA256  SHA256SUMS 清单的 SHA-256（可选）
 #   QUANTMIND_DOCKER_MIRROR  Docker 镜像加速地址
-#   QUANTMIND_REPO_URL    代码仓库地址（默认 Gitee）
+#   QUANTMIND_REPO_URL    代码仓库地址（默认自建 Gitea）
 #   QUANTMIND_REF         要部署的 Git 分支或 tag（默认 master）
 #   QUANTMIND_REPLACE_QLIB=true       覆盖已有 db/qlib_data（谨慎）
 #   QUANTMIND_REPLACE_DATABASE=true   覆盖已有 PostgreSQL 业务数据（谨慎）
@@ -21,7 +21,7 @@ set -euo pipefail
 PROJECT_DIR="${QUANTMIND_PROJECT_DIR:-/opt/quantmind}"
 DOWNLOAD_DIR="${QUANTMIND_DOWNLOAD_DIR:-/opt/quantmind-downloads}"
 STAGING_DIR="${QUANTMIND_STAGING_DIR:-/opt/quantmind-staging}"
-REPO_URL="${QUANTMIND_REPO_URL:-https://gitee.com/qusong0627/QuantMind.git}"
+REPO_URL="${QUANTMIND_REPO_URL:-https://quantmindai.cn/gitea/qusong0627/QuantMind.git}"
 REF="${QUANTMIND_REF:-master}"
 COMPOSE_OVERLAY="${QUANTMIND_COMPOSE_OVERLAY:-}"
 DEPLOY_OVERLAY_DIR="${QUANTMIND_DEPLOY_OVERLAY_DIR:-}"
