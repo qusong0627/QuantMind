@@ -126,6 +126,9 @@ Optuna 寻优(镜像/包 runtime 已含)、断点续跑由主节点 DB 状态驱
 
 ## 七、相关文件
 
+> 本地主节点为一键启动包?见《一键启动包远程训练教程》`docs/remote-training-from-portable-pack.md`
+
+
 - 节点包构建:本机 `scripts/setup/build_node_pack.sh`(输出 `deploy/portable/dist/qm-train-node-*.tar.gz`)
 - 编排代码:`backend/services/engine/training/remote_ssh_orchestrator.py`(executor=process 分支)
 - 节点探测:`backend/services/engine/training/node_manager.py`
