@@ -129,6 +129,15 @@ PACK="$(cd "$(dirname "$0")" && pwd)"
 RUNTIME="${PACK}/runtime/python/bin/python3"
 [ -x "$RUNTIME" ] || RUNTIME="${PACK}/runtime/bin/python3"
 cd "$WORK" || exit 2
+# 互斥:工作目录已有存活训练进程则拒绝启动(防交错误判)
+if pgrep -f "train.py --config ${WORK}/config.yaml" >/dev/null 2>&1; then
+    echo "[run_one] workspace busy (orphan or active training) - abort" >&2
+    exit 3
+fi
+if [ -f "${WORK}/train.pid" ] && kill -0 "$(cat "${WORK}/train.pid" 2>/dev/null)" 2>/dev/null; then
+    echo "[run_one] workspace busy with existing training pid=$(cat "${WORK}/train.pid") - abort" >&2
+    exit 3
+fi
 # 清理上次训练残留,防止编排器把旧 result.json 误判为本次成功
 rm -f "${WORK}/result.json" "${WORK}/train.pid" "${WORK}/train.log" \
       "${WORK}"/model.* "${WORK}"/pred.* "${WORK}"/metadata.json \

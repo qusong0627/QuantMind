@@ -621,6 +621,13 @@ class RemoteSSHOrchestrator(TrainingOrchestrator):
                         status="failed",
                         progress=0,
                     )
+                    # 杀远端残留训练进程:失败 run 的进程若不清理会继续占资源,
+                    # 且与下一个 run 共享 workspace 造成交错误杀(真机事故两次)
+                    await self._ssh_exec(
+                        f"pid=$(cat {work}/train.pid 2>/dev/null); "
+                        f"if [ -n \"$pid\" ]; then kill -9 $pid 2>/dev/null || true; fi",
+                        timeout=60,
+                    )
                 await self._ssh_exec(f"rm -f {work}/train.pid 2>/dev/null || true", timeout=60)
                 return
         except asyncio.CancelledError:
