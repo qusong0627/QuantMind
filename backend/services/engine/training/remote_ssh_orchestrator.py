@@ -561,7 +561,7 @@ class RemoteSSHOrchestrator(TrainingOrchestrator):
         """
         if not self.pack_root:
             raise RuntimeError("executor=process 节点必须配置 pack_root")
-        run_cmd = f"cd {self.pack_root} && bash run_one.sh {self.work_dir}"
+        run_cmd = f"cd {self.pack_root} && export TRAINING_WORKSPACE_DIR={self.work_dir} && bash run_one.sh {self.work_dir}"
         self._log(run_id, "[SYSTEM] 在远端启动 runtime 训练(免 Docker)...", progress=20)
         try:
             code, out, err = await self._ssh_exec(run_cmd, timeout=120)
