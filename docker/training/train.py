@@ -1243,7 +1243,7 @@ def main() -> int:
             logger.info("metadata.json saved locally")
 
             # 复制推理脚本模板
-            template_path = Path("/app/backend/services/engine/inference/templates/inference_parquet.py")
+            template_path = Path(os.getenv("TRAINING_INFERENCE_TEMPLATE") or "/app/backend/services/engine/inference/templates/inference_parquet.py")
             inference_dest = Path(_QM_WS) / "inference.py"
             if template_path.is_file():
                 inference_dest.write_text(template_path.read_text(encoding="utf-8"), encoding="utf-8")
@@ -1461,7 +1461,7 @@ def main() -> int:
             logger.info("metadata.json saved locally")
 
             # 复制统一推理脚本模板（而非内联生成旧版脚本）
-            template_path = Path("/app/backend/services/engine/inference/templates/inference_parquet.py")
+            template_path = Path(os.getenv("TRAINING_INFERENCE_TEMPLATE") or "/app/backend/services/engine/inference/templates/inference_parquet.py")
             inference_dest = Path(_QM_WS) / "inference.py"
             if template_path.is_file():
                 inference_dest.write_text(template_path.read_text(encoding="utf-8"), encoding="utf-8")

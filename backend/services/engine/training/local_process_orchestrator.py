@@ -202,6 +202,8 @@ class LocalProcessOrchestrator(LocalDockerOrchestrator):
             "TRAINING_WORKSPACE_DIR": str(work_dir),
             "TRAINING_LOCAL_DATA_DIR": str(snap_root or data_root),
             "TRAINING_CACHE_DIR": str(work_dir / "cache"),
+            # 推理模板：进程直跑时 /app 不存在，显式指向仓库最新模板（含 quantdb 直读分支）
+            "TRAINING_INFERENCE_TEMPLATE": str(self.train_script.parent.parent / "backend" / "services" / "engine" / "inference" / "templates" / "inference_parquet.py"),
             "TRAIN_IC_WORKERS": os.getenv("TRAIN_IC_WORKERS", ""),
             "TRAIN_NTHREADS": os.getenv("TRAIN_NTHREADS", ""),
             "QLIB_PROVIDER_URI": os.getenv("QLIB_PROVIDER_URI", ""),
