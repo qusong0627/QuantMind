@@ -626,6 +626,18 @@ class StrategyStorageService:
                     key = f"tag_{idx}"
                     where.append(f"tags::text ILIKE :{key}")
                     params[key] = f"%{t}%"
+            # 市场过滤(市场存 parameters.jsonb.market;历史无 market 行一律视为 A 股)
+            # 必须并入 where 列表:此前在 ORDER BY 之后追加 AND 导致 SQL 语法错误
+            if market:
+                mkt = str(market).upper()
+                if mkt in ("A", "CN"):
+                    where.append(
+                        "(parameters->>'market' IS NULL"
+                        " OR UPPER(parameters->>'market') IN ('A','CN'))"
+                    )
+                else:
+                    where.append("UPPER(parameters->>'market') = :mkt")
+                    params["mkt"] = mkt
             where_sql = " AND ".join(where)
             sql = f"""
                 SELECT id, name, description, status, cos_url, {cos_key_expr},
@@ -633,17 +645,6 @@ class StrategyStorageService:
                        parameters, config
                 FROM strategies WHERE {where_sql} ORDER BY updated_at DESC
             """
-            # 市场过滤（市场存 parameters.jsonb.market；历史无 market 行一律视为 A 股）
-            if market:
-                mkt = str(market).upper()
-                if mkt in ("A", "CN"):
-                    sql += (
-                        " AND (parameters->>'market' IS NULL"
-                        " OR UPPER(parameters->>'market') IN ('A','CN'))"
-                    )
-                else:
-                    sql += " AND UPPER(parameters->>'market') = :mkt"
-                    params["mkt"] = mkt
             rows = session.execute(text(sql), params).fetchall()
             items = [
                 {
