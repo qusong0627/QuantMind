@@ -75,6 +75,28 @@ echo "[INFO] 复制 runtime(约数分钟,大)..."
 mkdir -p "$NODE/runtime"
 rsync -a --exclude='__pycache__' --exclude='*.pyc' --exclude='pip/cache' "$RUNTIME_SRC/runtime/" "$NODE/runtime/"
 
+# ── GPU torch：训练节点(AutoDL 等)为 NVIDIA GPU 机器，内置 CUDA torch ──
+# CPU 服务器可 TORCH_DEVICE=cpu 跳过（节点包约小 3GB）
+if [ "${TORCH_DEVICE:-gpu}" = "gpu" ]; then
+    NODE_SP="$NODE/runtime/lib/python3.10/site-packages"
+    # 1) 优先从本地 GPU 训练镜像复制现成 CUDA torch（秒级、离线；镜像 python 3.10 与节点 runtime 兼容）
+    if docker image inspect quantmind-oss-gpu:latest >/dev/null 2>&1; then
+        echo "[INFO] 从本地镜像复制 CUDA torch (quantmind-oss-gpu:latest)..."
+        CID=$(docker create quantmind-oss-gpu:latest)
+        docker cp "$CID:/usr/local/lib/python3.10/site-packages" /tmp/qm-node-sp-copy >/dev/null 2>&1
+        docker rm "$CID" >/dev/null 2>&1
+        SP="/tmp/qm-node-sp-copy/site-packages"
+        for d in "$SP"/torch* "$SP"/nvidia* "$SP"/triton*; do
+            [ -e "$d" ] && cp -a "$d" "$NODE_SP/"
+        done
+        rm -rf /tmp/qm-node-sp-copy
+    else
+        echo "[INFO] 本地无 GPU 镜像，pip 安装 CUDA torch(约 3GB, 慢)..."
+        "$RTPY" -m pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cu128 "torch==2.11.0+cu128" 2>&1 | tail -2
+    fi
+    "$RTPY" -c "import torch; print('[OK] node torch', torch.__version__, 'cuda =', torch.cuda.is_available())"
+fi
+
 # ── 4. train_env.sh(密钥留在服务器侧) ─────────────────────────
 cat > "$NODE/train_env.sh" <<EOF
 # QuantMind 训练节点包环境(服务器侧维护,勿提交 git)
