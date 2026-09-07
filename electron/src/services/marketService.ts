@@ -475,20 +475,23 @@ class MarketService {
         };
       }
 
-      // 优先后端本地 parquet 真实行情（覆盖全部 5 个市场）
+      // A股：腾讯财经实时优先，不可达时后端日线兜底
+      if (market === 'CN') {
+        const tencentResponse = await this.getTencentMarketData();
+        if (tencentResponse.success && tencentResponse.data && tencentResponse.data.indices.length > 0) {
+          console.log(`成功获取腾讯财经实时数据，共${tencentResponse.data.indices.length}个指数`);
+          return tencentResponse;
+        }
+        if (tencentResponse.error) {
+          console.warn('腾讯财经实时不可达，回落后端日线:', tencentResponse.error);
+        }
+      }
+
+      // 后端本地 parquet 真实行情兜底（覆盖全部 5 个市场；CN 为腾讯失败后的兜底）
       const backendResp = await this.getBackendOverview(market);
       if (backendResp.success && backendResp.data && backendResp.data.indices.length > 0) {
         console.log(`成功获取后端 ${market} 市场概览，共${backendResp.data.indices.length}个品种`);
         return backendResp;
-      }
-
-      // A股市场使用腾讯财经API（后端不可用时兜底）
-      if (market === 'CN') {
-        const tencentResponse = await this.getTencentMarketData();
-        if (tencentResponse.success && tencentResponse.data && tencentResponse.data.indices.length > 0) {
-          console.log(`成功获取腾讯财经API数据，共${tencentResponse.data.indices.length}个指数`);
-          return tencentResponse;
-        }
       }
 
       // 加密货币使用 CoinGecko 实时行情

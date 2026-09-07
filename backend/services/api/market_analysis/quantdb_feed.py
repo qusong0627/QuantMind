@@ -37,7 +37,9 @@ INDEX_OVERVIEW = [
 PERIOD_DAYS = {"1d": 1, "3d": 3, "5d": 5, "10d": 10, "20d": 20}
 
 # 板块分类 -> sector_concept 中的 SectorType
-CATEGORY_TYPE = {"shenwan": "行业板块(一级)", "concept": "概念板块"}
+# 注意：shenwan 必须用「行业板块(二级)」=通达信二级行业(标准 80 个)，与离线快照/官网一致；
+# 不要用「行业板块(一级)」(申万一级 48 个)，否则实时刷新与快照的板块归口不一致。
+CATEGORY_TYPE = {"shenwan": "行业板块(二级)", "concept": "概念板块"}
 
 # 缓存 TTL（秒）：日级别分析数据设为 30 分钟，点击「市场分析」按钮时会主动清空
 _QUERY_TTL = 1800  # 资金流与市场指标聚合结果缓存 30 分钟
@@ -303,6 +305,29 @@ def _day_flow_series(flow: pd.DataFrame, days: list[str]) -> list[float]:
     s = flow.groupby(flow["dt"].astype(str))["flow_net_amount"].sum()
     return [round(float(s.get(d, 0.0)) / 1e8, 2) for d in days]
 
+
+def _detect_placeholder_symbols(flow: pd.DataFrame, share_thresh: int = 25) -> set[str]:
+    """识别被整行占位（多只股票共享同一高精度常量）的异常股票，供剔除。
+
+    上游 L2 生成端在逐笔缺失时会给一批股票填相同占位常量，造成资金流假数据。
+    判据：flow_net_amount 非零值被 >=share_thresh 只共享，即视为占位行。
+    与离线快照/官网 predict 脚本一致。
+    """
+    bad: set[str] = set()
+    if flow.empty or "flow_net_amount" not in flow.columns:
+        return bad
+    counts = (
+        flow[flow["flow_net_amount"].notna() & (flow["flow_net_amount"] != 0)]
+        .groupby("flow_net_amount")["symbol"]
+        .nunique()
+        .reset_index(name="n")
+    )
+    suspects = counts[counts["n"] >= share_thresh]["flow_net_amount"].tolist()
+    for v in suspects:
+        bad |= set(flow[flow["flow_net_amount"] == v]["symbol"])
+    return bad
+
+
 def get_stock_money_flow(limit: int = 20) -> list[dict[str, Any]]:
     """个股资金流向排行榜（当日主力净流入排序）。"""
     if not _available():
@@ -332,6 +357,23 @@ def _stock_money_flow_impl(limit: int) -> list[dict[str, Any]]:
     if flow.empty:
         return []
 
+    # 剔除 L2 占位污染（多只股票共享同一常量值=假数据），与离线快照/官网一致。
+    # bad_by_dt 供 30 日明细逐日剔除；当日榜单先剔除占位股，否则假股票把真实榜挤下去。
+    bad_by_dt: dict[str, set[str]] = {}
+    if "flow_net_amount" in hist.columns:
+        hng = hist[hist["flow_net_amount"].notna() & (hist["flow_net_amount"] != 0)]
+        hng = hng.assign(_dt=hng["dt"].astype(str))
+        cc = hng.groupby(["_dt", "flow_net_amount"])["symbol"].nunique().reset_index(name="n")
+        for row in cc[cc["n"] >= 25].itertuples(index=False):
+            dt = str(row._dt)
+            syms = set(hng[(hng["_dt"] == dt) & (hng["flow_net_amount"] == row.flow_net_amount)]["symbol"])
+            bad_by_dt.setdefault(dt, set()).update(syms)
+    today_bad = bad_by_dt.get(today, set())
+    if today_bad:
+        flow = flow[~flow["symbol"].isin(today_bad)]
+    if flow.empty:
+        return []
+
     prices = _load_prices([today])
     names = _instrument_names()
     flow = flow.merge(prices[["symbol", "close", "pct_change"]], on="symbol", how="left")
@@ -347,18 +389,20 @@ def _stock_money_flow_impl(limit: int) -> list[dict[str, Any]]:
         sym: _day_flow_series(grp, days)
         for sym, grp in grp_by_prefix.items()
     }
-    detail_map: dict[str, list[dict[str, Any]]] = {
-        sym: [
-            {
-                "date": str(row.dt),
+    detail_map: dict[str, list[dict[str, Any]]] = {}
+    for sym, grp in grp_by_prefix.items():
+        rows: list[dict[str, Any]] = []
+        for row in grp.itertuples(index=False):
+            dt = str(row.dt)
+            if dt in bad_by_dt and sym in bad_by_dt[dt]:
+                continue  # 剔除占位污染日，明细只保留真实数据
+            rows.append({
+                "date": dt,
                 "inflow": round(_f(row.flow_buy_amount) / 1e8, 2),
                 "outflow": round(_f(row.flow_sell_amount) / 1e8, 2),
                 "net_flow": round(_f(row.flow_net_amount) / 1e8, 2),
-            }
-            for row in grp.itertuples(index=False)
-        ]
-        for sym, grp in grp_by_prefix.items()
-    }
+            })
+        detail_map[sym] = rows
 
     items: list[dict[str, Any]] = []
     for row in top.itertuples(index=False):
@@ -409,6 +453,12 @@ def _stock_money_flow_full_impl() -> list[dict[str, Any]]:
         return []
     today = days[0]
     flow = _load_l2_flow([today])
+    if flow.empty:
+        return []
+    # 剔除当日被整行占位（共享常量=假数据）的异常股票，与离线快照/官网一致
+    bad = _detect_placeholder_symbols(flow)
+    if bad:
+        flow = flow[~flow["symbol"].isin(bad)]
     if flow.empty:
         return []
 
@@ -695,12 +745,16 @@ def get_market_breadth() -> dict[str, Any]:
 
 
 def get_sector_heatmap(category: str = "shenwan") -> list[dict[str, Any]]:
-    """获取申万一级行业或热门概念热力矩形图数据（板块均值涨跌、成交额/市值权重、领涨龙头及涨跌幅）。"""
+    """获取申万一级行业或热门概念热力矩形图数据（板块均值涨跌、市值/成交额权重、领涨龙头及涨跌幅）。
+
+    矩形面积权重与离线快照/官网一致：优先用总市值 total_mv（元→亿），
+    无估值数据时回退当日成交额，避免实时与快照的市值口径不一致。
+    """
     def _load():
         if not _available():
             return []
 
-        _, prices = _market_pct_snapshot()
+        today, prices = _market_pct_snapshot()
         if prices.empty:
             return []
 
@@ -712,14 +766,39 @@ def get_sector_heatmap(category: str = "shenwan") -> list[dict[str, Any]]:
         if not groups:
             return []
 
+        # 市值权重：从 valuation 读总市值，symbol 统一大写后缀与板块成员对齐
+        today_s = str(today).zfill(8) if today else ""
+        mv_map: dict[str, float] = {}
+        if today_s:
+            vdf = _read_partitioned("5_technical_derived/valuation", [today_s], "symbol, total_mv")
+            if not vdf.empty:
+                for r in vdf.itertuples(index=False):
+                    sym = str(r.symbol).strip().upper()
+                    tv = float(r.total_mv or 0.0)
+                    if not math.isfinite(tv):
+                        tv = 0.0
+                    mv_map[sym] = tv
+
         items: list[dict[str, Any]] = []
         for sname, syms in groups.items():
             sub = prices[prices["symbol"].isin(syms)]
             if sub.empty:
                 continue
             avg_pct = round(float(sub["pct_change"].mean() or 0.0), 2)
-            tot_amt = float(sub["amount"].sum() or 0.0)
-            val_yi = round(tot_amt / 1e8, 1) if tot_amt > 1e11 else round(tot_amt / 1e4, 1) if tot_amt > 1e7 else round(tot_amt, 1)
+            val_yi: float | None = None
+            if mv_map:
+                tot_mv = sum(mv_map.get(s, 0.0) for s in syms)
+                if tot_mv > 0:
+                    val_yi = round(tot_mv / 1e8, 1)
+            if val_yi is None:
+                # 无估值时按成交额兜底（单位分档换算，避免多分支比例错乱）
+                tot_amt = float(sub["amount"].sum() or 0.0)
+                if tot_amt > 1e11:
+                    val_yi = round(tot_amt / 1e8, 1)
+                elif tot_amt > 1e7:
+                    val_yi = round(tot_amt / 1e4, 1)
+                else:
+                    val_yi = round(tot_amt, 1)
 
             leader_row = sub.sort_values("pct_change", ascending=False).iloc[0]
             items.append({
