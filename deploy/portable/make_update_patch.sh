@@ -18,8 +18,6 @@ DIST="$HERE/dist"
 BASE="${1:-HEAD~1}"
 
 CODE_PREFIXES="backend/ config/ strategy_templates/ scripts/ pack.env.example pg_setup.py"
-# 根级训练脚本：仓库在 docker/training/ 下，补丁必须落到包根同名文件
-ROOT_SCRIPT_MAP="docker/training/train.py:train.py docker/training/preprocessing.py:preprocessing.py docker/training/parallel_utils.py:parallel_utils.py"
 # pack_assets 里的 bat 落到包根(便携包根目录的启动脚本)
 BAT_MAP="pack_assets/start.bat:start.bat pack_assets/stop.bat:stop.bat pack_assets/install_gpu.bat:install_gpu.bat"
 
@@ -45,14 +43,16 @@ for pair in $BAT_MAP; do
     cp "$src" "$STAGE/$dst"
     changed=1
 done
-# 2b) docker/training 三件套 → 包根 train.py / preprocessing.py / parallel_utils.py
-for pair in $ROOT_SCRIPT_MAP; do
-    src="${pair%%:*}"; dst="${pair##*:}"
-    if git diff --quiet "$BASE"..HEAD -- "$src" 2>/dev/null; then continue; fi
-    mkdir -p "$STAGE"
-    cp "$src" "$STAGE/$dst"
+# 2b) docker/training 整目录 → 补丁内 docker/training/(保相对布局: train.py 顶层
+#     import model_trainers/diagnostics/data 同级包; 代码包 data 与包根数据目录
+#     data/ 同名, 不能拉平到补丁根)。apply_update 需先删包内旧 docker/training
+#     与旧拉平残留(根级 train.py/model_trainers)。
+if ! git diff --quiet "$BASE"..HEAD -- docker/training 2>/dev/null; then
+    rm -rf "$STAGE/docker/training"
+    mkdir -p "$STAGE/docker"
+    cp -a docker/training "$STAGE/docker/training"
     changed=1
-done
+fi
 
 if [ "$changed" = "0" ]; then
     echo "[!] $BASE..HEAD 没有代码类改动,无需补丁"
@@ -71,6 +71,8 @@ cd /d "%~dp0"
 set "ROOT=%CD%"
 echo [update] package root: %ROOT%
 echo [update] stopping services...
+if exist "%ROOT%\train.py" echo [update] NOTE: old flattened layout detected (root train.py). Delete it and package-root model_trainers, then re-extract this zip's docker\ folder if missing - or use sync_from_git.bat on next runs.
+if exist "%ROOT%\model_trainers" echo [update] NOTE: old flattened layout detected (root model_trainers). Delete it, then re-extract this zip's docker\ folder if missing - or use sync_from_git.bat on next runs.
 taskkill /FI "WINDOWTITLE eq QuantMind-CeleryBeat*" /T /F >nul 2>&1
 taskkill /FI "WINDOWTITLE eq QuantMind-CeleryWorker*" /T /F >nul 2>&1
 taskkill /FI "WINDOWTITLE eq QuantMind-Backend*" /T /F >nul 2>&1

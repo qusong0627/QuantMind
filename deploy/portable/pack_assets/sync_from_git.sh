@@ -114,16 +114,19 @@ for d in backend config strategy_templates; do
         cp -a "$REPO/$d/." "$PACK/$d/"
     fi
 done
-# 训练脚本三件套：构建时由 docker/training/ 复制到包根。直跑训练逻辑在
-# train.py 内（TRAINING_WORKSPACE_DIR 等），同步必须一并刷新，否则旧 train.py
-# 会把产物写死 /workspace 导致直跑失败。
-if [ -f "$REPO/docker/training/train.py" ]; then
-    cp -f "$REPO/docker/training/train.py" "$PACK/train.py"
-    cp -f "$REPO/docker/training/preprocessing.py" "$PACK/preprocessing.py"
-    cp -f "$REPO/docker/training/parallel_utils.py" "$PACK/parallel_utils.py"
-    echo "[sync] training scripts refreshed (train.py / preprocessing.py / parallel_utils.py)"
+# docker/training 整目录（train.py 顶层 import model_trainers/diagnostics/data 同级包；
+# 代码包 data 与包根数据目录 data/ 同名，不能拉平到包根 → 保相对布局整目录镜像）。
+# 顺带清掉旧拉平布局残留（包根单文件 train.py/model_trainers 会误导脚本探测
+# 优先命中而 import 失败）。
+if [ -d "$REPO/docker/training" ]; then
+    rm -rf "$PACK/docker/training"
+    mkdir -p "$PACK/docker"
+    cp -a "$REPO/docker/training" "$PACK/docker/training"
+    rm -f "$PACK/train.py"
+    rm -rf "$PACK/model_trainers"
+    echo "[sync] docker/training refreshed (train.py + model_trainers/diagnostics/data)"
 else
-    echo "[sync] note: repo docker/training missing - package train.py NOT refreshed"
+    echo "[sync] note: repo docker/training missing - package training scripts NOT refreshed"
 fi
 # web/（前端构建产物，随 git 跟踪）：镜像覆盖并清掉旧 chunk，避免 UI 残留
 if [ -f "$REPO/web/index.html" ]; then

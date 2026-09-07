@@ -136,14 +136,21 @@ robocopy "%REPO%\config" "%PACK%\config" /E /NFL /NDL /NJH /NJS
 set "RC2=%errorlevel%"
 robocopy "%REPO%\strategy_templates" "%PACK%\strategy_templates" /E /NFL /NDL /NJH /NJS
 set "RC3=%errorlevel%"
-rem training scripts: built from repo docker\training into package root - MUST refresh
+rem docker/training whole dir (train.py imports model_trainers/diagnostics/data
+rem sibling packages; code package "data" collides with the data dir at package
+rem root, so keep the relative layout and mirror the whole dir). Also remove
+rem old flattened leftovers (root train.py/model_trainers would win script
+rem probing and fail on import).
 set "RC5=0"
 if exist "%REPO%\docker\training\train.py" (
-    copy /Y "%REPO%\docker\training\train.py" "%PACK%\train.py" >nul
-    copy /Y "%REPO%\docker\training\preprocessing.py" "%PACK%\preprocessing.py" >nul
-    copy /Y "%REPO%\docker\training\parallel_utils.py" "%PACK%\parallel_utils.py" >nul
+    if exist "%PACK%\docker\training" rd /s /q "%PACK%\docker\training"
+    if not exist "%PACK%\docker" mkdir "%PACK%\docker"
+    robocopy "%REPO%\docker\training" "%PACK%\docker\training" /E /NFL /NDL /NJH /NJS
+    if exist "%PACK%\train.py" del /q "%PACK%\train.py"
+    if exist "%PACK%\model_trainers" rd /s /q "%PACK%\model_trainers"
+    echo [sync] docker/training refreshed (train.py + model_trainers/diagnostics/data)
 ) else (
-    echo [sync] note: repo docker\training missing - package train.py NOT refreshed
+    echo [sync] note: repo docker\training missing - package training scripts NOT refreshed
     set "RC5=1"
 )
 rem web = prebuilt frontend tracked in repo (since 2026-09): mirror into package

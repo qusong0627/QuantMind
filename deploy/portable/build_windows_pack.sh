@@ -267,9 +267,12 @@ cp -a "$REPO_ROOT/electron/dist-react/." "$STAGE/web/"
 find "$STAGE/web/assets" -name '*.js' -type f \
     -exec sed -i 's#http://127\.0\.0\.1:8000##g' {} +
 
-cp "$REPO_ROOT/docker/training/train.py" "$STAGE/train.py"
-cp "$REPO_ROOT/docker/training/preprocessing.py" "$STAGE/preprocessing.py"
-cp "$REPO_ROOT/docker/training/parallel_utils.py" "$STAGE/parallel_utils.py"
+# docker/training 整目录(与编排器 /app/docker/training 布局对齐): train.py 顶层
+# import model_trainers/diagnostics/data 同级包; 代码包 data 与包根数据目录 data/
+# 同名冲突, 不能拉平到包根, 必须整目录拷贝保相对布局
+rm -rf "$STAGE/docker/training"
+mkdir -p "$STAGE/docker"
+cp -a "$REPO_ROOT/docker/training" "$STAGE/docker/training"
 
 cp "$HERE/pack_assets/start.sh" "$HERE/pack_assets/stop.sh" "$HERE/pack_assets/sync_from_git.sh" "$HERE/pack_assets/restore_backup.sh" "$STAGE/"
 cp "$HERE/pack_assets/start.bat" "$HERE/pack_assets/stop.bat" "$HERE/pack_assets/sync_from_git.bat" "$HERE/pack_assets/restore_backup.bat" "$STAGE/"
