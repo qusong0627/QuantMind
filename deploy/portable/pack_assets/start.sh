@@ -151,7 +151,7 @@ export ADMIN_DASHBOARD_DISABLED_SERVICES="${ADMIN_DASHBOARD_DISABLED_SERVICES:-d
 export ADMIN_DASHBOARD_QWENPAW_HOST="127.0.0.1"
 export ADMIN_DASHBOARD_QWENPAW_PORT="${QM_QWENPAW_PORT:-8088}"
 export ADMIN_DASHBOARD_HUNTLY_HOST="127.0.0.1"
-export ADMIN_DASHBOARD_HUNTLY_PORT="${QM_HUNTLY_PORT:-8090}"
+export ADMIN_DASHBOARD_HUNTLY_PORT="${QM_HUNTLY_PORT:-18090}"
 export REDIS_URL="redis://127.0.0.1:${QM_REDIS_PORT}"
 mkdir -p "$MPLCONFIGDIR"
 
@@ -207,11 +207,12 @@ ok "Redis 就绪"
 
 # ── 2b. Huntly（新闻聚合，内嵌 JRE，可选组件）────────────────
 HUNTLY_PID=""
-HUNTLY_PORT="${QM_HUNTLY_PORT:-8090}"
+HUNTLY_PORT="${QM_HUNTLY_PORT:-18090}"
 export HUNTLY_BASE_URL="http://127.0.0.1:${HUNTLY_PORT}"
 # API 服务连 Huntly 的登录凭据（RSS 源添加依赖 signin；可用 pack.env 覆盖）
 export HUNTLY_USERNAME="${HUNTLY_USERNAME:-admin}"
 export HUNTLY_PASSWORD="${HUNTLY_PASSWORD:-admin123}"
+export RSSHUB_BASE_URL="${RSSHUB_BASE_URL:-http://127.0.0.1:1200}"
 if [ -x "$ROOT/huntly/jre/bin/java" ] && [ -f "$ROOT/huntly/server.jar" ]; then
     if curl -fsS -m 2 "http://127.0.0.1:${HUNTLY_PORT}/" >/dev/null 2>&1; then
         log "Huntly 已在运行（端口 $HUNTLY_PORT），跳过启动"
