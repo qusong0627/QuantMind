@@ -196,6 +196,7 @@ class NewsService {
     processed: number;
     ok: number;
     failed: number;
+    started_at?: number | null;
     elapsed_seconds?: number;
     eta_seconds?: number | null;
   }> {
@@ -232,6 +233,36 @@ class NewsService {
     tip: string;
   }> {
     const r = await apiClient.get('/news/enrichment/finbert-status');
+    return (r as any).data ?? (r as any);
+  }
+
+  /** FinBERT 运行时开关状态（即时生效，含 CPU 线程限制信息） */
+  async adminFinbertToggleStatus(): Promise<{
+    enabled: boolean;
+    env_enabled: boolean;
+    device: number;
+    model: string;
+    installed: boolean;
+    model_ready: boolean;
+    model_failed: boolean;
+    override: boolean | null;
+    toggle_path: string;
+    cpu_threads: number | null;
+  }> {
+    const r = await apiClient.get('/admin/finbert/status');
+    const body = (r as any).data ?? (r as any);
+    return body.data ?? body;
+  }
+
+  /** 切换 FinBERT 运行时开关；开启成功返回 { data, warning? }（CPU 环境带限核提示） */
+  async adminFinbertToggle(
+    enabled: boolean
+  ): Promise<{
+    success: boolean;
+    data?: Record<string, unknown>;
+    warning?: string | null;
+  }> {
+    const r = await apiClient.post('/admin/finbert/toggle', { enabled });
     return (r as any).data ?? (r as any);
   }
 

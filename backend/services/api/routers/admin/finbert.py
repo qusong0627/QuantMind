@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
 from backend.services.api.user_app.middleware.auth import require_admin
-from backend.services.api.news.sentiment import get_finbert_status, set_finbert_enabled
+from backend.services.api.news.sentiment import cpu_inference_threads, get_finbert_status, set_finbert_enabled
 from backend.shared.system_events import record_system_event
 
 router = APIRouter(dependencies=[Depends(require_admin)])
@@ -40,6 +40,13 @@ async def finbert_toggle(req: ToggleRequest):
     st = get_finbert_status()
     if req.enabled and not ok:
         raise HTTPException(status_code=400, detail="FinBERT 开启失败（模型未安装或持久化失败）")
+    # CPU 环境（device=-1）开启时明确提示：推理线程已限流，但持续打分仍占 CPU
+    warning = None
+    if req.enabled and (st.get("device") or -1) < 0:
+        warning = (
+            f"当前为 CPU 环境（device=-1），推理线程已限制为 {cpu_inference_threads()} 个"
+            "（FINBERT_CPU_THREADS 可调）。持续打分仍会稳定占用 CPU，建议仅在 GPU 环境开启 FinBERT。"
+        )
     # 记录系统事件便于审计
     try:
         record_system_event(
@@ -52,4 +59,7 @@ async def finbert_toggle(req: ToggleRequest):
         )
     except Exception:
         pass
-    return {"success": ok, "data": st}
+    resp = {"success": ok, "data": st}
+    if warning:
+        resp["warning"] = warning
+    return resp

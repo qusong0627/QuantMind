@@ -28,6 +28,19 @@ DEFAULT_MODEL = os.getenv(
 )
 # 推理设备：-1=CPU。镜像内 torch 换成 CUDA 构建后，设 FINBERT_DEVICE=0 即走 GPU
 DEVICE = int(os.getenv("FINBERT_DEVICE", "-1"))
+
+
+def cpu_inference_threads() -> int:
+    """CPU 环境下 FinBERT 推理线程上限（FINBERT_CPU_THREADS，默认 2）。
+
+    单条标题前向极短，torch 默认按核全开时线程池同步开销远超计算本身，
+    服务多进程叠加会把 CPU 打满；2 线程对每分钟几十篇的量级足够。
+    仅 DEVICE<0（CPU）生效，GPU 环境不受影响。
+    """
+    try:
+        return max(1, int(os.getenv("FINBERT_CPU_THREADS", "2")))
+    except ValueError:
+        return 2
 # 仅 GPU 环境默认启用 FinBERT；CPU 环境默认关闭，避免 CPU 推理打满。
 # 显式设置 NEWS_USE_FINBERT=true/false 可覆盖默认行为。
 _USE_FINBERT_ENV = os.getenv("NEWS_USE_FINBERT", "").strip().lower()
@@ -106,8 +119,12 @@ def is_finbert_enabled() -> bool:
 
 
 def set_finbert_enabled(enabled: bool) -> bool:
-    """设置运行时开关并持久化到文件，即时生效，无需重启。未安装时拒绝开启。"""
-    global _RUNTIME_OVERRIDE, _RUNTIME_MTIME
+    """设置运行时开关并持久化到文件，即时生效，无需重启。未安装时拒绝开启。
+
+    开启成功后在后台等待模型就绪，并自动触发一次全量历史回填
+    （force=False，断点续跑、幂等），使存量纯词典法文章自动升级为融合打分。
+    """
+    global _RUNTIME_OVERRIDE, _RUNTIME_MTIME, _AUTO_REWRITE_THREAD
     if enabled and not is_model_installed():
         logger.warning("FinBERT 模型未安装（%s 缺失），拒绝开启", DEFAULT_MODEL)
         return False
@@ -123,13 +140,52 @@ def set_finbert_enabled(enabled: bool) -> bool:
         except Exception:
             pass
         logger.info("FinBERT 运行时开关已%s", "开启" if enabled else "关闭")
-        # 开启时若模型未加载则触发后台加载
+        # 开启时若模型未加载则触发后台加载；就绪后自动历史重写
         if enabled:
             _ensure_loading()
+            if _AUTO_REWRITE_THREAD is None or not _AUTO_REWRITE_THREAD.is_alive():
+                _AUTO_REWRITE_THREAD = threading.Thread(
+                    target=_auto_rewrite_worker,
+                    daemon=True,
+                    name="finbert-auto-rewrite",
+                )
+                _AUTO_REWRITE_THREAD.start()
         return True
     except Exception as exc:
         logger.warning("FinBERT 开关持久化失败: %s", exc)
         return False
+
+
+_AUTO_REWRITE_THREAD: threading.Thread | None = None
+
+
+def _auto_rewrite_worker() -> None:
+    """等模型就绪后自动启动全量历史回填（force=False）。
+
+    回填逐批 commit、以 enrichment 表为准幂等续跑：中断后重跑自动跳过
+    已完成行（数据库即断点）。仅在通过 set_finbert_enabled 开启的进程
+    （api 服务）触发；celery 侧懒加载路径不会重复拉起重建。
+    """
+    deadline = time.monotonic() + 120.0
+    while time.monotonic() < deadline:
+        with _model_lock:
+            if _model_ready:
+                break
+        time.sleep(0.5)
+    with _model_lock:
+        ready = _model_ready
+    if not ready or not is_finbert_enabled():
+        logger.info("FinBERT 自动历史重写取消：模型未就绪或开关已关闭")
+        return
+    try:
+        # 延迟导入避免模块环：enricher 顶层已 import 本模块，
+        # 此处的反向引用只发生在调用链运行时
+        from backend.services.api.news import start_full_rebuild_async
+
+        res = start_full_rebuild_async(force=False)
+        logger.info("FinBERT 就绪，自动历史重写已触发: started=%s", res.get("started"))
+    except Exception as e:
+        logger.warning("FinBERT 自动历史重写触发失败: %s", str(e)[:200])
 
 
 def get_finbert_status() -> dict:
@@ -144,6 +200,7 @@ def get_finbert_status() -> dict:
         "model_failed": _model_failed,
         "override": _RUNTIME_OVERRIDE,
         "toggle_path": _RUNTIME_TOGGLE_PATH,
+        "cpu_threads": cpu_inference_threads() if DEVICE < 0 else None,
     }
 
 
@@ -177,6 +234,15 @@ def _try_load() -> None:
     global _pipeline, _model_ready, _model_failed, _last_fail_at
     try:
         from transformers import pipeline  # type: ignore
+        if DEVICE < 0:
+            # 限制 CPU 推理线程数：pipeline 创建会触发 torch 初始化，
+            # 必须在此之前设置，否则线程池按全核创建
+            try:
+                import torch  # type: ignore
+
+                torch.set_num_threads(cpu_inference_threads())
+            except Exception:
+                pass
         logger.info("加载 FinBERT 模型: %s ...", DEFAULT_MODEL)
         _pipeline = pipeline(
             "sentiment-analysis",

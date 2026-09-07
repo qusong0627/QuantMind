@@ -84,6 +84,36 @@ def _label_from_score(s: float) -> str:
     return "neutral"
 
 
+def current_target_version() -> str:
+    """当前写入应使用的 model_version（FinBERT 就绪时带 +finbert 后缀）。
+
+    增量 enrich（_pending_page_ids）与全量重建共用本函数 + is_row_outdated，
+    保证两侧对「哪些行需要重跑」口径一致，避免开关切换后的升降级抖动。
+    """
+    return MODEL_VERSION + ("+finbert" if sentiment_mod.is_available() else "")
+
+
+def is_row_outdated(done_version: str | None, target_version: str) -> bool:
+    """该行是否落后于当前目标版本、需要重跑。
+
+    - 未 enrich / 出错行（空版本）：重跑
+    - 版本一致：跳过
+    - 带 +finbert 后缀但目标已不含（FinBERT 停用）：跳过 —— 关闭开关不把
+      历史融合结果降级回纯词典法
+    - 其余不一致（纯词典法行 / 旧版本行）：重跑升级（FinBERT 开启即自动重写）
+    """
+    if not done_version:
+        return True
+    if done_version == target_version:
+        return False
+    if done_version.startswith("ac-v1+lex-v1"):
+        # 远古纯词典行保留不动（与历史行为一致）
+        return False
+    if done_version.endswith("+finbert") and not target_version.endswith("+finbert"):
+        return False
+    return True
+
+
 def enrich_article(
     huntly_page_id: int,
     title: str | None,
@@ -146,7 +176,7 @@ def enrich_article(
         sentiment_score=round(float(final_score), 4),
         sentiment_label=final_label,
         sentiment_confidence=round(float(final_conf), 4),
-        model_version=MODEL_VERSION + ("+finbert" if sentiment_mod.is_available() else ""),
+        model_version=current_target_version(),
         countries=countries,
         regions=regions,
         key_terms=key_terms,
@@ -327,12 +357,13 @@ def _pending_page_ids(conn, candidate_ids: Iterable[int]) -> set[int]:
             (ids,),
         )
         done = {row[0]: row[1] for row in cur.fetchall()}
+    target_version = current_target_version()
     pending = set()
     for pid in ids:
         if pid not in done:
             pending.add(pid)
-        elif done[pid] != MODEL_VERSION and (done[pid] or "").startswith("ac-v1+lex-v1") is False:
-            # 旧版本，重跑
+        elif is_row_outdated(done[pid], target_version):
+            # 落后于当前版本（含 FinBERT 开启后等待融合重写的纯词典行），重跑
             pending.add(pid)
     return pending
 
@@ -570,8 +601,10 @@ def run_full_rebuild(force: bool = False) -> int:
         try:
             # FinBERT 批量推理窗口：标题攒一批一次前向，比逐篇快数倍
             _BATCH = int(os.getenv("FINBERT_BATCH", "96"))
-            # 预同步加载模型，避免首批 chunk 在懒加载窗口内整批降级 None
-            if sentiment_mod.USE_FINBERT:
+            # 预同步加载模型，避免首批 chunk 在懒加载窗口内整批降级 None。
+            # 用运行时开关（含 /data/finbert/enabled 文件）而非环境变量，
+            # 否则 CPU 环境经前端开关启用时预加载会被跳过、整次重建回到纯词典法
+            if sentiment_mod.is_finbert_enabled():
                 t_load = time.time()
                 sentiment_mod._try_load()
                 logger.info("rebuild: FinBERT 预加载 is_available=%s (%.1fs)",
@@ -623,9 +656,7 @@ def run_full_rebuild(force: bool = False) -> int:
             except Exception as e:
                 # 快照失败（如磁盘紧张）降级为直读线上库，行为等同旧版
                 logger.warning("Huntly 快照失败，降级直读: %s", e)
-            target_version = MODEL_VERSION + (
-                "+finbert" if sentiment_mod.is_available() else ""
-            )
+            target_version = current_target_version()
             for row in _iter_all_huntly_pages(batch_size=2000, db_path=scan_db):
                 pid = row["id"]
                 n_done += 1
@@ -633,7 +664,7 @@ def run_full_rebuild(force: bool = False) -> int:
                 # 目标版本（含 finbert 后缀）已算清的行一律跳过：
                 # 不论 force 与否都断点续跑，重复执行退化为幂等空扫描
                 mv = existing_versions.get(pid)
-                if mv == target_version:
+                if not is_row_outdated(mv, target_version):
                     with _REBUILD_LOCK:
                         _REBUILD_STATE["processed"] = n_done
                     continue
