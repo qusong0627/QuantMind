@@ -464,6 +464,7 @@ async def list_user_strategies(
     category: str | None = Query(None),
     search: str | None = Query(None),
     tags: str | None = Query(None),
+    market: str | None = Query(None, description="按市场过滤策略列表(A/CN/HK/US/CRYPTO;缺省不过滤)"),
 ):
     """获取当前用户的策略列表。如果是新用户则自动初始化模板。"""
     try:
@@ -475,7 +476,26 @@ async def list_user_strategies(
         tag_list = tags.split(",") if tags else None
         tenant_id = _get_tenant_id(request)
 
-        items = await asyncio.to_thread(svc.list, user_id=user_id, category=category, search=search, tags=tag_list)
+        items = await asyncio.to_thread(
+            svc.list,
+            user_id=user_id,
+            category=category,
+            search=search,
+            tags=tag_list,
+            market=market,
+        )
+
+        # 新用户(空库)自动同步模板,再按市场查询;带显式过滤条件时不同步
+        if not items and not search and not tags and not category:
+            await _perform_sync(user_id)
+            items = await asyncio.to_thread(
+                svc.list,
+                user_id=user_id,
+                category=category,
+                search=search,
+                tags=tag_list,
+                market=market,
+            )
 
         backtest_summaries = await _fetch_latest_backtest_summaries(user_id=user_id, tenant_id=tenant_id)
         trading_status = await _fetch_real_trading_status(request)
