@@ -278,6 +278,30 @@ async def _fetch_latest_backtest_summaries(user_id: str, tenant_id: str) -> dict
     return summaries
 
 
+def _market_for_template(t) -> str | None:
+    """模板 markets 标记 → 策略 market 参数(空=历史 A 股,不写,保持 NULL 兼容)。"""
+    ms = set(t.markets or [])
+    if "hong_kong" in ms:
+        return "HK"
+    if "us_stock" in ms:
+        return "US"
+    if "crypto" in ms:
+        return "CRYPTO"
+    if "futures" in ms:
+        return "FUTURES"
+    return None
+
+
+def _market_for_strategy_id(strategy_id: str) -> str | None:
+    """按模板 ID 前缀兜底补标(存量数据修复):hk_→HK、us_→US。"""
+    sid = str(strategy_id or "").lower()
+    if sid.startswith("hk_"):
+        return "HK"
+    if sid.startswith("us_"):
+        return "US"
+    return None
+
+
 async def _perform_sync(user_id: str):
     """
     执行模板同步的内部逻辑：将内置模板同步到用户的个人策略数据库。
@@ -285,6 +309,30 @@ async def _perform_sync(user_id: str):
     同步 DB 操作通过 asyncio.to_thread 避免阻塞事件循环。
     """
     svc = get_strategy_storage_service()
+
+    # 0. 存量补标:历史同步的 hk_/us_ 模板可能缺 market(重构期丢失标记),
+    #    导致各市场视图混用。补标幂等(market 非空即跳过)。
+    existing_all = await asyncio.to_thread(svc.list, user_id=user_id)
+    for s in existing_all:
+        params = s.get("parameters") or {}
+        if params.get("market"):
+            continue
+        mkt = _market_for_strategy_id(params.get("strategy_type"))
+        if mkt:
+            merged = {**params, "market": mkt}
+            await svc.save(
+                user_id=user_id,
+                strategy_id=s["id"],
+                name=s.get("name") or "",
+                code=s.get("code") or "",
+                metadata={
+                    "description": s.get("description") or "",
+                    "tags": s.get("tags") or [],
+                    "status": "ACTIVE",
+                    "is_verified": s.get("is_verified", True),
+                    "parameters": merged,
+                },
+            )
 
     templates = get_all_templates()
     synced_count = 0
@@ -297,6 +345,11 @@ async def _perform_sync(user_id: str):
         if any(s.get("name") == t.name for s in existing):
             continue
 
+        params: dict[str, Any] = {"strategy_type": t.id, "topk": 50, "signal": "<PRED>"}
+        mkt = _market_for_template(t)
+        if mkt:
+            params["market"] = mkt  # HK/US/CRYPTO 模板打市场标,供策略库按市场隔离
+
         await svc.save(
             user_id=user_id,
             name=t.name,
@@ -306,7 +359,7 @@ async def _perform_sync(user_id: str):
                 "tags": [t.category, t.difficulty, "SystemSync"],
                 "status": "ACTIVE",
                 "is_verified": True,
-                "parameters": {"strategy_type": t.id, "topk": 50, "signal": "<PRED>"},
+                "parameters": params,
             },
         )
         synced_count += 1
