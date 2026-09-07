@@ -722,7 +722,7 @@ class LocalDockerOrchestrator(TrainingOrchestrator):
         # 训练容器工作目录：使用 /data 挂载点下的路径
         # API 容器内路径：/data/training_jobs/{run_id}（通过 ./data:/data 挂载）
         # 宿主机路径：/opt/quantmind/data/training_jobs/{run_id}（Docker daemon 需要）
-        container_work_dir = Path("/data") / "training_jobs" / run_id
+        container_work_dir = Path(os.getenv("HOST_DATA_DIR") or "/data") / "training_jobs" / run_id
 
         _compose_dir = _HOST_PROJECT_PATH if _HOST_PROJECT_PATH.is_absolute() else Path.cwd()
         host_output_dir = _compose_dir / "data" / "training_jobs" / run_id
@@ -854,7 +854,7 @@ class LocalDockerOrchestrator(TrainingOrchestrator):
         # （如 quantdb_factor_reader → 训练容器 load_data ImportError 秒挂）。
         # 与 train.py 挂载同理；/app/backend 是 compose bind mount，API 容器内
         # 可直接感知其存在（宿主机路径由 HOST_PROJECT_PATH 换算）。
-        if Path("/app/backend").exists():
+        if Path("/app/backend").exists() or (_HOST_PROJECT_PATH / "backend").exists():
             volumes[str(_HOST_PROJECT_PATH / "backend")] = {
                 "bind": "/app/backend",
                 "mode": "ro",

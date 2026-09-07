@@ -16,6 +16,8 @@ config.yaml 结构：
 """
 
 from __future__ import annotations
+import os as _qm_os
+_QM_WS = _qm_os.environ.get("TRAINING_WORKSPACE_DIR") or "/workspace"
 
 import argparse
 import gc
@@ -836,13 +838,13 @@ def train_stacking(
         **{f"oof_{mt}": oof_preds[mt] for mt in model_types},
         "label": train_df[label_col],
     })
-    oof_path = Path("/workspace/oof_predictions.parquet")
+    oof_path = Path(_QM_WS) / "oof_predictions.parquet"
     oof_df.to_parquet(oof_path, engine="pyarrow", compression="zstd", index=False)
     logger.info("OOF predictions saved to %s", oof_path)
 
     # 保存元学习器
     import pickle
-    meta_model_path = Path("/workspace/meta_model.pkl")
+    meta_model_path = Path(_QM_WS) / "meta_model.pkl"
     with open(meta_model_path, "wb") as f:
         pickle.dump({
             "model": meta_model,
@@ -929,7 +931,7 @@ def main() -> int:
     result: dict = {}
     callback_url    = ""
     callback_secret = ""
-    result_path = Path("/workspace/result.json")
+    result_path = Path(_QM_WS) / "result.json"
 
     try:
         if not cfg_path.exists():
@@ -950,7 +952,7 @@ def main() -> int:
 
         run_id          = cfg.get("run_id", "unknown")
         job_name        = cfg.get("job_name", "unnamed")
-        result_path     = Path(cfg.get("output", {}).get("result_path", "/workspace/result.json"))
+        result_path     = Path(cfg.get("output", {}).get("result_path", _qm_os.path.join(_QM_WS, "result.json")))
         callback_url    = cfg.get("callback", {}).get("url", "")
         callback_secret = cfg.get("callback", {}).get("secret", "")
 
@@ -1078,7 +1080,7 @@ def main() -> int:
             is_stacking = multi_result.get("ensemble_method") == "stacking"
 
             # 保存各基模型
-            workspace = Path("/workspace")
+            workspace = Path(_QM_WS)
             saved_models: dict[str, str] = {}
             for mt, res in multi_result["models"].items():
                 suffix_map = {"lightgbm": "_lgb", "xgboost": "_xgb", "catboost": "_cbm", "linear": "_lin"}
@@ -1122,7 +1124,7 @@ def main() -> int:
                     best_iteration = None
 
             # 保存预测
-            pred_path = Path("/workspace/pred.parquet")
+            pred_path = Path(_QM_WS) / "pred.parquet"
             pred_df.to_parquet(pred_path, engine="pyarrow", compression="zstd", index=False)
             logger.info(f"Predictions saved to {pred_path}")
 
@@ -1133,7 +1135,7 @@ def main() -> int:
                 .set_index(["datetime", "instrument"])
                 .sort_index()
             )
-            pred_pkl_path = Path("/workspace/pred.pkl")
+            pred_pkl_path = Path(_QM_WS) / "pred.pkl"
             pred_qlib.to_pickle(pred_pkl_path)
             logger.info(f"Backtest-compatible pred.pkl saved ({len(pred_qlib):,} rows)")
 
@@ -1145,7 +1147,7 @@ def main() -> int:
             shap_info: dict[str, Any] = {"enabled": False, "status": "disabled"}
             if "lightgbm" in multi_result["models"]:
                 lgb_res = multi_result["models"]["lightgbm"]
-                shap_summary_path = Path("/workspace/shap_summary.csv")
+                shap_summary_path = Path(_QM_WS) / "shap_summary.csv"
                 shap_info = _compute_shap_summary(
                     model=lgb_res["model"],
                     split_frames=lgb_res["split_frames"],
@@ -1237,12 +1239,12 @@ def main() -> int:
                 metadata.update(dl_metadata)
 
             metadata_bytes = json.dumps(_sanitize_nan_inf(metadata), ensure_ascii=False, indent=2).encode()
-            Path("/workspace/metadata.json").write_bytes(metadata_bytes)
+            (Path(_QM_WS) / "metadata.json").write_bytes(metadata_bytes)
             logger.info("metadata.json saved locally")
 
             # 复制推理脚本模板
             template_path = Path("/app/backend/services/engine/inference/templates/inference_parquet.py")
-            inference_dest = Path("/workspace/inference.py")
+            inference_dest = Path(_QM_WS) / "inference.py"
             if template_path.is_file():
                 inference_dest.write_text(template_path.read_text(encoding="utf-8"), encoding="utf-8")
                 logger.info("inference.py copied from unified template: %s", template_path)
@@ -1257,18 +1259,18 @@ def main() -> int:
                     "test": {"rmse": test_m["rmse"], "auc": test_m["auc"]},
                 },
                 "artifacts": [
-                    {"name": saved_models.get(primary_type, "model.lgb"), "local": f"/workspace/{saved_models.get(primary_type, 'model.lgb')}"},
-                    {"name": "pred.parquet",  "local": "/workspace/pred.parquet"},
-                    {"name": "metadata.json", "local": "/workspace/metadata.json"},
-                    {"name": "inference.py",  "local": "/workspace/inference.py"},
-                    {"name": "config.yaml",   "local": "/workspace/config.yaml"},
-                    {"name": "result.json",   "local": "/workspace/result.json"},
-                    {"name": "model_comparison.json", "local": "/workspace/model_comparison.json"},
+                    {"name": saved_models.get(primary_type, "model.lgb"), "local": f"{_QM_WS}/{saved_models.get(primary_type, 'model.lgb')}"},
+                    {"name": "pred.parquet",  "local": str(Path(_QM_WS) / "pred.parquet")},
+                    {"name": "metadata.json", "local": str(Path(_QM_WS) / "metadata.json")},
+                    {"name": "inference.py",  "local": str(Path(_QM_WS) / "inference.py")},
+                    {"name": "config.yaml",   "local": f"{_QM_WS}/config.yaml"},
+                    {"name": "result.json",   "local": f"{_QM_WS}/result.json"},
+                    {"name": "model_comparison.json", "local": f"{_QM_WS}/model_comparison.json"},
                 ] + [
-                    {"name": f"pred_{mt}.parquet", "local": f"/workspace/pred_{mt}.parquet"}
+                    {"name": f"pred_{mt}.parquet", "local": f"{_QM_WS}/pred_{mt}.parquet"}
                     for mt in multi_result["model_types"]
                 ] + [
-                    {"name": fn, "local": f"/workspace/{fn}"}
+                    {"name": fn, "local": f"{_QM_WS}/{fn}"}
                     for fn in saved_models.values() if fn != saved_models.get(primary_type)
                 ],
                 "summary": {
@@ -1281,11 +1283,11 @@ def main() -> int:
             }
             if is_stacking:
                 result["artifacts"].extend([
-                    {"name": "meta_model.pkl", "local": "/workspace/meta_model.pkl"},
-                    {"name": "oof_predictions.parquet", "local": "/workspace/oof_predictions.parquet"},
+                    {"name": "meta_model.pkl", "local": f"{_QM_WS}/meta_model.pkl"},
+                    {"name": "oof_predictions.parquet", "local": f"{_QM_WS}/oof_predictions.parquet"},
                 ])
-            if shap_info.get("status") == "completed" and Path("/workspace/shap_summary.csv").exists():
-                result["artifacts"].append({"name": "shap_summary.csv", "local": "/workspace/shap_summary.csv"})
+            if shap_info.get("status") == "completed" and (Path(_QM_WS) / "shap_summary.csv").exists():
+                result["artifacts"].append({"name": "shap_summary.csv", "local": f"{_QM_WS}/shap_summary.csv"})
 
         else:
             # ── 单模型训练路径（向后兼容） ──
@@ -1323,7 +1325,7 @@ def main() -> int:
             logger.info("Training finished in %.2fs, best_iteration=%s, model_type=%s", elapsed, best_iteration, actual_model_type)
 
             # 保存模型（多框架）
-            workspace = Path("/workspace")
+            workspace = Path(_QM_WS)
             model_filename = _save_model(model, actual_model_type, workspace)
             logger.info(f"Model saved to {workspace / model_filename}")
             quantile_model_files: dict[str, str] = {}
@@ -1337,7 +1339,7 @@ def main() -> int:
                 logger.info("Quantile model artifacts saved: %s", quantile_model_files)
 
             # 保存预测结果（parquet 压缩用于存档，比 pickle 小 ~10x）
-            pred_path = Path("/workspace/pred.parquet")
+            pred_path = Path(_QM_WS) / "pred.parquet"
             pred_df.to_parquet(pred_path, engine="pyarrow", compression="zstd", index=False)
             logger.info(f"Predictions saved to {pred_path} ({pred_path.stat().st_size/1024/1024:.1f} MB)")
 
@@ -1350,11 +1352,11 @@ def main() -> int:
                 .set_index(["datetime", "instrument"])
                 .sort_index()
             )
-            pred_pkl_path = Path("/workspace/pred.pkl")
+            pred_pkl_path = Path(_QM_WS) / "pred.pkl"
             pred_qlib.to_pickle(pred_pkl_path)
             logger.info(f"Backtest-compatible pred.pkl saved ({pred_pkl_path.stat().st_size/1024/1024:.1f} MB, {len(pred_qlib):,} rows)")
 
-            shap_summary_path = Path("/workspace/shap_summary.csv")
+            shap_summary_path = Path(_QM_WS) / "shap_summary.csv"
             # SHAP: pred_contrib 仅支持 LightGBM；其他框架暂跳过
             if actual_model_type != "lightgbm":
                 explain_cfg_shap = {**explain_cfg, "enable_shap": False}
@@ -1455,12 +1457,12 @@ def main() -> int:
                 metadata.update(dl_metadata)
 
             metadata_bytes = json.dumps(_sanitize_nan_inf(metadata), ensure_ascii=False, indent=2).encode()
-            Path("/workspace/metadata.json").write_bytes(metadata_bytes)
+            (Path(_QM_WS) / "metadata.json").write_bytes(metadata_bytes)
             logger.info("metadata.json saved locally")
 
             # 复制统一推理脚本模板（而非内联生成旧版脚本）
             template_path = Path("/app/backend/services/engine/inference/templates/inference_parquet.py")
-            inference_dest = Path("/workspace/inference.py")
+            inference_dest = Path(_QM_WS) / "inference.py"
             if template_path.is_file():
                 inference_dest.write_text(template_path.read_text(encoding="utf-8"), encoding="utf-8")
                 logger.info("inference.py copied from unified template: %s", template_path)
@@ -1693,14 +1695,14 @@ if __name__ == "__main__":
                     "test": {"rmse": test_m["rmse"], "auc": test_m["auc"]},
                 },
                 "artifacts": [
-                    {"name": model_filename,  "local": f"/workspace/{model_filename}"},
-                    {"name": "pred.parquet",  "local": "/workspace/pred.parquet"},
-                    {"name": "metadata.json", "local": "/workspace/metadata.json"},
-                    {"name": "inference.py",  "local": "/workspace/inference.py"},
-                    {"name": "config.yaml",   "local": "/workspace/config.yaml"},
-                    {"name": "result.json",   "local": "/workspace/result.json"},
+                    {"name": model_filename,  "local": f"{_QM_WS}/{model_filename}"},
+                    {"name": "pred.parquet",  "local": str(Path(_QM_WS) / "pred.parquet")},
+                    {"name": "metadata.json", "local": str(Path(_QM_WS) / "metadata.json")},
+                    {"name": "inference.py",  "local": str(Path(_QM_WS) / "inference.py")},
+                    {"name": "config.yaml",   "local": f"{_QM_WS}/config.yaml"},
+                    {"name": "result.json",   "local": f"{_QM_WS}/result.json"},
                 ] + [
-                    {"name": filename, "local": f"/workspace/{filename}"}
+                    {"name": filename, "local": f"{_QM_WS}/{filename}"}
                     for filename in quantile_model_files.values()
                     if filename != model_filename
                 ],
@@ -1713,7 +1715,7 @@ if __name__ == "__main__":
                 "logs": f"val_rmse={val_m['rmse']:.6f}, val_auc={val_m['auc']:.6f}",
             }
             if shap_info.get("status") == "completed" and shap_summary_path.exists():
-                result["artifacts"].append({"name": "shap_summary.csv", "local": "/workspace/shap_summary.csv"})
+                result["artifacts"].append({"name": "shap_summary.csv", "local": f"{_QM_WS}/shap_summary.csv"})
 
         # ── 注入 WFA 诊断结果到 result 与 metadata ──
         if wfa_result.get("enabled"):

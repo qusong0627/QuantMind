@@ -6,6 +6,7 @@
 - train.py 只保留编排（数据/流程/回测组装），经 import 复用本模块。
 """
 from __future__ import annotations
+import os as _qm_os
 import logging
 import time
 from dataclasses import dataclass
@@ -118,7 +119,7 @@ class DLAdapter:
     ):
         model_cfg = cfg.get("model", {})
         dl_params = model_cfg.get("dl_params", {})
-        output_dir = Path("/workspace")
+        output_dir = Path(_qm_os.environ.get("TRAINING_WORKSPACE_DIR") or "/workspace")
         model, train_m, val_m, dl_metadata = _train_nativetft(
             model_type, train_df, val_df, features, dl_params, output_dir, hardware=hardware
         )
@@ -163,7 +164,7 @@ class DLAdapter:
     ):
         model_cfg = cfg.get("model", {})
         dl_params = model_cfg.get("dl_params", {})
-        output_dir = Path("/workspace")
+        output_dir = Path(_qm_os.environ.get("TRAINING_WORKSPACE_DIR") or "/workspace")
         model, train_m, val_m, dl_metadata = _train_dl(
             model_type, train_df, val_df, features, dl_params, output_dir, hardware=hardware
         )
