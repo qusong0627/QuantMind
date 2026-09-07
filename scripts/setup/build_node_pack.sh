@@ -55,6 +55,10 @@ echo "[INFO] runtime: $RTPY"
 
 # ── 3. 组装 ───────────────────────────────────────────────────
 STAGE="$(mktemp -d /tmp/qm-node-pack.XXXXXX)"
+# /tmp 为带 usrquota 的 tmpfs：失败/中断残留多 GB 阶段目录会填满配额，
+# 连带把整机会话的 Bash 输出通道挤死(EDQUOT)，必须无论成败都清理
+cleanup_node_build() { rm -rf "$STAGE" /tmp/qm-node-sp-copy; }
+trap cleanup_node_build EXIT INT TERM
 NODE="$STAGE/qm-train-node"
 mkdir -p "$NODE"/{backend,data,workspace,logs}
 DATE="$(date +%Y%m%d)"
@@ -78,23 +82,55 @@ rsync -a --exclude='__pycache__' --exclude='*.pyc' --exclude='pip/cache' "$RUNTI
 # ── GPU torch：训练节点(AutoDL 等)为 NVIDIA GPU 机器，内置 CUDA torch ──
 # CPU 服务器可 TORCH_DEVICE=cpu 跳过（节点包约小 3GB）
 if [ "${TORCH_DEVICE:-gpu}" = "gpu" ]; then
-    NODE_SP="$NODE/runtime/lib/python3.10/site-packages"
+    # 站点包 runtime 可能是 runtime/bin+lib(标准 venv) 或 runtime/python(嵌入式) 两种布局，
+    # 从源解释器路径推导节点侧同名 site-packages，避免硬编码失效
+    REL_PY="${RTPY#"$RUNTIME_SRC"/}"
+    NODE_PY="$NODE/$REL_PY"
+    NODE_SP="$(cd "$(dirname "$NODE_PY")/../lib" 2>/dev/null && ls -d python*/site-packages 2>/dev/null | head -1)"
+    [ -n "$NODE_SP" ] && NODE_SP="$(cd "$(dirname "$NODE_PY")/../lib/$NODE_SP" && pwd)"
+    if [ -z "$NODE_SP" ] || [ ! -d "$NODE_SP" ]; then
+        echo "[ERROR] 未找到节点 runtime site-packages（RTPY=$RTPY），中止"
+        exit 1
+    fi
+    echo "[INFO] 节点 site-packages: $NODE_SP"
     # 1) 优先从本地 GPU 训练镜像复制现成 CUDA torch（秒级、离线；镜像 python 3.10 与节点 runtime 兼容）
     if docker image inspect quantmind-oss-gpu:latest >/dev/null 2>&1; then
         echo "[INFO] 从本地镜像复制 CUDA torch (quantmind-oss-gpu:latest)..."
         CID=$(docker create quantmind-oss-gpu:latest)
-        docker cp "$CID:/usr/local/lib/python3.10/site-packages" /tmp/qm-node-sp-copy >/dev/null 2>&1
+        # docker cp <dir> <不存在目标> 会把目录内容落到目标名本身，没有多余的 site-packages 层
+        docker cp "$CID:/usr/local/lib/python3.10/site-packages" /tmp/qm-node-sp-copy
         docker rm "$CID" >/dev/null 2>&1
-        SP="/tmp/qm-node-sp-copy/site-packages"
+        SP="/tmp/qm-node-sp-copy"
+        COPIED=0
         for d in "$SP"/torch* "$SP"/nvidia* "$SP"/triton*; do
-            [ -e "$d" ] && cp -a "$d" "$NODE_SP/"
+            if [ -e "$d" ]; then cp -a "$d" "$NODE_SP/"; COPIED=$((COPIED + 1)); fi
         done
         rm -rf /tmp/qm-node-sp-copy
+        [ "$COPIED" -ge 3 ] || { echo "[ERROR] 镜像 site-packages 复制异常(copied=$COPIED)，中止"; exit 1; }
     else
-        echo "[INFO] 本地无 GPU 镜像，pip 安装 CUDA torch(约 3GB, 慢)..."
+        echo "[INFO] 本地无 GPU 镜像，pip 先为源 runtime 装 CUDA torch(约 3GB, 慢)，再铺入节点..."
         "$RTPY" -m pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cu128 "torch==2.11.0+cu128" 2>&1 | tail -2
+        # rsync runtime 发生在安装之前，节点拿不到安装产物；与镜像分支同构，
+        # 从源站点包把 torch 家族铺进节点(CPU torch 文件同目录被覆盖)
+        SP="$(cd "$(dirname "$RTPY")/../lib" 2>/dev/null && ls -d python*/site-packages 2>/dev/null | head -1)"
+        [ -n "$SP" ] && SP="$(cd "$(dirname "$RTPY")/../lib/$SP" && pwd)"
+        if [ -z "$SP" ] || [ ! -d "$SP" ]; then
+            echo "[ERROR] 未找到源 runtime site-packages（RTPY=$RTPY），中止"
+            exit 1
+        fi
+        COPIED=0
+        for d in "$SP"/torch* "$SP"/nvidia* "$SP"/triton*; do
+            if [ -e "$d" ]; then cp -a "$d" "$NODE_SP/"; COPIED=$((COPIED + 1)); fi
+        done
+        [ "$COPIED" -ge 3 ] || { echo "[ERROR] pip 后源 site-packages 复制异常(copied=$COPIED)，中止"; exit 1; }
     fi
-    "$RTPY" -c "import torch; print('[OK] node torch', torch.__version__, 'cuda =', torch.cuda.is_available())"
+    # 必须对节点内解释器自检:源 runtime 自带 cpu torch,跑 RTPY 测不出覆盖层是否生效
+    NODE_PY="$NODE/$REL_PY"
+    "$NODE_PY" -c "
+import torch, sys
+assert '+cu' in torch.__version__, f'node torch 非 CUDA 版: {torch.__version__}'
+print('[OK] node torch', torch.__version__, 'cuda =', torch.cuda.is_available())
+"
 fi
 
 # ── 4. train_env.sh(密钥留在服务器侧) ─────────────────────────
@@ -165,7 +201,11 @@ rm -f "${WORK}/result.json" "${WORK}/train.pid" "${WORK}/train.log" \
       "${WORK}"/model.* "${WORK}"/pred.* "${WORK}"/metadata.json \
       "${WORK}"/inference.py "${WORK}"/shap_summary.csv 2>/dev/null || true
 [ -f "${PACK}/train_env.sh" ] && . "${PACK}/train_env.sh" || true
-PYTHONPATH="${WORK}:${PACK}" TRAINING_WORKSPACE_DIR="${WORK}" setsid "$RUNTIME" "${WORK}/train.py" --config "${WORK}/config.yaml" > "${WORK}/train.log" 2>&1 < /dev/null &
+# 推理模板指向编排器每次推送的 work_dir/templates 版(与主节点同版本);
+# 未推送时 train.py 自动降级内置兜底
+PYTHONPATH="${WORK}:${PACK}" TRAINING_WORKSPACE_DIR="${WORK}" \
+    TRAINING_INFERENCE_TEMPLATE="${WORK}/templates/inference_parquet.py" \
+    setsid "$RUNTIME" "${WORK}/train.py" --config "${WORK}/config.yaml" > "${WORK}/train.log" 2>&1 < /dev/null &
 echo $! > "${WORK}/train.pid"
 exit 0
 EOF
