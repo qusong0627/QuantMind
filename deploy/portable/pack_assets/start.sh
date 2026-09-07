@@ -213,6 +213,8 @@ export HUNTLY_BASE_URL="http://127.0.0.1:${HUNTLY_PORT}"
 export HUNTLY_USERNAME="${HUNTLY_USERNAME:-admin}"
 export HUNTLY_PASSWORD="${HUNTLY_PASSWORD:-admin123}"
 export RSSHUB_BASE_URL="${RSSHUB_BASE_URL:-http://127.0.0.1:1200}"
+# celery/资讯 enrich 直读 Huntly sqlite 的真实包内路径（docker 默认 /data/huntly 在本机不存在）
+export HUNTLY_SQLITE_PATH="${HUNTLY_SQLITE_PATH:-$STORAGE_ROOT/huntly/db.sqlite}"
 if [ -x "$ROOT/huntly/jre/bin/java" ] && [ -f "$ROOT/huntly/server.jar" ]; then
     if curl -fsS -m 2 "http://127.0.0.1:${HUNTLY_PORT}/" >/dev/null 2>&1; then
         log "Huntly 已在运行（端口 $HUNTLY_PORT），跳过启动"
