@@ -245,7 +245,13 @@ const AIIDEPage: React.FC = () => {
         const cloudPath = path.startsWith('/execute') ? `/ai-ide${path}` : 
                          path.startsWith('/ai') ? `/ai-ide${path}` : path;
                          
-        const url = new URL(`${preferredBaseUrlRef.current}${cloudPath}`);
+        const url = new URL(
+            `${preferredBaseUrlRef.current}${cloudPath}`,
+            // web 构建的 base 是相对路径(如 /api/v1),单参数 new URL 会直接抛
+            // "Failed to construct 'URL': Invalid URL";以当前 origin 兜底,
+            // Electron 下 base 为绝对地址时该参数被忽略
+            window.location.origin
+        );
         const token = authService.getAccessToken();
         if (token) {
             url.searchParams.set('access_token', token);
