@@ -379,7 +379,7 @@ class QuantDBDataHub:
             f"'{str(base / f'dt={d}' / '*.parquet').replace(chr(92), '/')}'"
             for d in existing
         )
-        sql = f"SELECT {cols}, dt FROM read_parquet([{paths}], hive_partitioning=true)"
+        sql = f"SELECT {cols}, dt FROM read_parquet([{paths}], hive_partitioning=true, union_by_name=true)"
         if where_sql:
             sql += f" WHERE {where_sql}"
         if order_by:

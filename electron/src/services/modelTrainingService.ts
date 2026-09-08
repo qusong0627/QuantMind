@@ -915,10 +915,10 @@ class ModelTrainingService {
     };
   }
 
-  async getStockInferenceHistory(symbol: string, days = 180, modelId?: string): Promise<StockScoreHistoryResponse> {
+  async getStockInferenceHistory(symbol: string, days = 180, modelId?: string, endDate?: string): Promise<StockScoreHistoryResponse> {
     const resp = await this.client.get<StockScoreHistoryResponse>(
       `/models/inference/stock/${encodeURIComponent(symbol)}/history`,
-      { params: { days, ...(modelId ? { model_id: modelId } : {}) } },
+      { params: { days, ...(modelId ? { model_id: modelId } : {}), ...(endDate ? { end_date: endDate } : {}) } },
     );
     return resp.data;
   }

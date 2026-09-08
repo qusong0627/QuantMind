@@ -242,6 +242,7 @@ export const GridSearchPanel: React.FC = () => {
   const logMessagesRef = useRef<string[]>([]);
   const updateBacktestConfig = useBacktestCenterStore((state) => state.updateBacktestConfig);
   const setActiveModule = useBacktestCenterStore((state) => state.setActiveModule);
+  const setQuickBacktestPrefill = useBacktestCenterStore((state) => state.setQuickBacktestPrefill);
 
   const getCurrentUserId = () => {
     const storedUser = authService.getStoredUser() as any;
@@ -562,12 +563,10 @@ export const GridSearchPanel: React.FC = () => {
       start_date: config.dateRange.startDate,
       end_date: config.dateRange.endDate,
       initial_capital: config.initialCapital,
+    });
+    setQuickBacktestPrefill({
       qlib_strategy_type: 'TopkDropout',
       qlib_strategy_params: {
-        topk: params.topk,
-        n_drop: params.n_drop,
-      },
-      strategy_params: {
         topk: params.topk,
         n_drop: params.n_drop,
       },

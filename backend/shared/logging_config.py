@@ -14,6 +14,16 @@ def setup_logging(service_name: str = "quantmind"):
     Args:
         service_name: 服务名称，用于日志文件命名
     """
+    # 强制统一东八区，避免宿主机 UTC 导致日志少 8 小时
+    try:
+        import os as _os
+        import time as _time
+        _os.environ["TZ"] = "Asia/Shanghai"
+        if hasattr(_time, "tzset"):
+            _time.tzset()
+    except Exception:
+        pass
+
     # 创建根日志器
     root_logger = logging.getLogger()
     root_logger.setLevel(getattr(logging, settings.logging.log_level.upper()))

@@ -1,3 +1,4 @@
+/** 多模型共识矩阵（A股推理页已改用 ModelScoreCurveGrid，本组件现仅港股推理页使用）。 */
 import React from 'react';
 import { ModelConsensusItem } from '../../../services/inferenceCenterService';
 import { Layers, ShieldCheck, CheckCircle2, TrendingUp, Inbox } from 'lucide-react';

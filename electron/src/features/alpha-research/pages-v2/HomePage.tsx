@@ -49,8 +49,8 @@ export const HomePage: React.FC<HomePageProps> = ({ onNavigate }) => {
   const dateRangeText = dataSummary?.dateRange?.start && dataSummary?.dateRange?.end
     ? `${dataSummary.dateRange.start} ~ ${dataSummary.dateRange.end}`
     : '2016-01-01 ~ 2021-12-31';
-  const l1Columns = dataSummary?.datasets?.l1_factors?.columns ?? 158;
-  const l1Categories = dataSummary?.datasets?.l1_factors?.categoryCount ?? 6;
+  const l1Columns = dataSummary?.datasets?.l1_factors?.columns ?? 101;
+  const l1Categories = dataSummary?.datasets?.l1_factors?.categoryCount ?? 15;
 
   return (
     <Layout
@@ -267,10 +267,10 @@ export const HomePage: React.FC<HomePageProps> = ({ onNavigate }) => {
                   <Layers className="w-3 h-3 text-blue-500" /> 股票池覆盖
                 </span>
                 <span className="text-xs font-bold text-slate-800 block">
-                  {universeCount > 0 ? `${universeCount} 个多市场可选池` : '沪深 300 / 中证 500 / 1000'}
+                  {universeCount > 0 ? `5 大市场 · ${universeCount} 个 A 股可选池` : '沪深 300 / 中证 500 / 1000'}
                 </span>
               </div>
-              <span className="text-[10px] text-slate-500 mt-2">支持 A 股、港股、美股、加密</span>
+              <span className="text-[10px] text-slate-500 mt-2">A 股、港股、美股、加密、期货</span>
             </div>
 
             {/* 基础因子集 */}
@@ -283,7 +283,7 @@ export const HomePage: React.FC<HomePageProps> = ({ onNavigate }) => {
                   QuantDB L1 ({l1Columns} 维 / {l1Categories} 大类)
                 </span>
               </div>
-              <span className="text-[10px] text-slate-500 mt-2">Alpha158 + 动量/量价基础库</span>
+              <span className="text-[10px] text-slate-500 mt-2">动量/波动/流动性等 15 类多因子库</span>
             </div>
 
             {/* 数据时间范围 */}

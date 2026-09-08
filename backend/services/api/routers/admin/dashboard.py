@@ -244,8 +244,10 @@ async def _fetch_celery_health(service_name: str, redis_db: int = 3) -> dict[str
     """通过 Redis 中 celery 的 pidbox 键判断 worker/beat 是否活跃。
 
     celery 容器与 quantmind 共享网络、无独立监听端口，故以 Redis 注册信息为准。
+    使用 SCAN 渐进扫描（禁止 KEYS 全库阻塞）并放线程池执行，避免大小 key
+    空间下阻塞单 worker 事件循环、饿死 /health。
     """
-    try:
+    def _probe() -> bool:
         import redis as _redis
 
         client = _redis.from_url(
@@ -253,10 +255,18 @@ async def _fetch_celery_health(service_name: str, redis_db: int = 3) -> dict[str
             socket_timeout=2,
             db=redis_db,
         )
-        # pidbox 存在说明 celery worker 已注册并活跃
-        keys = client.keys("*pidbox*")
-        client.close()
-        alive = any(b"pidbox" in k if isinstance(k, bytes) else "pidbox" in str(k) for k in keys)
+        try:
+            # pidbox 存在说明 celery worker 已注册并活跃，找到一个即可提前退出
+            for batch in client.scan_iter(match="*pidbox*", count=100):
+                key = batch.decode() if isinstance(batch, bytes) else str(batch)
+                if "pidbox" in key:
+                    return True
+            return False
+        finally:
+            client.close()
+
+    try:
+        alive = await asyncio.to_thread(_probe)
         return {
             "service": service_name,
             "status": "healthy" if alive else "degraded",
@@ -276,7 +286,40 @@ async def _fetch_celery_health(service_name: str, redis_db: int = 3) -> dict[str
         }
 
 
+# 全量健康探测结果缓存：侧边栏 15s 高频轮询命中缓存，避免持续全量探测。
+_HEALTH_CACHE: dict[str, Any] = {}
+_HEALTH_CACHE_LOCK = asyncio.Lock()
+
+
 async def _collect_system_health() -> tuple[int, list[dict[str, Any]]]:
+    """聚合核心服务健康状态为一个 0-100 分值。
+
+    侧边栏 widget 每 15s 高频轮询，全量探测（4 HTTP + 6 TCP + 2 Redis）
+    每次约 2-3s；此处按 TTL 缓存结果，高频命中时直接返回，避免对下游
+    服务造成持续探测压力。TTL 经 ADMIN_DASHBOARD_HEALTH_CACHE_TTL 配置。
+    """
+    try:
+        cache_ttl = max(5.0, float(os.getenv("ADMIN_DASHBOARD_HEALTH_CACHE_TTL", "45")))
+    except ValueError:
+        cache_ttl = 45.0
+    now = asyncio.get_running_loop().time()
+    cached = _HEALTH_CACHE.get("payload")
+    if cached is not None and (now - _HEALTH_CACHE.get("ts", 0.0)) < cache_ttl:
+        return cached
+
+    async with _HEALTH_CACHE_LOCK:
+        # 双重检查：等待锁期间可能已有协程刷新
+        now = asyncio.get_running_loop().time()
+        cached = _HEALTH_CACHE.get("payload")
+        if cached is not None and (now - _HEALTH_CACHE.get("ts", 0.0)) < cache_ttl:
+            return cached
+        payload = await _collect_system_health_uncached()
+        _HEALTH_CACHE["payload"] = payload
+        _HEALTH_CACHE["ts"] = asyncio.get_running_loop().time()
+        return payload
+
+
+async def _collect_system_health_uncached() -> tuple[int, list[dict[str, Any]]]:
     """聚合核心服务健康状态为一个 0-100 分值。"""
     timeout_raw = os.getenv("ADMIN_DASHBOARD_HEALTH_TIMEOUT_SECONDS", "2.5").strip()
     try:
@@ -307,6 +350,29 @@ async def _collect_system_health() -> tuple[int, list[dict[str, Any]]]:
 
 
 def _get_uptime_days(request: Request) -> int | None:
+    """系统运行天数，优先取宿主机 uptime，容器重启不会归零。
+
+    宿主机自 2026-09-01 05:21 已运行 7 天，但 API 容器每次部署都会重置
+    started_at（上次仅 1 小时），导致前端显示 0 天。优先用 psutil.boot_time
+    或 /proc/uptime，失败再回退到 started_at。
+    """
+    # 1) 宿主机 uptime（最能反映“系统运行时间”）
+    try:
+        import psutil
+        from zoneinfo import ZoneInfo
+        boot_ts = psutil.boot_time()
+        boot = datetime.fromtimestamp(boot_ts, tz=timezone.utc).astimezone(ZoneInfo("Asia/Shanghai"))
+        now = datetime.now(ZoneInfo("Asia/Shanghai"))
+        return max(int((now - boot).total_seconds() // 86400), 0)
+    except Exception:
+        pass
+    try:
+        with open("/proc/uptime", "r", encoding="utf-8") as f:
+            up_seconds = float(f.read().split()[0])
+            return max(int(up_seconds // 86400), 0)
+    except Exception:
+        pass
+
     started_at = getattr(request.app.state, "started_at", None)
     if not isinstance(started_at, datetime):
         return None
@@ -412,6 +478,15 @@ async def get_dashboard_metrics(
                     # 前端期望 time 为可读字符串，type 映射 level
                     lvl = str(r.get("level") or "info")
                     type_map = {"info": "success", "warning": "warning", "error": "warning", "critical": "warning"}
+                    # 统一东八区显示（DB 存 TIMESTAMPTZ UTC，宿主机 UTC，直接 strftime 会少 8 小时）
+                    try:
+                        from zoneinfo import ZoneInfo
+                        if ts is not None and hasattr(ts, "astimezone"):
+                            if ts.tzinfo is None:
+                                ts = ts.replace(tzinfo=timezone.utc)
+                            ts = ts.astimezone(ZoneInfo("Asia/Shanghai"))
+                    except Exception:
+                        pass
                     recent_events.append(
                         {
                             "title": r.get("title") or "",

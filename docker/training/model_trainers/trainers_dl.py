@@ -573,9 +573,9 @@ def _train_nativetft(
         for batch in train_loader:
             data = batch[0] if isinstance(batch, (list, tuple)) else batch
             feature = data[:, :, 0:-1].float().to(device)
-            label = batch[1].float().to(device) if isinstance(batch, (list, tuple)) and len(batch) > 1 else None
-            if label is None:
-                label = data[:, -1, -1].float().to(device)
+            # _TSLazyDataset 返回 (row, weight)，weight 恒为 1.0，必须从
+            # row 的最后一列末行取真标签，否则模型学预测常数 1.0 (loss 极低、IC=NaN)
+            label = data[:, -1, -1].float().to(device)
 
             optimizer.zero_grad()
             pred = model(feature)
@@ -593,17 +593,23 @@ def _train_nativetft(
             for batch in val_loader:
                 data = batch[0] if isinstance(batch, (list, tuple)) else batch
                 feature = data[:, :, 0:-1].float().to(device)
-                label = batch[1].float().to(device) if isinstance(batch, (list, tuple)) and len(batch) > 1 else None
-                if label is None:
-                    label = data[:, -1, -1].float().to(device)
+                # 同训练循环：真标签在 data[:, -1, -1]，batch[1] 只是 weight=1.0
+                label = data[:, -1, -1].float().to(device)
                 pred = model(feature)
                 val_preds.append(pred.cpu().numpy())
                 val_labels.append(label.cpu().numpy())
 
         val_pred_arr = np.concatenate(val_preds)
         val_label_arr = np.concatenate(val_labels)
-        # IC (Pearson correlation) as validation metric
-        val_score = float(np.corrcoef(val_pred_arr, val_label_arr)[0, 1]) if len(val_pred_arr) > 1 else 0.0
+        # IC (Pearson correlation) as validation metric; 常数预测/常数标签时
+        # corrcoef 为 NaN，置 0 避免 best_state 全 NaN 导致权重丢失
+        if len(val_pred_arr) > 1:
+            with np.errstate(invalid="ignore"):
+                val_score = float(np.corrcoef(val_pred_arr, val_label_arr)[0, 1])
+            if not np.isfinite(val_score):
+                val_score = 0.0
+        else:
+            val_score = 0.0
 
         evals["train"].append(float("nan"))
         evals["valid"].append(val_score)

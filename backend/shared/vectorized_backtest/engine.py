@@ -35,21 +35,81 @@ class VectorizedBacktestEngine:
         self.logger = logger
 
     @staticmethod
-    def _get_limit_threshold_vec(stock_ids: pd.Index) -> pd.Series:
-        """Return per-stock limit thresholds based on stock code."""
-        thresholds = pd.Series(0.095, index=stock_ids)
-        for sid in stock_ids:
-            code = sid.split(".")[0] if "." in str(sid) else str(sid)
-            pure = code.upper()
-            for pfx in ("SH", "SZ", "BJ"):
-                if pure.startswith(pfx):
-                    pure = pure[len(pfx):]
-                    break
-            if pure.startswith("68") or pure.startswith("30"):
-                thresholds[sid] = 0.195  # ChiNext / STAR ±20%
-            elif pure.startswith("8") or pure.startswith("4"):
-                thresholds[sid] = 0.295  # Beijing ±30%
-        return thresholds
+    def _get_limit_threshold_vec(
+        stock_ids: pd.Index,
+        trade_date=None,
+        st_set: set | frozenset | None = None,
+    ) -> pd.Series:
+        """Return per-stock limit thresholds based on stock code.
+
+        严谨口径：委托 ``local_market_data.limit_pct``，支持 ST 主板 5%→10%
+        切换、创业板/科创板 20%、北交所 30% 及 302/689/92 前缀。
+        为保持向量化速度，阈值按“当日”统一计算；跨日历差异由调用方按日重算。
+        """
+        try:
+            from datetime import date as _date
+
+            from backend.services.simulation.services.local_market_data import limit_pct
+            from backend.shared.stock_utils import StockCodeUtil
+
+            d = trade_date
+            if d is None:
+                d = _date.today()
+            elif hasattr(d, "date") and not isinstance(d, _date):
+                try:
+                    d = d.date()
+                except Exception:
+                    d = _date.today()
+            # ST 集合：suffix 形态
+            if st_set is None:
+                try:
+                    from backend.services.simulation.services.local_market_data import (
+                        get_local_market_data,
+                    )
+
+                    st_set = get_local_market_data()._st_symbol_set()
+                except Exception:
+                    st_set = set()
+            thresholds = pd.Series(0.10, index=stock_ids, dtype=float)
+            for sid in stock_ids:
+                # 统一转为 suffix 以查 ST
+                try:
+                    sym_sfx = StockCodeUtil.to_suffix(str(sid))
+                except Exception:
+                    sym_sfx = str(sid)
+                is_st = sym_sfx in st_set if st_set else False
+                try:
+                    thresholds[sid] = float(limit_pct(str(sid), is_st=is_st, trade_date=d))
+                except Exception:
+                    # 回退前缀判定
+                    code = str(sid).split(".")[0]
+                    pure = code.upper()
+                    for pfx in ("SH", "SZ", "BJ"):
+                        if pure.startswith(pfx):
+                            pure = pure[len(pfx):]
+                            break
+                    if pure.startswith(("688", "689")) or pure.startswith(("300", "301", "302")):
+                        thresholds[sid] = 0.20
+                    elif pure.startswith(("43", "83", "87", "88", "92")):
+                        thresholds[sid] = 0.30
+                    else:
+                        thresholds[sid] = 0.10
+            return thresholds
+        except Exception:
+            # 极端回退
+            thresholds = pd.Series(0.10, index=stock_ids, dtype=float)
+            for sid in stock_ids:
+                code = str(sid).split(".")[0] if "." in str(sid) else str(sid)
+                pure = code.upper()
+                for pfx in ("SH", "SZ", "BJ"):
+                    if pure.startswith(pfx):
+                        pure = pure[len(pfx):]
+                        break
+                if pure.startswith("68") or pure.startswith("30"):
+                    thresholds[sid] = 0.20
+                elif pure.startswith("8") or pure.startswith("4"):
+                    thresholds[sid] = 0.30
+            return thresholds
 
     def run_backtest(
         self,
@@ -83,18 +143,38 @@ class VectorizedBacktestEngine:
             else:
                 change_wide = pd.DataFrame(np.nan, index=sig_wide.index, columns=sig_wide.columns)
 
-            thresholds = self._get_limit_threshold_vec(sig_wide.columns)
+            # 严谨：按日按 ST 动态阈值（容差 0.5pp 对齐分位舍入），并补充跌停无法卖出
+            try:
+                from backend.services.simulation.services.local_market_data import (
+                    get_local_market_data,
+                )
 
-            # Limit-up mask: True = stock is at limit-up (can't buy)
-            limit_up = change_wide.ge(thresholds, axis=1).fillna(False)
+                st_set = get_local_market_data()._st_symbol_set()
+            except Exception:
+                st_set = set()
+            # 逐日计算阈值矩阵（小规模按日循环，约 2500*500 场景可向量化）
+            thresh_mat = pd.DataFrame(
+                np.nan, index=sig_wide.index, columns=sig_wide.columns, dtype=float
+            )
+            for dt in sig_wide.index:
+                thresh_mat.loc[dt] = self._get_limit_threshold_vec(
+                    sig_wide.columns, trade_date=dt, st_set=st_set
+                )
+            # 分位舍入容差：沪深 0.5%、北交所 1%（market_breadth.TOL）；change 与阈值差在容差内即视为封板
+            # 为兼容历史 change 口径，这里按 change >= thresh - 0.005 判涨停，change <= -thresh + 0.005 判跌停
+            limit_up = (change_wide + 0.005).ge(thresh_mat).fillna(False)
+            limit_down = (change_wide - 0.005).le(-thresh_mat).fillna(False)
             # Suspended mask: True = stock has no close price (suspended)
             suspended = price_wide.isna()
 
-            # Tradable mask: False = should NOT be bought
-            tradable = ~limit_up & ~suspended
+            # Tradable mask：涨停不可买、跌停不可卖（向量化等权 TopK 仅做买入侧过滤，跌停作后续权重钳制）
+            # 买入不可：涨停或停牌
+            buy_tradable = ~limit_up & ~suspended
+            # 保留原 tradable 语义供 TopK 排名使用（仅过滤涨停买入）
+            tradable = buy_tradable
 
             # Apply tradability: zero out scores for untradable stocks
-            sig_wide = sig_wide.where(tradable, other=-np.inf)
+            sig_wide = sig_wide.where(buy_tradable, other=-np.inf)
 
             # 3. Daily returns
             # pct_change()[t] = P[t]/P[t-1] - 1 (T-1到T的日收益)

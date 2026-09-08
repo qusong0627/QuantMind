@@ -51,6 +51,14 @@ export interface BacktestProgress {
   message?: string;
 }
 
+// 参数优化"一键回填"的一次性载荷：快速回测消费后立即清空，
+// 防止策略类型/参数残留在共享配置中覆盖用户后续的策略选择
+export interface QuickBacktestPrefill {
+  nonce: number;
+  qlib_strategy_type?: string;
+  qlib_strategy_params?: Record<string, any>;
+}
+
 interface BacktestCenterState {
   // 当前激活的模块
   activeModule: ModuleId;
@@ -61,6 +69,13 @@ interface BacktestCenterState {
   updateBacktestConfig: (config: Partial<BacktestConfig>) => void;
   resetBacktestConfig: () => void;
   resetForMarket: (market: AppMarket) => void;
+
+  // 参数优化"一键回填"的一次性载荷
+  quickBacktestPrefill: QuickBacktestPrefill | null;
+  setQuickBacktestPrefill: (
+    prefill: Omit<QuickBacktestPrefill, 'nonce'>
+  ) => void;
+  clearQuickBacktestPrefill: () => void;
 
   // 运行中的回测
   runningBacktests: Map<string, BacktestProgress>;
@@ -144,6 +159,12 @@ export const useBacktestCenterStore = create<BacktestCenterState>()(
 
         resetBacktestConfig: () =>
           set({ backtestConfig: defaultBacktestConfig }),
+
+        // 一次性回填载荷管理
+        quickBacktestPrefill: null,
+        setQuickBacktestPrefill: (prefill) =>
+          set({ quickBacktestPrefill: { ...prefill, nonce: Date.now() } }),
+        clearQuickBacktestPrefill: () => set({ quickBacktestPrefill: null }),
 
         // 市场切换时重置配置
         resetForMarket: (market: AppMarket) =>

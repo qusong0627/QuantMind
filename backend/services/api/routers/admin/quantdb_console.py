@@ -18,6 +18,7 @@ GET  /api/v1/admin/data-platform/quantdb/calendar        远端交易日历
 
 from __future__ import annotations
 
+import asyncio
 import itertools
 import logging
 import os
@@ -122,43 +123,54 @@ def _dataset_stats(spec: DatasetSpec, root: Path) -> dict[str, Any]:
     return stats
 
 
+def _build_catalog_payload(root: Path) -> dict[str, Any]:
+    """同步组装目录载荷（含全量磁盘扫盘）。
+
+    调用方必须经 asyncio.to_thread 执行，禁止在事件循环线程直接调用，
+    否则单 worker 下 /health 会被长时间饿死并触发 watchdog 重启。
+    """
+    items = []
+    for spec in DATASETS:
+        items.append({
+            "dataset": spec.dataset,
+            "name": spec.name,
+            "group": spec.group,
+            "category_id": spec.category_id,
+            "layout": spec.layout,
+            "rel_dir": spec.rel_dir,
+            "note": spec.note,
+            **_dataset_stats(spec, root),
+        })
+
+    groups = []
+    for g in GROUPS:
+        members = [it for it in items if it["group"] == g["id"]]
+        groups.append({
+            **g,
+            "dataset_count": len(members),
+            "synced_count": sum(1 for it in members if it["synced"]),
+            "files": sum(it["files"] for it in members),
+            "size_mb": round(sum(it["size_mb"] for it in members), 1),
+        })
+
+    return {
+        "data_dir": str(root),
+        "groups": groups,
+        "datasets": items,
+        "timestamp": _now_iso(),
+    }
+
+
 @router.get("/catalog")
 async def get_catalog(current_user: dict = Depends(require_admin)):
     """返回数据集目录（按大类分组）+ 本地落盘统计。"""
     try:
         root = _data_dir()
-        items = []
-        for spec in DATASETS:
-            items.append({
-                "dataset": spec.dataset,
-                "name": spec.name,
-                "group": spec.group,
-                "category_id": spec.category_id,
-                "layout": spec.layout,
-                "rel_dir": spec.rel_dir,
-                "note": spec.note,
-                **_dataset_stats(spec, root),
-            })
-
-        groups = []
-        for g in GROUPS:
-            members = [it for it in items if it["group"] == g["id"]]
-            groups.append({
-                **g,
-                "dataset_count": len(members),
-                "synced_count": sum(1 for it in members if it["synced"]),
-                "files": sum(it["files"] for it in members),
-                "size_mb": round(sum(it["size_mb"] for it in members), 1),
-            })
+        payload = await asyncio.to_thread(_build_catalog_payload, root)
 
         return {
             "success": True,
-            "data": {
-                "data_dir": str(root),
-                "groups": groups,
-                "datasets": items,
-                "timestamp": _now_iso(),
-            },
+            "data": payload,
         }
     except Exception as exc:  # noqa: BLE001
         logger.error("quantdb catalog failed: %s", exc, exc_info=True)

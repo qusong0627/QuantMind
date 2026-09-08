@@ -1,6 +1,6 @@
 /** 个股终端 — 搜索驱动展示：顶部搜索 + 左右布局（左 K线大图·推理分数底部副图 + 右详情） */
 import { useCallback, useEffect, useState } from 'react';
-import { CandlestickChart, Search, Layers, Building2, Database, TrendingUp, TrendingDown } from 'lucide-react';
+import { CandlestickChart, Search, Layers, Building2, Database, TrendingUp, TrendingDown, Info } from 'lucide-react';
 import { message, Select } from 'antd';
 import { PAGE_LAYOUT } from '../../../config/pageLayout';
 import { StockListItem, StockProfile, KlineBar } from '../types';
@@ -247,6 +247,17 @@ export default function StockTerminalPage() {
             </div>
           )}
         </header>
+        {selected && (
+          <div className="mx-0 px-4 py-2 bg-gradient-to-r from-blue-50/60 via-violet-50/40 to-transparent border-b border-slate-100 flex items-center gap-2.5">
+            <div className="w-6 h-6 rounded-lg bg-blue-500/10 flex items-center justify-center shrink-0">
+              <Info className="w-3.5 h-3.5 text-blue-500" />
+            </div>
+            <p className="text-xs leading-none text-slate-600 flex-1">
+              <span className="font-bold text-slate-700">模型推理分说明：</span>
+              基于历史行情与模型权重离线推导，用于刻画个股在全市场截面中的<span className="font-semibold text-slate-700">相对收益与风险分位</span>；与 K 线价格绝对走势相反，受全市场分布与波动共同影响，<span className="font-semibold text-slate-700">不以绝对值论高低</span>，宜作横向对比与趋势参考。
+            </p>
+          </div>
+        )}
 
         {/* 主体 */}
         {!selected ? (

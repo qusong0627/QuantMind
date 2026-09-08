@@ -63,13 +63,22 @@ export const MarketAnalysisPage: React.FC = () => {
     fetchMarketData();
   }, []);
 
+  // 统一 QS 构造：避免无 date 时出现 &realtime=1 导致 404（/overview&realtime=1）
+  const buildQS = (date?: string, rt?: boolean) => {
+    const p = new URLSearchParams();
+    if (date) p.set('date', date);
+    if (rt) p.set('realtime', '1');
+    const s = p.toString();
+    return s ? `?${s}` : '';
+  };
+
   // 矩形树图数据：随分类模式切换拉取对应热力图
   useEffect(() => {
     if (activeTab !== 'flow-bar' || chartViewMode !== 'treemap') return;
     const token = localStorage.getItem('access_token') || '';
-    const dq = snapDate ? `&date=${snapDate}` : '';
-    const rq = realtime ? '&realtime=1' : '';
-    fetch(`${MARKET_ANALYSIS_API}/heatmap?category=${categoryMode}${dq}${rq}`, { headers: { Authorization: `Bearer ${token}` } })
+    const qs = buildQS(snapDate, realtime);
+    const suffix = qs ? qs.replace('?', '&') : '';
+    fetch(`${MARKET_ANALYSIS_API}/heatmap?category=${categoryMode}${suffix}`, { headers: { Authorization: `Bearer ${token}` } })
       .then((res) => (res.ok ? res.json() : null))
       .then((d) => setTreemapData(d?.items && d.items.length > 0 ? d.items : []))
       .catch(() => setTreemapData([]));
@@ -101,17 +110,17 @@ export const MarketAnalysisPage: React.FC = () => {
     setLoading(true);
     const token = localStorage.getItem('access_token') || '';
     const headers = token ? { Authorization: `Bearer ${token}` } : {};
-    const dq = snapDate ? `&date=${snapDate}` : '';
     const useRealtime = forceRealtime !== undefined ? forceRealtime : realtime;
-    const rq = useRealtime ? '&realtime=1' : '';
+    const qs = buildQS(snapDate, useRealtime);
+    const qsWithAmp = qs ? qs.replace('?', '&') : '';
 
     try {
       const [resIdx, resStock, resBreadth, resHeatmap, resSankey] = await Promise.all([
-        fetch(`${MARKET_ANALYSIS_API}/indices/overview${snapDate ? `?date=${snapDate}` : ''}${rq}`, { headers }),
-        fetch(`${MARKET_ANALYSIS_API}/money-flow/stocks?limit=20${dq}${rq}`, { headers }),
-        fetch(`${MARKET_ANALYSIS_API}/breadth${snapDate ? `?date=${snapDate}` : ''}${rq}`, { headers }),
-        fetch(`${MARKET_ANALYSIS_API}/heatmap?category=shenwan${dq}${rq}`, { headers }),
-        fetch(`${MARKET_ANALYSIS_API}/money-flow/sankey${snapDate ? `?date=${snapDate}` : ''}${rq}`, { headers }),
+        fetch(`${MARKET_ANALYSIS_API}/indices/overview${qs}`, { headers }),
+        fetch(`${MARKET_ANALYSIS_API}/money-flow/stocks?limit=20${qsWithAmp}`, { headers }),
+        fetch(`${MARKET_ANALYSIS_API}/breadth${qs}`, { headers }),
+        fetch(`${MARKET_ANALYSIS_API}/heatmap?category=shenwan${qsWithAmp}`, { headers }),
+        fetch(`${MARKET_ANALYSIS_API}/money-flow/sankey${qs}`, { headers }),
       ]);
 
       if (resIdx.ok) {

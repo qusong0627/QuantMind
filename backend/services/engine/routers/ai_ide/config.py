@@ -12,7 +12,7 @@ router = APIRouter()
 
 
 class LLMConfig(BaseModel):
-    qwen_api_key: str = ""
+    qwen_api_key: str | None = None
     model: str | None = None
     base_url: str | None = None
     provider: str | None = None
@@ -35,12 +35,19 @@ def _get_api_gateway_url():
     return "http://127.0.0.1:8000"
 
 
-def _build_profile_payload(config: LLMConfig) -> dict:
-    """组装 Profile 更新 payload；Key 为空时不覆盖已有 Key。"""
+def _build_profile_payload(config: LLMConfig, raw_body: dict | None = None) -> dict:
+    """组装 Profile 更新 payload；显式空字符串表示清除已有 Key。"""
     payload: dict = {}
-    new_key = config.qwen_api_key.strip()
-    if new_key:
-        payload["api_key"] = new_key
+    # 优先通过 Pydantic 的显式字段集判断（比 raw_body 更可靠，避免重复读 body）
+    if "qwen_api_key" in getattr(config, "model_fields_set", set()):
+        # 前端发 {"qwen_api_key": ""} => 清除；发 {"qwen_api_key": "sk-..."} => 设置
+        payload["api_key"] = str(config.qwen_api_key or "").strip()
+    elif raw_body is not None and "qwen_api_key" in raw_body:
+        raw_val = raw_body.get("qwen_api_key")
+        if raw_val is not None:
+            payload["api_key"] = str(raw_val).strip()
+    elif config.qwen_api_key is not None and isinstance(config.qwen_api_key, str) and config.qwen_api_key.strip():
+        payload["api_key"] = config.qwen_api_key.strip()
     if config.model is not None and config.model.strip():
         payload["llm_model"] = config.model.strip()
     if config.base_url is not None and config.base_url.strip():
@@ -92,13 +99,35 @@ async def get_llm_config(request: Request):
 
 @router.post("/llm")
 async def save_llm_config(request: Request, config: LLMConfig):
-    """保存 LLM 配置（API Key / 模型 / 接口地址），同步到用户 Profile"""
+    """保存 LLM 配置（API Key / 模型 / 接口地址），同步到用户 Profile
+
+    前端清除按钮会发送 {"qwen_api_key": ""}，此前被判定为空 payload 而 400；
+    此处通过原始 body 区分“未传”与“显式清空”，允许空字符串触发清除。
+    """
     user = _get_user_info(request)
     user_id = user["user_id"]
     tenant_id = user.get("tenant_id", "default")
 
-    payload = _build_profile_payload(config)
+    try:
+        raw_body = await request.json()
+        if not isinstance(raw_body, dict):
+            raw_body = {}
+    except Exception:
+        raw_body = {}
+
+    payload = _build_profile_payload(config, raw_body)
+    # 显式清空 api_key 视为有效 payload，避免 400
     if not payload:
+        if "qwen_api_key" in raw_body:
+            # 前端明确要清空 Key，即使其他字段为空也放行
+            payload = {"api_key": str(raw_body.get("qwen_api_key") or "").strip()}
+        else:
+            raise HTTPException(status_code=400, detail="请至少填写 API Key、模型或接口地址")
+    # 空字符串的 api_key 需要保留以触发清除，正常非空校验已在 _build 中处理
+    if payload.get("api_key") == "":
+        # 允许仅清空 Key 的请求，不要求其他字段
+        pass
+    elif not payload:
         raise HTTPException(status_code=400, detail="请至少填写 API Key、模型或接口地址")
 
     api_gateway = _get_api_gateway_url()

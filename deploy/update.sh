@@ -50,6 +50,20 @@ require_root() {
     fi
     log "提示: 未使用 sudo 且 docker 权限不足，尝试继续（失败请改用 sudo 或将用户加入 docker 组）"
 }
+record_system_event() {
+    # 写入 system_events，供管理后台“最近事件”展示；失败不阻断主流程
+    local _level="$1" _title="$2" _msg="${3:-}"
+    local _pg_user
+    _pg_user="$(grep -E '^DB_USER=' "$PROJECT_DIR/.env" 2>/dev/null | head -1 | cut -d= -f2- | tr -d \"\' || echo quantmind)"
+    _pg_user="${_pg_user:-quantmind}"
+    # 转义单引号
+    local _t_esc _m_esc
+    _t_esc="$(printf '%s' "$_title" | sed "s/'/''/g")"
+    _m_esc="$(printf '%s' "$_msg" | sed "s/'/''/g" | head -c 4000)"
+    docker exec -e PGUSER="$_pg_user" quantmind-db psql -U "$_pg_user" -v ON_ERROR_STOP=0 \
+        -c "INSERT INTO system_events (event_type, level, source, title, message) VALUES ('system_update', '$_level', 'updater', '$_t_esc', '$_m_esc')" >/dev/null 2>&1 || true
+}
+
 require_project() {
     [[ -d "$PROJECT_DIR/.git" ]] || die "不是 Git 部署目录: $PROJECT_DIR"
     [[ -f "$PROJECT_DIR/docker-compose.yml" ]] || die "缺少 docker-compose.yml: $PROJECT_DIR"
@@ -70,7 +84,7 @@ backup_database() {
     local backup_dir="$PROJECT_DIR/data/backups"
     mkdir -p "$backup_dir"
     local stamp backup_file pg_user pg_db pg_pass
-    stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+    stamp="$(TZ=Asia/Shanghai date +%Y%m%dT%H%M%S+08:00)"
     backup_file="$backup_dir/quantmind_pre_update_${stamp}.sql.gz"
     # 从 .env 读库凭据（脚本自身环境变量里 DB_PASSWORD 几乎必为空，须显式加载 .env）
     pg_user="$(grep -E '^DB_USER=' "$PROJECT_DIR/.env" 2>/dev/null | head -1 | cut -d= -f2- | tr -d \"\' || echo quantmind)"
@@ -133,7 +147,7 @@ sync_code() {
   "version": "$head_describe",
   "commit": "$head_sha",
   "branch": "$REF",
-  "generated_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  "generated_at": "$(TZ=Asia/Shanghai date +%Y-%m-%dT%H:%M:%S+08:00)"
 }
 EOF
     else
@@ -345,6 +359,7 @@ EOSQL
 main() {
     require_root
     require_project
+    record_system_event "info" "系统更新开始" "分支 $REF 远端 $REMOTE"
     backup_database
     sync_code
     build_core
@@ -361,7 +376,12 @@ main() {
         # 容器带 healthcheck 时校验为 healthy；无 healthcheck 的基础设施（db/redis）不校验
         local hk
         api_ok=false; celery_ok=false; beat_ok=false
-        curl --fail --silent --max-time 3 http://127.0.0.1:8000/health >/dev/null 2>&1 && api_ok=true
+        # updater 容器为 bridge 网络，127.0.0.1 指向自身；改走宿主容器 exec，避免 180s 误报失败
+        if docker exec quantmind curl --fail --silent --max-time 3 http://127.0.0.1:8000/health >/dev/null 2>&1; then
+            api_ok=true
+        elif curl --fail --silent --max-time 3 http://127.0.0.1:8000/health >/dev/null 2>&1; then
+            api_ok=true
+        fi
         for svc in quantmind-celery quantmind-celery-beat; do
             hk="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$svc" 2>/dev/null)"
             if [[ "$hk" == "healthy" ]]; then
@@ -370,10 +390,12 @@ main() {
         done
         if $api_ok && $celery_ok && $beat_ok; then
             log "升级完成 ✓ (HEAD: $(git -C "$PROJECT_DIR" rev-parse --short HEAD))"
+            record_system_event "info" "系统更新成功" "HEAD $(git -C "$PROJECT_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)"
             return
         fi
         sleep 2
     done
+    record_system_event "error" "系统更新失败" "API/celery 180s 内未就绪，请查看 data/update.log"
     log '健康检查失败，尾部日志：' >&2
     docker logs --tail 100 quantmind >&2 || true
     for svc in quantmind-celery quantmind-celery-beat; do

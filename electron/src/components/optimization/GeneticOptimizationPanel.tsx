@@ -37,6 +37,7 @@ export const GeneticOptimizationPanel: React.FC = () => {
     const logContainerRef = useRef<HTMLDivElement>(null);
     const updateBacktestConfig = useBacktestCenterStore((state) => state.updateBacktestConfig);
     const setActiveModule = useBacktestCenterStore((state) => state.setActiveModule);
+    const setQuickBacktestPrefill = useBacktestCenterStore((state) => state.setQuickBacktestPrefill);
 
     const getCurrentUserId = () => {
         const storedUser = authService.getStoredUser() as any;
@@ -243,11 +244,10 @@ export const GeneticOptimizationPanel: React.FC = () => {
             start_date: config.dateRange.startDate,
             end_date: config.dateRange.endDate,
             initial_capital: 10000000,
+        });
+        setQuickBacktestPrefill({
             qlib_strategy_type: 'WeightedStrategy',
             qlib_strategy_params: {
-                ...bestResult.best_params,
-            },
-            strategy_params: {
                 ...bestResult.best_params,
             },
         });

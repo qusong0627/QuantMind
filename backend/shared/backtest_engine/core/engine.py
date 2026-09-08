@@ -67,18 +67,41 @@ else:
     logger = logging.getLogger(__name__)
 
 
-def get_price_limit_threshold(code: str) -> float:
-    """按股票代码返回 A 股涨跌幅阈值（主板 10%，创业板/科创板 20%，北交所 30%）。"""
-    pure = str(code).upper()
-    for prefix in ("SH", "SZ", "BJ"):
-        if pure.startswith(prefix):
-            pure = pure[len(prefix):]
-            break
-    if pure.startswith("68") or pure.startswith("30"):
-        return 0.20  # 科创板 688 / 创业板 300、301
-    if pure.startswith("4") or pure.startswith("8"):
-        return 0.30  # 北交所
-    return 0.10  # 主板（含 *ST/ST）
+def get_price_limit_threshold(
+    code: str,
+    *,
+    is_st: bool = False,
+    trade_date=None,
+) -> float:
+    """按股票代码返回 A 股涨跌幅阈值（主板 10%，创业板/科创板 20%，北交所 30%）。
+
+    严谨口径委托 ``local_market_data.limit_pct``：支持 ST 主板 5%→10%（2026-07-06
+    切换）、创业板/科创板 20% 历史切换、北交所 30% 及其分位舍入。兼容旧单参调用。
+    """
+    try:
+        from datetime import date as _date
+
+        from backend.services.simulation.services.local_market_data import limit_pct
+
+        d = trade_date
+        if d is None:
+            d = _date.today()
+        elif hasattr(d, "date") and not isinstance(d, _date):
+            # pandas Timestamp / datetime
+            d = d.date() if hasattr(d, "date") else d
+        return float(limit_pct(str(code), is_st=bool(is_st), trade_date=d))
+    except Exception:
+        # 回退：旧前缀判定（无 ST/日期时）
+        pure = str(code).upper()
+        for prefix in ("SH", "SZ", "BJ"):
+            if pure.startswith(prefix):
+                pure = pure[len(prefix):]
+                break
+        if pure.startswith("68") or pure.startswith("30"):
+            return 0.20  # 科创板 688/689 / 创业板 300/301/302
+        if pure.startswith("4") or pure.startswith("8"):
+            return 0.30  # 北交所
+        return 0.10  # 主板（含 *ST/ST）
 
 
 class BacktestEngine:
@@ -459,14 +482,49 @@ class BacktestEngine:
         if pd.isna(close) or float(close) <= 0:
             return False
 
-        # 涨跌停过滤：买入无法在涨停成交，卖出无法在跌停成交
+        # 涨跌停过滤：买入无法在涨停成交，卖出无法在跌停成交（严谨口径：ST/分位舍入）
         if prev_close is not None and float(prev_close) > 0:
-            threshold = get_price_limit_threshold(order.symbol)
-            limit_up = float(prev_close) * (1 + threshold)
-            limit_down = float(prev_close) * (1 - threshold)
-            if order.side in (OrderSide.BUY, OrderSide.BUY_TO_COVER) and float(close) >= limit_up:
+            try:
+                from backend.services.simulation.services.local_market_data import compute_limits
+
+                is_st = False
+                try:
+                    # 复用 LocalMarketData 的 ST 缓存（instrument_detail 快照）
+                    from backend.services.simulation.services.local_market_data import (
+                        get_local_market_data,
+                    )
+
+                    _sym_sfx = str(order.symbol)
+                    # to_suffix 统一为 600036.SH 形态以查 ST 集合
+                    try:
+                        from backend.shared.stock_utils import StockCodeUtil
+
+                        _sym_sfx = StockCodeUtil.to_suffix(order.symbol)
+                    except Exception:
+                        pass
+                    is_st = _sym_sfx in get_local_market_data()._st_symbol_set()
+                except Exception:
+                    is_st = False
+                td = self.current_date
+                if hasattr(td, "date") and not isinstance(td, __import__("datetime").date):
+                    try:
+                        td = td.date()
+                    except Exception:
+                        pass
+                limit_up, limit_down = compute_limits(
+                    str(order.symbol), float(prev_close), is_st=is_st, trade_date=td
+                )
+            except Exception:
+                threshold = get_price_limit_threshold(
+                    order.symbol, is_st=False, trade_date=self.current_date
+                )
+                limit_up = float(prev_close) * (1 + threshold)
+                limit_down = float(prev_close) * (1 - threshold)
+            import math
+
+            if order.side in (OrderSide.BUY, OrderSide.BUY_TO_COVER) and math.isfinite(limit_up) and float(close) >= limit_up:
                 return False
-            if order.side in (OrderSide.SELL, OrderSide.SHORT_SELL) and float(close) <= limit_down:
+            if order.side in (OrderSide.SELL, OrderSide.SHORT_SELL) and limit_down > 0 and float(close) <= limit_down:
                 return False
 
         # 简单实现：市价单总是可以执行

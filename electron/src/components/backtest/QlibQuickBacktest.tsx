@@ -69,6 +69,8 @@ export const QlibQuickBacktest: React.FC = () => {
   const runStartedAtRef = useRef<number>(0);
   const backtestConfig = useBacktestCenterStore((state) => state.backtestConfig);
   const activeModule = useBacktestCenterStore((state) => state.activeModule);
+  const quickBacktestPrefill = useBacktestCenterStore((state) => state.quickBacktestPrefill);
+  const clearQuickBacktestPrefill = useBacktestCenterStore((state) => state.clearQuickBacktestPrefill);
   const currentMarket = useAppSelector(selectCurrentMarket);
   const marketConfig = getMarketConfig(currentMarket);
   const UNIVERSE_PRESETS = useMemo(() => MARKET_UNIVERSE_PRESETS[currentMarket] || MARKET_UNIVERSE_PRESETS.CN, [currentMarket]);
@@ -282,11 +284,6 @@ export const QlibQuickBacktest: React.FC = () => {
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
-  type BacktestConfigExt = Partial<BacktestConfig> & {
-    qlib_strategy_type?: string;
-    qlib_strategy_params?: QlibStrategyParams;
-  };
-  const sharedConfig = backtestConfig as BacktestConfigExt;
 
   // 处理策略选择
   const handleStrategySelected = (
@@ -453,7 +450,7 @@ export const QlibQuickBacktest: React.FC = () => {
     };
   }, []);
 
-  // 同步回测中心共享配置（如参数优化的一键回填）
+  // 同步回测中心共享配置的基础字段（日期、股票池）
   useEffect(() => {
     if (backtestConfig.start_date) {
       setStartDate(String(backtestConfig.start_date));
@@ -461,39 +458,32 @@ export const QlibQuickBacktest: React.FC = () => {
     if (backtestConfig.end_date) {
       setEndDate(String(backtestConfig.end_date));
     }
-    const syncedType =
-      sharedConfig.qlib_strategy_type || backtestConfig.strategy_type;
-    if (syncedType) {
-      setStrategyType(String(syncedType));
-    }
-
     if (backtestConfig.symbol && typeof backtestConfig.symbol === 'string') {
       setUniversePath(String(backtestConfig.symbol));
     }
+  }, [backtestConfig.start_date, backtestConfig.end_date, backtestConfig.symbol]);
 
-    const syncedParams =
-      sharedConfig.qlib_strategy_params || backtestConfig.strategy_params;
-    if (syncedParams && typeof syncedParams === 'object') {
+  // 消费参数优化"一键回填"的一次性载荷：应用后立即从 store 清除。
+  // 若不清除，残留值会在用户后续切换策略时反复覆盖本地策略类型与参数。
+  useEffect(() => {
+    if (!quickBacktestPrefill) return;
+    const prefilledType = quickBacktestPrefill.qlib_strategy_type;
+    if (prefilledType) {
+      setStrategyType(String(prefilledType));
+    }
+    const prefilledParams = quickBacktestPrefill.qlib_strategy_params;
+    if (prefilledParams && typeof prefilledParams === 'object') {
       setStrategyParams(
         sanitizeStrategyParams(
-          String(syncedType || strategyType || DEFAULT_TEMPLATE_ID),
-          syncedParams as QlibStrategyParams,
+          String(prefilledType || strategyType || DEFAULT_TEMPLATE_ID),
+          prefilledParams as QlibStrategyParams,
           undefined,
           strategyInfo?.code
         )
       );
     }
-  }, [
-    backtestConfig.start_date,
-    backtestConfig.end_date,
-    backtestConfig.strategy_type,
-    backtestConfig.symbol,
-    sharedConfig.qlib_strategy_type,
-    backtestConfig.strategy_params,
-    sharedConfig.qlib_strategy_params,
-    strategyType,
-    strategyInfo?.code,
-  ]);
+    clearQuickBacktestPrefill();
+  }, [quickBacktestPrefill, clearQuickBacktestPrefill, strategyType, strategyInfo?.code]);
 
   return (
     <motion.div

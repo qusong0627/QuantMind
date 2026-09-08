@@ -226,6 +226,60 @@ class QuantDBFactorReader:
         return sorted(root.glob("dt=*/*.parquet")) if root.is_dir() else []
 
     @staticmethod
+    def _partition_date_range(root: Path) -> tuple[str | None, str | None]:
+        """从 dt=YYYYMMDD 分区目录名直接推导 min/max 日期，避免全表扫描。
+
+        DESCRIBE + SELECT min/max 会打开 2581+ 个 parquet 做 union 推导，
+        在请求路径同步执行耗时 50s+（前端 30s 超时 → ECONNABORTED）。
+        分区名即日期，ls 目录 <0.2s。
+        """
+        if not root.is_dir():
+            return None, None
+        dates: list[str] = []
+        try:
+            for entry in root.iterdir():
+                if entry.is_dir() and entry.name.startswith("dt="):
+                    v = entry.name.split("=", 1)[1]
+                    if v.isdigit() and len(v) == 8:
+                        dates.append(f"{v[:4]}-{v[4:6]}-{v[6:]}")
+        except OSError:
+            return None, None
+        if not dates:
+            return None, None
+        return min(dates), max(dates)
+
+    @staticmethod
+    def _sample_schema_relation(files: list[Path]) -> str:
+        """用单个文件做 schema 采样，避免打开全量 2581 文件。
+
+        发布分区 schema 一致，单文件足以推导列名；全量 DESCRIBE 只读 footer
+        也要逐个开文件，耗时数秒~数十秒。刻意只取 1 个文件：多文件 UNION
+        需要子查询别名，容易写出无效 SQL，且无额外收益。
+        """
+        p = files[0].as_posix().replace("'", "''")
+        return f"read_parquet('{p}', hive_partitioning=true, union_by_name=true)"
+
+    def _donor_has_ohlcv(self) -> bool:
+        """检查 l1 donor 是否含 OHLCV：同样只采样 1 个文件，避免全扫。"""
+        root = self.data_dir / FACTOR_SOURCE_DIRS[OHLCV_DONOR_SOURCE]
+        if not root.is_dir():
+            return False
+        files = sorted(root.glob("dt=*/*.parquet"))
+        if not files:
+            return False
+        duckdb = self._duckdb()
+        con = duckdb.connect(config={"memory_limit": "2GB", "threads": "2"})
+        try:
+            rel = self._sample_schema_relation(files[:1])
+            rows = con.execute(f"DESCRIBE SELECT * FROM {rel}").fetchall()
+            cols = {str(r[0]) for r in rows}
+            return set(OHLCV_COLUMNS) <= cols
+        except Exception:  # noqa: BLE001
+            return False
+        finally:
+            con.close()
+
+    @staticmethod
     def _duckdb():
         try:
             import duckdb
@@ -302,17 +356,26 @@ class QuantDBFactorReader:
                 reason="No parquet files found",
             )
 
+        # 快路径：min/max 先走分区目录名（<0.2s），避免 SELECT 全表扫描 50s+
+        part_min, part_max = self._partition_date_range(root)
+
         duckdb = self._duckdb()
         con = duckdb.connect(config={"memory_limit": "2GB", "threads": "2"})
         try:
-            relation = self._relation(source)
-            described = con.execute(f"DESCRIBE SELECT * FROM {relation}").fetchall()
+            # schema 只采样首/中/末 3 文件，避免 DESCRIBE 打开全量 2581 文件
+            sampled = self._sample_schema_relation(files)
+            described = con.execute(f"DESCRIBE SELECT * FROM {sampled}").fetchall()
             columns = [str(row[0]) for row in described]
             column_types = {str(row[0]): str(row[1]) for row in described}
-            date_expr = self._date_expression(columns)
-            date_row = con.execute(
-                f"SELECT min({date_expr}), max({date_expr}) FROM {relation}"
-            ).fetchone()
+            if part_min is not None and part_max is not None:
+                date_row = (part_min, part_max)
+            else:
+                # 兜底：非分区存储才回退全表 min/max 扫描
+                relation = self._relation(source)
+                date_expr = self._date_expression(columns)
+                date_row = con.execute(
+                    f"SELECT min({date_expr}), max({date_expr}) FROM {relation}"
+                ).fetchone()
         except Exception as exc:
             return FactorSourceStatus(
                 dataset_id=source,
@@ -341,10 +404,8 @@ class QuantDBFactorReader:
         reason = None
         if missing and set(missing) <= set(OHLCV_COLUMNS):
             # 次要源（ccass/south）：OHLCV 由同目录 l1_factors 补给，标签可构建。
-            donor = self._ohlcv_donor_relation()
-            if donor is not None and set(OHLCV_COLUMNS) <= self._relation_columns(
-                donor
-            ):
+            # 用采样检查代替全量 _relation_columns，避免又一次全扫。
+            if self._donor_has_ohlcv():
                 missing = []
             else:
                 reason = "Missing OHLCV columns (l1_factors donor unavailable)"

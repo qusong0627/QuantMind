@@ -152,9 +152,14 @@ class InferenceCenterService {
     }
   }
 
-  async getStockKline(symbol: string, days: number = 60): Promise<KlineItem[]> {
+  async getStockKline(symbol: string, days: number = 60, endDate?: string, startDate?: string): Promise<KlineItem[]> {
     try {
-      const resp = await this.client.get<{ code: number; data: { items: KlineItem[] } }>(`/research/kline/${encodeURIComponent(symbol)}?days=${days}`);
+      const params = new URLSearchParams({ days: String(days) });
+      // 指标口径用 endDate 按基准日截断（防前视泄露）；图表验证用 startDate
+      // 拉取基准日之前窗口到最新的全量，展示基准日后实际走势对照预测
+      if (endDate) params.set('end_date', endDate);
+      if (startDate) params.set('start_date', startDate);
+      const resp = await this.client.get<{ code: number; data: { items: KlineItem[] } }>(`/research/kline/${encodeURIComponent(symbol)}?${params.toString()}`);
       return resp.data?.data?.items || [];
     } catch (e) {
       console.warn('获取股票K线失败:', e);

@@ -1016,13 +1016,13 @@ export const InferenceCenterPanel: React.FC<{
                     </div>
 
                     <div className="grid grid-cols-2 gap-2.5">
-                      {precheck.items.map(item => (
+                      {precheck.items.filter(item => item.key !== 'calendar_trade_date' && item.key !== 'data_fallback').slice(0, 8).map(item => (
                         <div key={item.key} className="flex items-center justify-between p-2.5 bg-white/40 rounded-xl border border-slate-100/60">
                           <div className="flex items-center gap-2 min-w-0">
                             <div className={clsx("w-1 h-1 rounded-full shrink-0", item.passed ? "bg-emerald-500" : "bg-rose-500")} />
                             <Text className="text-xs font-bold text-slate-700 truncate">{item.label}</Text>
                            </div>
-                           {item.passed ? <CheckCircle2 size={14} className="text-emerald-400" /> : <AlertCircle size={14} className="text-rose-400" />}
+                            {item.passed ? <CheckCircle2 size={14} className="text-emerald-400" /> : <AlertCircle size={14} className="text-rose-400" />}
                         </div>
                       ))}
                     </div>
@@ -1125,16 +1125,16 @@ export const InferenceCenterPanel: React.FC<{
                                     latestInferenceRun.prediction_trade_date && 
                                     latestInferenceRun.prediction_trade_date >= todayStr;
 
-                  return isEffective ? (
-                     <div className="bg-white/60 rounded-xl p-3 border border-emerald-100/30">
-                         <Text className="text-xs font-mono font-bold text-slate-800 break-all leading-tight block mb-2">
-                            {latestInferenceRun.run_id.slice(0, 24)}...
-                         </Text>
-                         <div className="flex items-center gap-2">
-                           <Tag className="m-0 bg-emerald-500 text-white border-0 text-xs font-bold px-1.5">{latestInferenceRun.prediction_trade_date}</Tag>
-                           <Text className="text-xs text-slate-500 font-mono italic">{dayjs(latestInferenceRun.updated_at).format('HH:mm')}</Text>
-                         </div>
-                     </div>
+                   return isEffective ? (
+                      <div className="bg-white/60 rounded-xl p-3 pb-8 border border-emerald-100/30 relative">
+                          <Text className="text-xs font-mono font-bold text-slate-800 break-all leading-tight block mb-2">
+                             {latestInferenceRun.run_id.slice(0, 24)}...
+                          </Text>
+                          <div className="absolute bottom-2 left-3 right-3 flex items-center justify-between">
+                            <Tag className="m-0 bg-emerald-500 text-white border-0 text-xs font-bold px-1.5 leading-none py-0.5">{latestInferenceRun.prediction_trade_date}</Tag>
+                            <Text className="text-xs text-slate-500 font-mono leading-none">{dayjs(latestInferenceRun.updated_at).format('HH:mm')}</Text>
+                          </div>
+                      </div>
                    ) : (
                      <div className="py-4 flex flex-col items-center justify-center bg-slate-50/50 rounded-xl border border-dashed border-slate-200">
                        <Clock size={16} className="text-slate-300 mb-2" />
@@ -1167,7 +1167,7 @@ export const InferenceCenterPanel: React.FC<{
                     {topRankings.map((r) => (
                       <div
                         key={r.code}
-                        className="flex items-center gap-2 px-2 py-1.5 rounded-lg bg-slate-50/70 border border-slate-100/60 hover:bg-blue-50/40 transition-colors"
+                        className="flex items-center gap-2 px-2 py-1.5 rounded-lg bg-slate-50/70 border border-slate-100/60 hover:bg-blue-50/40 transition-colors whitespace-nowrap overflow-hidden"
                       >
                         <span className={clsx(
                           'w-6 h-6 rounded-md flex items-center justify-center text-xs font-bold shrink-0',
@@ -1175,16 +1175,10 @@ export const InferenceCenterPanel: React.FC<{
                         )}>
                           {r.rank}
                         </span>
-                        <div className="min-w-0 flex-1">
-                          <div className="flex items-center gap-1.5">
-                            <Text className="text-xs font-bold text-slate-800 font-mono truncate">{r.code}</Text>
-                            <Text className="text-xs text-slate-500 truncate">{r.name || ''}</Text>
-                          </div>
-                          {r.industry && (
-                            <Text className="text-xs text-slate-400 truncate block">{r.industry}</Text>
-                          )}
-                        </div>
-                        <div className="flex flex-col items-end shrink-0">
+                        <Text className="text-xs font-bold text-slate-800 font-mono shrink-0">{r.code}</Text>
+                        <Text className="text-xs text-slate-600 truncate flex-1 min-w-0">{r.name || ''}</Text>
+                        <Text className="text-xs text-slate-400 truncate shrink-0 max-w-[80px]">{r.industry || ''}</Text>
+                        <div className="flex items-center gap-1 shrink-0">
                           <Text className={clsx('text-sm font-mono font-bold', r.score >= 0 ? 'text-rose-600' : 'text-emerald-600')}>
                             {r.score.toFixed(4)}
                           </Text>

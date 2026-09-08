@@ -729,8 +729,9 @@ class InferenceScriptRunner:
         v10_stderr: str,
         fallback_reason: str,
         prediction_trade_date: str,
+        persist: bool = True,
     ) -> ExecutionResult:
-        """执行 inference_alpha158.py 兜底推理脚本。"""
+        """执行 inference_alpha158.py 兜底推理脚本。persist=False 时只返回内存信号，不写库不发布。"""
         fallback_path = self.fallback_model_dir / self.fallback_script_name
         if not fallback_path.is_file():
             return ExecutionResult(
@@ -886,18 +887,19 @@ class InferenceScriptRunner:
         logger.info(
             f"[InferenceScriptRunner] alpha158 兜底成功，{len(signals)} 条信号, run_id={run_id}"
         )
-        self._persist_and_publish(
-            run_id,
-            prediction_trade_date,
-            tenant_id,
-            user_id,
-            signals,
-            active_model_id=self.fallback_model_id,
-            data_trade_date=date,
-            market="CN",  # alpha158 兜底仅 CN 链路
-        )
+        if persist:
+            self._persist_and_publish(
+                run_id,
+                prediction_trade_date,
+                tenant_id,
+                user_id,
+                signals,
+                active_model_id=self.fallback_model_id,
+                data_trade_date=date,
+                market="CN",  # alpha158 兜底仅 CN 链路
+            )
 
-        if redis_client is not None:
+        if persist and redis_client is not None:
             try:
                 redis_client.set(
                     f"{_COMPLETED_REDIS_KEY_PREFIX}:{prediction_trade_date}",
@@ -930,6 +932,7 @@ class InferenceScriptRunner:
         user_id: str = "system",
         redis_client=None,
         symbols: list[str] | None = None,
+        persist: bool = True,
     ) -> ExecutionResult:
         """
         执行 inference.py 脚本，解析信号输出，写库并发布 Redis Stream。
@@ -942,6 +945,8 @@ class InferenceScriptRunner:
         redis_client: 可选 Redis 客户端，用于写完成标记
         symbols     : 可选股票代码子集（前缀式，如 ["SH600036"]）。非空时仅对匹配
                       的股票落库与返回，用于「单股补推」；为 None 时全市场（原行为）。
+        persist     : 为 False 时跳过 _persist_and_publish 与 Redis 标记，仅返回
+                      内存信号（个股独立轻路线：结果只在前端缓存，不记入后端/DB）。
         """
         script_path = self.primary_model_dir / self.primary_script_name
         primary_meta = self._read_primary_metadata()
@@ -986,6 +991,7 @@ class InferenceScriptRunner:
                     v10_stderr=fallback_reason,
                     fallback_reason=fallback_reason,
                     prediction_trade_date=prediction_trade_date,
+                    persist=persist,
                 )
 
         if data_source in ("parquet", "quantdb_factors"):
@@ -1064,6 +1070,7 @@ class InferenceScriptRunner:
                 v10_stderr=fallback_reason,
                 fallback_reason=fallback_reason,
                 prediction_trade_date=prediction_trade_date,
+                persist=persist,
             )
 
         # 注入平台环境变量
@@ -1177,6 +1184,7 @@ class InferenceScriptRunner:
                     v10_stderr=stderr,
                     fallback_reason=fallback_reason,
                     prediction_trade_date=prediction_trade_date,
+                    persist=persist,
                 )
 
             logger.error(
@@ -1252,23 +1260,25 @@ class InferenceScriptRunner:
             f"[InferenceScriptRunner] 解析到 {len(signals)} 条信号, run_id={run_id}"
         )
 
-        # 写库 + 发布 Redis Stream（partial=单股补推时局部覆盖，不整桶删除）
-        # universe_tag 标注市场（HK 推理 → 'HK'），老行 NULL=CN；A 股路径值 'CN' 与历史等价
+        # 写库 + 发布 Redis Stream（partial=单股补推时局部覆盖，不整桶删除）。
+        # universe_tag 标注市场（HK 推理 → 'HK'），老行 NULL=CN；A 股路径值 'CN' 与历史等价。
+        # persist=False（个股独立路线）时跳过，只返回内存信号。
         persist_market = "CN" if model_market in ("A", "") else model_market
-        self._persist_and_publish(
-            run_id,
-            prediction_trade_date,
-            tenant_id,
-            user_id,
-            signals,
-            active_model_id=self.primary_model_id,
-            data_trade_date=date,
-            partial=partial_applied,
-            market=persist_market,
-        )
+        if persist:
+            self._persist_and_publish(
+                run_id,
+                prediction_trade_date,
+                tenant_id,
+                user_id,
+                signals,
+                active_model_id=self.primary_model_id,
+                data_trade_date=date,
+                partial=partial_applied,
+                market=persist_market,
+            )
 
         # 写 Redis 完成标记
-        if redis_client is not None:
+        if persist and redis_client is not None:
             try:
                 redis_client.set(
                     f"{_COMPLETED_REDIS_KEY_PREFIX}:{prediction_trade_date}",

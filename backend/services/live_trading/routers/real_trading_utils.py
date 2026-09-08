@@ -1007,15 +1007,27 @@ def _resolve_runner_image_for_mode() -> tuple[str, str]:
     return default_image, "default"
 
 
+def _get_remote_quote_redis_config() -> tuple[str, int, str | None, int]:
+    """远端行情快照 Redis 配置（与 stream 写入端 RemoteRedisDataSource 对齐）。
+
+    优先级：REMOTE_QUOTE_REDIS_* 环境变量（含项目根 .env 兜底），
+    缺省直连免费行情服 www.quantmindai.cn:6379/db3。
+    """
+    host = _get_env_with_root_fallback("REMOTE_QUOTE_REDIS_HOST", "www.quantmindai.cn")
+    port = int(_get_env_with_root_fallback("REMOTE_QUOTE_REDIS_PORT", "6379") or "6379")
+    password = _get_env_with_root_fallback("REMOTE_QUOTE_REDIS_PASSWORD", "quantmind2026") or None
+    db = int(_get_env_with_root_fallback("REMOTE_QUOTE_REDIS_DB", "3") or "3")
+    return host, port, password, db
+
+
 def _get_stream_series_redis_client():
     """
     Stream 行情时序 Redis（quote->series）客户端。
-    OSS 版本使用统一 Redis 实例 (REDIS_DB_MARKET)。
+
+    优先直连 REMOTE_QUOTE_REDIS_*（与 quantmind-stream 的 quote->series
+    写入端一致），远端探测异常时由调用方降级到交易 Redis。
     """
-    host = _get_env_with_root_fallback("REDIS_HOST", "localhost")
-    port = int(_get_env_with_root_fallback("REDIS_PORT", "6379") or "6379")
-    password = _get_env_with_root_fallback("REDIS_PASSWORD", "") or None
-    db = int(_get_env_with_root_fallback("REDIS_DB_MARKET", "3"))
+    host, port, password, db = _get_remote_quote_redis_config()
     client = redis_lib.Redis(
         host=host,
         port=port,
@@ -1092,6 +1104,8 @@ def check_stream_series_freshness(
 
     matched_symbol = None
     latest_age_sec = None
+    remote_probe_error = ""
+    used_fallback = False
     try:
         stream_redis.ping()
         for symbol in stream_symbols:
@@ -1104,10 +1118,12 @@ def check_stream_series_freshness(
                 if latest_age_sec is None or age < latest_age_sec:
                     matched_symbol = normalized
                     latest_age_sec = age
-    except Exception:
-        # 降级：尝试本地/交易 Redis
+    except Exception as exc:
+        # 远端探测异常时降级到交易 Redis，并在 details 回显原因
+        remote_probe_error = str(exc)
         if redis_client:
             try:
+                used_fallback = True
                 for symbol in stream_symbols:
                     normalized = StockCodeUtil.to_prefix(symbol)
                     key = f"market:series:{normalized}"
@@ -1158,6 +1174,8 @@ def check_stream_series_freshness(
             "age_seconds": latest_age_sec,
             "threshold_seconds": threshold_sec,
             "series_redis": f"{stream_redis_host}:{stream_redis_port}",
+            "remote_probe_error": remote_probe_error,
+            "used_fallback": used_fallback,
         },
     }
 
@@ -1172,16 +1190,22 @@ def check_stream_quote_persist_rate(
     最近交易日日线是否可用，模拟撮合引擎直读 QuantDB 可正常撮合。
     """
     try:
-        # 获取落库监控 Key (由 stream 服务定时写入)
+        # 获取落库监控 Key (由 stream 服务写入远端行情 Redis)
+        # 优先直连远端（与写入端一致），异常时降级到交易 Redis
         key = "market:stream:persist_stats"
         stats_raw = None
-        if redis_client:
-            stats_raw = redis_client.get(key)
-
-        if not stats_raw:
-            # 尝试从行情 Redis 获取
+        remote_probe_error = ""
+        try:
             stream_redis, _, _ = _get_stream_series_redis_client()
             stats_raw = stream_redis.get(key)
+        except Exception as exc:
+            remote_probe_error = str(exc)
+
+        if not stats_raw and redis_client:
+            try:
+                stats_raw = redis_client.get(key)
+            except Exception:
+                pass
 
         if not stats_raw:
             if allow_quantdb_fallback:
@@ -1219,7 +1243,7 @@ def check_stream_quote_persist_rate(
             "ok": ok,
             "message": message,
             "source": "stream_persist" if ok else "stale",
-            "details": stats,
+            "details": {**stats, "remote_probe_error": remote_probe_error},
         }
     except Exception as e:
         return {"ok": False, "message": f"行情落库检测异常: {e}", "details": {}}

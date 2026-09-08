@@ -66,6 +66,16 @@ export const normalizeStockCode = (raw: string): string => {
 };
 
 /**
+ * 前缀式转后缀式（SH600519 -> 600519.SH），供行情/终端等后缀口径组件使用。
+ * 非标准代码原样返回。
+ */
+export const toSuffixCode = (raw: string): string => {
+    const s = normalizeStockCode(raw);
+    const m = s.match(/^(SH|SZ|BJ)(\d{6})$/);
+    return m ? `${m[2]}.${m[1]}` : s;
+};
+
+/**
  * 解析股票代码
  */
 export const resolveCode = (entryKey: string | null, pos: RawPosition): string => {

@@ -30,6 +30,7 @@ EVENT_TYPES = {
     "health_transition": "健康状态迁移",
     "node_alert": "节点性能告警",
     "data_sync": "数据同步",
+    "system_update": "系统更新",
     "error": "错误",
 }
 LEVELS = {"info", "warning", "error", "critical"}

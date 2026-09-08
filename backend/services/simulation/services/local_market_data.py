@@ -87,6 +87,9 @@ _BSE_PREFIXES = ("43", "83", "87", "88", "92")
 # 创业板/科创板/北交所 ST 股不折减（实测最大涨幅仍为 ±20% / ±30%）。
 _ST_LIMIT_RELAXED_FROM = date(2026, 7, 6)
 
+# 创业板注册制改革：2020-08-24 起交易类证券涨跌幅由 10% 放宽至 20%（存量 300xxx 同步切换）。
+_CHINEXT_20PCT_FROM = date(2020, 8, 24)
+
 _CENT = Decimal("0.01")
 
 # amount/volume 的单位在 2026-07-21 前后发生切换，因此按日自动识别而非硬编码：
@@ -124,17 +127,31 @@ def _round_cent(value: Decimal, rounding: str) -> float:
 
 
 def _is_bse(symbol: str) -> bool:
-    code, _, suffix = symbol.partition(".")
-    if suffix == "BJ":
+    s = str(symbol).upper().strip()
+    if s.endswith(".BJ"):
         return True
-    return code[:2] in _BSE_PREFIXES
+    # 兼容 SH/SZ/BJ 前缀式（BJ430047 / BJ830000）与后缀式（430047.BJ / 830000.BJ）
+    for pfx in ("SH", "SZ", "BJ"):
+        if s.startswith(pfx):
+            s = s[len(pfx):]
+            break
+    s = s.split(".")[0]
+    if s.startswith("BJ"):
+        s = s[2:]
+    return s[:2] in _BSE_PREFIXES or s[:2] == "92"
 
 
 def _board_pct(symbol: str) -> Decimal:
     if _is_bse(symbol):
         return _PCT_BSE
-    code = symbol.partition(".")[0]
-    if code[:3] in _GROWTH_PREFIXES:
+    s = str(symbol).upper().strip()
+    # 兼容 SH600036 / 600036.SH / 600036 均取纯数字
+    for pfx in ("SH", "SZ", "BJ"):
+        if s.startswith(pfx):
+            s = s[len(pfx):]
+            break
+    s = s.split(".")[0]
+    if s[:3] in _GROWTH_PREFIXES:
         return _PCT_GROWTH
     return _PCT_MAIN
 
@@ -142,6 +159,15 @@ def _board_pct(symbol: str) -> Decimal:
 def limit_pct(symbol: str, *, is_st: bool, trade_date: date) -> Decimal:
     """该标的当日的涨跌幅限制比例。"""
     pct = _board_pct(symbol)
+    # 历史：创业板 2020-08-24 前为 10%，之后 20%（注册制改革）
+    s = str(symbol).upper().strip()
+    for pfx in ("SH", "SZ", "BJ"):
+        if s.startswith(pfx):
+            s = s[len(pfx):]
+            break
+    s = s.split(".")[0]
+    if s[:3] in ("300", "301", "302") and trade_date < _CHINEXT_20PCT_FROM:
+        pct = _PCT_MAIN
     st_reduces = is_st and pct == _PCT_MAIN and trade_date < _ST_LIMIT_RELAXED_FROM
     return _PCT_ST_MAIN if st_reduces else pct
 

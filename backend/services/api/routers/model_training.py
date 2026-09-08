@@ -2249,11 +2249,16 @@ async def _execute_single_day_inference(
     user_id: str,
     batch_id: str | None = None,
     symbols: list[str] | None = None,
+    persist: bool = True,
 ) -> dict[str, Any]:
     """单日推理执行体：预检 → 数据回退 → 执行 → 落库 → 返回 run payload。
 
     由 POST /inference/run（单日）与批量推理编排器共用。batch_id 仅写入
     request_json 供追溯，不改变执行逻辑。
+
+    persist=False 时跳过全部落库（run 记录/信号表/Redis 标记/pred 回写），
+    仅返回内存结果；成功时 payload 附带 signals 供调用方直接使用。
+    个股独立轻路线用此模式，结果只在前端缓存。
     """
     model_calendar = _get_model_calendar(model_dir)
     requested_inference_date = requested_date
@@ -2353,43 +2358,44 @@ async def _execute_single_day_inference(
             "stderr": "",
             "precheck": precheck,
         }
-        await model_inference_persistence.create_run(
-            run_id=provisional_run_id,
-            tenant_id=tenant_id,
-            user_id=user_id,
-            model_id=requested_model_id,
-            data_trade_date=date.fromisoformat(data_trade_date),
-            prediction_trade_date=date.fromisoformat(prediction_trade_date),
-            status="failed",
-            request_payload=_build_inference_request_payload(
-                requested_model_id, data_trade_date, precheck, batch_id
-            ),
-            created_at=run_created_at,
-        )
-        await model_inference_persistence.update_run(
-            run_id=provisional_run_id,
-            status="failed",
-            updated_at=run_created_at,
-            signals_count=0,
-            duration_ms=0,
-            fallback_used=False,
-            fallback_reason="precheck_failed",
-            failure_stage="precheck",
-            error_message="推理前置检查未通过",
-            stdout="",
-            stderr="",
-            active_model_id=resolved.effective_model_id,
-            effective_model_id=resolved.effective_model_id,
-            model_source=resolved.model_source,
-            active_data_source=_get_model_data_dir(model_dir),
-            result_payload=failure_payload,
-        )
-        await model_inference_persistence.record_run_to_settings(
-            tenant_id=tenant_id,
-            user_id=user_id,
-            model_id=requested_model_id,
-            run_payload=failure_payload,
-        )
+        if persist:
+            await model_inference_persistence.create_run(
+                run_id=provisional_run_id,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                model_id=requested_model_id,
+                data_trade_date=date.fromisoformat(data_trade_date),
+                prediction_trade_date=date.fromisoformat(prediction_trade_date),
+                status="failed",
+                request_payload=_build_inference_request_payload(
+                    requested_model_id, data_trade_date, precheck, batch_id
+                ),
+                created_at=run_created_at,
+            )
+            await model_inference_persistence.update_run(
+                run_id=provisional_run_id,
+                status="failed",
+                updated_at=run_created_at,
+                signals_count=0,
+                duration_ms=0,
+                fallback_used=False,
+                fallback_reason="precheck_failed",
+                failure_stage="precheck",
+                error_message="推理前置检查未通过",
+                stdout="",
+                stderr="",
+                active_model_id=resolved.effective_model_id,
+                effective_model_id=resolved.effective_model_id,
+                model_source=resolved.model_source,
+                active_data_source=_get_model_data_dir(model_dir),
+                result_payload=failure_payload,
+            )
+            await model_inference_persistence.record_run_to_settings(
+                tenant_id=tenant_id,
+                user_id=user_id,
+                model_id=requested_model_id,
+                run_payload=failure_payload,
+            )
         return failure_payload
 
     import asyncio
@@ -2407,6 +2413,7 @@ async def _execute_single_day_inference(
                 model_id=requested_model_id,
                 resolved_model=resolved.to_dict(),
                 symbols=symbols,
+                persist=persist,
             )
         )
     except Exception as exc:
@@ -2434,43 +2441,44 @@ async def _execute_single_day_inference(
             "stderr": "",
             "precheck": precheck,
         }
-        await model_inference_persistence.create_run(
-            run_id=provisional_run_id,
-            tenant_id=tenant_id,
-            user_id=user_id,
-            model_id=requested_model_id,
-            data_trade_date=date.fromisoformat(data_trade_date),
-            prediction_trade_date=date.fromisoformat(prediction_trade_date),
-            status="failed",
-            request_payload=_build_inference_request_payload(
-                requested_model_id, data_trade_date, precheck, batch_id
-            ),
-            created_at=inference_started_at,
-        )
-        await model_inference_persistence.update_run(
-            run_id=provisional_run_id,
-            status="failed",
-            updated_at=datetime.now(ZoneInfo("Asia/Shanghai")),
-            signals_count=0,
-            duration_ms=duration_ms,
-            fallback_used=False,
-            fallback_reason="",
-            failure_stage="execute",
-            error_message=str(exc),
-            stdout="",
-            stderr="",
-            active_model_id=resolved.effective_model_id,
-            effective_model_id=resolved.effective_model_id,
-            model_source=resolved.model_source,
-            active_data_source=_get_model_data_dir(model_dir),
-            result_payload=failure_payload,
-        )
-        await model_inference_persistence.record_run_to_settings(
-            tenant_id=tenant_id,
-            user_id=user_id,
-            model_id=requested_model_id,
-            run_payload=failure_payload,
-        )
+        if persist:
+            await model_inference_persistence.create_run(
+                run_id=provisional_run_id,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                model_id=requested_model_id,
+                data_trade_date=date.fromisoformat(data_trade_date),
+                prediction_trade_date=date.fromisoformat(prediction_trade_date),
+                status="failed",
+                request_payload=_build_inference_request_payload(
+                    requested_model_id, data_trade_date, precheck, batch_id
+                ),
+                created_at=inference_started_at,
+            )
+            await model_inference_persistence.update_run(
+                run_id=provisional_run_id,
+                status="failed",
+                updated_at=datetime.now(ZoneInfo("Asia/Shanghai")),
+                signals_count=0,
+                duration_ms=duration_ms,
+                fallback_used=False,
+                fallback_reason="",
+                failure_stage="execute",
+                error_message=str(exc),
+                stdout="",
+                stderr="",
+                active_model_id=resolved.effective_model_id,
+                effective_model_id=resolved.effective_model_id,
+                model_source=resolved.model_source,
+                active_data_source=_get_model_data_dir(model_dir),
+                result_payload=failure_payload,
+            )
+            await model_inference_persistence.record_run_to_settings(
+                tenant_id=tenant_id,
+                user_id=user_id,
+                model_id=requested_model_id,
+                run_payload=failure_payload,
+            )
         return failure_payload
 
     run_id = str(result.run_id or provisional_run_id)
@@ -2510,44 +2518,52 @@ async def _execute_single_day_inference(
         "stderr": stderr,
         "precheck": precheck,
     }
+    # persist=False 时把内存信号附在 payload 供调用方直接使用（不落库，
+    # 调用方自行从 signals 取分，不再读信号表）。
+    if not persist:
+        try:
+            success_payload["signals"] = list(getattr(result, "signals", None) or [])
+        except Exception:
+            success_payload["signals"] = []
 
-    await model_inference_persistence.create_run(
-        run_id=run_id,
-        tenant_id=tenant_id,
-        user_id=user_id,
-        model_id=requested_model_id,
-        data_trade_date=date.fromisoformat(data_trade_date),
-        prediction_trade_date=date.fromisoformat(prediction_trade_date),
-        status="completed" if result.success else "failed",
-        request_payload=_build_inference_request_payload(
-            requested_model_id, data_trade_date, precheck, batch_id
-        ),
-        created_at=inference_started_at,
-    )
-    await model_inference_persistence.update_run(
-        run_id=run_id,
-        status="completed" if result.success else "failed",
-        updated_at=datetime.now(ZoneInfo("Asia/Shanghai")),
-        signals_count=int(result.signals_count or 0),
-        duration_ms=duration_ms,
-        fallback_used=bool(result.fallback_used),
-        fallback_reason=result.fallback_reason or "",
-        failure_stage=result.failure_stage or "",
-        error_message=result.error or None,
-        stdout=stdout,
-        stderr=stderr,
-        active_model_id=result.active_model_id or resolved.effective_model_id,
-        effective_model_id=result_effective_model_id,
-        model_source=result_model_source,
-        active_data_source=result.active_data_source or _get_model_data_dir(model_dir),
-        result_payload=success_payload,
-    )
-    await model_inference_persistence.record_run_to_settings(
-        tenant_id=tenant_id,
-        user_id=user_id,
-        model_id=requested_model_id,
-        run_payload=success_payload,
-    )
+    if persist:
+        await model_inference_persistence.create_run(
+            run_id=run_id,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            model_id=requested_model_id,
+            data_trade_date=date.fromisoformat(data_trade_date),
+            prediction_trade_date=date.fromisoformat(prediction_trade_date),
+            status="completed" if result.success else "failed",
+            request_payload=_build_inference_request_payload(
+                requested_model_id, data_trade_date, precheck, batch_id
+            ),
+            created_at=inference_started_at,
+        )
+        await model_inference_persistence.update_run(
+            run_id=run_id,
+            status="completed" if result.success else "failed",
+            updated_at=datetime.now(ZoneInfo("Asia/Shanghai")),
+            signals_count=int(result.signals_count or 0),
+            duration_ms=duration_ms,
+            fallback_used=bool(result.fallback_used),
+            fallback_reason=result.fallback_reason or "",
+            failure_stage=result.failure_stage or "",
+            error_message=result.error or None,
+            stdout=stdout,
+            stderr=stderr,
+            active_model_id=result.active_model_id or resolved.effective_model_id,
+            effective_model_id=result_effective_model_id,
+            model_source=result_model_source,
+            active_data_source=result.active_data_source or _get_model_data_dir(model_dir),
+            result_payload=success_payload,
+        )
+        await model_inference_persistence.record_run_to_settings(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            model_id=requested_model_id,
+            run_payload=success_payload,
+        )
     return success_payload
 
 
@@ -3961,16 +3977,17 @@ _PRED_HIST_TTL = 600.0
 
 
 def _read_stock_pred_history(
-    storage_path: str, code6: str, cutoff: date, model_id: str
+    storage_path: str, code6: str, cutoff: date, model_id: str, anchor: date | None = None
 ) -> list[dict[str, Any]]:
     """从模型目录 pred.parquet 读取该股历史分数时序（含每日截面排名）。
 
     兼容多种列名（pred/fusion_score/score、trade_date/date/datetime、
     symbol/instrument 前缀/后缀/小写式均可）；无文件或读取失败返回 []。
+    anchor 非空时窗口为 [cutoff, anchor]，否则为 [cutoff, ∞)。
     """
     import time as _time
 
-    cache_key = f"{storage_path}|{code6}|{cutoff.isoformat()}"
+    cache_key = f"{storage_path}|{code6}|{cutoff.isoformat()}|{anchor.isoformat() if anchor else ''}"
     hit = _PRED_HIST_CACHE.get(cache_key)
     if hit and _time.time() - hit[0] < _PRED_HIST_TTL:
         return hit[1]
@@ -4020,6 +4037,7 @@ def _read_stock_pred_history(
                             FROM read_parquet('{str(parquet_file)}')
                             WHERE CAST({score_col} AS DOUBLE) IS NOT NULL
                               AND CAST({date_col} AS DATE) >= CAST(? AS DATE)
+                              {f"AND CAST({date_col} AS DATE) <= CAST('{anchor.isoformat()}' AS DATE)" if anchor else ""}
                               AND NOT (
                                   UPPER(CAST({sym_col} AS VARCHAR)) LIKE 'SH000%'
                                   OR UPPER(CAST({sym_col} AS VARCHAR)) LIKE 'SZ399%'
@@ -4063,7 +4081,7 @@ def _read_stock_pred_history(
 
 
 async def _load_stock_pred_history(
-    *, tenant_id: str, user_id: str, model_id: str | None, sym: str, cutoff: date
+    *, tenant_id: str, user_id: str, model_id: str | None, sym: str, cutoff: date, anchor: date | None = None
 ) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
     """读模型目录 pred.parquet 的全量历史分数序列。
 
@@ -4097,6 +4115,7 @@ async def _load_stock_pred_history(
         code6,
         cutoff,
         str(model.get("model_id") or ""),
+        anchor,
     )
     return (items or []), model
 
@@ -4110,6 +4129,9 @@ async def get_stock_inference_history(
     model_id: str | None = Query(
         None, description="按模型过滤，缺省返回所有模型的最新批次"
     ),
+    end_date: str | None = Query(
+        None, description="窗口终点YYYY-MM-DD（含当日），缺省今日；个股推理下方30天曲线以基准日为终点，保证与上方K线重叠"
+    ),
     current_user: dict[str, Any] = Depends(get_current_user),
 ):
     """返回某只股票的历史模型分数（供 K 线下方分数曲线叠加）。
@@ -4117,13 +4139,18 @@ async def get_stock_inference_history(
     主数据源为模型目录的 pred.parquet（训练生成的全量历史分数），不受每日推理批次影响；
     model_id 为空时取用户默认模型（个股终端下方曲线），显式传 model_id 时取该模型（推理批次详情）。
     无 pred.parquet 时才回退 engine_signal_scores 批次（按交易日去重取最新批次）。
+    end_date 指定时窗口为 [end_date-days, end_date]，否则为 [今日-days, 今日]。
     """
     tenant_id, user_id = _owner_scope(current_user)
     from datetime import timedelta as _td
     from backend.shared.stock_utils import StockCodeUtil
 
     sym = str(symbol).strip().upper()
-    cutoff = date.today() - _td(days=days)
+    try:
+        anchor = date.fromisoformat(str(end_date)[:10]) if end_date else date.today()
+    except (ValueError, TypeError):
+        anchor = date.today()
+    cutoff = anchor - _td(days=days)
 
     # 归一化 symbol：兼容纯数字 / SH前缀 / suffix 三种格式
     norm = sym
@@ -4131,21 +4158,67 @@ async def get_stock_inference_history(
         norm = StockCodeUtil.to_suffix(norm)
 
     params: dict[str, Any] = {
-        "sym": sym,
         "cutoff": cutoff,
         "tenant_id": tenant_id,
         "user_id": user_id,
     }
-    model_filter_sql = ""
+    # symbol 多口径匹配：engine_signal_scores.symbol 约定为纯数字（600519），
+    # 但调用方常传后缀式（600519.SH）/前缀式（SH600519），单等值匹配会静默查空。
+    # 用 ANY(变体数组) 保持索引可用（research 侧同理）。
+    try:
+        _sym_variants = {
+            sym,
+            StockCodeUtil.to_prefix(sym),
+            StockCodeUtil.to_suffix(sym),
+            re.sub(r"[^0-9]", "", sym),
+        }
+        _sym_variants |= {s.lower() for s in list(_sym_variants)}
+        _sym_variants = {s for s in _sym_variants if s}
+    except Exception:  # noqa: BLE001
+        _sym_variants = {sym}
+    params["syms"] = sorted(_sym_variants)
+    # model_id 可能是 run_id（共识行 run_model_id 缺失时前端回退用 run_id 展示，
+    # 如 "Run 20260831 6F803500"）：先解析为真实 model_id；解析不出（垃圾输入
+    # 或 run 无模型关联）则退化为不过滤，走全模型最新批次曲线兜底，避免小卡空白。
+    resolved_model_id: str | None = model_id
     if model_id:
-        model_filter_sql = "AND e.run_id IN (SELECT run_id FROM qm_model_inference_runs WHERE model_id = :model_id)"
-        params["model_id"] = model_id
+        try:
+            async with get_session(read_only=True) as _rs:
+                _mid = await _rs.execute(
+                    text("SELECT model_id FROM qm_model_inference_runs WHERE run_id = :r LIMIT 1"),
+                    {"r": model_id},
+                )
+                _found = str(_mid.scalar() or "").strip()
+                if _found:
+                    resolved_model_id = _found
+        except Exception:  # noqa: BLE001
+            pass
+    model_filter_sql = ""
+    if resolved_model_id:
+        # 仅当确认为注册模型时才过滤；否则（run_id 无关联/非法输入）不过滤兜底。
+        try:
+            from backend.shared.model_registry import model_registry_service as _mrs
+
+            _m = await _mrs.get_model(
+                tenant_id=tenant_id, user_id=user_id, model_id=resolved_model_id
+            )
+        except Exception:  # noqa: BLE001
+            _m = None
+        if _m:
+            model_filter_sql = "AND e.run_id IN (SELECT run_id FROM qm_model_inference_runs WHERE model_id = :model_id)"
+            params["model_id"] = resolved_model_id
+        else:
+            resolved_model_id = None
 
     async with get_session(read_only=True) as session:
         # 性能：先用 (tenant_id, symbol, trade_date) 索引取该股每日最新一条（毫秒级），
         # 排名用相关子查询只统计所在 run 内的行（idx_ess_run_id），避免对全市场做窗口函数
         # （旧写法 CTE 对所有股票 RANK() 后才过滤 symbol，500 天要 20s，现 ~0.6s）。
         # 排名仍在同一批 run 内计算：同一天多个 run 各自内部排名，取最新批次那条。
+        # 有 end_date（个股推理以基准日为终点）时加 trade_date 上限，保证与上方K线重叠。
+        end_filter = "AND e.trade_date <= :anchor" if end_date else ""
+        if end_date:
+            params["anchor"] = anchor
         rows = (
             (
                 await session.execute(
@@ -4155,8 +4228,9 @@ async def get_stock_inference_history(
                         SELECT DISTINCT ON (e.trade_date)
                                e.trade_date, e.run_id, e.fusion_score, e.signal_side, e.created_at
                         FROM engine_signal_scores e
-                        WHERE e.symbol = :sym
+                        WHERE e.symbol = ANY(:syms)
                           AND e.trade_date >= :cutoff
+                          {end_filter}
                           AND e.tenant_id = :tenant_id AND e.user_id = :user_id
                           {model_filter_sql}
                         ORDER BY e.trade_date, e.created_at DESC
@@ -4198,9 +4272,10 @@ async def get_stock_inference_history(
 
     # ── 分数曲线锁定「用户默认模型」目录的 pred.parquet（训练生成的全量历史分数），
     # 不受每日推理批次影响，也不展示非默认模型；默认模型缺失/无 pred 文件时才回退
-    # 上面的 engine_signal_scores 批次结果
+    # 上面的 engine_signal_scores 批次结果。end_date 指定时窗口以基准日为终点，
+    # 保证与上方K线重叠（个股推理30天小卡）。
     pred_items, pred_model = await _load_stock_pred_history(
-        tenant_id=tenant_id, user_id=user_id, model_id=model_id, sym=sym, cutoff=cutoff
+        tenant_id=tenant_id, user_id=user_id, model_id=resolved_model_id, sym=sym, cutoff=cutoff, anchor=anchor
     )
     if pred_items:
         items = pred_items

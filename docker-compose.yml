@@ -203,8 +203,7 @@ services:
       # 使用 mock key 允许服务启动，用户需在个人中心配置真实 API key
       - DASHSCOPE_API_KEY=${DASHSCOPE_API_KEY:-mock-api-key-not-configured}
       - QWEN_API_KEY=${QWEN_API_KEY:-mock-api-key-not-configured}
-      # DeepSeek API (用于 TradingAgents 等)
-      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-your-deepseek-api-key}
+      # DeepSeek API（密钥已删除，如需恢复请加回 DEEPSEEK_API_KEY 行）
       - DEEPSEEK_BASE_URL=${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
       - DEEPSEEK_MODEL=${DEEPSEEK_MODEL:-deepseek-chat}
       # 选股意图解析复用 AI_IDE LLM 配置（OpenAI 兼容）
@@ -237,7 +236,7 @@ services:
       - EMBEDDING_MODEL=${EMBEDDING_MODEL:-BAAI/bge-m3}
 
       # QuantDB SDK（付费高质量数据源：K线/Tick/财报/估值/315维AI因子）
-      - QUANTDB_API_KEY=${QUANTDB_API_KEY:-}
+      # QuantDB API（密钥已删除，如需在线同步请加回 QUANTDB_API_KEY 行）
       # QuantDB 本地数据中枢（A 股优先数据源）
       - QM_QUANTDB_DATA_DIR=/data/quantdb
       # 市场分析快照目录（脚本 compute.py 产出后经 scp 部署到宿主机 ./data/market-analysis）
@@ -408,8 +407,7 @@ services:
       # Qwen/DashScope API (mock key 允许启动，用户需配置真实 key)
       - DASHSCOPE_API_KEY=${DASHSCOPE_API_KEY:-mock-api-key-not-configured}
       - QWEN_API_KEY=${QWEN_API_KEY:-mock-api-key-not-configured}
-      # DeepSeek API (用于 TradingAgents 等)
-      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-your-deepseek-api-key}
+      # DeepSeek API（密钥已删除，如需恢复请加回 DEEPSEEK_API_KEY 行）
       - DEEPSEEK_BASE_URL=${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
       - DEEPSEEK_MODEL=${DEEPSEEK_MODEL:-deepseek-chat}
 
@@ -419,7 +417,7 @@ services:
       - AI_IDE_LLM_API_KEY=${AI_IDE_LLM_API_KEY:-mock-api-key-not-configured}
 
       # QuantDB SDK（数据同步 + 特征快照生成）
-      - QUANTDB_API_KEY=${QUANTDB_API_KEY:-}
+      # QuantDB API（密钥已删除，如需在线同步请加回 QUANTDB_API_KEY 行）
       - QM_QUANTDB_DATA_DIR=/data/quantdb
       # QuantDB 同步状态库（避免容器内空库导致全量重下）
       - QUANTDB_STATE_DIR=/data/quantdb/.sync_state
@@ -512,7 +510,7 @@ services:
       - NEWS_MATCHER_RELOAD_SEC=600
 
       # QuantDB SDK（数据同步调度需要）
-      - QUANTDB_API_KEY=${QUANTDB_API_KEY:-}
+      # QuantDB API（密钥已删除，如需在线同步请加回 QUANTDB_API_KEY 行）
       - QM_QUANTDB_DATA_DIR=/data/quantdb
       - QUANTDB_STATE_DIR=/data/quantdb/.sync_state
 

@@ -11,6 +11,7 @@ sync 部分，去掉远端 SDK 相关端点）。两个市场复用同一套逻�
 
 from __future__ import annotations
 
+import asyncio
 import itertools
 import logging
 import os
@@ -687,6 +688,49 @@ def _symbol_choices(spec: DatasetSpec, root: Path, market: str) -> dict[str, Any
     }
 
 
+def _build_catalog_payload(market: str, specs: tuple[DatasetSpec, ...], groups: list[dict[str, Any]], root: Path) -> dict[str, Any]:
+    """同步组装目录载荷（含全量磁盘扫盘）。
+
+    调用方必须经 asyncio.to_thread 执行，禁止在事件循环线程直接调用，
+    否则单 worker 下 /health 会被长时间饿死并触发 watchdog 重启。
+    """
+    items = []
+    for spec in specs:
+        items.append(
+            {
+                "dataset": spec.dataset,
+                "name": spec.name,
+                "group": spec.group,
+                "category_id": spec.category_id,
+                "layout": spec.layout,
+                "rel_dir": spec.rel_dir,
+                "note": spec.note,
+                **_dataset_stats(spec, root),
+            }
+        )
+    out_groups = []
+    for g in groups:
+        members = [it for it in items if it["group"] == g["id"]]
+        if not members:
+            continue  # 该市场没有此类数据集时不渲染空分组
+        out_groups.append(
+            {
+                **g,
+                "dataset_count": len(members),
+                "synced_count": sum(1 for it in members if it["synced"]),
+                "files": sum(it["files"] for it in members),
+                "size_mb": round(sum(it["size_mb"] for it in members), 1),
+            }
+        )
+    return {
+        "data_dir": str(root),
+        "market": market,
+        "groups": out_groups,
+        "datasets": items,
+        "timestamp": _now_iso(),
+    }
+
+
 def make_market_router(
     *, market: str, env_var: str, default_dir: str, sync_entry: str
 ) -> APIRouter:
@@ -718,43 +762,12 @@ def make_market_router(
     async def get_catalog(current_user: dict = Depends(require_admin)):
         try:
             root = _root()
-            items = []
-            for spec in DATASETS:
-                items.append(
-                    {
-                        "dataset": spec.dataset,
-                        "name": spec.name,
-                        "group": spec.group,
-                        "category_id": spec.category_id,
-                        "layout": spec.layout,
-                        "rel_dir": spec.rel_dir,
-                        "note": spec.note,
-                        **_dataset_stats(spec, root),
-                    }
-                )
-            groups = []
-            for g in _GROUPS:
-                members = [it for it in items if it["group"] == g["id"]]
-                if not members:
-                    continue  # 该市场没有此类数据集时不渲染空分组
-                groups.append(
-                    {
-                        **g,
-                        "dataset_count": len(members),
-                        "synced_count": sum(1 for it in members if it["synced"]),
-                        "files": sum(it["files"] for it in members),
-                        "size_mb": round(sum(it["size_mb"] for it in members), 1),
-                    }
-                )
+            payload = await asyncio.to_thread(
+                _build_catalog_payload, market, DATASETS, _GROUPS, root
+            )
             return {
                 "success": True,
-                "data": {
-                    "data_dir": str(root),
-                    "market": market,
-                    "groups": groups,
-                    "datasets": items,
-                    "timestamp": _now_iso(),
-                },
+                "data": payload,
             }
         except Exception as exc:  # noqa: BLE001
             logger.error("%s catalog failed: %s", market, exc, exc_info=True)

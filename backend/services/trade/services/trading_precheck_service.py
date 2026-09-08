@@ -67,10 +67,13 @@ def _get_env_with_root_fallback(key: str, default: str = "") -> str:
 
 
 def _get_stream_series_redis_client():
-    host = _get_env_with_root_fallback("REDIS_HOST", "localhost")
-    port = int(_get_env_with_root_fallback("REDIS_PORT", "6379") or "6379")
-    password = _get_env_with_root_fallback("REDIS_PASSWORD", "") or None
-    db = int(_get_env_with_root_fallback("REDIS_DB_MARKET", "3"))
+    # 与 live_trading.real_trading_utils 对齐：优先直连远端行情 Redis
+    # （REMOTE_QUOTE_REDIS_*，与 stream quote->series 写入端一致）。
+    # 此函数当前无调用方，保留仅为避免外部导入 break。
+    host = _get_env_with_root_fallback("REMOTE_QUOTE_REDIS_HOST", "www.quantmindai.cn")
+    port = int(_get_env_with_root_fallback("REMOTE_QUOTE_REDIS_PORT", "6379") or "6379")
+    password = _get_env_with_root_fallback("REMOTE_QUOTE_REDIS_PASSWORD", "quantmind2026") or None
+    db = int(_get_env_with_root_fallback("REMOTE_QUOTE_REDIS_DB", "3") or "3")
     client = redis_lib.Redis(
         host=host,
         port=port,

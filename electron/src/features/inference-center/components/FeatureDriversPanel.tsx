@@ -21,7 +21,7 @@ export const FeatureDriversPanel: React.FC<FeatureDriversPanelProps> = ({ driver
           </div>
           <div>
             <h4 className="text-sm font-bold text-slate-800 m-0">单股因子贡献与归因透视 (SHAP Drivers)</h4>
-            <p className="text-[11px] text-slate-400 m-0">驱动未来预测得分的核心正负向特征</p>
+            <p className="text-[11px] text-slate-600 m-0">驱动未来预测得分的核心正负向特征</p>
           </div>
         </div>
         <div className="flex items-center gap-1.5">
@@ -30,11 +30,11 @@ export const FeatureDriversPanel: React.FC<FeatureDriversPanelProps> = ({ driver
               模型 SHAP 归因
             </span>
           ) : (
-            <span className="text-[11px] font-semibold text-slate-400 bg-slate-50 px-2 py-0.5 rounded-md border border-slate-200">
+            <span className="text-[11px] font-semibold text-slate-600 bg-slate-50 px-2 py-0.5 rounded-md border border-slate-200">
               特征启发式
             </span>
           )}
-          <span className="text-[11px] text-slate-400 font-mono">Top {drivers.length}</span>
+          <span className="text-[11px] text-slate-600 font-mono">Top {drivers.length}</span>
         </div>
       </div>
 
@@ -44,8 +44,8 @@ export const FeatureDriversPanel: React.FC<FeatureDriversPanelProps> = ({ driver
             <div className="w-10 h-10 rounded-xl bg-slate-50 border border-slate-100 flex items-center justify-center text-slate-300">
               <Inbox className="w-5 h-5" />
             </div>
-            <p className="text-xs font-semibold text-slate-500 m-0">暂无因子贡献数据</p>
-            <p className="text-[11px] text-slate-400 m-0 leading-relaxed max-w-[240px]">
+            <p className="text-xs font-semibold text-slate-700 m-0">暂无因子贡献数据</p>
+            <p className="text-[11px] text-slate-600 m-0 leading-relaxed max-w-[240px]">
               未匹配到该标的的行情特征，无法归因预测分数。
               <br />
               请确认标的代码与市场正确后重试。
@@ -69,12 +69,12 @@ export const FeatureDriversPanel: React.FC<FeatureDriversPanelProps> = ({ driver
                       <span className="text-xs font-bold text-slate-800 truncate">{d.name}</span>
                       <div className="flex items-center gap-1.5 mt-0.5">
                         {d.category && (
-                          <span className="text-[10px] text-slate-400 bg-slate-50 px-1.5 py-0.2 rounded border border-slate-100">
+                          <span className="text-[10px] text-slate-600 bg-slate-50 px-1.5 py-0.2 rounded border border-slate-100">
                             {d.category}
                           </span>
                         )}
                         {d.value !== undefined && (
-                          <span className="text-[10px] text-slate-500 font-mono">值: {d.value}</span>
+                          <span className="text-[10px] text-slate-700 font-mono">值: {d.value}</span>
                         )}
                       </div>
                     </div>
@@ -110,12 +110,12 @@ export const FeatureDriversPanel: React.FC<FeatureDriversPanelProps> = ({ driver
                       <span className="text-xs font-bold text-slate-800 truncate">{d.name}</span>
                       <div className="flex items-center gap-1.5 mt-0.5">
                         {d.category && (
-                          <span className="text-[10px] text-slate-400 bg-slate-50 px-1.5 py-0.2 rounded border border-slate-100">
+                          <span className="text-[10px] text-slate-600 bg-slate-50 px-1.5 py-0.2 rounded border border-slate-100">
                             {d.category}
                           </span>
                         )}
                         {d.value !== undefined && (
-                          <span className="text-[10px] text-slate-500 font-mono">值: {d.value}</span>
+                          <span className="text-[10px] text-slate-700 font-mono">值: {d.value}</span>
                         )}
                       </div>
                     </div>

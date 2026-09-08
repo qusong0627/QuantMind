@@ -1492,6 +1492,60 @@ def _read_model_pred_day(storage_path: str, trade_date: str) -> list[dict[str, A
     return rows
 
 
+def _read_pred_single_symbol(
+    storage_path: str, trade_date: str, normalized_symbol: str
+) -> float | None:
+    """直读模型 pred.parquet 某日单个标的的分数。
+
+    个股独立轻路线专用：单行点查（duckdb 下推 date+symbol 谓词，毫秒级），
+    不走按日物化分片、不写进程缓存、不碰数据库。无文件/无列/无命中返回 None，
+    调用方据此决定是否转实时推理。
+    """
+    parquet_file = _pred_parquet_file(storage_path)
+    if parquet_file is None:
+        return None
+    digits = re.sub(r"[^0-9]", "", normalized_symbol)
+    try:
+        import duckdb
+
+        con = duckdb.connect()
+        try:
+            cols = [
+                r[0]
+                for r in con.execute(
+                    f"SELECT * FROM read_parquet('{str(parquet_file)}') LIMIT 0"
+                ).description
+            ]
+            score_col = next((c for c in ("pred", "fusion_score", "score") if c in cols), None)
+            date_col = (
+                "trade_date" if "trade_date" in cols else "date" if "date" in cols else None
+            )
+            sym_col = next((c for c in ("symbol", "instrument") if c in cols), None)
+            if not (score_col and date_col and sym_col):
+                return None
+            row = con.execute(
+                f"""
+                SELECT CAST({score_col} AS DOUBLE)
+                FROM read_parquet('{str(parquet_file)}')
+                WHERE CAST({date_col} AS DATE) = CAST('{trade_date}' AS DATE)
+                  AND CAST({score_col} AS DOUBLE) IS NOT NULL
+                  AND regexp_replace(CAST({sym_col} AS VARCHAR), '[^0-9]', '', 'g') = '{digits}'
+                LIMIT 1
+                """
+            ).fetchone()
+            if not row or row[0] is None:
+                return None
+            return float(row[0])
+        finally:
+            try:
+                con.close()
+            except Exception:
+                pass
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[predict_single_stock] pred 单标的直读失败 %s: %s", normalized_symbol, exc)
+        return None
+
+
 _PRED_DATES_CACHE: dict[str, tuple[float, list[str]]] = {}
 _PRED_DATES_CACHE_TTL = 600.0
 
@@ -2284,11 +2338,19 @@ async def get_symbols_features(tid: str, uid: str, symbols: list[str], lite: boo
         return {"code": 200, "data": {"items": items}}
 
 
-def _quantdb_kline_items(normalized_symbol: str, days: int) -> list[dict[str, Any]]:
-    """从 QuantDB 读取最近 days 日「不复权」日线（真实成交价），与行情软件同口径。
+def _quantdb_kline_items(
+    normalized_symbol: str, days: int, end_date: str | None = None, start_date: str | None = None
+) -> list[dict[str, Any]]:
+    """从 QuantDB 读取截止到 end_date 的最近 days 日「不复权」日线（真实成交价），与行情软件同口径。
 
     当前价格/前端 K 线统一走 QuantDB（qdb_daily_unadjusted，不复权原始价）。
     视图或数据不可用时返回空列表，由调用方回退到聚合表/实时行情源。
+
+    end_date 为 K 线截止日（含当日）：指标计算等需要无前视口径时按基准日截断；
+    缺省为今日（最新 days 根）。
+    start_date 为 K 线起始日（含当日）：图表需要展示基准日之后实际走势以验证
+    预测时，传基准日前推的起始日，此时返回 [start_date, end] 全窗口（上限 2000
+    根兜底），不再按 days 截尾。
     """
     try:
         from backend.services.engine.data_platform.quantdb_hub import QuantDBDataHub
@@ -2297,15 +2359,31 @@ def _quantdb_kline_items(normalized_symbol: str, days: int) -> list[dict[str, An
         if not hub.available:
             return []
         suffix = StockCodeUtil.to_suffix(normalized_symbol)
-        end = date.today()
-        # 自然日回退缓冲，确保覆盖 days 个交易日
-        start = end - timedelta(days=days * 2 + 20)
+        try:
+            end = date.fromisoformat(str(end_date)[:10]) if end_date else date.today()
+        except (ValueError, TypeError):
+            end = date.today()
+        try:
+            start_s = str(start_date)[:10] if start_date else ""
+            if start_s:
+                date.fromisoformat(start_s)
+        except (ValueError, TypeError):
+            start_s = ""
+        if start_s:
+            # 图表验证窗口：[起始日, 截止日] 全量返回（上限 2000 根兜底），
+            # 保留基准日之后的实际走势供对照预测，数字口径仍由调用方按基准日截断。
+            start = date.fromisoformat(start_s)
+            window_cap = 2000
+        else:
+            # 自然日回退缓冲，确保覆盖 days 个交易日
+            start = end - timedelta(days=days * 2 + 20)
+            window_cap = days
         df = hub.fetch_daily_kline(suffix, start, end, adjust="none")
         if df is None or df.empty or "trade_date" not in df.columns:
             return []
         df = df.dropna(subset=["close"]).copy()
         df = df.drop_duplicates(subset=["trade_date"]).sort_values("trade_date")
-        df = df.tail(days)
+        df = df.tail(window_cap)
         items = [
             {
                 "date": r["trade_date"].strftime("%Y-%m-%d"),
@@ -2323,21 +2401,41 @@ def _quantdb_kline_items(normalized_symbol: str, days: int) -> list[dict[str, An
         return []
 
 
-async def get_stock_kline(symbol: str, days: int) -> dict[str, Any]:
+async def get_stock_kline(
+    symbol: str, days: int, end_date: str | None = None, start_date: str | None = None
+) -> dict[str, Any]:
     normalized_symbol = StockCodeUtil.to_prefix(symbol)
     # 市场推断：港股后缀 0700.HK → HK 走 quanthk / stock_daily_latest_hk；
     # A 股前缀/6 位走原有 QuantDB / stock_daily_latest 链路
     is_hk = normalized_symbol.upper().endswith(".HK")
 
+    # 截止日/起始日归一化（非法值回退为缺省）；缓存键必须带日期维度，否则
+    # 不同窗口的 K 线结果会互相污染。
+    try:
+        end_s = str(end_date)[:10] if end_date else ""
+        if end_s:
+            date.fromisoformat(end_s)
+    except (ValueError, TypeError):
+        end_s = ""
+    try:
+        start_s = str(start_date)[:10] if start_date else ""
+        if start_s:
+            date.fromisoformat(start_s)
+    except (ValueError, TypeError):
+        start_s = ""
+    cache_key = f"sdl-kline:{normalized_symbol}:{days}:{end_s or 'latest'}:{start_s or '-'}"
+
     # 当前价格统一走 QuantDB（不复权真实价），避免 stock_daily_latest 空表/复权口径不一致
+    # 港股不在 QuantDB（走 quanthk 聚合表），仅 A 股走此快路径
     if not is_hk:
-        qd_items = _quantdb_kline_items(normalized_symbol, days)
+        qd_items = _quantdb_kline_items(
+            normalized_symbol, days, end_date=end_s or None, start_date=start_s or None
+        )
         if qd_items:
             payload = {"code": 200, "data": {"symbol": normalized_symbol, "items": qd_items}}
-            _set_local_cache(_SDL_CACHE, f"sdl-kline:{normalized_symbol}:{days}", payload, _SDL_CACHE_MAX_ENTRIES)
+            _set_local_cache(_SDL_CACHE, cache_key, payload, _SDL_CACHE_MAX_ENTRIES)
             return payload
 
-    cache_key = f"sdl-kline:{normalized_symbol}:{days}"
     cached = _get_local_cache(_SDL_CACHE, cache_key, _SDL_CACHE_TTL_SECONDS)
     if cached is not None:
         return cached
@@ -2346,24 +2444,42 @@ async def get_stock_kline(symbol: str, days: int) -> dict[str, Any]:
     # 表里 stock_daily_latest.symbol 实际可能是后缀格式（"600519.SH"）或前缀格式
     # （"SH600519"）。统一两边都走 _norm_symbol_sql 归一化为前缀格式后再比较，
     # 才能匹配上当前数据（5536 个股票全部为后缀格式存储）。
-    if is_hk:
-        cond_where = """symbol = :s"""
+    # 港股走 stock_daily_latest_hk（quanthk 最新交易日全量，symbol 为 0700.HK 后缀式，
+    # 直接等值匹配）；A 股走 stock_daily_latest，用 _norm_symbol_sql 归一化前缀后比较。
+    # 有起始日时返回 [起始日, 截止日] 全窗口（升序，上限 2000 根），供图表展示
+    # 基准日之后实际走势；无起始日时保持“最近 days 根”语义。
+    table = "stock_daily_latest_hk" if is_hk else "stock_daily_latest"
+    cond_where = "symbol = :s" if is_hk else f'{_norm_symbol_sql("symbol")} = {_norm_symbol_sql(":s")}'
+    window_cap = 2000 if start_s else days
+    if start_s:
+        sql = f"""
+            SELECT trade_date, open, high, low, close, volume, adj_factor
+            FROM {table}
+            WHERE {cond_where}
+            AND trade_date >= :st
+            {"AND trade_date <= :e" if end_s else ""}
+            ORDER BY trade_date ASC LIMIT :l
+        """
+        sql_params = {"s": normalized_symbol, "l": window_cap, "st": start_s}
+        if end_s:
+            sql_params["e"] = end_s
     else:
-        cond_where = f'{_norm_symbol_sql("symbol")} = {_norm_symbol_sql(":s")}'
-    sql = f"""
-        SELECT trade_date, open, high, low, close, volume, adj_factor
-        FROM {"stock_daily_latest_hk" if is_hk else "stock_daily_latest"}
-        WHERE {cond_where}
-        ORDER BY trade_date DESC LIMIT :l
-    """
+        end_filter = "AND trade_date <= :e" if end_s else ""
+        sql = f"""
+            SELECT trade_date, open, high, low, close, volume, adj_factor
+            FROM {table}
+            WHERE {cond_where}
+            {end_filter}
+            ORDER BY trade_date DESC LIMIT :l
+        """
+        sql_params = {"s": normalized_symbol, "l": days}
+        if end_s:
+            sql_params["e"] = end_s
 
     items = []
     try:
         async with get_session(read_only=True) as session:
-            res = await session.execute(
-                text(sql),
-                {"s": normalized_symbol, "l": days},
-            )
+            res = await session.execute(text(sql), sql_params)
             for r in res:
                 adj_factor = r[6]
                 items.append(
@@ -2376,11 +2492,14 @@ async def get_stock_kline(symbol: str, days: int) -> dict[str, Any]:
                         "volume": float(r[5]),
                     }
                 )
-            items.reverse()
+            if not start_s:
+                items.reverse()
     except Exception as exc:
         logger.warning(f"[get_stock_kline] DB query failed: {exc}")
 
-    # 若 DB 暂无行情数据，自动通过实时行情源拉取真实 K 线
+    # 若 DB 暂无行情数据，自动通过实时行情源拉取真实 K 线。
+    # 腾讯 fqkline 支持起止日期（param=code,day,start,end,count,qfq）：无起始日
+    # 时用 end_date/count 截断防前视泄露；有起始日时拉取验证窗口供对照预测。
     if not items:
         try:
             import aiohttp
@@ -2389,7 +2508,8 @@ async def get_stock_kline(symbol: str, days: int) -> dict[str, Any]:
                 ts_code = f"hk{code5}"
             else:
                 ts_code = normalized_symbol.lower()
-            url = f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param={ts_code},day,,,{days},qfq"
+            tx_count = 2000 if start_s else days
+            url = f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param={ts_code},day,{start_s},{end_s},{tx_count},qfq"
             async with aiohttp.ClientSession() as client:
                 async with client.get(url, timeout=aiohttp.ClientTimeout(total=6)) as resp:
                     if resp.status == 200:
@@ -2407,6 +2527,19 @@ async def get_stock_kline(symbol: str, days: int) -> dict[str, Any]:
                                 })
         except Exception as e:
             logger.warning(f"[get_stock_kline] 实时在线拉取 K 线失败: {e}")
+
+    # 统一兜底：按窗口边界过滤。无起始日时保持“最近 days 根”；
+    # 有起始日时保留全窗口（上限 2000 根）。
+    if start_s or end_s:
+        items = [
+            it for it in items
+            if (not start_s or str(it.get("date", ""))[:10] >= start_s)
+            and (not end_s or str(it.get("date", ""))[:10] <= end_s)
+        ]
+    if not start_s:
+        items = items[-days:]
+    else:
+        items = items[:2000]
 
     payload = {"code": 200, "data": {"symbol": normalized_symbol, "items": items}}
     if items:
@@ -2639,7 +2772,9 @@ async def predict_single_stock(
                 daily_vol_pct = atr / latest_close
 
     # 当前价格统一走 QuantDB（不复权真实价），与前端 K 线同口径；聚合表仅作回退。
-    qd_items = _quantdb_kline_items(normalized_symbol, days=30)
+    # 有明确目标日时 K 线按目标日截断：基准价格/波动率/均线乖离都取目标日当时
+    # 的值，否则盲测的预测扇形锚点是最新价，历史视角失真（前视泄露）。
+    qd_items = _quantdb_kline_items(normalized_symbol, days=30, end_date=target_date)
     if qd_items:
         latest_close = float(qd_items[-1]["close"])
         if not target_date:
@@ -2653,7 +2788,7 @@ async def predict_single_stock(
                 ma_gap_20 = round((latest_close - ma20) / ma20 * 100, 2)
     elif latest_close == 0.0:
         # QuantDB 与聚合表均无该股数据时，通过实时行情感底获取最新收盘价与波动率
-        k_payload = await get_stock_kline(normalized_symbol, days=30)
+        k_payload = await get_stock_kline(normalized_symbol, days=30, end_date=target_date)
         k_items = (k_payload.get("data") or {}).get("items") or []
         if k_items:
             latest_close = float(k_items[-1]["close"])
@@ -2702,8 +2837,10 @@ async def predict_single_stock(
     # rank/score 口径未知时留空，由宽度门禁兜底。
     chosen_target_mode = str(sel.get("targetMode") or sel.get("target_mode") or "").strip().lower()
 
-    # “开始预测推理”必须实际执行注册模型，不能用页面侧或服务侧的公式伪造结果。
+    # “开始预测推理”走独立轻路线：pred.parquet 直读优先，否则实时推理，
+    # 全程不落库（不写 run 记录/信号表/Redis 标记/pred 回写），结果只在前端缓存。
     # 延迟导入避免 research/model_training 路由在应用启动阶段发生循环导入。
+    independent_main: dict[str, Any] | None = None
     if execute:
         if not selected_model:
             raise HTTPException(status_code=404, detail="未找到可执行的已注册模型")
@@ -2717,25 +2854,74 @@ async def predict_single_stock(
                 {"tenant_id": tid, "user_id": uid}, chosen_model_id
             )
             requested_date = date.fromisoformat(target_date or latest_date)
-            execution = await _execute_single_day_inference(
-                requested_model_id=requested_model_id,
-                resolved=resolved,
-                model_dir=Path(resolved.storage_path),
-                requested_date=requested_date,
-                tenant_id=tid,
-                user_id=uid,
-                symbols=[normalized_symbol],
+            storage_path = str(resolved.storage_path)
+            # ① pred.parquet 单标的直读（不物化分片、不写库）
+            hit = _read_pred_single_symbol(
+                storage_path, requested_date.isoformat(), normalized_symbol
             )
+            hit_date = requested_date.isoformat()
+            live_signal: dict[str, Any] | None = None
+            if hit is None:
+                # ② 无命中则实时推理（persist=False：解析信号但不写库不发布）
+                execution = await _execute_single_day_inference(
+                    requested_model_id=requested_model_id,
+                    resolved=resolved,
+                    model_dir=Path(storage_path),
+                    requested_date=requested_date,
+                    tenant_id=tid,
+                    user_id=uid,
+                    symbols=[normalized_symbol],
+                    persist=False,
+                )
+                if not execution.get("success"):
+                    raise HTTPException(
+                        status_code=422,
+                        detail=execution.get("error_message") or "模型推理未产生有效结果",
+                    )
+                # 回退后的数据日可能有 parquet（请求日无数据但回退日有），再试一次
+                rolled = str(execution.get("data_trade_date") or hit_date)
+                hit = _read_pred_single_symbol(storage_path, rolled, normalized_symbol)
+                hit_date = rolled
+                if hit is None:
+                    # ③ 取内存信号（已按 symbols 过滤，仅含目标股）
+                    for sig in execution.get("signals") or []:
+                        try:
+                            if StockCodeUtil.to_prefix(str(sig.get("symbol") or "")) == normalized_symbol:
+                                live_signal = sig
+                                break
+                        except Exception:
+                            continue
+                    if live_signal is None:
+                        raise HTTPException(status_code=422, detail="模型推理未产生有效结果")
+            if live_signal is not None:
+                fusion = float(live_signal["score"])
+                from backend.services.engine.inference.script_runner import (
+                    InferenceScriptRunner,
+                )
+
+                side = InferenceScriptRunner._resolve_signal_sides(
+                    [fusion], [int(live_signal.get("consensus") or 0)]
+                )[0]
+                data_source = "live"
+            else:
+                fusion = float(hit)
+                side = "BUY" if fusion > 0.2 else ("SELL" if fusion < -0.2 else "HOLD")
+                data_source = "pred_parquet"
+            independent_main = {
+                "fusion_score": fusion,
+                "signal_side": side,
+                "score_rank": None,
+                "quality": None,
+                "expected_price": None,
+                "run_model_id": chosen_model_id,
+                "run_id": None,
+                "trade_date": hit_date,
+            }
         except HTTPException:
             raise
         except Exception as exc:
             logger.exception("[predict_single_stock] 实时模型推理失败")
             raise HTTPException(status_code=502, detail=f"实时模型推理失败: {exc}") from exc
-        if not execution.get("success"):
-            raise HTTPException(
-                status_code=422,
-                detail=execution.get("error_message") or "模型推理未产生有效结果",
-            )
 
     # 3. 读真实推理分数：engine_signal_scores（混合A：默认读持久化真实分数）
     _sym_variants = list({
@@ -2753,11 +2939,17 @@ async def predict_single_stock(
     score_rows = []
     try:
         async with get_session(read_only=True) as session:
-            # 仅非 execute 路径保留「目标日不晚于落库日」的上限过滤（历史查询语义）。
-            # execute=True 刚对目标股票现场补推并落库，落库 trade_date 可能晚于
-            # latest_date/今日（如补推成交到最新交易日），故去掉上限，直接取最新，
-            # 否则刚补推的分数会被过滤成 404「该标的没有真实模型推理结果」。
-            date_filter = "" if execute else " AND e.trade_date <= :d"
+            # 有明确目标日时必须保留「目标日不晚于落库日」的上限过滤，否则
+            # ORDER BY 取到的是最新分数，基准日选择形同虚设（盲测泄露）。
+            # 无目标日时沿用旧逻辑：execute=True 刚对目标股票现场补推并落库，
+            # 落库 trade_date 可能晚于回退前的 latest_date/今日，故去掉上限，
+            # 直接取最新，否则刚补推的分数会被过滤成 404。
+            # （目标日补推的落库 trade_date 即回退后的数据日，恒 <= 目标日，
+            #  不会误伤，故有 target_date 时可安全保留过滤。）
+            if target_date:
+                date_filter = " AND e.trade_date <= :d"
+            else:
+                date_filter = "" if execute else " AND e.trade_date <= :d"
             params = dict(score_params)
             if not date_filter:
                 params.pop("d", None)  # SQL 无 :d 占位符时不能传多余绑定
@@ -2815,6 +3007,69 @@ async def predict_single_stock(
             seen.add(mid)
             consensus_rows.append(r)
 
+    # 独立轻路线主分（内存态：pred.parquet 直读或实时信号，不读信号表）。
+    # 分位扇形所需 quality 允许从信号表同模型同日行只读复用（零写入），
+    # 无则保持 None（旧模型不伪造区间）。
+    if independent_main is not None:
+        main_row = independent_main
+        resolved_date = str(independent_main["trade_date"])
+        for qr in score_rows or []:
+            if str(qr.get("trade_date")) != resolved_date:
+                continue
+            if (qr.get("run_model_id") or qr.get("run_id")) not in {
+                chosen_model_id,
+                independent_main.get("run_model_id"),
+            }:
+                continue
+            if isinstance(qr.get("quality"), str) and qr.get("quality"):
+                main_row["quality"] = qr.get("quality")
+                break
+
+    # 多模型共识兜底：当信号表在该基准日数据不全时（常见于独立轻路线 persist=False
+    # 从未写库，或历史日期早于最近批次），从各模型的 pred.parquet 直读该标的
+    # 当日分数补齐缺口，仍不写库。保证底部“多模型分数与30天曲线”有历史可回溯。
+    if len(consensus_rows) < len(available_models) and available_models:
+        try:
+            from backend.shared.model_registry import model_registry_service as _mrs_cons
+
+            fallback_date = str((main_row or {}).get("trade_date") or resolved_date or date_bound_str)
+            existing_mids = {
+                str(r.get("run_model_id") or r.get("run_id") or "").strip() for r in consensus_rows
+            }
+            for m in available_models:
+                mid = str(m.get("modelId") or "").strip()
+                if not mid or mid in existing_mids:
+                    continue
+                try:
+                    mod = await _mrs_cons.get_model(tenant_id=tid, user_id=uid, model_id=mid)
+                    sp = str((mod or {}).get("storage_path") or "").strip()
+                    if not sp:
+                        continue
+                    sc = _read_pred_single_symbol(sp, fallback_date, normalized_symbol)
+                    if sc is None:
+                        continue
+                    side = "BUY" if sc > 0.2 else ("SELL" if sc < -0.2 else "HOLD")
+                    consensus_rows.append(
+                        {
+                            "fusion_score": float(sc),
+                            "signal_side": side,
+                            "score_rank": None,
+                            "quality": None,
+                            "expected_price": None,
+                            "run_model_id": mid,
+                            "run_id": None,
+                            "trade_date": fallback_date,
+                        }
+                    )
+                except Exception:  # noqa: BLE001
+                    continue
+            # 若补齐后主分仍为空（极早日期且独立路线未命中），用补齐首个当主分
+            if main_row is None and consensus_rows:
+                main_row = dict(consensus_rows[0])
+                resolved_date = str(main_row.get("trade_date") or fallback_date)
+        except Exception:  # noqa: BLE001
+            pass
+
     # 4. 只展示真实模型 SHAP 归因；没有 SHAP 结果就保持为空，绝不回退到启发式数据。
     drivers: list[dict[str, Any]] = []
 
@@ -2827,7 +3082,10 @@ async def predict_single_stock(
             rating = "STRONG_BUY"
         else:
             rating = {"BUY": "BUY", "HOLD": "HOLD", "SELL": "SELL"}.get(signal_side, "HOLD")
-        data_source = "persisted"
+        # 独立轻路线（pred.parquet/实时内存分）已在上游设定 data_source，
+        # 仅信号表老路径回退为 persisted。
+        if independent_main is None:
+            data_source = "persisted"
         headline_mid = main_row["run_model_id"] or main_row["run_id"]
         if headline_mid:
             headline_meta = next(

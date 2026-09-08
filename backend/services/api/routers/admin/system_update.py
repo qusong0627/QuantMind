@@ -132,6 +132,7 @@ def _build_container_spec(image: str) -> dict:
             "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
             f"QUANTMIND_PROJECT_DIR={_PROJECT_DIR}",
             f"DOCKER_CLI_PLUGINS={_COMPOSE_PLUGIN_DIR}",
+            "TZ=Asia/Shanghai",
             # 受信项目目录，避免 updater 容器内 git 因 UID 归属差异触发
             # dubious ownership 校验，导致所有 git 命令失败、被误判为"未提交改动"。
             # 见 GIT_CONFIG_COUNT 系列：https://git-scm.com/docs/git
@@ -184,6 +185,20 @@ async def trigger_update(
             raise HTTPException(
                 status_code=502, detail=f"启动 updater 容器失败: {started.text[:300]}"
             )
+        # 异步记录“更新已触发”事件（失败不阻断主流程）
+        try:
+            from backend.shared.system_events import record_system_event_async
+            import asyncio as _asyncio
+            _asyncio.create_task(record_system_event_async(
+                event_type="system_update",
+                level="info",
+                source="quantmind-api",
+                title="系统更新已触发（Web）",
+                message=f"updater 镜像 {image} 已启动，容器 {cid[:12]}",
+                meta={"container_id": cid, "image": image},
+            ))
+        except Exception:
+            pass
         return {"success": True, "data": {"started": True, "task_id": cid}}
     except HTTPException:
         raise

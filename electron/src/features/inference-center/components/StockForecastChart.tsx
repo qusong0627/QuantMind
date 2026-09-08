@@ -32,17 +32,33 @@ export const StockForecastChart: React.FC<StockForecastChartProps> = ({
     const hasForecast = forecast.length > 0;
 
     const lastKlineIndex = historyDates.length - 1;
-    const lastClose = kline.length > 0 ? kline[kline.length - 1].close : currentPrice;
 
-    // 历史部分在预测曲线上填充 null，在最后一根 K 线处连接
+    // 基准日锚点：K 线窗口含基准日后实际走势（供对照验证），预测扇形必须从
+    // as_of_date 的收盘（= currentPrice，后端已按基准日截断取值）长出，
+    // 竖线也钉在基准日而非最后一根 K 线
+    let baseIndex = lastKlineIndex;
+    if (asOfDate) {
+      const exact = historyDates.lastIndexOf(asOfDate);
+      if (exact >= 0) {
+        baseIndex = exact;
+      } else {
+        const le = historyDates.map((d, i) => ({ d, i })).filter((x) => x.d <= asOfDate).pop();
+        if (le) baseIndex = le.i;
+      }
+    }
+    const anchorPrice = currentPrice > 0
+      ? currentPrice
+      : (baseIndex >= 0 ? kline[baseIndex].close : 0);
+
+    // 历史部分在预测曲线上填充 null，在基准日 K 线处连接
     const p50SeriesData: (number | null)[] = new Array(historyDates.length).fill(null);
     const p90SeriesData: (number | null)[] = new Array(historyDates.length).fill(null);
     const p10SeriesData: (number | null)[] = new Array(historyDates.length).fill(null);
 
-    if (lastKlineIndex >= 0) {
-      p50SeriesData[lastKlineIndex] = lastClose;
-      p90SeriesData[lastKlineIndex] = lastClose;
-      p10SeriesData[lastKlineIndex] = lastClose;
+    if (baseIndex >= 0) {
+      p50SeriesData[baseIndex] = anchorPrice;
+      p90SeriesData[baseIndex] = anchorPrice;
+      p10SeriesData[baseIndex] = anchorPrice;
     }
 
     forecast.forEach(f => {
@@ -55,6 +71,9 @@ export const StockForecastChart: React.FC<StockForecastChartProps> = ({
       backgroundColor: 'transparent',
       animation: true,
       animationDuration: 800,
+      textStyle: {
+        fontFamily: "'Microsoft YaHei', '微软雅黑', 'PingFang SC', sans-serif",
+      },
       tooltip: {
         trigger: 'axis',
         axisPointer: {
@@ -77,7 +96,7 @@ export const StockForecastChart: React.FC<StockForecastChartProps> = ({
               const [, close, low, high] = item.data;
               html += `
                 <div style="display: flex; justify-content: space-between; gap: 12px; font-size: 11px; margin: 2px 0;">
-                  <span style="color: #64748b;">K线收盘:</span>
+                  <span style="color: #334155;">K线收盘:</span>
                   <span style="font-weight: 600; font-family: monospace;">¥${close?.toFixed(2)}</span>
                 </div>
               `;
@@ -100,7 +119,7 @@ export const StockForecastChart: React.FC<StockForecastChartProps> = ({
           : ['日K线'],
         bottom: 8,
         itemGap: 18,
-        textStyle: { color: '#64748b', fontSize: 11, fontWeight: 500 },
+        textStyle: { color: '#334155', fontSize: 11, fontWeight: 500 },
       },
       grid: {
         left: '4%',
@@ -117,7 +136,7 @@ export const StockForecastChart: React.FC<StockForecastChartProps> = ({
         axisLine: { lineStyle: { color: '#e2e8f0' } },
         axisTick: { show: false },
         axisLabel: {
-          color: '#64748b',
+          color: '#334155',
           fontSize: 10,
           formatter: (val: string) => val ? val.slice(5) : '',
         },
@@ -128,7 +147,7 @@ export const StockForecastChart: React.FC<StockForecastChartProps> = ({
         axisLine: { show: false },
         axisTick: { show: false },
         axisLabel: {
-          color: '#64748b',
+          color: '#334155',
           fontSize: 10,
           formatter: (v: number) => `¥${v.toFixed(1)}`,
         },
@@ -147,15 +166,15 @@ export const StockForecastChart: React.FC<StockForecastChartProps> = ({
             borderColor: '#ef4444',
             borderColor0: '#10b981',
           },
-          markLine: lastKlineIndex >= 0 ? {
+          markLine: baseIndex >= 0 ? {
             symbol: ['none', 'none'],
             data: [
               {
-                xAxis: historyDates[lastKlineIndex],
+                xAxis: historyDates[baseIndex],
                 lineStyle: { color: '#3b82f6', type: 'dashed', width: 1.5 },
                 label: {
                   show: true,
-                  formatter: 'T 当前基准日',
+                  formatter: baseIndex >= 0 ? `T 基准日 ${historyDates[baseIndex].slice(5)}` : 'T 基准日',
                   position: 'top',
                   color: '#2563eb',
                   fontSize: 10,
@@ -213,7 +232,7 @@ export const StockForecastChart: React.FC<StockForecastChartProps> = ({
         }] : []),
       ],
     };
-  }, [kline, forecast, symbol, currentPrice]);
+  }, [kline, forecast, symbol, currentPrice, asOfDate]);
 
   return (
     <div className="w-full h-full relative flex flex-col">
@@ -231,7 +250,7 @@ export const StockForecastChart: React.FC<StockForecastChartProps> = ({
         </div>
 
         {/* 第二行：基准日 + 模型信息 */}
-        <div className="flex items-center gap-3 text-[11px] text-slate-400">
+        <div className="flex items-center gap-3 text-xs text-slate-600">
           {asOfDate && (
             <span className="flex items-center gap-1 font-mono">
               基准日期: <strong className="text-slate-600 font-semibold">{asOfDate}</strong>

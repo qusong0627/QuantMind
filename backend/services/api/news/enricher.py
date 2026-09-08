@@ -346,7 +346,11 @@ def fetch_page_content(client: httpx.Client, page_id: int) -> str:
 
 
 def _pending_page_ids(conn, candidate_ids: Iterable[int]) -> set[int]:
-    """从候选 ID 中找出尚未 enrich 或 model 版本过旧的。"""
+    """从候选 ID 中找出尚未 enrich 或 model 版本过旧的。
+
+    完成判定与写入的 model_version 同源（current_target_version + is_row_outdated），
+    避免硬编码历史前缀导致启用 FinBERT 后已处理行被无限重跑。
+    """
     ids = list(set(int(x) for x in candidate_ids if x))
     if not ids:
         return set()

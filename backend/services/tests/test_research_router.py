@@ -186,6 +186,9 @@ async def test_get_stock_kline_uses_sdl_cache(monkeypatch):
     research_service = research._research_service  # noqa: SLF001
     research_service._SDL_CACHE.clear()  # noqa: SLF001
 
+    # 本用例测 DB 回退分支的缓存：屏蔽 QuantDB 主路（有本地数据的环境会命中主路）
+    monkeypatch.setattr(research_service, "_quantdb_kline_items", lambda *a, **k: [])
+
     class _FakeSession:
         async def execute(self, statement, params=None):
             calls["count"] += 1

@@ -481,9 +481,11 @@ def get_stock_money_flow(con, data_dir: Path, limit: int = 20) -> list[dict]:
     if "flow_net_amount" in hist.columns:
         hng = hist[hist["flow_net_amount"].notna() & (hist["flow_net_amount"] != 0)][["symbol", "_dt", "flow_net_amount"]]
         cc = hng.groupby(["_dt", "flow_net_amount"]).size().reset_index(name="n")
-        for row in cc[cc["n"] >= 25].itertuples(index=False):
-            dt = str(row._dt)
-            syms = set(hng[(hng["_dt"] == dt) & (hng["flow_net_amount"] == row.flow_net_amount)]["symbol"])
+        # itertuples 会把下划线开头的列名重命名为位置名，row._dt 必抛 AttributeError；
+        # 此处按位置解包（列序固定为 [_dt, flow_net_amount, n]）。
+        for _dt_val, _famt, _n in cc[cc["n"] >= 25].itertuples(index=False):
+            dt = str(_dt_val)
+            syms = set(hng[(hng["_dt"] == dt) & (hng["flow_net_amount"] == _famt)]["symbol"])
             bad_by_dt.setdefault(dt, set()).update(syms)
     prices = _load_prices(con, [today])
     names = _instrument_names(data_dir)
