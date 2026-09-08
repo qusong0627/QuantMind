@@ -30,6 +30,7 @@ import { useBacktestCenterStore } from '../../stores/backtestCenterStore';
 import { useAppSelector } from '../../store';
 import { selectCurrentMarket } from '../../store/slices/uiSlice';
 import { setCurrentTab } from '../../store/slices/aiStrategySlice';
+import { isMinibtStrategyType } from '../../utils/minibt';
 
 interface Strategy {
     id: string;
@@ -49,7 +50,7 @@ interface Strategy {
 }
 
 const isMinibtStrategy = (strategy: Strategy) =>
-    String(strategy.strategy_type || '').toLowerCase().startsWith('minibt_');
+    isMinibtStrategyType(strategy.strategy_type);
 
 export const StrategyManagementModule: React.FC = () => {
     const navigate = useNavigate();

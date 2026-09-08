@@ -30,7 +30,10 @@ import { modelTrainingService, UserModelRecord } from '../../services/modelTrain
 import { useAppSelector } from '../../store';
 import { selectCurrentMarket } from '../../store/slices/uiSlice';
 import { getMarketConfig } from '../../config/marketConfig';
+import { isMinibtStrategy } from '../../utils/minibt';
 import dayjs from 'dayjs';
+import { useNavigate } from 'react-router-dom';
+import { message } from 'antd';
 
 const MARKET_UNIVERSE_PRESETS: Record<string, { label: string; value: string }[]> = {
   CN: [
@@ -61,6 +64,7 @@ const DEFAULT_TEMPLATE_ID = 'standard_topk';
 const DEFAULT_TEMPLATE = getTemplateById(DEFAULT_TEMPLATE_ID);
 
 export const QlibQuickBacktest: React.FC = () => {
+  const navigate = useNavigate();
   const stopPollingRef = useRef<(() => void) | null>(null);
   const progressTimerRef = useRef<number | null>(null);
   const progressRef = useRef<number>(0);
@@ -257,9 +261,14 @@ export const QlibQuickBacktest: React.FC = () => {
   const loadPendingStrategy = async (id: string) => {
     try {
       const strategy = await strategyManagementService.getStrategy(id);
-      if (strategy) {
-        handleStrategySelected(strategy.code, strategy);
+      if (!strategy) return;
+      if (isMinibtStrategy(strategy)) {
+        // 陈旧 localStorage 可能指向 minibt 策略：qlib 跑不了，直接转 AI-IDE
+        message.info(`minibt 策略在 AI-IDE 中回测，已跳转：${strategy.name}`);
+        navigate(`/ai-ide?strategyId=${strategy.id}`);
+        return;
       }
+      handleStrategySelected(strategy.code, strategy);
     } catch (err) {
       console.error('Failed to load pending strategy:', err);
     }
@@ -294,6 +303,10 @@ export const QlibQuickBacktest: React.FC = () => {
     info?: StrategyFile,
     params?: QlibStrategyParams
   ) => {
+    if (isMinibtStrategy(info)) {
+      message.warning('minibt 策略不支持 qlib 快速回测，请在 AI-IDE 中运行');
+      return;
+    }
     setStrategyInfo(info || null);
     setError('');
 
