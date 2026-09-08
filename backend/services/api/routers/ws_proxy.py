@@ -97,3 +97,14 @@ async def websocket_proxy_bridge(websocket: WebSocket):
 async def websocket_proxy_market(websocket: WebSocket):
     """代理 /api/v1/ws/market 到 stream 服务."""
     await _proxy_websocket(websocket, "/api/v1/ws/market")
+
+
+@router.websocket("/ws/{path:path}")
+async def websocket_proxy_prefixed(websocket: WebSocket, path: str):
+    """代理 /ws/<path> 到 stream 的 /<path>（与 Nginx `rewrite ^/ws/(.*)$ /$1` 同义）。
+
+    Docker 部署下该前缀由 Nginx 先行剥离（docker/web/nginx.conf），本路由不参与；
+    便携包（无 Nginx）下前端 web 模式走相对路径 /ws/api/v1/ws/market 时由本路由兜底，
+    否则 Starlette 对未匹配的 WS 请求返回 403（表现为前端反复重连失败）。
+    """
+    await _proxy_websocket(websocket, f"/{path}")
