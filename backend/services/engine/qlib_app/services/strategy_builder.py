@@ -24,6 +24,15 @@ _BUILTIN_CLASS_MODULE_MAP: dict[str, str] = {
     "SimpleWeightStrategy": "backend.services.engine.qlib_app.utils.recording_strategy",
 }
 
+# minibt 脚本框架仅能在专用运行时（AI-IDE / quantmind-minibt-runner 镜像）执行。
+# 本引擎（qlib 回测）未安装该库，直接 exec 会抛 ModuleNotFoundError 裸栈
+# （2026-09-08 回测中心实录：minibt_* 策略走 qlib 回测必失败），
+# 因此在 AST 校验阶段拦截并给出可操作提示。
+_MINIBT_REJECT_MESSAGE = (
+    "该策略基于 minibt 脚本框架，qlib 回测引擎不支持；"
+    "请在 AI-IDE 中使用 minibt 运行时回测，或改用 qlib 策略模板。"
+)
+
 
 class StrategyBuilder(ABC):
     """Abstract Base Class for Strategy Builders"""
@@ -561,6 +570,8 @@ class CustomStrategyBuilder(StrategyBuilder):
                 for name in names:
                     if name in blacklist:
                         raise ValueError(f"Importing dangerous module '{name}' is forbidden")
+                    if name == "minibt":
+                        raise ValueError(_MINIBT_REJECT_MESSAGE)
 
             if isinstance(node, ast.Attribute):
                 if node.attr in dangerous_dunders:

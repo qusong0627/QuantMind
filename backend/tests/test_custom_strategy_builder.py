@@ -163,3 +163,43 @@ def test_custom_strategy_builder_sets_dynamic_module_path_for_local_class():
 
     assert isinstance(result, dict)
     assert result["module_path"] == "custom_strategy_test_module"
+
+
+def test_validate_rejects_minibt_import_with_actionable_message():
+    """回归 2026-09-08 回测中心：minibt_* 策略走 qlib 回测 → exec 抛
+    ModuleNotFoundError 裸栈。AST 校验阶段应拦下并给出可操作提示。"""
+    # Arrange
+    builder = CustomStrategyBuilder()
+    code = (
+        "import minibt\n"
+        "from minibt.indicators import MA\n\n"
+        "def get_strategy_config():\n"
+        "    return {'class': 'X', 'kwargs': {}}\n"
+    )
+
+    # Act / Assert
+    with pytest.raises(ValueError) as exc:
+        builder._validate_strategy_content(code)
+    assert "minibt" in str(exc.value)
+    assert "AI-IDE" in str(exc.value)
+
+
+def test_validate_still_accepts_plain_qlib_strategy():
+    """护栏不得误伤正常 qlib 策略。"""
+    builder = CustomStrategyBuilder()
+    builder._validate_strategy_content(
+        "from qlib.strategy.base import BaseStrategy\n"
+        "class S(BaseStrategy):\n"
+        "    pass\n"
+    )
+
+
+def test_validate_ignores_minibt_in_comments_and_strings():
+    """仅拦真实 import：注释/字符串里提到 minibt 不误判。"""
+    builder = CustomStrategyBuilder()
+    builder._validate_strategy_content(
+        "# 本策略不是 minibt 框架\n"
+        "NOTE = 'minibt 运行时'\n"
+        "class S:\n"
+        "    pass\n"
+    )
