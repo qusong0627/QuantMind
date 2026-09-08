@@ -37,6 +37,7 @@ interface Strategy {
     status: 'draft' | 'repository' | 'live_trading' | 'active' | 'inactive' | 'archived';
     created_at: string;
     updated_at: string;
+    strategy_type?: string;
     validated_backtest_id?: number;
     promoted_at?: string;
     live_trading_started_at?: string;
@@ -46,6 +47,9 @@ interface Strategy {
         max_drawdown?: number;
     };
 }
+
+const isMinibtStrategy = (strategy: Strategy) =>
+    String(strategy.strategy_type || '').toLowerCase().startsWith('minibt_');
 
 export const StrategyManagementModule: React.FC = () => {
     const navigate = useNavigate();
@@ -84,6 +88,7 @@ export const StrategyManagementModule: React.FC = () => {
                 id: item.id,
                 name: item.name,
                 status: normalizeStatus(item.status),
+                strategy_type: String(item?.parameters?.strategy_type || ''),
                 created_at: item.created_at || new Date().toISOString(),
                 updated_at: item.updated_at || item.created_at || new Date().toISOString(),
                 validated_backtest_id: item.validated_backtest_id,
@@ -101,6 +106,12 @@ export const StrategyManagementModule: React.FC = () => {
     };
 
     const handleBacktest = (strategy: Strategy) => {
+        if (isMinibtStrategy(strategy)) {
+            // minibt 脚本策略不走 qlib 快速回测,交给 AI-IDE minibt 运行时
+            message.info(`minibt 策略跳转 AI-IDE 回测: ${strategy.name}`);
+            navigate(`/ai-ide?strategyId=${strategy.id}`);
+            return;
+        }
         message.info(`跳转到快速回测: ${strategy.name}`);
         localStorage.setItem('selected_backtest_strategy_id', strategy.id);
         setActiveModule('quick-backtest');
@@ -238,7 +249,7 @@ export const StrategyManagementModule: React.FC = () => {
                                         <Edit className="w-4 h-4" /> 编辑
                                     </button>
                                     <button onClick={() => handleBacktest(strategy)} className="flex items-center gap-1 px-3 py-1.5 bg-blue-50 text-blue-600 rounded-lg text-sm">
-                                        <TestTube className="w-4 h-4" /> 回测验证
+                                        <TestTube className="w-4 h-4" /> {isMinibtStrategy(strategy) ? 'AI-IDE 回测' : '回测验证'}
                                     </button>
                                     <button onClick={() => handleDeleteClick(strategy)} className="flex items-center gap-1 px-3 py-1.5 bg-red-50 text-red-600 rounded-lg text-sm">
                                         <Trash2 className="w-4 h-4" /> 删除

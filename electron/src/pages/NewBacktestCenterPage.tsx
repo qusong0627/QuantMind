@@ -21,11 +21,16 @@ import { useBacktestCenterStore, ModuleId } from '../stores/backtestCenterStore'
 import { MarketSelector } from '../components/layout/MarketSelector';
 import { Bell } from 'lucide-react';
 import { PAGE_LAYOUT } from '../config/pageLayout';
+import { useAppSelector } from '../store';
+import { selectCurrentMarket } from '../store/slices/uiSlice';
+import { getMarketConfig } from '../config/marketConfig';
 
 // 固定尺寸常量已移除，改为自适应布局
 
 export const NewBacktestCenterPage: React.FC = () => {
   const { activeModule, setActiveModule } = useBacktestCenterStore();
+  const currentMarket = useAppSelector(selectCurrentMarket);
+  const marketCfg = getMarketConfig(currentMarket);
   // 组件挂载时，仅在 activeModule 为空或无效时重置为默认模块
   useEffect(() => {
     const validModules: ModuleId[] = [
@@ -91,6 +96,10 @@ export const NewBacktestCenterPage: React.FC = () => {
                 <h1 className="text-xl font-bold text-slate-800 tracking-tight">QuantMind</h1>
                 <div className="h-4 w-[1px] bg-slate-200 self-center" />
                 <span className="text-sm font-medium text-slate-500">回测中心</span>
+                {/* 当前市场视图标识:策略列表按此市场过滤(港股/A股策略互不可见) */}
+                <span className="text-xs font-semibold text-blue-600 bg-blue-50 border border-blue-100 rounded-lg px-2 py-0.5">
+                  {marketCfg.label}
+                </span>
               </div>
             </div>
           </div>

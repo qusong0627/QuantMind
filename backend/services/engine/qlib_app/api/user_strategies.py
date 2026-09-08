@@ -32,6 +32,7 @@ except ImportError:
 
 from backend.services.engine.qlib_app.services.strategy_templates import (
     get_all_templates,
+    get_template_by_id,
     invalidate_templates_cache,
 )
 from backend.services.engine.qlib_app.utils.structured_logger import StructuredTaskLogger
@@ -283,6 +284,9 @@ def _market_for_template(t) -> str | None:
     ms = set(t.markets or [])
     if "hong_kong" in ms:
         return "HK"
+    if "a_share" in ms:
+        # 显式标 A:避免 NULL 与 A 股视图歧义(CN 视图把 NULL 视作 A 股,HK 视图排除)
+        return "A"
     if "us_stock" in ms:
         return "US"
     if "crypto" in ms:
@@ -318,6 +322,14 @@ async def _perform_sync(user_id: str):
         if params.get("market"):
             continue
         mkt = _market_for_strategy_id(params.get("strategy_type"))
+        if not mkt:
+            # 按模板 markets 补标(a_share 模板显式标 A,消除 NULL 归属歧义)
+            try:
+                tpl = get_template_by_id(str(params.get("strategy_type") or ""))
+            except Exception:
+                tpl = None
+            if tpl:
+                mkt = _market_for_template(tpl)
         if mkt:
             merged = {**params, "market": mkt}
             await svc.save(
