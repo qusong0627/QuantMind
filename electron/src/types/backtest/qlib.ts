@@ -88,6 +88,10 @@ export interface QlibBacktestConfig {
   use_vectorized?: boolean;
   signal_lag_days?: number;
   allow_feature_signal_fallback?: boolean;
+  // 回测引擎标识：qlib 主引擎 / minibt 脚本运行时
+  engine?: 'qlib' | 'minibt';
+  // 引擎口径提示（如 minibt 撮合口径/手续费默认值），结果页会展示
+  warnings?: string[];
 }
 
 /** Qlib回测结果 */

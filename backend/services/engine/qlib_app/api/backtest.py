@@ -75,6 +75,19 @@ async def run_backtest(
 
         backtest_id = getattr(request, "backtest_id", None) or uuid4().hex
 
+        # minibt 脚本策略不走 qlib 引擎（主镜像没有该库），也不走 celery
+        # （worker 没有 docker socket）——在持有 docker.sock 的引擎进程里
+        # 直接派发 quantmind-minibt-runner 容器，结果映射回 qlib 结果形状。
+        from backend.services.engine.qlib_app.services.minibt_backtest_service import (
+            dispatch_minibt_backtest,
+            is_minibt_request,
+        )
+
+        if is_minibt_request(request):
+            return await dispatch_minibt_backtest(
+                request, backtest_id=backtest_id, async_mode=async_mode
+            )
+
         if async_mode:
             request_dict = request.dict()
             request_dict["backtest_id"] = backtest_id

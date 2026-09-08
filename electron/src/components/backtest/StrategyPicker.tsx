@@ -230,8 +230,8 @@ export const StrategyPicker: React.FC<StrategyPickerProps> = ({
         onValidationResult(result);
       }
 
-      // 如果验证通过，自动应用
-      if (result.is_valid && result.is_qlib_format) {
+      // 如果验证通过，自动应用（minibt 脚本策略由专用 runner 运行时回测）
+      if (result.is_valid && (result.is_qlib_format || result.engine === 'minibt')) {
         const codeParams = parseTopkParamsFromCode(content);
         onStrategySelected(content, {
           id: `upload_${Date.now()}`,
@@ -281,7 +281,7 @@ export const StrategyPicker: React.FC<StrategyPickerProps> = ({
       }
 
       // 如果验证通过，应用策略
-      if (result.is_valid && result.is_qlib_format) {
+      if (result.is_valid && (result.is_qlib_format || result.engine === 'minibt')) {
         const codeParams = parseTopkParamsFromCode(strategyToUse.code);
         onStrategySelected(strategyToUse.code, strategyToUse, codeParams);
       }
@@ -688,7 +688,7 @@ export const StrategyPicker: React.FC<StrategyPickerProps> = ({
  * 验证结果展示组件
  */
 const ValidationResultDisplay: React.FC<{ result: StrategyValidationResult }> = ({ result }) => {
-  if (result.is_valid && result.is_qlib_format) {
+  if (result.is_valid && (result.is_qlib_format || result.engine === 'minibt')) {
     return (
       <div className="bg-green-50 border border-green-200 rounded-2xl p-3">
         <div className="flex items-start gap-2">
@@ -698,7 +698,9 @@ const ValidationResultDisplay: React.FC<{ result: StrategyValidationResult }> = 
               策略验证通过
             </div>
             <div className="text-xs text-green-700">
-              检测到符合规范的 Qlib 策略，可以直接使用
+              {result.engine === 'minibt'
+                ? '检测到 minibt 脚本策略，将在 minibt 运行时回测（撮合口径与实盘有差异）'
+                : '检测到符合规范的 Qlib 策略，可以直接使用'}
             </div>
           </div>
         </div>

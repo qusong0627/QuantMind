@@ -30,7 +30,6 @@ import { useBacktestCenterStore } from '../../stores/backtestCenterStore';
 import { useAppSelector } from '../../store';
 import { selectCurrentMarket } from '../../store/slices/uiSlice';
 import { setCurrentTab } from '../../store/slices/aiStrategySlice';
-import { isMinibtStrategyType } from '../../utils/minibt';
 
 interface Strategy {
     id: string;
@@ -48,9 +47,6 @@ interface Strategy {
         max_drawdown?: number;
     };
 }
-
-const isMinibtStrategy = (strategy: Strategy) =>
-    isMinibtStrategyType(strategy.strategy_type);
 
 export const StrategyManagementModule: React.FC = () => {
     const navigate = useNavigate();
@@ -107,12 +103,6 @@ export const StrategyManagementModule: React.FC = () => {
     };
 
     const handleBacktest = (strategy: Strategy) => {
-        if (isMinibtStrategy(strategy)) {
-            // minibt 脚本策略不走 qlib 快速回测,交给 AI-IDE minibt 运行时
-            message.info(`minibt 策略跳转 AI-IDE 回测: ${strategy.name}`);
-            navigate(`/ai-ide?strategyId=${strategy.id}`);
-            return;
-        }
         message.info(`跳转到快速回测: ${strategy.name}`);
         localStorage.setItem('selected_backtest_strategy_id', strategy.id);
         setActiveModule('quick-backtest');
@@ -250,7 +240,7 @@ export const StrategyManagementModule: React.FC = () => {
                                         <Edit className="w-4 h-4" /> 编辑
                                     </button>
                                     <button onClick={() => handleBacktest(strategy)} className="flex items-center gap-1 px-3 py-1.5 bg-blue-50 text-blue-600 rounded-lg text-sm">
-                                        <TestTube className="w-4 h-4" /> {isMinibtStrategy(strategy) ? 'AI-IDE 回测' : '回测验证'}
+                                        <TestTube className="w-4 h-4" /> 回测验证
                                     </button>
                                     <button onClick={() => handleDeleteClick(strategy)} className="flex items-center gap-1 px-3 py-1.5 bg-red-50 text-red-600 rounded-lg text-sm">
                                         <Trash2 className="w-4 h-4" /> 删除

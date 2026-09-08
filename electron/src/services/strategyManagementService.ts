@@ -12,6 +12,7 @@ import {
   StrategyConversionRequest,
   StrategyConversionResponse,
 } from '../types/backtest/strategy';
+import { isMinibtStrategyCode } from '../utils/minibt';
 
 class StrategyManagementService {
   private client: AxiosInstance;
@@ -87,8 +88,10 @@ class StrategyManagementService {
 
       // 检查是否为Qlib格式
       const isQlibFormat = this.checkQlibFormat(code);
+      // minibt 脚本策略由专用 runner 镜像执行（回测中心已支持直接派发）
+      const isMinibt = isMinibtStrategyCode(code);
 
-      if (!isQlibFormat) {
+      if (!isQlibFormat && !isMinibt) {
         errors.push({
           type: 'compatibility',
           message: '检测到非Qlib格式策略代码，请先执行策略转换',
@@ -118,9 +121,14 @@ class StrategyManagementService {
       return {
         is_valid: errors.length === 0,
         is_qlib_format: isQlibFormat,
+        engine: isMinibt ? 'minibt' : isQlibFormat ? 'qlib' : undefined,
         errors,
         warnings,
-        suggestions: isQlibFormat ? [] : ['使用"策略转换"功能将Python代码转换为Qlib格式'],
+        suggestions: isQlibFormat
+          ? []
+          : isMinibt
+          ? []
+          : ['使用"策略转换"功能将Python代码转换为Qlib格式'],
       };
     } catch (error: any) {
       console.error('[StrategyManagementService] Validation error:', error);

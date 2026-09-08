@@ -229,6 +229,22 @@ export const QlibResultDisplay: React.FC<{ result: BacktestResult | QlibBacktest
           </div>
         </div>
       )}
+      {/* 引擎口径提示（如 minibt 撮合口径/手续费默认值） */}
+      {Array.isArray((result as any)?.config?.warnings) && (result as any).config.warnings.length > 0 && (
+        <div className="flex items-start gap-3 px-4 py-3 bg-amber-50 border border-amber-200 rounded-2xl">
+          <AlertCircle className="w-5 h-5 text-amber-500 shrink-0 mt-0.5" />
+          <div className="text-sm text-amber-900">
+            <span className="font-bold">
+              {(result as any)?.config?.engine === 'minibt' ? 'minibt 口径提示' : '口径提示'}
+            </span>
+            <ul className="mt-1 space-y-0.5 list-disc list-inside text-amber-800">
+              {(result as any).config.warnings.map((w: string, i: number) => (
+                <li key={i}>{w}</li>
+              ))}
+            </ul>
+          </div>
+        </div>
+      )}
       <div className="grid grid-cols-4 gap-4">
         {metrics.map((m, i) => (
           <div key={i} className="bg-white rounded-2xl border border-gray-200 p-4 relative">

@@ -63,6 +63,8 @@ export interface StrategyFile {
 export interface StrategyValidationResult {
   is_valid: boolean;
   is_qlib_format: boolean;
+  /** 运行时引擎：qlib 主引擎 / minibt 脚本运行时（专用 runner 镜像） */
+  engine?: 'qlib' | 'minibt';
   errors: StrategyValidationError[];
   warnings: StrategyValidationWarning[];
   suggestions?: string[];

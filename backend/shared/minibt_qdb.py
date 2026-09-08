@@ -101,7 +101,11 @@ def load_daily(
     if df.empty:
         empty = pd.DataFrame(columns=_DAILY_COLUMNS)
         empty["datetime"] = pd.to_datetime(empty["datetime"])
+        empty.attrs["symbol"] = suffix_code
         return empty
 
     df["datetime"] = pd.to_datetime(df.pop("time"))
-    return df[_DAILY_COLUMNS].reset_index(drop=True)
+    result = df[_DAILY_COLUMNS].reset_index(drop=True)
+    # minibt 的 broker 只按序号命名(symbol0/1...), 真实代码靠 attrs 传到逐笔明细
+    result.attrs["symbol"] = suffix_code
+    return result

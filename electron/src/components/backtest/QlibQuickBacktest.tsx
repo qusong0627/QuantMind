@@ -30,9 +30,7 @@ import { modelTrainingService, UserModelRecord } from '../../services/modelTrain
 import { useAppSelector } from '../../store';
 import { selectCurrentMarket } from '../../store/slices/uiSlice';
 import { getMarketConfig } from '../../config/marketConfig';
-import { isMinibtStrategy } from '../../utils/minibt';
 import dayjs from 'dayjs';
-import { useNavigate } from 'react-router-dom';
 import { message } from 'antd';
 
 const MARKET_UNIVERSE_PRESETS: Record<string, { label: string; value: string }[]> = {
@@ -64,7 +62,6 @@ const DEFAULT_TEMPLATE_ID = 'standard_topk';
 const DEFAULT_TEMPLATE = getTemplateById(DEFAULT_TEMPLATE_ID);
 
 export const QlibQuickBacktest: React.FC = () => {
-  const navigate = useNavigate();
   const stopPollingRef = useRef<(() => void) | null>(null);
   const progressTimerRef = useRef<number | null>(null);
   const progressRef = useRef<number>(0);
@@ -262,12 +259,6 @@ export const QlibQuickBacktest: React.FC = () => {
     try {
       const strategy = await strategyManagementService.getStrategy(id);
       if (!strategy) return;
-      if (isMinibtStrategy(strategy)) {
-        // 陈旧 localStorage 可能指向 minibt 策略：qlib 跑不了，直接转 AI-IDE
-        message.info(`minibt 策略在 AI-IDE 中回测，已跳转：${strategy.name}`);
-        navigate(`/ai-ide?strategyId=${strategy.id}`);
-        return;
-      }
       handleStrategySelected(strategy.code, strategy);
     } catch (err) {
       console.error('Failed to load pending strategy:', err);
@@ -303,10 +294,6 @@ export const QlibQuickBacktest: React.FC = () => {
     info?: StrategyFile,
     params?: QlibStrategyParams
   ) => {
-    if (isMinibtStrategy(info)) {
-      message.warning('minibt 策略不支持 qlib 快速回测，请在 AI-IDE 中运行');
-      return;
-    }
     setStrategyInfo(info || null);
     setError('');
 
@@ -316,6 +303,7 @@ export const QlibQuickBacktest: React.FC = () => {
     } else {
       // 个人策略或上传策略，使用 CustomStrategy 运行
       // 这样后端会执行代码内容，而不是仅依赖 ID
+      // （minibt 脚本策略由后端自动改派专用 runner 容器，前端无需特殊处理）
       setStrategyType('CustomStrategy');
       setStrategyParams(sanitizeStrategyParams('CustomStrategy', params || strategyParams, undefined, info?.code));
     }
