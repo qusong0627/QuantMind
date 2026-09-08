@@ -40,6 +40,8 @@ import { authService } from '../features/auth/services/authService';
 import { strategyManagementService } from '../services/strategyManagementService';
 import { modelTrainingService } from '../services/modelTrainingService';
 import HelpCenterLink from '../components/common/HelpCenterLink';
+import StrategyBacktestPanel from './components/StrategyBacktestPanel';
+import type { StrategyLabRunResult } from '../features/strategy-lab/types';
 import { SERVICE_ENDPOINTS } from '../config/services';
 import { PAGE_LAYOUT } from '../config/pageLayout';
 import { useAppSelector } from '../store';
@@ -166,6 +168,8 @@ const AIIDEPage: React.FC = () => {
     // Status State
     const [isRunning, setIsRunning] = React.useState(false);
     const [jobId, setJobId] = React.useState<string | null>(null);
+    // minibt 运行时回测结果(权益曲线/交易表),由 /execute/result/{job_id} 拉取
+    const [minibtResult, setMinibtResult] = React.useState<StrategyLabRunResult | null>(null);
     const [isSaving, setIsSaving] = React.useState(false);
     const [isAITyping, setIsAITyping] = React.useState(false);
     const [assistantRole, setAssistantRole] = React.useState<'quant_analyst' | 'bug_fixer' | 'code_reviewer'>('quant_analyst');
@@ -1137,6 +1141,7 @@ const AIIDEPage: React.FC = () => {
 
         setLogs([]);
         setErrors([]);
+        setMinibtResult(null);
         setProgress(null);
         setFinalResultSummary(null);
         resetExecuteResultSummary();
@@ -1219,6 +1224,13 @@ const AIIDEPage: React.FC = () => {
                     syncExecuteResultSummary();
                     setIsRunning(false);
                     es.close();
+                    // minibt 运行时:拉取结构化回测结果;非 minibt 任务返回 found=false,静默忽略
+                    apiFetch(`/execute/result/${job_id}`)
+                        .then((r) => (r.ok ? r.json() : null))
+                        .then((d: any) => {
+                            if (d && d.found) setMinibtResult(d.result as StrategyLabRunResult);
+                        })
+                        .catch(() => {});
                     return;
                 }
 
@@ -2277,7 +2289,7 @@ const AIIDEPage: React.FC = () => {
                                 <Square className="h-3.5 w-3.5 fill-current" />
                             </button>
                             <button
-                                onClick={() => { setLogs([]); setErrors([]); setProgress(null); setFinalResultSummary(null); resetExecuteResultSummary(); }}
+                                onClick={() => { setLogs([]); setErrors([]); setProgress(null); setFinalResultSummary(null); setMinibtResult(null); resetExecuteResultSummary(); }}
                                 className="p-1 hover:bg-gray-100 rounded text-gray-400 transition-all hover:scale-110"
                                 title="清除日志"
                             >
@@ -2296,6 +2308,11 @@ const AIIDEPage: React.FC = () => {
                         {logTab === 'result' ? (
                             <div className="space-y-1">
                                 {renderResultSummaryCard()}
+                                {minibtResult && (
+                                    <div className="mt-2 rounded-xl border border-blue-100 overflow-hidden text-left">
+                                        <StrategyBacktestPanel result={minibtResult} loading={false} />
+                                    </div>
+                                )}
                                 {logs.length === 0 && !isRunning && <p className="text-gray-400 italic">暂无运行数据</p>}
                                 {logs.map((log, i) => (
                                     <div key={i} className="flex gap-3 px-2 py-0.5 hover:bg-gray-100/50 rounded transition-colors group">

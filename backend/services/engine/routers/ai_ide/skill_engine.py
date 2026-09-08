@@ -45,6 +45,9 @@ class SkillEngine:
         "STRATEGY_CONFIG", "get_strategy_config", "策略配置",
     ]
 
+    # minibt 风格策略(Strategy/next 写法),命中即独占路由,不与传统/模型模板叠加
+    MINIBT_KEYWORDS = ["minibt", "mini bt", "策略实验室"]
+
     def __init__(self, templates_dir: str | None = None):
         if templates_dir is None:
             templates_dir = os.path.join(os.path.dirname(__file__), "skill_templates")
@@ -66,11 +69,16 @@ class SkillEngine:
 
         traditional_score = sum(1 for kw in self.TRADITIONAL_KEYWORDS if kw.lower() in user_lower)
         model_score = sum(1 for kw in self.MODEL_KEYWORDS if kw.lower() in user_lower)
+        minibt_score = sum(1 for kw in self.MINIBT_KEYWORDS if kw.lower() in user_lower)
 
         templates = []
 
+        # minibt 意图最优先且互斥:避免 traditional 模板教出 qlib 写法
+        # (minibt 命中词本身就会触发 traditional 的"回测/均线"等关键词)
+        if minibt_score > 0:
+            templates.append("minibt_strategy")
         # 仅在有明确技术意图时才注入策略模板
-        if traditional_score > 0 or model_score > 0:
+        elif traditional_score > 0 or model_score > 0:
             if model_score > traditional_score:
                 templates.append("qlib_model_strategy_config")
                 templates.append("fundamental_factor_reference")
@@ -79,7 +87,7 @@ class SkillEngine:
         # 否则不注入策略模板，让系统提示词主导对话风格
 
         # 如果有错误信息，叠加调试防护模板
-        if error_msg and (traditional_score > 0 or model_score > 0):
+        if error_msg and (traditional_score > 0 or model_score > 0 or minibt_score > 0):
             templates.append("debug_guardrail")
 
         return templates

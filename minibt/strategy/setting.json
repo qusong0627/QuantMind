@@ -1,0 +1,79 @@
+{
+    "drawings": {
+        "SHFE.cu2607_30": [
+            {
+                "type": "Box",
+                "points": [
+                    {
+                        "time": 1779878580,
+                        "logical": 906,
+                        "price": 105363.18327974276
+                    },
+                    {
+                        "time": 1779879930,
+                        "logical": 951,
+                        "price": 105292.57234726688
+                    }
+                ],
+                "options": {
+                    "fillEnabled": true,
+                    "fillColor": "rgba(255, 255, 255, 0.2)",
+                    "lineColor": "#1E80F0",
+                    "lineStyle": 0,
+                    "width": 4
+                }
+            },
+            {
+                "type": "TrendLine",
+                "points": [
+                    {
+                        "time": 1779880020,
+                        "logical": 954,
+                        "price": 105446.5273311897
+                    },
+                    {
+                        "time": 1779881040,
+                        "logical": 988,
+                        "price": 105305.30546623794
+                    }
+                ],
+                "options": {
+                    "lineColor": "#1E80F0",
+                    "lineStyle": 0,
+                    "width": 4
+                }
+            },
+            {
+                "type": "TrendLine",
+                "points": [
+                    {
+                        "time": 1779876720,
+                        "logical": 874,
+                        "price": 105047.90996784566
+                    },
+                    {
+                        "time": 1779881130,
+                        "logical": 991,
+                        "price": 105384.08360128617
+                    }
+                ],
+                "options": {
+                    "lineColor": "#1E80F0",
+                    "lineStyle": 0,
+                    "width": 4
+                }
+            }
+        ]
+    },
+    "price_alerts": {},
+    "istool": false,
+    "mouse_label_color": "rgba(255, 66, 151, 255)",
+    "candlestick_colors": {
+        "bear_color": "rgba(200, 97, 100, 100)",
+        "bull_color": "rgba(39, 157, 130, 100)"
+    },
+    "splitter_sizes": [
+        216,
+        883
+    ]
+}

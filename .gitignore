@@ -271,3 +271,8 @@ REFACTOR_PLAN.md
 # 便携版打包产物
 deploy/portable/build/
 deploy/portable/dist/
+
+# vendored minibt(源码跟踪,编译产物不跟踪)
+minibt/**/__pycache__/
+minibt/**/*.so
+minibt/build/

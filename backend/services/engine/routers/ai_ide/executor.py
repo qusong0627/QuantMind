@@ -1,6 +1,7 @@
 import ast
 import asyncio
 import hashlib
+import json
 import logging
 import os
 import sys
@@ -70,9 +71,23 @@ _SMOKE_OPTIONAL_IMPORTS = [
 ]
 _SMOKE_CACHE: dict[str, dict[str, Any]] = {}
 
+# minibt 策略运行时:检测到 `import minibt` 的代码自动切换到专用镜像(py3.12 + vendored minibt)
+_DOCKER_TIMEOUT = int(os.getenv("AI_IDE_DOCKER_TIMEOUT", "180"))
+_MINIBT_IMAGE = os.getenv("AI_IDE_MINIBT_RUNNER_IMAGE", "quantmind-minibt-runner:latest")
+_TRUSTED_IMAGE_PREFIXES = [
+    p.strip()
+    for p in os.getenv("AI_IDE_TRUSTED_IMAGE_PREFIXES", "quantmind-oss,quantmind-minibt-runner").split(",")
+    if p.strip()
+]
+
 # 使用共享卷目录，以便 Docker 宿主机能看到并挂载到下级容器
 TMP_ROOT = os.getenv("AI_IDE_TEMP_DIR", "/app/db/ai_ide_tmp")
 HOST_PROJECT_PATH = os.getenv("HOST_PROJECT_PATH", "/home/quantmind")
+
+
+def _detect_minibt(code: str) -> bool:
+    """策略代码是否使用 minibt 框架(仅检测顶层 import/from 行,注释不误判)。"""
+    return bool(re.search(r"^\s*(?:import|from)\s+minibt\b", code or "", re.MULTILINE))
 
 
 def _build_runner_environment(
@@ -109,6 +124,9 @@ def _build_runner_environment(
         "AI_IDE_ALLOW_FEATURE_SIGNAL_FALLBACK": os.getenv(
             "AI_IDE_ALLOW_FEATURE_SIGNAL_FALLBACK", "true"
         ),
+        # minibt 运行时容器使用:QuantDB 数据根 + 回测结果输出目录
+        "QM_QUANTDB_DATA_DIR": os.getenv("QM_QUANTDB_DATA_DIR", "/data/quantdb"),
+        "QM_MINIBT_RESULT_DIR": os.getenv("QM_MINIBT_RESULT_DIR", "/app/result"),
     }
     meta_env_map = {
         "model_id": "AI_IDE_BACKTEST_MODEL_ID",
@@ -926,6 +944,9 @@ async def start_execution(request: Request, item: StartRequest):
         if not safe_filename:
             safe_filename = "tmp_code.py"
         runner_image = _normalize_image_ref(item.runner_image)
+        if item.runner_image is None and _detect_minibt(code):
+            runner_image = _MINIBT_IMAGE
+            logger.info("[MINIBT] 检测到 minibt 策略代码,切换运行时镜像: %s", runner_image)
 
         job_id = str(uuid.uuid4())
         file_path = os.path.join(user_tmp_dir, f"{job_id}_{safe_filename}")
@@ -953,15 +974,15 @@ async def start_execution(request: Request, item: StartRequest):
             },
         }
 
-        # 跳过已知生产镜像的 smoke test，避免误报和延迟
-        if "quantmind-oss" in runner_image:
-            logger.info(f"[SMOKE] 跳过生产镜像 {runner_image} 的验证")
+        # 跳过可信内置镜像的 smoke test，避免误报和延迟
+        if any(runner_image.startswith(prefix) for prefix in _TRUSTED_IMAGE_PREFIXES):
+            logger.info(f"[SMOKE] 跳过可信镜像 {runner_image} 的验证")
         else:
             smoke_client = None
             try:
                 import docker
 
-                smoke_client = docker.from_env()
+                smoke_client = docker.from_env(timeout=_DOCKER_TIMEOUT)
                 smoke_result = await _run_image_smoke_check(
                     smoke_client,
                     runner_image,
@@ -1009,7 +1030,7 @@ async def smoke_image(request: Request, item: SmokeImageRequest):
         _get_user_id(request)
         import docker
 
-        client = docker.from_env()
+        client = docker.from_env(timeout=_DOCKER_TIMEOUT)
         queue: asyncio.Queue = asyncio.Queue()
         try:
             result = await _run_image_smoke_check(
@@ -1100,6 +1121,34 @@ async def get_logs_stream(request: Request, job_id: str):
     return StreamingResponse(log_generator(), media_type="text/event-stream")
 
 
+_JOB_ID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+
+
+@router.get("/result/{job_id}")
+async def get_execute_result(request: Request, job_id: str):
+    """读取 minibt 运行时容器写出的回测结果(结构对齐 StrategyLabRunResult)。
+
+    非 minibt 任务或结果尚未写出时返回 {"found": false},前端静默忽略。
+    不依赖 jobs dict —— 任务在 [PROCESS_FINISHED] 后即被清理,结果目录按
+    {TMP_ROOT}/{user_id}/{job_id}_result/ 落盘,重启后仍可读。
+    """
+    if not _JOB_ID_RE.fullmatch(job_id or ""):
+        raise HTTPException(status_code=422, detail="Invalid job_id")
+
+    user_id = _get_user_id(request)
+    result_path = os.path.join(TMP_ROOT, user_id, f"{job_id}_result", "result.json")
+    if not os.path.isfile(result_path):
+        return {"found": False}
+
+    try:
+        with open(result_path, encoding="utf-8") as f:
+            payload = json.load(f)
+    except Exception as exc:
+        logger.error("Read minibt result failed: %s (%s)", result_path, exc)
+        raise HTTPException(status_code=500, detail="读取回测结果失败") from exc
+    return {"found": True, "result": payload}
+
+
 async def run_process(job_id: str, file_path: str):
     if job_id not in jobs:
         return
@@ -1114,7 +1163,7 @@ async def run_process(job_id: str, file_path: str):
     request_meta = job_info.get("request_meta")
 
     try:
-        client = docker.from_env()
+        client = docker.from_env(timeout=_DOCKER_TIMEOUT)
 
         # 计算宿主机上的文件路径 (用于 Docker 挂载)
         # 假设 API 容器内的 /app 对应 宿主机的 {HOST_PROJECT_PATH}
@@ -1171,6 +1220,17 @@ async def run_process(job_id: str, file_path: str):
         }
 
         container_name = f"qm-ide-run-{job_id}"
+
+        # minibt 回测结果目录:每 job 独立 rw 挂载(runner 写 result.json,
+        # 引擎侧 /execute/result/{job_id} 按同路径读取;jobs dict 在结束后即清理,不可依赖)
+        result_dir = os.path.join(os.path.dirname(file_path), f"{job_id}_result")
+        os.makedirs(result_dir, exist_ok=True)
+        host_result_dir = os.path.join(HOST_PROJECT_PATH, os.path.relpath(result_dir, "/app"))
+        volumes[host_result_dir] = {
+            "bind": os.getenv("QM_MINIBT_RESULT_DIR", "/app/result"),
+            "mode": "rw",
+        }
+        job_info["result_dir"] = result_dir
 
         # 启动容器
         # 启动前验证: 确保 runner.py 和 strategy.py 文件存在

@@ -142,6 +142,10 @@ Electron 前端在本地开发时使用 Vite HMR；修改 `electron/src` 后运�
 - `backend/main_oss.py` - 全部后端服务的统一入口
 - `backend/run_tests.py` - 多模式测试运行器
 - `backend/shared/` - 跨服务共享模块
+- `minibt/` - vendored 裁剪版 minibt(20 行策略 DSL + 指标库 + 双引擎回测;补丁与口径差异见 `minibt/PATCHES.md`,运行时镜像 `docker/Dockerfile.minibt-runner`)
+- `backend/shared/minibt_qdb.py` - QuantDB → minibt KLine 数据适配器(AI-IDE minibt 策略用)
+- `backend/shared/minibt_result.py` - minibt 回测结果提取(修复浮盈/手续费口径,[RESULT] 行 + result.json)
+- `backend/services/engine/routers/ai_ide/executor.py` - AI-IDE 代码执行器(minibt 自动路由 /execute/result 端点)
 - `backend/services/engine/alpha_agent/launcher.py` - 因子演化启动器（支持 market 参数）
 - `backend/services/engine/rd_agent/market_adapters/` - 市场适配器注册表（a_share、crypto、hong_kong、us_stock）
 - `backend/services/engine/rd_agent/rd_loop_wrapper.py` - 桥接 RD-Agent 与 QuantMind 的 RDLoop 封装
