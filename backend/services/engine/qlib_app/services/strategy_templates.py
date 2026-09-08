@@ -55,6 +55,7 @@ class StrategyTemplate(BaseModel):
     markets: list[str] = []  # a_share, hong_kong, us_stock, crypto
     # 注意：markets 为空 = 历史 A 股模板，仅出现在 A 股视图（template_applies_to_market）；
     # 需要进入港股等其他视图的模板必须显式列出 markets。
+    dir: str = ""  # AI-IDE 工作空间文件夹（如 "minibt策略/趋势跟踪"），空 = 根目录
 
 
 # ---------------------------------------------------------------------------
@@ -195,6 +196,7 @@ class StrategyTemplateLoader:
                 live_defaults=meta.get("live_defaults", {}),
                 live_config_tips=meta.get("live_config_tips", []),
                 markets=meta.get("markets", []),
+                dir=meta.get("dir", ""),
             )
         except Exception as e:
             task_logger.error("build_template_failed", "构建模板对象失败", template_id=json_path.stem, error=str(e))

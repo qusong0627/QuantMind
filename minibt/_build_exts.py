@@ -13,4 +13,7 @@ exts = [
     Extension("minibt.cython_functions.backtrader_from_signals", ["minibt/cython_functions/backtrader_from_signals.pyx"], include_dirs=[np.get_include()]),
     Extension("minibt.cython_functions.backtrader_pair_from_signals", ["minibt/cython_functions/backtrader_pair_from_signals.pyx"], include_dirs=[np.get_include()]),
 ]
-setup(ext_modules=cythonize(exts, language_level=3))
+setup(
+    ext_modules=cythonize(exts, language_level=3),
+    packages=[],  # 显式置空:避免 setuptools 在仓库根做顶层包自动发现(multiple top-level 报错)
+)

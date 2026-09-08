@@ -1,0 +1,15 @@
+{
+  "id": "minibt_zscore",
+  "name": "minibt·Z-Score 统计套利式回归",
+  "description": "价格 Z-Score 低于 -1.8 做多、高于 +1.8 做空,回到 ±0.4 区间或击穿 2.5 止损离场。",
+  "category": "advanced",
+  "difficulty": "advanced",
+  "params": [],
+  "execution_defaults": {},
+  "live_defaults": {},
+  "live_config_tips": [],
+  "markets": [
+    "a_share"
+  ],
+  "dir": "minibt策略/均值回归"
+}

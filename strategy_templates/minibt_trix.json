@@ -1,0 +1,15 @@
+{
+  "id": "minibt_trix",
+  "name": "minibt·TRIX 三重平滑顺势",
+  "description": "三重 EMA 平滑的变动率(TRIX)上穿其信号线做多,下穿做空;过滤短线噪音。",
+  "category": "advanced",
+  "difficulty": "intermediate",
+  "params": [],
+  "execution_defaults": {},
+  "live_defaults": {},
+  "live_config_tips": [],
+  "markets": [
+    "a_share"
+  ],
+  "dir": "minibt策略/趋势跟踪"
+}

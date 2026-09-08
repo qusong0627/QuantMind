@@ -1,0 +1,15 @@
+{
+  "id": "minibt_keltner",
+  "name": "minibt·肯特纳通道突破",
+  "description": "EMA±动态 ATR 通道:价格突破上轨且短期 EMA 在上做多,跌破下轨做空;通道宽度随趋势强度自适应。",
+  "category": "advanced",
+  "difficulty": "advanced",
+  "params": [],
+  "execution_defaults": {},
+  "live_defaults": {},
+  "live_config_tips": [],
+  "markets": [
+    "a_share"
+  ],
+  "dir": "minibt策略/通道突破"
+}

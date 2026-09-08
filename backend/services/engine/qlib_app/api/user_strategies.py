@@ -349,6 +349,9 @@ async def _perform_sync(user_id: str):
         mkt = _market_for_template(t)
         if mkt:
             params["market"] = mkt  # HK/US/CRYPTO 模板打市场标,供策略库按市场隔离
+        if t.dir:
+            # AI-IDE 工作空间文件夹(策略在 IDE 文件树中的归属,不新建表字段)
+            params["ide_dir"] = t.dir
 
         await svc.save(
             user_id=user_id,

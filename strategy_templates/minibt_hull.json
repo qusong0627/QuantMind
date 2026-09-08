@@ -1,0 +1,15 @@
+{
+  "id": "minibt_hull",
+  "name": "minibt·HullMA 双周期",
+  "description": "短周期 Hull 均线上穿/下穿长周期 Hull 均线,且价格在长周期均线同侧才开仓。",
+  "category": "advanced",
+  "difficulty": "intermediate",
+  "params": [],
+  "execution_defaults": {},
+  "live_defaults": {},
+  "live_config_tips": [],
+  "markets": [
+    "a_share"
+  ],
+  "dir": "minibt策略/趋势跟踪"
+}

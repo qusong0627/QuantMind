@@ -1,0 +1,15 @@
+{
+  "id": "minibt_dual_thrust",
+  "name": "minibt·Dual Thrust 区间突破",
+  "description": "近 N 日最高价差构成动态上下轨:收盘上穿买入轨做多,下穿卖出轨做空;经典日内策略的日线版。",
+  "category": "advanced",
+  "difficulty": "advanced",
+  "params": [],
+  "execution_defaults": {},
+  "live_defaults": {},
+  "live_config_tips": [],
+  "markets": [
+    "a_share"
+  ],
+  "dir": "minibt策略/通道突破"
+}

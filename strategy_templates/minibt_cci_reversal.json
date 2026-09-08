@@ -1,0 +1,15 @@
+{
+  "id": "minibt_cci_reversal",
+  "name": "minibt·CCI 极值回归",
+  "description": "CCI 上穿 +100(强势启动)做多,下穿 -100(弱势破位)做空;极值突破式回归。",
+  "category": "basic",
+  "difficulty": "beginner",
+  "params": [],
+  "execution_defaults": {},
+  "live_defaults": {},
+  "live_config_tips": [],
+  "markets": [
+    "a_share"
+  ],
+  "dir": "minibt策略/均值回归"
+}

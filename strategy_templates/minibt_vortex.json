@@ -1,0 +1,15 @@
+{
+  "id": "minibt_vortex",
+  "name": "minibt·涡旋指标 Vortex",
+  "description": "正向/负向涡旋运动比较:+VI 上穿 -VI 且大于阈值做多,反之做空。",
+  "category": "advanced",
+  "difficulty": "intermediate",
+  "params": [],
+  "execution_defaults": {},
+  "live_defaults": {},
+  "live_config_tips": [],
+  "markets": [
+    "a_share"
+  ],
+  "dir": "minibt策略/趋势跟踪"
+}

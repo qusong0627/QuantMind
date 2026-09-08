@@ -1,0 +1,15 @@
+{
+  "id": "minibt_rsi_reversal",
+  "name": "minibt·RSI 超买超卖反转",
+  "description": "RSI 从超卖区上穿阈值做多,从超买区下穿做空;震荡市反转思路。",
+  "category": "basic",
+  "difficulty": "beginner",
+  "params": [],
+  "execution_defaults": {},
+  "live_defaults": {},
+  "live_config_tips": [],
+  "markets": [
+    "a_share"
+  ],
+  "dir": "minibt策略/均值回归"
+}

@@ -1,0 +1,15 @@
+{
+  "id": "minibt_vpt",
+  "name": "minibt·VPT 量价趋势",
+  "description": "量价趋势累计线(VPT)在均线上方且放量上涨做多,放量下跌做空。",
+  "category": "basic",
+  "difficulty": "intermediate",
+  "params": [],
+  "execution_defaults": {},
+  "live_defaults": {},
+  "live_config_tips": [],
+  "markets": [
+    "a_share"
+  ],
+  "dir": "minibt策略/量价动量"
+}

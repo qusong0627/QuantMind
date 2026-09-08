@@ -416,7 +416,8 @@ const AIIDEPage: React.FC = () => {
         const marketDir = `strategies/${currentMarket.toLowerCase()}`;
         setRootDirectory(marketDir).then((ok) => {
             if (ok) {
-                fetchLocalFileList();
+                setCurrentDir('');
+                fetchLocalFileList('');
             }
         });
     }, [currentMarket]);
@@ -570,12 +571,16 @@ const AIIDEPage: React.FC = () => {
     // 固定浅色主题，不跟随系统深色模式
     const editorTheme = 'light';
 
-    const fetchLocalFileList = async (): Promise<FileItem[]> => {
+    const fetchLocalFileList = async (dirOverride?: string): Promise<FileItem[]> => {
         setIsLoadingFiles(true);
         try {
             // CN/A 也要传 market：后端按 parameters.market 排除港股（缺省则全量混列）
             const mktParam = currentMarket ? `?market=${currentMarket}` : '';
-            const res = await apiFetch(`/files/list${mktParam}`);
+            // 虚拟文件夹导航:后端按 parameters.ide_dir 聚合,path 为当前目录
+            // dirOverride 解决 setState 异步导致的闭包旧值问题
+            const activeDir = dirOverride !== undefined ? dirOverride : currentDir;
+            const pathParam = activeDir ? `${mktParam ? '&' : '?'}path=${encodeURIComponent(activeDir)}` : '';
+            const res = await apiFetch(`/files/list${mktParam}${pathParam}`);
             if (!res.ok) {
                 const err = await res.json().catch(() => ({}));
                 const errMsg = formatError(err) || `文件列表加载失败(${res.status})`;
@@ -1282,7 +1287,7 @@ const AIIDEPage: React.FC = () => {
         setCurrentDir(path);
         setSelectedFile(null);
         setEditorContent('# 请选择一个文件开始编辑');
-        await fetchLocalFileList();
+        await fetchLocalFileList(path);
     };
 
     const handleGoParent = async () => {
@@ -1291,7 +1296,7 @@ const AIIDEPage: React.FC = () => {
         setCurrentDir(parentDir || '');
         setSelectedFile(null);
         setEditorContent('# 请选择一个文件开始编辑');
-        await fetchLocalFileList();
+        await fetchLocalFileList(parentDir || '');
     };
 
     // Session State

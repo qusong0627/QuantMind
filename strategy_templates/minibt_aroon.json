@@ -1,0 +1,15 @@
+{
+  "id": "minibt_aroon",
+  "name": "minibt·阿隆指标趋势强度",
+  "description": "Aroon-Up 高位且 Aroon-Dn 低位时做多(创新高能力强),反之做空。",
+  "category": "advanced",
+  "difficulty": "intermediate",
+  "params": [],
+  "execution_defaults": {},
+  "live_defaults": {},
+  "live_config_tips": [],
+  "markets": [
+    "a_share"
+  ],
+  "dir": "minibt策略/趋势跟踪"
+}

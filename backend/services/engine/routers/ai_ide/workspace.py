@@ -40,6 +40,10 @@ async def set_root(request: Request, body: SetRootRequest):
 async def list_files(request: Request, path: str = "", market: str | None = None):
     """
     列出策略工作区。在云端模式下，每个策略记录对应一个文件。
+
+    文件夹为虚拟层：按策略 parameters.ide_dir 聚合，不落库。
+    - path 为空 → 返回根目录：无 ide_dir 的策略文件 + 一级子文件夹
+    - path 非空 → 返回该文件夹内的文件 + 下一级子文件夹，parent 为上级目录
     market 过滤：切到港股时只列港股策略（CN 不传 = 现状全量）。
     """
     try:
@@ -50,7 +54,10 @@ async def list_files(request: Request, path: str = "", market: str | None = None
         items = svc.list(user_id=user_id, market=market)
 
         # 将策略项映射为 IDE 文件项；过滤存量 [folder] 污染数据
-        ide_items = []
+        file_items = []
+        dirs: set[str] = set()
+        cur = (path or "").strip("/")
+        prefix = f"{cur}/" if cur else ""
         for s in items:
             _nm = s.get("name") or ""
             _tags = s.get("tags") or []
@@ -58,20 +65,48 @@ async def list_files(request: Request, path: str = "", market: str | None = None
                 continue
             if (s.get("parameters") or {}).get("type") == "folder":
                 continue
-            ide_items.append({
+            ide_dir = str((s.get("parameters") or {}).get("ide_dir") or "").strip("/")
+            ide_items_entry = {
                 "id": s["id"],
                 "name": s["name"] + ".py" if not s["name"].endswith(".py") else s["name"],
                 "path": s["id"], # 在云端，路径即 ID
                 "type": "file",
                 "size": 0, # TODO: 优化获取大小
                 "last_modified": s.get("updated_at"),
-            })
+            }
+            if ide_dir:
+                if cur and ide_dir != cur and not ide_dir.startswith(prefix):
+                    continue  # 属于其它文件夹,当前目录不显示
+                if ide_dir != cur:
+                    rel = ide_dir[len(prefix):]
+                    top = rel.split("/")[0]
+                    dirs.add(f"{prefix}{top}")
+                    continue  # 当前目录只显示文件,子目录单独聚合
+                file_items.append(ide_items_entry)
+            else:
+                if cur:
+                    continue  # 无 ide_dir 的策略只在根目录显示
+                file_items.append(ide_items_entry)
 
+        folder_items = [
+            {
+                "id": f"virtual-folder:{d}",
+                "name": d.split("/")[-1],
+                "path": d,
+                "type": "dir",
+                "is_dir": True,
+                "size": 0,
+                "last_modified": None,
+            }
+            for d in sorted(dirs)
+        ]
+
+        parent = "/".join(cur.split("/")[:-1]) if cur else None
         return {
-            "items": ide_items,
+            "items": folder_items + file_items,
             "base": "cloud_workspace",
-            "parent": None,
-            "current": "",
+            "parent": parent,
+            "current": cur,
         }
     except Exception as e:
         logger.error(f"Failed to list cloud files: {e}")
@@ -96,7 +131,11 @@ async def create_file(request: Request, item: CreateItemRequest):
                 "status": "DRAFT",
                 "description": "Created via Cloud IDE",
                 "dir": item.dir or "",
-                "parameters": item.parameters or {},
+                "parameters": {
+                    **(item.parameters or {}),
+                    # 记录文件在 IDE 虚拟文件夹中的归属(list 按 ide_dir 聚合)
+                    **({"ide_dir": item.dir.strip("/")} if (item.dir or "").strip("/") else {}),
+                },
             }
         )
         return {"status": "success", "id": res["id"]}

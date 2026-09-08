@@ -1,0 +1,15 @@
+{
+  "id": "minibt_dual_ma",
+  "name": "minibt·双均线趋势跟踪",
+  "description": "短期均线上穿长期均线(金叉)做多,下穿(死叉)做空;经典趋势跟随入门策略。",
+  "category": "basic",
+  "difficulty": "beginner",
+  "params": [],
+  "execution_defaults": {},
+  "live_defaults": {},
+  "live_config_tips": [],
+  "markets": [
+    "a_share"
+  ],
+  "dir": "minibt策略/趋势跟踪"
+}
