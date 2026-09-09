@@ -80,6 +80,15 @@ class Neutralizer:
         if df.empty or not feature_cols:
             return df
 
+        # 元数据不可用（official_factors.duckdb 缺失或刷新失败）时硬失败：
+        # 声明 is_neutralized=true 的模型若静默拿到未中性化特征（或全量 dropna 后
+        # 的空特征），会产出看似成功却错误的预测——宁可在调用方报错。
+        if self._last_update_date is None:
+            raise RuntimeError(
+                "中性化元数据不可用（official_factors.duckdb 缺失或刷新失败），"
+                f"拒绝静默返回未中性化特征: db_path={self.db_path}"
+            )
+
         # Enrich DF with metadata from cache
         df = df.copy()
         df["industry"] = df.index.map(self._industry_cache)

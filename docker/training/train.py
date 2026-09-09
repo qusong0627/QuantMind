@@ -643,6 +643,10 @@ def _generate_oof_predictions(
     """时序扩展窗口 K-Fold 生成 OOF 预测。
 
     返回与 train_df 等长的 OOF 预测（fold 未覆盖部分为 NaN）。
+
+    标签是未来 h 日收益（cfg.label.target_horizon_days），因此训练集末尾 h 个
+    交易日必须 purge 掉：它们的标签窗口与验证集重叠，否则元模型在验证/测试上
+    的评估会被高估。
     """
     dates = sorted(train_df["trade_date"].unique())
     n_dates = len(dates)
@@ -650,6 +654,8 @@ def _generate_oof_predictions(
         logger.warning("Too few dates (%d) for %d folds, reducing to %d", n_dates, n_folds, max(1, n_dates - 1))
         n_folds = max(1, n_dates - 1)
 
+    horizon = int((cfg.get("label", {}) or {}).get("target_horizon_days") or 1)
+    purge = max(0, horizon)
     fold_size = n_dates // (n_folds + 1)
     oof_pred = pd.Series(np.nan, index=train_df.index, name="oof_pred")
 
@@ -661,7 +667,7 @@ def _generate_oof_predictions(
         if val_end_idx <= val_start_idx:
             continue
 
-        train_dates = set(dates[:train_end_idx])
+        train_dates = set(dates[: max(0, train_end_idx - purge)])
         val_dates = set(dates[val_start_idx:val_end_idx])
 
         fold_train = train_df[train_df["trade_date"].isin(train_dates)]
@@ -687,8 +693,8 @@ def _generate_oof_predictions(
         ).flatten()
 
         oof_pred.iloc[fold_val.index] = fold_pred
-        logger.info("OOF fold %d: train=%d dates, val=%d dates, pred_rows=%d",
-                     fold_i, len(train_dates), len(val_dates), len(fold_val))
+        logger.info("OOF fold %d: train=%d dates (purged %d), val=%d dates, pred_rows=%d",
+                     fold_i, len(train_dates), purge, len(val_dates), len(fold_val))
 
     return oof_pred
 
