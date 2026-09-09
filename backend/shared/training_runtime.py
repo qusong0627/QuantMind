@@ -59,6 +59,59 @@ def repo_root_dir() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
+# 特征快照（model_features_*.parquet）在仓库内的相对位置
+_FEATURE_SNAPSHOT_REL = ("db", "feature_snapshots")
+# 容器内绝对路径前缀：便携包/本机要按仓库根重定位，否则指向盘符相对的 C:\app\...
+_CONTAINER_PATH_PREFIXES = ("/app/", "/data/")
+
+
+def rebase_container_path(value: str) -> Path | None:
+    """把 /app/xxx、/data/xxx 重定位到仓库根，命中真实目录才返回。"""
+    for prefix in _CONTAINER_PATH_PREFIXES:
+        if value.startswith(prefix):
+            rebased = repo_root_dir() / value[len(prefix) :]
+            if rebased.exists():
+                return rebased
+    return None
+
+
+def feature_snapshot_dir() -> Path:
+    """特征快照 parquet 根目录（model_features_*.parquet 所在目录）。
+
+    优先级：MODEL_TRAINING_DATA_DIR 显式覆盖 → {仓库根}/db/feature_snapshots。
+    容器内仓库根即 /app，与历史硬编码 /app/db/feature_snapshots 完全一致；
+    便携包（免 Docker 直跑）解析到包内目录，而不是盘符相对的 C:\\app\\db\\...
+    """
+    override = (os.getenv("MODEL_TRAINING_DATA_DIR") or "").strip()
+    if override:
+        return Path(override).expanduser()
+    return repo_root_dir().joinpath(*_FEATURE_SNAPSHOT_REL)
+
+
+def resolve_feature_snapshot_dir(raw: str = "") -> Path:
+    """把模型 metadata 的 data_dir 规范成绝对的特征快照目录。
+
+    - 空值：走 feature_snapshot_dir()（含 MODEL_TRAINING_DATA_DIR 覆盖）；
+    - 相对路径（metadata 常见 "db/feature_snapshots"）：先按仓库根解析、再按容器
+      /app 解析，都不存在则取仓库根——推理子进程 cwd 是模型目录，相对路径必查空；
+    - 绝对路径不存在时按 /app、/data 前缀重定位到仓库根（容器训练产物在便携包
+      里复用），仍未命中则原样返回，让报错信息暴露原始路径。
+    """
+    value = str(raw or "").strip()
+    if not value:
+        return feature_snapshot_dir()
+    path = Path(value).expanduser()
+    if path.is_absolute():
+        if path.exists():
+            return path
+        return rebase_container_path(value) or path
+    for base in (repo_root_dir(), Path("/app")):
+        candidate = base / path
+        if candidate.exists():
+            return candidate
+    return repo_root_dir() / path
+
+
 def running_inside_container() -> bool:
     """是否运行在 Docker 容器内（用于保持容器版目录语义不变）。"""
     if os.path.exists("/.dockerenv"):

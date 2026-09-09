@@ -2582,9 +2582,9 @@ _SNAPSHOT_MARKET_FILE = {
 
 def _resolve_snapshot_parquet(market: str, year: int):
     """特征快照 parquet 路径（CN 按年，其他市场单文件）。找不到返回 None。"""
-    from pathlib import Path
+    from backend.shared.training_runtime import feature_snapshot_dir
 
-    base = Path(os.getenv("MODEL_TRAINING_DATA_DIR", "/app/db/feature_snapshots"))
+    base = feature_snapshot_dir()
     name = _SNAPSHOT_MARKET_FILE.get(market)
     if market == "CN":
         name = f"model_features_{year}.parquet"

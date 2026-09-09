@@ -67,7 +67,7 @@ from sqlalchemy.orm import sessionmaker
 
 from backend.services.engine.services.event_stream import EngineSignalStreamPublisher
 from backend.shared.stock_utils import StockCodeUtil
-from backend.shared.training_runtime import repo_root_dir
+from backend.shared.training_runtime import rebase_container_path, repo_root_dir, resolve_feature_snapshot_dir
 
 logger = logging.getLogger(__name__)
 
@@ -231,7 +231,7 @@ class InferenceScriptRunner:
 
         规则：
         1) 若能在候选路径中命中真实目录，返回该绝对路径；
-        2) 相对路径默认转换为 /app/<path>；
+        2) 相对路径默认转换为 <仓库根>/<path>（容器内即 /app/<path>）；
         3) prefer_alpha158 时在候选列表头部追加 metadata 中的默认路径。
         """
         raw = str(provider_uri or "").strip()
@@ -243,7 +243,12 @@ class InferenceScriptRunner:
         p = Path(raw)
         if p.is_absolute():
             candidates.append(p)
+            # 容器内构建的 metadata 常写死 /app/...；便携包/本机按仓库根重定位
+            rebased = rebase_container_path(raw)
+            if rebased is not None:
+                candidates.append(rebased)
         else:
+            candidates.append(repo_root_dir() / p)
             candidates.append(Path("/app") / p)
             candidates.append(p)
 
@@ -258,7 +263,7 @@ class InferenceScriptRunner:
 
         if p.is_absolute():
             return raw
-        return str(Path("/app") / p)
+        return str(repo_root_dir() / p)
 
     # ------------------------------------------------------------------
     # 公开方法
@@ -429,10 +434,7 @@ class InferenceScriptRunner:
     def _resolve_primary_active_data_source(primary_meta: dict[str, object]) -> str:
         data_source = str(primary_meta.get("data_source") or "").lower()
         if data_source == "parquet":
-            return str(
-                primary_meta.get("data_dir")
-                or os.getenv("MODEL_TRAINING_DATA_DIR", "/app/db/feature_snapshots")
-            )
+            return str(resolve_feature_snapshot_dir(primary_meta.get("data_dir")))
         if data_source == "quantdb_factors":
             return _resolve_market_factor_data_dir(primary_meta)
         try:
@@ -490,11 +492,8 @@ class InferenceScriptRunner:
         检查对应年份的 parquet 文件是否存在且含有目标日期的数据。
         """
         meta = self._read_primary_metadata()
-        # 解析 parquet 数据目录（优先 metadata 中的 data_dir，否则用默认路径）
-        parquet_dir = Path(
-            meta.get("data_dir")
-            or os.getenv("MODEL_TRAINING_DATA_DIR", "/app/db/feature_snapshots")
-        )
+        # 解析 parquet 数据目录（metadata 的 data_dir 优先，支持相对路径/容器绝对路径重定位）
+        parquet_dir = resolve_feature_snapshot_dir(meta.get("data_dir"))
 
         # Market-aware parquet file resolution
         market = ""
@@ -1103,10 +1102,8 @@ class InferenceScriptRunner:
         primary_meta = self._read_primary_metadata()
         parquet_data_dir = (
             _resolve_market_factor_data_dir(primary_meta)
-            if data_source == "quantdb_factors" else str(
-                primary_meta.get("data_dir")
-                or os.getenv("MODEL_TRAINING_DATA_DIR", "/app/db/feature_snapshots")
-            )
+            if data_source == "quantdb_factors"
+            else str(resolve_feature_snapshot_dir(primary_meta.get("data_dir")))
         )
         env.update(
             {
