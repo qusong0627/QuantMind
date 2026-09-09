@@ -62,20 +62,29 @@
    - 分支 A：`xtquant.xttrader` 可用 → 可另议外接方案（本手册不覆盖）
    - 分支 B（预期）：`xtquant-big-convert` 可导入 → 按下面继续
 
-2. **在 QMT 内置 Python 安装 big-convert**
-   ```bat
-   D:\...\bin.x64\python.exe -m pip install "xtquant-big-convert[redis]"
-   ```
-   装完用这条命令定位 4 个服务端文件的所在目录（就是 pip 的 site-packages）：
-   ```bat
-   D:\...\bin.x64\python.exe -c "import bigqmt_signal_trader_strategy as m, os; print(os.path.dirname(m.__file__))"
-   ```
-
-3. **就位服务端文件**（拷到 QMT 的 `python` 目录，如 `D:\国金证券QMT交易端\python\`）：
+2. **就位服务端文件**（拷到 QMT 的 `python` 目录，如 `D:\国金证券QMT交易端\python\`）：
    `bigqmt_signal_trader/`（整个包）、`bigqmt_signal_trader_strategy.py`、
    `bigqmt_signal_trader_redis_rpc_runtime.py`、`BIGQMT_REDIS_DRYRUN.py`。
 
-4. **写 QMT 端私有配置**：在 QMT 的 `python` 目录新建 `bigqmt_signal_trader_local_config.py`
+   > ⚠️ **不要在 QMT 内置 Python 里 `pip install xtquant-big-convert`**：
+   > 该包声明 `Requires-Python >=3.8`，而 QMT 自带的是 **Python 3.6**，装不上
+   > （且 QMT 的 pip 用旧 OpenSSL，连 HTTPS 镜像常报 SSL 错误）。
+   > 服务端只需要 **`redis` 这个 Python 包**（QMT 通常已内置），代码一律**文件拷贝**。
+   > 文件来源任选其一：
+   > - 已在开发机装过 `xtquant-big-convert` → 从它的 site-packages 拷；
+   > - 从 QuantMind 容器拷（同一份源码，Linux 侧就是 pip 装的）：
+   >   ```bash
+   >   docker cp quantmind:/usr/local/lib/python3.10/site-packages/bigqmt_signal_trader /tmp/qmt_srv/
+   >   docker cp quantmind:/usr/local/lib/python3.10/site-packages/bigqmt_signal_trader_strategy.py /tmp/qmt_srv/
+   >   docker cp quantmind:/usr/local/lib/python3.10/site-packages/bigqmt_signal_trader_redis_rpc_runtime.py /tmp/qmt_srv/
+   >   docker cp quantmind:/usr/local/lib/python3.10/site-packages/BIGQMT_REDIS_DRYRUN.py /tmp/qmt_srv/
+   >   ```
+   >   再把 `/tmp/qmt_srv/` 拷到 Windows 的 QMT `python` 目录（`__pycache__` 不必拷）。
+
+   > 📌 **前置**：全新安装的 QMT 在 `bin.x64\` 下**没有 `Lib\`、也没有 `python.exe`** ——
+   > 那是 QMT 界面里下载「Python 组件」后才出现的，不要手动建 `Lib\`。
+
+3. **写 QMT 端私有配置**：在 QMT 的 `python` 目录新建 `bigqmt_signal_trader_local_config.py`
    （含账号密码，**不要提交 git**）：
    ```python
    # coding: utf-8
@@ -91,7 +100,7 @@
    }
    ```
 
-5. **在 QMT 策略编辑器里加载运行 `BIGQMT_REDIS_DRYRUN.py`**（只加载这一个文件，它自己 import 其余模块）。
+4. **在 QMT 策略编辑器里加载运行 `BIGQMT_REDIS_DRYRUN.py`**（只加载这一个文件，它自己 import 其余模块）。
    QMT 需处于**实盘模式**。启动成功时 QMT 输出面板会打印：
    ```
    [bigqmt_shell] local redis config loaded keys=[...]
@@ -105,9 +114,9 @@
    > QMT 重启后要在策略编辑器里重新运行该策略。
    > 若券商沙箱拦截 `import redis`，改用自包含的 `bigqmt_no_redis/`（ZMQ 传输，配置里加 `"transport": "zmq"` 且 `rpc_background_threads=False`）。
 
-6. **放行防火墙**：Redis 端口只对 QuantMind 主机 IP 开放。
+5. **放行防火墙**：Redis 端口只对 QuantMind 主机 IP 开放。
 
-7. **服务端排错日志**：QMT 的 `python` 目录下 `logs/bigqmt_*.log`（保留 7 天）。
+6. **服务端排错日志**：QMT 的 `python` 目录下 `logs/bigqmt_*.log`（保留 7 天）。
 
 ---
 
@@ -190,6 +199,7 @@ A 股通道选为「大 QMT(执行端)」（写入 `broker:selected:CN=qmt_exec`
 | 现象 | 排查 |
 |------|------|
 | 页面「通道未就绪」 | `ENABLE_REAL_TRADING` 是否为 true；A 股券商是否已选 `qmt_exec` |
+| QMT 的 python.exe 里 `pip install xtquant-big-convert` 失败（SSL 错 / 提示需要 3.8+） | **正常**，服务端不装这个包：QMT 是 Python 3.6，代码走文件拷贝，只需 `redis` 包（通常已内置），见 §三.2 |
 | 测试连接报 `NOT_CONNECTED` | QMT 机器上的服务端没跑 / Redis 地址密码不对 / 防火墙未放行 |
 | 测试连接报 `ORDER_DISABLED` | 服务端 `rpc_allow_order_methods` 未开 |
 | 服务端面板日志以 `finished` 结尾、没有 `[bigqmt_rpc] started` | 用普通脚本/独立进程方式跑了入口 → 必须在 QMT **策略编辑器**里加载运行 `BIGQMT_REDIS_DRYRUN.py` |
