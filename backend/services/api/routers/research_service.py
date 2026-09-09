@@ -2411,18 +2411,25 @@ async def get_stock_kline(
 
     # 截止日/起始日归一化（非法值回退为缺省）；缓存键必须带日期维度，否则
     # 不同窗口的 K 线结果会互相污染。
+    # 同时保留解析后的 date 对象：trade_date 是 date 列，绑字符串会触发
+    # asyncpg DataError（'str' object has no attribute 'toordinal'），
+    # 导致带窗口的 K 线永远查不到 DB、只能落到腾讯在线兜底。
+    end_d: date | None = None
+    start_d: date | None = None
     try:
         end_s = str(end_date)[:10] if end_date else ""
         if end_s:
-            date.fromisoformat(end_s)
+            end_d = date.fromisoformat(end_s)
     except (ValueError, TypeError):
         end_s = ""
+        end_d = None
     try:
         start_s = str(start_date)[:10] if start_date else ""
         if start_s:
-            date.fromisoformat(start_s)
+            start_d = date.fromisoformat(start_s)
     except (ValueError, TypeError):
         start_s = ""
+        start_d = None
     cache_key = f"sdl-kline:{normalized_symbol}:{days}:{end_s or 'latest'}:{start_s or '-'}"
 
     # 当前价格统一走 QuantDB（不复权真实价），避免 stock_daily_latest 空表/复权口径不一致
@@ -2460,9 +2467,9 @@ async def get_stock_kline(
             {"AND trade_date <= :e" if end_s else ""}
             ORDER BY trade_date ASC LIMIT :l
         """
-        sql_params = {"s": normalized_symbol, "l": window_cap, "st": start_s}
-        if end_s:
-            sql_params["e"] = end_s
+        sql_params = {"s": normalized_symbol, "l": window_cap, "st": start_d}
+        if end_d:
+            sql_params["e"] = end_d
     else:
         end_filter = "AND trade_date <= :e" if end_s else ""
         sql = f"""
@@ -2473,8 +2480,8 @@ async def get_stock_kline(
             ORDER BY trade_date DESC LIMIT :l
         """
         sql_params = {"s": normalized_symbol, "l": days}
-        if end_s:
-            sql_params["e"] = end_s
+        if end_d:
+            sql_params["e"] = end_d
 
     items = []
     try:
@@ -2514,7 +2521,14 @@ async def get_stock_kline(
                 async with client.get(url, timeout=aiohttp.ClientTimeout(total=6)) as resp:
                     if resp.status == 200:
                         pdata = await resp.json(content_type=None)
-                        day_rows = (pdata.get("data", {}).get(ts_code, {}) or {}).get("qfqday") or (pdata.get("data", {}).get(ts_code, {}) or {}).get("day") or []
+                        # 腾讯接口在代码非法/无数据时 data 会退化成 list（错误结构），
+                        # 直接 .get 会抛 'list' object has no attribute 'get'，
+                        # 让整段在线兜底静默失效 → 这里逐层做类型守卫。
+                        data_node = pdata.get("data") if isinstance(pdata, dict) else None
+                        stock_node = data_node.get(ts_code) if isinstance(data_node, dict) else None
+                        if not isinstance(stock_node, dict):
+                            stock_node = {}
+                        day_rows = stock_node.get("qfqday") or stock_node.get("day") or []
                         for row in day_rows:
                             if len(row) >= 6:
                                 items.append({

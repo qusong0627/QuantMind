@@ -4,7 +4,7 @@
 # 用法: bash deploy/portable/make_update_patch.sh [基线提交]
 #   基线默认 HEAD~1;也可传 tag/commit 如 v2.3.3
 # 产出: deploy/portable/dist/QuantMind-Update-<日期>.zip
-#       (内含 backend/config/strategy_templates/根级脚本 +
+#       (内含 backend/config/strategy_templates/根级脚本 + data/upgrade_*.sql +
 #        apply_update.bat,老用户解压覆盖到包根后双击应用)
 #
 # 说明: 只打包 git 跟踪且属于「代码类」的改动路径;
@@ -54,6 +54,16 @@ if ! git diff --quiet "$BASE"..HEAD -- docker/training 2>/dev/null; then
     mkdir -p "$STAGE/docker"
     cp -a docker/training "$STAGE/docker/training"
     changed=1
+fi
+
+# 2c) 增量升级 SQL（data/upgrade_*.sql → 补丁内 data/，解压到包根后由
+#     main_oss._upgrade_sql_files() 启动时自动执行幂等迁移）。整组打包而非只打
+#     改动文件：修复「SQL 从未随包分发」之前构建的旧包一个都没带，靠每次补丁
+#     全量补齐才会收敛；4 个文件共 ~35KB，代价可忽略。
+if ls data/upgrade_*.sql >/dev/null 2>&1; then
+    mkdir -p "$STAGE/data"
+    cp -f data/upgrade_*.sql "$STAGE/data/"
+    echo "[i] 增量升级 SQL 随补丁分发: $(ls data/upgrade_*.sql | wc -l) 个"
 fi
 
 if [ "$changed" = "0" ]; then

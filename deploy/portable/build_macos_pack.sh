@@ -148,6 +148,15 @@ chmod +x "$STAGE/start.command" "$STAGE/stop.command"
 for D in uploads strategies reports backtest_results hf qlib_data quantdb quantus quanthk quantbc quantfutures; do
     mkdir -p "$STAGE/data/$D"
 done
+# 增量升级 SQL（data/upgrade_*.sql）：容器版挂 /data，便携包为 <包根>/data，
+# main_oss._upgrade_sql_files() 按候选目录探测执行（含 <backend>/../data）。
+# 缺这些文件则 system_events 等增量迁移永不执行——历史 bug，勿删。
+if ls "$REPO_ROOT"/data/upgrade_*.sql >/dev/null 2>&1; then
+    cp -f "$REPO_ROOT"/data/upgrade_*.sql "$STAGE/data/"
+    ok "增量升级 SQL 已打包: $(ls "$STAGE"/data/upgrade_*.sql | wc -l) 个"
+else
+    fail "仓库 data/upgrade_*.sql 缺失（system_events 等增量迁移将不执行）"
+fi
 
 # 打包
 cd "$BUILD"

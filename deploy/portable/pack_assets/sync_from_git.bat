@@ -158,6 +158,16 @@ set "RC4=0"
 if exist "%REPO%\web\index.html" robocopy "%REPO%\web" "%PACK%\web" /MIR /NFL /NDL /NJH /NJS
 if errorlevel 1 set "RC4=%errorlevel%"
 if not exist "%REPO%\web\index.html" echo [sync] note: repo web/index.html missing - frontend sync skipped
+rem data\upgrade_*.sql (startup migrations, tracked in git): mirror into package data\.
+rem main_oss._upgrade_sql_files() probes /data, <backend>\..\data, etc. at startup;
+rem without these files system_events and other incremental migrations never run.
+if exist "%REPO%\data\upgrade_*.sql" (
+    if not exist "%PACK%\data" mkdir "%PACK%\data"
+    copy /Y "%REPO%\data\upgrade_*.sql" "%PACK%\data\" >nul
+    echo [sync] upgrade SQL refreshed
+) else (
+    echo [sync] note: repo data\upgrade_*.sql missing - startup migrations will NOT run
+)
 for /d /r "%PACK%\backend" %%d in (__pycache__) do rd /s /q "%%d" 2>nul
 if %RC1% GEQ 8 goto :copy_fail
 if %RC2% GEQ 8 goto :copy_fail

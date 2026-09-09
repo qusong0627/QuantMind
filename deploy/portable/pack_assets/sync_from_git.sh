@@ -9,6 +9,7 @@
 # What it does:
 #   git pull (origin <branch>)
 #   copy backend/ config/ strategy_templates/ web/ into the package
+#   copy data/upgrade_*.sql into the package (startup migrations)
 #   clear __pycache__ (stale bytecode protection)
 #   ask you to restart with start.sh
 #
@@ -128,6 +129,17 @@ if [ -d "$REPO/docker/training" ]; then
 else
     echo "[sync] note: repo docker/training missing - package training scripts NOT refreshed"
 fi
+# data/upgrade_*.sql（增量迁移 SQL，随 git 跟踪）：镜像到包根 data/。
+# main_oss._upgrade_sql_files() 启动时按候选目录探测执行（含 <backend>/../data），
+# 缺这些文件则 system_events 等增量迁移永不执行——历史 bug，勿删。
+if ls "$REPO"/data/upgrade_*.sql >/dev/null 2>&1; then
+    mkdir -p "$PACK/data"
+    cp -f "$REPO"/data/upgrade_*.sql "$PACK/data/"
+    echo "[sync] upgrade SQL refreshed ($(ls "$PACK"/data/upgrade_*.sql 2>/dev/null | wc -l) files)"
+else
+    echo "[sync] note: repo data/upgrade_*.sql missing - startup migrations will NOT run"
+fi
+
 # web/（前端构建产物，随 git 跟踪）：镜像覆盖并清掉旧 chunk，避免 UI 残留
 if [ -f "$REPO/web/index.html" ]; then
     if command -v rsync >/dev/null 2>&1; then

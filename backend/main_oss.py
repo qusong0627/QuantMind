@@ -443,17 +443,89 @@ def _ensure_database_schema():
         logger.warning("数据库自动建表失败（不影响启动，后续按需建表）: %s", e)
 
 
+def _is_destructive_sql(sql_text: str) -> bool:
+    """判断 SQL 是否含破坏性语句（先剔除注释，避免注释里的关键字误伤）。
+
+    启动期自动迁移只允许幂等/增量脚本。历史教训：data/upgrade_v1.1.0.sql 内含
+    `DROP TABLE public.stock_daily_latest CASCADE`（还带显式 COMMIT），一旦被自动
+    执行会清空整表数据——这类脚本必须由运维人工 psql -f 执行。
+    """
+    import re
+
+    cleaned = re.sub(r"/\*.*?\*/", " ", sql_text, flags=re.DOTALL)
+    cleaned = re.sub(r"--[^\n]*", " ", cleaned)
+    return bool(
+        re.search(
+            r"\b(?:DROP\s+(?:TABLE|SCHEMA|DATABASE)|TRUNCATE|DELETE\s+FROM|DROP\s+COLUMN)\b",
+            cleaned,
+            re.IGNORECASE,
+        )
+    )
+
+
+def _upgrade_sql_files() -> list[str]:
+    """定位可自动执行的增量升级 SQL（data/upgrade_*.sql），兼容三种部署布局。
+
+    历史 bug：这里只 glob 容器内 /app/data，但镜像中该目录为空、compose 把仓库
+    data/ 挂到 /data（便携包则是 <pack>/data），导致迁移脚本从未执行
+    （system_events 缺失）。按优先级取第一个命中的目录，避免同一批 SQL 被重复执行。
+
+    破坏性脚本（DROP TABLE / TRUNCATE / DELETE FROM / DROP COLUMN）跳过并告警，
+    只自动执行幂等增量迁移，防止启动时清空存量表。
+    """
+    import glob as _glob
+
+    backend_dir = os.path.dirname(os.path.abspath(__file__))
+    candidates = [
+        os.getenv("QM_UPGRADE_SQL_DIR", ""),
+        os.getenv("QM_DATA_DIR", ""),
+        "/data",
+        "/app/data",
+        # 源码仓库 / 便携包：<root>/data（backend/ 的上一级）
+        os.path.join(os.path.dirname(backend_dir), "data"),
+    ]
+    seen: set[str] = set()
+    for directory in candidates:
+        if not directory or directory in seen:
+            continue
+        seen.add(directory)
+        hits = sorted(_glob.glob(os.path.join(directory, "upgrade_*.sql")))
+        if not hits:
+            continue
+        safe: list[str] = []
+        for path in hits:
+            try:
+                with open(path, encoding="utf-8", errors="replace") as f:
+                    text = f.read()
+            except OSError as e:
+                logger.warning("增量升级脚本不可读，跳过 %s: %s", os.path.basename(path), e)
+                continue
+            if _is_destructive_sql(text):
+                logger.warning(
+                    "跳过破坏性增量升级脚本（含 DROP/TRUNCATE/DELETE，需人工执行）: %s",
+                    os.path.basename(path),
+                )
+                continue
+            safe.append(path)
+        return safe
+    return []
+
+
 def _ensure_upgrade_scripts(env: dict) -> None:
-    """执行 /app/data/upgrade_*.sql 增量迁移（system_events、news title 等）。
+    """执行 data/upgrade_*.sql 增量迁移（system_events、news title 等）。
 
     幂等（均含 IF NOT EXISTS / DO IF NOT EXISTS），可重复执行，避免
     新表/新列因未自动迁移而导致线上 500（如 system_events 缺失、
     news_article_enrichment.title 缺失）。
     """
-    import glob as _glob
     import subprocess as _sp
 
-    for sql_path in sorted(_glob.glob("/app/data/upgrade_*.sql")):
+    sql_files = _upgrade_sql_files()
+    if not sql_files:
+        logger.warning("增量升级 SQL 未找到（data/upgrade_*.sql），跳过")
+        return
+
+    for sql_path in sql_files:
         try:
             result = _sp.run(
                 ["psql", "-h", os.getenv("DB_HOST", os.getenv("POSTGRES_HOST", "db")),
@@ -531,8 +603,28 @@ def _ensure_market_analysis_tables(env: dict) -> None:
         logger.warning("市场分析建表失败（不影响启动）: %s", e)
 
 
+def _exec_sql_python(cur, sql_path: str, ok_msg: str) -> None:
+    """执行单个 SQL 文件；失败仅告警，不中断后续文件。
+
+    autocommit 下每条语句自成事务，单条失败（如老库上 db_init.sql 的 admin
+    种子撞唯一键）不影响连接与后续文件，等价于 psql 的 ON_ERROR_STOP=0。
+    """
+    try:
+        with open(sql_path, encoding="utf-8") as f:
+            cur.execute(f.read())
+        logger.info("%s", ok_msg)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("SQL 执行失败 %s: %s", os.path.basename(sql_path), e)
+
+
 def _ensure_database_schema_python():
-    """psql 不可用时的回退方案：用 Python psycopg2 执行初始化 SQL。"""
+    """psql 不可用时的回退方案：用 Python psycopg2 执行初始化 SQL。
+
+    必须与 psql 路径的 ON_ERROR_STOP=0 对齐：单个 SQL 失败不能中断后续建表与
+    增量迁移。历史实现把三个文件串在一个 try 里，老库上 db_init.sql 的 admin
+    种子撞唯一键就直接跳到 except，market_analysis 与 data/upgrade_*.sql 全部
+    被跳过——system_events 因此永远建不出来（无 psql 的镜像与便携包正是这个组合）。
+    """
     init_sql = _sql_file("shared/db_init.sql")
     if not os.path.isfile(init_sql):
         return
@@ -548,29 +640,20 @@ def _ensure_database_schema_python():
         conn = psycopg2.connect(host=db_host, port=db_port, dbname=db_name,
                                 user=db_user, password=db_password)
         conn.autocommit = True
-        with open(init_sql) as f:
-            sql = f.read()
         with conn.cursor() as cur:
-            cur.execute(sql)
+            _exec_sql_python(cur, init_sql, "数据库表结构自检完成 (Python psycopg2)")
             # 市场分析建表（qm_market_sectors 等，不在 db_init.sql 内）
             market_sql = _sql_file(
                 "services/api/market_analysis/migrations/001_create_market_analysis.sql"
             )
             if os.path.isfile(market_sql):
-                with open(market_sql) as f:
-                    cur.execute(f.read())
-                logger.info("市场分析表结构自检完成 (Python psycopg2)")
+                _exec_sql_python(cur, market_sql, "市场分析表结构自检完成 (Python psycopg2)")
             # 增量升级（system_events、news title 等，幂等）
-            import glob as _glob2
-            for _up in sorted(_glob2.glob("/app/data/upgrade_*.sql")):
-                try:
-                    with open(_up, encoding="utf-8") as f:
-                        cur.execute(f.read())
-                    logger.info("增量升级已执行(Python): %s", os.path.basename(_up))
-                except Exception as ue:  # noqa: BLE001
-                    logger.warning("增量升级失败(Python) %s: %s", os.path.basename(_up), ue)
+            for _up in _upgrade_sql_files():
+                _exec_sql_python(
+                    cur, _up, f"增量升级已执行(Python): {os.path.basename(_up)}"
+                )
         conn.close()
-        logger.info("数据库表结构自检完成 (Python psycopg2)")
     except Exception as e:
         logger.warning("数据库自动建表失败（不影响启动）: %s", e)
 
