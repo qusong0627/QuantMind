@@ -107,13 +107,51 @@ class TestTerminalGuard:
         assert session.added == []
 
     def test_cancelled_not_regressed_by_late_fill(self) -> None:
-        """已撤单后到的成交回报不得改状态、不得再入账成交。"""
+        """已撤单后到的成交回报：状态不动，但**明细必须入账**（真钱不能少记）。"""
         order = _order(OrderStatus.CANCELLED, filled=40.0, filled_value=400.0)
         result, session = _apply(
             order, "PARTIALLY_FILLED", qty=40.0, price=10.0, trade_id="T9"
         )
         assert result is OrderStatus.CANCELLED
         assert order.status is OrderStatus.CANCELLED
+        assert order.filled_quantity == 80.0
+        assert len(session.added) == 1
+        assert session.added[0].exchange_trade_id == "T9"
+
+    def test_cancelled_late_fill_completing_quantity_keeps_cancelled(self) -> None:
+        """补到的成交正好补齐总量：明细入账，但状态不得从已撤翻回已成。"""
+        order = _order(
+            OrderStatus.CANCELLED, filled=60.0, filled_value=600.0, quantity=100.0
+        )
+        result, session = _apply(
+            order, "PARTIALLY_FILLED", qty=40.0, price=10.0, trade_id="T10"
+        )
+        assert result is OrderStatus.CANCELLED
+        assert order.filled_quantity == 100.0
+        assert len(session.added) == 1
+
+    def test_rejected_late_fill_records_trade_only(self) -> None:
+        order = _order(OrderStatus.REJECTED)
+        result, session = _apply(
+            order, "PARTIALLY_FILLED", qty=10.0, price=10.0, trade_id="T11"
+        )
+        assert result is OrderStatus.REJECTED
+        assert order.filled_quantity == 10.0
+        assert len(session.added) == 1
+
+    def test_cancelled_duplicate_late_fill_not_double_counted(self) -> None:
+        """同一成交号重放（桥重发）不得再入账。"""
+        existing = SimpleNamespace(exchange_trade_id="T9")
+        order = _order(OrderStatus.CANCELLED, filled=40.0, filled_value=400.0)
+        result, session = _apply(
+            order,
+            "PARTIALLY_FILLED",
+            qty=40.0,
+            price=10.0,
+            trade_id="T9",
+            session=FakeSession(rows=[existing]),
+        )
+        assert result is OrderStatus.CANCELLED
         assert order.filled_quantity == 40.0
         assert session.added == []
 

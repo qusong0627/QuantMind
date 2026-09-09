@@ -14,6 +14,7 @@ import asyncio
 import json
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi import HTTPException
@@ -187,3 +188,43 @@ class TestFieldValidation:
         )
         asyncio.run(mod.update_broker_config("tdx", payload, auth=_auth(), redis=redis))
         assert _stored("tdx", redis)["bridge_url"] == "http://192.168.31.13:8550"
+
+
+class TestSecretRedaction:
+    """测试连接的失败文案会回显给管理员：裸密码回显也必须抹掉。"""
+
+    def test_secret_hints_collect_stored_and_env(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("QMT_EXEC_REDIS_PASSWORD", "from-env")
+        redis = _redis(redis_password="s3cret")
+        hints = mod._secret_hints(redis, "qmt_exec")
+        assert "s3cret" in hints
+        assert "from-env" in hints
+
+    def test_secret_hints_empty_when_unconfigured(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("QMT_EXEC_REDIS_PASSWORD", raising=False)
+        monkeypatch.delenv("BIGQMT_REDIS_PASSWORD", raising=False)
+        assert mod._secret_hints(_redis(), "qmt_exec") == []
+
+    def test_connection_error_redacts_bare_password(self) -> None:
+        """桥侧把裸密码写进异常文案（不是 URL 形态）时，按已知密钥原文替换。"""
+        redis = _redis(redis_host="127.0.0.1", redis_password="s3cret")
+        client = SimpleNamespace(
+            account_id="8888",
+            refresh_settings=AsyncMock(
+                side_effect=ConnectionError("bridge auth failed pw=s3cret")
+            ),
+        )
+        with patch(
+            "backend.services.live_trading.services.qmt_exec_client.get_qmt_exec_client",
+            return_value=client,
+        ):
+            data = asyncio.run(
+                mod.test_broker_connection("qmt_exec", None, auth=_auth(), redis=redis)
+            )
+        assert data["success"] is False
+        assert "s3cret" not in data["message"]
+        assert "***" in data["message"]

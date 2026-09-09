@@ -680,6 +680,20 @@ class TestDispatchGate:
         assert result["status"] == "submitted"
         dispatch.assert_awaited_once()
 
+    def test_market_removed_from_config_blocks_requeue(self) -> None:
+        """市场被移出 mirror:config.markets 后，隔夜队列里的该市场单不得补交。"""
+        redis = self._open_redis()
+        reason = m._queued_entry_blocked(
+            redis, _cfg(markets=frozenset({"HK"})), _payload()
+        )
+        assert reason == "market_not_supported:CN"
+
+    def test_market_still_enabled_passes_recheck(self) -> None:
+        redis = self._open_redis()
+        with patch.object(m, "_real_trading_ready", return_value=(True, "")):
+            reason = m._queued_entry_blocked(redis, _cfg(), _payload())
+        assert reason == ""
+
 
 # --------------------------------------------------------------------------
 # 限额 / 熔断 / 幂等键

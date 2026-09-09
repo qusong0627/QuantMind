@@ -202,8 +202,11 @@ async def apply_execution_report(
 
     **终态守卫**：订单已处于 FILLED/CANCELLED/REJECTED/EXPIRED 时，陈旧或乱序的
     回报（桥重发、重连后的全量快照、poller 重启补拉）不得把它改回
-    SUBMITTED/PARTIALLY_FILLED——否则对账与持仓会按错误状态重算。此类回报只
-    保留备注/交易所编号，状态与成交累计都不再改动。
+    SUBMITTED/PARTIALLY_FILLED——否则对账与持仓会按错误状态重算。
+
+    但**只冻结状态，不冻结成交明细**：撤单/拒单之后才补到的真实成交（备注映射
+    缺失或过期、query_trades 滞后一轮、成交与撤单之间进程重启）仍要入账，否则
+    真钱账本会永久少记一笔；去重照旧按 ``exchange_trade_id``，重复回报不会双计。
     """
     normalized = normalize_status(status_raw)
     current = (
@@ -212,6 +215,8 @@ async def apply_execution_report(
         else normalize_status(order.status)
     )
     terminal_locked = current in _TERMINAL_STATUSES
+    # FILLED 本来就允许继续补明细（见下），所以只对「可能被降级改写」的终态上锁。
+    status_locked = terminal_locked and current != OrderStatus.FILLED
     ex_oid = valid_exchange_order_id(exchange_order_id)
     trade_id = str(exchange_trade_id or "").strip()
     try:
@@ -246,7 +251,12 @@ async def apply_execution_report(
     ):
         order.remarks = msg
 
-    if normalized in {OrderStatus.PARTIALLY_FILLED, OrderStatus.FILLED}:
+    # 终态之后补到的带成交号明细同样入账（状态已被钳住，这里只落明细/累计）。
+    accepts_fill = normalized in {
+        OrderStatus.PARTIALLY_FILLED,
+        OrderStatus.FILLED,
+    } or (terminal_locked and bool(trade_id) and filled_qty > 0)
+    if accepts_fill:
         if not trade_id:
             # 状态回调可能带累计成交量但没有唯一成交 ID：
             # 为避免与后续成交回调双计，这里只更新状态，不累计金额/数量。
@@ -303,16 +313,19 @@ async def apply_execution_report(
                 if order.filled_quantity > 0:
                     order.average_price = order.filled_value / order.filled_quantity
 
-        total_quantity = float(order.quantity or 0.0)
-        filled_total = float(getattr(order, "filled_quantity", 0.0) or 0.0)
-        if total_quantity > 0 and filled_total >= total_quantity:
-            order.status = OrderStatus.FILLED
-            if getattr(order, "filled_at", None) is None:
-                order.filled_at = datetime.now()
-        elif filled_total > 0 and normalized == OrderStatus.PARTIALLY_FILLED:
-            # 只有「部分成交」回报才落到 PARTIALLY_FILLED：部撤/撤单回报虽然
-            # filled_total > 0，状态必须是 CANCELLED（否则 cancelled_at 也不会落）。
-            order.status = OrderStatus.PARTIALLY_FILLED
+        # 终态（已撤/已拒/已过期）不再被成交推进状态：部撤/全撤后的补录只更新
+        # filled_quantity 与成交明细，状态保持调用方看到的终态。
+        if not status_locked:
+            total_quantity = float(order.quantity or 0.0)
+            filled_total = float(getattr(order, "filled_quantity", 0.0) or 0.0)
+            if total_quantity > 0 and filled_total >= total_quantity:
+                order.status = OrderStatus.FILLED
+                if getattr(order, "filled_at", None) is None:
+                    order.filled_at = datetime.now()
+            elif filled_total > 0 and normalized == OrderStatus.PARTIALLY_FILLED:
+                # 只有「部分成交」回报才落到 PARTIALLY_FILLED：部撤/撤单回报虽然
+                # filled_total > 0，状态必须是 CANCELLED（否则 cancelled_at 也不会落）。
+                order.status = OrderStatus.PARTIALLY_FILLED
 
     if (
         order.status == OrderStatus.CANCELLED

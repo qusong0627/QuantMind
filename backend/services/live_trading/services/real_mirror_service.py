@@ -1128,12 +1128,19 @@ async def drain_mirror_queue(
         return await _drain_with_session(redis, client, cfg, session, limit)
 
 
-def _queued_entry_blocked(redis: Any, payload: dict[str, Any]) -> str:
-    """补交前的复核（白/黑名单 + 通道就绪）。返回空串=允许，否则阻塞原因。
+def _queued_entry_blocked(
+    redis: Any, cfg: MirrorConfig, payload: dict[str, Any]
+) -> str:
+    """补交前的复核（市场/白/黑名单 + 通道就绪）。返回空串=允许，否则阻塞原因。
 
-    入队时过了闸门不代表补交时还成立：名单/券商选择/实盘开关都可能在
-    隔夜被改，必须在真正下单前重新判一遍。
+    入队时过了闸门不代表补交时还成立：市场开关、名单、券商选择、实盘开关都可能在
+    隔夜被改，必须在真正下单前重新判一遍（市场判定与首检 ``_mirror_virtual_fill``
+    同口径，否则把 CN 从 mirror:config.markets 移除后，隔夜队列里的 CN 单仍会补交）。
     """
+    symbol = str(payload.get("symbol") or "")
+    market_key = str(payload.get("market") or "").upper() or _infer_market(symbol)
+    if market_key not in cfg.markets:
+        return f"market_not_supported:{market_key}"
     if not whitelist_allows(
         redis,
         tenant_id=str(payload.get("tenant_id") or ""),
@@ -1141,18 +1148,16 @@ def _queued_entry_blocked(redis: Any, payload: dict[str, Any]) -> str:
         strategy_id=str(payload.get("strategy_id") or ""),
     ):
         return "whitelist"
-    if _is_blacklisted(redis, str(payload.get("symbol") or "")):
+    if _is_blacklisted(redis, symbol):
         return "blacklist"
-    ready, reason = _real_trading_ready(
-        redis, str(payload.get("market") or "CN").upper()
-    )
+    ready, reason = _real_trading_ready(redis, market_key)
     return "" if ready else reason
 
 
 def _dispatch_gate_blocked(
     redis: Any, cfg: MirrorConfig, payload: dict[str, Any]
 ) -> str:
-    """**真正调用 RPC 之前**的最后一道复检：急停 → 开关 → 名单 → 通道就绪。
+    """**真正调用 RPC 之前**的最后一道复检：急停 → 开关 → 市场/名单 → 通道就绪。
 
     首检（``_mirror_virtual_fill``）到实际下发之间隔着参考价查询、账户快照
     （RPC 各 10s 超时）与额度预留，期间运维置急停/关开关/改名单/切券商都必须
@@ -1162,7 +1167,7 @@ def _dispatch_gate_blocked(
         return "kill_switch"
     if not mirror_enabled(redis, cfg):
         return "mirror_disabled"
-    return _queued_entry_blocked(redis, payload)
+    return _queued_entry_blocked(redis, cfg, payload)
 
 
 async def _drain_with_session(
@@ -1190,7 +1195,7 @@ async def _drain_with_session(
             client.rpush(_QUEUE_KEY, raw)
             requeued += 1
             break
-        blocked = _queued_entry_blocked(redis, payload)
+        blocked = _queued_entry_blocked(redis, cfg, payload)
         if blocked:
             dropped += 1
             logger.warning(

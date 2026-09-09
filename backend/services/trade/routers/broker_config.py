@@ -214,6 +214,23 @@ def _guard_endpoint_change(
         )
 
 
+def _secret_hints(redis: RedisClient, broker: str) -> list[str]:
+    """该券商当前可能用到的凭据原文（**只用于脱敏替换**，不落日志）：库内值 + env 兜底值。
+
+    桥侧/底层库把裸密码回显进异常文案时，``redact_secrets`` 只按 URL 形态兜不住，
+    必须带上已知密钥原文一起替换。
+    """
+    stored = _read_config(redis, broker)
+    env_map = SECRET_ENV_VARS.get(broker, {})
+    hints: list[str] = []
+    for name, is_secret in BROKER_FIELDS.get(broker, {}).items():
+        if not is_secret:
+            continue
+        hints.append(str(stored.get(name, "") or ""))
+        hints.extend(str(os.getenv(var) or "") for var in env_map.get(name, ()))
+    return [hint for hint in hints if hint]
+
+
 def get_broker_setting(broker: str, field: str, default: str = "") -> str:
     """供 overseas_brokers 运行时读取（Redis 优先，回退环境变量由调用方处理）。"""
     from backend.services.trade_shared.redis_client import RedisClient
@@ -407,12 +424,12 @@ async def test_broker_connection(
         }.get(broker, "")
         message = str(exc)
         if broker == "qmt_exec":
-            # 兜底脱敏：底层库可能把 redis://user:密码@host 原样抛出来
+            # 兜底脱敏：底层库可能把 redis://user:密码@host 或裸密码原样抛出来
             from backend.services.live_trading.services.qmt_exec_client import (
                 redact_secrets,
             )
 
-            message = redact_secrets(message)
+            message = redact_secrets(message, *_secret_hints(redis, broker))
         return {"success": False, "message": f"连接失败：{message}{('；' + hint) if hint else ''}"}
 
 
