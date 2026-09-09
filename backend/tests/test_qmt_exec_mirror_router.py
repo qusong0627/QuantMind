@@ -8,12 +8,14 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import date, datetime, time, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi import HTTPException
+from pydantic import ValidationError
 
 from backend.services.live_trading.services import real_mirror_service as mirror
 from backend.services.trade.routers import qmt_mirror as mod
@@ -83,7 +85,8 @@ class TestStatusAndSwitches:
 
         off = mod.MirrorEnabledUpdate(enabled=False)
         data = asyncio.run(mod.set_mirror_enabled(off, redis=redis, auth=_auth()))
-        assert mirror._ENABLED_KEY not in redis.client.strings
+        # 显式写 "0"（删键会回落到 env 基线，env=true 时「关闭」等于没关）
+        assert redis.client.strings[mirror._ENABLED_KEY] == "0"
         assert data["enabled"] is False
 
     def test_kill_switch_blocks_even_when_enabled(self) -> None:
@@ -154,6 +157,26 @@ class TestConfigAndLists:
             )
         assert result == {"drained": 2}
         assert drain.await_args.kwargs["limit"] == 5
+
+    def test_config_limits_bounded(self) -> None:
+        """限额有上限，防手滑填出天文数字后一路下单。"""
+        with pytest.raises(ValidationError):
+            mod.MirrorConfigUpdate(max_order_value=mod.MAX_ORDER_VALUE_LIMIT + 1)
+        with pytest.raises(ValidationError):
+            mod.MirrorConfigUpdate(max_daily_value=mod.MAX_DAILY_VALUE_LIMIT + 1)
+        with pytest.raises(ValidationError):
+            mod.MirrorConfigUpdate(max_slippage_pct=0.5)
+        assert mod.MirrorConfigUpdate(max_order_value=1.0).max_order_value == 1.0
+
+    def test_lists_clean_and_bounded(self) -> None:
+        data = mod.MirrorListsUpdate(whitelist=[" default:1 ", "", "  "], blacklist=None)
+        assert data.whitelist == ["default:1"]
+        with pytest.raises(ValidationError):
+            mod.MirrorListsUpdate(blacklist=["S" * (mod.MAX_LIST_ITEM_LEN + 1)])
+        with pytest.raises(ValidationError):
+            mod.MirrorListsUpdate(
+                blacklist=[f"S{i}" for i in range(mod.MAX_LIST_ITEMS + 1)]
+            )
 
 
 def _sim(**over: Any) -> Any:
@@ -260,3 +283,25 @@ class TestReconcile:
         )
         assert data["items"] == []
         assert len(session.statements) == 1
+
+
+class TestSimCreatedWindow:
+    """虚拟单落库时间比真实时刻早 UTC+8h（naive utcnow 写 timestamptz），窗口须回移。"""
+
+    def test_window_shifted_by_session_offset(self) -> None:
+        target = date(2026, 9, 9)
+        start, end = mod._sim_created_window(target)
+        offset = datetime.now(mod.TZ).utcoffset() or timedelta(0)
+        expected_start = datetime.combine(
+            target, time.min, tzinfo=mod.TZ
+        ).astimezone(timezone.utc) - offset
+        assert start == expected_start
+        assert end - start == timedelta(days=1)
+        # 上海日 00:00 的真实瞬时被回移了 8 小时
+        assert start.hour == 8  # 2026-09-08 08:00Z
+
+    def test_window_covers_stored_values(self) -> None:
+        """实测样本：8/25 12:21（上海）的单落库为 8/24 20:21Z，必须落在 8/25 的窗口内。"""
+        start, end = mod._sim_created_window(date(2026, 8, 25))
+        stored = datetime(2026, 8, 24, 20, 21, 19, tzinfo=timezone.utc)
+        assert start <= stored < end

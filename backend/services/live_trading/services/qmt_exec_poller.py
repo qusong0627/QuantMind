@@ -12,7 +12,8 @@
 * **增量成交**：委托回报给的是**累计**成交量，成交回报给的是**单笔**成交量。
   优先用 ``query_trades`` 的明细累加；若委托已成交却查不到任何成交明细
   （跨日清理、接口缺数据），按「该订单在库内无成交行」为前提补一条**合成成交**，
-  合成 ``exchange_trade_id`` 稳定（``qmt-synth-<委托键>``）→ 重复轮询不会重复入账。
+  合成 ``exchange_trade_id`` 稳定（``qmt-synth-<委托键>``）→ 重复轮询不会重复入账；
+  真实明细随后到达时**就地升级**该行为真实成交行，不新增行（否则同一笔成交双计）。
 * **状态去重**：``(状态, 累计成交量)`` 未变化则跳过，减少无谓写库。
 * **日切**：QMT 每日重置委托编号，跨自然日清空去重缓存。
 * **异常隔离**：单轮失败只记日志，不退出循环；未启用/未配置时低频空转，
@@ -153,8 +154,10 @@ class QmtExecPoller:
 
         changed = 0
         async with self._session() as db:
-            touched = await self._sync_orders(db, orders, strategy_name=strategy_name)
-            touched += await self._sync_trades(db, trades, strategy_name=strategy_name)
+            # 先落真实成交明细、再处理委托回报：反过来的话，委托回报会先补一条
+            # 合成成交，同一轮稍后到达的成交明细又入账一次（同一笔成交双计）。
+            touched = await self._sync_trades(db, trades, strategy_name=strategy_name)
+            touched += await self._sync_orders(db, orders, strategy_name=strategy_name)
             if touched:
                 await db.commit()
                 redis = self._redis_handle()
@@ -322,12 +325,16 @@ class QmtExecPoller:
                 )
                 continue
             prev_status = order.status
+            price = float(item.get("traded_price") or 0)
+            upgraded = await self._upgrade_synth_trade(
+                db, order, trade_id=trade_id, volume=volume, price=price
+            )
             new_status = await apply_execution_report(
                 db,
                 order=order,
                 status_raw="PARTIALLY_FILLED",
                 filled_quantity=volume,
-                filled_price=float(item.get("traded_price") or 0),
+                filled_price=price,
                 exchange_order_id=str(item.get("order_id") or ""),
                 exchange_trade_id=trade_id,
                 message="成交回报",
@@ -338,15 +345,74 @@ class QmtExecPoller:
             if new_status != prev_status:
                 touched.append((order, new_status))
             logger.info(
-                "[QmtExecPoller] 成交入账 trade_id=%s order_id=%s symbol=%s qty=%s price=%s 累计=%s",
+                "[QmtExecPoller] 成交入账 trade_id=%s order_id=%s symbol=%s qty=%s price=%s 累计=%s%s",
                 trade_id,
                 order.order_id,
                 order.symbol,
                 volume,
                 item.get("traded_price"),
                 order.filled_quantity,
+                "（替换合成成交）" if upgraded else "",
             )
         return touched
+
+    async def _upgrade_synth_trade(
+        self,
+        db: Any,
+        order: Any,
+        *,
+        trade_id: str,
+        volume: float,
+        price: float,
+    ) -> bool:
+        """把此前的合成成交行就地升级为真实成交行，避免同一笔成交双计。
+
+        合成成交是「委托已成交但查不到成交明细」时的兜底；真实明细到达后若按常规
+        插入，同一笔成交会留下两行（合成行与真实行 ``exchange_trade_id`` 不同，
+        去重挡不住）→ 成交数量/金额双计。这里就地替换该行，并按差额校正订单累计。
+        返回是否发生了替换。
+        """
+        from sqlalchemy import select
+
+        from backend.services.trade_shared.models.trade import Trade
+
+        result = await db.execute(
+            select(Trade)
+            .where(
+                Trade.order_id == order.order_id,
+                Trade.exchange_trade_id.like(f"{_SYNTH_TRADE_PREFIX}%"),
+            )
+            .limit(1)
+        )
+        row = result.scalars().first()
+        if row is None:
+            return False
+        old_qty = float(row.quantity or 0.0)
+        old_value = float(row.trade_value or 0.0)
+        new_value = float(volume) * price if price else old_value
+        order.filled_quantity = (
+            float(getattr(order, "filled_quantity", 0.0) or 0.0) + float(volume) - old_qty
+        )
+        order.filled_value = (
+            float(getattr(order, "filled_value", 0.0) or 0.0) + new_value - old_value
+        )
+        if order.filled_quantity > 0:
+            order.average_price = order.filled_value / order.filled_quantity
+        row.exchange_trade_id = trade_id
+        row.quantity = float(volume)
+        if price:
+            row.price = price
+            row.trade_value = new_value
+        row.remarks = "成交回报（替换合成成交）"
+        logger.info(
+            "[QmtExecPoller] 合成成交升级为真实成交 order_id=%s synth_qty=%s "
+            "real_qty=%s trade_id=%s",
+            order.order_id,
+            old_qty,
+            volume,
+            trade_id,
+        )
+        return True
 
     # -- 匹配 -----------------------------------------------------------
     @staticmethod

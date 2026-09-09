@@ -41,6 +41,7 @@ import os
 import threading
 from typing import Any, Optional, Protocol
 from collections.abc import Callable
+from urllib.parse import quote
 
 logger = logging.getLogger(__name__)
 
@@ -673,7 +674,8 @@ class QmtExecClient:
         db = str(cfg.get("redis_db") or "0").strip() or "0"
         password = str(cfg.get("redis_password") or "")
         if password:
-            return f"redis://:{password}@{host}:{port}/{db}"
+            # 密码可能含 @ : / # 等 URL 保留字符，不编码会把主机解析错。
+            return f"redis://:{quote(password, safe='')}@{host}:{port}/{db}"
         return f"redis://{host}:{port}/{db}"
 
     async def refresh_settings(self) -> dict[str, Any]:
@@ -862,6 +864,10 @@ class QmtExecClient:
             raise QmtExecError("数量必须大于 0", code="INVALID_QUANTITY")
         cid = str(client_order_id or "").strip()
         remark = build_remark(cid) if cid else build_remark(f"qm-{qmt_symbol}-{volume}")
+        if cid:
+            # 先写映射再下单：TIMEOUT 时委托可能已提交，映射缺失会让回收端
+            # 只能靠兜底匹配（且此时还不知道 QMT 委托号）。写失败不影响下单。
+            await self._remember_remark(remark, cid)
         result = await self._call(
             self._get_backend(cfg).submit_order,
             symbol=qmt_symbol,
@@ -873,8 +879,6 @@ class QmtExecClient:
             strategy_name=str(cfg["strategy_name"]),
             timeout=float(cfg["timeout"]),
         )
-        if cid:
-            await self._remember_remark(remark, cid)
         logger.info(
             "[QmtExec] 下单已受理 symbol=%s side=%s qty=%s price=%s order_id=%s remark=%s cid=%s",
             qmt_symbol,

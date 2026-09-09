@@ -361,6 +361,7 @@ class TestQueue:
         redis.client.rpush("mirror:queue", '{"client_order_id": "mir-x"}')
         with (
             patch.object(m, "is_trading_time", return_value=True),
+            patch.object(m, "_queued_entry_blocked", return_value=""),
             patch.object(
                 m,
                 "_submit_payload",
@@ -370,6 +371,22 @@ class TestQueue:
             result = asyncio.run(m.drain_mirror_queue(redis, db=object()))
         assert result["requeued"] == 1
         assert redis.client.lists["mirror:queue"]
+
+    def test_drain_drops_entry_failing_recheck(self) -> None:
+        """入队后名单/通道可能被改：补交前复核不过的条目直接丢弃，不提交。"""
+        redis = self._open_redis()
+        redis.client.rpush("mirror:queue", '{"client_order_id": "mir-x"}')
+        submit = AsyncMock(return_value={"status": "submitted"})
+        with (
+            patch.object(m, "is_trading_time", return_value=True),
+            patch.object(m, "_queued_entry_blocked", return_value="whitelist"),
+            patch.object(m, "_submit_payload", submit),
+        ):
+            result = asyncio.run(m.drain_mirror_queue(redis, db=object()))
+        assert result["dropped"] == 1
+        assert result["submitted"] == 0
+        submit.assert_not_awaited()
+        assert not redis.client.lists.get("mirror:queue")
 
 
 # --------------------------------------------------------------------------

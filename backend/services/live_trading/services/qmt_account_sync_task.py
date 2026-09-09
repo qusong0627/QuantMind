@@ -34,6 +34,9 @@ SOURCE = "qmt_exec"
 STALE_ALERT_SECONDS_DEFAULT = 300
 STALE_ALERT_COOLDOWN_SECONDS_DEFAULT = 3600
 
+SETTINGS_REFRESH_SECONDS = 30.0  # 页面配置重读间隔（开启后无需重启服务）
+DISABLED_SLEEP_SECONDS = 60.0  # 未启用/未配置时空转间隔
+
 
 def _env_seconds(name: str, default: int) -> int:
     """读秒级 env，非法值回退默认（下限 60s，避免误配成高频告警）。"""
@@ -293,12 +296,13 @@ def _maybe_alert_stale(
 
 
 async def run_qmt_account_sync_task(interval_seconds: int = 30) -> None:
-    """常驻任务：定期同步大 QMT 账户快照。未配置时直接退出（不空转）。"""
-    client = get_qmt_exec_client()
-    if not client.configured:
-        logger.info("[QmtSync] QMT_EXEC_ENABLED/ACCOUNT_ID 未配置，账户同步任务跳过")
-        return
+    """常驻任务：定期同步大 QMT 账户快照。
 
+    启动时未配置**不退出**：页面「券商实盘接入」开启 QMT 后，任务每轮重读页面
+    配置即可接管（直接 return 的话就再也没机会醒来，页面开了也永远没有快照）。
+    未启用/未配置时低频空转，不给桥与数据库添压力。
+    """
+    client = get_qmt_exec_client()
     interval = max(10, int(interval_seconds))
     stale_threshold = _env_seconds(
         "QMT_SYNC_STALE_ALERT_SECONDS", STALE_ALERT_SECONDS_DEFAULT
@@ -308,15 +312,24 @@ async def run_qmt_account_sync_task(interval_seconds: int = 30) -> None:
     )
     health = _SyncHealth()
     logger.info(
-        "[QmtSync] 大 QMT 账户同步任务启动, interval=%ss, account=%s, "
+        "[QmtSync] 大 QMT 账户同步任务启动, interval=%ss, account=%s, enabled=%s, "
         "stale_alert=%ss, cooldown=%ss",
         interval,
-        client.account_id,
+        client.account_id or "(未配置)",
+        client.configured,
         stale_threshold,
         stale_cooldown,
     )
+    last_refresh = 0.0
     while True:
         try:
+            now = asyncio.get_running_loop().time()
+            if now - last_refresh >= SETTINGS_REFRESH_SECONDS:
+                last_refresh = now
+                await client.refresh_settings()
+            if not client.configured:
+                await asyncio.sleep(DISABLED_SLEEP_SECONDS)
+                continue
             result = await qmt_account_sync.sync_account_to_pg(
                 tenant_id="default",
                 user_id=os.getenv("QMT_EXEC_ACCOUNT_USER_ID", "00000001"),

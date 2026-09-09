@@ -184,7 +184,14 @@ const QmtMirrorCard: React.FC = () => {
             });
             const data = await resp.json().catch(() => null);
             if (!resp.ok) throw new Error(data?.detail || `HTTP ${resp.status}`);
-            message.success(`已尝试补交 ${Number(data?.drained ?? 0)} 笔`);
+            const submitted = Number(data?.submitted ?? 0);
+            const failed = Number(data?.failed ?? 0);
+            const dropped = Number(data?.dropped ?? 0);
+            message.success(
+                `已补交 ${submitted} 笔` +
+                    (failed ? `，失败 ${failed} 笔` : '') +
+                    (dropped ? `，复核不过丢弃 ${dropped} 笔` : '')
+            );
             await load(true);
         } catch (e: unknown) {
             message.error(e instanceof Error ? e.message : '补交失败');

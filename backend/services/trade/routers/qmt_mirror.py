@@ -12,6 +12,10 @@
 
 每次写操作都记审计日志（用户/租户/前后值）。所有 Redis 键的读写都封装在
 ``real_mirror_service`` 内，本路由只做参数校验、鉴权与审计。
+
+**鉴权口径**：本路由是真金白银的控制面（开关/急停/限额/名单/补交），全部端点
+要求管理员（``require_admin``），不是「登录即可」。读接口同样收口：状态与对账
+含白名单、当日用量与真单明细，普通用户无权查看。
 """
 
 from __future__ import annotations
@@ -22,16 +26,16 @@ from datetime import datetime, time, timedelta, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 
 from backend.services.live_trading.services import real_mirror_service as mirror
 from backend.services.live_trading.services.trading_session import TZ
 from backend.services.trade_shared.deps import (
     AuthContext,
-    get_auth_context,
     get_db,
     get_redis,
+    require_admin,
 )
 
 logger = logging.getLogger(__name__)
@@ -40,6 +44,12 @@ router = APIRouter()
 SIM_REMARK_PREFIX = "client_order_id="
 MIRROR_CID_PREFIX = "mir-"
 RECONCILE_LIMIT_MAX = 2000
+
+# 限额上限：防手滑把「单笔 1 万」改成天文数字后一路下单（下限由 gt=0 保证）
+MAX_ORDER_VALUE_LIMIT = 10_000_000.0  # 单笔上限 ≤1000 万
+MAX_DAILY_VALUE_LIMIT = 100_000_000.0  # 单日累计上限 ≤1 亿
+MAX_LIST_ITEMS = 500  # 白/黑名单最多条数
+MAX_LIST_ITEM_LEN = 64  # 单条最长字符（tenant:user:strategy / SH600519）
 
 
 # --------------------------------------------------------------------------
@@ -54,8 +64,12 @@ class MirrorKillUpdate(BaseModel):
 
 
 class MirrorConfigUpdate(BaseModel):
-    max_order_value: float | None = Field(None, gt=0, description="单笔上限（元）")
-    max_daily_value: float | None = Field(None, gt=0, description="单日累计上限（元）")
+    max_order_value: float | None = Field(
+        None, gt=0, le=MAX_ORDER_VALUE_LIMIT, description="单笔上限（元）"
+    )
+    max_daily_value: float | None = Field(
+        None, gt=0, le=MAX_DAILY_VALUE_LIMIT, description="单日累计上限（元）"
+    )
     max_daily_symbols: int | None = Field(
         None, gt=0, le=200, description="单日最多标的数"
     )
@@ -69,17 +83,38 @@ class MirrorConfigUpdate(BaseModel):
         None, ge=0, le=100, description="连续拒单熔断阈值，0=关闭熔断"
     )
     queue_outside_hours: bool | None = Field(None, description="非交易时段是否入队")
-    markets: list[str] | None = Field(None, description="允许镜像的市场，如 ['CN']")
+    markets: list[str] | None = Field(
+        None, max_length=20, description="允许镜像的市场，如 ['CN']"
+    )
 
 
 class MirrorListsUpdate(BaseModel):
     whitelist: list[str] | None = Field(
         None,
+        max_length=MAX_LIST_ITEMS,
         description="白名单：* / tenant / tenant:user / tenant:user:strategy；空数组=全部关闭",
     )
     blacklist: list[str] | None = Field(
-        None, description="黑名单标的（前缀式，如 SH600519）"
+        None,
+        max_length=MAX_LIST_ITEMS,
+        description="黑名单标的（前缀式，如 SH600519）",
     )
+
+    @field_validator("whitelist", "blacklist")
+    @classmethod
+    def _clean_items(cls, value: list[str] | None) -> list[str] | None:
+        """去空白 + 限长：名单项会被拼进 Redis 键与日志，超长/空白项只会帮倒忙。"""
+        if value is None:
+            return None
+        cleaned: list[str] = []
+        for item in value:
+            text = str(item or "").strip()
+            if not text:
+                continue
+            if len(text) > MAX_LIST_ITEM_LEN:
+                raise ValueError(f"名单项过长（≤{MAX_LIST_ITEM_LEN} 字符）: {text[:24]}…")
+            cleaned.append(text)
+        return cleaned
 
 
 # --------------------------------------------------------------------------
@@ -121,10 +156,9 @@ def _write(action: str, fn: Any, auth: AuthContext, **detail: Any) -> Any:
 @router.get("/qmt-mirror/status")
 async def get_mirror_status(
     redis: Any = Depends(get_redis),
-    auth: AuthContext = Depends(get_auth_context),
+    auth: AuthContext = Depends(require_admin),
 ):
     """镜像总览：开关、急停、白黑名单、限额、当日用量、队列与阻塞原因。"""
-    _ = auth
     return _snapshot(redis)
 
 
@@ -132,7 +166,7 @@ async def get_mirror_status(
 async def set_mirror_enabled(
     payload: MirrorEnabledUpdate,
     redis: Any = Depends(get_redis),
-    auth: AuthContext = Depends(get_auth_context),
+    auth: AuthContext = Depends(require_admin),
 ):
     """Redis 热开关（env 基线之外的运行时开关）。"""
     _write(
@@ -148,7 +182,7 @@ async def set_mirror_enabled(
 async def set_mirror_kill(
     payload: MirrorKillUpdate,
     redis: Any = Depends(get_redis),
-    auth: AuthContext = Depends(get_auth_context),
+    auth: AuthContext = Depends(require_admin),
 ):
     """急停开关。置位后所有镜像单立即停发（虚拟账本不受影响）。"""
     _write(
@@ -164,7 +198,7 @@ async def set_mirror_kill(
 async def update_mirror_config(
     payload: MirrorConfigUpdate,
     redis: Any = Depends(get_redis),
-    auth: AuthContext = Depends(get_auth_context),
+    auth: AuthContext = Depends(require_admin),
 ):
     """限额参数覆盖（写入 ``mirror:config``，只覆盖显式给出的字段）。"""
     updates = payload.model_dump(exclude_none=True)
@@ -189,7 +223,7 @@ async def update_mirror_config(
 async def update_mirror_lists(
     payload: MirrorListsUpdate,
     redis: Any = Depends(get_redis),
-    auth: AuthContext = Depends(get_auth_context),
+    auth: AuthContext = Depends(require_admin),
 ):
     """白名单/黑名单整体替换（``None`` 表示不动，``[]`` 表示清空）。"""
     if payload.whitelist is None and payload.blacklist is None:
@@ -210,7 +244,7 @@ async def update_mirror_lists(
 async def drain_mirror_queue_endpoint(
     limit: int = Query(20, ge=1, le=200, description="本次最多补交笔数"),
     redis: Any = Depends(get_redis),
-    auth: AuthContext = Depends(get_auth_context),
+    auth: AuthContext = Depends(require_admin),
 ):
     """手动排空镜像队列（交易时段内有效）。"""
     result = await mirror.drain_mirror_queue(redis, limit=limit)
@@ -235,6 +269,21 @@ def _order_price(row: Any) -> float:
     return 0.0
 
 
+def _sim_created_window(target: date_type) -> tuple[datetime, datetime]:
+    """虚拟单落库时间的「上海日」UTC 窗口。
+
+    ``sim_orders.created_at`` 是 ``timestamptz``，但写入方给的是 naive 的
+    ``datetime.utcnow()``（``simulation.models.TimestampMixin``）——asyncpg 按会话
+    时区（Asia/Shanghai）解释 naive 值，库内瞬时比真实时刻**早 UTC+8 小时**
+    （实测：同一笔单 ``sim_orders.created_at`` 比 ``sim_trades.executed_at`` 早 8h）。
+    因此按上海交易日过滤时，窗口必须整体回移同样的偏移，否则永远查不到当天的单。
+    """
+    offset = datetime.now(TZ).utcoffset() or timedelta(0)
+    start = datetime.combine(target, time.min, tzinfo=TZ).astimezone(timezone.utc)
+    start -= offset
+    return start, start + timedelta(days=1)
+
+
 @router.get("/qmt-mirror/reconcile")
 async def reconcile_mirror_orders(
     date: str | None = Query(
@@ -242,7 +291,7 @@ async def reconcile_mirror_orders(
     ),
     limit: int = Query(200, ge=1, le=RECONCILE_LIMIT_MAX),
     db: Any = Depends(get_db),
-    auth: AuthContext = Depends(get_auth_context),
+    auth: AuthContext = Depends(require_admin),
 ):
     """虚拟成交 vs 真单对账：价格滑点、手续费差、部分成交、拒单原因。"""
     try:
@@ -251,9 +300,8 @@ async def reconcile_mirror_orders(
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="date 需为 YYYY-MM-DD") from exc
-    # sim_orders.created_at 是 timestamptz（写入方用 utcnow），按上海日换算成 UTC 窗口
-    start = datetime.combine(target, time.min, tzinfo=TZ).astimezone(timezone.utc)
-    end = start + timedelta(days=1)
+    # sim_orders.created_at 的库内瞬时比真实时刻早 8h（见 _sim_created_window）
+    start, end = _sim_created_window(target)
 
     from backend.services.simulation.models.order import SimOrder
     from backend.services.trade_shared.models.order import Order

@@ -4,16 +4,25 @@
 环境变量。敏感字段（私钥/密码/token）只写不回读，查询接口仅返回 *_configured 布尔状态。
 ``qmt_exec``（大 QMT 执行端）另有热生效：写入后清空客户端配置缓存，下一次轮询即生效。
 
+安全口径
+--------
+* 全部端点要求管理员（``require_admin``）——这里存的是券商凭据与下单通道。
+* **换连接地址必须重填凭据**：只改 ``redis_host``/``bridge_url``/``opend_host`` 而
+  密码留空时，运行时会把库内已存的密钥原样发往新地址（等于交出凭据），故拒绝。
+* 地址/端口字段做格式校验；写操作记审计日志（只记字段名，绝不记值）。
+
 供前端「模拟交易设置 → 券商接入」卡片使用。
 """
 import json
 import logging
+import os
+import re
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from backend.services.trade_shared.deps import AuthContext, get_auth_context, get_redis
+from backend.services.trade_shared.deps import AuthContext, get_redis, require_admin
 from backend.services.trade_shared.redis_client import RedisClient
 
 logger = logging.getLogger(__name__)
@@ -83,6 +92,42 @@ BROKER_REQUIRED: dict[str, tuple[str, ...]] = {
     "qmt_exec": ("enabled", "account_id"),
 }
 
+# 连接地址类字段（决定凭据被发往哪里）：变更时必须同时重填该券商的敏感字段
+ENDPOINT_FIELDS: dict[str, tuple[str, ...]] = {
+    "futu": ("opend_host", "opend_port"),
+    "tdx": ("bridge_url",),
+    "qmt_exec": ("redis_host", "redis_port", "redis_db"),
+}
+
+# 敏感字段的环境变量来源（页面未存凭据时，运行时仍可能从 env 取用）
+SECRET_ENV_VARS: dict[str, dict[str, tuple[str, ...]]] = {
+    "tiger": {"rsa_private_key": ("TIGER_RSA_PRIVATE_KEY",)},
+    "futu": {"trade_pwd_md5": ("FUTU_TRADE_PWD_MD5",)},
+    "tdx": {"bridge_token": ("TDX_BRIDGE_TOKEN",)},
+    "qmt_exec": {
+        "redis_password": ("QMT_EXEC_REDIS_PASSWORD", "BIGQMT_REDIS_PASSWORD"),
+    },
+}
+
+# 地址/端口格式（主机名或 IPv4；IPv6 请用主机名，避免解析歧义）
+_HOST_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,253}$")
+_PORT_PATTERN = re.compile(r"^\d{1,5}$")
+_DB_PATTERN = re.compile(r"^\d{1,3}$")
+_URL_PATTERN = re.compile(
+    r"^https?://[A-Za-z0-9._\-]+(:\d{1,5})?(/[A-Za-z0-9._\-/]*)?$"
+)
+
+FIELD_PATTERNS: dict[str, re.Pattern] = {
+    "redis_host": _HOST_PATTERN,
+    "opend_host": _HOST_PATTERN,
+    "gateway_host": _HOST_PATTERN,
+    "redis_port": _PORT_PATTERN,
+    "opend_port": _PORT_PATTERN,
+    "gateway_port": _PORT_PATTERN,
+    "redis_db": _DB_PATTERN,
+    "bridge_url": _URL_PATTERN,
+}
+
 
 class BrokerConfigUpdate(BaseModel):
     values: dict[str, str] = Field(..., description="字段名 → 值（敏感字段原文）")
@@ -112,6 +157,63 @@ def _write_config(redis: RedisClient, broker: str, values: dict[str, str]) -> No
     redis.client.set(_CONFIG_KEY.format(broker=broker), json.dumps(values, ensure_ascii=False))
 
 
+def _audit(action: str, auth: AuthContext, **detail: Any) -> None:
+    """审计日志：只记字段名/布尔状态，绝不记字段值（含凭据）。"""
+    logger.info(
+        "[BrokerConfigAPI] %s tenant=%s user=%s %s",
+        action,
+        auth.tenant_id,
+        auth.user_id,
+        " ".join(f"{k}={v!r}" for k, v in detail.items()),
+    )
+
+
+def _validate_fields(values: dict[str, str]) -> None:
+    """地址/端口字段格式校验（挡住空格、换行、超长等可疑值）。"""
+    for name, value in values.items():
+        pattern = FIELD_PATTERNS.get(name)
+        text = str(value or "").strip()
+        if pattern is not None and text and not pattern.match(text):
+            raise HTTPException(status_code=422, detail=f"字段 {name} 格式非法")
+
+
+def _guard_endpoint_change(
+    broker: str, values: dict[str, str], stored: dict[str, str]
+) -> None:
+    """换连接地址时必须同时重填敏感字段。
+
+    否则「只改 host」会让运行时把库内已存的密码/token 原样发往新地址——
+    等于把凭据交给填写者。env 里的凭据同样在运行时会兜底使用，所以一并计入。
+    空值视为「清除该字段」，不算换地址；库内/env 都没有凭据可泄露时不拦。
+    """
+    changed = [
+        name
+        for name in ENDPOINT_FIELDS.get(broker, ())
+        if str(values.get(name) or "").strip()
+        and str(values.get(name) or "").strip() != str(stored.get(name, "") or "").strip()
+    ]
+    if not changed:
+        return
+    env_map = SECRET_ENV_VARS.get(broker, {})
+    missing: list[str] = []
+    for name, is_secret in BROKER_FIELDS[broker].items():
+        if not is_secret or str(values.get(name) or "").strip():
+            continue
+        has_secret = bool(str(stored.get(name, "") or "").strip()) or any(
+            str(os.getenv(var) or "").strip() for var in env_map.get(name, ())
+        )
+        if has_secret:
+            missing.append(name)
+    if missing:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"更换 {'/'.join(changed)} 时必须同时重新填写 {'/'.join(missing)}"
+                "（防止把已存凭据发往新地址）"
+            ),
+        )
+
+
 def get_broker_setting(broker: str, field: str, default: str = "") -> str:
     """供 overseas_brokers 运行时读取（Redis 优先，回退环境变量由调用方处理）。"""
     from backend.services.trade_shared.redis_client import RedisClient
@@ -130,11 +232,10 @@ _SELECTED_KEY = "broker:selected:{market}"
 @router.get("/broker-config-status")
 async def get_broker_config_status(
     market: str = "CN",
-    auth: AuthContext = Depends(get_auth_context),
+    auth: AuthContext = Depends(require_admin),
     redis: RedisClient = Depends(get_redis),
 ) -> dict[str, Any]:
     """按市场汇总：可选券商、各自配置状态、当前选中的券商。"""
-    _ = auth
     market = str(market or "CN").upper()
     brokers = MARKET_BROKERS.get(market, [])
     items: list[dict[str, Any]] = []
@@ -169,11 +270,10 @@ class BrokerSelectUpdate(BaseModel):
 async def select_market_broker(
     market: str,
     payload: BrokerSelectUpdate,
-    auth: AuthContext = Depends(get_auth_context),
+    auth: AuthContext = Depends(require_admin),
     redis: RedisClient = Depends(get_redis),
 ) -> dict[str, Any]:
     """设置某市场使用的实盘券商。"""
-    _ = auth
     market = str(market or "CN").upper()
     broker = str(payload.broker or "").lower().strip()
     if not redis.client:
@@ -185,6 +285,7 @@ async def select_market_broker(
             detail=f"{market} 市场不支持券商 '{broker}'，可选：{', '.join(allowed) or '无'}",
         )
     redis.client.set(_SELECTED_KEY.format(market=market), broker)
+    _audit("select", auth, market=market, broker=broker)
     return {"success": True, "market": market, "selected": broker}
 
 
@@ -198,21 +299,24 @@ class BrokerTestRequest(BaseModel):
 async def test_broker_connection(
     broker: str,
     payload: BrokerTestRequest | None = None,
-    auth: AuthContext = Depends(get_auth_context),
+    auth: AuthContext = Depends(require_admin),
     redis: RedisClient = Depends(get_redis),
 ) -> dict[str, Any]:
     """测试券商连通性（真实调用 SDK；OpenD/Gateway 未启动会明确报错）。
 
     测试前自动保存表单值；trade_env 可临时覆盖（测试 REAL 环境无需先改配置）。
     """
-    _ = auth
     broker = _normalize_broker(broker)
+    _audit("test", auth, broker=broker)
     if payload and payload.values:
         allowed = set(BROKER_FIELDS[broker])
         clean = {k: str(v).strip() for k, v in payload.values.items() if k in allowed and str(v).strip()}
+        _validate_fields(clean)
         stored = _read_config(redis, broker)
+        _guard_endpoint_change(broker, clean, stored)
         stored.update(clean)
         _write_config(redis, broker, stored)
+        _audit("test_save", auth, broker=broker, fields=sorted(clean))
     try:
         if broker == "tiger":
             from backend.services.trade.services.overseas_brokers import TigerBroker
@@ -306,11 +410,10 @@ async def test_broker_connection(
 @router.get("/broker-config/{broker}")
 async def get_broker_config(
     broker: str,
-    auth: AuthContext = Depends(get_auth_context),
+    auth: AuthContext = Depends(require_admin),
     redis: RedisClient = Depends(get_redis),
 ) -> dict[str, Any]:
     """读取券商接入配置（敏感字段脱敏为 *_configured）。"""
-    _ = auth
     broker = _normalize_broker(broker)
     stored = _read_config(redis, broker)
     fields: dict[str, Any] = {}
@@ -332,18 +435,19 @@ async def get_broker_config(
 async def update_broker_config(
     broker: str,
     payload: BrokerConfigUpdate,
-    auth: AuthContext = Depends(get_auth_context),
+    auth: AuthContext = Depends(require_admin),
     redis: RedisClient = Depends(get_redis),
 ) -> dict[str, Any]:
     """更新券商接入配置。未提供的敏感字段保持原值。"""
-    _ = auth
     broker = _normalize_broker(broker)
     allowed = set(BROKER_FIELDS[broker])
     unknown = set(payload.values) - allowed
     if unknown:
         raise HTTPException(status_code=422, detail=f"无效字段: {', '.join(sorted(unknown))}")
 
+    _validate_fields(payload.values)
     stored = _read_config(redis, broker)
+    _guard_endpoint_change(broker, payload.values, stored)
     for name, value in payload.values.items():
         text = str(value or "").strip()
         if text:
@@ -351,6 +455,8 @@ async def update_broker_config(
         else:
             stored.pop(name, None)  # 空值清除
     _write_config(redis, broker, stored)
+    # 审计只记字段名，不记值（值里可能有凭据）
+    _audit("update", auth, broker=broker, fields=sorted(payload.values))
     if broker == "qmt_exec":
         # 页面改配置立即生效（否则要等常驻任务下一轮刷新）
         try:

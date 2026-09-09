@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Any, Optional
 
 from sqlalchemy import and_, select
@@ -138,9 +138,10 @@ async def resolve_order(
         except ValueError:
             order_side = None
     if symbol_norm and order_side is not None:
-        recent_cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(
-            minutes=_FALLBACK_WINDOW_MINUTES
-        )
+        # submitted_at 是 naive 本地时间（``Column(DateTime)`` + ``datetime.now()``），
+        # 这里必须用同样的口径取窗口下界；用 UTC 会因时区差把 15 分钟窗口
+        # 放大成 8 小时 15 分（容器 TZ=Asia/Shanghai），兜底匹配会命中陈旧订单。
+        recent_cutoff = datetime.now() - timedelta(minutes=_FALLBACK_WINDOW_MINUTES)
         result = await db.execute(
             select(Order)
             .where(

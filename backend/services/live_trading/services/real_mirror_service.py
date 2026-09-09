@@ -324,14 +324,15 @@ def real_trading_ready(redis: Any, market: str = "CN") -> tuple[bool, str]:
 
 
 def set_enabled(redis: Any, enabled: bool) -> None:
-    """写入 Redis 热开关。"""
+    """写入 Redis 热开关。
+
+    ``False`` 写显式 ``"0"`` 而不是删键：删键会回落到 env 基线
+    ``SIMULATION_MIRROR_TO_REAL``，env 为 true 时「关闭」等于没关（fail-open）。
+    """
     client = _redis_client(redis)
     if client is None:
         raise RuntimeError("Redis 不可用")
-    if enabled:
-        client.set(_ENABLED_KEY, "1")
-    else:
-        client.delete(_ENABLED_KEY)
+    client.set(_ENABLED_KEY, "1" if enabled else "0")
 
 
 def read_config_overrides(redis: Any) -> dict[str, Any]:
@@ -463,8 +464,12 @@ def _invalidate_account_cache() -> None:
     _account_cache["at"] = 0.0
 
 
-async def _reference_price(symbol: str, fallback: float) -> float:
-    """参考价：QuantDB 最近收盘价优先，取不到用虚拟成交价。"""
+async def _reference_price(symbol: str) -> float:
+    """独立参考价：QuantDB 最近收盘价。取不到返回 0（调用方跳过，fail-closed）。
+
+    不能用虚拟成交价兜底——那样价格偏离闸门恒等于 0，停牌/除权/数据滞后
+    这些最该拦住真单的场景会全部放行。
+    """
     try:
         closes = await asyncio.to_thread(batch_quantdb_last_close, [symbol])
         price = float(closes.get(symbol) or 0)
@@ -472,7 +477,7 @@ async def _reference_price(symbol: str, fallback: float) -> float:
             return price
     except Exception as exc:  # noqa: BLE001
         logger.warning("[Mirror] 参考价取数失败 symbol=%s: %s", symbol, exc)
-    return float(fallback or 0)
+    return 0.0
 
 
 # --------------------------------------------------------------------------
@@ -674,7 +679,8 @@ async def mirror_virtual_fill(
     提前提交调用方的事务）。
 
     返回 ``status``：``skipped``（风控/未启用）、``queued``（非交易时段入队）、
-    ``submitted``（已提交真单）、``failed``（提交失败）、``error``（内部异常）。
+    ``submitted``（已提交真单）、``duplicate``（该 client_order_id 已有真单，
+    幂等跳过）、``failed``（提交失败）、``error``（内部异常）。
     """
     symbol = str(symbol or "").strip().upper()
     side = str(side or "").strip().upper()
@@ -794,9 +800,9 @@ async def _mirror_virtual_fill(
 
     if db is not None:
         return await _submit_payload(db=db, redis=redis, cfg=cfg, payload=payload)
-    from backend.shared.database_manager_v2 import get_db_manager
+    from backend.shared.database_manager_v2 import get_session
 
-    async with get_db_manager().session() as session:
+    async with get_session() as session:
         return await _submit_payload(db=session, redis=redis, cfg=cfg, payload=payload)
 
 
@@ -815,6 +821,12 @@ def _enqueue(redis: Any, payload: dict[str, Any]) -> bool:
         client.expire(_QUEUE_KEY, _QUEUE_TTL_SECONDS)
         return True
     except Exception as exc:  # noqa: BLE001
+        # 半失败要回滚去重标记，否则该单永远卡在「已入队」而实际不在队列里
+        if cid:
+            try:
+                client.srem(_QUEUED_SET_KEY, cid)
+            except Exception:  # noqa: BLE001 - 回滚失败只能靠 TTL 过期
+                pass
         logger.error("[Mirror] 入队失败 cid=%s: %s", cid, exc)
         return False
 
@@ -841,7 +853,7 @@ async def _submit_payload(
         )
         return {"status": "skipped", "reason": reason, "symbol": symbol}
 
-    ref_price = await _reference_price(symbol, float(payload.get("price") or 0))
+    ref_price = await _reference_price(symbol)
     if ref_price <= 0:
         return _skip("no_reference_price")
     drift = abs(ref_price - float(payload.get("price") or 0)) / ref_price
@@ -947,22 +959,54 @@ async def _submit_payload(
         return {"status": "failed", "reason": str(exc), "symbol": symbol}
 
     status = str(result.get("status") or "")
-    if status not in {"success"}:
+    execution = str(result.get("execution") or "")
+    detail = result.get("result") if isinstance(result.get("result"), dict) else {}
+    # 复用 REAL 尾段时「券商拒单」不抛异常：TradingEngine.submit_order 仍返回
+    # success=True，只是把订单置为 REJECTED。只看 status 会把拒单当成功
+    # （扣额度、清熔断计数、推「真单已提交」），必须同时看执行结果。
+    broker_status = str(detail.get("status") or "").upper()
+    if execution == "duplicate_skipped":
+        # 幂等命中：该 client_order_id 早已下单，本笔额度退回，不计拒单。
         _release_quota(
             redis, cfg, symbol=symbol, value=order_value, was_new_symbol=was_new_symbol
         )
-        reason = status or "unknown"
-        _record_reject(redis, cfg, reason=reason)
+        logger.info(
+            "[Mirror] 真单已存在（幂等跳过）cid=%s symbol=%s 真实订单=%s",
+            mirror_cid,
+            symbol,
+            result.get("order_id"),
+        )
+        return {
+            "status": "duplicate",
+            "reason": "duplicate_skipped",
+            "symbol": symbol,
+            "client_order_id": mirror_cid,
+            "order_id": result.get("order_id"),
+            "detail": result,
+        }
+    failure = ""
+    if status != "success":
+        failure = status or "unknown"
+    elif detail.get("success") is False:
+        failure = str(detail.get("message") or "submit_failed")
+    elif broker_status in {"REJECTED", "EXPIRED"}:
+        failure = f"broker_{broker_status.lower()}:{detail.get('message') or ''}"
+    if failure:
+        _release_quota(
+            redis, cfg, symbol=symbol, value=order_value, was_new_symbol=was_new_symbol
+        )
+        _record_reject(redis, cfg, reason=failure)
         logger.warning(
-            "[Mirror] 真单未成功 cid=%s symbol=%s status=%s detail=%s",
+            "[Mirror] 真单未成功 cid=%s symbol=%s status=%s execution=%s detail=%s",
             mirror_cid,
             symbol,
             status,
+            execution,
             result.get("result") or result.get("violations"),
         )
         return {
             "status": "failed",
-            "reason": reason,
+            "reason": failure,
             "symbol": symbol,
             "detail": result,
         }
@@ -1022,12 +1066,34 @@ async def drain_mirror_queue(
         return await _drain_with_session(redis, client, cfg, session, limit)
 
 
+def _queued_entry_blocked(redis: Any, payload: dict[str, Any]) -> str:
+    """补交前的复核（白/黑名单 + 通道就绪）。返回空串=允许，否则阻塞原因。
+
+    入队时过了闸门不代表补交时还成立：名单/券商选择/实盘开关都可能在
+    隔夜被改，必须在真正下单前重新判一遍。
+    """
+    if not whitelist_allows(
+        redis,
+        tenant_id=str(payload.get("tenant_id") or ""),
+        user_id=str(payload.get("user_id") or ""),
+        strategy_id=str(payload.get("strategy_id") or ""),
+    ):
+        return "whitelist"
+    if _is_blacklisted(redis, str(payload.get("symbol") or "")):
+        return "blacklist"
+    ready, reason = _real_trading_ready(
+        redis, str(payload.get("market") or "CN").upper()
+    )
+    return "" if ready else reason
+
+
 async def _drain_with_session(
     redis: Any, client: Any, cfg: MirrorConfig, db: Any, limit: int
 ) -> dict[str, Any]:
     submitted = 0
     failed = 0
     requeued = 0
+    dropped = 0
     for _ in range(max(1, int(limit))):
         raw = client.lpop(_QUEUE_KEY)
         if not raw:
@@ -1040,6 +1106,21 @@ async def _drain_with_session(
             logger.warning("[Mirror] 队列条目非法，丢弃: %r", raw)
             continue
         if not isinstance(payload, dict):
+            continue
+        if not is_trading_time():
+            # 排空跨过收盘/午休边界：本条放回队列，本轮到此外止
+            client.rpush(_QUEUE_KEY, raw)
+            requeued += 1
+            break
+        blocked = _queued_entry_blocked(redis, payload)
+        if blocked:
+            dropped += 1
+            logger.warning(
+                "[Mirror] 队列条目复核未通过，丢弃 cid=%s symbol=%s reason=%s",
+                payload.get("client_order_id"),
+                payload.get("symbol"),
+                blocked,
+            )
             continue
         result = await _submit_payload(db=db, redis=redis, cfg=cfg, payload=payload)
         status = str(result.get("status") or "")
@@ -1063,6 +1144,7 @@ async def _drain_with_session(
         "submitted": submitted,
         "failed": failed,
         "requeued": requeued,
+        "dropped": dropped,
     }
 
 

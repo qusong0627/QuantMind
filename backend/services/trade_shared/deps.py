@@ -19,6 +19,7 @@ class AuthContext:
     tenant_id: str
     raw_sub: str
     roles: list[str]
+    is_admin: bool = False
 
 
 async def get_auth_context(
@@ -37,8 +38,32 @@ async def get_auth_context(
 
     tenant_id = str(payload.get("tenant_id") or x_tenant_id or "default").strip()
     roles = payload.get("roles", ["user"])
+    # 与 API 服务 middleware/auth.py 同口径：is_admin 字段优先，其次看 roles
+    is_admin = bool(payload.get("is_admin", "admin" in roles))
 
-    return AuthContext(user_id=sub, tenant_id=tenant_id, raw_sub=sub, roles=roles)
+    return AuthContext(
+        user_id=sub,
+        tenant_id=tenant_id,
+        raw_sub=sub,
+        roles=roles,
+        is_admin=is_admin,
+    )
+
+
+async def require_admin(
+    auth: AuthContext = Depends(get_auth_context),
+) -> AuthContext:
+    """管理员门（trade 侧控制面端点用）。
+
+    仅依据 JWT 的 ``is_admin`` / ``roles`` 判定（与 API 服务同口径），
+    不在 trade 服务里回查 RBAC——那是 api 侧依赖，跨服务引入会拖慢每次请求。
+    """
+    if not (auth.is_admin or "admin" in (auth.roles or [])):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="需要管理员权限",
+        )
+    return auth
 
 
 def get_redis():
