@@ -1,12 +1,13 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import {
-    Alert, Button, Card, Checkbox, Collapse, Progress, Space, Table, Tag, Tooltip,
+    Alert, Button, Card, Checkbox, Collapse, Modal, Progress, Space, Table, Tag, Tooltip,
     Typography, message,
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import {
-    CloudSyncOutlined, DatabaseOutlined, EyeOutlined, ReloadOutlined,
-    StopOutlined,
+    CloudSyncOutlined, DatabaseOutlined, ExclamationCircleOutlined, EyeOutlined,
+    ReloadOutlined, StopOutlined,
 } from '@ant-design/icons';
 import {
     dataPlatformService, QuantDBDataset, QuantDBGroup, QuantDBSyncJob,
@@ -44,12 +45,15 @@ const DIFF_STATUS_TAG: Record<string, { color: string; label: string }> = {
 
 interface QuantDBCatalogPanelProps {
     connected: boolean;
+    /** 是否已配置 API Key（用于区分「未配置」与「已配置但云端连不上」） */
+    apiKeyConfigured?: boolean;
     onPreview: (dataset: QuantDBDataset) => void;
     /** 外部（如预览抽屉）同步完成后递增，触发目录统计刷新 */
     refreshSignal?: number;
 }
 
-export function QuantDBCatalogPanel({ connected, onPreview, refreshSignal = 0 }: QuantDBCatalogPanelProps) {
+export function QuantDBCatalogPanel({ connected, apiKeyConfigured = false, onPreview, refreshSignal = 0 }: QuantDBCatalogPanelProps) {
+    const navigate = useNavigate();
     const [groups, setGroups] = useState<QuantDBGroup[]>([]);
     const [datasets, setDatasets] = useState<QuantDBDataset[]>([]);
     const [dataDir, setDataDir] = useState('');
@@ -199,7 +203,26 @@ export function QuantDBCatalogPanel({ connected, onPreview, refreshSignal = 0 }:
             : selected.filter((n) => !names.includes(n)));
     };
 
+    const goConfigureKey = useCallback(() => {
+        navigate('/user-center?tab=data-platform');
+    }, [navigate]);
+
     const triggerSync = async () => {
+        if (!connected) {
+            // 未连接时按钮不禁用（禁用=点击零反馈，客户反馈就是「点了没反应」）：
+            // 点击给出原因与出路——去配置 Key，或改用「本地扫描」导入离线数据。
+            Modal.confirm({
+                title: '云端同步未连接',
+                icon: <ExclamationCircleOutlined />,
+                content: apiKeyConfigured
+                    ? '已配置 API Key，但云端验证失败（网络不可达或 Key 失效）。请检查网络后重试，或到「个人中心 → 数据平台」更新 Key。'
+                    : '尚未配置 QuantDB API Key，云端增量同步不可用。到「个人中心 → 数据平台」填写 Key 后立即生效（无需重启）；纯离线数据请用「本地扫描」导入。',
+                okText: '去配置 API Key',
+                cancelText: '知道了',
+                onOk: goConfigureKey,
+            });
+            return;
+        }
         if (selected.length === 0) {
             message.warning('请先勾选要同步的数据集');
             return;
@@ -390,16 +413,19 @@ export function QuantDBCatalogPanel({ connected, onPreview, refreshSignal = 0 }:
                 <Space direction="vertical" className="w-full" size="small">
                     <Space className="w-full">
                         <Button
-                            type="primary"
-                            icon={<CloudSyncOutlined />}
+                            type={connected ? 'primary' : 'default'}
+                            danger={!connected}
+                            icon={connected ? <CloudSyncOutlined /> : <ExclamationCircleOutlined />}
                             onClick={triggerSync}
                             loading={submitting}
-                            disabled={!connected || selected.length === 0 || isJobRunning}
+                            disabled={isJobRunning || (connected && selected.length === 0)}
                             className="flex-1"
                         >
                             {isJobRunning
                                 ? '已有同步任务进行中...'
-                                : `同步选中的 ${selected.length} 个数据集`}
+                                : connected
+                                    ? `同步选中的 ${selected.length} 个数据集`
+                                    : '云端同步未连接 · 点此查看原因'}
                         </Button>
                         {isJobRunning && activeJob?.status === 'running' && (
                             <Button
@@ -416,7 +442,11 @@ export function QuantDBCatalogPanel({ connected, onPreview, refreshSignal = 0 }:
                         <Alert
                             type="warning"
                             showIcon
-                            message="SDK 未连接，请先在上方配置有效的 API Key"
+                            message={apiKeyConfigured
+                                ? '已配置 API Key，但云端验证失败（网络不可达或 Key 失效）'
+                                : '未配置 QuantDB API Key，云端增量同步不可用'}
+                            description="保存 Key 后立即生效，无需重启；纯离线数据请用「本地扫描」导入。"
+                            action={<Button size="small" type="primary" ghost onClick={goConfigureKey}>去配置</Button>}
                         />
                     )}
                 </Space>
@@ -485,14 +515,19 @@ function SyncJobProgress({ job }: { job: QuantDBSyncJob }) {
                         <Text type="secondary" className="text-xs">数据集进度：</Text>
                         <div className="flex flex-wrap gap-1 mt-1">
                             {results.map((r) => (
-                                <Tag
-                                    key={r.dataset}
-                                    color={r.status === 'synced' ? 'green' : r.status === 'up_to_date' ? 'blue' : 'red'}
-                                    className="text-xs"
-                                >
-                                    {r.dataset}
-                                    {r.downloaded > 0 && ` (+${r.downloaded})`}
-                                </Tag>
+                                <Tooltip key={r.dataset} title={r.reason ?? r.error}>
+                                    <Tag
+                                        color={r.status === 'synced' ? 'green'
+                                            : r.status === 'up_to_date' ? 'blue'
+                                                : r.status === 'skipped' ? 'default'
+                                                    : 'red'}
+                                        className="text-xs"
+                                    >
+                                        {r.dataset}
+                                        {r.downloaded > 0 && ` (+${r.downloaded})`}
+                                        {r.status === 'skipped' && ' · 跳过'}
+                                    </Tag>
+                                </Tooltip>
                             ))}
                         </div>
                     </div>

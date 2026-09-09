@@ -271,6 +271,7 @@ export const AdminQuantDBPanel: React.FC = () => {
             {/* QuantDB 数据集目录与详情 */}
             <QuantDBCatalogPanel
                 connected={Boolean(info?.connected)}
+                apiKeyConfigured={Boolean(info?.api_key_configured)}
                 onPreview={setPreviewDataset}
                 refreshSignal={catalogRefreshSignal}
             />

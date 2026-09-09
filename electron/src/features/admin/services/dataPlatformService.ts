@@ -175,10 +175,12 @@ export interface QuantDBSyncJob {
     current?: string | null;
     results: Array<{
         dataset: string;
-        status: 'synced' | 'up_to_date' | 'failed';
+        status: 'synced' | 'up_to_date' | 'failed' | 'skipped';
         downloaded: number;
         layout?: string;
         error?: string;
+        /** skipped 的原因（用户取消 / 云端增量清单未收录） */
+        reason?: string;
     }>;
     with_pg: boolean;
     with_qlib: boolean;

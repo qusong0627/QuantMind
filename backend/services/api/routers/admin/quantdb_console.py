@@ -42,6 +42,9 @@ router = APIRouter(dependencies=[Depends(require_admin)])  # 路由器级认证�
 MAX_PREVIEW_ROWS = 200
 MAX_MANIFEST_FILES = 500
 MAX_SYMBOL_CHOICES = 500
+# 云端增量同步清单（quantdb_daily_sync.V2_DATASETS/V1_DATASETS）未收录的数据集，
+# 同步任务里标 skipped 而不是 up_to_date，避免前端显示成绿色「最新」。
+UNSUPPORTED_SYNC_REASON = "云端增量同步暂不支持该数据集，请用「本地扫描」导入"
 
 
 def _now_iso() -> str:
@@ -665,9 +668,49 @@ def _run_manifest_fallback(
         raise
 
 
-def _run_sync_job(job_id: str, req: SyncDatasetsRequest) -> None:
-    from backend.scripts.quantdb_daily_sync import run_daily_sync
+def _map_dataset_results(
+    datasets: list[str],
+    sync_result: dict[str, Any],
+    cancelled: bool,
+) -> list[dict[str, Any]]:
+    """把 run_daily_sync 的结果映射成管理台任务的数据集级结果。
 
+    优先级：额外数据源结果 > 用户取消 > 云端清单未收录 > 下载错误 > 有下载 > 已最新。
+    """
+    sources_info = sync_result.get("sources") or {}
+    parquet_info = sync_result.get("parquet") or {}
+    synced_count = parquet_info.get("synced", 0)
+    errors = parquet_info.get("errors", [])
+    uncovered = set(sync_result.get("uncovered_datasets") or [])
+
+    results: list[dict[str, Any]] = []
+    for name in datasets:
+        src = sources_info.get(name)
+        if src is not None:
+            if src.get("status") == "error":
+                results.append({"dataset": name, "status": "failed", "downloaded": 0,
+                                "error": str(src.get("error", "unknown"))})
+            elif src.get("synced", 0) > 0 or src.get("status") in ("ok", "completed"):
+                results.append({"dataset": name, "status": "synced", "downloaded": src.get("synced", 1)})
+            else:
+                results.append({"dataset": name, "status": "up_to_date", "downloaded": 0})
+        elif cancelled:
+            results.append({"dataset": name, "status": "skipped", "downloaded": 0,
+                            "reason": "用户取消"})
+        elif name in uncovered:
+            results.append({"dataset": name, "status": "skipped", "downloaded": 0,
+                            "reason": UNSUPPORTED_SYNC_REASON})
+        elif any(name in str(e) for e in errors):
+            results.append({"dataset": name, "status": "failed", "downloaded": 0,
+                            "error": next((e for e in errors if name in str(e)), "unknown")})
+        elif synced_count > 0:
+            results.append({"dataset": name, "status": "synced", "downloaded": 1})
+        else:
+            results.append({"dataset": name, "status": "up_to_date", "downloaded": 0})
+    return results
+
+
+def _run_sync_job(job_id: str, req: SyncDatasetsRequest) -> None:
     # 取消检查辅助
     def _cancelled() -> bool:
         with _jobs_lock:
@@ -710,6 +753,10 @@ def _run_sync_job(job_id: str, req: SyncDatasetsRequest) -> None:
     # Phase 1: parquet 同步（使用 quantdb_daily_sync 的统一逻辑）
     _job_update(job_id, stage="sync_parquet")
     try:
+        # import 放在 try 内：模块级导入失败（缺依赖/语法错误）会让线程直接退出，
+        # 任务永远停在 running，前端据此禁用同步按钮（点击无反应、无报错）。
+        from backend.scripts.quantdb_daily_sync import run_daily_sync
+
         sync_result = run_daily_sync(
             datasets=req.datasets,
             skip_pg=True,       # PG 单独处理
@@ -724,41 +771,17 @@ def _run_sync_job(job_id: str, req: SyncDatasetsRequest) -> None:
         return
 
     # 将 parquet 同步结果映射到 job results
-    parquet_info = sync_result.get("parquet") or {}
-    synced_count = parquet_info.get("synced", 0)
-    parquet_info.get("up_to_date", 0)
-    errors = parquet_info.get("errors", [])
-    parquet_info.get("total_downloaded", 0)
-    sources_info = sync_result.get("sources") or {}
-
-    results = []
     cancelled = _cancelled()
-    for name in req.datasets:
-        src = sources_info.get(name)
-        if src is not None:
-            if src.get("status") == "error":
-                results.append({"dataset": name, "status": "failed", "downloaded": 0,
-                                "error": str(src.get("error", "unknown"))})
-            elif src.get("synced", 0) > 0 or src.get("status") in ("ok", "completed"):
-                results.append({"dataset": name, "status": "synced", "downloaded": src.get("synced", 1)})
-            else:
-                results.append({"dataset": name, "status": "up_to_date", "downloaded": 0})
-        elif cancelled:
-            results.append({"dataset": name, "status": "skipped", "downloaded": 0,
-                            "reason": "用户取消"})
-        elif any(name in str(e) for e in errors):
-            results.append({"dataset": name, "status": "failed", "downloaded": 0, "error": next((e for e in errors if name in str(e)), "unknown")})
-        elif synced_count > 0:
-            results.append({"dataset": name, "status": "synced", "downloaded": 1})
-        else:
-            results.append({"dataset": name, "status": "up_to_date", "downloaded": 0})
+    results = _map_dataset_results(req.datasets, sync_result, cancelled)
 
     with _jobs_lock:
         job = _jobs.get(job_id)
         if job is not None:
             job["results"] = results
-            # 实际处理进度：已处理并经 sync 完成的数据集；若有 skipped（取消跳过）不计入 done。
-            job["done"] = sum(1 for r in results if r.get("status") in ("synced", "up_to_date"))
+            # 进度口径：已终态的数据集。用户取消跳过的不计入（否则取消也显示 100%）；
+            # 云端清单未收录而跳过的计入（否则进度条永远差几个到不了头）。
+            counted = ("synced", "up_to_date") if cancelled else ("synced", "up_to_date", "skipped")
+            job["done"] = sum(1 for r in results if r.get("status") in counted)
 
     if cancelled:
         _job_update(job_id, status="cancelled", current=None, finished_at=_now_iso())

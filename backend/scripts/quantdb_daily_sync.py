@@ -1043,6 +1043,7 @@ def run_daily_sync(
         "pg_fill": None,
         "qlib_cache": None,
         "feature_snapshot": None,
+        "uncovered_datasets": [],
     }
 
     # Phase 1: sync parquet
@@ -1051,8 +1052,34 @@ def run_daily_sync(
         ds_list = None
         if datasets:
             all_ds = V2_DATASETS + V1_DATASETS
+            covered = {ds["sub_category"] for ds in all_ds}
+            # 云端增量清单没收录的数据集（min1/min5/tick/etf_pcf/convertible_bond 等）
+            # 上报给调用方，不能静默当成 up_to_date——管理台会渲染成绿色「最新」，
+            # 用户以为同步过了（客户反馈「点了更新没反应」的静默路径之一）。
+            result["uncovered_datasets"] = sorted(set(datasets) - covered)
             ds_list = [ds for ds in all_ds if ds["sub_category"] in datasets]
-        result["parquet"] = sync_parquet(ds_list, dry_run=dry_run, progress_cb=progress_cb, should_cancel=should_cancel)
+        if ds_list == []:
+            # 请求的数据集全未收录：没有可下载项，不能进 sync_parquet——它在缺
+            # QUANTDB_API_KEY 时直接抛错，会把「跳过」变成整单失败（便携包无 Key
+            # 实测：点更新 → 任务 failed，用户看到的反而是假故障）。
+            log.info(
+                "[quantdb] 请求数据集均未收录云端清单，跳过 parquet 下载: %s",
+                result["uncovered_datasets"],
+            )
+            result["parquet"] = {
+                "synced": 0,
+                "up_to_date": 0,
+                "errors": [],
+                "total_downloaded": 0,
+                "skipped": True,
+            }
+        else:
+            result["parquet"] = sync_parquet(
+                ds_list,
+                dry_run=dry_run,
+                progress_cb=progress_cb,
+                should_cancel=should_cancel,
+            )
 
         # 上游历史 L1 分区只有因子，不含 OHLCV。每次同步后修复最近窗口，
         # 防止增量文件重新覆盖后让训练标签再次为空；历史全量由专用脚本执行。
