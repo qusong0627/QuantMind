@@ -25,7 +25,7 @@ services:
       retries: 5
     restart: unless-stopped
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     networks:
       - quantmind-net
 
@@ -34,7 +34,7 @@ services:
     image: redis:7-alpine
     container_name: quantmind-redis
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru --databases 16 --bind 0.0.0.0
     volumes:
       - redis-data:/data
