@@ -783,19 +783,9 @@ def train_stacking(
     meta_X_test = np.column_stack([test_base_preds[mt] for mt in model_types])
     test_ensemble_pred = meta_model.predict(meta_X_test)
 
-    # 评估集成指标
-    def _calc_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
-        from scipy.stats import spearmanr
-        rmse = float(np.sqrt(np.mean((y_true - y_pred) ** 2)))
-        ic = float(np.corrcoef(y_true, y_pred)[0, 1]) if len(y_true) > 2 else 0.0
-        rank_ic, _ = spearmanr(y_true, y_pred)
-        rank_ic = float(rank_ic) if not np.isnan(rank_ic) else 0.0
-        icir = ic / (np.std(y_pred) + 1e-9)
-        rank_icir = rank_ic / (np.std(y_pred) + 1e-9)
-        return {"rmse": rmse, "ic": ic, "rank_ic": rank_ic, "icir": icir, "rank_icir": rank_icir, "auc": 0.0}
-
-    val_ensemble_m = _calc_metrics(val_df[label_col].values, val_ensemble_pred)
-    test_ensemble_m = _calc_metrics(test_df[label_col].values, test_ensemble_pred)
+    # 评估集成指标（与主训练路径同口径：IC/RankIC 逐日计算后求 ICIR）
+    val_ensemble_m = _compute_metrics(val_df, val_df[label_col].values, val_ensemble_pred)
+    test_ensemble_m = _compute_metrics(test_df, test_df[label_col].values, test_ensemble_pred)
 
     logger.info("=== Stacking Ensemble Results ===")
     logger.info("Val:  IC=%.4f, RankIC=%.4f, ICIR=%.4f", val_ensemble_m["ic"], val_ensemble_m["rank_ic"], val_ensemble_m["rank_icir"])

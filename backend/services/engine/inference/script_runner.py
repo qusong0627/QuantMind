@@ -1329,6 +1329,28 @@ class InferenceScriptRunner:
     # ------------------------------------------------------------------
 
     @staticmethod
+    def _robust_normalize(arr: Any, lo_pct: float = 5.0, hi_pct: float = 95.0) -> Any:
+        """把当日截面分数稳健归一化到 [-1, 1]（5%/95% 分位裁剪后 min-max）。
+
+        模型原生分数量纲差异可达百倍：融合模板输出 rank 百分位 [-1, 1]，
+        单模型模板输出原始收益预测（T+1 约 ±0.05）。绝对阈值只有建立在
+        与量纲无关的尺度上才有意义。
+
+        退化情形（空/单元素/常量截面/含非有限值）原样返回，保持旧的绝对
+        阈值行为——research_service 的单股调用就依赖这一点。
+        """
+        import numpy as np
+
+        arr = np.asarray(arr, dtype=float)
+        if arr.size == 0 or not np.all(np.isfinite(arr)):
+            return arr
+        lo = float(np.percentile(arr, lo_pct))
+        hi = float(np.percentile(arr, hi_pct))
+        if not np.isfinite(lo) or not np.isfinite(hi) or hi - lo <= 0:
+            return arr
+        return np.clip(2.0 * (arr - lo) / (hi - lo) - 1.0, -1.0, 1.0)
+
+    @staticmethod
     def _resolve_signal_sides(
         scores: list[float],
         consensus_list: list[int] | None = None,
@@ -1340,15 +1362,17 @@ class InferenceScriptRunner:
         min_consensus: int = 4,
         min_confidence: float = 0.3,
     ) -> list[str]:
-        """双指标信号逻辑：百分比排名 + 共识度 + 绝对方向闸门 + 置信度。
+        """双指标信号逻辑：百分比排名 + 共识度 + 量纲无关的强弱闸门 + 置信度。
 
         逻辑：
-        - Top buy_pct 百分位 AND score > min_buy_score AND consensus >= min_consensus → BUY
-        - Bottom sell_pct 百分位 AND score < max_sell_score AND consensus >= min_consensus → SELL
+        - Top buy_pct 百分位 AND 归一化分数 > min_buy_score AND consensus >= min_consensus → BUY
+        - Bottom sell_pct 百分位 AND 归一化分数 < max_sell_score AND consensus >= min_consensus → SELL
         - 分歧太大 (consensus < min_consensus) 或低置信 (confidence < min_confidence) → HOLD
         - 其余 → HOLD
 
-        confidence_list 为 None 时跳过置信度门槛（兼容旧版）。
+        缺省即跳过：consensus/confidence 整体缺失（单模型脚本不输出）时不启用该闸门；
+        共识阈值当日不可达（max(consensus) < min_consensus）时同样跳过并告警。
+        2026-08-11 起「全 HOLD」一个月，正是这三道闸门静默失效叠加造成的。
         """
         import numpy as np
 
@@ -1361,19 +1385,33 @@ class InferenceScriptRunner:
         # 计算百分位阈值
         buy_threshold = np.percentile(arr, (1 - buy_pct) * 100)
         sell_threshold = np.percentile(arr, sell_pct * 100)
+        # 强弱闸门建立在量纲无关的归一化分数上（5%/95% 裁剪 → [-1, 1]）
+        norm = InferenceScriptRunner._robust_normalize(arr)
 
         # 生成信号（百分位 + 方向 + 共识度 + 置信度 四重约束）
-        has_consensus = consensus_list is not None and len(consensus_list) == n
-        has_confidence = confidence_list is not None and len(confidence_list) == n
+        has_consensus = (
+            consensus_list is not None
+            and len(consensus_list) == n
+            and all(c is not None for c in consensus_list)
+        )
+        if has_consensus and max(consensus_list) < min_consensus:
+            logger.warning(
+                "[SignalLogic] 共识闸门不可达，已跳过: 当日最大共识 %d < min_consensus %d"
+                "（单模型不输出 consensus、小融合成员数不足都会如此）",
+                max(consensus_list),
+                min_consensus,
+            )
+            has_consensus = False
+        has_confidence = (
+            confidence_list is not None
+            and len(confidence_list) == n
+            and all(c is not None for c in confidence_list)
+        )
         sides = []
         for i, s in enumerate(scores):
-            # 置信度门槛（None 视为低置信 → HOLD，避免 NoneType 比较异常）
-            conf = confidence_list[i] if has_confidence else None
-            low_conf = conf is not None and conf < min_confidence
-            if has_confidence and conf is None:
-                low_conf = True
-            is_buy = s >= buy_threshold and s > min_buy_score
-            is_sell = s <= sell_threshold and s < max_sell_score
+            low_conf = has_confidence and confidence_list[i] < min_confidence
+            is_buy = s >= buy_threshold and norm[i] > min_buy_score
+            is_sell = s <= sell_threshold and norm[i] < max_sell_score
             if (has_consensus and consensus_list[i] < min_consensus) or low_conf:
                 sides.append("HOLD")  # 分歧太大或低置信
             elif is_buy:
@@ -1392,8 +1430,21 @@ class InferenceScriptRunner:
             f"SELL={sell_count}({sell_count/n*100:.1f}%), HOLD={hold_count}({hold_count/n*100:.1f}%), "
             f"buy_threshold={buy_threshold:.4f} (min_buy={min_buy_score}), "
             f"sell_threshold={sell_threshold:.4f} (max_sell={max_sell_score}), "
-            f"score_range=[{arr.min():.4f}, {arr.max():.4f}], mean={arr.mean():.4f}"
+            f"score_range=[{arr.min():.4f}, {arr.max():.4f}], mean={arr.mean():.4f}, "
+            f"共识闸门={'启用' if has_consensus else '跳过'}, "
+            f"置信度闸门={'启用' if has_confidence else '跳过'}"
         )
+        if buy_count + sell_count == 0:
+            logger.warning(
+                "[SignalLogic] 无 BUY/SELL 输出: %d 只标的全部 HOLD"
+                "（共识闸门=%s, 置信度闸门=%s, 分数区间=[%.4f, %.4f]）"
+                "——请检查闸门阈值是否与模型分数量纲匹配",
+                n,
+                "启用" if has_consensus else "跳过",
+                "启用" if has_confidence else "跳过",
+                float(arr.min()),
+                float(arr.max()),
+            )
 
         return sides
 
@@ -1519,12 +1570,20 @@ class InferenceScriptRunner:
                     if "ST" in name and ("*" in name or name.startswith("ST")):
                         continue
 
+                    # 置信度：缺失/非数值一律视为 None（不因单个字段异常丢整只标的）
+                    conf_raw = item.get("confidence")
+                    try:
+                        conf_val = None if conf_raw is None else float(conf_raw)
+                    except (TypeError, ValueError):
+                        conf_val = None
+
                     valid.append(
                         {
                             "symbol": str(item["symbol"]),
                             "score": float(item["score"]),
                             "consensus": int(item.get("consensus", 0)),
                             "zfusion": float(item.get("zfusion", 0.0)),
+                            "confidence": conf_val,
                             "detail": item.get("detail", {}),
                         }
                     )
