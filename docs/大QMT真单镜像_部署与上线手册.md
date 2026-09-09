@@ -70,7 +70,17 @@
    > 该包声明 `Requires-Python >=3.8`，而 QMT 自带的是 **Python 3.6**，装不上
    > （且 QMT 的 pip 用旧 OpenSSL，连 HTTPS 镜像常报 SSL 错误）。
    > 服务端只需要 **`redis` 这个 Python 包**（QMT 通常已内置），代码一律**文件拷贝**。
-   > 文件来源任选其一：
+   >
+   > **省事做法（推荐）**：在 QuantMind 主机生成开箱包（含 5 个服务端文件 +
+   > 配置模板 + 探测脚本 + 部署步骤.txt + zip）：
+   > ```bash
+   > docker exec -w /app quantmind python backend/scripts/export_qmt_bridge_kit.py
+   > docker cp quantmind:/app/dist/qmt-bridge-kit.zip .
+   > ```
+   > 解压后把 `qmt-bridge-kit\` **里面的文件**拷到 QMT 的 `python` 目录即可，
+   > 跳过下面这段手工拷贝。
+   >
+   > 手工做法（文件来源任选其一）：
    > - 已在开发机装过 `xtquant-big-convert` → 从它的 site-packages 拷；
    > - 从 QuantMind 容器拷（同一份源码，Linux 侧就是 pip 装的）：
    >   ```bash
@@ -89,12 +99,14 @@
    ```python
    # coding: utf-8
    BIGQMT_ACCOUNT_ID = "资金账号"          # 必须与页面/环境变量里的 QMT_EXEC_ACCOUNT_ID 一致
+   BIGQMT_ACCOUNT_TYPE = "STOCK"          # ★ 服务端只认这里：STOCK 普通 / CREDIT 信用；
+                                          #   填错信用账户会返回「资产全 0」而不是报错
    BIGQMT_REDIS_CONFIG = {
        "host": "Redis地址", "port": 6380, "db": 0, "password": "Redis密码",
        "rpc_allow_order_methods": False,  # ★ 下单开关：先 False 验只读链路，确认风控后改 True
        "rpc_process_in_listener": True,
        "rpc_listener_methods": ("*",),
-       "rpc_background_threads": True,    # redis 传输用 True；换 zmq/pipe 必须改 False
+       "rpc_background_threads": True,    # redis 传输保持 True；zmq/pipe 必须 False
        "schedule_adjust": True,
        "schedule_adjust_interval": "100nMilliSecond",
    }
@@ -112,7 +124,13 @@
    > 方式：那样 QMT 不会注入 `passorder`/`get_trade_detail_data`，`init()` 不会被调用，
    > 服务端看起来"跑起来了"其实什么都没监听（面板日志以 `finished` 结尾）。
    > QMT 重启后要在策略编辑器里重新运行该策略。
-   > 若券商沙箱拦截 `import redis`，改用自包含的 `bigqmt_no_redis/`（ZMQ 传输，配置里加 `"transport": "zmq"` 且 `rpc_background_threads=False`）。
+   > 若券商沙箱拦截 `import redis`，可改用同目录的 `BIGQMT_ZMQ_DRYRUN.py` 入口
+   > （它把传输强制为 ZMQ，再 exec 同目录的 `BIGQMT_REDIS_DRYRUN.py`，两个文件都要在；
+   > **QMT 侧需另装 `pyzmq`**，装不上就只能换回 Redis 通道）。
+   > ⚠️ 这条路**尚未端到端验证**：QuantMind 客户端侧目前只走 redis 传输，换 ZMQ 还需
+   > 客户端侧接线（`BIGQMT_RPC_TRANSPORT` 之类），当前版本没有这个开关。
+   > 另外 `rpc_background_threads` 的取值随传输而变：**redis 用 `True`，zmq/pipe 用 `False`**
+   > （上游对 zmq 实测：True 592.9ms vs False 15.8ms，差 37 倍）。
 
 5. **放行防火墙**：Redis 端口只对 QuantMind 主机 IP 开放。
 
@@ -134,8 +152,22 @@
 | `strategy_name` | 默认 `quantmind`（用于识别本系统的委托） |
 | `redis_host/port/db/password` | QMT 那台机器的 Redis 地址与密码 |
 
+> 📌 `account_type` 页面这个值只用于 Linux 侧构造查询对象；**服务端以 QMT 端
+> `BIGQMT_ACCOUNT_TYPE` 为准**（客户端 `configure()` 传不过去）。两边不一致时自检
+> 会在监听层直接报「与页面配置的 account_type 不一致」。
+
 保存后点「**测试连接**」，应返回真实资金与持仓数量。再在「券商实盘接入」顶部把
 A 股通道选为「大 QMT(执行端)」（写入 `broker:selected:CN=qmt_exec`）。
+
+页面「测试连接」只给一句结论；要**逐层定位**断点，用命令行自检（只读，不下单）：
+```bash
+docker exec -w /app/backend -e PYTHONPATH=/app quantmind \
+    python scripts/qmt_bridge_selftest.py
+```
+5 层依次判定：配置层 → 网络层(Redis) → 监听层(RPC ping) → 账号层 → 委托层；
+哪层 `FAIL` 就按它给的「→ 下一步」修。网络层不通时后三层标 `SKIP`（不计通过）；
+监听层不通时**就此打住**不再往下查（RPC 都不通，查账号只会再等一遍超时）。
+退出码：0=5 层全通 / 1=有失败 / 2=配置层就没过。
 
 > 页面配置写入 `broker:config:qmt_exec`（Trade Redis），优先级高于 env；改完立即生效
 > （客户端会清缓存，下一次轮询重读）。
@@ -198,6 +230,7 @@ A 股通道选为「大 QMT(执行端)」（写入 `broker:selected:CN=qmt_exec`
 
 | 现象 | 排查 |
 |------|------|
+| 不知道断在哪一层 | 跑 `python scripts/qmt_bridge_selftest.py`（见 §四.1）：5 层逐层报，按「→ 下一步」修 |
 | 页面「通道未就绪」 | `ENABLE_REAL_TRADING` 是否为 true；A 股券商是否已选 `qmt_exec` |
 | QMT 的 python.exe 里 `pip install xtquant-big-convert` 失败（SSL 错 / 提示需要 3.8+） | **正常**，服务端不装这个包：QMT 是 Python 3.6，代码走文件拷贝，只需 `redis` 包（通常已内置），见 §三.2 |
 | 测试连接报 `NOT_CONNECTED` | QMT 机器上的服务端没跑 / Redis 地址密码不对 / 防火墙未放行 |

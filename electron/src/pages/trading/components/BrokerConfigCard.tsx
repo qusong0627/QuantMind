@@ -257,7 +257,7 @@ export const BrokerConfigCard: React.FC<{ market: string }> = ({ market }) => {
           )}
           {selected === 'qmt_exec' && (
             <div className="text-[11px] leading-5 text-amber-700 bg-amber-50 border border-amber-200 rounded-xl p-2.5">
-              配置步骤：① 在 QMT 那台 Windows 上安装 <b>xtquant-big-convert</b> 并常驻运行 RPC 服务端（QMT 内置 Python）；② 服务端需开启 <b>rpc_allow_order_methods</b> 才会真正下单；③ 上方填写该机器上的 <b>RPC Redis 地址/端口/密码</b>（本系统经此通道下发委托并轮询成交）；④ 保存后点「测试连接」应返回真实资金与持仓。成交无推送，靠 1–3 秒轮询回收。
+              配置步骤：① 在 QMT 那台 Windows 上部署 RPC 服务端 —— <b>不要 pip 安装</b>（QMT 内置 Python 是 3.6，装不了），用 QuantMind 生成的开箱包拷到 QMT 的 <b>python 目录</b>（部署手册 §三）；② 在 QMT <b>策略编辑器</b>里加载运行 <b>BIGQMT_REDIS_DRYRUN.py</b>（用普通脚本方式跑不会生效，日志以 finished 结尾）；③ 服务端配置开启 <b>rpc_allow_order_methods</b> 才会真正下单；④ 上方填写该机器上的 <b>RPC Redis 地址/端口/密码</b>；⑤ 保存后点「测试连接」应返回真实资金与持仓。成交无推送，靠 1–3 秒轮询回收；断在哪一层可跑 <code>scripts/qmt_bridge_selftest.py</code> 逐层看。
             </div>
           )}
           {selected === 'tdx' && (
