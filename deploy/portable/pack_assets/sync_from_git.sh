@@ -9,6 +9,7 @@
 # What it does:
 #   git pull (origin <branch>)
 #   copy backend/ config/ strategy_templates/ web/ into the package
+#   refresh launcher scripts (start/stop/sync/restore/pg_setup/pack.env.example)
 #   copy data/upgrade_*.sql into the package (startup migrations)
 #   clear __pycache__ (stale bytecode protection)
 #   ask you to restart with start.sh
@@ -115,6 +116,28 @@ for d in backend config strategy_templates; do
         cp -a "$REPO/$d/." "$PACK/$d/"
     fi
 done
+echo "[sync] refreshing launcher scripts ..."
+# 启动/运维脚本（start.sh/stop.sh/sync/restore/pg_setup/pack.env.example）：随同步刷新。
+# 历史缺口：这里只同步 backend/config/strategy_templates/web，启动脚本改了老包拿不到
+# （依赖新环境变量的更新会静默失效）。只覆盖包里**已存在**的同名文件，避免把
+# macOS 的 .command 或别的平台脚本塞进当前包；pack.env.example 是模板，不动 pack.env。
+# sync_from_git.sh 自身用「临时文件 + mv」原子替换：bash 持有旧 inode 继续执行，
+# 直接 cp 覆盖正在执行的脚本会边读边被截断。
+for f in start.sh stop.sh start.command stop.command start.bat stop.bat \
+         sync_from_git.sh sync_from_git.bat restore_backup.sh restore_backup.bat \
+         install_gpu.sh install_gpu.bat pg_setup.py pack.env.example; do
+    src="$REPO/deploy/portable/pack_assets/$f"
+    [ -f "$src" ] || continue
+    [ -f "$PACK/$f" ] || continue
+    if [ "$f" = "sync_from_git.sh" ]; then
+        cp -f "$src" "$PACK/.sync_from_git.sh.tmp" && mv -f "$PACK/.sync_from_git.sh.tmp" "$PACK/sync_from_git.sh"
+    else
+        cp -f "$src" "$PACK/$f"
+    fi
+    case "$f" in *.sh|*.command) chmod +x "$PACK/$f";; esac
+done
+echo "[sync] launcher scripts refreshed"
+
 # docker/training 整目录（train.py 顶层 import model_trainers/diagnostics/data 同级包；
 # 代码包 data 与包根数据目录 data/ 同名，不能拉平到包根 → 保相对布局整目录镜像）。
 # 顺带清掉旧拉平布局残留（包根单文件 train.py/model_trainers 会误导脚本探测

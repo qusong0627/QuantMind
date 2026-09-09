@@ -18,10 +18,27 @@ DIST="$HERE/dist"
 BASE="${1:-HEAD~1}"
 
 CODE_PREFIXES="backend/ config/ strategy_templates/ scripts/ pack.env.example pg_setup.py"
-# pack_assets 里的启动脚本/示例配置落到包根(便携包根目录同名文件;
-# pack.env.example 只更新模板说明, 不会覆盖用户自己的 pack.env)。
+# pack_assets 里的启动/运维脚本与示例配置落到包根(便携包根目录同名文件)。
+# 覆盖 .sh/.command 而不只是 .bat：此前这两条链路只同步 backend/config/web，
+# 启动脚本改了老包拿不到（依赖新环境变量的更新会静默失效）。
+# pack.env.example 只更新模板说明, 不会覆盖用户自己的 pack.env。
 # 路径必须是仓库相对路径(脚本已 cd 到 REPO_ROOT), 否则 git diff 匹配不到、静默跳过。
-BAT_MAP="deploy/portable/pack_assets/start.bat:start.bat deploy/portable/pack_assets/stop.bat:stop.bat deploy/portable/pack_assets/install_gpu.bat:install_gpu.bat deploy/portable/pack_assets/pack.env.example:pack.env.example"
+ASSET_MAP="
+deploy/portable/pack_assets/start.sh:start.sh
+deploy/portable/pack_assets/stop.sh:stop.sh
+deploy/portable/pack_assets/start.command:start.command
+deploy/portable/pack_assets/stop.command:stop.command
+deploy/portable/pack_assets/start.bat:start.bat
+deploy/portable/pack_assets/stop.bat:stop.bat
+deploy/portable/pack_assets/sync_from_git.sh:sync_from_git.sh
+deploy/portable/pack_assets/sync_from_git.bat:sync_from_git.bat
+deploy/portable/pack_assets/restore_backup.sh:restore_backup.sh
+deploy/portable/pack_assets/restore_backup.bat:restore_backup.bat
+deploy/portable/pack_assets/install_gpu.sh:install_gpu.sh
+deploy/portable/pack_assets/install_gpu.bat:install_gpu.bat
+deploy/portable/pack_assets/pg_setup.py:pg_setup.py
+deploy/portable/pack_assets/pack.env.example:pack.env.example
+"
 
 cd "$REPO_ROOT"
 [ -n "$(git rev-parse --verify -q "$BASE" 2>/dev/null || true)" ] || { echo "[!] 基线不存在: $BASE"; exit 1; }
@@ -37,9 +54,10 @@ for f in $(git diff --name-only "$BASE"..HEAD -- $CODE_PREFIXES); do
     cp "$f" "$STAGE/$f"
     changed=1
 done
-# 2) pack_assets → 包根同名文件(start.bat/stop.bat/install_gpu.bat/pack.env.example)
-for pair in $BAT_MAP; do
+# 2) pack_assets → 包根同名文件(start/stop/sync/restore/install_gpu/pg_setup/pack.env.example)
+for pair in $ASSET_MAP; do
     src="${pair%%:*}"; dst="${pair##*:}"
+    [ -f "$src" ] || { echo "[!] 缺启动脚本: $src"; continue; }
     if git diff --quiet "$BASE"..HEAD -- "$src" 2>/dev/null; then continue; fi
     mkdir -p "$STAGE"
     cp "$src" "$STAGE/$dst"

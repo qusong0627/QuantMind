@@ -136,6 +136,14 @@ robocopy "%REPO%\config" "%PACK%\config" /E /NFL /NDL /NJH /NJS
 set "RC2=%errorlevel%"
 robocopy "%REPO%\strategy_templates" "%PACK%\strategy_templates" /E /NFL /NDL /NJH /NJS
 set "RC3=%errorlevel%"
+rem launcher scripts (start/stop/restore/pg_setup/pack.env.example): refresh from repo.
+rem only files already present in the pack are updated (platform layout stays intact).
+rem sync_from_git.bat itself is NOT self-updated - cmd may be reading this file right
+rem now; it arrives via the update patch or a fresh pack.
+for %%F in (start.sh stop.sh start.command stop.command start.bat stop.bat sync_from_git.sh restore_backup.sh restore_backup.bat install_gpu.sh install_gpu.bat pg_setup.py pack.env.example) do (
+    if exist "%PACK%\%%F" if exist "%REPO%\deploy\portable\pack_assets\%%F" copy /Y "%REPO%\deploy\portable\pack_assets\%%F" "%PACK%\%%F" >nul
+)
+echo [sync] launcher scripts refreshed
 rem docker/training whole dir (train.py imports model_trainers/diagnostics/data
 rem sibling packages; code package "data" collides with the data dir at package
 rem root, so keep the relative layout and mirror the whole dir). Also remove
