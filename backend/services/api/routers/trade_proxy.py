@@ -156,6 +156,12 @@ async def _do_proxy(request: Request, user: dict | None = None) -> Response:
 )
 @router.api_route("/api/v1/trades", methods=["GET", "POST", "OPTIONS"], include_in_schema=False)
 @router.api_route("/api/v1/trades/{p:path}", methods=["GET", "POST", "OPTIONS"], include_in_schema=False)
+@router.api_route("/api/v1/qmt-mirror", methods=["GET", "POST", "PUT", "OPTIONS"], include_in_schema=False)
+@router.api_route(
+    "/api/v1/qmt-mirror/{p:path}",
+    methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+    include_in_schema=False,
+)
 @router.api_route("/api/v1/portfolios", methods=["GET", "POST", "OPTIONS"], include_in_schema=False)
 @router.api_route(
     "/api/v1/portfolios/{p:path}", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"], include_in_schema=False

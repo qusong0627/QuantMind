@@ -14,6 +14,9 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.services.trade_shared.redis_client import RedisClient
+from backend.services.live_trading.services.real_mirror_service import (
+    mirror_virtual_fill,
+)
 from backend.services.simulation.services.execution_engine import (
     ExecutionResult,
     SimulationExecutionEngine,
@@ -224,6 +227,7 @@ class SimulationEngine:
                         user_id=uid,
                         strategy_id=strategy_id,
                         market=market,
+                        run_id=exec_run_id,
                     )
                     report.orders.append(self._order_to_dict(order, result))
                     if result.success:
@@ -376,8 +380,9 @@ class SimulationEngine:
         user_id: str,
         strategy_id: str,
         market: Any = None,
+        run_id: str = "",
     ) -> ExecutionResult:
-        """执行单个订单"""
+        """执行单个订单（虚拟撮合；成功后按开关镜像一笔真单到 QMT）"""
         from backend.services.simulation.models.order import (
             OrderSide,
             OrderType,
@@ -404,6 +409,24 @@ class SimulationEngine:
         )
         if result.success:
             await exec_engine.apply_filled(sim_order, result)
+            # 双轨镜像：虚拟成交已生效，按开关/白名单/限额向大 QMT 补一笔真单。
+            # 用独立会话（db=None），避免真单写入提前提交本周期未完成的虚拟账本；
+            # mirror_virtual_fill 自身吞掉全部异常，不影响上面的虚拟成交。
+            await mirror_virtual_fill(
+                db=None,
+                redis=self.redis,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                symbol=order.symbol,
+                side=order.side,
+                quantity=order.quantity,
+                price=float(result.price or order.price or 0),
+                sim_order_id=str(sim_order.order_id or ""),
+                run_id=run_id,
+                strategy_id=strategy_id,
+                market=str(getattr(market, "value", market) or ""),
+                source="simulation_engine",
+            )
         else:
             await exec_engine.mark_rejected(sim_order, result.message)
 

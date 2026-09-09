@@ -72,3 +72,7 @@ tables>=3.8.0
 tigeropen>=3.0.0
 futu-api>=9.0.0
 ib_async>=1.0.0
+
+# 大 QMT 执行端（Windows QMT 内置 Python 常驻 RPC 服务端；Linux 侧为客户端）
+# 包内自带纯 Python 的 xtquant 桩（xtconstant/xttype/xtdata），Linux 无需真机 xtquant
+xtquant-big-convert[redis]==0.3.31

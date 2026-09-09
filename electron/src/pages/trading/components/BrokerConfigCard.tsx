@@ -1,15 +1,19 @@
-/** 海外券商（老虎/富途/IB）接入配置卡：按市场可选，配置存 Trade Redis。 */
+/** 实盘券商接入配置卡：按市场可选，配置存 Trade Redis。 */
 import React, { useCallback, useEffect, useState } from 'react';
-import { Alert, Button, Input, Select, Space, Tag, Typography, message } from 'antd';
+import { Alert, Button, Input, Select, Tag, Typography, message } from 'antd';
 import { BankOutlined, CheckCircleOutlined, ReloadOutlined } from '@ant-design/icons';
 import { authService } from '../../../features/auth/services/authService';
 import { SERVICE_URLS } from '../../../config/services';
 
 const { Text } = Typography;
 
-type BrokerKey = 'tiger' | 'futu' | 'ib';
+type BrokerKey = string;
 
 const BROKERS_BY_MARKET: Record<string, { key: BrokerKey; label: string; desc: string }[]> = {
+  CN: [
+    { key: 'qmt_exec', label: '大 QMT(执行端)', desc: 'QMT 内置 Python 跑 big-convert RPC 服务端，需在 QMT 机器上常驻；下单走官方内置通道' },
+    { key: 'tdx', label: '通达信(TDX 桥)', desc: 'Windows 常驻 TDX 桥（HTTP），需 token 一致且通达信已登录' },
+  ],
   HK: [
     { key: 'futu', label: '富途证券', desc: '需本机常驻 FutuOpenD 网关；港股行情强；支持模拟环境' },
     { key: 'tiger', label: '老虎证券', desc: '纯云端 API，无需网关；SIM 模拟账户可直接演练' },
@@ -24,7 +28,6 @@ const BROKERS_BY_MARKET: Record<string, { key: BrokerKey; label: string; desc: s
     { key: 'ib', label: '盈透 IB', desc: '外盘期货（CME 等）经 IB 接入；内盘期货暂不支持' },
   ],
   CRYPTO: [],
-  CN: [],
 };
 
 interface FieldDef {
@@ -32,9 +35,35 @@ interface FieldDef {
   label: string;
   sensitive?: boolean;
   placeholder: string;
+  options?: { value: string; label: string }[];
 }
 
 const FIELD_DEFS: Record<BrokerKey, FieldDef[]> = {
+  qmt_exec: [
+    { name: 'enabled', label: '启用执行端', placeholder: '', options: [
+      { value: 'true', label: 'true（启用）' },
+      { value: 'false', label: 'false（停用）' },
+    ] },
+    { name: 'account_id', label: '资金账号', placeholder: 'QMT 登录的资金账号，如 8888' },
+    { name: 'account_type', label: '账号类型', placeholder: '', options: [
+      { value: 'STOCK', label: 'STOCK（普通）' },
+      { value: 'CREDIT', label: 'CREDIT（信用）' },
+    ] },
+    { name: 'strategy_name', label: '策略名', placeholder: 'quantmind（用于识别本系统的委托）' },
+    { name: 'redis_host', label: 'RPC Redis 地址', placeholder: 'big-convert 服务端所在机器的 IP，如 192.168.31.20' },
+    { name: 'redis_port', label: 'RPC Redis 端口', placeholder: '6379' },
+    { name: 'redis_db', label: 'RPC Redis 库', placeholder: '0' },
+    { name: 'redis_password', label: 'RPC Redis 密码', sensitive: true, placeholder: 'big-convert 传输通道密码' },
+  ],
+  tdx: [
+    { name: 'bridge_url', label: '桥地址', placeholder: '如 http://192.168.31.13:8550' },
+    { name: 'bridge_token', label: '桥 Token', sensitive: true, placeholder: '与 Windows 桥一致的 token' },
+    { name: 'account', label: '资金账号', placeholder: '通达信资金账号（可留空）' },
+    { name: 'account_type', label: '账号类型', placeholder: '', options: [
+      { value: 'stock', label: 'stock（普通）' },
+      { value: 'credit', label: 'credit（信用）' },
+    ] },
+  ],
   tiger: [
     { name: 'tiger_id', label: 'Tiger ID', placeholder: '如 TQ12345（老虎 OpenAPI 平台获取）' },
     { name: 'rsa_private_key', label: 'RSA 私钥', sensitive: true, placeholder: 'PEM 文本（-----BEGIN 开头）或服务器上的文件路径' },
@@ -44,7 +73,10 @@ const FIELD_DEFS: Record<BrokerKey, FieldDef[]> = {
     { name: 'opend_host', label: 'FutuOpenD 地址', placeholder: 'OpenD 所在机器的局域网 IP，如 192.168.31.68' },
     { name: 'opend_port', label: 'FutuOpenD 端口', placeholder: '11111' },
     { name: 'trade_pwd_md5', label: '交易密码 MD5', sensitive: true, placeholder: '交易密码的 MD5（实盘下单前自动解锁）' },
-    { name: 'trade_env', label: '交易环境', placeholder: 'SIMULATE=模拟 / REAL=实盘' },
+    { name: 'trade_env', label: '交易环境', placeholder: '', options: [
+      { value: 'SIMULATE', label: 'SIMULATE（模拟）' },
+      { value: 'REAL', label: 'REAL（实盘）' },
+    ] },
   ],
   ib: [
     { name: 'gateway_host', label: 'Gateway 地址', placeholder: '127.0.0.1' },
@@ -171,7 +203,7 @@ export const BrokerConfigCard: React.FC<{ market: string }> = ({ market }) => {
           </div>
           <p className="text-xs text-gray-500 mt-1">
             配置保存在服务器（敏感字段只写不回显）。下单前请确认已在券商侧开通 OpenAPI 权限；
-            富途需先人工登录 FutuOpenD；IB 需先启动 IB Gateway。
+            富途需先人工登录 FutuOpenD；IB 需先启动 IB Gateway；A 股需先启动 QMT 执行端或 TDX 桥。
           </p>
         </div>
         <Button size="small" icon={<ReloadOutlined />} loading={loading} onClick={load}>刷新</Button>
@@ -223,7 +255,17 @@ export const BrokerConfigCard: React.FC<{ market: string }> = ({ market }) => {
               配置步骤：① 在老虎证券 OpenAPI 开放平台创建应用，获得 <b>Tiger ID</b> 并生成 <b>RSA 密钥对</b>（公钥绑定账户，私钥粘贴到下方）；② 填写交易账户号（U 开头=实盘，SIM 开头=模拟，模拟账户可直接演练）；③ 无需网关，保存后点「测试连接」即可。
             </div>
           )}
-          {FIELD_DEFS[selected].map(({ name, label, sensitive, placeholder }) => {
+          {selected === 'qmt_exec' && (
+            <div className="text-[11px] leading-5 text-amber-700 bg-amber-50 border border-amber-200 rounded-xl p-2.5">
+              配置步骤：① 在 QMT 那台 Windows 上安装 <b>xtquant-big-convert</b> 并常驻运行 RPC 服务端（QMT 内置 Python）；② 服务端需开启 <b>rpc_allow_order_methods</b> 才会真正下单；③ 上方填写该机器上的 <b>RPC Redis 地址/端口/密码</b>（本系统经此通道下发委托并轮询成交）；④ 保存后点「测试连接」应返回真实资金与持仓。成交无推送，靠 1–3 秒轮询回收。
+            </div>
+          )}
+          {selected === 'tdx' && (
+            <div className="text-[11px] leading-5 text-amber-700 bg-amber-50 border border-amber-200 rounded-xl p-2.5">
+              配置步骤：① 在 Windows 上启动 TDX 桥（HTTP 服务）并确保通达信已登录；② 上方填写桥的 <b>局域网地址</b> 与 <b>Token</b>（两侧一致）；③ 保存后点「测试连接」应返回账户资金。注意：TDX 桥与 QMT 执行端是两条独立通道，同一市场只能选其一。
+            </div>
+          )}
+          {FIELD_DEFS[selected].map(({ name, label, sensitive, placeholder, options }) => {
             const isConfigured = configured[name];
             return (
               <div key={name}>
@@ -235,15 +277,12 @@ export const BrokerConfigCard: React.FC<{ market: string }> = ({ market }) => {
                     </Tag>
                   )}
                 </div>
-                {name === 'trade_env' ? (
+                {options ? (
                   <Select
-                    value={values[name] || 'SIMULATE'}
+                    value={values[name] || options[0].value}
                     onChange={(v) => setValues({ ...values, [name]: v })}
                     style={{ width: 200 }}
-                    options={[
-                      { value: 'SIMULATE', label: 'SIMULATE（模拟）' },
-                      { value: 'REAL', label: 'REAL（实盘）' },
-                    ]}
+                    options={options}
                   />
                 ) : (
                   <Input

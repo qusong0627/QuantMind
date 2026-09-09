@@ -9,6 +9,11 @@ from backend.shared.trade_account_cache import (
 )
 from backend.shared.trade_redis_keys import build_trade_account_key, build_trade_agent_heartbeat_key
 from backend.services.trade_shared.models.qmt_agent_session import QMTAgentSession
+from backend.services.live_trading.services.qmt_exec_reconciler import (
+    apply_execution_report,
+    publish_order_event,
+    resolve_order,
+)
 
 router = APIRouter(tags=["Internal Strategy Gateway"])
 logger = logging.getLogger(__name__)
@@ -993,101 +998,16 @@ async def report_qmt_execution(
         str(payload.status or "").strip(),
     )
 
-    # 1) 首选：tenant + user + client_order_id 精确匹配
-    result = await db.execute(
-        select(Order).where(
-            and_(
-                Order.tenant_id == ctx.tenant_id,
-                Order.user_id == ctx_user_id,
-                Order.client_order_id == client_oid,
-            )
-        )
+    # 订单匹配与成交落库统一走 qmt_exec_reconciler（与 QMT 执行端轮询共用内核）
+    order, matched_by = await resolve_order(
+        db,
+        client_order_id=client_oid,
+        exchange_order_id=payload.exchange_order_id,
+        symbol=payload.symbol,
+        side=payload.side,
+        tenant_id=ctx.tenant_id,
+        user_id=ctx_user_id,
     )
-    order = result.scalar_one_or_none()
-    matched_by = "client_order_id"
-
-    # 2) 兼容：某些 Agent 会把 order_id(UUID) 填入 client_order_id 回传
-    if order is None:
-        try:
-            oid = uuid.UUID(client_oid)
-        except Exception:
-            oid = None
-        if oid is not None:
-            result = await db.execute(
-                select(Order).where(
-                    and_(
-                        Order.tenant_id == ctx.tenant_id,
-                        Order.user_id == ctx_user_id,
-                        Order.order_id == oid,
-                    )
-                )
-            )
-            order = result.scalar_one_or_none()
-            if order is not None:
-                matched_by = "order_id"
-
-    # 3) 兼容：如果回传了 exchange_order_id，允许按其匹配历史订单
-    ex_oid = _valid_exchange_order_id(payload.exchange_order_id)
-    if order is None and ex_oid:
-        if ex_oid:
-            result = await db.execute(
-                select(Order).where(
-                    and_(
-                        Order.tenant_id == ctx.tenant_id,
-                        Order.user_id == ctx_user_id,
-                        Order.exchange_order_id == ex_oid,
-                    )
-                )
-            )
-            order = result.scalar_one_or_none()
-            if order is not None:
-                matched_by = "exchange_order_id"
-
-    # 4) 兜底：回报缺失 client/exchange id 时，按最近 ACK 等待中的同标的同方向订单匹配
-    if order is None:
-        symbol = str(payload.symbol or "").strip().upper()
-        side = str(payload.side or "").strip().upper()
-        order_side = None
-        if side in {"BUY", "SELL"}:
-            try:
-                order_side = OrderSide(side)
-            except Exception:
-                order_side = None
-        if symbol and order_side is not None:
-            recent_cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(minutes=15)
-            candidates_result = await db.execute(
-                select(Order)
-                .where(
-                    and_(
-                        Order.tenant_id == ctx.tenant_id,
-                        Order.user_id == ctx_user_id,
-                        Order.symbol == symbol,
-                        Order.side == order_side,
-                        Order.submitted_at.is_not(None),
-                        Order.submitted_at >= recent_cutoff,
-                        Order.exchange_order_id.is_(None),
-                        Order.remarks.is_not(None),
-                        Order.remarks.like("%[AWAITING_BRIDGE_ACK]%"),
-                    )
-                )
-                .order_by(Order.submitted_at.desc())
-                .limit(2)
-            )
-            candidates = list(candidates_result.scalars().all())
-            if len(candidates) == 1:
-                order = candidates[0]
-                matched_by = "symbol_side_recent_ack_waiting"
-            elif len(candidates) > 1:
-                logger.warning(
-                    "[BridgeExecution] fallback match ambiguous tenant=%s user=%s account=%s symbol=%s side=%s candidates=%s",
-                    ctx.tenant_id,
-                    ctx.user_id,
-                    ctx.account_id,
-                    symbol,
-                    side,
-                    [str(item.order_id) for item in candidates],
-                )
-
     if order is None:
         logger.warning(
             "[BridgeExecution] order not found tenant=%s user=%s account=%s client_order_id=%s "
@@ -1110,122 +1030,20 @@ async def report_qmt_execution(
         str(getattr(order, "client_order_id", "") or ""),
     )
 
-    # 字符串状态映射（QMT Agent 应上报标准英文状态字符串）
-    status_map = {
-        "SUBMITTED": OrderStatus.SUBMITTED,
-        "PARTIALLY_FILLED": OrderStatus.PARTIALLY_FILLED,
-        "FILLED": OrderStatus.FILLED,
-        "REJECTED": OrderStatus.REJECTED,
-        "CANCELLED": OrderStatus.CANCELLED,
-        "PARTIALLY_CANCELLED": OrderStatus.CANCELLED,  # 部撤 → 视为已撤
-        "EXPIRED": OrderStatus.EXPIRED,
-    }
-    # QMT 原始数字状态码兜底映射（防止 Agent 未转换直接上报）
-    qmt_code_map = {
-        "48": OrderStatus.PENDING,         # 未报
-        "49": OrderStatus.SUBMITTED,       # 待报
-        "50": OrderStatus.SUBMITTED,       # 已报（交易所确认，未成交）
-        "51": OrderStatus.CANCELLED,       # 报撤中
-        "52": OrderStatus.PARTIALLY_FILLED,# 部成待撤
-        "53": OrderStatus.CANCELLED,       # 已撤
-        "54": OrderStatus.CANCELLED,       # 部撤
-        "55": OrderStatus.REJECTED,        # 废单
-        "56": OrderStatus.FILLED,          # 已成（实盘回放观测）
-        "57": OrderStatus.REJECTED,        # 柜台拒单/无效委托（实盘回放观测）
-        "58": OrderStatus.FILLED,          # 已成
-    }
-    raw_status = str(payload.status).strip()
-    normalized_status = status_map.get(raw_status.upper()) or qmt_code_map.get(raw_status, OrderStatus.SUBMITTED)
-
-    # 防御：FILLED 但 filled_quantity<=0 → 降级为 SUBMITTED（避免 QMT 状态误报产生虚假成交记录）
-    filled_qty = float(payload.filled_quantity) if payload.filled_quantity is not None else 0.0
-    if normalized_status == OrderStatus.FILLED and filled_qty <= 0:
-        normalized_status = OrderStatus.SUBMITTED
-
-    order.status = normalized_status
-    if ex_oid:
-        order.exchange_order_id = ex_oid
-    if payload.message or payload.error_code:
-        msg = str(payload.message or "").strip()
-        if payload.error_code:
-            msg = f"[{payload.error_code}] {msg}".strip()
-        if msg and not (
-            not ex_oid
-            and not str(payload.symbol or "").strip()
-            and not str(payload.side or "").strip()
-            and "async order accepted" in msg.lower()
-        ):
-            order.remarks = msg
-    exchange_trade_id = str(payload.exchange_trade_id or "").strip()
-    if normalized_status == OrderStatus.PARTIALLY_FILLED and not exchange_trade_id:
-        # 订单状态回调可能携带累计 traded_volume，但没有唯一成交 ID；
-        # 为避免与后续 trade callback 双计，这里仅更新状态，不累计成交金额/数量。
-        pass
-    elif normalized_status == OrderStatus.FILLED and not exchange_trade_id:
-        # FILLED 的订单状态回调同理，只更新状态与 exchange_order_id；
-        # 真实成交入账以带 exchange_trade_id 的 trade callback 为准。
-        pass
-    elif normalized_status in {OrderStatus.PARTIALLY_FILLED, OrderStatus.FILLED}:
-        if filled_qty > 0:
-            price = payload.filled_price or getattr(order, "average_price", None) or order.price or 0.0
-            trade_value = filled_qty * price
-            dedup_result = await db.execute(
-                select(Trade).where(
-                    and_(
-                        Trade.tenant_id == ctx.tenant_id,
-                        Trade.user_id == int(ctx.user_id),
-                        Trade.exchange_trade_id == exchange_trade_id,
-                    )
-                )
-            )
-            existing_trade = dedup_result.scalar_one_or_none()
-            if existing_trade is None:
-                trade = Trade(
-                    tenant_id=ctx.tenant_id,
-                    user_id=int(ctx.user_id),
-                    portfolio_id=order.portfolio_id,
-                    order_id=order.order_id,
-                    symbol=order.symbol,
-                    symbol_name=getattr(order, "symbol_name", None),
-                    side=order.side,
-                    trading_mode=order.trading_mode,
-                    quantity=filled_qty,
-                    price=price,
-                    trade_value=trade_value,
-                    commission=0.0,
-                    exchange_trade_id=payload.exchange_trade_id,
-                    executed_at=datetime.now(),
-                    remarks=((f"[{payload.error_code}] " if payload.error_code else "") + str(payload.message or "")).strip()
-                    or None,
-                )
-                db.add(trade)
-                order.filled_quantity = float(getattr(order, "filled_quantity", 0.0) or 0.0) + filled_qty
-                order.filled_value = float(getattr(order, "filled_value", 0.0) or 0.0) + trade_value
-                if order.filled_quantity > 0:
-                    order.average_price = order.filled_value / order.filled_quantity
-        total_quantity = float(order.quantity or 0.0)
-        if total_quantity > 0 and float(getattr(order, "filled_quantity", 0.0) or 0.0) >= total_quantity:
-            order.status = OrderStatus.FILLED
-        elif float(getattr(order, "filled_quantity", 0.0) or 0.0) > 0:
-            order.status = OrderStatus.PARTIALLY_FILLED
+    normalized_status = await apply_execution_report(
+        db,
+        order=order,
+        status_raw=payload.status,
+        filled_quantity=payload.filled_quantity,
+        filled_price=payload.filled_price,
+        exchange_order_id=payload.exchange_order_id,
+        exchange_trade_id=payload.exchange_trade_id,
+        message=payload.message,
+        error_code=payload.error_code,
+        report_symbol=payload.symbol,
+        report_side=payload.side,
+    )
     await db.commit()
-
-    # 通知前端刷新 (Event-Driven)
-    try:
-        # 如果是 FILLED 状态则发送 TRADE_CREATED，否则发送 ORDER_UPDATED
-        # 前端 useTradeWebSocket 会监听到此消息并调用 fetchData() 刷新页面数据
-        event_data = {
-            "event_type": "TRADE_CREATED" if normalized_status == OrderStatus.FILLED else "ORDER_UPDATED",
-            "order_id": str(order.order_id),
-            "user_id": str(ctx.user_id),
-            "tenant_id": ctx.tenant_id,
-            "status": normalized_status.value,
-            "symbol": order.symbol,
-            "filled_quantity": float(order.filled_quantity or 0),
-            "timestamp": datetime.now().isoformat(),
-        }
-        redis.publish_event("trading_events", event_data)
-    except Exception as e:
-        logger.warning(f"Failed to publish trading event for QMT execution: {e}")
-
+    publish_order_event(redis, order, normalized_status)
     return {"ok": True, "status": normalized_status.value}
+

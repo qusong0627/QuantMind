@@ -18,6 +18,9 @@ from backend.services.trade_shared.services.order_service import OrderService
 from backend.services.trade_shared.simulation_manager import SimulationAccountManager
 from backend.services.live_trading.services.trading_engine import TradingEngine
 from backend.services.live_trading.routers.real_trading_utils import _fetch_active_portfolio_snapshot
+from backend.services.live_trading.services.real_mirror_service import (
+    mirror_virtual_fill,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -251,6 +254,21 @@ async def dispatch_internal_strategy_order(
                 side_raw,
                 quantity,
                 total_fee,
+            )
+            # 双轨镜像：虚拟成交已生效，按开关/白名单/限额向大 QMT 补一笔真单。
+            # mirror_virtual_fill 自身吞掉全部异常，不影响上面的虚拟账本。
+            await mirror_virtual_fill(
+                db=db,
+                redis=redis,
+                tenant_id=tenant,
+                user_id=str(uid),
+                symbol=symbol,
+                side=side_raw,
+                quantity=quantity,
+                price=price,
+                client_order_id=client_order_id or "",
+                strategy_id=strategy_id_raw,
+                source=f"internal_dispatcher:{trading_mode.value}",
             )
             return {
                 "status": "success",

@@ -1204,6 +1204,175 @@ class TdxBroker(BaseBroker):
             return {}
 
 
+class QmtExecBroker(BaseBroker):
+    """
+    大 QMT 执行端 Broker（big-convert RPC 直连）。
+
+    与 TdxBroker 的差异：不经 HTTP 桥，而是通过 QMT 内置 Python 里常驻的
+    big-convert RPC 服务端（``qmt_exec_client``）下单/查询；下单只返回委托编号，
+    成交由 ``qmt_exec_poller`` 轮询回收后经共享内核落库。
+
+    配置（Redis ``broker:config:qmt_exec`` 优先，回退环境变量）:
+      QMT_EXEC_ENABLED / QMT_EXEC_ACCOUNT_ID / QMT_EXEC_ACCOUNT_TYPE
+      QMT_EXEC_STRATEGY_NAME / QMT_EXEC_TIMEOUT
+    """
+
+    def __init__(
+        self,
+        account_id: str = "",
+        account_type: str = "STOCK",
+        strategy_name: str = "",
+        timeout: float = 0.0,
+        client: Any = None,
+    ):
+        from backend.services.live_trading.services.qmt_exec_client import (
+            QmtExecClient,
+            get_qmt_exec_client,
+        )
+
+        if client is not None:
+            self._client = client
+        elif account_id or strategy_name or timeout:
+            env_client = get_qmt_exec_client()
+            self._client = QmtExecClient(
+                enabled=True,
+                account_id=account_id or env_client.account_id,
+                account_type=account_type or env_client.account_type,
+                timeout=float(timeout or env_client.timeout),
+                strategy_name=strategy_name or env_client.strategy_name,
+                bridge_redis=env_client.bridge_redis,
+            )
+        else:
+            self._client = get_qmt_exec_client()
+        if not self._client.configured:
+            logger.warning(
+                "[QmtExecBroker] QMT 执行端未启用/未配置（QMT_EXEC_ENABLED、QMT_EXEC_ACCOUNT_ID）"
+            )
+
+    @property
+    def client(self):
+        return self._client
+
+    async def place_order(
+        self,
+        user_id: int,
+        symbol: str,
+        side: str,
+        quantity: float,
+        order_type: str,
+        price: float | None = None,
+        tenant_id: str = "default",
+        client_order_id: str | None = None,
+        trade_action: str | None = None,
+        position_side: str | None = None,
+        is_margin_trade: bool | None = None,
+    ) -> BrokerResult:
+        _ = (user_id, tenant_id, trade_action, position_side, is_margin_trade)
+        from backend.services.live_trading.services.qmt_exec_client import QmtExecError
+
+        side_raw = str(side or "").strip().upper()
+        if side_raw not in ("BUY", "SELL"):
+            return BrokerResult(success=False, message=f"非法方向: {side}")
+        order_type_raw = str(order_type or "LIMIT").strip().upper()
+        if order_type_raw not in ("LIMIT", "MARKET"):
+            return BrokerResult(success=False, message=f"不支持的下单类型: {order_type}")
+        if order_type_raw == "LIMIT" and float(price or 0) <= 0:
+            return BrokerResult(success=False, message="限价单必须提供价格")
+
+        try:
+            result = await self._client.submit_order(
+                symbol=symbol,
+                side=side_raw,
+                quantity=quantity,
+                order_type=order_type_raw,
+                price=price,
+                client_order_id=str(client_order_id or ""),
+            )
+        except QmtExecError as exc:
+            logger.error(
+                "[QmtExecBroker] 下单失败 symbol=%s side=%s qty=%s code=%s: %s",
+                symbol,
+                side_raw,
+                quantity,
+                exc.code,
+                exc,
+            )
+            return BrokerResult(success=False, message=f"[{exc.code}] {exc}")
+        except Exception as exc:  # noqa: BLE001
+            logger.error("[QmtExecBroker] 下单异常: %s", exc, exc_info=True)
+            return BrokerResult(success=False, message=str(exc))
+
+        exchange_order_id = str(
+            result.get("order_id") or result.get("order_sysid") or ""
+        )
+        return BrokerResult(
+            success=True,
+            exchange_order_id=exchange_order_id,
+            message=f"QMT 已受理: order_id={exchange_order_id} remark={result.get('remark', '')}",
+        )
+
+    async def query_account(
+        self, user_id: str, tenant_id: str = "default"
+    ) -> dict[str, Any]:
+        _ = (user_id, tenant_id)
+        from backend.services.live_trading.services.qmt_exec_client import QmtExecError
+
+        try:
+            asset = await self._client.get_asset()
+            positions = await self._client.get_positions()
+        except QmtExecError as exc:
+            logger.warning("[QmtExecBroker] query_account 失败 code=%s: %s", exc.code, exc)
+            return {}
+        except Exception as exc:  # noqa: BLE001
+            logger.error("[QmtExecBroker] query_account 异常: %s", exc)
+            return {}
+        return {
+            "broker": "qmt_exec",
+            "available_cash": asset.get("cash", 0),
+            "balance": asset.get("total_asset", 0),
+            "total_asset": asset.get("total_asset", 0),
+            "market_value": asset.get("market_value", 0),
+            "frozen_cash": asset.get("frozen_cash", 0),
+            "positions": [
+                {
+                    "symbol": item.get("symbol"),
+                    "stock_code": item.get("stock_code"),
+                    "volume": item.get("volume"),
+                    "available_volume": item.get("can_use_volume"),
+                    "cost_price": item.get("avg_price"),
+                    "market_value": item.get("market_value"),
+                }
+                for item in positions
+            ],
+        }
+
+    async def cancel_order(self, exchange_order_id: str, **kwargs) -> bool:
+        from backend.services.live_trading.services.qmt_exec_client import QmtExecError
+
+        symbol = str(kwargs.get("symbol") or "")
+        try:
+            await self._client.cancel_order(
+                order_id=str(exchange_order_id), symbol=symbol
+            )
+            return True
+        except QmtExecError as exc:
+            logger.warning(
+                "[QmtExecBroker] 撤单失败 order_id=%s code=%s: %s",
+                exchange_order_id,
+                exc.code,
+                exc,
+            )
+            return False
+        except Exception as exc:  # noqa: BLE001
+            logger.error("[QmtExecBroker] 撤单异常: %s", exc)
+            return False
+
+    async def query_quote(self, symbol: str) -> dict[str, Any]:
+        """行情走 stream / QuantDB，不依赖 QMT 行情权限。"""
+        _ = symbol
+        return {}
+
+
 def create_broker(enable_real: bool, **kwargs) -> BaseBroker:
     """
     工厂方法：根据配置创建 Broker 实例。
@@ -1212,6 +1381,8 @@ def create_broker(enable_real: bool, **kwargs) -> BaseBroker:
       "bridge" → QMTBridgeBroker（通过 stream /internal/bridge/order 下发到 WS bridge agent）
       "redis"  → RedisBroker（通过 Trade Redis Stream 向终端代理下发指令）
       "qmt"    → QMTBroker（HTTP 调用本地 QMT Bridge，旧模式）
+      "tdx"    → TdxBroker（Windows TDX 桥 :8550）
+      "qmt_exec" → QmtExecBroker（大 QMT 内置 Python 的 big-convert RPC 直连）
       未设置   → QMTBridgeBroker（REAL）或 PaperTradingBroker（SIM）
     """
     broker_type = str(kwargs.get("broker_type", "bridge")).lower()
@@ -1265,6 +1436,14 @@ def create_broker(enable_real: bool, **kwargs) -> BaseBroker:
                 account_type=kwargs.get("tdx_account_type")
                 or os.getenv("TDX_ACCOUNT_TYPE", "stock"),
             )
+        if broker_type == "qmt_exec":
+            # 大 QMT 执行端（big-convert RPC）：账户/桥参数由 qmt_exec_client 统一解析
+            return QmtExecBroker(
+                account_id=kwargs.get("qmt_exec_account_id") or "",
+                account_type=kwargs.get("qmt_exec_account_type") or "STOCK",
+                strategy_name=kwargs.get("qmt_exec_strategy_name") or "",
+                timeout=float(kwargs.get("qmt_exec_timeout") or 0),
+            )
         if broker_type in ("tiger", "futu", "ib"):
             # 海外券商（港/美/期货实盘）：SDK 懒加载，密钥见 overseas_brokers 模块注释
             from backend.services.trade.services.overseas_brokers import (
@@ -1274,7 +1453,7 @@ def create_broker(enable_real: bool, **kwargs) -> BaseBroker:
             return get_overseas_broker(broker_type)
         raise ValueError(
             f"[create_broker] 未知 broker_type='{broker_type}'，"
-            "有效值: 'bridge'（默认）, 'redis', 'qmt', 'tdx', 'tiger', 'futu', 'ib'。"
+            "有效值: 'bridge'（默认）, 'redis', 'qmt', 'tdx', 'qmt_exec', 'tiger', 'futu', 'ib'。"
             "请检查 REAL_BROKER_TYPE 环境变量配置。"
         )
 

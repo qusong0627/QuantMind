@@ -1,5 +1,7 @@
 import { useAppSelector } from '../../../store';
 import BrokerConfigCard from '../components/BrokerConfigCard';
+import BrokerChannelCard from '../components/BrokerChannelCard';
+import QmtMirrorCard from '../components/QmtMirrorCard';
 import { selectCurrentMarket } from '../../../store/slices/uiSlice';
 import React, { useEffect, useState } from 'react';
 import { BankOutlined } from '@ant-design/icons';
@@ -11,6 +13,7 @@ import {
   Key,
   RefreshCw,
   Settings,
+  ShieldAlert,
   ShieldCheck,
 } from 'lucide-react';
 import { SERVICE_URLS } from '../../../config/services';
@@ -52,7 +55,7 @@ const SettingsCenter: React.FC<SettingsCenterProps> = ({ userId, isActive }) => 
   const [showSecretKey, setShowSecretKey] = useState(false);
   const [secretKey, setSecretKey] = useState<string | null>(null);
 
-  const [activeTab, setActiveTab] = useState<'credentials' | 'brokers'>('credentials');
+  const [activeTab, setActiveTab] = useState<'credentials' | 'brokers' | 'mirror'>('credentials');
 
   const handleCopy = async (text: string, key: string) => {
     await navigator.clipboard.writeText(text);
@@ -140,7 +143,6 @@ const SettingsCenter: React.FC<SettingsCenterProps> = ({ userId, isActive }) => 
           <Key size={13} className="inline mr-1.5 -mt-0.5" />
           接入凭证 / API 密钥
         </button>
-        {currentMarket !== 'CN' && (
         <button
           onClick={() => setActiveTab('brokers')}
           className={`px-4 py-2 rounded-xl text-xs font-bold transition-colors ${
@@ -151,6 +153,18 @@ const SettingsCenter: React.FC<SettingsCenterProps> = ({ userId, isActive }) => 
         >
           <BankOutlined className="inline mr-1.5 -mt-0.5" />
           券商实盘接入
+        </button>
+        {currentMarket === 'CN' && (
+        <button
+          onClick={() => setActiveTab('mirror')}
+          className={`px-4 py-2 rounded-xl text-xs font-bold transition-colors ${
+            activeTab === 'mirror'
+              ? 'bg-white text-rose-700 border border-rose-200 shadow-sm'
+              : 'bg-white/60 text-gray-500 border border-gray-200 hover:text-gray-700'
+          }`}
+        >
+          <ShieldAlert size={13} className="inline mr-1.5 -mt-0.5" />
+          大 QMT 真单镜像
         </button>
         )}
       </div>
@@ -251,14 +265,26 @@ const SettingsCenter: React.FC<SettingsCenterProps> = ({ userId, isActive }) => 
         </div>
         </div>
 
-        {/* 券商实盘接入卡片（非 CN 市场） */}
+        {/* 券商实盘接入卡片 */}
         <div
           className={`h-full bg-white rounded-3xl border border-gray-200 shadow-sm overflow-y-auto custom-scrollbar ${
             activeTab === 'brokers' ? '' : 'hidden'
           }`}
         >
-          <div className="p-5">
+          <div className="p-5 space-y-4">
+            <BrokerChannelCard market={currentMarket} />
             <BrokerConfigCard market={currentMarket} />
+          </div>
+        </div>
+
+        {/* 大 QMT 真单镜像（仅 A 股） */}
+        <div
+          className={`h-full bg-white rounded-3xl border border-gray-200 shadow-sm overflow-y-auto custom-scrollbar ${
+            activeTab === 'mirror' ? '' : 'hidden'
+          }`}
+        >
+          <div className="p-5">
+            <QmtMirrorCard />
           </div>
         </div>
       </div>

@@ -52,6 +52,9 @@ async def lifespan(app: FastAPI):
     manual_execution_task = None
     sandbox_signal_task = None
     tdx_account_sync_task = None
+    qmt_account_sync_task = None
+    qmt_exec_poller_task = None
+    mirror_queue_drainer_task = None
     tdx_quote_feed_task = None
     tdx_l2_capture_task = None
     tdx_l2_realtime_task = None
@@ -134,6 +137,32 @@ async def lifespan(app: FastAPI):
         tdx_account_sync_task = asyncio.create_task(
             run_tdx_account_sync_task(interval_seconds=30),
             name="tdx-account-sync",
+        )
+        # 大 QMT 执行端（big-convert RPC）：账户快照 + 委托/成交回收
+        # 未配置（QMT_EXEC_ENABLED=false 且页面未开启）时两个任务自行空转退出/低频等待
+        from backend.services.live_trading.services.qmt_account_sync_task import (
+            run_qmt_account_sync_task,
+        )
+        from backend.services.live_trading.services.qmt_exec_poller import (
+            run_qmt_exec_poller_task,
+        )
+
+        qmt_account_sync_task = asyncio.create_task(
+            run_qmt_account_sync_task(interval_seconds=30),
+            name="qmt-account-sync",
+        )
+        qmt_exec_poller_task = asyncio.create_task(
+            run_qmt_exec_poller_task(),
+            name="qmt-exec-poller",
+        )
+        # 模拟盘 → 真单镜像：非交易时段入队的镜像单，开盘后由本任务补交
+        from backend.services.live_trading.services.real_mirror_service import (
+            run_mirror_queue_drainer,
+        )
+
+        mirror_queue_drainer_task = asyncio.create_task(
+            run_mirror_queue_drainer(),
+            name="mirror-queue-drainer",
         )
         from backend.services.live_trading.services.tdx_quote_feed import run_tdx_quote_feed_task
 
@@ -284,7 +313,7 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    for task in (scanner_task, margin_task, snapshot_task, ledger_settlement_task, manual_execution_task, sandbox_signal_task, tdx_account_sync_task, tdx_quote_feed_task, tdx_l2_capture_task, tdx_l2_realtime_task, t1_unlock_task, corp_action_task):
+    for task in (scanner_task, margin_task, snapshot_task, ledger_settlement_task, manual_execution_task, sandbox_signal_task, tdx_account_sync_task, qmt_account_sync_task, qmt_exec_poller_task, mirror_queue_drainer_task, tdx_quote_feed_task, tdx_l2_capture_task, tdx_l2_realtime_task, t1_unlock_task, corp_action_task):
         if task is None:
             continue
         task.cancel()
@@ -394,11 +423,13 @@ from backend.services.trade.routers.tdx_config import router as tdx_config_route
 from backend.services.trade.routers.tdx_quote_feed import router as tdx_quote_feed_router
 from backend.services.trade.routers.tdx_l2 import router as tdx_l2_router
 from backend.services.trade.routers.broker_config import router as broker_config_router
+from backend.services.trade.routers.qmt_mirror import router as qmt_mirror_router
 
 app.include_router(tdx_config_router, prefix="/api/v1", tags=["TDX-Bridge"])
 app.include_router(tdx_quote_feed_router, prefix="/api/v1", tags=["TDX-Bridge"])
 app.include_router(tdx_l2_router, prefix="/api/v1", tags=["TDX-L2"])
 app.include_router(broker_config_router, prefix="/api/v1", tags=["Broker-Config"])
+app.include_router(qmt_mirror_router, prefix="/api/v1", tags=["QMT-Mirror"])
 
 app.add_middleware(
     CORSMiddleware,

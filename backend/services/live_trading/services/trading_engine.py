@@ -46,7 +46,7 @@ def _infer_broker_market(symbol: str | None) -> str:
 
 
 def _selected_broker_type(redis: RedisClient, market: str) -> str:
-    """读取用户在「券商接入」页为某市场选定的券商（tiger/futu/ib/qmt/tdx）。"""
+    """读取用户在「券商接入」页为某市场选定的券商（tiger/futu/ib/qmt/tdx/qmt_exec）。"""
     try:
         if redis and redis.client:
             raw = redis.client.get(f"broker:selected:{market}")
@@ -81,7 +81,7 @@ class TradingEngine:
         """
         按订单 trading_mode 取 broker:
           - REAL/SHADOW 且启用实盘 → 按标的市场路由券商：
-            broker:selected:{market}（用户在「券商接入」页选定，tiger/futu/ib/tdx）
+            broker:selected:{market}（用户在「券商接入」页选定，tiger/futu/ib/tdx/qmt_exec）
             优先，未选定回退 settings.REAL_BROKER_TYPE
           - 其余 (SIMULATION/BACKTEST) → PaperTradingBroker (本地模拟撮合)
         通过缓存避免重复构造。

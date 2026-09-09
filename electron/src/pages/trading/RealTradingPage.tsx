@@ -73,9 +73,9 @@ const getErrorHttpStatus = (err: unknown): number | undefined => {
 };
 
 
-// 实盘通道文案按市场：CN=通达信桥，HK=富途/老虎/IB，US=老虎/IB/富途
+// 实盘通道文案按市场：CN=通达信桥/大QMT执行端，HK=富途/老虎/IB，US=老虎/IB/富途
 const BROKER_LABELS: Record<string, string> = {
-  CN: '通达信',
+  CN: '通达信/大QMT',
   HK: '富途/老虎/IB',
   US: '老虎/IB/富途',
   FUTURES: 'IB',
