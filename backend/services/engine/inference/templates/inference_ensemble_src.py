@@ -239,7 +239,7 @@ def _sync_member_script(member_dir: Path) -> Path:
 
 
 def _predict_dl_source_model(member_dir: Path, trade_date: str, data_dir: Path,
-                             out_root: Path) -> dict[str, float]:
+                             out_root: Path, market: str = "CN") -> dict[str, float]:
     """DL (.pth/.pt) 源模型：委派其成员目录 inference.py 推理。
 
     成员脚本先同步到最新 parquet 模板（窗口按 trade_date 截断，
@@ -255,11 +255,20 @@ def _predict_dl_source_model(member_dir: Path, trade_date: str, data_dir: Path,
     # 成员脚本会把它当成自己的模型目录读错 metadata。
     env["MODEL_DIR"] = str(member_dir)
     env["TRADE_DATE"] = trade_date
+    cmd = [sys.executable, str(script), "--date", trade_date,
+           "--model-dir", str(member_dir),
+           "--data-dir", str(data_dir), "--output", str(out_path)]
+    # 与 runner 主脚本口径一致：非 CN 市场显式透传，否则成员按默认市场取数
+    if str(market or "CN").upper() not in ("", "CN", "A"):
+        cmd += ["--market", str(market).upper()]
     proc = subprocess.run(
-        [sys.executable, str(script), "--date", trade_date,
-         "--model-dir", str(member_dir),
-         "--data-dir", str(data_dir), "--output", str(out_path)],
+        cmd,
         capture_output=True, text=True, timeout=1800, env=env,
+        # 必须显式 utf-8：中文 Windows 默认按 ANSI(GBK) 解码子进程输出，
+        # 而子进程（PYTHONIOENCODING=utf-8）写的是 UTF-8，一旦日志含中文
+        # 就 UnicodeDecodeError，成员全部失败 → 融合脚本 exit 1
+        # （前端「脚本返回非零退出码」）。
+        encoding="utf-8", errors="replace",
     )
     if proc.returncode != 0:
         tail = (proc.stderr or "").strip().splitlines()[-3:]
@@ -715,7 +724,7 @@ def main():
             if isinstance(model, dict) and model.get("__dl_member__"):
                 # DL 源模型：委派成员推理脚本（窗口截断 + 全流程兼容）
                 scores = _predict_dl_source_model(
-                    m_dir, trade_date, data_dir, member_out_root)
+                    m_dir, trade_date, data_dir, member_out_root, market)
                 logger.info("源模型 %s (DL): %d 条信号, weight=%.3f", mid, len(scores), w)
                 all_scores[mid] = scores
                 weights[mid] = w

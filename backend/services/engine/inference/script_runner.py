@@ -67,6 +67,7 @@ from sqlalchemy.orm import sessionmaker
 
 from backend.services.engine.services.event_stream import EngineSignalStreamPublisher
 from backend.shared.stock_utils import StockCodeUtil
+from backend.shared.training_runtime import repo_root_dir
 
 logger = logging.getLogger(__name__)
 
@@ -190,11 +191,12 @@ class InferenceScriptRunner:
             or os.getenv("MODELS_PRODUCTION", "/app/models/production/model_qlib")
         )
         self.primary_model_dir = Path(resolved_primary)
+        # 兜底模型目录：容器内 /app/models/production/alpha158，便携包为
+        # <包根>/models/production/alpha158（历史上硬编码 /app，便携包兜底永远找不到）
         self.fallback_model_dir = Path(
             fallback_model_dir
-            or os.getenv(
-                "MODELS_FALLBACK_PRODUCTION", "/app/models/production/alpha158"
-            )
+            or os.getenv("MODELS_FALLBACK_PRODUCTION", "")
+            or str(repo_root_dir() / "models" / "production" / "alpha158")
         )
         self.primary_data_dir = self._normalize_provider_uri(
             str(primary_data_dir or os.getenv("QLIB_PRIMARY_DATA_PATH", ""))
@@ -688,12 +690,22 @@ class InferenceScriptRunner:
     # ------------------------------------------------------------------
 
     def _get_python_executable(self) -> str:
-        """解析容器内正确的 Python 解释器路径。"""
+        """解析子进程使用的 Python 解释器路径。
+
+        优先用当前解释器（sys.executable）：容器内它就是 /usr/local/bin/python3，
+        与历史口径一致；便携包（免 Docker 本机直跑）和本地开发则是带齐依赖的
+        运行时解释器。历史实现把 /usr/local/bin/python3、/usr/bin/python3 排在前
+        面，便携包会挑到系统 python（无 lightgbm、pandas 版本不符），推理脚本
+        报依赖错误或 QuantDB 读取失败，前端显示「脚本返回非零退出码」。
+        """
         # 1. 优先检查环境变量
         env_py = os.getenv("PYTHON_EXECUTABLE")
         if env_py and Path(env_py).exists():
             return env_py
-        # 2. 检查常用的容器内路径
+        # 2. 当前解释器（能跑起本进程，必然装齐了推理依赖）
+        if sys.executable and Path(sys.executable).exists():
+            return sys.executable
+        # 3. 兜底：容器内常见路径
         for p in [
             "/usr/local/bin/python3",
             "/usr/bin/python3",
@@ -702,20 +714,31 @@ class InferenceScriptRunner:
         ]:
             if Path(p).exists():
                 return p
-        # 3. 兜底使用 sys.executable
+        # 4. 最后兜底使用 sys.executable
         return sys.executable
 
     def _get_subprocess_env(self) -> dict:
-        """构造子进程运行环境，确保路径和库能被正确找到。"""
-        env = os.environ.copy()
-        # 确保 /usr/local/bin 在 PATH 中，许多 pip 包安装在这里
-        if "/usr/local/bin" not in env.get("PATH", ""):
-            env["PATH"] = "/usr/local/bin:" + env.get("PATH", "")
+        """构造子进程运行环境，确保路径和库能被正确找到。
 
-        # 强制设置 PYTHONPATH
-        curr_python_path = env.get("PYTHONPATH", "")
-        if "/app" not in curr_python_path:
-            env["PYTHONPATH"] = f"/app:{curr_python_path}".strip(":")
+        必须与部署形态无关：容器内仓库根就是 /app，便携包（免 Docker 本机直跑）
+        是解压目录。历史实现硬编码 "/app" 且用 ":" 拼 PYTHONPATH —— Windows 的
+        PYTHONPATH 分隔符是 ";"，整串会被当作单个不存在的路径丢弃，子进程
+        import backend.* 直接 ModuleNotFoundError，推理脚本 exit 1
+        （前端显示「脚本返回非零退出码」）。与 local_process_orchestrator 口径一致。
+        """
+        env = os.environ.copy()
+        # 确保 /usr/local/bin 在 PATH 中，许多 pip 包安装在这里（仅 POSIX）
+        if os.name != "nt" and "/usr/local/bin" not in env.get("PATH", ""):
+            env["PATH"] = "/usr/local/bin" + os.pathsep + env.get("PATH", "")
+
+        # 保证子进程能从仓库根 import backend.*（容器内即 /app，便携包为解压目录）；
+        # 保留既有条目并去重（便携包 start 脚本已注入包根）
+        entries: list[str] = []
+        for chunk in (str(repo_root_dir()), env.get("PYTHONPATH", "")):
+            for part in chunk.split(os.pathsep):
+                if part and part not in entries:
+                    entries.append(part)
+        env["PYTHONPATH"] = os.pathsep.join(entries)
 
         return env
 

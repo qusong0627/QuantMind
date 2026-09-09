@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import types
 
 import pytest
 
 from backend.services.engine.inference.script_runner import ExecutionResult, InferenceScriptRunner
+from backend.shared.training_runtime import repo_root_dir
 
 
 def test_runner_dimension_insufficient_triggers_fallback(monkeypatch, tmp_path: Path):
@@ -509,3 +511,171 @@ class TestActiveDataSourceAudit:
 
         assert result.success is True
         assert "feature_snapshots" in result.active_data_source
+
+
+class TestSubprocessEnvPortability:
+    """推理子进程环境必须与部署形态无关（Docker 容器 / 便携包 / Windows）。"""
+
+    def test_pythonpath_starts_with_repo_root(self, monkeypatch):
+        """仓库根必须排在 PYTHONPATH 首位——子进程要 import backend.*。
+
+        回归：Windows 便携包下曾用 ":" 拼接 PYTHONPATH（Windows 分隔符是 ";"），
+        整串被当成单个不存在的路径丢弃 → 推理脚本 ModuleNotFoundError → exit 1
+        （前端「脚本返回非零退出码」）。
+        """
+        monkeypatch.setenv("PYTHONPATH", "")
+        runner = InferenceScriptRunner(models_production="/tmp/whatever")
+
+        env = runner._get_subprocess_env()
+
+        assert env["PYTHONPATH"].split(os.pathsep)[0] == str(repo_root_dir())
+
+    def test_pythonpath_preserves_existing_entries(self, monkeypatch):
+        """已有 PYTHONPATH 条目（便携包 start.bat/start.sh 注入包根）不能被吞掉。"""
+        monkeypatch.setenv("PYTHONPATH", "/custom/one")
+        runner = InferenceScriptRunner(models_production="/tmp/whatever")
+
+        entries = runner._get_subprocess_env()["PYTHONPATH"].split(os.pathsep)
+
+        assert entries[0] == str(repo_root_dir())
+        assert "/custom/one" in entries
+
+    def test_windows_pythonpath_uses_semicolon(self, monkeypatch):
+        """Windows 下 PYTHONPATH 必须用 ";" 拼接且仍含仓库根（回归：曾用 ":"）。"""
+        import backend.services.engine.inference.script_runner as script_runner_module
+
+        class _WinOs:
+            """只覆盖 name/pathsep，其余属性透传真实 os（不污染 pathlib 的 os）。"""
+
+            name = "nt"
+            pathsep = ";"
+
+            def __getattr__(self, item):
+                return getattr(os, item)
+
+        monkeypatch.setenv("PYTHONPATH", "C:\\QuantMind")
+        monkeypatch.setenv("PATH", "C:\\Windows\\System32")
+        monkeypatch.setattr(script_runner_module, "os", _WinOs())
+        runner = script_runner_module.InferenceScriptRunner(models_production="/tmp/whatever")
+
+        env = runner._get_subprocess_env()
+
+        assert env["PYTHONPATH"].split(";")[0] == str(repo_root_dir())
+        assert "C:\\QuantMind" in env["PYTHONPATH"].split(";")
+        assert env["PATH"] == "C:\\Windows\\System32"
+
+    def test_fallback_model_dir_defaults_to_repo_models(self, monkeypatch):
+        """兜底 alpha158 目录默认取仓库内 models/，便携包下不再指向 /app。"""
+        monkeypatch.delenv("MODELS_FALLBACK_PRODUCTION", raising=False)
+        runner = InferenceScriptRunner(models_production="/tmp/whatever")
+
+        assert runner.fallback_model_dir == (
+            repo_root_dir() / "models" / "production" / "alpha158"
+        )
+
+    def test_python_executable_prefers_current_interpreter(self, monkeypatch):
+        """子进程解释器优先用当前解释器（便携包即包内运行时，含全部依赖）。
+
+        回归：历史实现优先 /usr/local/bin/python3、/usr/bin/python3，便携包会
+        挑到系统 python（无 lightgbm），推理子进程直接失败。
+        """
+        import sys
+
+        monkeypatch.delenv("PYTHON_EXECUTABLE", raising=False)
+        runner = InferenceScriptRunner(models_production="/tmp/whatever")
+
+        assert runner._get_python_executable() == sys.executable
+
+    def test_python_executable_env_override_wins(self, monkeypatch, tmp_path: Path):
+        """PYTHON_EXECUTABLE 显式指定时仍然优先。"""
+        import sys
+
+        override = tmp_path / "python3"
+        override.write_text("", encoding="utf-8")
+        monkeypatch.setenv("PYTHON_EXECUTABLE", str(override))
+        runner = InferenceScriptRunner(models_production="/tmp/whatever")
+
+        assert runner._get_python_executable() == str(override)
+        assert sys.executable  # 保底：断言当前解释器存在
+
+
+class TestEnsembleMemberSubprocess:
+    """融合模型成员子进程：UTF-8 解码与市场透传（Windows 回归）。"""
+
+    @staticmethod
+    def _module():
+        from backend.services.engine.inference.templates import inference_ensemble_src
+
+        return inference_ensemble_src
+
+    @staticmethod
+    def _member_dir(tmp_path: Path) -> Path:
+        member_dir = tmp_path / "member"
+        member_dir.mkdir(parents=True, exist_ok=True)
+        (member_dir / "inference.py").write_text("print('x')\n", encoding="utf-8")
+        return member_dir
+
+    def test_member_subprocess_uses_utf8_decoding(self, monkeypatch, tmp_path: Path):
+        """必须显式 encoding='utf-8'：中文 Windows 默认按 ANSI(cp936) 解码
+        子进程的 UTF-8 输出会 UnicodeDecodeError → 融合脚本 exit 1
+        （前端「脚本返回非零退出码」）。"""
+        module = self._module()
+        member_dir = self._member_dir(tmp_path)
+        captured: dict = {}
+
+        def _fake_run(cmd, **kwargs):
+            captured["cmd"] = list(cmd)
+            captured.update(kwargs)
+            return types.SimpleNamespace(returncode=1, stdout="", stderr="成员推理失败")
+
+        monkeypatch.setattr(module.subprocess, "run", _fake_run)
+
+        with pytest.raises(RuntimeError, match="成员推理失败"):
+            module._predict_dl_source_model(
+                member_dir, "2026-09-08", tmp_path / "data", tmp_path / "out"
+            )
+
+        assert captured["encoding"] == "utf-8"
+        assert captured["errors"] == "replace"
+        assert captured["text"] is True
+
+    def test_member_subprocess_forwards_non_cn_market(self, monkeypatch, tmp_path: Path):
+        """非 CN 市场必须透传 --market，否则成员按默认市场取数。"""
+        module = self._module()
+        member_dir = self._member_dir(tmp_path)
+        captured: dict = {}
+
+        def _fake_run(cmd, **kwargs):
+            captured["cmd"] = list(cmd)
+            out_path = Path(cmd[cmd.index("--output") + 1])
+            out_path.write_text('[{"symbol": "HK00700", "score": 0.5}]', encoding="utf-8")
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(module.subprocess, "run", _fake_run)
+
+        scores = module._predict_dl_source_model(
+            member_dir, "2026-09-08", tmp_path / "data", tmp_path / "out", "HK"
+        )
+
+        assert scores == {"HK00700": 0.5}
+        assert captured["cmd"][captured["cmd"].index("--market") + 1] == "HK"
+
+    def test_member_subprocess_omits_market_for_cn(self, monkeypatch, tmp_path: Path):
+        """CN（默认）不下发 --market，与 runner 主脚本口径一致。"""
+        module = self._module()
+        member_dir = self._member_dir(tmp_path)
+        captured: dict = {}
+
+        def _fake_run(cmd, **kwargs):
+            captured["cmd"] = list(cmd)
+            out_path = Path(cmd[cmd.index("--output") + 1])
+            out_path.write_text('[{"symbol": "SH600519", "score": 0.5}]', encoding="utf-8")
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(module.subprocess, "run", _fake_run)
+
+        module._predict_dl_source_model(
+            member_dir, "2026-09-08", tmp_path / "data", tmp_path / "out"
+        )
+
+        assert "--market" not in captured["cmd"]

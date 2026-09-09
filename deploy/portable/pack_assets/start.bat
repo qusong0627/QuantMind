@@ -9,13 +9,21 @@ cd /d "%~dp0"
 set "ROOT=%~dp0"
 echo MARK-A
 
+rem ---- optional user config: pack.env (same KEY=VALUE file as start.sh) ----
+rem Values here win over the defaults below and are also inherited by the
+rem backend. Read via PowerShell so a UTF-8 BOM (Notepad "UTF-8") is stripped
+rem instead of corrupting the first key.
+if not exist "%ROOT%pack.env" goto :packenv_done
+for /f "usebackq eol=# tokens=1,* delims==" %%A in (`powershell -NoProfile -Command "Get-Content -LiteralPath '%ROOT%pack.env' -Encoding UTF8"`) do set "%%A=%%B"
+:packenv_done
+
 rem ---- ports ----
-set "QM_PG_PORT=5432"
-set "QM_REDIS_PORT=6379"
-set "QM_API_PORT=8000"
-set "QM_ENGINE_PORT=8001"
-set "QM_TRADE_PORT=8002"
-set "QM_STREAM_PORT=8003"
+if not defined QM_PG_PORT set "QM_PG_PORT=5432"
+if not defined QM_REDIS_PORT set "QM_REDIS_PORT=6379"
+if not defined QM_API_PORT set "QM_API_PORT=8000"
+if not defined QM_ENGINE_PORT set "QM_ENGINE_PORT=8001"
+if not defined QM_TRADE_PORT set "QM_TRADE_PORT=8002"
+if not defined QM_STREAM_PORT set "QM_STREAM_PORT=8003"
 
 set "STORAGE_ROOT=%ROOT%data"
 set "PYTHON=%ROOT%runtime\python\python.exe"
@@ -95,8 +103,8 @@ set "STRATEGY_SERVICE_URL=http://127.0.0.1:%QM_ENGINE_PORT%"
 set "PORTFOLIO_SERVICE_URL=http://127.0.0.1:%QM_TRADE_PORT%"
 set "USER_SERVICE_URL=http://127.0.0.1:%QM_TRADE_PORT%"
 set "REAL_TRADING_SERVICE_URL=http://127.0.0.1:%QM_TRADE_PORT%"
-set "ENABLE_TDX_PUSH=false"
-set "ENABLE_REAL_TRADING=false"
+if not defined ENABLE_TDX_PUSH set "ENABLE_TDX_PUSH=false"
+if not defined ENABLE_REAL_TRADING set "ENABLE_REAL_TRADING=false"
 set "DEBUG=false"
 set "LOG_LEVEL=INFO"
 set "STRATEGY_TEMPLATES_DIR=%ROOT%strategy_templates"
@@ -107,7 +115,15 @@ set "TRADING_AGENTS_RESULTS_DIR=%STORAGE_ROOT%\reports\trading_agents"
 set "QM_WEB_DIST_DIR=%ROOT%web"
 set "HF_HOME=%STORAGE_ROOT%\hf"
 set "MPLCONFIGDIR=%ROOT%run\mpl"
-set "ENABLE_CRYPTO=false"
+rem Bundled + user models MUST live inside the pack: the backend defaults are
+rem /app/models/... which on Windows resolve to a drive-relative C:\app\...
+rem (system models unresolvable, user models written outside the pack).
+set "USER_MODELS_ROOT=%ROOT%models\users"
+set "MODELS_PRODUCTION=%ROOT%models\production"
+if not defined FINBERT_ZH_MODEL set "FINBERT_ZH_MODEL=%ROOT%models\finbert-zh-base"
+if not defined NEWS_USE_FINBERT set "NEWS_USE_FINBERT=true"
+if not defined QM_OPEN_BROWSER set "QM_OPEN_BROWSER=1"
+if not defined ENABLE_CRYPTO set "ENABLE_CRYPTO=false"
 set "QM_QUANTDB_DATA_DIR=%STORAGE_ROOT%\quantdb"
 set "QM_QUANTUS_DATA_DIR=%STORAGE_ROOT%\quantus"
 set "QM_QUANTHK_DATA_DIR=%STORAGE_ROOT%\quanthk"
@@ -125,8 +141,8 @@ set "ADMIN_DASHBOARD_REDIS_PORT=%QM_REDIS_PORT%"
 set "ADMIN_DASHBOARD_DISABLED_SERVICES=data_gateway,web,rsshub"
 set "HUNTLY_USERNAME=admin"
 set "HUNTLY_PASSWORD=admin123"
-set "QM_HUNTLY_PORT=8090"
-set "QM_QWENPAW_PORT=8088"
+if not defined QM_HUNTLY_PORT set "QM_HUNTLY_PORT=8090"
+if not defined QM_QWENPAW_PORT set "QM_QWENPAW_PORT=8088"
 rem local service endpoints (otherwise backend/health falls back to docker names)
 set "HUNTLY_BASE_URL=http://127.0.0.1:%QM_HUNTLY_PORT%"
 set "QWENPAW_BASE_URL=http://127.0.0.1:%QM_QWENPAW_PORT%"
@@ -228,7 +244,7 @@ echo ==============================================
 echo [QuantMind] Ready: http://127.0.0.1:%QM_API_PORT%/
 echo ==============================================
 echo [%date% %time%] ready, opening browser >> "%ROOT%logs\startup.log" 2>nul
-start "" http://127.0.0.1:%QM_API_PORT%/
+if "%QM_OPEN_BROWSER%"=="1" start "" http://127.0.0.1:%QM_API_PORT%/
 echo.
 echo [QuantMind] ============================================
 echo [QuantMind] CLOSING THIS WINDOW IS SAFE - all services
