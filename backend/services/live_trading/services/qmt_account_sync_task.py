@@ -23,6 +23,7 @@ from backend.services.live_trading.services.qmt_exec_client import (
     QmtExecClient,
     QmtExecError,
     get_qmt_exec_client,
+    mask_account_id,
 )
 from backend.services.live_trading.services.trading_session import is_trading_time
 
@@ -275,7 +276,7 @@ def _maybe_alert_stale(
         "[QmtSync] 账户快照已 %d 分钟未更新：%s account=%s",
         minutes,
         detail,
-        account_id,
+        mask_account_id(account_id),
     )
     try:
         # 延迟导入：real_mirror_service 反向依赖本模块（batch_quantdb_last_close）
@@ -315,7 +316,7 @@ async def run_qmt_account_sync_task(interval_seconds: int = 30) -> None:
         "[QmtSync] 大 QMT 账户同步任务启动, interval=%ss, account=%s, enabled=%s, "
         "stale_alert=%ss, cooldown=%ss",
         interval,
-        client.account_id or "(未配置)",
+        mask_account_id(client.account_id) or "(未配置)",
         client.configured,
         stale_threshold,
         stale_cooldown,

@@ -31,6 +31,7 @@ from backend.services.live_trading.services.qmt_exec_client import (
     QmtExecError,
     get_qmt_exec_client,
     is_qmt_exec_remark,
+    mask_account_id,
 )
 from backend.services.live_trading.services.qmt_exec_reconciler import (
     apply_execution_report,
@@ -108,7 +109,7 @@ class QmtExecPoller:
         logger.info(
             "[QmtExecPoller] 启动 interval=%.1fs account=%s enabled=%s",
             self._interval,
-            client.account_id or "(未配置)",
+            mask_account_id(client.account_id) or "(未配置)",
             client.configured,
         )
         while True:

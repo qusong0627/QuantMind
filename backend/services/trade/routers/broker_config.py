@@ -372,6 +372,7 @@ async def test_broker_connection(
             from backend.services.live_trading.services.qmt_exec_client import (
                 QmtExecError,
                 get_qmt_exec_client,
+                mask_account_id,
             )
 
             client = get_qmt_exec_client()
@@ -389,7 +390,7 @@ async def test_broker_connection(
             return {
                 "success": True,
                 "message": (
-                    f"QMT 执行端已连接（{client.account_id}），"
+                    f"QMT 执行端已连接（{mask_account_id(client.account_id)}），"
                     f"总资产 {float(asset.get('total_asset') or 0):.2f}"
                     f"，可用 {float(asset.get('cash') or 0):.2f}"
                     f"，持仓 {len(positions)} 只"
@@ -404,7 +405,15 @@ async def test_broker_connection(
             "tdx": "检查 Windows 桥是否启动、桥地址/token 是否与桥端一致、防火墙是否放行 8550",
             "qmt_exec": "检查 QMT 是否开机登录、big-convert RPC 服务端是否启动、桥 Redis 地址/密码是否正确、防火墙是否放行",
         }.get(broker, "")
-        return {"success": False, "message": f"连接失败：{exc}{('；' + hint) if hint else ''}"}
+        message = str(exc)
+        if broker == "qmt_exec":
+            # 兜底脱敏：底层库可能把 redis://user:密码@host 原样抛出来
+            from backend.services.live_trading.services.qmt_exec_client import (
+                redact_secrets,
+            )
+
+            message = redact_secrets(message)
+        return {"success": False, "message": f"连接失败：{message}{('；' + hint) if hint else ''}"}
 
 
 @router.get("/broker-config/{broker}")

@@ -284,6 +284,25 @@ class TestReconcile:
         assert data["items"] == []
         assert len(session.statements) == 1
 
+    def test_uses_truncating_cid_builder(self) -> None:
+        """镜像单号会截断到 orders 列宽：对账必须走同一条构造函数，否则超长 cid 对不上。"""
+        calls: list[str] = []
+        original = mirror.build_mirror_client_order_id
+
+        def spy(*, client_order_id: str = "", **kwargs: Any) -> str:
+            calls.append(client_order_id)
+            return original(client_order_id=client_order_id, **kwargs)
+
+        session = FakeSession([[_sim(remarks="client_order_id=cid-1")], []])
+        with patch.object(mirror, "build_mirror_client_order_id", side_effect=spy):
+            asyncio.run(
+                mod.reconcile_mirror_orders(
+                    date="2026-09-09", limit=10, db=session, auth=_auth()
+                )
+            )
+        # 两处（IN 查询 + 结果索引）都必须走同一条构造函数
+        assert calls and set(calls) == {"cid-1"}
+
 
 class TestSimCreatedWindow:
     """虚拟单落库时间比真实时刻早 UTC+8h（naive utcnow 写 timestamptz），窗口须回移。"""

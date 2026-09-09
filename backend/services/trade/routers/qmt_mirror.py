@@ -42,7 +42,6 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 SIM_REMARK_PREFIX = "client_order_id="
-MIRROR_CID_PREFIX = "mir-"
 RECONCILE_LIMIT_MAX = 2000
 
 # 限额上限：防手滑把「单笔 1 万」改成天文数字后一路下单（下限由 gt=0 保证）
@@ -329,7 +328,11 @@ async def reconcile_mirror_orders(
     if cids:
         real_stmt = select(Order).where(
             Order.tenant_id == tenant,
-            Order.client_order_id.in_([f"{MIRROR_CID_PREFIX}{c}" for c in cids]),
+            # 用与下单同一条构造函数：镜像单号会截断到 orders.client_order_id 列宽，
+            # 这里拼 f"mir-{cid}" 在超长 cid 时会对不上真单。
+            Order.client_order_id.in_(
+                [mirror.build_mirror_client_order_id(client_order_id=c) for c in cids]
+            ),
         )
         for row in (await db.execute(real_stmt)).scalars().all():
             real_by_cid[str(row.client_order_id)] = row
@@ -346,7 +349,7 @@ async def reconcile_mirror_orders(
             if remark.startswith(SIM_REMARK_PREFIX)
             else ""
         )
-        real = real_by_cid.get(f"{MIRROR_CID_PREFIX}{cid}")
+        real = real_by_cid.get(mirror.build_mirror_client_order_id(client_order_id=cid))
         sim_price = _order_price(sim)
         sim_fee = float(getattr(sim, "total_fee", 0) or 0)
         item: dict[str, Any] = {

@@ -66,6 +66,16 @@ _INVALID_EXCHANGE_ORDER_IDS = {"", "-1", "0", "none", "null", "nan"}
 _FALLBACK_WINDOW_MINUTES = 15
 _ACK_WAITING_MARKER = "[AWAITING_BRIDGE_ACK]"
 
+# 终态：订单一旦落定，任何回报都不得把它改回中间态（见 apply_execution_report）。
+_TERMINAL_STATUSES = frozenset(
+    {
+        OrderStatus.FILLED,
+        OrderStatus.CANCELLED,
+        OrderStatus.REJECTED,
+        OrderStatus.EXPIRED,
+    }
+)
+
 # 不覆盖为 remarks 的噪声消息（异步受理回执，无信息量）
 _IGNORED_MESSAGES = ("async order accepted",)
 
@@ -189,8 +199,19 @@ async def apply_execution_report(
     """把一条回报应用到订单（含成交去重与累计），返回归一化后的状态。
 
     调用方负责 ``db.commit()`` 与事件推送。
+
+    **终态守卫**：订单已处于 FILLED/CANCELLED/REJECTED/EXPIRED 时，陈旧或乱序的
+    回报（桥重发、重连后的全量快照、poller 重启补拉）不得把它改回
+    SUBMITTED/PARTIALLY_FILLED——否则对账与持仓会按错误状态重算。此类回报只
+    保留备注/交易所编号，状态与成交累计都不再改动。
     """
     normalized = normalize_status(status_raw)
+    current = (
+        order.status
+        if isinstance(order.status, OrderStatus)
+        else normalize_status(order.status)
+    )
+    terminal_locked = current in _TERMINAL_STATUSES
     ex_oid = valid_exchange_order_id(exchange_order_id)
     trade_id = str(exchange_trade_id or "").strip()
     try:
@@ -201,6 +222,15 @@ async def apply_execution_report(
     # 防御：FILLED 但成交量为 0 → 降级，避免状态误报产生虚假成交
     if normalized == OrderStatus.FILLED and filled_qty <= 0:
         normalized = OrderStatus.SUBMITTED
+
+    if terminal_locked and normalized != current:
+        logger.warning(
+            "[ExecReport] 忽略终态回退 order_id=%s %s → %s（陈旧/乱序回报）",
+            order.order_id,
+            current.value,
+            normalized.value,
+        )
+        normalized = current
 
     order.status = normalized
     if ex_oid:
@@ -279,7 +309,9 @@ async def apply_execution_report(
             order.status = OrderStatus.FILLED
             if getattr(order, "filled_at", None) is None:
                 order.filled_at = datetime.now()
-        elif filled_total > 0:
+        elif filled_total > 0 and normalized == OrderStatus.PARTIALLY_FILLED:
+            # 只有「部分成交」回报才落到 PARTIALLY_FILLED：部撤/撤单回报虽然
+            # filled_total > 0，状态必须是 CANCELLED（否则 cancelled_at 也不会落）。
             order.status = OrderStatus.PARTIALLY_FILLED
 
     if (

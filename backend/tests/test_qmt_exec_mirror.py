@@ -32,6 +32,9 @@ class FakeRedisClient:
     def get(self, key: str) -> str | None:
         return self.strings.get(key)
 
+    def exists(self, key: str) -> int:
+        return int(key in self.strings or key in self.sets)
+
     def set(self, key: str, value: Any) -> bool:
         self.strings[key] = str(value)
         return True
@@ -388,6 +391,41 @@ class TestQueue:
         submit.assert_not_awaited()
         assert not redis.client.lists.get("mirror:queue")
 
+    def test_drain_requeues_on_submit_exception(self) -> None:
+        """条目已出队：提交抛异常必须放回队列，不能静默丢单。"""
+        redis = self._open_redis()
+        raw = '{"client_order_id": "mir-x"}'
+        redis.client.rpush("mirror:queue", raw)
+        with (
+            patch.object(m, "is_trading_time", return_value=True),
+            patch.object(m, "_queued_entry_blocked", return_value=""),
+            patch.object(
+                m, "_submit_payload", AsyncMock(side_effect=RuntimeError("boom"))
+            ),
+        ):
+            result = asyncio.run(m.drain_mirror_queue(redis, db=object()))
+        assert result["requeued"] == 1
+        assert result["failed"] == 0
+        assert redis.client.lists["mirror:queue"] == [raw]
+
+    def test_drain_counts_skipped_as_dropped(self) -> None:
+        """下发前被闸门拦住（急停等）→ 条目作废，但必须计入 dropped 便于排查。"""
+        redis = self._open_redis()
+        redis.client.rpush("mirror:queue", '{"client_order_id": "mir-x"}')
+        with (
+            patch.object(m, "is_trading_time", return_value=True),
+            patch.object(m, "_queued_entry_blocked", return_value=""),
+            patch.object(
+                m,
+                "_submit_payload",
+                AsyncMock(return_value={"status": "skipped", "reason": "kill_switch"}),
+            ),
+        ):
+            result = asyncio.run(m.drain_mirror_queue(redis, db=object()))
+        assert result["dropped"] == 1
+        assert result["submitted"] == 0
+        assert not redis.client.lists.get("mirror:queue")
+
 
 # --------------------------------------------------------------------------
 # 提交链路
@@ -396,6 +434,9 @@ class TestSubmit:
     def _submit(self, redis: Any, **over: Any) -> dict[str, Any]:
         with (
             patch.object(m, "_reference_price", AsyncMock(return_value=10.0)),
+            # 下发前复检会重新读通道就绪（_real_trading_ready）；这里默认就绪，
+            # 闸门本身的行为由 TestDispatchGate 覆盖。
+            patch.object(m, "_real_trading_ready", return_value=(True, "")),
             patch.object(
                 m,
                 "_account_snapshot",
@@ -570,6 +611,77 @@ class TestSubmit:
 
 
 # --------------------------------------------------------------------------
+# 下发前复检（急停/开关/名单/通道）
+# --------------------------------------------------------------------------
+class TestDispatchGate:
+    """首检到真正下发之间隔着参考价 + 账户快照两次 RPC，期间停单动作必须拦住。"""
+
+    def _open_redis(self, **strings: str) -> Any:
+        return _redis(
+            strings={"mirror:enabled": "1", **strings},
+            sets={"mirror:whitelist": {"*"}},
+        )
+
+    def _call(
+        self, redis: Any, *, ready: tuple[bool, str] = (True, ""), **over: Any
+    ) -> tuple[dict[str, Any], Any]:
+        dispatch = AsyncMock(return_value={"status": "success", "order_id": "1001"})
+        with (
+            patch.object(m, "_reference_price", AsyncMock(return_value=10.0)),
+            patch.object(m, "_real_trading_ready", return_value=ready),
+            patch.object(
+                m,
+                "_account_snapshot",
+                AsyncMock(
+                    return_value={
+                        "cash": 1_000_000.0,
+                        "available_volume": {"SH600519": 1000.0},
+                    }
+                ),
+            ),
+            patch(
+                "backend.services.live_trading.services.internal_strategy_dispatcher"
+                ".dispatch_internal_strategy_order",
+                dispatch,
+            ),
+        ):
+            result = asyncio.run(
+                m._submit_payload(
+                    db=object(), redis=redis, cfg=_cfg(), payload=_payload(**over)
+                )
+            )
+        return result, dispatch
+
+    def test_kill_switch_blocks_and_releases_quota(self) -> None:
+        redis = self._open_redis(**{"mirror:kill": "1"})
+        result, dispatch = self._call(redis)
+        assert result["status"] == "skipped"
+        assert result["reason"] == "kill_switch"
+        dispatch.assert_not_awaited()
+        # 预留的额度必须回滚（本笔 10.2×100=1020），否则急停后额度仍被吃掉
+        assert float(redis.client.strings[m._daily_key("value")]) == 0.0
+        assert redis.client.scard(m._daily_key("symbols")) == 0
+
+    def test_switch_off_midflight_blocks(self) -> None:
+        redis = self._open_redis(**{"mirror:enabled": "0"})
+        result, dispatch = self._call(redis)
+        assert result["reason"] == "mirror_disabled"
+        dispatch.assert_not_awaited()
+
+    def test_channel_not_ready_blocks(self) -> None:
+        redis = self._open_redis()
+        result, dispatch = self._call(redis, ready=(False, "broker_not_qmt_exec:tdx"))
+        assert result["reason"] == "broker_not_qmt_exec:tdx"
+        dispatch.assert_not_awaited()
+
+    def test_ready_channel_still_dispatches(self) -> None:
+        redis = self._open_redis()
+        result, dispatch = self._call(redis)
+        assert result["status"] == "submitted"
+        dispatch.assert_awaited_once()
+
+
+# --------------------------------------------------------------------------
 # 限额 / 熔断 / 幂等键
 # --------------------------------------------------------------------------
 class TestQuotaAndBreaker:
@@ -608,6 +720,51 @@ class TestQuotaAndBreaker:
         )
         assert float(redis.client.strings[m._daily_key("value")]) == 0.0
         assert redis.client.scard(m._daily_key("symbols")) == 0
+
+    def test_reserve_quota_returns_same_day_for_all_keys(self) -> None:
+        """三个日键必须同属一天（分别取日期会在跨零点时拆成两套账）。"""
+        redis = _redis()
+        with patch.object(m, "trade_date_str", return_value="20260909"):
+            ok, _, snapshot = m._reserve_quota(
+                redis, _cfg(), symbol="SH600519", value=9000.0
+            )
+        assert ok is True
+        assert snapshot["date"] == "20260909"
+        assert m._daily_key("value", "20260909") in redis.client.strings
+        assert m._daily_key("orders", "20260909") in redis.client.strings
+
+    def test_release_quota_uses_reserved_date(self) -> None:
+        """跨零点回滚必须扣回预留那一天，绝不能把新一天的额度减成负数。"""
+        redis = _redis()
+        with patch.object(m, "trade_date_str", return_value="20260909"):
+            _, _, snapshot = m._reserve_quota(
+                redis, _cfg(), symbol="SH600519", value=9000.0
+            )
+        with patch.object(m, "trade_date_str", return_value="20260910"):
+            m._release_quota(
+                redis,
+                _cfg(),
+                symbol="SH600519",
+                value=9000.0,
+                was_new_symbol=True,
+                date_str=snapshot["date"],
+            )
+        assert float(redis.client.strings[m._daily_key("value", "20260909")]) == 0.0
+        assert m._daily_key("value", "20260910") not in redis.client.strings
+
+    def test_release_quota_skips_expired_day(self) -> None:
+        """当日键已过期 → 跳过回滚，不写出永不读取的负数垃圾键。"""
+        redis = _redis()
+        m._release_quota(
+            redis,
+            _cfg(),
+            symbol="SH600519",
+            value=9000.0,
+            was_new_symbol=True,
+            date_str="20260101",
+        )
+        assert m._daily_key("value", "20260101") not in redis.client.strings
+        assert m._daily_key("orders", "20260101") not in redis.client.strings
 
     def test_circuit_breaker_sets_kill_switch(self) -> None:
         redis = _redis()

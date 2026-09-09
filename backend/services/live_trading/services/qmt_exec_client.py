@@ -38,6 +38,7 @@ import asyncio
 import hashlib
 import logging
 import os
+import re
 import threading
 from typing import Any, Optional, Protocol
 from collections.abc import Callable
@@ -160,6 +161,32 @@ def build_remark(client_order_id: str) -> str:
 def is_qmt_exec_remark(remark: Any) -> bool:
     """备注是否由本系统写入（``qm`` 前缀）——用于轮询时筛掉账户里的手工单。"""
     return str(remark or "").strip().startswith(_REMARK_PREFIX)
+
+
+# ``redis://user:password@host`` 形态（密码部分可能被 percent-encode）
+_URL_PASSWORD_PATTERN = re.compile(r"(?i)(://[^:@/\s]*:)([^@\s/]+)(@)")
+
+
+def redact_secrets(text: Any, *secrets: str) -> str:
+    """把文本里的凭据抹掉再入日志/HTTP 响应。
+
+    两层：① 已知密钥原文（配置里的 redis 密码等）直接替换；② 兜底按
+    ``redis://user:pass@host`` 形态脱敏——底层库抛错时常常把整条 URL 带出来。
+    """
+    out = str(text)
+    for secret in secrets:
+        secret = str(secret or "")
+        if secret:
+            out = out.replace(secret, "***")
+    return _URL_PASSWORD_PATTERN.sub(r"\1***\3", out)
+
+
+def mask_account_id(account_id: Any) -> str:
+    """资金账号打码（日志/页面回显用）：保留前 2 位与后 2 位。"""
+    text = str(account_id or "").strip()
+    if len(text) <= 4:
+        return "***" if text else ""
+    return f"{text[:2]}***{text[-2:]}"
 
 
 def _to_float(value: Any, default: float = 0.0) -> float:
@@ -337,8 +364,12 @@ class BigConvertBackend:
                     timeout_seconds=self.timeout,
                 )
             except Exception as exc:  # noqa: BLE001
+                # 底层库的报错常把 redis URL（含密码）原样带出来，这段文本会进
+                # 日志、也可能经 /broker-config/{broker}/test 回显 → 先脱敏。
                 raise QmtExecError(
-                    f"big-convert 配置失败：{exc}（检查资金账号与桥 Redis 地址/密码）",
+                    "big-convert 配置失败："
+                    f"{redact_secrets(exc, str(self.redis_env.get('redis_password') or ''))}"
+                    "（检查资金账号与桥 Redis 地址/密码）",
                     code="CONFIG_FAIL",
                 ) from exc
             self._constants = {
@@ -351,7 +382,7 @@ class BigConvertBackend:
             self._account = StockAccount(self.account_id, self.account_type)
             logger.info(
                 "[QmtExec] big-convert 客户端就绪 account=%s type=%s",
-                self.account_id,
+                mask_account_id(self.account_id),
                 self.account_type,
             )
             return self._trader, self._account
@@ -772,7 +803,17 @@ class QmtExecClient:
         except QmtExecError:
             raise
         except Exception as exc:  # noqa: BLE001
-            raise QmtExecError(str(exc), code=_classify_error(exc)) from exc
+            raise QmtExecError(
+                redact_secrets(str(exc), self._secret_hint()),
+                code=_classify_error(exc),
+            ) from exc
+
+    def _secret_hint(self) -> str:
+        """当前配置里的 redis 密码（脱敏用；读取失败返回空串，绝不反过来抛错）。"""
+        try:
+            return str(self._effective().get("redis_password") or "")
+        except Exception:  # noqa: BLE001
+            return ""
 
     def _require_enabled(self) -> dict[str, Any]:
         cfg = self._effective()
@@ -799,7 +840,11 @@ class QmtExecClient:
                 ex=_REMARK_TTL_SECONDS,
             )
         except Exception as exc:  # noqa: BLE001 - 映射丢失只降级为兜底匹配
-            logger.warning("[QmtExec] 备注映射写入失败 remark=%s: %s", remark, exc)
+            logger.warning(
+                "[QmtExec] 备注映射写入失败 remark=%s: %s",
+                remark,
+                redact_secrets(exc, self._secret_hint()),
+            )
 
     async def resolve_client_order_id(self, remark: str) -> str:
         """备注 → client_order_id（映射缺失时返回空串，由调用方走兜底匹配）。"""
@@ -812,7 +857,11 @@ class QmtExecClient:
             if value:
                 return str(value)
         except Exception as exc:  # noqa: BLE001
-            logger.warning("[QmtExec] 备注映射读取失败 remark=%s: %s", key, exc)
+            logger.warning(
+                "[QmtExec] 备注映射读取失败 remark=%s: %s",
+                key,
+                redact_secrets(exc, self._secret_hint()),
+            )
         return ""
 
     # -- 只读接口 -------------------------------------------------------

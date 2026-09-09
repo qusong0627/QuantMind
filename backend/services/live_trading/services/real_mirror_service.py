@@ -20,6 +20,9 @@
     在下一交易时段开盘提交，滑点在对账中标注
 
 限额计数用 Lua 脚本**原子**预留，提交失败会回滚预留，避免并发下的超额。
+
+限额口径只覆盖**镜像路径**：绕开镜像直接走 REAL 下单（``broker:selected:CN=qmt_exec``
++ ``trading_mode=REAL``）不受本模块的名单/限额约束，那属于既有的实盘通道口径。
 """
 
 from __future__ import annotations
@@ -485,22 +488,26 @@ async def _reference_price(symbol: str) -> float:
 # --------------------------------------------------------------------------
 def _reserve_quota(
     redis: Any, cfg: MirrorConfig, *, symbol: str, value: float
-) -> tuple[bool, str, dict[str, float]]:
+) -> tuple[bool, str, dict[str, Any]]:
     """原子预留当日额度。
 
     返回 ``(是否通过, 原因, 快照)``；快照含 ``daily_value`` / ``daily_orders`` /
-    ``daily_symbols`` / ``new_symbol``（本笔是否当日新标的，回滚时用）。
+    ``daily_symbols`` / ``new_symbol``（本笔是否当日新标的，回滚时用）与
+    ``date``（**预留时**的日期键，回滚必须原样带回去，见 ``_release_quota``）。
     """
     client = _redis_client(redis)
     if client is None:
         return False, "redis_unavailable", {}
+    # 三个键必须属于同一天：分别调 trade_date_str() 会在跨零点的瞬间把金额写进
+    # 昨天、笔数写进今天（两套账，谁都拦不住）。
+    date_str = trade_date_str()
     try:
         result = client.eval(
             _RESERVE_LUA,
             3,
-            _daily_key("value"),
-            _daily_key("orders"),
-            _daily_key("symbols"),
+            _daily_key("value", date_str),
+            _daily_key("orders", date_str),
+            _daily_key("symbols", date_str),
             value,
             symbol,
             cfg.max_order_value,
@@ -517,22 +524,41 @@ def _reserve_quota(
         "daily_orders": _as_float(result[3]),
         "daily_symbols": _as_float(result[4]),
         "new_symbol": float(_as_int(result[5])),
+        "date": date_str,
     }
     return _as_int(result[0]) == 1, _as_text(result[1]), snapshot
 
 
 def _release_quota(
-    redis: Any, cfg: MirrorConfig, *, symbol: str, value: float, was_new_symbol: bool
+    redis: Any,
+    cfg: MirrorConfig,
+    *,
+    symbol: str,
+    value: float,
+    was_new_symbol: bool,
+    date_str: str = "",
 ) -> None:
-    """提交失败时回滚预留（尽力而为，失败只告警）。"""
+    """提交失败时回滚预留（尽力而为，失败只告警）。
+
+    ``date_str`` 必须是**预留时**返回的日期键：回滚时重新取 ``trade_date_str()``
+    会在跨零点时扣到新的一天（次日金额被减成负数 → 限额形同放开）。
+    当日键已过期（TTL）时直接跳过，避免写出永不读取的负数垃圾键。
+    """
     client = _redis_client(redis)
     if client is None:
         return
+    day = date_str or trade_date_str()
+    value_key = _daily_key("value", day)
     try:
-        client.incrbyfloat(_daily_key("value"), -float(value))
-        client.decr(_daily_key("orders"))
+        if not client.exists(value_key):
+            logger.warning(
+                "[Mirror] 额度键已过期，跳过回滚 symbol=%s date=%s", symbol, day
+            )
+            return
+        client.incrbyfloat(value_key, -float(value))
+        client.decr(_daily_key("orders", day))
         if was_new_symbol:
-            client.srem(_daily_key("symbols"), symbol)
+            client.srem(_daily_key("symbols", day), symbol)
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "[Mirror] 额度回滚失败 symbol=%s value=%.2f: %s", symbol, value, exc
@@ -925,6 +951,27 @@ async def _submit_payload(
         )
         return {"status": "skipped", "reason": reason, "symbol": symbol, **snapshot}
     was_new_symbol = _as_int(snapshot.get("new_symbol")) == 1
+    quota_date = str(snapshot.get("date") or "")
+
+    # 下发前复检（急停/开关/名单/通道）：首检到此处已过参考价 + 账户快照两次 RPC，
+    # 期间运维的任何停单动作都必须拦住这一笔（额度先回滚再返回）。
+    blocked = _dispatch_gate_blocked(redis, cfg, payload)
+    if blocked:
+        _release_quota(
+            redis,
+            cfg,
+            symbol=symbol,
+            value=order_value,
+            was_new_symbol=was_new_symbol,
+            date_str=quota_date,
+        )
+        logger.warning(
+            "[Mirror] 下发前复检未通过，已撤销本笔 cid=%s symbol=%s reason=%s",
+            mirror_cid,
+            symbol,
+            blocked,
+        )
+        return {"status": "skipped", "reason": blocked, "symbol": symbol, **snapshot}
 
     from backend.services.live_trading.services.internal_strategy_dispatcher import (
         dispatch_internal_strategy_order,
@@ -950,7 +997,12 @@ async def _submit_payload(
         )
     except Exception as exc:  # noqa: BLE001 - HTTPException 等
         _release_quota(
-            redis, cfg, symbol=symbol, value=order_value, was_new_symbol=was_new_symbol
+            redis,
+            cfg,
+            symbol=symbol,
+            value=order_value,
+            was_new_symbol=was_new_symbol,
+            date_str=quota_date,
         )
         _record_reject(redis, cfg, reason=str(exc))
         logger.error(
@@ -968,7 +1020,12 @@ async def _submit_payload(
     if execution == "duplicate_skipped":
         # 幂等命中：该 client_order_id 早已下单，本笔额度退回，不计拒单。
         _release_quota(
-            redis, cfg, symbol=symbol, value=order_value, was_new_symbol=was_new_symbol
+            redis,
+            cfg,
+            symbol=symbol,
+            value=order_value,
+            was_new_symbol=was_new_symbol,
+            date_str=quota_date,
         )
         logger.info(
             "[Mirror] 真单已存在（幂等跳过）cid=%s symbol=%s 真实订单=%s",
@@ -993,7 +1050,12 @@ async def _submit_payload(
         failure = f"broker_{broker_status.lower()}:{detail.get('message') or ''}"
     if failure:
         _release_quota(
-            redis, cfg, symbol=symbol, value=order_value, was_new_symbol=was_new_symbol
+            redis,
+            cfg,
+            symbol=symbol,
+            value=order_value,
+            was_new_symbol=was_new_symbol,
+            date_str=quota_date,
         )
         _record_reject(redis, cfg, reason=failure)
         logger.warning(
@@ -1087,6 +1149,22 @@ def _queued_entry_blocked(redis: Any, payload: dict[str, Any]) -> str:
     return "" if ready else reason
 
 
+def _dispatch_gate_blocked(
+    redis: Any, cfg: MirrorConfig, payload: dict[str, Any]
+) -> str:
+    """**真正调用 RPC 之前**的最后一道复检：急停 → 开关 → 名单 → 通道就绪。
+
+    首检（``_mirror_virtual_fill``）到实际下发之间隔着参考价查询、账户快照
+    （RPC 各 10s 超时）与额度预留，期间运维置急停/关开关/改名单/切券商都必须
+    拦住；否则「急停立即生效」不成立。返回空串=放行。
+    """
+    if kill_switch_on(redis):
+        return "kill_switch"
+    if not mirror_enabled(redis, cfg):
+        return "mirror_disabled"
+    return _queued_entry_blocked(redis, payload)
+
+
 async def _drain_with_session(
     redis: Any, client: Any, cfg: MirrorConfig, db: Any, limit: int
 ) -> dict[str, Any]:
@@ -1122,7 +1200,21 @@ async def _drain_with_session(
                 blocked,
             )
             continue
-        result = await _submit_payload(db=db, redis=redis, cfg=cfg, payload=payload)
+        try:
+            result = await _submit_payload(db=db, redis=redis, cfg=cfg, payload=payload)
+        except Exception as exc:  # noqa: BLE001 - 已出队，异常必须回队
+            # 条目已 lpop 出队：这里抛出去只会被常驻任务的兜底 except 记一条日志，
+            # 队列单静默消失（额度可能已预留）。放回队尾 + 本轮到此为止。
+            logger.error(
+                "[Mirror] 队列条目提交异常，放回队列 cid=%s symbol=%s: %s",
+                payload.get("client_order_id"),
+                payload.get("symbol"),
+                exc,
+                exc_info=True,
+            )
+            client.rpush(_QUEUE_KEY, raw)
+            requeued += 1
+            break
         status = str(result.get("status") or "")
         if status == "submitted":
             submitted += 1
@@ -1133,6 +1225,10 @@ async def _drain_with_session(
             break
         elif status in {"failed", "error"}:
             failed += 1
+        elif status == "skipped":
+            # 下发前被闸门拦住（急停/开关/名单/通道/价格/资金）→ 条目作废，
+            # 但要计入 dropped，否则日志里看不出来单子去哪了。
+            dropped += 1
         logger.info(
             "[Mirror] 队列补交 cid=%s status=%s reason=%s",
             payload.get("client_order_id"),
