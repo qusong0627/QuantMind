@@ -31,7 +31,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-DEFAULT_EVENTS = "/data/quantdb/3_financial_data/dividend_factors"
+from backend.shared.quantdb_paths import resolve_quantdb_subdir
 
 DROP_RATIO = 1.1  # “必然是除权日”的判定：裸价跌幅超过 1.1x 涨停幅度
 RESILIENCE = (
@@ -45,8 +45,17 @@ ADDITIVE_LOOKALIKE = 0.02  # 存量 factor.bin 里变化日占比超过它即判
 
 
 def resolve_events_dir() -> Path:
-    """事件表目录（可用 QUANTDB_DIVIDEND_DIR 覆盖）。"""
-    return Path(os.getenv("QUANTDB_DIVIDEND_DIR", DEFAULT_EVENTS))
+    """事件表目录（QUANTDB_DIVIDEND_DIR 覆盖 → QuantDB 数据目录派生）。
+
+    勿硬编码 ``/data/quantdb/...``：便携包（免 Docker）数据目录是
+    ``$STORAGE_ROOT/quantdb``，硬编码会让事件表整体读空 → ``EventBook`` 空 →
+    ``_multiplicative_factor`` 返回 None → CN 的 qlib ``$factor`` 静默退回
+    加法口径，``real_shares = adjusted_amount * factor`` 下股数逐日漂移。
+    """
+    env_val = os.getenv("QUANTDB_DIVIDEND_DIR", "").strip()
+    if env_val:
+        return Path(env_val)
+    return resolve_quantdb_subdir("3_financial_data", "dividend_factors")
 
 
 def board_limit(symbol: str) -> float:

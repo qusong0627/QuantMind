@@ -79,12 +79,12 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from backend.shared.qlib_multiplicative_factor import (  # noqa: E402
-    DEFAULT_EVENTS,
     STEP_EPS,
     board_limit,
     build_multiplicative_factor,
     covered_dates,
     load_events,
+    resolve_events_dir,
     to_code,
     unexplained_ex_dates,
 )
@@ -128,7 +128,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--events-dir",
-        default=os.getenv("QUANTDB_DIVIDEND_DIR", DEFAULT_EVENTS),
+        default=str(resolve_events_dir()),
         help="directory of <CODE.MKT>.parquet dividend/ex-date tables",
     )
     parser.add_argument("--symbols", default=None, help="file with one symbol per line")
