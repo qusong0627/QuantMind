@@ -1,0 +1,17 @@
+{
+  "model_id": "mdl_cn_train_20260819100559_9163cb84_ac5c5b2e",
+  "horizon_days": 5,
+  "sample_count": 1524290,
+  "rank_ic": {
+    "market": 0.04649272551212756,
+    "industry": 0.08688392036789362,
+    "board": 0.07864059559854782,
+    "cap": 0.07822854961145131
+  },
+  "weights": {
+    "market": 0.1602,
+    "industry": 0.2993,
+    "board": 0.2709,
+    "cap": 0.2695
+  }
+}

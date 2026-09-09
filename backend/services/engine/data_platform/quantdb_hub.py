@@ -30,7 +30,6 @@ QuantDB 数据中枢 — A 股所有数据读取的单一入口。
 from __future__ import annotations
 
 import logging
-import os
 import threading
 from datetime import date, timedelta
 from pathlib import Path
@@ -38,42 +37,19 @@ from typing import Optional
 
 import pandas as pd
 
+from backend.shared import quantdb_paths
+
 logger = logging.getLogger(__name__)
 
-# 环境变量：QuantDB 数据目录
-_QUANTDB_DATA_DIR_ENV = "QM_QUANTDB_DATA_DIR"
-
-# 默认数据目录（项目根相对 / 容器内绝对路径 / 本地盘符）
-_DEFAULT_DATA_DIRS = [
-    "/data/quantdb",  # Docker 容器内（挂载点）
-    "/app/data/quantdb",  # Docker 容器内
-    "D:/quant_data",  # Windows 本地开发常用盘符
-    str(Path(__file__).resolve().parents[4] / "data" / "quantdb"),  # 项目根/data/quantdb
-]
+# 数据目录解析统一委托 backend.shared.quantdb_paths（Docker / 便携包单一事实源）。
+# 保留 _resolve_data_dir 私有名：script_runner、quantdb_factor_reader、
+# api.routers.admin.quantdb_console、api.routers.research_service 均 import 它。
+_QUANTDB_DATA_DIR_ENV = quantdb_paths.QUANTDB_DATA_DIR_ENV
 
 
 def _resolve_data_dir() -> Path:
-    """解析 QuantDB 数据目录路径。"""
-    env_val = os.getenv(_QUANTDB_DATA_DIR_ENV, "").strip()
-    if env_val:
-        p = Path(env_val)
-        if p.is_dir() and any(p.iterdir()):
-            return p
-        logger.warning("QM_QUANTDB_DATA_DIR=%s 不存在或为空，尝试默认路径", env_val)
-
-    for d in _DEFAULT_DATA_DIRS:
-        p = Path(d)
-        if p.is_dir() and any(p.iterdir()):
-            return p
-
-    # 从 __file__ 向上推算项目根
-    project_root = Path(__file__).resolve().parents[4]
-    fallback = project_root / "data" / "quantdb"
-    if fallback.is_dir() and any(fallback.iterdir()):
-        return fallback
-
-    # 最后返回默认路径（让后续方法报错更清晰）
-    return Path(_DEFAULT_DATA_DIRS[-1])
+    """解析 QuantDB 数据目录路径（委托 quantdb_paths，语义与历史实现一致）。"""
+    return quantdb_paths.resolve_quantdb_dir()
 
 
 # ---------------------------------------------------------------------------

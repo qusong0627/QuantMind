@@ -7,25 +7,28 @@ position_score ∈ {0} ∪ [0.1, 0.99]：
   0    = 不入场（低于行业头部 / 大盘空仓 / 卖出信号）
   0.1~0.99 = 建议投入仓位百分比（半凯利 + 非线性映射）
 
-依赖（离线校准产物，缺失时降级为经验默认值）：
-  /data/quantdb/position_signal_calibration/ic_weights.json    —— p 的融合权重
-  /data/quantdb/position_signal_calibration/payoff_table.json —— 赔率查找表 b
+依赖（离线校准产物，缺失时回退仓库内置默认 → 经验默认值）：
+  <QuantDB数据目录>/position_signal_calibration/ic_weights.json    —— p 的融合权重
+  <QuantDB数据目录>/position_signal_calibration/payoff_table.json —— 赔率查找表 b
+数据目录经 backend/shared/quantdb_paths.resolve_quantdb_dir() 解析（便携包/Docker 通用），
+内置默认在 backend/services/engine/inference/calibration_defaults/。
 """
 from __future__ import annotations
 
 import json
 import logging
-import os
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
 from sqlalchemy import text
 
+from backend.shared.quantdb_paths import resolve_quantdb_subdir
+
 logger = logging.getLogger(__name__)
 
-_CAL_DIR = "/data/quantdb/position_signal_calibration"
-_IC_PATH = f"{_CAL_DIR}/ic_weights.json"
-_PAYOFF_PATH = f"{_CAL_DIR}/payoff_table.json"
+_CALIBRATION_DEFAULTS_DIR = Path(__file__).resolve().parent / "calibration_defaults"
+_calibration_missing_logged = False
 
 # 经验默认权重（校准产物缺失时用）：与 L2 模型校准结果相近
 _DEFAULT_WEIGHTS = {"market": 0.16, "industry": 0.30, "board": 0.27, "cap": 0.27}
@@ -40,25 +43,57 @@ _INDUSTRY_PCT_FLOOR = 0.80
 _MARKET_PCT_FLOOR = 0.60
 
 
+def _calibration_dir() -> Path:
+    """校准产物目录。惰性解析——便携包数据目录与 Docker 不同，勿在 import 时求值。"""
+    return resolve_quantdb_subdir("position_signal_calibration")
+
+
+def _read_json(path: Path) -> dict[str, Any] | None:
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else None
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("position_signal: 读取校准产物 %s 失败: %s", path, exc)
+        return None
+
+
 def _load_calibration() -> tuple[dict[str, float], dict[str, Any]]:
-    """加载 IC 权重 + 赔率查找表，缺失时降级。"""
+    """加载 IC 权重 + 赔率查找表。
+
+    优先级：数据目录校准产物 → 仓库内置默认 → 经验默认值。
+    便携包/新装环境的 QuantDB 数据目录里通常没有校准目录，内置默认保证
+    仍用真实校准值（而非粗糙经验值）；客户重校准后以数据目录为准。
+    """
+    global _calibration_missing_logged
     weights = dict(_DEFAULT_WEIGHTS)
     payoff: dict[str, Any] = {"fallback_by_bucket": {}, "overall_b": _DEFAULT_B, "table": {}}
-    try:
-        if os.path.isfile(_IC_PATH):
-            with open(_IC_PATH, encoding="utf-8") as f:
-                data = json.load(f)
-            if isinstance(data.get("weights"), dict):
-                w = data["weights"]
-                weights = {k: float(w.get(k, _DEFAULT_WEIGHTS[k])) for k in _DEFAULT_WEIGHTS}
-    except Exception as exc:
-        logger.warning("position_signal: IC 权重加载失败，用默认: %s", exc)
-    try:
-        if os.path.isfile(_PAYOFF_PATH):
-            with open(_PAYOFF_PATH, encoding="utf-8") as f:
-                payoff = json.load(f)
-    except Exception as exc:
-        logger.warning("position_signal: 赔率表加载失败，用默认: %s", exc)
+
+    cal_dir = _calibration_dir()
+    ic_path = cal_dir / "ic_weights.json"
+    if not ic_path.is_file():
+        ic_path = _CALIBRATION_DEFAULTS_DIR / "ic_weights.json"
+    payoff_path = cal_dir / "payoff_table.json"
+    if not payoff_path.is_file():
+        payoff_path = _CALIBRATION_DEFAULTS_DIR / "payoff_table.json"
+
+    ic_data = _read_json(ic_path) if ic_path.is_file() else None
+    if ic_data is None:
+        if not _calibration_missing_logged:
+            _calibration_missing_logged = True
+            logger.warning(
+                "position_signal: 校准产物缺失（%s 与内置默认 %s 均无），"
+                "用经验默认权重/赔率",
+                cal_dir,
+                _CALIBRATION_DEFAULTS_DIR,
+            )
+    elif isinstance(ic_data.get("weights"), dict):
+        w = ic_data["weights"]
+        weights = {k: float(w.get(k, _DEFAULT_WEIGHTS[k])) for k in _DEFAULT_WEIGHTS}
+
+    payoff_data = _read_json(payoff_path) if payoff_path.is_file() else None
+    if payoff_data is not None:
+        payoff = payoff_data
     return weights, payoff
 
 
@@ -209,14 +244,24 @@ def compute_position_scores(
     df["symbol_sfx"] = df["code"].map(_to_suffix)
 
     # 元数据：行业 + 流通市值(亿) + 板块
+    detail_dir = resolve_quantdb_subdir("2_base_sector", "instrument_detail")
     try:
         import duckdb
+
+        if not any(detail_dir.rglob("*.parquet")):
+            raise FileNotFoundError(f"instrument_detail 缺失: {detail_dir}")
+        # glob 交给 DuckDB（其文件顺序决定下面 keep="last" 的胜者，勿在 Python 侧重排）
+        pattern = (detail_dir / "**" / "*.parquet").as_posix()
         con = duckdb.connect()
-        meta = con.execute(
-            "SELECT Symbol AS symbol, rs_hyname AS industry, Ltsz AS ltsz "
-            "FROM read_parquet('/data/quantdb/2_base_sector/instrument_detail/**/*.parquet', union_by_name=true) "
-            "WHERE Symbol LIKE '%.SH' OR Symbol LIKE '%.SZ' OR Symbol LIKE '%.BJ'"
-        ).fetchdf()
+        try:
+            meta = con.execute(
+                "SELECT Symbol AS symbol, rs_hyname AS industry, Ltsz AS ltsz "
+                "FROM read_parquet(?, union_by_name=true) "
+                "WHERE Symbol LIKE '%.SH' OR Symbol LIKE '%.SZ' OR Symbol LIKE '%.BJ'",
+                [pattern],
+            ).fetchdf()
+        finally:
+            con.close()
         # Ltsz 字段已是亿元单位（如 2124.91 = 平安银行流通市值2124亿），勿再除1e8
         meta["ltsz_yi"] = pd.to_numeric(meta["ltsz"], errors="coerce")
         meta["board"] = meta["symbol"].map(lambda s: _classify_board(s.split(".")[0]))
@@ -225,7 +270,11 @@ def compute_position_scores(
         meta = meta.drop_duplicates(subset=["symbol"], keep="last")
         df = df.merge(meta[["symbol", "industry", "board", "cap_tier"]], left_on="symbol_sfx", right_on="symbol", how="left", suffixes=("", "_meta"))
     except Exception as exc:
-        logger.warning("position_signal: 元数据加载失败，按「其他」行业降级: %s", exc)
+        logger.warning(
+            "position_signal: 元数据加载失败（目录 %s），按「其他」行业降级: %s",
+            detail_dir,
+            exc,
+        )
         df["industry"] = "其他"
         df["board"] = "其他"
         df["cap_tier"] = "中盘"

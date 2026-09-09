@@ -10,11 +10,12 @@ TDX Signal Push Service - 把模型推理选股推送到通达信
 """
 import asyncio
 import logging
-import os
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from backend.shared.database_manager_v2 import get_session
+from backend.shared.quantdb_paths import resolve_quantdb_subdir
 from backend.shared.stock_utils import StockCodeUtil
 from backend.services.live_trading.services.tdx_push_service import (
     TdxPushError,
@@ -27,15 +28,21 @@ logger = logging.getLogger(__name__)
 DEFAULT_TOP_N = 20
 # 融合分数有效数字截断，避免推送超长小数
 _SCORE_DIGITS = 4
-_QUANTDB_NAME_DIR = "/data/quantdb/2_base_sector/instrument_detail"
+
+
+def _quantdb_name_dir() -> Path:
+    """QuantDB instrument_detail 目录。调用时解析——便携包（免 Docker）数据目录
+    是 ``$STORAGE_ROOT/quantdb``，import 时求值的硬编码绝对路径会永远落空。"""
+    return resolve_quantdb_subdir("2_base_sector", "instrument_detail")
 
 
 def _quantdb_name_table() -> str | None:
     """SDK 新版落盘 instrument_list.parquet，旧版 instrument_detail.parquet。"""
+    base = _quantdb_name_dir()
     for name in ("instrument_list.parquet", "instrument_detail.parquet"):
-        p = os.path.join(_QUANTDB_NAME_DIR, name)
-        if os.path.exists(p):
-            return p
+        p = base / name
+        if p.exists():
+            return str(p)
     return None
 
 

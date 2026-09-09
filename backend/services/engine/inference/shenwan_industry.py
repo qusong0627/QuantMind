@@ -15,15 +15,20 @@ from pathlib import Path
 
 import pandas as pd
 
+from backend.shared.quantdb_paths import resolve_quantdb_dir, resolve_quantdb_subdir
 from backend.shared.stock_utils import StockCodeUtil
 
 logger = logging.getLogger(__name__)
 
-# instrument_detail.parquet 的默认数据目录候选（与 quantdb_hub 一致）
-_DEFAULT_SECTOR_DIRS = [
-    "/data/quantdb/2_base_sector/instrument_detail",
-    "/data/quantdb",
-]
+
+def _sector_dirs() -> list[Path]:
+    """instrument_detail 的候选目录（由 QuantDB 数据目录解析派生，勿硬编码）。
+
+    便携包（免 Docker）数据目录是 ``$STORAGE_ROOT/quantdb``，硬编码 ``/data/quantdb``
+    会让申万行业映射整体失效、退到 stocks 表的证监会分类。
+    """
+    root = resolve_quantdb_dir()
+    return [resolve_quantdb_subdir("2_base_sector", "instrument_detail"), root]
 
 # 静态 fallback：若 parquet 缺失，用 stocks 表的行业字段兜底
 _FALLBACK_DB_TABLE = "stocks"
@@ -73,7 +78,7 @@ def _load_from_parquet() -> pd.DataFrame | None:
 
 
 def _resolve_instrument_detail_path() -> Path | None:
-    for base in _DEFAULT_SECTOR_DIRS:
+    for base in _sector_dirs():
         p = Path(base)
         for name in ("instrument_list.parquet", "instrument_detail.parquet"):
             if (p / name).exists():
