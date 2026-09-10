@@ -427,9 +427,16 @@ class TradingEngine:
             logger.error(f"Failed to cancel order {order.order_id}: {e}")
             return False
 
-    async def check_order_risk(self, user_id: int, order: Order) -> dict:
+    async def check_order_risk(self, user_id: int | str, order: Order) -> dict:
         """Check order against risk rules"""
         from backend.services.trade.services.remote_service import remote_service
+        from backend.services.live_trading.routers.real_trading_utils import (
+            normalize_db_user_id,
+        )
+
+        # orders/portfolios 的 user_id 是 VARCHAR（8 位补零口径）；上游传 int 时
+        # 直接拼进 SQL 会报 character varying = integer，统一先归一化。
+        db_user_id = normalize_db_user_id(user_id)
 
         # 1. Estimate order value if it's 0 (Market Order)
         # Market orders arrive with order_value=0; must estimate from real-time quote.
@@ -480,7 +487,7 @@ class TradingEngine:
                 .where(
                     and_(
                         Portfolio.id == order.portfolio_id,
-                        Portfolio.user_id == user_id,
+                        Portfolio.user_id == db_user_id,
                         Portfolio.tenant_id == order.tenant_id,
                         Portfolio.is_deleted == False,
                     )
@@ -538,7 +545,7 @@ class TradingEngine:
         # 统计该用户在当前租户下今天的订单总数 (排除已拒绝的，保留待成交、已成交等)
         stmt = select(func.count(Order.id)).where(
             and_(
-                Order.user_id == str(user_id),
+                Order.user_id == db_user_id,
                 Order.tenant_id == order.tenant_id,
                 Order.created_at >= datetime.combine(today, datetime.min.time()),
                 Order.status != OrderStatus.REJECTED,

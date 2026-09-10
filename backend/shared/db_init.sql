@@ -793,15 +793,18 @@ CREATE INDEX IF NOT EXISTS idx_us_user_id ON user_strategies (user_id);
 -- ========================
 DO $$ BEGIN
     -- Create enums if they don't exist
-    -- NOTE: values must match backend/services/trade/models/enums.py（小写）
+    -- NOTE: values must match backend/services/trade_shared/models/enums.py 的
+    -- values_callable 口径（DB 里存的是 Python 枚举的 value，不是成员名）。
+    -- tradeaction/positionside 历史上是 names/小写口径，与代码写库值不一致，
+    -- 老库由 data/upgrade_v1.1.1.sql 就地转换；新库从这里起就是正确口径。
     IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'orderside') THEN
         CREATE TYPE orderside AS ENUM ('buy', 'sell');
     END IF;
     IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'tradeaction') THEN
-        CREATE TYPE tradeaction AS ENUM ('buy_to_open', 'sell_to_close', 'sell_to_open', 'buy_to_close');
+        CREATE TYPE tradeaction AS ENUM ('OPEN', 'CLOSE', 'OPEN_REVERSE', 'CLOSE_REVERSE');
     END IF;
     IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'positionside') THEN
-        CREATE TYPE positionside AS ENUM ('long', 'short');
+        CREATE TYPE positionside AS ENUM ('LONG', 'SHORT');
     END IF;
     IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'ordertype') THEN
         CREATE TYPE ordertype AS ENUM ('market', 'limit', 'stop', 'stop_limit');

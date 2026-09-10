@@ -38,7 +38,9 @@ class OrderBase(BaseModel):
 class OrderCreate(OrderBase):
     """Create order schema"""
 
-    portfolio_id: int = Field(..., gt=0)
+    # 0 = 无组合口径（内部策略/镜像真单在未挂组合时按 0 落账，与通达信桥一致）；
+    # 前端下单仍应传真实组合 id。
+    portfolio_id: int = Field(..., ge=0)
     strategy_id: int | None = Field(None, gt=0)
     trading_mode: TradingMode | None = None
 
