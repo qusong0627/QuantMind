@@ -46,6 +46,7 @@ from backend.services.live_trading.services.trading_session import (
     is_trading_time,
     trade_date_str,
 )
+from backend.shared.stock_utils import StockCodeUtil
 
 logger = logging.getLogger(__name__)
 
@@ -449,7 +450,11 @@ async def _account_snapshot(force: bool = False) -> dict[str, Any]:
     positions = await client.get_positions()
     available: dict[str, float] = {}
     for item in positions:
-        symbol = str(item.get("symbol") or "").upper()
+        # 桥返回的 symbol 是前缀式（SH600371），而限额闸门/Signal 链路一律用
+        # 后缀式（600371.SH）查；不归一化会让卖出恒判「可用持仓 0」被跳过。
+        symbol = StockCodeUtil.to_suffix(
+            str(item.get("symbol") or item.get("stock_code") or "")
+        )
         if symbol:
             available[symbol] = float(item.get("can_use_volume") or 0)
     data = {
@@ -921,7 +926,14 @@ async def _submit_payload(
             )
             return _skip("insufficient_cash")
     else:
-        available = float((account.get("available_volume") or {}).get(symbol) or 0)
+        # 账户快照键为后缀式（QuantDB 口径），payload 的 symbol 可能带市场后缀差异，
+        # 查前统一归一化，避免口径不符导致的假「持仓不足」。
+        available = float(
+            (account.get("available_volume") or {}).get(
+                StockCodeUtil.to_suffix(symbol)
+            )
+            or 0
+        )
         if available < quantity:
             logger.warning(
                 "[Mirror] 可用持仓不足 symbol=%s 需要=%s 可用=%s",

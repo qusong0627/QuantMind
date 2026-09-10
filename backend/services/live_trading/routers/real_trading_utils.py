@@ -260,6 +260,17 @@ def _normalize_identity(
     return normalized_user, token_tenant_id
 
 
+def normalize_db_user_id(user_id: Any) -> str:
+    """数据库 user_id 口径统一为字符串（数字补零到 8 位，与 _normalize_identity 一致）。
+
+    内部调度链路里 user_id 常被转成 int（Redis 模拟账户键口径），直接拿去查
+    VARCHAR 列会报 ``operator does not exist: character varying = integer``，
+    且 "1" 与库里的 "00000001" 对不上——所有面向 DB 的查询都先过这里。
+    """
+    value = str(user_id or "").strip()
+    return value.zfill(8) if value.isdigit() else value
+
+
 async def _fetch_active_portfolio_snapshot(
     db: AsyncSession,
     *,
@@ -270,8 +281,8 @@ async def _fetch_active_portfolio_snapshot(
 ) -> dict | None:
     sid = str(strategy_id or "").strip()
 
-    # user_id 在数据库中是 VARCHAR 类型，直接使用字符串查询
-    normalized_user_id = str(user_id or "").strip()
+    # user_id 在数据库中是 VARCHAR 类型，直接用字符串查询（数字统一补零口径）
+    normalized_user_id = normalize_db_user_id(user_id)
     if not normalized_user_id:
         return None
 

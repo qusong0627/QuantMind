@@ -4,6 +4,10 @@
 每隔 SCAN_INTERVAL_SECONDS 秒扫描一次，将超过 ORDER_TIMEOUT_MINUTES 分钟
 仍停留在 SUBMITTED 状态的实盘订单标记为 EXPIRED，并推送用户通知。
 
+由外部通道托管的委托（通达信桥 ``通达信桥委托``、QMT 执行端镜像单 ``mirror:``）
+不适用这条本地启发式：它们的真实状态由桥/QMT 轮询器回报（桥 30s、QMT 2s），
+本地判死只会造成「柜台还挂着、本地已终态」的错位。这类单改为只提醒不改状态。
+
 环境变量：
   ORDER_TIMEOUT_MINUTES    超时分钟数，默认 30
   ORDER_SCAN_INTERVAL_SEC  扫描间隔秒数，默认 300 (5分钟)
@@ -32,6 +36,22 @@ _BRIDGE_ACK_SCAN_INTERVAL = int(os.getenv("BRIDGE_ACK_SCAN_INTERVAL_SEC", "5"))
 _AWAITING_BRIDGE_ACK_MARKER = "[AWAITING_BRIDGE_ACK]"
 _BRIDGE_ACK_TIMEOUT_MARKER = "[BRIDGE_ACK_TIMEOUT_PENDING_REVIEW]"
 
+# 外部通道托管的委托（备注前缀/特征）——真实状态以桥的回报为权威：
+#   通达信桥委托：桥每 30s 同步真实状态（已报/部成/已成/废单）
+#   mirror:%    ：QMT 执行端镜像真单，qmt_exec_poller 每 2s 回写柜台状态
+# 本地超时启发式不得越权覆盖这两类，否则镜像单在柜台仍挂着（甚至随时可能成交），
+# 本地却已 EXPIRED 进入终态，委托列表与柜台长期错位、成交回报也被终态守卫吞掉。
+_BROKER_MANAGED_REMARK_PATTERNS = ("%通达信桥委托%", "mirror:%")
+_STALE_PENDING_MARKER = "[STALE_PENDING_REVIEW]"
+
+
+def _not_broker_managed_clause():
+    """SQL 条件：排除由外部通道托管、状态以桥/轮询器为准的委托。"""
+    return [
+        or_(Order.remarks.is_(None), ~Order.remarks.like(pattern))
+        for pattern in _BROKER_MANAGED_REMARK_PATTERNS
+    ]
+
 
 async def _scan_once() -> int:
     """扫描一次，返回本次过期的订单数量。"""
@@ -46,12 +66,7 @@ async def _scan_once() -> int:
                     Order.status == OrderStatus.SUBMITTED,
                     Order.trading_mode == TradingMode.REAL,
                     Order.submitted_at <= cutoff,
-                    # 通达信桥委托由桥每 30s 同步真实状态（已报/部成/已成/废单），
-                    # 桥才是权威来源，本地超时启发式不得越权覆盖
-                    or_(
-                        Order.remarks.is_(None),
-                        ~Order.remarks.like("%通达信桥委托%"),
-                    ),
+                    *_not_broker_managed_clause(),
                 )
             )
             .limit(200)
@@ -177,6 +192,83 @@ async def _scan_bridge_ack_timeout_once() -> int:
     return flagged_count
 
 
+async def _flag_stale_broker_managed_once() -> int:
+    """对长时间未成交的托管委托（桥/QMT 镜像单）只提醒、不改状态。
+
+    这类委托的终态由桥/轮询器回写（撤单、废单、成交），本地判死会造成
+    「柜台还挂着、本地已 EXPIRED」的错位：委托列表看不到真实在途单，
+    后续成交回报撞上终态守卫。超时后仅标记一次并推送提醒，交人工决定
+    是否撤单（QMT 单可用控制面/委托页撤单；桥单由桥侧处理）。
+    """
+    cutoff = datetime.now() - timedelta(minutes=_TIMEOUT_MINUTES)
+    flagged_count = 0
+
+    async with get_session() as db:
+        stmt = (
+            select(Order)
+            .where(
+                and_(
+                    Order.status == OrderStatus.SUBMITTED,
+                    Order.trading_mode == TradingMode.REAL,
+                    Order.submitted_at <= cutoff,
+                    Order.remarks.is_not(None),
+                    or_(*[Order.remarks.like(p) for p in _BROKER_MANAGED_REMARK_PATTERNS]),
+                    ~Order.remarks.like(f"%{_STALE_PENDING_MARKER}%"),
+                )
+            )
+            .limit(200)
+        )
+        result = await db.execute(stmt)
+        orders = list(result.scalars().all())
+
+        for order in orders:
+            try:
+                order.remarks = (
+                    f"{(order.remarks or '').strip()} "
+                    f"{_STALE_PENDING_MARKER} [pending_over={_TIMEOUT_MINUTES}m "
+                    f"submitted_at={order.submitted_at}]"
+                ).strip()
+                flagged_count += 1
+                logger.warning(
+                    "broker-managed order %s still pending after %dm "
+                    "(submitted_at=%s symbol=%s remarks=%s)",
+                    order.order_id,
+                    _TIMEOUT_MINUTES,
+                    order.submitted_at,
+                    order.symbol,
+                    order.remarks,
+                )
+                try:
+                    await publish_notification_async(
+                        user_id=str(order.user_id),
+                        tenant_id=str(order.tenant_id or "default"),
+                        title="委托长时间未成交",
+                        content=(
+                            f"{order.symbol} 订单 {str(order.order_id)[:8]}... "
+                            f"已在柜台挂 {_TIMEOUT_MINUTES} 分钟未成交（状态以柜台为准，"
+                            "本次不判过期）。如需撤单请在委托页面操作。"
+                        ),
+                        type="trading",
+                        level="warning",
+                        action_url="/trading",
+                    )
+                except Exception as notify_exc:  # noqa: BLE001
+                    logger.warning(
+                        "notify failed for stale broker-managed order %s: %s",
+                        order.order_id,
+                        notify_exc,
+                    )
+            except Exception as exc:  # noqa: BLE001
+                logger.error(
+                    "failed to flag stale broker-managed order %s: %s", order.order_id, exc
+                )
+
+        if orders:
+            await db.commit()
+
+    return flagged_count
+
+
 async def run_order_timeout_scanner() -> None:
     """后台无限循环，定期扫描悬挂订单。"""
     logger.info(
@@ -199,6 +291,12 @@ async def run_order_timeout_scanner() -> None:
                 count = await _scan_once()
                 if count:
                     logger.info("Order timeout scanner: expired %d order(s)", count)
+                stale_count = await _flag_stale_broker_managed_once()
+                if stale_count:
+                    logger.info(
+                        "Order timeout scanner: flagged %d stale broker-managed order(s)",
+                        stale_count,
+                    )
                 next_long_scan = now + timedelta(seconds=max(1, _SCAN_INTERVAL))
         except Exception as exc:
             logger.error("Order timeout scanner error: %s", exc)

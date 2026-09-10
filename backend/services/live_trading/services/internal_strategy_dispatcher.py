@@ -26,6 +26,7 @@ from backend.services.trade_shared.simulation_manager import SimulationAccountMa
 from backend.services.live_trading.services.trading_engine import TradingEngine
 from backend.services.live_trading.routers.real_trading_utils import (
     _fetch_active_portfolio_snapshot,
+    normalize_db_user_id,
 )
 from backend.services.live_trading.services.real_mirror_service import (
     mirror_virtual_fill,
@@ -54,6 +55,21 @@ def _normalize_trade_action(raw: Any) -> str | None:
     return _TRADE_ACTION_ALIAS.get(value, value) or None
 
 
+def _normalize_strategy_id(raw: Any) -> int | None:
+    """strategy_id → 正整数或 None（0/负数/非数字一律 None）。
+
+    ``OrderCreate.strategy_id`` 是 ``gt=0``：内部策略/镜像真单没挂策略时
+    传的是 ``"0"``，``isdigit()`` 为真会直接构造出 ``strategy_id=0`` 触发
+    422/500（压测实测：镜像单全部被 OrderCreate 校验打回）。DB 列本身
+    nullable 且无外键，None 是「无策略」的正确表达。
+    """
+    value = str(raw or "").strip()
+    if not value.isdigit():
+        return None
+    parsed = int(value)
+    return parsed if parsed > 0 else None
+
+
 async def dispatch_internal_strategy_order(
     *,
     order_data: dict[str, Any],
@@ -67,6 +83,9 @@ async def dispatch_internal_strategy_order(
     # 非数字 JWT sub 统一映射为 0，保证命中同一模拟账户 Redis 键。
     _uid_raw = str(user_id or "").strip()
     uid = int(_uid_raw) if _uid_raw.isdigit() else 0
+    # DB 口径：orders/portfolios 的 user_id 列是 VARCHAR，库里存 8 位补零字符串
+    # （"1" 与 "00000001" 是同一个用户，但 SQL 里对不上）。面向 DB 的查询一律用它。
+    db_uid = normalize_db_user_id(_uid_raw)
     tenant = (tenant_id or "").strip() or "default"
     trading_mode_raw = str(order_data.get("trading_mode", "REAL")).upper()
     try:
@@ -210,7 +229,7 @@ async def dispatch_internal_strategy_order(
                 tenant_id=tenant,
                 user_id=uid,
                 portfolio_id=0,
-                strategy_id=int(strategy_id_raw) if strategy_id_raw.isdigit() else None,
+                strategy_id=_normalize_strategy_id(strategy_id_raw),
                 symbol=symbol,
                 side=sim_side,
                 order_type=SimOrderType.MARKET
@@ -298,13 +317,13 @@ async def dispatch_internal_strategy_order(
     try:
         strategy_id = order_data.get("strategy_id")
         strategy_id_str = str(strategy_id or "").strip()
-        strategy_id_val = int(strategy_id_str) if strategy_id_str.isdigit() else None
+        strategy_id_val = _normalize_strategy_id(strategy_id_str)
         portfolio_id = int(order_data.get("portfolio_id") or 0)
         if portfolio_id <= 0:
             snapshot = await _fetch_active_portfolio_snapshot(
                 db,
                 tenant_id=tenant,
-                user_id=str(uid),
+                user_id=db_uid,
                 strategy_id=str(strategy_id or ""),
             )
             if snapshot:
@@ -316,7 +335,7 @@ async def dispatch_internal_strategy_order(
                 .where(
                     and_(
                         Portfolio.tenant_id == tenant,
-                        Portfolio.user_id == uid,
+                        Portfolio.user_id == db_uid,
                         Portfolio.status == "active",
                     )
                 )
@@ -327,7 +346,14 @@ async def dispatch_internal_strategy_order(
             portfolio_id = int(result.scalar_one_or_none() or 0)
 
         if portfolio_id <= 0:
-            raise HTTPException(status_code=400, detail="no active portfolio available")
+            # 无组合兜底：本部署的实盘链路不依赖 portfolios 表（通达信桥的真单同样
+            # 以 portfolio_id=0 落账），镜像/内部策略真单按 0 归档，不阻断下单。
+            logger.info(
+                "[Order] REAL 下单无可用组合，按 portfolio_id=0 落账 user=%s symbol=%s",
+                db_uid,
+                symbol,
+            )
+            portfolio_id = 0
 
         try:
             order_type = OrderType(order_type_raw)
@@ -359,7 +385,7 @@ async def dispatch_internal_strategy_order(
                 .where(
                     and_(
                         Order.tenant_id == tenant,
-                        Order.user_id == str(uid),
+                        Order.user_id == db_uid,
                         Order.client_order_id == client_order_id,
                     )
                 )
@@ -380,7 +406,7 @@ async def dispatch_internal_strategy_order(
                 }
 
         order = await order_service.create_order(
-            user_id=uid,
+            user_id=db_uid,
             tenant_id=tenant,
             order_data=OrderCreate(
                 portfolio_id=portfolio_id,
@@ -407,7 +433,7 @@ async def dispatch_internal_strategy_order(
             .where(
                 and_(
                     Order.tenant_id == tenant,
-                    Order.user_id == str(uid),
+                    Order.user_id == db_uid,
                     Order.client_order_id == client_order_id,
                 )
             )
