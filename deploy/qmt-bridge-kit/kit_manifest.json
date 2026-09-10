@@ -1,0 +1,16 @@
+{
+  "kit": "qmt-bridge-kit",
+  "generated_at": "2026-09-10 13:04:43",
+  "big_convert_version": "0.3.31",
+  "server_files": [
+    "bigqmt_signal_trader",
+    "bigqmt_signal_trader_strategy.py",
+    "bigqmt_signal_trader_redis_rpc_runtime.py",
+    "BIGQMT_REDIS_DRYRUN.py",
+    "BIGQMT_ZMQ_DRYRUN.py",
+    "probe_qmt_env.py"
+  ],
+  "config_template_written": true,
+  "file_count": 58,
+  "total_bytes": 1161685
+}

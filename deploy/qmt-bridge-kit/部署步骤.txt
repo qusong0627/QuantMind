@@ -1,0 +1,55 @@
+﻿QuantMind · 大 QMT 桥 — Windows 侧开箱包
+生成时间：2026-09-10 13:04:43
+big-convert 版本：0.3.31
+
+【这个包是什么】
+  QMT 内置 Python 里常驻的 RPC 服务端。QMT 端**不需要 pip 安装任何东西**
+  （QMT 自带 Python 3.6，xtquant-big-convert 要求 >=3.8，装不上；且 QMT 的 pip
+  用旧 OpenSSL，连 HTTPS 镜像常报 SSL 错）。全部走文件拷贝，只需 QMT 自带的
+  redis 包。
+
+【第 1 步 · 放文件】
+  1) 先确认 QMT 已下载「Python 组件」：<QMT安装目录>\bin.x64\ 下应有
+     python.exe 与 Lib\（全新安装没有，需在 QMT 界面里下载，不要手动建）
+  2) 把本包所有文件拷到 QMT 的 python 目录，例如：
+     D:\国金证券QMT交易端\python\
+     必需：bigqmt_signal_trader\、bigqmt_signal_trader_strategy.py、
+           bigqmt_signal_trader_redis_rpc_runtime.py、BIGQMT_REDIS_DRYRUN.py
+
+【第 2 步 · 改配置】
+  编辑 bigqmt_signal_trader_local_config.py：
+    BIGQMT_ACCOUNT_ID   = QMT 资金账号（与 QuantMind 页面 account_id 一致）
+    BIGQMT_ACCOUNT_TYPE = STOCK 普通 / CREDIT 信用（★ 服务端只认这里；
+                          填错信用账户会返回「资产全 0」而不是报错）
+    BIGQMT_REDIS_CONFIG = Redis 地址 / 端口 / 密码
+    rpc_allow_order_methods = False → 先只验只读链路；
+                              确认风控后改 True 才会真正下单
+
+【第 3 步 · 在 QMT 里启动】
+  QMT 策略编辑器 → 加载运行 BIGQMT_REDIS_DRYRUN.py（只加载这一个文件，它会
+  自己 import 其余模块）。QMT 需处于实盘模式。
+  ★ 必须用「策略编辑器」方式运行：用 python.exe 当普通脚本跑、或用独立进程跑，
+    QMT 不会注入 passorder/get_trade_detail_data，日志会以 finished 结尾，
+    看起来跑起来了其实什么都没监听。
+  成功标志（QMT 输出面板）：
+    [bigqmt_shell] local rpc config loaded transport=redis keys=[...]
+    [bigqmt_shell] local account config loaded=True
+    [bigqmt_rpc] started channel=bigqmt:rpc:req:<账号>
+    [bigqmt_signal_trader] init ok
+  QMT 重启后需重新运行该策略。
+
+【第 4 步 · 放行防火墙】
+  Redis 端口只对 QuantMind 主机 IP 开放。
+
+【第 5 步 · 回 QuantMind 验证】
+  在 QuantMind 主机执行（只读，不下单）：
+    docker exec -w /app/backend -e PYTHONPATH=/app quantmind \
+        python scripts/qmt_bridge_selftest.py
+  5 层全 OK 即链路通；哪一层 FAIL，按提示修。
+
+【排错】
+  QMT 的 python 目录下 logs\bigqmt_*.log（保留 7 天）
+  详细手册：docs/大QMT真单镜像_部署与上线手册.md
+  Redis 被券商沙箱拦截 → 可换 BIGQMT_ZMQ_DRYRUN.py 入口（QMT 侧需 pyzmq；
+  注意 QuantMind 客户端侧目前只走 redis 传输，换 ZMQ 还需客户端侧接线，
+  属未验证路径，见手册 §三.4）
