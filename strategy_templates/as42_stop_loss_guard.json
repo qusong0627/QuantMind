@@ -1,0 +1,70 @@
+{
+  "id": "as42_stop_loss_guard",
+  "name": "A股个股止损",
+  "description": "平台内置止损类：个股回撤 8% 止损、盈利 15% 止盈，配合模型 TopK 选股。",
+  "category": "risk_control",
+  "difficulty": "beginner",
+  "params": [
+    {
+      "name": "topk",
+      "description": "持仓股票总数",
+      "default": 30,
+      "min": 5,
+      "max": 200
+    },
+    {
+      "name": "n_drop",
+      "description": "每期最大替换数",
+      "default": 10,
+      "min": 0,
+      "max": 200
+    },
+    {
+      "name": "rebalance_days",
+      "description": "调仓周期（交易日）",
+      "default": 3,
+      "min": 1,
+      "max": 60
+    },
+    {
+      "name": "stop_loss",
+      "description": "个股止损线（负数，-0.08=亏 8% 止损）",
+      "default": -0.08,
+      "min": -0.5,
+      "max": -0.01
+    },
+    {
+      "name": "take_profit",
+      "description": "个股止盈线（正数，0.15=赚 15% 止盈）",
+      "default": 0.15,
+      "min": 0.01,
+      "max": 1.0
+    }
+  ],
+  "execution_defaults": {
+    "max_buy_drop": -0.03,
+    "stop_loss": -0.08
+  },
+  "live_defaults": {
+    "rebalance_days": 3,
+    "schedule_type": "interval",
+    "trade_weekdays": [],
+    "enabled_sessions": [
+      "PM"
+    ],
+    "sell_time": "14:30",
+    "buy_time": "14:45",
+    "sell_first": true,
+    "order_type": "LIMIT",
+    "max_price_deviation": 0.02,
+    "max_orders_per_cycle": 20
+  },
+  "live_config_tips": [
+    "RedisStopLossStrategy 不支持 f_* 过滤（f_* 会被静默丢弃），本模板只用模型信号 + 止损。",
+    "止盈会削掉趋势段收益，建议与纯持有版本对比后再决定是否启用。"
+  ],
+  "markets": [
+    "a_share"
+  ],
+  "dir": "A股策略/09_事件与择时"
+}

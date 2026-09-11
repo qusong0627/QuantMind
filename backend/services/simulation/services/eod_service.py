@@ -36,7 +36,10 @@ from backend.services.simulation.services.projection_service import (
     SimulationProjectionService,
 )
 from backend.shared.database_manager_v2 import get_session
-from backend.shared.trade_account_cache import write_json_cache, write_trade_account_cache
+from backend.shared.trade_account_cache import (
+    write_json_cache,
+    write_trade_account_cache,
+)
 from backend.shared.trading_calendar import calendar_service
 
 logger = logging.getLogger(__name__)
@@ -75,7 +78,8 @@ def _past_trigger_window(now: datetime | None = None) -> bool:
 
 async def run_simulation_eod_worker() -> None:
     logger.info(
-        "Simulation EOD worker started: trigger_time=%s", _TRIGGER_TIME.strftime("%H:%M")
+        "Simulation EOD worker started: trigger_time=%s",
+        _TRIGGER_TIME.strftime("%H:%M"),
     )
     last_run_date: date | None = None
 
@@ -102,8 +106,24 @@ async def run_simulation_eod_worker() -> None:
         await asyncio.sleep(_INTERVAL_SEC)
 
 
+def _read_short_proceeds(tenant_id: str, user_id: str) -> float:
+    """Best-effort读取Redis侧融券冻结资金（P0-6）。
+
+    PG SimulationAccount无该列，EOD重算时缺它会导致融券户权益跳变。
+    Redis缺键/不可用返回0.0（现金户无影响）。
+    """
+    try:
+        from backend.shared.simulation_account_keys import account_key
+        from backend.shared.trade_account_cache import read_json_cache
+
+        data = read_json_cache(redis_client, account_key(tenant_id, user_id, "CN"))
+        return float((data or {}).get("short_proceeds") or 0.0)
+    except Exception:
+        return 0.0
+
+
 async def _execute_eod(trade_date: date) -> bool:
-    """Run the full EOD pipeline. Returns True on success."""
+    """Run the full EOD pipeline. Returns True only when all accounts succeed."""
     try:
         async with get_session(read_only=False) as session:
             accounts = list(
@@ -113,7 +133,9 @@ async def _execute_eod(trade_date: date) -> bool:
                             SimulationAccount.status == "active"
                         )
                     )
-                ).scalars().all()
+                )
+                .scalars()
+                .all()
             )
 
             if not accounts:
@@ -122,6 +144,9 @@ async def _execute_eod(trade_date: date) -> bool:
             projection_svc = SimulationProjectionService(session)
             snapshot_svc = SimulationDailySnapshotService(session)
 
+            # P0-2：逐户独立提交。单户异常只回滚该户，不污染后续户事务；
+            # P0-6：total计入Redis侧short_proceeds，与盘中equity口径对齐。
+            failed_accounts = 0
             for account in accounts:
                 try:
                     projection = await projection_svc.load_projection(
@@ -133,6 +158,7 @@ async def _execute_eod(trade_date: date) -> bool:
                     )
                     projection_account = projection.account
                     if projection_account is None:
+                        await session.rollback()
                         continue
 
                     positions = projection.positions or {}
@@ -151,7 +177,10 @@ async def _execute_eod(trade_date: date) -> bool:
 
                     cash = float(projection_account.cash or 0.0)
                     liabilities = float(projection_account.liabilities or 0.0)
-                    total_asset = round(cash + long_mv - short_mv, 4)
+                    short_proceeds = _read_short_proceeds(
+                        account.tenant_id, account.user_id
+                    )
+                    total_asset = round(cash + short_proceeds + long_mv - short_mv, 4)
 
                     projection_account.long_market_value = round(long_mv, 4)
                     projection_account.short_market_value = round(short_mv, 4)
@@ -163,12 +192,10 @@ async def _execute_eod(trade_date: date) -> bool:
                         )
                     projection_account.last_projected_at = datetime.utcnow()
 
-                    account_payload = (
-                        SimulationProjectionService.build_cache_payload(
-                            account=projection_account,
-                            positions=positions,
-                            source="eod_remarking",
-                        )
+                    account_payload = SimulationProjectionService.build_cache_payload(
+                        account=projection_account,
+                        positions=positions,
+                        source="eod_remarking",
                     )
 
                     await snapshot_svc.replace_daily_snapshot(
@@ -186,15 +213,20 @@ async def _execute_eod(trade_date: date) -> bool:
                         tenant_id=account.tenant_id,
                         user_id=account.user_id,
                     )
+                    # 逐户提交：该户成功即落盘，不等待全部账户
+                    await session.commit()
                 except Exception as exc:
+                    failed_accounts += 1
+                    try:
+                        await session.rollback()
+                    except Exception:
+                        pass
                     logger.error(
                         "EOD remark failed for account=%s: %s",
                         account.account_id,
                         exc,
                         exc_info=True,
                     )
-
-            await session.commit()
 
         pending_count = await _check_pending_orders()
         if pending_count > 0:
@@ -210,9 +242,7 @@ async def _execute_eod(trade_date: date) -> bool:
                     await check_session.execute(
                         select(func.count())
                         .select_from(SimulationFundSnapshot)
-                        .where(
-                            SimulationFundSnapshot.snapshot_date == trade_date
-                        )
+                        .where(SimulationFundSnapshot.snapshot_date == trade_date)
                     )
                 ).scalar_one_or_none()
         except Exception:
@@ -226,13 +256,18 @@ async def _execute_eod(trade_date: date) -> bool:
             )
         else:
             try:
+                # P0-7：EOD资金快照按trade_date记，与account_daily对齐
                 await SimulationFundSnapshotService.capture_all(
-                    redis_client,
-                    snapshot_date=trade_date,
+                    redis_client, snapshot_date=trade_date
                 )
             except Exception as exc:
                 logger.warning("EOD fund snapshot capture failed: %s", exc)
 
+        if failed_accounts:
+            logger.error(
+                "Simulation EOD finished with %d failed account(s)", failed_accounts
+            )
+            return False
         return True
 
     except Exception as exc:
@@ -244,11 +279,40 @@ async def _check_pending_orders() -> int:
     try:
         async with get_session(read_only=True) as session:
             result = await session.execute(
-                select(func.count()).select_from(SimulationOrderV2).where(
+                select(func.count())
+                .select_from(SimulationOrderV2)
+                .where(
                     SimulationOrderV2.status == OrderStatus.PENDING.value,
                 )
             )
             return int(result.scalar_one_or_none() or 0)
+    except Exception:
+        return 0
+
+
+def _redis_live_position_count(sim_key: str) -> int:
+    """读取 Redis 现有账户的持仓数（防空投影覆盖的判断依据）。"""
+    try:
+        if not redis_client.client:
+            return 0
+        from backend.shared.trade_account_cache import read_json_cache
+
+        current = read_json_cache(redis_client, sim_key) or {}
+        positions = current.get("positions") or {}
+        if isinstance(positions, str):
+            import json as _json
+
+            try:
+                positions = _json.loads(positions)
+            except Exception:
+                return 0
+        if not isinstance(positions, dict):
+            return 0
+        return sum(
+            1
+            for pos in positions.values()
+            if isinstance(pos, dict) and float(pos.get("volume") or 0) > 0
+        )
     except Exception:
         return 0
 
@@ -262,12 +326,21 @@ def _rebuild_redis(
 ) -> None:
     if not redis_client.client:
         return
+    sim_key = f"simulation:account:{tenant_id}:{str(user_id).strip()}"
+    # 空投影保护：ledger 为空（live 台账未建/迁移未跑）时 projection.positions 为空，
+    # 此时覆盖会把 Redis 里的实盘持仓清零（"回到初始状态"）。跳过并告警。
+    if not positions and _redis_live_position_count(sim_key) > 0:
+        logger.error(
+            "EOD rebuild skipped for %s: ledger projection empty but Redis holds live positions "
+            "(live fills not recorded to ledger?)",
+            sim_key,
+        )
+        return
     payload = SimulationProjectionService.build_cache_payload(
         account=account,
         positions=positions,
         source="eod_remarking",
     )
-    sim_key = f"simulation:account:{tenant_id}:{str(user_id).strip()}"
     write_json_cache(redis_client, sim_key, payload)
     write_trade_account_cache(redis_client, tenant_id, user_id, payload)
 

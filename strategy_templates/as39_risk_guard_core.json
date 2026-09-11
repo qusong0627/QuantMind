@@ -1,0 +1,103 @@
+{
+  "id": "as39_risk_guard_core",
+  "name": "A股大盘风控核心",
+  "description": "平台内置风控类：Beta<1.3、波动率<4%、行业上限 30%，大盘下行时自动降仓。",
+  "category": "risk_control",
+  "difficulty": "intermediate",
+  "params": [
+    {
+      "name": "topk",
+      "description": "持仓股票总数",
+      "default": 50,
+      "min": 5,
+      "max": 200
+    },
+    {
+      "name": "n_drop",
+      "description": "每期最大替换数",
+      "default": 10,
+      "min": 0,
+      "max": 200
+    },
+    {
+      "name": "rebalance_days",
+      "description": "调仓周期（交易日）",
+      "default": 5,
+      "min": 1,
+      "max": 60
+    },
+    {
+      "name": "industry_cap_ratio",
+      "description": "单一行业持仓上限占比",
+      "default": 0.3,
+      "min": 0.05,
+      "max": 0.6
+    },
+    {
+      "name": "market_state_window",
+      "description": "大盘状态判定窗口（交易日）",
+      "default": 20,
+      "min": 5,
+      "max": 120
+    },
+    {
+      "name": "f_beta_20_max",
+      "description": "20 日 Beta 上限",
+      "default": 1.3,
+      "min": -3,
+      "max": 3
+    },
+    {
+      "name": "f_vol_std_20_max",
+      "description": "20 日收益波动率上限（%）",
+      "default": 4.0,
+      "min": 0.1,
+      "max": 20
+    },
+    {
+      "name": "f_total_mv_min",
+      "description": "总市值下限（元）",
+      "default": 3000000000.0,
+      "min": 0
+    },
+    {
+      "name": "f_amount_ma_5_min",
+      "description": "5 日均成交额下限（万元）",
+      "default": 5000,
+      "min": 0
+    },
+    {
+      "name": "f_pe_ttm_max",
+      "description": "PE(TTM) 上限",
+      "default": 80,
+      "min": 0,
+      "max": 300
+    }
+  ],
+  "execution_defaults": {
+    "max_buy_drop": -0.03,
+    "stop_loss": -0.08
+  },
+  "live_defaults": {
+    "rebalance_days": 5,
+    "schedule_type": "interval",
+    "trade_weekdays": [],
+    "enabled_sessions": [
+      "PM"
+    ],
+    "sell_time": "14:30",
+    "buy_time": "14:45",
+    "sell_first": true,
+    "order_type": "LIMIT",
+    "max_price_deviation": 0.02,
+    "max_orders_per_cycle": 20
+  },
+  "live_config_tips": [
+    "大盘状态判定需要开启动态仓位，否则只生效行业上限与个股过滤。",
+    "波动率上限用百分数口径（4% 日波动），不是 0.04。"
+  ],
+  "markets": [
+    "a_share"
+  ],
+  "dir": "A股策略/08_风险控制与仓位"
+}

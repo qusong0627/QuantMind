@@ -1,5 +1,6 @@
 import json
 import logging
+from contextlib import contextmanager
 
 import pandas as pd
 from qlib.backtest.decision import Order, OrderDir
@@ -338,19 +339,30 @@ class DynamicRiskMixin:
         self._is_account_stopped = False
         self._initial_account_value = None
 
+    def _market_state_risk_degree(self, trade_date):
+        """按大盘状态序列算仓位；未配置动态仓位或该日无状态时返回 None。
+
+        抽出来是为了让 TopkDropout 系策略也能用：那条链路不会调用
+        ``get_risk_degree``，只能通过 ``_dynamic_risk_degree`` 钩子接入。
+        """
+        series = getattr(self, "market_state_series", None)
+        if trade_date is None or not isinstance(series, dict):
+            return None
+        value = series.get(trade_date.strftime("%Y-%m-%d"))
+        if isinstance(value, (int, float)):
+            return self._clamp(float(value))
+        position_by_state = getattr(self, "position_by_state", None)
+        if isinstance(value, str) and isinstance(position_by_state, dict):
+            mapped = position_by_state.get(value, position_by_state.get("neutral", 1.0))
+            total = getattr(self, "strategy_total_position", None)
+            base = float(total) if total is not None else 1.0
+            return self._clamp(min(mapped * base, getattr(self, "max_leverage", 1.0)))
+        return None
+
     def get_risk_degree(self, *args, **kwargs):
-        trade_date = self._get_trade_date()
-        if trade_date is not None:
-            date_key = trade_date.strftime("%Y-%m-%d")
-            if isinstance(self.market_state_series, dict):
-                value = self.market_state_series.get(date_key)
-                if isinstance(value, (int, float)):
-                    return self._clamp(float(value))
-                if isinstance(value, str) and isinstance(self.position_by_state, dict):
-                    mapped = self.position_by_state.get(value, self.position_by_state.get("neutral", 1.0))
-                    base = float(self.strategy_total_position) if self.strategy_total_position is not None else 1.0
-                    # Enforce max leverage limit
-                    return self._clamp(min(mapped * base, self.max_leverage))
+        market_degree = self._market_state_risk_degree(self._get_trade_date())
+        if market_degree is not None:
+            return market_degree
 
         if self.default_risk_degree is not None:
             try:
@@ -561,20 +573,207 @@ class FundamentalFilterMixin:
         if not self.use_fundamental_filter or score is None or score.empty:
             return score
 
-        instruments = score.index.get_level_values("instrument").tolist()
+        index = score.index
+        # SimpleSignal 返回的是「只按 instrument 索引」的 Series，
+        # qlib 原生 DataFrameSignal 返回 (datetime, instrument) 两级索引，两种都要支持。
+        if isinstance(index, pd.MultiIndex) and "instrument" in (index.names or []):
+            instrument_values = index.get_level_values("instrument")
+        else:
+            instrument_values = pd.Index(index)
+
+        instruments = [str(v) for v in instrument_values.tolist()]
         filtered_list = fundamental_aligner.filter_instruments(
             trade_date, instruments, constraints=self.fundamental_constraints
         )
         if not filtered_list:
-            return pd.Series(dtype=float)
+            # 过滤后为空：返回同结构的空对象，交给上层按「当天不调仓」处理。
+            return score.iloc[:0]
 
-        if isinstance(score, pd.DataFrame):
-            return score.loc[pd.IndexSlice[:, filtered_list], :]
-        return score.loc[pd.IndexSlice[:, filtered_list]]
+        # filter_instruments 内部按前缀式比较，但返回的是传入格式的子集
+        # （qlib 信号里是小写 sh600000），所以直接用原值做集合判断，不要二次规范化。
+        filtered_set = set(filtered_list)
+        keep = [instrument in filtered_set for instrument in instruments]
+        return score[keep]
+
+
+class _FundamentalFilteredSignal:
+    """把 ``signal.get_signal()`` 的结果按 ``f_*`` 约束过滤后再交给策略选股。
+
+    为什么需要它：qlib 的 ``TopkDropoutStrategy.generate_trade_decision`` 自己直接读
+    ``self.signal.get_signal(...)`` 做 Top-K 选股，**从不调用**
+    ``generate_target_weight_position``。因此只在
+    ``generate_target_weight_position`` 里做基本面过滤（历史写法）对 Topk-Dropout 系
+    策略完全无效——``f_*`` 会被静默忽略。这里把 signal 临时包一层，让过滤真正生效。
+    """
+
+    def __init__(self, inner, apply_filter, trade_date):
+        self._inner = inner
+        self._apply_filter = apply_filter
+        self._trade_date = trade_date
+
+    def get_signal(self, *args, **kwargs):
+        score = self._inner.get_signal(*args, **kwargs)
+        return self._apply_filter(score, self._trade_date)
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
+class _ScoreAdjustedSignal:
+    """把 ``signal.get_signal()`` 的结果交给策略自定义钩子调整后再交给选股逻辑。
+
+    为什么需要它：qlib 的 ``TopkDropoutStrategy.generate_trade_decision`` 自己读
+    ``self.signal.get_signal(...)`` 做 Top-K 选股，**从不调用**
+    ``generate_target_weight_position``。自定义选股逻辑（动量融合、趋势闸门、
+    涨停规避…）如果只覆写后者，会被静默忽略——模板看着像在跑，其实和内置类
+    逐字节同结果。这里把 signal 临时包一层，让钩子真正生效。
+
+    ``ref_date`` 固定传上一交易日（T-1）：回测是 T-1 收盘出信号、T 日开盘成交，
+    钩子只能看到 T 日开盘前已知的数据，避免前视偏差。
+    """
+
+    def __init__(self, inner, adjust, ref_date):
+        self._inner = inner
+        self._adjust = adjust
+        self._ref_date = ref_date
+
+    def get_signal(self, *args, **kwargs):
+        score = self._inner.get_signal(*args, **kwargs)
+        if score is None:
+            return score
+        try:
+            adjusted = self._adjust(score, self._ref_date)
+        except Exception:  # noqa: BLE001 - 钩子异常不能让整轮回测挂掉
+            logger.exception("自定义选股钩子执行失败，本次沿用原始信号")
+            return score
+        return score if adjusted is None else adjusted
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
+class PriceFrameMixin:
+    """日频行情矩阵缓存：首次调用把回测区间一次性取满，之后只做 pandas 切片。
+
+    为什么需要：容器内 ``D.features`` 对每个标的都有约 2ms 的固定开销，
+    全市场（约 5500 只）取一次要 10~17 秒，而且**不跨调用复用**。自定义类如果
+    每个调仓步各调一次（动量融合、趋势闸门、涨停统计、逆波动加权），
+    一年的回测会被从 1 分钟拖到 1 小时——实测 as11 单次回测跑了 60 分钟没结束。
+    这里把「回测首日往前 buffer + 回测末日」一次性取全并缓存，后续每个调仓步
+    只做毫秒级切片；回测中途新出现的标的按增量补取。
+
+    缓存挂在实例上（``_qm_price_cache``），按字段列表分桶，跨调仓步共享。
+    """
+
+    # 回测首日之前还要多取一段，供 60 日动量、250 日回撤这类回看窗口使用。
+    _PRICE_CACHE_BUFFER_DAYS = 400
+
+    def _backtest_window(self):
+        """回测区间 (首日, 末日)；日历不可用时返回 None（退化为按需取数）。"""
+        calendar = getattr(self, "trade_calendar", None)
+        if calendar is None:
+            return None
+        try:
+            first = pd.Timestamp(calendar.get_step_time(0)[0])
+            last = pd.Timestamp(calendar.get_step_time(calendar.get_trade_len() - 1)[0])
+        except Exception:  # noqa: BLE001 - 日历形态随 qlib 版本变化，取不到就按需取
+            return None
+        return first, last
+
+    def _price_frame(self, instruments, fields, start, end):
+        """取 index=(日期, 标的)、columns=字段 的行情切片（只含本次请求的标的）。"""
+        symbols = [str(symbol) for symbol in instruments]
+        if not symbols:
+            return None
+        fields = list(fields)
+        start, end = pd.Timestamp(start), pd.Timestamp(end)
+        cache = getattr(self, "_qm_price_cache", None)
+        if cache is None:
+            cache = {}
+            self._qm_price_cache = cache
+        key = tuple(fields)
+        entry = cache.get(key)
+        window = self._backtest_window()
+        if window is None:
+            fetch_start, fetch_end = start, end
+        else:
+            fetch_start = min(
+                start, window[0] - pd.Timedelta(days=self._PRICE_CACHE_BUFFER_DAYS)
+            )
+            fetch_end = max(end, window[1])
+        if entry is None or fetch_start < entry["start"] or fetch_end > entry["end"]:
+            frame = self._fetch_price_frame(symbols, fields, fetch_start, fetch_end)
+            if frame is None or frame.empty:
+                return None
+            frame = self._normalize_price_frame(frame)
+            entry = {
+                "frame": frame,
+                "symbols": set(symbols),
+                "start": fetch_start,
+                "end": fetch_end,
+            }
+            cache[key] = entry
+        missing = [symbol for symbol in symbols if symbol not in entry["symbols"]]
+        if missing:
+            extra = self._fetch_price_frame(missing, fields, entry["start"], entry["end"])
+            if extra is not None and not extra.empty:
+                extra = self._normalize_price_frame(extra)
+                entry["frame"] = entry["frame"].combine_first(extra)
+                entry["symbols"].update(missing)
+        sliced = entry["frame"].loc[start:end]
+        if sliced.empty:
+            return None
+        if set(symbols) != entry["symbols"]:
+            # 缓存里可能还留着其它调仓步带进来的标的，只返回本次请求的那些
+            # （否则 _close_matrix 的第 0 列可能不是调用方要的那只票）
+            sliced = sliced[sliced.index.get_level_values("instrument").isin(symbols)]
+            if sliced.empty:
+                return None
+        return sliced
+
+    def _close_matrix(self, instruments, start, end):
+        """收盘价矩阵（index=日期、columns=标的），走 ``_price_frame`` 的缓存。"""
+        frame = self._price_frame(instruments, ["$close"], start, end)
+        if frame is None:
+            return None
+        prices = frame["$close"].unstack(level="instrument")
+        return prices.sort_index()
+
+    @staticmethod
+    def _normalize_price_frame(frame):
+        """把 D.features 的多级索引统一成 (datetime, instrument) 顺序。
+
+        本平台的 qlib 返回的是 instrument 在前的索引，直接 ``.loc[start:end]``
+        会拿 Timestamp 和字符串比大小（TypeError: '<' not supported between
+        instances of 'str' and 'Timestamp'）。统一后按日期切片的语义才成立。
+        """
+        if not isinstance(frame.index, pd.MultiIndex):
+            return frame
+        names = list(frame.index.names)
+        if not names or names[0] == "datetime":
+            return frame
+        return frame.swaplevel("datetime", "instrument").sort_index()
+
+    @staticmethod
+    def _fetch_price_frame(symbols, fields, start, end):
+        """真正的取数口子；失败只记日志并返回 None，由调用方按「不调整」处理。"""
+        try:
+            from backend.services.engine.qlib_app.utils.qlib_utils import D
+
+            return D.features(list(symbols), list(fields), start, end, freq="day")
+        except Exception:  # noqa: BLE001 - 单次取数失败不应让整轮回测挂掉
+            logger.exception(
+                "行情切片拉取失败（%d 只标的，%s → %s）", len(symbols), start, end
+            )
+            return None
 
 
 class RedisRecordingStrategy(
-    DynamicRiskMixin, FundamentalFilterMixin, TopkDropoutStrategy, RedisLoggerMixin
+    PriceFrameMixin,
+    DynamicRiskMixin,
+    FundamentalFilterMixin,
+    TopkDropoutStrategy,
+    RedisLoggerMixin,
 ):
     """
     带有 Redis 记录功能的 TopkDropout 策略
@@ -602,11 +801,125 @@ class RedisRecordingStrategy(
         # 3. 调用 super().__init__
         super().__init__(*args, **clean_kwargs)
 
+        # 4. 让 risk_degree 真正生效。TopkDropoutStrategy.generate_trade_decision 直接读
+        #    self.risk_degree 下单（`value = cash * self.risk_degree / len(buy)`），
+        #    而 DynamicRiskMixin.get_risk_degree() 在这条链路上根本不会被调用；
+        #    risk_degree 又被 init_dynamic_risk 提前 pop 成了 default_risk_degree，
+        #    不显式回写就会被 BaseSignalStrategy 的默认值 0.95 覆盖
+        #    （实测 as40「固定 60% 仓位」实际一直按 95% 下单）。
+        # getattr 兜底：单测里 init_dynamic_risk 会被 monkeypatch 掉，此时不应 AttributeError
+        default_risk_degree = getattr(self, "default_risk_degree", None)
+        if default_risk_degree is not None:
+            try:
+                self.risk_degree = self._clamp(
+                    min(float(default_risk_degree), getattr(self, "max_leverage", 1.0))
+                )
+            except (TypeError, ValueError):
+                logger.warning("risk_degree 解析失败，沿用 qlib 默认仓位 0.95")
     def generate_target_weight_position(self, score, current=None, trade_exchange=None, *args, **kwargs):
+        # 仅对 WeightStrategyBase 系策略有效；TopkDropoutStrategy 不会走到这里，
+        # 它的 f_* 过滤由 _fundamental_filtered_signal() 在 generate_trade_decision 里完成。
         t_start = kwargs.get("trade_start_time") or kwargs.get("t_start")
         if t_start:
             score = self.apply_fundamental_filter(score, t_start)
         return super().generate_target_weight_position(score, current, trade_exchange, *args, **kwargs)
+
+    @contextmanager
+    def _fundamental_filtered_signal(self, trade_step):
+        """临时把 self.signal 换成带 f_* 过滤的代理（无约束时不生效）。
+
+        过滤必须用「上一交易日」的 features_daily 快照，否则构成前视偏差：
+        - 回测在 T 日开盘价成交（`deal_price=open`），模型信号也滞后一日
+          （`signal_lag_days=1`），所以 T 日开盘时只能看到 T-1 日收盘为止的数据；
+        - 而 features_daily 的 `dt=T` 分区是 T 日收盘后才生成的（`pct_change` 就是
+          T 日自身的涨跌幅、`close` 就是 T 日收盘价），拿它过滤等于用当天收盘信息
+          在当天开盘下单。实测该偏差能把 as32 这种含 `f_pct_change_min` 的模板
+          推到年化 400%+、夏普 13，明显失真。
+        qlib 的 `get_step_time(step, shift=1)` 返回上一个 bar（shift>0 = 更早），
+        在 step=0 时取到回测区间开始前的交易日；取不到或解析异常时跳过过滤
+        （宁可少一层约束，也不能引入未来信息）。
+        """
+        if not self.use_fundamental_filter:
+            yield
+            return
+        try:
+            current_time, _ = self.trade_calendar.get_step_time(trade_step)
+            prev_time, _ = self.trade_calendar.get_step_time(trade_step, shift=1)
+        except Exception:  # noqa: BLE001 - 日历不可用时退化为不过滤
+            logger.warning("fundamental filter: 无法取到调仓日，跳过 f_* 过滤")
+            yield
+            return
+        if pd.Timestamp(prev_time) >= pd.Timestamp(current_time):
+            logger.warning(
+                "fundamental filter: 上一交易日解析异常（%s >= %s），跳过 f_* 过滤",
+                prev_time,
+                current_time,
+            )
+            yield
+            return
+        original = self.signal
+        self.signal = _FundamentalFilteredSignal(
+            original, self.apply_fundamental_filter, prev_time
+        )
+        try:
+            yield
+        finally:
+            self.signal = original
+
+    # ---- 自定义策略钩子：默认不改变任何行为，供模板 .py 里的子类覆写 ----
+    def _adjust_signal(self, score, ref_date):
+        """子类钩子：TopK 选股前调整打分（动量融合 / 趋势闸门 / 涨停规避…）。
+
+        ``ref_date`` 是上一交易日（T-1），只能读该日收盘为止的数据。
+        返回 None 表示不调整；默认原样返回。
+        """
+        return score
+
+    def _dynamic_risk_degree(self, base, ref_date):
+        """子类钩子：按市场状态调整仓位系数（波动率目标 / 回撤阶梯…）。
+
+        ``ref_date`` 同上（T-1）。返回 None 表示不调整。
+        默认实现消费平台注入的 ``market_state_series``（UI 开启「动态仓位」时才有）：
+        这条链路走的是 TopkDropout，不会调用 ``get_risk_degree``，只能在这里接。
+        """
+        market_degree = self._market_state_risk_degree(ref_date)
+        return base if market_degree is None else market_degree
+
+    def _prev_bar_time(self, trade_step):
+        """取上一交易日的调仓时点；取不到返回 None（调用方按「不调整」处理）。"""
+        try:
+            prev_time, _ = self.trade_calendar.get_step_time(trade_step, shift=1)
+            return pd.Timestamp(prev_time)
+        except Exception:  # noqa: BLE001 - 日历不可用时退化为不调整
+            return None
+
+    @contextmanager
+    def _custom_signal_hook(self, trade_step):
+        """把 self.signal 临时包一层，让 ``_adjust_signal`` 在 qlib 读信号时生效。"""
+        ref_date = self._prev_bar_time(trade_step)
+        if ref_date is None:
+            yield
+            return
+        original = self.signal
+        self.signal = _ScoreAdjustedSignal(original, self._adjust_signal, ref_date)
+        try:
+            yield
+        finally:
+            self.signal = original
+
+    def _adjusted_risk_degree(self, trade_step, base):
+        """按 ``_dynamic_risk_degree`` 计算本次调仓要用的仓位系数。"""
+        ref_date = self._prev_bar_time(trade_step)
+        if ref_date is None:
+            return base
+        try:
+            adjusted = self._dynamic_risk_degree(base, ref_date)
+        except Exception:  # noqa: BLE001 - 钩子异常不能让整轮回测挂掉
+            logger.exception("自定义仓位钩子执行失败，沿用基础仓位")
+            return base
+        if adjusted is None:
+            return base
+        return max(0.0, min(1.0, float(adjusted)))
 
     def generate_trade_decision(self, execute_result=None):
         # 0. 账户止损检查
@@ -629,8 +942,16 @@ class RedisRecordingStrategy(
             return TradeDecisionWO([], self)
 
         # Generate new orders (交易记录已移至 post_exe_step，此处不再重复记录)
+        base_risk_degree = getattr(self, "risk_degree", 0.95)
         try:
-            trade_decision = super().generate_trade_decision(execute_result)
+            with self._fundamental_filtered_signal(trade_step):
+                with self._custom_signal_hook(trade_step):
+                    # TopkDropoutStrategy 直接读 self.risk_degree 下单，动态仓位必须在
+                    # 调用前改写它（get_risk_degree 在 Topk-Dropout 链路里不会被调用）。
+                    self.risk_degree = self._adjusted_risk_degree(
+                        trade_step, base_risk_degree
+                    )
+                    trade_decision = super().generate_trade_decision(execute_result)
         except TypeError as e:
             if "unsupported operand type(s) for /: 'float' and 'NoneType'" in str(e):
                 from qlib.backtest.decision import TradeDecisionWO
@@ -641,6 +962,8 @@ class RedisRecordingStrategy(
                 ).warning("skip_trade_no_price", "Skip trade due to missing price data (suspended stock)")
                 return TradeDecisionWO([], self)
             raise
+        finally:
+            self.risk_degree = base_risk_degree
         return trade_decision
 
     def reset(self, *args, **kwargs):
@@ -742,7 +1065,9 @@ class SimpleWeightStrategy(WeightStrategyBase):
         return weights.to_dict()
 
 
-class RedisWeightStrategy(DynamicRiskMixin, SimpleWeightStrategy, RedisLoggerMixin):
+class RedisWeightStrategy(
+    PriceFrameMixin, DynamicRiskMixin, SimpleWeightStrategy, RedisLoggerMixin
+):
     """
     带有 Redis 记录功能的 SimpleWeightStrategy，并在选股层过滤涨停/停牌股。
 

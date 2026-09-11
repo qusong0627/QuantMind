@@ -218,6 +218,33 @@ class SandboxPlatformManager:
         )
         return True
 
+    def stop_user_strategies(self, tenant_id: str, user_id: str) -> int:
+        """按租户+用户维度停止该用户全部沙箱策略。
+
+        重置模拟盘时 strategy_id 可能已丢失（active 键被删/历史写法不一致），
+        此时按精确三元组 stop 会漏杀，导致“重置后仍显示运行中”。按前缀全清兜底。
+        返回实际停止的数量。
+        """
+        self._purge_dead_workers()
+        prefix = f"{tenant_id}_{user_id}_"
+        keys = [k for k in list(self._active_runs.keys()) if k.startswith(prefix)]
+        stopped = 0
+        for key in keys:
+            try:
+                _, _, strategy_id = key.split("_", 2)
+            except ValueError:
+                continue
+            try:
+                if self.stop_strategy(tenant_id, user_id, strategy_id):
+                    stopped += 1
+                else:
+                    # stop_strategy 因共享 PID 拒绝时，仅摘除映射，避免残留运行态
+                    self._active_runs.pop(key, None)
+                    stopped += 1
+            except Exception:
+                continue
+        return stopped
+
     def is_strategy_running(self, tenant_id: str, user_id: str, strategy_id: str) -> bool:
         self._purge_dead_workers()
         key = self._strategy_key(tenant_id, user_id, strategy_id)

@@ -1,0 +1,96 @@
+{
+  "id": "as24_reversal_guard",
+  "name": "A股反转+行业分散护栏",
+  "description": "反转选股叠加行业持仓上限与大盘状态降仓，避免在单一行业深跌里越买越多。",
+  "category": "risk_control",
+  "difficulty": "advanced",
+  "params": [
+    {
+      "name": "topk",
+      "description": "持仓股票总数",
+      "default": 30,
+      "min": 5,
+      "max": 200
+    },
+    {
+      "name": "n_drop",
+      "description": "每期最大替换数",
+      "default": 10,
+      "min": 0,
+      "max": 200
+    },
+    {
+      "name": "rebalance_days",
+      "description": "调仓周期（交易日）",
+      "default": 3,
+      "min": 1,
+      "max": 60
+    },
+    {
+      "name": "industry_cap_ratio",
+      "description": "单一行业持仓上限占比",
+      "default": 0.25,
+      "min": 0.05,
+      "max": 0.6
+    },
+    {
+      "name": "market_state_window",
+      "description": "大盘状态判定窗口（交易日）",
+      "default": 20,
+      "min": 5,
+      "max": 120
+    },
+    {
+      "name": "f_rsi_14_max",
+      "description": "RSI(14) 上限",
+      "default": 40,
+      "min": 0,
+      "max": 100
+    },
+    {
+      "name": "f_ma_gap_20_max",
+      "description": "相对 20 日均线偏离上限（%）",
+      "default": 0.0,
+      "min": -50,
+      "max": 50
+    },
+    {
+      "name": "f_total_mv_min",
+      "description": "总市值下限（元）",
+      "default": 3000000000.0,
+      "min": 0
+    },
+    {
+      "name": "f_amount_ma_5_min",
+      "description": "5 日均成交额下限（万元）",
+      "default": 5000,
+      "min": 0
+    }
+  ],
+  "execution_defaults": {
+    "max_buy_drop": -0.03,
+    "stop_loss": -0.08
+  },
+  "live_defaults": {
+    "rebalance_days": 3,
+    "schedule_type": "interval",
+    "trade_weekdays": [],
+    "enabled_sessions": [
+      "PM"
+    ],
+    "sell_time": "14:30",
+    "buy_time": "14:45",
+    "sell_first": true,
+    "order_type": "LIMIT",
+    "max_price_deviation": 0.02,
+    "max_orders_per_cycle": 20
+  },
+  "live_config_tips": [
+    "行业上限 25% 保证反转信号不会集中在同一板块。",
+    "大盘状态由平台注入（需在回测配置中开启动态仓位）。"
+  ],
+  "markets": [
+    "a_share"
+  ],
+  "dir": "A股策略/05_反转与均值回归"
+}

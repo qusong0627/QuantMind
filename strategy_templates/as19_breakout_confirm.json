@@ -1,0 +1,90 @@
+{
+  "id": "as19_breakout_confirm",
+  "name": "A股突破确认",
+  "description": "要求股价站上 20 日线 3% 以上、5 日线向上、量能放大，用突破形态确认模型信号。",
+  "category": "advanced",
+  "difficulty": "intermediate",
+  "params": [
+    {
+      "name": "topk",
+      "description": "持仓股票总数",
+      "default": 30,
+      "min": 5,
+      "max": 200
+    },
+    {
+      "name": "n_drop",
+      "description": "每期最大替换数",
+      "default": 10,
+      "min": 0,
+      "max": 200
+    },
+    {
+      "name": "rebalance_days",
+      "description": "调仓周期（交易日）",
+      "default": 3,
+      "min": 1,
+      "max": 60
+    },
+    {
+      "name": "f_ma_gap_20_min",
+      "description": "相对 20 日均线偏离下限（%）",
+      "default": 3.0,
+      "min": -50,
+      "max": 50
+    },
+    {
+      "name": "f_ma_gap_5_min",
+      "description": "相对 5 日均线偏离下限（%）",
+      "default": 0.0,
+      "min": -50,
+      "max": 50
+    },
+    {
+      "name": "f_vol_to_ma20_min",
+      "description": "量比（对 20 日均量）下限",
+      "default": 1.0,
+      "min": 0.0,
+      "max": 10
+    },
+    {
+      "name": "f_rsi_14_max",
+      "description": "RSI(14) 上限",
+      "default": 75,
+      "min": 0,
+      "max": 100
+    },
+    {
+      "name": "f_amount_ma_5_min",
+      "description": "5 日均成交额下限（万元）",
+      "default": 8000,
+      "min": 0
+    }
+  ],
+  "execution_defaults": {
+    "max_buy_drop": -0.03,
+    "stop_loss": -0.08
+  },
+  "live_defaults": {
+    "rebalance_days": 3,
+    "schedule_type": "interval",
+    "trade_weekdays": [],
+    "enabled_sessions": [
+      "PM"
+    ],
+    "sell_time": "14:30",
+    "buy_time": "14:45",
+    "sell_first": true,
+    "order_type": "LIMIT",
+    "max_price_deviation": 0.02,
+    "max_orders_per_cycle": 20
+  },
+  "live_config_tips": [
+    "量比下限 1.0 要求放量，避免无量假突破。",
+    "RSI 上限 75 用于规避已经过度拉伸的标的。"
+  ],
+  "markets": [
+    "a_share"
+  ],
+  "dir": "A股策略/04_动量与趋势"
+}

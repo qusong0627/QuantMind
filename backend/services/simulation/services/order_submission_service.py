@@ -5,7 +5,7 @@ Unified simulation/shadow order submission pipeline.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -68,12 +68,77 @@ class SimulationOrderSubmissionService:
         time_in_force: str = "DAY",
         expires_at: datetime | None = None,
     ) -> SimulationSubmissionOutcome:
+        # P0-1/P0-4：同用户临界区串行化（幂等查+建单+撮合+落库），防并发双花与
+        # 融券读-改-写丢更新。锁忙直接失败由调用方重试，不静默放行。
+        try:
+            _lock_cm = SimulationAccountManager.locked_execution(
+                int(user_id), tenant_id
+            )
+        except Exception:
+            _lock_cm = None
+        if _lock_cm is None:
+            return SimulationSubmissionOutcome(
+                success=False,
+                client_order_id=str(client_order_id or "").strip() or None,
+                message="账户撮合繁忙，请稍后重试",
+            )
+        try:
+            async with _lock_cm:
+                return await self._submit_and_fill_locked(
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    symbol=symbol,
+                    side=side,
+                    quantity=quantity,
+                    order_type=order_type,
+                    price=price,
+                    portfolio_id=portfolio_id,
+                    strategy_id=strategy_id,
+                    trade_action=trade_action,
+                    position_side=position_side,
+                    is_margin_trade=is_margin_trade,
+                    remarks=remarks,
+                    client_order_id=client_order_id,
+                    trigger_source=trigger_source,
+                    time_in_force=time_in_force,
+                    expires_at=expires_at,
+                )
+        except RuntimeError:
+            return SimulationSubmissionOutcome(
+                success=False,
+                client_order_id=str(client_order_id or "").strip() or None,
+                message="账户撮合繁忙，请稍后重试",
+            )
+
+    async def _submit_and_fill_locked(
+        self,
+        *,
+        tenant_id: str,
+        user_id: int,
+        symbol: str,
+        side: str,
+        quantity: float,
+        order_type: str,
+        price: float | None = None,
+        portfolio_id: int = 0,
+        strategy_id: int | None = None,
+        trade_action: str | None = None,
+        position_side: str = "long",
+        is_margin_trade: bool = False,
+        remarks: str | None = None,
+        client_order_id: str | None = None,
+        trigger_source: str = "manual",
+        time_in_force: str = "DAY",
+        expires_at: datetime | None = None,
+    ) -> SimulationSubmissionOutcome:
         normalized_client_order_id = str(client_order_id or "").strip() or None
         if normalized_client_order_id:
-            existing_order = await self.order_service.get_projection_order_by_client_order_id(
-                tenant_id=tenant_id,
-                user_id=user_id,
-                client_order_id=normalized_client_order_id,
+            existing_order = (
+                await self.order_service.get_projection_order_by_client_order_id(
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    client_order_id=normalized_client_order_id,
+                )
             )
             if existing_order is not None:
                 return await self._build_duplicate_outcome(existing_order)
@@ -144,7 +209,7 @@ class SimulationOrderSubmissionService:
             )
 
         order.status = OrderStatus.SUBMITTED
-        order.submitted_at = order.submitted_at or datetime.now()
+        order.submitted_at = order.submitted_at or datetime.now(timezone.utc)
         await self.order_service.sync_order_projection(order)
         await self.db.commit()
 
@@ -183,12 +248,16 @@ class SimulationOrderSubmissionService:
                 await self.db.execute(
                     select(SimulationFill)
                     .where(SimulationFill.order_id == order.order_id)
-                    .order_by(SimulationFill.executed_at.desc(), SimulationFill.id.desc())
+                    .order_by(
+                        SimulationFill.executed_at.desc(), SimulationFill.id.desc()
+                    )
                 )
-            ).scalars().all()
+            )
+            .scalars()
+            .all()
         )
         latest_fill = fills[0] if fills else None
-        status = str(order.status or "").lower()
+        status = str(getattr(order.status, "value", order.status) or "").lower()
         if status == OrderStatus.FILLED.value and latest_fill is not None:
             return SimulationSubmissionOutcome(
                 success=True,
@@ -202,26 +271,38 @@ class SimulationOrderSubmissionService:
                 message="duplicate client_order_id skipped",
             )
         return SimulationSubmissionOutcome(
-            success=status not in {
+            success=status
+            not in {
                 OrderStatus.REJECTED.value,
                 OrderStatus.CANCELLED.value,
-                OrderStatus.EXPIRED.value,
+                "expired",
             },
             order_id=str(order.order_id),
             trade_id=str(latest_fill.fill_id) if latest_fill is not None else None,
             client_order_id=order.client_order_id,
-            fill_price=round(float(latest_fill.fill_price or 0.0), 4) if latest_fill is not None else 0.0,
-            filled_quantity=float(latest_fill.fill_quantity or 0.0) if latest_fill is not None else 0.0,
-            commission=float(latest_fill.commission or 0.0) if latest_fill is not None else 0.0,
+            fill_price=round(float(latest_fill.fill_price or 0.0), 4)
+            if latest_fill is not None
+            else 0.0,
+            filled_quantity=float(latest_fill.fill_quantity or 0.0)
+            if latest_fill is not None
+            else 0.0,
+            commission=float(latest_fill.commission or 0.0)
+            if latest_fill is not None
+            else 0.0,
             price_source=latest_fill.price_source if latest_fill is not None else None,
             message=(
                 "duplicate client_order_id skipped"
-                if status in {OrderStatus.PENDING.value, OrderStatus.SUBMITTED.value, OrderStatus.FILLED.value}
+                if status
+                in {
+                    OrderStatus.PENDING.value,
+                    OrderStatus.SUBMITTED.value,
+                    OrderStatus.FILLED.value,
+                }
                 else str(
                     order.rejected_reason
                     or (
                         "duplicate client_order_id expired"
-                        if status == OrderStatus.EXPIRED.value
+                        if status == "expired"
                         else "duplicate client_order_id rejected"
                     )
                 )

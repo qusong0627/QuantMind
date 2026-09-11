@@ -66,3 +66,40 @@ def redis_cache(ttl: int = 60, prefix: str = "cache"):
             return result
         return wrapper
     return decorator
+
+
+def invalidate_user_cache(
+    tenant_id: str | None,
+    user_id: str | int | None,
+    func_names: list[str] | tuple[str, ...] | None = None,
+    prefix: str = "cache",
+) -> int:
+    """按用户维度失效 redis_cache 缓存（启停/成交后调用，避免 5-10s 读到旧值）。
+
+    func_names 为空时清该用户全部缓存行。user_id 兼容原始与 zfill(8) 两种写法。
+    返回删除的键数量（失败返回 0，永不抛异常）。
+    """
+    try:
+        client = getattr(redis_client, "client", None) or redis_client
+        if client is None:
+            return 0
+        tenant = str(tenant_id or "default").strip() or "default"
+        raw = str(user_id or "").strip()
+        forms = {raw, raw.zfill(8)} - {""}
+        total = 0
+        for form in forms:
+            if func_names:
+                patterns = [f"{prefix}:{fn}:{tenant}:{form}:*" for fn in func_names]
+            else:
+                patterns = [f"{prefix}:*:{tenant}:{form}:*"]
+            for pattern in patterns:
+                try:
+                    keys = client.keys(pattern)
+                    if keys:
+                        total += int(client.delete(*keys) or 0)
+                except Exception as e:
+                    logger.warning(f"Redis cache invalidate error pattern={pattern}: {e}")
+        return total
+    except Exception as e:
+        logger.warning(f"Redis cache invalidate failed: {e}")
+        return 0

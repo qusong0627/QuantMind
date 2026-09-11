@@ -1,5 +1,7 @@
 from fastapi import APIRouter
+import json
 import logging
+import os
 from .real_trading_utils import *
 from .real_trading_utils import (
     _active_strategy_key,
@@ -87,6 +89,64 @@ async def _resolve_strategy_detail(*, strategy_id: str, user_id: str) -> dict:
         "source": "user_strategy",
         "code": strategy.get("code") or "",
     }
+
+
+# 策略代码 STRATEGY_CONFIG kwargs 中允许覆盖交易参数的键。
+# 优先级：策略代码 > 前端传入 > 存储详情 > 默认值。模型只负责生成信号，
+# 真正决定买卖节奏的是策略；代码没写才由前端补充。
+_CODE_LIVE_OVERRIDE_KEYS = (
+    "rebalance_days",
+    "schedule_type",
+    "trade_weekdays",
+    "enabled_sessions",
+    "sell_time",
+    "buy_time",
+    "sell_first",
+    "order_type",
+    "max_price_deviation",
+    "max_orders_per_cycle",
+)
+_CODE_EXEC_OVERRIDE_KEYS = ("max_buy_drop", "stop_loss")
+
+
+def _extract_code_trade_overrides(code_str: str) -> tuple[dict, dict]:
+    """从策略代码 STRATEGY_CONFIG kwargs 提取交易参数覆盖。"""
+    import ast
+
+    exec_over: dict = {}
+    live_over: dict = {}
+    if not code_str:
+        return exec_over, live_over
+    try:
+        tree = ast.parse(code_str)
+    except Exception:
+        return exec_over, live_over
+    for node in tree.body:
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+            continue
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        if not any(isinstance(t, ast.Name) and t.id == "STRATEGY_CONFIG" for t in targets):
+            continue
+        try:
+            cfg = ast.literal_eval(node.value)
+        except Exception:
+            break
+        if not isinstance(cfg, dict):
+            break
+        kwargs = cfg.get("kwargs") if isinstance(cfg.get("kwargs"), dict) else {}
+        # 兼容顶层直写（少数模板把交易参数放 STRATEGY_CONFIG 顶层）
+        merged_source = {**kwargs}
+        for key in list(cfg.keys()):
+            if key in _CODE_LIVE_OVERRIDE_KEYS + _CODE_EXEC_OVERRIDE_KEYS and key not in merged_source:
+                merged_source[key] = cfg[key]
+        for key in _CODE_EXEC_OVERRIDE_KEYS:
+            if merged_source.get(key) is not None:
+                exec_over[key] = merged_source[key]
+        for key in _CODE_LIVE_OVERRIDE_KEYS:
+            if merged_source.get(key) is not None:
+                live_over[key] = merged_source[key]
+        break
+    return exec_over, live_over
 
 
 @router.post("/start")
@@ -240,6 +300,7 @@ async def start_trading(
             }
 
         run_id = f"run_{int(time.time())}"
+        started_at_iso = __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()
         strategy_dir = get_strategy_path(resolved_user_id)
         os.makedirs(strategy_dir, exist_ok=True)
         file_path = os.path.join(strategy_dir, f"{run_id}.py")
@@ -250,8 +311,47 @@ async def start_trading(
                 f.write(content)
             code_str = content.decode("utf-8")
         else:
+            # 从存储加载的策略代码也持久化一份快照，供重启恢复直接使用
+            try:
+                _detail_code = detail.get("code") if 'detail' in locals() and isinstance(detail, dict) else None
+                if _detail_code:
+                    code_str = str(_detail_code)
+            except Exception:
+                pass
             with open(file_path, "w", encoding="utf-8") as f:
-                f.write(f"# strategy_ref={strategy_id}\n")
+                f.write(code_str or f"# strategy_ref={strategy_id}\n")
+
+        # 策略代码优先：STRATEGY_CONFIG kwargs 写了交易频率/时点/风控则覆盖前端传入；
+        # 代码没写才由前端补充。生效配置以本次快照为准并持久化。
+        code_overrides: dict = {}
+        try:
+            _code_exec_over, _code_live_over = _extract_code_trade_overrides(code_str)
+            if _code_exec_over:
+                exec_config = _normalize_execution_config(_code_exec_over, exec_config)
+                ExecutionConfigSchema.model_validate(exec_config)
+                code_overrides["execution_config"] = sorted(_code_exec_over.keys())
+            if _code_live_over:
+                live_config = _normalize_live_trade_config(_code_live_over, live_config)
+                code_overrides["live_trade_config"] = sorted(_code_live_over.keys())
+            if code_overrides:
+                logger.info(
+                    "[Sim] 策略代码覆盖交易参数 tenant=%s user=%s strategy=%s overrides=%s effective_rebalance=%s",
+                    resolved_tenant_id,
+                    resolved_user_id,
+                    strategy_id or strategy_name,
+                    code_overrides,
+                    (live_config or {}).get("rebalance_days"),
+                )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "[Sim] 策略代码交易参数解析失败 tenant=%s user=%s strategy=%s err=%s",
+                resolved_tenant_id,
+                resolved_user_id,
+                strategy_id or strategy_name,
+                exc,
+            )
 
         # 3. 沙箱模拟盘执行
         result = {"status": "success", "mode": "SIMULATION"}
@@ -272,7 +372,10 @@ async def start_trading(
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"沙箱启动失败: {str(e)}")
 
-        # 4. 状态持久化
+        # 4. 状态持久化（started_at 锚定调仓节奏，code_str 保障重启可恢复）
+        import hashlib as _hashlib
+
+        _code_sha = _hashlib.sha256(code_str.encode("utf-8")).hexdigest()[:12] if code_str else None
         redis.client.set(
             _active_strategy_key(resolved_tenant_id, resolved_user_id),
             json.dumps(
@@ -286,6 +389,13 @@ async def start_trading(
                     "trading_permission": trading_permission,
                     "signal_readiness": signal_readiness,
                     "launch_result": result,
+                    "started_at": started_at_iso,
+                    "code_sha": _code_sha,
+                    "code_str": code_str[:8000] if code_str else None,
+                    "code_overrides": code_overrides,
+                    # 重启恢复/托管调度解析身份用，避免按键后缀反推（历史 000admin 坑）
+                    "runtime_tenant_id": resolved_tenant_id,
+                    "runtime_user_id": resolved_user_id,
                 }
             ),
         )
@@ -299,13 +409,103 @@ async def start_trading(
             action_url="/trading",
         )
 
+        # 5. 首次启动 Bootstrap：不限时、按最新价、用真实推理立即跑一遍
+        # 目的：让用户启动后立刻看到策略在真实运行（等价于手动任务），后续再按
+        # 调度计划执行。仅时间门限放开，其余（模型/推理/账户/行情）全部走真实链路；
+        # 无可用推理时跳过（不阻断启动），等下一轮推理就绪后由托管调度器自然补跑。
+        bootstrap_result = None
+        bootstrap_skipped_reason = None
+        if mode == "SIMULATION" and trading_permission != "blocked":
+            if os.getenv("SIM_BOOTSTRAP_FIRST_RUN_ENABLED", "true").strip().lower() == "true":
+                try:
+                    from datetime import datetime, timezone
+
+                    now_iso = datetime.now(timezone.utc).isoformat()
+                    bootstrap_lock_key = (
+                        f"qm:hosted:simulation:bootstrap:{resolved_tenant_id}:{resolved_user_id}:{strategy_id or strategy_name}"
+                    )
+                    bootstrap_task_id = f"bootstrap_{run_id}_{strategy_id or strategy_name}"
+                    # 24h 内同一策略只 bootstrap 一次，避免重复启动短时间内重复建单
+                    try:
+                        acquired = redis.client.set(bootstrap_lock_key, bootstrap_task_id, ex=24 * 3600, nx=True)
+                    except Exception:
+                        acquired = True  # Redis 异常不阻断，仍尝试建单（靠 task_id 去重兜底）
+                    if acquired:
+                        bootstrap_result = await manual_execution_service.create_hosted_task(
+                            tenant_id=resolved_tenant_id,
+                            user_id=resolved_user_id,
+                            strategy_id=strategy_id or strategy_name,
+                            trading_mode="SIMULATION",
+                            execution_config=exec_config,
+                            live_trade_config=live_config,
+                            trigger_context={
+                                "source": "bootstrap_first_run",
+                                "runner_trade_date": datetime.now(timezone.utc).date().isoformat(),
+                                "triggered_at": now_iso,
+                                "started_at": now_iso,
+                                "runner_mode": "SIMULATION",
+                                "note": "first_run_unlimited_time_latest_price",
+                            },
+                            parent_runtime_id=run_id,
+                            note="bootstrap: first run unlimited time, latest price, real inference",
+                            task_id=bootstrap_task_id,
+                        )
+                        logger.info(
+                            "[SimBootstrap] 首次启动即时任务已创建 tenant=%s user=%s strategy=%s task=%s status=%s",
+                            resolved_tenant_id, resolved_user_id, strategy_id or strategy_name,
+                            bootstrap_task_id, (bootstrap_result or {}).get("status"),
+                        )
+                    else:
+                        bootstrap_skipped_reason = "bootstrap_lock_exists"
+                        logger.info(
+                            "[SimBootstrap] 跳过（24h 内已 bootstrap） tenant=%s user=%s strategy=%s",
+                            resolved_tenant_id, resolved_user_id, strategy_id or strategy_name,
+                        )
+                except Exception as exc:
+                    # HTTPException 409/400（无可用推理/无模拟账户）等仅 warning，不阻断 start_trading 成功返回
+                    from fastapi import HTTPException as _HTTPException
+
+                    if isinstance(exc, _HTTPException) and exc.status_code in (400, 409):
+                        bootstrap_skipped_reason = str(exc.detail)[:300] if isinstance(exc.detail, str) else str(exc.detail)[:300]
+                        logger.warning(
+                            "[SimBootstrap] 跳过（推理/账户未就绪） tenant=%s user=%s strategy=%s reason=%s",
+                            resolved_tenant_id, resolved_user_id, strategy_id or strategy_name, bootstrap_skipped_reason,
+                        )
+                    else:
+                        bootstrap_skipped_reason = str(exc)[:300]
+                        logger.warning(
+                            "[SimBootstrap] 创建失败 tenant=%s user=%s strategy=%s err=%s",
+                            resolved_tenant_id, resolved_user_id, strategy_id or strategy_name, exc, exc_info=True,
+                        )
+
+        # 启动成功后立即失效该用户的 status 缓存，避免读到上一轮旧值
+        try:
+            from backend.services.trade_shared.utils.redis_cache import (
+                invalidate_user_cache as _invalidate_user_cache,
+            )
+
+            _invalidate_user_cache(
+                resolved_tenant_id,
+                resolved_user_id,
+                func_names=["get_status", "get_orders"],
+            )
+        except Exception:
+            pass
+
         return {
             "status": "success",
             "message": f"策略 {strategy_name} 已成功启动",
             "effective_execution_config": exec_config,
             "effective_live_trade_config": live_config,
+            "code_overrides": code_overrides,
             "trading_permission": trading_permission,
             "signal_readiness": signal_readiness,
+            "bootstrap": {
+                "attempted": mode == "SIMULATION" and trading_permission != "blocked",
+                "task_id": (bootstrap_result or {}).get("task_id") if isinstance(bootstrap_result, dict) else None,
+                "status": (bootstrap_result or {}).get("status") if isinstance(bootstrap_result, dict) else None,
+                "skipped_reason": bootstrap_skipped_reason,
+            } if mode == "SIMULATION" else None,
         }
     except HTTPException:
         _schedule_user_notification(
@@ -366,6 +566,28 @@ async def stop_trading(
 
         # Clear active strategy in Redis
         redis.client.delete(_active_strategy_key(resolved_tenant_id, resolved_user_id))
+        # 清理 24h bootstrap 锁，避免同策略 24h 内重启被误挡
+        for pat in (
+            f"qm:hosted:simulation:bootstrap:{resolved_tenant_id}:{resolved_user_id}:*",
+            f"qm:hosted:simulation:{resolved_tenant_id}:{resolved_user_id}:*",
+        ):
+            try:
+                redis.delete_pattern(pat)
+            except Exception:
+                pass
+        # 启停后立即失效该用户的 status/orders 缓存，避免 5-10s 内读到旧值
+        try:
+            from backend.services.trade_shared.utils.redis_cache import (
+                invalidate_user_cache,
+            )
+
+            invalidate_user_cache(
+                resolved_tenant_id,
+                resolved_user_id,
+                func_names=["get_status", "get_orders"],
+            )
+        except Exception:
+            pass
 
         # 同步更新数据库中 portfolio 的 run_status
         try:
@@ -616,6 +838,8 @@ async def get_status(
             "latest_hosted_task": latest_hosted_task,
             "latest_signal_run_id": latest_signal_run_id,
             "signal_source_status": signal_source_status,
+            "trading_permission": trading_permission,
+            "signal_readiness": signal_readiness,
         }
 
     # No active strategy

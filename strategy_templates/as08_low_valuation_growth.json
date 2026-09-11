@@ -1,0 +1,95 @@
+{
+  "id": "as08_low_valuation_growth",
+  "name": "A股低估值成长",
+  "description": "PE<40 / PS<8 但要求营收 10 亿与净利润 1 亿，寻找估值尚可的成长股。",
+  "category": "advanced",
+  "difficulty": "intermediate",
+  "params": [
+    {
+      "name": "topk",
+      "description": "持仓股票总数",
+      "default": 40,
+      "min": 5,
+      "max": 200
+    },
+    {
+      "name": "n_drop",
+      "description": "每期最大替换数",
+      "default": 10,
+      "min": 0,
+      "max": 200
+    },
+    {
+      "name": "rebalance_days",
+      "description": "调仓周期（交易日）",
+      "default": 5,
+      "min": 1,
+      "max": 60
+    },
+    {
+      "name": "f_pe_ttm_min",
+      "description": "PE(TTM) 下限（剔除亏损）",
+      "default": 0.0,
+      "min": -50,
+      "max": 300
+    },
+    {
+      "name": "f_pe_ttm_max",
+      "description": "PE(TTM) 上限",
+      "default": 40,
+      "min": 0,
+      "max": 300
+    },
+    {
+      "name": "f_ps_ttm_max",
+      "description": "PS(TTM) 上限",
+      "default": 8.0,
+      "min": 0.1,
+      "max": 100
+    },
+    {
+      "name": "f_revenue_ttm_min",
+      "description": "TTM 营收下限（元）",
+      "default": 1000000000.0,
+      "min": 0
+    },
+    {
+      "name": "f_net_profit_ttm_min",
+      "description": "TTM 净利润下限（元）",
+      "default": 100000000.0,
+      "min": 0
+    },
+    {
+      "name": "f_total_mv_min",
+      "description": "总市值下限（元）",
+      "default": 3000000000.0,
+      "min": 0
+    }
+  ],
+  "execution_defaults": {
+    "max_buy_drop": -0.03,
+    "stop_loss": -0.08
+  },
+  "live_defaults": {
+    "rebalance_days": 5,
+    "schedule_type": "interval",
+    "trade_weekdays": [],
+    "enabled_sessions": [
+      "PM"
+    ],
+    "sell_time": "14:30",
+    "buy_time": "14:45",
+    "sell_first": true,
+    "order_type": "LIMIT",
+    "max_price_deviation": 0.02,
+    "max_orders_per_cycle": 20
+  },
+  "live_config_tips": [
+    "PS 上限用于剔除高收入但无利润的重资产行业。",
+    "该组合对模型信号的成长/景气维度依赖较强。"
+  ],
+  "markets": [
+    "a_share"
+  ],
+  "dir": "A股策略/02_价值与质量"
+}

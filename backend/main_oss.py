@@ -222,8 +222,13 @@ def run_all_services():
         ("engine", run_engine_service, (ports["engine"], workers_config["engine"])),
         ("trade", run_trade_service, (ports["trade"], workers_config["trade"])),
         ("stream", run_stream_service, (ports["stream"], workers_config["stream"])),
-        ("celery", run_celery_worker, ()),
     ]
+    # OSS 部署有独立的 celery-worker 容器消费同一个 broker/队列。若这里再起一个内嵌
+    # worker，两者会瓜分队列消息，导致定时任务随机落在主容器内（日志与结果都不在
+    # celery 容器里），且 solo 单进程被长任务阻塞会拖垮 API 进程树。
+    # 仅在明确没有独立 worker 容器时（如单机调试）通过环境变量开启。
+    if os.getenv("EMBEDDED_CELERY_WORKER", "false").lower() == "true":
+        services.append(("celery", run_celery_worker, ()))
 
     # name -> (runner, args, process, restart_count, last_restart_ts, health_failures)
     state: dict = {}

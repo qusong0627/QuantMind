@@ -1002,6 +1002,18 @@ def main() -> int:
             factor_field_sources=(cfg.get("data", {}) or {}).get("factor_field_sources") or None,
         )
 
+        # ── 行业编码开关：load_data 只负责 merge 列，不会自动进入特征集 ──
+        # 此前 ind_code_l1 从未被加入 valid_features，开关空转。
+        # 此处显式补入（要求 CatBoost 侧已声明 cat_features，见 trainers_gbdt）。
+        if bool(context_cfg.get("industry_as_feature", False)):
+            if "ind_code_l1" in df.columns and "ind_code_l1" not in valid_features:
+                valid_features = [*valid_features, "ind_code_l1"]
+                logger.info("industry_as_feature enabled: appended ind_code_l1 to features")
+            elif "ind_code_l1" not in df.columns:
+                logger.warning(
+                    "industry_as_feature enabled but ind_code_l1 unavailable in data; continuing without it"
+                )
+
         # ── 因子筛选 ──
         factor_selection_cfg = cfg.get("factor_selection", {}) or {}
         factor_selection_method = str(factor_selection_cfg.get("method", "")).strip().lower()

@@ -159,7 +159,10 @@ const PositionMonitor: React.FC<PositionMonitorProps> = ({ userId: _userId, isAc
         return mergeLivePrices(buildNormalizedHoldings(accountInfo, stockNames), livePrices);
     }, [accountInfo, stockNames, livePrices]);
 
-    const summary = React.useMemo(() => getPositionSummary(accountInfo), [accountInfo]);
+    const summary = React.useMemo(
+        () => getPositionSummary(accountInfo, holdings),
+        [accountInfo, holdings],
+    );
 
     if (!isActive) return null;
 

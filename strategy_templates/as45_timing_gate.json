@@ -1,0 +1,89 @@
+{
+  "id": "as45_timing_gate",
+  "name": "A股择时半仓防守",
+  "description": "大盘状态窗口 30 日、基础仓位 70% 的择时组合，只在大盘健康时保持较高仓位。",
+  "category": "risk_control",
+  "difficulty": "advanced",
+  "params": [
+    {
+      "name": "topk",
+      "description": "持仓股票总数",
+      "default": 30,
+      "min": 5,
+      "max": 200
+    },
+    {
+      "name": "n_drop",
+      "description": "每期最大替换数",
+      "default": 8,
+      "min": 0,
+      "max": 200
+    },
+    {
+      "name": "rebalance_days",
+      "description": "调仓周期（交易日）",
+      "default": 5,
+      "min": 1,
+      "max": 60
+    },
+    {
+      "name": "risk_degree",
+      "description": "基础仓位比例（0-1）",
+      "default": 0.7,
+      "min": 0.05,
+      "max": 1.0
+    },
+    {
+      "name": "market_state_window",
+      "description": "大盘状态判定窗口（交易日）",
+      "default": 30,
+      "min": 5,
+      "max": 120
+    },
+    {
+      "name": "industry_cap_ratio",
+      "description": "单一行业持仓上限占比",
+      "default": 0.3,
+      "min": 0.05,
+      "max": 0.6
+    },
+    {
+      "name": "f_total_mv_min",
+      "description": "总市值下限（元）",
+      "default": 10000000000.0,
+      "min": 0
+    },
+    {
+      "name": "f_amount_ma_5_min",
+      "description": "5 日均成交额下限（万元）",
+      "default": 5000,
+      "min": 0
+    }
+  ],
+  "execution_defaults": {
+    "max_buy_drop": -0.03,
+    "stop_loss": -0.08
+  },
+  "live_defaults": {
+    "rebalance_days": 5,
+    "schedule_type": "interval",
+    "trade_weekdays": [],
+    "enabled_sessions": [
+      "PM"
+    ],
+    "sell_time": "14:30",
+    "buy_time": "14:45",
+    "sell_first": true,
+    "order_type": "LIMIT",
+    "max_price_deviation": 0.02,
+    "max_orders_per_cycle": 20
+  },
+  "live_config_tips": [
+    "risk_degree 与大盘状态同时生效时，取两者中更保守的一方。",
+    "择时策略的收益高度依赖状态判定的准确性，建议先做单因子验证。"
+  ],
+  "markets": [
+    "a_share"
+  ],
+  "dir": "A股策略/09_事件与择时"
+}

@@ -80,19 +80,28 @@ export const useStrategies = (options: UseStrategiesOptions = {}): UseStrategies
     
     const fingerprintRef = useRef<string | null>(null);
     const initializedRef = useRef<boolean>(false);
+    const fetchDataRef = useRef<(params?: { silent?: boolean }) => Promise<void>>(async () => {});
     const strategiesRef = useRef<Strategy[]>([]);
     const statsRef = useRef<StrategyStats>(stats);
-    const subscribedTopicRef = useRef<string | null>(null);
+    const subscribedTopicsRef = useRef<string[]>([]);
     const prevRealtimeStatusRef = useRef<'connected' | 'fallback' | 'disabled'>('disabled');
 
-    const getCurrentUserId = useCallback(() => {
+    // 后端推送主题是 strategy.{JWT sub}/{sim uid}（如 strategy.admin / strategy.0），
+    // 而本地 user.id 是 PG 数字 id（如 "1"），单主题订阅永远收不到推送。
+    // 这里把全部身份候选都订阅，保证总有一个命中。
+    const getCurrentUserTopics = useCallback(() => {
         try {
             const raw = localStorage.getItem('user');
-            if (!raw) return '';
+            if (!raw) return [];
             const parsed = JSON.parse(raw);
-            return String(parsed?.id || parsed?.user_id || '');
+            const candidates = [parsed?.id, parsed?.user_id, parsed?.username];
+            const topics = candidates
+                .map((v) => String(v ?? '').trim())
+                .filter((v) => v.length > 0)
+                .map((v) => `strategy.${v}`);
+            return [...new Set(topics)];
         } catch {
-            return '';
+            return [];
         }
     }, []);
 
@@ -235,6 +244,28 @@ export const useStrategies = (options: UseStrategiesOptions = {}): UseStrategies
         await fetchData({ silent: true });
     }, [fetchData]);
 
+    // 供 WS 推送回调使用：避免把 fetchData 放进订阅副作用的依赖里导致反复重订阅
+    useEffect(() => {
+        fetchDataRef.current = fetchData;
+    }, [fetchData]);
+
+    // 后端 strategy.* 推送（模拟盘实时盈亏快照）：WS 连上时前端轮询会被关掉，
+    // 只认推送。收到后以接口为准重新拉取，避免本地合并口径与后端漂移。
+    useEffect(() => {
+        if (!enableRealtime) {
+            return;
+        }
+
+        const handleStrategyUpdate = () => {
+            void fetchDataRef.current({ silent: true });
+        };
+
+        websocketService.addMessageHandler(MessageType.STRATEGY_UPDATE, handleStrategyUpdate);
+        return () => {
+            websocketService.removeMessageHandler(MessageType.STRATEGY_UPDATE, handleStrategyUpdate);
+        };
+    }, [enableRealtime]);
+
     const startStrategy = useCallback(async (id: string): Promise<boolean> => {
         const previousStrategies = strategies;
         const previousStats = stats;
@@ -291,13 +322,12 @@ export const useStrategies = (options: UseStrategiesOptions = {}): UseStrategies
             return;
         }
 
-        const userId = getCurrentUserId();
-        if (!userId) {
+        const topics = getCurrentUserTopics();
+        if (topics.length === 0) {
             setRealtimeStatus('disabled');
             return;
         }
 
-        const topic = `strategy.${userId}`;
         const status = websocketService.getStatus();
         if (status === WebSocketStatus.DISCONNECTED || status === WebSocketStatus.ERROR) {
             try {
@@ -309,15 +339,15 @@ export const useStrategies = (options: UseStrategiesOptions = {}): UseStrategies
             }
         }
 
-        websocketService.subscribe({ channels: [topic] });
-        subscribedTopicRef.current = topic;
+        websocketService.subscribe({ channels: topics });
+        subscribedTopicsRef.current = topics;
         setRealtimeStatus(websocketService.getStatus() === WebSocketStatus.CONNECTED ? 'connected' : 'fallback');
-    }, [enableRealtime, getCurrentUserId]);
+    }, [enableRealtime, getCurrentUserTopics]);
 
     const disconnectRealtime = useCallback(() => {
-        if (subscribedTopicRef.current) {
-            websocketService.unsubscribe([subscribedTopicRef.current]);
-            subscribedTopicRef.current = null;
+        if (subscribedTopicsRef.current.length > 0) {
+            websocketService.unsubscribe(subscribedTopicsRef.current);
+            subscribedTopicsRef.current = [];
         }
         setRealtimeStatus('disabled');
     }, []);
@@ -397,8 +427,8 @@ export const useStrategies = (options: UseStrategiesOptions = {}): UseStrategies
         };
 
         const handleStatusChange = (status: WebSocketStatus) => {
-            if (status === WebSocketStatus.CONNECTED && subscribedTopicRef.current) {
-                websocketService.subscribe({ channels: [subscribedTopicRef.current] });
+            if (status === WebSocketStatus.CONNECTED && subscribedTopicsRef.current.length > 0) {
+                websocketService.subscribe({ channels: subscribedTopicsRef.current });
                 setRealtimeStatus('connected');
             } else if (
                 status === WebSocketStatus.DISCONNECTED ||

@@ -246,7 +246,7 @@ export const NotificationQuickCard: React.FC<NotificationQuickCardProps> = ({
             通知服务当前处于降级模式，已保留现有数据并继续刷新。
           </div>
         )}
-        <div className="flex-1 overflow-y-auto space-y-1.5 custom-scrollbar pr-1" onScroll={handleListScroll}>
+        <div className="flex-1 overflow-y-auto space-y-1 custom-scrollbar pr-1" onScroll={handleListScroll}>
           {visibleNotifications.length > 0 ? (
             visibleNotifications.map((notification) => {
               const { color, bg, Icon } = getTypeConfig(notification.type);
@@ -258,24 +258,20 @@ export const NotificationQuickCard: React.FC<NotificationQuickCardProps> = ({
                 <motion.div
                   key={notification.id}
                   onClick={() => openAction(notification)}
-                  className={`flex items-center justify-between py-2 px-3 rounded-xl transition-colors cursor-pointer bg-white border border-slate-100 shadow-sm ${!notification.is_read ? 'border-l-4 border-l-blue-500' : ''}`}
-                  title={navigationHint}
+                  className={`flex items-center justify-between py-1.5 px-2.5 rounded-xl transition-colors cursor-pointer bg-white border border-slate-100 shadow-sm ${!notification.is_read ? 'border-l-4 border-l-blue-500' : ''}`}
+                  title={`${notification.title} · ${relativeTime}${navigationHint ? ` · ${navigationHint}` : ''}`}
                   whileHover={{ backgroundColor: '#f1f5f9', borderColor: '#e2e8f0' }}
                   initial={{ opacity: 0, y: 10 }}
                   animate={{ opacity: 1, y: 0 }}
                 >
-                  <div className="flex items-center space-x-2.5 flex-1">
-                    <div className={`w-5 h-5 rounded-full flex items-center justify-center ${bg}`}>
-                      <Icon className={`w-2.5 h-2.5 ${color}`} />
+                  <div className="flex items-center space-x-2 flex-1 min-w-0">
+                    <div className={`w-4 h-4 rounded-full flex items-center justify-center flex-shrink-0 ${bg}`}>
+                      <Icon className={`w-2 h-2 ${color}`} />
                     </div>
-                    <div className="flex-1 min-w-0">
-                      <p className={`text-sm truncate ${!notification.is_read ? 'font-semibold text-[var(--text-primary)]' : 'font-medium text-[var(--text-secondary)]'}`}>
-                        {notification.title}
-                      </p>
-                      <p className="text-xs text-[var(--text-tertiary)] flex justify-between">
-                        <span>{relativeTime}</span>
-                      </p>
-                    </div>
+                    <p className={`text-[13px] truncate flex-1 min-w-0 ${!notification.is_read ? 'font-semibold text-[var(--text-primary)]' : 'font-medium text-[var(--text-secondary)]'}`}>
+                      {notification.title}
+                    </p>
+                    <span className="text-[11px] text-[var(--text-tertiary)] flex-shrink-0 tabular-nums">{relativeTime}</span>
                   </div>
                   <div className="flex items-center gap-2 ml-2">
                     {target && (

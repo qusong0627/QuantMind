@@ -759,18 +759,21 @@ export const ParameterConfig: React.FC<ParameterConfigProps> = ({
               <div className="space-y-0.5">
                 <div className="text-xs font-semibold text-slate-700">多周期训练</div>
                 <div className="text-[11px] text-slate-400 leading-relaxed">
-                  一次训练产出 T+1/T+3/T+5/T+10 四个周期模型，并自动创建 ICIR 加权融合模型，利用跨周期一致性提升选股稳定性。
+                  一次训练产出下方选定的多个周期模型，并自动创建 ICIR 加权融合模型，利用跨周期一致性提升选股稳定性。开启后第二步「T+N 参数」不再生效（周期以此处选择为准）。
                 </div>
               </div>
               <Switch
                 checked={(target.horizonDaysList?.length ?? 0) >= 2}
                 onChange={(checked) => {
                   if (checked) {
-                    // 多周期与收益率分位推理互斥：开启多周期时强制把分位关掉，
-                    // 避免提交 q分位+multi-horizon 的矛盾配置。
+                    // 多周期与收益率分位推理/WFA 互斥：开启多周期时强制关掉，
+                    // 避免提交矛盾配置（后端也会 422 拒绝）。
                     onTargetChange({ ...target, horizonDays: target.horizonDays, horizonDaysList: [1, 3, 5, 10] });
                     if (params.prediction_mode === 'quantile') {
                       onParamsChange({ ...params, prediction_mode: 'point' });
+                    }
+                    if (wfa?.enabled) {
+                      onWfaChange?.({ ...(wfa || { enabled: false, strategy: 'rolling', nWindows: 4, trainYears: 3, valMonths: 12, stepMonths: 12 }), enabled: false });
                     }
                   } else {
                     const { horizonDaysList, ...rest } = target;
@@ -778,9 +781,6 @@ export const ParameterConfig: React.FC<ParameterConfigProps> = ({
                   }
                 }}
               />
-            </div>
-            <div className="mt-1.5 text-xs text-slate-500 leading-relaxed">
-              一次训练产出 T+1/T+3/T+5/T+10 四个周期模型，并自动创建 ICIR 加权融合模型，利用跨周期一致性提升选股稳定性。周期选择在此处与第二步「T+N 参数」联动。
             </div>
             {(target.horizonDaysList?.length ?? 0) >= 2 && (
               <>
@@ -802,15 +802,15 @@ export const ParameterConfig: React.FC<ParameterConfigProps> = ({
                   ))}
                 </div>
                 <div className="mt-2 text-[11px] text-slate-400 font-mono">
-                  将产出 {target.horizonDaysList?.length ?? 0} 个模型 + 1 个融合模型（训练耗时约 ×{target.horizonDaysList?.length ?? 4}）
+                  将产出 {target.horizonDaysList?.length ?? 0} 个模型 + 1 个融合模型（串行训练，总耗时约等于单任务时长预算，各周期分摊）
                 </div>
                 {wfa?.enabled && (
                   <Alert
                     className="mt-2 rounded-lg border-amber-100 bg-amber-50/60"
                     type="warning"
                     showIcon
-                    message="多周期训练会禁用 WFA 诊断"
-                    description="避免 4 周期 × 4 窗口 = 16 次训练导致超时，训练结束后可单独在模型详情查看 WFA。"
+                    message="多周期训练已自动关闭 WFA 诊断"
+                    description="避免 4 周期 × 4 窗口 = 16 次训练导致超时；如需 WFA，请先关闭多周期再开启。"
                   />
                 )}
               </>
@@ -829,12 +829,15 @@ export const ParameterConfig: React.FC<ParameterConfigProps> = ({
                 </div>
                 <Switch
                   checked={!!wfa?.enabled}
-                  disabled={!wfaSupported}
+                  disabled={!wfaSupported || isMultiHorizon}
                   onChange={(checked) => onWfaChange({ ...(wfa || { enabled: false, strategy: 'rolling', nWindows: 4, trainYears: 3, valMonths: 12, stepMonths: 12 }), enabled: checked })}
                 />
               </div>
               {!wfaSupported && (
                 <div className="mt-2 text-[11px] text-amber-600">WFA 诊断仅支持树模型与线性模型（LightGBM / XGBoost / CatBoost / Ridge），当前模型后端会直接跳过。</div>
+              )}
+              {isMultiHorizon && (
+                <div className="mt-2 text-[11px] text-amber-600">多周期训练已开启，WFA 诊断不可用（后端拒绝 WFA+多周期组合）。</div>
               )}
 
               {wfa?.enabled && (

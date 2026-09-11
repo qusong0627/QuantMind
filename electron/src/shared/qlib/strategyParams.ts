@@ -150,7 +150,10 @@ export function getDefaultStrategyParams(
     }
 
     // 统一模板默认调仓比例为 20%（n_drop = topk * 20%，四舍五入且至少为 1）。
-    if (shouldAutoPopulateNDrop(strategyType, template)) {
+    // 仅当模板 JSON 未显式声明 n_drop 默认值时才推导；已声明的（如低换手模板
+    // n_drop=6）必须尊重模板原值——后端模板模式下 UI 值会直接生效。
+    const declaresNDrop = template.params.some(p => p.name === 'n_drop' && typeof p.default === 'number');
+    if (shouldAutoPopulateNDrop(strategyType, template) && !declaresNDrop) {
       const computedNDrop = resolveNDropByTopk(defaults.topk);
       if (computedNDrop !== undefined) {
         defaults.n_drop = computedNDrop;

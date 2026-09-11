@@ -23,7 +23,11 @@ from backend.services.simulation.services.projection_service import (
     SimulationProjectionService,
 )
 from backend.shared.database_manager_v2 import get_session
-from backend.shared.trade_account_cache import write_json_cache, write_trade_account_cache
+from backend.shared.simulation_account_keys import account_key
+from backend.shared.trade_account_cache import (
+    write_json_cache,
+    write_trade_account_cache,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +54,9 @@ async def _scan_and_monitor() -> tuple[int, int]:
                         SimulationAccount.liabilities > 0,
                     )
                 )
-            ).scalars().all()
+            )
+            .scalars()
+            .all()
         )
 
         manager = SimulationAccountManager(redis_client)
@@ -99,10 +105,13 @@ async def _write_warning(
 ) -> None:
     now = datetime.utcnow()
     existing = await session.execute(
-        select(SimulationCashLedger).where(
+        select(SimulationCashLedger)
+        .where(
             SimulationCashLedger.account_id == account.account_id,
             SimulationCashLedger.event_type == "MARGIN_WARNING",
-        ).order_by(SimulationCashLedger.occurred_at.desc()).limit(1)
+        )
+        .order_by(SimulationCashLedger.occurred_at.desc())
+        .limit(1)
     )
     last_warning = existing.scalar_one_or_none()
     if last_warning is not None:
@@ -149,17 +158,21 @@ async def _force_liquidate(
     lots = list(
         (
             await session.execute(
-                select(SimulationPositionLot).where(
+                select(SimulationPositionLot)
+                .where(
                     SimulationPositionLot.account_id == account_id,
                     SimulationPositionLot.position_side == "short",
                     SimulationPositionLot.status == "open",
                     SimulationPositionLot.quantity_remaining > 0,
-                ).order_by(
+                )
+                .order_by(
                     SimulationPositionLot.open_date.asc().nullsfirst(),
                     SimulationPositionLot.id.asc(),
                 )
             )
-        ).scalars().all()
+        )
+        .scalars()
+        .all()
     )
 
     for lot in lots:
@@ -174,25 +187,11 @@ async def _force_liquidate(
 
         board_lot_qty = int(qty // 100) * 100
         if board_lot_qty <= 0:
-            board_lot_qty = 100
+            # 不足一手按实际数量平，不超卖（原先或100股必触发INSUFFICIENT）
+            board_lot_qty = int(qty)
+        board_lot_qty = min(int(board_lot_qty), int(qty))
 
-        session.add(
-            SimulationCashLedger(
-                account_id=account.account_id,
-                tenant_id=account.tenant_id,
-                user_id=account.user_id,
-                event_type="FORCED_LIQUIDATION",
-                ref_type="margin_monitor",
-                ref_id=str(lot.id),
-                amount=0.0,
-                balance_after=float(account.cash or 0.0),
-                trade_date=now,
-                occurred_at=now,
-                note=f"forced liquidation: closing {board_lot_qty} shares of {lot.symbol} short position",
-            )
-        )
-        await session.commit()
-
+        # P0-4：先成交、后记账。成交失败不留幽灵流水，避免审计与余额对不上。
         outcome = await submission_service.submit_and_fill(
             tenant_id=account.tenant_id,
             user_id=int(account.user_id),
@@ -208,6 +207,22 @@ async def _force_liquidate(
         )
 
         if outcome.success:
+            session.add(
+                SimulationCashLedger(
+                    account_id=account.account_id,
+                    tenant_id=account.tenant_id,
+                    user_id=account.user_id,
+                    event_type="FORCED_LIQUIDATION",
+                    ref_type="margin_monitor",
+                    ref_id=f"{lot.id}:{outcome.order_id or ''}",
+                    amount=0.0,
+                    balance_after=float(account.cash or 0.0),
+                    trade_date=now,
+                    occurred_at=now,
+                    note=f"forced liquidation: closing {board_lot_qty} shares of {lot.symbol} short position",
+                )
+            )
+            await session.commit()
             liquidated += 1
             await session.refresh(account)
             logger.warning(
@@ -249,7 +264,7 @@ async def _rebuild_redis_cache(account: SimulationAccount) -> None:
             positions=projection.positions or {},
             source="margin_monitor_projection",
         )
-        sim_key = f"simulation:account:{account.tenant_id}:{str(account.user_id).strip()}"
+        sim_key = account_key(account.tenant_id, account.user_id)
         write_json_cache(redis_client, sim_key, payload)
         write_trade_account_cache(
             redis_client, account.tenant_id, account.user_id, payload

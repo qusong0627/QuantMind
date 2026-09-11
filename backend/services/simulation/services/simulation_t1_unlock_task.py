@@ -23,7 +23,11 @@ _ACCOUNT_KEY_PATTERN = "simulation:account:*"
 
 
 async def _unlock_all_accounts(manager: SimulationAccountManager) -> int:
-    """把全部模拟账户的 T+1 可卖量补齐为总量，返回有新解锁持仓的账户数。"""
+    """把全部模拟账户的 T+1 可卖量补齐为总量，返回有新解锁持仓的账户数。
+
+    按统一键规范解析（含 :MARKET 后缀的市场账户），市场透传给 unlock_t1，
+    避免扫到 HK 账户却解了 CN 账户、HK 账户永远锁死。
+    """
     if not redis_client.client:
         return 0
     try:
@@ -37,11 +41,14 @@ async def _unlock_all_accounts(manager: SimulationAccountManager) -> int:
     unlocked_count = 0
     for key in keys:
         try:
-            parts = str(key).split(":")
-            if len(parts) < 4 or not parts[2] or not parts[3].isdigit():
+            parsed = SimulationAccountManager.parse_account_key(str(key))
+            if not parsed:
+                continue
+            tenant, user_raw, market = parsed
+            if not user_raw.isdigit():
                 continue
             result = await manager.unlock_t1(
-                user_id=int(parts[3]), tenant_id=parts[2]
+                user_id=int(user_raw), tenant_id=tenant, market=market
             )
             if result.get("success") and result.get("unlocked", 0) > 0:
                 unlocked_count += 1

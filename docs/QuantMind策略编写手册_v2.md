@@ -107,9 +107,9 @@ STRATEGY_CONFIG = {
 数据同步脚本 `sync_factors_to_parquet.py` 采用 **Atomic Write** 机制。在实盘运行期间更新因子文件，不会造成策略读取中断或文件损坏。
 
 ### 4.2 新鲜度校验 (Freshness Guard)
-在 `production` 模式下，策略启动会自动校验 `fundamental_aligned.parquet` 的日期。
-- 若数据过期超过 **2 天**，日志将抛出 `CRITICAL` 警告。
-- 确保你始终基于最新的基本面快照做决策。
+基本面对齐数据来自 QuantDB `features_daily`，跟随每日同步更新即为最新。
+- 确保已执行 `quantdb_daily_sync.py`，使 `features_daily` 覆盖到最近交易日。
+- 基于最新基本面快照做决策。
 
 ### 4.3 性能优化
 对齐器在初次加载后会将数据驻留内存。对于全市场 5000+ 股票的 100 个指标过滤，耗时通常控制在 **10ms** 以内。
@@ -119,7 +119,7 @@ STRATEGY_CONFIG = {
 ## 5. 常见问题 (FAQ)
 
 **Q: 我填了参数但是没生效？**
-A: 请检查 Parquet 文件中是否存在该列。你可以运行 `python -c "import pandas as pd; print(pd.read_parquet('db/custom/fundamental_aligned.parquet').columns)"` 查看可用字段清单。
+A: 请检查 QuantDB `features_daily` 中是否存在该列（如 `revenue_ttm`、`total_mv`、`pe_ttm` 等）。缺失的列会被对齐器 **静默跳过**（不报错也不生效），见对齐器 `fundamental_aligner.filter_instruments`。常用字段若干：revenue_ttm、net_profit_ttm、annual_net_profit、equity、total_mv、float_mv、pe_ttm、pe_static、pb、ps_ttm、dividend_rate、vol_std_20/60、vol_atr_14、beta_20、ma_gap_5/20、rsi_14、kdj_j、macd_hist、pct_change、vol_to_ma5。注意：features_daily 不含 roe、is_st。
 
 **Q: 盘中实时涨幅能用这个过滤吗？**
 A: 建议仅对静态或低频因子（PE、市值、ST、行业）使用 `f_` 参数。对于盘中实时涨幅，建议在策略的 `generate_target_weight_position` 中动态调用行情接口。

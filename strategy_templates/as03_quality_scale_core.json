@@ -1,0 +1,86 @@
+{
+  "id": "as03_quality_scale_core",
+  "name": "A股质量规模核心",
+  "description": "要求 TTM 净利润、TTM 营收、净资产三重下限，只买有真实经营规模的标的，规避题材空壳。",
+  "category": "basic",
+  "difficulty": "intermediate",
+  "params": [
+    {
+      "name": "topk",
+      "description": "持仓股票总数",
+      "default": 40,
+      "min": 5,
+      "max": 200
+    },
+    {
+      "name": "n_drop",
+      "description": "每期最大替换数",
+      "default": 8,
+      "min": 0,
+      "max": 200
+    },
+    {
+      "name": "rebalance_days",
+      "description": "调仓周期（交易日）",
+      "default": 5,
+      "min": 1,
+      "max": 60
+    },
+    {
+      "name": "f_net_profit_ttm_min",
+      "description": "TTM 净利润下限（元）",
+      "default": 200000000.0,
+      "min": 0
+    },
+    {
+      "name": "f_revenue_ttm_min",
+      "description": "TTM 营收下限（元）",
+      "default": 2000000000.0,
+      "min": 0
+    },
+    {
+      "name": "f_equity_min",
+      "description": "净资产下限（元）",
+      "default": 3000000000.0,
+      "min": 0
+    },
+    {
+      "name": "f_total_mv_min",
+      "description": "总市值下限（元）",
+      "default": 5000000000.0,
+      "min": 0
+    },
+    {
+      "name": "f_amount_ma_5_min",
+      "description": "5 日均成交额下限（万元）",
+      "default": 5000,
+      "min": 0
+    }
+  ],
+  "execution_defaults": {
+    "max_buy_drop": -0.03,
+    "stop_loss": -0.08
+  },
+  "live_defaults": {
+    "rebalance_days": 5,
+    "schedule_type": "interval",
+    "trade_weekdays": [],
+    "enabled_sessions": [
+      "PM"
+    ],
+    "sell_time": "14:30",
+    "buy_time": "14:45",
+    "sell_first": true,
+    "order_type": "LIMIT",
+    "max_price_deviation": 0.02,
+    "max_orders_per_cycle": 20
+  },
+  "live_config_tips": [
+    "净利润 2 亿 / 营收 20 亿的下限对应 A 股中大盘蓝筹区间。",
+    "features_daily 无 ROE 列，本策略用「净利润 + 净资产」双下限近似质量门槛。"
+  ],
+  "markets": [
+    "a_share"
+  ],
+  "dir": "A股策略/01_宽基多因子"
+}

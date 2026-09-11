@@ -1411,6 +1411,11 @@ class ManualExecutionService:
             _pred_rows = await _asyncio.to_thread(
                 _read_model_pred_day, _storage_path, dtd
             )
+            # 写入端已原子 rename，读取到半写文件时仅本次返回空，下次调度重试
+            logger.warning(
+                "pred.parquet 回退命中 tenant=%s user=%s model=%s date=%s rows=%d storage=%s",
+                tenant_id, user_id, model, dtd, len(_pred_rows), _storage_path,
+            )
             return [
                 {
                     "symbol": _normalize_to_broker_symbol(_pr.get("symbol") or ""),
@@ -1428,7 +1433,8 @@ class ManualExecutionService:
             ]
         except Exception as exc:  # pragma: no cover - pred.parquet fallback
             logger.warning(
-                "pred.parquet 截面读取失败 model=%s date=%s: %s", model, dtd, exc
+                "pred.parquet 截面读取失败 tenant=%s user=%s model=%s date=%s err=%s",
+                tenant_id, user_id, model, dtd, exc,
             )
             return []
 
@@ -1488,11 +1494,14 @@ class ManualExecutionService:
         )
         if fallback_rows:
             normalized.extend(fallback_rows)
-            logger.info(
-                "手动任务信号表为空，已从 pred.parquet 回退 %d 条截面 run_id=%s date=%s",
-                len(fallback_rows),
-                run_id,
-                str(data_trade_date)[:10],
+            logger.warning(
+                "手动任务信号回退命中 tenant=%s user=%s model=%s run_id=%s date=%s rows=%d",
+                tenant_id, user_id, model_id, run_id, str(data_trade_date)[:10], len(fallback_rows),
+            )
+        else:
+            logger.warning(
+                "手动任务信号回退为空 tenant=%s user=%s model=%s run_id=%s date=%s",
+                tenant_id, user_id, model_id, run_id, str(data_trade_date)[:10],
             )
         return normalized
 

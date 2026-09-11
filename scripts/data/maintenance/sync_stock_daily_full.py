@@ -1,15 +1,22 @@
 #!/usr/bin/env python3
-"""Full sync of stock_daily_latest from fundamental_aligned.parquet.
+"""Full sync of stock_daily_latest from QuantDB.
 
-Updates ALL columns that exist in both parquet and the DB table,
-focusing on recent dates to keep the operation fast.
+Updates all columns QuantDB can provide (features_daily 技术+估值 + 未复权K线
++ roe + industry), focusing on recent dates to keep the operation fast.
+QuantDB 不产 is_st/idx_*/concept_*/涨停统计 等列, 这些列不参与同步。
 """
 import os
+import sys
 import time
 import logging
+from datetime import date, timedelta
+
 import pandas as pd
 import psycopg2
 from psycopg2.extras import execute_values
+
+# 保证 backend 包可导入（admin 端点以 /app 为 cwd 调用本脚本）
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("sync_stock_daily_full")
@@ -25,11 +32,20 @@ def main():
     )
     cur = conn.cursor()
 
-    parquet_path = "/app/db/custom/fundamental_aligned.parquet"
-    logger.info(f"Reading {parquet_path}...")
+    from backend.services.engine.data_platform.quantdb_hub import QuantDBDataHub
+    from sync_stock_daily_latest_from_parquet import load_quantdb_frame
+
+    hub = QuantDBDataHub.get_instance()
+    if not hub.available:
+        logger.error("QuantDB data not available; abort")
+        conn.close()
+        return
+    start = date.today() - timedelta(days=MAX_DAYS * 3)
+    end = date.today()
+    logger.info("Reading QuantDB frame [%s, %s]...", start, end)
     t0 = time.time()
-    df = pd.read_parquet(parquet_path, engine="pyarrow")
-    logger.info(f"Parquet loaded in {time.time()-t0:.1f}s, total rows: {len(df):,}")
+    df = load_quantdb_frame(hub, start, end)
+    logger.info(f"QuantDB frame loaded in {time.time()-t0:.1f}s, total rows: {len(df):,}")
 
     df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.date
 
@@ -42,7 +58,7 @@ def main():
     col_type_map = {r[0]: r[1] for r in cur.fetchall()}
     logger.info(f"Table has {len(col_type_map)} columns")
 
-    # 取 parquet 和 table 的交集列（排除主键）
+    # 取 QuantDB 和 table 的交集列（排除主键）
     parquet_cols = set(df.columns)
     sync_cols = sorted(parquet_cols & set(col_type_map.keys()) - {"trade_date", "symbol"})
     logger.info(f"Columns to sync ({len(sync_cols)}): {', '.join(sync_cols[:10])}...")

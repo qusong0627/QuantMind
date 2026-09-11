@@ -123,7 +123,7 @@ const PositionOverview: React.FC<PositionOverviewProps> = ({ holdings, summary, 
 
                 <div className="flex-1 overflow-y-auto overflow-x-auto custom-scrollbar pb-2">
                     {currentHoldings.length > 0 ? (
-                        <table className="w-full min-w-[1160px] table-fixed">
+                        <table className={`w-full min-w-[1160px] table-fixed ${compact ? '' : '[&_td]:!py-[9.5px] [&_th]:!py-[8.5px]'}`}>
                             <thead className="sticky top-0 bg-gray-100 border-b border-gray-200">
                                 <tr>
                                     {!compact && <th className="px-3 py-1.5 text-center text-sm font-semibold text-gray-700 w-[6%] whitespace-nowrap">序号</th>}

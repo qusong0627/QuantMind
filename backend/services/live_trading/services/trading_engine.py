@@ -633,7 +633,11 @@ class TradingEngine:
 
             # 2. 获取备选池 (从 Redis 或 DB 获取该策略的预设权重)
             # 方案：读取该租户/用户的实时活跃配置
-            active_key = f"trade:active_strategy:{portfolio.tenant_id}:{str(user_id).zfill(8)}"
+            from backend.shared.simulation_account_keys import (
+                active_strategy_key as _canonical_active_key,
+            )
+
+            active_key = _canonical_active_key(portfolio.tenant_id, user_id)
             active_data_raw = self.redis.client.get(active_key)
             if not active_data_raw:
                 return None

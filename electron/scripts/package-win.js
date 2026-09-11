@@ -26,7 +26,7 @@ if (process.platform !== 'win32') {
 }
 
 run('npm', ['run', 'build:react'], electronRoot);
-run('npm', ['run', 'build:electron:bundle-python'], electronRoot);
+run('npm', ['run', 'build:electron'], electronRoot);
 
 const args = [
   'electron-builder',

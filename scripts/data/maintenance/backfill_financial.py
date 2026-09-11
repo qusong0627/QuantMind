@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
-"""Backfill financial data (total_mv, pe_ttm, pb) into stock_daily_latest from parquet."""
+"""Backfill financial data (total_mv, pe_ttm, pb) into stock_daily_latest from QuantDB."""
 import os
+import sys
 import time
 import logging
+from datetime import date, timedelta
+
 import pandas as pd
 import psycopg2
 from psycopg2.extras import execute_values
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("backfill_financial")
@@ -17,13 +22,23 @@ def main():
     )
     cur = conn.cursor()
 
-    parquet_path = "/app/db/custom/fundamental_aligned.parquet"
-    logger.info(f"Reading {parquet_path}...")
-    df = pd.read_parquet(parquet_path, engine="pyarrow")
+    from backend.services.engine.data_platform.quantdb_hub import QuantDBDataHub
+    from sync_stock_daily_latest_from_parquet import load_quantdb_frame
+
+    hub = QuantDBDataHub.get_instance()
+    if not hub.available:
+        logger.error("QuantDB data not available; abort")
+        conn.close()
+        return
+    start = date.today() - timedelta(days=400)
+    end = date.today()
+    logger.info("Reading QuantDB frame [%s, %s]...", start, end)
+    df = load_quantdb_frame(hub, start, end)
     df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.date
 
     # Keep only rows with financial data
-    valid = df[df["total_mv"].notna()][["trade_date", "symbol", "total_mv", "pe_ttm", "pb"]].copy()
+    cols = [c for c in ("trade_date", "symbol", "total_mv", "pe_ttm", "pb") if c in df.columns]
+    valid = df[df["total_mv"].notna()][cols].copy() if "total_mv" in df.columns else pd.DataFrame(columns=cols)
     logger.info(f"Rows with valid financial data: {len(valid)}")
 
     # Create temp table

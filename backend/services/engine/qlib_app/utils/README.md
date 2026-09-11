@@ -16,7 +16,7 @@ Qlib service 通用工具与适配器。
 
 ## 近期更新
 - 基本面参数化过滤迁移（2026-05-11）：
-  - 新增 `backend/shared/fundamental_aligner.py`，统一从 `db/custom/fundamental_aligned.parquet` 按交易日读取快照并执行约束过滤；
+  - 新增 `backend/shared/fundamental_aligner.py`，统一从 QuantDB `features_daily`（经 `quantdb_hub`）按交易日读取快照并执行约束过滤（旧 `fundamental_aligned.parquet` 已废弃移除）；
   - `RedisRecordingStrategy` 接入 `FundamentalFilterMixin`，支持 `f_` 前缀参数（如 `f_pe_ttm_max`、`f_roe_min`、`f_industry_in`）；
   - 策略选股在 `generate_target_weight_position` 阶段自动应用过滤，保持回测/托管执行口径一致。
 - 交易流水数量还原稳定性修复（2026-04-22）：

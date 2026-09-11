@@ -1,0 +1,89 @@
+{
+  "id": "as02_low_turnover_core",
+  "name": "A股低换手核心",
+  "description": "调仓周期拉长到 10 日、单期替换数压到 6 只的低换手版本，用于压低 A 股双边成本对净值的侵蚀。",
+  "category": "basic",
+  "difficulty": "beginner",
+  "params": [
+    {
+      "name": "topk",
+      "description": "持仓股票总数",
+      "default": 60,
+      "min": 5,
+      "max": 200
+    },
+    {
+      "name": "n_drop",
+      "description": "每期最大替换数",
+      "default": 6,
+      "min": 0,
+      "max": 200
+    },
+    {
+      "name": "rebalance_days",
+      "description": "调仓周期（交易日）",
+      "default": 10,
+      "min": 1,
+      "max": 60
+    },
+    {
+      "name": "f_total_mv_min",
+      "description": "总市值下限（元）",
+      "default": 3000000000.0,
+      "min": 0
+    },
+    {
+      "name": "f_amount_ma_5_min",
+      "description": "5 日均成交额下限（万元）",
+      "default": 5000,
+      "min": 0
+    },
+    {
+      "name": "f_vol_std_20_max",
+      "description": "20 日收益波动率上限（%）",
+      "default": 4.5,
+      "min": 0.1,
+      "max": 20
+    },
+    {
+      "name": "f_pe_ttm_min",
+      "description": "PE(TTM) 下限（剔除亏损）",
+      "default": 0.0,
+      "min": -50,
+      "max": 300
+    },
+    {
+      "name": "f_pe_ttm_max",
+      "description": "PE(TTM) 上限",
+      "default": 80,
+      "min": 0,
+      "max": 300
+    }
+  ],
+  "execution_defaults": {
+    "max_buy_drop": -0.03,
+    "stop_loss": -0.08
+  },
+  "live_defaults": {
+    "rebalance_days": 10,
+    "schedule_type": "interval",
+    "trade_weekdays": [],
+    "enabled_sessions": [
+      "PM"
+    ],
+    "sell_time": "14:30",
+    "buy_time": "14:45",
+    "sell_first": true,
+    "order_type": "LIMIT",
+    "max_price_deviation": 0.02,
+    "max_orders_per_cycle": 20
+  },
+  "live_config_tips": [
+    "换手率越低，对信号质量的要求越高；建议搭配 IC 稳定的模型。",
+    "10 日调仓 + 6 只替换，实测月换手约 30% 以内。"
+  ],
+  "markets": [
+    "a_share"
+  ],
+  "dir": "A股策略/01_宽基多因子"
+}

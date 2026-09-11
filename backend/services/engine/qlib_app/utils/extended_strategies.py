@@ -1036,7 +1036,10 @@ class RedisCrashBuyDipStrategy(DynamicRiskMixin, WeightStrategyBase, RedisLogger
         self.stop_loss = float(kwargs.pop("stop_loss", -0.05))
         self.max_wait_days = int(kwargs.pop("max_wait_days", 3))
         self.min_oversold_margin = float(kwargs.pop("min_oversold_margin", 0.01))
-        self.index_scale = float(kwargs.pop("index_scale", 1000))
+        # index_scale=1 时 crash_threshold_points 的单位是「指数点」：
+        # 100 点 ≈ 沪深 300 的 2.5%~3%，与 crash_threshold_pct 量级一致。
+        # 历史默认值 1000 会把阈值放大约 1000 倍（-0.1 点即触发），等于每个下跌日都算暴跌。
+        self.index_scale = float(kwargs.pop("index_scale", 1.0))
         self.benchmark = kwargs.pop("benchmark", "SH000300")
         self.trend_window = int(kwargs.pop("trend_window", 20))
         self.ma_fast = int(kwargs.pop("ma_fast", 5))
@@ -1052,8 +1055,9 @@ class RedisCrashBuyDipStrategy(DynamicRiskMixin, WeightStrategyBase, RedisLogger
         self._crash_info: dict = {}
         self._factor_df: pd.DataFrame | None = None
         self._all_dates: list = []
+        self._date_index: dict = {}
         self._instruments: list = []
-        self._buy_plan: dict = {}
+        self._entered_crashes: set = set()
         self._positions: dict = {}
         self._initialized = False
 
@@ -1062,34 +1066,66 @@ class RedisCrashBuyDipStrategy(DynamicRiskMixin, WeightStrategyBase, RedisLogger
     def _ensure_initialized(self) -> None:
         if self._initialized:
             return
-        cal = getattr(getattr(self, "trade_exchange", None), "_trade_calendar", None)
+        # 交易日历要从 TradeCalendarManager 取：它覆盖回测区间。
+        # 注意 get_all_time() 只返回 (start_time, end_time) 两个端点，不是日历本身，
+        # 所以按 trade_len 逐步取 get_step_time()；再退回 _calendar 切片 / exchange。
+        cal = None
+        tc = getattr(self, "trade_calendar", None)
+        if tc is not None and hasattr(tc, "get_step_time") and hasattr(tc, "get_trade_len"):
+            try:
+                cal = [tc.get_step_time(step)[0] for step in range(tc.get_trade_len())]
+            except Exception:  # noqa: BLE001 - 取不到再退回下面的候选
+                cal = None
+        if cal is None and tc is not None and hasattr(tc, "_calendar"):
+            try:
+                cal = list(tc._calendar[tc.start_index : tc.end_index + 1])
+            except Exception:  # noqa: BLE001
+                cal = None
         if cal is None:
-            tc = getattr(getattr(self, "trade_exchange", None), "trade_calendar", None)
-            if tc is not None and hasattr(tc, "_calendar"):
-                cal = tc._calendar
+            cal = getattr(getattr(self, "trade_exchange", None), "_trade_calendar", None)
         if cal is None:
             return
         self._all_dates = [pd.Timestamp(d) for d in cal]
         if not self._all_dates:
             return
+        self._date_index = {d: i for i, d in enumerate(self._all_dates)}
 
         start_str = self._all_dates[0].strftime("%Y-%m-%d")
         end_str = self._all_dates[-1].strftime("%Y-%m-%d")
 
         try:
-            self._instruments = list(D.instruments("csi300"))
-        except Exception:
+            # qlib 的 D.instruments() 返回的是「市场配置 dict」（{'market': ..., 'filter_pipe': ...}），
+            # 直接 list() 只会拿到 ['market', 'filter_pipe'] 两个字符串，随后 D.features 必然抛错，
+            # 又被下面的 except 吞掉 → _factor_df 永远为 None → 策略从不买入（实测 as41 全年 0 笔）。
+            # 必须经 D.list_instruments(..., as_list=True) 取真实代码列表。
+            instrument_cfg = D.instruments("csi300")
+            self._instruments = list(
+                D.list_instruments(
+                    instrument_cfg, start_time=start_str, end_time=end_str, as_list=True
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("crash-buy-dip: 加载 csi300 成分股失败，策略不会交易: %s", exc)
             return
 
         try:
             idx = D.features([self.benchmark], ["$close", "$change"], start_time=start_str, end_time=end_str).copy()
+            # 指数在 qlib cn_data 里 $change 常常是 NaN（实测 SH000300 2024 全年 NaN），
+            # 只看 $change 会让「暴跌」判断永不触发；用收盘价自算涨跌幅兜底。
+            pct_change = idx["$change"].where(idx["$change"].notna(), idx["$close"].pct_change())
             idx["point_change"] = idx["$close"].diff() * self.index_scale
-            for ridx, row in idx[(idx["point_change"] < -self.crash_threshold_points) | (idx["$change"] < -self.crash_threshold_pct)].iterrows():
+            crash_mask = (idx["point_change"] < -self.crash_threshold_points) | (
+                pct_change < -self.crash_threshold_pct
+            )
+            for ridx, row in idx[crash_mask].iterrows():
                 dt = pd.Timestamp(ridx[1]) if isinstance(ridx, tuple) else pd.Timestamp(ridx)
                 self._crash_dates.add(dt)
-                self._crash_info[dt] = {"point_change": float(row["point_change"]), "pct_change": float(row["$change"])}
-        except Exception:
-            pass
+                self._crash_info[dt] = {
+                    "point_change": float(row["point_change"]),
+                    "pct_change": float(pct_change.loc[ridx]),
+                }
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("crash-buy-dip: 计算暴跌日失败，策略不会交易: %s", exc)
 
         if self._crash_dates:
             try:
@@ -1137,80 +1173,140 @@ class RedisCrashBuyDipStrategy(DynamicRiskMixin, WeightStrategyBase, RedisLogger
             out.append({"stock": sym, "score": float(row["score"])})
         return out
 
-    def _find_entry(self, stock, crash_date):
-        try:
-            ci = self._all_dates.index(crash_date)
-        except ValueError:
+    def _index_of(self, date):
+        return self._date_index.get(pd.Timestamp(date))
+
+    def _prev_trade_date(self, date):
+        idx = self._index_of(date)
+        if idx is None or idx == 0:
             return None
-        for w in range(1, self.max_wait_days + 1):
-            if ci + w >= len(self._all_dates):
+        return self._all_dates[idx - 1]
+
+    def _recent_crash_date(self, prev):
+        """prev 往前 max_wait_days 个交易日内最近的暴跌日（没有则 None）。"""
+        idx = self._index_of(prev)
+        if idx is None:
+            return None
+        for back in range(0, self.max_wait_days + 1):
+            pos = idx - back
+            if pos < 0:
                 break
-            bd = self._all_dates[ci + w]
+            if self._all_dates[pos] in self._crash_dates:
+                return self._all_dates[pos]
+        return None
+
+    def _get_trade_date(self, trade_start_time=None):
+        """当前决策日（= 订单执行日）。
+
+        qlib 的 WeightStrategyBase 调 generate_target_weight_position 时传的是
+        trade_start_time/trade_end_time；旧实现读 self.trade_step，而这个版本的
+        qlib 策略实例上根本没有该属性（实测 trade_step=MISSING）→ 永远返回 None，
+        策略一笔都不成交。这里优先用入参，其次走 TradeCalendarManager。
+        """
+        if trade_start_time is not None:
+            return pd.Timestamp(trade_start_time)
+        tc = getattr(self, "trade_calendar", None)
+        if tc is not None and hasattr(tc, "get_step_time"):
             try:
-                dd = self._factor_df.loc[(stock, bd), :]
-            except KeyError:
-                continue
-            if dd["$change"] > -0.01 or (dd.get("KMID", 0) > 0 and dd.get("LOWER_SHADOW", 0) > 0.01) or w == self.max_wait_days:
-                return bd
+                return pd.Timestamp(tc.get_step_time(tc.get_trade_step())[0])
+            except Exception:  # noqa: BLE001
+                return None
         return None
 
-    def _get_trade_date(self):
-        step = getattr(self, "trade_step", None)
-        cal = getattr(self, "trade_calendar", [])
-        if step is not None and cal and 0 <= step < len(cal):
-            return pd.Timestamp(cal[step])
-        return None
+    def generate_target_weight_position(
+        self,
+        score=None,
+        current=None,
+        trade_exchange=None,
+        trade_start_time=None,
+        trade_end_time=None,
+        *args,
+        **kwargs,
+    ):
+        """生成目标权重。
 
-    def generate_target_weight_position(self, score=None, current=None, trade_exchange=None, *args, **kwargs):
+        时序约定（与平台回测链路一致：T-1 收盘信号 → T 日开盘成交）：
+        本函数在 T 日开盘前调用，因此**只读 T-1 日（prev）为止的数据**，选出的票在
+        T 日开盘买入。旧实现用 T 日自己的收盘数据选股、并依赖不存在的 self.trade_step，
+        结果全年 0 笔成交（详见 docs/A股策略模板_50个设计说明.md §6.15）。
+
+        返回值语义（qlib WeightStrategyBase + OrderGenWOInteract）：
+        - None           → 不产生任何委托，维持现有持仓；
+        - {}             → 目标持仓为空 → 清仓（账户止损分支沿用平台惯例）；
+        - {stock: weight} → 目标权重。
+        """
         if self.check_account_stop_loss():
             return {}
         self._ensure_initialized()
-        td = self._get_trade_date()
-        if td is None:
-            return {}
+        td = self._get_trade_date(trade_start_time)
+        if td is None or not self._all_dates:
+            return None
+        prev = self._prev_trade_date(td)
+        if prev is None or self._factor_df is None or self._factor_df.empty:
+            return None
 
-        # 卖出：到期或止盈止损
+        # 1) 更新持仓：持有到期或触发止盈/止损（用 prev 收盘价估值，无未来信息）
         for stock in list(self._positions.keys()):
             info = self._positions[stock]
+            bi = self._index_of(info.get("buy_date"))
+            ti = self._index_of(td)
+            if bi is not None and ti is not None and ti >= bi + self.hold_days:
+                self._positions.pop(stock)
+                continue
             try:
-                bi = self._all_dates.index(info["buy_date"])
-                ti = self._all_dates.index(td)
-                if ti >= bi + self.hold_days:
-                    self._positions.pop(stock)
-                    continue
-            except ValueError:
-                pass
-            try:
-                cp = self._factor_df.loc[(stock, td), "$close"]
-                ret = cp / info["buy_price"] - 1
+                cp = float(self._factor_df.loc[(stock, prev), "$close"])
+            except KeyError:
+                continue
+            buy_price = float(info.get("buy_price") or 0.0)
+            if buy_price > 0:
+                ret = cp / buy_price - 1.0
                 if ret >= self.take_profit or ret <= self.stop_loss:
                     self._positions.pop(stock)
-            except KeyError:
-                pass
 
-        # 大跌日规划买入
-        if td in self._crash_dates and not any(p.get("crash_date") == td for p in self._positions.values()):
-            cands = self._find_oversold(td, self._crash_info.get(td, {}).get("pct_change", 0))
-            for c in cands:
-                bd = self._find_entry(c["stock"], td)
-                if bd is not None:
-                    self._buy_plan.setdefault(bd, []).append({"stock": c["stock"], "crash_date": td})
+        # 2) 暴跌抄底：prev 落在某次暴跌的等待窗口内，且该次暴跌尚未建仓
+        crash_ref = self._recent_crash_date(prev)
+        if crash_ref is not None and crash_ref not in self._entered_crashes:
+            cands = self._find_oversold(
+                crash_ref, self._crash_info.get(crash_ref, {}).get("pct_change", 0.0)
+            )
+            added = False
+            for cand in cands:
+                stock = cand["stock"]
+                if stock in self._positions:
+                    continue
+                try:
+                    row = self._factor_df.loc[(stock, prev), :]
+                    buy_price = float(row["$close"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                # 入场确认：prev 没有继续大跌，或留下下影线（都是 prev 已收盘的信息）
+                if not (
+                    row["$change"] > -0.01
+                    or (row.get("KMID", 0.0) > 0 and row.get("LOWER_SHADOW", 0.0) > 0.01)
+                ):
+                    continue
+                self._positions[stock] = {
+                    "buy_date": td,
+                    "buy_price": buy_price,
+                    "crash_date": crash_ref,
+                }
+                added = True
+            if added:
+                self._entered_crashes.add(crash_ref)
 
-        # 执行今日买入
-        if td in self._buy_plan:
-            plan = self._buy_plan.pop(td)
-            n = len(plan)
-            if n > 0:
-                w = 1.0 / n
-                for item in plan:
-                    self._positions[item["stock"]] = {"buy_date": td, "buy_price": 0, "crash_date": item["crash_date"]}
-                return {item["stock"]: 1.0 / n for item in plan}
-
-        return {}
+        # 3) 目标持仓与当前持仓一致时不产生委托（返回 None；返回 {} 会被当成清仓）
+        desired = set(self._positions.keys())
+        actual = set(current.get_stock_list()) if current is not None else set()
+        if desired == actual:
+            return None
+        if not desired:
+            return {}
+        weight = 1.0 / len(desired)
+        return {stock: weight for stock in desired}
 
     def reset(self, *args, **kwargs):
         self._positions.clear()
-        self._buy_plan.clear()
+        self._entered_crashes.clear()
         self._qm_trade_step_counter = 0
         self.reset_dynamic_risk()
         try:

@@ -29,12 +29,12 @@ async def test_risk_service_rejects_sell_to_open_when_long_short_not_enabled(mon
 
     monkeypatch.setattr(svc, "get_applicable_rules", _no_rules)
     monkeypatch.setattr(
-        "backend.services.trade.services.risk_service.get_margin_stock_pool_service",
+        "backend.services.live_trading.services.risk_service.get_margin_stock_pool_service",
         lambda _path: SimpleNamespace(is_margin_eligible=lambda _symbol: True),
     )
-    monkeypatch.setattr("backend.services.trade.services.risk_service.settings.ENABLE_MARGIN_TRADING", True)
-    monkeypatch.setattr("backend.services.trade.services.risk_service.settings.ENABLE_LONG_SHORT_REAL", False)
-    monkeypatch.setattr("backend.services.trade.services.risk_service.settings.LONG_SHORT_WHITELIST_USERS", "1001")
+    monkeypatch.setattr("backend.services.live_trading.services.risk_service.settings.ENABLE_MARGIN_TRADING", True)
+    monkeypatch.setattr("backend.services.live_trading.services.risk_service.settings.ENABLE_LONG_SHORT_REAL", False)
+    monkeypatch.setattr("backend.services.live_trading.services.risk_service.settings.LONG_SHORT_WHITELIST_USERS", "1001")
 
     order = SimpleNamespace(
         symbol="600000.SH",
@@ -61,15 +61,15 @@ async def test_risk_service_rejects_sell_to_open_when_credit_snapshot_unavailabl
 
     monkeypatch.setattr(svc, "get_applicable_rules", _no_rules)
     monkeypatch.setattr(
-        "backend.services.trade.services.risk_service.get_margin_stock_pool_service",
+        "backend.services.live_trading.services.risk_service.get_margin_stock_pool_service",
         lambda _path: SimpleNamespace(is_margin_eligible=lambda _symbol: True),
     )
-    monkeypatch.setattr("backend.services.trade.services.risk_service.settings.ENABLE_MARGIN_TRADING", True)
-    monkeypatch.setattr("backend.services.trade.services.risk_service.settings.ENABLE_LONG_SHORT_REAL", True)
-    monkeypatch.setattr("backend.services.trade.services.risk_service.settings.LONG_SHORT_WHITELIST_USERS", "1001")
-    monkeypatch.setattr("backend.services.trade.services.risk_service.settings.SHORT_ADMISSION_STRICT", True)
+    monkeypatch.setattr("backend.services.live_trading.services.risk_service.settings.ENABLE_MARGIN_TRADING", True)
+    monkeypatch.setattr("backend.services.live_trading.services.risk_service.settings.ENABLE_LONG_SHORT_REAL", True)
+    monkeypatch.setattr("backend.services.live_trading.services.risk_service.settings.LONG_SHORT_WHITELIST_USERS", "1001")
+    monkeypatch.setattr("backend.services.live_trading.services.risk_service.settings.SHORT_ADMISSION_STRICT", True)
     monkeypatch.setattr(
-        "backend.services.trade.routers.real_trading_utils._fetch_latest_real_account_snapshot",
+        "backend.services.live_trading.routers.real_trading_utils._fetch_latest_real_account_snapshot",
         AsyncMock(return_value=None),
     )
 
@@ -105,15 +105,15 @@ async def test_risk_service_passes_sell_to_open_when_all_checks_ready(monkeypatc
 
     monkeypatch.setattr(svc, "get_applicable_rules", _no_rules)
     monkeypatch.setattr(
-        "backend.services.trade.services.risk_service.get_margin_stock_pool_service",
+        "backend.services.live_trading.services.risk_service.get_margin_stock_pool_service",
         lambda _path: SimpleNamespace(is_margin_eligible=lambda _symbol: True),
     )
-    monkeypatch.setattr("backend.services.trade.services.risk_service.settings.ENABLE_MARGIN_TRADING", True)
-    monkeypatch.setattr("backend.services.trade.services.risk_service.settings.ENABLE_LONG_SHORT_REAL", True)
-    monkeypatch.setattr("backend.services.trade.services.risk_service.settings.LONG_SHORT_WHITELIST_USERS", "1001")
-    monkeypatch.setattr("backend.services.trade.services.risk_service.settings.SHORT_ADMISSION_STRICT", True)
+    monkeypatch.setattr("backend.services.live_trading.services.risk_service.settings.ENABLE_MARGIN_TRADING", True)
+    monkeypatch.setattr("backend.services.live_trading.services.risk_service.settings.ENABLE_LONG_SHORT_REAL", True)
+    monkeypatch.setattr("backend.services.live_trading.services.risk_service.settings.LONG_SHORT_WHITELIST_USERS", "1001")
+    monkeypatch.setattr("backend.services.live_trading.services.risk_service.settings.SHORT_ADMISSION_STRICT", True)
     monkeypatch.setattr(
-        "backend.services.trade.routers.real_trading_utils._fetch_latest_real_account_snapshot",
+        "backend.services.live_trading.routers.real_trading_utils._fetch_latest_real_account_snapshot",
         AsyncMock(return_value=snapshot),
     )
 

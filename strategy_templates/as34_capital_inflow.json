@@ -1,0 +1,82 @@
+{
+  "id": "as34_capital_inflow",
+  "name": "A股资金流入（量能放大）",
+  "description": "3 日量能趋势向上、量比>1.1、成交额 1 亿以上，跟随资金放量方向。",
+  "category": "advanced",
+  "difficulty": "intermediate",
+  "params": [
+    {
+      "name": "topk",
+      "description": "持仓股票总数",
+      "default": 30,
+      "min": 5,
+      "max": 200
+    },
+    {
+      "name": "n_drop",
+      "description": "每期最大替换数",
+      "default": 12,
+      "min": 0,
+      "max": 200
+    },
+    {
+      "name": "rebalance_days",
+      "description": "调仓周期（交易日）",
+      "default": 3,
+      "min": 1,
+      "max": 60
+    },
+    {
+      "name": "f_volume_trend_3d_min",
+      "description": "3 日量能趋势下限",
+      "default": 0.2,
+      "min": -1.0,
+      "max": 5.0
+    },
+    {
+      "name": "f_vol_to_ma5_min",
+      "description": "量比（对 5 日均量）下限",
+      "default": 1.1,
+      "min": 0.0,
+      "max": 10
+    },
+    {
+      "name": "f_amount_ma_5_min",
+      "description": "5 日均成交额下限（万元）",
+      "default": 10000,
+      "min": 0
+    },
+    {
+      "name": "f_total_mv_min",
+      "description": "总市值下限（元）",
+      "default": 3000000000.0,
+      "min": 0
+    }
+  ],
+  "execution_defaults": {
+    "max_buy_drop": -0.03,
+    "stop_loss": -0.08
+  },
+  "live_defaults": {
+    "rebalance_days": 3,
+    "schedule_type": "interval",
+    "trade_weekdays": [],
+    "enabled_sessions": [
+      "PM"
+    ],
+    "sell_time": "14:30",
+    "buy_time": "14:45",
+    "sell_first": true,
+    "order_type": "LIMIT",
+    "max_price_deviation": 0.02,
+    "max_orders_per_cycle": 20
+  },
+  "live_config_tips": [
+    "量能因子需要与价格方向配合，单看放量容易买到出货盘。",
+    "建议与趋势/动量类模板对比回测，验证增量信息。"
+  ],
+  "markets": [
+    "a_share"
+  ],
+  "dir": "A股策略/07_行业与主题轮动"
+}

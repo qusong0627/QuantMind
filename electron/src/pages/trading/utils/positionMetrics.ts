@@ -33,13 +33,19 @@ export const extractPositionCodes = (accountInfo: AccountInfo | null): string[] 
     return Array.from(new Set(rows.map(({ key, pos }) => resolveCode(key, pos)).filter(Boolean)));
 };
 
-export const getPositionSummary = (accountInfo: AccountInfo | null): PositionSummary => {
+export const getPositionSummary = (
+    accountInfo: AccountInfo | null,
+    holdings?: NormalizedHolding[],
+): PositionSummary => {
     const totalAsset = toFiniteNumber(accountInfo?.total_asset, 0);
     const cashValue = toFiniteNumber(
         (accountInfo as any)?.cash ?? (accountInfo as any)?.available_cash,
         0,
     );
-    const positionValue = toFiniteNumber(accountInfo?.market_value, 0);
+    // 传入合并实时价后的持仓时，汇总跟随重算（与明细同口径），否则用账户旧市值
+    const positionValue = holdings
+        ? holdings.reduce((sum, h) => sum + toFiniteNumber(h.value, 0), 0)
+        : toFiniteNumber(accountInfo?.market_value, 0);
     const safeTotalAsset = totalAsset > 0 ? totalAsset : (cashValue + positionValue);
     const positionRatio = safeTotalAsset > 0 ? (positionValue / safeTotalAsset) * 100 : 0;
     const cashRatio = safeTotalAsset > 0 ? (cashValue / safeTotalAsset) * 100 : 0;

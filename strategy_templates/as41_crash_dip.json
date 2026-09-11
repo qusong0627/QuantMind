@@ -1,0 +1,133 @@
+{
+  "id": "as41_crash_dip",
+  "name": "A股指数暴跌抄底",
+  "description": "平台内置抄底类：沪深 300 单日暴跌 2.5%（或 100 点）触发后，挑超跌且趋势未破的标的，等其企稳（前一交易日不再大跌或留长下影）于次日开盘买入，持有 5 日，止盈 8% 止损 5%。",
+  "category": "advanced",
+  "difficulty": "advanced",
+  "params": [
+    {
+      "name": "top_k",
+      "description": "单次抄底买入标的数",
+      "default": 5,
+      "min": 1,
+      "max": 50
+    },
+    {
+      "name": "hold_days",
+      "description": "抄底后持有交易日数",
+      "default": 5,
+      "min": 1,
+      "max": 60
+    },
+    {
+      "name": "take_profit",
+      "description": "个股止盈线（正数，0.15=赚 15% 止盈）",
+      "default": 0.08,
+      "min": 0.01,
+      "max": 1.0
+    },
+    {
+      "name": "stop_loss",
+      "description": "个股止损线（负数，-0.08=亏 8% 止损）",
+      "default": -0.05,
+      "min": -0.5,
+      "max": -0.01
+    },
+    {
+      "name": "crash_threshold_pct",
+      "description": "指数单日跌幅触发阈值（小数）",
+      "default": 0.025,
+      "min": 0.005,
+      "max": 0.1
+    },
+    {
+      "name": "crash_threshold_points",
+      "description": "指数单日跌幅触发阈值（点）",
+      "default": 100,
+      "min": 10,
+      "max": 1000
+    },
+    {
+      "name": "benchmark",
+      "description": "抄底参考基准指数",
+      "default": "SH000300"
+    },
+    {
+      "name": "max_wait_days",
+      "description": "触发后最长等待入场天数",
+      "default": 3,
+      "min": 0,
+      "max": 20
+    },
+    {
+      "name": "min_oversold_margin",
+      "description": "超跌幅度下限（相对均线）",
+      "default": 0.01,
+      "min": 0.0,
+      "max": 0.2
+    },
+    {
+      "name": "trend_window",
+      "description": "趋势判定窗口",
+      "default": 20,
+      "min": 5,
+      "max": 120
+    },
+    {
+      "name": "ma_fast",
+      "description": "快均线周期",
+      "default": 5,
+      "min": 2,
+      "max": 60
+    },
+    {
+      "name": "ma_slow",
+      "description": "慢均线周期",
+      "default": 20,
+      "min": 5,
+      "max": 250
+    },
+    {
+      "name": "vol_lookback",
+      "description": "波动率回看窗口",
+      "default": 10,
+      "min": 5,
+      "max": 120
+    },
+    {
+      "name": "rebalance_days",
+      "description": "调仓周期（交易日）",
+      "default": 1,
+      "min": 1,
+      "max": 60
+    }
+  ],
+  "execution_defaults": {
+    "max_buy_drop": -0.03,
+    "stop_loss": -0.08
+  },
+  "live_defaults": {
+    "rebalance_days": 1,
+    "schedule_type": "interval",
+    "trade_weekdays": [],
+    "enabled_sessions": [
+      "PM"
+    ],
+    "sell_time": "14:30",
+    "buy_time": "14:45",
+    "sell_first": true,
+    "order_type": "LIMIT",
+    "max_price_deviation": 0.02,
+    "max_orders_per_cycle": 20
+  },
+  "live_config_tips": [
+    "该策略是事件驱动型，多数交易日空仓，需要长期持有才能体现统计规律。",
+    "暴跌阈值 2.5% 或 100 点任一满足即触发，可只保留一个条件。",
+    "决策只读前一交易日收盘为止的数据（T-1 信号 → T 日开盘成交），不会用当天收盘价选股。",
+    "该类不接受 only_tradable（会透传给 qlib 基类报错），涨跌停过滤由类内部自行处理。"
+  ],
+  "markets": [
+    "a_share"
+  ],
+  "dir": "A股策略/09_事件与择时"
+}

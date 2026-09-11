@@ -1,0 +1,95 @@
+{
+  "id": "as04_broad_balanced",
+  "name": "A股大盘均衡配置",
+  "description": "总市值锁定 100 亿至 3000 亿、要求分红，构建大盘蓝筹均衡组合，波动低于全市场。",
+  "category": "basic",
+  "difficulty": "beginner",
+  "params": [
+    {
+      "name": "topk",
+      "description": "持仓股票总数",
+      "default": 50,
+      "min": 5,
+      "max": 200
+    },
+    {
+      "name": "n_drop",
+      "description": "每期最大替换数",
+      "default": 10,
+      "min": 0,
+      "max": 200
+    },
+    {
+      "name": "rebalance_days",
+      "description": "调仓周期（交易日）",
+      "default": 5,
+      "min": 1,
+      "max": 60
+    },
+    {
+      "name": "f_total_mv_min",
+      "description": "总市值下限（元）",
+      "default": 10000000000.0,
+      "min": 0
+    },
+    {
+      "name": "f_total_mv_max",
+      "description": "总市值上限（元）",
+      "default": 300000000000.0,
+      "min": 0
+    },
+    {
+      "name": "f_pe_ttm_min",
+      "description": "PE(TTM) 下限（剔除亏损）",
+      "default": 0.0,
+      "min": -50,
+      "max": 300
+    },
+    {
+      "name": "f_pe_ttm_max",
+      "description": "PE(TTM) 上限",
+      "default": 60,
+      "min": 0,
+      "max": 300
+    },
+    {
+      "name": "f_dividend_rate_min",
+      "description": "股息率下限（小数，0.02=2%）",
+      "default": 0.005,
+      "min": 0.0,
+      "max": 0.2
+    },
+    {
+      "name": "f_amount_ma_5_min",
+      "description": "5 日均成交额下限（万元）",
+      "default": 10000,
+      "min": 0
+    }
+  ],
+  "execution_defaults": {
+    "max_buy_drop": -0.03,
+    "stop_loss": -0.08
+  },
+  "live_defaults": {
+    "rebalance_days": 5,
+    "schedule_type": "interval",
+    "trade_weekdays": [],
+    "enabled_sessions": [
+      "PM"
+    ],
+    "sell_time": "14:30",
+    "buy_time": "14:45",
+    "sell_first": true,
+    "order_type": "LIMIT",
+    "max_price_deviation": 0.02,
+    "max_orders_per_cycle": 20
+  },
+  "live_config_tips": [
+    "大盘均衡适合作为底仓，与小盘/成长策略组合可显著降低相关性。",
+    "股息率下限 0.5% 用于剔除长期不分红的标的。"
+  ],
+  "markets": [
+    "a_share"
+  ],
+  "dir": "A股策略/01_宽基多因子"
+}

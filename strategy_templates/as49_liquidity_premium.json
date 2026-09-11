@@ -1,0 +1,82 @@
+{
+  "id": "as49_liquidity_premium",
+  "name": "A股流动性溢价",
+  "description": "成交额 5 亿以上、市值 200 亿以上、量比不低于 0.8 的高流动性组合。",
+  "category": "advanced",
+  "difficulty": "intermediate",
+  "params": [
+    {
+      "name": "topk",
+      "description": "持仓股票总数",
+      "default": 30,
+      "min": 5,
+      "max": 200
+    },
+    {
+      "name": "n_drop",
+      "description": "每期最大替换数",
+      "default": 8,
+      "min": 0,
+      "max": 200
+    },
+    {
+      "name": "rebalance_days",
+      "description": "调仓周期（交易日）",
+      "default": 5,
+      "min": 1,
+      "max": 60
+    },
+    {
+      "name": "f_amount_ma_5_min",
+      "description": "5 日均成交额下限（万元）",
+      "default": 50000,
+      "min": 0
+    },
+    {
+      "name": "f_total_mv_min",
+      "description": "总市值下限（元）",
+      "default": 20000000000.0,
+      "min": 0
+    },
+    {
+      "name": "f_vol_to_ma20_min",
+      "description": "量比（对 20 日均量）下限",
+      "default": 0.8,
+      "min": 0.0,
+      "max": 10
+    },
+    {
+      "name": "f_pe_ttm_max",
+      "description": "PE(TTM) 上限",
+      "default": 80,
+      "min": 0,
+      "max": 300
+    }
+  ],
+  "execution_defaults": {
+    "max_buy_drop": -0.03,
+    "stop_loss": -0.08
+  },
+  "live_defaults": {
+    "rebalance_days": 5,
+    "schedule_type": "interval",
+    "trade_weekdays": [],
+    "enabled_sessions": [
+      "PM"
+    ],
+    "sell_time": "14:30",
+    "buy_time": "14:45",
+    "sell_first": true,
+    "order_type": "LIMIT",
+    "max_price_deviation": 0.02,
+    "max_orders_per_cycle": 20
+  },
+  "live_config_tips": [
+    "高流动性组合容量大、冲击成本低，适合资金规模较大的账户。",
+    "量比下限 0.8 只排除极度缩量的标的，不追求放量。"
+  ],
+  "markets": [
+    "a_share"
+  ],
+  "dir": "A股策略/10_小盘与流动性"
+}

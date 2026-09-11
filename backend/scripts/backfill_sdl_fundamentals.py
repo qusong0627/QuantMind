@@ -3,10 +3,12 @@
 回填 stock_daily_latest 基本面数据 (pe_ttm / pb / roe / total_mv / float_mv / industry).
 
 数据源策略 (双源, 互补):
-  Phase 1 - fundamental_aligned.parquet (本地离线, 权威历史值)
-            覆盖 2020-01-02 ~ 2026-05-20, 含 pe_ttm/pb/roe/total_mv/float_mv/industry.
-            前缀代码 (SH600000) -> 后缀代码 (600000.SH) 转换后 JOIN.
-  Phase 2 - Eastmoney clist 直连 API (当日快照, 补 parquet 截止后的最新月)
+  Phase 1 - QuantDB (data/quantdb)
+            估值来源 features_daily/valuation (pe_ttm/pb/total_mv/float_mv),
+            roe 来源 3_financial_data/pershare_index (latest report),
+            industry 来源 2_base_sector/instrument_detail.
+            代码为后缀式 (600000.SH).
+  Phase 2 - Eastmoney clist 直连 API (当日快照, 补 QuantDB 截止后的最新月)
             f9=PE动态 f23=PB f20=总市值 f21=流通市值, 全市场 ~5860 只.
             快照值按 DB 各日收盘价线性缩放, 得到逐日估值估计.
 
@@ -14,7 +16,7 @@
 
 用法:
     python backend/scripts/backfill_sdl_fundamentals.py --diagnose        # 仅诊断
-    python backend/scripts/backfill_sdl_fundamentals.py --phase-parquet   # 阶段1: parquet 批量
+    python backend/scripts/backfill_sdl_fundamentals.py --phase-quantdb   # 阶段1: QuantDB 批量
     python backend/scripts/backfill_sdl_fundamentals.py --phase-em        # 阶段2: Eastmoney 最新月
     python backend/scripts/backfill_sdl_fundamentals.py --all            # 两阶段全跑
     python backend/scripts/backfill_sdl_fundamentals.py --dry-run        # 试运行
@@ -34,8 +36,7 @@ from sqlalchemy import create_engine, text
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, PROJECT_ROOT)
 
-PARQUET_PATH = "/app/db/custom/fundamental_aligned.parquet"
-# parquet 最晚日期之后, 由 Eastmoney 快照覆盖
+# QuantDB(valuation/features_daily) 覆盖之后, 由 Eastmoney 快照覆盖
 PARQUET_CUTOFF = date(2026, 5, 20)
 
 FUND_COLS = ["pe_ttm", "pb", "roe", "total_mv", "float_mv", "industry"]
@@ -66,7 +67,7 @@ def diagnose(engine):
         print(f"\n📊 总行数: {total:,}")
         r = conn.execute(text("SELECT MIN(trade_date), MAX(trade_date) FROM stock_daily_latest WHERE volume > 0")).one()
         print(f"   日期范围: {r[0]} → {r[1]}")
-        print(f"\n📋 基本面列覆盖率:")
+        print("\n📋 基本面列覆盖率:")
         for col in FUND_COLS:
             if col == "industry":
                 has = conn.execute(text(
@@ -82,51 +83,96 @@ def diagnose(engine):
     return total
 
 
-def _prefix_to_suffix(sym: str) -> str | None:
-    """SH600000 -> 600000.SH ; 仅保留 6 位数字股票代码, 剔除指数."""
-    if not isinstance(sym, str) or len(sym) < 8:
-        return None
-    market, code = sym[:2], sym[2:]
-    if market not in ("SH", "SZ", "BJ"):
-        return None
-    if not code.isdigit() or len(code) != 6:
-        return None
-    return f"{code}.{market}"
+def _quantdb_valuation_frame(start: date, end: date) -> pd.DataFrame:
+    """QuantDB 估值 (pe/pb/total_mv/float_mv)，bulk 读取。"""
+    from backend.services.engine.data_platform.quantdb_hub import QuantDBDataHub
+    hub = QuantDBDataHub.get_instance()
+    if not hub.available:
+        return pd.DataFrame()
+    df = hub.fetch_valuation(start=start, end=end)
+    if df.empty:
+        return df
+    sym_col = next((c for c in ("symbol", "Symbol") if c in df.columns), None)
+    date_col = next((c for c in ("time", "trade_date") if c in df.columns), None)
+    if not sym_col or not date_col:
+        print(f"   ⚠️ QuantDB valuation 缺 symbol/日期列: {list(df.columns)}")
+        return pd.DataFrame()
+    df = df.rename(columns={sym_col: "symbol", date_col: "trade_date"})
+    df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.date
+    return df
 
 
-def phase_parquet(engine, dry_run: bool = False) -> int:
-    """阶段1: 从 fundamental_aligned.parquet 批量回填历史基本面."""
+def _quantdb_roe_map(symbols: list[str]) -> dict[str, float]:
+    """从 3_financial_data/pershare_index 取每股最近报告期 roe (net_roe 优先)。"""
+    from backend.services.engine.data_platform.quantdb_hub import QuantDBDataHub
+    hub = QuantDBDataHub.get_instance()
+    roe_map: dict[str, float] = {}
+    for symbol in symbols:
+        try:
+            f = hub.fetch_financial(symbol, "pershare_index")
+            if f.empty:
+                continue
+            for col in ("net_roe", "total_roe", "equity_roe", "roe_dupont"):
+                if col in f.columns:
+                    vals = pd.to_numeric(f[col], errors="coerce").dropna()
+                    if not vals.empty:
+                        roe_map[symbol] = float(vals.iloc[-1])
+                        break
+        except Exception:
+            continue
+    return roe_map
+
+
+def _quantdb_industry_map() -> dict[str, str]:
+    """instrument_detail 行业映射 (symbol → ind_name_l1)。"""
+    try:
+        from backend.services.engine.data_platform.quantdb_hub import QuantDBDataHub
+        hub = QuantDBDataHub.get_instance()
+        ind = hub.fetch_instrument_industry()
+    except Exception:
+        return {}
+    if ind is None or ind.empty or "symbol" not in ind.columns or "ind_name_l1" not in ind.columns:
+        return {}
+    return dict(zip(ind["symbol"], ind["ind_name_l1"], strict=False))
+
+
+def phase_quantdb(engine, dry_run: bool = False) -> int:
+    """阶段1: 从 QuantDB 批量回填历史基本面 (valuation + pershare_index + instrument_detail)."""
     print("\n" + "=" * 70)
-    print("  阶段1: parquet 批量回填 (历史权威值)")
+    print("  阶段1: QuantDB 批量回填 (历史权威值)")
     print("=" * 70)
 
-    if not os.path.exists(PARQUET_PATH):
-        print(f"   ❌ parquet 不存在: {PARQUET_PATH}")
-        return 0
-
-    print(f"\n1️⃣  读取 parquet: {PARQUET_PATH}")
-    cols = ["trade_date", "symbol", "pe_ttm", "pb", "roe", "total_mv", "float_mv", "industry"]
-    df = pd.read_parquet(PARQUET_PATH, columns=cols)
-    df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.date
-    print(f"   parquet 原始: {len(df):,} 行, {df['symbol'].nunique()} 只, "
-          f"{df['trade_date'].min()} → {df['trade_date'].max()}")
-
-    # 转换代码格式: 前缀 -> 后缀
-    df["symbol"] = df["symbol"].map(_prefix_to_suffix)
-    df = df.dropna(subset=["symbol"])
-    print(f"   代码转换后 (6位数字股票): {df['symbol'].nunique()} 只")
-
-    # 仅保留 DB 日期范围内 (parquet 能覆盖的部分)
     with engine.connect() as conn:
         r = conn.execute(text("SELECT MIN(trade_date), MAX(trade_date) FROM stock_daily_latest WHERE volume>0")).one()
-    db_min, db_max = r[0], r[1]
-    df = df[(df["trade_date"] >= db_min) & (df["trade_date"] <= PARQUET_CUTOFF)]
-    print(f"   过滤至 DB 日期范围 & ≤{PARQUET_CUTOFF}: {len(df):,} 行")
+    db_min = r[0]
+    if db_min is None:
+        print("   ℹ️  stock_daily_latest 为空，跳过（无可用 DB 日期范围）")
+        return 0
+    db_min = pd.Timestamp(db_min).date()
+
+    print(f"\n1️⃣  读取 QuantDB valuation: {db_min} → {PARQUET_CUTOFF}")
+    df = _quantdb_valuation_frame(db_min, PARQUET_CUTOFF)
+    if df.empty:
+        print("   ❌ QuantDB valuation 无数据")
+        return 0
+    print(f"   QuantDB 估值: {len(df):,} 行, {df['symbol'].nunique()} 只, "
+          f"{df['trade_date'].min()} → {df['trade_date'].max()}")
+
+    print("\n2️⃣  补充 roe/industry (QuantDB)...")
+    symbols = sorted(df["symbol"].unique().tolist())
+    roe_map = _quantdb_roe_map(symbols)
+    ind_map = _quantdb_industry_map()
+    df["roe"] = df["symbol"].map(roe_map)
+    df["industry"] = df["symbol"].map(ind_map)
+    print(f"   roe 覆盖 {len(roe_map)} 只, industry 覆盖 {len(ind_map)} 只")
 
     # 数值列转 float, 剔除无效
     for c in ["pe_ttm", "pb", "roe", "total_mv", "float_mv"]:
-        df[c] = pd.to_numeric(df[c], errors="coerce")
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
     df["industry"] = df["industry"].fillna("").astype(str).replace("nan", "")
+    keep = ["trade_date", "symbol", "pe_ttm", "pb", "roe", "total_mv", "float_mv", "industry"]
+    df = df[keep].copy()
 
     if dry_run:
         nn = {c: int(df[c].notna().sum()) for c in FUND_COLS if c != "industry"}
@@ -134,7 +180,7 @@ def phase_parquet(engine, dry_run: bool = False) -> int:
         print(f"   [DRY RUN] 将写入临时表 {len(df):,} 行, 非空分布: {nn}")
         return 0
 
-    print(f"\n2️⃣  写入临时表 tmp_fund_backfill ({len(df):,} 行)...")
+    print(f"\n3️⃣  写入临时表 tmp_fund_backfill ({len(df):,} 行)...")
     t0 = time.time()
     with engine.begin() as conn:
         conn.execute(text("DROP TABLE IF EXISTS tmp_fund_backfill"))
@@ -147,12 +193,12 @@ def phase_parquet(engine, dry_run: bool = False) -> int:
         ))
     print(f"   临时表就绪 ({time.time()-t0:.1f}s)")
 
-    print(f"\n3️⃣  UPDATE JOIN 回填 (仅填充缺失, COALESCE 保留已有值)...")
+    print("\n4️⃣  UPDATE JOIN 回填 (仅填充缺失, COALESCE 保留已有值)...")
     # 行业是文本, 用 NULLIF('') ; 数值用 NULLIF(0)
     sets = []
     for c in FUND_COLS:
         if c == "industry":
-            sets.append(f"industry = COALESCE(NULLIF(s.industry, ''), t.industry, s.industry)")
+            sets.append("industry = COALESCE(NULLIF(s.industry, ''), t.industry, s.industry)")
         else:
             sets.append(f"{c} = COALESCE(NULLIF(s.{c}, 0), t.{c}, s.{c})")
     sql = text(f"""
@@ -258,7 +304,7 @@ def _fetch_eastmoney_snapshot() -> pd.DataFrame:
 
 
 def phase_eastmoney(engine, dry_run: bool = False) -> int:
-    """阶段2: Eastmoney 快照补 parquet 截止后的最新月 (按收盘价缩放为逐日估值)."""
+    """阶段2: Eastmoney 快照补 QuantDB 截止后的最新月 (按收盘价缩放为逐日估值)."""
     print("\n" + "=" * 70)
     print(f"  阶段2: Eastmoney 快照 (补 >{PARQUET_CUTOFF} 的最新月)")
     print("=" * 70)
@@ -300,7 +346,7 @@ def phase_eastmoney(engine, dry_run: bool = False) -> int:
     print(f"   DB 最新月: {len(db):,} 行, {db['symbol'].nunique()} 只; 基准日 {snap_date}: {len(ref):,} 只")
 
     # 重置最新月 Eastmoney 负责的 4 列 (清除此前错误缩放值), 随后基一致重填.
-    # parquet 阶段(≤cutoff)与 roe 不受影响.
+    # QuantDB 阶段(≤cutoff)与 roe 不受影响.
     if not dry_run:
         with engine.begin() as conn:
             r = conn.execute(text("""
@@ -390,9 +436,9 @@ def phase_forwardfill(engine, dry_run: bool = False) -> int:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="回填 stock_daily_latest 基本面数据 (parquet + Eastmoney + 前向填充)")
+    parser = argparse.ArgumentParser(description="回填 stock_daily_latest 基本面数据 (QuantDB + Eastmoney + 前向填充)")
     parser.add_argument("--diagnose", action="store_true", help="仅诊断")
-    parser.add_argument("--phase-parquet", action="store_true", help="阶段1: parquet 批量回填")
+    parser.add_argument("--phase-quantdb", action="store_true", help="阶段1: QuantDB 批量回填")
     parser.add_argument("--phase-em", action="store_true", help="阶段2: Eastmoney 最新月")
     parser.add_argument("--phase-ff", action="store_true", help="阶段3: 前向填充剩余缺口 (roe 等)")
     parser.add_argument("--all", action="store_true", help="三阶段全跑")
@@ -404,12 +450,12 @@ def main():
 
     if args.diagnose:
         return
-    if not any([args.phase_parquet, args.phase_em, args.phase_ff, args.all]):
+    if not any([args.phase_quantdb, args.phase_em, args.phase_ff, args.all]):
         return
 
     dry = args.dry_run
-    if args.all or args.phase_parquet:
-        phase_parquet(engine, dry_run=dry)
+    if args.all or args.phase_quantdb:
+        phase_quantdb(engine, dry_run=dry)
     if args.all or args.phase_em:
         phase_eastmoney(engine, dry_run=dry)
     if args.all or args.phase_ff:

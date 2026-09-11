@@ -6,10 +6,12 @@ import asyncio
 import concurrent.futures
 import json
 import logging
+import os
 import re
 import time
 import datetime as _dt
 from datetime import date, datetime
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
@@ -524,6 +526,144 @@ def _sse(event: str, data: Any) -> str:
     return f"event: {event}\ndata: {payload}\n\n"
 
 
+# 手动分析持久化的多周期组合（与离线 compute.py 产出的 money_flow_periods 键一致）
+_PERSIST_PERIOD_COMBOS: tuple[tuple[str, str, str], ...] = (
+    ("1d", "sector", "shenwan"),
+    ("1d", "sector", "concept"),
+    ("1d", "stock", "shenwan"),
+    ("5d", "sector", "shenwan"),
+    ("5d", "sector", "concept"),
+    ("5d", "stock", "shenwan"),
+    ("20d", "sector", "shenwan"),
+    ("20d", "sector", "concept"),
+    ("20d", "stock", "shenwan"),
+)
+
+
+def _persist_stream_snapshot(
+    *,
+    trade_date: str,
+    generated_at: str,
+    indices: Any,
+    breadth: Any,
+    heatmap_shenwan: Any,
+    heatmap_concept: Any,
+    sankey: Any,
+    stock_flow: Any,
+    stock_flow_full: Any,
+    money_flow_periods: dict[str, Any],
+) -> str | None:
+    """把手动分析结果合并写入快照目录（{date}.json + latest.json）。
+
+    只替换本次算出的块；tag_stats 等离线块保留旧快照内容，等 04:00 beat
+    全量重算后自然对齐。永不抛异常，失败仅记日志（不影响本次分析返回）。
+    返回写入的 trade_date，失败返回 None。
+    """
+    try:
+        env = os.getenv("QM_MARKET_SNAPSHOT_DIR", "").strip()
+        out_dir = Path(env).expanduser() if env else Path(os.getcwd()) / "data" / "market-analysis"
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        base: dict[str, Any] = {}
+        latest_path = out_dir / "latest.json"
+        if latest_path.is_file():
+            try:
+                base = json.loads(latest_path.read_text(encoding="utf-8")) or {}
+            except Exception:
+                base = {}
+        if not isinstance(base, dict):
+            base = {}
+
+        old_heatmap = base.get("heatmap") if isinstance(base.get("heatmap"), dict) else {}
+        heatmap: dict[str, Any] = dict(old_heatmap)
+        if heatmap_shenwan:
+            heatmap["shenwan"] = heatmap_shenwan
+        if heatmap_concept:
+            heatmap["concept"] = heatmap_concept
+
+        doc: dict[str, Any] = dict(base)
+        doc.update({
+            "trade_date": trade_date,
+            "generated_at": generated_at,
+            "indices": indices or [],
+            "breadth": breadth or {},
+            "heatmap": heatmap,
+            "sankey": sankey or {},
+            "stock_flow": stock_flow or [],
+            "stock_flow_full": stock_flow_full or base.get("stock_flow_full") or [],
+            "money_flow_periods": money_flow_periods or base.get("money_flow_periods") or {},
+        })
+
+        dated_path = out_dir / f"{trade_date}.json"
+        tmp_dated = dated_path.with_suffix(".json.tmp")
+        tmp_latest = latest_path.with_suffix(".json.tmp")
+        payload = json.dumps(doc, ensure_ascii=False)
+        tmp_dated.write_text(payload, encoding="utf-8")
+        tmp_latest.write_text(payload, encoding="utf-8")
+        tmp_dated.replace(dated_path)
+        tmp_latest.replace(latest_path)
+        _refresh_latest_tags_db(out_dir, trade_date, heatmap_shenwan, heatmap_concept)
+        logger.info("[market-analysis][stream] 快照已持久化 trade_date=%s dir=%s", trade_date, out_dir)
+        return trade_date
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[market-analysis][stream] 快照持久化失败: %s", exc)
+        return None
+
+
+def _refresh_latest_tags_db(
+    out_dir: Path,
+    trade_date: str,
+    heatmap_shenwan: Any,
+    heatmap_concept: Any,
+) -> None:
+    """同步刷新 latest.db 的 sector_mv（与 trade_date），与离线 build_tags_db 同表结构。
+
+    背景：/heatmap 优先读 SQLite latest.db，而流式落盘此前只写 JSON，
+    导致手动分析后表头（读 JSON 的 breadth）已是新交易日、热力图（读 db）
+    仍是旧交易日的错配。只替换 sector_mv + meta，tags 标签库留给离线全量重建。
+    永不抛异常。
+    """
+    try:
+        import sqlite3
+
+        rows: list[tuple] = []
+        for cat, items in (("shenwan", heatmap_shenwan), ("concept", heatmap_concept)):
+            for it in items or []:
+                if not isinstance(it, dict):
+                    continue
+                rows.append((
+                    cat, it.get("name"), it.get("value"),
+                    it.get("pct_change"), it.get("leader"), it.get("leader_pct"),
+                ))
+        if not rows:
+            return
+        db_path = out_dir / "latest.db"
+        con = sqlite3.connect(str(db_path), timeout=30)
+        try:
+            con.execute(
+                "CREATE TABLE IF NOT EXISTS sector_mv("
+                "category TEXT, name TEXT, value REAL, "
+                "pct_change REAL, leader TEXT, leader_pct REAL)"
+            )
+            con.execute("CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT)")
+            con.execute("DELETE FROM sector_mv")
+            con.executemany("INSERT INTO sector_mv VALUES(?,?,?,?,?,?)", rows)
+            con.execute(
+                "INSERT INTO meta(key, value) VALUES('trade_date', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (trade_date,),
+            )
+            con.commit()
+        finally:
+            con.close()
+        logger.info(
+            "[market-analysis][stream] latest.db sector_mv 已刷新 trade_date=%s rows=%d",
+            trade_date, len(rows),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[market-analysis][stream] latest.db 刷新失败: %s", exc)
+
+
 # 受限分析执行器：最多 2 个并发线程。
 # asyncio.to_thread/run_in_executor 无法取消已启动的线程，客户端断连后线程仍会跑完；
 # 若不限制并发，多次断连会留下大量 DuckDB 重查询线程，打满 CPU/磁盘把 API 事件循环饿死。
@@ -597,8 +737,50 @@ async def trigger_market_analysis_stream(
             if await request.is_disconnected():
                 return
 
+            # 手动分析算完即落盘（概念热力/全量个股/多周期一并补算），否则离开页面
+            # 重进时只能读到旧 latest.json，表现为“分析完一切换就回退到上一交易日”。
+            heatmap_concept = await _run_step("heatmap_concept", quantdb_feed.get_sector_heatmap, "concept")
+            if await request.is_disconnected():
+                return
+            stock_flow_full = await _run_step("stock_flow_full", quantdb_feed.get_stock_money_flow_full)
+            if await request.is_disconnected():
+                return
+            money_flow_periods: dict[str, Any] = {}
+            for _period, _dim, _cat in _PERSIST_PERIOD_COMBOS:
+                if await request.is_disconnected():
+                    return
+                items = await _run_step(
+                    f"period_{_period}_{_dim}_{_cat}",
+                    quantdb_feed.get_money_flow_period, _period, _dim, _cat, 31,
+                )
+                if items:
+                    money_flow_periods[f"{_period}_{_dim}_{_cat}"] = items
+
+            trade_date = str((breadth or {}).get("trade_date") or "").strip()
+            if not trade_date and latest_dt:
+                _raw = str(latest_dt).strip().replace("-", "")
+                if len(_raw) == 8 and _raw.isdigit():
+                    trade_date = f"{_raw[:4]}-{_raw[4:6]}-{_raw[6:8]}"
+            persisted_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            persisted = None
+            if trade_date:
+                persisted = await asyncio.to_thread(
+                    _persist_stream_snapshot,
+                    trade_date=trade_date,
+                    generated_at=persisted_at,
+                    indices=indices,
+                    breadth=breadth,
+                    heatmap_shenwan=heatmap,
+                    heatmap_concept=heatmap_concept,
+                    sankey=sankey,
+                    stock_flow=stock_flow,
+                    stock_flow_full=stock_flow_full,
+                    money_flow_periods=money_flow_periods,
+                )
+
             yield _sse("done", {
                 "trade_date": latest_dt,
+                "persisted_trade_date": persisted,
                 "message": "已从 QuantDB 读取最新数据并完成市场分析",
                 "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             })

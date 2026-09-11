@@ -59,6 +59,11 @@ export const StrategyMonitorCard: React.FC<StrategyMonitorCardProps> = ({
     return formatBackendTime(timeStr, { withSeconds: true });
   };
 
+  const formatPct = (value: number) => {
+    const v = Number.isFinite(value) ? value : 0;
+    return `${v >= 0 ? '+' : ''}${v.toFixed(2)}%`;
+  };
+
   const priorityWeight: Record<string, number> = {
     error: 0,
     starting: 1,
@@ -240,10 +245,10 @@ export const StrategyMonitorCard: React.FC<StrategyMonitorCardProps> = ({
                   </div>
                   <div className="text-right flex-shrink-0 ml-2">
                     <p className={`text-sm font-black leading-tight ${strategy.total_return >= 0 ? 'text-[var(--profit-primary)]' : 'text-[var(--loss-primary)]'}`}>
-                      {strategy.total_return >= 0 ? '+' : ''}{strategy.total_return}%
+                      {formatPct(strategy.total_return)}
                     </p>
                     <p className="text-[10px] font-bold text-slate-400 leading-tight mt-0.5">
-                      {strategy.today_return >= 0 ? '+' : ''}{strategy.today_return}%
+                      {formatPct(strategy.today_return)}
                     </p>
                   </div>
                 </motion.div>

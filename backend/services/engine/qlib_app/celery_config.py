@@ -154,12 +154,15 @@ if os.getenv("STRATEGY_LAB_SCAN_ENABLED", "true").lower() == "true":
         "kwargs": {"lookback_days": 7},
     }
 
-# 交易日盘后 04:10 计算市场分析快照（数据已由 daily-data-sync 03:00 同步完）
+# 交易日盘后计算市场分析快照（同步时间以用户在前端「同步调度」里的配置为准，
+# 不假设固定时刻已同步完）。beat 在 04:00–05:50 每 10 分钟触发一次，任务自带
+# 新鲜度门控：库内分区未超过线上快照时直接跳过不覆盖，等用户配置的同步完成后
+# 的某一次轮询自然产出；节假日无新分区时全天跳过属正常行为。
 # 产出 JSON + 标签 SQLite 到 QM_MARKET_SNAPSHOT_DIR=/data/market-analysis，API 读取。
 if os.getenv("MARKET_SNAPSHOT_ENABLED", "true").lower() == "true":
     beat_schedule["market-snapshot"] = {
         "task": "engine.tasks.market_snapshot",
-        "schedule": crontab(minute="10", hour="4", day_of_week="1-5"),
+        "schedule": crontab(minute="*/10", hour="4-5", day_of_week="1-5"),
     }
 
 celery_app.conf.update(

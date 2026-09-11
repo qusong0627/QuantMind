@@ -20,8 +20,8 @@ STRATEGY_CONFIG = {
         "f_total_mv_min": 2000000000.0,
         "f_beta_20_max": 1.5,
         "f_float_mv_min": 500000000.0,
-        "f_vol_std_20_max": 0.06,
-        "f_ma_gap_20_min": -0.12,
+        "f_vol_std_20_max": 6.0,
+        "f_ma_gap_20_min": -12.0,
         "f_pe_ttm_min": 0.0,
         "f_pe_ttm_max": 80.0,
     }

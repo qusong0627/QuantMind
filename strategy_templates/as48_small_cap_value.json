@@ -1,0 +1,96 @@
+{
+  "id": "as48_small_cap_value",
+  "name": "A股小盘价值",
+  "description": "市值 300 亿以下、PE<25、PB<2.5、有分红的低估值小盘，双周调仓。",
+  "category": "advanced",
+  "difficulty": "intermediate",
+  "params": [
+    {
+      "name": "topk",
+      "description": "持仓股票总数",
+      "default": 40,
+      "min": 5,
+      "max": 200
+    },
+    {
+      "name": "n_drop",
+      "description": "每期最大替换数",
+      "default": 10,
+      "min": 0,
+      "max": 200
+    },
+    {
+      "name": "rebalance_days",
+      "description": "调仓周期（交易日）",
+      "default": 10,
+      "min": 1,
+      "max": 60
+    },
+    {
+      "name": "f_total_mv_max",
+      "description": "总市值上限（元）",
+      "default": 30000000000.0,
+      "min": 0
+    },
+    {
+      "name": "f_pe_ttm_min",
+      "description": "PE(TTM) 下限（剔除亏损）",
+      "default": 0.0,
+      "min": -50,
+      "max": 300
+    },
+    {
+      "name": "f_pe_ttm_max",
+      "description": "PE(TTM) 上限",
+      "default": 25,
+      "min": 0,
+      "max": 300
+    },
+    {
+      "name": "f_pb_max",
+      "description": "PB 上限",
+      "default": 2.5,
+      "min": 0.1,
+      "max": 30
+    },
+    {
+      "name": "f_dividend_rate_min",
+      "description": "股息率下限（小数，0.02=2%）",
+      "default": 0.01,
+      "min": 0.0,
+      "max": 0.2
+    },
+    {
+      "name": "f_amount_ma_5_min",
+      "description": "5 日均成交额下限（万元）",
+      "default": 3000,
+      "min": 0
+    }
+  ],
+  "execution_defaults": {
+    "max_buy_drop": -0.03,
+    "stop_loss": -0.08
+  },
+  "live_defaults": {
+    "rebalance_days": 10,
+    "schedule_type": "interval",
+    "trade_weekdays": [],
+    "enabled_sessions": [
+      "PM"
+    ],
+    "sell_time": "14:30",
+    "buy_time": "14:45",
+    "sell_first": true,
+    "order_type": "LIMIT",
+    "max_price_deviation": 0.02,
+    "max_orders_per_cycle": 20
+  },
+  "live_config_tips": [
+    "小盘价值是「低估值 + 小市值」双因子的叠加，A 股长期有效性较强。",
+    "分红门槛用于剔除财务造假风险较高的空壳小盘。"
+  ],
+  "markets": [
+    "a_share"
+  ],
+  "dir": "A股策略/10_小盘与流动性"
+}

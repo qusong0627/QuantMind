@@ -34,8 +34,9 @@ _POLL_INTERVAL = 0.2
 
 
 def _active_strategy_key(tenant_id: str, user_id: str) -> str:
-    tenant = (tenant_id or "").strip() or "default"
-    return f"trade:active_strategy:{tenant}:{str(user_id).zfill(8)}"
+    from backend.shared.simulation_account_keys import active_strategy_key
+
+    return active_strategy_key(tenant_id, user_id)
 
 
 class SandboxSignalConsumer:
@@ -196,17 +197,9 @@ class SandboxSignalConsumer:
         current_pos = positions.get(symbol.upper())
         current_volume = int(float(current_pos.get("volume", 0))) if current_pos else 0
 
-        # 获取当前价格（优先行情API，回退到持仓成本价）
+        # 获取当前价格（Redis 实时优先，HTTP 次之；取不到直接跳过，
+        # 禁止用持仓成本价回退成交，避免虚假价格污染账户）
         current_price = await self._get_current_price(symbol)
-        if current_price <= 0:
-            if current_pos:
-                fallback_price = float(current_pos.get("price") or current_pos.get("cost", 0))
-                if fallback_price > 0:
-                    current_price = fallback_price
-                    logger.info(
-                        "[SandboxSignalConsumer] 使用持仓价格回退 %s: %.2f",
-                        symbol, current_price,
-                    )
         if current_price <= 0:
             logger.warning("[SandboxSignalConsumer] 无法获取 %s 的价格，跳过下单", symbol)
             return
@@ -332,7 +325,17 @@ class SandboxSignalConsumer:
             await db.commit()
 
     async def _get_current_price(self, symbol: str) -> float:
-        """获取当前市场价格"""
+        """获取当前市场价格：Redis 实时序列优先，行情 HTTP 次之。"""
+        try:
+            from backend.services.simulation.services.redis_series_quote import (
+                fetch_series_tick,
+            )
+
+            tick = await fetch_series_tick(symbol)
+            if tick and float(tick["price"]) > 0:
+                return float(tick["price"])
+        except Exception as e:
+            logger.warning("获取 %s Redis 行情失败: %s", symbol, e)
         market_url = settings.MARKET_DATA_SERVICE_URL.rstrip("/")
         endpoint = f"{market_url}/api/v1/quotes/{symbol}"
         try:

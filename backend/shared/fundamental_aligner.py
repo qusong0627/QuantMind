@@ -1,6 +1,4 @@
 import logging
-import os
-from pathlib import Path
 from typing import Any
 
 import pandas as pd
@@ -14,148 +12,108 @@ class FundamentalAligner:
     """
     统一基本面对齐器 (Unified Fundamental Aligner)
 
-    优先从 QuantDB ``features_daily`` 按交易日读取特征，确保训练、回测和
-    实盘筛选使用同一份宽表。旧的 ``fundamental_aligned.parquet`` 仅在新表缺少
-    对应交易日时作为兼容回退。
+    从 QuantDB ``features_daily`` 按交易日读取特征，确保训练、回测和实盘筛选
+    使用同一份宽表。数据读取统一走 ``quantdb_hub.QuantDBDataHub``，不再依赖
+    ``fundamental_aligned.parquet``。
     """
 
-    DEFAULT_PATH = "db/custom/fundamental_aligned.parquet"
-    DEFAULT_FEATURES_DAILY_PATH = "data/quantdb/6_ml_datasets/features_daily"
+    # 回测在某交易日 dt 上选股时，向前最多回看多少个交易日取特征（dt 本身无
+    # 分区时取最近一个有数据的日期，避免回测早期因分区缺失而清空组合）。
+    LOOKBACK_DAYS = 250
 
-    def __init__(self, parquet_path: str | None = None):
-        self.parquet_path = parquet_path or os.getenv(
-            "FUNDAMENTAL_ALIGN_PATH", self.DEFAULT_PATH
-        )
-        self._data: pd.DataFrame | None = None
-        self._project_root = self._find_project_root()
-
-        if os.path.isabs(self.parquet_path):
-            self.full_path = Path(self.parquet_path)
-        else:
-            self.full_path = self._project_root / self.parquet_path
-
-        configured_features_path = os.getenv("FEATURES_DAILY_PATH", "").strip()
-        feature_candidates = [
-            Path(configured_features_path) if configured_features_path else None,
-            Path("/data/6_ml_datasets/features_daily"),
-            self._project_root / self.DEFAULT_FEATURES_DAILY_PATH,
-        ]
-        self.features_daily_path = next(
-            (path for path in feature_candidates if path is not None and path.exists()),
-            self._project_root / self.DEFAULT_FEATURES_DAILY_PATH,
-        )
-        self._feature_snapshot_cache: dict[pd.Timestamp, pd.DataFrame] = {}
-
-    def _find_project_root(self) -> Path:
-        curr = Path(__file__).resolve().parent
-        for _ in range(10):
-            if (curr / "requirements.txt").exists() or (curr / "AGENTS.md").exists():
-                return curr
-            if curr.parent == curr:
-                break
-            curr = curr.parent
-        return Path(os.getcwd())
-
-    def _load_data(self) -> pd.DataFrame:
-        if self._data is not None:
-            return self._data
-
-        if not self.full_path.exists():
-            logger.warning("FundamentalAligner: 找不到对齐文件 %s", self.full_path)
-            self._data = pd.DataFrame()
-            return self._data
-
-        try:
-            df = pd.read_parquet(self.full_path)
-            if df.empty:
-                self._data = pd.DataFrame()
-                return self._data
-
-            df["trade_date"] = pd.to_datetime(df["trade_date"])
-
-            if os.getenv("MODE") == "production":
-                last_date = df["trade_date"].max()
-                days_diff = (pd.Timestamp.now().normalize() - last_date.normalize()).days
-                if days_diff > 2:
-                    logger.error(
-                        "CRITICAL: 基本面对齐数据已过期，最后日期=%s，滞后=%s天",
-                        last_date.date(),
-                        days_diff,
-                    )
-
-            self._data = df.set_index(["trade_date", "symbol"]).sort_index()
-            logger.info("FundamentalAligner: 成功加载数据，字段数=%s", len(df.columns))
-        except Exception as exc:
-            logger.error("FundamentalAligner: 加载失败: %s", exc)
-            self._data = pd.DataFrame()
-        return self._data
-
-    def _load_features_daily_snapshot(self, current_date: Any) -> pd.DataFrame:
-        """读取一个交易日的 features_daily 分区，并转换为 Qlib 的前缀代码。"""
-        dt = pd.to_datetime(current_date).normalize()
-        cached = self._feature_snapshot_cache.get(dt)
-        if cached is not None:
-            return cached
-
-        day_dir = self.features_daily_path / f"dt={dt.strftime('%Y%m%d')}"
-        files = sorted(day_dir.glob("*.parquet")) if day_dir.is_dir() else []
-        if not files:
-            return pd.DataFrame()
-
-        try:
-            snapshot = pd.read_parquet(files)
-        except Exception as exc:
-            logger.warning(
-                "FundamentalAligner: 读取 features_daily 失败 (%s): %s",
-                day_dir,
-                exc,
-            )
-            return pd.DataFrame()
-
-        if snapshot.empty or "symbol" not in snapshot.columns:
-            return pd.DataFrame()
-
-        snapshot = snapshot.copy()
-        snapshot["symbol"] = snapshot["symbol"].map(
-            lambda value: StockCodeUtil.to_prefix(str(value or ""))
-        )
-        snapshot = snapshot[snapshot["symbol"] != ""]
-        snapshot = snapshot.drop_duplicates(subset="symbol", keep="last").set_index("symbol")
-
-        # 只缓存有限个交易日，长期回测不会无限占用 worker 内存。
-        self._feature_snapshot_cache[dt] = snapshot
-        if len(self._feature_snapshot_cache) > 8:
-            oldest = min(self._feature_snapshot_cache)
-            self._feature_snapshot_cache.pop(oldest, None)
-        logger.debug(
-            "FundamentalAligner: 使用 features_daily %s，字段数=%s",
-            dt.date(),
-            len(snapshot.columns),
-        )
-        return snapshot
+    def __init__(self) -> None:
+        self._feature_snapshot_cache: dict[tuple[Any, ...], pd.DataFrame] = {}
 
     @staticmethod
     def _normalize_instrument(symbol: Any) -> str:
         return StockCodeUtil.to_prefix(str(symbol or ""))
 
-    def _snapshot_for_date(self, current_date: Any) -> pd.DataFrame:
-        """新宽表优先；没有分区时回退至历史对齐文件。"""
-        feature_snapshot = self._load_features_daily_snapshot(current_date)
-        if not feature_snapshot.empty:
-            return feature_snapshot
+    @staticmethod
+    def _base_col(key: str) -> str:
+        """约束键（无 f_ 前缀）→ 基础列名：剥掉 _min/_max/_in/_not 后缀。"""
+        for suffix, length in (("_max", 4), ("_min", 4), ("_in", 3), ("_not", 4)):
+            if key.endswith(suffix):
+                return key[:-length]
+        return key
 
-        data = self._load_data()
-        if data.empty:
+    @staticmethod
+    def _resolve_op(key: str) -> tuple[str, str]:
+        """约束键 → (基础列名, 比较操作)。"""
+        op = "eq"
+        if key.endswith("_max"):
+            return key[:-4], "le"
+        if key.endswith("_min"):
+            return key[:-4], "ge"
+        if key.endswith("_in"):
+            return key[:-3], "in"
+        if key.endswith("_not"):
+            return key[:-4], "ne"
+        return key, op
+
+    def _load_features_daily_snapshot(
+        self,
+        current_date: Any,
+        symbols: list[str],
+        needed_columns: list[str],
+    ) -> pd.DataFrame:
+        """经 quantdb_hub 读取交易日快照，symbol 归一化为前缀式。"""
+        from backend.services.engine.data_platform.quantdb_hub import QuantDBDataHub
+
+        hub = QuantDBDataHub.get_instance()
+        if not hub.available:
             return pd.DataFrame()
+
         dt = pd.to_datetime(current_date).normalize()
-        try:
-            snapshot = data.loc[dt].copy()
-        except KeyError:
+        dt_int = int(dt.strftime("%Y%m%d"))
+        # features_daily.symbol 为后缀式，输入 instruments 为前缀式，先归一化。
+        suffix_symbols = [
+            StockCodeUtil.to_suffix(str(s)) for s in symbols if str(s or "").strip()
+        ]
+        suffix_symbols = [s for s in suffix_symbols if s]
+        if not suffix_symbols:
             return pd.DataFrame()
-        snapshot.index = pd.Index(
-            [self._normalize_instrument(symbol) for symbol in snapshot.index], name="symbol"
+
+        cache_key = (
+            dt_int,
+            frozenset(suffix_symbols),
+            frozenset(needed_columns),
         )
-        return snapshot
+        if cache_key in self._feature_snapshot_cache:
+            return self._feature_snapshot_cache[cache_key]
+
+        try:
+            df = hub.fetch_latest_rows(
+                "qdb_features_daily",
+                suffix_symbols,
+                dt=dt_int,
+                lookback=self.LOOKBACK_DAYS,
+                columns=needed_columns,
+            )
+        except Exception as exc:
+            logger.warning("FundamentalAligner: 读取 features_daily 失败 (%s): %s", dt.date(), exc)
+            return pd.DataFrame()
+
+        if df.empty or "symbol" not in df.columns:
+            return pd.DataFrame()
+
+        df = df.copy()
+        df["symbol"] = df["symbol"].map(
+            lambda value: StockCodeUtil.to_prefix(str(value or ""))
+        )
+        df = df[df["symbol"] != ""]
+        df = df.drop_duplicates(subset="symbol", keep="last").set_index("symbol")
+
+        # 只缓存有限个查询，长期回测不会无限占用 worker 内存。
+        if len(self._feature_snapshot_cache) >= 16:
+            self._feature_snapshot_cache.clear()
+        self._feature_snapshot_cache[cache_key] = df
+        logger.debug(
+            "FundamentalAligner: 使用 features_daily %s 快照，symbols=%s 字段=%s",
+            dt.date(),
+            len(df),
+            needed_columns,
+        )
+        return df
 
     def filter_instruments(
         self,
@@ -166,7 +124,16 @@ class FundamentalAligner:
         if not constraints:
             return instruments
 
-        snapshot = self._snapshot_for_date(current_date)
+        needed_columns = sorted(
+            {
+                self._base_col(key)
+                for key, target_val in constraints.items()
+                if target_val is not None
+            }
+        )
+        snapshot = self._load_features_daily_snapshot(
+            current_date, instruments, needed_columns
+        )
         if snapshot.empty:
             # 数据缺失时保持历史行为：不因数据源暂不可用而清空组合。
             return instruments
@@ -176,19 +143,14 @@ class FundamentalAligner:
             if target_val is None:
                 continue
 
-            col = key
-            op = "eq"
-            if key.endswith("_max"):
-                col, op = key[:-4], "le"
-            elif key.endswith("_min"):
-                col, op = key[:-4], "ge"
-            elif key.endswith("_in"):
-                col, op = key[:-3], "in"
-            elif key.endswith("_not"):
-                col, op = key[:-4], "ne"
+            col, op = self._resolve_op(key)
 
             if col not in snapshot.columns:
-                logger.debug("FundamentalAligner: 字段 %s 不存在，跳过", col)
+                logger.warning(
+                    "FundamentalAligner: 约束列 %s 在 features_daily 中不存在，"
+                    "已跳过（静默失效）",
+                    col,
+                )
                 continue
 
             col_data = snapshot[col]
@@ -215,4 +177,3 @@ class FundamentalAligner:
 
 
 fundamental_aligner = FundamentalAligner()
-

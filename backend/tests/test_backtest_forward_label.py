@@ -78,9 +78,10 @@ def test_forward_label_is_future_return(synthetic_parquet: Path) -> None:
     raw = pd.read_parquet(synthetic_parquet / "model_features_2026.parquet")
     dates = sorted(raw["trade_date"].unique())
 
-    # Act
+    # Act — 本用例守卫纯前瞻公式，显式关闭 T+1 执行日偏移（默认值为 1）
     labels = data_loader.load_forward_labels(
-        dates=dates, horizon=horizon, data_dir=synthetic_parquet
+        dates=dates, horizon=horizon, data_dir=synthetic_parquet,
+        signal_lag_days=0,
     )
 
     # Assert — 标签必须等于 close[T+N]/close[T]-1
@@ -96,6 +97,40 @@ def test_forward_label_is_future_return(synthetic_parquet: Path) -> None:
 
     # 末尾 horizon 个交易日不可能有标签 —— 这是判断实现正确的关键信号
     assert labels["trade_date"].max() == dates[-1 - horizon]
+
+
+@pytest.mark.unit
+def test_forward_label_signal_lag_uses_execution_close(synthetic_parquet: Path) -> None:
+    """A 股 T+1 约定：signal_lag_days=1 时标签键仍为信号日 T，但收益按
+    执行日成交：fwd[T] = close[T+1+N]/close[T+1] - 1（与生产调用方
+    inference/backtest_service.py 传入方式一致）。"""
+    data_loader = _load_module("data_loader")
+    horizon, lag = 3, 1
+    raw = pd.read_parquet(synthetic_parquet / "model_features_2026.parquet")
+    dates = sorted(raw["trade_date"].unique())
+
+    labels = data_loader.load_forward_labels(
+        dates=dates, horizon=horizon, data_dir=synthetic_parquet,
+        signal_lag_days=lag,
+    )
+
+    # 实现契约：键仍是信号日 T，close 被替换为执行日 T+lag 的收盘价，
+    # 因此 fwd[T] = close[T+lag+H]/close[T+lag] - 1（行内直接对位，无需移日期）
+    expected = raw.sort_values(["symbol", "trade_date"]).copy()
+    expected["want_exec"] = (
+        expected.groupby("symbol")["close"].shift(-(horizon + lag))
+        / expected.groupby("symbol")["close"].shift(-lag)
+        - 1
+    )
+    expected = expected.dropna(subset=["want_exec"])
+    merged = labels.merge(
+        expected[["symbol", "trade_date", "want_exec"]],
+        on=["symbol", "trade_date"],
+    )
+    assert len(merged) == len(labels)
+    assert np.allclose(merged["fwd_return"], merged["want_exec"])
+    # 最后一个可执行信号日 = dates[-1-horizon-lag]
+    assert labels["trade_date"].max() == dates[-1 - horizon - lag]
 
 
 @pytest.mark.unit

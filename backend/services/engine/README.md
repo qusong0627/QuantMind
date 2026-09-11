@@ -80,8 +80,8 @@
 `quantmind-engine` 使用 Celery 处理耗时的异步回测和复杂的参数优化任务。Worker 进程必须独立于主 API 服务启动。
 当前已统一为 Celery 异步执行：`/api/v1/pipeline/*`、`/api/v1/qlib/backtest?async_mode=true`、`/api/v1/strategy-backtest-loop/*`。
 API 进程仅负责入队或同步请求处理，不再保留 `BackgroundTasks` / `create_task` / 线程池式后台执行路径。
-“明日信号生成”支持三种触发方式：管理员手动触发 `POST /api/v1/admin/models/run-inference`、策略激活后按当前 `tenant_id + user_id(8位)` 异步触发一次推理、以及 Celery Beat 08:55 自动兜底 `engine.tasks.auto_inference_if_needed`。
-生产部署必须同时运行 `celery-worker` 与 `celery-beat`；仅启动 worker 不会触发 08:55 自动推理。
+“明日信号生成”支持三种触发方式：管理员手动触发 `POST /api/v1/admin/models/run-inference`、策略激活后按当前 `tenant_id + user_id(8位)` 异步触发一次推理、以及 Celery Beat 00:00 自动兜底 `engine.tasks.auto_inference_if_needed`（周一至周五，见 `celery_config.beat_schedule`）。
+生产部署必须同时运行 `celery-worker` 与 `celery-beat`；仅启动 worker 不会触发 00:00 自动推理。
 如需因硬件压力临时暂停自动推理，可在运行环境设置 `AUTO_INFERENCE_ENABLED=false`（仅关闭 Beat 定时调度，不影响手动触发）。
 推理链路已升级为“多用户模型解析 + 系统兜底”：
 - 解析优先级：`显式 model_id > 策略绑定 > 用户默认 > model_qlib > alpha158`
@@ -268,3 +268,34 @@ python -m celery -A backend.services.engine.qlib_app.celery_config:celery_app fl
 - P3 健康语义：`/health` 在关键启动阶段异常（如初始化或 warmup 超时）时返回 `status=degraded`，与指标语义一致。
 - P3 本地联调默认值：根 `.env` 可设置 `AI_STRATEGY_WARMUP=false`，避免开发/CI 场景因预热超时把服务误判为 `degraded`。
 - P3 FastAPI 兼容：回测历史接口查询参数已改用 `pattern=`，避免 `regex=` 在新版本 FastAPI/Pydantic 下触发弃用告警。
+
+## 🗓️ 定时调度与市场数据同步（2026-09-10）
+
+### 1. 消费队列的 Celery Worker 必须唯一
+
+- `backend/main_oss.py` 在 `SERVICE_MODE=all` 下**不再默认启动内嵌 Celery worker**，只有 `celery-worker` 容器消费队列。
+- 需要单机调试、且没有独立 worker 容器时，才显式设置 `EMBEDDED_CELERY_WORKER=true` 打开内嵌 worker。
+- **为什么**：内嵌 worker 与 `celery-worker` 连同一个 broker、消费同一个 `qlib_backtest_srv` 队列，会随机瓜分消息。表现为定时任务「有时不执行」，实际是跑在另一个 worker 上（日志与结果不在 `quantmind-celery` 里）；且内嵌 worker 是 `--pool=solo` 单进程，被长任务阻塞会拖垮 API 进程树（日志出现 `missed heartbeat` / `Substantial drift`）。
+- **排查手法**：`redis-cli client list | grep cmd=brpop` 正常应只有 1 个；beat 每分钟发一次，对比 `quantmind-celery-beat` 的 `Sending due task` 数量与 `quantmind-celery` 的 `received` 数量应基本相等。
+
+### 2. 市场数据同步：是否开启 / 何时触发一律以用户配置为准
+
+- 配置入口：管理后台 → 数据平台 → 同步调度（`AdminQuantDBPanel`），API `POST /api/v1/admin/data-platform/sync-schedule/{market}`。
+- 存储：Redis `quantmind:sync_schedule:{market}`；`celery-beat` 每分钟跑 `dispatch_market_sync` 比对派发 `run_market_scheduled_sync`。
+- **任何市场都不内置默认启用**：未保存配置时 5 个市场（A / HK / US / BC / FUTURES）全部 `enabled=false`。
+  原因：内置固定时刻会让所有部署在同一分钟全量同步，给上游数据源和服务器造成突发压力。
+- `market_sync_scheduler.MARKET_SUGGESTED_TIMES` 只是**前端时间预填的建议值**，不参与触发；按既有约定统一放在次日 00:00 以后并互相错峰：
+  `A 01:00 / HK 02:00 / FUTURES 03:00 / BC 04:15 / US 05:30`。
+- 因此**新部署默认不会同步任何市场数据**，需要在前端显式开启；A 股不开则 `market_snapshot` 会持续 `skipped: stale`，推理质量回填也拿不到 T+5 真实收益。
+
+### 3. 任务超时约束
+
+- 全局：`task_time_limit=3600` / `task_soft_time_limit=3300`，`task_acks_late=true` + `task_reject_on_worker_lost=true`。
+- `run_market_scheduled_sync` 单独收紧为 `soft 1800 / hard 2100`（`MARKET_SYNC_SOFT_TIME_LIMIT` / `MARKET_SYNC_TIME_LIMIT`）且 `acks_late=false`。
+  原因：上游（如 yfinance）被限流时会把单个标的拖到分钟级，整体突破 3600s 硬限制 → 进程被 `SIGKILL`；叠加 `acks_late` 会重新入队再次超时，形成死循环。
+- 数据拉取耗时超过预算一半时，`market_sync_scheduler.run_market_sync` 会跳过 Qlib 缓存重建并在结果里标记 `skipped`。
+
+### 4. Redis（同时承载 broker / backend / 缓存）
+
+- `docker-compose.yml` 中 Redis 必须 `--maxmemory-policy noeviction`：`allkeys-lru` 会在内存压力下静默淘汰队列消息，定时任务表现为「没跑」且无任何报错。
+- 单次改动可用 `redis-cli config set maxmemory-policy noeviction` 热生效，无需重建容器。

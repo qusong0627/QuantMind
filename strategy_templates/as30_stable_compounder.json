@@ -1,0 +1,88 @@
+{
+  "id": "as30_stable_compounder",
+  "name": "A股稳健复利",
+  "description": "60 日波动率<3.5%、净利润 3 亿、净资产 30 亿、有分红，追求低回撤的长期复利。",
+  "category": "basic",
+  "difficulty": "intermediate",
+  "params": [
+    {
+      "name": "topk",
+      "description": "持仓股票总数",
+      "default": 30,
+      "min": 5,
+      "max": 200
+    },
+    {
+      "name": "n_drop",
+      "description": "每期最大替换数",
+      "default": 8,
+      "min": 0,
+      "max": 200
+    },
+    {
+      "name": "rebalance_days",
+      "description": "调仓周期（交易日）",
+      "default": 10,
+      "min": 1,
+      "max": 60
+    },
+    {
+      "name": "f_vol_std_60_max",
+      "description": "60 日收益波动率上限（%）",
+      "default": 3.5,
+      "min": 0.1,
+      "max": 20
+    },
+    {
+      "name": "f_net_profit_ttm_min",
+      "description": "TTM 净利润下限（元）",
+      "default": 300000000.0,
+      "min": 0
+    },
+    {
+      "name": "f_equity_min",
+      "description": "净资产下限（元）",
+      "default": 3000000000.0,
+      "min": 0
+    },
+    {
+      "name": "f_dividend_rate_min",
+      "description": "股息率下限（小数，0.02=2%）",
+      "default": 0.01,
+      "min": 0.0,
+      "max": 0.2
+    },
+    {
+      "name": "f_amount_ma_5_min",
+      "description": "5 日均成交额下限（万元）",
+      "default": 5000,
+      "min": 0
+    }
+  ],
+  "execution_defaults": {
+    "max_buy_drop": -0.03,
+    "stop_loss": -0.08
+  },
+  "live_defaults": {
+    "rebalance_days": 10,
+    "schedule_type": "interval",
+    "trade_weekdays": [],
+    "enabled_sessions": [
+      "PM"
+    ],
+    "sell_time": "14:30",
+    "buy_time": "14:45",
+    "sell_first": true,
+    "order_type": "LIMIT",
+    "max_price_deviation": 0.02,
+    "max_orders_per_cycle": 20
+  },
+  "live_config_tips": [
+    "60 日波动率上限比 20 日更平滑，适合长期持有型组合。",
+    "盈利与分红双门槛确保组合不会选到纯题材股。"
+  ],
+  "markets": [
+    "a_share"
+  ],
+  "dir": "A股策略/06_低波动与红利"
+}

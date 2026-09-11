@@ -1,0 +1,81 @@
+{
+  "id": "as50_midcap_balanced",
+  "name": "A股中盘均衡",
+  "description": "市值 100 亿至 1000 亿、成交额 1 亿以上的中盘均衡组合，兼顾弹性与容量。",
+  "category": "basic",
+  "difficulty": "beginner",
+  "params": [
+    {
+      "name": "topk",
+      "description": "持仓股票总数",
+      "default": 40,
+      "min": 5,
+      "max": 200
+    },
+    {
+      "name": "n_drop",
+      "description": "每期最大替换数",
+      "default": 10,
+      "min": 0,
+      "max": 200
+    },
+    {
+      "name": "rebalance_days",
+      "description": "调仓周期（交易日）",
+      "default": 5,
+      "min": 1,
+      "max": 60
+    },
+    {
+      "name": "f_total_mv_min",
+      "description": "总市值下限（元）",
+      "default": 10000000000.0,
+      "min": 0
+    },
+    {
+      "name": "f_total_mv_max",
+      "description": "总市值上限（元）",
+      "default": 100000000000.0,
+      "min": 0
+    },
+    {
+      "name": "f_amount_ma_5_min",
+      "description": "5 日均成交额下限（万元）",
+      "default": 10000,
+      "min": 0
+    },
+    {
+      "name": "f_pe_ttm_max",
+      "description": "PE(TTM) 上限",
+      "default": 60,
+      "min": 0,
+      "max": 300
+    }
+  ],
+  "execution_defaults": {
+    "max_buy_drop": -0.03,
+    "stop_loss": -0.08
+  },
+  "live_defaults": {
+    "rebalance_days": 5,
+    "schedule_type": "interval",
+    "trade_weekdays": [],
+    "enabled_sessions": [
+      "PM"
+    ],
+    "sell_time": "14:30",
+    "buy_time": "14:45",
+    "sell_first": true,
+    "order_type": "LIMIT",
+    "max_price_deviation": 0.02,
+    "max_orders_per_cycle": 20
+  },
+  "live_config_tips": [
+    "中盘是 A 股超额收益相对集中的区间，容量与弹性兼顾。",
+    "适合作为主力策略，与微盘、红利策略形成风格互补。"
+  ],
+  "markets": [
+    "a_share"
+  ],
+  "dir": "A股策略/10_小盘与流动性"
+}

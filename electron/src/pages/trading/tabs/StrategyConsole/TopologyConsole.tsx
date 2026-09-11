@@ -121,7 +121,7 @@ const TopologyConsole: React.FC<TopologyConsoleProps> = ({
                                     <Select
                                         value={selectedStrategyId || undefined}
                                         onChange={(value) => setSelectedStrategyId(String(value))}
-                                        onDropdownVisibleChange={(open) => {
+                                        onOpenChange={(open) => {
                                             if (open) void overview.ensureStrategies();
                                         }}
                                         options={strategyOptions}

@@ -1,0 +1,111 @@
+{
+  "id": "as31_regime_switch",
+  "name": "A股动量反转状态切换",
+  "description": "自定义类：沪深 300 均线判定市场状态，上行市加动量、下行市加反转，并同步调仓。",
+  "category": "advanced",
+  "difficulty": "advanced",
+  "params": [
+    {
+      "name": "topk",
+      "description": "持仓股票总数",
+      "default": 30,
+      "min": 5,
+      "max": 200
+    },
+    {
+      "name": "n_drop",
+      "description": "每期最大替换数",
+      "default": 10,
+      "min": 0,
+      "max": 200
+    },
+    {
+      "name": "rebalance_days",
+      "description": "调仓周期（交易日）",
+      "default": 3,
+      "min": 1,
+      "max": 60
+    },
+    {
+      "name": "fast_window",
+      "description": "快线周期（市场状态）",
+      "default": 20,
+      "min": 5,
+      "max": 120
+    },
+    {
+      "name": "slow_window",
+      "description": "慢线周期（市场状态）",
+      "default": 60,
+      "min": 10,
+      "max": 250
+    },
+    {
+      "name": "boost_weight",
+      "description": "动量/反转增强权重",
+      "default": 0.5,
+      "min": 0.0,
+      "max": 1.0
+    },
+    {
+      "name": "momentum_window",
+      "description": "增强因子回看天数",
+      "default": 20,
+      "min": 5,
+      "max": 120
+    },
+    {
+      "name": "uptrend_position",
+      "description": "上行市仓位比例",
+      "default": 1.0,
+      "min": 0.0,
+      "max": 1.0
+    },
+    {
+      "name": "neutral_position",
+      "description": "震荡市仓位比例",
+      "default": 0.8,
+      "min": 0.0,
+      "max": 1.0
+    },
+    {
+      "name": "downtrend_position",
+      "description": "下行市仓位比例",
+      "default": 0.5,
+      "min": 0.0,
+      "max": 1.0
+    },
+    {
+      "name": "f_total_mv_min",
+      "description": "总市值下限（元）",
+      "default": 3000000000.0,
+      "min": 0
+    }
+  ],
+  "execution_defaults": {
+    "max_buy_drop": -0.03,
+    "stop_loss": -0.08
+  },
+  "live_defaults": {
+    "rebalance_days": 3,
+    "schedule_type": "interval",
+    "trade_weekdays": [],
+    "enabled_sessions": [
+      "PM"
+    ],
+    "sell_time": "14:30",
+    "buy_time": "14:45",
+    "sell_first": true,
+    "order_type": "LIMIT",
+    "max_price_deviation": 0.02,
+    "max_orders_per_cycle": 20
+  },
+  "live_config_tips": [
+    "状态判定只看沪深 300，避免个股信号自证。",
+    "下行市仓位降到 50% 并加反转因子，是本模板的核心防御设计。"
+  ],
+  "markets": [
+    "a_share"
+  ],
+  "dir": "A股策略/07_行业与主题轮动"
+}

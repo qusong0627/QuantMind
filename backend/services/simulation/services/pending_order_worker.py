@@ -7,7 +7,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import or_, select
 
@@ -51,7 +51,9 @@ class SimulationPendingOrderWorker:
                         )
                         .limit(self.batch_size)
                     )
-                ).scalars().all()
+                )
+                .scalars()
+                .all()
             )
             if not rows:
                 return 0
@@ -78,14 +80,20 @@ class SimulationPendingOrderWorker:
 
                 session_decision = await engine.assess_execution_window(runtime_order)
                 if session_decision.target_trade_date is not None:
-                    runtime_order.trading_session_date = session_decision.target_trade_date
+                    runtime_order.trading_session_date = (
+                        session_decision.target_trade_date
+                    )
                 if not session_decision.can_execute:
                     if session_decision.final_state == "expired":
-                        await engine.mark_expired(runtime_order, session_decision.message)
+                        await engine.mark_expired(
+                            runtime_order, session_decision.message
+                        )
                         processed += 1
                         continue
                     if not session_decision.retryable:
-                        await engine.mark_rejected(runtime_order, session_decision.message)
+                        await engine.mark_rejected(
+                            runtime_order, session_decision.message
+                        )
                         processed += 1
                     else:
                         await order_service.queue_order(
@@ -96,39 +104,54 @@ class SimulationPendingOrderWorker:
                         processed += 1
                     continue
 
-                runtime_order.status = OrderStatus.SUBMITTED
-                runtime_order.submitted_at = datetime.now()
-                await order_service.sync_order_projection(
-                    runtime_order,
-                    rejected_reason=None,
-                )
-                await session.commit()
-
-                execution_result = await engine.execute_order(runtime_order)
-                if not execution_result.success:
-                    if (
-                        str(execution_result.message or "")
-                        == "Order expired before execution"
-                    ):
-                        await engine.mark_expired(
-                            runtime_order, execution_result.message
-                        )
-                    elif "queued for next valid session" in str(
-                        execution_result.message or ""
-                    ):
-                        await order_service.queue_order(
-                            runtime_order,
-                            str(execution_result.message or ""),
-                        )
-                    else:
-                        await engine.mark_rejected(
-                            runtime_order, execution_result.message
-                        )
-                    processed += 1
+                # P0-1：执行+落库临界区持同用户锁，与在线下单链路互斥。
+                # 锁忙则本轮跳过（订单仍pending，下轮再扫），不静默放行。
+                try:
+                    _lock_cm = SimulationAccountManager.locked_execution(
+                        int(getattr(runtime_order, "user_id", 0) or 0),
+                        str(getattr(runtime_order, "tenant_id", "default")),
+                    )
+                except Exception:
+                    _lock_cm = None
+                if _lock_cm is None:
                     continue
+                try:
+                    async with _lock_cm:
+                        runtime_order.status = OrderStatus.SUBMITTED
+                        runtime_order.submitted_at = datetime.now(timezone.utc)
+                        await order_service.sync_order_projection(
+                            runtime_order,
+                            rejected_reason=None,
+                        )
+                        await session.commit()
 
-                await engine.apply_filled(runtime_order, execution_result)
-                processed += 1
+                        execution_result = await engine.execute_order(runtime_order)
+                        if not execution_result.success:
+                            if (
+                                str(execution_result.message or "")
+                                == "Order expired before execution"
+                            ):
+                                await engine.mark_expired(
+                                    runtime_order, execution_result.message
+                                )
+                            elif "queued for next valid session" in str(
+                                execution_result.message or ""
+                            ):
+                                await order_service.queue_order(
+                                    runtime_order,
+                                    str(execution_result.message or ""),
+                                )
+                            else:
+                                await engine.mark_rejected(
+                                    runtime_order, execution_result.message
+                                )
+                            processed += 1
+                            continue
+
+                        await engine.apply_filled(runtime_order, execution_result)
+                        processed += 1
+                except RuntimeError:
+                    continue
         return processed
 
 
@@ -153,10 +176,14 @@ async def run_simulation_pending_order_worker() -> None:
         try:
             count = await worker.run_once()
             if count:
-                logger.info("simulation pending order worker processed %s order(s)", count)
+                logger.info(
+                    "simulation pending order worker processed %s order(s)", count
+                )
         except asyncio.CancelledError:
             logger.info("simulation pending order worker cancelled")
             raise
         except Exception as exc:
-            logger.error("simulation pending order worker failed: %s", exc, exc_info=True)
+            logger.error(
+                "simulation pending order worker failed: %s", exc, exc_info=True
+            )
         await asyncio.sleep(worker.interval_seconds)

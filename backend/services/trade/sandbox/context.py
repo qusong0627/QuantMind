@@ -5,6 +5,8 @@ from typing import Any, Dict, List
 
 import redis
 
+from backend.shared.simulation_account_keys import account_key
+
 
 class SandboxContext:
     """
@@ -57,7 +59,7 @@ class SandboxContext:
         if not r:
             return self._account_cache
 
-        key = f"simulation:account:{self.tenant_id}:{self.user_id}"
+        key = account_key(self.tenant_id, self.user_id)
         try:
             raw = r.get(key)
             if raw:

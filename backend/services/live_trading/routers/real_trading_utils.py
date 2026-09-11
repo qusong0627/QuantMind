@@ -225,8 +225,11 @@ def get_strategy_path(user_id: str):
 
 
 def _active_strategy_key(tenant_id: str, user_id: str) -> str:
-    tenant = (tenant_id or "").strip() or "default"
-    return f"trade:active_strategy:{tenant}:{str(user_id).zfill(8)}"
+    # 唯一口径见 shared/simulation_account_keys：数字补零 8 位，非数字保持原样。
+    # 禁止手写 zfill(8)——曾导致 admin 被写成 000admin，重启恢复与状态查询分裂。
+    from backend.shared.simulation_account_keys import active_strategy_key
+
+    return active_strategy_key(tenant_id, user_id)
 
 
 def _normalize_identity(
@@ -333,21 +336,13 @@ async def _fetch_active_portfolio_snapshot(
     )
     daily_pnl = _decimal_to_float(getattr(portfolio, "daily_pnl", None), 0.0)
     total_value = _decimal_to_float(getattr(portfolio, "total_value", None), 0.0)
-    available_cash = _decimal_to_float(getattr(portfolio, "available_cash", None), 0.0)
-    frozen_cash = _decimal_to_float(getattr(portfolio, "frozen_cash", None), 0.0)
-    # 持仓市值 = 总资产 - 可用现金 - 冻结资金 (简化计算，也可根据 positions 累加)
-    market_value = total_value - available_cash - frozen_cash
 
-    # 重新计算当日收益率以确保实时性 (优先使用持仓市值作为分母)
-    if market_value > 0:
-        raw_daily_return = daily_pnl / market_value
+    # 当日收益率统一口径：当日盈亏 / 初始资金（与模拟账户 daily_return_ratio、
+    # 前端 requireDerived 一致）。此前用持仓市值做分母，空仓/轻仓时失真且三处对不上。
+    if initial_capital > 0:
+        raw_daily_return = daily_pnl / initial_capital
     else:
-        # 兜底逻辑：若无持仓市值，尝试从数据库获取或使用初始资金计算
-        raw_daily_return = getattr(portfolio, "daily_return", 0.0)
-        if (not raw_daily_return or raw_daily_return == 0) and initial_capital > 0:
-            raw_daily_return = daily_pnl / initial_capital
-        elif not raw_daily_return:
-            raw_daily_return = 0.0
+        raw_daily_return = _decimal_to_float(getattr(portfolio, "daily_return", 0.0), 0.0)
 
     total_pnl = _decimal_to_float(getattr(portfolio, "total_pnl", None), 0.0)
     total_return = _decimal_to_float(getattr(portfolio, "total_return", None), 0.0)

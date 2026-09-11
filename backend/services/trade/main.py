@@ -217,6 +217,22 @@ async def lifespan(app: FastAPI):
             run_simulation_corporate_action_task(),
             name="simulation-corporate-action",
         )
+        # 模拟盘对账：Redis vs PG 台账，每天 03:20 只报不改
+        # （SIM_RECONCILE_AUTOFIX=true 才回填，默认关闭）
+        try:
+            from backend.services.simulation.services.reconcile_service import (
+                run_simulation_reconcile_worker,
+            )
+
+            reconcile_task = asyncio.create_task(
+                run_simulation_reconcile_worker(), name="simulation-reconcile"
+            )
+            app.state.simulation_reconcile_task = reconcile_task
+            logger.info("Simulation reconcile worker started (daily 03:20)")
+        except Exception as e:
+            logger.error(
+                "trade simulation reconcile worker start failed: %s", e, exc_info=True
+            )
         # 模拟盘资金快照只读周期采集（仅 capture_all upsert，不做 init/reset；
         # 旧 simulation_fund_snapshot_task 已删除，此处用 fund_snapshot_service 内
         # 已有的 SimulationFundSnapshotWorker 重建定时持久化，避免 Redis 丢失）。
@@ -249,6 +265,57 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.error(
                 "trade sim fund snapshot worker start failed: %s", e, exc_info=True
+            )
+        # 模拟账户盘中重估（仅改现价/市值，不碰现金成本；交易时段外自动跳过）
+        try:
+            from backend.services.simulation.services.account_remark_service import (
+                SimulationRemarkWorker,
+                remark_enabled,
+                remark_interval_seconds,
+            )
+
+            if remark_enabled():
+                sim_remark_worker = SimulationRemarkWorker(
+                    redis_client, interval_seconds=remark_interval_seconds()
+                )
+                await sim_remark_worker.start()
+                app.state.sim_remark_worker = sim_remark_worker
+                logger.info(
+                    "Simulation remark worker started (interval=%ss)",
+                    sim_remark_worker.interval_seconds,
+                )
+            else:
+                logger.info("Simulation remark worker disabled (SIM_REMARK_ENABLED=false)")
+        except Exception as e:
+            logger.error(
+                "trade sim remark worker start failed: %s", e, exc_info=True
+            )
+        # 策略监控推送源：把模拟盘实时盈亏写进 strategy_events，驱动仪表盘
+        # 「策略监控」卡片刷新（WS 连上时前端会关掉轮询，只认推送）。
+        try:
+            from backend.services.trade.services.strategy_monitor_pusher import (
+                StrategyMonitorPusher,
+                push_enabled,
+                push_interval_seconds,
+            )
+
+            if push_enabled():
+                strategy_push_worker = StrategyMonitorPusher(
+                    redis_client, interval_seconds=push_interval_seconds()
+                )
+                await strategy_push_worker.start()
+                app.state.sim_strategy_push_worker = strategy_push_worker
+                logger.info(
+                    "Strategy monitor pusher started (interval=%ss)",
+                    strategy_push_worker.interval_seconds,
+                )
+            else:
+                logger.info(
+                    "Strategy monitor pusher disabled (SIM_STRATEGY_PUSH_ENABLED=false)"
+                )
+        except Exception as e:
+            logger.error(
+                "trade strategy monitor pusher start failed: %s", e, exc_info=True
             )
         from backend.services.live_trading.services.tdx_l2_capture_task import run_tdx_l2_capture_task
         from backend.services.live_trading.services.tdx_l2_realtime import run_tdx_l2_realtime_task
@@ -385,6 +452,14 @@ async def lifespan(app: FastAPI):
             await sim_snapshot_worker.stop()
         except Exception as e:
             logger.warning("trade sim fund snapshot worker stop failed: %s", e)
+
+    # 停止策略监控推送源
+    strategy_push_worker = getattr(app.state, "sim_strategy_push_worker", None)
+    if strategy_push_worker is not None:
+        try:
+            await strategy_push_worker.stop()
+        except Exception as e:
+            logger.warning("trade strategy monitor pusher stop failed: %s", e)
 
     # 停止模拟盘策略级托管调度器
     hosted_scheduler = getattr(app.state, "simulation_hosted_scheduler", None)

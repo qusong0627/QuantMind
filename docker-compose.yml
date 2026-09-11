@@ -35,7 +35,9 @@ services:
     container_name: quantmind-redis
     ports:
       - "127.0.0.1:6379:6379"
-    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru --databases 16 --bind 0.0.0.0
+    # maxmemory-policy 必须为 noeviction：本实例同时承载 Celery broker/result backend，
+    # allkeys-lru 会在内存压力下静默淘汰队列消息（定时任务表现为"没跑"）。
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy noeviction --databases 16 --bind 0.0.0.0
     volumes:
       - redis-data:/data
     healthcheck:
@@ -71,6 +73,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    # 安全：业务端口保持公网可达（登录/仪表盘用）；数据库/中间件端口仅回环。
+    # 容器内仍需 0.0.0.0 监听（见 main_oss.py），宿主机暴露面由本节控制。
     ports:
       - "8000:8000"  # API Gateway
       - "8001:8001"  # Engine (Qlib回测)
@@ -565,7 +569,7 @@ services:
       dockerfile: docker/Dockerfile.data-gateway
     container_name: quantmind-data-gateway
     ports:
-      - "${DATA_GATEWAY_PORT:-8004}:8004"
+      - "127.0.0.1:${DATA_GATEWAY_PORT:-8004}:8004"
     environment:
       - TZ=Asia/Shanghai
       - PYTHONPATH=/app
@@ -586,7 +590,7 @@ services:
     image: lcomplete/huntly:latest
     container_name: quantmind-huntly
     ports:
-      - "${HUNTLY_PORT:-8090}:80"
+      - "127.0.0.1:${HUNTLY_PORT:-8090}:80"
     volumes:
       - ./data/huntly:/data
     environment:
@@ -610,7 +614,7 @@ services:
     image: diygod/rsshub:latest
     container_name: quantmind-rsshub
     ports:
-      - "${RSSHUB_PORT:-1200}:1200"
+      - "127.0.0.1:${RSSHUB_PORT:-1200}:1200"
     environment:
       - NODE_ENV=production
       - TZ=Asia/Shanghai
@@ -649,7 +653,7 @@ services:
     image: agentscope/qwenpaw:latest
     container_name: qwenpaw
     ports:
-      - "${QWENPAW_PORT:-8088}:8088"
+      - "127.0.0.1:${QWENPAW_PORT:-8088}:8088"
     networks:
       quantmind-net:
         aliases:
@@ -725,8 +729,8 @@ services:
       VNC_SERVER_PASSWORD: ${IB_VNC_PASSWORD:-quantmind-vnc}
       TWOFA_TIMEOUT_ACTION: restart
     ports:
-      - "4001:4001"
-      - "4002:4002"
+      - "127.0.0.1:4001:4001"
+      - "127.0.0.1:4002:4002"
       - "127.0.0.1:15901:5901"
     restart: unless-stopped
     networks:

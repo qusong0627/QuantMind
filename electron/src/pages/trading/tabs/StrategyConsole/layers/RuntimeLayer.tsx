@@ -62,9 +62,12 @@ const RuntimeLayer: React.FC<RuntimeLayerProps> = ({
     const orderText = live?.order_type
         ? `${live.order_type === 'MARKET' ? '市价' : '限价'}${typeof live.max_price_deviation === 'number' ? ` / 偏离 ${(live.max_price_deviation * 100).toFixed(1)}%` : ''}`
         : '-';
-    const strategyName = status?.strategy?.name || status?.strategy?.id || '-';
+    const strategyName = status?.strategy?.name || status?.strategy?.id
+        || (status?.latest_hosted_task as unknown as Record<string, unknown> | null)?.strategy_name as string
+        || '-';
     const progress = Number(status?.latest_hosted_task?.progress ?? NaN);
-    const showIdleGuide = (runState === 'idle' || runState === 'stopped') && !status?.strategy;
+    // 有最后一次托管任务时也展示运行卡（标注已停止），避免停止后左侧空白
+    const showIdleGuide = (runState === 'idle' || runState === 'stopped') && !status?.strategy && !status?.latest_hosted_task;
 
     // 右列数据源：最新托管任务（后端已聚合）
     const task = status?.latest_hosted_task || null;
@@ -75,7 +78,15 @@ const RuntimeLayer: React.FC<RuntimeLayerProps> = ({
     const success = Number(task?.success_count ?? (result?.success_count as number) ?? 0);
     const failed = Number(task?.failed_count ?? (result?.failed_count as number) ?? 0);
     const skipped = Number(preview?.skipped_count ?? 0);
-    const horizon = preview?.target_horizon_days as number | undefined;
+    const rawHorizon = (task as unknown as Record<string, unknown> | null)?.target_horizon_days
+        ?? request?.target_horizon_days
+        ?? result?.target_horizon_days
+        ?? preview?.target_horizon_days;
+    const horizon = typeof rawHorizon === 'number' && Number.isFinite(rawHorizon) && rawHorizon > 0
+        ? rawHorizon
+        : (typeof rawHorizon === 'string' && rawHorizon.trim() !== '' && Number.isFinite(Number(rawHorizon)) && Number(rawHorizon) > 0
+            ? Number(rawHorizon)
+            : undefined);
 
     return (
         <section className="bg-white rounded-2xl border border-slate-200/80 shadow-xs p-4">
@@ -99,19 +110,21 @@ const RuntimeLayer: React.FC<RuntimeLayerProps> = ({
                 )}
             </div>
 
-            <div className="grid grid-cols-1 lg:grid-cols-5 gap-3">
-                {/* 左列：全部指标 */}
-                <div className="lg:col-span-3 flex flex-col gap-3">
-                    {loading && !status ? (
+            {/* 两行网格：同行两卡自动等高，第二行即 策略参数 vs 任务汇报 底部对齐 */}
+            <div className="grid grid-cols-1 lg:grid-cols-5 gap-3 items-stretch">
+                {loading && !status ? (
+                    <div className="lg:col-span-5">
                         <Skeleton active paragraph={{ rows: 4 }} />
-                    ) : showIdleGuide ? (
-                        <div className="border border-dashed border-slate-200 rounded-xl py-10 text-center text-xs text-slate-400">
-                            尚未启动策略运行时
-                            <div className="mt-1 text-[11px] text-slate-300">在顶部选择已验证策略并启动，运行状态与参数将显示在这里</div>
-                        </div>
-                    ) : (
-                        <>
-                            <div className="rounded-xl border border-slate-100 p-3 text-center">
+                    </div>
+                ) : (
+                    <>
+                        {showIdleGuide ? (
+                            <div className="lg:col-span-3 border border-dashed border-slate-200 rounded-xl py-10 text-center text-xs text-slate-400">
+                                尚未启动策略运行时
+                                <div className="mt-1 text-[11px] text-slate-300">在顶部选择已验证策略并启动，运行状态与参数将显示在这里</div>
+                            </div>
+                        ) : (
+                            <div className="lg:col-span-3 rounded-xl border border-slate-100 p-3 text-center flex flex-col">
                                 <div className="text-xs font-bold text-slate-500 mb-2">运行策略</div>
                                 <div className="text-sm font-black text-slate-800 truncate" title={strategyName}>{strategyName}</div>
                                 <div className="mt-2 grid grid-cols-2 gap-2">
@@ -119,7 +132,7 @@ const RuntimeLayer: React.FC<RuntimeLayerProps> = ({
                                     <ParamCell label="生产批次交易日" value={latestRun?.prediction_trade_date || '-'} />
                                 </div>
                                 {Number.isFinite(progress) && (
-                                    <div className="mt-2.5">
+                                    <div className="mt-auto pt-2.5">
                                         <div className="flex justify-between text-xs font-bold text-slate-500 mb-1">
                                             <span>任务进度</span><span>{progress}%</span>
                                         </div>
@@ -132,7 +145,36 @@ const RuntimeLayer: React.FC<RuntimeLayerProps> = ({
                                     </div>
                                 )}
                             </div>
-                            <div className="rounded-xl border border-slate-100 p-3 text-center">
+                        )}
+                        <div className="lg:col-span-2 rounded-2xl border border-slate-200 bg-slate-50/40 p-4">
+                            <div className="text-sm font-black text-slate-700 mb-2.5">下个交易日计划</div>
+                            {!task ? (
+                                <div className="text-sm text-slate-400 py-3 text-center">今日暂未触发自动化托管任务</div>
+                            ) : (
+                                <div className="space-y-2.5 text-sm font-bold text-slate-700">
+                                    <div className="flex justify-between gap-3 items-center bg-white rounded-xl border border-slate-100 px-3.5 py-2.5">
+                                        <span className="text-slate-400 font-semibold text-xs" title="策略实际买卖节奏：策略代码优先，没写才用启动器选择">调仓周期</span>
+                                        <span className="text-sm font-black text-slate-800">{scheduleText}</span>
+                                    </div>
+                                    <div className="flex justify-between gap-3 items-center bg-white rounded-xl border border-slate-100 px-3.5 py-2.5">
+                                        <span className="text-slate-400 font-semibold text-xs" title="本批模型信号的有效天数，只决定信号用到哪天，不决定买卖节奏">信号有效期</span>
+                                        <span className="text-sm font-black text-slate-800">{horizon ? `${horizon} 个交易日` : '-'}</span>
+                                    </div>
+                                    <div className="flex justify-between gap-3 items-center bg-white rounded-xl border border-slate-100 px-3.5 py-2.5">
+                                        <span className="text-slate-400 font-semibold text-xs" title="本批信号可执行的时间范围，过期需等新一批推理">信号窗口</span>
+                                        <span className="text-xs font-bold text-slate-800 truncate text-right" title={`${execWindow?.start || '-'} ~ ${execWindow?.end || '-'}`}>
+                                            {execWindow?.start || '-'} ~ {execWindow?.end || '-'}
+                                        </span>
+                                    </div>
+                                    <div className="flex justify-between gap-3 items-center bg-white rounded-xl border border-slate-100 px-3.5 py-2.5">
+                                        <span className="text-slate-400 font-semibold text-xs">信号批次</span>
+                                        <span className="font-mono text-xs font-bold text-slate-800 truncate" title={task.run_id}>{task.prediction_trade_date || '-'}</span>
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+                        {!showIdleGuide && (
+                            <div className="lg:col-span-3 rounded-xl border border-slate-100 p-3 text-center">
                                 <div className="text-xs font-bold text-slate-500 mb-2">策略参数</div>
                                 <div className="grid grid-cols-2 gap-2">
                                     <ParamCell label="调仓周期" value={scheduleText} title={scheduleText} />
@@ -151,60 +193,33 @@ const RuntimeLayer: React.FC<RuntimeLayerProps> = ({
                                     </div>
                                 )}
                             </div>
-                        </>
-                    )}
-                </div>
-
-                {/* 右列：下个交易日计划 + 任务汇报 */}
-                <div className="lg:col-span-2 flex flex-col gap-3">
-                    <div className="rounded-xl border border-slate-100 p-3">
-                        <div className="text-xs font-bold text-slate-500 mb-1.5">下个交易日计划</div>
-                        {!task ? (
-                            <div className="text-xs text-slate-400 py-2">今日暂未触发自动化托管任务</div>
-                        ) : (
-                            <div className="space-y-1.5 text-xs font-bold text-slate-700">
-                                <div className="flex justify-between gap-2">
-                                    <span className="text-slate-400 font-medium">目标跨度</span>
-                                    <span>{horizon ? `${horizon} 个交易日` : '-'}</span>
-                                </div>
-                                <div className="flex justify-between gap-2">
-                                    <span className="text-slate-400 font-medium">执行窗口</span>
-                                    <span className="truncate" title={`${execWindow?.start || '-'} ~ ${execWindow?.end || '-'}`}>
-                                        {execWindow?.start || '-'} ~ {execWindow?.end || '-'}
-                                    </span>
-                                </div>
-                                <div className="flex justify-between gap-2">
-                                    <span className="text-slate-400 font-medium">信号批次</span>
-                                    <span className="font-mono truncate" title={task.run_id}>{task.prediction_trade_date || '-'}</span>
-                                </div>
-                            </div>
                         )}
-                    </div>
-                    <div className="rounded-xl border border-slate-100 p-3">
-                        <div className="flex items-center justify-between mb-1.5">
-                            <span className="text-xs font-bold text-slate-500">任务汇报</span>
-                            {task && (
-                                <span className={`px-2 py-0.5 rounded-full text-xs font-bold border ${taskTone(task.status)}`}>
-                                    {taskLabel(task.status)}
-                                </span>
-                            )}
+                        <div className="lg:col-span-2 rounded-2xl border border-slate-200 bg-white p-4">
+                            <div className="flex items-center justify-between mb-2.5">
+                                <span className="text-sm font-black text-slate-700">任务汇报</span>
+                                {task && (
+                                    <span className={`px-2.5 py-0.5 rounded-full text-xs font-black border ${taskTone(task.status)}`}>
+                                        {taskLabel(task.status)}
+                                    </span>
+                                )}
+                            </div>
+                            <div className="grid grid-cols-3 gap-2.5 text-center">
+                                <div className="rounded-xl bg-emerald-50 border border-emerald-100 py-3 px-2">
+                                    <div className="text-xs font-bold text-emerald-600/80 mb-0.5">成功</div>
+                                    <div className="text-xl font-black text-emerald-700">{success}</div>
+                                </div>
+                                <div className="rounded-xl bg-rose-50 border border-rose-100 py-3 px-2">
+                                    <div className="text-xs font-bold text-rose-600/80 mb-0.5">失败</div>
+                                    <div className="text-xl font-black text-rose-700">{failed}</div>
+                                </div>
+                                <div className="rounded-xl bg-slate-50 border border-slate-200 py-3 px-2">
+                                    <div className="text-xs font-bold text-slate-500 mb-0.5">跳过</div>
+                                    <div className="text-xl font-black text-slate-700">{skipped}</div>
+                                </div>
+                            </div>
                         </div>
-                        <div className="grid grid-cols-3 gap-2 text-center">
-                            <div className="rounded-lg bg-emerald-50 border border-emerald-100 py-1.5">
-                                <div className="text-xs font-bold text-emerald-600/70">成功</div>
-                                <div className="text-sm font-black text-emerald-700">{success}</div>
-                            </div>
-                            <div className="rounded-lg bg-rose-50 border border-rose-100 py-1.5">
-                                <div className="text-xs font-bold text-rose-600/70">失败</div>
-                                <div className="text-sm font-black text-rose-700">{failed}</div>
-                            </div>
-                            <div className="rounded-lg bg-slate-50 border border-slate-200 py-1.5">
-                                <div className="text-xs font-bold text-slate-400">跳过</div>
-                                <div className="text-sm font-black text-slate-700">{skipped}</div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
+                    </>
+                )}
             </div>
         </section>
     );

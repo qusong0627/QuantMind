@@ -1,0 +1,81 @@
+{
+  "id": "as47_micro_liquidity",
+  "name": "A股微盘流动性溢价",
+  "description": "市值 10 亿至 150 亿、成交额 2000 万以上的微盘组合，持仓 50 只、大比例轮换。",
+  "category": "advanced",
+  "difficulty": "advanced",
+  "params": [
+    {
+      "name": "topk",
+      "description": "持仓股票总数",
+      "default": 50,
+      "min": 5,
+      "max": 200
+    },
+    {
+      "name": "n_drop",
+      "description": "每期最大替换数",
+      "default": 20,
+      "min": 0,
+      "max": 200
+    },
+    {
+      "name": "rebalance_days",
+      "description": "调仓周期（交易日）",
+      "default": 3,
+      "min": 1,
+      "max": 60
+    },
+    {
+      "name": "f_total_mv_min",
+      "description": "总市值下限（元）",
+      "default": 1000000000.0,
+      "min": 0
+    },
+    {
+      "name": "f_total_mv_max",
+      "description": "总市值上限（元）",
+      "default": 15000000000.0,
+      "min": 0
+    },
+    {
+      "name": "f_amount_ma_5_min",
+      "description": "5 日均成交额下限（万元）",
+      "default": 2000,
+      "min": 0
+    },
+    {
+      "name": "f_vol_std_20_max",
+      "description": "20 日收益波动率上限（%）",
+      "default": 6.0,
+      "min": 0.1,
+      "max": 20
+    }
+  ],
+  "execution_defaults": {
+    "max_buy_drop": -0.03,
+    "stop_loss": -0.08
+  },
+  "live_defaults": {
+    "rebalance_days": 3,
+    "schedule_type": "interval",
+    "trade_weekdays": [],
+    "enabled_sessions": [
+      "PM"
+    ],
+    "sell_time": "14:30",
+    "buy_time": "14:45",
+    "sell_first": true,
+    "order_type": "LIMIT",
+    "max_price_deviation": 0.02,
+    "max_orders_per_cycle": 20
+  },
+  "live_config_tips": [
+    "微盘流动性溢价在 A 股长期存在，但在监管收紧/流动性危机时会剧烈回撤。",
+    "建议严格控制资金规模，并配合回撤降仓模板使用。"
+  ],
+  "markets": [
+    "a_share"
+  ],
+  "dir": "A股策略/10_小盘与流动性"
+}

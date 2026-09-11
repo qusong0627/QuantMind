@@ -1,0 +1,82 @@
+{
+  "id": "as18_trend_gate",
+  "name": "A股趋势闸门",
+  "description": "自定义类：只在收盘价站上长期均线且均线向上时买入，被挡掉的名额让给次优候选。",
+  "category": "advanced",
+  "difficulty": "advanced",
+  "params": [
+    {
+      "name": "topk",
+      "description": "持仓股票总数",
+      "default": 40,
+      "min": 5,
+      "max": 200
+    },
+    {
+      "name": "n_drop",
+      "description": "每期最大替换数",
+      "default": 10,
+      "min": 0,
+      "max": 200
+    },
+    {
+      "name": "rebalance_days",
+      "description": "调仓周期（交易日）",
+      "default": 5,
+      "min": 1,
+      "max": 60
+    },
+    {
+      "name": "trend_ma",
+      "description": "趋势均线周期",
+      "default": 60,
+      "min": 5,
+      "max": 250
+    },
+    {
+      "name": "trend_slope_days",
+      "description": "均线斜率回看天数",
+      "default": 10,
+      "min": 1,
+      "max": 60
+    },
+    {
+      "name": "f_total_mv_min",
+      "description": "总市值下限（元）",
+      "default": 3000000000.0,
+      "min": 0
+    },
+    {
+      "name": "f_amount_ma_5_min",
+      "description": "5 日均成交额下限（万元）",
+      "default": 5000,
+      "min": 0
+    }
+  ],
+  "execution_defaults": {
+    "max_buy_drop": -0.03,
+    "stop_loss": -0.08
+  },
+  "live_defaults": {
+    "rebalance_days": 5,
+    "schedule_type": "interval",
+    "trade_weekdays": [],
+    "enabled_sessions": [
+      "PM"
+    ],
+    "sell_time": "14:30",
+    "buy_time": "14:45",
+    "sell_first": true,
+    "order_type": "LIMIT",
+    "max_price_deviation": 0.02,
+    "max_orders_per_cycle": 20
+  },
+  "live_config_tips": [
+    "趋势闸门是「事前过滤」而不是「事后止损」，T+1 下更友好。",
+    "均线周期 60 日适合中频；短周期信号建议改为 20 日。"
+  ],
+  "markets": [
+    "a_share"
+  ],
+  "dir": "A股策略/04_动量与趋势"
+}

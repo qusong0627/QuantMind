@@ -108,11 +108,14 @@ const InteractiveTrendLine30D: React.FC<{
 
   const latestVal = netVals[netVals.length - 1].toFixed(2);
 
+  // 第一行向上展示会被表格容器边缘遮挡，改为向下展示，其余行保持向上不变
+  const isFirstRow = index === 0;
+
   return (
     <div className="relative flex items-center gap-3">
       {/* 悬浮交互浮层 (鼠标指向指定日期显示当日详细资金) */}
       {hoverPt && (
-        <div className="absolute bottom-full mb-2 left-1/2 -translate-x-1/2 bg-slate-950/95 text-white p-3 rounded-2xl shadow-2xl border border-purple-500/40 text-xs z-50 whitespace-nowrap backdrop-blur-md pointer-events-none animate-in fade-in zoom-in-95 duration-150">
+        <div className={`absolute left-1/2 -translate-x-1/2 bg-slate-950/95 text-white p-3 rounded-2xl shadow-2xl border border-purple-500/40 text-xs z-50 whitespace-nowrap backdrop-blur-md pointer-events-none animate-in fade-in zoom-in-95 duration-150 ${isFirstRow ? 'top-full mt-2' : 'bottom-full mb-2'}`}>
           <div className="font-mono text-[11px] text-purple-300 font-extrabold border-b border-slate-800 pb-1.5 mb-1.5 flex items-center justify-between gap-4">
             <span className="flex items-center gap-1">
               <Calendar className="w-3 h-3 text-purple-400" />
@@ -321,9 +324,9 @@ export const StockMoneyFlowTable: React.FC<StockMoneyFlowTableProps> = ({
   // 🎨 isMini 模式下的专用精细化全居中对齐列配置 (防止表头换行、统一居中)
   const miniColumns: ColumnsType<StockMoneyFlowItem> = [
     {
-      title: '序号',
+      title: <span className="whitespace-nowrap">序号</span>,
       key: 'index',
-      width: 42,
+      width: 60,
       align: 'center',
       render: (_, __, index) => (
         <span className="font-mono text-xs font-extrabold text-purple-600">
@@ -340,9 +343,6 @@ export const StockMoneyFlowTable: React.FC<StockMoneyFlowTableProps> = ({
       align: 'left',
       render: (symbol, record) => (
         <div className="flex items-center gap-2 py-0.5 whitespace-nowrap pl-1">
-          <div className="w-7 h-7 rounded-lg bg-purple-100/80 text-purple-700 font-extrabold text-[11px] flex items-center justify-center border border-purple-200/80 shadow-2xs flex-shrink-0">
-            {record.name.substring(0, 1)}
-          </div>
           <div className="flex flex-col text-left justify-center">
             <div className="font-extrabold text-slate-800 text-[11px] leading-tight flex items-center gap-0.5">
               <span>{record.name}</span>

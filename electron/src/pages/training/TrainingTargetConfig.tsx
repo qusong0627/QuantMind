@@ -30,6 +30,8 @@ interface TrainingTargetConfigProps {
   // 因子筛选开关与阈值（默认开启，阈值对齐后端 ic_icir 默认）
   factorFilter?: TrainingFactorFilterConfig;
   onFactorFilterChange?: (filter: TrainingFactorFilterConfig) => void;
+  // 多周期训练已开启时，T+N 由第三步多周期选择接管，此处置灰
+  multiHorizon?: boolean;
 }
 
 const SectionHeader: React.FC<{ title: string; desc: string; icon?: React.ReactNode }> = ({ title, desc, icon }) => (
@@ -56,6 +58,7 @@ export const TrainingTargetConfig: React.FC<TrainingTargetConfigProps> = ({
   dataCoverage,
   factorFilter,
   onFactorFilterChange,
+  multiHorizon = false,
 }) => {
   const labelFormula = buildLabelFormula(target);
   const effectiveTradeDate = buildEffectiveTradeDate(target, timePeriods.test[0]);
@@ -114,6 +117,7 @@ export const TrainingTargetConfig: React.FC<TrainingTargetConfigProps> = ({
                 <Button
                   key={preset}
                   size="small"
+                  disabled={multiHorizon}
                   type={target.horizonDays === preset ? 'primary' : 'default'}
                   className={clsx('h-8 rounded-xl font-bold px-3', target.horizonDays === preset && 'bg-indigo-600')}
                   onClick={() => onTargetChange({ ...target, horizonDays: preset })}
@@ -126,12 +130,16 @@ export const TrainingTargetConfig: React.FC<TrainingTargetConfigProps> = ({
               <InputNumber
                 min={1}
                 max={30}
+                disabled={multiHorizon}
                 value={target.horizonDays}
                 onChange={(value) => onTargetChange({ ...target, horizonDays: clamp(Number(value ?? target.horizonDays), 1, 30) })}
                 className="w-28"
               />
               <span className="text-sm text-slate-500">交易日</span>
             </div>
+            {multiHorizon && (
+              <div className="mt-2 text-[11px] text-amber-600">多周期训练已开启，周期由第三步多周期选择控制，此处 T+N 仅影响命名显示。</div>
+            )}
           </div>
 
           {/* ── 因子筛选（IC/ICIR）── */}

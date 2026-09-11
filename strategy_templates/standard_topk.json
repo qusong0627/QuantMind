@@ -20,11 +20,11 @@
       "max": 60
     },
     {
-      "name": "n_drop_ratio",
-      "description": "调仓比例：每期轮换持仓的比例（如 0.2 = 20%，对应 topk×20% 只），0 = 每期全量调仓",
-      "default": 0.2,
+      "name": "n_drop",
+      "description": "每期最大替换数：每 N 个交易日调仓时轮换的持仓数量（0 = 全量调仓）",
+      "default": 10,
       "min": 0,
-      "max": 1
+      "max": 200
     }
   ],
   "execution_defaults": {

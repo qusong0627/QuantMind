@@ -1,0 +1,82 @@
+{
+  "id": "as20_dual_momentum",
+  "name": "A股双周期动量",
+  "description": "60 日长周期动量 + 模型分（两个信号源），持仓 50 只、10 日调仓，追求低换手的趋势收益。",
+  "category": "advanced",
+  "difficulty": "intermediate",
+  "params": [
+    {
+      "name": "topk",
+      "description": "持仓股票总数",
+      "default": 50,
+      "min": 5,
+      "max": 200
+    },
+    {
+      "name": "n_drop",
+      "description": "每期最大替换数",
+      "default": 10,
+      "min": 0,
+      "max": 200
+    },
+    {
+      "name": "rebalance_days",
+      "description": "调仓周期（交易日）",
+      "default": 10,
+      "min": 1,
+      "max": 60
+    },
+    {
+      "name": "momentum_period",
+      "description": "动量回看天数",
+      "default": 60,
+      "min": 5,
+      "max": 60
+    },
+    {
+      "name": "momentum_weight",
+      "description": "动量因子融合权重",
+      "default": 0.3,
+      "min": 0.0,
+      "max": 1.0
+    },
+    {
+      "name": "f_total_mv_min",
+      "description": "总市值下限（元）",
+      "default": 3000000000.0,
+      "min": 0
+    },
+    {
+      "name": "f_amount_ma_5_min",
+      "description": "5 日均成交额下限（万元）",
+      "default": 5000,
+      "min": 0
+    }
+  ],
+  "execution_defaults": {
+    "max_buy_drop": -0.03,
+    "stop_loss": -0.08
+  },
+  "live_defaults": {
+    "rebalance_days": 10,
+    "schedule_type": "interval",
+    "trade_weekdays": [],
+    "enabled_sessions": [
+      "PM"
+    ],
+    "sell_time": "14:30",
+    "buy_time": "14:45",
+    "sell_first": true,
+    "order_type": "LIMIT",
+    "max_price_deviation": 0.02,
+    "max_orders_per_cycle": 20
+  },
+  "live_config_tips": [
+    "长周期动量在 A 股更接近「景气度」的代理变量。",
+    "动量权重压到 0.3，避免与模型信号重复暴露；与 as17 的区别在调仓更慢、动量权重更低。"
+  ],
+  "markets": [
+    "a_share"
+  ],
+  "dir": "A股策略/04_动量与趋势"
+}

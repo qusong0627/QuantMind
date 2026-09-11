@@ -296,19 +296,11 @@ def load_forward_labels(
         # 将 trade_date 转为 datetime 以便 shift
         df["trade_date_dt"] = pd.to_datetime(df["trade_date"])
         df = df.sort_values(["symbol", "trade_date_dt"]).reset_index(drop=True)
-        # 按 symbol 分组，将 trade_date 向前（未来）偏移 lag 个交易日
+        # 先按全量序列取执行日（T+lag）的日期与收盘价，再裁掉无执行日的首部行。
+        # 若先裁行再 shift，末日执行价会丢失，连带少算一批本可计算的信号标签。
         df["exec_date"] = df.groupby("symbol")["trade_date_dt"].shift(-signal_lag_days)
-        # 丢弃无法对齐的行（末尾 lag 天无执行日）
-        df = df[df["exec_date"].notna()].copy()
-        # 用执行日的 close 替换原来的 close 用于标签计算
-        # 需要将执行日的 close 对齐到当前行
-        exec_close = df.groupby("symbol").apply(
-            lambda g: g.set_index("trade_date_dt")["close"]
-            .reindex(g["exec_date"])
-            .values
-        ).explode()
-        # 更简单的方式：再做一次 shift 获取执行日的 close
         df["exec_close"] = df.groupby("symbol")["close"].shift(-signal_lag_days)
+        df = df[df["exec_date"].notna() & df["exec_close"].notna()].copy()
         df["close"] = df["exec_close"]
         df["trade_date"] = df["trade_date_dt"].dt.strftime("%Y-%m-%d")
         df = df.drop(columns=["trade_date_dt", "exec_date", "exec_close"])

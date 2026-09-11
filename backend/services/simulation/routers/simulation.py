@@ -1,17 +1,17 @@
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
-from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status, File, UploadFile
 from pydantic import BaseModel
 
-from backend.services.trade_shared.deps import AuthContext, get_auth_context, get_redis
+from backend.services.trade_shared.deps import AuthContext, get_auth_context, get_db, get_redis
 from backend.services.trade_shared.redis_client import RedisClient
 from backend.services.simulation.services.fund_snapshot_service import (
     SimulationFundSnapshotService,
 )
 from backend.services.simulation.services.simulation_manager import (
     SimulationAccountManager,
+    require_sim_user_id,
 )
 from backend.services.simulation.services.ocr_service import SimulationOCRService
 from backend.services.trade_shared.trade_config import settings
@@ -20,71 +20,43 @@ from backend.shared.stock_utils import StockCodeUtil
 import logging
 import httpx
 from sqlalchemy import text
-import pandas as pd
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
 
-def _require_user_id(raw_user_id: str) -> int:
-    """获取用户ID。Redis 账户 key 与 sim_orders/sim_trades 的 user_id 均为 integer，
-    JWT 的 sub 是字符串，需统一转 int 才能命中同一账户 key。"""
-    if not raw_user_id:
-        raise HTTPException(status_code=400, detail="Invalid user_id in token")
-    raw = str(raw_user_id).strip()
-    if raw.isdigit():
-        return int(raw)
-    logger.warning("Non-numeric user_id in simulation request: %s", raw)
-    return 0
+def _require_user_id(raw_user_id: str, tenant_id: str = "default") -> int:
+    """兼容别名，统一走 require_sim_user_id（OSS admin 归保留账户 0）。"""
+    return require_sim_user_id(raw_user_id, tenant_id=tenant_id)
 
-FUNDAMENTAL_PARQUET_PATH = "/app/db/custom/fundamental_aligned.parquet"
-_PARQUET_LATEST_PRICE_MAP: dict[str, float] | None = None
+def _to_quantdb_suffix(symbol: str) -> str:
+    """prefix(SH600036) → suffix(600036.SH)；返回空即无法归一化，原样返回。"""
+    suffix = StockCodeUtil.to_suffix(str(symbol or ""))
+    return suffix or str(symbol or "")
 
 
-def _load_latest_price_map_from_parquet() -> dict[str, float]:
-    global _PARQUET_LATEST_PRICE_MAP
-    if _PARQUET_LATEST_PRICE_MAP is not None:
-        return _PARQUET_LATEST_PRICE_MAP
-
+async def _get_latest_close_from_quantdb(symbol: str) -> float:
+    """从 QuantDB 未复权 K 线(daily_unadjusted)最新交易日读取收盘价。"""
     try:
-        df = pd.read_parquet(
-            FUNDAMENTAL_PARQUET_PATH,
-            columns=["trade_date", "symbol", "close", "adj_factor"],
+        from backend.services.engine.data_platform.quantdb_hub import QuantDBDataHub
+
+        hub = QuantDBDataHub.get_instance()
+        if not hub.available:
+            return 0.0
+        end = date.today()
+        start = end - timedelta(days=90)
+        df = hub.fetch_daily_kline(
+            _to_quantdb_suffix(symbol), start, end, adjust="none"
         )
+        if df is None or df.empty or "close" not in df.columns:
+            return 0.0
+        df = df.dropna(subset=["close"])
         if df.empty:
-            _PARQUET_LATEST_PRICE_MAP = {}
-            return _PARQUET_LATEST_PRICE_MAP
-
-        latest_trade_date = df["trade_date"].max()
-        latest_df = df[df["trade_date"] == latest_trade_date].copy()
-        latest_df = latest_df.dropna(subset=["symbol", "close"])
-
-        _PARQUET_LATEST_PRICE_MAP = {
-            str(row["symbol"]): float(row["close"])
-            for _, row in latest_df.iterrows()
-        }
-        logger.info(
-            "Loaded OCR price map from parquet: %s symbols, latest_trade_date=%s",
-            len(_PARQUET_LATEST_PRICE_MAP),
-            latest_trade_date,
-        )
-    except Exception as e:
-        logger.error(f"Failed to load price map from parquet: {e}", exc_info=True)
-        _PARQUET_LATEST_PRICE_MAP = {}
-
-    return _PARQUET_LATEST_PRICE_MAP
-
-
-async def _get_latest_close_from_sdl(symbol: str) -> float:
-    """
-    从 fundamental_aligned.parquet 最新交易日读取未复权现价。
-    """
-    try:
-        price_map = _load_latest_price_map_from_parquet()
-        return float(price_map.get(symbol) or 0.0)
-    except Exception as e:
-        logger.error(f"Failed to fetch parquet price for {symbol}: {e}")
+            return 0.0
+        return float(df["close"].iloc[-1])
+    except Exception as exc:
+        logger.error("Failed to fetch quantdb price for %s: %s", symbol, exc)
 
     return 0.0
 
@@ -108,11 +80,11 @@ async def _get_latest_price(symbol: str) -> float:
     except Exception as e:
         logger.warning(f"Failed to fetch real-time price for {symbol}: {e}")
 
-    # Level 2: 数据库兜底
+    # Level 2: QuantDB 未复权 K 线兜底
     if price <= 0:
-        price = await _get_latest_close_from_sdl(symbol)
+        price = await _get_latest_close_from_quantdb(symbol)
         if price > 0:
-            logger.info(f"Fallback to SDL close for {symbol}: {price}")
+            logger.info(f"Fallback to QuantDB close for {symbol}: {price}")
 
     return price
 
@@ -129,7 +101,7 @@ async def _resolve_symbol_by_name(name: str) -> str | None:
         # 清理名称中的特殊字符，如 *ST
         clean_name = name.replace("*", "").strip()
         query = text("""
-            SELECT symbol FROM stock_daily_latest 
+            SELECT symbol FROM stock_daily_latest
             WHERE stock_name LIKE :name
             ORDER BY trade_date DESC LIMIT 1
         """)
@@ -225,7 +197,7 @@ async def get_simulation_settings(
     redis: RedisClient = Depends(get_redis),
 ):
     manager = SimulationAccountManager(redis)
-    uid = _require_user_id(auth.user_id)
+    uid = _require_user_id(auth.user_id, auth.tenant_id)
     data = await manager.get_settings(
         user_id=uid,
         tenant_id=auth.tenant_id,
@@ -265,12 +237,15 @@ async def reset_simulation_account(
     request: AccountResetRequest,
     auth: AuthContext = Depends(get_auth_context),
     redis: RedisClient = Depends(get_redis),
+    db=Depends(get_db),
 ):
     """
     Reset simulation account with initial cash.
+    重置即视为全新起点：必须同步停止当前运行任务（沙箱+active_strategy+portfolio），
+    否则会出现“资金已清零但控制台仍显示运行中”。
     """
     manager = SimulationAccountManager(redis)
-    uid = _require_user_id(auth.user_id)
+    uid = _require_user_id(auth.user_id, auth.tenant_id)
     if request.initial_cash is None:
         settings = await manager.get_settings(
             user_id=uid,
@@ -292,25 +267,50 @@ async def reset_simulation_account(
         await manager.set_initial_cash(uid, initial_cash, tenant_id=auth.tenant_id)
 
     market = str(request.market or "CN").upper()
-    # 清空数据库中的历史交易/订单/快照，避免重置后前端仍拉到旧数据
+    # 清空数据库中的历史交易/订单/快照，避免重置后前端仍拉到旧数据。
+    # user_id 有 int 与原始 sub 两种口径（历史 varchar 兼容），一并清理。
+    # 新台账（accounts/lots/ledger/daily/fills/orders_v2）同步清空，否则 PG 新旧两套
+    # 台账分叉，对账与重建读到孤儿数据。
+    _NEW_LEDGER_TABLES = (
+        "simulation_accounts",
+        "simulation_position_lots",
+        "simulation_cash_ledger",
+        "simulation_account_daily",
+        "simulation_position_daily",
+        "simulation_fills",
+        "simulation_orders",
+    )
     try:
         from sqlalchemy import text as _text
         from backend.shared.database_manager_v2 import get_session as _get_session
+        uid_str_variants = {str(uid), str(auth.user_id)}
         async with _get_session() as _session:
             await _session.execute(_text("DELETE FROM sim_trades WHERE tenant_id=:tid AND user_id=:uid"), {"tid": auth.tenant_id, "uid": uid})
             await _session.execute(_text("DELETE FROM sim_orders WHERE tenant_id=:tid AND user_id=:uid"), {"tid": auth.tenant_id, "uid": uid})
-            # 兼容部分旧库用 varchar user_id
-            try:
-                await _session.execute(_text("DELETE FROM sim_trades WHERE tenant_id=:tid AND cast(user_id as varchar)=:uid_str"), {"tid": auth.tenant_id, "uid_str": str(uid)})
-            except Exception:
-                pass
-            await _session.execute(_text("DELETE FROM simulation_fund_snapshots WHERE tenant_id=:tid AND user_id=:uid_str"), {"tid": auth.tenant_id, "uid_str": str(uid)})
-            await _session.execute(_text("DELETE FROM sim_trades WHERE tenant_id=:tid AND cast(user_id as varchar)=:uid_str"), {"tid": auth.tenant_id, "uid_str": auth.user_id})
-            await _session.execute(_text("DELETE FROM simulation_fund_snapshots WHERE tenant_id=:tid AND user_id=:uid2"), {"tid": auth.tenant_id, "uid2": auth.user_id})
+            for uv in uid_str_variants:
+                await _session.execute(_text("DELETE FROM sim_trades WHERE tenant_id=:tid AND cast(user_id as varchar)=:uid_str"), {"tid": auth.tenant_id, "uid_str": uv})
+                await _session.execute(_text("DELETE FROM sim_orders WHERE tenant_id=:tid AND cast(user_id as varchar)=:uid_str"), {"tid": auth.tenant_id, "uid_str": uv})
+                await _session.execute(_text("DELETE FROM simulation_fund_snapshots WHERE tenant_id=:tid AND user_id=:uid2"), {"tid": auth.tenant_id, "uid2": uv})
+                for _table in _NEW_LEDGER_TABLES:
+                    try:
+                        # SAVEPOINT 隔离：表不存在（如旧库）只回滚本条，不影响已删数据
+                        async with _session.begin_nested():
+                            await _session.execute(
+                                _text(f"DELETE FROM {_table} WHERE tenant_id=:tid AND user_id=:uid2"),
+                                {"tid": auth.tenant_id, "uid2": uv},
+                            )
+                    except Exception:
+                        continue
+            await _session.commit()
     except Exception as _e:
         logger.warning(f"Reset DB cleanup failed for {auth.tenant_id}:{uid}: {_e}")
 
     # 清空 Redis 缓存（交易列表/统计），避免重置后仍命中旧缓存秒级延迟
+    # 运行态身份必须与 live_trading 完全同口径：数字补零8位、非数字保持原样。
+    # 模拟账户 uid（admin->0）只用于资金键，运行时停止必须用 runtime_user。
+    _raw_sub = str(auth.user_id or "").strip()
+    _runtime_user = _raw_sub.zfill(8) if _raw_sub.isdigit() else _raw_sub
+    _runtime_tenant = str(auth.tenant_id or "default").strip() or "default"
     try:
         if redis.client:
             redis.delete_pattern(f"sim_trade:list:{auth.tenant_id}:{uid}:*")
@@ -319,8 +319,106 @@ async def reset_simulation_account(
             redis.delete_pattern(f"sim_trade:stats:{auth.tenant_id}:{auth.user_id}:*")
             # 订单缓存
             redis.delete_pattern(f"order:list:user:{uid}:*")
+            # 重置后需可立即再次触发交易：清掉托管调度的幂等锁与 bootstrap 锁
+            # 否则同日同策略会被 36h/24h 锁挡住，表现为“重置后不交易”
+            for pat in (
+                f"qm:hosted:simulation:{auth.tenant_id}:{uid}:*",
+                f"qm:hosted:simulation:{auth.tenant_id}:{auth.user_id}:*",
+                f"qm:hosted:simulation:{_runtime_tenant}:{_runtime_user}:*",
+                f"qm:hosted:simulation:bootstrap:{auth.tenant_id}:{uid}:*",
+                f"qm:hosted:simulation:bootstrap:{auth.tenant_id}:{auth.user_id}:*",
+                f"qm:hosted:simulation:bootstrap:{_runtime_tenant}:{_runtime_user}:*",
+            ):
+                try:
+                    redis.delete_pattern(pat)
+                except Exception:
+                    pass
+            # 1) 先停沙箱：精确 sid + 按用户前缀兜底双保险，避免 sid 为空/口径不一致时漏杀
+            try:
+                from backend.services.trade.sandbox.manager import sandbox_manager
+
+                _sids: set[str] = set()
+                for key in (
+                    f"trade:active_strategy:{_runtime_tenant}:{_runtime_user}",
+                    f"trade:active_strategy:{_runtime_tenant}:{_runtime_user.zfill(8)}",
+                    f"trade:active_strategy:{auth.tenant_id}:{_raw_sub}",
+                    f"trade:active_strategy:{auth.tenant_id}:{_raw_sub.zfill(8)}",
+                    f"trade:active_strategy:default:{_raw_sub}",
+                    f"trade:active_strategy:default:{_raw_sub.zfill(8)}",
+                ):
+                    try:
+                        raw = redis.client.get(key)
+                        if raw:
+                            import json as _json
+
+                            d = _json.loads(raw)
+                            sid = str(d.get("strategy_id") or d.get("strategy_name") or "").strip()
+                            if sid:
+                                _sids.add(sid)
+                    except Exception:
+                        pass
+                for sid in _sids:
+                    try:
+                        sandbox_manager.stop_strategy(_runtime_tenant, _runtime_user, sid)
+                    except Exception:
+                        pass
+                # 前缀兜底：即使 sid 取不到，也能杀掉该用户残留进程
+                for t_uid in {(_runtime_tenant, _runtime_user), (auth.tenant_id, _raw_sub), ("default", _raw_sub)}:
+                    try:
+                        sandbox_manager.stop_user_strategies(t_uid[0], t_uid[1])
+                    except Exception:
+                        pass
+            except Exception as _e:
+                logger.warning(f"Reset sandbox stop failed for {_runtime_tenant}:{_runtime_user}: {_e}")
+            # 2) 再删 active_strategy 全写法，避免 /status 仍读到旧运行态
+            for key in {
+                f"trade:active_strategy:{_runtime_tenant}:{_runtime_user}",
+                f"trade:active_strategy:{_runtime_tenant}:{_runtime_user.zfill(8)}",
+                f"trade:active_strategy:{auth.tenant_id}:{_raw_sub}",
+                f"trade:active_strategy:{auth.tenant_id}:{_raw_sub.zfill(8)}",
+                f"trade:active_strategy:default:{_raw_sub}",
+                f"trade:active_strategy:default:{_raw_sub.zfill(8)}",
+                f"trade:active_strategy:{auth.tenant_id}:{uid}",
+                f"trade:active_strategy:{auth.tenant_id}:{str(uid).zfill(8)}",
+            }:
+                try:
+                    redis.client.delete(key)
+                except Exception:
+                    pass
     except Exception:
         pass
+
+    # 3) 同步 portfolio run_status running->stopped，与 /stop 接口同口径，前端不再显示运行中
+    try:
+        from sqlalchemy import desc as _desc
+        from sqlalchemy import select as _select
+        from backend.services.trade_shared.portfolio.models import Portfolio as _Portfolio
+
+        for _pu in {_runtime_user, _raw_sub}:
+            try:
+                _stmt = (
+                    _select(_Portfolio)
+                    .where(
+                        _Portfolio.tenant_id == _runtime_tenant,
+                        _Portfolio.user_id == _pu,
+                        _Portfolio.run_status == "running",
+                        _Portfolio.is_deleted.is_(False),
+                    )
+                    .order_by(_desc(_Portfolio.updated_at))
+                    .limit(1)
+                )
+                _res = await db.execute(_stmt)
+                _pf = _res.scalars().first()
+                if _pf is not None:
+                    _pf.run_status = "stopped"
+                    await db.commit()
+            except Exception:
+                try:
+                    await db.rollback()
+                except Exception:
+                    pass
+    except Exception as _e:
+        logger.warning(f"Reset portfolio stop failed for {_runtime_tenant}:{_runtime_user}: {_e}")
 
     account = await manager.init_account(
         uid, initial_cash, tenant_id=auth.tenant_id, market=market
@@ -346,7 +444,7 @@ async def get_simulation_account(
     需用户在个人中心显式重置为 100 万，避免自动重置覆盖手动任务后的持仓。
     """
     manager = SimulationAccountManager(redis)
-    uid = _require_user_id(auth.user_id)
+    uid = _require_user_id(auth.user_id, auth.tenant_id)
     market = market.upper()
     account = await manager.get_account(uid, tenant_id=auth.tenant_id, market=market)
     if not account:
@@ -391,6 +489,19 @@ async def get_simulation_account(
     account["today_pnl"] = today_pnl
     account["daily_pnl"] = today_pnl
     account["monthly_pnl"] = monthly_pnl
+    # 持仓数量统一口径：只计 volume > 0 的有效持仓（与前端/组合快照一致）
+    try:
+        _positions = account.get("positions") or {}
+        if isinstance(_positions, dict):
+            account["position_count"] = sum(
+                1
+                for _pos in _positions.values()
+                if isinstance(_pos, dict) and float(_pos.get("volume") or 0) > 0
+            )
+        elif isinstance(_positions, list):
+            account["position_count"] = len(_positions)
+    except Exception:
+        pass
     account["total_return_ratio"] = (total_pnl / initial_equity) if initial_equity > 0 else 0.0
     # 日收益率（今日实时锚点，智能图表每日收益率用）
     account["daily_return_ratio"] = (today_pnl / day_open_equity) if day_open_equity > 0 else 0.0
@@ -485,7 +596,7 @@ async def ocr_sync_holdings(
 
         # OCR 未识别到有效价格时，才用后端价格源兜底
         if current_price <= 0:
-            current_price = await _get_latest_close_from_sdl(symbol)
+            current_price = await _get_latest_close_from_quantdb(symbol)
 
         results.append({
             **item,
@@ -512,7 +623,41 @@ async def confirm_holding_sync(
     逻辑：根据识别出的股票和数量，拉取当前最新市价，并重新计算账户初始金额，使同步后的盈亏对齐。
     """
     manager = SimulationAccountManager(redis)
-    uid = _require_user_id(auth.user_id)
+    uid = _require_user_id(auth.user_id, auth.tenant_id)
+
+    # OCR 同步即“重新对齐起点”：先清旧成交/快照/新台账，避免旧基线导致
+    # today_pnl 脉冲、历史曲线串基线（与 reset 同口径）。
+    try:
+        from sqlalchemy import text as _text
+        from backend.shared.database_manager_v2 import get_session as _get_session
+        _uid_variants = {str(uid), str(auth.user_id)}
+        async with _get_session() as _session:
+            await _session.execute(_text("DELETE FROM sim_trades WHERE tenant_id=:tid AND user_id=:uid"), {"tid": auth.tenant_id, "uid": uid})
+            await _session.execute(_text("DELETE FROM sim_orders WHERE tenant_id=:tid AND user_id=:uid"), {"tid": auth.tenant_id, "uid": uid})
+            for _uv in _uid_variants:
+                await _session.execute(_text("DELETE FROM sim_trades WHERE tenant_id=:tid AND cast(user_id as varchar)=:uid_str"), {"tid": auth.tenant_id, "uid_str": _uv})
+                await _session.execute(_text("DELETE FROM sim_orders WHERE tenant_id=:tid AND cast(user_id as varchar)=:uid_str"), {"tid": auth.tenant_id, "uid_str": _uv})
+                await _session.execute(_text("DELETE FROM simulation_fund_snapshots WHERE tenant_id=:tid AND user_id=:uid2"), {"tid": auth.tenant_id, "uid2": _uv})
+                for _table in (
+                    "simulation_accounts",
+                    "simulation_position_lots",
+                    "simulation_cash_ledger",
+                    "simulation_account_daily",
+                    "simulation_position_daily",
+                    "simulation_fills",
+                    "simulation_orders",
+                ):
+                    try:
+                        async with _session.begin_nested():
+                            await _session.execute(
+                                _text(f"DELETE FROM {_table} WHERE tenant_id=:tid AND user_id=:uid2"),
+                                {"tid": auth.tenant_id, "uid2": _uv},
+                            )
+                    except Exception:
+                        continue
+            await _session.commit()
+    except Exception as _e:
+        logger.warning(f"OCR sync DB cleanup failed for {auth.tenant_id}:{uid}: {_e}")
 
     # 1. 预先获取所有股票的最新价格并计算总市值
     sync_positions = []
@@ -525,7 +670,7 @@ async def confirm_holding_sync(
         except (TypeError, ValueError):
             price = 0.0
         if price <= 0:
-            price = await _get_latest_close_from_sdl(item.symbol)
+            price = await _get_latest_close_from_quantdb(item.symbol)
 
         if price <= 0:
             raise HTTPException(

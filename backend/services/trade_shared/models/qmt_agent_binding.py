@@ -3,11 +3,16 @@ QMT Agent Binding Model
 """
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import Column, DateTime, Index, Integer, String
 
 from .base import Base
+
+
+def _utcnow() -> datetime:
+    # timestamptz 列必须用 aware UTC；naive utcnow 会被会话时区重解释（-8h BUG）。
+    return datetime.now(timezone.utc)
 
 
 class QMTAgentBinding(Base):
@@ -42,17 +47,19 @@ class QMTAgentBinding(Base):
 
     # 时间戳
     last_seen_at = Column(DateTime(timezone=True), nullable=True)
-    bound_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
-    created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
+    bound_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
     updated_at = Column(
         DateTime(timezone=True),
         nullable=False,
-        default=datetime.utcnow,
-        onupdate=datetime.utcnow,
+        default=_utcnow,
+        onupdate=_utcnow,
     )
 
     __table_args__ = (
-        Index("idx_qmt_binding_tenant_account_status", "tenant_id", "account_id", "status"),
+        Index(
+            "idx_qmt_binding_tenant_account_status", "tenant_id", "account_id", "status"
+        ),
         Index("idx_qmt_binding_api_key", "api_key_id"),
     )
 

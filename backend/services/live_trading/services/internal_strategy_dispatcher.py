@@ -438,7 +438,9 @@ async def dispatch_internal_strategy_order(
                     commission=commission,
                     stamp_duty=stamp_duty,
                     total_fee=total_fee,
-                    executed_at=datetime.utcnow(),
+                    # 时区BUG修复：naive utcnow 经会话时区(Asia/Shanghai)会被存成 -8h
+                    # 的错误 instant，必须用 aware UTC。
+                    executed_at=datetime.now(timezone.utc),
                     price_source="internal_dispatcher",
                 )
             )

@@ -4,7 +4,7 @@ import { TradeRecordsSkeleton } from '../common/CardSkeletons';
 import { useTradeRecords } from '../../hooks/useTradeRecords';
 import { useAppSelector } from '../../store';
 import { selectCurrentMarket } from '../../store/slices/uiSlice';
-import { formatBackendTime } from '../../utils/format';
+import { formatBackendTime, parseBackendTimestamp } from '../../utils/format';
 
 const MARKET_LABELS: Record<string, string> = { CN: 'A股', HK: '港股', US: '美股', CRYPTO: '区块链' };
 
@@ -101,9 +101,25 @@ export const TradeRecordsCard: React.FC = () => {
     }
   };
 
-  // 从 ISO 时间字符串中提取简短时间
+  // 从 ISO 时间字符串中提取简短时间：当天只显示 HH:mm，跨天补 MM-DD，避免昨日记录看着像今天的
+  // 日期比较统一用上海时区（与 formatBackendTime 一致），避免浏览器时区边缘错位
+  const shYmd = (d: Date) => {
+    const parts = new Intl.DateTimeFormat('zh-CN', {
+      timeZone: 'Asia/Shanghai',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).formatToParts(d);
+    const get = (t: string) => parts.find((p) => p.type === t)?.value || '';
+    return `${get('year')}-${get('month')}-${get('day')}`;
+  };
   const formatTime = (timeStr: string) => {
-    return formatBackendTime(timeStr, { withSeconds: false });
+    const d = parseBackendTimestamp(timeStr);
+    if (!d) return '--';
+    const hhmm = formatBackendTime(timeStr, { withSeconds: false });
+    if (shYmd(d) === shYmd(new Date())) return hhmm;
+    const [, mm, dd] = shYmd(d).split('-');
+    return `${mm}-${dd} ${hhmm}`;
   };
 
   const formatAmount = (value: number) => {

@@ -28,7 +28,8 @@ if "slowapi" not in sys.modules:
     sys.modules["slowapi.util"] = slowapi_util_module
 
 from backend.services.trade.routers import internal_strategy_lifecycle
-from backend.services.trade.services import internal_strategy_dispatcher
+from backend.services.live_trading.services import internal_strategy_dispatcher
+from backend.services.trade_shared.models.enums import PositionSide, TradeAction
 
 
 class _ScalarResult:
@@ -136,8 +137,8 @@ async def test_internal_strategy_order_sell_to_open_success(monkeypatch):
 
     assert res["status"] == "success"
     assert res["execution"] == "direct"
-    assert captured["order_data"].trade_action.value == "sell_to_open"
-    assert captured["order_data"].position_side.value == "short"
+    assert captured["order_data"].trade_action == TradeAction.SELL_TO_OPEN
+    assert captured["order_data"].position_side == PositionSide.SHORT
     assert captured["order_data"].is_margin_trade is True
 
 
@@ -266,6 +267,6 @@ async def test_internal_strategy_order_buy_to_close_success(monkeypatch):
     )
 
     assert res["status"] == "success"
-    assert captured["order_data"].trade_action.value == "buy_to_close"
-    assert captured["order_data"].position_side.value == "short"
+    assert captured["order_data"].trade_action == TradeAction.BUY_TO_CLOSE
+    assert captured["order_data"].position_side == PositionSide.SHORT
     assert captured["order_data"].is_margin_trade is True

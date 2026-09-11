@@ -406,8 +406,9 @@ def get_sector_heatmap(con, data_dir: Path, category: str = "shenwan") -> list[d
                 val_yi = round(tot_mv / 1e8, 1)
         if val_yi is None:
             # 估值缺失时统一按成交额(亿)兜底，单位一致，避免多分支换算比例错乱
+            # 注意：amount 口径为万元，万元→亿除 1e4（曾误写 1e8 导致全部分类被保底 10）。
             tot_amt = float(sub["amount"].sum() or 0.0)
-            val_yi = round(tot_amt / 1e8, 1)
+            val_yi = round(tot_amt / 1e4, 1)
         leader_row = sub.sort_values("pct_change", ascending=False).iloc[0]
         items.append({
             "name": sname, "value": max(val_yi, 10.0), "pct_change": avg_pct,

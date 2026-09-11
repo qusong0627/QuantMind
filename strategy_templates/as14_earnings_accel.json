@@ -1,0 +1,88 @@
+{
+  "id": "as14_earnings_accel",
+  "name": "A股盈利加速（TTM 超年度）",
+  "description": "要求 TTM 净利润高于最近年度净利润且双双为正，捕捉盈利正在加速的标的。",
+  "category": "advanced",
+  "difficulty": "advanced",
+  "params": [
+    {
+      "name": "topk",
+      "description": "持仓股票总数",
+      "default": 35,
+      "min": 5,
+      "max": 200
+    },
+    {
+      "name": "n_drop",
+      "description": "每期最大替换数",
+      "default": 8,
+      "min": 0,
+      "max": 200
+    },
+    {
+      "name": "rebalance_days",
+      "description": "调仓周期（交易日）",
+      "default": 5,
+      "min": 1,
+      "max": 60
+    },
+    {
+      "name": "f_net_profit_ttm_min",
+      "description": "TTM 净利润下限（元）",
+      "default": 300000000.0,
+      "min": 0
+    },
+    {
+      "name": "f_annual_net_profit_min",
+      "description": "最近年度净利润下限（元）",
+      "default": 200000000.0,
+      "min": 0
+    },
+    {
+      "name": "f_pe_ttm_min",
+      "description": "PE(TTM) 下限（剔除亏损）",
+      "default": 0.0,
+      "min": -50,
+      "max": 300
+    },
+    {
+      "name": "f_pe_ttm_max",
+      "description": "PE(TTM) 上限",
+      "default": 60,
+      "min": 0,
+      "max": 300
+    },
+    {
+      "name": "f_total_mv_min",
+      "description": "总市值下限（元）",
+      "default": 3000000000.0,
+      "min": 0
+    }
+  ],
+  "execution_defaults": {
+    "max_buy_drop": -0.03,
+    "stop_loss": -0.08
+  },
+  "live_defaults": {
+    "rebalance_days": 5,
+    "schedule_type": "interval",
+    "trade_weekdays": [],
+    "enabled_sessions": [
+      "PM"
+    ],
+    "sell_time": "14:30",
+    "buy_time": "14:45",
+    "sell_first": true,
+    "order_type": "LIMIT",
+    "max_price_deviation": 0.02,
+    "max_orders_per_cycle": 20
+  },
+  "live_config_tips": [
+    "TTM 净利润 > 年度净利润，等价于最近一到两个季度盈利同比在改善。",
+    "这是 features_daily 里少数能间接表达「业绩加速」的过滤组合。"
+  ],
+  "markets": [
+    "a_share"
+  ],
+  "dir": "A股策略/03_成长与景气"
+}

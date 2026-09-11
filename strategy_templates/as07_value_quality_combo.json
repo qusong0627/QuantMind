@@ -1,0 +1,95 @@
+{
+  "id": "as07_value_quality_combo",
+  "name": "A股价值质量双因子",
+  "description": "估值上限放松到 PE<25 / PB<3，但要求 TTM 净利润与营收规模，兼顾便宜与赚钱。",
+  "category": "basic",
+  "difficulty": "intermediate",
+  "params": [
+    {
+      "name": "topk",
+      "description": "持仓股票总数",
+      "default": 30,
+      "min": 5,
+      "max": 200
+    },
+    {
+      "name": "n_drop",
+      "description": "每期最大替换数",
+      "default": 8,
+      "min": 0,
+      "max": 200
+    },
+    {
+      "name": "rebalance_days",
+      "description": "调仓周期（交易日）",
+      "default": 10,
+      "min": 1,
+      "max": 60
+    },
+    {
+      "name": "f_pe_ttm_min",
+      "description": "PE(TTM) 下限（剔除亏损）",
+      "default": 0.0,
+      "min": -50,
+      "max": 300
+    },
+    {
+      "name": "f_pe_ttm_max",
+      "description": "PE(TTM) 上限",
+      "default": 25,
+      "min": 0,
+      "max": 300
+    },
+    {
+      "name": "f_pb_max",
+      "description": "PB 上限",
+      "default": 3.0,
+      "min": 0.1,
+      "max": 30
+    },
+    {
+      "name": "f_net_profit_ttm_min",
+      "description": "TTM 净利润下限（元）",
+      "default": 300000000.0,
+      "min": 0
+    },
+    {
+      "name": "f_revenue_ttm_min",
+      "description": "TTM 营收下限（元）",
+      "default": 3000000000.0,
+      "min": 0
+    },
+    {
+      "name": "f_total_mv_min",
+      "description": "总市值下限（元）",
+      "default": 5000000000.0,
+      "min": 0
+    }
+  ],
+  "execution_defaults": {
+    "max_buy_drop": -0.03,
+    "stop_loss": -0.08
+  },
+  "live_defaults": {
+    "rebalance_days": 10,
+    "schedule_type": "interval",
+    "trade_weekdays": [],
+    "enabled_sessions": [
+      "PM"
+    ],
+    "sell_time": "14:30",
+    "buy_time": "14:45",
+    "sell_first": true,
+    "order_type": "LIMIT",
+    "max_price_deviation": 0.02,
+    "max_orders_per_cycle": 20
+  },
+  "live_config_tips": [
+    "这是 GARP 思路的 A 股版本：估值不极端，但要求真实盈利。",
+    "适合作为组合的价值底仓，与动量类策略相关性低。"
+  ],
+  "markets": [
+    "a_share"
+  ],
+  "dir": "A股策略/02_价值与质量"
+}

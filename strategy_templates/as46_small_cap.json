@@ -1,0 +1,74 @@
+{
+  "id": "as46_small_cap",
+  "name": "A股小盘轮动",
+  "description": "市值 20 亿至 200 亿、成交额 3000 万以上的小盘组合，5 日调仓捕捉小盘弹性。",
+  "category": "advanced",
+  "difficulty": "intermediate",
+  "params": [
+    {
+      "name": "topk",
+      "description": "持仓股票总数",
+      "default": 40,
+      "min": 5,
+      "max": 200
+    },
+    {
+      "name": "n_drop",
+      "description": "每期最大替换数",
+      "default": 12,
+      "min": 0,
+      "max": 200
+    },
+    {
+      "name": "rebalance_days",
+      "description": "调仓周期（交易日）",
+      "default": 5,
+      "min": 1,
+      "max": 60
+    },
+    {
+      "name": "f_total_mv_min",
+      "description": "总市值下限（元）",
+      "default": 2000000000.0,
+      "min": 0
+    },
+    {
+      "name": "f_total_mv_max",
+      "description": "总市值上限（元）",
+      "default": 20000000000.0,
+      "min": 0
+    },
+    {
+      "name": "f_amount_ma_5_min",
+      "description": "5 日均成交额下限（万元）",
+      "default": 3000,
+      "min": 0
+    }
+  ],
+  "execution_defaults": {
+    "max_buy_drop": -0.03,
+    "stop_loss": -0.08
+  },
+  "live_defaults": {
+    "rebalance_days": 5,
+    "schedule_type": "interval",
+    "trade_weekdays": [],
+    "enabled_sessions": [
+      "PM"
+    ],
+    "sell_time": "14:30",
+    "buy_time": "14:45",
+    "sell_first": true,
+    "order_type": "LIMIT",
+    "max_price_deviation": 0.02,
+    "max_orders_per_cycle": 20
+  },
+  "live_config_tips": [
+    "小盘策略容量有限，资金规模大时冲击成本会显著上升。",
+    "成交额下限 3000 万元是流动性地板，低于此值难以成交。"
+  ],
+  "markets": [
+    "a_share"
+  ],
+  "dir": "A股策略/10_小盘与流动性"
+}

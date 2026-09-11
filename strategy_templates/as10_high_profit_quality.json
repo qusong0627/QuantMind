@@ -1,0 +1,94 @@
+{
+  "id": "as10_high_profit_quality",
+  "name": "A股高盈利质量（ROE 代理）",
+  "description": "净利润 5 亿 + 净资产 50 亿 + 营收 50 亿三重下限，用绝对规模近似高 ROE 白马。",
+  "category": "advanced",
+  "difficulty": "advanced",
+  "params": [
+    {
+      "name": "topk",
+      "description": "持仓股票总数",
+      "default": 35,
+      "min": 5,
+      "max": 200
+    },
+    {
+      "name": "n_drop",
+      "description": "每期最大替换数",
+      "default": 8,
+      "min": 0,
+      "max": 200
+    },
+    {
+      "name": "rebalance_days",
+      "description": "调仓周期（交易日）",
+      "default": 10,
+      "min": 1,
+      "max": 60
+    },
+    {
+      "name": "f_net_profit_ttm_min",
+      "description": "TTM 净利润下限（元）",
+      "default": 500000000.0,
+      "min": 0
+    },
+    {
+      "name": "f_equity_min",
+      "description": "净资产下限（元）",
+      "default": 5000000000.0,
+      "min": 0
+    },
+    {
+      "name": "f_revenue_ttm_min",
+      "description": "TTM 营收下限（元）",
+      "default": 5000000000.0,
+      "min": 0
+    },
+    {
+      "name": "f_pe_ttm_min",
+      "description": "PE(TTM) 下限（剔除亏损）",
+      "default": 0.0,
+      "min": -50,
+      "max": 300
+    },
+    {
+      "name": "f_pe_ttm_max",
+      "description": "PE(TTM) 上限",
+      "default": 45,
+      "min": 0,
+      "max": 300
+    },
+    {
+      "name": "f_amount_ma_5_min",
+      "description": "5 日均成交额下限（万元）",
+      "default": 5000,
+      "min": 0
+    }
+  ],
+  "execution_defaults": {
+    "max_buy_drop": -0.03,
+    "stop_loss": -0.08
+  },
+  "live_defaults": {
+    "rebalance_days": 10,
+    "schedule_type": "interval",
+    "trade_weekdays": [],
+    "enabled_sessions": [
+      "PM"
+    ],
+    "sell_time": "14:30",
+    "buy_time": "14:45",
+    "sell_first": true,
+    "order_type": "LIMIT",
+    "max_price_deviation": 0.02,
+    "max_orders_per_cycle": 20
+  },
+  "live_config_tips": [
+    "features_daily 没有 ROE 列，本模板用「净利润 + 净资产」绝对规模近似质量。",
+    "若要真正的 ROE 因子，需把 3_financial_data 的 roe 合并进 features_daily（经 quantdb_hub.fetch_financial）。"
+  ],
+  "markets": [
+    "a_share"
+  ],
+  "dir": "A股策略/02_价值与质量"
+}

@@ -247,8 +247,9 @@ class RemoteSSHOrchestrator(TrainingOrchestrator):
 
         try:
             await _set_parent("provisioning", 5, f"[MH] 多周期远程训练启动，共 {len(child_run_ids)} 个周期\n")
-            completed_model_ids: list[str] = []
+            ready_model_ids: list[str] = []
             completed_run_ids: set[str] = set()
+            skipped_children: list[dict] = []
             horizon_labels: list[str] = []
             n_total = len(child_run_ids)
 
@@ -262,8 +263,24 @@ class RemoteSSHOrchestrator(TrainingOrchestrator):
                         if isinstance(child_rec.request_payload, dict)
                         else {}
                     )
+                    child_tenant = str(child_rec.tenant_id or "default")
+                    child_user = str(child_rec.user_id or "")
                 horizon = int(child_payload.get("target_horizon_days") or 0)
                 horizon_labels.append(f"T{horizon}")
+                # 期望模型 ID 与回调注册口径一致（按 child 市场推断前缀）
+                child_ctx = (
+                    child_payload.get("context")
+                    if isinstance(child_payload.get("context"), dict)
+                    else {}
+                )
+                child_market = str(child_ctx.get("market") or "").upper().strip()
+                if not child_market:
+                    child_market = model_registry_service._infer_market_from_benchmark(
+                        child_ctx.get("benchmark")
+                    )
+                expected_model_id = model_registry_service.build_model_id_from_run(
+                    child_run_id, market=child_market or "CN"
+                )
                 base_progress = 5 + int((idx / n_total) * 90)
                 await _set_parent("running", base_progress, f"[MH] ({idx + 1}/{n_total}) 训练 T+{horizon} 模型…\n")
 
@@ -279,9 +296,44 @@ class RemoteSSHOrchestrator(TrainingOrchestrator):
                             break
                         st = str(r.status or "")
                         if st == "completed":
-                            completed_model_ids.append(
-                                model_registry_service.build_model_id_from_run(child_run_id)
+                            # 融合只收 ready/active 模型：被质量门禁暂留 candidate
+                            # 的 child 在此跳过，不参与融合（与本地编排器一致）。
+                            src_model = await model_registry_service.get_model(
+                                tenant_id=child_tenant,
+                                user_id=child_user,
+                                model_id=expected_model_id,
                             )
+                            if src_model is None:
+                                raise RuntimeError(
+                                    f"child T+{horizon} 已完成但模型未注册 "
+                                    f"(期望 {expected_model_id})，无法参与融合"
+                                )
+                            src_status = str(src_model.get("status") or "")
+                            if src_status not in ("ready", "active"):
+                                src_meta = src_model.get("metadata_json") or {}
+                                gate_reasons = (
+                                    src_meta.get("quality_warnings")
+                                    if isinstance(src_meta, dict)
+                                    else None
+                                ) or [f"status={src_status}"]
+                                reason_text = "；".join(str(x) for x in gate_reasons)
+                                skipped_children.append(
+                                    {
+                                        "run_id": child_run_id,
+                                        "horizon": f"T{horizon}",
+                                        "model_id": expected_model_id,
+                                        "status": src_status,
+                                        "reasons": [str(x) for x in gate_reasons],
+                                    }
+                                )
+                                await _set_parent(
+                                    "running",
+                                    5 + int(((idx + 1) / n_total) * 90),
+                                    f"[MH] T+{horizon} 模型未就绪（{reason_text}），"
+                                    "已跳过，不参与融合\n",
+                                )
+                            else:
+                                ready_model_ids.append(expected_model_id)
                             completed_run_ids.add(child_run_id)
                             break
                         if st == "failed":
@@ -293,14 +345,28 @@ class RemoteSSHOrchestrator(TrainingOrchestrator):
                     raise RuntimeError(f"child T+{horizon} timed out waiting for completion")
                 await _set_parent("running", 5 + int(((idx + 1) / n_total) * 90), f"[MH] T+{horizon} 模型训练完成（{idx + 1}/{n_total}）\n")
 
-            if len(completed_model_ids) < 2:
-                raise RuntimeError("multi-horizon requires at least 2 completed models")
+            if len(ready_model_ids) < 2:
+                skipped_text = "; ".join(
+                    f"{s['horizon']}({s['status']}: {';'.join(s['reasons'])})"
+                    for s in skipped_children
+                ) or "无"
+                raise RuntimeError(
+                    "multi-horizon requires at least 2 ready models, "
+                    f"got {len(ready_model_ids)}; skipped: {skipped_text}"
+                )
+            if skipped_children:
+                await _set_parent(
+                    "running",
+                    95,
+                    f"[MH] {len(skipped_children)} 个周期未就绪已跳过，"
+                    f"用 {len(ready_model_ids)} 个模型融合\n",
+                )
 
             fusion_name = f"{display_name}_MultiHorizon"
             fusion = await model_registry_service.register_ensemble_model(
                 tenant_id=tenant_id,
                 user_id=user_id,
-                source_model_ids=completed_model_ids,
+                source_model_ids=ready_model_ids,
                 display_name=fusion_name,
                 weight_strategy="icir",
             )

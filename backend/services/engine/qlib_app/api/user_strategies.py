@@ -35,7 +35,9 @@ from backend.services.engine.qlib_app.services.strategy_templates import (
     get_template_by_id,
     invalidate_templates_cache,
 )
-from backend.services.engine.qlib_app.utils.structured_logger import StructuredTaskLogger
+from backend.services.engine.qlib_app.utils.structured_logger import (
+    StructuredTaskLogger,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +60,7 @@ def _get_trade_redis():
         return None
     try:
         from redis import Redis
+
         return Redis(
             host=host,
             port=int(os.getenv("SIGNAL_STREAM_REDIS_PORT", "6379")),
@@ -68,7 +71,9 @@ def _get_trade_redis():
             socket_connect_timeout=3.0,
         )
     except Exception as e:
-        StructuredTaskLogger(logger, "user-strategies").warning("trade_redis_unavailable", "无法连接 trade-redis", error=e)
+        StructuredTaskLogger(logger, "user-strategies").warning(
+            "trade_redis_unavailable", "无法连接 trade-redis", error=e
+        )
         return None
 
 
@@ -81,21 +86,32 @@ def _is_valid_bearer_jwt(auth_header: str) -> bool:
     return len(parts) == 3 and all(part.strip() for part in parts)
 
 
-async def _trigger_inference_after_activate(*, strategy_id: str, tenant_id: str, user_id: str, market: str = "A") -> None:
+async def _trigger_inference_after_activate(
+    *, strategy_id: str, tenant_id: str, user_id: str, market: str = "A"
+) -> None:
     """
     策略激活后异步触发一次推理发布（按 tenant_id + user_id 定向产信号）。
     """
     try:
-        from backend.services.engine.inference.router_service import InferenceRouterService
+        from backend.services.engine.inference.router_service import (
+            InferenceRouterService,
+        )
     except Exception as e:
-        StructuredTaskLogger(logger, "user-strategies").warning("inference_import_failed", "导入 InferenceRouterService 失败", error=e)
+        StructuredTaskLogger(logger, "user-strategies").warning(
+            "inference_import_failed", "导入 InferenceRouterService 失败", error=e
+        )
         return
 
     from backend.services.engine.data_platform.calendars.calendar import get_calendar
 
     market_upper = (market or "A").upper()
     _MARKET_XCAL = {"A": "XSHG", "HK": "XHKG", "US": "XNYS"}
-    _MARKET_TZ = {"A": "Asia/Shanghai", "HK": "Asia/Hong_Kong", "US": "America/New_York", "CRYPTO": "UTC"}
+    _MARKET_TZ = {
+        "A": "Asia/Shanghai",
+        "HK": "Asia/Hong_Kong",
+        "US": "America/New_York",
+        "CRYPTO": "UTC",
+    }
 
     tz_name = _MARKET_TZ.get(market_upper, "Asia/Shanghai")
     now_local = datetime.now(ZoneInfo(tz_name))
@@ -106,7 +122,11 @@ async def _trigger_inference_after_activate(*, strategy_id: str, tenant_id: str,
     else:
         xcal_name = _MARKET_XCAL.get(market_upper, "XSHG")
         cal = xcals.get_calendar(xcal_name)
-        data_trade_date_obj = cal.previous_session(now_local.date()).date() if now_local.time() < datetime.strptime("09:30", "%H:%M").time() else now_local.date()
+        data_trade_date_obj = (
+            cal.previous_session(now_local.date()).date()
+            if now_local.time() < datetime.strptime("09:30", "%H:%M").time()
+            else now_local.date()
+        )
     data_trade_date = data_trade_date_obj.isoformat()
     if market_upper == "CRYPTO":
         prediction_trade_date = (data_trade_date_obj + timedelta(days=1)).isoformat()
@@ -121,11 +141,21 @@ async def _trigger_inference_after_activate(*, strategy_id: str, tenant_id: str,
             StructuredTaskLogger(
                 logger,
                 "user-strategies",
-                {"strategy_id": strategy_id, "tenant_id": tenant_id, "user_id": user_id},
-            ).info("inference_skipped", "已有同用户同日推理在执行/完成，跳过", date=prediction_trade_date)
+                {
+                    "strategy_id": strategy_id,
+                    "tenant_id": tenant_id,
+                    "user_id": user_id,
+                },
+            ).info(
+                "inference_skipped",
+                "已有同用户同日推理在执行/完成，跳过",
+                date=prediction_trade_date,
+            )
             return
     except Exception as e:
-        StructuredTaskLogger(logger, "user-strategies").warning("inference_lock_failed", "Redis 锁获取失败，降级继续执行", error=e)
+        StructuredTaskLogger(logger, "user-strategies").warning(
+            "inference_lock_failed", "Redis 锁获取失败，降级继续执行", error=e
+        )
 
     try:
         router_service = InferenceRouterService()
@@ -196,9 +226,55 @@ def _resolve_trade_service_url() -> str:
         hostname = (parsed.hostname or "").strip().lower()
         # 容器内若读到本地开发地址（127.0.0.1/localhost），会错误指向当前 engine 容器。
         if os.path.exists("/.dockerenv") and hostname in {"127.0.0.1", "localhost"}:
+            # OSS 单容器（SERVICE_MODE=all）下 trade 同进程监听 8002，直连本机；
+            # 只有分容器部署才走 quantmind-trade 域名。
+            if os.getenv("SERVICE_MODE", "").strip().lower() == "all":
+                return "http://127.0.0.1:8002/api/v1/real-trading/status"
             return "http://quantmind-trade:8002/api/v1/real-trading/status"
         return f"{direct.rstrip('/')}/api/v1/real-trading/status"
+    if os.getenv("SERVICE_MODE", "").strip().lower() == "all":
+        return "http://127.0.0.1:8002/api/v1/real-trading/status"
     return "http://quantmind-trade:8002/api/v1/real-trading/status"
+
+
+def _fetch_local_active_configs() -> list[dict[str, Any]]:
+    """直读 engine 激活写入的 Redis 活跃池（quantmind:active_strategies）。
+
+    策略列表的运行态/收益归因不再强依赖 trade 服务 HTTP（分容器域名在
+    OSS 单容器下不通、portfolios 表常为空）。trade HTTP 仅作实盘补充。
+    任何失败返回 []，调用方回退原逻辑。
+    """
+    try:
+        try:
+            redis = get_redis_sentinel_client()
+        except NameError:
+            return []
+        if redis is None:
+            return []
+        raw = redis.hgetall(ACTIVE_STRATEGIES_KEY) or {}
+    except Exception as exc:
+        logger.warning("local active strategies read failed: %s", exc)
+        return []
+    out: list[dict[str, Any]] = []
+    try:
+        items = raw.items() if isinstance(raw, dict) else []
+    except Exception:
+        return []
+    for field, payload in items:
+        try:
+            data = json.loads(payload) if isinstance(payload, (str, bytes)) else payload
+        except Exception:
+            continue
+        if not isinstance(data, dict):
+            continue
+        data = dict(data)
+        try:
+            field_str = field.decode() if isinstance(field, bytes) else str(field)
+        except Exception:
+            field_str = str(field)
+        data.setdefault("strategy_id", field_str)
+        out.append(data)
+    return out
 
 
 def _get_user_id(request: Request) -> str | None:
@@ -222,7 +298,9 @@ def _to_iso_string(value: Any) -> str | None:
     return text_value or None
 
 
-async def _fetch_latest_backtest_summaries(user_id: str, tenant_id: str) -> dict[str, dict[str, Any]]:
+async def _fetch_latest_backtest_summaries(
+    user_id: str, tenant_id: str
+) -> dict[str, dict[str, Any]]:
     """
     按策略 ID 提取最近一次回测摘要。
 
@@ -269,7 +347,11 @@ async def _fetch_latest_backtest_summaries(user_id: str, tenant_id: str) -> dict
             "risk_level": payload.get("risk_level"),
             "error_code": payload.get("error_code"),
             "error_message": payload.get("error_message"),
-            "last_update": _to_iso_string(payload.get("last_update") or row.get("completed_at") or row.get("created_at")),
+            "last_update": _to_iso_string(
+                payload.get("last_update")
+                or row.get("completed_at")
+                or row.get("created_at")
+            ),
             "execution_latency_ms": (
                 int(float(payload.get("execution_time")) * 1000)
                 if payload.get("execution_time") is not None
@@ -351,7 +433,9 @@ async def _perform_sync(user_id: str):
     for t in templates:
         # 去重：按 parameters.strategy_type == template.id 判重，避免同名误判
         existing = await asyncio.to_thread(svc.list, user_id=user_id)
-        if any((s.get("parameters") or {}).get("strategy_type") == t.id for s in existing):
+        if any(
+            (s.get("parameters") or {}).get("strategy_type") == t.id for s in existing
+        ):
             continue
         # 兼容旧数据：同名已存在也跳过，避免重复克隆
         if any(s.get("name") == t.name for s in existing):
@@ -388,6 +472,7 @@ async def _perform_sync(user_id: str):
 
 class StrategyCreateRequest(BaseModel):
     """创建策略请求"""
+
     name: str = Field(..., min_length=1, max_length=200, description="策略名称")
     code: str = Field("", description="策略代码")
     description: str = Field("", description="策略描述")
@@ -399,6 +484,7 @@ class StrategyCreateRequest(BaseModel):
 
 class StrategyUpdateRequest(BaseModel):
     """更新策略请求"""
+
     name: str | None = Field(None, description="策略名称")
     code: str | None = Field(None, description="策略代码")
     description: str | None = Field(None, description="策略描述")
@@ -440,6 +526,67 @@ class StrategyListResponse(BaseModel):
     strategies: list[StrategyListItem]
 
 
+async def _fetch_sim_fund_fallback(
+    tenant_id: str, user_sub: str
+) -> dict[str, float] | None:
+    """模拟盘收益兜底（策略监控用）。
+
+    实盘组合行（portfolios）由 runner 维护；模拟策略直接交易共享模拟账户，
+    portfolios 表为空时活跃策略的今日/累计收益全 0。此处直读该用户模拟账户
+    最新资金快照，把账户级收益归因给活跃策略（与原 portfolio 快照口径一致）。
+    无快照返回 None，调用方保持原值。
+    """
+    sub = str(user_sub or "").strip()
+    # JWT sub -> 模拟盘 uid（与 trade_shared.require_sim_user_id 同规则）：
+    # 数字直接用，非数字（OSS 默认 admin）归保留账户 0。
+    # 末尾恒带 "0"：OSS 单用户/策略 runner 落 0 号账户，数字 sub 也能命中。
+    sim_uid = sub if sub.isdigit() else "0"
+    candidates = []
+    for c in (sim_uid, sub, "0"):
+        if c and c not in candidates:
+            candidates.append(c)
+    try:
+        async with get_session(read_only=True) as session:
+            placeholders = ",".join(f":u{i}" for i in range(len(candidates)))
+            params: dict[str, Any] = {"tid": str(tenant_id or "default")}
+            params.update({f"u{i}": c for i, c in enumerate(candidates)})
+            row = (
+                await session.execute(
+                    text(
+                        "SELECT total_asset, today_pnl, total_pnl, initial_capital "
+                        "FROM simulation_fund_snapshots "
+                        f"WHERE tenant_id = :tid AND user_id IN ({placeholders}) "
+                        "ORDER BY snapshot_date DESC LIMIT 1"
+                    ),
+                    params,
+                )
+            ).fetchone()
+    except Exception as exc:
+        logger.warning("sim fund fallback query failed: %s", exc)
+        return None
+    if not row:
+        return None
+    try:
+        today_pnl = float(row[1] or 0.0)
+        total_pnl = float(row[2] or 0.0)
+        initial_capital = float(row[3] or 0.0)
+    except Exception:
+        return None
+    # 分母与 _fetch_active_portfolio_snapshot 对齐：均按初始资金，避免轻仓失真
+    total_return_pct = (
+        total_pnl / initial_capital * 100.0 if initial_capital > 0 else 0.0
+    )
+    today_return_pct = (
+        today_pnl / initial_capital * 100.0 if initial_capital > 0 else 0.0
+    )
+    return {
+        "today_pnl": today_pnl,
+        "total_pnl": total_pnl,
+        "today_return": today_return_pct,
+        "total_return": total_return_pct,
+    }
+
+
 async def _fetch_real_trading_status(request: Request) -> dict[str, Any] | None:
     auth_header = request.headers.get("authorization")
     if not auth_header or not _is_valid_bearer_jwt(auth_header):
@@ -447,14 +594,18 @@ async def _fetch_real_trading_status(request: Request) -> dict[str, Any] | None:
             "real_trading_skip", "skip real-trading/status due to invalid auth header"
         )
         return None
-    tenant_id = str((getattr(request.state, "user", {}) or {}).get("tenant_id") or "default")
+    tenant_id = str(
+        (getattr(request.state, "user", {}) or {}).get("tenant_id") or "default"
+    )
     headers = {"Authorization": auth_header, "X-Tenant-Id": tenant_id}
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(2.0, connect=1.0)) as client:
             resp = await client.get(_resolve_trade_service_url(), headers=headers)
         if resp.status_code != 200:
             StructuredTaskLogger(logger, "user-strategies").warning(
-                "real_trading_failed", "fetch real-trading/status failed", status=resp.status_code
+                "real_trading_failed",
+                "fetch real-trading/status failed",
+                status=resp.status_code,
             )
             return None
         payload = resp.json()
@@ -512,16 +663,50 @@ async def list_user_strategies(
                 market=market,
             )
 
-        backtest_summaries = await _fetch_latest_backtest_summaries(user_id=user_id, tenant_id=tenant_id)
+        backtest_summaries = await _fetch_latest_backtest_summaries(
+            user_id=user_id, tenant_id=tenant_id
+        )
         trading_status = await _fetch_real_trading_status(request)
         runtime_state = _normalize_runtime_state((trading_status or {}).get("status"))
-        strategy_payload = (trading_status or {}).get("strategy") if isinstance(trading_status, dict) else {}
+        strategy_payload = (
+            (trading_status or {}).get("strategy")
+            if isinstance(trading_status, dict)
+            else {}
+        )
         if not isinstance(strategy_payload, dict):
             strategy_payload = {}
         active_strategy_id = str(strategy_payload.get("id") or "").strip()
         active_strategy_name = str(strategy_payload.get("name") or "").strip().lower()
-        active_template_id = active_strategy_id.replace("sys_", "", 1) if active_strategy_id.startswith("sys_") else ""
-        trade_portfolio = (trading_status or {}).get("portfolio") if isinstance(trading_status, dict) else None
+        active_template_id = (
+            active_strategy_id.replace("sys_", "", 1)
+            if active_strategy_id.startswith("sys_")
+            else ""
+        )
+        trade_portfolio = (
+            (trading_status or {}).get("portfolio")
+            if isinstance(trading_status, dict)
+            else None
+        )
+        # 模拟模式兜底：portfolios 表为空时用模拟账户资金快照归因活跃策略。
+        # 实盘模式不启用（避免模拟/实盘混淆）。
+        sim_fund: dict[str, float] | None = None
+        try:
+            sim_mode = (
+                str((trading_status or {}).get("mode") or "SIMULATION").strip().upper()
+            )
+        except Exception:
+            sim_mode = "SIMULATION"
+        if sim_mode == "SIMULATION":
+            sim_fund = await _fetch_sim_fund_fallback(tenant_id, user_id)
+        # 本地活跃池（activate 写入，不依赖跨服务 HTTP，直接判定运行态）。
+        local_active_cfgs = _fetch_local_active_configs()
+        try:
+            my_uids = {
+                normalize_user_id(user_id),
+                str(user_id or "").strip(),
+            }
+        except Exception:
+            my_uids = {str(user_id or "").strip()}
 
         def _to_float(value: Any, default: float = 0.0) -> float:
             try:
@@ -537,26 +722,68 @@ async def list_user_strategies(
             base_status = _normalize_base_status(item.get("status"))
             item_id = str(item.get("id") or "")
             item_name = str(item.get("name") or "").strip().lower()
-            item_parameters = item.get("parameters") if isinstance(item.get("parameters"), dict) else {}
-            item_strategy_type = str(item_parameters.get("strategy_type") or "").strip().lower()
+            item_parameters = (
+                item.get("parameters")
+                if isinstance(item.get("parameters"), dict)
+                else {}
+            )
+            item_strategy_type = (
+                str(item_parameters.get("strategy_type") or "").strip().lower()
+            )
 
             is_active_item = False
             if active_strategy_id and item_id == active_strategy_id:
                 is_active_item = True
-            elif active_template_id and item_strategy_type == active_template_id.lower():
+            elif (
+                active_template_id and item_strategy_type == active_template_id.lower()
+            ):
                 is_active_item = True
             elif active_strategy_name and item_name == active_strategy_name:
                 is_active_item = True
 
+            # 本地活跃池兜底：trade HTTP 不通时仍能判定运行态（同用户+租户才算）。
+            local_match = False
+            if not is_active_item and local_active_cfgs:
+                for cfg in local_active_cfgs:
+                    try:
+                        if str(cfg.get("tenant_id") or "default") != tenant_id:
+                            continue
+                        if str(cfg.get("user_id") or "") not in my_uids:
+                            continue
+                        cfg_sid = str(cfg.get("strategy_id") or "").strip()
+                        cfg_name = str(cfg.get("name") or "").strip().lower()
+                        cfg_type = str(cfg.get("strategy_type") or "").strip().lower()
+                        if (
+                            (cfg_sid and cfg_sid == item_id)
+                            or (cfg_type and cfg_type == item_strategy_type)
+                            or (cfg_name and cfg_name == item_name)
+                        ):
+                            local_match = True
+                            break
+                    except Exception:
+                        continue
+            is_active_item = is_active_item or local_match
+
             item_runtime_state = runtime_state if is_active_item else None
-            effective_status = item_runtime_state or _base_to_effective_status(base_status)
+            if item_runtime_state is None and local_match:
+                # 跨服务状态不可达时，本地激活记录即运行态。
+                item_runtime_state = "running"
+            effective_status = item_runtime_state or _base_to_effective_status(
+                base_status
+            )
             summary = backtest_summaries.get(item_id, {})
             summary_total_return = summary.get("total_return")
             summary_today_return = summary.get("today_return")
             summary_risk_level = summary.get("risk_level")
             summary_execution_latency = summary.get("execution_latency_ms")
-            risk_level = summary_risk_level if isinstance(summary_risk_level, str) and summary_risk_level else (
-                item.get("parameters", {}).get("risk_level") if isinstance(item.get("parameters"), dict) else None
+            risk_level = (
+                summary_risk_level
+                if isinstance(summary_risk_level, str) and summary_risk_level
+                else (
+                    item.get("parameters", {}).get("risk_level")
+                    if isinstance(item.get("parameters"), dict)
+                    else None
+                )
             )
             if not isinstance(risk_level, str) or not risk_level.strip():
                 risk_level = "medium"
@@ -566,7 +793,9 @@ async def list_user_strategies(
                 total_return = 0.0
             today_return = _to_float(summary_today_return, 0.0)
             today_pnl = 0.0
-            if active_strategy_id and item_id == active_strategy_id:
+            # P0-STRAT：运行态匹配用模糊口径（is_active_item，与 effective_status
+            # 一致），否则 sys_ 模板策略永远走不到收益分支。
+            if is_active_item:
                 trade_today_return = (trading_status or {}).get("daily_return")
                 if trade_today_return is None and isinstance(trade_portfolio, dict):
                     trade_today_return = trade_portfolio.get("daily_return")
@@ -576,11 +805,26 @@ async def list_user_strategies(
                 if trade_today_return is not None:
                     today_return = _to_float(trade_today_return, today_return)
                 elif trade_daily_pnl is not None and isinstance(trade_portfolio, dict):
-                    initial_capital = _to_float(trade_portfolio.get("initial_capital"), 0.0)
+                    initial_capital = _to_float(
+                        trade_portfolio.get("initial_capital"), 0.0
+                    )
                     if initial_capital > 0:
-                        today_return = _to_float(trade_daily_pnl, 0.0) / initial_capital * 100.0
+                        today_return = (
+                            _to_float(trade_daily_pnl, 0.0) / initial_capital * 100.0
+                        )
                 if trade_daily_pnl is not None:
                     today_pnl = _to_float(trade_daily_pnl, 0.0)
+                # 模拟盘无 portfolios 行时 portfolio 快照为 None，上面全是 None；
+                # 用模拟账户资金快照兜底，否则活跃策略收益恒为 0。
+                if (
+                    trade_daily_pnl is None
+                    and trade_today_return is None
+                    and sim_fund is not None
+                ):
+                    today_pnl = float(sim_fund["today_pnl"])
+                    today_return = float(sim_fund["today_return"])
+                    if total_return == 0.0:
+                        total_return = float(sim_fund["total_return"])
             execution_latency_ms = None
             if summary_execution_latency is not None:
                 try:
@@ -608,11 +852,15 @@ async def list_user_strategies(
                     last_update=summary.get("last_update"),
                     error_code=summary.get("error_code"),
                     error_message=summary.get("error_message"),
-                    last_failed_at=summary.get("completed_at") if summary.get("status") == "failed" else None,
+                    last_failed_at=summary.get("completed_at")
+                    if summary.get("status") == "failed"
+                    else None,
                     last_signal_at=summary.get("created_at"),
                     execution_latency_ms=execution_latency_ms,
                     parameters=item.get("parameters") or {},
-                    category=item.get("tags", [None])[0] if item.get("tags") and item.get("is_system") else "db_stored",
+                    category=item.get("tags", [None])[0]
+                    if item.get("tags") and item.get("is_system")
+                    else "db_stored",
                     is_system=bool(item.get("is_system", False)),
                 )
             )
@@ -621,7 +869,9 @@ async def list_user_strategies(
     except HTTPException:
         raise
     except Exception as e:
-        StructuredTaskLogger(logger, "user-strategies").exception("list_failed", "获取策略列表失败", error=e)
+        StructuredTaskLogger(logger, "user-strategies").exception(
+            "list_failed", "获取策略列表失败", error=e
+        )
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -658,12 +908,16 @@ async def create_strategy(request: Request, body: StrategyCreateRequest):
     except HTTPException:
         raise
     except Exception as e:
-        StructuredTaskLogger(logger, "user-strategies").exception("create_failed", "创建策略失败", error=e)
+        StructuredTaskLogger(logger, "user-strategies").exception(
+            "create_failed", "创建策略失败", error=e
+        )
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.put("/{strategy_id}")
-async def update_strategy(strategy_id: str, request: Request, body: StrategyUpdateRequest):
+async def update_strategy(
+    strategy_id: str, request: Request, body: StrategyUpdateRequest
+):
     """更新策略。"""
     try:
         user_id = _get_user_id(request)
@@ -685,9 +939,17 @@ async def update_strategy(strategy_id: str, request: Request, body: StrategyUpda
         # 合并更新字段
         new_name = body.name if body.name is not None else existing.get("name", "")
         new_code = body.code if body.code is not None else existing.get("code", "")
-        new_description = body.description if body.description is not None else existing.get("description", "")
+        new_description = (
+            body.description
+            if body.description is not None
+            else existing.get("description", "")
+        )
         new_tags = body.tags if body.tags is not None else existing.get("tags", [])
-        new_parameters = body.parameters if body.parameters is not None else existing.get("parameters", {})
+        new_parameters = (
+            body.parameters
+            if body.parameters is not None
+            else existing.get("parameters", {})
+        )
 
         result = await svc.save(
             user_id=user_id,
@@ -711,9 +973,9 @@ async def update_strategy(strategy_id: str, request: Request, body: StrategyUpda
     except HTTPException:
         raise
     except Exception as e:
-        StructuredTaskLogger(logger, "user-strategies", {"strategy_id": strategy_id}).exception(
-            "update_failed", "更新策略失败", error=e
-        )
+        StructuredTaskLogger(
+            logger, "user-strategies", {"strategy_id": strategy_id}
+        ).exception("update_failed", "更新策略失败", error=e)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -738,11 +1000,17 @@ async def sync_templates(request: Request):
         invalidate_templates_cache()
 
         count = await _perform_sync(user_id)
-        return {"success": True, "synced_count": count, "message": f"成功同步 {count} 个模板"}
+        return {
+            "success": True,
+            "synced_count": count,
+            "message": f"成功同步 {count} 个模板",
+        }
     except HTTPException:
         raise
     except Exception as e:
-        StructuredTaskLogger(logger, "user-strategies").exception("sync_failed", "同步模板失败", error=e)
+        StructuredTaskLogger(logger, "user-strategies").exception(
+            "sync_failed", "同步模板失败", error=e
+        )
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -770,7 +1038,9 @@ async def get_strategy_detail(strategy_id: str, request: Request):
     except HTTPException:
         raise
     except Exception as e:
-        StructuredTaskLogger(logger, "user-strategies").exception("detail_failed", "获取策略详情失败", error=e)
+        StructuredTaskLogger(logger, "user-strategies").exception(
+            "detail_failed", "获取策略详情失败", error=e
+        )
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -798,7 +1068,11 @@ async def activate_strategy(strategy_id: str, request: Request):
 
         normalized_user_id = normalize_user_id(user_id)
         tenant_id = _get_tenant_id(request)
-        strategy_market = str(strategy.get("parameters", {}).get("market") or strategy.get("market") or "A").upper()
+        strategy_market = str(
+            strategy.get("parameters", {}).get("market")
+            or strategy.get("market")
+            or "A"
+        ).upper()
         config_to_cache = {
             "strategy_id": strategy_id,
             "user_id": normalized_user_id,
@@ -820,8 +1094,12 @@ async def activate_strategy(strategy_id: str, request: Request):
             try:
                 trade_redis.hset(ACTIVE_STRATEGIES_KEY, strategy_id, config_json)
             except Exception as e:
-                StructuredTaskLogger(logger, "user-strategies", {"strategy_id": strategy_id}).warning(
-                    "trade_redis_sync_failed", "同步写入 trade-redis 失败（不影响主流程）", error=e
+                StructuredTaskLogger(
+                    logger, "user-strategies", {"strategy_id": strategy_id}
+                ).warning(
+                    "trade_redis_sync_failed",
+                    "同步写入 trade-redis 失败（不影响主流程）",
+                    error=e,
                 )
 
         asyncio.create_task(
@@ -836,15 +1114,19 @@ async def activate_strategy(strategy_id: str, request: Request):
         StructuredTaskLogger(
             logger,
             "user-strategies",
-            {"strategy_id": strategy_id, "user_id": normalized_user_id, "tenant_id": tenant_id},
+            {
+                "strategy_id": strategy_id,
+                "user_id": normalized_user_id,
+                "tenant_id": tenant_id,
+            },
         ).info("activate", "策略已激活")
         return {"success": True, "message": "策略已成功激活", "data": config_to_cache}
     except HTTPException:
         raise
     except Exception as e:
-        StructuredTaskLogger(logger, "user-strategies", {"strategy_id": strategy_id}).exception(
-            "activate_failed", "激活策略失败", error=e
-        )
+        StructuredTaskLogger(
+            logger, "user-strategies", {"strategy_id": strategy_id}
+        ).exception("activate_failed", "激活策略失败", error=e)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -865,17 +1147,21 @@ async def deactivate_strategy(strategy_id: str, request: Request):
             try:
                 trade_redis.hdel(ACTIVE_STRATEGIES_KEY, strategy_id)
             except Exception as e:
-                StructuredTaskLogger(logger, "user-strategies", {"strategy_id": strategy_id}).warning(
-                    "trade_redis_remove_failed", "从 trade-redis 移除失败（不影响主流程）", error=e
+                StructuredTaskLogger(
+                    logger, "user-strategies", {"strategy_id": strategy_id}
+                ).warning(
+                    "trade_redis_remove_failed",
+                    "从 trade-redis 移除失败（不影响主流程）",
+                    error=e,
                 )
 
         return {"success": True, "message": "策略已停用"}
     except HTTPException:
         raise
     except Exception as e:
-        StructuredTaskLogger(logger, "user-strategies", {"strategy_id": strategy_id}).exception(
-            "deactivate_failed", "停用策略失败", error=e
-        )
+        StructuredTaskLogger(
+            logger, "user-strategies", {"strategy_id": strategy_id}
+        ).exception("deactivate_failed", "停用策略失败", error=e)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -904,7 +1190,7 @@ async def delete_user_strategy(strategy_id: str, request: Request):
     except ValueError as ve:
         raise HTTPException(status_code=400, detail=str(ve))
     except Exception as e:
-        StructuredTaskLogger(logger, "user-strategies", {"strategy_id": strategy_id}).exception(
-            "delete_failed", "删除策略失败", error=e
-        )
+        StructuredTaskLogger(
+            logger, "user-strategies", {"strategy_id": strategy_id}
+        ).exception("delete_failed", "删除策略失败", error=e)
         raise HTTPException(status_code=500, detail=str(e))

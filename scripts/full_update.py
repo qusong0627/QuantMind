@@ -1,4 +1,10 @@
 """
+⚠️ 本脚本已停用 (DEPRECATED)
+==========================
+本脚本是 fundamental_aligned.parquet 的旧生产者。该数据源已废弃——全面转向
+QuantDB features_daily (见 backend/shared/fundamental_aligner.py)。线上不再调用
+本脚本；所需数据统一由 quantdb_daily_sync.py 产生。保留仅供历史参照，不重新启用。
+
 全量数据拉取脚本
 ================
 每天拉取全量历史K线数据，一次性计算所有指标后保存。

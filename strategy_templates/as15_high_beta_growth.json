@@ -1,0 +1,89 @@
+{
+  "id": "as15_high_beta_growth",
+  "name": "A股高弹性成长",
+  "description": "Beta 在 1.0 至 2.5 之间、流动性充足的高弹性组合，仓位 80% 控制回撤。",
+  "category": "advanced",
+  "difficulty": "advanced",
+  "params": [
+    {
+      "name": "topk",
+      "description": "持仓股票总数",
+      "default": 30,
+      "min": 5,
+      "max": 200
+    },
+    {
+      "name": "n_drop",
+      "description": "每期最大替换数",
+      "default": 10,
+      "min": 0,
+      "max": 200
+    },
+    {
+      "name": "rebalance_days",
+      "description": "调仓周期（交易日）",
+      "default": 3,
+      "min": 1,
+      "max": 60
+    },
+    {
+      "name": "risk_degree",
+      "description": "基础仓位比例（0-1）",
+      "default": 0.8,
+      "min": 0.05,
+      "max": 1.0
+    },
+    {
+      "name": "f_beta_20_min",
+      "description": "20 日 Beta 下限",
+      "default": 1.0,
+      "min": -3,
+      "max": 3
+    },
+    {
+      "name": "f_beta_20_max",
+      "description": "20 日 Beta 上限",
+      "default": 2.5,
+      "min": -3,
+      "max": 3
+    },
+    {
+      "name": "f_total_mv_min",
+      "description": "总市值下限（元）",
+      "default": 3000000000.0,
+      "min": 0
+    },
+    {
+      "name": "f_amount_ma_5_min",
+      "description": "5 日均成交额下限（万元）",
+      "default": 8000,
+      "min": 0
+    }
+  ],
+  "execution_defaults": {
+    "max_buy_drop": -0.03,
+    "stop_loss": -0.08
+  },
+  "live_defaults": {
+    "rebalance_days": 3,
+    "schedule_type": "interval",
+    "trade_weekdays": [],
+    "enabled_sessions": [
+      "PM"
+    ],
+    "sell_time": "14:30",
+    "buy_time": "14:45",
+    "sell_first": true,
+    "order_type": "LIMIT",
+    "max_price_deviation": 0.02,
+    "max_orders_per_cycle": 20
+  },
+  "live_config_tips": [
+    "高 Beta 组合在指数上行时放大收益，下行时同样放大亏损，务必配合择时。",
+    "risk_degree=0.8 为硬性仓位上限，不受 UI 滑块覆盖。"
+  ],
+  "markets": [
+    "a_share"
+  ],
+  "dir": "A股策略/03_成长与景气"
+}

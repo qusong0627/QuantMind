@@ -460,8 +460,11 @@ class SimulationHostedScheduler:
         parts = key.split(":")
         if len(parts) < 4:
             return False
-        tenant_id = parts[-2].strip() or "default"
-        user_id = parts[-1].strip()
+        from backend.shared.simulation_account_keys import resolve_active_identity
+
+        tenant_id, user_id = resolve_active_identity(
+            tenant_suffix=parts[-2], user_suffix=parts[-1], payload=active_data
+        )
         strategy_id = str(active_data.get("strategy_id") or "").strip()
         if not user_id or not strategy_id:
             return False

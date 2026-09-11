@@ -4,7 +4,7 @@
 
 目标列 (前端 ResearchPlatformPage 表格 + 量化因子), 当前问题:
   - turnover_rate      换手率:        0.1%  (几乎全空)        -> 腾讯财经批量补
-  - pe_ttm / roe       PE/ROE:        78%/75% (负值被 parquet `>0` 剔除) -> 修复负值 + 腾讯补
+  - pe_ttm / roe       PE/ROE:        78%/75% (负值被旧源 `>0` 剔除) -> 修复负值 + 腾讯补
   - consecutive_limit_up_days 连板:   100%覆盖但值全0 (无效) -> 重算 (涨停连续天数)
   - idx_hs300/zz1000/chinext/margin/all 指数归属: 全0 (无效) -> 成分股列表补
   - is_st              ST状态:        仅21行=1 (无效, A股有数百只ST) -> 名称含ST重算
@@ -18,10 +18,10 @@
             历史日期用最新日 close 基准缩放; 最新日直接用快照值.
   Phase B - DB 重算 (无需外部源, 立竿见影):
             连板/指数归属/ST状态/衍生技术因子(kdj/beta/volume_ma/bp/ep/ln_mv).
-  Phase C - parquet 前向填充 (roe 等季报数据, 报告期内不变).
+  Phase C - QuantDB 前向填充 (roe 等季报数据, 报告期内不变).
 
 准确性关键:
-  - 负 PE/ROE 是亏损股的真实值, 必须保留 (parquet `>0` 过滤是 bug, 这里只跳过 0/NULL).
+  - 负 PE/ROE 是亏损股的真实值, 必须保留 (旧源 `>0` 过滤是 bug, 这里只跳过 0/NULL).
   - 腾讯快照用于历史日期时按"前复权close(d)/前复权close(最新日)"缩放, 基一致 (非真实价),
     避免被 adj_factor 错误缩小. pe/pb/mv 随价格线性变化, TTM盈利/净资产/股本近似不变.
 
@@ -29,7 +29,7 @@
     python backend/scripts/enrich_sdl_data.py --diagnose           # 仅诊断
     python backend/scripts/enrich_sdl_data.py --phase-tencent      # 阶段A: 腾讯补 pe/pb/mv/换手率
     python backend/scripts/enrich_sdl_data.py --phase-recompute   # 阶段B: 重算连板/指数/ST/衍生因子
-    python backend/scripts/enrich_sdl_data.py --phase-parquet     # 阶段C: parquet+前向填充 roe等
+    python backend/scripts/enrich_sdl_data.py --phase-quantdb     # 阶段C: QuantDB+前向填充 roe等
     python backend/scripts/enrich_sdl_data.py --all               # 全部
     python backend/scripts/enrich_sdl_data.py --all --dry-run    # 试运行
 """
@@ -50,8 +50,7 @@ from sqlalchemy import create_engine, text
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, PROJECT_ROOT)
 
-# parquet 历史基本面 (parquet 截止 2026-05-20)
-PARQUET_PATH = "/app/db/custom/fundamental_aligned.parquet"
+# QuantDB 覆盖之后, 由腾讯/重算补充
 PARQUET_CUTOFF = date(2026, 5, 20)
 
 FUND_COLS = ["pe_ttm", "pb", "roe", "total_mv", "float_mv", "industry"]
@@ -113,7 +112,7 @@ def diagnose(engine):
             ("inst_ownership", "机构持股", "num>0"),
             ("profit_growth", "利润增长", "num!=0"),
         ]
-        print(f"\n📋 列覆盖率:")
+        print("\n📋 列覆盖率:")
         for col, desc, kind in checks:
             if kind == "str":
                 has = conn.execute(text(
@@ -132,7 +131,7 @@ def diagnose(engine):
             print(f"   {status} {desc:14s} {col:24s}: {has:>8,} / {total:,} ({pct:5.1f}%)")
 
         # 指数归属/ST 实际值分布 (覆盖率100%但值可能全0)
-        print(f"\n🔍 布尔列实际值分布 (覆盖率可能虚高):")
+        print("\n🔍 布尔列实际值分布 (覆盖率可能虚高):")
         for col, desc in [("idx_hs300", "沪深300成分"), ("idx_all", "全市场"), ("is_st", "ST状态")]:
             rows = conn.execute(text(
                 f"SELECT {col}, COUNT(*) FROM stock_daily_latest WHERE volume>0 GROUP BY {col} ORDER BY 2 DESC LIMIT 2"
@@ -260,7 +259,7 @@ def phase_tencent(engine, dry_run: bool = False) -> int:
     print(f"   有效快照: {len(snap_df)} 只")
 
     if dry_run:
-        print(f"   [DRY RUN] 将用快照补全 pe_ttm/pb/total_mv/float_mv/turnover_rate")
+        print("   [DRY RUN] 将用快照补全 pe_ttm/pb/total_mv/float_mv/turnover_rate")
         print(f"   快照样例:\n{snap_df.head(3).to_string()}")
         return 0
 
@@ -290,7 +289,7 @@ def phase_tencent(engine, dry_run: bool = False) -> int:
     # 4. 历史日期: 按前复权 close 基一致缩放 pe/pb/mv (turnover 不缩放, 前向填充)
     #    ratio = close(d) / close(最新日), 两者同前复权基准 = 真实价格变动比
     #    pe/pb/mv 随价格线性变化 (TTM盈利/净资产/股本近似不变)
-    print(f"\n4️⃣  历史日期按前复权 close 缩放 PE/PB/市值 (基一致)...")
+    print("\n4️⃣  历史日期按前复权 close 缩放 PE/PB/市值 (基一致)...")
     with engine.connect() as conn:
         rows = conn.execute(text("""
             SELECT symbol, trade_date, close
@@ -340,7 +339,7 @@ def phase_tencent(engine, dry_run: bool = False) -> int:
             conn.execute(text("DROP TABLE IF EXISTS tmp_tencent_hist"))
 
     # 5. turnover_rate 前向填充 (换手率不随价格线性变化, 用最新日值前向填充近期)
-    print(f"\n5️⃣  换手率前向填充 (用最近非空值)...")
+    print("\n5️⃣  换手率前向填充 (用最近非空值)...")
     with engine.begin() as conn:
         result = conn.execute(text("""
             UPDATE stock_daily_latest t
@@ -540,71 +539,117 @@ def phase_recompute(engine, dry_run: bool = False):
 
 
 # ─────────────────────────────────────────────────────────────────────────
-# Phase C: parquet 前向填充 roe 等季报数据
+# Phase C: QuantDB 前向填充 roe 等季报数据
 # ─────────────────────────────────────────────────────────────────────────
-def _prefix_to_suffix(sym: str) -> str | None:
-    if not isinstance(sym, str) or len(sym) < 8:
-        return None
-    market, code = sym[:2], sym[2:]
-    if market not in ("SH", "SZ", "BJ"):
-        return None
-    if not code.isdigit() or len(code) != 6:
-        return None
-    return f"{code}.{market}"
+def phase_quantdb(engine, dry_run: bool = False) -> int:
+    """阶段C: QuantDB 批量回填历史基本面 (保留负值) + 前向填充."""
+    # 复用 backfill_sdl_fundamentals 的 QuantDB 读取助手 (估值 bulk + roe/industry)
+    try:
+        from backend.scripts.backfill_sdl_fundamentals import (
+            _quantdb_industry_map,
+            _quantdb_roe_map,
+            _quantdb_valuation_frame,
+        )
+    except Exception:
+        # 兜底：以内联方式重建（防止跨模块导入失败时完全不可用）
+        from backend.services.engine.data_platform.quantdb_hub import QuantDBDataHub as _Hub
 
+        def _quantdb_valuation_frame(start, end):
+            hub = _Hub.get_instance()
+            if not hub.available:
+                return pd.DataFrame()
+            df = hub.fetch_valuation(start=start, end=end)
+            if df.empty:
+                return df
+            sym_col = next((c for c in ("symbol", "Symbol") if c in df.columns), None)
+            date_col = next((c for c in ("time", "trade_date") if c in df.columns), None)
+            if not sym_col or not date_col:
+                return pd.DataFrame()
+            return df.rename(columns={sym_col: "symbol", date_col: "trade_date"})
 
-def phase_parquet(engine, dry_run: bool = False) -> int:
-    """阶段C: parquet 批量回填历史基本面 (修复负值: 只跳过0/NULL, 保留负值) + 前向填充."""
+        def _quantdb_roe_map(symbols):
+            hub = _Hub.get_instance()
+            out = {}
+            for sym in symbols:
+                try:
+                    f = hub.fetch_financial(sym, "pershare_index")
+                    for col in ("net_roe", "total_roe", "equity_roe", "roe_dupont"):
+                        if col in f.columns:
+                            vals = pd.to_numeric(f[col], errors="coerce").dropna()
+                            if not vals.empty:
+                                out[sym] = float(vals.iloc[-1])
+                                break
+                except Exception:
+                    continue
+            return out
+
+        def _quantdb_industry_map():
+            try:
+                hub = _Hub.get_instance()
+                ind = hub.fetch_instrument_industry()
+            except Exception:
+                return {}
+            if ind is None or ind.empty or "symbol" not in ind.columns or "ind_name_l1" not in ind.columns:
+                return {}
+            return dict(zip(ind["symbol"], ind["ind_name_l1"], strict=False))
+
     print("\n" + "=" * 72)
-    print("  阶段C: parquet 回填 + 前向填充 (roe 等, 保留负值)")
+    print("  阶段C: QuantDB 回填 + 前向填充 (roe 等, 保留负值)")
     print("=" * 72)
 
     updated = 0
-    if os.path.exists(PARQUET_PATH):
-        print(f"\n1️⃣  读取 parquet: {PARQUET_PATH}")
-        cols = ["trade_date", "symbol", "pe_ttm", "pb", "roe", "total_mv", "float_mv", "industry"]
-        df = pd.read_parquet(PARQUET_PATH, columns=cols)
-        df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.date
-        df["symbol"] = df["symbol"].map(_prefix_to_suffix)
-        df = df.dropna(subset=["symbol"])
-        with engine.connect() as conn:
-            r = conn.execute(text("SELECT MIN(trade_date), MAX(trade_date) FROM stock_daily_latest WHERE volume>0")).one()
-        df = df[(df["trade_date"] >= r[0]) & (df["trade_date"] <= PARQUET_CUTOFF)]
-        for c in ["pe_ttm", "pb", "roe", "total_mv", "float_mv"]:
-            df[c] = pd.to_numeric(df[c], errors="coerce")
-        df["industry"] = df["industry"].fillna("").astype(str).replace("nan", "")
-
-        if dry_run:
-            print(f"     [DRY RUN] parquet 将回填 {len(df):,} 行 (保留负值)")
-        elif not df.empty:
-            print(f"     写入临时表 {len(df):,} 行...")
-            with engine.begin() as conn:
-                conn.execute(text("DROP TABLE IF EXISTS tmp_fund_backfill"))
-            df.to_sql("tmp_fund_backfill", engine, if_exists="replace", index=False, method="multi", chunksize=5000)
-            with engine.begin() as conn:
-                conn.execute(text("CREATE INDEX IF NOT EXISTS tmp_fb_sym_dt ON tmp_fund_backfill(symbol, trade_date)"))
-                sets = []
-                for c in FUND_COLS:
-                    if c == "industry":
-                        sets.append(f"industry = COALESCE(NULLIF(s.industry, ''), t.industry, s.industry)")
-                    else:
-                        # 关键修复: 只跳过 0/NULL, 保留 parquet 的负值 (亏损股真实 PE/ROE)
-                        sets.append(f"{c} = COALESCE(NULLIF(s.{c}, 0), t.{c}, s.{c})")
-                result = conn.execute(text(f"""
-                    UPDATE stock_daily_latest s
-                    SET {', '.join(sets)}
-                    FROM tmp_fund_backfill t
-                    WHERE s.symbol = t.symbol AND s.trade_date = t.trade_date AND s.volume > 0
-                """))
-                updated = result.rowcount
-                conn.execute(text("DROP TABLE IF EXISTS tmp_fund_backfill"))
-            print(f"     ✅ parquet 回填: {updated:,} 行 (负值已保留)")
+    with engine.connect() as conn:
+        r = conn.execute(text("SELECT MIN(trade_date) FROM stock_daily_latest WHERE volume>0")).one()
+    db_min = r[0]
+    if db_min is None:
+        print("   ℹ️  stock_daily_latest 为空，跳过（无可用 DB 日期范围）")
     else:
-        print(f"   parquet 不存在: {PARQUET_PATH}, 跳过")
+        db_min = pd.Timestamp(db_min).date()
+        print(f"\n1️⃣  读取 QuantDB valuation: {db_min} → {PARQUET_CUTOFF}")
+        df = _quantdb_valuation_frame(db_min, PARQUET_CUTOFF)
+        if df.empty:
+            print("   ❌ QuantDB valuation 无数据")
+        else:
+            df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.date
+            symbols = sorted(df["symbol"].unique().tolist())
+            roe_map = _quantdb_roe_map(symbols)
+            ind_map = _quantdb_industry_map()
+            df["roe"] = df["symbol"].map(roe_map)
+            df["industry"] = df["symbol"].map(ind_map)
+            for c in ["pe_ttm", "pb", "roe", "total_mv", "float_mv"]:
+                if c in df.columns:
+                    df[c] = pd.to_numeric(df[c], errors="coerce")
+            df["industry"] = df["industry"].fillna("").astype(str).replace("nan", "")
+
+            if dry_run:
+                print(f"     [DRY RUN] QuantDB 将回填 {len(df):,} 行 (保留负值)")
+            elif not df.empty:
+                print(f"     写入临时表 {len(df):,} 行...")
+                with engine.begin() as conn:
+                    conn.execute(text("DROP TABLE IF EXISTS tmp_fund_backfill"))
+                df.to_sql("tmp_fund_backfill", engine, if_exists="replace", index=False, method="multi", chunksize=5000)
+                with engine.begin() as conn:
+                    conn.execute(text("CREATE INDEX IF NOT EXISTS tmp_fb_sym_dt ON tmp_fund_backfill(symbol, trade_date)"))
+                    sets = []
+                    for c in FUND_COLS:
+                        if c == "industry":
+                            sets.append("industry = COALESCE(NULLIF(s.industry, ''), t.industry, s.industry)")
+                        else:
+                            # 关键修复: 只跳过 0/NULL, 保留 QuantDB 的负值 (亏损股真实 PE/ROE)
+                            sets.append(f"{c} = COALESCE(NULLIF(s.{c}, 0), t.{c}, s.{c})")
+                    result = conn.execute(text(f"""
+                        UPDATE stock_daily_latest s
+                        SET {', '.join(sets)}
+                        FROM tmp_fund_backfill t
+                        WHERE s.symbol = t.symbol AND s.trade_date = t.trade_date AND s.volume > 0
+                    """))
+                    updated = result.rowcount
+                    conn.execute(text("DROP TABLE IF EXISTS tmp_fund_backfill"))
+                print(f"     ✅ QuantDB 回填: {updated:,} 行 (负值已保留)")
 
     # 前向填充剩余缺口 (roe 季报报告期内不变, 前向填充合理)
     if not dry_run:
-        print(f"\n2️⃣  前向填充剩余缺口 (roe/pe/pb/mv)...")
+        print("\n2️⃣  前向填充剩余缺口 (roe/pe/pb/mv)...")
         with engine.begin() as conn:
             for col in ["roe", "pe_ttm", "pb", "total_mv", "float_mv"]:
                 result = conn.execute(text(f"""
@@ -866,7 +911,7 @@ def _fill_listed_days(engine, dry_run: bool = False) -> int:
     if not ipo_rows:
         return 0
     if dry_run:
-        print(f"     [DRY RUN] 将用 ipo_date 算 listed_days = trade_date - ipo_date")
+        print("     [DRY RUN] 将用 ipo_date 算 listed_days = trade_date - ipo_date")
         return 0
     df = pd.DataFrame(ipo_rows)
     with engine.begin() as conn:
@@ -902,7 +947,7 @@ def main():
     parser.add_argument("--diagnose", action="store_true", help="仅诊断")
     parser.add_argument("--phase-tencent", action="store_true", help="阶段A: 腾讯补 PE/PB/市值/换手率")
     parser.add_argument("--phase-recompute", action="store_true", help="阶段B: 重算连板/ST/衍生因子")
-    parser.add_argument("--phase-parquet", action="store_true", help="阶段C: parquet+前向填充 roe")
+    parser.add_argument("--phase-quantdb", action="store_true", help="阶段C: QuantDB+前向填充 roe")
     parser.add_argument("--phase-extras", action="store_true",
                         help="阶段D: 可行补充列 (listing_market/idx_hs300/listed_days, 东财被封备选源)")
     parser.add_argument("--all", action="store_true", help="全部 (A→C→B, 腾讯优先补最新)")
@@ -913,14 +958,14 @@ def main():
     diagnose(engine)
     if args.diagnose:
         return
-    if not any([args.phase_tencent, args.phase_recompute, args.phase_parquet,
+    if not any([args.phase_tencent, args.phase_recompute, args.phase_quantdb,
                 args.phase_extras, args.all]):
         return
 
     dry = args.dry_run
-    # 执行顺序: 先 parquet(历史权威值) -> 腾讯(补最新+负值) -> 重算(衍生因子依赖pe/pb)
-    if args.all or args.phase_parquet:
-        phase_parquet(engine, dry_run=dry)
+    # 执行顺序: 先 QuantDB(历史权威值) -> 腾讯(补最新+负值) -> 重算(衍生因子依赖pe/pb)
+    if args.all or args.phase_quantdb:
+        phase_quantdb(engine, dry_run=dry)
     if args.all or args.phase_tencent:
         phase_tencent(engine, dry_run=dry)
     if args.all or args.phase_recompute:

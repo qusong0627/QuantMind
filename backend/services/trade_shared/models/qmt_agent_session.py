@@ -3,11 +3,16 @@ QMT Agent Session Model
 """
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import Column, DateTime, Index, String
 
 from .base import Base
+
+
+def _utcnow() -> datetime:
+    # timestamptz 列必须用 aware UTC；naive utcnow 会被会话时区重解释（-8h BUG）。
+    return datetime.now(timezone.utc)
 
 
 class QMTAgentSession(Base):
@@ -34,12 +39,12 @@ class QMTAgentSession(Base):
     last_used_at = Column(DateTime(timezone=True), nullable=True)
 
     # 时间戳
-    created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
     updated_at = Column(
         DateTime(timezone=True),
         nullable=False,
-        default=datetime.utcnow,
-        onupdate=datetime.utcnow,
+        default=_utcnow,
+        onupdate=_utcnow,
     )
 
     __table_args__ = (

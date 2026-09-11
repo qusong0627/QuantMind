@@ -114,6 +114,14 @@ const extractPositionCount = (accountInfo: AccountInfo | null): number => {
   const directCount = toFiniteNumber((accountInfo as any)?.position_count, Number.NaN);
   if (Number.isFinite(directCount)) return directCount;
   const positions = accountInfo.positions;
+  // dict 口径只计有量的有效持仓（与后端 position_count / 组合快照一致）
+  if (positions && typeof positions === 'object' && !Array.isArray(positions)) {
+    return Object.values(positions).filter((pos: any) => {
+      if (!pos || typeof pos !== 'object') return false;
+      const vol = pos.volume ?? pos.qty ?? pos.quantity ?? pos.total_volume;
+      return vol === undefined || Number(vol) > 0;
+    }).length;
+  }
   return Array.isArray(positions)
     ? positions.length
     : Object.keys(positions || {}).length;

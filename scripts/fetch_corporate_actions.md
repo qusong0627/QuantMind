@@ -10,7 +10,7 @@
 
 拉取 A 股市场的**除权除息事件**（派息 / 送股 / 转增 / 配股），保存为 CSV 供后续复权因子检测、历史重算、人工核查等场景使用。
 
-**注意**：本脚本输出的是**独立 CSV 文件**，**不进入** `fundamental_aligned.parquet`。主流程（`full_fetch.py` / `daily_update_pipeline.py`）的复权因子直接从 K 线 `factor` 字段获取，与本脚本互不依赖。
+**注意**：本脚本输出的是**独立 CSV 文件**，**不进入** QuantDB `features_daily`（旧 `fundamental_aligned.parquet` 已废弃）。主流程（`full_fetch.py` / `daily_update_pipeline.py`）的复权因子直接从 K 线 `factor` 字段获取，与本脚本互不依赖。
 
 ---
 
@@ -195,7 +195,7 @@ TQ 接口返回的事件类型编码（不完整列表，以实际数据为准�
 
 ### 7.2 独立文件
 
-- 本脚本输出**不进** `fundamental_aligned.parquet`
+- 本脚本输出**不进** QuantDB `features_daily`（旧 `fundamental_aligned.parquet` 已废弃）
 - 主流程（`full_fetch.py` / `daily_update_pipeline.py`）**不读**本 CSV
 - 用途：复权因子人工核查、AGENTS.md 复权因子检测规则的辅助数据源
 
@@ -235,7 +235,7 @@ python fetch_corporate_actions.py --start 202001 --end 202612 -o ca_all.csv --re
 python fetch_corporate_actions.py --start 202606 --end 202606 --include-bj
 ```
 
-> ⚠️ 包含 BJ 的输出**不能**直接与 `fundamental_aligned.parquet` 合并（parquet 已清洗 BJ）。
+> ⚠️ 包含 BJ 的输出**不能**直接与 QuantDB 数据合并（旧 `fundamental_aligned.parquet` 已清洗 BJ，且该源已废弃）。
 
 ---
 

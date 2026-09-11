@@ -7,7 +7,7 @@ import os
 import random
 import time
 import traceback
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -26,7 +26,10 @@ from backend.services.engine.qlib_app.services.market_state_service import (
     MarketStateService,
 )
 from backend.services.engine.qlib_app.services.risk_analyzer import RiskAnalyzer
-from backend.services.engine.qlib_app.services.strategy_builder import StrategyFactory
+from backend.services.engine.qlib_app.services.strategy_builder import (
+    StrategyFactory,
+    extract_backtest_dates,
+)
 from backend.services.engine.qlib_app.services.strategy_templates import (
     get_template_by_id,
 )
@@ -241,6 +244,47 @@ class QlibBacktestServiceRuntimeMixin(QlibBacktestServiceQueryMixin):
                         )
             # --- Pool File Resolution [END] ---
 
+            # --- Backtest Date Resolution [START] ---
+            # 专家模式 / AI-IDE 代码优先：策略代码可通过 BACKTEST_CONFIG /
+            # START_DATE+END_DATE / get_backtest_config() 指定回测区间，
+            # 有则覆盖请求参数；请求与代码均未指定时默认近一年。
+            if request.strategy_content:
+                try:
+                    code_dates = extract_backtest_dates(request.strategy_content)
+                    if code_dates:
+                        task_log.info(
+                            "code_dates_applied",
+                            "策略代码指定回测日期，覆盖请求参数",
+                            old_start=request.start_date,
+                            old_end=request.end_date,
+                            new_start=code_dates["start_date"],
+                            new_end=code_dates["end_date"],
+                        )
+                        request.start_date = code_dates["start_date"]
+                        request.end_date = code_dates["end_date"]
+                except ValueError:
+                    raise
+                except Exception as date_err:
+                    task_log.warning(
+                        "code_dates_parse_failed",
+                        "策略代码日期解析失败，使用请求参数",
+                        error=str(date_err),
+                    )
+            if not request.start_date or not request.end_date:
+                default_end = datetime.now().strftime("%Y-%m-%d")
+                default_start = (datetime.now() - timedelta(days=365)).strftime(
+                    "%Y-%m-%d"
+                )
+                task_log.info(
+                    "default_dates_applied",
+                    "未指定回测日期，默认近一年",
+                    start=default_start,
+                    end=default_end,
+                )
+                request.start_date = request.start_date or default_start
+                request.end_date = request.end_date or default_end
+            # --- Backtest Date Resolution [END] ---
+
             task_log.info(
                 "signal_raw", "原始signal配置", signal=request.strategy_params.signal,
                 model_id=getattr(request, "model_id", None),
@@ -357,18 +401,17 @@ class QlibBacktestServiceRuntimeMixin(QlibBacktestServiceQueryMixin):
                         end_ts = signal_ts
 
                 # 2. Qlib 物理日历边界检查
-                # 边界语义：cal_max_ts 是日历最后一天，若请求终点 >= cal_max_ts，
-                # 则实际终点收缩到 cal_max_ts 本身（可用数据最后一天），而不是
-                # 倒数第二天 full_cal[-2]。
-                # 否则会污染两个下游环节：
-                #   a) signal_end_date_truncated（上方）：信号只覆盖到 cal_max_ts，
-                #      但 request.end_date 被写成 cal_max_ts-1，导致 rows_in_range
-                #      少算一天；
-                #   b) qlib.backtest() 以 request.end_date 作为终点：当日历完全
-                #      不覆盖区间时 qlib 静默用工作日日历补 44 天空转（0 成交、
-                #      全部指标 0），而收缩到 cal_max_ts 后即可正常出信号。
+                # qlib TradeCalendar.get_step_time 会取 calendar[i+1] 做
+                # trade_end_time，终点顶到日历最后一天必报
+                # IndexError: index N out of bounds for axis 0 with size N。
+                # 因此 end >= cal_max 时必须留一根 bar，回退到倒数第二个交易日
+                # full_cal[-2]，而不是 cal_max 本身。
                 if end_ts >= cal_max_ts:
-                    actual_end_date = str(cal_max_ts.date())
+                    if len(full_cal) >= 2:
+                        safe_end_ts = pd.Timestamp(full_cal[-2].date())
+                    else:
+                        safe_end_ts = cal_max_ts - pd.Timedelta(days=1)
+                    actual_end_date = str(safe_end_ts.date())
                     task_log.info(
                         "calendar_limit_reached",
                         "检测到目标日期达到日历边界，执行安全回退",

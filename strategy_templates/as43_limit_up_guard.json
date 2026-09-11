@@ -1,0 +1,82 @@
+{
+  "id": "as43_limit_up_guard",
+  "name": "A股涨停规避",
+  "description": "自定义类：剔除近 10 日内出现过涨停的标的，把名额让给同样高分但可成交的股票。",
+  "category": "advanced",
+  "difficulty": "advanced",
+  "params": [
+    {
+      "name": "topk",
+      "description": "持仓股票总数",
+      "default": 30,
+      "min": 5,
+      "max": 200
+    },
+    {
+      "name": "n_drop",
+      "description": "每期最大替换数",
+      "default": 10,
+      "min": 0,
+      "max": 200
+    },
+    {
+      "name": "rebalance_days",
+      "description": "调仓周期（交易日）",
+      "default": 3,
+      "min": 1,
+      "max": 60
+    },
+    {
+      "name": "lookback_days",
+      "description": "涨停检查回看天数",
+      "default": 10,
+      "min": 1,
+      "max": 60
+    },
+    {
+      "name": "max_limit_ups",
+      "description": "允许的最大涨停次数",
+      "default": 0,
+      "min": 0,
+      "max": 10
+    },
+    {
+      "name": "f_total_mv_min",
+      "description": "总市值下限（元）",
+      "default": 3000000000.0,
+      "min": 0
+    },
+    {
+      "name": "f_amount_ma_5_min",
+      "description": "5 日均成交额下限（万元）",
+      "default": 5000,
+      "min": 0
+    }
+  ],
+  "execution_defaults": {
+    "max_buy_drop": -0.03,
+    "stop_loss": -0.08
+  },
+  "live_defaults": {
+    "rebalance_days": 3,
+    "schedule_type": "interval",
+    "trade_weekdays": [],
+    "enabled_sessions": [
+      "PM"
+    ],
+    "sell_time": "14:30",
+    "buy_time": "14:45",
+    "sell_first": true,
+    "order_type": "LIMIT",
+    "max_price_deviation": 0.02,
+    "max_orders_per_cycle": 20
+  },
+  "live_config_tips": [
+    "涨停阈值按板块自动区分：主板 9.5%、创业板/科创板 19.5%、北交所 29.5%。",
+    "max_limit_ups=0 表示近 10 日一次涨停都不能有；放宽到 1 可保留部分强势股。"
+  ],
+  "markets": [
+    "a_share"
+  ],
+  "dir": "A股策略/09_事件与择时"
+}

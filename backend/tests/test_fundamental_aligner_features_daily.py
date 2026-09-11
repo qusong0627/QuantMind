@@ -2,13 +2,38 @@ from __future__ import annotations
 
 import pandas as pd
 
+import backend.services.engine.data_platform.quantdb_hub as hub_mod
 from backend.shared.fundamental_aligner import FundamentalAligner
 
 
-def test_filter_instruments_prefers_features_daily_and_normalizes_symbols(tmp_path):
-    day_dir = tmp_path / "dt=20260821"
-    day_dir.mkdir()
-    pd.DataFrame(
+class _FakeHub:
+    """对齐器读取路径的假 QuantDB 中枢：返回预置的 features_daily 行。"""
+
+    available = True
+    _inst = None
+
+    def __init__(self, rows: pd.DataFrame):
+        self._rows = rows
+
+    @classmethod
+    def get_instance(cls) -> _FakeHub:
+        return cls._inst
+
+    def fetch_latest_rows(self, view, symbols, dt=None, lookback=100, columns=None):
+        if not symbols or df_empty(self._rows):
+            return pd.DataFrame()
+        need = ["symbol"] + [c for c in (columns or []) if c in self._rows.columns] + ["dt"]
+        out = self._rows[self._rows["symbol"].isin(symbols)].copy()
+        out["dt"] = dt or 0
+        return out[need]
+
+
+def df_empty(df: pd.DataFrame) -> bool:
+    return df is None or df.empty
+
+
+def test_filter_instruments_reads_features_daily_and_normalizes_symbols(monkeypatch):
+    rows = pd.DataFrame(
         {
             "symbol": ["600001.SH", "000002.SZ", "600003.SH"],
             "total_mv": [3e9, 3e9, 3e9],
@@ -17,11 +42,12 @@ def test_filter_instruments_prefers_features_daily_and_normalizes_symbols(tmp_pa
             "pb": [2.0, 2.0, 5.0],
             "vol_std_20": [0.03, 0.03, 0.08],
         }
-    ).to_parquet(day_dir / "data.parquet", index=False)
+    )
+    fake = _FakeHub(rows)
+    _FakeHub._inst = fake
+    monkeypatch.setattr(hub_mod, "QuantDBDataHub", _FakeHub)
 
-    aligner = FundamentalAligner(parquet_path=str(tmp_path / "legacy.parquet"))
-    aligner.features_daily_path = tmp_path
-
+    aligner = FundamentalAligner()
     filtered = aligner.filter_instruments(
         "2026-08-21",
         ["SH600001", "SZ000002", "SH600003"],
@@ -35,4 +61,3 @@ def test_filter_instruments_prefers_features_daily_and_normalizes_symbols(tmp_pa
     )
 
     assert filtered == ["SH600001"]
-

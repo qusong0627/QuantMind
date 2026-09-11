@@ -51,10 +51,10 @@ ALLOWED_MODULES: frozenset[str] = frozenset(
         "typing",
         "dataclasses",
         "enum",
-        # Path / environment (read-only use only; write operations blocked by
-        # Layer 2 sandbox: read-only FS, no network)
-        "os",
-        "os.path",
+        # Path handling: pathlib 无 exec/网络面，写入风险依赖 Layer 2 兜底。
+        # 注意：os / os.path 已于 2026-09 从白名单移除——Layer 2（只读 FS/
+        # 断网/cgroup）截至 Day-7 前未实现，放行 os 等于在 API 容器内开放
+        # os.system 任意执行；路径处理请改用 pathlib。
         "pathlib",
         # Logging (safe — no IO in sandbox)
         "logging",

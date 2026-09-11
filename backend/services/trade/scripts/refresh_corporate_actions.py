@@ -69,6 +69,7 @@ from backend.shared.database_manager_v2 import (  # noqa: E402
     init_database,
 )
 from backend.shared.stock_utils import StockCodeUtil  # noqa: E402
+from backend.shared.simulation_account_keys import account_key  # noqa: E402
 from backend.shared.trade_account_cache import (  # noqa: E402
     write_json_cache,
     write_trade_account_cache,
@@ -247,7 +248,7 @@ async def _refresh_redis_for_account(account_id: str) -> bool:
             positions=projection.positions or {},
             source="refresh_corporate_actions_script",
         )
-        sim_key = f"simulation:account:{account.tenant_id}:{str(account.user_id).strip()}"
+        sim_key = account_key(account.tenant_id, account.user_id)
         write_json_cache(redis_client, sim_key, payload)
         write_trade_account_cache(
             redis_client, account.tenant_id, account.user_id, payload

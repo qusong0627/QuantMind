@@ -52,6 +52,21 @@ class SimulationProjectionService:
             getattr(account, "short_market_value", 0.0) or 0.0
         )
         if positions:
+            # 防御性补齐成本/现价别名：外部拼装的 positions 可能只有 cost_price
+            # 或只有 cost，补齐后 Lua/撮合与台账侧读写各自口径都不丢。
+            for _pos in positions.values():
+                if not isinstance(_pos, dict):
+                    continue
+                _cost = _pos.get("cost", _pos.get("cost_price", 0.0))
+                try:
+                    _cost_f = float(_cost or 0.0)
+                except (TypeError, ValueError):
+                    _cost_f = 0.0
+                _pos.setdefault("cost", _cost_f)
+                _pos.setdefault("cost_price", _cost_f)
+                _pos.setdefault("price", _pos.get("last_price", 0.0))
+                _pos.setdefault("market_value", 0.0)
+                _pos.setdefault("volume", 0.0)
             long_market_value, short_market_value, market_value = (
                 SimulationProjectionService.summarize_position_market_value(positions)
             )
@@ -207,6 +222,7 @@ class SimulationProjectionService:
                 if side == "long"
                 else f"{normalized_symbol}:short"
             )
+            cost_rounded = round(cost_price, 4) if cost_price > 0 else 0.0
             positions[key] = {
                 "symbol": normalized_symbol,
                 "volume": qty,
@@ -218,7 +234,10 @@ class SimulationProjectionService:
                 "price": round(price, 4) if price > 0 else 0.0,
                 "last_price": round(price, 4) if price > 0 else 0.0,
                 "market_value": market_value,
-                "cost_price": round(cost_price, 4) if cost_price > 0 else 0.0,
+                # 口径统一：live Redis 持仓用 `cost`（Lua/撮合读写），台账侧用
+                # `cost_price`。双写别名，任一入口重建 Redis 都不丢成本口径。
+                "cost": cost_rounded,
+                "cost_price": cost_rounded,
                 "side": side,
             }
         return positions

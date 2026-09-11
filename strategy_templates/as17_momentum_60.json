@@ -1,0 +1,82 @@
+{
+  "id": "as17_momentum_60",
+  "name": "A股季度动量",
+  "description": "以 60 日动量为主、模型分辅助的季度级轮动，换手明显低于月度版本。",
+  "category": "advanced",
+  "difficulty": "intermediate",
+  "params": [
+    {
+      "name": "topk",
+      "description": "持仓股票总数",
+      "default": 30,
+      "min": 5,
+      "max": 200
+    },
+    {
+      "name": "n_drop",
+      "description": "每期最大替换数",
+      "default": 8,
+      "min": 0,
+      "max": 200
+    },
+    {
+      "name": "rebalance_days",
+      "description": "调仓周期（交易日）",
+      "default": 5,
+      "min": 1,
+      "max": 60
+    },
+    {
+      "name": "momentum_period",
+      "description": "动量回看天数",
+      "default": 60,
+      "min": 5,
+      "max": 60
+    },
+    {
+      "name": "momentum_weight",
+      "description": "动量因子融合权重",
+      "default": 0.6,
+      "min": 0.0,
+      "max": 1.0
+    },
+    {
+      "name": "f_total_mv_min",
+      "description": "总市值下限（元）",
+      "default": 3000000000.0,
+      "min": 0
+    },
+    {
+      "name": "f_amount_ma_5_min",
+      "description": "5 日均成交额下限（万元）",
+      "default": 5000,
+      "min": 0
+    }
+  ],
+  "execution_defaults": {
+    "max_buy_drop": -0.03,
+    "stop_loss": -0.08
+  },
+  "live_defaults": {
+    "rebalance_days": 5,
+    "schedule_type": "interval",
+    "trade_weekdays": [],
+    "enabled_sessions": [
+      "PM"
+    ],
+    "sell_time": "14:30",
+    "buy_time": "14:45",
+    "sell_first": true,
+    "order_type": "LIMIT",
+    "max_price_deviation": 0.02,
+    "max_orders_per_cycle": 20
+  },
+  "live_config_tips": [
+    "60 日动量对噪音更不敏感，适合趋势延续性强的行业。",
+    "动量权重 0.6 时需确认模型分与动量不同向，否则等于双重下注。"
+  ],
+  "markets": [
+    "a_share"
+  ],
+  "dir": "A股策略/04_动量与趋势"
+}

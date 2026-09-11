@@ -50,11 +50,19 @@ class SimulationDailySnapshotService:
         initial_equity = float(
             account_payload.get("initial_equity")
             or account_payload.get("initial_capital")
-            or ((account_payload.get("baseline") or {}).get("initial_equity") if isinstance(account_payload.get("baseline"), dict) else 0.0)
+            or (
+                (account_payload.get("baseline") or {}).get("initial_equity")
+                if isinstance(account_payload.get("baseline"), dict)
+                else 0.0
+            )
             or 0.0
         )
-        total_pnl = float(account_payload.get("total_pnl") or (total_asset - initial_equity))
-        daily_pnl = float(account_payload.get("today_pnl") or account_payload.get("daily_pnl") or 0.0)
+        total_pnl = float(
+            account_payload.get("total_pnl") or (total_asset - initial_equity)
+        )
+        daily_pnl = float(
+            account_payload.get("today_pnl") or account_payload.get("daily_pnl") or 0.0
+        )
         cash = float(account_payload.get("cash") or 0.0)
         available_cash = float(account_payload.get("available_cash") or cash)
         short_market_value = float(account_payload.get("short_market_value") or 0.0)
@@ -98,8 +106,14 @@ class SimulationDailySnapshotService:
             )
             market_value_item = float(pos.get("market_value") or (qty * price))
             unrealized = (
-                (cost_price - price) * qty if side == "short" else (price - cost_price) * qty
-            ) if cost_price > 0 and price > 0 else 0.0
+                (
+                    (cost_price - price) * qty
+                    if side == "short"
+                    else (price - cost_price) * qty
+                )
+                if cost_price > 0 and price > 0
+                else 0.0
+            )
             self.db.add(
                 SimulationPositionDaily(
                     account_id=account_id,
@@ -110,13 +124,26 @@ class SimulationDailySnapshotService:
                     symbol=symbol,
                     position_side=side,
                     quantity=qty,
-                    available_quantity=float(pos.get("available_volume") or qty),
+                    available_quantity=float(
+                        pos.get("available_volume")
+                        if pos.get("available_volume") is not None
+                        else qty
+                    ),
                     frozen_quantity=float(
                         pos.get("frozen_volume")
-                        or max(
+                        if pos.get("frozen_volume") is not None
+                        else max(
                             0.0,
-                            float(pos.get("volume") or qty)
-                            - float(pos.get("available_volume") or qty),
+                            float(
+                                pos.get("volume")
+                                if pos.get("volume") is not None
+                                else qty
+                            )
+                            - float(
+                                pos.get("available_volume")
+                                if pos.get("available_volume") is not None
+                                else qty
+                            ),
                         )
                     ),
                     cost_price=cost_price,

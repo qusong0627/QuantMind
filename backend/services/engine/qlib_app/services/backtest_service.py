@@ -200,6 +200,11 @@ class QlibBacktestService(QlibBacktestServiceRuntimeMixin):
         if template and getattr(template, "code", "").strip():
             request.strategy_content = template.code
             request.strategy_type = "CustomStrategy"
+            # 官方模板模式：JSON 声明的参数以 UI/strategy_params 为准，
+            # 模板代码里的硬编码值仅是缺省，不再钉死滑条（问题背景：修复前
+            # CustomStrategyBuilder「代码优先」把 topk/n_drop 等 UI 值全部丢弃）。
+            request.template_mode = True
+            request.template_params = {p.name: p.model_dump() for p in (template.params or [])}
             task_logger.info(
                 "strategy_template_matched",
                 "Unknown strategy_type matched template",

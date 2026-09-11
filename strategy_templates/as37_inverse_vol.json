@@ -1,0 +1,77 @@
+{
+  "id": "as37_inverse_vol",
+  "name": "A股逆波动加权",
+  "description": "自定义类：选股沿用模型分 TopK，权重按 1/波动率分配并设单票上限，风险更均衡。",
+  "category": "advanced",
+  "difficulty": "advanced",
+  "params": [
+    {
+      "name": "topk",
+      "description": "持仓股票总数",
+      "default": 30,
+      "min": 5,
+      "max": 200
+    },
+    {
+      "name": "rebalance_days",
+      "description": "调仓周期（交易日）",
+      "default": 5,
+      "min": 1,
+      "max": 60
+    },
+    {
+      "name": "vol_window",
+      "description": "波动率估计窗口（交易日）",
+      "default": 20,
+      "min": 5,
+      "max": 120
+    },
+    {
+      "name": "weight_cap",
+      "description": "单票权重上限（0-1）",
+      "default": 0.08,
+      "min": 0.01,
+      "max": 1.0
+    },
+    {
+      "name": "f_total_mv_min",
+      "description": "总市值下限（元）",
+      "default": 3000000000.0,
+      "min": 0
+    },
+    {
+      "name": "f_amount_ma_5_min",
+      "description": "5 日均成交额下限（万元）",
+      "default": 5000,
+      "min": 0
+    }
+  ],
+  "execution_defaults": {
+    "max_buy_drop": -0.03,
+    "stop_loss": -0.08
+  },
+  "live_defaults": {
+    "rebalance_days": 5,
+    "schedule_type": "interval",
+    "trade_weekdays": [],
+    "enabled_sessions": [
+      "PM"
+    ],
+    "sell_time": "14:30",
+    "buy_time": "14:45",
+    "sell_first": true,
+    "order_type": "LIMIT",
+    "max_price_deviation": 0.02,
+    "max_orders_per_cycle": 20
+  },
+  "live_config_tips": [
+    "逆波动加权会让低波动标的拿到更大权重，组合波动显著低于等权。",
+    "单票上限 8% 防止极端低波动标的权重过高。",
+    "该模板走权重链路（非 TopK-Dropout），没有 n_drop 参数，调仓即按目标权重再平衡。",
+    "f_* 过滤取上一交易日快照，无前视。"
+  ],
+  "markets": [
+    "a_share"
+  ],
+  "dir": "A股策略/08_风险控制与仓位"
+}

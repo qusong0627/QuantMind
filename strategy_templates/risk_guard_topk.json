@@ -5,20 +5,102 @@
   "category": "risk_control",
   "difficulty": "intermediate",
   "params": [
-    {"name": "topk", "description": "持仓股票总数", "default": 50, "min": 5, "max": 200},
-    {"name": "n_drop", "description": "每期替换数量", "default": 10, "min": 0, "max": 200},
-    {"name": "rebalance_days", "description": "调仓周期（交易日）", "default": 3, "min": 1, "max": 60},
-    {"name": "market_state_window", "description": "大盘状态判定窗口（交易日）", "default": 20, "min": 5, "max": 120},
-    {"name": "industry_cap_ratio", "description": "单行业持仓上限占比", "default": 0.3, "min": 0.1, "max": 0.6},
-    {"name": "f_total_mv_min", "description": "总市值下限（元）", "default": 2000000000, "min": 100000000, "max": 100000000000},
-    {"name": "f_float_mv_min", "description": "流通市值下限（元）", "default": 500000000, "min": 100000000, "max": 100000000000},
-    {"name": "f_beta_20_max", "description": "20 日 Beta 上限", "default": 1.5, "min": 0.5, "max": 3.0},
-    {"name": "f_vol_std_20_max", "description": "20 日收益波动率上限", "default": 0.06, "min": 0.01, "max": 0.2},
-    {"name": "f_ma_gap_20_min", "description": "相对 20 日均线偏离下限", "default": -0.12, "min": -0.5, "max": 0.2},
-    {"name": "f_pe_ttm_max", "description": "PE（TTM）上限", "default": 80, "min": 1, "max": 300}
+    {
+      "name": "topk",
+      "description": "持仓股票总数",
+      "default": 50,
+      "min": 5,
+      "max": 200
+    },
+    {
+      "name": "n_drop",
+      "description": "每期替换数量",
+      "default": 10,
+      "min": 0,
+      "max": 200
+    },
+    {
+      "name": "rebalance_days",
+      "description": "调仓周期（交易日）",
+      "default": 3,
+      "min": 1,
+      "max": 60
+    },
+    {
+      "name": "market_state_window",
+      "description": "大盘状态判定窗口（交易日）",
+      "default": 20,
+      "min": 5,
+      "max": 120
+    },
+    {
+      "name": "industry_cap_ratio",
+      "description": "单行业持仓上限占比",
+      "default": 0.3,
+      "min": 0.1,
+      "max": 0.6
+    },
+    {
+      "name": "f_total_mv_min",
+      "description": "总市值下限（元）",
+      "default": 2000000000,
+      "min": 100000000,
+      "max": 100000000000
+    },
+    {
+      "name": "f_float_mv_min",
+      "description": "流通市值下限（元）",
+      "default": 500000000,
+      "min": 100000000,
+      "max": 100000000000
+    },
+    {
+      "name": "f_beta_20_max",
+      "description": "20 日 Beta 上限",
+      "default": 1.5,
+      "min": 0.5,
+      "max": 3.0
+    },
+    {
+      "name": "f_vol_std_20_max",
+      "description": "20 日收益波动率上限（%）",
+      "default": 6.0,
+      "min": 0.5,
+      "max": 20
+    },
+    {
+      "name": "f_ma_gap_20_min",
+      "description": "相对 20 日均线偏离下限（%）",
+      "default": -12.0,
+      "min": -50,
+      "max": 50
+    },
+    {
+      "name": "f_pe_ttm_max",
+      "description": "PE（TTM）上限",
+      "default": 80,
+      "min": 1,
+      "max": 300
+    }
   ],
-  "execution_defaults": {"max_buy_drop": -0.03, "stop_loss": -0.08},
-  "live_defaults": {"rebalance_days": 3, "schedule_type": "interval", "trade_weekdays": [], "enabled_sessions": ["PM"], "sell_time": "14:30", "buy_time": "14:45", "sell_first": true, "order_type": "LIMIT", "max_price_deviation": 0.02, "max_orders_per_cycle": 20},
+  "execution_defaults": {
+    "max_buy_drop": -0.03,
+    "stop_loss": -0.08
+  },
+  "live_defaults": {
+    "rebalance_days": 3,
+    "schedule_type": "interval",
+    "trade_weekdays": [],
+    "enabled_sessions": [
+      "PM"
+    ],
+    "sell_time": "14:30",
+    "buy_time": "14:45",
+    "sell_first": true,
+    "order_type": "LIMIT",
+    "max_price_deviation": 0.02,
+    "max_orders_per_cycle": 20
+  },
   "live_config_tips": [
     "筛选字段来自 features_daily；PE 为负或缺失、波动过高的标的不会进入候选池。",
     "大盘状态与个股筛选相互独立；建议搭配稳定的中频模型信号。"

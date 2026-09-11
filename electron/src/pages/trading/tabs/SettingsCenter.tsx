@@ -57,6 +57,9 @@ const SettingsCenter: React.FC<SettingsCenterProps> = ({ userId, isActive }) => 
 
   const [activeTab, setActiveTab] = useState<'credentials' | 'brokers' | 'mirror'>('credentials');
 
+  // 实盘相关入口暂不开放，仅保留凭证管理
+  const SHOW_REAL_ENTRIES = false;
+
   const handleCopy = async (text: string, key: string) => {
     await navigator.clipboard.writeText(text);
     setCopied(key);
@@ -143,6 +146,7 @@ const SettingsCenter: React.FC<SettingsCenterProps> = ({ userId, isActive }) => 
           <Key size={13} className="inline mr-1.5 -mt-0.5" />
           接入凭证 / API 密钥
         </button>
+        {SHOW_REAL_ENTRIES && (
         <button
           onClick={() => setActiveTab('brokers')}
           className={`px-4 py-2 rounded-xl text-xs font-bold transition-colors ${
@@ -154,7 +158,8 @@ const SettingsCenter: React.FC<SettingsCenterProps> = ({ userId, isActive }) => 
           <BankOutlined className="inline mr-1.5 -mt-0.5" />
           券商实盘接入
         </button>
-        {currentMarket === 'CN' && (
+        )}
+        {SHOW_REAL_ENTRIES && currentMarket === 'CN' && (
         <button
           onClick={() => setActiveTab('mirror')}
           className={`px-4 py-2 rounded-xl text-xs font-bold transition-colors ${

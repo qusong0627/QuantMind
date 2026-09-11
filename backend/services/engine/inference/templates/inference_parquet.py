@@ -503,6 +503,50 @@ def load_window_data(trade_date: str, data_dir: Path, meta: dict, step_len: int)
 # 5. 特征预处理
 # ═══════════════════════════════════════════════════════════════════════════
 
+def _merge_industry_codes(df: pd.DataFrame, needed: list[str]) -> pd.DataFrame:
+    """推理端复现训练口径的行业编码。
+
+    训练端（docker/training/data/loading.py）用 instrument_detail 的 rs_hycode_sim
+    做 Categorical 编码、缺失映射到 max+1。此处同口径复现，否则含 ind_code 特征的
+    模型在推理端会被全填 0（= 第一个真实行业，静默错误）。
+    找不到映射表时返回原 df（调用方走填 0 兜底并 warning）。
+    """
+    try:
+        _qdb = os.getenv("QM_QUANTDB_DATA_DIR", "/data/quantdb")
+        _detail = None
+        for _name in ("instrument_detail.parquet", "instrument_list.parquet"):
+            _p = Path(_qdb) / "2_base_sector" / "instrument_detail" / _name
+            if _p.exists():
+                _detail = _p
+                break
+        if _detail is None:
+            logger.warning("行业映射表缺失，%s 将填 0", needed)
+            return df
+        ind_df = pd.read_parquet(_detail, engine="pyarrow")
+        sym_col = "symbol" if "symbol" in ind_df.columns else ("wind_code" if "wind_code" in ind_df.columns else None)
+        if not sym_col or "rs_hycode_sim" not in ind_df.columns:
+            logger.warning("行业映射表缺列，%s 将填 0", needed)
+            return df
+        ind_map = ind_df[[sym_col, "rs_hycode_sim"]].dropna().copy()
+        ind_map = ind_map.rename(columns={sym_col: "symbol", "rs_hycode_sim": "ind_code_l1"})
+        # 双边同归一到 6 位数字代码：训练端 zfill(6)，推理端 symbol 可能是前缀式（SH600036）
+        ind_map["symbol"] = ind_map["symbol"].astype(str).str.extract(r"(\d{6})", expand=False).str.zfill(6)
+        ind_map["ind_code_l1"] = pd.Categorical(ind_map["ind_code_l1"]).codes.astype(np.float32)
+        _key = df["symbol"].astype(str).str.extract(r"(\d{6})", expand=False).str.zfill(6)
+        df = df.merge(ind_map, left_on=_key, right_on="symbol", how="left", suffixes=("", "_ind"))
+        if "symbol_ind" in df.columns:
+            df = df.drop(columns=["symbol_ind"])
+        _ind_max = float(ind_map["ind_code_l1"].max()) if len(ind_map) else -1.0
+        for c in needed:
+            if c == "ind_code_l1":
+                df[c] = df[c].fillna(_ind_max + 1).astype(np.float32)
+        logger.info("行业编码已复现: %d/%d 行命中映射", int((df["ind_code_l1"] <= _ind_max).sum()) if "ind_code_l1" in df.columns else 0, len(df))
+        return df
+    except Exception as exc:
+        logger.warning("行业编码复现失败（%s），相关列将填 0: %s", needed, exc)
+        return df
+
+
 def _cross_sectional_preprocess_inline(X_df: pd.DataFrame, meta: dict) -> pd.DataFrame:
     """截面预处理（与 train.py _prepare_arrays 的 prep_cfg 逻辑一致）。
 
@@ -556,6 +600,11 @@ def preprocess(df: pd.DataFrame, meta: dict) -> tuple[pd.DataFrame, list[str]]:
     if _leaky:
         df = df.drop(columns=_leaky, errors="ignore")
         logger.warning("Dropped forward-looking return columns: %s", _leaky)
+
+    # 行业编码列优先复现映射（而非填 0）：填 0 等价于"第一个真实行业"，静默错误
+    _need_ind = [c for c in ("ind_code_l1", "ind_code_l2") if c in feature_cols and c not in df.columns]
+    if _need_ind:
+        df = _merge_industry_codes(df, _need_ind)
 
     # 缺失列补 0
     missing = [c for c in feature_cols if c not in df.columns]

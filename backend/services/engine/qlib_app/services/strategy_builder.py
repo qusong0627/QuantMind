@@ -3,7 +3,9 @@
 import ast
 import logging
 import os
+import re
 from abc import ABC, abstractmethod
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from backend.services.engine.qlib_app.schemas.backtest import QlibBacktestRequest
@@ -32,6 +34,118 @@ _MINIBT_REJECT_MESSAGE = (
     "该策略基于 minibt 脚本框架，qlib 回测引擎不支持；"
     "请在 AI-IDE 中使用 minibt 运行时回测，或改用 qlib 策略模板。"
 )
+
+_CODE_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _parse_code_date(value: Any, where: str) -> str:
+    """校验代码中的日期字符串，非法时抛 ValueError（fail fast）。"""
+    if not isinstance(value, str) or not _CODE_DATE_RE.match(value.strip()):
+        raise ValueError(
+            f"策略代码中 {where} 须为 YYYY-MM-DD 格式，当前为 {value!r}。"
+        )
+    try:
+        datetime.strptime(value.strip(), "%Y-%m-%d")
+    except ValueError:
+        raise ValueError(
+            f"策略代码中 {where} 不是合法日历日期：{value!r}。"
+        ) from None
+    return value.strip()
+
+
+def _dict_node_to_str_map(node: ast.Dict) -> dict[str, Any]:
+    """Dict 字面量 → {key: value}（仅支持字符串 key；值保留 AST 节点）。"""
+    result: dict[str, Any] = {}
+    for k, v in zip(node.keys, node.values, strict=False):
+        if isinstance(k, ast.Constant) and isinstance(k.value, str):
+            result[k.value] = v
+    return result
+
+
+def extract_backtest_dates(content: str) -> dict[str, str] | None:
+    """从策略代码提取回测日期（代码优先，AST 解析不执行代码）。
+
+    支持写法（优先级从高到低）：
+    1. BACKTEST_CONFIG = {"start_date": "YYYY-MM-DD", "end_date": "YYYY-MM-DD"}
+       （键名也接受 start/end）
+    2. def get_backtest_config(): return {"start_date": ..., "end_date": ...}
+    3. START_DATE = "YYYY-MM-DD" + END_DATE = "YYYY-MM-DD"（须成对出现）
+
+    返回 {"start_date": ..., "end_date": ...}；代码未指定任一写法时返回 None。
+    写法存在但日期非法/缺半边/起始晚于结束时抛 ValueError。
+    """
+    try:
+        tree = ast.parse(content)
+    except SyntaxError:
+        return None
+
+    backtest_config: dict[str, Any] | None = None
+    func_config: dict[str, Any] | None = None
+    start_const: Any = None
+    end_const: Any = None
+    has_start_assign = False
+    has_end_assign = False
+
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+            target = node.targets[0]
+            if isinstance(target, ast.Name):
+                if target.id == "BACKTEST_CONFIG" and isinstance(node.value, ast.Dict):
+                    backtest_config = _dict_node_to_str_map(node.value)
+                elif target.id == "START_DATE":
+                    has_start_assign = True
+                    if isinstance(node.value, ast.Constant):
+                        start_const = node.value.value
+                elif target.id == "END_DATE":
+                    has_end_assign = True
+                    if isinstance(node.value, ast.Constant):
+                        end_const = node.value.value
+        elif isinstance(node, ast.FunctionDef) and node.name == "get_backtest_config":
+            for sub in ast.walk(node):
+                if isinstance(sub, ast.Return) and isinstance(sub.value, ast.Dict):
+                    func_config = _dict_node_to_str_map(sub.value)
+                    break
+
+    def _from_dict(d: dict[str, Any], where: str) -> dict[str, str]:
+        raw_start = d.get("start_date", d.get("start"))
+        raw_end = d.get("end_date", d.get("end"))
+        if raw_start is None or raw_end is None:
+            raise ValueError(
+                f"策略代码中 {where} 须同时给出开始与结束日期 "
+                f"（start_date/start + end_date/end）。"
+            )
+        start = _parse_code_date(
+            raw_start.value if isinstance(raw_start, ast.Constant) else raw_start,
+            f"{where}.start_date",
+        )
+        end = _parse_code_date(
+            raw_end.value if isinstance(raw_end, ast.Constant) else raw_end,
+            f"{where}.end_date",
+        )
+        if start >= end:
+            raise ValueError(
+                f"策略代码中 {where} 起始日期 {start} 须早于结束日期 {end}。"
+            )
+        return {"start_date": start, "end_date": end}
+
+    if backtest_config is not None:
+        return _from_dict(backtest_config, "BACKTEST_CONFIG")
+    if func_config is not None:
+        return _from_dict(func_config, "get_backtest_config()")
+    if has_start_assign or has_end_assign:
+        if not (has_start_assign and has_end_assign):
+            raise ValueError(
+                "策略代码中 START_DATE 与 END_DATE 须成对出现，"
+                "只写一边时无法确定回测区间。"
+            )
+        start = _parse_code_date(start_const, "START_DATE")
+        end = _parse_code_date(end_const, "END_DATE")
+        if start >= end:
+            raise ValueError(
+                f"策略代码中 START_DATE {start} 须早于 END_DATE {end}。"
+            )
+        return {"start_date": start, "end_date": end}
+    return None
 
 
 class StrategyBuilder(ABC):
@@ -329,8 +443,9 @@ class CustomStrategyBuilder(StrategyBuilder):
                             )
                             kwargs[p] = val
 
-                    # 2. Smart UI Slider Merging
-                    # ONLY merge if it's already in kwargs OR explicitly in the signature
+                    # 2. Smart UI Slider Merging (CustomStrategy 代码优先)
+                    # 专家模式以 STRATEGY_CONFIG 为准：用户代码已显式声明的参数
+                    # 不用 UI/默认值覆盖，仅在代码缺失且类支持时回填。
                     ui_params = [
                         "topk",
                         "n_drop",
@@ -352,9 +467,10 @@ class CustomStrategyBuilder(StrategyBuilder):
                     for key in ui_params:
                         val = getattr(request.strategy_params, key, None)
                         if val is not None:
+                            if key in original_kwargs:
+                                continue
                             if (
                                 key in explicit_params
-                                or key in kwargs
                                 or (has_var_kwargs and key in force_passthrough_ui_params)
                             ):
                                 # 特殊处理：n_drop=0 表示不限调仓即全速调仓
@@ -396,9 +512,9 @@ class CustomStrategyBuilder(StrategyBuilder):
                         error=str(e),
                     )
             else:
-                # Fallback UI Merging (external class):
+                # Fallback UI Merging (external class, 代码优先):
                 # 当 STRATEGY_CONFIG 只引用外部类（class 不在 namespace）时，
-                # 仍然需要将 UI 参数回填到 kwargs，避免关键参数丢失。
+                # 用户代码已声明的参数保持不动，仅回填缺失的 rebalance_days。
                 ui_params = [
                     "topk",
                     "n_drop",
@@ -419,7 +535,9 @@ class CustomStrategyBuilder(StrategyBuilder):
                     val = getattr(request.strategy_params, key, None)
                     if val is None:
                         continue
-                    if key == "rebalance_days" or key in kwargs:
+                    if key in original_kwargs:
+                        continue
+                    if key == "rebalance_days":
                         logger.info(
                             "fallback_merge_ui_param",
                             "CustomStrategyBuilder fallback merge UI param",
@@ -429,6 +547,41 @@ class CustomStrategyBuilder(StrategyBuilder):
                         )
                         kwargs[key] = val
             # --- Parameter Merging & Filtering [END] ---
+
+            # 3. 官方模板模式（template_mode，仅回测快速模式命中官方模板时置位）：
+            #    调用方「显式传入」且模板 JSON 声明过、模板代码 kwargs 也已存在的
+            #    参数，以 strategy_params（UI 值）为准；未显式传入（如 pipeline/
+            #    定时任务用 schema 默认构造）保持代码优先，行为与改造前一致。
+            #    不注入代码中不存在的键（防策略类 __init__ TypeError，如历史
+            #    遗留 n_drop_ratio）。专家模式/AI-IDE template_mode=False 不变。
+            _tm = getattr(request, "template_mode", False)
+            _tp = getattr(request, "template_params", None)
+            if _tm is True and isinstance(_tp, dict) and _tp:
+                declared = set(_tp)
+                sp = getattr(request, "strategy_params", None)
+                _mfs = getattr(sp, "model_fields_set", None)
+                provided = set(_mfs) if isinstance(_mfs, (set, frozenset)) else set()
+                tmpl_kwargs = strategy["kwargs"]
+                for key in declared:
+                    if key in ("signal", "benchmark") or key not in original_kwargs:
+                        continue
+                    if key not in provided:
+                        continue
+                    val = getattr(sp, key, None)
+                    if val is None:
+                        continue
+                    if key == "n_drop" and val == 0:
+                        val = getattr(sp, "topk", None) or tmpl_kwargs.get("topk") or 50
+                    if tmpl_kwargs.get(key) == val:
+                        continue
+                    logger.info(
+                        "template_mode_param_from_ui",
+                        "Template mode: declared param takes UI value",
+                        param=key,
+                        code_value=tmpl_kwargs.get(key, "<absent>"),
+                        ui_value=val,
+                    )
+                    tmpl_kwargs[key] = val
 
         # 4. 如果类定义在动态模块中，优先回填 module_path，让 qlib 走标准反射链路。
         if (

@@ -21,6 +21,7 @@ from backend.shared.cors import resolve_cors_origins
 from .manager import manager
 from .notification_pusher import notification_pusher
 from .quote_pusher import quote_pusher
+from .strategy_pusher import strategy_pusher
 from .trade_pusher import trade_pusher
 from .ws_config import ws_config
 
@@ -117,6 +118,8 @@ async def handle_message(connection_id: str, message: dict):
                     await quote_pusher.subscribe_quote(topic.split("stock.", 1)[1])
                 elif topic.startswith("trade.updates."):
                     pass  # trade_pusher handles broadcasting; no extra per-client setup needed
+                elif topic.startswith("strategy."):
+                    pass  # strategy_pusher handles broadcasting
                 elif topic.startswith("notification."):
                     pass  # notification_pusher handles broadcasting
                 await manager.send_message(connection_id, {"type": "subscribed", "topic": topic})
@@ -165,6 +168,8 @@ class WebSocketServer:
         await quote_pusher.start()
         # 启动交易事件推送器（驱动 trade.updates.* 主题）
         await trade_pusher.start()
+        # 启动策略监控推送器（驱动 strategy.* 主题）
+        await strategy_pusher.start()
         # 启动通知事件推送器（驱动 notification.* 主题）
         await notification_pusher.start()
 
@@ -178,6 +183,8 @@ class WebSocketServer:
         await quote_pusher.stop()
         # 停止交易事件推送器
         await trade_pusher.stop()
+        # 停止策略监控推送器
+        await strategy_pusher.stop()
         # 停止通知事件推送器
         await notification_pusher.stop()
 

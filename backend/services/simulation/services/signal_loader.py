@@ -202,17 +202,28 @@ class SignalLoader:
                 if row.get("symbol")
             ]
             if signals:
-                logger.info(
+                logger.warning(
                     "SignalLoader: 信号表为空，从 pred.parquet 回退 %d 条截面, "
-                    "tenant=%s user=%s date=%s",
+                    "tenant=%s user=%s model=%s data_trade_date=%s effective_date=%s run_id=%s",
                     len(signals),
                     tenant_id,
                     user_id,
+                    model_id,
+                    data_trade_date,
                     effective_date,
+                    fallback_run_id,
+                )
+            else:
+                logger.warning(
+                    "SignalLoader: 信号表为空且 pred.parquet 回退为空, tenant=%s user=%s model=%s date=%s",
+                    tenant_id, user_id, model_id, data_trade_date,
                 )
             return signals
         except Exception as e:
-            logger.warning("SignalLoader: pred.parquet 回退失败 %s", e)
+            logger.warning(
+                "SignalLoader: pred.parquet 回退失败 tenant=%s user=%s model=%s date=%s err=%s",
+                tenant_id, user_id, model_id if 'model_id' in locals() else "unknown",
+                data_trade_date if 'data_trade_date' in locals() else "unknown", e)
             return []
 
     async def load_signals_for_date(

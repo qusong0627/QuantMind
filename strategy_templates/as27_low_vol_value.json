@@ -1,0 +1,96 @@
+{
+  "id": "as27_low_vol_value",
+  "name": "A股低波动价值",
+  "description": "低波动 + 低估值双约束，PE<20 / PB<2 且波动率<2.2%，兼顾防守与估值安全垫。",
+  "category": "basic",
+  "difficulty": "intermediate",
+  "params": [
+    {
+      "name": "topk",
+      "description": "持仓股票总数",
+      "default": 40,
+      "min": 5,
+      "max": 200
+    },
+    {
+      "name": "n_drop",
+      "description": "每期最大替换数",
+      "default": 10,
+      "min": 0,
+      "max": 200
+    },
+    {
+      "name": "rebalance_days",
+      "description": "调仓周期（交易日）",
+      "default": 10,
+      "min": 1,
+      "max": 60
+    },
+    {
+      "name": "f_vol_std_20_max",
+      "description": "20 日收益波动率上限（%）",
+      "default": 2.2,
+      "min": 0.1,
+      "max": 20
+    },
+    {
+      "name": "f_pe_ttm_min",
+      "description": "PE(TTM) 下限（剔除亏损）",
+      "default": 0.0,
+      "min": -50,
+      "max": 300
+    },
+    {
+      "name": "f_pe_ttm_max",
+      "description": "PE(TTM) 上限",
+      "default": 20,
+      "min": 0,
+      "max": 300
+    },
+    {
+      "name": "f_pb_max",
+      "description": "PB 上限",
+      "default": 2.0,
+      "min": 0.1,
+      "max": 30
+    },
+    {
+      "name": "f_total_mv_min",
+      "description": "总市值下限（元）",
+      "default": 5000000000.0,
+      "min": 0
+    },
+    {
+      "name": "f_amount_ma_5_min",
+      "description": "5 日均成交额下限（万元）",
+      "default": 5000,
+      "min": 0
+    }
+  ],
+  "execution_defaults": {
+    "max_buy_drop": -0.03,
+    "stop_loss": -0.08
+  },
+  "live_defaults": {
+    "rebalance_days": 10,
+    "schedule_type": "interval",
+    "trade_weekdays": [],
+    "enabled_sessions": [
+      "PM"
+    ],
+    "sell_time": "14:30",
+    "buy_time": "14:45",
+    "sell_first": true,
+    "order_type": "LIMIT",
+    "max_price_deviation": 0.02,
+    "max_orders_per_cycle": 20
+  },
+  "live_config_tips": [
+    "低波动与低估值在 A 股常同时出现于银行/公用事业，注意行业集中。",
+    "双周调仓可显著降低换手成本。"
+  ],
+  "markets": [
+    "a_share"
+  ],
+  "dir": "A股策略/06_低波动与红利"
+}

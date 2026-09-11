@@ -13,7 +13,7 @@ const formatMoney = (value: number): string =>
   value.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
 const formatSignedMoney = (value: number): string => {
-  const sign = value >= 0 ? '+' : '';
+  const sign = value > 0 ? '+' : value < 0 ? '-' : '';
   return `${sign}￥${formatMoney(Math.abs(value))}`;
 };
 

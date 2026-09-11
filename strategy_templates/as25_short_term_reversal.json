@@ -1,0 +1,83 @@
+{
+  "id": "as25_short_term_reversal",
+  "name": "A股短期反转（周频）",
+  "description": "上一交易日收跌、RSI(6)<40 的标的做均值回归，持仓 30 只、3 日调仓、大比例轮换。",
+  "category": "advanced",
+  "difficulty": "intermediate",
+  "params": [
+    {
+      "name": "topk",
+      "description": "持仓股票总数",
+      "default": 30,
+      "min": 5,
+      "max": 200
+    },
+    {
+      "name": "n_drop",
+      "description": "每期最大替换数",
+      "default": 15,
+      "min": 0,
+      "max": 200
+    },
+    {
+      "name": "rebalance_days",
+      "description": "调仓周期（交易日）",
+      "default": 3,
+      "min": 1,
+      "max": 60
+    },
+    {
+      "name": "f_pct_change_max",
+      "description": "上一交易日涨跌幅上限（%）",
+      "default": 0.0,
+      "min": -30,
+      "max": 30
+    },
+    {
+      "name": "f_rsi_6_max",
+      "description": "RSI(6) 上限",
+      "default": 40,
+      "min": 0,
+      "max": 100
+    },
+    {
+      "name": "f_ma_gap_20_min",
+      "description": "相对 20 日均线偏离下限（%）",
+      "default": -10.0,
+      "min": -50,
+      "max": 50
+    },
+    {
+      "name": "f_amount_ma_5_min",
+      "description": "5 日均成交额下限（万元）",
+      "default": 5000,
+      "min": 0
+    }
+  ],
+  "execution_defaults": {
+    "max_buy_drop": -0.03,
+    "stop_loss": -0.08
+  },
+  "live_defaults": {
+    "rebalance_days": 3,
+    "schedule_type": "interval",
+    "trade_weekdays": [],
+    "enabled_sessions": [
+      "PM"
+    ],
+    "sell_time": "14:30",
+    "buy_time": "14:45",
+    "sell_first": true,
+    "order_type": "LIMIT",
+    "max_price_deviation": 0.02,
+    "max_orders_per_cycle": 20
+  },
+  "live_config_tips": [
+    "短期反转是 A 股最稳健的因子之一，但换手高，需关注成本敏感性。",
+    "n_drop 设 15 表示每期替换一半持仓，追求信号新鲜度。"
+  ],
+  "markets": [
+    "a_share"
+  ],
+  "dir": "A股策略/05_反转与均值回归"
+}

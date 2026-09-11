@@ -36,19 +36,25 @@ DEFAULT_SCHEDULE = {
     "with_qlib": False,
 }
 
-# 各市场在无 Redis 配置时的默认定时（显式保存的配置总是覆盖这里的值）。
-# 未列入的市场保持 enabled=False，需要在前端手动开启。
-# A 股走独立的 daily-data-sync beat 任务（23:00 后由 quantdb 同步顺带南向），
-# 各海外市场与它错峰：
-#   HK       23:50  雅虎/akshare/CCASS 晚间陆续就绪，排 A 股同步之后
-#   US       05:30  美股收盘(北京约 04:00/05:00)后，EOD 数据已稳定
+# 各市场在没有用户配置时的建议触发时间（仅供前端「同步调度」预填，不参与自动触发）。
+#
+# 自动同步是否开启、何时触发，一律以用户在前端保存的配置为准（Redis
+# quantmind:sync_schedule:{market}，由 market-sync-dispatch 每分钟比对派发）。
+# 任何市场都不再内置 enabled=true 的默认调度：否则所有部署会在同一固定时刻
+# 全量同步，给上游数据源与服务器造成突发压力。
+# 建议时间遵循既有约定：每日自动同步上游数据建议设置到次日 00:00 以后，
+# 按需错峰触发，避免集中请求。下列仅为前端预填的推荐值，各市场互不错峰：
+#   A        01:00  QuantDB release 盘后发布，次日凌晨已就绪
+#   HK       02:00  雅虎/akshare/CCASS 次日凌晨陆续就绪
+#   FUTURES  03:00  日盘/夜盘结算数据落库后
 #   BC       04:15  加密市场全天候交易，选凌晨低谷时段拉取
-#   FUTURES  18:00  日盘收盘结算发布后、夜盘主力时段前
-MARKET_DEFAULT_SCHEDULES: dict[str, dict[str, Any]] = {
-    "HK": {"enabled": True, "time": "23:50"},
-    "US": {"enabled": True, "time": "05:30"},
-    "BC": {"enabled": True, "time": "04:15"},
-    "FUTURES": {"enabled": True, "time": "18:00"},
+#   US       05:30  美股收盘(北京约 04:00/05:00)后，EOD 数据已稳定
+MARKET_SUGGESTED_TIMES: dict[str, str] = {
+    "A": "01:00",
+    "HK": "02:00",
+    "FUTURES": "03:00",
+    "BC": "04:15",
+    "US": "05:30",
 }
 
 
@@ -62,8 +68,9 @@ def _redis():
 
 def _normalize(cfg: dict[str, Any] | None, market: str | None = None) -> dict[str, Any]:
     out = dict(DEFAULT_SCHEDULE)
-    if market is not None:
-        out.update(MARKET_DEFAULT_SCHEDULES.get(market, {}))
+    # 建议时间只用于预填，不会把 enabled 置为 True
+    if market is not None and market in MARKET_SUGGESTED_TIMES:
+        out["time"] = MARKET_SUGGESTED_TIMES[market]
     for k in out:
         if k in (cfg or {}):
             out[k] = cfg[k]
@@ -143,14 +150,38 @@ def run_market_sync(market: str, cfg: dict[str, Any]) -> dict[str, Any]:
     result["result"] = run(**kwargs)
 
     if with_qlib:
-        try:
-            from backend.services.engine.qlib_data_builder import ensure_qlib_cache
+        # 数据拉取阶段若被上游限流拖长，再重建 qlib 缓存会超出任务硬超时被 SIGKILL。
+        # 这里按已耗时判断剩余时间是否够用，不够则跳过并在结果里标记 skipped。
+        elapsed = (datetime.now() - datetime.fromisoformat(result["started"])).total_seconds()
+        budget = float(os.getenv("MARKET_SYNC_SOFT_TIME_LIMIT", "1800"))
+        if elapsed > budget * 0.5:
+            logger.error(
+                "[SyncSchedule] %s 数据拉取已耗时 %.0fs，超过预算 %.0fs 的一半，跳过 qlib 缓存重建",
+                market,
+                elapsed,
+                budget,
+            )
+            result["qlib"] = {
+                "status": "skipped",
+                "reason": f"data stage took {elapsed:.0f}s, too long to rebuild qlib cache",
+            }
+        else:
+            try:
+                from backend.services.engine.qlib_data_builder import ensure_qlib_cache
 
-            qlib_market = {"US": "US", "HK": "HK", "BC": "CRYPTO", "FUTURES": "FUTURES"}[market]
-            result["qlib"] = {"status": "ok", "provider_uri": ensure_qlib_cache(market=qlib_market)}
-        except Exception as exc:  # noqa: BLE001
-            logger.error("%s 定时同步 qlib 缓存失败: %s", market, exc, exc_info=True)
-            result["qlib"] = {"status": "error", "reason": str(exc)}
+                qlib_market = {
+                    "US": "US",
+                    "HK": "HK",
+                    "BC": "CRYPTO",
+                    "FUTURES": "FUTURES",
+                }[market]
+                result["qlib"] = {
+                    "status": "ok",
+                    "provider_uri": ensure_qlib_cache(market=qlib_market),
+                }
+            except Exception as exc:  # noqa: BLE001
+                logger.error("%s 定时同步 qlib 缓存失败: %s", market, exc, exc_info=True)
+                result["qlib"] = {"status": "error", "reason": str(exc)}
 
     result["finished"] = datetime.now().isoformat()
     return result

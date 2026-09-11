@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Incrementally upsert stock_daily_latest from db/custom/fundamental_aligned.parquet."""
+"""Incrementally upsert stock_daily_latest from QuantDB (quantdb_hub).
+
+数据源: QuantDB features_daily(技术+估值) + 未复权 K 线 + 3_financial_data(roe)
+      + instrument_detail(industry)。
+注意: QuantDB 不产 is_st/idx_*/concept_*/涨停统计/listed_days 等列, 这些列不再由
+本脚本写入 (stock_daily_latest 相应列保持原值/NULL)。
+"""
 
 from __future__ import annotations
 
@@ -7,6 +13,7 @@ import argparse
 import logging
 import math
 import os
+from datetime import date, timedelta
 from pathlib import Path
 from urllib.parse import quote
 
@@ -80,13 +87,8 @@ def get_database_url(explicit_url: str | None = None) -> str:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Incrementally sync stock_daily_latest from parquet")
+    parser = argparse.ArgumentParser(description="Incrementally sync stock_daily_latest from QuantDB")
     parser.add_argument("--database-url", default=None, help="Override DATABASE_URL")
-    parser.add_argument(
-        "--parquet-path",
-        default=str(project_root() / "db" / "custom" / "fundamental_aligned.parquet"),
-        help="Source parquet path",
-    )
     parser.add_argument("--batch-size", type=int, default=2000, help="Upsert batch size")
     parser.add_argument("--dry-run", action="store_true", help="Preview only")
     return parser.parse_args()
@@ -115,11 +117,76 @@ def get_table_columns(engine) -> list[str]:
     return [row[0] for row in rows]
 
 
-def load_incremental_frame(parquet_path: Path, local_max_date: pd.Timestamp | None) -> pd.DataFrame:
-    frame = pd.read_parquet(parquet_path)
-    frame["trade_date"] = pd.to_datetime(frame["trade_date"])
-    if local_max_date is not None:
-        frame = frame[frame["trade_date"] > local_max_date].copy()
+def _rename_date_symbol(df: pd.DataFrame) -> pd.DataFrame:
+    """统一 QuantDB 各视图的 symbol / 交易日列名。"""
+    sym_col = next((c for c in ("symbol", "Symbol") if c in df.columns), None)
+    date_col = next((c for c in ("time", "trade_date") if c in df.columns), None)
+    renamed = {}
+    if sym_col and sym_col != "symbol":
+        renamed[sym_col] = "symbol"
+    if date_col and date_col != "trade_date":
+        renamed[date_col] = "trade_date"
+    if renamed:
+        df = df.rename(columns=renamed)
+    return df
+
+
+def _latest_roe(hub, symbol: str) -> float | None:
+    """从 3_financial_data/pershare_index 取每股最近报告期 roe (net_roe 优先)。"""
+    try:
+        f = hub.fetch_financial(symbol, "pershare_index")
+        for col in ("net_roe", "total_roe", "equity_roe", "roe_dupont"):
+            if col in f.columns:
+                vals = pd.to_numeric(f[col], errors="coerce").dropna()
+                if not vals.empty:
+                    return float(vals.iloc[-1])
+    except Exception:
+        pass
+    return None
+
+
+def load_quantdb_frame(hub, start_date, end_date) -> pd.DataFrame:
+    """从 QuantDB 构建待同步宽表 (features_daily 技术+估值 + 未复权K线 + roe/industry)。"""
+    frames: list[pd.DataFrame] = []
+
+    fd = hub.fetch_features_daily(start=start_date, end=end_date)
+    if not fd.empty:
+        fd = _rename_date_symbol(fd)
+        frames.append(fd)
+
+    # features_daily 无 open/high/low/volume/amount, 用未复权 K 线补 (先复权再同步)
+    symbols = sorted(fd["symbol"].unique().tolist()) if not fd.empty else []
+    if symbols:
+        try:
+            kl = hub.fetch_daily_kline_batch(symbols, start_date, end_date, adjust="none")
+            if not kl.empty:
+                kl = _rename_date_symbol(kl)
+                frames.append(kl)
+        except Exception as exc:
+            LOGGER.warning("QuantDB kline fetch failed: %s", exc)
+
+    if not frames:
+        return pd.DataFrame()
+    frame = frames[0]
+    for extra in frames[1:]:
+        keys = [c for c in ("symbol", "trade_date") if c in frame.columns and c in extra.columns]
+        frame = frame.merge(extra, on=keys, how="outer", suffixes=("", "_k"))
+
+    if "symbol" in frame.columns:
+        symbols_all = sorted(frame["symbol"].unique().tolist())
+        try:
+            roe = {s: _latest_roe(hub, s) for s in symbols_all}
+            if any(v is not None for v in roe.values()):
+                frame["roe"] = frame["symbol"].map(roe)
+            ind = hub.fetch_instrument_industry()
+            if not ind.empty and "symbol" in ind.columns and "ind_name_l1" in ind.columns:
+                ind_map = dict(zip(ind["symbol"], ind["ind_name_l1"], strict=False))
+                frame["industry"] = frame["symbol"].map(ind_map)
+        except Exception as exc:
+            LOGGER.warning("QuantDB roe/industry attach failed: %s", exc)
+
+    if "trade_date" in frame.columns:
+        frame["trade_date"] = pd.to_datetime(frame["trade_date"])
     return frame.sort_values(["trade_date", "symbol"]).reset_index(drop=True)
 
 
@@ -197,9 +264,14 @@ def main() -> None:
     root = project_root()
     load_dotenv(root / ".env", override=True)
 
-    parquet_path = Path(args.parquet_path).expanduser().resolve()
     db_url = get_database_url(args.database_url)
     engine = create_engine(db_url)
+
+    from backend.services.engine.data_platform.quantdb_hub import QuantDBDataHub
+    hub = QuantDBDataHub.get_instance()
+    if not hub.available:
+        LOGGER.error("QuantDB data not available; abort sync")
+        return
 
     table_columns = get_table_columns(engine)
     local_rows, local_min, local_max = get_table_coverage(engine)
@@ -210,13 +282,16 @@ def main() -> None:
         local_max.date() if local_max is not None else None,
     )
 
-    incoming = load_incremental_frame(parquet_path, local_max)
+    # 增量范围: local_max 次日 → 今天; 空表则回看一年
+    start_date = (local_max + pd.Timedelta(days=1)).date() if local_max is not None else date.today() - timedelta(days=365)
+    end_date = date.today()
+    incoming = load_quantdb_frame(hub, start_date, end_date)
     if incoming.empty:
-        LOGGER.info("No parquet rows newer than local max trade_date")
+        LOGGER.info("No QuantDB rows in [%s, %s]", start_date, end_date)
         return
 
     LOGGER.info(
-        "parquet incremental rows=%s dates=%s..%s",
+        "QuantDB incremental rows=%s dates=%s..%s",
         len(incoming),
         incoming["trade_date"].min().date(),
         incoming["trade_date"].max().date(),
@@ -224,7 +299,7 @@ def main() -> None:
 
     normalized, skipped_columns = normalize_frame(incoming, table_columns)
     if skipped_columns:
-        LOGGER.info("table columns not present in parquet, leaving untouched/default: %s", skipped_columns)
+        LOGGER.info("table columns not present in QuantDB, leaving untouched/default: %s", skipped_columns)
 
     if args.dry_run:
         return

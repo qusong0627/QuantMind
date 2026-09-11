@@ -316,6 +316,21 @@ def _normalize_payload(payload: dict[str, Any], allowed_features: list[str]) -> 
             raise HTTPException(status_code=422, detail="horizons must contain at least 2 distinct periods")
         # 多周期主显示周期取第一个
         target_horizon_days = horizons[0]
+        # WFA 与多周期互斥：此前子任务静默 pop("wfa")，用户勾了 WFA 也无感知。
+        # 改为提交时显式拒绝，避免"以为做了 WFA 诊断"的误解。
+        if wfa_config and wfa_config.get("enabled", True):
+            raise HTTPException(
+                status_code=422,
+                detail="WFA 走查暂不支持多周期训练：wfa 与 horizons 请二选一",
+            )
+        # 分位推理与多周期互斥：子任务会继承 prediction_mode=quantile，
+        # 每个周期训 3 个分位模型（4 周期=12 次 LGB），预算却被切到 1/4，
+        # 且融合只用 P50 点预测、区间无声丢失。显式拒绝。
+        if req.prediction_mode == "quantile":
+            raise HTTPException(
+                status_code=422,
+                detail="prediction_mode=quantile 暂不支持多周期训练：分位推理与 horizons 请二选一",
+            )
 
     target_mode = str(payload.get("target_mode", "return")).strip().lower()
     if target_mode not in _ALLOWED_TARGET_MODE:
@@ -446,7 +461,9 @@ def _normalize_payload(payload: dict[str, Any], allowed_features: list[str]) -> 
         # 信号在 T 日生成、T+1 执行；若预测未来 H 天收益，Train 结束与
         # Val 开始之间至少应留下 H+1 天，避免执行价/未来价格跨入下一分段。
         # 不再阻断(422)，而是由后端自动向后平移日期。
-        gap_days = int(normalized.get("target_horizon_days") or 1) + 1
+        # 多周期必须按最大周期留 gap：此前取 horizons[0]（最小值），大周期
+        # child 的 train 尾部标签会跨入 val，造成跨段泄漏。
+        gap_days = (max(horizons) if horizons else int(normalized.get("target_horizon_days") or 1)) + 1
 
         # 记录修正通知
         adjustment_notices = []
@@ -470,6 +487,26 @@ def _normalize_payload(payload: dict[str, Any], allowed_features: list[str]) -> 
                 status_code=422,
                 detail=f"Date order must satisfy train_start <= train_end < valid_start <= valid_end < test_start <= test_end. {' '.join(adjustment_notices)}",
             )
+
+        # 多周期 embargo 前置校验：镜像内 splits.py 会对 train/val 尾部裁掉
+        # horizon+1 个交易日做隔离；val 段交易日不足时仅 warning 就跳过裁剪，
+        # 造成 val 泄漏、val ICIR 虚高，直接污染 ICIR 融合权重。
+        # 按最大周期校验（日历天按 5/7 折交易日，留 3 天节假日余量），不足 422。
+        # 仅多周期触发，单周期保持现状。
+        if horizons:
+            max_h = max(horizons)
+            min_trading_days = max_h + 1 + 3
+            val_calendar_days = (dt_valid_end - dt_valid_start).days + 1
+            approx_trading_days = val_calendar_days * 5 // 7
+            if approx_trading_days < min_trading_days:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f"多周期 T+{max_h} 要求验证集约 {min_trading_days} 个交易日以上"
+                        f"（当前 valid 段约 {approx_trading_days} 个），否则 embargo 隔离会被跳过、"
+                        "验证集泄漏并虚增 ICIR 权重。请拉长 valid_start~valid_end，或减小最大周期。"
+                    ),
+                )
 
         normalized.update(
             {

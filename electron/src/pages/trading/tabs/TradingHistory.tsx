@@ -408,12 +408,12 @@ const TradingHistory: React.FC<TradingHistoryProps> = ({ userId, isActive, tradi
                     交易记录
                 </h3>
                 
-                <div className="flex items-center bg-gray-100 p-1 rounded-lg gap-1 border border-gray-200">
+                <div className="flex items-center bg-gray-100 p-1 rounded-full gap-1 border border-gray-200">
                     {(['today', 'week', 'month', 'all'] as const).map((range) => (
                         <button
                             key={range}
                             onClick={() => setTimeRange(range)}
-                            className={`px-4 py-1.5 text-xs font-medium rounded-md transition-all ${timeRange === range
+                            className={`px-4 py-1.5 text-xs font-medium rounded-full transition-all ${timeRange === range
                                 ? 'bg-white text-blue-600 shadow-sm'
                                 : 'text-gray-500 hover:text-gray-700'
                                 }`}
@@ -423,49 +423,49 @@ const TradingHistory: React.FC<TradingHistoryProps> = ({ userId, isActive, tradi
                     ))}
                 </div>
 
-                <div className="flex items-center bg-gray-100 p-1 rounded-lg gap-1 border border-gray-200">
+                <div className="flex items-center bg-gray-100 p-1 rounded-full gap-1 border border-gray-200">
                     <button
                         onClick={() => setDirectionFilter('all')}
-                        className={`px-3 py-1.5 text-xs font-medium rounded-md transition-all ${directionFilter === 'all' ? 'bg-white text-blue-600 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
+                        className={`px-3 py-1.5 text-xs font-medium rounded-full transition-all ${directionFilter === 'all' ? 'bg-white text-blue-600 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
                     >
                         全部方向
                     </button>
                     <button
                         onClick={() => setDirectionFilter('buy')}
-                        className={`px-3 py-1.5 text-xs font-medium rounded-md transition-all ${directionFilter === 'buy' ? 'bg-white text-red-600 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
+                        className={`px-3 py-1.5 text-xs font-medium rounded-full transition-all ${directionFilter === 'buy' ? 'bg-white text-red-600 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
                     >
                         买入
                     </button>
                     <button
                         onClick={() => setDirectionFilter('sell')}
-                        className={`px-3 py-1.5 text-xs font-medium rounded-md transition-all ${directionFilter === 'sell' ? 'bg-white text-green-600 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
+                        className={`px-3 py-1.5 text-xs font-medium rounded-full transition-all ${directionFilter === 'sell' ? 'bg-white text-green-600 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
                     >
                         卖出
                     </button>
                 </div>
 
-                <div className="flex items-center bg-gray-100 p-1 rounded-lg gap-1 border border-gray-200">
+                <div className="flex items-center bg-gray-100 p-1 rounded-full gap-1 border border-gray-200">
                     <button
                         onClick={() => setStatusFilter('all')}
-                        className={`px-3 py-1.5 text-xs font-medium rounded-md transition-all ${statusFilter === 'all' ? 'bg-white text-blue-600 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
+                        className={`px-3 py-1.5 text-xs font-medium rounded-full transition-all ${statusFilter === 'all' ? 'bg-white text-blue-600 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
                     >
                         全部状态
                     </button>
                     <button
                         onClick={() => setStatusFilter('filled')}
-                        className={`px-3 py-1.5 text-xs font-medium rounded-md transition-all ${statusFilter === 'filled' ? 'bg-white text-green-600 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
+                        className={`px-3 py-1.5 text-xs font-medium rounded-full transition-all ${statusFilter === 'filled' ? 'bg-white text-green-600 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
                     >
                         已成交
                     </button>
                     <button
                         onClick={() => setStatusFilter('pending')}
-                        className={`px-3 py-1.5 text-xs font-medium rounded-md transition-all ${statusFilter === 'pending' ? 'bg-white text-orange-600 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
+                        className={`px-3 py-1.5 text-xs font-medium rounded-full transition-all ${statusFilter === 'pending' ? 'bg-white text-orange-600 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
                     >
                         委托中
                     </button>
                     <button
                         onClick={() => setStatusFilter('cancelled')}
-                        className={`px-3 py-1.5 text-xs font-medium rounded-md transition-all ${statusFilter === 'cancelled' ? 'bg-white text-gray-600 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
+                        className={`px-3 py-1.5 text-xs font-medium rounded-full transition-all ${statusFilter === 'cancelled' ? 'bg-white text-gray-600 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
                     >
                         已撤单
                     </button>
@@ -483,7 +483,7 @@ const TradingHistory: React.FC<TradingHistoryProps> = ({ userId, isActive, tradi
                     <button
                         type="button"
                         disabled={exporting || filteredTrades.length === 0}
-                        className="flex items-center gap-2 px-4 py-[7px] bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-lg font-medium transition-all text-xs disabled:opacity-50 disabled:cursor-not-allowed border border-gray-200 shadow-sm hover:shadow-md active:scale-95 ml-auto"
+                        className="flex items-center gap-2 px-4 py-[7px] bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-full font-medium transition-all text-xs disabled:opacity-50 disabled:cursor-not-allowed border border-gray-200 shadow-sm hover:shadow-md active:scale-95 ml-auto"
                     >
                         <Download size={14} />
                         {exporting ? '导出中...' : '导出'}
@@ -609,87 +609,87 @@ const TradingHistory: React.FC<TradingHistoryProps> = ({ userId, isActive, tradi
                             </div>
                         </div>
 
-                        <div className="flex-1 flex items-center justify-center gap-10">
+                        <div className="flex-1 flex items-center justify-center gap-6">
                             <div 
-                                className={`flex flex-col items-center cursor-pointer p-2 rounded-lg transition-all hover:bg-gray-50 ${statusFilter === 'all' ? 'bg-blue-50 ring-1 ring-inset ring-blue-100' : ''}`}
+                                className={`flex flex-col items-center cursor-pointer p-2 rounded-lg transition-all hover:bg-gray-50 w-[76px] shrink-0 ${statusFilter === 'all' ? 'bg-blue-50 ring-1 ring-inset ring-blue-100' : ''}`}
                                 onClick={() => setStatusFilter('all')}
                             >
-                                <span className={`text-[10px] mb-1 font-bold ${statusFilter === 'all' ? 'text-blue-600' : 'text-gray-500'}`}>总委托</span>
-                                <span className={`font-bold text-sm ${statusFilter === 'all' ? 'text-blue-700' : 'text-gray-900'}`}>
+                                <span className={`text-[10px] mb-1 font-bold whitespace-nowrap ${statusFilter === 'all' ? 'text-blue-600' : 'text-gray-500'}`}>总委托</span>
+                                <span className={`font-bold text-sm tabular-nums whitespace-nowrap ${statusFilter === 'all' ? 'text-blue-700' : 'text-gray-900'}`}>
                                     {stats.total} <span className="text-[10px] font-medium text-gray-400">笔</span>
                                 </span>
                             </div>
 
                             <div 
-                                className={`flex flex-col items-center cursor-pointer p-2 rounded-lg transition-all hover:bg-gray-50 ${statusFilter === 'filled' ? 'bg-green-50 ring-1 ring-inset ring-green-100' : ''}`}
+                                className={`flex flex-col items-center cursor-pointer p-2 rounded-lg transition-all hover:bg-gray-50 w-[76px] shrink-0 ${statusFilter === 'filled' ? 'bg-green-50 ring-1 ring-inset ring-green-100' : ''}`}
                                 onClick={() => setStatusFilter('filled')}
                             >
-                                <span className={`text-[10px] mb-1 font-bold ${statusFilter === 'filled' ? 'text-green-600' : 'text-gray-500'}`}>已成交</span>
-                                <span className={`font-bold text-sm ${statusFilter === 'filled' ? 'text-green-700' : 'text-green-600'}`}>
+                                <span className={`text-[10px] mb-1 font-bold whitespace-nowrap ${statusFilter === 'filled' ? 'text-green-600' : 'text-gray-500'}`}>已成交</span>
+                                <span className={`font-bold text-sm tabular-nums whitespace-nowrap ${statusFilter === 'filled' ? 'text-green-700' : 'text-green-600'}`}>
                                     {stats.filled + stats.partial} <span className="text-[10px] font-medium text-green-400">笔</span>
                                 </span>
                             </div>
 
                             <div 
-                                className={`flex flex-col items-center cursor-pointer p-2 rounded-lg transition-all hover:bg-gray-50 ${statusFilter === 'pending' ? 'bg-yellow-50 ring-1 ring-inset ring-yellow-100' : ''}`}
+                                className={`flex flex-col items-center cursor-pointer p-2 rounded-lg transition-all hover:bg-gray-50 w-[76px] shrink-0 ${statusFilter === 'pending' ? 'bg-yellow-50 ring-1 ring-inset ring-yellow-100' : ''}`}
                                 onClick={() => setStatusFilter('pending')}
                             >
-                                <span className={`text-[10px] mb-1 font-bold ${statusFilter === 'pending' ? 'text-yellow-600' : 'text-gray-500'}`}>委托中</span>
-                                <span className={`font-bold text-sm ${statusFilter === 'pending' ? 'text-yellow-700' : 'text-yellow-600'}`}>
+                                <span className={`text-[10px] mb-1 font-bold whitespace-nowrap ${statusFilter === 'pending' ? 'text-yellow-600' : 'text-gray-500'}`}>委托中</span>
+                                <span className={`font-bold text-sm tabular-nums whitespace-nowrap ${statusFilter === 'pending' ? 'text-yellow-700' : 'text-yellow-600'}`}>
                                     {stats.pending} <span className="text-[10px] font-medium text-yellow-400">笔</span>
                                 </span>
                             </div>
 
                             <div 
-                                className={`flex flex-col items-center cursor-pointer p-2 rounded-lg transition-all hover:bg-gray-50 ${statusFilter === 'cancelled' ? 'bg-gray-50 ring-1 ring-inset ring-gray-200' : ''}`}
+                                className={`flex flex-col items-center cursor-pointer p-2 rounded-lg transition-all hover:bg-gray-50 w-[76px] shrink-0 ${statusFilter === 'cancelled' ? 'bg-gray-50 ring-1 ring-inset ring-gray-200' : ''}`}
                                 onClick={() => setStatusFilter('cancelled')}
                             >
-                                <span className={`text-[10px] mb-1 font-bold ${statusFilter === 'cancelled' ? 'text-gray-600' : 'text-gray-500'}`}>撤单</span>
-                                <span className={`font-bold text-sm ${statusFilter === 'cancelled' ? 'text-gray-700' : 'text-gray-400'}`}>
+                                <span className={`text-[10px] mb-1 font-bold whitespace-nowrap ${statusFilter === 'cancelled' ? 'text-gray-600' : 'text-gray-500'}`}>撤单</span>
+                                <span className={`font-bold text-sm tabular-nums whitespace-nowrap ${statusFilter === 'cancelled' ? 'text-gray-700' : 'text-gray-400'}`}>
                                     {stats.cancelled} <span className="text-[10px] font-medium text-gray-300">笔</span>
                                 </span>
                             </div>
 
                             {stats.rejected > 0 && (
                                 <div 
-                                    className={`flex flex-col items-center cursor-pointer p-2 rounded-lg transition-all hover:bg-gray-50 ${statusFilter === 'rejected' ? 'bg-red-50 ring-1 ring-inset ring-red-100' : ''}`}
+                                    className={`flex flex-col items-center cursor-pointer p-2 rounded-lg transition-all hover:bg-gray-50 w-[76px] shrink-0 ${statusFilter === 'rejected' ? 'bg-red-50 ring-1 ring-inset ring-red-100' : ''}`}
                                     onClick={() => setStatusFilter('rejected')}
                                 >
-                                    <span className={`text-[10px] mb-1 font-bold ${statusFilter === 'rejected' ? 'text-red-600' : 'text-gray-500'}`}>拒绝/过期</span>
-                                    <span className={`font-bold text-sm ${statusFilter === 'rejected' ? 'text-red-700' : 'text-red-500'}`}>
+                                    <span className={`text-[10px] mb-1 font-bold whitespace-nowrap ${statusFilter === 'rejected' ? 'text-red-600' : 'text-gray-500'}`}>拒绝/过期</span>
+                                    <span className={`font-bold text-sm tabular-nums whitespace-nowrap ${statusFilter === 'rejected' ? 'text-red-700' : 'text-red-500'}`}>
                                         {stats.rejected} <span className="text-[10px] font-medium text-red-400">笔</span>
                                     </span>
                                 </div>
                             )}
 
-                            <div className="h-8 w-px bg-gray-100"></div>
+                            <div className="h-8 w-px bg-gray-100 shrink-0"></div>
 
-                            <div className="flex flex-col items-center">
-                                <span className="text-gray-500 text-[10px] mb-1 font-bold">买入金额</span>
-                                <span className="font-bold text-red-600 text-sm">
+                            <div className="flex flex-col items-center min-w-[92px] shrink-0">
+                                <span className="text-gray-500 text-[10px] mb-1 font-bold whitespace-nowrap">买入金额</span>
+                                <span className="font-bold text-red-600 text-sm tabular-nums whitespace-nowrap">
                                     {stats.buyAmount >= 10000 ? `¥${(stats.buyAmount / 10000).toFixed(2)}万` : `¥${stats.buyAmount.toFixed(2)}`}
                                 </span>
                             </div>
 
-                            <div className="flex flex-col items-center">
-                                <span className="text-gray-500 text-[10px] mb-1 font-bold">卖出金额</span>
-                                <span className="font-bold text-green-600 text-sm">
+                            <div className="flex flex-col items-center min-w-[92px] shrink-0">
+                                <span className="text-gray-500 text-[10px] mb-1 font-bold whitespace-nowrap">卖出金额</span>
+                                <span className="font-bold text-green-600 text-sm tabular-nums whitespace-nowrap">
                                     {stats.sellAmount >= 10000 ? `¥${(stats.sellAmount / 10000).toFixed(2)}万` : `¥${stats.sellAmount.toFixed(2)}`}
                                 </span>
                             </div>
 
-                            <div className="flex flex-col items-center">
-                                <span className="text-gray-500 text-[10px] mb-1 font-bold">净买入</span>
-                                <span className={`font-bold text-sm ${stats.netBuy >= 0 ? 'text-red-600' : 'text-green-600'}`}>
+                            <div className="flex flex-col items-center min-w-[92px] shrink-0">
+                                <span className="text-gray-500 text-[10px] mb-1 font-bold whitespace-nowrap">净买入</span>
+                                <span className={`font-bold text-sm tabular-nums whitespace-nowrap ${stats.netBuy >= 0 ? 'text-red-600' : 'text-green-600'}`}>
                                     {Math.abs(stats.netBuy) >= 10000 ? `¥${(Math.abs(stats.netBuy) / 10000).toFixed(2)}万` : `¥${Math.abs(stats.netBuy).toFixed(2)}`}
                                 </span>
                             </div>
 
-                            <div className="h-8 w-px bg-gray-100"></div>
+                            <div className="h-8 w-px bg-gray-100 shrink-0"></div>
 
-                            <div className="flex flex-col items-center">
-                                <span className="text-gray-500 text-[10px] mb-1 font-bold">累计费用</span>
-                                <span className="font-bold text-amber-600 text-sm">
+                            <div className="flex flex-col items-center min-w-[92px] shrink-0">
+                                <span className="text-gray-500 text-[10px] mb-1 font-bold whitespace-nowrap">累计费用</span>
+                                <span className="font-bold text-amber-600 text-sm tabular-nums whitespace-nowrap">
                                     ¥{stats.totalCommission.toFixed(2)}
                                 </span>
                             </div>

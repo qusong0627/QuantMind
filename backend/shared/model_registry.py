@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import os
 import shutil
 from dataclasses import dataclass
@@ -1824,17 +1825,44 @@ class ModelRegistryService:
                 meta = self._parse_json_field(src.get("metadata_json"))
                 metrics = self._parse_json_field(src.get("metrics_json"))
                 icir = None
-                for k in ("val_rank_icir", "val_icir", "rank_icir"):
-                    if k in metrics:
-                        icir = float(metrics[k])
+                # metrics_json 只有 train/val/test 三段时取不到扁平 ICIR 键，
+                # 逐个试探：跳过缺失/None/非数值/NaN-inf，只取首个有限值。
+                # 此前 `if k in metrics: float(...)` 在值为 None 时直接抛 TypeError。
+                search_spaces: list[dict[str, Any]] = []
+                if isinstance(metrics, dict):
+                    search_spaces.append(metrics)
+                m = meta.get("metrics")
+                if isinstance(m, dict):
+                    search_spaces.append(m)
+                for space in search_spaces:
+                    if icir is not None:
                         break
-                if icir is None:
-                    m = meta.get("metrics")
-                    if isinstance(m, dict):
-                        icir = float(m.get("val_rank_icir") or m.get("val_icir") or 0)
-                weights[mid] = max(float(icir or 0), 0.0)
-            total = sum(weights.values()) or 1.0
+                    for k in ("val_rank_icir", "val_icir", "rank_icir"):
+                        v = space.get(k)
+                        if v is None:
+                            continue
+                        try:
+                            fv = float(v)
+                        except (TypeError, ValueError):
+                            continue
+                        if math.isfinite(fv):
+                            icir = fv
+                            break
+                # 负 ICIR 截断为 0（该周期不参与融合）；全员非正时走下方等权兜底。
+                weights[mid] = max(float(icir or 0.0), 0.0)
+                logger.info(
+                    "ensemble icir candidate %s: val_rank_icir=%s -> raw_weight=%.6f",
+                    mid,
+                    icir,
+                    weights[mid],
+                )
+            total = sum(weights.values())
             if total <= 0:
+                # 此前 `total = sum(...) or 1.0` 把 0 转成 1.0，导致该分支永不可达，
+                # 全零/全负 ICIR 时会产出和为 0 的全零权重。先判零再归一化。
+                logger.warning(
+                    "ensemble icir weights all non-positive; falling back to equal weights"
+                )
                 weights = {str(s["model_id"]): 1.0 / len(sources) for s in sources}
             else:
                 weights = {k: v / total for k, v in weights.items()}

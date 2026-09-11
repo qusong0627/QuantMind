@@ -1,7 +1,7 @@
 """市场定时同步调度器测试。
 
-覆盖 _normalize 按市场合并默认配置（MARKET_DEFAULT_SCHEDULES）与
-显式保存配置的覆盖行为，Redis 用桩对象替代。
+覆盖 _normalize 的市场建议时间预填（MARKET_SUGGESTED_TIMES）、未配置时保持
+关闭、以及显式保存配置的覆盖行为，Redis 用桩对象替代。
 """
 
 from __future__ import annotations
@@ -10,7 +10,8 @@ import pytest
 
 from backend.services.engine.tasks.market_sync_scheduler import (
     DEFAULT_SCHEDULE,
-    MARKET_DEFAULT_SCHEDULES,
+    MARKET_SUGGESTED_TIMES,
+    MARKETS,
     get_schedule,
     save_schedule,
 )
@@ -41,49 +42,63 @@ def stub_redis(monkeypatch: pytest.MonkeyPatch) -> _StubRedis:
     return stub
 
 
-def test_hk_schedule_is_enabled_by_default_without_redis_config(stub_redis):
+def test_no_market_is_enabled_without_user_config(stub_redis):
+    # Act：Redis 里没有任何配置时逐一读取所有市场
+    got = {m: get_schedule(m) for m in MARKETS}
+
+    # Assert：所有市场一律保持关闭，避免所有部署在同一固定时刻全量同步
+    assert all(cfg["enabled"] is False for cfg in got.values()), got
+
+
+def test_market_suggested_time_is_prefilled_without_enabling(stub_redis):
     # Act：Redis 里没有任何 HK 配置时读取
     cfg = get_schedule("HK")
 
-    # Assert：港股开箱即定时同步（排在 A 股 23:30 之后），其余字段沿用全局默认
-    assert cfg["enabled"] is True
-    assert cfg["time"] == "23:50"
+    # Assert：建议时间只作预填，enabled 仍为 False；其余字段沿用全局默认
+    assert cfg["enabled"] is False
+    assert cfg["time"] == MARKET_SUGGESTED_TIMES["HK"]
     assert cfg["days"] == DEFAULT_SCHEDULE["days"]
     assert cfg["datasets"] == []
 
 
-def test_markets_in_default_table_are_enabled_with_expected_times(stub_redis):
-    # Arrange / Act：Redis 里没有任何配置时逐一读取
-    got = {m: get_schedule(m) for m in MARKET_DEFAULT_SCHEDULES}
-
-    # Assert：海外市场全部开箱即定时同步，且互不错峰
-    assert got["HK"]["enabled"] is True and got["HK"]["time"] == "23:50"
-    assert got["US"]["enabled"] is True and got["US"]["time"] == "05:30"
-    assert got["BC"]["enabled"] is True and got["BC"]["time"] == "04:15"
-    assert got["FUTURES"]["enabled"] is True and got["FUTURES"]["time"] == "18:00"
-    times = [cfg["time"] for cfg in got.values()]
-    assert len(times) == len(set(times)), "各市场默认触发时间必须错开"
+def test_suggested_times_are_staggered_and_after_midnight():
+    # Assert：各市场建议时间互不错峰，且都落在次日 00:00 以后的凌晨窗口
+    times = list(MARKET_SUGGESTED_TIMES.values())
+    assert len(times) == len(set(times)), "各市场建议触发时间必须错开"
+    assert all("00:00" <= t <= "06:00" for t in times), times
 
 
-def test_ashare_has_no_market_default_and_stays_disabled_without_config(stub_redis):
-    # Act：A 股不在默认表内（走独立的 daily-data-sync beat 任务）
+def test_ashare_stays_disabled_without_config(stub_redis):
+    # Act：A 股未配置
     cfg = get_schedule("A")
 
-    # Assert：保持关闭与全局默认时间
+    # Assert：保持关闭，时间取 A 股建议值
     assert cfg["enabled"] is False
-    assert cfg["time"] == DEFAULT_SCHEDULE["time"]
+    assert cfg["time"] == MARKET_SUGGESTED_TIMES["A"]
 
 
-def test_explicit_saved_config_overrides_market_default(stub_redis):
+def test_user_can_enable_market_explicitly(stub_redis):
+    # Arrange：用户在前端显式开启港股定时
+    save_schedule("HK", {"enabled": True, "time": "22:30"})
+
+    # Act
+    cfg = get_schedule("HK")
+
+    # Assert：以用户保存的配置为准
+    assert cfg["enabled"] is True
+    assert cfg["time"] == "22:30"
+
+
+def test_explicit_saved_config_disables_market(stub_redis):
     # Arrange：用户在前端显式关闭港股定时
     save_schedule("HK", {"enabled": False})
 
     # Act
     cfg = get_schedule("HK")
 
-    # Assert：显式关闭优先于市场默认开启；未覆盖字段沿用港股市场默认
+    # Assert：显式关闭生效；未覆盖字段沿用建议时间预填
     assert cfg["enabled"] is False
-    assert cfg["time"] == "23:50"
+    assert cfg["time"] == MARKET_SUGGESTED_TIMES["HK"]
 
 
 def test_save_and_get_roundtrip_keeps_fields_not_set_by_caller(stub_redis):

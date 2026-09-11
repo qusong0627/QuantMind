@@ -5,7 +5,7 @@ Simulation ledger/account projection service.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import Select, select
@@ -21,6 +21,22 @@ class CashLedgerEntry:
     event_type: str
     amount: float
     note: str | None = None
+
+
+def _naive_utc(value: datetime | None) -> datetime:
+    """ledger 表的时间列是 naive 口径（与 SimTrade.executed_at 的 aware UTC 对齐到边界剥离）。
+
+    直接把 aware 值写入 naive 列会在 asyncpg 层抛
+    "can't subtract offset-naive and offset-aware datetimes"，导致整笔成交落库失败。
+    """
+    try:
+        if value is not None and getattr(value, "tzinfo", None) is not None:
+            return value.astimezone(timezone.utc).replace(tzinfo=None)
+        if value is not None:
+            return value
+    except Exception:
+        pass
+    return datetime.utcnow()
 
 
 class SimulationLedgerService:
@@ -124,7 +140,7 @@ class SimulationLedgerService:
             tenant_id=tenant_id,
             user_id=user_id,
             ref_id=str(getattr(trade, "trade_id", "") or ""),
-            trade_time=getattr(trade, "executed_at", None) or datetime.utcnow(),
+            trade_time=_naive_utc(getattr(trade, "executed_at", None)),
             entries=cash_entries,
             ending_balance=float(after_snapshot.get("cash") or account.cash or 0.0),
         )
@@ -226,7 +242,7 @@ class SimulationLedgerService:
         side = str(getattr(getattr(order, "side", None), "value", getattr(order, "side", "")) or "").strip().lower()
         trade_action = str(getattr(order, "trade_action", None) or "").strip().lower()
         position_side = str(getattr(order, "position_side", None) or "long").strip().lower()
-        occurred_at = getattr(trade, "executed_at", None) or datetime.utcnow()
+        occurred_at = _naive_utc(getattr(trade, "executed_at", None))
         fill_id = str(getattr(trade, "trade_id", "") or "")
 
         if position_side == "short":

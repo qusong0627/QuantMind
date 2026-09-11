@@ -46,8 +46,27 @@ def apply_qlib_loose_patches():
                 logger.warning(f"Qlib Patch: Unsupported freq '{freq}' detected, defaulting to 'day'")
                 return 1, "day"
         Freq.parse = patched_freq_parse
-        
-        logger.info("✅ Qlib 宽松逻辑补丁已注入 (已禁用 1min 回退并软化频率校验)")
+
+        # 3. 持仓列表按代码排序，消除 PYTHONHASHSEED 导致的回测结果漂移
+        # 原实现是 list(set(self.position.keys()) - {...})，set 的迭代顺序取决于
+        # 字符串哈希种子；TopkDropoutStrategy.generate_trade_decision 用它构造卖出单
+        # 列表，在现金不足的调仓日决定先卖哪只 → 同一份信号在不同进程里跑出不同年化
+        # （实测 standard_topk 2024 全年 54.98% / 57.63% / 60.63% / 61.31%，
+        # 而最大回撤恒为 -18.42%，因为路径一致、只有成交顺序不同）。
+        # 排序后回测与哈希种子无关，可复现。
+        from qlib.backtest.position import Position
+
+        if not getattr(Position, "_qm_deterministic_stock_list", False):
+
+            def _sorted_get_stock_list(self):
+                return sorted(
+                    set(self.position.keys()) - {"cash", "now_account_value", "cash_delay"}
+                )
+
+            Position.get_stock_list = _sorted_get_stock_list
+            Position._qm_deterministic_stock_list = True
+
+        logger.info("✅ Qlib 宽松逻辑补丁已注入 (已禁用 1min 回退、软化频率校验、持仓列表排序)")
     except Exception as e:
         logger.error(f"❌ 注入 Qlib 补丁失败: {e}")
 

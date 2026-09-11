@@ -9,6 +9,7 @@ from datetime import datetime
 import asyncio
 import json
 import logging
+import os
 
 from sqlalchemy import Select, or_, select
 from sqlalchemy import text
@@ -23,6 +24,7 @@ from backend.services.simulation.services.projection_service import (
     SimulationProjectionService,
 )
 from backend.shared.stock_utils import StockCodeUtil
+from backend.shared.simulation_account_keys import account_key
 from backend.shared.database_manager_v2 import get_session
 from backend.shared.trade_account_cache import write_trade_account_cache
 from backend.services.trade_shared.redis_client import redis_client
@@ -82,9 +84,60 @@ class SimulationCorporateActionService:
             )
             actions = list((await session.execute(stmt)).scalars().all())
             for action in actions:
-                await cls._apply_action(session=session, action=action, applied_at=cutoff)
-                applied += 1
+                # P0-3：原子认领（pending->processing），双worker/重跑只能一个得手；
+                # 认领单独提交，apply失败回滚后状态回到pending可重跑，不留半截账。
+                action_id = action.id
+                claim = await session.execute(
+                    text(
+                        "UPDATE simulation_corporate_actions "
+                        "SET status='processing' WHERE id=:id AND status='pending'"
+                    ),
+                    {"id": action_id},
+                )
+                await session.commit()
+                if (getattr(claim, "rowcount", 0) or 0) == 0:
+                    continue
+                try:
+                    fresh = await session.get(SimulationCorporateAction, action_id)
+                    if fresh is None:
+                        continue
+                    await cls._apply_action(
+                        session=session, action=fresh, applied_at=cutoff
+                    )
+                    await session.commit()
+                    applied += 1
+                except Exception as exc:
+                    try:
+                        await session.rollback()
+                    except Exception:
+                        pass
+                    logger.error(
+                        "Corporate action apply failed id=%s, rolled back to pending: %s",
+                        action_id,
+                        exc,
+                        exc_info=True,
+                    )
         return applied
+
+    @staticmethod
+    async def _ledger_exists(
+        session, *, account_id: str, event_type: str, ref_id: str
+    ) -> bool:
+        """同一action对同一账户是否已记过该事件账（P0-3重跑幂等）。"""
+        try:
+            row = await session.execute(
+                select(SimulationCashLedger.id)
+                .where(
+                    SimulationCashLedger.account_id == account_id,
+                    SimulationCashLedger.event_type == event_type,
+                    SimulationCashLedger.ref_type == "corporate_action",
+                    SimulationCashLedger.ref_id == str(ref_id),
+                )
+                .limit(1)
+            )
+            return row.scalar_one_or_none() is not None
+        except Exception:
+            return False
 
     @classmethod
     async def _apply_action(
@@ -106,7 +159,9 @@ class SimulationCorporateActionService:
                         SimulationPositionLot.quantity_remaining > 0,
                     )
                 )
-            ).scalars().all()
+            )
+            .scalars()
+            .all()
         )
 
         if normalized_type == "dividend":
@@ -114,19 +169,44 @@ class SimulationCorporateActionService:
             for lot in lots:
                 by_account[str(lot.account_id)].append(lot)
             applied_accounts = 0
+            per_share = float(action.cash_dividend_per_share or 0.0)
             for account_id, account_lots in by_account.items():
                 qty = sum(float(lot.quantity_remaining or 0.0) for lot in account_lots)
-                cash = cls.compute_dividend_cash(qty, float(action.cash_dividend_per_share or 0.0))
+                cash = cls.compute_dividend_cash(qty, per_share)
                 if cash <= 0:
                     continue
                 account = await session.get(SimulationAccount, account_id)
                 if account is None:
                     continue
+                # P0-3：该账户已记过此次分红账则跳过（重跑幂等，不双发）
+                if await cls._ledger_exists(
+                    session,
+                    account_id=account.account_id,
+                    event_type="DIVIDEND_CASH",
+                    ref_id=str(action.id),
+                ):
+                    continue
                 account.cash = float(account.cash or 0.0) + cash
                 account.available_cash = float(account.available_cash or 0.0) + cash
                 account.total_asset = float(account.total_asset or 0.0) + cash
-                account.equity = float(account.equity or account.total_asset or 0.0) + cash
+                account.equity = (
+                    float(account.equity or account.total_asset or 0.0) + cash
+                )
                 account.last_projected_at = applied_at
+                # 除息下调成本：名义价自然贴权，成本不降则此后浮盈系统性偏低。
+                # cost_amount 同步重算；下限 0（高分红不倒贴）。
+                if per_share > 0:
+                    for lot in account_lots:
+                        try:
+                            new_cost = max(
+                                0.0, float(lot.cost_price or 0.0) - per_share
+                            )
+                            lot.cost_price = round(new_cost, 6)
+                            lot.cost_amount = round(
+                                new_cost * float(lot.quantity_open or 0.0), 6
+                            )
+                        except Exception:
+                            continue
                 session.add(
                     SimulationCashLedger(
                         account_id=account.account_id,
@@ -150,10 +230,20 @@ class SimulationCorporateActionService:
                 applied_accounts += 1
             cls._merge_action_note(
                 action,
-                f"dividend_applied_accounts={applied_accounts}",
+                f"dividend_applied_accounts={applied_accounts},cost_adjusted_per_share={per_share}",
             )
         elif normalized_type in {"bonus_share", "split", "reverse_split"}:
-            multiplier = cls.compute_share_multiplier(normalized_type, float(action.share_ratio or 0.0))
+            # 注意：当前 QuantDB 同步与 CSV 导入都不产生 split/reverse_split，
+            # 该分支仅对手工入库的记录生效；若出现会在 note 中标出来源。
+            if normalized_type in {"split", "reverse_split"}:
+                logger.warning(
+                    "公司行为出现拆股类型 %s symbol=%s（上游暂不产出，请核对手工录入）",
+                    normalized_type,
+                    normalized_symbol,
+                )
+            multiplier = cls.compute_share_multiplier(
+                normalized_type, float(action.share_ratio or 0.0)
+            )
             if multiplier <= 0:
                 multiplier = 1.0
             touched_accounts: set[str] = set()
@@ -183,7 +273,9 @@ class SimulationCorporateActionService:
                     account = await session.get(SimulationAccount, account_id)
                     if account is None:
                         continue
-                    delta_qty = old_qty_by_account.get(account_id, 0.0) * (multiplier - 1.0)
+                    delta_qty = old_qty_by_account.get(account_id, 0.0) * (
+                        multiplier - 1.0
+                    )
                     value_delta = round(delta_qty * latest_price, 4)
                     if value_delta > 0:
                         session.add(
@@ -223,8 +315,38 @@ class SimulationCorporateActionService:
                 subscribed_qty = round(subscribed_qty, 6)
                 if subscribed_qty <= 0:
                     continue
-                total_cost = round(subscribed_qty * float(action.rights_price or 0.0), 4)
+                total_cost = round(
+                    subscribed_qty * float(action.rights_price or 0.0), 4
+                )
                 if total_cost <= 0:
+                    continue
+                # 配股认购开关：SIM_RIGHTS_AUTO_SUBSCRIBE=false 时只记录跳过，不动资金
+                # （默认 true 保持现状：现金足够即全额认购）。
+                if os.getenv("SIM_RIGHTS_AUTO_SUBSCRIBE", "true").strip().lower() in {
+                    "0",
+                    "false",
+                    "no",
+                    "off",
+                }:
+                    skipped_accounts += 1
+                    session.add(
+                        SimulationCashLedger(
+                            account_id=account.account_id,
+                            tenant_id=account.tenant_id,
+                            user_id=account.user_id,
+                            event_type="RIGHTS_SUBSCRIPTION_SKIPPED",
+                            ref_type="corporate_action",
+                            ref_id=str(action.id),
+                            amount=0.0,
+                            balance_after=float(account.cash or 0.0),
+                            trade_date=applied_at,
+                            occurred_at=applied_at,
+                            note=(
+                                f"{normalized_symbol} rights issue skipped: "
+                                f"auto-subscribe disabled (SIM_RIGHTS_AUTO_SUBSCRIBE=false)"
+                            ),
+                        )
+                    )
                     continue
                 available_cash = float(account.available_cash or 0.0)
                 if available_cash + 1e-6 < total_cost:
@@ -250,7 +372,9 @@ class SimulationCorporateActionService:
                     continue
                 account.cash = float(account.cash or 0.0) - total_cost
                 account.available_cash = available_cash - total_cost
-                account.long_market_value = float(account.long_market_value or 0.0) + total_cost
+                account.long_market_value = (
+                    float(account.long_market_value or 0.0) + total_cost
+                )
                 account.last_projected_at = applied_at
                 session.add(
                     SimulationCashLedger(
@@ -328,7 +452,24 @@ class SimulationCorporateActionService:
                 long_market_value += market_value
         cash = float(account.cash or 0.0)
         liabilities = float(account.liabilities or 0.0)
-        total_asset = round(cash + long_market_value - short_market_value, 4)
+        # P0-6：计入Redis侧short_proceeds，与盘中equity口径对齐
+        try:
+            from backend.shared.simulation_account_keys import account_key
+            from backend.shared.trade_account_cache import read_json_cache
+            from backend.services.trade_shared.redis_client import (
+                redis_client as _redis_client,
+            )
+
+            _cached = read_json_cache(
+                _redis_client,
+                account_key(account.tenant_id, account.user_id, "CN"),
+            )
+            _proceeds = float((_cached or {}).get("short_proceeds") or 0.0)
+        except Exception:
+            _proceeds = 0.0
+        total_asset = round(
+            cash + _proceeds + long_market_value - short_market_value, 4
+        )
         account.long_market_value = round(long_market_value, 4)
         account.short_market_value = round(short_market_value, 4)
         account.total_asset = total_asset
@@ -351,12 +492,42 @@ class SimulationCorporateActionService:
     ) -> None:
         if not redis_client.client:
             return
+        sim_key = account_key(tenant_id, user_id)
+        # 空投影保护（与 EOD _rebuild_redis 同理）：ledger 为空时不覆盖 Redis 实盘持仓
+        if not positions:
+            try:
+                from backend.shared.trade_account_cache import read_json_cache
+
+                current = read_json_cache(redis_client, sim_key) or {}
+                live = current.get("positions") or {}
+                if isinstance(live, str):
+                    try:
+                        live = json.loads(live)
+                    except Exception:
+                        live = {}
+                live_count = (
+                    sum(
+                        1
+                        for pos in live.values()
+                        if isinstance(pos, dict) and float(pos.get("volume") or 0) > 0
+                    )
+                    if isinstance(live, dict)
+                    else 0
+                )
+                if live_count > 0:
+                    logger.error(
+                        "Corporate-action rebuild skipped for %s: ledger projection empty "
+                        "but Redis holds live positions",
+                        sim_key,
+                    )
+                    return
+            except Exception:
+                pass
         payload = SimulationProjectionService.build_cache_payload(
             account=account,
             positions=positions,
             source="corporate_action_apply",
         )
-        sim_key = f"simulation:account:{tenant_id}:{str(user_id).strip()}"
         redis_client.client.set(sim_key, json.dumps(payload, ensure_ascii=False))
         write_trade_account_cache(redis_client, tenant_id, user_id, payload)
 
@@ -390,5 +561,7 @@ async def run_simulation_corporate_action_worker(interval_seconds: int = 3600) -
         try:
             await SimulationCorporateActionService.apply_due_actions()
         except Exception as exc:
-            logger.error("Simulation corporate action worker failed: %s", exc, exc_info=True)
+            logger.error(
+                "Simulation corporate action worker failed: %s", exc, exc_info=True
+            )
         await asyncio.sleep(max(60, int(interval_seconds or 3600)))

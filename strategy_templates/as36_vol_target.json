@@ -1,0 +1,96 @@
+{
+  "id": "as36_vol_target",
+  "name": "A股波动率目标仓位",
+  "description": "自定义类：仓位 = min(1, 目标波动/沪深 300 已实现波动)，高波动期自动降仓。",
+  "category": "risk_control",
+  "difficulty": "advanced",
+  "params": [
+    {
+      "name": "topk",
+      "description": "持仓股票总数",
+      "default": 40,
+      "min": 5,
+      "max": 200
+    },
+    {
+      "name": "n_drop",
+      "description": "每期最大替换数",
+      "default": 10,
+      "min": 0,
+      "max": 200
+    },
+    {
+      "name": "rebalance_days",
+      "description": "调仓周期（交易日）",
+      "default": 5,
+      "min": 1,
+      "max": 60
+    },
+    {
+      "name": "target_vol",
+      "description": "目标年化波动率（0.15=15%）",
+      "default": 0.15,
+      "min": 0.05,
+      "max": 0.6
+    },
+    {
+      "name": "vol_window",
+      "description": "波动率估计窗口（交易日）",
+      "default": 20,
+      "min": 5,
+      "max": 120
+    },
+    {
+      "name": "min_position",
+      "description": "最低仓位比例",
+      "default": 0.2,
+      "min": 0.0,
+      "max": 1.0
+    },
+    {
+      "name": "max_position",
+      "description": "最高仓位比例",
+      "default": 1.0,
+      "min": 0.1,
+      "max": 1.0
+    },
+    {
+      "name": "f_total_mv_min",
+      "description": "总市值下限（元）",
+      "default": 3000000000.0,
+      "min": 0
+    },
+    {
+      "name": "f_amount_ma_5_min",
+      "description": "5 日均成交额下限（万元）",
+      "default": 5000,
+      "min": 0
+    }
+  ],
+  "execution_defaults": {
+    "max_buy_drop": -0.03,
+    "stop_loss": -0.08
+  },
+  "live_defaults": {
+    "rebalance_days": 5,
+    "schedule_type": "interval",
+    "trade_weekdays": [],
+    "enabled_sessions": [
+      "PM"
+    ],
+    "sell_time": "14:30",
+    "buy_time": "14:45",
+    "sell_first": true,
+    "order_type": "LIMIT",
+    "max_price_deviation": 0.02,
+    "max_orders_per_cycle": 20
+  },
+  "live_config_tips": [
+    "目标波动 15% 对应 A 股中性风险预算；激进账户可调到 20%。",
+    "波动率是滞后的，但比预测波动更可靠；min_position 防止极端行情空仓踏空。"
+  ],
+  "markets": [
+    "a_share"
+  ],
+  "dir": "A股策略/08_风险控制与仓位"
+}

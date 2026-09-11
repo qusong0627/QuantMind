@@ -16,6 +16,7 @@ export enum MessageType {
   MARKET_DATA = 'market_data',
   TRADE_SIGNAL = 'trade_signal',
   TRADE_UPDATE = 'trade_update',
+  STRATEGY_UPDATE = 'strategy_update',
   NOTIFICATION = 'notification',
   SYSTEM_ALERT = 'system_alert',
   HEARTBEAT = 'heartbeat',

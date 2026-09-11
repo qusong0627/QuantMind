@@ -367,7 +367,7 @@ def main() -> None:
 
     engine = create_engine(get_database_url(args.database_url))
     specs = [
-        SyncSpec("fundamental_aligned", root / "db" / "custom" / "fundamental_aligned.parquet"),
+        # fundamental_aligned 已废弃(转向 QuantDB features_daily)，不再从 PG 拉该 parquet
         SyncSpec("feature_snapshots", root / "db" / "feature_snapshots" / "model_features_2026.parquet"),
     ]
     any_synced = False

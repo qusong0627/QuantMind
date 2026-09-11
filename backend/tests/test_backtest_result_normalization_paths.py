@@ -7,6 +7,7 @@ project_root = os.path.join(os.path.dirname(__file__), "../../")
 sys.path.append(project_root)
 
 from backend.services.engine.qlib_app.services import backtest_service as service_mod
+from backend.services.engine.qlib_app.services import backtest_service_query as query_mod
 from backend.services.engine.qlib_app.services.risk_analyzer import RiskAnalyzer
 
 
@@ -37,7 +38,9 @@ def test_get_result_normalizes_trades_on_cache_hit(monkeypatch):
     service._initialized = True
     service._cache = FakeCache(cached_result={"trades": [{"price": 0.54}]})
 
-    monkeypatch.setattr(service_mod, "QlibBacktestResult", FakeResultModel)
+    # QlibBacktestResult 的名字解析发生在定义模块（query mixin）的全局命名空间，
+    # patch 必须打在那里才会生效。
+    monkeypatch.setattr(query_mod, "QlibBacktestResult", FakeResultModel)
 
     called = {}
 
@@ -63,7 +66,8 @@ def test_get_result_normalizes_trades_on_persistence_path_and_writes_cache(monke
     cache = FakeCache(cached_result=None)
     service._cache = cache
 
-    async def fake_get_result(backtest_id, tenant_id=None, user_id=None):
+    async def fake_get_result(backtest_id, tenant_id=None, user_id=None, exclude_fields=None):
+        assert exclude_fields is None  # 未排除 trades 时应完整取回
         return FakeResultModel(trades=[{"price": 0.54}])
 
     service._persistence = types.SimpleNamespace(get_result=fake_get_result)

@@ -418,7 +418,10 @@ class RiskAnalyzer:
 
         total_trades = len(trades)
         win_count = len(wins)
-        win_rate = win_count / total_trades if total_trades > 0 else 0.0
+        # 胜率分母只算「有盈亏的成交」：买入单没有 pnl，若算进分母会把胜率摊薄
+        # （例如全年 28 买 21 卖全对，也只有 21/49）。
+        closed_count = win_count + len(losses)
+        win_rate = win_count / closed_count if closed_count > 0 else 0.0
         sum_wins = sum(wins)
         sum_losses = sum(losses)
         profit_factor = sum_wins / sum_losses if sum_losses > 0 else (float("inf") if sum_wins > 0 else 0.0)
@@ -429,10 +432,14 @@ class RiskAnalyzer:
         if win_count == 0 and len(losses) == 0 and daily_returns is not None:
             try:
                 clean_returns = daily_returns.dropna()
-                if len(clean_returns) > 0:
-                    win_days = clean_returns[clean_returns > 0]
-                    loss_days = clean_returns[clean_returns < 0]
-                    win_rate = float(len(win_days) / len(clean_returns))
+                # 空仓日收益恰为 0，不是亏损日：分母只算有涨跌的交易日，
+                # 否则像 as41 这种「大部分时间空仓、只做暴跌后几日」的事件型策略，
+                # 胜率会被 200 多个空仓日摊成 3%（年化却是 +21%）。
+                active = clean_returns[clean_returns != 0]
+                if len(active) > 0:
+                    win_days = active[active > 0]
+                    loss_days = active[active < 0]
+                    win_rate = float(len(win_days) / len(active))
                     # 盈利因子使用传统标准计算：总盈利 / 总亏损
                     sum_day_wins = float(win_days.sum()) if len(win_days) > 0 else 0.0
                     sum_day_losses = float(abs(loss_days.sum())) if len(loss_days) > 0 else 0.0

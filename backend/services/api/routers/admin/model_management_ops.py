@@ -456,7 +456,7 @@ async def update_market_features(
 
 @router.post(
     "/sync-stock-daily-full",
-    summary="日常全量同步：从本地 parquet 补齐 stock_daily_latest 所有列（含 is_st/指数成分/技术指标等）",
+    summary="日常全量同步：从 QuantDB 补齐 stock_daily_latest 可同步列（features_daily 技术/估值 + 未复权K线 + roe/行业）",
 )
 async def sync_stock_daily_full(
     max_days: int = Query(
@@ -465,8 +465,9 @@ async def sync_stock_daily_full(
     current_user: dict = Depends(require_admin),
 ):
     """
-    从 /app/db/custom/fundamental_aligned.parquet 全量同步所有列到 stock_daily_latest。
-    包含 is_st、idx_hs300、idx_zz1000、idx_margin、各类技术指标、概念标签等。
+    从 QuantDB (features_daily + 未复权K线 + 3_financial_data/roe + instrument_detail/行业)
+    全量同步 stock_daily_latest 中 QuantDB 能提供的列。
+    注：QuantDB 目前不产 is_st/idx_*/concept_*/涨停统计 等列，这些列不参与同步。
     """
     _ = current_user
 
