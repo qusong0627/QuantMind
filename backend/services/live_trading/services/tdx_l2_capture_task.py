@@ -214,11 +214,18 @@ def parse_exday_row(row: dict) -> dict:
 
 
 def parse_snapshot(snap_result: dict) -> dict:
-    """get_market_snapshot → {now, open, pre_close, volume, amount, bid5, ask5, inside, outside}。"""
-    r = snap_result.get("Value") if isinstance(snap_result, dict) else None
+    """get_market_snapshot → {now, open, pre_close, volume, amount, bid5, ask5, inside, outside}。
+
+    形状兼容两种来源：桥透传为**平铺** dict（实测 2026-09-11，无 Value 包装），
+    TdxAiData 等旧来源为 {"Value": [ {...} ]}——只认一种曾让快照全丢
+    （now_price 与快照类因子全 null/0，2026-09-02 起线上如此）。
+    """
+    r = snap_result if isinstance(snap_result, dict) else None
+    if isinstance(r, dict) and "Value" in r:
+        r = r.get("Value")
     if isinstance(r, list) and r:
         r = r[0] if isinstance(r[0], dict) else r
-    if not isinstance(r, dict):
+    if not isinstance(r, dict) or not r:  # 空输入保持空契约（{"Value": []} 同）
         return {}
     return {
         "now": _f(r.get("Now")),
@@ -379,10 +386,15 @@ def compute_l2_factors(
     if len(samples) >= 6:
         prices = [s[5] for s in samples]
         rets = [abs((b - a) / a) for a, b in zip(prices, prices[1:]) if a > 0]
-        half = max(len(rets) // 2, 1)
-        cur_rv = sum(rets[-half:]) / half
-        day_rv = sum(rets) / len(rets)
-        factors["micro_zone_rv_ratio_close"] = round(_clip(cur_rv / (day_rv + 1e-9), 0, 10), 6)
+        if rets:
+            half = max(len(rets) // 2, 1)
+            cur_rv = sum(rets[-half:]) / half
+            day_rv = sum(rets) / len(rets)
+            factors["micro_zone_rv_ratio_close"] = round(_clip(cur_rv / (day_rv + 1e-9), 0, 10), 6)
+        else:
+            # 全程无有效价（停牌/无行情，now 缺省记 0）→ rets 为空，按样本不足处理。
+            # 注意 half 有 max(...,1) 兜底但 day_rv 的除法没有——曾让整轮采集中止。
+            factors["micro_zone_rv_ratio_close"] = None
     else:
         factors["micro_zone_rv_ratio_close"] = None
 
@@ -610,29 +622,34 @@ async def run_tdx_l2_capture_task(interval_sec: int = 0) -> None:
                 await asyncio.sleep(120.0 / _CALLS_PER_MIN)
                 suffix = StockCodeUtil.to_suffix(prefix) or prefix
                 with_more = processed % 8 == 0
-                data, snap = await fetch_l2_data(suffix, with_more=with_more)
-                calls += 3 if with_more else 2
-                if not data:
-                    continue
-                data["symbol"] = prefix
-                data["stock_code"] = suffix
-                state = states.setdefault(prefix, L2SeriesState())
-                factors = compute_l2_factors(data, snap, state)
-                signal = build_signal_score(factors)
-                await _upsert_snapshot(data, snap, factors, signal)
-                redis_payload = {
-                    "symbol": prefix,
-                    "ts": datetime.now().isoformat(timespec="seconds"),
-                    "factors": factors,
-                    "signal_score": signal,
-                    "now": snap.get("now"),
-                    "volume": snap.get("volume"),
-                    "l2_tic_num": data.get("l2_tic_num"),
-                    "l2_order_num": data.get("l2_order_num"),
-                }
-                _redis_set_json(_REALTIME_KEY.format(symbol=prefix), redis_payload)
-                saved += 1
-                processed += 1
+                calls += 3 if with_more else 2  # 先计费：失败也已打桥
+                try:
+                    data, snap = await fetch_l2_data(suffix, with_more=with_more)
+                    if not data:
+                        continue
+                    data["symbol"] = prefix
+                    data["stock_code"] = suffix
+                    state = states.setdefault(prefix, L2SeriesState())
+                    factors = compute_l2_factors(data, snap, state)
+                    signal = build_signal_score(factors)
+                    await _upsert_snapshot(data, snap, factors, signal)
+                    redis_payload = {
+                        "symbol": prefix,
+                        "ts": datetime.now().isoformat(timespec="seconds"),
+                        "factors": factors,
+                        "signal_score": signal,
+                        "now": snap.get("now"),
+                        "volume": snap.get("volume"),
+                        "l2_tic_num": data.get("l2_tic_num"),
+                        "l2_order_num": data.get("l2_order_num"),
+                    }
+                    _redis_set_json(_REALTIME_KEY.format(symbol=prefix), redis_payload)
+                    saved += 1
+                    processed += 1
+                except Exception as exc:  # noqa: BLE001 单只失败只跳过本只：
+                    # 一票异常曾让整轮（含候选池 20+ 只）每分钟全被跳过，
+                    # 排障面被压缩成一只票的问题——降级到单只粒度。
+                    logger.warning("[TdxL2] %s 采集失败(跳过本只): %s", prefix, exc)
 
             l2_status["snapshots_saved"] += saved
             l2_status["processed"] = processed
