@@ -8,6 +8,9 @@
 
 from __future__ import annotations
 
+import asyncio
+from unittest.mock import patch
+
 from backend.services.live_trading.services import real_mirror_service as mirror
 from backend.services.trade.services import (
     close_cleanup_audit_task as audit,
@@ -227,3 +230,26 @@ class TestCloseClassification:
         assert audit.parse_audit_time("bad") == (15, 5)
         assert reconcile.parse_reconcile_time("15:10") == (15, 10)
         assert reconcile.parse_reconcile_time("") == (15, 10)
+
+    def test_local_orders_restricted_to_qmt_channel(self) -> None:
+        """本地残留只对照 QMT 通道单：桥单拿 QMT 柜台比对全是假残留。"""
+        clause = str(
+            audit._qmt_channel_clause().compile(compile_kwargs={"literal_binds": True})
+        )
+        for prefix in audit._QMT_CHANNEL_CID_PREFIXES:
+            assert f"'{prefix}%'" in clause
+        assert "'mirror:%'" in clause
+
+    def test_run_audit_skips_when_channel_unconfigured(self) -> None:
+        class FakeClient:
+            configured = False
+
+            async def refresh_settings(self) -> dict:
+                return {}
+
+        with patch(
+            "backend.services.live_trading.services.qmt_exec_client.get_qmt_exec_client",
+            return_value=FakeClient(),
+        ):
+            report = asyncio.run(audit.run_close_audit(FakeRedis(), "20260911"))
+        assert report["skipped"] == "qmt_not_configured"

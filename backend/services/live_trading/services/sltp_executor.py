@@ -74,6 +74,8 @@ _CLOSE_HOUR = 15
 _CLOSE_MINUTE = 0
 # 重挂价格判定：与保护价差异不超过该值视为同价（避免无意义撤挂丢失队列优先级）
 _REQUOTE_PRICE_EPSILON = 0.01
+# 连续多少轮拿不到该标的行情就告警（默认 3s 轮询 ≈ 30 秒；行情恢复后计数归零）
+_TICK_MISS_ALERT_THRESHOLD = 10
 
 DEFAULT_RULE: dict[str, Any] = {
     "symbol": "",
@@ -113,7 +115,12 @@ def normalize_rule(raw: dict[str, Any]) -> dict[str, Any]:
     rule = dict(DEFAULT_RULE)
     rule.update({k: v for k, v in (raw or {}).items() if k in DEFAULT_RULE})
     rule["symbol"] = normalize_symbol(rule.get("symbol"))
-    rule["side"] = str(rule.get("side") or "SELL").strip().upper()
+    side = str(rule.get("side") or "SELL").strip().upper()
+    if side != "SELL":
+        # 执行器是清仓语义：只允许卖出（买入会越止越买，建仓另走策略链路）
+        logger.warning("[SltpExec] 规则 side=%s 非法，按 SELL 处理: %s", side, rule["symbol"])
+        side = "SELL"
+    rule["side"] = side
     for key in ("entry_price", "quantity", "stop_loss_pct", "take_profit_pct", "trailing_stop_pct"):
         value = rule.get(key)
         if value in ("", None):
@@ -143,8 +150,14 @@ def merge_config(raw: dict[str, Any] | None) -> dict[str, Any]:
 
 
 def trigger_config(rule: dict[str, Any], fallback: dict[str, Any] | None) -> dict[str, Any]:
-    """规则触发阈值：规则内显式值优先，缺省回落设置页（``load_sltp_config``）口径。"""
+    """规则触发阈值：规则内显式值优先，缺省回落设置页（``load_sltp_config``）口径。
+
+    设置页把「止损止盈」整个关掉（``enabled=False``）时不再回落到它的阈值——
+    否则用户关掉的提醒会以「执行器缺省阈值」的名义继续触发真单。
+    """
     fb = fallback or {}
+    if fb.get("enabled") is False:
+        fb = {}
     cfg = {
         "stop_loss_pct": rule.get("stop_loss_pct") if rule.get("stop_loss_pct") is not None else fb.get("stop_loss_pct"),
         "take_profit_pct": rule.get("take_profit_pct") if rule.get("take_profit_pct") is not None else fb.get("take_profit_pct"),
@@ -158,6 +171,34 @@ def update_highest_price(previous: float | None, price: float) -> float:
     """最高价只升不降。"""
     prev = float(previous or 0)
     return max(prev, float(price or 0))
+
+
+def rule_client_order_id(symbol: str, now_ts: float, generation: int = 1) -> str:
+    """规则当日幂等委托号。
+
+    同一个「标的 + 交易日 + 触发代数」永远得到同一个 ``client_order_id``：
+    触发后进程崩溃/状态写回失败时按同号重试，调度器的 client_order_id 去重
+    会返回已有委托而不是重复下单（下真单的链路不允许靠状态机兜底防重）。
+
+    ``generation`` 是当日第几次触发；``POST /reset`` 重新武装后递增，
+    保证「重新武装后再触发」仍能下出**新**单而不是被自己的旧号挡住。
+    """
+    day = datetime.fromtimestamp(float(now_ts), TZ).strftime("%Y%m%d")
+    return f"sltp-{normalize_symbol(symbol)}-{day}-g{max(1, int(generation))}"
+
+
+def is_retryable(state_item: dict[str, Any] | None) -> bool:
+    """本轮是否可（重新）评估触发。
+
+    ``armed`` 是常规状态；``triggered`` 但**没有任何委托号**说明上一次触发在
+    落单前中断（进程被杀、状态写回后崩溃），允许重试——幂等由
+    :func:`rule_client_order_id` 保证，重试不会变成重复下单。
+    """
+    item = state_item or {}
+    status = str(item.get("status") or ST_ARMED)
+    if status == ST_ARMED:
+        return True
+    return status == ST_TRIGGERED and not str(item.get("order_id") or "")
 
 
 def resolve_protect_price(
@@ -219,6 +260,29 @@ def save_config(redis: Any, cfg: dict[str, Any]) -> dict[str, Any]:
     return clean
 
 
+def set_enabled(redis: Any, enabled: bool) -> dict[str, Any]:
+    """只改总开关，不动规则表。
+
+    与 :func:`save_config` 的区别是**读失败直接抛错**（调用方回 5xx）：把「读不到」
+    当空配置再整体写回，会在 Redis 抖动时把规则表整份抹掉。这里只有真的读到
+    （含键不存在 → 默认配置）才会写。
+    """
+    raw = redis.get(CONFIG_KEY)
+    cfg = merge_config(raw if isinstance(raw, dict) else None)
+    cfg["enabled"] = bool(enabled)
+    redis.set(CONFIG_KEY, cfg)
+    return cfg
+
+
+def diff_state(
+    before: dict[str, dict[str, Any]], after: dict[str, dict[str, Any]]
+) -> tuple[set[str], set[str]]:
+    """状态快照对比：返回 ``(改动过的标的, 被删除的标的)``。"""
+    dirty = {symbol for symbol, item in after.items() if item != before.get(symbol)}
+    removed = {symbol for symbol in before if symbol not in after}
+    return dirty, removed
+
+
 def load_state(redis: Any, today: str | None = None) -> dict[str, Any]:
     """读规则状态；跨日自动重置为 armed（当日一次触发的语义）。"""
     day = today or trade_date_str()
@@ -240,9 +304,46 @@ def load_state(redis: Any, today: str | None = None) -> dict[str, Any]:
     return state
 
 
-def save_state(redis: Any, state: dict[str, Any]) -> None:
+def save_state(
+    redis: Any,
+    state: dict[str, Any],
+    *,
+    dirty: set[str] | None = None,
+    removed: set[str] | None = None,
+) -> None:
+    """写回规则状态。
+
+    * 不带 ``dirty``：整份覆盖（reset / 初始化场景）。
+    * 带 ``dirty``：先读回 Redis 现存状态，只覆盖本轮改动过的规则，其余保留。
+      执行器每轮都写状态，整份覆盖会把并发的 ``POST /reset``、CLI ``--rm``/``--arm``
+      一并冲掉（后写覆盖先写）——真单链路上「用户以为已经解除，执行器照旧触发」
+      是不能接受的。
+    """
     try:
-        redis.set(STATE_KEY, state)
+        if dirty is None and removed is None:
+            redis.set(STATE_KEY, state)
+            return
+        current = redis.get(STATE_KEY)
+        day = str(state.get("date") or "")
+        if isinstance(current, dict) and str(current.get("date") or "") == day:
+            merged = dict(current)
+        else:
+            merged = {"date": day, "rules": {}}
+        rules = dict(merged.get("rules") or {})
+        for symbol in removed or ():
+            rules.pop(symbol, None)
+        for symbol in dirty or ():
+            item = state["rules"].get(symbol)
+            if item is None:
+                rules.pop(symbol, None)
+            else:
+                rules[symbol] = item
+        merged["rules"] = rules
+        merged["date"] = day or merged.get("date")
+        redis.set(STATE_KEY, merged)
+        # 与落盘一致（并发新增/删除同步进进程内视图，供本轮后续步骤使用）
+        state["rules"] = rules
+        state["date"] = merged["date"]
     except Exception as exc:  # noqa: BLE001
         logger.error("[SltpExec] 状态写回失败: %s", exc)
 
@@ -258,7 +359,14 @@ def reset_rules(redis: Any, symbols: list[str] | None = None) -> dict[str, Any]:
         if item is None:
             continue
         keep_entry = item.get("entry_price")
-        state["rules"][symbol] = {"status": ST_ARMED, "highest_price": None, "entry_price": keep_entry}
+        state["rules"][symbol] = {
+            "status": ST_ARMED,
+            "highest_price": None,
+            "entry_price": keep_entry,
+            # generation 保留：重新武装后再触发要下**新**单（委托号含代数），
+            # 而崩溃重试复用同代委托号、交给调度器幂等去重
+            "generation": int(item.get("generation") or 0),
+        }
     save_state(redis, state)
     return state
 
@@ -333,6 +441,13 @@ async def run_sltp_cycle(deps: SltpDeps, *, config: dict[str, Any] | None = None
 
     today = trade_date_str()
     state = load_state(deps.redis, today)
+    # 本轮开始时的快照：结束/中途回写只覆盖改动过的规则（并发 reset/--rm 不被冲掉）
+    before_rules = {symbol: dict(item) for symbol, item in state["rules"].items()}
+
+    def _persist() -> None:
+        dirty, removed = diff_state(before_rules, state["rules"])
+        save_state(deps.redis, state, dirty=dirty, removed=removed)
+
     user_id = str(cfg.get("user_id") or "1")
     tenant_id = str(cfg.get("tenant_id") or "default")
     now = deps.now()
@@ -342,12 +457,13 @@ async def run_sltp_cycle(deps: SltpDeps, *, config: dict[str, Any] | None = None
 
     # 2) 交易时段内评估触发
     if not is_trading_time():
-        save_state(deps.redis, state)
+        await _notify_stranded_triggers(deps, state, user_id, tenant_id)
+        _persist()
         return summary
 
-    armed = [r for r in rules if state["rules"].get(r["symbol"], {}).get("status", ST_ARMED) == ST_ARMED]
+    armed = [r for r in rules if is_retryable(state["rules"].get(r["symbol"]))]
     if not armed:
-        save_state(deps.redis, state)
+        _persist()
         return summary
 
     if not bool(getattr(deps.client, "configured", True)):
@@ -371,6 +487,16 @@ async def run_sltp_cycle(deps: SltpDeps, *, config: dict[str, Any] | None = None
         if price is None or price <= 0:
             st["misses"] = int(st.get("misses") or 0) + 1
             st["last_tick_ts"] = now
+            # 恰好到阈值时告警一次；行情恢复计数归零，可再次告警
+            if st["misses"] == _TICK_MISS_ALERT_THRESHOLD:
+                await deps.notify(
+                    user_id,
+                    f"{symbol} 行情缺失",
+                    f"连续 {st['misses']} 轮未取到该标的实时行情，止盈止损规则暂时无法评估。"
+                    "请检查行情通道/代码是否正确。",
+                    "warning",
+                    tenant_id=tenant_id,
+                )
             continue
         st["misses"] = 0
         st["last_price"] = price
@@ -408,7 +534,9 @@ async def run_sltp_cycle(deps: SltpDeps, *, config: dict[str, Any] | None = None
         st["status"] = ST_TRIGGERED
         st["reason"] = reason
         st["triggered_at"] = now
-        save_state(deps.redis, state)
+        # 先落 triggered 再下单：进程中断时留下「触发未落单」的痕迹，
+        # 下一轮 is_retryable 会按同号重试（委托号幂等，不会重复下单）
+        _persist()
         summary["triggered"] += 1
         logger.info("[SltpExec] 触发 %s: %s", symbol, reason)
 
@@ -419,7 +547,7 @@ async def run_sltp_cycle(deps: SltpDeps, *, config: dict[str, Any] | None = None
             deps, cfg, state, st, rule, position, price, reason, user_id, tenant_id, now, summary
         )
 
-    save_state(deps.redis, state)
+    _persist()
     return summary
 
 
@@ -475,7 +603,10 @@ async def _execute_trigger(
         )
         return
 
-    cid = f"sltp-{symbol}-{int(now)}"
+    generation = int(st.get("generation") or 0) + 1
+    st["generation"] = generation
+    # 当日同规则固定委托号：崩溃重试复用同号，由调度器幂等去重（不会重复下单）
+    cid = rule_client_order_id(symbol, now, generation)
     remarks = f"sltp:{reason[:40]}" if reason else "sltp:trigger"
     order_data = {
         "symbol": symbol,
@@ -545,6 +676,31 @@ def seconds_to_close(now_ts: float) -> float:
         hour=_CLOSE_HOUR, minute=_CLOSE_MINUTE, second=0, microsecond=0
     )
     return (close_dt - now_dt).total_seconds()
+
+
+async def _notify_stranded_triggers(
+    deps: SltpDeps, state: dict[str, Any], user_id: str, tenant_id: str
+) -> None:
+    """触发后没能落单（进程中断）且已过交易时段：告警一次，交人工处理。
+
+    交易时段内这类规则会由 :func:`is_retryable` 自动重试，不需要告警；
+    但收盘后才发现的（例如重启后已过 15:00）当天已经没有补救机会，
+    必须让人知道「触发了但没卖出去」。
+    """
+    for symbol, st in state.get("rules", {}).items():
+        if str(st.get("status")) != ST_TRIGGERED or str(st.get("order_id") or ""):
+            continue
+        if st.get("stranded_notified"):
+            continue
+        st["stranded_notified"] = True
+        await deps.notify(
+            user_id,
+            f"{symbol} 止损触发未能下单",
+            f"{st.get('reason') or '触发'}；但触发时执行器中断且已收盘，当天未能报出委托。"
+            "请人工确认是否手动卖出，或下一个交易日重新武装（POST /reset）。",
+            "error",
+            tenant_id=tenant_id,
+        )
 
 
 async def _monitor_pending(
@@ -728,7 +884,7 @@ async def _apply_remainder_policy(
 
     # requote：撤旧挂新（保护价、当日额度按新委托重新计）
     requote_count = int(st.get("requote_count") or 0) + 1
-    cid = f"sltp-{symbol}-{int(now)}-r{requote_count}"
+    cid = f"{rule_client_order_id(symbol, now, int(st.get('generation') or 1))}-r{requote_count}"
     order_data = {
         "symbol": symbol,
         "side": "SELL",
@@ -802,7 +958,7 @@ def build_state_snapshot(redis: Any) -> dict[str, Any]:
 # --------------------------------------------------------------------------
 # 生产依赖与常驻任务
 # --------------------------------------------------------------------------
-def _build_default_deps(redis: Any) -> SltpDeps:
+def _build_default_deps(redis: Any, tenant_id: str = "default") -> SltpDeps:
     from sqlalchemy import select
 
     from backend.services.live_trading.services.internal_strategy_dispatcher import (
@@ -822,7 +978,7 @@ def _build_default_deps(redis: Any) -> SltpDeps:
             return await dispatch_internal_strategy_order(
                 order_data=order_data,
                 user_id=str(user_id),
-                tenant_id="default",
+                tenant_id=tenant_id,
                 redis=redis,
                 db=db,
             )
@@ -890,7 +1046,9 @@ async def run_qmt_sltp_executor_task() -> None:
             cfg = load_config(redis)
             interval = max(1.0, float(cfg.get("poll_interval_sec") or interval))
             if cfg.get("enabled"):
-                deps = _build_default_deps(redis)
+                deps = _build_default_deps(
+                    redis, tenant_id=str(cfg.get("tenant_id") or "default")
+                )
                 summary = await run_sltp_cycle(deps, config=cfg)
                 last_error = ""
                 if summary.get("triggered") or summary.get("submitted") or summary.get("failed"):

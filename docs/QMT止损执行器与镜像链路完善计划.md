@@ -285,3 +285,37 @@ P1–P4 全部落地，代码位于 `next` 分支。
 
 **已知后续项**：`sltp_executor.py` 905 行略超 800 行指引（触发/执行/监控/运行时装配
 同文件），后续可按"核心执行 vs 运行时装配"拆分。
+
+---
+
+## 9. 代码审查修复（2026-09-11，第二轮）
+
+P1–P4 落地后做了一轮独立代码审查（结论：WARNING——启用执行器前先修 HIGH 1/2）。
+全部发现已修复并补测，改动仍在 `next`。
+
+| 级别 | 问题 | 修法 | 落点 |
+|---|---|---|---|
+| HIGH 1 | 超时扫描器的托管保护漏了 `sltp-`/`flat-`/`flatten-` 前缀；备注模式列表被 `dict.fromkeys` 前的写法吞掉「通达信桥委托」包含式 | 补齐 cid 前缀；前缀式/包含式合并去重 | `order_timeout_scanner.py` |
+| HIGH 2 | 触发后先落 `triggered` 再下单：崩溃会留「触发未落单」状态，当日不再重试也不告警（真单漏卖） | ①委托号改为**当日固定** `sltp-{symbol}-{yyyymmdd}-g{代数}`，崩溃重试同号被 dispatcher 幂等去重（不重复下单）；②`triggered` 且无委托号视为可重试；③收盘后仍无委托号的告警一次（`_notify_stranded_triggers`） | `sltp_executor.py` |
+| MEDIUM 3 | `PUT /enabled`、CLI `--enable` 把「读配置失败」当空配置写回 → Redis 抖动时抹掉规则表 | 新增 `set_enabled`（读失败抛错 → 503）；CLI `_load` 改严格读；`--status/--evaluate` 顶层捕获后友好退出 | `sltp_executor.py` / `routers/qmt_sltp.py` / `qmt_sltp_ctl.py` |
+| MEDIUM 4 | 卖单整手预检拿隔日快照可能误拦合法全量卖出 | 只取**当日**快照（`snapshot_date`）；数量 ≥ 可用量×99% 视为全量；非 A 股（HK/US）不做预检；拿不准放行 | `internal_strategy_dispatcher.py` |
+| MEDIUM 5 | 规则 `side=BUY` 可写入，触发会变成「越止越买」 | 路由校验只允许 SELL；`normalize_rule` 对存量脏配置强制 SELL 并告警 | `routers/qmt_sltp.py` / `sltp_executor.py` |
+| MEDIUM 6 | 收盘核对在 QMT 通道未配置时每天都报假警；本地残留把桥单也算进去（假 `counter_order_missing`） | 通道未配置直接跳过（且不写 done 标记，当日启用后可补跑）；本地单按 QMT 通道 cid 前缀过滤 | `close_cleanup_audit_task.py` |
+| MEDIUM 7 | 本地订单查询失败被吞 → 报表静默变绿 | 查询异常上抛并记入 `report["errors"]`（→ `ok=False` + 通知） | `close_cleanup_audit_task.py` |
+| LOW 8 | 备注模式列表可能被去重逻辑吃掉包含式匹配 | 同 HIGH 1 | `order_timeout_scanner.py` |
+| LOW 9 | 行情长期缺失无感知 | 连续 `_TICK_MISS_ALERT_THRESHOLD`(10) 轮缺 tick 告警一次（恢复后计数归零，可再次告警） | `sltp_executor.py` |
+| LOW 10 | 派发闭包写死 `tenant_id="default"` | `_build_default_deps(redis, tenant_id=...)` 跟随配置 | `sltp_executor.py` |
+| LOW 11 | 设置页把止损止盈关掉后，其阈值仍作为规则缺省值 | `trigger_config` 忽略 `enabled=False` 的回落配置 | `sltp_executor.py` |
+| LOW 12 | 执行器每轮整份回写状态，冲掉并发的 `POST /reset` / CLI `--rm` | `save_state(dirty=…, removed=…)` 只覆盖本轮改动过的规则（读回合并）；reset/初始化仍整份写 | `sltp_executor.py` |
+
+**新增测试**（`test_qmt_sltp_executor.py` 新增 15 例 + 两个既有测试文件各补 2 例）：
+幂等委托号/崩溃重试复用同号/reset 后换新号、收盘后滞留触发告警一次、状态合并写、
+`set_enabled` 读失败不写回、tick 缺失告警、回落配置 enabled 门控、side 强制 SELL、
+路由拒 BUY、快照当日过滤/非 A 股豁免/全量容差、QMT 通道过滤、通道未配置跳过核对。
+
+**回归**：容器内 320 passed（QMT/镜像/执行器/对账/扫描器/派发 + 新用例）；改动文件
+`ruff check` 全绿（仅剩 `internal_strategy_dispatcher.py` 7 处存量 B904）。
+trade 服务已重启加载新代码，三条任务启动正常，执行器 `enabled=false` 空转。
+
+**实盘验证（只读）**：`--status` 配置与状态无损；`--enable` → `--status` → `--disable`
+往返正常且规则表保留；`mirror:enabled=0`、无 kill switch（安全开关保持关闭）。

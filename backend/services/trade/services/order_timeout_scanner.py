@@ -4,9 +4,10 @@
 每隔 SCAN_INTERVAL_SECONDS 秒扫描一次，将超过 ORDER_TIMEOUT_MINUTES 分钟
 仍停留在 SUBMITTED 状态的实盘订单标记为 EXPIRED，并推送用户通知。
 
-由外部通道托管的委托（通达信桥 ``通达信桥委托``、QMT 执行端镜像单 ``mirror:``）
-不适用这条本地启发式：它们的真实状态由桥/QMT 轮询器回报（桥 30s、QMT 2s），
-本地判死只会造成「柜台还挂着、本地已终态」的错位。这类单改为只提醒不改状态。
+由外部通道托管的委托（通达信桥 ``通达信桥委托``、QMT 执行端镜像单 ``mirror:``/``mir-``、
+止损执行器 ``sltp:``/``sltp-``、按清单平仓 ``flat-``）不适用这条本地启发式：它们的真实
+状态由桥/QMT 轮询器回报（桥 30s、QMT 2s），本地判死只会造成「柜台还挂着、本地已终态」
+的错位（止损单挂跌停价排队正是超过 30 分钟的典型场景）。这类单改为只提醒不改状态。
 
 环境变量：
   ORDER_TIMEOUT_MINUTES    超时分钟数，默认 30
@@ -41,15 +42,22 @@ _BRIDGE_ACK_TIMEOUT_MARKER = "[BRIDGE_ACK_TIMEOUT_PENDING_REVIEW]"
 #   mirror:%    ：QMT 执行端镜像真单，qmt_exec_poller 每 2s 回写柜台状态
 # 本地超时启发式不得越权覆盖这两类，否则镜像单在柜台仍挂着（甚至随时可能成交），
 # 本地却已 EXPIRED 进入终态，委托列表与柜台长期错位、成交回报也被终态守卫吞掉。
-_BROKER_MANAGED_REMARK_PREFIXES = ("mirror:", "通达信桥委托")
+_BROKER_MANAGED_REMARK_PREFIXES = ("mirror:", "sltp:", "通达信桥委托")
 _BROKER_MANAGED_REMARK_CONTAINS = ("通达信桥委托",)
 # 备注会被成交回报覆盖（qmt_exec_reconciler: ``order.remarks = msg``），
-# client_order_id 不会 —— 镜像单以 ``mir-`` 前缀兜底识别。
-_BROKER_MANAGED_CID_PREFIXES = ("mir-",)
-# 兼容既有引用口径：LIKE 模式列表
+# client_order_id 不会 —— 只能靠 cid 前缀兜底识别：
+#   mir-     ：SIM→真单镜像（qmt_exec_poller 2s 回写）
+#   sltp-    ：止损/止盈执行器真单（挂跌停价排队可能超过本地超时阈值）
+#   flat- / flatten- ：按清单平仓脚本真单
+_BROKER_MANAGED_CID_PREFIXES = ("mir-", "sltp-", "flat-", "flatten-")
+# 兼容既有引用口径：LIKE 模式列表（前缀式 + 包含式，两者都保留：
+# 「通达信桥委托」既可作前缀也可作备注中段标记，如 [AWAITING_BRIDGE_ACK] 通达信桥委托）
 _BROKER_MANAGED_REMARK_PATTERNS = tuple(
-    f"{p}%" for p in _BROKER_MANAGED_REMARK_PREFIXES
-) + tuple(f"%{c}%" for c in _BROKER_MANAGED_REMARK_CONTAINS if c not in _BROKER_MANAGED_REMARK_PREFIXES)
+    dict.fromkeys(
+        [f"{p}%" for p in _BROKER_MANAGED_REMARK_PREFIXES]
+        + [f"%{c}%" for c in _BROKER_MANAGED_REMARK_CONTAINS]
+    )
+)
 _STALE_PENDING_MARKER = "[STALE_PENDING_REVIEW]"
 
 

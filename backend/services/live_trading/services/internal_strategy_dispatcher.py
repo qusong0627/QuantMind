@@ -154,12 +154,18 @@ async def _notify_mirror_outcome(
 async def _fetch_latest_real_account_snapshot(
     db: AsyncSession, *, tenant_id: str, user_id: str
 ) -> dict[str, Any] | None:
-    """最近一笔真账户快照（``real_account_snapshots``，按 tenant/user 过滤）。
+    """**当日**最近一笔真账户快照（``real_account_snapshots``，按 tenant/user 过滤）。
 
     user_id 两种存量口径都试（补零 ``00000001`` 与裸 ``1``），快照写入方
-    （bridge ``ctx.user_id``）与调度链路的用户口径未必一致。快照本身可能滞后，
-    调用方只拿它做「能否确认是全量卖出」的软预检，拿不到就放行。
+    （bridge ``ctx.user_id``）与调度链路的用户口径未必一致。
+
+    只取当日快照：隔日快照的可用量（T+1 解锁、当日买卖）已经过期，拿它做整手
+    预检会把合法的全量卖出当成碎股拦掉。取不到（含写入方用 UTC 日期导致对不上）
+    就返回 ``None``——调用方拿不准时放行，柜台 ``251150`` 仍是最终闸门。
     """
+    from datetime import datetime
+
+    from backend.services.live_trading.services.trading_session import TZ
     from backend.services.trade_shared.models.real_account_snapshot import (
         RealAccountSnapshot,
     )
@@ -172,6 +178,7 @@ async def _fetch_latest_real_account_snapshot(
             .where(
                 RealAccountSnapshot.tenant_id == str(tenant_id or "default"),
                 RealAccountSnapshot.user_id.in_(sorted(uid_candidates)),
+                RealAccountSnapshot.snapshot_date == datetime.now(TZ).date(),
             )
             .order_by(RealAccountSnapshot.snapshot_at.desc())
             .limit(1)
@@ -180,6 +187,10 @@ async def _fetch_latest_real_account_snapshot(
     if row is None:
         return None
     return {"payload_json": getattr(row, "payload_json", None) or {}}
+
+
+# 快照可用量与实际可用量的容差：差异在 1% 以内视为同一持仓，按全量卖出放行
+_FULL_EXIT_TOLERANCE = 0.99
 
 
 async def _sell_lot_violation(
@@ -193,8 +204,9 @@ async def _sell_lot_violation(
 ) -> str | None:
     """卖单整手预检（人类可读原因；``None`` = 放行）。
 
-    只有能从真账户快照确认「这不是全量卖出」时才拦——全量卖出允许碎股，
+    只有能从**当日**真账户快照确认「这不是全量卖出」时才拦——全量卖出允许碎股，
     且快照可能滞后，拿不准时不拦（柜台 ``251150`` 仍是最终闸门）。
+    整手规则是 A 股口径，非 A 股标的（港股/美股等）不做预检。
     """
     from backend.services.live_trading.services import lot_rules
     from backend.shared.stock_utils import StockCodeUtil
@@ -205,6 +217,8 @@ async def _sell_lot_violation(
     if str(side or "").upper() != "SELL":
         return None
     target = StockCodeUtil.to_suffix(str(symbol or ""))
+    if not str(target or "").endswith((".SH", ".SZ", ".BJ")):
+        return None
     available: float | None = None
     try:
         snapshot = await _fetch_latest_real_account_snapshot(
@@ -227,7 +241,7 @@ async def _sell_lot_violation(
         logger.debug("[Order] 真账户快照读取失败，跳过整手预检: %s", exc)
     if available is None or available <= 0:
         return None
-    if qty >= available:
+    if qty >= available * _FULL_EXIT_TOLERANCE:
         return None  # 全量卖出：允许碎股
     return lot_rules.describe_violation(str(symbol or ""), "SELL", qty)
 
