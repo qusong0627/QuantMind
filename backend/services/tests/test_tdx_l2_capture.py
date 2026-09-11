@@ -106,6 +106,26 @@ class TestParseSnapshot:
         assert snap["ask5"] == [36.0, 63.0, 2.0]
         assert snap["inside"] == 313869.0
 
+    def test_extracts_flat_snapshot_from_bridge(self):
+        """桥透传的快照是**平铺** dict（无 Value 包装，实测 2026-09-11；
+        仓库文档《券商接入新手指南》亦记录「exday 包 Value，快照平铺」）。
+        曾因只认 Value 包装导致快照全丢：now_price 与全部快照类因子为 null/0。"""
+        # Act
+        snap = parse_snapshot({
+            "ErrorId": 0, "Now": "6.51", "Open": "6.60", "LastClose": "6.67",
+            "Volume": "2315", "Amount": "15086", "Buyv": ["7", "1", "4"],
+            "Sellv": ["36", "63", "2"], "Inside": "1200", "Outside": "1115",
+        })
+        # Assert：与 Value 包装形状解析结果一致
+        assert snap["now"] == 6.51
+        assert snap["open"] == 6.60
+        assert snap["pre_close"] == 6.67
+        assert snap["volume"] == 2315.0
+        assert snap["bid5"] == [7.0, 1.0, 4.0]
+        assert snap["ask5"] == [36.0, 63.0, 2.0]
+        assert snap["inside"] == 1200.0
+        assert snap["outside"] == 1115.0
+
     def test_empty_result(self):
         # Act
         snap = parse_snapshot({})
@@ -180,6 +200,19 @@ class TestComputeL2Factors:
         # Assert: 波动/流动性因子有值且在 [0,10] 截断内
         assert 0.0 <= factors["micro_zone_rv_ratio_close"] <= 10.0
         assert 0.0 <= factors["micro_liquidity_daily_pattern"] <= 10.0
+
+    def test_rv_ratio_returns_none_when_no_valid_prices(self):
+        """快照拿不到价（停牌/无行情，now=None → price=0）时不得除零：
+        零价样本满 6 帧后 rets 为空列表，min(len)//2 的 half 兜到 1 但
+        day_rv = sum(rets)/len(rets) 会 ZeroDivisionError，曾致整轮采集中止
+        （2026-09-11 实盘：SZ002227 一只无价票让 26 只候选每分钟全被跳过）。"""
+        # Arrange: 全程无有效价（now=None），累计 ≥6 帧
+        state = L2SeriesState()
+        snap = _snap(now=None)
+        for _ in range(8):
+            factors = compute_l2_factors(_exday(), snap, state)
+        # Assert: 不抛异常，因子保守返回 None（样本不足不误导）
+        assert factors["micro_zone_rv_ratio_close"] is None
 
     def test_flow_revert_speed_and_impact_decay(self):
         # Arrange: 固定两帧采样不足以测自相关 → None（标准化时跳过，不误导）
