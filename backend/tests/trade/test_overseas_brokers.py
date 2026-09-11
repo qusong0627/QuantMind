@@ -339,31 +339,31 @@ def _engine_with_redis(selected: dict[str, str] | None = None) -> TradingEngine:
 
 def test_get_broker_real_falls_back_to_global_type():
     engine = _engine_with_redis()
-    with mock.patch("backend.services.trade.services.trading_engine.settings.ENABLE_REAL_TRADING", True), \
-         mock.patch("backend.services.trade.services.trading_engine.settings.REAL_BROKER_TYPE", "tdx"):
+    with mock.patch("backend.services.live_trading.services.trading_engine.settings.ENABLE_REAL_TRADING", True), \
+         mock.patch("backend.services.live_trading.services.trading_engine.settings.REAL_BROKER_TYPE", "tdx"):
         broker = engine._get_broker(TradingMode.REAL, "AAPL")
     assert broker.__class__.__name__ == "TdxBroker"
 
 
 def test_get_broker_real_routes_to_selected_tiger_for_us():
     engine = _engine_with_redis({"US": "tiger"})
-    with mock.patch("backend.services.trade.services.trading_engine.settings.ENABLE_REAL_TRADING", True), \
-         mock.patch("backend.services.trade.services.trading_engine.settings.REAL_BROKER_TYPE", "tdx"):
+    with mock.patch("backend.services.live_trading.services.trading_engine.settings.ENABLE_REAL_TRADING", True), \
+         mock.patch("backend.services.live_trading.services.trading_engine.settings.REAL_BROKER_TYPE", "tdx"):
         broker = engine._get_broker(TradingMode.REAL, "AAPL")
     assert isinstance(broker, TigerBroker)
 
 
 def test_get_broker_real_routes_to_selected_ib_for_hk():
     engine = _engine_with_redis({"HK": "ib"})
-    with mock.patch("backend.services.trade.services.trading_engine.settings.ENABLE_REAL_TRADING", True), \
-         mock.patch("backend.services.trade.services.trading_engine.settings.REAL_BROKER_TYPE", "tdx"):
+    with mock.patch("backend.services.live_trading.services.trading_engine.settings.ENABLE_REAL_TRADING", True), \
+         mock.patch("backend.services.live_trading.services.trading_engine.settings.REAL_BROKER_TYPE", "tdx"):
         broker = engine._get_broker(TradingMode.REAL, "0700.HK")
     assert isinstance(broker, IBBroker)
 
 
 def test_get_broker_real_disabled_uses_paper_broker():
     engine = _engine_with_redis({"US": "tiger"})
-    with mock.patch("backend.services.trade.services.trading_engine.settings.ENABLE_REAL_TRADING", False):
+    with mock.patch("backend.services.live_trading.services.trading_engine.settings.ENABLE_REAL_TRADING", False):
         broker = engine._get_broker(TradingMode.REAL, "AAPL")
     assert broker.__class__.__name__ == "PaperTradingBroker"
 
@@ -376,7 +376,7 @@ def test_get_broker_simulation_uses_paper_broker():
 
 def test_get_broker_cache_respects_market_and_type():
     engine = _engine_with_redis({"US": "tiger", "HK": "ib"})
-    with mock.patch("backend.services.trade.services.trading_engine.settings.ENABLE_REAL_TRADING", True):
+    with mock.patch("backend.services.live_trading.services.trading_engine.settings.ENABLE_REAL_TRADING", True):
         us_broker = engine._get_broker(TradingMode.REAL, "AAPL")
         hk_broker = engine._get_broker(TradingMode.REAL, "0700.HK")
     assert isinstance(us_broker, TigerBroker)

@@ -41,16 +41,57 @@ _BRIDGE_ACK_TIMEOUT_MARKER = "[BRIDGE_ACK_TIMEOUT_PENDING_REVIEW]"
 #   mirror:%    ：QMT 执行端镜像真单，qmt_exec_poller 每 2s 回写柜台状态
 # 本地超时启发式不得越权覆盖这两类，否则镜像单在柜台仍挂着（甚至随时可能成交），
 # 本地却已 EXPIRED 进入终态，委托列表与柜台长期错位、成交回报也被终态守卫吞掉。
-_BROKER_MANAGED_REMARK_PATTERNS = ("%通达信桥委托%", "mirror:%")
+_BROKER_MANAGED_REMARK_PREFIXES = ("mirror:", "通达信桥委托")
+_BROKER_MANAGED_REMARK_CONTAINS = ("通达信桥委托",)
+# 备注会被成交回报覆盖（qmt_exec_reconciler: ``order.remarks = msg``），
+# client_order_id 不会 —— 镜像单以 ``mir-`` 前缀兜底识别。
+_BROKER_MANAGED_CID_PREFIXES = ("mir-",)
+# 兼容既有引用口径：LIKE 模式列表
+_BROKER_MANAGED_REMARK_PATTERNS = tuple(
+    f"{p}%" for p in _BROKER_MANAGED_REMARK_PREFIXES
+) + tuple(f"%{c}%" for c in _BROKER_MANAGED_REMARK_CONTAINS if c not in _BROKER_MANAGED_REMARK_PREFIXES)
 _STALE_PENDING_MARKER = "[STALE_PENDING_REVIEW]"
+
+
+def is_broker_managed(remarks: str | None, client_order_id: str | None) -> bool:
+    """Python 口径的托管判断（与 :func:`_broker_managed_clause` 同规则）。
+
+    供测试与日志使用，避免两处规则漂移。
+    """
+    text = str(remarks or "")
+    if any(text.startswith(p) for p in _BROKER_MANAGED_REMARK_PREFIXES):
+        return True
+    if any(c in text for c in _BROKER_MANAGED_REMARK_CONTAINS):
+        return True
+    cid = str(client_order_id or "")
+    return any(cid.startswith(p) for p in _BROKER_MANAGED_CID_PREFIXES)
+
+
+def _broker_managed_clause():
+    """SQL 条件：外部通道托管（备注特征 或 镜像 client_order_id 前缀）。"""
+    return or_(
+        *[Order.remarks.like(pattern) for pattern in _BROKER_MANAGED_REMARK_PATTERNS],
+        *[
+            Order.client_order_id.like(f"{prefix}%")
+            for prefix in _BROKER_MANAGED_CID_PREFIXES
+        ],
+    )
 
 
 def _not_broker_managed_clause():
     """SQL 条件：排除由外部通道托管、状态以桥/轮询器为准的委托。"""
-    return [
+    remark_clean = [
         or_(Order.remarks.is_(None), ~Order.remarks.like(pattern))
         for pattern in _BROKER_MANAGED_REMARK_PATTERNS
     ]
+    cid_clean = or_(
+        Order.client_order_id.is_(None),
+        *[
+            ~Order.client_order_id.like(f"{prefix}%")
+            for prefix in _BROKER_MANAGED_CID_PREFIXES
+        ],
+    )
+    return [*remark_clean, cid_clean]
 
 
 async def _scan_once() -> int:
@@ -211,9 +252,11 @@ async def _flag_stale_broker_managed_once() -> int:
                     Order.status == OrderStatus.SUBMITTED,
                     Order.trading_mode == TradingMode.REAL,
                     Order.submitted_at <= cutoff,
-                    Order.remarks.is_not(None),
-                    or_(*[Order.remarks.like(p) for p in _BROKER_MANAGED_REMARK_PATTERNS]),
-                    ~Order.remarks.like(f"%{_STALE_PENDING_MARKER}%"),
+                    _broker_managed_clause(),
+                    or_(
+                        Order.remarks.is_(None),
+                        ~Order.remarks.like(f"%{_STALE_PENDING_MARKER}%"),
+                    ),
                 )
             )
             .limit(200)

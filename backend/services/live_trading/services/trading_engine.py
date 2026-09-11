@@ -26,6 +26,15 @@ from backend.shared.trade_account_cache import write_trade_account_cache
 
 logger = logging.getLogger(__name__)
 
+# 撤单失败原因码 → 用户可见备注（broker_client.cancel_order_verbose 口径）
+_CANCEL_FAILURE_REMARKS = {
+    "counter_rejected": "撤单被柜台拒绝（多为已成交或已撤销），请刷新委托状态",
+    "timeout": "撤单请求超时，结果未知，请刷新委托状态确认",
+    "error": "撤单通道异常，请稍后重试或手动核查",
+    "rejected": "撤单未受理，请刷新委托状态",
+    "unknown": "撤单结果未知，请刷新委托状态确认",
+}
+
 
 def _safe_schedule_notification(coro):
     try:
@@ -392,29 +401,54 @@ class TradingEngine:
             logger.error(f"Failed to sync account to Redis for user {user_id}: {e}")
 
     async def cancel_order_execution(self, order: Order) -> bool:
-        """Cancel order execution (if not yet filled)"""
+        """Cancel order execution (if not yet filled)。
+
+        返回 ``True`` 仅表示撤单请求已受理（终态仍以异步回报为准）；
+        柜台明确拒绝（多为已成交/已撤销）或超时未知时返回 ``False`` 并如实落备注——
+        实测：全成后撤单被柜台拒 ``-1``，旧实现无条件返回 True，前端显示"撤单已发送"。
+        """
         try:
             if order.status in [OrderStatus.FILLED, OrderStatus.CANCELLED]:
                 return False
 
             # 向 Broker（QMT）发出撤单指令，最终状态以异步回报为准。
             if order.exchange_order_id or order.client_order_id:
+                broker_kwargs = {
+                    "user_id": str(order.user_id),
+                    "tenant_id": str(order.tenant_id or "default"),
+                    "client_order_id": str(order.client_order_id or ""),
+                    "symbol": str(order.symbol or ""),
+                    "side": str(
+                        order.side.value if hasattr(order.side, "value") else order.side or ""
+                    ),
+                }
+                accepted, reason = False, "unknown"
                 try:
                     broker = self._get_broker(order.trading_mode, order.symbol)
-                    await broker.cancel_order(
-                        str(order.exchange_order_id or ""),
-                        user_id=str(order.user_id),
-                        tenant_id=str(order.tenant_id or "default"),
-                        client_order_id=str(order.client_order_id or ""),
-                        symbol=str(order.symbol or ""),
-                        side=str(order.side.value if hasattr(order.side, "value") else order.side or ""),
-                    )
+                    exchange_id = str(order.exchange_order_id or "")
+                    verbose = getattr(broker, "cancel_order_verbose", None)
+                    if verbose is not None:
+                        accepted, reason = await verbose(exchange_id, **broker_kwargs)
+                    else:
+                        accepted = bool(await broker.cancel_order(exchange_id, **broker_kwargs))
+                        reason = "submitted" if accepted else "rejected"
                 except Exception as broker_err:
                     logger.warning(
                         "broker cancel_order failed for order %s: %s",
                         order.order_id,
                         broker_err,
                     )
+                    accepted, reason = False, "error"
+
+                if not accepted:
+                    message = _CANCEL_FAILURE_REMARKS.get(
+                        reason, f"撤单未受理（{reason}），请刷新委托状态"
+                    )
+                    await self.order_service.transition_order_status(
+                        order, order.status, remarks=message
+                    )
+                    await self._notify_cancel_failure(order, reason)
+                    return False
 
             await self.order_service.transition_order_status(
                 order,
@@ -426,6 +460,22 @@ class TradingEngine:
         except Exception as e:
             logger.error(f"Failed to cancel order {order.order_id}: {e}")
             return False
+
+    async def _notify_cancel_failure(self, order: Order, reason: str) -> None:
+        """撤单失败通知（fire-and-forget，失败只记日志）。"""
+        try:
+            detail = _CANCEL_FAILURE_REMARKS.get(reason, f"原因：{reason}")
+            await publish_notification_async(
+                user_id=str(order.user_id),
+                tenant_id=str(order.tenant_id or "default"),
+                title="撤单未成功",
+                content=f"{order.symbol} 订单 {str(order.order_id)[:8]}... {detail}",
+                type="trading",
+                level="warning",
+                action_url="/trading",
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("notify cancel failure failed for order %s: %s", order.order_id, exc)
 
     async def check_order_risk(self, user_id: int | str, order: Order) -> dict:
         """Check order against risk rules"""

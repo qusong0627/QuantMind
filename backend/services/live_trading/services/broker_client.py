@@ -1204,6 +1204,54 @@ class TdxBroker(BaseBroker):
             return {}
 
 
+# 价格保护豁免来源：报价由专用链路决定
+#   sltp-  止损执行器（保护价=跌停价，天然贴边）
+#   flat-/flatten-  人工/脚本全量平仓
+#   mir-   镜像单（已过 2% 偏离闸门 + 强平豁免）
+_PRICE_PROTECTION_EXEMPT_CID_PREFIXES = ("sltp-", "flat-", "flatten-", "mir-")
+# 涨跌停带容差：报价允许比带边界再外扩 2%（覆盖滑点/复权误差），超出即拒
+_PRICE_PROTECTION_BAND_TOLERANCE = 0.02
+
+
+def check_price_protection_band(
+    *,
+    price: float,
+    side: str,
+    detail: dict[str, Any] | None,
+    client_order_id: str = "",
+    tolerance: float = _PRICE_PROTECTION_BAND_TOLERANCE,
+) -> str | None:
+    """报价是否越出涨跌停带（返回人类可读原因；``None`` = 放行，纯函数）。
+
+    实测柜台对超范围价**不拒单**且按盘口成交（卖 1.80 低于跌停 1.97 → 成交 2.40），
+    所以本地必须自己设闸：防程序 bug 把离谱价格当市价单打出去。
+    取不到 ``UpStopPrice/DownStopPrice`` 时放行（不因行情缺失阻断交易）。
+    """
+    _ = side
+    cid = str(client_order_id or "")
+    if any(cid.startswith(prefix) for prefix in _PRICE_PROTECTION_EXEMPT_CID_PREFIXES):
+        return None
+    value = float(price or 0)
+    if value <= 0:
+        return None
+    band = detail or {}
+    try:
+        up = float(band.get("UpStopPrice") or 0)
+        down = float(band.get("DownStopPrice") or 0)
+    except (TypeError, ValueError):
+        return None
+    if up <= 0 or down <= 0:
+        return None
+    lower = down * (1 - tolerance)
+    upper = up * (1 + tolerance)
+    if lower <= value <= upper:
+        return None
+    return (
+        f"限价 {value:.2f} 越出涨跌停带 [{lower:.2f}, {upper:.2f}]"
+        f"（跌停 {down:.2f} / 涨停 {up:.2f}），疑似价格错误"
+    )
+
+
 class QmtExecBroker(BaseBroker):
     """
     大 QMT 执行端 Broker（big-convert RPC 直连）。
@@ -1279,6 +1327,27 @@ class QmtExecBroker(BaseBroker):
         if order_type_raw == "LIMIT" and float(price or 0) <= 0:
             return BrokerResult(success=False, message="限价单必须提供价格")
 
+        # 价格保护（Phase 4.1）：报价必须落在涨跌停带内（含容差），否则拒单。
+        # 实测柜台会"照收"超范围价并按盘口成交（卖 1.80 低于跌停 1.97 → 成交 2.40），
+        # 所以这一层是防程序 bug 打出离谱价格的最后一道闸。
+        block_reason = await self._check_price_protection(
+            symbol=symbol,
+            order_type=order_type_raw,
+            price=float(price or 0),
+            side=side_raw,
+            client_order_id=str(client_order_id or ""),
+        )
+        if block_reason:
+            logger.warning(
+                "[QmtExecBroker] 价格保护拒绝 symbol=%s side=%s price=%s cid=%s: %s",
+                symbol,
+                side_raw,
+                price,
+                client_order_id,
+                block_reason,
+            )
+            return BrokerResult(success=False, message=f"[PRICE_PROTECTION] {block_reason}")
+
         try:
             result = await self._client.submit_order(
                 symbol=symbol,
@@ -1347,6 +1416,17 @@ class QmtExecBroker(BaseBroker):
         }
 
     async def cancel_order(self, exchange_order_id: str, **kwargs) -> bool:
+        ok, _reason = await self.cancel_order_verbose(exchange_order_id, **kwargs)
+        return ok
+
+    async def cancel_order_verbose(
+        self, exchange_order_id: str, **kwargs
+    ) -> tuple[bool, str]:
+        """撤单（如实上报）：返回 ``(是否受理, 原因码)``。
+
+        原因码：``submitted`` 已发往柜台；``counter_rejected`` 柜台拒绝
+        （多为已成交/已撤销）；``timeout`` 结果未知需先查询委托；其余为 RPC 错误码。
+        """
         from backend.services.live_trading.services.qmt_exec_client import QmtExecError
 
         symbol = str(kwargs.get("symbol") or "")
@@ -1354,18 +1434,49 @@ class QmtExecBroker(BaseBroker):
             await self._client.cancel_order(
                 order_id=str(exchange_order_id), symbol=symbol
             )
-            return True
+            return True, "submitted"
         except QmtExecError as exc:
+            code = str(getattr(exc, "code", "") or "")
+            reason = {
+                "CANCEL_REJECTED": "counter_rejected",
+                "TIMEOUT": "timeout",
+            }.get(code, code.lower() or "rejected")
             logger.warning(
-                "[QmtExecBroker] 撤单失败 order_id=%s code=%s: %s",
+                "[QmtExecBroker] 撤单失败 order_id=%s code=%s reason=%s: %s",
                 exchange_order_id,
                 exc.code,
+                reason,
                 exc,
             )
-            return False
+            return False, reason
         except Exception as exc:  # noqa: BLE001
             logger.error("[QmtExecBroker] 撤单异常: %s", exc)
-            return False
+            return False, "error"
+
+    async def _check_price_protection(
+        self,
+        *,
+        symbol: str,
+        order_type: str,
+        price: float,
+        side: str,
+        client_order_id: str,
+    ) -> str | None:
+        """限价单报价必须落在涨跌停带内（强平/镜像来源豁免）。取不到带则放行。"""
+        if str(order_type or "").upper() != "LIMIT":
+            return None
+        if float(price or 0) <= 0:
+            return None
+        if str(client_order_id or "").startswith(_PRICE_PROTECTION_EXEMPT_CID_PREFIXES):
+            return None
+        try:
+            detail = await self._client.get_instrument_detail(symbol)
+        except Exception as exc:  # noqa: BLE001 - 行情取不到不拦交易
+            logger.warning(
+                "[QmtExecBroker] 价格保护取合约详情失败（放行） symbol=%s: %s", symbol, exc
+            )
+            return None
+        return check_price_protection_band(price=price, side=side, detail=detail)
 
     async def query_quote(self, symbol: str) -> dict[str, Any]:
         """行情走 stream / QuantDB，不依赖 QMT 行情权限。"""

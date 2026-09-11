@@ -64,6 +64,15 @@ _DAILY_TTL_SECONDS = 3 * 24 * 3600
 _QUEUE_TTL_SECONDS = 7 * 24 * 3600
 _MAX_CLIENT_ORDER_ID_LEN = 100
 
+# 强平/止损单（bypass_price_gate）的 sanity 上界：偏离昨收超过该比例视为脏数据，
+# 即使豁免 2% 偏离闸门也不下单（防把过期/错符号的报价当盘口价打出去）。
+_SANITY_MAX_DRIFT = 0.20
+
+# 镜像跳过记录：mirror:skipped:{YYYYMMDD} 哈希，field={symbol}:{reason} → 次数，
+# 供当日双轨对账报表使用（TTL 7 天）。
+_SKIP_HASH_PREFIX = "mirror:skipped:"
+_SKIP_TTL_SECONDS = 7 * 24 * 3600
+
 # 账户/行情缓存：避免每笔镜像都打一次 RPC
 _ACCOUNT_CACHE_SECONDS = 10.0
 _account_cache: dict[str, Any] = {"at": 0.0, "data": None}
@@ -310,6 +319,63 @@ def _is_blacklisted(redis: Any, symbol: str) -> bool:
 
 def _daily_key(field: str, date_str: str | None = None) -> str:
     return _DAILY_KEY.format(date=date_str or trade_date_str(), field=field)
+
+
+def record_skip(
+    redis: Any,
+    *,
+    symbol: str,
+    side: str,
+    quantity: float,
+    reason: str,
+    source: str,
+) -> None:
+    """记录一次镜像跳过（供当日双轨对账报表），失败只记日志不打断下单流程。"""
+    client = _redis_client(redis)
+    if client is None:
+        return
+    key = f"{_SKIP_HASH_PREFIX}{trade_date_str()}"
+    field = f"{symbol}:{reason}"
+    detail = json.dumps(
+        {
+            "side": side,
+            "quantity": quantity,
+            "source": source,
+            "at": datetime.now().isoformat(timespec="seconds"),
+        },
+        ensure_ascii=False,
+    )
+    try:
+        pipe = client.pipeline()
+        pipe.hincrby(key, field, 1)
+        pipe.hset(key, f"{field}:detail", detail)
+        pipe.expire(key, _SKIP_TTL_SECONDS)
+        pipe.execute()
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("[Mirror] 记录跳过失败 %s %s: %s", symbol, reason, exc)
+
+
+def load_skips(redis: Any, date_str: str | None = None) -> dict[str, int]:
+    """读取某日的跳过计数：{ "symbol:reason": count }（对账报表用）。"""
+    client = _redis_client(redis)
+    if client is None:
+        return {}
+    key = f"{_SKIP_HASH_PREFIX}{date_str or trade_date_str()}"
+    try:
+        raw = client.hgetall(key)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[Mirror] 读取跳过记录失败: %s", exc)
+        return {}
+    counts: dict[str, int] = {}
+    for field, value in (raw or {}).items():
+        name = field.decode() if isinstance(field, bytes) else str(field)
+        if name.endswith(":detail"):
+            continue
+        try:
+            counts[name] = int(value)
+        except (TypeError, ValueError):
+            continue
+    return counts
 
 
 # --------------------------------------------------------------------------
@@ -703,11 +769,16 @@ async def mirror_virtual_fill(
     strategy_id: str = "",
     market: str = "",
     source: str = "",
+    bypass_price_gate: bool = False,
 ) -> dict[str, Any]:
     """虚拟成交 → 真单镜像。**永不抛异常**，返回结构化决策结果。
 
     ``db`` 缺省时自建独立会话（调用方持有未提交事务时用，避免真单写入
     提前提交调用方的事务）。
+
+    ``bypass_price_gate=True``：强平/止损类订单（一定要成交），跳过 2% 偏离闸门，
+    限价改用**盘口价**（虚拟成交价）为基准，昨收只做 sanity 上界。普通策略信号
+    不要用它——那正是该闸门要拦的场景。
 
     返回 ``status``：``skipped``（风控/未启用）、``queued``（非交易时段入队）、
     ``submitted``（已提交真单）、``duplicate``（该 client_order_id 已有真单，
@@ -731,6 +802,7 @@ async def mirror_virtual_fill(
             strategy_id=str(strategy_id or ""),
             market=str(market or ""),
             source=str(source or ""),
+            bypass_price_gate=bool(bypass_price_gate),
         )
     except Exception as exc:  # noqa: BLE001 - 镜像失败绝不影响虚拟账本
         logger.error(
@@ -760,6 +832,7 @@ async def _mirror_virtual_fill(
     strategy_id: str,
     market: str,
     source: str,
+    bypass_price_gate: bool = False,
 ) -> dict[str, Any]:
     def _skip(reason: str) -> dict[str, Any]:
         logger.info(
@@ -769,6 +842,14 @@ async def _mirror_virtual_fill(
             side,
             quantity,
             reason,
+        )
+        record_skip(
+            redis,
+            symbol=symbol,
+            side=side,
+            quantity=quantity,
+            reason=reason,
+            source=source,
         )
         return {"status": "skipped", "reason": reason, "symbol": symbol}
 
@@ -814,6 +895,8 @@ async def _mirror_virtual_fill(
         "source": source,
         "queued_at": datetime.now(timezone.utc).isoformat(),
     }
+    if bypass_price_gate:
+        payload["bypass_price_gate"] = True
     if not is_trading_time():
         if not cfg.queue_outside_hours:
             return _skip("outside_trading_hours")
@@ -882,27 +965,55 @@ async def _submit_payload(
             mirror_cid,
             reason,
         )
+        record_skip(
+            redis,
+            symbol=symbol,
+            side=side,
+            quantity=quantity,
+            reason=reason,
+            source=str(payload.get("source") or "submit"),
+        )
         return {"status": "skipped", "reason": reason, "symbol": symbol}
 
     ref_price = await _reference_price(symbol)
     if ref_price <= 0:
         return _skip("no_reference_price")
-    drift = abs(ref_price - float(payload.get("price") or 0)) / ref_price
-    if cfg.max_slippage_pct > 0 and drift > cfg.max_slippage_pct:
+    live_price = float(payload.get("price") or 0)
+    drift = abs(ref_price - live_price) / ref_price
+    bypass = bool(payload.get("bypass_price_gate"))
+    if bypass:
+        # 强平/止损来源：偏离闸门豁免（急跌日止损恰恰是偏离最大的时刻），
+        # 但仍做异常数据上界——偏离过大视为脏数据，fail-closed 不下单。
+        if drift > _SANITY_MAX_DRIFT:
+            logger.warning(
+                "[Mirror] 强平单价格异常 symbol=%s 委托=%.3f 昨收=%.3f 偏离=%.2f%% > %.0f%%",
+                symbol,
+                live_price,
+                ref_price,
+                drift * 100,
+                _SANITY_MAX_DRIFT * 100,
+            )
+            return _skip("price_sanity")
+    elif cfg.max_slippage_pct > 0 and drift > cfg.max_slippage_pct:
         # 参考价与虚拟成交价偏离过大（除权/停牌/数据滞后）→ 不下真单
         logger.warning(
             "[Mirror] 价格偏离过大 symbol=%s 虚拟=%.3f 参考=%.3f 偏离=%.2f%%",
             symbol,
-            float(payload.get("price") or 0),
+            live_price,
             ref_price,
             drift * 100,
         )
         return _skip("price_drift")
 
+    # 限价基准：普通信号用昨收（虚拟成交价与实时盘口可能脱钩，见计划 §2.3 开放问题）；
+    # 强平/止损单用盘口价（payload price = 当时盘口），否则跌停保护价会被昨收口径算歪。
+    base_price = live_price if bypass else ref_price
+    if base_price <= 0:
+        return _skip("no_reference_price")
     if side == "BUY":
-        limit_price = round(ref_price * (1 + cfg.max_slippage_pct), 2)
+        limit_price = round(base_price * (1 + cfg.max_slippage_pct), 2)
     else:
-        limit_price = round(ref_price * (1 - cfg.max_slippage_pct), 2)
+        limit_price = round(base_price * (1 - cfg.max_slippage_pct), 2)
     if limit_price <= 0:
         return _skip("invalid_limit_price")
     order_value = round(limit_price * quantity, 2)

@@ -70,6 +70,175 @@ def _normalize_strategy_id(raw: Any) -> int | None:
     return parsed if parsed > 0 else None
 
 
+# 强平/止损类来源标记：这些订单"一定要成交"，镜像时豁免 2% 偏离闸门
+# （限价改用盘口价基准，见 real_mirror_service._submit_payload）。
+_FORCED_EXIT_REMARK_PREFIXES = ("sltp:", "flatten:", "forced-exit:")
+
+_MIRROR_REASON_CN = {
+    "price_drift": "价格偏离昨收超过镜像闸门（±2%），疑似行情脱钩",
+    "no_reference_price": "取不到参考价（QuantDB 昨收缺失）",
+    "insufficient_cash": "真账户可用资金不足",
+    "insufficient_position": "真账户可用持仓不足（T+1 或已被占用）",
+    "mirror_disabled": "镜像开关未开启",
+    "kill_switch": "镜像急停生效中",
+    "whitelist": "不在镜像白名单",
+    "blacklist": "标的在黑名单",
+    "outside_trading_hours": "非交易时段且未开启排队",
+    "invalid_quantity_or_price": "数量或价格非法",
+    "max_order_value": "超过单笔金额上限",
+    "max_daily_value": "超过单日累计金额上限",
+    "max_daily_orders": "超过单日笔数上限",
+    "max_daily_symbols": "超过单日标的数上限",
+    "price_sanity": "价格偏离昨收超过 20%，按脏数据 fail-closed",
+}
+
+
+def _is_forced_exit(remarks: Any) -> bool:
+    """备注前缀识别强平/止损来源（``sltp:`` / ``flatten:`` / ``forced-exit:``）。"""
+    text = str(remarks or "").strip().lower()
+    return text.startswith(_FORCED_EXIT_REMARK_PREFIXES)
+
+
+def _mirror_reason_cn(reason: str) -> str:
+    key = str(reason or "").strip()
+    if key in _MIRROR_REASON_CN:
+        return _MIRROR_REASON_CN[key]
+    if key.startswith("account_unavailable"):
+        return "真账户查询失败"
+    if key.startswith("market_not_supported"):
+        return f"镜像未支持该市场（{key.split(':', 1)[-1]}）"
+    return key or "未知原因"
+
+
+def _mirror_notice_allowed(redis: Any, symbol: str, reason: str, ttl: int = 1800) -> bool:
+    """同一标的同一原因 30 分钟内只通知一次（急跌日避免刷屏）。"""
+    client = getattr(redis, "client", None)
+    if client is None:
+        return True
+    try:
+        key = f"mirror:notify:{symbol}:{reason}"
+        return bool(client.set(key, "1", nx=True, ex=ttl))
+    except Exception:  # noqa: BLE001 - 通知节流失效不阻断主流程
+        return True
+
+
+async def _notify_mirror_outcome(
+    mirror_result: dict[str, Any] | None,
+    *,
+    redis: Any,
+    tenant: str,
+    user_id: str,
+    symbol: str,
+    side: str,
+    quantity: float,
+) -> None:
+    """把镜像 ``skipped/failed/error`` 上抛给用户（原来只写日志，用户无从知晓）。"""
+    status = str((mirror_result or {}).get("status") or "")
+    if status not in {"skipped", "failed", "error"}:
+        return
+    reason = str((mirror_result or {}).get("reason") or "")
+    if not _mirror_notice_allowed(redis, symbol, f"{status}:{reason}"):
+        return
+    try:
+        from backend.shared.notification_publisher import publish_notification_async
+
+        await publish_notification_async(
+            user_id=str(user_id),
+            tenant_id=str(tenant or "default"),
+            title=f"{symbol} 真单镜像未下单",
+            content=(
+                f"模拟{('买入' if str(side).upper() == 'BUY' else '卖出')} {quantity:g} 股已记账，"
+                f"但真单镜像未下发：{_mirror_reason_cn(reason)}。实盘账户没有这笔委托。"
+            ),
+            type="trading",
+            level="warning",
+            action_url="/trading",
+        )
+    except Exception as exc:  # noqa: BLE001 - 通知失败不影响主流程
+        logger.warning("[Shadow/Sim] 镜像结果通知失败: %s", exc)
+
+
+async def _fetch_latest_real_account_snapshot(
+    db: AsyncSession, *, tenant_id: str, user_id: str
+) -> dict[str, Any] | None:
+    """最近一笔真账户快照（``real_account_snapshots``，按 tenant/user 过滤）。
+
+    user_id 两种存量口径都试（补零 ``00000001`` 与裸 ``1``），快照写入方
+    （bridge ``ctx.user_id``）与调度链路的用户口径未必一致。快照本身可能滞后，
+    调用方只拿它做「能否确认是全量卖出」的软预检，拿不到就放行。
+    """
+    from backend.services.trade_shared.models.real_account_snapshot import (
+        RealAccountSnapshot,
+    )
+
+    raw_uid = str(user_id or "").strip()
+    uid_candidates = {raw_uid, normalize_db_user_id(raw_uid)}
+    row = (
+        await db.execute(
+            select(RealAccountSnapshot)
+            .where(
+                RealAccountSnapshot.tenant_id == str(tenant_id or "default"),
+                RealAccountSnapshot.user_id.in_(sorted(uid_candidates)),
+            )
+            .order_by(RealAccountSnapshot.snapshot_at.desc())
+            .limit(1)
+        )
+    ).scalars().first()
+    if row is None:
+        return None
+    return {"payload_json": getattr(row, "payload_json", None) or {}}
+
+
+async def _sell_lot_violation(
+    db: AsyncSession,
+    *,
+    tenant: str,
+    user_id: str,
+    symbol: str,
+    side: str,
+    quantity: float,
+) -> str | None:
+    """卖单整手预检（人类可读原因；``None`` = 放行）。
+
+    只有能从真账户快照确认「这不是全量卖出」时才拦——全量卖出允许碎股，
+    且快照可能滞后，拿不准时不拦（柜台 ``251150`` 仍是最终闸门）。
+    """
+    from backend.services.live_trading.services import lot_rules
+    from backend.shared.stock_utils import StockCodeUtil
+
+    qty = float(quantity or 0)
+    if qty != int(qty) or qty <= 0:
+        return f"数量必须为正整数股，got {quantity}"
+    if str(side or "").upper() != "SELL":
+        return None
+    target = StockCodeUtil.to_suffix(str(symbol or ""))
+    available: float | None = None
+    try:
+        snapshot = await _fetch_latest_real_account_snapshot(
+            db, tenant_id=tenant, user_id=user_id
+        )
+        payload = (snapshot or {}).get("payload_json") or {}
+        for item in payload.get("positions") or []:
+            code = StockCodeUtil.to_suffix(
+                str(item.get("stock_code") or item.get("symbol") or "")
+            )
+            if code and code == target:
+                available = float(
+                    item.get("available_volume")
+                    or item.get("can_use_volume")
+                    or item.get("volume")
+                    or 0
+                )
+                break
+    except Exception as exc:  # noqa: BLE001 - 快照不可用则只做绝对非法检查
+        logger.debug("[Order] 真账户快照读取失败，跳过整手预检: %s", exc)
+    if available is None or available <= 0:
+        return None
+    if qty >= available:
+        return None  # 全量卖出：允许碎股
+    return lot_rules.describe_violation(str(symbol or ""), "SELL", qty)
+
+
 async def dispatch_internal_strategy_order(
     *,
     order_data: dict[str, Any],
@@ -291,7 +460,10 @@ async def dispatch_internal_strategy_order(
             )
             # 双轨镜像：虚拟成交已生效，按开关/白名单/限额向大 QMT 补一笔真单。
             # mirror_virtual_fill 自身吞掉全部异常，不影响上面的虚拟账本。
-            await mirror_virtual_fill(
+            # 强平/止损来源（remarks 前缀）豁免镜像价格闸门：这类单"一定要卖"，
+            # 急跌日恰恰偏离最大，闸门放行由保护价兜底。
+            remarks_raw = str(order_data.get("remarks") or "")
+            mirror_result = await mirror_virtual_fill(
                 db=db,
                 redis=redis,
                 tenant_id=tenant,
@@ -303,12 +475,25 @@ async def dispatch_internal_strategy_order(
                 client_order_id=client_order_id or "",
                 strategy_id=strategy_id_raw,
                 source=f"internal_dispatcher:{trading_mode.value}",
+                bypass_price_gate=bool(order_data.get("bypass_price_gate"))
+                or _is_forced_exit(remarks_raw),
+            )
+            # 镜像结果上抛 + skip/failed 通知（原来被丢弃，用户只看到 success）
+            await _notify_mirror_outcome(
+                mirror_result,
+                redis=redis,
+                tenant=tenant,
+                user_id=str(uid),
+                symbol=symbol,
+                side=side_raw,
+                quantity=quantity,
             )
             return {
                 "status": "success",
                 "execution": "virtual",
                 "order_id": str(sim_order.order_id),
                 "detail": result,
+                "mirror": mirror_result,
             }
         except Exception as exc:
             logger.error("[Shadow/Sim] 虚拟成交失败: %s", exc, exc_info=True)
@@ -458,6 +643,23 @@ async def dispatch_internal_strategy_order(
     except Exception as exc:
         logger.error("Internal order dispatch failed: %s", exc, exc_info=True)
         raise HTTPException(status_code=500, detail=str(exc))
+
+    lot_violation = await _sell_lot_violation(
+        db, tenant=tenant, user_id=db_uid, symbol=symbol, side=side_raw, quantity=quantity
+    )
+    if lot_violation:
+        await order_service.transition_order_status(
+            order, OrderStatus.REJECTED, remarks=f"Lot check failed: {lot_violation}"
+        )
+        logger.warning(
+            "[Order] 数量预检拒绝 %s %s qty=%s: %s", symbol, side_raw, quantity, lot_violation
+        )
+        return {
+            "status": "rejected",
+            "execution": "lot_blocked",
+            "order_id": str(order.order_id),
+            "violations": [{"rule": "lot_size", "message": lot_violation}],
+        }
 
     risk_result = await engine.check_order_risk(uid, order)
     if not risk_result.get("passed"):

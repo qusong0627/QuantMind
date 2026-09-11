@@ -55,6 +55,9 @@ async def lifespan(app: FastAPI):
     qmt_account_sync_task = None
     qmt_exec_poller_task = None
     mirror_queue_drainer_task = None
+    qmt_sltp_executor_task = None
+    dual_book_reconcile_task = None
+    close_audit_task = None
     tdx_quote_feed_task = None
     tdx_l2_capture_task = None
     tdx_l2_realtime_task = None
@@ -163,6 +166,34 @@ async def lifespan(app: FastAPI):
         mirror_queue_drainer_task = asyncio.create_task(
             run_mirror_queue_drainer(),
             name="mirror-queue-drainer",
+        )
+        # QMT 止盈/止损执行器：触发即以保护价（跌停价）下真单，默认关闭
+        # （Redis qmt:sltp:executor:config.enabled 打开才工作）
+        from backend.services.live_trading.services.sltp_executor import (
+            run_qmt_sltp_executor_task,
+        )
+
+        qmt_sltp_executor_task = asyncio.create_task(
+            run_qmt_sltp_executor_task(),
+            name="qmt-sltp-executor",
+        )
+        # SIM ↔ 真单 双轨对账：每日收盘后对比两本账，差异超阈值发通知
+        from backend.services.trade.services.dual_book_reconciliation_task import (
+            run_dual_book_reconciliation_task,
+        )
+
+        dual_book_reconcile_task = asyncio.create_task(
+            run_dual_book_reconciliation_task(),
+            name="dual-book-reconcile",
+        )
+        # 收盘清理核对：柜台委托是否全部终结、本地有无 submitted 残留
+        from backend.services.trade.services.close_cleanup_audit_task import (
+            run_close_audit_task,
+        )
+
+        close_audit_task = asyncio.create_task(
+            run_close_audit_task(),
+            name="close-cleanup-audit",
         )
         from backend.services.live_trading.services.tdx_quote_feed import run_tdx_quote_feed_task
 
@@ -380,7 +411,7 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    for task in (scanner_task, margin_task, snapshot_task, ledger_settlement_task, manual_execution_task, sandbox_signal_task, tdx_account_sync_task, qmt_account_sync_task, qmt_exec_poller_task, mirror_queue_drainer_task, tdx_quote_feed_task, tdx_l2_capture_task, tdx_l2_realtime_task, t1_unlock_task, corp_action_task):
+    for task in (scanner_task, margin_task, snapshot_task, ledger_settlement_task, manual_execution_task, sandbox_signal_task, tdx_account_sync_task, qmt_account_sync_task, qmt_exec_poller_task, mirror_queue_drainer_task, qmt_sltp_executor_task, dual_book_reconcile_task, close_audit_task, tdx_quote_feed_task, tdx_l2_capture_task, tdx_l2_realtime_task, t1_unlock_task, corp_action_task):
         if task is None:
             continue
         task.cancel()
@@ -499,12 +530,14 @@ from backend.services.trade.routers.tdx_quote_feed import router as tdx_quote_fe
 from backend.services.trade.routers.tdx_l2 import router as tdx_l2_router
 from backend.services.trade.routers.broker_config import router as broker_config_router
 from backend.services.trade.routers.qmt_mirror import router as qmt_mirror_router
+from backend.services.trade.routers.qmt_sltp import router as qmt_sltp_router
 
 app.include_router(tdx_config_router, prefix="/api/v1", tags=["TDX-Bridge"])
 app.include_router(tdx_quote_feed_router, prefix="/api/v1", tags=["TDX-Bridge"])
 app.include_router(tdx_l2_router, prefix="/api/v1", tags=["TDX-L2"])
 app.include_router(broker_config_router, prefix="/api/v1", tags=["Broker-Config"])
 app.include_router(qmt_mirror_router, prefix="/api/v1", tags=["QMT-Mirror"])
+app.include_router(qmt_sltp_router, prefix="/api/v1", tags=["QMT-SLTP"])
 
 app.add_middleware(
     CORSMiddleware,
