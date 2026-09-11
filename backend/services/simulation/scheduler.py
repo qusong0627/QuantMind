@@ -6,6 +6,7 @@ Simulation Scheduler - 模拟盘定时调度器
 """
 
 import asyncio
+import json
 import logging
 import os
 from dataclasses import dataclass
@@ -245,10 +246,27 @@ class SimulationScheduler:
     async def _run_single_account(self, account: ActiveSimulationAccount) -> bool:
         """执行单个账户的调仓"""
         try:
+            # 市场提示取自激活策略配置（parameters.market；港股信号为裸数字需显式指明）
+            market_hint: str | None = None
+            try:
+                if self.redis.client:
+                    raw = self.redis.client.hget(
+                        "quantmind:active_strategies", account.strategy_id
+                    )
+                    if raw:
+                        cfg = json.loads(raw)
+                        market_hint = str(
+                            cfg.get("market")
+                            or (cfg.get("parameters") or {}).get("market")
+                            or ""
+                        ).strip() or None
+            except Exception:
+                market_hint = None
             report = await self.engine.run_cycle(
                 tenant_id=account.tenant_id,
                 user_id=account.user_id,
                 strategy_id=account.strategy_id,
+                market=market_hint,
             )
             return report.error is None
         except Exception as e:
