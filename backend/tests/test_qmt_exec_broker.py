@@ -10,6 +10,7 @@ from typing import Any
 
 from backend.services.live_trading.services.broker_client import (
     QmtExecBroker,
+    check_price_protection_band,
     create_broker,
 )
 from backend.services.live_trading.services.qmt_exec_client import QmtExecError
@@ -45,8 +46,15 @@ class FakeExecClient:
             }
         ]
         self.cancel_error: Exception | None = None
+        self.detail: dict[str, Any] = {"UpStopPrice": 11.0, "DownStopPrice": 9.0}
+        self.detail_error: Exception | None = None
         for key, value in over.items():
             setattr(self, key, value)
+
+    async def get_instrument_detail(self, code: str) -> dict[str, Any]:
+        if self.detail_error is not None:
+            raise self.detail_error
+        return dict(self.detail)
 
     async def submit_order(self, **kwargs: Any) -> Any:
         self.submitted.append(kwargs)
@@ -159,6 +167,98 @@ class TestQueryAccount:
                 raise QmtExecError("超时", code="TIMEOUT")
 
         assert asyncio.run(QmtExecBroker(client=Broken()).query_account("1")) == {}
+
+
+class TestPriceProtection:
+    """Phase 4.1：报价越出涨跌停带即拒（柜台实测会照收超范围价）。"""
+
+    def test_band_pure_function(self) -> None:
+        detail = {"UpStopPrice": 11.0, "DownStopPrice": 9.0}
+        assert check_price_protection_band(price=10.0, side="BUY", detail=detail) is None
+        # 容差内（跌停 9 × 0.98 = 8.82）
+        assert check_price_protection_band(price=8.9, side="SELL", detail=detail) is None
+        assert check_price_protection_band(price=8.0, side="SELL", detail=detail) is not None
+        assert check_price_protection_band(price=12.0, side="BUY", detail=detail) is not None
+
+    def test_band_pure_function_passes_when_unknown(self) -> None:
+        assert check_price_protection_band(price=10.0, side="BUY", detail=None) is None
+        assert check_price_protection_band(price=10.0, side="BUY", detail={}) is None
+        assert (
+            check_price_protection_band(
+                price=10.0, side="BUY", detail={"UpStopPrice": 11.0}, tolerance=0.02
+            )
+            is None
+        )
+        assert check_price_protection_band(price=0, side="BUY", detail={}) is None
+
+    def test_exempt_prefixes(self) -> None:
+        detail = {"UpStopPrice": 11.0, "DownStopPrice": 9.0}
+        for cid in ("sltp-600036.SH-1", "flat-x", "flatten-manual", "mir-abc"):
+            assert (
+                check_price_protection_band(
+                    price=1.0, side="SELL", detail=detail, client_order_id=cid
+                )
+                is None
+            )
+        assert (
+            check_price_protection_band(
+                price=1.0, side="SELL", detail=detail, client_order_id="user-1"
+            )
+            is not None
+        )
+
+    def test_place_order_rejects_out_of_band_limit(self) -> None:
+        client = FakeExecClient()
+        result = _place(client, price=1.0, client_order_id="user-1")
+        assert result.success is False
+        assert "[PRICE_PROTECTION]" in result.message
+        assert client.submitted == []
+
+    def test_place_order_allows_exempt_sltp(self) -> None:
+        client = FakeExecClient()
+        result = _place(client, price=1.0, client_order_id="sltp-600036.SH-1")
+        assert result.success is True
+        assert client.submitted[0]["price"] == 1.0
+
+    def test_place_order_market_not_band_checked(self) -> None:
+        client = FakeExecClient()
+        assert _place(client, order_type="MARKET", price=None).success is True
+
+    def test_place_order_detail_failure_passes(self) -> None:
+        client = FakeExecClient(detail_error=QmtExecError("超时", code="TIMEOUT"))
+        assert _place(client, price=1.0, client_order_id="user-1").success is True
+
+
+class TestCancelVerbose:
+    def test_success_maps_to_submitted(self) -> None:
+        client = FakeExecClient()
+        broker = QmtExecBroker(client=client)
+        assert asyncio.run(broker.cancel_order_verbose("1001")) == (True, "submitted")
+
+    def test_counter_rejected_maps(self) -> None:
+        client = FakeExecClient(
+            cancel_error=QmtExecError("已成交", code="CANCEL_REJECTED")
+        )
+        broker = QmtExecBroker(client=client)
+        ok, reason = asyncio.run(broker.cancel_order_verbose("1001"))
+        assert (ok, reason) == (False, "counter_rejected")
+
+    def test_timeout_maps(self) -> None:
+        client = FakeExecClient(cancel_error=QmtExecError("超时", code="TIMEOUT"))
+        broker = QmtExecBroker(client=client)
+        assert asyncio.run(broker.cancel_order_verbose("1001")) == (False, "timeout")
+
+    def test_unknown_code_lowercased(self) -> None:
+        client = FakeExecClient(cancel_error=QmtExecError("boom", code="RPC_ERROR"))
+        broker = QmtExecBroker(client=client)
+        assert asyncio.run(broker.cancel_order_verbose("1001")) == (False, "rpc_error")
+
+    def test_cancel_order_still_boolean(self) -> None:
+        client = FakeExecClient(
+            cancel_error=QmtExecError("已成交", code="CANCEL_REJECTED")
+        )
+        broker = QmtExecBroker(client=client)
+        assert asyncio.run(broker.cancel_order("1001")) is False
 
 
 class TestCancelAndFactory:

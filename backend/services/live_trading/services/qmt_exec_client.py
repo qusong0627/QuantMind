@@ -279,6 +279,10 @@ class QmtExecBackend(Protocol):
 
     def query_trades(self) -> list[dict[str, Any]]: ...
 
+    def get_full_tick(self, codes: list[str]) -> dict[str, Any]: ...
+
+    def get_instrument_detail(self, code: str) -> dict[str, Any]: ...
+
     def submit_order(
         self,
         *,
@@ -447,6 +451,22 @@ class BigConvertBackend:
         trader, account = self._ensure()
         trades = trader.query_stock_trades(account) or []
         return [self._normalize_trade(item) for item in trades]
+
+    def get_full_tick(self, codes: list[str]) -> dict[str, Any]:
+        """批量实时盘口（桥侧 ``get_full_tick``，返回 ``{code: tick}``）。
+
+        tick 字段：lastPrice/lastClose/open/volume/amount/bidPrice/bidVol/askPrice/askVol/
+        stockStatus（无涨跌停价，涨跌停走 :meth:`get_instrument_detail`）。
+        """
+        trader, _ = self._ensure()
+        result = trader.client.call("get_full_tick", {"codes": list(codes)})
+        return result if isinstance(result, dict) else {}
+
+    def get_instrument_detail(self, code: str) -> dict[str, Any]:
+        """合约详情（PreClose/UpStopPrice/DownStopPrice/InstrumentName）。"""
+        trader, _ = self._ensure()
+        result = trader.client.call("get_instrument_detail", {"code": str(code)})
+        return result if isinstance(result, dict) else {}
 
     @staticmethod
     def _normalize_order(item: Any) -> dict[str, Any]:
@@ -888,6 +908,27 @@ class QmtExecClient:
     async def query_trades(self) -> list[dict[str, Any]]:
         cfg = self._require_enabled()
         return await self._call(self._get_backend(cfg).query_trades)
+
+    async def get_full_tick(self, codes: list[str]) -> dict[str, Any]:
+        """批量实时盘口（止损执行器/守护轮询用）。空列表直接返回 ``{}`` 不打桥。"""
+        qmt_codes = [_to_qmt_symbol(code) for code in (codes or [])]
+        qmt_codes = [code for code in qmt_codes if code]
+        if not qmt_codes:
+            return {}
+        cfg = self._require_enabled()
+        return await self._call(
+            self._get_backend(cfg).get_full_tick, codes=qmt_codes
+        )
+
+    async def get_instrument_detail(self, code: str) -> dict[str, Any]:
+        """合约详情（涨跌停价保护位来源；参数名为 ``code``，用 ``stock_code`` 桥会报错）。"""
+        qmt_code = _to_qmt_symbol(code)
+        if not qmt_code:
+            raise QmtExecError(f"非法代码：{code}", code="INVALID_SYMBOL")
+        cfg = self._require_enabled()
+        return await self._call(
+            self._get_backend(cfg).get_instrument_detail, code=qmt_code
+        )
 
     # -- 交易接口 -------------------------------------------------------
     async def submit_order(

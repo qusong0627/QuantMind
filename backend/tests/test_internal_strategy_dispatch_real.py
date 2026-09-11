@@ -223,3 +223,98 @@ def test_real_order_uses_portfolio_from_order_data():
 
     assert result["status"] == "success"
     assert captured["svc"].calls[0]["order_data"].portfolio_id == 7
+
+
+# ---------------------------------------------------------------------------
+# 卖单整手预检（_sell_lot_violation / _fetch_latest_real_account_snapshot）
+# ---------------------------------------------------------------------------
+class FakeSnapshotDb:
+    """仿 SQLAlchemy 查询链 ``execute().scalars().first()``。"""
+
+    def __init__(self, row: Any = None):
+        self.row = row
+        self.statements: list[Any] = []
+
+    async def execute(self, stmt):
+        self.statements.append(stmt)
+        row = self.row
+
+        class _Result:
+            @staticmethod
+            def scalars():
+                class _Scalars:
+                    @staticmethod
+                    def first():
+                        return row
+
+                return _Scalars()
+
+        return _Result()
+
+
+def _snapshot_row(*positions: dict[str, Any]) -> SimpleNamespace:
+    return SimpleNamespace(payload_json={"positions": list(positions)})
+
+
+def _lot_check(db, *, side="SELL", symbol="600036.SH", quantity=150, user_id="1"):
+    return _run(
+        d._sell_lot_violation(
+            db, tenant="default", user_id=user_id, symbol=symbol, side=side, quantity=quantity
+        )
+    )
+
+
+def test_sell_partial_odd_lot_blocked():
+    db = FakeSnapshotDb(
+        _snapshot_row({"stock_code": "600036.SH", "available_volume": 1000})
+    )
+    violation = _lot_check(db, quantity=150)
+    assert violation is not None
+    assert "整数倍" in violation
+
+
+def test_sell_full_position_allows_odd_lot():
+    db = FakeSnapshotDb(
+        _snapshot_row({"stock_code": "600036.SH", "available_volume": 150})
+    )
+    assert _lot_check(db, quantity=150) is None
+
+
+def test_sell_without_snapshot_passes():
+    """快照缺失时不做整手预检（柜台拒绝码仍是最终闸门）。"""
+    assert _lot_check(FakeSnapshotDb(None), quantity=150) is None
+
+
+def test_buy_not_lot_prechecked():
+    db = FakeSnapshotDb(
+        _snapshot_row({"stock_code": "600036.SH", "available_volume": 1000})
+    )
+    assert _lot_check(db, side="BUY", quantity=150) is None
+
+
+def test_star_board_partial_below_min_lot_blocked():
+    db = FakeSnapshotDb(
+        _snapshot_row({"stock_code": "688001.SH", "available_volume": 1000})
+    )
+    violation = _lot_check(db, symbol="688001.SH", quantity=100)
+    assert violation is not None
+    assert "科创板" in violation
+
+
+def test_non_integer_quantity_rejected_before_snapshot():
+    db = FakeSnapshotDb(None)
+    violation = _lot_check(db, quantity=100.5)
+    assert violation is not None
+    assert db.statements == []  # 绝对非法数量不需要查快照
+
+
+def test_fetch_latest_snapshot_queries_both_uid_forms():
+    db = FakeSnapshotDb(_snapshot_row({"stock_code": "600036.SH", "volume": 100}))
+    snapshot = _run(
+        d._fetch_latest_real_account_snapshot(db, tenant_id="default", user_id="1")
+    )
+    assert snapshot == {"payload_json": {"positions": [{"stock_code": "600036.SH", "volume": 100}]}}
+    sql = str(
+        db.statements[-1].compile(compile_kwargs={"literal_binds": True})
+    )
+    assert "'1'" in sql and "'00000001'" in sql
