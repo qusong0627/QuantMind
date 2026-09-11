@@ -38,6 +38,11 @@ _REPORT_TTL_SECONDS = 30 * 24 * 3600
 _COUNTER_TERMINAL = {"FILLED", "CANCELLED", "REJECTED"}
 # 本地非终态
 _LOCAL_OPEN = {"pending", "submitted", "partially_filled"}
+# QMT 通道本地单识别（client_order_id 前缀，与 order_timeout_scanner / broker_client 同口径）：
+#   mir- / sltp- / flat- / flatten-
+# 只有这些单的真实状态由 QMT 执行端轮询器回写，才适合拿 QMT 柜台委托对照。
+# 通达信桥委托由桥自己的同步器回写状态，拿 QMT 柜台核对只会产生假「本地残留」。
+_QMT_CHANNEL_CID_PREFIXES = ("mir-", "sltp-", "flat-", "flatten-")
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -125,7 +130,11 @@ def classify_close_state(
 
 
 async def run_close_audit(redis, date_str: str | None = None) -> dict:
-    """执行一次收盘核对，返回报表并落 Redis。"""
+    """执行一次收盘核对，返回报表并落 Redis。
+
+    QMT 执行端未配置/未启用时直接跳过：没有柜台可核对，跑下去只会每天报
+    「查询柜台委托失败」的假警。
+    """
     from backend.services.live_trading.services.qmt_exec_client import get_qmt_exec_client
 
     date_str = date_str or datetime.now(TZ).strftime("%Y%m%d")
@@ -138,6 +147,14 @@ async def run_close_audit(redis, date_str: str | None = None) -> dict:
     }
 
     client = get_qmt_exec_client()
+    try:
+        await client.refresh_settings()
+    except Exception as exc:  # noqa: BLE001 - 配置读取失败不影响下面的显式判定
+        logger.warning("[CloseAudit] 读取通道配置失败: %s", exc)
+    if not getattr(client, "configured", False):
+        logger.info("[CloseAudit] QMT 执行端未配置/未启用，跳过收盘核对")
+        return {"date": date_str, "skipped": "qmt_not_configured"}
+
     counter_orders: list[dict] = []
     try:
         counter_orders = list(await client.query_orders() or [])
@@ -145,7 +162,12 @@ async def run_close_audit(redis, date_str: str | None = None) -> dict:
         logger.warning("[CloseAudit] 查询柜台委托失败: %s", exc)
         report["errors"].append(f"query_orders_failed: {exc}")
 
-    local_orders = await _collect_local_open_orders(date_str)
+    try:
+        local_orders = await _collect_local_open_orders(date_str)
+    except Exception as exc:  # noqa: BLE001 - 查不到本地单不能当作「无残留」
+        logger.error("[CloseAudit] 查询本地订单失败: %s", exc, exc_info=True)
+        local_orders = []
+        report["errors"].append(f"local_orders_query_failed: {exc}")
 
     classified = classify_close_state(counter_orders=counter_orders, local_orders=local_orders)
     report["counter_orders"] = len(counter_orders)
@@ -188,8 +210,27 @@ async def run_close_audit(redis, date_str: str | None = None) -> dict:
     return report
 
 
+def _qmt_channel_clause():
+    """本地单里属于 QMT 通道的部分（client_order_id 前缀 + 历史 ``mirror:`` 备注）。
+
+    备注会被成交回报覆盖（``order.remarks = msg``），所以以 client_order_id 为准，
+    备注只作历史存量兜底。
+    """
+    from sqlalchemy import or_
+
+    from backend.services.trade_shared.models.order import Order
+
+    return or_(
+        *[Order.client_order_id.like(f"{prefix}%") for prefix in _QMT_CHANNEL_CID_PREFIXES],
+        Order.remarks.like("mirror:%"),
+    )
+
+
 async def _collect_local_open_orders(date_str: str) -> list[dict]:
-    """本地当日 REAL 非终态订单（created_at 为 naive 北京时间）。"""
+    """本地当日的 QMT 通道 REAL 非终态订单（``created_at`` 为 naive 北京时间）。
+
+    查询失败向上抛：把「查不到」当成「没有残留」会让报表静默变绿。
+    """
     from backend.services.trade_shared.models.enums import OrderStatus
     from backend.services.trade_shared.models.order import Order, TradingMode
 
@@ -199,34 +240,31 @@ async def _collect_local_open_orders(date_str: str) -> list[dict]:
 
     from backend.shared.database_manager_v2 import get_session
 
-    try:
-        async with get_session(read_only=True) as db:
-            rows = (
-                await db.execute(
-                    select(
-                        Order.order_id,
-                        Order.symbol,
-                        Order.status,
-                        Order.exchange_order_id,
-                    ).where(
-                        and_(
-                            Order.trading_mode == TradingMode.REAL,
-                            Order.created_at >= start,
-                            Order.created_at < end,
-                            Order.status.in_(
-                                [
-                                    OrderStatus.SUBMITTED,
-                                    OrderStatus.PARTIALLY_FILLED,
-                                    OrderStatus.PENDING,
-                                ]
-                            ),
-                        )
+    async with get_session(read_only=True) as db:
+        rows = (
+            await db.execute(
+                select(
+                    Order.order_id,
+                    Order.symbol,
+                    Order.status,
+                    Order.exchange_order_id,
+                ).where(
+                    and_(
+                        Order.trading_mode == TradingMode.REAL,
+                        Order.created_at >= start,
+                        Order.created_at < end,
+                        Order.status.in_(
+                            [
+                                OrderStatus.SUBMITTED,
+                                OrderStatus.PARTIALLY_FILLED,
+                                OrderStatus.PENDING,
+                            ]
+                        ),
+                        _qmt_channel_clause(),
                     )
                 )
-            ).all()
-    except Exception as exc:  # noqa: BLE001
-        logger.error("[CloseAudit] 查询本地订单失败: %s", exc, exc_info=True)
-        return []
+            )
+        ).all()
     return [
         {
             "order_id": str(order_id),
@@ -341,8 +379,9 @@ async def run_close_audit_task() -> None:
                 and (now.hour, now.minute) >= (target_h, target_m)
                 and not already
             ):
-                await run_close_audit(redis, date_str)
-                if client is not None:
+                result = await run_close_audit(redis, date_str)
+                # 因通道未配置而跳过时不落 done 标记：当天稍后启用还能补跑
+                if client is not None and not (result or {}).get("skipped"):
                     try:
                         client.set(_DONE_KEY.format(date=date_str), "1", ex=3 * 24 * 3600)
                     except Exception:  # noqa: BLE001

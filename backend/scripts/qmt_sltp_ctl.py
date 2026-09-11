@@ -38,7 +38,14 @@ def _dump(obj) -> None:
 
 
 def _load(redis):
-    return ex.load_config(redis), ex.load_state(redis)
+    """读配置 + 状态。
+
+    配置**读失败直接抛错**：CLI 的写路径都是「读-改-写」，把「读不到」当空配置
+    再写回会把规则表整份抹掉（真单链路上等于静默解除所有止损）。
+    """
+    raw = redis.get(ex.CONFIG_KEY)
+    cfg = ex.merge_config(raw if isinstance(raw, dict) else None)
+    return cfg, ex.load_state(redis)
 
 
 def _save(redis, cfg):
@@ -143,8 +150,15 @@ def main() -> None:
     parser.add_argument("--evaluate", action="store_true", help="只读评估（不下单）")
     args = parser.parse_args()
 
-    redis = get_redis()
+    try:
+        redis = get_redis()
+        _dispatch(redis, args, parser)
+    except Exception as exc:  # noqa: BLE001 - 读配置失败时报错退出，绝不写回空配置
+        print(f"执行失败：{exc}", file=sys.stderr)
+        raise SystemExit(1) from exc
 
+
+def _dispatch(redis, args, parser) -> None:
     if args.status or not any(
         [args.enable, args.disable, args.mode, args.interval, args.alert_sec,
          args.policy, args.close_reminder,

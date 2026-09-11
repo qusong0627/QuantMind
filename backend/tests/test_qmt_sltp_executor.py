@@ -14,6 +14,8 @@ from __future__ import annotations
 import asyncio
 from unittest.mock import patch
 
+import pytest
+
 from backend.services.live_trading.services import sltp_executor as ex
 from backend.services.live_trading.services.lot_rules import (
     align_sell_quantity,
@@ -84,8 +86,9 @@ class Harness:
         dispatch_result: dict | None = None,
         fallback: dict | None = None,
         default_detail: dict | None = None,
+        state: dict | None = None,
     ) -> None:
-        self.redis = FakeRedis(cfg=ex.merge_config(cfg))
+        self.redis = FakeRedis(cfg=ex.merge_config(cfg), state=state)
         self.client = FakeClient(
             ticks=ticks, details=details, positions=positions, default_detail=default_detail
         )
@@ -669,3 +672,192 @@ class TestCloseReminder:
         h.now = self._at(14, 40)
         h.cycle()
         assert [n for n in h.notices if "临近收盘" in n["title"]] == []
+
+
+# --------------------------------------------------------------------------
+# 9. 崩溃重试与幂等委托号（review HIGH 2）
+# --------------------------------------------------------------------------
+def _stuck_state(reason: str = "止损触发 现价90.00 ≤ 95.00") -> dict:
+    """模拟「已落 triggered、进程在落单前/写回前中断」的 Redis 状态。"""
+    return {
+        "date": DAY,
+        "rules": {"600036.SH": {"status": ex.ST_TRIGGERED, "reason": reason}},
+    }
+
+
+class TestIdempotentRetry:
+    def test_client_order_id_is_rule_day_generation_stable(self) -> None:
+        a = ex.rule_client_order_id("600036.SH", 1_000_000.0, 1)
+        b = ex.rule_client_order_id("SH600036", 1_000_000.0 + 1, 1)  # 前缀式 + 数秒后
+        c = ex.rule_client_order_id("600036.SH", 1_000_000.0, 2)
+        assert a == b  # 同一标的同一天同一代 → 同号（重试可被幂等去重）
+        assert a != c  # 重新武装后的下一代 → 新号（能下出新单）
+        assert a.startswith("sltp-600036.SH-") and a.endswith("-g1")
+
+    def test_is_retryable_predicate(self) -> None:
+        assert ex.is_retryable({"status": ex.ST_ARMED})
+        assert ex.is_retryable({})
+        assert ex.is_retryable({"status": ex.ST_TRIGGERED})  # 触发未落单 → 可重试
+        assert not ex.is_retryable({"status": ex.ST_TRIGGERED, "order_id": "OID-1"})
+        assert not ex.is_retryable({"status": ex.ST_SUBMITTED, "order_id": "OID-1"})
+        assert not ex.is_retryable({"status": ex.ST_FILLED})
+
+    def test_triggered_without_order_is_retried(self) -> None:
+        h = Harness(
+            cfg=_cfg([_rule()]),
+            ticks={"600036.SH": {"lastPrice": 90.0}},
+            positions=[_position()],
+            state=_stuck_state(),
+        )
+        summary = h.cycle()
+        assert summary["triggered"] == 1
+        assert len(h.dispatched) == 1
+        assert h.state()["rules"]["600036.SH"]["status"] == ex.ST_SUBMITTED
+
+    def test_triggered_with_order_is_not_retried(self) -> None:
+        state = _stuck_state()
+        state["rules"]["600036.SH"]["order_id"] = "OID-1"
+        h = Harness(
+            cfg=_cfg([_rule()]),
+            ticks={"600036.SH": {"lastPrice": 90.0}},
+            positions=[_position()],
+            state=state,
+        )
+        h.cycle()
+        assert h.dispatched == []
+
+    def test_crash_retry_reuses_client_order_id(self) -> None:
+        """下单成功但状态没写回（崩溃）→ 重试必须复用同一委托号，交调度器去重。"""
+        first = Harness(
+            cfg=_cfg([_rule()]), ticks={"600036.SH": {"lastPrice": 90.0}}, positions=[_position()]
+        )
+        first.cycle()
+        cid_first = first.dispatched[0]["client_order_id"]
+
+        retry = Harness(
+            cfg=_cfg([_rule()]),
+            ticks={"600036.SH": {"lastPrice": 90.0}},
+            positions=[_position()],
+            state=_stuck_state(),
+        )
+        retry.cycle()
+        assert retry.dispatched[0]["client_order_id"] == cid_first
+
+    def test_reset_then_retrigger_uses_new_client_order_id(self) -> None:
+        h = Harness(
+            cfg=_cfg([_rule()]), ticks={"600036.SH": {"lastPrice": 90.0}}, positions=[_position()]
+        )
+        h.cycle()
+        h.reset()
+        h.cycle()
+        assert len(h.dispatched) == 2
+        assert h.dispatched[0]["client_order_id"].endswith("-g1")
+        assert h.dispatched[1]["client_order_id"].endswith("-g2")
+
+    def test_stranded_trigger_notified_after_close_once(self) -> None:
+        h = Harness(
+            cfg=_cfg([_rule()]),
+            ticks={"600036.SH": {"lastPrice": 90.0}},
+            positions=[_position()],
+            state=_stuck_state(),
+        )
+        with (
+            patch.object(ex, "is_trading_time", return_value=False),
+            patch.object(ex, "trade_date_str", return_value=DAY),
+        ):
+            asyncio.run(ex.run_sltp_cycle(h.deps()))
+            asyncio.run(ex.run_sltp_cycle(h.deps()))
+        alerts = [n for n in h.notices if "触发未能下单" in n["title"]]
+        assert len(alerts) == 1
+        assert alerts[0]["level"] == "error"
+        assert h.dispatched == []  # 收盘后不补单，只告警
+
+
+# --------------------------------------------------------------------------
+# 10. 状态回写与并发（review LOW 12 / MEDIUM 3）
+# --------------------------------------------------------------------------
+class TestStateWriteMerge:
+    def test_dirty_save_preserves_concurrent_writes(self) -> None:
+        redis = FakeRedis(state={"date": DAY, "rules": {"600036.SH": {"status": ex.ST_ARMED}}})
+        state = ex.load_state(redis, DAY)
+        before = {symbol: dict(item) for symbol, item in state["rules"].items()}
+        # 执行器本轮只改了 600036
+        state["rules"]["600036.SH"]["last_price"] = 9.9
+        # 并发：CLI 新武装了 300750、并删掉了别的规则
+        stored = redis.store[ex.STATE_KEY]["rules"]
+        stored["300750.SZ"] = {"status": ex.ST_ARMED}
+
+        dirty, removed = ex.diff_state(before, state["rules"])
+        ex.save_state(redis, state, dirty=dirty, removed=removed)
+
+        after = redis.store[ex.STATE_KEY]["rules"]
+        assert after["600036.SH"]["last_price"] == 9.9
+        assert after["300750.SZ"] == {"status": ex.ST_ARMED}  # 并发新增没被冲掉
+
+    def test_full_save_still_overwrites(self) -> None:
+        """reset/初始化路径不受合并逻辑影响（整份覆盖）。"""
+        redis = FakeRedis(state={"date": DAY, "rules": {"600036.SH": {"status": ex.ST_ARMED}}})
+        ex.save_state(redis, {"date": DAY, "rules": {"000001.SZ": {"status": ex.ST_ARMED}}})
+        assert list(redis.store[ex.STATE_KEY]["rules"]) == ["000001.SZ"]
+
+    def test_set_enabled_raises_without_writing_on_read_failure(self) -> None:
+        class BrokenRedis:
+            def __init__(self) -> None:
+                self.writes: list = []
+
+            def get(self, key):
+                raise RuntimeError("redis down")
+
+            def set(self, key, value):
+                self.writes.append((key, value))
+
+        redis = BrokenRedis()
+        with pytest.raises(RuntimeError):
+            ex.set_enabled(redis, True)
+        assert redis.writes == []  # 读失败绝不写回（否则规则表被整份抹掉）
+
+    def test_set_enabled_keeps_rules(self) -> None:
+        redis = FakeRedis(
+            cfg={"enabled": False, "rules": [{"symbol": "600036.SH", "stop_loss_pct": 0.05}]}
+        )
+        saved = ex.set_enabled(redis, True)
+        assert saved["enabled"] is True
+        assert [r["symbol"] for r in saved["rules"]] == ["600036.SH"]
+
+
+# --------------------------------------------------------------------------
+# 11. 其他加固（review LOW 9 / LOW 11 / MEDIUM 5）
+# --------------------------------------------------------------------------
+class TestHardening:
+    def test_tick_miss_alerted_once_at_threshold(self) -> None:
+        h = Harness(cfg=_cfg([_rule()]), ticks={}, positions=[_position()])
+        for _ in range(ex._TICK_MISS_ALERT_THRESHOLD - 1):
+            h.cycle()
+        assert [n for n in h.notices if "行情缺失" in n["title"]] == []
+        h.cycle()
+        h.cycle()  # 超过阈值不重复告警
+        assert len([n for n in h.notices if "行情缺失" in n["title"]]) == 1
+
+    def test_disabled_fallback_thresholds_ignored(self) -> None:
+        rule = ex.normalize_rule({"symbol": "600036.SH"})
+        merged = ex.trigger_config(rule, {"stop_loss_pct": 0.05, "enabled": False})
+        assert merged["stop_loss_pct"] is None
+        # enabled=True / 未声明时照常回落
+        assert ex.trigger_config(rule, {"stop_loss_pct": 0.05})["stop_loss_pct"] == 0.05
+        assert (
+            ex.trigger_config(rule, {"stop_loss_pct": 0.05, "enabled": True})["stop_loss_pct"]
+            == 0.05
+        )
+
+    def test_normalize_rule_forces_sell_side(self) -> None:
+        assert ex.normalize_rule({"symbol": "600036.SH", "side": "buy"})["side"] == "SELL"
+        assert ex.normalize_rule({"symbol": "600036.SH", "side": "SELL"})["side"] == "SELL"
+
+    def test_router_rejects_buy_side(self) -> None:
+        from pydantic import ValidationError
+
+        from backend.services.trade.routers.qmt_sltp import SltpRule
+
+        with pytest.raises(ValidationError):
+            SltpRule(symbol="600036.SH", side="BUY")
+        assert SltpRule(symbol="600036.SH", side="sell").side == "SELL"

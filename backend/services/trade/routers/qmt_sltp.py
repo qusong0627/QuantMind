@@ -53,8 +53,9 @@ class SltpRule(BaseModel):
     @classmethod
     def _clean_side(cls, value: str) -> str:
         text = str(value or "SELL").strip().upper()
-        if text not in ("SELL", "BUY"):
-            raise ValueError("side 仅支持 SELL/BUY")
+        if text != "SELL":
+            # 执行器是清仓语义（触发即卖出）；买入会让「越止越买」，建仓走策略链路
+            raise ValueError("side 仅支持 SELL（止盈止损执行器只卖不买）")
         return text
 
 
@@ -158,13 +159,15 @@ async def put_sltp_enabled(
     redis: Any = Depends(get_redis),
     auth: AuthContext = Depends(require_admin),
 ):
-    """快速开关（保留规则表）。"""
+    """快速开关（保留规则表）。
+
+    走 ``executor.set_enabled``：读失败直接 503，绝不把「读不到配置」当空配置
+    写回去（否则 Redis 抖动时这一按会把规则表抹掉）。
+    """
     try:
-        cfg = executor.load_config(redis)
-        cfg["enabled"] = bool(payload.enabled)
-        saved = executor.save_config(redis, cfg)
+        saved = executor.set_enabled(redis, payload.enabled)
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=503, detail=f"Redis 写入失败: {exc}") from exc
+        raise HTTPException(status_code=503, detail=f"Redis 读取/写入失败: {exc}") from exc
     logger.info("[SltpAPI] enabled tenant=%s user=%s → %s", auth.tenant_id, auth.user_id, saved["enabled"])
     return {"enabled": saved["enabled"]}
 

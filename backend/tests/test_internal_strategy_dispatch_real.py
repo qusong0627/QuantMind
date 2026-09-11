@@ -318,3 +318,22 @@ def test_fetch_latest_snapshot_queries_both_uid_forms():
         db.statements[-1].compile(compile_kwargs={"literal_binds": True})
     )
     assert "'1'" in sql and "'00000001'" in sql
+    # 只取当日快照：隔日可用量已过期，拿它预检会误拦合法全量卖出
+    assert "snapshot_date" in sql
+
+
+def test_non_ashare_lot_precheck_skipped():
+    """整手规则是 A 股口径：港股/美股不做本地预检（柜台才是最终闸门）。"""
+    db = FakeSnapshotDb(
+        _snapshot_row({"stock_code": "00700.HK", "available_volume": 1000})
+    )
+    assert _lot_check(db, symbol="00700.HK", quantity=150) is None
+    assert db.statements == []
+
+
+def test_full_exit_within_tolerance_passes():
+    """数量与快照可用量相差 1% 以内视为全量卖出（快照口径/舍入差异）。"""
+    db = FakeSnapshotDb(
+        _snapshot_row({"stock_code": "600036.SH", "available_volume": 101})
+    )
+    assert _lot_check(db, quantity=100) is None
