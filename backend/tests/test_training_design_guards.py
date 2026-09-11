@@ -41,4 +41,8 @@ def test_labels_and_split_gap_share_t_plus_one_execution_convention() -> None:
     assert "shift(-(_horizon + _EXECUTION_LAG_DAYS))" in loading_source
     assert "_embargo_days = _horizon + _EXECUTION_LAG_DAYS" in splits_source
     assert '"execution_lag_days": _EXECUTION_LAG_DAYS' in source
-    assert 'gap_days = int(normalized.get("target_horizon_days") or 1) + 1' in utils_source
+    # 多周期按最大周期留 gap（571165db 跨段泄漏修复）；单周期回落 target_horizon_days+1
+    assert (
+        'gap_days = (max(horizons) if horizons else int(normalized.get("target_horizon_days") or 1)) + 1'
+        in utils_source
+    )
