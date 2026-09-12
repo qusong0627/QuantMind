@@ -34,7 +34,7 @@ function peBand(pe: number, min: number, max: number): PeBand {
   return { bar: 'bg-rose-100', text: 'text-rose-700', t };
 }
 
-export const UsSectorValuationPanel: React.FC = () => {
+export const UsSectorValuationPanel: React.FC<{ className?: string }> = ({ className = '' }) => {
   const [items, setItems] = useState<UsSectorValuationRow[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -68,7 +68,7 @@ export const UsSectorValuationPanel: React.FC = () => {
 
   return (
     <SectionCard
-      className="!p-2.5 !gap-1.5"
+      className={`!p-2.5 !gap-1.5 ${className}`}
       title={
         <span className="flex items-center gap-1.5">
           <ThermometerSun className="w-3.5 h-3.5 text-blue-600" />

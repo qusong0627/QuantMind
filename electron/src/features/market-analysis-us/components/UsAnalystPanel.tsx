@@ -157,7 +157,7 @@ export const UsAnalystPanel: React.FC = () => {
     <div className="flex flex-col gap-1.5">
       {/* 全池评级分布 */}
       <SectionCard
-        className="!p-2.5 gap-1.5"
+        className="!p-2.5 gap-1.5 h-full min-h-0"
         title={
           <span className="flex items-center gap-1.5">
             <Users className="w-3.5 h-3.5 text-blue-600" />全池评级分布
@@ -211,10 +211,10 @@ export const UsAnalystPanel: React.FC = () => {
         )}
       </SectionCard>
 
-      <div className="grid grid-cols-1 xl:grid-cols-2 gap-1.5 items-start">
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-1.5 shrink-0 xl:h-[620px]">
         {/* 评级升降级流水 */}
         <SectionCard
-          className="!p-2.5 gap-1.5"
+          className="!p-2.5 gap-1.5 h-full min-h-0"
           title={
             <span className="flex items-center gap-1.5">
               <ArrowUpRight className="w-3.5 h-3.5 text-blue-600" />评级升降级流水
@@ -230,7 +230,7 @@ export const UsAnalystPanel: React.FC = () => {
           {upgradeItems.length === 0 ? (
             <EmptyHint loading={loading} />
           ) : (
-            <div className={`flex flex-col max-h-[600px] ${SCROLL}`}>
+            <div className={`flex flex-col flex-1 min-h-0 ${SCROLL}`}>
               <div className={`${HEAD} ${UP_GRID} sticky top-0 z-10 bg-white/95 backdrop-blur`}>
                 <span>#</span>
                 <span>标的 · 机构 · 评级变化</span>
@@ -298,7 +298,7 @@ export const UsAnalystPanel: React.FC = () => {
 
         {/* 目标价隐含空间 */}
         <SectionCard
-          className="!p-2.5 gap-1.5"
+          className="!p-2.5 gap-1.5 h-full min-h-0"
           title={
             <span className="flex items-center gap-1.5">
               <Target className="w-3.5 h-3.5 text-blue-600" />目标价隐含空间
@@ -310,7 +310,7 @@ export const UsAnalystPanel: React.FC = () => {
           {targetItems.length === 0 ? (
             <EmptyHint loading={loading} />
           ) : (
-            <div className={`flex flex-col max-h-[600px] ${SCROLL}`}>
+            <div className={`flex flex-col flex-1 min-h-0 ${SCROLL}`}>
               <p className="text-[9px] text-slate-400 pb-1">
                 按隐含空间降序；后端已剔除 |空间| &gt; 200% 的离群值（退市/并购残留标的）；目标价快照无日期字段，以收盘价日期为准。
               </p>

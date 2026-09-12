@@ -44,7 +44,10 @@ function HighTag({ dd }: { dd: number | null }) {
   return <span className="text-slate-500 font-mono">{dd.toFixed(1)}%</span>;
 }
 
-export const UsHotStocksPanel: React.FC<{ limit?: number }> = ({ limit = 18 }) => {
+export const UsHotStocksPanel: React.FC<{ limit?: number; className?: string }> = ({
+  limit = 18,
+  className = '',
+}) => {
   const [tab, setTab] = useState<TabId>('amount');
   const [rows, setRows] = useState<UsHotStockRow[]>([]);
   const [tradeDate, setTradeDate] = useState('');
@@ -74,7 +77,7 @@ export const UsHotStocksPanel: React.FC<{ limit?: number }> = ({ limit = 18 }) =
 
   return (
     <SectionCard
-      className="!p-2.5"
+      className={`!p-2.5 ${className}`}
       title={
         <span className="flex items-center gap-1.5">
           <Flame className="w-3.5 h-3.5 text-orange-500" />

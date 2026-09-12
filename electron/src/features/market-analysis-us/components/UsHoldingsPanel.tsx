@@ -26,7 +26,7 @@ const TONE: Record<Tone, { box: string; text: string }> = {
 const HEAD =
   'grid gap-1 px-1 py-[3px] text-[9px] font-bold text-slate-400 border-b border-slate-200 bg-white/95 sticky top-0 z-10';
 const ROW = 'grid gap-1 px-1 py-[3px] text-[10px] items-center border-b border-slate-50 last:border-0';
-const SCROLL = 'flex flex-col max-h-[300px] overflow-y-auto';
+const SCROLL = 'flex flex-col flex-1 min-h-0 overflow-y-auto';
 
 const INS_GRID = 'grid-cols-[14px_1fr_58px_34px_58px]';
 const INST_GRID = 'grid-cols-[14px_1fr_54px_40px_54px]';
@@ -162,7 +162,7 @@ function instCells(it: UsInstitutionalRow, i: number) {
 /** 内部人交易卡（统计条 + 买卖双榜 + 口径脚注） */
 const InsiderCard: React.FC<{ insider: UsInsiderMovers | null; loading: boolean }> = ({ insider, loading }) => (
   <SectionCard
-    className="!p-2.5 gap-1.5 xl:col-span-2"
+    className="!p-2.5 gap-1.5 xl:col-span-2 h-full min-h-0"
     title={
       <span className="flex items-center gap-1.5">
         <Building2 className="w-3.5 h-3.5 text-blue-600" />
@@ -183,8 +183,8 @@ const InsiderCard: React.FC<{ insider: UsInsiderMovers | null; loading: boolean 
       <MetricTile label="买入金额" value={`US$ ${fmtInt(insider?.buy_amount_yi)}亿`} tone="red" />
       <MetricTile label="卖出金额" value={`US$ ${fmtInt(insider?.sell_amount_yi)}亿`} tone="green" />
     </div>
-    <div className="grid grid-cols-1 lg:grid-cols-2 gap-1.5">
-      <div className="flex flex-col gap-0.5 min-w-0">
+    <div className="grid grid-cols-1 lg:grid-cols-2 gap-1.5 shrink-0 xl:h-[380px]">
+      <div className="flex flex-col gap-0.5 min-w-0 min-h-0">
         <MiniHead tone="red" label="买入榜" extra={`Top ${insider?.top_buys?.length ?? 0}`} />
         <Table
           grid={INS_GRID} labels={INS_HEAD} items={insider?.top_buys ?? []}
@@ -192,7 +192,7 @@ const InsiderCard: React.FC<{ insider: UsInsiderMovers | null; loading: boolean 
           render={(it, i) => insiderCells(it, i, 'red')}
         />
       </div>
-      <div className="flex flex-col gap-0.5 min-w-0">
+      <div className="flex flex-col gap-0.5 min-w-0 min-h-0">
         <MiniHead tone="green" label="卖出榜" extra={`Top ${insider?.top_sells?.length ?? 0}`} />
         <Table
           grid={INS_GRID} labels={INS_HEAD} items={insider?.top_sells ?? []}
@@ -211,7 +211,7 @@ const InsiderCard: React.FC<{ insider: UsInsiderMovers | null; loading: boolean 
 /** 机构持仓卡（中位占比 + 增减持双榜 + 13F 口径脚注） */
 const InstCard: React.FC<{ inst: UsInstitutionalHolders | null; loading: boolean }> = ({ inst, loading }) => (
   <SectionCard
-    className="!p-2.5 gap-1.5"
+    className="!p-2.5 gap-1.5 h-full min-h-0"
     title={
       <span className="flex items-center gap-1.5">
         <Building2 className="w-3.5 h-3.5 text-blue-600" />
@@ -230,7 +230,7 @@ const InstCard: React.FC<{ inst: UsInstitutionalHolders | null; loading: boolean
       <MetricTile label="机构持股中位占比" value={pctOrDash(inst?.institutions_pct_median)} />
       <MetricTile label="内部人持股中位占比" value={pctOrDash(inst?.insiders_pct_median, 2)} tone="red" />
     </div>
-    <div className="flex flex-col gap-0.5 min-w-0">
+    <div className="flex flex-col gap-0.5 min-w-0 min-h-0">
       <span className="flex items-center gap-1.5 px-1 pb-0.5 border-b border-slate-100">
         <span className="text-[10px] font-extrabold text-blue-700">增持榜</span>
         <span className="text-[9px] font-mono text-slate-400">按增减金额排序</span>
@@ -240,7 +240,7 @@ const InstCard: React.FC<{ inst: UsInstitutionalHolders | null; loading: boolean
         loading={loading} emptyText="暂无增持记录" render={instCells}
       />
     </div>
-    <div className="flex flex-col gap-0.5 min-w-0">
+    <div className="flex flex-col gap-0.5 min-w-0 min-h-0">
       <span className="flex items-center gap-1.5 px-1 pb-0.5 border-b border-slate-100">
         <span className="text-[10px] font-extrabold text-blue-700">减持榜</span>
         <span className="text-[9px] font-mono text-slate-400">按增减金额排序</span>
@@ -341,13 +341,13 @@ export const UsHoldingsPanel: React.FC = () => {
       </div>
 
       {/* 内部人 + 机构：两行三列紧凑网格（宽屏） */}
-      <div className="grid grid-cols-1 xl:grid-cols-3 gap-1.5 items-start">
+      <div className="grid grid-cols-1 xl:grid-cols-3 gap-1.5 shrink-0 xl:h-[400px]">
         <InsiderCard insider={insider} loading={loading} />
         <InstCard inst={institutional} loading={loading} />
 
         {/* 除息日历 */}
         <SectionCard
-          className="!p-2.5 gap-1.5 xl:col-span-2"
+          className="!p-2.5 gap-1.5 xl:col-span-2 h-full min-h-0"
           title={
             <span className="flex items-center gap-1.5">
               <CalendarClock className="w-3.5 h-3.5 text-blue-600" />
@@ -374,7 +374,7 @@ export const UsHoldingsPanel: React.FC = () => {
 
         {/* 近期拆股 */}
         <SectionCard
-          className="!p-2.5 gap-1.5"
+          className="!p-2.5 gap-1.5 h-full min-h-0"
           title={
             <span className="flex items-center gap-1.5">
               <Scissors className="w-3.5 h-3.5 text-blue-600" />

@@ -11,7 +11,7 @@ import { getMarketDistribution } from '../services/api';
 import type { UsMarketDistribution } from '../types';
 import { SectionCard, EmptyHint, DateBadge } from '../../market-analysis-shared/ui';
 
-export const UsMarketDistributionPanel: React.FC = () => {
+export const UsMarketDistributionPanel: React.FC<{ className?: string }> = ({ className = '' }) => {
   const [data, setData] = useState<UsMarketDistribution | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -36,7 +36,7 @@ export const UsMarketDistributionPanel: React.FC = () => {
 
   return (
     <SectionCard
-      className="!p-2.5"
+      className={`!p-2.5 ${className}`}
       title={
         <span className="flex items-center gap-1.5">
           <BarChart3 className="w-3.5 h-3.5 text-blue-600" />
@@ -51,16 +51,17 @@ export const UsMarketDistributionPanel: React.FC = () => {
       {buckets.length === 0 ? (
         <EmptyHint loading={loading} />
       ) : (
-        <div className="flex flex-col gap-1.5">
-          {/* 横向柱状：左绿（跌）右红（涨），零轴居中 */}
-          <div className="flex items-end gap-[3px] h-[76px]">
+        <div className="flex flex-col gap-1.5 flex-1 min-h-0">
+          {/* 横向柱状：左绿（跌）右红（涨）。容器 flex-1 + 柱高用百分比，
+              使卡片被拉高到与同排左卡片等高时柱子随之长高（而非留白）。 */}
+          <div className="flex items-end gap-[3px] flex-1 min-h-[72px]">
             {buckets.map((b, i) => {
               const down = i < 5;
-              const h = Math.max(2, (b.count / max) * 68);
+              const pct = Math.max(3, (b.count / max) * 100);
               return (
                 <div
                   key={b.label}
-                  className="flex-1 flex flex-col items-center justify-end gap-0.5 group"
+                  className="flex-1 h-full flex flex-col items-center justify-end gap-0.5 group"
                   title={`${b.label}: ${b.count} 只`}
                 >
                   <span className="text-[8px] font-mono text-slate-400 opacity-0 group-hover:opacity-100">
@@ -68,7 +69,7 @@ export const UsMarketDistributionPanel: React.FC = () => {
                   </span>
                   <span
                     className={`w-full rounded-t-sm ${down ? 'bg-green-400' : 'bg-red-400'} group-hover:opacity-80`}
-                    style={{ height: `${h}px` }}
+                    style={{ height: `${pct}%` }}
                   />
                 </div>
               );

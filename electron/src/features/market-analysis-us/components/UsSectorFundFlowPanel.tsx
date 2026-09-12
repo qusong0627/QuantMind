@@ -10,7 +10,10 @@ import { getSectorFundFlow } from '../services/api';
 import type { UsSectorFundFlow } from '../types';
 import { SectionCard, EmptyHint, DateBadge, fmtInt } from '../../market-analysis-shared/ui';
 
-export const UsSectorFundFlowPanel: React.FC<{ limit?: number }> = ({ limit = 14 }) => {
+export const UsSectorFundFlowPanel: React.FC<{ limit?: number; className?: string }> = ({
+  limit = 14,
+  className = '',
+}) => {
   const [data, setData] = useState<UsSectorFundFlow | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -38,7 +41,7 @@ export const UsSectorFundFlowPanel: React.FC<{ limit?: number }> = ({ limit = 14
 
   return (
     <SectionCard
-      className="!p-2.5"
+      className={`!p-2.5 ${className}`}
       title={
         <span className="flex items-center gap-1.5">
           <Waves className="w-3.5 h-3.5 text-blue-600" />
@@ -53,7 +56,7 @@ export const UsSectorFundFlowPanel: React.FC<{ limit?: number }> = ({ limit = 14
       {sectors.length === 0 ? (
         <EmptyHint loading={loading} />
       ) : (
-        <div className="flex flex-col">
+        <div className="flex flex-col flex-1 min-h-0">
           <div className="grid grid-cols-[64px_58px_46px_1fr_46px] gap-1.5 px-1 py-[3px] text-[9px] font-bold text-slate-400 border-b border-slate-200">
             <span>板块</span>
             <span className="text-right">成交额</span>
@@ -68,7 +71,7 @@ export const UsSectorFundFlowPanel: React.FC<{ limit?: number }> = ({ limit = 14
             return (
               <div
                 key={s.sector}
-                className="grid grid-cols-[64px_58px_46px_1fr_46px] gap-1.5 px-1 py-[3px] text-[10px] items-center border-b border-slate-50 last:border-0 hover:bg-slate-50/80"
+                className="grid grid-cols-[64px_58px_46px_1fr_46px] gap-1.5 px-1 py-[3px] text-[10px] items-center border-b border-slate-50 last:border-0 hover:bg-slate-50/80 flex-1 min-h-[18px]"
               >
                 <span className="font-bold text-slate-700 truncate" title={s.sector}>
                   {s.name}

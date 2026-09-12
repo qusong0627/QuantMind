@@ -175,20 +175,23 @@ export const MarketAnalysisUsPage: React.FC = () => {
         })}
       </div>
 
-      {/* Tab1 大盘脉搏：首屏 = 哪里热 + 钱去哪 + 板块全景 */}
+      {/* Tab1 大盘脉搏：首屏 = 哪里热 + 钱去哪 + 板块全景
+          布局约定：同排**等高**（网格默认 stretch，不用 items-start），
+          每列最后一张卡用 flex-1/h-full 吃掉行高差，卡内内容弹性填充 ——
+          避免各卡片按自身内容高导致底边参差。 */}
       {activeTab === 'panorama' && (
         <>
-          <div className="grid grid-cols-1 xl:grid-cols-3 gap-1.5 items-start">
-            <div className="xl:col-span-2">
-              <UsHotStocksPanel limit={18} />
+          <div className="grid grid-cols-1 xl:grid-cols-3 gap-1.5 shrink-0 xl:h-[560px]">
+            <div className="xl:col-span-2 h-full min-h-0">
+              <UsHotStocksPanel limit={18} className="h-full" />
             </div>
-            <div className="xl:col-span-1 flex flex-col gap-1.5">
+            <div className="xl:col-span-1 h-full min-h-0 flex flex-col gap-1.5">
               <UsBreadthCard breadth={breadth} loading={loading} />
-              <UsMarketDistributionPanel />
+              <UsMarketDistributionPanel className="flex-1 min-h-0" />
             </div>
           </div>
-          <div className="grid grid-cols-1 xl:grid-cols-3 gap-1.5 items-start">
-            <div className="xl:col-span-2 bg-white/90 backdrop-blur-md rounded-2xl p-2.5 border border-slate-200/80 shadow-sm flex flex-col gap-1.5">
+          <div className="grid grid-cols-1 xl:grid-cols-3 gap-1.5 shrink-0 xl:h-[460px]">
+            <div className="xl:col-span-2 h-full min-h-0 bg-white/90 backdrop-blur-md rounded-2xl p-2.5 border border-slate-200/80 shadow-sm flex flex-col gap-1.5">
               <div className="flex items-center justify-between">
                 <h3 className="text-[11px] font-extrabold text-slate-800 flex items-center gap-1.5">
                   <Layers className="w-3.5 h-3.5 text-blue-600" />
@@ -197,37 +200,39 @@ export const MarketAnalysisUsPage: React.FC = () => {
                 <span className="text-[9px] font-mono text-slate-400">{heatmap.length} 个板块</span>
               </div>
               {heatmap.length > 0 ? (
-                <SectorHeatmapChart data={heatmapItems} height={420} valueLabel="成交额权重" />
+                <div className="flex-1 min-h-0">
+                  <SectorHeatmapChart data={heatmapItems} height="100%" valueLabel="成交额权重" />
+                </div>
               ) : (
                 <div className="py-6 text-center text-[11px] text-slate-400">热力图加载中…</div>
               )}
             </div>
-            <div className="xl:col-span-1">
-              <UsSectorFundFlowPanel limit={14} />
+            <div className="xl:col-span-1 h-full">
+              <UsSectorFundFlowPanel limit={14} className="h-full" />
             </div>
           </div>
         </>
       )}
 
       {activeTab === 'breadth' && (
-        <div className="grid grid-cols-1 xl:grid-cols-3 gap-1.5 items-start">
-          <div className="xl:col-span-2">
-            <UsBreadthPanel />
+        <div className="grid grid-cols-1 xl:grid-cols-3 gap-1.5 shrink-0 xl:h-[620px]">
+          <div className="xl:col-span-2 h-full min-h-0">
+            <UsBreadthPanel className="h-full" />
           </div>
-          <div className="xl:col-span-1 flex flex-col gap-1.5">
+          <div className="xl:col-span-1 h-full min-h-0 flex flex-col gap-1.5">
             <UsMarketDistributionPanel />
-            <UsBreadthHighlightsPanel />
+            <UsBreadthHighlightsPanel className="flex-1 min-h-0" />
           </div>
         </div>
       )}
       {activeTab === 'rotation' && (
-        <div className="grid grid-cols-1 xl:grid-cols-3 gap-1.5 items-start">
-          <div className="xl:col-span-2">
-            <UsSectorRotationPanel />
+        <div className="grid grid-cols-1 xl:grid-cols-3 gap-1.5 shrink-0 xl:h-[620px]">
+          <div className="xl:col-span-2 h-full min-h-0">
+            <UsSectorRotationPanel className="h-full" />
           </div>
-          <div className="xl:col-span-1 flex flex-col gap-1.5">
-            <UsSectorFundFlowPanel limit={14} />
-            <UsSectorValuationPanel />
+          <div className="xl:col-span-1 h-full min-h-0 flex flex-col gap-1.5">
+            <UsMarketDistributionPanel />
+            <UsSectorValuationPanel className="flex-1 min-h-0" />
           </div>
         </div>
       )}

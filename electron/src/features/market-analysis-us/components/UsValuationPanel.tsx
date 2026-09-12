@@ -124,10 +124,10 @@ export const UsValuationPanel: React.FC = () => {
         </span>
       </div>
 
-      <div className="grid grid-cols-1 xl:grid-cols-2 gap-1.5 items-start">
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-1.5">
         {/* 估值概览：一行紧凑指标条 */}
         <SectionCard
-          className="!p-2.5 gap-1.5"
+          className="!p-2.5 gap-1.5 h-full"
           title={
             <span className="flex items-center gap-1.5">
               <LineChart className="w-3.5 h-3.5 text-blue-600" />
@@ -165,7 +165,7 @@ export const UsValuationPanel: React.FC = () => {
 
         {/* 市值分层 */}
         <SectionCard
-          className="!p-2.5 gap-1.5"
+          className="!p-2.5 gap-1.5 h-full"
           title={
             <span className="flex items-center gap-1.5">
               <Layers className="w-3.5 h-3.5 text-blue-600" />
@@ -219,7 +219,7 @@ export const UsValuationPanel: React.FC = () => {
 
       {/* 估值三榜 */}
       <SectionCard
-        className="!p-2.5 gap-1.5"
+        className="!p-2.5 gap-1.5 h-full"
         title={
           <span className="flex items-center gap-1.5">
             <Coins className="w-3.5 h-3.5 text-blue-600" />
@@ -248,7 +248,7 @@ export const UsValuationPanel: React.FC = () => {
         {rankItems.length === 0 ? (
           <EmptyHint loading={rankLoading} text="暂无符合条件的标的" />
         ) : (
-          <div className="flex flex-col max-h-[460px] overflow-y-auto">
+          <div className="flex flex-col flex-1 min-h-0 overflow-y-auto">
             <div className={`${HEAD} ${RANK_GRID} sticky top-0 z-10 bg-white/95 backdrop-blur`}>
               <span>#</span>
               <span>标的</span>

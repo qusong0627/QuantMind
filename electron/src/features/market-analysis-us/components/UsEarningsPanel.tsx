@@ -99,11 +99,11 @@ export const UsEarningsPanel: React.FC = () => {
         </span>
       </div>
 
-      <div className="grid grid-cols-1 xl:grid-cols-6 gap-1.5 items-start">
+      <div className="grid grid-cols-1 xl:grid-cols-6 gap-1.5">
         {/* 财报日历 */}
-        <div className="xl:col-span-2 min-w-0">
+        <div className="xl:col-span-2 min-w-0 h-full">
           <SectionCard
-            className="!p-2.5 gap-1.5"
+            className="!p-2.5 gap-1.5 h-full"
             title={
               <span className="flex items-center gap-1.5">
                 <CalendarDays className="w-3.5 h-3.5 text-blue-600" />
@@ -125,7 +125,7 @@ export const UsEarningsPanel: React.FC = () => {
             {calItems.length === 0 ? (
               <EmptyHint loading={loading} />
             ) : (
-              <div className={`flex flex-col max-h-[420px] ${SCROLL}`}>
+              <div className={`flex flex-col flex-1 min-h-0 ${SCROLL}`}>
                 <div className={`${HEAD} ${CAL_GRID}`}>
                   <span>#</span>
                   <span>标的</span>
@@ -187,9 +187,9 @@ export const UsEarningsPanel: React.FC = () => {
         </div>
 
         {/* 超预期榜 */}
-        <div className="xl:col-span-2 min-w-0">
+        <div className="xl:col-span-2 min-w-0 h-full">
           <SectionCard
-            className="!p-2.5 gap-1.5"
+            className="!p-2.5 gap-1.5 h-full"
             title={
               <span className="flex items-center gap-1.5">
                 <TrendingUp className="w-3.5 h-3.5 text-blue-600" />
@@ -209,7 +209,7 @@ export const UsEarningsPanel: React.FC = () => {
             {surItems.length === 0 ? (
               <EmptyHint loading={loading} />
             ) : (
-              <div className={`flex flex-col max-h-[420px] ${SCROLL}`}>
+              <div className={`flex flex-col flex-1 min-h-0 ${SCROLL}`}>
                 <div className={`${HEAD} ${SUR_GRID}`}>
                   <span>#</span>
                   <span>标的</span>
@@ -261,9 +261,9 @@ export const UsEarningsPanel: React.FC = () => {
         </div>
 
         {/* 盈利预期修正 */}
-        <div className="xl:col-span-2 min-w-0">
+        <div className="xl:col-span-2 min-w-0 h-full">
           <SectionCard
-            className="!p-2.5 gap-1.5"
+            className="!p-2.5 gap-1.5 h-full"
             title={
               <span className="flex items-center gap-1.5">
                 <LineChart className="w-3.5 h-3.5 text-blue-600" />
@@ -280,7 +280,7 @@ export const UsEarningsPanel: React.FC = () => {
             {revItems.length === 0 ? (
               <EmptyHint loading={loading} />
             ) : (
-              <div className={`flex flex-col max-h-[420px] ${SCROLL}`}>
+              <div className={`flex flex-col flex-1 min-h-0 ${SCROLL}`}>
                 <div className={`${HEAD} ${REV_GRID}`}>
                   <span>#</span>
                   <span>标的 / 覆盖</span>

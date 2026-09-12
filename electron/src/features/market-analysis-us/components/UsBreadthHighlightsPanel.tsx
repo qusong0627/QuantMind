@@ -45,7 +45,7 @@ function ddText(v: number | null): string {
   return `${v > 0 ? '+' : ''}${v.toFixed(1)}%`;
 }
 
-export const UsBreadthHighlightsPanel: React.FC = () => {
+export const UsBreadthHighlightsPanel: React.FC<{ className?: string }> = ({ className = '' }) => {
   const [data, setData] = useState<UsBreadthHighlights | null>(null);
   const [loading, setLoading] = useState(true);
   const [tab, setTab] = useState<HighlightTab>('near_high');
@@ -71,7 +71,7 @@ export const UsBreadthHighlightsPanel: React.FC = () => {
 
   return (
     <SectionCard
-      className="!p-2.5 !gap-1.5"
+      className={`!p-2.5 !gap-1.5 ${className}`}
       title={
         <span className="flex items-center gap-1.5">
           <TrendingUp className="w-3.5 h-3.5 text-blue-600" />
@@ -119,7 +119,7 @@ export const UsBreadthHighlightsPanel: React.FC = () => {
       {rows.length === 0 ? (
         <EmptyHint loading={loading} />
       ) : (
-        <div className="flex flex-col max-h-[560px] overflow-y-auto">
+        <div className="flex flex-col flex-1 min-h-0 overflow-y-auto">
           <div
             className={`${GRID} px-1 py-[3px] text-[9px] font-bold text-slate-400 border-b border-slate-200 sticky top-0 bg-white/95 backdrop-blur z-10`}
           >

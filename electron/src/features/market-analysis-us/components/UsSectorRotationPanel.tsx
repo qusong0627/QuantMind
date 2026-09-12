@@ -46,7 +46,7 @@ function breadthWidth(v: number | null): number {
   return Math.min(100, Math.max(0, v));
 }
 
-export const UsSectorRotationPanel: React.FC = () => {
+export const UsSectorRotationPanel: React.FC<{ className?: string }> = ({ className = '' }) => {
   const [data, setData] = useState<UsSectorRotation | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -69,7 +69,7 @@ export const UsSectorRotationPanel: React.FC = () => {
 
   return (
     <SectionCard
-      className="!p-2.5 !gap-1.5"
+      className={`!p-2.5 !gap-1.5 ${className}`}
       title={
         <span className="flex items-center gap-1.5">
           <Layers className="w-3.5 h-3.5 text-blue-600" />
