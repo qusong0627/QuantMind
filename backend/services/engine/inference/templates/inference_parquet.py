@@ -729,7 +729,13 @@ def main():
         scores = quantile_values[:, 1]
     elif model_type == "xgb":
         dmat = xgb.DMatrix(X_values, feature_names=list(X_df.columns))
-        scores = model.predict(dmat, iteration_range=(0, best_iter) if best_iter else None)
+        # xgboost>=3.2 不接受 iteration_range=None（TypeError: 'NoneType' not
+        # subscriptable）。best_iteration 缺失（未启用早停的模型）时用不传参
+        # 预测全部树；有值时行为与原先完全一致。
+        if best_iter:
+            scores = model.predict(dmat, iteration_range=(0, int(best_iter)))
+        else:
+            scores = model.predict(dmat)
     elif model_type == "catboost":
         # 分类模型必须输出正类概率而非 predict() 的硬标签，保证线上排序与
         # 训练期 AUC/选股信号口径一致。

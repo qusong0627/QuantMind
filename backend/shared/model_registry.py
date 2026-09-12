@@ -16,6 +16,13 @@ from sqlalchemy import text
 from backend.shared.cos_service import get_cos_service
 from backend.shared.database_manager_v2 import get_session
 from backend.shared.database_pool import get_db
+from backend.shared.model_algorithm_meta import (
+    build_algorithm_metadata,
+    build_algorithm_metrics,
+    build_child_metrics_json,
+    comparison_index,
+    read_xgboost_best_iteration,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1789,6 +1796,277 @@ class ModelRegistryService:
         safe = "".join(c if c.isalnum() or c in {"_", "-"} else "_" for c in model_type)
         return f"{base_model_id}_{safe}_{digest}"
 
+    @staticmethod
+    def _file_md5(path: Path) -> str | None:
+        """文件 md5（用于识别「原样复制的父份产物」）；不可读返回 None。"""
+        try:
+            if not path.is_file():
+                return None
+            digest = hashlib.md5()
+            with open(path, "rb") as fh:
+                for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            return digest.hexdigest()
+        except Exception:  # noqa: BLE001
+            return None
+
+    @staticmethod
+    def _find_per_algorithm_pred(
+        parent_dir: Path, job_dir: Path | None, model_type: str
+    ) -> Path | None:
+        """定位某算法的专属预测文件 pred_{type}.parquet。
+
+        训练端在任务工作目录写出每个基模型的独立预测；同步产物可能已复制进
+        模型目录。两处都找不到则返回 None（不伪造，由调用方如实标记）。
+        """
+        name = f"pred_{model_type}.parquet"
+        candidates = [parent_dir / name]
+        if job_dir is not None:
+            candidates.append(job_dir / name)
+        for cand in candidates:
+            if cand.is_file():
+                return cand
+        return None
+
+    @staticmethod
+    def _pred_coverage_fields(pred_parquet: Path) -> dict[str, Any]:
+        """从 pred.parquet 的 trade_date 列读出覆盖度（读不出则为 None）。"""
+        fields: dict[str, Any] = {
+            "pred_rows": None,
+            "pred_coverage_start": None,
+            "pred_coverage_end": None,
+        }
+        try:
+            import pandas as pd
+
+            dates = pd.to_datetime(
+                pd.read_parquet(pred_parquet, columns=["trade_date"])["trade_date"]
+            )
+            fields["pred_rows"] = int(len(dates))
+            if len(dates):
+                fields["pred_coverage_start"] = str(dates.min().date())
+                fields["pred_coverage_end"] = str(dates.max().date())
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("读取 %s 覆盖度失败: %s", pred_parquet, exc)
+        return fields
+
+    def _adopt_parent_predictions(
+        self, *, child_dir: Path, parent_dir: Path
+    ) -> dict[str, Any]:
+        """主算法子模型沿用父份预测（父份就是这个算法自己的预测）。"""
+        for name in ("pred.parquet", "pred.pkl"):
+            src = parent_dir / name
+            if not src.is_file():
+                continue
+            dest = child_dir / name
+            if src.resolve() != dest.resolve():
+                shutil.copy2(src, dest)
+        return {
+            "pred_source": "parent_primary",
+            **self._pred_coverage_fields(child_dir / "pred.parquet"),
+        }
+
+    def _materialize_child_predictions(
+        self,
+        *,
+        child_dir: Path,
+        model_type: str,
+        per_algo_pred: Path | None,
+        parent_dir: Path,
+        is_primary: bool,
+        is_ensemble: bool,
+        parent_pred_md5s: dict[str, str | None],
+    ) -> dict[str, Any]:
+        """写入子模型自己的 pred.parquet / pred.pkl，返回其覆盖度元数据。
+
+        训练期存有 per-algorithm 预测（pred_{type}.parquet）时直接采用；
+        没有时：主算法且非集成训练 → 父份本来就是它的预测，沿用；其余算法
+        **不复制父份**（复制会让多模型曲线画出多条相同曲线），并清理历史上
+        被原样复制进来的父份文件（按 md5 精确识别）。
+        """
+        unavailable: dict[str, Any] = {
+            "pred_source": "unavailable",
+            # 覆盖度字段是主模型的预测口径，不能用它冒充子模型自己的覆盖度
+            "pred_rows": None,
+            "pred_coverage_start": None,
+            "pred_coverage_end": None,
+        }
+        if per_algo_pred is None:
+            if is_primary and not is_ensemble:
+                parent_parquet = parent_dir / "pred.parquet"
+                if parent_parquet.is_file():
+                    return self._adopt_parent_predictions(
+                        child_dir=child_dir, parent_dir=parent_dir
+                    )
+            for name in ("pred.parquet", "pred.pkl"):
+                stale = child_dir / name
+                expected = parent_pred_md5s.get(name)
+                if expected and self._file_md5(stale) == expected:
+                    try:
+                        stale.unlink()
+                    except OSError as exc:
+                        logger.warning("清理残留父份预测失败 %s: %s", stale, exc)
+            logger.warning(
+                "拆分子模型 %s/%s：无 per-algorithm 预测文件，未写入 pred 产物",
+                child_dir.name,
+                model_type,
+            )
+            return unavailable
+
+        copied_parquet = False
+        try:
+            import pandas as pd
+
+            # 只读需要的三列；列缺失会在此抛错，此时尚未落盘，不留半成品
+            frame = pd.read_parquet(
+                per_algo_pred, columns=["trade_date", "symbol", "pred"]
+            )
+            dest_parquet = child_dir / "pred.parquet"
+            if per_algo_pred.resolve() != dest_parquet.resolve():
+                shutil.copy2(per_algo_pred, dest_parquet)
+                copied_parquet = True
+            pred_qlib = (
+                frame[["trade_date", "symbol", "pred"]]
+                .rename(
+                    columns={
+                        "trade_date": "datetime",
+                        "symbol": "instrument",
+                        "pred": "score",
+                    }
+                )
+                .assign(datetime=lambda d: pd.to_datetime(d["datetime"]))
+                .set_index(["datetime", "instrument"])
+                .sort_index()
+            )
+            pred_qlib.to_pickle(child_dir / "pred.pkl")
+            trade_dates = pd.to_datetime(frame["trade_date"])
+            fields: dict[str, Any] = {
+                "pred_source": per_algo_pred.name,
+                "pred_rows": int(len(frame)),
+                "pred_coverage_start": None,
+                "pred_coverage_end": None,
+            }
+            if len(frame):
+                fields["pred_coverage_start"] = str(trade_dates.min().date())
+                fields["pred_coverage_end"] = str(trade_dates.max().date())
+            return fields
+        except Exception as exc:  # noqa: BLE001
+            if copied_parquet:
+                # 本次刚复制进来但 pred.pkl 生成失败：删掉半成品保持一致
+                try:
+                    (child_dir / "pred.parquet").unlink()
+                except OSError:
+                    pass
+            logger.warning(
+                "拆分子模型 %s/%s：per-algorithm 预测写入失败: %s",
+                child_dir.name,
+                model_type,
+                exc,
+            )
+            return unavailable
+
+    def _build_child_model_metadata(
+        self,
+        *,
+        parent_meta: dict[str, Any],
+        record: dict[str, Any],
+        model_type: str,
+        model_file: str,
+        child_id: str,
+        child_dir: Path,
+        parent_dir: Path,
+        job_dir: Path | None,
+        comparison: dict[str, dict[str, Any]],
+        primary_type: str,
+        parent_pred_md5s: dict[str, str | None],
+    ) -> dict[str, Any]:
+        """按算法重建子模型 metadata（架构 / 指标 / 预测覆盖度）。"""
+        mtype = model_type.strip().lower()
+        algo_fields, algo_drops = build_algorithm_metadata(mtype, parent_meta)
+        child_meta = dict(parent_meta)
+        for key in algo_drops:
+            child_meta.pop(key, None)
+        child_meta.update(algo_fields)
+
+        # 主模型私有字段清理：下面按算法重算
+        child_meta["model_id"] = child_id
+        child_meta["source_run_id"] = (
+            f"{record.get('source_run_id') or ''}_{model_type}"
+        )
+        child_meta["is_multi_model"] = False
+        child_meta["model_types"] = [model_type]
+        child_meta["model_type"] = model_type
+        child_meta["primary_model_type"] = model_type
+        child_meta["model_file"] = model_file
+        child_meta["saved_models"] = {model_type: model_file}
+
+        # 集成（stacking）训练的子条目是单个基模型：父份的集成标记必须摘掉，
+        # 否则推理端按 is_ensemble 选融合模板，而融合产物（meta_model.pkl /
+        # base_model_files）并不随子模型复制。
+        is_ensemble = bool(
+            parent_meta.get("is_ensemble")
+            or str(parent_meta.get("model_type") or "").strip().lower() == "stacking"
+            or str(parent_meta.get("ensemble_method") or "").strip().lower()
+            not in ("", "none")
+        )
+        if is_ensemble:
+            for key in (
+                "is_ensemble",
+                "ensemble_method",
+                "base_model_files",
+                "meta_model_file",
+                "base_model_fill_values",
+                "meta_learner",
+                "fold_method",
+                "n_folds",
+                "oof_predictions",
+            ):
+                child_meta.pop(key, None)
+            child_meta["is_ensemble"] = False
+
+        metrics = build_algorithm_metrics(mtype, parent_meta, comparison)
+        if metrics is not None:
+            child_meta["metrics"] = metrics
+        elif mtype != primary_type:
+            # 取不到该算法指标时宁可缺省，也不回填主模型指标
+            child_meta.pop("metrics", None)
+
+        entry = comparison.get(mtype)
+        if isinstance(entry, dict):
+            elapsed = entry.get("elapsed_seconds")
+            if isinstance(elapsed, (int, float)) and not isinstance(elapsed, bool):
+                child_meta["elapsed_seconds"] = elapsed
+
+        if mtype == "xgboost":
+            child_meta["best_iteration"] = read_xgboost_best_iteration(
+                child_dir / model_file
+            )
+
+        # SHAP 仅 LightGBM 基模型有产出：归属 lgb 子模型，其余显式禁用
+        if mtype == "lightgbm" and (parent_dir / "shap_summary.csv").is_file():
+            shutil.copy2(
+                parent_dir / "shap_summary.csv", child_dir / "shap_summary.csv"
+            )
+        else:
+            child_meta["shap"] = {
+                "enabled": False,
+                "status": "disabled",
+                "reason": f"SHAP 仅对 LightGBM 基模型计算（当前算法 {model_type}）",
+            }
+
+        child_meta.update(
+            self._materialize_child_predictions(
+                child_dir=child_dir,
+                model_type=mtype,
+                per_algo_pred=self._find_per_algorithm_pred(parent_dir, job_dir, mtype),
+                parent_dir=parent_dir,
+                is_primary=mtype == primary_type,
+                is_ensemble=is_ensemble,
+                parent_pred_md5s=parent_pred_md5s,
+            )
+        )
+        return child_meta
+
     async def split_multi_model_entries(
         self, *, tenant_id: str, user_id: str, model_id: str
     ) -> list[dict[str, Any]]:
@@ -1799,8 +2077,14 @@ class ModelRegistryService:
         其余算法的权重虽在目录里却无法被选中 —— 用户训练 13 个模型却只看到 1 个。
 
         本方法按 metadata.saved_models 为每个算法生成独立目录（该算法的权重 +
-        推理脚本 + 预测/结果）与独立 DB 记录；metadata 重写为单模型形态。
+        推理脚本 + **该算法自己的预测/结果**）与独立 DB 记录；metadata 重写为
+        单算法形态（架构参数、指标、score_direction 都按算法各自重建）。
         确定性 model_id + ON CONFLICT 保证重复调用幂等。
+
+        预测量来源：训练任务工作目录的 `pred_{model_type}.parquet`（训练端为每个
+        基模型独立写出）；只有主算法（非集成训练）能沿用父份——父份本就是它的
+        预测；其余算法找不到自己的预测时如实标记 pred_source=unavailable，
+        不复制父份冒充。
 
         返回新建/更新的条目列表；单算法模型返回空列表。
         """
@@ -1821,16 +2105,37 @@ class ModelRegistryService:
         if not isinstance(saved, dict) or len(saved) <= 1:
             return []  # 单算法训练，无需拆分
 
-        # 随每条子模型一起复制的共享产物（推理脚本 + 预测/结果，缺则跳过）
-        _shared = ("inference.py", "pred.parquet", "pred.pkl", "result.json", "config.yaml")
+        from backend.shared.training_runtime import training_jobs_dir
+
+        run_id = str(meta.get("run_id") or "").strip()
+        job_dir = training_jobs_dir(run_id) if run_id else None
+        comparison = comparison_index(meta)
+        primary_type = (
+            str(meta.get("primary_model_type") or meta.get("model_type") or "")
+            .strip()
+            .lower()
+        )
+        parent_pred_md5s = {
+            name: self._file_md5(base_dir / name)
+            for name in ("pred.parquet", "pred.pkl")
+        }
+
+        # 随每条子模型一起复制的共享产物（推理脚本 / 训练配置 / 运行结果，缺则跳过）
+        _shared = ("inference.py", "config.yaml", "result.json")
         created: list[dict[str, Any]] = []
         now = datetime.now(timezone.utc)
         for mtype, filename in saved.items():
+            mtype_key = str(mtype)
             fname = str(filename or "").strip()
-            if not fname or not (base_dir / fname).is_file():
+            # saved_models 的值来自 metadata：拒绝带路径分隔符的名字，
+            # 避免越出模型目录复制/写入
+            if not fname or Path(fname).name != fname:
+                logger.warning("拆分子模型：权重文件名非法，跳过 %s/%s", model_id, fname)
+                continue
+            if not (base_dir / fname).is_file():
                 logger.warning("拆分子模型：权重缺失，跳过 %s/%s", model_id, fname)
                 continue
-            child_id = self._child_model_id(model_id, str(mtype))
+            child_id = self._child_model_id(model_id, mtype_key)
             child_dir = base_dir.parent / child_id
             try:
                 child_dir.mkdir(parents=True, exist_ok=True)
@@ -1841,24 +2146,30 @@ class ModelRegistryService:
                         dest = child_dir / shared
                         if src.resolve() != dest.resolve():
                             shutil.copy2(src, dest)
-                child_meta = {
-                    **meta,
-                    "model_id": child_id,
-                    "source_run_id": f"{record.get('source_run_id') or ''}_{mtype}",
-                    "is_multi_model": False,
-                    "model_types": [mtype],
-                    "model_type": mtype,
-                    "primary_model_type": mtype,
-                    "model_file": fname,
-                    "saved_models": {mtype: fname},
-                }
+                child_meta = self._build_child_model_metadata(
+                    parent_meta=meta,
+                    record=record,
+                    model_type=mtype_key,
+                    model_file=fname,
+                    child_id=child_id,
+                    child_dir=child_dir,
+                    parent_dir=base_dir,
+                    job_dir=job_dir,
+                    comparison=comparison,
+                    primary_type=primary_type,
+                    parent_pred_md5s=parent_pred_md5s,
+                )
                 (child_dir / "metadata.json").write_text(
-                    json.dumps(child_meta, ensure_ascii=False, indent=2), encoding="utf-8"
+                    json.dumps(child_meta, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.warning("拆分子模型失败 %s (%s): %s", model_id, mtype, exc)
                 continue
 
+            child_metrics_json = build_child_metrics_json(
+                comparison.get(mtype_key.lower())
+            )
             async with get_session() as session:
                 await session.execute(
                     text(
@@ -1892,17 +2203,21 @@ class ModelRegistryService:
                         "model_file": fname,
                         "metadata_json": json.dumps(child_meta, ensure_ascii=False),
                         "metrics_json": json.dumps(
-                            record.get("metrics_json") or {}, ensure_ascii=False
+                            child_metrics_json, ensure_ascii=False
                         ),
                         "created_at": now,
                         "updated_at": now,
                     },
                 )
-            created.append({"model_id": child_id, "model_type": mtype, "model_file": fname})
+            created.append(
+                {"model_id": child_id, "model_type": mtype, "model_file": fname}
+            )
         if created:
             logger.info(
                 "多算法模型 %s 拆分为 %d 条单模型记录: %s",
-                model_id, len(created), [c["model_type"] for c in created],
+                model_id,
+                len(created),
+                [c["model_type"] for c in created],
             )
         return created
 
@@ -2309,7 +2624,9 @@ class ModelRegistryService:
         job_dir = training_jobs_dir(run_id)
 
         # 多模型模式：metadata.json 里 saved_models 记录了全部基模型文件名
-        # （model_gru.pth / model_mlp.pkl 等新后缀名不在静态白名单），动态展开补全
+        # （model_gru.pth / model_mlp.pkl 等新后缀名不在静态白名单），动态展开补全；
+        # 同时带上训练端为每个基模型独立写出的 pred_{type}.parquet，
+        # 拆分（split_multi_model_entries）要靠它给子模型自己的预测。
         for predefined_dir in (target_dir, job_dir):
             meta_path = predefined_dir / "metadata.json"
             if meta_path.is_file():
@@ -2317,6 +2634,11 @@ class ModelRegistryService:
                     saved = json.loads(meta_path.read_text(encoding="utf-8")).get("saved_models") or {}
                     artifact_names.extend(
                         v for v in saved.values() if v not in artifact_names
+                    )
+                    artifact_names.extend(
+                        f"pred_{mtype}.parquet"
+                        for mtype in saved
+                        if f"pred_{mtype}.parquet" not in artifact_names
                     )
                 except Exception:
                     pass
