@@ -238,6 +238,7 @@ export const UsValuationPanel: React.FC = () => {
             options={KIND_OPTIONS}
             value={kind}
             onChange={(id) => setKind(id as RankKind)}
+            accent="blue"
           />
         }
       >

@@ -131,16 +131,26 @@ export function EmptyHint({ text = '暂无数据', loading = false }: { text?: s
   );
 }
 
-/** 周期 chip 切换 */
+/** 周期/分类 chip 切换
+ *
+ * `accent` 控制选中态主色：港股与 A 股用默认的紫色，美股模块用蓝色
+ * （各市场模块有自己的主题色，共享组件不写死单一市场配色）。
+ */
 export function PeriodChips({
   options,
   value,
   onChange,
+  accent = 'purple',
 }: {
   options: Array<{ id: string; label: string }>;
   value: string;
   onChange: (id: string) => void;
+  accent?: 'purple' | 'blue';
 }) {
+  const activeCls =
+    accent === 'blue'
+      ? 'bg-white text-blue-700 shadow-2xs border border-blue-200'
+      : 'bg-white text-purple-700 shadow-2xs border border-purple-200';
   return (
     <div className="flex items-center gap-1 rounded-full bg-slate-100 p-0.5">
       {options.map((opt) => (
@@ -148,9 +158,7 @@ export function PeriodChips({
           key={opt.id}
           onClick={() => onChange(opt.id)}
           className={`px-3 py-1 rounded-full text-[11px] font-extrabold transition-all ${
-            value === opt.id
-              ? 'bg-white text-purple-700 shadow-2xs border border-purple-200'
-              : 'text-slate-500 hover:text-slate-800'
+            value === opt.id ? activeCls : 'text-slate-500 hover:text-slate-800'
           }`}
         >
           {opt.label}

@@ -75,6 +75,7 @@ export const UsBreadthHighlightsPanel: React.FC = () => {
           options={TABS}
           value={tab}
           onChange={(id) => setTab(id as HighlightTab)}
+          accent="blue"
         />
         <span className="text-[10px] font-mono text-slate-400 whitespace-nowrap">
           {rows.length} 只
