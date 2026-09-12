@@ -55,21 +55,39 @@ console.log('登录后:', p.url());
 let pass = 0, total = 0;
 const check = (ok, label) => { total++; if (ok) pass++; console.log(`${ok ? '✓' : '✗'} ${label}`); };
 
+/** 切市场：先等应用水合到可交互（导航栏出现），再点轮询确认生效 */
+async function switchMarket(page, radioLabel, wantKey) {
+  for (let attempt = 0; attempt < 4; attempt++) {
+    await page.locator('a,button', { hasText: '推理中心' }).first()
+      .waitFor({ state: 'visible', timeout: 25000 }).catch(() => {});
+    await page.waitForTimeout(2000);
+    const radio = page.locator('button[role=radio]', { hasText: radioLabel }).first();
+    if (await radio.count()) {
+      await radio.click({ timeout: 10000 }).catch((e) => console.log('  · 点击市场按钮失败:', String(e).slice(0, 70)));
+    }
+    for (let i = 0; i < 8; i++) {
+      await page.waitForTimeout(700);
+      if ((await page.evaluate(() => localStorage.getItem('qm:current_market'))) === wantKey) return true;
+    }
+  }
+  return false;
+}
+
 for (const mk of TO_RUN) {
   console.log(`\n========== ${mk.key} 推理中心 ==========`);
   await p.goto(`${BASE}/`, { waitUntil: 'domcontentloaded' });
-  const radio = p.locator('button[role=radio]', { hasText: mk.radio }).first();
-  await radio.waitFor({ state: 'visible', timeout: 25000 }).catch(() => {});
-  if (await radio.count()) { await radio.click(); await p.waitForTimeout(2500); }
+  const switched = await switchMarket(p, mk.radio, mk.key);
   const market = await p.evaluate(() => localStorage.getItem('qm:current_market'));
-  check(market === mk.key, `市场已切到 ${mk.key}（localStorage=${market}）`);
+  check(switched, `市场已切到 ${mk.key}（localStorage=${market}）`);
 
   const nav = p.locator('a,button', { hasText: '推理中心' }).first();
   await nav.waitFor({ state: 'visible', timeout: 20000 }).catch(() => {});
   await p.waitForTimeout(1000);
   const navOk = await nav.click({ timeout: 8000 }).then(() => true).catch(() => false);
   if (!navOk) { console.log('✗ 未能点开推理中心导航'); continue; }
-  await p.waitForTimeout(5000);
+  // 等页面挂载出 h1，而不是固定 sleep
+  await p.locator('h1', { hasText: '模型推理中心' }).first().waitFor({ state: 'visible', timeout: 30000 }).catch(() => {});
+  await p.waitForTimeout(2500);
 
   const h1 = (await p.locator('h1').first().innerText().catch(() => '')).replace(/\s+/g, ' ').trim();
   check(h1.includes('模型推理中心'), `页面标题（实测 h1="${h1}"）`);
@@ -95,8 +113,9 @@ for (const mk of TO_RUN) {
 
   await input.click();
   await input.fill(mk.query);
-  await p.waitForTimeout(3000);
   const sug = p.locator('div.absolute > div', { hasText: mk.hint }).first();
+  // 等联想项出现（首次列表请求要建缓存，冷启动可能超过 5s）
+  await sug.waitFor({ state: 'visible', timeout: 25000 }).catch(() => {});
   let picked = false;
   if (await sug.count()) {
     await sug.click({ timeout: 6000 }).catch(() => {});
@@ -106,7 +125,9 @@ for (const mk of TO_RUN) {
     await p.locator('body').click({ position: { x: 5, y: 5 } }).catch(() => {});
   }
   check(picked, `搜索「${mk.query}」出现联想项「${mk.hint}」`);
-  await p.waitForTimeout(9000);
+  // 等结果区真正出现（首次预测可能要跑模型，最长给 90s），而不是固定 sleep 后碰运气
+  await p.locator('text=模型信号分数').first().waitFor({ state: 'visible', timeout: 90000 }).catch(() => {});
+  await p.waitForTimeout(1500);
 
   f = flat(await p.locator('body').innerText().catch(() => ''));
   check(f.includes(mk.currency), `货币符号「${mk.currency}」正确`);

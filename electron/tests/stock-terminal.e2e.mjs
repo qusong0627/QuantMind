@@ -78,21 +78,37 @@ let pass = 0;
 let total = 0;
 const check = (ok, label) => { total++; if (ok) pass++; console.log(`${ok ? '✓' : '✗'} ${label}`); };
 
+/** 切市场：先等应用水合到可交互（导航栏出现），再点轮询确认生效。
+ *  直接点会落在启动遮罩/初始化窗口里被吞掉，表现为 localStorage 一直是旧值。
+ *  点不通时回落为直接设置 localStorage + 重载（并显式记录，不静默降级）。 */
+async function switchMarket(radioLabel, wantKey) {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    await p.locator('a,button', { hasText: '个股终端' }).first()
+      .waitFor({ state: 'visible', timeout: 25000 }).catch(() => {});
+    await p.waitForTimeout(2000);
+    const radio = p.locator('button[role=radio]', { hasText: radioLabel }).first();
+    if (await radio.count()) {
+      await radio.click({ timeout: 10000 }).catch((e) => console.log('  · 点击市场按钮失败:', String(e).slice(0, 70)));
+    }
+    for (let i = 0; i < 8; i++) {
+      await p.waitForTimeout(700);
+      if ((await p.evaluate(() => localStorage.getItem('qm:current_market'))) === wantKey) return true;
+    }
+  }
+  console.log(`  · 点击切换未生效，回落为直接设置 localStorage 并重载（市场切换器本身由 us-market-analysis.e2e 覆盖）`);
+  await p.evaluate((m) => localStorage.setItem('qm:current_market', m), wantKey);
+  await p.reload({ waitUntil: 'domcontentloaded' });
+  await p.waitForTimeout(4000);
+  return (await p.evaluate(() => localStorage.getItem('qm:current_market'))) === wantKey;
+}
+
 for (const mk of MARKETS_TO_RUN) {
   console.log(`\n========== ${mk.key} 个股终端 ==========`);
   // 市场切换器在首页/看板头部，个股终端页内部没有再渲染它 —— 必须先切市场再进页面
   await p.goto(`${BASE}/`, { waitUntil: 'domcontentloaded' });
-  const radio = p.locator('button[role=radio]', { hasText: mk.radio }).first();
-  // 重载后要等鉴权恢复 + 市场按钮渲染出来（固定 sleep 会偶发扑空）
-  await radio.waitFor({ state: 'visible', timeout: 25000 }).catch(() => {});
-  if (await radio.count()) {
-    await radio.click();
-    await p.waitForTimeout(2500);
-  } else {
-    console.log(`⚠ 未找到「${mk.radio}」市场切换按钮`);
-  }
+  const switched = await switchMarket(mk.radio, mk.key);
   const marketNow = await p.evaluate(() => localStorage.getItem('qm:current_market'));
-  check(marketNow === mk.key, `市场已切到 ${mk.key}（localStorage=${marketNow}）`);
+  check(switched, `市场已切到 ${mk.key}（localStorage=${marketNow}）`);
 
   // 进入个股终端（导航项与三市场共用同一条）
   const nav = p.locator('a,button', { hasText: '个股终端' }).first();
@@ -112,16 +128,26 @@ for (const mk of MARKETS_TO_RUN) {
   if (!(await input.count())) { console.log('✗ 未进入终端页（无搜索框），跳过本市场'); continue; }
 
   // 搜索并选中：点建议项里带该标的中文名的那一条（不要盲点第一个按钮）
-  await input.click();
-  await input.fill(mk.query);
-  await p.waitForTimeout(3000);
-  const typed = await input.inputValue().catch(() => '');
   const sug = p.locator('button', { hasText: mk.klineHint }).first();
-  const sugCount = await sug.count();
-  console.log(`  · 输入值="${typed}" 建议项数=${sugCount}`);
-  const picked = await sug.click({ timeout: 6000 }).then(() => true).catch(() => false);
+  let sugCount = 0;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    await input.click();
+    await input.fill('');
+    await input.fill(mk.query);
+    // 等联想项出现（首次列表请求要建 universe 缓存，冷启动可能超过 5s）
+    await sug.waitFor({ state: 'visible', timeout: 25000 }).catch(() => {});
+    sugCount = await sug.count();
+    if (sugCount) break;
+    console.log(`  · 第 ${attempt + 1} 次搜索无联想，重试`);
+    await p.waitForTimeout(2000);
+  }
+  console.log(`  · 输入值="${await input.inputValue().catch(() => '')}" 建议项数=${sugCount}`);
+  const picked = await sug.click({ timeout: 8000 }).then(() => true).catch(() => false);
   check(picked, `搜索「${mk.query}」后选中建议项「${mk.klineHint}」`);
-  await p.waitForTimeout(9000);
+  // 等 K 线画出来 + 右侧详情体的首个 Tab 渲染（详情体自己有一次聚合请求）
+  await p.locator('canvas').first().waitFor({ state: 'visible', timeout: 60000 }).catch(() => {});
+  await p.locator('button', { hasText: mk.tabs[0] }).first().waitFor({ state: 'visible', timeout: 45000 }).catch(() => {});
+  await p.waitForTimeout(2000);
 
   f = flat(await p.locator('body').innerText().catch(() => ''));
   check(f.includes(mk.klineHint), `选中标的名出现（${mk.klineHint}）`);
