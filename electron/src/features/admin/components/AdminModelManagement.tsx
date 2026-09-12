@@ -27,16 +27,21 @@ const MODEL_MARKET_OPTIONS = [
     { value: 'hong_kong', label: '港股', color: 'blue' },
     { value: 'us_stock', label: '美股', color: 'green' },
     { value: 'crypto', label: '加密', color: 'purple' },
+    { value: 'futures', label: '期货', color: 'orange' },
 ];
 
 function extractModelMarket(model: ModelDirectoryInfo): string {
     const meta = model.metadata || {};
     const wf = model.workflow_config || {};
     const qlib = model.qlib_config || {};
-    const raw = String(meta.market || wf.market || qlib.market || '').toLowerCase();
+    // context.market 必须兜底：训练脚本把市场写在 metadata.context 里，
+    // 早期产物顶层没有 market 字段，只读顶层会把美股/港股模型统统显示成「A股」。
+    const ctxMarket = (meta.context as { market?: string } | undefined)?.market || '';
+    const raw = String(meta.market || ctxMarket || wf.market || qlib.market || '').toLowerCase();
     if (raw.includes('hk') || raw.includes('hong_kong') || raw.includes('港股')) return 'hong_kong';
     if (raw.includes('us') || raw.includes('美股')) return 'us_stock';
     if (raw.includes('crypto') || raw.includes('加密')) return 'crypto';
+    if (raw.includes('futures') || raw.includes('期货')) return 'futures';
     if (raw.includes('cn') || raw.includes('a_share') || raw.includes('a股') || raw.includes('sh') || raw.includes('sz')) return 'a_share';
     return 'a_share'; // default
 }

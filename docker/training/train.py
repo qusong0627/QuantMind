@@ -1246,6 +1246,9 @@ def main() -> int:
             if dl_metadata:
                 metadata.update(dl_metadata)
 
+            # 顶层 market 显式落盘：管理后台按 `metadata.market` 识别市场，
+            # 只写 context.market 会让模型在扫描列表里显示成默认的「A股」。
+            metadata["market"] = market
             metadata_bytes = json.dumps(_sanitize_nan_inf(metadata), ensure_ascii=False, indent=2).encode()
             (Path(_QM_WS) / "metadata.json").write_bytes(metadata_bytes)
             logger.info("metadata.json saved locally")
@@ -1464,6 +1467,9 @@ def main() -> int:
             if dl_metadata:
                 metadata.update(dl_metadata)
 
+            # 顶层 market 显式落盘：管理后台按 `metadata.market` 识别市场，
+            # 只写 context.market 会让模型在扫描列表里显示成默认的「A股」。
+            metadata["market"] = market
             metadata_bytes = json.dumps(_sanitize_nan_inf(metadata), ensure_ascii=False, indent=2).encode()
             (Path(_QM_WS) / "metadata.json").write_bytes(metadata_bytes)
             logger.info("metadata.json saved locally")

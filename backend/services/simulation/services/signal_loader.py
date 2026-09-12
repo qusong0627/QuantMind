@@ -21,10 +21,19 @@ def _market_where(market: str | None) -> str:
     if not market:
         return ""
     m = str(market).upper()
+    # 只接受字母数字的市场名，避免把外部输入拼进 SQL
+    if not m.isalnum():
+        logger.warning("signal_loader: 非法 market=%r，按不加市场条件处理", market)
+        return ""
     if m in ("A", "CN"):
         return " AND (universe_tag IS NULL OR universe_tag = 'CN')"
-    # 非 CN（HK）：当日新行看 universe_tag；HK 历史老行（无 tag）按模型桶兜底
-    return " AND (universe_tag = 'HK' OR feature_version LIKE 'script_v1_mdl_hk_%')"
+    if m == "HK":
+        # HK 有历史老行（无 tag），按模型桶兜底
+        return " AND (universe_tag = 'HK' OR feature_version LIKE 'script_v1_mdl_hk_%')"
+    # 其它市场（US/CRYPTO/FUTURES）：按 universe_tag 精确匹配。
+    # 这些市场没有「历史无 tag 存量行」，不需要 LIKE 兜底。
+    # 注意：此前非 CN 一律按 HK 过滤，US 查出来永远为空（静默无信号）。
+    return f" AND universe_tag = '{m}'"
 
 
 def _to_market_symbol(symbol: str, market: str | None) -> str:

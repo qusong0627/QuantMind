@@ -123,8 +123,11 @@ services:
       # 训练期间资源保护：训练开始时 stop 非保护容器以释放内存，结束后自动恢复。
       # 受保护前缀（按容器名前缀匹配，不会被停止）：quantmind* 和 qm-train-* 自身，
       # 加上 ragflow 套件依赖的基础设施（redis/mysql/es/minio）。
+      # ⚠️ 未在名单内且正在运行的容器会在训练期间被 stop 以腾内存 ——
+      # 本机曾因此把 baymax-* / l2-sata-fuse 等业务容器停掉。新增业务容器时
+      # 务必把前缀补进这个名单（或用 TRAINING_PAUSE_OTHERS=false 整体关闭）。
       - TRAINING_PAUSE_OTHERS=true
-      - TRAINING_PROTECTED_NAME_PREFIXES=quantmind,qm-train-,docker-redis-,docker-mysql-,docker-es01-,docker-minio-
+      - TRAINING_PROTECTED_NAME_PREFIXES=quantmind,qm-train-,docker-redis-,docker-mysql-,docker-es01-,docker-minio-,baymax-,l2-
 
       # 融资融券股票池文件路径（容器内）
       - MARGIN_STOCK_POOL_PATH=/data/融资融券.json

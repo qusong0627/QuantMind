@@ -38,11 +38,19 @@ _MARKET_DIR_NAMES = {
     "FUTURES": "quantfutures",
 }
 
-# 训练脚本候选：便携包把 docker/training/train.py 复制到包根目录，
-# 仓库 / 容器内则保留原 docker/training/ 相对布局。
+# 训练脚本候选：现行布局是「docker/training/ 整目录」（train.py 顶层 import
+# model_trainers/diagnostics/data 同级包，必须整目录在场），因此**活源码优先**。
+#
+# 顺序不能反：容器内 /app/train.py 是镜像构建时 COPY 进来的快照，会随源码演进
+# 变旧（实测落后 120 行，缺 OOF purge、集成指标口径等修复），而 /app/docker/training
+# 是 compose 外挂载的活源码。根级 train.py 排在后面只为兼容 macOS 便携包
+# （build_macos_pack.sh 仍把它复制到包根；其余包的 sync_from_git.sh 会主动删掉
+# 根级残留，理由同样是「会误导脚本探测」）。
+#
+# 与 remote_ssh_orchestrator._resolve_train_script 的候选顺序保持一致。
 _SCRIPT_REL_CANDIDATES = (
-    "train.py",
     "docker/training/train.py",
+    "train.py",
 )
 
 # 直跑训练依赖探测（importlib find_spec，不真正导入，毫秒级）

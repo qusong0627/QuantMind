@@ -1224,8 +1224,8 @@ class InferenceScriptRunner:
                 prediction_trade_date=prediction_trade_date,
             )
 
-        # 解析信号
-        signals = self._parse_signals(str(out_file))
+        # 解析信号（传市场：非 CN 跳过 A 股专用剔除规则，避免静默丢美股标的）
+        signals = self._parse_signals(str(out_file), model_market)
         if signals is None:
             return ExecutionResult(
                 success=False,
@@ -1472,19 +1472,39 @@ class InferenceScriptRunner:
             return set()
 
     @staticmethod
-    def _normalize_code(code: str) -> str:
-        """提取纯 6 位数字代码，去掉 SH/SZ/BJ 前缀和 .SH/.SZ/.BJ 后缀。"""
-        c = code.strip().upper()
-        for prefix in ("SH", "SZ", "BJ"):
-            if c.startswith(prefix):
-                c = c[len(prefix):]
-                break
-        c = c.split(".")[0]
+    def _normalize_code(code: str, market: str | None = None) -> str:
+        """按市场归一 symbol。
+
+        - **CN/A（默认）**：去 SH/SZ/BJ 前缀与 .SH/.SZ/.BJ 后缀，得纯 6 位数字
+          （engine_signal_scores.symbol 的历史约定）。
+        - **HK**：去 .HK/.HJ 后缀，保留 4 位数字。
+        - **US/CRYPTO/FUTURES**：**原样返回**（仅去空白/大写）。
+
+        ⚠️ 非 A 股绝不能沿用「剥前缀 + 切点」的写法：美股 ticker 与交易所前缀
+        同形（SHOP→OP、SHW→W、BJ→空串、SHAK→AK），含点的 ticker 也会被切坏
+        （BRK.B→BRK）。这类损坏**不抛错、只写脏 symbol**，落库后行情查价键
+        还会拼成 stock:OP.SH，极难排查 —— 实测 484 只美股池里 SHOP/SHW 就在其中。
+        """
+        c = (code or "").strip().upper()
+        if not c:
+            return c
+        mkt = str(market or "CN").upper()
+        if mkt in ("CN", "A", ""):
+            for prefix in ("SH", "SZ", "BJ"):
+                if c.startswith(prefix):
+                    c = c[len(prefix):]
+                    break
+            return c.split(".")[0]
+        if mkt == "HK":
+            # 港股主键为 4 位数字（0700.HK → 0700）
+            return c.split(".")[0]
+        # 美股/加密/期货：ticker 本身即主键，不做任何裁剪
         return c
 
     @staticmethod
     def _normalize_signal_symbols(
         signals_sorted: list[dict],
+        market: str | None = None,
     ) -> tuple[list[str], list[str]]:
         """返回 (raw_symbols, plain_symbols)。
 
@@ -1492,9 +1512,14 @@ class InferenceScriptRunner:
         QuantDB 直读模型的 symbol 是前缀（SH600097）或后缀（600097.SH），
         落库/信号流/position_score 一律用归一后的纯数字；原始格式仅保留
         给行情 Redis 查价（需要市场前缀定位 stock:{code}.SH）。
+
+        **非 A 股市场由 `_normalize_code(market=...)` 原样保留 ticker**，
+        不做前缀/后缀裁剪（见该函数注释：美股 SHOP/SHW 会被剥成 OP/W）。
         """
         raw = [str(s["symbol"]) for s in signals_sorted]
-        return raw, [InferenceScriptRunner._normalize_code(x) for x in raw]
+        return raw, [
+            InferenceScriptRunner._normalize_code(x, market) for x in raw
+        ]
 
     @staticmethod
     def _is_st_symbol(symbol: str, st_symbols: set[str], st_normalized: set[str] | None = None) -> bool:
@@ -1507,8 +1532,14 @@ class InferenceScriptRunner:
         return sym_code in st_normalized if sym_code else False
 
     @staticmethod
-    def _parse_signals(file_path: str) -> list[dict] | None:
-        """从指定的 json 文件读取信号数组，解析成功后自动删除文件。返回 None 表示失败。"""
+    def _parse_signals(file_path: str, market: str | None = None) -> list[dict] | None:
+        """从指定的 json 文件读取信号数组，解析成功后自动删除文件。返回 None 表示失败。
+
+        `market` 决定是否施加 **A 股专用的剔除规则**（B 股/北交所/指数/ST）。
+        非 A 股市场必须跳过这些规则：美股 ticker 与 A 股代码形态重叠，
+        按 A 股规则过滤会**静默丢标的** —— 例如 BJ's Wholesale 的 `BJ` 被
+        北交所规则丢弃、名称以 ST 开头的美股（STARBUCKS 之类）被 ST 规则丢弃。
+        """
         p = Path(file_path)
         if not p.is_file():
             return None
@@ -1529,6 +1560,8 @@ class InferenceScriptRunner:
         # 获取 ST 股票列表（预计算标准化代码集合）
         st_symbols = InferenceScriptRunner._get_st_symbols()
         st_normalized = {InferenceScriptRunner._normalize_code(s) for s in st_symbols}
+        # A 股专用剔除规则只对 CN 生效（见 docstring）
+        is_cn = str(market or "CN").upper() in ("CN", "A", "")
 
         valid = []
         for item in data:
@@ -1536,39 +1569,46 @@ class InferenceScriptRunner:
                 try:
                     symbol = str(item["symbol"]).strip().upper()
                     # 1. 排除 B 股: 上海 B (900xxx), 深圳 B (200xxx)
-                    if symbol.startswith("SH900") or symbol.startswith("SZ200"):
+                    if is_cn and symbol.startswith("SH900"):
                         continue
-                    if ".SH" in symbol and symbol.startswith("900"):
+                    if is_cn and symbol.startswith("SZ200"):
                         continue
-                    if ".SZ" in symbol and symbol.startswith("200"):
+                    if is_cn and ".SH" in symbol and symbol.startswith("900"):
+                        continue
+                    if is_cn and ".SZ" in symbol and symbol.startswith("200"):
                         continue
                     # 处理无前缀的纯数字
-                    if symbol.isdigit() and len(symbol) == 6:
+                    if is_cn and symbol.isdigit() and len(symbol) == 6:
                         if symbol.startswith("900") or symbol.startswith("200"):
                             continue
 
                     # 2. 排除北交所: BJ 前缀或 .BJ 后缀，或数字开头 (43, 83, 87, 88)
-                    if symbol.startswith("BJ") or ".BJ" in symbol:
+                    if is_cn and symbol.startswith("BJ"):
                         continue
-                    if symbol.startswith(("43", "83", "87", "88", "92")):
+                    if is_cn and ".BJ" in symbol:
+                        continue
+                    if is_cn and symbol.startswith(("43", "83", "87", "88", "92")):
                         continue
 
                     # 3. 排除指数代码: SH000xxx, SZ399xxx 等
-                    if symbol.startswith("SH000") or symbol.startswith("SZ399"):
+                    if is_cn and symbol.startswith("SH000"):
                         continue
-                    if symbol.startswith("000") and symbol.endswith(".SH"):
+                    if is_cn and symbol.startswith("SZ399"):
                         continue
-                    if symbol.startswith("399") and symbol.endswith(".SZ"):
+                    if is_cn and symbol.startswith("000") and symbol.endswith(".SH"):
+                        continue
+                    if is_cn and symbol.startswith("399") and symbol.endswith(".SZ"):
                         continue
 
                     # 4. 排除 ST/*ST 股票（代码匹配 + 名称匹配）
-                    sym_code = InferenceScriptRunner._normalize_code(symbol)
-                    if sym_code and sym_code in st_normalized:
-                        continue
-                    # 名称包含 ST 的也要排除（兜底）
-                    name = str(item.get("name", "")).upper()
-                    if "ST" in name and ("*" in name or name.startswith("ST")):
-                        continue
+                    if is_cn:
+                        sym_code = InferenceScriptRunner._normalize_code(symbol, market)
+                        if sym_code and sym_code in st_normalized:
+                            continue
+                        # 名称包含 ST 的也要排除（兜底）
+                        name = str(item.get("name", "")).upper()
+                        if "ST" in name and ("*" in name or name.startswith("ST")):
+                            continue
 
                     # 置信度：缺失/非数值一律视为 None（不因单个字段异常丢整只标的）
                     conf_raw = item.get("confidence")
@@ -1630,7 +1670,7 @@ class InferenceScriptRunner:
         # symbol 统一归一为纯数字（落库/信号流/position_score 约定），
         # raw 保留原始格式给行情 Redis 查价
         raw_symbols, symbols = InferenceScriptRunner._normalize_signal_symbols(
-            signals_sorted
+            signals_sorted, market
         )
         scores = [s["score"] for s in signals_sorted]
         consensus_list = [s.get("consensus", 0) for s in signals_sorted]

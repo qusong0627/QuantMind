@@ -211,7 +211,14 @@ def _validate_config_dict(run_id: str, config: dict) -> dict:
 
 class LocalDockerOrchestrator(TrainingOrchestrator):
     def __init__(self):
-        self.docker = DockerClient.from_env()
+        # 显式放宽 docker 客户端读超时：docker SDK 默认 60s，而训练容器是 17GB 镜像
+        # + 10 余个 bind 挂载（含整个 data/quantus 数据根），首次创建/启动常超过 60s。
+        # 实测容器已 Created 但 start 未在 60s 内返回 → run() 抛 ReadTimeout，
+        # 编排器记 ERROR「docker run failed」，而容器随后照常跑起来 ——
+        # 表现为「界面显示训练失败、实际后台训练正常」，是最难排查的一类假失败。
+        _docker_timeout = int(os.getenv("TRAINING_DOCKER_TIMEOUT", "600"))
+        self.docker = DockerClient.from_env(timeout=_docker_timeout)
+        self._docker_timeout = _docker_timeout
         self.api_base = (
             os.getenv("QUANTMIND_API_BASE_URL") or "http://quantmind-api:8000"
         ).strip()
@@ -966,6 +973,9 @@ class LocalDockerOrchestrator(TrainingOrchestrator):
                 for pkg in _TRAINING_BOOTSTRAP_PIP.split()
             ]
             bootstrap_cmd = " && ".join(bootstrap_cmds) if bootstrap_cmds else "true"
+            # 计时：训练容器的 run（create+start）在 17GB 镜像 + 多挂载下可能数十秒，
+            # 记录耗时便于区分「真的慢」与「客户端超时误报」
+            _t_run = time.monotonic()
             container = await asyncio.to_thread(
                 self.docker.containers.run,
                 _TRAINING_IMAGE,
@@ -999,6 +1009,43 @@ class LocalDockerOrchestrator(TrainingOrchestrator):
         except Exception as e:
             from backend.shared.database_manager_v2 import get_session
             from backend.services.api.routers.admin.db import TrainingJobRecord
+
+            # 客户端超时 ≠ 启动失败：容器可能已经 Created/Running，只是 start 的响应
+            # 未在客户端超时内返回（17GB 镜像 + 十余个 bind 挂载的首次启动实测会超 60s）。
+            # 先按名字回查容器确认，避免把「实际在跑的训练」记成 failed
+            # —— 那是用户最难排查的假失败：界面报错、后台却在训练。
+            try:
+                probe = await asyncio.to_thread(self.docker.containers.get, container_name)
+                if probe.status in ("created", "running"):
+                    if probe.status == "created":
+                        await asyncio.to_thread(probe.start)
+                    logger.warning(
+                        "[%s] docker run 抛出 %s（耗时 %.0fs），但容器 %s 已存在且状态=%s，"
+                        "按启动成功继续（客户端超时误报）",
+                        run_id, type(e).__name__, time.monotonic() - _t_run,
+                        container_name, probe.status,
+                    )
+                    async with get_session() as db:
+                        record = await db.get(TrainingJobRecord, run_id)
+                        if record:
+                            record.status = "running"
+                            record.progress = max(int(record.progress or 0), 12)
+                            record.instance_id = probe.id[:12]
+                            record.logs = (
+                                record.logs or ""
+                            ) + f"Container ID: {probe.id[:12]} (recovered after client timeout)\n"
+                            await db.commit()
+                    self.log_stream.append_log(
+                        run_id=run_id,
+                        tenant_id=tenant_id,
+                        user_id=user_id,
+                        line=f"[SYSTEM] Container ID: {probe.id[:12]}（客户端超时但容器已在运行）",
+                        status="running",
+                        progress=12,
+                    )
+                    return
+            except Exception as probe_err:
+                logger.warning("[%s] 容器回查失败，按启动失败处理: %s", run_id, probe_err)
 
             logger.error("[%s] docker run failed: %s", run_id, e)
             async with get_session() as db:

@@ -2134,6 +2134,9 @@ async def precheck_inference(
     )
     model_dir = Path(resolved.storage_path)
     model_calendar = _get_model_calendar(model_dir)
+    # 生效日推算必须带市场：不传时默认按 A 股（XSHG）日历算 T+1，
+    # 美股会因节假日错位（precheck 展示口径；真正落库那次自带 market）
+    model_market = _get_model_market(model_dir)
     requested_inference_date = (
         inference_date or datetime.now(ZoneInfo("Asia/Shanghai")).date()
     )
@@ -2151,7 +2154,9 @@ async def precheck_inference(
         primary_data_dir=_get_model_data_dir(model_dir),
         primary_model_id=resolved.effective_model_id,
     )
-    prediction_trade_date = runner._resolve_prediction_trade_date(data_trade_date)
+    prediction_trade_date = runner._resolve_prediction_trade_date(
+        data_trade_date, market=model_market
+    )
     items = _build_precheck_items(
         resolved_model_id=requested_model_id,
         model_dir=model_dir,
@@ -2169,7 +2174,7 @@ async def precheck_inference(
             if latest and latest != data_trade_date:
                 data_trade_date = latest
                 prediction_trade_date = runner._resolve_prediction_trade_date(
-                    data_trade_date
+                    data_trade_date, market=model_market
                 )
                 items = _build_precheck_items(
                     resolved_model_id=requested_model_id,
@@ -2261,6 +2266,9 @@ async def _execute_single_day_inference(
     个股独立轻路线用此模式，结果只在前端缓存。
     """
     model_calendar = _get_model_calendar(model_dir)
+    # 生效日推算必须带市场：不传时默认按 A 股（XSHG）日历算 T+1，
+    # 美股会因节假日错位（precheck 展示口径；真正落库那次自带 market）
+    model_market = _get_model_market(model_dir)
     requested_inference_date = requested_date
     resolved_data_trade_date, calendar_adjusted = await _resolve_trade_date_for_owner(
         tenant_id=tenant_id,
@@ -2274,7 +2282,9 @@ async def _execute_single_day_inference(
         primary_data_dir=_get_model_data_dir(model_dir),
         primary_model_id=resolved.effective_model_id,
     )
-    prediction_trade_date = runner._resolve_prediction_trade_date(data_trade_date)
+    prediction_trade_date = runner._resolve_prediction_trade_date(
+        data_trade_date, market=model_market
+    )
     precheck_items = _build_precheck_items(
         resolved_model_id=requested_model_id,
         model_dir=model_dir,
@@ -2291,7 +2301,7 @@ async def _execute_single_day_inference(
             if latest and latest != data_trade_date:
                 data_trade_date = latest
                 prediction_trade_date = runner._resolve_prediction_trade_date(
-                    data_trade_date
+                    data_trade_date, market=model_market
                 )
                 precheck_items = _build_precheck_items(
                     resolved_model_id=requested_model_id,
