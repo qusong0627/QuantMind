@@ -138,6 +138,10 @@ class DLAdapter:
                 "val_m": val_m,
                 "test_m": test_m,
                 "dl_metadata": dl_metadata,
+                # 与 run_dl(single=True) 保持同键名：train.py 的多模型保存段按
+                # res["pred_df"] 取每个基模型的全量预测写出 pred_{type}.parquet，
+                # 只给 full_pred_df 会让 nativetft 的基模型预测被静默跳过。
+                "pred_df": full_pred_df.reset_index(drop=True),
                 "full_pred_df": full_pred_df,
                 "elapsed": time.time() - t_start,
             }

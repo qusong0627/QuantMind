@@ -1200,6 +1200,15 @@ def main() -> int:
                 "model_file": saved_models.get(primary_type, ""),
                 "saved_models": saved_models,
                 "comparison": multi_result["comparison"],
+                # 每个基模型自己的 dl_metadata（架构/输入规格/feat_norm）。
+                # 顶层那几个字段只记录主模型（上面的 ensemble 分支只取 primary_res），
+                # 拆分子模型时只有这里是权威来源 —— 缺了它，主模型是树模型时
+                # DL 子模型的标准化统计量（feat_norm）无法复原。
+                "algorithm_metadata": {
+                    mt: res["dl_metadata"]
+                    for mt, res in multi_result["models"].items()
+                    if res.get("dl_metadata")
+                },
                 "ensemble_method": multi_result["ensemble_method"],
                 "hardware": hardware,
                 "feature_count": len(valid_features),
@@ -1674,7 +1683,12 @@ def main():
     best_iter = meta.get("best_iteration")
     if model_type == "xgb":
         dmat = xgb.DMatrix(X_values, feature_names=list(X_df.columns))
-        scores = model.predict(dmat, iteration_range=(0, best_iter) if best_iter else None)
+        # xgboost>=3.2 不接受 iteration_range=None；无 best_iteration 时不传参
+        # （全部树），与模板 inference_parquet.py 的处理保持一致
+        if best_iter:
+            scores = model.predict(dmat, iteration_range=(0, int(best_iter)))
+        else:
+            scores = model.predict(dmat)
     elif model_type == "catboost":
         scores = model.predict(X_values)
     elif model_type == "sklearn":
