@@ -508,7 +508,12 @@ cat /proc/loadavg 2>/dev/null | awk '{print $1}'
         else:
             try:
                 from docker import DockerClient
-                client = await asyncio.to_thread(DockerClient.from_env)
+                # 放宽读超时：本函数后续会用训练镜像（17GB）起一次性容器跑
+                # nvidia-smi，SDK 默认 60s 常在镜像层首次加载时超时。超时会被
+                # 下面的 except 吞掉并回退「无 GPU」，表现为有卡机器被静默当 CPU 训练。
+                client = await asyncio.to_thread(
+                    DockerClient.from_env, timeout=int(os.getenv("TRAINING_DOCKER_TIMEOUT", "600"))
+                )
                 await asyncio.to_thread(client.ping)
                 result["docker_available"] = True
                 result["docker_error"] = None
@@ -637,7 +642,11 @@ cat /proc/loadavg 2>/dev/null | awk '{print $1}'
                         "name": parts[4],
                     })
         except Exception as exc:
-            logger.warning("docker GPU probe failed: %s", exc)
+            logger.warning(
+                "docker GPU probe failed: %s —— 本次训练将按「无 GPU」回退 CPU 模式"
+                "（若该机器确有显卡，先排查 docker 客户端读超时 / nvidia runtime）",
+                exc,
+            )
         cls._gpu_probe_cache = (now, gpus)
         return gpus
 

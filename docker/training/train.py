@@ -219,15 +219,16 @@ def _save_model(model: Any, model_type: str, out_dir: Path) -> str:
             pickle.dump(model, f)
         return "model.pkl"
     elif model_type in _DL_MODEL_TYPES:
-        # MLP 用 sklearn 实现（存 pkl）；其余 DL 模型在 _train_dl() 中已保存 model.pth
+        # MLP 用 sklearn 实现（存 pkl）；其余 DL 模型的权重已由训练器写出、
+        # 并由 train_multi_models 按类型改名为 model_{type}.pth，
+        # 此处只返回该文件名，不再从固定的 model.pth 改名（多模型会互相覆盖）。
         if model_type == "mlp":
             import pickle
             path = out_dir / "model.pkl"
             with open(path, "wb") as f:
                 pickle.dump(model, f)
             return "model.pkl"
-        # DL 模型在 _train_dl() 中已保存 model.pth，此处仅返回文件名
-        return "model.pth"
+        return f"model_{model_type}.pth"
     else:
         import pickle
         path = out_dir / "model.pkl"
@@ -593,6 +594,16 @@ def train_multi_models(
         model_results[mt] = _train_single_model(
             mt, train_df, val_df, test_df, df, features, cfg, hardware=hardware
         )
+        # DL 权重由训练器固定写到 model.pth（model_trainers/trainers_dl.py），
+        # 多模型循环里会被下一个模型**覆盖**，而下游保存阶段是「_save_model 返回
+        # model.pth，再改名成 model_{type}.pth」——于是只有第一个 DL 模型能改名
+        # 成功，其余 FileNotFoundError 整任务失败。
+        # 这里在该模型预测已完成之后（_train_single_model 内部已跑完 _predict_dl）
+        # 立即按类型改名，保证每个 DL 模型留下自己的权重文件。
+        if mt in _DL_MODEL_TYPES and mt != "mlp":
+            _src = Path(_QM_WS) / "model.pth"
+            if _src.is_file():
+                _src.replace(Path(_QM_WS) / f"model_{mt}.pth")
 
     # 生成对比报告
     comparison_rows = []

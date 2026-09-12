@@ -407,6 +407,9 @@ def _train_dl(
     # DL 元数据 (供推理重建模型)
     dl_metadata = {
         "model_class_name": cls_name,
+        # 记录模型类型：多模型训练时权重文件按类型命名（model_{type}.pth），
+        # 推理侧需要它来定位正确的权重（缺省回退 model.pth 兼容旧产物）
+        "model_type": model_type,
         "model_params": {k: v for k, v in model_params.items() if k not in ("GPU", "n_epochs", "lr", "batch_size", "early_stop", "metric")},
         "is_sequence_model": is_ts,
         "input_spec": {
@@ -725,10 +728,14 @@ def _predict_dl(
     model_params["GPU"] = 0 if torch.cuda.is_available() else -1
     model_obj = model_cls(**model_params)
 
-    # 加载权重
-    model_path = model_dir / "model.pth"
+    # 加载权重：多模型训练下权重按类型命名（model_{type}.pth），
+    # 单模型 / 旧产物回退固定名 model.pth
+    _mt = str(dl_metadata.get("model_type") or "")
+    model_path = model_dir / f"model_{_mt}.pth" if _mt else model_dir / "model.pth"
     if not model_path.exists():
-        raise FileNotFoundError(f"model.pth not found at {model_path}")
+        model_path = model_dir / "model.pth"
+    if not model_path.exists():
+        raise FileNotFoundError(f"DL 权重不存在: 已尝试 model_{_mt}.pth 与 model.pth @ {model_dir}")
 
     state_dict = torch.load(str(model_path), map_location="cpu")
     inner_model = None
@@ -914,9 +921,19 @@ def _predict_nativetft(
     infer_device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     logger.info("NativeTFT inference device: %s", infer_device)
     model = _NativeTFTNet().to(infer_device)
-    model_path = model_dir / "model.pth"
-    if not model_path.exists():
-        raise FileNotFoundError(f"model.pth not found at {model_path}")
+    # 权重定位：多模型训练下按类型命名（model_nativetft.pth）。注意此处
+    # dl_metadata["model_type"] 存的是类名 "NativeTFT"，与注册键大小写不同，
+    # 故依次尝试 原值 / 小写 / 固定名三种候选。
+    _cands = []
+    _mt = str(dl_metadata.get("model_type") or "")
+    if _mt:
+        _cands += [model_dir / f"model_{_mt}.pth", model_dir / f"model_{_mt.lower()}.pth"]
+    _cands.append(model_dir / "model.pth")
+    model_path = next((c for c in _cands if c.exists()), None)
+    if model_path is None:
+        raise FileNotFoundError(
+            f"NativeTFT 权重不存在: 已尝试 {[c.name for c in _cands]} @ {model_dir}"
+        )
     state_dict = torch.load(str(model_path), map_location=infer_device)
     model.load_state_dict(state_dict)
     model.eval()
