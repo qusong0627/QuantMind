@@ -1780,6 +1780,132 @@ class ModelRegistryService:
             ),
         }
 
+    @staticmethod
+    def _child_model_id(base_model_id: str, model_type: str) -> str:
+        """多算法拆分子条目的 model_id（确定性 hash，保证重复执行幂等）。"""
+        digest = hashlib.sha1(
+            f"{base_model_id}:{model_type}".encode("utf-8")
+        ).hexdigest()[:8]
+        safe = "".join(c if c.isalnum() or c in {"_", "-"} else "_" for c in model_type)
+        return f"{base_model_id}_{safe}_{digest}"
+
+    async def split_multi_model_entries(
+        self, *, tenant_id: str, user_id: str, model_id: str
+    ) -> list[dict[str, Any]]:
+        """把一次多算法训练的产出拆成「一个算法一条」的独立模型记录。
+
+        模型库的设计是**一条记录 = 一个算法**：A 股历史记录各自 `model_type`
+        单一，港股那 13 条也是从同一次训练拆出的单模型包。而注册流程只写 1 条，
+        其余算法的权重虽在目录里却无法被选中 —— 用户训练 13 个模型却只看到 1 个。
+
+        本方法按 metadata.saved_models 为每个算法生成独立目录（该算法的权重 +
+        推理脚本 + 预测/结果）与独立 DB 记录；metadata 重写为单模型形态。
+        确定性 model_id + ON CONFLICT 保证重复调用幂等。
+
+        返回新建/更新的条目列表；单算法模型返回空列表。
+        """
+        tenant, user = self._normalize_owner(tenant_id=tenant_id, user_id=user_id)
+        record = await self.get_model(tenant_id=tenant, user_id=user, model_id=model_id)
+        if not record:
+            return []
+        base_dir = Path(str(record.get("storage_path") or ""))
+        meta_path = base_dir / "metadata.json"
+        if not meta_path.is_file():
+            return []
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            logger.warning("拆分子模型：metadata.json 解析失败 %s", meta_path)
+            return []
+        saved = meta.get("saved_models") or {}
+        if not isinstance(saved, dict) or len(saved) <= 1:
+            return []  # 单算法训练，无需拆分
+
+        # 随每条子模型一起复制的共享产物（推理脚本 + 预测/结果，缺则跳过）
+        _shared = ("inference.py", "pred.parquet", "pred.pkl", "result.json", "config.yaml")
+        created: list[dict[str, Any]] = []
+        now = datetime.now(timezone.utc)
+        for mtype, filename in saved.items():
+            fname = str(filename or "").strip()
+            if not fname or not (base_dir / fname).is_file():
+                logger.warning("拆分子模型：权重缺失，跳过 %s/%s", model_id, fname)
+                continue
+            child_id = self._child_model_id(model_id, str(mtype))
+            child_dir = base_dir.parent / child_id
+            try:
+                child_dir.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(base_dir / fname, child_dir / fname)
+                for shared in _shared:
+                    src = base_dir / shared
+                    if src.is_file():
+                        dest = child_dir / shared
+                        if src.resolve() != dest.resolve():
+                            shutil.copy2(src, dest)
+                child_meta = {
+                    **meta,
+                    "model_id": child_id,
+                    "source_run_id": f"{record.get('source_run_id') or ''}_{mtype}",
+                    "is_multi_model": False,
+                    "model_types": [mtype],
+                    "model_type": mtype,
+                    "primary_model_type": mtype,
+                    "model_file": fname,
+                    "saved_models": {mtype: fname},
+                }
+                (child_dir / "metadata.json").write_text(
+                    json.dumps(child_meta, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("拆分子模型失败 %s (%s): %s", model_id, mtype, exc)
+                continue
+
+            async with get_session() as session:
+                await session.execute(
+                    text(
+                        """
+                        INSERT INTO qm_user_models (
+                            tenant_id, user_id, model_id, source_run_id, status, storage_path,
+                            model_file, metadata_json, metrics_json, is_default,
+                            created_at, updated_at, activated_at
+                        ) VALUES (
+                            :tenant_id, :user_id, :model_id, :source_run_id, :status, :storage_path,
+                            :model_file, CAST(:metadata_json AS JSONB), CAST(:metrics_json AS JSONB),
+                            FALSE, :created_at, :updated_at, NULL
+                        )
+                        ON CONFLICT (tenant_id, user_id, model_id)
+                        DO UPDATE SET
+                            status = EXCLUDED.status,
+                            storage_path = EXCLUDED.storage_path,
+                            model_file = EXCLUDED.model_file,
+                            metadata_json = EXCLUDED.metadata_json,
+                            metrics_json = EXCLUDED.metrics_json,
+                            updated_at = EXCLUDED.updated_at
+                        """
+                    ),
+                    {
+                        "tenant_id": tenant,
+                        "user_id": user,
+                        "model_id": child_id,
+                        "source_run_id": str(record.get("source_run_id") or ""),
+                        "status": str(record.get("status") or "candidate"),
+                        "storage_path": str(child_dir.resolve()),
+                        "model_file": fname,
+                        "metadata_json": json.dumps(child_meta, ensure_ascii=False),
+                        "metrics_json": json.dumps(
+                            record.get("metrics_json") or {}, ensure_ascii=False
+                        ),
+                        "created_at": now,
+                        "updated_at": now,
+                    },
+                )
+            created.append({"model_id": child_id, "model_type": mtype, "model_file": fname})
+        if created:
+            logger.info(
+                "多算法模型 %s 拆分为 %d 条单模型记录: %s",
+                model_id, len(created), [c["model_type"] for c in created],
+            )
+        return created
+
     async def register_ensemble_model(
         self,
         *,

@@ -1137,6 +1137,21 @@ async def complete_training_run(
                     result_payload=normalized_result,
                 )
                 normalized_result["model_registration"] = registration
+                # 多算法训练拆分为「一个算法一条」记录：模型库的设计是单算法条目
+                # （A 股历史记录、港股 13 条单模型包皆如此），不拆的话用户训了
+                # 13 个模型却只能在库里看到 1 个。best-effort，失败不影响主注册。
+                try:
+                    base_id = str((registration or {}).get("model_id") or "")
+                    if base_id and str((registration or {}).get("status")) == "ready":
+                        children = await model_registry_service.split_multi_model_entries(
+                            tenant_id=str(record.tenant_id or "default"),
+                            user_id=str(record.user_id or ""),
+                            model_id=base_id,
+                        )
+                        if children:
+                            normalized_result["model_registration"]["sub_models"] = children
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("多算法模型拆分失败 %s: %s", run_id, exc)
                 outcome, summary, reg_error = _registration_outcome(registration)
                 if outcome == "failed":
                     status = "failed"
