@@ -4142,6 +4142,9 @@ async def get_stock_inference_history(
     end_date: str | None = Query(
         None, description="窗口终点YYYY-MM-DD（含当日），缺省今日；个股推理下方30天曲线以基准日为终点，保证与上方K线重叠"
     ),
+    market: str | None = Query(
+        None, description="模型列表市场过滤（CN/HK/US）；缺省按 symbol 形态推断"
+    ),
     current_user: dict[str, Any] = Depends(get_current_user),
 ):
     """返回某只股票的历史模型分数（供 K 线下方分数曲线叠加）。
@@ -4334,7 +4337,16 @@ async def get_stock_inference_history(
         from backend.shared.model_registry import model_registry_service
 
         all_models = await model_registry_service.list_models(
-            tenant_id=tenant_id, user_id=user_id
+            tenant_id=tenant_id,
+            user_id=user_id,
+            # 模型下拉必须按市场过滤：不过滤会把 A 股/港股/美股模型混在一起
+            # （个股终端右上角模型选择器的现象）。显式 market 优先，否则按
+            # symbol 形态推断；推断不出（None）则保持旧行为不过滤。
+            market=(
+                str(market).upper().strip()
+                if market
+                else StockCodeUtil.detect_market(sym)
+            ),
         )
         for m in all_models:
             pmeta = m.get("metadata_json") or {}

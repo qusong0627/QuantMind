@@ -140,3 +140,31 @@ class StockCodeUtil:
     def normalize_list(codes: list[str]) -> list[str]:
         """批量标准化为 suffix 格式（QuantDB 层口径）"""
         return [StockCodeUtil.to_suffix(c) for c in codes if c]
+
+    @staticmethod
+    def detect_market(code: str) -> Optional[str]:
+        """由代码形态推断市场，返回 'CN' / 'HK' / 'US'；无法判定返回 None。
+
+        **判据必须互斥且精确** —— 按「前缀即市场」的粗略写法会把美股 SHOP/SHW
+        当成上交所（见 trading_calendar.resolve_market_from_symbol 的实测误判），
+        进而按错误市场过滤模型列表，静默给出空结果。
+
+        规则：
+        - CN：6 位纯数字 / SH|SZ|BJ + 6 位数字 / 6 位数字 + .SH|.SZ|.BJ
+        - HK：4-5 位数字 + .HK 后缀
+        - US：含字母的 ticker，可带 . 或 -（AAPL / BRK.B / BRK-B）
+        - 其余（纯数字但位数不符、空串、含中文等）返回 None，交由调用方决定是否过滤
+        """
+        c = str(code or "").strip().upper()
+        if not c:
+            return None
+        if re.match(r"^(SH|SZ|BJ)\d{6}$", c) or re.match(r"^\d{6}\.(SH|SZ|BJ)$", c):
+            return "CN"
+        if re.match(r"^\d{6}$", c):
+            return "CN"
+        if re.match(r"^\d{4,5}\.HK$", c):
+            return "HK"
+        # 美股：必须含字母，且只含字母/数字/点/横杠（排除纯数字与中文代码）
+        if re.match(r"^[A-Z][A-Z0-9.\-]{0,9}$", c) and re.search(r"[A-Z]", c):
+            return "US"
+        return None
