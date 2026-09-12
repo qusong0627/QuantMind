@@ -397,6 +397,15 @@ function CorporatePanel({ d }: { d: UsStockDetail }) {
   );
 }
 
+// 情绪标签：后端 news_article_enrichment 的实际取值是 bullish / bearish / neutral
+// （实测 26.9 万 neutral / 18.7 万 bullish / 13.2 万 bearish），不是 positive/negative。
+// 配色沿用全站「涨红跌绿」。
+const SENTIMENT_TONE: Record<string, { cls: string; label: string }> = {
+  bullish: { cls: 'bg-rose-50 text-rose-500', label: '看多' },
+  bearish: { cls: 'bg-emerald-50 text-emerald-600', label: '看空' },
+  neutral: { cls: 'bg-slate-50 text-slate-500', label: '中性' },
+};
+
 function NewsPanel({ symbol }: { symbol: string }) {
   const [items, setItems] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
@@ -434,11 +443,14 @@ function NewsPanel({ symbol }: { symbol: string }) {
           <div className="text-[11px] font-bold text-slate-700 leading-snug line-clamp-2">{n.title ?? '--'}</div>
           <div className="mt-1 flex items-center gap-2 text-[10px] text-slate-400">
             <span>{String(n.published_at ?? '').slice(0, 16)}</span>
-            {n.sentiment_label && (
-              <span className={`px-1 rounded ${n.sentiment_label === 'positive' ? 'bg-rose-50 text-rose-500' : n.sentiment_label === 'negative' ? 'bg-emerald-50 text-emerald-600' : 'bg-slate-50 text-slate-500'}`}>
-                {n.sentiment_label}
-              </span>
-            )}
+            {n.sentiment_label && (() => {
+              const tone = SENTIMENT_TONE[String(n.sentiment_label).toLowerCase()];
+              return (
+                <span className={`px-1 rounded ${tone?.cls ?? 'bg-slate-50 text-slate-500'}`}>
+                  {tone?.label ?? n.sentiment_label}
+                </span>
+              );
+            })()}
             {n.source && <span className="truncate">{n.source}</span>}
           </div>
         </a>

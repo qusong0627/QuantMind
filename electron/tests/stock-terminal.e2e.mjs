@@ -136,8 +136,8 @@ for (const mk of MARKETS_TO_RUN) {
   }
   check(tabHit === mk.tabs.length, `详情 Tab 齐备 ${tabHit}/${mk.tabs.length} [${mk.tabs.join(' / ')}]`);
 
-  // 逐个点开前 3 个 Tab，确认不白屏
-  for (const t of mk.tabs.slice(0, 3)) {
+  // 逐个点开**全部** Tab，确认不白屏（只开前几个会漏掉资讯等尾巴上的面板）
+  for (const t of mk.tabs) {
     const btn = p.locator('button', { hasText: new RegExp(`^${t}$`) }).first();
     if (!(await btn.count())) { console.log(`  ⚠ 找不到 Tab 按钮 ${t}`); continue; }
     await btn.click().catch(() => {});

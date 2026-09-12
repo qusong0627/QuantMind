@@ -46,7 +46,9 @@ export class UsStockTerminalService extends StockTerminalService {
       cap_top10_avg: null,
       pct_industry: null,
       market_empty: null,
-      cap_display: it.market_cap_yi ? `$${(it.market_cap_yi / 10000).toFixed(2)}万亿` : null,
+      // 后端已按美元口径格式化好（"$4.77万亿" / "$50.00亿"）；自算的固定「万亿」单位会把
+      // 小市值显示成 "$0.01万亿"，仅作后端缺该字段时的兜底。
+      cap_display: it.cap_display ?? (it.market_cap_yi ? `$${(it.market_cap_yi / 10000).toFixed(2)}万亿` : null),
     }));
     return { ...raw, items };
   }
