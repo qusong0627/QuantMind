@@ -54,11 +54,14 @@ class ResolvedModel:
 
 
 _MARKET_ALIASES: dict[str, frozenset[str]] = {
-    "CN": frozenset({"CN", "A", "A_SHARE", "A股", "CHINA"}),
-    "HK": frozenset({"HK", "HONG_KONG", "港股"}),
-    "US": frozenset({"US", "美股"}),
-    "CRYPTO": frozenset({"CRYPTO", "加密", "加密货币"}),
-    "FUTURES": frozenset({"FUTURES", "期货"}),
+    # 除市场名外，同时收录**交易所/日历代号**：训练与推理链路里的日历名是
+    # SSE/HKEX/NYSE 三套（见 routers/model_training._MARKET_CALENDAR），
+    # 漏收会让这些值静默落到默认的 CN（曾导致美股被识别成 A 股）。
+    "CN": frozenset({"CN", "A", "A_SHARE", "A股", "CHINA", "SSE", "XSHG", "SZSE"}),
+    "HK": frozenset({"HK", "HONG_KONG", "港股", "HKEX", "XHKG"}),
+    "US": frozenset({"US", "美股", "NYSE", "XNYS", "NASDAQ", "XNAS", "AMEX"}),
+    "CRYPTO": frozenset({"CRYPTO", "加密", "加密货币", "24/7"}),
+    "FUTURES": frozenset({"FUTURES", "期货", "CME", "SHFE"}),
 }
 
 

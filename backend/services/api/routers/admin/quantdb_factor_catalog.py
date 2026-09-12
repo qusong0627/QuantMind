@@ -465,6 +465,17 @@ async def load_quantdb_training_sources(market: str = "CN") -> dict[str, Any]:
             WHERE status = 'published' AND market = :market
         """), {"market": market})).mappings().all()
     published = {str(row["source_dataset"]): dict(row) for row in rows}
+    # 各已发布版本的启用特征数（此前这里是写死的 0，前端因子源列表因此
+    # 在所有市场都显示「0 个特征」，与实际可用数量不符）
+    counts: dict[str, int] = {}
+    if published:
+        count_rows = (await session.execute(text("""
+            SELECT source_dataset, COUNT(*) AS n
+            FROM qm_training_factor_mapping
+            WHERE version_id = ANY(:version_ids) AND enabled
+            GROUP BY source_dataset
+        """), {"version_ids": [v["version_id"] for v in published.values()]})).mappings().all()
+        counts = {str(r["source_dataset"]): int(r["n"]) for r in count_rows}
     sources = []
     for source in sources_for_market(market):
         status = statuses[source]
@@ -476,7 +487,7 @@ async def load_quantdb_training_sources(market: str = "CN") -> dict[str, Any]:
             "ready": bool(status["ready"]),
             "published": version is not None,
             "trainable": bool(status["ready"]) and version is not None,
-            "feature_count": 0,
+            "feature_count": counts.get(source, 0),
             "catalog_version": version["version_id"] if version else None,
             "schema_hash": status["schema_hash"],
             "reason": status["reason"] if not status["ready"] else (
