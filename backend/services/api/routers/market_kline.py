@@ -260,14 +260,17 @@ def _aggregator_fetch(market: str, symbol: str, start: Optional[date], end: Opti
     df = res.data
     items: list[dict[str, Any]] = []
     for _, r in df.iterrows():
+        # 必须走 _safe_float：`float(x or 0)` 对 NaN 是放行的（NaN 为 truthy），
+        # 会把 NaN 带进响应体，FastAPI 序列化时抛 "Out of range float values" → 500。
+        # 港股/美股走 aggregator 兜底路径时实测 amount 整列为 NaN，正是这个 500 的来源。
         items.append({
             "date": str(r.get("trade_date")),
-            "open": float(r.get("open") or 0),
-            "high": float(r.get("high") or 0),
-            "low": float(r.get("low") or 0),
-            "close": float(r.get("close") or 0),
-            "volume": float(r.get("volume") or 0),
-            "amount": float(r.get("amount") or 0) if r.get("amount") is not None else None,
+            "open": _safe_float(r.get("open")),
+            "high": _safe_float(r.get("high")),
+            "low": _safe_float(r.get("low")),
+            "close": _safe_float(r.get("close")),
+            "volume": _safe_float(r.get("volume")),
+            "amount": _safe_float(r.get("amount"), default=None),
         })
     return {
         "items": items,
