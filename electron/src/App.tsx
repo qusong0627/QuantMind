@@ -39,11 +39,14 @@ const UserCenterPage = lazy(() => import('./features/user-center/pages/UserCente
 const StrategyComparisonPage = lazy(() => import('./features/strategy-comparison/pages/StrategyComparisonPage'));
 const MarketAnalysisPage = lazy(() => import('./features/market-analysis/pages/MarketAnalysisPage').then(m => ({ default: m.MarketAnalysisPage })));
 const MarketAnalysisHkPage = lazy(() => import('./features/market-analysis-hk/pages/MarketAnalysisHkPage').then(m => ({ default: m.MarketAnalysisHkPage })));
+const MarketAnalysisUsPage = lazy(() => import('./features/market-analysis-us/pages/MarketAnalysisUsPage').then(m => ({ default: m.MarketAnalysisUsPage })));
 
 /** 市场分析路由包装：跟随大盘分析顶部市场切换器（选 A股 → A股版，选 港股 → 港股版） */
 const MarketAnalysisByMarket: React.FC = () => {
   const market = useSelector(selectCurrentMarket);
-  return market === 'HK' ? <MarketAnalysisHkPage /> : <MarketAnalysisPage />;
+  if (market === 'HK') return <MarketAnalysisHkPage />;
+  if (market === 'US') return <MarketAnalysisUsPage />;
+  return <MarketAnalysisPage />;
 };
 const QuantBotPage = lazy(() => import('./features/quantbot/pages/QuantBotPage'));
 const AIIDEPage = lazy(() => import('./pages/AIIDEPage'));

@@ -292,39 +292,54 @@ def _write_snapshot_file(root: Path, symbol: str, df: pd.DataFrame) -> Path:
 
 
 def _normalise_valuation(symbol: str, data: dict) -> pd.DataFrame | None:
-    """yahoo info → QuantDB 估值 schema。"""
+    """yahoo info → QuantDB 估值 schema。
+
+    入参 data 是 `YahooFinanceAdapter.fetch_field("valuation")` 返回行的字典，
+    键名与该适配器输出保持一致（**snake_case**：market_cap / trailing_pe /
+    price_to_book ...）。历史 bug：此处曾按 yfinance 原生 camelCase
+    （marketCap / trailingPE）取值，两边对不上导致全部落成 NULL，
+    且照常建分区写空行 —— 静默失败两周（2026-08-14 ~ 08-27 有值，08-28 起全空）。
+    """
     try:
-        mv = data.get("marketCap")
-        pe = data.get("trailingPE")
-        pb = data.get("priceToBook")
         row = {
             "symbol": symbol,
             "time": pd.Timestamp.now().normalize(),
-            "close": float(data.get("regularMarketPrice") or 0.0),
+            # 适配器不返回行情价，留空而不是填 0（0 会被下游当真实价格）
+            "close": None,
             "total_capital": None,
             "circulating_capital": None,
-            "total_mv": float(mv) if mv else None,
+            "total_mv": _opt_float(data.get("market_cap")),
             "float_mv": None,
-            "net_profit_ttm": float(data.get("netIncomeToCommon"))
-            if data.get("netIncomeToCommon")
-            else None,
-            "revenue_ttm": float(data.get("totalRevenue"))
-            if data.get("totalRevenue")
-            else None,
+            "net_profit_ttm": _opt_float(data.get("net_income")),
+            "revenue_ttm": _opt_float(data.get("revenue")),
             "equity": None,
             "annual_net_profit": None,
-            "pe_ttm": float(pe) if pe else None,
+            "pe_ttm": _opt_float(data.get("trailing_pe")),
             "pe_static": None,
-            "pb": float(pb) if pb else None,
-            "ps_ttm": None,
+            "pb": _opt_float(data.get("price_to_book")),
+            "ps_ttm": _opt_float(data.get("price_to_sales")),
             "dividend_rate": None,
             "release_id": "yahoo",
             "published_at": datetime.now().isoformat(timespec="seconds"),
         }
+        if row["total_mv"] is None and row["pe_ttm"] is None and row["pb"] is None:
+            # 三个核心字段全空 = 上游 schema 又对不上了，不能静默写空分区
+            log.warning("估值标准化 %s: 核心字段全空，疑似字段名漂移", symbol)
         return pd.DataFrame([row])
     except Exception as exc:  # noqa: BLE001
         log.warning("估值标准化失败 %s: %s", symbol, exc)
         return None
+
+
+def _opt_float(value: object) -> float | None:
+    """安全转 float：None / NaN / 空串 → None（不落 0，避免下游当真值）。"""
+    if value is None:
+        return None
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return None if pd.isna(out) else out
 
 
 def _is_rate_limited(exc: Exception) -> bool:

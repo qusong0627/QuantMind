@@ -114,6 +114,20 @@ def _refresh_signal_datasets(result: dict[str, Any]) -> None:
         result["signal_datasets"] = {"status": "error", "error": str(exc)}
 
 
+def _sync_index(result: dict) -> None:
+    """akshare 指数日线增量同步（index_daily）。
+
+    历史 bug：全量分支（datasets 为空）只跑个股 K 线，从不触碰指数分区，
+    导致 index_daily 长期滞后个股（实测 09-07 vs 09-11）。两条分支都必须调用。
+    """
+    from backend.scripts.akshare_index_sync import sync as ak_index_sync
+
+    try:
+        result["akshare_index"] = ak_index_sync("HK")
+    except Exception as exc:  # noqa: BLE001
+        result["akshare_index"] = {"error": str(exc)}
+
+
 def run(*, days: int = 5, symbols: str | None = None, datasets: list[str] | None = None,
         fast: bool = False, **kwargs: Any) -> dict:
     """同步港股数据。datasets 为勾选的数据集名；None 时全量同步雅虎数据。
@@ -128,6 +142,8 @@ def run(*, days: int = 5, symbols: str | None = None, datasets: list[str] | None
         # 雅虎元数据段(估值快照/财务序列/分析师)最后执行——任务有 3600s 硬限制，
         # 若被截断只损失元数据增量，次日续跑；雅虎必须 skip_kline(K线口径铁律)。
         _sync_akshare_kline(result, days=days, symbols=symbols)
+        # 指数与个股必须同轮更新，否则 index_daily 滞后、页面日期错位
+        _sync_index(result)
         result["sources"] = {"hsgt_south": _south_source_result(days=days)}
         _refresh_l1_dataset(result, days=days)
         # CCASS 机构持仓：HKEX 披露晚到（T+1~T+2），每晚增量补齐；
@@ -183,12 +199,7 @@ def run(*, days: int = 5, symbols: str | None = None, datasets: list[str] | None
 
     # akshare 指数（index_daily）
     if "index_daily" in datasets:
-        from backend.scripts.akshare_index_sync import sync as ak_index_sync
-
-        try:
-            result["akshare_index"] = ak_index_sync("HK")
-        except Exception as exc:  # noqa: BLE001
-            result["akshare_index"] = {"error": str(exc)}
+        _sync_index(result)
 
     # 港股 CCASS 机构持仓（ccass_top50）
     if "ccass_top50" in datasets:

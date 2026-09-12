@@ -39,12 +39,29 @@ def _refresh_l1_dataset(result: dict) -> None:
         result["l1_dataset"] = {"status": "error", "error": str(exc)}
 
 
+def _sync_index(result: dict) -> None:
+    """akshare 指数日线增量同步（index_daily）。
+
+    历史 bug：全量分支（datasets 为空）只跑雅虎数据段，从不触碰指数分区，
+    导致 index_daily 长期停滞（实测停在 2026-08-27，同日个股已到 09-10），
+    指数与个股并列展示时日期错位。两条分支都必须调用本函数。
+    """
+    from backend.scripts.akshare_index_sync import sync as ak_index_sync
+
+    try:
+        result["akshare_index"] = ak_index_sync("US")
+    except Exception as exc:  # noqa: BLE001
+        result["akshare_index"] = {"error": str(exc)}
+
+
 def run(*, days: int = 5, symbols: str | None = None, datasets: list[str] | None = None,
         fast: bool = False, **kwargs: Any) -> dict:
     """同步美股数据。datasets 为勾选的数据集名；None 时全量同步雅虎数据。"""
     if not datasets:
         result = dict(_yahoo_run("US", days=days, symbols=symbols, fast=fast))
         result["market"] = "US"
+        # 指数与个股必须同轮更新，否则 index_daily 停滞、页面日期错位
+        _sync_index(result)
         # L1 因子直读数据集随日K落盘后刷新（与港股同口径）
         _refresh_l1_dataset(result)
         return result
@@ -57,12 +74,7 @@ def run(*, days: int = 5, symbols: str | None = None, datasets: list[str] | None
 
     # akshare 指数（index_daily）
     if "index_daily" in datasets:
-        from backend.scripts.akshare_index_sync import sync as ak_index_sync
-
-        try:
-            result["akshare_index"] = ak_index_sync("US")
-        except Exception as exc:  # noqa: BLE001
-            result["akshare_index"] = {"error": str(exc)}
+        _sync_index(result)
 
     # L1 因子日频分区（训练直读数据集，随 daily_forward 增量刷新）
     if "daily_forward" in datasets or "l1_factors" in datasets:

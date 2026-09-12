@@ -13,7 +13,10 @@ import logging
 import os
 import threading
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    import pandas as pd
 
 from backend.services.engine.data_platform.quantdb_hub import (
     QuantDBDataHub,
@@ -70,7 +73,8 @@ class QuantUSDataHub(QuantDBDataHub):
             "qus_daily_forward": "1_kline_data/daily_forward",
             "qus_index_daily": "1_kline_data/index_daily",
             "qus_valuation": "5_technical_derived/valuation",
-            "qus_features_daily": "6_ml_datasets/features_daily",
+            # L1 因子日频分区（模型训练直读数据集）
+            "qus_l1_factors": "6_ml_datasets/l1_factors",
         }
         for view_name, rel_path in partitioned_views.items():
             full_path = dd / rel_path
@@ -123,13 +127,14 @@ class QuantUSDataHub(QuantDBDataHub):
         return self._normalize_columns(df)
 
     def fetch_stock_list(self):
-        """美股标的池（instrument_detail.parquet）。"""
+        """美股标的池（security_master：symbol / cn_name / en_name）。
+
+        历史上这里读 `2_base_sector/instrument_detail/`（instrument_list.parquet /
+        instrument_detail.parquet），该目录从未落盘，方法恒返回空表。
+        """
         import pandas as pd
 
-        detail_dir = self._data_dir / "2_base_sector" / "instrument_detail"
-        file_path = detail_dir / "instrument_list.parquet"
-        if not file_path.exists():
-            file_path = detail_dir / "instrument_detail.parquet"
+        file_path = self._data_dir / "2_base_sector" / "security_master" / "data.parquet"
         if not file_path.exists():
             return pd.DataFrame()
         return pd.read_parquet(file_path)
@@ -157,6 +162,10 @@ class QuantUSDataHub(QuantDBDataHub):
         "calendar": "4_analyst/calendar",
         "insider_transactions": "4_analyst/insider_transactions",
         "options_chain": "4_options",
+        # 标的池主表（symbol / cn_name / en_name），原 fetch_stock_list 读的
+        # 2_base_sector/instrument_detail 从未落盘
+        "security_master": "2_base_sector/security_master",
+        # 由 quantus_extra_datasets.py 落盘（universe_YYYYMMDD.parquet），可能尚未生成
         "us_universe": "2_base_sector/us_universe",
     }
 
