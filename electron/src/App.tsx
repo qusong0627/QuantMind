@@ -63,11 +63,14 @@ const InferenceCenterByMarket: React.FC = () => {
 };
 const StockTerminalPage = lazy(() => import('./features/stock-terminal/pages/StockTerminalPage'));
 const StockTerminalHkPage = lazy(() => import('./features/stock-terminal-hk/pages/StockTerminalPage'));
+const StockTerminalUsPage = lazy(() => import('./features/stock-terminal-us/pages/StockTerminalPage'));
 
-/** 个股终端路由包装：跟随顶部市场切换器（A股 → A股版；港股 → 港股独立版） */
+/** 个股终端路由包装：跟随顶部市场切换器（A股 / 港股 / 美股 三个独立实现，共用 stock-terminal-shared） */
 const StockTerminalByMarket: React.FC = () => {
   const market = useSelector(selectCurrentMarket);
-  return market === 'HK' ? <StockTerminalHkPage /> : <StockTerminalPage />;
+  if (market === 'HK') return <StockTerminalHkPage />;
+  if (market === 'US') return <StockTerminalUsPage />;
+  return <StockTerminalPage />;
 };
 const ResearchPlatformPage = lazy(() => import('./pages/ResearchPlatformPage').then(m => ({ default: m.default || m.ResearchPlatformPage })));
 const RealTradingPage = lazy(() => import('./pages/trading/RealTradingPage'));
