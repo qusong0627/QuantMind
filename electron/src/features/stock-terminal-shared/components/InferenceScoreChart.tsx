@@ -19,6 +19,8 @@ interface Props {
   /** 分数回溯窗口（自然日）。默认 180；个股终端需传更大值以覆盖「当前日期向前 2 年」的 K 线全区间，
    * 否则 K 线副图左侧交易日没有分数。 */
   days?: number;
+  /** 紧凑模式：隐藏标题栏与缩放条、固定窗口不可拉伸，供多模型小卡复用 */
+  compact?: boolean;
 }
 
 export interface Point {
@@ -27,7 +29,7 @@ export interface Point {
   side: string | null;
 }
 
-export function InferenceScoreChart({ symbol, modelId, selectedDate, onPointClick, onScoresLoaded, onModelsLoaded, refreshKey = 0, height = 220, days = 180 }: Props) {
+export function InferenceScoreChart({ symbol, modelId, selectedDate, onPointClick, onScoresLoaded, onModelsLoaded, refreshKey = 0, height = 220, days = 180, compact = false, endDate }: Props & { endDate?: string | null }) {
   const [points, setPoints] = useState<Point[]>([]);
   const [loading, setLoading] = useState(false);
   const [modelName, setModelName] = useState<string>('');
@@ -42,8 +44,9 @@ export function InferenceScoreChart({ symbol, modelId, selectedDate, onPointClic
     const code = symbol.split('.')[0];
     // 传 model_id（如有）：后端按指定模型返回 pred 分数；否则锁定用户默认模型。
     // days 由调用方控制窗口（个股终端传 750 保证覆盖最长 2 年的 K 线）
+    // endDate 指定时窗口以基准日为终点，保证与上方K线重叠（个股推理30天小卡）
     modelTrainingService
-      .getStockInferenceHistory(code, days, modelId || undefined)
+      .getStockInferenceHistory(code, days, modelId || undefined, endDate || undefined)
       .then((resp) => {
         if (cancelled) return;
         const pts: Point[] = (resp.items ?? [])
@@ -76,7 +79,7 @@ export function InferenceScoreChart({ symbol, modelId, selectedDate, onPointClic
     return () => {
       cancelled = true;
     };
-  }, [symbol, modelId, refreshKey, days]);
+  }, [symbol, modelId, refreshKey, days, endDate, selectedDate]);
 
   const option = useMemo(() => {
     if (!points.length) return null;
@@ -105,7 +108,7 @@ export function InferenceScoreChart({ symbol, modelId, selectedDate, onPointClic
           return `${d}<br/>分数 <b style="color:${Number(v) >= 0 ? '#e11d48' : '#059669'}">${Number(v).toFixed(digits)}</b>`;
         },
       },
-      grid: { left: 48, right: 16, top: 12, bottom: 28 },
+      grid: { left: 48, right: 16, top: 12, bottom: compact ? 20 : 28 },
       xAxis: {
         type: 'category' as const,
         data: dates,
@@ -121,9 +124,9 @@ export function InferenceScoreChart({ symbol, modelId, selectedDate, onPointClic
         axisLabel: { color: '#64748b', fontSize: 10, formatter: (v: number) => v.toFixed(digits) },
         splitLine: { lineStyle: { color: '#f1f5f9' } },
       },
-      dataZoom: [
+      dataZoom: compact ? [] : [
         { type: 'inside' as const, xAxisIndex: 0, start: 0, end: 100 },
-        { type: 'slider' as const, xAxisIndex: 0, bottom: 0, height: 14, borderColor: '#e2e8f0', fillerColor: 'rgba(99,102,241,0.08)' },
+        { type: 'slider' as const, xAxisIndex: 0, bottom: 6, height: 18, borderColor: '#e2e8f0', fillerColor: 'rgba(99,102,241,0.08)' },
       ],
       series: [
         {
@@ -141,7 +144,16 @@ export function InferenceScoreChart({ symbol, modelId, selectedDate, onPointClic
           markLine: {
             silent: true,
             symbol: 'none',
-            data: [{ yAxis: 0, lineStyle: { color: '#94a3b8', type: 'dashed', width: 1 }, label: { formatter: '0', fontSize: 9, color: '#94a3b8' } }],
+            data: [
+              { yAxis: 0, lineStyle: { color: '#94a3b8', type: 'dashed', width: 1 }, label: { formatter: '0', fontSize: 9, color: '#94a3b8' } },
+              ...(selectedDate && dates.includes(selectedDate)
+                ? [{
+                    xAxis: selectedDate,
+                    lineStyle: { color: '#3b82f6', type: 'dashed', width: 1.2 },
+                    label: { show: true, formatter: `T ${selectedDate.slice(5)}`, position: 'insideTop', color: '#2563eb', fontSize: 9, fontWeight: 700 as const },
+                  }]
+                : []),
+            ],
           },
           markPoint: selectedDate
             ? {
@@ -159,29 +171,46 @@ export function InferenceScoreChart({ symbol, modelId, selectedDate, onPointClic
         },
       ],
     };
-  }, [points, selectedDate]);
+  }, [points, selectedDate, compact]);
 
   if (loading) {
     return (
       <div className="h-full flex items-center justify-center" style={{ height }}>
         <Spin size="small" />
-        <span className="ml-2 text-xs text-slate-400">推理分数加载中…</span>
+        <span className="ml-2 text-xs text-slate-600">推理分数加载中…</span>
       </div>
     );
   }
 
   if (!points.length) {
     return (
-      <div className="h-full flex flex-col items-center justify-center gap-2 text-xs text-slate-400" style={{ height }}>
+      <div className="h-full flex flex-col items-center justify-center gap-2 text-xs text-slate-600" style={{ height }}>
         <TrendingDown className="w-5 h-5 opacity-40" />
-        暂无默认模型分数
-        <span className="text-[11px]">请先在模型管理设置默认模型（需含 pred 历史分数）</span>
+        {compact ? '暂无该模型分数' : '暂无默认模型分数'}
+        {!compact && <span className="text-[11px]">请先在模型管理设置默认模型（需含 pred 历史分数）</span>}
       </div>
     );
   }
 
   const last = points[points.length - 1];
   const up = last.value >= 0;
+
+  // 紧凑模式由外层小卡提供标题栏，这里只渲染曲线
+  if (compact) {
+    return (
+      <div className="h-full flex flex-col">
+        <div className="flex-1 min-h-0">
+          <ReactECharts
+            option={option as any}
+            notMerge
+            lazyUpdate
+            style={{ width: '100%', height }}
+            opts={{ renderer: 'canvas' }}
+          />
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="h-full flex flex-col">

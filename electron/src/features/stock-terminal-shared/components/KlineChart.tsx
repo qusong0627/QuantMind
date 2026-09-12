@@ -2,8 +2,11 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import ReactECharts from 'echarts-for-react';
-import { KlineBar } from '../../types';
-import { boll, kdj, macd, rsi, sma, volMa, Series } from '../../engine/indicators';
+import { KlineBar, KlineMarker } from '../types';
+import { boll, kdj, macd, rsi, sma, volMa, Series } from '../engine/indicators';
+import { useStockTerminal } from '../adapter';
+
+export type { KlineMarker };
 
 export type SubplotType = 'vol' | 'macd' | 'kdj' | 'rsi';
 
@@ -96,8 +99,11 @@ function weekKey(date: string): string {
   d.setDate(d.getDate() - day);
   return d.toISOString().slice(0, 10);
 }
-/** 默认参考线（标注 0.10 分档下沿） */
-const DEFAULT_REF_LINE: RefLine = { id: 'default-golden', value: 0.10, label: '参考线', color: '#10b981' };
+/**
+ * 默认参考线（标注 0.10 分档下沿）。标签与图内几何随市场主题走：
+ * A 股称「参考线」、港股称「黄金线」；两市场缩放条预留高度本就不同，故做成主题参数。
+ */
+const defaultRefLine = (label: string): RefLine => ({ id: 'default-golden', value: 0.10, label, color: '#10b981' });
 
 interface Props {
   bars: KlineBar[];
@@ -113,6 +119,8 @@ interface Props {
   alerts?: AlertPoint[];
   trades?: TradeMarker[];
   refLines?: RefLine[];
+  /** 事件竖线（美股用拆股事件解释未复权价的跳变）；日期不在当前窗口内的自动忽略 */
+  markers?: KlineMarker[];
   /** 初始缩放窗口（%）：默认 0-100 全显；个股终端首屏聚焦最近 200 根 */
   zoomStart?: number;
   zoomEnd?: number;
@@ -122,6 +130,7 @@ interface Props {
 export function KlineChart({
   bars, config, overlays, height = 460, period = 'daily',
   signals = [], btEquity = [], scoreSeries = [], scorePoints, showScoreSubplot = false, alerts = [], trades = [], refLines = [],
+  markers = [],
   zoomStart = 0, zoomEnd = 100, onBarClick,
 }: Props) {
   // 自适应容器高度：图表铺满父容器（个股终端 K 线卡内部空间），不再写死 320 留下大片空白；
@@ -137,6 +146,10 @@ export function KlineChart({
     return () => ro.disconnect();
   }, []);
   const chartH = boxH > 120 ? boxH : height;
+
+  // 主题参数：参考线标签与底部缩放条几何（A 股与港股两套页面历来取值不同，收敛为主题参数而非各写一份）
+  const { theme } = useStockTerminal();
+  const goldenLine = useMemo(() => defaultRefLine(theme.refLineLabel), [theme.refLineLabel]);
 
   const option = useMemo(() => {
     const dates = bars.map(b => b.date);
@@ -180,7 +193,7 @@ export function KlineChart({
           + (hasScoreSubplot ? scoreSubH : 0)
           + (subCount - 1) * SUB_GAP)
       : 0;
-    const mainH = Math.max(140, chartH - TOP - GAP - subTotal - 52);
+    const mainH = Math.max(140, chartH - TOP - GAP - subTotal - theme.klineBottomReserve);
     const grids: any[] = [];
     const xAxes: any[] = [];
     const yAxes: any[] = [];
@@ -237,6 +250,19 @@ export function KlineChart({
         name, type: 'line', xAxisIndex: 0, yAxisIndex: yAxisIdx, data,
         symbol: 'none', lineStyle: { width, color }, itemStyle: { color }, emphasis: { disabled: true }, z: 3,
       });
+
+    // 事件竖线（拆股等）：画在主图对应日期上，窗口外的自动忽略
+    const visibleMarkers = markers.filter(m => idxByDate.has(m.date));
+    if (visibleMarkers.length) {
+      series[0].markLine = {
+        silent: true, symbol: 'none',
+        data: visibleMarkers.map(m => ({
+          xAxis: m.date,
+          lineStyle: { color: m.color ?? '#f59e0b', type: 'dashed', width: 1 },
+          label: { formatter: m.label, fontSize: 9, color: m.color ?? '#b45309', position: 'insideEndTop' },
+        })),
+      } as any;
+    }
 
     if (ma5) line('MA5', ma5, COLORS.ma5);
     if (ma10) line('MA10', ma10, COLORS.ma10);
@@ -462,8 +488,8 @@ export function KlineChart({
 
       // 参考线 + 默认黄金线 0.10：画在右侧分数轴上（主图 markLine）
       const visRef = refLines.filter(l => l.visible !== false);
-      const hasGolden = visRef.some(l => Math.abs(l.value - DEFAULT_REF_LINE.value) < 1e-6);
-      const allLines = hasGolden ? visRef : [DEFAULT_REF_LINE, ...visRef];
+      const hasGolden = visRef.some(l => Math.abs(l.value - goldenLine.value) < 1e-6);
+      const allLines = hasGolden ? visRef : [goldenLine, ...visRef];
       const firstScore = series.find((s: any) => String(s.name).startsWith('分数·'));
       if (firstScore) {
         firstScore.markLine = {
@@ -557,11 +583,11 @@ export function KlineChart({
       yAxis: yAxes,
       dataZoom: [
         { type: 'inside', xAxisIndex: xAxes.map((_, i) => i), start: zoomStart, end: zoomEnd },
-        { type: 'slider', xAxisIndex: xAxes.map((_, i) => i), start: zoomStart, end: zoomEnd, bottom: 22, height: 20, borderColor: '#e2e8f0', fillerColor: 'rgba(59,130,246,0.08)' },
+        { type: 'slider', xAxisIndex: xAxes.map((_, i) => i), start: zoomStart, end: zoomEnd, bottom: theme.sliderBottom, height: theme.sliderHeight, borderColor: '#e2e8f0', fillerColor: 'rgba(59,130,246,0.08)' },
       ],
       series,
     };
-  }, [bars, config, overlays, chartH, signals, btEquity, scoreSeries, scorePoints, showScoreSubplot, period, alerts, trades, refLines, zoomStart, zoomEnd]);
+  }, [bars, config, overlays, chartH, signals, btEquity, scoreSeries, scorePoints, showScoreSubplot, period, alerts, trades, refLines, markers, zoomStart, zoomEnd, goldenLine, theme.klineBottomReserve, theme.sliderBottom, theme.sliderHeight]);
 
   const onEvents = onBarClick ? {
     click: (params: any) => {

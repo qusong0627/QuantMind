@@ -1,10 +1,9 @@
-/** 顶部股票搜索框：输入联想（不预加载全量），选中即展示 */
+/** 顶部股票搜索框：输入联想（不预加载全量），选中即展示。跨市场共用，市场差异走 useStockTerminal() */
 import { useEffect, useRef, useState } from 'react';
 import { Search, Star, X, Clock3, TrendingUp } from 'lucide-react';
 import { Spin } from 'antd';
-import { stockTerminalService } from '../services/stockTerminalService';
+import { useStockTerminal } from '../adapter';
 import { StockListItem } from '../types';
-import { toPrefix } from './StockSidebar';
 
 interface Props {
   onSelect: (item: StockListItem) => void;
@@ -23,7 +22,8 @@ function loadHistory(): string[] {
   }
 }
 
-export function StockSearchBar({ onSelect, watchlistSymbols, placeholder = '搜索港股代码 / 名称，如 0700 或 腾讯控股' }: Props) {
+export function StockSearchBar({ onSelect, watchlistSymbols, placeholder }: Props) {
+  const { service, theme, toWatchSymbol } = useStockTerminal();
   const [q, setQ] = useState('');
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -53,7 +53,7 @@ export function StockSearchBar({ onSelect, watchlistSymbols, placeholder = '搜�
     setLoading(true);
     const timer = setTimeout(async () => {
       try {
-        const resp = await stockTerminalService.getStockList({ q: trimmed, page: 1, page_size: 10 });
+        const resp = await service.getStockList({ q: trimmed, page: 1, page_size: 10 });
         setItems(resp.items ?? []);
       } catch {
         setItems([]);
@@ -62,7 +62,7 @@ export function StockSearchBar({ onSelect, watchlistSymbols, placeholder = '搜�
       }
     }, 300);
     return () => clearTimeout(timer);
-  }, [q, open]);
+  }, [q, open, service]);
 
   const handleSelect = (it: StockListItem) => {
     const key = `${it.symbol}|${it.name}`;
@@ -104,7 +104,7 @@ export function StockSearchBar({ onSelect, watchlistSymbols, placeholder = '搜�
           }}
           onFocus={() => setOpen(true)}
           onKeyDown={handleKeyDown}
-          placeholder={placeholder}
+          placeholder={placeholder ?? theme.searchPlaceholder}
           className="w-full h-9 pl-10 pr-10 rounded-full border border-slate-200 bg-white text-[13px] placeholder:text-slate-400 shadow-sm focus:outline-none focus:border-indigo-300 focus:ring-2 focus:ring-indigo-100"
         />
         {q ? (
@@ -133,7 +133,7 @@ export function StockSearchBar({ onSelect, watchlistSymbols, placeholder = '搜�
                 </div>
               ) : items.length ? (
                 items.map((it, idx) => {
-                  const watched = watchlistSymbols.has(toPrefix(it.symbol));
+                  const watched = watchlistSymbols.has(toWatchSymbol(it.symbol));
                   const up = (it.pct_change ?? 0) >= 0;
                   return (
                     <button
@@ -149,7 +149,7 @@ export function StockSearchBar({ onSelect, watchlistSymbols, placeholder = '搜�
                           {watched && <Star className="w-3 h-3 text-amber-400 fill-amber-400 shrink-0" />}
                         </span>
                         <span className="text-[11px] text-slate-400 truncate">
-                          {it.board ?? ''} {it.industry ? `· ${it.industry}` : ''} {it.total_mv ? `· ${it.total_mv.toFixed(0)}亿` : ''}
+                          {it.board ?? ''} {it.industry ? `· ${it.industry}` : ''} {it.cap_display ?? (it.total_mv ? `· ${it.total_mv.toFixed(0)}亿` : '')}
                         </span>
                       </span>
                       <span className="shrink-0 text-right">
@@ -192,7 +192,7 @@ export function StockSearchBar({ onSelect, watchlistSymbols, placeholder = '搜�
                           key={h}
                           onClick={async () => {
                             try {
-                              const resp = await stockTerminalService.getStockList({ q: sym, page: 1, page_size: 10 });
+                              const resp = await service.getStockList({ q: sym, page: 1, page_size: 10 });
                               const hit = resp.items?.find((x) => x.symbol === sym) ?? resp.items?.[0];
                               if (hit) handleSelect(hit);
                               else handleSelect({ symbol: sym, name: name || sym } as StockListItem);
@@ -213,9 +213,7 @@ export function StockSearchBar({ onSelect, watchlistSymbols, placeholder = '搜�
                 <TrendingUp className="w-3 h-3 text-slate-400" />
                 <span className="text-[11px] font-bold text-slate-500">输入关键词开始搜索</span>
               </div>
-              <div className="px-1 text-[11px] text-slate-400 leading-relaxed">
-                支持代码（如 00700 / 0700.HK / 腾讯）、名称；不输入时不加载全量列表。
-              </div>
+              <div className="px-1 text-[11px] text-slate-400 leading-relaxed">{theme.searchHint}</div>
             </div>
           )}
         </div>
