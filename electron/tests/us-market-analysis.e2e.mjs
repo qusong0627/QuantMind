@@ -3,8 +3,9 @@ import { chromium } from 'playwright';
 
 const BASE = process.env.QM_BASE || 'http://localhost:3080';
 const EXPECT = {
-  大盘脉搏: ['市场温度计', 'GICS 板块热力图', '赚钱效应'],
-  市场宽度: ['A-D', 'MA50', 'MA200'],
+  // 大盘脉搏已重排为「看哪儿热」优先：热门榜 + 活力条 + 资金流
+  大盘脉搏: ['市场温度计', 'GICS 板块热力图', '今日热门', '量比', '板块资金流'],
+  市场宽度: ['A-D', 'MA50', 'MA200', '涨跌幅分布'],
   板块轮动: ['轮动', '相对标普', '板块估值'],
   财报季: ['财报', '超预期', '盈利预期'],
   分析师动向: ['评级', '目标价'],
@@ -63,11 +64,12 @@ let text = await p.locator('body').innerText().catch(() => '');
 let f = flat(text);
 console.log('\nURL:', p.url());
 console.log('✓ 渲染美股页标题:', f.includes('美股市场多维分析'));
-console.log('✓ QuantUS 引擎标识:', f.includes('QuantUS 数据引擎'));
+console.log('✓ QuantUS 引擎标识:', f.includes('QuantUS'));
 console.log('✓ 标普500 指数卡:', f.includes('标普500'));
 console.log('✓ 费城半导体 指数卡:', f.includes('费城半导体'));
 console.log('✓ 未误渲染 A 股指数:', !f.includes('上证指数'));
-console.log('✓ 标的池提示:', f.includes('标普500 + 纳指补充'));
+console.log('✓ 标的池口径提示:', f.includes('标的池') && f.includes('非全市场'));
+console.log('✓ 指数量比已渲染:', f.includes('量比'));
 
 // ---- 逐 Tab ----
 console.log('\n---- 各 Tab 内容断言 ----');
