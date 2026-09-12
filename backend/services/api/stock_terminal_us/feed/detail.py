@@ -11,7 +11,8 @@ earnings, insiders, holdings, corporate_actions, notes}`。
 
 模块分工：
 - 本文件：聚合器 + overview / valuation / financials(三表) / corporate_actions
-- `research.py`：分析师 / 财报 / 内部人 / 机构持仓（事件式披露表）
+- `research.py`：分析师 / 财报（卖方覆盖）
+- `holdings.py`：内部人 / 机构持仓（筹码披露）
 - `labels.py`：财务中文标签映射与数值出口工具
 
 口径提醒：估值走 f10 快照（`5_technical_derived/valuation` 分区自 2026-08-28 起全 null，
@@ -33,7 +34,7 @@ from backend.services.api.market_analysis_us.feed.valuation import (
     _PE_MIN,
     _SIZE_TIERS,
 )
-from backend.services.api.stock_terminal_us.feed import research
+from backend.services.api.stock_terminal_us.feed import holdings, research
 from backend.services.api.stock_terminal_us.feed.base import (
     DIVIDEND_DIR,
     FIN_DIR,
@@ -64,63 +65,29 @@ _FISCAL_YEARS = 5
 
 # ---- 面板空骨架（键齐全，前端不必防御 undefined；NaN/None 一律 null） ----
 
-_EMPTY_OVERVIEW: dict[str, Any] = {
-    "cn_name": None,
-    "en_name": None,
-    "sector": None,
-    "industry": None,
-    "close": None,
-    "pct_change": None,
-    "market_cap": None,
-    "cap_display": None,
-    "week52_high": None,
-    "week52_low": None,
-    "avg_volume": None,
-    "trade_date": None,
-}
-_EMPTY_VALUATION: dict[str, Any] = {
-    "pe_ratio": None,
-    "pb_ratio": None,
-    "dividend_yield": None,
-    "market_cap": None,
-    "week52_high": None,
-    "week52_low": None,
-    "source": None,
-    "asof": None,
-    "size_tier": None,
-    "stale_warning": None,
-}
-_EMPTY_FINANCIALS: dict[str, Any] = {
-    "periods": [],
-    "income": [],
-    "balance": [],
-    "cashflow": [],
-}
-_EMPTY_ANALYSTS: dict[str, Any] = {
-    "target": None,
-    "ratings": [],
-    "upgrades": [],
-}
-_EMPTY_EARNINGS: dict[str, Any] = {"history": [], "upcoming": []}
-_EMPTY_INSIDERS: dict[str, Any] = {
-    "items": [],
-    "net": {
-        "buy_value": None,
-        "sell_value": None,
-        "net_value": None,
-        "buy_count": None,
-        "sell_count": None,
-    },
-}
-_EMPTY_HOLDINGS: dict[str, Any] = {
-    "insiders_pct": None,
-    "institutions_pct": None,
-    "institutions_float_pct": None,
-    "institutions_count": None,
-    "funds": [],
-    "reported_date": None,
-}
-_EMPTY_CORPORATE: dict[str, Any] = {"dividends": [], "splits": []}
+
+def _skeleton(names: str, **extra: Any) -> dict[str, Any]:
+    """空骨架：空格分隔的键名 -> 值全为 None；**extra 用于 a=[]/a=None 这类显式缺省。"""
+    return {**dict.fromkeys(names.split()), **extra}
+
+
+_EMPTY_OVERVIEW = _skeleton(
+    "cn_name en_name sector industry close pct_change market_cap cap_display week52_high week52_low avg_volume trade_date"
+)
+_EMPTY_VALUATION = _skeleton(
+    "pe_ratio pb_ratio dividend_yield market_cap week52_high week52_low source asof size_tier stale_warning"
+)
+_EMPTY_FINANCIALS = _skeleton("", periods=[], income=[], balance=[], cashflow=[])
+_EMPTY_ANALYSTS = _skeleton("", target=None, ratings=[], upgrades=[])
+_EMPTY_EARNINGS = _skeleton("", history=[], upcoming=[])
+_EMPTY_INSIDERS = _skeleton(
+    "", items=[], net=_skeleton("buy_value sell_value net_value buy_count sell_count")
+)
+_EMPTY_HOLDINGS = _skeleton(
+    "insiders_pct institutions_pct institutions_float_pct institutions_count reported_date",
+    funds=[],
+)
+_EMPTY_CORPORATE = _skeleton("", dividends=[], splits=[])
 
 
 def _panel(label: str, loader: Callable[[], Any], empty: Any) -> Any:
@@ -308,10 +275,10 @@ def get_detail(symbol: str) -> dict[str, Any] | None:
             "earnings", lambda: research.get_earnings(sym), _EMPTY_EARNINGS
         ),
         "insiders": _panel(
-            "insiders", lambda: research.get_insiders(sym), _EMPTY_INSIDERS
+            "insiders", lambda: holdings.get_insiders(sym), _EMPTY_INSIDERS
         ),
         "holdings": _panel(
-            "holdings", lambda: research.get_holdings(sym), _EMPTY_HOLDINGS
+            "holdings", lambda: holdings.get_holdings(sym), _EMPTY_HOLDINGS
         ),
         "corporate_actions": _panel(
             "corporate_actions", lambda: _corporate_actions(sym), _EMPTY_CORPORATE

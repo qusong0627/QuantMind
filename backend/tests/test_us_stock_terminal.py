@@ -26,6 +26,8 @@ from backend.services.api.market_analysis_us.feed import base as us_base
 from backend.services.api.stock_terminal_us.feed import (
     base as term_base,
     detail,
+    holdings,
+    huntly,
     kline,
     news,
     research,
@@ -400,7 +402,7 @@ def test_detail_earnings_contract():
 
 
 def test_detail_insiders_contract_and_net_consistency():
-    ins = research.get_insiders("AAPL")
+    ins = holdings.get_insiders("AAPL")
     items, net = ins["items"], ins["net"]
     assert items and len(items) <= 30
     dates = [it["date"] for it in items]
@@ -421,7 +423,7 @@ def test_detail_insiders_contract_and_net_consistency():
 
 def test_detail_holdings_contract():
     """major_holders 是 4 行无标签宽表，顺序固定 —— 顺序错了会把「机构家数」当占比。"""
-    h = research.get_holdings("AAPL")
+    h = holdings.get_holdings("AAPL")
     assert 0 <= h["insiders_pct"] <= 100
     assert 0 < h["institutions_pct"] <= 100
     assert h["insiders_pct"] < h["institutions_pct"], "内部人占比应小于机构占比"
@@ -470,10 +472,10 @@ def test_detail_panels_degrade_to_empty_skeleton():
         "upgrades": [],
     }
     assert research.get_earnings("ZZZZZZ") == {"history": [], "upcoming": []}
-    assert research.get_insiders("ZZZZZZ")["items"] == []
-    assert research.get_holdings("ZZZZZZ")["funds"] == []
+    assert holdings.get_insiders("ZZZZZZ")["items"] == []
+    assert holdings.get_holdings("ZZZZZZ")["funds"] == []
     assert detail._corporate_actions("ZZZZZZ")["dividends"] == []
-    assert research.get_holdings("ZZZZZZ")["reported_date"] is None
+    assert holdings.get_holdings("ZZZZZZ")["reported_date"] is None
 
 
 def test_insider_type_parsed_from_text_prefix():
@@ -486,9 +488,9 @@ def test_insider_type_parsed_from_text_prefix():
     assert _insider_type(None) == ""
     assert _insider_type("") == ""
     # 只有 Purchase/Sale 归为 buy/sell，其余（授予/行权/未知）一律 other
-    assert research._INSIDER_TYPE_MAP.get("Purchase") == "buy"
-    assert research._INSIDER_TYPE_MAP.get("Sale") == "sell"
-    assert research._INSIDER_TYPE_MAP.get("Stock Gift", "other") == "other"
+    assert holdings._INSIDER_TYPE_MAP.get("Purchase") == "buy"
+    assert holdings._INSIDER_TYPE_MAP.get("Sale") == "sell"
+    assert holdings._INSIDER_TYPE_MAP.get("Stock Gift", "other") == "other"
 
 
 def test_upgrade_action_normalized_by_shared_grade_logic():
@@ -547,7 +549,7 @@ def test_news_enrichment_primary_path():
 
 
 def test_news_single_char_symbol_uses_name_only():
-    if not os.path.exists(news._db_path()) and not _pg_reachable():
+    if not os.path.exists(huntly.db_path()) and not _pg_reachable():
         pytest.skip("无资讯源")
     res = news.get_stock_news("F", limit=3)
     assert res is not None and "F" not in res["keywords"]
@@ -564,10 +566,10 @@ def _pg_reachable() -> bool:
 
 def test_news_huntly_fallback_path():
     """兜底路径：Huntly 标题 LIKE（原实现保留），条目形状与主路径一致。"""
-    db = news._db_path()
+    db = huntly.db_path()
     if not os.path.exists(db):
         pytest.skip("本机无 Huntly 库")
-    items = news._fetch_huntly(db, news.keywords_for("AAPL"), "AAPL", 5)
+    items = huntly.fetch_by_title(news.keywords_for("AAPL"), "AAPL", 5)
     assert 0 < len(items) <= 5
     ids = [it["id"] for it in items]
     assert ids == sorted(ids, reverse=True), "兜底路径按 id 倒序"

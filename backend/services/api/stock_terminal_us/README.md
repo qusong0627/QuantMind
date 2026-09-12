@@ -49,9 +49,11 @@ backend/services/api/stock_terminal_us/     # 后端：自包含市场目录
 │   ├── universe.py    # 标的池 / 搜索 / 分页列表（最新分区有行情者）/ 个股概要
 │   ├── kline.py       # 未复权日线 + 全部历史拆股事件（显式分区 + 列裁剪）
 │   ├── detail.py      # 聚合器（get_detail）+ overview/valuation/财务三表/分红拆股 + 空骨架
-│   ├── research.py    # 分析师 / 财报 / 内部人 / 机构持仓（事件式披露表）
+│   ├── research.py    # 分析师 / 财报（卖方覆盖）
+│   ├── holdings.py    # 内部人 / 机构持仓（筹码披露）
 │   ├── labels.py      # 财务中文标签映射（key=原始英文列名, label=中文）+ num() 出口
-│   └── news.py        # 资讯：PG enrichment 主路径 + Huntly 标题 LIKE 兜底
+│   ├── news.py        # 资讯编排：匹配词规则 + PG enrichment 主路径 + 兜底调度
+│   └── huntly.py      # Huntly SQLite 只读访问（元数据 + 标题 LIKE 兜底）
 └── README.md
 backend/tests/test_us_stock_terminal.py     # 零 mock，直连真实 parquet + PG + Huntly
 ```

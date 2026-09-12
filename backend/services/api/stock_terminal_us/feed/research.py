@@ -1,14 +1,10 @@
-"""美股个股终端 —— 卖方覆盖与披露面板（分析师 / 财报 / 内部人 / 机构持仓）。
-
-这四块都是「事件式披露」小表，每股一文件、TTL 缓存，与财务三表（`detail._financials`）
-分开维护：改披露口径不必动财务标签映射。
+"""美股个股终端 —— 卖方覆盖面板（分析师目标价/评级/升降级 + 财报日历）。
 
 响应形状对齐前端 `stock-terminal-us/types.ts`（缺数据的键给 null / 空数组，不省略）：
-- `get_analysts`  -> {target, ratings[], upgrades[]}
-- `get_earnings`  -> {history[], upcoming[]}
-- `get_insiders`  -> {items[], net{}}
-- `get_holdings`  -> {insiders_pct, institutions_pct, institutions_float_pct,
-                      institutions_count, funds[], reported_date}
+- `get_analysts` -> {target, ratings[], upgrades[]}
+- `get_earnings` -> {history[], upcoming[]}
+
+内部人与机构持仓见 `holdings.py`（筹码披露口径单独维护）。
 
 口径要点（都是踩过的坑）：
 - `earnings_history.surprisePercent` 是**小数**（0.0452 = 4.52%），
@@ -16,11 +12,7 @@
 - `earnings_dates.Earnings Date` **带时区**（`2026-10-29 16:00:00-04:00`），
   与 tz-naive 的 today 直接比较会抛 TypeError
 - `calendar.Earnings Date` 是**列表列**（`array([datetime.date(...)])`），取首个元素；
-  它是财报日期的权威口径（10-30），earnings_dates 的东方时区时间戳会差一天
-- `major_holders` 是 4 行**无标签宽表**，顺序固定（内部人占比 / 机构占比 /
-  机构流通股占比 / 机构家数），按位置取值；13F 口径披露滞后约一季
-- 内部人交易 `Transaction` 列**恒为空串**，类型从 `Text` 前缀解析；
-  AAPL 78 行里 40 行 `Text` 为空（授予/行权等无价格事件）→ 类型归 `other`
+  它是财报日期的权威口径（2026-10-30），earnings_dates 的东八区时间戳会差一天
 - `upgrades_downgrades.Action` 只出现 main/reit/down/up/init 五种，
   归一为前端枚举 up|down|init|reiterated|other；up/down 判定复用
   `market_analysis_us.feed.analysts._grade_direction`（评级词档位比较），不另写一套
@@ -36,10 +28,6 @@ import pandas as pd
 
 from backend.services.api.market_analysis_shared.display import safe_float
 from backend.services.api.market_analysis_us.feed.analysts import _grade_direction
-from backend.services.api.market_analysis_us.feed.holdings import (
-    _MAJOR_HOLDER_FIELDS,
-    _insider_type,
-)
 from backend.services.api.stock_terminal_us.feed.base import _symbol_table
 from backend.services.api.stock_terminal_us.feed.labels import num
 
@@ -47,11 +35,6 @@ ANALYST_REL = "4_analyst"
 _UPGRADE_LIMIT = 30
 _EARNINGS_HISTORY_LIMIT = 8
 _EARNINGS_UPCOMING_LIMIT = 3
-_INSIDER_LIMIT = 30
-_FUND_LIMIT = 15
-
-# 内部人交易类型归一：只有 Purchase / Sale 是择时信号，其余（授予/行权/赠与）一律 other
-_INSIDER_TYPE_MAP = {"Purchase": "buy", "Sale": "sell"}
 
 # Action 原始值（yahoo 全样本只有这五种）-> 前端枚举
 _ACTION_WORDS: dict[str, str] = {
@@ -235,101 +218,3 @@ def get_earnings(sym: str) -> dict[str, Any]:
                     }
                 )
     return {"history": history, "upcoming": upcoming}
-
-
-def _insider_items(df: pd.DataFrame) -> list[dict[str, Any]]:
-    df = df.copy()
-    df["_d"] = pd.to_datetime(df.get("Start Date"), errors="coerce")
-    df = df[df["_d"].notna()].sort_values("_d", ascending=False).head(_INSIDER_LIMIT)
-    items: list[dict[str, Any]] = []
-    for _, r in df.iterrows():
-        txn = _insider_type(r.get("Text"))
-        items.append(
-            {
-                "date": str(r["_d"])[:10],
-                "insider": str(r.get("Insider") or ""),
-                "position": str(r.get("Position") or ""),
-                # 类型只从 Text 前缀解析（Transaction 列恒空）；授予/行权等无价格事件 -> other
-                "type": _INSIDER_TYPE_MAP.get(txn, "other"),
-                "shares": int(safe_float(r.get("Shares"))),
-                "value": num(r.get("Value")),
-            }
-        )
-    return items
-
-
-def get_insiders(sym: str) -> dict[str, Any]:
-    """SEC Form 4 内部人交易（近 30 条，倒序）+ 这批流水的买卖净额。"""
-    df = _symbol_table(f"{ANALYST_REL}/insider_transactions", sym)
-    items = _insider_items(df) if not df.empty else []
-    buys = [it for it in items if it["type"] == "buy"]
-    sells = [it for it in items if it["type"] == "sell"]
-    buy_value = round(sum(it["value"] or 0 for it in buys), 2)
-    sell_value = round(sum(it["value"] or 0 for it in sells), 2)
-    return {
-        "items": items,
-        "net": {
-            "buy_value": buy_value,
-            "sell_value": sell_value,
-            "net_value": round(buy_value - sell_value, 2),
-            "buy_count": len(buys),
-            "sell_count": len(sells),
-        },
-    }
-
-
-def _major_holders(mh: pd.DataFrame) -> dict[str, Any]:
-    """major_holders 4 行固定表序 -> 占比字段（前 3 行是小数 ×100，第 4 行是家数）。"""
-    out: dict[str, Any] = {}
-    if mh.empty or "Value" not in mh.columns:
-        return out
-    vals = pd.to_numeric(mh["Value"], errors="coerce").tolist()
-    for field, raw in zip(_MAJOR_HOLDER_FIELDS, vals, strict=False):
-        if pd.isna(raw):
-            continue
-        out[field] = (
-            int(safe_float(raw)) if field == "institutions_count" else num(raw * 100)
-        )
-    return out
-
-
-def _fund_rows(mf: pd.DataFrame) -> list[dict[str, Any]]:
-    mf = mf.copy()
-    mf["_pct"] = pd.to_numeric(mf.get("pctHeld"), errors="coerce")
-    mf = mf[mf["_pct"].notna()].sort_values("_pct", ascending=False).head(_FUND_LIMIT)
-    funds: list[dict[str, Any]] = []
-    for _, r in mf.iterrows():
-        funds.append(
-            {
-                "holder": str(r.get("Holder") or ""),
-                "pct_held": num(safe_float(r.get("pctHeld")) * 100),
-                "shares": int(safe_float(r.get("Shares"))),
-                "value": num(r.get("Value")),
-                "pct_change": num(safe_float(r.get("pctChange")) * 100),
-                "date_reported": str(r.get("Date Reported") or "")[:10],
-            }
-        )
-    return funds
-
-
-def get_holdings(sym: str) -> dict[str, Any]:
-    """机构持股结构（major_holders）+ 头部机构明细（13F，滞后一季）。"""
-    mh = _symbol_table(f"{ANALYST_REL}/major_holders", sym)
-    major = _major_holders(mh)
-
-    mf = _symbol_table(f"{ANALYST_REL}/mutual_fund_holders", sym)
-    funds: list[dict[str, Any]] = []
-    reported: str | None = None
-    if not mf.empty:
-        funds = _fund_rows(mf)
-        if "Date Reported" in mf.columns:
-            ts = pd.to_datetime(mf["Date Reported"], errors="coerce").max()
-            reported = None if pd.isna(ts) else str(ts)[:10]
-    return {
-        "insiders_pct": major.get("insiders_pct"),
-        "institutions_pct": major.get("institutions_pct"),
-        "institutions_float_pct": major.get("institutions_float_pct"),
-        "institutions_count": major.get("institutions_count"),
-        "funds": funds,
-        "reported_date": reported,
-    }

@@ -6,27 +6,24 @@
 响应带 `sentiment_score` / `sentiment_label` / `event_tags` 等标签。
 查询按 `huntly_page_id` 倒序取最近 `_PG_SCAN_MAX` 条候选（走主键索引后向扫描，
 实测 0.03-0.3s），再按发布时间倒序切 limit —— 与 `routers/news.py` 的
-`/articles` 同库同口径，不新造一套标签语义。
+`/articles` 同库同口径，不新造一套标签语义。标题/链接/时间从 Huntly 按 id 批量取
+（`huntly.py`），取不到时回落到 enrichment 表自带的 title。
 
 **匹配词规则**（沿用 A 股终端）：中文名 + 代码，**长度 ≤1 的代码不参与匹配**
 （F/T/A 这类单字符 ticker 在标题里几乎满命中）；单字符标的只剩中文名走标题匹配。
 
-**兜底**：Huntly SQLite 标题 LIKE（本模块原实现）—— PG 不可用 / enrichment
+**兜底**：Huntly 标题 LIKE（`huntly.fetch_by_title`）—— PG 不可用 / enrichment
 无命中 / 关键词为空时启用，再按 id 反查 PG 补情绪标签（best-effort）。
-
-Huntly 连接必须用 `file:{path}?immutable=1`：Java 进程持写锁会让 `mode=ro`
-阻塞（连 PRAGMA 都拿不到锁）。已知风险：`immutable=1` 与并发写可能抛
-`database disk image is malformed`，失败重试一次后降级为 available=false + 空 items。
 """
 
 from __future__ import annotations
 
 import logging
 import os
-import sqlite3
 from typing import Any
 from collections.abc import Iterable
 
+from backend.services.api.stock_terminal_us.feed import huntly
 from backend.services.api.stock_terminal_us.feed.base import (
     _name_of,
     _symbol_exists,
@@ -35,11 +32,7 @@ from backend.services.api.stock_terminal_us.feed.base import (
 
 logger = logging.getLogger(__name__)
 
-HUNTLY_SQLITE_PATH = "/data/huntly/db.sqlite"
 _MAX_KEYWORD_LEN = 1  # 长度 <= 1 的关键词命中一切，不参与匹配
-
-# 代码关键词的 Huntly 扫描窗口（行数）；page 行内含正文大字段，全表扫一次冷启动 47s
-_TICKER_SCAN_WINDOW = 200_000
 
 # enrichment 候选窗口：按 huntly_page_id 倒序取多少条后在内存里按发布时间排序
 _PG_SCAN_DEFAULT = 100
@@ -50,10 +43,6 @@ _ENRICH_COLS = (
     "huntly_page_id, tickers, sentiment_score, sentiment_label, "
     "event_tags, industries, key_terms, countries, title"
 )
-
-
-def _db_path() -> str:
-    return os.getenv("HUNTLY_SQLITE_PATH", HUNTLY_SQLITE_PATH)
 
 
 def keywords_for(symbol: str) -> list[str]:
@@ -148,107 +137,6 @@ def _fetch_by_ids(ids: Iterable[int]) -> dict[int, dict[str, Any]]:
         return {}
 
 
-# ---- Huntly SQLite（兜底 + 主路径的标题/链接/时间） ----
-
-
-def _huntly_connect(db: str) -> sqlite3.Connection:
-    conn = sqlite3.connect(f"file:{db}?immutable=1", uri=True, timeout=3)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-
-def _huntly_meta(ids: Iterable[int]) -> dict[int, dict[str, Any]]:
-    """按 id 批量取 Huntly 页面（标题/链接/发布时间/来源名）；失败返回空映射。"""
-    id_list = [int(i) for i in ids]
-    if not id_list:
-        return {}
-    placeholders = ",".join(["?"] * len(id_list))
-    sql = (
-        "SELECT p.id, p.title, p.url, p.connected_at, p.created_at, c.name AS source_name "
-        "FROM page p LEFT JOIN connector c ON c.id = p.connector_id "
-        f"WHERE p.id IN ({placeholders})"
-    )
-    try:
-        conn = _huntly_connect(_db_path())
-        try:
-            rows = conn.execute(sql, id_list).fetchall()
-        finally:
-            conn.close()
-    except Exception as exc:  # noqa: BLE001 - 主路径仍可只靠 PG 标题
-        logger.warning("[stock-terminal-us] Huntly 批量取页面失败: %s", exc)
-        return {}
-    return {
-        int(r["id"]): {
-            "title": str(r["title"] or ""),
-            "link": str(r["url"] or ""),
-            "published_at": str(r["connected_at"] or r["created_at"] or "")[:19],
-            "source": str(r["source_name"] or ""),
-        }
-        for r in rows
-    }
-
-
-def _recent_floor(conn: sqlite3.Connection) -> int:
-    """代码匹配的扫描下界（最近 _TICKER_SCAN_WINDOW 行的最小 id）；取不到返回 0。"""
-    try:
-        row = conn.execute("SELECT max(id) FROM page").fetchone()
-        return max(0, int(row[0] or 0) - _TICKER_SCAN_WINDOW)
-    except sqlite3.Error:  # 取不到就退回不限窗口（正确性优先）
-        return 0
-
-
-def _fetch_huntly(
-    db: str, keywords: list[str], sym: str, limit: int
-) -> list[dict[str, Any]]:
-    """兜底路径：Huntly 标题 LIKE，逐词匹配后去重、按 id 倒序取前 limit 条。"""
-    items: list[dict[str, Any]] = []
-    seen: set[int] = set()
-    conn = sqlite3.connect(f"file:{db}?immutable=1", uri=True, timeout=3)
-    conn.row_factory = sqlite3.Row
-    try:
-        floor = _recent_floor(conn)
-        for kw in keywords:
-            sql = (
-                "SELECT p.id, p.title, p.url, p.connected_at, p.created_at, "
-                "c.name AS source_name FROM page p "
-                "LEFT JOIN connector c ON c.id = p.connector_id WHERE p.title LIKE ?"
-            )
-            params: list[Any] = [f"%{kw}%"]
-            if kw == sym and floor:
-                sql += " AND p.id > ?"
-                params.append(floor)
-            rows = conn.execute(
-                sql + " ORDER BY p.id DESC LIMIT ?", [*params, limit]
-            ).fetchall()
-            for r in rows:
-                rid = int(r["id"])
-                if rid in seen:
-                    continue
-                seen.add(rid)
-                items.append(
-                    {
-                        "id": rid,
-                        "title": str(r["title"] or ""),
-                        "link": str(r["url"] or ""),
-                        "published_at": str(r["connected_at"] or r["created_at"] or "")[
-                            :19
-                        ],
-                        "source": str(r["source_name"] or ""),
-                        "sentiment_score": None,
-                        "sentiment_label": None,
-                        "event_tags": [],
-                        "industries": [],
-                        "key_terms": [],
-                        "countries": [],
-                        "matched_by": "title",
-                    }
-                )
-    finally:
-        conn.close()
-    items.sort(key=lambda it: int(it["id"]), reverse=True)
-    return items[:limit]
-
-
 # ---- 组装 ----
 
 
@@ -276,6 +164,38 @@ def _sort_key(item: dict[str, Any]) -> tuple[str, int]:
     return (item.get("published_at") or "", int(item["id"]))
 
 
+def _enrichment_items(sym: str, keywords: list[str], limit: int) -> list[dict]:
+    """主路径取数：PG 候选 + Huntly 元数据 + 发布时间倒序切 limit。"""
+    scan = min(max(limit * 5, _PG_SCAN_DEFAULT), _PG_SCAN_MAX)
+    rows = _fetch_candidates(sym, keywords, scan)
+    if not rows:
+        return []
+    meta = huntly.huntly_meta([r["id"] for r in rows])
+    return sorted((_to_item(r, meta, sym) for r in rows), key=_sort_key, reverse=True)[
+        :limit
+    ]
+
+
+def _huntly_items(sym: str, keywords: list[str], limit: int) -> list[dict]:
+    """兜底路径取数：Huntly 标题 LIKE + 按 id 反查 PG 补情绪标签。"""
+    items = huntly.fetch_by_title(keywords, sym, limit)
+    if not items:
+        return []
+    labels = _fetch_by_ids(it["id"] for it in items)
+    for it in items:
+        row = labels.get(it["id"])
+        if row:
+            it["sentiment_score"] = row["sentiment_score"]
+            it["sentiment_label"] = row["sentiment_label"]
+            it["event_tags"] = row["event_tags"]
+            it["industries"] = row["industries"]
+            it["key_terms"] = row["key_terms"]
+            it["countries"] = row["countries"]
+            if sym in row["tickers"]:
+                it["matched_by"] = "ticker"
+    return items
+
+
 def get_stock_news(symbol: str, limit: int = 20) -> dict[str, Any] | None:
     """个股资讯；标的不存在返回 None（路由转 404），资讯源不可用返回空 items。"""
     sym = normalize_symbol(symbol)
@@ -299,44 +219,24 @@ def get_stock_news(symbol: str, limit: int = 20) -> dict[str, Any] | None:
     if not keywords:
         return result
 
-    scan = min(max(limit * 5, _PG_SCAN_DEFAULT), _PG_SCAN_MAX)
     try:
-        rows = _fetch_candidates(sym, keywords, scan)
+        items = _enrichment_items(sym, keywords, limit)
     except Exception as exc:  # noqa: BLE001 - PG 不可用则走 Huntly 兜底
         logger.warning(
             "[stock-terminal-us] enrichment 查询失败，转 Huntly 兜底: %s", exc
         )
-        rows = []
-    if rows:
-        meta = _huntly_meta([r["id"] for r in rows])
-        items = sorted(
-            (_to_item(r, meta, sym) for r in rows), key=_sort_key, reverse=True
-        )[:limit]
+        items = []
+    if items:
         result.update(
             provider="enrichment", available=True, total=len(items), items=items
         )
         return result
 
-    # 兜底：Huntly 标题 LIKE（PG 空/不可用时），再按 id 补情绪标签
-    db = _db_path()
-    if not os.path.exists(db):
+    if not os.path.exists(huntly.db_path()):
         return result
     for attempt in (1, 2):
         try:
-            items = _fetch_huntly(db, keywords, sym, limit)
-            if items:
-                labels = _fetch_by_ids(it["id"] for it in items)
-                for it in items:
-                    row = labels.get(it["id"])
-                    if row:
-                        it["sentiment_score"] = row["sentiment_score"]
-                        it["sentiment_label"] = row["sentiment_label"]
-                        it["event_tags"] = row["event_tags"]
-                        it["industries"] = row["industries"]
-                        it["key_terms"] = row["key_terms"]
-                        it["countries"] = row["countries"]
-                        if sym in row["tickers"]:
-                            it["matched_by"] = "ticker"
+            items = _huntly_items(sym, keywords, limit)
             result.update(
                 provider="huntly" if items else None,
                 available=bool(items),
