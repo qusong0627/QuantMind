@@ -122,11 +122,25 @@ _SYMBOL_PREFIX_TO_MARKET = {
 }
 
 
+# 交易所惯用名 -> ALL_MARKETS 的规范代码。
+# 前端 config/marketConfig.ts 传的是惯用名（SSE / HKEX / NYSE），而 ALL_MARKETS 的键是
+# exchange_calendars 的代码（SSE / XHKG / XNYS）。少了这层别名，get_market('NYSE') 会抛错、
+# 被调用方吞掉后退化成「只看周末」，于是美股假日（如 2026-07-03 独立日）被当成交易日 —— 静默错。
+_MARKET_ALIASES = {
+    "NYSE": "XNYS", "US": "XNYS", "NASD": "XNAS", "NASDAQ": "XNAS",
+    "HKEX": "XHKG", "HK": "XHKG",
+    "SSE": "SSE", "SH": "SSE", "SZSE": "SZSE", "SZ": "SZSE",
+}
+
+
 def get_market(market_code: str) -> MarketDefinition:
-    """获取市场定义，支持旧代码(如 SSE)和新代码(如 XNYS)"""
+    """获取市场定义，支持惯用名(如 NYSE/HKEX)与 exchange_calendars 代码(如 XNYS)"""
     code = str(market_code or "").strip().upper()
     if code in ALL_MARKETS:
         return ALL_MARKETS[code]
+    alias = _MARKET_ALIASES.get(code)
+    if alias and alias in ALL_MARKETS:
+        return ALL_MARKETS[alias]
     # 尝试通过 xcal_name 反查
     for m in ALL_MARKETS.values():
         if m.xcal_name == code:
