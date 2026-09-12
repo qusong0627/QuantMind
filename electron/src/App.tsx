@@ -55,11 +55,14 @@ const ModelRegistryPage = lazy(() => import('./pages/ModelRegistryPage'));
 const ModelHubPage = lazy(() => import('./pages/ModelHubPage'));
 const InferenceCenterPage = lazy(() => import('./pages/InferenceCenterPage'));
 const InferenceCenterHkPage = lazy(() => import('./pages/InferenceCenterHkPage'));
+const InferenceCenterUsPage = lazy(() => import('./pages/InferenceCenterUsPage'));
 
-/** 推理中心路由包装：跟随顶部市场切换器（A股 → A股版；港股 → 港股独立页） */
+/** 推理中心路由包装：跟随顶部市场切换器（三市场各一份适配器，页面实现共用 inference-center-shared） */
 const InferenceCenterByMarket: React.FC = () => {
   const market = useSelector(selectCurrentMarket);
-  return market === 'HK' ? <InferenceCenterHkPage /> : <InferenceCenterPage />;
+  if (market === 'HK') return <InferenceCenterHkPage />;
+  if (market === 'US') return <InferenceCenterUsPage />;
+  return <InferenceCenterPage />;
 };
 const StockTerminalPage = lazy(() => import('./features/stock-terminal/pages/StockTerminalPage'));
 const StockTerminalHkPage = lazy(() => import('./features/stock-terminal-hk/pages/StockTerminalPage'));

@@ -10,6 +10,8 @@ interface StockForecastChartProps {
   currentPrice: number;
   modelName?: string;
   asOfDate?: string;
+  /** 货币符号（¥ / HK$ / $），由各市场适配器提供 */
+  currencySymbol?: string;
 }
 
 export const StockForecastChart: React.FC<StockForecastChartProps> = ({
@@ -20,6 +22,7 @@ export const StockForecastChart: React.FC<StockForecastChartProps> = ({
   currentPrice,
   modelName,
   asOfDate,
+  currencySymbol = '¥',
 }) => {
   const option = useMemo(() => {
     // 1. 历史 K 线数据
@@ -97,7 +100,7 @@ export const StockForecastChart: React.FC<StockForecastChartProps> = ({
               html += `
                 <div style="display: flex; justify-content: space-between; gap: 12px; font-size: 11px; margin: 2px 0;">
                   <span style="color: #334155;">K线收盘:</span>
-                  <span style="font-weight: 600; font-family: monospace;">¥${close?.toFixed(2)}</span>
+                  <span style="font-weight: 600; font-family: monospace;">${currencySymbol}${close?.toFixed(2)}</span>
                 </div>
               `;
             } else if (item.value !== null && item.value !== undefined) {
@@ -105,7 +108,7 @@ export const StockForecastChart: React.FC<StockForecastChartProps> = ({
               html += `
                 <div style="display: flex; justify-content: space-between; gap: 12px; font-size: 11px; margin: 2px 0;">
                   <span style="color: ${color}; font-weight: 500;">${item.seriesName}:</span>
-                  <span style="font-weight: 600; font-family: monospace; color: #0f172a;">¥${Number(item.value).toFixed(2)}</span>
+                  <span style="font-weight: 600; font-family: monospace; color: #0f172a;">${currencySymbol}${Number(item.value).toFixed(2)}</span>
                 </div>
               `;
             }
@@ -149,7 +152,7 @@ export const StockForecastChart: React.FC<StockForecastChartProps> = ({
         axisLabel: {
           color: '#334155',
           fontSize: 10,
-          formatter: (v: number) => `¥${v.toFixed(1)}`,
+          formatter: (v: number) => `${currencySymbol}${v.toFixed(1)}`,
         },
         splitLine: {
           lineStyle: { color: 'rgba(226, 232, 240, 0.6)', type: 'dashed' },
@@ -232,7 +235,7 @@ export const StockForecastChart: React.FC<StockForecastChartProps> = ({
         }] : []),
       ],
     };
-  }, [kline, forecast, symbol, currentPrice, asOfDate]);
+  }, [kline, forecast, symbol, currentPrice, asOfDate, currencySymbol]);
 
   return (
     <div className="w-full h-full relative flex flex-col">

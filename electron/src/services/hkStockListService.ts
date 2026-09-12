@@ -42,10 +42,12 @@ class HkStockListService {
   search(keyword: string, limit = 10): HkStock[] {
     const kw = keyword.trim().toLowerCase();
     if (!kw) return [];
-    const digits = kw.replace(/\D/g, '');
+    // 港股代码有 4 位（0700.HK）与 5 位（00700）两种写法，库内是 4 位。
+    // 去掉前导零后再比，否则用户按 5 位规范码输入（00700）会一条都搜不到。
+    const digits = kw.replace(/\D/g, '').replace(/^0+/, '');
     const out: HkStock[] = [];
     for (const s of this.stocks) {
-      const codePart = s.symbol.replace('.HK', '');
+      const codePart = s.symbol.replace('.HK', '').replace(/^0+/, '');
       const hit = s.name.toLowerCase().includes(kw)
         || s.symbol.toLowerCase().includes(kw)
         || (digits.length >= 2 && codePart.includes(digits));

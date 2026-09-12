@@ -41,7 +41,9 @@ export function InferenceScoreChart({ symbol, modelId, selectedDate, onPointClic
     }
     let cancelled = false;
     setLoading(true);
-    const code = symbol.split('.')[0];
+    // 只剥掉**已知的交易所后缀**（600519.SH → 600519 / 0700.HK → 0700）。
+    // 不能用 split('.')[0]：美股的 BRK.B / BF.B 会被截成 BRK / BF，查成另一只股票。
+    const code = symbol.replace(/\.(SH|SZ|BJ|HK)$/i, '');
     // 传 model_id（如有）：后端按指定模型返回 pred 分数；否则锁定用户默认模型。
     // days 由调用方控制窗口（个股终端传 750 保证覆盖最长 2 年的 K 线）
     // endDate 指定时窗口以基准日为终点，保证与上方K线重叠（个股推理30天小卡）
