@@ -3987,17 +3987,29 @@ _PRED_HIST_TTL = 600.0
 
 
 def _read_stock_pred_history(
-    storage_path: str, code6: str, cutoff: date, model_id: str, anchor: date | None = None
+    storage_path: str,
+    sym_key: str,
+    cutoff: date,
+    model_id: str,
+    anchor: date | None = None,
+    ticker_mode: bool = False,
 ) -> list[dict[str, Any]]:
     """从模型目录 pred.parquet 读取该股历史分数时序（含每日截面排名）。
 
     兼容多种列名（pred/fusion_score/score、trade_date/date/datetime、
     symbol/instrument 前缀/后缀/小写式均可）；无文件或读取失败返回 []。
     anchor 非空时窗口为 [cutoff, anchor]，否则为 [cutoff, ∞)。
+
+    symbol 匹配按市场分派：ticker_mode=False（CN）按数字段匹配（SH600519/600519.SH/
+    sh600519 归一为 600519）；ticker_mode=True（US/HK）按去非字母数字后的整串匹配
+    （BRK.B 与 BRK-B 同一只）—— 纯字母 ticker 用数字段会变成空串匹配不到任何行。
     """
     import time as _time
 
-    cache_key = f"{storage_path}|{code6}|{cutoff.isoformat()}|{anchor.isoformat() if anchor else ''}"
+    cache_key = (
+        f"{storage_path}|{'tk' if ticker_mode else 'cn'}:{sym_key}"
+        f"|{cutoff.isoformat()}|{anchor.isoformat() if anchor else ''}"
+    )
     hit = _PRED_HIST_CACHE.get(cache_key)
     if hit and _time.time() - hit[0] < _PRED_HIST_TTL:
         return hit[1]
@@ -4028,19 +4040,34 @@ def _read_stock_pred_history(
                     (c for c in ("symbol", "instrument") if c in cols), None
                 )
                 if score_col and date_col and sym_col:
-                    # 先全市场截面算 RANK 再过滤该股（过滤在窗口前做会使排名恒为 1）；
-                    # regexp_extract 抽连续数字段，兼容 SH600000/600000.SH/sh600000
-                    # （注：duckdb 的 regexp_replace 默认只替换首个匹配，不能用于去前缀）
-                    # 排名口径与 A 套（engine_signal_scores）对齐：剔除 B 股
-                    # （SH900/SZ200）、北交所（BJ）、指数（SH000/SZ399），两套
-                    # 数据源切换时排名不再跳变
+                    # 先全市场截面算 RANK 再过滤该股（过滤在窗口前做会使排名恒为 1）。
+                    # 排名口径与 A 套（engine_signal_scores）对齐：剔除 B 股（SH900/SZ200）、
+                    # 北交所（BJ）、指数（SH000/SZ399），两套数据源切换时排名不再跳变。
+                    # 注意这些前缀剔除是 CN 专属规则：美股有真 ticker「BJ」，非 CN 一律不套。
+                    if ticker_mode:
+                        key_expr = (
+                            f"regexp_replace(UPPER(CAST({sym_col} AS VARCHAR)),"
+                            " '[^A-Z0-9]', '', 'g')"
+                        )
+                        excl = ""
+                    else:
+                        # regexp_extract 抽连续数字段，兼容 SH600000/600000.SH/sh600000
+                        # （注：duckdb 的 regexp_replace 默认只替换首个匹配，不能用于去前缀）
+                        key_expr = f"regexp_extract(CAST({sym_col} AS VARCHAR), '[0-9]+', 0)"
+                        excl = f"""
+                              AND NOT (
+                                  UPPER(CAST({sym_col} AS VARCHAR)) LIKE 'SH000%'
+                                  OR UPPER(CAST({sym_col} AS VARCHAR)) LIKE 'SZ399%'
+                                  OR UPPER(CAST({sym_col} AS VARCHAR)) LIKE 'SH900%'
+                                  OR UPPER(CAST({sym_col} AS VARCHAR)) LIKE 'SZ200%'
+                                  OR UPPER(CAST({sym_col} AS VARCHAR)) LIKE 'BJ%'
+                              )"""
                     rows = con.execute(
                         f"""
                         WITH d AS (
                             SELECT CAST({date_col} AS DATE) AS td,
                                    CAST({score_col} AS DOUBLE) AS sc,
-                                   regexp_extract(CAST({sym_col} AS VARCHAR),
-                                                  '[0-9]+', 0) AS code6,
+                                   {key_expr} AS sym_key,
                                    RANK() OVER (PARTITION BY CAST({date_col} AS DATE)
                                                 ORDER BY CAST({score_col} AS DOUBLE) DESC) AS rk,
                                    COUNT(*) OVER (PARTITION BY CAST({date_col} AS DATE)) AS tot
@@ -4048,18 +4075,12 @@ def _read_stock_pred_history(
                             WHERE CAST({score_col} AS DOUBLE) IS NOT NULL
                               AND CAST({date_col} AS DATE) >= CAST(? AS DATE)
                               {f"AND CAST({date_col} AS DATE) <= CAST('{anchor.isoformat()}' AS DATE)" if anchor else ""}
-                              AND NOT (
-                                  UPPER(CAST({sym_col} AS VARCHAR)) LIKE 'SH000%'
-                                  OR UPPER(CAST({sym_col} AS VARCHAR)) LIKE 'SZ399%'
-                                  OR UPPER(CAST({sym_col} AS VARCHAR)) LIKE 'SH900%'
-                                  OR UPPER(CAST({sym_col} AS VARCHAR)) LIKE 'SZ200%'
-                                  OR UPPER(CAST({sym_col} AS VARCHAR)) LIKE 'BJ%'
-                              )
+                              {excl}
                         )
                         SELECT td, sc, rk, tot FROM d
-                        WHERE code6 = ? ORDER BY td DESC
+                        WHERE sym_key = ? ORDER BY td DESC
                         """,
-                        [cutoff, code6],
+                        [cutoff, sym_key],
                     ).fetchall()
                     items = [
                         {
@@ -4091,12 +4112,20 @@ def _read_stock_pred_history(
 
 
 async def _load_stock_pred_history(
-    *, tenant_id: str, user_id: str, model_id: str | None, sym: str, cutoff: date, anchor: date | None = None
+    *,
+    tenant_id: str,
+    user_id: str,
+    model_id: str | None,
+    sym: str,
+    cutoff: date,
+    anchor: date | None = None,
+    market: str | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
     """读模型目录 pred.parquet 的全量历史分数序列。
 
     model_id 为空时取用户设置的默认模型（个股终端下方分数曲线就是此路径，只展默认模型）；
     仅推理批次详情页等明确指定模型的调用方会传 model_id。
+    market 决定 symbol 匹配口径（CN 数字段 / 非 CN 整串 ticker）与默认模型的市场过滤。
     Returns (items, model)；模型缺失/无文件/读空时 items 为 []，调用方回退 engine_signal_scores。
     """
     try:
@@ -4105,8 +4134,10 @@ async def _load_stock_pred_history(
                 tenant_id=tenant_id, user_id=user_id, model_id=model_id
             )
         else:
+            # 默认模型按市场过滤：不过滤会把 A 股默认模型的 pred.parquet 拿去匹配美股 ticker
+            # （读空后曲线只剩信号表，个股终端换市场时表现为分数曲线消失）
             model = await model_registry_service.get_default_model(
-                tenant_id=tenant_id, user_id=user_id
+                tenant_id=tenant_id, user_id=user_id, market=market
             )
     except Exception as exc:  # noqa: BLE001
         logger.warning("分数曲线模型解析失败: %s", exc)
@@ -4116,16 +4147,24 @@ async def _load_stock_pred_history(
     if not model or not storage_path:
         return [], None
 
-    code6 = re.sub(r"[^0-9]", "", sym)
-    if not code6:
+    # symbol 匹配按市场分派：非 CN（US ticker / HK 4-5 位.HK）按整串匹配，
+    # 数字裁剪对 AAPL 这类 ticker 会得到空串 → pred.parquet 一行都读不到（曲线只剩信号表 1 个点）。
+    if market and str(market).upper() != "CN":
+        sym_key = re.sub(r"[^A-Z0-9]", "", str(sym or "").upper())
+        ticker_mode = True
+    else:
+        sym_key = re.sub(r"[^0-9]", "", sym)
+        ticker_mode = False
+    if not sym_key:
         return [], None
     items = await asyncio.to_thread(
         _read_stock_pred_history,
         storage_path,
-        code6,
+        sym_key,
         cutoff,
         str(model.get("model_id") or ""),
         anchor,
+        ticker_mode,
     )
     return (items or []), model
 
@@ -4159,6 +4198,9 @@ async def get_stock_inference_history(
     from backend.shared.stock_utils import StockCodeUtil
 
     sym = str(symbol).strip().upper()
+    # 有效市场：显式 market 优先，否则按 symbol 形态推断（推断不出为 None，保持旧行为不过滤）。
+    # 同时决定 pred.parquet 的 symbol 匹配口径与默认模型的市场过滤，故在取数前解析一次。
+    eff_market = str(market).upper().strip() if market else StockCodeUtil.detect_market(sym)
     try:
         anchor = date.fromisoformat(str(end_date)[:10]) if end_date else date.today()
     except (ValueError, TypeError):
@@ -4288,7 +4330,13 @@ async def get_stock_inference_history(
     # 上面的 engine_signal_scores 批次结果。end_date 指定时窗口以基准日为终点，
     # 保证与上方K线重叠（个股推理30天小卡）。
     pred_items, pred_model = await _load_stock_pred_history(
-        tenant_id=tenant_id, user_id=user_id, model_id=resolved_model_id, sym=sym, cutoff=cutoff, anchor=anchor
+        tenant_id=tenant_id,
+        user_id=user_id,
+        model_id=resolved_model_id,
+        sym=sym,
+        cutoff=cutoff,
+        anchor=anchor,
+        market=eff_market,
     )
     if pred_items:
         items = pred_items
@@ -4342,11 +4390,7 @@ async def get_stock_inference_history(
             # 模型下拉必须按市场过滤：不过滤会把 A 股/港股/美股模型混在一起
             # （个股终端右上角模型选择器的现象）。显式 market 优先，否则按
             # symbol 形态推断；推断不出（None）则保持旧行为不过滤。
-            market=(
-                str(market).upper().strip()
-                if market
-                else StockCodeUtil.detect_market(sym)
-            ),
+            market=eff_market,
         )
         for m in all_models:
             pmeta = m.get("metadata_json") or {}

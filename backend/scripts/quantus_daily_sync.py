@@ -54,6 +54,20 @@ def _sync_index(result: dict) -> None:
         result["akshare_index"] = {"error": str(exc)}
 
 
+def _refresh_sdl(result: dict) -> None:
+    """刷新 stock_daily_latest_us（个股预测/研究服务的 PG 快照）。
+
+    与港股同一约定：K 线落盘后同步最近 90 个交易日快照；缺这步时
+    /research/predict-stock?market=US 第一步就报 relation does not exist。
+    """
+    from backend.scripts.quantus_sdl_sync import sync_day as _sdl_sync
+
+    try:
+        result["sdl_us"] = _sdl_sync()
+    except Exception as exc:  # noqa: BLE001
+        result["sdl_us"] = {"status": "error", "error": str(exc)}
+
+
 def run(*, days: int = 5, symbols: str | None = None, datasets: list[str] | None = None,
         fast: bool = False, **kwargs: Any) -> dict:
     """同步美股数据。datasets 为勾选的数据集名；None 时全量同步雅虎数据。"""
@@ -64,6 +78,8 @@ def run(*, days: int = 5, symbols: str | None = None, datasets: list[str] | None
         _sync_index(result)
         # L1 因子直读数据集随日K落盘后刷新（与港股同口径）
         _refresh_l1_dataset(result)
+        # 个股预测/研究服务的 PG 快照（stock_daily_latest_us）刷新最近 90 交易日
+        _refresh_sdl(result)
         return result
 
     result: dict = {"market": "US", "days": days, "datasets": datasets}
@@ -79,6 +95,7 @@ def run(*, days: int = 5, symbols: str | None = None, datasets: list[str] | None
     # L1 因子日频分区（训练直读数据集，随 daily_forward 增量刷新）
     if "daily_forward" in datasets or "l1_factors" in datasets:
         _refresh_l1_dataset(result)
+        _refresh_sdl(result)
 
     return result
 

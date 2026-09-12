@@ -562,7 +562,20 @@ async def _load_sdl_pg_map(session, trade_date: date, market: str | None) -> dic
         WHERE sdl.trade_date = :trade_date
           AND sdl.volume > 0
     """
-    res = await session.execute(text(sql), {"trade_date": trade_date})
+    try:
+        res = await session.execute(text(sql), {"trade_date": trade_date})
+    except Exception as exc:  # noqa: BLE001
+        # 非 CN 的市场表只有 53 列（无 concept_*/idx_chinext/volume_trend_3d 等 CN 专属列），
+        # 整条 SQL 会 UndefinedColumnError。降级为空 map（调用方回退非 Redis 候选池路径），
+        # 不允许一处缺列把整个截面接口打成 500。CN 表列集固定，异常照旧抛出。
+        if is_cn:
+            raise
+        try:
+            await session.rollback()  # 失败查询会挂起事务，回滚后再交还调用方
+        except Exception:  # noqa: BLE001
+            pass
+        logger.warning("读取 %s 兜底字段失败（非 CN 表列集差异），降级为空: %s", sdl_table, exc)
+        return {}
     symbol_map: dict[str, dict[str, Any]] = {}
 
     def _info_score(payload: dict[str, Any]) -> int:
@@ -1493,18 +1506,41 @@ def _read_model_pred_day(storage_path: str, trade_date: str) -> list[dict[str, A
 
 
 def _read_pred_single_symbol(
-    storage_path: str, trade_date: str, normalized_symbol: str
+    storage_path: str, trade_date: str, normalized_symbol: str, market: str | None = None
 ) -> float | None:
     """直读模型 pred.parquet 某日单个标的的分数。
 
     个股独立轻路线专用：单行点查（duckdb 下推 date+symbol 谓词，毫秒级），
     不走按日物化分片、不写进程缓存、不碰数据库。无文件/无列/无命中返回 None，
     调用方据此决定是否转实时推理。
+
+    symbol 匹配按市场分派（**不能统一用数字裁剪**）：
+    - CN：抽连续数字段（600519），兼容 SH600519/600519.SH/sh600519 三种写法；
+    - 非 CN（US ticker / HK 4-5 位.HK）：两侧都去掉非字母数字字符后整串比对
+      （BRK.B 与 BRK-B 视为同一只）。数字裁剪对纯字母 ticker 会得到空串，
+      SQL 里 `regexp_replace(symbol,'[^0-9]','','g') = ''` 对**所有** ticker 都成立，
+      LIMIT 1 会静默取到任意一只股票（实测 AAPL@2026-08-05 取到 -0.047236，
+      真值 +0.022226）。
     """
     parquet_file = _pred_parquet_file(storage_path)
     if parquet_file is None:
         return None
-    digits = re.sub(r"[^0-9]", "", normalized_symbol)
+    is_cn = not market or str(market).upper() == "CN"
+    if is_cn:
+        sym_key = re.sub(r"[^0-9]", "", normalized_symbol)
+        if not sym_key:
+            return None
+    else:
+        ticker = str(normalized_symbol or "").strip().upper()
+        sym_key = re.sub(r"[^A-Z0-9]", "", ticker)
+        if not sym_key or not re.fullmatch(r"[A-Z0-9.\-]{1,12}", ticker):
+            return None
+
+    def _sym_expr(sym_col: str) -> str:
+        if is_cn:
+            return f"regexp_replace(CAST({sym_col} AS VARCHAR), '[^0-9]', '', 'g')"
+        return f"regexp_replace(UPPER(CAST({sym_col} AS VARCHAR)), '[^A-Z0-9]', '', 'g')"
+
     try:
         import duckdb
 
@@ -1527,11 +1563,12 @@ def _read_pred_single_symbol(
                 f"""
                 SELECT CAST({score_col} AS DOUBLE)
                 FROM read_parquet('{str(parquet_file)}')
-                WHERE CAST({date_col} AS DATE) = CAST('{trade_date}' AS DATE)
+                WHERE CAST({date_col} AS DATE) = CAST(? AS DATE)
                   AND CAST({score_col} AS DOUBLE) IS NOT NULL
-                  AND regexp_replace(CAST({sym_col} AS VARCHAR), '[^0-9]', '', 'g') = '{digits}'
+                  AND {_sym_expr(sym_col)} = ?
                 LIMIT 1
-                """
+                """,
+                [str(trade_date), sym_key],
             ).fetchone()
             if not row or row[0] is None:
                 return None
@@ -2614,7 +2651,12 @@ def _compute_shap_drivers_sync(
     import glob as _glob
     from pathlib import Path
 
-    metas = _glob.glob(f"/app/models/users/*/*/{model_id}/metadata.json")
+    # 模型目录有两种布局：CN 直接挂在用户目录下，非 CN 多一层市场段
+    # （/app/models/users/{tenant}/{user}/{market}/{model_id}），只 glob 前者会让
+    # 美股/港股模型的归因永远拿不到 metadata → 静默返回 None。
+    metas = _glob.glob(f"/app/models/users/*/*/{model_id}/metadata.json") or _glob.glob(
+        f"/app/models/users/*/*/*/{model_id}/metadata.json"
+    )
     if not metas:
         return None
     try:
@@ -2642,13 +2684,17 @@ def _compute_shap_drivers_sync(
     import pyarrow.parquet as pq
 
     schema = set(pq.read_schema(snap).names)
+    # 快照标的列名分市场：CN 为 symbol，US/HK/CRYPTO 为 instrument
+    sym_col = next((c for c in ("symbol", "instrument") if c in schema), None)
+    if sym_col is None:
+        return None
     avail = [c for c in feat_cols if c in schema]
     if not avail:
         return None
     try:
         tbl = pq.read_table(
-            snap, columns=["symbol", "trade_date"] + avail,
-            filters=[("symbol", "=", sym)],
+            snap, columns=[sym_col, "trade_date"] + avail,
+            filters=[(sym_col, "=", sym)],
         )
         df = tbl.to_pandas()
     except Exception:
@@ -2723,6 +2769,76 @@ def _compute_shap_drivers_sync(
     ]
 
 
+def _sdl_anchor_symbol_key(normalized_symbol: str) -> str:
+    """聚合表 symbol 键：两侧同规则归一（去非字母数字）后比对，兼容 BRK.B/BRK-B。"""
+    return re.sub(r"[^A-Z0-9]", "", str(normalized_symbol or "").upper())
+
+
+async def _fetch_sdl_anchor(
+    normalized_symbol: str, market: str, target_date: str | None
+) -> dict[str, Any] | None:
+    """市场聚合表的单标的锚点行（名称/收盘/波动率/均线乖离/资金流/复权因子）。
+
+    列集按市场分派：CN 走 stock_daily_latest（含 stocks 表名称回退，该表
+    stock_name 全表为空）；非 CN 走各自的市场表（stock_daily_latest_hk/us），
+    这两张表没有 stocks 表可回退，名称取表内 stock_name/name，**不引用 CN 专属列**
+    （避免美股表缺列时整段 500）。
+
+    有基准日时非 CN 加 trade_date 上限：CN 的基准价由 QuantDB K 线按 end_date
+    截断兜底，非 CN 没有这条通路，不加会把历史基准日的锚点取成最新行（前视）。
+    """
+    sdl_table = _get_sdl_table(market)
+    is_cn = not market or market.upper() == "CN"
+    if is_cn:
+        sym_predicate = f"{_norm_symbol_sql('sdl.symbol')} = {_norm_symbol_sql(':s')}"
+        name_expr = (
+            "COALESCE(sdl.stock_name, ("
+            "        SELECT st.name FROM stocks st"
+            f"        WHERE {_norm_symbol_sql('st.symbol')} = {_norm_symbol_sql('sdl.symbol')}"
+            "        LIMIT 1"
+            "    ), '')"
+        )
+    else:
+        sym_predicate = "regexp_replace(UPPER(sdl.symbol), '[^A-Z0-9]', '', 'g') = :s"
+        name_expr = "COALESCE(NULLIF(sdl.stock_name, ''), sdl.name, '')"
+
+    params: dict[str, Any] = {
+        "s": normalized_symbol if is_cn else _sdl_anchor_symbol_key(normalized_symbol)
+    }
+    date_filter = ""
+    if target_date and not is_cn:
+        try:
+            params["td"] = date.fromisoformat(str(target_date)[:10])
+            date_filter = " AND sdl.trade_date <= :td"
+        except (ValueError, TypeError):
+            date_filter = ""
+
+    sql = f"""
+        SELECT {name_expr} AS stock_name, sdl.close, sdl.trade_date,
+               sdl.vol_std_20, sdl.vol_atr_14, sdl.ma_gap_5, sdl.ma_gap_20,
+               sdl.main_flow, sdl.adj_factor
+        FROM {sdl_table} sdl
+        WHERE {sym_predicate}{date_filter}
+        ORDER BY sdl.trade_date DESC LIMIT 1
+    """
+    async with get_session(read_only=True) as session:
+        row = (await session.execute(text(sql), params)).first()
+    if not row:
+        return None
+    return {
+        "stock_name": str(row[0] or "").strip(),
+        # K 线与行情一致还原为真实不复权价：DB close 为前复权价(adj_factor<1)，
+        # 与 get_stock_kline 的 _to_nominal_price(close, adj_factor) 保持同口径。
+        "close": _to_nominal_price(row[1], row[8]),
+        "trade_date": row[2],
+        "vol_std": float(row[3] or 0.0),
+        "atr": float(row[4] or 0.0),
+        "ma_gap_5": float(row[5] or 0.0),
+        "ma_gap_20": float(row[6] or 0.0),
+        "main_flow": float(row[7] or 0.0),
+    }
+
+
 async def predict_single_stock(
     tid: str,
     uid: str,
@@ -2736,6 +2852,7 @@ async def predict_single_stock(
 ) -> dict[str, Any]:
     """单只股票未来走势与区间分位数预测服务。"""
     normalized_symbol = StockCodeUtil.to_prefix(symbol)
+    market_key = str(market or "CN").upper()
 
     # 1. 查询股票最新行情 + 真实波动率/均线（用于推导分位数锥与因子归因）
     stock_name = normalized_symbol
@@ -2747,43 +2864,25 @@ async def predict_single_stock(
     ma_gap_20 = 0.0
     main_flow = 0.0
 
-    sdl_table = _get_sdl_table(market)
-    async with get_session(read_only=True) as session:
-        # stock_daily_latest.stock_name 全表为空，名称回退 stocks 表
-        res = await session.execute(
-            text(
-                f"SELECT sdl.stock_name, sdl.close, sdl.trade_date, "
-                f"       sdl.vol_std_20, sdl.vol_atr_14, "
-                f"       sdl.ma_gap_5, sdl.ma_gap_20, sdl.main_flow, "
-                f"       sdl.adj_factor, "
-                f"       (SELECT st.name FROM stocks st "
-                f"        WHERE {_norm_symbol_sql('st.symbol')} = {_norm_symbol_sql('sdl.symbol')} "
-                f"        LIMIT 1) AS name_fallback "
-                f"FROM {sdl_table} sdl "
-                f"WHERE {_norm_symbol_sql('sdl.symbol')} = {_norm_symbol_sql(':s')} "
-                f"ORDER BY sdl.trade_date DESC LIMIT 1"
-            ),
-            {"s": normalized_symbol},
-        )
-        row = res.first()
-        if row:
-            stock_name = (row[0] or row[9] or stock_name).strip() or stock_name
-            # K 线与行情一致还原为真实不复权价：DB close 为前复权价(adj_factor<1)，
-            # 与 get_stock_kline 的 _to_nominal_price(close, adj_factor) 保持同口径。
-            latest_close = _to_nominal_price(row[1], row[8])
-            if not target_date and row[2]:
-                latest_date = str(row[2])
-            # vol_std_20 在 stock_daily_latest 为百分数口径(2.78=2.78%)；
-            # vol_atr_14 为绝对价格 ATR。优先 vol_std，回退 ATR/close
-            vol_std = float(row[3] or 0.0)
-            atr = float(row[4] or 0.0)
-            _ma_gap_5_unused = float(row[5] or 0.0)  # row[5]=ma_gap_5，仅保位（SELECT 按位取值）
-            ma_gap_20 = float(row[6] or 0.0)
-            main_flow = float(row[7] or 0.0) or 0.0
-            if vol_std and vol_std > 0.3:
-                daily_vol_pct = vol_std / 100.0
-            elif latest_close > 0 and atr > 0:
-                daily_vol_pct = atr / latest_close
+    # 锚点行按市场分派取数（CN 走 stock_daily_latest，非 CN 走市场专属表）
+    anchor = await _fetch_sdl_anchor(normalized_symbol, market, target_date)
+    if anchor:
+        stock_name = (anchor["stock_name"] or stock_name).strip() or stock_name
+        latest_close = anchor["close"]
+        if not target_date and anchor["trade_date"]:
+            latest_date = str(anchor["trade_date"])
+        # vol_std_20 口径按市场区分：CN/HK 聚合表为百分数(2.78=2.78%)，
+        # US（QuantUS l1_factors）为小数(0.0147=1.47%)；vol_atr_14 为绝对价格 ATR。
+        vol_std = anchor["vol_std"]
+        atr = anchor["atr"]
+        ma_gap_20 = anchor["ma_gap_20"]
+        main_flow = anchor["main_flow"]
+        if vol_std > 0 and market_key == "US":
+            daily_vol_pct = vol_std
+        elif vol_std > 0.3:
+            daily_vol_pct = vol_std / 100.0
+        elif latest_close > 0 and atr > 0:
+            daily_vol_pct = atr / latest_close
 
     # 当前价格统一走 QuantDB（不复权真实价），与前端 K 线同口径；聚合表仅作回退。
     # 有明确目标日时 K 线按目标日截断：基准价格/波动率/均线乖离都取目标日当时
@@ -2800,8 +2899,9 @@ async def predict_single_stock(
             if len(closes) >= 20:
                 ma20 = float(np.mean(closes[-20:]))
                 ma_gap_20 = round((latest_close - ma20) / ma20 * 100, 2)
-    elif latest_close == 0.0:
-        # QuantDB 与聚合表均无该股数据时，通过实时行情感底获取最新收盘价与波动率
+    elif latest_close == 0.0 and market_key != "US":
+        # QuantDB 与聚合表均无该股数据时，通过实时行情感底获取最新收盘价与波动率。
+        # 美股没有实时行情源（腾讯兜底只认沪深/港股代码），跳过避免空等超时。
         k_payload = await get_stock_kline(normalized_symbol, days=30, end_date=target_date)
         k_items = (k_payload.get("data") or {}).get("items") or []
         if k_items:
@@ -2827,8 +2927,18 @@ async def predict_single_stock(
         "SH601857": "中国石油",
         "SH600900": "长江电力",
     }
-    if stock_name == normalized_symbol and normalized_symbol in KNOWN_NAMES:
+    # A 股简称兜底只对 CN 生效：美股 ticker 不会出现在该表里，但加市场门避免
+    # 语义混入（美股价格/名称为美元/英文语境）。
+    if market_key == "CN" and stock_name == normalized_symbol and normalized_symbol in KNOWN_NAMES:
         stock_name = KNOWN_NAMES[normalized_symbol]
+
+    # 非 CN 市场无任何本地行情时显式报错：后续扇形价格锚点按 latest_close 换算，
+    # 拿不到真实价就只能编（CN 的 100.0 兜底是 A 股价格量级，对美股无意义）。
+    if market_key != "CN" and latest_close <= 0:
+        raise HTTPException(
+            status_code=404,
+            detail=f"{market_key} 市场无 {normalized_symbol} 的历史行情数据，无法生成预测",
+        )
 
     # 获取可用模型列表（在会话外调用，避免嵌套会话）
     models_res = await get_available_models(tid, uid, market)
@@ -2871,7 +2981,7 @@ async def predict_single_stock(
             storage_path = str(resolved.storage_path)
             # ① pred.parquet 单标的直读（不物化分片、不写库）
             hit = _read_pred_single_symbol(
-                storage_path, requested_date.isoformat(), normalized_symbol
+                storage_path, requested_date.isoformat(), normalized_symbol, market_key
             )
             hit_date = requested_date.isoformat()
             live_signal: dict[str, Any] | None = None
@@ -2894,7 +3004,7 @@ async def predict_single_stock(
                     )
                 # 回退后的数据日可能有 parquet（请求日无数据但回退日有），再试一次
                 rolled = str(execution.get("data_trade_date") or hit_date)
-                hit = _read_pred_single_symbol(storage_path, rolled, normalized_symbol)
+                hit = _read_pred_single_symbol(storage_path, rolled, normalized_symbol, market_key)
                 hit_date = rolled
                 if hit is None:
                     # ③ 取内存信号（已按 symbols 过滤，仅含目标股）
@@ -2955,15 +3065,15 @@ async def predict_single_stock(
         async with get_session(read_only=True) as session:
             # 有明确目标日时必须保留「目标日不晚于落库日」的上限过滤，否则
             # ORDER BY 取到的是最新分数，基准日选择形同虚设（盲测泄露）。
-            # 无目标日时沿用旧逻辑：execute=True 刚对目标股票现场补推并落库，
-            # 落库 trade_date 可能晚于回退前的 latest_date/今日，故去掉上限，
-            # 直接取最新，否则刚补推的分数会被过滤成 404。
-            # （目标日补推的落库 trade_date 即回退后的数据日，恒 <= 目标日，
-            #  不会误伤，故有 target_date 时可安全保留过滤。）
+            # 无目标日时取最新：信号落库 trade_date 是生效日 T+1，比本地数据日
+            # 晚一天，卡上限会把「刚推的/最新一批」分数过滤成 404。
+            # （execute=True 刚现场补推并落库的那条同样可能晚于 latest_date；
+            #  CN/HK 的 latest_date 恰好等于最新生效日所以一直没暴露，
+            #  美股数据日比港股晚一档，09-10 数据日的信号记在 09-11 就被误杀。）
             if target_date:
                 date_filter = " AND e.trade_date <= :d"
             else:
-                date_filter = "" if execute else " AND e.trade_date <= :d"
+                date_filter = ""
             params = dict(score_params)
             if not date_filter:
                 params.pop("d", None)  # SQL 无 :d 占位符时不能传多余绑定
@@ -3059,7 +3169,7 @@ async def predict_single_stock(
                     sp = str((mod or {}).get("storage_path") or "").strip()
                     if not sp:
                         continue
-                    sc = _read_pred_single_symbol(sp, fallback_date, normalized_symbol)
+                    sc = _read_pred_single_symbol(sp, fallback_date, normalized_symbol, market_key)
                     if sc is None:
                         continue
                     side = "BUY" if sc > 0.2 else ("SELL" if sc < -0.2 else "HOLD")
