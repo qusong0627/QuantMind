@@ -15,6 +15,7 @@ from backend.services.api.market_analysis_us.feed import (
     breadth,
     earnings,
     holdings,
+    hotspot,
     indices,
     sectors,
     valuation,
@@ -141,6 +142,124 @@ def test_profit_leaders_sorted_and_named():
     for it in res["items"]:
         assert it["name"], "每条榜单项都应有名称（中文名或代码兜底）"
         assert -100 <= it["pct_change"] <= 100
+
+
+# ---- Tab1 今日热门 ----
+#
+# 热门榜是「看哪儿热」的核心，口径错了会误导判断，因此对基准与排序都有断言。
+
+
+def test_volume_baseline_excludes_latest_day():
+    """量比基准必须**不含最新交易日** —— 否则巨量当日会抬高分母把自己稀释掉。
+
+    窗口固定 20 日（21 日分区取后 20 日）；个别标的因数据缺口不足 20 日，
+    这类标的的量比在 `_hot_snapshot` 中会被置空而不是用短窗口凑数。
+    """
+    base = us_base._volume_baseline(20)
+    assert not base.empty
+    assert base["base_days"].max() == 20, "基准窗口应取满 20 个交易日"
+    assert (base["base_days"] <= 20).all(), "基准天数不可能超过窗口"
+    full = (base["base_days"] == 20).mean()
+    assert full >= 0.9, f"满基准标的占比过低（{full:.1%}），疑似分区缺失"
+    # 基准窗口不含最新交易日：其余额不应等于最新日的成交量（抽样对比）
+    latest = us_base._latest_trade_date()
+    assert latest
+    _, snap = us_base._market_pct_snapshot()
+    merged = snap.merge(base, on="symbol", how="inner")
+    same = (merged["volume"] == merged["avg_volume"]).mean()
+    assert same < 0.5, "多数标的的当日量恰等于基准均量，疑似基准含当日"
+
+
+def test_hot_snapshot_rvol_semantics():
+    """量比 = 当日量 / 前20日均量；基准不足 20 天的标的必须为 None（新股量比会失真）。"""
+    latest, df = us_base._hot_snapshot()
+    assert latest and not df.empty
+    assert "rvol" in df.columns
+    rvol = df["rvol"].dropna()
+    assert len(rvol) > 300, f"可计算量比的标的过少：{len(rvol)}"
+    # 量比分布应集中在 1 附近（多数股票成交量接近自身均值）
+    assert 0.3 <= float(rvol.median()) <= 3.0, f"量比中位数异常：{rvol.median()}"
+    short = df[df["base_days"].fillna(0) < 20]
+    if not short.empty:
+        assert short["rvol"].isna().all(), "基准不足 20 天的标的量比必须为空"
+
+
+@pytest.mark.parametrize(
+    "kind,col,asc",
+    [("amount", "amount_yi", False), ("rvol", "rvol", False),
+     ("gainers", "pct_change", False), ("losers", "pct_change", True)],
+)
+def test_hot_stocks_sorted(kind, col, asc):
+    res = hotspot.get_hot_stocks(kind, 15)
+    assert res["trade_date"]
+    items = res["items"]
+    assert len(items) >= 5
+    vals = [i[col] for i in items if i.get(col) is not None]
+    assert vals == sorted(vals, reverse=not asc), f"{kind} 榜排序错误"
+    for i in items:
+        assert i["name"] and i["symbol"]
+        # 距 52 周高点：0=正处高点，负值=低于高点（不允许正值）
+        if i["drawdown_pct"] is not None:
+            assert i["drawdown_pct"] <= 0.01, f"{i['symbol']} 距高点为正：{i['drawdown_pct']}"
+
+
+def test_hot_stocks_invalid_kind_falls_back():
+    res = hotspot.get_hot_stocks("bogus", 5)
+    assert res["kind"] == "amount"
+
+
+def test_unusual_volume_respects_threshold():
+    res = hotspot.get_unusual_volume(20, 2.0)
+    assert res["min_rvol"] == 2.0
+    for i in res["items"]:
+        assert i["rvol"] is not None and i["rvol"] >= 2.0, f"{i['symbol']} 量比低于门槛"
+
+
+def test_market_distribution_buckets_conserve_total():
+    """分桶必须不重不漏：各桶家数之和 = 全池标的数。"""
+    res = hotspot.get_market_distribution()
+    buckets = res["buckets"]
+    assert len(buckets) == 10
+    assert sum(b["count"] for b in buckets) == res["total"], "分桶家数之和与总数不符"
+    q = res["quantiles"]
+    assert q["p10"] <= q["p25"] <= q["median"] <= q["p75"] <= q["p90"], "分位数未单调"
+    assert -100 <= q["p10"] and q["p90"] <= 100
+
+
+def test_market_stats_consistency():
+    st = hotspot.get_market_stats()
+    assert st["trade_date"]
+    assert st["total_amount_yi"] > 0
+    assert 0 <= st["active_ratio"] <= 100
+    assert st["high_rvol_count"] >= 0
+    assert st["up_5pct"] >= 0 and st["down_5pct"] >= 0
+    if st["rvol_median"] is not None:
+        assert 0.1 <= st["rvol_median"] <= 10
+
+
+def test_index_rvol_present_or_null():
+    """指数量比：SOX 无 volume 数据时必须为 None，其余指数量比应为正。"""
+    items = {i["symbol"]: i for i in indices.get_indices_overview()}
+    assert items["SPX.US"]["rvol"] is None or items["SPX.US"]["rvol"] > 0
+    # SOX 的 volume 恒为 0 → 量比必须为 None（不能算出 0 或 inf）
+    assert items["SOX.US"]["rvol"] is None
+
+
+def test_sector_fund_flow_shares_and_sorting():
+    """板块资金流：占比之和≈100%，排序按占比变化降序。"""
+    res = sectors.get_sector_fund_flow(24)
+    sectors_rows = res["sectors"]
+    assert sectors_rows, "板块资金流为空"
+    assert res["total_amount_yi"] > 0
+    total_share = sum(s["share"] for s in sectors_rows)
+    assert 95 <= total_share <= 105, f"板块占比之和异常：{total_share}"
+    changes = [s["share_change_pp"] for s in sectors_rows if s["share_change_pp"] is not None]
+    assert changes == sorted(changes, reverse=True), "资金流必须按占比变化降序"
+    for s in sectors_rows:
+        assert s["name"]
+        if s["share_change_pp"] is not None:
+            # 占比变化是百分点，单板块单日不应超过 ±20pp
+            assert -20 <= s["share_change_pp"] <= 20
 
 
 # ---- Tab2 市场宽度 ----

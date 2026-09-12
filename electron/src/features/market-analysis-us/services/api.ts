@@ -14,17 +14,23 @@ import type {
   UsEarningsRevisions,
   UsEarningsSurprises,
   UsFeedStatus,
+  UsHotKind,
+  UsHotStocks,
   UsIndexItem,
   UsIndexSpread,
   UsInsiderMovers,
   UsInstitutionalHolders,
+  UsMarketDistribution,
+  UsMarketStats,
   UsProfitLeaders,
   UsRecentSplits,
   UsRefreshResult,
+  UsSectorFundFlow,
   UsSectorHeatItem,
   UsSectorRotation,
   UsSectorValuationRow,
   UsSizeTiers,
+  UsUnusualVolume,
   UsValuationOverview,
   UsValuationRankings,
 } from '../types';
@@ -71,6 +77,28 @@ export function getHeatmap(limit = 40): Promise<UsSectorHeatItem[]> {
 
 export function getProfitLeaders(limit = 10): Promise<UsProfitLeaders> {
   return getJson<UsProfitLeaders>(`/profit-leaders?limit=${limit}`);
+}
+
+// ---- Tab1 今日热门 ----
+
+export function getHotStocks(kind: UsHotKind, limit = 20): Promise<UsHotStocks> {
+  return getJson<UsHotStocks>(`/hot-stocks?kind=${kind}&limit=${limit}`);
+}
+
+export function getUnusualVolume(limit = 20, minRvol = 2.0): Promise<UsUnusualVolume> {
+  return getJson<UsUnusualVolume>(`/unusual-volume?limit=${limit}&min_rvol=${minRvol}`);
+}
+
+export function getMarketDistribution(): Promise<UsMarketDistribution> {
+  return getJson<UsMarketDistribution>('/market-distribution');
+}
+
+export function getMarketStats(): Promise<UsMarketStats> {
+  return getJson<UsMarketStats>('/market-stats');
+}
+
+export function getSectorFundFlow(limit = 24): Promise<UsSectorFundFlow> {
+  return getJson<UsSectorFundFlow>(`/sector-fund-flow?limit=${limit}`);
 }
 
 // ---- Tab2 市场宽度 ----

@@ -49,6 +49,8 @@ def get_indices_overview() -> list[dict[str, Any]]:
         if df.empty:
             return []
         df["dt"] = df["dt"].astype(str)
+        # 量比基准：同指数前 20 个交易日的均量（不含当日）
+        base = _index_volume_baseline()
         result: list[dict[str, Any]] = []
         for item in INDEX_OVERVIEW:
             sub = df[df["symbol"] == item["symbol"]].sort_values("dt")
@@ -59,6 +61,12 @@ def get_indices_overview() -> list[dict[str, Any]]:
             prev = closes[-2] if len(closes) > 1 else last
             change = last - prev
             volume = safe_float(sub["volume"].iloc[-1])
+            avg_vol = base.get(item["symbol"])
+            rvol = (
+                round(volume / avg_vol, 2)
+                if avg_vol and avg_vol > 0 and volume > 0
+                else None
+            )
             result.append(
                 {
                     "symbol": item["symbol"],
@@ -69,6 +77,7 @@ def get_indices_overview() -> list[dict[str, Any]]:
                     # amount 恒 0 → 不输出成交额；volume 为股数（SOX 为 0）
                     "turnover_yi": None,
                     "volume": int(volume) if volume > 0 else None,
+                    "rvol": rvol,
                     "trend": [round(c, 2) for c in closes[-_SPARK_DAYS:]],
                     "trade_date": to_iso(str(sub["dt"].iloc[-1])),
                 }
@@ -76,6 +85,21 @@ def get_indices_overview() -> list[dict[str, Any]]:
         return result
 
     return cached("us_indices_overview", _load)
+
+
+def _index_volume_baseline(window: int = 20) -> dict[str, float]:
+    """各指数前 window 个交易日平均成交量（量比分母，不含最新日）。"""
+    latest = _latest_index_date()
+    if not latest:
+        return {}
+    days = _index_trading_days(latest, window + 1)[1:]
+    if not days:
+        return {}
+    df = _read_partitioned(INDEX_REL, days, columns="symbol, volume")
+    if df.empty:
+        return {}
+    agg = df.groupby("symbol")["volume"].mean()
+    return {str(k): float(v) for k, v in agg.items() if v and v > 0}
 
 
 def get_index_spread() -> dict[str, Any]:

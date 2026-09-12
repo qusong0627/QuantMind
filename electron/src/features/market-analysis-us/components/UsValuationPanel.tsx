@@ -16,8 +16,6 @@ import type {
 import {
   DateBadge,
   EmptyHint,
-  PeriodChips,
-  RankRow,
   SectionCard,
   fmtInt,
 } from '../../market-analysis-shared/ui';
@@ -47,25 +45,23 @@ function rankValueText(row: UsValuationRankRow, kind: RankKind): string {
   return kind === 'dividend' ? pctOrDash(row.value, 2) : fmtNum(row.value);
 }
 
-/** 榜单行的副指标（跨榜展示另外两个估值维度，缺失显示 --） */
-function rankSubText(row: UsValuationRankRow, kind: RankKind): string {
-  const dy = `股息率 ${pctOrDash(row.dividend_yield, 2)}`;
-  if (kind === 'dividend') return `PE ${fmtNum(row.pe_ratio)} · PB ${fmtNum(row.pb_ratio)}`;
-  if (kind === 'pe') return `PB ${fmtNum(row.pb_ratio)} · ${dy}`;
-  return `PE ${fmtNum(row.pe_ratio)} · ${dy}`;
-}
+const HEAD =
+  'grid gap-1 px-1 py-[3px] text-[9px] font-bold text-slate-400 border-b border-slate-200 bg-slate-50/60';
+const ROW = 'grid gap-1 px-1 py-[3px] text-[10px] items-center border-b border-slate-50 last:border-0';
 
-function StatTile({ label, value, sub }: { label: string; value: React.ReactNode; sub?: React.ReactNode }) {
+const RANK_GRID = 'grid-cols-[14px_1fr_34px_44px_42px_44px_50px]';
+const TIER_GRID = 'grid-cols-[68px_44px_1fr_60px_72px]';
+
+/** 估值概览单行指标条：label / value（/ 次要值） */
+function Metric({ label, value, sub }: { label: string; value: React.ReactNode; sub?: string }) {
   return (
-    <div className="rounded-xl border border-blue-100 bg-blue-50/60 px-3 py-2 flex flex-col gap-0.5">
-      <span className="text-[10px] font-bold text-slate-500">{label}</span>
-      <span className="text-sm font-extrabold font-mono text-blue-700 whitespace-nowrap">{value}</span>
-      {sub && <span className="text-[9px] font-mono text-slate-400 whitespace-nowrap">{sub}</span>}
-    </div>
+    <span className="flex items-baseline gap-1 whitespace-nowrap">
+      <span className="text-[9px] font-bold text-slate-400">{label}</span>
+      <span className="text-[11px] font-extrabold font-mono text-blue-700">{value}</span>
+      {sub && <span className="text-[9px] text-slate-400">{sub}</span>}
+    </span>
   );
 }
-
-const TIER_GRID = 'grid grid-cols-[74px_58px_1fr_72px_84px] gap-1.5 px-1 items-center';
 
 export const UsValuationPanel: React.FC = () => {
   const [overview, setOverview] = useState<UsValuationOverview | null>(null);
@@ -96,7 +92,7 @@ export const UsValuationPanel: React.FC = () => {
     let alive = true;
     setRankLoading(true);
     setRanking(null);
-    getValuationRankings(kind, 20)
+    getValuationRankings(kind, 30)
       .then((d) => {
         if (alive) setRanking(d);
       })
@@ -113,9 +109,9 @@ export const UsValuationPanel: React.FC = () => {
   const rankItems = ranking?.items ?? [];
 
   return (
-    <div className="flex flex-col gap-2.5">
+    <div className="flex flex-col gap-1.5">
       {/* 面板标题 */}
-      <div className="rounded-2xl border border-blue-100/70 bg-gradient-to-r from-blue-50/90 via-sky-50/70 to-white px-4 py-2.5 flex items-center justify-between gap-3">
+      <div className="rounded-2xl border border-blue-100/70 bg-gradient-to-r from-blue-50/90 via-sky-50/70 to-white px-4 py-2 flex items-center justify-between gap-3">
         <div className="flex items-center gap-2 min-w-0">
           <Coins className="w-4 h-4 text-blue-600 flex-shrink-0" />
           <span className="text-sm font-extrabold text-slate-800 whitespace-nowrap">估值主题</span>
@@ -128,13 +124,15 @@ export const UsValuationPanel: React.FC = () => {
         </span>
       </div>
 
-      <div className="grid grid-cols-1 xl:grid-cols-2 gap-2.5 items-start">
-        {/* 估值概览 */}
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-1.5 items-start">
+        {/* 估值概览：一行紧凑指标条 */}
         <SectionCard
+          className="!p-2.5 gap-1.5"
           title={
             <span className="flex items-center gap-1.5">
               <LineChart className="w-3.5 h-3.5 text-blue-600" />
-              估值概览（标的池中位数）
+              估值概览
+              <span className="text-[9px] font-normal text-slate-400">标的池中位数</span>
             </span>
           }
           extra={<DateBadge label="数据" date={overview?.as_of} />}
@@ -142,23 +140,20 @@ export const UsValuationPanel: React.FC = () => {
           {!overview && overviewLoading ? (
             <EmptyHint loading />
           ) : (
-            <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
-              <StatTile label="覆盖标的" value={`${fmtInt(overview?.coverage)} 只`} />
-              <StatTile label="PE 中位" value={fmtNum(overview?.pe_median)} />
-              <StatTile
-                label="PE 四分位"
+            <div className="rounded-lg border border-blue-100 bg-blue-50/60 px-2 py-1 flex flex-wrap items-center gap-x-3 gap-y-1">
+              <Metric label="覆盖" value={`${fmtInt(overview?.coverage)} 只`} />
+              <Metric label="PE中位" value={fmtNum(overview?.pe_median)} />
+              <Metric
+                label="PE四分位"
                 value={`${fmtNum(overview?.pe_p25)} ~ ${fmtNum(overview?.pe_p75)}`}
-                sub="P25 ~ P75"
+                sub="P25~P75"
               />
-              <StatTile label="PB 中位" value={fmtNum(overview?.pb_median)} />
-              <StatTile
-                label="股息率中位"
-                value={pctOrDash(overview?.dividend_yield_median, 2)}
-              />
-              <StatTile
+              <Metric label="PB中位" value={fmtNum(overview?.pb_median)} />
+              <Metric label="股息率中位" value={pctOrDash(overview?.dividend_yield_median, 2)} />
+              <Metric
                 label="分红标的"
                 value={`${fmtInt(overview?.dividend_payers)} 只`}
-                sub="股息率 ≥ 0.5%"
+                sub="≥0.5%"
               />
             </div>
           )}
@@ -170,14 +165,16 @@ export const UsValuationPanel: React.FC = () => {
 
         {/* 市值分层 */}
         <SectionCard
+          className="!p-2.5 gap-1.5"
           title={
             <span className="flex items-center gap-1.5">
               <Layers className="w-3.5 h-3.5 text-blue-600" />
-              市值分层（总市值 / PE / 股息率）
+              市值分层
+              <span className="text-[9px] font-normal text-slate-400">家数 / 总市值 / PE / 股息率</span>
             </span>
           }
           extra={
-            <span className="text-[10px] font-mono text-slate-400 whitespace-nowrap">
+            <span className="text-[9px] font-mono text-slate-400 whitespace-nowrap">
               合计 US$ {fmtInt(tiers?.total_market_cap_yi)} 亿
             </span>
           }
@@ -186,9 +183,7 @@ export const UsValuationPanel: React.FC = () => {
             <EmptyHint loading={overviewLoading} />
           ) : (
             <div className="flex flex-col overflow-x-auto">
-              <div
-                className={`${TIER_GRID} pb-1 text-[9px] font-extrabold text-slate-400 border-b border-slate-100`}
-              >
+              <div className={`${HEAD} ${TIER_GRID}`}>
                 <span>分层</span>
                 <span className="text-right">家数</span>
                 <span className="text-right">总市值（亿美元）</span>
@@ -196,23 +191,20 @@ export const UsValuationPanel: React.FC = () => {
                 <span className="text-right">股息率中位</span>
               </div>
               {tierRows.map((t) => (
-                <div
-                  key={t.key}
-                  className={`${TIER_GRID} py-1.5 border-b border-slate-50 last:border-0`}
-                >
-                  <span className="text-[10px] font-extrabold text-blue-700 bg-blue-50 border border-blue-100 rounded px-1 py-0.5 text-center whitespace-nowrap">
+                <div key={t.key} className={`${ROW} ${TIER_GRID}`}>
+                  <span className="text-[9px] font-extrabold text-blue-700 bg-blue-50 border border-blue-100 rounded px-1 py-px text-center whitespace-nowrap">
                     {t.label}
                   </span>
-                  <span className="text-right text-[11px] font-mono font-bold text-slate-600">
+                  <span className="text-right font-mono text-slate-600 whitespace-nowrap">
                     {fmtInt(t.count)}
                   </span>
-                  <span className="text-right text-[11px] font-mono font-bold text-slate-600">
+                  <span className="text-right font-mono font-bold text-slate-700 whitespace-nowrap">
                     {fmtInt(t.market_cap_yi)}
                   </span>
-                  <span className="text-right text-[11px] font-mono font-bold text-slate-600">
+                  <span className="text-right font-mono text-slate-600 whitespace-nowrap">
                     {fmtNum(t.pe_median)}
                   </span>
-                  <span className="text-right text-[11px] font-mono font-bold text-slate-600">
+                  <span className="text-right font-mono text-slate-600 whitespace-nowrap">
                     {pctOrDash(t.dividend_yield_median, 2)}
                   </span>
                 </div>
@@ -227,63 +219,90 @@ export const UsValuationPanel: React.FC = () => {
 
       {/* 估值三榜 */}
       <SectionCard
+        className="!p-2.5 gap-1.5"
         title={
           <span className="flex items-center gap-1.5">
             <Coins className="w-3.5 h-3.5 text-blue-600" />
-            估值主题榜（Top 20）
+            估值主题榜
+            <span className="text-[9px] font-normal text-slate-400">Top 30 · PE/PB/股息率三列同屏</span>
           </span>
         }
         extra={
-          <PeriodChips
-            options={KIND_OPTIONS}
-            value={kind}
-            onChange={(id) => setKind(id as RankKind)}
-            accent="blue"
-          />
+          <div className="flex items-center gap-0.5 rounded-full bg-slate-100 p-0.5">
+            {KIND_OPTIONS.map((opt) => (
+              <button
+                key={opt.id}
+                onClick={() => setKind(opt.id)}
+                className={`px-2 py-[3px] rounded-full text-[10px] font-extrabold transition-all ${
+                  kind === opt.id
+                    ? 'bg-white text-blue-700 shadow-2xs border border-blue-200'
+                    : 'text-slate-500 hover:text-slate-800'
+                }`}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
         }
       >
         {rankItems.length === 0 ? (
           <EmptyHint loading={rankLoading} text="暂无符合条件的标的" />
         ) : (
           <div className="flex flex-col max-h-[460px] overflow-y-auto">
+            <div className={`${HEAD} ${RANK_GRID} sticky top-0 z-10 bg-white/95 backdrop-blur`}>
+              <span>#</span>
+              <span>标的</span>
+              <span className="text-right">市值</span>
+              <span className="text-right">PE</span>
+              <span className="text-right">PB</span>
+              <span className="text-right">股息率</span>
+              <span className="text-right">榜值</span>
+            </div>
             {rankItems.map((it, i) => (
-              <RankRow
-                key={it.symbol}
-                rank={i + 1}
-                name={it.name}
-                nameSub={it.name === it.symbol ? undefined : it.symbol}
-                main={
-                  <span className="flex items-center gap-2 min-w-0">
-                    {it.sector && (
-                      <span className="text-[9px] font-bold text-blue-700 bg-blue-50 border border-blue-100 rounded px-1 py-0.5 whitespace-nowrap">
-                        {it.sector}
-                      </span>
-                    )}
-                    <span className="text-[10px] font-mono text-slate-400 whitespace-nowrap">
-                      市值 US$ {fmtInt(it.market_cap_yi)}亿
+              <div key={it.symbol} className={`${ROW} ${RANK_GRID}`}>
+                <span className={`text-[9px] font-extrabold ${i < 3 ? 'text-blue-600' : 'text-slate-400'}`}>
+                  {i + 1}
+                </span>
+                <span className="flex items-center gap-1 min-w-0">
+                  <span className="font-bold text-slate-800 truncate" title={it.name}>{it.name}</span>
+                  {it.name !== it.symbol && (
+                    <span className="text-[9px] font-mono text-slate-400 truncate flex-shrink-0">{it.symbol}</span>
+                  )}
+                  {it.sector && (
+                    <span
+                      className="text-[8px] font-bold text-blue-700 bg-blue-50 border border-blue-100 rounded px-1 whitespace-nowrap hidden xl:inline"
+                      title={it.sector}
+                    >
+                      {it.sector}
                     </span>
-                  </span>
-                }
-                right={
-                  <div className="flex items-center gap-3 flex-shrink-0">
-                    <span className="text-[9px] font-mono text-slate-400 whitespace-nowrap">
-                      {rankSubText(it, kind)}
-                    </span>
-                    <span className="w-16 text-right text-xs font-extrabold font-mono text-blue-700 whitespace-nowrap">
-                      {rankValueText(it, kind)}
-                      {kind !== 'dividend' && <span className="text-[9px] text-slate-400">x</span>}
-                    </span>
-                  </div>
-                }
-              />
+                  )}
+                </span>
+                <span className="text-right font-mono text-slate-500 whitespace-nowrap" title="总市值（亿美元）">
+                  {fmtInt(it.market_cap_yi)}
+                </span>
+                <span className={`text-right font-mono whitespace-nowrap ${kind === 'pe' ? 'font-extrabold text-slate-800' : 'text-slate-600'}`}>
+                  {fmtNum(it.pe_ratio)}
+                </span>
+                <span className={`text-right font-mono whitespace-nowrap ${kind === 'pb' ? 'font-extrabold text-slate-800' : 'text-slate-600'}`}>
+                  {fmtNum(it.pb_ratio)}
+                </span>
+                <span className={`text-right font-mono whitespace-nowrap ${kind === 'dividend' ? 'font-extrabold text-slate-800' : 'text-slate-600'}`}>
+                  {pctOrDash(it.dividend_yield, 2)}
+                </span>
+                <span className="text-right font-mono font-extrabold text-blue-700 whitespace-nowrap">
+                  {rankValueText(it, kind)}
+                  {kind !== 'dividend' && <span className="text-[9px] text-slate-400">x</span>}
+                </span>
+              </div>
             ))}
           </div>
         )}
-        <div className="flex items-start gap-1.5 px-1">
+        <div className="flex items-start gap-1.5">
           <Info className="w-3 h-3 text-slate-300 mt-0.5 flex-shrink-0" />
           <p className="text-[9px] text-slate-400 leading-relaxed">
             榜单已施加健全性门槛（市值 ≥ 20 亿美元、PE ≥ 3、PB ≥ 0.3、股息率 ≥ 0.5%），
             用于剔除快照陈旧的空壳标的（如收购 / 退市残留）。数据源为 f10 基本面快照，非实时行情。
+            PE/PB/股息率三列对全部榜单同屏可见，加粗列为当前榜单的排序维度。
           </p>
         </div>
       </SectionCard>

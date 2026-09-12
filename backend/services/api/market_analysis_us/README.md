@@ -8,6 +8,27 @@
 数据全部来自本地 QuantUS parquet（`QM_QUANTUS_DATA_DIR`，默认 `data/quantus/`），
 **无外部实时行情依赖**。入口：顶部市场切换器选「美股」→ 侧边栏「市场分析」。
 
+## 「哪里热」的口径（本模块的核心）
+
+港股/A 股模块靠「南向资金 + 涨停板」判断热点；美股没有这两个东西，
+专业口径是下面三个指标，`feed/hotspot.py` 全部实现：
+
+| 指标 | 定义 | 为什么用它 |
+|------|------|-----------|
+| **成交额**（美元） | `close × volume` | 跨标的**可比**的关注度。20 美元的股成交 1 亿股与 800 美元的股成交 100 万股，成交量差 100 倍但成交额可能相当 |
+| **量比 RVOL** | 当日成交量 / **前** 20 个交易日平均成交量 | 「异动」的第一判据。**基准必须不含当日** —— 否则巨量当日会抬高分母把自己稀释掉（`_volume_baseline` 取 21 日分区后 20 日）。基准不足 20 日的标的（新股）rvol 置 null，不参与量比榜 |
+| **距 52 周高点** | `(close / 52周最高 - 1) × 100` | 区分「新高附近的放量（强势突破）」与「下跌中的放量（恐慌出货）」 |
+
+板块层面用 **成交额占比相对 20 日基准的变化（百分点）** 判断资金迁移：
+单看今日成交额只能看出谁体量大（信息技术永远最大），要看占比相对**自身近期基准**的变化
+才能识别「钱正在往哪儿集中」（`sectors.get_sector_fund_flow`）。
+
+## 排版取向：看盘密度
+
+这是**看盘工具**不是仪表盘。卡片 `p-2.5`、网格 `gap-1.5`、榜单行 `py-[3px]`、
+表头 `text-[9px]`、数据行 `text-[10px]`，一屏塞进尽可能多的标的。
+新增面板请沿用 `components/UsHotStocksPanel.tsx` 的密度范式（它同时是「热门榜」的参考实现）。
+
 ## ⚠️ 数据口径与限制（改代码前必读）
 
 以下均为**实测结论**，直接决定哪些面板能做、怎么做。详见
@@ -92,6 +113,7 @@ electron/src/features/market-analysis-shared/  # 跨市场共享（三市场共�
 |------|------|
 | 诊断 | `GET /status` |
 | Tab1 | `/indices/overview`、`/indices/spread`、`/breadth`、`/heatmap`、`/profit-leaders` |
+| Tab1 热门 | `/hot-stocks?kind=amount\|rvol\|gainers\|losers`、`/unusual-volume`、`/market-stats`、`/market-distribution`、`/sector-fund-flow` |
 | Tab2 | `/breadth/history`、`/breadth/highlights` |
 | Tab3 | `/sector-rotation`、`/sector-valuation` |
 | Tab4 | `/earnings/calendar`、`/earnings/surprises`、`/earnings/revisions` |

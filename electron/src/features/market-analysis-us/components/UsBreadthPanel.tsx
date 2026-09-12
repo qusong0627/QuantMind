@@ -1,6 +1,7 @@
 /** 美股市场宽度 —— 均线站位（% 站上 MA50 / MA200）与 A-D 线（累计涨跌家数）
  * 样本为标普500 + 纳指补充约 517 只（非全市场）；A-D 线在 60 日窗口起点归零，只反映窗口内累计强弱。
  * 后端字段在数据不足时可能为 null，一律先过 safeNum 再展示/绘图（禁止裸 .toFixed）。
+ * 排版按看盘密度：摘要压成一行指标条，图表内边距与切换按钮一并收窄。
  */
 
 import React, { useEffect, useRef, useState } from 'react';
@@ -20,9 +21,15 @@ const fmtPct1 = (v: unknown): string => {
   return n === null ? '--' : `${n.toFixed(1)}%`;
 };
 
-const VIEWS = [{ id: 'ad', label: 'A-D 线' }, { id: 'ma', label: '均线站位' }];
+const VIEWS = [
+  { id: 'ad', label: 'A-D 线', hint: '累计涨跌家数，60 日窗口起点归零，只反映窗口内累计强弱' },
+  { id: 'ma', label: '均线站位', hint: '收盘价站上 MA50 / MA200 的成分股占比' },
+];
 
-const MA50_COLOR = '#2563eb'; // blue-600
+/** 图表高度：看盘页优先密度，够看趋势即可 */
+const CHART_HEIGHT = 240;
+
+const AD_COLOR = '#2563eb'; // blue-600
 const MA200_COLOR = '#7c3aed'; // purple-600
 
 const TOOLTIP_BASE = {
@@ -74,29 +81,51 @@ export const UsBreadthPanel: React.FC = () => {
 
   const points: UsBreadthPoint[] = data && Array.isArray(data.points) ? data.points : [];
   const summary = data?.summary;
+  const adLine = safeNum(summary?.ad_line);
   const ma50 = safeNum(summary?.pct_above_ma50);
   const ma200 = safeNum(summary?.pct_above_ma200);
   const newHighs = safeNum(summary?.new_highs);
   const newLows = safeNum(summary?.new_lows);
 
-  // 摘要卡：站上均线占比 ≥50% 视为多数偏强（红），<50% 偏弱（绿）
-  const pctCard = (label: string, n: number | null, title: string) => ({
-    label,
-    value: fmtPct1(n),
-    color: n === null ? 'text-slate-400' : n >= 50 ? 'text-red-600' : 'text-green-600',
-    title,
-  });
-  const cntCard = (label: string, n: number | null, color: string, title: string) => ({
-    label,
-    value: fmtInt(n),
-    color: n === null ? 'text-slate-400' : color,
-    title,
-  });
-  const cards = [
-    pctCard('% 站上 MA50', ma50, '收盘价高于 50 日均线的股票占比（≥50% 为多数偏强）'),
-    pctCard('% 站上 MA200', ma200, '收盘价高于 200 日均线的股票占比（≥50% 为多数偏强）'),
-    cntCard('创新高家数', newHighs, 'text-red-600', '当日创 52 周新高的股票数'),
-    cntCard('创新低家数', newLows, 'text-green-600', '当日创 52 周新低的股票数'),
+  // 站上均线占比 ≥50% 视为多数偏强（红），<50% 偏弱（绿）
+  const pctTone = (n: number | null) =>
+    n === null ? 'text-slate-400' : n >= 50 ? 'text-red-600' : 'text-green-600';
+  const countTone = (n: number | null, tone = 'text-red-600') =>
+    n === null ? 'text-slate-400' : tone;
+
+  // 一行指标条：A-D 线 + 两条均线站位 + 新高新低家数（均为后端 summary 口径）
+  const cells = [
+    {
+      label: 'A-D 线',
+      value: fmtInt(adLine),
+      tone:
+        adLine === null ? 'text-slate-400' : adLine >= 0 ? 'text-red-600' : 'text-green-600',
+      title: '60 日窗口内累计涨跌家数（窗口起点归零，只反映窗口内强弱）',
+    },
+    {
+      label: '% 站上 MA50',
+      value: fmtPct1(ma50),
+      tone: pctTone(ma50),
+      title: '收盘价高于 50 日均线的股票占比（≥50% 为多数偏强）',
+    },
+    {
+      label: '% 站上 MA200',
+      value: fmtPct1(ma200),
+      tone: pctTone(ma200),
+      title: '收盘价高于 200 日均线的股票占比（≥50% 为多数偏强）',
+    },
+    {
+      label: '创新高',
+      value: fmtInt(newHighs),
+      tone: countTone(newHighs),
+      title: '当日创 52 周新高的股票数',
+    },
+    {
+      label: '创新低',
+      value: fmtInt(newLows),
+      tone: countTone(newLows, 'text-green-600'),
+      title: '当日创 52 周新低的股票数',
+    },
   ];
 
   useEffect(() => {
@@ -108,7 +137,7 @@ export const UsBreadthPanel: React.FC = () => {
     const dates = points.map((p) => p.date);
 
     const baseAxis = {
-      grid: { left: 6, right: 10, top: 28, bottom: 4, containLabel: true },
+      grid: { left: 6, right: 10, top: 22, bottom: 2, containLabel: true },
       animationDuration: 300,
       xAxis: {
         type: 'category' as const,
@@ -149,7 +178,7 @@ export const UsBreadthPanel: React.FC = () => {
             yAxis: VALUE_AXIS,
             series: [
               {
-                ...lineSeries('A-D 线', MA50_COLOR, points.map((p) => safeNum(p.ad_line))),
+                ...lineSeries('A-D 线', AD_COLOR, points.map((p) => safeNum(p.ad_line))),
                 areaStyle: { opacity: 0.08, color: '#3b82f6' },
               },
             ],
@@ -173,7 +202,7 @@ export const UsBreadthPanel: React.FC = () => {
             },
             series: [
               {
-                ...lineSeries('站上 MA50', MA50_COLOR, points.map((p) => safeNum(p.pct_above_ma50))),
+                ...lineSeries('站上 MA50', AD_COLOR, points.map((p) => safeNum(p.pct_above_ma50))),
                 markLine: {
                   silent: true,
                   symbol: 'none',
@@ -199,47 +228,58 @@ export const UsBreadthPanel: React.FC = () => {
 
   return (
     <SectionCard
+      className="!p-2.5 !gap-1.5"
       title={
         <span className="flex items-center gap-1.5">
           <Activity className="w-3.5 h-3.5 text-blue-600" />
           市场宽度：均线站位与 A-D 线
+          <span className="text-[9px] font-normal text-slate-400">
+            标普500 + 纳指补充约 517 只
+          </span>
         </span>
       }
       extra={<DateBadge label="数据日期" date={data?.trade_date} />}
     >
-      {/* 摘要条 */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
-        {cards.map((c) => (
-          <div key={c.label} title={c.title}
-            className="rounded-xl border border-blue-100/70 bg-gradient-to-b from-blue-50/50 to-white px-3 py-2 flex flex-col gap-0.5">
+      {/* 摘要指标条：一行放完 5 个口径，替代原 4 张大卡 */}
+      <div className="rounded-xl border border-blue-100/70 bg-gradient-to-b from-blue-50/40 to-white px-2.5 py-1.5 flex items-center gap-x-4 gap-y-1 flex-wrap">
+        {cells.map((c) => (
+          <span key={c.label} className="flex items-baseline gap-1 whitespace-nowrap" title={c.title}>
             <span className="text-[10px] font-bold text-slate-400">{c.label}</span>
-            <span className={`text-lg font-extrabold font-mono ${c.color}`}>{c.value}</span>
-          </div>
+            <span className={`text-[13px] font-extrabold font-mono ${c.tone}`}>{c.value}</span>
+          </span>
         ))}
       </div>
 
-      {/* 图表切换 */}
+      {/* 图表切换：紧凑按钮组 */}
       <div className="flex items-center justify-between gap-2">
-        <div className="flex items-center gap-1 rounded-full bg-slate-100 p-0.5">
+        <div className="flex items-center gap-1">
           {VIEWS.map((v) => (
             <button
               key={v.id}
               onClick={() => setView(v.id)}
-              className={`px-3 py-1 rounded-full text-[11px] font-extrabold transition-all ${view === v.id ? 'bg-white text-blue-700 shadow-2xs border border-blue-200' : 'text-slate-500 hover:text-slate-800'}`}
+              title={v.hint}
+              className={`px-2 py-[3px] rounded-md text-[10px] font-extrabold transition-colors ${
+                view === v.id
+                  ? 'bg-blue-600 text-white'
+                  : 'bg-slate-100 text-slate-500 hover:bg-slate-200 hover:text-slate-700'
+              }`}
             >
               {v.label}
             </button>
           ))}
+          <span className="ml-1 text-[9px] font-mono text-slate-400 whitespace-nowrap">
+            {view === 'ad' ? '窗口起点归零' : '0-100% 区间'}
+          </span>
         </div>
-        <span className="text-[10px] font-mono text-slate-400 whitespace-nowrap">
-          {view === 'ad' ? '窗口起点归零' : '0-100% 区间'}
+        <span className="text-[9px] font-mono text-slate-400 whitespace-nowrap">
+          近 {points.length} 个交易日
         </span>
       </div>
 
       {points.length === 0 ? (
         <EmptyHint loading={loading} />
       ) : (
-        <div ref={chartRef} style={{ width: '100%', height: 300 }} />
+        <div ref={chartRef} style={{ width: '100%', height: CHART_HEIGHT }} />
       )}
     </SectionCard>
   );

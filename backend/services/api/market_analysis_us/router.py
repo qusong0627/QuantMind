@@ -10,6 +10,9 @@
 - 标的池为标普500 + 纳指补充共约 517 只，**不是全市场**
 - 日线是**未复权原始价**，`amount` 是**美元原始成交额**
 - **无 VIX、无 ETF**；期权数据不可用（只有 call、单一到期日、单快照）
+
+列表类端点的 `limit` 上界统一为 100：这些榜单都是小列表，上限过紧会让前端
+调参时撞上 422 而静默空面板（历史事故：`earnings/surprises?limit=60` 撞 `le=50`）。
 """
 
 from __future__ import annotations
@@ -28,6 +31,7 @@ from backend.services.api.market_analysis_us.feed import (
     breadth,
     earnings,
     holdings,
+    hotspot,
     indices,
     sectors,
     valuation,
@@ -93,7 +97,7 @@ async def get_market_breadth(current_user: dict = Depends(get_current_user)) -> 
 
 @router.get("/heatmap")
 async def get_sector_heatmap(
-    limit: int = Query(default=40, ge=5, le=80),
+    limit: int = Query(default=40, ge=5, le=100),
     current_user: dict = Depends(get_current_user),
 ) -> list[dict]:
     """GICS 板块热力图（中位涨幅 / 成交额 / 领涨龙头）。"""
@@ -117,6 +121,57 @@ async def get_profit_leaders(
         raise _fatal(exc) from exc
 
 
+# ---- Tab 1 大盘脉搏 · 今日热门 ----
+
+
+@router.get("/hot-stocks")
+async def get_hot_stocks(
+    kind: str = Query(default="amount", pattern="^(amount|rvol|gainers|losers)$"),
+    limit: int = Query(default=20, ge=5, le=100),
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    """今日热门榜：amount=成交额 / rvol=量比 / gainers=涨幅 / losers=跌幅。"""
+    _ = current_user
+    try:
+        return await asyncio.to_thread(hotspot.get_hot_stocks, kind, limit)
+    except Exception as exc:
+        raise _fatal(exc) from exc
+
+
+@router.get("/unusual-volume")
+async def get_unusual_volume(
+    limit: int = Query(default=20, ge=5, le=100),
+    min_rvol: float = Query(default=2.0, ge=1.0, le=20.0),
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    """放量异动榜：量比 ≥ min_rvol，按量比降序。"""
+    _ = current_user
+    try:
+        return await asyncio.to_thread(hotspot.get_unusual_volume, limit, min_rvol)
+    except Exception as exc:
+        raise _fatal(exc) from exc
+
+
+@router.get("/market-distribution")
+async def get_market_distribution(current_user: dict = Depends(get_current_user)) -> dict:
+    """全市场涨跌幅分布直方图 + 分位数。"""
+    _ = current_user
+    try:
+        return await asyncio.to_thread(hotspot.get_market_distribution)
+    except Exception as exc:
+        raise _fatal(exc) from exc
+
+
+@router.get("/market-stats")
+async def get_market_stats(current_user: dict = Depends(get_current_user)) -> dict:
+    """市场活力快照：成交额 / 量比中位数 / 放量占比 / ±5% 家数。"""
+    _ = current_user
+    try:
+        return await asyncio.to_thread(hotspot.get_market_stats)
+    except Exception as exc:
+        raise _fatal(exc) from exc
+
+
 # ---- Tab 2 市场宽度 ----
 
 
@@ -135,7 +190,7 @@ async def get_breadth_history(
 
 @router.get("/breadth/highlights")
 async def get_breadth_highlights(
-    limit: int = Query(default=30, ge=5, le=50),
+    limit: int = Query(default=30, ge=5, le=100),
     current_user: dict = Depends(get_current_user),
 ) -> dict:
     """52 周位置榜：创新高 / 创新低 / 距高点最近 / 距高点最远。"""
@@ -151,7 +206,7 @@ async def get_breadth_highlights(
 
 @router.get("/sector-rotation")
 async def get_sector_rotation(
-    limit: int = Query(default=24, ge=5, le=50),
+    limit: int = Query(default=24, ge=5, le=100),
     current_user: dict = Depends(get_current_user),
 ) -> dict:
     """GICS 板块 1/5/20/60 日轮动 + 相对标普强弱 + 板块内宽度。"""
@@ -162,9 +217,22 @@ async def get_sector_rotation(
         raise _fatal(exc) from exc
 
 
+@router.get("/sector-fund-flow")
+async def get_sector_fund_flow(
+    limit: int = Query(default=24, ge=5, le=100),
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    """板块资金流：成交额占比及其相对 20 日基准的变化（百分点）。"""
+    _ = current_user
+    try:
+        return await asyncio.to_thread(sectors.get_sector_fund_flow, limit)
+    except Exception as exc:
+        raise _fatal(exc) from exc
+
+
 @router.get("/sector-valuation")
 async def get_sector_valuation(
-    limit: int = Query(default=24, ge=5, le=50),
+    limit: int = Query(default=24, ge=5, le=100),
     current_user: dict = Depends(get_current_user),
 ) -> list[dict]:
     """板块估值温度计：PE/PB/股息率中位数 + 市值合计。"""
@@ -194,7 +262,7 @@ async def get_earnings_calendar(
 
 @router.get("/earnings/surprises")
 async def get_earnings_surprises(
-    limit: int = Query(default=30, ge=5, le=50),
+    limit: int = Query(default=30, ge=5, le=100),
     lookback_days: int = Query(default=120, ge=7, le=400),
     current_user: dict = Depends(get_current_user),
 ) -> dict:
@@ -210,7 +278,7 @@ async def get_earnings_surprises(
 
 @router.get("/earnings/revisions")
 async def get_earnings_revisions(
-    limit: int = Query(default=30, ge=5, le=50),
+    limit: int = Query(default=30, ge=5, le=100),
     current_user: dict = Depends(get_current_user),
 ) -> dict:
     """盈利预期修正榜（当前季度 EPS/营收同比增速）。"""
@@ -240,7 +308,7 @@ async def get_analyst_upgrades(
 
 @router.get("/analysts/targets")
 async def get_analyst_targets(
-    limit: int = Query(default=30, ge=5, le=60),
+    limit: int = Query(default=30, ge=5, le=100),
     current_user: dict = Depends(get_current_user),
 ) -> dict:
     """目标价隐含空间榜（剔除退市/并购残留造成的离群值）。"""
@@ -267,7 +335,7 @@ async def get_analyst_ratings(current_user: dict = Depends(get_current_user)) ->
 @router.get("/insiders/movers")
 async def get_insider_movers(
     days: int = Query(default=90, ge=7, le=365),
-    limit: int = Query(default=20, ge=5, le=50),
+    limit: int = Query(default=20, ge=5, le=100),
     current_user: dict = Depends(get_current_user),
 ) -> dict:
     """内部人交易榜：净买入 / 净卖出（只统计 Purchase 与 Sale）。"""
@@ -280,7 +348,7 @@ async def get_insider_movers(
 
 @router.get("/holdings/institutional")
 async def get_institutional_holders(
-    limit: int = Query(default=30, ge=5, le=50),
+    limit: int = Query(default=30, ge=5, le=100),
     current_user: dict = Depends(get_current_user),
 ) -> dict:
     """机构持仓：全市场结构 + 机构增减持榜（13F 口径，含披露日）。"""
@@ -321,7 +389,7 @@ async def get_recent_splits(
 
 @router.get("/corporate-actions/dividend-history")
 async def get_dividend_history(
-    limit: int = Query(default=30, ge=5, le=60),
+    limit: int = Query(default=30, ge=5, le=100),
     current_user: dict = Depends(get_current_user),
 ) -> list[dict]:
     """稳定分红标的（近一年按季派息）。"""
@@ -338,7 +406,7 @@ async def get_dividend_history(
 @router.get("/valuation/rankings")
 async def get_valuation_rankings(
     kind: str = Query(default="dividend", pattern="^(dividend|pe|pb)$"),
-    limit: int = Query(default=20, ge=5, le=50),
+    limit: int = Query(default=20, ge=5, le=100),
     current_user: dict = Depends(get_current_user),
 ) -> dict:
     """估值主题榜：dividend=高股息 / pe=低PE / pb=低PB。
@@ -417,7 +485,12 @@ async def trigger_refresh_stream(
             await asyncio.to_thread(clear_cache_us)
             steps = [
                 ("indices", indices.get_indices_overview),
+                ("market_stats", hotspot.get_market_stats),
                 ("breadth", breadth.get_market_breadth),
+                ("hot_amount", hotspot.get_hot_stocks, "amount", 20),
+                ("hot_rvol", hotspot.get_hot_stocks, "rvol", 20),
+                ("market_distribution", hotspot.get_market_distribution),
+                ("sector_fund_flow", sectors.get_sector_fund_flow, 24),
                 ("heatmap", sectors.get_sector_heatmap, 40),
                 ("breadth_history", breadth.get_breadth_history, 60),
                 ("breadth_highlights", breadth.get_breadth_highlights, 30),
@@ -428,7 +501,6 @@ async def trigger_refresh_stream(
                 ("analyst_targets", analysts.get_analyst_targets, 30),
                 ("insiders", holdings.get_insider_movers, 90, 20),
                 ("valuation", valuation.get_valuation_rankings, "dividend", 20),
-                ("profit_leaders", breadth.get_profit_leaders, 10),
             ]
             for name, func, *args in steps:
                 result = await asyncio.to_thread(func, *args)

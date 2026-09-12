@@ -210,6 +210,87 @@ def _benchmark_return(window: int) -> float | None:
     return round((closes[-1] / base - 1) * 100, 2)
 
 
+def get_sector_fund_flow(limit: int = 24) -> dict[str, Any]:
+    """板块资金流：成交额占比及其相对 20 日基准的变化。
+
+    **这是判断「哪里在变热」的核心口径** —— 单看今日成交额只能看出谁体量大
+    （信息技术永远最大），要看**占比相对自身近期基准的变化**才能识别资金迁移：
+    占比 +1.5pp 意味着资金正在往这个板块集中。
+
+    `amount_share_change_pp` 单位为百分点（percentage point），非百分比。
+    """
+    limit = max(5, min(int(limit), 50))
+
+    def _load() -> dict[str, Any]:
+        empty = {"trade_date": "", "total_amount_yi": 0.0, "base_days": 0, "sectors": []}
+        if not _avail():
+            return empty
+        latest, snap = _market_pct_snapshot()
+        if not latest or snap.empty:
+            return empty
+        smap = _sector_map()
+        if smap.empty:
+            return empty
+
+        today = snap.merge(smap, on="symbol", how="inner")
+        total_today = float(today["amount"].fillna(0).sum())
+        if total_today <= 0:
+            return empty
+        cur = (
+            today.groupby("sector")["amount"]
+            .sum()
+            .rename("amount")
+            .reset_index()
+        )
+        cur["share"] = cur["amount"] / total_today * 100
+
+        # 20 日基准占比：每日各板块成交额 / 当日全市场成交额，再取均值
+        days = _trading_days(None, 21)[1:]  # 排除最新日
+        base_share: dict[str, float] = {}
+        base_days = 0
+        if days:
+            k = _read_partitioned(KLINE_REL, days, columns="symbol, dt, amount")
+            if not k.empty:
+                k = _dedupe_bars(k, ["symbol", "dt"])
+                k["dt"] = k["dt"].astype(str)
+                k = k.merge(smap[["symbol", "sector"]], on="symbol", how="inner")
+                per_day = k.groupby(["dt", "sector"])["amount"].sum().reset_index()
+                totals = per_day.groupby("dt")["amount"].transform("sum")
+                per_day["share"] = per_day["amount"] / totals * 100
+                base_share = (
+                    per_day.groupby("sector")["share"].mean().to_dict()
+                )
+                base_days = int(per_day["dt"].nunique())
+
+        rows = []
+        for _, r in cur.iterrows():
+            sector = r["sector"]
+            base = base_share.get(sector)
+            rows.append(
+                {
+                    "name": _sector_cn(sector),
+                    "sector": sector,
+                    "amount_yi": fmt_yi(safe_float(r["amount"])),
+                    "share": round(safe_float(r["share"]), 2),
+                    "base_share": round(base, 2) if base is not None else None,
+                    "share_change_pp": (
+                        round(safe_float(r["share"]) - base, 2)
+                        if base is not None
+                        else None
+                    ),
+                }
+            )
+        rows.sort(key=lambda x: (x["share_change_pp"] is None, -(x["share_change_pp"] or 0)))
+        return {
+            "trade_date": to_iso(latest),
+            "total_amount_yi": fmt_yi(total_today),
+            "base_days": base_days,
+            "sectors": rows[:limit],
+        }
+
+    return cached(f"us_sector_fund_flow:{limit}", _load, ttl=_SECTOR_TTL)
+
+
 def get_sector_valuation(limit: int = 24) -> list[dict[str, Any]]:
     """板块估值温度计：GICS 板块 × PE/PB/股息率中位数 + 市值合计。
 

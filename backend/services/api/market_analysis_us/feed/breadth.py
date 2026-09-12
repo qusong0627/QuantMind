@@ -252,6 +252,27 @@ def get_breadth_highlights(limit: int = 30) -> dict[str, Any]:
     return cached(f"us_breadth_highlights:{limit}", _load, ttl=_BREADTH_TTL)
 
 
+def _proximity_map() -> dict[str, float]:
+    """symbol -> 距 52 周高点的百分比（0=正处高点，负值=低于高点）。
+
+    供热门榜标注「这是新高附近的放量」还是「下跌中的放量」。
+    复用宽度矩阵，结果缓存，多个面板共用一次计算。
+    """
+
+    def _load() -> dict[str, float]:
+        dates, mat = _breadth_matrix(1)
+        if mat.empty or len(dates) < WINDOW_52W:
+            return {}
+        last = dates[-1]
+        close = mat.loc[last]
+        hi = mat.rolling(WINDOW_52W, min_periods=WINDOW_52W).max().loc[last]
+        valid = close.notna() & hi.notna() & (hi > 0)
+        dd = ((close[valid] / hi[valid]) - 1) * 100
+        return {s: round(float(v), 2) for s, v in dd.items()}
+
+    return cached("us:proximity_map", _load, ttl=_BREADTH_TTL)
+
+
 def get_profit_leaders(limit: int = 10) -> dict[str, Any]:
     """赚钱效应榜：涨幅 × 成交额活跃度综合评分 Top N。
 

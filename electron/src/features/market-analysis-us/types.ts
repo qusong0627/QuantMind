@@ -34,8 +34,88 @@ export interface UsIndexItem {
   turnover_yi: number | null;
   /** 成交量（股数）；SOX.US 为 null */
   volume: number | null;
+  /** 量比（当日量 / 前 20 日均量）；无基准时为 null */
+  rvol: number | null;
   trend: number[];
   trade_date: string;
+}
+
+// ---- 今日热门（大盘脉搏核心） ----
+
+/** 个股热门行：成交额 / 量比 / 涨跌 + 距 52 周高点位置 */
+export interface UsHotStockRow {
+  symbol: string;
+  name: string;
+  sector: string;
+  close: number;
+  pct_change: number;
+  /** 成交额（亿美元） */
+  amount_yi: number;
+  /** 量比 = 当日量 / 前 20 日均量；基准不足 20 日为 null */
+  rvol: number | null;
+  /** 距 52 周高点百分比：0=正处高点，负值=低于高点 */
+  drawdown_pct: number | null;
+}
+
+export type UsHotKind = 'amount' | 'rvol' | 'gainers' | 'losers';
+
+export interface UsHotStocks {
+  trade_date: string;
+  kind: string;
+  items: UsHotStockRow[];
+}
+
+export interface UsUnusualVolume extends UsHotStocks {
+  min_rvol: number;
+}
+
+export interface UsDistributionBucket {
+  label: string;
+  count: number;
+}
+
+export interface UsMarketDistribution {
+  trade_date: string;
+  total: number;
+  buckets: UsDistributionBucket[];
+  quantiles: {
+    p10?: number;
+    p25?: number;
+    median?: number;
+    p75?: number;
+    p90?: number;
+  };
+}
+
+export interface UsMarketStats {
+  trade_date: string;
+  total_amount_yi: number;
+  rvol_median: number | null;
+  /** 放量标的占比（量比 ≥1.5 的家数 / 全池，%） */
+  active_ratio: number;
+  high_rvol_count: number;
+  up_5pct: number;
+  down_5pct: number;
+}
+
+export interface UsSectorFundFlowRow {
+  name: string;
+  sector: string;
+  /** 成交额（亿美元） */
+  amount_yi: number;
+  /** 占全市场成交额比例（%） */
+  share: number;
+  /** 前 20 日平均占比（%） */
+  base_share: number | null;
+  /** 占比变化（百分点）—— 资金迁移方向 */
+  share_change_pp: number | null;
+}
+
+export interface UsSectorFundFlow {
+  trade_date: string;
+  total_amount_yi: number;
+  base_days: number;
+  sectors: UsSectorFundFlowRow[];
 }
 
 export interface UsIndexSpreadPair {

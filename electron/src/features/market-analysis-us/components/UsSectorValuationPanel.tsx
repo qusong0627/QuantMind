@@ -6,6 +6,7 @@
  *   **null 而非 0**，前端必须渲染 `--`（0 会被误读为真实估值）
  * - market_cap_yi 后端已换算为「亿美元」，直接展示即可，不要再除 1e8
  * - 后端按 PE 中位数升序返回（null 排最后），低 PE 在前
+ * 排版按看盘密度：表头 + 行高 py-[3px]，PE 色条压薄到 h-2.5，另加「市值占比」列。
  */
 
 import React, { useEffect, useState } from 'react';
@@ -14,7 +15,8 @@ import { getSectorValuation } from '../services/api';
 import type { UsSectorValuationRow } from '../types';
 import { SectionCard, EmptyHint, fmtInt } from '../../market-analysis-shared/ui';
 
-const GRID = 'grid grid-cols-[1fr_62px_42px_52px_74px_32px] gap-1.5';
+/** 列：板块 / PE中位 / PB中位 / 股息率 / 市值(亿$) / 市值占比 / 股数 */
+const GRID = 'grid grid-cols-[1fr_56px_40px_48px_62px_44px_30px] gap-1';
 
 interface PeBand {
   bar: string;
@@ -38,7 +40,7 @@ export const UsSectorValuationPanel: React.FC = () => {
 
   useEffect(() => {
     let alive = true;
-    getSectorValuation(24)
+    getSectorValuation(30)
       .then((d) => {
         if (alive) setItems(d);
       })
@@ -58,24 +60,28 @@ export const UsSectorValuationPanel: React.FC = () => {
   const peMin = peVals.length ? Math.min(...peVals) : 0;
   const peMax = peVals.length ? Math.max(...peVals) : 0;
 
+  // 市值占比 = 该板块市值 / 本次展示板块市值合计（非全市场口径，标题里已注明）
+  const capTotal = items.reduce(
+    (sum, i) => (Number.isFinite(i.market_cap_yi) ? sum + i.market_cap_yi : sum),
+    0,
+  );
+
   return (
     <SectionCard
+      className="!p-2.5 !gap-1.5"
       title={
         <span className="flex items-center gap-1.5">
           <ThermometerSun className="w-3.5 h-3.5 text-blue-600" />
           板块估值温度计
-        </span>
-      }
-      extra={
-        <span className="text-[9px] font-mono text-slate-400 whitespace-nowrap">
-          数据源 f10 快照 · 按 PE 升序
+          <span className="text-[9px] font-normal text-slate-400">
+            f10 快照 · 按 PE 升序 · 绿=洼地 红=偏贵
+          </span>
         </span>
       }
     >
-      <p className="text-[9px] text-slate-400 leading-relaxed font-medium">
-        PE / PB 中位数只取正值（亏损公司已剔除），无有效值显示 --；分档按当前展示集合
-        PE 相对位置三等分，<span className="text-emerald-600 font-bold">绿色=估值洼地</span>，
-        <span className="text-rose-600 font-bold">红色=偏贵</span>。市值单位：亿美元。
+      <p className="text-[9px] text-slate-400 leading-snug font-medium">
+        PE / PB 中位数只取正值（亏损公司已剔除），无有效值显示 --；分档按当前展示集合 PE
+        相对位置三等分。市值与占比单位：亿美元。
       </p>
 
       {items.length === 0 ? (
@@ -83,24 +89,39 @@ export const UsSectorValuationPanel: React.FC = () => {
       ) : (
         <div className="flex flex-col max-h-[560px] overflow-y-auto">
           <div
-            className={`${GRID} px-1 pb-1 text-[9px] font-extrabold text-slate-400 border-b border-slate-100 sticky top-0 bg-white/95 backdrop-blur z-10`}
+            className={`${GRID} px-1 py-[3px] text-[9px] font-bold text-slate-400 border-b border-slate-200 sticky top-0 bg-white/95 backdrop-blur z-10`}
           >
-            <span>板块 · 成分股</span>
-            <span className="text-right">PE中位</span>
-            <span className="text-right">PB中位</span>
-            <span className="text-right">股息率</span>
-            <span className="text-right">市值(亿$)</span>
-            <span className="text-right" title="成分股数量">
+            <span>板块</span>
+            <span className="text-right" title="成分股 PE 中位数（只取正值）">
+              PE中位
+            </span>
+            <span className="text-right" title="成分股 PB 中位数（只取正值）">
+              PB
+            </span>
+            <span className="text-right" title="成分股股息率中位数">
+              股息率
+            </span>
+            <span className="text-right" title="板块市值合计（亿美元）">
+              市值(亿$)
+            </span>
+            <span className="text-right" title="占本次展示板块市值合计的比例（非全市场口径）">
+              占比
+            </span>
+            <span className="text-right" title="板块成分股数量（标的池内）">
               股数
             </span>
           </div>
 
           {items.map((it) => {
             const band = it.pe_median !== null ? peBand(it.pe_median, peMin, peMax) : null;
+            const capShare =
+              capTotal > 0 && Number.isFinite(it.market_cap_yi)
+                ? (it.market_cap_yi / capTotal) * 100
+                : null;
             return (
               <div
                 key={it.sector || it.name}
-                className={`${GRID} px-1 py-1 border-b border-slate-50 last:border-0 items-center`}
+                className={`${GRID} px-1 py-[3px] border-b border-slate-50 last:border-0 items-center hover:bg-slate-50/80`}
               >
                 <span className="flex items-center gap-1 min-w-0">
                   <span className="text-[10px] font-bold text-slate-800 truncate" title={it.sector}>
@@ -110,7 +131,7 @@ export const UsSectorValuationPanel: React.FC = () => {
 
                 {band && it.pe_median !== null ? (
                   <span
-                    className="relative h-4 rounded-md bg-slate-100 overflow-hidden"
+                    className="relative h-2.5 rounded-sm bg-slate-100 overflow-hidden"
                     title={`PE 中位数 ${it.pe_median.toFixed(2)}`}
                   >
                     <span
@@ -118,7 +139,7 @@ export const UsSectorValuationPanel: React.FC = () => {
                       style={{ width: `${Math.max(band.t * 100, 10)}%` }}
                     />
                     <span
-                      className={`relative z-10 block text-center text-[10px] font-mono font-extrabold leading-4 ${band.text}`}
+                      className={`relative z-10 block text-center text-[9px] font-mono font-extrabold leading-[10px] ${band.text}`}
                     >
                       {it.pe_median.toFixed(1)}
                     </span>
@@ -137,6 +158,9 @@ export const UsSectorValuationPanel: React.FC = () => {
                 </span>
                 <span className="text-right text-[10px] font-mono text-slate-600">
                   {fmtInt(it.market_cap_yi)}
+                </span>
+                <span className="text-right text-[9px] font-mono text-slate-500">
+                  {capShare === null ? '--' : `${capShare.toFixed(1)}%`}
                 </span>
                 <span className="text-right text-[9px] font-mono text-slate-400">
                   {fmtInt(it.stock_count)}

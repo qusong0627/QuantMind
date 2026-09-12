@@ -227,6 +227,52 @@ def _market_pct_snapshot() -> tuple[str | None, pd.DataFrame]:
     return cur, snap
 
 
+# ---- 量能基准（量比计算的底座） ----
+
+_VOLUME_BASELINE_WINDOW = 20
+
+
+def _volume_baseline(window: int = _VOLUME_BASELINE_WINDOW) -> pd.DataFrame:
+    """各标的在**前 window 个交易日**的平均成交量/成交额。
+
+    返回 DataFrame[symbol, avg_volume, avg_amount, base_days]。
+
+    **基准窗口不含最新交易日** —— 量比 = 当日量 / 前 20 日均量，若把当日
+    算进基准，巨量当日会抬高分母把自己稀释掉（专业口径都是「前 N 日」）。
+    """
+    days = _trading_days(None, window + 1)
+    if len(days) < 2:
+        return pd.DataFrame(columns=["symbol", "avg_volume", "avg_amount", "base_days"])
+    base_days = days[1 : window + 1]  # days[0] 是最新交易日，排除
+    k = _read_partitioned(KLINE_REL, base_days, columns="symbol, volume, amount")
+    if k.empty:
+        return pd.DataFrame(columns=["symbol", "avg_volume", "avg_amount", "base_days"])
+    agg = k.groupby("symbol").agg(
+        avg_volume=("volume", "mean"),
+        avg_amount=("amount", "mean"),
+        base_days=("volume", "size"),
+    )
+    return agg.reset_index()
+
+
+def _hot_snapshot() -> tuple[str | None, pd.DataFrame]:
+    """最新交易日截面 + 量比/成交额（热门榜的公共底座）。
+
+    返回 DataFrame[symbol, close, amount, volume, pct_change, avg_volume,
+    avg_amount, rvol]。`rvol`（量比）为当日量 / 前 20 日均量，基准不足
+    20 天的标的 rvol 置空而不是用短窗口凑数（新股量比会严重失真）。
+    """
+    latest, snap = _market_pct_snapshot()
+    if not latest or snap.empty:
+        return latest, pd.DataFrame()
+    base = _volume_baseline()
+    df = snap.merge(base, on="symbol", how="left")
+    enough = df["base_days"].fillna(0) >= _VOLUME_BASELINE_WINDOW
+    avg_vol = df["avg_volume"].where(df["avg_volume"].fillna(0) > 0)
+    df["rvol"] = (df["volume"] / avg_vol).where(enough)
+    return latest, df
+
+
 # ---- 名称 / 行业 / 基本面快照 ----
 
 
