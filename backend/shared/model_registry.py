@@ -1131,11 +1131,17 @@ class ModelRegistryService:
         )
         if default:
             default_id = str(default.get("model_id") or "")
+            # 走默认模型兜底 = 显式请求的模型不可用（未就绪/市场不符），**必须**
+            # 标记 fallback_used：此前这里写死 False，导致 _resolve_requested_model
+            # 的「显式请求却回落」守卫失效 —— 调用方请求模型 X、实际跑的是默认
+            # 模型 Y，且无任何报错（实测请求美股 candidate 模型时静默跑了 A 股默认模型）。
+            _explicit = str(model_id or "").strip()
+            _fell_back = bool(_explicit) and default_id != _explicit
             return ResolvedModel(
                 effective_model_id=default_id,
                 model_source="user_default",
-                fallback_used=False,
-                fallback_reason="",
+                fallback_used=_fell_back,
+                fallback_reason="; ".join(reason_parts).strip() if _fell_back else "",
                 storage_path=str(default.get("storage_path") or ""),
                 model_file=str(default.get("model_file") or ""),
                 status=str(default.get("status") or "active"),
