@@ -110,3 +110,45 @@ def test_quantdb_money_flow_period():
         )
         assert isinstance(res, list)
         assert len(res) > 0
+
+
+# ---- 快照新鲜度门控（陈旧快照静默返回 None，由 router 回退实时聚合） ----
+
+def test_snapshot_staleness_gate_blocks_stale():
+    """快照交易日落后于库内最新分区时必须判为陈旧（否则页面静默显示旧数据）。"""
+    from datetime import datetime, timedelta
+
+    from backend.services.api.market_analysis import quantdb_snapshot as snap
+
+    latest = snap._latest_partition_date()
+    assert latest, "取不到库内最新分区，无法验证门控"
+    latest_iso = f"{latest[:4]}-{latest[4:6]}-{latest[6:]}"
+
+    # 落后一天 = 陈旧（这正是「周五数据卡到周一」那次的形态）
+    prev = (datetime.strptime(latest, "%Y%m%d") - timedelta(days=1)).strftime("%Y-%m-%d")
+    assert snap._is_stale({"trade_date": prev}) is True
+    # 与库内最新一致 = 不陈旧
+    assert snap._is_stale({"trade_date": latest_iso}) is False
+    # 晚于库内最新（配置/时钟异常）不应判陈旧，避免误触发实时计算
+    assert snap._is_stale({"trade_date": "2099-01-01"}) is False
+
+
+def test_snapshot_staleness_gate_tolerates_missing_fields():
+    """缺 trade_date / 取不到分区时不得误判陈旧（保持原行为，不误伤正常快照）。"""
+    from backend.services.api.market_analysis import quantdb_snapshot as snap
+
+    assert snap._is_stale({}) is False
+    assert snap._is_stale({"trade_date": None}) is False
+    assert snap._is_stale({"trade_date": ""}) is False
+
+
+def test_fresh_snapshot_still_served():
+    """快照新鲜时必须照常返回（门控不能把正常快照也挡掉）。"""
+    from backend.services.api.market_analysis import quantdb_snapshot as snap
+
+    latest = snap._latest_partition_date()
+    snap_date = (snap.trade_date() or "").replace("-", "")
+    if not latest or snap_date != latest:
+        pytest.skip(f"当前快照({snap_date}) 与库内最新({latest}) 不一致，跳过新鲜分支断言")
+    assert snap._load(None) is not None, "快照新鲜却被门控挡掉"
+    assert snap.breadth() is not None

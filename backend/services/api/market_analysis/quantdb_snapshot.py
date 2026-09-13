@@ -14,11 +14,15 @@ router 回退到实时 quantdb_feed（DuckDB 聚合），保证快照缺失也�
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import sqlite3
+import time
 from pathlib import Path
 from typing import Any, Optional
+
+logger = logging.getLogger(__name__)
 
 _DEFAULT_ROOT = Path(os.getcwd()) / "data" / "market-analysis"
 
@@ -50,9 +54,65 @@ def _load(date: Optional[str]) -> Optional[dict[str, Any]]:
     if not p:
         return None
     try:
-        return json.loads(Path(p).read_text(encoding="utf-8"))
+        snap = json.loads(Path(p).read_text(encoding="utf-8"))
     except Exception:
         return None
+    # 陈旧快照主动返回 None：调用方（router）会回退实时聚合。
+    # 只对「最新」模式判定 —— 显式历史日期取的就是那一天，不存在陈旧问题。
+    if date is None and _is_stale(snap):
+        _warn_stale_once(str(snap.get("trade_date") or "?"))
+        return None
+    return snap
+
+
+# ── 新鲜度门控 ─────────────────────────────────────────────────────────────
+# 快照由定时任务**次日早上**生成（见 qlib_app/celery_config 的 market-snapshot）。
+# 任务漏跑、新装环境尚未跑过、或调度缺口（曾漏配周六 → 周五数据卡到周一）时，
+# 快照会**静默陈旧**：页面不报错、只是显示旧数据，不看日期根本发现不了。
+# 这里主动判陈旧并返回 None，让各端点既有的 realtime 兜底接手。
+
+_FRESHNESS_TTL_SEC = 60.0
+_freshness_cache: Optional[tuple[float, Optional[str]]] = None
+_stale_warned_for: Optional[str] = None
+
+
+def _latest_partition_date() -> Optional[str]:
+    """库内最新交易日（YYYYMMDD）。带短 TTL 缓存，避免每个请求都扫分区目录。"""
+    global _freshness_cache
+    now = time.monotonic()
+    if _freshness_cache is not None and now - _freshness_cache[0] < _FRESHNESS_TTL_SEC:
+        return _freshness_cache[1]
+    try:
+        from .quantdb_feed import _latest_trade_date
+
+        value = _latest_trade_date()
+    except Exception:  # noqa: BLE001 - 判不了就不判，保持原行为
+        value = None
+    _freshness_cache = (now, value)
+    return value
+
+
+def _is_stale(snap: dict[str, Any]) -> bool:
+    """快照交易日是否落后于库内最新分区。判不了（缺字段/取不到）时返回 False。"""
+    snap_date = str(snap.get("trade_date") or "").replace("-", "")
+    latest = _latest_partition_date()
+    if not snap_date or not latest:
+        return False
+    return snap_date < latest
+
+
+def _warn_stale_once(snap_date: str) -> None:
+    """同一天只告警一次，避免逐请求刷日志。"""
+    global _stale_warned_for
+    if _stale_warned_for == snap_date:
+        return
+    _stale_warned_for = snap_date
+    logger.warning(
+        "市场分析快照陈旧（快照 %s < 库内最新 %s），本次已回退实时聚合；"
+        "请检查 market-snapshot 定时任务是否正常产出",
+        snap_date,
+        _latest_partition_date(),
+    )
 
 
 def has_snapshot(date: Optional[str] = None) -> bool:
