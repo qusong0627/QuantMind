@@ -162,7 +162,11 @@ if os.getenv("STRATEGY_LAB_SCAN_ENABLED", "true").lower() == "true":
 if os.getenv("MARKET_SNAPSHOT_ENABLED", "true").lower() == "true":
     beat_schedule["market-snapshot"] = {
         "task": "engine.tasks.market_snapshot",
-        "schedule": crontab(minute="*/10", hour="4-5", day_of_week="1-5"),
+        # 含周六：每个交易日的数据在**次日早上**落快照，只跑到周五的话
+        # 周五收盘的数据要等下一个周一才产出 —— 周末打开市场分析看到的是周四的
+        # 数据（实测 2026-09-11 周五的数据在周日仍缺失）。任务自带新鲜度门控，
+        # 周六无新分区时会自行跳过，不会白跑。
+        "schedule": crontab(minute="*/10", hour="4-5", day_of_week="mon-sat"),
     }
 
 celery_app.conf.update(

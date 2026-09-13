@@ -340,14 +340,17 @@ export const UsHoldingsPanel: React.FC = () => {
         <DateBadge label="数据" date={insider?.as_of || dividends?.as_of} />
       </div>
 
-      {/* 内部人 + 机构：两行三列紧凑网格（宽屏） */}
-      <div className="grid grid-cols-1 xl:grid-cols-3 gap-1.5 shrink-0 xl:h-[400px]">
+      {/* 第一行：内部人交易榜（2 栏）+ 机构持仓（1 栏） */}
+      <div className="grid grid-cols-1 xl:grid-cols-3 gap-1.5 shrink-0 xl:h-[300px]">
         <InsiderCard insider={insider} loading={loading} />
         <InstCard inst={institutional} loading={loading} />
+      </div>
 
-        {/* 除息日历 */}
+      {/* 第二行：近期拆股（左 2 栏）+ 除息日历（右 1 栏） */}
+      <div className="grid grid-cols-1 xl:grid-cols-3 gap-1.5 shrink-0 xl:h-[340px]">
+        {/* 除息日历（右列，窄栏；靠 order 排到拆股之后） */}
         <SectionCard
-          className="!p-2.5 gap-1.5 xl:col-span-2 h-full min-h-0"
+          className="!p-2.5 gap-1.5 h-full min-h-0 order-2"
           title={
             <span className="flex items-center gap-1.5">
               <CalendarClock className="w-3.5 h-3.5 text-blue-600" />
@@ -372,9 +375,9 @@ export const UsHoldingsPanel: React.FC = () => {
           </p>
         </SectionCard>
 
-        {/* 近期拆股 */}
+        {/* 近期拆股（左列 2 栏宽） */}
         <SectionCard
-          className="!p-2.5 gap-1.5 h-full min-h-0"
+          className="!p-2.5 gap-1.5 xl:col-span-2 h-full min-h-0 order-1"
           title={
             <span className="flex items-center gap-1.5">
               <Scissors className="w-3.5 h-3.5 text-blue-600" />
