@@ -124,8 +124,11 @@ export const UsValuationPanel: React.FC = () => {
         </span>
       </div>
 
+      {/* 2 栏：左列 = 概览 + 市值分层（堆叠），右列 = 估值三榜。
+          原先三榜独占整行（1696px），表格列只用掉一半宽度，右侧大片空白。 */}
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-1.5">
-        {/* 估值概览：一行紧凑指标条 */}
+        <div className="flex flex-col gap-1.5">
+          {/* 估值概览：一行紧凑指标条 */}
         <SectionCard
           className="!p-2.5 gap-1.5 h-full"
           title={
@@ -215,10 +218,10 @@ export const UsValuationPanel: React.FC = () => {
             分层阈值：超大盘 ≥ 2000 亿 / 大盘 ≥ 100 亿 / 中盘 ≥ 20 亿 / 其余为小盘（美元）。
           </p>
         </SectionCard>
-      </div>
+        </div>
 
-      {/* 估值三榜 */}
-      <SectionCard
+        {/* 估值三榜（右列） */}
+        <SectionCard
         className="!p-2.5 gap-1.5 h-full"
         title={
           <span className="flex items-center gap-1.5">
@@ -305,7 +308,8 @@ export const UsValuationPanel: React.FC = () => {
             PE/PB/股息率三列对全部榜单同屏可见，加粗列为当前榜单的排序维度。
           </p>
         </div>
-      </SectionCard>
+        </SectionCard>
+      </div>
     </div>
   );
 };

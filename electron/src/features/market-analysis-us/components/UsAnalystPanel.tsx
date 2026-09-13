@@ -17,9 +17,9 @@ const HEAD =
 const ROW = 'grid gap-1 px-1 py-[3px] text-[10px] items-center border-b border-slate-50 last:border-0';
 const SCROLL = 'overflow-y-auto';
 
-const UP_GRID = 'grid-cols-[14px_1fr_56px_50px]';
-const TARGET_GRID = 'grid-cols-[14px_1fr_46px_52px_48px]';
-const RATED_GRID = 'grid-cols-[14px_1fr_30px_26px_26px]';
+const UP_GRID = 'grid-cols-[32px_1fr_56px_54px]';
+const TARGET_GRID = 'grid-cols-[14px_1fr_52px_52px_48px]';
+const RATED_GRID = 'grid-cols-[14px_1fr_38px_28px_28px]';
 
 /** 评级方向 → 文案/配色（红=上调、绿=下调、灰=维持，与红涨绿跌一致） */
 const DIRECTION_STYLE: Record<string, { chip: string; label: string }> = {
@@ -232,7 +232,7 @@ export const UsAnalystPanel: React.FC = () => {
           ) : (
             <div className={`flex flex-col flex-1 min-h-0 ${SCROLL}`}>
               <div className={`${HEAD} ${UP_GRID} sticky top-0 z-10 bg-white/95 backdrop-blur`}>
-                <span>#</span>
+                <span>日期</span>
                 <span>标的 · 机构 · 评级变化</span>
                 <span className="text-right">方向</span>
                 <span className="text-right">目标价</span>

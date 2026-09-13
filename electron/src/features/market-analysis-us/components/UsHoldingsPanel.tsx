@@ -30,8 +30,8 @@ const SCROLL = 'flex flex-col flex-1 min-h-0 overflow-y-auto';
 
 const INS_GRID = 'grid-cols-[14px_1fr_58px_34px_58px]';
 const INST_GRID = 'grid-cols-[14px_1fr_54px_40px_54px]';
-const DIV_GRID = 'grid-cols-[14px_1fr_36px_40px_52px]';
-const SPLIT_GRID = 'grid-cols-[14px_1fr_50px_48px]';
+const DIV_GRID = 'grid-cols-[14px_1fr_36px_40px_58px]';
+const SPLIT_GRID = 'grid-cols-[14px_1fr_58px_48px]';
 
 /** 表头 + 行渲染壳：四张表结构相同，只有列宽与行内容不同（grid 在此统一注入表头，避免两处写重） */
 function Table<T>({ grid, labels, items, render, loading, emptyText }: {
