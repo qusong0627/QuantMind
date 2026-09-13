@@ -805,8 +805,13 @@ def main():
 
     logger.info("推理完成，生成 %d 条信号", len(scores))
 
-    # 方向纠正：如果训练时检测到 IC < 0（模型反向），翻转分数使正分=看涨
-    score_direction = meta.get("score_direction", "")
+    # 方向纠正：如果训练时检测到验证集 IC < 0（模型反向），翻转分数使正分=看涨。
+    # 方向由训练写在 **metrics.score_direction**（train.py / model_algorithm_meta.py 都写这里）；
+    # 顶层 meta["score_direction"] 是历史写法，一并兼容。
+    # 注意：此前这里只读顶层，而训练从不写顶层 —— 于是这个翻转对所有训练产出的模型
+    # **从未生效**，反向模型的分数一直是反的（实测 5 个美股模型受影响）。
+    _metrics = meta.get("metrics") or {}
+    score_direction = meta.get("score_direction") or _metrics.get("score_direction") or ""
     if score_direction == "reversed":
         if quantile_values is not None:
             quantile_values = np.column_stack((-quantile_values[:, 2], -quantile_values[:, 1], -quantile_values[:, 0]))

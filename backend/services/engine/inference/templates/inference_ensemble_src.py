@@ -426,8 +426,10 @@ def predict_with_model(model, meta: dict, day_df: pd.DataFrame) -> dict[str, flo
 
     scores = np.asarray(scores).flatten()
 
-    # 方向纠正：训练时 IC<0 的模型分数已翻转
-    if meta.get("score_direction") == "reversed":
+    # 方向纠正：训练时 IC<0 的模型分数需翻转（方向写在 metrics.score_direction，
+    # 顶层 meta["score_direction"] 为历史写法一并兼容 —— 只读顶层会让翻转永不生效）
+    _metrics = meta.get("metrics") or {}
+    if (meta.get("score_direction") or _metrics.get("score_direction")) == "reversed":
         scores = -scores
 
     result = {}

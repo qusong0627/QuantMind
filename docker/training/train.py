@@ -911,6 +911,31 @@ def train_stacking(
 
 
 # ── 主入口 ────────────────────────────────────────────────────────────────────
+def _score_direction_from_ic(ic: Any) -> str:
+    """与 model_trainers/metrics.py 同口径：验证集 IC < 0 即反向模型。"""
+    try:
+        v = float(ic)
+    except (TypeError, ValueError):
+        return "normal"
+    if v != v:  # NaN
+        return "normal"
+    return "reversed" if v < 0 else "normal"
+
+
+def _apply_score_direction(df: pd.DataFrame, direction: str) -> pd.DataFrame:
+    """反向模型的预测列取负，使「正分=看涨」在该模型的预测产物里也成立。
+
+    `pred.parquet` 是全平台读取该模型分数序列的来源（个股预测直读、多模型分数曲线、
+    共识矩阵），符号必须在这里就修正 —— 只在推理模板里翻转的话，走 pred 直读的
+    路径拿到的仍然是反的。
+    """
+    if direction != "reversed" or df is None or "pred" not in df.columns:
+        return df
+    out = df.copy()
+    out["pred"] = -out["pred"]
+    return out
+
+
 def main() -> int:
     # 最早期诊断日志：在任何处理之前打印，确保 Batch 环境中一定能看到
     print(f"[BOOT] python={sys.version}", flush=True)
@@ -1142,10 +1167,16 @@ def main() -> int:
                 except Exception:
                     best_iteration = None
 
-            # 保存预测
+            # 保存预测：反向模型先取负，保证 pred 产物符合平台「正分=看涨」口径
+            # （pred.parquet 同时喂给 parquet 与 pkl 两条产物，必须一致）
+            primary_direction = _score_direction_from_ic(
+                next((r.get("val_ic") for r in (multi_result.get("comparison") or [])
+                      if r.get("model_type") == primary_type), None)
+            )
+            pred_df = _apply_score_direction(pred_df, primary_direction)
             pred_path = Path(_QM_WS) / "pred.parquet"
             pred_df.to_parquet(pred_path, engine="pyarrow", compression="zstd", index=False)
-            logger.info(f"Predictions saved to {pred_path}")
+            logger.info(f"Predictions saved to {pred_path} (score_direction={primary_direction})")
 
             pred_qlib = (
                 pred_df[["trade_date", "symbol", "pred"]]
@@ -1178,7 +1209,7 @@ def main() -> int:
             else:
                 logger.info("SHAP skipped: no LightGBM in multi-model run")
 
-            # 保存各基模型独立预测（parquet）
+            # 保存各基模型独立预测（parquet）—— 同样按各自的方向取负
             for mt, res in multi_result["models"].items():
                 base_pred_path = workspace / f"pred_{mt}.parquet"
                 # stacking 模式为省内存已 pop 掉 base 的 pred_df（用 OOF 做元特征），这里跳过即可
@@ -1186,7 +1217,15 @@ def main() -> int:
                 if base_pred is None:
                     logger.info("Skip saving %s base pred (pred_df=None, stacking mode)", mt)
                     continue
-                base_pred.to_parquet(base_pred_path, engine="pyarrow", compression="zstd", index=False)
+                base_direction = _score_direction_from_ic(
+                    next((r.get("val_ic") for r in (multi_result.get("comparison") or [])
+                          if r.get("model_type") == mt), None)
+                )
+                _apply_score_direction(base_pred, base_direction).to_parquet(
+                    base_pred_path, engine="pyarrow", compression="zstd", index=False
+                )
+                if base_direction == "reversed":
+                    logger.info("base pred %s 已按反向模型取负", mt)
 
             # 构造 metadata
             metadata = {
@@ -1710,6 +1749,12 @@ def main():
         scores = pred.flatten()
     else:
         scores = model.predict(X_values, num_iteration=best_iter)
+    # 方向纠正：验证集 IC<0（反向模型）翻转分数，使正分=看涨。
+    # 方向写在 metrics.score_direction（顶层 meta["score_direction"] 为历史写法）。
+    _metrics = meta.get("metrics") or {}
+    if (meta.get("score_direction") or _metrics.get("score_direction")) == "reversed":
+        scores = -np.asarray(scores)
+        print("[inference] 检测到反向模型 (score_direction=reversed)，已翻转分数", file=sys.stderr)
     signals = sorted(
         [{"symbol": s, "score": float(v)} for s, v in zip(symbols, scores) if v == v],
         key=lambda x: x["score"], reverse=True
