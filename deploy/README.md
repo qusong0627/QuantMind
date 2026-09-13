@@ -45,6 +45,24 @@ QUANTMIND_REPLACE_DATABASE=true \
 QUANTMIND_REPLACE_QWENPAW_DATA=true
 ```
 
+## 离线包制作与依赖指纹
+
+`full-deploy.sh` 用「依赖指纹」在速度与新鲜度之间自动决策：镜像构建时把
+requirements 指纹写入 Label `qm.req.sha`，部署时与当前代码算出的指纹比对——
+一致直接复用成品镜像（秒级）；不一致（如依赖新增了包）自动重建对齐。
+
+**制作镜像时必须打指纹戳**（否则部署侧视为无指纹、每次触发重建）：
+
+```bash
+QM_REQ_SHA=$(bash deploy/req-fingerprint.sh) docker compose build quantmind
+docker save quantmind-oss:latest <其余镜像...> | zstd -T0 -o images.tar.zst
+```
+
+指纹只覆盖 `requirements.txt`、`requirements/{production,ai}.txt`、
+`docker/Dockerfile.oss` 与 `TORCH_DEVICE` 取值；**业务代码走 bind mount，
+纯代码更新不需要重新制作镜像包**。requirements/Dockerfile 变更后才需重打
+images.tar.zst；来不及重打包时，联网部署机会自动重建补齐（保持服务可用）。
+
 ## 在线源码部署
 
 ```bash

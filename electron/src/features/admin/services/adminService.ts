@@ -596,7 +596,19 @@ class AdminService {
     }
 
     // FinBERT 开关（独立控制按键）
-    async getFinbertStatus(): Promise<{ enabled: boolean; device: number; model: string; model_ready: boolean; model_failed: boolean }> {
+    async getFinbertStatus(): Promise<{
+        enabled: boolean;
+        device: number;
+        model: string;
+        installed?: boolean;
+        framework_ok?: boolean;
+        ready_for_use?: boolean;
+        env_enabled?: boolean;
+        model_ready: boolean;
+        model_failed: boolean;
+        override?: boolean | null;
+        toggle_path?: string;
+    }> {
         const resp = await this.axiosInstance.get('/admin/finbert/status');
         return resp.data?.data ?? resp.data;
     }

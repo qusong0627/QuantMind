@@ -1687,7 +1687,7 @@ async def enrichment_finbert_status():
 
     返回：
       - available: 模型是否已就绪（加载成功且未失败）
-      - use_finbert: 进程级是否启用了 FinBERT（CPU 镜像默认关闭，GPU 镜像默认开启）
+      - use_finbert: FinBERT 是否实际生效（权重+框架就绪且开关开启，含运行时 toggle）
       - model: 当前配置的模型名/路径
       - device: 推理设备（-1=CPU, 0=GPU0）
       - last_inference_label/conf: 最近一次推理样本（若无则 None）
@@ -1700,7 +1700,9 @@ async def enrichment_finbert_status():
         return {"available": False, "use_finbert": False, "error": f"import failed: {e}"}
 
     available = bool(sentiment_mod.is_available())
-    use_finbert = bool(sentiment_mod.USE_FINBERT)
+    # 有效启用态 = 权重+框架就绪 且 开关开启（含 /data/finbert/enabled 运行时开关），
+    # 不能读进程级 USE_FINBERT 常量，否则管理页会把已生效的运行时开关误报为「已关闭」。
+    use_finbert = bool(sentiment_mod.is_finbert_enabled())
 
     # 最近一次推理样本（可选）
     sample = None
@@ -1739,10 +1741,14 @@ async def enrichment_finbert_status():
         pass
 
     # 状态语义
-    if not use_finbert:
-        tip = "FinBERT 在当前环境被关闭（CPU 镜像默认）。如需启用：设 NEWS_USE_FINBERT=true 并部署 GPU 镜像或安装 CPU 版 torch。"
+    if not sentiment_mod.is_model_installed():
+        tip = "FinBERT 权重未安装。执行 docker exec quantmind python3 backend/scripts/download_finbert.py 下载权重。"
+    elif not sentiment_mod.is_framework_available():
+        tip = "镜像缺少 PyTorch 推理框架（离线镜像默认 TORCH_DEVICE=skip 不含 torch）。执行 sudo bash deploy/install-model-deps.sh 补装后功能方可开启。"
+    elif not use_finbert:
+        tip = "FinBERT 已就绪但处于关闭状态（默认关闭，避免 CPU 环境打满推理进程）。可在 管理后台→系统设置 中开启。"
     elif not available:
-        tip = "FinBERT 已启用但加载失败，请执行 python3 backend/scripts/download_finbert.py 下载权重；详见 docs/FinBERT 中文金融情感模型.md。"
+        tip = "FinBERT 已启用但模型加载失败，请执行 python3 backend/scripts/download_finbert.py 校验权重；详见 docs/FinBERT 中文金融情感模型.md。"
     else:
         tip = "FinBERT 已就绪，可在新闻资讯/标签管理中观察带 +finbert 后缀的 model_version。"
 

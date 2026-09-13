@@ -29,6 +29,7 @@ import {
   EditOutlined,
   PlusOutlined,
   ReloadOutlined,
+  SearchOutlined,
   TagsOutlined,
 } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
@@ -118,22 +119,31 @@ export const AdminTagManagement: React.FC = () => {
 
   const handleCreate = () => {
     setEditingTag(null);
-    form.resetFields();
-    form.setFieldsValue({ kind: 'event', weight: 1.0, enabled: true });
     setModalOpen(true);
   };
 
   const handleEdit = (tag: LexiconTag) => {
     setEditingTag(tag);
-    form.setFieldsValue({
-      term: tag.term,
-      kind: tag.kind,
-      event_tag: tag.event_tag,
-      weight: tag.weight,
-      note: tag.note,
-    });
     setModalOpen(true);
   };
+
+  // destroyOnHidden 下 Form 在弹窗打开后才挂载；表单赋值必须在挂载之后进行，
+  // 否则 useForm 实例未连接会告警且赋值丢失。
+  useEffect(() => {
+    if (!modalOpen) return;
+    if (editingTag) {
+      form.setFieldsValue({
+        term: editingTag.term,
+        kind: editingTag.kind,
+        event_tag: editingTag.event_tag,
+        weight: editingTag.weight,
+        note: editingTag.note,
+      });
+    } else {
+      form.resetFields();
+      form.setFieldsValue({ kind: 'event', weight: 1.0, enabled: true });
+    }
+  }, [modalOpen, editingTag, form]);
 
   const handleSave = async () => {
     try {
@@ -311,14 +321,18 @@ export const AdminTagManagement: React.FC = () => {
             options={KIND_OPTIONS}
             style={{ minWidth: 160 }}
           />
-          <Input.Search
-            allowClear
-            placeholder="搜索词条..."
-            value={filterKeyword}
-            onChange={(e) => setFilterKeyword(e.target.value)}
-            onSearch={() => { setPage(1); loadTags(); }}
-            style={{ width: 240 }}
-          />
+          {/* antd 5.29 的 Input.Search 内部仍走 addonAfter，触发自身废弃告警；
+              等价改用 Space.Compact 组合，行为（回车/点击搜索）保持不变。 */}
+          <Space.Compact style={{ width: 240 }}>
+            <Input
+              allowClear
+              placeholder="搜索词条..."
+              value={filterKeyword}
+              onChange={(e) => setFilterKeyword(e.target.value)}
+              onPressEnter={() => { setPage(1); loadTags(); }}
+            />
+            <Button icon={<SearchOutlined />} onClick={() => { setPage(1); loadTags(); }} />
+          </Space.Compact>
         </div>
 
         <Table

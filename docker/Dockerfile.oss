@@ -15,9 +15,10 @@ ARG TORCH_DEVICE=skip
 # CPU 版 torch 下载源（国内 pytorch 镜像暂缺 2.9.1+cpu，使用官方源）
 ARG TORCH_CPU_INDEX_URL=https://download.pytorch.org/whl/cpu
 
+# 注意：不要设置 PIP_NO_CACHE_DIR=1，否则会禁用 pip 下载缓存，
+# 使下方 --mount=type=cache 的 wheel 缓存空转，依赖变更时全量重新下载。
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_INDEX_URL=${PIP_INDEX_URL} \
     PIP_TRUSTED_HOST=${PIP_TRUSTED_HOST} \
@@ -50,16 +51,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       sshpass \
     && rm -rf /var/lib/apt/lists/*
 
-# 安装 Python 依赖
-COPY requirements.txt /tmp/requirements.txt
-COPY requirements/production.txt /tmp/requirements-production.txt
-COPY requirements/ai.txt /tmp/requirements-ai.txt
-
 # 本地 torch wheel 目录（docker/torch_wheels/）被 .gitignore 忽略、不随代码分发。
 # 默认按 TORCH_DEVICE 从 PyPI 安装 torch：
 #   cpu -> torch==2.9.1+cpu（仅 CPU 轮子，构建快、镜像小，无需 GPU）
 #   gpu -> torch==2.9.1（完整 CUDA 轮子，构建慢、镜像大，需 NVIDIA GPU）
 # 需要离线/定制 wheel 时自行 COPY docker/torch_wheels/ 后放开下方本地分支。
+# torch 单独成层且在 requirements 之前：requirements 变更时本层直接命中缓存，
+# 不会重装 torch。
 RUN --mount=type=cache,target=/root/.cache/pip,id=quantmind-pip \
     python -m pip install --upgrade pip setuptools wheel cython \
     && if [ "$TORCH_DEVICE" = "skip" ] || [ "$TORCH_DEVICE" = "none" ]; then \
@@ -67,6 +65,7 @@ RUN --mount=type=cache,target=/root/.cache/pip,id=quantmind-pip \
        elif ls /tmp/torch_wheels/*.whl >/dev/null 2>&1; then \
          echo "安装本地 torch wheel"; \
          python -m pip install --root-user-action=ignore /tmp/torch_wheels/*.whl; \
+         rm -rf /tmp/torch_wheels; \
        elif [ "$TORCH_DEVICE" = "gpu" ]; then \
          echo "构建 GPU 版 torch（完整 CUDA，构建慢）"; \
          python -m pip install --root-user-action=ignore "torch==2.9.1"; \
@@ -78,11 +77,17 @@ RUN --mount=type=cache,target=/root/.cache/pip,id=quantmind-pip \
          python -m pip install --root-user-action=ignore "torch==2.9.1+cpu" \
            --index-url ${PIP_INDEX_URL} \
            --extra-index-url ${TORCH_CPU_INDEX_URL}; \
-       fi \
-    && python -m pip install --root-user-action=ignore -r /tmp/requirements.txt \
-    && python -m pip install --root-user-action=ignore -r /tmp/requirements-production.txt \
-    && python -m pip install --root-user-action=ignore -r /tmp/requirements-ai.txt \
-    && rm -rf /tmp/requirements*.txt /tmp/torch_wheels
+       fi
+
+# 安装 Python 依赖
+COPY requirements.txt /tmp/requirements.txt
+COPY requirements/production.txt /tmp/requirements-production.txt
+COPY requirements/ai.txt /tmp/requirements-ai.txt
+RUN --mount=type=cache,target=/root/.cache/pip,id=quantmind-pip \
+     python -m pip install --root-user-action=ignore -r /tmp/requirements.txt \
+  && python -m pip install --root-user-action=ignore -r /tmp/requirements-production.txt \
+  && python -m pip install --root-user-action=ignore -r /tmp/requirements-ai.txt \
+  && rm -rf /tmp/requirements*.txt
 
 # 安装 QuantDB SDK（付费高质量数据源：K线/Tick/财报/估值/315维AI因子）
 RUN --mount=type=cache,target=/root/.cache/pip,id=quantmind-pip \
@@ -130,6 +135,14 @@ COPY strategy_templates strategy_templates
 RUN mkdir -p /data/models /data/qlib_data /data/uploads /data/strategies /tmp \
     && mkdir -p /root/.qlib/qlib_data
 # Qlib features 符号链接在运行时由 entrypoint 或首次访问时创建（数据卷挂载后才存在）
+
+# 依赖指纹戳（构建/打包侧经 deploy/req-fingerprint.sh 计算后以 --build-arg 注入）。
+# 供 full-deploy / update 比对「最新代码 requirements 指纹 vs 本镜像指纹」，
+# 一致→复用，不一致→重建。不传则为 unknown，视为无指纹。
+# 放在文件末尾：ARG 值变化只影响此元数据层，不会打断上方依赖层的构建缓存链
+#（真正由依赖引起的变化，本就会从对应 COPY/ARG 层开始正常失效重建）。
+ARG QM_REQ_SHA=unknown
+LABEL qm.req.sha=${QM_REQ_SHA}
 
 # 暴露端口
 EXPOSE 8000 8001 8002 8003

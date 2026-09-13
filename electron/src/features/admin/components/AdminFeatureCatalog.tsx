@@ -29,6 +29,7 @@ import {
   PlusOutlined,
   ReloadOutlined,
   SaveOutlined,
+  SearchOutlined,
   DatabaseOutlined,
   FolderOutlined,
   UploadOutlined,
@@ -594,11 +595,14 @@ export const AdminFeatureCatalog: React.FC = () => {
           </div>
         </div>
         <Space wrap>
-          <Input.Search
+          {/* 纯过滤输入（无 onSearch/enterButton），antd5.29 Input.Search 内部
+              addonAfter 会触发废弃告警，改等价 Input + 搜索图标后缀。 */}
+          <Input
             allowClear
             placeholder="搜索 Key / 名称 / 描述 / 公式"
             value={keyword}
             onChange={e => setKeyword(e.target.value)}
+            suffix={<SearchOutlined className="text-slate-400" />}
             style={{ width: 260 }}
             className="feature-search-center"
           />

@@ -121,9 +121,13 @@ start_services() {
     docker compose pull db redis huntly rsshub qwenpaw ib-gateway \
         || log '部分外部镜像未能预拉取，将在启动时重试'
     # 构建时注入 pip 源加速（国内网络），可通过 QUANTMIND_PIP_MIRROR 覆盖
+    # 依赖指纹 QM_REQ_SHA 写入镜像 Label，供 full-deploy/update 比对复用还是重建。
+    local req_sha
+    req_sha="$(bash "$PROJECT_DIR/deploy/req-fingerprint.sh" "$PROJECT_DIR" 2>/dev/null || true)"
     docker compose build \
         --build-arg PIP_INDEX_URL="$PIP_MIRROR" \
         --build-arg PIP_TRUSTED_HOST="$PIP_TRUSTED_HOST" \
+        --build-arg QM_REQ_SHA="${req_sha:-unknown}" \
         quantmind
     docker compose up -d --remove-orphans
 }

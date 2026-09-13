@@ -58,19 +58,6 @@ document.documentElement.classList.add('qm-rounded');
 // 启动即预加载 AI-IDE 资源（不等待路由/登录页）
 void preloadAiIdeResources();
 
-// ===== 临时诊断：定位 antd Input addonAfter 废弃警告的源头 =====
-if (typeof window !== 'undefined' && !(window as any).__addonDiagnosed) {
-    (window as any).__addonDiagnosed = true;
-    const origWarn = console.warn.bind(console);
-    console.warn = (...args: any[]) => {
-        const first = args[0];
-        if (typeof first === 'string' && first.includes('[antd: Input]') && first.includes('addon')) {
-            origWarn('>>> addonAfter/addonBefore 警告首次触发，堆栈：', new Error('addon-warn').stack);
-        }
-        origWarn(...args);
-    };
-}
-
 ReactDOM.createRoot(document.getElementById('root') as HTMLElement).render(
   <React.StrictMode>
     <Provider store={store}>

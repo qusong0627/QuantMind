@@ -239,7 +239,10 @@ build_core() {
 
     if $need_build; then
         log "2/4 重建核心后端镜像（检测到依赖/构建配置变更）"
-        docker compose -f "$PROJECT_DIR/docker-compose.yml" build quantmind || {
+        # 把依赖指纹同步写入镜像 Label（qm.req.sha），与 full-deploy 的指纹闸门共用一套口径。
+        local req_sha
+        req_sha="$(bash "$PROJECT_DIR/deploy/req-fingerprint.sh" "$PROJECT_DIR" 2>/dev/null || true)"
+        QM_REQ_SHA="${req_sha:-unknown}" docker compose -f "$PROJECT_DIR/docker-compose.yml" build quantmind || {
             die "镜像构建失败，请检查以上日志"
         }
     fi

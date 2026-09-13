@@ -356,7 +356,7 @@ export const AdminDataPlatform: React.FC = () => {
             <Card
                 bordered={false}
                 className="rounded-2xl shadow-sm"
-                bodyStyle={{ padding: 20 }}
+                styles={{ body: { padding: 20 } }}
             >
                 <div className="flex items-center justify-between flex-wrap gap-3">
                     <div>

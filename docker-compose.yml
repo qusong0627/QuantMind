@@ -58,6 +58,7 @@ services:
       args:
         TORCH_DEVICE: ${TORCH_DEVICE:-skip}
         TORCH_CPU_INDEX_URL: ${TORCH_CPU_INDEX_URL:-https://download.pytorch.org/whl/cpu}
+        QM_REQ_SHA: ${QM_REQ_SHA:-unknown}
     platform: linux/amd64
     # GPU 直通：宿主机已安装 nvidia-container-toolkit 时可开启
     # deploy:
@@ -656,7 +657,10 @@ services:
     image: agentscope/qwenpaw:latest
     container_name: qwenpaw
     ports:
-      - "127.0.0.1:${QWENPAW_PORT:-8088}:8088"
+      # 默认仅回环（00a8d9bc 安全收敛口径）。需要外部直连的机器在 .env 设置
+      # QWENPAW_BIND=0.0.0.0（qwenpaw 为免登录模式，建议配合云安全组/防火墙
+      # 限制来源 IP）。.env 不被 git 跟踪，绑定策略在部署更新后保留。
+      - "${QWENPAW_BIND:-127.0.0.1}:${QWENPAW_PORT:-8088}:8088"
     networks:
       quantmind-net:
         aliases:

@@ -106,9 +106,33 @@ def is_model_installed() -> bool:
         return False
 
 
+_framework_ok: bool | None = None
+
+
+def is_framework_available() -> bool:
+    """推理框架（torch/transformers）是否可用。离线镜像默认 TORCH_DEVICE=skip
+    不含 PyTorch——此时即便权重齐全 FinBERT 也无法运行，结果缓存避免重复导入。"""
+    global _framework_ok
+    if _framework_ok is None:
+        try:
+            import torch  # noqa: F401
+            import transformers  # noqa: F401
+
+            _framework_ok = True
+        except Exception:
+            _framework_ok = False
+    return _framework_ok
+
+
+def is_ready_for_use() -> bool:
+    """完整可运行态：权重已安装 且 推理框架可用。"""
+    return is_model_installed() and is_framework_available()
+
+
 def is_finbert_enabled() -> bool:
-    """当前是否启用 FinBERT（含运行时文件开关，优先于环境变量）。未安装时一律视为关闭。"""
-    if not is_model_installed():
+    """当前是否启用 FinBERT（含运行时文件开关，优先于环境变量）。
+    未安装或缺推理框架时一律视为关闭（默认关闭，杜绝半残状态空转）。"""
+    if not is_ready_for_use():
         return False
     if _RUNTIME_OVERRIDE is not None:
         return _RUNTIME_OVERRIDE
@@ -119,14 +143,18 @@ def is_finbert_enabled() -> bool:
 
 
 def set_finbert_enabled(enabled: bool) -> bool:
-    """设置运行时开关并持久化到文件，即时生效，无需重启。未安装时拒绝开启。
+    """设置运行时开关并持久化到文件，即时生效，无需重启。
+    未就绪（权重缺失或无 torch 框架）时拒绝开启。
 
     开启成功后在后台等待模型就绪，并自动触发一次全量历史回填
     （force=False，断点续跑、幂等），使存量纯词典法文章自动升级为融合打分。
     """
     global _RUNTIME_OVERRIDE, _RUNTIME_MTIME, _AUTO_REWRITE_THREAD
-    if enabled and not is_model_installed():
-        logger.warning("FinBERT 模型未安装（%s 缺失），拒绝开启", DEFAULT_MODEL)
+    if enabled and not is_ready_for_use():
+        if not is_model_installed():
+            logger.warning("FinBERT 模型未安装（%s 缺失），拒绝开启", DEFAULT_MODEL)
+        elif not is_framework_available():
+            logger.warning("镜像缺少 torch/transformers，拒绝开启 FinBERT")
         return False
     _RUNTIME_OVERRIDE = bool(enabled)
     try:
@@ -196,6 +224,8 @@ def get_finbert_status() -> dict:
         "device": DEVICE,
         "model": DEFAULT_MODEL,
         "installed": is_model_installed(),
+        "framework_ok": is_framework_available(),
+        "ready_for_use": is_ready_for_use(),
         "model_ready": _model_ready,
         "model_failed": _model_failed,
         "override": _RUNTIME_OVERRIDE,

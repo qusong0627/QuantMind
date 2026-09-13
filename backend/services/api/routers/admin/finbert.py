@@ -32,10 +32,12 @@ async def finbert_toggle(req: ToggleRequest):
     """切换 FinBERT 开关，即时生效，无需重启。未安装时拒绝开启。"""
     from fastapi import HTTPException
 
-    # 未安装时直接拒绝开启，避免无效切换
+    # 未就绪（权重缺失/无 torch 框架）直接拒绝开启，避免无效开关
     st_before = get_finbert_status()
-    if req.enabled and not st_before.get("installed"):
-        raise HTTPException(status_code=400, detail=f"FinBERT 模型未安装（{st_before.get('model')} 缺失），无法开启。请先执行 backend/scripts/download_finbert.py 离线下载。")
+    if req.enabled and not st_before.get("ready_for_use"):
+        if not st_before.get("installed"):
+            raise HTTPException(status_code=400, detail=f"FinBERT 模型未安装（{st_before.get('model')} 缺失），无法开启。请先执行 backend/scripts/download_finbert.py 离线下载。")
+        raise HTTPException(status_code=400, detail="当前镜像缺少 PyTorch 推理框架（离线镜像默认不含 torch），无法开启。请先执行 sudo bash deploy/install-model-deps.sh 补装后重试。")
     ok = set_finbert_enabled(req.enabled)
     st = get_finbert_status()
     if req.enabled and not ok:

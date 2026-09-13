@@ -12,7 +12,10 @@
 #   QUANTMIND_REPLACE_QLIB=true       覆盖已有 db/qlib_data（谨慎）
 #   QUANTMIND_REPLACE_DATABASE=true   覆盖已有 PostgreSQL 业务数据（谨慎）
 #   QUANTMIND_REPLACE_QWENPAW_DATA=true 覆盖已有 QwenPaw 持久化数据（谨慎）
-#   QUANTMIND_REBUILD_IMAGE=true 基于最新代码重建 quantmind 镜像（默认复用离线包成品镜像，谨慎）
+#   QUANTMIND_REBUILD_IMAGE=true 无条件基于最新代码重建 quantmind 镜像。
+#     默认（不设）走「依赖指纹闸门」自动决策：代码 requirements 指纹与镜像
+#     Label qm.req.sha 一致 → 复用成品镜像（秒级启动）；不一致或镜像无指纹 →
+#     自动重建对齐依赖，避免旧镜像缺新依赖导致运行时崩溃。
 #   QUANTMIND_COMPOSE_OVERLAY  已验证 docker-compose.yml 的本地路径（可选）
 #   QUANTMIND_DEPLOY_OVERLAY_DIR  受控 Dockerfile 覆盖目录（可选）
 
@@ -149,6 +152,44 @@ PY
     systemctl restart docker
 }
 
+# ── quantmind-oss 依赖指纹闸门 ────────────────────────────────────────────
+# 目的：在「部署速度」与「代码/依赖新鲜度」之间取得平衡。
+#   - 镜像构建时把 requirements.txt/production.txt/ai.txt + Dockerfile.oss
+#     的内容哈希写入 LABEL qm.req.sha（见 docker/Dockerfile.oss 的 QM_REQ_SHA，
+#     由 deploy/req-fingerprint.sh 计算）。
+#   - build_and_start（步骤 8，代码已 checkout）比对「代码算出的期望指纹」与
+#     「镜像自带指纹」：
+#       一致   → 依赖未变，复用成品镜像（秒级启动，覆盖绝大多数「纯代码更新」）。
+#       不一致 → 代码依赖已变（如新增 QMT）而镜像过期，强制重建对齐，
+#                杜绝「新代码 bind-mount + 旧镜像缺依赖」在运行时 import 崩溃。
+#   - 业务代码走 bind mount，纯代码更新永远不触发重建；只有 requirements/Dockerfile 变才重建。
+# 注意：步骤 4 的镜像导入只负责「让镜像存在」，最终是否复用/重建统一由此处（步骤 8）决定，
+#       所以步骤 4 即便复用了旧镜像也不会带病上线——步骤 8 会拦截。
+requirements_fingerprint() {
+    # 唯一实现在 deploy/req-fingerprint.sh（与打包/update/deploy 共用，避免口径漂移）。
+    # checkout 的是无此 helper 的旧 REF 时返回空 → 调用方降级为「复用现有镜像 + 警告」。
+    local helper="$PROJECT_DIR/deploy/req-fingerprint.sh"
+    if [[ -f "$helper" ]]; then
+        bash "$helper" "$PROJECT_DIR" 2>/dev/null || true
+    fi
+}
+
+# 读取已存在镜像的依赖指纹；无该镜像返回 notloaded，有镜像无 Label 返回 none。
+image_req_sha() {
+    local image="$1"
+    if ! docker image inspect "$image" >/dev/null 2>&1; then
+        printf 'notloaded'
+        return 0
+    fi
+    local sha
+    sha="$(docker image inspect "$image" \
+        --format '{{ index .Config.Labels "qm.req.sha" }}' 2>/dev/null || true)"
+    case "$sha" in
+        ""|none|"<no value>") printf 'none' ;;
+        *) printf '%s' "$sha" ;;
+    esac
+}
+
 import_images() {
     local archive="$PACKAGE_DIR/images.tar.zst"
     log '步骤 4/8：解压并导入 Docker 镜像'
@@ -168,8 +209,10 @@ import_images() {
             break
         fi
     done
+    # 镜像齐全即跳过导入（提速）。quantmind-oss 是否为最新依赖由步骤 8 指纹闸门裁决，
+    # 此处复用旧镜像不会导致带病上线。
     if $images_ready; then
-        log '复用已导入的 Docker 镜像'
+        log '复用已导入的 Docker 镜像（quantmind-oss 新鲜度将于步骤 8 依代码指纹校验）'
         return 0
     fi
 
@@ -380,15 +423,32 @@ build_and_start() {
             || docker pull diygod/rsshub:latest \
             || log '警告：rsshub 拉取失败（不影响核心服务，RSS 源功能将不可用）'
     fi
-    # 核心镜像按需重建：默认直接复用离线包内已导入、校验过的 quantmind-oss 成品镜像，
-    # 避免每次部署重复构建/联网拉取（离线包镜像与最新代码一致时重建纯属浪费）。
-    # 只有 QUANTMIND_REBUILD_IMAGE=true 才基于最新代码重建。web/data-gateway/dashboard
-    # 均已在离线包中提供成品镜像，直接复用可避免为可选服务拉取额外构建基础镜像。
+    # 依赖指纹闸门：代码已在步骤 5 更新，此处比对「代码 requirements 指纹 vs 镜像 Label」。
+    #   一致   → 复用成品镜像（纯代码更新永远走这条，秒级）；
+    #   不一致 → 离线包镜像已落后代码依赖（如 QMT 事件），自动重建对齐，
+    #            杜绝「新代码 + 缺依赖旧镜像」的运行时 import 崩溃。
+    # 重建需要 PyPI 访问（已配国内源与 wheel 缓存）；纯离线机若触发重建，
+    # 说明离线包过旧，应重新生成镜像包，而非静默带病上线。
+    local want have need_build=false reason=''
+    want="$(requirements_fingerprint)"
+    have="$(image_req_sha quantmind-oss:latest)"
     if [[ ${QUANTMIND_REBUILD_IMAGE:-false} == true ]]; then
-        log '按 QUANTMIND_REBUILD_IMAGE=true 基于最新代码重建 quantmind 镜像...'
-        docker compose build --pull=false quantmind
+        need_build=true; reason='QUANTMIND_REBUILD_IMAGE=true 强制重建'
+    elif [[ -z "$want" ]]; then
+        log '警告：无法计算代码依赖指纹（requirements 清单缺失？），复用现有镜像'
+    elif [[ "$have" == notloaded ]]; then
+        need_build=true; reason='quantmind-oss 镜像不存在'
+    elif [[ "$have" == none ]]; then
+        need_build=true; reason='镜像无依赖指纹（早于指纹机制的离线包/手工构建）'
+    elif [[ "$have" != "$want" ]]; then
+        need_build=true; reason="依赖指纹不一致（镜像=$have，代码=$want）"
     else
-        log '复用离线包内 quantmind-oss 成品镜像（跳过重建；QUANTMIND_REBUILD_IMAGE=true 可强制重建）'
+        log "依赖指纹一致（$want）：复用 quantmind-oss 成品镜像，跳过重建"
+    fi
+    if $need_build; then
+        log "重建 quantmind 镜像（$reason）；需 PyPI 访问，纯离线机请改用与代码匹配的新离线包"
+        QM_REQ_SHA="${want:-unknown}" docker compose build --pull=false quantmind \
+            || die "quantmind 镜像重建失败（$reason）。离线环境请重新生成与代码匹配的镜像包后重试"
     fi
     docker compose up -d --pull never
     configure_qwenpaw_runtime
@@ -408,7 +468,7 @@ main() {
     echo "     3. 导入 Docker 镜像         ~3-10 分钟"
     echo "     4. 下载最新代码             ~1-3 分钟"
     echo "     5. 恢复业务数据与数据库     ~2-5 分钟"
-    echo "     6. 复用成品镜像并启动服务   ~1-5 分钟（QUANTMIND_REBUILD_IMAGE=true 重建则另加构建时间）"
+    echo "     6. 依赖指纹校验并启动服务   指纹一致约 1 分钟；不一致将自动重建镜像（另加构建时间）"
     echo "     合计                       约 15-50 分钟"
     echo " -------------------------------------------------------------------------"
     echo " 💡 如遇系统组件下载缓慢，请切换至国内加速源以提升速度。"
