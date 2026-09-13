@@ -20,6 +20,8 @@ export interface UseTradeRecordsOptions {
     tradingMode?: TradingMode;
     autoRefresh?: boolean;
     refreshInterval?: number;
+    /** 市场过滤（CN/HK/US/FUTURES/CRYPTO）；不传 = 全部市场 */
+    market?: string;
 }
 
 export interface UseTradeRecordsReturn {
@@ -39,6 +41,7 @@ export const useTradeRecords = (options: UseTradeRecordsOptions = {}): UseTradeR
         tradingMode,
         autoRefresh = false,
         refreshInterval = 60000, // 1分钟
+        market,
     } = options;
 
     const [records, setRecords] = useState<TradeRecord[]>([]);
@@ -102,7 +105,7 @@ export const useTradeRecords = (options: UseTradeRecordsOptions = {}): UseTradeR
             }
             setError(null);
 
-            const result = await tradingService.getRecentTrades(limit, tradingMode);
+            const result = await tradingService.getRecentTrades(limit, tradingMode, market);
             const normalizedRecords = normalizeRecords(result.records);
 
             // 批量获取股票名称并补全
@@ -188,7 +191,7 @@ export const useTradeRecords = (options: UseTradeRecordsOptions = {}): UseTradeR
             initializedRef.current = true;
             setLoading(false);
         }
-    }, [limit, tradingMode, normalizeRecords, records, scheduleRetry, clearRetryTimer]);
+    }, [limit, tradingMode, market, normalizeRecords, records, scheduleRetry, clearRetryTimer]);
 
     // 监听实时成交更新事件，收到后立即触发数据刷新
     useTradeWebSocket({

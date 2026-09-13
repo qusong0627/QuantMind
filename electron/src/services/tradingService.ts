@@ -12,6 +12,7 @@ import { APIClient, createAPIClient, DEFAULT_API_CONFIG, APIClientConfig } from 
 import { API_ENDPOINTS } from './config';
 import { SERVICE_URLS } from '../config/services';
 import { ChartDataPoint } from './portfolioService';
+import { symbolMatchesMarket } from '../utils/marketInfer';
 
 // ==================== 接口定义 ====================
 
@@ -228,12 +229,14 @@ class TradingService {
     /**
      * 获取模拟成交列表（读 sim_trades，模拟盘专用口径）
      * 注意：/api/v1/simulation/trades 不接受 trading_mode/user_id 参数（后端从 JWT 取用户）
+     * @param params.market 市场过滤（CN/HK/US/FUTURES/CRYPTO）；不传 = 全部市场
      */
-    async listSimulationTrades(params: { limit?: number; offset?: number } = {}): Promise<Trade[]> {
+    async listSimulationTrades(params: { limit?: number; offset?: number; market?: string } = {}): Promise<Trade[]> {
         const queryParams: Record<string, unknown> = {
             limit: params.limit ?? 50,
             offset: params.offset ?? 0,
         };
+        if (params.market) queryParams['market'] = String(params.market).toUpperCase();
         return await this.client.get<Trade[]>(API_ENDPOINTS.SIMULATION_TRADES, queryParams);
     }
 
@@ -294,8 +297,9 @@ class TradingService {
      * @param userId 用户ID
      * @param range 时间范围
      * @param tradingMode 交易模式
+     * @param market 市场过滤（模拟口径下按 symbol 形态过滤）；不传 = 全部市场
      */
-    async getTradeStats(userId: string, range = '1m', tradingMode?: TradingMode): Promise<ChartDataPoint[]> {
+    async getTradeStats(userId: string, range = '1m', tradingMode?: TradingMode, market?: string): Promise<ChartDataPoint[]> {
         try {
             const params: Record<string, unknown> = {
                 user_id: userId,
@@ -305,9 +309,13 @@ class TradingService {
                 params['trading_mode'] = String(tradingMode).toUpperCase();
             }
             // 模拟模式分流：模拟成交统计读 sim_trades 专用接口（同样返回 daily_counts）
-            const endpoint = String(tradingMode).toLowerCase() === 'simulation'
+            const isSimulation = String(tradingMode).toLowerCase() === 'simulation';
+            const endpoint = isSimulation
                 ? API_ENDPOINTS.SIMULATION_TRADES_STATS
                 : API_ENDPOINTS.TRADING_STATS;
+            if (isSimulation && market) {
+                params['market'] = String(market).toUpperCase();
+            }
             const response = await this.client.get<TradeStatsSummaryResponse | ChartDataPoint[]>(endpoint, params);
             if (Array.isArray(response)) {
                 return response;
@@ -343,9 +351,15 @@ class TradingService {
      * 获取模拟成交统计摘要（含已实现盈亏、胜率、盈亏比，手续费计入口径）
      * 后端不可用时返回 null，调用方自行降级展示。
      */
-    async getSimulationTradeStatsOverview(): Promise<TradeStatsOverview | null> {
+    /**
+     * 模拟成交统计摘要（累计笔数/胜率/盈亏比）
+     * @param market 市场过滤（按 symbol 形态，后端过滤）；不传 = 全部市场
+     */
+    async getSimulationTradeStatsOverview(market?: string): Promise<TradeStatsOverview | null> {
         try {
-            const response = await this.client.get<Record<string, unknown>>(API_ENDPOINTS.SIMULATION_TRADES_STATS, {});
+            const params: Record<string, unknown> = {};
+            if (market) params['market'] = String(market).toUpperCase();
+            const response = await this.client.get<Record<string, unknown>>(API_ENDPOINTS.SIMULATION_TRADES_STATS, params);
             const data: any = (response as any)?.data ?? response;
             const totalTrades = Number(data?.total_trades);
             if (!Number.isFinite(totalTrades)) {
@@ -377,6 +391,7 @@ class TradingService {
     async getRecentTrades(
         limit = 10,
         tradingMode?: TradingMode,
+        market?: string,
     ): Promise<{ records: TradeRecord[]; isOffline: boolean; isFallbackToOrders: boolean }> {
         const normalizedTradingMode = this.normalizeTradingMode(tradingMode);
 
@@ -384,7 +399,7 @@ class TradingService {
         // 不再查实盘 trades 表，避免模拟盘记录恒为空。
         if (normalizedTradingMode === 'simulation') {
             try {
-                const simTrades = await this.listSimulationTrades({ limit });
+                const simTrades = await this.listSimulationTrades({ limit, market });
                 const records = simTrades.map((trade) => this.mapTradeToTradeRecord(trade));
                 return { records, isOffline: false, isFallbackToOrders: false };
             } catch (simError) {
@@ -394,21 +409,30 @@ class TradingService {
         }
 
         try {
+            // 实盘 trades/orders 表没有 market 列，且 /trades 接口不支持市场参数：
+            // 按 symbol 形态在前端过滤。先在服务端多取几倍再过滤，避免「先截断后过滤」导致记录稀疏
+            const fetchLimit = market ? Math.min(limit * 5, 200) : limit;
             const trades = await this.listTrades({
-                limit,
+                limit: fetchLimit,
                 trading_mode: normalizedTradingMode,
             });
-            const records = trades.map((trade) => this.mapTradeToTradeRecord(trade));
+            const records = trades
+                .map((trade) => this.mapTradeToTradeRecord(trade))
+                .filter((record) => symbolMatchesMarket(record.symbol, market))
+                .slice(0, limit);
             return { records, isOffline: false, isFallbackToOrders: false };
         } catch (tradeError) {
             // 成交接口失败时降级回订单接口，避免卡片直接空白
             try {
                 const response = await this.listOrders({
-                    limit,
+                    limit: market ? Math.min(limit * 5, 200) : limit,
                     trading_mode: normalizedTradingMode,
                 });
                 const orders = this.extractOrders(response);
-                const records = orders.map((order) => this.mapOrderToTradeRecord(order));
+                const records = orders
+                    .map((order) => this.mapOrderToTradeRecord(order))
+                    .filter((record) => symbolMatchesMarket(record.symbol, market))
+                    .slice(0, limit);
                 return { records, isOffline: false, isFallbackToOrders: true };
             } catch (orderError) {
                 console.warn('交易服务不可用，返回空列表:', orderError || tradeError);

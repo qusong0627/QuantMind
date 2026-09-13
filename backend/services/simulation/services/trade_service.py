@@ -2,13 +2,13 @@
 Simulation trade service.
 """
 
-from typing import List, Optional
 from uuid import UUID
 
 from sqlalchemy import String, and_, case, cast, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.services.simulation.models.trade import SimTrade
+from backend.services.simulation.services.market_rules import market_symbol_sql_regex
 
 
 class SimTradeService:
@@ -22,6 +22,18 @@ class SimTradeService:
         except Exception:
             self._cache_ttl = 60
 
+    @staticmethod
+    def _market_condition(market: str | None):
+        """市场过滤条件：sim_trades 无 market 列，按 symbol 形态判据过滤。
+
+        pattern 来自 market_rules（与引擎 infer_market 同一套判据）；
+        market 为空或不认识时返回 None（不过滤，保持历史行为）。
+        """
+        pattern = market_symbol_sql_regex(market)
+        if not pattern:
+            return None
+        return SimTrade.symbol.op("~*")(pattern)
+
     async def get_trade(self, tenant_id: str, user_id: int, trade_id: UUID) -> SimTrade | None:
         result = await self.db.execute(
             select(SimTrade).where(
@@ -34,10 +46,11 @@ class SimTradeService:
         )
         return result.scalar_one_or_none()
 
-    def _list_cache_key(self, tenant_id: str, user_id: int, portfolio_id: int | None, symbol: str | None, limit: int, offset: int) -> str:
+    def _list_cache_key(self, tenant_id: str, user_id: int, portfolio_id: int | None, symbol: str | None, limit: int, offset: int, market: str | None = None) -> str:
         sym = symbol.upper() if symbol else "all"
         port = str(portfolio_id) if portfolio_id is not None else "all"
-        return f"sim_trade:list:{tenant_id}:{user_id}:{port}:{sym}:{limit}:{offset}"
+        mkt = str(market).upper() if market else "all"
+        return f"sim_trade:list:{tenant_id}:{user_id}:{port}:{sym}:{mkt}:{limit}:{offset}"
 
     async def list_trades(
         self,
@@ -46,6 +59,7 @@ class SimTradeService:
         *,
         portfolio_id: int | None = None,
         symbol: str | None = None,
+        market: str | None = None,
         limit: int = 50,
         offset: int = 0,
     ) -> list[SimTrade]:
@@ -56,7 +70,7 @@ class SimTradeService:
         except Exception:
             pass
         # Redis 缓存：仅对常规分页生效，带 symbol 时仍缓存（key 已区分）
-        cache_key = self._list_cache_key(tenant_id, user_id, portfolio_id, symbol, limit, offset)
+        cache_key = self._list_cache_key(tenant_id, user_id, portfolio_id, symbol, limit, offset, market)
         if self.redis and getattr(self.redis, "client", None):
             try:
                 cached = self.redis.get(cache_key)
@@ -88,6 +102,9 @@ class SimTradeService:
             conditions.append(SimTrade.portfolio_id == portfolio_id)
         if symbol:
             conditions.append(SimTrade.symbol == symbol.upper())
+        market_cond = self._market_condition(market)
+        if market_cond is not None:
+            conditions.append(market_cond)
 
         stmt = (
             select(SimTrade).where(and_(*conditions)).order_by(SimTrade.executed_at.desc()).limit(limit).offset(offset)
@@ -115,12 +132,13 @@ class SimTradeService:
                 pass
         return trades
 
-    def _stats_cache_key(self, tenant_id: str, user_id: int, portfolio_id: int | None) -> str:
+    def _stats_cache_key(self, tenant_id: str, user_id: int, portfolio_id: int | None, market: str | None = None) -> str:
         port = str(portfolio_id) if portfolio_id is not None else "all"
-        return f"sim_trade:stats:{tenant_id}:{user_id}:{port}"
+        mkt = str(market).upper() if market else "all"
+        return f"sim_trade:stats:{tenant_id}:{user_id}:{port}:{mkt}"
 
-    async def get_stats(self, tenant_id: str, user_id: int, portfolio_id: int | None = None) -> dict:
-        cache_key = self._stats_cache_key(tenant_id, user_id, portfolio_id)
+    async def get_stats(self, tenant_id: str, user_id: int, portfolio_id: int | None = None, market: str | None = None) -> dict:
+        cache_key = self._stats_cache_key(tenant_id, user_id, portfolio_id, market)
         if self.redis and getattr(self.redis, "client", None):
             try:
                 cached = self.redis.get(cache_key)
@@ -133,6 +151,9 @@ class SimTradeService:
         conditions = [SimTrade.tenant_id == tenant_id, cast(SimTrade.user_id, String) == str(user_id)]
         if portfolio_id is not None:
             conditions.append(SimTrade.portfolio_id == portfolio_id)
+        market_cond = self._market_condition(market)
+        if market_cond is not None:
+            conditions.append(market_cond)
 
         summary_stmt = select(
             func.count(SimTrade.id).label("total_trades"),

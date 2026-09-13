@@ -10,6 +10,7 @@ import { authService } from '../features/auth/services/authService';
 import { useAppSelector } from '../store';
 import { selectCurrentMarket } from '../store/slices/uiSlice';
 import { getMarketConfig } from '../config/marketConfig';
+import type { SimulationFundSnapshot } from '../services/realTradingService';
 
 export interface ChartData {
     dailyReturn: ChartDataPoint[];
@@ -348,13 +349,31 @@ const getTradingDayWindow = async (anchorDate: string, count: number, calendar: 
     return promise;
 };
 
-export const useIntelligenceCharts = (userId: string = 'current', options?: { autoRefresh?: boolean, tradingMode?: 'real' | 'simulation' }) => {
+export const useIntelligenceCharts = (
+    userId: string = 'current',
+    options?: {
+        autoRefresh?: boolean;
+        tradingMode?: 'real' | 'simulation';
+        /** 市场维度：成交统计与账户按市场取数；不传 = 沿用页面级默认（当前市场） */
+        market?: string;
+        /**
+         * 是否拉「组合绩效/日快照/持仓分布」这类**尚无市场维度**的数据源。
+         * 非 A 股市场传 false（由市场内容规格声明），避免把 A 股曲线挂到别的市场格子上。
+         */
+        portfolioSeries?: boolean;
+        /** 是否拉持仓分布（同为无市场维度的数据源） */
+        positionRatio?: boolean;
+    },
+) => {
     const currentMarket = useAppSelector(selectCurrentMarket);
     const calendar = getMarketConfig(currentMarket).calendar;
     const autoFetchEnabled = options?.autoRefresh ?? chartsAutoFetchEnabled();
     const resolvedUserId = resolveChartUserId(userId);
     const mode = options?.tradingMode || 'real';
     const isLive = mode === 'real';
+    const market = options?.market ?? currentMarket;
+    const portfolioSeriesEnabled = options?.portfolioSeries !== false;
+    const positionRatioEnabled = options?.positionRatio !== false;
 
     const [data, setData] = useState<ChartData>({
         dailyReturn: [],
@@ -406,16 +425,22 @@ export const useIntelligenceCharts = (userId: string = 'current', options?: { au
             // 根据模式动态选择接口
             const { realTradingService } = await import('../services/realTradingService');
             const [dailyReturn, tradeCount, positionRatio, account, ledgerDaily, tradeStats] = await Promise.all([
-                portfolioService.getDailyReturns(resolvedUserId, '1m', mode),
-                tradingService.getTradeStats(resolvedUserId, '1w', mode),
-                portfolioService.getPositionDistribution(resolvedUserId, mode),
-                realTradingService.getRuntimeAccount(resolvedUserId, 'default', mode).catch(() => null),
-                isLive 
+                portfolioSeriesEnabled
+                    ? portfolioService.getDailyReturns(resolvedUserId, '1m', mode)
+                    : Promise.resolve([] as ChartDataPoint[]),
+                tradingService.getTradeStats(resolvedUserId, '1w', mode, market),
+                positionRatioEnabled
+                    ? portfolioService.getPositionDistribution(resolvedUserId, mode)
+                    : Promise.resolve([] as PositionDistribution[]),
+                realTradingService.getRuntimeAccount(resolvedUserId, 'default', mode, market).catch(() => null),
+                portfolioSeriesEnabled && isLive
                     ? realTradingService.getAccountLedgerDaily(30, resolvedUserId).catch(() => [])
-                    : realTradingService.getSimulationDailySnapshots(30).catch(() => []),
+                    : portfolioSeriesEnabled
+                        ? realTradingService.getSimulationDailySnapshots(30).catch(() => [])
+                        : Promise.resolve([] as SimulationFundSnapshot[]),
                 isLive
                     ? Promise.resolve(null)
-                    : tradingService.getSimulationTradeStatsOverview().catch(() => null),
+                    : tradingService.getSimulationTradeStatsOverview(market).catch(() => null),
             ]);
 
             let normalizedPositionRatio: PositionDistribution[] = [];
@@ -550,7 +575,7 @@ export const useIntelligenceCharts = (userId: string = 'current', options?: { au
             initializedRef.current = true;
             setLoading(false);
         }
-    }, [autoFetchEnabled, resolvedUserId, mode, isLive]);
+    }, [autoFetchEnabled, resolvedUserId, mode, isLive, market, portfolioSeriesEnabled, positionRatioEnabled]);
 
     useEffect(() => {
         if (!autoFetchEnabled) {

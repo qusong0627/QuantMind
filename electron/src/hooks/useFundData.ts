@@ -11,6 +11,8 @@ export interface UseFundDataOptions {
   refreshInterval?: number;
   userId?: string;
   tenantId?: string;
+  /** 市场维度（CN/HK/US/FUTURES/CRYPTO）：模拟盘按市场取账户，实盘账户为账户级不受影响 */
+  market?: string;
 }
 
 export interface UseFundDataReturn {
@@ -19,6 +21,8 @@ export interface UseFundDataReturn {
   error: string | null;
   lastUpdate: string | null;
   isSimulated: boolean;
+  /** 该市场模拟盘未开通（后端 account_not_initialized），卡片应渲染空态而不是 0 元户 */
+  notInitialized: boolean;
   tradingMode: 'real' | 'simulation';
   refresh: () => Promise<void>;
 }
@@ -29,6 +33,7 @@ export const useFundData = (options: UseFundDataOptions = {}): UseFundDataReturn
     refreshInterval = 30000,
     userId,
     tenantId,
+    market,
   } = options;
 
   const tradingMode = useAppSelector((state) => state.ui.tradingMode);
@@ -37,6 +42,7 @@ export const useFundData = (options: UseFundDataOptions = {}): UseFundDataReturn
   const [error, setError] = useState<string | null>(null);
   const [lastUpdate, setLastUpdate] = useState<string | null>(null);
   const [isSimulated, setIsSimulated] = useState<boolean>(tradingMode === 'simulation');
+  const [notInitialized, setNotInitialized] = useState<boolean>(false);
   const fingerprintRef = useRef<string | null>(null);
   const initializedRef = useRef<boolean>(false);
 
@@ -63,11 +69,12 @@ export const useFundData = (options: UseFundDataOptions = {}): UseFundDataReturn
       setLoading(true);
       setError(null);
 
-      const result = await portfolioService.getFundOverview(resolvedUserId, tradingMode, resolvedTenantId);
+      const result = await portfolioService.getFundOverview(resolvedUserId, tradingMode, resolvedTenantId, market);
 
       const nextSnapshot = {
         data: result.data,
         isSimulated: result.isSimulated,
+        notInitialized: result.notInitialized,
         mode: tradingMode
       };
 
@@ -79,6 +86,7 @@ export const useFundData = (options: UseFundDataOptions = {}): UseFundDataReturn
 
       setData(result.data);
       setIsSimulated(result.isSimulated);
+      setNotInitialized(result.notInitialized);
       setLastUpdate(result.data.lastUpdate);
       fingerprintRef.current = fingerprint;
     } catch (err) {
@@ -104,7 +112,7 @@ export const useFundData = (options: UseFundDataOptions = {}): UseFundDataReturn
       initializedRef.current = true;
       setLoading(false);
     }
-  }, [resolvedUserId, resolvedTenantId, tradingMode]);
+  }, [resolvedUserId, resolvedTenantId, tradingMode, market]);
 
   // 手动刷新
   const refresh = useCallback(async () => {
@@ -116,12 +124,13 @@ export const useFundData = (options: UseFundDataOptions = {}): UseFundDataReturn
     fetchData({ silent: false });
   }, [fetchData]);
 
-  // 监听模式切换，立即进入加载状态并重置数据
+  // 监听模式/市场切换，立即进入加载状态并重置数据（市场切换后不得残留上一个市场的账户）
   useEffect(() => {
     setLoading(true);
     setData(null);
+    setNotInitialized(false);
     fingerprintRef.current = null;
-  }, [tradingMode]);
+  }, [tradingMode, market]);
 
   // 统一由协调器触发刷新，避免模块自轮询造成闪烁
   useEffect(() => {
@@ -146,6 +155,7 @@ export const useFundData = (options: UseFundDataOptions = {}): UseFundDataReturn
     error,
     lastUpdate,
     isSimulated,
+    notInitialized,
     tradingMode,
     refresh,
   };

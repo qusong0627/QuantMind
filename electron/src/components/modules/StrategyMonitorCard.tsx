@@ -4,6 +4,13 @@ import { motion } from 'framer-motion';
 import { useStrategies } from '../../hooks/useStrategies';
 import { StrategyMonitorSkeleton } from '../common/CardSkeletons';
 import { formatBackendTime } from '../../utils/format';
+import {
+  BoxPlaceholder,
+  MarketChip,
+  formatBoxTitle,
+  useBoxContent,
+  useMarketContent,
+} from '../../features/dashboard-shared';
 
 interface StrategyMonitorCardProps {
   expanded?: boolean;
@@ -31,6 +38,9 @@ export const StrategyMonitorCard: React.FC<StrategyMonitorCardProps> = ({
   onCloseExpand,
 }) => {
   const [isHovered, setIsHovered] = useState(false);
+  // 市场维度：策略库按 parameters.market 过滤（历史无 market 字段的策略按 A 股计）
+  const { market, content } = useBoxContent('strategy');
+  const marketContent = useMarketContent();
 
   const {
     strategies,
@@ -42,7 +52,7 @@ export const StrategyMonitorCard: React.FC<StrategyMonitorCardProps> = ({
     lastUpdatedAt,
     realtimeStatus,
     refresh,
-  } = useStrategies({ autoRefresh: true, refreshInterval: 10000, enableRealtime: true });
+  } = useStrategies({ autoRefresh: true, refreshInterval: 10000, enableRealtime: true, market });
 
   const formatAmount = (value: number) => {
     const formatter = new Intl.NumberFormat('zh-CN', {
@@ -124,7 +134,8 @@ export const StrategyMonitorCard: React.FC<StrategyMonitorCardProps> = ({
       <div className="relative mb-3.5 z-10">
         <div className="text-center px-8">
           <h3 className="text-base font-black text-slate-800 inline-flex items-center gap-2">
-            策略监控
+            {formatBoxTitle(content, { label: marketContent.label })}
+            <MarketChip market={market} />
           </h3>
           <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mt-0.5">
             {realtimeStatus === 'connected' ? 'REAL-TIME UPDATES ENABLED' : 'POLLING MODE ACTIVE'}
@@ -254,6 +265,13 @@ export const StrategyMonitorCard: React.FC<StrategyMonitorCardProps> = ({
                 </motion.div>
               );
             })
+          ) : strategies.length === 0 && !loading ? (
+            /* 该市场没有策略：明说「暂无策略」，不回落到其它市场（历史问题：港股格显示 A 股策略数） */
+            <BoxPlaceholder
+              content={content}
+              state={{ loading: false, hasData: false, error }}
+              onRetry={refresh}
+            />
           ) : (
             <div className="flex flex-col items-center justify-center py-8 text-center">
               <Activity className="w-8 h-8 text-slate-200 mb-2" />

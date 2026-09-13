@@ -1,5 +1,4 @@
 import logging
-from typing import List, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -28,6 +27,10 @@ def _require_user_id(raw_user_id: str, tenant_id: str = "default") -> int:
 async def list_trades(
     portfolio_id: int | None = Query(default=None),
     symbol: str | None = Query(default=None),
+    market: str | None = Query(
+        default=None,
+        description="市场过滤 CN/HK/US/FUTURES/CRYPTO（按 symbol 形态判据）；不传 = 全部市场",
+    ),
     limit: int = Query(default=50, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
     auth: AuthContext = Depends(get_auth_context),
@@ -41,6 +44,7 @@ async def list_trades(
         user_id,
         portfolio_id=portfolio_id,
         symbol=symbol,
+        market=market,
         limit=limit,
         offset=offset,
     )
@@ -79,18 +83,23 @@ async def get_trade(
 @router.get("/trades/stats/summary", response_model=SimTradeStatsResponse)
 async def get_trade_stats(
     portfolio_id: int | None = Query(default=None),
+    market: str | None = Query(
+        default=None,
+        description="市场过滤 CN/HK/US/FUTURES/CRYPTO（按 symbol 形态判据）；不传 = 全部市场",
+    ),
     auth: AuthContext = Depends(get_auth_context),
     db: AsyncSession = Depends(get_read_db),
     redis: RedisClient = Depends(get_redis),
 ):
     user_id = _require_user_id(auth.user_id, auth.tenant_id)
     service = SimTradeService(db, redis)
-    stats = await service.get_stats(auth.tenant_id, user_id, portfolio_id=portfolio_id)
+    stats = await service.get_stats(auth.tenant_id, user_id, portfolio_id=portfolio_id, market=market)
     logger.info(
-        "simulation trade stats ready: tenant_id=%s user_id=%s portfolio_id=%s total_trades=%s daily_points=%s",
+        "simulation trade stats ready: tenant_id=%s user_id=%s portfolio_id=%s market=%s total_trades=%s daily_points=%s",
         auth.tenant_id,
         user_id,
         portfolio_id,
+        market,
         stats.get("total_trades", 0),
         len(stats.get("daily_counts", []) or []),
     )

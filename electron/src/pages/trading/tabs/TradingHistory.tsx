@@ -9,6 +9,8 @@ import { csvExporter } from '../../../services/export';
 import { exportTradeRecordsToExcel } from '../../../utils/excelExport';
 import { formatBackendDateTime, formatBackendTime } from '../../../utils/format';
 import type { TradeRecordExportRow } from '../../../utils/excelExport';
+// 市场推断统一走 utils/marketInfer（与后端 market_rules.infer_market 同口径）
+import { inferMarketOfSymbol } from '../../../utils/marketInfer';
 
 interface TradingHistoryProps {
     userId: string;
@@ -69,17 +71,6 @@ const buildDateRange = (timeRange: 'today' | 'week' | 'month' | 'all'): OrdersRa
     };
 };
 
-
-// 与后端 market_rules.infer_market 同口径的简化推断（交易记录按市场过滤用）
-function inferMarketOfSymbol(symbol: string): string {
-    const s = String(symbol || '').toUpperCase().trim();
-    if (/^\d{1,5}\.HK$/.test(s)) return 'HK';
-    if (/^\d{6}\.(SH|SZ|BJ)$/.test(s) || /^\d{6}$/.test(s)) return 'CN';
-    if (/\.(CN|FUT)$/.test(s) || s.includes('(T+D)')) return 'FUTURES';
-    if (/^[A-Z0-9]+USDT$/.test(s)) return 'CRYPTO';
-    if (/^[A-Z]{1,6}(\.[A-Z]{1,2})?$/.test(s)) return 'US';
-    return 'CN';
-}
 
 const TradingHistory: React.FC<TradingHistoryProps> = ({ userId, isActive, tradingMode }) => {
     const currentMarket = useAppSelector(selectCurrentMarket);

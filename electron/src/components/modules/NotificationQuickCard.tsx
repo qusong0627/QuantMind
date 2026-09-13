@@ -10,6 +10,14 @@ import { useNavigate } from 'react-router-dom';
 import { useBacktestCenterStore } from '../../stores/backtestCenterStore';
 import type { BusinessNotification, NotificationRouteTarget } from '../../types/notification';
 import { Modal } from 'antd';
+import {
+  BoxPlaceholder,
+  MarketChip,
+  formatBoxTitle,
+  splitNotificationsByMarket,
+  useBoxContent,
+  useMarketContent,
+} from '../../features/dashboard-shared';
 
 interface NotificationQuickCardProps {
   expanded?: boolean;
@@ -51,6 +59,11 @@ export const NotificationQuickCard: React.FC<NotificationQuickCardProps> = ({
     markAsRead,
     markAllAsRead,
   } = useNotifications({ limit: expanded ? 20 : 10, days: 7, autoRefresh: true });
+
+  // 市场分流：通知表没有 market 列，按通知内容里的标的代码分「本市场 / 全局」（见 notificationScope.ts）
+  const { market, content } = useBoxContent('notify');
+  const marketContent = useMarketContent();
+  const bucket = useMemo(() => splitNotificationsByMarket(notifications, market), [notifications, market]);
 
   const handleNavigation = (target: NotificationRouteTarget) => {
     if (target === 'backtest-history') {
@@ -97,8 +110,12 @@ export const NotificationQuickCard: React.FC<NotificationQuickCardProps> = ({
   }), [total, unreadCount, typeCounts]);
 
   const visibleNotifications = useMemo(
-    () => expanded ? notifications : notifications.slice(0, 3),
-    [expanded, notifications]
+    () => {
+      // 本市场相关优先，其后是全局通知；其它市场的通知不进这个格子
+      const scoped = [...bucket.market, ...bucket.global];
+      return expanded ? scoped : scoped.slice(0, 3);
+    },
+    [expanded, bucket]
   );
 
   const handleListScroll = (event: React.UIEvent<HTMLDivElement>) => {
@@ -129,7 +146,8 @@ export const NotificationQuickCard: React.FC<NotificationQuickCardProps> = ({
       <div className="relative mb-3.5 z-10">
         <div className="text-center px-8">
           <h3 className="text-base font-black text-slate-800 inline-flex items-center gap-2">
-            信息通知
+            {formatBoxTitle(content, { label: marketContent.label })}
+            <MarketChip market={market} />
           </h3>
           <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mt-0.5">
             {realtimeStatus === 'connected' ? 'REAL-TIME UPDATES ENABLED' : 'POLLING MODE ACTIVE'}
@@ -238,9 +256,13 @@ export const NotificationQuickCard: React.FC<NotificationQuickCardProps> = ({
       </div>
 
       <div className="flex-1 min-h-0 relative z-10 flex flex-col bg-slate-50/50 border border-slate-100 rounded-xl p-2">
-        <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 px-2 text-center">
+        <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 px-2 text-center">
           {expanded ? 'NOTIFICATION LIST' : 'RECENT NOTIFICATIONS'}
         </h4>
+        <p className="text-[9px] text-slate-400 text-center mb-2 leading-tight">
+          {marketContent.label}相关 {bucket.market.length} 条 · 全局 {bucket.global.length} 条
+          <span className="text-slate-300">（其它市场的通知已隐藏）</span>
+        </p>
         {(degraded || error) && (
           <div className="mb-2 text-xs text-[var(--warning-dark)] bg-[var(--warning-bg)] rounded-lg px-2 py-1.5">
             通知服务当前处于降级模式，已保留现有数据并继续刷新。
@@ -284,6 +306,13 @@ export const NotificationQuickCard: React.FC<NotificationQuickCardProps> = ({
                 </motion.div>
               );
             })
+          ) : !loading ? (
+            /* 本市场与全局都没有：明说，而不是把别的市场的通知端上来 */
+            <BoxPlaceholder
+              content={content}
+              state={{ loading: false, hasData: false, error }}
+              onRetry={refresh}
+            />
           ) : (
             <div className="text-center py-4 text-xs text-[var(--text-tertiary)]">
               暂无通知

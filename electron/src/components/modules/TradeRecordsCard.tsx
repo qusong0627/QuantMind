@@ -5,17 +5,25 @@ import { useTradeRecords } from '../../hooks/useTradeRecords';
 import { useAppSelector } from '../../store';
 import { selectCurrentMarket } from '../../store/slices/uiSlice';
 import { formatBackendTime, parseBackendTimestamp } from '../../utils/format';
-
-const MARKET_LABELS: Record<string, string> = { CN: 'A股', HK: '港股', US: '美股', CRYPTO: '区块链' };
+import {
+  BoxPlaceholder,
+  MarketChip,
+  formatBoxTitle,
+  useBoxContent,
+  useMarketContent,
+} from '../../features/dashboard-shared';
 
 export const TradeRecordsCard: React.FC = () => {
   const tradingMode = useAppSelector((state) => state.ui.tradingMode);
-  const currentMarket = useAppSelector(selectCurrentMarket);
+  const { market, content } = useBoxContent('trade');
+  const marketContent = useMarketContent();
+  // 市场维度：模拟盘走后端 market 过滤；实盘 trades/orders 无 market 列，由取数层按 symbol 形态过滤
   const { records, loading, isOffline, isFallbackToOrders, isStale, lastUpdatedAt, refresh } = useTradeRecords({
     limit: 8,
     tradingMode,
     autoRefresh: true,
     refreshInterval: 12000,
+    market,
   });
   const [flashTopId, setFlashTopId] = useState<string | null>(null);
   const [newBadgeId, setNewBadgeId] = useState<string | null>(null);
@@ -142,7 +150,16 @@ export const TradeRecordsCard: React.FC = () => {
   };
 
   return (
-    <Card title={`实时交易记录 (${MARKET_LABELS[currentMarket] || ''})`} height="100%" background="trade">
+    <Card
+      title={
+        <span className="inline-flex items-center gap-2">
+          <span>{formatBoxTitle(content, { label: marketContent.label })}</span>
+          <MarketChip market={market} source={content.source} />
+        </span>
+      }
+      height="100%"
+      background="trade"
+    >
       <div className="trade-records-table">
         <div className="trade-records-header">
           <div className="trade-cell time-cell">时间</div>
@@ -151,6 +168,15 @@ export const TradeRecordsCard: React.FC = () => {
           <div className="trade-cell quantity-cell">数量</div>
           <div className="trade-cell status-cell">状态</div>
         </div>
+
+        {/* 该市场没有成交：明说「暂无」，不回落到其它市场（历史问题：港股卡片列 A 股成交） */}
+        {!loading && viewRows.rows.length === 0 && (
+          <BoxPlaceholder
+            content={content}
+            state={{ loading: false, hasData: false }}
+            onRetry={refresh}
+          />
+        )}
 
         {/* 数据行 */}
         {viewRows.rows.map((record, index) => (
@@ -180,7 +206,7 @@ export const TradeRecordsCard: React.FC = () => {
           </div>
         ))}
 
-        {Array.from({ length: viewRows.placeholders }).map((_, index) => (
+        {viewRows.rows.length > 0 && Array.from({ length: viewRows.placeholders }).map((_, index) => (
           <div key={`placeholder-${index}`} className="trade-records-row placeholder-row" aria-hidden="true">
             <div className="trade-cell time-cell text-[var(--text-quaternary)]">--:--</div>
             <div className="trade-cell action-cell text-[var(--text-quaternary)]">--</div>

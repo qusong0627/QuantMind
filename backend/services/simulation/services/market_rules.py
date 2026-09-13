@@ -164,6 +164,47 @@ _FUTURES_RE = re.compile(r"\.(CN|FUT)$", re.IGNORECASE)
 _CRYPTO_RE = re.compile(r"^[A-Z0-9]+USDT$", re.IGNORECASE)
 _US_TICKER_RE = re.compile(r"^[A-Z]{1,6}(\.[A-Z]{1,2})?$", re.IGNORECASE)
 
+# ── 同一套判据的 SQL 版（Postgres `~*` 大小写不敏感正则）────────────────────
+# 存在意义：sim_trades / trades 等表没有 market 列，市场只隐含在 symbol 形态里，
+# 按市场过滤时必须在 SQL 侧用与 infer_market 完全一致的判据，
+# 否则「列表过滤」与「引擎推断」会给出两套口径（历史教训：SHOP/SHW 被当成上交所）。
+# 港股只认 `.HK` 后缀式：模拟盘落库前经 signal_loader._to_market_symbol 归一为 0001.HK，
+# 裸 4-5 位数字在 infer_market 里会落到 CN 兜底，SQL 侧同样不接（两边必须一致）。
+_SQL_PATTERNS: dict[Market, str] = {
+    Market.HK: r"\d{1,5}\.HK",
+    Market.CN: r"(\d{6}\.(SH|SZ|BJ)|(SH|SZ|BJ)\d{6}|\d{6})",
+    Market.FUTURES: r"(.*\.(CN|FUT)|.*\(T\+D\)|[A-Z]{2}\d{2}\.\d{2})",
+    Market.CRYPTO: r"[A-Z0-9]+USDT",
+    Market.US: r"[A-Z]{1,6}(\.[A-Z]{1,2})?",
+}
+
+
+def market_symbol_sql_regex(market: Market | str | None) -> str | None:
+    """市场 → symbol 形态 SQL 正则（供 `symbol ~* :pattern` 使用）。
+
+    **不传市场 / 不认识的市场一律返回 None（调用方按「不过滤」处理）**——
+    不能像 normalize_market 那样把空值兜底成 CN，否则「不传 market」会静默变成
+    「只看 A 股」，历史调用方（不带市场参数的分页列表）会突然少数据。
+    """
+    if isinstance(market, Market):
+        key: Market | None = market
+    else:
+        text = str(market or "").upper().strip()
+        if not text:
+            key = None
+        elif text in {"A", "A_SHARE", "SSE"}:
+            key = Market.CN
+        else:
+            try:
+                key = Market(text)
+            except ValueError:
+                key = None
+    pattern = _SQL_PATTERNS.get(key) if key else None
+    if not pattern:
+        return None
+    # 全匹配锚定：避免子串误伤（US 的 AAPL 不该匹配到 "XXAAPLXX"）
+    return f"^({pattern})$"
+
 
 def infer_market(symbol: str) -> Market:
     """由标的代码推断所属市场（模拟引擎用信号代码选行情源/规则）。"""

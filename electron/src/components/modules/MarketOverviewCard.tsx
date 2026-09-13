@@ -7,17 +7,13 @@ import { selectCurrentMarket } from '../../store/slices/uiSlice';
 import { MARKET_INDICES, type MarketId } from '../../services/marketService';
 import type { MarketIndex } from '../../services/marketService';
 import { TrendingUp, TrendingDown, Minus } from 'lucide-react';
-
-const MARKET_LABELS: Record<MarketId, string> = {
-  CN: 'A股',
-  HK: '港股',
-  US: '美股',
-  CRYPTO: '区块链',
-  FUTURES: '期货',
-};
+import { MarketChip, formatBoxTitle, useBoxContent, useMarketContent } from '../../features/dashboard-shared';
 
 export const MarketOverviewCard: React.FC = () => {
   const currentMarket = useAppSelector(selectCurrentMarket);
+  // 标题/徽标/数据源标注走市场内容规格（六宫格统一口径）
+  const { content } = useBoxContent('market');
+  const marketContent = useMarketContent();
   const { data, loading, error, timedOut } = useMarketData({ market: currentMarket, timeoutMs: 8000 });
 
   // 市场默认数据
@@ -51,7 +47,16 @@ export const MarketOverviewCard: React.FC = () => {
   const placeholderCount = Math.max(6 - viewRows.length, 0);
 
   return (
-    <Card title={`${MARKET_LABELS[currentMarket]}概览`} height="100%" background="market">
+    <Card
+      title={
+        <span className="inline-flex items-center gap-2">
+          <span>{formatBoxTitle(content, { label: marketContent.label })}</span>
+          <MarketChip market={currentMarket} source={content.source} />
+        </span>
+      }
+      height="100%"
+      background="market"
+    >
       <div className="flex flex-col h-full py-1 gap-1">
         {/* 市场状态横幅 */}
         <div className={`flex items-center justify-between px-3 py-1.5 rounded-lg border ${

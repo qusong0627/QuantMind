@@ -283,13 +283,31 @@ async def reset_simulation_account(
     try:
         from sqlalchemy import text as _text
         from backend.shared.database_manager_v2 import get_session as _get_session
+        from backend.services.simulation.services.market_rules import market_symbol_sql_regex
+        # 成交/委托表没有 market 列，市场只隐含在 symbol 形态里。
+        # 重置某一个市场的账户时，不能把其它市场的成交历史一起删掉
+        # （历史行为是全删 —— 新开了「按市场开通模拟盘」入口后必须先按 symbol 收窄）。
+        _sym_pat = market_symbol_sql_regex(market)
+        _sym_clause = " AND symbol ~* :sym_pat" if _sym_pat else ""
         uid_str_variants = {str(uid), str(auth.user_id)}
         async with _get_session() as _session:
-            await _session.execute(_text("DELETE FROM sim_trades WHERE tenant_id=:tid AND user_id=:uid"), {"tid": auth.tenant_id, "uid": uid})
-            await _session.execute(_text("DELETE FROM sim_orders WHERE tenant_id=:tid AND user_id=:uid"), {"tid": auth.tenant_id, "uid": uid})
+            await _session.execute(
+                _text(f"DELETE FROM sim_trades WHERE tenant_id=:tid AND user_id=:uid{_sym_clause}"),
+                {"tid": auth.tenant_id, "uid": uid, **({"sym_pat": _sym_pat} if _sym_pat else {})},
+            )
+            await _session.execute(
+                _text(f"DELETE FROM sim_orders WHERE tenant_id=:tid AND user_id=:uid{_sym_clause}"),
+                {"tid": auth.tenant_id, "uid": uid, **({"sym_pat": _sym_pat} if _sym_pat else {})},
+            )
             for uv in uid_str_variants:
-                await _session.execute(_text("DELETE FROM sim_trades WHERE tenant_id=:tid AND cast(user_id as varchar)=:uid_str"), {"tid": auth.tenant_id, "uid_str": uv})
-                await _session.execute(_text("DELETE FROM sim_orders WHERE tenant_id=:tid AND cast(user_id as varchar)=:uid_str"), {"tid": auth.tenant_id, "uid_str": uv})
+                await _session.execute(
+                    _text(f"DELETE FROM sim_trades WHERE tenant_id=:tid AND cast(user_id as varchar)=:uid_str{_sym_clause}"),
+                    {"tid": auth.tenant_id, "uid_str": uv, **({"sym_pat": _sym_pat} if _sym_pat else {})},
+                )
+                await _session.execute(
+                    _text(f"DELETE FROM sim_orders WHERE tenant_id=:tid AND cast(user_id as varchar)=:uid_str{_sym_clause}"),
+                    {"tid": auth.tenant_id, "uid_str": uv, **({"sym_pat": _sym_pat} if _sym_pat else {})},
+                )
                 await _session.execute(_text("DELETE FROM simulation_fund_snapshots WHERE tenant_id=:tid AND user_id=:uid2"), {"tid": auth.tenant_id, "uid2": uv})
                 for _table in _NEW_LEDGER_TABLES:
                     try:

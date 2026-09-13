@@ -331,14 +331,18 @@ class PortfolioService {
      * 获取资金概览数据
      *
      * 根据 mode 参数分流：
-     * - 'real': 调用 realTradingService.getAccount
-     * - 'simulation': 调用 realTradingService.getSimulationAccount
+     * - 'real': 调用 realTradingService.getAccount（**账户级**，实盘账户不区分市场）
+     * - 'simulation': 调用 realTradingService.getSimulationAccount（**市场级**，按 market 取对应市场账户）
+     *
+     * market 只对模拟盘生效；未开通的市场由后端返回 account_not_initialized，
+     * 这里原样透出 notInitialized，交由卡片刻意渲染空态（不得回落到其它市场账户）。
      */
     async getFundOverview(
         userId: string,
         mode: 'real' | 'simulation' = 'simulation',
         tenantId = 'default',
-    ): Promise<{ data: FundData; isSimulated: boolean }> {
+        market?: string,
+    ): Promise<{ data: FundData; isSimulated: boolean; notInitialized: boolean }> {
         try {
             const { realTradingService } = await import('./realTradingService');
             let account: any = null;
@@ -356,16 +360,26 @@ class PortfolioService {
                     account = realAccount;
                     useSimulation = false;
                 } else {
-                    account = await realTradingService.getSimulationAccount(userId, tenantId);
+                    account = await realTradingService.getSimulationAccount(userId, tenantId, market);
                     useSimulation = true;
                 }
             } else {
-                account = await realTradingService.getSimulationAccount(userId, tenantId);
+                account = await realTradingService.getSimulationAccount(userId, tenantId, market);
                 useSimulation = true;
             }
 
             if (!account) {
                 throw new Error('No account data received');
+            }
+
+            // 该市场模拟盘未开通：明确告知，不编造初始资金、不回落到其它市场
+            const notInitialized = useSimulation && account.account_not_initialized === true;
+            if (notInitialized) {
+                return {
+                    data: { ...this.getDefaultFundData(), metricsSource: 'account_not_initialized' },
+                    isSimulated: true,
+                    notInitialized: true,
+                };
             }
 
             let totalAsset = this.pickFirstNumber(
@@ -408,7 +422,9 @@ class PortfolioService {
                 initialCapital = dbInitialEquity;
             }
 
-            if (useSimulation) {
+            if (useSimulation && dbInitialEquity <= 0) {
+                // 注意：/simulation/settings 目前**不分市场**（单一键），只在账户自身没带
+                // initial_equity 时才用它兜底 —— 否则会给港股/美股账户套上 A 股设置的初始资金
                 try {
                     const settings = await realTradingService.getSimulationSettings();
                     const configuredInitialCash = this.pickFirstNumber(
@@ -548,6 +564,7 @@ class PortfolioService {
                     lastUpdate: new Date().toISOString(),
                 },
                 isSimulated: useSimulation,
+                notInitialized: false,
             };
         } catch (error) {
             console.warn(`获取${mode === 'real' ? '模拟' : '模拟'}账户数据失败:`, error);
@@ -556,6 +573,7 @@ class PortfolioService {
                 return {
                     data: this.getDefaultFundData(),
                     isSimulated: true,
+                    notInitialized: false,
                 };
             }
             throw error;

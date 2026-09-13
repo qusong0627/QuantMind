@@ -2,7 +2,8 @@ import React from 'react';
 import { motion } from 'framer-motion';
 
 interface CardProps {
-  title?: string;
+  /** 卡标题：字符串或元素（首页六宫格在市场名旁挂市场徽标用时传元素） */
+  title?: React.ReactNode;
   className?: string;
   children: React.ReactNode;
   height?: string;

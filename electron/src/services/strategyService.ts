@@ -186,9 +186,15 @@ class StrategyService {
 
     /**
      * 获取策略列表
+     * @param options.market 市场过滤（CN/HK/US/FUTURES/CRYPTO）；后端按 parameters.market 过滤，
+     *                       历史无 market 字段的策略按 A 股计；不传 = 全部市场
      */
-    async getStrategies(): Promise<ApiResponse<Strategy[]>> {
-        const response = await apiClient.get<unknown>(API_ENDPOINTS.STRATEGIES);
+    async getStrategies(options: { market?: string } = {}): Promise<ApiResponse<Strategy[]>> {
+        const market = String(options.market || '').toUpperCase().trim();
+        const endpoint = market
+            ? `${API_ENDPOINTS.STRATEGIES}?market=${encodeURIComponent(market)}`
+            : API_ENDPOINTS.STRATEGIES;
+        const response = await apiClient.get<unknown>(endpoint);
         const normalizedResponse = this.isObject(response) ? response : {};
         const rawData = this.isObject(normalizedResponse) && 'data' in normalizedResponse
             ? normalizedResponse['data']

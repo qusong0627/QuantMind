@@ -9,6 +9,7 @@ import { getChartOption } from '../../utils/chartOptions';
 import { useIntelligenceCharts } from '../../hooks/useIntelligenceCharts';
 import { useAppSelector } from '../../store';
 import { formatBackendTime } from '../../utils/format';
+import { MarketChip, formatBoxTitle, useBoxContent, useMarketContent } from '../../features/dashboard-shared';
 
 // 图表区域占位 shimmer
 const ChartShimmer: React.FC<{ className?: string }> = ({ className = '' }) => (
@@ -17,6 +18,9 @@ const ChartShimmer: React.FC<{ className?: string }> = ({ className = '' }) => (
 
 const IntelligenceChartsCard: React.FC = () => {
   const tradingMode = useAppSelector((state) => state.ui.tradingMode);
+  // 市场内容规格：声明该市场哪些子面板有市场口径数据（没有的渲染占位，不拿别的市场数据顶）
+  const { market, content } = useBoxContent('charts');
+  const marketContent = useMarketContent();
   const {
     data: chartData,
     loading,
@@ -26,8 +30,15 @@ const IntelligenceChartsCard: React.FC = () => {
     hasDailyReturn,
     hasTradeCount,
     hasPositionRatio,
-  } = useIntelligenceCharts('current', { tradingMode });
+  } = useIntelligenceCharts('current', {
+    tradingMode,
+    market,
+    portfolioSeries: content.panels?.portfolioSeries !== false,
+    positionRatio: content.panels?.positionRatio !== false,
+  });
   const { isConnected, status } = useWebSocket();
+  const portfolioSeriesEnabled = content.panels?.portfolioSeries !== false;
+  const positionRatioEnabled = content.panels?.positionRatio !== false;
 
   const tradeStats = chartData.tradeStats;
   // 盈亏比展示：无亏损平仓且有盈利时展示 ∞；否则取平均盈利/平均亏损
@@ -42,7 +53,22 @@ const IntelligenceChartsCard: React.FC = () => {
   };
 
   return (
-    <Card title="智能图表" height="100%" background="charts">
+    <Card
+      title={
+        <span className="inline-flex items-center gap-2">
+          <span>{formatBoxTitle(content, { label: marketContent.label })}</span>
+          <MarketChip market={market} />
+        </span>
+      }
+      height="100%"
+      background="charts"
+    >
+      {/* 无市场口径的子面板：说明原因，避免看起来像坏了 */}
+      {content.panelNote && !positionRatioEnabled && (
+        <div className="text-[10px] text-slate-400 px-1 pb-1 leading-tight" title={content.panelNote}>
+          {content.panelNote}
+        </div>
+      )}
       <div className="grid grid-rows-[1.05fr_1fr] gap-3 h-full">
         <motion.div
           className="rounded-xl bg-white/30 border border-white/40 p-2"
@@ -58,7 +84,7 @@ const IntelligenceChartsCard: React.FC = () => {
                 ) : (
                   <div className="text-xs text-[var(--text-tertiary)] flex items-center gap-1 bg-white/65 px-2 py-1 rounded-md">
                     <Activity size={12} />
-                    暂无收益数据
+                    {portfolioSeriesEnabled ? '暂无收益数据' : '该市场暂无资金曲线'}
                   </div>
                 )}
               </div>
@@ -100,7 +126,7 @@ const IntelligenceChartsCard: React.FC = () => {
                 <EChartsChart option={getChartOption('positionRatio', chartData.positionRatio)} />
               ) : (
                 <div className="h-full flex items-center justify-center text-xs text-[var(--text-tertiary)]">
-                  {loading ? <ChartShimmer className="h-full w-full" /> : '暂无持仓分布'}
+                  {loading ? <ChartShimmer className="h-full w-full" /> : (positionRatioEnabled ? '暂无持仓分布' : '该市场暂无持仓分布')}
                 </div>
               )}
             </div>

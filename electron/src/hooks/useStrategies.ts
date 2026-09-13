@@ -33,6 +33,9 @@ export interface UseStrategiesOptions {
     autoRefresh?: boolean;
     refreshInterval?: number;
     enableRealtime?: boolean;
+    /** 市场过滤（CN/HK/US/FUTURES/CRYPTO）：后端按 strategies.parameters.market 过滤；
+     *  历史无 market 字段的策略按 A 股计；不传 = 全部市场 */
+    market?: string;
 }
 
 export interface UseStrategiesReturn {
@@ -59,6 +62,7 @@ export const useStrategies = (options: UseStrategiesOptions = {}): UseStrategies
         autoRefresh = true,
         refreshInterval = DEFAULT_POLLING_INTERVAL,
         enableRealtime = true,
+        market,
     } = options;
 
     const [strategies, setStrategies] = useState<Strategy[]>([]);
@@ -217,7 +221,7 @@ export const useStrategies = (options: UseStrategiesOptions = {}): UseStrategies
                 setLoading(true);
             }
 
-            const response = await strategyService.getStrategies();
+            const response = await strategyService.getStrategies({ market });
 
             if (isSuccessResponse(response) && Array.isArray(response.data)) {
                 const reconciledStrategies = await reconcileRuntimeStatus(response.data);
@@ -238,7 +242,7 @@ export const useStrategies = (options: UseStrategiesOptions = {}): UseStrategies
             initializedRef.current = true;
             setLoading(false);
         }
-    }, [strategies.length, reconcileRuntimeStatus, applyStrategiesSnapshot]);
+    }, [strategies.length, reconcileRuntimeStatus, applyStrategiesSnapshot, market]);
 
     const refresh = useCallback(async () => {
         await fetchData({ silent: true });

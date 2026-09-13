@@ -2,45 +2,57 @@ import React from 'react';
 import { Card } from '../common/Card';
 import { FundOverviewSkeleton } from '../common/CardSkeletons';
 import { motion } from 'framer-motion';
+import { message } from 'antd';
 import { useFundData } from '../../hooks/useFundData';
 import { FundData } from '../../services/userService';
-import { useAppSelector } from '../../store';
-import { selectCurrentMarket } from '../../store/slices/uiSlice';
+import {
+  BoxPlaceholder,
+  MarketChip,
+  formatBoxTitle,
+  useBoxContent,
+  useMarketContent,
+  useOpenSimAccount,
+} from '../../features/dashboard-shared';
 
-const MARKET_LABELS: Record<string, string> = { CN: 'A股', HK: '港股', US: '美股', CRYPTO: '区块链' };
-
+/** 金额格式化：货币符号来自市场内容规格（A股 ¥ / 港股 HK$ / 美股 $ …） */
 const formatMoney = (value: number): string =>
   value.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
-const formatSignedMoney = (value: number): string => {
+const formatSignedMoney = (value: number, currency: string): string => {
   const sign = value > 0 ? '+' : value < 0 ? '-' : '';
-  return `${sign}￥${formatMoney(Math.abs(value))}`;
+  return `${sign}${currency}${formatMoney(Math.abs(value))}`;
 };
 
 export const FundOverviewCard: React.FC = () => {
-  const currentMarket = useAppSelector(selectCurrentMarket);
-  const { data, loading, error, isSimulated, tradingMode } = useFundData({
+  // 市场内容规格（标题/货币/空态文案）与当前市场，全部来自共享层
+  const { market, content } = useBoxContent('fund');
+  const marketContent = useMarketContent();
+  const { openAccount, opening } = useOpenSimAccount();
+
+  const { data, loading, error, isSimulated, notInitialized, tradingMode, refresh } = useFundData({
     autoRefresh: true,
-    refreshInterval: 5000 // 实时数据刷新，间隔缩短
+    refreshInterval: 5000, // 实时数据刷新，间隔缩短
+    market,
   });
 
-  const marketLabel = MARKET_LABELS[currentMarket] || '';
   const modeLabel = tradingMode === 'real' ? '实盘' : '模拟';
-  const cardTitle = `资金概览 (${marketLabel}/${modeLabel})`;
+  const currency = content.currency || '¥';
+  const cardTitle = formatBoxTitle(content, { label: marketContent.label, mode: modeLabel });
+  // 实盘账户是账户级（后端 /account 无 market 维度），切换市场不会换账户，必须明示
+  const isAccountLevelReal = tradingMode === 'real' && !isSimulated;
 
-  if (loading && !data) {
+  const handleOpenAccount = async () => {
+    const result = await openAccount(market, marketContent.defaultSeedCash);
+    if (result.ok) {
+      message.success(`${marketContent.label}${result.message}`);
+      await refresh();
+    } else {
+      message.error(result.message);
+    }
+  };
+
+  if (loading && !data && !notInitialized) {
     return <FundOverviewSkeleton />;
-  }
-
-  if (error && !data) {
-    return (
-      <Card title={cardTitle} background="fund" height="100%">
-        <div className="flex flex-col items-center justify-center h-full">
-          <div className="text-[var(--error)] text-sm mb-2">数据加载失败</div>
-          <div className="text-xs text-[var(--text-tertiary)]">系统将自动重试...</div>
-        </div>
-      </Card>
-    );
   }
 
   const fallbackFundInfo: FundData = {
@@ -83,9 +95,37 @@ export const FundOverviewCard: React.FC = () => {
     ? (fundInfo.initialCapitalEstimated ? '初始权益(估算)' : '初始权益')
     : '初始资金';
 
+  // 未开通该市场模拟盘（或加载失败）：渲染空态，绝不回落到其它市场账户
+  if (!loading && (notInitialized || (error && !data))) {
+    return (
+      <Card title={cardTitle} background="fund" height="100%">
+        <div className="h-full min-h-0 flex flex-col">
+          <div className="flex items-center justify-between mb-1">
+            <MarketChip market={market} source={content.source} />
+          </div>
+          <BoxPlaceholder
+            content={content}
+            state={{ loading: false, hasData: false, notInitialized, error: notInitialized ? null : error }}
+            onRetry={refresh}
+            onOpenAccount={handleOpenAccount}
+            opening={opening}
+          />
+        </div>
+      </Card>
+    );
+  }
+
   return (
     <Card title={cardTitle} background="fund" height="100%">
       <div className="h-full min-h-0 flex flex-col relative">
+        <div className="flex items-center justify-between mb-0.5">
+          <MarketChip market={market} source={content.source} />
+          {isAccountLevelReal && (
+            <span className="text-[9px] text-slate-400" title="实盘账户为账户级快照，不按市场拆分">
+              实盘账户（账户级）
+            </span>
+          )}
+        </div>
         {/* 顶部总资产 - 增大字号且微调间距 */}
         <div className="text-center mb-1 mt-[-4px]">
           <motion.div
@@ -96,7 +136,7 @@ export const FundOverviewCard: React.FC = () => {
             key={fundInfo.totalAsset}
             style={{ fontFamily: 'Outfit, sans-serif' }}
           >
-            ￥{formatMoney(fundInfo.totalAsset)}
+            {currency}{formatMoney(fundInfo.totalAsset)}
           </motion.div>
           <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest leading-none mt-0.5">Total Net Asset Value</div>
         </div>
@@ -110,7 +150,7 @@ export const FundOverviewCard: React.FC = () => {
               {!initialCapitalAvailable ? (
                 <div className="text-lg font-black text-slate-300 font-mono leading-tight">--</div>
               ) : (
-                <div className="text-lg font-black text-slate-800 font-mono leading-tight">￥{formatMoney(fundInfo.initialCapital)}</div>
+                <div className="text-lg font-black text-slate-800 font-mono leading-tight">{currency}{formatMoney(fundInfo.initialCapital)}</div>
               )}
             </div>
             <div title="统一日账本口径，对应 daily_pnl / today_pnl。" className="bg-slate-50 border border-slate-100 rounded-2xl p-3.5 hover:bg-slate-100 transition-colors flex flex-col items-center justify-center text-center">
@@ -119,7 +159,7 @@ export const FundOverviewCard: React.FC = () => {
                 <div className="text-lg font-black text-slate-300 font-mono leading-tight">--</div>
               ) : (
                 <div className={`text-lg font-black font-mono leading-tight ${fundInfo.todayPnL >= 0 ? 'text-[var(--profit-primary)]' : 'text-[var(--loss-primary)]'}`}>
-                  {formatSignedMoney(fundInfo.todayPnL)}
+                  {formatSignedMoney(fundInfo.todayPnL, currency)}
                 </div>
               )}
             </div>
@@ -133,7 +173,7 @@ export const FundOverviewCard: React.FC = () => {
                 <div className="text-lg font-black text-slate-300 font-mono leading-tight">--</div>
               ) : (
                 <div className={`text-lg font-black font-mono leading-tight ${monthlyPnL >= 0 ? 'text-[var(--profit-primary)]' : 'text-[var(--loss-primary)]'}`}>
-                  {formatSignedMoney(monthlyPnL)}
+                  {formatSignedMoney(monthlyPnL, currency)}
                 </div>
               )}
             </div>
@@ -143,7 +183,7 @@ export const FundOverviewCard: React.FC = () => {
                 <div className="text-lg font-black text-slate-300 font-mono leading-tight">--</div>
               ) : (
                 <div className={`text-lg font-black font-mono leading-tight ${(fundInfo.totalPnL || 0) >= 0 ? 'text-[var(--profit-primary)]' : 'text-[var(--loss-primary)]'}`}>
-                  {formatSignedMoney(fundInfo.totalPnL || 0)}
+                  {formatSignedMoney(fundInfo.totalPnL || 0, currency)}
                 </div>
               )}
             </div>
@@ -173,9 +213,6 @@ export const FundOverviewCard: React.FC = () => {
             </div>
           </div>
         </div>
-
-
-
       </div>
     </Card>
   );
