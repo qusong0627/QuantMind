@@ -1,6 +1,6 @@
 ---
 name: factor-train-pipeline
-description: "因子训练链路：把「因子研究」筛选保留集（可按库剔除，如去 L2）合并为自定义市场数据集 → 发布训练目录 → 提交生产级模型训练（LightGBM 等，防泄露口径：按年切分+embargo+截面预处理）→ 监控进度 → 读取指标。触发词：因子训练、筛选因子拿去训练、去L2训练、273因子、合并因子训练、自定义市场训练、训练LightGBM、训练因子模型"
+description: "因子训练链路：把「因子研究」筛选保留集（可按库剔除，如去 L2）合并为自定义市场数据集 → 发布训练目录 → 提交生产级模型训练（LightGBM 等，防泄露口径：按年切分+embargo+截面预处理）→ 监控进度 → 读取指标；含每日 03:00 自动重建调度与 CUSTOM→CN 模型市场迁移。触发词：因子训练、筛选因子拿去训练、去L2训练、273因子、合并因子训练、自定义市场训练、训练LightGBM、训练因子模型、自定义数据集重建、模型迁到A股"
 ---
 
 > ## ⚙️ 运行环境契约
@@ -43,8 +43,12 @@ docker exec -w /app quantmind python3 backend/scripts/apply_factor_selection_to_
 ```bash
 docker exec -d quantmind bash -c 'cd /app && python3 backend/scripts/build_factor_custom_dataset.py \
   --start 2020-01-01 --min-coverage 0.9 > /tmp/custom273_build.log 2>&1'
-# 跟踪：tail -1 /tmp/custom273_build.log（进度行）+ 完成标志 [5/5]（~10-16 分钟，写 1624 个分区）
+# 跟踪：tail -1 /tmp/custom273_build.log（进度行）+ 完成标志 [5/5]
+# 首次/全量 ~10-16 分钟（1624 分区）；之后默认走增量，只补缺失分区（秒级~分钟级）
 ```
+增量语义（2026-09-15 起）：`meta.json` 记录筛选指纹 + 股票池 + start/min-coverage，
+三者一致时只写缺失分区；筛选集重筛 / 参数变化 → 自动回退全量。`--full` 强制全量
+（例：源数据前复权基准被回溯改写后，需要全量重写历史分区时）。
 
 口径（**与回测一致，防泄露友好**）：
 - 股票池：全 A **非 ST/退市**；`--min-coverage 0.9` 剔除长期停牌/次新/低效股（约留 3600 只）；
@@ -129,6 +133,28 @@ best_iteration=...`（完成后 metrics 写入 train/val/test，模型注册到�
 （A 股全市场日频 0.52~0.53 即可用）。同期实测样例：273 因子 LightGBM（162 轮早停，
 44 分钟）train/val/test AUC = 0.5284/0.5222/0.5260，RMSE 三集合一致。
 
+## ⑥ 每日自动重建（同步调度）
+
+自定义市场数据集是**派生数据**（源头是 A 股 QuantDB 的 daily_forward + 五个因子库），
+已作为独立「市场」`CUSTOM` 挂进平台的市场同步调度（与 A/US/HK/BC/FUTURES 同一套机制）。
+
+- **配置**：Redis `quantmind:sync_schedule:CUSTOM`，当前 = `{"enabled": true, "time": "03:00"}`，
+  排在 A 股同步（00:55）之后等源数据落盘。前端入口：「数据管理 → A股」tab 的
+  「自定义数据集重建」面板（开关 / 时间 / 立即重建一次）。
+- **命令行**（查看配置 / 手动触发，等效前端按钮）：
+  ```bash
+  curl -s "http://127.0.0.1:8000/api/v1/admin/data-platform/sync-schedule/CUSTOM" -H "Authorization: Bearer $TOKEN"
+  curl -s -X POST "http://127.0.0.1:8000/api/v1/admin/data-platform/sync-schedule/CUSTOM/run" -H "Authorization: Bearer $TOKEN"
+  ```
+- **执行体**：celery worker 调 `build_factor_custom_dataset.rebuild()`（增量模式），
+  任务名 `engine.tasks.run_market_scheduled_sync`、队列 `qlib_backtest_srv`，同日去重
+  （`quantmind:sync_schedule_last_run:CUSTOM:<date>`）。跟踪：`docker logs quantmind-celery | grep -E "保留集|待写|完成"`。
+- **改调度器代码后**：worker/beat 需重启才拾取新代码
+  （`docker restart quantmind-celery quantmind-celery-beat`）；API 侧改 admin 路由走
+  「kill api 子进程（监听 8000）让看门狗 respawn」。
+- **局限**：增量只补缺失分区——源数据前复权基准被回溯改写（除权除息）时历史分区不会
+  自动重写，需要时手动 `--full`（全量 ~10-16 分钟）。
+
 ## 实战坑清单（全踩过）
 
 1. **CUSTOM 市场三处接线**（缺一处就静默失败/422/无数据）：`request.resolve_market` 白名单、
@@ -147,8 +173,16 @@ best_iteration=...`（完成后 metrics 写入 train/val/test，模型注册到�
 9. 提交时撞上正在重建的数据分区（构建未完成）→ DuckDB "don't know what type"；
    等 `[5/5] 完成` 再提交；
 10. 冒烟/测试产物清理：`rm -rf` 要发生在**容器内**（宿主删不到 /data）；
-11. 训练注册的市场跟随训练市场：`context.market=CUSTOM` 注册进**自定义市场**；
-    要让模型出现在 A 股模型管理，需迁移（改 metadata.market）或直接用 CN 市场训练；
+11. 训练注册的市场跟随训练市场：`context.market=CUSTOM` 注册进**自定义市场**，而前端
+    市场切换器只有 CN/HK/US/CRYPTO/FUTURES —— 不迁移的话模型在**整个前端都不可见**
+    （只有后台「数据管理 → 模型扫描」接口能看到）。迁移用一条命令（改 metadata +
+    搬目录 + 改 display_name 后缀 + 迁移溯源 + 就绪校验，幂等可重跑）：
+    ```bash
+    docker exec -w /app quantmind python backend/scripts/migrate_model_market.py \
+      --model-id <mdl_...> --to-market CN        # 先加 --dry-run 预演
+    ```
+    273 样例模型已于 2026-09-15 迁 CN，A 股模型管理/推理中心即时可见；推理取数不受
+    影响（仍从 metadata.quantdb_dir pin 的 /data/quantcustom 读，日历本就按 CN）；
 12. 截面预处理的语义必须「先缩尾后统计」（统计量取缩尾后的数据），否则极值把 mean/std
     抬高、Z 分全部塌成常数（历史修复已在 preprocessing.py 固化并有回归脚本）。
 
@@ -159,12 +193,17 @@ best_iteration=...`（完成后 metrics 写入 train/val/test，模型注册到�
 - [ ] ④ 提交返回 `validFeatureCount == len(features)` 且 `missing == 0`
 - [ ] ⑤ 日志出现 `Split mode` + `Embargo` + `Training finished`；容器结束后 result.json 存在
 - [ ] 完成后：模型管理能看到新模型（status=ready）；train/val/test 指标无断崖
+- [ ] ⑥ 调度生效：`sync-schedule` 里 CUSTOM `enabled=true`（03:00）；次日自定义目录出现新交易日分区
+- [ ] 模型可见性：CUSTOM 训练的模型已用 migrate_model_market.py 迁到目标市场（否则前端不可见）
 
 ## 参考实现
 
-- 构建脚本 `backend/scripts/build_factor_custom_dataset.py`
+- 构建脚本 `backend/scripts/build_factor_custom_dataset.py`（rebuild() 供调度复用；增量 + `--full`）
 - 勾选发布 `backend/scripts/apply_factor_selection_to_catalog.py --source kept`
+- 市场迁移 `backend/scripts/migrate_model_market.py --model-id <id> --to-market CN`
+- 调度挂载 `backend/services/engine/tasks/market_sync_scheduler.py`（MARKETS 里的 CUSTOM 分支）
 - 载荷模板 `assets/train_payload_template.json`
 - 成功样例工单：`train_20260914130341_887a7a0d`（273 因子 / 3600 只 / 2020-2024 训、2025 验、2026 测）
+- 样例模型 `mdl_cust_train_20260914130341_887a7a0d_c2e90650`（已迁 CN，A 股模型管理可见）
 
 > 免责声明同项目根 CLAUDE.md：仅供学习研究，不构成投资建议。
