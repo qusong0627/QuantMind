@@ -641,14 +641,24 @@ class QuantDBFactorReader:
                 for i, name in enumerate(ohlcv_names):
                     ohlcv_arr[pos:pos + n, i] = chunk[name].values
                 pos += n
-            frame = pd.DataFrame(
-                {
-                    "symbol": sym_arr[:pos],
-                    "trade_date": date_arr[:pos],
-                    **{name: factor_arr[:pos, i] for i, name in enumerate(factor_names)},
-                    **{name: ohlcv_arr[:pos, i] for i, name in enumerate(ohlcv_names)},
-                }
-            )
+            # 组装成少数连续块：pandas 会把「逐列 1D 切片」各建一个块（273 因子=
+            # 273 块碎片），后续 sort/filter/groupby 每次都要先合并碎片，大表
+            # （8.5M×279）直读时峰值内存翻倍、实测 OOM(SIGKILL 137)。2D 数组
+            # 直接交给 DataFrame 则是单块，copy=False 让帧零复制共享预分配缓冲。
+            _pieces = [
+                pd.DataFrame(
+                    {
+                        "symbol": pd.Series(sym_arr[:pos], dtype=object),
+                        "trade_date": pd.Series(date_arr[:pos]),
+                    }
+                ),
+                pd.DataFrame(factor_arr[:pos], columns=factor_names, copy=False),
+            ]
+            if ohlcv_names:
+                _pieces.append(
+                    pd.DataFrame(ohlcv_arr[:pos], columns=ohlcv_names, copy=False)
+                )
+            frame = pd.concat(_pieces, axis=1, copy=False)
         finally:
             con.close()
         return frame

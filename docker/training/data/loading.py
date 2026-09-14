@@ -450,22 +450,36 @@ def load_data(
         else:
             raise RuntimeError("Column 'mom_ret_1d' not found and cannot be constructed (no pct_change or close)")
 
+    # ── 行选择与标签构建全部在**窄表**上完成（2026-09-15）────────────────────
+    # 宽表（8.5M×279 float32 ≈ 9.5GB）每整表复制一次就 +9.5GB；旧实现依次做
+    # 假日过滤 / 排序 / 标签过滤 / 裁剪 / 选列共 4~5 次整表复制，2016 起窗口
+    # 首训实测在容器 OOM(SIGKILL 137)。改为：窄表（4~6 列，~0.2GB）上完成全部
+    # 行级运算，宽表只保留一次 .loc 取行（含选列），语义逐行等价。
+    _horizon = max(1, int(target_horizon_days or 1))
+    _mom_col = f"mom_ret_{_horizon}d"
+    _narrow_cols = list(
+        dict.fromkeys(
+            c
+            for c in ("symbol", "trade_date", "volume", "close", "mom_ret_1d", _mom_col)
+            if c in df.columns
+        )
+    )
+    narrow = df[_narrow_cols]
+
     # 剔除节假日填充行：QuantDB parquet 含约 6.6% 的假交易日
     # （close>0、mom_ret_1d=0，但全市场 volume==0），如春节/清明/劳动节。
     # 必须在 label 构造前剔除：shift(-N) 按行位移，若序列含假日，
     # "未来 N 个交易日收益" 实际只跨 N-k 个真实交易日，导致标签时间尺度不一致。
-    if "volume" in df.columns:
-        _day_vol = df.groupby("trade_date")["volume"].max()
+    if "volume" in narrow.columns:
+        _day_vol = narrow.groupby("trade_date")["volume"].max()
         _real_days = _day_vol[_day_vol > 0].index
         _dropped_days = len(_day_vol) - len(_real_days)
         if _dropped_days > 0:
-            _rows_before = len(df)
-            # 内存优化：布尔筛选已产生新帧，再 .copy() 会短暂三倍占存（原帧+筛选帧+副本），
-            # 大表直读（7M×280）曾把 48G 训练容器直接打爆。筛选语义等价，直接使用。
-            df = df[df["trade_date"].isin(_real_days)]
+            _rows_before = len(narrow)
+            narrow = narrow[narrow["trade_date"].isin(_real_days)]
             logger.info(
                 "Dropped %d non-trading days (holiday fill rows): %d -> %d rows",
-                _dropped_days, _rows_before, len(df),
+                _dropped_days, _rows_before, len(narrow),
             )
     else:
         logger.warning(
@@ -477,40 +491,54 @@ def load_data(
     # 注：mom_ret_{N}d 列是过去 N 日收益（backward-looking），如 mom_ret_5d[T] = (close[T]-close[T-5])/close[T-5]
     # shift(-N) 后，行 T 得到行 T+N 的值 = (close[T+N]-close[T])/close[T]，即正确的 N 日远期收益
     # 等价于: label = next_N_day_return = pct_change(N).shift(-N)
-    # 从参数读取预测周期（不依赖全局 cfg）
-    _horizon = max(1, int(target_horizon_days or 1))
-
-    df = df.sort_values(["symbol", "trade_date"]).reset_index(drop=True)
-    _mom_col = f"mom_ret_{_horizon}d"
+    # 保持原始行索引（不 reset），供后续宽表按索引一次性取行
+    narrow = narrow.sort_values(["symbol", "trade_date"])
     if direct_factor_source:
         # Raw factor sources carry close, so labels are always true forward returns.
         _lag = _EXECUTION_LAG_DAYS
-        execution_close = df.groupby("symbol")["close"].shift(-_lag)
-        future_close = df.groupby("symbol")["close"].shift(-(_lag + _horizon))
-        df["label"] = future_close / execution_close - 1.0
+        execution_close = narrow.groupby("symbol")["close"].shift(-_lag)
+        future_close = narrow.groupby("symbol")["close"].shift(-(_lag + _horizon))
+        narrow["label"] = future_close / execution_close - 1.0
     elif _horizon == 1:
         # mom_ret_1d[T+2] = close[T+2] / close[T+1] - 1，匹配 T+1 执行。
-        df["label"] = df.groupby("symbol")["mom_ret_1d"].shift(-(_horizon + _EXECUTION_LAG_DAYS))
-    elif _mom_col in df.columns:
+        narrow["label"] = narrow.groupby("symbol")["mom_ret_1d"].shift(-(_horizon + _EXECUTION_LAG_DAYS))
+    elif _mom_col in narrow.columns:
         # mom_ret_H[T+1+H] = close[T+1+H] / close[T+1] - 1。
-        df["label"] = df.groupby("symbol")[_mom_col].shift(-(_horizon + _EXECUTION_LAG_DAYS))
+        narrow["label"] = narrow.groupby("symbol")[_mom_col].shift(-(_horizon + _EXECUTION_LAG_DAYS))
     else:
         # 回退：通过滚动累乘 1d 收益构造 N 日远期收益
-        df["label"] = (
-            df.groupby("symbol")["mom_ret_1d"]
+        narrow["label"] = (
+            narrow.groupby("symbol")["mom_ret_1d"]
             .transform(lambda s: (1 + s).rolling(_horizon).apply(np.prod, raw=True) - 1)
             .shift(-(_horizon + _EXECUTION_LAG_DAYS))
         )
     logger.info(
         "Label built with target_horizon_days=%s (%s)",
         _horizon,
-        "direct close" if direct_factor_source else _mom_col if _mom_col in df.columns else "rolling",
+        "direct close" if direct_factor_source else _mom_col if _mom_col in narrow.columns else "rolling",
     )
 
-    valid_count_before = len(df)
-    # 同上的内存优化：去掉标签筛选后的冗余深拷贝
-    df = df[df["label"].notna()]
-    logger.info(f"After label shift & dropna: {len(df)} rows (dropped {valid_count_before - len(df)} rows with missing labels)")
+    # 标签有效性 + 裁剪到请求区间：一次布尔掩码定行（缓冲区行只为标签服务，不输出）
+    valid_count_before = len(narrow)
+    _label_ok = narrow["label"].notna()
+    logger.info(f"After label shift & dropna: {int(_label_ok.sum())} rows (dropped {valid_count_before - int(_label_ok.sum())} rows with missing labels)")
+    _clip_end = test_end or valid_end or train_end
+    _in_range = (narrow["trade_date"] >= train_start) & (narrow["trade_date"] <= _clip_end)
+    valid_index = narrow.index[_label_ok & _in_range]
+
+    # 校验特征列（选列发生在取行之前，先把缺失特征剔掉）
+    missing = [f for f in features if f not in df.columns]
+    if missing:
+        logger.warning(f"Features not found in parquet (ignored): {missing}")
+        features = [f for f in features if f in df.columns]
+    if not features:
+        raise RuntimeError("No valid feature columns found")
+
+    # 宽表一次性取回（行=已排序有效行，列=最终保留列），label 从窄表对齐写入
+    df["label"] = narrow["label"]
+    keep_cols = ["symbol", "trade_date", "label"] + features
+    df = df.loc[valid_index, keep_cols].reset_index(drop=True)
+    logger.info(f"After date range clip ({train_start} to {_clip_end}): {len(df)} rows")
 
     # 分类目标保留为 0/1，不能再做截面 rank；否则 binary objective 会收到
     # 连续标签而退化成语义不明确的回归任务。
@@ -521,28 +549,6 @@ def load_data(
         _n_pos = int((df["label"] == 1).sum())
         _n_neg = int((df["label"] == 0).sum())
         logger.info(f"Classification target: positive={_n_pos}, negative={_n_neg} (ratio={_n_pos / max(1, _n_pos + _n_neg):.3f})")
-
-    # 裁剪到请求日期范围
-    mask = (df["trade_date"] >= train_start) & (df["trade_date"] <= train_end)
-    # 如果有验证集/测试集，扩大 mask 范围以包含它们
-    if valid_end:
-        mask = (df["trade_date"] >= train_start) & (df["trade_date"] <= valid_end)
-    if test_end:
-        mask = (df["trade_date"] >= train_start) & (df["trade_date"] <= test_end)
-
-    df = df[mask].copy()
-    logger.info(f"After date range clip ({train_start} to {test_end or valid_end or train_end}): {len(df)} rows")
-
-    # 校验特征列
-    missing = [f for f in features if f not in df.columns]
-    if missing:
-        logger.warning(f"Features not found in parquet (ignored): {missing}")
-        features = [f for f in features if f in df.columns]
-    if not features:
-        raise RuntimeError("No valid feature columns found")
-
-    keep_cols = ["symbol", "trade_date", "label"] + features
-    df = df[keep_cols].reset_index(drop=True)
 
     # 收益预测使用截面 rank 目标，强调同日选股排序；分类预测保持二元标签。
     if _target_mode != "classification":
