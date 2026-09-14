@@ -174,14 +174,23 @@ def _prepare_arrays(
             len(_prep_feats), sorted(_exclude & set(features)),
         )
 
-    fill_values_raw = train_df[features].median().to_dict()
+    # 逐列取中位数：train_df[features] 整块取值会临时复制 ~8GB（7.4M×273 float32）
+    fill_values_raw = {c: train_df[c].median() for c in features}
     fill_values = {k: (0.0 if (isinstance(v, float) and math.isnan(v)) else v) for k, v in fill_values_raw.items()}
+    _fill_vec = np.array([fill_values[c] for c in features], dtype=np.float32)
 
     def _fill(frame: pd.DataFrame) -> np.ndarray:
-        x = frame[features].copy()
-        for c in features:
-            x[c] = x[c].astype("float32").fillna(fill_values[c])
-        return x.to_numpy(dtype=np.float32)
+        # 预分配一块 float32 矩阵逐列搬入并原地填 NaN。原实现
+        # 「frame[features].copy() → 逐列 astype/fillna → to_numpy(float32)」
+        # 同时存在 2~3 份整块副本（7.7M×273 时每份 ≈8GB），是预处理段峰值主因。
+        arr = np.empty((len(frame), len(features)), dtype=np.float32)
+        for i, c in enumerate(features):
+            col = frame[c].to_numpy(dtype=np.float32, copy=True)
+            mask = np.isnan(col)
+            if mask.any():
+                col[mask] = _fill_vec[i]
+            arr[:, i] = col
+        return arr
 
     X_train = _fill(train_df)
     y_train = train_df["label"].astype("float32").to_numpy()
