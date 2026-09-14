@@ -51,6 +51,7 @@ cp -r skills/<skill-name> ~/.claude/skills/
 | [backtest-center](backtest-center/) | 回测中心：快速回测、专家模式、策略对比、参数优化、向量化极速回测 | 回测、策略对比、参数优化 |
 | [rd-agent-factor-mining](rd-agent-factor-mining/) | RD-Agent 因子挖掘端到端流水线：preflight → 演化 → 回测评估 → IC/Sharpe 排序 → 入库，支持五市场 | 挖因子、因子挖掘、RD-Agent、一键挖因子 |
 | [model-train-infer-backtest-report](model-train-infer-backtest-report/) | 训练-推理-组合回测-专业报告全流程：13 种模型类型、批量推理全年、自定义组合回测（阈值+大盘MA+止损）、研报 MD+PDF | 训练模型、推理全年、T+3、止损、出报告 |
+| [factor-train-pipeline](factor-train-pipeline/) | 因子训练链路：因子研究筛选保留集（可按库剔除，如去 L2）→ 合并自定义市场数据集 → 发布训练目录 → 生产级 LightGBM 训练全流程与实战坑清单 | 因子训练、筛选因子拿去训练、去L2训练、合并因子训练、自定义市场训练 |
 
 ### 交易
 
