@@ -14,11 +14,19 @@ export interface MarketSyncSchedule {
 }
 
 interface SyncSchedulePanelProps {
-    /** 市场标识: A / US / HK / BC / FUTURES */
+    /** 市场标识: A / US / HK / BC / FUTURES / CUSTOM */
     market: string;
     /** 该市场当前勾选的数据集（用于默认填充） */
     selectedDatasets?: string[];
     defaultDays?: number;
+    /** 面板标题（默认按上游同步文案；CUSTOM 重建等场景可覆盖） */
+    title?: string;
+    /** 面板底部提示（默认按上游同步文案） */
+    hint?: string;
+    /** 立即执行按钮文案（默认「立即同步一次」） */
+    runLabel?: string;
+    /** 隐藏「最近 N 个交易日 / 数据集」字段（本地重建等场景无此概念） */
+    hideWindowFields?: boolean;
 }
 
 /** 每市场定时同步配置面板 — 每天 HH:MM 定时同步上游数据（精确到分钟，建议次日 00:00 以后按需错峰）。 */
@@ -26,6 +34,10 @@ export const SyncSchedulePanel: React.FC<SyncSchedulePanelProps> = ({
     market,
     selectedDatasets = [],
     defaultDays = 5,
+    title = '定时同步（每天自动同步上游数据，建议设置到次日 00:00 以后）',
+    hint = '按需错峰触发，避免集中请求；同步在后台执行（Celery），到点自动触发，时区 Asia/Shanghai。',
+    runLabel = '立即同步一次',
+    hideWindowFields = false,
 }) => {
     const [loading, setLoading] = useState(false);
     const [saving, setSaving] = useState(false);
@@ -95,7 +107,7 @@ export const SyncSchedulePanel: React.FC<SyncSchedulePanelProps> = ({
             <div className="flex items-center justify-between mb-2">
                 <span className="text-xs font-semibold text-amber-700 flex items-center">
                     <ClockCircleOutlined className="mr-1" />
-                    定时同步（每天自动同步上游数据，建议设置到次日 00:00 以后）
+                    {title}
                 </span>
                 <Switch
                     size="small"
@@ -119,34 +131,39 @@ export const SyncSchedulePanel: React.FC<SyncSchedulePanelProps> = ({
                                 onChange={(v) => v && setTime(v)}
                                 style={{ width: 90 }}
                             />
-                            <span className="text-xs text-gray-600">同步最近</span>
-                            <InputNumber
-                                size="small"
-                                min={1}
-                                max={365}
-                                value={days}
-                                onChange={(v) => setDays(v ?? defaultDays)}
-                                style={{ width: 70 }}
-                            />
-                            <span className="text-xs text-gray-600">
-                                {market === 'BC' ? '个自然日' : '个交易日'}
-                            </span>
+                            {!hideWindowFields && (
+                                <>
+                                    <span className="text-xs text-gray-600">同步最近</span>
+                                    <InputNumber
+                                        size="small"
+                                        min={1}
+                                        max={365}
+                                        value={days}
+                                        onChange={(v) => setDays(v ?? defaultDays)}
+                                        style={{ width: 70 }}
+                                    />
+                                    <span className="text-xs text-gray-600">
+                                        {market === 'BC' ? '个自然日' : '个交易日'}
+                                    </span>
+                                </>
+                            )}
+                            {hideWindowFields && (
+                                <span className="text-xs text-gray-600">自动执行</span>
+                            )}
                         </Space>
                     </div>
-                    <div className="text-xs text-gray-500 mt-1">
-                        {datasets.length > 0
-                            ? `定时同步数据集: ${datasets.join(', ')}（来自当前勾选）`
-                            : '未指定数据集时按各市场默认全量同步'}
-                    </div>
+                    {!hideWindowFields && (
+                        <div className="text-xs text-gray-500 mt-1">
+                            {datasets.length > 0
+                                ? `定时同步数据集: ${datasets.join(', ')}（来自当前勾选）`
+                                : '未指定数据集时按各市场默认全量同步'}
+                        </div>
+                    )}
                     <Alert
                         className="mt-2"
                         type="info"
                         showIcon
-                        message={
-                            <span className="text-xs">
-                                按需错峰触发，避免集中请求；同步在后台执行（Celery），到点自动触发，时区 Asia/Shanghai。
-                            </span>
-                        }
+                        message={<span className="text-xs">{hint}</span>}
                     />
                 </>
             )}
@@ -161,7 +178,7 @@ export const SyncSchedulePanel: React.FC<SyncSchedulePanelProps> = ({
                     loading={running}
                     disabled={!enabled}
                 >
-                    立即同步一次
+                    {runLabel}
                 </Button>
             </div>
         </div>

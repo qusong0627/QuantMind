@@ -268,6 +268,16 @@ export const AdminQuantDBPanel: React.FC = () => {
             {/* 定时同步调度面板（建议次日 00:00 以后按需错峰，具体时间以前端设置为准） */}
             <SyncSchedulePanel market="A" defaultDays={5} />
 
+            {/* 自定义数据集重建调度（筛选保留 273 因子五库合并 → /data/quantcustom；
+                依赖 A 股同步先把源数据落盘，建议排在 A 股之后如 03:00） */}
+            <SyncSchedulePanel
+                market="CUSTOM"
+                title="自定义数据集重建（因子筛选保留集五库合并，建议 03:00、排在 A 股同步之后）"
+                hint="重建 /data/quantcustom 合并数据集（模型直读训练的数据源）：增量模式只补缺失分区，筛选集或参数变化时自动全量重建。数据源为 A 股 QuantDB，须先等 A 股同步完成。"
+                runLabel="立即重建一次"
+                hideWindowFields
+            />
+
             {/* QuantDB 数据集目录与详情 */}
             <QuantDBCatalogPanel
                 connected={Boolean(info?.connected)}
