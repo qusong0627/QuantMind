@@ -34,14 +34,37 @@ from backend.services.engine.factor_report.portfolio import portfolio_path  # no
 from backend.shared.database_manager_v2 import get_session  # noqa: E402
 
 
-async def _apply_one(dataset: str, *, market: str, keep_others: bool, dry_run: bool, version_name: str | None) -> dict:
-    pj = portfolio_path(dataset)
-    if not pj.exists():
-        return {"dataset": dataset, "ok": False, "reason": f"缺少 {pj}（先跑 build_factor_portfolio.py）"}
-    payload = json.loads(pj.read_text(encoding="utf-8"))
-    if not payload.get("available"):
-        return {"dataset": dataset, "ok": False, "reason": payload.get("reason") or "组合不可用"}
-    selected = {f["name"] for f in payload.get("factors", [])}
+def _seeds_from_kept(kept_data: dict, without: set[str]) -> dict[str, set[str]]:
+    """筛选保留集 → {数据集: 因子名集合}（可按库剔除；仅保留有训练目录的数据集）。"""
+    out: dict[str, set[str]] = {}
+    for k in kept_data.get("kept", []):
+        lib = str(k.get("library") or "")
+        name = str(k.get("name") or "")
+        if not name or lib in without:
+            continue
+        if lib not in DATASETS:
+            continue  # 研究专用（如 factor_research）无训练目录
+        out.setdefault(lib, set()).add(name)
+    return out
+
+
+async def _apply_one(
+    dataset: str,
+    *,
+    market: str,
+    keep_others: bool,
+    dry_run: bool,
+    version_name: str | None,
+    selected: set[str] | None = None,
+) -> dict:
+    if selected is None:
+        pj = portfolio_path(dataset)
+        if not pj.exists():
+            return {"dataset": dataset, "ok": False, "reason": f"缺少 {pj}（先跑 build_factor_portfolio.py）"}
+        payload = json.loads(pj.read_text(encoding="utf-8"))
+        if not payload.get("available"):
+            return {"dataset": dataset, "ok": False, "reason": payload.get("reason") or "组合不可用"}
+        selected = {f["name"] for f in payload.get("factors", [])}
     if not selected:
         return {"dataset": dataset, "ok": False, "reason": "推荐集为空"}
 
@@ -131,15 +154,72 @@ async def main() -> int:
     ap.add_argument("--version-name", default=None, help="新版本名（默认「<数据集>（因子体检优选）」）")
     ap.add_argument("--market", default="CN", help="目录市场（默认 CN；推荐集基于 A 股因子表）")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument(
+        "--source",
+        choices=["portfolio", "kept"],
+        default="portfolio",
+        help="勾选来源：portfolio=因子体检推荐组合（默认）；kept=因子研究筛选保留集",
+    )
+    ap.add_argument(
+        "--without-libraries",
+        default="",
+        help="kept 模式下要剔除的因子库（逗号分隔，如 l2_factors / l1_factors,l2_factors）",
+    )
+    ap.add_argument(
+        "--kept-file",
+        default="",
+        help="kept 模式读取的筛选结果（默认 <quantdb>/factor_research/screening/factor_selection.json）",
+    )
     args = ap.parse_args()
 
     datasets = list(DATASETS) if args.dataset == "all" else [args.dataset]
     datasets = [d for d in datasets if d in DATASETS] or list(DATASETS)
 
     failed = 0
+    seeds: dict[str, set[str]] | None = None
+    if args.source == "kept":
+        without = {x.strip() for x in args.without_libraries.split(",") if x.strip()}
+        kept_path = Path(args.kept_file).expanduser() if args.kept_file else None
+        if kept_path is None:
+            from backend.shared.quantdb_paths import resolve_quantdb_dir
+
+            kept_path = (
+                resolve_quantdb_dir()
+                / "factor_research"
+                / "screening"
+                / "factor_selection.json"
+            )
+        if not kept_path.exists():
+            print(f"[kept] 找不到筛选结果: {kept_path}（先跑 screen_factors.py）")
+            return 1
+        kept_data = json.loads(kept_path.read_text(encoding="utf-8"))
+        seeds = _seeds_from_kept(kept_data, without)
+        total = sum(len(v) for v in seeds.values())
+        print(
+            f"[kept] {kept_path}：剔除库 {sorted(without) or '无'} 后，"
+            f"可用 {total} 个因子（按数据集 { {k: len(v) for k, v in seeds.items()} }）"
+        )
+        if without:
+            export_path = kept_path.parent / (
+                "kept_features_excl_" + "_".join(sorted(without)) + ".txt"
+            )
+            export_path.write_text(
+                "\n".join(sorted(e for v in seeds.values() for e in v)) + "\n",
+                encoding="utf-8",
+            )
+            print(f"[kept] 已导出因子清单 -> {export_path}")
+
     for ds in datasets:
-        res = await _apply_one(ds, market=args.market.upper(), keep_others=args.keep_others,
-                               dry_run=args.dry_run, version_name=args.version_name)
+        if seeds is not None and ds not in seeds:
+            continue
+        res = await _apply_one(
+            ds,
+            market=args.market.upper(),
+            keep_others=args.keep_others,
+            dry_run=args.dry_run,
+            version_name=args.version_name,
+            selected=seeds.get(ds) if seeds is not None else None,
+        )
         if res.get("ok"):
             if res.get("dry_run"):
                 print(f"[{ds}] 预演：目录 {res['mappings']} 条中命中推荐因子 {res['hit_in_catalog']} 个"
