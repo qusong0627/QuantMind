@@ -4,6 +4,9 @@
 配置存 Redis（db 0，key: quantmind:sync_schedule:{market}），
 Celery beat 每分钟触发 dispatch_market_sync 检查是否有市场到点，
 到点则派发对应市场同步任务（Redis 记录 last_run 防止重复触发）。
+
+CUSTOM 市场不是上游数据源，而是「筛选保留合并因子」数据集（/data/quantcustom）
+的重建入口 —— 与各市场同构地挂在同一套调度里（默认建议 03:00，在 A 股同步之后）。
 """
 
 from __future__ import annotations
@@ -19,6 +22,16 @@ logger = logging.getLogger(__name__)
 _SCHEDULE_KEY = "quantmind:sync_schedule:{market}"
 _LAST_RUN_KEY = "quantmind:sync_schedule_last_run:{market}:{date}"
 
+# 派发任务名：上游同步与自定义数据集重建的超时预算不同（后者是本地磁盘作业，
+# 全量重建可达 40-60 分钟），因此 CUSTOM 走独立任务，见 celery_tasks.py。
+_SYNC_TASK_NAME = "engine.tasks.run_market_scheduled_sync"
+_CUSTOM_REBUILD_TASK_NAME = "engine.tasks.run_custom_dataset_rebuild"
+
+
+def task_name_for(market: str) -> str:
+    return _CUSTOM_REBUILD_TASK_NAME if market == "CUSTOM" else _SYNC_TASK_NAME
+
+
 # market -> (标签, 同步任务名)
 MARKETS = {
     "A": "QuantDB A股",
@@ -26,6 +39,9 @@ MARKETS = {
     "HK": "QuantHK 港股",
     "BC": "QuantBC 区块链",
     "FUTURES": "QuantFutures 期货",
+    # 自定义市场不拉上游数据，而是重建「筛选保留合并因子」数据集
+    # （/data/quantcustom，直读训练的输入；依赖 A 股同步先跑完）
+    "CUSTOM": "QuantCustom 自定义因子集",
 }
 
 DEFAULT_SCHEDULE = {
@@ -55,6 +71,9 @@ MARKET_SUGGESTED_TIMES: dict[str, str] = {
     "FUTURES": "03:00",
     "BC": "04:15",
     "US": "05:30",
+    # CUSTOM 在 A 股同步之后：先等 00:55 的 A 股同步把源数据（daily_forward +
+    # 因子库）落盘，再合并出当日自定义分区；慢了也无妨（增量只补缺失分区）。
+    "CUSTOM": "03:00",
 }
 
 
@@ -133,6 +152,23 @@ def run_market_sync(market: str, cfg: dict[str, Any]) -> dict[str, Any]:
         result["result"] = run_daily_sync(skip_pg=True)
         return result
 
+    if market == "CUSTOM":
+        # 重建「筛选保留合并因子」数据集（/data/quantcustom）；days/datasets/
+        # with_qlib 不适用。增量守卫在 rebuild 内：筛选集或参数变化自动全量。
+        from backend.scripts.build_factor_custom_dataset import (
+            DEFAULT_MIN_COVERAGE,
+            DEFAULT_START,
+            rebuild,
+        )
+
+        result["result"] = rebuild(
+            start=os.getenv("CUSTOM_DATASET_START") or DEFAULT_START,
+            min_coverage=float(
+                os.getenv("CUSTOM_DATASET_MIN_COVERAGE") or DEFAULT_MIN_COVERAGE
+            ),
+        )
+        return result
+
     if market == "US":
         from backend.scripts.quantus_daily_sync import run
     elif market == "HK":
@@ -152,7 +188,9 @@ def run_market_sync(market: str, cfg: dict[str, Any]) -> dict[str, Any]:
     if with_qlib:
         # 数据拉取阶段若被上游限流拖长，再重建 qlib 缓存会超出任务硬超时被 SIGKILL。
         # 这里按已耗时判断剩余时间是否够用，不够则跳过并在结果里标记 skipped。
-        elapsed = (datetime.now() - datetime.fromisoformat(result["started"])).total_seconds()
+        elapsed = (
+            datetime.now() - datetime.fromisoformat(result["started"])
+        ).total_seconds()
         budget = float(os.getenv("MARKET_SYNC_SOFT_TIME_LIMIT", "1800"))
         if elapsed > budget * 0.5:
             logger.error(
@@ -180,7 +218,9 @@ def run_market_sync(market: str, cfg: dict[str, Any]) -> dict[str, Any]:
                     "provider_uri": ensure_qlib_cache(market=qlib_market),
                 }
             except Exception as exc:  # noqa: BLE001
-                logger.error("%s 定时同步 qlib 缓存失败: %s", market, exc, exc_info=True)
+                logger.error(
+                    "%s 定时同步 qlib 缓存失败: %s", market, exc, exc_info=True
+                )
                 result["qlib"] = {"status": "error", "reason": str(exc)}
 
     result["finished"] = datetime.now().isoformat()
@@ -206,11 +246,13 @@ def dispatch_due_syncs() -> dict[str, Any]:
             continue
         _mark_run(market, date_str)
         celery_app.send_task(
-            "engine.tasks.run_market_scheduled_sync",
+            task_name_for(market),
             args=[market, cfg],
             queue="qlib_backtest_srv",
         )
         dispatched.append(market)
-        logger.info("[SyncSchedule] %s 到点 %s，已派发同步任务", MARKETS[market], now_hm)
+        logger.info(
+            "[SyncSchedule] %s 到点 %s，已派发同步任务", MARKETS[market], now_hm
+        )
 
     return {"now": now_hm, "dispatched": dispatched}

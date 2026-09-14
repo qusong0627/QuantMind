@@ -980,6 +980,27 @@ def run_market_scheduled_sync(market: str, cfg: dict[str, Any]) -> dict[str, Any
         return {"market": market, "status": "failed", "error": str(e)}
 
 
+@celery_app.task(
+    name="engine.tasks.run_custom_dataset_rebuild",
+    # 自定义市场数据集重建是纯本地磁盘作业（不请求上游），不受上面的限流预算约束；
+    # 全量重建在慢盘上实测可达 40-60 分钟（1624 分区逐个读写），会超过同步任务的
+    # 1800s 软超时被中断（留下未完成的半程重写）。因此单独放宽：默认 60/65 分钟。
+    soft_time_limit=int(os.getenv("CUSTOM_REBUILD_SOFT_TIME_LIMIT", "3600")),
+    time_limit=int(os.getenv("CUSTOM_REBUILD_TIME_LIMIT", "3900")),
+    acks_late=False,
+    reject_on_worker_lost=False,
+)
+def run_custom_dataset_rebuild(market: str, cfg: dict[str, Any]) -> dict[str, Any]:
+    """执行自定义市场数据集重建（由 dispatch_market_sync 按 CUSTOM 市场派发）。"""
+    try:
+        from backend.services.engine.tasks.market_sync_scheduler import run_market_sync
+
+        return run_market_sync(market, cfg)
+    except Exception as e:
+        logger.exception("[SyncSchedule] %s 数据集重建失败: %s", market, e)
+        return {"market": market, "status": "failed", "error": str(e)}
+
+
 # 与 compute.py 同口径的轻量新鲜度检查（只读目录与 latest.json，不引重型依赖）。
 # 快照分区目录：<data_dir>/1_kline_data/daily_unadjusted/dt=YYYYMMDD
 _SNAPSHOT_PARTITION_REL = "1_kline_data/daily_unadjusted"

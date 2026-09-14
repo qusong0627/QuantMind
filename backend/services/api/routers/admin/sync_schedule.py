@@ -35,8 +35,8 @@ class SyncScheduleRequest(BaseModel):
 
         try:
             datetime.strptime(v.strip(), "%H:%M")
-        except ValueError:
-            raise ValueError("time 必须是 HH:MM 格式（如 22:30）")
+        except ValueError as exc:
+            raise ValueError("time 必须是 HH:MM 格式（如 22:30）") from exc
         return v.strip()
 
 
@@ -115,9 +115,10 @@ async def run_market_schedule_now(
         raise HTTPException(status_code=400, detail="该市场定时同步未启用，请先保存配置")
 
     from backend.services.engine.qlib_app.celery_config import celery_app
+    from backend.services.engine.tasks.market_sync_scheduler import task_name_for
 
     celery_app.send_task(
-        "engine.tasks.run_market_scheduled_sync",
+        task_name_for(market),
         args=[market, cfg],
         queue="qlib_backtest_srv",
     )

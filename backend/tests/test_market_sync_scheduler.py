@@ -62,10 +62,102 @@ def test_market_suggested_time_is_prefilled_without_enabling(stub_redis):
 
 
 def test_suggested_times_are_staggered_and_after_midnight():
-    # Assert：各市场建议时间互不错峰，且都落在次日 00:00 以后的凌晨窗口
-    times = list(MARKET_SUGGESTED_TIMES.values())
-    assert len(times) == len(set(times)), "各市场建议触发时间必须错开"
-    assert all("00:00" <= t <= "06:00" for t in times), times
+    # CUSTOM 是本地数据集重建（不请求上游），允许与 FUTURES 同时刻；
+    # 其余市场均会请求上游数据源，必须错峰。
+    upstream_times = [t for m, t in MARKET_SUGGESTED_TIMES.items() if m != "CUSTOM"]
+    assert len(upstream_times) == len(set(upstream_times)), (
+        "上游市场建议触发时间必须错开"
+    )
+    assert all("00:00" <= t <= "06:00" for t in MARKET_SUGGESTED_TIMES.values())
+
+
+def test_custom_rebuild_is_suggested_after_ashare_sync():
+    # Assert：自定义数据集重建建议在 A 股同步（01:00 建议 / 实配 00:55）之后，
+    # 否则合并时源数据还没落盘
+    assert MARKET_SUGGESTED_TIMES["CUSTOM"] == "03:00"
+    assert MARKET_SUGGESTED_TIMES["CUSTOM"] > MARKET_SUGGESTED_TIMES["A"]
+
+
+def test_custom_market_is_registered(stub_redis):
+    # Assert：CUSTOM 在调度市场注册表内，且默认保持关闭（与其他市场一致）
+    assert "CUSTOM" in MARKETS
+    assert MARKETS["CUSTOM"]
+    assert get_schedule("CUSTOM")["enabled"] is False
+
+
+def test_run_market_sync_custom_dispatches_dataset_rebuild(monkeypatch):
+    import backend.scripts.build_factor_custom_dataset as bfcd
+
+    calls: list[dict] = []
+
+    def fake_rebuild(**kwargs):
+        calls.append(kwargs)
+        return {"written": 2, "mode": "incremental"}
+
+    monkeypatch.setattr(bfcd, "rebuild", fake_rebuild)
+
+    from backend.services.engine.tasks.market_sync_scheduler import run_market_sync
+
+    # Act
+    result = run_market_sync("CUSTOM", {"enabled": True, "time": "03:00"})
+
+    # Assert：走数据集重建而非上游同步，参数取默认（窗口起点 / 覆盖率）
+    assert result["market"] == "CUSTOM"
+    assert result["result"] == {"written": 2, "mode": "incremental"}
+    assert len(calls) == 1
+    assert calls[0]["start"] == bfcd.DEFAULT_START
+    assert calls[0]["min_coverage"] == bfcd.DEFAULT_MIN_COVERAGE
+
+
+def test_dispatch_fires_custom_once_per_day(stub_redis, monkeypatch):
+    import sys
+    import types
+    from datetime import datetime as _dt
+
+    import backend.services.engine.tasks.market_sync_scheduler as ms
+
+    sent: list[tuple] = []
+    fake_celery = types.SimpleNamespace(
+        send_task=lambda name, args=None, queue=None: sent.append((name, args, queue))
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "backend.services.engine.qlib_app.celery_config",
+        types.SimpleNamespace(celery_app=fake_celery),
+    )
+
+    class _FrozenDateTime(_dt):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 9, 15, 3, 0, 0)
+
+    monkeypatch.setattr(ms, "datetime", _FrozenDateTime)
+
+    # Arrange：CUSTOM 配置为每天 03:00
+    save_schedule("CUSTOM", {"enabled": True, "time": "03:00"})
+
+    # Act：到点派发一次；同日再触发一次
+    first = ms.dispatch_due_syncs()
+    second = ms.dispatch_due_syncs()
+
+    # Assert：只派发 CUSTOM，任务名/队列正确；同日不重复派发
+    assert first["dispatched"] == ["CUSTOM"]
+    assert second["dispatched"] == []
+    assert len(sent) == 1
+    name, args, queue = sent[0]
+    # CUSTOM 走独立的数据集重建任务（本地作业，超时预算放宽）
+    assert name == "engine.tasks.run_custom_dataset_rebuild"
+    assert args[0] == "CUSTOM"
+    assert queue == "qlib_backtest_srv"
+
+
+def test_task_name_for_routes_custom_to_rebuild_task():
+    from backend.services.engine.tasks.market_sync_scheduler import task_name_for
+
+    # Assert：CUSTOM 走数据集重建任务；上游市场走常规同步任务
+    assert task_name_for("CUSTOM") == "engine.tasks.run_custom_dataset_rebuild"
+    assert task_name_for("A") == "engine.tasks.run_market_scheduled_sync"
+    assert task_name_for("HK") == "engine.tasks.run_market_scheduled_sync"
 
 
 def test_ashare_stays_disabled_without_config(stub_redis):
