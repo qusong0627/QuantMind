@@ -42,16 +42,20 @@ docker exec -w /app quantmind python3 backend/scripts/apply_factor_selection_to_
 
 ```bash
 docker exec -d quantmind bash -c 'cd /app && python3 backend/scripts/build_factor_custom_dataset.py \
-  --start 2020-01-01 --min-coverage 0.9 > /tmp/custom273_build.log 2>&1'
+  --start 2016-01-01 --min-coverage 0.65 > /tmp/custom273_build.log 2>&1'
 # 跟踪：tail -1 /tmp/custom273_build.log（进度行）+ 完成标志 [5/5]
-# 首次/全量 ~10-16 分钟（1624 分区）；之后默认走增量，只补缺失分区（秒级~分钟级）
+# 首次/全量 ~45-75 分钟（2599 分区，慢盘实测）；之后默认走增量，只补缺失分区（秒级）
 ```
 增量语义（2026-09-15 起）：`meta.json` 记录筛选指纹 + 股票池 + start/min-coverage，
 三者一致时只写缺失分区；筛选集重筛 / 参数变化 → 自动回退全量。`--full` 强制全量
 （例：源数据前复权基准被回溯改写后，需要全量重写历史分区时）。
+脚本默认值（DEFAULT_START=2016-01-01 / DEFAULT_MIN_COVERAGE=0.65）与每日调度共用，
+改这两个常量后 **celery worker 要重启**（否则缓存旧值 → 每晚误判参数不一致而全量）。
 
 口径（**与回测一致，防泄露友好**）：
-- 股票池：全 A **非 ST/退市**；`--min-coverage 0.9` 剔除长期停牌/次新/低效股（约留 3600 只）；
+- 股票池：全 A **非 ST/退市**；覆盖率阈值随窗口长度调整（全窗口口径）：6 年窗（2020 起）
+  0.9 约留 3600 只；10.7 年窗（2016 起）0.9 只剩 2579 只（老票偏置），0.65 约留 3271 只，
+  与短窗口径的推理覆盖基本持平，同时仍剔除交易不足窗口 70% 的长期停牌/次新票；
 - **可交易性**：当日涨停或跌停 → `close` 置 NaN（标签不可算 = 样本剔除，买不进/卖不出不进样本）；
 - 分区含**全套 OHLCV + date(YYYY-MM-DD)**（直读必需列），价格=前复权；
 - 因子缺失写 NaN，由训练端截面预处理负责填充。
@@ -97,7 +101,7 @@ UPDATE qm_training_factor_catalog_version SET status='published', published_at=N
 |---|---|---|
 | `model_type` | `lightgbm` | 单模型 |
 | `model_types` / `ensemble` | **必须删除** | 载荷里带 `model_types` 会一次训 13 个模型（含 DL，CPU 上极慢） |
-| `train_start/end` | 例 `2020-01-02` ~ `2024-12-31` | 按年切分；训练含 embargo 自动丢边界 6 交易日 |
+| `train_start/end` | 例 `2016-01-04` ~ `2024-12-31` | 按年切分；训练含 embargo 自动丢边界 6 交易日 |
 | `valid_start/end` | 例 `2025-01-02` ~ `2025-12-31` | 验证一年 |
 | `test_start/end` | 例 `2026-01-02` ~ `2026-09-11` | 测试期 |
 | `features` | 273 个因子名（一行一行的清单文件转数组） | ②导出的 `kept_features_excl_*.txt` |
@@ -153,7 +157,7 @@ best_iteration=...`（完成后 metrics 写入 train/val/test，模型注册到�
   （`docker restart quantmind-celery quantmind-celery-beat`）；API 侧改 admin 路由走
   「kill api 子进程（监听 8000）让看门狗 respawn」。
 - **局限**：增量只补缺失分区——源数据前复权基准被回溯改写（除权除息）时历史分区不会
-  自动重写，需要时手动 `--full`（全量 ~10-16 分钟）。
+  自动重写，需要时手动 `--full`（全量 ~45-75 分钟，2599 分区）。
 
 ## 实战坑清单（全踩过）
 
@@ -188,8 +192,8 @@ best_iteration=...`（完成后 metrics 写入 train/val/test，模型注册到�
 
 ## 验证 Checklist
 
-- [ ] ② 完成：`ls /data/quantcustom/6_ml_datasets/l1_factors/ | wc -l` ≈ 1625（1624 分区 + meta）
-- [ ] ③ 完成：字段发现返回 files=1624；published 版本含全部因子且 enabled
+- [ ] ② 完成：`ls /data/quantcustom/6_ml_datasets/l1_factors/ | wc -l` ≈ 2600（2599 分区 + meta，2016 起口径）
+- [ ] ③ 完成：字段发现返回 files=分区数；published 版本含全部因子且 enabled
 - [ ] ④ 提交返回 `validFeatureCount == len(features)` 且 `missing == 0`
 - [ ] ⑤ 日志出现 `Split mode` + `Embargo` + `Training finished`；容器结束后 result.json 存在
 - [ ] 完成后：模型管理能看到新模型（status=ready）；train/val/test 指标无断崖

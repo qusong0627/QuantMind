@@ -20,7 +20,7 @@
 退回全量重建。`--full` 强制全量。
 
 用法（仓库根）:
-    python3 backend/scripts/build_factor_custom_dataset.py --start 2020-01-01
+    python3 backend/scripts/build_factor_custom_dataset.py --start 2016-01-01
     python3 backend/scripts/build_factor_custom_dataset.py --smoke 300    # 冒烟
     python3 backend/scripts/build_factor_custom_dataset.py --full         # 强制全量
 
@@ -61,8 +61,11 @@ LIB_DIRS = {
 }
 DROP_COLS = {"symbol", "time", "dt", "date", "open", "high", "low", "volume", "amount"}
 
-DEFAULT_START = "2020-01-01"
-DEFAULT_MIN_COVERAGE = 0.9
+DEFAULT_START = "2016-01-01"
+# 覆盖率阈值随窗口长度调整（全窗口口径）：6 年窗（2020 起）用 0.9 约留 3600 只；
+# 10.7 年窗（2016 起）用 0.9 只剩 2579 只（老票偏置），0.65 约留 3270 只，
+# 与短窗口径下的推理覆盖（~3600）基本持平，同时仍剔除交易不足窗口 70% 的票。
+DEFAULT_MIN_COVERAGE = 0.65
 _OHLCV = ("open", "high", "low", "close", "volume", "amount")
 
 
