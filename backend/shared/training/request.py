@@ -95,7 +95,7 @@ def parse_date(date_str: str, field: str) -> datetime:
 def resolve_market(raw_market: Any, benchmark: str) -> str:
     """解析目标市场：显式字段优先，缺失/非法时从 benchmark 推断，回退 CN。"""
     market = str(raw_market or "").strip().upper()
-    if market in ("CN", "US", "HK", "CRYPTO", "FUTURES"):
+    if market in ("CN", "US", "HK", "CRYPTO", "FUTURES", "CUSTOM"):
         return market
     return _BENCHMARK_MARKET.get(str(benchmark or "").upper(), "CN")
 

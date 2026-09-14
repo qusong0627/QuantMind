@@ -98,6 +98,7 @@ _MARKET_DATA_MOUNT_DIRS = {
     "US": "/tmp/quantus_data",
     "CRYPTO": "/tmp/quantbc_data",
     "FUTURES": "/tmp/quantfutures_data",
+    "CUSTOM": "/data/quantcustom",
 }
 # 训练容器内环境变量名（train.py 按市场选择数据根目录）
 _MARKET_MOUNT_ENV_VARS = {
@@ -105,6 +106,7 @@ _MARKET_MOUNT_ENV_VARS = {
     "HK": "QUANTHK_DATA_DIR",
     "US": "QUANTUS_DATA_DIR",
     "CRYPTO": "QUANTBC_DATA_DIR",
+    "CUSTOM": "QM_QUANTCUSTOM_DATA_DIR",
     "FUTURES": "QUANTFUTURES_DATA_DIR",
 }
 
