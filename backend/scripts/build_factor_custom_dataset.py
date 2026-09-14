@@ -64,6 +64,12 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--start", default="2020-01-01", help="起始日（含）")
     ap.add_argument("--smoke", type=int, default=0, help="冒烟：只取前 N 只股票")
+    ap.add_argument(
+        "--min-coverage",
+        type=float,
+        default=0.7,
+        help="窗口内有效收盘覆盖率下限（剔除长期停牌/次新/垃圾股；0=不过滤）",
+    )
     args = ap.parse_args()
     t0 = time.time()
     root = resolve_quantdb_dir()
@@ -90,13 +96,6 @@ def main() -> int:
     ok_sym = instr[
         (instr["IsSTGP"].astype(str) == "0") & (instr["IsQuitGP"].astype(str) == "0")
     ]["Symbol"].tolist()
-    print(f"[2/5] 股票池（非 ST/退市）: {len(ok_sym)} 只")
-    if args.smoke:
-        ok_sym = ok_sym[: args.smoke]
-    sym_index = pd.Index(ok_sym)
-    threshold = sym_index.map(_limit_threshold).to_numpy(dtype=np.float64)
-
-    # 3) 逐日合并（5 库 × 单日分区 → 1 个自定分区）
     dates = [
         d
         for d in sorted(
@@ -104,6 +103,29 @@ def main() -> int:
         )
         if d >= args.start.replace("-", "")
     ]
+    print(f"[2/5] 股票池（非 ST/退市）: {len(ok_sym)} 只，窗口 {len(dates)} 日")
+    if args.smoke:
+        ok_sym = ok_sym[: args.smoke]
+    if args.min_coverage > 0 and not args.smoke:
+        # 覆盖过滤：窗口内有效收盘占比 ≥ min_coverage，剔除长期停牌/次新等
+        # （数据驱动、无未来函数；把训练体量压到内存安全范围）。
+        cnt: dict[str, int] = {}
+        for dt in dates:
+            d = pd.read_parquet(
+                root / "1_kline_data" / "daily_forward" / f"dt={dt}" / "data.parquet",
+                columns=["symbol", "close"],
+            )
+            close = d.set_index("symbol")["close"].reindex(ok_sym)
+            for sym, v in close.items():
+                if pd.notna(v) and v > 0:
+                    cnt[sym] = cnt.get(sym, 0) + 1
+        floor = int(len(dates) * args.min_coverage)
+        ok_sym = [sym for sym in ok_sym if cnt.get(sym, 0) >= floor]
+        print(f"      覆盖率 ≥ {args.min_coverage:.0%}: 保留 {len(ok_sym)} 只")
+    sym_index = pd.Index(ok_sym)
+    threshold = sym_index.map(_limit_threshold).to_numpy(dtype=np.float64)
+
+    # 3) 逐日合并（5 库 × 单日分区 → 1 个自定分区）
     custom_root = Path(os.getenv("QM_QUANTCUSTOM_DATA_DIR") or "/data/quantcustom")
     out_root = custom_root / "6_ml_datasets" / "l1_factors"
     print(f"[3/5] 交易日 {len(dates)} 个（{dates[0]} ~ {dates[-1]}）→ {out_root}")
