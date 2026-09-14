@@ -7,6 +7,9 @@
 - 截面 Z-score / 缩尾：按 trade_date 分组，推理端可复现（推理时拿到整日横截面）。
 - 中性化：特征快照不含行业列，推理端不可复现 → 本模块不做中性化（已知限制）。
 - 缺失值：停牌 NaN 用截面中位数填充；整列缺失（非 NaN 行数过低）填 0 → z=0 中性。
+- 内存：按日期分块 + 分组向量化。历史版本逐 (日期×特征) `.loc` 赋值 + 整表 float64
+  上浮，在 5.5M 行 × 273 特征直读训练时把 48G 容器打爆（OOM 137）；分块后峰值 < 15G，
+  数学口径不变（每个交易日独立求截面统计量），输出保持 float32（与加载器降位一致）。
 """
 
 from __future__ import annotations
@@ -26,6 +29,8 @@ MIN_COVER_RATIO = 0.01
 MIN_COVER_ROWS = 20
 
 _WINSOR_QUANTILES = (0.01, 0.99)
+# 每次处理的交易日数（内存与向量化效率的平衡；单块 ≈ chunk×股票数 行）
+_CHUNK_DATES = 100
 
 
 def binarize_labels(y: np.ndarray | pd.Series, threshold: float = 0.0) -> np.ndarray:
@@ -66,6 +71,19 @@ def winsorize(
     return out.astype(np.float32)
 
 
+def _date_chunks(dates: pd.Series, chunk: int = _CHUNK_DATES):
+    """把唯一交易日切成若干块（用于分块处理，控制峰值内存）。"""
+    uniq = pd.Index(dates.unique())
+    for i in range(0, len(uniq), chunk):
+        yield uniq[i : i + chunk]
+
+
+def _chunk_broadcast(dates: pd.Series, per_date: pd.DataFrame) -> pd.DataFrame:
+    """把 (日期 × 特征) 的聚合值按行广播回该块（输出与 dates 同索引）。"""
+    base = pd.DataFrame({"trade_date": dates.to_numpy()}, index=dates.index)
+    return base.join(per_date, on="trade_date")[per_date.columns]
+
+
 def cross_sectional_median_fill(
     df: pd.DataFrame,
     features: list[str],
@@ -78,64 +96,82 @@ def cross_sectional_median_fill(
     - 该特征当日非 NaN 行数 ≥ max(总行数×min_ratio, min_rows)：用截面中位数填充停牌 NaN。
     - 否则视为整列缺失：填 0（后续 Z-score 后 std=0 → 全 0，中性）。
 
-    返回填充后的新 DataFrame（不修改入参），并记录整列缺失清单到 result["missing_log"]。
+    分块向量化实现：每块对 (日期×特征) 求一次 count/median，再整块 fillna。
+    返回填充后的新 DataFrame（不修改入参）。
     """
     out = df.copy()
-    log: list[dict[str, str]] = []
     if not features:
         return out
-    for date, grp in out.groupby("trade_date", sort=True):
-        n = len(grp)
-        threshold = max(int(n * min_ratio), min_rows)
-        for feat in features:
-            col = grp[feat]
-            n_valid = int(col.notna().sum())
-            if n_valid >= threshold:
-                med = col.median()
-                if np.isnan(med):
-                    med = 0.0
-                out.loc[col.index, feat] = col.fillna(med)
-            else:
-                out.loc[col.index, feat] = col.fillna(0.0)
-                log.append({"trade_date": str(date), "feature": feat,
-                            "valid": str(n_valid), "total": str(n),
-                            "action": "zero_fill"})
-    if log:
-        logger.warning("cross_sectional_median_fill: %d feature-days treated as whole-column missing -> 0", len(log))
+    zero_filled = 0
+    for chunk in _date_chunks(out["trade_date"]):
+        m = out["trade_date"].isin(chunk)
+        sub = out.loc[m, ["trade_date", *features]]
+        g = sub.groupby("trade_date", sort=False)
+        cnt = g[features].count()
+        med = g[features].median()
+        n = g[features].size()
+        thresh = np.maximum((n.astype(float) * min_ratio).astype(int), min_rows)
+        zero_mask = cnt.lt(thresh, axis=0)  # 整列缺失 → 填 0
+        fill = med.mask(zero_mask, 0.0)
+        zero_filled += int(zero_mask.to_numpy().sum())
+        fill_full = _chunk_broadcast(sub["trade_date"], fill)
+        out.loc[m, features] = sub[features].fillna(fill_full).astype(np.float32)
+    if zero_filled:
+        logger.warning(
+            "cross_sectional_median_fill: %d feature-days treated as whole-column missing -> 0",
+            zero_filled,
+        )
     return out
 
 
 def cross_sectional_zscore(
-    df: pd.DataFrame, features: list[str], winsor: bool = True, quantiles: tuple[float, float] = _WINSOR_QUANTILES
+    df: pd.DataFrame,
+    features: list[str],
+    winsor: bool = True,
+    quantiles: tuple[float, float] = _WINSOR_QUANTILES,
 ) -> pd.DataFrame:
     """按 (trade_date, feature) 截面 Z-score：每个交易日截面先分位缩尾，再 (x-mean)/std。
 
     std=0 的列（整列缺失填充后）全 0。NaN 透传（下游 dropna）。
     必须按 trade_date 分组——全局 Z-score 会混入不同交易日分布，截面排名失真。
+
+    分块向量化实现；块内用 float64 计算（防溢出），输出回 float32
+    （与加载器 "columns downcast to float32" 口径一致，避免整表上浮吃内存）。
     """
     out = df.copy()
     if not features:
         return out
-    # 特征列统一为 float64，避免 int 列写入 z 分数时报 LossySetitemError
-    for feat in features:
-        if feat in out.columns:
-            out[feat] = out[feat].astype(np.float64)
-    for date, grp in out.groupby("trade_date", sort=True):
-        idx = grp.index
-        for feat in features:
-            col = grp[feat].to_numpy(dtype=np.float64)
-            if winsor:
-                col = winsorize(col, quantiles)
-            valid = ~np.isnan(col)
-            if not valid.any():
-                out.loc[idx, feat] = np.nan
-                continue
-            mu = col[valid].mean()
-            sd = col[valid].std()
-            if sd == 0 or not np.isfinite(sd):
-                out.loc[idx, feat] = np.where(valid, 0.0, np.nan)
-            else:
-                out.loc[idx, feat] = np.where(valid, (col - mu) / sd, np.nan)
+    if winsor:
+        q_lo, q_hi = quantiles
+    for chunk in _date_chunks(out["trade_date"]):
+        m = out["trade_date"].isin(chunk)
+        sub = out.loc[m, ["trade_date", *features]]
+        g = sub.groupby("trade_date", sort=False)
+        X = sub[features].astype(np.float64)
+        if winsor:
+            lo = g[features].quantile(q_lo)
+            hi = g[features].quantile(q_hi)
+            # 样本过少（<10 有效值）不缩尾：边界放宽为 ±inf
+            cnt = g[features].count()
+            enough = cnt.ge(10)
+            lo = lo.where(enough, -np.inf)
+            hi = hi.where(enough, np.inf)
+            lo_full = _chunk_broadcast(sub["trade_date"], lo)
+            hi_full = _chunk_broadcast(sub["trade_date"], hi)
+            X = X.clip(lower=lo_full, upper=hi_full)
+        # 统计量必须取自**缩尾后**的 X（与旧实现「先裁后统」一致；用裁剪前数据
+        # 会让极值抬高的 mean/std 把 Z 压成常数——曾致全部特征近乎恒定）。
+        xg = X.copy()
+        xg["trade_date"] = sub["trade_date"].to_numpy()
+        g2 = xg.groupby("trade_date", sort=False)
+        mu = g2[features].transform("mean")
+        sd = g2[features].transform(lambda s: s.std(ddof=0))  # 对齐旧实现 np.nanstd(ddof=0)
+        sd_ok = sd.gt(0) & np.isfinite(sd)
+        Z = (X - mu).div(sd.where(sd_ok))
+        valid = X.notna()
+        Z = Z.where(valid)  # NaN 透传
+        Z = Z.mask(valid & ~sd_ok, 0.0)  # std 无效的截面 → 有效行置 0
+        out.loc[m, features] = Z.astype(np.float32)
     return out
 
 
@@ -160,4 +196,3 @@ def cross_sectional_preprocess(
     out = cross_sectional_median_fill(df, feats)
     out = cross_sectional_zscore(out, feats, winsor=winsor, quantiles=quantiles)
     return out
-

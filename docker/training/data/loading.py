@@ -460,7 +460,9 @@ def load_data(
         _dropped_days = len(_day_vol) - len(_real_days)
         if _dropped_days > 0:
             _rows_before = len(df)
-            df = df[df["trade_date"].isin(_real_days)].copy()
+            # 内存优化：布尔筛选已产生新帧，再 .copy() 会短暂三倍占存（原帧+筛选帧+副本），
+            # 大表直读（7M×280）曾把 48G 训练容器直接打爆。筛选语义等价，直接使用。
+            df = df[df["trade_date"].isin(_real_days)]
             logger.info(
                 "Dropped %d non-trading days (holiday fill rows): %d -> %d rows",
                 _dropped_days, _rows_before, len(df),
@@ -506,7 +508,8 @@ def load_data(
     )
 
     valid_count_before = len(df)
-    df = df[df["label"].notna()].copy()
+    # 同上的内存优化：去掉标签筛选后的冗余深拷贝
+    df = df[df["label"].notna()]
     logger.info(f"After label shift & dropna: {len(df)} rows (dropped {valid_count_before - len(df)} rows with missing labels)")
 
     # 分类目标保留为 0/1，不能再做截面 rank；否则 binary objective 会收到
