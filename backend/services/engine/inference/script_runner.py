@@ -96,7 +96,16 @@ def _resolve_quantdb_data_dir() -> str:
 
 
 def _resolve_market_factor_data_dir(meta: dict) -> str:
-    """按模型 metadata.context.market 解析因子数据根目录（HK→quanthk 等）。"""
+    """解析模型直读因子的数据根目录：metadata.quantdb_dir（训练时 pin）优先，否则按市场。
+
+    pin 优先必须与推理模板 ``_quantdb_reader`` 的取数口径一致 —— 脚本实际读的是
+    pin 目录，就绪检查/环境变量却按市场默认目录，两者不一致时会读错目录，
+    表现为门禁失败后**静默兜底到系统模型**（跨市场迁移、自定义数据集训练的模型
+    注册进常规市场时最容易踩到）。
+    """
+    pinned = str(meta.get("quantdb_dir") or "").strip()
+    if pinned and Path(pinned).is_dir():
+        return pinned
     try:
         from backend.services.engine.data_platform.quantdb_factor_reader import (
             market_data_dir, normalize_market,
