@@ -11,7 +11,7 @@
 | 阶段 | 进度 | 完成定义 |
 |---|---|---|
 | P0 止血+维护基建 | 10/10 ✅ | 安全问题清零；体检脚本可跑；回归进 CI |
-| P1 契约化 | 3/6 | 四契约落地；交易台数字可下钻 |
+| P1 契约化 | 4/6 | 四契约落地；交易台数字可下钻 |
 | P2 执行统一 | 0/6 | 回测-模拟一致性 diff=0 |
 | P3 策略收敛 | 0/5 | 策略全生命周期 E2E |
 | P4 选股收敛+评估 | 0/6 | Scanner 替换旧链；体检九项上线 |
@@ -177,8 +177,18 @@
 - **测试**：`test_order_contract.py` 9 条（合成器纯函数/迁移幂等/两表 DDL 同步/三写入点源断言/模型字段/来源枚举）
 - **证据（2026-09-16）**：9/9 通过；四列已上库（information_schema 确认）；**两表写入冒烟**（BEGIN…INSERT…ROLLBACK：sim_orders 落 client_order_id/source/price_source、orders 落 broker_fill/mirror）通过；ruff 无新增
 
-### T-P1-04 Ledger 契约
-`sim_orders/sim_trades/ledger` 写入闭环断言（成交必落账）；Redis 重建按市场（修跨市场串账）。测试：成交后台账非空断言 + 重建不串市场。
+### T-P1-04 Ledger 契约 ✅
+- **内容**：① **成交必落账**——新增真库 E2E 测试（record_trade 买入 → COMMIT → 账户/批次/流水三表齐落校验 → 清理测试租户）；
+  体检 C05 升级为**覆盖率检查**（近 7 日成交 vs cash_ledger ref_id，过渡期历史缺口 warn 点名）；② **跨市场串账修复**——
+  `simulation_position_lots`/`simulation_cash_ledger` 增 `market` 维度（写入落市场、消费/投影/重建按
+  `COALESCE(market,'CN')` 过滤）；`load_projection(market=)` 透传；重建（simulation_manager）按市场、
+  EOD 与融券显式 CN、企业行为保持全市场旧行为；③ 引擎重跑幂等去重（`RULE:SIM-DEDUP`，同 run 同标的同方向跳过）；
+  ④ `backend/shared/ledger_contract.py` 自愈迁移（安全化三纪律）；db_init.sql 同步
+- **测试**：`test_ledger_contract.py` 6 条（含 **真库 E2E**）+ 体检 14 条全绿
+- **证据（2026-09-16）**：20/20 通过（E2E 实测三表齐落 market=CN、测试租户零残留）；两表列已上库；ruff 无新增
+- **明确未做（记录在案）**：① 账户层仍为合并视图（account_id 带市场段的彻底市场化账户属后续）；
+  ② sim_orders `client_order_id` 唯一索引仍未启用（投影幂等查全路径未验证，硬约束会把重复单变 500）；
+  ③ runner 专用只读 DB 账号（T-P0-03 遗留）
 
 ### T-P1-07 资本注入调整 + 快照市场维度（P0-05 遗留）
 新市场账户**首日**的 `today_pnl` 不能把种子算成当日盈利：① 快照表加 `market` 列（前端注释里的"方案 B2"，解决非 CN 面板无市场维度）；② `get_baselines` 按市场对齐日初基线，或按"新账户出现的当日将种子计入基线"。测试：新建市场账户当日 today_pnl ≈ 0。

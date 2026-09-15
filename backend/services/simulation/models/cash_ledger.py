@@ -19,6 +19,8 @@ class SimulationCashLedger(Base, TimestampMixin):
         String(64), nullable=False, default="default", index=True
     )
     user_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    # T-P1-04 Ledger 契约：市场维度（历史行 NULL，按市场过滤读取时 COALESCE(market,'CN')）
+    market: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
     event_type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     ref_type: Mapped[str] = mapped_column(String(32), nullable=False, default="trade")
     ref_id: Mapped[str | None] = mapped_column(String(96), nullable=True, index=True)

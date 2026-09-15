@@ -1950,6 +1950,8 @@ CREATE TABLE IF NOT EXISTS simulation_cash_ledger (
     account_id      VARCHAR(96) NOT NULL,
     tenant_id       VARCHAR(64) NOT NULL DEFAULT 'default',
     user_id         VARCHAR(64) NOT NULL,
+    -- T-P1-04 Ledger 契约：市场维度（历史行 NULL 按 CN 口径）
+    market          VARCHAR(16),
     event_type      VARCHAR(64) NOT NULL,
     ref_type        VARCHAR(32) NOT NULL DEFAULT 'trade',
     ref_id          VARCHAR(96),
@@ -2096,6 +2098,8 @@ CREATE TABLE IF NOT EXISTS simulation_position_lots (
     account_id          VARCHAR(96) NOT NULL,
     tenant_id           VARCHAR(64) NOT NULL DEFAULT 'default',
     user_id             VARCHAR(64) NOT NULL,
+    -- T-P1-04 Ledger 契约：市场维度（历史行 NULL 按 CN 口径；修跨市场重建串账）
+    market              VARCHAR(16),
     symbol              VARCHAR(20) NOT NULL,
     position_side       VARCHAR(16) NOT NULL DEFAULT 'long',
     open_fill_id        VARCHAR(96),

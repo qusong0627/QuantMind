@@ -786,6 +786,12 @@ class SimulationExecutionEngine:
                 SimulationLedgerService,
             )
 
+            # T-P1-04：台账列自愈（market 维度）+ 成交落市场
+            from backend.shared.ledger_contract import (
+                ensure_ledger_contract_columns_async,
+            )
+
+            await ensure_ledger_contract_columns_async()
             ledger = SimulationLedgerService(self.db)
             before_snapshot = (
                 dict(result.account_snapshot)
@@ -796,6 +802,7 @@ class SimulationExecutionEngine:
                 order=order,
                 trade=trade,
                 account_snapshot=before_snapshot,
+                market=str(getattr(result, "market", None) or "CN"),
             )
         except Exception as ledger_exc:  # noqa: BLE001
             from backend.shared.errfmt import locate

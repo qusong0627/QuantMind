@@ -163,6 +163,8 @@ async def _execute_eod(trade_date: date) -> bool:
                         latest_price_loader=lambda symbol: _load_close_price(
                             session, symbol
                         ),
+                        # T-P1-04：EOD 当前为 CN 账本口径（多市场 EOD 属后续步骤）
+                        market="CN",
                     )
                     projection_account = projection.account
                     if projection_account is None:

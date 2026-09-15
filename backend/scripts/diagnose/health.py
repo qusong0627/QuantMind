@@ -143,6 +143,29 @@ def classify_ledger_writes(ledger_rows: int, accounts_with_positions: int) -> Ch
     return CheckResult("C05", "台账写入", "ok", "台账与账户均为空（无交易）")
 
 
+def classify_ledger_coverage(trades_7d: int, covered_7d: int) -> CheckResult:
+    """C05b 判定（T-P1-04）：近 7 日成交是否全部有对应 cash_ledger 流水。
+
+    过渡期口径：历史成交（T-P1-04 前）未落账属已知缺口 → warn 并点名笔数；
+    连续 7 日无未覆盖成交后自然转绿。若出现"新成交不落账"即视为链路回归。
+    """
+    if trades_7d <= 0:
+        return CheckResult("C05", "台账写入", "ok", "近 7 日无成交（覆盖率检查跳过）")
+    missing = max(0, int(trades_7d) - int(covered_7d))
+    if missing == 0:
+        return CheckResult(
+            "C05", "台账写入", "ok", f"近 7 日 {trades_7d} 笔成交全部落账", "", {"trades_7d": trades_7d}
+        )
+    return CheckResult(
+        "C05",
+        "台账写入",
+        "warn",
+        f"近 7 日 {trades_7d} 笔成交中 {missing} 笔无 cash_ledger 流水",
+        "历史成交属 T-P1-04 前已知缺口（7 日内自然过期）；若为新增成交则是落账链路回归，查 [CONTRACT:LEDGER] 日志",
+        {"trades_7d": trades_7d, "covered_7d": covered_7d},
+    )
+
+
 # ---------------------------------------------------------------------------
 # 检查实现（IO 经 ctx 注入）
 # ---------------------------------------------------------------------------
@@ -274,7 +297,20 @@ async def check_c05_ledger_writes(ctx: HealthContext) -> CheckResult:
             continue
         if any(float((p or {}).get("volume") or 0) > 0 for p in positions.values()):
             with_positions += 1
-    return classify_ledger_writes(trades, with_positions)
+    presence = classify_ledger_writes(trades, with_positions)
+    if presence.level != "ok":
+        return presence
+    # T-P1-04：覆盖率——近 7 日成交 vs cash_ledger 流水（成交必落账）
+    cov_rows = ctx.query(
+        "SELECT count(*) AS trades_7d, "
+        "count(*) FILTER (WHERE EXISTS ("
+        "  SELECT 1 FROM simulation_cash_ledger l WHERE l.ref_id = sim_trades.trade_id::text"
+        ")) AS covered_7d "
+        "FROM sim_trades WHERE executed_at >= now() - interval '7 days'"
+    )
+    trades_7d = int(cov_rows[0]["trades_7d"]) if cov_rows else 0
+    covered_7d = int(cov_rows[0]["covered_7d"]) if cov_rows else 0
+    return classify_ledger_coverage(trades_7d, covered_7d)
 
 
 async def check_c06_reconcile_diff(ctx: HealthContext) -> CheckResult:

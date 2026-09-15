@@ -538,6 +538,8 @@ return 0
                     latest_price_loader=lambda symbol: _load_close_price(
                         session, symbol
                     ),
+                    # T-P1-04：按市场重建（此前不带市场 → HK 重建会灌入 CN 持仓）
+                    market=market,
                 )
                 projection_account = projection.account
                 if projection_account is None:

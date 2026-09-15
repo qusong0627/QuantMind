@@ -19,6 +19,8 @@ class SimulationPositionLot(Base, TimestampMixin):
         String(64), nullable=False, default="default", index=True
     )
     user_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    # T-P1-04 Ledger 契约：市场维度（历史行 NULL，读取按 COALESCE(market,'CN') 口径）
+    market: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
     symbol: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
     position_side: Mapped[str] = mapped_column(
         String(16), nullable=False, default="long", index=True

@@ -115,7 +115,12 @@ class SimulationLedgerService:
         order: Any,
         trade: Any,
         account_snapshot: dict[str, Any] | None,
+        market: str | None = None,
     ) -> None:
+        # T-P1-04：台账落市场维度（lot/现金流水按市场过滤读取的基础）
+        from backend.shared.ledger_contract import normalize_ledger_market
+
+        market_n = normalize_ledger_market(market)
         tenant_id = str(getattr(order, "tenant_id", None) or "default").strip() or "default"
         user_id = str(getattr(order, "user_id", None) or "").strip()
         if not user_id:
@@ -143,6 +148,7 @@ class SimulationLedgerService:
             trade_time=_naive_utc(getattr(trade, "executed_at", None)),
             entries=cash_entries,
             ending_balance=float(after_snapshot.get("cash") or account.cash or 0.0),
+            market=market_n,
         )
 
         await self._apply_position_lots(
@@ -151,6 +157,7 @@ class SimulationLedgerService:
             user_id=user_id,
             order=order,
             trade=trade,
+            market=market_n,
         )
 
         self._sync_account_projection(account, after_snapshot)
@@ -200,6 +207,7 @@ class SimulationLedgerService:
         trade_time: datetime,
         entries: list[CashLedgerEntry],
         ending_balance: float,
+        market: str = "CN",
     ) -> None:
         running_balance = float(ending_balance or 0.0) - sum(
             float(entry.amount or 0.0) for entry in entries
@@ -211,6 +219,7 @@ class SimulationLedgerService:
                     account_id=account.account_id,
                     tenant_id=tenant_id,
                     user_id=user_id,
+                    market=market,
                     event_type=entry.event_type,
                     ref_type="trade",
                     ref_id=ref_id or None,
@@ -230,6 +239,7 @@ class SimulationLedgerService:
         user_id: str,
         order: Any,
         trade: Any,
+        market: str = "CN",
     ) -> None:
         symbol = str(getattr(order, "symbol", "") or "").strip().upper()
         if not symbol:
@@ -252,6 +262,7 @@ class SimulationLedgerService:
                         account_id=account_id,
                         tenant_id=tenant_id,
                         user_id=user_id,
+                        market=market,
                         symbol=symbol,
                         position_side="short",
                         open_fill_id=fill_id or None,
@@ -271,6 +282,7 @@ class SimulationLedgerService:
                     position_side="short",
                     quantity=quantity,
                     closed_at=occurred_at,
+                    market=market,
                 )
                 return
 
@@ -280,6 +292,7 @@ class SimulationLedgerService:
                     account_id=account_id,
                     tenant_id=tenant_id,
                     user_id=user_id,
+                    market=market,
                     symbol=symbol,
                     position_side="long",
                     open_fill_id=fill_id or None,
@@ -299,6 +312,7 @@ class SimulationLedgerService:
             position_side="long",
             quantity=quantity,
             closed_at=occurred_at,
+            market=market,
         )
 
     async def _consume_lots(
@@ -309,16 +323,21 @@ class SimulationLedgerService:
         position_side: str,
         quantity: float,
         closed_at: datetime,
+        market: str = "CN",
     ) -> None:
         remaining = float(quantity or 0.0)
         if remaining <= 0:
             return
+        from sqlalchemy import func as sa_func
+
         stmt: Select[tuple[SimulationPositionLot]] = (
             select(SimulationPositionLot)
             .where(
                 SimulationPositionLot.account_id == account_id,
                 SimulationPositionLot.symbol == symbol,
                 SimulationPositionLot.position_side == position_side,
+                # T-P1-04：同市场内消费（历史行 NULL 视为 CN）
+                sa_func.coalesce(SimulationPositionLot.market, "CN") == market,
                 SimulationPositionLot.status == "open",
                 SimulationPositionLot.quantity_remaining > 0,
             )

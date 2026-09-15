@@ -520,6 +520,34 @@ class SimulationEngine:
         )
 
         await ensure_order_contract_columns_async()
+        client_order_id = build_sim_client_order_id(run_id, order.symbol, order.side)
+        if client_order_id:
+            # T-P1-04：引擎重跑幂等——同 run 同标的同方向已建单则跳过（防重复下单）
+            from sqlalchemy import select as sa_select
+
+            existing = (
+                await db.execute(
+                    sa_select(SimOrder.order_id).where(
+                        SimOrder.tenant_id == tenant_id,
+                        SimOrder.client_order_id == client_order_id,
+                    )
+                )
+            ).first()
+            if existing is not None:
+                from backend.shared.errfmt import locate
+
+                logger.info(
+                    locate(
+                        "RULE:SIM-DEDUP",
+                        "重复调仓单已存在，幂等跳过",
+                        ref=client_order_id,
+                        where="simulation/engine.py:_execute_order",
+                    )
+                )
+                return ExecutionResult(
+                    success=True,
+                    message="duplicate client_order_id skipped (idempotent)",
+                )
         sim_order = SimOrder(
             tenant_id=tenant_id,
             user_id=int(user_id) if user_id.isdigit() else 0,
@@ -529,7 +557,7 @@ class SimulationEngine:
             quantity=order.quantity,
             price=order.price,
             strategy_id=int(strategy_id) if strategy_id.isdigit() else None,
-            client_order_id=build_sim_client_order_id(run_id, order.symbol, order.side),
+            client_order_id=client_order_id,
             source=SOURCE_REBALANCE,
             remarks=(str(order.reason).strip()[:500] if getattr(order, "reason", None) else None)
             or "策略托管自动调仓",

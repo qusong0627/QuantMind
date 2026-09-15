@@ -132,12 +132,14 @@ class SimulationProjectionService:
         tenant_id: str,
         user_id: str | int,
         latest_price_loader,
+        market: str | None = None,
     ) -> ProjectionSnapshot:
         account_id = self.build_account_id(tenant_id, user_id)
         account = await self.db.get(SimulationAccount, account_id)
         positions = await self._load_positions_from_lots(
             account_id=account_id,
             latest_price_loader=latest_price_loader,
+            market=market,
         )
         return ProjectionSnapshot(account=account, positions=positions)
 
@@ -146,7 +148,10 @@ class SimulationProjectionService:
         *,
         account_id: str,
         latest_price_loader,
+        market: str | None = None,
     ) -> dict[str, dict[str, float]]:
+        from sqlalchemy import func as sa_func
+
         stmt = (
             select(
                 SimulationPositionLot,
@@ -163,6 +168,15 @@ class SimulationProjectionService:
                 SimulationPositionLot.id.asc(),
             )
         )
+        if market is not None:
+            # T-P1-04：按市场过滤（修跨市场串账——HK 重建不再灌入 CN 持仓）；
+            # 历史行 market 为 NULL，按 CN 口径（COALESCE）。market=None 保留全市场旧行为。
+            from backend.shared.ledger_contract import normalize_ledger_market
+
+            stmt = stmt.where(
+                sa_func.coalesce(SimulationPositionLot.market, "CN")
+                == normalize_ledger_market(market)
+            )
         lots = list((await self.db.execute(stmt)).scalars().all())
         if not lots:
             return {}

@@ -256,6 +256,8 @@ async def _rebuild_redis_cache(account: SimulationAccount) -> None:
             tenant_id=account.tenant_id,
             user_id=account.user_id,
             latest_price_loader=lambda symbol: _load_price(session, symbol),
+            # T-P1-04：融券保证金仅 CN 可用（市场过滤口径）
+            market="CN",
         )
         if projection.account is None:
             return
