@@ -425,6 +425,12 @@ def train_model(df: pd.DataFrame, features: list[str], cfg: dict, hardware: dict
     train_elapsed = time.time() - train_t0
     logger.info("Training finished in %.2fs (%s)", train_elapsed, model_type)
 
+    # X_train/X_val（≈7.8GB）训练后即成死重：预测经 _fill(frames) 从帧重算，
+    # 不再使用训练矩阵；不释放会与全窗口 _fill(df) 的 8.2GB 临时并存，训练后
+    # 阶段峰值 45G+ 撞容器限额（2026-09-16 XGB 实证 ExitCode=137，训练已跑完）。
+    del X_train, X_val
+    _trim_memory("after training")
+
     # 统一预测 (树模型)
     y_train_pred = _predict_with_model(model, _fill(train_df), model_type, features)
     y_val_pred = _predict_with_model(model, _fill(val_df), model_type, features)
@@ -442,7 +448,17 @@ def train_model(df: pd.DataFrame, features: list[str], cfg: dict, hardware: dict
         ["label_return"] if "label_return" in df.columns else []
     )
     full_pred_df = df[_fp_cols].copy()
-    full_pred_df["pred"] = _predict_with_model(model, _fill(df), model_type, features)
+    # 分块预测：整帧 _fill(df)（8.2GB 临时）改为按日期块（100 日/块，块内 ~0.4GB），
+    # 与上方 del X_* 一起把训练后阶段峰值再降 ~15GB。树/线性模型逐行独立预测。
+    # 注意 df 按 symbol 排序、日期是交错的——必须按掩码位置回填，拼接会错位。
+    _pred_out = np.empty(len(df), dtype=np.float64)
+    _uniq_dates = pd.Index(df["trade_date"].unique())
+    for _i in range(0, len(_uniq_dates), 100):
+        _chunk_mask = df["trade_date"].isin(_uniq_dates[_i : _i + 100]).to_numpy()
+        _pred_out[_chunk_mask] = _predict_with_model(
+            model, _fill(df.loc[_chunk_mask]), model_type, features
+        )
+    full_pred_df["pred"] = _pred_out
     full_pred_df["split"] = "train"
     full_pred_df.loc[
         (full_pred_df["trade_date"] >= val_df["trade_date"].min()) &
@@ -607,6 +623,9 @@ def _train_single_model(
     else:
         raise ValueError(f"Unsupported model_type: {model_type}")
 
+    del X_train, X_val
+    _trim_memory("after training (single)")
+
     # 树模型预测
     y_train_pred = _predict_with_model(model, _fill(train_df), model_type, features)
     y_val_pred = _predict_with_model(model, _fill(val_df), model_type, features)
@@ -623,7 +642,16 @@ def _train_single_model(
             ["label_return"] if "label_return" in df.columns else []
         )
         full_pred_df = df[_fp_cols].copy()
-        full_pred_df["pred"] = _predict_with_model(model, _fill(df), model_type, features)
+        # 分块预测：同 train_model（整帧临时 → 100 日/块），训练后阶段峰值再降 ~8GB；
+        # 按掩码位置回填（df 按 symbol 排序、日期交错，拼接会错位）
+        _pred_out = np.empty(len(df), dtype=np.float64)
+        _uniq_dates = pd.Index(df["trade_date"].unique())
+        for _i in range(0, len(_uniq_dates), 100):
+            _chunk_mask = df["trade_date"].isin(_uniq_dates[_i : _i + 100]).to_numpy()
+            _pred_out[_chunk_mask] = _predict_with_model(
+                model, _fill(df.loc[_chunk_mask]), model_type, features
+            )
+        full_pred_df["pred"] = _pred_out
         full_pred_df["split"] = "train"
         full_pred_df.loc[
             (full_pred_df["trade_date"] >= val_df["trade_date"].min()) &
