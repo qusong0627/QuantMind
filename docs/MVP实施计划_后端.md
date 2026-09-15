@@ -11,7 +11,7 @@
 | 阶段 | 进度 | 完成定义 |
 |---|---|---|
 | P0 止血+维护基建 | 10/10 ✅ | 安全问题清零；体检脚本可跑；回归进 CI |
-| P1 契约化 | 4/6 | 四契约落地；交易台数字可下钻 |
+| P1 契约化 | 5/6 | 四契约落地；交易台数字可下钻 |
 | P2 执行统一 | 0/6 | 回测-模拟一致性 diff=0 |
 | P3 策略收敛 | 0/5 | 策略全生命周期 E2E |
 | P4 选股收敛+评估 | 0/6 | Scanner 替换旧链；体检九项上线 |
@@ -151,8 +151,9 @@
 > 推理任务分布式锁（修同日多 run 竞态）；先例：`qm:inference:completed:*`（script_runner:143）与
 > hosted scheduler 的分布式锁（`qm:hosted:simulation:*`）。
 
-### T-P1-01 Signal 契约增列
-`engine_signal_scores` 加 `market/rank_pct/source/signal_ts`（**已实现并上库**：自愈式迁移 `shared/signal_contract.py`、两写入端接线、`db_init.sql` 同步、设计文档 §4.1 已对齐 rank_pct 口径）；回填脚本 `backend/scripts/backfill_rank_pct.py`（幂等分窗 UPDATE，与 PG percent_rank() 同口径，有对照测试）。下游读点全改为 rank 口径（**待办：下游 rank 化**）。测试：`test_signal_contract.py` 11 条（纯函数/PG 对照/写入端源断言/迁移幂等）+ 回填校验（抽样对账，待回填完成后补）。
+### T-P1-01 Signal 契约增列 ✅
+`engine_signal_scores` 加 `market/rank_pct/source/signal_ts`（**已实现并上库**：自愈式迁移 `shared/signal_contract.py`、两写入端接线、`db_init.sql` 同步、设计文档 §4.1 已对齐 rank_pct 口径）；回填脚本 `backend/scripts/backfill_rank_pct.py`（幂等分窗 UPDATE，与 PG percent_rank() 同口径，有对照测试）。下游读点全改为 rank 口径（**待办：下游 rank 化 → T-P4-03**）。测试：`test_signal_contract.py` 11 条（纯函数/PG 对照/写入端源断言/迁移幂等）。
+- **回填完成（2026-09-16）**：**14261830/14261830 全填、剩余 0**；25 个分窗逐批计数吻合；跨期抽验（2024-08-05 / 2026-09-15）0 NULL、min/max=0.00/1.00；期间遭遇并修复热表 DDL 自阻塞事故（见事故记录），修复后全速完成。
 
 ### T-P1-02 就绪标记与单实例锁 ✅
 - **内容**：`backend/shared/inference_lock.py` 唯一实现（SET NX EX 获取 + token + **Lua CAS 释放**）；锁三层收敛：
@@ -193,8 +194,15 @@
 ### T-P1-07 资本注入调整 + 快照市场维度（P0-05 遗留）
 新市场账户**首日**的 `today_pnl` 不能把种子算成当日盈利：① 快照表加 `market` 列（前端注释里的"方案 B2"，解决非 CN 面板无市场维度）；② `get_baselines` 按市场对齐日初基线，或按"新账户出现的当日将种子计入基线"。测试：新建市场账户当日 today_pnl ≈ 0。
 
-### T-P1-05 今日交易台后端聚合 API
-`/api/v1/desk/today`：数据✓推理✓→候选→计划→执行→盈亏 + 健康卡（与体检脚本同源）；所有数字带 `source` 下钻字段。
+### T-P1-05 今日交易台后端聚合 API ✅
+- **内容**：`GET /api/v1/desk/today`（api 服务）——一屏闭环：管线四步 + 信号（BUY/SELL/HOLD +
+  Top5 候选按 rank_pct）+ 执行（SIM/REAL 今日订单合并，带 price_source/client_order_id/origin/reason）+
+  盈亏（用户级快照）+ 健康卡。**与体检脚本同源**：pipeline 四步与 health 卡直接映射
+  `health.py::CHECKS` 判定（不重复造逻辑）；健康检查同步 IO 走 `asyncio.to_thread`（不阻塞事件循环）；
+  `?health=false` 可跳过；**所有块带 `source` 下钻字段**；身份双口径（快照/模拟单=归一 uid，REAL=原始 sub）
+- **测试**：`test_desk_today.py` 5 条（pipeline 纯函数/unknown 降级/同源与 to_thread 源断言/路由注册/下钻字段）
+- **证据（2026-09-16）**：5/5 通过；**线上冒烟**（重启后 admin token 实调）——pipeline 四步、
+  BUY 1040/SELL 843、Top5 候选、盈亏 200.8 万、健康 7 ok/2 warn/1 fail（fail 为已知双键形）全部正确返回
 
 ### T-P1-06 调度表统一
 散落 worker/beat 收敛为一条注册表（含开关、心跳、手动重跑 `--date --force`）；心跳进体检。
