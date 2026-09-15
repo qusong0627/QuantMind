@@ -67,6 +67,7 @@ class SimulationOrderSubmissionService:
         trigger_source: str = "manual",
         time_in_force: str = "DAY",
         expires_at: datetime | None = None,
+        strict_market: bool = True,
     ) -> SimulationSubmissionOutcome:
         # P0-1/P0-4：同用户临界区串行化（幂等查+建单+撮合+落库），防并发双花与
         # 融券读-改-写丢更新。锁忙直接失败由调用方重试，不静默放行。
@@ -102,6 +103,7 @@ class SimulationOrderSubmissionService:
                     trigger_source=trigger_source,
                     time_in_force=time_in_force,
                     expires_at=expires_at,
+                    strict_market=strict_market,
                 )
         except RuntimeError:
             return SimulationSubmissionOutcome(
@@ -130,6 +132,7 @@ class SimulationOrderSubmissionService:
         trigger_source: str = "manual",
         time_in_force: str = "DAY",
         expires_at: datetime | None = None,
+        strict_market: bool = True,
     ) -> SimulationSubmissionOutcome:
         normalized_client_order_id = str(client_order_id or "").strip() or None
         if normalized_client_order_id:
@@ -213,7 +216,7 @@ class SimulationOrderSubmissionService:
         await self.order_service.sync_order_projection(order)
         await self.db.commit()
 
-        execution_result = await self.engine.execute_order(order)
+        execution_result = await self.engine.execute_order(order, strict_market=strict_market)
         if not execution_result.success:
             if str(execution_result.message or "") == "Order expired before execution":
                 await self.engine.mark_expired(order, execution_result.message)

@@ -546,28 +546,12 @@ class TdxRollingTradeService:
         返回 (placed_orders, failed_orders)。
         """
         from backend.services.trade_shared.redis_client import redis_client as trade_redis
-        from backend.services.trade_shared.simulation_manager import (
-            SimulationAccountManager,
-        )
-        from backend.services.simulation.models.order import (
-            OrderSide,
-            OrderStatus,
-            OrderType,
-        )
-        from backend.services.simulation.schemas.order import SimOrderCreate
-        from backend.services.simulation.services.execution_engine import (
-            SimulationExecutionEngine,
-        )
-        from backend.services.simulation.services.order_service import (
-            SimOrderService,
-        )
         from backend.shared.database_manager_v2 import get_db_manager
 
         user_id_int = int(user_id) if str(user_id).isdigit() else 0
         if user_id_int <= 0:
             return [], [{"error": f"无效的用户 ID: {user_id}"}]
 
-        account_manager = SimulationAccountManager(trade_redis)
         db_manager = get_db_manager()
         placed: list[dict[str, Any]] = []
         failed: list[dict[str, Any]] = []
@@ -585,41 +569,48 @@ class TdxRollingTradeService:
                 failed.append({**item, "side": side, "error": "数量或股票代码无效"})
                 return
             try:
+                # T-P2-01：改经 OrderRouter 唯一入口（获得账户锁/幂等/涨跌停/费用/落账）；
+                # paper 模式刻意不动真单（mirror=False，免确认零风险）；自动化路径允许如实降级。
+                from backend.services.simulation.services.order_router import (
+                    OrderRequest,
+                    submit_order,
+                )
+                from backend.shared.order_contract import SOURCE_TDX_ROLLING
+
                 async with db_manager.get_session() as db:
-                    order_service = SimOrderService(db)
-                    exec_engine = SimulationExecutionEngine(db, account_manager)
-                    order = await order_service.create_order(
-                        tenant_id,
-                        str(user_id_int),
-                        SimOrderCreate(
+                    routed = await submit_order(
+                        db,
+                        trade_redis,
+                        OrderRequest(
+                            tenant_id=tenant_id,
+                            user_id=user_id_int,
                             symbol=symbol,
-                            side=OrderSide.BUY if side == "buy" else OrderSide.SELL,
-                            order_type=OrderType.MARKET,
+                            side=side,
                             quantity=volume,
+                            order_type="market",
                             price=float(item.get("close") or 0) or None,
-                            strategy_id=None,
+                            source=SOURCE_TDX_ROLLING,
                             remarks=f"TdxRolling paper: {run_id}",
+                            run_id=str(run_id or ""),
+                            mirror=False,
+                            strict_market=False,
                         ),
                     )
-                    order.status = OrderStatus.SUBMITTED
-                    order.submitted_at = datetime.now()
-                    await db.commit()
-                    result = await exec_engine.execute_order(order)
-                    if result.success:
-                        await exec_engine.apply_filled(order, result)
+                    if routed.success:
                         placed.append(
                             {
                                 **item,
                                 "side": side,
-                                "order_id": str(order.order_id),
+                                "order_id": str(routed.order_id or ""),
                                 "status": "filled",
-                                "message": f"模拟成交 {result.quantity}股@{result.price}",
+                                "message": (
+                                    f"模拟成交 {routed.filled_quantity}股@{routed.fill_price}"
+                                    f"（{routed.price_source}）"
+                                ),
                             }
                         )
                     else:
-                        await exec_engine.mark_rejected(order, result.message)
-                        failed.append({**item, "side": side, "error": result.message})
-                    await db.commit()
+                        failed.append({**item, "side": side, "error": routed.message})
             except Exception as exc:
                 failed.append({**item, "side": side, "error": str(exc)})
 

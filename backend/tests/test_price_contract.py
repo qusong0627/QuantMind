@@ -128,8 +128,8 @@ def test_both_paths_wired_to_resolver():
     assert "_resolve_fill_price(order, bar, strict_market=False)" in src
     assert "external_price=resolved.price" in src
     assert "price_source=resolved.source" in src
-    # 手动即时路径：strict（保持 P0-5 语义）
-    assert "_resolve_fill_price(order, None, strict_market=True)" in src
+    # 手动即时路径：strict（保持 P0-5 语义；strict_market 参数化于 T-P2-01）
+    assert "_resolve_fill_price(order, None, strict_market=strict_market)" in src
     # 不再有旧的双份守卫/谎报来源
     assert 'price_source=f"local_{cfg.price_mode}"' not in src
     assert "RULE:PRICE-STALE" in src

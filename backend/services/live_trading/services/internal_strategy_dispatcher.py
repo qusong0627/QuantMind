@@ -15,7 +15,6 @@ from backend.services.trade_shared.portfolio.models import Portfolio
 from backend.services.trade_shared.redis_client import RedisClient
 from backend.services.trade_shared.schemas.order import OrderCreate
 from backend.services.trade_shared.services.order_service import OrderService
-from backend.services.trade_shared.simulation_manager import SimulationAccountManager
 from backend.services.live_trading.services.trading_engine import TradingEngine
 from backend.services.live_trading.routers.real_trading_utils import (
     _fetch_active_portfolio_snapshot,
@@ -307,9 +306,6 @@ async def dispatch_internal_strategy_order(
         # 禁止只改 Redis / 手插 sim_orders，否则交易记录与 EOD/资金台账会分裂。
         try:
             from backend.services.simulation.models.order import SimOrder
-            from backend.services.simulation.services.order_submission_service import (
-                SimulationOrderSubmissionService,
-            )
 
             dup_marker = f"client_order_id={client_order_id}"
             dup_stmt = (
@@ -348,24 +344,33 @@ async def dispatch_internal_strategy_order(
             elif str(client_order_id or "").startswith("auto-"):
                 trigger_source = "hosted"
 
-            sim_manager = SimulationAccountManager(redis)
-            submission = SimulationOrderSubmissionService(db, sim_manager)
-            outcome = await submission.submit_and_fill(
-                tenant_id=tenant,
-                user_id=uid,
-                symbol=symbol,
-                side=side_raw.lower(),
-                quantity=quantity,
-                order_type=sim_order_type,
-                price=price if price > 0 else None,
-                portfolio_id=0,
-                strategy_id=strategy_id_val,
-                trade_action=trade_action_raw,
-                position_side=position_side_raw,
-                is_margin_trade=is_margin_trade,
-                remarks=combined_remarks,
-                client_order_id=client_order_id,
-                trigger_source=trigger_source,
+            # T-P2-01：改经 OrderRouter 唯一入口（内部即时链不变，幂等/锁/落账在链内）；
+            # 镜像仍由本 dispatcher 处理（携带 client_order_id 与强平豁免等双轨语义）。
+            from backend.services.simulation.services.order_router import (
+                OrderRequest,
+                submit_order,
+            )
+
+            outcome = await submit_order(
+                db,
+                redis,
+                OrderRequest(
+                    tenant_id=tenant,
+                    user_id=uid,
+                    symbol=symbol,
+                    side=side_raw.lower(),
+                    quantity=quantity,
+                    order_type=sim_order_type,
+                    price=price if price > 0 else None,
+                    source=trigger_source,
+                    client_order_id=client_order_id,
+                    strategy_id=strategy_id_val,
+                    trade_action=trade_action_raw,
+                    position_side=position_side_raw,
+                    is_margin_trade=is_margin_trade,
+                    remarks=combined_remarks,
+                    mirror=False,
+                ),
             )
             if not outcome.success:
                 logger.warning(

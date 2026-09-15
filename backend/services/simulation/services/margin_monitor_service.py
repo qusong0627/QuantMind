@@ -41,10 +41,6 @@ async def _scan_and_monitor() -> tuple[int, int]:
     warnings = 0
     liquidations = 0
 
-    from backend.services.simulation.services.simulation_manager import (
-        SimulationAccountManager,
-    )
-
     async with get_session(read_only=False) as session:
         accounts = list(
             (
@@ -59,14 +55,7 @@ async def _scan_and_monitor() -> tuple[int, int]:
             .all()
         )
 
-        manager = SimulationAccountManager(redis_client)
-
-        from backend.services.simulation.services.order_submission_service import (
-            SimulationOrderSubmissionService,
-        )
-
-        submission_service = SimulationOrderSubmissionService(session, manager)
-
+        # T-P2-01：下单已收口 OrderRouter（在 _force_liquidate 内经 submit_order 调用）
         for account in accounts:
             try:
                 equity = float(account.equity or account.total_asset or 0.0)
@@ -79,7 +68,6 @@ async def _scan_and_monitor() -> tuple[int, int]:
                     count = await _force_liquidate(
                         session=session,
                         account=account,
-                        submission_service=submission_service,
                         target_ratio=_WARNING_RATIO,
                     )
                     liquidations += count
@@ -147,10 +135,18 @@ async def _force_liquidate(
     *,
     session,
     account: SimulationAccount,
-    submission_service,
     target_ratio: float,
 ) -> int:
-    """Close short positions FIFO until ratio >= target_ratio or all shorts exhausted."""
+    """Close short positions FIFO until ratio >= target_ratio or all shorts exhausted.
+
+    T-P2-01：下单经 OrderRouter 唯一入口（锁/幂等/落账内聚）。
+    """
+    from backend.services.simulation.services.order_router import (
+        OrderRequest,
+        submit_order,
+    )
+    from backend.shared.order_contract import SOURCE_FORCED_LIQUIDATION
+
     account_id = account.account_id
     now = datetime.utcnow()
     liquidated = 0
@@ -192,18 +188,24 @@ async def _force_liquidate(
         board_lot_qty = min(int(board_lot_qty), int(qty))
 
         # P0-4：先成交、后记账。成交失败不留幽灵流水，避免审计与余额对不上。
-        outcome = await submission_service.submit_and_fill(
-            tenant_id=account.tenant_id,
-            user_id=int(account.user_id),
-            symbol=lot.symbol,
-            side="buy",
-            quantity=float(board_lot_qty),
-            order_type="market",
-            trade_action="buy_to_close",
-            position_side="short",
-            is_margin_trade=True,
-            trigger_source="forced_liquidation",
-            remarks=f"Forced liquidation: margin ratio below {_LIQUIDATION_RATIO}",
+        outcome = await submit_order(
+            session,
+            redis_client,
+            OrderRequest(
+                tenant_id=account.tenant_id,
+                user_id=int(account.user_id),
+                symbol=lot.symbol,
+                side="buy",
+                quantity=float(board_lot_qty),
+                order_type="market",
+                source=SOURCE_FORCED_LIQUIDATION,
+                trade_action="buy_to_close",
+                position_side="short",
+                is_margin_trade=True,
+                remarks=f"Forced liquidation: margin ratio below {_LIQUIDATION_RATIO}",
+                # 强平风险优先：行情链路缺席时允许如实标注的降级成交（不允许平不掉仓）
+                strict_market=False,
+            ),
         )
 
         if outcome.success:

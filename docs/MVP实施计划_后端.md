@@ -12,7 +12,7 @@
 |---|---|---|
 | P0 止血+维护基建 | 10/10 ✅ | 安全问题清零；体检脚本可跑；回归进 CI |
 | P1 契约化 | 6/6 ✅ | 四契约落地；交易台数字可下钻 |
-| P2 执行统一 | 1/6 | 回测-模拟一致性 diff=0 |
+| P2 执行统一 | 2/6 | 回测-模拟一致性 diff=0 |
 | P3 策略收敛 | 0/5 | 策略全生命周期 E2E |
 | P4 选股收敛+评估 | 0/6 | Scanner 替换旧链；体检九项上线 |
 | P5+ | — | 见主文档 §12.2 总表（P5 后进入下个迭代再细化） |
@@ -231,8 +231,20 @@
 - **证据（2026-09-16）**：10/10 通过；**真机探针**——托管路径对 600036.SH 如实输出
   `prev_close_bar / price=41.83 / degraded=True`；手动 strict 保持原拒单话术（local_daily_open → 拒绝）
 
-### T-P2-01 OrderRouter（唯一入口）
-五条下单路径收敛；账户锁 + 幂等 + 状态机；沙箱/镜像改走 Router。
+### T-P2-01 OrderRouter（唯一入口）✅
+- **架构决策（细案论证后实施）**：Router = 组合而非重写——即时链委托给线上验证过的
+  `SimulationOrderSubmissionService`（锁/幂等/会话窗/投影），Router 补齐：统一请求/结果契约、
+  **from_bar 托管模式**（锁→幂等→建单→execute_from_bar→落账）、**镜像收口**、strict_market 分级
+- **五路径全部改接**（注释与源断言双重防回退）：托管引擎（bar+mirror，旧内联链与 direct
+  execute_from_bar/SimOrder 创建全部移除）/ 沙箱消费者（**修 R6：获得锁+幂等+落账+真单镜像**，
+  source=sandbox）/ TDX 滚动 paper（获得锁/涨跌停/费用/落账，source=tdx_rolling）/ internal
+  dispatcher（source=hosted/manual，既有镜像通知保留）/ 融券强平（source=forced_liquidation，
+  刻意 strict=False 允许如实降级——风险优先不平不掉仓）
+- source 域新增：sandbox / tdx_rolling / hosted / forced_liquidation（taxonomy 测试同步）
+- `execute_order`/`submit_and_fill` 增 `strict_market` 参数贯穿（默认 True 保 P0-5）
+- **测试**：`test_order_router.py` 7 条（strict 解析/校验早退/委托捕获 source+strict/duplicate 映射/
+  五路径源断言/防回退）+ 既有 74 条全绿
+- **证据（2026-09-16）**：74/74 通过（含 P1 全部套件）；重启后启动干净；体检基线不变
 
 ### T-P2-02 撮合规则单实现
 matcher/market_rules 提升为全模式共用；回测接入同一实现。

@@ -660,11 +660,12 @@ class SimulationExecutionEngine:
         )
 
     async def execute_order(
-        self, order: SimOrder, market: str | None = None
+        self, order: SimOrder, market: str | None = None, *, strict_market: bool = True
     ) -> ExecutionResult:
         # T-P2-03：价格与陈旧价守卫收敛到 _resolve_fill_price（唯一实现）；
-        # 手动即时单 strict_market=True——保持 P0-5 语义（非实时市价单拒绝成交）。
-        resolved = await self._resolve_fill_price(order, None, strict_market=True)
+        # strict_market=True（手动即时单，默认）保持 P0-5 语义——非实时市价单拒绝成交；
+        # 自动化路径（沙箱/TDX/由 Router 传入 False）允许如实标注的降级。
+        resolved = await self._resolve_fill_price(order, None, strict_market=strict_market)
         if not resolved.ok:
             return ExecutionResult(
                 success=False, message=resolved.message, price_source=resolved.source or None

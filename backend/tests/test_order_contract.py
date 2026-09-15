@@ -71,10 +71,17 @@ def test_db_init_synced():
 
 
 def test_engine_writer_wired():
-    src = (_BACKEND / "services/simulation/engine.py").read_text(encoding="utf-8")
-    assert "build_sim_client_order_id(run_id, order.symbol, order.side)" in src
-    assert "source=SOURCE_REBALANCE" in src
-    assert "ensure_order_contract_columns_async()" in src
+    """T-P2-01 后：引擎改经 OrderRouter；幂等键合成与封列自愈分别在引擎/Router。"""
+    engine_src = (_BACKEND / "services/simulation/engine.py").read_text(encoding="utf-8")
+    assert "build_sim_client_order_id(" in engine_src
+    assert "SOURCE_REBALANCE" in engine_src
+    assert "order_router import" in engine_src
+
+    router_src = (
+        _BACKEND / "services/simulation/services/order_router.py"
+    ).read_text(encoding="utf-8")
+    assert "ensure_order_contract_columns_async()" in router_src
+    assert "trigger_source=req.source" in router_src
 
 
 def test_order_service_writer_wired():
@@ -111,5 +118,19 @@ def test_source_taxonomy_constants():
         oc.SOURCE_INTERNAL,
         oc.SOURCE_MIRROR,
         oc.SOURCE_SLTP,
-    } == {"rebalance", "manual", "internal", "mirror", "sltp"}
+        oc.SOURCE_SANDBOX,
+        oc.SOURCE_TDX_ROLLING,
+        oc.SOURCE_HOSTED,
+        oc.SOURCE_FORCED_LIQUIDATION,
+    } == {
+        "rebalance",
+        "manual",
+        "internal",
+        "mirror",
+        "sltp",
+        "sandbox",
+        "tdx_rolling",
+        "hosted",
+        "forced_liquidation",
+    }
     assert SOURCE_REBALANCE == "rebalance"

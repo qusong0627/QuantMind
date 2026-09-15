@@ -15,9 +15,6 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.services.trade_shared.redis_client import RedisClient
-from backend.services.live_trading.services.real_mirror_service import (
-    mirror_virtual_fill,
-)
 from backend.services.simulation.services.execution_engine import (
     ExecutionResult,
     SimulationExecutionEngine,
@@ -505,109 +502,71 @@ class SimulationEngine:
         run_id: str = "",
         bar: Any = None,
     ) -> ExecutionResult:
-        """执行单个订单（虚拟撮合；成功后按开关镜像一笔真单到 QMT）"""
-        from backend.services.simulation.models.order import (
-            OrderSide,
-            OrderType,
-            SimOrder,
+        """执行单个订单（T-P2-01：改经 OrderRouter 唯一入口——幂等/落账/镜像收口在链内）"""
+        from backend.services.simulation.services.order_router import (
+            OrderRequest,
+            submit_order,
         )
-
-        # 创建订单对象（T-P1-03：确定性幂等键 + 来源分类，落 Order 契约列）
+        from backend.shared.errfmt import locate
         from backend.shared.order_contract import (
             SOURCE_REBALANCE,
             build_sim_client_order_id,
-            ensure_order_contract_columns_async,
         )
 
-        await ensure_order_contract_columns_async()
-        client_order_id = build_sim_client_order_id(run_id, order.symbol, order.side)
-        if client_order_id:
-            # T-P1-04：引擎重跑幂等——同 run 同标的同方向已建单则跳过（防重复下单）
-            from sqlalchemy import select as sa_select
-
-            existing = (
-                await db.execute(
-                    sa_select(SimOrder.order_id).where(
-                        SimOrder.tenant_id == tenant_id,
-                        SimOrder.client_order_id == client_order_id,
-                    )
-                )
-            ).first()
-            if existing is not None:
-                from backend.shared.errfmt import locate
-
-                logger.info(
-                    locate(
-                        "RULE:SIM-DEDUP",
-                        "重复调仓单已存在，幂等跳过",
-                        ref=client_order_id,
-                        where="simulation/engine.py:_execute_order",
-                    )
-                )
-                return ExecutionResult(
-                    success=True,
-                    message="duplicate client_order_id skipped (idempotent)",
-                )
-        sim_order = SimOrder(
-            tenant_id=tenant_id,
-            user_id=int(user_id) if user_id.isdigit() else 0,
-            symbol=order.symbol,
-            side=OrderSide.BUY if order.side == "BUY" else OrderSide.SELL,
-            order_type=OrderType.MARKET,
-            quantity=order.quantity,
-            price=order.price,
-            strategy_id=int(strategy_id) if strategy_id.isdigit() else None,
-            client_order_id=client_order_id,
-            source=SOURCE_REBALANCE,
-            remarks=(str(order.reason).strip()[:500] if getattr(order, "reason", None) else None)
-            or "策略托管自动调仓",
-        )
-        db.add(sim_order)
-        await db.flush()
-
-        if bar is not None:
-            result = await exec_engine.execute_from_bar(
-                sim_order, bar, market=getattr(market, "value", None)
-            )
-        else:
-            result = await exec_engine.execute_order(
-                sim_order, market=getattr(market, "value", None)
-            )
-        if result.success:
-            await exec_engine.apply_filled(sim_order, result)
-            # 双轨镜像：虚拟成交已生效，按开关/白名单/限额向大 QMT 补一笔真单。
-            # 用独立会话（db=None），避免真单写入提前提交本周期未完成的虚拟账本；
-            # mirror_virtual_fill 自身吞掉全部异常，不影响上面的虚拟成交。
-            await mirror_virtual_fill(
-                db=None,
-                redis=self.redis,
+        routed = await submit_order(
+            db,
+            self.redis,
+            OrderRequest(
                 tenant_id=tenant_id,
-                user_id=user_id,
+                user_id=int(user_id) if str(user_id).isdigit() else 0,
                 symbol=order.symbol,
                 side=order.side,
                 quantity=order.quantity,
-                price=float(result.price or order.price or 0),
-                sim_order_id=str(sim_order.order_id or ""),
+                order_type="market",
+                price=order.price,
+                source=SOURCE_REBALANCE,
+                client_order_id=build_sim_client_order_id(
+                    run_id, order.symbol, order.side
+                ),
+                strategy_id=int(strategy_id) if str(strategy_id).isdigit() else None,
+                remarks=(
+                    str(order.reason).strip()[:500]
+                    if getattr(order, "reason", None)
+                    else None
+                )
+                or "策略托管自动调仓",
+                bar=bar,
                 run_id=run_id,
-                strategy_id=strategy_id,
-                market=str(getattr(market, "value", market) or ""),
-                source="simulation_engine",
-            )
-        else:
-            # T-P0-08：拒单此前仅写入订单 remarks，控制面完全不可见；补自定位告警
-            from backend.shared.errfmt import locate
-
-            logger.warning(
+                mirror=True,
+                mirror_source="simulation_engine",
+            ),
+        )
+        if routed.duplicate:
+            logger.info(
                 locate(
-                    "RULE:SIM-EXEC",
-                    f"模拟单被拒: {result.message}",
-                    ref=str(sim_order.order_id or ""),
+                    "RULE:SIM-DEDUP",
+                    "重复调仓单已存在，幂等跳过",
+                    ref=str(routed.client_order_id or ""),
                     where="simulation/engine.py:_execute_order",
                 )
             )
-            await exec_engine.mark_rejected(sim_order, result.message)
-
-        return result
+        if not routed.success:
+            logger.warning(
+                locate(
+                    "RULE:SIM-EXEC",
+                    f"模拟单被拒: {routed.message}",
+                    ref=str(routed.order_id or ""),
+                    where="simulation/engine.py:_execute_order",
+                )
+            )
+        return ExecutionResult(
+            success=routed.success,
+            price=routed.fill_price,
+            quantity=routed.filled_quantity,
+            commission=routed.commission,
+            price_source=routed.price_source,
+            message=routed.message,
+        )
 
     def _order_to_dict(self, order: Order, result: ExecutionResult) -> dict[str, Any]:
         """订单结果转字典"""

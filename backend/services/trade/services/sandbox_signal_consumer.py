@@ -15,13 +15,7 @@ import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.services.trade_shared.redis_client import redis_client
-from backend.services.simulation.models.order import OrderSide, OrderType
-from backend.services.simulation.schemas.order import SimOrderCreate
-from backend.services.simulation.services.execution_engine import (
-    ExecutionResult,
-    SimulationExecutionEngine,
-)
-from backend.services.simulation.services.order_service import SimOrderService
+from backend.services.simulation.models.order import OrderSide
 from backend.services.simulation.services.simulation_manager import SimulationAccountManager
 from backend.services.trade_shared.trade_config import settings
 from backend.shared.database_manager_v2 import get_db_manager
@@ -285,44 +279,63 @@ class SandboxSignalConsumer:
         price: float,
         run_id: str,
     ):
-        """创建订单并执行"""
+        """创建订单并执行（T-P2-01：改经 OrderRouter 唯一入口）。
+
+        收敛收益：账户锁 + client_order_id 幂等 + 台账落账（成交必落账）
+        + 真单镜像（修复 R6：沙箱单此前永不同步真单）+ source= sandbox 契约列。
+        沙箱为自动化路径：strict_market=False（实时价优先，降级如实标注）。
+        """
+        from backend.services.simulation.services.order_router import (
+            OrderRequest,
+            submit_order,
+        )
+        from backend.shared.order_contract import SOURCE_SANDBOX
+
         db_manager = get_db_manager()
         async with db_manager.session() as db:
-            order_service = SimOrderService(db)
-            exec_engine = SimulationExecutionEngine(db, self._account_manager)
-
-            # 创建订单
-            order_create = SimOrderCreate(
-                symbol=symbol,
-                side=side,
-                order_type=OrderType.MARKET,
-                quantity=quantity,
-                price=price,
-                strategy_id=strategy_id,
-                remarks=f"Sandbox signal: {run_id}",
+            routed = await submit_order(
+                db,
+                self._account_manager.redis,
+                OrderRequest(
+                    tenant_id=tenant_id,
+                    user_id=int(user_id),
+                    symbol=symbol,
+                    side=side.value,
+                    quantity=int(quantity),
+                    order_type="market",
+                    price=price if price > 0 else None,
+                    source=SOURCE_SANDBOX,
+                    strategy_id=strategy_id,
+                    remarks=f"Sandbox signal: {run_id}",
+                    run_id=run_id,
+                    mirror=True,
+                    mirror_source="sandbox",
+                    strict_market=False,
+                ),
             )
-            order = await order_service.create_order(tenant_id, user_id, order_create)
-            logger.info("[SandboxSignalConsumer] 订单创建: order_id=%s", order.order_id)
-
-            # 提交订单
-            from backend.services.simulation.models.order import OrderStatus
-            order.status = OrderStatus.SUBMITTED
-            order.submitted_at = datetime.now()
-            await db.commit()
-
-            # 执行订单
-            result = await exec_engine.execute_order(order)
-            if result.success:
-                trade = await exec_engine.apply_filled(order, result)
+            if routed.success:
                 logger.info(
-                    "[SandboxSignalConsumer] 订单成交: %s %s %d@%.2f, commission=%.2f",
-                    symbol, side.value, result.quantity, result.price, result.commission,
+                    "[SandboxSignalConsumer] 订单成交(经 Router): %s %s %s@%.2f, source=%s, mirror=%s",
+                    symbol,
+                    side.value,
+                    routed.filled_quantity,
+                    routed.fill_price,
+                    routed.price_source,
+                    (routed.mirror or {}).get("status") if routed.mirror else "-",
+                )
+            elif routed.duplicate:
+                logger.info(
+                    "[SandboxSignalConsumer] 幂等跳过重复单: %s %s (cid=%s)",
+                    symbol,
+                    side.value,
+                    routed.client_order_id,
                 )
             else:
-                await exec_engine.mark_rejected(order, result.message)
-                logger.warning("[SandboxSignalConsumer] 订单被拒: %s - %s", symbol, result.message)
-
-            await db.commit()
+                logger.warning(
+                    "[SandboxSignalConsumer] 订单被拒(经 Router): %s - %s",
+                    symbol,
+                    routed.message,
+                )
 
     async def _get_current_price(self, symbol: str) -> float:
         """获取当前市场价格：Redis 实时序列优先，行情 HTTP 次之。"""

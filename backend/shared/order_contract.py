@@ -27,9 +27,13 @@ ORDER_COLUMNS = (
 # source 取值域（Order 契约：来源分类，供过滤/对账/下钻）
 SOURCE_REBALANCE = "rebalance"
 SOURCE_MANUAL = "manual"
+SOURCE_HOSTED = "hosted"  # 托管调度自动单（dispatcher auto- 前缀）
+SOURCE_FORCED_LIQUIDATION = "forced_liquidation"  # 融券维持担保比例强平
 SOURCE_INTERNAL = "internal"
 SOURCE_MIRROR = "mirror"
 SOURCE_SLTP = "sltp"
+SOURCE_SANDBOX = "sandbox"  # 沙箱策略信号（T-P2-01 收敛入 Router）
+SOURCE_TDX_ROLLING = "tdx_rolling"  # 通达信滚动 paper 单（T-P2-01 收敛入 Router）
 
 # Fill 取价来源（REAL 侧：成交回报来自券商）
 PRICE_SOURCE_BROKER_FILL = "broker_fill"
