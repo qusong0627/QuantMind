@@ -12,7 +12,7 @@
 |---|---|---|
 | P0 止血+维护基建 | 10/10 ✅ | 安全问题清零；体检脚本可跑；回归进 CI |
 | P1 契约化 | 6/6 ✅ | 四契约落地；交易台数字可下钻 |
-| P2 执行统一 | 0/6 | 回测-模拟一致性 diff=0 |
+| P2 执行统一 | 1/6 | 回测-模拟一致性 diff=0 |
 | P3 策略收敛 | 0/5 | 策略全生命周期 E2E |
 | P4 选股收敛+评估 | 0/6 | Scanner 替换旧链；体检九项上线 |
 | P5+ | — | 见主文档 §12.2 总表（P5 后进入下个迭代再细化） |
@@ -219,6 +219,17 @@
 ---
 
 ## P2 执行统一（3-4 周）
+
+### T-P2-03 取价契约 ✅
+- **内容**：`execution_engine._resolve_fill_price(order, bar, strict_market)` = **取价唯一实现**（两路径共用）：
+  ① L0/L1 新鲜实时价直接用（source 如实）；② strict（手动即时市价单）遇非实时拒单（保持 P0-5 语义）；
+  ③ 非 strict 降级 bar——`bar.trade_date` 如实标注 `today_bar_close`/`prev_close_bar`，degraded=True +
+  `[RULE:PRICE-STALE]` WARNING（**修复"盘中按昨收成交且谎报 local_close"**）；④ 全无拒单。
+  `ashare_matcher.MatchConfig.external_price`（解析价喂撮合，滑点/涨跌停钳制不变）；
+  `execute_order` 价格段重构为同一 resolver（守卫单实现）；from_bar 结果 price_source 改为真实来源
+- **测试**：`test_price_contract.py` 10 条（matcher 覆写/ resolver 六态 / 两路径接线源断言）
+- **证据（2026-09-16）**：10/10 通过；**真机探针**——托管路径对 600036.SH 如实输出
+  `prev_close_bar / price=41.83 / degraded=True`；手动 strict 保持原拒单话术（local_daily_open → 拒绝）
 
 ### T-P2-01 OrderRouter（唯一入口）
 五条下单路径收敛；账户锁 + 幂等 + 状态机；沙箱/镜像改走 Router。

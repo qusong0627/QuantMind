@@ -35,6 +35,9 @@ class MatchConfig:
     stamp_duty_rate: float = _STAMP_DUTY_RATE
     transfer_fee_rate: float = _TRANSFER_FEE_RATE
     lot_size: int = _LOT_SIZE
+    # T-P2-03 取价契约：外部解析价（托管路径经执行引擎取价链解析后喂入；
+    # 设置时优先于 bar 的 price_mode 取价——滑点/涨跌停钳制逻辑不变）
+    external_price: float | None = None
 
 
 @dataclass
@@ -51,7 +54,10 @@ class MatchResult:
     reason: str = ""
 
 
-def _pick_price(bar: DailyBar, mode: str) -> float:
+def _pick_price(bar: DailyBar, mode: str, external_price: float | None = None) -> float:
+    # T-P2-03：外部解析价优先（经执行引擎取价链）；否则按 bar 的 price_mode
+    if external_price is not None and float(external_price) > 0:
+        return float(external_price)
     if mode == "vwap" and bar.vwap > 0:
         return bar.vwap
     if mode == "open" and bar.open > 0:
@@ -125,7 +131,7 @@ def match_order(
         fill_qty = quantity
 
     # ── 成交价 + 滑点 ──
-    base_price = _pick_price(bar, cfg.price_mode)
+    base_price = _pick_price(bar, cfg.price_mode, cfg.external_price)
     if base_price <= 0:
         return MatchResult(success=False, reason="INVALID_PRICE")
 

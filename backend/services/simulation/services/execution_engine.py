@@ -58,6 +58,21 @@ class ExecutionResult:
 
 
 @dataclass
+class ResolvedFill:
+    """取价契约结果（T-P2-03）：ok=False 时 message 为拒单原因。
+
+    snapshot 携带原始行情快照（下游涨跌停钳制需要 limit_up/down_price）。
+    """
+
+    ok: bool
+    price: float = 0.0
+    source: str = ""
+    degraded: bool = False  # True=用了非实时价（bar/陈旧快照），已如实标注并告警
+    message: str = ""
+    snapshot: Any = None
+
+
+@dataclass
 class MarketSnapshot:
     price: float
     price_source: str
@@ -458,13 +473,96 @@ class SimulationExecutionEngine:
         # 避免以虚假价格成交污染模拟盘资产/持仓。
         return MarketSnapshot(price=0.0, price_source="unavailable")
 
+    # 取价契约（T-P2-03）：新鲜实时源 vs 陈旧/兜底源
+    _FRESH_PRICE_SOURCES = frozenset({"redis_series", "market_data_service"})
+
+    async def _resolve_fill_price(
+        self,
+        order: SimOrder,
+        bar: Any,
+        *,
+        strict_market: bool,
+    ) -> ResolvedFill:
+        """**取价契约唯一实现**：两执行路径共用（守卫/降级/标注单实现）。
+
+        规则：
+        1. L0/L1 新鲜实时价 → 直接使用（source 如实）；
+        2. strict（手动即时市价单，保持 P0-5 语义）遇非实时 → 拒单；
+        3. 否则降级：优先 bar（自带 trade_date，如实标注 today_bar_close / prev_close_bar，
+           绝不静默按昨收成交——`[RULE:PRICE-STALE]` WARNING 点名），bar 无则用陈旧快照价；
+        4. 全无 → 拒单。
+        """
+        snapshot = await self._latest_price(
+            order.symbol,
+            user_id=order.user_id,
+            tenant_id=order.tenant_id,
+        )
+        price = float(getattr(snapshot, "price", 0.0) or 0.0)
+        source = str(getattr(snapshot, "price_source", "") or "unavailable")
+        is_market = getattr(order, "order_type", None) == OrderType.MARKET
+
+        if price > 0 and source in self._FRESH_PRICE_SOURCES:
+            return ResolvedFill(ok=True, price=price, source=source, snapshot=snapshot)
+
+        if strict_market and is_market:
+            if price <= 0 or source == "unavailable":
+                return ResolvedFill(
+                    ok=False,
+                    message=f"无法获取 {order.symbol} 实时行情，模拟单拒绝成交",
+                )
+            return ResolvedFill(
+                ok=False,
+                message=(
+                    f"{order.symbol} 当前为非实时行情({source})，"
+                    "市价单拒绝成交，请用限价单或盘中再试"
+                ),
+            )
+
+        bar_price = 0.0
+        if bar is not None:
+            from backend.services.simulation.services.ashare_matcher import (
+                _pick_price as _matcher_pick_price,
+            )
+
+            try:
+                bar_price = float(_matcher_pick_price(bar, "close") or 0.0)
+            except Exception:  # noqa: BLE001
+                bar_price = 0.0
+        if bar_price > 0:
+            is_today_bar = getattr(bar, "trade_date", None) == datetime.now().date()
+            bar_source = "today_bar_close" if is_today_bar else "prev_close_bar"
+            from backend.shared.errfmt import locate
+
+            logger.warning(
+                locate(
+                    "RULE:PRICE-STALE",
+                    f"{order.symbol} 实时价不可用({source})，按 {bar_source}={bar_price:.4f} 成交",
+                    ref=str(getattr(order, "order_id", "") or ""),
+                    where="execution_engine.py:_resolve_fill_price",
+                )
+            )
+            return ResolvedFill(
+                ok=True, price=bar_price, source=bar_source, degraded=True, snapshot=snapshot
+            )
+        if price > 0:
+            return ResolvedFill(
+                ok=True, price=price, source=source, degraded=True, snapshot=snapshot
+            )
+        return ResolvedFill(
+            ok=False, message=f"无法获取 {order.symbol} 行情，模拟单拒绝成交"
+        )
+
     async def execute_from_bar(
         self,
         order: SimOrder,
         bar: Any,
         market: str | None = None,
     ) -> ExecutionResult:
-        """按当日不复权日 K 走 ashare_matcher（托管/周期调仓与回放同口径）。"""
+        """按当日不复权日 K 走 ashare_matcher（托管/周期调仓与回放同口径）。
+
+        T-P2-03：成交价先经 `_resolve_fill_price` 解析（实时链优先，bar 降级如实标注），
+        解析价以 external_price 喂给撮合；滑点/涨跌停钳制不变。
+        """
         from backend.services.simulation.services.ashare_matcher import (
             MatchConfig,
             match_order,
@@ -499,6 +597,13 @@ class SimulationExecutionEngine:
                     else float(avail)
                 )
 
+        # T-P2-03：取价契约——实时链优先，bar 降级如实标注（修复"盘中按昨收成交"）
+        resolved = await self._resolve_fill_price(order, bar, strict_market=False)
+        if not resolved.ok:
+            return ExecutionResult(
+                success=False, message=resolved.message, price_source=resolved.source or None
+            )
+
         cfg = MatchConfig(
             price_mode="close",
             slippage_bps=float(settings.SIMULATION_SLIPPAGE_BPS),
@@ -506,6 +611,7 @@ class SimulationExecutionEngine:
             commission_min=float(settings.SIMULATION_COMMISSION_MIN),
             stamp_duty_rate=float(settings.SIMULATION_STAMP_DUTY_RATE),
             lot_size=lot_size_for_symbol(order.symbol, rules.market),
+            external_price=resolved.price,
         )
         mr = match_order(
             side=side,
@@ -550,46 +656,22 @@ class SimulationExecutionEngine:
             transfer_fee=mr.transfer_fee,
             market=market_str,
             account_snapshot=account_snapshot,
-            price_source=f"local_{cfg.price_mode}",
+            price_source=resolved.source,
         )
 
     async def execute_order(
         self, order: SimOrder, market: str | None = None
     ) -> ExecutionResult:
-        snapshot = await self._latest_price(
-            order.symbol,
-            user_id=order.user_id,
-            tenant_id=order.tenant_id,
-        )
-        base_price = snapshot.price
-        fetched_source = snapshot.price_source
-
-        # 行情不可用（实时行情与 DB 兜底都失败时 price=0 / unavailable）：
-        # 市价与限价单都无从定价，直接拒单，避免随机价格或空价格成交污染账户。
-        if base_price <= 0 or fetched_source == "unavailable":
+        # T-P2-03：价格与陈旧价守卫收敛到 _resolve_fill_price（唯一实现）；
+        # 手动即时单 strict_market=True——保持 P0-5 语义（非实时市价单拒绝成交）。
+        resolved = await self._resolve_fill_price(order, None, strict_market=True)
+        if not resolved.ok:
             return ExecutionResult(
-                success=False,
-                message=f"无法获取 {order.symbol} 实时行情，模拟单拒绝成交",
+                success=False, message=resolved.message, price_source=resolved.source or None
             )
-
-        # P0-5：兜底价（DB昨收/本地日线）是陈旧价，非交易时段市价单禁止按此成交，
-        # 否则盘后/节假日一点即成交。限价单允许（用户显式定价）。
-        if (
-            fetched_source
-            in {
-                "db_fallback",
-                "local_daily_open",
-                "local_daily_close",
-            }
-            and order.order_type == OrderType.MARKET
-        ):
-            return ExecutionResult(
-                success=False,
-                message=(
-                    f"{order.symbol} 当前为非实时行情({fetched_source})，"
-                    "市价单拒绝成交，请用限价单或盘中再试"
-                ),
-            )
+        base_price = resolved.price
+        fetched_source = resolved.source
+        snapshot = resolved.snapshot  # 下游涨跌停钳制需要 limit_up/down_price
 
         slippage = settings.SIMULATION_SLIPPAGE_BPS / 10000
 
