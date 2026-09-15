@@ -84,6 +84,9 @@ async def run_simulation_eod_worker() -> None:
     last_run_date: date | None = None
 
     while True:
+        from backend.shared.scheduler_registry import heartbeat as _sched_heartbeat
+
+        _sched_heartbeat("sim_eod")
         try:
             now = datetime.now(_TZ)
             target_trade_date = _resolve_target_trade_date(now)

@@ -336,17 +336,60 @@ async def check_c06_reconcile_diff(ctx: HealthContext) -> CheckResult:
 
 
 async def check_c07_scheduler_heartbeat(ctx: HealthContext) -> CheckResult:
+    """T-P1-06：按调度注册表逐项判定心跳（ok/stale/off/missing）；收盘核对折入同级。"""
+    import time as _time
+
+    from backend.shared.scheduler_registry import (
+        JOBS,
+        classify_scheduler_status,
+        heartbeat_key,
+        switch_enabled,
+    )
+
+    now_ts = _time.time()
+    entries: list[dict] = []
+    for spec in JOBS:
+        if spec.heartbeat_ttl is None:  # 未接线心跳的任务不进判定（注册表注明）
+            continue
+        enabled = switch_enabled(spec)
+        raw = ctx.redis_get(heartbeat_key(spec.key), REDIS_DB_GENERAL)
+        age = None
+        if raw is not None:
+            try:
+                age = int(now_ts - float(raw))
+            except (TypeError, ValueError):
+                age = None
+        if not enabled:
+            state = "off"
+        elif age is None:
+            state = "missing"
+        elif age <= spec.heartbeat_ttl:
+            state = "ok"
+        else:
+            state = "stale"
+        entries.append(
+            {
+                "key": spec.key,
+                "name": spec.name,
+                "enabled": enabled,
+                "state": state,
+                "age": age,
+                "ttl": spec.heartbeat_ttl,
+            }
+        )
+    level, detail, metrics = classify_scheduler_status(entries)
+
+    # 收盘核对（非心跳类任务，保留原有检查）；与心跳判定取更严者
     rows = ctx.query("SELECT max(trade_date) AS d FROM engine_signal_scores")
     latest = rows[0]["d"] if rows else None
-    if latest is None:
-        return CheckResult("C07", "调度心跳", "warn", "无交易日基准")
-    ymd = str(latest).replace("-", "")
-    audit = ctx.redis_get(f"trade:close-audit:done:{ymd}", REDIS_DB_TRADE)
-    if not audit:
-        return CheckResult(
-            "C07", "调度心跳", "warn", f"收盘核对标记缺失 trade:close-audit:done:{ymd}", "确认 close_cleanup_audit 任务运行"
-        )
-    return CheckResult("C07", "调度心跳", "ok", f"收盘核对已执行（{ymd}）")
+    if latest is not None:
+        ymd = str(latest).replace("-", "")
+        audit = ctx.redis_get(f"trade:close-audit:done:{ymd}", REDIS_DB_TRADE)
+        if not audit:
+            if level == "ok":
+                level = "warn"
+            detail = f"{detail}；收盘核对标记缺失（{ymd}）"
+    return CheckResult("C07", "调度心跳", level, detail, "", metrics)
 
 
 async def check_c08_data_sync_freshness(ctx: HealthContext) -> CheckResult:

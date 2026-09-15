@@ -67,6 +67,9 @@ async def run_simulation_t1_unlock_task(
     manager = SimulationAccountManager(redis_client)
     last_date = ""
     while True:
+        from backend.shared.scheduler_registry import heartbeat as _sched_heartbeat
+
+        _sched_heartbeat("t1_unlock")
         try:
             now = datetime.now()
             today = now.strftime("%Y%m%d")

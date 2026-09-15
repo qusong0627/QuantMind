@@ -11,7 +11,7 @@
 | 阶段 | 进度 | 完成定义 |
 |---|---|---|
 | P0 止血+维护基建 | 10/10 ✅ | 安全问题清零；体检脚本可跑；回归进 CI |
-| P1 契约化 | 5/6 | 四契约落地；交易台数字可下钻 |
+| P1 契约化 | 6/6 ✅ | 四契约落地；交易台数字可下钻 |
 | P2 执行统一 | 0/6 | 回测-模拟一致性 diff=0 |
 | P3 策略收敛 | 0/5 | 策略全生命周期 E2E |
 | P4 选股收敛+评估 | 0/6 | Scanner 替换旧链；体检九项上线 |
@@ -204,8 +204,17 @@
 - **证据（2026-09-16）**：5/5 通过；**线上冒烟**（重启后 admin token 实调）——pipeline 四步、
   BUY 1040/SELL 843、Top5 候选、盈亏 200.8 万、健康 7 ok/2 warn/1 fail（fail 为已知双键形）全部正确返回
 
-### T-P1-06 调度表统一
-散落 worker/beat 收敛为一条注册表（含开关、心跳、手动重跑 `--date --force`）；心跳进体检。
+### T-P1-06 调度表统一 ✅（P1 收官）
+- **内容**：`backend/shared/scheduler_registry.py` = 全部 11 个周期任务（5 worker + 6 celery）的**唯一事实源**
+  （归属/周期/开关环境变量/心跳 TTL/手动重跑命令）；**心跳协议** `qm:sched:hb:{key}`（best-effort 不抛出，
+  11 个任务全部接线——漏接一个测试即红）；体检 C07 升级为按注册表逐项判定
+  （stale=fail 调度停摆 / missing=warn 过渡 / off 按开关关闭，**决不静默**）；
+  `backend/scripts/schedule_ctl.py`：`list`（调度表+心跳实况）/ `run <任务键>`（sim_eod、auto_inference、
+  market_sync_dispatch 三个支持手动重跑，`--date` 语义按任务；`--force` 为保留参数并如实提示不造假语义）
+- **测试**：`test_scheduler_registry.py` 7 条（注册表完整性/开关纯函数/心跳判定纯函数/best-effort 假 redis/11 任务接线源断言/体检消费/分发表覆盖）
+- **证据（2026-09-16）**：21/21 通过；**线上实测**——5 worker 心跳 9-57s 鲜活、celery 侧 dispatch/news×2 心跳 33-45s
+  （重启 celery-worker/beat 后）；auto_inference/strategy_lab/backfill 为按日任务，首次触发后自然出现（C07 如实 warn 点名）；
+  体检 C07 线上输出"6 项无心跳记录……观察一周期"（过渡期口径）
 
 ---
 

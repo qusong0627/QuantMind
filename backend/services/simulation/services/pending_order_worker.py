@@ -173,6 +173,9 @@ async def run_simulation_pending_order_worker() -> None:
         worker.batch_size,
     )
     while True:
+        from backend.shared.scheduler_registry import heartbeat as _sched_heartbeat
+
+        _sched_heartbeat("pending_order")
         try:
             count = await worker.run_once()
             if count:

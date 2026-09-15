@@ -120,6 +120,10 @@ def auto_inference_if_needed() -> dict[str, Any]:
         c. 执行推理脚本。
     """
     from zoneinfo import ZoneInfo
+
+    from backend.shared.scheduler_registry import heartbeat as _sched_heartbeat
+
+    _sched_heartbeat("auto_inference")  # T-P1-06 调度心跳
     from sqlalchemy import create_engine as sa_create_engine
     from sqlalchemy import text as sa_text
     from sqlalchemy.orm import sessionmaker as sa_sessionmaker
@@ -730,6 +734,10 @@ def news_enrich_recent_task(self, limit: int = 200) -> dict[str, Any]:
     幂等：huntly_page_id 是主键 + model_version 不变则跳过。
     """
     from backend.services.api.news import run_enrichment_batch
+
+    from backend.shared.scheduler_registry import heartbeat as _sched_heartbeat
+
+    _sched_heartbeat("news_enrich")  # T-P1-06 调度心跳
     try:
         n = run_enrichment_batch(limit=limit)
         logger.info("[NewsEnrich] 完成: %d 篇新写入", n)
@@ -744,6 +752,10 @@ def news_matcher_reload_task() -> dict[str, Any]:
     """每 10 分钟重载 stock_aliases / finance_lexicon 自动机，
     让管理员在 SQL 里新增的词条尽快生效。"""
     from backend.services.api.news import get_matcher
+
+    from backend.shared.scheduler_registry import heartbeat as _sched_heartbeat
+
+    _sched_heartbeat("news_matcher")  # T-P1-06 调度心跳
     try:
         m = get_matcher(force_reload=True)
         return {"status": "success", "aliases": m.alias_count, "lex": m.lex_count}
@@ -896,6 +908,9 @@ def feature_snapshot_task(self, year: int = 0) -> dict[str, Any]:
 @celery_app.task(name="engine.tasks.strategy_lab_daily_scan")
 def strategy_lab_daily_scan(lookback_days: int = 7) -> dict[str, Any]:
     """Run all watched Strategy Lab scripts and persist today's signals."""
+    from backend.shared.scheduler_registry import heartbeat as _sched_heartbeat
+
+    _sched_heartbeat("strategy_lab_scan")  # T-P1-06 调度心跳
     try:
         from backend.services.engine.strategy_lab.cron.daily_scan import run_daily_scan
 
@@ -913,6 +928,10 @@ def backfill_inference_quality(horizon_days: int = 5, limit: int = 500) -> dict[
     data_trade_date <= 当前- horizon 且未在 qm_model_inference_quality 的日期。
     """
     from datetime import timedelta
+
+    from backend.shared.scheduler_registry import heartbeat as _sched_heartbeat
+
+    _sched_heartbeat("backfill_quality")  # T-P1-06 调度心跳
     from sqlalchemy import text
     from backend.services.engine.inference.inference_quality_backfill import (
         inference_quality_backfill,
@@ -974,6 +993,9 @@ def backfill_inference_quality(horizon_days: int = 5, limit: int = 500) -> dict[
 @celery_app.task(name="engine.tasks.dispatch_market_sync")
 def dispatch_market_sync() -> dict[str, Any]:
     """每分钟检查各市场定时同步配置，到点派发同步任务。"""
+    from backend.shared.scheduler_registry import heartbeat as _sched_heartbeat
+
+    _sched_heartbeat("market_sync_dispatch")  # T-P1-06 调度心跳
     try:
         from backend.services.engine.tasks.market_sync_scheduler import dispatch_due_syncs
 

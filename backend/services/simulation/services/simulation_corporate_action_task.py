@@ -33,6 +33,9 @@ async def run_simulation_corporate_action_task(
     """每交易日 08:30 后同步 QuantDB 公司行为并应用到模拟盘账户（幂等）。"""
     last_date = ""
     while True:
+        from backend.shared.scheduler_registry import heartbeat as _sched_heartbeat
+
+        _sched_heartbeat("corp_action")
         try:
             now = datetime.now()
             today = now.strftime("%Y%m%d")

@@ -194,6 +194,10 @@ class SimulationEquitySettlementWorker:
     async def _run(self) -> None:
         # 启动即执行首个周期：重启后不等第一个 interval，几秒内恢复权益数据。
         while not self._stopped.is_set():
+            # T-P1-06：调度心跳（体检 C07 按注册表判定）
+            from backend.shared.scheduler_registry import heartbeat as _sched_heartbeat
+
+            _sched_heartbeat("equity_settle")
             try:
                 stats = await self.run_cycle()
                 self._cycle_count += 1
