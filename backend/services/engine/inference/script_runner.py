@@ -1017,6 +1017,17 @@ class InferenceScriptRunner:
                     run_id,
                     ex=86400,
                 )
+                # T-P1-02：全量校验通过才置就绪标记（部分推/池裁剪不置位）
+                from backend.shared.inference_lock import mark_signal_ready_if_full
+
+                mark_signal_ready_if_full(
+                    redis_client,
+                    market="CN",
+                    trade_date=prediction_trade_date,
+                    run_id=run_id,
+                    partial=bool(pool_id),
+                    symbol_count=len(signals),
+                )
             except Exception as exc:
                 logger.warning(f"[InferenceScriptRunner] 写 Redis 完成标记失败: {exc}")
 
@@ -1037,6 +1048,74 @@ class InferenceScriptRunner:
         )
 
     def execute(
+        self,
+        date: str,
+        tenant_id: str = "default",
+        user_id: str = "system",
+        redis_client=None,
+        symbols: list[str] | None = None,
+        persist: bool = True,
+        pool_id: str | None = None,
+    ) -> ExecutionResult:
+        """全市场持久化推理的单实例锁包装（T-P1-02）；实现见 ``_execute_impl``。
+
+        - 锁范围：``persist=True 且 symbols is None``（全市场落库 run——历史竞态
+          正是发生在该类 run）；单股补推/persist=False 的轻路线不加锁（快速交互
+          不应被串行化）。
+        - 获取失败（同日同模型已有 run 在执行）→ 返回 ``LOCK_HELD`` 失败结果，
+          不重复执行；释放为 CAS（属主校验），异常时由 TTL 兜底。
+        """
+        lock_token = None
+        lock_key = None
+        if persist and symbols is None and redis_client is not None:
+            from backend.shared.errfmt import locate
+            from backend.shared.inference_lock import (
+                acquire,
+                inference_lock_key,
+            )
+
+            lock_key = inference_lock_key(
+                tenant_id, user_id, self.primary_model_id, date
+            )
+            lock_token = acquire(redis_client, lock_key)
+            if lock_token is None:
+                logger.warning(
+                    locate(
+                        "RULE:INFERENCE-LOCK",
+                        "同日同模型全市场推理已在执行，跳过重复运行",
+                        ref=f"{tenant_id}:{user_id}:{date}",
+                        where="script_runner.py:execute",
+                    )
+                )
+                return ExecutionResult(
+                    success=False,
+                    run_id="",
+                    signals_count=0,
+                    fallback_used=False,
+                    fallback_reason="LOCK_HELD: 同日同模型全市场推理已在执行",
+                )
+        try:
+            return self._execute_impl(
+                date=date,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                redis_client=redis_client,
+                symbols=symbols,
+                persist=persist,
+                pool_id=pool_id,
+            )
+        finally:
+            if lock_token and lock_key:
+                try:
+                    from backend.shared.inference_lock import release
+
+                    release(redis_client, lock_key, lock_token)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "[InferenceScriptRunner] 释放推理锁失败（将由 TTL 过期）: %s", exc
+                    )
+
+    def _execute_impl(
         self,
         date: str,
         tenant_id: str = "default",
@@ -1432,6 +1511,17 @@ class InferenceScriptRunner:
                     f"{_COMPLETED_REDIS_KEY_PREFIX}:{prediction_trade_date}",
                     run_id,
                     ex=86400,
+                )
+                # T-P1-02：全量校验通过才置就绪标记（部分推/池裁剪不置位）
+                from backend.shared.inference_lock import mark_signal_ready_if_full
+
+                mark_signal_ready_if_full(
+                    redis_client,
+                    market=persist_market,
+                    trade_date=prediction_trade_date,
+                    run_id=run_id,
+                    partial=(partial_applied or pool_scoped),
+                    symbol_count=len(symbols),
                 )
             except Exception as exc:
                 logger.warning(

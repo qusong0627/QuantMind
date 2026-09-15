@@ -11,7 +11,7 @@
 | 阶段 | 进度 | 完成定义 |
 |---|---|---|
 | P0 止血+维护基建 | 10/10 ✅ | 安全问题清零；体检脚本可跑；回归进 CI |
-| P1 契约化 | 0/6 | 四契约落地；交易台数字可下钻 |
+| P1 契约化 | 2/6 | 四契约落地；交易台数字可下钻 |
 | P2 执行统一 | 0/6 | 回测-模拟一致性 diff=0 |
 | P3 策略收敛 | 0/5 | 策略全生命周期 E2E |
 | P4 选股收敛+评估 | 0/6 | Scanner 替换旧链；体检九项上线 |
@@ -145,8 +145,17 @@
 ### T-P1-01 Signal 契约增列
 `engine_signal_scores` 加 `market/rank_pct/source/signal_ts`（**已实现并上库**：自愈式迁移 `shared/signal_contract.py`、两写入端接线、`db_init.sql` 同步、设计文档 §4.1 已对齐 rank_pct 口径）；回填脚本 `backend/scripts/backfill_rank_pct.py`（幂等分窗 UPDATE，与 PG percent_rank() 同口径，有对照测试）。下游读点全改为 rank 口径（**待办：下游 rank 化**）。测试：`test_signal_contract.py` 11 条（纯函数/PG 对照/写入端源断言/迁移幂等）+ 回填校验（抽样对账，待回填完成后补）。
 
-### T-P1-02 就绪标记与单实例锁
-`qm:signal:ready:{market}:{date}` 全量校验后才置位；推理任务加分布式锁（修同日多 run 竞态）。测试：并发双跑只有一个执行；残 run 不置位。
+### T-P1-02 就绪标记与单实例锁 ✅
+- **内容**：`backend/shared/inference_lock.py` 唯一实现（SET NX EX 获取 + token + **Lua CAS 释放**）；锁三层收敛：
+  `runner.execute` 包装（全市场持久化 run 的唯一咽喉点，覆盖 4 类触发方）、celery 任务级、admin 手动——
+  **admin 与 celery 全局任务统一为同 scope 键形**（此前两端键形不同，"防并发"注释与事实不符 = 同日双跑疑因之一）；
+  三个本地常量副本全部清除；TTL 1800→3600（旧值小于运行时长会让锁中途过期，反而放行双跑）。
+  就绪标记 `qm:signal:ready:{market}:{date}`：非部分推且标的数 ≥ `SIGNAL_READY_MIN_SYMBOLS`(默认 1000) 才置位，
+  值=run_id(JSON)；体检 C02 已改为优先消费就绪标记（回退读完成标记兼容）
+- **测试**：`test_inference_lock.py` 9 条——纯函数/键构造/**真实 Redis 并发抢锁仅一胜者**/**CAS 属主校验（错误 token 不误删）**/四处接线源断言
+- **证据（2026-09-16）**：9/9 通过；admin/celery 模块 import OK；ruff 无新增（B904 数与基线一致）；
+  **下一交易日 08:00 推理为首个观察点**（就绪标记写入 + 锁日志）
+- **变更文件**：`shared/inference_lock.py`(新)、`script_runner.py`、`celery_tasks.py`、`admin/model_management.py`、`admin/model_management_utils.py`、`scripts/diagnose/health.py`、tests
 
 ### T-P1-03 Order/Fill 契约
 新增 order 表字段/视图（mode/price_source/reason/client_order_id 语义统一）；三环境写入点对齐。

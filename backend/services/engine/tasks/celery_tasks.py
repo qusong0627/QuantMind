@@ -16,26 +16,35 @@ from backend.shared.redis_sentinel_client import get_redis_sentinel_client
 
 logger = logging.getLogger(__name__)
 
-# 与 model_management.py 保持一致的锁配置
-_INFERENCE_LOCK_KEY_PREFIX = "qm:lock:inference:daily"
-_INFERENCE_LOCK_TTL_SEC = 1800  # 30 分钟
+# 锁前缀/ TTL 的唯一实现在 backend/shared/inference_lock.py（禁止本地再定义）
 
 
 def _run_async(coro: Any) -> Any:
     return asyncio.run(coro)
 
 
-def _try_acquire_strategy_lock(strategy_id: str, trade_date: str, owner: str) -> bool:
-    """尝试获取特定策略当日推理分布式锁。"""
+_LOCK_DEGRADED_TOKEN = "degraded-no-redis"
+
+
+def _try_acquire_strategy_lock(strategy_id: str, trade_date: str, owner: str) -> str | None:
+    """尝试获取特定策略当日推理分布式锁。
+
+    T-P1-02：返回值改为**释放 token**（成功）或 None（被占用）——释放必须走
+    ``inference_lock.release`` 的 CAS 属主校验（此前裸 delete 会误删他人锁）。
+    Redis 不可用时返回 ``degraded-no-redis``（fail-open：宁可重复推理，不可
+    无信号——与风险闸门的 fail-closed 语义不同，理由见计划 T-P1-02 细案）。
+    ``owner`` 保留形参仅作调用方语义标注（锁值由 token 生成）。
+    """
     try:
+        from backend.shared.inference_lock import LOCK_KEY_PREFIX, acquire
         from backend.shared.redis_sentinel_client import get_redis_sentinel_client
 
         redis = get_redis_sentinel_client()
-        lock_key = f"{_INFERENCE_LOCK_KEY_PREFIX}:{strategy_id}:{trade_date}"
-        return bool(redis.set(lock_key, owner, ex=_INFERENCE_LOCK_TTL_SEC, nx=True))
+        lock_key = f"{LOCK_KEY_PREFIX}:{strategy_id}:{trade_date}"
+        return acquire(redis, lock_key)
     except Exception as e:
-        logger.warning("[InferenceLock] Redis 不可用，跳过策略锁检查: %s", e)
-        return True
+        logger.warning("[InferenceLock] Redis 不可用，跳过策略锁检查（fail-open）: %s", e)
+        return _LOCK_DEGRADED_TOKEN
 
 
 from backend.services.engine.services.signal_generator import global_signal_generator
@@ -357,11 +366,15 @@ def auto_inference_if_needed() -> dict[str, Any]:
                 )
                 continue
 
-            # 尝试获取锁
+            # 尝试获取锁（T-P1-02：token 语义，释放走 CAS 属主校验）
+            from backend.shared.inference_lock import LOCK_KEY_PREFIX as _LOCK_PREFIX
+
             lock_scope = f"{tid}:{uid}:{sid or mid or 'default'}"
-            if not _try_acquire_strategy_lock(
+            lock_key = f"{_LOCK_PREFIX}:{lock_scope}:{prediction_trade_date}"
+            lock_token = _try_acquire_strategy_lock(
                 lock_scope, prediction_trade_date, "celery_auto"
-            ):
+            )
+            if not lock_token:
                 logger.info("[AutoInference] 任务锁冲突，跳过: tid=%s uid=%s", tid, uid)
                 _write_dispatch_log(
                     tenant_id=tid,
@@ -421,12 +434,23 @@ def auto_inference_if_needed() -> dict[str, Any]:
                 )
                 raise
             finally:
-                # 释放锁
-                try:
-                    lock_key = f"{_INFERENCE_LOCK_KEY_PREFIX}:{lock_scope}:{prediction_trade_date}"
-                    redis.delete(lock_key)
-                except:
-                    pass
+                # 释放锁（T-P1-02：CAS 属主校验；Redis 不可用/锁已过期则 no-op）
+                if lock_token and lock_token != _LOCK_DEGRADED_TOKEN:
+                    try:
+                        from backend.shared.inference_lock import release
+
+                        release_redis = redis
+                        if release_redis is None:
+                            from backend.shared.redis_sentinel_client import (
+                                get_redis_sentinel_client,
+                            )
+
+                            release_redis = get_redis_sentinel_client()
+                        release(release_redis, lock_key, lock_token)
+                    except Exception as rel_exc:  # noqa: BLE001
+                        logger.warning(
+                            "[InferenceLock] 释放锁失败（TTL 兜底）: %s", rel_exc
+                        )
 
         return {
             "status": "completed",

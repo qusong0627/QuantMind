@@ -44,8 +44,14 @@ from .model_management_utils import (
     _load_feature_catalog_from_db,
     _load_feature_catalog_from_file,
     _resolve_inference_dates_with_calendar,
-    _INFERENCE_LOCK_KEY_PREFIX,
-    _INFERENCE_LOCK_TTL_SEC,
+)
+
+# T-P1-02：推理锁唯一实现（禁止本地副本；Admin 手动 / celery 定时 / runner 三层共享同一体系）
+from backend.shared.inference_lock import (
+    LOCK_KEY_PREFIX as _INFERENCE_LOCK_KEY_PREFIX,
+    acquire as _acquire_inference_lock,
+    lock_ttl_seconds as _inference_lock_ttl_seconds,
+    release as _release_inference_lock,
 )
 
 router = APIRouter(dependencies=[Depends(require_admin)])  # 路由器级认证兜底
@@ -199,26 +205,22 @@ async def run_inference(
     requested_data_trade_date, data_trade_date, prediction_trade_date, calendar_adjusted = (
         await _resolve_inference_dates_with_calendar(current_user=current_user, now_local=now_local)
     )
-    lock_key = f"{_INFERENCE_LOCK_KEY_PREFIX}:{prediction_trade_date}"
-
-    # --- 1. 获取分布式锁（SET NX EX），防止并发 ---
+    # --- 1. 获取分布式锁（T-P1-02：与 celery 全局任务同 scope，手动态与定时态真正互斥；
+    #         token + CAS 释放）---
+    lock_key = f"{_INFERENCE_LOCK_KEY_PREFIX}:default:system:global:{prediction_trade_date}"
+    lock_token = None
     try:
         redis = get_redis_sentinel_client()
-        acquired = redis.set(lock_key, "admin_manual", ex=_INFERENCE_LOCK_TTL_SEC, nx=True)
+        lock_token = _acquire_inference_lock(redis, lock_key)
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"Redis 不可用，无法获取并发锁: {e}")
 
-    if not acquired:
-        locked_by = ""
-        try:
-            locked_by = redis.get(lock_key) or ""
-        except Exception:
-            pass
+    if lock_token is None:
         raise HTTPException(
             status_code=409,
             detail=(
                 f"目标预测日任务（{prediction_trade_date}）已在运行中，请稍后重试。"
-                f"（锁持有者: {locked_by}，TTL: {_INFERENCE_LOCK_TTL_SEC}s）"
+                f"（TTL: {_inference_lock_ttl_seconds()}s）"
             ),
         )
 
@@ -246,10 +248,12 @@ async def run_inference(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"推理脚本执行异常: {e}")
     finally:
-        try:
-            redis.delete(lock_key)
-        except Exception:
-            pass
+        if lock_token:
+            # T-P1-02：CAS 属主校验释放（替代裸 delete；TTL 过期/异常时 no-op）
+            try:
+                _release_inference_lock(redis, lock_key, lock_token)
+            except Exception:
+                pass
 
     if not result.success:
         return {
@@ -297,7 +301,7 @@ async def run_inference(
         "active_model_id": result.active_model_id,
         "active_data_source": result.active_data_source,
         "lock_key": lock_key,
-        "lock_ttl_sec": _INFERENCE_LOCK_TTL_SEC,
+        "lock_ttl_sec": _inference_lock_ttl_seconds(),
     }
 
 

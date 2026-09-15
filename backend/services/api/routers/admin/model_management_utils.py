@@ -45,9 +45,8 @@ MODELS_ROOT = os.path.abspath(os.path.join(os.getcwd(), "models"))
 # Engine 服务地址（与 engine_proxy 保持一致）
 _ENGINE_BASE_URL = os.getenv("ENGINE_SERVICE_URL", "http://127.0.0.1:8001").rstrip("/")
 _ENGINE_INTERNAL_SECRET = get_internal_call_secret()
-# 每日推理分布式锁：TTL 30 分钟，防止 Admin 手动触发与 Celery Beat 09:15 并发冲突
-_INFERENCE_LOCK_TTL_SEC = int(os.getenv("INFERENCE_LOCK_TTL_SEC", "1800"))
-_INFERENCE_LOCK_KEY_PREFIX = "qm:lock:inference:daily"
+# 每日推理分布式锁的常量已收敛到 backend/shared/inference_lock.py（T-P1-02：
+# 此前本地副本与 celery 侧键形不一致，"防并发"实际未生效，禁止再定义本地副本）
 # 生产模型根目录（系统内置 model_qlib 已废弃，不再指向具体模型子目录）
 MODELS_PRODUCTION = os.path.join(MODELS_ROOT, "production")
 FEATURE_CATALOG_FALLBACK = os.path.join(os.getcwd(), "config", "features", "model_training_feature_catalog_v1.json")

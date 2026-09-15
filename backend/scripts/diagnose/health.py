@@ -168,6 +168,10 @@ async def check_c02_signal_readiness(ctx: HealthContext) -> CheckResult:
     if latest is None:
         return CheckResult("C02", "信号就绪", "fail", "信号表为空", "检查推理任务")
     latest_str = str(latest)
+    # T-P1-02：首选就绪标记（全量校验通过才置位）；完成标记为兼容回退
+    from backend.shared.inference_lock import ready_key
+
+    ready_raw = ctx.redis_get(ready_key("CN", latest_str), REDIS_DB_GENERAL)
     marker = ctx.redis_get(f"qm:inference:completed:{latest_str}", REDIS_DB_GENERAL)
     # 残 run 迹象：近 7 日单日多 run（>2 说明重跑/竞态频发）
     run_rows = ctx.query(
@@ -176,16 +180,19 @@ async def check_c02_signal_readiness(ctx: HealthContext) -> CheckResult:
         d=latest,
     )
     runs = int(run_rows[0]["n"]) if run_rows else 0
-    if not marker:
+    if not ready_raw and not marker:
         return CheckResult(
             "C02",
             "信号就绪",
             "warn",
-            f"{latest_str} 无推理完成标记（runs={runs}）",
-            "确认推理调度执行；标记键 qm:inference:completed:{date}",
+            f"{latest_str} 无就绪/完成标记（runs={runs}）",
+            "确认推理调度执行；标记键 qm:signal:ready:{market}:{date}",
             {"trade_date": latest_str, "runs": runs},
         )
-    detail = f"{latest_str} 标记={str(marker)[:24]}… runs={runs}"
+    ready_desc = (
+        f"就绪标记={str(ready_raw)[:48]}…" if ready_raw else "无就绪标记（回退读完成标记）"
+    )
+    detail = f"{latest_str} {ready_desc} runs={runs}"
     if runs > 2:
         return CheckResult("C02", "信号就绪", "warn", detail + "（同日多 run，检查竞态/回填）")
     return CheckResult("C02", "信号就绪", "ok", detail)
