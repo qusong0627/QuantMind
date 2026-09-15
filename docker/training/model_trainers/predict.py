@@ -15,10 +15,13 @@ def _predict_with_model(model: Any, X: np.ndarray, model_type: str, features: li
     if model_type == "lightgbm":
         return model.predict(X, num_iteration=model.best_iteration)
     elif model_type == "xgboost":
-        import xgboost as xgb
-        dmat = xgb.DMatrix(X, feature_names=features)
+        # inplace_predict：直接从 numpy 预测，避免为每次预测构建整份 DMatrix
+        # （train/val/test/全窗口共 4 次调用、每次整表复制 7~14GB——2016 直读
+        # 窗口下是预测阶段瞬时击中 48G 容器限额的放大器，OOMKilled 实证）。
         n_iter = model.best_iteration
-        return model.predict(dmat, iteration_range=(0, (n_iter + 1) if n_iter is not None else 0))
+        return model.inplace_predict(
+            X, iteration_range=(0, (n_iter + 1) if n_iter is not None else 0)
+        )
     elif model_type == "catboost":
         pred = model.predict_proba(X) if hasattr(model, "predict_proba") else model.predict(X)
     else:

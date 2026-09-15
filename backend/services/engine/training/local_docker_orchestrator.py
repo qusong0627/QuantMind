@@ -69,7 +69,11 @@ def _host_mem_limit_gb() -> str | None:
             for line in f:
                 if line.startswith("MemTotal:"):
                     total_gb = int(line.split()[1]) / 1024.0 / 1024.0
-                    limit_gb = max(20, min(64, int(total_gb * 0.8)))
+                    # 训练期间编排器会 stop 其它容器（内存实际让给训练），0.8 系数在
+                    # 60G 宿主上只给 48G——2016 直读窗口（7.7M 行）训练器构造/预测的
+                    # 瞬时尖峰反复击中该限额（docker inspect OOMKilled=true 实证）。
+                    # 提到 0.88（本机 ≈54G）；宿主 60G − 保护服务 ~6G 仍可承载。
+                    limit_gb = max(20, min(64, int(total_gb * 0.88)))
                     return f"{limit_gb}g"
     except OSError:
         return None
