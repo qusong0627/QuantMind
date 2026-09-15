@@ -13,10 +13,12 @@ export const useTradingModeInitialization = () => {
     const initializeMode = useCallback(() => {
         if (!isAuthenticated || initializedRef.current) return;
 
-        // 实盘入口已在前端隐藏，统一固定为模拟盘，
-        // 忽略历史 localStorage 中可能存在的 real 偏好，避免页面仍停留于实盘态。
-        if (tradingMode !== 'simulation') {
-            dispatch(setTradingMode('simulation'));
+        // 只恢复用户显式保存的偏好，不再根据账户状态做隐式模式切换。
+        const savedMode = localStorage.getItem(TRADING_MODE_PREF_KEY);
+        if (savedMode === 'real' || savedMode === 'simulation') {
+            if (tradingMode !== savedMode) {
+                dispatch(setTradingMode(savedMode as 'real' | 'simulation'));
+            }
         }
 
         initializedRef.current = true;

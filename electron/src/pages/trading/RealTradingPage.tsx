@@ -538,7 +538,6 @@ const RealTradingPage: React.FC = () => {
 
                         {/* Bottom help, explicit mode selector, and trading disclaimer. */}
                         <div className="p-3 pb-6 border-t border-gray-200 shrink-0 bg-white space-y-1.5">
-                            {/* ===== 实盘入口（模拟/实盘切换，暂隐藏，后期功能完善后恢复）=====
                             <div className="flex items-center justify-between gap-2 px-1 pb-1">
                                 <span className="text-[11px] font-semibold text-slate-400">交易模式</span>
                                 <button
@@ -563,7 +562,6 @@ const RealTradingPage: React.FC = () => {
                                     </span>
                                 </button>
                             </div>
-                            */}
                             <HelpCenterLink className="w-full text-xs font-semibold tracking-wide" />
                         </div>
                     </div>

@@ -15,8 +15,9 @@ const TRADING_MODE_PREF_KEY = 'qm:trading_mode_pref';
 const MARKET_PREF_KEY = 'qm:current_market';
 
 const savedMode = localStorage.getItem(TRADING_MODE_PREF_KEY);
+// 未显式保存过偏好时默认模拟盘：实盘态须由用户主动切换一次（切换会写入偏好）
 const initialTradingMode: 'real' | 'simulation' =
-  (savedMode === 'real' || savedMode === 'simulation') ? savedMode : 'real';
+  (savedMode === 'real' || savedMode === 'simulation') ? savedMode : 'simulation';
 
 const savedMarket = localStorage.getItem(MARKET_PREF_KEY);
 const validMarkets: AppMarket[] = (['CN', 'US', 'HK', 'CRYPTO', 'FUTURES'] as AppMarket[]).filter((m) => isMarketEnabled(m));

@@ -101,7 +101,6 @@ export const HeaderBar: React.FC = () => {
           <MarketSelector />
         </motion.div>
 
-        {/* ===== 实盘入口（REAL/SIM 数据源切换，暂隐藏，后期功能完善后恢复）=====
         <motion.div
           initial={{ opacity: 0, scale: 0.95 }}
           animate={{ opacity: 1, scale: 1 }}
@@ -131,7 +130,6 @@ export const HeaderBar: React.FC = () => {
             </span>
           </button>
         </motion.div>
-        */}
       </div>
 
       <div className="flex flex-col items-center justify-center text-center">
