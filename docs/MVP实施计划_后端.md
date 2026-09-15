@@ -137,6 +137,15 @@
 > - **回填**：`backend/scripts/backfill_rank_pct.py`（默认 dry-run；按 run 分批 UPDATE where rank_pct IS NULL；
 >   幂等可重跑；1426 万行/2914 run 全量回填）。
 > - 测试：`test_signal_contract.py`——分位口径（并列/单值/NaN/空）+ 写入端 SQL 含新列源断言 + 迁移 SQL 幂等形态。
+- **事故记录（2026-09-16，lessons learned）**：自愈迁移最初对热表**无条件** `ADD COLUMN IF NOT EXISTS`——
+  PG 即使列已存在也要申请 **AccessExclusive**；当调用方自身事务未提交（Step 0.1 的 DELETE 持 RowExclusive）
+  而迁移走独立连接时，**自阻塞 44 分钟**（inference 主会话 idle-in-transaction↔自己的迁移连接互等），
+  排队中的 AccessExclusive 进而**堵死整张表的全部读写**（回填/推理/查询集体排队）。
+  修复（本批提交）：两契约模块统一改为 **information_schema 预检 → 列齐全零 DDL 快路径 →
+  仅缺列才 ALTER（SET LOCAL lock_timeout=3s 快速失败）→ 异常只告警不抛出**；
+  现场经 `pg_cancel_backend`（取消无意义 ALTER）秒级疏通，回填恢复全速。
+  **教训固化**：① 运行时 DDL 永远先 existence 预检；② 自愈迁移必须 lock_timeout 且失败不阻断业务；
+  ③ 自愈测试加 `test_ensure_is_lock_safe`（源码断言三项纪律）。
 >
 > **T-P1-02 就绪标记与单实例锁（下一批）**：`qm:signal:ready:{market}:{date}`（全量校验后置位）+
 > 推理任务分布式锁（修同日多 run 竞态）；先例：`qm:inference:completed:*`（script_runner:143）与

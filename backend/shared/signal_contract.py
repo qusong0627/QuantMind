@@ -83,43 +83,99 @@ def _finite(value: Any) -> bool:
         return False
 
 
-def _migration_statements() -> list[str]:
-    return [ALTER_TEMPLATE.format(name=name, type=col_type) for name, col_type in CONTRACT_COLUMNS]
+def _statements_for(missing: set[str]) -> list[str]:
+    return [
+        ALTER_TEMPLATE.format(name=name, type=col_type)
+        for name, col_type in CONTRACT_COLUMNS
+        if name in missing
+    ]
+
+
+_PRECHECK_SQL = (
+    "SELECT column_name FROM information_schema.columns "
+    "WHERE table_name = 'engine_signal_scores' AND column_name = ANY(:cols)"
+)
+
+
+def _missing_columns_sync(conn) -> set[str]:
+    from sqlalchemy import text as sa_text
+
+    names = [name for name, _ in CONTRACT_COLUMNS]
+    rows = conn.execute(sa_text(_PRECHECK_SQL), {"cols": names}).fetchall()
+    present = {str(r[0]) for r in rows}
+    return {n for n in names if n not in present}
+
+
+async def _missing_columns_async(session) -> set[str]:
+    from sqlalchemy import text as sa_text
+
+    names = [name for name, _ in CONTRACT_COLUMNS]
+    rows = (await session.execute(sa_text(_PRECHECK_SQL), {"cols": names})).fetchall()
+    present = {str(r[0]) for r in rows}
+    return {n for n in names if n not in present}
 
 
 def ensure_signal_contract_columns(conn) -> None:
-    """幂等补齐契约列（同步；**独立事务**执行，不污染调用方事务）。
+    """幂等补齐契约列（同步；**安全化**：先查 existence，只对缺列做 DDL）。
 
-    写入端入口调用（script_runner 写库链路用 psycopg2 同步会话）。
-    用 ``engine.begin()`` 独立提交：调用方后续回滚不会让"已迁移"标记失真
-    （ALTER 已提交、标记才置位；失败则回滚且不置标记，下次重试）。
+    2026-09-16 事故教训（见实施计划 T-P1-01 事故记录）：对热表无条件
+    ``ADD COLUMN IF NOT EXISTS`` 仍会申请 AccessExclusive 锁——当调用方自身事务
+    尚未提交（持 RowExclusive）且迁移连接用独立会话时，**形成自阻塞**；排队中的
+    AccessExclusive 还会堵死该表的所有后续读写。故：
+    1. 先查 information_schema（AccessShare，不与任何写冲突），列齐全直接返回（零 DDL）；
+    2. 缺列才 ALTER，且 ``lock_timeout=3s`` 快速失败，不长时间钳制热表；
+    3. 任何异常只告警不抛出（列缺失会在后续 INSERT 时显式报错），不拖垮业务链路。
     """
     global _ensured
     if _ensured:
         return
+    import logging
+
     from sqlalchemy import text as sa_text
 
-    engine = conn.get_bind()
-    with engine.begin() as migration_conn:
-        for stmt in _migration_statements():
-            migration_conn.execute(sa_text(stmt))
-    _ensured = True
+    logger = logging.getLogger(__name__)
+    try:
+        missing = _missing_columns_sync(conn)
+        if not missing:
+            _ensured = True
+            return
+        engine = conn.get_bind()
+        with engine.begin() as migration_conn:
+            migration_conn.execute(sa_text("SET LOCAL lock_timeout = '3s'"))
+            for stmt in _statements_for(missing):
+                migration_conn.execute(sa_text(stmt))
+        _ensured = True
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[SignalContract] 契约列自愈失败（不阻断业务；缺口列将在写入时报错）: %s", exc
+        )
 
 
 async def ensure_signal_contract_columns_async() -> None:
-    """幂等补齐契约列（异步；**独立会话**执行，不污染调用方事务）。
-
-    与同步变体共享进程级标记：任一先行执行过即跳过（列是全局的）。
-    """
+    """幂等补齐契约列（异步；与同步变体同款安全化：先查 existence + lock_timeout + 不抛出）。"""
     global _ensured
     if _ensured:
         return
+    import logging
+
     from sqlalchemy import text as sa_text
 
     from backend.shared.database_manager_v2 import get_session
 
-    async with get_session(read_only=False) as migration_session:
-        for stmt in _migration_statements():
-            await migration_session.execute(sa_text(stmt))
-        await migration_session.commit()
-    _ensured = True
+    logger = logging.getLogger(__name__)
+    try:
+        async with get_session(read_only=False) as pre_session:
+            missing = await _missing_columns_async(pre_session)
+        if not missing:
+            _ensured = True
+            return
+        async with get_session(read_only=False) as migration_session:
+            await migration_session.execute(sa_text("SET LOCAL lock_timeout = '3s'"))
+            for stmt in _statements_for(missing):
+                await migration_session.execute(sa_text(stmt))
+            await migration_session.commit()
+        _ensured = True
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[SignalContract] 契约列自愈失败（不阻断业务；缺口列将在写入时报错）: %s", exc
+        )

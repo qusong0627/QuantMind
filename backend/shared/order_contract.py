@@ -55,44 +55,120 @@ def build_sim_client_order_id(run_id: str, symbol: str, side: str) -> str | None
     return f"sim-{rid}-{sym}-{sd}"[:MAX_CLIENT_ORDER_ID_LEN]
 
 
-def _statements() -> list[str]:
-    stmts: list[str] = []
-    for name, col_type in SIM_ORDER_COLUMNS:
-        stmts.append(
-            f"ALTER TABLE sim_orders ADD COLUMN IF NOT EXISTS {name} {col_type}"
-        )
-    for name, col_type in ORDER_COLUMNS:
-        stmts.append(
-            f"ALTER TABLE orders ADD COLUMN IF NOT EXISTS {name} {col_type}"
-        )
-    return stmts
+_TABLE_COLUMNS = {
+    "sim_orders": SIM_ORDER_COLUMNS,
+    "orders": ORDER_COLUMNS,
+}
+
+_PRECHECK_SQL = (
+    "SELECT column_name FROM information_schema.columns "
+    "WHERE table_name = :table AND column_name = ANY(:cols)"
+)
+
+
+def _missing_for(table: str, present: set[str]) -> list[tuple[str, str]]:
+    return [
+        (name, col_type)
+        for name, col_type in _TABLE_COLUMNS[table]
+        if name not in present
+    ]
+
+
+async def _missing_columns_async(session) -> dict[str, set[str]]:
+    from sqlalchemy import text as sa_text
+
+    out: dict[str, set[str]] = {}
+    for table, cols in _TABLE_COLUMNS.items():
+        names = [n for n, _ in cols]
+        rows = (
+            await session.execute(
+                sa_text(_PRECHECK_SQL), {"table": table, "cols": names}
+            )
+        ).fetchall()
+        present = {str(r[0]) for r in rows}
+        out[table] = {n for n in names if n not in present}
+    return out
 
 
 def ensure_order_contract_columns(conn) -> None:
-    """幂等补齐契约列（同步；独立事务，调用方回滚不影响"已迁移"标记语义）。"""
+    """幂等补齐契约列（同步；安全化：先查 existence，只对缺列 DDL + lock_timeout）。
+
+    同日事故教训（见 signal_contract 注释）：热表无条件 ADD COLUMN IF NOT EXISTS
+    仍申请 AccessExclusive，会与调用方未提交事务自阻塞并堵死全表；故先走
+    information_schema 预检，列齐全零 DDL；缺列才 ALTER 且 3s 超时快速失败；
+    异常只告警不抛出。
+    """
     global _ensured
     if _ensured:
         return
+    import logging
+
     from sqlalchemy import text as sa_text
 
-    engine = conn.get_bind()
-    with engine.begin() as migration_conn:
-        for stmt in _statements():
-            migration_conn.execute(sa_text(stmt))
-    _ensured = True
+    logger = logging.getLogger(__name__)
+    try:
+        missing: dict[str, list[tuple[str, str]]] = {}
+        for table, cols in _TABLE_COLUMNS.items():
+            names = [n for n, _ in cols]
+            rows = conn.execute(
+                sa_text(_PRECHECK_SQL), {"table": table, "cols": names}
+            ).fetchall()
+            present = {str(r[0]) for r in rows}
+            gaps = _missing_for(table, present)
+            if gaps:
+                missing[table] = gaps
+        if not missing:
+            _ensured = True
+            return
+        engine = conn.get_bind()
+        with engine.begin() as migration_conn:
+            migration_conn.execute(sa_text("SET LOCAL lock_timeout = '3s'"))
+            for table, gaps in missing.items():
+                for name, col_type in gaps:
+                    migration_conn.execute(
+                        sa_text(
+                            f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {name} {col_type}"
+                        )
+                    )
+        _ensured = True
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[OrderContract] 契约列自愈失败（不阻断业务；缺口列将在写入时报错）: %s", exc
+        )
 
 
 async def ensure_order_contract_columns_async() -> None:
-    """幂等补齐契约列（异步；独立会话，不混入调用方业务事务）。"""
+    """幂等补齐契约列（异步；与同步变体同款安全化）。"""
     global _ensured
     if _ensured:
         return
+    import logging
+
     from sqlalchemy import text as sa_text
 
     from backend.shared.database_manager_v2 import get_session
 
-    async with get_session(read_only=False) as migration_session:
-        for stmt in _statements():
-            await migration_session.execute(sa_text(stmt))
-        await migration_session.commit()
-    _ensured = True
+    logger = logging.getLogger(__name__)
+    try:
+        async with get_session(read_only=False) as pre_session:
+            missing = await _missing_columns_async(pre_session)
+        gaps = {t: cols for t, cols in missing.items() if cols}
+        if not gaps:
+            _ensured = True
+            return
+        async with get_session(read_only=False) as migration_session:
+            await migration_session.execute(sa_text("SET LOCAL lock_timeout = '3s'"))
+            for table, names in gaps.items():
+                for name, col_type in _missing_for(table, set()):
+                    if name in names:
+                        await migration_session.execute(
+                            sa_text(
+                                f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {name} {col_type}"
+                            )
+                        )
+            await migration_session.commit()
+        _ensured = True
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[OrderContract] 契约列自愈失败（不阻断业务；缺口列将在写入时报错）: %s", exc
+        )
