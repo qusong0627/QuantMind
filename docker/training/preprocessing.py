@@ -100,9 +100,10 @@ def cross_sectional_median_fill(
     - fill_value="zero"：不做截面统计，缺失直接填 0（训练页开关可选）。
 
     分块向量化实现：每块对 (日期×特征) 求一次 count/median，再整块 fillna。
-    返回填充后的新 DataFrame（不修改入参）。
+    **原地修改入参 features 列并返回同一对象**（无整帧副本——2026-09-15 实测
+    df.copy() 在 7.7M×273 上每帧 ≈7GB，与 df/切分帧叠加触发宿主全局 OOM）。
     """
-    out = df.copy()
+    out = df
     if not features:
         return out
     if str(fill_value or "median").strip().lower() == "zero":
@@ -147,8 +148,9 @@ def cross_sectional_zscore(
 
     分块向量化实现；块内用 float64 计算（防溢出），输出回 float32
     （与加载器 "columns downcast to float32" 口径一致，避免整表上浮吃内存）。
+    原地修改入参 features 列并返回同一对象（无整帧副本）。
     """
-    out = df.copy()
+    out = df
     if not features:
         return out
     if winsor:
@@ -191,8 +193,9 @@ def cross_sectional_rank(df: pd.DataFrame, features: list[str]) -> pd.DataFrame:
     与 Z-score 互为替选口径：秩对极端值天然免疫（无需缩尾），但丢弃截面上的
     距离信息。树模型对单调变换不敏感（两者等价），该口径主要服务 MLP/线性等
     对输入尺度敏感的模型。NaN 透传（不参与排名）。
+    原地修改入参 features 列并返回同一对象（无整帧副本）。
     """
-    out = df.copy()
+    out = df
     if not features:
         return out
     for chunk in _date_chunks(out["trade_date"]):

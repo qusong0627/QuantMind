@@ -149,12 +149,17 @@ def _prepare_arrays(
     val_df: pd.DataFrame,
     features: list[str],
     prep_cfg: dict | None = None,
+    extra_frames: list[pd.DataFrame] | None = None,
 ) -> tuple:
     """计算 fill_values 并转换为 numpy 数组。
 
     prep_cfg 启用时（`preprocessing.enabled=true`），对特征做截面预处理：
     per (trade_date, feature) 中位数填充 + 分位缩尾 + 截面 Z-score。
     类别特征（ind_code_l1/l2）不参与变换（保持原始编码）。
+    extra_frames：一并**原地**预处理的帧（test 帧与全窗口帧）——2026-09-15 修正：
+    此前只处理 train/val，测试期与全窗口预测（pred.pkl）在原始特征上进行，与训练/
+    推理口径不一致。截面统计按日独立（切分按日期，单日横截面完整落在同一段内），
+    故各帧分别处理与其自身口径一致。
     返回 (fill_values, X_train, y_train, X_val, y_val, _fill_fn)。
     """
     import math
@@ -191,6 +196,10 @@ def _prepare_arrays(
             _prep_kw["quantiles"] = _quantiles
         train_df = cross_sectional_preprocess(train_df, _prep_feats, **_prep_kw)
         val_df = cross_sectional_preprocess(val_df, _prep_feats, **_prep_kw)
+        # 关键修正：test 帧与全窗口帧此前未预处理，测试指标/全窗口预测失真。
+        # preprocess 已就地化，对传入帧原地处理（不影响返回值签名）。
+        for _extra in extra_frames or []:
+            cross_sectional_preprocess(_extra, _prep_feats, **_prep_kw)
         logger.info(
             "Cross-sectional preprocessing enabled: %d features "
             "(exclude %s, fill=%s, standardize=%s, winsor=%s%s)",

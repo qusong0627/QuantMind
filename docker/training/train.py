@@ -372,7 +372,8 @@ def train_model(df: pd.DataFrame, features: list[str], cfg: dict, hardware: dict
     train_df, val_df, test_df = _split_data(df, cfg)
     _trim_memory("after split")
     fill_values, X_train, y_train, X_val, y_val, _fill = _prepare_arrays(
-        train_df, val_df, features, prep_cfg=cfg.get("preprocessing") or {}
+        train_df, val_df, features, prep_cfg=cfg.get("preprocessing") or {},
+        extra_frames=[test_df, df],
     )
     _trim_memory("after prepare")
 
@@ -570,7 +571,8 @@ def _train_single_model(
 
     _optuna_result = None
     fill_values, X_train, y_train, X_val, y_val, _fill = _prepare_arrays(
-        train_df, val_df, features, prep_cfg=cfg.get("preprocessing") or {}
+        train_df, val_df, features, prep_cfg=cfg.get("preprocessing") or {},
+        extra_frames=[test_df, df],
     )
 
     if model_type in ("lightgbm", "xgboost", "catboost"):
