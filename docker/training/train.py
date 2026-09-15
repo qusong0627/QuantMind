@@ -49,6 +49,38 @@ except Exception:
 logger = logging.getLogger("quantmind.train")
 
 
+def _rss_gb() -> float:
+    """当前进程 RSS（GB），供阶段日志观测内存曲线。"""
+    try:
+        with open("/proc/self/status", encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) / 1024.0 / 1024.0
+    except OSError:
+        pass
+    return float("nan")
+
+
+def _trim_memory(tag: str = "") -> None:
+    """把 glibc 滞留的 arena 内存归还给 OS（gc + malloc_trim）。
+
+    大表 pandas 运算会产生 7~9GB 级整帧临时副本：对象释放后 glibc 默认保留
+    arena，RSS 高水位不降。宿主 60G 且多租户共享（本机还跑着别的容器）时，
+    训练容器约 42G 的"滞留峰值"会触发**宿主全局 OOM**——2026-09-15 13:52
+    实测：内核 global_oom 杀掉训练进程 anon-rss 42.5G，而 30s 采样峰值只有
+    36.7G，差额即滞留量。在阶段边界主动归还，把有效峰值拉回活动集大小。
+    """
+    gc.collect()
+    try:
+        import ctypes
+
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except Exception:  # pragma: no cover - 非 glibc 平台
+        pass
+    if tag:
+        logger.info("Memory trimmed (%s): rss=%.1fGB", tag, _rss_gb())
+
+
 def _workspace_from_cfg(cfg: dict | None = None, result_path: Path | None = None) -> Path:
     """产物目录：native 跟 config output 走，Docker 仍是 /workspace。"""
     out = (cfg or {}).get("output") or {}
@@ -338,9 +370,11 @@ def train_model(df: pd.DataFrame, features: list[str], cfg: dict, hardware: dict
 
     # 数据切分
     train_df, val_df, test_df = _split_data(df, cfg)
+    _trim_memory("after split")
     fill_values, X_train, y_train, X_val, y_val, _fill = _prepare_arrays(
         train_df, val_df, features, prep_cfg=cfg.get("preprocessing") or {}
     )
+    _trim_memory("after prepare")
 
     # 路由到对应训练函数
     logger.info("Training model: %s (framework=%s)", model_type, _get_model_framework(model_type))
@@ -402,6 +436,7 @@ def train_model(df: pd.DataFrame, features: list[str], cfg: dict, hardware: dict
     logger.info(f"Val   IC={val_m['ic']:.4f}    RankIC={val_m['rank_ic']:.4f}  ICIR={val_m['rank_icir']:.4f}")
 
     # 生成全窗口预测（label_return 若在：评估报告的真实收益口径）
+    _trim_memory("before full-pred")
     _fp_cols = ["symbol", "trade_date", "label"] + (
         ["label_return"] if "label_return" in df.columns else []
     )
@@ -1112,8 +1147,9 @@ def main() -> int:
             # 全局股票池（P3）：编排器已把池解析成代码列表随 config.yaml 传入
             pool_symbols=(cfg.get("data", {}) or {}).get("pool_symbols") or None,
         )
+        _trim_memory("after load")
 
-        # ── 行业编码开关：load_data 只负责 merge 列，不会自动进入特征集 ──
+        # ─ 行业编码开关：load_data 只负责 merge 列，不会自动进入特征集 ──
         # 此前 ind_code_l1 从未被加入 valid_features，开关空转。
         # 此处显式补入（要求 CatBoost 侧已声明 cat_features，见 trainers_gbdt）。
         if bool(context_cfg.get("industry_as_feature", False)):
