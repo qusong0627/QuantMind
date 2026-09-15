@@ -553,16 +553,10 @@ class AuthService:
                 )
                 user = result.scalar_one_or_none()
 
-                logger.error(f"DEBUG credentials: {credentials}")
                 if not user:
-                    logger.error("DEBUG user not found")
                     raise ValueError("用户名或密码错误")
 
-                logger.error(
-                    f"DEBUG user found: {user.username}, active={user.is_active}, locked={user.is_locked}"
-                )
                 if not self._verify_password(credentials.password, user.password_hash):
-                    logger.error("DEBUG password verify failed")
                     raise ValueError("用户名或密码错误")
 
                 if not user.is_active:

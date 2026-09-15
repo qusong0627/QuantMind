@@ -558,7 +558,9 @@ async def list_simulation_fund_snapshots(
     """查询当前用户的模拟盘日级资金快照历史。"""
     snapshots = await SimulationFundSnapshotService.list_user_daily(
         tenant_id=auth.tenant_id,
-        user_id=str(auth.user_id),
+        # P0-04：快照行的 user_id 由账户键解析而来（int 归一形态，如 00000001→1），
+        # 必须用同一归一口径读取，否则 admin 会读到另一个空账户的平线。
+        user_id=str(_require_user_id(auth.user_id, auth.tenant_id)),
         days=days,
     )
     return [

@@ -461,6 +461,10 @@ return 0
             "warning_level": "normal",
             "positions": {},
             "market": self._normalize_market(market),
+            # P0-05：落账户级初始资金。用户级资金快照按市场求和 initial_capital 时需要
+            # 每个市场账户各自的种子（settings 只有一份、无法区分多市场），否则跨市场
+            # 合并会把新增市场的种子计成盈利。
+            "initial_cash": initial_cash,
         }
 
         write_json_cache(self.redis, key, account_data)

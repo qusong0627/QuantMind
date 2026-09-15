@@ -48,16 +48,43 @@ def _local_today() -> datetime.date:
         return datetime.now().date()
 
 
-def _parse_account_key(key: str) -> tuple[str, str] | None:
-    # simulation:account:{tenant_id}:{user_id}（CN），带 :MARKET 后缀的市场账户
-    # 与 CN 账户按 (tenant, user) 合并成一条用户级快照：快照表以
-    # tenant/user/date 唯一，且台账 account_id（sim:{tenant}:{user}）本来
-    # 就不分市场——跨市场资产应合计为用户总资产，而非串行覆盖或跳过。
-    parsed = parse_canonical_account_key(key)
-    if not parsed:
-        return None
-    tenant_id, user_id, _market = parsed
-    return tenant_id, user_id
+def resolve_account_seed(
+    account: dict,
+    market: str,
+    settings_initial: Decimal | None,
+) -> Decimal | None:
+    """单市场账户的初始资金（用户级快照 initial_capital 求和用）。纯函数。
+
+    用户级快照按 (tenant, user) 合并跨市场账户（快照表以 tenant/user/date 唯一），
+    因此初始资金必须按市场逐个求和——settings 只有一份（无市场维度），拿它当
+    唯一初始会让每个新增市场账户的种子被计成盈利（曾致 +100 万假收益）。
+
+    解析顺序：
+      1. 账户内显式 initial_cash（init_account 落的字段，P0-05 起写入）；
+      2. 未交易启发式：无持仓且现金 ≈ 总资产（从未成交 = 无盈亏）→ 以当前总资产为初始；
+      3. CN 账户回退用户级 settings（历史存量账户唯一可信来源）；
+      4. 其余返回 None（未知种子，不参与求和，由汇总层 WARNING 点名）。
+    """
+    explicit = account.get("initial_cash")
+    if explicit is not None:
+        try:
+            return Decimal(str(explicit))
+        except Exception:
+            pass
+
+    cash = _to_decimal(account.get("cash") or account.get("available_balance"))
+    total = _to_decimal(account.get("total_asset"))
+    positions = account.get("positions")
+    has_positions = isinstance(positions, dict) and any(
+        isinstance(pos, dict) and float(pos.get("volume") or 0) > 0
+        for pos in positions.values()
+    )
+    if not has_positions and abs(cash - total) <= Decimal("0.01"):
+        return total
+
+    if str(market or "CN").upper() == "CN" and settings_initial is not None:
+        return settings_initial
+    return None
 
 
 @dataclass
@@ -178,12 +205,15 @@ class SimulationFundSnapshotService:
         keys = list(redis.client.scan_iter(match="simulation:account:*", count=500))
         # 同一用户跨市场账户（CN/HK/US/...）合并为一条用户级快照：
         # 资产字段累加，盈亏在合并后的总资产上计算（与台账口径一致）。
+        # P0-05：initial_capital 同样按市场逐个求和（见 resolve_account_seed），
+        # 不能用单份 settings 当唯一初始——否则每个新增市场账户的种子被计成盈利。
         grouped: dict[tuple[str, str], dict[str, Decimal]] = {}
+        settings_cache: dict[tuple[str, str], Decimal] = {}
         for key in keys:
-            parsed = _parse_account_key(str(key))
+            parsed = parse_canonical_account_key(str(key))
             if not parsed:
                 continue
-            tenant_id, user_id = parsed
+            tenant_id, user_id, market = parsed
             raw = redis.client.get(key)
             if not raw:
                 continue
@@ -199,6 +229,7 @@ class SimulationFundSnapshotService:
                     "available_balance": Decimal("0"),
                     "frozen_balance": Decimal("0"),
                     "market_value": Decimal("0"),
+                    "initial_capital": Decimal("0"),
                 },
             )
             bucket["total_asset"] += _to_decimal(account.get("total_asset"))
@@ -208,8 +239,39 @@ class SimulationFundSnapshotService:
             bucket["frozen_balance"] += _to_decimal(account.get("frozen_balance"))
             bucket["market_value"] += _to_decimal(account.get("market_value"))
 
+            settings_initial: Decimal | None = None
+            if str(market).upper() == "CN":
+                cache_key = (tenant_id, user_id)
+                if cache_key not in settings_cache:
+                    settings_cache[cache_key] = cls._read_settings_initial_cash(
+                        redis, tenant_id, user_id
+                    )
+                settings_initial = settings_cache[cache_key] or None
+            seed = resolve_account_seed(account, market, settings_initial)
+            if seed is None:
+                logger.warning(
+                    "fund snapshot: unknown initial capital for %s (market=%s); "
+                    "excluded from seed sum",
+                    key,
+                    market,
+                )
+            else:
+                bucket["initial_capital"] += seed
+
         rows: list[dict[str, object]] = []
         for (tenant_id, user_id), bucket in grouped.items():
+            initial_capital = bucket["initial_capital"]
+            if initial_capital == 0:
+                # 全部账户均无种子（历史数据/异常）：沿用原兜底链，保盈亏为 0 口径
+                initial_capital = cls._read_settings_initial_cash(
+                    redis, tenant_id, user_id
+                )
+                if initial_capital == 0:
+                    initial_capital = await cls._read_ledger_initial_equity(
+                        tenant_id, user_id
+                    )
+                if initial_capital == 0:
+                    initial_capital = bucket["total_asset"]
             row = {
                 "tenant_id": tenant_id,
                 "user_id": user_id,
@@ -219,21 +281,11 @@ class SimulationFundSnapshotService:
                 "available_balance": bucket["available_balance"],
                 "frozen_balance": bucket["frozen_balance"],
                 "market_value": bucket["market_value"],
-                "initial_capital": Decimal("0"),
+                "initial_capital": initial_capital,
                 "total_pnl": Decimal("0"),
                 "today_pnl": Decimal("0"),
                 "source": "redis_simulation_account",
             }
-            if row["initial_capital"] == 0:
-                row["initial_capital"] = cls._read_settings_initial_cash(
-                    redis, tenant_id, user_id
-                )
-                if row["initial_capital"] == 0:
-                    row["initial_capital"] = await cls._read_ledger_initial_equity(
-                        tenant_id, user_id
-                    )
-                if row["initial_capital"] == 0:
-                    row["initial_capital"] = row["total_asset"]
             # 总盈亏 = 总资产 - 初始资金（手续费已从现金扣减，天然计入）
             row["total_pnl"] = row["total_asset"] - row["initial_capital"]
             # 当日盈亏 = 总资产 - 日初权益（snap_date之前最近快照基线）
