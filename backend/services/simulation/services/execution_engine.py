@@ -798,10 +798,15 @@ class SimulationExecutionEngine:
                 account_snapshot=before_snapshot,
             )
         except Exception as ledger_exc:  # noqa: BLE001
+            from backend.shared.errfmt import locate
+
             logger.error(
-                "Sim ledger record failed for order %s: %s",
-                order.order_id,
-                ledger_exc,
+                locate(
+                    "CONTRACT:LEDGER",
+                    f"Sim ledger record failed: {ledger_exc}",
+                    ref=str(order.order_id or ""),
+                    where="execution_engine.py:apply_filled",
+                ),
                 exc_info=True,
             )
             raise
@@ -839,9 +844,15 @@ class SimulationExecutionEngine:
                         restore_err,
                         exc_info=True,
                     )
+            from backend.shared.errfmt import locate
+
             logger.error(
-                "Sim order %s apply_filled commit failed; DB rolled back and account restored",
-                order.order_id,
+                locate(
+                    "CONTRACT:LEDGER",
+                    "Sim order apply_filled commit failed; DB rolled back and account restored",
+                    ref=str(order.order_id or ""),
+                    where="execution_engine.py:apply_filled(commit)",
+                ),
                 exc_info=True,
             )
             raise

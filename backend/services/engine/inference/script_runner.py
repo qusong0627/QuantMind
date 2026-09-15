@@ -1563,15 +1563,18 @@ class InferenceScriptRunner:
             f"置信度闸门={'启用' if has_confidence else '跳过'}"
         )
         if buy_count + sell_count == 0:
+            from backend.shared.errfmt import locate
+
             logger.warning(
-                "[SignalLogic] 无 BUY/SELL 输出: %d 只标的全部 HOLD"
-                "（共识闸门=%s, 置信度闸门=%s, 分数区间=[%.4f, %.4f]）"
-                "——请检查闸门阈值是否与模型分数量纲匹配",
-                n,
-                "启用" if has_consensus else "跳过",
-                "启用" if has_confidence else "跳过",
-                float(arr.min()),
-                float(arr.max()),
+                locate(
+                    "RULE:SIGNAL-GATE",
+                    f"无 BUY/SELL 输出: {n} 只标的全部 HOLD"
+                    f"（共识闸门={'启用' if has_consensus else '跳过'}, "
+                    f"置信度闸门={'启用' if has_confidence else '跳过'}, "
+                    f"分数区间=[{float(arr.min()):.4f}, {float(arr.max()):.4f}]）"
+                    "——请检查闸门阈值是否与模型分数量纲匹配",
+                    where="script_runner.py:_resolve_signal_sides",
+                )
             )
 
         return sides

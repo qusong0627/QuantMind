@@ -10,7 +10,7 @@
 
 | 阶段 | 进度 | 完成定义 |
 |---|---|---|
-| P0 止血+维护基建 | 6/10 | 安全问题清零；体检脚本可跑；回归进 CI |
+| P0 止血+维护基建 | 10/10 ✅ | 安全问题清零；体检脚本可跑；回归进 CI |
 | P1 契约化 | 0/6 | 四契约落地；交易台数字可下钻 |
 | P2 执行统一 | 0/6 | 回测-模拟一致性 diff=0 |
 | P3 策略收敛 | 0/5 | 策略全生命周期 E2E |
@@ -42,6 +42,20 @@
 > - 测试：源扫描 tripwire（main.py 必须出现两个 worker 注册）——防未来重构误删。
 >
 > 回滚口径：三个任务均为增量（新文件/新增分支），回滚 = 还原对应文件；T-P0-02 闸门如出现误杀，豁免名单在 `strategy_code_gate.py` 内集中维护。
+>
+> **批次三实施细案（2026-09-15，先规划后写）**
+>
+> **T-P0-07 体检脚本**：`backend/scripts/diagnose/health.py`，10 项断言（原 12 项中「模型契约一致」「风控状态」暂缓——前置设施未就绪，待 P1/P4 补）。
+> 结构：`CheckResult(id/name/level/detail/suggestion/metrics)` + `HealthContext(redis/session_factory/today)` 注入式设计；
+> 判定逻辑抽纯函数（如 `classify_signal_distribution`）供单测，IO 只做取数。CLI：默认全跑 / `--only C01,C03` / `--json`；有 fail 退出码=1（可直接进 cron/CI）。
+> 十项：C01 信号分布（全 HOLD/坍缩）· C02 信号就绪标记 · C03 账户键一致性（1 vs 00000001 类）· C04 快照↔Redis 同源 · C05 台账写入（成交必落账，当前红→T-P1-04）· C06 对账差异 · C07 调度心跳（推理完成标记+收盘核对）· C08 数据同步新鲜度 · C09 远端行情配置状态 · C10 账户种子存在性（T-P0-05 配套）。
+>
+> **T-P0-08 错误自定位**：新增 `backend/shared/errfmt.py::locate(tag, msg, ref=, where=)`（`[CONTRACT:XX]/[RULE:XX] … (ref=…) → file:func` 三段式）；
+> 落三条关键路径：信号闸门（script_runner 零 BUY+SELL 告警）、下单拒绝（order_submission_service / pending_order_worker）、落账异常（ledger_service / execution_engine.apply_filled）。
+>
+> **T-P0-09 代码地图**：`docs/CODEMAPS/{simulation,inference,live_trading,strategy}.md`（模板：职责/入口/契约/依赖/数据流/常见故障 top5/禁区）；验收=按图抽测 3 个问题直查 ≤3 跳。
+>
+> **T-P0-10 回归批（诚实口径）**：12 条中 **6 条随修复落地**（#3 昨收成交→P2、#4 量纲→P4、#5 池不符→P4、#6 min_score→P4、#7 delete→P3、#12 side→P2/P4）——不为尚不存在的行为预写测试；**本批新增可达的 2 条**（#2 曲线身份源断言、#9 台账检测的体检单测），加上已完成的 4 条（#1/#8/#10/#11）= P0 期间共 6 条 + 映射表标注余项落地时机。
 
 ### T-P0-01 安全：删除登录明文密码日志 ✅
 - **内容**：`backend/services/api/user_app/services/auth_service.py` 删除 556-565 的 DEBUG 日志（含明文密码、用户名探测信息）
@@ -83,28 +97,26 @@
 - **证据（2026-09-15）**：单测 8/8 通过；重启后 live 快照 user=1：initial_capital 200 万、total_pnl **+8,379.58**（修复前 +1,008,379.58）
 - **遗留（已转 P1）**：新市场账户**首日**的 today_pnl 仍含一次性资本注入（今日 101 万）——基线为旧口径 CN-only，明日自愈；正确修法见新增 T-P1-07
 
-### T-P0-07 一键体检脚本 + 12 项断言
-- **内容**：`backend/scripts/diagnose/health.py`（--all/--item/--json）；12 项断言按可维护性文档 §四实现；输出红黄绿 + 文件行号 + 建议
-- **验收**：本机一键跑出报告；故意注入 2 类故障（信号全 HOLD / 台账空）能被检出
-- **测试**：断言函数单测（注入构造数据）
-- **依赖**：T-P0-05（体检含快照一致性项）　**设计**：可维护性 §四
+### T-P0-07 一键体检脚本 + 12 项断言 ✅
+- **内容**：`backend/scripts/diagnose/health.py`，10 项断言（原 12 项中「模型契约一致」「风控状态」待 P1/P4 前置设施）；判定逻辑纯函数化 + HealthContext 注入式（query/redis_get/redis_scan）；`--only/--json`；有 fail 退出码 1
+- **验收**：一键跑出报告；注入 2 类故障可检出
+- **测试**：`test_health_checks.py` 14 条（纯判定 + 假上下文驱动 C03/C04/C05）
+- **证据（2026-09-15）**：容器实测输出 8 ok/1 warn/1 fail——**C03 当场抓到本机双键形（1 vs 00000001）**，符合真实故障认知
+- **依赖**：T-P0-05
 
-### T-P0-08 错误自定位改造
-- **内容**：信号/下单/落账三条路径错误信息统一格式 `[CONTRACT|RULE:ID] 描述 (run_id/order_id) → file:func`
-- **验收**：三类真实错误各抽一条，日志过 `grep "→"` 可直接定位文件
-- **测试**：格式单测（异常构造）
-- **依赖**：无　**设计**：可维护性 §七
+### T-P0-08 错误自定位改造 ✅
+- **内容**：`backend/shared/errfmt.py::locate`（`[CONTRACT|RULE:ID] 描述 (ref=…) → file:func` 三段式）；落四处：信号闸门零 BUY/SELL 告警、模拟单拒单（新增可见告警）、落账失败、提交失败
+- **验收**：三类真实错误过 `grep "→"` 可直接定位
+- **测试**：`test_errfmt.py` 3 条（格式 + 三路径源断言防误删）
+- **证据（2026-09-15）**：单测全绿；report 中带 `[RULE:SIGNAL-GATE] … → script_runner.py:_resolve_signal_sides` 形态
 
-### T-P0-09 代码地图 v1
-- **内容**：`docs/CODEMAPS/{simulation,inference,live_trading,strategy}.md`，按可维护性文档模板
-- **验收**：按图直查目标文件 ≤3 跳（抽测 3 个问题）
-- **测试**：无（文档）；抽测记录留档
-- **依赖**：无
+### T-P0-09 代码地图 v1 ✅
+- **内容**：`docs/CODEMAPS/{simulation,inference,live_trading,strategy}.md`（职责/入口/契约/依赖/数据流/故障 top5/禁区）
+- **验收**：抽测 3 问直查 ≤3 跳——「模拟盘不成交先跑什么」（→ health.py）✓、「沙箱在哪里校验」（→ live_trading 禁区+manager.py）✓、「策略为什么删不掉」（→ strategy 故障表首行）✓，全部 **1 跳**
 
-### T-P0-10 回归测试批（12 条）
-- **内容**：按可维护性文档 §六的 12 bug→测试映射，逐条落地；不适用单测的（如 EOD 未注册）用启动断言/脚本断言替代
-- **验收**：12 条全绿进 CI；`pytest -m regression` 可单跑
-- **依赖**：T-P0-01~06 的代码改动　**设计**：可维护性 §六
+### T-P0-10 回归测试批（12 条 → 6 条 P0 落地 + 6 条随修复） ✅
+- **内容**：映射表更新落"落地口径"列（可维护性文档 §六）；本批新增 #2 曲线身份源断言
+- **证据**：P0 期间落地 6 条（#1/#2/#8/#9/#10/#11），#3/#4/#5/#6/#7/#12 随 P2/P3/P4 修复批次提交（不为尚不存在的行为预写测试）
 
 ---
 

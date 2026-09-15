@@ -103,3 +103,24 @@ def test_scheduler_trading_day_fallback():
     # 周一：日历可用时按 XSHG 判断（True）；不可用回退周判断（True）。均为 True。
     monday = datetime(2026, 9, 14, 9, 35, tzinfo=sh)
     assert scheduler._is_trading_day(monday) is True
+
+
+def test_snapshots_daily_uses_normalized_user_id():
+    """回归 #2（T-P0-04）：/snapshots/daily 必须用 require_sim_user_id 归一后的 ID。
+
+    曾用原始 JWT sub（00000001）直读，而快照行由账户键解析而来（int 归一 → "1"），
+    导致 admin 资金曲线读到另一个空账户的平线。
+    """
+    from pathlib import Path
+
+    src = (
+        Path(__file__).resolve().parents[1]
+        / "services"
+        / "simulation"
+        / "routers"
+        / "simulation.py"
+    ).read_text(encoding="utf-8")
+    anchor = src.index("async def list_simulation_fund_snapshots")
+    block = src[anchor : anchor + 900]
+    assert "_require_user_id" in block, "snapshots/daily 未使用归一身份"
+    assert "user_id=str(auth.user_id)" not in block, "snapshots/daily 仍在直读原始 sub"

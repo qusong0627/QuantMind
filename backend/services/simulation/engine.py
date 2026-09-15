@@ -557,6 +557,17 @@ class SimulationEngine:
                 source="simulation_engine",
             )
         else:
+            # T-P0-08：拒单此前仅写入订单 remarks，控制面完全不可见；补自定位告警
+            from backend.shared.errfmt import locate
+
+            logger.warning(
+                locate(
+                    "RULE:SIM-EXEC",
+                    f"模拟单被拒: {result.message}",
+                    ref=str(sim_order.order_id or ""),
+                    where="simulation/engine.py:_execute_order",
+                )
+            )
             await exec_engine.mark_rejected(sim_order, result.message)
 
         return result
