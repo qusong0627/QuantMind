@@ -117,6 +117,15 @@ services:
       - REDIS_PORT=6379
       - REDIS_PASSWORD=
 
+      # 远端行情 Redis（模拟撮合 L0 快照取价 / 实盘预检直连；两处共用一个配置源）。
+      # 留空 = 使用官方公共免费行情服（默认值在 backend/shared/remote_quote_config.py）；
+      # 私有部署可在此/.env 覆盖；REMOTE_QUOTE_DISABLED=true 时可整体关闭（走本地日线兜底）。
+      - REMOTE_QUOTE_REDIS_HOST=${REMOTE_QUOTE_REDIS_HOST:-}
+      - REMOTE_QUOTE_REDIS_PORT=${REMOTE_QUOTE_REDIS_PORT:-}
+      - REMOTE_QUOTE_REDIS_PASSWORD=${REMOTE_QUOTE_REDIS_PASSWORD:-}
+      - REMOTE_QUOTE_REDIS_DB=${REMOTE_QUOTE_REDIS_DB:-}
+      - REMOTE_QUOTE_DISABLED=${REMOTE_QUOTE_DISABLED:-}
+
       # 存储配置 (本地存储)
       - STORAGE_MODE=local
       - STORAGE_ROOT=/data

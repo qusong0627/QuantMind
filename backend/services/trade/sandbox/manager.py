@@ -126,6 +126,12 @@ class SandboxPlatformManager:
         live_trade_config: dict | None = None,
     ) -> str:
         """分发策略到其中一个空闲的 Worker，返回 run_id"""
+        # T-P0-02：执行前唯一必过卡点（启动/重启恢复等全部调用方经此）。
+        # 此前这里无任何校验，任意代码可在 trade 进程内执行。
+        from backend.shared.strategy_code_gate import validate_strategy_code
+
+        validate_strategy_code(code_str)
+
         self._ensure_pool_capacity()
         if not self._workers:
             raise RuntimeError("Sandbox Worker Pool is empty.")

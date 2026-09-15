@@ -22,12 +22,15 @@ logger = logging.getLogger(__name__)
 SERIES_KEY_PREFIX = "market:series:"
 
 
-def _env() -> tuple[str, int, str | None, int]:
-    host = (os.getenv("REMOTE_QUOTE_REDIS_HOST") or "www.quantmindai.cn").strip()
-    port = int(os.getenv("REMOTE_QUOTE_REDIS_PORT") or "6379")
-    password = (os.getenv("REMOTE_QUOTE_REDIS_PASSWORD") or "quantmind2026").strip() or None
-    db = int(os.getenv("REMOTE_QUOTE_REDIS_DB") or "3")
-    return host, port, password, db
+def _env() -> tuple[str, int, str | None, int] | None:
+    """远端行情连接参数；配置关闭/主机为空时返回 None（本级别取价禁用）。
+
+    T-P0-03：默认值与读取逻辑收敛到 backend/shared/remote_quote_config.py
+    （与实盘预检共用一份，消除两处重复的免费行情服默认值）。
+    """
+    from backend.shared.remote_quote_config import resolve_remote_quote_redis
+
+    return resolve_remote_quote_redis()
 
 
 def series_key_for(symbol: str) -> str | None:
@@ -79,15 +82,29 @@ def parse_series_member(
 
 
 _client = None
+_client_disabled_warned = False
 
 
 def _get_client():
-    """远端行情 Redis 客户端（单例复用，与 stream 侧同实例）。"""
-    global _client
+    """远端行情 Redis 客户端（单例复用，与 stream 侧同实例）。
+
+    配置禁用（REMOTE_QUOTE_DISABLED 或主机为空）时返回 None，首次访问
+    WARNING 一次——调用方一律走本地日线兜底，不静默连默认地址。
+    """
+    global _client, _client_disabled_warned
     if _client is None:
+        env = _env()
+        if env is None:
+            if not _client_disabled_warned:
+                logger.warning(
+                    "[RedisSeriesQuote] 远端行情 Redis 未配置/已禁用，"
+                    "L0 实时 tick 取价停用（走本地日线兜底）"
+                )
+                _client_disabled_warned = True
+            return None
         import redis.asyncio as aioredis
 
-        host, port, password, db = _env()
+        host, port, password, db = env
         _client = aioredis.Redis(
             host=host,
             port=port,
@@ -113,8 +130,10 @@ async def fetch_series_tick(symbol: str, max_age_sec: int = 300) -> dict[str, An
     key = series_key_for(symbol)
     if not key:
         return None
+    client = _get_client()
+    if client is None:
+        return None
     try:
-        client = _get_client()
         rows = await client.zrevrange(key, 0, 0, withscores=True)
     except Exception as exc:  # noqa: BLE001
         logger.warning("[RedisSeriesQuote] 读取 %s 失败: %s", key, exc)

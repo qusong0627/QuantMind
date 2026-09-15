@@ -139,6 +139,14 @@ async def _execute_eod(trade_date: date) -> bool:
             )
 
             if not accounts:
+                # 静默失效防治（T-P0-06 实测）：本部署 PG 台账为空（Ledger 写入链
+                # 未填充，见 T-P1-04），EOD 会"每晚成功但什么都没写"。明确点名，
+                # 台账填充后本告警自动消失。
+                logger.warning(
+                    "EOD %s: PG 无 active 模拟账户，EOD 全链跳过"
+                    "（PG 台账为空，待 T-P1-04 Ledger 契约填充）",
+                    trade_date,
+                )
                 return True
 
             projection_svc = SimulationProjectionService(session)

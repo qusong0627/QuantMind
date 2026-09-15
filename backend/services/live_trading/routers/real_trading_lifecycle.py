@@ -372,6 +372,9 @@ async def start_trading(
             logger.info(
                 f"[Sim] 用户 {resolved_user_id} 启动了沙箱模拟盘 {strategy_name} -> PID Task"
             )
+        except ValueError as e:
+            # T-P0-02：策略代码未过安全闸门（AST 校验）属调用方错误 → 400 带明细
+            raise HTTPException(status_code=400, detail=str(e)) from e
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"沙箱启动失败: {str(e)}")
 

@@ -94,28 +94,10 @@ def _load_metadata_from_fs(strategy_path: Path) -> dict | None:
 
 
 def _validate_code(code: str) -> None:
-    """AST 安全检查，防止保存危险代码。"""
-    import ast
+    """AST 安全检查，防止保存危险代码（T-P0-02：统一走共享闸门，白名单口径）。"""
+    from backend.shared.strategy_code_gate import validate_strategy_code
 
-    try:
-        tree = ast.parse(code)
-    except SyntaxError as e:
-        raise ValueError(f"策略代码存在语法错误: {e}")
-
-    blacklist = {"os", "sys", "subprocess", "shutil", "pathlib", "pickle", "socket"}
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.Import, ast.ImportFrom)):
-            names = []
-            if isinstance(node, ast.Import):
-                names = [n.name.split(".")[0] for n in node.names]
-            elif isinstance(node, ast.ImportFrom) and node.module:
-                names = [node.module.split(".")[0]]
-            for name in names:
-                if name in blacklist:
-                    raise ValueError(f"禁止在策略中导入危险模块: {name}")
-        if isinstance(node, ast.Attribute):
-            if node.attr in {"__subclasses__", "__builtins__"}:
-                raise ValueError(f"检测到潜在的沙箱逃逸代码: {node.attr}")
+    validate_strategy_code(code)
 
 
 # ---------------------------------------------------------------------------

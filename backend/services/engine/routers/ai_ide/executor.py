@@ -145,6 +145,11 @@ def _build_runner_environment(
     # 否则子容器里的用户代码又会去读那份没人同步的旧缓存
     if env.get("AI_IDE_BACKTEST_PROVIDER_URI"):
         env["AI_IDE_BACKTEST_PROVIDER_URI"] = provider_uri
+    # T-P0-03：不再向用户代码容器透传签钥与 LLM Key——
+    # SECRET_KEY / JWT_SECRET_KEY / INTERNAL_CALL_SECRET 是平台鉴权根密钥，
+    # DASHSCOPE_API_KEY / QWEN_API_KEY 是 LLM 计费 Key，runner（回测执行）
+    # 均不需要；DB/REDIS 保留（runner 需要数据访问）。
+    # 遗留跟踪（P1）：runner 专用只读 DB 账号，进一步收窄 user 代码的 DB 面。
     passthrough_keys = [
         "APP_ENV",
         "DB_DRIVER",
@@ -157,13 +162,8 @@ def _build_runner_environment(
         "REDIS_HOST",
         "REDIS_PORT",
         "REDIS_PASSWORD",
-        "SECRET_KEY",
-        "JWT_SECRET_KEY",
-        "INTERNAL_CALL_SECRET",
         "STORAGE_MODE",
         "STORAGE_ROOT",
-        "DASHSCOPE_API_KEY",
-        "QWEN_API_KEY",
         "AI_STRATEGY_TOTAL_MV_PER_YI",
         "QLIB_ALLOW_FEATURE_SIGNAL_FALLBACK",
         "QLIB_BACKTEST_REQUIRE_PRED",

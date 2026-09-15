@@ -262,6 +262,60 @@ async def lifespan(app: FastAPI):
             logger.error(
                 "trade sim equity settlement worker start failed: %s", e, exc_info=True
             )
+
+        # T-P0-06：模拟盘日终结算（EOD）。此前 run_simulation_eod_worker 全仓
+        # 无调用方 → simulation_account_daily（日级台账快照）长期无写入者。
+        # 默认开启；SIM_EOD_WORKER_ENABLED=false 关闭。
+        try:
+            from backend.services.simulation.services.eod_service import (
+                run_simulation_eod_worker,
+            )
+
+            if str(os.getenv("SIM_EOD_WORKER_ENABLED", "true")).strip().lower() not in {
+                "0",
+                "false",
+                "no",
+                "off",
+            }:
+                app.state.sim_eod_worker_task = asyncio.create_task(
+                    run_simulation_eod_worker(), name="simulation-eod"
+                )
+                logger.info("Simulation EOD worker started")
+            else:
+                logger.info(
+                    "Simulation EOD worker disabled (SIM_EOD_WORKER_ENABLED=false)"
+                )
+        except Exception as e:
+            logger.error("trade sim EOD worker start failed: %s", e, exc_info=True)
+
+        # T-P0-06：挂单消费者。此前 run_simulation_pending_order_worker 全仓无
+        # 调用方 → status=pending 的模拟单永久悬空。默认开启；
+        # SIM_PENDING_ORDER_WORKER_ENABLED=false 关闭。
+        try:
+            from backend.services.simulation.services.pending_order_worker import (
+                run_simulation_pending_order_worker,
+            )
+
+            if str(os.getenv("SIM_PENDING_ORDER_WORKER_ENABLED", "true")).strip().lower() not in {
+                "0",
+                "false",
+                "no",
+                "off",
+            }:
+                app.state.sim_pending_order_worker_task = asyncio.create_task(
+                    run_simulation_pending_order_worker(),
+                    name="simulation-pending-order",
+                )
+                logger.info("Simulation pending order worker started")
+            else:
+                logger.info(
+                    "Simulation pending order worker disabled "
+                    "(SIM_PENDING_ORDER_WORKER_ENABLED=false)"
+                )
+        except Exception as e:
+            logger.error(
+                "trade sim pending order worker start failed: %s", e, exc_info=True
+            )
         # 策略监控推送源：把模拟盘实时盈亏写进 strategy_events，驱动仪表盘
         # 「策略监控」卡片刷新（WS 连上时前端会关掉轮询，只认推送）。
         try:

@@ -1016,14 +1016,16 @@ def _resolve_runner_image_for_mode() -> tuple[str, str]:
 def _get_remote_quote_redis_config() -> tuple[str, int, str | None, int]:
     """远端行情快照 Redis 配置（与 stream 写入端 RemoteRedisDataSource 对齐）。
 
-    优先级：REMOTE_QUOTE_REDIS_* 环境变量（含项目根 .env 兜底），
-    缺省直连免费行情服 www.quantmindai.cn:6379/db3。
+    T-P0-03：默认值与读取逻辑收敛到 backend/shared/remote_quote_config.py
+    （与模拟撮合 L0 取价共用一份，消除两处重复的免费行情服默认值）。
+    REMOTE_QUOTE_DISABLED=true 时抛错，由调用方降级到交易 Redis。
     """
-    host = _get_env_with_root_fallback("REMOTE_QUOTE_REDIS_HOST", "www.quantmindai.cn")
-    port = int(_get_env_with_root_fallback("REMOTE_QUOTE_REDIS_PORT", "6379") or "6379")
-    password = _get_env_with_root_fallback("REMOTE_QUOTE_REDIS_PASSWORD", "quantmind2026") or None
-    db = int(_get_env_with_root_fallback("REMOTE_QUOTE_REDIS_DB", "3") or "3")
-    return host, port, password, db
+    from backend.shared.remote_quote_config import resolve_remote_quote_redis
+
+    resolved = resolve_remote_quote_redis()
+    if resolved is None:
+        raise RuntimeError("远端行情 Redis 未配置或已禁用（REMOTE_QUOTE_DISABLED）")
+    return resolved
 
 
 def _get_stream_series_redis_client():
