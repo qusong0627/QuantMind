@@ -41,8 +41,18 @@ class SimOrderService:
             remarks=data.remarks,
             status=OrderStatus.PENDING,
         )
-        # client_order_id 不落 sim_orders 表，只写入 simulation_orders 投影。
+        # T-P1-03：client_order_id 同时落 sim_orders 台账（投影之外的第二份幂等凭据；
+        # 此前注释自述"只写投影"，投影表为空时幂等实际断链）；source 取 trigger_source
+        from backend.shared.order_contract import (
+            SOURCE_MANUAL,
+            ensure_order_contract_columns_async,
+        )
+
         client_order_id = str(data.client_order_id or "").strip() or None
+        trigger_source = str(kwargs.get("trigger_source") or "").strip()
+        order.client_order_id = client_order_id
+        order.source = (trigger_source or SOURCE_MANUAL)[:32]
+        await ensure_order_contract_columns_async()
         self.db.add(order)
         await self.db.commit()
         await self.db.refresh(order)

@@ -459,6 +459,15 @@ class ExecutionStreamConsumer:
             )
             session.add(trade)
 
+            # T-P1-03：Fill 契约——成交价来源（券商回报），REAL 订单可溯取价链路
+            from backend.shared.order_contract import (
+                PRICE_SOURCE_BROKER_FILL,
+                ensure_order_contract_columns_async,
+            )
+
+            await ensure_order_contract_columns_async()
+            order.price_source = PRICE_SOURCE_BROKER_FILL
+
             order.filled_quantity = float(order.filled_quantity or 0.0) + filled_qty
             order.filled_value = float(order.filled_value or 0.0) + trade_value
             if order.filled_quantity > 0:

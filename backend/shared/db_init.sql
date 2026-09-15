@@ -855,6 +855,9 @@ CREATE TABLE IF NOT EXISTS orders (
     expired_at      TIMESTAMP,
     client_order_id VARCHAR(100) UNIQUE,
     exchange_order_id VARCHAR(100),
+    -- T-P1-03 Order 契约列（REAL：成交来源 + 订单来源分类）
+    price_source    VARCHAR(64),
+    source          VARCHAR(32),
     remarks         VARCHAR(500),
     version         INTEGER NOT NULL DEFAULT 1,
     created_at      TIMESTAMP NOT NULL DEFAULT NOW(),
@@ -1185,6 +1188,9 @@ CREATE TABLE IF NOT EXISTS sim_orders (
     cancelled_at    TIMESTAMPTZ,
     execution_model VARCHAR(32) NOT NULL DEFAULT 'next_bar_open',
     price_source    VARCHAR(64),
+    -- T-P1-03 Order 契约列（client_order_id 落台账；source=rebalance/manual/...）
+    client_order_id VARCHAR(100),
+    source          VARCHAR(32),
     remarks         VARCHAR(500),
     version         INTEGER NOT NULL DEFAULT 1,
     total_fee       FLOAT NOT NULL DEFAULT 0,

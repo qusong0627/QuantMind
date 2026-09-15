@@ -90,6 +90,9 @@ class Order(Base, TimestampMixin):
     # Additional info
     client_order_id = Column(String(100), nullable=True, unique=True)
     exchange_order_id = Column(String(100), nullable=True)
+    # T-P1-03 Order 契约列：REAL 成交来源（broker_fill）与订单来源分类（manual/mirror/...）
+    price_source = Column(String(64), nullable=True)
+    source = Column(String(32), nullable=True)
     remarks = Column(String(500), nullable=True)
     version = Column(Integer, nullable=False, default=1)
 

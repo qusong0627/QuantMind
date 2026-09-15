@@ -105,6 +105,11 @@ class SimOrder(Base, TimestampMixin):
     )
     price_source: Mapped[str | None] = mapped_column(
         String(64), nullable=True)
+    # T-P1-03 Order 契约列：client_order_id 落台账（此前只写投影，投影为空时幂等断链）；
+    # source = rebalance/manual/internal/mirror/sltp（来源分类，供对账与下钻）
+    client_order_id: Mapped[str | None] = mapped_column(
+        String(100), nullable=True, index=True)
+    source: Mapped[str | None] = mapped_column(String(32), nullable=True)
     remarks: Mapped[str | None] = mapped_column(String(500), nullable=True)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     total_fee: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)

@@ -11,7 +11,7 @@
 | 阶段 | 进度 | 完成定义 |
 |---|---|---|
 | P0 止血+维护基建 | 10/10 ✅ | 安全问题清零；体检脚本可跑；回归进 CI |
-| P1 契约化 | 2/6 | 四契约落地；交易台数字可下钻 |
+| P1 契约化 | 3/6 | 四契约落地；交易台数字可下钻 |
 | P2 执行统一 | 0/6 | 回测-模拟一致性 diff=0 |
 | P3 策略收敛 | 0/5 | 策略全生命周期 E2E |
 | P4 选股收敛+评估 | 0/6 | Scanner 替换旧链；体检九项上线 |
@@ -157,8 +157,16 @@
   **下一交易日 08:00 推理为首个观察点**（就绪标记写入 + 锁日志）
 - **变更文件**：`shared/inference_lock.py`(新)、`script_runner.py`、`celery_tasks.py`、`admin/model_management.py`、`admin/model_management_utils.py`、`scripts/diagnose/health.py`、tests
 
-### T-P1-03 Order/Fill 契约
-新增 order 表字段/视图（mode/price_source/reason/client_order_id 语义统一）；三环境写入点对齐。
+### T-P1-03 Order/Fill 契约 ✅
+- **背景（侦察后按真实缺口收窄）**：`sim_orders` 已有 `price_source/execution_model`（apply_filled 已在写取价来源）；reason 已由 `remarks` 承载——不重复造列
+- **本批修复**：① `client_order_id` 落 `sim_orders` 台账（此前注释自述"只写投影"，投影为空时幂等断链）；② `orders`(REAL) 增 `price_source`（成交来源可溯）；③ 两表增 `source`（rebalance/manual/internal/mirror/sltp 来源分类）
+- **实现**：`backend/shared/order_contract.py`（signal_contract 同款自愈式、独立事务）；接线三写入点——
+  `order_service.create_order`（client_order_id + source←trigger_source）、
+  `engine._execute_order`（确定性幂等键 `sim-{run_id}-{symbol}-{side}` + source=rebalance）、
+  `execution_stream_consumer._handle_order_filled`（price_source=broker_fill）；两模型同步；`db_init.sql` 同步
+- **不加唯一索引**（记 T-P1-04）：投影幂等查全路径未验证前，硬约束会把重复单变成 500
+- **测试**：`test_order_contract.py` 9 条（合成器纯函数/迁移幂等/两表 DDL 同步/三写入点源断言/模型字段/来源枚举）
+- **证据（2026-09-16）**：9/9 通过；四列已上库（information_schema 确认）；**两表写入冒烟**（BEGIN…INSERT…ROLLBACK：sim_orders 落 client_order_id/source/price_source、orders 落 broker_fill/mirror）通过；ruff 无新增
 
 ### T-P1-04 Ledger 契约
 `sim_orders/sim_trades/ledger` 写入闭环断言（成交必落账）；Redis 重建按市场（修跨市场串账）。测试：成交后台账非空断言 + 重建不串市场。

@@ -512,7 +512,14 @@ class SimulationEngine:
             SimOrder,
         )
 
-        # 创建订单对象
+        # 创建订单对象（T-P1-03：确定性幂等键 + 来源分类，落 Order 契约列）
+        from backend.shared.order_contract import (
+            SOURCE_REBALANCE,
+            build_sim_client_order_id,
+            ensure_order_contract_columns_async,
+        )
+
+        await ensure_order_contract_columns_async()
         sim_order = SimOrder(
             tenant_id=tenant_id,
             user_id=int(user_id) if user_id.isdigit() else 0,
@@ -522,6 +529,8 @@ class SimulationEngine:
             quantity=order.quantity,
             price=order.price,
             strategy_id=int(strategy_id) if strategy_id.isdigit() else None,
+            client_order_id=build_sim_client_order_id(run_id, order.symbol, order.side),
+            source=SOURCE_REBALANCE,
             remarks=(str(order.reason).strip()[:500] if getattr(order, "reason", None) else None)
             or "策略托管自动调仓",
         )
