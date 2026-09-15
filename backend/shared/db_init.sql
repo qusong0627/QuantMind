@@ -375,6 +375,11 @@ CREATE TABLE IF NOT EXISTS engine_signal_scores (
     expected_price  DOUBLE PRECISION,
     quality         JSONB,
     created_at      TIMESTAMPTZ DEFAULT NOW(),
+    -- T-P1-01 Signal 契约列（历史 NULL：market→CN, source→batch）
+    market          TEXT,
+    rank_pct        DOUBLE PRECISION,
+    source          TEXT,
+    signal_ts       TIMESTAMPTZ,
     UNIQUE (tenant_id, user_id, trade_date, symbol, model_version, feature_version, run_id)
 );
 

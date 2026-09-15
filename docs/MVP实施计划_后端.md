@@ -122,8 +122,28 @@
 
 ## P1 契约化（2-3 周）
 
+> **批次一实施细案（2026-09-15，先规划后写）**
+>
+> **T-P1-01 Signal 契约增列（本批）**
+> - **命名决策**：既有 `score_rank INTEGER`（名次旧口径，selection/手动任务在消费）**保持不变**；分位以新列
+>   `rank_pct DOUBLE PRECISION`（percent_rank 口径 0..1，与 PG `percent_rank()` 对齐）新增。另加
+>   `market TEXT`（历史 NULL 视为 CN）、`source TEXT`（batch|realtime，NULL 视为 batch）、`signal_ts TIMESTAMPTZ`。
+>   设计文档 §4.1 的 score_rank 表述以此为准修正。
+> - **迁移机制**：沿用自愈式先例（`rd_agent_persistence` 的 `ALTER ... ADD COLUMN IF NOT EXISTS`），收敛为
+>   `backend/shared/signal_contract.py::ensure_signal_contract_columns(session)`（进程内一次标记）；
+>   两个写入端（script_runner 主链 / realtime_contract 实时链）入口自愈；`db_init.sql` 同步（新装）。
+> - **分位计算**：`compute_rank_pct(scores)` 纯函数（并列取最小名次、n==1→0.0、非有限值→None），与回填 SQL 的
+>   `percent_rank()` 同口径（有测试断言两者一致）。
+> - **回填**：`backend/scripts/backfill_rank_pct.py`（默认 dry-run；按 run 分批 UPDATE where rank_pct IS NULL；
+>   幂等可重跑；1426 万行/2914 run 全量回填）。
+> - 测试：`test_signal_contract.py`——分位口径（并列/单值/NaN/空）+ 写入端 SQL 含新列源断言 + 迁移 SQL 幂等形态。
+>
+> **T-P1-02 就绪标记与单实例锁（下一批）**：`qm:signal:ready:{market}:{date}`（全量校验后置位）+
+> 推理任务分布式锁（修同日多 run 竞态）；先例：`qm:inference:completed:*`（script_runner:143）与
+> hosted scheduler 的分布式锁（`qm:hosted:simulation:*`）。
+
 ### T-P1-01 Signal 契约增列
-`engine_signal_scores` 加 `market/score_rank/score_pct/source/ts`（迁移脚本可回滚，rank 回填按 run 分组截面）；下游读点全改为 rank 口径。测试：增列回归 + 回填校验（抽样 3 天对账）。
+`engine_signal_scores` 加 `market/rank_pct/source/signal_ts`（**已实现并上库**：自愈式迁移 `shared/signal_contract.py`、两写入端接线、`db_init.sql` 同步、设计文档 §4.1 已对齐 rank_pct 口径）；回填脚本 `backend/scripts/backfill_rank_pct.py`（幂等分窗 UPDATE，与 PG percent_rank() 同口径，有对照测试）。下游读点全改为 rank 口径（**待办：下游 rank 化**）。测试：`test_signal_contract.py` 11 条（纯函数/PG 对照/写入端源断言/迁移幂等）+ 回填校验（抽样对账，待回填完成后补）。
 
 ### T-P1-02 就绪标记与单实例锁
 `qm:signal:ready:{market}:{date}` 全量校验后才置位；推理任务加分布式锁（修同日多 run 竞态）。测试：并发双跑只有一个执行；残 run 不置位。

@@ -44,6 +44,9 @@ class SignalScoreItem(BaseModel):
     signal_side: Literal["BUY", "SELL", "HOLD"] | None = None
     expected_price: float | None = None
     quality: dict[str, Any] = Field(default_factory=dict)
+    # T-P1-01 Signal 契约列：market/rank_pct 可显式给；缺省时后者按本批 fusion_score 现算
+    market: str | None = None
+    rank_pct: float | None = None
 
 
 class SignalReadyRequest(BaseModel):
@@ -176,12 +179,14 @@ async def mark_signal_ready(run_id: str, payload: SignalReadyRequest):
             run_id, tenant_id, user_id, trade_date, symbol,
             model_version, feature_version,
             light_score, tft_score, fusion_score, risk_weight, regime, score_rank,
-            universe_tag, signal_side, expected_price, quality, created_at
+            universe_tag, signal_side, expected_price, quality, created_at,
+            market, rank_pct, source, signal_ts
         ) VALUES (
             :run_id, :tenant_id, :user_id, :trade_date, :symbol,
             :model_version, :feature_version,
             :light_score, :tft_score, :fusion_score, :risk_weight, :regime, :score_rank,
-            :universe_tag, :signal_side, :expected_price, CAST(:quality AS jsonb), NOW()
+            :universe_tag, :signal_side, :expected_price, CAST(:quality AS jsonb), NOW(),
+            :market, :rank_pct, :source, NOW()
         )
         ON CONFLICT (
             tenant_id, user_id, trade_date, symbol, model_version, feature_version, run_id
@@ -196,15 +201,31 @@ async def mark_signal_ready(run_id: str, payload: SignalReadyRequest):
             universe_tag = EXCLUDED.universe_tag,
             signal_side = EXCLUDED.signal_side,
             expected_price = EXCLUDED.expected_price,
-            quality = EXCLUDED.quality
+            quality = EXCLUDED.quality,
+            market = EXCLUDED.market,
+            rank_pct = EXCLUDED.rank_pct,
+            source = EXCLUDED.source,
+            signal_ts = EXCLUDED.signal_ts
         """)
+
+    from backend.shared.signal_contract import (
+        SOURCE_REALTIME,
+        compute_rank_pct,
+        ensure_signal_contract_columns_async,
+        normalize_market,
+    )
+
+    rank_pcts = compute_rank_pct([item.fusion_score for item in payload.scores])
+
+    # T-P1-01：契约列自愈（独立会话，进程内一次；不混入下方业务事务）
+    await ensure_signal_contract_columns_async()
 
     async with get_session(read_only=False) as db:
         run_ret = await db.execute(upsert_run_sql, {"run_id": run_id})
         if int(run_ret.rowcount or 0) <= 0:
             raise HTTPException(status_code=404, detail=f"run_id 不存在: {run_id}")
 
-        for item in payload.scores:
+        for idx, item in enumerate(payload.scores):
             await db.execute(
                 insert_score_sql,
                 {
@@ -225,6 +246,9 @@ async def mark_signal_ready(run_id: str, payload: SignalReadyRequest):
                     "signal_side": item.signal_side,
                     "expected_price": item.expected_price,
                     "quality": json.dumps(item.quality or {}, ensure_ascii=False),
+                    "market": normalize_market(item.market or item.universe_tag),
+                    "rank_pct": item.rank_pct if item.rank_pct is not None else rank_pcts[idx],
+                    "source": SOURCE_REALTIME,
                 },
             )
 

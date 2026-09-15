@@ -2147,6 +2147,18 @@ class InferenceScriptRunner:
         )
 
         # ── Step 2: 批量写入信号评分（含 signal_side 和 expected_price）──────────
+        # T-P1-01：Signal 契约列自愈（market/rank_pct/source/signal_ts）+ 截面分位
+        from backend.shared.signal_contract import (
+            SOURCE_BATCH,
+            compute_rank_pct,
+            ensure_signal_contract_columns,
+            normalize_market,
+        )
+
+        ensure_signal_contract_columns(db)
+        contract_market = normalize_market(market)
+        rank_pcts = compute_rank_pct(scores)
+
         import redis as redis_lib
 
         redis_host = os.getenv("REMOTE_QUOTE_REDIS_HOST", "redis")
@@ -2177,19 +2189,25 @@ class InferenceScriptRunner:
                 run_id, tenant_id, user_id, trade_date, symbol,
                 model_version, feature_version, universe_tag,
                 light_score, tft_score, fusion_score, risk_weight, regime,
-                signal_side, expected_price, quality, created_at
+                signal_side, expected_price, quality, created_at,
+                market, rank_pct, source, signal_ts
             ) VALUES (
                 :run_id, :tenant_id, :user_id, :trade_date, :symbol,
                 'inference_script', :feature_version, :universe_tag,
                 NULL, NULL, :score, 1.0, 'normal',
-                :signal_side, :expected_price, CAST(:quality AS jsonb), NOW()
+                :signal_side, :expected_price, CAST(:quality AS jsonb), NOW(),
+                :market, :rank_pct, :source, NOW()
             )
             ON CONFLICT (tenant_id, user_id, trade_date, symbol, model_version, feature_version, run_id)
             DO UPDATE SET
                 fusion_score = EXCLUDED.fusion_score,
                 signal_side = EXCLUDED.signal_side,
                 expected_price = EXCLUDED.expected_price,
-                quality = EXCLUDED.quality
+                quality = EXCLUDED.quality,
+                market = EXCLUDED.market,
+                rank_pct = EXCLUDED.rank_pct,
+                source = EXCLUDED.source,
+                signal_ts = EXCLUDED.signal_ts
         """)
         # universe_tag 市场标注：HK/US 等非 CN 写入市场大写；A 股路径 'CN'（老行 NULL 视为 CN）
         universe_tag = "CN" if market in (None, "", "A") else str(market).upper()
@@ -2245,6 +2263,9 @@ class InferenceScriptRunner:
                     "signal_side": signal_side,
                     "expected_price": expected_price,
                     "quality": quality,
+                    "market": contract_market,
+                    "rank_pct": rank_pcts[idx],
+                    "source": SOURCE_BATCH,
                 },
             )
         if quote_redis:
