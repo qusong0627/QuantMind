@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import logging
 import os
-import time
 from pathlib import Path
 
 import numpy as np
@@ -546,6 +545,10 @@ def load_data(
     keep_cols = ["symbol", "trade_date", "label"] + features
     df = df.loc[valid_index, keep_cols].reset_index(drop=True)
     logger.info(f"After date range clip ({train_start} to {_clip_end}): {len(df)} rows")
+
+    # 保留原始收益标签：label 随后会被截面 rank（回归）或二值化（分类）改写，
+    # 评估报告的分层收益 / 多空净值需要真实收益口径（train 端按需读取）。
+    df["label_return"] = df["label"].astype(np.float32)
 
     # 分类目标保留为 0/1，不能再做截面 rank；否则 binary objective 会收到
     # 连续标签而退化成语义不明确的回归任务。

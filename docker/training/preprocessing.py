@@ -89,18 +89,28 @@ def cross_sectional_median_fill(
     features: list[str],
     min_ratio: float = MIN_COVER_RATIO,
     min_rows: int = MIN_COVER_ROWS,
+    fill_value: str = "median",
 ) -> pd.DataFrame:
     """按 (trade_date, feature) 截面中位数填充缺失值。
 
     规则：
-    - 该特征当日非 NaN 行数 ≥ max(总行数×min_ratio, min_rows)：用截面中位数填充停牌 NaN。
-    - 否则视为整列缺失：填 0（后续 Z-score 后 std=0 → 全 0，中性）。
+    - fill_value="median"（默认）：该特征当日非 NaN 行数 ≥ max(总行数×min_ratio,
+      min_rows) 时用截面中位数填充停牌 NaN；否则视为整列缺失：填 0
+      （后续 Z-score 后 std=0 → 全 0，中性）。
+    - fill_value="zero"：不做截面统计，缺失直接填 0（训练页开关可选）。
 
     分块向量化实现：每块对 (日期×特征) 求一次 count/median，再整块 fillna。
     返回填充后的新 DataFrame（不修改入参）。
     """
     out = df.copy()
     if not features:
+        return out
+    if str(fill_value or "median").strip().lower() == "zero":
+        for chunk in _date_chunks(out["trade_date"]):
+            m = out["trade_date"].isin(chunk)
+            out.loc[m, features] = (
+                out.loc[m, features].fillna(0.0).astype(np.float32)
+            )
         return out
     zero_filled = 0
     for chunk in _date_chunks(out["trade_date"]):
@@ -175,6 +185,26 @@ def cross_sectional_zscore(
     return out
 
 
+def cross_sectional_rank(df: pd.DataFrame, features: list[str]) -> pd.DataFrame:
+    """按 (trade_date, feature) 截面百分位秩（pct rank - 0.5，值域 [-0.5, 0.5]）。
+
+    与 Z-score 互为替选口径：秩对极端值天然免疫（无需缩尾），但丢弃截面上的
+    距离信息。树模型对单调变换不敏感（两者等价），该口径主要服务 MLP/线性等
+    对输入尺度敏感的模型。NaN 透传（不参与排名）。
+    """
+    out = df.copy()
+    if not features:
+        return out
+    for chunk in _date_chunks(out["trade_date"]):
+        m = out["trade_date"].isin(chunk)
+        sub = out.loc[m, ["trade_date", *features]]
+        g = sub.groupby("trade_date", sort=False)
+        R = g[features].rank(pct=True) - 0.5
+        R = R.mask(sub[features].isna())  # NaN 透传
+        out.loc[m, features] = R.astype(np.float32)
+    return out
+
+
 def cross_sectional_preprocess(
     df: pd.DataFrame,
     features: list[str],
@@ -183,16 +213,27 @@ def cross_sectional_preprocess(
     winsor: bool = True,
     quantiles: tuple[float, float] = _WINSOR_QUANTILES,
     exclude: set[str] | None = None,
+    fill_value: str = "median",
+    standardize: str = "zscore",
 ) -> pd.DataFrame:
     """主入口：按配置做截面预处理。
 
     enabled=False 时原样返回（兼容旧链路）。exclude 指定不参与变换的特征列
     （如类别特征 ind_code_l1，保持原始编码）。返回新 DataFrame。
+
+    fill_value: "median"（默认，截面中位数填充）| "zero"（缺失填 0）。
+    standardize: "zscore"（默认，缩尾 + 截面 Z-score）| "rank"（截面百分位秩，
+        rank 模式不做缩尾——秩对极端值免疫）。
+    未传的新参数一律保持历史默认行为，载荷不写这些键时与旧口径逐位一致。
     """
     if not enabled or not features:
         return df
     excl = exclude or set()
     feats = [f for f in features if f not in excl]
-    out = cross_sectional_median_fill(df, feats)
-    out = cross_sectional_zscore(out, feats, winsor=winsor, quantiles=quantiles)
+    out = cross_sectional_median_fill(df, feats, fill_value=fill_value)
+    mode = str(standardize or "zscore").strip().lower()
+    if mode == "rank":
+        out = cross_sectional_rank(out, feats)
+    else:
+        out = cross_sectional_zscore(out, feats, winsor=winsor, quantiles=quantiles)
     return out

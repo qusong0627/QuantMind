@@ -715,16 +715,68 @@ export const ParameterConfig: React.FC<ParameterConfigProps> = ({
               <div className="space-y-0.5">
                 <div className="text-xs font-semibold text-slate-700">特征截面预处理</div>
                 <div className="text-[11px] text-slate-400 leading-relaxed">
-                  按交易日截面：中位数填充缺失 + 分位缩尾(1%/99%) + Z-score 标准化。消除量纲差异与极端值
+                  按交易日截面：缺失填充 + 分位缩尾 + 标准化。缩尾分位 / 标准化口径 / 填充方式可展开细调
                 </div>
               </div>
-              <Tooltip title="对特征做截面预处理：每交易日按特征中位数填充缺失（停牌）、1%/99% 分位缩尾、截面 Z-score。开启后模型输入分布更规范，但会改变特征量纲（与旧模型不可直接对比）">
+              <Tooltip title="对特征做截面预处理：每交易日按特征填充缺失（停牌）、分位缩尾、标准化。开启后模型输入分布更规范，但会改变特征量纲（与旧模型不可直接对比）">
                 <Switch
                   checked={!!params.preprocessingEnabled}
                   onChange={(checked) => onParamsChange({ ...params, preprocessingEnabled: checked })}
                 />
               </Tooltip>
             </div>
+            {!!params.preprocessingEnabled && (
+              <div className="mt-2.5 grid grid-cols-3 gap-2 border-t border-indigo-50 pt-2.5">
+                <div className="space-y-1">
+                  <div className="text-[11px] text-slate-500">缩尾分位</div>
+                  <Select
+                    size="small"
+                    className="w-full"
+                    value={(params.preprocessingWinsorQ || [0.01, 0.99]).join('/')}
+                    onChange={(v) => {
+                      const [lo, hi] = v.split('/').map(Number);
+                      onParamsChange({ ...params, preprocessingWinsorQ: [lo, hi] });
+                    }}
+                    options={[
+                      { value: '0.005/0.995', label: '0.5% / 99.5%' },
+                      { value: '0.01/0.99', label: '1% / 99%（默认）' },
+                      { value: '0.025/0.975', label: '2.5% / 97.5%' },
+                      { value: '0.05/0.95', label: '5% / 95%' },
+                    ]}
+                  />
+                </div>
+                <div className="space-y-1">
+                  <div className="text-[11px] text-slate-500">标准化</div>
+                  <Select
+                    size="small"
+                    className="w-full"
+                    value={params.preprocessingStandardize || 'zscore'}
+                    onChange={(v) =>
+                      onParamsChange({ ...params, preprocessingStandardize: v as 'zscore' | 'rank' })
+                    }
+                    options={[
+                      { value: 'zscore', label: 'Z-score（默认）' },
+                      { value: 'rank', label: '截面百分位秩' },
+                    ]}
+                  />
+                </div>
+                <div className="space-y-1">
+                  <div className="text-[11px] text-slate-500">缺失填充</div>
+                  <Select
+                    size="small"
+                    className="w-full"
+                    value={params.preprocessingFill || 'median'}
+                    onChange={(v) =>
+                      onParamsChange({ ...params, preprocessingFill: v as 'median' | 'zero' })
+                    }
+                    options={[
+                      { value: 'median', label: '截面中位数（默认）' },
+                      { value: 'zero', label: '填 0' },
+                    ]}
+                  />
+                </div>
+              </div>
+            )}
           </div>
 
           {/* ── 收益率分位推理 ── */}

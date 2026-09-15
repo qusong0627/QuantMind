@@ -158,8 +158,14 @@ def _train_xgb(cfg: dict, features: list[str], X_train: np.ndarray, y_train: np.
     num_boost_round = int(model_cfg.get("num_boost_round", 1000))
     early_stopping_rounds = max(1, int(model_cfg.get("early_stopping_rounds", 100) or 100))
 
-    dtrain = xgb.DMatrix(X_train, label=y_train, feature_names=features)
-    dval = xgb.DMatrix(X_val, label=y_val, feature_names=features)
+    # QuantileDMatrix：hist 训练的省内存构造，不落 CSR 稠密副本（对比 DMatrix
+    # 在 7.4M×273 float32 上省约 7GB + 直方图构建更省）。2026-09-15 XGB 在
+    # DMatrix 构造处峰值冲顶 OOM(SIGKILL 137) 后切换；valid 用 ref=dtrain
+    # 复用训练分箱。分箱细节（sketch 分位）与 DMatrix 略有差异，属内部实现。
+    dtrain = xgb.QuantileDMatrix(X_train, label=y_train, feature_names=features)
+    dval = xgb.QuantileDMatrix(
+        X_val, label=y_val, feature_names=features, ref=dtrain
+    )
 
     evals_result: dict = {}
     model = xgb.train(

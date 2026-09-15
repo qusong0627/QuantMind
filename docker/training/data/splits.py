@@ -167,11 +167,39 @@ def _prepare_arrays(
 
     if prep_enabled and _prep_feats:
         _winsor = bool(prep_cfg.get("winsor", True))
-        train_df = cross_sectional_preprocess(train_df, _prep_feats, enabled=True, winsor=_winsor)
-        val_df = cross_sectional_preprocess(val_df, _prep_feats, enabled=True, winsor=_winsor)
+        # 训练页精细开关（均为可选，缺省与历史口径逐位一致）：
+        #   winsor_quantiles [lo, hi]（如 [0.025, 0.975]）、fill=median|zero、
+        #   standardize=zscore|rank。非法值一律回退默认，不阻断训练。
+        _quantiles = None
+        _raw_q = prep_cfg.get("winsor_quantiles")
+        if isinstance(_raw_q, (list, tuple)) and len(_raw_q) == 2:
+            try:
+                _lo, _hi = float(_raw_q[0]), float(_raw_q[1])
+                if 0.0 <= _lo < _hi <= 1.0:
+                    _quantiles = (_lo, _hi)
+            except (TypeError, ValueError):
+                _quantiles = None
+        _fill_mode = str(prep_cfg.get("fill") or "median").strip().lower()
+        _std_mode = str(prep_cfg.get("standardize") or "zscore").strip().lower()
+        _prep_kw = {
+            "enabled": True,
+            "winsor": _winsor,
+            "fill_value": _fill_mode,
+            "standardize": _std_mode,
+        }
+        if _quantiles is not None:
+            _prep_kw["quantiles"] = _quantiles
+        train_df = cross_sectional_preprocess(train_df, _prep_feats, **_prep_kw)
+        val_df = cross_sectional_preprocess(val_df, _prep_feats, **_prep_kw)
         logger.info(
-            "Cross-sectional preprocessing enabled: %d features (exclude %s)",
-            len(_prep_feats), sorted(_exclude & set(features)),
+            "Cross-sectional preprocessing enabled: %d features "
+            "(exclude %s, fill=%s, standardize=%s, winsor=%s%s)",
+            len(_prep_feats),
+            sorted(_exclude & set(features)),
+            _fill_mode,
+            _std_mode,
+            _winsor,
+            f", quantiles={_quantiles}" if _quantiles else "",
         )
 
     # 逐列取中位数：train_df[features] 整块取值会临时复制 ~8GB（7.4M×273 float32）

@@ -1,22 +1,25 @@
 import React from 'react';
 import { Card, Divider, Alert, Tag, Space, Typography, Empty, Button, Table, Tooltip as AntTooltip } from 'antd';
 import { BarChart, MonitorPlay, Activity, Download, Filter } from 'lucide-react';
-import { 
-  BarChart as ReBarChart, 
-  Bar, 
-  XAxis, 
-  YAxis, 
-  CartesianGrid, 
-  Tooltip, 
-  Legend, 
-  ResponsiveContainer, 
+import {
+  BarChart as ReBarChart,
+  LineChart as ReLineChart,
+  Line,
+  Bar,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  Legend,
+  ResponsiveContainer,
   ReferenceLine
 } from 'recharts';
 import dayjs from 'dayjs';
 import { clsx } from 'clsx';
-import { 
-  TrainingResult, 
+import {
+  TrainingResult,
   TrainingRequestPayload,
+  EvalReport,
   getObjectiveMetricDescription,
   getTargetModeDescription,
 } from './trainingUtils';
@@ -455,7 +458,10 @@ export const TrainingResultView: React.FC<TrainingResultViewProps> = ({
                 centered
               />
             </div>
-            
+
+            {/* 模型评估报告（预测强弱：IC 时序 / 分层收益 / 多空组合） */}
+            <EvalReportSection report={result.eval_report || result.metadata.eval_report} />
+
             <Card className="rounded-2xl border-slate-200" size="small" title="建议落盘文件">
               <div className="flex flex-wrap gap-2">
                 {result.artifacts.map((artifact) => (
@@ -675,5 +681,106 @@ export const TrainingResultView: React.FC<TrainingResultViewProps> = ({
         <FactorSelectionReport report={result.metadata.factor_selection} />
       ) : null}
     </div>
+  );
+};
+
+/** 模型评估报告：预测强弱诊断（RankIC 稳健性 / 十分位分层收益 / 多空组合） */
+const EvalReportSection: React.FC<{ report?: EvalReport }> = ({ report }) => {
+  if (!report || report.error) return null;
+  const ric: NonNullable<EvalReport['rank_ic']> = report.rank_ic || {};
+  const ls: NonNullable<EvalReport['long_short']> = report.long_short || {};
+  const groups: NonNullable<EvalReport['groups']> = report.groups || {};
+  const groupData = (groups.mean_returns || []).map((v, i) => ({
+    group: `G${i + 1}`,
+    ret: v == null ? null : Number((v * 100).toFixed(3)),
+  }));
+  const lsCurve = (ls.curve || []).map(([d, v]) => ({
+    date: String(d).slice(2, 10),
+    v: Number((v * 100).toFixed(2)),
+  }));
+  const fmt = (v: number | null | undefined, digits = 2, scale = 1) =>
+    v == null || Number.isNaN(v) ? '—' : `${(v * scale).toFixed(digits)}${scale === 100 ? '%' : ''}`;
+  const lvl = (v: number | null | undefined, good: number, ok: number) =>
+    v == null ? 'text-slate-400' : v >= good ? 'text-emerald-600' : v >= ok ? 'text-amber-600' : 'text-rose-500';
+  const basisText = report.return_basis === 'label_return' ? '真实收益口径' : '秩标签口径';
+  const bySplit = report.by_split || {} as NonNullable<EvalReport['by_split']>;
+  const splitLabel: Record<string, string> = { train: '训练', valid: '验证', test: '测试' };
+  return (
+    <Card
+      className="rounded-2xl border-emerald-100"
+      size="small"
+      title={
+        <span className="text-sm font-black text-slate-800">
+          模型评估报告
+          <span className="ml-2 text-[10px] font-normal text-slate-400">
+            {basisText} · {report.n_days ?? '—'} 个交易日 · {Number(report.n_rows || 0).toLocaleString()} 行
+          </span>
+        </span>
+      }
+    >
+      <div className="grid grid-cols-3 gap-2 md:grid-cols-6">
+        {[
+          { label: 'RankIC 均值', value: fmt(ric.mean, 4), cls: lvl(ric.mean, 0.03, 0.015) },
+          { label: 'ICIR', value: fmt(ric.icir, 3), cls: lvl(ric.icir, 0.3, 0.15) },
+          { label: 'IC 胜率', value: fmt(ric.win_rate, 1, 100), cls: lvl(ric.win_rate, 0.55, 0.5) },
+          { label: '分层单调性', value: fmt(groups.monotonicity, 3), cls: lvl(groups.monotonicity, 0.9, 0.6) },
+          { label: '多空夏普', value: fmt(ls.sharpe, 2), cls: lvl(ls.sharpe, 1.0, 0.5) },
+          { label: '多空年化', value: fmt(ls.ann_return, 1, 100), cls: 'text-slate-800' },
+        ].map((it) => (
+          <div key={it.label} className="rounded-xl border border-emerald-100 bg-white px-2 py-1.5 text-center">
+            <div className="text-[9px] font-bold tracking-wider text-slate-400">{it.label}</div>
+            <div className={clsx('mt-0.5 text-sm font-black', it.cls)}>{it.value}</div>
+          </div>
+        ))}
+      </div>
+      <div className="mt-3 grid gap-3 md:grid-cols-2">
+        <div className="rounded-xl border border-slate-100 bg-white p-2">
+          <div className="mb-1 text-[10px] font-bold text-slate-500">
+            十分位分层平均收益（G1=预测最弱，G{groups.n_groups || 10}=最强）
+          </div>
+          <ResponsiveContainer width="100%" height={150}>
+            <ReBarChart data={groupData} margin={{ top: 4, right: 4, bottom: 0, left: -18 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
+              <XAxis dataKey="group" tick={{ fontSize: 9 }} />
+              <YAxis tick={{ fontSize: 9 }} />
+              <Tooltip formatter={(v) => [v == null ? '—' : `${v}%`, '平均收益']} />
+              <Bar dataKey="ret" fill="#10b981" radius={[3, 3, 0, 0]} />
+            </ReBarChart>
+          </ResponsiveContainer>
+        </div>
+        <div className="rounded-xl border border-slate-100 bg-white p-2">
+          <div className="mb-1 text-[10px] font-bold text-slate-500">多空组合累计净值（Top − Bottom，%）</div>
+          <ResponsiveContainer width="100%" height={150}>
+            <ReLineChart data={lsCurve} margin={{ top: 4, right: 4, bottom: 0, left: -18 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
+              <XAxis dataKey="date" tick={{ fontSize: 9 }} minTickGap={48} />
+              <YAxis tick={{ fontSize: 9 }} />
+              <Tooltip formatter={(v) => [`${v}%`, '累计净值']} />
+              <ReferenceLine y={0} stroke="#94a3b8" strokeDasharray="2 2" />
+              <Line type="monotone" dataKey="v" stroke="#6366f1" dot={false} strokeWidth={1.6} />
+            </ReLineChart>
+          </ResponsiveContainer>
+        </div>
+      </div>
+      {(Object.keys(bySplit).length > 0 || (report.yearly || []).length > 0) && (
+        <div className="mt-3 flex flex-wrap gap-2">
+          {Object.entries(bySplit).map(([name, s]) => (
+            <span key={name} className="rounded-lg border border-slate-100 bg-slate-50/70 px-2 py-1 text-[10px] text-slate-600">
+              <b className="mr-1 text-slate-700">{splitLabel[name] || name}</b>
+              IC {fmt(s.mean, 4)} · ICIR {fmt(s.icir, 2)} · 胜率 {fmt(s.win_rate, 0, 100)}
+            </span>
+          ))}
+          {(report.yearly || []).map((y) => (
+            <span key={y.year} className="rounded-lg border border-indigo-50 bg-indigo-50/50 px-2 py-1 text-[10px] text-indigo-700">
+              <b className="mr-1">{y.year}</b>IC {fmt(y.mean, 3)} · ICIR {fmt(y.icir, 2)}
+            </span>
+          ))}
+        </div>
+      )}
+      <div className="mt-2 text-[10px] text-slate-400">
+        分层收益为未来收益口径（T+1 执行、持有 N 日）；多空净值按每日 Top−Bottom 平均收益复利累计，未扣交易成本；
+        IC 胜率 = 日 RankIC 为正的比例。
+      </div>
+    </Card>
   );
 };

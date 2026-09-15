@@ -124,6 +124,12 @@ export interface TrainingParams {
   tft_num_heads?: number;
   /** 截面预处理：按 (交易日, 特征) 中位数填充缺失 + 分位缩尾 + 截面 Z-score */
   preprocessingEnabled?: boolean;
+  /** 缩尾分位 [lo, hi]，默认 [0.01, 0.99]（0.5% / 2.5% / 5% 可选） */
+  preprocessingWinsorQ?: [number, number];
+  /** 标准化口径：zscore（默认，缩尾 + 截面 Z-score）| rank（截面百分位秩） */
+  preprocessingStandardize?: 'zscore' | 'rank';
+  /** 缺失填充：median（默认，截面中位数）| zero（直接填 0） */
+  preprocessingFill?: 'median' | 'zero';
   /** Stacking 集成参数 */
   n_folds?: number;
   meta_alpha?: number;
@@ -218,9 +224,37 @@ export interface TrainingRequestPayload {
   pool_id?: string | null;
 }
 
+/** 训练完成后的模型评估报告（train.py compute_eval_report 产出，预测强弱诊断） */
+export interface EvalReport {
+  version?: number;
+  /** 收益口径：label_return=真实未来收益（分层/多空可看真实口径）；label_rank=秩标签退化口径 */
+  return_basis?: string;
+  n_rows?: number;
+  n_days?: number;
+  rank_ic?: { mean?: number | null; std?: number | null; icir?: number | null; win_rate?: number | null; t_stat?: number | null };
+  ic_curve?: Array<[string, number]>;
+  yearly?: Array<{ year: number; mean?: number | null; std?: number | null; icir?: number | null; win_rate?: number | null; t_stat?: number | null }>;
+  groups?: { n_groups?: number; mean_returns?: Array<number | null>; monotonicity?: number | null };
+  long_short?: {
+    mean?: number | null;
+    icir?: number | null;
+    win_rate?: number | null;
+    t_stat?: number | null;
+    ann_return?: number | null;
+    ann_vol?: number | null;
+    sharpe?: number | null;
+    max_drawdown?: number | null;
+    curve?: Array<[string, number]>;
+  };
+  by_split?: Record<string, { mean: number | null; icir: number | null; win_rate: number | null; t_stat: number | null; n_days?: number; n_rows?: number }>;
+  error?: string;
+}
+
 export interface TrainingResult {
   modelId: string;
   modelName: string;
+  /** 模型评估报告（训练产物 eval_report.json，老模型可能没有） */
+  eval_report?: EvalReport;
   request: TrainingRequestPayload;
   metadata: {
     display_name: string;
@@ -238,6 +272,8 @@ export interface TrainingResult {
     objective: string;
     metric: string;
     market?: string;
+    /** 模型评估报告（B2 起训练产物携带；老模型可能没有） */
+    eval_report?: EvalReport;
     generated_at: string;
     // 因子筛选报告（train.py select_top_factors 产出）：漏斗 + 每特征 IC/ICIR/覆盖/PFS/原因
     factor_selection?: {
@@ -597,6 +633,11 @@ export const DEFAULT_PARAMS: TrainingParams = {
   early_stopping_rounds: 50,
   objective: 'regression',
   metric: 'l2',
+  // 特征截面预处理（精细口径，未启用时不进载荷）
+  preprocessingEnabled: false,
+  preprocessingWinsorQ: [0.01, 0.99],
+  preprocessingStandardize: 'zscore',
+  preprocessingFill: 'median',
   // XGBoost
   xgb_max_depth: 4,
   xgb_subsample: 0.7,
@@ -1213,9 +1254,20 @@ export const buildBackendTrainingPayload = (
     };
   }
 
-  // 特征截面预处理：按交易日截面 中位数填充缺失 + 分位缩尾 + Z-score
+  // 特征截面预处理：按交易日截面 中位数填充缺失 + 分位缩尾 + Z-score（口径可选）
   if (request.params.preprocessingEnabled) {
-    payload.preprocessing = { enabled: true, winsor: true };
+    const preprocessing: Record<string, unknown> = { enabled: true, winsor: true };
+    const q = request.params.preprocessingWinsorQ;
+    if (Array.isArray(q) && q.length === 2 && q[0] !== 0.01) {
+      preprocessing.winsor_quantiles = [q[0], q[1]];
+    }
+    if (request.params.preprocessingStandardize === 'rank') {
+      preprocessing.standardize = 'rank';
+    }
+    if (request.params.preprocessingFill === 'zero') {
+      preprocessing.fill = 'zero';
+    }
+    payload.preprocessing = preprocessing;
   }
 
   // 训练节点（local=本机 Docker，autodl-xxx=AutoDL 远程 GPU）

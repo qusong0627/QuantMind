@@ -89,7 +89,7 @@ def _resolve_inference_template(workspace: Path) -> Path | None:
 
 # ── B4 拆包：类型集合/注册表/分派与训练器实现见 docker/training/model_trainers/ ──
 # （训练容器经挂载与镜像 COPY 双通道同步；本地见编排器 volumes，远端见 rsync。）
-from model_trainers.metrics import _compute_metrics
+from model_trainers.metrics import _compute_metrics, compute_eval_report
 from model_trainers.registry import (
     _ALL_MODEL_TYPES,
     _DL_MODEL_TYPES,
@@ -401,8 +401,11 @@ def train_model(df: pd.DataFrame, features: list[str], cfg: dict, hardware: dict
     logger.info(f"Train IC={train_m['ic']:.4f}  RankIC={train_m['rank_ic']:.4f}")
     logger.info(f"Val   IC={val_m['ic']:.4f}    RankIC={val_m['rank_ic']:.4f}  ICIR={val_m['rank_icir']:.4f}")
 
-    # 生成全窗口预测
-    full_pred_df = df[["symbol", "trade_date", "label"]].copy()
+    # 生成全窗口预测（label_return 若在：评估报告的真实收益口径）
+    _fp_cols = ["symbol", "trade_date", "label"] + (
+        ["label_return"] if "label_return" in df.columns else []
+    )
+    full_pred_df = df[_fp_cols].copy()
     full_pred_df["pred"] = _predict_with_model(model, _fill(df), model_type, features)
     full_pred_df["split"] = "train"
     full_pred_df.loc[
@@ -578,7 +581,11 @@ def _train_single_model(
     # 全量预测（pred_df）只在需要时生成：OOF fold 训练不需要，跳过可避免
     # 每个 fold 对全量数据(644万行)预测+拷贝，9次叠加是 OOM 主因
     if need_full_pred:
-        full_pred_df = df[["symbol", "trade_date", "label"]].copy()
+        # 生成全窗口预测（label_return 若在：评估报告的真实收益口径）
+        _fp_cols = ["symbol", "trade_date", "label"] + (
+            ["label_return"] if "label_return" in df.columns else []
+        )
+        full_pred_df = df[_fp_cols].copy()
         full_pred_df["pred"] = _predict_with_model(model, _fill(df), model_type, features)
         full_pred_df["split"] = "train"
         full_pred_df.loc[
@@ -1506,6 +1513,23 @@ def main() -> int:
             pred_qlib.to_pickle(pred_pkl_path)
             logger.info(f"Backtest-compatible pred.pkl saved ({pred_pkl_path.stat().st_size/1024/1024:.1f} MB, {len(pred_qlib):,} rows)")
 
+            # ── 模型评估报告（预测强弱结构化诊断：IC 时序 / 分层收益 / 多空组合）──
+            eval_report = None
+            try:
+                eval_report = compute_eval_report(pred_df)
+                (workspace / "eval_report.json").write_text(
+                    json.dumps(eval_report, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+                _ric = eval_report.get("rank_ic") or {}
+                _ls = eval_report.get("long_short") or {}
+                logger.info(
+                    "Eval report: basis=%s rank_ic=%s icir=%s ls_sharpe=%s groups_mono=%s",
+                    eval_report.get("return_basis"), _ric.get("mean"), _ric.get("icir"),
+                    _ls.get("sharpe"), (eval_report.get("groups") or {}).get("monotonicity"),
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Eval report failed: %s", exc, exc_info=True)
+
             shap_summary_path = workspace / "shap_summary.csv"
             # SHAP: pred_contrib 仅支持 LightGBM；其他框架暂跳过
             if actual_model_type != "lightgbm":
@@ -1588,6 +1612,7 @@ def main() -> int:
                 "pred_coverage_end": str(pred_df["trade_date"].max().date()) if not pred_df.empty else "",
                 "pred_rows": int(len(pred_df)),
                 "shap": shap_info,
+                "eval_report": eval_report,
                 "generated_at": datetime.utcnow().isoformat(),
                 "elapsed_seconds": elapsed,
             }
@@ -1883,6 +1908,11 @@ if __name__ == "__main__":
                 "error": "",
                 "logs": f"val_rmse={val_m['rmse']:.6f}, val_auc={val_m['auc']:.6f}",
             }
+            if eval_report:
+                result["eval_report"] = eval_report
+                result["artifacts"].append(
+                    {"name": "eval_report.json", "local": str(workspace / "eval_report.json")}
+                )
             if shap_info.get("status") == "completed" and shap_summary_path.exists():
                 result["artifacts"].append({"name": "shap_summary.csv", "local": str(workspace / "shap_summary.csv")})
 
