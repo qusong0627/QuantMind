@@ -194,12 +194,23 @@ def _prepare_arrays(
         }
         if _quantiles is not None:
             _prep_kw["quantiles"] = _quantiles
-        train_df = cross_sectional_preprocess(train_df, _prep_feats, **_prep_kw)
-        val_df = cross_sectional_preprocess(val_df, _prep_feats, **_prep_kw)
         # 关键修正：test 帧与全窗口帧此前未预处理，测试指标/全窗口预测失真。
         # preprocess 已就地化，对传入帧原地处理（不影响返回值签名）。
+        # 多模型循环（train_multi_models）复用同一批帧：用 attrs 配置指纹去重，
+        # 同配置不重复处理（否则第二次调用会把已处理帧再 zscore 一遍）。
+        _prep_sig = repr(sorted(_prep_kw.items())) + "|" + repr(sorted(_prep_feats))
+
+        def _apply_prep(frame: pd.DataFrame) -> pd.DataFrame:
+            if frame.attrs.get("qm_prep_sig") == _prep_sig:
+                return frame
+            out = cross_sectional_preprocess(frame, _prep_feats, **_prep_kw)
+            out.attrs["qm_prep_sig"] = _prep_sig
+            return out
+
+        train_df = _apply_prep(train_df)
+        val_df = _apply_prep(val_df)
         for _extra in extra_frames or []:
-            cross_sectional_preprocess(_extra, _prep_feats, **_prep_kw)
+            _apply_prep(_extra)
         logger.info(
             "Cross-sectional preprocessing enabled: %d features "
             "(exclude %s, fill=%s, standardize=%s, winsor=%s%s)",
