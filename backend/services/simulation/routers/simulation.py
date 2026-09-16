@@ -272,15 +272,10 @@ async def reset_simulation_account(
     # user_id 有 int 与原始 sub 两种口径（历史 varchar 兼容），一并清理。
     # 新台账（accounts/lots/ledger/daily/fills/orders_v2）同步清空，否则 PG 新旧两套
     # 台账分叉，对账与重建读到孤儿数据。
-    _NEW_LEDGER_TABLES = (
-        "simulation_accounts",
-        "simulation_position_lots",
-        "simulation_cash_ledger",
-        "simulation_account_daily",
-        "simulation_position_daily",
-        "simulation_fills",
-        "simulation_orders",
-    )
+    # 台账删除的市场收窄唯一实现（backend/shared/ledger_reset.py）：
+    # 账户/批次/流水按市场收窄（旧库无列时 CN 等价全删、非 CN 跳过）；
+    # 品种形态可推断市场的 fills/orders_v2 按 symbol 正则收窄；日快照仅 CN 生产。
+
     try:
         from sqlalchemy import text as _text
         from backend.shared.database_manager_v2 import get_session as _get_session
@@ -320,16 +315,16 @@ async def reset_simulation_account(
                     _text(f"DELETE FROM simulation_fund_snapshots WHERE tenant_id=:tid AND user_id=:uid2{_snap_clause}"),
                     {"tid": auth.tenant_id, "uid2": uv, **_snap_params},
                 )
-                for _table in _NEW_LEDGER_TABLES:
-                    try:
-                        # SAVEPOINT 隔离：表不存在（如旧库）只回滚本条，不影响已删数据
-                        async with _session.begin_nested():
-                            await _session.execute(
-                                _text(f"DELETE FROM {_table} WHERE tenant_id=:tid AND user_id=:uid2"),
-                                {"tid": auth.tenant_id, "uid2": uv},
-                            )
-                    except Exception:
-                        continue
+                from backend.shared.ledger_reset import delete_user_ledger_rows
+
+                await delete_user_ledger_rows(
+                    _session,
+                    tenant_id=auth.tenant_id,
+                    user_id_variants=[uv],
+                    market=market,
+                    symbol_clause=_sym_clause or None,
+                    symbol_params={"sym_pat": _sym_pat} if _sym_pat else None,
+                )
             await _session.commit()
     except Exception as _e:
         logger.warning(f"Reset DB cleanup failed for {auth.tenant_id}:{uid}: {_e}")
@@ -703,23 +698,20 @@ async def confirm_holding_sync(
                     _text(f"DELETE FROM simulation_fund_snapshots WHERE tenant_id=:tid AND user_id=:uid2{_snap_clause2}"),
                     {"tid": auth.tenant_id, "uid2": _uv, **_snap_params2},
                 )
-                for _table in (
-                    "simulation_accounts",
-                    "simulation_position_lots",
-                    "simulation_cash_ledger",
-                    "simulation_account_daily",
-                    "simulation_position_daily",
-                    "simulation_fills",
-                    "simulation_orders",
-                ):
-                    try:
-                        async with _session.begin_nested():
-                            await _session.execute(
-                                _text(f"DELETE FROM {_table} WHERE tenant_id=:tid AND user_id=:uid2"),
-                                {"tid": auth.tenant_id, "uid2": _uv},
-                            )
-                    except Exception:
-                        continue
+                from backend.shared.ledger_reset import delete_user_ledger_rows
+                from backend.services.simulation.services.market_rules import (
+                    market_symbol_sql_regex as _msr_cn,
+                )
+
+                _cn_pat = _msr_cn("CN")
+                await delete_user_ledger_rows(
+                    _session,
+                    tenant_id=auth.tenant_id,
+                    user_id_variants=[_uv],
+                    market="CN",
+                    symbol_clause=" AND symbol ~* :sym_pat" if _cn_pat else None,
+                    symbol_params={"sym_pat": _cn_pat} if _cn_pat else None,
+                )
             await _session.commit()
     except Exception as _e:
         logger.warning(f"OCR sync DB cleanup failed for {auth.tenant_id}:{uid}: {_e}")

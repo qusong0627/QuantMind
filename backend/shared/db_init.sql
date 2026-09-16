@@ -1897,6 +1897,7 @@ CREATE INDEX IF NOT EXISTS idx_user_sessions_token_jti ON user_sessions (token_j
 -- 60.1 SIMULATION_ACCOUNTS
 CREATE TABLE IF NOT EXISTS simulation_accounts (
     account_id              VARCHAR(96) PRIMARY KEY,
+    market                  VARCHAR(16) NOT NULL DEFAULT 'CN',
     tenant_id               VARCHAR(64) NOT NULL DEFAULT 'default',
     user_id                 VARCHAR(64) NOT NULL,
     base_currency           VARCHAR(16) NOT NULL DEFAULT 'CNY',
@@ -1917,8 +1918,8 @@ CREATE TABLE IF NOT EXISTS simulation_accounts (
     created_at              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at              TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-CREATE UNIQUE INDEX IF NOT EXISTS idx_simulation_accounts_tenant_user
-    ON simulation_accounts (tenant_id, user_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_simulation_accounts_tenant_user_market
+    ON simulation_accounts (tenant_id, user_id, market);
 
 -- 60.2 SIMULATION_ACCOUNT_DAILY
 CREATE TABLE IF NOT EXISTS simulation_account_daily (

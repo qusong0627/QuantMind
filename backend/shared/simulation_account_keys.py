@@ -19,9 +19,14 @@ def normalize_tenant(tenant_id: str | None) -> str:
     return (tenant_id or "").strip() or "default"
 
 
-def normalize_market(market: str | None) -> str:
-    """CN（含 A/A_SHARE/空）归一为 CN，其余大写原样返回。"""
-    market_upper = str(market or "CN").upper().strip()
+def normalize_market(market: object) -> str:
+    """CN（含 A/A_SHARE/空）归一为 CN，其余大写原样返回。
+
+    Market 枚举按 .value 解包（``str(Market.CN)`` 是 "Market.CN" 而非 "CN"——
+    曾致 ledger_account_id 生成 ":MARKET.CN" 后缀的错误 id）。
+    """
+    raw = getattr(market, "value", market)
+    market_upper = str(raw or "CN").upper().strip()
     if market_upper in {"", "CN", "A", "A_SHARE"}:
         return "CN"
     return market_upper
@@ -38,6 +43,35 @@ def account_key(tenant_id: str | None, user_id: object, market: str | None = "CN
 
 def settings_key(tenant_id: str | None, user_id: object) -> str:
     return f"{SETTINGS_KEY_PREFIX}{normalize_tenant(tenant_id)}:{str(user_id).strip()}"
+
+
+# ---------------------------------------------------------------------------
+# PG 台账账户 id（市场化账户唯一规范）
+#
+# 与 Redis 账户键同构（CN 无后缀是历史存量，不迁移）：
+#     sim:{tenant}:{user}            # CN
+#     sim:{tenant}:{user}:{MARKET}   # HK / US / FUTURES / ...
+# 账户行 cash/initial_equity 的读写一律经本函数，禁止手写 f-string。
+# ---------------------------------------------------------------------------
+
+LEDGER_ACCOUNT_PREFIX = "sim:"
+
+
+def ledger_account_id(tenant_id: str | None, user_id: object, market: str | None = "CN") -> str:
+    """构造 PG 台账账户 id（唯一实现；CN 无后缀→存量行零迁移）。"""
+    tenant = normalize_tenant(tenant_id)
+    user = str(user_id).strip()
+    if normalize_market(market) == "CN":
+        return f"{LEDGER_ACCOUNT_PREFIX}{tenant}:{user}"
+    return f"{LEDGER_ACCOUNT_PREFIX}{tenant}:{user}:{normalize_market(market)}"
+
+
+def market_from_ledger_account_id(account_id: str | None) -> str:
+    """从台账账户 id 反解市场（无后缀=CN；与 account_key 的键形约定一致）。"""
+    parts = str(account_id or "").split(":")
+    if len(parts) >= 4 and parts[0] == "sim":
+        return normalize_market(parts[3])
+    return "CN"
 
 
 def parse_account_key(key: str) -> tuple[str, str, str] | None:

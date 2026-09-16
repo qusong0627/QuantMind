@@ -199,6 +199,8 @@ class SimOrderService:
             order.remarks = f"{order.remarks or ''} [Cancelled: {reason}]"
         await self.db.commit()
         await self.db.refresh(order)
+        # V2 投影镜像：否则 worker 扫描仍视该单为 pending，下个会话重放已撤单
+        await self.sync_order_projection(order)
         return order
 
     # ── V2投影链路兼容（margin/强平与pending worker调用） ──
@@ -234,6 +236,10 @@ class SimOrderService:
             import logging
 
             from backend.services.simulation.models.order_v2 import SimulationOrderV2
+            from backend.services.simulation.services.market_rules import (
+                infer_market,
+            )
+            from backend.shared.simulation_account_keys import ledger_account_id
 
             status = getattr(order, "status", None)
             status_str = getattr(status, "value", status)
@@ -261,7 +267,12 @@ class SimOrderService:
                         order_id=getattr(order, "order_id", None),
                         tenant_id=str(getattr(order, "tenant_id", "default")),
                         user_id=str(getattr(order, "user_id", "")),
-                        account_id=f"{getattr(order, 'tenant_id', 'default')}:{getattr(order, 'user_id', '')}",
+                        # 市场化账户：账户 id 经唯一实现（市场按标的推断；此前为第三种手写格式）
+                        account_id=ledger_account_id(
+                            getattr(order, "tenant_id", "default"),
+                            getattr(order, "user_id", ""),
+                            infer_market(str(getattr(order, "symbol", ""))),
+                        ),
                         symbol=str(getattr(order, "symbol", "")),
                         side=str(
                             getattr(
@@ -331,3 +342,25 @@ class SimOrderService:
         except Exception:
             pass
         return order
+
+    async def load_runtime_order(self, projection_order):
+        """V2投影 → 运行时 SimOrder（worker 入口）：优先取同 order_id 的 v1 台账行
+        （session 绑定，引擎终态写回 v1 才生效）；无 v1 行（V2-only 单）回退内存态构造。"""
+        order_id = getattr(projection_order, "order_id", None)
+        if order_id is not None:
+            try:
+                row = (
+                    await self.db.execute(
+                        select(SimOrder)
+                        .where(SimOrder.order_id == order_id)
+                        .limit(1)
+                    )
+                ).scalar_one_or_none()
+                if row is not None:
+                    return row
+            except Exception as exc:  # noqa: BLE001 - 探测失败回退内存态（旧语义）
+                logger.debug("load_runtime_order v1 lookup failed: %s", exc)
+        return self._build_runtime_order(
+            projection_order,
+            remarks=getattr(projection_order, "rejected_reason", None),
+        )

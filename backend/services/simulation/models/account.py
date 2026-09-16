@@ -14,6 +14,8 @@ class SimulationAccount(Base, TimestampMixin):
     __tablename__ = "simulation_accounts"
 
     account_id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    # 市场化账户（2026-09-16）：id 带市场段（CN 无后缀）；本列供 SQL 过滤/对账
+    market: Mapped[str] = mapped_column(String(16), nullable=False, default="CN")
     tenant_id: Mapped[str] = mapped_column(
         String(64), nullable=False, default="default", index=True
     )
@@ -44,9 +46,10 @@ class SimulationAccount(Base, TimestampMixin):
 
     __table_args__ = (
         Index(
-            "idx_simulation_accounts_tenant_user",
+            "idx_simulation_accounts_tenant_user_market",
             "tenant_id",
             "user_id",
+            "market",
             unique=True,
         ),
     )

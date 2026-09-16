@@ -433,10 +433,17 @@ class SimulationCorporateActionService:
         account = await session.get(SimulationAccount, account_id)
         if account is None:
             return
+        # 市场化账户：市场由账户 id 反解（CN 无后缀）——持仓/现金严格同市场口径
+        from backend.shared.simulation_account_keys import (
+            market_from_ledger_account_id,
+        )
+
+        market = market_from_ledger_account_id(account_id)
         projection = await SimulationProjectionService(session).load_projection(
             tenant_id=account.tenant_id,
             user_id=account.user_id,
             latest_price_loader=lambda symbol: cls._load_latest_price(session, symbol),
+            market=market,
         )
         positions = projection.positions or {}
         long_market_value = 0.0
@@ -462,7 +469,7 @@ class SimulationCorporateActionService:
 
             _cached = read_json_cache(
                 _redis_client,
-                account_key(account.tenant_id, account.user_id, "CN"),
+                account_key(account.tenant_id, account.user_id, market),
             )
             _proceeds = float((_cached or {}).get("short_proceeds") or 0.0)
         except Exception:
@@ -480,6 +487,7 @@ class SimulationCorporateActionService:
             positions=positions,
             tenant_id=account.tenant_id,
             user_id=account.user_id,
+            market=market,
         )
 
     @staticmethod
@@ -489,10 +497,13 @@ class SimulationCorporateActionService:
         positions: dict,
         tenant_id: str,
         user_id: str,
+        market: str = "CN",
     ) -> None:
         if not redis_client.client:
             return
-        sim_key = account_key(tenant_id, user_id)
+        # 市场化账户：写回**对应市场**的 Redis 键（CN 无后缀）；trade 缓存为
+        # 用户级单键（无市场维度）——仅在 CN 时联动更新，非 CN 不误灌合并视图
+        sim_key = account_key(tenant_id, user_id, market)
         # 空投影保护（与 EOD _rebuild_redis 同理）：ledger 为空时不覆盖 Redis 实盘持仓
         if not positions:
             try:
@@ -529,7 +540,8 @@ class SimulationCorporateActionService:
             source="corporate_action_apply",
         )
         redis_client.client.set(sim_key, json.dumps(payload, ensure_ascii=False))
-        write_trade_account_cache(redis_client, tenant_id, user_id, payload)
+        if str(market).upper() == "CN":
+            write_trade_account_cache(redis_client, tenant_id, user_id, payload)
 
     @staticmethod
     async def _load_latest_price(session, symbol: str) -> float:

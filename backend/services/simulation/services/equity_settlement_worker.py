@@ -441,21 +441,23 @@ class SimulationEquitySettlementWorker:
         from backend.services.simulation.models.account import SimulationAccount
         from backend.shared.database_manager_v2 import get_session
 
-        # 同一 (tenant, user) 只取一个账户（CN 优先，与台账 account_id 口径一致）
-        chosen: dict[tuple[str, str], dict[str, Any]] = {}
+        # 市场化账户（T-P1-04 收口）：按 (tenant, user, market) 逐市场刷新——
+        # 每个市场的 Redis 账户更新**同市场**的 PG 账户行（不再 CN 优先合并）
+        chosen: dict[tuple[str, str, str], dict[str, Any]] = {}
         for item in accounts:
             if not item["user_id"].isdigit():
                 continue
-            k = (item["tenant_id"], item["user_id"])
-            if k not in chosen or item["market"] == "CN":
-                chosen[k] = item
+            k = (item["tenant_id"], item["user_id"], str(item["market"]).upper())
+            chosen[k] = item
 
         updated = 0
         now = datetime.utcnow()
         async with get_session() as session:
-            for (tenant_id, user_id), item in chosen.items():
+            for (tenant_id, user_id, market), item in chosen.items():
                 account = item["account"]
-                account_id = f"sim:{tenant_id}:{user_id}"
+                from backend.shared.simulation_account_keys import ledger_account_id
+
+                account_id = ledger_account_id(tenant_id, user_id, market)
                 long_mv, short_mv, net_mv = summarize_positions(
                     account.get("positions")
                 )

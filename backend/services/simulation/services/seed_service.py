@@ -38,7 +38,8 @@ class SimulationSeedService:
         clear_legacy_history: bool = True,
         source: str = "ocr_confirmed_snapshot",
     ) -> str:
-        account_id = SimulationProjectionService.build_account_id(tenant_id, user_id)
+        # OCR 持仓重灌仅作用于 CN 默认账户（市场化账户：CN 无后缀 id）
+        account_id = SimulationProjectionService.build_account_id(tenant_id, user_id, "CN")
         now = datetime.utcnow()
         normalized_user_id = str(user_id)
         try:
@@ -170,6 +171,7 @@ class SimulationSeedService:
                     account_id=account_id,
                     tenant_id=tenant_id,
                     user_id=normalized_user_id,
+                    market="CN",
                     symbol=symbol,
                     position_side="long",
                     open_fill_id=None,

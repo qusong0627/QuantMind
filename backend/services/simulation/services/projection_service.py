@@ -27,8 +27,13 @@ class SimulationProjectionService:
         self.db = db
 
     @staticmethod
-    def build_account_id(tenant_id: str, user_id: str | int) -> str:
-        return f"sim:{str(tenant_id or 'default').strip() or 'default'}:{str(user_id).strip()}"
+    def build_account_id(
+        tenant_id: str, user_id: str | int, market: str | None = None
+    ) -> str:
+        """PG 台账账户 id（市场化账户唯一实现委托；勿在此重造格式）。"""
+        from backend.shared.simulation_account_keys import ledger_account_id
+
+        return ledger_account_id(tenant_id, user_id, market)
 
     @staticmethod
     def build_cache_payload(
@@ -134,7 +139,8 @@ class SimulationProjectionService:
         latest_price_loader,
         market: str | None = None,
     ) -> ProjectionSnapshot:
-        account_id = self.build_account_id(tenant_id, user_id)
+        # 市场化账户：账户行按市场维度取（market=None 显式默认 CN，与 id 无后缀约定一致）
+        account_id = self.build_account_id(tenant_id, user_id, market)
         account = await self.db.get(SimulationAccount, account_id)
         positions = await self._load_positions_from_lots(
             account_id=account_id,
@@ -255,40 +261,6 @@ class SimulationProjectionService:
                 "side": side,
             }
         return positions
-
-    async def get_available_quantity(
-        self,
-        *,
-        tenant_id: str,
-        user_id: str | int,
-        symbol: str,
-        position_side: str = "long",
-        as_of_date: date | None = None,
-    ) -> float:
-        account_id = self.build_account_id(tenant_id, user_id)
-        normalized_symbol = str(symbol or "").strip().upper()
-        normalized_side = str(position_side or "long").strip().lower()
-        stmt = (
-            select(SimulationPositionLot)
-            .where(
-                SimulationPositionLot.account_id == account_id,
-                SimulationPositionLot.symbol == normalized_symbol,
-                SimulationPositionLot.position_side == normalized_side,
-                SimulationPositionLot.status == "open",
-                SimulationPositionLot.quantity_remaining > 0,
-            )
-        )
-        lots = list((await self.db.execute(stmt)).scalars().all())
-        if not lots:
-            return 0.0
-        target_date = as_of_date or date.today()
-        return round(
-            sum(
-                self._lot_available_quantity(lot, as_of_date=target_date)
-                for lot in lots
-            ),
-            6,
-        )
 
     @staticmethod
     def _lot_available_quantity(

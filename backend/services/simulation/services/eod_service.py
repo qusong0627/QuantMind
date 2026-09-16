@@ -17,6 +17,7 @@ import os
 from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
+from sqlalchemy import func as sa_func
 from sqlalchemy import select, func
 
 from backend.services.trade_shared.redis_client import redis_client
@@ -133,7 +134,9 @@ async def _execute_eod(trade_date: date) -> bool:
                 (
                     await session.execute(
                         select(SimulationAccount).where(
-                            SimulationAccount.status == "active"
+                            SimulationAccount.status == "active",
+                            # 市场化账户后按市场行存储；EOD 当前为 CN 口径（多市场 EOD 属后续）
+                            sa_func.coalesce(SimulationAccount.market, "CN") == "CN",
                         )
                     )
                 )

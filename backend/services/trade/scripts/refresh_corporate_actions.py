@@ -235,10 +235,16 @@ async def _refresh_redis_for_account(account_id: str) -> bool:
         if account is None:
             print(f"    [warn] 账户不存在: {account_id}")
             return False
+        from backend.shared.simulation_account_keys import (
+            market_from_ledger_account_id,
+        )
+
+        market = market_from_ledger_account_id(account_id)
         projection = await SimulationProjectionService(session).load_projection(
             tenant_id=account.tenant_id,
             user_id=account.user_id,
             latest_price_loader=lambda symbol: _load_close_price(session, symbol),
+            market=market,
         )
         if projection.account is None:
             print(f"    [warn] projection 为空: {account_id}")
@@ -248,11 +254,12 @@ async def _refresh_redis_for_account(account_id: str) -> bool:
             positions=projection.positions or {},
             source="refresh_corporate_actions_script",
         )
-        sim_key = account_key(account.tenant_id, account.user_id)
+        sim_key = account_key(account.tenant_id, account.user_id, market)
         write_json_cache(redis_client, sim_key, payload)
-        write_trade_account_cache(
-            redis_client, account.tenant_id, account.user_id, payload
-        )
+        if str(market).upper() == "CN":  # trade 缓存为用户级单键（无市场维度）
+            write_trade_account_cache(
+                redis_client, account.tenant_id, account.user_id, payload
+            )
         return True
 
 

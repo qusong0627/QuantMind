@@ -44,8 +44,13 @@ class SimulationLedgerService:
         self.db = db
 
     @staticmethod
-    def build_account_id(tenant_id: str, user_id: str | int) -> str:
-        return f"sim:{str(tenant_id or 'default').strip() or 'default'}:{str(user_id).strip()}"
+    def build_account_id(
+        tenant_id: str, user_id: str | int, market: str | None = None
+    ) -> str:
+        """PG 台账账户 id（市场化账户唯一实现：CN 无后缀，非 CN 带市场段）。"""
+        from backend.shared.simulation_account_keys import ledger_account_id
+
+        return ledger_account_id(tenant_id, user_id, market)
 
     @staticmethod
     def build_cash_entries(*, side: str, trade_value: float, commission: float, stamp_duty: float, transfer_fee: float) -> list[CashLedgerEntry]:
@@ -121,13 +126,25 @@ class SimulationLedgerService:
         from backend.shared.ledger_contract import normalize_ledger_market
 
         market_n = normalize_ledger_market(market)
+        # 市场化账户契约（T-P1-04 收口）：账户行按市场维度供给（列+唯一索引）
+        from backend.shared.ledger_contract import (
+            ensure_accounts_market_contract_async,
+        )
+
+        await ensure_accounts_market_contract_async()
         tenant_id = str(getattr(order, "tenant_id", None) or "default").strip() or "default"
         user_id = str(getattr(order, "user_id", None) or "").strip()
         if not user_id:
             return
-        account_id = self.build_account_id(tenant_id, user_id)
+        account_id = self.build_account_id(tenant_id, user_id, market_n)
         before_snapshot = dict(account_snapshot or {})
-        account = await self._ensure_account(account_id=account_id, tenant_id=tenant_id, user_id=user_id, account_snapshot=before_snapshot)
+        account = await self._ensure_account(
+            account_id=account_id,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            account_snapshot=before_snapshot,
+            market=market_n,
+        )
         after_snapshot = self.apply_trade_to_account_snapshot(
             trade=trade,
             account_snapshot=before_snapshot,
@@ -169,6 +186,7 @@ class SimulationLedgerService:
         tenant_id: str,
         user_id: str,
         account_snapshot: dict[str, Any],
+        market: str = "CN",
     ) -> SimulationAccount:
         account = await self.db.get(SimulationAccount, account_id)
         if account is None:
@@ -183,6 +201,7 @@ class SimulationLedgerService:
                 account_id=account_id,
                 tenant_id=tenant_id,
                 user_id=user_id,
+                market=market,
                 initial_equity=initial_equity,
                 cash=float(account_snapshot.get("cash") or 0.0),
                 available_cash=float(account_snapshot.get("available_cash") or account_snapshot.get("cash") or 0.0),
