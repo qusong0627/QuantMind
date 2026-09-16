@@ -31,6 +31,7 @@ import { EvalScoreBadge } from '../shared/EvalScoreBadge';
 import { message, Modal, Popover } from 'antd';
 import { PromotionGateCard } from '../shared/PromotionGateCard';
 import { StrategyVersionDrawer } from '../shared/strategyDiff/StrategyVersionDrawer';
+import { DangerConfirmModal } from '../shared/compliance/DangerConfirmModal';
 import { strategyManagementService } from '../../services/strategyManagementService';
 import { useBacktestCenterStore } from '../../stores/backtestCenterStore';
 import { useAppSelector } from '../../store';
@@ -297,17 +298,22 @@ export const StrategyManagementModule: React.FC = () => {
                 )}
             </div>
 
-            <Modal
-                title="确认删除"
+            {/* T-FE-18：删除属于危险动作——统一后果文案确认卡 */}
+            <DangerConfirmModal
                 open={deleteModalVisible}
-                onOk={handleConfirmDelete}
+                scenario={{
+                    title: `删除策略「${selectedStrategy?.name || ''}」`,
+                    consequences: [
+                        '删除后**不可恢复**（代码、参数与版本历史一并移除）',
+                        '若该策略正在模拟盘/实盘运行，请先停止后再删除',
+                        '依赖该策略的托管任务会随之下线',
+                    ],
+                    confirmText: '确认删除',
+                    cancelText: '取消',
+                }}
+                onConfirm={handleConfirmDelete}
                 onCancel={() => setDeleteModalVisible(false)}
-                okText="确认删除"
-                cancelText="取消"
-                okButtonProps={{ danger: true }}
-            >
-                <p>确定要永久删除策略 "{selectedStrategy?.name}" 吗？</p>
-            </Modal>
+            />
 
             {/* T-FE-10：版本与变更抽屉（版本 diff + 生效参数及来源 + 参数锁） */}
             <StrategyVersionDrawer

@@ -354,7 +354,9 @@ const LiveTradeConfigForm: React.FC<Props> = ({
                   </div>
                 </label>
                 <label>
-                  <div className="mb-0.5 text-[11px] text-gray-500">全局止损</div>
+                  <div className="mb-0.5 text-[11px] text-gray-500" title="平台默认安全：止损不可关闭（-3% ~ -20%），仅可调幅度">
+                    全局止损 <span className="text-[9px] text-slate-400">（平台锁定：不可关闭）</span>
+                  </div>
                   <div className="relative">
                     <input
                       type="number"

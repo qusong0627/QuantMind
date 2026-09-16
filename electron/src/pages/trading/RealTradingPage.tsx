@@ -14,8 +14,10 @@ import ReplayPage from './tabs/ReplayPage';
 import type { RealTradingStatus, AccountInfo, PreflightCheckResponse, PreflightCheckItem } from '../../services/realTradingService';
 import { authService } from '../../features/auth/services/authService';
 import type { StrategyFile } from '../../types/backtest/strategy';
-import { useAppDispatch, useAppSelector } from '../../store';
-import { selectCurrentMarket, selectTradingMode, setTradingMode } from '../../store/slices/uiSlice';
+import { useAppSelector } from '../../store';
+import { selectCurrentMarket } from '../../store/slices/uiSlice';
+import { useTradingModeSwitch } from '../../features/shared/useTradingModeSwitch';
+import { ComplianceFooter } from '../../components/shared/compliance/ComplianceChrome';
 import { getMarketConfig } from '../../config/marketConfig';
 import { useTradeWebSocket } from '../../hooks/useTradeWebSocket';
 import { buildTradingTopBarAccountInfo, resolveTradingAccountMode } from './utils/accountAdapter';
@@ -25,7 +27,6 @@ import type { DeployMode, ExecutionConfig, LiveTradeConfig } from '../../types/l
 type TradingMode = 'real' | 'simulation';  // 支持实盘(通达信桥)与模拟盘
 type ActiveTab = 'manage' | 'manual-task' | 'personal' | 'position' | 'history' | 'settings' | 'replay';
 type PreflightStage = 'trading-readiness' | 'preflight';
-const TRADING_MODE_PREF_KEY = 'qm:trading_mode_pref';
 type PendingDeploy = {
     strategyId: string;
     mode: DeployMode;
@@ -83,7 +84,6 @@ const BROKER_LABELS: Record<string, string> = {
 };
 
 const RealTradingPage: React.FC = () => {
-    const dispatch = useAppDispatch();
     const currentMarket = useAppSelector(selectCurrentMarket);
     const marketConfig = getMarketConfig(currentMarket);
     const [activeTab, setActiveTab] = useState<ActiveTab>('manage');
@@ -107,7 +107,8 @@ const RealTradingPage: React.FC = () => {
         }
         return 'user_1001';
     });
-    const tradingMode: TradingMode = useAppSelector(selectTradingMode);
+    // T-FE-18：交易模式切换统一入口（切实盘前置二次确认，与顶栏同源）
+    const { tradingMode, requestSwitch, confirmModal: tradingModeConfirmModal } = useTradingModeSwitch();
     const [status, setStatus] = useState<RealTradingStatus | null>(null);
     const [accountInfo, setAccountInfo] = useState<AccountInfo | null>(null);
     const [preflightResult, setPreflightResult] = useState<PreflightCheckResponse | null>(null);
@@ -314,9 +315,8 @@ const RealTradingPage: React.FC = () => {
     };
 
     const handleModeSwitch = useCallback((mode: TradingMode) => {
-        localStorage.setItem(TRADING_MODE_PREF_KEY, mode);
-        dispatch(setTradingMode(mode));
-    }, [dispatch]);
+        requestSwitch(mode);
+    }, [requestSwitch]);
 
     const handleWizardConfirm = useCallback(async (payload: {
         execution_config: ExecutionConfig;
@@ -563,6 +563,8 @@ const RealTradingPage: React.FC = () => {
                                 </button>
                             </div>
                             <HelpCenterLink className="w-full text-xs font-semibold tracking-wide" />
+                            {/* T-FE-17 免责页脚：真实资金操作区常驻可见 */}
+                            <ComplianceFooter />
                         </div>
                     </div>
 
@@ -846,6 +848,7 @@ const RealTradingPage: React.FC = () => {
                 onCancel={() => setWizardOpen(false)}
                 onConfirm={handleWizardConfirm}
             />
+            {tradingModeConfirmModal}
         </div>
     );
 };

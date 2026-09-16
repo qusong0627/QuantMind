@@ -130,7 +130,7 @@ const LiveTradeConfigWizard: React.FC<Props> = ({
       },
       {
         label: '风控',
-        value: `大跌拦截 ${((executionConfig.max_buy_drop || 0) * 100).toFixed(1)}%，止损 ${((executionConfig.stop_loss || 0) * 100).toFixed(1)}%`,
+        value: `大跌拦截 ${((executionConfig.max_buy_drop || 0) * 100).toFixed(1)}%，止损 ${((executionConfig.stop_loss || 0) * 100).toFixed(1)}%（平台锁定·不可关闭）`,
       },
       {
         label: '股票池',

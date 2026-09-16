@@ -60,15 +60,5 @@ export const QUANTBOT_INTENTS: QuantbotIntent[] = [
   },
 ];
 
-/** 危险动作判定（两步确认卡触发）：显式 danger 或动作文案含写/执行类词 */
-const _DANGER_WORDS = /执行|下单|买入|卖出|清仓|删除|停用|停止|上实盘|真实盘/;
-
-export function needsTwoStepConfirm(action: { label?: string; variant?: string } | null | undefined): boolean {
-  if (!action) return false;
-  if (action.variant === 'danger') return true;
-  return _DANGER_WORDS.test(String(action.label || ''));
-}
-
-export function confirmConsequence(label: string): string {
-  return `「${label}」属于写操作：确认后将立即对实际状态生效（可能产生委托或不可逆变更）。请核对上下文与参数后确认。`;
-}
+/** 危险动作判定与后果文案：唯一实现在 shared/compliance/dangerAction（T-FE-18 收敛），此处再导出兼容旧引用 */
+export { needsTwoStepConfirm, confirmConsequence } from '../../../components/shared/compliance/dangerAction';

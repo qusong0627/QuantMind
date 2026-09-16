@@ -30,6 +30,11 @@ import type {
     ManualExecutionTaskRecord,
 } from '../../../services/realTradingService';
 import type { StrategyFile } from '../../../types/backtest/strategy';
+import { DangerConfirmModal } from '../../../components/shared/compliance/DangerConfirmModal';
+import {
+    buildLargeOrderScenario,
+    isLargeOrderAmount,
+} from '../../../components/shared/compliance/dangerAction';
 
 interface ManualTaskPageProps {
     tenantId: string;
@@ -200,6 +205,8 @@ const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack }) 
     const [previewLoading, setPreviewLoading] = useState(false);
 
     const [submitting, setSubmitting] = useState(false);
+    // T-FE-18：大额调仓提交前置二次确认（阈值与文案见 dangerAction）
+    const [largeOrderConfirmOpen, setLargeOrderConfirmOpen] = useState(false);
     const [selectedTaskId, setSelectedTaskId] = useState('');
     const [selectedTask, setSelectedTask] = useState<ManualExecutionTaskRecord | null>(null);
     const [logs, setLogs] = useState<ManualExecutionLogEntry[]>([]);
@@ -495,6 +502,20 @@ const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack }) 
 
     const previewSummary = preview?.summary;
     const previewTaskSummary = (selectedTask?.result_json as Record<string, unknown> | undefined)?.preview_summary as Record<string, unknown> | undefined;
+
+    /** 大额（买卖预估总额 ≥ 阈值）先过危险确认卡，普通金额维持原有单次确认流程 */
+    const handleSubmitClick = useCallback(() => {
+        if (previewSummary && isLargeOrderAmount(previewSummary.estimated_buy_amount, previewSummary.estimated_sell_proceeds)) {
+            setLargeOrderConfirmOpen(true);
+            return;
+        }
+        void submitExecution();
+    }, [previewSummary, submitExecution]);
+
+    const largeOrderScenario = buildLargeOrderScenario({
+        buyAmount: previewSummary?.estimated_buy_amount,
+        sellAmount: previewSummary?.estimated_sell_proceeds,
+    });
 
     return (
         <div className="h-full overflow-y-auto bg-gray-50 p-4 custom-scrollbar">
@@ -1512,7 +1533,7 @@ const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack }) 
                                         <div className="space-y-2">
                                             <button
                                                 type="button"
-                                                onClick={() => void submitExecution()}
+                                                onClick={handleSubmitClick}
                                                 disabled={submitting || !preview}
                                                 className="w-full py-3.5 rounded-xl bg-red-600 text-white text-xs font-bold hover:bg-red-700 shadow-md shadow-red-100 transition-all active:scale-[0.98] flex items-center justify-center gap-2"
                                             >
@@ -1563,6 +1584,17 @@ const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack }) 
                     </div>
                 ) : null}
             </div>
+
+            <DangerConfirmModal
+                open={largeOrderConfirmOpen}
+                scenario={largeOrderScenario}
+                loading={submitting}
+                onConfirm={() => {
+                    setLargeOrderConfirmOpen(false);
+                    void submitExecution();
+                }}
+                onCancel={() => setLargeOrderConfirmOpen(false)}
+            />
         </div>
     );
 };

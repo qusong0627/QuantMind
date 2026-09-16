@@ -13,6 +13,7 @@ import {
 } from '../deskModel';
 import { executePlan } from '../services/deskService';
 import { TermTooltip } from '../../shared/TermTooltip';
+import { checkDiversification } from '../../../components/shared/compliance/diversification';
 
 interface PlanCardProps {
   plan: PlanBlock | null | undefined;
@@ -76,6 +77,8 @@ export const PlanCard: React.FC<PlanCardProps> = ({ plan, onDrillDown, onExecute
   };
   const summary = planSummary(plan);
   const orders = plan?.orders || [];
+  // T-FE-18：强制分散提示（按本次计划买入金额估算，非全账户口径）
+  const diversification = useMemo(() => checkDiversification(orders), [orders]);
 
   return (
     <section className="bg-white rounded-2xl border border-gray-200 p-4 flex flex-col">
@@ -141,6 +144,21 @@ export const PlanCard: React.FC<PlanCardProps> = ({ plan, onDrillDown, onExecute
             <span className="text-red-600">买入约 {formatMoney(summary.buyAmount)}</span>
             <span className="text-emerald-600">卖出约 {formatMoney(summary.sellAmount)}</span>
           </div>
+
+          {diversification.warnings.length > 0 ? (
+            <div className="mb-2 rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-1.5 space-y-0.5">
+              {diversification.warnings.map((w, i) => (
+                <div key={i} className="text-[11px] text-amber-800 flex items-center gap-1">
+                  <AlertTriangle className="w-3 h-3 shrink-0" />
+                  分散提示：{w}
+                </div>
+              ))}
+            </div>
+          ) : diversification.maxWeight !== null ? (
+            <div className="mb-2 text-[11px] text-emerald-700">
+              分散检查 ✓ 单票最大 {(diversification.maxWeight * 100).toFixed(1)}% · {diversification.buyCount} 只
+            </div>
+          ) : null}
 
           <div className="flex-1 overflow-y-auto max-h-[320px] pr-1 space-y-1.5">
             {orders.map((order, index) => (

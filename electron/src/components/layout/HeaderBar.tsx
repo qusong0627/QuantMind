@@ -6,11 +6,9 @@ import { Wifi, ShieldCheck } from 'lucide-react';
 import { MarketSelector } from './MarketSelector';
 import { motion } from 'framer-motion';
 import { selectCurrentTab } from '../../store/slices/aiStrategySlice';
-import { useAppDispatch, useAppSelector } from '../../store';
-import { setTradingMode } from '../../store/slices/uiSlice';
 import { UiModeToggle } from '../../features/shared/UiModeToggle';
+import { useTradingModeSwitch } from '../../features/shared/useTradingModeSwitch';
 
-const TRADING_MODE_PREF_KEY = 'qm:trading_mode_pref';
 import { SERVICE_URLS } from '../../config/services';
 
 export const HeaderBar: React.FC = () => {
@@ -18,8 +16,8 @@ export const HeaderBar: React.FC = () => {
   const [apiStatus, setApiStatus] = useState<'checking' | 'connected' | 'disconnected'>('checking');
   const [networkLatency, setNetworkLatency] = useState<number>(0);
   const currentTab = useSelector(selectCurrentTab);
-  const dispatch = useAppDispatch();
-  const tradingMode = useAppSelector((state) => state.ui.tradingMode);
+  // T-FE-18：切换到实盘前统一二次确认（唯一入口 hook，交易页同源）
+  const { tradingMode, requestSwitch, confirmModal } = useTradingModeSwitch();
 
   const { isConnected: realtimeConnected } = useRealtimeData({
     enabled: false,
@@ -52,11 +50,6 @@ export const HeaderBar: React.FC = () => {
 
     return () => clearInterval(latencyTimer);
   }, []);
-
-  const handleModeSwitch = (mode: 'real' | 'simulation'): void => {
-    localStorage.setItem(TRADING_MODE_PREF_KEY, mode);
-    dispatch(setTradingMode(mode));
-  };
 
   return (
     <div className="relative px-8 pt-6 pb-2 grid grid-cols-3 items-center bg-transparent">
@@ -112,7 +105,7 @@ export const HeaderBar: React.FC = () => {
             role="switch"
             aria-checked={tradingMode === 'simulation'}
             aria-label={`当前交易模式：${tradingMode === 'real' ? '实盘' : '模拟盘'}，点击切换`}
-            onClick={() => handleModeSwitch(tradingMode === 'real' ? 'simulation' : 'real')}
+            onClick={() => requestSwitch(tradingMode === 'real' ? 'simulation' : 'real')}
             className={`relative flex h-8 w-[72px] shrink-0 items-center rounded-full border px-1 transition-all focus:outline-none shadow-sm ${tradingMode === 'simulation'
               ? 'border-emerald-200 bg-emerald-50/50'
               : 'border-blue-200 bg-blue-50/50'
@@ -174,6 +167,8 @@ export const HeaderBar: React.FC = () => {
           </div>
         </div>
       </div>
+
+      {confirmModal}
     </div>
   );
 };
