@@ -25,6 +25,8 @@ class TradingSession(str, Enum):
     # T-P2-07：盘后固定价格交易 15:05–15:30（按收盘价成交）——模拟托管支持；
     # 实盘通道待核实（real_trading_utils 显式拒绝）
     AFTER_HOURS = "AFTER_HOURS"
+    # T-P3-07：期货夜盘（21:00–02:30，跨午夜；时段表见 shared/market_sessions）
+    NIGHT = "NIGHT"
 
 
 class LiveOrderType(str, Enum):

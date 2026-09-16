@@ -35,10 +35,6 @@ from backend.services.trade_shared.portfolio.models import Portfolio
 from backend.services.trade_shared.models.trade import Trade
 from backend.services.trade_shared.redis_client import RedisClient, get_redis
 from backend.services.trade_shared.utils.redis_cache import redis_cache
-from backend.services.simulation.services.market_rules import (
-    AFTER_HOURS_FIXED_END,
-    AFTER_HOURS_FIXED_START,
-)
 from backend.services.trade_shared.schemas.live_trade_config import (
     ExecutionConfigSchema,
     LiveTradeConfigSchema,
@@ -917,32 +913,31 @@ def _normalize_live_trade_config(
     ):
         normalized["max_price_deviation"] = float(normalized["max_price_deviation"])
 
-    session_ranges = {
-        "AM": ("09:30", "11:30"),
-        "PM": ("13:00", "15:00"),
-    }
+    # T-P3-07：时段校验按**策略市场本地时钟**（市场唯一事实源 shared/market_sessions）。
+    # A股 "14:45"=北京钟点；美股 "15:50"=美东钟点——本地钟不随夏令时漂移，校验零 DST 复杂度。
+    from backend.shared.market_sessions import in_session_hhmm, session_ranges_local
+
+    market_key = (
+        (user_live_cfg or {}).get("market")
+        or (base_live_cfg or {}).get("market")
+        or "CN"
+    )
+    session_ranges = session_ranges_local(market_key)
     enabled_sessions = normalized.get("enabled_sessions") or []
-    if "AFTER_HOURS" in enabled_sessions:
-        if not allow_after_hours:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "盘后固定价格时段（AFTER_HOURS）实盘通道待核实（T-P2-07），"
-                    "当前仅模拟盘支持"
-                ),
-            )
-        # 常量单一事实源：market_rules（不在本模块落副本）
-        session_ranges["AFTER_HOURS"] = (
-            AFTER_HOURS_FIXED_START.strftime("%H:%M"),
-            AFTER_HOURS_FIXED_END.strftime("%H:%M"),
+    if "AFTER_HOURS" in enabled_sessions and not allow_after_hours:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "盘后时段（AFTER_HOURS）实盘通道待核实（T-P2-07 / T-P3-07），"
+                "当前仅模拟盘支持"
+            ),
         )
     for key in ("sell_time", "buy_time"):
         target = str(normalized.get(key) or "")
         in_session = any(
-            start <= target <= end
-            for start, end in (
-                session_ranges[s] for s in enabled_sessions if s in session_ranges
-            )
+            in_session_hhmm(target, *session_ranges[s])
+            for s in enabled_sessions
+            if s in session_ranges
         )
         if not in_session:
             raise HTTPException(

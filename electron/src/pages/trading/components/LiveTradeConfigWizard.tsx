@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import type { AppMarket } from '../../../store/slices/uiSlice';
 import { Alert, Button, message, Modal, Steps } from 'antd';
 import { CheckCircle2 } from 'lucide-react';
 import type {
@@ -13,6 +14,8 @@ import LiveTradeConfigForm from './LiveTradeConfigForm';
 type Props = {
   open: boolean;
   mode: DeployMode;
+  /** 策略市场（T-P3-07：时段按市场本地钟点解释；缺省 CN） */
+  market?: AppMarket;
   strategyId: string;
   strategyName: string;
   strategyDefaults?: StrategyLiveDefaults | null;
@@ -60,6 +63,7 @@ function buildInitialState(
 }
 
 const LiveTradeConfigWizard: React.FC<Props> = ({
+  market = 'CN',
   open,
   mode,
   strategyId,
@@ -92,7 +96,10 @@ const LiveTradeConfigWizard: React.FC<Props> = ({
     initializedKeyRef.current = nextKey;
   }, [open, mode, strategyId, strategyDefaults, initialExecutionConfig, initialLiveTradeConfig]);
 
-  const issues = useMemo(() => validateLiveTradeConfig(liveTradeConfig), [liveTradeConfig]);
+  const issues = useMemo(
+    () => validateLiveTradeConfig(liveTradeConfig, market),
+    [liveTradeConfig, market],
+  );
   const tips = strategyDefaults?.live_config_tips || [];
   const modeLabel = mode === 'SIMULATION' ? '模拟盘' : (mode === 'SHADOW' ? '影子模式' : '实盘');
   const orderTypeLabel = liveTradeConfig.order_type === 'LIMIT' ? '限价' : '市价';
@@ -154,7 +161,7 @@ const LiveTradeConfigWizard: React.FC<Props> = ({
       setSubmitting(true);
       await onConfirm({
         execution_config: executionConfig,
-        live_trade_config: liveTradeConfig,
+        live_trade_config: { ...liveTradeConfig, market },
       });
     } finally {
       setSubmitting(false);
@@ -203,6 +210,7 @@ const LiveTradeConfigWizard: React.FC<Props> = ({
                 </div>
               )}
               <LiveTradeConfigForm
+                market={market}
                 executionConfig={executionConfig}
                 liveTradeConfig={liveTradeConfig}
                 onExecutionConfigChange={setExecutionConfig}

@@ -23,7 +23,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _TEMPLATES_DIR = _PROJECT_ROOT / "strategy_templates"
 
 _ALLOWED_MARKETS = {"a_share", "hong_kong", "us_stock", "crypto"}
-_ALLOWED_SESSIONS = {"AM", "PM", "AFTER_HOURS"}
+_ALLOWED_SESSIONS = {"AM", "PM", "AFTER_HOURS", "NIGHT"}
 
 
 def _load_all_jsons() -> list[tuple[str, dict]]:

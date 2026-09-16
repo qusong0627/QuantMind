@@ -1,0 +1,50 @@
+{
+  "id": "us_adaptive",
+  "name": "美股自适应调仓",
+  "description": "宽 Top 50 + 高替换 10 + 动态仓位（dynamic_position），快速对抗概念漂移。",
+  "category": "advanced",
+  "difficulty": "advanced",
+  "params": [
+    {
+      "name": "topk",
+      "description": "持仓股票总数",
+      "default": 50,
+      "min": 10,
+      "max": 200
+    },
+    {
+      "name": "n_drop",
+      "description": "每期最大替换数",
+      "default": 10,
+      "min": 0,
+      "max": 200
+    },
+    {
+      "name": "rebalance_days",
+      "description": "调仓周期（交易日）",
+      "default": 3,
+      "min": 1,
+      "max": 60
+    }
+  ],
+  "execution_defaults": {
+    "max_buy_drop": -0.04,
+    "stop_loss": -0.08
+  },
+  "live_defaults": {
+    "rebalance_days": 3,
+    "enabled_sessions": [
+      "AM"
+    ],
+    "sell_time": "15:50",
+    "buy_time": "15:58",
+    "sell_first": true
+  },
+  "live_config_tips": [
+    "高换手放大成本：美股免佣但需计滑点与监管费。",
+    "时间均为美东钟点（平台自动换算）。"
+  ],
+  "markets": [
+    "us_stock"
+  ]
+}

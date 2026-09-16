@@ -1,0 +1,55 @@
+{
+  "id": "us_alpha_weighted",
+  "name": "美股 Alpha 加权",
+  "description": "高分散加权 Top 50、单票 ≤4%，降低个股特异性风险。",
+  "category": "basic",
+  "difficulty": "intermediate",
+  "params": [
+    {
+      "name": "topk",
+      "description": "持仓股票总数",
+      "default": 50,
+      "min": 10,
+      "max": 200
+    },
+    {
+      "name": "min_score",
+      "description": "最低入选分数",
+      "default": 0.0
+    },
+    {
+      "name": "max_weight",
+      "description": "单票权重上限",
+      "default": 0.04,
+      "min": 0.01,
+      "max": 0.1
+    },
+    {
+      "name": "rebalance_days",
+      "description": "调仓周期（交易日）",
+      "default": 3,
+      "min": 1,
+      "max": 60
+    }
+  ],
+  "execution_defaults": {
+    "max_buy_drop": -0.04,
+    "stop_loss": -0.08
+  },
+  "live_defaults": {
+    "rebalance_days": 3,
+    "enabled_sessions": [
+      "AM"
+    ],
+    "sell_time": "15:50",
+    "buy_time": "15:58",
+    "sell_first": true
+  },
+  "live_config_tips": [
+    "高分散适合较大资金；关注交易成本占比。",
+    "时间均为美东钟点（平台自动换算）。"
+  ],
+  "markets": [
+    "us_stock"
+  ]
+}

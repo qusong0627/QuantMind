@@ -1,0 +1,57 @@
+{
+  "id": "us_stop_loss",
+  "name": "美股止损保护",
+  "description": "Top 30 + 硬止损 -12% / 止盈 +25%，美股高波动下的风控增强配置。",
+  "category": "risk_control",
+  "difficulty": "beginner",
+  "params": [
+    {
+      "name": "topk",
+      "description": "持仓股票总数",
+      "default": 30,
+      "min": 5,
+      "max": 100
+    },
+    {
+      "name": "stop_loss",
+      "description": "个券止损阈值",
+      "default": -0.12,
+      "min": -0.3,
+      "max": -0.03
+    },
+    {
+      "name": "take_profit",
+      "description": "个券止盈阈值",
+      "default": 0.25,
+      "min": 0.05,
+      "max": 1.0
+    },
+    {
+      "name": "rebalance_days",
+      "description": "调仓周期（交易日）",
+      "default": 3,
+      "min": 1,
+      "max": 60
+    }
+  ],
+  "execution_defaults": {
+    "max_buy_drop": -0.04,
+    "stop_loss": -0.06
+  },
+  "live_defaults": {
+    "rebalance_days": 3,
+    "enabled_sessions": [
+      "AM"
+    ],
+    "sell_time": "15:50",
+    "buy_time": "15:58",
+    "sell_first": true
+  },
+  "live_config_tips": [
+    "止盈会截断趋势利润、止损在跳空行情可能滑价成交。",
+    "时间均为美东钟点（平台自动换算）。"
+  ],
+  "markets": [
+    "us_stock"
+  ]
+}

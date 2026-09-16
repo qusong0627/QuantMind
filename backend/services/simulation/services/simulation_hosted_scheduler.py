@@ -22,9 +22,11 @@ from backend.services.trade_shared.redis_client import RedisClient
 from backend.services.simulation.services.rebalance_job_service import (
     SimulationRebalanceJobService,
 )
-from backend.services.simulation.services.market_rules import (
-    AFTER_HOURS_FIXED_END,
-    AFTER_HOURS_FIXED_START,
+from backend.shared.market_sessions import (
+    market_calendar,
+    market_timezone,
+    session_ranges_local,
+    in_session_hhmm,
 )
 
 logger = logging.getLogger(__name__)
@@ -139,24 +141,27 @@ async def run_simulation_cycle_for_active(
     return report_to_hosted_result(report)
 
 
-def _parse_started_at(value: Any) -> date | None:
+def _parse_started_at(value: Any, market: Any = "CN") -> date | None:
+    """解析 started_at → 策略市场本地日期（T-P3-07：按市场时区解释 naive 时间）。"""
     text = str(value or "").strip()
     if not text:
         return None
+    tz = market_timezone(market)
     try:
         parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
         if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=_SH_TZ)
-        return parsed.astimezone(_SH_TZ).date()
+            parsed = parsed.replace(tzinfo=tz)
+        return parsed.astimezone(tz).date()
     except Exception:
         return None
 
 
-def _session_index(day: date) -> int | None:
-    if get_calendar is None:
+def _session_index(day: date, market: Any = "CN") -> int | None:
+    cal_id = market_calendar(market)
+    if get_calendar is None or cal_id is None:
         return None
     try:
-        calendar = get_calendar("XSHG")
+        calendar = get_calendar(cal_id)
         session = calendar.date_to_session(pd.Timestamp(day), direction="previous")
         return int(calendar.sessions.get_loc(session))
     except Exception:
@@ -168,44 +173,43 @@ def _is_interval_rebalance_day(
     *,
     started_day: date | None,
     rebalance_days: int,
+    market: Any = "CN",
 ) -> bool:
     if rebalance_days <= 1:
         return True
     if started_day is None:
         return True
 
-    current_idx = _session_index(current_day)
-    started_idx = _session_index(started_day)
+    current_idx = _session_index(current_day, market)
+    started_idx = _session_index(started_day, market)
     if current_idx is not None and started_idx is not None:
         return max(0, current_idx - started_idx) % rebalance_days == 0
 
     return max(0, (current_day - started_day).days) % rebalance_days == 0
 
 
-def _is_trading_day(day: date) -> bool:
-    if get_calendar is None:
+def _is_trading_day(day: date, market: Any = "CN") -> bool:
+    cal_id = market_calendar(market)
+    if get_calendar is None or cal_id is None:
         return day.weekday() < 5
     try:
-        calendar = get_calendar("XSHG")
+        calendar = get_calendar(cal_id)
         return calendar.is_session(pd.Timestamp(day))
     except Exception:
         return day.weekday() < 5
 
 
 def _is_enabled_session(now_hhmm: str, live_trade_config: dict[str, Any]) -> bool:
-    enabled = set(live_trade_config.get("enabled_sessions") or [])
-    if "AM" in enabled and "09:30" <= now_hhmm <= "11:30":
-        return True
-    if "PM" in enabled and "13:00" <= now_hhmm <= "15:00":
-        return True
-    # T-P2-07：盘后固定价格交易 15:05–15:30（常量取自 market_rules，单一事实源）
-    if "AFTER_HOURS" in enabled and (
-        AFTER_HOURS_FIXED_START.strftime("%H:%M")
-        <= now_hhmm
-        <= AFTER_HOURS_FIXED_END.strftime("%H:%M")
-    ):
-        return True
-    return False
+    """会话门（T-P3-07）：时段表按**策略市场本地时钟**（shared/market_sessions 唯一事实源）。
+
+    CN 15:05–15:30 盘后（T-P2-07 新规）、美股常规 09:30–16:00、期货夜盘 21:00–02:30 跨午夜，
+    全部由时段表 + in_session_hhmm 表达；缺省市场（None）回落 CN 保持存量语义。
+    """
+    ranges = session_ranges_local(live_trade_config.get("market"))
+    enabled = live_trade_config.get("enabled_sessions") or []
+    return any(
+        in_session_hhmm(now_hhmm, *ranges[s]) for s in enabled if s in ranges
+    )
 
 
 def _matches_trigger_window(
@@ -269,11 +273,12 @@ def _should_trigger(
     live_trade_config: dict[str, Any],
     started_day: date | None,
 ) -> SimulationScheduleDecision:
-    local_now = now.astimezone(_SH_TZ)
+    market = live_trade_config.get("market")
+    local_now = now.astimezone(market_timezone(market))
     now_hhmm = local_now.strftime("%H:%M")
     trade_date = local_now.date().isoformat()
 
-    if not _is_trading_day(local_now.date()):
+    if not _is_trading_day(local_now.date(), market):
         return SimulationScheduleDecision(False, "IDLE", trade_date, "non_trading_day")
 
     if not _is_enabled_session(now_hhmm, live_trade_config):
@@ -290,6 +295,7 @@ def _should_trigger(
             local_now.date(),
             started_day=started_day,
             rebalance_days=max(1, _to_int(live_trade_config.get("rebalance_days"), 3)),
+            market=market,
         ):
             return SimulationScheduleDecision(
                 False, "IDLE", trade_date, "interval_skip"
@@ -314,6 +320,8 @@ def _build_candidate_trigger_datetimes(
     buy_time = str(live_trade_config.get("buy_time") or "14:50")
     candidates: list[tuple[datetime, str]] = []
 
+    tz = market_timezone(live_trade_config.get("market"))
+
     def _append_candidate(target_hhmm: str, phase: str) -> None:
         if not _is_time_in_enabled_session(target_hhmm, live_trade_config):
             return
@@ -330,7 +338,7 @@ def _build_candidate_trigger_datetimes(
                     current_day.day,
                     hour,
                     minute,
-                    tzinfo=_SH_TZ,
+                    tzinfo=tz,
                 ),
                 phase,
             )
@@ -356,7 +364,7 @@ def _next_scheduled_trigger(
     started_day: date | None,
     horizon_days: int = 30,
 ) -> SimulationNextTrigger | None:
-    local_now = now.astimezone(_SH_TZ)
+    local_now = now.astimezone(market_timezone(live_trade_config.get("market")))
     normalized_config = _normalize_live_trade_config(live_trade_config)
     window_seconds = max(
         30, _to_int(normalized_config.get("trigger_window_seconds"), 90)
@@ -527,7 +535,9 @@ class SimulationHostedScheduler:
         live_trade_config = _normalize_live_trade_config(
             active_data.get("live_trade_config")
         )
-        started_day = _parse_started_at(active_data.get("started_at"))
+        started_day = _parse_started_at(
+            active_data.get("started_at"), market=live_trade_config.get("market")
+        )
         decision = _should_trigger(
             now=now,
             live_trade_config=live_trade_config,

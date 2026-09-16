@@ -1,0 +1,50 @@
+{
+  "id": "us_bigcap_core",
+  "name": "美股大盘核心",
+  "description": "聚焦美股大盘蓝筹。",
+  "category": "basic",
+  "difficulty": "beginner",
+  "params": [
+    {
+      "name": "topk",
+      "description": "持仓股票总数",
+      "default": 20,
+      "min": 5,
+      "max": 100
+    },
+    {
+      "name": "n_drop",
+      "description": "每期最大替换数",
+      "default": 4,
+      "min": 0,
+      "max": 100
+    },
+    {
+      "name": "rebalance_days",
+      "description": "调仓周期（交易日）",
+      "default": 5,
+      "min": 1,
+      "max": 60
+    }
+  ],
+  "execution_defaults": {
+    "max_buy_drop": -0.03,
+    "stop_loss": -0.08
+  },
+  "live_defaults": {
+    "rebalance_days": 5,
+    "enabled_sessions": [
+      "AM"
+    ],
+    "sell_time": "15:50",
+    "buy_time": "15:58",
+    "sell_first": true
+  },
+  "live_config_tips": [
+    "大盘核心适合长持：调仓低频，注意汇率对冲需求。",
+    "时间均为美东钟点（平台自动换算）。"
+  ],
+  "markets": [
+    "us_stock"
+  ]
+}

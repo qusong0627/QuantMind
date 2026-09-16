@@ -76,15 +76,23 @@ class ResolvedFill:
 _SH_TZ = ZoneInfo("Asia/Shanghai")
 
 
-def _resolve_match_session(now: datetime | None = None) -> str:
+def _resolve_match_session(now: datetime | None = None, market: Any = "CN") -> str:
     """当前墙钟对应的撮合会话（T-P2-07：墙钟→会话的唯一推导点）。
 
-    盘后固定价格窗口 15:05–15:30 → after_hours_fixed（收盘价成交、无滑点）；
-    其余 → continuous。仅墙钟驱动的模拟执行路径使用（托管/手动/挂单重试）；
+    盘后固定价格（15:05–15:30 按收盘价）是 **A股专属制度**（2026-07-06 新规）——
+    T-P3-07：仅 CN 市场启用；美股/港股等回落 regular 连续会话（本函数语义），
+    不误用收盘价固定成交。仅墙钟驱动的模拟执行路径使用（托管/手动/挂单重试）；
     replay/回测按历史日线驱动，不按墙钟，不经本函数。
     """
+    from backend.shared.market_sessions import normalize_market_key
     from backend.services.simulation.services.market_rules import session_for_time
 
+    if normalize_market_key(market) != "CN":
+        from backend.services.simulation.services.market_rules import (
+            SESSION_CONTINUOUS,
+        )
+
+        return SESSION_CONTINUOUS
     return session_for_time(now or datetime.now(_SH_TZ))
 
 
@@ -628,7 +636,7 @@ class SimulationExecutionEngine:
             stamp_duty_rate=float(settings.SIMULATION_STAMP_DUTY_RATE),
             lot_size=lot_size_for_symbol(order.symbol, rules.market),
             external_price=resolved.price,
-            session=_resolve_match_session(),
+            session=_resolve_match_session(market=rules.market.value),
         )
         mr = match_order(
             side=side,
@@ -750,7 +758,10 @@ class SimulationExecutionEngine:
             SESSION_AFTER_HOURS_FIXED,
         )
 
-        after_hours_fixed = _resolve_match_session() == SESSION_AFTER_HOURS_FIXED
+        after_hours_fixed = (
+            _resolve_match_session(market=rules.market.value)
+            == SESSION_AFTER_HOURS_FIXED
+        )
         if after_hours_fixed:
             logger.info(
                 "[RULE:AFTER-HOURS] %s 盘后固定价格会话下单（基准价 %.4f）order_type=%s",

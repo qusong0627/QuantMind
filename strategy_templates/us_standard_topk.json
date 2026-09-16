@@ -1,0 +1,50 @@
+{
+  "id": "us_standard_topk",
+  "name": "美股标准 Top-K 选股",
+  "description": "按模型预测分取 Top 40、每期替换 8 只，无风格过滤的美股对照基准。",
+  "category": "basic",
+  "difficulty": "beginner",
+  "params": [
+    {
+      "name": "topk",
+      "description": "持仓股票总数",
+      "default": 40,
+      "min": 5,
+      "max": 200
+    },
+    {
+      "name": "n_drop",
+      "description": "每期最大替换数",
+      "default": 8,
+      "min": 0,
+      "max": 200
+    },
+    {
+      "name": "rebalance_days",
+      "description": "调仓周期（交易日）",
+      "default": 3,
+      "min": 1,
+      "max": 60
+    }
+  ],
+  "execution_defaults": {
+    "max_buy_drop": -0.04,
+    "stop_loss": -0.1
+  },
+  "live_defaults": {
+    "rebalance_days": 3,
+    "enabled_sessions": [
+      "AM"
+    ],
+    "sell_time": "15:50",
+    "buy_time": "15:58",
+    "sell_first": true
+  },
+  "live_config_tips": [
+    "美股模板时间均为美东本地钟点（平台按市场时区自动换算）。",
+    "无风格约束，建议搭配止损模板控制模型失效期回撤。"
+  ],
+  "markets": [
+    "us_stock"
+  ]
+}

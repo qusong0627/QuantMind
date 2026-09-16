@@ -1,15 +1,22 @@
-import type { LiveTradeConfig, TradingSession } from '../../../types/liveTrading';
+import type { LiveTradeConfig } from '../../../types/liveTrading';
+import type { AppMarket } from '../../../store/slices/uiSlice';
+import { getMarketSessions } from '../../../config/marketConfig';
 
 export interface ValidationIssue {
   field: string;
   message: string;
 }
 
+/** HH:MM ∈ [start, end]；支持跨午夜时段（期货夜盘 21:00–02:30）。 */
 function isTimeInRange(value: string, start: string, end: string) {
-  return value >= start && value <= end;
+  if (!value || !start || !end) return false;
+  return start <= end ? value >= start && value <= end : value >= start || value <= end;
 }
 
-export function validateLiveTradeConfig(config: LiveTradeConfig): ValidationIssue[] {
+export function validateLiveTradeConfig(
+  config: LiveTradeConfig,
+  market?: AppMarket,
+): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
 
   if (config.schedule_type === 'interval' && !config.rebalance_days) {
@@ -28,26 +35,32 @@ export function validateLiveTradeConfig(config: LiveTradeConfig): ValidationIssu
     issues.push({ field: 'buy_time', message: '请选择买入时间' });
   }
 
-  if (config.sell_time && config.buy_time && config.sell_time >= config.buy_time) {
-    issues.push({ field: 'buy_time', message: '买入时间必须晚于卖出时间' });
-  }
-
   const enabledSessions = config.enabled_sessions || [];
   if (enabledSessions.length === 0) {
     issues.push({ field: 'enabled_sessions', message: '至少选择一个执行时段' });
   }
 
-  const sessionRanges = {
-    AM: ['00:00', '23:59'],
-    PM: ['00:00', '23:59'],
-    // 盘后固定价格交易（T-P2-07）：15:05–15:30，与后端 market_rules 同口径
-    AFTER_HOURS: ['15:05', '15:30'],
-  } as const satisfies Record<TradingSession, readonly [string, string]>;
+  // T-P3-07：时段表按**策略市场本地钟点**（与后端 shared/market_sessions 同口径）
+  const sessionRanges = getMarketSessions(market ?? config.market ?? 'CN').sessions;
+  const hasWrappingSession = enabledSessions.some((s) => {
+    const r = sessionRanges[s];
+    return r ? r[0] > r[1] : false;
+  });
+
+  // 跨午夜时段的买卖顺序无法用简单的字符串比较表达（如夜盘 23:00 卖 / 01:00 买）——跳过该规则
+  if (
+    !hasWrappingSession &&
+    config.sell_time &&
+    config.buy_time &&
+    config.sell_time >= config.buy_time
+  ) {
+    issues.push({ field: 'buy_time', message: '买入时间必须晚于卖出时间' });
+  }
 
   if (config.sell_time) {
     const sellValid = enabledSessions.some((session) => {
-      const [start, end] = sessionRanges[session];
-      return isTimeInRange(config.sell_time, start, end);
+      const r = sessionRanges[session];
+      return r ? isTimeInRange(config.sell_time, r[0], r[1]) : false;
     });
     if (!sellValid) {
       issues.push({ field: 'sell_time', message: '卖出时间必须落在已选执行时段内' });
@@ -56,8 +69,8 @@ export function validateLiveTradeConfig(config: LiveTradeConfig): ValidationIssu
 
   if (config.buy_time) {
     const buyValid = enabledSessions.some((session) => {
-      const [start, end] = sessionRanges[session];
-      return isTimeInRange(config.buy_time, start, end);
+      const r = sessionRanges[session];
+      return r ? isTimeInRange(config.buy_time, r[0], r[1]) : false;
     });
     if (!buyValid) {
       issues.push({ field: 'buy_time', message: '买入时间必须落在已选执行时段内' });
@@ -74,4 +87,3 @@ export function validateLiveTradeConfig(config: LiveTradeConfig): ValidationIssu
 
   return issues;
 }
-

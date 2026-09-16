@@ -833,6 +833,7 @@ const RealTradingPage: React.FC = () => {
             <LiveTradeConfigWizard
                 open={wizardOpen}
                 mode={wizardMode}
+                market={currentMarket}
                 strategyId={wizardStrategy?.id || ''}
                 strategyName={wizardStrategy?.name || ''}
                 strategyDefaults={wizardStrategy ? {

@@ -2,7 +2,7 @@ export type DeployMode = 'REAL' | 'SHADOW' | 'SIMULATION';
 
 export type ScheduleType = 'interval' | 'weekly';
 export type TradeWeekday = 'MON' | 'TUE' | 'WED' | 'THU' | 'FRI';
-export type TradingSession = 'AM' | 'PM' | 'AFTER_HOURS';
+export type TradingSession = 'AM' | 'PM' | 'AFTER_HOURS' | 'NIGHT';
 export type LiveOrderType = 'LIMIT' | 'MARKET';
 
 export interface ExecutionConfig {
@@ -11,6 +11,8 @@ export interface ExecutionConfig {
 }
 
 export interface LiveTradeConfig {
+  /** 策略市场（T-P3-07：时段按市场本地钟点解释；缺省 CN） */
+  market?: 'CN' | 'US' | 'HK' | 'CRYPTO' | 'FUTURES';
   rebalance_days?: 1 | 3 | 5 | 10 | 20;
   schedule_type: ScheduleType;
   trade_weekdays?: TradeWeekday[];

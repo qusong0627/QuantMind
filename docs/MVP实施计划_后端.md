@@ -13,7 +13,7 @@
 | P0 止血+维护基建 | 10/10 ✅ | 安全问题清零；体检脚本可跑；回归进 CI |
 | P1 契约化 | 6/6 ✅ | 四契约落地；交易台数字可下钻 |
 | P2 执行统一 | 7/7 ✅ | 回测-模拟一致性 diff=0（执行层，含真实数据）；盘后固定价格窗口；成交落账闭环+影子对照 |
-| P3 策略收敛 | 3/6（+T-P3-06 模板库专业化） | 策略全生命周期 E2E |
+| P3 策略收敛 | 4/7（+T-P3-07 市场时段参数化+美股模板） | 策略全生命周期 E2E |
 | P4 选股收敛+评估 | 0/6 | Scanner 替换旧链；体检九项上线 |
 | P5+ | — | 见主文档 §12.2 总表（P5 后进入下个迭代再细化） |
 
@@ -474,6 +474,35 @@
   6/6（含真库 E2E：版本递增/参数锁/迁移矩阵/删除守卫/归档清理）；受影响套件 91/91；
   `backend/tests` 全量 **1985 passed**（上批基线 1957，+28、零新增失败）；`backend/shared/tests`
   18（修复 6 条旧红，剩 1 条 request_logging 预存在红）；services/tests 591 与基线一致。
+
+### T-P3-07 市场时段参数化 + 美股模板系列（缺口解锁）✅
+**背景**：T-P3-06 记录的缺口"美股/期货模板系列为零"，阻塞项 = 时段校验/调度为 A 股写死钟点。
+**设计决策（关键口径）**：**live_trade_config 的时间一律为策略市场本地时钟**——A股 "14:45"=北京、
+美股 "15:50"=美东、期货夜盘 "01:30"=北京。本地钟点不随夏令时漂移（校验零 DST 复杂度），
+调度器按市场时区换算"现在"（夏令时由 zoneinfo 吸收）。
+**落地（2026-09-16）**：
+- **唯一实现 `backend/shared/market_sessions.py`**（纯函数）：五市场时段表（CN 含盘后固定价格 15:05–15:30
+  与 market_rules 常量同步断言守护；US 常规 09:30–16:00 + 盘后 16:00–20:00；HK 09:30–12:00/13:00–16:00；
+  FUTURES 日盘 09:00–15:00 + 夜盘 21:00–02:30（跨午夜，简化口径）；CRYPTO 7×24）+ 市场时区
+  （Asia/Shanghai · Asia/Hong_Kong · America/New_York）+ 交易日历映射（XSHG/XHKG/XNYS）+ 市场键归一
+  （a_share/us_stock/hong_kong… 未知保守回落 CN）+ 跨午夜 in_session_hhmm。
+- **消费方全链市场参数化**：实盘配置校验（session_ranges_local + 跨午夜支持）；托管调度器
+  （_should_trigger/_next_scheduled_trigger/_parse_started_at 全部按市场时区；交易日/调仓日指数按市场
+  日历 XNYS/XHKG/XSHG）；撮合会话推导 `_resolve_match_session(market=…)`——**盘后固定价格仅 CN 启用**
+  （美股/港股回落 regular，不误用收盘价固定成交）。
+- **美股模板系列 ×9**（us_standard_topk / bigcap_core / weighted_core / alpha_weighted / momentum /
+  adaptive / stop_loss / ls_topk / **extended_hours**）：ET 本地钟 live_defaults（收盘前 15:50/15:58；
+  extended_hours 演示盘后 19:50/19:58 时段）+ 专业文档（汇率/PDT/盘后流动性提示）+ execution_defaults。
+- **前端**：marketConfig 增时段表（与后端同口径镜像）+ 时钟口径标签；LiveTradeConfigForm/Wizard/
+  校验函数市场驱动（时段按钮/默认时点/区间钳制/跨午夜放宽）；RealTradingPage 传当前市场；
+  TradingSession 词表加 NIGHT；**已构建部署**（main-hd9YImQB.js）。
+- **证据**：`test_market_sessions.py` **29/29**（含 US 夏令时/冬令时换算、期货跨午夜、调度门、
+  美股触发链北京 03:50→美东 15:50、实盘校验按市场钟）；模板三套件 28/28；AST 闸门 **95/95**；
+  backend/tests 全量 **2021 passed**（上批基线 1991，+30，零新增失败）；services/tests 591 与基线一致；
+  实机重启干净 + 美股触发链冒烟通过。
+- **记录在案**：期货夜盘为简化口径（商品差异化时段待品种级规则）；美股 REAL 通道（tiger/ib）的时段
+  校验与 PDT 限制待通道核实后接入（当前 fail-closed 仅模拟）。
+
 
 - **T-P3-03** 旧 5 格式 → 2 格式转换器/下架清单
 - **T-P3-04** AI-IDE 接入统一回测（结果落库 + 触发 verified）

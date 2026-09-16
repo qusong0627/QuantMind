@@ -205,7 +205,7 @@ def test_execute_from_bar_passes_session_to_matcher():
     src = (_BACKEND / "services/simulation/services/execution_engine.py").read_text(
         encoding="utf-8"
     )
-    assert "session=_resolve_match_session()" in src
+    assert "session=_resolve_match_session(market=rules.market.value)" in src
 
 
 @pytest.mark.unit
@@ -370,7 +370,11 @@ def test_mixed_pm_and_after_hours_sessions_allowed_for_simulation():
 
 @pytest.mark.unit
 def test_after_hours_rule_source_has_single_definition():
-    """防第二实现：盘后时段常量只在 market_rules 定义（源码级断言）。"""
+    """防第二实现（T-P2-07 + T-P3-07）：时段常量只在 market_rules 定义。
+
+    消费链：撮合会话推导经 market_rules；调度会话门与实盘校验经 shared/market_sessions
+    的时段表（其 CN AFTER_HOURS 由 test_market_sessions 的同步断言守护）。
+    """
     engine_src = (
         _BACKEND / "services/simulation/services/execution_engine.py"
     ).read_text(encoding="utf-8")
@@ -382,4 +386,6 @@ def test_after_hours_rule_source_has_single_definition():
     ).read_text(encoding="utf-8")
     for src in (engine_src, scheduler_src, utils_src):
         assert not re.search(r"15,\s*5\)|15,\s*30\)", src), "出现盘后时段常量副本"
-        assert "market_rules" in src
+    assert "market_rules" in engine_src
+    assert "market_sessions" in scheduler_src
+    assert "market_sessions" in utils_src

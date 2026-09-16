@@ -1,0 +1,51 @@
+{
+  "id": "us_extended_hours",
+  "name": "美股盘后延长时段",
+  "description": "标准 Top 30 选股，但调仓落在**盘后延长时段**（16:00–20:00 美东）。",
+  "category": "advanced",
+  "difficulty": "advanced",
+  "params": [
+    {
+      "name": "topk",
+      "description": "持仓股票总数",
+      "default": 30,
+      "min": 5,
+      "max": 100
+    },
+    {
+      "name": "n_drop",
+      "description": "每期最大替换数",
+      "default": 6,
+      "min": 0,
+      "max": 100
+    },
+    {
+      "name": "rebalance_days",
+      "description": "调仓周期（交易日）",
+      "default": 3,
+      "min": 1,
+      "max": 60
+    }
+  ],
+  "execution_defaults": {
+    "max_buy_drop": -0.04,
+    "stop_loss": -0.08
+  },
+  "live_defaults": {
+    "rebalance_days": 3,
+    "enabled_sessions": [
+      "AFTER_HOURS"
+    ],
+    "sell_time": "19:50",
+    "buy_time": "19:58",
+    "sell_first": true
+  },
+  "live_config_tips": [
+    "盘后时段流动性较薄、点差更宽；模拟盘按日线收盘口径成交，与真实盘后成交存在差异。",
+    "盘后实盘通道待核实（与 A 股盘后固定价格同理 fail-closed），当前仅模拟盘支持。",
+    "时间均为美东钟点（平台自动换算）。"
+  ],
+  "markets": [
+    "us_stock"
+  ]
+}

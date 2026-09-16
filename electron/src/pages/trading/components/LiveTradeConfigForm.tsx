@@ -1,5 +1,7 @@
 import React from 'react';
 import type { ExecutionConfig, LiveTradeConfig, TradeWeekday, TradingSession } from '../../../types/liveTrading';
+import type { AppMarket } from '../../../store/slices/uiSlice';
+import { getMarketSessionDefaults, getMarketSessions } from '../../../config/marketConfig';
 import type { ValidationIssue } from '../utils/liveTradeConfigValidation';
 import {
   StockPoolSelectField,
@@ -7,6 +9,8 @@ import {
 } from '../../../components/backtest/StockPoolSelectField';
 
 type Props = {
+  /** 策略市场（T-P3-07：时段按市场本地钟点解释；缺省 CN 保持存量语义） */
+  market?: AppMarket;
   executionConfig: ExecutionConfig;
   liveTradeConfig: LiveTradeConfig;
   onExecutionConfigChange: (val: ExecutionConfig) => void;
@@ -15,47 +19,37 @@ type Props = {
 };
 
 const WEEKDAYS: TradeWeekday[] = ['MON', 'TUE', 'WED', 'THU', 'FRI'];
-const SESSIONS: TradingSession[] = ['AM', 'PM', 'AFTER_HOURS'];
 
-const SESSION_LABELS: Record<TradingSession, string> = {
-  AM: '上午',
-  PM: '下午',
-  AFTER_HOURS: '盘后',
-};
+type SessionRanges = Record<string, [string, string]>;
 
-const SESSION_RANGES: Record<TradingSession, [string, string]> = {
-  AM: ['09:00', '11:30'],
-  PM: ['13:00', '15:00'],
-  // 盘后固定价格交易（T-P2-07）：15:05–15:30，与后端 market_rules 同口径
-  AFTER_HOURS: ['15:05', '15:30'],
-};
+/** HH:MM 是否落在 [start, end]；支持跨午夜时段（如期货夜盘 21:00–02:30）。 */
+function isTimeInRange(time: string, start: string, end: string): boolean {
+  if (!time || !start || !end) return false;
+  return start <= end ? time >= start && time <= end : time >= start || time <= end;
+}
 
-const SESSION_DEFAULTS: Record<string, { sell_time: string; buy_time: string }> = {
-  AM: { sell_time: '09:00', buy_time: '09:05' },
-  PM: { sell_time: '14:30', buy_time: '14:45' },
-  AFTER_HOURS: { sell_time: '15:05', buy_time: '15:10' },
-  'AM,PM': { sell_time: '09:00', buy_time: '09:05' },
-  // 排序键为 [...next].sort().join(',')：AFTER_HOURS 因字典序排在最前
-  'AFTER_HOURS,AM': { sell_time: '09:00', buy_time: '09:05' },
-  'AFTER_HOURS,PM': { sell_time: '14:30', buy_time: '14:45' },
-  'AFTER_HOURS,AM,PM': { sell_time: '09:00', buy_time: '09:05' },
-};
-
-function isTimeInSessions(time: string, sessions: TradingSession[]): boolean {
+function isTimeInSessions(time: string, sessions: TradingSession[], ranges: SessionRanges): boolean {
   return sessions.some((s) => {
-    const [start, end] = SESSION_RANGES[s];
-    return time >= start && time <= end;
+    const r = ranges[s];
+    return r ? isTimeInRange(time, r[0], r[1]) : false;
   });
 }
 
-function sessionTimeBounds(sessions: TradingSession[]): { min: string; max: string } {
-  const ranges = (SESSIONS.filter((s) => sessions.includes(s))).map((s) => SESSION_RANGES[s]);
-  if (ranges.length === 0) {
+function sessionTimeBounds(
+  sessions: TradingSession[],
+  ranges: SessionRanges,
+): { min?: string; max?: string } {
+  const picked = sessions.map((s) => ranges[s]).filter(Boolean) as [string, string][];
+  if (picked.length === 0) {
     return { min: '09:00', max: '15:30' };
   }
+  // 含跨午夜时段时不下发 min/max 钳制（浏览器 time 输入不支持环绕区间）
+  if (picked.some(([start, end]) => start > end)) {
+    return {};
+  }
   return {
-    min: ranges.map(([start]) => start).sort()[0],
-    max: ranges.map(([, end]) => end).sort().slice(-1)[0],
+    min: picked.map(([start]) => start).sort()[0],
+    max: picked.map(([, end]) => end).sort().slice(-1)[0],
   };
 }
 
@@ -70,6 +64,7 @@ const SectionTitle: React.FC<{ children: React.ReactNode }> = ({ children }) => 
 );
 
 const LiveTradeConfigForm: React.FC<Props> = ({
+  market = 'CN',
   executionConfig,
   liveTradeConfig,
   onExecutionConfigChange,
@@ -106,7 +101,12 @@ const LiveTradeConfigForm: React.FC<Props> = ({
       }
     : null;
 
-  const timeBounds = sessionTimeBounds(liveTradeConfig.enabled_sessions);
+  const marketSessions = getMarketSessions(market);
+  const sessionRanges: SessionRanges = marketSessions.sessions;
+  const SESSIONS = Object.keys(marketSessions.sessions) as TradingSession[];
+  const SESSION_LABELS = marketSessions.sessionLabels as Record<string, string>;
+  const sessionDefaults = getMarketSessionDefaults(market);
+  const timeBounds = sessionTimeBounds(liveTradeConfig.enabled_sessions, sessionRanges);
 
   return (
     <div className="grid grid-cols-1 md:grid-cols-[minmax(0,1fr)_168px] gap-2.5 items-start">
@@ -178,7 +178,10 @@ const LiveTradeConfigForm: React.FC<Props> = ({
           </div>
 
           <div className="mt-2 flex flex-wrap items-center gap-2">
-            <span className="text-[11px] text-gray-500 shrink-0">执行时段</span>
+            <span className="text-[11px] text-gray-500 shrink-0">
+              执行时段
+              <span className="text-gray-400">（{marketSessions.timezoneLabel}）</span>
+            </span>
             {SESSIONS.map((session) => {
               const selected = liveTradeConfig.enabled_sessions.includes(session);
               return (
@@ -196,12 +199,15 @@ const LiveTradeConfigForm: React.FC<Props> = ({
 
                     const patch: Partial<LiveTradeConfig> = { enabled_sessions: next };
                     if (next.length > 0) {
-                      const key = [...next].sort().join(',');
-                      const defaults = SESSION_DEFAULTS[key] || SESSION_DEFAULTS['PM'];
-                      if (!isTimeInSessions(liveTradeConfig.sell_time, next)) {
+                      const sorted = [...next].sort();
+                      const primary = sorted.find((s) => sessionDefaults[s]) || sorted[0];
+                      const defaults =
+                        sessionDefaults[primary] ||
+                        Object.values(sessionDefaults)[0] || { sell_time: '14:30', buy_time: '14:45' };
+                      if (!isTimeInSessions(liveTradeConfig.sell_time, next, sessionRanges)) {
                         patch.sell_time = defaults.sell_time;
                       }
-                      if (!isTimeInSessions(liveTradeConfig.buy_time, next)) {
+                      if (!isTimeInSessions(liveTradeConfig.buy_time, next, sessionRanges)) {
                         patch.buy_time = defaults.buy_time;
                       }
                       const newSell = patch.sell_time ?? liveTradeConfig.sell_time;
@@ -222,7 +228,7 @@ const LiveTradeConfigForm: React.FC<Props> = ({
               <span className="text-[10px] text-gray-400">
                 {liveTradeConfig.enabled_sessions
                   .sort()
-                  .map((s) => `${SESSION_RANGES[s][0]}–${SESSION_RANGES[s][1]}`)
+                  .map((s) => `${sessionRanges[s][0]}–${sessionRanges[s][1]}`)
                   .join(' / ')}
               </span>
             )}
@@ -239,7 +245,7 @@ const LiveTradeConfigForm: React.FC<Props> = ({
               <div className="mb-0.5 text-[11px] text-gray-500">卖出</div>
               <input
                 type="time"
-                className={`${controlClassName} h-8 ${!isTimeInSessions(liveTradeConfig.sell_time, liveTradeConfig.enabled_sessions) ? 'border-red-500 bg-red-50' : ''}`}
+                className={`${controlClassName} h-8 ${!isTimeInSessions(liveTradeConfig.sell_time, liveTradeConfig.enabled_sessions, sessionRanges) ? 'border-red-500 bg-red-50' : ''}`}
                 value={liveTradeConfig.sell_time}
                 min={timeBounds.min}
                 max={timeBounds.max}
@@ -254,7 +260,7 @@ const LiveTradeConfigForm: React.FC<Props> = ({
               <div className="mb-0.5 text-[11px] text-gray-500">买入</div>
               <input
                 type="time"
-                className={`${controlClassName} h-8 ${!isTimeInSessions(liveTradeConfig.buy_time, liveTradeConfig.enabled_sessions) ? 'border-red-500 bg-red-50' : ''}`}
+                className={`${controlClassName} h-8 ${!isTimeInSessions(liveTradeConfig.buy_time, liveTradeConfig.enabled_sessions, sessionRanges) ? 'border-red-500 bg-red-50' : ''}`}
                 value={liveTradeConfig.buy_time}
                 min={timeBounds.min}
                 max={timeBounds.max}

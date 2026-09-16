@@ -1,0 +1,64 @@
+{
+  "id": "us_ls_topk",
+  "name": "美股多空 TopK",
+  "description": "做多高分 Top 50、同时做空低分 Top 50 的市场中性配置。",
+  "category": "advanced",
+  "difficulty": "advanced",
+  "params": [
+    {
+      "name": "topk",
+      "description": "多头持仓数",
+      "default": 50,
+      "min": 5,
+      "max": 200
+    },
+    {
+      "name": "short_topk",
+      "description": "空头持仓数",
+      "default": 50,
+      "min": 5,
+      "max": 200
+    },
+    {
+      "name": "long_exposure",
+      "description": "多头敞口",
+      "default": 1.0,
+      "min": 0.0,
+      "max": 2.0
+    },
+    {
+      "name": "short_exposure",
+      "description": "空头敞口",
+      "default": 1.0,
+      "min": 0.0,
+      "max": 2.0
+    },
+    {
+      "name": "rebalance_days",
+      "description": "调仓周期（交易日）",
+      "default": 5,
+      "min": 1,
+      "max": 60
+    }
+  ],
+  "execution_defaults": {
+    "max_buy_drop": -0.04,
+    "stop_loss": -0.08
+  },
+  "live_defaults": {
+    "rebalance_days": 5,
+    "enabled_sessions": [
+      "AM"
+    ],
+    "sell_time": "15:50",
+    "buy_time": "15:58",
+    "sell_first": true
+  },
+  "live_config_tips": [
+    "空头腿依赖券源与借券费率，实盘前先在券商端核实可用性。",
+    "时间均为美东钟点（平台自动换算）。"
+  ],
+  "markets": [
+    "us_stock"
+  ]
+}
