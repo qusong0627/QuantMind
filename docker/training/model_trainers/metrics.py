@@ -183,7 +183,7 @@ def compute_eval_report(
         spread = spread.clip(-0.05, 0.05)
         stats = _series_stats(spread)
         cum = (1.0 + spread).cumprod() - 1.0
-        max_dd = float((cum - cum.cummax()).min()) if not cum.empty else None
+        max_dd = float((cum / cum.cummax() - 1.0).min()) if not cum.empty else None  # 相对回撤
         ann_ret = None
         ann_vol = None
         sharpe = None
