@@ -321,6 +321,8 @@ class QlibBacktestResult(BaseModel):
     style_attribution: dict[str, Any] | None = None
     rebalance_suggestions: list[RebalanceInstruction] | None = None
     advanced_stats: dict[str, Any] | None = None
+    # T-P4-06：回测体检报告（九项检验 + 四分类判定，回测完成后自动生成；证据卡展示）
+    health: dict[str, Any] | None = None
 
     execution_time: float | None = None
     error_message: str | None = None

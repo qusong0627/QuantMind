@@ -217,6 +217,45 @@ async def start_trading(
                 gate_ok, gate_reason = can_start(detail.get("status"), mode)
                 if not gate_ok:
                     raise HTTPException(status_code=400, detail=gate_reason)
+
+                # T-P4-06 ②：晋级门禁（T-P3-05 门槛总表）——回测体检须 A/B；
+                # 无体检记录/L（运气嫌疑）/E（证据不足）不得晋级。
+                # 应急开关：HEALTH_GATE_ENABLED=false 全局关闭（默认开）。
+                from backend.shared.backtest_health import (
+                    gate_enabled,
+                    latest_strategy_health,
+                    latest_user_tracking_error,
+                    promotion_gate,
+                    sim_trading_days_since,
+                )
+
+                if gate_enabled() and strategy_id:
+                    health = await latest_strategy_health(
+                        strategy_id,
+                        tenant_id=resolved_tenant_id,
+                        user_id=resolved_user_id,
+                    )
+                    gate_sim_days = None
+                    gate_tracking_error = None
+                    if mode == "REAL":
+                        gate_sim_days = sim_trading_days_since(
+                            redis, resolved_tenant_id, resolved_user_id, strategy_id
+                        )
+                        gate_tracking_error = latest_user_tracking_error(
+                            redis, resolved_user_id
+                        )
+                    health_ok, health_note = promotion_gate(
+                        health,
+                        mode=mode,
+                        sim_trading_days=gate_sim_days,
+                        tracking_error=gate_tracking_error,
+                    )
+                    if not health_ok:
+                        raise HTTPException(status_code=400, detail=health_note)
+                    logger.info(
+                        "[Lifecycle] 晋级门禁通过 strategy=%s mode=%s：%s",
+                        strategy_id, mode, health_note,
+                    )
         elif strategy_file:
             strategy_name = strategy_file.filename or strategy_name
 
@@ -440,6 +479,11 @@ async def start_trading(
             user_id=resolved_user_id,
             lifecycle_status="SIM" if mode == "SIMULATION" else "LIVE",
         )
+        # T-P3-05 LIVE 门槛：SIM 首启时间戳（NX 幂等，保留最早；LIVE 晋级需 ≥20 交易日）
+        if mode == "SIMULATION" and strategy_id:
+            from backend.shared.backtest_health import stamp_sim_start
+
+            stamp_sim_start(redis, resolved_tenant_id, resolved_user_id, strategy_id)
 
         # 5. 首次启动 Bootstrap：不限时、按最新价、用真实推理立即跑一遍
         # 目的：让用户启动后立刻看到策略在真实运行（等价于手动任务），后续再按

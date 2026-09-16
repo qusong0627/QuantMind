@@ -499,6 +499,7 @@ async def _execute_and_persist(
                 ),
                 config=request_dict,
                 result=result,
+                strategy_id=getattr(request, "strategy_id", None),
             )
         except Exception as exc:  # noqa: BLE001
             task_logger.error(

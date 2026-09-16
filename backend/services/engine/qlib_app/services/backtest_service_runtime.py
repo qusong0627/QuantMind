@@ -905,6 +905,7 @@ class QlibBacktestServiceRuntimeMixin(QlibBacktestServiceQueryMixin):
                     completed_at=result.completed_at,
                     config=self._build_config_payload(request, signal_meta=signal_meta),
                     result=result,
+                    strategy_id=getattr(request, "strategy_id", None),
                 )
             await self._notify_progress(
                 backtest_id,

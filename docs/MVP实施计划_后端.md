@@ -13,8 +13,8 @@
 | P0 止血+维护基建 | 10/10 ✅ | 安全问题清零；体检脚本可跑；回归进 CI |
 | P1 契约化 | 6/6 ✅ | 四契约落地；交易台数字可下钻 |
 | P2 执行统一 | 7/7 ✅ | 回测-模拟一致性 diff=0（执行层，含真实数据）；盘后固定价格窗口；成交落账闭环+影子对照 |
-| P3 策略收敛 | 6/7（余 T-P3-05 门槛总表，依赖 P4 体检） | 策略全生命周期 E2E |
-| P4 选股收敛+评估 | 5/6（T-P4-05 五卡 + 体检九项已全落地；余 T-P4-06 三处接入） | Scanner 替换旧链；体检九项上线 |
+| P3 策略收敛 | 7/7 ✅（T-P3-05 门槛总表随 T-P4-06 体检接入定稿） | 策略全生命周期 E2E |
+| P4 选股收敛+评估 | 6/6 ✅（五卡 + 体检九项 + 三处接入全落地） | Scanner 替换旧链；体检九项上线 |
 | P5+ | — | 见主文档 §12.2 总表（P5 后进入下个迭代再细化） |
 
 ---
@@ -540,9 +540,22 @@
   SIM 不降级、不存在 False、幂等；executor 接线源断言）；backend/tests 全量 **2023 passed**
   （上批 2021，+2，零新增失败）。
 
-### T-P3-05 晋级门槛总表（唯一事实源，模型/策略/环境三方引用）
-（未开始：量化门槛 = 回测体检结论 A/B 方可进 SIM、SIM 天数/跟踪误差达标方可进 LIVE——
-依赖 T-P4-05 回测体检九项落地后定稿数字。）
+### T-P3-05 晋级门槛总表（唯一事实源，模型/策略/环境三方引用）✅
+**代码唯一事实源**：`backend/shared/backtest_health.py` 顶部常量区（改常量即改全平台口径，
+文档与测试同源断言）；门禁执行点 `real_trading_lifecycle.py /start`（`promotion_gate()` 纯函数）；
+应急开关 `HEALTH_GATE_ENABLED=false` 全局旁路（记日志）。
+
+| 晋级 | 门槛 | v1 口径与数据条件 |
+|------|------|------------------|
+| DRAFT → VERIFIED | 回测成功 + is_verified（T-P3-04 已有） | 不变 |
+| VERIFIED → SIM | **回测体检结论 ∈ {A, B}**（B 放行但门禁信息标注收益来源）；无体检记录/L（运气嫌疑）/E（证据不足）→ 拒绝 | 体检由回测完成后自动生成（T-P4-06 ①）；拒绝信息带证据与建议 |
+| SIM → LIVE | 同 SIM 门槛 + **SIM 运行 ≥ 20 交易日** + **模拟↔真单跟踪误差 ≤ 15%**（年化，TE_ann） | SIM 天数 = 首启打点起算的交易日（Redis `strategy:sim_start:{t}:{u}:{sid}`，NX 保留最早；**v1 近似**：停启不累计）；跟踪误差取影子对照日报（`te_ann_bps`），**无数据（无真单/共同日不足）→ 只提示不拦**（如实降级）；历史启动无打点 → 同上不拦 |
+
+**与设计文档差异（记录）**：设计 §6.3 示例报告把"1 年样本 → E 区"视作常态——本表据此不设
+"短样本豁免"；用户对 E 的正确解法是延长回测区间，而非绕过门禁。
+
+**测试**：`test_backtest_health.py::test_promotion_gate_verdict_matrix / _real_mode_thresholds`
+（A/B/L/E/未体检 + REAL 天数/跟踪误差矩阵）；门禁接线源断言防漂移。
 
 ### T-P3-06 策略模板库专业化补齐（用户点名 2026-09-16）✅
 **背景**：用户反馈"有些没有内容的模板需要补充、整体需专业机构级优化适配平台"。
@@ -927,10 +940,36 @@
   账户 1:CN 77.8 B（27 持仓）、999:CN 15.2 D（99.6% 现金）；eval_scores 落表核对通过。
 - **测试**：`test_eval_cards.py` **20/20**（四卡纯函数 + 两代元数据 + 双 ID/日期回看回归 + 单卡隔离 +
   worker 配置 + 接线断言 + 真库 E2E 三件）；backend/tests 全量回归见提交记录。
-- **05b 余项**：试验次数 N 自动取自参数扫描记录（R2 扫描器接线）；T-P4-06 三处接入随后。
+- **05b 余项**：试验次数 N 自动取自参数扫描记录（R2 扫描器接线）。
+
+**落地·T-P4-06 体检三处接入（2026-09-16）**：
+- **接入层唯一实现** `shared/backtest_health.py`：`evaluate_equity_curve`（曲线→九项报告，复用
+  health_check 唯一实现，禁止复制公式）· `evaluate_for_window`（按**曲线窗口**取基准/regime——
+  历史回测窗口在当下之前，不是"最近 N 天"）· `promotion_gate`（门禁纯函数）·
+  `attach_backtest_health` / `schedule_health_check`（best-effort 后台，绝不阻塞回测落库）。
+- **① 回测完成自动体检**：钩子挂 `BacktestPersistence.save_run`（status=completed 且有净值曲线）→
+  报告落 `result_json.health`（证据卡，schema 加 `health` 字段可经 API 下钻）+ 策略回测同时落
+  `eval_scores`（object_type=**strategy_health**，object_id=策略 id，inputs_version 记 backtest_id/
+  evidence_source）；`strategy_id` 从 Celery 任务与 minibt 两条持久化链透传。
+- **② 晋级门禁**：`/start` 端点 SIM/LIVE 晋级前 `promotion_gate`——**A/B 放行（B 标注收益来源）、
+  L/E/未体检拒绝**（拒绝信息带证据+建议）；REAL 另查 SIM 交易日（首启打点 NX 保留最早）与
+  影子对照跟踪误差（无数据如实降级只提示）。**注意行为变化**：存量策略未体检即启动模拟会被
+  拒绝并提示重跑回测（设计 §6.3 强制口径；`HEALTH_GATE_ENABLED=false` 应急旁路）。
+- **③ 月度复检**：`scripts/eval/health_recheck.py`（证据源优先级：活跃策略的**模拟盘真实净值**
+  → 体检留档所指回测曲线 → 皆无记 skipped 不造假）+ worker `health_recheck_service.py`
+  （每月 1–7 日窗口、3600s 轮询、`health:recheck:done:{YYYY-MM}` 幂等、心跳入注册表）+
+  `schedule_ctl run health_recheck` 手动重跑；**结论退化（A/B→L/E）→ Redis 告警键**
+  `health:recheck:alert:*`（TTL 90 天）+ ERROR 日志（通知中心接线留前端批次）。
+- **实机验收**：真类 `BacktestPersistence.save_run` 全链（合成回测行）→ result_json.health
+  **A/100**（窗口 2024-01-02→2024-10-27，真库基准+regime）+ eval_scores 留档回读 + 清理；
+  非法窗口如实降级 E + 告警日志（不造假）。
+- **测试**：`test_backtest_health.py` **9/9**（门禁矩阵/四分类确定性夹具 A·B·L·E/短曲线 None/
+  SIM 打点 NX/交易日日历回退/复检纯函数/**三处接线源守卫**/真库 E2E 两件）；
+  scheduler 注册表测试同步（health_recheck 心跳接线源 + 重跑分发表）。
+- **证据卡前端展示**（渲染 result.health）→ 归前端批次（T-FE-*）；试验次数 N 自动接线随 R2 扫描器。
 
 - **T-P4-05** 五张评分卡 + 回测体检九项（`scripts/eval/` + `eval_scores` 表）
-- **T-P4-06** 体检三处接入（回测后/晋级门禁/月度复检）
+- **T-P4-06** 体检三处接入（回测后/晋级门禁/月度复检）✅ 见上方落地记录（2026-09-16）
 
 ---
 

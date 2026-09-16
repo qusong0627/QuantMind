@@ -156,6 +156,7 @@ class BacktestPersistence:
         result: QlibBacktestResult | None,
         completed_at: datetime | None = None,
         task_id: str | None = None,
+        strategy_id: str | None = None,
     ) -> None:
         user_id = normalize_user_id(user_id)
         summary_payload, local_payload = self._split_result_payload(result)
@@ -216,6 +217,21 @@ class BacktestPersistence:
                 tenant_id=tenant_id,
                 result_file_path=result_file_path,
             )
+        # T-P4-06 ①：回测完成自动体检（九项 → result_json.health + 策略留档）。
+        # best-effort 后台执行：失败只告警，绝不阻塞回测结果落库。
+        if status == "completed" and isinstance(local_payload, dict):
+            equity_rows = local_payload.get("equity_curve")
+            if equity_rows:
+                from backend.shared.backtest_health import schedule_health_check
+
+                schedule_health_check(
+                    backtest_id=backtest_id,
+                    equity_rows=equity_rows,
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    strategy_id=strategy_id,
+                    benchmark_symbol=(config or {}).get("benchmark_symbol"),
+                )
 
     async def get_result(
         self,

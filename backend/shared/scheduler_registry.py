@@ -90,6 +90,13 @@ JOBS: tuple[JobSpec, ...] = (
         "因子/模型/策略/账户/每日选股五卡 → eval_scores 表（T-P4-05b）",
     ),
     JobSpec(
+        "health_recheck", "月度体检复检", "worker", "trade",
+        "每月首周（3600s 轮询）",
+        "HEALTH_RECHECK_ENABLED", True, 7200,
+        "python backend/scripts/schedule_ctl.py run health_recheck --date YYYY-MM-DD",
+        "SIM/LIVE 策略月度回测体检复检（T-P4-06 ③；结论退化告警）",
+    ),
+    JobSpec(
         "auto_inference", "自动推理", "celery_beat", "celery", "交易日 08:00",
         None, True, 345600,
         "python backend/scripts/schedule_ctl.py run auto_inference --date YYYY-MM-DD",

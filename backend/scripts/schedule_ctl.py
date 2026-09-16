@@ -191,6 +191,27 @@ def _run_eval_scores(date_str: str | None, force: bool) -> int:
     return 0 if summary.get("total_scored") else 1
 
 
+def _run_health_recheck(date_str: str | None, force: bool) -> int:
+    import asyncio
+
+    from backend.scripts.eval.health_recheck import run_health_recheck
+    from backend.shared.database_manager_v2 import close_database
+
+    async def _run():
+        try:
+            return await run_health_recheck(save=True)
+        finally:
+            await close_database()
+
+    summary = asyncio.run(_run())
+    print(
+        f"health_recheck {summary.get('date')}: 策略={summary.get('n_strategies')} "
+        f"复检={summary.get('ok')} 跳过={summary.get('skipped')} "
+        f"告警={summary.get('alerts')} 异常={len(summary.get('errors') or [])}"
+    )
+    return 0 if not summary.get("errors") else 1
+
+
 _RERUN_DISPATCH: dict[str, Callable[[str | None, bool], int]] = {
     # 键 = 注册表任务键（唯一标识，禁止别名——测试防止漂移）
     "sim_eod": _run_sim_eod,
@@ -199,6 +220,7 @@ _RERUN_DISPATCH: dict[str, Callable[[str | None, bool], int]] = {
     "dual_book": _run_dual_book,
     "mirror_shadow": _run_shadow_compare,
     "eval_scores": _run_eval_scores,
+    "health_recheck": _run_health_recheck,
 }
 
 

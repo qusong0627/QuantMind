@@ -59,6 +59,7 @@ async def lifespan(app: FastAPI):
     dual_book_reconcile_task = None
     shadow_compare_task = None
     eval_scores_task = None
+    health_recheck_task = None
     close_audit_task = None
     tdx_quote_feed_task = None
     tdx_l2_capture_task = None
@@ -205,6 +206,15 @@ async def lifespan(app: FastAPI):
         eval_scores_task = asyncio.create_task(
             run_eval_scores_worker(),
             name="eval-scores-worker",
+        )
+        # 月度体检复检（T-P4-06 ③）：每月首周对 SIM/LIVE 策略重跑回测体检
+        from backend.services.trade.services.health_recheck_service import (
+            run_health_recheck_worker,
+        )
+
+        health_recheck_task = asyncio.create_task(
+            run_health_recheck_worker(),
+            name="health-recheck-worker",
         )
         # 收盘清理核对：柜台委托是否全部终结、本地有无 submitted 残留
         from backend.services.trade.services.close_cleanup_audit_task import (
@@ -464,7 +474,7 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning("trade risk trigger scanner stop failed: %s", e)
 
-    for task in (scanner_task, margin_task, snapshot_task, ledger_settlement_task, manual_execution_task, sandbox_signal_task, tdx_account_sync_task, qmt_account_sync_task, qmt_exec_poller_task, mirror_queue_drainer_task, qmt_sltp_executor_task, dual_book_reconcile_task, shadow_compare_task, eval_scores_task, close_audit_task, tdx_quote_feed_task, tdx_l2_capture_task, tdx_l2_realtime_task, t1_unlock_task, corp_action_task):
+    for task in (scanner_task, margin_task, snapshot_task, ledger_settlement_task, manual_execution_task, sandbox_signal_task, tdx_account_sync_task, qmt_account_sync_task, qmt_exec_poller_task, mirror_queue_drainer_task, qmt_sltp_executor_task, dual_book_reconcile_task, shadow_compare_task, eval_scores_task, health_recheck_task, close_audit_task, tdx_quote_feed_task, tdx_l2_capture_task, tdx_l2_realtime_task, t1_unlock_task, corp_action_task):
         if task is None:
             continue
         task.cancel()

@@ -34,6 +34,8 @@ _HEARTBEAT_WIRED = {
     "mirror_shadow": "services/trade/services/shadow_compare_service.py",
     # T-P4-05b 新增（EOD 五卡评分）
     "eval_scores": "services/trade/services/eval_scores_service.py",
+    # T-P4-06 新增（月度体检复检）
+    "health_recheck": "services/trade/services/health_recheck_service.py",
 }
 
 
@@ -152,6 +154,7 @@ def test_schedule_ctl_dispatch_covers_rerun_declared_jobs():
         "mirror_shadow",
         "market_sync_dispatch",
         "eval_scores",
+        "health_recheck",
     }
 
     # 未知任务 → 退出码 2（纯函数路径，不触发真实执行）
