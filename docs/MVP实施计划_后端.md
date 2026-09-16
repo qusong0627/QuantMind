@@ -14,7 +14,7 @@
 | P1 契约化 | 6/6 ✅ | 四契约落地；交易台数字可下钻 |
 | P2 执行统一 | 7/7 ✅ | 回测-模拟一致性 diff=0（执行层，含真实数据）；盘后固定价格窗口；成交落账闭环+影子对照 |
 | P3 策略收敛 | 6/7（余 T-P3-05 门槛总表，依赖 P4 体检） | 策略全生命周期 E2E |
-| P4 选股收敛+评估 | 2/6 | Scanner 替换旧链；体检九项上线 |
+| P4 选股收敛+评估 | 3/6 | Scanner 替换旧链；体检九项上线 |
 | P5+ | — | 见主文档 §12.2 总表（P5 后进入下个迭代再细化） |
 
 ---
@@ -653,6 +653,47 @@
 - **证据**：`test_signal_thresholds.py` 7/7（含真库非空）+ 扫描器/SPI 套件 17/17 回归；
   backend/tests 全量 **2052 passed**（+7，零新增失败）。
 
+### T-P4-02 旧 `/selection` 三层过滤退休（声明 + 引导到新入口，Claude skills 同步改）✅
+> **实施细案（2026-09-16，先侦察后写）**
+> - **消费面侦察**：活消费方 = Claude skills（stock-market-analysis 全市场扫描/大盘环境、
+>   trading-agents 个股研判）经 `/api/v1/selection/daily`；前端选股面板（StockPickingPanel 等）
+>   自诊断起即死代码（无 import），本批不动、记 refactor 清单；后端另有 ai_strategy 的
+>   `/selection/parse|execute`（同名不同物，无关）。
+> - **新入口**：`GET /api/v1/scanner/daily`（engine 服务）：run_scan 服务化——date/strategy/mode
+>   参数，**身份无信号自动回落最新写入身份**（`identity_fallback` 如实标注），响应含
+>   market_state（分位口径）/entry_gate/thresholds/opportunities 证据链。
+> - **/selection/daily 恒空仓同步修复 + 退休声明**：保留响应契约（skills 平滑过渡），阈值切换
+>   到 shared/signal_thresholds（与扫描器同源）；市场状态改分位口径 `market_state_quantile`
+>   （绝对阶梯 avgTop1≥0.12/0.10/0.09/0.06 在窄分布模型下恒"熊市"）；响应加
+>   `deprecated/replacement` 字段 + HTTP `Deprecation`/`Link: successor-version` 头。
+> - **model_training 页统一**：`compute_market_signals` 的 wide-scale 探测启发（80/50/30 或
+>   绝对 0.10/0.09/0.06）替换为同一 resolve_thresholds——**页/选股链/扫描器三方口径归一**。
+> - **Claude skills 同步改**：stock-market-analysis（SKILL.md+2 参考文档）与 trading-agents
+>   SKILL.md 的 curl 示例切到新入口（注明旧路径过渡期仍可用）；双副本同步纪律（memory）。
+> - **测试**：market_state_quantile 纯函数；新端点接线/身份回落源断言；/selection 分位切换 +
+>   deprecated 字段（真库直调 handler：market_state 非"熊市"且 candidates 非空——恒空仓修复
+>   在旧面同步生效的活证据）；compute_market_signals 纯函数分位口径测试。
+
+**落地（2026-09-16）**：
+- **新入口 `GET /api/v1/scanner/daily`**（engine，已注册上线/OpenAPI 确认）：run_scan 服务化——
+  strategy/date/mode 参数、**身份无信号自动回落最新写入身份**（`identity_fallback` 如实标注）、
+  响应含 market_state/entry_gate/thresholds/opportunities 证据链。
+- **/selection/daily 恒空仓同步修复 + 退休声明**：阈值切到 shared/signal_thresholds（与扫描器同源）；
+  市场状态 `market_state_quantile`（绝对阶梯在窄分布下恒"熊市"——实机取证：修复前
+  candidates=0，修复后 5 只且 market_state 与 entry_gate 自洽）；响应 `deprecated/replacement`
+  字段 + HTTP `Deprecation`/`Link: successor-version` 头。实机直调：candidates 非空 ✓ 头齐备 ✓。
+- **三方口径归一**：`compute_market_signals`（训练页）删两套启发（wide-scale 80/50/30 与窄分布绝对
+  0.10/0.09/0.06）改同一 resolve_thresholds；扫描器 meta 的 market_state 也切分位口径
+  （实机探针抓到"entry_ok=True 但状态=熊市"的自相矛盾——已修）。
+- **Claude skills 同步迁移**（11 处）：stock-market-analysis（SKILL.md+2 REFERENCES）与
+  trading-agents SKILL.md 的调用示例→新入口，含响应结构注释更新（candidates→opportunities/
+  分位口径 market_state）；旧路径注明"弃用、过渡期仍可用"。
+- **证据**：`test_selection_retire.py` 4/4（含真库直调旧端点：非空候选+退休三件套）+
+  纯函数（窄分布不再恒空仓）；backend/tests 全量 **2055 passed**（+3，零新增失败）；
+  实机：新端点直调（错误身份回落✓5 只机会）、engine 重启后路由上线确认。
+- **记录（refactor 清单）**：前端死码选股面板（StockPickingPanel/ModelScoreResearch/
+  NegativeScorePanel + stockPickingService）随 refactor-cleaner 批次清理。
+
 - **T-P4-02** 旧 `/selection` 三层过滤退休（声明 + 引导到新入口，Claude skills 同步改）
 **落地（2026-09-16）**：
 - **SPI 唯一实现** `shared/scanner_spi.py`：`Opportunity`（sources/strength 0..1/score 0-100/horizon/
@@ -713,6 +754,47 @@
   每测试独立 loop → 残留池致同进程后续真库测试跨循环 skip）——**24/24 零 skip 确定性通过**。
 - **证据**：`test_signal_thresholds.py` 7/7（含真库非空）+ 扫描器/SPI 套件 17/17 回归；
   backend/tests 全量 **2052 passed**（+7，零新增失败）。
+
+### T-P4-02 旧 `/selection` 三层过滤退休（声明 + 引导到新入口，Claude skills 同步改）✅
+> **实施细案（2026-09-16，先侦察后写）**
+> - **消费面侦察**：活消费方 = Claude skills（stock-market-analysis 全市场扫描/大盘环境、
+>   trading-agents 个股研判）经 `/api/v1/selection/daily`；前端选股面板（StockPickingPanel 等）
+>   自诊断起即死代码（无 import），本批不动、记 refactor 清单；后端另有 ai_strategy 的
+>   `/selection/parse|execute`（同名不同物，无关）。
+> - **新入口**：`GET /api/v1/scanner/daily`（engine 服务）：run_scan 服务化——date/strategy/mode
+>   参数，**身份无信号自动回落最新写入身份**（`identity_fallback` 如实标注），响应含
+>   market_state（分位口径）/entry_gate/thresholds/opportunities 证据链。
+> - **/selection/daily 恒空仓同步修复 + 退休声明**：保留响应契约（skills 平滑过渡），阈值切换
+>   到 shared/signal_thresholds（与扫描器同源）；市场状态改分位口径 `market_state_quantile`
+>   （绝对阶梯 avgTop1≥0.12/0.10/0.09/0.06 在窄分布模型下恒"熊市"）；响应加
+>   `deprecated/replacement` 字段 + HTTP `Deprecation`/`Link: successor-version` 头。
+> - **model_training 页统一**：`compute_market_signals` 的 wide-scale 探测启发（80/50/30 或
+>   绝对 0.10/0.09/0.06）替换为同一 resolve_thresholds——**页/选股链/扫描器三方口径归一**。
+> - **Claude skills 同步改**：stock-market-analysis（SKILL.md+2 参考文档）与 trading-agents
+>   SKILL.md 的 curl 示例切到新入口（注明旧路径过渡期仍可用）；双副本同步纪律（memory）。
+> - **测试**：market_state_quantile 纯函数；新端点接线/身份回落源断言；/selection 分位切换 +
+>   deprecated 字段（真库直调 handler：market_state 非"熊市"且 candidates 非空——恒空仓修复
+>   在旧面同步生效的活证据）；compute_market_signals 纯函数分位口径测试。
+
+**落地（2026-09-16）**：
+- **新入口 `GET /api/v1/scanner/daily`**（engine，已注册上线/OpenAPI 确认）：run_scan 服务化——
+  strategy/date/mode 参数、**身份无信号自动回落最新写入身份**（`identity_fallback` 如实标注）、
+  响应含 market_state/entry_gate/thresholds/opportunities 证据链。
+- **/selection/daily 恒空仓同步修复 + 退休声明**：阈值切到 shared/signal_thresholds（与扫描器同源）；
+  市场状态 `market_state_quantile`（绝对阶梯在窄分布下恒"熊市"——实机取证：修复前
+  candidates=0，修复后 5 只且 market_state 与 entry_gate 自洽）；响应 `deprecated/replacement`
+  字段 + HTTP `Deprecation`/`Link: successor-version` 头。实机直调：candidates 非空 ✓ 头齐备 ✓。
+- **三方口径归一**：`compute_market_signals`（训练页）删两套启发（wide-scale 80/50/30 与窄分布绝对
+  0.10/0.09/0.06）改同一 resolve_thresholds；扫描器 meta 的 market_state 也切分位口径
+  （实机探针抓到"entry_ok=True 但状态=熊市"的自相矛盾——已修）。
+- **Claude skills 同步迁移**（11 处）：stock-market-analysis（SKILL.md+2 REFERENCES）与
+  trading-agents SKILL.md 的调用示例→新入口，含响应结构注释更新（candidates→opportunities/
+  分位口径 market_state）；旧路径注明"弃用、过渡期仍可用"。
+- **证据**：`test_selection_retire.py` 4/4（含真库直调旧端点：非空候选+退休三件套）+
+  纯函数（窄分布不再恒空仓）；backend/tests 全量 **2055 passed**（+3，零新增失败）；
+  实机：新端点直调（错误身份回落✓5 只机会）、engine 重启后路由上线确认。
+- **记录（refactor 清单）**：前端死码选股面板（StockPickingPanel/ModelScoreResearch/
+  NegativeScorePanel + stockPickingService）随 refactor-cleaner 批次清理。
 
 - **T-P4-02** 旧 `/selection` 三层过滤退休（声明 + 引导到新入口，Claude skills 同步改）
 - **T-P4-03** 阈值分位化全量替换 + 量纲回归测试

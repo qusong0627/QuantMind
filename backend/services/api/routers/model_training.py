@@ -127,25 +127,29 @@ def compute_market_signals(signals: list[dict[str, Any]]) -> dict[str, Any]:
         else None
     )
 
-    # 阈值自适应：融合模型分数是截面百分位 [-1,1]（高分常见 0.8+），
-    # 硬编码 0.09/0.06/0.10 会把所有行业判为强信号或全部弱信号。
-    # 检测实际分数范围，wide scale 时用 80/50 分位数作为强/弱阈值。
+    # 阈值唯一实现（T-P4-02 三方归一）：分位口径由当日分布推得
+    # （shared/signal_thresholds，与选股链/扫描器同源）——旧的 wide-scale 探测
+    # 启发（80/50/30）与窄分布下的绝对 0.10/0.09/0.06 均已删除；
+    # 窄分布模型（实测 ∈[-0.05,0.012]）此前会把一切判为"熊市/空仓"。
     _all_scores = [
         float(it["fusion_score"])
         for it in signals
         if it.get("fusion_score") is not None
     ]
-    _is_wide = bool(_all_scores) and (
-        max(_all_scores) > 0.35 or min(_all_scores) < -0.35
+    from backend.shared.signal_thresholds import (
+        DEFAULT_PROFILE,
+        resolve_thresholds,
     )
-    if _is_wide and _all_scores:
-        _sn = len(_all_scores)
-        _ss = sorted(_all_scores)
-        strong_thr = float(_ss[max(0, min(_sn - 1, int(0.80 * (_sn - 1))))])
-        entry_thr = float(_ss[max(0, min(_sn - 1, int(0.50 * (_sn - 1))))])
-        empty_thr = float(_ss[max(0, min(_sn - 1, int(0.30 * (_sn - 1))))])
+
+    _thresholds = resolve_thresholds(_all_scores, DEFAULT_PROFILE)
+    if _thresholds is not None:
+        strong_thr = _thresholds.strong_top1
+        entry_thr = _thresholds.entry_avg_top1
+        empty_thr = _thresholds.exit_avg_top1
+        _score_scale = "quantile"
     else:
         strong_thr, entry_thr, empty_thr = 0.10, 0.09, 0.06
+        _score_scale = "absolute_fallback"
     strong_industry_count = sum(
         1 for x in industry_stats if float(x["top1_score"]) >= strong_thr
     )
@@ -176,7 +180,7 @@ def compute_market_signals(signals: list[dict[str, Any]]) -> dict[str, Any]:
             "entry_threshold": entry_thr,
             "empty_threshold": empty_thr,
             "strong_threshold": strong_thr,
-            "score_scale": "wide" if _is_wide else "normal",
+            "score_scale": _score_scale,
             "label": "可入场"
             if entry_signal == "strong"
             else ("空仓观望" if entry_signal == "empty" else "谨慎"),

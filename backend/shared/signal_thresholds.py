@@ -101,3 +101,27 @@ def thresholds_to_dict(thresholds: ThresholdSet | None) -> dict[str, Any] | None
         "strong_industry_min": thresholds.strong_industry_min,
         "quantiles": dict(thresholds.quantiles),
     }
+
+
+def market_state_quantile(
+    avg_top1: float | None, thresholds: ThresholdSet | None
+) -> str:
+    """分位口径市场状态（训练页/选股链/扫描器三方共用）。
+
+    绝对阶梯（avgTop1≥0.12/0.10/0.09/0.06）在窄分布模型下会把一切判为"熊市"；
+    分位口径按当日分布定位：≥强行业分位=牛市、≥入场分位=偏强、
+    ≥入场/空仓均值=震荡、≥空仓分位=偏弱、否则熊市。
+    """
+    if thresholds is None or avg_top1 is None:
+        return "无信号"
+    value = float(avg_top1)
+    if value >= thresholds.strong_top1:
+        return "牛市"
+    if value >= thresholds.entry_avg_top1:
+        return "震荡偏强"
+    mid = (thresholds.entry_avg_top1 + thresholds.exit_avg_top1) / 2.0
+    if value >= mid:
+        return "震荡"
+    if value >= thresholds.exit_avg_top1:
+        return "震荡偏弱"
+    return "熊市"

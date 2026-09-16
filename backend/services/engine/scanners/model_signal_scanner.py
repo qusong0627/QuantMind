@@ -77,6 +77,7 @@ def scan_model_signals(
                 "trade_date": snapshot.trade_date,
                 "scanner": "model_signal",
                 "mode": "quantile",
+                "thresholds": None,
                 "picked": 0,
                 "note": "无有效分数（分位阈值不可解析）",
             }
@@ -100,7 +101,14 @@ def scan_model_signals(
     ind_top1, _ind_count, avg_top1, strong_count = _compute_industry_signals(
         snapshot.day_scores, snapshot.industry_map, strong_threshold=strong_threshold
     )
-    market_state = _market_state(avg_top1, strong_count)
+    # 市场状态口径与阈值口径一致（T-P4-02 三方归一：分位模式用分位状态，
+    # 否则窄分布模型下会出现"entry_ok=True 但状态=熊市"的自相矛盾）
+    if thresholds is not None:
+        from backend.shared.signal_thresholds import market_state_quantile
+
+        market_state = market_state_quantile(avg_top1, thresholds)
+    else:
+        market_state = _market_state(avg_top1, strong_count)
 
     ts_text = str(ts or "")
     opportunities: list[Opportunity] = []

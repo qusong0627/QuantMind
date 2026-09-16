@@ -281,6 +281,7 @@ async def auth_middleware(request: Request, call_next):
             "/api/v1/inference/",
             "/api/v1/analysis/",
             "/api/v1/selection/",
+            "/api/v1/scanner/",
             "/api/v1/strategy/",
             "/api/v1/backtest/",
             "/api/v1/rd-agent/",
@@ -360,8 +361,10 @@ except ImportError as e:
 # 3.2 选股（策略 v2.0 三层过滤）
 try:
     from backend.services.engine.routers.selection import router as selection_router
+    from backend.services.engine.routers.scanner import router as scanner_router
 
     app.include_router(selection_router, prefix="/api/v1")
+    app.include_router(scanner_router, prefix="/api/v1", tags=["Scanner"])
 except ImportError as e:
     logger.error(f"❌ Failed to load Selection router: {e}")
 

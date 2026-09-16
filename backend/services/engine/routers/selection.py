@@ -22,10 +22,16 @@ from time import time as _now
 from typing import Any
 
 import pandas as pd
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 from sqlalchemy import text
 
 from backend.shared.database_manager_v2 import get_session
+from backend.shared.signal_thresholds import (
+    DEFAULT_PROFILE,
+    market_state_quantile,
+    resolve_thresholds,
+    thresholds_to_dict,
+)
 from backend.shared.stock_utils import StockCodeUtil
 
 from backend.services.engine.auth_context import get_authenticated_identity
@@ -59,8 +65,23 @@ def _resolve_config(strategy: str) -> StrategyConfig:
     return cfg
 
 
-def _position_advice(avg_top1: float, strong_count: int) -> dict[str, str]:
-    """按仓位管理表给出仓位建议。"""
+_POSITION_BY_STATE: dict[str, tuple[str, str]] = {
+    "牛市": ("100%", "牛市，满仓可追强信号"),
+    "震荡偏强": ("50%", "震荡偏强，半仓只做强区间"),
+    "震荡": ("30%", "震荡，轻仓快进快出"),
+    "震荡偏弱": ("0-30%", "震荡偏弱，观望或极轻仓"),
+    "熊市": ("0%", "熊市，绝对空仓"),
+    "无信号": ("0%", "无信号"),
+}
+
+
+def _position_advice(
+    avg_top1: float, strong_count: int, state: str | None = None
+) -> dict[str, str]:
+    """仓位建议：分位状态优先（T-P4-02：绝对阶梯在窄分布模型下恒 0%）；无状态回落绝对口径。"""
+    if state and state in _POSITION_BY_STATE:
+        position, reason = _POSITION_BY_STATE[state]
+        return {"position": position, "reason": reason}
     if avg_top1 >= 0.12 and strong_count >= 5:
         return {"position": "100%", "reason": "牛市，满仓可追强信号"}
     if avg_top1 >= 0.10 and strong_count >= 3:
@@ -231,11 +252,19 @@ async def _load_price_flags(
 @router.get("/daily")
 async def daily_selection(
     request: Request,
+    response: Response,
     strategy: str = Query("balanced"),
     date: str | None = Query(None, description="信号交易日，缺省取最新"),
     ignore_ma20: bool = Query(False, description="勾选后忽略大盘MA20强制空仓，允许入场"),
 ):
-    """今日选股：市场状态 + 行业排行 + 候选股 + 被排除示例。"""
+    """今日选股（**已弃用**，T-P4-02）：请迁移到 GET /api/v1/scanner/daily。
+
+    返回值保持兼容（skills 平滑过渡）；阈值已切换分位口径（恒空仓修复），
+    响应附 deprecated/replacement 字段与 Deprecation/Link 头。
+    """
+    # T-P4-02 退休声明（HTTP 标准三件套）
+    response.headers["Deprecation"] = "true"
+    response.headers["Link"] = '</api/v1/scanner/daily>; rel="successor-version"'
     user_id, tenant_id = get_authenticated_identity(request)
     cfg = _resolve_config(strategy)
 
@@ -263,14 +292,34 @@ async def daily_selection(
     _num_scores = pd.to_numeric(day_scores["score"], errors="coerce")
     day_scores = day_scores[_num_scores.notna() & _num_scores.abs().ne(float("inf"))].copy()
 
+    # 2.5 T-P4-02 恒空仓修复：阈值分位化（与扫描器/训练页同源 signal_thresholds）
+    thresholds = resolve_thresholds(list(day_scores["score"]), DEFAULT_PROFILE)
+    strong_threshold = 0.10  # 分位不可解析时回落存量口径
+    if thresholds is not None:
+        from dataclasses import replace as _dc_replace
+
+        cfg = _dc_replace(
+            cfg,
+            score_min=thresholds.score_min,
+            score_max=thresholds.score_max,
+            entry_threshold=thresholds.entry_avg_top1,
+            exit_threshold=thresholds.exit_avg_top1,
+            strong_industry_min=thresholds.strong_industry_min,
+        )
+        strong_threshold = thresholds.strong_top1
+
     # 3. 行业信号
     industry_map = load_shenwan_industry_map()
     ind_top1, ind_count, avg_top1, strong_count = _compute_industry_signals(
-        day_scores, industry_map
+        day_scores, industry_map, strong_threshold=strong_threshold
     )
-    state = _market_state(avg_top1, strong_count)
+    state = (
+        market_state_quantile(avg_top1, thresholds)
+        if thresholds is not None
+        else _market_state(avg_top1, strong_count)
+    )
     index_above_ma20, index_detail = await _load_index_above_ma20(trade_date or None)
-    position = _position_advice(avg_top1, strong_count)
+    position = _position_advice(avg_top1, strong_count, state)
 
     # 4. 入场判断 + 选股
     ma20_ok = index_above_ma20 or ignore_ma20
@@ -342,10 +391,16 @@ async def daily_selection(
 
     return {
         "status": "success",
+        # T-P4-02 退休声明：迁移到新入口（响应契约保持，skills 平滑过渡）
+        "deprecated": True,
+        "replacement": "/api/v1/scanner/daily",
+        "deprecated_note": "旧选股链已弃用；阈值已切换分位口径（恒空仓修复），新入口见 replacement",
         "meta": {
             "trade_date": trade_date,
             "strategy": strategy,
             "total_signals": len(signals),
+            "threshold_mode": "quantile" if thresholds is not None else "absolute",
+            "thresholds": thresholds_to_dict(thresholds),
             "strategy_config": {
                 "entry_threshold": cfg.entry_threshold,
                 "exit_threshold": cfg.exit_threshold,
