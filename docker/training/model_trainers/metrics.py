@@ -124,6 +124,11 @@ def compute_eval_report(
         return {**report, "error": "no label column for evaluation"}
     cols = ["trade_date", "pred", ret_col] + (["split"] if "split" in pred_df.columns else [])
     df = pred_df[cols].dropna(subset=["pred", ret_col]).copy()
+    if ret_col == "label_return":
+        # 早年前复权损坏（负价/趋零）会产生 ±1000% 级的假收益（实测 4474/768 万行
+        # |ret|>50%）：多空净值 cumprod 会炸成 1e34、回撤变乱码。报告口径剔除
+        # |ret|>200% 行（0.06%），IC 统计不受影响。
+        df = df[df[ret_col].abs() <= 2.0]
     if df.empty:
         return {**report, "error": "empty predictions"}
     df["trade_date"] = pd.to_datetime(df["trade_date"])
