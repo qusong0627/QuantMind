@@ -163,8 +163,14 @@ async def test_subscription_writes_standard_keys_with_value_crosscheck(sub_env):
             age = datetime.now(tz=_CST).timestamp() - ts
             assert -60 <= age <= 300, f"{sym} 快照时间戳异常 age={age:.0f}s"
             assert snap.get("source") == "tdx_aidata_sub"
-            # 五档入 Hash
-            for f in ("bid1", "bid5", "ask1", "ask5"):
+            # 五档全景入 Hash（T-P6-03 覆盖口径：bid1-5/ask1-5 价与量全 20 字段；
+            # Inside/Outside 内外盘 TDX 推送载荷不提供——并入总线路由时另行裁定）
+            for f in (
+                *[f"bid{i}" for i in range(1, 6)],
+                *[f"bid_vol{i}" for i in range(1, 6)],
+                *[f"ask{i}" for i in range(1, 6)],
+                *[f"ask_vol{i}" for i in range(1, 6)],
+            ):
                 assert f in snap and float(snap[f]) >= 0, (sym, f, snap.get(f))
 
             # 时序点与快照内部一致（逐值对拍）

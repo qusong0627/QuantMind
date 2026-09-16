@@ -183,6 +183,11 @@ def is_silent(last_frame_ts: float | None, now: float, silence_s: float) -> bool
 # 错误码 2“股票代码错误”仅打印不抛、零帧到达；修复=热集分片多 worker，每片 ≤ 此值）
 SDK_SUBSCRIBE_MAX = 100
 
+# L0.5 归档时效闸门：只留「实时到达」的帧（age ≤ 此值）。夜间/停牌陈旧重放帧
+# （2026-09-17 实测：收盘后服务器仍以 ~10s 推前日 15:30 快照，age 数小时）不落盘——
+# 否则会污染当日分区为「迟到的一天」（如 09-16 分区只有 65 只收盘重放行）。
+ARCHIVE_MAX_AGE_S = 300.0
+
 
 def shard_symbols(
     symbols: set[str] | list[str], shard_id: int, shard_count: int
@@ -255,6 +260,7 @@ class SubscriptionEngine:
             "set_syncs": 0,
             "hot_set_size": 0,  # 全量热集规模（分片前）
             "over_cap": False,  # 本片超 SDK 上限被截断（显式降级，绝不静默）
+            "archived_stale_skipped": 0,  # 陈旧重放帧未落盘计数（ARCHIVE_MAX_AGE_S 闸门）
             "last_error": None,
         }
 
@@ -347,9 +353,16 @@ class SubscriptionEngine:
                         pass
 
         if self._archiver is not None and archived:
+            fresh_records = []
             for record in archived:
+                age = now_epoch - record["ts"]
+                if 0.0 <= age <= ARCHIVE_MAX_AGE_S:
+                    fresh_records.append(record)
+                else:
+                    self.counters["archived_stale_skipped"] += 1
+            for record in fresh_records:
                 self._archiver.append(record)
-            self.counters["archived"] += len(archived)
+            self.counters["archived"] += len(fresh_records)
         return written
 
     # ── 热集同步 ────────────────────────────────────────────────────

@@ -222,6 +222,36 @@ def test_latency_recorder_flush_failure_never_raises():
     assert rec.counters["last_error"]
 
 
+@pytest.mark.unit
+def test_latency_recorder_fresh_guard_split():
+    """新鲜档拆分：陈旧重放帧（>guard）不入验收窗口；flush 双档落键。"""
+    from backend.shared.latency_metrics import LatencyRecorder
+
+    fake = _FakeClient()
+    rec = LatencyRecorder(
+        "unit-guard", redis_client=fake, window_size=100, fresh_guard_ms=1000.0
+    )
+    rec.observe(100.0)   # 新鲜
+    rec.observe(500.0)   # 新鲜
+    rec.observe(5000.0)  # 陈旧（>guard）
+    rec.observe(-5.0)    # 未来戳：入全量、不计陈旧
+    assert rec.counters["stale"] == 1 and rec.counters["future"] == 1
+    assert rec.flush() is True
+    ops = fake.executed[0]
+    hs = {op[1]: op[2] for op in ops if op[0] == "hset"}
+    assert hs["intel:latency:unit-guard"]["samples"] == "4"
+    assert hs["intel:latency:unit-guard"]["stale_count"] == "1"
+    assert hs["intel:latency:unit-guard_fresh"]["samples"] == "2"
+    assert hs["intel:latency:unit-guard_fresh"]["p95_ms"] == "500.0"
+    # 关闭 guard（None）→ 不落新鲜档键
+    fake2 = _FakeClient()
+    rec2 = LatencyRecorder("unit-noguard", redis_client=fake2, fresh_guard_ms=None)
+    rec2.observe(123.0)
+    rec2.flush()
+    keys = {op[1] for op in fake2.executed[0] if op[0] == "hset"}
+    assert keys == {"intel:latency:unit-noguard"}
+
+
 # ── 4. preflight 门禁语义（假 Redis）────────────────────────────────
 
 

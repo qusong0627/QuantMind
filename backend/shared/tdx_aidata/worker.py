@@ -222,6 +222,7 @@ class AidataWorker:
             latency = LatencyRecorder(
                 "market_snapshot",
                 flush_seconds=float(os.getenv("QM_LATENCY_FLUSH_S", "30")),
+                fresh_guard_ms=float(os.getenv("QM_LATENCY_FRESH_GUARD_MS", "300000")),
             )
         self.latency = latency
 

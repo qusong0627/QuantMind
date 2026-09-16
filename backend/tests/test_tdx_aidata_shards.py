@@ -172,6 +172,7 @@ def test_merge_subscriptions_aggregate():
                 "redis_errors": 0,
                 "last_error": None,
                 "over_cap": False,
+                "hot_set_size": 527,  # 分片视角同值：聚合必须取 max（求和会报成 3162）
             },
             "archiver": {
                 "pending_rows": 5,
@@ -194,6 +195,7 @@ def test_merge_subscriptions_aggregate():
                 "redis_errors": 1,
                 "last_error": "boom",
                 "over_cap": True,
+                "hot_set_size": 527,
             },
             "archiver": {
                 "pending_rows": 3,
@@ -213,6 +215,7 @@ def test_merge_subscriptions_aggregate():
     assert merged["counters"]["redis_errors"] == 1
     assert merged["counters"]["last_error"] == "boom"  # 字符串取首个非空
     assert merged["counters"]["over_cap"] is True  # bool 逐片或
+    assert merged["counters"]["hot_set_size"] == 527  # 同值取 max 而非求和
     assert (
         merged["archiver"]["rows"] == 1900 and merged["archiver"]["flush_errors"] == 1
     )
@@ -301,6 +304,10 @@ async def test_two_shard_cluster_e2e():
     hot_key = f"qm:hot_set:test-{uuid.uuid4().hex[:8]}"
     os.environ["QM_HOT_SET_KEY"] = hot_key
     os.environ["TDX_AIDATA_SUBSCRIBE_ENABLED"] = "1"
+    # 测试 worker 关闭落盘/打点 sink：绝不写生产 L0.5 目录与 intel:latency
+    # （2026-09-17 实测：E2E 曾把夜间重放帧写进 /data/l05_snapshots 与生产时延窗口）
+    os.environ["QM_L05_ENABLED"] = "0"
+    os.environ["QM_LATENCY_ENABLED"] = "0"
     os.environ["QM_HOT_SET_SYNC_S"] = "2"
     cluster = TdxAiDataCluster(shard_count=2, base_socket=base_socket)
     try:
@@ -348,6 +355,8 @@ async def test_two_shard_cluster_e2e():
         os.environ.pop("QM_HOT_SET_KEY", None)
         os.environ.pop("TDX_AIDATA_SUBSCRIBE_ENABLED", None)
         os.environ.pop("QM_HOT_SET_SYNC_S", None)
+        os.environ.pop("QM_L05_ENABLED", None)
+        os.environ.pop("QM_LATENCY_ENABLED", None)
         try:
             r.delete(hot_key)
             r.close()

@@ -225,13 +225,18 @@ async def test_engine_push_to_l05_sink(tmp_path):
         redis_factory=None,
         archiver=archiver,
     )
-    engine.on_push(_PUSH_SAMPLE)
+    # 动态水印：样本 refresh_time 固定 15:30:53——归档时效闸门（>300s 拒收）生效后
+    # 须改为「当前时刻」才能走通落盘路径（陈旧帧拒收由下方专项测试覆盖）
+    fresh_sample = _PUSH_SAMPLE.replace(
+        "153053", datetime.now(_CST).strftime("%H%M%S")
+    )
+    engine.on_push(fresh_sample)
     # 手动 drain（redis_factory=None 时仅归档路径生效）
     engine._drain_and_write()
     assert engine.counters["archived"] == 1
     archiver.flush()
 
-    recs = parse_push_payload(_PUSH_SAMPLE)
+    recs = parse_push_payload(fresh_sample)
     push_price = float(recs[0]["price"])
     from backend.shared.tdx_aidata.collector import record_ts
 
@@ -240,6 +245,49 @@ async def test_engine_push_to_l05_sink(tmp_path):
     assert len(df) == 1
     assert float(df.iloc[0]["price"]) == pytest.approx(push_price)
     assert float(df.iloc[0]["bid1"]) == pytest.approx(40.91)
+
+
+@pytest.mark.unit
+def test_engine_archiver_skips_stale_replay_frames(tmp_path):
+    """归档时效闸门：夜间/停牌陈旧重放帧（age>300s）不落盘，显式计数。"""
+    import time
+
+    from backend.shared.l05_store import SnapshotArchiver
+    from backend.shared.tdx_aidata.collector import SubscriptionEngine
+
+    class _FakeBudget:
+        def check(self):
+            return None
+
+        def consume(self):
+            pass
+
+        def note_rate_limited(self):
+            return 60.0
+
+        def note_success(self):
+            pass
+
+    archiver = SnapshotArchiver(base_dir=str(tmp_path / "l05"))
+    engine = SubscriptionEngine(
+        sdk_subscribe=lambda codes, cb: None,
+        sdk_unsubscribe=lambda: None,
+        budget_gate=_FakeBudget(),
+        redis_factory=None,
+        archiver=archiver,
+    )
+    now = int(time.time())
+    base = {"symbol": "600036.SH", "price": 40.0, "pre_close": 39.9, "open": 40.0}
+    engine._queue.put({**base, "ts": now})          # 实时帧 → 落盘
+    engine._queue.put({**base, "ts": now - 3600})   # 1h 前重放帧 → 闸门拦下
+    engine._drain_and_write()
+    assert engine.counters["archived"] == 1
+    assert engine.counters["archived_stale_skipped"] == 1
+    archiver.flush()
+    from backend.shared.l05_store import read_day
+
+    df = read_day(datetime.fromtimestamp(now, tz=_CST).date(), base_dir=str(tmp_path / "l05"))
+    assert len(df) == 1
 
 
 # ── 6. 维护面：日列表 / 容量 / 缺失日读取 / CLI 冒烟 ────────────────

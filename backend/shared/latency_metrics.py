@@ -35,6 +35,7 @@ DEFAULT_WINDOW_SIZE = 1000
 DEFAULT_FLUSH_SECONDS = 30.0
 DEFAULT_SERIES_KEEP = 2880  # 30s × 2880 ≈ 24h
 SERIES_TTL_S = 90000  # 25h，兜底防 rank 截断失效
+DEFAULT_FRESH_GUARD_MS = 300_000.0  # 新鲜档上限：>5min 的帧是陈旧重放（非传输时延）
 
 _client: Any = None
 
@@ -82,10 +83,15 @@ class LatencyRecorder:
         flush_seconds: float = DEFAULT_FLUSH_SECONDS,
         flush_samples: int | None = None,
         series_keep: int = DEFAULT_SERIES_KEEP,
+        fresh_guard_ms: float | None = DEFAULT_FRESH_GUARD_MS,
     ) -> None:
         self.stage = str(stage)
         window_size = max(10, int(window_size))
         self._samples: deque[float] = deque(maxlen=window_size)
+        self._fresh_samples: deque[float] = deque(maxlen=window_size)
+        self.fresh_guard_ms = (
+            float(fresh_guard_ms) if fresh_guard_ms is not None else None
+        )
         self._lock = threading.Lock()
         self._redis_client = redis_client
         self.flush_seconds = float(flush_seconds)
@@ -97,6 +103,7 @@ class LatencyRecorder:
             "observed": 0,
             "rejected": 0,
             "future": 0,
+            "stale": 0,
             "flushes": 0,
             "flush_errors": 0,
             "flush_skipped": 0,
@@ -106,7 +113,12 @@ class LatencyRecorder:
     # ── 写入侧 ──────────────────────────────────────────────────────
 
     def observe(self, latency_ms: float) -> None:
-        """记录一个样本（非数/NaN/Inf 计入 rejected；负值计入 future 照常入窗）。"""
+        """记录一个样本（非数/NaN/Inf 计入 rejected；负值计入 future 照常入窗）。
+
+        双通道语义：全量 → 本 stage（端到端真相）；``0 ≤ lat ≤ fresh_guard_ms`` 的样本
+        额外入 **新鲜档**（``{stage}_fresh``）——夜盘/停牌标的的陈旧重放帧（数小时级）
+        不是传输时延，不应稀释"行情到达 <2s"验收口径（2026-09-17 实测：夜盘帧 p50≈9h）。
+        """
         try:
             value = float(latency_ms)
         except (TypeError, ValueError):
@@ -122,7 +134,12 @@ class LatencyRecorder:
             self._pending += 1
             self.counters["observed"] += 1
             if value < 0:
-                self.counters["future"] += 1
+                self.counters["future"] += 1  # 未来戳：入全量档、不算新鲜也不计陈旧
+            elif self.fresh_guard_ms is not None:
+                if value <= self.fresh_guard_ms:
+                    self._fresh_samples.append(value)
+                else:
+                    self.counters["stale"] += 1
 
     def _client(self):
         if self._redis_client is not None:
@@ -147,35 +164,57 @@ class LatencyRecorder:
     def flush(self) -> bool:
         with self._lock:
             samples = sorted(self._samples)
+            fresh = sorted(self._fresh_samples)
             observed = int(self.counters["observed"])
             future = int(self.counters["future"])
+            stale = int(self.counters["stale"])
             self._pending = 0
             self._last_flush = time.monotonic()
         if not samples:
             return False
-        stats = _stats(samples)
         now_ts = time.time()
-        payload: dict[str, Any] = {
-            **stats,
-            "flush_interval_s": round(self.flush_seconds, 1),
-            "window_size": self._samples.maxlen,
-            "total_count": observed,
-            "future_count": future,
-            "updated_at": round(now_ts, 3),
-        }
-        series_payload = json.dumps(
-            {k: payload[k] for k in ("samples", "p50_ms", "p95_ms", "max_ms", "avg_ms")},
-            ensure_ascii=False,
+
+        def _payload(block: list[float], *, count: int | None = None) -> dict[str, Any]:
+            out: dict[str, Any] = {
+                **_stats(block),
+                "flush_interval_s": round(self.flush_seconds, 1),
+                "window_size": self._samples.maxlen,
+                "updated_at": round(now_ts, 3),
+            }
+            if count is not None:
+                out["total_count"] = count
+            return out
+
+        payload = _payload(samples, count=observed)
+        payload["future_count"] = future
+        payload["stale_count"] = stale
+        fresh_payload = (
+            _payload(fresh, count=len(fresh)) if fresh and self.fresh_guard_ms is not None else None
         )
-        hash_key = f"{LATENCY_PREFIX}:{self.stage}"
-        series_key = f"{LATENCY_PREFIX}:{self.stage}:series"
+        if fresh_payload is not None:
+            fresh_payload["fresh_guard_ms"] = self.fresh_guard_ms
+
+        def _series(body: dict[str, Any]) -> str:
+            return json.dumps(
+                {k: body[k] for k in ("samples", "p50_ms", "p95_ms", "max_ms", "avg_ms")},
+                ensure_ascii=False,
+            )
+
         try:
             client = self._client()
             pipe = client.pipeline(transaction=False)
-            pipe.hset(hash_key, mapping={k: str(v) for k, v in payload.items()})
-            pipe.zadd(series_key, {series_payload: now_ts})
-            pipe.zremrangebyrank(series_key, 0, -(self.series_keep + 1))
-            pipe.expire(series_key, SERIES_TTL_S)
+
+            def _write(stage: str, body: dict[str, Any]) -> None:
+                hash_key = f"{LATENCY_PREFIX}:{stage}"
+                series_key = f"{LATENCY_PREFIX}:{stage}:series"
+                pipe.hset(hash_key, mapping={k: str(v) for k, v in body.items()})
+                pipe.zadd(series_key, {_series(body): now_ts})
+                pipe.zremrangebyrank(series_key, 0, -(self.series_keep + 1))
+                pipe.expire(series_key, SERIES_TTL_S)
+
+            _write(self.stage, payload)
+            if fresh_payload is not None:
+                _write(f"{self.stage}_fresh", fresh_payload)
             pipe.execute()
             with self._lock:
                 self.counters["flushes"] += 1
@@ -193,6 +232,7 @@ class LatencyRecorder:
         """进程内视图（worker 状态快照用）：窗口分位 + 计数，不读 Redis。"""
         with self._lock:
             samples = sorted(self._samples)
+            fresh = sorted(self._fresh_samples)
             pending = self._pending
         out: dict[str, Any] = {
             "stage": self.stage,
@@ -201,6 +241,8 @@ class LatencyRecorder:
         }
         if samples:
             out.update(_stats(samples))
+        if fresh and self.fresh_guard_ms is not None:
+            out["fresh"] = _stats(fresh)
         return out
 
 

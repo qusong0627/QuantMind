@@ -351,14 +351,21 @@ def shard_socket_path(base_socket: str, shard_id: int) -> str:
 
 
 def _sum_counters(snaps: list[dict[str, Any]]) -> dict[str, Any]:
-    """合并订阅 counters：数值求和、字符串取首个非空（last_error 等）。"""
+    """合并订阅 counters：数值求和、字符串取首个非空（last_error 等）。
+
+    ``hot_set_size`` 例外：各分片视角同值（全量热集），聚合取 **max** 而非求和
+    （否则 6 片会把 527 报成 3162——2026-09-17 首跑验收仪器实测踩到）。
+    """
     merged: dict[str, Any] = {}
     for snap in snaps:
         for key, value in (snap.get("counters") or {}).items():
             if isinstance(value, bool):
                 merged[key] = bool(merged.get(key, False)) or value
             elif isinstance(value, (int, float)):
-                merged[key] = merged.get(key, 0) + value
+                if key == "hot_set_size":
+                    merged[key] = max(merged.get(key, 0), value)
+                else:
+                    merged[key] = merged.get(key, 0) + value
             elif value is not None and not merged.get(key):
                 merged[key] = value
     return merged
