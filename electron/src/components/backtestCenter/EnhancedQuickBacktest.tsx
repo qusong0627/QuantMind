@@ -89,6 +89,16 @@ export const EnhancedQuickBacktest: React.FC = () => {
     loadSavedConfigs();
     
     // 检查是否有从策略管理中心传递过来的策略ID
+    // T-FE-11：策略模板库「立即回测」预选（模板 id → 选中对应模板）
+    const pendingTemplateId = localStorage.getItem('selected_backtest_template_id');
+    if (pendingTemplateId) {
+      localStorage.removeItem('selected_backtest_template_id');
+      try {
+        handleSelectTemplate(pendingTemplateId);
+      } catch {
+        // 模板不存在时静默忽略（不阻断页面）
+      }
+    }
     const pendingId = localStorage.getItem('selected_backtest_strategy_id');
     if (pendingId) {
       localStorage.removeItem('selected_backtest_strategy_id');

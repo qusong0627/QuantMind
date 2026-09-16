@@ -22,10 +22,10 @@ import {
     RefreshCw,
     Edit,
     Copy,
-    AlertTriangle,
-} from 'lucide-react';
+    AlertTriangle, ShieldAlert } from 'lucide-react';
 import { EvalScoreBadge } from '../shared/EvalScoreBadge';
-import { message, Modal } from 'antd';
+import { message, Modal, Popover } from 'antd';
+import { PromotionGateCard } from '../shared/PromotionGateCard';
 import { strategyManagementService } from '../../services/strategyManagementService';
 import { useBacktestCenterStore } from '../../stores/backtestCenterStore';
 import { useAppSelector } from '../../store';
@@ -244,6 +244,20 @@ export const StrategyManagementModule: React.FC = () => {
                                     <button onClick={() => handleBacktest(strategy)} className="flex items-center gap-1 px-3 py-1.5 bg-blue-50 text-blue-600 rounded-lg text-sm">
                                         <TestTube className="w-4 h-4" /> 回测验证
                                     </button>
+                                    {/* T-FE-12：晋级门槛可见——与启动端点拦截逻辑同源 */}
+                                    <Popover
+                                        trigger="click"
+                                        placement="topLeft"
+                                        content={
+                                            <div style={{ width: 380 }}>
+                                                <PromotionGateCard strategyId={String(strategy.id)} />
+                                            </div>
+                                        }
+                                    >
+                                        <button className="flex items-center gap-1 px-3 py-1.5 bg-amber-50 text-amber-700 rounded-lg text-sm">
+                                            <ShieldAlert className="w-4 h-4" /> 晋级门槛
+                                        </button>
+                                    </Popover>
                                     <button onClick={() => handleDeleteClick(strategy)} className="flex items-center gap-1 px-3 py-1.5 bg-red-50 text-red-600 rounded-lg text-sm">
                                         <Trash2 className="w-4 h-4" /> 删除
                                     </button>
