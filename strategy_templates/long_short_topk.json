@@ -48,10 +48,15 @@
       "max": 2.0
     }
   ],
-  "execution_defaults": {},
+  "execution_defaults": {
+    "max_buy_drop": -0.03,
+    "stop_loss": -0.06
+  },
   "live_defaults": {
     "rebalance_days": 3
   },
-  "live_config_tips": [],
+  "live_config_tips": [
+    "多空对照模板：A股现货无裸卖空，实盘请仅使用多头分支。"
+  ],
   "markets": []
 }

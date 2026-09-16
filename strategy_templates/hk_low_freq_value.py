@@ -1,8 +1,13 @@
-"""
-港股月频价值（港股模板）
-[Market] Hong Kong — 港股交易时段 9:30-16:00（午休 12:00-13:00），T+0，无涨跌停。
-信号 <PRED> 为平台港股模型预测分（T 日收盘生成、T+1 生效）。
-"""
+# -*- coding: utf-8 -*-
+"""港股低频价值 (HK Low-Frequency Value)
+
+[港股] 时间 9:30–16:00（午休 12:00–13:00）、T+0 回转、无涨跌停 ｜ 信号 <PRED> 为平台港股模型预测分（T 日收盘生成、T+1 生效）。
+
+核心逻辑：20 日低频调仓的价值型加权组合，吃低估值修复的长钱收益。
+调仓：每 20 个交易日 ｜ 持仓：40 只 / 单票 ≤4% ｜ 建议调仓时点：尾盘 15:50 卖出 / 15:58 买入（json live_defaults 预填）。
+参数：见同名 .json（topk / min_score / max_weight）。
+使用：AI-IDE → 策略模板 → 港股 选择本模板绑定港股模型回测；实盘策略 ID 用 sys_hk_low_freq_value。
+风险提示：港股无涨跌停、波动大于 A 股，建议结合止损模板并关注汇率与流动性风险。"""
 STRATEGY_CONFIG = {
     "class": "RedisWeightStrategy",
     "module_path": "backend.services.engine.qlib_app.utils.extended_strategies",

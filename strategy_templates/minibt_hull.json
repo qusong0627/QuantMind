@@ -4,10 +4,58 @@
   "description": "短周期 Hull 均线上穿/下穿长周期 Hull 均线,且价格在长周期均线同侧才开仓。",
   "category": "advanced",
   "difficulty": "intermediate",
-  "params": [],
-  "execution_defaults": {},
-  "live_defaults": {},
-  "live_config_tips": [],
+  "params": [
+    {
+      "name": "SYMBOL",
+      "description": "标的代码（QuantDB 前复权日线）",
+      "default": "600036"
+    },
+    {
+      "name": "LONG_HMA_PERIOD",
+      "description": "长周期 Hull 均线（趋势基准）",
+      "default": 30,
+      "min": 10,
+      "max": 120
+    },
+    {
+      "name": "SHORT_HMA_PERIOD",
+      "description": "短周期 Hull 均线（入场触发）",
+      "default": 5,
+      "min": 2,
+      "max": 30
+    },
+    {
+      "name": "SIZE",
+      "description": "每次交易股数",
+      "default": 1000,
+      "min": 100,
+      "max": 100000
+    },
+    {
+      "name": "COMMISSION",
+      "description": "双边佣金比例",
+      "default": 0.00025,
+      "min": 0.0,
+      "max": 0.003
+    }
+  ],
+  "execution_defaults": {
+    "max_buy_drop": -0.03,
+    "stop_loss": -0.08
+  },
+  "live_defaults": {
+    "rebalance_days": 3,
+    "enabled_sessions": [
+      "PM"
+    ],
+    "sell_time": "14:45",
+    "buy_time": "14:50",
+    "sell_first": true
+  },
+  "live_config_tips": [
+    "研究示例（单标的）：Hull 均线滞后小但转向快，震荡市仍有假信号，实盘仅做多。",
+    "回测口径：当根收盘价成交、无 T+1/涨跌停约束；手续费仅双边佣金。"
+  ],
   "markets": [
     "a_share"
   ],

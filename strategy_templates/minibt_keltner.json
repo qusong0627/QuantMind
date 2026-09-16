@@ -4,10 +4,79 @@
   "description": "EMA±动态 ATR 通道:价格突破上轨且短期 EMA 在上做多,跌破下轨做空;通道宽度随趋势强度自适应。",
   "category": "advanced",
   "difficulty": "advanced",
-  "params": [],
-  "execution_defaults": {},
-  "live_defaults": {},
-  "live_config_tips": [],
+  "params": [
+    {
+      "name": "SYMBOL",
+      "description": "标的代码（QuantDB 前复权日线）",
+      "default": "600036"
+    },
+    {
+      "name": "EMA_PERIOD",
+      "description": "中轨 EMA 周期",
+      "default": 8,
+      "min": 3,
+      "max": 60
+    },
+    {
+      "name": "ATR_PERIOD",
+      "description": "ATR 波动周期",
+      "default": 7,
+      "min": 3,
+      "max": 40
+    },
+    {
+      "name": "ATR_MULT",
+      "description": "通道宽度（ATR 倍数）",
+      "default": 1.5,
+      "min": 0.5,
+      "max": 4.0
+    },
+    {
+      "name": "SHORT_EMA_PERIOD",
+      "description": "短 EMA 过滤周期",
+      "default": 5,
+      "min": 2,
+      "max": 30
+    },
+    {
+      "name": "TREND",
+      "description": "趋势过滤强度（0~1）",
+      "default": 0.5,
+      "min": 0.0,
+      "max": 1.0
+    },
+    {
+      "name": "SIZE",
+      "description": "每次交易股数",
+      "default": 1000,
+      "min": 100,
+      "max": 100000
+    },
+    {
+      "name": "COMMISSION",
+      "description": "双边佣金比例",
+      "default": 0.00025,
+      "min": 0.0,
+      "max": 0.003
+    }
+  ],
+  "execution_defaults": {
+    "max_buy_drop": -0.03,
+    "stop_loss": -0.08
+  },
+  "live_defaults": {
+    "rebalance_days": 3,
+    "enabled_sessions": [
+      "PM"
+    ],
+    "sell_time": "14:45",
+    "buy_time": "14:50",
+    "sell_first": true
+  },
+  "live_config_tips": [
+    "研究示例（单标的）：肯特纳通道以波动率自适应，实盘建议突破后回踩确认再入场、仅做多。",
+    "回测口径：当根收盘价成交、无 T+1/涨跌停约束；手续费仅双边佣金。"
+  ],
   "markets": [
     "a_share"
   ],

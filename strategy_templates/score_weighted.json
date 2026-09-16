@@ -20,10 +20,15 @@
       "max": 0.2
     }
   ],
-  "execution_defaults": {},
+  "execution_defaults": {
+    "max_buy_drop": -0.03,
+    "stop_loss": -0.08
+  },
   "live_defaults": {
     "rebalance_days": 3
   },
-  "live_config_tips": [],
+  "live_config_tips": [
+    "权重分配型模板：权重 = Score/ΣScore 且单票 ≤5%。"
+  ],
   "markets": []
 }

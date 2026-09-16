@@ -4,10 +4,58 @@
   "description": "量价趋势累计线(VPT)在均线上方且放量上涨做多,放量下跌做空。",
   "category": "basic",
   "difficulty": "intermediate",
-  "params": [],
-  "execution_defaults": {},
-  "live_defaults": {},
-  "live_config_tips": [],
+  "params": [
+    {
+      "name": "SYMBOL",
+      "description": "标的代码（QuantDB 前复权日线）",
+      "default": "600036"
+    },
+    {
+      "name": "MA_PERIOD",
+      "description": "VPT 均线周期（量价趋势基准）",
+      "default": 14,
+      "min": 5,
+      "max": 60
+    },
+    {
+      "name": "VOLUME_MULT",
+      "description": "放量确认倍数（成交量 > 均量×倍数 才确认信号）",
+      "default": 1.5,
+      "min": 1.0,
+      "max": 4.0
+    },
+    {
+      "name": "SIZE",
+      "description": "每次交易股数",
+      "default": 1000,
+      "min": 100,
+      "max": 100000
+    },
+    {
+      "name": "COMMISSION",
+      "description": "双边佣金比例",
+      "default": 0.00025,
+      "min": 0.0,
+      "max": 0.003
+    }
+  ],
+  "execution_defaults": {
+    "max_buy_drop": -0.03,
+    "stop_loss": -0.08
+  },
+  "live_defaults": {
+    "rebalance_days": 3,
+    "enabled_sessions": [
+      "PM"
+    ],
+    "sell_time": "14:45",
+    "buy_time": "14:50",
+    "sell_first": true
+  },
+  "live_config_tips": [
+    "研究示例（单标的）：量价配合信号对流动性敏感，实盘建议限流动性好的标的并仅做多。",
+    "回测口径：当根收盘价成交、无 T+1/涨跌停约束；手续费仅双边佣金。"
+  ],
   "markets": [
     "a_share"
   ],

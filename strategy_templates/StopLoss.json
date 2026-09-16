@@ -27,10 +27,16 @@
       "max": 0.5
     }
   ],
-  "execution_defaults": {},
+  "execution_defaults": {
+    "max_buy_drop": -0.03,
+    "stop_loss": -0.05
+  },
   "live_defaults": {
     "rebalance_days": 3
   },
-  "live_config_tips": [],
+  "live_config_tips": [
+    "止损保护型模板：stop_loss 可按风格再收紧（平台允许 -3%~-20%）。",
+    "启动模拟/实盘后在「执行控制」可查看触发记录；触发价以实时快照为准。"
+  ],
   "markets": []
 }

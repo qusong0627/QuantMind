@@ -4,10 +4,65 @@
   "description": "近 N 日最高价差构成动态上下轨:收盘上穿买入轨做多,下穿卖出轨做空;经典日内策略的日线版。",
   "category": "advanced",
   "difficulty": "advanced",
-  "params": [],
-  "execution_defaults": {},
-  "live_defaults": {},
-  "live_config_tips": [],
+  "params": [
+    {
+      "name": "SYMBOL",
+      "description": "标的代码（QuantDB 前复权日线）",
+      "default": "600036"
+    },
+    {
+      "name": "NDAY",
+      "description": "区间窗口（N 日最高/最低计算 Range）",
+      "default": 14,
+      "min": 3,
+      "max": 60
+    },
+    {
+      "name": "K1",
+      "description": "上轨系数（开盘 + K1×Range 触发做多）",
+      "default": 0.6,
+      "min": 0.1,
+      "max": 1.5
+    },
+    {
+      "name": "K2",
+      "description": "下轨系数（开盘 − K2×Range 触发做空）",
+      "default": 0.6,
+      "min": 0.1,
+      "max": 1.5
+    },
+    {
+      "name": "SIZE",
+      "description": "每次交易股数",
+      "default": 1000,
+      "min": 100,
+      "max": 100000
+    },
+    {
+      "name": "COMMISSION",
+      "description": "双边佣金比例",
+      "default": 0.00025,
+      "min": 0.0,
+      "max": 0.003
+    }
+  ],
+  "execution_defaults": {
+    "max_buy_drop": -0.03,
+    "stop_loss": -0.08
+  },
+  "live_defaults": {
+    "rebalance_days": 3,
+    "enabled_sessions": [
+      "PM"
+    ],
+    "sell_time": "14:45",
+    "buy_time": "14:50",
+    "sell_first": true
+  },
+  "live_config_tips": [
+    "研究示例（单标的）：Dual Thrust 为日内策略的日线简化版，实盘仅做多分支可用。",
+    "回测口径：当根收盘价成交、无 T+1/涨跌停约束；手续费仅双边佣金。"
+  ],
   "markets": [
     "a_share"
   ],

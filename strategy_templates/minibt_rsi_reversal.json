@@ -4,10 +4,66 @@
   "description": "RSI 从超卖区上穿阈值做多,从超买区下穿做空;震荡市反转思路。",
   "category": "basic",
   "difficulty": "beginner",
-  "params": [],
-  "execution_defaults": {},
-  "live_defaults": {},
-  "live_config_tips": [],
+  "params": [
+    {
+      "name": "SYMBOL",
+      "description": "标的代码（QuantDB 前复权日线；支持 '600036'/'SH600036'/'600036.SH'）",
+      "default": "600036"
+    },
+    {
+      "name": "RSI_PERIOD",
+      "description": "RSI 计算周期（短周期更灵敏、信号更频繁）",
+      "default": 6,
+      "min": 2,
+      "max": 30
+    },
+    {
+      "name": "OVERBOUGHT",
+      "description": "超买阈值（RSI 下穿该值反手做空/离场）",
+      "default": 65,
+      "min": 50,
+      "max": 90
+    },
+    {
+      "name": "OVERSOLD",
+      "description": "超卖阈值（RSI 上穿该值反手做多）",
+      "default": 35,
+      "min": 10,
+      "max": 50
+    },
+    {
+      "name": "SIZE",
+      "description": "每次交易股数（A股按 100 整数倍取整）",
+      "default": 1000,
+      "min": 100,
+      "max": 100000
+    },
+    {
+      "name": "COMMISSION",
+      "description": "双边佣金比例（示例万 2.5；实盘按券商费率与印花税另计）",
+      "default": 0.00025,
+      "min": 0.0,
+      "max": 0.003
+    }
+  ],
+  "execution_defaults": {
+    "max_buy_drop": -0.03,
+    "stop_loss": -0.08
+  },
+  "live_defaults": {
+    "rebalance_days": 3,
+    "enabled_sessions": [
+      "PM"
+    ],
+    "sell_time": "14:45",
+    "buy_time": "14:50",
+    "sell_first": true
+  },
+  "live_config_tips": [
+    "研究示例（单标的）：A股现货无裸卖空，实盘请忽略做空分支只做多。",
+    "回测口径：信号当根 K 线收盘价成交，引擎无 T+1/涨跌停/整手约束，与实盘存在口径差。",
+    "手续费仅含双边佣金，未计印花税与滑点；改参数请直接编辑代码中的 STRATEGY 常量。"
+  ],
   "markets": [
     "a_share"
   ],

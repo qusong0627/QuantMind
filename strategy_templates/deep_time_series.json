@@ -20,10 +20,15 @@
       "max": 10
     }
   ],
-  "execution_defaults": {},
+  "execution_defaults": {
+    "max_buy_drop": -0.03,
+    "stop_loss": -0.08
+  },
   "live_defaults": {
     "rebalance_days": 3
   },
-  "live_config_tips": [],
+  "live_config_tips": [
+    "时序模型模板：依赖模型 .pkl 信号产物，切换模型后建议先回测验证。"
+  ],
   "markets": []
 }

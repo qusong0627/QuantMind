@@ -34,10 +34,15 @@
       "max": 1.0
     }
   ],
-  "execution_defaults": {},
+  "execution_defaults": {
+    "max_buy_drop": -0.03,
+    "stop_loss": -0.08
+  },
   "live_defaults": {
     "rebalance_days": 3
   },
-  "live_config_tips": [],
+  "live_config_tips": [
+    "趋势策略换手偏高：请关注成本占比；趋势反转期建议结合大盘状态过滤。"
+  ],
   "markets": []
 }

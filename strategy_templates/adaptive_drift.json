@@ -13,10 +13,15 @@
       "max": 100
     }
   ],
-  "execution_defaults": {},
+  "execution_defaults": {
+    "max_buy_drop": -0.03,
+    "stop_loss": -0.08
+  },
   "live_defaults": {
     "rebalance_days": 3
   },
-  "live_config_tips": [],
+  "live_config_tips": [
+    "自适应模板：宽 topk + 高 n_drop，换手偏高，注意交易成本占比。"
+  ],
   "markets": []
 }

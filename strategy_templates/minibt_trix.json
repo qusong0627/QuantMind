@@ -4,10 +4,58 @@
   "description": "三重 EMA 平滑的变动率(TRIX)上穿其信号线做多,下穿做空;过滤短线噪音。",
   "category": "advanced",
   "difficulty": "intermediate",
-  "params": [],
-  "execution_defaults": {},
-  "live_defaults": {},
-  "live_config_tips": [],
+  "params": [
+    {
+      "name": "SYMBOL",
+      "description": "标的代码（QuantDB 前复权日线）",
+      "default": "600036"
+    },
+    {
+      "name": "TRIX_PERIOD",
+      "description": "TRIX 三重指数平滑周期",
+      "default": 12,
+      "min": 5,
+      "max": 60
+    },
+    {
+      "name": "SIGNAL_PERIOD",
+      "description": "TRIX 信号线周期",
+      "default": 9,
+      "min": 3,
+      "max": 40
+    },
+    {
+      "name": "SIZE",
+      "description": "每次交易股数",
+      "default": 1000,
+      "min": 100,
+      "max": 100000
+    },
+    {
+      "name": "COMMISSION",
+      "description": "双边佣金比例",
+      "default": 0.00025,
+      "min": 0.0,
+      "max": 0.003
+    }
+  ],
+  "execution_defaults": {
+    "max_buy_drop": -0.03,
+    "stop_loss": -0.08
+  },
+  "live_defaults": {
+    "rebalance_days": 3,
+    "enabled_sessions": [
+      "PM"
+    ],
+    "sell_time": "14:45",
+    "buy_time": "14:50",
+    "sell_first": true
+  },
+  "live_config_tips": [
+    "研究示例（单标的）：TRIX 过滤噪音但滞后偏大，适合中长周期趋势，实盘仅做多。",
+    "回测口径：当根收盘价成交、无 T+1/涨跌停约束；手续费仅双边佣金。"
+  ],
   "markets": [
     "a_share"
   ],

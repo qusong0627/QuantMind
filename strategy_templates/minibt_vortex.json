@@ -4,10 +4,58 @@
   "description": "正向/负向涡旋运动比较:+VI 上穿 -VI 且大于阈值做多,反之做空。",
   "category": "advanced",
   "difficulty": "intermediate",
-  "params": [],
-  "execution_defaults": {},
-  "live_defaults": {},
-  "live_config_tips": [],
+  "params": [
+    {
+      "name": "SYMBOL",
+      "description": "标的代码（QuantDB 前复权日线）",
+      "default": "600036"
+    },
+    {
+      "name": "VI_PERIOD",
+      "description": "涡旋指标周期",
+      "default": 14,
+      "min": 5,
+      "max": 60
+    },
+    {
+      "name": "VI_THRESHOLD",
+      "description": "趋势触发阈值（VI+ 超过 VI− 且差额高于该值）",
+      "default": 1.0,
+      "min": 0.2,
+      "max": 3.0
+    },
+    {
+      "name": "SIZE",
+      "description": "每次交易股数",
+      "default": 1000,
+      "min": 100,
+      "max": 100000
+    },
+    {
+      "name": "COMMISSION",
+      "description": "双边佣金比例",
+      "default": 0.00025,
+      "min": 0.0,
+      "max": 0.003
+    }
+  ],
+  "execution_defaults": {
+    "max_buy_drop": -0.03,
+    "stop_loss": -0.08
+  },
+  "live_defaults": {
+    "rebalance_days": 3,
+    "enabled_sessions": [
+      "PM"
+    ],
+    "sell_time": "14:45",
+    "buy_time": "14:50",
+    "sell_first": true
+  },
+  "live_config_tips": [
+    "研究示例（单标的）：Vortex 交叉频繁，实盘建议提高阈值并叠加趋势过滤，仅做多。",
+    "回测口径：当根收盘价成交、无 T+1/涨跌停约束；手续费仅双边佣金。"
+  ],
   "markets": [
     "a_share"
   ],

@@ -27,7 +27,10 @@
       "max": 20
     }
   ],
-  "execution_defaults": {},
+  "execution_defaults": {
+    "max_buy_drop": -0.04,
+    "stop_loss": -0.08
+  },
   "live_defaults": {
     "rebalance_days": 5,
     "enabled_sessions": [
