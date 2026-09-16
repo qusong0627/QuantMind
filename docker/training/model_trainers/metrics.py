@@ -188,8 +188,10 @@ def compute_eval_report(
         ann_vol = None
         sharpe = None
         if not spread.empty:
-            ann_ret = float(spread.mean() * ann_days)
-            ann_vol = float(spread.std(ddof=0) * np.sqrt(ann_days))
+            # 周期年化：抽样后每点代表 h 个交易日，年化常数 = 244/h
+            periods_per_year = ann_days / h
+            ann_ret = float(spread.mean() * periods_per_year)
+            ann_vol = float(spread.std(ddof=0) * np.sqrt(periods_per_year))
             sharpe = round(ann_ret / ann_vol, 4) if ann_vol > 1e-12 else None
         report["long_short"] = {
             **stats,
