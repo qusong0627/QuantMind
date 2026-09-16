@@ -378,11 +378,17 @@ def _train_dl(
             return -self.loss_fn(pred, label)
         model_obj.metric_fn = types.MethodType(_safe_metric_fn, model_obj)
 
-    # 准备训练/验证数据
-    X_train = train_df[features]
-    y_train = train_df["label"]
-    X_val = val_df[features]
-    y_val = val_df["label"]
+    # 准备训练/验证数据：仅 flat 模型需要 X 矩阵（train_args 直接喂 (X, y)）。
+    # TS 通路走 loader，不用这两个切片——pandas 2.x 的 df[cols] 是深拷贝
+    # （实测 shares_memory=False），旧实现无条件切 train+val ≈+8GB 常驻，
+    # 把 loader 构建期峰值推到主机红线（v6 在 ALSTM 处 40GB 顶穿实证）。
+    if is_ts:
+        X_train = y_train = X_val = y_val = None
+    else:
+        X_train = train_df[features]
+        y_train = train_df["label"]
+        X_val = val_df[features]
+        y_val = val_df["label"]
 
     # Qlib TS 模型（pytorch_*_ts）的 train_epoch/test_epoch 只接受 DataLoader，
     # 且要求样本形如 [step_len, d_feat+1]（最后一列末行为 label）；
@@ -392,6 +398,10 @@ def _train_dl(
     if is_ts:
         # 单拷贝 TS 数据通路（sort/特征提取/.values/归一化/重排的 6 份整表副本
         # 全部消除，见 _build_ts_dataloader_from_frame 文档——旧链路是 DL 大表 OOM 根因）
+        # 建 loader（+6.97GB 主数组）前先归还上文预处理阶段滞留的 arena
+        from diagnostics.utils import trim_memory as _trim_pre_loader
+
+        _trim_pre_loader("before TS loader build")
         _train_loader, _feat_norm = _build_ts_dataloader_from_frame(
             train_df, features, "label",
             step_len=step_len, batch_size=batch_size, shuffle=True,
