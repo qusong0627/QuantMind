@@ -36,6 +36,7 @@ async def _scan_model_signal(
     tenant_id: str,
     user_id: str | None,
     ts: str,
+    mode: str = "quantile",
 ) -> tuple[list[Opportunity], dict[str, Any]]:
     cfg = StrategyConfig.preset(strategy)
     snapshot = await load_model_signal_snapshot(
@@ -48,7 +49,7 @@ async def _scan_model_signal(
             "picked": 0,
             "note": "无信号",
         }
-    return scan_model_signals(snapshot, cfg, ts=ts)
+    return scan_model_signals(snapshot, cfg, ts=ts, mode=mode)
 
 
 _SCANNER_DISPATCH: dict[str, Callable] = {
@@ -65,8 +66,13 @@ async def run_scan(
     prior: list[Opportunity] | None = None,
     cooldown_days: int = 1,
     now: datetime | None = None,
+    mode: str = "quantile",
 ) -> dict[str, Any]:
-    """全路批扫描（盘后）→ 合并机会池（未持久化，v1 由调用方决定去处）。"""
+    """全路批扫描（盘后）→ 合并机会池（未持久化，v1 由调用方决定去处）。
+
+    mode="quantile"（默认，T-P4-03）：阈值随当日分数分布自适应——量纲错位免疫；
+    mode="absolute"：存量绝对口径（A/B 对照与等价基线）。
+    """
     current = now or datetime.now(_SH_TZ)
     ts = current.isoformat(timespec="seconds")
     opportunities: list[Opportunity] = []
@@ -87,6 +93,7 @@ async def run_scan(
             tenant_id=tenant_id,
             user_id=user_id,
             ts=ts,
+            mode=mode,
         )
         opportunities.extend(opps)
         metas.append(meta)
@@ -99,6 +106,7 @@ async def run_scan(
     return {
         "as_of": ts,
         "strategy": strategy,
+        "mode": mode,
         "scanners_run": [m.get("scanner") for m in metas],
         "scanners_skipped": skipped,
         "meta": metas,

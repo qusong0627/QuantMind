@@ -160,6 +160,7 @@ class BacktestResult:
 def _compute_industry_signals(
     day_scores: pd.DataFrame,
     industry_map: dict[str, str],
+    strong_threshold: float = 0.10,
 ) -> tuple[dict[str, float], dict[str, int], float, int]:
     """计算单日行业信号。
 
@@ -202,8 +203,9 @@ def _compute_industry_signals(
     else:
         avg_top1 = 0.0
 
-    # 强行业数: Top1 ≥ 0.10 的行业个数
-    strong = sum(1 for v in ind_top1.values() if v >= 0.10)
+    # 强行业数: Top1 ≥ strong_threshold 的行业个数
+    # （T-P4-03：阈值可注入——分位模式传分布分位；默认 0.10 保持存量等价）
+    strong = sum(1 for v in ind_top1.values() if v >= strong_threshold)
 
     return ind_top1, ind_count, avg_top1, strong
 

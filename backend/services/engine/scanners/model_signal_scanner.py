@@ -45,13 +45,51 @@ def scan_model_signals(
     config: StrategyConfig | None = None,
     *,
     ts: str | None = None,
+    mode: str = "absolute",
+    profile: Any = None,
 ) -> tuple[list[Opportunity], dict[str, Any]]:
     """快照 → (机会列表, 批级 meta)。
 
+    mode="absolute"（默认，存量等价基线）：绝对分数阈值（[0.10,0.12] 带、0.10 强行业）；
+    mode="quantile"（T-P4-03，生产默认由 runner 指定）：阈值由当日分数分布推得
+    （shared/signal_thresholds）——**尺度等变**，量纲错位不可能再归零。
     strength = rank_pct 分位（T-P1-01 口径；缺失记 0），score = round(strength×100)；
     evidence 携带 fusion_score/industry/trend 与批级证据索引（市场状态/行业 Top1）。
     """
+    from dataclasses import replace as _replace
+
+    from backend.shared.signal_thresholds import (
+        DEFAULT_PROFILE,
+        resolve_thresholds,
+        thresholds_to_dict,
+    )
+
     cfg = config or StrategyConfig()
+    thresholds = None
+    strong_threshold = 0.10  # 存量等价默认
+    if str(mode) == "quantile":
+        scores = (
+            list(snapshot.day_scores["score"]) if not snapshot.day_scores.empty else []
+        )
+        thresholds = resolve_thresholds(scores, profile or DEFAULT_PROFILE)
+        if thresholds is None:
+            return [], {
+                "trade_date": snapshot.trade_date,
+                "scanner": "model_signal",
+                "mode": "quantile",
+                "picked": 0,
+                "note": "无有效分数（分位阈值不可解析）",
+            }
+        cfg = _replace(
+            cfg,
+            score_min=thresholds.score_min,
+            score_max=thresholds.score_max,
+            entry_threshold=thresholds.entry_avg_top1,
+            exit_threshold=thresholds.exit_avg_top1,
+            strong_industry_min=thresholds.strong_industry_min,
+        )
+        strong_threshold = thresholds.strong_top1
+
     picks = _select_stocks_daily(
         snapshot.day_scores,
         snapshot.industry_map,
@@ -60,7 +98,7 @@ def scan_model_signals(
         snapshot.history_scores,
     )
     ind_top1, _ind_count, avg_top1, strong_count = _compute_industry_signals(
-        snapshot.day_scores, snapshot.industry_map
+        snapshot.day_scores, snapshot.industry_map, strong_threshold=strong_threshold
     )
     market_state = _market_state(avg_top1, strong_count)
 
@@ -95,6 +133,8 @@ def scan_model_signals(
     meta: dict[str, Any] = {
         "trade_date": snapshot.trade_date,
         "scanner": "model_signal",
+        "mode": str(mode),
+        "thresholds": thresholds_to_dict(thresholds),
         "config": {
             "score_min": cfg.score_min,
             "score_max": cfg.score_max,

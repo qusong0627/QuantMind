@@ -22,7 +22,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 async def _run(args) -> dict:
     from backend.services.engine.scanners.runner import run_scan
 
-    return await run_scan(trade_date=args.date, strategy=args.strategy)
+    return await run_scan(trade_date=args.date, strategy=args.strategy, mode=args.mode)
 
 
 def main() -> int:
@@ -34,6 +34,12 @@ def main() -> int:
         "--strategy",
         default="balanced",
         choices=("conservative", "balanced", "aggressive"),
+    )
+    parser.add_argument(
+        "--mode",
+        default="quantile",
+        choices=("quantile", "absolute"),
+        help="阈值口径：quantile=分位自适应（默认，T-P4-03）/ absolute=存量绝对口径",
     )
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--top", type=int, default=20)

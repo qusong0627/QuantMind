@@ -188,6 +188,11 @@ async def test_real_data_equivalence_via_loader():
     assert [o.symbol for o in opportunities] == [p["symbol"] for p in legacy]
     assert meta["trade_date"] == snapshot.trade_date
     assert meta["picked"] == len(legacy)
+    # 跨测试确定性：用后关池（asyncpg 连接绑定事件循环；pytest-asyncio 每测试独立
+    # loop，残留池会让同进程后续真库测试撞 "attached to a different loop"）。
+    from backend.shared.database_manager_v2 import close_database
+
+    await close_database()
 
 
 @pytest.mark.unit
