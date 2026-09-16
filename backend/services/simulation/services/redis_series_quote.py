@@ -17,6 +17,8 @@ import os
 import time
 from typing import Any
 
+from backend.shared.freshness import UNAVAILABLE, FreshnessPolicy, quote_policy
+
 logger = logging.getLogger(__name__)
 
 SERIES_KEY_PREFIX = "market:series:"
@@ -53,9 +55,16 @@ def series_key_for(symbol: str) -> str | None:
 
 
 def parse_series_member(
-    member: str | bytes, score: float, now_ts: float, max_age_sec: int
+    member: str | bytes,
+    score: float,
+    now_ts: float,
+    policy: FreshnessPolicy | None = None,
 ) -> dict[str, Any] | None:
-    """解析单个 ZSET 成员；价格无效或超龄返回 None（纯函数，可单测）。"""
+    """解析单个 ZSET 成员；价格无效或不可用（unavailable）返回 None（纯函数，可单测）。
+
+    新鲜度口径唯一走 ``backend.shared.freshness``（T-P6-05）；stale 仍可用并在
+    返回值 ``freshness`` 字段如实标注。
+    """
     try:
         data = json.loads(member)
     except (TypeError, ValueError):
@@ -71,12 +80,14 @@ def parse_series_member(
     except (TypeError, ValueError):
         return None
     age = now_ts - ts
-    if age < 0 or age > max_age_sec:
+    level = (policy or quote_policy()).classify(age)
+    if level == UNAVAILABLE:
         return None
     out: dict[str, Any] = {
         "price": price,
         "timestamp": ts,
         "age_s": age,
+        "freshness": level,
         "source": data.get("source") or "redis_series",
     }
     for key in ("open", "high", "low", "volume", "amount"):
@@ -124,16 +135,14 @@ def _get_client():
     return _client
 
 
-async def fetch_series_tick(symbol: str, max_age_sec: int = 300) -> dict[str, Any] | None:
-    """取 symbol 最新 tick；新鲜才返回，否则 None。
+async def fetch_series_tick(
+    symbol: str, *, policy: FreshnessPolicy | None = None
+) -> dict[str, Any] | None:
+    """取 symbol 最新 tick；可用（fresh/stale）才返回，unavailable 返回 None。
 
-    max_age_sec 默认 300，与 stream 侧快照“>300s 视为不可用”口径一致，
-    可用环境变量 SIM_REDIS_QUOTE_MAX_AGE_SEC 覆盖。
+    新鲜度口径唯一走 ``backend.shared.freshness.quote_policy()``（T-P6-05；
+    旧 simulation 阈值环境变量作为兼容别名仅在该共享模块内读取）。
     """
-    try:
-        max_age_sec = int(os.getenv("SIM_REDIS_QUOTE_MAX_AGE_SEC") or max_age_sec)
-    except (TypeError, ValueError):
-        pass
     key = series_key_for(symbol)
     if not key:
         return None
@@ -148,21 +157,21 @@ async def fetch_series_tick(symbol: str, max_age_sec: int = 300) -> dict[str, An
     if not rows:
         return None
     member, score = rows[0]
-    tick = parse_series_member(member, float(score), time.time(), max_age_sec)
+    tick = parse_series_member(member, float(score), time.time(), policy)
     if tick is None:
-        logger.debug("[RedisSeriesQuote] %s 无新鲜 tick", key)
+        logger.debug("[RedisSeriesQuote] %s 无可用 tick", key)
     return tick
 
 
 async def fetch_series_ticks(
     symbols: list[str],
     *,
-    max_age_sec: int = 300,
+    policy: FreshnessPolicy | None = None,
     volume_window_sec: int = 60,
 ) -> dict[str, dict[str, Any]]:
     """Batch-load fresh ticks and recent incremental volume in one pipeline."""
+    policy = policy or quote_policy()
     try:
-        max_age_sec = int(os.getenv("SIM_REDIS_QUOTE_MAX_AGE_SEC") or max_age_sec)
         volume_window_sec = int(
             os.getenv("SIM_LIQUIDITY_WINDOW_SEC") or volume_window_sec
         )
@@ -193,7 +202,7 @@ async def fetch_series_ticks(
         if not rows:
             continue
         member, score = rows[-1]
-        tick = parse_series_member(member, float(score), now_ts, max_age_sec)
+        tick = parse_series_member(member, float(score), now_ts, policy)
         if tick is None:
             continue
         volumes: list[float] = []

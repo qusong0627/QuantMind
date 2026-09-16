@@ -91,13 +91,33 @@ def subscription_enabled() -> bool:
         return True
     if raw in _FALSY:
         return False
-    return str(os.getenv("TDX_AIDATA_SUBSCRIBE_ENABLED") or "").strip().lower() in _TRUTHY
+    return (
+        str(os.getenv("TDX_AIDATA_SUBSCRIBE_ENABLED") or "").strip().lower() in _TRUTHY
+    )
 
 
 def hot_set_key() -> str:
     """热集符号集 Redis 键（T-P6-06 维护；测试可 env 隔离）。"""
     env = str(os.getenv("QM_HOT_SET_KEY") or "").strip()
     return env or DEFAULT_HOT_SET_KEY
+
+
+def shard_count() -> int:
+    """订阅分片数：Redis 配置 > env QM_SUB_SHARDS > 1。
+
+    SDK 单进程单次 subscribe 上限 100 只（2026-09-17 实测：101 只整批拒绝、
+    错误码 2 仅打印不抛、零帧）→ 热集 >100 时须多 worker 分片订阅；
+    分片数经验值 = ceil(热集规模 / 100)，调大后经 restart 生效。
+    """
+    cfg = _read_redis_config_sync()
+    for raw in (cfg.get("shard_count"), os.getenv("QM_SUB_SHARDS")):
+        try:
+            value = int(str(raw).strip())
+            if value > 0:
+                return value
+        except (TypeError, ValueError):
+            continue
+    return 1
 
 
 def ini_path(directory: str | None = None) -> str:
@@ -197,8 +217,9 @@ def save_config_sync(client, updates: dict[str, Any]) -> dict[str, str]:
 
     client 为同步 redis 客户端（调用方负责连接与线程卸载）。
     """
+    # Redis 配置优先；仅 dir/enabled 走既有写入面，shard_count 供运维/API 设置
     mapping = {}
-    for key in ("dir", "enabled"):
+    for key in ("dir", "enabled", "shard_count"):
         if key in updates and updates[key] is not None:
             value = str(updates[key]).strip()
             if value:
@@ -219,5 +240,6 @@ def public_config() -> dict[str, Any]:
         "enabled": is_enabled(),
         "dir_ready": ready,
         "socket_path": socket_path(),
+        "shard_count": shard_count(),
         "token": token_status(ini_path(directory)),
     }

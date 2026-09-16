@@ -83,9 +83,16 @@ def _record_to_row(record: dict[str, Any]) -> dict[str, Any]:
 
 
 def write_records(
-    records: list[dict[str, Any]], *, base_dir: str = DEFAULT_BASE_DIR
+    records: list[dict[str, Any]],
+    *,
+    base_dir: str = DEFAULT_BASE_DIR,
+    tag: str = "",
 ) -> dict[str, Any]:
-    """按本地日（CST）分组落盘；返回 {rows, dates, files}。"""
+    """按本地日（CST）分组落盘；返回 {rows, dates, files}。
+
+    ``tag``：多 worker 分片并存时写入文件名（part-<ms>-<tag>-<seq>.parquet），
+    防同毫秒同名撞车（各分片只归档自己订阅到的帧，无重复行）。
+    """
     import pyarrow as pa
     import pyarrow.parquet as pq
 
@@ -100,6 +107,7 @@ def write_records(
             continue
         grouped.setdefault(day_key, []).append(row)
 
+    tag_part = f"-{str(tag).strip()}" if str(tag or "").strip() else ""
     files: list[str] = []
     rows = 0
     seq = 0
@@ -107,7 +115,7 @@ def write_records(
         day_dir = Path(base_dir) / f"date={day_key}"
         day_dir.mkdir(parents=True, exist_ok=True)
         seq += 1
-        path = day_dir / f"part-{int(time.time() * 1000)}-{seq:04d}.parquet"
+        path = day_dir / f"part-{int(time.time() * 1000)}{tag_part}-{seq:04d}.parquet"
         # 按 (symbol, ts) 排序：同一 flush 内标的成组，行组统计可裁剪（单标的回放读更快）
         day_rows.sort(key=lambda r: (r["symbol"], r["ts"] or 0))
         table = pa.Table.from_pylist(day_rows)
@@ -320,8 +328,10 @@ class SnapshotArchiver:
         flush_rows: int = 50_000,
         flush_seconds: float = 30.0,
         keep_days: int = 90,
+        tag: str = "",
     ) -> None:
         self.base_dir = base_dir
+        self.tag = str(tag or "").strip()
         self.flush_rows = max(1, int(flush_rows))
         self.flush_seconds = float(flush_seconds)
         self.keep_days = int(keep_days)
@@ -358,7 +368,7 @@ class SnapshotArchiver:
         if not batch:
             return result
         try:
-            result = write_records(batch, base_dir=self.base_dir)
+            result = write_records(batch, base_dir=self.base_dir, tag=self.tag)
             self.counters["rows"] += int(result.get("rows") or 0)
             self.counters["flushes"] += 1
         except Exception as exc:  # noqa: BLE001 - 归档失败不阻断实时链

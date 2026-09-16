@@ -23,6 +23,7 @@ from backend.services.simulation.services.simulation_manager import (
 )
 from backend.services.trade_shared.trade_config import settings
 from backend.shared.auth import get_internal_call_secret
+from backend.shared.freshness import UNAVAILABLE, quote_policy
 from backend.shared.utc_datetime import utc_now
 from backend.shared.trade_account_cache import (
     write_json_cache,
@@ -381,14 +382,8 @@ return tostring(granted)
             if resp.status_code == 200:
                 data = resp.json()
                 age_seconds = self._quote_age_seconds(data)
-                try:
-                    max_age_seconds = int(
-                        __import__("os").getenv("SIM_REDIS_QUOTE_MAX_AGE_SEC")
-                        or "300"
-                    )
-                except ValueError:
-                    max_age_seconds = 300
-                if age_seconds is None or age_seconds > max_age_seconds:
+                # 新鲜度口径唯一走 shared.freshness（T-P6-05）；unavailable 视为无行情
+                if quote_policy().classify(age_seconds) == UNAVAILABLE:
                     logger.warning(
                         "Market quote for %s missing/stale timestamp; rejected",
                         symbol,

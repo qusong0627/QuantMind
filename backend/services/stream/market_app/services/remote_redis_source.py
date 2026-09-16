@@ -17,6 +17,7 @@ from typing import Any
 import redis.asyncio as aioredis
 
 from .data_source import DataSourceAdapter
+from backend.shared.freshness import FRESH, STALE, UNAVAILABLE, quote_policy
 from backend.shared.stock_utils import StockCodeUtil
 
 logger = logging.getLogger(__name__)
@@ -142,20 +143,20 @@ class RemoteRedisDataSource(DataSourceAdapter):
                 except (TypeError, ValueError):
                     return None
 
-            # 新鲜度规则:
-            # - >60s 记为陈旧并告警
-            # - >300s 视为不可用，直接跳过（触发上层安全保护）
+            # 新鲜度规则（T-P6-05 唯一谓词）：fresh/stale 可用（stale 告警），
+            # unavailable（>stale 窗口 / 未来戳 / ts 缺失）跳过（触发上层安全保护）
             ts_raw = int(data.get("timestamp", 0) or 0)
-            age = (now_ts - ts_raw) if ts_raw > 0 else 999999
-            is_stale = age > 60
+            level = quote_policy().classify_ts(ts_raw, now_ts)
+            age = (now_ts - ts_raw) if ts_raw > 0 else None
+            is_stale = level != FRESH
 
-            if is_stale:
+            if level == STALE:
                 logger.warning(
-                    f"[RemoteRedis] 数据陈旧: {normalized} (age: {int(age)}s)"
+                    f"[RemoteRedis] 数据陈旧: {normalized} (age: {int(age or 0)}s)"
                 )
-            if age > 300:
+            if level == UNAVAILABLE:
                 logger.warning(
-                    f"[RemoteRedis] 数据不可用(>300s): {normalized} (age: {int(age)}s)"
+                    f"[RemoteRedis] 数据不可用: {normalized} (age: {age if age is None else int(age)}s)"
                 )
                 continue
 

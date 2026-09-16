@@ -30,9 +30,16 @@ _SELFCHECK_SYMBOL = "600036.SH"
 
 
 class TdxAiDataConfigRequest(BaseModel):
-    dir: str | None = Field(None, description="安装目录（含 libTdxAiData.so + tqServer.py + TdxAiData.ini）")
+    dir: str | None = Field(
+        None, description="安装目录（含 libTdxAiData.so + tqServer.py + TdxAiData.ini）"
+    )
     enabled: bool | None = Field(None, description="启用开关")
-    token: str | None = Field(None, description="通达信 Token（写入 TdxAiData.ini 的 [Token] 段；不回显）")
+    token: str | None = Field(
+        None, description="通达信 Token（写入 TdxAiData.ini 的 [Token] 段；不回显）"
+    )
+    shard_count: int | None = Field(
+        None, ge=1, le=32, description="订阅分片数（SDK 单进程上限 100 只/片；保存后重启全分片生效）"
+    )
 
 
 def _redis_sync():
@@ -47,20 +54,20 @@ def _config_and_status() -> dict[str, Any]:
     return {
         "config": tdx_config.public_config(),
         "socket_path": tdx_config.socket_path(),
+        "shard_count": tdx_config.shard_count(),
     }
 
 
 @router.get("/tdx-aidata/config")
 async def get_tdx_aidata_config(current_user: dict = Depends(require_admin)):
-    from backend.shared.tdx_aidata.client import TdxAiDataClient
+    from backend.shared.tdx_aidata.client import default_cluster
 
     data = _config_and_status()
-    client = TdxAiDataClient()
+    cluster = default_cluster()
     try:
-        status = await client.status()  # 只读：不拉起
+        data["worker"] = await cluster.status()  # 只读：不拉起；聚合全分片
     finally:
-        await client.close()
-    data["worker"] = status
+        await cluster.close()
     return {"success": True, "data": data}
 
 
@@ -70,16 +77,16 @@ async def save_tdx_aidata_config(
 ):
     from backend.shared.tdx_aidata import config as tdx_config
 
-    # 1) 目录/开关 → Redis（前端配置源）
+    # 1) 目录/开关/分片数 → Redis（前端配置源）
     updates: dict[str, Any] = {}
     if req.dir is not None:
         updates["dir"] = req.dir
     if req.enabled is not None:
         updates["enabled"] = "true" if req.enabled else "false"
+    if req.shard_count is not None:
+        updates["shard_count"] = str(int(req.shard_count))
     if updates:
-        await asyncio.to_thread(
-            tdx_config.save_config_sync, _redis_sync(), updates
-        )
+        await asyncio.to_thread(tdx_config.save_config_sync, _redis_sync(), updates)
 
     # 2) Token → ini（外科手术写入；目录取保存后的生效值）
     token_written = False
@@ -88,16 +95,16 @@ async def save_tdx_aidata_config(
         await asyncio.to_thread(tdx_config.write_token, ini, str(req.token).strip())
         token_written = True
 
-    # 3) 配置变更后重启 worker（SDK 在 start() 读 ini/目录）
-    from backend.shared.tdx_aidata.client import TdxAiDataClient
+    # 3) 配置变更后重启全部 worker 分片（SDK 在 start() 读 ini/目录）
+    from backend.shared.tdx_aidata.client import default_cluster
 
-    client = TdxAiDataClient()
-    restarted = False
+    cluster = default_cluster()
+    restarted: Any = False
     try:
         if updates or token_written:
-            restarted = await client.restart()
+            restarted = await cluster.restart()
     finally:
-        await client.close()
+        await cluster.close()
 
     data = _config_and_status()
     data["token_written"] = token_written
@@ -107,22 +114,24 @@ async def save_tdx_aidata_config(
 
 @router.post("/tdx-aidata/selfcheck")
 async def tdx_aidata_selfcheck(current_user: dict = Depends(require_admin)):
-    """连通性自检：拉起 worker + 真实取一次快照（消耗 1 次窗口配额）。"""
+    """连通性自检：拉起全部分片 + 主片真实取一次快照（消耗 1 次窗口配额）。"""
     import time
 
-    from backend.shared.tdx_aidata.client import TdxAiDataClient, TdxAiDataError
+    from backend.shared.tdx_aidata.client import TdxAiDataError, default_cluster
 
-    client = TdxAiDataClient()
+    cluster = default_cluster()
     t0 = time.monotonic()
     result: dict[str, Any] = {"ok": False, "symbol": _SELFCHECK_SYMBOL}
     try:
-        status = await client.status(try_start=True)
+        started = await cluster.ensure_all()
+        result["shards_started"] = started
+        status = await cluster.status()
         result["worker"] = status
-        if status.get("worker") != "up":
-            result["error"] = status.get("sdk_error") or "worker 未能就绪"
+        if status.get("worker") == "down":
+            result["error"] = "全部分片未能就绪"
             return {"success": True, "data": result}
         try:
-            quote = await client.get_quote(_SELFCHECK_SYMBOL, timeout=30)
+            quote = await cluster.primary.get_quote(_SELFCHECK_SYMBOL, timeout=30)
             result["ok"] = True
             result["latency_ms"] = round((time.monotonic() - t0) * 1000, 1)
             # 只摘关键字段，避免整包回传（键名以 SDK 为准，缺失即缺省）
@@ -135,20 +144,19 @@ async def tdx_aidata_selfcheck(current_user: dict = Depends(require_admin)):
             result["error_code"] = exc.code
             if exc.retry_after_s is not None:
                 result["retry_after_s"] = exc.retry_after_s
-        st2 = await client.status()
-        result["gate"] = (st2 or {}).get("gate")
+        result["gate"] = (status or {}).get("gate")
     finally:
-        await client.close()
+        await cluster.close()
     return {"success": True, "data": result}
 
 
 @router.post("/tdx-aidata/restart")
 async def tdx_aidata_restart(current_user: dict = Depends(require_admin)):
-    from backend.shared.tdx_aidata.client import TdxAiDataClient
+    from backend.shared.tdx_aidata.client import default_cluster
 
-    client = TdxAiDataClient()
+    cluster = default_cluster()
     try:
-        restarted = await client.restart()
+        restarted = await cluster.restart()
     finally:
-        await client.close()
+        await cluster.close()
     return {"success": True, "data": {"restarted": restarted}}

@@ -49,6 +49,7 @@ from backend.services.trade.services.trading_precheck_service import (
     run_trading_readiness_precheck,
 )
 from backend.services.trade_shared.trade_config import settings
+from backend.shared.freshness import STALE, UNAVAILABLE, quote_policy
 from backend.shared.margin_stock_pool import get_margin_stock_pool_service
 from backend.shared.notification_publisher import publish_notification_async
 from backend.shared.strategy_storage import get_strategy_storage_service
@@ -1155,13 +1156,33 @@ def check_tdx_bridge_online() -> tuple[bool, str]:
         return False, f"TDX 桥不可达: {exc}"
 
 
+def _probe_freshest_series_age(redis_like, symbols: list[str]) -> tuple[str | None, float | None]:
+    """探测 symbols 中最新的 market:series 年龄（秒，保留浮点）；无数据返回 (None, None)。"""
+    matched: str | None = None
+    latest_age: float | None = None
+    for symbol in symbols:
+        normalized = StockCodeUtil.to_prefix(symbol)
+        key = f"market:series:{normalized}"
+        latest = redis_like.zrevrange(key, 0, 0, withscores=True)
+        if latest:
+            _, score = latest[0]
+            age = time.time() - float(score)
+            if latest_age is None or age < latest_age:
+                matched = normalized
+                latest_age = age
+    return matched, latest_age
+
+
 def check_stream_series_freshness(
     redis_client=None, *, allow_quantdb_fallback: bool = False, market: str = "CN"
 ) -> dict[str, Any]:
     """
     统一的 Stream 行情时序新鲜度检测逻辑（按市场）。
 
-    allow_quantdb_fallback=True 时（模拟盘）：当 Redis 时序缺失/不新鲜时，
+    分级口径（T-P6-05）唯一走 ``backend.shared.freshness``：fresh/stale 视为就绪
+    （stale 在 details.level 如实标注），unavailable 就绪失败。
+
+    allow_quantdb_fallback=True 时（模拟盘）：当 Redis 时序缺失/不可用时，
     回退检查该市场本地行情库是否有最近交易日日线（CN=quantdb、HK=quanthk、
     US=quantus…）。模拟撮合引擎直读对应市场库，有日线即可撮合，故视为就绪；
     标记 source=quantdb 供调用方区分。
@@ -1170,53 +1191,45 @@ def check_stream_series_freshness(
     market_upper = str(market or "CN").upper()
     stream_symbols = _resolve_preflight_symbols()
     stream_redis, stream_redis_host, stream_redis_port = _get_stream_series_redis_client()
-    threshold_sec = int(os.getenv("PREFLIGHT_SERIES_STALE_THRESHOLD_SEC", "300"))
+    policy = quote_policy()
+    threshold_sec = int(policy.stale_within_s)
 
     matched_symbol = None
     latest_age_sec = None
+    latest_age_raw: float | None = None
+    level = UNAVAILABLE
     remote_probe_error = ""
     used_fallback = False
     try:
         stream_redis.ping()
-        for symbol in stream_symbols:
-            normalized = StockCodeUtil.to_prefix(symbol)
-            key = f"market:series:{normalized}"
-            latest = stream_redis.zrevrange(key, 0, 0, withscores=True)
-            if latest:
-                _, score = latest[0]
-                age = max(0, int(time.time() - float(score)))
-                if latest_age_sec is None or age < latest_age_sec:
-                    matched_symbol = normalized
-                    latest_age_sec = age
+        matched_symbol, latest_age_raw = _probe_freshest_series_age(stream_redis, stream_symbols)
+        level = policy.classify(latest_age_raw)
     except Exception as exc:
         # 远端探测异常时降级到交易 Redis，并在 details 回显原因
         remote_probe_error = str(exc)
         if redis_client:
             try:
                 used_fallback = True
-                for symbol in stream_symbols:
-                    normalized = StockCodeUtil.to_prefix(symbol)
-                    key = f"market:series:{normalized}"
-                    latest = redis_client.zrevrange(key, 0, 0, withscores=True)
-                    if latest:
-                        _, score = latest[0]
-                        age = max(0, int(time.time() - float(score)))
-                        if latest_age_sec is None or age < latest_age_sec:
-                            matched_symbol = normalized
-                            latest_age_sec = age
+                matched_symbol, latest_age_raw = _probe_freshest_series_age(
+                    redis_client, stream_symbols
+                )
+                level = policy.classify(latest_age_raw)
             except Exception:
                 pass
 
-    ok = latest_age_sec is not None and latest_age_sec < threshold_sec
-    message = (
-        f"行情新鲜（{matched_symbol} 延迟 {latest_age_sec}s）"
-        if ok
-        else (
+    if latest_age_raw is not None:
+        latest_age_sec = max(0, int(latest_age_raw))
+    ok = level != UNAVAILABLE
+    if ok and level == STALE:
+        message = f"行情陈旧但可用（{matched_symbol} 延迟 {latest_age_sec}s，超 fresh {int(policy.fresh_within_s)}s）"
+    elif ok:
+        message = f"行情新鲜（{matched_symbol} 延迟 {latest_age_sec}s）"
+    else:
+        message = (
             f"行情延迟过高（{matched_symbol} 延迟 {latest_age_sec}s > {threshold_sec}s）"
             if matched_symbol
             else "未发现可用行情序列"
         )
-    )
 
     source = "stream_series"
     if not ok and allow_quantdb_fallback:
@@ -1242,7 +1255,9 @@ def check_stream_series_freshness(
         "details": {
             "matched_symbol": matched_symbol,
             "age_seconds": latest_age_sec,
+            "level": level,
             "threshold_seconds": threshold_sec,
+            "fresh_within_seconds": policy.fresh_within_s,
             "series_redis": f"{stream_redis_host}:{stream_redis_port}",
             "remote_probe_error": remote_probe_error,
             "used_fallback": used_fallback,

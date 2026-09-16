@@ -38,6 +38,9 @@ interface WorkerStatus {
     pid?: number;
     gate?: GateStatus;
     counters?: { requests?: number; ok?: number; rate_limited?: number };
+    /** 分片集群（SDK 单进程订阅上限 100，热集 >100 需多分片） */
+    shard_count?: number;
+    shards_up?: string;
 }
 
 interface SelfcheckResult {
@@ -126,7 +129,11 @@ export const TdxAiDataPanel: React.FC = () => {
             const resp = await adminService.tdxAiDataSelfcheck();
             const data: SelfcheckResult = resp?.data;
             setCheckResult(data);
-            setWorker((prev) => ({ ...prev, ...(data?.worker as WorkerStatus), gate: data?.gate ?? prev.gate }));
+            setWorker({
+                ...worker,
+                ...(data?.worker as WorkerStatus),
+                gate: (data?.gate as GateStatus | undefined) ?? worker.gate,
+            });
             if (data?.ok) message.success('连通性自检通过');
             else if (data?.error_code === 'rate_limited') message.warning('配额窗口冷却中（见下方倒计时）');
             else message.warning(data?.error || '自检未通过');
@@ -140,7 +147,8 @@ export const TdxAiDataPanel: React.FC = () => {
     const gate = worker?.gate;
     const maxReq = gate?.max_requests_per_window ?? 3;
     const usedReq = Math.min(gate?.window_requests ?? 0, maxReq);
-    const workerUp = worker?.worker === 'up';
+    const workerDegraded = worker?.worker === 'degraded';
+    const workerUp = worker?.worker === 'up' || workerDegraded;
     const sdkReady = worker?.sdk_ready === true;
 
     return (
@@ -154,10 +162,15 @@ export const TdxAiDataPanel: React.FC = () => {
                 <Space size={6}>
                     <Tag
                         className="m-0 rounded-full px-2 font-bold"
-                        color={workerUp ? 'success' : worker ? 'default' : undefined}
+                        color={workerUp ? (workerDegraded ? 'warning' : 'success') : worker ? 'default' : undefined}
                     >
-                        {workerUp ? 'worker 运行中' : 'worker 未运行'}
+                        {workerUp ? (workerDegraded ? 'worker 降级运行' : 'worker 运行中') : 'worker 未运行'}
                     </Tag>
+                    {workerUp && (worker?.shard_count ?? 1) > 1 && (
+                        <Tag className="m-0 rounded-full px-2 font-bold" color={workerDegraded ? 'warning' : 'blue'}>
+                            分片 {worker?.shards_up ?? '—'}
+                        </Tag>
+                    )}
                     {workerUp && (
                         <Tag className="m-0 rounded-full px-2 font-bold" color={sdkReady ? 'processing' : 'error'}>
                             {sdkReady ? 'SDK 就绪' : 'SDK 异常'}

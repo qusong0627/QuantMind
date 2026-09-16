@@ -179,6 +179,24 @@ def is_silent(last_frame_ts: float | None, now: float, silence_s: float) -> bool
 
 # ── 订阅引擎（worker 内运行）────────────────────────────────────────
 
+# SDK 单次 subscribe 上限（实测 2026-09-17：100 只整批接受、101 只起整批拒绝——
+# 错误码 2“股票代码错误”仅打印不抛、零帧到达；修复=热集分片多 worker，每片 ≤ 此值）
+SDK_SUBSCRIBE_MAX = 100
+
+
+def shard_symbols(
+    symbols: set[str] | list[str], shard_id: int, shard_count: int
+) -> list[str]:
+    """确定性分片：crc32(symbol) % shard_count == shard_id（热集增删不重排，稳定）。"""
+    ordered = sorted(symbols)
+    if shard_count <= 1:
+        return ordered
+    import zlib
+
+    n = int(shard_count)
+    sid = int(shard_id) % n
+    return [s for s in ordered if zlib.crc32(s.encode("utf-8")) % n == sid]
+
 
 class SubscriptionEngine:
     """热集订阅 → 帧落 Redis 的常驻引擎。
@@ -197,22 +215,28 @@ class SubscriptionEngine:
         budget_gate,
         redis_factory: Callable[[], Any] | None,
         archiver: Any | None = None,
+        latency: Any | None = None,
         hot_set_key: str = DEFAULT_HOT_SET_KEY,
         cap: int = DEFAULT_CAP,
         silence_s: float = DEFAULT_SILENCE_S,
         sync_interval_s: float = 15.0,
         resubscribe_min_gap_s: float = 60.0,
+        shard_id: int = 0,
+        shard_count: int = 1,
     ) -> None:
         self._sdk_subscribe = sdk_subscribe
         self._sdk_unsubscribe = sdk_unsubscribe
         self._gate = budget_gate
         self._redis_factory = redis_factory
         self._archiver = archiver  # l05_store.SnapshotArchiver | None（L0.5 落盘 sink）
+        self._latency = latency  # latency_metrics.LatencyRecorder | None（T-P6-05 时延打点）
         self._hot_set_key = hot_set_key
         self.cap = int(cap)
         self.silence_s = float(silence_s)
         self.sync_interval_s = float(sync_interval_s)
         self.resubscribe_min_gap_s = float(resubscribe_min_gap_s)
+        self.shard_count = max(1, int(shard_count))
+        self.shard_id = int(shard_id) % self.shard_count
 
         self._queue: queue.SimpleQueue = queue.SimpleQueue()
         self._current: set[str] = set()  # 原生码（后缀式）
@@ -229,6 +253,8 @@ class SubscriptionEngine:
             "redis_errors": 0,
             "resubscribes": 0,
             "set_syncs": 0,
+            "hot_set_size": 0,  # 全量热集规模（分片前）
+            "over_cap": False,  # 本片超 SDK 上限被截断（显式降级，绝不静默）
             "last_error": None,
         }
 
@@ -257,10 +283,10 @@ class SubscriptionEngine:
     # ── redis 写侧 ──────────────────────────────────────────────────
 
     def _drain_and_write(self) -> int:
-        """队列→(Redis 写 | L0.5 归档) 批量消费。
+        """队列→(Redis 写 | L0.5 归档 | 时延打点) 批量消费。
 
-        两路互相独立：Redis 不可用（redis_factory=None/异常）不阻断归档；
-        归档失败只计数（SnapshotArchiver 内部吞错），不阻断实时链。
+        三路互相独立：Redis 写失败（或 redis_factory=None）不阻断归档与打点；
+        归档/打点失败只计数（各自内部吞错），不阻断实时链。
         """
         batch: list[dict] = []
         while len(batch) < 500:
@@ -272,20 +298,33 @@ class SubscriptionEngine:
             return 0
 
         now = datetime.now(CST)
-        archived: list[dict] = []
-        written = 0
+        now_epoch = now.timestamp()
+        mapped_records: list[tuple[dict, dict]] = []
+        for record in batch:
+            mapped = frame_to_redis(record, now)
+            self.counters["records"] += 1
+            if mapped is None:
+                self.counters["skipped_symbols"] += 1
+                continue
+            mapped_records.append((record, mapped))
+        if not mapped_records:
+            return 0
 
-        client = None
+        if self._latency is not None:
+            # 时延打点：源时间戳（水位）→ 本批可消费（写标准键/归档）时刻
+            for _record, mapped in mapped_records:
+                self._latency.observe((now_epoch - mapped["ts"]) * 1000.0)
+            self._latency.maybe_flush()
+
+        archived = [{**record, "ts": mapped["ts"]} for record, mapped in mapped_records]
+        written = len(mapped_records)
+
         if self._redis_factory is not None:
+            client = None
             try:
                 client = self._redis_factory()
                 pipe = client.pipeline(transaction=False)
-                for record in batch:
-                    mapped = frame_to_redis(record, now)
-                    self.counters["records"] += 1
-                    if mapped is None:
-                        self.counters["skipped_symbols"] += 1
-                        continue
+                for _record, mapped in mapped_records:
                     pipe.hset(mapped["snapshot_key"], mapping=mapped["snapshot_fields"])
                     pipe.expire(mapped["snapshot_key"], SNAPSHOT_TTL)
                     pipe.zadd(
@@ -294,11 +333,8 @@ class SubscriptionEngine:
                     )
                     pipe.zremrangebyrank(mapped["series_key"], 0, -(SERIES_MAX_POINTS + 1))
                     pipe.expire(mapped["series_key"], SERIES_TTL)
-                    archived.append({**record, "ts": mapped["ts"]})
-                    written += 1
-                if written:
-                    pipe.execute()
-                    self.counters["written"] += written
+                pipe.execute()
+                self.counters["written"] += written
             except Exception as exc:  # noqa: BLE001
                 self.counters["redis_errors"] += 1
                 self.counters["last_error"] = f"redis write: {exc}"
@@ -309,16 +345,6 @@ class SubscriptionEngine:
                         client.close()
                     except Exception:  # noqa: BLE001
                         pass
-        else:
-            # 无 Redis 写侧（测试/降级）：仍走映射校验与归档
-            for record in batch:
-                mapped = frame_to_redis(record, now)
-                self.counters["records"] += 1
-                if mapped is None:
-                    self.counters["skipped_symbols"] += 1
-                    continue
-                archived.append({**record, "ts": mapped["ts"]})
-                written += 1
 
         if self._archiver is not None and archived:
             for record in archived:
@@ -364,8 +390,9 @@ class SubscriptionEngine:
                     self._sdk_unsubscribe()
                 except Exception:  # noqa: BLE001 - 空集/首订时 unsub 报错容忍
                     pass
-            self._gate.consume()
-            self._sdk_subscribe(sorted(symbols), self.on_push)
+            if symbols:
+                self._gate.consume()
+                self._sdk_subscribe(sorted(symbols), self.on_push)
         except Exception as exc:  # noqa: BLE001
             code, msg = protocol.map_sdk_error(exc)
             self.counters["last_error"] = f"resubscribe: {msg}"
@@ -377,15 +404,31 @@ class SubscriptionEngine:
         self.counters["resubscribes"] += 1
         return True
 
+    def _shard_desired(self, full: set[str]) -> set[str]:
+        """全量热集 → 本片应订集合（哈希分片 + SDK 上限硬截断，超限显式计数）。"""
+        self.counters["hot_set_size"] = len(full)
+        desired = shard_symbols(full, self.shard_id, self.shard_count)
+        if len(desired) > SDK_SUBSCRIBE_MAX:
+            self.counters["over_cap"] = True
+            logger.error(
+                "分片 %d/%d 应订 %d 只超 SDK 上限 %d：截断（请上调 QM_SUB_SHARDS）",
+                self.shard_id, self.shard_count, len(desired), SDK_SUBSCRIBE_MAX,
+            )
+            desired = desired[:SDK_SUBSCRIBE_MAX]
+        else:
+            self.counters["over_cap"] = False
+        return set(desired)
+
     def sync_hot_set_once(self) -> dict[str, Any]:
-        """一次热集差分同步（供 run 循环与手动触发复用）。"""
-        desired = self._read_hot_set()
-        if desired is None:
+        """一次热集差分同步（供 run 循环与手动触发复用；含本片分片过滤）。"""
+        full = self._read_hot_set()
+        if full is None:
             return {"changed": False, "reason": "hot_set_unreadable"}
+        desired = self._shard_desired(full)
         self.counters["set_syncs"] += 1
         if desired == self._current:
             return {"changed": False, "current": len(self._current)}
-        to_add, to_remove = hot_set_diff(self._current, desired, cap=self.cap)
+        to_add, to_remove = hot_set_diff(self._current, desired, cap=SDK_SUBSCRIBE_MAX)
         if not to_add and not to_remove:
             return {"changed": False, "current": len(self._current)}
         ok = self.resubscribe(desired)
@@ -400,8 +443,8 @@ class SubscriptionEngine:
 
     async def run(self) -> None:
         logger.info(
-            "subscription engine started hot_set=%s cap=%s silence=%.0fs",
-            self._hot_set_key, self.cap, self.silence_s,
+            "subscription engine started hot_set=%s shard=%d/%d silence=%.0fs",
+            self._hot_set_key, self.shard_id, self.shard_count, self.silence_s,
         )
         while not self._stop.is_set():
             try:
@@ -435,6 +478,7 @@ class SubscriptionEngine:
         out: dict[str, Any] = {
             "enabled": True,
             "hot_set_key": self._hot_set_key,
+            "shard": {"id": self.shard_id, "count": self.shard_count},
             "subscribed": len(self._current),
             "subscribed_sample": sorted(self._current)[:10],
             "last_frame_age_s": (
@@ -449,4 +493,6 @@ class SubscriptionEngine:
                 "pending_rows": self._archiver.pending_rows,
                 **self._archiver.counters,
             }
+        if self._latency is not None:
+            out["latency"] = self._latency.snapshot()
         return out

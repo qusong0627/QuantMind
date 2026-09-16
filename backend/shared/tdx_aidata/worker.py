@@ -164,6 +164,7 @@ class AidataWorker:
         self.subscription = None  # collector.SubscriptionEngine | None
         self._sub_task: asyncio.Task | None = None
         self.archiver = None  # l05_store.SnapshotArchiver | None
+        self.latency = None  # latency_metrics.LatencyRecorder | None（T-P6-05）
 
     # ── 订阅引擎（T-P6-02）─────────────────────────────────────────
 
@@ -191,6 +192,11 @@ class AidataWorker:
         from backend.shared.tdx_aidata import config as _cfg
         from backend.shared.tdx_aidata.collector import SubscriptionEngine
 
+        shard_id = int(os.getenv("QM_SUB_SHARD_ID", "0") or 0)
+        # 分片数：spawn env 优先（client 注入），否则回落共享配置（Redis > env > 1）
+        shard_count = int(os.getenv("QM_SUB_SHARDS") or 0) or _cfg.shard_count()
+        shard_count = max(1, shard_count)
+
         archiver = None
         if str(os.getenv("QM_L05_ENABLED", "true")).strip().lower() not in {
             "0", "false", "no", "off",
@@ -202,9 +208,22 @@ class AidataWorker:
                 flush_rows=int(os.getenv("QM_L05_FLUSH_ROWS", "50000")),
                 flush_seconds=float(os.getenv("QM_L05_FLUSH_S", "30")),
                 keep_days=int(os.getenv("QM_L05_KEEP_DAYS", "90")),
+                tag=f"s{shard_id}" if shard_count > 1 else "",  # 多 worker 写同日目录防文件名撞车
             )
             logger.info("l05 archiver enabled dir=%s", archiver.base_dir)
         self.archiver = archiver
+
+        latency = None
+        if str(os.getenv("QM_LATENCY_ENABLED", "true")).strip().lower() not in {
+            "0", "false", "no", "off",
+        }:
+            from backend.shared.latency_metrics import LatencyRecorder
+
+            latency = LatencyRecorder(
+                "market_snapshot",
+                flush_seconds=float(os.getenv("QM_LATENCY_FLUSH_S", "30")),
+            )
+        self.latency = latency
 
         engine = SubscriptionEngine(
             sdk_subscribe=lambda codes, cb: self.tqs.subscribe(
@@ -214,16 +233,22 @@ class AidataWorker:
             budget_gate=self.gate,
             redis_factory=self._redis_factory,
             archiver=archiver,
+            latency=latency,
             hot_set_key=_cfg.hot_set_key(),
             cap=int(os.getenv("QM_HOT_SET_CAP", "1000")),
             silence_s=float(os.getenv("QM_HOT_SET_SILENCE_S", "120")),
             sync_interval_s=float(os.getenv("QM_HOT_SET_SYNC_S", "15")),
+            shard_id=shard_id,
+            shard_count=shard_count,
         )
         self.subscription = engine
         self._sub_task = asyncio.get_running_loop().create_task(
             engine.run(), name="tdx-aidata-subscription"
         )
-        logger.info("subscription engine enabled hot_set=%s", _cfg.hot_set_key())
+        logger.info(
+            "subscription engine enabled hot_set=%s shard=%d/%d",
+            _cfg.hot_set_key(), engine.shard_id, engine.shard_count,
+        )
 
     # ── SDK 引入（唯一处） ──────────────────────────────────────────
 
@@ -526,6 +551,12 @@ class AidataWorker:
                 logger.info("l05 archiver final flush rows=%s", flushed.get("rows"))
             except Exception as exc:  # noqa: BLE001
                 logger.warning("l05 停机终刷失败: %s", exc)
+        if self.latency is not None:
+            # 停机终刷：时延窗口落末次
+            try:
+                await asyncio.to_thread(self.latency.flush)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("latency 停机终刷失败: %s", exc)
         try:
             os.unlink(self.socket_path)
         except OSError:
