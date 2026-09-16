@@ -172,6 +172,10 @@ def compute_eval_report(
     # ③ Top−Bottom 多空组合
     if n_groups in gm.columns and 1 in gm.columns:
         spread = (gm[n_groups] - gm[1]).dropna()
+        # 单日多空价差缩尾 ±5%（因子报告通行口径）：早期损坏标签残留会让个别日
+        # 价差 ±100%，逐日复利把净值炸成 1e32、回撤变乱码；缩尾后年化/夏普/回撤
+        # 才具可比性（对绝大多数正常交易日无影响）。
+        spread = spread.clip(-0.05, 0.05)
         stats = _series_stats(spread)
         cum = (1.0 + spread).cumprod() - 1.0
         max_dd = float((cum - cum.cummax()).min()) if not cum.empty else None
