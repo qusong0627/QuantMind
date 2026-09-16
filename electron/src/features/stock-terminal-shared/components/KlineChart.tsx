@@ -2,9 +2,11 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import ReactECharts from 'echarts-for-react';
-import { KlineBar, KlineMarker } from '../types';
+import { TermTooltip } from '../../shared/TermTooltip';
+import { KlineBar, KlineMarker, type TradeMarker } from '../types';
 import { boll, kdj, macd, rsi, sma, volMa, Series } from '../engine/indicators';
 import { useStockTerminal } from '../adapter';
+import type { KlineAdjust } from '../service';
 
 export type { KlineMarker };
 
@@ -44,13 +46,8 @@ export interface AlertPoint {
   score?: number | null;
 }
 
-/** 模拟交易点：buy/sell */
-export interface TradeMarker {
-  date: string;
-  side: 'buy' | 'sell';
-  price: number;
-  shares: number;
-}
+/** 模拟交易点（T-FE-08 下钻：理由/订单号/金额）——类型唯一来源在 types.ts */
+export type { TradeMarker } from '../types';
 
 /** 参考线：分数轴虚线 */
 export interface RefLine {
@@ -103,6 +100,13 @@ function weekKey(date: string): string {
  * 默认参考线（标注 0.10 分档下沿）。标签与图内几何随市场主题走：
  * A 股称「参考线」、港股称「黄金线」；两市场缩放条预留高度本就不同，故做成主题参数。
  */
+/** T-FE-07 复权口径角标文案（与 adapter 的 KlineAdjust 键一致） */
+const ADJUST_LABELS: Record<string, string> = {
+  qfq: '前复权',
+  hfq: '后复权',
+  none: '不复权',
+};
+
 const defaultRefLine = (label: string): RefLine => ({ id: 'default-golden', value: 0.10, label, color: '#10b981' });
 
 interface Props {
@@ -125,13 +129,19 @@ interface Props {
   zoomStart?: number;
   zoomEnd?: number;
   onBarClick?: (bar: KlineBar) => void;
+  /** T-FE-07 复权口径角标（图内左上角；口径变更会改变价格可比性） */
+  adjust?: KlineAdjust;
+  /** T-FE-08 买卖点下钻：点击交易标记（含理由/订单号） */
+  onTradeClick?: (marker: TradeMarker) => void;
+  /** T-FE-08 信号点下钻：点击推理信号三角标记 */
+  onSignalClick?: (signal: SignalPoint) => void;
 }
 
 export function KlineChart({
   bars, config, overlays, height = 460, period = 'daily',
   signals = [], btEquity = [], scoreSeries = [], scorePoints, showScoreSubplot = false, alerts = [], trades = [], refLines = [],
   markers = [],
-  zoomStart = 0, zoomEnd = 100, onBarClick,
+  zoomStart = 0, zoomEnd = 100, onBarClick, adjust, onTradeClick, onSignalClick,
 }: Props) {
   // 自适应容器高度：图表铺满父容器（个股终端 K 线卡内部空间），不再写死 320 留下大片空白；
   // 未测量到时回退 height 属性（其它定高调用方）
@@ -589,10 +599,20 @@ export function KlineChart({
     };
   }, [bars, config, overlays, chartH, signals, btEquity, scoreSeries, scorePoints, showScoreSubplot, period, alerts, trades, refLines, markers, zoomStart, zoomEnd, goldenLine, theme.klineBottomReserve, theme.sliderBottom, theme.sliderHeight]);
 
-  const onEvents = onBarClick ? {
+  const onEvents = (onBarClick || onTradeClick || onSignalClick) ? {
     click: (params: any) => {
-      const raw = params?.data;
-      const idx = typeof raw === 'object' && raw?.value ? raw.value[0] : params?.dataIndex;
+      // T-FE-08：交易/信号标记优先（data 内随身携带原始对象），其次回退 bar 点击
+      const payload = params?.data;
+      if (params?.seriesName === '交易' && onTradeClick && payload?.t) {
+        onTradeClick(payload.t as TradeMarker);
+        return;
+      }
+      if (params?.seriesName === '信号' && onSignalClick && payload?.sig) {
+        onSignalClick(payload.sig as SignalPoint);
+        return;
+      }
+      if (!onBarClick) return;
+      const idx = typeof payload === 'object' && payload?.value ? payload.value[0] : params?.dataIndex;
       const i = Number.isInteger(idx) && idx >= 0 && idx < bars.length ? idx : -1;
       if (i < 0) return;
       onBarClick(bars[i]);
@@ -600,7 +620,16 @@ export function KlineChart({
   } : undefined;
 
   return (
-    <div ref={wrapRef} className="w-full h-full min-h-0">
+    <div ref={wrapRef} className="w-full h-full min-h-0 relative">
+      {adjust && (
+        <div className="absolute top-1 left-2 z-10">
+          <TermTooltip term="kline_adjust" className="!border-0">
+            <span className="text-[10px] px-1.5 py-0.5 rounded bg-white/85 border border-slate-200 text-slate-500">
+              {ADJUST_LABELS[adjust] || adjust}
+            </span>
+          </TermTooltip>
+        </div>
+      )}
       <ReactECharts
         option={option}
         notMerge

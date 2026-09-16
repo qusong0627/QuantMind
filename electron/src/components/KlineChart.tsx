@@ -17,11 +17,13 @@
 
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
-    createChart,
+    CandlestickSeries,
     CrosshairMode,
-    IChartApi,
-    ISeriesApi,
-    Time,
+    HistogramSeries,
+    createChart,
+    type IChartApi,
+    type ISeriesApi,
+    type Time,
 } from 'lightweight-charts';
 import { Card, Empty, Segmented, Space, Spin, Tag, Typography } from 'antd';
 import axios from 'axios';
@@ -122,7 +124,8 @@ export const KlineChart: React.FC<KlineChartProps> = ({
         chartRef.current = chart;
         // 中国市场红涨绿跌；港 / 美沿用国际惯例 - 简化版默认中式
         const isChineseStyle = market === 'A' || market === 'HK';
-        candleRef.current = (chart as any).addCandlestickSeries({
+        // v5 API：addCandlestickSeries 已移除（v4 写法在升级后静默失败）→ addSeries(CandlestickSeries)
+        candleRef.current = chart.addSeries(CandlestickSeries, {
             upColor: isChineseStyle ? '#ef4444' : '#10b981',
             downColor: isChineseStyle ? '#10b981' : '#ef4444',
             borderUpColor: isChineseStyle ? '#ef4444' : '#10b981',
@@ -131,12 +134,12 @@ export const KlineChart: React.FC<KlineChartProps> = ({
             wickDownColor: isChineseStyle ? '#10b981' : '#ef4444',
         });
         if (showVolume) {
-            volRef.current = (chart as any).addHistogramSeries({
+            volRef.current = chart.addSeries(HistogramSeries, {
                 color: '#94a3b8',
                 priceFormat: { type: 'volume' },
                 priceScaleId: '',
             });
-            (chart as any).priceScale('').applyOptions({
+            chart.priceScale('').applyOptions({
                 scaleMargins: { top: 0.8, bottom: 0 },
             });
         }

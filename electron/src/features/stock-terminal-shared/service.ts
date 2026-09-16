@@ -10,7 +10,7 @@
 import axios, { AxiosInstance } from 'axios';
 import { SERVICE_ENDPOINTS, resolveWebSafeServiceBase } from '../../config/services';
 import { authService } from '../auth/services/authService';
-import { KlineBar, KlineMarker, KlineSplitsEvent, StockListResponse, StockProfile } from './types';
+import { KlineBar, KlineMarker, KlineSplitsEvent, StockListResponse, StockProfile, type TradeMarker } from './types';
 
 /** 复权方式：qfq=前复权（默认）/ hfq=后复权 / none=不复权。仅 A 股日线后端真正支持三种；港股/美股固定 none */
 export type KlineAdjust = 'qfq' | 'hfq' | 'none';
@@ -215,6 +215,21 @@ export class StockTerminalService {
    */
   async getKlineMarkers(_symbol: string, _start?: string, _end?: string): Promise<KlineMarker[]> {
     return [];
+  }
+
+  /**
+   * 模拟成交标记（T-FE-08 个股 K 线买卖点，含理由/订单号）：用户级；失败返回空数组（不阻断绘图）。
+   */
+  async getTradeMarks(symbol: string, days = 250): Promise<TradeMarker[]> {
+    try {
+      const resp = await this.client.get('/stock-terminal/trade-marks', {
+        params: { symbol, days },
+      });
+      const items = resp.data?.data?.items ?? [];
+      return Array.isArray(items) ? (items as TradeMarker[]) : [];
+    } catch {
+      return [];
+    }
   }
 
   async getIndexKline(symbol: string, days = 500): Promise<{ date: string; close: number }[]> {

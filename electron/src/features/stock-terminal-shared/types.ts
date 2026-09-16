@@ -139,3 +139,15 @@ export interface KlineBar {
 }
 
 export type Exchange = 'SH' | 'SZ' | 'BJ';
+
+/** 模拟交易点（K 线买卖标记；T-FE-08 下钻：理由/订单号） */
+export interface TradeMarker {
+  date: string;
+  side: 'buy' | 'sell';
+  price: number;
+  shares: number;
+  reason?: string;
+  order_id?: string;
+  amount?: number;
+  fee?: number;
+}

@@ -8,17 +8,19 @@
  * 市场差异全部来自 useStockTerminal() 的主题与服务，本文件不含任何市场判断。
  */
 
-import { useCallback, useEffect, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { CandlestickChart, Search, Layers, Building2, Database, TrendingUp, TrendingDown } from 'lucide-react';
 import { message, Select } from 'antd';
 import { PAGE_LAYOUT } from '../../../config/pageLayout';
 import { useStockTerminal } from '../adapter';
-import { StockListItem, StockProfile, KlineBar, KlineMarker } from '../types';
+import { StockListItem, StockProfile, KlineBar, KlineMarker, type TradeMarker } from '../types';
 import type { KlineAdjust } from '../service';
 import { modelTrainingService } from '../../../services/modelTrainingService';
 import { StockSearchBar } from '../components/StockSearchBar';
 import type { Point as ScorePoint } from '../components/InferenceScoreChart';
-import { KlineChart } from '../components/KlineChart';
+import { KlineChart, type SignalPoint } from '../components/KlineChart';
+import { DrillDownDrawer } from '../../shared/DrillDownDrawer';
+import { signalPointDrillEntries, tradeMarkerDrillEntries } from '../utils';
 
 export interface DetailRenderContext {
   symbol: string;
@@ -75,6 +77,14 @@ export default function StockTerminalShell({ renderDetail, renderHeaderExtra, re
   const [barsLoading, setBarsLoading] = useState(false);
   /** K 线事件竖线（美股拆股）；A 股/港股服务默认返回空数组 */
   const [markers, setMarkers] = useState<KlineMarker[]>([]);
+  // T-FE-08：模拟成交换手标记 + 点击下钻抽屉（买卖点 → 理由/订单号来源链）
+  const [trades, setTrades] = useState<TradeMarker[]>([]);
+  const [drill, setDrill] = useState<{
+    title: string;
+    subtitle?: string;
+    entries: Array<{ label: string; value: string; source?: string; hint?: string }>;
+    raw: unknown;
+  } | null>(null);
   const [period, setPeriod] = useState<'daily' | 'weekly' | 'monthly'>('daily');
   const [adjust, setAdjust] = useState<KlineAdjust>(theme.defaultAdjust);
   const [signalDate, setSignalDate] = useState<string | undefined>(undefined);
@@ -208,6 +218,15 @@ export default function StockTerminalShell({ renderDetail, renderHeaderExtra, re
       .catch(() => {
         if (!cancelled) setMarkers([]);
       });
+    // 模拟成交标记（T-FE-08 买卖点；用户级，失败空数组不阻断绘图）
+    service
+      .getTradeMarks(selected.symbol, 500)
+      .then((ts) => {
+        if (!cancelled) setTrades(ts ?? []);
+      })
+      .catch(() => {
+        if (!cancelled) setTrades([]);
+      });
     return () => {
       cancelled = true;
     };
@@ -227,6 +246,15 @@ export default function StockTerminalShell({ renderDetail, renderHeaderExtra, re
         profile,
       }
     : null;
+
+  // T-FE-08：信号三角与分数副图同源（同一模型/同一取数），只取 BUY/SELL
+  const signals = useMemo<SignalPoint[]>(
+    () =>
+      scorePoints
+        .filter((p) => p.side === 'BUY' || p.side === 'SELL')
+        .map((p) => ({ date: p.date, fusion: p.value, side: String(p.side) })),
+    [scorePoints]
+  );
 
   return (
     /* 底部 pb-[84px]：给悬浮 Dock 菜单栏（64px）留出空间，避免遮挡 K线图底部的缩放条 */
@@ -345,7 +373,24 @@ export default function StockTerminalShell({ renderDetail, renderHeaderExtra, re
                     <div className="h-full flex items-center justify-center text-xs text-slate-400">K线加载中…</div>
                   ) : bars.length ? (
                     <div className="flex-1 min-h-0">
-                      <KlineChart bars={bars} config={{ ma: true, boll: false, subplots: ['vol'] }} overlays={[]} period={period} scorePoints={scorePoints.map((p) => ({ date: p.date, value: p.value }))} showScoreSubplot={true} markers={markers} zoomStart={zoomStart} zoomEnd={100} />
+                      <KlineChart bars={bars} config={{ ma: true, boll: false, subplots: ['vol'] }} overlays={[]} period={period} scorePoints={scorePoints.map((p) => ({ date: p.date, value: p.value }))} showScoreSubplot={true} markers={markers} signals={signals} trades={trades} adjust={adjust} zoomStart={zoomStart} zoomEnd={100}
+                        onTradeClick={(m) =>
+                          setDrill({
+                            title: `${m.side === 'buy' ? '买入' : '卖出'} ${selected?.symbol ?? ''} · ${m.date}`,
+                            subtitle: '模拟成交（sim_trades）——点击来源可核对',
+                            entries: tradeMarkerDrillEntries(m),
+                            raw: m,
+                          })
+                        }
+                        onSignalClick={(sig) =>
+                          setDrill({
+                            title: `信号 ${sig.side} · ${sig.date}`,
+                            subtitle: '推理信号（与分数副图同源同模型）',
+                            entries: signalPointDrillEntries(sig),
+                            raw: sig,
+                          })
+                        }
+                      />
                     </div>
                   ) : (
                     <div className="h-full flex items-center justify-center text-xs text-slate-400">暂无K线</div>
@@ -437,6 +482,15 @@ export default function StockTerminalShell({ renderDetail, renderHeaderExtra, re
           </div>
         )}
       </div>
+
+      <DrillDownDrawer
+        open={!!drill}
+        title={drill?.title || ''}
+        subtitle={drill?.subtitle}
+        entries={drill?.entries || []}
+        raw={drill?.raw}
+        onClose={() => setDrill(null)}
+      />
     </div>
   );
 }

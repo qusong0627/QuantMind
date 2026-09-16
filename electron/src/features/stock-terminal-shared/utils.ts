@@ -28,3 +28,60 @@ export function fmtCapUsd(v: number | null | undefined): string {
   if (abs >= 1e4) return `$${(v / 1e4).toFixed(1)}万`;
   return `$${v.toFixed(0)}`;
 }
+
+/** 交易标记 → 下钻条目（T-FE-08：买卖点点击的来源链；缺失字段如实「—」，不推断） */
+export function tradeMarkerDrillEntries(marker: {
+  date: string;
+  side: 'buy' | 'sell';
+  price: number;
+  shares: number;
+  reason?: string;
+  order_id?: string;
+  amount?: number;
+  fee?: number;
+}): Array<{ label: string; value: string; source?: string; hint?: string }> {
+  const entries = [
+    { label: '方向', value: marker.side === 'buy' ? '买入' : '卖出' },
+    { label: '日期', value: marker.date || '—' },
+    { label: '成交价', value: Number(marker.price || 0).toFixed(2) },
+    { label: '数量（股）', value: String(marker.shares ?? '—') },
+    {
+      label: '成交金额',
+      value: marker.amount !== undefined ? Number(marker.amount).toFixed(2) : '—',
+    },
+    {
+      label: '费用',
+      value: marker.fee !== undefined ? Number(marker.fee).toFixed(2) : '—',
+      source: 'sim_trades.total_fee（佣金+印花税+过户费）',
+    },
+    {
+      label: '理由（下单备注）',
+      value: marker.reason || '—',
+      hint: marker.reason ? undefined : '该笔成交未带备注（历史单或人工单）',
+    },
+    {
+      label: '订单号',
+      value: marker.order_id || '—',
+      source: 'sim_trades.order_id ⋈ sim_orders',
+    },
+  ];
+  return entries;
+}
+
+/** 信号标记 → 下钻条目（T-FE-08：信号三角点击；与分数副图同一模型/同一来源） */
+export function signalPointDrillEntries(signal: {
+  date: string;
+  side: string;
+  fusion: number | null;
+}): Array<{ label: string; value: string; source?: string; hint?: string }> {
+  return [
+    { label: '方向', value: signal.side === 'BUY' ? '买入信号' : signal.side === 'SELL' ? '卖出信号' : signal.side },
+    { label: '日期', value: signal.date || '—' },
+    {
+      label: '推理分数',
+      value: signal.fusion === null || signal.fusion === undefined ? '—' : Number(signal.fusion).toFixed(6),
+      source: 'engine_signal_scores.fusion_score（与分数副图同源）',
+      hint: '分数仅同日内排序有效；跨模型不可比，阈值按 rank_pct 分位口径',
+    },
+  ];
+}

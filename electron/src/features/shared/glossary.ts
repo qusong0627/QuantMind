@@ -122,6 +122,28 @@ export const GLOSSARY: Record<string, GlossaryEntry> = {
     category: '评分',
   },
 
+  max_drawdown: {
+    plain: '最大回撤（从最高点最多跌过多少）',
+    detail: '区间内净值相对历史峰值的最大跌幅（水下曲线取最小值）。负值越大风险越高；策略红线 MDD ≤ -50%。',
+    category: '通用',
+  },
+  sharpe: {
+    plain: '夏普比率（每承担一分波动赚多少）',
+    detail: '年化：均值/波动 × √252（rf=0 口径）。样本 <2 或波动为 0 → 不计算（—）。',
+    category: '通用',
+  },
+
+  kline_adjust: {
+    plain: '复权口径（分红送股后价格是否折算）',
+    detail: '前复权（qfq）：历史价按复权因子折算，均线/形态可比；不复权（none）：真实成交价，事件跳变会失真。口径变更会改变价格可比性，图内角标提示当前口径。',
+    category: '行情',
+  },
+  trade_mark: {
+    plain: 'K 线上的买卖点（模拟成交）',
+    detail: '来自 sim_trades（含理由 remarks 与订单号）；点击标记可下钻到该笔成交的来源与理由。',
+    category: '行情',
+  },
+
   // ── 执行/交易 ─────────────────────────────────────────────
   dry_run: {
     plain: '计划预演：按同样规则算给你看，不会真下单',
