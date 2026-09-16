@@ -123,6 +123,7 @@ async def run_simulation_cycle_for_active(
     live_trade_config: dict[str, Any] | None = None,
     run_id: str | None = None,
     exclude_symbols: set[str] | None = None,
+    quantity_overrides: dict[tuple[str, str], int] | None = None,
 ) -> dict[str, Any]:
     """托管模拟盘唯一执行入口：RebalanceCalculator + ashare_matcher。"""
     from backend.services.simulation.engine import simulation_engine
@@ -139,8 +140,14 @@ async def run_simulation_cycle_for_active(
         params_override=params_override or None,
         pool_id=cfg.get("pool_id"),
         exclude_symbols=exclude_symbols,
+        quantity_overrides=quantity_overrides,
     )
-    return report_to_hosted_result(report)
+    result = report_to_hosted_result(report)
+    # T-FE-05 v2：人工改量裁定随报告透传（前端如实展示 applied/ignored）
+    adjustments = getattr(report, "quantity_adjustments", None)
+    if adjustments:
+        result["quantity_adjustments"] = list(adjustments)
+    return result
 
 
 async def preview_simulation_plan_for_active(
@@ -188,14 +195,15 @@ async def execute_simulation_plan_for_active(
     strategy_id: str,
     live_trade_config: dict[str, Any] | None = None,
     exclude_symbols: set[str] | None = None,
+    quantity_overrides: dict[tuple[str, str], int] | None = None,
     run_id: str | None = None,
 ) -> dict[str, Any]:
     """交易台"一键执行"（T-FE-05，人工触发一次调仓）——**与托管调度共用唯一执行入口**
     ``run_simulation_cycle_for_active``（RebalanceCalculator + ashare_matcher；
-    风控买锁/退出规则全量生效；退出规则单**不接受** exclude_symbols 排除）。
+    风控买锁/退出规则全量生效；退出规则单**不接受** exclude_symbols 排除与数量改写）。
 
     防重与只读纪律在调用方（desk 端点：60s Redis 锁 + 仅模拟盘）。
-    返回 report_to_hosted_result 形态的执行报告。
+    返回 report_to_hosted_result 形态的执行报告（含 quantity_adjustments 裁定）。
     """
     cfg = _normalize_live_trade_config(live_trade_config)
     return await run_simulation_cycle_for_active(
@@ -205,6 +213,7 @@ async def execute_simulation_plan_for_active(
         live_trade_config=cfg,
         run_id=run_id,
         exclude_symbols=exclude_symbols,
+        quantity_overrides=quantity_overrides,
     )
 
 

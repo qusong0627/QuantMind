@@ -588,6 +588,46 @@ def parse_exclude_symbols(raw: str | None, max_items: int = 50) -> set[str]:
     return set(items[:max_items])
 
 
+def parse_quantity_overrides(raw: Any, max_items: int = 50) -> dict[tuple[str, str], int]:
+    """人工改量载荷解析（纯函数，T-FE-05 v2）——**fail-fast，不静默丢改量**。
+
+    接受 [{symbol, side, quantity}, ...]；任何一条不合法（缺字段/方向非法/数量非正整数/
+    重复键/超上限）都抛 ValueError 由端点转 400——资金相关的人工调整不做静默降级。
+    """
+    if raw is None:
+        return {}
+    if not isinstance(raw, list):
+        raise ValueError("quantity_overrides 必须为数组")
+    if len(raw) > max_items:
+        raise ValueError(f"quantity_overrides 超过上限 {max_items} 条")
+    result: dict[tuple[str, str], int] = {}
+    for i, item in enumerate(raw):
+        if not isinstance(item, dict):
+            raise ValueError(f"quantity_overrides[{i}] 必须为对象")
+        symbol = str(item.get("symbol") or "").strip()
+        side = str(item.get("side") or "").strip().upper()
+        if not symbol:
+            raise ValueError(f"quantity_overrides[{i}] 缺少 symbol")
+        if side not in {"BUY", "SELL"}:
+            raise ValueError(f"quantity_overrides[{i}] side 必须为 BUY/SELL")
+        raw_qty = item.get("quantity")
+        if isinstance(raw_qty, bool):  # bool 是 int 子类，显式拒绝
+            raise ValueError(f"quantity_overrides[{i}] quantity 必须为整数")
+        if isinstance(raw_qty, float) and not raw_qty.is_integer():
+            raise ValueError(f"quantity_overrides[{i}] quantity 必须为整数（不接受小数）")
+        try:
+            quantity = int(raw_qty)
+        except (TypeError, ValueError):
+            raise ValueError(f"quantity_overrides[{i}] quantity 必须为整数") from None
+        if quantity <= 0:
+            raise ValueError(f"quantity_overrides[{i}] quantity 必须为正整数")
+        key = (symbol, side)
+        if key in result:
+            raise ValueError(f"quantity_overrides 重复条目: {symbol} {side}")
+        result[key] = quantity
+    return result
+
+
 def _resolve_active_strategy(tenant_id: str, raw_user: str) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
     """活跃策略解析（预演/执行唯一共用）→ (payload, error_block)。"""
     source = "redis:trade:active_strategy"
@@ -671,10 +711,15 @@ async def execute_plan(
 
     ① 动作可用性：须有活跃策略且为 SIMULATION（REAL 走另有确认链，此处拒绝）；
     ② 防重：同一策略 60s 内只允许触发一次（Redis NX 锁，重复 → 429 附剩余秒数）；
-    ③ 风控不可绕过：退出规则单不接受 exclude_symbols（引擎侧全量生效）。
+    ③ 风控不可绕过：退出规则单不接受 exclude_symbols 排除，也**不接受人工改量**
+       （quantity_overrides 对退出单一律拒改并如实记录裁定）。
 
     执行与托管调度共用唯一入口 run_simulation_cycle_for_active（RebalanceCalculator +
     ashare_matcher）——计划预演与真实执行天然同源。
+
+    人工改量（T-FE-05 v2）：body.quantity_overrides = [{symbol, side, quantity}, ...]；
+    载荷不合法一律 400（fail-fast，资金相关调整不静默降级）；未命中当前计划的条目
+    在 report.quantity_adjustments 中如实裁定（不猜测、不补单）。
     """
     from backend.services.trade_shared.redis_client import get_redis as get_trade_redis
 
@@ -689,6 +734,11 @@ async def execute_plan(
         exclude_symbols = parse_exclude_symbols(",".join(str(x) for x in exclude_raw))
     else:
         exclude_symbols = set()
+
+    try:
+        quantity_overrides = parse_quantity_overrides(body.get("quantity_overrides"))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"人工改量载荷不合法: {exc}") from exc
 
     active, error_block = _resolve_active_strategy(tenant_id, raw_user)
     if error_block is not None:
@@ -737,6 +787,7 @@ async def execute_plan(
             strategy_id=strategy_id,
             live_trade_config=live_cfg,
             exclude_symbols=exclude_symbols or None,
+            quantity_overrides=quantity_overrides or None,
         )
     except Exception as exc:  # noqa: BLE001 - 执行失败如实返回（不吞）
         logger.error("desk plan execute failed: %s", exc, exc_info=True)
@@ -748,6 +799,10 @@ async def execute_plan(
             "strategy_id": strategy_id,
             "mode": mode,
             "excluded": sorted(exclude_symbols),
+            "quantity_overrides": [
+                {"symbol": symbol, "side": side, "quantity": qty}
+                for (symbol, side), qty in sorted(quantity_overrides.items())
+            ],
             "report": report,
             "source": "run_simulation_cycle_for_active（与托管调度同一执行入口）",
         },

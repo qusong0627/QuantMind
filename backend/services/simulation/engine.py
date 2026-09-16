@@ -8,7 +8,7 @@ import json
 import logging
 import math
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime
 from typing import Any
 
@@ -35,7 +35,9 @@ from backend.services.simulation.services.rebalance_calculator import (
     WeightMode,
 )
 from backend.services.simulation.services.market_rules import (
+    infer_market,
     infer_market_from_symbols,
+    normalize_order_quantity,
     rules_for,
 )
 from backend.services.simulation.services.signal_loader import (
@@ -73,6 +75,89 @@ class ExecutionReport:
     # T-FE-05：计划预演（dry_run=True 时填 planned_orders，不执行撮合/不落账）
     dry_run: bool = False
     planned_orders: list[dict[str, Any]] = field(default_factory=list)
+    # T-FE-05 可调 v2：人工改量的逐条裁定记录（applied/ignored，含原因——不静默）
+    quantity_adjustments: list[dict[str, Any]] = field(default_factory=list)
+
+
+def apply_quantity_overrides(
+    orders: list[Order],
+    overrides: dict[tuple[str, str], int] | None,
+    *,
+    exit_order_count: int = 0,
+    market: str | None = None,
+) -> tuple[list[Order], list[dict[str, Any]]]:
+    """人工改量（T-FE-05 审后调整 v2）——**申报数量人工覆盖的唯一实现**。
+
+    纪律（与 exclude_symbols 同族的机构口径）：
+    - 退出规则单（前 ``exit_order_count`` 条，kind=exit）**不可改量**——风控动作不接受人工调整；
+    - 覆盖键 (symbol, side) 必须命中本轮**真实计算**出的非退出单；两轮之间行情变化可能让
+      计划单消失——未命中一律如实记入 ignored，**不猜测、不补单**；
+    - 数量经 ``normalize_order_quantity`` 归一（申报单位唯一实现：科创板 200 起 1 股递增，
+      主板/创业板整手向下取整）；归一后 ≤0（低于最小申报）该单拒改，如实记录；
+    - **不改价格、不改方向、不新增单**——人工只能调量，不能越权构造订单。
+    """
+    result = list(orders)
+    records: list[dict[str, Any]] = []
+    if not overrides:
+        return result, records
+
+    exit_n = max(0, int(exit_order_count))
+    seen_keys: set[tuple[str, str]] = set()
+    for idx, order in enumerate(result):
+        key = (str(order.symbol), str(order.side).upper())
+        if key not in overrides:
+            continue
+        seen_keys.add(key)
+        requested = int(overrides[key])
+        if idx < exit_n:
+            records.append(
+                {
+                    "symbol": order.symbol,
+                    "side": order.side,
+                    "requested": requested,
+                    "applied": None,
+                    "reason": "退出规则单不可改量（风控动作不绕过）",
+                }
+            )
+            continue
+        order_market = market if market else infer_market(order.symbol)
+        normalized = normalize_order_quantity(requested, order.symbol, order_market)
+        if normalized <= 0:
+            records.append(
+                {
+                    "symbol": order.symbol,
+                    "side": order.side,
+                    "requested": requested,
+                    "applied": None,
+                    "reason": "低于最小申报数量，拒改",
+                }
+            )
+            continue
+        result[idx] = replace(order, quantity=int(normalized))
+        records.append(
+            {
+                "symbol": order.symbol,
+                "side": order.side,
+                "requested": requested,
+                "from": int(order.quantity),
+                "to": int(normalized),
+                "applied": True,
+            }
+        )
+
+    for key, requested in overrides.items():
+        if key in seen_keys:
+            continue
+        records.append(
+            {
+                "symbol": key[0],
+                "side": key[1],
+                "requested": int(requested),
+                "applied": None,
+                "reason": "本次计划中不存在同标的同方向单（行情变化可能已撤单），未应用",
+            }
+        )
+    return result, records
 
 
 class SimulationEngine:
@@ -112,6 +197,7 @@ class SimulationEngine:
         pool_id: str | None = None,
         dry_run: bool = False,
         exclude_symbols: set[str] | None = None,
+        quantity_overrides: dict[tuple[str, str], int] | None = None,
     ) -> ExecutionReport:
         """
         执行一次模拟盘调仓周期。
@@ -129,6 +215,9 @@ class SimulationEngine:
                 结果进 ``report.planned_orders``。任何写副作用路径都必须跳过。
             exclude_symbols: 人工排除集（T-FE-05 审后可调 v1）——命中的标的**不参与调仓**；
                 **退出规则单不受排除影响**（风控退出不可被人工绕过，机构口径）。
+            quantity_overrides: 人工改量（T-FE-05 审后可调 v2），键 (symbol, side) → 申报数量；
+                **退出规则单不受改量影响**（风控动作不绕过）；未命中/归一失败不静默——
+                逐条裁定记入 ``report.quantity_adjustments``（见 ``apply_quantity_overrides``）。
 
         Returns:
             执行报告（dry_run 时 executed_at 仅为计算时刻）
@@ -310,6 +399,23 @@ class SimulationEngine:
                 )
                 orders = exit_orders + orders
                 report.order_count = len(orders)
+
+                # 4.6 人工改量（T-FE-05 v2）：只动调仓单的数量，退出规则单与价格/方向不可改；
+                #     逐条裁定进 report（未命中/拒改不静默）
+                if quantity_overrides:
+                    orders, adjustments = apply_quantity_overrides(
+                        orders,
+                        quantity_overrides,
+                        exit_order_count=len(exit_orders),
+                        market=market,
+                    )
+                    report.quantity_adjustments = adjustments
+                    logger.info(
+                        "SimulationEngine: 人工改量 tenant=%s user=%s 裁定=%d 条",
+                        tenant,
+                        uid,
+                        len(adjustments),
+                    )
 
                 if dry_run:
                     # T-FE-05 计划预演：同源计算（退出+调仓+风控买锁）→ 只报告不执行
