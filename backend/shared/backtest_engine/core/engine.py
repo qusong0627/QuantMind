@@ -550,9 +550,10 @@ class BacktestEngine:
         """执行订单（支持多头买卖和融券做空/平空）"""
         # 计算执行价格（考虑滑点）
         if order.side in (OrderSide.BUY, OrderSide.BUY_TO_COVER):
-            execution_price = market_data["close"] * (1 + self.slippage_rate)
+            # T-P2-05：成交价 round(4) 与模拟撮合器（ashare_matcher）逐位对齐——parity diff=0 前提
+            execution_price = round(market_data["close"] * (1 + self.slippage_rate), 4)
         else:
-            execution_price = market_data["close"] * (1 - self.slippage_rate)
+            execution_price = round(market_data["close"] * (1 - self.slippage_rate), 4)
 
         # T-P2-02：手数取整 + 费用唯一实现（market_rules；回测/模拟同源）
         from backend.services.simulation.services.market_rules import (
