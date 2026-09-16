@@ -19,7 +19,6 @@ import {
   Cpu,
   CandlestickChart,
   Sigma, Gauge } from 'lucide-react';
-import { UiModeToggle } from '../../features/shared/UiModeToggle';
 import { useSelector } from 'react-redux';
 import { selectCurrentMarket } from '../../store/slices/uiSlice';
 import { getMarketConfig } from '../../config/marketConfig';
@@ -113,9 +112,6 @@ export const FloatingNavBar: React.FC<FloatingNavBarProps> = ({ current, onChang
             )}
           </React.Fragment>
         ))}
-        {/* T-FE-02 简单/专业模式：全页面常驻（页面级布局无顶栏） */}
-        <span className="dock-divider" aria-hidden="true" />
-        <UiModeToggle compact />
       </div>
     </nav>
   );

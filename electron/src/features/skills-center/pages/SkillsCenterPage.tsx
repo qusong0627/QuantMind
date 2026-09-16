@@ -14,6 +14,7 @@ import ReportManagerPage from '../../trading-agents/pages/ReportManagerPage';
 import PdfPreview from '../../trading-agents/components/PdfPreview';
 import { FactorReportPanel } from '../components/factor-report/FactorReportPanel';
 import { EvalCenterPanel } from '../components/eval-center/EvalCenterPanel';
+import { UiModeToggle } from '../../shared/UiModeToggle';
 import { PROMPTS } from '../prompts.generated';
 import { SERVICE_URLS } from '../../../config/services';
 
@@ -42,6 +43,8 @@ const SkillsCenterPage: React.FC = () => {
             </div>
           </div>
           <div className="flex items-center gap-2 shrink-0">
+            {/* T-FE-02 简单/专业模式（页面内切换；全局偏好持久化） */}
+            <UiModeToggle />
             {/* 页签：提示词库 / 因子报告 */}
             <div className="flex items-center gap-1 rounded-full bg-slate-100 border border-slate-200 p-0.5">
               <button
