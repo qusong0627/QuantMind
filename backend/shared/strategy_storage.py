@@ -451,6 +451,24 @@ class StrategyStorageService:
                         new_version,
                         cur_status,
                     )
+                # T-FE-10：内容变更留版本快照（同事务；失败不阻断——审计增强）
+                if content_changed:
+                    from backend.shared.strategy_version_contract import (
+                        record_strategy_version,
+                    )
+
+                    record_strategy_version(
+                        session,
+                        strategy_id=sid,
+                        version=new_version,
+                        user_id=uid_int,
+                        name=name,
+                        code=code,
+                        parameters=parameters if provided_params else (current[3] or {}),
+                        execution_config=execution_config if provided_exec else (current[4] or {}),
+                        status=cur_status,
+                        code_hash=hash_val,
+                    )
                 return strategy_id
             else:
                 # INSERT
@@ -475,6 +493,24 @@ class StrategyStorageService:
                     ) RETURNING id
                 """
                 row = session.execute(text(sql), params).scalar()
+                # T-FE-10：新建策略留 v1 快照（同事务；失败不阻断）
+                if row is not None:
+                    from backend.shared.strategy_version_contract import (
+                        record_strategy_version,
+                    )
+
+                    record_strategy_version(
+                        session,
+                        strategy_id=int(row),
+                        version=1,
+                        user_id=uid_int,
+                        name=name,
+                        code=code,
+                        parameters=parameters,
+                        execution_config=execution_config,
+                        status=status,
+                        code_hash=hash_val,
+                    )
                 return str(row)
 
     # ------------------------------------------------------------------

@@ -1039,6 +1039,64 @@ async def sync_templates(request: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/{strategy_id}/versions")
+async def list_strategy_versions(
+    strategy_id: str,
+    request: Request,
+    limit: int = 20,
+    include_content: bool = True,
+):
+    """策略版本历史（T-FE-10）：近 limit 个内容快照（版本 diff 的数据源）。
+
+    ``include_content=false`` 只回元数据（版本/时间/状态/哈希），默认带 code/parameters 供前端 diff。
+    """
+    user_id = _get_user_id(request)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="未认证")
+    sid_text = str(strategy_id or "").strip()
+    if not sid_text.isdigit():
+        raise HTTPException(status_code=400, detail="strategy_id 须为数字")
+
+    def _load() -> list[dict]:
+        from sqlalchemy import text as _text
+
+        from backend.shared.strategy_storage import _ensure_int_user_id, get_db
+
+        uid_int = _ensure_int_user_id(user_id)
+        cols = (
+            "version, name, status, code_hash, created_at, parameters, execution_config"
+            + (", code" if include_content else "")
+        )
+        with get_db() as session:
+            rows = session.execute(
+                _text(
+                    f"SELECT {cols} FROM strategy_versions "
+                    "WHERE strategy_id = :sid AND user_id = :uid "
+                    "ORDER BY version DESC LIMIT :n"
+                ),
+                {"sid": int(sid_text), "uid": uid_int, "n": max(1, min(int(limit), 50))},
+            ).mappings().all()
+        return [
+            {
+                **{k: (v.isoformat() if hasattr(v, "isoformat") else v) for k, v in dict(r).items()},
+            }
+            for r in rows
+        ]
+
+    try:
+        versions = await asyncio.to_thread(_load)
+    except Exception as exc:  # noqa: BLE001 - 契约缺表/查询失败按空历史（前端显示"暂无版本记录"）
+        StructuredTaskLogger(logger, "user-strategies").warning(
+            "versions_query_failed", "版本历史查询失败", error=str(exc)
+        )
+        versions = []
+    return {
+        "success": True,
+        "data": {"versions": versions},
+        "meta": {"count": len(versions), "source": "db:strategy_versions（保存时同事务留快照）"},
+    }
+
+
 # --- 动态路径参数 ---
 
 
