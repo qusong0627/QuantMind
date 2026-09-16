@@ -114,6 +114,31 @@ export interface ShadowBlock {
   source: string;
 }
 
+export interface EvidenceItem {
+  id: string;
+  name: string;
+  level: string;
+  detail: string;
+  suggestion?: string;
+  source?: string;
+}
+
+export interface EvidenceRing {
+  key: string;
+  label: string;
+  artifact: string;
+  frequency: string;
+  level: 'ok' | 'warn' | 'fail' | 'no_evidence' | string;
+  summary: string;
+  items: EvidenceItem[];
+}
+
+export interface EvidenceBlock {
+  rings: EvidenceRing[];
+  no_evidence: string[];
+  source: string;
+}
+
 export interface DeskToday {
   as_of: string;
   tenant_id: string;
@@ -126,6 +151,7 @@ export interface DeskToday {
   pnl: PnlBlock;
   shadow: ShadowBlock;
   health: HealthBlock;
+  evidence?: EvidenceBlock;
 }
 
 export interface DeskTodayResponse {

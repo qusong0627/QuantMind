@@ -8,10 +8,11 @@ import { Gauge, RefreshCw } from 'lucide-react';
 import { PAGE_LAYOUT } from '../../config/pageLayout';
 import { getDeskToday } from './services/deskService';
 import type { DeskToday } from './types';
-import { pipelineSummary, planDrillEntries, pnlDrillEntries, statusStyle } from './deskModel';
+import { evidenceRingDrillEntries, pipelineSummary, planDrillEntries, pnlDrillEntries, statusStyle } from './deskModel';
 import { DrillDownDrawer, type DrillEntry } from '../shared/DrillDownDrawer';
 import { UiModeToggle } from '../shared/UiModeToggle';
 import { PipelineBar } from './components/PipelineBar';
+import { EvidenceMatrix } from './components/EvidenceMatrix';
 import { PlanCard } from './components/PlanCard';
 import { ExecutionCard, HealthCard, PnlCard, SignalsCard } from './components/DeskCards';
 
@@ -126,6 +127,18 @@ const DeskTodayPage: React.FC = () => {
                 </div>
                 <ExecutionCard execution={desk.execution} />
               </div>
+
+              <EvidenceMatrix
+                evidence={desk.evidence}
+                onDrill={(ring) =>
+                  setDrawer({
+                    title: `证据环 · ${ring.label}（${statusStyle(ring.level).label}）`,
+                    subtitle: `${ring.artifact} · ${ring.frequency}——每项可核对来源`,
+                    entries: evidenceRingDrillEntries(ring) as DrillEntry[],
+                    raw: ring,
+                  })
+                }
+              />
 
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
                 <PnlCard

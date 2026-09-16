@@ -27,6 +27,8 @@ const STATUS_STYLES: Record<string, StatusStyle> = {
   warn: { label: '警告', dot: 'bg-amber-500', text: 'text-amber-600' },
   fail: { label: '异常', dot: 'bg-rose-600', text: 'text-rose-700' },
   unknown: { label: '未运行', dot: 'bg-slate-300', text: 'text-slate-500' },
+  // T-FE-16：无证据 ≠ 绿——独立灰态（验收要求任一环节"无证据"可见）
+  no_evidence: { label: '无证据', dot: 'bg-slate-200 border border-dashed border-slate-400', text: 'text-slate-400' },
 };
 
 export function statusStyle(status: string | undefined): StatusStyle {
@@ -232,4 +234,47 @@ export function excludedSymbolsFromPlan(
   return orders
     .filter((order, index) => excludedIndexes.has(index) && order.kind !== 'exit')
     .map((order) => order.symbol);
+}
+
+export interface EvidenceSummary {
+  ok: number;
+  warn: number;
+  fail: number;
+  noEvidence: number;
+  gapLabels: string[];
+}
+
+/** 证据矩阵汇总（纯函数）：各态计数 + 无证据环名单（前端首行横幅用） */
+export function evidenceSummary(rings: import('./types').EvidenceRing[] | null | undefined): EvidenceSummary {
+  const list = rings || [];
+  const out: EvidenceSummary = { ok: 0, warn: 0, fail: 0, noEvidence: 0, gapLabels: [] };
+  for (const ring of list) {
+    if (ring.level === 'ok') out.ok += 1;
+    else if (ring.level === 'warn') out.warn += 1;
+    else if (ring.level === 'fail') out.fail += 1;
+    else {
+      out.noEvidence += 1;
+      out.gapLabels.push(ring.label);
+    }
+  }
+  return out;
+}
+
+/** 证据环 → 下钻条目（T-FE-16：每格下钻至证据项原文/来源） */
+export function evidenceRingDrillEntries(
+  ring: import('./types').EvidenceRing | null | undefined
+): Array<{ label: string; value: string; source?: string; hint?: string }> {
+  if (!ring) return [];
+  const head = [
+    { label: '环节', value: ring.label },
+    { label: '状态', value: statusStyle(ring.level).label },
+    { label: '证据产物', value: `${ring.artifact}（${ring.frequency}）` },
+  ];
+  const items = (ring.items || []).map((item) => ({
+    label: `${item.name}（${item.id}）`,
+    value: statusStyle(item.level).label,
+    source: item.source,
+    hint: [item.detail, item.suggestion ? `建议：${item.suggestion}` : ''].filter(Boolean).join(' — '),
+  }));
+  return [...head, ...items];
 }

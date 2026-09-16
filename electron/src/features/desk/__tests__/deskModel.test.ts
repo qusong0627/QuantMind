@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import type { PipelineStep, PlanBlock, PlanOrder } from '../../types';
+import type { EvidenceRing, PipelineStep, PlanBlock, PlanOrder } from '../../types';
 import {
   buildExecuteSelection,
+  evidenceRingDrillEntries,
+  evidenceSummary,
   excludedSymbolsFromPlan,
   executionSummary,
   formatMoney,
@@ -208,5 +210,47 @@ describe('一键执行选择模型（T-FE-05）', () => {
   it('空计划不抛错', () => {
     expect(buildExecuteSelection(undefined, new Set()).executableCount).toBe(0);
     expect(excludedSymbolsFromPlan(null, new Set<number>())).toEqual([]);
+  });
+});
+
+describe('证据矩阵（T-FE-16）', () => {
+  const ring = (over: Partial<EvidenceRing>): EvidenceRing => ({
+    key: 'data', label: '数据', artifact: '数据质检报告', frequency: '每日',
+    level: 'ok', summary: '已同步', items: [], ...over,
+  });
+
+  it('汇总：四态计数 + 无证据环名单（无证据 ≠ 绿）', () => {
+    const summary = evidenceSummary([
+      ring({ level: 'ok' }), ring({ level: 'warn' }), ring({ level: 'fail' }),
+      ring({ level: 'no_evidence', label: '特征' }), ring({ level: 'no_evidence', label: '模拟' }),
+    ]);
+    expect(summary).toMatchObject({ ok: 1, warn: 1, fail: 1, noEvidence: 2 });
+    expect(summary.gapLabels).toEqual(['特征', '模拟']);
+    expect(evidenceSummary(null).noEvidence).toBe(0);
+  });
+
+  it('no_evidence 状态样式为灰态「无证据」（专属样式，不是"未运行"）', () => {
+    expect(statusStyle('no_evidence').label).toBe('无证据');
+    expect(statusStyle('no_evidence').dot).toContain('dashed');
+  });
+
+  it('下钻条目：环头三行 + 逐证据项（detail 与建议进 hint、来源保留）', () => {
+    const entries = evidenceRingDrillEntries(
+      ring({
+        items: [
+          { id: 'C05', name: '台账写入', level: 'fail', detail: '1 笔无台账', suggestion: '查 ledger', source: 'health:C05' },
+        ],
+      })
+    );
+    expect(entries[0]).toMatchObject({ label: '环节', value: '数据' });
+    expect(entries[1]).toMatchObject({ label: '状态', value: '正常' });
+    expect(entries[2].value).toContain('数据质检报告');
+    const item = entries[3];
+    expect(item.label).toContain('台账写入');
+    expect(item.value).toBe('异常');
+    expect(item.hint).toContain('1 笔无台账');
+    expect(item.hint).toContain('建议：查 ledger');
+    expect(item.source).toBe('health:C05');
+    expect(evidenceRingDrillEntries(null)).toEqual([]);
   });
 });
