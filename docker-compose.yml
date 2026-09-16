@@ -313,9 +313,13 @@ services:
       - QM_TDX_DIR=${QM_TDX_DIR:-/data/third_party/tdx}
       - QM_INVESTMENT_DATA_DIR=${QM_INVESTMENT_DATA_DIR:-/data/third_party/investment_data}
       - QM_SIMONLIN_A_DIR=${QM_SIMONLIN_A_DIR:-/data/third_party/simonlin_a_stock}
+      # TdxAiData 实时数据通道（P6）：安装目录含 libTdxAiData.so + tqServer.py + TdxAiData.ini（Token）
+      - TDX_AIDATA_DIR=${TDX_AIDATA_DIR:-/opt/tdx-aidata}
     volumes:
       # 运行时数据
       - ./data:/data
+      # TdxAiData 安装目录（rw：前端「数据源设置」需写 TdxAiData.ini 的 Token）
+      - /opt/tdx-aidata:/opt/tdx-aidata
       # AI 模型文件 (按需下载)
       - ./models:/app/models
       # Qlib 历史数据 (按需下载)

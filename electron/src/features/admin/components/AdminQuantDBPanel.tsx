@@ -18,6 +18,7 @@ import { QuantDBCatalogPanel } from './quantdb/QuantDBCatalogPanel';
 import { QuantDBPreviewDrawer } from './quantdb/QuantDBPreviewDrawer';
 import { describeError } from './quantdb/utils';
 import { SyncSchedulePanel } from './data-management/SyncSchedulePanel';
+import { TdxAiDataPanel } from './data-management/TdxAiDataPanel';
 
 const { Text } = Typography;
 
@@ -267,6 +268,9 @@ export const AdminQuantDBPanel: React.FC = () => {
 
             {/* 定时同步调度面板（建议次日 00:00 以后按需错峰，具体时间以前端设置为准） */}
             <SyncSchedulePanel market="A" defaultDays={5} />
+
+            {/* TdxAiData 实时数据源（P6：订阅推送=盘中实时主源；请求接口=低频补充） */}
+            <TdxAiDataPanel />
 
             {/* 自定义数据集重建调度（筛选保留 273 因子五库合并 → /data/quantcustom；
                 依赖 A 股同步先把源数据落盘，建议排在 A 股之后如 03:00） */}

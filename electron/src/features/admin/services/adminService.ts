@@ -397,6 +397,35 @@ class AdminService {
         return resp.data;
     }
 
+    /** TdxAiData 数据源配置 + worker 状态（只读，不拉起 worker） */
+    async getTdxAiDataConfig(): Promise<any> {
+        const resp = await this.axiosInstance.get('/admin/data-platform/tdx-aidata/config');
+        return resp.data;
+    }
+
+    /** 保存 TdxAiData 配置（目录/开关/Token；Token 写入 ini，不回显） */
+    async saveTdxAiDataConfig(payload: {
+        dir?: string;
+        enabled?: boolean;
+        token?: string;
+    }): Promise<any> {
+        const resp = await this.axiosInstance.post('/admin/data-platform/tdx-aidata/config', payload);
+        return resp.data;
+    }
+
+    /** 连通性自检（拉起 worker + 真实取一次行情；限流时如实返回 retry_after） */
+    async tdxAiDataSelfcheck(): Promise<any> {
+        const resp = await this.axiosInstance.post('/admin/data-platform/tdx-aidata/selfcheck', {}, {
+            timeout: 60000,
+        });
+        return resp.data;
+    }
+
+    async restartTdxAiDataWorker(): Promise<any> {
+        const resp = await this.axiosInstance.post('/admin/data-platform/tdx-aidata/restart');
+        return resp.data;
+    }
+
     async getModelDirectoryDetail(modelPath: string): Promise<ModelDirectoryInfo> {
         const resp = await this.axiosInstance.get<ModelDirectoryInfo>(`/admin/models/directory/${modelPath}`);
         return resp.data;

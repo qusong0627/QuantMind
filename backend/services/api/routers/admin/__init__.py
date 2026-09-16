@@ -17,6 +17,7 @@ from .users import router as users_router
 from .alpha_factor_pipeline import router as alpha_factor_pipeline_router
 from .trading_agents import router as trading_agents_router
 from .sync_schedule import router as sync_schedule_router
+from .tdx_aidata import router as tdx_aidata_router
 from .quantdb_factor_catalog import router as quantdb_factor_catalog_router
 from .qlib_console import router as qlib_console_router
 from .system_update import router as system_update_router
@@ -76,6 +77,9 @@ admin_router.include_router(
 )
 admin_router.include_router(
     sync_schedule_router, prefix="/data-platform", tags=["Admin-SyncSchedule"]
+)
+admin_router.include_router(
+    tdx_aidata_router, prefix="/data-platform", tags=["Admin-TdxAiData"]
 )
 admin_router.include_router(
     quantdb_factor_catalog_router, prefix="/training-data", tags=["Admin-TrainingData"]
