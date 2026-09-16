@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 from datetime import date
 from decimal import Decimal
@@ -538,3 +539,83 @@ class TestPartitionScan:
         bars = lmd._build_date(date(2026, 7, 20))
 
         assert bars["600036.SH"].close == 38.91
+
+
+# ======================================================================
+# 行情不可用：短路 / 节流 / 数据后到时自愈
+# ======================================================================
+
+class TestUnavailableMarketData:
+    """数据目录缺失时的行为。
+
+    线上回归背景：数据目录里没有 1_kline_data/daily_unadjusted（未挂载/未同步/
+    该数据集未产出）时，视图兜底查询每 2 秒抛一次 Catalog Error
+    （"Table with name qdb_daily_unadjusted does not exist"），把日志刷满，
+    且不告诉运维到底缺什么。
+    """
+
+    def test_missing_dataset_dir_skips_view_query_and_warns(self, tmp_path, caplog):
+        hub = _FakeHub(tmp_path)  # tmp_path 下没有 1_kline_data/daily_unadjusted
+        lmd = LocalMarketData(hub=hub, market="CN")
+
+        with caplog.at_level(logging.WARNING):
+            assert lmd._sessions() == []
+            assert lmd.latest_trade_date() is None
+
+        # 关键回归点：目录不存在时不再查 DuckDB 视图（查了必抛 Catalog Error）
+        assert hub.queries == []
+        warnings = [r for r in caplog.records if "本地行情不可用" in r.getMessage()]
+        assert len(warnings) == 1
+        assert str(tmp_path / "1_kline_data" / "daily_unadjusted") in warnings[0].getMessage()
+
+    def test_unavailable_warning_is_throttled(self, tmp_path, caplog):
+        lmd = LocalMarketData(hub=_FakeHub(tmp_path), market="CN")
+
+        with caplog.at_level(logging.WARNING):
+            for _ in range(5):
+                assert lmd._sessions() == []
+
+        assert len([r for r in caplog.records if "本地行情不可用" in r.getMessage()]) == 1
+
+    def test_view_query_failure_is_throttled(self, tmp_path, caplog):
+        # 目录存在但没有 dt= 分区（非 hive 布局）→ 仍走视图兜底；
+        # 视图查询失败按 ERROR 记录，同一原因同样只报一次
+        (tmp_path / "1_kline_data" / "daily_unadjusted").mkdir(parents=True)
+        hub = _FakeHub(tmp_path)
+
+        def _raise(sql):
+            raise RuntimeError(
+                'Catalog Error: Table with name qdb_daily_unadjusted does not exist!'
+            )
+
+        hub.query = _raise
+        lmd = LocalMarketData(hub=hub, market="CN")
+
+        with caplog.at_level(logging.ERROR):
+            for _ in range(3):
+                assert lmd._sessions() == []
+
+        errors = [
+            r
+            for r in caplog.records
+            if r.levelno == logging.ERROR and "本地行情不可用" in r.getMessage()
+        ]
+        assert len(errors) == 1
+
+    def test_data_dir_appearing_later_recovers_without_restart(self, tmp_path, caplog):
+        hub = _FakeHub(tmp_path)
+        lmd = LocalMarketData(hub=hub, market="CN")
+
+        with caplog.at_level(logging.INFO):
+            assert lmd._sessions() == []  # 数据未挂载：空结果 + 告警
+
+            # 数据后到（卷挂载完成 / 首次同步落盘）
+            _write_partition(tmp_path, 20260720, _DAILY)
+            with patch(
+                "backend.services.simulation.services.local_market_data._ROOT_PROBE_TTL_SEC",
+                0.0,
+            ):
+                assert lmd._sessions() == [20260720]
+
+        assert len([r for r in caplog.records if "本地行情不可用" in r.getMessage()]) == 1
+        assert any("本地行情恢复可用" in r.getMessage() for r in caplog.records)

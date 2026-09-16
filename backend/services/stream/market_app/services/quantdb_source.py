@@ -11,12 +11,35 @@ QuantDB 数据源 — A 股行情统一从本地 QuantDB parquet 读取。
 """
 
 import logging
+import threading
+import time
 from datetime import datetime, timezone
 from typing import Any
 
 from .data_source import DataSourceAdapter
 
 logger = logging.getLogger(__name__)
+
+# 行情不可用告警的最小间隔（秒）。取行情是 2 秒一次的常驻轮询，数据缺失时
+# 每个周期都报会淹没日志；具体缺失原因由 LocalMarketData 侧给出（含数据目录）。
+_UNAVAILABLE_LOG_INTERVAL_SEC = 300.0
+
+_unavailable_lock = threading.Lock()
+_unavailable_at: float | None = None
+
+
+def _warn_unavailable_once() -> None:
+    """同一缺失状态 5 分钟内只报一次。"""
+    global _unavailable_at
+    now = time.monotonic()
+    with _unavailable_lock:
+        if (
+            _unavailable_at is not None
+            and now - _unavailable_at < _UNAVAILABLE_LOG_INTERVAL_SEC
+        ):
+            return
+        _unavailable_at = now
+    logger.warning("[quantdb] QuantDB 无可用日线数据")
 
 
 class QuantDBDataSource(DataSourceAdapter):
@@ -58,7 +81,7 @@ class QuantDBDataSource(DataSourceAdapter):
             market_data = self._get_market_data()
             latest_date = market_data.latest_trade_date()
             if latest_date is None:
-                logger.warning("[quantdb] QuantDB 无可用日线数据")
+                _warn_unavailable_once()
                 return []
             bars = market_data.load_date(latest_date, symbols=symbols)
             results: list[dict[str, Any]] = []

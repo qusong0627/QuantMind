@@ -14,6 +14,7 @@
   C03 账户键一致性（1 vs 00000001 类）    C08 数据同步新鲜度
   C04 快照 ↔ Redis 同源                   C09 远端行情配置状态
   C05 台账写入（成交必落账）              C10 账户种子存在性
+  C11 runner 只读 DB 账号                 C12 本地行情数据可用性
 
 用法（容器内）:
     python backend/scripts/diagnose/health.py                # 全量
@@ -546,6 +547,69 @@ async def check_c11_runner_db_role(ctx: HealthContext) -> CheckResult:
     return CheckResult("C11", "runner 只读 DB", level, f"{role}：{detail}", suggestion)
 
 
+def classify_local_market_data(
+    available: dict[str, str], missing: dict[str, str]
+) -> CheckResult:
+    """本地行情可用性判定（纯函数）：缺失市场清单 → 体检结论。"""
+    if not missing:
+        detail = "、".join(f"{m} {d}" for m, d in available.items()) or "无市场可查"
+        return CheckResult("C12", "本地行情数据", "ok", f"最近交易日 {detail}")
+    joined = "；".join(f"{m}: {r}" for m, r in missing.items())
+    if available:
+        return CheckResult(
+            "C12",
+            "本地行情数据",
+            "warn",
+            f"{joined}（可用: {'、'.join(available)}）",
+            "确认数据目录已挂载且完成同步（QuantDB / 各市场 *_daily_sync）",
+        )
+    return CheckResult(
+        "C12",
+        "本地行情数据",
+        "fail",
+        f"所有市场行情不可用 —— {joined}",
+        "数据目录未挂载或未同步：模拟盘撮合、实时行情兜底、回测均取不到数",
+    )
+
+
+async def check_c12_local_market_data(ctx: HealthContext) -> CheckResult:
+    """本地行情数据可用性：各市场最近交易日能否取到。
+
+    数据目录没挂载/没同步时进程不会退出，只是每 2 秒刷一条"无可用日线数据"
+    —— 静默降级里最容易被忽略的一种，体检必须能一眼看出。
+    """
+    from backend.services.simulation.services.local_market_data import (
+        get_local_market_data,
+    )
+    from backend.services.simulation.services.market_rules import Market
+
+    available: dict[str, str] = {}
+    missing: dict[str, str] = {}
+    for market in Market:
+        if market is Market.CRYPTO and not _crypto_market_enabled():
+            continue  # ENABLE_CRYPTO=false：该市场本就不提供数据
+        try:
+            market_data = get_local_market_data(market)
+            latest = market_data.latest_trade_date()
+        except Exception as exc:  # noqa: BLE001 - 体检不因单市场探测失败中断
+            missing[market.value] = f"探测失败 {exc}"
+            continue
+        if latest is None:
+            missing[market.value] = (
+                market_data.data_unavailable_reason() or "无可用日线"
+            )
+        else:
+            available[market.value] = latest.isoformat()
+    return classify_local_market_data(available, missing)
+
+
+def _crypto_market_enabled() -> bool:
+    """加密市场是否启用（委托 quantbc_hub，避免 ENABLE_CRYPTO 解析两处口径分叉）。"""
+    from backend.services.engine.data_platform.quantbc_hub import _crypto_enabled
+
+    return _crypto_enabled()
+
+
 CHECKS: list[tuple[str, str, Callable]] = [
     ("C01", "信号分布", check_c01_signal_distribution),
     ("C02", "信号就绪与残 run", check_c02_signal_readiness),
@@ -558,6 +622,7 @@ CHECKS: list[tuple[str, str, Callable]] = [
     ("C09", "远端行情配置", check_c09_remote_quote_config),
     ("C10", "账户种子", check_c10_initial_seed_presence),
     ("C11", "runner 只读 DB", check_c11_runner_db_role),
+    ("C12", "本地行情数据", check_c12_local_market_data),
 ]
 
 

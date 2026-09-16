@@ -10,11 +10,13 @@ from backend.scripts.diagnose.health import (
     classify_account_key_forms,
     classify_cid_duplicates,
     classify_ledger_writes,
+    classify_local_market_data,
     classify_signal_distribution,
     classify_snapshot_consistency,
     check_c03_account_key_consistency,
     check_c04_snapshot_consistency,
     check_c05_ledger_writes,
+    check_c12_local_market_data,
     exit_code,
     summarize,
 )
@@ -190,3 +192,62 @@ async def test_c05_warns_when_ledger_empty_but_positions_exist():
     )
     r = await check_c05_ledger_writes(ctx)
     assert r.level == "warn"
+
+
+# --- C12 本地行情数据 ------------------------------------------------------
+
+
+def test_c12_all_markets_available_is_ok():
+    r = classify_local_market_data({"CN": "2026-09-16", "HK": "2026-09-16"}, {})
+    assert r.level == "ok"
+    assert "2026-09-16" in r.detail
+
+
+def test_c12_partial_missing_is_warn():
+    r = classify_local_market_data(
+        {"CN": "2026-09-16"}, {"HK": "HK 日线数据集目录不存在: /data/quanthk/..."}
+    )
+    assert r.level == "warn"
+    assert "HK 日线数据集目录不存在" in r.detail
+    assert "CN" in r.detail
+
+
+def test_c12_nothing_available_is_fail():
+    r = classify_local_market_data(
+        {}, {"CN": "CN 日线数据集目录不存在: /data/quantdb/1_kline_data/daily_unadjusted"}
+    )
+    assert r.level == "fail"
+    assert "模拟盘撮合" in r.suggestion
+
+
+@pytest.mark.asyncio
+async def test_c12_check_reports_missing_market_with_reason(monkeypatch):
+    from datetime import date
+
+    import backend.services.engine.data_platform.quantbc_hub as quantbc_hub
+    import backend.services.simulation.services.local_market_data as local_market_data
+    from backend.services.simulation.services.market_rules import Market
+
+    class _FakeMarketData:
+        def __init__(self, latest, reason=None):
+            self._latest = latest
+            self._reason = reason
+
+        def latest_trade_date(self):
+            return self._latest
+
+        def data_unavailable_reason(self):
+            return self._reason
+
+    def _fake_get(market=None):
+        if market is Market.CN:
+            return _FakeMarketData(date(2026, 9, 16))
+        return _FakeMarketData(None, f"{market.value} 日线数据集目录不存在: /data/x")
+
+    monkeypatch.setattr(quantbc_hub, "_crypto_enabled", lambda: False)
+    monkeypatch.setattr(local_market_data, "get_local_market_data", _fake_get)
+
+    r = await check_c12_local_market_data(FakeCtx())
+
+    assert r.level == "warn"
+    assert "CN" in r.detail and "HK" in r.detail

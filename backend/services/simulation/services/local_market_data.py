@@ -73,6 +73,24 @@ _SESSIONS_TTL_SEC = 300.0
 # 尾部校验最多回溯多少个分区（防止损坏数据导致逐日 stat 蔓延）
 _SESSIONS_TAIL_CHECK = 30
 
+# 分区根探测「未命中」的缓存有效期（秒）。命中结果永久缓存，未命中只短期
+# 缓存：数据目录可能后到（卷挂载完成 / 首次同步落盘），永久钉住会让常驻
+# 进程不重启就再也取不到行情。
+_ROOT_PROBE_TTL_SEC = 60.0
+
+# 「本地行情不可用」告警的最小间隔（秒）。行情轮询是常驻 2 秒循环，同一缺失
+# 状态每周期都报会淹没日志；状态变化（原因不同）则立即报。
+_UNAVAILABLE_LOG_INTERVAL_SEC = 300.0
+
+# 各市场数据目录环境变量（告警里给出可操作的排查入口）
+_MARKET_DATA_DIR_ENV: dict[Market, str] = {
+    Market.CN: "QM_QUANTDB_DATA_DIR",
+    Market.HK: "QM_QUANTHK_DATA_DIR",
+    Market.US: "QM_QUANTUS_DATA_DIR",
+    Market.FUTURES: "QM_QUANTFUTURES_DATA_DIR",
+    Market.CRYPTO: "QM_QUANTBC_DATA_DIR",
+}
+
 # 每档涨跌幅（不含 ST 折减）
 _PCT_MAIN = Decimal("0.10")
 _PCT_GROWTH = Decimal("0.20")  # 创业板 300/301/302 + 科创板 688/689
@@ -269,7 +287,11 @@ class LocalMarketData:
         # 分区根目录与直读可用性：首次访问时探测，之后只读
         self._kline_root: Path | None = None
         self._kline_root_probed = False
+        self._kline_root_at: float | None = None
         self._direct_read_ok = True
+        # 行情不可用状态（节流用）：原因串 + 上次告警时刻
+        self._unavailable_reason: str | None = None
+        self._unavailable_at: float | None = None
 
     @staticmethod
     def _resolve_hub(market: Market) -> QuantDBDataHub:
@@ -319,6 +341,14 @@ class LocalMarketData:
         cutoff = _to_dt_int(on_or_before) if on_or_before else None
         candidates = [d for d in sessions if cutoff is None or d <= cutoff]
         return _from_dt_int(candidates[-1]) if candidates else None
+
+    def data_unavailable_reason(self) -> str | None:
+        """本地行情不可用的原因（体检/告警取用）；可用时返回 None。
+
+        只做目录级判定：数据目录缺失是最常见的不可用形态（未挂载/未同步），
+        此时给到具体路径，运维可直接照单排查。
+        """
+        return self._dataset_missing_reason()
 
     # ------------------------------------------------------------------
     # 内部实现
@@ -429,6 +459,8 @@ class LocalMarketData:
 
     def _scan_via_view(self, dt_ints: tuple[int, ...]) -> pd.DataFrame:
         """DuckDB 视图兜底扫描（全分区元数据枚举，仅在直读不可用时使用）。"""
+        if self._data_unavailable():
+            return pd.DataFrame()
         dt_list = ", ".join(str(d) for d in dt_ints)
         sql = (
             "SELECT symbol, dt, open, high, low, close, volume, amount "
@@ -437,14 +469,89 @@ class LocalMarketData:
         try:
             return self._hub.query(sql)
         except Exception as exc:
-            logger.error("本地行情扫描失败 dt=%s: %s", dt_list, exc)
+            self._log_unavailable(
+                f"本地行情扫描失败 dt={dt_list}: {exc}", level=logging.ERROR
+            )
             return pd.DataFrame()
+
+    def _dataset_paths(self) -> tuple[Path, Path] | None:
+        """(数据目录, 当日线数据集目录)；hub 无真实 data_dir 路径时返回 None。
+
+        只认真实的 str/Path：MagicMock 一类的测试桩会伪装成 os.PathLike，
+        据此判"目录不存在"会把本该走 DuckDB 视图的调用误判成数据缺失。
+        """
+        raw = getattr(self._hub, "data_dir", None)
+        if not isinstance(raw, (str, Path)):
+            return None
+        data_dir = Path(raw)
+        return data_dir, data_dir / _MARKET_KLINE_DIRS[self.market]
+
+    def _dataset_missing_reason(self) -> str | None:
+        """行情数据集目录缺失的原因描述；目录存在或无法判定时返回 None。
+
+        无法判定时必须返回 None：非 hive 布局（平铺 per-symbol 文件）的市场
+        仍要走 DuckDB 视图，不能因为探测不到目录就把数据判死。
+        """
+        paths = self._dataset_paths()
+        if paths is None:
+            return None
+        data_dir, dataset_dir = paths
+        if dataset_dir.is_dir():
+            return None
+        env_name = _MARKET_DATA_DIR_ENV[self.market]
+        return (
+            f"{self.market.value} 日线数据集目录不存在: {dataset_dir}"
+            f"（数据目录解析为 {data_dir}；请确认数据已挂载/已同步，"
+            f"或用 {env_name} 指定数据目录）"
+        )
+
+    def _data_unavailable(self) -> bool:
+        """数据集目录缺失时短路：报一次可定位的告警并返回 True。
+
+        目录不存在时 DuckDB 视图同样不会挂载（hub 按目录存在性建视图），
+        查询只会抛 Catalog Error —— 那串报错对排查没有帮助，还每周期刷屏。
+        """
+        reason = self._dataset_missing_reason()
+        if reason is None:
+            return False
+        self._log_unavailable(reason)
+        return True
+
+    def _log_unavailable(self, reason: str, *, level: int = logging.WARNING) -> None:
+        """行情不可用告警：同一原因在 ``_UNAVAILABLE_LOG_INTERVAL_SEC`` 内只报一次。"""
+        now = time.monotonic()
+        with self._lock:
+            if (
+                reason == self._unavailable_reason
+                and self._unavailable_at is not None
+                and now - self._unavailable_at < _UNAVAILABLE_LOG_INTERVAL_SEC
+            ):
+                return
+            self._unavailable_reason = reason
+            self._unavailable_at = now
+        logger.log(level, "本地行情不可用（%s）: %s", self.market.value, reason)
+
+    def _note_available(self) -> None:
+        """行情恢复可用：清掉告警状态并留一条可追溯的恢复日志。"""
+        with self._lock:
+            if self._unavailable_reason is None:
+                return
+            reason, self._unavailable_reason = self._unavailable_reason, None
+            self._unavailable_at = None
+        logger.info("本地行情恢复可用（%s）；此前: %s", self.market.value, reason)
 
     def _probe_kline_root(self) -> Path | None:
         """hive 分区根目录；非 dt= 分区布局（或 hub 无 data_dir）时返回 None。"""
+        now = time.monotonic()
         with self._lock:
-            if self._kline_root_probed:
+            if self._kline_root is not None:
                 return self._kline_root
+            if (
+                self._kline_root_probed
+                and self._kline_root_at is not None
+                and now - self._kline_root_at < _ROOT_PROBE_TTL_SEC
+            ):
+                return None
         root: Path | None = None
         try:
             candidate = Path(self._hub.data_dir) / _MARKET_KLINE_DIRS[self.market]
@@ -452,9 +559,12 @@ class LocalMarketData:
                 root = candidate
         except (OSError, TypeError, ValueError, AttributeError) as exc:
             logger.info("本地行情分区目录不可用，回退 DuckDB 视图: %s", exc)
+        if root is not None:
+            self._note_available()
         with self._lock:
             self._kline_root = root
             self._kline_root_probed = True
+            self._kline_root_at = now
         return root
 
     def _read_partitions(
@@ -579,14 +689,17 @@ class LocalMarketData:
 
     def _query_session_dates(self) -> list[int]:
         """视图兜底：DuckDB DISTINCT dt（慢路径，仅非 hive 布局的市场使用）。"""
+        if self._data_unavailable():
+            return []
         try:
             df = self._hub.query(
                 f"SELECT DISTINCT dt FROM {self._kline_view} ORDER BY dt"
             )
-            return [int(v) for v in df["dt"].tolist()]
         except Exception as exc:
-            logger.error("读取本地行情交易日失败: %s", exc)
+            self._log_unavailable(f"读取本地行情交易日失败: {exc}", level=logging.ERROR)
             return []
+        self._note_available()
+        return [int(v) for v in df["dt"].tolist()]
 
     def _previous_session(self, dt_int: int) -> int | None:
         sessions = self._sessions()

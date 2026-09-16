@@ -63,10 +63,14 @@ class QuantFuturesDataHub(QuantDBDataHub):
                     cls._instance = cls()
         return cls._instance
 
-    def _mount_views(self, conn) -> None:
-        """用 qfut_* 前缀挂载分区视图，避免与其他市场视图冲突。"""
+    def _mount_views(self, conn, force: bool = False) -> None:
+        """用 qfut_* 前缀挂载分区视图，避免与其他市场视图冲突。
+
+        force=True 时忽略已挂载标记重建（基类 query() 在 Catalog 报错后的
+        重试路径就带 force=True，签名不一致会抛 TypeError 盖掉原始错误）。
+        """
         conn_id = id(conn)
-        if conn_id in self._views_mounted_per_conn:
+        if not force and conn_id in self._views_mounted_per_conn:
             return
         dd = self._data_dir
         partitioned_views = {
