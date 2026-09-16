@@ -25,7 +25,24 @@ def _predict_with_model(model: Any, X: np.ndarray, model_type: str, features: li
     elif model_type == "catboost":
         pred = model.predict_proba(X) if hasattr(model, "predict_proba") else model.predict(X)
     else:
-        pred = model.predict_proba(X) if hasattr(model, "predict_proba") else model.predict(X)
+        # sklearn 系（Ridge/RF/MLP）：.predict 内部 check_array 会整份复制输入
+        # （640 万行 × 273 列 float32 ≈ 7GB 副本）——2026-09-16 ML8 批次 MLP
+        # 训练完成后在预测处 OOMKilled 实证。分块预测把副本压到 0.5GB。
+        _n = len(X)
+        _step = 500_000
+        if _n > _step:
+            _parts = []
+            for _i in range(0, _n, _step):
+                _chunk = X[_i : _i + _step]
+                _r = (
+                    model.predict_proba(_chunk)
+                    if hasattr(model, "predict_proba")
+                    else model.predict(_chunk)
+                )
+                _parts.append(np.asarray(_r))
+            pred = np.concatenate(_parts, axis=0)
+        else:
+            pred = model.predict_proba(X) if hasattr(model, "predict_proba") else model.predict(X)
 
     # sklearn/CatBoost 分类器默认 predict() 返回硬标签；选股排序与 AUC 均应使用
     # 正类概率，避免把大量样本压成 0/1 并丢失排序信息。
