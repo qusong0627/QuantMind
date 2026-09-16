@@ -133,38 +133,41 @@ class DataAlertService:
             self.notification_writer(title=title, body=body, level=level, extra=extra)
             return
 
-        # 默认实现：直接 SQL 写 notifications 表（避免依赖 async session）
+        # 默认实现：统一通知发布器（PG notifications + Redis Stream → WS 实时送达）。
+        # 修复（T-P6-11，2026-09-17）：旧版自拼 INSERT 三处错——①id 列被 gen_random_uuid()
+        # 写崩（SERIAL 整型）②列名 type≠notification_type（UndefinedColumn）③user_id 取了
+        # users.id（主键空间=1）而 notifications.user_id **FK 指向 users.user_id**（业务 8 位
+        # 空间）——三错叠加被 except 吞成 warning，admin 永远收不到数据质量告警。
         try:
             from sqlalchemy import create_engine, text as sql_text
+
+            from backend.shared.notification_publisher import publish_notification
+
             engine = create_engine(self.db_url, pool_pre_ping=True)
             with engine.begin() as conn:
                 admin_ids = conn.execute(
                     sql_text(
-                        "SELECT id, COALESCE(tenant_id, 'default') AS tid "
+                        "SELECT user_id, COALESCE(tenant_id, 'default') AS tid "
                         "FROM users WHERE is_admin = true"
                     )
                 ).fetchall()
-                if not admin_ids:
-                    logger.warning("no admin users; skip data-alert fanout")
-                    return
-                for row in admin_ids:
-                    conn.execute(
-                        sql_text(
-                            """
-                            INSERT INTO notifications
-                                (id, user_id, tenant_id, title, content, type, level, created_at)
-                            VALUES
-                                (gen_random_uuid(), :uid, :tid, :title, :body,
-                                 'data_quality', :level, NOW())
-                            """
-                        ),
-                        {
-                            "uid": str(row[0]),
-                            "tid": str(row[1]),
-                            "title": title[:200],
-                            "body": (body + "\n" + json.dumps(extra, default=str))[:4000],
-                            "level": level,
-                        },
+            if not admin_ids:
+                logger.warning("no admin users; skip data-alert fanout")
+                return
+            content = (body + "\n" + json.dumps(extra, default=str))[:4000]
+            for row in admin_ids:
+                published = publish_notification(
+                    user_id=str(row[0]),
+                    tenant_id=str(row[1]),
+                    title=title[:128],
+                    content=content,
+                    type="data_quality",
+                    level=level,
+                )
+                if not published:
+                    logger.warning(
+                        "data-alert 通知发布未成功（publisher 返回 False）: user=%s title=%s",
+                        row[0], title,
                     )
         except Exception as exc:  # noqa: BLE001
             logger.warning("fanout data-alert to admins failed: %s", exc)

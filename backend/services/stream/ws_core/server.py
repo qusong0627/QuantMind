@@ -10,7 +10,7 @@ import logging
 import time
 import uuid
 from contextlib import asynccontextmanager
-from typing import Any, Dict, Optional
+from typing import Any
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -19,6 +19,7 @@ from backend.shared.auth import auth_manager, decode_jwt_token
 from backend.shared.cors import resolve_cors_origins
 
 from .manager import manager
+from .intel_pusher import intel_pusher
 from .notification_pusher import notification_pusher
 from .quote_pusher import quote_pusher
 from .strategy_pusher import strategy_pusher
@@ -113,6 +114,25 @@ async def handle_message(connection_id: str, message: dict):
                             use_queue=False,
                         )
                         return
+                elif topic.startswith("intel."):
+                    # 情报总线 topic 鉴权（T-P6-11）：intel.{tenant}.user.{uid} / .market.{MKT}
+                    from backend.shared.intel_events import authorize_intel_topic
+
+                    if not authorize_intel_topic(metadata, topic):
+                        logger.warning(
+                            "intel 越权订阅被拒: conn=%s topic=%s user=%s tenant=%s",
+                            connection_id, topic, metadata.get("user_id"), metadata.get("tenant_id"),
+                        )
+                        await manager.send_message(
+                            connection_id,
+                            {
+                                "type": "error",
+                                "error_code": "SUBSCRIPTION_FORBIDDEN",
+                                "error_message": "Forbidden intel subscription",
+                            },
+                            use_queue=False,
+                        )
+                        return
                 await manager.subscribe(connection_id, topic)
                 if topic.startswith("stock."):
                     await quote_pusher.subscribe_quote(topic.split("stock.", 1)[1])
@@ -122,6 +142,8 @@ async def handle_message(connection_id: str, message: dict):
                     pass  # strategy_pusher handles broadcasting
                 elif topic.startswith("notification."):
                     pass  # notification_pusher handles broadcasting
+                elif topic.startswith("intel."):
+                    pass  # intel_pusher handles broadcasting
                 await manager.send_message(connection_id, {"type": "subscribed", "topic": topic})
 
     elif msg_type == "unsubscribe":
@@ -172,6 +194,8 @@ class WebSocketServer:
         await strategy_pusher.start()
         # 启动通知事件推送器（驱动 notification.* 主题）
         await notification_pusher.start()
+        # 启动情报总线推送器（T-P6-11：intel:events → intel.* 主题）
+        await intel_pusher.start()
 
     async def stop(self):
         """停止服务器"""
@@ -187,6 +211,8 @@ class WebSocketServer:
         await strategy_pusher.stop()
         # 停止通知事件推送器
         await notification_pusher.stop()
+        # 停止情报总线推送器
+        await intel_pusher.stop()
 
         # 取消心跳检测任务
         if self.heartbeat_task:
