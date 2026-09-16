@@ -108,6 +108,25 @@ def grade_shards(status: dict[str, Any] | None) -> tuple[str, str]:
     return "FAIL", f"分片全部不可用（{status.get('shards_up')}）"
 
 
+P6_RSS_BUDGET_MB = 4096.0  # 单容器 P6 相关进程 RSS 预算（T-P6-10 先算账；压测后校准）
+
+
+def grade_resources(res: dict[str, Any] | None) -> tuple[str, str]:
+    """P6 进程 RSS 汇总 vs 预算（>80% 预警、>100% 失败）；不可测 → N/A。"""
+    if not res or res.get("p6_rss_mb") is None:
+        return "N/A", "资源不可测（psutil 缺失?）"
+    rss = float(res["p6_rss_mb"])
+    detail = (
+        f"P6 进程 RSS 合计 {rss:.0f}MB / 预算 {P6_RSS_BUDGET_MB:.0f}MB"
+        f"（tdx worker×{res.get('tdx_workers')} + engine {res.get('engine_rss_mb')}MB）"
+    )
+    if rss > P6_RSS_BUDGET_MB:
+        return "FAIL", detail + " 超预算"
+    if rss > P6_RSS_BUDGET_MB * 0.8:
+        return "WARN", detail + "（>80%）"
+    return "OK", detail
+
+
 # ── 采集（IO）────────────────────────────────────────────────────────
 
 
@@ -288,6 +307,48 @@ def collect_engine_budget() -> dict[str, Any] | None:
         return None
 
 
+def collect_resources() -> dict[str, Any] | None:
+    """P6 进程资源汇总（T-P6-10 预算面）：tdx worker 群 + 主引擎进程 + cgroup 容器内存。"""
+    try:
+        import psutil
+
+        tdx_rss = 0.0
+        tdx_count = 0
+        engine_rss = None
+        main_pid = None
+        for proc in psutil.process_iter(["pid", "name", "cmdline", "memory_info"]):
+            try:
+                cmdline = " ".join(proc.info.get("cmdline") or [])
+                if "tdx_aidata.worker" in cmdline:
+                    tdx_count += 1
+                    tdx_rss += float(proc.info["memory_info"].rss) / 1e6
+                elif (
+                    "main_oss.py" in cmdline
+                    and str(proc.info.get("name") or "").startswith("python")
+                    and main_pid is None
+                ):
+                    # 只认 python 进程本体（cmdline 里 sh -c 包装壳 RSS≈0，误抓过一次）
+                    main_pid = proc.info["pid"]
+                    engine_rss = round(float(proc.info["memory_info"].rss) / 1e6, 1)
+            except Exception:  # noqa: BLE001
+                continue
+        container_mb = None
+        try:
+            with open("/sys/fs/cgroup/memory.current") as f:
+                container_mb = round(int(f.read().strip()) / 1e6, 1)
+        except Exception:  # noqa: BLE001
+            pass
+        return {
+            "tdx_workers": tdx_count,
+            "tdx_rss_mb": round(tdx_rss, 1),
+            "engine_rss_mb": engine_rss,
+            "p6_rss_mb": round(tdx_rss + (engine_rss or 0.0), 1),
+            "container_mem_mb": container_mb,
+        }
+    except Exception:  # noqa: BLE001
+        return None
+
+
 # ── 报告 ─────────────────────────────────────────────────────────────
 
 
@@ -300,12 +361,18 @@ def build_report(sample: int, series_len: int) -> dict[str, Any]:
     cadence = collect_cadence(sample, series_len)
     l05 = collect_l05()
     budget = collect_engine_budget()
+    resources = collect_resources()
 
     verdicts: dict[str, dict[str, str]] = {}
-    verdicts["A_shards"] = dict(zip(("level", "message"), grade_shards((shards or {}).get("status"))))
-    verdicts["B_landing"] = dict(zip(("level", "message"), grade_landing_rate(landing.get("rate"), trading=trading)))
-    verdicts["C_latency"] = dict(zip(("level", "message"), grade_latency(latency, trading=trading)))
-    verdicts["D_cadence"] = dict(zip(("level", "message"), grade_cadence(cadence.get("p95_s"), trading=trading)))
+
+    def _v(grade: tuple[str, str]) -> dict[str, str]:
+        level, message = grade
+        return {"level": level, "message": message}
+
+    verdicts["A_shards"] = _v(grade_shards((shards or {}).get("status")))
+    verdicts["B_landing"] = _v(grade_landing_rate(landing.get("rate"), trading=trading))
+    verdicts["C_latency"] = _v(grade_latency(latency, trading=trading))
+    verdicts["D_cadence"] = _v(grade_cadence(cadence.get("p95_s"), trading=trading))
     if l05 is None:
         verdicts["E_l05"] = {"level": "WARN", "message": "留存信息不可读"}
     elif l05.get("days", 0) == 0:
@@ -323,6 +390,7 @@ def build_report(sample: int, series_len: int) -> dict[str, Any]:
             "level": "OK" if budget["round_500_ms"] < 5000 else "WARN",
             "message": f"快车道 {budget['per_symbol_ms']}ms/只 → 500 只 ≈{budget['round_500_ms']}ms",
         }
+    verdicts["G_resources"] = _v(grade_resources(resources))
     has_fail = any(v["level"] == "FAIL" for v in verdicts.values())
     return {
         "generated_at": now.isoformat(),
@@ -336,6 +404,7 @@ def build_report(sample: int, series_len: int) -> dict[str, Any]:
             "cadence": cadence,
             "l05": l05,
             "engine_budget": budget,
+            "resources": resources,
         },
     }
 
@@ -345,7 +414,9 @@ def _print_human(report: dict[str, Any]) -> None:
     print(f"P6 实时轨验收报告  {report['generated_at']}  "
           f"({'盘中' if report['trading'] else '闭市'}观察窗)")
     print("-" * 72)
-    for key in ("A_shards", "B_landing", "C_latency", "D_cadence", "E_l05", "F_engine"):
+    for key in (
+        "A_shards", "B_landing", "C_latency", "D_cadence", "E_l05", "F_engine", "G_resources",
+    ):
         v = report["verdicts"][key]
         print(f" {icon.get(v['level'], '?')} {key:<12} {v['message']}")
     details = report["details"]

@@ -61,3 +61,17 @@ def test_acceptance_grades():
     assert grade_shards({"worker": "degraded", "shards_up": "5/6"})[0] == "WARN"
     assert grade_shards({"worker": "down", "shards_up": "0/6"})[0] == "FAIL"
     assert grade_shards(None)[0] == "FAIL"
+
+
+@pytest.mark.unit
+def test_grade_resources_budget_lines():
+    from backend.scripts.p6_acceptance_report import grade_resources
+
+    assert grade_resources(None)[0] == "N/A"
+    assert grade_resources({"p6_rss_mb": None})[0] == "N/A"
+    ok = grade_resources({"p6_rss_mb": 1500, "tdx_workers": 6, "engine_rss_mb": 800})
+    assert ok[0] == "OK"
+    warn = grade_resources({"p6_rss_mb": 3500, "tdx_workers": 6, "engine_rss_mb": 800})
+    assert warn[0] == "WARN"
+    fail = grade_resources({"p6_rss_mb": 5000, "tdx_workers": 6, "engine_rss_mb": 800})
+    assert fail[0] == "FAIL"

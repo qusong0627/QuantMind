@@ -31,6 +31,8 @@ from collections.abc import Callable
 
 import numpy as np
 
+from backend.shared.load_governor import LoadGovernor
+
 from backend.services.engine.inference.realtime_core import (
     compute_cycle,
     digits as _digits,
@@ -144,6 +146,7 @@ class RealtimeInferenceService:
         self._stop = asyncio.Event()
         self._lock = threading.Lock()
         self._engine = None  # IncrementalFeatureEngine（惰性）
+        self._governor: LoadGovernor | None = None  # T-P6-10 过载治理（按配置节拍维护）
         self._bootstrapped: set[str] = set()  # 已引导历史的标的（引擎键=热集原生码）
         self._sessions: dict[str, Any] = {}  # model_dir → ort session
         self._baselines: dict[str, dict[str, dict[str, Any]]] = {}  # "YYYYMMDD|model" → rows
@@ -286,8 +289,12 @@ class RealtimeInferenceService:
 
     # ── 周期计算（同步；由 to_thread 调用）────────────────────────────
 
-    def build_cycle(self) -> dict[str, Any] | None:
-        """单周期：热集 → 快照 → 基线+覆盖 → 矩阵 → 分数 → 载荷（不发布）。"""
+    def build_cycle(self, degrade_level: int = 0) -> dict[str, Any] | None:
+        """单周期：热集 → 快照 → 基线+覆盖 → 矩阵 → 分数 → 载荷（不发布）。
+
+        ``degrade_level ≥ 1``（过载治理）：跳过 live 覆盖等可选计算（快照读取/发布绝不跳过），
+        级别随载荷与账本落盘——降级如实标注，回放验收按账本当时的级别对账。
+        """
         cfg = self._config_loader()
         if not cfg.enabled or not cfg.model_dir:
             return None
@@ -320,6 +327,8 @@ class RealtimeInferenceService:
             self._engine = IncrementalFeatureEngine()
 
         override = effective_override(cfg.override_whitelist, cols)
+        if degrade_level >= 1:
+            override = set()  # 过载降载：省掉逐标的 live 覆盖（唯一可选重计算段）
         model_id = model_dir.name
         model_version = str(meta.get("model_version") or model_id)
         result = compute_cycle(
@@ -343,6 +352,7 @@ class RealtimeInferenceService:
             model_version=model_version, override=override,
         )
         ledger["trade_date"] = today.strftime("%Y%m%d")
+        ledger["degraded_level"] = int(degrade_level)
         (self._ledger_sink or self._append_ledger)(ledger)
 
         items = [
@@ -365,7 +375,12 @@ class RealtimeInferenceService:
             "ready_symbols": result.ready,
             "missing_symbols": result.missing,
             "overridden_cells": result.overridden,
-            "quality": {"override_whitelist": sorted(override), "note": OVERRIDE_GUARD_NOTE},
+            "degraded_level": int(degrade_level),
+            "quality": {
+                "override_whitelist": sorted(override),
+                "degraded_level": int(degrade_level),
+                "note": OVERRIDE_GUARD_NOTE,
+            },
             "scores": items,
         }
 
@@ -398,10 +413,14 @@ class RealtimeInferenceService:
         logger.info("[realtime-infer] service loop started")
         while not self._stop.is_set():
             cfg = self._config_loader()
+            governor = self._governor_for(cfg)
+            t0 = time.monotonic()
             try:
                 if cfg.enabled and cfg.model_dir:
-                    t0 = time.monotonic()
-                    payload = await asyncio.to_thread(self.build_cycle)
+                    payload = await asyncio.to_thread(
+                        self.build_cycle,
+                        governor.level if governor.skip_optional() else 0,
+                    )
                     if payload:
                         publisher = self._publisher or self._default_publish
                         result = publisher(payload, cfg)
@@ -415,17 +434,31 @@ class RealtimeInferenceService:
                             self.counters["last_error"] = None
                     with self._lock:
                         self.counters["cycles"] += 1
-                        self.counters["last_ms"] = round((time.monotonic() - t0) * 1000, 1)
                         self.counters["last_cycle_at"] = _now().isoformat()
             except Exception as exc:  # noqa: BLE001 - 循环永续
                 with self._lock:
                     self.counters["skipped"] += 1
                     self.counters["last_error"] = f"{type(exc).__name__}: {exc}"
                 logger.warning("[realtime-infer] 周期失败: %s", exc)
+            finally:
+                elapsed_ms = (time.monotonic() - t0) * 1000
+                level = governor.record(elapsed_ms)
+                with self._lock:
+                    self.counters["last_ms"] = round(elapsed_ms, 1)
+                    self.counters["degrade_level"] = level
             try:
-                await asyncio.wait_for(self._stop.wait(), timeout=cfg.cadence_s)
+                await asyncio.wait_for(self._stop.wait(), timeout=governor.effective_cadence_s())
             except asyncio.TimeoutError:
                 pass
+
+    def _governor_for(self, cfg: RealtimeInferConfig) -> LoadGovernor:
+        """按配置节拍维护治理器（节拍变更即重建，窗口不跨节拍混算）。"""
+        with self._lock:
+            gov = self._governor
+            if gov is None or abs(gov.base_cadence_s - cfg.cadence_s) > 1e-9:
+                gov = LoadGovernor(base_cadence_s=cfg.cadence_s)
+                self._governor = gov
+            return gov
 
     def start(self) -> None:
         if self._task is None or self._task.done():
@@ -445,6 +478,7 @@ class RealtimeInferenceService:
     def status(self) -> dict[str, Any]:
         cfg = self._config_loader()
         with self._lock:
+            governor = self._governor
             out = {
                 "enabled": cfg.enabled,
                 "model_dir": cfg.model_dir,
@@ -452,6 +486,8 @@ class RealtimeInferenceService:
                 "override_whitelist": list(cfg.override_whitelist),
                 "loop_alive": bool(self._task and not self._task.done()),
                 "cached_models": list(self._sessions.keys()),
+                "governor": governor.snapshot() if governor else None,
+                "resources": _process_resources(),
                 **dict(self.counters),
             }
         return out
@@ -462,6 +498,23 @@ def _read_metadata(model_dir: Path) -> dict[str, Any]:
     if not meta_path.is_file():
         raise RuntimeError(f"metadata.json 不存在: {model_dir}")
     return json.loads(meta_path.read_text(encoding="utf-8"))
+
+
+def _process_resources() -> dict[str, Any]:
+    """本进程资源占用（T-P6-10 预算面；psutil 缺失/失败如实为 None）。"""
+    try:
+        import psutil
+
+        proc = psutil.Process()
+        mem = proc.memory_info()
+        with proc.oneshot():
+            return {
+                "rss_mb": round(mem.rss / 1e6, 1),
+                "cpu_percent": proc.cpu_percent(interval=None),
+                "threads": proc.num_threads(),
+            }
+    except Exception:  # noqa: BLE001
+        return {"rss_mb": None, "cpu_percent": None, "threads": None}
 
 
 _default_service: RealtimeInferenceService | None = None
