@@ -300,10 +300,15 @@ def _train_mlp(cfg: dict, features: list[str], X_train: np.ndarray, y_train: np.
         hidden = [64, 32]
     alpha = float(dl_params.get("alpha", 1e-3))
     model_class = MLPClassifier if str((cfg.get("label", {}) or {}).get("target_mode") or "return").lower() == "classification" else MLPRegressor
+    # batch_size 必须显式传递：sklearn 默认 200，在 640 万行上意味着每轮
+    # 3.2 万次微型更新（Python 循环瓶颈，实测 28 分钟仍未跑完首轮预算）。
+    # 尊重载荷的 batch_size（DL 批统一 4000）后单轮约 8 秒。
+    batch_size = int(dl_params.get("batch_size", 200) or 200)
     model = model_class(
         hidden_layer_sizes=[int(h) for h in hidden],
         alpha=alpha,
         learning_rate_init=float(dl_params.get("lr", 0.001)),
+        batch_size=batch_size,
         max_iter=int(dl_params.get("n_epochs", 500)),
         early_stopping=True,
         n_iter_no_change=10,
