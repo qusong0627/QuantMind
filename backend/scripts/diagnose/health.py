@@ -494,6 +494,58 @@ async def check_c10_initial_seed_presence(ctx: HealthContext) -> CheckResult:
     return CheckResult("C10", "账户种子", "ok", f"扫描 {len(keys)} 键，无缺种子账户")
 
 
+def classify_runner_db_privileges(
+    role_present: bool,
+    can_select: bool,
+    can_insert: bool,
+) -> tuple[str, str]:
+    """runner 只读角色的权限面判定（纯函数）。"""
+    if not role_present:
+        return (
+            "fail",
+            "只读角色不存在——runner 启动时将回落主库凭据（最小权限失效）",
+        )
+    if can_insert:
+        return (
+            "fail",
+            "只读角色可写（INSERT 未被拒绝）——权限面过宽，检查 GRANT",
+        )
+    if not can_select:
+        return ("warn", "只读角色缺 SELECT——runner 数据访问会全线报错")
+    return ("ok", "SELECT-only")
+
+
+async def check_c11_runner_db_role(ctx: HealthContext) -> CheckResult:
+    """runner 只读 DB 账号（T-P0-03 遗留）：角色存在 + SELECT 有 + 写被拒绝。"""
+    from backend.shared.runner_db_account import runner_db_role_name
+
+    role = runner_db_role_name()
+    present = bool(
+        ctx.query(
+            "SELECT 1 AS present FROM pg_roles WHERE rolname = :r LIMIT 1", r=role
+        )
+    )
+    can_select = False
+    can_insert = False
+    if present:
+        row = ctx.query(
+            "SELECT has_table_privilege(:r, 'simulation_fund_snapshots', 'SELECT') AS s, "
+            "has_table_privilege(:r, 'simulation_fund_snapshots', 'INSERT') AS i",
+            r=role,
+        )
+        if row:
+            can_select = bool(row[0]["s"])
+            can_insert = bool(row[0]["i"])
+    level, detail = classify_runner_db_privileges(present, can_select, can_insert)
+    suggestion = (
+        ""
+        if level == "ok"
+        else "引擎服务启动时自动供给（backend/shared/runner_db_account.py）；"
+        "检查 DB 账号是否有 CREATE ROLE 权限或显式配置 RUNNER_DB_USER/RUNNER_DB_PASSWORD"
+    )
+    return CheckResult("C11", "runner 只读 DB", level, f"{role}：{detail}", suggestion)
+
+
 CHECKS: list[tuple[str, str, Callable]] = [
     ("C01", "信号分布", check_c01_signal_distribution),
     ("C02", "信号就绪与残 run", check_c02_signal_readiness),
@@ -505,6 +557,7 @@ CHECKS: list[tuple[str, str, Callable]] = [
     ("C08", "数据同步", check_c08_data_sync_freshness),
     ("C09", "远端行情配置", check_c09_remote_quote_config),
     ("C10", "账户种子", check_c10_initial_seed_presence),
+    ("C11", "runner 只读 DB", check_c11_runner_db_role),
 ]
 
 

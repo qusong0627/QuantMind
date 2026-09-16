@@ -32,7 +32,7 @@
 >
 > **T-P0-03 敏感 env 与远端口令**
 > - `ai_ide/executor.py` 停止透传 5 个密钥类变量：`SECRET_KEY / JWT_SECRET_KEY / INTERNAL_CALL_SECRET / DASHSCOPE_API_KEY / QWEN_API_KEY`（runner 只跑回测，不需要签钥与 LLM Key；DB/REDIS 保留，runner 需要数据访问）。
-> - **P0-03 后续跟踪（记入 P1）**：runner 专用只读 DB 账号（现在 user 代码容器可用全权 DB 凭据，属遗留风险面）。
+> - **P0-03 后续跟踪（记入 P1）**：runner 专用只读 DB 账号（现在 user 代码容器可用全权 DB 凭据，属遗留风险面）。→ **已收口（2026-09-16 深夜）**。
 > - `redis_series_quote.py`：删除硬编码默认（公网主机 + `quantmind2026` 口令）；未配置 `REMOTE_QUOTE_REDIS_HOST` 即**禁用该级取价**（返回 None 走兜底），首次访问 WARNING 一次。
 > - 测试：env 白名单断言（source 扫描 5 键不在 passthrough）；`_env()` 缺失/完备两态单测。
 >
@@ -45,10 +45,10 @@
 >
 > **批次三实施细案（2026-09-15，先规划后写）**
 >
-> **T-P0-07 体检脚本**：`backend/scripts/diagnose/health.py`，10 项断言（原 12 项中「模型契约一致」「风控状态」暂缓——前置设施未就绪，待 P1/P4 补）。
+> **T-P0-07 体检脚本**：`backend/scripts/diagnose/health.py`，10 项断言（原 12 项中「模型契约一致」「风控状态」暂缓——前置设施未就绪，待 P1/P4 补；**2026-09-16 起增补 C11=11 项**）。
 > 结构：`CheckResult(id/name/level/detail/suggestion/metrics)` + `HealthContext(redis/session_factory/today)` 注入式设计；
 > 判定逻辑抽纯函数（如 `classify_signal_distribution`）供单测，IO 只做取数。CLI：默认全跑 / `--only C01,C03` / `--json`；有 fail 退出码=1（可直接进 cron/CI）。
-> 十项：C01 信号分布（全 HOLD/坍缩）· C02 信号就绪标记 · C03 账户键一致性（1 vs 00000001 类）· C04 快照↔Redis 同源 · C05 台账写入（成交必落账，当前红→T-P1-04）· C06 对账差异 · C07 调度心跳（推理完成标记+收盘核对）· C08 数据同步新鲜度 · C09 远端行情配置状态 · C10 账户种子存在性（T-P0-05 配套）。
+> 十项（+C11=11 项）：C01 信号分布（全 HOLD/坍缩）· C02 信号就绪标记 · C03 账户键一致性（1 vs 00000001 类）· C04 快照↔Redis 同源 · C05 台账写入（成交必落账，当前红→T-P1-04）· C06 对账差异 · C07 调度心跳（推理完成标记+收盘核对）· C08 数据同步新鲜度 · C09 远端行情配置状态 · C10 账户种子存在性（T-P0-05 配套）· **C11 runner 只读 DB 角色（T-P0-03 收口配套，2026-09-16 增补）**。
 >
 > **T-P0-08 错误自定位**：新增 `backend/shared/errfmt.py::locate(tag, msg, ref=, where=)`（`[CONTRACT:XX]/[RULE:XX] … (ref=…) → file:func` 三段式）；
 > 落三条关键路径：信号闸门（script_runner 零 BUY+SELL 告警）、下单拒绝（order_submission_service / pending_order_worker）、落账异常（ledger_service / execution_engine.apply_filled）。
@@ -75,6 +75,27 @@
 - **验收**：docker inspect runner 环境无 5 个密钥；远端行情两处消费共用同一配置源
 - **测试**：`test_remote_quote_config.py`（默认免费源/覆盖/禁用/根 .env 兜底 + executor 白名单源扫描）
 - **遗留跟踪（P1）**：runner 专用只读 DB 账号（现 runner 仍持全权 DB 凭据）
+  → **已收口（2026-09-16 深夜，见文末 T-P0-03 收口记录）**
+
+### T-P0-03 收口：runner 专用只读 DB 账号 ✅（2026-09-16 深夜）
+- **供给** `shared/runner_db_account.py`：幂等创建/维护 `qm_runner_ro`
+  （LOGIN + NOSUPERUSER/NOCREATEDB/NOCREATEROLE/**NOINHERIT** + CONNECT + USAGE +
+  **SELECT ON ALL TABLES** + ALTER DEFAULT PRIVILEGES=后续新表自动只读）；
+  DO 块存在即 ALTER（口令轮换随动同步）；角色名白名单正则 + 口令字面量转义（不拼未校验外串）；
+  失败只告警（调用方显式降级，体检 C11 独立可见）。
+- **口令**：`RUNNER_DB_PASSWORD` 显式覆盖优先；否则 `sha256(主口令:qm-runner-ro:v1)[:24]`
+  确定性派生——零新增配置、可重复部署；主口令轮换后供给自动 ALTER 同步。
+- **接线** executor：启动点改经 `_runner_environment_with_least_privilege` 统一入口——
+  DB_USER/DB_PASSWORD 替换为只读凭据，**DATABASE_URL 同源重写**（防"换了变量但 URL 仍带
+  主凭据"的双口径泄漏；重写失败则移除 URL）；供给失败回落主凭据并 **ERROR 级告警**（记录在案）。
+- **体检 C11**「runner 只读 DB」：角色存在 + SELECT 有 + INSERT 被拒（可写=fail 过宽）；
+  判定纯函数 classify_runner_db_privileges。实机：供给前 C11 fail → 供给后 ok。
+- **实测**：真库 E2E——只读角色连接 SELECT 通，**INSERT/UPDATE/CREATE TABLE 全被
+  permission denied**，角色属性（非 SUPERUSER/NOCREATEDB/NOINHERIT）逐项核验；真实供给链
+  跑通（env: DB_USER=qm_runner_ro、DATABASE_URL userinfo 已重写、主口令零泄漏）；
+  测试 8/8。**边界（记录在案）**：① REDIS_PASSWORD 仍为主口令透传（Redis ACL 分账号属
+  后续，Redis 侧无表级权限概念，风险面显著小于 DB）；② 供给失败降级路径保留（外部托管库
+  无 CREATE ROLE 权限时 AI-IDE 不中断，靠 C11 暴露）。
 
 ### T-P0-06 调度注册：EOD worker + pending order worker ✅（端到端待 T-P1-04）
 - **内容**：`trade/main.py` 注册两个 worker（开关 `SIM_EOD_WORKER_ENABLED`/`SIM_PENDING_ORDER_WORKER_ENABLED` 默认 true）+ `app.state` 引用 + 启动日志
@@ -98,7 +119,7 @@
 - **遗留（已转 P1）**：新市场账户**首日**的 today_pnl 仍含一次性资本注入（今日 101 万）——基线为旧口径 CN-only，明日自愈；正确修法见新增 T-P1-07
 
 ### T-P0-07 一键体检脚本 + 12 项断言 ✅
-- **内容**：`backend/scripts/diagnose/health.py`，10 项断言（原 12 项中「模型契约一致」「风控状态」待 P1/P4 前置设施）；判定逻辑纯函数化 + HealthContext 注入式（query/redis_get/redis_scan）；`--only/--json`；有 fail 退出码 1
+- **内容**：`backend/scripts/diagnose/health.py`，10 项断言（原 12 项中「模型契约一致」「风控状态」待 P1/P4 前置设施；后增补 C11，2026-09-16 起 11 项）；判定逻辑纯函数化 + HealthContext 注入式（query/redis_get/redis_scan）；`--only/--json`；有 fail 退出码 1
 - **验收**：一键跑出报告；注入 2 类故障可检出
 - **测试**：`test_health_checks.py` 14 条（纯判定 + 假上下文驱动 C03/C04/C05）
 - **证据（2026-09-15）**：容器实测输出 8 ok/1 warn/1 fail——**C03 当场抓到本机双键形（1 vs 00000001）**，符合真实故障认知

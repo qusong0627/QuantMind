@@ -117,7 +117,7 @@
   =[applied:true]，UI 明示"改量应用：002552.SZ 卖 500 → 600"；**PG 实锤**：
   `sim_orders: SZ002552 sell 600`（落库数量=改量后值而非计划值 500；盘后拒单属撮合时段规则）。
   **前置**：侦察实机修复托管执行链三处 P0 静默断链（见后端计划同批记录）。
-- **T-FE-06 系统健康卡 ✅**：体检 10 项断言红黄绿 chips + hover 下钻（detail/suggestion），
+- **T-FE-06 系统健康卡 ✅**：体检断言红黄绿 chips（10 项起，2026-09-16 增补 C11=11 项，卡片按接口动态渲染）+ hover 下钻（detail/suggestion），
   与 `diagnose/health.py` 同源。
 - **测试**：`deskModel` vitest **8/8**（管线最差态/计划买卖分组与金额/退出规则计数/盈亏容错/
   健康视图/格式化）；`npm run typecheck` 零错误；浏览器探针：真实数据零 console 错误 +

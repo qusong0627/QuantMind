@@ -91,7 +91,10 @@ def _detect_minibt(code: str) -> bool:
 
 
 def _build_runner_environment(
-    user_id: str, request_meta: dict[str, Any] | None = None
+    user_id: str,
+    request_meta: dict[str, Any] | None = None,
+    *,
+    db_overrides: dict[str, str] | None = None,
 ) -> dict[str, str]:
     request_meta = request_meta or {}
     # Normalize provider_uri: frontend sends relative paths like "db/qlib_data/hk_data"
@@ -175,7 +178,47 @@ def _build_runner_environment(
         value = os.getenv(key)
         if value is not None:
             env[key] = value
+    # T-P0-03 遗留收口：runner 用**只读 DB 角色**（供给失败时调用方退回主凭据并显式告警）。
+    # DATABASE_URL 必须同源重写——否则"换了 DB_* 变量但 URL 仍带主凭据"形成双口径泄漏。
+    if db_overrides:
+        env["DB_USER"] = db_overrides["DB_USER"]
+        env["DB_PASSWORD"] = db_overrides["DB_PASSWORD"]
+        raw_url = env.get("DATABASE_URL")
+        if raw_url:
+            from backend.shared.runner_db_account import (
+                rewrite_database_url_for_runner,
+            )
+
+            rewritten = rewrite_database_url_for_runner(
+                raw_url, db_overrides["DB_USER"], db_overrides["DB_PASSWORD"]
+            )
+            if rewritten:
+                env["DATABASE_URL"] = rewritten
+            else:
+                env.pop("DATABASE_URL", None)
+                logger.warning(
+                    "runner DATABASE_URL 重写失败已移除（runner 用 DB_HOST/DB_* 只读凭据组装）"
+                )
     return env
+
+
+async def _runner_environment_with_least_privilege(
+    user_id: str, request_meta: dict[str, Any] | None = None
+) -> dict[str, str]:
+    """runner 环境统一入口（T-P0-03 遗留）：DB 凭据替换为只读角色，失败**显式告警**后退回主凭据。"""
+    overrides: dict[str, str] | None = None
+    try:
+        from backend.shared.runner_db_account import get_runner_db_env_overrides_async
+
+        overrides = await get_runner_db_env_overrides_async()
+    except Exception as exc:  # noqa: BLE001 - 供给异常不阻断启动
+        logger.warning("runner 只读 DB 凭据供给异常（退回主凭据）: %s", exc)
+    if overrides is None:
+        logger.error(
+            "🚨 runner 只读 DB 角色不可用——本次回落为**主库凭据**"
+            "（最小权限失效；体检 C11 可见，检查 DB 供给权限/RUNNER_DB_* 配置）"
+        )
+    return _build_runner_environment(user_id, request_meta, db_overrides=overrides)
 
 
 class StartRequest(BaseModel):
@@ -1263,6 +1306,8 @@ async def run_process(job_id: str, file_path: str):
         if not os.path.isfile(runner_path):
             raise RuntimeError(f"Runner 文件不存在: {runner_path}")
 
+        # 启动前解析 runner 环境（含只读 DB 凭据供给；失败显式告警后退回主凭据）
+        runner_env = await _runner_environment_with_least_privilege(user_id, request_meta)
         container = await asyncio.to_thread(
             client.containers.run,
             image_ref,
@@ -1271,7 +1316,7 @@ async def run_process(job_id: str, file_path: str):
             detach=True,
             volumes=volumes,
             network=_NETWORK,
-            environment=_build_runner_environment(user_id, request_meta),
+            environment=runner_env,
             mem_limit="16g",
             cpu_quota=100000,  # 1 CPU
         )
