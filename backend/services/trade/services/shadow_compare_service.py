@@ -100,9 +100,11 @@ async def collect_day_pairs(date_str: str, *, tenant_id: str | None = None) -> d
     from backend.shared.database_manager_v2 import get_session
 
     start, end = cst_day_window(date_str)
-    # sim_trades.executed_at：历史 naive-UTC / 新 aware-UTC 两种存量，按 UTC 口径平移窗口
-    utc_start = (start - _CST_OFFSET).replace(tzinfo=None)
-    utc_end = (end - _CST_OFFSET).replace(tzinfo=None)
+    # sim_trades.executed_at 为 **timestamptz**：直接以 aware 时刻窗口比较。
+    # 历史坑（2026-09-16 实测修复）：旧实现把窗口平移成 naive-UTC 再比较，PG/asyncpg
+    # 会按**会话时区（容器 Asia/Shanghai）**解释 naive 参数 → 实际窗口变为
+    # [昨16:00, 今16:00) CST，16:00 之后当日成交全部查不到（时段性假阴性）。
+    # 历史 naive-UTC 存量被 PG 解释为 CST，日历日归属不变——日窗查询下语义正确。
     # orders.created_at：naive 北京时间（容器 TZ=Asia/Shanghai）
     naive_start = start.replace(tzinfo=None)
     naive_end = end.replace(tzinfo=None)
@@ -124,7 +126,7 @@ async def collect_day_pairs(date_str: str, *, tenant_id: str | None = None) -> d
         "WHERE trading_mode = 'REAL' AND client_order_id LIKE 'mir-%' "
         "AND created_at >= :s AND created_at < :e"
     )
-    sim_params: dict = {"s": utc_start, "e": utc_end}
+    sim_params: dict = {"s": start, "e": end}
     real_params: dict = {"s": naive_start, "e": naive_end}
     if tenant_id:
         sim_sql += " AND t.tenant_id = :tid"
