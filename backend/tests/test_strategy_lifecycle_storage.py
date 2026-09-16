@@ -255,3 +255,58 @@ def test_writeback_helper_accepts_new_vocab():
 
     assert normalize_status("SIM") == "SIM"
     assert normalize_status("live_trading") == "LIVE"  # 兼容旧入参
+
+
+@pytest.mark.asyncio
+async def test_mark_as_verified_transitions_draft_to_verified():
+    """T-P3-04：回测验证标记与状态机联动——DRAFT→VERIFIED（消除 is_verified/status 分裂），
+    已运行状态不降级，目标不存在行数诚实。"""
+    try:
+        from backend.shared.database_manager_v2 import get_session  # noqa: F401
+    except Exception as exc:  # noqa: BLE001
+        pytest.skip(f"依赖不可用: {exc}")
+
+    from backend.shared.strategy_storage import get_strategy_storage_service
+
+    await _cleanup()
+    svc = get_strategy_storage_service()
+    try:
+        created = await svc.save(
+            user_id="1", name=_unique_name("verify"), code="print('v')"
+        )
+        sid = created["id"]
+        got = await svc.get(sid, user_id="1")
+        assert got["status"] == "DRAFT" and got["is_verified"] is False
+
+        ok = await svc.mark_as_verified(sid, "1")
+        assert ok is True
+        got = await svc.get(sid, user_id="1")
+        assert got["status"] == "VERIFIED", "DRAFT 应联动迁移 VERIFIED（T-P3-04）"
+        assert got["is_verified"] is True
+        # 幂等：重复标记不炸
+        assert await svc.mark_as_verified(sid, "1") is True
+
+        # 运行中（SIM）重复回测不得降级
+        await _set_status_raw(sid, "SIM")
+        assert await svc.mark_as_verified(sid, "1") is True
+        got = await svc.get(sid, user_id="1")
+        assert got["status"] == "SIM"
+
+        # 不存在的目标 → False（此前无条件 True）
+        assert await svc.mark_as_verified("999999999", "1") is False
+    finally:
+        await _cleanup()
+
+
+@pytest.mark.unit
+def test_ai_ide_executor_triggers_verified_on_success():
+    """T-P3-04 接线源断言：AI-IDE 回测成功路径调用验证标记（数字 strategy_id 守卫）。"""
+    src = (
+        _BACKEND / "services/engine/routers/ai_ide/executor.py"
+    ).read_text(encoding="utf-8")
+    assert "_mark_strategy_verified_on_success(strategy_id)" in src
+    assert "mark_as_verified" in src
+    # 仅数字 strategy_id 触发（sys_ 模板/无策略代码不受影响）
+    assert 'sid.isdigit()' in src
+    # 失败不阻断回测结果
+    assert "不阻断回测结果" in src

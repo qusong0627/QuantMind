@@ -602,18 +602,48 @@ class StrategyStorageService:
             }
 
     async def mark_as_verified(self, strategy_id: str, user_id: str) -> bool:
+        """回测验证通过标记（T-P3-04 状态一致化）。
+
+        - ``is_verified = TRUE``（回测证据位，activate/手动执行/前端按钮沿用）；
+        - **状态机联动**：DRAFT → VERIFIED（否则 is_verified=True 而 status=DRAFT 的
+          分裂会让 T-P3-01 的 SIM 启动门禁误拒已回测策略）；已在 VERIFIED/SIM/LIVE
+          不降级，ARCHIVED 保持归档；
+        - 行数诚实：目标不存在 → False（此前无条件 True）。
+        """
+        sid_text = str(strategy_id or "").strip()
+        if not sid_text.isdigit():
+            return False
         uid_int = _ensure_int_user_id(user_id)
         with get_db() as session:
-            session.execute(
+            row = session.execute(
                 text(
-                    "UPDATE strategies SET is_verified = TRUE, updated_at = :now WHERE id = :sid AND user_id = :uid"
+                    "SELECT status FROM strategies "
+                    "WHERE id = :sid AND user_id = :uid FOR UPDATE"
+                ),
+                {"sid": int(sid_text), "uid": uid_int},
+            ).fetchone()
+            if row is None:
+                return False
+            current = normalize_status(row[0])
+            new_status = _STATUS_VERIFIED if current == _STATUS_DRAFT else row[0]
+            result = session.execute(
+                text(
+                    "UPDATE strategies SET is_verified = TRUE, status = :status, "
+                    "updated_at = :now WHERE id = :sid AND user_id = :uid"
                 ),
                 {
-                    "sid": int(strategy_id),
-                    "uid": uid_int,
+                    "status": new_status,
                     "now": datetime.now(timezone.utc),
+                    "sid": int(sid_text),
+                    "uid": uid_int,
                 },
             )
+            if (result.rowcount or 0) == 0:
+                return False
+            if current == _STATUS_DRAFT:
+                logger.info(
+                    "[Strategy] 回测验证通过：id=%s DRAFT→VERIFIED（T-P3-04）", sid_text
+                )
             return True
 
     def update_lifecycle_status(

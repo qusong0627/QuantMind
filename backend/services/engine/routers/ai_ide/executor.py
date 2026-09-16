@@ -838,8 +838,31 @@ def _run_module_backtest(module):
         print(f"[RESULT] profit_factor: {float(result.profit_factor or 0.0):.4f}")
     if getattr(result, "avg_win", None) is not None:
         print(f"[RESULT] avg_win: {float(result.avg_win or 0.0):.4f}")
+    # T-P3-04：回测成功即触发策略验证（is_verified + DRAFT→VERIFIED 状态机迁移；
+    # 结果持久化已在 QlibBacktestService 内部完成 → qlib_backtest_runs）
+    _mark_strategy_verified_on_success(strategy_id)
+
     print("\n[RESULT] 回测成功")
     return 0
+
+
+def _mark_strategy_verified_on_success(strategy_id):
+    """回测成功回调：数字 strategy_id → 标记验证可用（失败仅告警，不阻断回测结果）。"""
+    sid = str(strategy_id or "").strip()
+    if not sid.isdigit():
+        return
+    try:
+        from backend.shared.strategy_storage import get_strategy_storage_service
+
+        svc = get_strategy_storage_service()
+        user_id = os.getenv("USER_ID", "default") or "default"
+        ok = asyncio.run(svc.mark_as_verified(sid, user_id))
+        if ok:
+            print(f"[SYSTEM] 策略 {sid} 回测通过，已标记验证可用（T-P3-04）")
+        else:
+            print(f"[WARN] 策略 {sid} 验证标记未命中（不存在或无权）")
+    except Exception as exc:  # noqa: BLE001
+        print(f"[WARN] 策略验证标记失败（不阻断回测结果）: {exc}")
 
 
 def main():

@@ -13,7 +13,7 @@
 | P0 止血+维护基建 | 10/10 ✅ | 安全问题清零；体检脚本可跑；回归进 CI |
 | P1 契约化 | 6/6 ✅ | 四契约落地；交易台数字可下钻 |
 | P2 执行统一 | 7/7 ✅ | 回测-模拟一致性 diff=0（执行层，含真实数据）；盘后固定价格窗口；成交落账闭环+影子对照 |
-| P3 策略收敛 | 4/7（+T-P3-07 市场时段参数化+美股模板） | 策略全生命周期 E2E |
+| P3 策略收敛 | 5/6（余 T-P3-05 门槛总表，依赖 P4 体检） | 策略全生命周期 E2E |
 | P4 选股收敛+评估 | 0/6 | Scanner 替换旧链；体检九项上线 |
 | P5+ | — | 见主文档 §12.2 总表（P5 后进入下个迭代再细化） |
 
@@ -505,8 +505,27 @@
 
 
 - **T-P3-03** 旧 5 格式 → 2 格式转换器/下架清单
-- **T-P3-04** AI-IDE 接入统一回测（结果落库 + 触发 verified）
-- **T-P3-05** 晋级门槛总表（唯一事实源，模型/策略/环境三方引用）
+### T-P3-04 AI-IDE 接入统一回测（结果落库 + 触发 verified）✅
+**落地（2026-09-16）**：
+- **结果落库**：核实 `QlibBacktestService.run_backtest` 运行时内部已持久化
+  （`BacktestPersistence.save_run → qlib_backtest_runs`，AI-IDE/minibt/同步 API/优化链路共用），
+  无缺口——本项记录为"已由服务内部承担"。
+- **触发 verified**：AI-IDE 容器 runner 回测成功（status=completed）后调用
+  `_mark_strategy_verified_on_success(strategy_id)`（来源 `AI_IDE_BACKTEST_STRATEGY_ID` 环境变量，
+  仅数字 strategy_id 触发，sys_ 模板/纯代码模式不受影响；失败仅告警不阻断回测输出）。
+- **状态一致化（修 T-P3-01 发现的分裂）**：`mark_as_verified` 重写——`is_verified=TRUE`
+  与 **DRAFT→VERIFIED 状态机迁移联动**（此前只置 is_verified 不动 status，会让"回测已通过但
+  status=DRAFT"的策略被 T-P3-01 的 SIM 启动门禁误拒）；SIM/LIVE 重复回测不降级、ARCHIVED 保持；
+  行数诚实（目标不存在 → False）。celery 回测任务路径（tasks.py）经同一函数自动联动。
+- **记录在案**：标记仍为"回测无异常即通过"（不看收益指标）——量化门槛（DSR/夏普/回撤下限）
+  归 T-P3-05 晋级门槛总表；AI 兜底模板（无策略行为）不触发。
+- **证据**：`test_strategy_lifecycle_storage.py` 8/8（新增真库 E2E：DRAFT→mark→VERIFIED 联动、
+  SIM 不降级、不存在 False、幂等；executor 接线源断言）；backend/tests 全量 **2023 passed**
+  （上批 2021，+2，零新增失败）。
+
+### T-P3-05 晋级门槛总表（唯一事实源，模型/策略/环境三方引用）
+（未开始：量化门槛 = 回测体检结论 A/B 方可进 SIM、SIM 天数/跟踪误差达标方可进 LIVE——
+依赖 T-P4-05 回测体检九项落地后定稿数字。）
 
 ### T-P3-06 策略模板库专业化补齐（用户点名 2026-09-16）✅
 **背景**：用户反馈"有些没有内容的模板需要补充、整体需专业机构级优化适配平台"。
