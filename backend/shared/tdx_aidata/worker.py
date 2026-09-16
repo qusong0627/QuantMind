@@ -161,6 +161,52 @@ class AidataWorker:
         self._lock = asyncio.Lock()
         self._server: asyncio.AbstractServer | None = None
         self._stop = asyncio.Event()
+        self.subscription = None  # collector.SubscriptionEngine | None
+        self._sub_task: asyncio.Task | None = None
+
+    # ── 订阅引擎（T-P6-02）─────────────────────────────────────────
+
+    def _redis_factory(self):
+        """订阅写侧 Redis（远端行情实例——与消费方同一事实源）。"""
+        import redis as _redis
+
+        from backend.shared.remote_quote_config import resolve_remote_quote_redis
+
+        resolved = resolve_remote_quote_redis()
+        if resolved is None:
+            raise RuntimeError("远端行情 Redis 未配置/已禁用（REMOTE_QUOTE_DISABLED）")
+        host, port, password, db = resolved
+        return _redis.Redis(
+            host=host,
+            port=port,
+            password=password,
+            db=db,
+            socket_connect_timeout=3,
+            socket_timeout=5,
+            decode_responses=True,
+        )
+
+    def _start_subscription(self) -> None:
+        from backend.shared.tdx_aidata import config as _cfg
+        from backend.shared.tdx_aidata.collector import SubscriptionEngine
+
+        engine = SubscriptionEngine(
+            sdk_subscribe=lambda codes, cb: self.tqs.subscribe(
+                stock_list=codes, callback=cb
+            ),
+            sdk_unsubscribe=lambda: self.tqs._tdx().unsubscribe(),
+            budget_gate=self.gate,
+            redis_factory=self._redis_factory,
+            hot_set_key=_cfg.hot_set_key(),
+            cap=int(os.getenv("QM_HOT_SET_CAP", "1000")),
+            silence_s=float(os.getenv("QM_HOT_SET_SILENCE_S", "120")),
+            sync_interval_s=float(os.getenv("QM_HOT_SET_SYNC_S", "15")),
+        )
+        self.subscription = engine
+        self._sub_task = asyncio.get_running_loop().create_task(
+            engine.run(), name="tdx-aidata-subscription"
+        )
+        logger.info("subscription engine enabled hot_set=%s", _cfg.hot_set_key())
 
     # ── SDK 引入（唯一处） ──────────────────────────────────────────
 
@@ -216,19 +262,31 @@ class AidataWorker:
                 meta,
             )
         if method == "status":
-            return (
-                {
-                    "pid": os.getpid(),
-                    "started_at": self.started_at,
-                    "dir": self.directory,
-                    "sdk_ready": self.tqs is not None,
-                    "sdk_error": self.sdk_error,
-                    "counters": self.counters,
-                    "gate": self.gate.snapshot(),
-                },
-                None,
-                meta,
-            )
+            payload = {
+                "pid": os.getpid(),
+                "started_at": self.started_at,
+                "dir": self.directory,
+                "sdk_ready": self.tqs is not None,
+                "sdk_error": self.sdk_error,
+                "counters": self.counters,
+                "gate": self.gate.snapshot(),
+            }
+            if self.subscription is not None:
+                payload["subscription"] = self.subscription.snapshot()
+            return payload, None, meta
+
+        if method == "subscription_status":
+            if self.subscription is None:
+                return {"enabled": False}, None, meta
+            return self.subscription.snapshot(), None, meta
+
+        if method == "hot_set_sync":
+            if self.subscription is None:
+                return {"enabled": False}, None, meta
+            result = await asyncio.to_thread(self.subscription.sync_hot_set_once)
+            result["enabled"] = True
+            result["subscription"] = self.subscription.snapshot()
+            return result, None, meta
 
         # 数据类：预算闸门 + SDK 就绪检查
         wait_s = self.gate.check()
@@ -433,8 +491,17 @@ class AidataWorker:
                 asyncio.get_running_loop().add_signal_handler(sig, self._stop.set)
             except NotImplementedError:  # pragma: no cover
                 pass
+        if config.subscription_enabled() and self.tqs is not None:
+            self._start_subscription()
         async with self._server:
             await self._stop.wait()
+        if self.subscription is not None:
+            self.subscription.stop()
+        if self._sub_task is not None:
+            try:
+                await asyncio.wait_for(self._sub_task, timeout=3)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                self._sub_task.cancel()
         try:
             os.unlink(self.socket_path)
         except OSError:

@@ -21,6 +21,8 @@ KNOWN_METHODS = {
     "get_klines_batch",
     "get_minute_data",
     "get_tick_data",
+    "subscription_status",
+    "hot_set_sync",
 }
 
 _PERIOD_MAP = {

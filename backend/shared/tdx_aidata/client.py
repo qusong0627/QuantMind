@@ -250,6 +250,14 @@ class TdxAiDataClient:
             timeout=timeout,
         )
 
+    async def subscription_status(self, *, timeout: float | None = None) -> dict:
+        """订阅引擎状态（T-P6-02；未启用返回 {"enabled": False}）。"""
+        return await self.call("subscription_status", {}, timeout=timeout or 15.0)
+
+    async def sync_hot_set(self, *, timeout: float | None = None) -> dict:
+        """手动触发一次热集差分同步（测试/运维用）。"""
+        return await self.call("hot_set_sync", {}, timeout=timeout or 60.0)
+
     # ── 状态 ────────────────────────────────────────────────────────
 
     async def status(self, *, try_start: bool = False) -> dict[str, Any]:

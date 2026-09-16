@@ -21,6 +21,7 @@ from typing import Any
 DEFAULT_DIR = "/opt/tdx-aidata"
 REDIS_CONFIG_KEY = "qm:market:tdx_aidata:config"
 DEFAULT_SOCKET = "/tmp/qm-tdx-aidata.sock"
+DEFAULT_HOT_SET_KEY = "qm:hot_set:symbols"
 
 _TRUTHY = {"1", "true", "yes", "on"}
 _FALSY = {"0", "false", "no", "off"}
@@ -80,6 +81,23 @@ def socket_path() -> str:
     """IPC 套接字路径（固定，不随目录漂移——跨服务单 worker）。"""
     env = str(os.getenv("QM_TDX_AIDATA_SOCKET") or "").strip()
     return env or DEFAULT_SOCKET
+
+
+def subscription_enabled() -> bool:
+    """订阅采集开关（T-P6-02）：Redis 配置 > env；默认关（T-P6-06 热集服务接线后再默认开）。"""
+    cfg = _read_redis_config_sync()
+    raw = str(cfg.get("subscription_enabled") or "").strip().lower()
+    if raw in _TRUTHY:
+        return True
+    if raw in _FALSY:
+        return False
+    return str(os.getenv("TDX_AIDATA_SUBSCRIBE_ENABLED") or "").strip().lower() in _TRUTHY
+
+
+def hot_set_key() -> str:
+    """热集符号集 Redis 键（T-P6-06 维护；测试可 env 隔离）。"""
+    env = str(os.getenv("QM_HOT_SET_KEY") or "").strip()
+    return env or DEFAULT_HOT_SET_KEY
 
 
 def ini_path(directory: str | None = None) -> str:
