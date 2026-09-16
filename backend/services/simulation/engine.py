@@ -385,7 +385,9 @@ class SimulationEngine:
                 # 4.5 持仓退出评估（T-P2-04 v1）：调仓之前——退出卖单与调仓卖单共用
                 # sim-{run}-{sym}-sell 幂等键（退出先记账，调仓重复自动跳过）
                 exit_rules = await self._load_exit_ruleset(strategy_id, uid)
-                exit_orders = self._evaluate_position_exits(account, quotes, exit_rules)
+                exit_orders = await self._evaluate_position_exits(
+                    account, quotes, exit_rules, tenant=tenant, user_id=uid, market=market
+                )
 
                 # 5. 调仓计算
                 orders = self.rebalance_calculator.calculate(
@@ -514,25 +516,75 @@ class SimulationEngine:
             sl = exec_cfg.get("stop_loss")
             tp = exec_cfg.get("take_profit")
             mh = exec_cfg.get("max_hold_days")
-            if not sl and not tp and not mh:
+            # T-P2-04b：移动止损键兼容两种口径（策略短键 / 实盘 sltp 的 _pct 长键）
+            trail = exec_cfg.get("trailing_stop") or exec_cfg.get("trailing_stop_pct")
+            if not sl and not tp and not mh and not trail:
                 return None
             return ExitRuleSet(
                 hard_stop_pct=abs(float(sl)) if sl else None,
                 take_profit_pct=abs(float(tp)) if tp else None,
                 max_hold_days=int(mh) if mh else None,
+                trailing_stop_pct=abs(float(trail)) if trail else None,
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("SimulationEngine: 加载退出规则失败 %s", exc)
             return None
 
-    def _evaluate_position_exits(self, account, quotes, exit_rules) -> list[Order]:
-        """评估持仓退出（唯一实现 exit_rules）；返回卖单（source=sltp），T+1 不可卖跳过。"""
+    async def _evaluate_position_exits(
+        self, account, quotes, exit_rules, *, tenant: str = "default", user_id: str = "", market: Any = None
+    ) -> list[Order]:
+        """评估持仓退出（唯一实现 exit_rules）；返回卖单（source=sltp），T+1 不可卖跳过。
+
+        T-P2-04b：状态供给经 exit_state_service（开仓日=台账/成交最早，高水位=开仓以来
+        不复权日线 high ∪ 持久化值 ∪ 当前价）——trailing/time_stop 从"零填充静默退化"
+        变为真实生效；无开仓日历史的旧持仓按周期点名（不静默、不编数据）。
+        """
         from backend.shared.errfmt import locate
         from backend.shared.exit_rules import PositionState, evaluate_exit
         from backend.shared.order_contract import SOURCE_SLTP
 
         if exit_rules is None:
             return []
+        # 状态供给（唯一取数实现）：账户键双形态统一经归一后缀式索引
+        states: dict = {}
+        missing_open_date: list[str] = []
+        try:
+            from backend.services.simulation.services.exit_state_service import (
+                load_symbol_exit_states,
+            )
+
+            prices: dict[str, float] = {}
+            for sym, pos in (account.positions or {}).items():
+                if not isinstance(pos, dict):
+                    continue
+                quote = quotes.get(sym) or quotes.get(StockCodeUtil.to_prefix(sym))
+                if quote is not None and float(quote.current_price or 0) > 0:
+                    from backend.services.simulation.services.exit_state_service import (
+                        _norm_symbol,
+                    )
+
+                    prices[_norm_symbol(sym)] = float(quote.current_price)
+            states, missing_open_date = await load_symbol_exit_states(
+                redis_like=self.redis,
+                tenant_id=tenant,
+                user_id=str(user_id),
+                market=market,
+                positions={s: p for s, p in (account.positions or {}).items() if isinstance(p, dict)},
+                last_prices=prices,
+            )
+        except Exception as exc:  # noqa: BLE001 - 供给失败退回 v1 语义（规则仍跑，缺状态项如实退化）
+            logger.warning("SimulationEngine: 退出状态供给失败（退回 entry 近似）: %s", exc)
+            states = {}
+        if missing_open_date and (exit_rules.max_hold_days or exit_rules.trailing_stop_pct):
+            logger.info(
+                locate(
+                    "RULE:EXIT",
+                    f"{len(missing_open_date)} 个持仓无开仓日历史（台账早于 T-P1-04），"
+                    f"time_stop 不可用、trailing 以持久化高水位/开仓价近似: "
+                    f"{','.join(sorted(missing_open_date)[:5])}",
+                    where="simulation/engine.py:_evaluate_position_exits",
+                )
+            )
         out: list[Order] = []
         for sym, pos in (account.positions or {}).items():
             if not isinstance(pos, dict):
@@ -543,11 +595,18 @@ class SimulationEngine:
             quote = quotes.get(sym) or quotes.get(StockCodeUtil.to_prefix(sym))
             if quote is None or float(quote.current_price or 0) <= 0:
                 continue
+            from backend.services.simulation.services.exit_state_service import (
+                _norm_symbol as _ns,
+            )
+
+            st = states.get(_ns(sym))
             decision = evaluate_exit(
                 exit_rules,
                 PositionState(
                     entry_price=float(pos.get("cost") or 0),
                     last_price=float(quote.current_price),
+                    high_water_price=(st.high_water if st is not None else None),
+                    hold_days=(st.hold_days if st is not None else None),
                 ),
             )
             if not decision.should_exit:

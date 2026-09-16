@@ -408,14 +408,13 @@ async def test_engine_quantity_overrides_full_chain(monkeypatch):
     monkeypatch.setattr(engine, "_load_bars", _bars)
     monkeypatch.setattr(engine, "_load_exit_ruleset", _none)
     monkeypatch.setattr(engine, "_apply_risk_buy_locks", lambda orders, **kw: orders)
-    # 退出单桩：一只持仓触发止损（kind=exit，应在名单首位）
-    monkeypatch.setattr(
-        engine,
-        "_evaluate_position_exits",
-        lambda account, quotes, rules: [
+    # 退出单桩（T-P2-04b 起评估为 async）：一只持仓触发止损（kind=exit，名单首位）
+    async def _exit_stub(account, quotes, rules, **kwargs):
+        return [
             Order(symbol="600519.SH", side="SELL", quantity=300, price=1500.0, reason="止损")
-        ],
-    )
+        ]
+
+    monkeypatch.setattr(engine, "_evaluate_position_exits", _exit_stub)
 
     report = await engine.run_cycle(
         tenant_id="default",

@@ -360,8 +360,58 @@
   回放 `scan_stop_loss` 接入（low 触发口径不变）；**模拟活盘引擎新增退出评估**（此前完全没有）：
   hosted 周期先评估持仓退出（规则取自策略 execution_config，与实盘隐式止损同源），退出卖单
   `source=sltp` + `[RULE:EXIT]` 自定位日志，与同周期调仓卖单共用幂等键自动去重。
-- **v1 边界（记录在案）**：hard_stop + take_profit；trailing/time_stop 需持仓最高价/开仓日历史 →
+- **v1 边界（已由 T-P2-04b 补齐，见下）**：hard_stop + take_profit；trailing/time_stop 需持仓最高价/开仓日历史 →
   T-P2-04b（随 PG lots 集成）；回测 `StopLossManager` 属独立体系（回测专用）暂不动。
+
+### T-P2-04b 退出规则状态供给（先细案，2026-09-16 晚）
+> **侦察结论**：五规则判定早已唯一实现，但 live 侧没有任何调用方喂状态——
+> `high_water_price`/`hold_days`/`signal_gone` 三个字段**零填充**：
+> trailing 静默退化为按开仓价的固定线、time_stop 永不触发、signal_exit 无配置面（休眠）。
+> 实测数据现状：`simulation_position_lots` 0 行、`sim_trades` 1 行——**存量 27 个持仓
+> 无任何开仓日来源**（T-P1-04 前的 Redis-only 持仓）；账户 position 键**双形态**
+> （`300649.SZ` 与 `SH600983` 混存）；日线批量接口
+> `hub.fetch_daily_kline_batch(adjust="none")` 可用；实盘侧高水位语义在
+> `sltp_executor.update_highest_price`（每 tick 增量维护，唯一实现）。
+>
+> **细案**：
+> 1. 新服务 `simulation/services/exit_state_service.py`（取数唯一实现）：
+>    - 开仓日：lots 最早未平行 → sim_trades 最早 BUY → None（**如实不可用 + 周期点名**，不编数据）；
+>    - 持仓最高价：`max(开仓以来不复权日线 high, 当前价, 持久化值)` —— 持久化于
+>      `simexit:hw:{tenant}:{user}:{market}` 哈希（`{hw,d}` JSON；**开仓日晚于持久化日期
+>      时丢弃持久化值**——同标的二次建仓不继承旧高点）；折叠复用
+>      `sltp_executor.update_highest_price`（高水位语义唯一实现，与实盘止损同源）；
+>    - 持有交易日：`backtest_health.trading_days_between`（日历唯一实现）。
+> 2. 引擎：`_evaluate_position_exits` 改 async 并接入状态供给（tenant/user/market 透传）；
+>    规则集装载补 `trailing_stop(_pct)` 键；无开仓日持仓按周期汇总点名（不静默）。
+> 3. reset / OCR 同步：清对应市场的高水位哈希（防同标的重开后继承旧高点）。
+> 4. 口径边界（写注释与文档）：模拟为**日频评估**（trailing 用评估时点价，与硬止损同节奏），
+>    实盘为报价级增量采样——规则同源、频率不同；日线 high 用**不复权**（cost 为成交原价）。
+> 5. signal_exit 保持休眠（无配置面；触发语义——对哪套信号集、阈值如何——需产品决策，记录在案）。
+> 6. 验证（机构级）：纯函数矩阵（折叠/日期丢弃/日历）+ **真库 E2E**（lots 两笔取最早、
+>    trades 回退、批量日线 high 与直查逐值一致）+ 引擎集成（trailing/time 真实触发、旧持仓
+>    如实不触发+点名）+ 源守卫；测试夹具同步改 async。
+
+**落地记录（2026-09-16 深夜）**：
+- **状态供给唯一实现** `services/simulation/services/exit_state_service.py`：开仓日（lots 最早
+  未平行 → sim_trades 最早 BUY → 缺省点名）；高水位（开仓以来**不复权**日线 high ∪ 持久化值 ∪
+  当前价，折叠复用 `sltp_executor.update_highest_price`）；持有交易日（`trading_days_between`）；
+  持久化哈希 `simexit:hw:{t}:{u}:{m}`（`{hw,d}` JSON、无 TTL、user 双口径收敛同键、
+  **stored d 早于开仓日即丢弃**=二次建仓不继承旧高点）；reset/OCR 同步清哈希。
+- **引擎接线**：`_evaluate_position_exits` 改 async（tenant/user/market 透传）、规则集装载补
+  `trailing_stop(_pct)` 双键；无状态时**退回 v1 语义**（entry 近似）且供给失败只告警——
+  fail-safe 不 fail-closed 的边界（退出保护不能被新依赖拖垮）。`signal_exit` 保持休眠
+  （无配置面，触发语义需产品决策，记录在案）；**无信号日整轮早退（含退出评估）**属既有设计
+  （信号坍缩由体检 C01 兜底，记录在案）。
+- **过程实锤（E2E 抓到两处真实类型坑）**：`simulation_position_lots.user_id` 是 varchar 而
+  `sim_trades.user_id` 是 integer（服务统一 CAST 文本比较 + 双口径候选）；`lots.open_date`
+  是 timestamp（统一 coerce 到 date）——两处若按直觉写会在真库直接 DataError。
+- **真机验证**：对真实账户（28 个旧持仓=Redis-only 无台账）直跑退出评估——状态供给全链无异常、
+  **28 个高水位落库**（`{"hw":62.12,"d":"2026-09-16"}` 形态）、**12 笔 hard_stop 真实触发**
+  （深亏持仓）；无开仓日持仓按周期一行点名（不静默）。
+- **测试** `test_exit_state_supply.py` **8/8**：纯函数（折叠/归一/键收敛）+ 真库 E2E（lots 最早/
+  trades 回退/批量 high 与直查逐值一致）+ 服务集成（装配/只升不降/旧高点丢弃/清理）+ 引擎全链
+  （trailing 带高水位真实触发「最高 12」+ time_stop「持有 7 日」）+ 源守卫；受影响三套件同步改
+  async 夹具后 42/42。
 - **测试**：`test_exit_rules.py` 9 条全绿；全量回归 183/183；重启干净。
 > **实施细案（2026-09-16，先侦察后写）**
 > - **侦察结论（退出规则 5 处实现）**：① TDX `check_sltp_trigger`（纯函数，sltp_executor 与桥 daemon 共用）；
@@ -378,7 +428,7 @@
 >   风控触发器评估接入（position_stop_loss/take_profit 与 canonical 同判定）。
 > - **模拟活盘接线（v1）**：hosted 周期在调仓**之前**评估持仓退出（规则取自策略 execution_config 风险字段，
 >   与实盘隐式止损同源）；退出卖单沿用 `sim-{run}-{sym}-sell` 幂等键 → 与同周期调仓卖单自动去重；
->   v1 支持 hard_stop + take_profit（trailing/time 需持仓最高价/开仓日历史 → 随 T-P2-04b lots 集成，记录在案）。
+>   v1 支持 hard_stop + take_profit（trailing/time 状态供给已随 **T-P2-04b** 落地，见下）。
 > - 测试：`test_exit_rules.py`——优先级阶梯纯函数、快照内容、sltp 包装与旧行为逐案对照、三处接线源断言、
 >   引擎退出单接线源断言；既有回放/触发器测试回归。
 >

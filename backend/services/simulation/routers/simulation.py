@@ -452,6 +452,15 @@ async def reset_simulation_account(
     account = await manager.init_account(
         uid, initial_cash, tenant_id=auth.tenant_id, market=market
     )
+    # T-P2-04b：清该市场高水位哈希（防同标的二次建仓继承上一轮高点）
+    try:
+        from backend.services.simulation.services.exit_state_service import (
+            clear_high_water,
+        )
+
+        clear_high_water(redis, auth.tenant_id, str(uid), market)
+    except Exception:  # noqa: BLE001 - 清理失败不阻断重置
+        pass
     await _capture_simulation_snapshot(redis)
     return {
         "success": True,
@@ -751,6 +760,15 @@ async def confirm_holding_sync(
 
     # 4. 初始化账户 (重置现金为 calculated_initial_cash)
     await manager.init_account(uid, calculated_initial_cash, auth.tenant_id)
+    # T-P2-04b：OCR 重对齐清 CN 高水位（同标的重开后不继承旧高点）
+    try:
+        from backend.services.simulation.services.exit_state_service import (
+            clear_high_water,
+        )
+
+        clear_high_water(redis, auth.tenant_id, str(uid), "CN")
+    except Exception:  # noqa: BLE001 - 清理失败不阻断同步
+        pass
 
     # 5. 写入持仓 (通过 update_balance 扣除现金，从而使总资产保持不变，盈亏从 0 开始)
     for pos in sync_positions:

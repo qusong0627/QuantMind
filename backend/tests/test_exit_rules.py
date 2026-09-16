@@ -148,7 +148,7 @@ def test_three_sites_delegate_to_canonical():
 
 def test_sim_engine_exit_wiring():
     src = (_BACKEND / "services/simulation/engine.py").read_text(encoding="utf-8")
-    assert "exit_orders = self._evaluate_position_exits(" in src
+    assert "await self._evaluate_position_exits(" in src  # T-P2-04b 起带状态供给（async）
     assert "orders = exit_orders + orders" in src  # 退出优先于调仓
     assert 'locate(\n                    "RULE:EXIT"' in src or "RULE:EXIT" in src
     assert "SOURCE_SLTP" in src
