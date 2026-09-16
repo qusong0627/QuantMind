@@ -103,10 +103,41 @@ async def run_scan(
         cooldown_days=cooldown_days,
         as_of=ts,
     )
+
+    # T-P4-04 买入前 K 线过滤（纯函数层；scan 等价性不受影响）
+    buy_filter_meta: dict[str, Any] | None = None
+    from backend.shared.buy_filters import DEFAULT_BUY_FILTERS, apply_buy_filters
+
+    if DEFAULT_BUY_FILTERS.enabled and merged:
+        from backend.services.engine.scanners.daily_bars import (
+            load_recent_daily_bars,
+        )
+
+        bars_by_symbol = load_recent_daily_bars(
+            [o.symbol for o in merged], end_date=trade_date
+        )
+        if bars_by_symbol is None:
+            buy_filter_meta = {"skipped": True, "reason": "QuantDB 不可用（如实跳过）"}
+        else:
+            kept, rejected = apply_buy_filters(merged, bars_by_symbol)
+            buy_filter_meta = {
+                "skipped": False,
+                "config": {
+                    "max_rise_from_low": DEFAULT_BUY_FILTERS.max_rise_from_low,
+                    "max_open_gap": DEFAULT_BUY_FILTERS.max_open_gap,
+                    "max_bias5": DEFAULT_BUY_FILTERS.max_bias5,
+                    "min_vol_ratio": DEFAULT_BUY_FILTERS.min_vol_ratio,
+                },
+                "passed": len(kept),
+                "rejected": rejected,
+            }
+            merged = kept
+
     return {
         "as_of": ts,
         "strategy": strategy,
         "mode": mode,
+        "buy_filters": buy_filter_meta,
         "scanners_run": [m.get("scanner") for m in metas],
         "scanners_skipped": skipped,
         "meta": metas,

@@ -60,6 +60,17 @@ def main() -> int:
                 f"市场状态={meta.get('market_state')} avgTop1={meta.get('avg_top1')} "
                 f"强行业={meta.get('strong_industry_count')} 选中={meta.get('picked')}"
             )
+    bf = report.get("buy_filters")
+    if bf:
+        if bf.get("skipped"):
+            print(f"  买入前 K 线过滤: 跳过（{bf.get('reason')}）")
+        else:
+            print(
+                f"  买入前 K 线过滤（KHunter 4 规则）: 通过 {bf.get('passed', 0)}"
+                f" / 拒绝 {len(bf.get('rejected') or [])}"
+            )
+            for rj in (bf.get("rejected") or [])[:5]:
+                print(f"    拒: {rj['symbol']} — {'；'.join(rj['reasons'])}")
     print(f"\n机会池（{len(report['opportunities'])} 条，Top {args.top}）:")
     print(f"{'symbol':<12}{'score':>6}{'strength':>10}  行业 / 融合分 / 趋势")
     for o in report["opportunities"][: args.top]:

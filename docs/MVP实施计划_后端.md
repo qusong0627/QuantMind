@@ -14,7 +14,7 @@
 | P1 契约化 | 6/6 ✅ | 四契约落地；交易台数字可下钻 |
 | P2 执行统一 | 7/7 ✅ | 回测-模拟一致性 diff=0（执行层，含真实数据）；盘后固定价格窗口；成交落账闭环+影子对照 |
 | P3 策略收敛 | 6/7（余 T-P3-05 门槛总表，依赖 P4 体检） | 策略全生命周期 E2E |
-| P4 选股收敛+评估 | 3/6 | Scanner 替换旧链；体检九项上线 |
+| P4 选股收敛+评估 | 4/6 | Scanner 替换旧链；体检九项上线 |
 | P5+ | — | 见主文档 §12.2 总表（P5 后进入下个迭代再细化） |
 
 ---
@@ -798,6 +798,38 @@
 
 - **T-P4-02** 旧 `/selection` 三层过滤退休（声明 + 引导到新入口，Claude skills 同步改）
 - **T-P4-03** 阈值分位化全量替换 + 量纲回归测试
+### T-P4-04 买入前 K 线过滤（移植 KHunter 4 规则）✅
+> **实施细案（2026-09-16，先侦察后写）**
+> - **四规则（设计 §事前·形态 + 策略表达示例）**：① 距低点涨幅 rise_from_low≤50%（20 日低点，
+>   防追已大涨）② 开盘跳空 open_gap≤4%（vs 昨收，防高开接盘）③ BIAS5≤7%（5 日乖离，防短线
+>   过热）④ 量能确认 vol_ratio≥0.7（当日量/前 5 日均量，防极度缩量假突破）。
+> - **唯一实现 `shared/buy_filters.py`**（纯函数）：`BuyFilterConfig` + 表达式解析
+>   （`rise_from_low<=50%`/`open_gap<=4%`/`bias5<=7`/`vol_ratio>=0.7` 与策略 spec
+>   `risk.buy_filters` 同形，未知键报错不静默）+ `evaluate_bar_filters`（逐规则证据）
+>   + `apply_buy_filters`（opportunities × bars → 保留/拒绝+原因）。
+> - **数据装载** `services/engine/scanners/daily_bars.py`：QuantDB hub `fetch_series`
+>   （**不复权**日线——前复权价在除权日跳变会污染 gap/bias）；符号数据不足→该标的**拒买**
+>   （fail-closed）；基础设施不可用→整步跳过并 meta 如实标注（fail-loud，不静默通过）。
+> - **接线**：runner 在 scan 后对 model_signal 机会做买入前过滤（纯函数层，不动 scan 等价性）；
+>   meta 记 `buy_filters`（配置/通过/拒绝明细）；CLI 展示。
+> - **测试**：四规则边界（通过/拒绝各态）+ 组合顺序 + 解析器（规范形/未知键报错）+
+>   真库装载（9/15 实选 5 只取日线 ≥6 根）+ runner 接线源断言。
+
+**落地（2026-09-16）**：
+- **唯一实现 `shared/buy_filters.py`**（纯函数）：`BuyFilterConfig`（四规则默认=手册推荐值：
+  距低点涨幅 ≤50%/20 日、开盘跳空 ≤4%、BIAS5 ≤7、量能比 ≥0.7）+ **表达式解析器**
+  （`rise_from_low<=50%` 等策略 spec 同形；未知键/反向约束 ValueError 响亮失败）+
+  `evaluate_bar_filters`（逐规则证据快照）+ `apply_buy_filters`（拒绝明细留痕）；
+  **数据不足 fail-closed 拒买**。
+- **数据装载** `services/engine/scanners/daily_bars.py`：QuantDB hub `fetch_series`
+  （**不复权**日线——前复权价除权日跳变会污染 gap/bias）；hub 不可用→整步跳过并 meta 如实标注。
+- **接线**：runner 扫描后对机会执行买入前过滤（纯函数层，scan 等价性不受影响）；
+  meta 落 `buy_filters`（配置/通过/拒绝明细）；CLI 展示过滤摘要与拒绝原因。
+- **实机取证**：9/15 实选 5 只全链路——真实不复权日线四规则评估
+  `passed=5, rejected=[]`（决策日非过热标的，全过为合理结果；拒绝路径由边界测试覆盖）。
+- **证据**：`test_buy_filters.py` 12/12（四规则边界/解析器/apply/fail-closed/真库取线）；
+  P4 全系五套件 **40/40**；backend/tests 全量 **2067 passed**（+12，零新增失败）。
+
 - **T-P4-04** 买入前 K 线过滤（移植 KHunter 4 规则）
 - **T-P4-05** 五张评分卡 + 回测体检九项（`scripts/eval/` + `eval_scores` 表）
 - **T-P4-06** 体检三处接入（回测后/晋级门禁/月度复检）
