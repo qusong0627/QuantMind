@@ -218,20 +218,32 @@ class BacktestPersistence:
                 result_file_path=result_file_path,
             )
         # T-P4-06 ①：回测完成自动体检（九项 → result_json.health + 策略留档）。
-        # best-effort 后台执行：失败只告警，绝不阻塞回测结果落库。
+        # best-effort：失败只告警，绝不回滚/阻塞回测结果落库（落库已在上面提交完成）。
+        # 注意（2026-09-16 实证修复）：此处必须 **await** 体检，不能 fire-and-forget——
+        # celery worker 的 _async_loop 是 run_until_complete 驱动，create_task 出来的任务
+        # 在本次调用返回后随循环停转而**永不执行**（表现为前端异步回测永远无体检记录、
+        # 晋级门禁永远拒绝）。本路径是唯一的 completed 落库点，直接跑完最稳。
         if status == "completed" and isinstance(local_payload, dict):
             equity_rows = local_payload.get("equity_curve")
             if equity_rows:
-                from backend.shared.backtest_health import schedule_health_check
+                from backend.shared.backtest_health import attach_backtest_health, health_enabled
 
-                schedule_health_check(
-                    backtest_id=backtest_id,
-                    equity_rows=equity_rows,
-                    tenant_id=tenant_id,
-                    user_id=user_id,
-                    strategy_id=strategy_id,
-                    benchmark_symbol=(config or {}).get("benchmark_symbol"),
-                )
+                if health_enabled():
+                    try:
+                        await attach_backtest_health(
+                            backtest_id=backtest_id,
+                            equity_rows=equity_rows,
+                            tenant_id=tenant_id,
+                            user_id=user_id,
+                            strategy_id=strategy_id,
+                            benchmark_symbol=(config or {}).get("benchmark_symbol"),
+                        )
+                    except Exception as exc:  # noqa: BLE001 - best-effort（不阻断、不静默）
+                        logger.warning(
+                            "[BacktestHealth] %s 体检失败（结果已落库，不阻断）: %s",
+                            backtest_id,
+                            exc,
+                        )
 
     async def get_result(
         self,

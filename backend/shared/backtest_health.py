@@ -177,14 +177,21 @@ def promotion_gate(
 
 
 def load_index_closes_between(symbol: str, start_iso: str, end_iso: str) -> list[float]:
-    """按 [start, end]（ISO）取指数收盘（QuantDB index_daily）→ list[float]（升序）。"""
+    """按 [start, end]（ISO）取指数收盘（QuantDB index_daily）→ list[float]（升序）。
+
+    符号口径（2026-09-16 修复）：回测配置携带的基准是 qlib 式（如 ``sh000300``），而
+    QuantDB 指数库为后缀式（``000300.SH``）——统一经 ``StockCodeUtil.to_suffix`` 归一，
+    否则序列取空、因子回归缺证据、体检恒判 E（证据不足）。归一是纯格式化，不影响
+    真缺数据的窗口（如指数停更）如实返回空。
+    """
     try:
         from backend.services.engine.data_platform.quantdb_hub import QuantDBDataHub
+        from backend.shared.stock_utils import StockCodeUtil
 
         hub = QuantDBDataHub.get_instance()
         df = hub.fetch_series(
             "qdb_index_daily",
-            symbol,
+            StockCodeUtil.to_suffix(symbol),
             _iso_to_dt(start_iso),
             _iso_to_dt(end_iso),
             columns=["close"],
@@ -642,7 +649,13 @@ def schedule_health_check(
     strategy_id: str | None = None,
     benchmark_symbol: str | None = None,
 ) -> bool:
-    """后台调度体检（回测落库路径专用）：无事件循环/失败只告警，绝不阻塞回测。"""
+    """后台调度体检（fire-and-forget create_task）——**仅限长驻事件循环**（服务进程主循环）。
+
+    ⚠ 2026-09-16 实证：celery worker 的循环由 ``run_until_complete`` 驱动，本次调用返回后
+    循环即停转，create_task 出的体检任务**永不执行**（表现为异步回测永远无体检记录）。
+    落库路径（BacktestPersistence.save_run）已改为直接 ``await attach_backtest_health``；
+    新调用方优先用 await，本函数仅为长驻循环场景保留。
+    """
     if not health_enabled() or not equity_rows:
         return False
     import asyncio

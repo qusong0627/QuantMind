@@ -997,6 +997,25 @@
 共享 redis 单例、裸码归一断言——防回归）。**注意**：修复等于**重新武装了托管模拟执行**，
 有活跃策略时下一个调度窗口即会正常出单（本机当前无活跃策略，未触发）。
 
+**事故与修复·回测体检链两处静默失效（2026-09-16 晚，T-FE-05 v2 真机 E2E 侦察发现，P0）**：
+走"回测 → 体检 → 晋级 → 启动 → 交易台执行"生产全链时发现**异步回测路径永远拿不到体检**
+（晋级门禁被静默锁死，前端表现=永远提示"重跑回测"，且重跑也没用）：
+1. **fire-and-forget 任务永不执行**：`BacktestPersistence.save_run` 用
+   `schedule_health_check`（`loop.create_task`）——celery worker 的 `_async_loop` 由
+   `run_until_complete` 驱动，save_run 返回后循环停转，体检任务**从未执行**（日志无任何痕迹，
+   最典型的静默失效）。修复：落库路径改为 **`await attach_backtest_health(...)`**（落库已提交、
+   失败只告警语义不变）；`schedule_health_check` 保留但 docstring 标注仅限长驻循环。
+   实证：修复前该回测**无任何 strategy_health 行**（result_json 无 health 字段、日志无痕迹）；
+   修复①后同参数回测即落 `strategy_health|2|E|30`（此时基准未归一 → 仍判 E，属下一处）。
+2. **基准符号族错配**：回测配置携带 qlib 式基准（`sh000300`），`load_index_closes_between`
+   直查 QuantDB 指数库（后缀式 `000300.SH`）→ 取空 → 因子回归缺证据 → 体检**恒判 E**
+   （"缺基准回归证据"）。修复：经 `StockCodeUtil.to_suffix` 归一（共享工具，不手写正则）。
+   实证：`sh000300` 取数 0 根 → 修复后 234 根且与后缀式逐值相等。
+**验证**：`test_backtest_health.py` **13/13**（新增真库基准归一回归测试 + 源守卫更新为
+断言 `await attach_backtest_health(` 且持久化层禁现 `schedule_health_check(`）；
+三次真机回测（0.9 年窗 → E/30"缺基准"；修复①后 → E/42"样本不足 < MinTRL 2.15 年"——
+**基准回归已生效、E 为诚实的样本不足**；这就是设计里"短样本天然判 E"的预期行为）。
+
 - **T-P4-05** 五张评分卡 + 回测体检九项（`scripts/eval/` + `eval_scores` 表）
 - **T-P4-06** 体检三处接入（回测后/晋级门禁/月度复检）✅ 见上方落地记录（2026-09-16）
 

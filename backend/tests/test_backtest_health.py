@@ -237,7 +237,10 @@ def test_three_integration_points_wired_in_source():
     persistence = (
         _BACKEND / "services/engine/qlib_app/services/backtest_persistence.py"
     ).read_text(encoding="utf-8")
-    assert "schedule_health_check(" in persistence
+    # 2026-09-16 修复：落库路径必须 **await** 体检（celery 的 run_until_complete 循环
+    # 会在 save_run 返回后停转，fire-and-forget 的 create_task 永不执行 → 静默无体检）
+    assert "await attach_backtest_health(" in persistence
+    assert "schedule_health_check(" not in persistence
     assert 'status == "completed"' in persistence
     assert "strategy_id" in persistence  # 策略联动已透传
 
@@ -576,3 +579,21 @@ async def test_health_recheck_smoke_real_env():
     assert json.dumps(
         summary, ensure_ascii=False, default=str
     )  # 可序列化（告警/留档前置）
+
+
+# ── 基准符号口径（2026-09-16 实证修复）────────────────────────────────
+
+
+def test_benchmark_symbol_qlib_form_normalized_real_db():
+    """回归守卫：qlib 式基准（sh000300，回测配置实际携带的形态）必须能取到指数序列。
+
+    修复前：fetch_series 收到 sh000300 → QuantDB index_daily 为后缀式 → 取空 →
+    因子回归缺证据 → 体检恒判 E（证据不足）——晋级门禁被静默锁死。
+    """
+    from backend.shared.backtest_health import load_index_closes_between
+
+    suffix = load_index_closes_between("000300.SH", "2025-09-12", "2026-09-01")
+    assert len(suffix) > 200, f"真库应覆盖该窗口（实际 {len(suffix)} 根）"
+    qlib_form = load_index_closes_between("sh000300", "2025-09-12", "2026-09-01")
+    assert qlib_form == suffix, "qlib 式基准必须与后缀式取到同一序列（StockCodeUtil 归一）"
+    assert load_index_closes_between("sz399006", "2025-09-12", "2026-09-01"), "深市指数同样归一"
