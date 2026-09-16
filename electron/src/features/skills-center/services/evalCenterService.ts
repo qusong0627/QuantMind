@@ -70,3 +70,42 @@ export function getScoreHistory(
 export function getStrategyHealth(strategyId: string, limit = 24): Promise<StrategyHealthResponse> {
   return getJson(`/health/${encodeURIComponent(strategyId)}?limit=${limit}`);
 }
+
+export interface UploadHealthResponse {
+  success: boolean;
+  data: {
+    report: Record<string, unknown>;
+    report_text: string;
+    points: number;
+    disclaimer: string;
+    source: string;
+  };
+}
+
+/** 自助体检（T-FE-15）：上传/粘贴净值曲线 → 九项报告（只读自查，不落档案/不参与门禁） */
+export async function uploadHealthCheck(content: string, trials = 1): Promise<UploadHealthResponse> {
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), 60000);
+  try {
+    const res = await fetch(`${BASE}/health/upload`, {
+      method: 'POST',
+      headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content, trials }),
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      const detail = await res.text().catch(() => '');
+      let message = detail.slice(0, 200);
+      try {
+        const parsed = JSON.parse(detail);
+        if (parsed && typeof parsed.detail === 'string') message = parsed.detail;
+      } catch {
+        // 非 JSON 错误体按原文
+      }
+      throw new Error(message || `自助体检失败 ${res.status}`);
+    }
+    return (await res.json()) as UploadHealthResponse;
+  } finally {
+    window.clearTimeout(timer);
+  }
+}

@@ -1,6 +1,7 @@
 import React, { useMemo, useState, useEffect, useCallback } from 'react';
 import { Button, Card, Tag, Typography, Empty, Spin, Progress, Divider, Input, Modal, Tabs, Switch, DatePicker, Table, Drawer, Badge, Tooltip, Collapse, Select, Pagination, message, Space, Alert } from 'antd';
 import { clsx } from 'clsx';
+import { EvalScoreBadge } from '../components/shared/EvalScoreBadge';
 import dayjs from 'dayjs';
 import {
   Layers, Star, RefreshCw, Search, Code, Calendar,
@@ -172,6 +173,10 @@ export const ModelCard: React.FC<{
           </Tag>
         )}
         {fc && <><span className="inline-block h-2 w-px bg-slate-300 mx-1" /><Text className="text-[9px] text-slate-400 font-mono font-bold">{fc}维</Text></>}
+        <span className="ml-auto">
+          {/* eval_scores 以模型目录名（无 sys- 前缀）落档；注册表 UI id 带 sys- 前缀 → 归一 */}
+          <EvalScoreBadge objectType="model" objectId={String(model.model_id).replace(/^sys-/, '')} />
+        </span>
       </div>
     </div>
   );

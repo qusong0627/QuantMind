@@ -4,6 +4,7 @@ import React from 'react';
 import { Activity, BarChart3, HeartPulse, Wallet } from 'lucide-react';
 import type { ExecutionBlock, HealthBlock, PnlBlock, SignalsBlock } from '../types';
 import { TermTooltip } from '../../shared/TermTooltip';
+import { EvalScoreBadge } from '../../../components/shared/EvalScoreBadge';
 import { useUiMode } from '../../shared/useUiMode';
 import {
   executionSummary,
@@ -40,6 +41,11 @@ export const SignalsCard: React.FC<{ signals: SignalsBlock | null | undefined }>
       <BarChart3 className="w-4 h-4 text-blue-600" />
       <h3 className="text-sm font-semibold text-slate-800">候选信号</h3>
       <span className="text-[11px] text-slate-400">{signals?.trade_date || '—'}</span>
+      {signals?.trade_date && (
+        <span className="ml-auto">
+          <EvalScoreBadge objectType="daily_selection" objectId={signals.trade_date} prefix="选股评分" />
+        </span>
+      )}
     </header>
     <div className="flex gap-3 text-[11px] text-slate-600 mb-2">
       <span className="text-red-600">BUY {signals?.buy ?? '—'}</span>

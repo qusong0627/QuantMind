@@ -25,6 +25,7 @@ import {
   radarEntries,
 } from './evalCenterModel';
 import { useUiMode } from '../../../shared/useUiMode';
+import { SelfHealthUpload } from './SelfHealthUpload';
 import { TermTooltip } from '../../../shared/TermTooltip';
 
 function errorText(error: unknown): string {
@@ -294,9 +295,18 @@ export const EvalCenterPanel: React.FC = () => {
           <RefreshCw className="w-6 h-6 text-blue-500 animate-spin" />
         </div>
       ) : rows.length === 0 ? (
-        <div className="bg-gray-50 rounded-2xl border border-gray-200 p-10 text-center text-sm text-gray-500">
-          暂无该类型评分记录（评分任务在 EOD 跑批/回测体检后自动写入）
-        </div>
+        activeType === 'strategy_health' ? (
+          <div className="space-y-4">
+            <div className="bg-gray-50 rounded-2xl border border-gray-200 p-6 text-center text-sm text-gray-500">
+              暂无体检留档（回测完成后自动生成；月度复检每月留档）——下方可直接自助体检：
+            </div>
+            <SelfHealthUpload />
+          </div>
+        ) : (
+          <div className="bg-gray-50 rounded-2xl border border-gray-200 p-10 text-center text-sm text-gray-500">
+            暂无该类型评分记录（评分任务在 EOD 跑批/回测体检后自动写入）
+          </div>
+        )
       ) : (
         <div className="grid grid-cols-1 lg:grid-cols-5 gap-4">
           <div className="lg:col-span-2 space-y-2 max-h-[560px] overflow-y-auto pr-1">
@@ -342,13 +352,16 @@ export const EvalCenterPanel: React.FC = () => {
 
           <div className="lg:col-span-3 space-y-4">
             {activeType === 'strategy_health' ? (
-              archive ? (
-                <HealthArchive archive={archive} />
-              ) : (
-                <div className="bg-gray-50 rounded-2xl border border-gray-200 p-8 text-center text-sm text-gray-500">
-                  选择左侧策略查看体检档案
-                </div>
-              )
+              <div className="space-y-4">
+                {archive ? (
+                  <HealthArchive archive={archive} />
+                ) : (
+                  <div className="bg-gray-50 rounded-2xl border border-gray-200 p-8 text-center text-sm text-gray-500">
+                    选择左侧策略查看体检档案
+                  </div>
+                )}
+                <SelfHealthUpload />
+              </div>
             ) : selectedRow ? (
               isSimple ? (
                 <div className="bg-white rounded-2xl border border-gray-200 p-6 text-center">

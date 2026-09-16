@@ -24,6 +24,7 @@ import {
     Copy,
     AlertTriangle,
 } from 'lucide-react';
+import { EvalScoreBadge } from '../shared/EvalScoreBadge';
 import { message, Modal } from 'antd';
 import { strategyManagementService } from '../../services/strategyManagementService';
 import { useBacktestCenterStore } from '../../stores/backtestCenterStore';
@@ -229,6 +230,7 @@ export const StrategyManagementModule: React.FC = () => {
                                         <div className="flex items-center gap-3 mb-2">
                                             <h3 className="text-sm font-semibold text-slate-700 tracking-tight">{strategy.name}</h3>
                                             {getStatusBadge(strategy.status)}
+                                            <EvalScoreBadge objectType="strategy_health" objectId={String(strategy.id)} />
                                         </div>
                                         <div className="text-xs text-gray-500">
                                             创建时间: {new Date(strategy.created_at).toLocaleString()}
