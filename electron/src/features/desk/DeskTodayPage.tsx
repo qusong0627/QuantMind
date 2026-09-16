@@ -113,6 +113,7 @@ const DeskTodayPage: React.FC = () => {
                 <div className="xl:col-span-2">
                   <PlanCard
                     plan={desk.plan}
+                    onExecuted={() => void load()}
                     onDrillDown={() =>
                       setDrawer({
                         title: '调仓计划 · 来源链',

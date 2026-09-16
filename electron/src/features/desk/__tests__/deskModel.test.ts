@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import type { PipelineStep, PlanBlock, PlanOrder } from '../../types';
 import {
+  buildExecuteSelection,
+  excludedSymbolsFromPlan,
   executionSummary,
   formatMoney,
   formatPct,
@@ -175,5 +177,36 @@ describe('下钻条目（T-FE-03）', () => {
 
     const unavailable = planDrillEntries({ available: false, source: 'redis', reason: '无活跃策略' });
     expect(unavailable[0].value).toBe('无活跃策略');
+  });
+});
+
+describe('一键执行选择模型（T-FE-05）', () => {
+  const plan: PlanBlock = {
+    available: true,
+    source: 'x',
+    orders: [
+      order({ side: 'BUY', symbol: '600036.SH' }),
+      order({ side: 'SELL', symbol: '002552.SZ' }),
+      order({ side: 'SELL', symbol: '688596.SH', kind: 'exit', reason: '止损触发' }),
+    ],
+  };
+
+  it('退出规则单锁定进 locked（不可排除），其余可勾选', () => {
+    const sel = buildExecuteSelection(plan, new Set());
+    expect(sel.locked.map((x) => x.order.symbol)).toEqual(['688596.SH']);
+    expect(sel.selectable.map((x) => x.order.symbol)).toEqual(['600036.SH', '002552.SZ']);
+    expect(sel.executableCount).toBe(3);
+  });
+
+  it('勾除调仓单后执行数下降；退出单即使在下标集合中也不被排除', () => {
+    const excluded = new Set([0, 2]); // 勾除 BUY 与退出单（退出单应被忽略）
+    const sel = buildExecuteSelection(plan, excluded);
+    expect(sel.executableCount).toBe(2); // 3 - 1（退出单不计入排除）
+    expect(excludedSymbolsFromPlan(plan, excluded)).toEqual(['600036.SH']);
+  });
+
+  it('空计划不抛错', () => {
+    expect(buildExecuteSelection(undefined, new Set()).executableCount).toBe(0);
+    expect(excludedSymbolsFromPlan(null, new Set<number>())).toEqual([]);
   });
 });

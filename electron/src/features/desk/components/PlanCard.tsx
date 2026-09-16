@@ -1,14 +1,24 @@
 /** 调仓计划卡（FE-B/T-FE-05）：引擎 dry-run 预演——每笔带理由与触发类别，绝不执行 */
 
-import React from 'react';
-import { AlertTriangle, ClipboardList, HelpCircle } from 'lucide-react';
+import React, { useMemo, useState } from 'react';
+import { AlertTriangle, ClipboardList, HelpCircle, Play } from 'lucide-react';
+import { Checkbox, Modal, message } from 'antd';
 import type { PlanBlock } from '../types';
-import { formatMoney, planKindLabel, planSummary } from '../deskModel';
+import {
+  buildExecuteSelection,
+  excludedSymbolsFromPlan,
+  formatMoney,
+  planKindLabel,
+  planSummary,
+} from '../deskModel';
+import { executePlan } from '../services/deskService';
 import { TermTooltip } from '../../shared/TermTooltip';
 
 interface PlanCardProps {
   plan: PlanBlock | null | undefined;
   onDrillDown?: () => void;
+  /** 执行成功后回调（父组件刷新交易台） */
+  onExecuted?: () => void;
 }
 
 const SideBadge: React.FC<{ side: string }> = ({ side }) => {
@@ -25,7 +35,45 @@ const SideBadge: React.FC<{ side: string }> = ({ side }) => {
   );
 };
 
-export const PlanCard: React.FC<PlanCardProps> = ({ plan, onDrillDown }) => {
+export const PlanCard: React.FC<PlanCardProps> = ({ plan, onDrillDown, onExecuted }) => {
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [excludedIndexes, setExcludedIndexes] = useState<Set<number>>(new Set());
+  const [executing, setExecuting] = useState(false);
+  const [execResult, setExecResult] = useState<string>('');
+
+  const selection = useMemo(
+    () => buildExecuteSelection(plan, excludedIndexes),
+    [plan, excludedIndexes]
+  );
+
+  const toggleExclude = (index: number, checked: boolean) => {
+    // 传值更新（tsc 下函数式 setter 的类型坑，repo 约定）
+    const next = new Set(excludedIndexes);
+    if (checked) next.delete(index);
+    else next.add(index);
+    setExcludedIndexes(next);
+  };
+
+  const handleExecute = async () => {
+    setExecuting(true);
+    setExecResult('');
+    try {
+      const resp = await executePlan(excludedSymbolsFromPlan(plan, excludedIndexes));
+      const report = resp?.data?.report || {};
+      const filled = Number((report as Record<string, unknown>).filled_count ?? 0);
+      const rejected = Number((report as Record<string, unknown>).rejected_count ?? 0);
+      const orders = Number((report as Record<string, unknown>).order_count ?? 0);
+      setExecResult(`执行完成：委托 ${orders} 笔，成交 ${filled}，拒单 ${rejected}`);
+      message.success('调仓执行完成');
+      onExecuted?.();
+    } catch (err: unknown) {
+      const text = err instanceof Error ? err.message : '执行失败';
+      setExecResult(text);
+      message.error(text.slice(0, 80));
+    } finally {
+      setExecuting(false);
+    }
+  };
   const summary = planSummary(plan);
   const orders = plan?.orders || [];
 
@@ -47,6 +95,20 @@ export const PlanCard: React.FC<PlanCardProps> = ({ plan, onDrillDown }) => {
           <span className="text-[11px] text-slate-500 truncate max-w-[160px]">
             {plan.strategy_name}（{plan.mode || 'SIMULATION'}）
           </span>
+        )}
+        {plan?.available && orders.length > 0 && (
+          <button
+            type="button"
+            onClick={() => {
+              setExcludedIndexes(new Set());
+              setExecResult('');
+              setConfirmOpen(true);
+            }}
+            className="inline-flex items-center gap-1 rounded-xl bg-blue-600 px-3 py-1.5 text-[11px] font-bold text-white hover:bg-blue-500 shrink-0"
+          >
+            <Play className="w-3 h-3" />
+            一键执行
+          </button>
         )}
       </header>
 
@@ -105,6 +167,66 @@ export const PlanCard: React.FC<PlanCardProps> = ({ plan, onDrillDown }) => {
           </div>
         </>
       )}
+
+      <Modal
+        open={confirmOpen}
+        title="一键执行调仓（模拟盘）"
+        okText="确认执行"
+        cancelText="取消"
+        confirmLoading={executing}
+        onOk={() => void handleExecute()}
+        onCancel={() => setConfirmOpen(false)}
+        width={560}
+      >
+        <div className="space-y-3 text-xs">
+          <div className="rounded-xl bg-slate-50 border border-slate-100 p-3 text-slate-600 space-y-1">
+            <div>· 与预演共用同一引擎（RebalanceCalculator + 撮合）；执行时行情若有变化，成交与预演可能有出入。</div>
+            <div>· <b className="text-amber-700">退出规则单不可排除</b>（止损/止盈属风控动作，人工不可绕过）。</div>
+            <div>· 同一策略 60 秒内仅允许触发一次（服务端防重）。</div>
+          </div>
+
+          <div className="max-h-[280px] overflow-y-auto space-y-1.5 pr-1">
+            {selection.locked.map(({ index, order }) => (
+              <div key={`locked-${index}`} className="flex items-center gap-2 text-xs">
+                <Checkbox checked disabled />
+                <span className="text-[10px] px-1 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-200">
+                  退出规则 · 不可排除
+                </span>
+                <span className={`font-medium ${order.side === 'BUY' ? 'text-red-600' : 'text-emerald-600'}`}>
+                  {order.side === 'BUY' ? '买' : '卖'} {order.symbol}
+                </span>
+                <span className="text-slate-500">{order.quantity} 股</span>
+                <span className="text-slate-400 truncate">{order.reason}</span>
+              </div>
+            ))}
+            {selection.selectable.map(({ index, order }) => (
+              <div key={`sel-${index}`} className="flex items-center gap-2 text-xs">
+                <Checkbox
+                  checked={!excludedIndexes.has(index)}
+                  onChange={(e) => toggleExclude(index, e.target.checked)}
+                />
+                <span className={`font-medium ${order.side === 'BUY' ? 'text-red-600' : 'text-emerald-600'}`}>
+                  {order.side === 'BUY' ? '买' : '卖'} {order.symbol}
+                </span>
+                <span className="text-slate-500">{order.quantity} 股</span>
+                <span className="text-slate-400 truncate">{order.reason}</span>
+              </div>
+            ))}
+          </div>
+
+          <div className="text-slate-600">
+            本次将执行 <b className="text-slate-800">{selection.executableCount}</b> 笔
+            {excludedIndexes.size > 0 && (
+              <span className="text-amber-700">（勾除 {excludedIndexes.size} 笔）</span>
+            )}
+          </div>
+          {execResult && (
+            <div className={`rounded-xl p-3 border ${execResult.includes('完成') ? 'bg-emerald-50 border-emerald-200 text-emerald-800' : 'bg-rose-50 border-rose-200 text-rose-700'}`}>
+              {execResult}
+            </div>
+          )}
+        </div>
+      </Modal>
 
       <footer className="text-[10px] text-slate-400 mt-2">
         {onDrillDown ? (

@@ -192,3 +192,44 @@ export function planDrillEntries(plan: PlanBlock | null | undefined, topN = 10):
   }
   return entries;
 }
+
+export interface ExecuteSelection {
+  /** 可勾选排除的调仓单（index 为在 orders 中的下标） */
+  selectable: Array<{ index: number; order: PlanOrder }>;
+  /** 锁定不可排除的退出规则单（风控退出不可被人工绕过） */
+  locked: Array<{ index: number; order: PlanOrder }>;
+  /** 当前将被执行的单数 */
+  executableCount: number;
+}
+
+/** 一键执行选择模型（纯函数）：退出规则单锁定；其余可逐笔勾选排除 */
+export function buildExecuteSelection(
+  plan: PlanBlock | null | undefined,
+  excludedIndexes: Set<number>
+): ExecuteSelection {
+  const orders = plan?.orders || [];
+  const selectable: ExecuteSelection['selectable'] = [];
+  const locked: ExecuteSelection['locked'] = [];
+  orders.forEach((order, index) => {
+    if (order.kind === 'exit') {
+      locked.push({ index, order });
+    } else {
+      selectable.push({ index, order });
+    }
+  });
+  const executableCount = orders.filter(
+    (order, index) => order.kind === 'exit' || !excludedIndexes.has(index)
+  ).length;
+  return { selectable, locked, executableCount };
+}
+
+/** 勾选下标 → 排除标的（服务端按 symbol 归一匹配裸码/后缀） */
+export function excludedSymbolsFromPlan(
+  plan: PlanBlock | null | undefined,
+  excludedIndexes: Set<number>
+): string[] {
+  const orders = plan?.orders || [];
+  return orders
+    .filter((order, index) => excludedIndexes.has(index) && order.kind !== 'exit')
+    .map((order) => order.symbol);
+}

@@ -41,3 +41,42 @@ export async function getDeskToday(options: DeskTodayOptions = {}): Promise<Desk
     window.clearTimeout(timer);
   }
 }
+
+export interface ExecutePlanResponse {
+  success: boolean;
+  data: {
+    strategy_id: string;
+    mode: string;
+    excluded: string[];
+    report: Record<string, unknown>;
+    source: string;
+  };
+}
+
+/** 一键执行一轮调仓（服务端三重闸门：活跃/仅模拟盘/60s 防重；退出规则单不可排除） */
+export async function executePlan(excludeSymbols: string[]): Promise<ExecutePlanResponse> {
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), 120000);
+  try {
+    const res = await fetch(`${BASE}/plan/execute`, {
+      method: 'POST',
+      headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ exclude_symbols: excludeSymbols }),
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      const detail = await res.text().catch(() => '');
+      let message = detail.slice(0, 200);
+      try {
+        const parsed = JSON.parse(detail);
+        if (parsed && typeof parsed.detail === 'string') message = parsed.detail;
+      } catch {
+        // 非 JSON 错误体按原文展示
+      }
+      throw new Error(message || `执行失败 ${res.status}`);
+    }
+    return (await res.json()) as ExecutePlanResponse;
+  } finally {
+    window.clearTimeout(timer);
+  }
+}
