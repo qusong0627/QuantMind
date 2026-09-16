@@ -22,10 +22,18 @@ from sqlalchemy import text
 try:
     from backend.shared.database_manager_v2 import get_session
     from backend.shared.redis_sentinel_client import get_redis_sentinel_client
+    from backend.shared.strategy_lifecycle import (
+        StrategyLockedError,
+        VersionConflictError,
+    )
     from backend.shared.strategy_storage import get_strategy_storage_service
     from backend.shared.utils import normalize_user_id
 except ImportError:
     from shared.database_manager_v2 import get_session  # type: ignore
+    from shared.strategy_lifecycle import (  # type: ignore
+        StrategyLockedError,
+        VersionConflictError,
+    )
     from shared.strategy_storage import get_strategy_storage_service  # type: ignore
     from shared.redis_sentinel_client import get_redis_sentinel_client  # type: ignore
     from shared.utils import normalize_user_id  # type: ignore
@@ -197,13 +205,20 @@ async def _trigger_inference_after_activate(
 
 
 def _normalize_base_status(raw: Any) -> str:
+    """DB status（T-P3-01 规范词表）→ API/前端展示词表。
+
+    统一词表为 DRAFT/VERIFIED/SIM/LIVE/ARCHIVED 后，此处保持前端可见值不变：
+    VERIFIED→repository（原 ACTIVE 语义）、SIM/LIVE→live_trading（运行中）。
+    """
     text = str(raw or "").strip().lower()
     if text in {"draft", "d"}:
         return "draft"
-    if text in {"active", "repository", "repo"}:
+    if text in {"active", "repository", "repo", "verified"}:
         return "repository"
-    if text in {"live_trading", "live"}:
+    if text in {"live_trading", "live", "trading", "sim"}:
         return "live_trading"
+    if text in {"archived", "archive"}:
+        return "repository"  # 归档行不进列表（storage 层已过滤），兜底不外泄新词
     return "draft"
 
 
@@ -490,6 +505,10 @@ class StrategyUpdateRequest(BaseModel):
     description: str | None = Field(None, description="策略描述")
     tags: list[str] | None = Field(None, description="标签")
     parameters: dict[str, Any] | None = Field(None, description="策略参数")
+    expected_version: int | None = Field(
+        None,
+        description="参数锁（T-P3-01）：运行中策略改内容必填=当前版本（GET 返回的 version）",
+    )
 
 
 class StrategyListItem(BaseModel):
@@ -963,6 +982,7 @@ async def update_strategy(
                 "is_verified": existing.get("is_verified", False),
                 "parameters": new_parameters,
             },
+            expected_version=body.expected_version,
         )
         return {
             "strategy_id": result["id"],
@@ -972,6 +992,11 @@ async def update_strategy(
         }
     except HTTPException:
         raise
+    except (StrategyLockedError, VersionConflictError) as lock_exc:
+        # T-P3-01 参数锁/版本冲突 → 409（前端可凭返回消息提示"刷新后重试"）
+        raise HTTPException(status_code=409, detail=str(lock_exc)) from lock_exc
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve)) from ve
     except Exception as e:
         StructuredTaskLogger(
             logger, "user-strategies", {"strategy_id": strategy_id}

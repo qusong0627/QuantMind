@@ -227,16 +227,28 @@ class UserStrategyLoader:
         # 文件系统兜底保存
         return self._save_to_fs(code=code, metadata=metadata, category=category, strategy_id=strategy_id)
 
-    def delete_strategy(self, strategy_id: str, category: str) -> bool:
-        """
-        删除策略（PG 软删除）。
+    def delete_strategy(
+        self, strategy_id: str, category: str, user_id: str | None = None
+    ) -> bool:
+        """删除策略（PG 主路径 + 文件系统兜底）。
+
+        T-P3-02 修复初版即存的三个缺陷：① 未 await（协程对象被当"成功"返回、
+        策略实际从未删除）；② user_id 硬编码 "0"（get 预检查必然查空）；
+        ③ 删除结果不反映实际行数。user_id 为 None 时拒绝走 PG（不给静默假成功）。
         """
         if _USE_CLOUD and strategy_id.isdigit():
+            if not user_id:
+                task_logger.warning(
+                    "delete_strategy_missing_user",
+                    "缺少 user_id，拒绝 PG 删除（请从请求上下文传入）",
+                    strategy_id=strategy_id,
+                )
+                return False
             try:
                 svc = get_strategy_storage_service()
-                # 注意：delete 需要 user_id，这里使用宽松删除（不验证 user_id）
-                # 实际部署中应从请求上下文获取 user_id
-                return svc.delete(strategy_id=int(strategy_id), user_id="0")
+                return asyncio.run(
+                    svc.delete(strategy_id=int(strategy_id), user_id=str(user_id))
+                )
             except Exception as e:
                 task_logger.warning("delete_strategy_pg_failed", "PG 删除策略失败", strategy_id=strategy_id, error=str(e))
 

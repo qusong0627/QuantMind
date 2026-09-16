@@ -101,14 +101,29 @@ except ImportError:
 
 
 # ---------------------------------------------------------------------------
-# 常量
+# 常量（状态词表唯一实现 = shared/strategy_lifecycle.py，禁止本地副本）
 # ---------------------------------------------------------------------------
 _URL_TTL = int(os.getenv("COS_STRATEGY_URL_TTL", "3600"))
 _STRATEGY_FOLDER = "user_strategies"
-_STATUS_ACTIVE = "ACTIVE"
-_STATUS_DRAFT = "DRAFT"
-_STATUS_LIVE_TRADING = "LIVE_TRADING"
-_STATUS_ARCHIVED = "ARCHIVED"
+
+from backend.shared.strategy_lifecycle import (  # noqa: E402
+    STATUS_ARCHIVED as _STATUS_ARCHIVED,
+)
+from backend.shared.strategy_lifecycle import (  # noqa: E402
+    STATUS_DRAFT as _STATUS_DRAFT,
+)
+from backend.shared.strategy_lifecycle import (  # noqa: E402
+    STATUS_VERIFIED as _STATUS_VERIFIED,
+)
+from backend.shared.strategy_lifecycle import (  # noqa: E402
+    IllegalTransitionError,
+    StrategyLockedError,
+    VersionConflictError,
+    assert_transition,
+    is_running,
+    normalize_status,
+    requires_version_bump,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -188,17 +203,8 @@ def _json_safe(obj: Any) -> str:
 
 
 def _normalize_lifecycle_status(status: str) -> str:
-    text = str(status or "").strip().lower()
-    if text in {"draft", "d"}:
-        return _STATUS_DRAFT
-    if text in {"active", "repository", "repo"}:
-        return _STATUS_ACTIVE
-    if text in {"live_trading", "live", "trading"}:
-        return _STATUS_LIVE_TRADING
-    if text in {"archived", "archive"}:
-        return _STATUS_ARCHIVED
-    # 保持兼容：未知状态按传入值大写写入
-    return str(status or _STATUS_DRAFT).strip().upper() or _STATUS_DRAFT
+    """（兼容保留）状态归一委托唯一实现 strategy_lifecycle.normalize_status。"""
+    return normalize_status(status)
 
 
 # ---------------------------------------------------------------------------
@@ -218,8 +224,9 @@ class StrategyStorageService:
 
     def _has_cos_key_column(self, session) -> bool:
         """兼容旧库：运行时探测 strategies.cos_key 是否存在并缓存。"""
-        if self._has_cos_key_col is not None:
-            return self._has_cos_key_col
+        cached = getattr(self, "_has_cos_key_col", None)
+        if cached is not None:
+            return cached
         try:
             exists = session.execute(
                 text("""
@@ -312,8 +319,9 @@ class StrategyStorageService:
         file_size: int,
         hash_val: str,
         metadata: dict[str, Any],
+        expected_version: int | None = None,
     ) -> str:
-        """INSERT or UPDATE strategies 表。"""
+        """INSERT or UPDATE strategies 表（T-P3-01：补丁语义 + 版本递增 + 参数锁）。"""
         if get_db is None:
             raise RuntimeError("数据库不可用")
 
@@ -323,7 +331,7 @@ class StrategyStorageService:
             metadata.get("description") or f"Updated ({now.strftime('%Y-%m-%d %H:%M')})"
         )
         strategy_type = metadata.get("strategy_type") or "CUSTOM"
-        status = metadata.get("status") or _STATUS_DRAFT
+        status = normalize_status(metadata.get("status"))
         config = metadata.get("config") or {}
         parameters = metadata.get("parameters") or {}
         execution_config = metadata.get("execution_config") or {"max_buy_drop": -0.03}
@@ -359,22 +367,90 @@ class StrategyStorageService:
                 params["cos_key"] = cos_key
 
             if strategy_id and strategy_id.isdigit():
-                # UPDATE
-                params["sid"] = int(strategy_id)
-                sql = f"""
-                    UPDATE strategies SET
-                        name = :name, description = :desc,
-                        code = :code, cos_url = :cos_url,
-                        {"cos_key = :cos_key," if has_cos_key else ""}
-                        code_hash = :code_hash, file_size = :file_size,
-                        config = CAST(:config AS jsonb),
-                        parameters = CAST(:params AS jsonb),
-                        execution_config = CAST(:exec_config AS jsonb),
-                        tags = :tags,
-                        updated_at = :now
-                    WHERE id = :sid AND user_id = :uid
-                """
-                session.execute(text(sql), params)
+                # UPDATE（T-P3-01）：
+                # ① 补丁语义——description/config/parameters/execution_config 仅在显式提供时覆盖
+                #   （修复"局部更新把 execution_config/config 抹成默认值"的族缺陷）；
+                # ② 版本递增——代码/参数/执行配置实质变化才 version+1；
+                # ③ 参数锁——运行中（SIM/LIVE）策略改内容必须携带 expected_version 显式升版。
+                sid = int(strategy_id)
+                params["sid"] = sid
+                current = session.execute(
+                    text(
+                        "SELECT status, version, code_hash, parameters, execution_config "
+                        "FROM strategies WHERE id = :sid AND user_id = :uid FOR UPDATE"
+                    ),
+                    {"sid": sid, "uid": uid_int},
+                ).fetchone()
+                if current is None:
+                    raise StrategyLockedError(f"策略不存在或无权更新: id={strategy_id}")
+
+                cur_status = normalize_status(current[0])
+                cur_version = int(current[1] or 1)
+                provided_params = metadata.get("parameters") is not None
+                provided_exec = metadata.get("execution_config") is not None
+                provided_config = metadata.get("config") is not None
+                provided_desc = metadata.get("description") is not None
+
+                content_changed = bool(
+                    hash_val != str(current[2] or "")
+                    or (provided_params and parameters != (current[3] or {}))
+                    or (provided_exec and execution_config != (current[4] or {}))
+                )
+                new_version = cur_version
+                if content_changed:
+                    if requires_version_bump(cur_status):
+                        if expected_version is None:
+                            raise StrategyLockedError(
+                                f"策略处于运行中（{cur_status}），修改内容必须显式升版本："
+                                "请携带 expected_version=当前版本（参数锁，T-P3-01）"
+                            )
+                        if int(expected_version) != cur_version:
+                            raise VersionConflictError(
+                                f"版本冲突：期望 {expected_version}，当前 {cur_version}"
+                                "（策略已被其他操作修改，请刷新后重试）"
+                            )
+                    elif expected_version is not None and int(expected_version) != cur_version:
+                        raise VersionConflictError(
+                            f"版本冲突：期望 {expected_version}，当前 {cur_version}"
+                        )
+                    new_version = cur_version + 1
+
+                set_parts = [
+                    "name = :name",
+                    "code = :code",
+                    "cos_url = :cos_url",
+                    "code_hash = :code_hash",
+                    "file_size = :file_size",
+                    "tags = :tags",
+                    "version = :version",
+                    "updated_at = :now",
+                ]
+                if has_cos_key:
+                    set_parts.insert(2, "cos_key = :cos_key")
+                if provided_desc:
+                    set_parts.append("description = :desc")
+                if provided_config:
+                    set_parts.append("config = CAST(:config AS jsonb)")
+                if provided_params:
+                    set_parts.append("parameters = CAST(:params AS jsonb)")
+                if provided_exec:
+                    set_parts.append("execution_config = CAST(:exec_config AS jsonb)")
+                params["version"] = new_version
+                sql = (
+                    f"UPDATE strategies SET {', '.join(set_parts)} "
+                    "WHERE id = :sid AND user_id = :uid"
+                )
+                result = session.execute(text(sql), params)
+                if (result.rowcount or 0) == 0:
+                    raise StrategyLockedError(f"策略更新未命中记录: id={strategy_id}")
+                if new_version != cur_version:
+                    logger.info(
+                        "[Strategy] 版本递增 id=%s %s→%s status=%s",
+                        strategy_id,
+                        cur_version,
+                        new_version,
+                        cur_status,
+                    )
                 return strategy_id
             else:
                 # INSERT
@@ -412,7 +488,13 @@ class StrategyStorageService:
         code: str,
         metadata: dict[str, Any] | None = None,
         strategy_id: str | None = None,
+        expected_version: int | None = None,
     ) -> dict[str, Any]:
+        """保存/更新策略。
+
+        ``expected_version``（T-P3-01 参数锁）：运行中（SIM/LIVE）策略修改内容时必填，
+        且须等于当前版本（读 get()["version"] 获得）；非运行态可选（乐观并发）。
+        """
         metadata = metadata or {}
         new_id = str(uuid4())
         cos_key = _make_cos_key(user_id, new_id)
@@ -436,6 +518,7 @@ class StrategyStorageService:
             file_size,
             hash_val,
             metadata,
+            expected_version=expected_version,
         )
         return {
             "id": db_id,
@@ -486,9 +569,9 @@ class StrategyStorageService:
             cos_key_expr = "cos_key" if has_cos_key else "NULL::text as cos_key"
             sql = f"""
                 SELECT id, user_id, name, description, strategy_type, status,
-                       config, parameters, code, cos_url, {cos_key_expr}, 
+                       config, parameters, code, cos_url, {cos_key_expr},
                        code_hash, file_size, tags, is_public, created_at, updated_at,
-                       is_verified, execution_config
+                       is_verified, execution_config, version
                 FROM strategies
                 WHERE id = :sid AND status != '{_STATUS_ARCHIVED}'
             """
@@ -513,6 +596,9 @@ class StrategyStorageService:
                 "execution_config": row[18] or {},
                 "tags": _parse_tags(row[13]),
                 "parameters": row[7] or {},
+                # T-P3-01：状态机与参数锁需要状态/版本（此前 SELECT 取了 status 却不返回）
+                "status": normalize_status(row[5]),
+                "version": int(row[19] or 1),
             }
 
     async def mark_as_verified(self, strategy_id: str, user_id: str) -> bool:
@@ -533,9 +619,11 @@ class StrategyStorageService:
     def update_lifecycle_status(
         self, strategy_id: Any, user_id: str, status: str
     ) -> bool:
-        """
-        更新策略生命周期状态（draft/repository/live_trading -> DB status）。
-        返回是否命中并更新到记录。
+        """更新策略生命周期状态（T-P3-01：经状态机校验的合法迁移）。
+
+        - 同状态回写 = 幂等成功（no-op）；
+        - 非法迁移（跨级/回退）→ 告警并返回 False（不静默改写）；
+        - 命中且合法 → True，行内 status 写为规范新词表（VERIFIED/SIM/LIVE/…）。
         """
         sid_text = str(strategy_id or "").strip()
         if not sid_text.isdigit():
@@ -543,28 +631,49 @@ class StrategyStorageService:
                 "update_lifecycle_status skip non-numeric strategy_id=%s", sid_text
             )
             return False
-        normalized = _normalize_lifecycle_status(status)
+        target = normalize_status(status)
         uid_int = _ensure_int_user_id(user_id)
         with get_db() as session:
+            row = session.execute(
+                text(
+                    "SELECT status FROM strategies "
+                    "WHERE id = :sid AND user_id = :uid FOR UPDATE"
+                ),
+                {"sid": int(sid_text), "uid": uid_int},
+            ).fetchone()
+            if row is None:
+                return False
+            current = normalize_status(row[0])
+            if current == target:
+                return True  # 幂等 no-op（如重复启动/重复停止）
+            try:
+                assert_transition(current, target)
+            except IllegalTransitionError as exc:
+                logger.warning(
+                    "[Strategy] 拒绝非法状态迁移 id=%s: %s", sid_text, exc
+                )
+                return False
             result = session.execute(
-                text("""
-                    UPDATE strategies
-                    SET status = :status, updated_at = :now
-                    WHERE id = :sid AND user_id = :uid AND status != :archived
-                    """),
+                text(
+                    "UPDATE strategies SET status = :status, updated_at = :now "
+                    "WHERE id = :sid AND user_id = :uid AND status = :current"
+                ),
                 {
-                    "status": normalized,
+                    "status": target,
                     "now": datetime.now(timezone.utc),
                     "sid": int(sid_text),
                     "uid": uid_int,
-                    "archived": _STATUS_ARCHIVED,
+                    "current": row[0],
                 },
             )
             return bool((result.rowcount or 0) > 0)
 
     async def delete(self, strategy_id: Any, user_id: str) -> bool:
-        """
-        删除策略（数据库和COS）
+        """删除策略（数据库 + COS）。T-P3-02：行数诚实 + 运行中守卫 + 可清归档。
+
+        - 运行中（SIM/LIVE）：拒绝（ValueError，上层 400 直出话术）——防悬空引用；
+        - 归档（ARCHIVED）可清理（此前经 get() 预检查、归档行永远删不掉）；
+        - DELETE 未命中行 → False（不再无条件返回 True）。
         """
         if isinstance(strategy_id, str) and strategy_id.startswith("sys_"):
             raise ValueError("无法删除系统内置策略")
@@ -572,26 +681,40 @@ class StrategyStorageService:
         if not str(strategy_id).isdigit():
             return False
 
-        # 1. 查出 cos_key
-        strategy = await self.get(strategy_id, user_id=user_id)
-        if not strategy:
-            return False
-
-        # 2. 从 COS 删除
-        cos_key = strategy.get("cos_key")
-        if not self._local_mode and cos_key:
-            try:
-                self._cos.delete_file(cos_key)
-            except Exception as e:
-                logger.warning(f"删除COS文件失败 {cos_key}: {e}")
-
-        # 3. 从 DB 删除
         uid_int = _ensure_int_user_id(user_id)
         with get_db() as session:
-            session.execute(
+            has_cos_key = self._has_cos_key_column(session)
+            key_expr = "cos_key" if has_cos_key else "NULL::text AS cos_key"
+            row = session.execute(
+                text(
+                    f"SELECT status, {key_expr} FROM strategies "
+                    "WHERE id = :sid AND user_id = :uid FOR UPDATE"
+                ),
+                {"sid": int(strategy_id), "uid": uid_int},
+            ).fetchone()
+            if row is None:
+                return False
+
+            cur_status = normalize_status(row[0])
+            if is_running(cur_status):
+                raise ValueError(
+                    f"策略正在运行（{cur_status}），请先停止后再删除"
+                )
+
+            # COS 删除（文件删失败仅告警；随后删行）
+            cos_key = row[1]
+            if not self._local_mode and cos_key:
+                try:
+                    self._cos.delete_file(cos_key)
+                except Exception as e:
+                    logger.warning(f"删除COS文件失败 {cos_key}: {e}")
+
+            result = session.execute(
                 text("DELETE FROM strategies WHERE id = :sid AND user_id = :uid"),
                 {"sid": int(strategy_id), "uid": uid_int},
             )
+            if (result.rowcount or 0) == 0:
+                return False
         return True
 
     def list(
@@ -605,7 +728,11 @@ class StrategyStorageService:
     ) -> builtins.list[dict[str, Any]]:
         # strategies.user_id 为整数（users.id），需先解析业务 user_id（如 'admin'）
         # 统一管理：category/search/tags 在此层生效，避免上层各自为政
-        uid_int = _ensure_int_user_id(user_id)
+        try:
+            uid_int = _ensure_int_user_id(user_id)
+        except ValueError as exc:
+            logger.warning("list: user_id=%r 无法解析（%s），返回空列表", user_id, exc)
+            return []
         with get_db() as session:
             has_cos_key = self._has_cos_key_column(session)
             cos_key_expr = "cos_key" if has_cos_key else "NULL::text as cos_key"

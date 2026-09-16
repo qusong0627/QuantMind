@@ -12,6 +12,7 @@ from .real_trading_utils import (
     _normalize_identity,
     _normalize_live_trade_config,
     _parse_user_id,
+    _schedule_status_writeback,
     _schedule_user_notification,
 )
 from backend.services.live_trading.services.manual_execution_service import (
@@ -91,6 +92,9 @@ async def _resolve_strategy_detail(*, strategy_id: str, user_id: str) -> dict:
         "live_config_tips": strategy.get("live_config_tips") or [],
         "source": "user_strategy",
         "code": strategy.get("code") or "",
+        # T-P3-01 状态机：启动门禁与参数锁使用（sys_ 模板分支无此键）
+        "status": strategy.get("status"),
+        "version": strategy.get("version"),
     }
 
 
@@ -205,6 +209,14 @@ async def start_trading(
             live_config = (
                 detail.get("live_trade_config") or _default_live_trade_config()
             )
+            # T-P3-01 启动门禁（状态机）：SIM 须 VERIFIED（回测验证）；REAL 须 SIM（模拟证据）。
+            # sys_ 模板/文件上传（source 非 user_strategy）不受状态机约束。
+            if detail.get("source") == "user_strategy":
+                from backend.shared.strategy_lifecycle import can_start
+
+                gate_ok, gate_reason = can_start(detail.get("status"), mode)
+                if not gate_ok:
+                    raise HTTPException(status_code=400, detail=gate_reason)
         elif strategy_file:
             strategy_name = strategy_file.filename or strategy_name
 
@@ -422,6 +434,12 @@ async def start_trading(
             level="success",
             action_url="/trading",
         )
+        # T-P3-01：状态回写接线（此前 _schedule_status_writeback 已建但全仓无调用方）
+        _schedule_status_writeback(
+            strategy_id=strategy_id,
+            user_id=resolved_user_id,
+            lifecycle_status="SIM" if mode == "SIMULATION" else "LIVE",
+        )
 
         # 5. 首次启动 Bootstrap：不限时、按最新价、用真实推理立即跑一遍
         # 目的：让用户启动后立刻看到策略在真实运行（等价于手动任务），后续再按
@@ -570,6 +588,13 @@ async def stop_trading(
 
         # Clear active strategy in Redis
         redis.client.delete(_active_strategy_key(resolved_tenant_id, resolved_user_id))
+        # T-P3-01：状态回写——停止后回到 VERIFIED（SIM/LIVE → VERIFIED 为合法迁移）
+        if stopped_strategy_id:
+            _schedule_status_writeback(
+                strategy_id=stopped_strategy_id,
+                user_id=resolved_user_id,
+                lifecycle_status="VERIFIED",
+            )
         # 清理 24h bootstrap 锁，避免同策略 24h 内重启被误挡
         for pat in (
             f"qm:hosted:simulation:bootstrap:{resolved_tenant_id}:{resolved_user_id}:*",

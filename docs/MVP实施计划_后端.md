@@ -13,7 +13,7 @@
 | P0 止血+维护基建 | 10/10 ✅ | 安全问题清零；体检脚本可跑；回归进 CI |
 | P1 契约化 | 6/6 ✅ | 四契约落地；交易台数字可下钻 |
 | P2 执行统一 | 7/7 ✅ | 回测-模拟一致性 diff=0（执行层，含真实数据）；盘后固定价格窗口；成交落账闭环+影子对照 |
-| P3 策略收敛 | 0/5 | 策略全生命周期 E2E |
+| P3 策略收敛 | 2/5（状态机+参数锁、delete 修复） | 策略全生命周期 E2E |
 | P4 选股收敛+评估 | 0/6 | Scanner 替换旧链；体检九项上线 |
 | P5+ | — | 见主文档 §12.2 总表（P5 后进入下个迭代再细化） |
 
@@ -444,8 +444,37 @@
 
 ## P3 策略收敛（2-3 周）
 
-- **T-P3-01** 策略注册表状态机（DRAFT→VERIFIED→SIM→LIVE）+ 版本 + 参数锁
-- **T-P3-02** `strategy_storage.delete` async 修复 + E2E
+### T-P3-01 策略注册表状态机（DRAFT→VERIFIED→SIM→LIVE）+ 版本 + 参数锁 ✅
+### T-P3-02 `strategy_storage.delete` async 修复 + E2E ✅
+
+**落地（2026-09-16，T-P3-01/02 同批）**：
+- **状态机唯一实现** `backend/shared/strategy_lifecycle.py`（纯函数）：规范词表
+  DRAFT/VERIFIED/SIM/LIVE/ARCHIVED；**存量归一**（ACTIVE/REPOSITORY→VERIFIED、
+  LIVE_TRADING→LIVE，实测 88 行 ACTIVE 全部平移）；迁移表含幂等（同状态回写=no-op）；
+  **启动门禁** `can_start`：SIM 须 VERIFIED（回测验证）、REAL 须 SIM（模拟证据，门槛细则归 T-P3-05）。
+- **存储层**（`strategy_storage.py`）：`get()` 补回 status/version（此前 SELECT 取了却不返回）；
+  `update_lifecycle_status` 经迁移校验（非法迁移告警拒绝，不再静默改写）；
+  **save UPDATE 分支重写**——① 补丁语义（description/config/execution_config 仅显式提供才覆盖，
+  修复"局部更新抹配置"族缺陷）② 版本递增（代码/参数/执行配置实质变化才 +1）③ **参数锁**
+  （SIM/LIVE 改内容必须携带 `expected_version`=当前版本，否则 StrategyLockedError/VersionConflictError）。
+- **运行时驱动**（此前回写通道 `_schedule_status_writeback` 已建但全仓无调用方→死代码）：
+  `start_trading` 接线（启动成功→SIM/LIVE；启动前过 `can_start` 门禁，sys_ 模板/文件上传豁免）；
+  `stop_trading` 接线（→VERIFIED）。
+- **API 兼容**：`_normalize_base_status` 扩展新词表（VERIFIED→repository、SIM/LIVE→live_trading，
+  前端可见值不变）；update 端点透传 `expected_version`、锁冲突→409。
+- **T-P3-02 delete 修复**：`strategy_storage.delete` 行数诚实（不再无条件 True）+ **运行中拒绝**
+  （SIM/LIVE→ValueError 直出话术，防悬空引用）+ 归档行可清理（旧实现经 get() 过滤归档永远删不掉）；
+  死代码 `user_strategy_loader.delete_strategy` 三缺陷修复（未 await 协程被当成功返回 / user_id 硬编码 "0" /
+  结果不反映行数）；`list()` 对无法解析 user_id 防御返回空。
+- **存量测试修复**（初版起即红、未入过回归）：`backend/shared/tests/test_strategy_storage.py`
+  6 条失效（打桩约定/行结构/同步调用 async 假绿）全部修正 + 新增运行中删除守卫用例，16/16。
+- **记录在案**：LIVE→SIM 直接回退不允许（经 VERIFIED）；AI-IDE 回测→VERIFIED 触发属 T-P3-04；
+  晋级量化门槛总表 T-P3-05；前端策略页"8 种状态"词表待随 T-P3-04 前端批次对齐。
+- **证据**：新套件 `test_strategy_lifecycle.py` 22/22（纯函数）+ `test_strategy_lifecycle_storage.py`
+  6/6（含真库 E2E：版本递增/参数锁/迁移矩阵/删除守卫/归档清理）；受影响套件 91/91；
+  `backend/tests` 全量 **1985 passed**（上批基线 1957，+28、零新增失败）；`backend/shared/tests`
+  18（修复 6 条旧红，剩 1 条 request_logging 预存在红）；services/tests 591 与基线一致。
+
 - **T-P3-03** 旧 5 格式 → 2 格式转换器/下架清单
 - **T-P3-04** AI-IDE 接入统一回测（结果落库 + 触发 verified）
 - **T-P3-05** 晋级门槛总表（唯一事实源，模型/策略/环境三方引用）

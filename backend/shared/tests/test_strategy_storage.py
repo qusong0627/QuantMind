@@ -3,6 +3,7 @@ StrategyStorageService 单元测试
 测试 PG + COS 统一存储服务的核心功能（使用 mock 隔离外部依赖）
 """
 
+import asyncio
 import unittest
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
@@ -16,6 +17,7 @@ class TestStrategyStorageService(unittest.IsolatedAsyncioTestCase):
         from backend.shared.strategy_storage import StrategyStorageService
 
         svc = StrategyStorageService.__new__(StrategyStorageService)
+        svc._has_cos_key_col = True  # 跳过 __init__：补列探测缓存（现行实现会读它）
         if cos_available:
             mock_cos = MagicMock()
             mock_cos.client = MagicMock()
@@ -96,9 +98,9 @@ class TestStrategyStorageService(unittest.IsolatedAsyncioTestCase):
     async def test_save_calls_cos_and_db_returns_id(self):
         svc = self._make_service(cos_available=True)
 
-        db_result = {"id": 42}
-
-        def fake_upsert(**kw):
+        def fake_upsert(*args, **kw):
+            # 位置：user_id, strategy_id, name, code, ...（实现按位置调用）
+            assert args[3] == "import qlib\nprint('hello')"
             return "42"
 
         svc._db_upsert = fake_upsert
@@ -121,9 +123,9 @@ class TestStrategyStorageService(unittest.IsolatedAsyncioTestCase):
         """COS 不可用时，save 应仍然写入 PG（code 字段保存代码）。"""
         svc = self._make_service(cos_available=False)
 
-        def fake_upsert(**kw):
-            # 确认 code 非空
-            self.assertIsNotNone(kw.get("code"))
+        def fake_upsert(*args, **kw):
+            # 确认 code 非空（位置参数第 4 位）
+            self.assertIsNotNone(args[3])
             return "99"
 
         svc._db_upsert = fake_upsert
@@ -149,16 +151,17 @@ class TestStrategyStorageService(unittest.IsolatedAsyncioTestCase):
             1,  # id
             "My Strategy",  # name
             "desc",  # description
-            "quantitative",  # strategy_type
-            "draft",  # status
+            "ACTIVE",  # status（存量词表，list 原样返回）
             "https://old.cos/key.py",  # cos_url
             "user_strategies/1/2024/01/abc.py",  # cos_key
             "deadbeef",  # code_hash
-            100,  # file_size
             '["AI"]',  # tags
-            False,  # is_public
+            False,  # is_verified
+            '{}',  # execution_config
             datetime(2024, 1, 1, tzinfo=timezone.utc),  # created_at
             datetime(2024, 1, 2, tzinfo=timezone.utc),  # updated_at
+            '{}',  # parameters
+            '{}',  # config
         )
 
         mock_session = MagicMock()
@@ -180,9 +183,8 @@ class TestStrategyStorageService(unittest.IsolatedAsyncioTestCase):
         item = results[0]
         self.assertEqual(item["id"], "1")
         self.assertEqual(item["name"], "My Strategy")
-        # presign URL 应被调用（cos_key 不为空）
-        svc._cos.get_presigned_url.assert_called_once()
-        self.assertIsNotNone(item["cos_url"])
+        # cos_url 直接来自列（现行实现对列表不逐行预签名）
+        self.assertEqual(item["cos_url"], "https://old.cos/key.py")
 
     def test_list_without_user_id_returns_empty(self):
         """user_id 无法解析时返回空列表而不抛异常。"""
@@ -202,9 +204,11 @@ class TestStrategyStorageService(unittest.IsolatedAsyncioTestCase):
         svc = self._make_service(cos_available=False)
 
         mock_session = MagicMock()
-        mock_result = MagicMock()
-        mock_result.rowcount = 1
-        mock_session.execute.return_value = mock_result
+        select_result = MagicMock()
+        select_result.fetchone.return_value = ("DRAFT", None)  # status, cos_key
+        delete_result = MagicMock()
+        delete_result.rowcount = 1
+        mock_session.execute.side_effect = [select_result, delete_result]
 
         from contextlib import contextmanager
 
@@ -216,7 +220,7 @@ class TestStrategyStorageService(unittest.IsolatedAsyncioTestCase):
             patch("backend.shared.strategy_storage._ensure_int_user_id", return_value=1),
             patch("backend.shared.strategy_storage.get_db", new=fake_db_ctx),
         ):
-            result = svc.delete(strategy_id=1, user_id="1")
+            result = asyncio.run(svc.delete(strategy_id=1, user_id="1"))
 
         self.assertTrue(result)
 
@@ -224,9 +228,9 @@ class TestStrategyStorageService(unittest.IsolatedAsyncioTestCase):
         svc = self._make_service(cos_available=False)
 
         mock_session = MagicMock()
-        mock_result = MagicMock()
-        mock_result.rowcount = 0
-        mock_session.execute.return_value = mock_result
+        select_result = MagicMock()
+        select_result.fetchone.return_value = None  # 行不存在
+        mock_session.execute.side_effect = [select_result]
 
         from contextlib import contextmanager
 
@@ -238,9 +242,32 @@ class TestStrategyStorageService(unittest.IsolatedAsyncioTestCase):
             patch("backend.shared.strategy_storage._ensure_int_user_id", return_value=1),
             patch("backend.shared.strategy_storage.get_db", new=fake_db_ctx),
         ):
-            result = svc.delete(strategy_id=999, user_id="1")
+            result = asyncio.run(svc.delete(strategy_id=999, user_id="1"))
 
         self.assertFalse(result)
+
+    def test_delete_refuses_running_strategy(self):
+        """T-P3-02：运行中（SIM/LIVE）策略拒绝删除（防悬空引用），ValueError 直出话术。"""
+        svc = self._make_service(cos_available=False)
+
+        mock_session = MagicMock()
+        select_result = MagicMock()
+        select_result.fetchone.return_value = ("SIM", None)
+        mock_session.execute.side_effect = [select_result]
+
+        from contextlib import contextmanager
+
+        @contextmanager
+        def fake_db_ctx():
+            yield mock_session
+
+        with (
+            patch("backend.shared.strategy_storage._ensure_int_user_id", return_value=1),
+            patch("backend.shared.strategy_storage.get_db", new=fake_db_ctx),
+            self.assertRaises(ValueError) as ctx,
+        ):
+            asyncio.run(svc.delete(strategy_id=7, user_id="1"))
+        self.assertIn("运行", str(ctx.exception))
 
     # ------------------------------------------------------------------
     # 用户隔离
