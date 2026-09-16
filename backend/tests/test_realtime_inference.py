@@ -114,6 +114,7 @@ def test_build_cycle_with_override_whitelist(tmp_path):
             hot_set_fetcher=lambda: hot,
             snapshot_fetcher=lambda syms: snaps,
             baseline_loader=lambda syms, day: baseline,
+            ledger_sink=lambda _e: None,  # 测试绝不写生产账本（Redis）
         )
 
     p_plain = svc(()).build_cycle()
@@ -168,6 +169,7 @@ async def test_publish_end_to_end_real_db(tmp_path):
         hot_set_fetcher=lambda: hot,
         snapshot_fetcher=lambda syms: snaps,
         baseline_loader=lambda syms, day: baseline,
+        ledger_sink=lambda _e: None,  # 测试绝不写生产账本（Redis）
     )
     payload = svc.build_cycle()
     assert payload is not None

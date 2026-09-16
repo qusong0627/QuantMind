@@ -31,12 +31,23 @@ from collections.abc import Callable
 
 import numpy as np
 
-from backend.shared.feature_incremental import TIER_COLUMNS, Window, compute_tier
+from backend.services.engine.inference.realtime_core import (
+    compute_cycle,
+    digits as _digits,
+    effective_override,
+    ledger_entry,
+    ledger_json,
+    load_baseline_bundle,
+    snapshot_key,
+)
 
 logger = logging.getLogger(__name__)
 
 CST = timezone(timedelta(hours=8))
 CONFIG_KEY = "qm:realtime:infer:config"
+LEDGER_KEY_PREFIX = "qm:realtime:infer:ledger"
+LEDGER_TTL_S = 7 * 86400
+LEDGER_MAX_ENTRIES = 4000
 SNAPSHOT_DIR = "/app/db/feature_snapshots"
 DEFAULT_SNAPSHOT_PARQUET = f"{SNAPSHOT_DIR}/model_features_{datetime.now(tz=CST).year}.parquet"
 OVERRIDE_GUARD_NOTE = (
@@ -47,33 +58,6 @@ OVERRIDE_GUARD_NOTE = (
 
 def _now() -> datetime:
     return datetime.now(tz=CST)
-
-
-def _digits(symbol: str) -> str:
-    """后缀式/前缀式 → 纯数字（快照 parquet 与 engine_signal_scores 口径）。"""
-    s = str(symbol or "").strip().upper()
-    for suf in (".SH", ".SZ", ".BJ"):
-        if s.endswith(suf):
-            return s[: -len(suf)]
-    if s[:2] in ("SH", "SZ", "BJ") and s[2:].isdigit():
-        return s[2:]
-    return s
-
-
-def snapshot_key(symbol: str) -> str | None:
-    """任意形态 → ``market:snapshot:{prefix.lower()}``（与 collector 写入面同构）。"""
-    s = str(symbol or "").strip().upper()
-    if "." in s:
-        code, _, mk = s.partition(".")
-        if mk in ("SH", "SZ", "BJ") and code.isdigit():
-            return f"market:snapshot:{mk.lower()}{code}"
-        return None
-    if s[:2] in ("SH", "SZ", "BJ") and s[2:].isdigit():
-        return f"market:snapshot:{s[:2].lower()}{s[2:]}"
-    if s.isdigit() and len(s) == 6:
-        mk = "SH" if s[0] in "69" else ("BJ" if s[0] in "48" else "SZ")
-        return f"market:snapshot:{mk.lower()}{s}"
-    return None
 
 
 class RealtimeInferConfig:
@@ -148,12 +132,14 @@ class RealtimeInferenceService:
         snapshot_fetcher: Callable[[list[str]], dict[str, dict[str, Any]]] | None = None,
         baseline_loader: Callable[[list[str], date], dict[str, dict[str, Any]]] | None = None,
         publisher: Callable[[dict[str, Any], RealtimeInferConfig], Any] | None = None,
+        ledger_sink: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self._config_loader = config_loader or _load_config_sync
         self._hot_set_fetcher = hot_set_fetcher
         self._snapshot_fetcher = snapshot_fetcher
         self._baseline_loader = baseline_loader
         self._publisher = publisher
+        self._ledger_sink = ledger_sink  # 注入式账本落点（None → Redis；测试注入 list.append）
         self._task: asyncio.Task | None = None
         self._stop = asyncio.Event()
         self._lock = threading.Lock()
@@ -164,6 +150,7 @@ class RealtimeInferenceService:
         self._baseline_day: str | None = None
         self.counters: dict[str, Any] = {
             "cycles": 0, "published": 0, "scores": 0, "skipped": 0,
+            "ledger_entries": 0, "ledger_errors": 0,
             "last_ms": None, "last_error": None, "last_run_id": None,
             "last_cycle_at": None, "last_scores": 0,
         }
@@ -210,36 +197,40 @@ class RealtimeInferenceService:
                 pass
 
     def _default_baseline(self, symbols: list[str], day: date) -> dict[str, Any]:
-        """T-1 特征行 + 价格历史（同一次 parquet 读取）；parquet 为纯数字 symbol。
-
-        返回 {"rows": {digits: {feature: value}}, "history": {digits: DataFrame(尾 45 行)}}——
-        history 供增量引擎引导（快车道任何特征都需要价格窗口，仅特征行不够）。
-        """
-        import pandas as pd
-
+        """T-1 行 + 价格历史（共享核心实现：与回放器同源）。"""
         meta = _read_metadata(Path(self._current_model_dir()))
         cols = list(meta.get("feature_columns") or [])
-        path = Path(DEFAULT_SNAPSHOT_PARQUET)
-        if not cols or not path.is_file():
-            return {"rows": {}, "history": {}}
-        raw = ["symbol", "trade_date", "open", "high", "low", "close", "volume", "amount"]
-        df = pd.read_parquet(path, columns=raw + [c for c in cols if c not in raw])
-        df = df[df["symbol"].isin([_digits(s) for s in symbols])]
-        df["trade_date"] = pd.to_datetime(df["trade_date"])
-        past = df[df["trade_date"].dt.date < day]
-        if past.empty:
-            return {"rows": {}, "history": {}}
-        latest = past["trade_date"].max()
-        rows: dict[str, dict[str, Any]] = {}
-        history: dict[str, Any] = {}
-        for sym, g in past.groupby("symbol"):
-            g = g.sort_values("trade_date")
-            history[str(sym)] = g[raw].tail(45).reset_index(drop=True)
-            last = g[g["trade_date"] == latest]
-            if not last.empty:
-                row = last.iloc[-1]
-                rows[str(sym)] = {c: row.get(c) for c in cols}
-        return {"rows": rows, "history": history}
+        return load_baseline_bundle(
+            symbols, day, parquet_path=DEFAULT_SNAPSHOT_PARQUET, cols=cols
+        )
+
+    def _append_ledger(self, entry: dict[str, Any]) -> None:
+        """账本落 Redis（best-effort：失败计数不阻断发布——回放验收依赖它的完整性计数）。"""
+        try:
+            import os
+
+            import redis as redis_lib
+
+            client = redis_lib.Redis(
+                host=os.getenv("REDIS_HOST") or "redis",
+                port=int(os.getenv("REDIS_PORT", "6379")),
+                db=int(os.getenv("REDIS_DB", "0")),
+                password=os.getenv("REDIS_PASSWORD") or None,
+                decode_responses=True, socket_connect_timeout=2, socket_timeout=3,
+            )
+            key = f"{LEDGER_KEY_PREFIX}:{str(entry.get('trade_date') or '')}"
+            pipe = client.pipeline(transaction=False)
+            pipe.rpush(key, ledger_json(entry))
+            pipe.ltrim(key, -LEDGER_MAX_ENTRIES, -1)
+            pipe.expire(key, LEDGER_TTL_S)
+            pipe.execute()
+            client.close()
+            with self._lock:
+                self.counters["ledger_entries"] = int(self.counters.get("ledger_entries", 0)) + 1
+        except Exception as exc:  # noqa: BLE001
+            with self._lock:
+                self.counters["ledger_errors"] = int(self.counters.get("ledger_errors", 0)) + 1
+                self.counters["last_ledger_error"] = str(exc)
 
     async def _default_publish(self, payload: dict[str, Any], cfg: RealtimeInferConfig) -> None:
         from backend.services.engine.routers.realtime_contract import (
@@ -328,70 +319,52 @@ class RealtimeInferenceService:
 
             self._engine = IncrementalFeatureEngine()
 
-        override = set(cfg.override_whitelist) & set(TIER_COLUMNS) & set(cols)
-        x = np.empty((len(hot), len(cols)), dtype=np.float32)
-        ready = missing = overridden = 0
-        symbols_digits: list[str] = []
-        for i, sym in enumerate(hot):
-            digits = _digits(sym)
-            symbols_digits.append(digits)
-            row = dict(baseline.get(digits) or {})
-            if sym not in self._bootstrapped:
-                hist = histories.get(digits)
-                if hist is not None and len(hist):
-                    try:
-                        self._engine.bootstrap(sym, hist)
-                    except Exception as exc:  # noqa: BLE001 - 单标的引导失败不拖垮周期
-                        logger.debug("bootstrap 失败 %s: %s", sym, exc)
-                self._bootstrapped.add(sym)
-            snap = snapshots.get(sym)
-            if snap:
-                self._engine.on_snapshot(sym, snap)
-            live = None
-            if override:
-                try:
-                    live = self._engine.compute(sym)
-                except Exception as exc:  # noqa: BLE001 - 单标的失败不拖垮周期
-                    logger.debug("live 特征失败 %s: %s", sym, exc)
-            for j, col in enumerate(cols):
-                val = row.get(col)
-                if live is not None and col in override:
-                    lv = live.get(col)
-                    if lv is not None and np.isfinite(lv):
-                        val = lv
-                        overridden += 1
-                if val is None or (isinstance(val, float) and np.isnan(val)):
-                    val = fill.get(col, 0.0)
-                    missing += 1
-                x[i, j] = float(val)
-            if row:
-                ready += 1
-        out = session.run(None, {input_name: x})[0]
-        scores = np.asarray(out, dtype=float).reshape(-1)
-        order = np.argsort(-scores)
-        ranks = np.empty(len(scores), dtype=int)
-        ranks[order] = np.arange(1, len(scores) + 1)
+        override = effective_override(cfg.override_whitelist, cols)
+        model_id = model_dir.name
+        model_version = str(meta.get("model_version") or model_id)
+        result = compute_cycle(
+            session=session,
+            input_name=input_name,
+            cols=cols,
+            fill=fill,
+            model_version=model_version,
+            hot=hot,
+            snapshots=snapshots,
+            baseline=baseline,
+            histories=histories,
+            override=override,
+            engine=self._engine,
+            bootstrapped=self._bootstrapped,
+        )
+        cycle_ts = time.time()
+        run_id = f"rt-{model_id}-{today.strftime('%Y%m%d')}"
+        ledger = ledger_entry(
+            result, ts=cycle_ts, run_id=run_id,
+            model_version=model_version, override=override,
+        )
+        ledger["trade_date"] = today.strftime("%Y%m%d")
+        (self._ledger_sink or self._append_ledger)(ledger)
+
         items = [
             {
-                "symbol": symbols_digits[i],
-                "fusion_score": float(scores[i]),
-                "score_rank": int(ranks[i]),
+                "symbol": result.symbols[i],
+                "fusion_score": float(result.scores[i]),
+                "score_rank": int(result.ranks[i]),
                 "quality": {"live": bool(override), "overridden_cols": len(override)},
             }
             for i in range(len(hot))
         ]
-        model_id = model_dir.name
         return {
-            "run_id": f"rt-{model_id}-{today.strftime('%Y%m%d')}",
+            "run_id": run_id,
             "trade_date": today,
             "model_id": model_id,
-            "model_version": str(meta.get("model_version") or model_id),
+            "model_version": model_version,
             "feature_version": str(meta.get("factor_catalog_version") or meta.get("feature_version") or "default"),
             "feature_dim": len(cols),
             "expected_symbols": len(hot),
-            "ready_symbols": ready,
-            "missing_symbols": missing,
-            "overridden_cells": overridden,
+            "ready_symbols": result.ready,
+            "missing_symbols": result.missing,
+            "overridden_cells": result.overridden,
             "quality": {"override_whitelist": sorted(override), "note": OVERRIDE_GUARD_NOTE},
             "scores": items,
         }
