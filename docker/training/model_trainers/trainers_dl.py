@@ -327,7 +327,10 @@ def _train_dl(
 
     n_epochs    = int(_dl("n_epochs", 200))
     batch_size  = int(_dl("batch_size", 4000))
-    lr          = float(_dl("lr", 0.001))
+    # lr：rnn/tcn/alstm/nativetft 默认 0.001→3e-4。大表（640万行×273）下
+    # 1e-3 一轮即"冲过头"（2026-09-16 GRU 第 1 轮后停滞、被耐心 3 早停实证）；
+    # transformer/tabnet 各自分支有专属默认（1e-4 / 5e-3），仅未显式传 lr 时生效。
+    lr          = float(_dl("lr", 0.0003))
     step_len    = int(dl_params.get("dl_step_len", 20))
     early_stop  = int(dl_params.get("early_stopping_rounds", 20))
     metric_name = str(dl_params.get("metric", "")).lower()
@@ -769,6 +772,13 @@ def _predict_dl(
     """加载训练好的 DL 模型并预测。"""
     import importlib
     import torch
+
+    # 训练阶段（20+ 分钟批次张量 churn）滞留的 glibc arena 先归还 OS：
+    # 否则 训练底仓(含滞留 ~10GB) + 预测主数组(全窗口 ≈8.4GB) 会顶穿容器限额
+    # （2026-09-16 GRU 保存后 36 秒 OOMKilled 实证）。
+    from diagnostics.utils import trim_memory as _trim
+
+    _trim("before dl predict")
 
     cls_name = dl_metadata.get("model_class_name", "")
     model_params = dl_metadata.get("model_params", {})

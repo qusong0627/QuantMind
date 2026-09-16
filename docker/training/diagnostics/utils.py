@@ -67,3 +67,39 @@ def _sanitize_nan_inf(obj):
     except (TypeError, ValueError):
         logger.warning("metadata 中发现不可序列化对象 %s，已置空", type(obj).__name__)
         return None
+
+
+def rss_gb() -> float:
+    """当前进程 RSS（GB）。"""
+    try:
+        with open("/proc/self/status", encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) / 1024.0 / 1024.0
+    except OSError:
+        pass
+    return float("nan")
+
+
+def trim_memory(tag: str = "") -> None:
+    """gc + malloc_trim：把 glibc 滞留 arena 归还 OS（与 train._trim_memory 同实现）。
+
+    训练循环 20+ 分钟的批次张量churn 会滞留数 GB arena；DL 预测前主动归还，
+    避免 训练底仓(含滞留) + 预测主数组 叠加顶穿容器限额（2026-09-16 GRU
+    全窗口预测 OOMKilled 实证）。
+    """
+    import gc
+
+    gc.collect()
+    try:
+        import ctypes
+
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except Exception:  # pragma: no cover
+        pass
+    if tag:
+        import logging
+
+        logging.getLogger("quantmind.train").info(
+            "DL memory trimmed (%s): rss=%.1fGB", tag, rss_gb()
+        )
