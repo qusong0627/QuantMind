@@ -32,9 +32,10 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from backend.shared.backtest_health import (  # noqa: E402
     MIN_CURVE_DAYS,
-    record_strategy_health,
     evaluate_for_window,
     latest_strategy_health,
+    record_strategy_health,
+    resolve_sweep_evidence,
 )
 from backend.shared.simulation_account_keys import active_strategy_key  # noqa: E402
 
@@ -158,8 +159,13 @@ async def run_health_recheck(
                 )
                 continue
 
+            n_trials, matrix, trials_source = await resolve_sweep_evidence(
+                tenant_id=tenant_id, user_id=user_id, strategy_id=sid
+            )
+            if trials_source == "default" and (previous or {}).get("n_trials"):
+                n_trials = max(1, int(previous["n_trials"]))  # 沿用上期口径，防复检口径漂移
             report = await evaluate_for_window(
-                rows, n_trials=int((previous or {}).get("n_trials") or 1)
+                rows, n_trials=n_trials, performance_matrix=matrix
             )
             if report is None:
                 results.append(
@@ -180,6 +186,8 @@ async def run_health_recheck(
                 "confidence": report["confidence"],
                 "previous_verdict": (previous or {}).get("verdict"),
                 "evidence_source": evidence_source,
+                "n_trials": n_trials,
+                "n_trials_source": trials_source,
             }
             if save:
                 await record_strategy_health(

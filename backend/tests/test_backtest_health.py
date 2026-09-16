@@ -264,6 +264,52 @@ def test_three_integration_points_wired_in_source():
     assert "health: dict[str, Any] | None = None" in schema  # 证据卡可经 API 下钻
 
 
+# ── 参数扫描证据（N 去胀 + PBO 矩阵）────────────────────────────────
+
+
+@pytest.mark.unit
+def test_pbo_matrix_from_trials():
+    from backend.shared.backtest_health import _pbo_matrix_from_trials
+
+    def _trial(seed: int) -> dict:
+        rng2 = np.random.default_rng(seed)
+        rets = rng2.normal(0.0005, 0.01, 60)
+        vals = list(np.cumprod(1 + rets) * 100)
+        return {
+            "params": {"k": seed},
+            "metrics": {
+                "equity_curve": [
+                    {"date": f"2025-{(i // 21) + 1:02d}-{(i % 21) + 1:02d}", "value": v}
+                    for i, v in enumerate(vals)
+                ]
+            },
+        }
+
+    mat = _pbo_matrix_from_trials([_trial(1), _trial(2), _trial(3)])
+    assert mat is not None and mat.shape[1] == 3 and mat.shape[0] >= 20
+
+    # 有效列 < 2 / 曲线过短 → None（PBO 如实缺省）
+    assert _pbo_matrix_from_trials([_trial(1)]) is None
+    assert _pbo_matrix_from_trials([{"metrics": {"equity_curve": []}}, _trial(2)]) is None
+    assert _pbo_matrix_from_trials([]) is None
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_resolve_sweep_evidence_default_without_db():
+    from backend.shared.backtest_health import resolve_sweep_evidence
+
+    # 非数字 strategy_id → 直接缺省（不查库）
+    n, matrix, source = await resolve_sweep_evidence(
+        tenant_id="default", user_id="1", strategy_id="sys_template"
+    )
+    assert n == 1 and matrix is None and source == "default"
+    n, _, source = await resolve_sweep_evidence(
+        tenant_id="default", user_id="1", strategy_id=None
+    )
+    assert source == "default"
+
+
 # ── 真库 E2E ────────────────────────────────────────────────────────
 
 
@@ -351,6 +397,118 @@ async def test_attach_backtest_health_e2e_real_db():
                 text(
                     "DELETE FROM eval_scores WHERE object_type='strategy_health' AND object_id=:s"
                 ),
+                {"s": strategy_id},
+            )
+            await session.commit()
+        from backend.shared.database_manager_v2 import close_database
+
+        await close_database()
+
+
+@pytest.mark.asyncio
+async def test_sweep_evidence_and_attach_e2e_real_db():
+    """参数扫描记录真库 E2E：合成 qlib_optimization_runs → N 去胀 + PBO 矩阵 →
+    attach 体检读取 optimization_run 源 → 清理。"""
+    try:
+        from sqlalchemy import text
+
+        from backend.shared.database_manager_v2 import get_session
+    except Exception as exc:  # noqa: BLE001
+        pytest.skip(f"依赖不可用: {exc}")
+    try:
+        async with get_session(read_only=True) as probe:
+            await probe.execute(text("SELECT 1"))
+    except Exception as exc:  # noqa: BLE001
+        pytest.skip(f"DB 连接抖动: {exc}")
+
+    from backend.shared.backtest_health import (
+        attach_backtest_health,
+        resolve_sweep_evidence,
+    )
+
+    strategy_id = f"88{uuid.uuid4().int % 10**6:06d}"
+    optimization_id = f"pytest_opt_{uuid.uuid4().hex[:10]}"
+    backtest_id = f"pytest_swp_{uuid.uuid4().hex[:10]}"
+    total_tasks = 40
+
+    trials = []
+    for seed in (1, 2, 3):
+        rng2 = np.random.default_rng(seed)
+        rets = rng2.normal(0.0005, 0.01, 60)
+        vals = list(np.cumprod(1 + rets) * 100)
+        trials.append(
+            {
+                "params": {"topk": seed * 10},
+                "metrics": {
+                    "equity_curve": [
+                        {"date": f"2026-{(i // 21) + 1:02d}-{(i % 21) + 1:02d}", "value": v}
+                        for i, v in enumerate(vals)
+                    ]
+                },
+            }
+        )
+
+    try:
+        async with get_session() as session:
+            await session.execute(
+                text(
+                    "INSERT INTO qlib_optimization_runs (optimization_id, mode, user_id, tenant_id, "
+                    "status, created_at, updated_at, base_request_json, optimization_target, "
+                    "total_tasks, completed_count, all_results_json) VALUES "
+                    "(:oid, 'grid', '00000001', 'default', 'completed', now(), now(), "
+                    "CAST(:base AS jsonb), 'sharpe_ratio', :n, :n, CAST(:res AS jsonb))"
+                ),
+                {
+                    "oid": optimization_id,
+                    "base": json.dumps({"strategy_id": strategy_id}),
+                    "n": total_tasks,
+                    "res": json.dumps(trials, ensure_ascii=False),
+                },
+            )
+            await session.execute(
+                text(
+                    "INSERT INTO qlib_backtest_runs (backtest_id, user_id, tenant_id, status, "
+                    "created_at, completed_at) VALUES (:b, '00000001', 'default', 'completed', now(), now())"
+                ),
+                {"b": backtest_id},
+            )
+            await session.commit()
+
+        n_trials, matrix, source = await resolve_sweep_evidence(
+            tenant_id="default", user_id="00000001", strategy_id=strategy_id
+        )
+        assert n_trials == total_tasks and source == "optimization_run"
+        assert matrix is not None and matrix.shape[1] == 3
+
+        curve_a, _ = _alpha_curve_a()
+        rows = [
+            {"date": f"2026-0{(i // 21) + 1}-{(i % 21) + 1:02d}", "value": row["value"]}
+            for i, row in enumerate(curve_a[:120])
+        ]
+        report = await attach_backtest_health(
+            backtest_id=backtest_id,
+            equity_rows=rows,
+            tenant_id="default",
+            user_id="00000001",
+            strategy_id=strategy_id,
+        )
+        assert report is not None
+        assert report["inputs"]["n_trials_source"] == "optimization_run"
+        assert report["tests"]["dsr"].get("n_trials") == total_tasks
+        assert report["tests"]["pbo"].get("sufficient") is True
+    finally:
+        from backend.shared.database_manager_v2 import get_session as _gs
+
+        async with _gs() as session:
+            await session.execute(
+                text("DELETE FROM qlib_optimization_runs WHERE optimization_id=:o"),
+                {"o": optimization_id},
+            )
+            await session.execute(
+                text("DELETE FROM qlib_backtest_runs WHERE backtest_id=:b"), {"b": backtest_id}
+            )
+            await session.execute(
+                text("DELETE FROM eval_scores WHERE object_type='strategy_health' AND object_id=:s"),
                 {"s": strategy_id},
             )
             await session.commit()

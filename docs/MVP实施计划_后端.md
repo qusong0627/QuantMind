@@ -966,7 +966,21 @@
 - **测试**：`test_backtest_health.py` **9/9**（门禁矩阵/四分类确定性夹具 A·B·L·E/短曲线 None/
   SIM 打点 NX/交易日日历回退/复检纯函数/**三处接线源守卫**/真库 E2E 两件）；
   scheduler 注册表测试同步（health_recheck 心跳接线源 + 重跑分发表）。
-- **证据卡前端展示**（渲染 result.health）→ 归前端批次（T-FE-*）；试验次数 N 自动接线随 R2 扫描器。
+- **遗留收口（2026-09-16 二批）**：
+  - **试验次数 N 自动取自参数扫描记录**：`resolve_sweep_evidence`（`shared/backtest_health.py`）——
+    按 `base_request_json->>'strategy_id'` 关联该策略最近一次 **completed** 网格优化
+    （`qlib_optimization_runs`）→ N=total_tasks（DSR 去胀）+ 由 `all_results_json` 逐试验净值
+    构建 **PBO 的 T×N 矩阵**（有则必跑）；无记录/无策略 → 如实缺省（n_trials_source=default）。
+    回测挂钩与月度复检同源接入。
+  - **证据卡前端展示**：`HealthEvidencePanel.tsx`（体检结论页签）——四分类徽章（A 红/B 蓝/L 琥珀/
+    E 灰）+ 可信度分 + 理由/建议 + **九项明细行**（不足项如实显示原因，不隐藏）；已并入
+    高级分析模块（`EnhancedAdvancedAnalysisModule`），`npm run typecheck` 零错误、
+    `scripts/deploy_frontend.sh` 构建部署到 quantmind-web 容器。
+- **测试补强**：`test_backtest_health.py` 扩至 **12/12**（+PBO 矩阵纯函数 + 扫描记录真库 E2E：
+  合成 optimization run → N=40 去胀 + 矩阵 → attach 体检读取 optimization_run 源 → 清理）。
+  - **FE-E 数据出口**：`/api/v1/eval/*`（`services/api/routers/eval_scores.py`，eval_scores 唯一
+    读取面）——scores 网格（latest_only）/ scores/history（升序）/ health/{sid}（最新+历史+
+    **门禁预演**与执行点同源）/ object-types；可见性=租户共享行+本人私有行；只读；HTTP 实机 200。
 
 - **T-P4-05** 五张评分卡 + 回测体检九项（`scripts/eval/` + `eval_scores` 表）
 - **T-P4-06** 体检三处接入（回测后/晋级门禁/月度复检）✅ 见上方落地记录（2026-09-16）

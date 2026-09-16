@@ -252,6 +252,80 @@ async def evaluate_for_window(
     return report
 
 
+def _pbo_matrix_from_trials(trials: list[Any]) -> Any | None:
+    """网格优化试验列表（OptimizationTaskResult dump）→ T×N 逐期收益矩阵（日期交集对齐）。
+
+    每列 = 一组参数的逐期收益；样本 < 20 个共同交易日或有效列 < 2 → None（PBO 如实缺省）。
+    """
+    curves: list[dict[str, float]] = []
+    for item in trials or []:
+        if not isinstance(item, dict):
+            continue
+        metrics = item.get("metrics") or {}
+        curve = metrics.get("equity_curve") or []
+        points = [
+            (str(row.get("date"))[:10], float(row.get("value")))
+            for row in curve
+            if isinstance(row, dict) and row.get("value")
+        ]
+        rets: dict[str, float] = {}
+        for (_, prev_v), (day, value) in zip(points, points[1:], strict=False):
+            if prev_v > 0 and value > 0:
+                rets[day] = value / prev_v - 1.0
+        if len(rets) >= 2:
+            curves.append(rets)
+    if len(curves) < 2:
+        return None
+    common = set(curves[0])
+    for c in curves[1:]:
+        common &= set(c)
+    dates = sorted(common)
+    if len(dates) < 20:
+        return None
+    return np.asarray([[c[d] for c in curves] for d in dates], dtype=float)
+
+
+async def resolve_sweep_evidence(
+    *, tenant_id: str, user_id: str, strategy_id: str | None
+) -> tuple[int, Any | None, str]:
+    """参数扫描证据（T-P4-05b 余项）→ (n_trials, pbo_matrix|None, source)。
+
+    来源：该策略最近一次 **completed** 的网格优化（`qlib_optimization_runs`，
+    `base_request_json->>'strategy_id'` 关联）——N=total_tasks（去胀），
+    并通过 `all_results_json` 逐试验净值构建 PBO 的 T×N 矩阵（有则必跑）。
+    无 strategy_id / 无记录 → (env 默认, None, "default")，如实缺省不猜测。
+    """
+    sid = str(strategy_id or "").strip()
+    default_trials = max(1, int(os.getenv("BACKTEST_HEALTH_TRIALS", "1")))
+    if not sid.isdigit():
+        return default_trials, None, "default"
+    try:
+        from sqlalchemy import text as _text
+
+        from backend.shared.database_manager_v2 import get_session
+
+        async with get_session(read_only=True) as session:
+            row = (
+                await session.execute(
+                    _text(
+                        "SELECT total_tasks, all_results_json FROM qlib_optimization_runs "
+                        "WHERE tenant_id=:t AND user_id=:u AND status='completed' "
+                        "AND base_request_json->>'strategy_id' = :sid "
+                        "ORDER BY created_at DESC LIMIT 1"
+                    ),
+                    {"t": tenant_id or "default", "u": str(user_id or ""), "sid": sid},
+                )
+            ).mappings().first()
+    except Exception as exc:  # noqa: BLE001 - 扫描记录读取失败按缺省（不阻断体检）
+        logger.warning("[BacktestHealth] 参数扫描记录读取失败（按缺省 N）: %s", exc)
+        return default_trials, None, "default"
+    if not row:
+        return default_trials, None, "default"
+    n_trials = max(1, int(row["total_tasks"] or 1))
+    matrix = _pbo_matrix_from_trials(row["all_results_json"] or [])
+    return n_trials, matrix, "optimization_run"
+
+
 async def attach_backtest_health(
     *,
     backtest_id: str,
@@ -272,17 +346,21 @@ async def attach_backtest_health(
             len(equity_rows or []),
         )
         return None
+    trials_source = "explicit"
+    matrix = None
+    if n_trials is None:
+        n_trials, matrix, trials_source = await resolve_sweep_evidence(
+            tenant_id=tenant_id, user_id=user_id, strategy_id=strategy_id
+        )
     report = await evaluate_for_window(
         equity_rows,
         benchmark_symbol=benchmark_symbol,
-        n_trials=int(
-            n_trials
-            if n_trials is not None
-            else os.getenv("BACKTEST_HEALTH_TRIALS", "1")
-        ),
+        n_trials=int(n_trials),
+        performance_matrix=matrix,
     )
     if report is None:
         return None
+    report["inputs"]["n_trials_source"] = trials_source
 
     await _store_on_run(backtest_id=backtest_id, report=report)
     sid = str(strategy_id or "").strip()
