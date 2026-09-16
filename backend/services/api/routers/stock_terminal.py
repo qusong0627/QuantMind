@@ -801,6 +801,80 @@ async def stock_signal_overlay(
     return {"success": True, "data": {"series": grouped}}
 
 
+@router.get("/trade-marks")
+async def stock_trade_marks(
+    symbol: str = Query(...),
+    days: int = Query(250, ge=7, le=1000),
+    current_user: dict = Depends(get_current_user),
+):
+    """模拟成交标记（T-FE-08 个股 K 线买卖点）：sim_trades ⋈ sim_orders（理由=remarks）。
+
+    用户级（租户 + 归一 uid，与模拟盘接口同口径）；symbol 按 裸码/后缀/前缀 三形归一匹配
+    （sim_trades 存量以 suffix 为主，前缀兜底）；按日窗口过滤。
+    返回 {items: [{date, side, price, shares, amount, fee, reason, order_id}], source}。
+    """
+    from backend.services.trade_shared.simulation_manager import require_sim_user_id
+    from backend.shared.stock_utils import StockCodeUtil
+
+    raw = symbol.upper().strip()
+    # 三形输入容错（裸码/后缀/前缀）→ 统一归一为后缀后校验（口径唯一）
+    sym = StockCodeUtil.to_suffix(raw)
+    if not _SYMBOL_RE.match(sym):
+        raise HTTPException(status_code=400, detail=f"非法代码 {raw}")
+    tenant_id = str(current_user.get("tenant_id") or "default")
+    raw_user = str(current_user.get("user_id") or "")
+    sim_uid = int(require_sim_user_id(raw_user, tenant_id=tenant_id))
+
+    candidates = {raw, sym, StockCodeUtil.to_prefix(sym)}
+    start = _date.today() - _timedelta(days=days * 2)
+
+    async with get_session() as session:
+        from sqlalchemy import text as _text
+
+        rows = (
+            await session.execute(
+                _text(
+                    "SELECT t.executed_at, t.side::text AS side, t.price, t.quantity, "
+                    "t.total_fee, t.order_id::text AS order_id, o.remarks, o.client_order_id "
+                    "FROM sim_trades t LEFT JOIN sim_orders o ON o.order_id = t.order_id "
+                    "WHERE t.tenant_id = :tid AND t.user_id = :uid "
+                    "AND t.symbol = ANY(:syms) AND t.executed_at >= :start "
+                    "ORDER BY t.executed_at"
+                ),
+                {
+                    "tid": tenant_id,
+                    "uid": sim_uid,
+                    "syms": sorted(candidates),
+                    "start": start,
+                },
+            )
+        ).fetchall()
+
+    items = [
+        {
+            "date": str(r[0])[:10] if r[0] is not None else None,
+            "side": "buy" if str(r[1]).lower().startswith("buy") else "sell",
+            "price": float(r[2] or 0.0),
+            "shares": float(r[3] or 0.0),
+            "amount": round(float(r[2] or 0.0) * float(r[3] or 0.0), 2),
+            "fee": float(r[4] or 0.0),
+            "reason": r[6] or "",
+            "order_id": r[5],
+            "client_order_id": r[7],
+        }
+        for r in rows
+        if r[0] is not None
+    ]
+    return {
+        "success": True,
+        "data": {
+            "items": items,
+            "symbol_matched": sorted(candidates),
+            "source": "db:sim_trades ⋈ sim_orders（模拟盘成交，含理由 remarks）",
+        },
+    }
+
+
 @router.get("/chart-backtest")
 async def chart_backtest(
     symbol: str = Query(...),
