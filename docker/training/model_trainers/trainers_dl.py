@@ -163,6 +163,86 @@ def _build_ts_dataloader(
     )
     return loader, (_feat_mean, _feat_std)
 
+
+def _build_ts_dataloader_from_frame(
+    frame: pd.DataFrame,
+    features: list[str],
+    label_col: str = "label",
+    *,
+    step_len: int,
+    batch_size: int,
+    shuffle: bool = True,
+    feat_norm: "tuple[np.ndarray, np.ndarray] | None" = None,
+    drop_last: bool = True,
+) -> "tuple[torch.utils.data.DataLoader, tuple[np.ndarray, np.ndarray]]":
+    """单拷贝 TS 数据通路（机构级内存模型，2026-09-16）。
+
+    背景：旧链路（_ts_indexed + _build_ts_dataloader）在训练集上串行产生
+    ``sort_values → frame[features] → .values → (x-mean) → /std → fancy-reorder``
+    共 6 份整表副本（640 万×273 float32 每份 ≈7GB，峰值 3~4 份并存 ≈25-30GB），
+    叠加加载后底仓后必然击穿容器限额——这是 DL 大表"模型构建即 OOM"的根因。
+
+    分配模型：**全流程只有 1 个 n×d 主数组**（≈7GB），其余全部原地：
+    1) 符号连续性校验（加载器输出已按 (symbol, trade_date) 排序，通常零拷贝直通；
+       乱序时做唯一一次 lexsort，记录置换供 scatter 映射）；
+    2) 逐列搬入预分配数组（每列 ≈32MB，与 splits._fill 同款做法）；
+    3) 原地清 NaN/Inf + 原地 z-score（X 为自有缓冲，唯一副本，安全）；
+    4) 分组偏移由 factorize 直接给出（无 MultiIndex 对象开销）。
+    """
+    n = len(frame)
+    if n == 0:
+        raise ValueError("empty frame for TS dataloader")
+
+    from torch.utils.data import DataLoader
+
+    sym = frame["symbol"].to_numpy()
+    if n > 1 and not bool((sym[1:] >= sym[:-1]).all()):
+        # 异常路径：乱序输入。lexsort 主键取 (symbol, trade_date) 稳定序
+        order = np.lexsort(
+            (frame["trade_date"].to_numpy(), sym)
+        )
+        frame = frame.iloc[order]
+        sym = sym[order]
+    else:
+        order = None  # 恒等：行序即原始行序
+
+    X = np.empty((n, len(features)), dtype=np.float32)
+    for i, c in enumerate(features):
+        X[:, i] = frame[c].to_numpy(dtype=np.float32, copy=False)
+    y = frame[label_col].to_numpy(dtype=np.float32, copy=False)
+
+    np.nan_to_num(X, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
+    if feat_norm is None:
+        mean = X.mean(axis=0)
+        std = np.where((s := X.std(axis=0)) == 0, 1.0, s)
+        feat_norm = (mean, std)
+    else:
+        mean, std = feat_norm
+    X -= mean
+    X /= std
+    np.nan_to_num(X, copy=False, nan=0.0)
+
+    inst_codes, inst_uniques = pd.factorize(sym, sort=False)
+    counts = np.bincount(inst_codes, minlength=len(inst_uniques))
+    offsets = np.concatenate([[0], np.cumsum(counts)]).tolist()
+
+    dataset = _TSLazyDataset(X, y, offsets, step_len)
+    # 接口对齐旧链路：scatter 消费者按 original_rows[ds.indices] 映射回原始行
+    dataset.original_rows = order if order is not None else np.arange(n)
+    loader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        drop_last=drop_last,
+        num_workers=0,
+    )
+    logger.info(
+        "TS single-copy loader: %d samples from %d rows × %d feats (X=%.2fGB, order=%s)",
+        len(dataset), n, len(features), X.nbytes / 1e9,
+        "identity" if order is None else "lexsorted",
+    )
+    return loader, feat_norm
+
 def _train_dl(
     model_type: str,
     train_df: pd.DataFrame,
@@ -294,24 +374,15 @@ def _train_dl(
     is_ts = model_type in _QLIB_TS_MODEL_MAP
 
     if is_ts:
-        # TS 滑窗必须按 symbol 分组，否则窗口会跨越不同股票边界产生污染样本。
-        # train_df 是扁平 RangeIndex，这里用 (symbol, trade_date) 建 MultiIndex
-        # 供 _build_ts_dataloader 计算每只股票的连续区间 offset。
-        def _ts_indexed(frame: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series]:
-            f = frame.sort_values(["symbol", "trade_date"])
-            idx = pd.MultiIndex.from_arrays(
-                [f["symbol"].to_numpy(), f["trade_date"].to_numpy()],
-                names=["instrument", "datetime"],
-            )
-            return f[features].set_axis(idx), f["label"].set_axis(idx)
-
-        _xt, _yt = _ts_indexed(train_df)
-        _xv, _yv = _ts_indexed(val_df)
-        _train_loader, _feat_norm = _build_ts_dataloader(
-            _xt, _yt, step_len=step_len, batch_size=batch_size, shuffle=True
+        # 单拷贝 TS 数据通路（sort/特征提取/.values/归一化/重排的 6 份整表副本
+        # 全部消除，见 _build_ts_dataloader_from_frame 文档——旧链路是 DL 大表 OOM 根因）
+        _train_loader, _feat_norm = _build_ts_dataloader_from_frame(
+            train_df, features, "label",
+            step_len=step_len, batch_size=batch_size, shuffle=True,
         )
-        _val_loader, _ = _build_ts_dataloader(
-            _xv, _yv, step_len=step_len, batch_size=batch_size, shuffle=False,
+        _val_loader, _ = _build_ts_dataloader_from_frame(
+            val_df, features, "label",
+            step_len=step_len, batch_size=batch_size, shuffle=False,
             feat_norm=_feat_norm,  # 验证集复用训练集统计量
         )
         train_args: tuple = (_train_loader,)
@@ -534,27 +605,18 @@ def _train_nativetft(
     logger.info("NativeTFT: d_feat=%d, hidden=%d, heads=%d, step_len=%d, device=%s",
                 d_feat, hidden_dim, num_heads, step_len, device)
 
-    # ── 构建 DataLoader ──
-    # TS 滑窗必须按 symbol 分组，否则窗口会跨越不同股票边界产生污染样本。
-    # train_df/val_df 是扁平 RangeIndex，这里用 (symbol, trade_date) 建 MultiIndex
-    # 供 _build_ts_dataloader 计算每只股票的连续区间 offset。
+    # ── 构建 DataLoader（单拷贝通路，同 _train_dl）──
     # 训练集计算 mean/std 统计量，验证集复用（避免 look-ahead）；
     # feat_norm 持久化进 dl_metadata 供推理复现标准化。
-    def _ts_indexed(frame: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series]:
-        f = frame.sort_values(["symbol", "trade_date"])
-        idx = pd.MultiIndex.from_arrays(
-            [f["symbol"].to_numpy(), f["trade_date"].to_numpy()],
-            names=["instrument", "datetime"],
-        )
-        return f[features].set_axis(idx), f["label"].set_axis(idx)
-
-    _xt, _yt = _ts_indexed(train_df)
-    _xv, _yv = _ts_indexed(val_df)
-    train_loader, _feat_norm = _build_ts_dataloader(
-        _xt, _yt, step_len, batch_size, shuffle=True)
-    val_loader, _ = _build_ts_dataloader(
-        _xv, _yv, step_len, batch_size, shuffle=False,
-        feat_norm=_feat_norm)
+    _train_loader, _feat_norm = _build_ts_dataloader_from_frame(
+        train_df, features, "label",
+        step_len=step_len, batch_size=batch_size, shuffle=True,
+    )
+    _val_loader, _ = _build_ts_dataloader_from_frame(
+        val_df, features, "label",
+        step_len=step_len, batch_size=batch_size, shuffle=False,
+        feat_norm=_feat_norm,
+    )
 
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     loss_fn = nn.MSELoss()
