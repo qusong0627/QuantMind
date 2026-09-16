@@ -3,16 +3,21 @@ import { isMarketEnabled } from '../../config/marketFlags';
 
 export type AppMarket = 'CN' | 'US' | 'HK' | 'CRYPTO' | 'FUTURES';
 
+export type UiMode = 'simple' | 'professional';
+
 export interface UIState {
   theme: 'light' | 'dark';
   sidebarOpen: boolean;
   notifications: any[];
   tradingMode: 'real' | 'simulation';
   currentMarket: AppMarket;
+  /** T-FE-02 简单/专业模式：简单是默认视图（不是功能裁剪，机构能力收敛进专业模式与下钻层） */
+  uiMode: UiMode;
 }
 
 const TRADING_MODE_PREF_KEY = 'qm:trading_mode_pref';
 const MARKET_PREF_KEY = 'qm:current_market';
+const UI_MODE_PREF_KEY = 'qm:ui_mode_pref';
 
 const savedMode = localStorage.getItem(TRADING_MODE_PREF_KEY);
 // 未显式保存过偏好时默认模拟盘：实盘态须由用户主动切换一次（切换会写入偏好）
@@ -29,12 +34,17 @@ if (!validMarkets.includes(savedMarket as AppMarket)) {
   localStorage.setItem(MARKET_PREF_KEY, initialMarket);
 }
 
+// 未显式保存过偏好时默认简单模式（前端设计 §一.2：简单模式为默认视图）
+const savedUiMode = localStorage.getItem(UI_MODE_PREF_KEY);
+const initialUiMode: UiMode = savedUiMode === 'professional' ? 'professional' : 'simple';
+
 const initialState: UIState = {
   theme: 'light',
   sidebarOpen: true,
   notifications: [],
   tradingMode: initialTradingMode,
   currentMarket: initialMarket,
+  uiMode: initialUiMode,
 };
 
 const uiSlice = createSlice({
@@ -61,13 +71,18 @@ const uiSlice = createSlice({
       state.currentMarket = market;
       localStorage.setItem(MARKET_PREF_KEY, market);
     },
+    setUiMode: (state, action: PayloadAction<UiMode>) => {
+      state.uiMode = action.payload === 'professional' ? 'professional' : 'simple';
+      localStorage.setItem(UI_MODE_PREF_KEY, state.uiMode);
+    },
   },
 });
 
-export const { setTheme, toggleSidebar, addNotification, removeNotification, setTradingMode, setMarket } = uiSlice.actions;
+export const { setTheme, toggleSidebar, addNotification, removeNotification, setTradingMode, setMarket, setUiMode } = uiSlice.actions;
 
 // Selectors
 export const selectCurrentMarket = (state: { ui: UIState }) => state.ui.currentMarket;
 export const selectTradingMode = (state: { ui: UIState }) => state.ui.tradingMode;
+export const selectUiMode = (state: { ui: UIState }) => state.ui.uiMode;
 
 export default uiSlice.reducer;

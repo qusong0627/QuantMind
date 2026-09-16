@@ -6,8 +6,10 @@ import {
   formatPct,
   healthItemViews,
   pipelineSummary,
+  planDrillEntries,
   planKindLabel,
   planSummary,
+  pnlDrillEntries,
   pnlSummary,
   statusStyle,
 } from '../deskModel';
@@ -121,5 +123,57 @@ describe('executionSummary / healthItemViews / 格式化', () => {
     expect(formatMoney(1234.5)).toContain('1,234.50');
     expect(formatPct(0.1234)).toBe('12.34%');
     expect(formatPct(null)).toBe('—');
+  });
+});
+
+describe('下钻条目（T-FE-03）', () => {
+  it('盈亏块 → 条目：字段分解 + source；不可用 → 状态条目（含 detail）', () => {
+    const entries = pnlDrillEntries({
+      available: true,
+      source: 'db:simulation_fund_snapshots',
+      total_asset: 2010176.58,
+      initial_capital: 2000000,
+      total_pnl: 10176.58,
+      today_pnl: 1797,
+      market_value: 521211,
+      snapshot_date: '2026-09-16',
+    });
+    const labels = entries.map((e) => e.label);
+    expect(labels).toContain('总资产');
+    expect(labels).toContain('累计收益');
+    expect(entries.every((e) => e.source === 'db:simulation_fund_snapshots')).toBe(true);
+    const pnlEntry = entries.find((e) => e.label === '累计收益');
+    expect(pnlEntry?.hint).toContain('0.51%'); // 收益率推算写入 hint
+
+    const empty = pnlDrillEntries({ available: false, source: 'x', detail: '无资金快照' });
+    expect(empty).toHaveLength(1);
+    expect(empty[0].value).toBe('无资金快照');
+  });
+
+  it('计划块 → 摘要条目 + 前 N 笔明细（退出规则标注在 source 列）', () => {
+    const plan = {
+      available: true,
+      source: 'simulation engine dry-run',
+      strategy_name: '测试策略',
+      mode: 'SIMULATION',
+      signal_count: 1000,
+      order_count: 3,
+      error: null,
+      orders: [
+        order({ side: 'BUY', symbol: '600036.SH', estimated_amount: 1000 }),
+        order({ side: 'SELL', symbol: '002552.SZ', estimated_amount: 2000 }),
+        order({ side: 'SELL', symbol: '688596.SH', estimated_amount: 300, kind: 'exit', reason: '止损触发' }),
+      ],
+    };
+    const entries = planDrillEntries(plan, 2); // topN=2 截断明细
+    expect(entries.find((e) => e.label === '信号数')?.value).toBe('1000');
+    expect(entries.find((e) => e.label === '计划笔数')?.value).toContain('卖 2');
+    const orderEntries = entries.filter((e) => /^(买|卖) /.test(e.label));
+    expect(orderEntries).toHaveLength(2);
+    expect(orderEntries[0].source).toBe('定期调仓');
+    expect(orderEntries[0].hint).toContain('调仓买入');
+
+    const unavailable = planDrillEntries({ available: false, source: 'redis', reason: '无活跃策略' });
+    expect(unavailable[0].value).toBe('无活跃策略');
   });
 });

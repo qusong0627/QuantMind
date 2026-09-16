@@ -9,6 +9,13 @@ import type {
   PnlBlock,
 } from './types';
 
+export interface DrillEntryLike {
+  label: string;
+  value: string;
+  source?: string;
+  hint?: string;
+}
+
 export interface StatusStyle {
   label: string;
   dot: string;
@@ -143,4 +150,45 @@ export function formatMoney(value: number | null | undefined): string {
 export function formatPct(value: number | null | undefined, digits = 2): string {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return '—';
   return `${(Number(value) * 100).toFixed(digits)}%`;
+}
+
+/** 盈亏块 → 下钻条目（T-FE-03：数字 → 来源链；金额原样展示，不重算） */
+export function pnlDrillEntries(pnl: PnlBlock | null | undefined): DrillEntryLike[] {
+  if (!pnl || !pnl.available) {
+    return [{ label: '状态', value: '无资金快照', source: pnl?.source, hint: pnl?.detail }];
+  }
+  const summary = pnlSummary(pnl);
+  return [
+    { label: '总资产', value: formatMoney(pnl.total_asset), source: pnl.source },
+    { label: '初始本金', value: formatMoney(pnl.initial_capital), source: pnl.source },
+    { label: '累计收益', value: formatMoney(pnl.total_pnl), source: pnl.source, hint: summary.returnPct !== null ? `收益率 ${formatPct(summary.returnPct)}（累计收益 ÷ 初始本金）` : '本金缺失，不计算收益率' },
+    { label: '今日盈亏', value: formatMoney(pnl.today_pnl), source: pnl.source },
+    { label: '持仓市值', value: formatMoney(pnl.market_value), source: pnl.source },
+    { label: '快照日期', value: pnl.snapshot_date || '—', source: pnl.source },
+  ];
+}
+
+/** 计划块 → 下钻条目（顶部摘要 + 前 N 笔明细） */
+export function planDrillEntries(plan: PlanBlock | null | undefined, topN = 10): DrillEntryLike[] {
+  if (!plan?.available) {
+    return [{ label: '状态', value: plan?.reason || '不可用', source: plan?.source }];
+  }
+  const summary = planSummary(plan);
+  const entries: DrillEntryLike[] = [
+    { label: '策略', value: `${plan.strategy_name || plan.strategy_id || '—'}（${plan.mode || 'SIMULATION'}）`, source: plan.source },
+    { label: '信号数', value: String(plan.signal_count ?? '—'), source: 'db:engine_signal_scores（同执行路径）' },
+    { label: '计划笔数', value: `${plan.order_count ?? summary.buys.length + summary.sells.length}（买 ${summary.buys.length} / 卖 ${summary.sells.length}${summary.exits ? ` · 退出规则 ${summary.exits}` : ''}）`, source: plan.source },
+    { label: '买入金额（预估）', value: formatMoney(summary.buyAmount), source: plan.source },
+    { label: '卖出金额（预估）', value: formatMoney(summary.sellAmount), source: plan.source },
+    { label: '预演错误', value: plan.error || '无', source: plan.source },
+  ];
+  for (const order of (plan.orders || []).slice(0, topN)) {
+    entries.push({
+      label: `${order.side === 'BUY' ? '买' : '卖'} ${order.symbol}`,
+      value: `${order.quantity} 股 @ ${order.price}（约 ${formatMoney(order.estimated_amount)}）`,
+      source: planKindLabel(order.kind),
+      hint: order.reason,
+    });
+  }
+  return entries;
 }

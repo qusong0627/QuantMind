@@ -17,6 +17,8 @@ import {
   XCircle,
 } from 'lucide-react';
 import type { HealthReport, HealthTestItem } from '../../../services/backtestService';
+import { TermTooltip } from '../../../features/shared/TermTooltip';
+import { useUiMode } from '../../../features/shared/useUiMode';
 
 interface HealthEvidencePanelProps {
   backtestId: string;
@@ -67,6 +69,8 @@ function formatValue(key: string, value: unknown): string {
 interface TestRow {
   key: string;
   label: string;
+  /** 术语表 key（label 的 tooltip 解释来源；与 glossary 覆盖度单测同源） */
+  term: string;
   text: string;
   ok: boolean | null;
 }
@@ -89,6 +93,7 @@ export function buildTestRows(tests: HealthReport['tests']): TestRow[] {
     fr.sufficient
       ? {
           key: 'factor_regression',
+          term: 'factor_regression',
           label: '因子回归（alpha/beta）',
           text: `年化 alpha ${formatValue('alpha_annual', fr.alpha_annual)}，t=${formatValue('alpha_t', fr.alpha_t)} ${
             fr.alpha_significant ? '✓ 显著' : '✗ 不显著'
@@ -97,6 +102,7 @@ export function buildTestRows(tests: HealthReport['tests']): TestRow[] {
         }
       : {
           key: 'factor_regression',
+          term: 'factor_regression',
           label: '因子回归（alpha/beta）',
           text: String(fr.reason || '未提供基准序列'),
           ok: null,
@@ -106,48 +112,53 @@ export function buildTestRows(tests: HealthReport['tests']): TestRow[] {
     dsr.sufficient
       ? {
           key: 'dsr',
+          term: 'dsr',
           label: 'DSR 紧缩夏普',
           text: `${formatValue('dsr', dsr.dsr)} ${dsr.passes_095 ? '✓' : '✗'} ≥0.95（试验 N=${formatValue('n_trials', dsr.n_trials)}）`,
           ok: Boolean(dsr.passes_095),
         }
-      : { key: 'dsr', label: 'DSR 紧缩夏普', text: String(dsr.reason || '样本不足'), ok: null }
+      : { key: 'dsr', term: 'dsr', label: 'DSR 紧缩夏普', text: String(dsr.reason || '样本不足'), ok: null }
   );
   rows.push(
     psr.sufficient
       ? {
           key: 'psr',
+          term: 'psr',
           label: 'PSR 概率夏普',
           text: `${formatValue('psr', psr.psr)}（Sharpe>0 概率，偏度/峰度校正）`,
           ok: null,
         }
-      : { key: 'psr', label: 'PSR 概率夏普', text: String(psr.reason || '样本不足'), ok: null }
+      : { key: 'psr', term: 'psr', label: 'PSR 概率夏普', text: String(psr.reason || '样本不足'), ok: null }
   );
   rows.push(
     mtrl.sufficient
       ? {
           key: 'min_trl',
+          term: 'min_trl',
           label: '最短样本 MinTRL',
           text: `样本 ${formatValue('observed_years', mtrl.observed_years)} 年 vs 需 ${formatValue('min_trl_years', mtrl.min_trl_years)} 年 ${mtrl.adequate ? '✓' : '✗'}`,
           ok: Boolean(mtrl.adequate),
         }
-      : { key: 'min_trl', label: '最短样本 MinTRL', text: String(mtrl.reason || '样本不足'), ok: null }
+      : { key: 'min_trl', term: 'min_trl', label: '最短样本 MinTRL', text: String(mtrl.reason || '样本不足'), ok: null }
   );
   rows.push(
     boot.sufficient
       ? {
           key: 'bootstrap',
+          term: 'bootstrap',
           label: 'Block Bootstrap',
           text: `年化收益 CI ${formatValue('return_ci', boot.return_ci)}（${
             boot.return_ci_crosses_zero ? '跨 0 ⚠' : '不跨 0'
           }）`,
           ok: !boot.return_ci_crosses_zero,
         }
-      : { key: 'bootstrap', label: 'Block Bootstrap', text: String(boot.reason || '样本不足'), ok: null }
+      : { key: 'bootstrap', term: 'bootstrap', label: 'Block Bootstrap', text: String(boot.reason || '样本不足'), ok: null }
   );
   rows.push(
     conc.sufficient
       ? {
           key: 'concentration',
+          term: 'concentration',
           label: '收益集中度',
           text: `剔 Top${formatValue('top_k', conc.top_k)} 日 ${formatValue('full_total_return', conc.full_total_return)} → ${formatValue(
             'ex_top_total_return',
@@ -155,41 +166,44 @@ export function buildTestRows(tests: HealthReport['tests']): TestRow[] {
           )} ${conc.kills_alpha ? '⚠ 集中' : '✓ 分散'}`,
           ok: !conc.kills_alpha,
         }
-      : { key: 'concentration', label: '收益集中度', text: String(conc.reason || '样本不足'), ok: null }
+      : { key: 'concentration', term: 'concentration', label: '收益集中度', text: String(conc.reason || '样本不足'), ok: null }
   );
   rows.push(
     regime.sufficient
       ? {
           key: 'regime',
+          term: 'regime',
           label: '跨 regime 分段',
           text: `覆盖 ${formatValue('regimes_covered', regime.regimes_covered)}；${
             regime.all_alive ? '各段存活 ✓' : '存在失效段 ✗'
           }`,
           ok: Boolean(regime.all_alive),
         }
-      : { key: 'regime', label: '跨 regime 分段', text: String(regime.reason || '未提供指数序列'), ok: null }
+      : { key: 'regime', term: 'regime', label: '跨 regime 分段', text: String(regime.reason || '未提供指数序列'), ok: null }
   );
   rows.push(
     cost.sufficient
       ? {
           key: 'cost',
+          term: 'cost_sensitivity',
           label: '成本敏感性',
           text: `费率上浮 ${formatValue('uplift_bps', cost.uplift_bps)}bps → 年化 ${formatValue('adjusted_annual', cost.adjusted_annual)} ${
             cost.still_positive_after_cost ? '✓ 仍正' : '✗ 转负'
           }`,
           ok: Boolean(cost.still_positive_after_cost),
         }
-      : { key: 'cost', label: '成本敏感性', text: String(cost.reason || '未提供换手序列'), ok: null }
+      : { key: 'cost', term: 'cost_sensitivity', label: '成本敏感性', text: String(cost.reason || '未提供换手序列'), ok: null }
   );
   rows.push(
     pbo.sufficient
       ? {
           key: 'pbo',
+          term: 'pbo',
           label: 'PBO 过拟合概率',
           text: `${formatValue('pbo', pbo.pbo)}（${formatValue('overfit_risk', pbo.overfit_risk)}，${formatValue('n_params', pbo.n_params)} 组）`,
           ok: null,
         }
-      : { key: 'pbo', label: 'PBO 过拟合概率', text: String(pbo.reason || '未提供参数扫描矩阵'), ok: null }
+      : { key: 'pbo', term: 'pbo', label: 'PBO 过拟合概率', text: String(pbo.reason || '未提供参数扫描矩阵'), ok: null }
   );
   return rows;
 }
@@ -201,6 +215,7 @@ function RowIcon({ ok }: { ok: boolean | null }) {
 }
 
 export const HealthEvidencePanel: React.FC<HealthEvidencePanelProps> = ({ backtestId }) => {
+  const { isSimple } = useUiMode();
   const [loading, setLoading] = useState(false);
   const [report, setReport] = useState<HealthReport | null>(null);
   const [error, setError] = useState('');
@@ -262,6 +277,7 @@ export const HealthEvidencePanel: React.FC<HealthEvidencePanelProps> = ({ backte
   const VerdictIcon = style.icon;
   const rows = buildTestRows(report.tests);
   const confidence = Math.max(0, Math.min(100, Math.round(report.confidence ?? 0)));
+  const verdictTerm = `verdict_${String(report.verdict || 'e').toLowerCase()}`;
 
   return (
     <div className="space-y-4">
@@ -271,7 +287,10 @@ export const HealthEvidencePanel: React.FC<HealthEvidencePanelProps> = ({ backte
             <VerdictIcon className={`w-7 h-7 ${style.ring}`} />
             <div>
               <div className="text-lg font-bold">
-                结论：{report.verdict_label || `判定 ${report.verdict}`}
+                结论：
+                <TermTooltip term={verdictTerm} className="!border-white/40">
+                  {report.verdict_label || `判定 ${report.verdict}`}
+                </TermTooltip>
               </div>
               <div className="text-xs opacity-80 mt-0.5">
                 样本 {report.n_days} 个交易日 · 试验 N={report.n_trials}
@@ -307,6 +326,12 @@ export const HealthEvidencePanel: React.FC<HealthEvidencePanelProps> = ({ backte
         )}
       </div>
 
+      {isSimple ? (
+        <div className="bg-white rounded-2xl border border-gray-200 p-4 text-xs text-slate-500">
+          已是简单模式精炼视图（结论 + 理由 + 建议）；右上角「专业」可展开
+          <TermTooltip term="dsr">九项检验</TermTooltip>明细与原始口径。
+        </div>
+      ) : (
       <div className="bg-white rounded-2xl border border-gray-200 p-5">
         <h4 className="text-sm font-semibold text-gray-800 mb-3">九项检验明细</h4>
         <div className="space-y-2.5">
@@ -314,7 +339,9 @@ export const HealthEvidencePanel: React.FC<HealthEvidencePanelProps> = ({ backte
             <div key={row.key} className="flex items-start gap-2 text-sm">
               <RowIcon ok={row.ok} />
               <div>
-                <span className="text-gray-500 mr-2">{row.label}</span>
+                <TermTooltip term={row.term} className="text-gray-500 mr-2">
+                  {row.label}
+                </TermTooltip>
                 <span className="text-gray-800">{row.text}</span>
               </div>
             </div>
@@ -324,6 +351,7 @@ export const HealthEvidencePanel: React.FC<HealthEvidencePanelProps> = ({ backte
           判定优先级：证据不足（E）→ 运气嫌疑（L）→ Beta 主导（B）→ 真 alpha（A）；L/E 类策略不得晋级模拟/实盘。
         </p>
       </div>
+      )}
     </div>
   );
 };

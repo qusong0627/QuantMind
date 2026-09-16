@@ -8,6 +8,7 @@ import { motion } from 'framer-motion';
 import { selectCurrentTab } from '../../store/slices/aiStrategySlice';
 import { useAppDispatch, useAppSelector } from '../../store';
 import { setTradingMode } from '../../store/slices/uiSlice';
+import { UiModeToggle } from '../../features/shared/UiModeToggle';
 
 const TRADING_MODE_PREF_KEY = 'qm:trading_mode_pref';
 import { SERVICE_URLS } from '../../config/services';
@@ -129,6 +130,15 @@ export const HeaderBar: React.FC = () => {
               <span className={tradingMode === 'simulation' ? 'text-white' : 'text-slate-400'}>SIM</span>
             </span>
           </button>
+        </motion.div>
+
+        {/* T-FE-02 简单/专业模式（与底部导航共用同一控件） */}
+        <motion.div
+          initial={{ opacity: 0, scale: 0.95 }}
+          animate={{ opacity: 1, scale: 1 }}
+          className="flex items-center ml-2 shrink-0"
+        >
+          <UiModeToggle />
         </motion.div>
       </div>
 

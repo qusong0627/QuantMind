@@ -3,6 +3,8 @@
 import React from 'react';
 import { Activity, BarChart3, HeartPulse, Wallet } from 'lucide-react';
 import type { ExecutionBlock, HealthBlock, PnlBlock, SignalsBlock } from '../types';
+import { TermTooltip } from '../../shared/TermTooltip';
+import { useUiMode } from '../../shared/useUiMode';
 import {
   executionSummary,
   formatMoney,
@@ -11,8 +13,25 @@ import {
   pnlSummary,
 } from '../deskModel';
 
-function SourceFooter({ source }: { source: string }) {
-  return <footer className="text-[10px] text-slate-400 mt-2">来源：{source}</footer>;
+function SourceFooter({ source, onDrillDown }: { source: string; onDrillDown?: () => void }) {
+  const { isSimple } = useUiMode();
+  if (isSimple && !onDrillDown) return null; // 简单模式收起技术来源（专业模式/下钻保留）
+  return (
+    <footer className="text-[10px] text-slate-400 mt-2">
+      {onDrillDown ? (
+        <button
+          type="button"
+          onClick={onDrillDown}
+          className="hover:text-blue-600 underline decoration-dotted underline-offset-2"
+          title="下钻：来源链与原始载荷"
+        >
+          来源：{source}（点击下钻）
+        </button>
+      ) : (
+        <>来源：{source}</>
+      )}
+    </footer>
+  );
 }
 
 export const SignalsCard: React.FC<{ signals: SignalsBlock | null | undefined }> = ({ signals }) => (
@@ -32,7 +51,8 @@ export const SignalsCard: React.FC<{ signals: SignalsBlock | null | undefined }>
         <div key={item.symbol} className="flex items-center justify-between text-xs">
           <span className="text-slate-800">{item.symbol}</span>
           <span className="text-slate-500">
-            rank_pct {item.rank_pct === null || item.rank_pct === undefined ? '—' : item.rank_pct.toFixed(3)}
+            <TermTooltip term="rank_pct">rank_pct</TermTooltip>{' '}
+            {item.rank_pct === null || item.rank_pct === undefined ? '—' : item.rank_pct.toFixed(3)}
             <span className="text-slate-400"> · score {item.score?.toFixed(4) ?? '—'}</span>
           </span>
         </div>
@@ -90,10 +110,11 @@ export const ExecutionCard: React.FC<{ execution: ExecutionBlock | null | undefi
   );
 };
 
-export const PnlCard: React.FC<{ pnl: PnlBlock | null | undefined; positionCount?: number }> = ({
-  pnl,
-  positionCount,
-}) => {
+export const PnlCard: React.FC<{
+  pnl: PnlBlock | null | undefined;
+  positionCount?: number;
+  onDrillDown?: () => void;
+}> = ({ pnl, positionCount, onDrillDown }) => {
   const summary = pnlSummary(pnl);
   return (
     <section className="bg-white rounded-2xl border border-gray-200 p-4">
@@ -138,7 +159,7 @@ export const PnlCard: React.FC<{ pnl: PnlBlock | null | undefined; positionCount
           </div>
         </>
       )}
-      <SourceFooter source={pnl?.source || '—'} />
+      <SourceFooter source={pnl?.source || '—'} onDrillDown={onDrillDown} />
     </section>
   );
 };

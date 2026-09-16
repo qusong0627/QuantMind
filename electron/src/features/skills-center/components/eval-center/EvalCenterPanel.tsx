@@ -24,6 +24,8 @@ import {
   historySeries,
   radarEntries,
 } from './evalCenterModel';
+import { useUiMode } from '../../../shared/useUiMode';
+import { TermTooltip } from '../../../shared/TermTooltip';
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : '请求失败';
@@ -101,6 +103,7 @@ const HealthArchive: React.FC<{ archive: StrategyHealthArchive }> = ({ archive }
 };
 
 export const EvalCenterPanel: React.FC = () => {
+  const { isSimple } = useUiMode();
   const [objectTypes, setObjectTypes] = useState<EvalObjectType[]>([]);
   const [activeType, setActiveType] = useState<string>('factor');
   const [rows, setRows] = useState<EvalScoreRow[]>([]);
@@ -347,6 +350,26 @@ export const EvalCenterPanel: React.FC = () => {
                 </div>
               )
             ) : selectedRow ? (
+              isSimple ? (
+                <div className="bg-white rounded-2xl border border-gray-200 p-6 text-center">
+                  <div className="text-sm font-semibold text-slate-800">{selectedRow.object_id}</div>
+                  <div className="mt-2 flex items-center justify-center gap-3 text-sm">
+                    <span className={`px-2 py-0.5 rounded-full border text-xs ${gradeMeta(selectedRow.grade, selectedRow.low_confidence).className}`}>
+                      {selectedRow.grade || '—'}{gradeMeta(selectedRow.grade, selectedRow.low_confidence).isLowConfidence ? ' †' : ''}
+                    </span>
+                    <span className="text-slate-700">
+                      {selectedRow.score === null ? '未评分' : `${Number(selectedRow.score).toFixed(1)} 分`}
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-500 mt-2">{coverageSummary(selectedRow)}</p>
+                  {selectedRow.red_line_failed?.length > 0 && (
+                    <p className="text-xs text-amber-700 mt-1">⚠ 红线：{selectedRow.red_line_failed.join('、')}</p>
+                  )}
+                  <p className="text-xs text-slate-400 mt-3">
+                    简单模式仅展示结论；右上角切换「专业」查看<TermTooltip term="score_grade">评级</TermTooltip>雷达、历史曲线与维度明细。
+                  </p>
+                </div>
+              ) : (
               <>
                 <div className="bg-white rounded-2xl border border-gray-200 p-4">
                   <div className="flex items-center gap-2 mb-2">
@@ -395,6 +418,7 @@ export const EvalCenterPanel: React.FC = () => {
                   </div>
                 </div>
               </>
+              )
             ) : (
               <div className="bg-gray-50 rounded-2xl border border-gray-200 p-8 text-center text-sm text-gray-500">
                 选择左侧对象查看评分详情

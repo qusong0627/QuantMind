@@ -8,7 +8,8 @@ import { Gauge, RefreshCw } from 'lucide-react';
 import { PAGE_LAYOUT } from '../../config/pageLayout';
 import { getDeskToday } from './services/deskService';
 import type { DeskToday } from './types';
-import { pipelineSummary, statusStyle } from './deskModel';
+import { pipelineSummary, planDrillEntries, pnlDrillEntries, statusStyle } from './deskModel';
+import { DrillDownDrawer, type DrillEntry } from '../shared/DrillDownDrawer';
 import { PipelineBar } from './components/PipelineBar';
 import { PlanCard } from './components/PlanCard';
 import { ExecutionCard, HealthCard, PnlCard, SignalsCard } from './components/DeskCards';
@@ -17,10 +18,18 @@ function errorText(error: unknown): string {
   return error instanceof Error ? error.message : '请求失败';
 }
 
+interface DrawerState {
+  title: string;
+  subtitle?: string;
+  entries: DrillEntry[];
+  raw: unknown;
+}
+
 const DeskTodayPage: React.FC = () => {
   const [desk, setDesk] = useState<DeskToday | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [drawer, setDrawer] = useState<DrawerState | null>(null);
 
   useEffect(() => {
     void load();
@@ -100,13 +109,33 @@ const DeskTodayPage: React.FC = () => {
               <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-4 gap-4">
                 <SignalsCard signals={desk.signals} />
                 <div className="xl:col-span-2">
-                  <PlanCard plan={desk.plan} />
+                  <PlanCard
+                    plan={desk.plan}
+                    onDrillDown={() =>
+                      setDrawer({
+                        title: '调仓计划 · 来源链',
+                        subtitle: '预演与执行共用同一 RebalanceCalculator（dry-run，未执行）',
+                        entries: planDrillEntries(desk.plan) as DrillEntry[],
+                        raw: desk.plan,
+                      })
+                    }
+                  />
                 </div>
                 <ExecutionCard execution={desk.execution} />
               </div>
 
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-                <PnlCard pnl={desk.pnl} />
+                <PnlCard
+                  pnl={desk.pnl}
+                  onDrillDown={() =>
+                    setDrawer({
+                      title: '账户盈亏 · 来源链',
+                      subtitle: '资金快照行字段分解（数字直接来自该行，不重算）',
+                      entries: pnlDrillEntries(desk.pnl) as DrillEntry[],
+                      raw: desk.pnl,
+                    })
+                  }
+                />
                 <HealthCard health={desk.health} />
               </div>
             </>
@@ -117,6 +146,15 @@ const DeskTodayPage: React.FC = () => {
           )}
         </div>
       </div>
+
+      <DrillDownDrawer
+        open={!!drawer}
+        title={drawer?.title || ''}
+        subtitle={drawer?.subtitle}
+        entries={drawer?.entries || []}
+        raw={drawer?.raw}
+        onClose={() => setDrawer(null)}
+      />
     </div>
   );
 };

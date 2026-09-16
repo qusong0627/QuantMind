@@ -4,9 +4,11 @@ import React from 'react';
 import { AlertTriangle, ClipboardList, HelpCircle } from 'lucide-react';
 import type { PlanBlock } from '../types';
 import { formatMoney, planKindLabel, planSummary } from '../deskModel';
+import { TermTooltip } from '../../shared/TermTooltip';
 
 interface PlanCardProps {
   plan: PlanBlock | null | undefined;
+  onDrillDown?: () => void;
 }
 
 const SideBadge: React.FC<{ side: string }> = ({ side }) => {
@@ -23,7 +25,7 @@ const SideBadge: React.FC<{ side: string }> = ({ side }) => {
   );
 };
 
-export const PlanCard: React.FC<PlanCardProps> = ({ plan }) => {
+export const PlanCard: React.FC<PlanCardProps> = ({ plan, onDrillDown }) => {
   const summary = planSummary(plan);
   const orders = plan?.orders || [];
 
@@ -34,9 +36,11 @@ export const PlanCard: React.FC<PlanCardProps> = ({ plan }) => {
           <ClipboardList className="w-4 h-4 text-blue-600" />
           <h3 className="text-sm font-semibold text-slate-800">调仓计划（预演）</h3>
           {plan?.available && plan?.dry_run && (
-            <span className="text-[11px] px-1.5 py-0.5 rounded-full bg-blue-50 text-blue-700 border border-blue-200">
-              未执行
-            </span>
+            <TermTooltip term="dry_run" className="!border-0">
+              <span className="text-[11px] px-1.5 py-0.5 rounded-full bg-blue-50 text-blue-700 border border-blue-200">
+                未执行
+              </span>
+            </TermTooltip>
           )}
         </div>
         {plan?.strategy_name && (
@@ -63,7 +67,14 @@ export const PlanCard: React.FC<PlanCardProps> = ({ plan }) => {
             <span>
               目标调仓 <b className="text-slate-800">{orders.length}</b> 笔
               （买 {summary.buys.length} / 卖 {summary.sells.length}
-              {summary.exits > 0 ? ` · 含退出规则 ${summary.exits}` : ''}）
+              {summary.exits > 0 ? (
+                <>
+                  {' '}
+                  · 含<TermTooltip term="exit_rule">退出规则</TermTooltip> {summary.exits}
+                </>
+              ) : (
+                ''
+              )}）
             </span>
             <span className="text-red-600">买入约 {formatMoney(summary.buyAmount)}</span>
             <span className="text-emerald-600">卖出约 {formatMoney(summary.sellAmount)}</span>
@@ -96,7 +107,18 @@ export const PlanCard: React.FC<PlanCardProps> = ({ plan }) => {
       )}
 
       <footer className="text-[10px] text-slate-400 mt-2">
-        来源：{plan?.source || '—'}（与执行同一 RebalanceCalculator；执行前人工可审）
+        {onDrillDown ? (
+          <button
+            type="button"
+            onClick={onDrillDown}
+            className="hover:text-blue-600 underline decoration-dotted underline-offset-2"
+            title="下钻：来源链与原始载荷"
+          >
+            来源：{plan?.source || '—'}（点击下钻）
+          </button>
+        ) : (
+          <>来源：{plan?.source || '—'}（与执行同一 RebalanceCalculator；执行前人工可审）</>
+        )}
       </footer>
     </section>
   );
