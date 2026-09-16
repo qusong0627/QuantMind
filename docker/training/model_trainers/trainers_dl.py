@@ -99,7 +99,8 @@ def _build_ts_dataloader(
     import torch
     from torch.utils.data import DataLoader
 
-    X_values = np.ascontiguousarray(df_X.values, dtype=np.float32)
+    # copy=True：显式自有缓冲，后续全部原地操作（避免污染调用方视图）
+    X_values = np.array(df_X.values, dtype=np.float32, copy=True)
     y_values = np.ascontiguousarray(df_y.values, dtype=np.float32)
 
     # 填充特征中的 NaN/inf（GRU 只 mask label 中的 NaN，不处理 feature 中的 NaN）
@@ -127,7 +128,8 @@ def _build_ts_dataloader(
         _feat_mean = X_values.mean(axis=0)
         _feat_std = X_values.std(axis=0)
         _feat_std = np.where(_feat_std == 0, 1.0, _feat_std)  # 避免除零
-    X_values = (X_values - _feat_mean) / _feat_std
+    X_values -= _feat_mean
+    X_values /= _feat_std
     # 标准化后再次确保无 NaN（mean/std 计算过程中可能引入）
     _post_nan = np.isnan(X_values).sum()
     if _post_nan:
@@ -167,7 +169,7 @@ def _build_ts_dataloader(
 def _build_ts_dataloader_from_frame(
     frame: pd.DataFrame,
     features: list[str],
-    label_col: str = "label",
+    label_col: "str | None" = "label",
     *,
     step_len: int,
     batch_size: int,
@@ -209,7 +211,10 @@ def _build_ts_dataloader_from_frame(
     X = np.empty((n, len(features)), dtype=np.float32)
     for i, c in enumerate(features):
         X[:, i] = frame[c].to_numpy(dtype=np.float32, copy=False)
-    y = frame[label_col].to_numpy(dtype=np.float32, copy=False)
+    if label_col and label_col in frame.columns:
+        y = frame[label_col].to_numpy(dtype=np.float32, copy=False)
+    else:
+        y = np.zeros(n, dtype=np.float32)  # 纯推理：无标签
 
     np.nan_to_num(X, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
     if feat_norm is None:
@@ -822,19 +827,25 @@ def _predict_dl(
                          np.asarray(_fn["std"], dtype=np.float32))
         # TS 滑窗必须按 symbol 分组：df_X 是扁平 RangeIndex，
         # 用 (symbol, trade_date) 建 MultiIndex 供 loader 计算股票连续区间。
-        _pred_df = df_X.copy()
-        if "symbol" in _pred_df.columns and "trade_date" in _pred_df.columns:
-            _pred_df = _pred_df.sort_values(["symbol", "trade_date"])
-            _idx = pd.MultiIndex.from_arrays(
-                [_pred_df["symbol"].to_numpy(), _pred_df["trade_date"].to_numpy()],
-                names=["instrument", "datetime"],
+        # 单拷贝通路（与训练同款，2026-09-16）：旧实现 copy→sort→[features]→
+        # .values→归一化×2→重排 共 7 份整表副本，全窗口预测（640 万行）叠加必 OOM
+        # （GRU 保存后在预测处 OOMKilled 实证）。新通路内部按需 lexsort 并记录
+        # original_rows（相对 df_X 原始行），输出按 (symbol, trade_date) 键控。
+        _pred_df = df_X
+        if "symbol" in df_X.columns and "trade_date" in df_X.columns:
+            loader, _ = _build_ts_dataloader_from_frame(
+                df_X, features, None,
+                step_len=step_len, batch_size=batch_size,
+                shuffle=False, feat_norm=feat_norm, drop_last=False,
             )
-            _X = _pred_df[features].set_axis(_idx)
-            _y = pd.Series(0.0, index=_idx)
         else:
+            # 遗留调用方（无键帧）：保持旧构造兼容
             _X = df_X[features]
             _y = pd.Series(0.0, index=df_X.index)
-        loader, _ = _build_ts_dataloader(_X, _y, step_len, batch_size, shuffle=False, feat_norm=feat_norm, drop_last=False)
+            loader, _ = _build_ts_dataloader(
+                _X, _y, step_len, batch_size, shuffle=False,
+                feat_norm=feat_norm, drop_last=False,
+            )
         # 找到内部模型
         inner_model = None
         for attr_name in ("model", "GRU_model", "gru_model", "LSTM_model", "lstm_model",
@@ -885,27 +896,23 @@ def _predict_dl(
             "pred": out,
         })
     else:
-        X_values = df_X[features].values.astype(np.float32)
-        # 填充 NaN/Inf：tabnet 内部断言禁止 NaN 输入
+        X_values = np.empty((len(df_X), len(features)), dtype=np.float32)
+        for _i, _c in enumerate(features):
+            X_values[:, _i] = df_X[_c].to_numpy(dtype=np.float32, copy=False)
+        # 填充 NaN/Inf：tabnet 内部断言禁止 NaN 输入（原地）
         if np.isnan(X_values).any() or np.isinf(X_values).any():
             logger.warning("DL flat predict: 特征含 %d NaN/%d Inf，填 0",
                            int(np.isnan(X_values).sum()), int(np.isinf(X_values).sum()))
             X_values = np.nan_to_num(X_values, nan=0.0, posinf=0.0, neginf=0.0)
-        X_tensor = torch.from_numpy(X_values).to(infer_device)
-        inner_model = None
-        for attr_name in ("model", "GRU_model", "gru_model", "LSTM_model", "lstm_model",
-                          "ALSTM_model", "alstm_model", "TCN_model", "tcn_model",
-                          "tabnet_model", "transformer_model"):
-            inner_model = getattr(model_obj, attr_name, None)
-            if inner_model is not None:
-                break
         if inner_model is not None:
             inner_model.eval()
             inner_model = inner_model.to(infer_device)
         is_tabnet = "Tabnet" in cls_name
         preds = []
-        for i in range(0, len(X_tensor), batch_size):
-            batch = X_tensor[i:i+batch_size]
+        for i in range(0, len(X_values), batch_size):
+            # 逐批上卡：旧实现把 640 万×273 整表 .to(device)（≈7GB 显存 +
+            # 同量主机侧中转），改为批级传输（批 8000 ≈ 9MB）
+            batch = torch.from_numpy(X_values[i:i+batch_size]).to(infer_device)
             with torch.no_grad():
                 if is_tabnet:
                     # qlib TabNet.forward(x, priors) 需要 priors 参数（训练时 qlib 内部构造）
