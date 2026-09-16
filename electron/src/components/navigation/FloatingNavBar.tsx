@@ -18,8 +18,7 @@ import {
   BarChart3,
   Cpu,
   CandlestickChart,
-  Sigma,
-} from 'lucide-react';
+  Sigma, Gauge } from 'lucide-react';
 import { useSelector } from 'react-redux';
 import { selectCurrentMarket } from '../../store/slices/uiSlice';
 import { getMarketConfig } from '../../config/marketConfig';
@@ -48,6 +47,7 @@ export const FloatingNavBar: React.FC<FloatingNavBarProps> = ({ current, onChang
     { id: 'rss-news', label: 'RSS信息流', icon: Rss },
     { id: 'stock-terminal', label: '个股终端', icon: CandlestickChart },
     { id: 'ai-ide', label: 'AI-IDE', icon: SquareTerminal },
+    { id: 'desk', label: '今日交易台', icon: Gauge },
     { id: 'backtest', label: '回测中心', icon: FlaskConical },
     { id: 'trading', label: '模拟交易', icon: ArrowLeftRight },
     // 3. 模型区域
@@ -72,7 +72,7 @@ export const FloatingNavBar: React.FC<FloatingNavBarProps> = ({ current, onChang
     // 1. 大盘分析模块
     navItems.filter((item) => ['dashboard', 'market-analysis', 'rss-news'].includes(item.id)),
     // 2. 回测与交易区域
-    navItems.filter((item) => ['stock-terminal', 'ai-ide', 'backtest', 'trading'].includes(item.id)),
+    navItems.filter((item) => ['desk', 'stock-terminal', 'ai-ide', 'backtest', 'trading'].includes(item.id)),
     // 3. 模型区域
     navItems.filter((item) => ['model-training', 'model-registry', 'inference-center'].includes(item.id)),
     // 4. 智能投研区域

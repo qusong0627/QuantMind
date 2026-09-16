@@ -97,6 +97,7 @@ const AdminOrderManagement = lazy(() => import('./features/admin/components/Admi
 const AdminInferenceMonitor = lazy(() => import('./features/admin/components/AdminInferenceMonitor').then(m => ({ default: m.AdminInferenceMonitor })));
 const AlphaResearchPage = lazy(() => import('./features/alpha-research/pages/AlphaResearchPage'));
 const SkillsCenterPage = lazy(() => import('./features/skills-center/pages/SkillsCenterPage'));
+const DeskTodayPage = lazy(() => import('./features/desk/DeskTodayPage'));
 const FactorResearchPage = lazy(() => import('./features/factor-research/pages/FactorResearchPage'));
 
 // 主题切换hook
@@ -204,6 +205,7 @@ export default function App() {
   const handleNavChange = (newTab: string) => {
     // 映射 ID 到路由路径
     const routeMap: Record<string, string> = {
+      desk: '/desk',
       'agent': '/quantbot',
       'market-analysis': '/market-analysis',
       'ai-ide': '/ai-ide',
@@ -258,6 +260,8 @@ export default function App() {
       dispatch(setCurrentTab('research' as DashboardTab));
     } else if (location.pathname.startsWith('/trading-agents')) {
       dispatch(setCurrentTab('skills' as DashboardTab));
+    } else if (location.pathname.startsWith('/desk')) {
+      dispatch(setCurrentTab('desk' as DashboardTab));
     } else if (location.pathname.startsWith('/skills')) {
       dispatch(setCurrentTab('skills' as DashboardTab));
     } else if (location.pathname.startsWith('/trading')) {
@@ -712,6 +716,16 @@ export default function App() {
                           }
                         >
                           <AlphaResearchPage />
+                        </Suspense>
+                      </ProtectedRoute>
+                    }
+                  />
+                  <Route
+                    path="/desk"
+                    element={
+                      <ProtectedRoute>
+                        <Suspense fallback={<Spin size="large" />}>
+                          <DeskTodayPage />
                         </Suspense>
                       </ProtectedRoute>
                     }

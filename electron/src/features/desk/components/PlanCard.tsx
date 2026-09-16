@@ -1,0 +1,103 @@
+/** 调仓计划卡（FE-B/T-FE-05）：引擎 dry-run 预演——每笔带理由与触发类别，绝不执行 */
+
+import React from 'react';
+import { AlertTriangle, ClipboardList, HelpCircle } from 'lucide-react';
+import type { PlanBlock } from '../types';
+import { formatMoney, planKindLabel, planSummary } from '../deskModel';
+
+interface PlanCardProps {
+  plan: PlanBlock | null | undefined;
+}
+
+const SideBadge: React.FC<{ side: string }> = ({ side }) => {
+  const isBuy = String(side).toUpperCase() === 'BUY';
+  // 涨红跌绿口径：买=红（做多），卖=绿
+  return (
+    <span
+      className={`text-[11px] px-1.5 py-0.5 rounded border font-semibold ${
+        isBuy ? 'bg-red-50 text-red-700 border-red-200' : 'bg-emerald-50 text-emerald-700 border-emerald-200'
+      }`}
+    >
+      {isBuy ? '买' : '卖'}
+    </span>
+  );
+};
+
+export const PlanCard: React.FC<PlanCardProps> = ({ plan }) => {
+  const summary = planSummary(plan);
+  const orders = plan?.orders || [];
+
+  return (
+    <section className="bg-white rounded-2xl border border-gray-200 p-4 flex flex-col">
+      <header className="flex items-center justify-between gap-2 mb-2">
+        <div className="flex items-center gap-2">
+          <ClipboardList className="w-4 h-4 text-blue-600" />
+          <h3 className="text-sm font-semibold text-slate-800">调仓计划（预演）</h3>
+          {plan?.available && plan?.dry_run && (
+            <span className="text-[11px] px-1.5 py-0.5 rounded-full bg-blue-50 text-blue-700 border border-blue-200">
+              未执行
+            </span>
+          )}
+        </div>
+        {plan?.strategy_name && (
+          <span className="text-[11px] text-slate-500 truncate max-w-[160px]">
+            {plan.strategy_name}（{plan.mode || 'SIMULATION'}）
+          </span>
+        )}
+      </header>
+
+      {!plan?.available ? (
+        <div className="flex-1 flex flex-col items-center justify-center text-center py-6">
+          <HelpCircle className="w-6 h-6 text-slate-300 mb-1.5" />
+          <p className="text-xs text-slate-500">{plan?.reason || '计划预演不可用'}</p>
+        </div>
+      ) : orders.length === 0 ? (
+        <div className="flex-1 flex flex-col items-center justify-center text-center py-6">
+          <p className="text-xs text-slate-500">
+            {plan?.error ? `预演未产出计划：${plan.error}` : '今日无需调仓（已符合目标权重）'}
+          </p>
+        </div>
+      ) : (
+        <>
+          <div className="flex flex-wrap items-center gap-3 text-[11px] text-slate-600 mb-2">
+            <span>
+              目标调仓 <b className="text-slate-800">{orders.length}</b> 笔
+              （买 {summary.buys.length} / 卖 {summary.sells.length}
+              {summary.exits > 0 ? ` · 含退出规则 ${summary.exits}` : ''}）
+            </span>
+            <span className="text-red-600">买入约 {formatMoney(summary.buyAmount)}</span>
+            <span className="text-emerald-600">卖出约 {formatMoney(summary.sellAmount)}</span>
+          </div>
+
+          <div className="flex-1 overflow-y-auto max-h-[320px] pr-1 space-y-1.5">
+            {orders.map((order, index) => (
+              <div
+                key={`${order.symbol}-${order.side}-${index}`}
+                className="flex items-center gap-2 text-xs border-b border-gray-100 pb-1.5 last:border-0"
+              >
+                <SideBadge side={order.side} />
+                <span className="font-medium text-slate-800 w-24">{order.symbol}</span>
+                <span className="text-slate-600 w-16 text-right">{order.quantity}</span>
+                <span className="text-slate-400 w-14 text-right">@{order.price}</span>
+                <span className="text-slate-400 w-20 text-right">{formatMoney(order.estimated_amount)}</span>
+                <span className="text-[11px] text-slate-500 truncate flex-1" title={order.reason}>
+                  {planKindLabel(order.kind)}：{order.reason}
+                </span>
+                {(order.is_limit_up || order.is_limit_down || order.is_suspended) && (
+                  <span className="text-[11px] text-amber-600 inline-flex items-center gap-0.5 shrink-0">
+                    <AlertTriangle className="w-3 h-3" />
+                    {order.is_suspended ? '停牌' : order.is_limit_up ? '涨停' : '跌停'}
+                  </span>
+                )}
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+
+      <footer className="text-[10px] text-slate-400 mt-2">
+        来源：{plan?.source || '—'}（与执行同一 RebalanceCalculator；执行前人工可审）
+      </footer>
+    </section>
+  );
+};
