@@ -101,6 +101,15 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"⚠️ VectorizedMatcher startup skipped: {e}")
 
+    # 启动热集实时推理服务（P6 T-P6-08；Redis 配置门控，默认关，配置热读无需重启）
+    try:
+        from backend.services.engine.inference.realtime_service import default_service
+
+        default_service().start()
+        logger.info("✅ RealtimeInference service loop created (active if qm:realtime:infer:config.enabled=true)")
+    except Exception as e:
+        logger.warning(f"⚠️ RealtimeInference startup skipped: {e}")
+
     # 启动预热向量解析/字段检索（2026-05-03：暂时关闭强制预热以加快启动速度）
     warmup_enabled = os.getenv("AI_STRATEGY_WARMUP", "false").strip().lower() not in ("0", "false", "no", "off")
     if warmup_enabled:

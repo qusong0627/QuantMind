@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import date, datetime
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
@@ -118,6 +118,14 @@ class DispatchItemsUpsertRequest(BaseModel):
     items: list[DispatchItemUpsert]
 
 
+@router.get("/realtime/infer/status")
+async def realtime_inference_status():
+    """热集实时推理服务状态（T-P6-08）：配置/计数器/最近错误（只读）。"""
+    from backend.services.engine.inference.realtime_service import default_service
+
+    return {"ok": True, "data": default_service().status()}
+
+
 @router.post("/runs/{run_id}/feature-ready")
 async def mark_feature_ready(run_id: str, payload: FeatureReadyRequest):
     sql = text("""
@@ -155,7 +163,9 @@ async def mark_feature_ready(run_id: str, payload: FeatureReadyRequest):
         """)
     params = {
         "run_id": run_id,
-        **payload.model_dump(mode="json"),
+        # python 模式 dump：date/datetime 保持对象（asyncpg 原生适配）——
+        # json 模式会转 ISO 字符串，asyncpg 传 date 列直接 DataError（2026-09-17 E2E 实测）
+        **payload.model_dump(mode="python"),
         "quality": json.dumps(payload.quality or {}, ensure_ascii=False),
     }
     async with get_session(read_only=False) as db:
@@ -232,7 +242,7 @@ async def mark_signal_ready(run_id: str, payload: SignalReadyRequest):
                     "run_id": run_id,
                     "tenant_id": payload.tenant_id,
                     "user_id": payload.user_id,
-                    "trade_date": payload.trade_date.isoformat(),
+                    "trade_date": payload.trade_date,  # date 对象（asyncpg 原生；勿转字符串）
                     "model_version": payload.model_version,
                     "feature_version": payload.feature_version,
                     "symbol": item.symbol.upper().strip(),
@@ -290,7 +300,7 @@ async def update_dispatch_stage(batch_id: str, payload: DispatchStageRequest):
             last_error = EXCLUDED.last_error,
             updated_at = NOW()
         """)
-    params = {"batch_id": batch_id, **payload.model_dump(mode="json")}
+    params = {"batch_id": batch_id, **payload.model_dump(mode="python")}
     async with get_session(read_only=False) as db:
         await db.execute(sql, params)
     return {"ok": True, "batch_id": batch_id, "stage": payload.stage}
@@ -333,7 +343,7 @@ async def upsert_dispatch_items(batch_id: str, payload: DispatchItemsUpsertReque
                     "client_order_id": item.client_order_id,
                     "tenant_id": item.tenant_id or payload.tenant_id,
                     "user_id": item.user_id or payload.user_id,
-                    "trade_date": (item.trade_date or payload.trade_date).isoformat(),
+                    "trade_date": (item.trade_date or payload.trade_date),  # date 对象
                     "symbol": item.symbol.upper().strip(),
                     "action": item.action,
                     "quantity": item.quantity,
