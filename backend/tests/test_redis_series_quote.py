@@ -13,6 +13,9 @@ from backend.services.simulation.services.redis_series_quote import (
 def test_series_key_uses_prefix_format():
     assert series_key_for("600036.SH") == "market:series:SH600036"
     assert series_key_for("SH600036") == "market:series:SH600036"
+    assert series_key_for("0700.HK") == "market:series:0700.HK"
+    assert series_key_for("HK00700") == "market:series:HK00700"
+    assert series_key_for("AAPL") == "market:series:AAPL"
     assert series_key_for("not-a-code-!!!") is None
 
 

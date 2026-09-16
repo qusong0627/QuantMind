@@ -93,9 +93,9 @@ async def test_simulation_manager_supports_margin_short_open_and_close():
     redis = _FakeRedis()
     manager = SimulationAccountManager(redis)
 
-    await manager.init_account(user_id=1, initial_cash=1_000_000, tenant_id="default")
+    await manager.init_account(user_id=42, initial_cash=1_000_000, tenant_id="default")
     open_res = await manager.update_balance(
-        user_id=1,
+        user_id=42,
         symbol="SH600000",
         delta_cash=0,
         delta_volume=-100,
@@ -106,13 +106,13 @@ async def test_simulation_manager_supports_margin_short_open_and_close():
         is_margin_trade=True,
     )
     assert open_res["success"] is True
-    raw = redis.client.get("simulation:account:default:1")
+    raw = redis.client.get("simulation:account:default:42")
     account = json.loads(raw)
     assert account["liabilities"] > 0
     assert any("::short" in key for key in account["positions"].keys())
 
     close_res = await manager.update_balance(
-        user_id=1,
+        user_id=42,
         symbol="SH600000",
         delta_cash=0,
         delta_volume=100,

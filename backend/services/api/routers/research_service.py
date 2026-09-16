@@ -84,6 +84,16 @@ def _redis_set_json(key: str, value: dict[str, Any], ttl_seconds: int) -> None:
         return
 
 
+async def _aredis_get_json(key: str) -> dict[str, Any] | None:
+    """异步包装：在线程池执行同步 Redis GET，避免阻塞 API 事件循环（单 worker 下会冻住 /health）。"""
+    return await asyncio.to_thread(_redis_get_json, key)
+
+
+async def _aredis_set_json(key: str, value: dict[str, Any], ttl_seconds: int) -> None:
+    """异步包装：在线程池执行同步 Redis SETEX，避免阻塞 API 事件循环。"""
+    await asyncio.to_thread(_redis_set_json, key, value, ttl_seconds)
+
+
 def _sdl_redis_key(trade_date: date) -> str:
     # v6：主源改为 features_daily 50 维宽表 parquet（PG stock_daily_latest 仅兜底补充字段），
     # 并叠加 QuantDB instrument_list 的股票名称/行业兜底。
@@ -96,7 +106,7 @@ async def _load_sdl_day_map(session, trade_date: date, market: str | None = None
         return {}
 
     cache_key = _sdl_redis_key(trade_date) + f":{market or 'CN'}"
-    cached = _redis_get_json(cache_key)
+    cached = await _aredis_get_json(cache_key)
     if cached and "symbols" in cached and isinstance(cached["symbols"], dict):
         symbols = cached["symbols"]
         return symbols if isinstance(symbols, dict) else {}
@@ -158,7 +168,7 @@ async def _load_sdl_day_map(session, trade_date: date, market: str | None = None
             merged["is_csi1000"] = bool(lbl.get("is_csi1000"))
         symbol_map[symbol] = merged
 
-    _redis_set_json(
+    await _aredis_set_json(
         cache_key,
         {"trade_date": trade_date.isoformat(), "symbols": symbol_map, "created_at": datetime.now().isoformat()},
         _SDL_REDIS_TTL_SECONDS,
@@ -1939,7 +1949,7 @@ async def get_research_universe_by_date(
         return cached
 
     storage_path, _market = await _model_market(tid, uid, model_id)
-    pred_rows = _read_model_pred_day(storage_path, trade_date) if storage_path else []
+    pred_rows = await asyncio.to_thread(_read_model_pred_day, storage_path, trade_date) if storage_path else []
     if not pred_rows:
         # 兜底：该日无 parquet 分数 → 候选池快照（同日行数最多的 run）
         snap_run = await _best_snapshot_run_for_date(tid, uid, model_id, trade_date)
@@ -1961,13 +1971,13 @@ async def get_research_universe_by_date(
     # 响应体从 ~5.3MB（54 字段×5194 只）降到几十 KB 级别。
     pseudo_run_id = f"pred_{trade_date.replace('-', '')}"
     try:
-        quantdb_names = _get_quantdb_stock_names()
+        quantdb_names = await asyncio.to_thread(_get_quantdb_stock_names)
     except Exception:  # noqa: BLE001
         quantdb_names = {}
     # 行业/概念/指数静态标签（进程内缓存，读 instrument_list + sector_members + index_weights 各一次）
     try:
-        quantdb_labels = _load_quantdb_labels()
-        quantdb_meta = _load_quantdb_name_industry()
+        quantdb_labels = await asyncio.to_thread(_load_quantdb_labels)
+        quantdb_meta = await asyncio.to_thread(_load_quantdb_name_industry)
     except Exception:  # noqa: BLE001
         logger.warning("读取 QuantDB 行业/概念/指数标签失败", exc_info=True)
         quantdb_labels = {}
@@ -2124,7 +2134,7 @@ async def sync_watchlist_positions_service(tid: str, uid: str, authorization: st
     """模拟盘持仓自动加入自选：拉持仓 -> 补名 -> 专用 upsert；返回当前持仓 prefix 列表。"""
     positions = await _fetch_simulation_positions(authorization, uid, tid)
     if positions:
-        names = _get_quantdb_stock_names()
+        names = await asyncio.to_thread(_get_quantdb_stock_names)
         for symbol in positions:
             name = names.get(StockCodeUtil.to_suffix(symbol)) or None
             await _upsert_watchlist_position(tid, uid, symbol, name)

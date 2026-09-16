@@ -5,7 +5,7 @@ Synthetic execution engine for simulation orders.
 import asyncio
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -23,6 +23,7 @@ from backend.services.simulation.services.simulation_manager import (
 )
 from backend.services.trade_shared.trade_config import settings
 from backend.shared.auth import get_internal_call_secret
+from backend.shared.utc_datetime import utc_now
 from backend.shared.trade_account_cache import (
     write_json_cache,
     write_trade_account_cache,
@@ -44,6 +45,9 @@ class ExecutionResult:
         market: str = "CN",
         account_snapshot: dict | None = None,
         price_source: str | None = None,
+        requested_quantity: float | None = None,
+        quote_timestamp: int | None = None,
+        quote_age_seconds: float | None = None,
         message: str = "",
     ):
         self.success = success
@@ -55,6 +59,9 @@ class ExecutionResult:
         self.market = market
         self.account_snapshot = account_snapshot
         self.price_source = price_source
+        self.requested_quantity = requested_quantity
+        self.quote_timestamp = quote_timestamp
+        self.quote_age_seconds = quote_age_seconds
         self.message = message
 
 
@@ -100,6 +107,9 @@ def _resolve_match_session(now: datetime | None = None, market: Any = "CN") -> s
 class MarketSnapshot:
     price: float
     price_source: str
+    quote_timestamp: int | None = None
+    quote_age_seconds: float | None = None
+    recent_volume: float | None = None
     limit_up: bool = False
     limit_down: bool = False
     suspended: bool = False
@@ -148,6 +158,32 @@ class SimulationExecutionEngine:
         if not text:
             return False
         return text in {"1", "true", "yes", "y", "on"}
+
+    @staticmethod
+    def _quote_age_seconds(data: dict[str, Any]) -> float | None:
+        raw = (
+            data.get("timestamp")
+            or data.get("quote_timestamp")
+            or data.get("updated_at")
+            or data.get("update_time")
+        )
+        if raw is None:
+            return None
+        try:
+            if isinstance(raw, (int, float)) or str(raw).replace(".", "", 1).isdigit():
+                ts = float(raw)
+                if ts > 10_000_000_000:
+                    ts /= 1000.0
+                return max(0.0, datetime.now(timezone.utc).timestamp() - ts)
+            parsed = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return max(
+                0.0,
+                datetime.now(timezone.utc).timestamp() - parsed.timestamp(),
+            )
+        except (TypeError, ValueError, OverflowError):
+            return None
 
     @staticmethod
     def _is_price_near(
@@ -232,6 +268,79 @@ class SimulationExecutionEngine:
         except Exception:
             return False, False, False, None, None
 
+    def market_snapshot_from_tick(
+        self,
+        symbol: str,
+        tick: dict[str, Any],
+    ) -> MarketSnapshot:
+        """Build the shared execution snapshot used by manual and hosted orders."""
+        price = float(tick.get("price") or 0.0)
+        lu, ld, suspended, lu_price, ld_price = self._enrich_cn_limits(
+            symbol, price
+        )
+        return MarketSnapshot(
+            price=price,
+            price_source="redis_series",
+            quote_timestamp=self._as_int(tick.get("timestamp")),
+            quote_age_seconds=self._as_float(tick.get("age_s")),
+            recent_volume=self._as_float(tick.get("recent_volume")),
+            limit_up=lu,
+            limit_down=ld,
+            suspended=suspended,
+            limit_up_price=lu_price,
+            limit_down_price=ld_price,
+        )
+
+    def _reserve_liquidity(
+        self,
+        *,
+        symbol: str,
+        requested: float,
+        capacity: float,
+        quote_timestamp: int | None,
+    ) -> float:
+        """Atomically reserve a symbol's participation capacity per quote window."""
+        client = getattr(getattr(self.manager, "redis", None), "client", None)
+        if client is None or capacity <= 0:
+            return min(requested, capacity)
+        import os
+
+        try:
+            window = max(1, int(os.getenv("SIM_LIQUIDITY_WINDOW_SEC", "60")))
+        except ValueError:
+            window = 60
+        ts = int(quote_timestamp or datetime.now(timezone.utc).timestamp())
+        bucket = ts // window
+        key = f"simulation:liquidity:{symbol}:{bucket}"
+        script = """
+local key = KEYS[1]
+local requested = tonumber(ARGV[1])
+local capacity = tonumber(ARGV[2])
+local ttl = tonumber(ARGV[3])
+local used = tonumber(redis.call("GET", key) or "0")
+local remaining = math.max(0, capacity - used)
+local granted = math.min(requested, remaining)
+redis.call("SET", key, used + granted, "EX", ttl)
+return tostring(granted)
+"""
+        try:
+            return max(
+                0.0,
+                float(
+                    client.eval(
+                        script,
+                        1,
+                        key,
+                        str(requested),
+                        str(capacity),
+                        str(window * 2),
+                    )
+                ),
+            )
+        except Exception as exc:
+            logger.warning("liquidity reservation failed for %s: %s", symbol, exc)
+            return min(requested, capacity)
+
     async def _latest_price(
         self,
         symbol: str,
@@ -246,10 +355,10 @@ class SimulationExecutionEngine:
         # 盘中 tick 新鲜时直接按 Redis 现价成交；陈旧/缺失则走下方兜底链路。
         try:
             from backend.services.simulation.services.redis_series_quote import (
-                fetch_series_tick,
+                fetch_series_ticks,
             )
 
-            tick = await fetch_series_tick(symbol)
+            tick = (await fetch_series_ticks([symbol])).get(symbol)
             if tick:
                 logger.info(
                     "Redis series price for %s: %.4f (age=%.0fs)",
@@ -257,18 +366,7 @@ class SimulationExecutionEngine:
                     tick["price"],
                     tick["age_s"],
                 )
-                px = float(tick["price"])
-                # L0 原先直接返回裸价导致涨跌停/停牌拦截失效，这里补齐风控字段
-                lu, ld, susp, lu_px, ld_px = self._enrich_cn_limits(symbol, px)
-                return MarketSnapshot(
-                    price=px,
-                    price_source="redis_series",
-                    limit_up=lu,
-                    limit_down=ld,
-                    suspended=susp,
-                    limit_up_price=lu_px,
-                    limit_down_price=ld_px,
-                )
+                return self.market_snapshot_from_tick(symbol, tick)
         except Exception as e:
             logger.warning("Failed to fetch redis series quote for %s: %s", symbol, e)
 
@@ -282,6 +380,20 @@ class SimulationExecutionEngine:
             resp = await client.get(endpoint, headers=headers)
             if resp.status_code == 200:
                 data = resp.json()
+                age_seconds = self._quote_age_seconds(data)
+                try:
+                    max_age_seconds = int(
+                        __import__("os").getenv("SIM_REDIS_QUOTE_MAX_AGE_SEC")
+                        or "300"
+                    )
+                except ValueError:
+                    max_age_seconds = 300
+                if age_seconds is None or age_seconds > max_age_seconds:
+                    logger.warning(
+                        "Market quote for %s missing/stale timestamp; rejected",
+                        symbol,
+                    )
+                    data = {}
                 px = self._as_float(data.get("current_price") or data.get("last_price"))
                 if px and px > 0:
                     limit_up = self._as_bool(data.get("is_limit_up"))
@@ -322,6 +434,7 @@ class SimulationExecutionEngine:
                     return MarketSnapshot(
                         price=px,
                         price_source="market_data_service",
+                        quote_age_seconds=age_seconds,
                         limit_up=limit_up,
                         limit_down=limit_down,
                         suspended=suspended,
@@ -330,6 +443,10 @@ class SimulationExecutionEngine:
                     )
         except Exception as e:
             logger.warning("Failed to fetch market quote for %s: %s", symbol, e)
+
+        # Executable orders require a fresh realtime quote. Historical daily
+        # data remains available to valuation code, but is never tradable.
+        return MarketSnapshot(price=0.0, price_source="realtime_quote_unavailable")
 
         # Level 2: 数据库兜底 (L2 Fallback) — stock_daily_latest
         try:
@@ -506,6 +623,7 @@ class SimulationExecutionEngine:
         bar: Any,
         *,
         strict_market: bool,
+        snapshot: MarketSnapshot | None = None,
     ) -> ResolvedFill:
         """**取价契约唯一实现**：两执行路径共用（守卫/降级/标注单实现）。
 
@@ -516,7 +634,7 @@ class SimulationExecutionEngine:
            绝不静默按昨收成交——`[RULE:PRICE-STALE]` WARNING 点名），bar 无则用陈旧快照价；
         4. 全无 → 拒单。
         """
-        snapshot = await self._latest_price(
+        snapshot = snapshot or await self._latest_price(
             order.symbol,
             user_id=order.user_id,
             tenant_id=order.tenant_id,
@@ -685,19 +803,29 @@ class SimulationExecutionEngine:
         )
 
     async def execute_order(
-        self, order: SimOrder, market: str | None = None, *, strict_market: bool = True
+        self,
+        order: SimOrder,
+        market: str | None = None,
+        snapshot: MarketSnapshot | None = None,
+        requested_quantity: float | None = None,
+        *,
+        strict_market: bool = True,
     ) -> ExecutionResult:
         # T-P2-03：价格与陈旧价守卫收敛到 _resolve_fill_price（唯一实现）；
         # strict_market=True（手动即时单，默认）保持 P0-5 语义——非实时市价单拒绝成交；
         # 自动化路径（沙箱/TDX/由 Router 传入 False）允许如实标注的降级。
-        resolved = await self._resolve_fill_price(order, None, strict_market=strict_market)
+        resolved = await self._resolve_fill_price(
+            order, None, strict_market=strict_market, snapshot=snapshot
+        )
         if not resolved.ok:
             return ExecutionResult(
-                success=False, message=resolved.message, price_source=resolved.source or None
+                success=False,
+                message=resolved.message,
+                price_source=resolved.source or None,
             )
         base_price = resolved.price
         fetched_source = resolved.source
-        snapshot = resolved.snapshot  # 下游涨跌停钳制需要 limit_up/down_price
+        snapshot = resolved.snapshot  # 下游涨跌停钳制/流动性约束需要 limit_up/down_price 与 recent_volume
 
         slippage = settings.SIMULATION_SLIPPAGE_BPS / 10000
 
@@ -710,6 +838,13 @@ class SimulationExecutionEngine:
 
         rules = rules_for(market or infer_market(order.symbol))
         market_str = rules.market.value
+        requested_qty = float(
+            requested_quantity
+            if requested_quantity is not None
+            else order.quantity
+        )
+        if requested_qty <= 0:
+            return ExecutionResult(success=False, message="quantity must be > 0")
 
         # 记录更新前的账户快照：供 apply_filled 落库失败时补偿恢复，
         # 保证 Redis 余额/持仓与 sim_orders/sim_trades 的数据一致性（T+1 语义下无法用反向增减安全回退）。
@@ -740,26 +875,29 @@ class SimulationExecutionEngine:
             _resolve_match_session(market=rules.market.value) == SESSION_AFTER_HOURS_FIXED
         )
 
-        # A股申报数量校验（T-P2-02：唯一实现；科创板 200 股起、1 股递增，其余 100 整数倍）
-        if rules.market.value == "CN" and side == "buy":
+        # A股申报数量校验（T-P2-02：唯一实现）——整数股全员；买入另需整手
+        # （科创板≥200 可 1 股递增，其余 100 整数倍；卖出可零股）。
+        if rules.market.value == "CN":
             from backend.services.simulation.services.market_rules import (
                 normalize_order_quantity,
             )
 
-            qty = float(order.quantity or 0)
-            normalized = normalize_order_quantity(qty, order.symbol, "CN")
-            if (
-                abs(qty - round(qty)) > 1e-6
-                or normalized <= 0
-                or normalized != int(round(qty))
-            ):
+            qty = requested_qty
+            if abs(qty - round(qty)) > 1e-6:
                 return ExecutionResult(
                     success=False,
-                    message=(
-                        f"买入申报数量不合规（{order.symbol}: {order.quantity}；"
-                        "科创板≥200可1股递增，其余100整数倍）"
-                    ),
+                    message=f"CN委托数量须为整数股，当前{order.quantity}",
                 )
+            if side == "buy":
+                normalized = normalize_order_quantity(qty, order.symbol, "CN")
+                if normalized <= 0 or normalized != int(round(qty)):
+                    return ExecutionResult(
+                        success=False,
+                        message=(
+                            f"买入申报数量不合规（{order.symbol}: {order.quantity}；"
+                            "科创板≥200可1股递增，其余100整数倍）"
+                        ),
+                    )
 
         # 单笔申报数量上限（2026-07-06 新规；唯一实现；买卖双侧）
         if rules.market.value == "CN":
@@ -831,12 +969,62 @@ class SimulationExecutionEngine:
                 success=False, message=f"Unsupported order type: {order.order_type}"
             )
 
-        gross = order.quantity * exec_price
+        fill_quantity = requested_qty
+        if snapshot.recent_volume is not None:
+            import os
+
+            try:
+                participation = min(
+                    1.0,
+                    max(
+                        0.001,
+                        float(os.getenv("SIMULATION_MAX_PARTICIPATION_RATE", "0.10")),
+                    ),
+                )
+            except ValueError:
+                participation = 0.10
+            capacity = max(0.0, float(snapshot.recent_volume) * participation)
+            if rules.market.value == "CN" and side == "buy":
+                from backend.services.simulation.services.market_rules import (
+                    lot_size_for_symbol,
+                )
+
+                lot_size = int(lot_size_for_symbol(order.symbol, rules.market))
+                capacity = int(capacity // lot_size) * lot_size
+            elif rules.market.value == "CN":
+                capacity = int(capacity)
+            fill_quantity = self._reserve_liquidity(
+                symbol=order.symbol,
+                requested=requested_qty,
+                capacity=capacity,
+                quote_timestamp=snapshot.quote_timestamp,
+            )
+            if fill_quantity <= 0:
+                return ExecutionResult(
+                    success=False,
+                    message="insufficient_realtime_liquidity",
+                )
+        else:
+            import os
+
+            try:
+                max_unverified_notional = float(
+                    os.getenv("SIM_LIQUIDITY_UNVERIFIED_MAX_NOTIONAL", "100000")
+                )
+            except ValueError:
+                max_unverified_notional = 100000.0
+            if requested_qty * exec_price > max_unverified_notional:
+                return ExecutionResult(
+                    success=False,
+                    message="realtime_liquidity_unavailable_for_large_order",
+                )
+
+        gross = fill_quantity * exec_price
         if rules.market.value == "CN":
             # T-P2-02：费用分项唯一实现（market_rules.compute_fee_breakdown）；
             # settings 仅作显式覆盖（env/前端可配置语义保持不变）
             commission, stamp_duty, transfer_fee = rules.compute_fee_breakdown(
-                order.quantity,
+                fill_quantity,
                 exec_price,
                 order.side.value,
                 commission_rate=float(settings.SIMULATION_COMMISSION_RATE),
@@ -846,14 +1034,14 @@ class SimulationExecutionEngine:
         else:
             # 非 CN：同一实现（印花税独立分项——现金合计不变、sim_trades 分项更正确）
             commission, stamp_duty, transfer_fee = rules.compute_fee_breakdown(
-                order.quantity, exec_price, side
+                fill_quantity, exec_price, side
             )
         if order.side.value == "buy":
             delta_cash = -(gross + commission + transfer_fee)
-            delta_volume = order.quantity
+            delta_volume = fill_quantity
         else:
             delta_cash = gross - commission - stamp_duty - transfer_fee
-            delta_volume = -order.quantity
+            delta_volume = -fill_quantity
 
         update = await self.manager.update_balance(
             user_id=order.user_id,
@@ -887,13 +1075,21 @@ class SimulationExecutionEngine:
         return ExecutionResult(
             success=True,
             price=exec_price,
-            quantity=order.quantity,
+            quantity=fill_quantity,
             commission=commission,
             stamp_duty=stamp_duty,
             transfer_fee=transfer_fee,
             market=market_str,
             account_snapshot=account_snapshot,
             price_source=price_source,
+            requested_quantity=requested_qty,
+            quote_timestamp=snapshot.quote_timestamp,
+            quote_age_seconds=snapshot.quote_age_seconds,
+            message=(
+                "partially_filled"
+                if fill_quantity + 1e-6 < requested_qty
+                else "filled"
+            ),
         )
 
     async def apply_filled(self, order: SimOrder, result: ExecutionResult) -> SimTrade:
@@ -914,25 +1110,49 @@ class SimulationExecutionEngine:
             stamp_duty=result.stamp_duty,
             transfer_fee=transfer_fee,
             total_fee=total_fee,
-            # 时区BUG修复：timestamptz 列必须用 aware UTC，naive 值会被会话
-            # 时区重解释（曾导致成交时间 -8h）。
-            executed_at=datetime.now(timezone.utc),
+            # sim_trades.executed_at 是 TIMESTAMPTZ，必须写 aware UTC。
+            # naive UTC 会在旧库 timestamptz 上被 asyncpg 拒绝，整笔成交回滚。
+            executed_at=utc_now(),
             price_source=result.price_source,
         )
         self.db.add(trade)
+        # Both identifiers are database-generated and are referenced by the
+        # ledger/fill projections below.
+        await self.db.flush()
 
-        order.status = OrderStatus.FILLED
+        requested_quantity = float(
+            result.requested_quantity
+            if result.requested_quantity is not None
+            else order.quantity
+        )
+        partial = result.quantity + 1e-6 < requested_quantity
+        # Existing PostgreSQL enum has no partially_filled value. A partial DAY
+        # order remains pending with filled_quantity > 0 and a queued remainder.
+        order.status = OrderStatus.PENDING if partial else OrderStatus.FILLED
         order.submitted_at = order.submitted_at or datetime.now(timezone.utc)
-        order.filled_at = datetime.now(timezone.utc)
-        order.filled_quantity = result.quantity
-        order.average_price = result.price
-        order.filled_value = trade_value
-        order.commission = result.commission
-        order.total_fee = total_fee
+        order.filled_at = None if partial else datetime.now(timezone.utc)
+        old_filled_quantity = float(order.filled_quantity or 0.0)
+        old_filled_value = float(order.filled_value or 0.0)
+        new_filled_quantity = old_filled_quantity + result.quantity
+        new_filled_value = old_filled_value + trade_value
+        order.filled_quantity = new_filled_quantity
+        order.average_price = (
+            new_filled_value / new_filled_quantity
+            if new_filled_quantity > 0
+            else result.price
+        )
+        order.filled_value = new_filled_value
+        order.commission = float(order.commission or 0.0) + result.commission
+        order.total_fee = float(order.total_fee or 0.0) + total_fee
         # 委托金额以实际成交金额为准（市价单无委托价，此前 quantity*(price or 0)=0 失真）
         order.order_value = trade_value
         order.execution_model = "synthetic_price"
         order.price_source = result.price_source
+        audit = (
+            f"quote_ts={result.quote_timestamp or 'unknown'} "
+            f"quote_age_s={float(result.quote_age_seconds or 0.0):.1f}"
+        )
+        order.remarks = f"{order.remarks or ''} [{audit}]".strip()[:500]
 
         # live 成交同步写入 ledger 台账（持仓批次/资金流水/账户），与 SimTrade 同事务。
         # 此前 live 路径从不写台账，PG 侧 lots/accounts 全空，EOD/策略监控等读 PG
@@ -960,6 +1180,59 @@ class SimulationExecutionEngine:
                 account_snapshot=before_snapshot,
                 market=str(getattr(result, "market", None) or "CN"),
             )
+            from sqlalchemy import select
+
+            from backend.services.simulation.models.fill import SimulationFill
+            from backend.services.simulation.models.order_v2 import (
+                SimulationOrderV2,
+            )
+
+            projection_order = (
+                await self.db.execute(
+                    select(SimulationOrderV2)
+                    .where(SimulationOrderV2.order_id == order.order_id)
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            if projection_order is not None:
+                if partial:
+                    projection_order.quantity = max(
+                        0.0, requested_quantity - result.quantity
+                    )
+                    projection_order.status = OrderStatus.PENDING.value
+                    projection_order.rejected_reason = (
+                        "partially_filled; remainder queued for current DAY session"
+                    )
+                else:
+                    projection_order.quantity = 0.0
+                    projection_order.status = OrderStatus.FILLED.value
+                    projection_order.rejected_reason = None
+                self.db.add(
+                    SimulationFill(
+                        fill_id=trade.trade_id,
+                        order_id=order.order_id,
+                        legacy_trade_id=trade.id,
+                        tenant_id=str(order.tenant_id),
+                        user_id=str(order.user_id),
+                        account_id=projection_order.account_id,
+                        strategy_id=projection_order.strategy_id,
+                        portfolio_id=int(order.portfolio_id or 0),
+                        symbol=order.symbol,
+                        side=str(order.side.value),
+                        position_side=str(
+                            getattr(order, "position_side", "long") or "long"
+                        ),
+                        trade_action=getattr(order, "trade_action", None),
+                        fill_price=result.price,
+                        fill_quantity=result.quantity,
+                        gross_amount=trade_value,
+                        commission=result.commission,
+                        stamp_duty=result.stamp_duty,
+                        transfer_fee=transfer_fee,
+                        executed_at=utc_now().replace(tzinfo=None),
+                        price_source=result.price_source,
+                    )
+                )
         except Exception as ledger_exc:  # noqa: BLE001
             from backend.shared.errfmt import locate
 
@@ -1048,13 +1321,30 @@ class SimulationExecutionEngine:
             pass
         return trade
 
+    async def _set_projection_status(
+        self, order: SimOrder, status: str, reason: str | None = None
+    ) -> None:
+        from sqlalchemy import update
+
+        from backend.services.simulation.models.order_v2 import SimulationOrderV2
+
+        order_id = getattr(order, "order_id", None)
+        if order_id is None:
+            return
+        await self.db.execute(
+            update(SimulationOrderV2)
+            .where(SimulationOrderV2.order_id == order_id)
+            .values(status=status, rejected_reason=(reason or None))
+        )
+
     async def mark_rejected(self, order: SimOrder, message: str):
         """V2挂单拒单兼容（同 mark_expired 口径）。
 
         - V2 投影（SimulationOrderV2）用字符串状态；旧 SimOrder 用枚举。
-        - 瞬态对象（worker 的 _build_runtime_order 内存态）不容崩：commit 无物可落属预期，
+        - 瞬态对象（内存态运行时单）不容崩：commit 无物可落属预期，
           refresh 仅对持久对象有意义。此前无条件 refresh 致线上 worker 每轮
           InvalidRequestError("not persistent")——订单永久卡 submitted、拒因丢失。
+        - 投影直写经 `_set_projection_status`（引擎内唯一出口，与 worker 侧镜像等价）。
         """
         try:
             from backend.services.simulation.models.order_v2 import (
@@ -1073,6 +1363,9 @@ class SimulationExecutionEngine:
                 order.rejected_reason = str(message or "")[:500]
             if hasattr(order, "remarks"):
                 order.remarks = f"Execution rejected: {message}"
+            await self._set_projection_status(
+                order, OrderStatus.REJECTED.value, str(message or "")[:500]
+            )
             await self.db.commit()
             try:
                 await self.db.refresh(order)
@@ -1096,16 +1389,103 @@ class SimulationExecutionEngine:
         except Exception:
             return None
 
-    async def assess_execution_window(self, order):
-        """V2挂单链路兼容：模拟盘无盘前盘后会话限制，默认可执行。"""
+    async def assess_execution_window(self, order, now: datetime | None = None):
+        """Enforce the exchange session before any executable price is used."""
         from types import SimpleNamespace
+        from zoneinfo import ZoneInfo
+
+        from backend.services.simulation.services.market_rules import infer_market
+
+        market = infer_market(str(getattr(order, "symbol", "") or ""))
+        if market.value == "CRYPTO":
+            return SimpleNamespace(
+                can_execute=True,
+                target_trade_date=(now or datetime.now(timezone.utc)).date(),
+                final_state=None,
+                retryable=False,
+                message="ok",
+            )
+
+        tz_name = {
+            "CN": "Asia/Shanghai",
+            "HK": "Asia/Hong_Kong",
+            "US": "America/New_York",
+            "FUTURES": "Asia/Shanghai",
+        }.get(market.value, "Asia/Shanghai")
+        local_now = now or datetime.now(ZoneInfo(tz_name))
+        if local_now.tzinfo is None:
+            local_now = local_now.replace(tzinfo=ZoneInfo(tz_name))
+        else:
+            local_now = local_now.astimezone(ZoneInfo(tz_name))
+        today = local_now.date()
+
+        is_session = local_now.weekday() < 5
+        calendar = None
+        try:
+            import pandas as pd
+            from exchange_calendars import get_calendar
+
+            calendar_name = {
+                "CN": "XSHG",
+                "HK": "XHKG",
+                "US": "XNYS",
+            }.get(market.value)
+            if calendar_name:
+                calendar = get_calendar(calendar_name)
+                is_session = bool(calendar.is_session(pd.Timestamp(today)))
+        except Exception:
+            calendar = None
+        if market.value in {"CN", "HK"}:
+            morning_close = (12, 0) if market.value == "HK" else (11, 30)
+            afternoon_close = (16, 0) if market.value == "HK" else (15, 0)
+            morning = (
+                (9, 30) <= (local_now.hour, local_now.minute) < morning_close
+            )
+            afternoon = (
+                (13, 0) <= (local_now.hour, local_now.minute) < afternoon_close
+            )
+            can_execute = is_session and (morning or afternoon)
+        elif market.value == "US":
+            can_execute = is_session and (
+                (9, 30) <= (local_now.hour, local_now.minute) < (16, 0)
+            )
+        else:
+            can_execute = is_session
+
+        target_date = today
+        market_close = (16, 0) if market.value == "HK" else (15, 0)
+        if not is_session or (
+            market.value in {"CN", "HK"}
+            and (local_now.hour, local_now.minute) >= market_close
+        ) or (
+            market.value == "US" and (local_now.hour, local_now.minute) >= (16, 0)
+        ):
+            target_date = today
+            while True:
+                target_date += timedelta(days=1)
+                if calendar is not None:
+                    import pandas as pd
+
+                    if calendar.is_session(pd.Timestamp(target_date)):
+                        break
+                elif target_date.weekday() < 5:
+                    break
+
+        if can_execute:
+            return SimpleNamespace(
+                can_execute=True,
+                target_trade_date=today,
+                final_state=None,
+                retryable=False,
+                message="ok",
+            )
 
         return SimpleNamespace(
-            can_execute=True,
-            target_trade_date=getattr(order, "trading_session_date", None),
+            can_execute=False,
+            target_trade_date=target_date,
             final_state=None,
-            retryable=False,
-            message="ok",
+            retryable=True,
+            message="queued for next valid session",
         )
 
     async def mark_expired(self, order, message: str):
@@ -1130,6 +1510,9 @@ class SimulationExecutionEngine:
                 order, "submitted_at"
             ):
                 order.submitted_at = datetime.now(timezone.utc)
+            await self._set_projection_status(
+                order, "expired", str(message or "")[:500]
+            )
             await self.db.commit()
             try:
                 await self.db.refresh(order)

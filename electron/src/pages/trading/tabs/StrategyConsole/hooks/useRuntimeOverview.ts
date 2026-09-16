@@ -11,6 +11,7 @@ import type {
 import type { StrategyFile } from '../../../../../types/backtest/strategy';
 import { buildInputNodes, deriveRunState } from '../topologyTypes';
 import type { RunState, TopologyNode } from '../topologyTypes';
+import { sortTradingStrategies } from '../../../utils/sortTradingStrategies';
 
 export type ConsoleTradingMode = 'real' | 'simulation';
 
@@ -239,9 +240,10 @@ export function useRuntimeOverview(
         try {
             const { strategyManagementService } = await import('../../../../../services/strategyManagementService');
             const list = await strategyManagementService.loadStrategies(userId);
-            setStrategies(list);
+            const sorted = sortTradingStrategies(list);
+            setStrategies(sorted);
             setStrategiesLoaded(true);
-            return list;
+            return sorted;
         } catch (e) {
             console.warn('[TopologyConsole] strategies failed', e);
             return [];

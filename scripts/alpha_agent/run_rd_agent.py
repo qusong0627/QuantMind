@@ -355,6 +355,17 @@ def main():
     logger.info("=" * 60)
 
     try:
+        from backend.services.engine.alpha_agent.hw_lock import (
+            HardwareLockError,
+            assert_factor_mining_hardware,
+        )
+
+        assert_factor_mining_hardware()
+    except HardwareLockError as exc:
+        logger.error("%s", exc)
+        raise SystemExit(2) from exc
+
+    try:
         os.environ["LOG_TRACE_PATH"] = log_dir
 
         from backend.services.engine.rd_agent.rd_loop_wrapper import RDLoopWrapper

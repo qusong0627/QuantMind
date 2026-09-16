@@ -30,5 +30,6 @@
   "live_config_tips": [
     "权重分配型模板：权重 = Score/ΣScore 且单票 ≤5%。"
   ],
+  "dir": "通用策略",
   "markets": []
 }

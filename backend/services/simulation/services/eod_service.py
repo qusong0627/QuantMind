@@ -97,10 +97,30 @@ async def run_simulation_eod_worker() -> None:
                 and _past_trigger_window(now)
                 and await _should_run_eod(target_trade_date)
             ):
-                result = await _execute_eod(target_trade_date)
+                timeout_sec = max(
+                    60,
+                    int(os.getenv("SIM_EOD_CYCLE_TIMEOUT_SECONDS", "600")),
+                )
+                try:
+                    result = await asyncio.wait_for(
+                        _execute_eod(target_trade_date),
+                        timeout=timeout_sec,
+                    )
+                except asyncio.TimeoutError:
+                    logger.error(
+                        "Simulation EOD timed out after %ss for %s",
+                        timeout_sec,
+                        target_trade_date,
+                    )
+                    result = False
                 if result:
                     last_run_date = target_trade_date
                     logger.info("Simulation EOD completed for %s", target_trade_date)
+                else:
+                    logger.warning(
+                        "Simulation EOD did not complete for %s; will retry",
+                        target_trade_date,
+                    )
         except asyncio.CancelledError:
             logger.info("Simulation EOD worker cancelled")
             raise
@@ -193,8 +213,10 @@ async def _execute_eod(trade_date: date) -> bool:
 
                     cash = float(projection_account.cash or 0.0)
                     liabilities = float(projection_account.liabilities or 0.0)
-                    short_proceeds = _read_short_proceeds(
-                        account.tenant_id, account.user_id
+                    short_proceeds = await asyncio.to_thread(
+                        _read_short_proceeds,
+                        account.tenant_id,
+                        account.user_id,
                     )
                     total_asset = round(cash + short_proceeds + long_mv - short_mv, 4)
 
@@ -223,7 +245,8 @@ async def _execute_eod(trade_date: date) -> bool:
                         positions=positions,
                     )
 
-                    _rebuild_redis(
+                    await asyncio.to_thread(
+                        _rebuild_redis,
                         account=projection_account,
                         positions=positions,
                         tenant_id=account.tenant_id,

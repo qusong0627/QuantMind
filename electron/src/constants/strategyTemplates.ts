@@ -42,7 +42,7 @@ export const strategyTemplates: StrategyTemplate[] = [
         description: '基于"强者恒强"逻辑，自动筛选过去一段时间涨幅最高且波动稳健的行业或个股。',
         difficulty: 'beginner',
         tags: ['动量', '趋势', '强度'],
-        code: `"""\n趋势动量策略 (Momentum Strategy)\n[Native] 核心逻辑：基于过去 20-60 天的累计收益率进行排名。\n"""\nSTRATEGY_CONFIG = {\n    "class": "RedisTopkStrategy",\n    "kwargs": {\n        "topk": 30,\n        "n_drop": 6,\n        "momentum_period": 20\n    }\n}`,
+        code: `"""\n趋势动量策略 (Momentum Strategy)\n[Native] 核心逻辑：基于过去 20-60 天的累计收益率进行排名。\n"""\nSTRATEGY_CONFIG = {\n    "class": "RedisMomentumStrategy",\n    "module_path": "backend.services.engine.qlib_app.utils.extended_strategies",\n    "kwargs": {\n        "signal": "<PRED>",\n        "topk": 30,\n        "n_drop": 6,\n        "momentum_period": 20,\n        "momentum_weight": 0.3\n    }\n}`,
         parameters: [
             { name: 'topk', type: 'int', default: 30, description: '选股数量' },
             { name: 'momentum_period', type: 'int', default: 20, description: '动量回看周期 (天)' },
@@ -55,11 +55,11 @@ export const strategyTemplates: StrategyTemplate[] = [
         description: '在标准 TopK 选股基础上叠加硬性止损/止盈规则，一旦触发立即强制平仓，保护资金安全。',
         difficulty: 'beginner',
         tags: ['风控', '止损', '止盈'],
-        code: `"""\n止损止盈策略 (Stop-Loss / Take-Profit Strategy)\n[Native] 核心逻辑：每日持仓浮亏超过 stop_loss 或浮盈超过 take_profit 时，强制平仓并从选股池剔除。\n"""\nSTRATEGY_CONFIG = {\n    "class": "RedisStopLossStrategy",\n    "kwargs": {\n        "signal": "<PRED>",\n        "topk": 30,\n        "n_drop": 6,\n        "stop_loss": -0.08,\n        "take_profit": 0.15,\n    }\n}`,
+        code: `"""\n止损止盈策略 (Stop-Loss / Take-Profit Strategy)\n[Native] 核心逻辑：每日持仓浮亏超过 stop_loss 或浮盈超过 take_profit 时，强制平仓并从选股池剔除。\n"""\nSTRATEGY_CONFIG = {\n    "class": "RedisStopLossStrategy",\n    "kwargs": {\n        "signal": "<PRED>",\n        "topk": 30,\n        "n_drop": 6,\n        "stop_loss": -0.10,\n        "take_profit": 0.20,\n    }\n}`,
         parameters: [
             { name: 'topk', type: 'int', default: 30, description: '选股数量' },
-            { name: 'stop_loss', type: 'float', default: -0.08, description: '止损触发阈值' },
-            { name: 'take_profit', type: 'float', default: 0.15, description: '止盈触发阈值' },
+            { name: 'stop_loss', type: 'float', default: -0.10, description: '止损触发阈值' },
+            { name: 'take_profit', type: 'float', default: 0.20, description: '止盈触发阈值' },
         ],
     },
 
@@ -124,7 +124,7 @@ export const strategyTemplates: StrategyTemplate[] = [
         id: 'deep_time_series',
         name: '深度学习时序策略',
         category: '高级算法',
-        description: '利用深度学习模型捕捉市场的长短期记忆效应，原生支持 3D 时序信号加载。',
+        description: '用 GRU/LSTM 等深度时序模型（按历史特征序列预测未来收益打分）驱动的 TopK-Dropout 选股：按预测分取前 topk 只、每期替换 n_drop 只、每 rebalance_days 个交易日调仓。需先训练或指定对应的深度学习时序模型（pred.pkl）。',
         difficulty: 'advanced',
         tags: ['深度学习', '时序', 'GRU', 'LSTM'],
         code: `"""\n深度学习时序预测策略 (Time-Series GRU/LSTM)\n[Native] 核心逻辑：原生加载 .pkl 时序信号，支持 TS 格式特征。\n"""\nSTRATEGY_CONFIG = {\n    "class": "RedisRecordingStrategy",\n    "kwargs": {\n        "signal": "<PRED>",\n        "topk": 30,\n        "n_drop": 6,\n    }\n}`,

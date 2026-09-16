@@ -255,9 +255,11 @@ async def dispatch_internal_strategy_order(
 ) -> dict[str, Any]:
     """复用内部策略下单逻辑：实盘走真实风控/柜台，影子/模拟走虚拟成交。"""
     # user_id 口径与模拟盘接口（simulation.py _require_user_id）对齐：
-    # 非数字 JWT sub 统一映射为 0，保证命中同一模拟账户 Redis 键。
+    # 管理员族收口 10000001，避免 int("00000001")==1 读到空账。
+    from backend.services.trade_shared.simulation_manager import canonical_sim_uid
+
     _uid_raw = str(user_id or "").strip()
-    uid = int(_uid_raw) if _uid_raw.isdigit() else 0
+    uid = canonical_sim_uid(_uid_raw)
     # DB 口径：orders/portfolios 的 user_id 列是 VARCHAR，库里存 8 位补零字符串
     # （"1" 与 "00000001" 是同一个用户，但 SQL 里对不上）。面向 DB 的查询一律用它。
     db_uid = normalize_db_user_id(_uid_raw)

@@ -43,6 +43,7 @@ class StrategyParameter(BaseModel):
 
 class StrategyTemplate(BaseModel):
     id: str
+    sort: int = 100
     name: str
     description: str
     category: str  # basic | advanced | risk_control
@@ -197,6 +198,7 @@ class StrategyTemplateLoader:
                 live_config_tips=meta.get("live_config_tips", []),
                 markets=meta.get("markets", []),
                 dir=meta.get("dir", ""),
+                sort=int(meta.get("sort") or 100),
             )
         except Exception as e:
             task_logger.error("build_template_failed", "构建模板对象失败", template_id=json_path.stem, error=str(e))

@@ -69,6 +69,18 @@ prepare_env() {
     elif [[ "$TORCH_DEVICE" == skip ]]; then
         die "TORCH_DEVICE=skip 表示不安装 torch，本脚本无意义；请用 cpu 或 gpu"
     fi
+    # 持久化到 .env：避免后续 update/full-deploy 按默认(skip)判定依赖指纹漂移，
+    # 把已含 torch 的镜像回退重建（指纹把 TORCH_DEVICE 纳入）。
+    local env_file="$PROJECT_DIR/.env"
+    if [[ -f "$env_file" ]]; then
+        if grep -qE '^[[:space:]]*TORCH_DEVICE=' "$env_file"; then
+            sed -i "s|^[[:space:]]*TORCH_DEVICE=.*|TORCH_DEVICE=${TORCH_DEVICE}|" "$env_file"
+        else
+            printf '\n# torch 形态（install-model-deps 写入，用于依赖指纹对齐）\nTORCH_DEVICE=%s\n' \
+                "$TORCH_DEVICE" >> "$env_file"
+        fi
+        log "已同步 .env → TORCH_DEVICE=${TORCH_DEVICE}"
+    fi
 }
 
 rebuild_image() {

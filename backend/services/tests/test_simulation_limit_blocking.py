@@ -40,6 +40,7 @@ def _snapshot(
     limit_up: bool = False,
     limit_down: bool = False,
     suspended: bool = False,
+    recent_volume: float | None = None,
 ) -> MarketSnapshot:
     return MarketSnapshot(
         price=price,
@@ -47,6 +48,7 @@ def _snapshot(
         limit_up=limit_up,
         limit_down=limit_down,
         suspended=suspended,
+        recent_volume=recent_volume,
     )
 
 
@@ -160,3 +162,20 @@ async def test_execute_order_fills_sell_and_charges_stamp_duty():
     assert manager.update_balance.called is True
     _, kwargs = manager.update_balance.call_args
     assert kwargs["delta_volume"] == -100
+
+
+@pytest.mark.asyncio
+async def test_execute_order_partially_fills_at_participation_cap(monkeypatch):
+    monkeypatch.setenv("SIMULATION_MAX_PARTICIPATION_RATE", "0.10")
+    engine, manager = _engine(_snapshot(price=10.0, recent_volume=5_000))
+
+    result = await engine.execute_order(
+        _make_order(OrderSide.BUY, quantity=1_000)
+    )
+
+    assert result.success is True
+    assert result.quantity == 500
+    assert result.requested_quantity == 1_000
+    assert result.message == "partially_filled"
+    _, kwargs = manager.update_balance.call_args
+    assert kwargs["delta_volume"] == 500

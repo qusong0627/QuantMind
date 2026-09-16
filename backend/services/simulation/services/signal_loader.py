@@ -10,6 +10,8 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.shared.stock_utils import StockCodeUtil
+
 logger = logging.getLogger(__name__)
 
 
@@ -54,6 +56,12 @@ class SignalScore:
     run_id: str
     tenant_id: str
     user_id: str
+
+
+def _normalize_signal_symbol(raw: object) -> str:
+    """信号表可能是 6 位数字；行情层要 suffix，否则 quotes 对不上、整轮 0 单。"""
+    text = str(raw or "").upper().strip()
+    return StockCodeUtil.to_suffix(text) or text
 
 
 class SignalLoader:
@@ -136,7 +144,7 @@ class SignalLoader:
             rows = result.fetchall()
             signals = [
                 SignalScore(
-                    symbol=_to_market_symbol(str(row[0]).upper(), market),
+                    symbol=_to_market_symbol(_normalize_signal_symbol(row[0]), market),
                     score=float(row[1]),
                     trade_date=row[2],
                     run_id=str(row[3]),
@@ -200,7 +208,7 @@ class SignalLoader:
             )
             signals = [
                 SignalScore(
-                    symbol=str(row.get("symbol") or "").upper(),
+                    symbol=_normalize_signal_symbol(row.get("symbol")),
                     score=float(row.get("fusion_score") or 0.0),
                     trade_date=effective_date,
                     run_id=fallback_run_id,
@@ -288,7 +296,7 @@ class SignalLoader:
             rows = (await db.execute(query, params)).fetchall()
             signals = [
                 SignalScore(
-                    symbol=_to_market_symbol(str(row[0]).upper(), market),
+                    symbol=_to_market_symbol(_normalize_signal_symbol(row[0]), market),
                     score=float(row[1]),
                     trade_date=row[2],
                     run_id=str(row[3]),

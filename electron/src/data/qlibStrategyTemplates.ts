@@ -8,6 +8,8 @@
 
 export interface StrategyTemplate {
   id: string;
+  /** 展示排序，默认 Top-K 为 1 */
+  sort?: number;
   name: string;
   description: string;
   category: 'basic' | 'advanced' | 'risk_control';
@@ -59,6 +61,7 @@ export function filterTemplatesByMarket(
 export const QLIB_STRATEGY_TEMPLATES: StrategyTemplate[] = [
   {
     id: 'standard_topk',
+    sort: 1,
     name: '默认 Top-K 选股策略',
     description: '最经典的量化选股逻辑。每日截面排名，精选最具潜力的 Top-K 标的，等权持仓。',
     category: 'basic',
@@ -198,4 +201,94 @@ export function getTemplatesByDifficulty(difficulty: StrategyTemplate['difficult
  */
 export function getTemplateById(id: string): StrategyTemplate | undefined {
   return QLIB_STRATEGY_TEMPLATES.find(t => t.id === id);
+}
+
+/** 无 dir 的内置模板归入此分组，并固定排在模板选择器最前。 */
+export const GENERAL_STRATEGY_DIR = '通用策略';
+
+const ASHARE_ID = /^as\d{2}(_|$)/i;
+const HK_ID = /^hk_/i;
+const MINIBT_ID = /^minibt_/i;
+
+export function resolveTemplateDir(template: StrategyTemplate): string {
+  const explicit = template.dir?.trim();
+  if (explicit) return explicit;
+  if (ASHARE_ID.test(template.id)) return 'A股策略/未分类';
+  if (HK_ID.test(template.id)) return '港股策略';
+  if (MINIBT_ID.test(template.id)) return 'minibt策略';
+  return GENERAL_STRATEGY_DIR;
+}
+
+function compareTemplates(a: StrategyTemplate, b: StrategyTemplate): number {
+  const rank = (template: StrategyTemplate) => {
+    const sort = Number(template.sort);
+    return Number.isFinite(sort) && sort > 0 ? sort : 100;
+  };
+  const diff = rank(a) - rank(b);
+  if (diff !== 0) return diff;
+  return a.id.localeCompare(b.id);
+}
+
+export function groupStrategyTemplatesByDir(
+  templates: StrategyTemplate[],
+): Array<[string, StrategyTemplate[]]> {
+  const map = new Map<string, StrategyTemplate[]>();
+  for (const template of templates) {
+    const key = resolveTemplateDir(template);
+    const bucket = map.get(key);
+    if (bucket) {
+      bucket.push(template);
+    } else {
+      map.set(key, [template]);
+    }
+  }
+  const groups = Array.from(map.entries()).map(([label, items]) => [
+    label,
+    [...items].sort(compareTemplates),
+  ] as [string, StrategyTemplate[]]);
+  groups.sort(([left], [right]) => {
+    if (left === GENERAL_STRATEGY_DIR) return -1;
+    if (right === GENERAL_STRATEGY_DIR) return 1;
+    return 0;
+  });
+  return groups;
+}
+
+export type StrategyTemplateSection = {
+  label: string;
+  items: StrategyTemplate[];
+  children: Array<{ label: string; items: StrategyTemplate[] }>;
+};
+
+/** 通用策略置顶；A股/港股等按第一级目录收拢，避免 10 个子目录再加通用变成 11 组。 */
+export function groupStrategyTemplateSections(
+  templates: StrategyTemplate[],
+): StrategyTemplateSection[] {
+  const topMap = new Map<string, StrategyTemplateSection>();
+  for (const [dir, items] of groupStrategyTemplatesByDir(templates)) {
+    const parts = dir.split('/').map((part) => part.trim()).filter(Boolean);
+    const topLabel = parts[0] || GENERAL_STRATEGY_DIR;
+    const subLabel = parts.slice(1).join('/');
+    if (!topMap.has(topLabel)) {
+      topMap.set(topLabel, { label: topLabel, items: [], children: [] });
+    }
+    const section = topMap.get(topLabel)!;
+    if (subLabel) {
+      const existing = section.children.find((child) => child.label === subLabel);
+      if (existing) {
+        existing.items.push(...items);
+      } else {
+        section.children.push({ label: subLabel, items: [...items] });
+      }
+    } else {
+      section.items.push(...items);
+    }
+  }
+  const sections = Array.from(topMap.values());
+  sections.sort((left, right) => {
+    if (left.label === GENERAL_STRATEGY_DIR) return -1;
+    if (right.label === GENERAL_STRATEGY_DIR) return 1;
+    return 0;
+  });
+  return sections;
 }

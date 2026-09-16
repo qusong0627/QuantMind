@@ -290,14 +290,16 @@ class TdxRollingTradeService:
         返回 (positions, error)，positions 元素与 load_positions_from_tdx 同构，
         额外带 raw_symbol（模拟盘持仓原 key，卖出时沿用保证对账一致）。
         """
-        user_id_int = int(user_id) if str(user_id).isdigit() else 0
-        if user_id_int <= 0:
-            return [], f"无效的用户 ID: {user_id}"
         try:
             from backend.services.trade_shared.redis_client import redis_client as trade_redis
             from backend.services.trade_shared.simulation_manager import (
                 SimulationAccountManager,
+                canonical_sim_uid,
             )
+
+            user_id_int = canonical_sim_uid(user_id)
+            if user_id_int <= 0:
+                return [], f"无效的用户 ID: {user_id}"
 
             account = await SimulationAccountManager(trade_redis).get_account(
                 user_id_int, tenant_id=tenant_id
@@ -546,9 +548,13 @@ class TdxRollingTradeService:
         返回 (placed_orders, failed_orders)。
         """
         from backend.services.trade_shared.redis_client import redis_client as trade_redis
+        from backend.services.trade_shared.simulation_manager import (
+            SimulationAccountManager,
+            canonical_sim_uid,
+        )
         from backend.shared.database_manager_v2 import get_db_manager
 
-        user_id_int = int(user_id) if str(user_id).isdigit() else 0
+        user_id_int = canonical_sim_uid(user_id)
         if user_id_int <= 0:
             return [], [{"error": f"无效的用户 ID: {user_id}"}]
 

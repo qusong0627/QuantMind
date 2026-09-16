@@ -71,12 +71,16 @@ class TrainingTaskRegistry:
 
     def __init__(self) -> None:
         self._tasks: set[asyncio.Task[Any]] = set()
+        self._by_run_id: dict[str, set[asyncio.Task[Any]]] = {}
 
-    def register(self, coro_or_task: Any) -> asyncio.Task[Any]:
+    def register(
+        self, coro_or_task: Any, *, run_id: str | None = None
+    ) -> asyncio.Task[Any]:
         """注册一个协程或已创建的 task 到 registry。
 
         - 传入 coroutine：asyncio.create_task + 注册
         - 传入 task：直接加入 set
+        - run_id 非空时额外按 run_id 建索引，供 cancel(run_id) 快速定位并中断
         """
         if isinstance(coro_or_task, asyncio.Task):
             task = coro_or_task
@@ -84,7 +88,27 @@ class TrainingTaskRegistry:
             task = asyncio.create_task(coro_or_task)
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
+        if run_id:
+            self._by_run_id.setdefault(str(run_id), set()).add(task)
+            task.add_done_callback(
+                lambda t: self._by_run_id.get(str(run_id), set()).discard(t)
+            )
         return task
+
+    def cancel(self, run_id: str) -> bool:
+        """请求取消该 run 已注册的全部编排 task（best-effort 中断长等待）。
+
+        返回是否有 task 被实际取消。真正的资源清理（docker stop / ssh kill）
+        由编排器轮询循环在读到取消标记后执行。
+        """
+        tasks = self._by_run_id.pop(str(run_id), None)
+        cancelled = False
+        if tasks:
+            for t in list(tasks):
+                if not t.done():
+                    t.cancel()
+                    cancelled = True
+        return cancelled
 
     def discard(self, task: asyncio.Task[Any]) -> None:
         """手动从 registry 移除（done_callback 失败时兜底）。"""
@@ -136,7 +160,9 @@ class TrainingTaskRegistry:
                     else {}
                 )
                 try:
-                    self.register(launch_fn(run_id=run_id, payload=payload))
+                    self.register(
+                        launch_fn(run_id=run_id, payload=payload), run_id=run_id
+                    )
                     n += 1
                 except Exception as exc:  # noqa: BLE001
                     logger.error(

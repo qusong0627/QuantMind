@@ -16,7 +16,11 @@ import {
   AlertTriangle,
   Folder,
 } from 'lucide-react';
-import { StrategyTemplate } from '../../data/qlibStrategyTemplates';
+import {
+  groupStrategyTemplateSections,
+  StrategyTemplate,
+  StrategyTemplateSection,
+} from '../../data/qlibStrategyTemplates';
 import { strategyTemplateService } from '../../features/strategy-wizard/services/strategyTemplateService';
 import { registerRuntimeTemplates } from '../../shared/qlib/strategyParams';
 import { getMarketConfig } from '../../config/marketConfig';
@@ -95,21 +99,18 @@ export const StrategyTemplateModal: React.FC<StrategyTemplateModalProps> = ({
     return () => document.removeEventListener('keydown', handleKeyDown);
   }, [isOpen, onClose]);
 
+  // 通用策略置顶；A 股 01-10 收进「A股策略」，避免 10 个子目录再加通用变成 11 组。
+  // 必须在 isOpen 早退之前调用，否则打开弹窗时 hook 数量会比上一轮多。
+  const { filtered, sections } = useMemo(() => {
+    const filteredList =
+      category === 'all' ? templates : templates.filter((t) => t.category === category);
+    return { filtered: filteredList, sections: groupStrategyTemplateSections(filteredList) };
+  }, [templates, category]);
+
+  const sectionCount = (section: StrategyTemplateSection) =>
+    section.items.length + section.children.reduce((sum, child) => sum + child.items.length, 0);
+
   if (!isOpen) return null;
-
-  const filtered =
-    category === 'all' ? templates : templates.filter((t) => t.category === category);
-
-  // 按 AI-IDE 虚拟目录（dir）分组展示，无 dir 的归入「通用策略」
-  const grouped = useMemo(() => {
-    const map = new Map<string, StrategyTemplate[]>();
-    for (const t of filtered) {
-      const key = (t.dir && t.dir.trim()) || '通用策略';
-      if (!map.has(key)) map.set(key, []);
-      map.get(key)!.push(t);
-    }
-    return Array.from(map.entries());
-  }, [filtered]);
 
   const handleSelect = (template: StrategyTemplate) => {
     onSelect(template);
@@ -135,6 +136,68 @@ export const StrategyTemplateModal: React.FC<StrategyTemplateModalProps> = ({
       : c === 'advanced'
       ? 'bg-purple-100 text-purple-700'
       : 'bg-orange-100 text-orange-700';
+
+  const renderTemplateGrid = (items: StrategyTemplate[]) => (
+    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+      {items.map((template) => {
+        const isSelected = template.id === currentTemplateId;
+        return (
+          <div
+            key={template.id}
+            onClick={() => handleSelect(template)}
+            className={`relative p-4 rounded-2xl border-2 cursor-pointer transition-all select-none ${
+              isSelected
+                ? 'border-green-400 bg-green-50 shadow-md'
+                : 'border-gray-200 hover:border-blue-300 hover:bg-blue-50/30 hover:shadow-sm'
+            }`}
+          >
+            {isSelected && (
+              <div className="absolute top-3 right-3 w-5 h-5 bg-green-500 rounded-full flex items-center justify-center">
+                <Check className="w-3 h-3 text-white" />
+              </div>
+            )}
+            <div className="flex items-start gap-2 mb-2 pr-6">
+              <div className="flex-1 min-w-0">
+                <h4 className="font-semibold text-gray-800 text-sm truncate">{template.name}</h4>
+              </div>
+            </div>
+            <div className="flex gap-1.5 mb-2">
+              <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${difficultyColor(template.difficulty)}`}>
+                {difficultyLabel(template.difficulty)}
+              </span>
+              <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${categoryColor(template.category)}`}>
+                {categoryLabel(template.category)}
+              </span>
+            </div>
+            <p className="text-xs text-gray-500 leading-relaxed line-clamp-2">{template.description}</p>
+            {template.params.length > 0 && (
+              <div className="mt-2.5 pt-2.5 border-t border-gray-100">
+                <p className="text-xs text-gray-400 mb-1.5">可调参数</p>
+                <div className="flex flex-wrap gap-1.5">
+                  {template.params.slice(0, 4).map((param) => (
+                    <span
+                      key={param.name}
+                      className="text-xs bg-gray-100 text-gray-600 px-2 py-0.5 rounded-lg"
+                    >
+                      {param.name}
+                      {param.default !== undefined && (
+                        <span className="text-blue-500 ml-0.5">={param.default}</span>
+                      )}
+                    </span>
+                  ))}
+                  {template.params.length > 4 && (
+                    <span className="text-xs text-gray-400 px-1 py-0.5">
+                      +{template.params.length - 4} 更多
+                    </span>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
 
   return (
     /* 遮罩层 */
@@ -232,86 +295,25 @@ export const StrategyTemplateModal: React.FC<StrategyTemplateModalProps> = ({
               <p className="text-sm">该分类暂无模板</p>
             </div>
           ) : (
-            <div className="space-y-5">
-              {grouped.map(([dirLabel, items]) => (
-                <div key={dirLabel}>
+            <div className="space-y-6">
+              {sections.map((section) => (
+                <div key={section.label}>
                   <div className="flex items-center gap-1.5 mb-2 px-0.5">
                     <Folder className="w-3.5 h-3.5 text-gray-400" />
-                    <span className="text-xs font-medium text-gray-500 truncate">{dirLabel}</span>
-                    <span className="text-xs text-gray-400">({items.length})</span>
+                    <span className="text-xs font-medium text-gray-600 truncate">{section.label}</span>
+                    <span className="text-xs text-gray-400">({sectionCount(section)})</span>
                   </div>
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                    {items.map((template) => {
-                      const isSelected = template.id === currentTemplateId;
-                      return (
-                  <div
-                    key={template.id}
-                    onClick={() => handleSelect(template)}
-                    className={`relative p-4 rounded-2xl border-2 cursor-pointer transition-all select-none ${
-                      isSelected
-                        ? 'border-green-400 bg-green-50 shadow-md'
-                        : 'border-gray-200 hover:border-blue-300 hover:bg-blue-50/30 hover:shadow-sm'
-                    }`}
-                  >
-                    {/* 已选标记 */}
-                    {isSelected && (
-                      <div className="absolute top-3 right-3 w-5 h-5 bg-green-500 rounded-full flex items-center justify-center">
-                        <Check className="w-3 h-3 text-white" />
+                  {section.items.length > 0 && renderTemplateGrid(section.items)}
+                  {section.children.map((child) => (
+                    <div key={child.label} className={section.items.length > 0 ? 'mt-4' : 'mt-2'}>
+                      <div className="flex items-center gap-1.5 mb-2 px-0.5">
+                        <Folder className="w-3.5 h-3.5 text-gray-400" />
+                        <span className="text-xs font-medium text-gray-500 truncate">{child.label}</span>
+                        <span className="text-xs text-gray-400">({child.items.length})</span>
                       </div>
-                    )}
-
-                    {/* 模板标题行 */}
-                    <div className="flex items-start gap-2 mb-2 pr-6">
-                      <div className="flex-1 min-w-0">
-                        <h4 className="font-semibold text-gray-800 text-sm truncate">
-                          {template.name}
-                        </h4>
-                      </div>
+                      {renderTemplateGrid(child.items)}
                     </div>
-
-                    {/* 难度/分类标签 */}
-                    <div className="flex gap-1.5 mb-2">
-                      <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${difficultyColor(template.difficulty)}`}>
-                        {difficultyLabel(template.difficulty)}
-                      </span>
-                      <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${categoryColor(template.category)}`}>
-                        {categoryLabel(template.category)}
-                      </span>
-                    </div>
-
-                    {/* 描述 */}
-                    <p className="text-xs text-gray-500 leading-relaxed line-clamp-2">
-                      {template.description}
-                    </p>
-
-                    {/* 可调参数 */}
-                    {template.params.length > 0 && (
-                      <div className="mt-2.5 pt-2.5 border-t border-gray-100">
-                        <p className="text-xs text-gray-400 mb-1.5">可调参数</p>
-                        <div className="flex flex-wrap gap-1.5">
-                          {template.params.slice(0, 4).map((param) => (
-                            <span
-                              key={param.name}
-                              className="text-xs bg-gray-100 text-gray-600 px-2 py-0.5 rounded-lg"
-                            >
-                              {param.name}
-                              {param.default !== undefined && (
-                                <span className="text-blue-500 ml-0.5">={param.default}</span>
-                              )}
-                            </span>
-                          ))}
-                          {template.params.length > 4 && (
-                            <span className="text-xs text-gray-400 px-1 py-0.5">
-                              +{template.params.length - 4} 更多
-                            </span>
-                          )}
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-                  </div>
+                  ))}
                 </div>
               ))}
             </div>

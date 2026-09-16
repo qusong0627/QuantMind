@@ -174,9 +174,17 @@ class AuthService:
             return True
 
     async def _generate_user_id(self, session) -> str:
-        """生成唯一的8位数字用户ID"""
+        """生成唯一的 8 位数字用户 ID（10000000-99999999，不以 0 开头）。"""
+        from backend.shared.admin_identity import (
+            ADMIN_USER_ID,
+            LEGACY_ADMIN_USER_IDS,
+        )
+
+        reserved = {ADMIN_USER_ID, *LEGACY_ADMIN_USER_IDS, "00000000"}
         for _ in range(50):
-            candidate = f"{uuid.uuid4().int % 10**8:08d}"
+            candidate = str(uuid.uuid4().int % 90_000_000 + 10_000_000)
+            if candidate in reserved:
+                continue
             exists = await session.execute(
                 select(User.user_id).where(User.user_id == candidate)
             )

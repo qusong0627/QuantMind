@@ -5,7 +5,7 @@ Simulation order schemas.
 from datetime import datetime
 from typing import Optional
 
-from pydantic import UUID4, BaseModel, ConfigDict, Field
+from pydantic import UUID4, BaseModel, ConfigDict, Field, field_serializer
 
 from backend.services.simulation.models.order import (
     OrderSide,
@@ -13,6 +13,7 @@ from backend.services.simulation.models.order import (
     OrderType,
     TradingMode,
 )
+from backend.shared.utc_datetime import to_utc_iso
 
 
 class SimOrderBase(BaseModel):
@@ -67,3 +68,14 @@ class SimOrderResponse(SimOrderBase):
     created_at: datetime
     updated_at: datetime
     symbol_name: str | None = None
+
+    @field_serializer(
+        "submitted_at",
+        "filled_at",
+        "cancelled_at",
+        "created_at",
+        "updated_at",
+        when_used="json",
+    )
+    def _serialize_datetime(self, value: datetime | None) -> str | None:
+        return to_utc_iso(value)

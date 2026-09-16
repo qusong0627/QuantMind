@@ -68,7 +68,11 @@ export function formatTime(timestamp: number): string {
 
 const SHANGHAI_TIME_ZONE = 'Asia/Shanghai';
 const TZ_AWARE_SUFFIX_RE = /(Z|[+-]\d{2}:?\d{2})$/i;
-const NAIVE_DATE_TIME_RE = /^(\d{4})-(\d{2})-(\d{2})(?:[T\s](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?)?$/;
+// 小数位最多 9 位：Python isoformat 默认微秒 6 位。只写 {1,3} 时
+// `2026-09-14T07:54:25.123456` 匹配失败，落到 `new Date()` 被当成本地时间，
+// 仪表盘就会把 UTC 07:54 显示成 07:54 而不是上海 15:54。
+const NAIVE_DATE_TIME_RE =
+  /^(\d{4})-(\d{2})-(\d{2})(?:[T\s](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,9}))?)?)?$/;
 
 const buildShangHaiFormatter = (options: Intl.DateTimeFormatOptions): Intl.DateTimeFormat => (
   new Intl.DateTimeFormat('zh-CN', {
@@ -135,7 +139,7 @@ export function parseBackendTimestamp(value: string | number | Date | null | und
       Number(hour),
       Number(minute),
       Number(second),
-      Number(fraction.padEnd(3, '0')),
+      Number(fraction.padEnd(3, '0').slice(0, 3)),
     ));
     return Number.isNaN(parsed.getTime()) ? null : parsed;
   }

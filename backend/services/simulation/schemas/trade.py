@@ -3,11 +3,11 @@ Simulation trade schemas.
 """
 
 from datetime import datetime
-from typing import List, Optional
 
-from pydantic import UUID4, BaseModel, ConfigDict, Field
+from pydantic import UUID4, BaseModel, ConfigDict, Field, field_serializer
 
 from backend.services.simulation.models.order import OrderSide, TradingMode
+from backend.shared.utc_datetime import to_utc_iso
 
 
 class SimTradeResponse(BaseModel):
@@ -31,6 +31,10 @@ class SimTradeResponse(BaseModel):
     price_source: str | None
     created_at: datetime
     updated_at: datetime
+
+    @field_serializer("executed_at", "created_at", "updated_at", when_used="json")
+    def _serialize_datetime(self, value: datetime | None) -> str | None:
+        return to_utc_iso(value)
 
 
 class TradeStatsDailyPoint(BaseModel):

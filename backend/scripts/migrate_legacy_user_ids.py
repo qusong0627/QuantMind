@@ -1,6 +1,6 @@
 """存量用户 user_id 规范化迁移：非 8 位数字 ID → 8 位规范 ID（幂等）。
 
-覆盖 admin 纠正（admin 用户名→00000001）与其他历史坏 ID（随机分配，
+覆盖 admin 纠正（admin / 00000001 → 10000001）与其他历史坏 ID（随机分配，
 与 auth_service._generate_user_id 同算法并做唯一性校验）。
 
 迁移面：全部字符型 user_id 列（单事务，FK 先卸后建）+ Redis 用户键

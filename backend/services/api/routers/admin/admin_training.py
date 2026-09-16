@@ -373,6 +373,16 @@ async def get_training_run(
     return await get_training_run_for_owner(run_id, current_user)
 
 
+@router.post("/training-runs/{run_id}/cancel", summary="取消训练任务（管理员）")
+async def cancel_training_run(
+    run_id: str,
+    current_user: dict[str, Any] = Depends(require_admin),
+):
+    from .admin_training_utils import cancel_training_run as _cancel_training_run
+
+    return await _cancel_training_run(run_id, current_user)
+
+
 @router.post(
     "/training-runs/{run_id}/complete",
     summary="训练完成回调（内部接口）",

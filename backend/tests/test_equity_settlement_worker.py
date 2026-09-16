@@ -9,7 +9,9 @@
 
 from backend.services.simulation.services.equity_settlement_worker import (
     build_remark_updates,
+    settle_cycle_timeout_seconds,
     settle_enabled,
+    settle_heartbeat_cycles,
     settle_interval_seconds,
     split_position_key,
     summarize_positions,
@@ -67,6 +69,25 @@ def test_worker_config_defaults(monkeypatch):
     assert settle_interval_seconds() == 10
     monkeypatch.setenv("SIM_EQUITY_SETTLE_ENABLED", "false")
     assert settle_enabled() is False
+
+
+def test_cycle_timeout_and_heartbeat_defaults(monkeypatch):
+    monkeypatch.delenv("SIM_EQUITY_SETTLE_CYCLE_TIMEOUT_SECONDS", raising=False)
+    monkeypatch.delenv("SIM_EQUITY_SETTLE_HEARTBEAT_CYCLES", raising=False)
+    assert settle_cycle_timeout_seconds() == 25
+    assert settle_heartbeat_cycles() == 20
+    monkeypatch.setenv("SIM_EQUITY_SETTLE_CYCLE_TIMEOUT_SECONDS", "8")
+    assert settle_cycle_timeout_seconds() == 10
+    monkeypatch.setenv("SIM_EQUITY_SETTLE_HEARTBEAT_CYCLES", "0")
+    assert settle_heartbeat_cycles() == 1
+
+
+def test_trade_service_starts_simulation_eod_worker():
+    from pathlib import Path
+
+    source = Path("backend/services/trade/main.py").read_text(encoding="utf-8")
+    assert "run_simulation_eod_worker" in source
+    assert "simulation-eod-worker" in source
 
 
 def test_ensure_table_runs_once_per_process(monkeypatch):

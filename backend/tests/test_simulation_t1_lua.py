@@ -23,8 +23,7 @@ MANAGER_SOURCE = (
     PROJECT_ROOT
     / "backend"
     / "services"
-    / "trade"
-    / "services"
+    / "trade_shared"
     / "simulation_manager.py"
 )
 

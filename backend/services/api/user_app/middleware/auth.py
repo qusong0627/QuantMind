@@ -86,12 +86,14 @@ async def get_current_user(
     roles = payload.get("roles", [])
     is_admin = bool(payload.get("is_admin", "admin" in roles))
 
-    # 存量登录态兼容：user_id 规范化（'admin'→'00000001'，见 shared/admin_identity.py）
+    # 存量登录态兼容：user_id 规范化（admin / 00000001 → 10000001）
     # 之后，改名之前签发的 token 其 sub 仍是旧值，直接使用会查不到自己名下的模型/
     # 策略/数据（用户表现：「注册的都没了」）。这里映射到规范 ID，令旧会话平滑过渡。
+    from backend.shared.admin_identity import is_admin_user_id, normalize_admin_user_id
+
     user_id = payload.get("sub")
-    if user_id == "admin":
-        user_id = "00000001"
+    if is_admin_user_id(user_id):
+        user_id = normalize_admin_user_id(user_id)
 
     return {
         "user_id": user_id,

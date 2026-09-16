@@ -793,7 +793,8 @@ async def submit_training_job(
     orchestrator = get_orchestrator(node_id=node_id)
     logger.warning(f"[SYSTEM] Dispatching training job {run_id}. node={node_id} payload_keys={list(normalized_payload.keys())}")
     REGISTRY.register(
-        orchestrator.launch_training_job(run_id=run_id, payload=normalized_payload)
+        orchestrator.launch_training_job(run_id=run_id, payload=normalized_payload),
+        run_id=run_id,
     )
 
     # 预检特征可用性，告知前端哪些特征在 parquet 中不存在
@@ -810,6 +811,55 @@ async def submit_training_job(
         "missingFeatures": missing_features[:30],
     }
 
+
+
+_CANCELABLE_STATUSES = ("pending", "provisioning", "running", "waiting_callback")
+
+
+async def cancel_training_run(run_id: str, current_user: dict[str, Any]) -> dict[str, Any]:
+    """取消一个进行中的训练任务（用户态/管理端共用）。
+
+    流程：校验归属与状态 → 置 redis 取消标记 → best-effort 中断编排 task →
+    立即把 DB 状态置 cancelled 并写日志。真正的资源回收（docker stop / ssh kill）
+    由编排器轮询循环读到取消标记后执行，避免容器/远端进程泄漏。
+    """
+    tenant_id = str(current_user.get("tenant_id") or "default")
+    user_id = str(current_user.get("user_id") or current_user.get("sub") or "unknown")
+
+    async with get_session() as session:
+        stmt = select(TrainingJobRecord).where(
+            TrainingJobRecord.id == run_id,
+            TrainingJobRecord.tenant_id == tenant_id,
+            TrainingJobRecord.user_id == user_id,
+        )
+        record = (await session.execute(stmt)).scalar_one_or_none()
+
+        if not record:
+            raise HTTPException(status_code=404, detail="Training run not found")
+
+        status = str(record.status or "")
+        if status not in _CANCELABLE_STATUSES:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Training run is not cancelable (status={status or 'unknown'})",
+            )
+
+        record.status = "cancelled"
+        record.logs = (record.logs or "") + "[SYSTEM] 训练已被用户取消\n"
+        record.progress = max(int(record.progress or 0), 0)
+        await session.commit()
+
+    _training_log_stream.mark_cancel_requested(run_id)
+    REGISTRY.cancel(run_id)
+    _training_log_stream.append_log(
+        run_id=run_id,
+        tenant_id=tenant_id,
+        user_id=user_id,
+        line="[SYSTEM] 取消请求已提交，正在停止训练容器/进程…",
+        status="cancelled",
+    )
+
+    return {"runId": run_id, "status": "cancelled", "cancelled": True}
 
 
 async def get_training_run_for_owner(run_id: str, current_user: dict[str, Any]) -> dict[str, Any]:
@@ -854,9 +904,9 @@ async def get_training_run_for_owner(run_id: str, current_user: dict[str, Any]) 
 
     # 远端编排（AutoDL）常只把终态写进 Redis，DB 会一直停在 pending。
     # 若仍以 DB 为准，前端会把已失败任务显示成「训练中」。
-    if live_status in {"completed", "failed"}:
+    if live_status in {"completed", "failed", "cancelled"}:
         effective_status = live_status
-    elif effective_status not in {"completed", "failed"} and live_status in {
+    elif effective_status not in {"completed", "failed", "cancelled"} and live_status in {
         "pending",
         "provisioning",
         "running",
@@ -877,7 +927,7 @@ async def get_training_run_for_owner(run_id: str, current_user: dict[str, Any]) 
         "progress": progress,
         "logs": merged_logs,
         "result": normalized_result,
-        "isCompleted": effective_status in ["completed", "failed"],
+        "isCompleted": effective_status in ["completed", "failed", "cancelled"],
     }
 
 

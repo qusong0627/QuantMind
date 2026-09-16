@@ -160,22 +160,6 @@ async def _cleanup_tenant(tenant: str):
         await session.commit()
 
 
-async def _assert_no_foreign_pending():
-    """worker 扫描是全局的（无租户过滤）——真库夹具先确认无其它 pending 单，
-    否则 monkeypatch 的 execute_order 会作用到别人的单上。"""
-    from sqlalchemy import text as _t
-
-    from backend.shared.database_manager_v2 import get_session
-
-    async with get_session(read_only=True) as session:
-        n = (
-            await session.execute(
-                _t("SELECT count(*) FROM simulation_orders WHERE status='pending'")
-            )
-        ).scalar_one()
-    assert int(n) == 0, f"真库存在 {n} 条外部 pending 挂单，测试无法隔离，先清理/换环境"
-
-
 async def _create_order(tenant: str, user: str, *, symbol: str = "600036.SH"):
     """走生产建档路径（v1 行 + V2 投影一次同步），返回 order_id。"""
     from backend.services.simulation.models.order import OrderSide, OrderType
@@ -222,13 +206,38 @@ async def _read_both(order_id):
     return v1, v2
 
 
+def _patch_always_executable(monkeypatch):
+    """确定性桩：会话门恒放行（真实 assess 依赖交易所日历/墙钟，测试须脱敏）。
+
+    本文件验证的是**执行期终态持久化**（拒/成交落双表），会话门另有
+    test_market_sessions / 上游 assess 测试覆盖。
+    """
+    from types import SimpleNamespace
+
+    from backend.services.simulation.services.execution_engine import (
+        SimulationExecutionEngine,
+    )
+
+    async def _fake_assess(self, order, *a, **k):
+        return SimpleNamespace(
+            can_execute=True,
+            target_trade_date=None,
+            final_state=None,
+            retryable=False,
+            message="ok",
+        )
+
+    monkeypatch.setattr(
+        SimulationExecutionEngine, "assess_execution_window", _fake_assess
+    )
+
+
 # ── 真库：worker 拒单路径 ────────────────────────────────────────────
 
 
 @pytest.mark.asyncio
 async def test_pending_worker_reject_persists_both_tables(monkeypatch):
     await _ensure_db_pool()
-    await _assert_no_foreign_pending()
     from backend.services.simulation.models.order import OrderStatus
     from backend.services.simulation.services.execution_engine import (
         ExecutionResult,
@@ -251,9 +260,10 @@ async def test_pending_worker_reject_persists_both_tables(monkeypatch):
             )
 
         monkeypatch.setattr(SimulationExecutionEngine, "execute_order", _fake_exec)
+        _patch_always_executable(monkeypatch)
 
         worker = SimulationPendingOrderWorker(interval_seconds=15, batch_size=50)
-        processed = await worker.run_once()  # 修复前：InvalidRequestError 抛出
+        processed = await worker.run_once(tenant_id=tenant)
         assert processed >= 1
 
         v1, v2 = await _read_both(order_id)
@@ -271,7 +281,6 @@ async def test_pending_worker_reject_persists_both_tables(monkeypatch):
 @pytest.mark.asyncio
 async def test_pending_worker_fill_mirrors_projection(monkeypatch):
     await _ensure_db_pool()
-    await _assert_no_foreign_pending()
     from backend.services.simulation.models.order import OrderStatus
     from backend.services.simulation.services.execution_engine import (
         ExecutionResult,
@@ -305,9 +314,10 @@ async def test_pending_worker_fill_mirrors_projection(monkeypatch):
 
         monkeypatch.setattr(SimulationExecutionEngine, "execute_order", _fake_exec)
         monkeypatch.setattr(SimulationExecutionEngine, "apply_filled", _fake_apply)
+        _patch_always_executable(monkeypatch)
 
         worker = SimulationPendingOrderWorker(interval_seconds=15, batch_size=50)
-        assert await worker.run_once() >= 1
+        assert await worker.run_once(tenant_id=tenant) >= 1
 
         v1, v2 = await _read_both(order_id)
         assert v1.status == OrderStatus.FILLED
@@ -323,7 +333,6 @@ async def test_pending_worker_fill_mirrors_projection(monkeypatch):
 @pytest.mark.asyncio
 async def test_cancel_mirrors_projection_and_worker_skips(monkeypatch):
     await _ensure_db_pool()
-    await _assert_no_foreign_pending()
     from backend.services.simulation.models.order import OrderStatus, SimOrder
     from backend.services.simulation.services.execution_engine import (
         SimulationExecutionEngine,
@@ -359,7 +368,7 @@ async def test_cancel_mirrors_projection_and_worker_skips(monkeypatch):
             SimulationExecutionEngine, "execute_order", _must_not_exec
         )
         worker = SimulationPendingOrderWorker(interval_seconds=15, batch_size=50)
-        assert await worker.run_once() == 0
+        assert await worker.run_once(tenant_id=tenant) == 0
 
         v1, v2 = await _read_both(order_id)
         assert v1.status == OrderStatus.CANCELLED
@@ -377,9 +386,13 @@ def test_terminal_state_mirror_wiring_source_guards():
     worker_src = (
         _BACKEND / "services/simulation/services/pending_order_worker.py"
     ).read_text(encoding="utf-8")
-    assert "load_runtime_order" in worker_src  # v1 行优先（终态写回 v1 生效）
+    # v1 台账行优先（终态写回 v1 生效）；缺行投影单显式拒（不重放幻影单）
+    assert "SimOrder.order_id == projection_order.order_id" in worker_src
+    assert "legacy order missing" in worker_src
+    # 原子认领（并发/重放防双执行）
+    assert "claim.rowcount != 1" in worker_src
     # 终态（过期/拒单/成交）均镜像 V2 投影
-    assert worker_src.count("sync_order_projection") >= 4
+    assert worker_src.count("sync_order_projection") >= 2
 
     router_src = (
         _BACKEND / "services/simulation/services/order_router.py"

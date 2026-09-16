@@ -65,6 +65,9 @@ async def lifespan(app: FastAPI):
     tdx_l2_capture_task = None
     tdx_l2_realtime_task = None
     t1_unlock_task = None
+    simulation_pending_order_task = None
+    corp_action_task = None
+    simulation_eod_task = None
 
     try:
         await init_unified_config(service_name="quantmind-trade")
@@ -239,6 +242,14 @@ async def lifespan(app: FastAPI):
             run_simulation_t1_unlock_task(),
             name="simulation-t1-unlock",
         )
+        from backend.services.simulation.services.pending_order_worker import (
+            run_simulation_pending_order_worker,
+        )
+
+        simulation_pending_order_task = asyncio.create_task(
+            run_simulation_pending_order_worker(),
+            name="simulation-pending-order-worker",
+        )
         from backend.services.live_trading.services.risk_trigger_scanner import (
             RiskTriggerScanner,
             scan_enabled,
@@ -262,6 +273,18 @@ async def lifespan(app: FastAPI):
             run_simulation_corporate_action_task(),
             name="simulation-corporate-action",
         )
+        try:
+            from backend.services.simulation.services.eod_service import (
+                run_simulation_eod_worker,
+            )
+
+            simulation_eod_task = asyncio.create_task(
+                run_simulation_eod_worker(),
+                name="simulation-eod-worker",
+            )
+            logger.info("Simulation EOD worker scheduled")
+        except Exception as e:
+            logger.error("trade simulation EOD worker start failed: %s", e, exc_info=True)
         # 模拟盘持久化权益结算（对账确权→行情重估→权益持久化，默认 30s 周期，
         # 无交易时段门控，启动即执行首周期）。取代旧的三个独立 worker：
         # 每日 03:20 reconcile、300s fund snapshot、仅交易时段运行的 remark——
@@ -474,7 +497,7 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning("trade risk trigger scanner stop failed: %s", e)
 
-    for task in (scanner_task, margin_task, snapshot_task, ledger_settlement_task, manual_execution_task, sandbox_signal_task, tdx_account_sync_task, qmt_account_sync_task, qmt_exec_poller_task, mirror_queue_drainer_task, qmt_sltp_executor_task, dual_book_reconcile_task, shadow_compare_task, eval_scores_task, health_recheck_task, close_audit_task, tdx_quote_feed_task, tdx_l2_capture_task, tdx_l2_realtime_task, t1_unlock_task, corp_action_task):
+    for task in (scanner_task, margin_task, snapshot_task, ledger_settlement_task, manual_execution_task, sandbox_signal_task, tdx_account_sync_task, qmt_account_sync_task, qmt_exec_poller_task, mirror_queue_drainer_task, qmt_sltp_executor_task, dual_book_reconcile_task, shadow_compare_task, eval_scores_task, health_recheck_task, close_audit_task, tdx_quote_feed_task, tdx_l2_capture_task, tdx_l2_realtime_task, t1_unlock_task, simulation_pending_order_task, corp_action_task, simulation_eod_task):
         if task is None:
             continue
         task.cancel()

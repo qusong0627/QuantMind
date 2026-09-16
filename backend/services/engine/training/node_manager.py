@@ -296,6 +296,33 @@ awk '{print $1}' /proc/loadavg 2>/dev/null
         return args
 
     @classmethod
+    async def _run_collect_cmd(
+        cls, node: dict[str, Any], cmd: str | None = None
+    ) -> tuple[int | None, bytes, bytes]:
+        """执行一次远端采集命令（cmd 缺省为容器版采集脚本；SSH 机制单实现）。
+
+        返回 (returncode, stdout, stderr)；超时返回 (None, b"", b"")
+        （超时时尽力 kill 子进程，避免残留 ssh 挂死）。
+        """
+        proc = await asyncio.create_subprocess_exec(
+            *cls._build_ssh(node),
+            cmd or cls._COLLECT_CMD,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(), timeout=cls._SSH_TIMEOUT
+            )
+        except asyncio.TimeoutError:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            return None, b"", b""
+        return proc.returncode, stdout or b"", stderr or b""
+
+    @classmethod
     async def collect(cls, node: dict[str, Any]) -> dict[str, Any]:
         """SSH 采集节点状态。失败时返回 offline 标记，不抛错。"""
         result: dict[str, Any] = {
@@ -337,22 +364,11 @@ awk '{print $1}' /proc/loadavg 2>/dev/null
             else:
                 probe += "echo no-docker; "
             probe += "echo ===NET===; cat /proc/loadavg 2>/dev/null | awk '{print $1}'"
-            proc = await asyncio.create_subprocess_exec(
-                *cls._build_ssh(node),
-                probe,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            try:
-                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=cls._SSH_TIMEOUT)
-            except asyncio.TimeoutError:
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
+            rc, stdout, stderr = await cls._run_collect_cmd(node, probe)
+            if rc is None:
                 result["error"] = "SSH 连接超时"
                 return cls.assess_readiness(result)
-            if proc.returncode not in (0, None):
+            if rc not in (0, None):
                 result["error"] = (stderr or stdout).decode(errors="replace")[:200]
                 return cls.assess_readiness(result)
             out = stdout.decode(errors="replace")
@@ -361,23 +377,35 @@ awk '{print $1}' /proc/loadavg 2>/dev/null
                 return cls.assess_readiness(result)
             # 与容器版同走 _parse:GPU 列表/活跃任务/readiness 标签统一解析
             return cls._parse(out, result)
-        proc = await asyncio.create_subprocess_exec(
-            *cls._build_ssh(node),
-            cls._COLLECT_CMD,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=cls._SSH_TIMEOUT)
-        except asyncio.TimeoutError:
-            try:
-                proc.kill()
-            except Exception:
-                pass
+        rc, stdout, stderr = await cls._run_collect_cmd(node)
+        if rc is None:
             result["error"] = "SSH 连接超时"
             return cls.assess_readiness(result)
 
-        if proc.returncode not in (0, None):
+        if rc != 0:
+            if rc < 0:
+                # 子进程被信号终止（如 rc=-11 SIGSEGV），多为长跑进程中的
+                # 瞬时问题，重试一次；仍失败则走常规错误映射。
+                logger.warning(
+                    "训练节点 SSH 采集进程异常退出 id=%s rc=%s，重试一次",
+                    node.get("id"),
+                    rc,
+                )
+                rc, stdout, stderr = await cls._run_collect_cmd(node)
+                if rc is None:
+                    result["error"] = "SSH 连接超时"
+                    return cls.assess_readiness(result)
+                if rc == 0:
+                    return cls._parse(stdout.decode(errors="replace"), result)
+                err_preview = (
+                    stderr.decode(errors="replace") if stderr else ""
+                ).strip()[:200]
+                logger.warning(
+                    "训练节点 SSH 采集重试失败 id=%s rc=%s err=%s",
+                    node.get("id"),
+                    rc,
+                    err_preview,
+                )
             err_msg = (stderr.decode(errors="replace") if stderr else "").strip()
             if "Permission denied" in err_msg:
                 result["error"] = "SSH 密码/密钥认证失败"
@@ -388,7 +416,7 @@ awk '{print $1}' /proc/loadavg 2>/dev/null
             elif "No route to host" in err_msg or "Host is down" in err_msg:
                 result["error"] = "主机不可达 (已关机)"
             else:
-                result["error"] = err_msg or f"SSH 连接失败 (code={proc.returncode})"
+                result["error"] = err_msg or f"SSH 连接失败 (code={rc})"
             return cls.assess_readiness(result)
 
         out = stdout.decode(errors="replace")

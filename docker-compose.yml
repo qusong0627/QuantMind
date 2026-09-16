@@ -59,6 +59,7 @@ services:
         TORCH_DEVICE: ${TORCH_DEVICE:-skip}
         TORCH_CPU_INDEX_URL: ${TORCH_CPU_INDEX_URL:-https://download.pytorch.org/whl/cpu}
         QM_REQ_SHA: ${QM_REQ_SHA:-unknown}
+        APT_MIRROR: ${APT_MIRROR:-mirrors.tuna.tsinghua.edu.cn}
     platform: linux/amd64
     # GPU 直通：宿主机已安装 nvidia-container-toolkit 时可开启
     # deploy:
@@ -116,6 +117,15 @@ services:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - REDIS_PASSWORD=
+      # 模拟撮合实时行情；生产可覆盖为独立行情 Redis，禁止在源码中内置凭据。
+      - REMOTE_QUOTE_REDIS_HOST=${REMOTE_QUOTE_REDIS_HOST:-redis}
+      - REMOTE_QUOTE_REDIS_PORT=${REMOTE_QUOTE_REDIS_PORT:-6379}
+      - REMOTE_QUOTE_REDIS_PASSWORD=${REMOTE_QUOTE_REDIS_PASSWORD:-}
+      - REMOTE_QUOTE_REDIS_DB=${REMOTE_QUOTE_REDIS_DB:-3}
+      - SIM_REDIS_QUOTE_MAX_AGE_SEC=${SIM_REDIS_QUOTE_MAX_AGE_SEC:-300}
+      - SIM_LIQUIDITY_WINDOW_SEC=${SIM_LIQUIDITY_WINDOW_SEC:-60}
+      - SIMULATION_MAX_PARTICIPATION_RATE=${SIMULATION_MAX_PARTICIPATION_RATE:-0.10}
+      - SIM_LIQUIDITY_UNVERIFIED_MAX_NOTIONAL=${SIM_LIQUIDITY_UNVERIFIED_MAX_NOTIONAL:-100000}
 
       # 远端行情 Redis（模拟撮合 L0 快照取价 / 实盘预检直连；两处共用一个配置源）。
       # 留空 = 使用官方公共免费行情服（默认值在 backend/shared/remote_quote_config.py）；
@@ -584,6 +594,8 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile.data-gateway
+      args:
+        APT_MIRROR: ${APT_MIRROR:-mirrors.tuna.tsinghua.edu.cn}
     container_name: quantmind-data-gateway
     ports:
       - "127.0.0.1:${DATA_GATEWAY_PORT:-8004}:8004"
@@ -670,10 +682,10 @@ services:
     image: agentscope/qwenpaw:latest
     container_name: qwenpaw
     ports:
-      # 默认仅回环（00a8d9bc 安全收敛口径）。需要外部直连的机器在 .env 设置
-      # QWENPAW_BIND=0.0.0.0（qwenpaw 为免登录模式，建议配合云安全组/防火墙
-      # 限制来源 IP）。.env 不被 git 跟踪，绑定策略在部署更新后保留。
-      - "${QWENPAW_BIND:-127.0.0.1}:${QWENPAW_PORT:-8088}:8088"
+      # 默认对外绑定 0.0.0.0：QuantBot 页面由浏览器/Electron 直连 <宿主>:8088，
+      # 回环绑定会导致外部无法访问。qwenpaw 为免登录模式，请配合云安全组/防火墙
+      # 限制来源 IP；确需仅本机访问的机器在 .env 设置 QWENPAW_BIND=127.0.0.1。
+      - "${QWENPAW_BIND:-0.0.0.0}:${QWENPAW_PORT:-8088}:8088"
     networks:
       quantmind-net:
         aliases:

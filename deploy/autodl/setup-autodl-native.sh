@@ -190,25 +190,29 @@ if [ -n "$API_KEY" ]; then
     fi
 else
     if is_noninteractive; then
-        error "非交互模式需要环境变量 QUANTDB_API_KEY"
+        warn "未提供 QUANTDB_API_KEY，跳过数据源配置（后续可用 AUTODL_RESYNC=1 QUANTDB_API_KEY=… 补）"
+    else
+        ask_line "请输入 QUANTDB_API_KEY（可选，跳过则不自动下载因子）:" || true
+        API_KEY="${REPLY:-}"
     fi
-    ask_line "请输入 QUANTDB_API_KEY（写入 $ENV_FILE，用于自动下载因子）:" || true
-    API_KEY="${REPLY:-}"
-    [ -n "$API_KEY" ] || error "未输入 API Key"
 fi
 
 export QUANTDB_API_KEY="$API_KEY"
-write_key "$ENV_FILE" "$API_KEY"
-chmod 600 "$ENV_FILE" 2>/dev/null || true
-write_key "$HOME/.bashrc" "$API_KEY"
-write_key "$NODE_ENV_FILE" "$API_KEY"
-chmod 600 "$NODE_ENV_FILE" 2>/dev/null || true
-if [ "$ENV_FILE" = "/etc/profile.d/quantmind_sh.sh" ]; then
-    grep -q "quantmind_sh.sh" /etc/profile 2>/dev/null \
-        || echo ". /etc/profile.d/quantmind_sh.sh" >> /etc/profile 2>/dev/null \
-        || true
+if [ -n "$API_KEY" ]; then
+    write_key "$ENV_FILE" "$API_KEY"
+    chmod 600 "$ENV_FILE" 2>/dev/null || true
+    write_key "$HOME/.bashrc" "$API_KEY"
+    write_key "$NODE_ENV_FILE" "$API_KEY"
+    chmod 600 "$NODE_ENV_FILE" 2>/dev/null || true
+    if [ "$ENV_FILE" = "/etc/profile.d/quantmind_sh.sh" ]; then
+        grep -q "quantmind_sh.sh" /etc/profile 2>/dev/null \
+            || echo ". /etc/profile.d/quantmind_sh.sh" >> /etc/profile 2>/dev/null \
+            || true
+    fi
+    ok "QUANTDB_API_KEY 已写入 $ENV_FILE 、~/.bashrc、$NODE_ENV_FILE"
+else
+    warn "未写入 QUANTDB_API_KEY（跳过数据源配置）"
 fi
-ok "QUANTDB_API_KEY 已写入 $ENV_FILE 、~/.bashrc、$NODE_ENV_FILE"
 info "非登录 SSH（编排器）不一定会 source profile.d；开训同步由主节点注入 Key。"
 
 # ── 4. 训练数据集：自动 / 增量 / 手动 ───────────────
@@ -359,8 +363,10 @@ PY
 
 case "$SYNC_MODE" in
     yes)
-        [ -n "$API_KEY" ] || error "自动同步需要 QUANTDB_API_KEY"
-        if run_sdk_sync "$SINCE" "$DATASETS"; then
+        if [ -z "$API_KEY" ]; then
+            warn "未配置 QUANTDB_API_KEY，无法自动同步；改为手动上传"
+            print_manual_hint
+        elif run_sdk_sync "$SINCE" "$DATASETS"; then
             if [ -d "$FACTOR_DIR" ] && [ -n "$(ls -A "$FACTOR_DIR" 2>/dev/null)" ]; then
                 ok "数据集已就绪 $(du -sh "$FACTOR_DIR" | cut -f1): $(ls -1 "$FACTOR_DIR" | tr '\n' ' ')"
             else

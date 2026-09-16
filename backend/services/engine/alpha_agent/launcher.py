@@ -89,6 +89,10 @@ class AlphaAgentLauncher:
         llm_overrides: 用户级 LLM 环境变量覆盖（如个人中心配置的 API Key），
         优先于容器全局 env 注入子进程。
         """
+        from backend.services.engine.alpha_agent.hw_lock import assert_factor_mining_hardware
+
+        assert_factor_mining_hardware()
+
         task_id = uuid.uuid4().hex[:16]
         task = EvolutionTask(
             task_id=task_id, user_id=user_id, market=market,

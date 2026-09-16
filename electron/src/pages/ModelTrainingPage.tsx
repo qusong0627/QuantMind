@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { AnimatePresence, motion } from 'framer-motion';
 import {
   Brain, ChevronRight, Play, Settings2, BarChart, Database,
-  Copy, Sparkles, RefreshCcw, Target, Upload, Layers
+  Copy, Sparkles, RefreshCcw, Target, Upload, Layers, Square
 } from 'lucide-react';
 import {
   Button, Space, Tag, Typography, message, Card, Select, Modal, Alert, Tooltip
@@ -206,6 +206,7 @@ export const ModelTrainingPage: React.FC = () => {
   const [logs, setLogs] = useState<string[]>([]);
   const [result, setResult] = useState<TrainingResult | null>(null);
   const [resultError, setResultError] = useState<string>('');
+  const [activeRunId, setActiveRunId] = useState<string>('');
   const [settingDefaultModel, setSettingDefaultModel] = useState(false);
   const [draftSavedAt, setDraftSavedAt] = useState<string>('');
   const [trainingNodes, setTrainingNodes] = useState<any[]>([]);
@@ -508,6 +509,7 @@ export const ModelTrainingPage: React.FC = () => {
         payload.factor_catalog_version = factorCatalogVersion;
       }
       const { runId } = await modelTrainingService.runTraining(payload);
+      setActiveRunId(runId);
       pushLog(`提交成功，Run ID: ${runId}`);
       startPolling(runId);
     } catch (err: any) {
@@ -545,6 +547,17 @@ export const ModelTrainingPage: React.FC = () => {
         setProgress(Math.max(run.progress || 5, 5));
       }
 
+      if (run.status === 'cancelled') {
+        clearTimers();
+        pushLog('训练已被取消');
+        setTrainingStatus('draft');
+        setExecutionStage('已取消');
+        setBackendRunStatus('');
+        setActiveRunId('');
+        message.info('训练已取消');
+        return;
+      }
+
       if (run.isCompleted || failedByLog || run.status === 'failed') {
         clearTimers();
         if (run.status === 'failed' || failedByLog) {
@@ -573,41 +586,24 @@ export const ModelTrainingPage: React.FC = () => {
     pollTimerRef.current = window.setInterval(tick, 3000);
   };
 
-  // 页面挂载时恢复「切页前的活跃训练」：有进行中/最近任务则继续轮询，进度不丢
+  // 页面挂载时仅恢复「进行中」的训练任务：切页前的 running/provisioning 继续轮询，
+  // 进度不丢。已完成/失败不恢复，页面停在第一步（避免进页即跳到第五步结果页）。
   useEffect(() => {
     let active = true;
     (async () => {
       const run = await modelTrainingService.getActiveTrainingRun();
       if (!active || !run) return;
+      const inProgress =
+        !run.isCompleted &&
+        ['running', 'provisioning', 'waiting_callback', 'pending'].includes(run.status || '');
+      if (!inProgress) return;
       ingestServerLogs(run.logs);
-      const failedByLog = /\[ERROR\].*(编排失败|训练异常退出|原生进程轮询异常)/.test(run.logs || '');
-      // 仅恢复尚未完成的任务；已完成/失败（含 Redis 终态、日志已报错）不再伪装成训练中
-      if (run.isCompleted || run.status === 'failed' || failedByLog) {
-        setBackendRunStatus(run.status || (failedByLog ? 'failed' : ''));
-        if (run.status === 'failed' || failedByLog) {
-          setResultError((run.result as any)?.error || '训练失败');
-          setTrainingStatus('draft');
-          setExecutionStage('待配置');
-          setBackendRunStatus('');
-        } else {
-          const parsed = parseTrainingResult(requestPreview, run.runId, run.result);
-          if (parsed) {
-            setResult(parsed);
-            setResultError('');
-            setTrainingStatus('completed');
-            setProgress(100);
-            setCurrentStep(4);
-            setExecutionStage('训练完成');
-          }
-        }
-        return;
-      }
       setBackendRunStatus(run.status || '');
-      if (run.status === 'running' || run.status === 'provisioning' || run.status === 'waiting_callback' || run.status === 'pending') {
-        setProgress(Math.max(run.progress || 5, 5));
-      }
+      setProgress(Math.max(run.progress || 5, 5));
       setTrainingStatus('running');
       setExecutionStage('训练进行中（已从上次会话恢复）');
+      setCurrentStep(3);
+      setActiveRunId(run.runId);
       startPolling(run.runId);
     })();
     return () => {
@@ -630,6 +626,31 @@ export const ModelTrainingPage: React.FC = () => {
     setTrainingStatus('draft');
     setResult(null);
     setResultError('');
+  };
+
+  const handleCancelTraining = () => {
+    if (!activeRunId) return;
+    Modal.confirm({
+      title: '取消训练',
+      content: `确定要取消训练任务 ${activeRunId} 吗？训练容器/进程将被停止，已产出的模型不会入库。`,
+      okText: '取消训练',
+      okButtonProps: { danger: true },
+      cancelText: '继续训练',
+      onOk: async () => {
+        try {
+          await modelTrainingService.cancelTrainingRun(activeRunId);
+          clearTimers();
+          pushLog('已提交取消请求，正在停止训练…');
+          setTrainingStatus('draft');
+          setExecutionStage('已取消');
+          setBackendRunStatus('');
+          setActiveRunId('');
+          message.success('训练已取消');
+        } catch (err: any) {
+          message.error(`取消失败: ${err.message}`);
+        }
+      },
+    });
   };
 
   const handleResetAll = () => {
@@ -923,6 +944,17 @@ export const ModelTrainingPage: React.FC = () => {
                         </>
                       )}
                       <Button size="small" icon={<RefreshCcw size={14}/>} className="rounded-xl h-8 font-bold px-3" onClick={handleResetAll} disabled={isTrainingInProgress}>清空</Button>
+                      {isTrainingInProgress && (
+                        <Button
+                          size="small"
+                          danger
+                          icon={<Square size={14} />}
+                          className="rounded-xl h-8 font-bold px-4"
+                          onClick={handleCancelTraining}
+                        >
+                          取消训练
+                        </Button>
+                      )}
                       <Tooltip title={disableStartTraining ? startDisabledReason : undefined}>
                         <span className={disableStartTraining ? 'inline-block' : undefined}>
                           <Button size="small" type="primary" icon={<ChevronRight size={14}/>} className="rounded-xl h-8 bg-blue-600 font-bold px-4 shadow-sm" onClick={stepAction} disabled={disableStartTraining}>

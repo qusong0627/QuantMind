@@ -1,11 +1,11 @@
-"""管理员身份口径：username='admin'，user_id='00000001'。
+"""管理员身份口径：username='admin'，user_id='10000001'。
 
-历史原因（db_init.sql 曾 seed user_id='admin' 的坏行，且 seed_data 按 username
-判存在后跳过），线上 users.user_id 可能为 'admin'，导致 JWT sub、信号表、
-池目录等全链路拿的是 'admin' 而非 8 位规范 ID。
+历史原因（db_init.sql 曾 seed user_id='admin'，后又纠正为 '00000001'）：
+``00000001`` 经 int() 会变成 1，和 admin JWT 落到的模拟账户 0 对不上。
+规范 ID 必须是 8 位且不以 0 开头，int(user_id) 与字符串一致。
 
-本模块提供幂等纠正：把所有字符型 user_id 列中的 'admin' 改为 '00000001'，
-整数列（strategies.user_id 等存 users.id）不受影响，无需处理。
+本模块提供幂等纠正：把字符型 user_id 列中的 'admin' / '00000001'
+改为 '10000001'。整数列（strategies.user_id 等存 users.id）不受影响。
 """
 
 from __future__ import annotations
@@ -18,8 +18,25 @@ from sqlalchemy import text
 logger = logging.getLogger(__name__)
 
 ADMIN_USERNAME = "admin"
-ADMIN_USER_ID = "00000001"
+ADMIN_USER_ID = "10000001"
 LEGACY_ADMIN_USER_ID = "admin"
+LEGACY_ADMIN_USER_IDS = frozenset({"admin", "00000001"})
+# 模拟盘 Redis/PG 曾把 admin 写成 0，把 00000001 写成 1
+OSS_ADMIN_SIM_ALIASES = frozenset({"0", "1", "00000001", "10000001", "admin"})
+
+
+def is_admin_user_id(user_id: object) -> bool:
+    from backend.shared.simulation_account_keys import is_admin_sim_user
+
+    return is_admin_sim_user(user_id)
+
+
+def normalize_admin_user_id(user_id: object) -> str:
+    """旧 token / 历史键一律收到 10000001。"""
+    if is_admin_user_id(user_id):
+        return ADMIN_USER_ID
+    return str(user_id or "").strip()
+
 
 # 指向 users(user_id) 的 FK 约束名（live 库实测）。约束为即时检查：
 # 子表先改则子侧校验失败，父表先改则父侧校验失败，故事务内先 drop、
@@ -138,12 +155,13 @@ async def migrate_user_ids(
 
 
 async def fix_admin_user_id(dry_run: bool = False) -> dict[str, Any]:
-    """纠正 admin 的 user_id 为 00000001（幂等，可重复执行）。
+    """纠正 admin 的 user_id 为 10000001（幂等，可重复执行）。
 
-    返回 {"updated": {table: rows}, "users_fixed": bool, "dry_run": bool}。
+    同时收口历史 'admin' 与 '00000001'。
     """
     report = await migrate_user_ids(
-        {LEGACY_ADMIN_USER_ID: ADMIN_USER_ID}, dry_run=dry_run
+        dict.fromkeys(LEGACY_ADMIN_USER_IDS, ADMIN_USER_ID),
+        dry_run=dry_run,
     )
     report["users_fixed"] = bool(report["updated"].get("users"))
     return report
@@ -174,9 +192,11 @@ async def generate_user_id(session, taken: set[str] | None = None) -> str:
     from sqlalchemy import text as _text
 
     taken = taken or set()
+    reserved = {ADMIN_USER_ID, *LEGACY_ADMIN_USER_IDS, "00000000"}
     for _ in range(50):
-        candidate = f"{_uuid.uuid4().int % 10**8:08d}"
-        if candidate in taken:
+        # 10000000-99999999：8 位且不以 0 开头，避免 int(user_id) 丢掉前导零。
+        candidate = str(_uuid.uuid4().int % 90_000_000 + 10_000_000)
+        if candidate in taken or candidate in reserved:
             continue
         exists = (
             await session.execute(
@@ -190,9 +210,9 @@ async def generate_user_id(session, taken: set[str] | None = None) -> str:
 
 
 async def plan_legacy_migration() -> dict[str, str]:
-    """为所有不规范 user_id 规划映射：admin 用户名→00000001，其余随机 8 位。
+    """为所有不规范 user_id 规划映射：admin 用户名→10000001，其余随机 8 位。
 
-    00000001 被非 admin 占用时抛 ValueError 由调用方处理。
+    10000001 被非 admin 占用时抛 ValueError 由调用方处理。
     """
     from sqlalchemy import text as _text
 
@@ -216,7 +236,7 @@ async def plan_legacy_migration() -> dict[str, str]:
                 new = ADMIN_USER_ID
                 if new in taken and new != old:
                     raise ValueError(
-                        "00000001 已被非 admin 用户占用，请先手工处理"
+                        f"{ADMIN_USER_ID} 已被非 admin 用户占用，请先手工处理"
                     )
             else:
                 new = await generate_user_id(session, taken)
@@ -250,7 +270,10 @@ def needs_fix_sync() -> bool:
     try:
         with engine.connect() as conn:
             n = conn.execute(
-                text("SELECT count(*) FROM users WHERE user_id='admin'")
+                text(
+                    "SELECT count(*) FROM users "
+                    "WHERE user_id IN ('admin', '00000001')"
+                )
             ).scalar()
             return bool(n)
     finally:

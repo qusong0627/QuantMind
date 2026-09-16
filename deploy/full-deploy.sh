@@ -9,7 +9,7 @@
 #   QUANTMIND_DOCKER_MIRROR  Docker 镜像加速地址
 #   QUANTMIND_REPO_URL    代码仓库地址（默认自建 Gitea）
 #   QUANTMIND_REF         要部署的 Git 分支或 tag（默认 master）
-#   QUANTMIND_REPLACE_QLIB=true       覆盖已有 db/qlib_data（谨慎）
+#   QUANTMIND_REPLACE_QLIB=true       覆盖已有 Qlib 数据 data/qlib/cn_data（谨慎）
 #   QUANTMIND_REPLACE_DATABASE=true   覆盖已有 PostgreSQL 业务数据（谨慎）
 #   QUANTMIND_REPLACE_QWENPAW_DATA=true 覆盖已有 QwenPaw 持久化数据（谨慎）
 #   QUANTMIND_REBUILD_IMAGE=true 无条件基于最新代码重建 quantmind 镜像。
@@ -291,17 +291,6 @@ checkout_code() {
 }
 
 install_payload_data() {
-    local qlib_target="$PROJECT_DIR/db/qlib_data"
-    # 只有真实 Qlib 数据才默认保留；仓库中的空目录或损坏数据会被离线包替换。
-    if [[ -e "$qlib_target" ]] && has_qlib_features "$qlib_target" \
-        && [[ ${QUANTMIND_REPLACE_QLIB:-false} != true ]]; then
-        log "检测到有效 Qlib 数据，复用现有目录: $qlib_target"
-    else
-        rm -rf "$qlib_target"
-        mkdir -p "$PROJECT_DIR/db"
-        mv "$STAGING_DIR/db/qlib_data" "$qlib_target"
-    fi
-
     for directory in data models; do
         [[ -d "$STAGING_DIR/$directory" ]] || die "业务数据包缺少: $directory"
         if [[ -e "$PROJECT_DIR/$directory" ]] \
@@ -312,6 +301,27 @@ install_payload_data() {
             mv "$STAGING_DIR/$directory" "$PROJECT_DIR/$directory"
         fi
     done
+
+    # Qlib A 股缓存统一放在规范目录 data/qlib/cn_data（容器内 /data/qlib/cn_data，
+    # 与 backend/shared/qlib_paths.py 及前端 marketConfig 一致）。
+    # 旧版部署包/旧脚本可能落在 db/qlib_data，检测到有效数据时自动迁移，
+    # 避免「夜间同步写 A 目录、AI-IDE 读 B 目录」导致 Qlib 数据目录不存在。
+    local qlib_target="$PROJECT_DIR/data/qlib/cn_data"
+    local qlib_legacy="$PROJECT_DIR/db/qlib_data"
+    if has_qlib_features "$qlib_target" \
+        && [[ ${QUANTMIND_REPLACE_QLIB:-false} != true ]]; then
+        log "检测到有效 Qlib 数据，复用现有目录: $qlib_target"
+    elif has_qlib_features "$qlib_legacy" \
+        && [[ ${QUANTMIND_REPLACE_QLIB:-false} != true ]]; then
+        log "检测到旧位置 Qlib 数据，迁移到规范目录: $qlib_legacy -> $qlib_target"
+        mkdir -p "$PROJECT_DIR/data/qlib"
+        rm -rf "$qlib_target"
+        mv "$qlib_legacy" "$qlib_target"
+    else
+        rm -rf "$qlib_target"
+        mkdir -p "$PROJECT_DIR/data/qlib"
+        mv "$STAGING_DIR/db/qlib_data" "$qlib_target"
+    fi
     rm -rf "$STAGING_DIR"
 }
 
@@ -412,6 +422,35 @@ configure_qwenpaw_runtime() {
     fi
 }
 
+# 统一 torch 形态，避免依赖指纹漂移：
+# 镜像的 qm.req.sha 把 TORCH_DEVICE 纳入（skip/cpu/gpu 是不同镜像）。此处解析生效值
+# （TORCH_DEVICE / QUANTMIND_TORCH_DEVICE > .env；均无则按 skip）并持久化到 .env，
+# 使后续 update/full-deploy 与当前镜像保持一致，不再误判漂移触发重建。
+ensure_torch_device() {
+    local device="${TORCH_DEVICE:-${QUANTMIND_TORCH_DEVICE:-}}"
+    local env_file="$PROJECT_DIR/.env"
+    if [[ -z "$device" && -f "$env_file" ]]; then
+        device="$(grep -E '^[[:space:]]*TORCH_DEVICE=' "$env_file" 2>/dev/null | tail -1 \
+            | cut -d= -f2- | tr -d "\"' " || true)"
+    fi
+    if [[ -z "$device" ]]; then
+        log '未指定 TORCH_DEVICE（按默认 skip 处理），如需 CPU/GPU 版 torch 请设 TORCH_DEVICE=cpu|gpu'
+        return 0
+    fi
+    export TORCH_DEVICE="$device"
+    if [[ -f "$env_file" ]]; then
+        if grep -qE '^[[:space:]]*TORCH_DEVICE=' "$env_file"; then
+            sed -i "s|^[[:space:]]*TORCH_DEVICE=.*|TORCH_DEVICE=${device}|" "$env_file"
+        else
+            printf '\n# torch 形态（full-deploy 写入，用于依赖指纹对齐）\nTORCH_DEVICE=%s\n' \
+                "$device" >> "$env_file"
+        fi
+        log "TORCH_DEVICE=$device（已同步 .env）"
+    else
+        log "TORCH_DEVICE=$device（.env 不存在，仅本次生效）"
+    fi
+}
+
 build_and_start() {
     log '步骤 8/8：基于最新代码重新构建并启动服务'
     cd "$PROJECT_DIR"
@@ -481,8 +520,9 @@ main() {
     install_payload_data
     restore_database
     restore_qwenpaw_volumes
+    ensure_torch_device
     build_and_start
-    log "完成：代码=$PROJECT_DIR，Qlib 数据=$PROJECT_DIR/db/qlib_data"
+    log "完成：代码=$PROJECT_DIR，Qlib 数据=$PROJECT_DIR/data/qlib/cn_data"
     echo ""
     echo "========================================================================="
     echo " 🎉 QuantMind 完整部署成功！"

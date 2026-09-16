@@ -36,6 +36,7 @@ cd ~/projects/quantmind && python3 scripts/alpha_agent/factor_pipeline.py --chec
 
 | 检查项 | 作用 | 失败处理 |
 |---|---|---|
+| `hardware` | 最低 **8 核 / 32GB**。RD-Agent 演化会把 CPU/内存打满，低于此规格直接 412 失败，避免整机卡死 | 换机器或关其他重负载；测试可设 `ALPHA_AGENT_SKIP_HW_LOCK=1`（生产勿开） |
 | `conda_shim` | RD-Agent LocalEnv 硬编码 `rdagent4qlib` conda 环境，容器无 conda，靠 shim 映射到容器 python | 确认 `docker/conda-shim` 挂载 `/usr/local/bin/conda:ro` 且文件有 `+x` |
 | `litellm_patch` | litellm 1.97 + pydantic 2.13 冲突（`Message is not fully defined`） | 确认 `docker/litellm_sitecustomize.py` 挂载为 `site-packages/sitecustomize.py:ro` |
 | `deepseek_key` | 因子挖掘走 DeepSeek 通道（`llm_env.py` 优先级最高） | 更新 `~/projects/quantmind/.env` 的 `DEEPSEEK_API_KEY`，改后必须 `docker compose up -d quantmind` recreate |

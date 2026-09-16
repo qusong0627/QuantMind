@@ -29,6 +29,7 @@ from backend.services.simulation.services.fund_snapshot_service import (
 from backend.services.trade_shared.redis_client import RedisClient
 from backend.services.trade_shared.simulation_manager import (
     SimulationAccountManager,
+    canonical_sim_uid,
     resolve_sim_subs,
 )
 from backend.shared.simulation_account_keys import parse_account_key
@@ -111,7 +112,7 @@ class StrategyMonitorPusher:
                 if not parsed:
                     continue
                 tenant, user, market = parsed
-                sim_uid = int(user) if str(user).isdigit() else 0
+                sim_uid = canonical_sim_uid(user)
 
                 raw = self.redis.client.get(key_str)
                 if not raw:

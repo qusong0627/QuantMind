@@ -11,6 +11,7 @@ import RuntimeLayer from './layers/RuntimeLayer';
 import OutputLayer from './layers/OutputLayer';
 import LogPanel from './layers/LogPanel';
 import { RUN_STATE_META } from './topologyTypes';
+import { sortTradingStrategies } from '../../utils/sortTradingStrategies';
 
 interface TopologyConsoleProps {
     tenantId: string;
@@ -58,7 +59,7 @@ const TopologyConsole: React.FC<TopologyConsoleProps> = ({
     const [logsOpen, setLogsOpen] = useState(false);
 
     const strategyOptions = useMemo(
-        () => overview.strategies.map((s) => ({
+        () => sortTradingStrategies(overview.strategies).map((s) => ({
             value: s.id,
             label: s.is_system ? `(内置) ${s.name}` : s.name,
         })),

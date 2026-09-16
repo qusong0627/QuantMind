@@ -1136,10 +1136,51 @@ class LocalDockerOrchestrator(TrainingOrchestrator):
                 user_id=user_id,
                 work_dir=container_work_dir,
                 max_time_minutes=max_time_minutes,
-            )
+            ),
+            run_id=run_id,
         )
 
     # ── 轮询容器状态 ─────────────────────────────────────────────────────────────
+    async def _cancel_container(
+        self,
+        run_id: str,
+        container_id: str,
+        tenant_id: str,
+        user_id: str,
+    ) -> None:
+        """用户取消：优雅停 + 删容器，落 cancelled 状态并清理取消标记。"""
+        try:
+            c = self.docker.containers.get(container_id)
+            c.reload()
+            if c.attrs["State"].get("Status") in ("running", "created", "paused"):
+                await asyncio.to_thread(c.stop, timeout=20)
+            await asyncio.to_thread(c.remove, {"force": True, "v": True})
+        except docker.errors.NotFound:
+            pass
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[%s] cancel stop container failed: %s", run_id, exc)
+
+        from backend.services.api.routers.admin.db import TrainingJobRecord
+        from backend.shared.database_manager_v2 import get_session
+
+        async with get_session() as db:
+            r = await db.get(TrainingJobRecord, run_id)
+            if r and str(r.status or "") not in ("completed", "failed"):
+                r.status = "cancelled"
+                r.logs = (r.logs or "") + "[SYSTEM] 训练已被用户取消，容器已停止\n"
+                r.progress = max(int(r.progress or 0), 0)
+                await db.commit()
+        self.log_stream.append_log(
+            run_id=run_id,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            line="[SYSTEM] 训练已被用户取消，容器已停止",
+            status="cancelled",
+            progress=0,
+            container_id=container_id[:12],
+        )
+        self.log_stream.clear_cancel(run_id)
+
     async def _poll_container(
         self,
         run_id: str,
@@ -1183,6 +1224,10 @@ class LocalDockerOrchestrator(TrainingOrchestrator):
 
         while time.time() < deadline:
             await asyncio.sleep(_POLL_INTERVAL)
+            if self.log_stream.is_cancel_requested(run_id):
+                await self._cancel_container(run_id, container_id, tenant_id, user_id)
+                await _try_resume()
+                return
             try:
                 c = self.docker.containers.get(container_id)
                 c.reload()
@@ -1260,6 +1305,25 @@ class LocalDockerOrchestrator(TrainingOrchestrator):
                     callback_received = False
                     while time.time() < callback_deadline:
                         await asyncio.sleep(max(1, _CALLBACK_CHECK_INTERVAL))
+                        if self.log_stream.is_cancel_requested(run_id):
+                            # waiting_callback 阶段用户取消：容器已退出，仅落 cancelled 状态
+                            async with get_session() as db:
+                                r = await db.get(TrainingJobRecord, run_id)
+                                if r and r.status not in ("completed", "failed"):
+                                    r.status = "cancelled"
+                                    r.logs = (r.logs or "") + "[SYSTEM] 训练已被用户取消\n"
+                                    await db.commit()
+                            self.log_stream.append_log(
+                                run_id=run_id,
+                                tenant_id=tenant_id,
+                                user_id=user_id,
+                                line="[SYSTEM] 训练已被用户取消",
+                                status="cancelled",
+                                container_id=container_id[:12],
+                            )
+                            self.log_stream.clear_cancel(run_id)
+                            await _try_resume()
+                            return
                         async with get_session(read_only=True) as db:
                             r = await db.get(TrainingJobRecord, run_id)
                             if r and str(r.status or "") in {"completed", "failed"}:

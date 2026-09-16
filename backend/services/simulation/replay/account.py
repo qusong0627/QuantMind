@@ -44,6 +44,15 @@ class ReplayAccountManager(SimulationAccountManager):
     def _get_settings_key(self, user_id: int, tenant_id: str) -> str:
         return f"replay:settings:{self._session_id}"
 
+    def _lookup_keys(self, user_id: int, tenant_id: str, market: str = "CN") -> list[str]:
+        # 回放账户与日常模拟盘**严格隔离**：读取只认会话键，不并入用户名别名
+        # （父类别名查找面向 simulation:account:* ，若并集可能读到真实账户数据）。
+        return [self._get_key(user_id, tenant_id, market)]
+
+    def _settings_lookup_keys(self, user_id: int, tenant_id: str) -> list[str]:
+        # 同上：设置读取同样只认会话键。
+        return [self._get_settings_key(user_id, tenant_id)]
+
     # ------------------------------------------------------------------
     # 便捷包装：省掉调用方到处传占位的 user_id/tenant_id
     # ------------------------------------------------------------------

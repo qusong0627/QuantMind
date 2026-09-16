@@ -22,6 +22,12 @@ from backend.services.trade.services.real_account_snapshot_guard import (
 )
 
 
+def test_lifecycle_exports_active_strategy_alias_helpers():
+    """import * 不会带出下划线函数，status/stop 必须显式导入别名读写。"""
+    assert callable(real_lifecycle._read_active_strategy_raw)
+    assert callable(real_lifecycle._delete_active_strategy_aliases)
+
+
 class _FakeMappingResult:
     def __init__(self, row):
         self._row = row

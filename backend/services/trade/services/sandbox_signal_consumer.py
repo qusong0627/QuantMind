@@ -16,7 +16,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.services.trade_shared.redis_client import redis_client
 from backend.services.simulation.models.order import OrderSide
-from backend.services.simulation.services.simulation_manager import SimulationAccountManager
+from backend.services.simulation.services.simulation_manager import (
+    SimulationAccountManager,
+    canonical_sim_uid,
+)
 from backend.services.trade_shared.trade_config import settings
 from backend.shared.database_manager_v2 import get_session
 
@@ -31,6 +34,25 @@ def _active_strategy_key(tenant_id: str, user_id: str) -> str:
     from backend.shared.simulation_account_keys import active_strategy_key
 
     return active_strategy_key(tenant_id, user_id)
+
+
+def _read_active_strategy_raw(tenant_id: str, user_id: str):
+    from backend.shared.simulation_account_keys import active_strategy_lookup_keys
+
+    if not redis_client.client:
+        return None
+    canonical = _active_strategy_key(tenant_id, user_id)
+    for key in active_strategy_lookup_keys(tenant_id, user_id):
+        raw = redis_client.client.get(key)
+        if not raw:
+            continue
+        if key != canonical:
+            try:
+                redis_client.client.set(canonical, raw)
+            except Exception:
+                pass
+        return raw
+    return None
 
 
 class SandboxSignalConsumer:
@@ -131,7 +153,7 @@ class SandboxSignalConsumer:
         if not redis_client.client:
             return False
         try:
-            raw = redis_client.client.get(_active_strategy_key(tenant_id, user_id))
+            raw = _read_active_strategy_raw(tenant_id, user_id)
             if not raw:
                 return False
             if isinstance(raw, bytes):
@@ -170,7 +192,7 @@ class SandboxSignalConsumer:
             logger.warning("[SandboxSignalConsumer] 信号缺少 symbol")
             return
 
-        user_id_int = int(user_id) if user_id.isdigit() else 0
+        user_id_int = canonical_sim_uid(user_id)
         if user_id_int <= 0:
             logger.warning("[SandboxSignalConsumer] 无效的 user_id: %s", user_id)
             return
@@ -251,7 +273,7 @@ class SandboxSignalConsumer:
             logger.warning("[SandboxSignalConsumer] 直接下单信号缺少必要参数")
             return
 
-        user_id_int = int(user_id) if user_id.isdigit() else 0
+        user_id_int = canonical_sim_uid(user_id)
         if user_id_int <= 0:
             return
 

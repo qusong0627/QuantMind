@@ -1,0 +1,17 @@
+# 本地临时配置（已被 .gitignore 忽略，不会提交到仓库）
+# exec_mode:
+#   - ssh_docker   （默认）走 docker run（节点需装 docker + nvidia-container-toolkit + 训练镜像）
+#   - native_python 免 docker 直跑 train.py（AutoDL Python 容器）
+nodes:
+  - id: autodl-1
+    name: "AutoDL RTX4090 (免Docker原生直跑)"
+    host: "connect.bjb2.seetacloud.com"
+    port: 27045
+    user: "root"
+    ssh_password: "Qz8kRgnt8SWh"
+    ssh_key: "C:\\Users\\quson\\.ssh\\id_ed25519"
+    work_dir: "/root/workspace"
+    docker_image: ""
+    gpus: "all"
+    exec_mode: "native_python"
+    quantdb_dir: "/root/autodl-fs/quantdb"

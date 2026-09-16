@@ -1,5 +1,4 @@
 from datetime import datetime
-from typing import List, Optional
 from uuid import UUID
 
 import logging
@@ -36,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 
 def _require_user_id(raw_user_id: str, tenant_id: str = "default") -> int:
-    """兼容别名，统一走 require_sim_user_id（OSS admin 归保留账户 0）。"""
+    """兼容别名，统一走 require_sim_user_id（OSS admin 归 10000001）。"""
     return require_sim_user_id(raw_user_id, tenant_id=tenant_id)
 
 
@@ -71,6 +70,16 @@ async def create_order(
                 existing = exc.existing
                 await db.refresh(existing)
                 return existing
+            # 会话门：非交易时段即时单转挂单顺延（与 pending worker 同语义，唯一评估实现）
+            session_decision = await engine.assess_execution_window(order)
+            if not session_decision.can_execute:
+                await order_service.queue_order(
+                    order,
+                    session_decision.message,
+                    trading_session_date=session_decision.target_trade_date,
+                )
+                await db.refresh(order)
+                return order
             order.status = OrderStatus.SUBMITTED
             await db.commit()
             await db.refresh(order)
@@ -170,4 +179,4 @@ async def cancel_order(
     try:
         return await service.cancel_order(order, request.reason)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e

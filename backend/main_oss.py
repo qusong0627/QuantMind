@@ -668,7 +668,7 @@ def _ensure_seed_admin():
 
     离线部署的 postgres 转储不含 admin 用户，且历史上应用启动不会自动 seed，
     导致首次登录报 'user not found' (401)。这里在启动期幂等地创建默认 admin
-    （admin / admin123，user_id=00000001，is_admin=true，显示名 QuantMind、头像 /logo.png），
+    （admin / admin123，user_id=10000001，is_admin=true，显示名 QuantMind、头像 /logo.png），
     并补全 RBAC 角色。
     失败仅告警，不影响主流程启动。
     """

@@ -110,6 +110,9 @@ class TrainingRunLogStream:
         # 记录「该用户最近活跃的训练 run」，供前端切页后从 redis 恢复进度/状态。
         return f"{self.stream_prefix}:user:active:{tenant_id}:{user_id}"
 
+    def _cancel_key(self, run_id: str) -> str:
+        return f"{self.stream_prefix}:cancel:{run_id}"
+
     @staticmethod
     def _decode(raw: Any) -> str:
         if raw is None:
@@ -232,6 +235,36 @@ class TrainingRunLogStream:
                     ensure_ascii=False,
                 ),
             )
+        except Exception:
+            return
+
+    def mark_cancel_requested(self, run_id: str) -> None:
+        """置取消标记（训练编排器轮询循环据此 kill 容器/进程）。"""
+        client = self._get_client()
+        if client is None:
+            return
+        try:
+            client.setex(self._cancel_key(run_id), self.state_ttl_sec, "1")
+        except Exception:
+            return
+
+    def is_cancel_requested(self, run_id: str) -> bool:
+        """查询取消标记是否存在。"""
+        client = self._get_client()
+        if client is None:
+            return False
+        try:
+            return bool(client.get(self._cancel_key(run_id)))
+        except Exception:
+            return False
+
+    def clear_cancel(self, run_id: str) -> None:
+        """清理取消标记（任务终态后调用）。"""
+        client = self._get_client()
+        if client is None:
+            return
+        try:
+            client.delete(self._cancel_key(run_id))
         except Exception:
             return
 

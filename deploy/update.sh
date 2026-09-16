@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # QuantMind 一键更新脚本
 # 核心流程：拉代码 → 重建/重启后端容器 → 跑 data/upgrade_*.sql → 健康检查。
-# db/redis/qwenpaw 等基础设施容器不动（restart: unless-stopped 兜底）。
+# db/redis/qwenpaw 等基础设施容器不强制重启（仅 compose 配置漂移时按需重建）。
 # 用法：sudo bash deploy/update.sh [--ref master] [--remote gitee|github|origin] [--force] [--no-build] [--skip-backup]
 
 set -Eeuo pipefail
@@ -204,11 +204,20 @@ build_core() {
 
     # docker-compose.yml 仅参与"build 段"签名，不再整文件比对：
     # compose 里端口/环境变量/卷等改动不影响镜像层，改动它们不应触发镜像重建。
-    # 用 grep 摘出 build 段相关的行（build/context/dockerfile/args/target/... 含 key），
-    # 对该子集取 sha256 作为签名；只保留那些真正改变镜像构建的参数。
-    build_blk="$(grep -nE 'build:|context:|dockerfile:|args:|target:|cache_from:|TORCH_DEVICE|TORCH_CPU_INDEX_URL' \
-        "$PROJECT_DIR/docker-compose.yml" 2>/dev/null | sha256sum \
-        | awk '{print $1}' | head -c 64)"
+    # 注意：
+    #   1) 禁用 grep -n —— 行号会随文件任意位置的编辑而漂移，导致签名每次都变、
+    #      每次部署白白全量重建。
+    #   2) 用 awk 只截取 quantmind 服务块，其他服务的 build 段变更不误伤本镜像。
+    #   3) build args 在 compose 里是 ${TORCH_DEVICE:-skip} 这类静态插值文本，
+    #      .env 里切 cpu/gpu 不会改变该文本，故把 TORCH_DEVICE 生效值单独计入签名。
+    local svc_blk torch_val
+    svc_blk="$(awk '/^  quantmind:/{f=1;next} f && /^  [A-Za-z0-9_-]+:/{exit} f' \
+        "$PROJECT_DIR/docker-compose.yml" 2>/dev/null || true)"
+    torch_val="${TORCH_DEVICE:-$(grep -E '^[[:space:]]*TORCH_DEVICE=' "$PROJECT_DIR/.env" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d "\"' " || true)}"
+    build_blk="$(printf '%s' "$svc_blk" \
+        | grep -aE 'build:|context:|dockerfile:|args:|target:|platform:|cache_from:|TORCH_DEVICE|TORCH_CPU_INDEX_URL' \
+        | sha256sum | awk '{print $1}')${torch_val:-skip}"
+    build_blk="$(printf '%s' "$build_blk" | sha256sum | awk '{print $1}' | head -c 64)"
     build_blk="${build_blk:-missing}"
     trigger="${trigger}docker-compose-build=${build_blk}\n"
 
@@ -251,10 +260,10 @@ build_core() {
     printf '%s' "$trigger" > "$marker"
 }
 
-# 关键步骤：只重启 application 层容器，**不**碰 db/redis/qwenpaw 等基础设施
-# （db 已 restart: unless-stopped，无需脚本干预；碰它才容易翻车）
+# 关键步骤：强制重建 application 层容器（bind mount 代码需进程重启才生效），
+# 其余服务（含 db/redis/qwenpaw）不强制重启，仅在 compose 配置发生漂移时按需重建。
 restart_services() {
-    log '3/4 重启后端服务（quantmind + celery；不动 db/redis/qwenpaw）'
+    log '3/4 重启后端服务（强制重建 quantmind + celery）'
     cd "$PROJECT_DIR"
     local services=(quantmind)
     local service
@@ -264,6 +273,20 @@ restart_services() {
         fi
     done
     docker compose up -d --no-deps --force-recreate "${services[@]}"
+
+    # 配置漂移 reconcile：对其余服务执行一次 up -d，Compose 按配置 hash 仅重建
+    # 端口/环境/镜像/挂载发生变化的容器，未变更者原地不动（db/redis 不会被无谓重启）。
+    # 修复场景：改了 qwenpaw 的绑定/环境等 compose 配置后，update 流程此前从不重建它，
+    # 导致改动长期不生效（例如 qwenpaw 端口回退 127.0.0.1）。
+    local others=()
+    while IFS= read -r service; do
+        [[ -z "$service" ]] && continue
+        [[ " ${services[*]} " == *" $service "* ]] && continue
+        others+=("$service")
+    done < <(docker compose config --services)
+    if (( ${#others[@]} > 0 )); then
+        docker compose up -d --no-deps "${others[@]}"
+    fi
 }
 
 # 跑 data/upgrade_*.sql —— 这是用户最关心的"执行 SQL"主流程。

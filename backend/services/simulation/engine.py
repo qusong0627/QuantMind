@@ -47,6 +47,7 @@ from backend.services.simulation.services.signal_loader import (
 )
 from backend.services.simulation.services.simulation_manager import (
     SimulationAccountManager,
+    canonical_sim_uid,
 )
 from backend.services.trade_shared.trade_config import settings
 from backend.shared.database_manager_v2 import get_session
@@ -186,6 +187,22 @@ class SimulationEngine:
         self.rebalance_calculator = RebalanceCalculator()
         self._market_data = market_data or get_local_market_data()
 
+    def _ensure_redis(self) -> None:
+        """模块级单例默认是未 connect 的 RedisClient，bootstrap 必须接到 trade Redis。
+
+        原地更新 account_manager.redis（不重建管理器对象）：保留实例级注入点
+        （测试/联调常以 monkeypatch 替换 manager 方法，重建会静默绕过 mock）。
+        """
+        if getattr(self.redis, "client", None) is not None:
+            return
+        from backend.services.trade_shared.redis_client import get_redis
+
+        connected = get_redis()
+        if getattr(connected, "client", None) is None:
+            return
+        self.redis = connected
+        self.account_manager.redis = connected
+
     async def run_cycle(
         self,
         tenant_id: str,
@@ -198,6 +215,7 @@ class SimulationEngine:
         dry_run: bool = False,
         exclude_symbols: set[str] | None = None,
         quantity_overrides: dict[tuple[str, str], int] | None = None,
+        signal_run_id: str | None = None,
     ) -> ExecutionReport:
         """
         执行一次模拟盘调仓周期。
@@ -206,7 +224,8 @@ class SimulationEngine:
             tenant_id: 租户 ID
             user_id: 用户 ID
             strategy_id: 策略 ID
-            run_id: 指定信号批次 ID，若 None 则取最新
+            run_id: 本轮执行 ID（订单备注/任务追踪），不是推理批次
+            signal_run_id: 指定推理信号批次；None 则取最新截面
             params_override: 前端传递的策略参数覆盖
             market: 策略市场提示（激活策略 parameters.market）。
                    港股信号 symbol 为裸数字无法靠众数推断，须由调用方显式传入。
@@ -240,12 +259,12 @@ class SimulationEngine:
             # 引入的 AttributeError 使托管/引导/手动全部模拟周期死在入口，静默进 report.error）。
             # 统一走共享 get_session（master 会话 + 出口提交语义）。
             async with get_session() as db:
-                # 1. 加载信号（market 提示时按市场过滤；缺省旧行为）
+                # 1. 加载信号（market 提示时按市场过滤；signal_run_id 指定批次，None 取最新截面）
                 signals = await self.signal_loader.load_latest_signals(
                     db=db,
                     tenant_id=tenant,
                     user_id=uid,
-                    run_id=run_id,
+                    run_id=signal_run_id,
                     market=market,
                 )
                 report.signal_count = len(signals)
@@ -355,8 +374,9 @@ class SimulationEngine:
                 )
 
                 # 3. 获取当前账户状态（按市场隔离）
+                self._ensure_redis()
                 account_data = await self.account_manager.get_account(
-                    user_id=int(uid) if uid.isdigit() else 0,
+                    user_id=canonical_sim_uid(uid),
                     tenant_id=tenant,
                     market=market.value,
                 )
@@ -379,8 +399,23 @@ class SimulationEngine:
                     if int(float((pos or {}).get("volume") or 0)) > 0
                 ]
                 symbols = list(dict.fromkeys([s.symbol for s in signals] + position_symbols))
-                bars = await self._load_bars(symbols, market=market)
-                quotes = self._quotes_from_bars(bars)
+                quotes, live_ticks = await self._load_live_quotes(symbols)
+                if not quotes:
+                    # 无新鲜实时行情：回落本地日线 bars（盘后/停更期的计划与预演可用，
+                    # 保住 T-FE-05 dry-run/计划链）。**执行**不受影响：取价契约逐单守卫，
+                    # strict 市价单遇陈旧价一律拒单（防止按昨收静默成交）。
+                    bars = await self._load_bars(symbols, market=market)
+                    quotes = self._quotes_from_bars(bars)
+                    if not quotes:
+                        report.error = "realtime_quote_unavailable"
+                        logger.error(
+                            "SimulationEngine: no fresh realtime quote and no local bars; "
+                            "cycle rejected tenant=%s user=%s symbols=%d",
+                            tenant,
+                            uid,
+                            len(symbols),
+                        )
+                        return report
 
                 # 4.5 持仓退出评估（T-P2-04 v1）：调仓之前——退出卖单与调仓卖单共用
                 # sim-{run}-{sym}-sell 幂等键（退出先记账，调仓重复自动跳过）
@@ -458,7 +493,7 @@ class SimulationEngine:
                         strategy_id=strategy_id,
                         market=market,
                         run_id=exec_run_id,
-                        bar=self._bar_for_symbol(bars, order.symbol),
+                        live_tick=self._tick_for_symbol(live_ticks, order.symbol),
                     )
                     report.orders.append(self._order_to_dict(order, result))
                     if result.success:
@@ -474,7 +509,7 @@ class SimulationEngine:
 
                 # 8. 更新账户快照
                 updated_account = await self.account_manager.get_account(
-                    user_id=int(uid) if uid.isdigit() else 0,
+                    user_id=canonical_sim_uid(uid),
                     tenant_id=tenant,
                     market=market.value,
                 )
@@ -734,6 +769,36 @@ class SimulationEngine:
             trade_date = latest
         return await asyncio.to_thread(market_data.load_date, trade_date, symbols)
 
+    async def _load_live_quotes(
+        self, symbols: list[str]
+    ) -> tuple[dict[str, Quote], dict[str, dict[str, Any]]]:
+        from backend.services.simulation.services.redis_series_quote import (
+            fetch_series_ticks,
+        )
+
+        ticks = await fetch_series_ticks(symbols)
+        quotes: dict[str, Quote] = {}
+        indexed_ticks: dict[str, dict[str, Any]] = {}
+        for symbol, tick in ticks.items():
+            price = float(tick.get("price") or 0.0)
+            if price <= 0:
+                continue
+            quote = Quote(symbol=symbol, current_price=price)
+            for key in {
+                symbol,
+                StockCodeUtil.to_prefix(symbol),
+                StockCodeUtil.to_suffix(symbol),
+            }:
+                if key:
+                    quotes[key] = quote
+                    indexed_ticks[key] = tick
+        logger.info(
+            "SimulationEngine: fresh realtime quotes %d/%d",
+            len(ticks),
+            len(symbols),
+        )
+        return quotes, indexed_ticks
+
     @staticmethod
     def _quotes_from_bars(bars: dict[str, Any]) -> dict[str, Quote]:
         quotes: dict[str, Quote] = {}
@@ -762,6 +827,16 @@ class SimulationEngine:
             return bars[suffix]
         prefix = StockCodeUtil.to_prefix(symbol)
         return bars.get(prefix)
+
+    @staticmethod
+    def _tick_for_symbol(
+        ticks: dict[str, dict[str, Any]], symbol: str
+    ) -> dict[str, Any] | None:
+        return (
+            ticks.get(symbol)
+            or ticks.get(StockCodeUtil.to_suffix(symbol))
+            or ticks.get(StockCodeUtil.to_prefix(symbol))
+        )
 
     def _build_account(self, data: dict[str, Any]) -> SimulationAccount:
         """构建账户对象"""
@@ -814,6 +889,7 @@ class SimulationEngine:
         strategy_id: str,
         market: Any = None,
         run_id: str = "",
+        live_tick: dict[str, Any] | None = None,
         bar: Any = None,
     ) -> ExecutionResult:
         """执行单个订单（T-P2-01：改经 OrderRouter 唯一入口——幂等/落账/镜像收口在链内）"""

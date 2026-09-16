@@ -2,7 +2,8 @@
 
 from backend.services.trade_shared.simulation_manager import (
     SimulationAccountManager,
+    canonical_sim_uid,
     require_sim_user_id,
 )
 
-__all__ = ["SimulationAccountManager", "require_sim_user_id"]
+__all__ = ["SimulationAccountManager", "canonical_sim_uid", "require_sim_user_id"]

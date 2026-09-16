@@ -34,10 +34,12 @@ interface TagStats {
 interface TagStockItem {
   symbol: string;
   name: string;
-  close_price: number;
-  pct_change: number;
-  net_inflow: number;
+  close_price?: number | null;
+  pct_change?: number | null;
+  net_inflow?: number | null;
 }
+
+const MISSING = <span className="font-mono text-xs text-slate-300">—</span>;
 
 export const TagLookupPanel: React.FC = () => {
   const [perspective, setPerspective] = useState<'stock' | 'sector'>('stock');
@@ -174,7 +176,12 @@ export const TagLookupPanel: React.FC = () => {
       key: 'close_price',
       align: 'right',
       width: 90,
-      render: (v) => <span className="font-mono text-xs font-semibold text-slate-800">¥{v.toFixed(2)}</span>,
+      render: (v: number | null | undefined) =>
+        v == null ? (
+          MISSING
+        ) : (
+          <span className="font-mono text-xs font-semibold text-slate-800">¥{v.toFixed(2)}</span>
+        ),
     },
     {
       title: '涨跌幅',
@@ -182,7 +189,8 @@ export const TagLookupPanel: React.FC = () => {
       key: 'pct_change',
       align: 'right',
       width: 100,
-      render: (v) => {
+      render: (v: number | null | undefined) => {
+        if (v == null) return MISSING;
         const isPos = v >= 0;
         return (
           <span className={`font-mono text-xs font-bold flex items-center justify-end gap-0.5 ${isPos ? 'text-red-500' : 'text-emerald-500'}`}>
@@ -198,7 +206,8 @@ export const TagLookupPanel: React.FC = () => {
       key: 'net_inflow',
       align: 'right',
       width: 140,
-      render: (v) => {
+      render: (v: number | null | undefined) => {
+        if (v == null) return MISSING;
         const isPos = v >= 0;
         return (
           <span className={`font-mono text-xs font-extrabold ${isPos ? 'text-red-500' : 'text-emerald-500'}`}>

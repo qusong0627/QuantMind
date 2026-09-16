@@ -631,7 +631,8 @@ class RemoteSSHOrchestrator(TrainingOrchestrator):
             REGISTRY.register(
                 self._poll_process(run_id, label)
                 if is_process
-                else self._poll_remote(run_id, run_key)
+                else self._poll_remote(run_id, run_key),
+                run_id=run_id,
             )
         except Exception as exc:  # noqa: BLE001
             logger.error("[%s] 远程训练编排失败: %s", run_id, exc, exc_info=True)
@@ -915,6 +916,9 @@ class RemoteSSHOrchestrator(TrainingOrchestrator):
         progress = 22
         try:
             while True:
+                if self.log_stream.is_cancel_requested(run_id):
+                    await self._cancel_remote(run_id, container_name)
+                    return
                 code, out, err = await self._ssh_exec(
                     f"docker logs {container_name} --tail {self._LOG_TAIL_LINES} 2>&1",
                     timeout=120,
@@ -965,6 +969,9 @@ class RemoteSSHOrchestrator(TrainingOrchestrator):
         last_pid = ""
         try:
             while True:
+                if self.log_stream.is_cancel_requested(run_id):
+                    await self._cancel_remote(run_id, f"native-{run_id}")
+                    return
                 start = last_n + 1
                 probe = (
                     f"n=$(wc -l < {shlex.quote(log_path)} 2>/dev/null || echo 0); "
@@ -1080,6 +1087,39 @@ class RemoteSSHOrchestrator(TrainingOrchestrator):
         except Exception as exc:  # noqa: BLE001
             logger.error("[%s] 容器结束处理失败: %s", run_id, exc, exc_info=True)
             self._log(run_id, f"[ERROR] 容器结束处理失败: {exc}", status="failed", progress=0)
+
+    async def _cancel_remote(self, run_id: str, run_key: str) -> None:
+        """用户取消：杀远端进程/容器，落 cancelled 状态并清理取消标记。"""
+        if self.exec_mode == "native_python":
+            pid_file = f"{self.work_dir}/train_{run_id}.pid"
+            kill_cmd = (
+                f"pid=$(cat {shlex.quote(pid_file)} 2>/dev/null || true); "
+                f"if [ -n \"$pid\" ]; then "
+                f"kill -TERM -- -\"$pid\" 2>/dev/null || kill -TERM \"$pid\" 2>/dev/null || true; "
+                f"sleep 1; "
+                f"kill -9 -- -\"$pid\" 2>/dev/null || kill -9 \"$pid\" 2>/dev/null || true; fi"
+            )
+            await self._ssh_exec(kill_cmd, timeout=30)
+        else:
+            container_name = run_key or f"qm-train-{run_id}"
+            await self._ssh_exec(
+                f"docker stop {container_name} 2>/dev/null || true; "
+                f"docker rm -f {container_name} 2>/dev/null || true",
+                timeout=60,
+            )
+
+        from backend.services.api.routers.admin.db import TrainingJobRecord
+        from backend.shared.database_manager_v2 import get_session
+
+        async with get_session() as db:
+            r = await db.get(TrainingJobRecord, run_id)
+            if r and str(r.status or "") not in ("completed", "failed"):
+                r.status = "cancelled"
+                r.logs = (r.logs or "") + "[SYSTEM] 训练已被用户取消，远端进程已停止\n"
+                r.progress = max(int(r.progress or 0), 0)
+                await db.commit()
+        self._log(run_id, "[SYSTEM] 训练已被用户取消，远端进程已停止", status="cancelled", progress=0)
+        self.log_stream.clear_cancel(run_id)
 
     async def _pull_artifacts(self, run_id: str) -> None:
         """拉取模型产物到本地工作目录 /data/training_jobs/{run_id}。

@@ -12,7 +12,7 @@ import logging
 import os
 import time
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import redis.asyncio as aioredis
 
@@ -29,11 +29,18 @@ class RemoteRedisDataSource(DataSourceAdapter):
     """
 
     def __init__(self):
-        # 行情专用远程 Redis：默认硬编码免费行情服务器（www.quantmindai.cn:6379 / db3），
-        # 无需 .env 即可部署开箱即用；REMOTE_QUOTE_REDIS_* 环境变量仅在需要覆盖时生效。
-        self._host = (os.getenv("REMOTE_QUOTE_REDIS_HOST") or "www.quantmindai.cn").strip()
+        # 行情 Redis 必须显式配置；未配置远端时仅回退部署内 Redis。
+        self._host = (
+            os.getenv("REMOTE_QUOTE_REDIS_HOST")
+            or os.getenv("REDIS_HOST")
+            or "redis"
+        ).strip()
         self._port = int(os.getenv("REMOTE_QUOTE_REDIS_PORT") or "6379")
-        self._password = (os.getenv("REMOTE_QUOTE_REDIS_PASSWORD") or "quantmind2026").strip() or None
+        self._password = (
+            os.getenv("REMOTE_QUOTE_REDIS_PASSWORD")
+            or os.getenv("REDIS_PASSWORD")
+            or ""
+        ).strip() or None
         self._db = int(os.getenv("REMOTE_QUOTE_REDIS_DB") or "3")
         self._client: aioredis.Redis | None = None
 
@@ -128,11 +135,11 @@ class RemoteRedisDataSource(DataSourceAdapter):
             if not data:
                 continue
 
-            def _f(field: str) -> float | None:
-                v = data.get(field)
+            def _f(field: str, snapshot=data) -> float | None:
+                v = snapshot.get(field)
                 try:
                     return float(v) if v is not None else None
-                except:
+                except (TypeError, ValueError):
                     return None
 
             # 新鲜度规则:

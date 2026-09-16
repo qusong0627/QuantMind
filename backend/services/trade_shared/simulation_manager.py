@@ -5,7 +5,7 @@ Simulation Account Manager - Manage paper trading accounts in Redis
 import json
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Optional
+from typing import Any
 
 from backend.services.trade_shared.redis_client import RedisClient, redis_client
 from backend.services.trade_shared.trade_config import settings
@@ -14,32 +14,62 @@ from backend.shared.trade_account_cache import read_json_cache, write_json_cache
 
 logger = logging.getLogger(__name__)
 
-# OSS 单用户部署的保留映射：JWT sub 为用户名（如 admin）时，历史模拟数据
-# （sim_orders/sim_trades PG user_id、Redis 账户键）全落在 user 0 上。
-# 改映射会丢历史，故保持 0，但用 error 日志标出，便于多用户部署时发现串号。
+# 非管理员且非数字的 JWT sub 仍落到历史保留账户 0，并打 error 便于发现串号。
+# 管理员族（admin / 00000001 / 1 / 0）一律收口为 10000001，避免 int("00000001")==1。
 RESERVED_NON_NUMERIC_USER_ID = 0
 
 
-def require_sim_user_id(raw_user_id: str, tenant_id: str = "default") -> int:
-    """JWT sub 转模拟盘 int user_id。三处路由共用，禁止各自手写分叉。
+def canonical_sim_uid(raw_user_id: object) -> int:
+    """模拟盘 int user_id：管理员族 → 10000001，其它数字保持 int，其余 → 0。"""
+    from backend.shared.simulation_account_keys import (
+        CANONICAL_ADMIN_SIM_USER,
+        is_admin_sim_user,
+    )
 
-    数字 sub 直接转 int；非数字（OSS 默认 admin 用户）归 0。
+    raw = str(raw_user_id or "").strip()
+    if is_admin_sim_user(raw):
+        return int(CANONICAL_ADMIN_SIM_USER)
+    if raw.isdigit():
+        return int(raw)
+    return RESERVED_NON_NUMERIC_USER_ID
+
+
+def require_sim_user_id(raw_user_id: str, tenant_id: str = "default") -> int:
+    """JWT sub 转模拟盘 int user_id。三处路由共用，禁止各自手写 int()/isdigit()。
+
+    管理员族收口为 10000001；其它数字 sub 直接转 int；其余非数字仍归 0。
     同时旁路记录 sub 反查映射（见 record_sim_sub），供 WS 推送定位主题。
     """
     from fastapi import HTTPException
 
-    if not raw_user_id:
+    from backend.shared.simulation_account_keys import is_admin_sim_user
+
+    if not str(raw_user_id or "").strip():
         raise HTTPException(status_code=400, detail="Invalid user_id in token")
     raw = str(raw_user_id).strip()
-    if raw.isdigit():
-        sim_user_id = int(raw)
-    else:
+    if not raw.isdigit() and not is_admin_sim_user(raw):
         logger.error(
-            "Non-numeric user_id mapped to reserved account 0: %s "
-            "(多用户部署下不同用户名会串号，请改用数字 sub)",
+            "Rejected non-numeric simulation user_id to prevent account sharing: %s",
             raw,
         )
-        sim_user_id = RESERVED_NON_NUMERIC_USER_ID
+        legacy_exists = False
+        try:
+            client = _shared_redis()
+            legacy_exists = bool(
+                client
+                and client.exists(
+                    f"simulation:account:{normalize_tenant(tenant_id)}:"
+                    f"{RESERVED_NON_NUMERIC_USER_ID}"
+                )
+            )
+        except Exception:
+            pass
+        suffix = "；检测到旧 0 号账户，请先执行账户迁移" if legacy_exists else ""
+        raise HTTPException(
+            status_code=400,
+            detail=f"模拟盘要求数字用户 ID，已拒绝共享 0 号账户{suffix}",
+        )
+    sim_user_id = canonical_sim_uid(raw)
     record_sim_sub(sim_user_id, raw, tenant_id=tenant_id)
     return sim_user_id
 
@@ -251,13 +281,102 @@ return cjson.encode({success=true, unlocked=unlocked})
         return normalize_market(market)
 
     def _get_key(self, user_id: int, tenant_id: str, market: str = "CN") -> str:
-        from backend.shared.simulation_account_keys import account_key
+        from backend.shared.simulation_account_keys import (
+            account_key,
+            canonical_sim_user_suffix,
+        )
 
-        return account_key(tenant_id, user_id, market)
+        return account_key(tenant_id, canonical_sim_user_suffix(user_id), market)
+
+    def _lookup_keys(self, user_id: int, tenant_id: str, market: str = "CN") -> list[str]:
+        """账户读取候选键：**实例自身规范键优先**（子类可覆写 _get_key，如回放会话），
+        再并入用户名别名键（admin '1'/'00000001' 双形兼容）。"""
+        from backend.shared.simulation_account_keys import account_lookup_keys
+
+        keys = [
+            self._get_key(user_id, tenant_id, market),
+            *account_lookup_keys(tenant_id, user_id, market),
+        ]
+        seen: set[str] = set()
+        out: list[str] = []
+        for key in keys:
+            if key and key not in seen:
+                seen.add(key)
+                out.append(key)
+        return out
+
+    def _settings_lookup_keys(self, user_id: int, tenant_id: str) -> list[str]:
+        from backend.shared.simulation_account_keys import settings_lookup_keys
+
+        return settings_lookup_keys(tenant_id, user_id)
+
+    def _promote_settings(self, user_id: int, tenant_id: str) -> None:
+        canonical = self._get_settings_key(user_id, tenant_id)
+        if read_json_cache(self.redis, canonical):
+            return
+        for key in self._settings_lookup_keys(user_id, tenant_id):
+            data = read_json_cache(self.redis, key)
+            if data:
+                write_json_cache(self.redis, canonical, data)
+                return
+
+    def _pick_cached_account(
+        self, user_id: int, tenant_id: str, market: str
+    ) -> dict[str, Any] | None:
+        """在 10000001 / 00000001 / 1 / 0 别名里取最像真实资金的一份，并回写规范键。"""
+        from backend.shared.simulation_account_keys import account_payload_score
+
+        canonical = self._get_key(user_id, tenant_id, market)
+        best: dict[str, Any] | None = None
+        best_score: tuple[int, float, float] | None = None
+        best_key: str | None = None
+        for key in self._lookup_keys(user_id, tenant_id, market):
+            data = read_json_cache(self.redis, key)
+            if not data:
+                continue
+            score = account_payload_score(data)
+            if (
+                best is None
+                or score > best_score
+                or (score == best_score and key == canonical)
+            ):
+                best = data
+                best_score = score
+                best_key = key
+        if best is None or best_key is None:
+            return None
+        if best_key != canonical:
+            write_json_cache(self.redis, canonical, best)
+            self._promote_settings(user_id, tenant_id)
+            logger.warning(
+                "Promoted simulation account alias %s -> %s tenant=%s user=%s",
+                best_key,
+                canonical,
+                tenant_id,
+                user_id,
+            )
+        return best
+
+    def _ensure_client(self):
+        """空 RedisClient（未 connect）时接到 trade 共享连接，避免 bootstrap 读不到账户。"""
+        client = getattr(self.redis, "client", None) if self.redis is not None else None
+        if client is not None:
+            return client
+        shared = _shared_redis()
+        if shared is not None and self.redis is not None:
+            self.redis.client = shared
+            return shared
+        return shared
 
     @staticmethod
     def _exec_lock_key(user_id: int, tenant_id: str) -> str:
-        return f"simulation:exec_lock:{SimulationAccountManager._normalize_tenant(tenant_id)}:{user_id}"
+        from backend.shared.simulation_account_keys import canonical_sim_user_suffix
+
+        return (
+            "simulation:exec_lock:"
+            f"{SimulationAccountManager._normalize_tenant(tenant_id)}:"
+            f"{canonical_sim_user_suffix(user_id)}"
+        )
 
     @staticmethod
     def acquire_exec_lock(
@@ -362,9 +481,12 @@ return 0
         return parse_account_key(key)
 
     def _get_settings_key(self, user_id: int, tenant_id: str) -> str:
-        from backend.shared.simulation_account_keys import settings_key
+        from backend.shared.simulation_account_keys import (
+            canonical_sim_user_suffix,
+            settings_key,
+        )
 
-        return settings_key(tenant_id, user_id)
+        return settings_key(tenant_id, canonical_sim_user_suffix(user_id))
 
     @staticmethod
     def _position_key(symbol: str, position_side: str) -> str:
@@ -385,6 +507,13 @@ return 0
         tenant_id = self._normalize_tenant(tenant_id)
         key = self._get_settings_key(user_id, tenant_id)
         data = read_json_cache(self.redis, key)
+        if not data:
+            for alias in self._settings_lookup_keys(user_id, tenant_id):
+                data = read_json_cache(self.redis, alias)
+                if data:
+                    if alias != key:
+                        write_json_cache(self.redis, key, data)
+                    break
 
         initial_cash = float(default_initial_cash)
         last_modified_at: str | None = None
@@ -467,6 +596,7 @@ return 0
             "initial_cash": initial_cash,
         }
 
+        self._ensure_client()
         write_json_cache(self.redis, key, account_data)
         logger.info(
             "Initialized simulation account for tenant=%s user=%s market=%s with %.2f",
@@ -486,14 +616,14 @@ return 0
         Redis 缺键时从 ledger 投影自愈（lots→持仓+收盘重估），并回填 Redis；
         台账也无记录时返回 None（表示账户从未创建，不自动建空账）。
         """
-        if not self.redis.client:
+        if not self._ensure_client():
             return None
 
         tenant_id = self._normalize_tenant(tenant_id)
-        key = self._get_key(user_id, tenant_id, market)
-        data = read_json_cache(self.redis, key)
+        data = self._pick_cached_account(user_id, tenant_id, market)
         if data:
             return data
+        key = self._get_key(user_id, tenant_id, market)
 
         rebuilt = await self._rebuild_from_ledger(user_id, tenant_id, market)
         if rebuilt:
@@ -678,11 +808,17 @@ return 0
                         pos["volume"] += qty
                         # T+1：当日买入不计入可卖量，历史买入才可卖（重建不再直接解锁）
                         try:
-                            trade_day = (
-                                executed_at.date()
-                                if hasattr(executed_at, "date")
-                                else None
-                            )
+                            from zoneinfo import ZoneInfo as _ZoneInfo
+
+                            if hasattr(executed_at, "date"):
+                                trade_dt = executed_at
+                                if getattr(trade_dt, "tzinfo", None) is None:
+                                    trade_dt = trade_dt.replace(tzinfo=timezone.utc)
+                                trade_day = trade_dt.astimezone(
+                                    _ZoneInfo("Asia/Shanghai")
+                                ).date()
+                            else:
+                                trade_day = None
                         except Exception:
                             trade_day = None
                         if market_norm == "CN" and trade_day == today:
@@ -772,16 +908,15 @@ return 0
         t_plus_1: 买入是否锁定至次日（CN 规则）。T+0 市场传 False，
         买入即刻计入可卖量。
         """
-        if not self.redis.client:
+        if not self._ensure_client():
             return {"success": False, "reason": "REDIS_UNAVAILABLE"}
 
         tenant_id = self._normalize_tenant(tenant_id)
+        cached = self._pick_cached_account(user_id, tenant_id, market)
         key = self._get_key(user_id, tenant_id, market)
-
-        # 如果账户不存在，先初始化（交易时需要账户存在）。
-        # 新注册/默认用户统一按 100 万初始资金建账；
-        # 用户对初始资金的修改已废弃（模拟盘设置修改 deprecated），故不读取 settings 残留值。
-        if not self.redis.client.get(key):
+        if not cached:
+            # 交易时需要账户存在。新用户按 100 万建账，但先并入管理员历史别名，
+            # 避免把 OSS admin 历史资金覆盖成空账。
             await self.init_account(
                 user_id, initial_cash=1_000_000.0, tenant_id=tenant_id, market=market
             )
@@ -836,10 +971,11 @@ return 0
         仅对 T+1 市场（CN）有意义；对 T+0 市场账户调用无副作用
         （可卖量恒等于总量）。
         """
-        if not self.redis.client:
+        if not self._ensure_client():
             return {"success": False, "reason": "REDIS_UNAVAILABLE"}
 
         tenant_id = self._normalize_tenant(tenant_id)
+        self._pick_cached_account(user_id, tenant_id, market)
         key = self._get_key(user_id, tenant_id, market)
 
         try:
@@ -853,6 +989,129 @@ return 0
                 "Failed to unlock T+1 for tenant=%s user=%s: %s", tenant_id, user_id, e
             )
             return {"success": False, "reason": "UNLOCK_T1_FAILED"}
+
+    async def sync_t1_from_ledger(
+        self,
+        user_id: int,
+        tenant_id: str = "default",
+        market: str = "CN",
+        as_of_date=None,
+    ) -> dict[str, Any]:
+        """Reconcile Redis sellable quantities from dated PG position lots.
+
+        Unlike ``unlock_t1``, this is safe to rerun after an intraday restart:
+        lots opened on the current Shanghai trade date remain unavailable.
+        """
+        from datetime import datetime as _datetime
+        from zoneinfo import ZoneInfo as _ZoneInfo
+
+        from backend.services.simulation.services.projection_service import (
+            SimulationProjectionService,
+        )
+        from backend.shared.database_manager_v2 import get_session as _get_session
+        from backend.shared.stock_utils import StockCodeUtil
+
+        if not self._ensure_client():
+            return {"success": False, "reason": "REDIS_UNAVAILABLE"}
+        market_norm = self._normalize_market(market)
+        if market_norm != "CN":
+            return await self.unlock_t1(user_id, tenant_id=tenant_id, market=market_norm)
+
+        tenant_id = self._normalize_tenant(tenant_id)
+        target_date = as_of_date or _datetime.now(
+            _ZoneInfo("Asia/Shanghai")
+        ).date()
+        try:
+            async with self.locked_execution(user_id, tenant_id):
+                account = self._pick_cached_account(user_id, tenant_id, market_norm)
+                if not account:
+                    return {"success": False, "reason": "ACCOUNT_NOT_FOUND"}
+                async with _get_session(read_only=True) as session:
+                    projection = SimulationProjectionService(session)
+                    available = await projection.load_available_quantities(
+                        tenant_id=tenant_id,
+                        user_id=user_id,
+                        as_of_date=target_date,
+                    )
+                # Merge legacy sim_trades reconstruction even when newer lots
+                # exist: migrated and pre-ledger positions can coexist.
+                rebuilt = await self._rebuild_from_ledger(
+                    user_id, tenant_id, market_norm
+                )
+                for fallback_key, fallback_pos in (
+                    (rebuilt or {}).get("positions") or {}
+                ).items():
+                    if not isinstance(fallback_pos, dict):
+                        continue
+                    fallback_symbol = StockCodeUtil.to_suffix(
+                        str(fallback_key).split("::", 1)[0]
+                    )
+                    available.setdefault(
+                        (str(fallback_symbol).upper(), "long"),
+                        float(fallback_pos.get("available_volume") or 0.0),
+                    )
+
+                positions = dict(account.get("positions") or {})
+                has_long_position = False
+                unlocked = 0
+                for raw_key, raw_pos in positions.items():
+                    if not isinstance(raw_pos, dict):
+                        continue
+                    side = str(raw_pos.get("side") or "long").strip().lower()
+                    if side != "long" or str(raw_key).endswith(("::short", ":short")):
+                        continue
+                    has_long_position = True
+                    symbol = StockCodeUtil.to_suffix(str(raw_key).split("::", 1)[0])
+                    ledger_value = available.get((str(symbol).upper(), "long"))
+                    if ledger_value is None:
+                        # Unknown Redis-only holdings retain their current lock
+                        # state. Never increase sellable quantity without dated
+                        # evidence, but do not permanently relock old accounts.
+                        ledger_value = float(
+                            raw_pos.get("available_volume") or 0.0
+                        )
+                    volume = max(0.0, float(raw_pos.get("volume") or 0.0))
+                    old_value = max(
+                        0.0, float(raw_pos.get("available_volume") or 0.0)
+                    )
+                    new_value = min(volume, max(0.0, float(ledger_value)))
+                    if abs(old_value - new_value) > 1e-6:
+                        unlocked += 1
+                    updated = dict(raw_pos)
+                    updated["available_volume"] = new_value
+                    updated["frozen_volume"] = max(0.0, volume - new_value)
+                    positions[raw_key] = updated
+
+                if has_long_position and not available:
+                    logger.warning(
+                        "T+1 ledger projection empty; keeping Redis holdings locked "
+                        "tenant=%s user=%s",
+                        tenant_id,
+                        user_id,
+                    )
+                account["positions"] = positions
+                account["t1_settlement_date"] = target_date.isoformat()
+                write_json_cache(
+                    self.redis,
+                    self._get_key(user_id, tenant_id, market_norm),
+                    account,
+                )
+                return {
+                    "success": True,
+                    "unlocked": unlocked,
+                    "settlement_date": target_date.isoformat(),
+                }
+        except RuntimeError:
+            return {"success": False, "reason": "SIM_EXEC_LOCK_BUSY"}
+        except Exception as exc:
+            logger.error(
+                "Failed to sync T+1 from ledger tenant=%s user=%s: %s",
+                tenant_id,
+                user_id,
+                exc,
+                exc_info=True,
+            )
+            return {"success": False, "reason": "T1_LEDGER_SYNC_FAILED"}
 
     async def _update_balance_margin(
         self,

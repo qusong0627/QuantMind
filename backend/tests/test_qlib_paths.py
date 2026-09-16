@@ -34,3 +34,44 @@ def test_resolve_cn_skips_incomplete_quantdb_cache(tmp_path: Path, monkeypatch):
     _make_ready_provider(fallback)
 
     assert qlib_paths.resolve_qlib_provider_uri("CN") == str(fallback)
+
+
+def test_fallback_redirects_missing_canonical_to_ready_legacy(
+    tmp_path: Path, monkeypatch
+):
+    """新部署常见故障：前端钉死 /data/qlib/cn_data 但数据在旧 db/qlib_data。"""
+    monkeypatch.delenv("QLIB_PROVIDER_URI", raising=False)
+    monkeypatch.setattr(qlib_paths, "_PROJECT_ROOT", tmp_path)
+
+    legacy = tmp_path / "db" / "qlib_data"
+    _make_ready_provider(legacy)
+
+    missing_canonical = str(tmp_path / "data" / "qlib" / "cn_data")
+    assert qlib_paths.fallback_to_ready_provider_uri(
+        missing_canonical, market="CN"
+    ) == str(legacy)
+
+
+def test_fallback_keeps_ready_provider_and_unknown_paths(tmp_path: Path, monkeypatch):
+    monkeypatch.delenv("QLIB_PROVIDER_URI", raising=False)
+    monkeypatch.setattr(qlib_paths, "_PROJECT_ROOT", tmp_path)
+
+    ready = tmp_path / "data" / "qlib" / "cn_data"
+    _make_ready_provider(ready)
+    assert qlib_paths.fallback_to_ready_provider_uri(str(ready)) == str(ready)
+
+    # 全部未就绪时原样返回，让调用方报出真实缺失路径
+    empty_root = tmp_path / "nothing"
+    empty_root.mkdir()
+    monkeypatch.setattr(qlib_paths, "_PROJECT_ROOT", empty_root)
+    missing = str(empty_root / "nowhere")
+    result = qlib_paths.fallback_to_ready_provider_uri(missing)
+    assert "nowhere" in result
+
+
+def test_guess_market_from_provider_uri():
+    assert qlib_paths.guess_market_from_provider_uri("/data/qlib/cn_data") == "CN"
+    assert qlib_paths.guess_market_from_provider_uri("/data/qlib/hk_data") == "HK"
+    assert qlib_paths.guess_market_from_provider_uri("/x/us_data/y") == "US"
+    assert qlib_paths.guess_market_from_provider_uri("/data/qlib/bc_data") == "CRYPTO"
+    assert qlib_paths.guess_market_from_provider_uri(None) == "CN"

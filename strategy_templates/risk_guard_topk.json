@@ -1,7 +1,7 @@
 {
   "id": "risk_guard_topk",
   "name": "大盘风控 Top-K 选股策略",
-  "description": "以 features_daily 的市值、估值、波动和均线偏离做硬过滤，并在大盘下行时自动降仓，适合盘后生成、次日开盘执行。",
+  "description": "以 features_daily 的市值、估值、波动和均线偏离做硬过滤，并在大盘下行时自动降仓，默认盘中（PM 尾盘）按信号定期调仓。",
   "category": "risk_control",
   "difficulty": "intermediate",
   "params": [
@@ -105,6 +105,7 @@
     "筛选字段来自 features_daily；PE 为负或缺失、波动过高的标的不会进入候选池。",
     "大盘状态与个股筛选相互独立；建议搭配稳定的中频模型信号。"
   ],
+  "dir": "通用策略",
   "markets": [
     "a_share"
   ]

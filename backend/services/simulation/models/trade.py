@@ -4,14 +4,14 @@ Simulation trade model.
 
 import uuid
 from datetime import datetime
-from typing import Optional
 
-from sqlalchemy import DateTime, Enum, Float, ForeignKey, Index, Integer, String
+from sqlalchemy import Enum, Float, ForeignKey, Index, Integer, String
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from backend.services.simulation.models import Base, TimestampMixin
 from backend.services.simulation.models.order import OrderSide, TradingMode
+from backend.shared.utc_datetime import UtcDateTime, utc_now
 
 
 class SimTrade(Base, TimestampMixin):
@@ -61,7 +61,7 @@ class SimTrade(Base, TimestampMixin):
     total_fee: Mapped[float] = mapped_column(
         Float, nullable=False, default=0.0)
     executed_at: Mapped[datetime] = mapped_column(
-        DateTime, nullable=False, default=datetime.utcnow
+        UtcDateTime, nullable=False, default=utc_now
     )
     price_source: Mapped[str | None] = mapped_column(
         String(64), nullable=True)

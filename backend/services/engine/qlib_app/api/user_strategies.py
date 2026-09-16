@@ -27,6 +27,7 @@ try:
         VersionConflictError,
     )
     from backend.shared.strategy_storage import get_strategy_storage_service
+    from backend.shared.strategy_template_sync import sync_builtin_templates
     from backend.shared.utils import normalize_user_id
 except ImportError:
     from shared.database_manager_v2 import get_session  # type: ignore
@@ -36,11 +37,11 @@ except ImportError:
     )
     from shared.strategy_storage import get_strategy_storage_service  # type: ignore
     from shared.redis_sentinel_client import get_redis_sentinel_client  # type: ignore
+    from shared.strategy_template_sync import sync_builtin_templates  # type: ignore
     from shared.utils import normalize_user_id  # type: ignore
 
 from backend.services.engine.qlib_app.services.strategy_templates import (
     get_all_templates,
-    get_template_by_id,
     invalidate_templates_cache,
 )
 from backend.services.engine.qlib_app.utils.structured_logger import (
@@ -376,108 +377,12 @@ async def _fetch_latest_backtest_summaries(
     return summaries
 
 
-def _market_for_template(t) -> str | None:
-    """模板 markets 标记 → 策略 market 参数(空=历史 A 股,不写,保持 NULL 兼容)。"""
-    ms = set(t.markets or [])
-    if "hong_kong" in ms:
-        return "HK"
-    if "a_share" in ms:
-        # 显式标 A:避免 NULL 与 A 股视图歧义(CN 视图把 NULL 视作 A 股,HK 视图排除)
-        return "A"
-    if "us_stock" in ms:
-        return "US"
-    if "crypto" in ms:
-        return "CRYPTO"
-    if "futures" in ms:
-        return "FUTURES"
-    return None
-
-
-def _market_for_strategy_id(strategy_id: str) -> str | None:
-    """按模板 ID 前缀兜底补标(存量数据修复):hk_→HK、us_→US。"""
-    sid = str(strategy_id or "").lower()
-    if sid.startswith("hk_"):
-        return "HK"
-    if sid.startswith("us_"):
-        return "US"
-    return None
-
-
 async def _perform_sync(user_id: str):
+    """将内置模板同步到用户个人策略库（共享单实现，含存量市场补标）。
+
+    去重键为 strategy_type / template:<id> / 同名；写入一律经 StrategyStorageService。
     """
-    执行模板同步的内部逻辑：将内置模板同步到用户的个人策略数据库。
-    统一管理：仅通过 StrategyStorageService 写入，禁止直连 SQL；去重键为 strategy_type==template.id。
-    同步 DB 操作通过 asyncio.to_thread 避免阻塞事件循环。
-    """
-    svc = get_strategy_storage_service()
-
-    # 0. 存量补标:历史同步的 hk_/us_ 模板可能缺 market(重构期丢失标记),
-    #    导致各市场视图混用。补标幂等(market 非空即跳过)。
-    existing_all = await asyncio.to_thread(svc.list, user_id=user_id)
-    for s in existing_all:
-        params = s.get("parameters") or {}
-        if params.get("market"):
-            continue
-        mkt = _market_for_strategy_id(params.get("strategy_type"))
-        if not mkt:
-            # 按模板 markets 补标(a_share 模板显式标 A,消除 NULL 归属歧义)
-            try:
-                tpl = get_template_by_id(str(params.get("strategy_type") or ""))
-            except Exception:
-                tpl = None
-            if tpl:
-                mkt = _market_for_template(tpl)
-        if mkt:
-            merged = {**params, "market": mkt}
-            await svc.save(
-                user_id=user_id,
-                strategy_id=s["id"],
-                name=s.get("name") or "",
-                code=s.get("code") or "",
-                metadata={
-                    "description": s.get("description") or "",
-                    "tags": s.get("tags") or [],
-                    "status": "ACTIVE",
-                    "is_verified": s.get("is_verified", True),
-                    "parameters": merged,
-                },
-            )
-
-    templates = get_all_templates()
-    synced_count = 0
-    for t in templates:
-        # 去重：按 parameters.strategy_type == template.id 判重，避免同名误判
-        existing = await asyncio.to_thread(svc.list, user_id=user_id)
-        if any(
-            (s.get("parameters") or {}).get("strategy_type") == t.id for s in existing
-        ):
-            continue
-        # 兼容旧数据：同名已存在也跳过，避免重复克隆
-        if any(s.get("name") == t.name for s in existing):
-            continue
-
-        params: dict[str, Any] = {"strategy_type": t.id, "topk": 50, "signal": "<PRED>"}
-        mkt = _market_for_template(t)
-        if mkt:
-            params["market"] = mkt  # HK/US/CRYPTO 模板打市场标,供策略库按市场隔离
-        if t.dir:
-            # AI-IDE 工作空间文件夹(策略在 IDE 文件树中的归属,不新建表字段)
-            params["ide_dir"] = t.dir
-
-        await svc.save(
-            user_id=user_id,
-            name=t.name,
-            code=t.code,
-            metadata={
-                "description": t.description,
-                "tags": [t.category, t.difficulty, "SystemSync"],
-                "status": "ACTIVE",
-                "is_verified": True,
-                "parameters": params,
-            },
-        )
-        synced_count += 1
-    return synced_count
+    return await sync_builtin_templates(user_id)
 
 
 # ============================================================================
@@ -555,15 +460,10 @@ async def _fetch_sim_fund_fallback(
     最新资金快照，把账户级收益归因给活跃策略（与原 portfolio 快照口径一致）。
     无快照返回 None，调用方保持原值。
     """
-    sub = str(user_sub or "").strip()
-    # JWT sub -> 模拟盘 uid（与 trade_shared.require_sim_user_id 同规则）：
-    # 数字直接用，非数字（OSS 默认 admin）归保留账户 0。
-    # 末尾恒带 "0"：OSS 单用户/策略 runner 落 0 号账户，数字 sub 也能命中。
-    sim_uid = sub if sub.isdigit() else "0"
-    candidates = []
-    for c in (sim_uid, sub, "0"):
-        if c and c not in candidates:
-            candidates.append(c)
+    from backend.shared.simulation_account_keys import ledger_user_id_candidates
+
+    candidates = ledger_user_id_candidates(user_sub)
+    preferred = candidates[0]
     try:
         async with get_session(read_only=True) as session:
             # T-P1-07：快照带市场维度后必须显式取合并行（'ALL'）
@@ -577,16 +477,21 @@ async def _fetch_sim_fund_fallback(
                 else ""
             )
             placeholders = ",".join(f":u{i}" for i in range(len(candidates)))
-            params: dict[str, Any] = {"tid": str(tenant_id or "default")}
+            params: dict[str, Any] = {
+                "tid": str(tenant_id or "default"),
+                "preferred": preferred,
+            }
             params.update({f"u{i}": c for i, c in enumerate(candidates)})
             row = (
                 await session.execute(
                     text(
                         "SELECT total_asset, today_pnl, total_pnl, initial_capital "
                         "FROM simulation_fund_snapshots "
-                        f"WHERE tenant_id = :tid AND user_id IN ({placeholders}) "
+                        f"WHERE tenant_id = :tid AND CAST(user_id AS varchar) IN ({placeholders}) "
                         f"{market_clause}"
-                        "ORDER BY snapshot_date DESC LIMIT 1"
+                        "ORDER BY snapshot_date DESC, "
+                        "CASE WHEN CAST(user_id AS varchar) = :preferred THEN 0 ELSE 1 END "
+                        "LIMIT 1"
                     ),
                     params,
                 )
@@ -671,6 +576,15 @@ async def list_user_strategies(
         svc = get_strategy_storage_service()
         tag_list = tags.split(",") if tags else None
         tenant_id = _get_tenant_id(request)
+
+        # 注释承诺过「新用户自动初始化模板」，先前漏实现。
+        # 每次列表先补齐缺失内置策略；已有同 strategy_type / template:id / 同名则跳过。
+        try:
+            await _perform_sync(user_id)
+        except Exception as e:
+            StructuredTaskLogger(logger, "user-strategies").warning(
+                "auto_sync_failed", "列表自动同步模板失败，继续返回已有策略", error=e
+            )
 
         items = await asyncio.to_thread(
             svc.list,
@@ -832,29 +746,25 @@ async def list_user_strategies(
                 trade_daily_pnl = (trading_status or {}).get("daily_pnl")
                 if trade_daily_pnl is None and isinstance(trade_portfolio, dict):
                     trade_daily_pnl = trade_portfolio.get("daily_pnl")
-                if trade_today_return is not None:
-                    today_return = _to_float(trade_today_return, today_return)
-                elif trade_daily_pnl is not None and isinstance(trade_portfolio, dict):
-                    initial_capital = _to_float(
-                        trade_portfolio.get("initial_capital"), 0.0
-                    )
-                    if initial_capital > 0:
-                        today_return = (
-                            _to_float(trade_daily_pnl, 0.0) / initial_capital * 100.0
-                        )
-                if trade_daily_pnl is not None:
-                    today_pnl = _to_float(trade_daily_pnl, 0.0)
-                # 模拟盘无 portfolios 行时 portfolio 快照为 None，上面全是 None；
-                # 用模拟账户资金快照兜底，否则活跃策略收益恒为 0。
-                if (
-                    trade_daily_pnl is None
-                    and trade_today_return is None
-                    and sim_fund is not None
-                ):
+                # 模拟盘收益以资金快照为准，避免空 portfolios 行的 0 盈亏盖住真实账户。
+                if sim_mode == "SIMULATION" and sim_fund is not None:
                     today_pnl = float(sim_fund["today_pnl"])
                     today_return = float(sim_fund["today_return"])
                     if total_return == 0.0:
                         total_return = float(sim_fund["total_return"])
+                else:
+                    if trade_today_return is not None:
+                        today_return = _to_float(trade_today_return, today_return)
+                    elif trade_daily_pnl is not None and isinstance(trade_portfolio, dict):
+                        initial_capital = _to_float(
+                            trade_portfolio.get("initial_capital"), 0.0
+                        )
+                        if initial_capital > 0:
+                            today_return = (
+                                _to_float(trade_daily_pnl, 0.0) / initial_capital * 100.0
+                            )
+                    if trade_daily_pnl is not None:
+                        today_pnl = _to_float(trade_daily_pnl, 0.0)
             execution_latency_ms = None
             if summary_execution_latency is not None:
                 try:

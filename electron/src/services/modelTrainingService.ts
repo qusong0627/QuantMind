@@ -560,6 +560,13 @@ class ModelTrainingService {
     return resp.data;
   }
 
+  async cancelTrainingRun(runId: string): Promise<{ runId: string; status: string; cancelled: boolean }> {
+    const resp = await this.client.post<{ runId: string; status: string; cancelled: boolean }>(
+      `/models/training-runs/${runId}/cancel`,
+    );
+    return resp.data;
+  }
+
   async getActiveTrainingRun(): Promise<ModelTrainingRunStatus | null> {
     // 后端对「无活跃训练任务」返回 200 + null（不再 404），此处兜底网络/未知错误
     try {

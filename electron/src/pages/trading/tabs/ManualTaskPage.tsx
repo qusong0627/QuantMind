@@ -9,6 +9,7 @@ import timezone from 'dayjs/plugin/timezone';
 dayjs.extend(utc);
 dayjs.extend(timezone);
 import { strategyManagementService } from '../../../services/strategyManagementService';
+import { sortTradingStrategies } from '../utils/sortTradingStrategies';
 import {
     modelTrainingService,
     type InferenceRankingResult,
@@ -236,15 +237,11 @@ const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack }) 
 
     const filteredStrategyOptions = useMemo(() => {
         const q = strategySearch.toLowerCase().trim();
-        return strategies
-            .filter((s) => !s.is_system) // 过滤掉系统模板，只显示个人策略
-            .filter(s => s.name.toLowerCase().includes(q) || s.id.toLowerCase().includes(q))
-            .sort((a, b) => {
-                const idA = Number(a.id);
-                const idB = Number(b.id);
-                if (!isNaN(idA) && !isNaN(idB)) return idA - idB;
-                return String(a.id).localeCompare(String(b.id));
-            });
+        return sortTradingStrategies(
+            strategies
+                .filter((s) => !s.is_system)
+                .filter((s) => s.name.toLowerCase().includes(q) || s.id.toLowerCase().includes(q)),
+        );
     }, [strategies, strategySearch]);
 
     const strategyOptions = useMemo(

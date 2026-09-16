@@ -34,13 +34,20 @@ def _env() -> tuple[str, int, str | None, int] | None:
 
 
 def series_key_for(symbol: str) -> str | None:
-    """symbol 转序列键；非标准 6 位代码返回 None（避免脏 key 查询）。"""
+    """Convert a validated CN/HK/US symbol to its exact series key."""
     import re as _re
 
     from backend.shared.stock_utils import StockCodeUtil
 
-    normalized = StockCodeUtil.to_prefix(symbol)
-    if not normalized or not _re.match(r"^(SH|SZ|BJ)\d{6}$", normalized):
+    raw = str(symbol or "").strip().upper()
+    normalized = StockCodeUtil.to_prefix(raw)
+    if _re.fullmatch(r"^(SH|SZ|BJ)\d{6}$", normalized):
+        pass
+    elif _re.fullmatch(r"(?:\d{4,5}\.HK|HK\d{5})", raw):
+        normalized = raw
+    elif _re.fullmatch(r"[A-Z][A-Z0-9.-]{0,14}", raw):
+        normalized = raw
+    else:
         return None
     return f"{SERIES_KEY_PREFIX}{normalized}"
 
@@ -145,3 +152,61 @@ async def fetch_series_tick(symbol: str, max_age_sec: int = 300) -> dict[str, An
     if tick is None:
         logger.debug("[RedisSeriesQuote] %s 无新鲜 tick", key)
     return tick
+
+
+async def fetch_series_ticks(
+    symbols: list[str],
+    *,
+    max_age_sec: int = 300,
+    volume_window_sec: int = 60,
+) -> dict[str, dict[str, Any]]:
+    """Batch-load fresh ticks and recent incremental volume in one pipeline."""
+    try:
+        max_age_sec = int(os.getenv("SIM_REDIS_QUOTE_MAX_AGE_SEC") or max_age_sec)
+        volume_window_sec = int(
+            os.getenv("SIM_LIQUIDITY_WINDOW_SEC") or volume_window_sec
+        )
+    except (TypeError, ValueError):
+        pass
+    keyed = [(symbol, series_key_for(symbol)) for symbol in dict.fromkeys(symbols)]
+    keyed = [(symbol, key) for symbol, key in keyed if key]
+    client = _get_client()
+    if client is None or not keyed:
+        return {}
+    now_ts = time.time()
+    try:
+        pipe = client.pipeline(transaction=False)
+        for _, key in keyed:
+            pipe.zrangebyscore(
+                key,
+                now_ts - max(1, volume_window_sec),
+                now_ts,
+                withscores=True,
+            )
+        rows_by_symbol = await pipe.execute()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[RedisSeriesQuote] 批量读取失败: %s", exc)
+        return {}
+
+    result: dict[str, dict[str, Any]] = {}
+    for (symbol, _), rows in zip(keyed, rows_by_symbol, strict=True):
+        if not rows:
+            continue
+        member, score = rows[-1]
+        tick = parse_series_member(member, float(score), now_ts, max_age_sec)
+        if tick is None:
+            continue
+        volumes: list[float] = []
+        for raw_member, _raw_score in rows:
+            try:
+                payload = json.loads(raw_member)
+                volume = float(payload.get("volume"))
+                if volume >= 0:
+                    volumes.append(volume)
+            except (TypeError, ValueError, KeyError):
+                continue
+        tick["recent_volume"] = (
+            max(0.0, volumes[-1] - volumes[0]) if len(volumes) >= 2 else None
+        )
+        result[symbol] = tick
+    return result

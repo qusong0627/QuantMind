@@ -17,7 +17,7 @@ class TestUnlockAllAccounts:
     async def test_unlocks_valid_account_keys_only(self):
         # Arrange
         manager = MagicMock()
-        manager.unlock_t1 = AsyncMock(
+        manager.sync_t1_from_ledger = AsyncMock(
             side_effect=[
                 {"success": True, "unlocked": 3},
                 {"success": True, "unlocked": 0},
@@ -39,13 +39,14 @@ class TestUnlockAllAccounts:
 
         # Assert: 2 个合法 key 各解锁一次，其中 1 个有新解锁持仓
         assert unlocked_count == 1
-        assert manager.unlock_t1.await_count == 2
+        assert manager.sync_t1_from_ledger.await_count == 2
 
     @pytest.mark.asyncio
     async def test_market_suffix_is_passed_through(self):
         # Arrange: HK 后缀账户必须透传 market 解锁，不能解到 CN 账户上
         manager = MagicMock()
         manager.unlock_t1 = AsyncMock(return_value={"success": True, "unlocked": 1})
+        manager.sync_t1_from_ledger = AsyncMock()
         fake_redis = MagicMock()
         fake_redis.scan_iter.return_value = ["simulation:account:default:7:HK"]
 
@@ -63,6 +64,7 @@ class TestUnlockAllAccounts:
     async def test_redis_scan_failure_returns_zero(self):
         manager = MagicMock()
         manager.unlock_t1 = AsyncMock()
+        manager.sync_t1_from_ledger = AsyncMock()
         fake_redis = MagicMock()
         fake_redis.scan_iter.side_effect = RuntimeError("redis down")
 

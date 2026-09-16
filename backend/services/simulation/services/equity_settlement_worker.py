@@ -59,6 +59,22 @@ def settle_interval_seconds() -> int:
         return 30
 
 
+def settle_cycle_timeout_seconds() -> int:
+    """Hard cap for one cycle. Sync Redis on the event loop cannot be
+    interrupted; callers must offload those calls to a thread first."""
+    try:
+        return max(10, int(os.getenv("SIM_EQUITY_SETTLE_CYCLE_TIMEOUT_SECONDS", "25")))
+    except (TypeError, ValueError):
+        return 25
+
+
+def settle_heartbeat_cycles() -> int:
+    try:
+        return max(1, int(os.getenv("SIM_EQUITY_SETTLE_HEARTBEAT_CYCLES", "20")))
+    except (TypeError, ValueError):
+        return 20
+
+
 # 持仓键 → (代码, 方向)。兼容三种历史键形：
 #   SYMBOL::long（交易 Lua 写入）/ SYMBOL（init/旧数据）/ SYMBOL:short（台账投影）。
 def split_position_key(pos_key: str) -> tuple[str, str]:
@@ -193,22 +209,34 @@ class SimulationEquitySettlementWorker:
 
     async def _run(self) -> None:
         # 启动即执行首个周期：重启后不等第一个 interval，几秒内恢复权益数据。
+        heartbeat_every = settle_heartbeat_cycles()
         while not self._stopped.is_set():
             # T-P1-06：调度心跳（体检 C07 按注册表判定）
             from backend.shared.scheduler_registry import heartbeat as _sched_heartbeat
 
             _sched_heartbeat("equity_settle")
             try:
-                stats = await self.run_cycle()
+                stats = await asyncio.wait_for(
+                    self.run_cycle(),
+                    timeout=settle_cycle_timeout_seconds(),
+                )
                 self._cycle_count += 1
-                # 30s 一条日志会刷屏：仅在有动作（重估/对账差异/报错）或首周期时输出
+                # Quiet cycles stay silent; heartbeat keeps overnight stalls visible.
                 if (
                     self._cycle_count == 1
+                    or self._cycle_count % heartbeat_every == 0
                     or stats.get("remarked")
                     or (stats.get("reconcile") or {}).get("diff_fields")
                     or stats.get("error")
                 ):
                     logger.info("Simulation equity settle cycle: %s", stats)
+            except asyncio.TimeoutError:
+                self._cycle_count += 1
+                logger.error(
+                    "Simulation equity settle cycle timed out after %ss (cycle=%s)",
+                    settle_cycle_timeout_seconds(),
+                    self._cycle_count,
+                )
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -255,7 +283,7 @@ class SimulationEquitySettlementWorker:
         # Step 2: 行情重估（对账之后再读账户，拿到确权后的最新值）
         accounts: list[dict[str, Any]] = []
         try:
-            accounts = self._load_accounts()
+            accounts = await asyncio.to_thread(self._load_accounts)
             stats["accounts"] = len(accounts)
             if accounts:
                 prices = await self._resolve_prices(accounts)
@@ -347,17 +375,16 @@ class SimulationEquitySettlementWorker:
             return {}
 
         from backend.services.simulation.services.redis_series_quote import (
-            fetch_series_tick,
+            fetch_series_ticks,
         )
 
         codes = sorted(market_by_code)
-        ticks = await asyncio.gather(
-            *(fetch_series_tick(code) for code in codes), return_exceptions=True
-        )
+        ticks = await fetch_series_ticks(codes)
 
         prices: dict[str, float] = {}
         fallback_codes: list[str] = []
-        for code, tick in zip(codes, ticks, strict=False):
+        for code in codes:
+            tick = ticks.get(code)
             px = 0.0
             if isinstance(tick, dict):
                 try:
@@ -415,8 +442,11 @@ class SimulationEquitySettlementWorker:
         drift = abs(float(account.get("total_asset") or 0) - (cash + net_mv)) > 0.01
         if not updates and not drift:
             return False
+        if not self.redis.client:
+            return False
         try:
-            result = self.redis.client.eval(
+            result = await asyncio.to_thread(
+                self.redis.client.eval,
                 _REMARK_LUA,
                 1,
                 item["key"],

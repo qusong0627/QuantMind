@@ -30,5 +30,6 @@
   "live_config_tips": [
     "权重分配型模板：单票上限 max_weight=5%，避免集中度风险。"
   ],
+  "dir": "通用策略",
   "markets": []
 }

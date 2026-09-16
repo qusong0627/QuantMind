@@ -10,11 +10,13 @@
 import asyncio
 import logging
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from backend.services.trade_shared.redis_client import redis_client
 from backend.services.trade_shared.simulation_manager import SimulationAccountManager
 
 logger = logging.getLogger(__name__)
+_SH_TZ = ZoneInfo("Asia/Shanghai")
 
 _UNLOCK_HOUR = 9
 _UNLOCK_MINUTE = 16
@@ -22,8 +24,20 @@ _CHECK_INTERVAL_SECONDS = 60
 _ACCOUNT_KEY_PATTERN = "simulation:account:*"
 
 
-async def _unlock_all_accounts(manager: SimulationAccountManager) -> int:
-    """把全部模拟账户的 T+1 可卖量补齐为总量，返回有新解锁持仓的账户数。
+def _is_cn_trade_date(day) -> bool:
+    try:
+        import pandas as pd
+        from exchange_calendars import get_calendar
+
+        return bool(get_calendar("XSHG").is_session(pd.Timestamp(day)))
+    except Exception:
+        return day.weekday() < 5
+
+
+async def _unlock_all_accounts(
+    manager: SimulationAccountManager, *, as_of_date=None
+) -> int:
+    """按 PG 持仓批次同步全部模拟账户可卖量。
 
     按统一键规范解析（含 :MARKET 后缀的市场账户），市场透传给 unlock_t1，
     避免扫到 HK 账户却解了 CN 账户、HK 账户永远锁死。
@@ -47,9 +61,17 @@ async def _unlock_all_accounts(manager: SimulationAccountManager) -> int:
             tenant, user_raw, market = parsed
             if not user_raw.isdigit():
                 continue
-            result = await manager.unlock_t1(
-                user_id=int(user_raw), tenant_id=tenant, market=market
-            )
+            if market == "CN":
+                result = await manager.sync_t1_from_ledger(
+                    user_id=int(user_raw),
+                    tenant_id=tenant,
+                    market=market,
+                    as_of_date=as_of_date,
+                )
+            else:
+                result = await manager.unlock_t1(
+                    user_id=int(user_raw), tenant_id=tenant, market=market
+                )
             if result.get("success") and result.get("unlocked", 0) > 0:
                 unlocked_count += 1
         except Exception as exc:
@@ -60,9 +82,9 @@ async def _unlock_all_accounts(manager: SimulationAccountManager) -> int:
 async def run_simulation_t1_unlock_task(
     interval_seconds: int = _CHECK_INTERVAL_SECONDS,
 ) -> None:
-    """每个交易日 09:16 后把全部模拟账户 T+1 可卖量补齐（幂等）。
+    """每个交易日 09:16 后按持仓批次同步 T+1 可卖量（幂等）。
 
-    进程在解锁窗口后重启会补跑一次；周末/节假日解锁无害（幂等）。
+    进程在解锁窗口后重启会补跑，但当日买入批次不会被解锁。
     """
     manager = SimulationAccountManager(redis_client)
     last_date = ""
@@ -71,18 +93,24 @@ async def run_simulation_t1_unlock_task(
 
         _sched_heartbeat("t1_unlock")
         try:
-            now = datetime.now()
+            now = datetime.now(_SH_TZ)
             today = now.strftime("%Y%m%d")
             if (
                 today != last_date
                 and (now.hour, now.minute) >= (_UNLOCK_HOUR, _UNLOCK_MINUTE)
             ):
                 last_date = today
-                if now.weekday() >= 5:
-                    continue  # 周末不解锁，周一自然补齐
-                unlocked = await _unlock_all_accounts(manager)
-                if unlocked:
-                    logger.info("模拟盘 T+1 解锁: %d 个账户有新解锁持仓", unlocked)
+                if not _is_cn_trade_date(now.date()):
+                    logger.info("模拟盘 T+1 跳过非交易日: %s", today)
+                    continue
+                unlocked = await _unlock_all_accounts(
+                    manager, as_of_date=now.date()
+                )
+                logger.info(
+                    "模拟盘 T+1 同步完成: date=%s unlocked_accounts=%d",
+                    today,
+                    unlocked,
+                )
         except Exception as exc:
             logger.warning("模拟盘 T+1 解锁任务异常: %s", exc)
         await asyncio.sleep(interval_seconds)

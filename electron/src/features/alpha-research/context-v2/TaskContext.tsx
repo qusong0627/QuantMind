@@ -426,6 +426,11 @@ export const TaskProvider: React.FC<{ children: React.ReactNode }> = ({ children
         bindMiningTransport(resp.data.taskId);
       } catch (err: any) {
         console.error('Failed to start mining task:', err);
+        const detail = err?.response?.data?.detail;
+        const failMsg =
+          typeof detail === 'string' && detail.trim()
+            ? detail
+            : (err?.message || '无法连接后端服务');
         // Set error state instead of falling back to mock data
         setMiningTask({
           taskId: '',
@@ -436,14 +441,14 @@ export const TaskProvider: React.FC<{ children: React.ReactNode }> = ({ children
             currentRound: 0,
             totalRounds: config.maxRounds || 3,
             progress: 0,
-            message: `启动失败: ${err?.message || '无法连接后端服务'}`,
+            message: `启动失败: ${failMsg}`,
             timestamp: new Date().toISOString(),
           },
           logs: [{
             id: generateId(),
             timestamp: new Date().toISOString(),
             level: 'error' as const,
-            message: `启动挖掘任务失败: ${err?.message || '无法连接后端服务，请检查网络或登录状态'}`,
+            message: `启动挖掘任务失败: ${failMsg}`,
           }],
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString(),

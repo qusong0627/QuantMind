@@ -150,8 +150,9 @@ def test_real_order_with_int_user_id_and_no_portfolio_succeeds():
             if key.startswith("user_id"):
                 assert isinstance(value, str), f"int user_id 绑定参数: {_bind_params(stmt)}"
 
-    # 风控仍用 int 口径（保留既有规则匹配语义）
-    assert captured["eng"].risk_user_ids == [1]
+    # 风控用 int 口径，且管理员族收口 canonical 10000001（合流后 admin 身份口径：
+    # "1"/"00000001"/"admin" 均归一，规则匹配与 Redis 键同源）
+    assert captured["eng"].risk_user_ids == [10000001]
 
 
 def test_real_order_duplicate_client_order_id_is_skipped():

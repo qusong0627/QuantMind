@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 
 def _require_user_id(raw_user_id: str, tenant_id: str = "default") -> int:
-    """兼容别名，统一走 require_sim_user_id（OSS admin 归保留账户 0）。"""
+    """兼容别名，统一走 require_sim_user_id（OSS admin 归 10000001）。"""
     return require_sim_user_id(raw_user_id, tenant_id=tenant_id)
 
 

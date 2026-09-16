@@ -1,7 +1,7 @@
 {
   "id": "deep_time_series",
   "name": "深度学习时序策略 (GRU/LSTM)",
-  "description": "利用深度学习模型捕捉市场的长短期记忆效应，原生支持 3D 时序信号加载。",
+  "description": "用 GRU/LSTM 等深度时序模型（按历史特征序列预测未来收益打分）驱动的 TopK-Dropout 选股：按预测分取前 topk 只、每期替换 n_drop 只、每 rebalance_days 个交易日调仓。需先训练或指定对应的深度学习时序模型（pred.pkl）。",
   "category": "basic",
   "difficulty": "advanced",
   "params": [
@@ -28,7 +28,9 @@
     "rebalance_days": 3
   },
   "live_config_tips": [
+    "该策略依赖深度学习时序模型的预测分（pred.pkl），请先训练或选择对应模型，否则无有效信号。",
     "时序模型模板：依赖模型 .pkl 信号产物，切换模型后建议先回测验证。"
   ],
+  "dir": "通用策略",
   "markets": []
 }

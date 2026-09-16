@@ -112,13 +112,52 @@ QUANTMIND_ENABLE_WEB_UPDATE=true
 EOF
 }
 
+# QwenPaw 运行时契约兜底：确保 venv 含 reportlab（研报 MD→PDF）、容器含 docker CLI
+# （配合挂载的 /var/run/docker.sock 执行 `docker exec quantmind ...`）。
+# 定制镜像构建时已内置；此处为兜底，安装失败仅告警不中断（对齐 full-deploy.sh）。
+configure_qwenpaw_runtime() {
+    log '    校验 QwenPaw 运行时（reportlab / docker CLI）'
+    if ! docker ps --format '{{.Names}}' | grep -qx qwenpaw; then
+        log '    警告：qwenpaw 容器未运行，跳过'
+        return 0
+    fi
+
+    if docker exec qwenpaw /app/venv/bin/python3 -c 'import reportlab' >/dev/null 2>&1; then
+        log '    reportlab 已就绪'
+    else
+        docker exec qwenpaw sh -c \
+            '/app/venv/bin/pip install -q -i https://pypi.tuna.tsinghua.edu.cn/simple reportlab' \
+            || docker exec qwenpaw sh -c \
+            '/app/venv/bin/pip install -q -i https://mirrors.aliyun.com/pypi/simple/ reportlab' \
+            || docker exec qwenpaw sh -c '/app/venv/bin/pip install -q reportlab' \
+            || log '    警告：reportlab 安装失败，技能 PDF 生成将降级为仅 MD'
+    fi
+
+    if docker exec qwenpaw sh -c 'command -v docker' >/dev/null 2>&1; then
+        log '    docker CLI 已就绪'
+    elif [[ -x /usr/bin/docker ]] \
+        && docker cp /usr/bin/docker qwenpaw:/usr/local/bin/docker 2>/dev/null \
+        && docker exec qwenpaw sh -c \
+            'chmod +x /usr/local/bin/docker && docker --version >/dev/null' 2>/dev/null; then
+        log '    已从宿主机复制 docker CLI 到 QwenPaw 容器'
+    else
+        docker exec qwenpaw sh -c \
+            'command -v apt-get >/dev/null 2>&1 && apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -q docker.io' \
+            || log '    警告：docker CLI 安装失败，重依赖取数脚本将走内置 pdf 技能兜底'
+    fi
+}
+
 start_services() {
     log '4/5 构建并启动服务'
     cd "$PROJECT_DIR"
-    # 仅预拉取第三方外部镜像（postgres/redis/huntly/rsshub/qwenpaw/ib-gateway）。
+    # 仅预拉取第三方外部镜像（postgres/redis/huntly/rsshub/ib-gateway）。
     # 自研镜像（quantmind-oss / data-gateway / dashboard 等）未上传镜像仓库，
     # 由下方 docker compose build 本地构建，不可对它们执行 pull。
-    docker compose pull db redis huntly rsshub qwenpaw ib-gateway \
+    # qwenpaw 例外：本地 tag agentscope/qwenpaw:latest 是「上游 + reportlab + docker CLI」
+    # 的定制镜像（docker/Dockerfile.qwenpaw）。直接 pull 会用上游原版覆盖该 tag 并丢掉
+    # 定制层，故这里不 pull，改由下方 build 自动拉取上游基础层后叠加定制
+    # （对齐 full-deploy.sh「绝不覆盖定制镜像」的原则）。
+    docker compose pull db redis huntly rsshub ib-gateway \
         || log '部分外部镜像未能预拉取，将在启动时重试'
     # 构建时注入 pip 源加速（国内网络），可通过 QUANTMIND_PIP_MIRROR 覆盖
     # 依赖指纹 QM_REQ_SHA 写入镜像 Label，供 full-deploy/update 比对复用还是重建。
@@ -129,7 +168,10 @@ start_services() {
         --build-arg PIP_TRUSTED_HOST="$PIP_TRUSTED_HOST" \
         --build-arg QM_REQ_SHA="${req_sha:-unknown}" \
         quantmind
+    # qwenpaw 定制层（reportlab + docker CLI）：buildkit 自动拉取上游基础层后叠加。
+    docker compose build qwenpaw
     docker compose up -d --remove-orphans
+    configure_qwenpaw_runtime
 }
 
 health_check() {

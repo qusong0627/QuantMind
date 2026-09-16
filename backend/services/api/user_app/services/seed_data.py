@@ -44,13 +44,13 @@ async def init_admin_data(db: AsyncSession):
     result = await db.execute(stmt)
     admin_user = result.scalar_one_or_none()
 
-    # 2.1 历史坏数据自愈：db_init.sql 曾 seed user_id='admin'，规范应为 00000001。
+    # 2.1 历史坏数据自愈：admin 规范 ID 为 10000001（不再用 admin / 00000001）。
     # 用户名登录不受影响，但 JWT sub 与全链路 user_id 口径会错。
-    if admin_user is not None and admin_user.user_id != "00000001":
-        from backend.shared.admin_identity import fix_admin_user_id
+    from backend.shared.admin_identity import ADMIN_USER_ID, fix_admin_user_id
 
+    if admin_user is not None and admin_user.user_id != ADMIN_USER_ID:
         logger.warning(
-            "检测到 admin user_id=%r，纠正为 00000001", admin_user.user_id
+            "检测到 admin user_id=%r，纠正为 %s", admin_user.user_id, ADMIN_USER_ID
         )
         # 必须先结束当前事务再纠正：上面的 SELECT 让本 session 持有 users 表上的锁/
         # 事务快照，而 fix_admin_user_id 会在**新连接**上执行 ALTER TABLE（ACCESS
@@ -71,7 +71,7 @@ async def init_admin_data(db: AsyncSession):
         hashed = bcrypt.hashpw(b"admin123", bcrypt.gensalt()).decode("utf-8")
 
         admin_user = User(
-            user_id="00000001",
+            user_id=ADMIN_USER_ID,
             tenant_id=default_tenant_id,
             username="admin",
             email="admin@quantmind.com",

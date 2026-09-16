@@ -70,7 +70,9 @@ async def _ensure_table() -> None:
     _table_ensured = True
 
 
-def _positions_by_symbol(positions: Any) -> dict[str, float]:
+def _positions_by_symbol(
+    positions: Any, field: str = "volume"
+) -> dict[str, float]:
     out: dict[str, float] = {}
     if not isinstance(positions, dict):
         return out
@@ -80,7 +82,7 @@ def _positions_by_symbol(positions: Any) -> dict[str, float]:
         code = str(key).split("::", 1)[0].strip().upper()
         if not code:
             continue
-        out[code] = out.get(code, 0.0) + float(pos.get("volume") or 0)
+        out[code] = out.get(code, 0.0) + float(pos.get(field) or 0)
     return out
 
 
@@ -136,7 +138,11 @@ async def run_reconcile_once(
 
     manager = SimulationAccountManager(redis)
     try:
-        keys = list(redis.client.scan_iter(match="simulation:account:*", count=500))
+        keys = await asyncio.to_thread(
+            lambda: list(
+                redis.client.scan_iter(match="simulation:account:*", count=500)
+            )
+        )
     except Exception as exc:
         logger.warning("reconcile scan failed: %s", exc)
         return stats
@@ -156,7 +162,7 @@ async def run_reconcile_once(
         try:
             import json as _json
 
-            live_raw = redis.client.get(key)
+            live_raw = await asyncio.to_thread(redis.client.get, key)
             live = _json.loads(live_raw) if live_raw else {}
             if not isinstance(live, dict):
                 live = {}
@@ -186,7 +192,25 @@ async def run_reconcile_once(
                         "pg_value": pg_pos.get(code, 0.0),
                         "diff": d,
                     })
-            if classify_reconcile_outcome(True, len(diffs)) == "clean":
+            live_available = _positions_by_symbol(
+                live.get("positions"), "available_volume"
+            )
+            pg_available = _positions_by_symbol(
+                rebuilt.get("positions"), "available_volume"
+            )
+            for code in sorted(set(live_available) | set(pg_available)):
+                d = live_available.get(code, 0.0) - pg_available.get(code, 0.0)
+                if abs(d) > _DIFF_TOL:
+                    diffs.append(
+                        {
+                            "field": "available_volume",
+                            "symbol": code,
+                            "redis_value": live_available.get(code, 0.0),
+                            "pg_value": pg_available.get(code, 0.0),
+                            "diff": d,
+                        }
+                    )
+            if not diffs:
                 # T-P2-06：零差异也落当日证据行（每日一行，进程内去重）
                 stats["clean"] += 1
                 try:
@@ -196,13 +220,14 @@ async def run_reconcile_once(
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("reconcile clean 行写入失败: %s", exc)
                 continue
+                continue
             stats["diff_fields"] += len(diffs)
             fixed = False
             if autofix:
                 try:
                     from backend.shared.trade_account_cache import write_json_cache
 
-                    write_json_cache(redis, key, rebuilt)
+                    await asyncio.to_thread(write_json_cache, redis, key, rebuilt)
                     fixed = True
                     stats["autofixed"] += 1
                 except Exception as exc:
@@ -235,7 +260,8 @@ async def run_reconcile_once(
         except Exception as exc:
             logger.debug("reconcile skipped %s: %s", key, exc)
             continue
-    logger.info(
+    log = logger.info if stats["diff_fields"] else logger.debug
+    log(
         "simulation reconcile done: checked=%d diff_fields=%d autofixed=%d "
         "clean=%d ledger_empty=%d",
         stats["checked"],

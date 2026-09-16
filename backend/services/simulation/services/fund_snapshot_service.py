@@ -128,20 +128,31 @@ async def _latest_totals_by_market_before(
 
 
 async def _latest_total_scoped(
-    session, tenant_id: str, user_id: str, before, *, market: str | None
+    session,
+    tenant_id: str,
+    user_id: str,
+    before,
+    *,
+    market: str | None,
+    user_ids: list[str] | None = None,
 ) -> Decimal | None:
-    """as_of 之前最近一条快照总资产；market=None 表示旧库（不过滤市场）。"""
+    """as_of 之前最近一条快照总资产；market=None 表示旧库（不过滤市场）。
+
+    user_ids 非空时按别名集合查询（admin '1'/'00000001' 双形兼容，唯一实现
+    `ledger_user_id_candidates`）。
+    """
     from sqlalchemy import text as sa_text
 
+    ids = [str(u) for u in (user_ids or [user_id])]
     where_market = "AND market = :m " if market else ""
-    params: dict[str, object] = {"t": tenant_id, "u": user_id, "d": before}
+    params: dict[str, object] = {"t": tenant_id, "u": ids, "d": before}
     if market:
         params["m"] = market
     row = (
         await session.execute(
             sa_text(
                 "SELECT total_asset FROM simulation_fund_snapshots "
-                "WHERE tenant_id = :t AND user_id = :u AND snapshot_date < :d "
+                "WHERE tenant_id = :t AND user_id = ANY(:u) AND snapshot_date < :d "
                 f"{where_market}"
                 "ORDER BY snapshot_date DESC LIMIT 1"
             ),
@@ -350,14 +361,27 @@ class SimulationFundSnapshotService:
         day_open = initial_capital
         month_open = initial_capital
         try:
+            from backend.shared.simulation_account_keys import ledger_user_id_candidates
+
+            user_ids = ledger_user_id_candidates(user_id)
             async with get_session(read_only=True) as session:
                 day_row = await _latest_total_scoped(
-                    session, tenant_id, user_id, today, market=scope
+                    session,
+                    tenant_id,
+                    user_id,
+                    today,
+                    market=scope,
+                    user_ids=user_ids,
                 )
                 if day_row is not None:
                     day_open = day_row
                 month_row = await _latest_total_scoped(
-                    session, tenant_id, user_id, month_start, market=scope
+                    session,
+                    tenant_id,
+                    user_id,
+                    month_start,
+                    market=scope,
+                    user_ids=user_ids,
                 )
                 if month_row is not None:
                     month_open = month_row

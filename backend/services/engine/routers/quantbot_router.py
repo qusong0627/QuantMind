@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from backend.services.engine.quantbot.intent_parser import parse_intent
+from backend.services.engine.alpha_agent.hw_lock import HardwareLockError
 from backend.services.engine.alpha_agent.launcher import get_launcher as get_alpha_agent_launcher
 from backend.services.engine.quantbot.task_store import QuantBotTaskStore
 
@@ -129,12 +130,15 @@ async def _handle_factor_evolution(
 
     # 异步启动演化 (AlphaAgent)
     alpha_launcher = get_alpha_agent_launcher()
-    alpha_task_id = await alpha_launcher.start_evolution(
-        user_id,
-        universe=intent.get("constraints", {}).get("universe", "csi300"),
-        loop_n=int(intent.get("constraints", {}).get("loop_n", 3)),
-        direction=intent.get("description", item.message),
-    )
+    try:
+        alpha_task_id = await alpha_launcher.start_evolution(
+            user_id,
+            universe=intent.get("constraints", {}).get("universe", "csi300"),
+            loop_n=int(intent.get("constraints", {}).get("loop_n", 3)),
+            direction=intent.get("description", item.message),
+        )
+    except HardwareLockError as exc:
+        raise HTTPException(status_code=412, detail=str(exc)) from exc
 
     return {
         "intent": "factor_evolution",

@@ -407,7 +407,9 @@ async def get_stocks_by_tag(
     """根据标签查个股（优先 SQLite 快照，缺失回退实时聚合）。"""
     _ = current_user
     st = _snap.stocks_by_tag(tag=tag, limit=limit, date=date)
-    if st:
+    # 快照 tags 表只存 symbol/sector_type，无行情字段；无行情时必须回退
+    # 实时聚合，否则前端 v.toFixed 会因 undefined 崩溃。
+    if st and st["items"] and "close_price" in st["items"][0]:
         return {"tag": tag, "total": len(st["items"]), "items": st["items"]}
     if date:
         return {"tag": tag, "total": 0, "items": []}

@@ -16,6 +16,7 @@ from typing import Optional
 import httpx
 from fastapi import APIRouter, HTTPException, Query, Request
 
+from backend.services.engine.alpha_agent.hw_lock import HardwareLockError
 from backend.services.engine.alpha_agent.launcher import get_launcher
 from backend.services.engine.auth_context import (
     assert_identity_not_spoofed,
@@ -302,15 +303,18 @@ async def start_evolution(
             status_code=429,
             detail=f"当前全平台挖掘任务数已达上限（{max_global}），请稍后再试。",
         )
-    task_id = await launcher.start_evolution(
-        auth_user_id,
-        market=market,
-        universe=universe,
-        loop_n=loop_n,
-        direction=direction or None,
-        data_source=data_source or None,
-        llm_overrides=llm_config.llm_env_overrides(),
-    )
+    try:
+        task_id = await launcher.start_evolution(
+            auth_user_id,
+            market=market,
+            universe=universe,
+            loop_n=loop_n,
+            direction=direction or None,
+            data_source=data_source or None,
+            llm_overrides=llm_config.llm_env_overrides(),
+        )
+    except HardwareLockError as exc:
+        raise HTTPException(status_code=412, detail=str(exc)) from exc
     return {
         "code": 200,
         "data": {

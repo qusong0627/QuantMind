@@ -21,6 +21,7 @@ from backend.services.trade_shared.redis_client import RedisClient
 from backend.services.simulation.engine import SimulationEngine, simulation_engine
 from backend.services.simulation.services.simulation_manager import (
     SimulationAccountManager,
+    canonical_sim_uid,
 )
 from backend.shared.database_manager_v2 import get_db_manager
 
@@ -239,7 +240,7 @@ class SimulationScheduler:
                                         tenant_id=tenant_id,
                                         user_id=user_id,
                                         strategy_id=str(strategy_id),
-                                        account_id=int(user_id) if user_id.isdigit() else 0,
+                                        account_id=canonical_sim_uid(user_id),
                                     ))
                     except Exception as e:
                         logger.debug("SimulationScheduler: 解析账户 key 失败 %s: %s", key, e)
@@ -338,8 +339,9 @@ class SimulationScheduler:
                         tenant_id = parts[2]
                         user_id_str = parts[3]
                         if user_id_str.isdigit():
-                            result = await manager.unlock_t1(
-                                user_id=int(user_id_str), tenant_id=tenant_id,
+                            result = await manager.sync_t1_from_ledger(
+                                user_id=int(user_id_str),
+                                tenant_id=tenant_id,
                             )
                             if result.get("success") and result.get("unlocked", 0) > 0:
                                 unlocked_count += 1

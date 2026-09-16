@@ -23,5 +23,6 @@
   "live_config_tips": [
     "自适应模板：宽 topk + 高 n_drop，换手偏高，注意交易成本占比。"
   ],
+  "dir": "通用策略",
   "markets": []
 }

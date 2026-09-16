@@ -7,12 +7,13 @@ import uuid
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import DateTime, Enum, Float, Index, Integer, String
+from sqlalchemy import Enum, Float, Index, Integer, String
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from backend.services.trade_shared.models.enums import _CaseInsensitiveEnum
 from backend.services.simulation.models import Base, TimestampMixin
+from backend.shared.utc_datetime import UtcDateTime
 
 
 class OrderSide(str, enum.Enum):
@@ -93,12 +94,12 @@ class SimOrder(Base, TimestampMixin):
     commission: Mapped[float] = mapped_column(
         Float, nullable=False, default=0.0)
 
-    submitted_at: Mapped[datetime | None
-                         ] = mapped_column(DateTime(timezone=True), nullable=True)
+    submitted_at: Mapped[datetime | None] = mapped_column(
+        UtcDateTime, nullable=True)
     filled_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True)
-    cancelled_at: Mapped[datetime | None
-                         ] = mapped_column(DateTime(timezone=True), nullable=True)
+        UtcDateTime, nullable=True)
+    cancelled_at: Mapped[datetime | None] = mapped_column(
+        UtcDateTime, nullable=True)
 
     execution_model: Mapped[str] = mapped_column(
         String(32), nullable=False, default="synthetic_price"

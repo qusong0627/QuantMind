@@ -123,6 +123,15 @@ describe('backend time formatting', () => {
     expect(formatBackendTime('2026-04-09T05:12:00', { withSeconds: true })).toBe('13:12:00');
   });
 
+  it('should treat Python microsecond naive ISO as UTC, not local time', () => {
+    expect(parseBackendTimestamp('2026-09-14T07:54:25.123456')?.toISOString()).toBe(
+      '2026-09-14T07:54:25.123Z',
+    );
+    expect(formatBackendTime('2026-09-14T07:54:25.123456', { withSeconds: true })).toBe(
+      '15:54:25',
+    );
+  });
+
   it('should keep timezone-aware timestamps stable', () => {
     expect(parseBackendTimestamp('2026-04-09T05:12:00Z')?.toISOString()).toBe('2026-04-09T05:12:00.000Z');
     expect(formatBackendTime('2026-04-09T05:12:00Z', { withSeconds: true })).toBe('13:12:00');

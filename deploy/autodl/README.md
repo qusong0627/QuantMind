@@ -16,19 +16,36 @@ AutoDL 显卡实例默认是 Python 容器（有 torch + GPU，但**没有 docke
 
 ## 快速开始
 
-1. 开通带 GPU 的 AutoDL Python 实例，SSH 登录：
-   ```bash
-   ssh -p <端口> root@connect.xxx.seetacloud.com
-   ```
-2. 上传并执行 `setup-autodl-native.sh`（在 AutoDL 本机跑，不是主节点）。
+开通带 GPU 的 AutoDL Python 实例，SSH 登录后在 **AutoDL 本机**（不是主节点）执行。
 
-交互：
+### 方式一：一键下载执行（推荐）
+
+无需先 `scp` 脚本，直接 curl 拉取即跑（保留 stdin，可交互）：
 
 ```bash
-bash setup-autodl-native.sh
+bash -c "$(curl -fsSL https://quantmindai.cn/gitea/qusong0627/QuantMind/raw/branch/master/deploy/autodl/quick-setup.sh)"
 ```
 
-非交互（无 TTY / CI / 远程一条命令）：
+非交互（CI / 管道执行，需带齐环境变量）：
+
+```bash
+QUANTDB_API_KEY=qdb_xxx AUTO_DL=yes AUTODL_SINCE=2024-01-01 AUTODL_DATASETS=l1_factors \
+  bash -c "$(curl -fsSL https://quantmindai.cn/gitea/qusong0627/QuantMind/raw/branch/master/deploy/autodl/quick-setup.sh)"
+```
+
+> `quick-setup.sh` 是下载器，内部自动拉取并执行 `setup-autodl-native.sh`。
+> 可用 `QUANTMIND_REF`（分支/tag）、`QUANTMIND_RAW_BASE`（raw 根地址）、
+> `QUANTMIND_SETUP_SHA256`（脚本校验）覆盖下载行为。
+
+### 方式二：先上传再执行
+
+```bash
+scp -P <端口> deploy/autodl/setup-autodl-native.sh root@connect.xxx.seetacloud.com:/root/
+ssh -p <端口> root@connect.xxx.seetacloud.com
+bash /root/setup-autodl-native.sh
+```
+
+非交互：
 
 ```bash
 QUANTDB_API_KEY=qdb_xxx AUTO_DL=yes AUTODL_SINCE=2024-01-01 AUTODL_DATASETS=l1_factors \
@@ -41,7 +58,7 @@ QUANTDB_API_KEY=qdb_xxx AUTO_DL=yes AUTODL_SINCE=2024-01-01 AUTODL_DATASETS=l1_f
 AUTODL_RESYNC=1 QUANTDB_API_KEY=qdb_xxx bash setup-autodl-native.sh
 ```
 
-脚本会：检测 Python / GPU；安装训练依赖（缺啥装啥，pandas 钉在 2.x）；创建 `/root/workspace` 与 `/root/autodl-fs/quantdb`；写入 API Key；按选择自动同步 / 增量 / 跳过并提示手动上传。
+脚本会：检测 Python / GPU；安装训练依赖（缺啥装啥，pandas 钉在 2.x）；创建 `/root/workspace` 与 `/root/autodl-fs/quantdb`；（可选）写入 API Key；按选择自动同步 / 增量 / 跳过并提示手动上传。
 
 ## 数据集
 
@@ -60,7 +77,7 @@ AUTODL_RESYNC=1 QUANTDB_API_KEY=qdb_xxx bash setup-autodl-native.sh
 
 | 变量 | 默认 | 说明 |
 |------|------|------|
-| `QUANTDB_API_KEY` | 无 | 自动/增量同步必填 |
+| `QUANTDB_API_KEY` | 无 | **可选**；自动/增量同步时必填，不填则跳过数据源配置（手动上传） |
 | `AUTO_DL` | 空盘 yes / 有数据 skip | `yes` / `no` / `skip` |
 | `AUTODL_RESYNC` | 0 | `1` 时已有数据仍增量 |
 | `AUTODL_SINCE` | `3-year` | `YYYY-MM-DD` 或 `full` |
@@ -118,4 +135,5 @@ TRAINING_MASTER_HOST=<协调机公网IP>   # AutoDL 回调 API，勿填 127.0.0.
 
 ## 文件
 
+- `quick-setup.sh` — 一键下载器（curl 拉取并执行 `setup-autodl-native.sh`）
 - `setup-autodl-native.sh` — 节点初始化（交互 + 非交互）

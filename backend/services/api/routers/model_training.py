@@ -15,6 +15,7 @@ from sqlalchemy import text
 
 from backend.services.api.routers.admin.admin_training import (
     complete_training_run,
+    cancel_training_run as _cancel_training_run,
     get_latest_training_run_for_owner,
     get_training_run_for_owner,
     submit_training_job,
@@ -733,6 +734,14 @@ async def get_training_run(
     current_user: dict[str, Any] = Depends(get_current_user),
 ):
     return await get_training_run_for_owner(run_id, current_user)
+
+
+@router.post("/training-runs/{run_id}/cancel", summary="取消训练任务（用户态）")
+async def cancel_training_run(
+    run_id: str,
+    current_user: dict[str, Any] = Depends(get_current_user),
+):
+    return await _cancel_training_run(run_id, current_user)
 
 
 @router.get("", summary="获取当前用户模型列表（用户态）")

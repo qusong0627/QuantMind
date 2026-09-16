@@ -1,5 +1,8 @@
 FROM python:3.11-slim
 
+# APT 国内镜像源（构建时可经 build-arg 覆盖）
+ARG APT_MIRROR=mirrors.tuna.tsinghua.edu.cn
+
 ENV PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple/ \
     PIP_TRUSTED_HOST=pypi.tuna.tsinghua.edu.cn
 
@@ -8,11 +11,11 @@ WORKDIR /app
 # 配置 APT 国内镜像源
 RUN set -eux; \
     if [ -f /etc/apt/sources.list.d/debian.sources ]; then \
-      sed -i "s/deb.debian.org/mirrors.aliyun.com/g" /etc/apt/sources.list.d/debian.sources; \
-      sed -i "s/security.debian.org/mirrors.aliyun.com/g" /etc/apt/sources.list.d/debian.sources; \
+      sed -i "s/deb.debian.org/${APT_MIRROR}/g" /etc/apt/sources.list.d/debian.sources; \
+      sed -i "s/security.debian.org/${APT_MIRROR}/g" /etc/apt/sources.list.d/debian.sources; \
     else \
-      sed -i "s/deb.debian.org/mirrors.aliyun.com/g" /etc/apt/sources.list; \
-      sed -i "s/security.debian.org/mirrors.aliyun.com/g" /etc/apt/sources.list; \
+      sed -i "s/deb.debian.org/${APT_MIRROR}/g" /etc/apt/sources.list; \
+      sed -i "s/security.debian.org/${APT_MIRROR}/g" /etc/apt/sources.list; \
     fi
 
 RUN apt-get update && apt-get install -y --no-install-recommends gcc libpq-dev curl && rm -rf /var/lib/apt/lists/*

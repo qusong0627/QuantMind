@@ -7,11 +7,13 @@ from .real_trading_utils import (
     _active_strategy_key,
     _default_execution_config,
     _default_live_trade_config,
+    _delete_active_strategy_aliases,
     _fetch_active_portfolio_snapshot,
     _normalize_execution_config,
     _normalize_identity,
     _normalize_live_trade_config,
     _parse_user_id,
+    _read_active_strategy_raw,
     _schedule_status_writeback,
     _schedule_user_notification,
 )
@@ -504,23 +506,35 @@ async def start_trading(
                     except Exception:
                         acquired = True  # Redis 异常不阻断，仍尝试建单（靠 task_id 去重兜底）
                     if acquired:
-                        bootstrap_result = await run_simulation_cycle_for_active(
-                            tenant_id=resolved_tenant_id,
-                            user_id=resolved_user_id,
-                            strategy_id=strategy_id or strategy_name,
-                            live_trade_config=live_config,
-                            run_id=bootstrap_task_id,
-                        )
-                        if bootstrap_result.get("status") == "failed":
-                            bootstrap_skipped_reason = str(
-                                bootstrap_result.get("error") or "simulation cycle failed"
-                            )[:300]
-                        logger.info(
-                            "[SimBootstrap] 首次启动已走 SimulationEngine tenant=%s user=%s strategy=%s task=%s status=%s filled=%s",
-                            resolved_tenant_id, resolved_user_id, strategy_id or strategy_name,
-                            bootstrap_task_id, (bootstrap_result or {}).get("status"),
-                            (bootstrap_result or {}).get("filled_count"),
-                        )
+                        try:
+                            bootstrap_result = await run_simulation_cycle_for_active(
+                                tenant_id=resolved_tenant_id,
+                                user_id=resolved_user_id,
+                                strategy_id=strategy_id or strategy_name,
+                                live_trade_config=live_config,
+                                run_id=bootstrap_task_id,
+                            )
+                            if bootstrap_result.get("status") == "failed":
+                                bootstrap_skipped_reason = str(
+                                    bootstrap_result.get("error") or "simulation cycle failed"
+                                )[:300]
+                                # 失败不占 24h 锁，否则重置后再启动仍被跳过
+                                try:
+                                    redis.client.delete(bootstrap_lock_key)
+                                except Exception:
+                                    pass
+                            logger.info(
+                                "[SimBootstrap] 首次启动已走 SimulationEngine tenant=%s user=%s strategy=%s task=%s status=%s filled=%s",
+                                resolved_tenant_id, resolved_user_id, strategy_id or strategy_name,
+                                bootstrap_task_id, (bootstrap_result or {}).get("status"),
+                                (bootstrap_result or {}).get("filled_count"),
+                            )
+                        except Exception:
+                            try:
+                                redis.client.delete(bootstrap_lock_key)
+                            except Exception:
+                                pass
+                            raise
                     else:
                         bootstrap_skipped_reason = "bootstrap_lock_exists"
                         logger.info(
@@ -613,8 +627,8 @@ async def stop_trading(
             auth, user_id=user_id, tenant_id=tenant_id
         )
 
-        active_strat_raw = redis.client.get(
-            _active_strategy_key(resolved_tenant_id, resolved_user_id)
+        active_strat_raw = _read_active_strategy_raw(
+            redis, resolved_tenant_id, resolved_user_id
         )
         result = {"status": "success", "message": "Stopped"}
         stopped_strategy_id = None
@@ -630,8 +644,8 @@ async def stop_trading(
             )
             logger.info(f"[Sim] 用户 {resolved_user_id} 停止了沙箱模拟盘")
 
-        # Clear active strategy in Redis
-        redis.client.delete(_active_strategy_key(resolved_tenant_id, resolved_user_id))
+        # Clear active strategy in Redis（含管理员历史别名）
+        _delete_active_strategy_aliases(redis, resolved_tenant_id, resolved_user_id)
         # T-P3-01：状态回写——停止后回到 VERIFIED（SIM/LIVE → VERIFIED 为合法迁移）
         if stopped_strategy_id:
             _schedule_status_writeback(
@@ -740,8 +754,8 @@ async def get_status(
     # Get active strategy info
     strategy_info = None
     active_strat_id = None
-    active_strat_raw = redis.client.get(
-        _active_strategy_key(resolved_tenant_id, resolved_user_id)
+    active_strat_raw = _read_active_strategy_raw(
+        redis, resolved_tenant_id, resolved_user_id
     )
     portfolio_snapshot = None
     latest_hosted_task = None

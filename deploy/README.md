@@ -114,7 +114,7 @@ curl http://127.0.0.1:8000/health
 
 不要把整套平台装进 AutoDL。主节点继续跑 Docker，AutoDL 只做 **`native_python` 训练 Worker**（实例一般不能嵌套 Docker）。
 
-1. AutoDL 上执行 `deploy/autodl/setup-autodl-native.sh`（详见 [`autodl/README.md`](autodl/README.md)）。
+1. AutoDL 上执行 `deploy/autodl/setup-autodl-native.sh`，或一条命令下载执行 `deploy/autodl/quick-setup.sh`（详见 [`autodl/README.md`](autodl/README.md)）。
 2. 主节点写 `config/training_nodes.yaml`（gitignore），`exec_mode: native_python`，数据目录 `/root/autodl-fs/quantdb`。
 3. `.env` 设置 `TRAINING_MASTER_HOST=<协调机公网IP>`，重启 `quantmind`。
 4. 桌面客户端模型训练页选择该节点。

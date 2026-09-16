@@ -151,6 +151,44 @@ def resolve_qlib_data_dir(market: str = "CN") -> str:
     return resolve_qlib_provider_uri(market=market)
 
 
+_PATH_MARKET_HINTS = {
+    "cn_data": "CN",
+    "hk_data": "HK",
+    "us_data": "US",
+    "bc_data": "CRYPTO",
+    "futures_data": "FUTURES",
+}
+
+
+def guess_market_from_provider_uri(provider_uri: str | None) -> str:
+    """从 provider_uri 路径片段猜测市场，未知按 CN。"""
+    lowered = str(provider_uri or "").lower()
+    for hint, market in _PATH_MARKET_HINTS.items():
+        if hint in lowered:
+            return market
+    return "CN"
+
+
+def fallback_to_ready_provider_uri(
+    provider_uri: str | None, market: str | None = None
+) -> str:
+    """归一 provider_uri 并保证读取端可用：
+
+    1. 先走 normalize_qlib_provider_uri（旧容器路径 → 规范目录）。
+    2. 若结果目录未就绪（新部署常见：数据实际落在另一处），回退到
+       resolve_qlib_provider_uri 解析出的就绪目录。
+    3. 两者都未就绪则原样返回，让调用方报出真实缺失路径。
+    """
+    market = (market or guess_market_from_provider_uri(provider_uri)).upper()
+    candidate = normalize_qlib_provider_uri(provider_uri, market=market)
+    if is_qlib_provider_ready(candidate):
+        return candidate
+    resolved = resolve_qlib_provider_uri(market)
+    if is_qlib_provider_ready(resolved):
+        return resolved
+    return candidate
+
+
 def resolve_qlib_calendar_path(market: str = "CN") -> Path:
     """返回 Qlib 交易日历文件路径 (calendars/day.txt)。"""
     return Path(resolve_qlib_provider_uri(market=market)) / "calendars" / "day.txt"

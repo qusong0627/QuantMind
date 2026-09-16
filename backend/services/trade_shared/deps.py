@@ -41,6 +41,11 @@ async def get_auth_context(
     # 与 API 服务 middleware/auth.py 同口径：is_admin 字段优先，其次看 roles
     is_admin = bool(payload.get("is_admin", "admin" in roles))
 
+    from backend.shared.admin_identity import is_admin_user_id, normalize_admin_user_id
+
+    if is_admin_user_id(sub):
+        sub = normalize_admin_user_id(sub)
+
     return AuthContext(
         user_id=sub,
         tenant_id=tenant_id,

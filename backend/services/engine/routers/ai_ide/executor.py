@@ -112,9 +112,16 @@ def _build_runner_environment(
     # 用户策略里的 qlib.init 必须与引擎读同一份缓存：旧前端传的是历史容器路径
     # /app/db/qlib_data，而系统实际解析/维护的是 /data/qlib/{market}_data。
     try:
-        from backend.shared.qlib_paths import normalize_qlib_provider_uri
+        from backend.shared.qlib_paths import fallback_to_ready_provider_uri
 
-        provider_uri = normalize_qlib_provider_uri(provider_uri)
+        ready_uri = fallback_to_ready_provider_uri(provider_uri)
+        if ready_uri != provider_uri:
+            logger.warning(
+                "AI-IDE provider_uri 未就绪，回退到可用缓存目录: %s -> %s",
+                provider_uri,
+                ready_uri,
+            )
+        provider_uri = ready_uri
     except Exception as exc:  # noqa: BLE001
         logger.warning("AI-IDE provider_uri 归一失败，沿用原路径: %s", exc)
     env = {
@@ -627,8 +634,9 @@ import traceback
 
 STRATEGY_PATH = "/app/strategy.py"
 try:
-    from backend.shared.qlib_paths import resolve_qlib_provider_uri as _resolve_qlib
-    QLIB_DATA_PATH = os.getenv("AI_IDE_BACKTEST_PROVIDER_URI", "") or _resolve_qlib("CN")
+    from backend.shared.qlib_paths import fallback_to_ready_provider_uri as _fallback_qlib
+
+    QLIB_DATA_PATH = _fallback_qlib(os.getenv("AI_IDE_BACKTEST_PROVIDER_URI", ""))
 except Exception:  # noqa: BLE001
     QLIB_DATA_PATH = os.getenv("AI_IDE_BACKTEST_PROVIDER_URI", "/app/db/qlib_data")
 
@@ -729,7 +737,7 @@ def _init_qlib():
     import qlib
     from qlib.data import D
 
-    provider_uri = os.getenv("AI_IDE_BACKTEST_PROVIDER_URI") or QLIB_DATA_PATH
+    provider_uri = QLIB_DATA_PATH
     region = os.getenv("AI_IDE_BACKTEST_REGION") or "cn"
     if not os.path.exists(provider_uri):
         print(f"[ERROR] Qlib 数据目录不存在: {provider_uri}")
@@ -840,7 +848,7 @@ def _run_module_backtest(module):
             allow_feature_signal_fallback=os.getenv(
                 "AI_IDE_ALLOW_FEATURE_SIGNAL_FALLBACK", "true"
             ).strip().lower() in {"1", "true", "yes", "on"},
-            qlib_provider_uri=os.getenv("AI_IDE_BACKTEST_PROVIDER_URI"),
+            qlib_provider_uri=QLIB_DATA_PATH,
             qlib_region=os.getenv("AI_IDE_BACKTEST_REGION"),
             # AI-IDE 模块型策略默认走向量化极速引擎：step 逐日循环在
             # universe=all 全市场 + 近 1 年区间下要 500s+，向量化引擎秒级完成。
