@@ -36,6 +36,8 @@ _HEARTBEAT_WIRED = {
     "eval_scores": "services/trade/services/eval_scores_service.py",
     # T-P4-06 新增（月度体检复检）
     "health_recheck": "services/trade/services/health_recheck_service.py",
+    # P6 T-P6-06 新增（热集构建）
+    "hot_set_builder": "services/live_trading/services/hot_set_builder.py",
 }
 
 

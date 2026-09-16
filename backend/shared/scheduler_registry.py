@@ -59,6 +59,11 @@ JOBS: tuple[JobSpec, ...] = (
         "消化 status=pending 的模拟单",
     ),
     JobSpec(
+        "hot_set_builder", "热集构建（P6）", "worker", "trade", "60s 周期",
+        "QM_HOT_SET_BUILD_ENABLED", True, 300, None,
+        "全用户持仓并集 ∪ 候选池 → Redis 热集集合（订阅采集数据源，T-P6-06）",
+    ),
+    JobSpec(
         "t1_unlock", "T+1 解锁", "worker", "trade", "60s 轮询（交易日 09:16 生效）",
         None, True, 300, None,
         "次日补齐 available_volume",

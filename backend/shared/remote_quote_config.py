@@ -83,3 +83,25 @@ def resolve_remote_quote_redis() -> tuple[str, int, str | None, int] | None:
         db = FREE_FEED_DB
     password = _read("REMOTE_QUOTE_REDIS_PASSWORD", FREE_FEED_PASSWORD) or None
     return host, port, password, db
+
+
+def make_sync_client(*, socket_timeout: float = 5.0, socket_connect_timeout: float = 3.0):
+    """构造**同步**远端行情 Redis 客户端（唯一构造点；未配置/已禁用返回 None）。
+
+    消费方（订阅写侧/热集构建等）统一经此获取，避免各自拼装连接参数。
+    """
+    import redis as _redis
+
+    resolved = resolve_remote_quote_redis()
+    if resolved is None:
+        return None
+    host, port, password, db = resolved
+    return _redis.Redis(
+        host=host,
+        port=port,
+        password=password,
+        db=db,
+        decode_responses=True,
+        socket_connect_timeout=socket_connect_timeout,
+        socket_timeout=socket_timeout,
+    )
