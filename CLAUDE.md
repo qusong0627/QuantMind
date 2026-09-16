@@ -172,6 +172,8 @@ Electron 前端在本地开发时使用 Vite HMR；修改 `electron/src` 后运�
 - `backend/shared/tdx_aidata/` - TdxAiData 实时行情通道（worker 唯一 SDK 引入口 + 订阅引擎写 `market:snapshot`/`market:series` 标准键，P6 盘中主源；**SDK 单次订阅上限 100 只**——超限整批拒绝且只打印不抛，>100 必须分片集群 `TdxAiDataCluster`，分片数在 Redis `qm:market:tdx_aidata:config.shard_count`）
 - `backend/shared/l05_store.py` - L0.5 热集快照按日落盘（`data/l05_snapshots/date=YYYYMMDD/` + 质检 + 降冷 + 订阅写侧归档器，T-P6-04）
 - `backend/shared/freshness.py` - 行情新鲜度分级唯一谓词（fresh/stale/unavailable；阈值 env 唯一读取点，T-P6-05）
+- `backend/shared/feature_defs.py` - 批量特征定义唯一实现（151 维 OHLCV 因子；原 update_feature_parquet 纯迁移，改算法必须过金样）
+- `backend/shared/feature_incremental.py` + `backend/services/engine/inference/incremental_features.py` - 增量特征引擎（32 列快车道与批量 ε=1e-9 金样锁定 + 快照状态机/分钟桶/provenance，T-P6-07）
 - `backend/shared/latency_metrics.py` - 端到端时延打点（`intel:latency` 滚动统计；报表 `backend/scripts/latency_report.py`，T-P6-05）
 - `backend/scripts/l05_maintenance.py` - L0.5 留存运维（质检报告 `report` / 容量 `capacity` / 降冷 `prune` 默认 dry-run）
 - `docker-compose.yml` - 本地部署配置

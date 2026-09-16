@@ -386,7 +386,7 @@ def compute_market_features(df: pd.DataFrame, market: str, batch_size: int = 100
     final_path: 若给定，合并临时文件后直接写该路径并返回轻量占位，
                 避免大表全量回读内存。
     """
-    from backend.scripts.update_feature_parquet import compute_features_for_group
+    from backend.shared.feature_defs import compute_features_for_group
 
     # industry 在部分市场/时段是 object 混型（字符串+数字），统一规整为 str
     # 再进入 pyarrow 落盘，避免 ArrowTypeError
