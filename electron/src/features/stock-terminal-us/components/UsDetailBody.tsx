@@ -9,18 +9,20 @@
 import { useEffect, useState } from 'react';
 import { Spin } from 'antd';
 import { stockTerminalService } from '../services/stockTerminalService';
+import { useUiMode } from '../../shared/useUiMode';
+import { fallbackDetailTab, visibleDetailTabs, type DetailTabDef } from '../../stock-terminal-shared/utils';
 import type { UsStockDetail, UsAnalysts, UsEarnings, UsFinancials, UsHoldings, UsCorporateActions, UsOverview, UsValuation } from '../types';
 
 type DetailTab = 'overview' | 'valuation' | 'financials' | 'analysts' | 'earnings' | 'insiders' | 'holdings' | 'corporate' | 'news';
 
-const TABS: { id: DetailTab; label: string }[] = [
+const TABS: DetailTabDef<DetailTab>[] = [
   { id: 'overview', label: '概览' },
   { id: 'valuation', label: '估值' },
   { id: 'financials', label: '财务' },
-  { id: 'analysts', label: '分析师' },
-  { id: 'earnings', label: '财报' },
-  { id: 'insiders', label: '内部人' },
-  { id: 'holdings', label: '机构' },
+  { id: 'analysts', label: '分析师', proOnly: true },
+  { id: 'earnings', label: '财报', proOnly: true },
+  { id: 'insiders', label: '内部人', proOnly: true },
+  { id: 'holdings', label: '机构', proOnly: true },
   { id: 'corporate', label: '分红拆股' },
   { id: 'news', label: '资讯' },
 ];
@@ -466,6 +468,14 @@ export function UsDetailBody({ symbol }: { symbol: string }) {
   const [detail, setDetail] = useState<UsStockDetail | null>(null);
   const [loading, setLoading] = useState(false);
   const [failed, setFailed] = useState(false);
+  const { isSimple } = useUiMode();
+  const tabs = visibleDetailTabs(TABS, isSimple);
+
+  // 切到简单模式时，被收起的页签回落（默认页签本就可见，兜底仍保留）
+  useEffect(() => {
+    const next = fallbackDetailTab(tab, TABS, isSimple);
+    if (next !== tab) setTab(next);
+  }, [isSimple, tab]);
 
   useEffect(() => {
     let cancelled = false;
@@ -490,7 +500,7 @@ export function UsDetailBody({ symbol }: { symbol: string }) {
     <div className="flex flex-col h-full min-h-0">
       <div className="px-3 py-2 border-b border-slate-100 bg-white shrink-0">
         <div className="grid grid-cols-5 gap-1.5">
-          {TABS.map((t) => (
+          {tabs.map((t) => (
             <button
               key={t.id}
               onClick={() => setTab(t.id)}
@@ -500,6 +510,11 @@ export function UsDetailBody({ symbol }: { symbol: string }) {
             </button>
           ))}
         </div>
+        {isSimple && (
+          <div className="text-[10px] text-slate-400 mt-1">
+            简单模式已收起机构级页签（分析师/财报/内部人/机构）——顶栏可切换专业模式
+          </div>
+        )}
       </div>
       <div className="flex-1 min-h-0 overflow-y-auto p-3 pb-16 bg-gray-50/30 custom-scrollbar">
         {tab === 'news' ? (

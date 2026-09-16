@@ -3,13 +3,17 @@
 import React, { useMemo, useState } from 'react';
 import { AlertTriangle, ClipboardList, HelpCircle, Play } from 'lucide-react';
 import { Checkbox, Modal, message } from 'antd';
-import type { PlanBlock } from '../types';
+import type { PlanBlock, PlanOrder } from '../types';
 import {
   buildExecuteSelection,
   excludedSymbolsFromPlan,
   formatMoney,
+  hasInvalidQuantityEdit,
+  isValidQuantityInput,
   planKindLabel,
   planSummary,
+  quantityAdjustmentSummary,
+  quantityOverridesFromPlan,
 } from '../deskModel';
 import { executePlan } from '../services/deskService';
 import { TermTooltip } from '../../shared/TermTooltip';
@@ -18,6 +22,8 @@ import { checkDiversification } from '../../../components/shared/compliance/dive
 interface PlanCardProps {
   plan: PlanBlock | null | undefined;
   onDrillDown?: () => void;
+  /** T-FE-03 v2：计划单逐层下钻（单字段 → 触发类别/当日信号 → 原始条目） */
+  onOrderDrill?: (order: PlanOrder) => void;
   /** 执行成功后回调（父组件刷新交易台） */
   onExecuted?: () => void;
 }
@@ -36,11 +42,17 @@ const SideBadge: React.FC<{ side: string }> = ({ side }) => {
   );
 };
 
-export const PlanCard: React.FC<PlanCardProps> = ({ plan, onDrillDown, onExecuted }) => {
+export const PlanCard: React.FC<PlanCardProps> = ({ plan, onDrillDown, onOrderDrill, onExecuted }) => {
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [excludedIndexes, setExcludedIndexes] = useState<Set<number>>(new Set());
+  // T-FE-05 v2：人工改量（下标 → 数量）；退出规则单不出现在该表（风控不绕过）
+  const [quantityEdits, setQuantityEdits] = useState<Map<number, number>>(new Map());
   const [executing, setExecuting] = useState(false);
   const [execResult, setExecResult] = useState<string>('');
+  const [execAdjustments, setExecAdjustments] = useState<{ applied: string[]; ignored: string[] }>({
+    applied: [],
+    ignored: [],
+  });
 
   const selection = useMemo(
     () => buildExecuteSelection(plan, excludedIndexes),
@@ -55,16 +67,42 @@ export const PlanCard: React.FC<PlanCardProps> = ({ plan, onDrillDown, onExecute
     setExcludedIndexes(next);
   };
 
+  const setQuantityEdit = (index: number, quantity: number) => {
+    const next = new Map(quantityEdits);
+    next.set(index, quantity);
+    setQuantityEdits(next);
+  };
+
+  const resetQuantityEdit = (index: number) => {
+    const next = new Map(quantityEdits);
+    next.delete(index);
+    setQuantityEdits(next);
+  };
+
+  const invalidEdit = useMemo(
+    () => hasInvalidQuantityEdit(plan, quantityEdits),
+    [plan, quantityEdits]
+  );
+  const changedCount = useMemo(
+    () => quantityOverridesFromPlan(plan, quantityEdits).length,
+    [plan, quantityEdits]
+  );
+
   const handleExecute = async () => {
     setExecuting(true);
     setExecResult('');
+    setExecAdjustments({ applied: [], ignored: [] });
     try {
-      const resp = await executePlan(excludedSymbolsFromPlan(plan, excludedIndexes));
+      const resp = await executePlan(
+        excludedSymbolsFromPlan(plan, excludedIndexes),
+        quantityOverridesFromPlan(plan, quantityEdits)
+      );
       const report = resp?.data?.report || {};
       const filled = Number((report as Record<string, unknown>).filled_count ?? 0);
       const rejected = Number((report as Record<string, unknown>).rejected_count ?? 0);
       const orders = Number((report as Record<string, unknown>).order_count ?? 0);
       setExecResult(`执行完成：委托 ${orders} 笔，成交 ${filled}，拒单 ${rejected}`);
+      setExecAdjustments(quantityAdjustmentSummary(report));
       message.success('调仓执行完成');
       onExecuted?.();
     } catch (err: unknown) {
@@ -104,7 +142,9 @@ export const PlanCard: React.FC<PlanCardProps> = ({ plan, onDrillDown, onExecute
             type="button"
             onClick={() => {
               setExcludedIndexes(new Set());
+              setQuantityEdits(new Map());
               setExecResult('');
+              setExecAdjustments({ applied: [], ignored: [] });
               setConfirmOpen(true);
             }}
             className="inline-flex items-center gap-1 rounded-xl bg-blue-600 px-3 py-1.5 text-[11px] font-bold text-white hover:bg-blue-500 shrink-0"
@@ -164,7 +204,9 @@ export const PlanCard: React.FC<PlanCardProps> = ({ plan, onDrillDown, onExecute
             {orders.map((order, index) => (
               <div
                 key={`${order.symbol}-${order.side}-${index}`}
-                className="flex items-center gap-2 text-xs border-b border-gray-100 pb-1.5 last:border-0"
+                className={`flex items-center gap-2 text-xs border-b border-gray-100 pb-1.5 last:border-0 rounded-lg px-1 ${onOrderDrill ? 'cursor-pointer hover:bg-blue-50/40' : ''}`}
+                onClick={onOrderDrill ? () => onOrderDrill(order) : undefined}
+                title={onOrderDrill ? '点击下钻：计划单 → 触发类别/当日信号 → 原始条目' : undefined}
               >
                 <SideBadge side={order.side} />
                 <span className="font-medium text-slate-800 w-24">{order.symbol}</span>
@@ -192,23 +234,24 @@ export const PlanCard: React.FC<PlanCardProps> = ({ plan, onDrillDown, onExecute
         okText="确认执行"
         cancelText="取消"
         confirmLoading={executing}
+        okButtonProps={{ disabled: invalidEdit }}
         onOk={() => void handleExecute()}
         onCancel={() => setConfirmOpen(false)}
-        width={560}
+        width={620}
       >
         <div className="space-y-3 text-xs">
           <div className="rounded-xl bg-slate-50 border border-slate-100 p-3 text-slate-600 space-y-1">
             <div>· 与预演共用同一引擎（RebalanceCalculator + 撮合）；执行时行情若有变化，成交与预演可能有出入。</div>
-            <div>· <b className="text-amber-700">退出规则单不可排除</b>（止损/止盈属风控动作，人工不可绕过）。</div>
-            <div>· 同一策略 60 秒内仅允许触发一次（服务端防重）。</div>
+            <div>· <b className="text-amber-700">退出规则单不可排除、不可改量</b>（止损/止盈属风控动作，人工不可绕过）。</div>
+            <div>· 数量会按市场申报规则归一（整手/科创板 200 起）；同一策略 60 秒内仅允许触发一次（服务端防重）。</div>
           </div>
 
-          <div className="max-h-[280px] overflow-y-auto space-y-1.5 pr-1">
+          <div className="max-h-[320px] overflow-y-auto space-y-1.5 pr-1">
             {selection.locked.map(({ index, order }) => (
               <div key={`locked-${index}`} className="flex items-center gap-2 text-xs">
                 <Checkbox checked disabled />
                 <span className="text-[10px] px-1 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-200">
-                  退出规则 · 不可排除
+                  退出规则 · 不可排除/改量
                 </span>
                 <span className={`font-medium ${order.side === 'BUY' ? 'text-red-600' : 'text-emerald-600'}`}>
                   {order.side === 'BUY' ? '买' : '卖'} {order.symbol}
@@ -217,19 +260,56 @@ export const PlanCard: React.FC<PlanCardProps> = ({ plan, onDrillDown, onExecute
                 <span className="text-slate-400 truncate">{order.reason}</span>
               </div>
             ))}
-            {selection.selectable.map(({ index, order }) => (
-              <div key={`sel-${index}`} className="flex items-center gap-2 text-xs">
-                <Checkbox
-                  checked={!excludedIndexes.has(index)}
-                  onChange={(e) => toggleExclude(index, e.target.checked)}
-                />
-                <span className={`font-medium ${order.side === 'BUY' ? 'text-red-600' : 'text-emerald-600'}`}>
-                  {order.side === 'BUY' ? '买' : '卖'} {order.symbol}
-                </span>
-                <span className="text-slate-500">{order.quantity} 股</span>
-                <span className="text-slate-400 truncate">{order.reason}</span>
-              </div>
-            ))}
+            {selection.selectable.map(({ index, order }) => {
+              const edited = quantityEdits.get(index);
+              const effectiveQty = edited !== undefined ? edited : order.quantity;
+              const editedValid = !quantityEdits.has(index) || isValidQuantityInput(effectiveQty);
+              const isChanged = edited !== undefined && isValidQuantityInput(effectiveQty) && Math.floor(effectiveQty) !== order.quantity;
+              const excluded = excludedIndexes.has(index);
+              return (
+                <div
+                  key={`sel-${index}`}
+                  className={`flex items-center gap-2 text-xs rounded-lg px-1 py-0.5 ${excluded ? 'opacity-50' : ''}`}
+                >
+                  <Checkbox
+                    checked={!excludedIndexes.has(index)}
+                    onChange={(e) => toggleExclude(index, e.target.checked)}
+                  />
+                  <span className={`font-medium shrink-0 ${order.side === 'BUY' ? 'text-red-600' : 'text-emerald-600'}`}>
+                    {order.side === 'BUY' ? '买' : '卖'} {order.symbol}
+                  </span>
+                  <input
+                    type="number"
+                    min={1}
+                    step={100}
+                    value={effectiveQty}
+                    disabled={excluded}
+                    onChange={(e) => setQuantityEdit(index, Number(e.target.value))}
+                    aria-label={`${order.symbol} 数量`}
+                    className={`w-[84px] shrink-0 px-1.5 py-0.5 text-xs border rounded-lg outline-none focus:ring-1 ${
+                      editedValid ? 'border-gray-200 focus:ring-blue-400' : 'border-rose-300 bg-rose-50 focus:ring-rose-400'
+                    }`}
+                  />
+                  {isChanged ? (
+                    <span className="text-[10px] text-blue-600 shrink-0 inline-flex items-center gap-1">
+                      原 {order.quantity}
+                      <button
+                        type="button"
+                        onClick={() => resetQuantityEdit(index)}
+                        className="text-slate-400 hover:text-slate-600 underline decoration-dotted"
+                        title="恢复计划数量"
+                      >
+                        恢复
+                      </button>
+                    </span>
+                  ) : (
+                    <span className="text-[10px] text-slate-400 shrink-0">≈ {formatMoney(order.price * order.quantity)}</span>
+                  )}
+                  <span className="text-slate-400 truncate">{order.reason}</span>
+                  {!editedValid && <span className="text-[10px] text-rose-600 shrink-0">数量须为正整数</span>}
+                </div>
+              );
+            })}
           </div>
 
           <div className="text-slate-600">
@@ -237,10 +317,26 @@ export const PlanCard: React.FC<PlanCardProps> = ({ plan, onDrillDown, onExecute
             {excludedIndexes.size > 0 && (
               <span className="text-amber-700">（勾除 {excludedIndexes.size} 笔）</span>
             )}
+            {changedCount > 0 && <span className="text-blue-700">（改量 {changedCount} 笔）</span>}
           </div>
+          {invalidEdit && (
+            <div className="rounded-xl p-2.5 border bg-rose-50 border-rose-200 text-rose-700">
+              存在不合法的改量输入（须为正整数）——修正后才能确认执行。
+            </div>
+          )}
           {execResult && (
             <div className={`rounded-xl p-3 border ${execResult.includes('完成') ? 'bg-emerald-50 border-emerald-200 text-emerald-800' : 'bg-rose-50 border-rose-200 text-rose-700'}`}>
               {execResult}
+              {execAdjustments.applied.length > 0 && (
+                <div className="mt-1.5 text-[11px] text-emerald-700">
+                  改量应用：{execAdjustments.applied.join('；')}
+                </div>
+              )}
+              {execAdjustments.ignored.length > 0 && (
+                <div className="mt-1.5 text-[11px] text-amber-700">
+                  改量未应用：{execAdjustments.ignored.join('；')}
+                </div>
+              )}
             </div>
           )}
         </div>

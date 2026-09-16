@@ -1,19 +1,26 @@
 /** 今日交易台纯函数（展示模型；可单测，无副作用） */
 
 import type {
+  EvidenceRing,
   ExecutionBlock,
+  ExecutionItem,
   HealthBlock,
   PipelineStep,
   PlanBlock,
   PlanOrder,
   PnlBlock,
+  SignalItem,
+  SignalsBlock,
 } from './types';
+import type { DrillLevelSpec } from '../shared/DrillDownDrawer';
 
 export interface DrillEntryLike {
   label: string;
   value: string;
   source?: string;
   hint?: string;
+  /** 逐层穿透（T-FE-03 v2）：该条目的下一层 */
+  drill?: DrillLevelSpec;
 }
 
 export interface StatusStyle {
@@ -195,8 +202,216 @@ export function planDrillEntries(plan: PlanBlock | null | undefined, topN = 10):
   return entries;
 }
 
-export interface ExecuteSelection {
-  /** 可勾选排除的调仓单（index 为在 orders 中的下标） */
+// ── 逐层穿透（T-FE-03 v2）：条目 → 下一层（计划单→信号→原始载荷 等）────────
+
+function sideLabel(side: string): string {
+  return String(side).toUpperCase() === 'BUY' ? '买' : '卖';
+}
+
+/** 取价来源 → 人话（T-P2-03 取价链的降级标记如实解释） */
+export function priceSourceHint(priceSource: string | null | undefined): string {
+  const key = String(priceSource || '');
+  if (key === 'broker_fill') return '券商真实成交回报（实盘镜像）';
+  if (key === 'local_close') return '当日本地日线收盘（QuantDB）';
+  if (key === 'today_bar_close') return '当日 K 线收盘（当日分区延迟时如实标注）';
+  if (key === 'prev_close_bar') return '降级：最近可用日线收盘（非当日，已标 degraded）';
+  if (!key) return '未标注（历史数据或旧路径）';
+  return `工程口径见原始载荷（${key}）`;
+}
+
+/** 候选信号条目 → 下钻层（字段分解 → 原始条目/信号块） */
+export function signalItemDrillEntries(
+  item: SignalItem,
+  signals: SignalsBlock | null | undefined
+): DrillEntryLike[] {
+  const rankText =
+    item.rank_pct === null || item.rank_pct === undefined ? '—' : item.rank_pct.toFixed(3);
+  return [
+    { label: '标的', value: item.symbol },
+    { label: '方向', value: sideLabel(item.side) },
+    {
+      label: 'rank_pct（当日分位）',
+      value: rankText,
+      hint: '0=全市场最弱、1=最强；阈值按当日分布分位自适应（不硬编码）',
+    },
+    { label: '模型分', value: item.score === null || item.score === undefined ? '—' : item.score.toFixed(4) },
+    { label: '交易日', value: signals?.trade_date || '—', source: signals?.source },
+    {
+      label: '原始条目（该标的全部列）',
+      value: '展开',
+      drill: {
+        title: `信号原始条目 · ${item.symbol}`,
+        subtitle: 'engine_signal_scores 行原样（含市场/来源/时间戳）',
+        entries: Object.entries(item as unknown as Record<string, unknown>).map(([k, v]) => ({
+          label: k,
+          value: v === null || v === undefined ? '—' : String(v),
+        })),
+        raw: item,
+      },
+    },
+    {
+      label: '当日全体分布',
+      value: `BUY ${signals?.buy ?? '—'} / SELL ${signals?.sell ?? '—'} / HOLD ${signals?.hold ?? '—'}`,
+      drill: {
+        title: '信号块原始载荷',
+        subtitle: '当日信号聚合（与扫描器/选股同源）',
+        entries: [
+          { label: '交易日', value: signals?.trade_date || '—' },
+          { label: '市场', value: signals?.market || 'CN' },
+          { label: '来源', value: signals?.source || '—' },
+        ],
+        raw: signals,
+      },
+    },
+  ];
+}
+
+/** 今日执行条目 → 下钻层（订单字段 → 取价来源说明 → 原始条目） */
+export function executionItemDrillEntries(
+  item: ExecutionItem,
+  execution: ExecutionBlock | null | undefined
+): DrillEntryLike[] {
+  return [
+    { label: '模式', value: item.mode === 'REAL' ? '实盘（镜像）' : '模拟盘' },
+    { label: '标的/方向', value: `${sideLabel(item.side)} ${item.symbol}` },
+    { label: '数量', value: `${item.quantity} 股` },
+    { label: '状态', value: item.status },
+    {
+      label: '取价来源',
+      value: item.price_source || '—',
+      hint: priceSourceHint(item.price_source),
+      drill: {
+        title: '取价来源 · 工程口径',
+        subtitle: 'T-P2-03 取价链唯一实现（L0/L1 新鲜价优先，降级如实标注）',
+        entries: [
+          { label: '本单标记', value: item.price_source || '—' },
+          { label: '含义', value: priceSourceHint(item.price_source) },
+          { label: '降级规则', value: '[RULE:PRICE-STALE]（陈旧价拒单/标注）' },
+        ],
+        raw: { price_source: item.price_source, symbol: item.symbol, client_order_id: item.client_order_id },
+      },
+    },
+    { label: '订单 ID', value: item.client_order_id || '—', source: execution?.source },
+    {
+      label: '原始条目',
+      value: '展开',
+      drill: {
+        title: `执行原始条目 · ${item.symbol}`,
+        subtitle: 'sim_orders/trades 投影行（含 reason/时间）',
+        entries: Object.entries(item as unknown as Record<string, unknown>).map(([k, v]) => ({
+          label: k,
+          value: v === null || v === undefined ? '—' : String(v),
+        })),
+        raw: item,
+      },
+    },
+  ];
+}
+
+/** 计划单 → 下钻层（字段分解 → 触发类别说明 / 对应当日信号 / 原始条目） */
+export function planOrderDrillEntries(
+  order: PlanOrder,
+  plan: PlanBlock | null | undefined,
+  signals?: SignalsBlock | null
+): DrillEntryLike[] {
+  const isExit = order.kind === 'exit';
+  const matchedSignal = (signals?.top_buy || []).find((s) => s.symbol === order.symbol);
+  const entries: DrillEntryLike[] = [
+    { label: '标的/方向', value: `${sideLabel(order.side)} ${order.symbol}` },
+    { label: '计划数量', value: `${order.quantity} 股` },
+    { label: '计划价格', value: String(order.price), hint: '预演取价；真实成交以执行时行情为准' },
+    {
+      label: '预估金额',
+      value: formatMoney(order.estimated_amount),
+      hint: `计算式：${order.price} × ${order.quantity}`,
+    },
+    {
+      label: '触发类别',
+      value: isExit ? '退出规则（风控）' : '定期调仓',
+      source: plan?.source,
+      drill: {
+        title: isExit ? '退出规则 · 为什么风控不可绕过' : '定期调仓 · 人工可调范围',
+        subtitle: '与执行同一 RebalanceCalculator（T-P2-04 退出规则单实现）',
+        entries: isExit
+          ? [
+              { label: '触发', value: '止损/止盈等退出规则命中持仓', hint: order.reason },
+              { label: '人工权限', value: '不可排除、不可改量（风控动作不绕过）' },
+              { label: '规则来源', value: 'shared/exit_rules.py（唯一实现）' },
+            ]
+          : [
+              { label: '来源', value: 'TopK 偏离目标权重触发调仓', hint: order.reason },
+              { label: '人工权限', value: '可勾选排除、可改量（按市场申报规则归一）' },
+              { label: '计算器', value: 'RebalanceCalculator（与执行/预演同源）' },
+            ],
+        raw: { kind: order.kind, reason: order.reason, symbol: order.symbol, side: order.side },
+      },
+    },
+    { label: '理由原文', value: order.reason || '—' },
+    {
+      label: '涨跌停/停牌',
+      value: order.is_suspended ? '停牌' : order.is_limit_up ? '涨停' : order.is_limit_down ? '跌停' : '正常',
+    },
+    {
+      label: '计划单原始条目',
+      value: '展开',
+      drill: {
+        title: `计划单原始条目 · ${order.symbol}`,
+        subtitle: 'dry-run 引擎输出（未执行，字段原样）',
+        entries: Object.entries(order as unknown as Record<string, unknown>).map(([k, v]) => ({
+          label: k,
+          value: v === null || v === undefined ? '—' : String(v),
+        })),
+        raw: order,
+      },
+    },
+  ];
+  if (matchedSignal) {
+    entries.push({
+      label: '对应当日信号',
+      value: `rank_pct ${matchedSignal.rank_pct?.toFixed(3) ?? '—'} · 分 ${matchedSignal.score?.toFixed(4) ?? '—'}`,
+      hint: '该标的同时在当日候选信号内——可继续下钻信号来源',
+      drill: {
+        title: `信号 · ${order.symbol}`,
+        subtitle: '当日候选信号条目（engine_signal_scores）',
+        entries: signalItemDrillEntries(matchedSignal, signals),
+        raw: matchedSignal,
+      },
+    });
+  }
+  return entries;
+}
+
+/** 管线步骤 → 下钻层（步骤详情 → 同源体检断言证据环 → 逐证据项） */
+export function pipelineStepDrillEntries(
+  step: PipelineStep,
+  evidence?: { rings?: EvidenceRing[] } | null
+): DrillEntryLike[] {
+  const entries: DrillEntryLike[] = [
+    { label: '步骤', value: step.label },
+    { label: '状态', value: statusStyle(step.status).label },
+    { label: '明细', value: step.detail || '—' },
+    { label: '来源', value: step.source },
+  ];
+  // 步骤 ← 体检断言的同源映射（C08/C02/C01/C05）；找到含该断言的证据环即挂下一层
+  const checkId = String(step.source || '').split(':').pop() || '';
+  const ring = (evidence?.rings || []).find((r) => (r.items || []).some((i) => i.id === checkId));
+  if (ring) {
+    entries.push({
+      label: '对应证据环',
+      value: `${ring.label}（${statusStyle(ring.level).label}）`,
+      source: ring.artifact,
+      drill: {
+        title: `证据环 · ${ring.label}`,
+        subtitle: `${ring.artifact} · ${ring.frequency}——每项可核对来源`,
+        entries: evidenceRingDrillEntries(ring),
+        raw: ring,
+      },
+    });
+  }
+  return entries;
+}
+
+export interface ExecuteSelection {  /** 可勾选排除的调仓单（index 为在 orders 中的下标） */
   selectable: Array<{ index: number; order: PlanOrder }>;
   /** 锁定不可排除的退出规则单（风控退出不可被人工绕过） */
   locked: Array<{ index: number; order: PlanOrder }>;
@@ -234,6 +449,78 @@ export function excludedSymbolsFromPlan(
   return orders
     .filter((order, index) => excludedIndexes.has(index) && order.kind !== 'exit')
     .map((order) => order.symbol);
+}
+
+/** 人工改量（T-FE-05 v2）：改量输入与计划数量不同时收录为服务端载荷（纯函数） */
+export interface QuantityOverride {
+  symbol: string;
+  side: string;
+  quantity: number;
+}
+
+/** 改量输入（下标 → 数量）是否合法：正整数 */
+export function isValidQuantityInput(value: number | null | undefined): boolean {
+  const n = Number(value);
+  return Number.isFinite(n) && Number.isInteger(n) && n > 0;
+}
+
+/**
+ * 改量下标 → 服务端载荷（纯函数）：
+ * 仅收录「非退出规则单 + 与计划数量不同 + 合法正整数」的条目；退出单恒不收（风控不绕过）。
+ */
+export function quantityOverridesFromPlan(
+  plan: PlanBlock | null | undefined,
+  quantityEdits: Map<number, number>
+): QuantityOverride[] {
+  const orders = plan?.orders || [];
+  const out: QuantityOverride[] = [];
+  orders.forEach((order, index) => {
+    if (order.kind === 'exit') return;
+    if (!quantityEdits.has(index)) return;
+    const qty = quantityEdits.get(index) as number;
+    if (!isValidQuantityInput(qty)) return;
+    if (qty === order.quantity) return;
+    out.push({ symbol: order.symbol, side: order.side, quantity: Math.floor(qty) });
+  });
+  return out;
+}
+
+/** 是否存在非法改量输入（用于确认按钮门禁：资金相关调整不做静默降级） */
+export function hasInvalidQuantityEdit(
+  plan: PlanBlock | null | undefined,
+  quantityEdits: Map<number, number>
+): boolean {
+  const orders = plan?.orders || [];
+  for (const [index, qty] of quantityEdits) {
+    if (index < 0 || index >= orders.length) continue;
+    if (orders[index].kind === 'exit') continue;
+    if (!isValidQuantityInput(qty)) return true;
+  }
+  return false;
+}
+
+/**
+ * 执行报告的改量裁定 → 人话摘要（纯函数）：applied/ignored 逐条如实，未应用附原因。
+ */
+export function quantityAdjustmentSummary(report: unknown): {
+  applied: string[];
+  ignored: string[];
+} {
+  const adjustments = (report as { quantity_adjustments?: unknown })?.quantity_adjustments;
+  const applied: string[] = [];
+  const ignored: string[] = [];
+  if (!Array.isArray(adjustments)) return { applied, ignored };
+  for (const item of adjustments) {
+    if (!item || typeof item !== 'object') continue;
+    const rec = item as Record<string, unknown>;
+    const label = `${String(rec.symbol ?? '')} ${String(rec.side ?? '') === 'SELL' ? '卖' : '买'}`;
+    if (rec.applied === true) {
+      applied.push(`${label} ${String(rec.from ?? '?')} → ${String(rec.to ?? '?')}`);
+    } else {
+      ignored.push(`${label}（申请 ${String(rec.requested ?? '?')}）：${String(rec.reason ?? '未应用')}`);
+    }
+  }
+  return { applied, ignored };
 }
 
 export interface EvidenceSummary {

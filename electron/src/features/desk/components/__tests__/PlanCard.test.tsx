@@ -1,9 +1,10 @@
 /**
- * 调仓计划卡：强制分散提示渲染（T-FE-18）——阈值判定用夹具体现，UI 文案与使用同源。
+ * 调仓计划卡：分散提示渲染（T-FE-18）+ 人工改量交互（T-FE-05 v2）。
  */
 
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import type { PlanBlock, PlanOrder } from '../../types';
 
 vi.mock('../../../shared/useUiMode', () => ({
@@ -86,5 +87,68 @@ describe('PlanCard 分散提示（T-FE-18）', () => {
       />
     );
     expect(screen.queryByText(/分散检查|分散提示/)).toBeNull();
+  });
+});
+
+describe('PlanCard 人工改量（T-FE-05 v2）', () => {
+  it('改量后执行载荷带 quantity_overrides；退出单无数量输入', async () => {
+    const user = userEvent.setup();
+    const { executePlan } = await import('../../services/deskService');
+    const mocked = vi.mocked(executePlan);
+    mocked.mockReset();
+    mocked.mockResolvedValue({
+      success: true,
+      data: {
+        strategy_id: '1',
+        mode: 'SIMULATION',
+        excluded: [],
+        quantity_overrides: [{ symbol: '600000', side: 'BUY', quantity: 1200 }],
+        report: { order_count: 2, filled_count: 2, rejected_count: 0 },
+        source: 'test',
+      },
+    });
+
+    render(
+      <PlanCard
+        plan={makePlan([
+          buyOrder('600000', 40000),
+          { ...buyOrder('600519', 30000), side: 'SELL', kind: 'exit', reason: '止损' },
+        ])}
+      />
+    );
+    await user.click(screen.getByRole('button', { name: /一键执行/ }));
+
+    // 改量：600000 由 100 → 1200
+    const input = screen.getByLabelText('600000 数量');
+    await user.clear(input);
+    await user.type(input, '1200');
+    expect(screen.getByText(/改量 1 笔/)).toBeTruthy();
+
+    // 退出单行没有数量输入（风控不绕过）
+    expect(screen.queryByLabelText('600519 数量')).toBeNull();
+    expect(screen.getByText(/退出规则 · 不可排除\/改量/)).toBeTruthy();
+
+    await user.click(screen.getByRole('button', { name: '确认执行' }));
+    await vi.waitFor(() => expect(mocked).toHaveBeenCalledTimes(1));
+    expect(mocked).toHaveBeenCalledWith([], [{ symbol: '600000', side: 'BUY', quantity: 1200 }]);
+  });
+
+  it('非法改量（0）拦截确认按钮并给出提示', async () => {
+    const user = userEvent.setup();
+    const { executePlan } = await import('../../services/deskService');
+    vi.mocked(executePlan).mockClear();
+
+    render(<PlanCard plan={makePlan([buyOrder('600000', 40000)])} />);
+    await user.click(screen.getByRole('button', { name: /一键执行/ }));
+
+    const input = screen.getByLabelText('600000 数量');
+    await user.clear(input);
+    await user.type(input, '0');
+    expect(screen.getByText(/存在不合法的改量输入/)).toBeTruthy();
+    const okBtn = screen.getByRole('button', { name: '确认执行' });
+    expect(okBtn).toBeDisabled();
+
+    await user.click(okBtn);
+    expect(vi.mocked(executePlan)).not.toHaveBeenCalled();
   });
 });

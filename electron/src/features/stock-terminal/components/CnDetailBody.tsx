@@ -1,24 +1,27 @@
-/** A 股个股终端右侧详情体：9 个 Tab（概况/财务/估值/筹码/融资/形态/股东/资讯/L2） */
+/** A 股个股终端右侧详情体：9 个 Tab（概况/财务/估值/筹码/融资/形态/股东/资讯/L2）——
+ * T-FE-02 收尾：简单模式收起机构级页签（筹码/融资/形态/股东/L2），专业模式全量。 */
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { StockProfile } from '../types';
 import { OverviewTab } from './OverviewTab';
 import { FinancialsTab, ValuationTab, ChipFlowTab, MarginTab, SentimentTab, HoldersTab } from './tabs/P2Tabs';
 import { NewsTab } from './tabs/NewsTab';
 import { L2FeatureCard } from './L2FeatureCard';
+import { useUiMode } from '../../shared/useUiMode';
+import { fallbackDetailTab, visibleDetailTabs, type DetailTabDef } from '../../stock-terminal-shared/utils';
 
 type DetailTab = 'overview' | 'financials' | 'valuation' | 'chipflow' | 'margin' | 'sentiment' | 'holders' | 'news' | 'l2';
 
-const DETAIL_TABS: { id: DetailTab; label: string }[] = [
+const DETAIL_TABS: DetailTabDef<DetailTab>[] = [
   { id: 'overview', label: '概况' },
   { id: 'financials', label: '财务' },
   { id: 'valuation', label: '估值' },
-  { id: 'chipflow', label: '筹码' },
-  { id: 'margin', label: '融资' },
-  { id: 'sentiment', label: '形态' },
-  { id: 'holders', label: '股东' },
+  { id: 'chipflow', label: '筹码', proOnly: true },
+  { id: 'margin', label: '融资', proOnly: true },
+  { id: 'sentiment', label: '形态', proOnly: true },
+  { id: 'holders', label: '股东', proOnly: true },
   { id: 'news', label: '资讯' },
-  { id: 'l2', label: 'L2' },
+  { id: 'l2', label: 'L2', proOnly: true },
 ];
 
 interface Props {
@@ -28,13 +31,21 @@ interface Props {
 }
 
 export function CnDetailBody({ symbol, profile, signalDate }: Props) {
+  const { isSimple } = useUiMode();
   const [detailTab, setDetailTab] = useState<DetailTab>('overview');
+  const tabs = visibleDetailTabs(DETAIL_TABS, isSimple);
+
+  // 切到简单模式时，被收起的页签回落到第一个可见页签（不留空白）
+  useEffect(() => {
+    const next = fallbackDetailTab(detailTab, DETAIL_TABS, isSimple);
+    if (next !== detailTab) setDetailTab(next);
+  }, [isSimple, detailTab]);
 
   return (
     <div className="flex flex-col h-full min-h-0">
       <div className="px-3 py-2 border-b border-slate-100 bg-white shrink-0">
-        <div className="grid grid-cols-5 gap-1.5">
-          {DETAIL_TABS.map((t) => (
+        <div className={`grid ${isSimple ? 'grid-cols-4' : 'grid-cols-5'} gap-1.5`}>
+          {tabs.map((t) => (
             <button
               key={t.id}
               onClick={() => setDetailTab(t.id)}
@@ -44,6 +55,11 @@ export function CnDetailBody({ symbol, profile, signalDate }: Props) {
             </button>
           ))}
         </div>
+        {isSimple && (
+          <div className="text-[10px] text-slate-400 mt-1">
+            简单模式已收起机构级页签（筹码/融资/形态/股东/L2）——顶栏可切换专业模式
+          </div>
+        )}
       </div>
       <div className="flex-1 min-h-0 overflow-y-auto p-3 pb-16 bg-gray-50/30 custom-scrollbar">
         <div className={detailTab === 'overview' ? '[&>div]:!grid-cols-1 [&>div]:!gap-3' : ''}>

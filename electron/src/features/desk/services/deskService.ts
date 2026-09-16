@@ -48,20 +48,30 @@ export interface ExecutePlanResponse {
     strategy_id: string;
     mode: string;
     excluded: string[];
+    quantity_overrides: { symbol: string; side: string; quantity: number }[];
     report: Record<string, unknown>;
     source: string;
   };
 }
 
-/** 一键执行一轮调仓（服务端三重闸门：活跃/仅模拟盘/60s 防重；退出规则单不可排除） */
-export async function executePlan(excludeSymbols: string[]): Promise<ExecutePlanResponse> {
+/**
+ * 一键执行一轮调仓（服务端三重闸门：活跃/仅模拟盘/60s 防重；退出规则单不可排除、不可改量）。
+ * quantityOverrides（T-FE-05 v2）：人工改量载荷，服务端 fail-fast 校验（不合法 400）。
+ */
+export async function executePlan(
+  excludeSymbols: string[],
+  quantityOverrides: { symbol: string; side: string; quantity: number }[] = []
+): Promise<ExecutePlanResponse> {
   const controller = new AbortController();
   const timer = window.setTimeout(() => controller.abort(), 120000);
   try {
     const res = await fetch(`${BASE}/plan/execute`, {
       method: 'POST',
       headers: { ...authHeaders(), 'Content-Type': 'application/json' },
-      body: JSON.stringify({ exclude_symbols: excludeSymbols }),
+      body: JSON.stringify({
+        exclude_symbols: excludeSymbols,
+        quantity_overrides: quantityOverrides,
+      }),
       signal: controller.signal,
     });
     if (!res.ok) {

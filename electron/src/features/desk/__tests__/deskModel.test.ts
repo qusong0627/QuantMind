@@ -5,16 +5,23 @@ import {
   evidenceRingDrillEntries,
   evidenceSummary,
   excludedSymbolsFromPlan,
+  executionItemDrillEntries,
   executionSummary,
   formatMoney,
   formatPct,
+  hasInvalidQuantityEdit,
   healthItemViews,
+  pipelineStepDrillEntries,
   pipelineSummary,
   planDrillEntries,
   planKindLabel,
+  planOrderDrillEntries,
   planSummary,
   pnlDrillEntries,
   pnlSummary,
+  quantityAdjustmentSummary,
+  quantityOverridesFromPlan,
+  signalItemDrillEntries,
   statusStyle,
 } from '../deskModel';
 
@@ -252,5 +259,162 @@ describe('证据矩阵（T-FE-16）', () => {
     expect(item.hint).toContain('建议：查 ledger');
     expect(item.source).toBe('health:C05');
     expect(evidenceRingDrillEntries(null)).toEqual([]);
+  });
+});
+
+describe('人工改量（T-FE-05 v2）', () => {
+  const mkOrder = (over: Partial<PlanOrder>): PlanOrder => ({
+    symbol: '600036.SH',
+    side: 'BUY',
+    quantity: 1000,
+    price: 40,
+    estimated_amount: 40000,
+    reason: '调仓',
+    kind: 'rebalance',
+    is_limit_up: false,
+    is_limit_down: false,
+    is_suspended: false,
+    ...over,
+  });
+
+  it('载荷只收录「与计划不同且合法」的非退出单', () => {
+    const plan = {
+      available: true,
+      source: 's',
+      orders: [
+        mkOrder({ symbol: '600036.SH' }),
+        mkOrder({ symbol: '000001.SZ', quantity: 500 }),
+        mkOrder({ symbol: '600519.SH', side: 'SELL', quantity: 300, kind: 'exit' }),
+      ],
+    } as PlanBlock;
+    const edits = new Map<number, number>([
+      [0, 1200], // 改量
+      [1, 500], // 与计划相同 → 不收
+      [2, 100], // 退出单 → 恒不收（风控不绕过）
+    ]);
+    expect(quantityOverridesFromPlan(plan, edits)).toEqual([
+      { symbol: '600036.SH', side: 'BUY', quantity: 1200 },
+    ]);
+  });
+
+  it('非法输入（NaN/0/负数/小数）不入载荷，并被门禁识别', () => {
+    const plan = { available: true, source: 's', orders: [mkOrder({})] } as PlanBlock;
+    expect(quantityOverridesFromPlan(plan, new Map([[0, 0]]))).toEqual([]);
+    expect(quantityOverridesFromPlan(plan, new Map([[0, -5]]))).toEqual([]);
+    expect(quantityOverridesFromPlan(plan, new Map([[0, Number.NaN]]))).toEqual([]);
+    expect(quantityOverridesFromPlan(plan, new Map([[0, 12.7]]))).toEqual([]);
+    expect(hasInvalidQuantityEdit(plan, new Map([[0, 0]]))).toBe(true);
+    expect(hasInvalidQuantityEdit(plan, new Map([[0, 1500]]))).toBe(false);
+    expect(hasInvalidQuantityEdit(plan, new Map())).toBe(false);
+  });
+
+  it('退出单即使被改也不触发门禁（不可改但不算非法输入）', () => {
+    const plan = {
+      available: true,
+      source: 's',
+      orders: [mkOrder({ kind: 'exit', side: 'SELL' })],
+    } as PlanBlock;
+    expect(hasInvalidQuantityEdit(plan, new Map([[0, 0]]))).toBe(false);
+  });
+
+  it('整数值浮点（input 常见形态）视为合法并向下取整', () => {
+    const plan = { available: true, source: 's', orders: [mkOrder({})] } as PlanBlock;
+    expect(quantityOverridesFromPlan(plan, new Map([[0, 1200.0]]))).toEqual([
+      { symbol: '600036.SH', side: 'BUY', quantity: 1200 },
+    ]);
+  });
+
+  it('执行报告裁定 → 人话摘要（applied/ignored 含原因）', () => {
+    const summary = quantityAdjustmentSummary({
+      quantity_adjustments: [
+        { symbol: '600036.SH', side: 'BUY', from: 1000, to: 1200, applied: true },
+        { symbol: '600519.SH', side: 'SELL', requested: 100, applied: null, reason: '退出规则单不可改量（风控动作不绕过）' },
+      ],
+    });
+    expect(summary.applied).toEqual(['600036.SH 买 1000 → 1200']);
+    expect(summary.ignored[0]).toContain('退出规则单不可改量');
+    expect(quantityAdjustmentSummary(null)).toEqual({ applied: [], ignored: [] });
+    expect(quantityAdjustmentSummary({})).toEqual({ applied: [], ignored: [] });
+  });
+});
+
+describe('逐层穿透下钻（T-FE-03 v2）', () => {
+  const signal = { symbol: '600036', side: 'BUY', rank_pct: 0.982, score: 0.0123 };
+  const signalsBlock = {
+    trade_date: '2026-09-16',
+    buy: 1040,
+    sell: 30,
+    hold: 4000,
+    top_buy: [signal],
+    source: 'db:engine_signal_scores',
+  };
+
+  it('信号条目：字段分解 + 两层可穿透（原始条目/信号块载荷）', () => {
+    const entries = signalItemDrillEntries(signal, signalsBlock);
+    expect(entries[0]).toMatchObject({ label: '标的', value: '600036' });
+    expect(entries[2].value).toBe('0.982');
+    const rawEntry = entries.find((e) => e.label.includes('原始条目'));
+    expect(rawEntry?.drill?.entries.some((x) => x.label === 'rank_pct')).toBe(true);
+    expect(rawEntry?.drill?.raw).toBe(signal);
+    const blockEntry = entries.find((e) => e.label === '当日全体分布');
+    expect(blockEntry?.drill?.raw).toBe(signalsBlock);
+  });
+
+  it('执行条目：取价来源挂解释层（broker_fill/降级标记如实）', () => {
+    const entries = executionItemDrillEntries(
+      { mode: 'SIM', symbol: '600036', side: 'BUY', quantity: 1200, status: 'FILLED', price_source: 'prev_close_bar', client_order_id: 'sim-x-1' },
+      { source: 'db:sim_orders' }
+    );
+    const ps = entries.find((e) => e.label === '取价来源');
+    expect(ps?.value).toBe('prev_close_bar');
+    expect(ps?.hint).toContain('降级');
+    expect(ps?.drill?.entries.some((x) => x.label === '降级规则')).toBe(true);
+    expect(executionItemDrillEntries({ mode: 'SIM', symbol: 'X', side: 'BUY', quantity: 1, status: 'PENDING' }, null)[4].hint).toContain('未标注');
+  });
+
+  it('计划单：退出单与调仓单的触发类别说明不同；命中候选信号时可继续下钻', () => {
+    const rebalance = order({ symbol: '600036', kind: 'rebalance' });
+    const exit = order({ symbol: '600519.SH', kind: 'exit', side: 'SELL' });
+    const plan = { available: true, source: 'engine dry-run', orders: [rebalance, exit] } as PlanBlock;
+
+    const rebEntries = planOrderDrillEntries(rebalance, plan, signalsBlock);
+    const rebKind = rebEntries.find((e) => e.label === '触发类别');
+    expect(rebKind?.value).toBe('定期调仓');
+    expect(rebKind?.drill?.entries.some((x) => String(x.value).includes('可勾选排除'))).toBe(true);
+    // 600036 在候选信号内 → 挂信号层，且信号层内部还能再穿一层
+    const sigEntry = rebEntries.find((e) => e.label === '对应当日信号');
+    expect(sigEntry?.drill?.raw).toBe(signal);
+    expect(sigEntry?.drill?.entries.some((x) => x.drill)).toBe(true);
+
+    const exitEntries = planOrderDrillEntries(exit, plan, signalsBlock);
+    const exitKind = exitEntries.find((e) => e.label === '触发类别');
+    expect(exitKind?.value).toBe('退出规则（风控）');
+    expect(exitKind?.drill?.entries.some((x) => String(x.value).includes('不可排除、不可改量'))).toBe(true);
+    expect(exitEntries.find((e) => e.label === '对应当日信号')).toBeUndefined();
+  });
+
+  it('管线步骤：按体检断言 ID 关联证据环并挂下一层；无环时不挂', () => {
+    const step = { key: 'settlement', label: '结算/台账', status: 'fail', detail: '1 笔无台账', source: 'health:C05' };
+    const evidence = {
+      rings: [
+        {
+          key: 'ledger',
+          label: '账本',
+          artifact: '对账报告',
+          frequency: '每日',
+          level: 'fail',
+          summary: '缺口',
+          items: [{ id: 'C05', name: '台账写入', level: 'fail', detail: '1 笔无台账', source: 'health:C05' }],
+        },
+      ],
+    };
+    const entries = pipelineStepDrillEntries(step, evidence);
+    expect(entries[1]).toMatchObject({ label: '状态', value: '异常' });
+    const ringEntry = entries.find((e) => e.label === '对应证据环');
+    expect(ringEntry?.drill?.raw).toBe(evidence.rings[0]);
+    expect(ringEntry?.drill?.entries.some((x) => String(x.label).includes('台账写入'))).toBe(true);
+
+    const noRing = pipelineStepDrillEntries(step, { rings: [] });
+    expect(noRing.find((e) => e.label === '对应证据环')).toBeUndefined();
   });
 });

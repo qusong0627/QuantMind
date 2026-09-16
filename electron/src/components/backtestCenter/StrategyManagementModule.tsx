@@ -28,6 +28,7 @@ import {
     Lock,
 } from 'lucide-react';
 import { EvalScoreBadge } from '../shared/EvalScoreBadge';
+import { useUiMode } from '../../features/shared/useUiMode';
 import { message, Modal, Popover } from 'antd';
 import { PromotionGateCard } from '../shared/PromotionGateCard';
 import { StrategyVersionDrawer } from '../shared/strategyDiff/StrategyVersionDrawer';
@@ -71,6 +72,8 @@ export const StrategyManagementModule: React.FC = () => {
     const [deleteModalVisible, setDeleteModalVisible] = useState(false);
     const [versionDrawerFor, setVersionDrawerFor] = useState<Strategy | null>(null);
     const [selectedStrategy, setSelectedStrategy] = useState<Strategy | null>(null);
+    // T-FE-02 收尾：策略卡简单/专业降升维——简单模式收起机构级元信息与版本抽屉
+    const { isSimple } = useUiMode();
 
     // 切换市场时重新加载：策略库按全局市场隔离，避免港股策略混入 A 股视图
     const currentMarket = useAppSelector(selectCurrentMarket);
@@ -245,23 +248,29 @@ export const StrategyManagementModule: React.FC = () => {
                                         <div className="flex items-center gap-3 mb-2">
                                             <h3 className="text-sm font-semibold text-slate-700 tracking-tight">{strategy.name}</h3>
                                             {getStatusBadge(strategy.status)}
-                                            <span className="text-[10px] px-1.5 py-0.5 rounded-full border border-slate-200 bg-slate-50 text-slate-500">
-                                                v{strategy.version ?? 1}
-                                            </span>
-                                            {['sim', 'live'].includes(String(strategy.rawStatus || '').toLowerCase()) && (
-                                                <span
-                                                    className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-full border border-amber-200 bg-amber-50 text-amber-700"
-                                                    title="参数锁（T-P3-01）：运行中策略修改内容必须显式升版本"
-                                                >
-                                                    <Lock className="w-3 h-3" />
-                                                    锁
-                                                </span>
+                                            {!isSimple && (
+                                                <>
+                                                    <span className="text-[10px] px-1.5 py-0.5 rounded-full border border-slate-200 bg-slate-50 text-slate-500">
+                                                        v{strategy.version ?? 1}
+                                                    </span>
+                                                    {['sim', 'live'].includes(String(strategy.rawStatus || '').toLowerCase()) && (
+                                                        <span
+                                                            className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-full border border-amber-200 bg-amber-50 text-amber-700"
+                                                            title="参数锁（T-P3-01）：运行中策略修改内容必须显式升版本"
+                                                        >
+                                                            <Lock className="w-3 h-3" />
+                                                            锁
+                                                        </span>
+                                                    )}
+                                                    <EvalScoreBadge objectType="strategy_health" objectId={String(strategy.id)} />
+                                                </>
                                             )}
-                                            <EvalScoreBadge objectType="strategy_health" objectId={String(strategy.id)} />
                                         </div>
-                                        <div className="text-xs text-gray-500">
-                                            创建时间: {new Date(strategy.created_at).toLocaleString()}
-                                        </div>
+                                        {!isSimple && (
+                                            <div className="text-xs text-gray-500">
+                                                创建时间: {new Date(strategy.created_at).toLocaleString()}
+                                            </div>
+                                        )}
                                     </div>
                                 </div>
                                 <div className="flex items-center gap-2 pt-3 border-t border-gray-100">
@@ -285,9 +294,11 @@ export const StrategyManagementModule: React.FC = () => {
                                             <ShieldAlert className="w-4 h-4" /> 晋级门槛
                                         </button>
                                     </Popover>
-                                    <button onClick={() => setVersionDrawerFor(strategy)} className="flex items-center gap-1 px-3 py-1.5 bg-slate-50 text-slate-600 rounded-lg text-sm">
-                                        <History className="w-4 h-4" /> 版本与变更
-                                    </button>
+                                    {!isSimple && (
+                                        <button onClick={() => setVersionDrawerFor(strategy)} className="flex items-center gap-1 px-3 py-1.5 bg-slate-50 text-slate-600 rounded-lg text-sm">
+                                            <History className="w-4 h-4" /> 版本与变更
+                                        </button>
+                                    )}
                                     <button onClick={() => handleDeleteClick(strategy)} className="flex items-center gap-1 px-3 py-1.5 bg-red-50 text-red-600 rounded-lg text-sm">
                                         <Trash2 className="w-4 h-4" /> 删除
                                     </button>

@@ -8,7 +8,7 @@ import { Gauge, RefreshCw } from 'lucide-react';
 import { PAGE_LAYOUT } from '../../config/pageLayout';
 import { getDeskToday } from './services/deskService';
 import type { DeskToday } from './types';
-import { evidenceRingDrillEntries, pipelineSummary, planDrillEntries, pnlDrillEntries, statusStyle } from './deskModel';
+import { evidenceRingDrillEntries, executionItemDrillEntries, pipelineStepDrillEntries, pipelineSummary, planDrillEntries, planOrderDrillEntries, pnlDrillEntries, signalItemDrillEntries, statusStyle } from './deskModel';
 import { DrillDownDrawer, type DrillEntry } from '../shared/DrillDownDrawer';
 import { UiModeToggle } from '../shared/UiModeToggle';
 import { ComplianceFooter } from '../../components/shared/compliance/ComplianceChrome';
@@ -108,14 +108,43 @@ const DeskTodayPage: React.FC = () => {
             </div>
           ) : desk ? (
             <>
-              <PipelineBar steps={desk.pipeline} />
+              {/* T-FE-03 v2 逐层穿透：管线四步 → 证据环 → 证据项 */}
+              <PipelineBar
+                steps={desk.pipeline}
+                onStepDrill={(step) =>
+                  setDrawer({
+                    title: `管线步骤 · ${step.label}`,
+                    subtitle: '与体检断言同源（点击「对应证据环」继续下钻）',
+                    entries: pipelineStepDrillEntries(step, desk.evidence) as DrillEntry[],
+                    raw: step,
+                  })
+                }
+              />
 
               <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-4 gap-4">
-                <SignalsCard signals={desk.signals} />
+                <SignalsCard
+                  signals={desk.signals}
+                  onItemDrill={(item) =>
+                    setDrawer({
+                      title: `信号 · ${item.symbol}`,
+                      subtitle: '字段分解 → 原始条目 → 信号块载荷（engine_signal_scores）',
+                      entries: signalItemDrillEntries(item, desk.signals) as DrillEntry[],
+                      raw: item,
+                    })
+                  }
+                />
                 <div className="xl:col-span-2">
                   <PlanCard
                     plan={desk.plan}
                     onExecuted={() => void load()}
+                    onOrderDrill={(order) =>
+                      setDrawer({
+                        title: `计划单 · ${order.symbol}`,
+                        subtitle: '单字段 → 触发类别/当日信号 → 原始条目（dry-run 输出）',
+                        entries: planOrderDrillEntries(order, desk.plan, desk.signals) as DrillEntry[],
+                        raw: order,
+                      })
+                    }
                     onDrillDown={() =>
                       setDrawer({
                         title: '调仓计划 · 来源链',
@@ -126,7 +155,17 @@ const DeskTodayPage: React.FC = () => {
                     }
                   />
                 </div>
-                <ExecutionCard execution={desk.execution} />
+                <ExecutionCard
+                  execution={desk.execution}
+                  onItemDrill={(item) =>
+                    setDrawer({
+                      title: `执行 · ${item.symbol}`,
+                      subtitle: '订单字段 → 取价来源说明 → 原始条目（sim_orders 投影）',
+                      entries: executionItemDrillEntries(item, desk.execution) as DrillEntry[],
+                      raw: item,
+                    })
+                  }
+                />
               </div>
 
               <EvidenceMatrix

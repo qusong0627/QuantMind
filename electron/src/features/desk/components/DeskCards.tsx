@@ -2,7 +2,7 @@
 
 import React from 'react';
 import { Activity, BarChart3, HeartPulse, Wallet } from 'lucide-react';
-import type { ExecutionBlock, HealthBlock, PnlBlock, SignalsBlock } from '../types';
+import type { ExecutionBlock, ExecutionItem, HealthBlock, PnlBlock, SignalItem, SignalsBlock } from '../types';
 import { TermTooltip } from '../../shared/TermTooltip';
 import { EvalScoreBadge } from '../../../components/shared/EvalScoreBadge';
 import { useUiMode } from '../../shared/useUiMode';
@@ -35,7 +35,11 @@ function SourceFooter({ source, onDrillDown }: { source: string; onDrillDown?: (
   );
 }
 
-export const SignalsCard: React.FC<{ signals: SignalsBlock | null | undefined }> = ({ signals }) => (
+export const SignalsCard: React.FC<{
+  signals: SignalsBlock | null | undefined;
+  /** T-FE-03 v2：条目级逐层下钻（信号字段 → 原始条目 → 信号块载荷） */
+  onItemDrill?: (item: SignalItem) => void;
+}> = ({ signals, onItemDrill }) => (
   <section className="bg-white rounded-2xl border border-gray-200 p-4">
     <header className="flex items-center gap-2 mb-2">
       <BarChart3 className="w-4 h-4 text-blue-600" />
@@ -54,7 +58,12 @@ export const SignalsCard: React.FC<{ signals: SignalsBlock | null | undefined }>
     </div>
     <div className="space-y-1">
       {(signals?.top_buy || []).slice(0, 5).map((item) => (
-        <div key={item.symbol} className="flex items-center justify-between text-xs">
+        <div
+          key={item.symbol}
+          className={`flex items-center justify-between text-xs rounded-lg px-1 py-0.5 ${onItemDrill ? 'cursor-pointer hover:bg-blue-50/50' : ''}`}
+          onClick={onItemDrill ? () => onItemDrill(item) : undefined}
+          title={onItemDrill ? '点击下钻：信号字段 → 原始条目' : undefined}
+        >
           <span className="text-slate-800">{item.symbol}</span>
           <span className="text-slate-500">
             <TermTooltip term="rank_pct">rank_pct</TermTooltip>{' '}
@@ -71,7 +80,11 @@ export const SignalsCard: React.FC<{ signals: SignalsBlock | null | undefined }>
   </section>
 );
 
-export const ExecutionCard: React.FC<{ execution: ExecutionBlock | null | undefined }> = ({ execution }) => {
+export const ExecutionCard: React.FC<{
+  execution: ExecutionBlock | null | undefined;
+  /** T-FE-03 v2：条目级逐层下钻（订单字段 → 取价来源 → 原始条目） */
+  onItemDrill?: (item: ExecutionItem) => void;
+}> = ({ execution, onItemDrill }) => {
   const summary = executionSummary(execution);
   return (
     <section className="bg-white rounded-2xl border border-gray-200 p-4">
@@ -87,7 +100,12 @@ export const ExecutionCard: React.FC<{ execution: ExecutionBlock | null | undefi
       </div>
       <div className="space-y-1 max-h-[180px] overflow-y-auto pr-1">
         {(execution?.items || []).slice(0, 6).map((item, index) => (
-          <div key={`${item.client_order_id || item.symbol}-${index}`} className="text-xs flex items-center gap-2">
+          <div
+            key={`${item.client_order_id || item.symbol}-${index}`}
+            className={`text-xs flex items-center gap-2 rounded-lg px-1 py-0.5 ${onItemDrill ? 'cursor-pointer hover:bg-blue-50/50' : ''}`}
+            onClick={onItemDrill ? () => onItemDrill(item) : undefined}
+            title={onItemDrill ? '点击下钻：订单字段 → 取价来源 → 原始条目' : undefined}
+          >
             <span
               className={`text-[10px] px-1 py-0.5 rounded border ${
                 item.mode === 'REAL'

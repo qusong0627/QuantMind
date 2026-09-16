@@ -85,3 +85,31 @@ export function signalPointDrillEntries(signal: {
     },
   ];
 }
+
+// ── 详情页签的简单/专业降升维（T-FE-02 收尾）──────────────────────────
+
+export interface DetailTabDef<T extends string = string> {
+  id: T;
+  label: string;
+  /** 机构级页签：简单模式收起（专业模式全部展示） */
+  proOnly?: boolean;
+}
+
+/** 按模式过滤页签（纯函数）：简单模式收起 proOnly；专业模式全量 */
+export function visibleDetailTabs<T extends string>(
+  tabs: DetailTabDef<T>[],
+  isSimple: boolean
+): DetailTabDef<T>[] {
+  return isSimple ? tabs.filter((t) => !t.proOnly) : tabs;
+}
+
+/** 当前页签被收起时的回落目标（第一个可见页签；无可见则保持原值） */
+export function fallbackDetailTab<T extends string>(
+  current: T,
+  tabs: DetailTabDef<T>[],
+  isSimple: boolean
+): T {
+  const visible = visibleDetailTabs(tabs, isSimple);
+  if (visible.some((t) => t.id === current)) return current;
+  return visible[0]?.id ?? current;
+}

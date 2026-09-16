@@ -7,6 +7,8 @@ import React, { useEffect, useState } from 'react';
 import { Spin, Tag } from 'antd';
 import { Building2, Waves, Coins, CalendarClock, BarChart3, Target, Newspaper } from 'lucide-react';
 import { SERVICE_ENDPOINTS } from '../../../config/services';
+import { useUiMode } from '../../shared/useUiMode';
+import { fallbackDetailTab, visibleDetailTabs, type DetailTabDef } from '../../stock-terminal-shared/utils';
 
 interface HkStockDetail {
   symbol: string;
@@ -307,15 +309,23 @@ export function HkDetailBody({ symbol, name, close }: { symbol: string; name: st
     };
   }, [symbol]);
 
-  const TABS = [
-    { id: 'ccass', label: 'CCASS' },
-    { id: 'south', label: '南向' },
+  const TABS: DetailTabDef[] = [
+    { id: 'ccass', label: 'CCASS', proOnly: true },
+    { id: 'south', label: '南向', proOnly: true },
     { id: 'valuation', label: '估值' },
     { id: 'dividend', label: '分红' },
     { id: 'financial', label: '财务' },
-    { id: 'analyst', label: '分析师' },
+    { id: 'analyst', label: '分析师', proOnly: true },
     { id: 'news', label: '资讯' },
   ];
+  const { isSimple } = useUiMode();
+  const tabs = visibleDetailTabs(TABS, isSimple);
+
+  // 切到简单模式时，被收起的页签回落（默认页签 CCASS 属机构级）
+  useEffect(() => {
+    const next = fallbackDetailTab(tab, TABS, isSimple);
+    if (next !== tab) setTab(next);
+  }, [isSimple, tab]);
 
   if (loading && !detail) {
     return <div className="py-8 flex justify-center"><Spin /></div>;
@@ -327,7 +337,7 @@ export function HkDetailBody({ symbol, name, close }: { symbol: string; name: st
   return (
     <div className="flex flex-col gap-2">
       <div className="grid grid-cols-4 gap-1">
-        {TABS.map((t) => (
+        {tabs.map((t) => (
           <button
             key={t.id}
             onClick={() => setTab(t.id)}
@@ -341,6 +351,11 @@ export function HkDetailBody({ symbol, name, close }: { symbol: string; name: st
           </button>
         ))}
       </div>
+      {isSimple && (
+        <div className="text-[10px] text-slate-400">
+          简单模式已收起机构级页签（CCASS/南向/分析师）——顶栏可切换专业模式
+        </div>
+      )}
       <div className="min-h-[260px]">
         {tab === 'ccass' && <CcassBlock d={detail.ccass} />}
         {tab === 'south' && <SouthBlock d={detail.south} />}
