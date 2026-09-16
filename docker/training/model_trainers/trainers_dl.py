@@ -30,6 +30,14 @@ _QLIB_FLAT_MODEL_MAP: dict[str, tuple[str, str]] = {
 
 _QLIB_MODEL_MAP = {**_QLIB_TS_MODEL_MAP, **_QLIB_FLAT_MODEL_MAP}
 
+# 预测分块粒度（内存模型，配套 2026-09-16 v4 预测段 OOM 修复）：
+# 全量单拷贝预测数组在 768 万行×273 feats 下达 8.4GB，与训练底仓叠加顶穿主机
+# 内存上限（v4 在 41.3GB 被内核全局 OOM 实证）。TS 滑窗永不跨 symbol → 按符号
+# 数分块；flat 模型逐行独立 → 按行数分块。窗口/归一化/权重均与块无关，分块
+# 与全量逐值等价（tools/equiv 测试脚本验证）。
+_PRED_SYMBOL_CHUNK = 400
+_PRED_ROW_CHUNK = 1_000_000
+
 class _TSLazyDataset(torch.utils.data.Dataset):
     """Lazy TS dataset: 按需生成滚动窗口，避免一次性加载全部窗口到内存。
 
@@ -444,8 +452,9 @@ def _train_dl(
         evals["train"].append(train_score)
         evals["valid"].append(val_score)
 
-        if (epoch + 1) % 10 == 0 or epoch == 0:
-            logger.info("Epoch %d/%d: valid=%.6f", epoch + 1, n_epochs, val_score)
+        # 每轮都打：早期停滞诊断依赖完整曲线（旧实现 (epoch+1)%10 过滤，
+        # 8 轮配置只打第 1 轮，停滞只能靠早停终值倒推）
+        logger.info("Epoch %d/%d: valid=%.6f", epoch + 1, n_epochs, val_score)
 
         if val_score > best_score:
             best_score = val_score
@@ -482,6 +491,22 @@ def _train_dl(
     # 保存模型
     torch.save(best_state, str(output_dir / "model.pth"))
     logger.info("DL model saved: model.pth (best_epoch=%d, best_score=%.6f)", best_epoch, best_score)
+
+    # 预测/指标前释放训练态大数据：TS loader 的 X（训练 ~6.97GB + 验证 ~0.81GB）
+    # 与训练帧切片在保存后仍被局部变量持有，而随后 _dl_metrics 会对 train_df/val_df
+    # 逐块预测——不释放则全量预测数组与训练底仓叠加顶穿主机内存上限
+    # （2026-09-16 v4 在 41.3GB 被内核全局 OOM 实证；容器限额 53G 之上还有
+    #  主机 60G 全局天花板，实际可用仅 ~41GB）。
+    if is_ts:
+        del _train_loader, _val_loader
+        if model_type in ("transformer", "tcn"):
+            # _WeightlessLoader 包装时保留了原始 loader 引用，一并断开
+            del _orig_train_loader, _orig_val_loader
+    train_args = val_args = None  # 断开 _WeightlessLoader / (X_train, y_train) 引用链
+    del X_train, X_val, y_train, y_val
+    from diagnostics.utils import trim_memory as _trim_after_train
+
+    _trim_after_train("after train, before metrics")
 
     # DL 元数据 (供推理重建模型)
     dl_metadata = {
@@ -643,7 +668,7 @@ def _train_nativetft(
         model.train()
         epoch_loss = 0.0
         n_batches = 0
-        for batch in train_loader:
+        for batch in _train_loader:
             data = batch[0] if isinstance(batch, (list, tuple)) else batch
             feature = data[:, :, 0:-1].float().to(device)
             # _TSLazyDataset 返回 (row, weight)，weight 恒为 1.0，必须从
@@ -663,7 +688,7 @@ def _train_nativetft(
         val_preds = []
         val_labels = []
         with torch.no_grad():
-            for batch in val_loader:
+            for batch in _val_loader:
                 data = batch[0] if isinstance(batch, (list, tuple)) else batch
                 feature = data[:, :, 0:-1].float().to(device)
                 # 同训练循环：真标签在 data[:, -1, -1]，batch[1] 只是 weight=1.0
@@ -836,27 +861,17 @@ def _predict_dl(
             feat_norm = (np.asarray(_fn["mean"], dtype=np.float32),
                          np.asarray(_fn["std"], dtype=np.float32))
         # TS 滑窗必须按 symbol 分组：df_X 是扁平 RangeIndex，
-        # 用 (symbol, trade_date) 建 MultiIndex 供 loader 计算股票连续区间。
-        # 单拷贝通路（与训练同款，2026-09-16）：旧实现 copy→sort→[features]→
-        # .values→归一化×2→重排 共 7 份整表副本，全窗口预测（640 万行）叠加必 OOM
-        # （GRU 保存后在预测处 OOMKilled 实证）。新通路内部按需 lexsort 并记录
-        # original_rows（相对 df_X 原始行），输出按 (symbol, trade_date) 键控。
+        # 单拷贝通路内部按需 lexsort 并记录 original_rows（相对块帧行），
+        # 输出按 (symbol, trade_date) 键控。
+        # 分块预测（内存模型，2026-09-16）：TS 滑窗永不跨 symbol，按符号块切分
+        # 与全量逐值等价；全量单拷贝数组在 768 万行×273 下达 8.4GB，与底仓
+        # 叠加顶穿主机上限（v4 在 41.3GB 被内核全局 OOM 实证），分块后峰值≈
+        # 最大块（400 符号 ≈0.5GB）。
         _pred_df = df_X
-        if "symbol" in df_X.columns and "trade_date" in df_X.columns:
-            loader, _ = _build_ts_dataloader_from_frame(
-                df_X, features, None,
-                step_len=step_len, batch_size=batch_size,
-                shuffle=False, feat_norm=feat_norm, drop_last=False,
-            )
-        else:
-            # 遗留调用方（无键帧）：保持旧构造兼容
-            _X = df_X[features]
-            _y = pd.Series(0.0, index=df_X.index)
-            loader, _ = _build_ts_dataloader(
-                _X, _y, step_len, batch_size, shuffle=False,
-                feat_norm=feat_norm, drop_last=False,
-            )
-        # 找到内部模型
+        n_total = len(_pred_df)
+        out = np.full(n_total, np.nan, dtype=np.float32)
+
+        # 找到内部模型（跨块复用，eval/to(device) 只做一次）
         inner_model = None
         for attr_name in ("model", "GRU_model", "gru_model", "LSTM_model", "lstm_model",
                           "ALSTM_model", "alstm_model", "TCN_model", "tcn_model",
@@ -867,79 +882,142 @@ def _predict_dl(
         if inner_model is not None:
             inner_model.eval()
             inner_model = inner_model.to(infer_device)
-        preds = []
         is_tcn = "TCN" in cls_name
-        for batch in loader:
-            data = batch[0] if isinstance(batch, (list, tuple)) else batch
-            feature = data[:, :, 0:-1].to(infer_device)
-            # TCN 期望 channels-first [batch, d_feat, seq]（训练时 qlib 内部 transpose，
-            # 推理需手动补）；GRU/LSTM/ALSTM batch_first，Transformer 内部自处理。
-            if is_tcn:
-                feature = feature.transpose(1, 2)
-            with torch.no_grad():
-                pred = inner_model(feature.float())
-                if isinstance(pred, tuple):
-                    pred = pred[0]
-                if hasattr(pred, 'dim') and pred.dim() == 2 and pred.shape[1] == 1:
-                    pred = pred.squeeze(-1)
-                preds.append(pred.detach().cpu().numpy())
-        raw_pred = np.concatenate(preds)
 
-        # 时序滑窗预测天然比全量行少（每只股票前 step_len-1 行无完整窗口）。
-        # 用 dataset.original_rows（排序索引→原始 df_X 行）把预测 scatter
-        # 回原始行的窗口末端位置，其余填 NaN，返回 DataFrame(symbol,trade_date,pred)。
-        n_total = len(_pred_df)
-        out = np.full(n_total, np.nan, dtype=np.float32)
-        if raw_pred.shape[0] > 0 and hasattr(loader.dataset, "original_rows"):
-            ds = loader.dataset
-            orig = ds.original_rows[ds.indices] + step_len - 1
-            if orig.max() < n_total and len(orig) == raw_pred.shape[0]:
-                out[orig] = raw_pred
-            else:
-                logger.warning("DL predict scatter 不匹配: pred=%d orig=%d n_total=%d -> 全 NaN",
-                               raw_pred.shape[0], len(orig), n_total)
+        _has_keys = "symbol" in _pred_df.columns and "trade_date" in _pred_df.columns
+        if _has_keys and n_total:
+            _sym_codes = pd.factorize(_pred_df["symbol"].to_numpy(), sort=False)[0]
+            _n_codes = int(_sym_codes.max()) + 1
+            _blocks = [
+                np.flatnonzero((_sym_codes >= lo) & (_sym_codes < lo + _PRED_SYMBOL_CHUNK))
+                for lo in range(0, _n_codes, _PRED_SYMBOL_CHUNK)
+            ]
         else:
-            logger.warning("DL predict 无 original_rows 或无预测: pred=%d", raw_pred.shape[0])
+            _blocks = [np.arange(n_total)]  # 遗留无键调用：单块（与旧实现同路径）
+
+        for _pos in _blocks:
+            if _pos.size == 0:
+                continue
+            # 单块覆盖全帧时不复制（小帧与旧实现内存同路径）
+            _chunk = _pred_df if _pos.size == n_total else _pred_df.iloc[_pos]
+            # 乱序块修正：scatter 公式（窗口末端 = 起始行 + step_len-1）仅在块内
+            # 符号连续（行步长 1）时成立。非符号主序的块先做 (symbol, trade_date)
+            # 稳定排序，并同步置换行号映射，保证窗口末端落回真实行。
+            # 生产数据为符号主序（loader 日志 order=identity），此分支零成本跳过。
+            if _has_keys and len(_chunk) > 1:
+                _csym = _chunk["symbol"].to_numpy()
+                if not bool((_csym[1:] >= _csym[:-1]).all()):
+                    _ord = np.lexsort((_chunk["trade_date"].to_numpy(), _csym))
+                    _chunk = _chunk.iloc[_ord]
+                    _pos = _pos[_ord]
+            try:
+                if _has_keys:
+                    loader, _ = _build_ts_dataloader_from_frame(
+                        _chunk, features, None,
+                        step_len=step_len, batch_size=batch_size,
+                        shuffle=False, feat_norm=feat_norm, drop_last=False,
+                    )
+                else:
+                    # 遗留调用方（无键帧）：保持旧构造兼容
+                    _X = _chunk[features]
+                    _y = pd.Series(0.0, index=_chunk.index)
+                    loader, _ = _build_ts_dataloader(
+                        _X, _y, step_len, batch_size, shuffle=False,
+                        feat_norm=feat_norm, drop_last=False,
+                    )
+            except ValueError as exc:
+                # 退化块（块内所有 symbol 行数 < step_len，无完整窗口）：
+                # 该块记 NaN，与全量路径中这些 symbol 无窗口的语义一致
+                logger.warning("DL predict 跳过退化块（%d 行）: %s", _pos.size, exc)
+                if _chunk is not _pred_df:
+                    del _chunk
+                continue
+            preds = []
+            for batch in loader:
+                data = batch[0] if isinstance(batch, (list, tuple)) else batch
+                feature = data[:, :, 0:-1].to(infer_device)
+                # TCN 期望 channels-first [batch, d_feat, seq]（训练时 qlib 内部 transpose，
+                # 推理需手动补）；GRU/LSTM/ALSTM batch_first，Transformer 内部自处理。
+                if is_tcn:
+                    feature = feature.transpose(1, 2)
+                with torch.no_grad():
+                    pred = inner_model(feature.float())
+                    if isinstance(pred, tuple):
+                        pred = pred[0]
+                    if hasattr(pred, 'dim') and pred.dim() == 2 and pred.shape[1] == 1:
+                        pred = pred.squeeze(-1)
+                    preds.append(pred.detach().cpu().numpy())
+            raw_pred = np.concatenate(preds) if preds else np.empty(0, dtype=np.float32)
+
+            # 时序滑窗预测天然比全量行少（每只股票前 step_len-1 行无完整窗口）。
+            # 用 dataset.original_rows（块内排序索引→块帧行）把预测 scatter 回
+            # 块帧原始行，再经 _pos 映射回全局行号，其余填 NaN。
+            if raw_pred.shape[0] > 0 and hasattr(loader.dataset, "original_rows"):
+                ds = loader.dataset
+                orig = ds.original_rows[ds.indices] + step_len - 1
+                if orig.max() < len(_chunk) and len(orig) == raw_pred.shape[0]:
+                    out[_pos[orig]] = raw_pred
+                else:
+                    logger.warning(
+                        "DL predict scatter 不匹配(块): pred=%d orig=%d chunk=%d -> 块内全 NaN",
+                        raw_pred.shape[0], len(orig), len(_chunk),
+                    )
+            else:
+                logger.warning("DL predict 无 original_rows 或无预测(块): pred=%d", raw_pred.shape[0])
+            del loader, preds, raw_pred
+            if _chunk is not _pred_df:
+                del _chunk
         return pd.DataFrame({
             "symbol": _pred_df["symbol"].to_numpy(),
             "trade_date": _pred_df["trade_date"].to_numpy(),
             "pred": out,
         })
     else:
-        X_values = np.empty((len(df_X), len(features)), dtype=np.float32)
-        for _i, _c in enumerate(features):
-            X_values[:, _i] = df_X[_c].to_numpy(dtype=np.float32, copy=False)
-        # 填充 NaN/Inf：tabnet 内部断言禁止 NaN 输入（原地）
-        if np.isnan(X_values).any() or np.isinf(X_values).any():
-            logger.warning("DL flat predict: 特征含 %d NaN/%d Inf，填 0",
-                           int(np.isnan(X_values).sum()), int(np.isinf(X_values).sum()))
-            X_values = np.nan_to_num(X_values, nan=0.0, posinf=0.0, neginf=0.0)
+        # 分块预测（行块）：flat 模型逐行独立，行块切分逐值等价；全量 X（768 万
+        # 行）≈8.4GB 与底仓叠加顶穿主机上限（2026-09-16 v4 实证），峰值降为单块。
+        n_total = len(df_X)
+        _flat_out = np.empty(n_total, dtype=np.float32)
         if inner_model is not None:
             inner_model.eval()
             inner_model = inner_model.to(infer_device)
         is_tabnet = "Tabnet" in cls_name
-        preds = []
-        for i in range(0, len(X_values), batch_size):
-            # 逐批上卡：旧实现把 640 万×273 整表 .to(device)（≈7GB 显存 +
-            # 同量主机侧中转），改为批级传输（批 8000 ≈ 9MB）
-            batch = torch.from_numpy(X_values[i:i+batch_size]).to(infer_device)
-            with torch.no_grad():
-                if is_tabnet:
-                    # qlib TabNet.forward(x, priors) 需要 priors 参数（训练时 qlib 内部构造）
-                    priors = torch.ones(batch.shape[0], batch.shape[1], dtype=batch.dtype, device=infer_device)
-                    pred = inner_model(batch.float(), priors)
-                else:
-                    pred = inner_model(batch.float())
-                if isinstance(pred, tuple):
-                    pred = pred[0]
-                if hasattr(pred, 'dim') and pred.dim() == 2 and pred.shape[1] == 1:
-                    pred = pred.squeeze(-1)
-                preds.append(pred.detach().cpu().numpy())
-        _flat_pred = np.concatenate(preds)
+        _nan_warned = False
+        for _st in range(0, n_total, _PRED_ROW_CHUNK):
+            _blk = df_X.iloc[_st:_st + _PRED_ROW_CHUNK]
+            X_values = np.empty((len(_blk), len(features)), dtype=np.float32)
+            for _i, _c in enumerate(features):
+                X_values[:, _i] = _blk[_c].to_numpy(dtype=np.float32, copy=False)
+            # 填充 NaN/Inf：tabnet 内部断言禁止 NaN 输入（原地）
+            if np.isnan(X_values).any() or np.isinf(X_values).any():
+                if not _nan_warned:
+                    logger.warning("DL flat predict: 特征含 NaN/Inf，填 0（分块处理）")
+                    _nan_warned = True
+                np.nan_to_num(X_values, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
+            preds = []
+            for i in range(0, len(X_values), batch_size):
+                # 逐批上卡：旧实现把整表 .to(device)（≈7GB 显存 + 同量主机侧
+                # 中转），改为批级传输（批 8000 ≈ 9MB）
+                batch = torch.from_numpy(X_values[i:i+batch_size]).to(infer_device)
+                with torch.no_grad():
+                    if is_tabnet:
+                        # qlib TabNet.forward(x, priors) 需要 priors 参数（训练时 qlib 内部构造）
+                        priors = torch.ones(batch.shape[0], batch.shape[1], dtype=batch.dtype, device=infer_device)
+                        pred = inner_model(batch.float(), priors)
+                    else:
+                        pred = inner_model(batch.float())
+                    if isinstance(pred, tuple):
+                        pred = pred[0]
+                    if hasattr(pred, 'dim') and pred.dim() == 2 and pred.shape[1] == 1:
+                        pred = pred.squeeze(-1)
+                    preds.append(pred.detach().cpu().numpy())
+            _flat_out[_st:_st + len(_blk)] = (
+                np.concatenate(preds) if preds else np.float32(0.0)
+            )
+            del _blk, X_values, preds
         return pd.DataFrame({
             "symbol": df_X["symbol"].to_numpy(),
             "trade_date": df_X["trade_date"].to_numpy(),
-            "pred": _flat_pred,
+            "pred": _flat_out,
         })
 
 def _predict_nativetft(
@@ -1023,43 +1101,77 @@ def _predict_nativetft(
     if isinstance(_fn, dict) and _fn.get("mean") and _fn.get("std"):
         feat_norm = (np.asarray(_fn["mean"], dtype=np.float32),
                      np.asarray(_fn["std"], dtype=np.float32))
-    # TS 滑窗必须按 symbol 分组，否则窗口跨股票边界产生污染样本
-    _pred_df = df_X.copy()
-    if "symbol" in _pred_df.columns and "trade_date" in _pred_df.columns:
-        _pred_df = _pred_df.sort_values(["symbol", "trade_date"])
-        _idx = pd.MultiIndex.from_arrays(
-            [_pred_df["symbol"].to_numpy(), _pred_df["trade_date"].to_numpy()],
-            names=["instrument", "datetime"],
-        )
-        _X = _pred_df[features].set_axis(_idx)
-        _y = pd.Series(0.0, index=_idx)
+    # 分块预测（符号块，同 _predict_dl）：全量单拷贝数组（768 万行 ≈8.4GB）与
+    # 帧副本叠加会顶穿主机上限（2026-09-16 v4 实证）；窗口永不跨 symbol，
+    # 分块逐值等价。返回顺序为各块内 (symbol, trade_date) 排序后拼接。
+    _has_keys = "symbol" in df_X.columns and "trade_date" in df_X.columns
+    n_total = len(df_X)
+    if _has_keys and n_total:
+        _sym_codes = pd.factorize(df_X["symbol"].to_numpy(), sort=False)[0]
+        _n_codes = int(_sym_codes.max()) + 1
+        _blocks = [
+            np.flatnonzero((_sym_codes >= lo) & (_sym_codes < lo + _PRED_SYMBOL_CHUNK))
+            for lo in range(0, _n_codes, _PRED_SYMBOL_CHUNK)
+        ]
     else:
-        _X = df_X[features]
-        _y = pd.Series(0.0, index=df_X.index)
+        _blocks = [np.arange(n_total)]
 
-    # 构建 TS DataLoader 并预测
-    loader, _ = _build_ts_dataloader(
-        _X, _y, step_len, batch_size, shuffle=False, feat_norm=feat_norm, drop_last=False)
+    _parts = []
+    for _pos in _blocks:
+        if _pos.size == 0:
+            continue
+        _chunk = df_X if _pos.size == n_total else df_X.iloc[_pos]
+        # TS 滑窗必须按 symbol 分组，否则窗口跨股票边界产生污染样本
+        _pred_df = _chunk.copy()
+        if _has_keys:
+            _pred_df = _pred_df.sort_values(["symbol", "trade_date"])
+            _idx = pd.MultiIndex.from_arrays(
+                [_pred_df["symbol"].to_numpy(), _pred_df["trade_date"].to_numpy()],
+                names=["instrument", "datetime"],
+            )
+            _X = _pred_df[features].set_axis(_idx)
+            _y = pd.Series(0.0, index=_idx)
+        else:
+            _X = _pred_df[features]
+            _y = pd.Series(0.0, index=_pred_df.index)
 
-    preds = []
-    with torch.no_grad():
-        for batch in loader:
-            data = batch[0] if isinstance(batch, (list, tuple)) else batch
-            feature = data[:, :, 0:-1].float().to(infer_device)
-            pred = model(feature)
-            preds.append(pred.cpu().numpy())
-    raw_pred = np.concatenate(preds)
+        # 构建 TS DataLoader 并预测
+        try:
+            loader, _ = _build_ts_dataloader(
+                _X, _y, step_len, batch_size, shuffle=False, feat_norm=feat_norm, drop_last=False)
+        except ValueError as exc:
+            # 退化块（块内所有 symbol 行数 < step_len）：与全量路径这些 symbol
+            # 无窗口的语义一致，记 NaN 跳过
+            logger.warning("NativeTFT predict 跳过退化块（%d 行）: %s", _pos.size, exc)
+            if _chunk is not df_X:
+                del _chunk
+            continue
 
-    # 与 _predict_dl 相同的 scatter 逻辑：用 original_rows 映射回原始行
-    n_total = len(_pred_df)
-    out = np.full(n_total, np.nan, dtype=np.float32)
-    if raw_pred.shape[0] > 0 and hasattr(loader.dataset, "original_rows"):
-        ds = loader.dataset
-        orig = ds.original_rows[ds.indices] + step_len - 1
-        if orig.max() < n_total and len(orig) == raw_pred.shape[0]:
-            out[orig] = raw_pred
-    return pd.DataFrame({
-        "symbol": _pred_df["symbol"].to_numpy(),
-        "trade_date": _pred_df["trade_date"].to_numpy(),
-        "pred": out,
-    })
+        preds = []
+        with torch.no_grad():
+            for batch in loader:
+                data = batch[0] if isinstance(batch, (list, tuple)) else batch
+                feature = data[:, :, 0:-1].float().to(infer_device)
+                pred = model(feature)
+                preds.append(pred.cpu().numpy())
+        raw_pred = np.concatenate(preds) if preds else np.empty(0, dtype=np.float32)
+
+        # 与 _predict_dl 相同的 scatter 逻辑：用 original_rows 映射回块帧行
+        _n_chunk = len(_pred_df)
+        out = np.full(_n_chunk, np.nan, dtype=np.float32)
+        if raw_pred.shape[0] > 0 and hasattr(loader.dataset, "original_rows"):
+            ds = loader.dataset
+            orig = ds.original_rows[ds.indices] + step_len - 1
+            if orig.max() < _n_chunk and len(orig) == raw_pred.shape[0]:
+                out[orig] = raw_pred
+        _parts.append(pd.DataFrame({
+            "symbol": _pred_df["symbol"].to_numpy(),
+            "trade_date": _pred_df["trade_date"].to_numpy(),
+            "pred": out,
+        }))
+        del loader, _X, _y, _pred_df, preds, raw_pred, out
+        if _chunk is not df_X:
+            del _chunk
+    if not _parts:
+        return pd.DataFrame({"symbol": [], "trade_date": [], "pred": []})
+    return pd.concat(_parts, ignore_index=True)
