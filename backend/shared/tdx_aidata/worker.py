@@ -163,6 +163,7 @@ class AidataWorker:
         self._stop = asyncio.Event()
         self.subscription = None  # collector.SubscriptionEngine | None
         self._sub_task: asyncio.Task | None = None
+        self.archiver = None  # l05_store.SnapshotArchiver | None
 
     # ── 订阅引擎（T-P6-02）─────────────────────────────────────────
 
@@ -190,6 +191,21 @@ class AidataWorker:
         from backend.shared.tdx_aidata import config as _cfg
         from backend.shared.tdx_aidata.collector import SubscriptionEngine
 
+        archiver = None
+        if str(os.getenv("QM_L05_ENABLED", "true")).strip().lower() not in {
+            "0", "false", "no", "off",
+        }:
+            from backend.shared.l05_store import DEFAULT_BASE_DIR, SnapshotArchiver
+
+            archiver = SnapshotArchiver(
+                base_dir=os.getenv("QM_L05_DIR") or DEFAULT_BASE_DIR,
+                flush_rows=int(os.getenv("QM_L05_FLUSH_ROWS", "50000")),
+                flush_seconds=float(os.getenv("QM_L05_FLUSH_S", "30")),
+                keep_days=int(os.getenv("QM_L05_KEEP_DAYS", "90")),
+            )
+            logger.info("l05 archiver enabled dir=%s", archiver.base_dir)
+        self.archiver = archiver
+
         engine = SubscriptionEngine(
             sdk_subscribe=lambda codes, cb: self.tqs.subscribe(
                 stock_list=codes, callback=cb
@@ -197,6 +213,7 @@ class AidataWorker:
             sdk_unsubscribe=lambda: self.tqs._tdx().unsubscribe(),
             budget_gate=self.gate,
             redis_factory=self._redis_factory,
+            archiver=archiver,
             hot_set_key=_cfg.hot_set_key(),
             cap=int(os.getenv("QM_HOT_SET_CAP", "1000")),
             silence_s=float(os.getenv("QM_HOT_SET_SILENCE_S", "120")),
@@ -502,6 +519,13 @@ class AidataWorker:
                 await asyncio.wait_for(self._sub_task, timeout=3)
             except (asyncio.TimeoutError, asyncio.CancelledError):
                 self._sub_task.cancel()
+        if self.archiver is not None:
+            # 停机终刷：缓冲区数据不许丢
+            try:
+                flushed = await asyncio.to_thread(self.archiver.flush)
+                logger.info("l05 archiver final flush rows=%s", flushed.get("rows"))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("l05 停机终刷失败: %s", exc)
         try:
             os.unlink(self.socket_path)
         except OSError:

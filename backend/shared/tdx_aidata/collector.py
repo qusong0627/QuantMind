@@ -84,6 +84,19 @@ def normalize_subscription_symbol(symbol: object) -> tuple[str, str] | None:
     return f"{prefix[2:]}.{prefix[:2]}", prefix
 
 
+def record_ts(record: dict, now: datetime | None = None) -> int:
+    """记录时间戳（唯一实现）：显式 ts 优先，否则由 refresh_time(HHMMSS) 按 CST 换算。"""
+    raw_ts = record.get("ts")
+    if raw_ts is not None:
+        try:
+            return int(raw_ts)
+        except (TypeError, ValueError):
+            pass
+    now = now or datetime.now(CST)
+    ts = refresh_time_to_epoch(str(record.get("refresh_time") or ""), now)
+    return int(ts if ts is not None else now.timestamp())
+
+
 def frame_to_redis(record: dict, now: datetime) -> dict[str, Any] | None:
     """推送记录 → Redis 写入三件套；符号非法/关键价缺失 → None（调用方计数跳过）。"""
     norm = normalize_subscription_symbol(record.get("symbol"))
@@ -96,9 +109,7 @@ def frame_to_redis(record: dict, now: datetime) -> dict[str, Any] | None:
     if not price or not pre_close:
         return None
 
-    ts = refresh_time_to_epoch(str(record.get("refresh_time") or ""), now)
-    if ts is None:
-        ts = int(now.timestamp())
+    ts = record_ts(record, now)
 
     snapshot_fields: dict[str, str] = {
         # 消费方契约字段（stream RemoteRedisDataSource 必读）
@@ -185,6 +196,7 @@ class SubscriptionEngine:
         sdk_unsubscribe: Callable[[], Any],
         budget_gate,
         redis_factory: Callable[[], Any] | None,
+        archiver: Any | None = None,
         hot_set_key: str = DEFAULT_HOT_SET_KEY,
         cap: int = DEFAULT_CAP,
         silence_s: float = DEFAULT_SILENCE_S,
@@ -195,6 +207,7 @@ class SubscriptionEngine:
         self._sdk_unsubscribe = sdk_unsubscribe
         self._gate = budget_gate
         self._redis_factory = redis_factory
+        self._archiver = archiver  # l05_store.SnapshotArchiver | None（L0.5 落盘 sink）
         self._hot_set_key = hot_set_key
         self.cap = int(cap)
         self.silence_s = float(silence_s)
@@ -210,6 +223,7 @@ class SubscriptionEngine:
             "frames": 0,
             "records": 0,
             "written": 0,
+            "archived": 0,
             "skipped_symbols": 0,
             "parse_errors": 0,
             "redis_errors": 0,
@@ -243,9 +257,11 @@ class SubscriptionEngine:
     # ── redis 写侧 ──────────────────────────────────────────────────
 
     def _drain_and_write(self) -> int:
-        """队列→Redis 批量写（引擎线程内同步执行，量级小；错误计数不抛出）。"""
-        if self._redis_factory is None:
-            return 0
+        """队列→(Redis 写 | L0.5 归档) 批量消费。
+
+        两路互相独立：Redis 不可用（redis_factory=None/异常）不阻断归档；
+        归档失败只计数（SnapshotArchiver 内部吞错），不阻断实时链。
+        """
         batch: list[dict] = []
         while len(batch) < 500:
             try:
@@ -256,41 +272,59 @@ class SubscriptionEngine:
             return 0
 
         now = datetime.now(CST)
+        archived: list[dict] = []
+        written = 0
+
         client = None
-        try:
-            client = self._redis_factory()
-            pipe = client.pipeline(transaction=False)
-            written = 0
+        if self._redis_factory is not None:
+            try:
+                client = self._redis_factory()
+                pipe = client.pipeline(transaction=False)
+                for record in batch:
+                    mapped = frame_to_redis(record, now)
+                    self.counters["records"] += 1
+                    if mapped is None:
+                        self.counters["skipped_symbols"] += 1
+                        continue
+                    pipe.hset(mapped["snapshot_key"], mapping=mapped["snapshot_fields"])
+                    pipe.expire(mapped["snapshot_key"], SNAPSHOT_TTL)
+                    pipe.zadd(
+                        mapped["series_key"],
+                        {json.dumps(mapped["series_payload"], ensure_ascii=False): mapped["ts"]},
+                    )
+                    pipe.zremrangebyrank(mapped["series_key"], 0, -(SERIES_MAX_POINTS + 1))
+                    pipe.expire(mapped["series_key"], SERIES_TTL)
+                    archived.append({**record, "ts": mapped["ts"]})
+                    written += 1
+                if written:
+                    pipe.execute()
+                    self.counters["written"] += written
+            except Exception as exc:  # noqa: BLE001
+                self.counters["redis_errors"] += 1
+                self.counters["last_error"] = f"redis write: {exc}"
+                logger.warning("订阅写 Redis 失败: %s", exc)
+            finally:
+                if client is not None:
+                    try:
+                        client.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+        else:
+            # 无 Redis 写侧（测试/降级）：仍走映射校验与归档
             for record in batch:
                 mapped = frame_to_redis(record, now)
                 self.counters["records"] += 1
                 if mapped is None:
                     self.counters["skipped_symbols"] += 1
                     continue
-                pipe.hset(mapped["snapshot_key"], mapping=mapped["snapshot_fields"])
-                pipe.expire(mapped["snapshot_key"], SNAPSHOT_TTL)
-                pipe.zadd(
-                    mapped["series_key"],
-                    {json.dumps(mapped["series_payload"], ensure_ascii=False): mapped["ts"]},
-                )
-                pipe.zremrangebyrank(mapped["series_key"], 0, -(SERIES_MAX_POINTS + 1))
-                pipe.expire(mapped["series_key"], SERIES_TTL)
+                archived.append({**record, "ts": mapped["ts"]})
                 written += 1
-            if written:
-                pipe.execute()
-                self.counters["written"] += written
-            return written
-        except Exception as exc:  # noqa: BLE001
-            self.counters["redis_errors"] += 1
-            self.counters["last_error"] = f"redis write: {exc}"
-            logger.warning("订阅写 Redis 失败: %s", exc)
-            return 0
-        finally:
-            if client is not None:
-                try:
-                    client.close()
-                except Exception:  # noqa: BLE001
-                    pass
+
+        if self._archiver is not None and archived:
+            for record in archived:
+                self._archiver.append(record)
+            self.counters["archived"] += len(archived)
+        return written
 
     # ── 热集同步 ────────────────────────────────────────────────────
 
@@ -398,7 +432,7 @@ class SubscriptionEngine:
 
     def snapshot(self) -> dict[str, Any]:
         now = time.time()
-        return {
+        out: dict[str, Any] = {
             "enabled": True,
             "hot_set_key": self._hot_set_key,
             "subscribed": len(self._current),
@@ -409,3 +443,10 @@ class SubscriptionEngine:
             "silent": is_silent(self.last_frame_ts, now, self.silence_s),
             "counters": dict(self.counters),
         }
+        if self._archiver is not None:
+            out["archiver"] = {
+                "base_dir": self._archiver.base_dir,
+                "pending_rows": self._archiver.pending_rows,
+                **self._archiver.counters,
+            }
+        return out
