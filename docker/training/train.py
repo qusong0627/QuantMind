@@ -1582,7 +1582,10 @@ def main() -> int:
             # ── 模型评估报告（预测强弱结构化诊断：IC 时序 / 分层收益 / 多空组合）──
             eval_report = None
             try:
-                eval_report = compute_eval_report(pred_df)
+                eval_report = compute_eval_report(
+                    pred_df,
+                    horizon_days=int((cfg.get("label", {}) or {}).get("target_horizon_days") or 1),
+                )
                 (workspace / "eval_report.json").write_text(
                     json.dumps(eval_report, ensure_ascii=False, indent=2), encoding="utf-8"
                 )

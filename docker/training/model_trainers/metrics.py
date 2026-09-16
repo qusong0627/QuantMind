@@ -101,6 +101,7 @@ def compute_eval_report(
     n_groups: int = 10,
     curve_points: int = 200,
     ann_days: int = 244,
+    horizon_days: int = 1,
 ) -> dict:
     """模型评估报告：从全窗口预测构造「预测强弱」结构化诊断。
 
@@ -172,9 +173,13 @@ def compute_eval_report(
     # ③ Top−Bottom 多空组合
     if n_groups in gm.columns and 1 in gm.columns:
         spread = (gm[n_groups] - gm[1]).dropna()
-        # 单日多空价差缩尾 ±5%（因子报告通行口径）：早期损坏标签残留会让个别日
-        # 价差 ±100%，逐日复利把净值炸成 1e32、回撤变乱码；缩尾后年化/夏普/回撤
-        # 才具可比性（对绝大多数正常交易日无影响）。
+        # 标签是未来 N 日收益：逐日值相互重叠，直接按日复利 = 把 N 日收益按
+        # 244 次/年复利（实测年化 650%、净值 e28）。按持仓周期抽样为非重叠
+        # 序列后再统计/复利（年化基准仍按 244 个交易日）。
+        h = max(1, int(horizon_days or 1))
+        if h > 1:
+            spread = spread.iloc[::h]
+        # 单日价差缩尾 ±5%（因子报告通行口径）：防个别极端日主导复利。
         spread = spread.clip(-0.05, 0.05)
         stats = _series_stats(spread)
         cum = (1.0 + spread).cumprod() - 1.0
