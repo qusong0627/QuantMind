@@ -118,8 +118,17 @@ async def test_eval_api_endpoints_real_db():
     try:
         async with get_session(read_only=True) as probe:
             await probe.execute(text("SELECT 1"))
-    except Exception as exc:  # noqa: BLE001
-        pytest.skip(f"DB 连接抖动: {exc}")
+    except Exception:
+        # 跨事件循环池自愈：前序用例可能留下绑定旧循环的池（asyncpg 陷阱）——
+        # 关池重试一次，避免整条真库 E2E 被环境抖动跳过（用后关池纪律的受害者侧补丁）。
+        from backend.shared.database_manager_v2 import close_database
+
+        await close_database()
+        try:
+            async with get_session(read_only=True) as probe:
+                await probe.execute(text("SELECT 1"))
+        except Exception as exc:  # noqa: BLE001
+            pytest.skip(f"DB 连接抖动: {exc}")
 
     from backend.services.api.routers.eval_scores import (
         list_scores,
