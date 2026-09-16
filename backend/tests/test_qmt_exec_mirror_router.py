@@ -30,29 +30,6 @@ def _auth() -> Any:
     return SimpleNamespace(tenant_id="default", user_id="1")
 
 
-class FakeResult:
-    def __init__(self, rows: list[Any]):
-        self._rows = rows
-
-    def scalars(self) -> FakeResult:
-        return self
-
-    def all(self) -> list[Any]:
-        return list(self._rows)
-
-
-class FakeSession:
-    """按调用顺序吐出预置结果集（对账端点固定两次 execute）。"""
-
-    def __init__(self, batches: list[list[Any]]):
-        self.batches = list(batches)
-        self.statements: list[Any] = []
-
-    async def execute(self, stmt: Any) -> FakeResult:
-        self.statements.append(stmt)
-        return FakeResult(self.batches.pop(0) if self.batches else [])
-
-
 class TestStatusAndSwitches:
     def test_status_returns_snapshot(self) -> None:
         redis = _redis()
@@ -179,47 +156,89 @@ class TestConfigAndLists:
             )
 
 
-def _sim(**over: Any) -> Any:
+def _pair(**over: Any) -> dict[str, Any]:
     base: dict[str, Any] = {
-        "remarks": "client_order_id=cid-1",
-        "symbol": "SH600519",
-        "side": "BUY",
-        "quantity": 100.0,
-        "average_price": 10.0,
-        "total_fee": 5.0,
+        "base": "o1",
+        "symbol": "600036.SH",
+        "side": "buy",
+        "sim_order_id": "o1",
+        "sim_cid": "sim-run-600036.SH-buy",
+        "sim_user_id": "1",
+        "sim_price": 10.0,
+        "sim_quantity": 100.0,
+        "sim_fee": 5.0,
+        "sim_status": "filled",
+        "real_cid": "mir-o1",
+        "real_user_id": "00000001",
+        "real_order_id": "QMT-1",
+        "real_exchange_order_id": "1001",
+        "real_price": 10.2,
+        "real_limit_price": 10.2,
+        "real_quantity": 100.0,
+        "real_status": "filled",
+        "real_commission": 6.0,
+        "real_remarks": "",
+        "price_source": "broker_fill",
+        "symbol_mismatch": False,
+    }
+    base.update(over)
+    return base
+
+
+def _sim_only(**over: Any) -> dict[str, Any]:
+    base: dict[str, Any] = {
+        "order_id": "o9",
+        "client_order_id": None,
+        "remarks": None,
+        "symbol": "600036.SH",
+        "side": "sell",
+        "fill_price": 9.5,
+        "filled_quantity": 50.0,
+        "total_fee": 3.0,
         "status": "filled",
+        "user_id": "1",
     }
     base.update(over)
-    return SimpleNamespace(**base)
+    return base
 
 
-def _real(**over: Any) -> Any:
-    base: dict[str, Any] = {
-        "client_order_id": "mir-cid-1",
-        "order_id": "QMT-1",
-        "exchange_order_id": "1001",
-        "average_price": 10.2,
-        "commission": 6.0,
-        "status": "FILLED",
-        "filled_quantity": 100.0,
-        "price": 10.2,
-        "remarks": "",
+def _pairing(
+    pairs: list[Any] | None = None,
+    sim_only: list[Any] | None = None,
+    real_only: list[Any] | None = None,
+    mismatch: int = 0,
+) -> dict[str, Any]:
+    return {
+        "pairs": pairs or [],
+        "sim_only": sim_only or [],
+        "real_only": real_only or [],
+        "symbol_side_mismatch": mismatch,
+        "date": "20260909",
     }
-    base.update(over)
-    return SimpleNamespace(**base)
+
+
+def _patch_pairs(pairing: dict[str, Any]):
+    """端点委托唯一实现：打桩 collect_day_pairs（配对/取价逻辑在其自身套件测）。"""
+    return patch(
+        "backend.services.trade.services.shadow_compare_service.collect_day_pairs",
+        new=AsyncMock(return_value=pairing),
+    )
 
 
 class TestReconcile:
+    """T-P2-06：端点收敛为 collect_day_pairs 唯一实现，只做展示组装。"""
+
     def test_matched_order_reports_slippage_and_fee(self) -> None:
-        session = FakeSession([[_sim()], [_real()]])
-        data = asyncio.run(
-            mod.reconcile_mirror_orders(
-                date="2026-09-09", limit=100, db=session, auth=_auth()
+        with _patch_pairs(_pairing(pairs=[_pair()])):
+            data = asyncio.run(
+                mod.reconcile_mirror_orders(
+                    date="2026-09-09", limit=100, db=None, auth=_auth()
+                )
             )
-        )
         item = data["items"][0]
         assert item["mirrored"] is True
         assert item["real_order_id"] == "QMT-1"
+        assert item["client_order_id"] == "sim-run-600036.SH-buy"
         assert item["slippage"] == pytest.approx(0.2)
         assert item["slippage_pct"] == pytest.approx(0.02)
         assert item["fee_diff"] == pytest.approx(1.0)
@@ -230,37 +249,43 @@ class TestReconcile:
         assert summary["avg_abs_slippage"] == pytest.approx(0.2)
         assert summary["fee_diff_total"] == pytest.approx(1.0)
 
-    def test_unmirrored_order_explains_why(self) -> None:
-        session = FakeSession([[_sim(remarks="client_order_id=cid-9")], []])
-        data = asyncio.run(
-            mod.reconcile_mirror_orders(
-                date="2026-09-09", limit=100, db=session, auth=_auth()
+    def test_engine_path_pair_falls_back_to_base(self) -> None:
+        """engine/OrderRouter 路径 sim cid 列为空（镜像 base=order_id）：展示回退 base。"""
+        with _patch_pairs(_pairing(pairs=[_pair(sim_cid="")])):
+            data = asyncio.run(
+                mod.reconcile_mirror_orders(
+                    date="2026-09-09", limit=100, db=None, auth=_auth()
+                )
             )
-        )
+        assert data["items"][0]["client_order_id"] == "o1"
+        assert data["summary"]["mirrored"] == 1
+
+    def test_unmirrored_order_explains_why(self) -> None:
+        with _patch_pairs(_pairing(sim_only=[_sim_only()])):
+            data = asyncio.run(
+                mod.reconcile_mirror_orders(
+                    date="2026-09-09", limit=100, db=None, auth=_auth()
+                )
+            )
         item = data["items"][0]
         assert item["mirrored"] is False
         assert "未找到真单" in item["note"]
         assert data["summary"]["mirrored"] == 0
+        assert data["summary"]["virtual_orders"] == 1
 
     def test_rejected_real_order_counted(self) -> None:
-        session = FakeSession(
-            [
-                [_sim()],
-                [
-                    _real(
-                        status="REJECTED",
-                        average_price=0.0,
-                        price=0.0,
-                        remarks="资金不足",
-                    )
-                ],
-            ]
+        pair = _pair(
+            real_status="rejected",
+            real_price=0.0,
+            real_limit_price=0.0,
+            real_remarks="资金不足",
         )
-        data = asyncio.run(
-            mod.reconcile_mirror_orders(
-                date="2026-09-09", limit=100, db=session, auth=_auth()
+        with _patch_pairs(_pairing(pairs=[pair])):
+            data = asyncio.run(
+                mod.reconcile_mirror_orders(
+                    date="2026-09-09", limit=100, db=None, auth=_auth()
+                )
             )
-        )
         assert data["summary"]["rejected_or_cancelled"] == 1
         assert data["items"][0]["real_message"] == "资金不足"
         assert "slippage" not in data["items"][0]
@@ -269,58 +294,31 @@ class TestReconcile:
         with pytest.raises(HTTPException) as exc:
             asyncio.run(
                 mod.reconcile_mirror_orders(
-                    date="2026/09/09", limit=10, db=FakeSession([]), auth=_auth()
+                    date="2026/09/09", limit=10, db=None, auth=_auth()
                 )
             )
         assert exc.value.status_code == 400
 
-    def test_no_sim_orders_skips_real_lookup(self) -> None:
-        session = FakeSession([[]])
-        data = asyncio.run(
-            mod.reconcile_mirror_orders(
-                date="2026-09-09", limit=10, db=session, auth=_auth()
-            )
-        )
-        assert data["items"] == []
-        assert len(session.statements) == 1
-
-    def test_uses_truncating_cid_builder(self) -> None:
-        """镜像单号会截断到 orders 列宽：对账必须走同一条构造函数，否则超长 cid 对不上。"""
-        calls: list[str] = []
-        original = mirror.build_mirror_client_order_id
-
-        def spy(*, client_order_id: str = "", **kwargs: Any) -> str:
-            calls.append(client_order_id)
-            return original(client_order_id=client_order_id, **kwargs)
-
-        session = FakeSession([[_sim(remarks="client_order_id=cid-1")], []])
-        with patch.object(mirror, "build_mirror_client_order_id", side_effect=spy):
-            asyncio.run(
+    def test_empty_day_returns_empty(self) -> None:
+        with _patch_pairs(_pairing()):
+            data = asyncio.run(
                 mod.reconcile_mirror_orders(
-                    date="2026-09-09", limit=10, db=session, auth=_auth()
+                    date="2026-09-09", limit=10, db=None, auth=_auth()
                 )
             )
-        # 两处（IN 查询 + 结果索引）都必须走同一条构造函数
-        assert calls and set(calls) == {"cid-1"}
+        assert data["items"] == []
+        assert data["summary"]["virtual_orders"] == 0
 
-
-class TestSimCreatedWindow:
-    """虚拟单落库时间比真实时刻早 UTC+8h（naive utcnow 写 timestamptz），窗口须回移。"""
-
-    def test_window_shifted_by_session_offset(self) -> None:
-        target = date(2026, 9, 9)
-        start, end = mod._sim_created_window(target)
-        offset = datetime.now(mod.TZ).utcoffset() or timedelta(0)
-        expected_start = datetime.combine(
-            target, time.min, tzinfo=mod.TZ
-        ).astimezone(timezone.utc) - offset
-        assert start == expected_start
-        assert end - start == timedelta(days=1)
-        # 上海日 00:00 的真实瞬时被回移了 8 小时
-        assert start.hour == 8  # 2026-09-08 08:00Z
-
-    def test_window_covers_stored_values(self) -> None:
-        """实测样本：8/25 12:21（上海）的单落库为 8/24 20:21Z，必须落在 8/25 的窗口内。"""
-        start, end = mod._sim_created_window(date(2026, 8, 25))
-        stored = datetime(2026, 8, 24, 20, 21, 19, tzinfo=timezone.utc)
-        assert start <= stored < end
+    def test_limit_applies_to_items(self) -> None:
+        with _patch_pairs(
+            _pairing(
+                pairs=[_pair(), _pair(base="o2", real_cid="mir-o2")],
+                sim_only=[_sim_only()],
+            )
+        ):
+            data = asyncio.run(
+                mod.reconcile_mirror_orders(
+                    date="2026-09-09", limit=1, db=None, auth=_auth()
+                )
+            )
+        assert len(data["items"]) == 1

@@ -4,7 +4,7 @@
 1. 注册表完整性（键唯一/字段齐全/心跳 TTL 与周期的合理关系/可重跑项都在分发表）；
 2. switch_enabled 纯函数；classify_scheduler_status 纯函数（stale=fail / missing=warn / off 不算）；
 3. heartbeat() best-effort（假 redis 成功写入；坏 redis 不抛出）；
-4. 接线源断言：11 个任务全部写入心跳（5 worker + 6 celery），漏一个即测试红；
+4. 接线源断言：全部任务写入心跳（worker + celery；T-P2-06 后 5+2 worker + 6 celery），漏一个即测试红；
 5. 体检 C07 使用注册表；schedule_ctl 分发表覆盖声明了 rerun 的任务。
 """
 
@@ -29,6 +29,9 @@ _HEARTBEAT_WIRED = {
     "pending_order": "services/simulation/services/pending_order_worker.py",
     "t1_unlock": "services/simulation/services/simulation_t1_unlock_task.py",
     "corp_action": "services/simulation/services/simulation_corporate_action_task.py",
+    # T-P2-06 新增（对账/影子对照）
+    "dual_book": "services/trade/services/dual_book_reconciliation_task.py",
+    "mirror_shadow": "services/trade/services/shadow_compare_service.py",
 }
 
 
@@ -99,7 +102,7 @@ def test_heartbeat_ok_and_best_effort():
 
 
 def test_all_jobs_heartbeat_wired_in_source():
-    """11 个任务的心跳接线源断言——漏接一个即红（防静默漏项）。"""
+    """各任务的心跳接线源断言——漏接一个即红（防静默漏项）。"""
     celery_src = (_BACKEND / "services/engine/tasks/celery_tasks.py").read_text(
         encoding="utf-8"
     )
@@ -143,6 +146,8 @@ def test_schedule_ctl_dispatch_covers_rerun_declared_jobs():
     assert set(schedule_ctl._RERUN_DISPATCH) == {
         "sim_eod",
         "auto_inference",
+        "dual_book",
+        "mirror_shadow",
         "market_sync_dispatch",
     }
 

@@ -8,6 +8,7 @@ import pytest
 
 from backend.scripts.diagnose.health import (
     classify_account_key_forms,
+    classify_cid_duplicates,
     classify_ledger_writes,
     classify_signal_distribution,
     classify_snapshot_consistency,
@@ -84,6 +85,21 @@ def test_ledger_writes_classification():
     r = classify_ledger_writes(0, 3)
     assert r.level == "warn" and "T-P1-04" in r.suggestion
     assert classify_ledger_writes(5, 3).level == "ok"
+
+
+def test_cid_duplicates_scan():
+    """T-P2-06：幂等键重复扫描（无重复 ok；有重复 fail 且点名）。"""
+    ok = classify_cid_duplicates([])
+    assert ok.level == "ok" and ok.metrics == {"cid_dup_groups": 0}
+    dup = classify_cid_duplicates(
+        [
+            {"tenant_id": "default", "user_id": 1, "client_order_id": "sim-r-600036.SH-buy"},
+            {"tenant_id": "default", "user_id": 1, "client_order_id": "sim-r2-000001.SZ-sell"},
+        ]
+    )
+    assert dup.level == "fail"
+    assert "2 组" in dup.detail
+    assert "sim-r-600036.SH-buy" in dup.detail
 
 
 def test_summary_and_exit_code():

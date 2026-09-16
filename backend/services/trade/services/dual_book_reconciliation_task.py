@@ -61,7 +61,17 @@ def _config() -> dict:
 
 
 def _redis_client(redis) -> object | None:
-    return getattr(redis, "client", None) if redis is not None else None
+    """兼容两种形态：RedisClient 包装器（``.client``）或原生 client（有 set/get）。
+
+    历史陷阱（T-P2-06）：CLI 手动重跑传入 sentinel 原生客户端时不带 ``.client``，
+    旧实现静默返回 None → 报表/跳过记录"跑成功但没落盘"。
+    """
+    if redis is None:
+        return None
+    client = getattr(redis, "client", None)
+    if client is not None:
+        return client
+    return redis if hasattr(redis, "set") else None
 
 
 def parse_reconcile_time(raw: str) -> tuple[int, int]:
@@ -360,7 +370,13 @@ async def run_dual_book_reconciliation_task() -> None:
     target_h, target_m = parse_reconcile_time(cfg["time"])
     logger.info("[Reconcile] 双轨对账任务启动：每日 %02d:%02d 执行", target_h, target_m)
     last_error = ""
+    from backend.shared.scheduler_registry import heartbeat as _sched_heartbeat
+
     while True:
+        try:
+            _sched_heartbeat("dual_book")
+        except Exception:  # noqa: BLE001
+            pass
         try:
             now = datetime.now(TZ)
             date_str = now.strftime("%Y%m%d")

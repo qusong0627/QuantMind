@@ -136,11 +136,48 @@ def _run_data_sync(date_str: str | None, force: bool) -> int:
     return 0 if completed.returncode == 0 else 1
 
 
+def _run_dual_book(date_str: str | None, force: bool) -> int:
+    import asyncio
+
+    from backend.services.trade.services.dual_book_reconciliation_task import (
+        run_dual_book_reconciliation,
+    )
+    from backend.services.trade_shared.deps import get_redis
+
+    # 与 worker 同一客户端（报表统一落 trade 库；sentinel 客户端形态不含 .client）
+    report = asyncio.run(run_dual_book_reconciliation(get_redis(), date_str))
+    print(
+        f"dual_book {report.get('date')}: 差异={len(report.get('diffs') or [])} "
+        f"未解释={len(report.get('unexplained') or [])} ok={report.get('ok')}"
+    )
+    return 0 if report.get("ok") else 1
+
+
+def _run_shadow_compare(date_str: str | None, force: bool) -> int:
+    import asyncio
+
+    from backend.services.trade.services.shadow_compare_service import (
+        run_shadow_compare,
+    )
+    from backend.services.trade_shared.deps import get_redis
+
+    report = asyncio.run(run_shadow_compare(get_redis(), date_str))
+    coverage = report.get("coverage") or {}
+    print(
+        f"mirror_shadow {report.get('date')}: 配对={coverage.get('matched')} "
+        f"仅模拟={coverage.get('sim_only')} 仅真单={coverage.get('real_only')} "
+        f"ok={report.get('ok')}"
+    )
+    return 0 if report.get("ok") else 1
+
+
 _RERUN_DISPATCH: dict[str, Callable[[str | None, bool], int]] = {
     # 键 = 注册表任务键（唯一标识，禁止别名——测试防止漂移）
     "sim_eod": _run_sim_eod,
     "auto_inference": _run_inference,
     "market_sync_dispatch": _run_data_sync,
+    "dual_book": _run_dual_book,
+    "mirror_shadow": _run_shadow_compare,
 }
 
 

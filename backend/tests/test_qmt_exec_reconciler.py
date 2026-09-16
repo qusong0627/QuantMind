@@ -223,3 +223,25 @@ class TestStatusTransitions:
         assert result is OrderStatus.PARTIALLY_FILLED
         assert order.filled_quantity == 0.0
         assert session.added == []
+
+
+class TestPriceSourceLabeling:
+    def test_fill_records_broker_fill_price_source(self) -> None:
+        """T-P2-06：QMT 回填成交标 price_source=broker_fill（影子对照/审计识别真实成交价）。"""
+        order = _order(status=OrderStatus.SUBMITTED, filled=0.0)
+        _apply(order, "PARTIALLY_FILLED", qty=100, price=10.2, trade_id="T-1")
+        assert order.price_source == "broker_fill"
+
+
+class TestNormalizeStatus:
+    def test_enum_input_not_silently_degraded(self) -> None:
+        """T-P2-06：枚举入参直接透传（str(enum) 查表失败曾静默降级 SUBMITTED 丢成交）。"""
+        from backend.services.live_trading.services.qmt_exec_reconciler import (
+            normalize_status,
+        )
+
+        assert normalize_status(OrderStatus.PARTIALLY_FILLED) is OrderStatus.PARTIALLY_FILLED
+        assert normalize_status(OrderStatus.FILLED) is OrderStatus.FILLED
+        assert normalize_status("PARTIALLY_FILLED") is OrderStatus.PARTIALLY_FILLED
+        assert normalize_status("garbage") is OrderStatus.SUBMITTED
+        assert normalize_status(None) is OrderStatus.SUBMITTED

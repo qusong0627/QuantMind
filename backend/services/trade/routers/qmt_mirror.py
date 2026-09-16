@@ -22,15 +22,12 @@ from __future__ import annotations
 
 import logging
 from datetime import date as date_type
-from datetime import datetime, time, timedelta, timezone
+from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import select
-
 from backend.services.live_trading.services import real_mirror_service as mirror
-from backend.services.live_trading.services.trading_session import TZ
 from backend.services.trade_shared.deps import (
     AuthContext,
     get_db,
@@ -40,8 +37,6 @@ from backend.services.trade_shared.deps import (
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
-
-SIM_REMARK_PREFIX = "client_order_id="
 RECONCILE_LIMIT_MAX = 2000
 
 # 限额上限：防手滑把「单笔 1 万」改成天文数字后一路下单（下限由 gt=0 保证）
@@ -252,37 +247,8 @@ async def drain_mirror_queue_endpoint(
 
 
 # --------------------------------------------------------------------------
-# 对账
+# 对账（T-P2-06：配对与取价唯一实现 = shadow_compare_service.collect_day_pairs）
 # --------------------------------------------------------------------------
-def _side_text(value: Any) -> str:
-    return str(getattr(value, "value", value) or "").upper()
-
-
-def _order_price(row: Any) -> float:
-    if row is None:
-        return 0.0
-    for name in ("average_price", "filled_price", "price"):
-        value = getattr(row, name, None)
-        if value:
-            return float(value)
-    return 0.0
-
-
-def _sim_created_window(target: date_type) -> tuple[datetime, datetime]:
-    """虚拟单落库时间的「上海日」UTC 窗口。
-
-    ``sim_orders.created_at`` 是 ``timestamptz``，但写入方给的是 naive 的
-    ``datetime.utcnow()``（``simulation.models.TimestampMixin``）——asyncpg 按会话
-    时区（Asia/Shanghai）解释 naive 值，库内瞬时比真实时刻**早 UTC+8 小时**
-    （实测：同一笔单 ``sim_orders.created_at`` 比 ``sim_trades.executed_at`` 早 8h）。
-    因此按上海交易日过滤时，窗口必须整体回移同样的偏移，否则永远查不到当天的单。
-    """
-    offset = datetime.now(TZ).utcoffset() or timedelta(0)
-    start = datetime.combine(target, time.min, tzinfo=TZ).astimezone(timezone.utc)
-    start -= offset
-    return start, start + timedelta(days=1)
-
-
 @router.get("/qmt-mirror/reconcile")
 async def reconcile_mirror_orders(
     date: str | None = Query(
@@ -292,95 +258,56 @@ async def reconcile_mirror_orders(
     db: Any = Depends(get_db),
     auth: AuthContext = Depends(require_admin),
 ):
-    """虚拟成交 vs 真单对账：价格滑点、手续费差、部分成交、拒单原因。"""
+    """虚拟成交 vs 真单对账：价格滑点、手续费差、部分成交、拒单原因。
+
+    T-P2-06 收敛：配对/取价委托 ``collect_day_pairs`` 唯一实现——模拟单可被镜像
+    引用的键 = client_order_id 列 ∪ order_id ∪ remarks 内嵌 cid（修复旧实现只认
+    remarks 前缀、漏掉 engine/OrderRouter 镜像路径的问题）。
+    """
     try:
         target = (
             datetime.strptime(date, "%Y-%m-%d").date() if date else date_type.today()
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="date 需为 YYYY-MM-DD") from exc
-    # sim_orders.created_at 的库内瞬时比真实时刻早 8h（见 _sim_created_window）
-    start, end = _sim_created_window(target)
 
-    from backend.services.simulation.models.order import SimOrder
-    from backend.services.trade_shared.models.order import Order
+    from backend.services.trade.services.shadow_compare_service import collect_day_pairs
 
     tenant = (auth.tenant_id or "default").strip() or "default"
-    sim_stmt = (
-        select(SimOrder)
-        .where(
-            SimOrder.tenant_id == tenant,
-            SimOrder.remarks.like(f"{SIM_REMARK_PREFIX}%"),
-            SimOrder.created_at >= start,
-            SimOrder.created_at < end,
-        )
-        .order_by(SimOrder.created_at.desc())
-        .limit(limit)
-    )
-    sim_rows = list((await db.execute(sim_stmt)).scalars().all())
-    cids = {
-        str(row.remarks or "")[len(SIM_REMARK_PREFIX) :].strip()
-        for row in sim_rows
-        if str(row.remarks or "").startswith(SIM_REMARK_PREFIX)
-    }
-    cids.discard("")
-    real_by_cid: dict[str, Any] = {}
-    if cids:
-        real_stmt = select(Order).where(
-            Order.tenant_id == tenant,
-            # 用与下单同一条构造函数：镜像单号会截断到 orders.client_order_id 列宽，
-            # 这里拼 f"mir-{cid}" 在超长 cid 时会对不上真单。
-            Order.client_order_id.in_(
-                [mirror.build_mirror_client_order_id(client_order_id=c) for c in cids]
-            ),
-        )
-        for row in (await db.execute(real_stmt)).scalars().all():
-            real_by_cid[str(row.client_order_id)] = row
+    pairing = await collect_day_pairs(target.strftime("%Y%m%d"), tenant_id=tenant)
 
     items: list[dict[str, Any]] = []
     matched = filled = rejected = 0
     slippage_sum = 0.0
     slippage_n = 0
     fee_diff_sum = 0.0
-    for sim in sim_rows:
-        remark = str(sim.remarks or "")
-        cid = (
-            remark[len(SIM_REMARK_PREFIX) :].strip()
-            if remark.startswith(SIM_REMARK_PREFIX)
-            else ""
-        )
-        real = real_by_cid.get(mirror.build_mirror_client_order_id(client_order_id=cid))
-        sim_price = _order_price(sim)
-        sim_fee = float(getattr(sim, "total_fee", 0) or 0)
+
+    for p in pairing["pairs"]:
+        if len(items) >= limit:
+            break
+        matched += 1
+        sim_price = float(p.get("sim_price") or 0.0)
+        sim_fee = float(p.get("sim_fee") or 0.0)
+        real_price = float(p.get("real_price") or 0.0)
+        real_fee = float(p.get("real_commission") or 0.0)
+        status = str(p.get("real_status") or "").upper()
         item: dict[str, Any] = {
-            "client_order_id": cid,
-            "symbol": str(sim.symbol or ""),
-            "side": _side_text(sim.side),
-            "quantity": float(sim.quantity or 0),
+            "client_order_id": p.get("sim_cid") or p.get("base") or "",
+            "symbol": str(p.get("symbol") or ""),
+            "side": str(p.get("side") or "").upper(),
+            "quantity": float(p.get("sim_quantity") or 0.0),
             "virtual_price": sim_price,
             "virtual_fee": sim_fee,
-            "virtual_status": _side_text(sim.status),
-            "mirrored": real is not None,
+            "virtual_status": str(p.get("sim_status") or "").upper(),
+            "mirrored": True,
+            "real_order_id": str(p.get("real_order_id") or ""),
+            "real_exchange_order_id": str(p.get("real_exchange_order_id") or ""),
+            "real_price": real_price,
+            "real_fee": real_fee,
+            "real_status": status,
+            "real_filled_quantity": float(p.get("real_quantity") or 0.0),
+            "real_limit_price": float(p.get("real_limit_price") or 0.0),
         }
-        if real is None:
-            item["note"] = "未找到真单（被风控跳过 / 镜像未开启 / 跨日）"
-            items.append(item)
-            continue
-        matched += 1
-        status = _side_text(real.status)
-        real_price = _order_price(real)
-        real_fee = float(getattr(real, "commission", 0) or 0)
-        item.update(
-            {
-                "real_order_id": str(real.order_id),
-                "real_exchange_order_id": str(real.exchange_order_id or ""),
-                "real_price": real_price,
-                "real_fee": real_fee,
-                "real_status": status,
-                "real_filled_quantity": float(real.filled_quantity or 0),
-                "real_limit_price": float(real.price or 0),
-            }
-        )
         if real_price > 0 and sim_price > 0:
             diff = real_price - sim_price
             item["slippage"] = round(diff, 4)
@@ -388,18 +315,35 @@ async def reconcile_mirror_orders(
             slippage_sum += abs(diff)
             slippage_n += 1
         item["fee_diff"] = round(real_fee - sim_fee, 4)
-        fee_diff_sum += real_fee - sim_fee
+        fee_diff_sum += item["fee_diff"]
         if status in {"FILLED", "PARTIALLY_FILLED"}:
             filled += 1
         if status in {"REJECTED", "CANCELLED", "EXPIRED"}:
             rejected += 1
-            item["real_message"] = str(real.remarks or "")
+            item["real_message"] = str(p.get("real_remarks") or "")
         items.append(item)
+
+    for s in pairing["sim_only"]:
+        if len(items) >= limit:
+            break
+        items.append(
+            {
+                "client_order_id": str(s.get("client_order_id") or ""),
+                "symbol": str(s.get("symbol") or ""),
+                "side": str(s.get("side") or "").upper(),
+                "quantity": float(s.get("filled_quantity") or 0.0),
+                "virtual_price": float(s.get("fill_price") or 0.0),
+                "virtual_fee": float(s.get("total_fee") or 0.0),
+                "virtual_status": str(s.get("status") or "").upper(),
+                "mirrored": False,
+                "note": "未找到真单（被风控跳过 / 镜像未开启 / 跨日）",
+            }
+        )
 
     return {
         "date": target.isoformat(),
         "summary": {
-            "virtual_orders": len(sim_rows),
+            "virtual_orders": matched + len(pairing["sim_only"]),
             "mirrored": matched,
             "filled": filled,
             "rejected_or_cancelled": rejected,

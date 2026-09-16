@@ -65,3 +65,29 @@ def test_drill_down_source_fields_present():
         "scripts/diagnose/health.py（与体检命令行同源）",
     ):
         assert needle in src, needle
+
+
+def test_desk_shadow_block_wired():
+    """T-P2-06：交易台影子对照块接线（读日报不重算；不可用态不伪造数字）。"""
+    src = (_BACKEND / "services/api/routers/desk.py").read_text(encoding="utf-8")
+    assert "_collect_shadow" in src
+    assert "load_latest_report" in src
+    assert '"shadow": shadow' in src
+    assert '"available": False' in src  # 无日报时如实不可用
+    assert "redis:mirror:shadow:{date}" in src
+
+
+def test_desk_shadow_collect_unavailable_without_redis(monkeypatch):
+    """get_redis 异常时 shadow 块降级为不可用（不炸整个交易台）。"""
+    import asyncio
+
+    from backend.services.api.routers import desk as desk_mod
+
+    def _boom():
+        raise RuntimeError("redis down")
+
+    monkeypatch.setattr(
+        "backend.services.trade_shared.deps.get_redis", _boom, raising=True
+    )
+    data = asyncio.run(desk_mod._collect_shadow())
+    assert data["available"] is False

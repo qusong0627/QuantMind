@@ -39,6 +39,17 @@ CREATE TABLE IF NOT EXISTS simulation_reconcile_reports (
 
 _table_ensured = False
 
+# 当日已写过 clean 行的 (date, tenant, user, market)；进程内去重——30s 周期不落重复证据，
+# 重启后最多多写一行（幂等无害）。
+_clean_marked: set[tuple[str, str, str, str]] = set()
+
+
+def classify_reconcile_outcome(rebuilt: bool, diff_count: int) -> str:
+    """对账结果分类（纯函数）：ledger_empty（PG 台账空，显式可见）/ clean / diff。"""
+    if not rebuilt:
+        return "ledger_empty"
+    return "diff" if diff_count > 0 else "clean"
+
 
 async def _ensure_table() -> None:
     """确保对账报告表存在（CREATE IF NOT EXISTS）。
@@ -73,6 +84,36 @@ def _positions_by_symbol(positions: Any) -> dict[str, float]:
     return out
 
 
+async def _write_clean_row(
+    *, tenant_id: str, user_id: str, market: str
+) -> None:
+    """零差异时写当日"clean"证据行（每日每账户一行）——健康也留痕。
+
+    证据矩阵要求"账本 | 对账零差异 | 对账报告 | 每日"：不落行时 C06 无法区分
+    "跑过且干净"与"从未跑过"（恒 warn"无对账报告"）。
+    """
+    today = datetime.now(_SH_TZ).strftime("%Y%m%d")
+    key = (today, tenant_id, user_id, market)
+    if key in _clean_marked:
+        return
+    from sqlalchemy import text as _text
+
+    from backend.shared.database_manager_v2 import get_session as _get_session
+
+    async with _get_session() as session:
+        await session.execute(
+            _text(
+                "INSERT INTO simulation_reconcile_reports "
+                "(tenant_id, user_id, market, field, symbol, "
+                "redis_value, pg_value, diff, autofixed) "
+                "VALUES (:tid, :uid, :mkt, 'clean', '', 0, 0, 0, false)"
+            ),
+            {"tid": tenant_id, "uid": user_id, "mkt": market},
+        )
+        await session.commit()
+    _clean_marked.add(key)
+
+
 async def run_reconcile_once(
     redis: RedisClient, *, autofix: bool = False
 ) -> dict[str, Any]:
@@ -84,7 +125,7 @@ async def run_reconcile_once(
     )
     from backend.shared.database_manager_v2 import get_session as _get_session
 
-    stats = {"checked": 0, "diff_fields": 0, "autofixed": 0}
+    stats = {"checked": 0, "diff_fields": 0, "autofixed": 0, "clean": 0, "ledger_empty": 0}
     if not redis.client:
         return stats
     try:
@@ -120,7 +161,10 @@ async def run_reconcile_once(
             if not isinstance(live, dict):
                 live = {}
             rebuilt = await manager._rebuild_from_ledger(user_id, tenant_id, market)
-            if not rebuilt:
+            outcome = classify_reconcile_outcome(bool(rebuilt), 0)
+            if outcome == "ledger_empty":
+                # Redis 有账但 PG 台账空（历史 Redis-only 时代遗留）：显式计数，不静默跳过
+                stats["ledger_empty"] += 1
                 continue
             diffs: list[dict[str, Any]] = []
             cash_diff = float(live.get("cash") or 0) - float(rebuilt.get("cash") or 0)
@@ -142,7 +186,15 @@ async def run_reconcile_once(
                         "pg_value": pg_pos.get(code, 0.0),
                         "diff": d,
                     })
-            if not diffs:
+            if classify_reconcile_outcome(True, len(diffs)) == "clean":
+                # T-P2-06：零差异也落当日证据行（每日一行，进程内去重）
+                stats["clean"] += 1
+                try:
+                    await _write_clean_row(
+                        tenant_id=tenant_id, user_id=user_raw, market=market
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("reconcile clean 行写入失败: %s", exc)
                 continue
             stats["diff_fields"] += len(diffs)
             fixed = False
@@ -184,10 +236,13 @@ async def run_reconcile_once(
             logger.debug("reconcile skipped %s: %s", key, exc)
             continue
     logger.info(
-        "simulation reconcile done: checked=%d diff_fields=%d autofixed=%d",
+        "simulation reconcile done: checked=%d diff_fields=%d autofixed=%d "
+        "clean=%d ledger_empty=%d",
         stats["checked"],
         stats["diff_fields"],
         stats["autofixed"],
+        stats["clean"],
+        stats["ledger_empty"],
     )
     return stats
 

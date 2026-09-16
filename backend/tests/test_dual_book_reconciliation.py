@@ -83,7 +83,11 @@ class TestSkipRecording:
         mirror.record_skip(
             redis, symbol="000001.SZ", side="BUY", quantity=200, reason="whitelist", source="t"
         )
-        counts = mirror.load_skips(redis, "20260911")
+        # record_skip 写"当天"键（trade_date_str）：读取必须同一日期口径，
+        # 写死日期曾在隔日全红（时间冻结型测试缺陷，T-P2-06 修复）
+        from backend.services.live_trading.services.trading_session import trade_date_str
+
+        counts = mirror.load_skips(redis, trade_date_str())
         assert counts["600036.SH:price_drift"] == 2
         assert counts["000001.SZ:whitelist"] == 1
         # detail 字段不参与计数

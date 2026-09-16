@@ -143,6 +143,29 @@ def classify_ledger_writes(ledger_rows: int, accounts_with_positions: int) -> Ch
     return CheckResult("C05", "台账写入", "ok", "台账与账户均为空（无交易）")
 
 
+def classify_cid_duplicates(dup_rows: list) -> CheckResult:
+    """C05c 判定（T-P2-06）：sim_orders 幂等键 (tenant,user,client_order_id) 重复扫描。
+
+    重复 = 幂等键在 DB 层失守的痕迹（各写路径"先查后插"竞态）。硬约束唯一索引
+    需先统一各路径的 IntegrityError→重复语义（T-P2-08，记录在案），本项先做可见性。
+    """
+    rows = [dict(r) for r in (dup_rows or [])]
+    if not rows:
+        return CheckResult("C05", "台账写入", "ok", "幂等键无重复", "", {"cid_dup_groups": 0})
+    sample = "，".join(
+        f"{r.get('tenant_id')}:{r.get('user_id')}:{r.get('client_order_id')}"
+        for r in rows[:3]
+    )
+    return CheckResult(
+        "C05",
+        "台账写入",
+        "fail",
+        f"sim_orders 幂等键重复 {len(rows)} 组（{sample}）",
+        "查重复 client_order_id 来源路径；唯一索引落地见 T-P2-08",
+        {"cid_dup_groups": len(rows)},
+    )
+
+
 def classify_ledger_coverage(trades_7d: int, covered_7d: int) -> CheckResult:
     """C05b 判定（T-P1-04）：近 7 日成交是否全部有对应 cash_ledger 流水。
 
@@ -300,6 +323,18 @@ async def check_c05_ledger_writes(ctx: HealthContext) -> CheckResult:
     presence = classify_ledger_writes(trades, with_positions)
     if presence.level != "ok":
         return presence
+    # T-P2-06：幂等键重复扫描（fail 级——DB 层幂等失守的痕迹）
+    try:
+        dup_rows = ctx.query(
+            "SELECT tenant_id, user_id, client_order_id, count(*) AS c FROM sim_orders "
+            "WHERE client_order_id IS NOT NULL "
+            "GROUP BY tenant_id, user_id, client_order_id HAVING count(*) > 1 LIMIT 3"
+        )
+    except Exception:  # noqa: BLE001 - 表缺失等不阻断 C05 主判定
+        dup_rows = []
+    dup_check = classify_cid_duplicates(dup_rows or [])
+    if dup_check.level != "ok":
+        return dup_check
     # T-P1-04：覆盖率——近 7 日成交 vs cash_ledger 流水（成交必落账）
     cov_rows = ctx.query(
         "SELECT count(*) AS trades_7d, "

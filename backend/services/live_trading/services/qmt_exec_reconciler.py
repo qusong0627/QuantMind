@@ -86,7 +86,13 @@ def valid_exchange_order_id(value: Any) -> str:
 
 
 def normalize_status(raw_status: Any) -> OrderStatus:
-    """标准字符串优先，其次 QMT 数字码，最后保守判为 SUBMITTED。"""
+    """标准字符串优先，其次 QMT 数字码，最后保守判为 SUBMITTED。
+
+    T-P2-06：OrderStatus 枚举直接透传——此前 ``str(enum)`` 得到
+    "OrderStatus.PARTIALLY_FILLED" 查表失败静默降级为 SUBMITTED（丢成交）。
+    """
+    if isinstance(raw_status, OrderStatus):
+        return raw_status
     text = str(raw_status or "").strip()
     if not text:
         return OrderStatus.SUBMITTED
@@ -312,6 +318,11 @@ async def apply_execution_report(
                 )
                 if order.filled_quantity > 0:
                     order.average_price = order.filled_value / order.filled_quantity
+                    # T-P2-06：真实成交标注 broker_fill（与桥接链路 execution_stream_consumer
+                    # 同源；影子对照/对账按 price_source 识别真实成交价）
+                    from backend.shared.order_contract import PRICE_SOURCE_BROKER_FILL
+
+                    order.price_source = PRICE_SOURCE_BROKER_FILL
 
         # 终态（已撤/已拒/已过期）不再被成交推进状态：部撤/全撤后的补录只更新
         # filled_quantity 与成交明细，状态保持调用方看到的终态。

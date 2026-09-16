@@ -12,7 +12,7 @@
 |---|---|---|
 | P0 止血+维护基建 | 10/10 ✅ | 安全问题清零；体检脚本可跑；回归进 CI |
 | P1 契约化 | 6/6 ✅ | 四契约落地；交易台数字可下钻 |
-| P2 执行统一 | 6/7（仅余 T-P2-06 影子对照） | 回测-模拟一致性 diff=0 ✅（执行层，含真实数据）；盘后固定价格窗口 ✅ |
+| P2 执行统一 | 7/7 ✅ | 回测-模拟一致性 diff=0（执行层，含真实数据）；盘后固定价格窗口；成交落账闭环+影子对照 |
 | P3 策略收敛 | 0/5 | 策略全生命周期 E2E |
 | P4 选股收敛+评估 | 0/6 | Scanner 替换旧链；体检九项上线 |
 | P5+ | — | 见主文档 §12.2 总表（P5 后进入下个迭代再细化） |
@@ -373,8 +373,72 @@
   与模拟"当日拒单"对齐，平价夹具断言升级为"两侧均不成交 + 回测状态=REJECTED"。
 - **T-P2-05c（列后续）**：策略层回放全链路（同一策略对象驱动回测 vs 时光回放 + 真实数据端到端）。
 
-### T-P2-06 模拟盘成交即落账 + 影子对照
+### T-P2-06 模拟盘成交即落账 + 影子对照 ✅
 成交落账闭环 + shadow 对照报告（模拟-实盘偏差指标）。
+
+**落地（2026-09-16）**：
+- **① 影子对照纯函数唯一实现** `backend/shared/shadow_compare.py`：`pair_orders`（三源键配对：cid 列∪order_id∪
+  remarks 内嵌，符号/方向错配标记）· `compute_price_deviation`（bps 方向归一：买贵/卖便宜均=正成本，
+  mean/median/p95 |abs|）· `compute_fill_stats`（成交率=真实/模拟量、部分成交、拒单）· `compute_slippage_realization`
+  （实现滑点 vs 配置 bps）· `compute_tracking_error`（共同交易日对齐→日收益差 mean/std，年化 ×√244，
+  <3 天=insufficient 且不除零）· `build_shadow_report`（覆盖率+样本不足如实标注）。
+- **② 采集与日报** `backend/services/trade/services/shadow_compare_service.py`：`collect_day_pairs`（sim_trades
+  executed_at 窗口 ⋈ sim_orders；orders mir-% ⋈ 成交价）；`collect_equity_series`（**双键形归一探测**：
+  模拟侧归一整型 "620601" ↔ 实盘侧补零 "00620601"，取第一个有数据形式防双计）；日报落 Redis
+  `mirror:shadow:{date}`（TTL 30 天），**空日也落"跑过且为空"的证据**；常驻任务每日 15:15（`MIRROR_SHADOW_ENABLED`），
+  心跳入调度注册表（新增 `mirror_shadow` + 补登记遗漏的 `dual_book` JobSpec，两张表可手动重跑）。
+- **③ 收敛既有**：`/qmt-mirror/reconcile` 端点改为委托 `collect_day_pairs`（**修复只认 remarks 前缀、
+  漏 engine/OrderRouter 镜像路径的配对缺口**；响应契约保持，前端零改动）；删除端点内重复的取价/时间窗实现。
+- **④ 落账闭环加固**：`reconcile_service` 零差异落当日 clean 证据行（进程内去重）→ C06 可判"对账零差异"；
+  统计新增 `clean/ledger_empty`（Redis 有账但 PG 台账空**显式可见**，不再静默跳过——本机实测 ledger_empty=4）；
+  C05 新增幂等键重复扫描（fail 级，`classify_cid_duplicates`）；QMT poller 回填成交补 `price_source=broker_fill`
+  （与桥接链路同源）；**实测修复 `normalize_status` 枚举入参静默降级**（str(enum) 查表失败→SUBMITTED 丢成交）。
+- **⑤ 交易台**：desk 新增 `shadow` 块（读最近日报不重算，不可用时如实标注不伪造）。
+- **实测修复（联调发现）**：`_raw_client` 客户端形态兼容——CLI 手动重跑传入原生客户端（无 `.client` 包装）
+  曾致"跑成功但落盘静默 no-op"；schedule_ctl 重跑统一走 trade 客户端（与 worker 同库）。
+- **记录在案（不做）**：`sim_orders` 唯一索引仍缓办（T-P2-08：各写路径 IntegrityError→重复语义需先统一，
+  否则硬约束变 500——本批先以 C05c 重复扫描保可见性）；策略级跟踪误差（快照表无 strategy 维度）；
+  历史 Redis-only 虚拟成交回填（无源）。
+- **证据**：新套件 `test_shadow_compare.py` **18/18** + `test_shadow_compare_service.py` **13/13**（含真库 E2E：
+  60bps 偏差/成交率/双键形跟踪误差/clean 行落盘去重）；`backend/tests` 全量 **1957 passed**（基线 1921，
+  +36 新增、修复 1 条冻结日期旧测试，**集合差零新增失败**）；services/tests 591 passed 与基线一致；
+  实机重启后 `mirror_shadow`/`dual_book` 心跳新鲜、CLI 重跑→日报→desk 读取闭环通过。
+
+> **T-P2-06 实施细案（2026-09-16，先侦察后写）**
+> - **侦察结论（触点全图）**：镜像链路 `mirror_virtual_fill` 建真单
+>   `orders.client_order_id='mir-{base}'`（base=sim cid｜sim_order_id｜run-symbol-side），模拟侧关联见
+>   `sim_orders.client_order_id` 列（T-P1-03）或 remarks `client_order_id=`（dispatcher 路径）。
+>   已有实现三处：① `/qmt-mirror/reconcile` 端点（逐单价格滑点+费用差，**只认 remarks 前缀的模拟单**
+>   ——engine/OrderRouter 路径配对遗漏）；② `dual_book_reconciliation_task` 每日 15:10 双轨**数量**对账
+>   （Redis `mirror:reconcile:{date}`+告警）；③ `reconcile_service` Redis↔PG 30s 对账（**零差异不落报告**
+>   ——C06 恒"无对账报告"，健康时反而无证据）。本机实测存量：镜像真单 62（压测产物）、REAL 成交 73、
+>   sim PG 台账近空（历史 Redis-only 遗留）；sim 资金快照 user '1'、real 日快照 user '00000001' ——
+>   **两侧 user_id 键形不同，对照必须以归一 uid 连接**。QMT poller 回填成交**不写 price_source**（标注缺口）。
+> - **① 纯函数唯一实现 `backend/shared/shadow_compare.py`**：`pair_orders`（base 键配对：matched/
+>   sim_only/real_only）· `compute_price_deviation`（成交价偏差 bps：买+贵=正成本，n/mean/median/p95/
+>   abs_mean）· `compute_fill_stats`（成交率=real_filled/sim_filled、部分成交、拒单）·
+>   `compute_slippage_realization`（实现滑点 vs 配置 bps）· `compute_tracking_error`（按日对齐共同交易日→
+>   日收益差 std/mean，年化×√244；<2 天=insufficient）· `build_shadow_report`（组装+覆盖率+样本不足标注，
+>   **永不除零**）。
+> - **② 采集与日报 `backend/services/trade/services/shadow_compare_service.py`**：`collect_day_pairs`
+>   （sim_trades executed_at 窗口 ⋈ sim_orders，real orders mir-% ⋈ 成交价 average_price）；`collect_equity_series`
+>   （simulation_fund_snapshots ↔ real_account_ledger_daily_snapshots，**双方 uid 归一整型**）；
+>   `run_shadow_compare` 挂进 dual_book 每日循环（独立开关 `MIRROR_SHADOW_ENABLED` 默认 on），
+>   落 Redis `mirror:shadow:{date}`（TTL 30 天），unexplained 复用现有通知。
+> - **③ 收敛既有**：`/qmt-mirror/reconcile` 端点改复用 `collect_day_pairs`（修 remarks-only 漏配；
+>   响应 items/summary 契约保持）。**不建第二实现**。
+> - **④ 落账闭环加固**：reconcile_service 零差异时按日写 clean 摘要行（进程内去重）→ C06 有"对账零差异"
+>   证据；stats 增 `ledger_empty` 计数（Redis 有账/PG 台账空显式可见，不静默 skip）；QMT poller 回填补
+>   `orders.price_source='broker_fill'`；`sim_orders` 部分唯一索引 (tenant,user,client_order_id) WHERE NOT NULL
+>   （order_contract 自愈迁移安全模式；先核全部插单路径过幂等预检）。
+> - **⑤ 交易台**：`desk.py` 新增 `shadow` 块——实时滚动窗（默认 20 交易日）指标 + 当日日报可用性，
+>   按既有 `_collect_*` 模式（带 source 下钻）。
+> - **⑥ 测试（机构级）**：纯函数数学口径全套（偏差方向/分位/成交率/跟踪误差对齐与不足样本/覆盖率分类/
+>   空样本）· 真库 E2E（造 sim 单+成交+镜像单 → run → 断言报告 → 清理，ledger_contract 模式）·
+>   reconcile clean 行与 C06 联动 · qmt_mirror 端点回归（engine 路径配对）· trade/main 接线 tripwire ·
+>   测试隔离修复（`test_dual_book_reconciliation` 冻结日期 bug——load_skips 写死 20260911）。
+> - **不做（记录在案）**：策略级跟踪误差（快照表无 strategy 维度，账户级先行）；对照面板自动刷新
+>   （日报 + 交易台按需计算已够）；历史 Redis-only 时代虚拟成交回填（无源）。
 
 ---
 

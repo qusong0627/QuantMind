@@ -267,12 +267,53 @@ async def _collect_pnl(tenant_id: str, sim_user_id: str) -> dict[str, Any]:
     }
 
 
+async def _collect_shadow() -> dict[str, Any]:
+    """影子对照块（T-P2-06）：读最近一份日报（Redis），不重复计算。
+
+    指标口径见 ``shared/shadow_compare.py``（成交价偏差 bps/成交率/滑点实现/
+    跟踪误差）；无日报时如实返回不可用（不伪造数字）。
+    """
+
+    def _sync() -> dict | None:
+        try:
+            from backend.services.trade.services.shadow_compare_service import (
+                load_latest_report,
+            )
+            from backend.services.trade_shared.deps import get_redis
+
+            return load_latest_report(get_redis())
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[Desk] shadow 日报读取失败: %s", exc)
+            return None
+
+    report = await asyncio.to_thread(_sync)
+    if not report:
+        return {
+            "available": False,
+            "detail": "尚无影子对照日报（每日 15:15 生成）",
+            "source": "redis:mirror:shadow:{date}",
+        }
+    return {
+        "available": True,
+        "date": report.get("date"),
+        "stale": bool(report.get("stale")),
+        "ok": bool(report.get("ok")),
+        "coverage": report.get("coverage"),
+        "price_deviation": report.get("price_deviation"),
+        "fill": report.get("fill"),
+        "slippage": report.get("slippage"),
+        "tracking_error": report.get("tracking_error"),
+        "generated_at": report.get("generated_at"),
+        "source": "redis:mirror:shadow:{date}（T-P2-06 影子对照日报）",
+    }
+
+
 @router.get("/today")
 async def desk_today(
     health: bool = Query(True, description="是否运行体检（10 项断言，约 1-2s）"),
     current_user: dict = Depends(get_current_user),
 ) -> dict[str, Any]:
-    """今日交易台聚合：管线/信号/执行/盈亏/健康——每个数字带 source 下钻字段。"""
+    """今日交易台聚合：管线/信号/执行/盈亏/影子对照/健康——每个数字带 source 下钻字段。"""
     from backend.services.trade_shared.simulation_manager import require_sim_user_id
 
     tenant_id = str(current_user.get("tenant_id") or "default")
@@ -280,10 +321,11 @@ async def desk_today(
     sim_uid = require_sim_user_id(raw_user, tenant_id=tenant_id)
 
     health_items = await _run_health() if health else {}
-    signals, execution, pnl = await asyncio.gather(
+    signals, execution, pnl, shadow = await asyncio.gather(
         _collect_signals(tenant_id),
         _collect_execution(tenant_id, int(sim_uid), raw_user),
         _collect_pnl(tenant_id, str(sim_uid)),
+        _collect_shadow(),
     )
     health_summary = {
         "ok": sum(1 for i in health_items.values() if i.get("level") == "ok"),
@@ -303,6 +345,7 @@ async def desk_today(
             "signals": signals,
             "execution": execution,
             "pnl": pnl,
+            "shadow": shadow,
             "health": health_summary,
         },
     }

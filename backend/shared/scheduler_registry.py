@@ -69,6 +69,20 @@ JOBS: tuple[JobSpec, ...] = (
         "分红送转到账（apply_due_actions）",
     ),
     JobSpec(
+        "dual_book", "双轨对账（模拟↔真单数量）", "worker", "trade",
+        "交易日 15:10（60s 轮询）",
+        "MIRROR_RECONCILE_ENABLED", True, 600,
+        "python backend/scripts/schedule_ctl.py run dual_book --date YYYYMMDD",
+        "模拟成交 vs 镜像真单数量差异，Redis mirror:reconcile:{date}",
+    ),
+    JobSpec(
+        "mirror_shadow", "影子对照（模拟↔真单价格）", "worker", "trade",
+        "交易日 15:15（60s 轮询）",
+        "MIRROR_SHADOW_ENABLED", True, 600,
+        "python backend/scripts/schedule_ctl.py run mirror_shadow --date YYYYMMDD",
+        "成交价偏差/成交率/滑点实现/跟踪误差，Redis mirror:shadow:{date}（T-P2-06）",
+    ),
+    JobSpec(
         "auto_inference", "自动推理", "celery_beat", "celery", "交易日 08:00",
         None, True, 345600,
         "python backend/scripts/schedule_ctl.py run auto_inference --date YYYY-MM-DD",
