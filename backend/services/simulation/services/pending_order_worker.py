@@ -63,10 +63,19 @@ class SimulationPendingOrderWorker:
             engine = SimulationExecutionEngine(session, manager)
 
             for projection_order in rows:
-                runtime_order = order_service._build_runtime_order(
-                    projection_order,
-                    remarks=projection_order.rejected_reason,
+                runtime_order = await order_service.load_runtime_order(
+                    projection_order
                 )
+                # 防御：v1 台账行已终态（撤单/成交/拒单）而 V2 投影滞留 pending——
+                # 属投影陈旧（历史缺口），以 v1 为准镜像回写，绝不重放执行。
+                if getattr(runtime_order, "status", None) in (
+                    OrderStatus.FILLED,
+                    OrderStatus.CANCELLED,
+                    OrderStatus.REJECTED,
+                ):
+                    await order_service.sync_order_projection(runtime_order)
+                    processed += 1
+                    continue
                 expires_at = engine._normalize_runtime_datetime(
                     getattr(runtime_order, "expires_at", None)
                 )
@@ -74,6 +83,10 @@ class SimulationPendingOrderWorker:
                     await engine.mark_expired(
                         runtime_order,
                         "Order expired before execution",
+                    )
+                    await order_service.sync_order_projection(
+                        runtime_order,
+                        rejected_reason="Order expired before execution",
                     )
                     processed += 1
                     continue
@@ -88,11 +101,19 @@ class SimulationPendingOrderWorker:
                         await engine.mark_expired(
                             runtime_order, session_decision.message
                         )
+                        await order_service.sync_order_projection(
+                            runtime_order,
+                            rejected_reason=str(session_decision.message or "")[:500],
+                        )
                         processed += 1
                         continue
                     if not session_decision.retryable:
                         await engine.mark_rejected(
                             runtime_order, session_decision.message
+                        )
+                        await order_service.sync_order_projection(
+                            runtime_order,
+                            rejected_reason=str(session_decision.message or "")[:500],
                         )
                         processed += 1
                     else:
@@ -141,14 +162,28 @@ class SimulationPendingOrderWorker:
                                     runtime_order,
                                     str(execution_result.message or ""),
                                 )
+                                processed += 1
+                                continue
                             else:
                                 await engine.mark_rejected(
                                     runtime_order, execution_result.message
                                 )
+                            # 终态镜像 V2 投影（否则订单卡 submitted、拒因丢失；
+                            # 拒因为 None 时 sync 保留既有值，故成交/过期分支同样无害）
+                            await order_service.sync_order_projection(
+                                runtime_order,
+                                rejected_reason=str(
+                                    execution_result.message or ""
+                                )[:500]
+                                or None,
+                            )
                             processed += 1
                             continue
 
                         await engine.apply_filled(runtime_order, execution_result)
+                        # 成交镜像 V2 投影（v1 行由 apply_filled 落库，v2 此前永远卡
+                        # submitted——用户可见订单列表读 v1，V2 供幂等/审计）
+                        await order_service.sync_order_projection(runtime_order)
                         processed += 1
                 except RuntimeError:
                     continue

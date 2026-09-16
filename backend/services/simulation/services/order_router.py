@@ -229,11 +229,16 @@ async def _submit_from_bar(db, manager, req: OrderRequest) -> RouterOutcome:
             )
         order.status = OrderStatus.SUBMITTED
         order.submitted_at = order.submitted_at or datetime.now(timezone.utc)
+        await order_service.sync_order_projection(order)
         await db.commit()
 
         result = await engine.execute_from_bar(order, req.bar)
         if not result.success:
             await engine.mark_rejected(order, result.message)
+            # 终态镜像 V2 投影：否则投影滞留 pending 会被 pending worker 重放执行
+            await order_service.sync_order_projection(
+                order, rejected_reason=str(result.message or "")[:500] or None
+            )
             await db.commit()
             return RouterOutcome(
                 success=False,
@@ -243,6 +248,7 @@ async def _submit_from_bar(db, manager, req: OrderRequest) -> RouterOutcome:
                 message=str(result.message or ""),
             )
         trade = await engine.apply_filled(order, result)
+        await order_service.sync_order_projection(order)
         return RouterOutcome(
             success=True,
             order_id=str(order.order_id),

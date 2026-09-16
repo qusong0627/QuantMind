@@ -208,9 +208,63 @@
   ④ `backend/shared/ledger_contract.py` 自愈迁移（安全化三纪律）；db_init.sql 同步
 - **测试**：`test_ledger_contract.py` 6 条（含 **真库 E2E**）+ 体检 14 条全绿
 - **证据（2026-09-16）**：20/20 通过（E2E 实测三表齐落 market=CN、测试租户零残留）；两表列已上库；ruff 无新增
-- **明确未做（记录在案）**：① 账户层仍为合并视图（account_id 带市场段的彻底市场化账户属后续）；
-  ② sim_orders `client_order_id` 唯一索引仍未启用（投影幂等查全路径未验证，硬约束会把重复单变 500）；
-  ③ runner 专用只读 DB 账号（T-P0-03 遗留）
+- **明确未做（记录在案）**：① 账户层仍为合并视图（account_id 带市场段的彻底市场化账户属后续）
+  → **已收口（2026-09-16 深夜，见下）**；② sim_orders `client_order_id` 唯一索引仍未启用
+  → **已收口（T-P2-08）**；③ runner 专用只读 DB 账号 → **已收口（T-P0-03）**
+
+### 市场化账户（account_id 带市场段）✅ 细案+落地（2026-09-16 深夜）
+> **勘察结论**：`simulation_accounts` PK=account_id（`sim:{t}:{u}`）+ **UNIQUE(tenant,user) 是硬冲突点**；
+> 全库无外键；`build_account_id` 两处重复定义 + 两处手写变体（equity_worker `sim:{t}:{u}`、
+> order_service `{t}:{u}` 第三种格式）；账户行 cash 由 Redis 快照逐笔投影（PG=跟账镜像）、
+> 对账方向「PG 为主」；现网账户表 0 行、仅 orders_v2 35 行（迁移面极小，但按客户部署标准写回填脚本）。
+>
+> **设计（CN 无后缀约定——与 Redis 键同构，存量 CN 路径字节级不变）**：
+> 1. **ID 唯一实现** `simulation_account_keys.ledger_account_id(t,u,market)`：CN/空 → `sim:{t}:{u}`；
+>    非 CN → `sim:{t}:{u}:{MARKET}`；`ledger_service`/`projection_service` 两处定义收敛为委托，
+>    equity_worker/order_service 手写变体同步归位。
+> 2. **Schema**（ledger_contract 二级哨兵）：accounts 加 `market` 列 + 唯一索引升级为
+>    `(tenant,user,market)`（新键先建、旧键后删、同事务 lock_timeout）；ORM/db_init.sql 同步。
+> 3. **写入**：record_trade 按市场建/取账户行（`_ensure_account(market=)`）；equity_worker
+>    「按市场解析出的账户逐市场 UPDATE」（废弃 CN 优先合并段）；企业行为/回填脚本从
+>    account_id 解析市场 → 按市场 load_projection + 写回**对应市场** Redis 键（原硬编码 CN 键）。
+> 4. **读取**：load_projection 账户按市场取（market=None 显式默认 CN）；EOD 账户枚举限 CN 行
+>    （多市场 EOD 属后续）；reset 账户删除按市场收窄（原整用户删）。
+> 5. **回填脚本** `scripts/backfill_ledger_account_market.py`（DRY-RUN 默认，幂等）：非 CN 子表行
+>    account_id 补市场后缀；按市场补建缺失账户行（cash=该市场 **cash_ledger 末笔 balance_after**，
+>    initial_equity=0 诚实缺省——不猜测）；清单人工过目后 `--apply`。
+> 6. **保留**：用户级合并视图只存在于**展示/汇总层**（fund_snapshots 'ALL' 行、desk 资金卡、
+>    health C04）——已由 T-P1-07 落地，不在存储层回流。
+> 7. **边界（记录在案）**：多市场 EOD（仍 CN-only）；`simulation_account_daily`/`position_daily`
+>    市场列随多市场 EOD 批次（当前无非 CN 写入者，无活体冲突）。
+> 8. **验证（机构级）**：真库 E2E——CN/HK 双市场 record_trade → 两行两 id（CN 无后缀/HK 带后缀）+
+>    唯一索引可插第三市场；`load_projection(market=HK)` 现金/持仓双隔离；空账户如实 None；
+>    回填脚本真库夹具（legacy 行 → 清单 → 补后缀/补建 → 幂等）；源守卫（唯一实现/无手写残留）。
+
+- **证据（2026-09-16 晚）**：`test_ledger_accounts_market.py` 5/5 绿（含真库 E2E 三市场行共存、
+  HK 投影现金/持仓双隔离、reset 按市场收窄、回填脚本 legacy→补后缀→补建→幂等）；
+  契约哨兵对线上库实迁移（market 列 + 新唯一索引上线、旧索引移除）；回填脚本线上 DRY-RUN
+  清单为空（无需 apply）；相关 27 测试文件回归 462 通过（2 条 stock_pool 源守卫为既有失败）。
+  提交 59e8ebd3。
+
+### 挂单链路终态持久化 ✅（2026-09-16 夜，市场账户验证时发现的活体缺陷）
+> **实测症状**：线上 108 次 `pending order worker failed: Instance '<SimOrder ...>' is not
+> persistent within this Session`；`simulation_orders` 全部 36 行卡 `submitted`、24h 零成交；
+> 用户可见订单列表（读 v1 `sim_orders`）与投影表（V2）双双失真。
+>
+> **根因**：worker 从 V2 投影构造的是**内存态**运行时单（`_build_runtime_order`），而
+> `mark_rejected` 对它无条件 `db.refresh` ——瞬态对象必炸；且 `mark_expired` 的
+> `isinstance(status, str)` 分派是 str-Enum 陷阱（`OrderStatus(str, Enum)` 恒真），v1 会被
+> 写入 "expired" 字符串（PG 原生枚举有该值、Python 枚举没有 → 该行以后 ORM 读取 LookupError）。
+> 同族缺口：`cancel_order` / `order_router` / `order_submission_service` 改 v1 后不同步 V2 投影
+> ——**用户撤销的挂单会被 worker 下个会话重放执行**；路由单成交后 V2 滞留 pending 同样可被重放。
+>
+> **修复**：① `mark_rejected`/`mark_expired` 按模型类型分派状态（V2 字符串 / v1 枚举），
+> 瞬态对象 refresh 容错；② worker 入口 `load_runtime_order`：v1 行优先（终态写回 v1 生效），
+> V2-only 单回退内存态；终态守卫（v1 已终态只镜像不重放）；过期/拒单/成交四类终态均镜像
+> V2 投影（拒因落库）；③ `cancel_order`/`order_router`/`order_submission_service` 终态同步 V2。
+>
+> **证据**：`test_pending_order_lifecycle.py` 5/5 绿（单元类型分派 + 真库双表 rejected/filled、
+> 撤销镜像且 worker 不再拾取、源守卫）；相关回归 462 通过；ruff 无新增。
 
 ### T-P1-07 资本注入调整 + 快照市场维度（P0-05 遗留）✅
 新市场账户**首日**的 `today_pnl` 不能把种子算成当日盈利：① 快照表加 `market` 列（前端注释里的"方案 B2"，解决非 CN 面板无市场维度）；② `get_baselines` 按市场对齐日初基线，或按"新账户出现的当日将种子计入基线"。测试：新建市场账户当日 today_pnl ≈ 0。

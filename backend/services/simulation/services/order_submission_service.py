@@ -219,6 +219,9 @@ class SimulationOrderSubmissionService:
         if not session_decision.can_execute:
             if session_decision.final_state == "expired":
                 await self.engine.mark_expired(order, session_decision.message)
+                await self.order_service.sync_order_projection(
+                    order, rejected_reason=str(session_decision.message or "")[:500]
+                )
                 return SimulationSubmissionOutcome(
                     success=False,
                     order_id=str(order.order_id),
@@ -238,6 +241,9 @@ class SimulationOrderSubmissionService:
                     message="queued_pending_session",
                 )
             await self.engine.mark_rejected(order, session_decision.message)
+            await self.order_service.sync_order_projection(
+                order, rejected_reason=str(session_decision.message or "")[:500]
+            )
             return SimulationSubmissionOutcome(
                 success=False,
                 order_id=str(order.order_id),
@@ -256,6 +262,10 @@ class SimulationOrderSubmissionService:
                 await self.engine.mark_expired(order, execution_result.message)
             else:
                 await self.engine.mark_rejected(order, execution_result.message)
+            # 终态镜像 V2 投影（否则投影滞留 submitted，拒因丢失）
+            await self.order_service.sync_order_projection(
+                order, rejected_reason=str(execution_result.message or "")[:500] or None
+            )
             return SimulationSubmissionOutcome(
                 success=False,
                 order_id=str(order.order_id),
@@ -264,6 +274,7 @@ class SimulationOrderSubmissionService:
             )
 
         trade = await self.engine.apply_filled(order, execution_result)
+        await self.order_service.sync_order_projection(order)
         return SimulationSubmissionOutcome(
             success=True,
             order_id=str(order.order_id),

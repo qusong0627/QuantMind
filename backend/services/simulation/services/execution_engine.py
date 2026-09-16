@@ -1049,11 +1049,38 @@ class SimulationExecutionEngine:
         return trade
 
     async def mark_rejected(self, order: SimOrder, message: str):
-        order.status = OrderStatus.REJECTED
-        order.submitted_at = order.submitted_at or datetime.now(timezone.utc)
-        order.remarks = f"Execution rejected: {message}"
-        await self.db.commit()
-        await self.db.refresh(order)
+        """V2挂单拒单兼容（同 mark_expired 口径）。
+
+        - V2 投影（SimulationOrderV2）用字符串状态；旧 SimOrder 用枚举。
+        - 瞬态对象（worker 的 _build_runtime_order 内存态）不容崩：commit 无物可落属预期，
+          refresh 仅对持久对象有意义。此前无条件 refresh 致线上 worker 每轮
+          InvalidRequestError("not persistent")——订单永久卡 submitted、拒因丢失。
+        """
+        try:
+            from backend.services.simulation.models.order_v2 import (
+                SimulationOrderV2,
+            )
+
+            if isinstance(order, SimulationOrderV2):
+                order.status = "rejected"
+            else:
+                order.status = OrderStatus.REJECTED
+            if getattr(order, "submitted_at", None) is None and hasattr(
+                order, "submitted_at"
+            ):
+                order.submitted_at = datetime.now(timezone.utc)
+            if hasattr(order, "rejected_reason"):
+                order.rejected_reason = str(message or "")[:500]
+            if hasattr(order, "remarks"):
+                order.remarks = f"Execution rejected: {message}"
+            await self.db.commit()
+            try:
+                await self.db.refresh(order)
+            except Exception:
+                pass
+        except Exception:
+            logger.error("mark_rejected failed", exc_info=True)
+            raise
 
     @staticmethod
     def _normalize_runtime_datetime(value):
@@ -1084,9 +1111,14 @@ class SimulationExecutionEngine:
     async def mark_expired(self, order, message: str):
         """V2挂单过期兼容：旧SimOrder无EXPIRED枚举，降级为REJECTED；V2投影用字符串expired。"""
         try:
-            status = getattr(order, "status", None)
-            # SimulationOrderV2.status 是纯字符串
-            if isinstance(status, str):
+            from backend.services.simulation.models.order_v2 import (
+                SimulationOrderV2,
+            )
+
+            # 类型分派必须按模型类型判断——OrderStatus 是 str 子类，
+            # isinstance(status, str) 恒真（旧写法会把 "expired" 写进 v1 原生枚举列，
+            # 该行以后 ORM 读取时 LookupError）。
+            if isinstance(order, SimulationOrderV2):
                 order.status = "expired"
             else:
                 order.status = OrderStatus.REJECTED
