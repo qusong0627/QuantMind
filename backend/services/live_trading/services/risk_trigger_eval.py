@@ -259,12 +259,29 @@ def _evaluate_positions(
         if pnl is None:
             continue
 
+        # T-P2-04：止损/止盈判定委托 exit_rules 唯一实现（规则语义同线：
+        # 扫描器 pct 为负数比例，canonical 用正比例；映射回命中类型保持本模块契约）
+        from backend.shared.exit_rules import (
+            RULE_HARD_STOP,
+            ExitRuleSet,
+            PositionState,
+            evaluate_exit,
+        )
+
+        decision = evaluate_exit(
+            ExitRuleSet(
+                hard_stop_pct=abs(float(sl_pick[1])) if sl_pick is not None else None,
+                take_profit_pct=float(tp_pick[1]) if tp_pick is not None else None,
+            ),
+            PositionState(entry_price=cost, last_price=quote.price),
+        )
+
         hit_rule: RuleView | None = None
         hit_type = ""
-        if sl_pick is not None and pnl <= sl_pick[1]:
+        if decision.should_exit and decision.rule_id == RULE_HARD_STOP and sl_pick is not None:
             hit_rule, _ = sl_pick
             hit_type = "position_stop_loss"
-        elif tp_pick is not None and pnl >= tp_pick[1]:
+        elif decision.should_exit and tp_pick is not None:
             hit_rule, _ = tp_pick
             hit_type = "position_take_profit"
         if hit_rule is None:

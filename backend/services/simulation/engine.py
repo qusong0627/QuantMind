@@ -254,6 +254,11 @@ class SimulationEngine:
                 bars = await self._load_bars(symbols, market=market)
                 quotes = self._quotes_from_bars(bars)
 
+                # 4.5 持仓退出评估（T-P2-04 v1）：调仓之前——退出卖单与调仓卖单共用
+                # sim-{run}-{sym}-sell 幂等键（退出先记账，调仓重复自动跳过）
+                exit_rules = await self._load_exit_ruleset(strategy_id, uid)
+                exit_orders = self._evaluate_position_exits(account, quotes, exit_rules)
+
                 # 5. 调仓计算
                 orders = self.rebalance_calculator.calculate(
                     signals=signals,
@@ -264,6 +269,7 @@ class SimulationEngine:
                 orders = self._apply_risk_buy_locks(
                     orders, tenant=tenant, user_id=uid, trade_date=datetime.now().date()
                 )
+                orders = exit_orders + orders
                 report.order_count = len(orders)
 
                 if not orders:
@@ -328,6 +334,91 @@ class SimulationEngine:
             )
             report.error = str(e)
             return report
+
+    async def _load_exit_ruleset(self, strategy_id: str, user_id: str):
+        """持仓退出规则（T-P2-04 v1）：与实盘隐式止损同源——策略 execution_config。"""
+        from backend.shared.exit_rules import ExitRuleSet
+
+        try:
+            storage_svc = get_strategy_storage_service()
+            strategy = await storage_svc.get(
+                strategy_id=int(strategy_id) if str(strategy_id).isdigit() else 0,
+                user_id=user_id,
+            )
+            params = (strategy or {}).get("parameters", {}) or {}
+            exec_cfg = params.get("execution_config") or {}
+            sl = exec_cfg.get("stop_loss")
+            tp = exec_cfg.get("take_profit")
+            mh = exec_cfg.get("max_hold_days")
+            if not sl and not tp and not mh:
+                return None
+            return ExitRuleSet(
+                hard_stop_pct=abs(float(sl)) if sl else None,
+                take_profit_pct=abs(float(tp)) if tp else None,
+                max_hold_days=int(mh) if mh else None,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("SimulationEngine: 加载退出规则失败 %s", exc)
+            return None
+
+    def _evaluate_position_exits(self, account, quotes, exit_rules) -> list[Order]:
+        """评估持仓退出（唯一实现 exit_rules）；返回卖单（source=sltp），T+1 不可卖跳过。"""
+        from backend.shared.errfmt import locate
+        from backend.shared.exit_rules import PositionState, evaluate_exit
+        from backend.shared.order_contract import SOURCE_SLTP
+
+        if exit_rules is None:
+            return []
+        out: list[Order] = []
+        for sym, pos in (account.positions or {}).items():
+            if not isinstance(pos, dict):
+                continue
+            volume = int(float(pos.get("volume") or 0))
+            if volume <= 0:
+                continue
+            quote = quotes.get(sym) or quotes.get(StockCodeUtil.to_prefix(sym))
+            if quote is None or float(quote.current_price or 0) <= 0:
+                continue
+            decision = evaluate_exit(
+                exit_rules,
+                PositionState(
+                    entry_price=float(pos.get("cost") or 0),
+                    last_price=float(quote.current_price),
+                ),
+            )
+            if not decision.should_exit:
+                continue
+            avail = pos.get("available_volume")
+            available = int(float(volume if avail is None else avail))
+            if available <= 0:  # T+1 锁定中：记录可见，次日解锁再卖
+                logger.info(
+                    locate(
+                        "RULE:EXIT",
+                        f"退出信号但 T+1 不可卖 {sym}: {decision.reason}",
+                        where="simulation/engine.py:_evaluate_position_exits",
+                    )
+                )
+                continue
+            order = Order(
+                symbol=sym,
+                side="SELL",
+                quantity=available,
+                price=0.0,
+                reason=f"[{decision.rule_id}] {decision.reason}",
+            )
+            try:
+                order.source = SOURCE_SLTP  # 来源分类（交易台/对账可见）
+            except Exception:  # noqa: BLE001
+                pass
+            out.append(order)
+            logger.info(
+                locate(
+                    "RULE:EXIT",
+                    f"持仓退出（{decision.rule_id}）{sym} x{available}: {decision.reason}",
+                    where="simulation/engine.py:_evaluate_position_exits",
+                )
+            )
+        return out
 
     async def _load_strategy_config(
         self,
@@ -524,7 +615,7 @@ class SimulationEngine:
                 quantity=order.quantity,
                 order_type="market",
                 price=order.price,
-                source=SOURCE_REBALANCE,
+                source=getattr(order, "source", None) or SOURCE_REBALANCE,
                 client_order_id=build_sim_client_order_id(
                     run_id, order.symbol, order.side
                 ),
@@ -576,6 +667,7 @@ class SimulationEngine:
             "quantity": order.quantity,
             "price": order.price,
             "reason": order.reason,
+            "source": getattr(order, "source", None) or "rebalance",
             "success": result.success,
             "executed_price": result.price if result.success else None,
             "commission": result.commission if result.success else None,

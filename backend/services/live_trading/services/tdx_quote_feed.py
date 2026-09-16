@@ -126,31 +126,27 @@ def map_snapshot(result: dict) -> dict:
 
 
 def check_sltp_trigger(price: float, entry_price: float, cfg: dict) -> tuple[bool, str]:
-    """止损/止盈/移动止损触发判断（与桥 stop_loss_daemon 同规则，纯函数）。
+    """止损/止盈/移动止损触发判断（T-P2-04：**委托 exit_rules 唯一实现**）。
 
     cfg: {stop_loss_pct, take_profit_pct, trailing_stop_pct, highest_price}
     highest_price 为持仓以来最高价（由调用方维护，只升不降）。
-    返回 (triggered, reason)。
+    返回 (triggered, reason)——文案与历史口径保持兼容（桥 daemon 与
+    sltp_executor 零改动）。
     """
-    if price <= 0 or entry_price <= 0:
-        return False, ""
-    sl = cfg.get("stop_loss_pct")
-    if sl:
-        line = entry_price * (1 - float(sl))
-        if price <= line:
-            return True, f"止损触发 现价{price:.2f} ≤ {line:.2f}"
-    tp = cfg.get("take_profit_pct")
-    if tp:
-        line = entry_price * (1 + float(tp))
-        if price >= line:
-            return True, f"止盈触发 现价{price:.2f} ≥ {line:.2f}"
-    trail = cfg.get("trailing_stop_pct")
-    if trail:
-        highest = float(cfg.get("highest_price") or entry_price)
-        line = highest * (1 - float(trail))
-        if price <= line:
-            return True, f"移动止损 现价{price:.2f} ≤ {line:.2f}（最高 {highest:.2f}）"
-    return False, ""
+    from backend.shared.exit_rules import ExitRuleSet, PositionState, evaluate_exit
+
+    rules = ExitRuleSet(
+        hard_stop_pct=cfg.get("stop_loss_pct"),
+        take_profit_pct=cfg.get("take_profit_pct"),
+        trailing_stop_pct=cfg.get("trailing_stop_pct"),
+    )
+    pos = PositionState(
+        entry_price=entry_price,
+        last_price=price,
+        high_water_price=cfg.get("highest_price"),
+    )
+    decision = evaluate_exit(rules, pos)
+    return decision.should_exit, decision.reason
 
 
 def load_sltp_config(tenant_id: str, user_id: str) -> dict:

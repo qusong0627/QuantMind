@@ -36,8 +36,13 @@ def scan_stop_loss(
 ) -> list[dict[str, Any]]:
     """扫描止损，只返回提案不执行（propose 用）。
 
-    触发条件与 _run_stop_loss 保持一致：当日最低价 <= 成本 × (1-pct)。
+    T-P2-04：判定委托 ``exit_rules.evaluate_exit``（唯一实现）；触发价口径 = 日线 low
+    （回放语义：当日最低价 ≤ 止损线即触发；与历史行为一致）。
+    成交价逻辑（跌停钳制/跳空开盘价）保持不变。
     """
+    from backend.shared.exit_rules import ExitRuleSet, PositionState, evaluate_exit
+
+    rules = ExitRuleSet(hard_stop_pct=float(stop_loss_pct))
     out: list[dict[str, Any]] = []
     for symbol, pos in (account_data.get("positions") or {}).items():
         bar = bars.get(symbol)
@@ -47,8 +52,13 @@ def scan_stop_loss(
         if cost <= 0:
             continue
         stop_price = cost * (1.0 - stop_loss_pct)
-        if bar.low > stop_price:
+        # 唯一实现判定（low 触发口径）；bar.low 为 0/无效时按不触发处理
+        decision = evaluate_exit(
+            rules, PositionState(entry_price=cost, last_price=float(bar.low or 0.0))
+        )
+        if not decision.should_exit:
             continue
+        stop_price = float(decision.snapshot.get("line") or stop_price)
         avail = pos.get("available_volume")
         qty = int(float(pos.get("volume", 0)) if avail is None else float(avail))
         if qty <= 0:
