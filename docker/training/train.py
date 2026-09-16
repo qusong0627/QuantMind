@@ -416,8 +416,14 @@ def train_model(df: pd.DataFrame, features: list[str], cfg: dict, hardware: dict
     elif model_type in ("linear", "random_forest", "mlp"):
         model = _dispatch_gbdt_sklearn(cfg, model_type, features, X_train, y_train, X_val, y_val)
     elif model_type == "nativetft":
+        del X_train, X_val
+        _trim_memory("before DL dispatch")
         return _dispatch_dl(cfg, model_type, features, train_df, val_df, test_df, df, fill_values, hardware, single=False, t_start=train_t0)
     elif model_type in _DL_MODEL_TYPES:
+        # X_train/X_val（≈7.8GB）是树模型用的；DL 从数据帧自建序列，不需要它。
+        # 不释放会与 DL 数据准备叠加撞容器限额（2026-09-16 TabNet 启动即 OOM 实证）。
+        del X_train, X_val
+        _trim_memory("before DL dispatch")
         return _dispatch_dl(cfg, model_type, features, train_df, val_df, test_df, df, fill_values, hardware, single=False, t_start=train_t0)
     else:
         raise ValueError(f"Unsupported model_type: {model_type}")
@@ -619,6 +625,9 @@ def _train_single_model(
     elif model_type == "nativetft":
         return _dispatch_dl(cfg, model_type, features, train_df, val_df, test_df, df, fill_values, hardware, single=True, t_start=t0)
     elif model_type in _DL_MODEL_TYPES:
+        # 同 train_model：DL 不用 X 矩阵，dispatch 前释放（省 ~7.8GB）
+        del X_train, X_val
+        _trim_memory("before DL dispatch (single)")
         return _dispatch_dl(cfg, model_type, features, train_df, val_df, test_df, df, fill_values, hardware, single=True, t_start=t0)
     else:
         raise ValueError(f"Unsupported model_type: {model_type}")
