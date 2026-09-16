@@ -18,7 +18,7 @@ from backend.services.trade_shared.redis_client import redis_client
 from backend.services.simulation.models.order import OrderSide
 from backend.services.simulation.services.simulation_manager import SimulationAccountManager
 from backend.services.trade_shared.trade_config import settings
-from backend.shared.database_manager_v2 import get_db_manager
+from backend.shared.database_manager_v2 import get_session
 
 logger = logging.getLogger(__name__)
 
@@ -291,8 +291,8 @@ class SandboxSignalConsumer:
         )
         from backend.shared.order_contract import SOURCE_SANDBOX
 
-        db_manager = get_db_manager()
-        async with db_manager.session() as db:
+        # P0 修复（同 engine.run_cycle）：DatabaseManager 无 session() API，统一 get_session
+        async with get_session() as db:
             routed = await submit_order(
                 db,
                 self._account_manager.redis,

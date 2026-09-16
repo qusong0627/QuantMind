@@ -14,7 +14,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.services.trade_shared.redis_client import RedisClient
+from backend.services.trade_shared.redis_client import RedisClient, redis_client
 from backend.services.simulation.services.execution_engine import (
     ExecutionResult,
     SimulationExecutionEngine,
@@ -47,7 +47,7 @@ from backend.services.simulation.services.simulation_manager import (
     SimulationAccountManager,
 )
 from backend.services.trade_shared.trade_config import settings
-from backend.shared.database_manager_v2 import get_db_manager
+from backend.shared.database_manager_v2 import get_session
 from backend.shared.stock_utils import StockCodeUtil
 from backend.shared.strategy_storage import get_strategy_storage_service
 
@@ -70,6 +70,9 @@ class ExecutionReport:
     orders: list[dict[str, Any]] = field(default_factory=list)
     account_snapshot: dict[str, Any] = field(default_factory=dict)
     error: str | None = None
+    # T-FE-05：计划预演（dry_run=True 时填 planned_orders，不执行撮合/不落账）
+    dry_run: bool = False
+    planned_orders: list[dict[str, Any]] = field(default_factory=list)
 
 
 class SimulationEngine:
@@ -89,7 +92,10 @@ class SimulationEngine:
         loader: SignalLoader | None = None,
         market_data: LocalMarketData | None = None,
     ):
-        self.redis = redis or RedisClient()
+        # P0 修复：默认必须引用**共享单例** redis_client（启动时 connect 的那一个）。
+        # 此前 `redis or RedisClient()` 每次新建未连接实例 → client 恒 None →
+        # 账户/风控/快照全链路拿不到数据（与 db_manager.session 同源的静默断链）。
+        self.redis = redis or redis_client
         self.signal_loader = loader or signal_loader
         self.account_manager = SimulationAccountManager(self.redis)
         self.rebalance_calculator = RebalanceCalculator()
@@ -104,6 +110,7 @@ class SimulationEngine:
         params_override: dict[str, Any] | None = None,
         market: str | None = None,
         pool_id: str | None = None,
+        dry_run: bool = False,
     ) -> ExecutionReport:
         """
         执行一次模拟盘调仓周期。
@@ -116,9 +123,12 @@ class SimulationEngine:
             params_override: 前端传递的策略参数覆盖
             market: 策略市场提示（激活策略 parameters.market）。
                    港股信号 symbol 为裸数字无法靠众数推断，须由调用方显式传入。
+            dry_run: **计划预演**（T-FE-05）——走同一 RebalanceCalculator 计算
+                （含退出规则与风控买锁），但**不撮合、不落单、不写快照**；
+                结果进 ``report.planned_orders``。任何写副作用路径都必须跳过。
 
         Returns:
-            执行报告
+            执行报告（dry_run 时 executed_at 仅为计算时刻）
         """
         tenant = (tenant_id or "").strip() or "default"
         uid = str(user_id or "").strip()
@@ -134,8 +144,10 @@ class SimulationEngine:
         )
 
         try:
-            db_manager = get_db_manager()
-            async with db_manager.session() as db:
+            # P0 修复（T-FE-05 预演实机复现）：DatabaseManager 无 session() API（9-01 重构
+            # 引入的 AttributeError 使托管/引导/手动全部模拟周期死在入口，静默进 report.error）。
+            # 统一走共享 get_session（master 会话 + 出口提交语义）。
+            async with get_session() as db:
                 # 1. 加载信号（market 提示时按市场过滤；缺省旧行为）
                 signals = await self.signal_loader.load_latest_signals(
                     db=db,
@@ -167,6 +179,14 @@ class SimulationEngine:
                     market.value,
                     len(signals),
                 )
+                # P0 修复：信号表 symbol 为纯数字（DB 契约），行情/账户/撮合为后缀式。
+                # 在引擎边界统一归一（CN → 600036.SH），否则全部信号会因行情键失配
+                # 被当"不可交易"过滤——托管周期自 9/13 统一路径起静默空转（零订单）。
+                if getattr(market, "value", str(market)).upper() in ("CN", "A"):
+                    for _sig in signals:
+                        _suffix = StockCodeUtil.to_suffix(_sig.symbol)
+                        if _suffix:
+                            _sig.symbol = _suffix
 
                 # 1.6 全局股票池过滤（P3）：严格语义，池为空或零命中即终止本轮，
                 # 绝不放行全市场信号（否则模拟盘会买进池外标的）。
@@ -271,6 +291,25 @@ class SimulationEngine:
                 )
                 orders = exit_orders + orders
                 report.order_count = len(orders)
+
+                if dry_run:
+                    # T-FE-05 计划预演：同源计算（退出+调仓+风控买锁）→ 只报告不执行
+                    report.dry_run = True
+                    report.planned_orders = [
+                        self._plan_to_dict(
+                            order,
+                            quotes,
+                            kind="exit" if idx < len(exit_orders) else "rebalance",
+                        )
+                        for idx, order in enumerate(orders)
+                    ]
+                    logger.info(
+                        "SimulationEngine: 计划预演(未执行), tenant=%s user=%s orders=%d",
+                        tenant,
+                        uid,
+                        len(report.planned_orders),
+                    )
+                    return report
 
                 if not orders:
                     logger.info(
@@ -658,6 +697,24 @@ class SimulationEngine:
             price_source=routed.price_source,
             message=routed.message,
         )
+
+    @staticmethod
+    def _plan_to_dict(order: Order, quotes: dict[str, Quote], *, kind: str) -> dict[str, Any]:
+        """调仓指令 → 计划预演条目（T-FE-05）：含理由/触发类别/预估金额与涨跌停状态。"""
+        quote = quotes.get(order.symbol)
+        price = float(order.price or 0.0)
+        return {
+            "symbol": order.symbol,
+            "side": order.side,
+            "quantity": int(order.quantity or 0),
+            "price": price,
+            "estimated_amount": round(price * int(order.quantity or 0), 2),
+            "reason": order.reason or "",
+            "kind": kind,  # exit=退出规则触发 | rebalance=定期调仓
+            "is_limit_up": bool(getattr(quote, "is_limit_up", False)),
+            "is_limit_down": bool(getattr(quote, "is_limit_down", False)),
+            "is_suspended": bool(getattr(quote, "is_suspended", False)),
+        }
 
     def _order_to_dict(self, order: Order, result: ExecutionResult) -> dict[str, Any]:
         """订单结果转字典"""

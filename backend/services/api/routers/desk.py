@@ -21,6 +21,7 @@ GET /api/v1/desk/today
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from datetime import datetime, timezone
 from typing import Any
@@ -308,12 +309,81 @@ async def _collect_shadow() -> dict[str, Any]:
     }
 
 
+async def _async_unavailable(reason: str) -> dict[str, Any]:
+    """统一"不可用"块（跳过/降级时不伪造数据）。"""
+    return {"available": False, "reason": reason, "source": "desk:toggle"}
+
+
+async def _collect_plan(tenant_id: str, raw_user: str) -> dict[str, Any]:
+    """调仓计划预演卡（T-FE-05）：活跃策略（Redis）→ 引擎 dry-run（唯一调仓实现）。
+
+    纪律：只读预演——RebalanceCalculator 单一实现复用（退出规则+池过滤+风控买锁同源），
+    但绝不撮合/落单/写快照；无活跃策略时如实返回不可用原因。
+    """
+    source = "redis:trade:active_strategy → simulation engine dry-run"
+    try:
+        from backend.services.trade_shared.redis_client import get_redis as get_trade_redis
+        from backend.shared.simulation_account_keys import active_strategy_key
+
+        client = get_trade_redis()
+        if getattr(client, "client", None) is None:
+            client.connect()
+        raw = client.client.get(active_strategy_key(tenant_id, raw_user))
+        payload = json.loads(raw) if raw else None
+    except Exception as exc:  # noqa: BLE001 - 预演读取失败不拖垮交易台
+        return {"available": False, "reason": f"活跃策略读取失败: {exc}", "source": source}
+
+    if not isinstance(payload, dict) or not payload:
+        return {
+            "available": False,
+            "reason": "当前无活跃策略——在实盘/模拟页启动策略后，此处显示当日调仓计划预演",
+            "source": source,
+        }
+    strategy_id = str(payload.get("strategy_id") or "").strip()
+    if not strategy_id:
+        return {"available": False, "reason": "活跃策略未记录 strategy_id", "source": source}
+    live_cfg = payload.get("live_trade_config")
+    if not isinstance(live_cfg, dict):
+        live_cfg = {}
+
+    try:
+        from backend.services.simulation.services.simulation_hosted_scheduler import (
+            preview_simulation_plan_for_active,
+        )
+
+        result = await preview_simulation_plan_for_active(
+            tenant_id=tenant_id,
+            user_id=raw_user,
+            strategy_id=strategy_id,
+            live_trade_config=live_cfg,
+        )
+    except Exception as exc:  # noqa: BLE001 - 预演失败降级为不可用（如实原因）
+        logger.warning("desk plan preview failed: %s", exc)
+        return {
+            "available": False,
+            "reason": f"计划预演失败: {exc}",
+            "strategy_id": strategy_id,
+            "source": source,
+        }
+
+    result.update(
+        {
+            "strategy_id": strategy_id,
+            "strategy_name": payload.get("strategy_name"),
+            "mode": str(payload.get("mode") or "SIMULATION"),
+            "source": "simulation engine dry-run（RebalanceCalculator 单一实现，未执行）",
+        }
+    )
+    return result
+
+
 @router.get("/today")
 async def desk_today(
     health: bool = Query(True, description="是否运行体检（10 项断言，约 1-2s）"),
+    plan: bool = Query(True, description="是否运行调仓计划预演（dry-run 引擎，约 1-3s）"),
     current_user: dict = Depends(get_current_user),
 ) -> dict[str, Any]:
-    """今日交易台聚合：管线/信号/执行/盈亏/影子对照/健康——每个数字带 source 下钻字段。"""
+    """今日交易台聚合：管线/信号/计划预演/执行/盈亏/影子对照/健康——每个数字带 source 下钻字段。"""
     from backend.services.trade_shared.simulation_manager import require_sim_user_id
 
     tenant_id = str(current_user.get("tenant_id") or "default")
@@ -321,11 +391,14 @@ async def desk_today(
     sim_uid = require_sim_user_id(raw_user, tenant_id=tenant_id)
 
     health_items = await _run_health() if health else {}
-    signals, execution, pnl, shadow = await asyncio.gather(
+    signals, execution, pnl, shadow, plan_block = await asyncio.gather(
         _collect_signals(tenant_id),
         _collect_execution(tenant_id, int(sim_uid), raw_user),
         _collect_pnl(tenant_id, str(sim_uid)),
         _collect_shadow(),
+        _collect_plan(tenant_id, raw_user)
+        if plan
+        else _async_unavailable("调仓计划预演已跳过（?plan=false）"),
     )
     health_summary = {
         "ok": sum(1 for i in health_items.values() if i.get("level") == "ok"),
@@ -343,6 +416,7 @@ async def desk_today(
             "sim_user_id": str(sim_uid),
             "pipeline": build_pipeline(health_items),
             "signals": signals,
+            "plan": plan_block,
             "execution": execution,
             "pnl": pnl,
             "shadow": shadow,

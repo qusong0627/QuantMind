@@ -141,6 +141,42 @@ async def run_simulation_cycle_for_active(
     return report_to_hosted_result(report)
 
 
+async def preview_simulation_plan_for_active(
+    *,
+    tenant_id: str,
+    user_id: str,
+    strategy_id: str,
+    live_trade_config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """调仓计划预演（T-FE-05，只读）：dry-run run_cycle —— 与执行入口共用同一
+    RebalanceCalculator 与池/风控前置，但**绝不撮合、不落单、不写快照**。
+
+    返回 {available, dry_run, order_count, planned orders, signal_count, error}。
+    """
+    from backend.services.simulation.engine import simulation_engine
+
+    cfg = _normalize_live_trade_config(live_trade_config)
+    params_override: dict[str, Any] = {}
+    if cfg.get("pool_id"):
+        params_override["pool_id"] = cfg["pool_id"]
+    report = await simulation_engine.run_cycle(
+        tenant_id=tenant_id,
+        user_id=user_id,
+        strategy_id=strategy_id,
+        params_override=params_override or None,
+        pool_id=cfg.get("pool_id"),
+        dry_run=True,
+    )
+    return {
+        "available": True,
+        "dry_run": True,
+        "order_count": int(report.order_count),
+        "signal_count": int(report.signal_count),
+        "orders": list(report.planned_orders),
+        "error": report.error,
+    }
+
+
 def _parse_started_at(value: Any, market: Any = "CN") -> date | None:
     """解析 started_at → 策略市场本地日期（T-P3-07：按市场时区解释 naive 时间）。"""
     text = str(value or "").strip()

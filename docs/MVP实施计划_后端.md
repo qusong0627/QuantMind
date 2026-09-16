@@ -982,6 +982,21 @@
     读取面）——scores 网格（latest_only）/ scores/history（升序）/ health/{sid}（最新+历史+
     **门禁预演**与执行点同源）/ object-types；可见性=租户共享行+本人私有行；只读；HTTP 实机 200。
 
+**事故与修复·托管模拟执行链三连断链（2026-09-16，T-FE-05 侦察发现，P0）**：
+建设计划预演时对真库跑 dry-run，实机连续暴露三处**静默断链**（全部进 `report.error`，
+主界面无感）——托管/引导/手动全部模拟周期无法出单：
+1. `db_manager.session()` 是不存在的 API（9-01 交易服务重构引入）→ `run_cycle` 入口
+   AttributeError；同款调用在 `sandbox_signal_consumer` 一并修复为共享 `get_session()`；
+2. 引擎默认 `redis or RedisClient()` 每次新建**未连接**实例（client 恒 None）→ 账户/风控/
+   快照全链路拿不到数据（"账户不存在"）；修复为引用共享单例 `redis_client`（启动时 connect 的那一个）；
+3. 信号表 symbol 为**纯数字**（DB 契约）而行情/账户/撮合为后缀式 → `_filter_tradable`
+   全量失配（"无可交易标的"，9-13 托管统一路径时引入的缺口）；修复为引擎边界统一
+   `StockCodeUtil.to_suffix`（CN）。
+**验证**：修复后实机 dry-run —— 1000 信号、1027 bars、**77 笔计划**（卖退出+调仓，含理由与
+预估金额）；`test_desk_plan_preview.py` 4/4 含三处源守卫（`db_manager.session()` 全仓禁现、
+共享 redis 单例、裸码归一断言——防回归）。**注意**：修复等于**重新武装了托管模拟执行**，
+有活跃策略时下一个调度窗口即会正常出单（本机当前无活跃策略，未触发）。
+
 - **T-P4-05** 五张评分卡 + 回测体检九项（`scripts/eval/` + `eval_scores` 表）
 - **T-P4-06** 体检三处接入（回测后/晋级门禁/月度复检）✅ 见上方落地记录（2026-09-16）
 
