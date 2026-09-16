@@ -456,16 +456,35 @@ class BacktestEngine:
             self.stop_loss_manager.reset()
 
     def _process_orders(self, market_data: dict[str, pd.Series]) -> None:
-        """处理待执行订单"""
+        """处理待执行订单。
+
+        T-P2-05b：不可成交的语义与模拟侧对齐——**市价单当日拒单（不顺延）**；
+        限价单保持挂单顺延（挂单在真实市场中可持续等待成交）。
+        """
         pending_orders = [order for order in self.orders if order.status == OrderStatus.PENDING]
 
         for order in pending_orders:
             symbol_data = market_data.get(order.symbol)
             if symbol_data is None:
+                # 无行情（停牌/缺数据）
+                if order.order_type == OrderType.MARKET:
+                    order.status = OrderStatus.REJECTED
+                    order.reject_reason = "当日无行情（停牌/缺数据），市价单不顺延"
+                    logger.warning(
+                        "订单被拒绝: 当日无行情",
+                        extra={"order_id": order.order_id, "symbol": order.symbol},
+                    )
                 continue
             prev_close = self._get_prev_close(order.symbol)
             if self._can_execute_order(order, symbol_data, prev_close):
                 self._execute_order(order, symbol_data)
+            elif order.order_type == OrderType.MARKET:
+                order.status = OrderStatus.REJECTED
+                order.reject_reason = "当日不可成交（涨跌停/停牌），市价单不顺延"
+                logger.warning(
+                    "订单被拒绝: 当日不可成交（市价单不顺延）",
+                    extra={"order_id": order.order_id, "symbol": order.symbol},
+                )
 
     def _get_prev_close(self, symbol: str) -> float | None:
         """获取指定标的前一交易日收盘价（用于涨跌停判定）"""
