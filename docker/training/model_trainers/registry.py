@@ -206,10 +206,14 @@ class DLAdapter:
                 "val_m": val_m,
                 "test_m": test_m,
                 "pred_df": full_pred_df.reset_index(drop=True),
+                # 引用共享切分帧（train_multi_models 的同一份），不做 reset_index 全量
+                # 副本：单份副本 ≈8.7GB（train 7.2G + val 0.85G + test 0.6G），7 模型
+                # 在 model_results 里囤积 ≈61GB 必 OOM（2026-09-16 v6 修复）。
+                # 消费端（SHAP .sample() 抽样 / 对比报告）不依赖默认索引。
                 "split_frames": {
-                    "train": train_df.reset_index(drop=True),
-                    "valid": val_df.reset_index(drop=True),
-                    "test": test_df.reset_index(drop=True),
+                    "train": train_df,
+                    "valid": val_df,
+                    "test": test_df,
                 },
                 "dl_metadata": dl_metadata,
                 "elapsed": time.time() - t_start,

@@ -536,6 +536,29 @@ def _train_dl(
     def _dl_metrics(frame: pd.DataFrame) -> dict:
         try:
             pred_df = _predict_dl(output_dir, frame, features, dl_metadata)
+            # 轻量指标帧（内存模型，2026-09-16 v6）：旧实现 frame.copy() + 全列
+            # merge 对 640 万行 train 帧瞬时再分配 ~14GB（7.2GB 拷贝 + 7.2GB
+            # merge 输出），与常驻帧/模型叠加在 42.8GB 顶穿主机上限（v5 实证）。
+            # _predict_dl 输出与输入行序严格一致（scatter 按行号回填），且
+            # _compute_metrics 仅依赖 trade_date 做每日分组 → 位置对齐后只构造
+            # 单列小帧，逐值与旧 merge 通路一致。
+            _has_keys = "symbol" in frame.columns and "trade_date" in frame.columns
+            _aligned = False
+            if _has_keys and len(pred_df) == len(frame):
+                _aligned = bool(
+                    (frame["symbol"].to_numpy() == pred_df["symbol"].to_numpy()).all()
+                    and (frame["trade_date"].to_numpy() == pred_df["trade_date"].to_numpy()).all()
+                )
+            if _aligned:
+                pred_np = pred_df["pred"].to_numpy()
+                if int((~np.isnan(pred_np)).sum()) < 10:
+                    logger.warning("DL metrics: 预测不足 10 行有效，rmse/auc 置 0")
+                    return {"ic": float("nan"), "rank_ic": float("nan"), "rank_icir": float("nan"), "rmse": 0.0, "auc": 0.0}
+                small = pd.DataFrame({"trade_date": frame["trade_date"].to_numpy()})
+                y_true = frame["label"].astype("float32").to_numpy()
+                y_pred = np.where(np.isnan(pred_np), np.float32(0.0), pred_np).astype("float32")
+                return _compute_metrics(small, y_true, y_pred)
+            # 回退：遗留无键帧 / 键序不匹配的防御路径，保持旧 merge 通路
             frame_m = frame.copy()
             if "symbol" not in frame_m.columns or "trade_date" not in frame_m.columns:
                 frame_m = frame.reset_index()
@@ -931,6 +954,7 @@ def _predict_dl(
                 logger.warning("DL predict 跳过退化块（%d 行）: %s", _pos.size, exc)
                 if _chunk is not _pred_df:
                     del _chunk
+                _trim()
                 continue
             preds = []
             for batch in loader:
@@ -967,6 +991,9 @@ def _predict_dl(
             del loader, preds, raw_pred
             if _chunk is not _pred_df:
                 del _chunk
+            # 块间归还 glibc arena：每块工作集 ~1.7GB，不 trim 则滞留累积
+            # ~1.4GB/块（v5 实测 9 块涨 ~16GB），会顶穿后续阶段
+            _trim()
         return pd.DataFrame({
             "symbol": _pred_df["symbol"].to_numpy(),
             "trade_date": _pred_df["trade_date"].to_numpy(),
@@ -1014,6 +1041,8 @@ def _predict_dl(
                 np.concatenate(preds) if preds else np.float32(0.0)
             )
             del _blk, X_values, preds
+            # 块间归还 glibc arena（同 TS 通路，防滞留累积）
+            _trim()
         return pd.DataFrame({
             "symbol": df_X["symbol"].to_numpy(),
             "trade_date": df_X["trade_date"].to_numpy(),
@@ -1029,6 +1058,8 @@ def _predict_nativetft(
 ) -> np.ndarray:
     """加载训练好的 NativeTFT 模型并预测。"""
     import torch
+
+    from diagnostics.utils import trim_memory as _trim
 
     model_arch = dl_metadata.get("model_arch", {})
     input_dim = int(model_arch.get("input_dim", len(features)))
@@ -1145,6 +1176,7 @@ def _predict_nativetft(
             logger.warning("NativeTFT predict 跳过退化块（%d 行）: %s", _pos.size, exc)
             if _chunk is not df_X:
                 del _chunk
+            _trim()
             continue
 
         preds = []
@@ -1172,6 +1204,8 @@ def _predict_nativetft(
         del loader, _X, _y, _pred_df, preds, raw_pred, out
         if _chunk is not df_X:
             del _chunk
+        # 块间归还 glibc arena（同 _predict_dl，防滞留累积）
+        _trim()
     if not _parts:
         return pd.DataFrame({"symbol": [], "trade_date": [], "pred": []})
     return pd.concat(_parts, ignore_index=True)
