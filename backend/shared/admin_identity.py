@@ -247,7 +247,7 @@ async def plan_legacy_migration() -> dict[str, str]:
 
 
 def needs_fix_sync() -> bool:
-    """同步快检：users 表是否存在 user_id='admin' 的行（脚本预检用）。"""
+    """同步快检：users 表仍有 legacy admin 行，或规范行（10000001）缺失（脚本/启动自愈预检用）。"""
     import os
     from urllib.parse import quote_plus
 
@@ -269,12 +269,19 @@ def needs_fix_sync() -> bool:
     engine = create_engine(url, pool_pre_ping=True)
     try:
         with engine.connect() as conn:
-            n = conn.execute(
+            # 触发条件（二选一）：① 仍有 admin/00000001 legacy 行；
+            # ② 规范行 10000001 缺失（老库曾以 00000001 为规范——子表可能仍留 legacy 值，
+            #    此分支让"users 已修但子表未修"的中间态也能被自愈链路覆盖）
+            legacy = conn.execute(
                 text(
                     "SELECT count(*) FROM users "
                     "WHERE user_id IN ('admin', '00000001')"
                 )
             ).scalar()
-            return bool(n)
+            canonical = conn.execute(
+                text("SELECT count(*) FROM users WHERE user_id = :a"),
+                {"a": ADMIN_USER_ID},
+            ).scalar()
+            return bool(legacy) or not bool(canonical)
     finally:
         engine.dispose()

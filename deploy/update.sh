@@ -415,6 +415,8 @@ main() {
             fi
         done
         if $api_ok && $celery_ok && $beat_ok; then
+            # admin 身份遗留收口（幂等分块；后台执行不阻塞升级；遗留为空时秒级完成）
+            docker exec -d quantmind bash -c 'cd /app && python backend/scripts/fix_admin_identity_full.py > /tmp/admin_identity_sweep.log 2>&1' 2>/dev/null || true
             log "升级完成 ✓ (HEAD: $(git -C "$PROJECT_DIR" rev-parse --short HEAD))"
             record_system_event "info" "系统更新成功" "HEAD $(git -C "$PROJECT_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)"
             return

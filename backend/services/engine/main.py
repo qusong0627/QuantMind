@@ -296,6 +296,19 @@ async def auth_middleware(request: Request, call_next):
             )
 
     if user_id:
+        # admin 身份规范化（与 api 侧 auth 中间件同口径）：旧 token 的 sub='00000001'/'admin'
+        # 归一为 10000001，否则下游按 legacy id 读写（实测事故：策略列表自动同步模板写入
+        # user_id=1 的克隆行，"用户策略不存在"/改名失败）
+        try:
+            from backend.shared.admin_identity import (
+                is_admin_user_id,
+                normalize_admin_user_id,
+            )
+
+            if is_admin_user_id(user_id):
+                user_id = normalize_admin_user_id(user_id)
+        except Exception:  # noqa: BLE001 - 规范化失败不阻断（保持旧行为）
+            pass
         # 注入到 request.state
         request.state.user = {"user_id": user_id, "tenant_id": tenant_id, "sub": user_id}
 

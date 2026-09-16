@@ -142,36 +142,59 @@ def _code_hash(code: str) -> str:
 
 
 def _ensure_int_user_id(user_id: str) -> int:
-    """将 user_id 解析为整数。先按 users.user_id 业务字段查，再兼容纯数字。"""
+    """将 user_id 解析为整数（**strategies.user_id = users.id 主键空间**，非业务 user_id）。
+
+    解析链：admin 族业务形先规范（'00000001'/'admin'→'10000001'）→ users.user_id 业务字段
+    查询 → users.id 主键查询 → 纯数字兜底。
+    背景（2026-09-16 事故）：admin 业务 id 改名后，旧解析链在"业务行尚为旧值"或"输入已是
+    新业务形"两种中间态下都会落到「直转 int」兜底——把业务形 10000001 当主键查，策略行
+    却在主键空间 1 → 列表/改名/启动统一报"用户策略不存在"。此处把两个空间的解析显式化。
+    """
     if get_db is None:
         try:
             return int(user_id)
         except ValueError:
             raise ValueError(f"无法解析 user_id={user_id!r} 为整数，且数据库不可用")
 
+    raw = str(user_id or "").strip()
+    candidates: list[str] = []
+    try:
+        from backend.shared.admin_identity import (
+            is_admin_user_id,
+            normalize_admin_user_id,
+        )
+
+        if is_admin_user_id(raw):
+            candidates.append(normalize_admin_user_id(raw))
+    except Exception:  # noqa: BLE001 - 规范化不可用则退回原形
+        pass
+    if raw not in candidates:
+        candidates.append(raw)
+
     try:
         with get_db() as session:
-            # 1. 按业务用户ID查询
-            row = session.execute(
-                text("SELECT id FROM users WHERE user_id = :uid"),
-                {"uid": user_id},
-            ).scalar()
-            if row is not None:
-                return int(row)
+            # 1. 按业务用户ID查询（规范形优先）
+            for uid in candidates:
+                row = session.execute(
+                    text("SELECT id FROM users WHERE user_id = :uid"),
+                    {"uid": uid},
+                ).scalar()
+                if row is not None:
+                    return int(row)
             # 2. 按数字主键兼容
-            if user_id.isdigit():
+            if raw.isdigit():
                 row2 = session.execute(
                     text("SELECT id FROM users WHERE id = :id"),
-                    {"id": int(user_id)},
+                    {"id": int(raw)},
                 ).scalar()
                 if row2 is not None:
                     return int(row2)
     except Exception as e:
         logger.warning(f"_ensure_int_user_id DB lookup failed: {e}")
 
-    # 3. 最后尝试直接转换
+    # 3. 最后尝试直接转换（输入已是主键空间时的兜底）
     try:
-        return int(user_id)
+        return int(raw)
     except ValueError:
         raise ValueError(f"user_id={user_id!r} 无法解析为整数且在数据库中不存在")
 

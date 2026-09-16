@@ -663,6 +663,37 @@ def _ensure_database_schema_python():
         logger.warning("数据库自动建表失败（不影响启动）: %s", e)
 
 
+def _ensure_admin_identity() -> None:
+    """启动期 admin 身份收口（幂等，后台线程执行不阻塞启动）。
+
+    历史部署中 admin 曾以 user_id='00000001'（或 'admin'）落库，规范化到 10000001 后
+    若只改了 users 主行、子表未跟上，会出现"模型/策略/回测找不到"类问题
+    （2026-09-16 实测两例）。这里按统一 sweep 收口：users 或子表仍有 legacy 值即修复。
+    大库（亿级行表）首次会耗时较长且需短暂卸 FK——生产大库建议用
+    ``backend/scripts/fix_admin_identity_full.py`` 分块执行；本自愈面向常规部署。
+    """
+    try:
+        from backend.shared.admin_identity import fix_admin_user_id, needs_fix_sync
+
+        if not needs_fix_sync():
+            return
+        logger.info("检测到 admin 身份遗留（legacy user_id），后台启动自愈 sweep …")
+
+        import asyncio
+        import threading
+
+        def _run() -> None:
+            try:
+                report = asyncio.run(fix_admin_user_id())
+                logger.info("admin 身份自愈完成: %s", report.get("updated"))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("admin 身份自愈失败（可手动跑 scripts/fix_admin_user_id.py）: %s", exc)
+
+        threading.Thread(target=_run, name="admin-identity-heal", daemon=True).start()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("admin 身份自愈预检失败（不影响启动）: %s", e)
+
+
 def _ensure_seed_admin():
     """启动期确保默认管理员账号存在（自愈）。
 
@@ -730,6 +761,8 @@ def main():
     """主入口"""
     # 启动前确保数据库表结构完整
     _ensure_database_schema()
+    # 启动期 admin 身份收口（legacy user_id 遗留自愈；后台线程，不阻塞启动）
+    _ensure_admin_identity()
     # 启动期确保默认管理员账号存在（幂等，失败不影响启动）
     _ensure_seed_admin()
     # 启动期确保全局股票池表结构与内置池 seed（幂等，失败不影响启动）
