@@ -20,3 +20,16 @@ optuna>=3.6.0
 # Qlib: 生产部署统一锁定 0.9.7，并限制为 x86_64/AMD64 平台安装（ARM 环境自动跳过）
 pyqlib==0.9.7; platform_machine == "x86_64" or platform_machine == "AMD64"
 pyarrow>=15.0.0
+# ONNX 导出链（T-P6-08 实时推理；onnxruntime=唯一推理运行时）
+# 实测锁定矩阵（2026-09-17，探雷记录）：
+#   - onnx 1.17 + onnxruntime 1.20.1（IR/opset 21 对齐；onnx 1.22/ORT 1.23 组合
+#     在清华源上 IR 版本互不兼容）
+#   - onnxmltools 1.16（1.14 读不懂 xgboost 3.x 的 base_score="[v]"；1.16 要求特征名
+#     f%d 模式——导出器已按位置转换并摘名）
+#   - skl2onnx 1.17；catboost 原生 format="onnx"（已在 requirements 主清单）
+# 注意：pip 安装会尝试升级 numpy 2.x——必须锁 1.26（主镜像 pandas/torch ABI，
+# 运行中容器已回退验证）
+onnx==1.17.0
+onnxruntime==1.20.1
+onnxmltools==1.16.0
+skl2onnx==1.17.0
