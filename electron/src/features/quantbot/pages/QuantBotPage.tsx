@@ -10,6 +10,9 @@
  */
 
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
+import { message } from 'antd';
+import { Lightbulb } from 'lucide-react';
+import { QUANTBOT_INTENTS } from '../intents/quantbotIntents';
 import { Bot, RefreshCw, Wifi, WifiOff, ExternalLink, AlertTriangle } from 'lucide-react';
 import { isElectronEnv, SERVICE_URLS } from '../../../config/services';
 
@@ -45,6 +48,8 @@ const IFRAME_LOAD_TIMEOUT_MS = 15_000;
 const QuantBotPage: React.FC = () => {
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const [iframeKey, setIframeKey] = useState<number>(0);
+  // T-FE-13：四类意图示例条（聊天宿主在 QwenPaw iframe 内——示例一键复制、粘贴即用）
+  const [showIntents, setShowIntents] = useState(true);
   const [loading, setLoading] = useState<boolean>(true);
   const [connected, setConnected] = useState<boolean>(false);
   const [timedOut, setTimedOut] = useState<boolean>(false);
@@ -169,6 +174,50 @@ const QuantBotPage: React.FC = () => {
       </div>
 
       {/* iframe 内容区域 — 避开底部 Dock 悬浮栏 */}
+      {/* T-FE-13 四类意图示例：写策略 / 选股筛选 / 分析问答 / 操作帮助 —— 点击复制提示词 */}
+      <div className="flex-shrink-0 bg-white border-x border-slate-200/80 px-4 py-2">
+        <div className="flex flex-wrap items-start gap-x-3 gap-y-1.5">
+          <button
+            type="button"
+            onClick={() => setShowIntents(!showIntents)}
+            className="inline-flex items-center gap-1 text-[11px] font-bold text-slate-600 hover:text-blue-600 mt-0.5"
+            title="展开 / 收起四类意图示例"
+          >
+            <Lightbulb className="w-3.5 h-3.5 text-amber-500" />
+            示例提示词 {showIntents ? '▾' : '▸'}
+          </button>
+          {showIntents &&
+            QUANTBOT_INTENTS.map((intent) => (
+              <span key={intent.key} className="inline-flex items-center gap-1 flex-wrap">
+                <span className="text-[10px] font-bold text-slate-400">{intent.label}</span>
+                {intent.examples.map((ex) => (
+                  <button
+                    key={ex.label}
+                    type="button"
+                    title={ex.prompt}
+                    onClick={async () => {
+                      try {
+                        await navigator.clipboard.writeText(ex.prompt);
+                        message.success('已复制提示词——粘贴到下方对话框发送即可');
+                      } catch {
+                        message.warning('复制失败（剪贴板不可用），请手动输入示例内容');
+                      }
+                    }}
+                    className="text-[10px] px-2 py-0.5 rounded-full border border-slate-200 bg-slate-50 text-slate-600 hover:bg-blue-50 hover:border-blue-200 hover:text-blue-700 transition-colors"
+                  >
+                    {ex.label}
+                  </button>
+                ))}
+              </span>
+            ))}
+        </div>
+        {showIntents && (
+          <p className="text-[10px] text-slate-400 mt-1">
+            写操作（下单 / 清仓 / 上实盘等）不由助手直达执行——一律在正式页面经二次确认后生效
+          </p>
+        )}
+      </div>
+
       <div className="flex-1 relative overflow-hidden bg-white border-x border-b border-slate-200/80 rounded-b-xl shadow-xs">
         {loading && !timedOut && (
           <div className="absolute inset-0 z-10 flex items-center justify-center bg-white/90 backdrop-blur-xs">
