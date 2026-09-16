@@ -213,3 +213,81 @@ async def test_eval_api_endpoints_real_db():
         from backend.shared.database_manager_v2 import close_database
 
         await close_database()
+
+
+# ── T-FE-15 自助体检上传 ────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_parse_nav_payload_formats():
+    from backend.services.api.routers.eval_scores import parse_nav_payload
+
+    # JSON 纯数组
+    rows = parse_nav_payload("[" + ",".join(str(100 + i) for i in range(40)) + "]")
+    assert len(rows) == 40 and rows[0]["date"] is None
+
+    # JSON 回测结果文件形态（{"equity_curve":[{date,value}]}）
+    import json as _json
+
+    payload = {"equity_curve": [{"date": f"2026-01-{i:02d}", "value": 100 + i} for i in range(1, 32)]}
+    rows = parse_nav_payload(_json.dumps(payload))
+    assert len(rows) == 31 and rows[0]["date"] == "2026-01-01"
+
+    # CSV：日期+数值（表头跳过）；YYYYMMDD 归一为 ISO
+    csv = "date,close\n" + "\n".join(f"202601{i:02d},{100 + i}" for i in range(1, 32))
+    rows = parse_nav_payload(csv)
+    assert len(rows) == 31 and rows[0]["date"] == "2026-01-01"
+    assert rows[-1]["value"] == 131
+
+    # CSV：纯数值
+    rows = parse_nav_payload("\n".join(str(100 + i) for i in range(35)))
+    assert len(rows) == 35
+
+
+@pytest.mark.unit
+def test_parse_nav_payload_guards():
+    from backend.services.api.routers.eval_scores import parse_nav_payload
+
+    with pytest.raises(ValueError, match="内容为空"):
+        parse_nav_payload("  ")
+    with pytest.raises(ValueError, match="不足"):
+        parse_nav_payload("1,2,3")  # <30 点
+    with pytest.raises(ValueError, match="过多"):
+        parse_nav_payload("\n".join(str(100 + (i % 7)) for i in range(5001)))
+    # 非法值（0/负）被过滤后不足
+    with pytest.raises(ValueError, match="不足"):
+        parse_nav_payload("\n".join(["0"] * 40))
+
+
+@pytest.mark.asyncio
+async def test_upload_health_check_real_report():
+    """合成强势曲线 → 真实九项体检报告（A/B/L/E 皆可，但必须结构完整）；口径不足 400。"""
+    import json as _json
+
+    import numpy as np
+    from fastapi import HTTPException
+
+    from backend.services.api.routers.eval_scores import upload_health_check
+
+    rng = np.random.default_rng(7)
+    bench = rng.normal(0.0003, 0.006, 750)
+    strat = 0.3 * bench + 0.002 + rng.normal(0, 0.004, 750)
+    vals = list(np.cumprod(1 + strat) * 100)
+    start = __import__("datetime").date(2024, 1, 2)
+    curve = [
+        {"date": (start + __import__("datetime").timedelta(days=i)).isoformat(), "value": float(v)}
+        for i, v in enumerate(vals[:300])
+    ]
+    resp = await upload_health_check(
+        payload={"content": _json.dumps({"equity_curve": curve})},
+        current_user={"tenant_id": "default", "user_id": "00000001"},
+    )
+    data = resp["data"]
+    assert data["report"]["verdict"] in {"A", "B", "L", "E"}
+    assert "结论标签" in data["report_text"]
+    assert data["points"] == 300
+    assert "不参与" in data["disclaimer"]
+
+    with pytest.raises(HTTPException) as exc:
+        await upload_health_check(payload={"content": "1,2"}, current_user={"tenant_id": "default", "user_id": "1"})
+    assert exc.value.status_code == 400

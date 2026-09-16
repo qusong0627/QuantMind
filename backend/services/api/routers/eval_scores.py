@@ -155,6 +155,111 @@ async def score_history(
     }
 
 
+def parse_nav_payload(content: str, *, max_points: int = 5000) -> list[dict[str, Any]]:
+    """自助体检输入解析（纯函数）：CSV / JSON 两族 → [{date,value}]。
+
+    支持形态：
+    - JSON: [v1, v2, ...] 或 [{date,value}] 或 {"equity_curve":[{"date","value"}]}
+      （兼容回测结果文件直接上传）；
+    - CSV/TSV：首列日期（YYYY-MM-DD/YYYYMMDD 均可，可缺省 → 序号日期）+ 含 value/nav/close 的一列；
+      或纯数值两列。
+    解析失败抛 ValueError（调用方转 400，附可读原因）。
+    """
+    import csv as _csv
+    import io as _io
+    import json as _json
+    import re as _re
+
+    text = (content or "").strip()
+    if not text:
+        raise ValueError("内容为空")
+    rows: list[dict[str, Any]] = []
+
+    if text[:1] in "[{":
+        try:
+            data = _json.loads(text)
+        except ValueError as exc:
+            raise ValueError(f"JSON 解析失败: {exc}") from exc
+        if isinstance(data, dict):
+            data = data.get("equity_curve") or data.get("nav_curve") or data.get("nav") or []
+        if not isinstance(data, list):
+            raise ValueError("JSON 顶层须为数组或含 equity_curve 的对象")
+        for item in data:
+            if isinstance(item, (int, float)):
+                rows.append({"date": None, "value": float(item)})
+            elif isinstance(item, dict):
+                v = item.get("value", item.get("nav", item.get("close")))
+                if v is None:
+                    continue
+                rows.append({"date": str(item.get("date") or "")[:10] or None, "value": float(v)})
+    else:
+        reader = _csv.reader(_io.StringIO(text))
+        date_re = _re.compile(r"^\d{4}-?\d{2}-?\d{2}$")
+        for raw in reader:
+            cells = [c.strip() for c in raw if c.strip()]
+            if not cells or cells[0].lower() in {"date", "日期", "时间", "trade_date"}:
+                continue
+            date_val: str | None = None
+            nums: list[float] = []
+            for cell in cells:
+                if date_val is None and date_re.match(cell):
+                    date_val = (
+                        f"{cell[:4]}-{cell[4:6]}-{cell[6:8]}" if "-" not in cell else cell
+                    )
+                    continue
+                try:
+                    nums.append(float(cell))
+                except ValueError:
+                    continue
+            if nums:
+                rows.append({"date": date_val, "value": nums[-1]})
+
+    rows = [r for r in rows if r["value"] is not None and r["value"] > 0]
+    if len(rows) > max_points:
+        raise ValueError(f"点位过多（{len(rows)} > {max_points}），请压缩后重试")
+    if len(rows) < 30:
+        raise ValueError(f"有效净值点位不足（{len(rows)} < 30），无法体检——至少提供 30 个交易日")
+    return rows
+
+
+@router.post("/health/upload")
+async def upload_health_check(
+    payload: dict[str, Any] | None = None,
+    current_user: dict = Depends(get_current_user),
+) -> dict[str, Any]:
+    """自助体检（T-FE-15）：上传/粘贴净值曲线 → 九项检验 + 四分类报告。
+
+    纪律：**只读自查**——不落 eval_scores、不参与晋级门禁（门禁数据仅来自
+    回测自动体检/月度复检的策略留档）；样本不足/口径不符如实 400。
+    """
+    _ = current_user
+    body = payload if isinstance(payload, dict) else {}
+    content = str(body.get("content") or "")
+    try:
+        rows = parse_nav_payload(content)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    from backend.shared.backtest_health import evaluate_for_window
+
+    report = await evaluate_for_window(rows, n_trials=int(body.get("trials") or 1))
+    if report is None:
+        raise HTTPException(status_code=400, detail="净值序列无法体检（样本或口径不足）")
+
+    from backend.scripts.eval.health_check import render_report
+
+    return {
+        "success": True,
+        "data": {
+            "report": report,
+            "report_text": render_report(report),
+            "points": len(rows),
+            "disclaimer": "自助体检仅供自查，不写入评估档案、不参与策略晋级门禁",
+            "source": "scripts/eval/health_check.py（与自动体检同一实现；基准=沪深300 窗口口径）",
+        },
+    }
+
+
 @router.get("/health/{strategy_id}")
 async def strategy_health(
     strategy_id: str,
