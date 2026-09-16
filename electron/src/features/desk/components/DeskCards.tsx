@@ -6,10 +6,10 @@ import type { ExecutionBlock, HealthBlock, PnlBlock, SignalsBlock } from '../typ
 import { TermTooltip } from '../../shared/TermTooltip';
 import { EvalScoreBadge } from '../../../components/shared/EvalScoreBadge';
 import { useUiMode } from '../../shared/useUiMode';
+import { ComplianceReturn } from '../../../components/shared/compliance/ComplianceChrome';
 import {
   executionSummary,
   formatMoney,
-  formatPct,
   healthItemViews,
   pnlSummary,
 } from '../deskModel';
@@ -146,7 +146,14 @@ export const PnlCard: React.FC<{
                 }`}
               >
                 {formatMoney(summary.totalPnl)}
-                {summary.returnPct !== null ? `（${formatPct(summary.returnPct)}）` : ''}
+                {summary.returnPct !== null ? (
+                  <span className="font-normal">
+                    {' · '}
+                    <ComplianceReturn value={summary.returnPct} windowText={pnl?.snapshot_date || undefined} />
+                  </span>
+                ) : (
+                  ''
+                )}
               </div>
             </div>
             <div>

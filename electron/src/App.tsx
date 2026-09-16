@@ -24,6 +24,8 @@ import { useTradingModeInitialization } from './hooks/useTradingModeInitializati
 import { useMarketReset } from './hooks/useMarketReset';
 import { authService } from './features/auth/services/authService';
 import { initDynamicServerUrl, isElectronEnv } from './config/services';
+import { RiskProfileModal } from './components/shared/compliance/RiskProfileModal';
+import { shouldAskRiskProfile } from './components/shared/compliance/riskProfile';
 
 // 认证相关组件
 import AppRoutes from './features/auth/AppRoutes';
@@ -183,6 +185,10 @@ export default function App() {
   useTheme();
   useTradingModeInitialization();
   useMarketReset();
+
+  // T-FE-17 合规四件：首启风险问卷（无档案且未在近期跳过时询问一次；
+  // 跳过 7 天内不再打扰，高风险动作与此无关、恒走二次确认）——hook 必须位于提前 return 之前
+  const [riskAskOpen, setRiskAskOpen] = React.useState(false);
   
   dayjs.locale('zh-cn');
 
@@ -200,6 +206,13 @@ export default function App() {
   const isPublicRoute = publicRoutes.some(route =>
     location.pathname.startsWith(route)
   );
+
+  // T-FE-17：登录后且无风险档案（或跳过已过期）时弹首启问卷一次
+  React.useEffect(() => {
+    if (isAuthenticated && !isPublicRoute && shouldAskRiskProfile()) {
+      setRiskAskOpen(true);
+    }
+  }, [isAuthenticated, isPublicRoute]);
 
   // 处理导航栏切换
   const handleNavChange = (newTab: string) => {
@@ -809,6 +822,12 @@ export default function App() {
               {/* 菜单触发的导出模态框 */}
               {shouldShowNavigation && ExportModal}
             </ErrorBoundary>
+
+            <RiskProfileModal
+              open={riskAskOpen}
+              onDone={() => setRiskAskOpen(false)}
+              onSkip={() => setRiskAskOpen(false)}
+            />
           </div>
           </ConfigProvider>
         </WebSocketProvider>

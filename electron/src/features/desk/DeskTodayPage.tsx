@@ -11,6 +11,7 @@ import type { DeskToday } from './types';
 import { evidenceRingDrillEntries, pipelineSummary, planDrillEntries, pnlDrillEntries, statusStyle } from './deskModel';
 import { DrillDownDrawer, type DrillEntry } from '../shared/DrillDownDrawer';
 import { UiModeToggle } from '../shared/UiModeToggle';
+import { ComplianceFooter } from '../../components/shared/compliance/ComplianceChrome';
 import { PipelineBar } from './components/PipelineBar';
 import { EvidenceMatrix } from './components/EvidenceMatrix';
 import { PlanCard } from './components/PlanCard';
@@ -160,6 +161,9 @@ const DeskTodayPage: React.FC = () => {
               暂无数据——点击右上角刷新重试
             </div>
           )}
+
+          {/* T-FE-17 免责页脚：交易台为消费默认入口，全流程可见资质边界 */}
+          <ComplianceFooter />
         </div>
       </div>
 

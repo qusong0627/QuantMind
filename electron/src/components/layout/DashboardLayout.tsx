@@ -4,6 +4,7 @@ import { selectCurrentTab } from '../../store/slices/aiStrategySlice';
 import { ModuleGrid } from './ModuleGrid';
 import { NewBacktestCenterPage } from '../../pages/NewBacktestCenterPage';
 import { MarketWeatherBackground } from './MarketWeatherBackground';
+import { ComplianceFooter } from '../shared/compliance/ComplianceChrome';
 
 const UserCenterPage = React.lazy(() => import('../../features/user-center/pages/UserCenterPage'));
 const RealTradingPage = React.lazy(() => import('../../pages/trading/RealTradingPage'));
@@ -17,16 +18,11 @@ interface DashboardLayoutProps {
 export const DashboardLayout: React.FC<DashboardLayoutProps> = ({ modules, onLayoutChange }) => {
   const activeTab = useSelector(selectCurrentTab);
 
-  console.log('DashboardLayout: 当前activeTab', activeTab);
-  console.log('DashboardLayout: 渲染内容区域，activeTab =', activeTab);
-
   const renderContent = () => {
-    console.log('DashboardLayout: renderContent被调用，activeTab=', activeTab);
     switch (activeTab as any) {
       case 'dashboard':
         return <ModuleGrid modules={modules} onLayoutChange={onLayoutChange} />;
       case 'backtest':
-        console.log('DashboardLayout: 渲染回测中心组件');
         return (
           <div className="w-full h-full">
             <NewBacktestCenterPage />
@@ -69,10 +65,17 @@ export const DashboardLayout: React.FC<DashboardLayoutProps> = ({ modules, onLay
     >
       {/* 动态大盘天气背景层 - 仅在仪表盘页面显示 */}
       {showWeatherBackground && <MarketWeatherBackground />}
-      
-      {/* 内容层 - z-10 */}
-      <div className="relative z-10 h-full w-full">
-        {renderContent()}
+
+      {/* 内容层 - z-10；T-FE-17 免责页脚仅在仪表盘首页常驻 */}
+      <div className="relative z-10 h-full w-full flex flex-col">
+        <div className="flex-1 min-h-0">
+          {renderContent()}
+        </div>
+        {activeTab === 'dashboard' && (
+          <div className="shrink-0 px-4 pb-0.5">
+            <ComplianceFooter />
+          </div>
+        )}
       </div>
     </div>
   );

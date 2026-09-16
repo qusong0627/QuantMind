@@ -212,6 +212,11 @@ export const FundOverviewCard: React.FC = () => {
               )}
             </div>
           </div>
+
+          {/* T-FE-17 收益展示规范：区间（截至快照）+ 口径 + 过往不代表未来 */}
+          <div className="mt-1.5 text-[9px] text-slate-400 leading-3 text-center">
+            收益口径：累计收益率对应 total_return_pct，截至 {String(fundInfo.lastUpdate || '').slice(0, 10) || '—'} 快照；过往不代表未来。
+          </div>
         </div>
       </div>
     </Card>
