@@ -446,6 +446,11 @@ def _select_stocks_daily(
 
     # 第2层: 个股分数区间
     df = df[(df["score"] >= config.score_min) & (df["score"] <= config.score_max)]
+    if df.empty:
+        # 空集提前返回（T-P4-01 等价性工具实测抓到）：空 DataFrame 被空布尔 Series
+        # 索引会丢列（pandas 行为），后续 df["symbol"] 直接 KeyError 崩溃——
+        # 真库空带日（如量纲错位期）复现过。
+        return []
 
     # 主板优先
     if config.main_board_only:

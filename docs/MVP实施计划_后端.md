@@ -14,7 +14,7 @@
 | P1 契约化 | 6/6 ✅ | 四契约落地；交易台数字可下钻 |
 | P2 执行统一 | 7/7 ✅ | 回测-模拟一致性 diff=0（执行层，含真实数据）；盘后固定价格窗口；成交落账闭环+影子对照 |
 | P3 策略收敛 | 6/7（余 T-P3-05 门槛总表，依赖 P4 体检） | 策略全生命周期 E2E |
-| P4 选股收敛+评估 | 0/6 | Scanner 替换旧链；体检九项上线 |
+| P4 选股收敛+评估 | 1/6 | Scanner 替换旧链；体检九项上线 |
 | P5+ | — | 见主文档 §12.2 总表（P5 后进入下个迭代再细化） |
 
 ---
@@ -570,7 +570,74 @@
 
 ## P4 选股收敛 + 评估（2 周）
 
-- **T-P4-01** Scanner SPI + 模型信号扫描器迁入（等价性验证）
+### T-P4-01 Scanner SPI + 模型信号扫描器迁入（等价性验证）✅
+> **实施细案（2026-09-16，先侦察后写）**
+> - **侦察结论**：现有"模型信号选股"核心 = `inference_backtest_service._select_stocks_daily`
+>   （个股分数区间+主板+ST/涨跌停+3 天趋势过滤，近乎纯函数：day_scores/industry_map/config/
+>   price_day/history_scores → [{symbol,score,industry,trend}]）+ `_compute_industry_signals`
+>   （行业 Top1/avgTop1/强行业数，纯函数）+ `_market_state`；/selection 端点（1874 行）是其薄封装。
+> - **SPI 设计**：`shared/scanner_spi.py`（纯函数唯一实现）——`Opportunity`（含 sources/strength/
+>   score 0-100/horizon/evidence/expiry/state，对齐设计 §三）+ `merge_opportunities`（多源合并：
+>   同标的并 sources、共振加分、同源冷却期、过期出池）+ 扫描器注册表（声明式：id/name/market/
+>   frequency/scope/开关，仿 scheduler_registry）。
+> - **模型信号扫描器（移入不改写）**：`services/engine/scanners/model_signal_scanner.py` 直接调用
+>   `_select_stocks_daily`（**复用而非复制**——单一实现原则，等价性由构造保证+测试锁定），
+>   输出 Opportunity：strength=rank_pct 分位（T-P1-01 列）、score=round(strength×100)、
+>   evidence={fusion_score, industry, trend}；批级 meta 附行业信号与市场状态（扫描器只发现，
+>   买不买由策略决定——设计铁律）。
+> - **IO 适配**：`load_model_signal_snapshot(trade_date, market)`（engine_signal_scores +
+>   申万行业映射；纯 scan 不碰 DB）+ `run_scan` 编排 + CLI `scripts/run_scanner.py`。
+> - **等价性验证（机构级）**：① 确定性夹具——同快照喂 `_select_stocks_daily` 与扫描器，
+>   逐字段相等（symbol/score/industry/trend）；② **真库等价**——取真实交易日信号跑双侧，
+>   symbol 集合完全一致（无数据 skip）；③ merge 纯函数（共振/冷却/过期）；④ 注册表不变量。
+> - **边界（记录）**：阈值仍为现绝对口径（T-P4-03 改分位，等价性基线不变）；机会池持久化/
+>   盘中扫描/其余六路扫描器归后续批次。
+
+**落地（2026-09-16）**：
+- **SPI 唯一实现** `shared/scanner_spi.py`：`Opportunity`（sources/strength 0..1/score 0-100/horizon/
+  evidence/expiry/state）+ `ScannerSpec` 注册表（注册即生效、独立开关 `SCANNER_MODEL_SIGNAL_ENABLED`、
+  仿 scheduler_registry）+ `merge_opportunities`（同标的并 sources、**多源共振 +8/源封顶 100**、
+  同源冷却期、过期出池，纯函数）+ 稳定序列化。
+- **模型信号扫描器** `services/engine/scanners/`：**移入不改写**——`scan_model_signals` 直接复用
+  `_select_stocks_daily`（单一实现，等价性由构造保证）+ `_compute_industry_signals/_market_state`
+  批级证据（entry_gate 只呈现不拦截）；strength=rank_pct、score=round(rank×100)；
+  `model_signal_loader`（**自动取最新写入身份**——不硬编码键形，双键形教训：日更写 00000001、
+  历史写 system）+ `runner.run_scan` 编排 + CLI `scripts/run_scanner.py`。
+- **等价性验证（机构级）**：确定性夹具逐字段对照（symbol 序列/score/industry/trend 全等且夹具
+  有区分度断言防假绿）+ **真库双侧对照**（最新信号日 9/15，5189 只）双路径一致；merge/冷却/
+  共振/过期纯函数 10 条。
+- **实测修复（等价性工具抓到）**：`_select_stocks_daily` 在**分数带内为空**时因"空 DataFrame ×
+  空布尔索引丢列"（pandas 行为）KeyError 崩溃——真库空带日（量纲错位期）可复现；已加空集提前
+  返回 + 回归测试（该函数为 /selection 与回测引擎共用核心）。
+- **实机冒烟**：CLI 全路扫描 9/15 → 市场状态=熊市 avgTop1=0.0117、0 选中——与已知量纲问题一致
+  （T-P4-03 分位化修复的靶子）；链路（装载→扫描→合并→呈现）端到端通。
+- **证据**：`test_scanner_spi.py` 10/10 + `test_model_signal_scanner.py` 7/7（含真库等价）；
+  backend/tests 全量 **2045 passed**（+17，零新增失败）；services/tests 与基线一致。
+- **边界（记录）**：机会池持久化/盘中扫描/其余六路扫描器归后续批次；v1 扫描器仅注册表一条。
+
+- **T-P4-02** 旧 `/selection` 三层过滤退休（声明 + 引导到新入口，Claude skills 同步改）
+**落地（2026-09-16）**：
+- **SPI 唯一实现** `shared/scanner_spi.py`：`Opportunity`（sources/strength 0..1/score 0-100/horizon/
+  evidence/expiry/state）+ `ScannerSpec` 注册表（注册即生效、独立开关 `SCANNER_MODEL_SIGNAL_ENABLED`、
+  仿 scheduler_registry）+ `merge_opportunities`（同标的并 sources、**多源共振 +8/源封顶 100**、
+  同源冷却期、过期出池，纯函数）+ 稳定序列化。
+- **模型信号扫描器** `services/engine/scanners/`：**移入不改写**——`scan_model_signals` 直接复用
+  `_select_stocks_daily`（单一实现，等价性由构造保证）+ `_compute_industry_signals/_market_state`
+  批级证据（entry_gate 只呈现不拦截）；strength=rank_pct、score=round(rank×100)；
+  `model_signal_loader`（**自动取最新写入身份**——不硬编码键形，双键形教训：日更写 00000001、
+  历史写 system）+ `runner.run_scan` 编排 + CLI `scripts/run_scanner.py`。
+- **等价性验证（机构级）**：确定性夹具逐字段对照（symbol 序列/score/industry/trend 全等且夹具
+  有区分度断言防假绿）+ **真库双侧对照**（最新信号日 9/15，5189 只）双路径一致；merge/冷却/
+  共振/过期纯函数 10 条。
+- **实测修复（等价性工具抓到）**：`_select_stocks_daily` 在**分数带内为空**时因"空 DataFrame ×
+  空布尔索引丢列"（pandas 行为）KeyError 崩溃——真库空带日（量纲错位期）可复现；已加空集提前
+  返回 + 回归测试（该函数为 /selection 与回测引擎共用核心）。
+- **实机冒烟**：CLI 全路扫描 9/15 → 市场状态=熊市 avgTop1=0.0117、0 选中——与已知量纲问题一致
+  （T-P4-03 分位化修复的靶子）；链路（装载→扫描→合并→呈现）端到端通。
+- **证据**：`test_scanner_spi.py` 10/10 + `test_model_signal_scanner.py` 7/7（含真库等价）；
+  backend/tests 全量 **2045 passed**（+17，零新增失败）；services/tests 与基线一致。
+- **边界（记录）**：机会池持久化/盘中扫描/其余六路扫描器归后续批次；v1 扫描器仅注册表一条。
+
 - **T-P4-02** 旧 `/selection` 三层过滤退休（声明 + 引导到新入口，Claude skills 同步改）
 - **T-P4-03** 阈值分位化全量替换 + 量纲回归测试
 - **T-P4-04** 买入前 K 线过滤（移植 KHunter 4 规则）
