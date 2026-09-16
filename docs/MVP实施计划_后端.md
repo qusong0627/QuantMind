@@ -191,8 +191,35 @@
   ② sim_orders `client_order_id` 唯一索引仍未启用（投影幂等查全路径未验证，硬约束会把重复单变 500）；
   ③ runner 专用只读 DB 账号（T-P0-03 遗留）
 
-### T-P1-07 资本注入调整 + 快照市场维度（P0-05 遗留）
+### T-P1-07 资本注入调整 + 快照市场维度（P0-05 遗留）✅
 新市场账户**首日**的 `today_pnl` 不能把种子算成当日盈利：① 快照表加 `market` 列（前端注释里的"方案 B2"，解决非 CN 面板无市场维度）；② `get_baselines` 按市场对齐日初基线，或按"新账户出现的当日将种子计入基线"。测试：新建市场账户当日 today_pnl ≈ 0。
+
+**落地记录（2026-09-16）**：
+- **契约迁移** `shared/fund_snapshot_contract.py`：加 `market VARCHAR(16) NOT NULL DEFAULT 'ALL'`；
+  唯一键升级 (tenant,user,date,market)——**索引创建与旧三列唯一约束移除同事务原子生效**
+  （避免"旧约束还在、多市场行已写"的中间态）；历史行回填 'ALL'（等价原合并口径）。
+  安全化同 ledger 契约（预检→零 DDL 快路径→lock_timeout=3s→失败不阻断，走旧口径兜底）。
+- **采集双写**：`capture_all` 写 单市场行（CN/HK/…）+ **ALL 合并行**（同批 upsert 自愈，
+  ALL 恒为各市场之和）；旧口径实现保留为 `_capture_all_legacy`（契约未就绪时兜底）。
+- **基线唯一实现** `compute_market_baselines`（纯函数）：单市场=昨日行，**新开市场首日=其种子**
+  （注入不进 today_pnl），种子未知=当日总资产（不声称未知盈亏）；ALL=各市场规则之和
+  （= T-P1-07 ② "新账户出现的当日将种子计入基线"的完整形态）；月初语义与旧实现同日历口径。
+- **读取方显式市场口径**（防同日多行混排）：desk 盈亏卡/影子对照/策略监控兜底/体检 C04 取
+  **ALL**；账户卡净值取 **CN**（原 CN-only 豁免真实化）；reset / OCR 同步的 DELETE 按市场收窄
+  （重置单一市场不再清掉其它市场曲线）；`/simulation/account` 非 CN 用**账户自身种子**为
+  initial_equity（settings 无市场维度，此前把 CN settings 当其它市场初始）。
+- **前端 B2 收尾**：`marketContent` 非 CN 图表面板全量恢复（删除 NON_CN_CHARTS_PANELS）；
+  `getSimulationDailySnapshots(days, market)` 传当前市场；持仓分布回退源（无市场维度）非 CN
+  收口（宁可空态不串市场）。
+- **实测**：迁移后真机采集——user 1 三行（CN 1,010,160.75 / FUTURES 1,000,000 / ALL 2,010,160.75），
+  **FUTURES 新开 100 万种子 today_pnl = 0**（修复前 ALL 行会显示 +101 万）；API 侧
+  `?market=CN/ALL` 序列正确；账户端点 CN/FUTURES 各自 initial/today 正确；浏览器探针非 CN
+  "待补齐市场维度"提示已移除。
+- **测试 16/16**（test_fund_snapshot_multimarket）：基线纯函数矩阵（新市场/未知种子/月初/月中）+
+  capture 真库 E2E（双市场三行 + 种子不进盈亏 + Σ 种子守恒）+ get_baselines 市场感知真库用例 +
+  契约真库（列/索引/旧约束移除/幂等）+ 读取方源守卫。
+- **迁移日口径如实**：历史行无市场维度无法拆分，单市场 today_pnl 在**迁移当日**以种子为基线
+  （≈累计盈亏）；次日有单市场历史后即按昨日口径，自愈。
 
 ### T-P1-05 今日交易台后端聚合 API ✅
 - **内容**：`GET /api/v1/desk/today`（api 服务）——一屏闭环：管线四步 + 信号（BUY/SELL/HOLD +
@@ -396,9 +423,28 @@
 - **⑤ 交易台**：desk 新增 `shadow` 块（读最近日报不重算，不可用时如实标注不伪造）。
 - **实测修复（联调发现）**：`_raw_client` 客户端形态兼容——CLI 手动重跑传入原生客户端（无 `.client` 包装）
   曾致"跑成功但落盘静默 no-op"；schedule_ctl 重跑统一走 trade 客户端（与 worker 同库）。
-- **记录在案（不做）**：`sim_orders` 唯一索引仍缓办（T-P2-08：各写路径 IntegrityError→重复语义需先统一，
-  否则硬约束变 500——本批先以 C05c 重复扫描保可见性）；策略级跟踪误差（快照表无 strategy 维度）；
-  历史 Redis-only 虚拟成交回填（无源）。
+- **记录在案**：~~`sim_orders` 唯一索引缓办~~ → **T-P2-08 已落地（2026-09-16 晚，见下）**；
+  策略级跟踪误差（快照表无 strategy 维度）；历史 Redis-only 虚拟成交回填（无源）。
+
+### T-P2-08 sim_orders 幂等键唯一索引 ✅（2026-09-16）
+- **索引**：`uq_sim_orders_scope_client_order_id`——`(tenant_id, user_id, client_order_id)
+  WHERE client_order_id IS NOT NULL` **部分唯一索引**；风控直插单 cid 恒 NULL 不受覆盖
+  （其幂等靠 Redis already_fired，语义未变）；db_init.sql 新装同步建索引。
+- **迁移前置（不静默删金融行）**：`order_contract.ensure_sim_order_unique_index_async` ——
+  pg_indexes 预检 → **存量重复预检：有重复则拒绝建索引并 ERROR 点名**（交修复脚本/人工）→
+  仅新建才 DDL（lock_timeout=3s）→ 失败只告警（无索引=旧语义，业务不中断，C05c 体检保可见性）。
+  配套 `scripts/repair_sim_order_duplicates.py`（DRY-RUN 默认；去重规则=保留最早行、后代行
+  cid 置空 + `[DUP-OF:…]` 标记留审计；**有成交的重复行跳过交人工**，不自动处理）。
+- **写入侧防 500（三层收口）**：`SimOrderService.create_order` 捕获 IntegrityError → 按幂等键
+  查台账本体 → 抛 `DuplicateSimOrderError`；三个调用方（from_bar 路由 / 即时提交链 /
+  HTTP 下单端点）各自转既有 duplicate 语义（HTTP 重放返回既有单，池化幂等）。
+- **幂等查表纠偏（历史断链根因）**：路由/提交链预检**先查 sim_orders 本体**（投影可能为空），
+  投影降为旧数据兜底；调度器幂等判定由 `remarks` 前缀改查 **cid 列**
+  （mark_rejected 覆写 remarks 会抹掉前缀标记——旧实现下幂等会断）。
+- **测试**：`test_order_contract` **12/12**——源守卫（预检/lock_timeout/不阻断/四调用方转
+  duplicate）+ **真库 E2E**：建索引（带 WHERE）→ 同键二次 create_order → DuplicateSimOrderError
+  且库内单行 → 清理；DTO/列上限口径注记（SimOrderCreate max_length=64 与列宽 100 的既有差异，
+  幂等键最长实测 `sim-{run}-{sym}-{side}` < 64，暂不动）。
 - **证据**：新套件 `test_shadow_compare.py` **18/18** + `test_shadow_compare_service.py` **13/13**（含真库 E2E：
   60bps 偏差/成交率/双键形跟踪误差/clean 行落盘去重）；`backend/tests` 全量 **1957 passed**（基线 1921，
   +36 新增、修复 1 条冻结日期旧测试，**集合差零新增失败**）；services/tests 591 passed 与基线一致；
@@ -959,7 +1005,17 @@
   → 体检留档所指回测曲线 → 皆无记 skipped 不造假）+ worker `health_recheck_service.py`
   （每月 1–7 日窗口、3600s 轮询、`health:recheck:done:{YYYY-MM}` 幂等、心跳入注册表）+
   `schedule_ctl run health_recheck` 手动重跑；**结论退化（A/B→L/E）→ Redis 告警键**
-  `health:recheck:alert:*`（TTL 90 天）+ ERROR 日志（通知中心接线留前端批次）。
+  `health:recheck:alert:*`（TTL 90 天）+ ERROR 日志；**通知中心接线已落地（2026-09-16 晚，
+  见下）**。
+- **通知接线（2026-09-16）**：退化分支追加 `_publish_degradation_notification` ——
+  PG notifications + WS 实时推送（best-effort，Redis 告警键与 ERROR 日志仍是兜底证据）。
+  **收件人经 users 表实查解析**（策略 owner 为 int 归一形态 "1"，notifications FK 指向原始
+  sub "00000001"——直接发会 FK 静默失败）；新增通知类型 **health**（L→error/E→warning，
+  action_url=/strategy），publisher 白名单登记 + 偏好映射 strategy_alerts；前端类型层、
+  两处白名单、通知卡（第 5 统计格 + 图标）与点击导航（策略类通知此前无分支=点了不跳，
+  现落策略管理模块）全套接线。测试：`test_backtest_health` 15/15（+源守卫+**真库 E2E**：
+  收件人解析、type=health 不降级、level/action_url 断言、清理）+ 前端组件测试 2/2
+  （体检统计格渲染、点击落 strategy-management）。
 - **实机验收**：真类 `BacktestPersistence.save_run` 全链（合成回测行）→ result_json.health
   **A/100**（窗口 2024-01-02→2024-10-27，真库基准+regime）+ eval_scores 留档回读 + 清理；
   非法窗口如实降级 E + 告警日志（不造假）。
