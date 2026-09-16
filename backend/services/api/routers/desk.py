@@ -314,6 +314,272 @@ async def _async_unavailable(reason: str) -> dict[str, Any]:
     return {"available": False, "reason": reason, "source": "desk:toggle"}
 
 
+# ── T-FE-16 全链证据矩阵（设计《评估与打分体系》§七：每环有数、每数可验、每验留档）──
+
+EVIDENCE_RINGS: tuple[tuple[str, str, str, str], ...] = (
+    # (key, 环节, 证据产物, 频率)
+    ("data", "数据", "数据质检报告", "每日"),
+    ("feature", "特征", "特征体检表", "每日/训练前"),
+    ("model", "模型", "模型卡", "训练后+每日滚动"),
+    ("signal", "信号", "信号日报", "每日"),
+    ("backtest", "回测", "体检报告", "每次回测"),
+    ("simulation", "模拟", "模拟对照报告", "每日"),
+    ("execution", "执行", "执行报告", "每日"),
+    ("ledger", "账本", "对账报告", "每日"),
+    ("strategy", "策略", "策略卡", "每周+事件触发"),
+    ("system", "系统", "健康卡", "每日"),
+)
+
+# 环节 ← 体检断言映射（除以下外，其余环节证据来自评估留档/日报/文件新鲜度）
+_RING_HEALTH_IDS: dict[str, tuple[str, ...]] = {
+    "data": ("C08",),
+    "signal": ("C01", "C02"),
+    "ledger": ("C04", "C05", "C06"),
+    "system": ("C03", "C07", "C09", "C10"),
+}
+
+
+def build_evidence_rings(sources: dict[str, Any]) -> list[dict[str, Any]]:
+    """十环证据矩阵（纯函数）→ 每环 {key, label, artifact, frequency, level, summary, items}。
+
+    纪律：**无证据 ≠ 绿**——证据源缺失/为空一律 `no_evidence`（验收：任一环节"无证据"可见）；
+    环级状态 = 各证据项最差（fail > warn > ok > no_evidence 仅当无任何项）。
+    """
+    health_items: dict[str, Any] = sources.get("health_items") or {}
+    eval_summary: dict[str, Any] = sources.get("eval_summary") or {}
+    features_latest: str | None = sources.get("features_latest")
+    signals: dict[str, Any] = sources.get("signals") or {}
+    execution: dict[str, Any] = sources.get("execution") or {}
+    shadow: dict[str, Any] = sources.get("shadow") or {}
+
+    severity = {"fail": 3, "warn": 2, "ok": 1, "no_evidence": 0}
+    rings: list[dict[str, Any]] = []
+    for key, label, artifact, frequency in EVIDENCE_RINGS:
+        items: list[dict[str, Any]] = []
+
+        for cid in _RING_HEALTH_IDS.get(key, ()):
+            item = health_items.get(cid)
+            if item is not None:
+                items.append(
+                    {
+                        "id": cid,
+                        "name": str(item.get("name") or cid),
+                        "level": str(item.get("level") or "warn"),
+                        "detail": str(item.get("detail") or ""),
+                        "suggestion": str(item.get("suggestion") or ""),
+                        "source": f"scripts/diagnose/health.py:{cid}",
+                    }
+                )
+
+        if key == "feature":
+            trade_date = str(signals.get("trade_date") or "").replace("-", "")
+            if features_latest:
+                lag = "同交易日" if features_latest == trade_date else "滞后"
+                items.append(
+                    {
+                        "id": "feature_freshness",
+                        "name": "特征分区新鲜度",
+                        "level": "ok" if features_latest == trade_date else "warn",
+                        "detail": f"最新特征分区 {features_latest}，信号日 {trade_date or '—'}（{lag}）",
+                        "suggestion": "" if features_latest == trade_date else "检查特征计算/同步任务（滞后会断推理）",
+                        "source": "fs:6_ml_datasets/features_daily/dt=*",
+                    }
+                )
+        elif key == "model":
+            row = eval_summary.get("model")
+            items.append(
+                {
+                    "id": "model_scores",
+                    "name": "模型评分留档",
+                    "level": "ok" if row else "no_evidence",
+                    "detail": (
+                        f"模型卡 {row['count']} 个，最新 {row['latest_date']}"
+                        + (f"（最差 {row['worst_grade']}）" if row.get("worst_grade") else "")
+                    )
+                    if row
+                    else "eval_scores 无模型评分（EOD 评分任务未运行或尚无模型）",
+                    "suggestion": "" if row else "运行 EOD 评分任务或先训练模型",
+                    "source": "db:eval_scores(object_type=model)",
+                }
+            )
+        elif key == "backtest":
+            row = eval_summary.get("strategy_health")
+            items.append(
+                {
+                    "id": "backtest_health",
+                    "name": "回测体检留档",
+                    "level": "ok" if row else "no_evidence",
+                    "detail": (
+                        f"体检留档 {row['count']} 份，最新 {row['latest_date']}"
+                        + (f"（最新结论 {row['latest_grade']}）" if row.get("latest_grade") else "")
+                    )
+                    if row
+                    else "尚无体检留档（回测完成后自动体检写入）",
+                    "suggestion": "" if row else "跑一次策略回测即自动生成体检报告",
+                    "source": "db:eval_scores(object_type=strategy_health)",
+                }
+            )
+        elif key == "simulation":
+            items.append(
+                {
+                    "id": "shadow_report",
+                    "name": "模拟对照日报",
+                    "level": "ok" if shadow.get("available") else "no_evidence",
+                    "detail": (
+                        f"{shadow.get('date')} 日报：成交率 {(shadow.get('fill') or {}).get('fill_rate')}"
+                        if shadow.get("available")
+                        else str(shadow.get("reason") or "无影子对照日报")
+                    ),
+                    "suggestion": "" if shadow.get("available") else "无真单镜像时该环天然无证据（影子需 REAL 轨迹）",
+                    "source": "redis:mirror:shadow:{date}（T-P2-06）",
+                }
+            )
+        elif key == "execution":
+            rejected = int(execution.get("rejected") or 0)
+            filled = int(execution.get("filled") or 0)
+            total = int(execution.get("sim_count") or 0) + int(execution.get("real_count") or 0)
+            items.append(
+                {
+                    "id": "execution_today",
+                    "name": "今日执行",
+                    "level": "warn" if rejected > 0 else "ok",
+                    "detail": f"委托 {total} 笔（成交 {filled} / 拒单 {rejected}）"
+                    + ("" if total else "——今日无委托（含盘前，正常空态）"),
+                    "suggestion": "核查拒单原因（资金/涨跌停/风控）" if rejected > 0 else "",
+                    "source": "db:sim_orders+orders（今日）",
+                }
+            )
+        elif key == "strategy":
+            row = eval_summary.get("strategy")
+            items.append(
+                {
+                    "id": "strategy_scores",
+                    "name": "策略评分留档",
+                    "level": "ok" if row else "no_evidence",
+                    "detail": f"策略卡 {row['count']} 份，最新 {row['latest_date']}" if row else "eval_scores 无策略评分",
+                    "suggestion": "" if row else "运行 EOD 评分任务（策略卡按回测曲线评分）",
+                    "source": "db:eval_scores(object_type=strategy)",
+                }
+            )
+
+        if not items:
+            level = "no_evidence"
+            summary = "该环节暂无证据源接入"
+        else:
+            level = max((str(i["level"]) for i in items), key=lambda lv: severity.get(lv, 0))
+            summary = "；".join(str(i["detail"])[:60] for i in items if i["detail"])[:160]
+        rings.append(
+            {
+                "key": key,
+                "label": label,
+                "artifact": artifact,
+                "frequency": frequency,
+                "level": level,
+                "summary": summary,
+                "items": items,
+            }
+        )
+    return rings
+
+
+async def _collect_evidence(
+    *,
+    health_items: dict[str, Any],
+    signals: dict[str, Any],
+    execution: dict[str, Any],
+    shadow: dict[str, Any],
+) -> dict[str, Any]:
+    """十环证据采集（只做轻量补充查询：评估留档摘要 + 特征分区新鲜度）。"""
+    eval_summary: dict[str, Any] = {}
+    try:
+        from sqlalchemy import text as _t2
+
+        async with get_session(read_only=True) as session:
+            rows = (
+                await session.execute(
+                    _t2(
+                        "SELECT object_type, count(*) AS n, max(snapshot_date) AS latest FROM eval_scores "
+                        "WHERE object_type IN ('model','strategy','strategy_health') "
+                        "GROUP BY object_type"
+                    )
+                )
+            ).mappings().all()
+            latest_rows = (
+                await session.execute(
+                    _t2(
+                        "SELECT DISTINCT ON (object_type) object_type, grade FROM eval_scores "
+                        "WHERE object_type IN ('strategy_health') "
+                        "ORDER BY object_type, snapshot_date DESC, created_at DESC"
+                    )
+                )
+            ).mappings().all()
+        # 模型卡"最差评级"：各模型最新一条的快照评级取最差（A<B<C<D 字典序即档位序）
+        grades = [str(g) for g in await _model_grades() if g]
+        summary_map: dict[str, Any] = {}
+        for r in rows:
+            summary_map[str(r["object_type"])] = {
+                "count": int(r["n"] or 0),
+                "latest_date": str(r["latest"]) if r["latest"] else None,
+                "worst_grade": min(grades) if r["object_type"] == "model" and grades else None,
+                "latest_grade": None,
+            }
+        for r in latest_rows:
+            item = summary_map.setdefault(str(r["object_type"]), {"count": 0, "latest_date": None})
+            item["latest_grade"] = str(r["grade"]) if r["grade"] else None
+        eval_summary = summary_map
+    except Exception as exc:  # noqa: BLE001 - 证据采集失败按"无证据"呈现
+        logger.warning("desk evidence eval query failed: %s", exc)
+
+    features_latest: str | None = None
+    try:
+        import glob as _glob
+        import os as _os
+
+        root = _os.getenv("QM_QUANTDB_DATA_DIR") or "/data/quantdb"
+        parts = sorted(_glob.glob(_os.path.join(root, "6_ml_datasets", "features_daily", "dt=*")))
+        if parts:
+            features_latest = _os.path.basename(parts[-1]).replace("dt=", "")
+    except Exception:  # noqa: BLE001
+        features_latest = None
+
+    rings = build_evidence_rings(
+        {
+            "health_items": health_items,
+            "eval_summary": eval_summary,
+            "features_latest": features_latest,
+            "signals": signals,
+            "execution": execution,
+            "shadow": shadow,
+        }
+    )
+    no_evidence = [r["label"] for r in rings if r["level"] == "no_evidence"]
+    return {
+        "rings": rings,
+        "no_evidence": no_evidence,
+        "source": "体检断言+eval_scores 留档+对照日报+特征分区（每格可下钻原文）",
+    }
+
+
+async def _model_grades() -> list[Any]:
+    """模型卡评级列表（判断最差档用；失败返回空）。"""
+    try:
+        from sqlalchemy import text as _t3
+
+        async with get_session(read_only=True) as session:
+            rows = (
+                await session.execute(
+                    _t3(
+                        "SELECT DISTINCT ON (object_id) grade FROM eval_scores "
+                        "WHERE object_type='model' AND grade IS NOT NULL "
+                        "ORDER BY object_id, snapshot_date DESC, created_at DESC"
+                    )
+                )
+            ).fetchall()
+        return [r[0] for r in rows]
+    except Exception:  # noqa: BLE001
+        return []
+
+
 def parse_exclude_symbols(raw: str | None, max_items: int = 50) -> set[str]:
     """逗号分隔排除集解析（纯函数）：去空/去重/上限截断。"""
     if not raw:
@@ -533,5 +799,11 @@ async def desk_today(
             "pnl": pnl,
             "shadow": shadow,
             "health": health_summary,
+            "evidence": await _collect_evidence(
+                health_items=health_items,
+                signals=signals,
+                execution=execution,
+                shadow=shadow,
+            ),
         },
     }
