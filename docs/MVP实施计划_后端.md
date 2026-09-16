@@ -448,7 +448,48 @@
   （2 标的 × 12 交易日，买/持有/卖），实测通过（未被 skip）；② **市价单不顺延语义统一**——回测
   `_process_orders` 对不可成交（涨停/跌停/停牌/无行情）的市价单即时拒单（限价单保持挂单顺延），
   与模拟"当日拒单"对齐，平价夹具断言升级为"两侧均不成交 + 回测状态=REJECTED"。
-- **T-P2-05c（列后续）**：策略层回放全链路（同一策略对象驱动回测 vs 时光回放 + 真实数据端到端）。
+- **T-P2-05c ✅（2026-09-16 深夜）**：策略层回放全链路平价落地（见下）。
+
+### T-P2-05c 策略层回放平价（先细案，2026-09-16 深夜）
+> **侦察结论**：① 回放 `ReplayDayRunner.run_day` 全链 = 真实 PG 会话 + Redis 回放账户 +
+> ashare_matcher，信号经 `ReplaySignalLoader` 直读模型 pred.parquet（**T+1 语义**：T 日信号
+> = T-1 数据日分数，与 engine_signal_scores 同口径）；② 回测 `BacktestEngine` 逐日循环：
+> 填昨日队列单（**当日 close ± 滑点**）→ 权益记录 → 策略回调；费用/申报/涨跌停经 T-P2-02
+> 收敛同源；③ **成交约定天然不同**：回放默认 `price_mode='open'`（产品语义：昨收算信号、
+> 次日开盘可交易），回测恒为 T+1 close——平价口径须**显式对齐**（回放侧 MatchConfig 改
+> close + slippage_bps=10 对齐引擎 0.001）；④ 引擎 Portfolio 无 T+1 可卖量概念，但回放
+> `unlock()` 发生在日初读账户前 → **两侧决策时可见量均=全量**，无需建模锁定。
+>
+> **细案（平价夹具 = `test_strategy_replay_backtest_parity.py`，进 CI 需行情可用）**：
+> 1. 同一输入：真实窗口（最近 ~12 交易日）× 固定 3 标的 × **同一批生产信号**（同一 loader，
+>    同一过滤后的信号对象列表）+ 同一 initial_cash/参数（topk=2/n_drop=1/rebalance_days=2/
+>    equal/lot=100）；
+> 2. 回放侧：真会话（ReplaySession 行 + ReplayAccountManager.init）+ `run_day` 逐日
+>    （stop_loss=None，MatchConfig(price_mode='close', slippage_bps=10)）；
+> 3. 回测侧：`BacktestEngine(slippage_rate=0.001, risk_management=False)` + **决策适配器**
+>    `_ReplayParityStrategy`（BaseStrategy）——在 D 日回调时调用**同一** `runner._build_orders`
+>    （signals_{D+1} + bars_{D+1} + 引擎组合镜像 account_data + day_index=D），卖先买后入队，
+>    由引擎按 T+1 close 成交——决策信息集与回放 D+1 步完全一致（无前视）；
+> 4. 断言：逐成交日 diff=0（symbol/side/数量/价格 round4/三项费用逐分）；期末账户
+>    （现金/持仓量/加权成本/总权益）一致；每一 K：引擎 equity_curve[k+1]（post-fill(k)×close(k+1)）
+>    ≈ 回放第 k 日快照重建值——账本级全链平价；
+> 5. 清理：replay 各表按 session_id 删除 + Redis 回放账户键清除。
+
+**落地记录（2026-09-16 深夜）**：`backend/tests/test_strategy_replay_backtest_parity.py` ✅
+- 实现按细案 1:1：`_UniverseLoader`（两侧共享同一批生产信号对象与缓存）、
+  `_ReplayParityStrategy`（BaseStrategy 适配器，D 日回调复用回放 `_build_orders` 计算
+  D+1 订单、卖先买后入队，组合镜像 = 引擎 post-fill 状态）；回放侧真会话行 +
+  `ReplayAccountManager.init` + MatchConfig(close, 10bps)。
+- **实测（真库真行情真模型分数）**：窗口 2026-08-18..2026-09-02 × 6 标的（600036.SH/
+  000001.SZ/600519.SH/601318.SH/600030.SH/000858.SZ，topk=3/n_drop=2/每日调仓）——
+  **13 笔成交逐笔 diff=0**（symbol/side/数量/价格 round4/三项费用逐分）+ **期末账户一致**
+  （现金/持仓量/总权益，1 分容差）+ **逐日权益交叉核对一致**（引擎 T+1 前置口径 =
+  回放 T 后置口径，2 分容差）；运行 ~96s，数据/模型缺失自动 skip。
+- **平价口径结论（写死为契约）**：两引擎成交约定不同（回放默认 open / 回测恒 T+1 close）——
+  策略层平价须显式对齐（本次用 close+10bps）；回放默认 open 是产品语义，不动。
+- **边界（记录在案）**：① 信号裁剪到平价 universe（生产分数子集，两侧同一批对象）；
+  ② code 会话（SDK）路径的策略层平价未覆盖（回放侧 code_runner 与回测侧适配器形态不同），
+  归后续批次；③ 未包含停牌/涨跌停极端日的强制路径（执行层平价已在 T-P2-05 覆盖）。
 
 ### T-P2-06 模拟盘成交即落账 + 影子对照 ✅
 成交落账闭环 + shadow 对照报告（模拟-实盘偏差指标）。
