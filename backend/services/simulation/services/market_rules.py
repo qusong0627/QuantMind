@@ -255,6 +255,47 @@ def normalize_order_quantity(
     return (qty // lot) * lot
 
 
+# ── 单笔申报数量上限（2026-07-06 新规口径；官方规则原文核实 2026-09-16）──
+# 主板/创业板：限价 ≤30 万股、市价 ≤15 万股；科创板：限价 ≤10 万股、市价 ≤5 万股；
+# 盘后固定价格（全 A 股/ETF）：≤100 万股。非 CN 不设上限。
+_CAP_CONTINUOUS_LIMIT = 300_000
+_CAP_CONTINUOUS_MARKET = 150_000
+_CAP_STAR_LIMIT = 100_000
+_CAP_STAR_MARKET = 50_000
+_CAP_AFTER_HOURS = 1_000_000
+
+
+def order_quantity_cap(
+    symbol: str,
+    *,
+    order_type: str | None = None,
+    session: str | None = None,
+    market: Market | str | None = None,
+) -> int | None:
+    """单笔申报数量上限（唯一实现）；非 CN 返回 None（不设限）。
+
+    - 盘后固定价格会话：统一 100 万股（不分板块/类型）；
+    - 科创板（688/689）：限价 10 万 / 市价 5 万；
+    - 主板/创业板：限价 30 万 / 市价 15 万；
+    - order_type 缺失（校验点拿不到类型）→ 取该板块**最宽松档（限价档）**，
+      宁可不误拒（类型在别的边界另行收敛）。
+    """
+    if isinstance(market, Market):
+        mkt = market
+    elif market is None:
+        mkt = infer_market(symbol)  # 未传市场 → 按标的推断（HK/US 不设限）
+    else:
+        mkt = normalize_market(market)
+    if mkt != Market.CN:
+        return None
+    if str(session or "").lower() == SESSION_AFTER_HOURS_FIXED:
+        return _CAP_AFTER_HOURS
+    ot = str(order_type or "").lower()
+    if is_star_market(symbol):
+        return _CAP_STAR_MARKET if ot == "market" else _CAP_STAR_LIMIT
+    return _CAP_CONTINUOUS_MARKET if ot == "market" else _CAP_CONTINUOUS_LIMIT
+
+
 def normalize_market(market: Market | str | None) -> Market:
     if isinstance(market, Market):
         return market

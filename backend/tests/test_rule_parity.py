@@ -59,6 +59,8 @@ def test_fee_parity_backtest_engine():
     assert (buy["commission"], buy["stamp_duty"], buy["transfer_fee"]) == (c, s, t)
     assert buy["total_fee"] == round(c + s + t, 2)
 
+    # T+1：卖出前先解锁（模拟"次日"；直调 _execute_order 绕过了日循环的 unlock_t1）
+    engine.portfolio.unlock_t1()
     # 卖出 100 股 → 含印花税，逐分相等
     engine._execute_order(
         Order(symbol="SH600036", side=OrderSide.SELL, order_type=OrderType.MARKET, quantity=100),

@@ -731,6 +731,15 @@ class SimulationExecutionEngine:
                 success=False, message="Limit-down locked, sell order cannot be filled"
             )
 
+        # T-P2-07：会话解析上移（申报上限依赖会话：盘后固定价格统一 100 万股上限）
+        from backend.services.simulation.services.market_rules import (
+            SESSION_AFTER_HOURS_FIXED,
+        )
+
+        after_hours_fixed = (
+            _resolve_match_session(market=rules.market.value) == SESSION_AFTER_HOURS_FIXED
+        )
+
         # A股申报数量校验（T-P2-02：唯一实现；科创板 200 股起、1 股递增，其余 100 整数倍）
         if rules.market.value == "CN" and side == "buy":
             from backend.services.simulation.services.market_rules import (
@@ -752,16 +761,32 @@ class SimulationExecutionEngine:
                     ),
                 )
 
+        # 单笔申报数量上限（2026-07-06 新规；唯一实现；买卖双侧）
+        if rules.market.value == "CN":
+            from backend.services.simulation.services.market_rules import (
+                order_quantity_cap,
+            )
+
+            cap = order_quantity_cap(
+                order.symbol,
+                order_type=getattr(
+                    getattr(order, "order_type", None), "value", None
+                ),
+                session=SESSION_AFTER_HOURS_FIXED if after_hours_fixed else None,
+                market=rules.market,
+            )
+            if cap is not None and float(order.quantity or 0) > cap:
+                return ExecutionResult(
+                    success=False,
+                    message=(
+                        f"单笔申报数量超过上限（{order.symbol}: {order.quantity} > {cap} 股；"
+                        "主板/创业板限价30万·市价15万，科创板限价10万·市价5万，盘后100万股）"
+                    ),
+                )
+
         # T-P2-07：盘后固定价格会话 —— 市价单成交价=收盘价（取价链结果）、无滑点；
         # 限价分支现语义（买<市价拒/卖>市价拒/按市价成交）即盘后申报价有效性规则本身，零改动。
-        from backend.services.simulation.services.market_rules import (
-            SESSION_AFTER_HOURS_FIXED,
-        )
-
-        after_hours_fixed = (
-            _resolve_match_session(market=rules.market.value)
-            == SESSION_AFTER_HOURS_FIXED
-        )
+        # （会话判定已上移至申报数量校验之前——申报上限依赖会话）
         if after_hours_fixed:
             logger.info(
                 "[RULE:AFTER-HOURS] %s 盘后固定价格会话下单（基准价 %.4f）order_type=%s",

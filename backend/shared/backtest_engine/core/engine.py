@@ -292,6 +292,8 @@ class BacktestEngine:
                 continue
 
             self.current_date = date
+            # T+1 账本模型：日初解锁（昨日买入今日可卖）；先于当日成交处理
+            self.portfolio.unlock_t1()
             # 为兼容单标的场景，当前价格使用首个标的收盘价
             first_symbol = next(iter(daily_market.keys()))
             self.current_price = daily_market[first_symbol]["close"]
@@ -477,7 +479,17 @@ class BacktestEngine:
                 continue
             prev_close = self._get_prev_close(order.symbol)
             if self._can_execute_order(order, symbol_data, prev_close):
-                self._execute_order(order, symbol_data)
+                try:
+                    self._execute_order(order, symbol_data)
+                except ValueError as exc:
+                    # 业务性拒单（T+1 不可卖/现金或持仓不足）：记录拒绝，不中断整轮回测
+                    order.status = OrderStatus.REJECTED
+                    order.reject_reason = str(exc)
+                    logger.warning(
+                        "订单被拒绝: %s",
+                        exc,
+                        extra={"order_id": order.order_id, "symbol": order.symbol},
+                    )
             elif order.order_type == OrderType.MARKET:
                 order.status = OrderStatus.REJECTED
                 order.reject_reason = "当日不可成交（涨跌停/停牌），市价单不顺延"
@@ -596,6 +608,27 @@ class BacktestEngine:
                 )
                 return
             order.quantity = float(_floored)
+        # 单笔申报数量上限（2026-07-06 新规；market_rules 唯一实现；买卖双侧）
+        if str(_rules.market.value) == "CN":
+            from backend.services.simulation.services.market_rules import (
+                order_quantity_cap,
+            )
+
+            _cap = order_quantity_cap(
+                order.symbol,
+                order_type=str(getattr(order.order_type, "value", "") or ""),
+                market=_rules.market,
+            )
+            if _cap is not None and float(order.quantity) > _cap:
+                order.status = OrderStatus.REJECTED
+                order.reject_reason = (
+                    f"单笔申报数量超过上限（{order.quantity} > {_cap} 股）"
+                )
+                logger.warning(
+                    "订单被拒绝: 单笔申报数量超过上限",
+                    extra={"order_id": order.order_id, "symbol": order.symbol},
+                )
+                return
         _commission, _stamp_duty, _transfer_fee = _rules.compute_fee_breakdown(
             order.quantity,
             execution_price,

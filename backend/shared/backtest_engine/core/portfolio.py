@@ -18,6 +18,9 @@ class Position:
         """
         self.symbol = symbol
         self.quantity = 0.0
+        # T+1 账本模型（记录在案项收口）：可卖量——当日买入次日才解锁；
+        # 决策/撮合与模拟侧 lua 锁定同一语义（同日买→卖被拒，不是静默 T+0）
+        self.available_quantity = 0.0
         self.avg_cost = 0.0
         self.market_value = 0.0
         self.unrealized_pnl = 0.0
@@ -79,10 +82,20 @@ class Position:
 
         return realized_pnl
 
+    def unlock_t1(self) -> None:
+        """日初解锁：昨日及更早买入的持仓转为可卖（A 股 T+1）。"""
+        self.available_quantity = self.quantity
+
     def reduce_shares(self, quantity: float, price: float) -> float:
-        """减少持仓，返回实现盈亏"""
+        """减少持仓，返回实现盈亏（调用方须先过 available 校验，见 Portfolio.sell）"""
         if quantity > self.quantity:
             raise ValueError("卖出数量超过持仓")
+        if quantity > self.available_quantity:
+            raise ValueError(
+                f"T+1 不可卖：{self.symbol} 可卖 {self.available_quantity} < 卖出 {quantity}"
+                "（当日买入次日才可卖）"
+            )
+        self.available_quantity -= quantity
 
             # 计算实现盈亏
         realized_pnl = (price - self.avg_cost) * quantity
@@ -177,9 +190,14 @@ class Portfolio:
         self._update_total_value()
 
     def sell(self, symbol: str, quantity: float, price: float, commission: float = 0.0) -> float:
-        """卖出"""
+        """卖出（T+1：可卖量=昨日及更早持仓；当日买入当日卖出被拒）"""
         if symbol not in self.positions or self.positions[symbol].quantity < quantity:
             raise ValueError(f"持仓不足，{symbol} 持仓 {self.positions.get(symbol, Position(symbol)).quantity}")
+        if self.positions[symbol].available_quantity < quantity:
+            raise ValueError(
+                f"T+1 不可卖：{symbol} 可卖 {self.positions[symbol].available_quantity} < 卖出 {quantity}"
+                "（当日买入次日才可卖）"
+            )
 
             # 更新持仓
         position = self.positions[symbol]
@@ -200,6 +218,11 @@ class Portfolio:
             # 更新总价值
         self._update_total_value()
         return realized_pnl
+
+    def unlock_t1(self) -> None:
+        """日初解锁全部持仓（引擎每日循环起始调用，先于当日成交处理）。"""
+        for position in self.positions.values():
+            position.unlock_t1()
 
     def update_market_value(self, date: datetime, prices: dict[str, float]) -> None:
         """更新所有持仓的市值，支持多标的"""
@@ -230,6 +253,7 @@ class Portfolio:
         return {
             symbol: {
                 "quantity": pos.quantity,
+                "available_quantity": pos.available_quantity,
                 "avg_cost": pos.avg_cost,
                 "market_value": pos.market_value,
                 "unrealized_pnl": pos.unrealized_pnl,

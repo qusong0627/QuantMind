@@ -48,6 +48,8 @@ def test_portfolio_buy_then_sell_reconciles():
     assert p.get_position("SH600036") == 100
     assert p.cash == pytest.approx(100000.0 - 100 * 10.0)
 
+    # T+1（账本模型收口）：当日买入次日才可卖——卖出前先解锁
+    p.unlock_t1()
     pnl = p.sell("SH600036", 100, price=12.0, commission=0.0)
     assert p.get_position("SH600036") == 0
     assert p.cash == pytest.approx(100000.0 - 1000.0 + 1200.0)
