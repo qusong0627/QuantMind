@@ -17,6 +17,7 @@ import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta
 from typing import Any
 
 from backend.shared.stock_utils import StockCodeUtil
@@ -156,8 +157,18 @@ def _camel_name(column: str, view: str) -> str:
 # 注意：return1d/3d/5d 不再兜底到 l1_factors.mom_ret_*d（过去收益）——
 # 投研平台的 return 系列是“推理日后 N 日真实收益”，语义上必须来自
 # features_daily 按推理日读取的 return_* 标签；mom_ret_*d 是历史动量（过去收益），
-# 用它会污染“未来收益”展示。features_daily 的 return_* 在推理日后未满 N 个交易日
-# 时为 NaN，投影路径返回空由前端显示“-”，待未来行情生成后自然回填。
+# 用它会污染“未来收益”展示。features_daily 按日增量落盘时，远期 return_* 往往
+# 不会回写历史分区（实测 10/20/60 日长期全 NaN），投影路径在宽表缺失时改用
+# daily_forward 的 close[T+N]/close[T]-1 现算，单位与宽表一致（百分数）。
+_RETURN_HORIZONS: dict[str, int] = {
+    "return1d": 1,
+    "return3d": 3,
+    "return5d": 5,
+    "return10d": 10,
+    "return20d": 20,
+    "return60d": 60,
+}
+
 _DERIVED_FALLBACKS: dict[str, tuple[str, float]] = {
     # UI 的 rsi / atr 字段在 PG 里分别来自 rsi_6 与 vol_atr_14，
     # QuantDB 同名列是 rsi_6 / vol_atr_14，这里补上映射避免这两列取不到值。
@@ -507,6 +518,129 @@ def _apply_listed_days(
         item.setdefault("values", {})["listedDays"] = (base - start_date).days
 
 
+def _trading_dates_from(dt: int, min_days: int) -> list[str]:
+    """从 daily_forward 分区枚举不少于 min_days 个「不早于 dt」的交易日。"""
+    hub = _get_hub()
+    partition_dates = getattr(hub, "_partition_dates", None)
+    if not callable(partition_dates):
+        return []
+    try:
+        start = datetime.strptime(str(dt), "%Y%m%d").date()
+    except ValueError:
+        return []
+    # 60 个交易日大约跨 90 个自然日，留余量覆盖长假
+    end = start + timedelta(days=max(40, min_days * 3 + 20))
+    try:
+        dates = [str(d) for d in partition_dates("1_kline_data/daily_forward", start, end)]
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("枚举 daily_forward 交易日失败: %s", exc)
+        return []
+    dt_s = str(dt)
+    if dt_s in dates:
+        return dates[dates.index(dt_s) :]
+    return dates
+
+
+def _closes_on_dt(symbols: list[str], dt: int) -> dict[str, float]:
+    """读取指定交易日 daily_forward 收盘价。lookback=0 保证不误用更早的收盘。"""
+    rows = _get_hub().fetch_latest_rows(
+        "qdb_daily_forward", symbols, dt=dt, lookback=0, columns=["close"]
+    )
+    if rows is None or getattr(rows, "empty", True):
+        return {}
+    out: dict[str, float] = {}
+    for _, row in rows.iterrows():
+        symbol = str(row.get("symbol") or "")
+        close = _to_jsonable(row.get("close"))
+        if symbol and isinstance(close, (int, float)) and close:
+            out[symbol] = float(close)
+    return out
+
+
+def _fill_forward_returns(
+    result: dict[str, dict[str, Any]],
+    symbols: list[str],
+    wanted: frozenset[str],
+    dt: int,
+) -> None:
+    """宽表 return_* 缺失时，用 daily_forward 现算推理日后 N 日真实收益。
+
+    QuantDB features_daily 按日增量写入，远期标签不会回写历史分区：
+    2026-09-01 的 return_1/3/5d 已有值，return_10/20/60d 在 T+10 行情已到后
+    仍全为 NaN。这里按交易日 LEAD 补齐，口径与宽表一致（百分数）。
+    """
+    needed = {name: n for name, n in _RETURN_HORIZONS.items() if name in wanted}
+    if not needed:
+        return
+    missing = [
+        (name, n)
+        for name, n in needed.items()
+        if any(name not in ((result.get(s) or {}).get("values") or {}) for s in symbols)
+    ]
+    if not missing:
+        return
+    dates = _trading_dates_from(dt, max(n for _, n in missing))
+    if not dates:
+        return
+    needed_dates = {dt}
+    horizon_dt: dict[str, int] = {}
+    for name, n in missing:
+        if n >= len(dates):
+            continue
+        try:
+            future = int(dates[n])
+        except (TypeError, ValueError):
+            continue
+        needed_dates.add(future)
+        horizon_dt[name] = future
+    if not horizon_dt:
+        return
+
+    closes_by_dt = {d: _closes_on_dt(symbols, d) for d in needed_dates}
+    base_close = closes_by_dt.get(dt) or {}
+    if not base_close:
+        return
+
+    filled = 0
+    for symbol in symbols:
+        item = result.get(symbol)
+        if item is None:
+            continue
+        values = item.setdefault("values", {})
+        c0 = base_close.get(symbol)
+        if not c0:
+            continue
+        for name, future in horizon_dt.items():
+            if name in values:
+                continue
+            c1 = (closes_by_dt.get(future) or {}).get(symbol)
+            if not c1:
+                continue
+            values[name] = (c1 / c0 - 1.0) * 100.0
+            filled += 1
+    if filled:
+        logger.info(
+            "投研收益回填: dt=%s symbols=%s filled=%s horizons=%s",
+            dt,
+            len(symbols),
+            filled,
+            ",".join(sorted(horizon_dt)),
+        )
+
+
+def _returns_incomplete(
+    result: dict[str, dict[str, Any]], symbols: list[str], wanted: frozenset[str]
+) -> bool:
+    names = [n for n in _RETURN_HORIZONS if n in wanted]
+    if not names:
+        return False
+    for symbol in symbols:
+        values = (result.get(symbol) or {}).get("values") or {}
+        if any(name not in values for name in names):
+            return True
+    return False
+
+
 def _load_projected_features(
     symbols: list[str], wanted: frozenset[str], dt: int | None = None
 ) -> dict[str, dict[str, Any]]:
@@ -517,6 +651,7 @@ def _load_projected_features(
     dt 模式只查 50 维宽表单视图，且结果按 (日期, 字段集) 缓存（宽表按日落盘、
     当天不变），切回已看过的日期或刷新页面直接命中，不重复扫描。
     """
+    cache_key = ""
     if dt is not None:
         cache_key = (
             f"{dt}|{len(symbols)}|{hash(tuple(symbols))}|{','.join(sorted(wanted))}"
@@ -532,13 +667,16 @@ def _load_projected_features(
     result = {s: _build_projected_payload(s, sources, wanted) for s in symbols}
     if dt is not None:
         _apply_listed_days(result, symbols, wanted, dt)
+        _fill_forward_returns(result, symbols, wanted, dt)
 
     if dt is not None and len(symbols) > 1000:
-        # 只缓存全池量级请求（投研宇宙）；小批量（详情面板等）不值得占缓存槽
+        # 只缓存全池量级请求（投研宇宙）；小批量（详情面板等）不值得占缓存槽。
+        # 远期收益尚未走完时缩短 TTL，等 T+N 行情落盘后尽快出现在表格里。
+        ttl = 60.0 if _returns_incomplete(result, symbols, wanted) else _PROJ_DAY_CACHE_TTL
         with _PROJ_DAY_CACHE_LOCK:
             if len(_PROJ_DAY_CACHE) > _PROJ_DAY_CACHE_MAX_ENTRIES:
                 _PROJ_DAY_CACHE.clear()
-            _PROJ_DAY_CACHE[cache_key] = (time.monotonic(), result)
+            _PROJ_DAY_CACHE[cache_key] = (time.monotonic() - (_PROJ_DAY_CACHE_TTL - ttl), result)
     return result
 
 

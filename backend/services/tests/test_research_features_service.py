@@ -20,11 +20,18 @@ def _clear_cache():
 class _FakeHub:
     """最小 QuantDBHub 替身：按视图名返回预置行。"""
 
-    def __init__(self, rows_by_view: dict[str, list[dict]], *, available: bool = True):
+    def __init__(
+        self,
+        rows_by_view: dict[str, list[dict]],
+        *,
+        available: bool = True,
+        calendar: list[str] | None = None,
+    ):
         self._rows_by_view = rows_by_view
         self.available = available
         self.data_dir = None
         self.queries: list[str] = []
+        self._calendar = calendar or []
 
     def query(self, sql: str):
         import pandas as pd
@@ -35,10 +42,18 @@ class _FakeHub:
                 return pd.DataFrame(rows)
         raise RuntimeError("view not found")
 
+    def _partition_dates(self, rel_path, start=None, end=None):
+        if "daily_forward" not in str(rel_path):
+            return []
+        start_s = start.strftime("%Y%m%d") if start else ""
+        end_s = end.strftime("%Y%m%d") if end else "99999999"
+        return [d for d in self._calendar if start_s <= d <= end_s]
+
     def fetch_latest_rows(self, view, symbols, *, dt=None, lookback=None, columns=None):
         """按视图名返回预置行的 DataFrame（新 QuantDBHub 直读接口）。
 
         视图不存在时优雅降级为空表（与真实 Hub 行为一致）。
+        lookback=0 时按精确 dt 过滤，供远期收益现算读取 T / T+N 收盘价。
         """
         import pandas as pd
 
@@ -48,6 +63,8 @@ class _FakeHub:
         if "symbol" in df.columns:
             wanted = {str(s) for s in symbols}
             df = df[df["symbol"].isin(wanted)]
+        if dt is not None and lookback == 0 and not df.empty and "dt" in df.columns:
+            df = df[df["dt"].astype(str) == str(dt)]
         if columns:
             keep = [c for c in columns if c in df.columns]
             if "symbol" in df.columns:
@@ -373,7 +390,7 @@ def test_projected_batch_prefers_real_return_over_fallback(monkeypatch):
 
 
 def test_projected_batch_omits_unavailable_long_horizon_returns(monkeypatch):
-    """10/20/60 日收益上游失真，不做兜底——宁缺勿滥。"""
+    """10/20/60 日收益不上游动量兜底——宁缺勿滥。"""
     _install_hub(
         monkeypatch,
         _FakeHub(
@@ -389,6 +406,55 @@ def test_projected_batch_omits_unavailable_long_horizon_returns(monkeypatch):
         svc.get_batch_full_features(["600036.SH"], fields=["return20d"])
     )
     assert "return20d" not in result["data"]["items"][0]["values"]
+
+
+def test_projected_batch_fills_missing_return10d_from_kline(monkeypatch):
+    """宽表 return_10d 为 NaN 时，用 daily_forward 按交易日 LEAD 现算未来 10 日收益。"""
+    calendar = [
+        "20260901",
+        "20260902",
+        "20260903",
+        "20260904",
+        "20260907",
+        "20260908",
+        "20260909",
+        "20260910",
+        "20260911",
+        "20260914",
+        "20260915",
+    ]
+    _install_hub(
+        monkeypatch,
+        _FakeHub(
+            {
+                "qdb_features_daily": [
+                    {
+                        "symbol": "301589.SZ",
+                        "dt": 20260901,
+                        "return_1d": -1.1708,
+                        "return_10d": float("nan"),
+                    }
+                ],
+                "qdb_daily_forward": [
+                    {"symbol": "301589.SZ", "dt": 20260901, "close": 145.2},
+                    {"symbol": "301589.SZ", "dt": 20260915, "close": 147.33},
+                ],
+            },
+            calendar=calendar,
+        ),
+    )
+
+    result = asyncio.run(
+        svc.get_batch_full_features(
+            ["301589.SZ"],
+            fields=["return1d", "return10d", "return20d"],
+            trade_date="2026-09-01",
+        )
+    )
+    values = result["data"]["items"][0]["values"]
+    assert values["return1d"] == pytest.approx(-1.1708)
+    assert values["return10d"] == pytest.approx((147.33 / 145.2 - 1.0) * 100.0)
+    assert "return20d" not in values
 
 
 def test_projected_batch_cap_covers_full_pool():

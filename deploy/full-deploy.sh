@@ -423,20 +423,14 @@ configure_qwenpaw_runtime() {
 }
 
 # 统一 torch 形态，避免依赖指纹漂移：
-# 镜像的 qm.req.sha 把 TORCH_DEVICE 纳入（skip/cpu/gpu 是不同镜像）。此处解析生效值
-# （TORCH_DEVICE / QUANTMIND_TORCH_DEVICE > .env；均无则按 skip）并持久化到 .env，
-# 使后续 update/full-deploy 与当前镜像保持一致，不再误判漂移触发重建。
-ensure_torch_device() {
-    local device="${TORCH_DEVICE:-${QUANTMIND_TORCH_DEVICE:-}}"
+# 镜像的 qm.req.sha 把 TORCH_DEVICE 纳入（skip/cpu/gpu 是不同镜像）。解析顺序：
+#   TORCH_DEVICE / QUANTMIND_TORCH_DEVICE > .env > 镜像 Label（qm.torch.device 或
+#   用 cpu/gpu/skip 重算指纹与 qm.req.sha 对拍）。
+# 有现成镜像却推断不出时直接失败，禁止默认 skip——否则会把 cpu/gpu 离线包盖成无 torch。
+# 仅「镜像不存在」（全新安装）才回落 skip，并写入 .env 供后续对齐。
+persist_torch_device() {
+    local device="$1"
     local env_file="$PROJECT_DIR/.env"
-    if [[ -z "$device" && -f "$env_file" ]]; then
-        device="$(grep -E '^[[:space:]]*TORCH_DEVICE=' "$env_file" 2>/dev/null | tail -1 \
-            | cut -d= -f2- | tr -d "\"' " || true)"
-    fi
-    if [[ -z "$device" ]]; then
-        log '未指定 TORCH_DEVICE（按默认 skip 处理），如需 CPU/GPU 版 torch 请设 TORCH_DEVICE=cpu|gpu'
-        return 0
-    fi
     export TORCH_DEVICE="$device"
     if [[ -f "$env_file" ]]; then
         if grep -qE '^[[:space:]]*TORCH_DEVICE=' "$env_file"; then
@@ -449,6 +443,57 @@ ensure_torch_device() {
     else
         log "TORCH_DEVICE=$device（.env 不存在，仅本次生效）"
     fi
+}
+
+ensure_torch_device() {
+    local device="${TORCH_DEVICE:-${QUANTMIND_TORCH_DEVICE:-}}"
+    local env_file="$PROJECT_DIR/.env"
+    local inferred have helper d want
+    if [[ -z "$device" && -f "$env_file" ]]; then
+        device="$(grep -E '^[[:space:]]*TORCH_DEVICE=' "$env_file" 2>/dev/null | tail -1 \
+            | cut -d= -f2- | tr -d "\"' " || true)"
+    fi
+    if [[ -z "$device" ]]; then
+        helper="$PROJECT_DIR/deploy/req-fingerprint.sh"
+        if [[ -f "$helper" ]]; then
+            inferred="$(bash "$helper" --infer-torch "$PROJECT_DIR" quantmind-oss:latest 2>/dev/null || true)"
+            # 兼容尚未包含 --infer-torch 的旧 helper：按 cpu/gpu/skip 对拍镜像指纹。
+            if [[ -z "$inferred" ]]; then
+                have="$(image_req_sha quantmind-oss:latest)"
+                if [[ "$have" != notloaded && "$have" != none ]]; then
+                    for d in cpu gpu skip; do
+                        want="$(TORCH_DEVICE="$d" bash "$helper" "$PROJECT_DIR" 2>/dev/null || true)"
+                        if [[ -n "$want" && "$want" == "$have" ]]; then
+                            inferred="$d"
+                            break
+                        fi
+                    done
+                fi
+            fi
+        fi
+        if [[ -n "$inferred" ]]; then
+            log "未指定 TORCH_DEVICE，已从镜像推断为 $inferred"
+            persist_torch_device "$inferred"
+            return 0
+        fi
+        have="$(image_req_sha quantmind-oss:latest)"
+        case "$have" in
+            notloaded)
+                log '未指定 TORCH_DEVICE 且无 quantmind-oss 镜像，按 skip 处理（全新安装）'
+                persist_torch_device skip
+                return 0
+                ;;
+            none)
+                log '未指定 TORCH_DEVICE，镜像无依赖指纹，按 skip 处理'
+                persist_torch_device skip
+                return 0
+                ;;
+            *)
+                die "未指定 TORCH_DEVICE，且无法从镜像推断（镜像指纹=${have}）。请显式设置 TORCH_DEVICE=cpu|gpu|skip 后重试，以免把已含 torch 的镜像按 skip 重建。"
+                ;;
+        esac
+    fi
+    persist_torch_device "$device"
 }
 
 build_and_start() {

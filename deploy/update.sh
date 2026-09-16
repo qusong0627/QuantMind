@@ -214,6 +214,52 @@ build_core() {
     svc_blk="$(awk '/^  quantmind:/{f=1;next} f && /^  [A-Za-z0-9_-]+:/{exit} f' \
         "$PROJECT_DIR/docker-compose.yml" 2>/dev/null || true)"
     torch_val="${TORCH_DEVICE:-$(grep -E '^[[:space:]]*TORCH_DEVICE=' "$PROJECT_DIR/.env" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d "\"' " || true)}"
+    if [[ -z "$torch_val" ]]; then
+        torch_val="$(bash "$PROJECT_DIR/deploy/req-fingerprint.sh" --infer-torch \
+            "$PROJECT_DIR" quantmind-oss:latest 2>/dev/null || true)"
+        if [[ -z "$torch_val" ]]; then
+            local img_sha want d
+            img_sha="$(docker image inspect quantmind-oss:latest \
+                --format '{{ index .Config.Labels "qm.req.sha" }}' 2>/dev/null || true)"
+            case "$img_sha" in
+                ""|none|"<no value>"|notloaded) ;;
+                *)
+                    for d in cpu gpu skip; do
+                        want="$(TORCH_DEVICE="$d" bash "$PROJECT_DIR/deploy/req-fingerprint.sh" \
+                            "$PROJECT_DIR" 2>/dev/null || true)"
+                        if [[ -n "$want" && "$want" == "$img_sha" ]]; then
+                            torch_val="$d"
+                            break
+                        fi
+                    done
+                    ;;
+            esac
+        fi
+        if [[ -n "$torch_val" ]]; then
+            log "2/4 未指定 TORCH_DEVICE，已从镜像推断为 $torch_val"
+            export TORCH_DEVICE="$torch_val"
+            if [[ -f "$PROJECT_DIR/.env" ]]; then
+                if grep -qE '^[[:space:]]*TORCH_DEVICE=' "$PROJECT_DIR/.env"; then
+                    sed -i "s|^[[:space:]]*TORCH_DEVICE=.*|TORCH_DEVICE=${torch_val}|" "$PROJECT_DIR/.env"
+                else
+                    printf '\n# torch 形态（update.sh 写入，用于依赖指纹对齐）\nTORCH_DEVICE=%s\n' \
+                        "$torch_val" >> "$PROJECT_DIR/.env"
+                fi
+            fi
+        elif docker image inspect quantmind-oss:latest >/dev/null 2>&1; then
+            local img_sha
+            img_sha="$(docker image inspect quantmind-oss:latest \
+                --format '{{ index .Config.Labels "qm.req.sha" }}' 2>/dev/null || true)"
+            case "$img_sha" in
+                ""|none|"<no value>")
+                    log '2/4 镜像无依赖指纹且无法推断 TORCH_DEVICE，构建签名按 skip'
+                    ;;
+                *)
+                    die "未指定 TORCH_DEVICE，且无法从镜像推断（镜像指纹=${img_sha}）。请显式设置 TORCH_DEVICE=cpu|gpu|skip 后重试，以免把已含 torch 的镜像按 skip 重建。"
+                    ;;
+            esac
+        fi
+    fi
     build_blk="$(printf '%s' "$svc_blk" \
         | grep -aE 'build:|context:|dockerfile:|args:|target:|platform:|cache_from:|TORCH_DEVICE|TORCH_CPU_INDEX_URL' \
         | sha256sum | awk '{print $1}')${torch_val:-skip}"

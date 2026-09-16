@@ -1031,7 +1031,11 @@ export const ResearchPlatformPage: React.FC = () => {
         _setResearchDateCache(dateContext, {
           candidatePool: pool,
           overview: result,
-          universeFeatures: researchDateCache.get(dateContext)?.universeFeatures ?? {},
+          // 切日期可复用已富化特征；点「刷新数据」必须清空，否则会一直命中
+          // 旧的 return10d 空值，宽表回填后前端仍显示 “-”。
+          universeFeatures: isContextSwitch
+            ? (researchDateCache.get(dateContext)?.universeFeatures ?? {})
+            : {},
         });
       } catch (error) {
         console.error('[ResearchPlatformPage] load universe failed:', error);
