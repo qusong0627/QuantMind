@@ -83,6 +83,13 @@ JOBS: tuple[JobSpec, ...] = (
         "成交价偏差/成交率/滑点实现/跟踪误差，Redis mirror:shadow:{date}（T-P2-06）",
     ),
     JobSpec(
+        "eval_scores", "评分五卡（EOD）", "worker", "trade",
+        "交易日 16:00（60s 轮询）",
+        "EVAL_SCORES_WORKER_ENABLED", True, 600,
+        "python backend/scripts/schedule_ctl.py run eval_scores --date YYYY-MM-DD",
+        "因子/模型/策略/账户/每日选股五卡 → eval_scores 表（T-P4-05b）",
+    ),
+    JobSpec(
         "auto_inference", "自动推理", "celery_beat", "celery", "交易日 08:00",
         None, True, 345600,
         "python backend/scripts/schedule_ctl.py run auto_inference --date YYYY-MM-DD",

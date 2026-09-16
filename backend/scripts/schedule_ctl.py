@@ -171,6 +171,26 @@ def _run_shadow_compare(date_str: str | None, force: bool) -> int:
     return 0 if report.get("ok") else 1
 
 
+def _run_eval_scores(date_str: str | None, force: bool) -> int:
+    import asyncio
+
+    from backend.scripts.eval.run_all import run_all
+    from backend.shared.database_manager_v2 import close_database
+
+    async def _run():
+        try:
+            return await run_all(date_str, save=True)
+        finally:
+            await close_database()
+
+    summary = asyncio.run(_run())
+    print(
+        f"eval_scores {summary.get('date')}: 落分={summary.get('total_scored')} "
+        f"异常={summary.get('total_errors')} 耗时={summary.get('elapsed_sec')}s"
+    )
+    return 0 if summary.get("total_scored") else 1
+
+
 _RERUN_DISPATCH: dict[str, Callable[[str | None, bool], int]] = {
     # 键 = 注册表任务键（唯一标识，禁止别名——测试防止漂移）
     "sim_eod": _run_sim_eod,
@@ -178,6 +198,7 @@ _RERUN_DISPATCH: dict[str, Callable[[str | None, bool], int]] = {
     "market_sync_dispatch": _run_data_sync,
     "dual_book": _run_dual_book,
     "mirror_shadow": _run_shadow_compare,
+    "eval_scores": _run_eval_scores,
 }
 
 

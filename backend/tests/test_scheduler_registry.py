@@ -32,6 +32,8 @@ _HEARTBEAT_WIRED = {
     # T-P2-06 新增（对账/影子对照）
     "dual_book": "services/trade/services/dual_book_reconciliation_task.py",
     "mirror_shadow": "services/trade/services/shadow_compare_service.py",
+    # T-P4-05b 新增（EOD 五卡评分）
+    "eval_scores": "services/trade/services/eval_scores_service.py",
 }
 
 
@@ -149,6 +151,7 @@ def test_schedule_ctl_dispatch_covers_rerun_declared_jobs():
         "dual_book",
         "mirror_shadow",
         "market_sync_dispatch",
+        "eval_scores",
     }
 
     # 未知任务 → 退出码 2（纯函数路径，不触发真实执行）

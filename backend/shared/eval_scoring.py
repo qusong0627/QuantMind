@@ -116,6 +116,18 @@ def combine_dimension_scores(
             "grade": None,
             "low_confidence": True,
             "missing_dims": missing,
+            "red_line_failed": [d.key for d in dims if d.red_line_failed],
+            "capped": False,
+            "dimensions": {
+                d.key: {
+                    "label": d.label,
+                    "score": d.score,
+                    "weight": d.weight,
+                    "red_line_failed": d.red_line_failed,
+                    "detail": d.detail,
+                }
+                for d in dims
+            },
             "detail": {d.key: d.detail for d in dims},
             "note": "全部维度不可评",
         }
