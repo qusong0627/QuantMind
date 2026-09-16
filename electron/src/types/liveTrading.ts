@@ -2,7 +2,7 @@ export type DeployMode = 'REAL' | 'SHADOW' | 'SIMULATION';
 
 export type ScheduleType = 'interval' | 'weekly';
 export type TradeWeekday = 'MON' | 'TUE' | 'WED' | 'THU' | 'FRI';
-export type TradingSession = 'AM' | 'PM';
+export type TradingSession = 'AM' | 'PM' | 'AFTER_HOURS';
 export type LiveOrderType = 'LIMIT' | 'MARKET';
 
 export interface ExecutionConfig {

@@ -210,7 +210,9 @@ async def start_trading(
 
         exec_config = _normalize_execution_config({}, exec_config)
         ExecutionConfigSchema.model_validate(exec_config)
-        live_config = _normalize_live_trade_config({}, live_config)
+        live_config = _normalize_live_trade_config(
+            {}, live_config, allow_after_hours=(mode == "SIMULATION")
+        )
 
         # 前端可覆盖风控参数（以本次启动快照为准）
         if execution_config:
@@ -237,7 +239,9 @@ async def start_trading(
                 raise HTTPException(
                     status_code=400, detail="live_trade_config 必须是对象"
                 )
-            live_config = _normalize_live_trade_config(user_live_cfg, live_config)
+            live_config = _normalize_live_trade_config(
+                user_live_cfg, live_config, allow_after_hours=(mode == "SIMULATION")
+            )
 
         deployment_market = str(
             (live_config or {}).get("market")
@@ -334,7 +338,11 @@ async def start_trading(
                 ExecutionConfigSchema.model_validate(exec_config)
                 code_overrides["execution_config"] = sorted(_code_exec_over.keys())
             if _code_live_over:
-                live_config = _normalize_live_trade_config(_code_live_over, live_config)
+                live_config = _normalize_live_trade_config(
+                    _code_live_over,
+                    live_config,
+                    allow_after_hours=(mode == "SIMULATION"),
+                )
                 code_overrides["live_trade_config"] = sorted(_code_live_over.keys())
             if code_overrides:
                 logger.info(

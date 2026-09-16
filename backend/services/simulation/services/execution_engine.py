@@ -7,6 +7,7 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -70,6 +71,21 @@ class ResolvedFill:
     degraded: bool = False  # True=用了非实时价（bar/陈旧快照），已如实标注并告警
     message: str = ""
     snapshot: Any = None
+
+
+_SH_TZ = ZoneInfo("Asia/Shanghai")
+
+
+def _resolve_match_session(now: datetime | None = None) -> str:
+    """当前墙钟对应的撮合会话（T-P2-07：墙钟→会话的唯一推导点）。
+
+    盘后固定价格窗口 15:05–15:30 → after_hours_fixed（收盘价成交、无滑点）；
+    其余 → continuous。仅墙钟驱动的模拟执行路径使用（托管/手动/挂单重试）；
+    replay/回测按历史日线驱动，不按墙钟，不经本函数。
+    """
+    from backend.services.simulation.services.market_rules import session_for_time
+
+    return session_for_time(now or datetime.now(_SH_TZ))
 
 
 @dataclass
@@ -612,6 +628,7 @@ class SimulationExecutionEngine:
             stamp_duty_rate=float(settings.SIMULATION_STAMP_DUTY_RATE),
             lot_size=lot_size_for_symbol(order.symbol, rules.market),
             external_price=resolved.price,
+            session=_resolve_match_session(),
         )
         mr = match_order(
             side=side,
@@ -727,9 +744,27 @@ class SimulationExecutionEngine:
                     ),
                 )
 
+        # T-P2-07：盘后固定价格会话 —— 市价单成交价=收盘价（取价链结果）、无滑点；
+        # 限价分支现语义（买<市价拒/卖>市价拒/按市价成交）即盘后申报价有效性规则本身，零改动。
+        from backend.services.simulation.services.market_rules import (
+            SESSION_AFTER_HOURS_FIXED,
+        )
+
+        after_hours_fixed = _resolve_match_session() == SESSION_AFTER_HOURS_FIXED
+        if after_hours_fixed:
+            logger.info(
+                "[RULE:AFTER-HOURS] %s 盘后固定价格会话下单（基准价 %.4f）order_type=%s",
+                order.symbol,
+                base_price,
+                getattr(order.order_type, "value", order.order_type),
+            )
+
         if order.order_type == OrderType.MARKET:
-            direction = 1 if side == "buy" else -1
-            exec_price = round(base_price * (1 + direction * slippage), 2)
+            if after_hours_fixed:
+                exec_price = round(base_price, 2)
+            else:
+                direction = 1 if side == "buy" else -1
+                exec_price = round(base_price * (1 + direction * slippage), 2)
             # 市价滑点不得冲破涨跌停：钳制到日内限价内
             if snapshot.limit_up_price and exec_price > snapshot.limit_up_price:
                 exec_price = round(float(snapshot.limit_up_price), 2)

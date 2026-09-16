@@ -35,6 +35,10 @@ from backend.services.trade_shared.portfolio.models import Portfolio
 from backend.services.trade_shared.models.trade import Trade
 from backend.services.trade_shared.redis_client import RedisClient, get_redis
 from backend.services.trade_shared.utils.redis_cache import redis_cache
+from backend.services.simulation.services.market_rules import (
+    AFTER_HOURS_FIXED_END,
+    AFTER_HOURS_FIXED_START,
+)
 from backend.services.trade_shared.schemas.live_trade_config import (
     ExecutionConfigSchema,
     LiveTradeConfigSchema,
@@ -870,7 +874,18 @@ def _default_live_trade_config() -> dict:
     }
 
 
-def _normalize_live_trade_config(user_live_cfg: dict, base_live_cfg: dict) -> dict:
+def _normalize_live_trade_config(
+    user_live_cfg: dict,
+    base_live_cfg: dict,
+    *,
+    allow_after_hours: bool = False,
+) -> dict:
+    """合并并校验实盘/模拟时段配置。
+
+    T-P2-07：AFTER_HOURS（盘后固定价格 15:05–15:30）仅模拟托管支持——
+    allow_after_hours=True（SIMULATION 启动）时放行并校验时刻落在窗口内；
+    默认 False（REAL 口径）显式拒绝（QMT 盘后通道待核实，fail-closed 带明确话术）。
+    """
     merged = dict(_default_live_trade_config())
     merged.update(base_live_cfg or {})
     merged.update(user_live_cfg or {})
@@ -907,6 +922,20 @@ def _normalize_live_trade_config(user_live_cfg: dict, base_live_cfg: dict) -> di
         "PM": ("13:00", "15:00"),
     }
     enabled_sessions = normalized.get("enabled_sessions") or []
+    if "AFTER_HOURS" in enabled_sessions:
+        if not allow_after_hours:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "盘后固定价格时段（AFTER_HOURS）实盘通道待核实（T-P2-07），"
+                    "当前仅模拟盘支持"
+                ),
+            )
+        # 常量单一事实源：market_rules（不在本模块落副本）
+        session_ranges["AFTER_HOURS"] = (
+            AFTER_HOURS_FIXED_START.strftime("%H:%M"),
+            AFTER_HOURS_FIXED_END.strftime("%H:%M"),
+        )
     for key in ("sell_time", "buy_time"):
         target = str(normalized.get(key) or "")
         in_session = any(

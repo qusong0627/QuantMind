@@ -22,6 +22,10 @@ from backend.services.trade_shared.redis_client import RedisClient
 from backend.services.simulation.services.rebalance_job_service import (
     SimulationRebalanceJobService,
 )
+from backend.services.simulation.services.market_rules import (
+    AFTER_HOURS_FIXED_END,
+    AFTER_HOURS_FIXED_START,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -193,6 +197,13 @@ def _is_enabled_session(now_hhmm: str, live_trade_config: dict[str, Any]) -> boo
     if "AM" in enabled and "09:30" <= now_hhmm <= "11:30":
         return True
     if "PM" in enabled and "13:00" <= now_hhmm <= "15:00":
+        return True
+    # T-P2-07：盘后固定价格交易 15:05–15:30（常量取自 market_rules，单一事实源）
+    if "AFTER_HOURS" in enabled and (
+        AFTER_HOURS_FIXED_START.strftime("%H:%M")
+        <= now_hhmm
+        <= AFTER_HOURS_FIXED_END.strftime("%H:%M")
+    ):
         return True
     return False
 

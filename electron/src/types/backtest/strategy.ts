@@ -31,7 +31,7 @@ export interface StrategyFile {
     rebalance_days?: 1 | 3 | 5 | 10 | 20;
     schedule_type?: 'interval' | 'weekly';
     trade_weekdays?: Array<'MON' | 'TUE' | 'WED' | 'THU' | 'FRI'>;
-    enabled_sessions?: Array<'AM' | 'PM'>;
+    enabled_sessions?: Array<'AM' | 'PM' | 'AFTER_HOURS'>;
     sell_time?: string;
     buy_time?: string;
     sell_first?: boolean;
@@ -48,7 +48,7 @@ export interface StrategyFile {
     rebalance_days?: 1 | 3 | 5 | 10 | 20;
     schedule_type?: 'interval' | 'weekly';
     trade_weekdays?: Array<'MON' | 'TUE' | 'WED' | 'THU' | 'FRI'>;
-    enabled_sessions?: Array<'AM' | 'PM'>;
+    enabled_sessions?: Array<'AM' | 'PM' | 'AFTER_HOURS'>;
     sell_time?: string;
     buy_time?: string;
     sell_first?: boolean;

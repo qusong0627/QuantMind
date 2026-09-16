@@ -12,7 +12,7 @@
 |---|---|---|
 | P0 止血+维护基建 | 10/10 ✅ | 安全问题清零；体检脚本可跑；回归进 CI |
 | P1 契约化 | 6/6 ✅ | 四契约落地；交易台数字可下钻 |
-| P2 执行统一 | 5/7（新增 T-P2-07 盘后固定价格窗口） | 回测-模拟一致性 diff=0 ✅（执行层，含真实数据） |
+| P2 执行统一 | 6/7（仅余 T-P2-06 影子对照） | 回测-模拟一致性 diff=0 ✅（执行层，含真实数据）；盘后固定价格窗口 ✅ |
 | P3 策略收敛 | 0/5 | 策略全生命周期 E2E |
 | P4 选股收敛+评估 | 0/6 | Scanner 替换旧链；体检九项上线 |
 | P5+ | — | 见主文档 §12.2 总表（P5 后进入下个迭代再细化） |
@@ -271,15 +271,60 @@
   （含最低佣金/卖方印花）、科创板 201 股语义（201 合法/150 拒）、ST 涨跌停 2026-07-06 两侧、
   源断言防第二实现；全量回归 **99/99**。
 
-### T-P2-07 盘后固定价格交易窗口（2026-07-06 新规，新增）
+### T-P2-07 盘后固定价格交易窗口（2026-07-06 新规）✅
 **背景（用户提示后查证）**：沪深北交易所 2026-07-06 新规将**盘后固定价格交易扩至全部 A 股与 ETF**
 （15:05–15:30、按收盘价、时间优先；申报时间沪 9:30–11:30/13:00–15:30，深/北 9:15–11:30/13:00–15:30；
 买入价 < 收盘价 / 卖出价 > 收盘价 为无效申报）；沪市基金收盘改收盘集合竞价（14:57–15:00）。
-**现状审计**：模拟/回测/策略 `execution.window` 均无盘后窗口；QMT 通道是否支持盘后单待核实。
-**待办**：① sim 撮合支持 `after_hours_fixed`（收盘价成交、时间优先简化为按序成交）；
-② 策略 execution.window 枚举扩展；③ REAL 通道核实后接入；④ 盘后申报时间窗校验进风控 L0 时段校验。
+**落地（2026-09-16）**：
+- ① **sim 撮合盘后会话**：`market_rules.session_for_time()` 会话解析唯一入口；`ashare_matcher` 盘后成交价=取价链
+  结果、无滑点；`execute_from_bar` 按墙钟推导会话（`_resolve_match_session`）；`execute_order` MARKET 分支盘后
+  跳过滑点（LIMIT 分支现语义即盘后申报价规则本身，零改动）；两侧 `[RULE:AFTER-HOURS]` 日志。
+- ② **枚举扩展**：`TradingSession.AFTER_HOURS`（共享 schema）；`real_trading_utils` 归一函数 `allow_after_hours`
+  （SIM 放行 + 时刻落窗校验 / REAL 显式 400）；`simulation_hosted_scheduler` 会话门 15:05–15:30（常量源自
+  market_rules）；前端类型/表单（"盘后"按钮、默认 15:05/15:10、时点边界随会话自适应）/校验 ranges。
+- ③ **REAL 不接入**（QMT 盘后通道待核实）：REAL 配置显式拒绝；镜像/轮询维持"15:05 后入队次交易日"保守语义。
+- ④ **L0 时段校验**：`is_after_hours_fixed_session` 唯一谓词接进会话推导与调度门两消费点；P5 规则引擎直接引用。
+- **顺带修复（回归抓出）**：T-P2-02 收敛时 CN_RULES 漏配 `transfer_fee_rate`，**过户费 0.001% 全链路静默归零**
+  （撮合/执行/回测），旧测试 `test_ashare_matcher` 早有断言但因该批未跑此套件未暴露——已补 `0.00001` 修复；
+  同批更新科创板过时断言（350 不截断）与 precheck 测试隔离（TDX 桥兜底未 mock，桥在线即假失败）。
+- **证据**：新套件 `test_after_hours_fixed.py` **35/35**；`backend/tests` 全量 **1921 passed**（HEAD 基线 1883，
+  +35 新增 +3 修复，**集合差零新增失败**，其余 30F/6E 为 HEAD 既有环境/他链路遗留：qlib trade_unit 配置、
+  to_qlib 小写命名、训练/版本等）；`services/tests` 591 passed（3 条既有失败与 HEAD 一致）；前端 `tsc --noEmit` 干净；
+  容器运行时冒烟：09:31→continuous / 15:10→after_hours_fixed / REAL 拒绝话术 / SIM 放行均正确。
+- **边界（记录在案）**：墙钟 15:05–15:30 真机成交需实盘时段自然触发（本轮以注入时刻测试覆盖）；申报窗
+  （沪深 9:30/9:15 起可申报）属券商侧语义，模拟不建模；部分成交/队列位置不建模（按序全额）。
 **附注**：申报数量新规的科创板部分已在 T-P2-02 落地；**创业板"200 股起"口径待交易所原文核实**
 （搜索源与既有认知冲突），代码暂保持 100 整数倍并留出处注释。
+
+> **T-P2-07 实施细案（2026-09-16，先侦察后写）**
+> - **侦察结论（触点全图）**：模拟盘两条执行路径 = ① 托管/调仓 `OrderRouter._submit_from_bar → execute_from_bar`
+>   （喂 bar 走 ashare_matcher）；② 手动/内部单 `_submit_immediate → order_submission_service → execute_order`
+>   （即时链，market/limit 分支内联）。策略时段枚举 = `LiveTradeConfigSchema.TradingSession`(AM/PM)，
+>   保存期校验在 `real_trading_utils._normalize_live_trade_config`（SIM/REAL 共用同一函数，调用点
+>   `real_trading_lifecycle` 已持有 mode），读取期判定在 `simulation_hosted_scheduler._is_enabled_session`
+>   （第二份副本）。L0 时段口径现状 = `trading_session.py`（REAL 侧：QMT 轮询/镜像，15:05 后即非交易时段）。
+> - **① 撮合（唯一实现）**：`market_rules.session_for_time()`（从已有 `is_after_hours_fixed_session` 派生）为会话解析
+>   唯一入口；`ashare_matcher.match_order` 在 `session=after_hours_fixed` 时成交价 = 取价链结果（external_price 优先 →
+>   bar.close）**不加滑点**（固定价格机制语义）；涨跌停/停牌/可卖量/申报数量闸门**保持与连续竞价同向**
+>   （涨停收盘不买、跌停收盘不卖——保守口径，队列深度无数据可建模）；打 `[RULE:AFTER-HOURS]` 日志。
+>   申报价有效性（买 < 收盘无效）由申报侧承担：`execute_order` LIMIT 分支现语义（买价<市价拒/卖价>市价拒/按市价成交）
+>   **即为盘后规则本身**，零改动；MARKET 分支盘后跳过滑点按收盘价成交。
+> - **② 枚举扩展**：`TradingSession` 加 `AFTER_HOURS`（共享 schema）；`real_trading_utils` session_ranges 加
+>   `AFTER_HOURS: 15:05–15:30`（常量取自 market_rules，不落副本），归一函数加 `allow_after_hours` 参数——
+>   SIMULATION 保存放行、**REAL 显式 400**（③ 未核实，fail-closed 带明确话术）；`simulation_hosted_scheduler.
+>   _is_enabled_session` 加 AFTER_HOURS 分支（同一常量源）。前端：类型 + 表单 SESSIONS/SESSION_DEFAULTS（"盘后"，
+>   默认 sell 15:05 / buy 15:10）+ 校验 ranges。
+> - **③ REAL 通道**：**不接入**（QMT 是否支持盘后单未核实）。REAL 配置显式拒绝；镜像/轮询维持现状
+>   （15:05 后视为非交易时段 → 入队次交易日补交，保守不丢单）。核实后的接线点：`trading_session.TRADING_SESSIONS`
+>   加盘后段 + 本批 `session_for_time` 复用。
+> - **④ L0 时段校验**：唯一谓词 = `is_after_hours_fixed_session`（本批接进 ① 会话推导与 ② 调度门两消费点，
+>   边界 15:05:00/15:30:00 含）；P5 风控规则引擎落地时直接引用，不建第二实现。
+> - **不做（记录在案）**：回测引擎（日线 T 下单 T+1 成交，无日内时段概念）不适用；replay `day_runner` 保持
+>   continuous（时光回放不按墙钟）；部分成交/队列位置不建模（时间优先简化为按序全额成交）。
+> - **测试**：`backend/tests/test_after_hours_fixed.py`——谓词边界（15:04:59/15:05:00/15:30:00/15:30:01）·
+>   matcher 盘后无滑点（买/卖/external_price）+ 闸门回归（涨停买拒/跌停卖拒/停牌/科创板 201）· 墙钟会话推导
+>   `_resolve_match_session` · 调度门 AFTER_HOURS 三时刻 · 配置校验 SIM 放行 / SIM 超窗拒 / REAL 拒 ·
+>   执行引擎两路径接线源断言；既有回归（rule_parity/backtest_sim_parity/price_contract/matcher/scheduler）全绿。
 
 ### T-P2-04 退出规则单一实现 ✅
 - **落地（2026-09-16）**：`backend/shared/exit_rules.py` 唯一实现（优先级阶梯：硬止损→止盈→移动→信号→时间；

@@ -23,9 +23,44 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass
+from datetime import time as _time_cls
 from enum import Enum
 
 from backend.shared.stock_utils import StockCodeUtil
+
+# T-P2-07（2026-07-06 新规）：盘后固定价格交易扩至全部 A 股与 ETF——
+# 15:05–15:30 按当日收盘价、时间优先撮合；买价<收盘/卖价>收盘为无效申报。
+AFTER_HOURS_FIXED_START = _time_cls(15, 5)
+AFTER_HOURS_FIXED_END = _time_cls(15, 30)
+
+SESSION_CONTINUOUS = "continuous"
+SESSION_AFTER_HOURS_FIXED = "after_hours_fixed"
+
+
+def is_after_hours_fixed_session(ts) -> bool:
+    """是否处于盘后固定价格交易时段（纯函数；ts 接受 datetime/time）。
+
+    T-P2-07：这是盘后时段判定的**唯一谓词**（风控 L0 时段校验 / 撮合会话推导 /
+    调度会话门三处共用），15:05:00–15:30:00 含边界。
+    """
+    try:
+        t = ts.time() if hasattr(ts, "time") and not isinstance(ts, _time_cls) else ts
+    except Exception:  # noqa: BLE001
+        return False
+    return AFTER_HOURS_FIXED_START <= t <= AFTER_HOURS_FIXED_END
+
+
+def session_for_time(ts) -> str:
+    """由时刻解析撮合会话（会话解析唯一入口）。
+
+    15:05–15:30 → after_hours_fixed（收盘价成交）；其余 → continuous。
+    调用方负责传入正确时区（上海）的时刻；replay/回测不按墙钟调用本函数。
+    """
+    return (
+        SESSION_AFTER_HOURS_FIXED
+        if is_after_hours_fixed_session(ts)
+        else SESSION_CONTINUOUS
+    )
 
 
 class Market(str, Enum):
@@ -121,6 +156,9 @@ CN_RULES = MarketTradingRules(
     commission_rate=0.0003,
     commission_min=5.0,
     stamp_duty_rate=0.0005,
+    # 过户费（沪深双向 0.001%）——T-P2-02 收敛时漏配致全链路静默归零，
+    # 回归由 test_ashare_matcher 抓出（2026-09-16 T-P2-07 批次修复）
+    transfer_fee_rate=0.00001,
     has_price_limit=True,
 )
 HK_RULES = MarketTradingRules(

@@ -132,12 +132,13 @@ def test_buy_below_lot_rejected():
 
 
 @pytest.mark.unit
-def test_star_board_buy_floored_to_200():
+def test_star_board_buy_over_200_not_floored():
+    """科创板 2026-07-06 新规口径（T-P2-02）：200 股起、1 股递增，350 不截断。"""
     bar = _bar()
     bar.symbol = "688001.SH"
     r = match_order("buy", 350, bar, _CFG)
     assert r.success
-    assert r.fill_quantity == 200
+    assert r.fill_quantity == 350
 
 
 @pytest.mark.unit

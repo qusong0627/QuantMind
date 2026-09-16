@@ -14,6 +14,8 @@ from datetime import date
 from backend.services.simulation.services.local_market_data import DailyBar
 from backend.services.simulation.services.market_rules import (
     CN_RULES,
+    SESSION_AFTER_HOURS_FIXED,
+    SESSION_CONTINUOUS,
     lot_size_for_symbol,
     normalize_order_quantity,
 )
@@ -43,6 +45,8 @@ class MatchConfig:
     # T-P2-03 取价契约：外部解析价（托管路径经执行引擎取价链解析后喂入；
     # 设置时优先于 bar 的 price_mode 取价——滑点/涨跌停钳制逻辑不变）
     external_price: float | None = None
+    # T-P2-07 会话：continuous（连续竞价）| after_hours_fixed（盘后固定价格，按收盘价）
+    session: str = SESSION_CONTINUOUS
 
 
 @dataclass
@@ -138,14 +142,25 @@ def match_order(
         # 卖出允许清仓零头（不满一手也可以卖完）
         fill_qty = quantity
 
-    # ── 成交价 + 滑点 ──
+    # ── 成交价 + 滑点（T-P2-07：盘后固定价格会话按取价结果=收盘价成交、不加滑点；
+    #     涨跌停钳制/闸门与连续竞价同向，队列深度无数据不建模，时间优先=按序全额成交）──
     base_price = _pick_price(bar, cfg.price_mode, cfg.external_price)
     if base_price <= 0:
         return MatchResult(success=False, reason="INVALID_PRICE")
 
-    slippage = cfg.slippage_bps / 10000
-    direction = 1 if side == "buy" else -1
-    fill_price = round(base_price * (1 + direction * slippage), 4)
+    if cfg.session == SESSION_AFTER_HOURS_FIXED:
+        fill_price = round(base_price, 4)
+        logger.info(
+            "[RULE:AFTER-HOURS] %s 盘后固定价格会话成交（按收盘价、无滑点）"
+            " side=%s price=%.4f",
+            bar.symbol,
+            side,
+            fill_price,
+        )
+    else:
+        slippage = cfg.slippage_bps / 10000
+        direction = 1 if side == "buy" else -1
+        fill_price = round(base_price * (1 + direction * slippage), 4)
 
     # 涨跌停价格钳制
     if math.isfinite(bar.limit_up) and fill_price > bar.limit_up:

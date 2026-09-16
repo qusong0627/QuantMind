@@ -22,6 +22,9 @@ class TradeWeekday(str, Enum):
 class TradingSession(str, Enum):
     AM = "AM"
     PM = "PM"
+    # T-P2-07：盘后固定价格交易 15:05–15:30（按收盘价成交）——模拟托管支持；
+    # 实盘通道待核实（real_trading_utils 显式拒绝）
+    AFTER_HOURS = "AFTER_HOURS"
 
 
 class LiveOrderType(str, Enum):

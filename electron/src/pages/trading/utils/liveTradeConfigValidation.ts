@@ -1,4 +1,4 @@
-import type { LiveTradeConfig } from '../../../types/liveTrading';
+import type { LiveTradeConfig, TradingSession } from '../../../types/liveTrading';
 
 export interface ValidationIssue {
   field: string;
@@ -40,7 +40,9 @@ export function validateLiveTradeConfig(config: LiveTradeConfig): ValidationIssu
   const sessionRanges = {
     AM: ['00:00', '23:59'],
     PM: ['00:00', '23:59'],
-  } as const;
+    // 盘后固定价格交易（T-P2-07）：15:05–15:30，与后端 market_rules 同口径
+    AFTER_HOURS: ['15:05', '15:30'],
+  } as const satisfies Record<TradingSession, readonly [string, string]>;
 
   if (config.sell_time) {
     const sellValid = enabledSessions.some((session) => {

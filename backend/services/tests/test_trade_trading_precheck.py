@@ -183,6 +183,12 @@ async def test_trading_precheck_fails_without_pg_snapshot_even_with_heartbeat(mo
         "backend.services.live_trading.routers.real_trading_utils._fetch_latest_real_account_snapshot",
         AsyncMock(return_value=None),
     )
+    # 测试隔离：QMT 未就绪时 precheck 会兜底探测 TDX 桥（本机桥在线会翻 True），
+    # 本用例断言的是「无 PG 快照即不通过」，须显式关掉兜底探测
+    monkeypatch.setattr(
+        "backend.services.live_trading.routers.real_trading_utils.check_tdx_bridge_online",
+        lambda: (False, "TDX 桥未连接（测试隔离）"),
+    )
 
     fake_db = _FakeDb(
         [
