@@ -22,10 +22,15 @@ import {
     RefreshCw,
     Edit,
     Copy,
-    AlertTriangle, ShieldAlert } from 'lucide-react';
+    AlertTriangle,
+    ShieldAlert,
+    History,
+    Lock,
+} from 'lucide-react';
 import { EvalScoreBadge } from '../shared/EvalScoreBadge';
 import { message, Modal, Popover } from 'antd';
 import { PromotionGateCard } from '../shared/PromotionGateCard';
+import { StrategyVersionDrawer } from '../shared/strategyDiff/StrategyVersionDrawer';
 import { strategyManagementService } from '../../services/strategyManagementService';
 import { useBacktestCenterStore } from '../../stores/backtestCenterStore';
 import { useAppSelector } from '../../store';
@@ -39,6 +44,10 @@ interface Strategy {
     created_at: string;
     updated_at: string;
     strategy_type?: string;
+    version?: number;
+    parameters?: Record<string, unknown>;
+    /** 规范化前的原始状态（SIM/LIVE 判定参数锁用） */
+    rawStatus?: string;
     validated_backtest_id?: number;
     promoted_at?: string;
     live_trading_started_at?: string;
@@ -59,6 +68,7 @@ export const StrategyManagementModule: React.FC = () => {
     const [filter, setFilter] = useState<'all' | 'draft' | 'repository' | 'live_trading'>('all');
     const [searchTerm, setSearchTerm] = useState('');
     const [deleteModalVisible, setDeleteModalVisible] = useState(false);
+    const [versionDrawerFor, setVersionDrawerFor] = useState<Strategy | null>(null);
     const [selectedStrategy, setSelectedStrategy] = useState<Strategy | null>(null);
 
     // 切换市场时重新加载：策略库按全局市场隔离，避免港股策略混入 A 股视图
@@ -70,7 +80,8 @@ export const StrategyManagementModule: React.FC = () => {
     const normalizeStatus = (status?: string): Strategy['status'] => {
         const value = String(status || '').toLowerCase();
         if (['repository', 'live_trading', 'draft', 'archived'].includes(value)) return value as Strategy['status'];
-        if (value === 'active') return 'repository';
+        if (value === 'active' || value === 'verified' || value === 'sim') return 'repository';
+        if (value === 'live') return 'live_trading';
         if (value === 'paused' || value === 'inactive') return 'inactive';
         return 'draft';
     };
@@ -87,6 +98,9 @@ export const StrategyManagementModule: React.FC = () => {
                 name: item.name,
                 status: normalizeStatus(item.status),
                 strategy_type: String(item?.parameters?.strategy_type || ''),
+                version: Number(item?.version || 1),
+                parameters: item?.parameters && typeof item.parameters === 'object' ? item.parameters : {},
+                rawStatus: String(item?.status || ''),
                 created_at: item.created_at || new Date().toISOString(),
                 updated_at: item.updated_at || item.created_at || new Date().toISOString(),
                 validated_backtest_id: item.validated_backtest_id,
@@ -230,6 +244,18 @@ export const StrategyManagementModule: React.FC = () => {
                                         <div className="flex items-center gap-3 mb-2">
                                             <h3 className="text-sm font-semibold text-slate-700 tracking-tight">{strategy.name}</h3>
                                             {getStatusBadge(strategy.status)}
+                                            <span className="text-[10px] px-1.5 py-0.5 rounded-full border border-slate-200 bg-slate-50 text-slate-500">
+                                                v{strategy.version ?? 1}
+                                            </span>
+                                            {['sim', 'live'].includes(String(strategy.rawStatus || '').toLowerCase()) && (
+                                                <span
+                                                    className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-full border border-amber-200 bg-amber-50 text-amber-700"
+                                                    title="参数锁（T-P3-01）：运行中策略修改内容必须显式升版本"
+                                                >
+                                                    <Lock className="w-3 h-3" />
+                                                    锁
+                                                </span>
+                                            )}
                                             <EvalScoreBadge objectType="strategy_health" objectId={String(strategy.id)} />
                                         </div>
                                         <div className="text-xs text-gray-500">
@@ -258,6 +284,9 @@ export const StrategyManagementModule: React.FC = () => {
                                             <ShieldAlert className="w-4 h-4" /> 晋级门槛
                                         </button>
                                     </Popover>
+                                    <button onClick={() => setVersionDrawerFor(strategy)} className="flex items-center gap-1 px-3 py-1.5 bg-slate-50 text-slate-600 rounded-lg text-sm">
+                                        <History className="w-4 h-4" /> 版本与变更
+                                    </button>
                                     <button onClick={() => handleDeleteClick(strategy)} className="flex items-center gap-1 px-3 py-1.5 bg-red-50 text-red-600 rounded-lg text-sm">
                                         <Trash2 className="w-4 h-4" /> 删除
                                     </button>
@@ -279,6 +308,24 @@ export const StrategyManagementModule: React.FC = () => {
             >
                 <p>确定要永久删除策略 "{selectedStrategy?.name}" 吗？</p>
             </Modal>
+
+            {/* T-FE-10：版本与变更抽屉（版本 diff + 生效参数及来源 + 参数锁） */}
+            <StrategyVersionDrawer
+                open={!!versionDrawerFor}
+                strategy={
+                    versionDrawerFor
+                        ? {
+                              id: String(versionDrawerFor.id),
+                              name: versionDrawerFor.name,
+                              version: versionDrawerFor.version,
+                              strategyType: versionDrawerFor.strategy_type,
+                              parameters: versionDrawerFor.parameters,
+                              rawStatus: versionDrawerFor.rawStatus,
+                          }
+                        : null
+                }
+                onClose={() => setVersionDrawerFor(null)}
+            />
         </motion.div>
     );
 };

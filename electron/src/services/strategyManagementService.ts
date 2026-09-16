@@ -274,6 +274,17 @@ class StrategyManagementService {
   /**
    * 获取单个策略详情
    */
+  /** 策略版本历史（T-FE-10）：保存时同事务留快照；include_content=false 仅元数据 */
+  async getStrategyVersions(
+    strategyId: string,
+    includeContent = true
+  ): Promise<import('../components/shared/strategyDiff/strategyDiffModel').VersionRecord[]> {
+    const response = await this.client.get(`/api/v1/strategies/${strategyId}/versions`, {
+      params: { include_content: includeContent, limit: 20 },
+    });
+    return response.data?.data?.versions || [];
+  }
+
   async getStrategy(strategyId: string): Promise<StrategyFile> {
     try {
       const response = await this.client.get(`/api/v1/strategies/${strategyId}`, {
