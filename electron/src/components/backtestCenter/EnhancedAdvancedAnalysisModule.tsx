@@ -14,6 +14,7 @@ import {
   PieChart,
   RefreshCw,
   Shield,
+  Stethoscope,
 } from 'lucide-react';
 import { Select } from 'antd';
 import { useBacktestCenterStore } from '../../stores/backtestCenterStore';
@@ -21,10 +22,11 @@ import type { BacktestResult } from '../../services/backtestService';
 import { BasicRiskPanel } from './analysis/BasicRiskPanel';
 import { TradeStatsPanel } from './analysis/TradeStatsPanel';
 import { BenchmarkPanel } from './analysis/BenchmarkPanel';
+import { HealthEvidencePanel } from './analysis/HealthEvidencePanel';
 import { authService } from '../../features/auth/services/authService';
 import { resolveStrategyName, resolveBacktestPeriod } from '../backtest/BacktestHistory';
 
-type AnalysisType = 'risk' | 'trade' | 'benchmark';
+type AnalysisType = 'risk' | 'trade' | 'benchmark' | 'health';
 
 interface AnalysisModule {
   id: AnalysisType;
@@ -51,6 +53,12 @@ const ANALYSIS_MODULES: AnalysisModule[] = [
     name: '基准对比',
     icon: PieChart,
     description: '超额收益、Beta、Alpha、相关性',
+  },
+  {
+    id: 'health',
+    name: '体检结论',
+    icon: Stethoscope,
+    description: '九项统计检验：真 alpha / Beta 主导 / 运气嫌疑 / 证据不足',
   },
 ];
 
@@ -231,6 +239,8 @@ const AnalysisResults: React.FC<{ type: AnalysisType; backtestId: string }> = ({
       return <TradeStatsPanel backtestId={backtestId} />;
     case 'benchmark':
       return <BenchmarkPanel backtestId={backtestId} />;
+    case 'health':
+      return <HealthEvidencePanel backtestId={backtestId} />;
     default:
       return null;
   }

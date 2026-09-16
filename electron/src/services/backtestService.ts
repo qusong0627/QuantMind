@@ -167,6 +167,34 @@ export interface BacktestResult {
   // 极值
   best_month?: { month: string; return: number };
   worst_month?: { month: string; return: number };
+
+  // T-P4-06 回测体检（九项统计检验 + 四分类判定；回测完成后自动生成，证据卡展示）
+  health?: HealthReport | null;
+}
+
+/** 回测体检单项检验结果（结构随检验不同，均有 sufficient/数值/说明） */
+export interface HealthTestItem {
+  sufficient?: boolean;
+  reason?: string;
+  [key: string]: unknown;
+}
+
+/** 回测体检报告（对齐后端 shared/backtest_health + scripts/eval/health_check 输出） */
+export interface HealthReport {
+  verdict: 'A' | 'B' | 'L' | 'E';
+  verdict_label: string;
+  confidence: number;
+  reasons: string[];
+  suggestions: string[];
+  n_days: number;
+  n_trials: number;
+  generated_at?: string;
+  inputs?: {
+    benchmark?: string;
+    window?: [string, string];
+    n_trials?: number;
+  };
+  tests?: Record<string, HealthTestItem>;
 }
 
 /** 交易记录 */
