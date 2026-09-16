@@ -162,6 +162,15 @@ class DLAdapter:
                 # 只给 full_pred_df 会让 nativetft 的基模型预测被静默跳过。
                 "pred_df": full_pred_df.reset_index(drop=True),
                 "full_pred_df": full_pred_df,
+                # 与 run_dl(single=True) 对齐键名：train.py 主模型消费段按
+                # res["split_frames"] 读取（SHAP 抽样用）——nativetft 若被选为
+                # primary（本批 val IC 最高）而缺此键会在批次终点 KeyError。
+                # 引用共享切分帧，不复制（同 run_dl，7 模型囤积问题）。
+                "split_frames": {
+                    "train": train_df,
+                    "valid": val_df,
+                    "test": test_df,
+                },
                 "elapsed": time.time() - t_start,
             }
         return (

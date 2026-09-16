@@ -797,13 +797,25 @@ def _train_nativetft(
     def _tft_metrics(frame: pd.DataFrame) -> dict:
         try:
             pred_df = _predict_nativetft(output_dir, frame, features, dl_metadata)
-            frame_m = frame.copy()
-            if "symbol" not in frame_m.columns or "trade_date" not in frame_m.columns:
+            # 轻量指标帧（内存模型，2026-09-17 v8）：旧实现 frame.copy() + 全列
+            # merge 对 640 万行 train 帧瞬时 +14.5GB，把 29.5GB 基线在 20 秒内顶到
+            # 45GB 触发全局 OOM（v7 在 nativetft 指标段实证，内核 RSS=45.08GB）。
+            # _predict_nativetft 输出按 (symbol, trade_date) 键控（块内排序拼接，
+            # 不保证与输入同序）→ 仍在键上 merge，但只带 3 列小帧（≈0.25GB）。
+            _need = ["symbol", "trade_date", "label"]
+            if all(c in frame.columns for c in _need):
+                small = frame[_need].copy()
+                merged = small.merge(
+                    pred_df[["symbol", "trade_date", "pred"]],
+                    on=["symbol", "trade_date"], how="left",
+                )
+            else:
+                # 遗留无键帧：旧通路
                 frame_m = frame.reset_index()
                 if "instrument" in frame_m.columns:
                     frame_m["symbol"] = frame_m["instrument"]
                     frame_m["trade_date"] = frame_m["datetime"] if "datetime" in frame_m.columns else 0
-            merged = frame_m.merge(pred_df[["symbol", "trade_date", "pred"]], on=["symbol", "trade_date"], how="left")
+                merged = frame_m.merge(pred_df[["symbol", "trade_date", "pred"]], on=["symbol", "trade_date"], how="left")
             if merged["pred"].notna().sum() < 10:
                 return {"ic": float("nan"), "rank_ic": float("nan"), "rank_icir": float("nan"), "rmse": 0.0, "auc": 0.0}
             y_true = merged["label"].astype("float32").to_numpy()
