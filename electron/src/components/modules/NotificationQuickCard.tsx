@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from 'react';
 import { useDispatch } from 'react-redux';
-import { Bell, AlertCircle, TrendingUp, Settings, ArrowRight, RefreshCw, WifiOff, X, CheckCheck, Trash2 } from 'lucide-react';
+import { Bell, AlertCircle, TrendingUp, Settings, ArrowRight, RefreshCw, WifiOff, X, CheckCheck, Trash2, HeartPulse } from 'lucide-react';
 import { motion } from 'framer-motion';
 import { setCurrentTab } from '../../store/slices/aiStrategySlice';
 import { useNotifications, resolveNotificationTarget, getNavigationHint } from '../../hooks/useNotifications';
@@ -30,6 +30,8 @@ const TYPE_CONFIG = {
   trading: { color: 'text-[var(--notification-trading)]', bg: 'bg-[var(--error-bg)]', Icon: TrendingUp },
   market: { color: 'text-[var(--notification-market)]', bg: 'bg-[var(--warning-bg)]', Icon: AlertCircle },
   strategy: { color: 'text-[var(--notification-strategy)]', bg: 'bg-[var(--success-bg)]', Icon: Bell },
+  // T-P4-06 通知接线：体检复检退化告警（策略体检 A/B → L/E）
+  health: { color: 'text-indigo-500', bg: 'bg-indigo-50', Icon: HeartPulse },
 } as const;
 
 export const NotificationQuickCard: React.FC<NotificationQuickCardProps> = ({
@@ -71,6 +73,13 @@ export const NotificationQuickCard: React.FC<NotificationQuickCardProps> = ({
       dispatch(setCurrentTab('backtest'));
       return;
     }
+
+    // T-P4-06：策略类通知（含体检退化告警，action_url=/strategy）落到策略管理模块
+    if (target === 'strategy') {
+      setBacktestModule('strategy-management');
+      dispatch(setCurrentTab('backtest'));
+      return;
+    }
     
     const internalTargets = ['dashboard', 'trading', 'profile', 'ai-ide'] as const;
     if (internalTargets.includes(target as typeof internalTargets[number])) {
@@ -107,6 +116,7 @@ export const NotificationQuickCard: React.FC<NotificationQuickCardProps> = ({
     trading: typeCounts['trading'] || 0,
     market: typeCounts['market'] || 0,
     strategy: typeCounts['strategy'] || 0,
+    health: typeCounts['health'] || 0,
   }), [total, unreadCount, typeCounts]);
 
   const visibleNotifications = useMemo(
@@ -224,7 +234,7 @@ export const NotificationQuickCard: React.FC<NotificationQuickCardProps> = ({
         </div>
       </div>
 
-      <div className="grid grid-cols-4 gap-1 mb-2.5 relative z-10 bg-slate-50 border border-slate-100/80 rounded-xl p-1.5">
+      <div className="grid grid-cols-5 gap-1 mb-2.5 relative z-10 bg-slate-50 border border-slate-100/80 rounded-xl p-1.5">
         <div className="text-center">
           <div className="w-6 h-6 bg-blue-50 rounded-full flex items-center justify-center mx-auto mb-1">
             <Settings className="w-3 h-3 text-blue-500" />
@@ -252,6 +262,13 @@ export const NotificationQuickCard: React.FC<NotificationQuickCardProps> = ({
           </div>
           <p className="text-[10px] font-bold text-slate-400 uppercase">策略</p>
           <p className="text-xs font-bold text-slate-800">{stats.strategy}</p>
+        </div>
+        <div className="text-center">
+          <div className="w-6 h-6 bg-indigo-50 rounded-full flex items-center justify-center mx-auto mb-1">
+            <HeartPulse className="w-3 h-3 text-indigo-500" />
+          </div>
+          <p className="text-[10px] font-bold text-slate-400 uppercase">体检</p>
+          <p className="text-xs font-bold text-slate-800">{stats.health}</p>
         </div>
       </div>
 

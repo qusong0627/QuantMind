@@ -21,7 +21,7 @@ export interface ToastNotification {
 
 // ==================== 业务通知（持久化） ====================
 
-export type BusinessNotificationType = 'system' | 'trading' | 'market' | 'strategy';
+export type BusinessNotificationType = 'system' | 'trading' | 'market' | 'strategy' | 'health';
 export type BusinessNotificationLevel = 'info' | 'warning' | 'error' | 'success';
 
 export interface BusinessNotification {

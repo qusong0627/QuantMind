@@ -597,3 +597,99 @@ def test_benchmark_symbol_qlib_form_normalized_real_db():
     qlib_form = load_index_closes_between("sh000300", "2025-09-12", "2026-09-01")
     assert qlib_form == suffix, "qlib 式基准必须与后缀式取到同一序列（StockCodeUtil 归一）"
     assert load_index_closes_between("sz399006", "2025-09-12", "2026-09-01"), "深市指数同样归一"
+
+
+# ── T-P4-06 通知接线：退化告警进通知中心（2026-09-16）──────────────────
+
+
+def test_health_alert_notification_wiring_source_guards():
+    """接线守卫：类型白名单不得把 health 静默降级；退化分支必须发通知；收件人经 users 实查。"""
+    pub = (Path(__file__).resolve().parents[1] / "shared/notification_publisher.py").read_text(
+        encoding="utf-8"
+    )
+    assert '"health"' in pub.split("_ALLOWED_TYPES")[1].split("\n")[0]
+
+    pref = (Path(__file__).resolve().parents[1] / "shared/notification_preference.py").read_text(
+        encoding="utf-8"
+    )
+    assert '"health": "strategy_alerts"' in pref
+
+    recheck = (
+        Path(__file__).resolve().parents[1] / "scripts/eval/health_recheck.py"
+    ).read_text(encoding="utf-8")
+    assert "await _publish_degradation_notification(" in recheck
+    assert "_resolve_notification_user_id" in recheck
+    assert 'type="health"' in recheck
+
+
+async def _ensure_pool_tp406():
+    from sqlalchemy import text as _t
+
+    from backend.shared.database_manager_v2 import close_database, get_session
+
+    try:
+        async with get_session(read_only=True) as probe:
+            await probe.execute(_t("SELECT 1"))
+        return
+    except Exception:  # noqa: BLE001
+        await close_database()
+    async with get_session(read_only=True) as probe:
+        await probe.execute(_t("SELECT 1"))
+
+
+@pytest.mark.asyncio
+async def test_degradation_notification_e2e_real_db():
+    """真库 E2E：策略 owner（int 形态）→ users 实查解析 → notifications 落行（type=health）→ 清理。
+
+    覆盖两个静默风险：① 收件人 FK（策略 user_id=1 vs users.user_id=00000001）；
+    ② publisher 白名单若漏 'health' 会被静默降级成 system。
+    """
+    await _ensure_pool_tp406()
+    from sqlalchemy import text as sa_text
+
+    from backend.scripts.eval.health_recheck import (
+        _publish_degradation_notification,
+        _resolve_notification_user_id,
+    )
+    from backend.shared.database_manager_v2 import close_database, get_session
+
+    marker = "E2E体检策略（T-P4-06 接线验证）"
+    resolved = await _resolve_notification_user_id("1")
+    assert resolved == "00000001", f"策略 owner 1 应解析为 00000001，实际 {resolved!r}"
+    try:
+        await _publish_degradation_notification(
+            tenant_id="default",
+            user_id="1",
+            strategy_id="999999",
+            strategy_name=marker,
+            previous={"verdict": "A"},
+            current={
+                "verdict": "L",
+                "confidence": 30,
+                "reasons": ["剔 Top5 后 alpha 消失（集中度疑云）"],
+            },
+        )
+        async with get_session(read_only=True) as session:
+            row = (
+                await session.execute(
+                    sa_text(
+                        "SELECT notification_type, level, action_url, title, content "
+                        "FROM notifications WHERE user_id = '00000001' AND title LIKE :m "
+                        "ORDER BY id DESC LIMIT 1"
+                    ),
+                    {"m": f"%{marker}%"},
+                )
+            ).fetchone()
+        assert row is not None, "退化告警未落到通知中心（FK/白名单静默失败）"
+        assert str(row[0]) == "health", f"类型被降级为 {row[0]}（白名单漏登记）"
+        assert str(row[1]) == "error"  # L 结论 = error 级
+        assert str(row[2]) == "/strategy"
+        assert "A" in str(row[3])
+        assert "不可晋级" in str(row[4])
+    finally:
+        async with get_session(read_only=False) as session:
+            await session.execute(
+                sa_text("DELETE FROM notifications WHERE title LIKE :m"),
+                {"m": f"%{marker}%"},
+            )
+        await close_database()

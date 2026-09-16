@@ -334,7 +334,7 @@ export const useNotifications = (options: UseNotificationsOptions = {}): UseNoti
         title: String(raw?.title ?? '系统通知'),
         content: String(raw?.content ?? ''),
         action_url: raw?.action_url ? String(raw.action_url) : undefined,
-        type: (['system', 'trading', 'market', 'strategy'].includes(String(raw?.type))
+        type: (['system', 'trading', 'market', 'strategy', 'health'].includes(String(raw?.type))
           ? String(raw?.type)
           : 'system') as BusinessNotification['type'],
         level: (['info', 'warning', 'error', 'success'].includes(String(raw?.level))

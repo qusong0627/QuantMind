@@ -78,6 +78,8 @@ async def should_send_notification(
         "system": "system_announcements",
         "portfolio": "portfolio_updates",
         "market": "portfolio_updates",
+        # 体检复检告警归策略提醒开关（T-P4-06 通知接线）
+        "health": "strategy_alerts",
     }
 
     preference_key = type_to_preference.get(notification_type)

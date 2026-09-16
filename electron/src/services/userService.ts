@@ -363,7 +363,7 @@ class UserService {
         title: String(item?.title ?? ''),
         content: String(item?.content ?? ''),
         action_url: item?.action_url ? String(item.action_url) : undefined,
-        type: (['system', 'trading', 'market', 'strategy'].includes(String(item?.type))
+        type: (['system', 'trading', 'market', 'strategy', 'health'].includes(String(item?.type))
           ? String(item.type)
           : 'system') as UserNotification['type'],
         level: (['info', 'warning', 'error', 'success'].includes(String(item?.level))

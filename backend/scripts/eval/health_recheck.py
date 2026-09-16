@@ -52,6 +52,93 @@ def should_alert(previous: dict[str, Any] | None, current: dict[str, Any]) -> bo
     return prev_verdict in {"A", "B"} and cur_verdict in DEGRADED_VERDICTS
 
 
+async def _resolve_notification_user_id(raw: str) -> str:
+    """策略 owner（int 归一形态，如 "1"）→ users 表实际存在的 user_id（如 "00000001"）。
+
+    notifications 表对 users(user_id) 有 FK——直接拿策略 owner 发通知会 FK 失败且被
+    publisher 的 best-effort 吞掉（静默无通知）。此处在 users 候选键形中实查，
+    查不到返回空串（调用方跳过发布并告警，不静默发错人）。
+    """
+    base = str(raw or "").strip()
+    if not base:
+        return ""
+    candidates = [base]
+    if base.isdigit():
+        candidates.extend([base.zfill(8), str(int(base))])
+    candidates = list(dict.fromkeys(candidates))
+    try:
+        from sqlalchemy import text as _text
+
+        from backend.shared.database_manager_v2 import get_session
+
+        placeholders = ", ".join(f":c{i}" for i in range(len(candidates)))
+        params = {f"c{i}": c for i, c in enumerate(candidates)}
+        async with get_session(read_only=True) as session:
+            rows = (
+                await session.execute(
+                    _text(
+                        f"SELECT user_id FROM users WHERE user_id IN ({placeholders})"
+                    ),
+                    params,
+                )
+            ).fetchall()
+        found = {str(r[0]) for r in rows}
+        for c in candidates:
+            if c in found:
+                return c
+    except Exception as exc:  # noqa: BLE001 - 解析失败按原值兜底（发布失败只告警）
+        logger.warning("[HealthRecheck] 通知收件人解析失败: %s", exc)
+    return base
+
+
+async def _publish_degradation_notification(
+    *,
+    tenant_id: str,
+    user_id: str,
+    strategy_id: str,
+    strategy_name: str,
+    previous: dict[str, Any] | None,
+    current: dict[str, Any],
+) -> None:
+    """退化告警接入通知中心（T-P4-06 通知接线）：PG notifications + WS 实时推送。
+
+    best-effort：失败只告警——Redis 告警键（health:recheck:alert:*）与 ERROR 日志
+    仍是兜底证据。收件人经 users 表实查（FK 保证），查不到则跳过并点名。
+    """
+    try:
+        resolved = await _resolve_notification_user_id(user_id)
+        if not resolved:
+            logger.warning(
+                "[HealthRecheck] 策略 %s 退化告警：收件人无法解析（user_id=%s），"
+                "跳过通知中心发布",
+                strategy_id,
+                user_id,
+            )
+            return
+        from backend.shared.notification_publisher import publish_notification_async
+
+        prev_verdict = (previous or {}).get("verdict")
+        cur_verdict = current.get("verdict")
+        reasons = "；".join(str(r) for r in (current.get("reasons") or [])[:2])
+        name = strategy_name or f"策略 {strategy_id}"
+        await publish_notification_async(
+            user_id=resolved,
+            tenant_id=tenant_id,
+            title=f"体检复检：{name} 结论退化 {prev_verdict} → {cur_verdict}",
+            content=(
+                f"月度复检结论由 {prev_verdict} 退化为 {cur_verdict}"
+                f"（可信度 {current.get('confidence')}）。{reasons}。"
+                "按晋级门槛总表，L/E 结论不可晋级；请在策略管理查看体检报告并处理。"
+            ),
+            type="health",
+            level="error" if str(cur_verdict).upper() == "L" else "warning",
+            action_url="/strategy",
+            expire_days=90,
+        )
+    except Exception as exc:  # noqa: BLE001 - 通知失败不阻断复检
+        logger.warning("[HealthRecheck] 退化通知发布失败（不阻断）: %s", exc)
+
+
 def _redis_client():
     from backend.services.trade_shared.redis_client import get_redis as get_trade_redis
 
@@ -203,6 +290,15 @@ async def run_health_recheck(
             if should_alert(previous, report):
                 entry["alert"] = True
                 _write_alert(redis, tenant_id, user_id, sid, previous, report)
+                # T-P4-06 通知接线：退化告警进通知中心（best-effort，不阻断复检）
+                await _publish_degradation_notification(
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    strategy_id=sid,
+                    strategy_name=str(strat.get("name") or ""),
+                    previous=previous,
+                    current=report,
+                )
                 logger.error(
                     "[HealthRecheck] 策略 %s 体检结论退化：%s → %s（%s）",
                     sid,
