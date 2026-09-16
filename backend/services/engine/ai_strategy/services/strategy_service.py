@@ -384,10 +384,13 @@ class StrategyService:
         # 提取Python代码
         python_code = extract_python_code_from_json(result, content)
 
-        # 如果仍然没有有效代码，使用默认结构
+        # 如果仍然没有有效代码，使用声明式占位骨架（T-P3-03：原 handle_data
+        # 伪代码无任何执行器——改产 STRATEGY_CONFIG 骨架，保证格式契约可执行）
         if not python_code:
-            logger.warning("未找到有效Python代码，使用默认模板")
-            python_code = f"# {description}\n# 基于AI生成\n\ndef initialize(context):\n    # 初始化策略参数\n    pass\n\ndef handle_data(context, data):\n    # 处理数据并生成交易信号\n    pass"
+            logger.warning("未找到有效Python代码，使用声明式占位骨架")
+            from backend.shared.strategy_format import build_scaffold_strategy_code
+
+            python_code = build_scaffold_strategy_code(description)
 
         # 清理rationale，移除代码块
         if "rationale" in result:

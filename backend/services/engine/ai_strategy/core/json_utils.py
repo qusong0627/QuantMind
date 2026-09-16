@@ -263,6 +263,8 @@ def create_fallback_strategy_result(description: str, content: str = "") -> dict
     Returns:
         回退策略结果
     """
+    from backend.shared.strategy_format import build_scaffold_strategy_code
+
     return {
         "strategy_name": f"{description[:10]}策略",
         "rationale": content if content else "AI生成的策略",
@@ -270,7 +272,8 @@ def create_fallback_strategy_result(description: str, content: str = "") -> dict
             {
                 "filename": "strategy.py",
                 "language": "python",
-                "code": f"# {description}\n# 基于DeepSeek AI生成\n\ndef initialize(context):\n    # 初始化策略参数\n    pass\n\ndef handle_data(context, data):\n    # 处理数据并生成交易信号\n    pass",
+                # T-P3-03：原 handle_data 伪代码无执行器，改产声明式占位骨架
+                "code": build_scaffold_strategy_code(description),
             }
         ],
         "metadata": {

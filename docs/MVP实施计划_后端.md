@@ -13,7 +13,7 @@
 | P0 止血+维护基建 | 10/10 ✅ | 安全问题清零；体检脚本可跑；回归进 CI |
 | P1 契约化 | 6/6 ✅ | 四契约落地；交易台数字可下钻 |
 | P2 执行统一 | 7/7 ✅ | 回测-模拟一致性 diff=0（执行层，含真实数据）；盘后固定价格窗口；成交落账闭环+影子对照 |
-| P3 策略收敛 | 5/6（余 T-P3-05 门槛总表，依赖 P4 体检） | 策略全生命周期 E2E |
+| P3 策略收敛 | 6/7（余 T-P3-05 门槛总表，依赖 P4 体检） | 策略全生命周期 E2E |
 | P4 选股收敛+评估 | 0/6 | Scanner 替换旧链；体检九项上线 |
 | P5+ | — | 见主文档 §12.2 总表（P5 后进入下个迭代再细化） |
 
@@ -504,7 +504,24 @@
   校验与 PDT 限制待通道核实后接入（当前 fail-closed 仅模拟）。
 
 
-- **T-P3-03** 旧 5 格式 → 2 格式转换器/下架清单
+### T-P3-03 旧 5 格式 → 2 格式转换器/下架清单 ✅
+**落地（2026-09-16）**：
+- **五格式全库实测清点**：① STRATEGY_CONFIG 声明式 75 行（执行器：回测中心/托管/SDK——保留格式 A）；
+  ② minibt DSL 2 行 + 9 行空壳克隆（执行器：AI-IDE py3.12——保留格式 B）；③ handle_data 聚宽风
+  **存量 0 行**但活跃于两处 AI 兜底生成路径（无任何执行器）；④ 空/桩残壳 12 行（11 空 code +
+  1 桩 `# New Strategy`）；⑤ 沙箱 on_tick / AI-IDE 脚本型 0 行进库（运行时形态，记录边界不转换）。
+- **唯一实现 `shared/strategy_format.py`**：`classify_strategy_code` 五分类 + `is_executable_format`
+  闸门 + `build_scaffold_strategy_code` 声明式占位骨架。
+- **下架**：两处 AI 兜底生成（strategy_service / json_utils）**停止产出 handle_data 伪代码**，
+  改产可执行的声明式骨架（含"占位，请补全"标注，过 AST 闸门）。
+- **审计脚本** `scripts/strategy_format_audit.py`（--json；下架清单）；
+  **修复脚本** `scripts/repair_strategy_code_formats.py`（默认 DRY-RUN；--apply；--only-ids）
+  ——按 name 精确匹配模板回填 .py + sha256，无匹配不猜测列人工。
+- **实机执行**：审计 89 行 → 回填 11 行（2 legacy + 9 minibt 克隆）→ 复审计 **88/89 可执行**
+  （77 声明式 + 11 minibt），余 id=39 桩「8888」（DRAFT，人工清单）。
+- **证据**：`test_strategy_format.py` 6/6（五形态/骨架过闸门与注入安全/兜底下架源断言/dry-run
+  契约/真库回填幂等 E2E 含抖动降级 skip）；backend/tests 全量 **2028 passed** 零新增失败。
+
 ### T-P3-04 AI-IDE 接入统一回测（结果落库 + 触发 verified）✅
 **落地（2026-09-16）**：
 - **结果落库**：核实 `QlibBacktestService.run_backtest` 运行时内部已持久化
