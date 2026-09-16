@@ -111,6 +111,7 @@ class SimulationEngine:
         market: str | None = None,
         pool_id: str | None = None,
         dry_run: bool = False,
+        exclude_symbols: set[str] | None = None,
     ) -> ExecutionReport:
         """
         执行一次模拟盘调仓周期。
@@ -126,6 +127,8 @@ class SimulationEngine:
             dry_run: **计划预演**（T-FE-05）——走同一 RebalanceCalculator 计算
                 （含退出规则与风控买锁），但**不撮合、不落单、不写快照**；
                 结果进 ``report.planned_orders``。任何写副作用路径都必须跳过。
+            exclude_symbols: 人工排除集（T-FE-05 审后可调 v1）——命中的标的**不参与调仓**；
+                **退出规则单不受排除影响**（风控退出不可被人工绕过，机构口径）。
 
         Returns:
             执行报告（dry_run 时 executed_at 仅为计算时刻）
@@ -179,6 +182,22 @@ class SimulationEngine:
                     market.value,
                     len(signals),
                 )
+                if exclude_symbols:
+                    from backend.shared.stock_utils import StockCodeUtil as _SCU
+
+                    excluded_norm = set()
+                    for _sym in exclude_symbols:
+                        excluded_norm.add(str(_sym))
+                        excluded_norm.add(_SCU.to_suffix(str(_sym)))
+                        excluded_norm.add(_SCU.to_prefix(str(_sym)))
+                    before = len(signals)
+                    signals = [s for s in signals if s.symbol not in excluded_norm]
+                    logger.info(
+                        "SimulationEngine: 人工排除 %d 个标的，信号 %d → %d",
+                        len(exclude_symbols),
+                        before,
+                        len(signals),
+                    )
                 # P0 修复：信号表 symbol 为纯数字（DB 契约），行情/账户/撮合为后缀式。
                 # 在引擎边界统一归一（CN → 600036.SH），否则全部信号会因行情键失配
                 # 被当"不可交易"过滤——托管周期自 9/13 统一路径起静默空转（零订单）。

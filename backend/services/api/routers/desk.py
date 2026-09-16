@@ -26,7 +26,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from backend.services.api.user_app.middleware.auth import get_current_user
 from backend.shared.database_manager_v2 import get_session
@@ -314,13 +314,17 @@ async def _async_unavailable(reason: str) -> dict[str, Any]:
     return {"available": False, "reason": reason, "source": "desk:toggle"}
 
 
-async def _collect_plan(tenant_id: str, raw_user: str) -> dict[str, Any]:
-    """调仓计划预演卡（T-FE-05）：活跃策略（Redis）→ 引擎 dry-run（唯一调仓实现）。
+def parse_exclude_symbols(raw: str | None, max_items: int = 50) -> set[str]:
+    """逗号分隔排除集解析（纯函数）：去空/去重/上限截断。"""
+    if not raw:
+        return set()
+    items = [x.strip() for x in str(raw).split(",") if x.strip()]
+    return set(items[:max_items])
 
-    纪律：只读预演——RebalanceCalculator 单一实现复用（退出规则+池过滤+风控买锁同源），
-    但绝不撮合/落单/写快照；无活跃策略时如实返回不可用原因。
-    """
-    source = "redis:trade:active_strategy → simulation engine dry-run"
+
+def _resolve_active_strategy(tenant_id: str, raw_user: str) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """活跃策略解析（预演/执行唯一共用）→ (payload, error_block)。"""
+    source = "redis:trade:active_strategy"
     try:
         from backend.services.trade_shared.redis_client import get_redis as get_trade_redis
         from backend.shared.simulation_account_keys import active_strategy_key
@@ -330,15 +334,29 @@ async def _collect_plan(tenant_id: str, raw_user: str) -> dict[str, Any]:
             client.connect()
         raw = client.client.get(active_strategy_key(tenant_id, raw_user))
         payload = json.loads(raw) if raw else None
-    except Exception as exc:  # noqa: BLE001 - 预演读取失败不拖垮交易台
-        return {"available": False, "reason": f"活跃策略读取失败: {exc}", "source": source}
-
+    except Exception as exc:  # noqa: BLE001 - 读取失败不拖垮调用方
+        return None, {"available": False, "reason": f"活跃策略读取失败: {exc}", "source": source}
     if not isinstance(payload, dict) or not payload:
-        return {
+        return None, {
             "available": False,
             "reason": "当前无活跃策略——在实盘/模拟页启动策略后，此处显示当日调仓计划预演",
             "source": source,
         }
+    return payload, None
+
+
+async def _collect_plan(
+    tenant_id: str, raw_user: str, exclude_symbols: set[str] | None = None
+) -> dict[str, Any]:
+    """调仓计划预演卡（T-FE-05）：活跃策略（Redis）→ 引擎 dry-run（唯一调仓实现）。
+
+    纪律：只读预演——RebalanceCalculator 单一实现复用（退出规则+池过滤+风控买锁同源），
+    但绝不撮合/落单/写快照；无活跃策略时如实返回不可用原因。
+    """
+    source = "redis:trade:active_strategy → simulation engine dry-run"
+    payload, error_block = _resolve_active_strategy(tenant_id, raw_user)
+    if error_block is not None:
+        return error_block
     strategy_id = str(payload.get("strategy_id") or "").strip()
     if not strategy_id:
         return {"available": False, "reason": "活跃策略未记录 strategy_id", "source": source}
@@ -356,6 +374,7 @@ async def _collect_plan(tenant_id: str, raw_user: str) -> dict[str, Any]:
             user_id=raw_user,
             strategy_id=strategy_id,
             live_trade_config=live_cfg,
+            exclude_symbols=exclude_symbols,
         )
     except Exception as exc:  # noqa: BLE001 - 预演失败降级为不可用（如实原因）
         logger.warning("desk plan preview failed: %s", exc)
@@ -377,10 +396,103 @@ async def _collect_plan(tenant_id: str, raw_user: str) -> dict[str, Any]:
     return result
 
 
+@router.post("/plan/execute")
+async def execute_plan(
+    payload: dict[str, Any] | None = None,
+    current_user: dict = Depends(get_current_user),
+) -> dict[str, Any]:
+    """一键执行一轮调仓（T-FE-05，人工触发）——机构级三重闸门：
+
+    ① 动作可用性：须有活跃策略且为 SIMULATION（REAL 走另有确认链，此处拒绝）；
+    ② 防重：同一策略 60s 内只允许触发一次（Redis NX 锁，重复 → 429 附剩余秒数）；
+    ③ 风控不可绕过：退出规则单不接受 exclude_symbols（引擎侧全量生效）。
+
+    执行与托管调度共用唯一入口 run_simulation_cycle_for_active（RebalanceCalculator +
+    ashare_matcher）——计划预演与真实执行天然同源。
+    """
+    from backend.services.trade_shared.redis_client import get_redis as get_trade_redis
+
+    tenant_id = str(current_user.get("tenant_id") or "default")
+    raw_user = str(current_user.get("user_id") or "")
+
+    body = payload if isinstance(payload, dict) else {}
+    exclude_raw = body.get("exclude_symbols")
+    if isinstance(exclude_raw, str):
+        exclude_symbols = parse_exclude_symbols(exclude_raw)
+    elif isinstance(exclude_raw, list):
+        exclude_symbols = parse_exclude_symbols(",".join(str(x) for x in exclude_raw))
+    else:
+        exclude_symbols = set()
+
+    active, error_block = _resolve_active_strategy(tenant_id, raw_user)
+    if error_block is not None:
+        raise HTTPException(status_code=409, detail=error_block["reason"])
+    strategy_id = str(active.get("strategy_id") or "").strip()
+    if not strategy_id:
+        raise HTTPException(status_code=409, detail="活跃策略未记录 strategy_id")
+    mode = str(active.get("mode") or "SIMULATION").upper()
+    if mode != "SIMULATION":
+        raise HTTPException(
+            status_code=409,
+            detail=f"当前活跃策略为 {mode} 模式——交易台一键执行仅限模拟盘（实盘请走实盘确认链）",
+        )
+    live_cfg = active.get("live_trade_config")
+    if not isinstance(live_cfg, dict):
+        live_cfg = {}
+
+    # 防重锁（60s）：double-click / 并发触发一律拒绝并给出剩余时间
+    try:
+        client = get_trade_redis()
+        if getattr(client, "client", None) is None:
+            client.connect()
+        lock_key = f"qm:desk:plan:execute:{tenant_id}:{raw_user}:{strategy_id}"
+        acquired = client.client.set(lock_key, "1", nx=True, ex=60)
+        if not acquired:
+            ttl = client.client.ttl(lock_key)
+            raise HTTPException(
+                status_code=429,
+                detail=f"刚已触发过执行（同一策略 60 秒内防重），请 {max(0, int(ttl))} 秒后再试",
+            )
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - Redis 不可用时拒绝执行（fail-closed）
+        raise HTTPException(
+            status_code=503, detail=f"防重锁不可用，为安全起见拒绝执行: {exc}"
+        ) from exc
+
+    from backend.services.simulation.services.simulation_hosted_scheduler import (
+        execute_simulation_plan_for_active,
+    )
+
+    try:
+        report = await execute_simulation_plan_for_active(
+            tenant_id=tenant_id,
+            user_id=raw_user,
+            strategy_id=strategy_id,
+            live_trade_config=live_cfg,
+            exclude_symbols=exclude_symbols or None,
+        )
+    except Exception as exc:  # noqa: BLE001 - 执行失败如实返回（不吞）
+        logger.error("desk plan execute failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"执行失败: {exc}") from exc
+
+    return {
+        "success": True,
+        "data": {
+            "strategy_id": strategy_id,
+            "mode": mode,
+            "excluded": sorted(exclude_symbols),
+            "report": report,
+            "source": "run_simulation_cycle_for_active（与托管调度同一执行入口）",
+        },
+    }
+
+
 @router.get("/today")
 async def desk_today(
     health: bool = Query(True, description="是否运行体检（10 项断言，约 1-2s）"),
     plan: bool = Query(True, description="是否运行调仓计划预演（dry-run 引擎，约 1-3s）"),
+    exclude: str | None = Query(None, description="人工排除标的（逗号分隔；退出规则单不受影响）"),
     current_user: dict = Depends(get_current_user),
 ) -> dict[str, Any]:
     """今日交易台聚合：管线/信号/计划预演/执行/盈亏/影子对照/健康——每个数字带 source 下钻字段。"""
@@ -396,7 +508,7 @@ async def desk_today(
         _collect_execution(tenant_id, int(sim_uid), raw_user),
         _collect_pnl(tenant_id, str(sim_uid)),
         _collect_shadow(),
-        _collect_plan(tenant_id, raw_user)
+        _collect_plan(tenant_id, raw_user, parse_exclude_symbols(exclude))
         if plan
         else _async_unavailable("调仓计划预演已跳过（?plan=false）"),
     )

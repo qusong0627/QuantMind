@@ -122,6 +122,7 @@ async def run_simulation_cycle_for_active(
     strategy_id: str,
     live_trade_config: dict[str, Any] | None = None,
     run_id: str | None = None,
+    exclude_symbols: set[str] | None = None,
 ) -> dict[str, Any]:
     """托管模拟盘唯一执行入口：RebalanceCalculator + ashare_matcher。"""
     from backend.services.simulation.engine import simulation_engine
@@ -137,6 +138,7 @@ async def run_simulation_cycle_for_active(
         run_id=run_id,
         params_override=params_override or None,
         pool_id=cfg.get("pool_id"),
+        exclude_symbols=exclude_symbols,
     )
     return report_to_hosted_result(report)
 
@@ -147,6 +149,7 @@ async def preview_simulation_plan_for_active(
     user_id: str,
     strategy_id: str,
     live_trade_config: dict[str, Any] | None = None,
+    exclude_symbols: set[str] | None = None,
 ) -> dict[str, Any]:
     """调仓计划预演（T-FE-05，只读）：dry-run run_cycle —— 与执行入口共用同一
     RebalanceCalculator 与池/风控前置，但**绝不撮合、不落单、不写快照**。
@@ -166,6 +169,7 @@ async def preview_simulation_plan_for_active(
         params_override=params_override or None,
         pool_id=cfg.get("pool_id"),
         dry_run=True,
+        exclude_symbols=exclude_symbols,
     )
     return {
         "available": True,
@@ -175,6 +179,33 @@ async def preview_simulation_plan_for_active(
         "orders": list(report.planned_orders),
         "error": report.error,
     }
+
+
+async def execute_simulation_plan_for_active(
+    *,
+    tenant_id: str,
+    user_id: str,
+    strategy_id: str,
+    live_trade_config: dict[str, Any] | None = None,
+    exclude_symbols: set[str] | None = None,
+    run_id: str | None = None,
+) -> dict[str, Any]:
+    """交易台"一键执行"（T-FE-05，人工触发一次调仓）——**与托管调度共用唯一执行入口**
+    ``run_simulation_cycle_for_active``（RebalanceCalculator + ashare_matcher；
+    风控买锁/退出规则全量生效；退出规则单**不接受** exclude_symbols 排除）。
+
+    防重与只读纪律在调用方（desk 端点：60s Redis 锁 + 仅模拟盘）。
+    返回 report_to_hosted_result 形态的执行报告。
+    """
+    cfg = _normalize_live_trade_config(live_trade_config)
+    return await run_simulation_cycle_for_active(
+        tenant_id=tenant_id,
+        user_id=user_id,
+        strategy_id=strategy_id,
+        live_trade_config=cfg,
+        run_id=run_id,
+        exclude_symbols=exclude_symbols,
+    )
 
 
 def _parse_started_at(value: Any, market: Any = "CN") -> date | None:
