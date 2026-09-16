@@ -467,6 +467,8 @@ async def _default_execute_sim_sell(
 
     manager = SimulationAccountManager(redis)
     engine = SimulationExecutionEngine(db, manager)
+    # 注（T-P2-08）：本路径 client_order_id 恒 NULL，不在唯一索引范围内——
+    # 风控单去重靠 Redis already_fired（见 :324-330），语义未变
     sim_order = SimOrder(
         tenant_id=tenant_id,
         user_id=user_id,

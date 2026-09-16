@@ -2,20 +2,66 @@
 Simulation order service.
 """
 
+import logging
 from datetime import datetime, timezone
 from typing import List, Optional
 from uuid import UUID
 
 from sqlalchemy import String, and_, cast, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.services.simulation.models.order import OrderStatus, SimOrder
 from backend.services.simulation.schemas.order import SimOrderCreate
 
+logger = logging.getLogger(__name__)
+
+
+class DuplicateSimOrderError(Exception):
+    """幂等键命中已有台账单（T-P2-08）：唯一索引竞态兜底。
+
+    各调用方应转既有 duplicate 语义（success+duplicate / duplicate_skipped），
+    不得向用户暴露为 500。
+    """
+
+    def __init__(self, client_order_id: str, existing: SimOrder):
+        super().__init__(f"duplicate client_order_id skipped: {client_order_id}")
+        self.client_order_id = client_order_id
+        self.existing = existing
+
 
 class SimOrderService:
     def __init__(self, db: AsyncSession):
         self.db = db
+
+    async def get_sim_order_by_client_order_id(
+        self, tenant_id: str, user_id: str, client_order_id: str
+    ) -> Optional[SimOrder]:
+        """按幂等键查**台账本体**（sim_orders）——投影可能为空，本体才是权威（T-P2-08）。
+
+        user_id 形与 create_order 同规则（数字转 int），保证与写入行可比。
+        """
+        cid = str(client_order_id or "").strip()
+        if not cid:
+            return None
+        uid = int(user_id) if str(user_id).isdigit() else user_id
+        try:
+            result = await self.db.execute(
+                select(SimOrder)
+                .where(
+                    and_(
+                        SimOrder.tenant_id == tenant_id,
+                        SimOrder.user_id == uid,
+                        SimOrder.client_order_id == cid,
+                    )
+                )
+                .order_by(SimOrder.id.desc())
+                .limit(1)
+            )
+            return result.scalars().first()
+        except Exception as exc:  # noqa: BLE001 - 探测失败不阻断（走旧语义）
+            logger.warning("sim_orders 幂等键反查失败 cid=%s: %s", cid, exc)
+            return None
 
     async def create_order(
         self, tenant_id: str, user_id: str, data: SimOrderCreate, **kwargs
@@ -53,8 +99,29 @@ class SimOrderService:
         order.client_order_id = client_order_id
         order.source = (trigger_source or SOURCE_MANUAL)[:32]
         await ensure_order_contract_columns_async()
+        # T-P2-08：幂等键唯一索引（部分索引，cid 非空行）；未启用（存量重复/失败）则旧语义
+        from backend.shared.order_contract import ensure_sim_order_unique_index_async
+
+        await ensure_sim_order_unique_index_async()
         self.db.add(order)
-        await self.db.commit()
+        try:
+            await self.db.commit()
+        except IntegrityError as exc:
+            await self.db.rollback()
+            # 唯一索引竞态兜底：同 (tenant,user,cid) 并发双提交/重放 → 转 duplicate 语义
+            existing = None
+            if client_order_id:
+                existing = await self.get_sim_order_by_client_order_id(
+                    tenant_id, str(user_id), client_order_id
+                )
+            if existing is not None:
+                logger.info(
+                    "sim_orders 幂等键命中（T-P2-08）：cid=%s 已有单 %s，返回 duplicate 语义",
+                    client_order_id,
+                    getattr(existing, "order_id", "?"),
+                )
+                raise DuplicateSimOrderError(client_order_id, existing) from exc
+            raise
         await self.db.refresh(order)
         # V2链路会同步写simulation_orders投影；旧链路不需要，忽略trigger等kwargs
         try:

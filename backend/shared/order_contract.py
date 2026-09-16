@@ -8,11 +8,22 @@
   ③ 两表均无 ``source``（rebalance/manual/mirror/sltp 来源分类，供对账与交易台下钻）。
 
 迁移沿用自愈式先例（独立事务，不污染调用方；失败不置标记可重试）。
-**不加唯一索引**：投影幂等查全路径未验证前，硬约束会把"重复单"变成 500——待
-T-P1-04 台账链路打通后一并启用。
+
+**唯一索引（T-P2-08，2026-09-16 启用）**：``uq_sim_orders_scope_client_order_id``——
+``(tenant_id, user_id, client_order_id) WHERE client_order_id IS NOT NULL`` 部分唯一索引。
+启用前的顾虑（"硬约束会把重复单变成 500"）以两侧收口解决：
+① 写入侧（``SimOrderService.create_order``）捕获 IntegrityError → 按幂等键反查已有单 →
+   抛 ``DuplicateSimOrderError``，由各调用方转既有 duplicate 语义（不再 500）；
+② 迁移侧先查存量重复——**有重复则不建索引并 ERROR 点名**（自动删金融行比重复更危险，
+   交 repair 脚本/人工），去重后下一次调用自动启用；
+③ 风控直插单 cid 恒 NULL，部分索引不覆盖（其幂等靠 Redis already_fired，语义不变）。
 """
 
 from __future__ import annotations
+
+import logging
+
+logger = logging.getLogger(__name__)
 
 SIM_ORDER_COLUMNS = (
     ("client_order_id", "VARCHAR(100)"),
@@ -176,3 +187,96 @@ async def ensure_order_contract_columns_async() -> None:
         logger.warning(
             "[OrderContract] 契约列自愈失败（不阻断业务；缺口列将在写入时报错）: %s", exc
         )
+
+
+# ── sim_orders 幂等键唯一索引（T-P2-08）─────────────────────────────
+
+SIM_ORDER_UNIQUE_INDEX = "uq_sim_orders_scope_client_order_id"
+
+_unique_index_ready: bool | None = None
+
+
+async def sim_order_unique_index_ready_async() -> bool:
+    """探测唯一索引是否已存在（进程内缓存）。"""
+    global _unique_index_ready
+    if _unique_index_ready is not None:
+        return _unique_index_ready
+    from sqlalchemy import text as sa_text
+
+    from backend.shared.database_manager_v2 import get_session
+
+    try:
+        async with get_session(read_only=True) as session:
+            row = (
+                await session.execute(
+                    sa_text(
+                        "SELECT 1 FROM pg_indexes WHERE indexname = :n LIMIT 1"
+                    ),
+                    {"n": SIM_ORDER_UNIQUE_INDEX},
+                )
+            ).fetchone()
+        _unique_index_ready = row is not None
+    except Exception as exc:  # noqa: BLE001 - 探测失败按未就绪（旧语义）处理
+        logger.warning("[OrderContract] 唯一索引探测失败: %s", exc)
+        return False
+    return bool(_unique_index_ready)
+
+
+async def ensure_sim_order_unique_index_async() -> bool:
+    """幂等启用 sim_orders 幂等键唯一索引（T-P2-08）。就绪/新建成 True，未启用 False。
+
+    安全化（与列迁移同款三纪律）：pg_indexes/存量重复预检 → 零 DDL 快路径 →
+    仅新建才 DDL（lock_timeout=3s）→ 异常只告警不抛出（无索引=旧语义，业务不中断）。
+    存量重复存在时**不建索引**并 ERROR 点名（health C05c 也在扫同口径重复）。
+    """
+    global _unique_index_ready
+    if _unique_index_ready:
+        return True
+    from sqlalchemy import text as sa_text
+
+    from backend.shared.database_manager_v2 import get_session
+
+    try:
+        async with get_session(read_only=True) as session:
+            exists = (
+                await session.execute(
+                    sa_text("SELECT 1 FROM pg_indexes WHERE indexname = :n LIMIT 1"),
+                    {"n": SIM_ORDER_UNIQUE_INDEX},
+                )
+            ).fetchone()
+            if exists is not None:
+                _unique_index_ready = True
+                return True
+            dupes = (
+                await session.execute(
+                    sa_text(
+                        "SELECT tenant_id, user_id, client_order_id, count(*) AS c "
+                        "FROM sim_orders WHERE client_order_id IS NOT NULL "
+                        "GROUP BY tenant_id, user_id, client_order_id "
+                        "HAVING count(*) > 1 LIMIT 3"
+                    )
+                )
+            ).fetchall()
+            if dupes:
+                logger.warning(
+                    "[OrderContract] 存量重复单阻止唯一索引启用（需先去重，"
+                    "见 scripts/repair_sim_order_duplicates.py）: %s",
+                    [(str(d[0]), str(d[1]), str(d[2]), int(d[3])) for d in dupes],
+                )
+                return False
+        async with get_session(read_only=False) as session:
+            await session.execute(sa_text("SET LOCAL lock_timeout = '3s'"))
+            await session.execute(
+                sa_text(
+                    f"CREATE UNIQUE INDEX IF NOT EXISTS {SIM_ORDER_UNIQUE_INDEX} "
+                    "ON sim_orders (tenant_id, user_id, client_order_id) "
+                    "WHERE client_order_id IS NOT NULL"
+                )
+            )
+            await session.commit()
+        _unique_index_ready = True
+        logger.info("[OrderContract] sim_orders 幂等键唯一索引已启用（T-P2-08）")
+        return True
+    except Exception as exc:  # noqa: BLE001 - 失败不阻断（旧语义继续，体检可查）
+        logger.warning("[OrderContract] 唯一索引自愈失败（不阻断）: %s", exc)
+        return False

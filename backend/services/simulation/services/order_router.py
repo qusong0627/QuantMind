@@ -152,11 +152,30 @@ async def _submit_from_bar(db, manager, req: OrderRequest) -> RouterOutcome:
         SimulationAccountManager,
     )
 
+    from backend.services.simulation.services.order_service import (
+        DuplicateSimOrderError,
+    )
+
     order_service = SimOrderService(db)
     engine = SimulationExecutionEngine(db, manager)
     cid = str(req.client_order_id or "").strip() or None
 
     if cid:
+        # T-P2-08：先查**台账本体**（sim_orders，投影可能为空——查错表是幂等断链的历史根因），
+        # 投影作为旧数据的兜底探测
+        existing_sim = await order_service.get_sim_order_by_client_order_id(
+            tenant_id=req.tenant_id,
+            user_id=req.user_id,
+            client_order_id=cid,
+        )
+        if existing_sim is not None:
+            return RouterOutcome(
+                success=True,
+                order_id=str(existing_sim.order_id),
+                client_order_id=cid,
+                duplicate=True,
+                message="duplicate client_order_id skipped",
+            )
         existing = await order_service.get_projection_order_by_client_order_id(
             tenant_id=req.tenant_id,
             user_id=req.user_id,
@@ -180,24 +199,34 @@ async def _submit_from_bar(db, manager, req: OrderRequest) -> RouterOutcome:
 
     async with lock_cm:
         await ensure_order_contract_columns_async()
-        order = await order_service.create_order(
-            req.tenant_id,
-            str(req.user_id),
-            SimOrderCreate(
-                portfolio_id=max(0, int(req.portfolio_id or 0)),
-                strategy_id=req.strategy_id,
+        try:
+            order = await order_service.create_order(
+                req.tenant_id,
+                str(req.user_id),
+                SimOrderCreate(
+                    portfolio_id=max(0, int(req.portfolio_id or 0)),
+                    strategy_id=req.strategy_id,
+                    client_order_id=cid,
+                    symbol=req.symbol,
+                    side=OrderSide(str(req.side or "").strip().lower()),
+                    order_type=OrderType(str(req.order_type or "").strip().lower()),
+                    quantity=float(req.quantity),
+                    price=float(req.price) if req.price and float(req.price) > 0 else None,
+                    remarks=req.remarks,
+                    position_side=str(req.position_side or "long").strip().lower(),
+                    is_margin_trade=bool(req.is_margin_trade),
+                ),
+                trigger_source=req.source,
+            )
+        except DuplicateSimOrderError as exc:
+            # T-P2-08：唯一索引竞态兜底——锁内并发/重放命中同一幂等键
+            return RouterOutcome(
+                success=True,
+                order_id=str(exc.existing.order_id),
                 client_order_id=cid,
-                symbol=req.symbol,
-                side=OrderSide(str(req.side or "").strip().lower()),
-                order_type=OrderType(str(req.order_type or "").strip().lower()),
-                quantity=float(req.quantity),
-                price=float(req.price) if req.price and float(req.price) > 0 else None,
-                remarks=req.remarks,
-                position_side=str(req.position_side or "long").strip().lower(),
-                is_margin_trade=bool(req.is_margin_trade),
-            ),
-            trigger_source=req.source,
-        )
+                duplicate=True,
+                message="duplicate client_order_id skipped",
+            )
         order.status = OrderStatus.SUBMITTED
         order.submitted_at = order.submitted_at or datetime.now(timezone.utc)
         await db.commit()

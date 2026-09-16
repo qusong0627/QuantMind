@@ -5,7 +5,7 @@ import uuid
 from typing import Any, Dict, Optional
 
 from fastapi import HTTPException
-from sqlalchemy import and_, select
+from sqlalchemy import or_, and_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -307,6 +307,8 @@ async def dispatch_internal_strategy_order(
         try:
             from backend.services.simulation.models.order import SimOrder
 
+            # T-P2-08：幂等判定改用 cid 列（权威）——原 remarks 前缀判断会被
+            # mark_rejected 覆写 remarks 抹掉标记（幂等断链隐患）；remarks 兜底保留旧数据
             dup_marker = f"client_order_id={client_order_id}"
             dup_stmt = (
                 select(SimOrder.order_id)
@@ -314,7 +316,10 @@ async def dispatch_internal_strategy_order(
                     and_(
                         SimOrder.tenant_id == tenant,
                         SimOrder.user_id == uid,
-                        SimOrder.remarks.startswith(dup_marker),
+                        or_(
+                            SimOrder.client_order_id == client_order_id,
+                            SimOrder.remarks.startswith(dup_marker),
+                        ),
                     )
                 )
                 .limit(1)

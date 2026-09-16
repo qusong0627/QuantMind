@@ -21,7 +21,10 @@ from backend.services.simulation.schemas.order import SimOrderCreate
 from backend.services.simulation.services.execution_engine import (
     SimulationExecutionEngine,
 )
-from backend.services.simulation.services.order_service import SimOrderService
+from backend.services.simulation.services.order_service import (
+    DuplicateSimOrderError,
+    SimOrderService,
+)
 from backend.services.simulation.services.simulation_manager import (
     SimulationAccountManager,
 )
@@ -136,6 +139,29 @@ class SimulationOrderSubmissionService:
     ) -> SimulationSubmissionOutcome:
         normalized_client_order_id = str(client_order_id or "").strip() or None
         if normalized_client_order_id:
+            # T-P2-08：先查台账本体（权威）——投影可能为空，单查投影是幂等断链的历史根因；
+            # 命中后尽量用投影富化成交信息，投影缺失则给最小 duplicate 结果（促发者只需 duplicate 语义）
+            sim_existing = await self.order_service.get_sim_order_by_client_order_id(
+                tenant_id=tenant_id,
+                user_id=user_id,
+                client_order_id=normalized_client_order_id,
+            )
+            if sim_existing is not None:
+                projection = (
+                    await self.order_service.get_projection_order_by_client_order_id(
+                        tenant_id=tenant_id,
+                        user_id=user_id,
+                        client_order_id=normalized_client_order_id,
+                    )
+                )
+                if projection is not None:
+                    return await self._build_duplicate_outcome(projection)
+                return SimulationSubmissionOutcome(
+                    success=True,
+                    order_id=str(sim_existing.order_id),
+                    client_order_id=normalized_client_order_id,
+                    message="duplicate client_order_id skipped",
+                )
             existing_order = (
                 await self.order_service.get_projection_order_by_client_order_id(
                     tenant_id=tenant_id,
@@ -146,27 +172,35 @@ class SimulationOrderSubmissionService:
             if existing_order is not None:
                 return await self._build_duplicate_outcome(existing_order)
 
-        order = await self.order_service.create_order(
-            tenant_id,
-            user_id,
-            SimOrderCreate(
-                portfolio_id=max(0, int(portfolio_id or 0)),
-                strategy_id=strategy_id,
+        try:
+            order = await self.order_service.create_order(
+                tenant_id,
+                user_id,
+                SimOrderCreate(
+                    portfolio_id=max(0, int(portfolio_id or 0)),
+                    strategy_id=strategy_id,
+                    client_order_id=normalized_client_order_id,
+                    time_in_force=str(time_in_force or "DAY").strip().upper() or "DAY",
+                    expires_at=expires_at,
+                    symbol=symbol,
+                    side=OrderSide(str(side or "").strip().lower()),
+                    order_type=OrderType(str(order_type or "").strip().lower()),
+                    quantity=float(quantity),
+                    price=float(price) if price and float(price) > 0 else None,
+                    remarks=remarks,
+                    trade_action=trade_action,
+                    position_side=str(position_side or "long").strip().lower(),
+                    is_margin_trade=bool(is_margin_trade),
+                ),
+                trigger_source=trigger_source,
+            )
+        except DuplicateSimOrderError:
+            # T-P2-08：唯一索引竞态兜底（并发/重放命中同一幂等键）——转既有 duplicate 语义
+            return SimulationSubmissionOutcome(
+                success=True,
                 client_order_id=normalized_client_order_id,
-                time_in_force=str(time_in_force or "DAY").strip().upper() or "DAY",
-                expires_at=expires_at,
-                symbol=symbol,
-                side=OrderSide(str(side or "").strip().lower()),
-                order_type=OrderType(str(order_type or "").strip().lower()),
-                quantity=float(quantity),
-                price=float(price) if price and float(price) > 0 else None,
-                remarks=remarks,
-                trade_action=trade_action,
-                position_side=str(position_side or "long").strip().lower(),
-                is_margin_trade=bool(is_margin_trade),
-            ),
-            trigger_source=trigger_source,
-        )
+                message="duplicate client_order_id skipped",
+            )
         expires_at_value = self.engine._normalize_runtime_datetime(
             getattr(order, "expires_at", None)
         )

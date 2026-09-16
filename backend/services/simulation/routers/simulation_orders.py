@@ -22,7 +22,10 @@ from backend.services.simulation.schemas.order import (
 from backend.services.simulation.services.execution_engine import (
     SimulationExecutionEngine,
 )
-from backend.services.simulation.services.order_service import SimOrderService
+from backend.services.simulation.services.order_service import (
+    DuplicateSimOrderError,
+    SimOrderService,
+)
 from backend.services.simulation.services.simulation_manager import (
     SimulationAccountManager,
     require_sim_user_id,
@@ -61,7 +64,13 @@ async def create_order(
     # 拿不到锁直接429由前端重试，不静默放行。
     try:
         async with SimulationAccountManager.locked_execution(user_id, auth.tenant_id):
-            order = await order_service.create_order(auth.tenant_id, user_id, data)
+            try:
+                order = await order_service.create_order(auth.tenant_id, user_id, data)
+            except DuplicateSimOrderError as exc:
+                # T-P2-08：同幂等键重放——返回已有台账单（客户端重试语义，不报价新单不 500）
+                existing = exc.existing
+                await db.refresh(existing)
+                return existing
             order.status = OrderStatus.SUBMITTED
             await db.commit()
             await db.refresh(order)
