@@ -385,13 +385,23 @@ async def load_fund_series(
     from backend.shared.database_manager_v2 import get_session
 
     since = date.today() - timedelta(days=max(7, int(days)))
+    # T-P1-07：本函数是 CN-only 口径（调用方 L606 已按市场门控）——
+    # 快照带市场维度后必须显式取 CN 行，否则会混入其它市场的序列
+    from backend.shared.fund_snapshot_contract import (
+        fund_snapshot_has_market_column_async,
+    )
+
+    market_clause = (
+        "AND market = 'CN' " if await fund_snapshot_has_market_column_async() else ""
+    )
     async with get_session(read_only=True) as session:
         for form in uid_forms(user_raw):
             rows = (
                 await session.execute(
                     _text(
                         "SELECT snapshot_date, total_asset FROM simulation_fund_snapshots "
-                        "WHERE tenant_id = :t AND user_id = :u AND snapshot_date >= :since "
+                        "WHERE tenant_id = :t AND user_id = :u "
+                        f"{market_clause}AND snapshot_date >= :since "
                         "ORDER BY snapshot_date"
                     ),
                     {"t": tenant, "u": form, "since": since},

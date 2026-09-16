@@ -873,10 +873,11 @@ export const realTradingService = {
     },
 
     // Get Simulation Fund Snapshots (from DB table simulation_fund_snapshots)
-    getSimulationDailySnapshots: async (days: number = 1): Promise<SimulationFundSnapshot[]> => {
+    // T-P1-07：market 传具体市场取该市场序列（默认 ALL=跨市场合并行，兼容旧调用）
+    getSimulationDailySnapshots: async (days: number = 1, market?: string): Promise<SimulationFundSnapshot[]> => {
         const token = authService.getAccessToken();
         const response = await axios.get(`${SERVICE_ENDPOINTS.API_GATEWAY}/simulation/snapshots/daily`, {
-            params: { days },
+            params: { days, ...(market ? { market } : {}) },
             headers: token ? new AxiosHeaders({ Authorization: `Bearer ${token}` }) : undefined,
             timeout: 30000,
         });

@@ -42,11 +42,13 @@ describe('formatBoxTitle', () => {
 });
 
 describe('内容分层：市场差异只在规格里表达', () => {
-  test('非 A 股市场关闭无市场口径的图表面板并给出说明', () => {
+  test('T-P1-07：非 A 股市场恢复全量图表面板（市场维度已落地，不再关闭）', () => {
     for (const market of ['HK', 'US', 'FUTURES', 'CRYPTO'] as const) {
       const charts = MARKET_CONTENT[market].boxes.charts;
-      expect(charts.panels?.portfolioSeries, `${market} 应关闭组合绩效面板`).toBe(false);
-      expect(charts.panelNote, `${market} 应说明原因`).toBeTruthy();
+      expect(
+        charts.panels?.portfolioSeries,
+        `${market} 不应再关闭组合绩效面板（快照已带市场维度）`
+      ).toBeUndefined();
     }
   });
 

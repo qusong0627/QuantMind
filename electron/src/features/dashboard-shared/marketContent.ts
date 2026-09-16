@@ -13,18 +13,14 @@ import type { BoxContent, BoxId, MarketContent } from './types';
 const BOX_ORDER: BoxId[] = ['market', 'fund', 'trade', 'strategy', 'charts', 'notify'];
 
 /**
- * 非 A 股市场的智能图表面板开关。
+ * 非 A 股市场的智能图表面板：**已恢复全量**（T-P1-07 / 方案 B2 落地）。
  *
- * 原因（后端现状）：模拟盘日快照 `/simulation/snapshots/daily` 与组合绩效
- * `/portfolios/performance` **都没有市场维度**（表里没有 market 列），
- * 直接展示会把 A 股曲线挂在港股/美股格子上 —— 与本轮要修的问题同类。
- * 因此这些子面板先按市场关闭，只保留有市场口径的成交统计；
- * 后端补上市场维度（方案 B2）后，把这里改回 true 即可。
+ * 历史：快照表无市场维度时，非 CN 面板关闭资金曲线与持仓分布（防串市场）。
+ * 2026-09-16 T-P1-07 起 `/simulation/snapshots/daily?market=` 与
+ * `/simulation/account?market=` 均为市场口径，前端按当前市场取数——
+ * 资产曲线可直接展示。（持仓分布的回退源 `/portfolios/*` 仍无市场维度，
+ * 已在 useIntelligenceCharts 内按市场收口：非 CN 只在账户口径可用时出数。）
  */
-const NON_CN_CHARTS_PANELS: Partial<BoxContent> = {
-  panels: { portfolioSeries: false, positionRatio: false },
-  panelNote: '该市场暂只统计成交；资金曲线与持仓分布待后端补齐市场维度',
-};
 
 interface MarketSeed {
   market: AppMarket;
@@ -112,7 +108,6 @@ const SEEDS: Record<AppMarket, MarketSeed> = {
     boxes: {
       trade: { emptyHint: '只统计港股标的（xxxxx.HK）的模拟成交；A 股成交不会混入' },
       market: { emptyHint: '本地 QuantHK 数据未就绪，可到「数据管理 → 港股」触发同步' },
-      charts: NON_CN_CHARTS_PANELS,
     },
   },
   US: {
@@ -125,7 +120,6 @@ const SEEDS: Record<AppMarket, MarketSeed> = {
     boxes: {
       trade: { emptyHint: '只统计美股 ticker 的模拟成交；A 股/港股成交不会混入' },
       strategy: { emptyHint: '策略库中暂无美股策略（美股标的池约 517 只，非全市场）' },
-      charts: NON_CN_CHARTS_PANELS,
     },
   },
   FUTURES: {
@@ -138,7 +132,6 @@ const SEEDS: Record<AppMarket, MarketSeed> = {
     currency: '¥',
     boxes: {
       trade: { emptyHint: '只统计期货合约（.CN / .FUT）的模拟成交' },
-      charts: NON_CN_CHARTS_PANELS,
     },
   },
   CRYPTO: {
@@ -151,7 +144,6 @@ const SEEDS: Record<AppMarket, MarketSeed> = {
     boxes: {
       fund: { emptyHint: '区块链市场当前未开放模拟盘（生产默认隐藏该市场）' },
       trade: { canOpenAccount: false, emptyHint: '区块链市场当前未开放模拟盘' },
-      charts: NON_CN_CHARTS_PANELS,
     },
   },
 };

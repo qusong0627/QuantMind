@@ -181,6 +181,7 @@ class SimulationSettingsResponse(BaseModel):
 
 class SimulationFundSnapshotResponse(BaseModel):
     snapshot_date: date
+    market: str = "ALL"
     total_asset: Decimal
     available_balance: Decimal
     frozen_balance: Decimal
@@ -283,12 +284,19 @@ async def reset_simulation_account(
     try:
         from sqlalchemy import text as _text
         from backend.shared.database_manager_v2 import get_session as _get_session
+        from backend.shared.fund_snapshot_contract import (
+            fund_snapshot_has_market_column_async as _snap_has_market,
+        )
         from backend.services.simulation.services.market_rules import market_symbol_sql_regex
         # 成交/委托表没有 market 列，市场只隐含在 symbol 形态里。
         # 重置某一个市场的账户时，不能把其它市场的成交历史一起删掉
         # （历史行为是全删 —— 新开了「按市场开通模拟盘」入口后必须先按 symbol 收窄）。
         _sym_pat = market_symbol_sql_regex(market)
         _sym_clause = " AND symbol ~* :sym_pat" if _sym_pat else ""
+        # T-P1-07：快照按市场收窄（列就绪时）——重置单一市场不再丢其它市场的资金曲线；
+        # 历史 ALL 合并行为历史事实保留，今日 ALL 行由重置后的即时采集重写
+        _snap_clause = " AND market = :snap_market" if await _snap_has_market() else ""
+        _snap_params = {"snap_market": market} if _snap_clause else {}
         uid_str_variants = {str(uid), str(auth.user_id)}
         async with _get_session() as _session:
             await _session.execute(
@@ -308,7 +316,10 @@ async def reset_simulation_account(
                     _text(f"DELETE FROM sim_orders WHERE tenant_id=:tid AND cast(user_id as varchar)=:uid_str{_sym_clause}"),
                     {"tid": auth.tenant_id, "uid_str": uv, **({"sym_pat": _sym_pat} if _sym_pat else {})},
                 )
-                await _session.execute(_text("DELETE FROM simulation_fund_snapshots WHERE tenant_id=:tid AND user_id=:uid2"), {"tid": auth.tenant_id, "uid2": uv})
+                await _session.execute(
+                    _text(f"DELETE FROM simulation_fund_snapshots WHERE tenant_id=:tid AND user_id=:uid2{_snap_clause}"),
+                    {"tid": auth.tenant_id, "uid2": uv, **_snap_params},
+                )
                 for _table in _NEW_LEDGER_TABLES:
                     try:
                         # SAVEPOINT 隔离：表不存在（如旧库）只回滚本条，不影响已删数据
@@ -486,16 +497,28 @@ async def get_simulation_account(
         default_initial_cash=DEFAULT_INITIAL_CASH,
         cooldown_days=COOLDOWN_DAYS,
     )
-    initial_equity = float(settings.get("initial_cash", DEFAULT_INITIAL_CASH))
+    settings_initial = float(settings.get("initial_cash", DEFAULT_INITIAL_CASH))
+    initial_equity = settings_initial
+    # T-P1-07：非 CN 市场的种子按账户自身解析（settings 只有一份、无市场维度——
+    # 港股/期货面板拿 CN settings 当初始会把别的市场的种子算成这个市场的盈亏）
+    if market != "CN":
+        from backend.services.simulation.services.fund_snapshot_service import (
+            resolve_account_seed,
+        )
+
+        account_seed = resolve_account_seed(account, market, None)
+        if account_seed is not None and account_seed > 0:
+            initial_equity = float(account_seed)
 
     # 补算盈亏字段（手续费已从现金扣减，天然计入盈亏）：
-    # 总盈亏 = 总资产 - 初始资金；今日/本月盈亏基于日快照基线推导。
+    # 总盈亏 = 总资产 - 初始资金；今日/本月盈亏基于日快照基线推导（按市场取基线）。
     total_asset = float(account.get("total_asset") or 0.0)
     total_pnl = total_asset - initial_equity
     baselines = await SimulationFundSnapshotService.get_baselines(
         tenant_id=auth.tenant_id,
         user_id=str(uid),
         initial_capital=Decimal(str(initial_equity)),
+        market=market,
     )
     day_open_equity = float(baselines["day_open_equity"])
     month_open_equity = float(baselines["month_open_equity"])
@@ -553,19 +576,22 @@ async def capture_simulation_fund_snapshot(
 @router.get("/snapshots/daily", response_model=list[SimulationFundSnapshotResponse])
 async def list_simulation_fund_snapshots(
     days: int = Query(default=30, ge=1, le=3650),
+    market: str = Query(default="ALL", description="市场维度（ALL=跨市场合并行；CN/HK/US/FUTURES/CRYPTO 取单市场序列）"),
     auth: AuthContext = Depends(get_auth_context),
 ):
-    """查询当前用户的模拟盘日级资金快照历史。"""
+    """查询当前用户的模拟盘日级资金快照历史（T-P1-07：市场维度可选）。"""
     snapshots = await SimulationFundSnapshotService.list_user_daily(
         tenant_id=auth.tenant_id,
         # P0-04：快照行的 user_id 由账户键解析而来（int 归一形态，如 00000001→1），
         # 必须用同一归一口径读取，否则 admin 会读到另一个空账户的平线。
         user_id=str(_require_user_id(auth.user_id, auth.tenant_id)),
         days=days,
+        market=market,
     )
     return [
         SimulationFundSnapshotResponse(
             snapshot_date=s.snapshot_date,
+            market=getattr(s, "market", "ALL") or "ALL",
             total_asset=s.total_asset,
             available_balance=s.available_balance,
             frozen_balance=s.frozen_balance,
@@ -650,14 +676,24 @@ async def confirm_holding_sync(
     try:
         from sqlalchemy import text as _text
         from backend.shared.database_manager_v2 import get_session as _get_session
+        from backend.shared.fund_snapshot_contract import (
+            fund_snapshot_has_market_column_async as _snap_has_market2,
+        )
         _uid_variants = {str(uid), str(auth.user_id)}
+        # T-P1-07：OCR 同步对齐的是默认（CN）账户——快照只清该市场行（列就绪时），
+        # 不再把其它市场的资金曲线一并清掉
+        _snap_clause2 = " AND market = :snap_market" if await _snap_has_market2() else ""
+        _snap_params2 = {"snap_market": "CN"} if _snap_clause2 else {}
         async with _get_session() as _session:
             await _session.execute(_text("DELETE FROM sim_trades WHERE tenant_id=:tid AND user_id=:uid"), {"tid": auth.tenant_id, "uid": uid})
             await _session.execute(_text("DELETE FROM sim_orders WHERE tenant_id=:tid AND user_id=:uid"), {"tid": auth.tenant_id, "uid": uid})
             for _uv in _uid_variants:
                 await _session.execute(_text("DELETE FROM sim_trades WHERE tenant_id=:tid AND cast(user_id as varchar)=:uid_str"), {"tid": auth.tenant_id, "uid_str": _uv})
                 await _session.execute(_text("DELETE FROM sim_orders WHERE tenant_id=:tid AND cast(user_id as varchar)=:uid_str"), {"tid": auth.tenant_id, "uid_str": _uv})
-                await _session.execute(_text("DELETE FROM simulation_fund_snapshots WHERE tenant_id=:tid AND user_id=:uid2"), {"tid": auth.tenant_id, "uid2": _uv})
+                await _session.execute(
+                    _text(f"DELETE FROM simulation_fund_snapshots WHERE tenant_id=:tid AND user_id=:uid2{_snap_clause2}"),
+                    {"tid": auth.tenant_id, "uid2": _uv, **_snap_params2},
+                )
                 for _table in (
                     "simulation_accounts",
                     "simulation_position_lots",

@@ -436,7 +436,9 @@ export const useIntelligenceCharts = (
                 portfolioSeriesEnabled && isLive
                     ? realTradingService.getAccountLedgerDaily(30, resolvedUserId).catch(() => [])
                     : portfolioSeriesEnabled
-                        ? realTradingService.getSimulationDailySnapshots(30).catch(() => [])
+                        ? realTradingService
+                              .getSimulationDailySnapshots(30, market)
+                              .catch(() => [])
                         : Promise.resolve([] as SimulationFundSnapshot[]),
                 isLive
                     ? Promise.resolve(null)
@@ -450,8 +452,13 @@ export const useIntelligenceCharts = (
                 normalizedPositionRatio = buildHoldingCashFromAccount(account);
             } 
             
-            // 如果账户数据不可用，或者比例都是0，则尝试解析持仓分布
-            if (normalizedPositionRatio.length === 0 || normalizedPositionRatio.every(v => v.value <= 0)) {
+            // 如果账户数据不可用，或者比例都是0，则尝试解析持仓分布。
+            // T-P1-07：回退源 /portfolios/* 无市场维度——非 CN 市场只在账户口径
+            // 可用时出数，宁可空态也不把 A 股持仓挂到港股/美股格子上
+            if (
+                (normalizedPositionRatio.length === 0 || normalizedPositionRatio.every(v => v.value <= 0)) &&
+                market === 'CN'
+            ) {
                 normalizedPositionRatio = normalizePositionDistribution(positionRatio);
             }
 

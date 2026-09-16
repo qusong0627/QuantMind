@@ -172,13 +172,24 @@ async def _first_form_with_rows(
     if table not in allowed_tables:  # pragma: no cover - 防御（调用方为常量）
         raise ValueError(f"非法表名: {table}")
 
+    # T-P1-07：模拟快照带市场维度后，影子对照取合并行（'ALL'）；
+    # 实盘台账表无市场列，不受影响
+    market_clause = ""
+    if table == "simulation_fund_snapshots":
+        from backend.shared.fund_snapshot_contract import (
+            fund_snapshot_has_market_column_async,
+        )
+
+        if await fund_snapshot_has_market_column_async():
+            market_clause = "AND market = 'ALL' "
     async with get_session(read_only=True) as db:
         for form in forms:
             rows = (
                 await db.execute(
                     sa_text(
                         f"SELECT snapshot_date, total_asset FROM {table} "
-                        "WHERE tenant_id = :t AND user_id = :u AND snapshot_date >= :since "
+                        "WHERE tenant_id = :t AND user_id = :u "
+                        f"{market_clause}AND snapshot_date >= :since "
                         "ORDER BY snapshot_date"
                     ),
                     {"t": tenant_id, "u": form, "since": since},

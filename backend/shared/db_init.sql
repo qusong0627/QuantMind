@@ -1198,6 +1198,11 @@ CREATE TABLE IF NOT EXISTS sim_orders (
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- T-P2-08：幂等键唯一索引（部分索引；cid 为空的风控直插单不覆盖）
+CREATE UNIQUE INDEX IF NOT EXISTS uq_sim_orders_scope_client_order_id
+    ON sim_orders (tenant_id, user_id, client_order_id)
+    WHERE client_order_id IS NOT NULL;
+
 -- ========================
 -- 43. SIM_TRADES
 -- ========================
@@ -1232,6 +1237,7 @@ CREATE TABLE IF NOT EXISTS simulation_fund_snapshots (
     tenant_id       VARCHAR(50) NOT NULL DEFAULT 'default',
     user_id         VARCHAR(50) NOT NULL,
     snapshot_date   DATE NOT NULL,
+    market          VARCHAR(16) NOT NULL DEFAULT 'ALL',
     total_asset     FLOAT NOT NULL DEFAULT 0,
     available_balance FLOAT NOT NULL DEFAULT 0,
     frozen_balance  FLOAT NOT NULL DEFAULT 0,
@@ -1241,7 +1247,7 @@ CREATE TABLE IF NOT EXISTS simulation_fund_snapshots (
     today_pnl       FLOAT NOT NULL DEFAULT 0,
     source          VARCHAR(64) NOT NULL DEFAULT 'sim',
     updated_at      TIMESTAMP NOT NULL DEFAULT NOW(),
-    UNIQUE (tenant_id, user_id, snapshot_date)
+    UNIQUE (tenant_id, user_id, snapshot_date, market)
 );
 
 -- ========================

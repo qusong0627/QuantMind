@@ -284,9 +284,20 @@ async def check_c04_snapshot_consistency(ctx: HealthContext) -> CheckResult:
             continue
         per_user[(tenant, user)] = per_user.get((tenant, user), 0.0) + total
 
+    # T-P1-07：快照带市场维度后必须显式取合并行（'ALL'）——否则同日各市场行与
+    # 合并行混排，(tenant,user) 字典项会被不确定的一行覆盖（误报/漏报）
+    has_market_col = bool(
+        ctx.query(
+            "SELECT 1 AS present FROM information_schema.columns "
+            "WHERE table_name = 'simulation_fund_snapshots' "
+            "AND column_name = 'market' LIMIT 1"
+        )
+    )
+    market_clause = "AND market = 'ALL' " if has_market_col else ""
     rows = ctx.query(
         "SELECT tenant_id, user_id, total_asset FROM simulation_fund_snapshots "
-        "WHERE snapshot_date = (SELECT max(snapshot_date) FROM simulation_fund_snapshots)"
+        "WHERE snapshot_date = (SELECT max(snapshot_date) FROM simulation_fund_snapshots) "
+        f"{market_clause}"
     )
     # 快照的用户键是账户键解析原文；Redis 侧同口径比对
     snapshot_total = {(str(r["tenant_id"]), str(r["user_id"])): float(r["total_asset"] or 0) for r in rows}

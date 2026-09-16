@@ -238,12 +238,22 @@ async def _collect_pnl(tenant_id: str, sim_user_id: str) -> dict[str, Any]:
     async with get_session(read_only=True) as session:
         from sqlalchemy import text as sa_text
 
+        # T-P1-07：快照带市场维度后必须显式取合并行（'ALL'），
+        # 否则同日各市场行与合并行混排、LIMIT 1 会取到不确定的一行
+        from backend.shared.fund_snapshot_contract import (
+            fund_snapshot_has_market_column_async,
+        )
+
+        market_clause = (
+            "AND market = 'ALL' " if await fund_snapshot_has_market_column_async() else ""
+        )
         row = (
             await session.execute(
                 sa_text(
                     "SELECT snapshot_date, total_asset, initial_capital, total_pnl, today_pnl, "
                     "market_value, updated_at FROM simulation_fund_snapshots "
                     "WHERE tenant_id = :t AND user_id = :u "
+                    f"{market_clause}"
                     "ORDER BY snapshot_date DESC LIMIT 1"
                 ),
                 {"t": tenant_id, "u": sim_user_id},

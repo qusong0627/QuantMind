@@ -8,11 +8,13 @@ from backend.services.trade_shared.models.base import Base
 class SimulationFundSnapshot(Base):
     __tablename__ = "simulation_fund_snapshots"
     __table_args__ = (
+        # T-P1-07：市场维度 —— 'ALL'=跨市场合并行，其余为单市场行
         UniqueConstraint(
             "tenant_id",
             "user_id",
             "snapshot_date",
-            name="uq_simulation_fund_snapshots_scope_date",
+            "market",
+            name="uq_sim_fund_snapshot_scope_date_market",
         ),
     )
 
@@ -20,6 +22,7 @@ class SimulationFundSnapshot(Base):
     tenant_id = Column(String(50), nullable=False, index=True)
     user_id = Column(String(50), nullable=False, index=True)
     snapshot_date = Column(Date, nullable=False, index=True)
+    market = Column(String(16), nullable=False, default="ALL")
     total_asset = Column(Float, nullable=False, default=0.0)
     available_balance = Column(Float, nullable=False, default=0.0)
     frozen_balance = Column(Float, nullable=False, default=0.0)

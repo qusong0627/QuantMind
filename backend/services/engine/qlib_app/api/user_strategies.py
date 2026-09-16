@@ -566,6 +566,16 @@ async def _fetch_sim_fund_fallback(
             candidates.append(c)
     try:
         async with get_session(read_only=True) as session:
+            # T-P1-07：快照带市场维度后必须显式取合并行（'ALL'）
+            from backend.shared.fund_snapshot_contract import (
+                fund_snapshot_has_market_column_async,
+            )
+
+            market_clause = (
+                "AND market = 'ALL' "
+                if await fund_snapshot_has_market_column_async()
+                else ""
+            )
             placeholders = ",".join(f":u{i}" for i in range(len(candidates)))
             params: dict[str, Any] = {"tid": str(tenant_id or "default")}
             params.update({f"u{i}": c for i, c in enumerate(candidates)})
@@ -575,6 +585,7 @@ async def _fetch_sim_fund_fallback(
                         "SELECT total_asset, today_pnl, total_pnl, initial_capital "
                         "FROM simulation_fund_snapshots "
                         f"WHERE tenant_id = :tid AND user_id IN ({placeholders}) "
+                        f"{market_clause}"
                         "ORDER BY snapshot_date DESC LIMIT 1"
                     ),
                     params,
