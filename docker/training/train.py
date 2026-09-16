@@ -623,6 +623,8 @@ def _train_single_model(
     elif model_type in ("linear", "random_forest", "mlp"):
         model = _dispatch_gbdt_sklearn(cfg, model_type, features, X_train, y_train, X_val, y_val)
     elif model_type == "nativetft":
+        del X_train, X_val
+        _trim_memory("before DL dispatch (single tft)")
         return _dispatch_dl(cfg, model_type, features, train_df, val_df, test_df, df, fill_values, hardware, single=True, t_start=t0)
     elif model_type in _DL_MODEL_TYPES:
         # 同 train_model：DL 不用 X 矩阵，dispatch 前释放（省 ~7.8GB）
