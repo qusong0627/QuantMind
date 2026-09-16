@@ -12,7 +12,10 @@ from enum import Enum
 from typing import Any
 
 from backend.services.simulation.services.signal_loader import SignalScore
-from backend.services.simulation.services.market_rules import lot_size_for_symbol
+from backend.services.simulation.services.market_rules import (
+    lot_size_for_symbol,
+    normalize_order_quantity,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -428,10 +431,10 @@ class RebalanceCalculator:
             if not quote or quote.current_price <= 0:
                 continue
 
-            # 计算目标股数（向下取整到整手）
+            # 计算目标股数（T-P2-02：申报数量归一唯一实现——科创板 200 起 1 股递增，其余 100 整数倍）
             raw_quantity = target_value / quote.current_price
-            lot_quantity = self._floor_to_lot(
-                raw_quantity, self._lot_for(sig.symbol, strategy)
+            lot_quantity = normalize_order_quantity(
+                raw_quantity, sig.symbol, getattr(strategy, "market", None) or "CN"
             )
 
             if lot_quantity > 0:
@@ -479,12 +482,6 @@ class RebalanceCalculator:
     def _lot_for(symbol: str, strategy: StrategyConfig) -> int:
         """CN 按板块手数（科创板 200），其它市场用策略默认 lot_size。"""
         return max(1, int(lot_size_for_symbol(symbol) or strategy.lot_size or 100))
-
-    def _floor_to_lot(self, quantity: float, lot_size: int = 100) -> int:
-        """向下取整到整手"""
-        if quantity <= 0:
-            return 0
-        return int(quantity // lot_size) * lot_size
 
     def _generate_orders(
         self,

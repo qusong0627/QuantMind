@@ -12,16 +12,21 @@ from dataclasses import dataclass
 from datetime import date
 
 from backend.services.simulation.services.local_market_data import DailyBar
-from backend.services.simulation.services.market_rules import lot_size_for_symbol
+from backend.services.simulation.services.market_rules import (
+    CN_RULES,
+    lot_size_for_symbol,
+    normalize_order_quantity,
+)
 
 logger = logging.getLogger(__name__)
 
-# ── 费用常量 ──────────────────────────────────────────────────────────
-_COMMISSION_RATE = 0.0003  # 佣金费率（双向）
-_COMMISSION_MIN = 5.0  # 佣金最低 5 元
-_STAMP_DUTY_RATE = 0.0005  # 印花税（仅卖出，2023-08-28 降为 0.05%）
-_TRANSFER_FEE_RATE = 0.00001  # 过户费（沪深双向，0.001%）
-_LOT_SIZE = 100  # A股 1 手 = 100 股
+# T-P2-02：费用默认值单一事实源 = market_rules.CN_RULES（禁止本地常量副本；
+# env/前端 settings 通过 MatchConfig 显式覆盖，语义不变）
+_COMMISSION_RATE = CN_RULES.commission_rate
+_COMMISSION_MIN = CN_RULES.commission_min
+_STAMP_DUTY_RATE = CN_RULES.stamp_duty_rate
+_TRANSFER_FEE_RATE = CN_RULES.transfer_fee_rate
+_LOT_SIZE = CN_RULES.lot_size
 
 
 @dataclass(frozen=True)
@@ -65,24 +70,27 @@ def _pick_price(bar: DailyBar, mode: str, external_price: float | None = None) -
     return bar.close
 
 
-def _floor_to_lot(shares: float, lot_size: int) -> int:
-    if shares <= 0:
-        return 0
-    return int(shares // lot_size) * lot_size
-
-
 def compute_fees(
     quantity: int,
     price: float,
     side: str,
     cfg: MatchConfig,
 ) -> tuple[float, float, float, float]:
-    """计算 A 股三项费用。返回 (commission, stamp_duty, transfer_fee, total_fee)。"""
-    gross = quantity * price
-    commission = max(gross * cfg.commission_rate, cfg.commission_min)
-    stamp_duty = gross * cfg.stamp_duty_rate if side == "sell" else 0.0
-    transfer_fee = gross * cfg.transfer_fee_rate
-    total_fee = commission + stamp_duty + transfer_fee
+    """费用分项（T-P2-02：**委托 market_rules 唯一实现**；cfg 作显式覆盖）。
+
+    返回 (commission, stamp_duty, transfer_fee, total_fee)；各项 round(2)
+    （与 execute_order / 回测引擎同源同精度——规则平价测试保证逐分相等）。
+    """
+    commission, stamp_duty, transfer_fee = CN_RULES.compute_fee_breakdown(
+        quantity,
+        price,
+        side,
+        commission_rate=cfg.commission_rate,
+        commission_min=cfg.commission_min,
+        stamp_duty_rate=cfg.stamp_duty_rate,
+        transfer_fee_rate=cfg.transfer_fee_rate,
+    )
+    total_fee = round(commission + stamp_duty + transfer_fee, 2)
     return commission, stamp_duty, transfer_fee, total_fee
 
 
@@ -120,10 +128,10 @@ def match_order(
                 reason=f"INSUFFICIENT_AVAILABLE_VOLUME:{available_volume:.0f}",
             )
 
-    # ── 整手 ──
-    lot_size = max(1, int(lot_size_for_symbol(bar.symbol) or cfg.lot_size or _LOT_SIZE))
+    # ── 整手/申报数量（T-P2-02：market_rules.normalize_order_quantity 唯一实现；
+    #     科创板 200 股起、1 股递增，其余 CN 100 整数倍向下取整）──
     if side == "buy":
-        fill_qty = _floor_to_lot(quantity, lot_size)
+        fill_qty = normalize_order_quantity(quantity, bar.symbol, "CN")
         if fill_qty <= 0:
             return MatchResult(success=False, reason="BELOW_LOT_SIZE")
     else:

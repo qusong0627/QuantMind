@@ -71,18 +71,46 @@ class MarketTradingRules:
     commission_min: float
     # 印花税率（卖出单边计提；0 表示无）
     stamp_duty_rate: float
+    # 过户费率（双向；A股 0.001%，其余 0）——T-P2-02 费用单实现补齐分项
+    transfer_fee_rate: float = 0.0
     # 是否存在涨跌停限制（False 时行情层 limit_up/down 恒为 False）
-    has_price_limit: bool
+    has_price_limit: bool = True
 
-    def compute_commission(self, quantity: float, price: float, side: str) -> float:
-        """按市场规则计算单笔费用（佣金 + 印花税）。"""
+    def compute_fee_breakdown(
+        self,
+        quantity: float,
+        price: float,
+        side: str,
+        *,
+        commission_rate: float | None = None,
+        commission_min: float | None = None,
+        stamp_duty_rate: float | None = None,
+        transfer_fee_rate: float | None = None,
+    ) -> tuple[float, float, float]:
+        """**费用分项唯一实现**（T-P2-02）：(佣金, 印花税, 过户费)，各项 round(2)。
+
+        默认值来自本市场规则；显式入参仅作覆盖（env/前端 settings 的可配置语义）。
+        """
         gross = abs(float(quantity) * float(price))
         if gross <= 0:
-            return 0.0
-        fee = max(gross * self.commission_rate, self.commission_min)
-        if side.lower() == "sell":
-            fee += gross * self.stamp_duty_rate
-        return round(fee, 2)
+            return 0.0, 0.0, 0.0
+        rate = self.commission_rate if commission_rate is None else float(commission_rate)
+        min_fee = self.commission_min if commission_min is None else float(commission_min)
+        stamp_rate = (
+            self.stamp_duty_rate if stamp_duty_rate is None else float(stamp_duty_rate)
+        )
+        transfer_rate = (
+            self.transfer_fee_rate if transfer_fee_rate is None else float(transfer_fee_rate)
+        )
+        commission = round(max(gross * rate, min_fee), 2)
+        stamp = round(gross * stamp_rate, 2) if str(side).lower() == "sell" else 0.0
+        transfer = round(gross * transfer_rate, 2)
+        return commission, stamp, transfer
+
+    def compute_commission(self, quantity: float, price: float, side: str) -> float:
+        """按市场规则计算单笔费用合计（佣金 + 印花税 + 过户费；向后兼容）。"""
+        commission, stamp, transfer = self.compute_fee_breakdown(quantity, price, side)
+        return round(commission + stamp + transfer, 2)
 
 
 CN_RULES = MarketTradingRules(
@@ -148,6 +176,45 @@ RULES_BY_MARKET: dict[Market, MarketTradingRules] = {
 def rules_for(market: Market | str | None) -> MarketTradingRules:
     market = normalize_market(market)
     return RULES_BY_MARKET[market]
+
+
+def _pure_code(symbol: str) -> str:
+    pure = StockCodeUtil.to_suffix(symbol) or symbol
+    pure = str(pure).upper()
+    for prefix in ("SH", "SZ", "BJ"):
+        if pure.startswith(prefix):
+            pure = pure[len(prefix) :]
+            break
+    return pure.split(".")[0]
+
+
+def is_star_market(symbol: str) -> bool:
+    """科创板（688/689）：申报数量语义与主板不同（200 股起、1 股递增）。"""
+    return _pure_code(symbol).startswith(("688", "689"))
+
+
+def normalize_order_quantity(
+    quantity: float, symbol: str, market: Market | str | None = None
+) -> int:
+    """**申报数量归一唯一实现**（T-P2-02）。
+
+    规则（含 2026-07-06 交易新规口径）：
+    - 科创板（688/689）：单笔申报 ≥200 股，超过部分**以 1 股为单位递增**（201 股合法）；
+    - 其余 CN（主板/创业板/北交所）：按 100（或市场配置）整数倍**向下取整**；
+    - 非 CN：原样取整。
+    返回 0 表示低于最小申报数量，调用方应拒单。
+    """
+    qty = int(float(quantity or 0))
+    if qty <= 0:
+        return 0
+    mkt = market if isinstance(market, Market) else normalize_market(market)
+    if mkt != Market.CN:
+        return qty
+    if is_star_market(symbol):
+        min_qty = max(200, int(lot_size_for_symbol(symbol, Market.CN)))
+        return qty if qty >= min_qty else 0
+    lot = max(1, int(lot_size_for_symbol(symbol, Market.CN)))
+    return (qty // lot) * lot
 
 
 def normalize_market(market: Market | str | None) -> Market:

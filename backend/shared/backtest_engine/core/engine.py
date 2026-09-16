@@ -114,7 +114,7 @@ class BacktestEngine:
     def __init__(
         self,
         initial_cash: float = 100000.0,
-        commission_rate: float = 0.001,
+        commission_rate: float | None = None,  # T-P2-02：None=取市场规则默认（CN 0.0003）
         slippage_rate: float = 0.001,
         benchmark: str | None = None,
         enable_risk_management: bool = True,
@@ -126,15 +126,21 @@ class BacktestEngine:
 
         Args:
             initial_cash: 初始资金
-            commission_rate: 手续费率
+            commission_rate: 手续费率（None=使用 market_rules 市场默认，禁止与规则漂移）
             slippage_rate: 滑点率
             benchmark: 基准指数代码
             enable_risk_management: 是否启用风险管理
             risk_config: 风险管理配置
             stop_loss_config: 止损配置
         """
+        from backend.services.simulation.services.market_rules import CN_RULES
+
         self.initial_cash = initial_cash
-        self.commission_rate = commission_rate
+        # T-P2-02：费用默认值来自单实现（market_rules）；显式入参仅作覆盖
+        self._commission_override = commission_rate
+        self.commission_rate = (
+            float(commission_rate) if commission_rate is not None else CN_RULES.commission_rate
+        )
         self.slippage_rate = slippage_rate
         self.benchmark = benchmark
         self.enable_risk_management = enable_risk_management
@@ -542,13 +548,41 @@ class BacktestEngine:
 
     def _execute_order(self, order: Order, market_data: pd.Series) -> None:
         """执行订单（支持多头买卖和融券做空/平空）"""
-        is_short_side = order.side in (OrderSide.SHORT_SELL, OrderSide.BUY_TO_COVER)
-
         # 计算执行价格（考虑滑点）
         if order.side in (OrderSide.BUY, OrderSide.BUY_TO_COVER):
             execution_price = market_data["close"] * (1 + self.slippage_rate)
         else:
             execution_price = market_data["close"] * (1 - self.slippage_rate)
+
+        # T-P2-02：手数取整 + 费用唯一实现（market_rules；回测/模拟同源）
+        from backend.services.simulation.services.market_rules import (
+            infer_market,
+            normalize_order_quantity,
+            rules_for,
+        )
+
+        _rules = rules_for(infer_market(order.symbol))
+        if (
+            order.side in (OrderSide.BUY, OrderSide.SHORT_SELL)
+            and str(_rules.market.value) == "CN"
+        ):
+            _floored = normalize_order_quantity(order.quantity, order.symbol, _rules.market)
+            if _floored <= 0:
+                order.status = OrderStatus.REJECTED
+                order.reject_reason = f"申报数量不合规（原始 {order.quantity}）"
+                logger.warning(
+                    "订单被拒绝: 申报数量不合规",
+                    extra={"order_id": order.order_id, "symbol": order.symbol},
+                )
+                return
+            order.quantity = float(_floored)
+        _commission, _stamp_duty, _transfer_fee = _rules.compute_fee_breakdown(
+            order.quantity,
+            execution_price,
+            order.side.value,
+            commission_rate=self._commission_override,
+        )
+        total_fee = round(_commission + _stamp_duty + _transfer_fee, 2)
 
         # 风险检查
         if self.enable_risk_management and self.risk_manager:
@@ -565,12 +599,9 @@ class BacktestEngine:
                 order.reject_reason = reason
                 return
 
-        # 计算手续费
-        commission = order.quantity * execution_price * self.commission_rate
-
         # 交易前校验
         if order.side == OrderSide.BUY:
-            required_cash = order.quantity * execution_price + commission
+            required_cash = order.quantity * execution_price + total_fee
             if required_cash > self.portfolio.cash:
                 order.status = OrderStatus.REJECTED
                 order.reject_reason = "现金不足"
@@ -603,7 +634,7 @@ class BacktestEngine:
 
         elif order.side == OrderSide.SHORT_SELL:
             # 融券开空只需确保有足够现金支付手续费
-            if commission > self.portfolio.cash:
+            if total_fee > self.portfolio.cash:
                 order.status = OrderStatus.REJECTED
                 order.reject_reason = "现金不足以支付融券手续费"
                 logger.warning(
@@ -626,7 +657,7 @@ class BacktestEngine:
                 order.status = OrderStatus.REJECTED
                 order.reject_reason = "平空数量超过持仓"
                 return
-            cover_cost = order.quantity * execution_price + commission
+            cover_cost = order.quantity * execution_price + total_fee
             if cover_cost > self.portfolio.cash:
                 order.status = OrderStatus.REJECTED
                 order.reject_reason = "现金不足以平空"
@@ -639,8 +670,11 @@ class BacktestEngine:
             "side": order.side.value,
             "quantity": order.quantity,
             "price": execution_price,
-            "commission": commission,
-            "total_cost": order.quantity * execution_price + commission,
+            "commission": _commission,
+            "stamp_duty": _stamp_duty,
+            "transfer_fee": _transfer_fee,
+            "total_fee": total_fee,
+            "total_cost": order.quantity * execution_price + total_fee,
         }
 
         # 更新组合
@@ -649,7 +683,7 @@ class BacktestEngine:
                 symbol=order.symbol,
                 quantity=order.quantity,
                 price=execution_price,
-                commission=commission,
+                commission=total_fee,
             )
             if self.enable_risk_management and self.stop_loss_manager:
                 self.stop_loss_manager.add_position(
@@ -666,7 +700,7 @@ class BacktestEngine:
                 symbol=order.symbol,
                 quantity=order.quantity,
                 price=execution_price,
-                commission=commission,
+                commission=total_fee,
             )
             if self.enable_risk_management and self.stop_loss_manager:
                 positions_to_remove = [
@@ -683,7 +717,7 @@ class BacktestEngine:
                 symbol=order.symbol,
                 quantity=order.quantity,
                 price=execution_price,
-                commission=commission,
+                commission=total_fee,
             )
             if self.enable_risk_management and self.stop_loss_manager:
                 self.stop_loss_manager.add_position(
@@ -700,7 +734,7 @@ class BacktestEngine:
                 symbol=order.symbol,
                 quantity=order.quantity,
                 price=execution_price,
-                commission=commission,
+                commission=total_fee,
             )
             if self.enable_risk_management and self.stop_loss_manager:
                 positions_to_remove = [

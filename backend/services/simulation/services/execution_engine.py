@@ -706,21 +706,25 @@ class SimulationExecutionEngine:
                 success=False, message="Limit-down locked, sell order cannot be filled"
             )
 
-        # A股买入整手校验（卖出允许零碎以便清仓/强平）
+        # A股申报数量校验（T-P2-02：唯一实现；科创板 200 股起、1 股递增，其余 100 整数倍）
         if rules.market.value == "CN" and side == "buy":
             from backend.services.simulation.services.market_rules import (
-                lot_size_for_symbol,
+                normalize_order_quantity,
             )
 
-            lot_size = int(lot_size_for_symbol(order.symbol, rules.market))
             qty = float(order.quantity or 0)
+            normalized = normalize_order_quantity(qty, order.symbol, "CN")
             if (
                 abs(qty - round(qty)) > 1e-6
-                or int(round(qty)) % lot_size != 0
+                or normalized <= 0
+                or normalized != int(round(qty))
             ):
                 return ExecutionResult(
                     success=False,
-                    message=f"CN买入须为{lot_size}股整手，当前{order.quantity}",
+                    message=(
+                        f"买入申报数量不合规（{order.symbol}: {order.quantity}；"
+                        "科创板≥200可1股递增，其余100整数倍）"
+                    ),
                 )
 
         if order.order_type == OrderType.MARKET:
@@ -758,23 +762,21 @@ class SimulationExecutionEngine:
 
         gross = order.quantity * exec_price
         if rules.market.value == "CN":
-            # A 股保持既有全局费率口径（可由 env 覆盖），并设最低佣金（默认 5 元）
-            commission = round(
-                order.quantity * exec_price * settings.SIMULATION_COMMISSION_RATE, 2
+            # T-P2-02：费用分项唯一实现（market_rules.compute_fee_breakdown）；
+            # settings 仅作显式覆盖（env/前端可配置语义保持不变）
+            commission, stamp_duty, transfer_fee = rules.compute_fee_breakdown(
+                order.quantity,
+                exec_price,
+                order.side.value,
+                commission_rate=float(settings.SIMULATION_COMMISSION_RATE),
+                commission_min=float(settings.SIMULATION_COMMISSION_MIN),
+                stamp_duty_rate=float(settings.SIMULATION_STAMP_DUTY_RATE),
             )
-            commission = max(commission, float(settings.SIMULATION_COMMISSION_MIN))
-            # 证券交易印花税：A 股卖出单边收取（买入不收取）
-            stamp_duty = (
-                round(gross * float(settings.SIMULATION_STAMP_DUTY_RATE), 2)
-                if order.side.value == "sell"
-                else 0.0
-            )
-            # 过户费：双向 0.001%（1e-5），与回放 ashare_matcher / 台账口径对齐
-            transfer_fee = round(gross * 0.00001, 2)
         else:
-            commission = rules.compute_commission(order.quantity, exec_price, side)
-            stamp_duty = 0.0
-            transfer_fee = 0.0
+            # 非 CN：同一实现（印花税独立分项——现金合计不变、sim_trades 分项更正确）
+            commission, stamp_duty, transfer_fee = rules.compute_fee_breakdown(
+                order.quantity, exec_price, side
+            )
         if order.side.value == "buy":
             delta_cash = -(gross + commission + transfer_fee)
             delta_volume = order.quantity
