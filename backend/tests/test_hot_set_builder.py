@@ -192,8 +192,10 @@ async def test_build_once_empty_sources_replaces_empty_real_env():
 
         builder = HotSetBuilder(hot_set_key=hot_key, cap=10)
         report = await builder.build_once(tenant_filter=tenant)
-        assert report["kept"] == 0
-        assert qr.scard(hot_key) == 0
+        # T-P6-13 起：空股票源 → 仅常驻指数（regime 源）；旧集合被**替换**（过期订阅退订）
+        assert report["kept"] == 2
+        assert set(qr.smembers(hot_key)) == {"000300.SH", "000001.SH"}
+        assert json.loads(qr.hget(f"{hot_key}:meta", "sources") or "{}").get("indexes") == 2
     finally:
         qr.delete(hot_key, f"{hot_key}:meta")
         qr.close()

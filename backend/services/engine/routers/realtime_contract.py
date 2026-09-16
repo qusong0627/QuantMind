@@ -126,6 +126,14 @@ async def realtime_inference_status():
     return {"ok": True, "data": default_service().status()}
 
 
+@router.get("/realtime/regime/status")
+async def realtime_regime_status():
+    """日内市场状态服务状态（T-P6-13）：配置/计数器/最近状态（只读）。"""
+    from backend.services.engine.realtime_regime import default_service
+
+    return {"ok": True, "data": default_service().status()}
+
+
 @router.post("/runs/{run_id}/feature-ready")
 async def mark_feature_ready(run_id: str, payload: FeatureReadyRequest):
     sql = text("""

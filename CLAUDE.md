@@ -174,6 +174,7 @@ Electron 前端在本地开发时使用 Vite HMR；修改 `electron/src` 后运�
 - `backend/shared/freshness.py` - 行情新鲜度分级唯一谓词（fresh/stale/unavailable；阈值 env 唯一读取点，T-P6-05）
 - `backend/shared/feature_defs.py` - 批量特征定义唯一实现（151 维 OHLCV 因子；原 update_feature_parquet 纯迁移，改算法必须过金样）
 - `backend/shared/feature_incremental.py` + `backend/services/engine/inference/incremental_features.py` - 增量特征引擎（32 列快车道与批量 ε=1e-9 金样锁定 + 快照状态机/分钟桶/provenance，T-P6-07）
+- `backend/shared/market_regime.py` + `backend/services/engine/realtime_regime.py` - 市场状态（regime）口径单源（日频/日内共用）+ 日内服务（指数 live + 热集广度 → 快照/总线，T-P6-13）
 - `backend/shared/intel_events.py` + `backend/services/stream/ws_core/intel_pusher.py` - 盘中情报总线（Redis Stream `intel:events`，schema 校验/生产消费 SDK/WS `intel.{tenant}.market.*` 鉴权，T-P6-11）
 - `backend/services/engine/inference/realtime_{core,service}.py` + `replay_verifier.py` - 热集实时推理（ONNX、账本 `qm:realtime:infer:ledger:*`）与回放复现验收（同数据同特征同模型 → 信号 diff=0；CLI `scripts/p6_replay_verify.py`，T-P6-08/09）
 - `backend/shared/latency_metrics.py` - 端到端时延打点（`intel:latency` 滚动统计；报表 `backend/scripts/latency_report.py`，T-P6-05）

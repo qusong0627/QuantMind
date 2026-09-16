@@ -137,7 +137,9 @@ class HotSetBuilder:
         anomalies, anom_err = self._collect_anomalies()
 
         composed = hot_set_pure.compose_hot_set(
-            positions=positions, anomalies=anomalies, candidates=candidates, cap=self.cap
+            positions=positions, anomalies=anomalies, candidates=candidates,
+            indexes=hot_set_pure.REGIME_INDEXES,  # T-P6-13：regime 常驻指数（不占 cap）
+            cap=self.cap,
         )
         report: dict[str, Any] = {
             **composed["stats"],
@@ -146,6 +148,7 @@ class HotSetBuilder:
                 "positions": len(positions),
                 "candidates": len(candidates),
                 "anomalies": len(anomalies),
+                "indexes": len(hot_set_pure.REGIME_INDEXES),
             },
             "errors": [e for e in (pos_err, cand_err, anom_err) if e],
         }

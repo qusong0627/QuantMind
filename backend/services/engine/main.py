@@ -110,6 +110,15 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"⚠️ RealtimeInference startup skipped: {e}")
 
+    # 启动日内市场状态服务（P6 T-P6-13；Redis 配置门控，默认关）
+    try:
+        from backend.services.engine.realtime_regime import default_service as regime_service
+
+        regime_service().start()
+        logger.info("✅ RealtimeRegime service loop created (active if qm:realtime:regime:config.enabled=true)")
+    except Exception as e:
+        logger.warning(f"⚠️ RealtimeRegime startup skipped: {e}")
+
     # 启动预热向量解析/字段检索（2026-05-03：暂时关闭强制预热以加快启动速度）
     warmup_enabled = os.getenv("AI_STRATEGY_WARMUP", "false").strip().lower() not in ("0", "false", "no", "off")
     if warmup_enabled:

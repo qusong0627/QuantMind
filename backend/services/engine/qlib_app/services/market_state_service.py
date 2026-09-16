@@ -201,25 +201,17 @@ class MarketStateService:
         else:
             volume = volume.astype(float)
 
-        daily_ret = close.pct_change()
-        roll_ret = close / close.shift(window) - 1.0
-        roll_vol = daily_ret.rolling(window).std()
-        volume_ratio = volume / volume.rolling(window).mean()
+        # T-P6-13 口径单源：滚动与分级全在 shared.market_regime（日内服务共用同一实现）
+        from backend.shared.market_regime import build_state_series
 
-        series: dict[str, str] = {}
-        for idx in range(len(df)):
-            if idx < window:
-                continue
-            if idx + 1 >= len(df):
-                continue
-            date = df.iloc[idx + 1]["datetime"]
-            ret = roll_ret.iloc[idx]
-            vol = roll_vol.iloc[idx]
-            vratio = volume_ratio.iloc[idx]
-            state = self._classify_state(ret, vol, vratio, thresholds)
-            series[date.strftime("%Y-%m-%d")] = state
-
-        return series
+        dates = [d.strftime("%Y-%m-%d") for d in df["datetime"]]
+        return build_state_series(
+            [float(v) for v in close.tolist()],
+            [float(v) for v in volume.tolist()],
+            dates,
+            window=int(window),
+            thresholds=thresholds,
+        )
 
     def _classify_state(
         self,
@@ -228,15 +220,10 @@ class MarketStateService:
         vratio: float,
         thresholds: dict[str, float],
     ) -> str:
-        if pd.isna(ret) or pd.isna(vol):
-            return "neutral"
-        if ret >= thresholds["ret_up"] and vol <= thresholds["vol_high"]:
-            return "bull"
-        if ret <= thresholds["ret_down"] and vol >= thresholds["vol_high"]:
-            return "bear"
-        if vratio >= thresholds["volume_ratio_high"] and ret >= 0:
-            return "bull"
-        return "neutral"
+        """兼容旧调用面（口径已收敛到 shared.market_regime.classify_regime）。"""
+        from backend.shared.market_regime import classify_regime
+
+        return classify_regime(ret, vol, vratio, thresholds)
 
     def _risk_from_state_series(
         self,
