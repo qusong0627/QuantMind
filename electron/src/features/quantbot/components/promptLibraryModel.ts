@@ -46,6 +46,10 @@ const TEMPLATE_ITEMS: LibPrompt[] = PROMPTS.map((p) => ({
 /** 示例在前、模板在后（与各自源文件的声明顺序一致） */
 export const ALL_PROMPTS: LibPrompt[] = [...EXAMPLE_ITEMS, ...TEMPLATE_ITEMS];
 
+export const EXAMPLE_TOTAL = EXAMPLE_ITEMS.length;
+
+export const TEMPLATE_TOTAL = TEMPLATE_ITEMS.length;
+
 export const PROMPT_LIBRARY_TOTAL = ALL_PROMPTS.length;
 
 export const EXAMPLE_CATEGORY_ORDER: string[] = QUANTBOT_INTENTS.map((i) => i.label);

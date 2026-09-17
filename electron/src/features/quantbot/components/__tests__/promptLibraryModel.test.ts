@@ -2,8 +2,10 @@ import { describe, expect, it } from 'vitest';
 import {
   ALL_PROMPTS,
   EXAMPLE_CATEGORY_ORDER,
+  EXAMPLE_TOTAL,
   PROMPT_LIBRARY_TOTAL,
   TEMPLATE_CATEGORY_ORDER,
+  TEMPLATE_TOTAL,
   filterPrompts,
   groupByCategory,
   type LibPrompt,
@@ -18,7 +20,9 @@ describe('QuantBot 提示词库数据模型', () => {
     // Assert
     expect(examples.length).toBeGreaterThanOrEqual(30);
     expect(templates.length).toBeGreaterThanOrEqual(20);
-    expect(PROMPT_LIBRARY_TOTAL).toBe(examples.length + templates.length);
+    expect(EXAMPLE_TOTAL).toBe(examples.length);
+    expect(TEMPLATE_TOTAL).toBe(templates.length);
+    expect(PROMPT_LIBRARY_TOTAL).toBe(EXAMPLE_TOTAL + TEMPLATE_TOTAL);
     expect(ALL_PROMPTS.slice(0, examples.length).every((p) => p.kind === 'example')).toBe(true);
 
     const ids = new Set(ALL_PROMPTS.map((p) => p.id));

@@ -13,8 +13,8 @@ import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react'
 import { BookMarked, FileText } from 'lucide-react';
 import { Bot, RefreshCw, Wifi, WifiOff, ExternalLink, AlertTriangle } from 'lucide-react';
 import { isElectronEnv, SERVICE_URLS } from '../../../config/services';
-import PromptLibraryDrawer from '../components/PromptLibraryDrawer';
-import ReportsDrawer from '../components/ReportsDrawer';
+import PromptLibraryModal from '../components/PromptLibraryModal';
+import ReportsModal from '../components/ReportsModal';
 import { PROMPT_LIBRARY_TOTAL } from '../components/promptLibraryModel';
 
 /** 无任何服务器配置时的兜底地址（dsh 容器宿主映射端口） */
@@ -49,7 +49,7 @@ const IFRAME_LOAD_TIMEOUT_MS = 15_000;
 const QuantBotPage: React.FC = () => {
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const [iframeKey, setIframeKey] = useState<number>(0);
-  // 提示词库（示例 34 条 + 模板 25 条，合并为一个抽屉）与调研报告档案，均为悬浮抽屉，不占 iframe 布局
+  // 提示词库（示例 34 条 + 模板 24 条，合并为一个弹窗）与调研报告档案，均为居中弹窗，不占 iframe 布局
   const [showPrompts, setShowPrompts] = useState(false);
   const [showReports, setShowReports] = useState(false);
   const [loading, setLoading] = useState<boolean>(true);
@@ -195,7 +195,7 @@ const QuantBotPage: React.FC = () => {
       </div>
 
       {/* iframe 内容区域 — 避开底部 Dock 悬浮栏 */}
-      {/* 提示词库 / 调研报告均为顶栏按钮唤起的抽屉（悬浮于 iframe 之上，不占布局） */}
+      {/* 提示词库 / 调研报告均为顶栏按钮唤起的居中弹窗（悬浮于 iframe 之上，不占布局） */}
 
       <div className="flex-1 relative overflow-hidden bg-white border-x border-b border-slate-200/80 rounded-b-xl shadow-xs">
         {loading && !timedOut && (
@@ -249,10 +249,10 @@ const QuantBotPage: React.FC = () => {
         />
       </div>
 
-      {/* 提示词库（示例 + 模板合并） */}
-      <PromptLibraryDrawer open={showPrompts} onClose={() => setShowPrompts(false)} />
-      {/* 调研报告档案（md + PDF 自动归档，内嵌预览） */}
-      <ReportsDrawer open={showReports} onClose={() => setShowReports(false)} />
+      {/* 提示词库（示例 + 模板合并，居中弹窗） */}
+      <PromptLibraryModal open={showPrompts} onClose={() => setShowPrompts(false)} />
+      {/* 调研报告档案（md + PDF 自动归档，内嵌预览，居中弹窗） */}
+      <ReportsModal open={showReports} onClose={() => setShowReports(false)} />
     </div>
   );
 };
