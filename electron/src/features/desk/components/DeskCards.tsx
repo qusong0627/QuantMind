@@ -4,8 +4,8 @@
  * 卡片头部=图标色块+标题+微统计；行 hover 可点 → 居中下钻弹窗。
  */
 
-import React from 'react';
-import { Activity, AlertTriangle, BarChart3, CheckCircle2, HeartPulse, HelpCircle, Wallet, XCircle } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import { Activity, AlertTriangle, BarChart3, CheckCircle2, Clock, Database, HeartPulse, HelpCircle, Server, Wallet, XCircle } from 'lucide-react';
 import type { ExecutionBlock, ExecutionItem, HealthBlock, PnlBlock, SignalItem, SignalsBlock } from '../types';
 import { TermTooltip } from '../../shared/TermTooltip';
 import { EvalScoreBadge } from '../../../components/shared/EvalScoreBadge';
@@ -13,6 +13,7 @@ import { useUiMode } from '../../shared/useUiMode';
 import { ComplianceReturn } from '../../../components/shared/compliance/ComplianceChrome';
 import { StockLabel } from './StockLabel';
 import { CARD, CardHeader, StatTile } from './cardKit';
+import { SERVICE_URLS } from '../../../config/services';
 import {
   executionSummary,
   formatMoney,
@@ -249,8 +250,50 @@ export const PnlCard: React.FC<{
   );
 };
 
-export const HealthCard: React.FC<{ health: HealthBlock | null | undefined }> = ({ health }) => {
+const formatUptime = (startedAt?: string | null): string => {
+  if (!startedAt) return '--';
+  const start = new Date(startedAt).getTime();
+  if (Number.isNaN(start)) return '--';
+  const diffSec = Math.max(0, Math.floor((Date.now() - start) / 1000));
+  const h = Math.floor(diffSec / 3600);
+  const m = Math.floor((diffSec % 3600) / 60);
+  const sec = diffSec % 60;
+  return h > 0 ? `${h}h ${m}m` : m > 0 ? `${m}m ${sec}s` : `${sec}s`;
+};
+
+export const HealthCard: React.FC<{ health: HealthBlock | null | undefined; tradingRunning?: boolean }> = ({ health, tradingRunning }) => {
   const items = healthItemViews(health);
+  // 系统运行状态条（与个人中心同源：/api/v1/tdx/l2/status，20s 轮询）
+  const [l2Status, setL2Status] = useState<{ capture?: Record<string, unknown>; realtime?: Record<string, unknown> } | null>(null);
+  useEffect(() => {
+    let alive = true;
+    const base = SERVICE_URLS.API_GATEWAY.replace(/\/+$/, '');
+    const fetchL2 = async () => {
+      try {
+        const res = await fetch(`${base}/api/v1/tdx/l2/status`, {
+          headers: { Authorization: `Bearer ${localStorage.getItem('access_token') || ''}` },
+        });
+        if (!alive) return;
+        if (res.ok) setL2Status(await res.json());
+      } catch {
+        /* 桥/服务不可达时保持上一状态 */
+      }
+    };
+    void fetchL2();
+    const timer = window.setInterval(() => void fetchL2(), 20000);
+    return () => {
+      alive = false;
+      window.clearInterval(timer);
+    };
+  }, []);
+  const captureLast = l2Status?.capture?.last_cycle_at as string | undefined;
+  const captureStale = (() => {
+    if (!captureLast) return true;
+    const ageSec = (Date.now() - new Date(captureLast).getTime()) / 1000;
+    return !Number.isFinite(ageSec) || ageSec > 300;
+  })();
+  const nodeRunning = l2Status?.realtime?.running === true || l2Status?.capture?.running === true;
+  const running = Boolean(tradingRunning) || nodeRunning;
   const levelCard: Record<string, string> = {
     ok: 'border-emerald-200/70 bg-emerald-50/40',
     warn: 'border-amber-200/70 bg-amber-50/50',
@@ -292,6 +335,36 @@ export const HealthCard: React.FC<{ health: HealthBlock | null | undefined }> = 
           </span>
         }
       />
+      {/* 系统运行状态条（2026-09-17 自个人中心并入）：交易节点 / 数据同步 / 运行时长 */}
+      <div className="mb-2 flex flex-wrap items-center gap-1.5 text-[11px] font-bold">
+        <span className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-slate-50/70 px-2 py-1 text-slate-600">
+          <Server className="h-3 w-3 text-slate-400" />
+          交易节点
+          <span className={`rounded-full px-1.5 py-px text-[10px] font-bold ${running ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-700'}`}>
+            {running ? 'Running' : 'Stopped'}
+          </span>
+        </span>
+        <span className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-slate-50/70 px-2 py-1 text-slate-600">
+          <Database className="h-3 w-3 text-slate-400" />
+          数据同步
+          {captureLast ? (
+            <span className={`rounded-full border px-1.5 py-px text-[10px] font-bold ${captureStale ? 'bg-amber-50 text-amber-600 border-amber-200' : 'bg-emerald-50 text-emerald-600 border-emerald-200'}`}>
+              {new Date(captureLast).toLocaleTimeString('zh-CN', { hour12: false })}
+              {captureStale ? ' · 陈旧' : ' · 新鲜'}
+            </span>
+          ) : (
+            <span className="font-mono text-[10px] text-slate-400">--</span>
+          )}
+        </span>
+        <span className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-slate-50/70 px-2 py-1 text-slate-600">
+          <Clock className="h-3 w-3 text-slate-400" />
+          运行时长
+          <span className="font-mono text-[10px] text-slate-700">
+            {running ? formatUptime(l2Status?.realtime?.started_at as string | undefined) : '--'}
+          </span>
+        </span>
+      </div>
+
       {/* 体检项卡片网格：状态图标 + 名称 + 结论 + 明细两行截断（悬停看全文/建议） */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2 flex-1 content-start auto-rows-min">
         {items.map((item) => (

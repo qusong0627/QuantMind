@@ -587,7 +587,7 @@ const RealTradingPage: React.FC = () => {
 
                     {/* Right Content Area */}
                     <div className="flex-1 overflow-hidden relative bg-gray-50/50">
-                    {activeTab === 'desk' && <DeskTodayPage embedded />}
+                    {activeTab === 'desk' && <DeskTodayPage embedded tradingRunning={status?.status === 'running'} />}
                     {activeTab === 'signals' && (
                         /* 候选信号：quant-Trader 个股终端左栏复刻（列表/筛选/补推理）；
                            模型刷新（补推理）完成后跳「系统健康」 */

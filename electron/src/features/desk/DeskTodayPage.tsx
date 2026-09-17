@@ -36,7 +36,7 @@ interface DrawerState {
   raw: unknown;
 }
 
-const DeskTodayPage: React.FC<{ embedded?: boolean }> = ({ embedded = false }) => {
+const DeskTodayPage: React.FC<{ embedded?: boolean; tradingRunning?: boolean }> = ({ embedded = false, tradingRunning }) => {
   const [desk, setDesk] = useState<DeskToday | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -118,7 +118,7 @@ const DeskTodayPage: React.FC<{ embedded?: boolean }> = ({ embedded = false }) =
               页签、调仓计划→「策略管理·交易记录上方」、今日执行→「持仓监控」；账户盈亏卡同屏重复已移除。 */}
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
             <div className="lg:col-span-5 grid">
-              <HealthCard health={desk.health} />
+              <HealthCard health={desk.health} tradingRunning={tradingRunning} />
             </div>
             <div className="lg:col-span-7 grid">
               {/* 副驾驶（T-P6-16）：情报事件流 + 误报标注 + 建议卡一键执行（无 mock） */}
