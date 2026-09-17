@@ -142,7 +142,7 @@ export function StockFilterPanel({ filters, onChange, total, fullTotal, models: 
       </div>
 
       {/* 筛选下拉网格：columnOnly 只留 概念+日历+模型，其余维度在列表表头筛选 */}
-      <div className={`grid gap-1.5 items-center ${compact ? (showMarketCalendar ? 'grid-cols-[minmax(0,200px)_auto_minmax(0,1fr)]' : 'grid-cols-[minmax(0,200px)_minmax(0,1fr)]') : 'grid-cols-4'}`}>
+      <div className={`grid gap-1.5 items-center ${compact ? (showMarketCalendar ? 'grid-cols-[minmax(0,200px)_auto_minmax(0,220px)]' : 'grid-cols-[minmax(0,200px)_minmax(0,220px)]') : 'grid-cols-4'}`}>
         {!columnOnly && (
           <>
             <Select allowClear size="small" placeholder="板块" value={filters.board || undefined}
