@@ -56,6 +56,7 @@ async def lifespan(app: FastAPI):
     qmt_exec_poller_task = None
     mirror_queue_drainer_task = None
     qmt_sltp_executor_task = None
+    qmt_quote_backup_task = None
     dual_book_reconcile_task = None
     shadow_compare_task = None
     eval_scores_task = None
@@ -216,6 +217,19 @@ async def lifespan(app: FastAPI):
             run_qmt_sltp_executor_task(),
             name="qmt-sltp-executor",
         )
+        # 大 QMT 备源行情（T-P6-02 备源席）：全推订阅 → 主源陈旧时旁路写标准键。
+        # 默认关（Redis qm:qmt:quote:backup:config.enabled）；桥离线自动退避重试。
+        try:
+            from backend.services.live_trading.services.qmt_quote_backup import (
+                get_backup_service,
+            )
+
+            qmt_quote_backup_task = asyncio.create_task(
+                get_backup_service().run_forever(),
+                name="qmt-quote-backup",
+            )
+        except Exception as e_start:
+            logger.error("qmt quote backup start failed: %s", e_start, exc_info=True)
         # SIM ↔ 真单 双轨对账：每日收盘后对比两本账，差异超阈值发通知
         from backend.services.trade.services.dual_book_reconciliation_task import (
             run_dual_book_reconciliation_task,
@@ -553,7 +567,7 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning("trade risk trigger scanner stop failed: %s", e)
 
-    for task in (scanner_task, margin_task, snapshot_task, ledger_settlement_task, manual_execution_task, sandbox_signal_task, tdx_account_sync_task, qmt_account_sync_task, qmt_exec_poller_task, mirror_queue_drainer_task, qmt_sltp_executor_task, dual_book_reconcile_task, shadow_compare_task, eval_scores_task, health_recheck_task, close_audit_task, tdx_quote_feed_task, tdx_l2_capture_task, tdx_l2_realtime_task, t1_unlock_task, simulation_pending_order_task, corp_action_task, simulation_eod_task, hot_set_builder_task):
+    for task in (scanner_task, margin_task, snapshot_task, ledger_settlement_task, manual_execution_task, sandbox_signal_task, tdx_account_sync_task, qmt_account_sync_task, qmt_exec_poller_task, mirror_queue_drainer_task, qmt_sltp_executor_task, qmt_quote_backup_task, dual_book_reconcile_task, shadow_compare_task, eval_scores_task, health_recheck_task, close_audit_task, tdx_quote_feed_task, tdx_l2_capture_task, tdx_l2_realtime_task, t1_unlock_task, simulation_pending_order_task, corp_action_task, simulation_eod_task, hot_set_builder_task):
         if task is None:
             continue
         task.cancel()

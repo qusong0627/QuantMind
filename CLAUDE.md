@@ -179,4 +179,5 @@ Electron 前端在本地开发时使用 Vite HMR；修改 `electron/src` 后运�
 - `backend/services/engine/inference/realtime_{core,service}.py` + `replay_verifier.py` - 热集实时推理（ONNX、账本 `qm:realtime:infer:ledger:*`）与回放复现验收（同数据同特征同模型 → 信号 diff=0；CLI `scripts/p6_replay_verify.py`，T-P6-08/09）
 - `backend/shared/latency_metrics.py` - 端到端时延打点（`intel:latency` 滚动统计；报表 `backend/scripts/latency_report.py`，T-P6-05）
 - `backend/scripts/l05_maintenance.py` - L0.5 留存运维（质检报告 `report` / 容量 `capacity` / 降冷 `prune` 默认 dry-run）
+- `backend/services/live_trading/services/qmt_quote_backup.py` - 大 QMT 备源行情席（全推订阅 → 主源陈旧超 30s 时旁路写 `market:snapshot/series`，source=qmt_big；状态 `qm:qmt:quote:backup:status`）
 - `docker-compose.yml` - 本地部署配置

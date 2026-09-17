@@ -255,3 +255,15 @@ docker exec -w /app/backend -e PYTHONPATH=/app quantmind \
 - 首期务必保持小额限额；确认对账无误后再逐步放宽。
 
 > ⚠️ 本项目仅供学习研究与技术演示，不构成投资建议。真单交易风险自负。
+
+## 附：备源行情（T-P6-02 备源席，2026-09-17）
+
+桥的 RPC runtime **自带全推行情订阅服务**（``QuoteSubscriptionManager``，默认常开）——
+容器侧容器已上线备源席（trade 服务任务，``qmt_quote_backup``），**Windows 侧无需任何额外配置**：
+
+- 容器启用/停用：``redis-cli -n 0 hset qm:qmt:quote:backup:config enabled true stale_after_s 30``；
+- 状态面：``redis-cli -n 0 hgetall qm:qmt:quote:backup:status``——``bridge_ok`` 反映桥在线、
+  ``written/skipped_fresh`` 反映席位接管量；桥离线时 ``last_error`` 如实记录并指数退避重试；
+- 席位语义：仅当标准键缺失或主源（TdxAiData）陈旧超过 ``stale_after_s`` 才写入（source=``qmt_big``），
+  主源恢复后自动让位——**不会**与主源互相覆盖抖动；
+- 前提：Windows 机开机 + QMT 登录（与真单镜像同一前提）；行情权限随券商终端。
