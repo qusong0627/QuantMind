@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { Sparkles, Search, Activity, Layers, Network, TrendingUp, BarChart3, Clock, RefreshCw, Zap } from 'lucide-react';
 import { Input, DatePicker, Spin, message } from 'antd';
 import dayjs from 'dayjs';
@@ -8,12 +8,23 @@ import { CapitalFlowSankeyChart } from '../components/CapitalFlowSankeyChart';
 import { StockMoneyFlowTable, StockMoneyFlowItem } from '../components/StockMoneyFlowTable';
 import { MarketBreadthCard } from '../components/MarketBreadthCard';
 import { TagLookupPanel } from '../components/TagLookupPanel';
+import { StockTerminalModal } from '../components/StockTerminalModal';
 import { CapitalFlowHorizontalBarChart, FlowItem } from '../components/CapitalFlowHorizontalBarChart';
 import { Tag as TagIcon } from 'lucide-react';
 import { SERVICE_ENDPOINTS } from '../../../config/services';
 import { PAGE_LAYOUT } from '../../../config/pageLayout';
 
 const MARKET_ANALYSIS_API = `${SERVICE_ENDPOINTS.USER_SERVICE}/market-analysis`;
+// 全市场个股联想（代码/名称/拼音；个股终端同一端点，避免只覆盖资金流榜而搜不到个别代码）
+const STOCK_SEARCH_API = `${SERVICE_ENDPOINTS.USER_SERVICE}/stock-terminal/list`;
+
+/** 600519.SH → SH600519（前端展示口径） */
+const toPrefixDisplay = (s: string): string => {
+  const m = s.match(/^(\d{6})\.(SH|SZ|BJ)$/i);
+  return m ? `${m[2].toUpperCase()}${m[1]}` : s;
+};
+/** 归一化代码（去分隔符、大写）供本地匹配 */
+const normSymbol = (s: string): string => s.replace(/[^0-9A-Za-z]/g, '').toUpperCase();
 
 interface MarketBreadthData {
   trade_date: string;
@@ -32,6 +43,15 @@ export const MarketAnalysisPage: React.FC = () => {
   const [analyzing, setAnalyzing] = useState(false);
   const [activeTab, setActiveTab] = useState('panorama'); // 默认进入大盘全景看板
   const [searchQuery, setSearchQuery] = useState('');
+  // 顶栏搜索选中个股 → 弹出个股终端大界面（与资金流聚焦联动，关闭后仍在聚焦位）
+  const [terminalSymbol, setTerminalSymbol] = useState<string | null>(null);
+  // 预取终端 chunk：搜索框一聚焦就加载，消除点选后 2-3s 的懒加载等待
+  const terminalPrefetched = useRef(false);
+  const prefetchTerminal = () => {
+    if (terminalPrefetched.current) return;
+    terminalPrefetched.current = true;
+    void import('../../stock-terminal/pages/StockTerminalPage');
+  };
   const [indices, setIndices] = useState<IndexItem[]>([]);
   const [stockFlows, setStockFlows] = useState<StockMoneyFlowItem[]>([]);
   const [breadth, setBreadth] = useState<MarketBreadthData | null>(null);
@@ -177,14 +197,43 @@ export const MarketAnalysisPage: React.FC = () => {
     return () => { cancelled = true; };
   }, [realtime]);
 
-  // 本地过滤搜索结果（名称/代码子串）
-  const searchResults = useMemo(() => {
+  // 🎯 全局搜索：服务端全市场联想（防抖 250ms），失败/无结果时回退本地资金流榜过滤
+  const [stockHits, setStockHits] = useState<Array<{ symbol: string; name: string }>>([]);
+  const localHits = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     if (!q) return [];
     return allStocks
       .filter((s) => s.name?.toLowerCase().includes(q) || s.symbol?.toLowerCase().includes(q))
-      .slice(0, 8);
+      .slice(0, 8)
+      .map((s) => ({ symbol: s.symbol, name: s.name || s.symbol }));
   }, [searchQuery, allStocks]);
+  useEffect(() => {
+    const q = searchQuery.trim();
+    if (!q) {
+      setStockHits([]);
+      return;
+    }
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      try {
+        const token = localStorage.getItem('access_token') || '';
+        const res = await fetch(`${STOCK_SEARCH_API}?q=${encodeURIComponent(q)}&page=1&page_size=8`, {
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+        });
+        const json = await res.json();
+        const items = ((json?.data?.items ?? []) as Array<{ symbol?: string; name?: string }>)
+          .map((it) => ({ symbol: String(it.symbol || ''), name: String(it.name || it.symbol || '') }))
+          .filter((it) => it.symbol);
+        if (!cancelled) setStockHits(items.length ? items : localHits);
+      } catch {
+        if (!cancelled) setStockHits(localHits);
+      }
+    }, 250);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [searchQuery, localHits]);
 
   // 个股资金流「筹码四分结构」柱状图
   const renderFourBarChart = (s: StockMoneyFlowItem) => {
@@ -361,6 +410,42 @@ export const MarketAnalysisPage: React.FC = () => {
                 <span>QuantDB 2.0 数据引擎</span>
               </span>
             </div>
+            {/* 全局搜索（行业或股票）：选中个股 → 弹出个股终端大界面联动 */}
+            <div className="relative w-48 sm:w-64">
+              <Input
+                prefix={<Search className="w-3.5 h-3.5 text-purple-400 mr-1.5" />}
+                placeholder="输入个股代码/名称，弹出个股终端"
+                value={searchQuery}
+                onChange={(e) => { setSearchQuery(e.target.value); setIsSearchOpen(true); prefetchTerminal(); }}
+                onFocus={() => { setIsSearchOpen(true); prefetchTerminal(); }}
+                onBlur={() => setTimeout(() => setIsSearchOpen(false), 150)}
+                className="rounded-xl border border-purple-200/80 bg-slate-50/60 text-xs text-slate-800 placeholder-slate-400 py-1 px-3 shadow-2xs hover:border-purple-300 focus:bg-white focus:ring-2 focus:ring-purple-100 transition-all"
+              />
+              {isSearchOpen && searchQuery.trim() && stockHits.length > 0 && (
+                <div className="absolute left-0 right-0 top-full mt-1.5 bg-white rounded-xl border border-purple-100 shadow-xl z-50 overflow-hidden max-h-80 overflow-y-auto">
+                  {stockHits.map((item) => (
+                    <button
+                      key={item.symbol}
+                      onMouseDown={(e) => e.preventDefault()}
+                      onClick={() => {
+                        const local = allStocks.find((s) => normSymbol(s.symbol) === normSymbol(item.symbol));
+                        if (local) {
+                          setFocusStock(local);
+                          setActiveTab('stock-flow');
+                        }
+                        setSearchQuery('');
+                        setIsSearchOpen(false);
+                        setTerminalSymbol(item.symbol);
+                      }}
+                      className="w-full flex items-center justify-between gap-2 px-3 py-2 hover:bg-purple-50 border-b border-slate-100 last:border-0 text-left"
+                    >
+                      <span className="text-xs font-extrabold text-slate-800 truncate">{item.name}</span>
+                      <span className="text-[11px] font-mono text-slate-400">{toPrefixDisplay(item.symbol)}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
 
           <div className="flex items-center gap-2.5 flex-shrink-0">
@@ -374,32 +459,6 @@ export const MarketAnalysisPage: React.FC = () => {
                 <span className="text-purple-700 font-extrabold">{dataDate}</span>
               </span>
             )}
-            <div className="relative w-48 sm:w-60">
-              <Input
-                prefix={<Search className="w-3.5 h-3.5 text-purple-400 mr-1.5" />}
-                placeholder="全局搜索行业或股票..."
-                value={searchQuery}
-                onChange={(e) => { setSearchQuery(e.target.value); setIsSearchOpen(true); }}
-                onFocus={() => setIsSearchOpen(true)}
-                onBlur={() => setTimeout(() => setIsSearchOpen(false), 150)}
-                className="rounded-xl border border-purple-200/80 bg-slate-50/60 text-xs text-slate-800 placeholder-slate-400 py-1 px-3 shadow-2xs hover:border-purple-300 focus:bg-white focus:ring-2 focus:ring-purple-100 transition-all"
-              />
-              {isSearchOpen && searchQuery.trim() && searchResults.length > 0 && (
-                <div className="absolute left-0 right-0 top-full mt-1.5 bg-white rounded-xl border border-purple-100 shadow-xl z-50 overflow-hidden max-h-80 overflow-y-auto">
-                  {searchResults.map((item) => (
-                    <button
-                      key={item.symbol}
-                      onMouseDown={(e) => e.preventDefault()}
-                      onClick={() => { setFocusStock(item); setActiveTab('stock-flow'); setSearchQuery(''); setIsSearchOpen(false); }}
-                      className="w-full flex items-center justify-between gap-2 px-3 py-2 hover:bg-purple-50 border-b border-slate-100 last:border-0 text-left"
-                    >
-                      <span className="text-xs font-extrabold text-slate-800 truncate">{item.name}</span>
-                      <span className="text-[11px] font-mono text-slate-400">{item.symbol}</span>
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
 
             {/* 🎯 快照历史日期选择器 */}
             <div className="flex items-center gap-1.5">
@@ -824,6 +883,13 @@ export const MarketAnalysisPage: React.FC = () => {
           )}
         </div>
       </div>
+
+      {/* 个股终端弹窗：顶栏搜索选中个股 → 大界面联动 */}
+      <StockTerminalModal
+        open={!!terminalSymbol}
+        symbol={terminalSymbol}
+        onClose={() => setTerminalSymbol(null)}
+      />
     </div>
   );
 };

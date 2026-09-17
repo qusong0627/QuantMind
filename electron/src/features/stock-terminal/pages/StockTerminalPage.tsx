@@ -39,10 +39,18 @@ const CN_THEME: TerminalTheme = {
   defaultAdjust: 'qfq',
 };
 
-export default function StockTerminalPage() {
+export default function StockTerminalPage({
+  initialSymbol,
+  bottomReserve,
+}: {
+  initialSymbol?: string;
+  bottomReserve?: number;
+}) {
   return (
     <StockTerminalProvider market="CN" theme={CN_THEME} config={CN_CONFIG} toWatchSymbol={toPrefix}>
       <StockTerminalShell
+        initialSymbol={initialSymbol}
+        bottomReserve={bottomReserve}
         renderDetail={(ctx) => <CnDetailBody symbol={ctx.symbol} profile={ctx.profile} signalDate={ctx.signalDate} />}
         renderBanner={() => (
           <div className="mx-0 px-4 py-2 bg-gradient-to-r from-blue-50/60 via-violet-50/40 to-transparent border-b border-slate-100 flex items-center gap-2.5">

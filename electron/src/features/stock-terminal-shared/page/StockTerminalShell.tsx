@@ -37,6 +37,10 @@ interface Props {
   renderHeaderExtra?: (ctx: DetailRenderContext) => ReactNode;
   /** 顶部通栏提示条（可选，A 股用它放「模型推理分说明」；未提供则不占位） */
   renderBanner?: (ctx: DetailRenderContext) => ReactNode;
+  /** 初始股票（可选）：挂载/变化时自动联想选中，供外部入口（如市场分析弹窗）直接落到某只票 */
+  initialSymbol?: string;
+  /** 底部预留（px，默认 84 给悬浮 Dock 让位）；弹窗内嵌时传小值 */
+  bottomReserve?: number;
 }
 
 const KLINE_PERIODS: { key: 'daily' | 'weekly' | 'monthly'; label: string }[] = [
@@ -69,7 +73,7 @@ function weekKey(date: string): string {
   return d.toISOString().slice(0, 10);
 }
 
-export default function StockTerminalShell({ renderDetail, renderHeaderExtra, renderBanner }: Props) {
+export default function StockTerminalShell({ renderDetail, renderHeaderExtra, renderBanner, initialSymbol, bottomReserve = 84 }: Props) {
   const { service, theme, toWatchSymbol } = useStockTerminal();
   const [selected, setSelected] = useState<StockListItem | null>(null);
   const [profile, setProfile] = useState<StockProfile | null>(null);
@@ -161,6 +165,38 @@ export default function StockTerminalShell({ renderDetail, renderHeaderExtra, re
     setSelected(item);
     setSignalDate(undefined);
   }, []);
+
+  // 外部入口带入代码 → 自动联想选中（名称检索走服务端；前缀式代码（SH600519）直搜无果时回退裸代码）
+  useEffect(() => {
+    const code = (initialSymbol || '').trim();
+    if (!code) return;
+    let cancelled = false;
+    (async () => {
+      const normalize = (s: string) => s.replace(/[^0-9A-Za-z]/g, '').toUpperCase();
+      const queries = [code];
+      const bare = code.replace(/^(SH|SZ|BJ)/i, '').replace(/\.(SH|SZ|BJ)$/i, '');
+      if (bare !== code) queries.push(bare);
+      for (const q of queries) {
+        let resp;
+        try {
+          resp = await service.getStockList({ q, page: 1, page_size: 10 });
+        } catch {
+          continue; // 单个查询失败不终止回退链
+        }
+        if (cancelled) return;
+        const items = resp.items ?? [];
+        if (!items.length) continue;
+        const exact = items.find(
+          (it) => normalize(it.symbol) === normalize(code) || normalize(it.symbol) === normalize(bare),
+        );
+        handleSelect(exact || items[0]);
+        return;
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [initialSymbol, service, handleSelect]);
 
   // 详情随选中+信号日联动
   useEffect(() => {
@@ -257,8 +293,11 @@ export default function StockTerminalShell({ renderDetail, renderHeaderExtra, re
   );
 
   return (
-    /* 底部 pb-[84px]：给悬浮 Dock 菜单栏（64px）留出空间，避免遮挡 K线图底部的缩放条 */
-    <div className="w-full h-full bg-[#f8fafc] px-6 pt-6 pb-[84px] flex flex-col overflow-hidden">
+    /* 底部预留默认 84px：给悬浮 Dock 菜单栏（64px）留出空间，避免遮挡 K线图底部的缩放条 */
+    <div
+      className="w-full h-full bg-[#f8fafc] px-6 pt-6 flex flex-col overflow-hidden"
+      style={{ paddingBottom: bottomReserve }}
+    >
       <div className={PAGE_LAYOUT.frameClass}>
         {/* 顶栏：标题 + 居中搜索框 + 价格/模型 */}
         <header className={PAGE_LAYOUT.headerClass} style={{ height: `${PAGE_LAYOUT.headerHeight}px` }}>
