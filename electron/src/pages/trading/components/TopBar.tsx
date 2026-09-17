@@ -126,7 +126,7 @@ const TopBar: React.FC<TopBarProps> = ({ accountInfo, isConnected, strategyStatu
     ];
 
     return (
-        <div className="flex flex-col gap-2 p-4 px-6 bg-white h-full w-full min-h-0">
+        <div className="flex flex-col gap-2 px-6 pt-3 pb-3 bg-white w-full">
             {/* Header: Title, Tags, and Status Indicators */}
             <div className="flex items-center justify-between gap-3">
                 <div className="flex items-center gap-2.5">
@@ -162,8 +162,8 @@ const TopBar: React.FC<TopBarProps> = ({ accountInfo, isConnected, strategyStatu
                 </div>
             </div>
 
-            {/* 8 卡片弹性填满 30% 区域：桌面端固定 4×2，较窄屏幕自然折行。 */}
-            <div className="grid grid-cols-2 sm:grid-cols-4 sm:grid-rows-2 gap-2 flex-1 min-h-0">
+            {/* 8 卡片单行（桌面 lg 起 8 列；窄屏 4 列/2 列自然折行），高度贴合内容，不再占据 30% 版面 */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-2">
                 {metrics.map((metric) => {
                     const pnl = metric.pnl || 0;
                     const valueClass = metric.highlight ? getPnLColor(pnl) : 'text-slate-900';
@@ -171,9 +171,9 @@ const TopBar: React.FC<TopBarProps> = ({ accountInfo, isConnected, strategyStatu
                         <div
                             key={metric.label}
                             title={metric.hint}
-                            className="flex min-h-0 h-full flex-col items-center justify-center rounded-2xl border border-slate-200 bg-slate-50/80 p-2 text-center transition-all hover:bg-white hover:shadow-xs overflow-hidden"
+                            className="group flex min-w-0 flex-col items-center justify-center gap-0.5 rounded-xl border border-slate-200/80 bg-gradient-to-b from-white to-slate-50/70 px-2 py-2 text-center shadow-2xs transition-all hover:border-slate-300 hover:shadow-md hover:-translate-y-px overflow-hidden"
                         >
-                            <span className="mb-1 text-[11px] font-bold tracking-wide text-slate-600">
+                            <span className="text-[11px] font-bold tracking-wide text-slate-500">
                                 {metric.label}
                             </span>
                             <span className={`font-mono text-lg font-black tracking-tight ${valueClass}`}>
@@ -181,8 +181,8 @@ const TopBar: React.FC<TopBarProps> = ({ accountInfo, isConnected, strategyStatu
                             </span>
                             <span
                                 className={metric.highlight
-                                    ? `mt-1 rounded border px-1.5 py-0.5 text-[11px] font-bold ${getPnLTagClass(pnl)}`
-                                    : 'mt-1 text-[11px] font-medium text-slate-500'}
+                                    ? `rounded border px-1.5 py-px text-[10px] font-bold ${getPnLTagClass(pnl)}`
+                                    : 'text-[10px] font-medium text-slate-400'}
                             >
                                 {metric.subLabel}
                             </span>

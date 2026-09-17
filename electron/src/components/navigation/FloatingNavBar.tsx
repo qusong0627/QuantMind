@@ -14,7 +14,7 @@ import {
   Brain,
   BarChart3,
   Cpu,
-  Sigma, Gauge } from 'lucide-react';
+  Sigma } from 'lucide-react';
 import { useSelector } from 'react-redux';
 import { selectCurrentMarket } from '../../store/slices/uiSlice';
 import { getMarketConfig } from '../../config/marketConfig';
@@ -41,7 +41,6 @@ export const FloatingNavBar: React.FC<FloatingNavBarProps> = ({ current, onChang
     { id: 'dashboard', label: marketLabel, icon: LayoutDashboard },
     { id: 'market-analysis', label: '市场分析', icon: BarChart3 },
     { id: 'rss-news', label: 'RSS信息流', icon: Rss },
-    { id: 'desk', label: '今日交易台', icon: Gauge },
     { id: 'backtest', label: '回测中心', icon: FlaskConical },
     { id: 'trading', label: '模拟交易', icon: ArrowLeftRight },
     // 3. 模型区域
@@ -62,8 +61,8 @@ export const FloatingNavBar: React.FC<FloatingNavBarProps> = ({ current, onChang
   const groupedNavItems: NavItemConfig[][] = [
     // 1. 大盘分析模块
     navItems.filter((item) => ['dashboard', 'market-analysis', 'rss-news'].includes(item.id)),
-    // 2. 回测与交易区域（AI-IDE 与个股终端已迁至 QuantBot 顶栏 / 市场分析搜索浮窗，全屏路由保留）
-    navItems.filter((item) => ['desk', 'backtest', 'trading'].includes(item.id)),
+    // 2. 回测与交易区域（AI-IDE/个股终端/今日交易台已迁移入口：QuantBot 顶栏 / 市场分析搜索浮窗 / 模拟交易页签，全屏路由保留）
+    navItems.filter((item) => ['backtest', 'trading'].includes(item.id)),
     // 3. 模型区域
     navItems.filter((item) => ['model-training', 'model-registry', 'inference-center'].includes(item.id)),
     // 4. 智能投研区域

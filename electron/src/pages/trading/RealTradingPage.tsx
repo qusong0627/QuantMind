@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { LayoutDashboard, PieChart, FileText, Settings, User, ClipboardList, Clock } from 'lucide-react';
+import { LayoutDashboard, PieChart, FileText, Settings, User, ClipboardList, Clock, Gauge } from 'lucide-react';
 import HelpCenterLink from '../../components/common/HelpCenterLink';
 import type { LucideIcon } from 'lucide-react';
 import { Button, Collapse, Modal, Spin, Tag, message } from 'antd';
@@ -11,6 +11,7 @@ import PositionMonitor from './tabs/PositionMonitor';
 import TradingHistory from './tabs/TradingHistory';
 import SettingsCenter from './tabs/SettingsCenter';
 import ReplayPage from './tabs/ReplayPage';
+import DeskTodayPage from '../../features/desk/DeskTodayPage';
 import type { RealTradingStatus, AccountInfo, PreflightCheckResponse, PreflightCheckItem } from '../../services/realTradingService';
 import { authService } from '../../features/auth/services/authService';
 import type { StrategyFile } from '../../types/backtest/strategy';
@@ -25,7 +26,7 @@ import LiveTradeConfigWizard from './components/LiveTradeConfigWizard';
 import type { DeployMode, ExecutionConfig, LiveTradeConfig } from '../../types/liveTrading';
 
 type TradingMode = 'real' | 'simulation';  // 支持实盘(通达信桥)与模拟盘
-type ActiveTab = 'manage' | 'manual-task' | 'personal' | 'position' | 'history' | 'settings' | 'replay';
+type ActiveTab = 'desk' | 'manage' | 'manual-task' | 'personal' | 'position' | 'history' | 'settings' | 'replay';
 type PreflightStage = 'trading-readiness' | 'preflight';
 type PendingDeploy = {
     strategyId: string;
@@ -483,6 +484,8 @@ const RealTradingPage: React.FC = () => {
     };
 
     const tabs: Array<{ id: ActiveTab; label: string; icon: LucideIcon }> = [
+        // 今日交易台自底部栏迁入（2026-09-17），置于功能导航首位
+        { id: 'desk', label: '今日交易台', icon: Gauge },
         { id: 'manage', label: '策略管理', icon: LayoutDashboard },
         // 时光回放功能尚存多处问题，暂时隐藏入口，完善后取消注释即可恢复（ReplayPage 渲染分支保留）
         // { id: 'replay', label: '时光回放', icon: Clock },
@@ -497,8 +500,8 @@ const RealTradingPage: React.FC = () => {
         <div className="w-full h-full bg-[#f8fafc] p-6 flex flex-col overflow-hidden font-sans box-border">
             {/* Unified Frame Container with 32px Border Radius (BacktestCenter Style) */}
             <div className="bg-white border border-gray-200 shadow-sm w-full h-full rounded-[32px] flex flex-col overflow-hidden">
-                {/* Integrated Top Header - Account Overview（占可用高度 3/10） */}
-                <div className="flex-[3] min-h-0 flex flex-col bg-white border-b border-gray-200 overflow-hidden z-10">
+                {/* Integrated Top Header - Account Overview（自然高度：8 卡片单行后不再占 30% 版面） */}
+                <div className="shrink-0 flex flex-col bg-white border-b border-gray-200 overflow-hidden z-10">
                     <TopBar
                         isConnected={!!status}
                         strategyStatus={strategyStatus}
@@ -511,8 +514,8 @@ const RealTradingPage: React.FC = () => {
                     />
                 </div>
 
-                {/* Bottom Section - Sidebar & Content（占可用高度 7/10） */}
-                <div className="flex-[7] min-h-0 flex overflow-hidden">
+                {/* Bottom Section - Sidebar & Content（占满剩余高度） */}
+                <div className="flex-1 min-h-0 flex overflow-hidden">
                     {/* Left Sidebar - Navigation */}
                     <div className="w-[200px] flex flex-col border-r border-gray-200 bg-white shrink-0">
                         <div className="flex-1 overflow-y-auto py-3.5 px-3 space-y-1.5 custom-scrollbar">
@@ -570,6 +573,7 @@ const RealTradingPage: React.FC = () => {
 
                     {/* Right Content Area */}
                     <div className="flex-1 overflow-hidden relative bg-gray-50/50">
+                    {activeTab === 'desk' && <DeskTodayPage embedded />}
                     {activeTab === 'manage' && (
                             <TopologyConsole
                                 tenantId={tenantId}
