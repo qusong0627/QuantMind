@@ -45,11 +45,40 @@ export function getQwenPawDirectUrl(): string {
 /** iframe 加载超时时间（毫秒） */
 const IFRAME_LOAD_TIMEOUT_MS = 15_000;
 
+/**
+ * 复制文本：优先 Clipboard API；不可用（HTTP 非安全上下文 / 无权限）时降级
+ * textarea + execCommand——局域网 http 访问是常态场景，必须可复制。
+ */
+async function copyText(text: string): Promise<boolean> {
+  try {
+    if (typeof navigator !== 'undefined' && navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    // 落入降级路径
+  }
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    const ok = document.execCommand('copy');
+    document.body.removeChild(ta);
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
 const QuantBotPage: React.FC = () => {
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const [iframeKey, setIframeKey] = useState<number>(0);
-  // T-FE-13：四类意图示例条（聊天宿主在 dsh iframe 内——示例一键复制、粘贴即用）
-  const [showIntents, setShowIntents] = useState(true);
+  // T-FE-13：四类意图示例条（聊天宿主在 dsh iframe 内——示例一键复制、粘贴即用）；默认折叠
+  const [showIntents, setShowIntents] = useState(false);
   const [loading, setLoading] = useState<boolean>(true);
   const [connected, setConnected] = useState<boolean>(false);
   const [timedOut, setTimedOut] = useState<boolean>(false);
@@ -197,10 +226,10 @@ const QuantBotPage: React.FC = () => {
                     type="button"
                     title={ex.prompt}
                     onClick={async () => {
-                      try {
-                        await navigator.clipboard.writeText(ex.prompt);
+                      const ok = await copyText(ex.prompt);
+                      if (ok) {
                         message.success('已复制提示词——粘贴到下方对话框发送即可');
-                      } catch {
+                      } else {
                         message.warning('复制失败（剪贴板不可用），请手动输入示例内容');
                       }
                     }}

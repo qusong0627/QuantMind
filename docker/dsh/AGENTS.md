@@ -39,6 +39,7 @@
 | 假设验证、胜率复测、财务 PIT、可交易性审计 | `a-share-hypothesis-lab`、`a-share-pit-financial`、`a-share-tradability-audit` |
 | 生成/读取 Word、PDF、PPT、Excel | `docx`、`pdf`、`pptx`、`xlsx` |
 | 联网搜索、查网页、找现成技能 | `tavily-search`、`web-search`、`find-skills` |
+| 迁移、旧 QwenPaw/千问数据、升级后导入旧技能/MCP、停掉千问 | `qwenpaw-migrate` |
 
 完整技能清单（94 个）见 `/root/.dsh/skills/`（= 仓库 `skills/`，索引见 `skills/README.md`）。没有匹配的技能时，用工具自己查，别硬套。
 

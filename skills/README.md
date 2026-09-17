@@ -34,6 +34,7 @@ QuantBot（dsh 容器 / DeepSeek Harness）**无需安装**：docker-compose 把
 | [quantdb-sdk](quantdb-sdk/) | QuantDB 数据 SDK：API Key 配置、数据集目录、字段查询、K线/财务/因子远程查询 | quantdb、数据key、数据集、查询K线 |
 | [quantdb-fields](quantdb-fields/) | QuantDB 字段单位速查：各数据集实测单位、口径与陷阱（volume=股、amount=万元、L2 逐笔等） | 字段单位、成交量单位、数据口径、逐笔、十档盘口 |
 | [quantdb-data-structure](quantdb-data-structure/) | QuantDB 数据结构：目录组织、Hive 分区、parquet 路径、代码格式、quantdb_hub 入口、quantdb vs quantcustom | quantdb 结构、数据目录、dt 分区、parquet 路径、数据在哪里 |
+| [qwenpaw-migrate](qwenpaw-migrate/) | QwenPaw（千问）→ DSH 迁移向导：旧容器用户技能与 MCP 配置导入、核验平台技能库、停用并清理旧容器与数据卷（含整卷备份） | 迁移、QwenPaw、千问、旧数据导入、升级清理 |
 
 ### 研究与分析
 
