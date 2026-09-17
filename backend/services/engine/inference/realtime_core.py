@@ -256,7 +256,22 @@ def load_baseline_bundle(
     if not path.is_file() or not cols:
         return {"rows": {}, "history": {}}
     raw = ["symbol", "trade_date", "open", "high", "low", "close", "volume", "amount"]
-    df = pd.read_parquet(path, columns=raw + [c for c in cols if c not in raw])
+    # 列裁剪必须与 parquet **实际 schema 取交集**：模型 feature_columns 里的 parquet 未收录列
+    # （如 JQ110_* ——2026-09-17 实测硬报 ArrowInvalid）不得进 read_parquet，缺失值统一走
+    # compute_cycle 的 fill_values 兜底（与快照覆盖白名单同纪律：口径不符不硬来）。
+    requested = raw + [c for c in cols if c not in raw]
+    try:
+        import pyarrow.parquet as _pq
+
+        available = set(_pq.ParquetFile(path).schema_arrow.names)
+    except Exception:  # noqa: BLE001 - schema 读取失败回落全量请求（由 read_parquet 报真错）
+        available = set()
+    if available:
+        ordered = list(dict.fromkeys(requested))
+        selected = [c for c in ordered if c in available]
+    else:
+        selected = list(dict.fromkeys(requested))
+    df = pd.read_parquet(path, columns=selected)
     df = df[df["symbol"].isin([digits(s) for s in symbols])]
     df["trade_date"] = pd.to_datetime(df["trade_date"])
     past = df[df["trade_date"].dt.date < day]

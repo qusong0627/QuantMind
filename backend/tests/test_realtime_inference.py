@@ -333,3 +333,34 @@ def test_min_live_coverage_config_parsing():
     assert RealtimeInferConfig.from_mapping({"min_live_coverage": "0.8"}).min_live_coverage == 0.8
     assert RealtimeInferConfig.from_mapping({"min_live_coverage": "5"}).min_live_coverage == 1.0
     assert RealtimeInferConfig.from_mapping({"min_live_coverage": "-1"}).min_live_coverage == 0.0
+
+
+@pytest.mark.unit
+def test_baseline_loader_tolerates_unknown_feature_columns(tmp_path):
+    """模型 feature_columns 含 parquet 未收录列 → 取交集读取，缺失列交 fill 兜底（不再硬崩）。
+
+    回归 2026-09-17 实测：273 列自定义模型（含 JQ110_*）在基线加载处 ArrowInvalid 硬崩。
+    """
+    import pandas as pd
+
+    from backend.services.engine.inference.realtime_core import load_baseline_bundle
+
+    parquet = tmp_path / "feat.parquet"
+    pd.DataFrame(
+        {
+            "symbol": ["600036"] * 3,
+            "trade_date": pd.to_datetime(["2026-09-09", "2026-09-10", "2026-09-11"]),
+            "open": [10.0, 10.1, 10.2], "high": [10.2, 10.3, 10.4],
+            "low": [9.9, 10.0, 10.1], "close": [10.1, 10.2, 10.3],
+            "volume": [1e6, 1e6, 1e6], "amount": [1e7, 1e7, 1e7],
+            "f1": [0.1, 0.2, 0.3],
+        }
+    ).to_parquet(parquet)
+    bundle = load_baseline_bundle(
+        ["600036.SH"], __import__("datetime").date(2026, 9, 17),
+        parquet_path=parquet, cols=["f1", "JQ110_52week_rank", "not_in_parquet"],
+    )
+    row = bundle["rows"]["600036"]
+    assert row["f1"] == 0.3           # 存在的列正常取到
+    assert row.get("JQ110_52week_rank") is None  # 未收录列不崩、交 fill 兜底
+    assert len(bundle["history"]["600036"]) == 3

@@ -76,6 +76,42 @@ def validate_model_dir(model_dir: str) -> list[str]:
     return cols
 
 
+BASELINE_PARQUET_TMPL = "/app/db/feature_snapshots/model_features_{year}.parquet"
+MIN_COLUMN_COVERAGE = 0.5
+
+
+def feature_coverage(model_dir: str, feature_columns: list[str]) -> tuple[int, int, float]:
+    """模型特征列在实时基线 parquet 中的覆盖率（0~1）。
+
+    机构级防线（2026-09-17 实测）：覆盖率过低（如 273 列自定义模型仅 8% 命中）时，
+    打分矩阵 92% 走 fill 值 = **垃圾分冒充实时信号** → 配置层直接拒绝。
+    """
+    import datetime as _dt
+    from pathlib import Path
+
+    path = Path(BASELINE_PARQUET_TMPL.format(year=_dt.datetime.now().year))
+    if not path.is_file():
+        return (0, len(feature_columns), 0.0)
+    try:
+        import pyarrow.parquet as _pq
+
+        available = set(_pq.ParquetFile(path).schema_arrow.names)
+    except Exception:  # noqa: BLE001
+        return (0, len(feature_columns), 0.0)
+    hit = sum(1 for c in feature_columns if c in available)
+    total = max(1, len(feature_columns))
+    return (hit, len(feature_columns), hit / total)
+
+
+def validate_feature_coverage(model_dir: str, feature_columns: list[str]) -> None:
+    hit, total, ratio = feature_coverage(model_dir, feature_columns)
+    if ratio < MIN_COLUMN_COVERAGE:
+        raise ValueError(
+            f"模型特征覆盖率过低（{hit}/{total}={ratio:.0%} < {MIN_COLUMN_COVERAGE:.0%}）："
+            "基线 parquet 未收录大部分特征，实时打分将大量走 fill 值（疑似错误模型）"
+        )
+
+
 def validate_override_whitelist(whitelist: list[str] | None, feature_columns: list[str]) -> None:
     """白名单必须 ⊆ 模型特征列（防写错列名造成静默错分）。"""
     unknown = [c for c in (whitelist or []) if c not in set(feature_columns)]
@@ -140,6 +176,7 @@ async def set_infer_config(payload: InferConfigRequest) -> dict[str, Any]:
         if model_dir:
             try:
                 feature_columns = validate_model_dir(model_dir)
+                validate_feature_coverage(model_dir, feature_columns)
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
         if payload.model_dir is not None:

@@ -111,3 +111,21 @@ def test_admin_realtime_config_roundtrip_real_redis(tmp_path):
         if original:
             client.hset(CONFIG_KEY, mapping=original)
         client.close()
+
+
+@pytest.mark.unit
+def test_feature_coverage_guard(tmp_path, monkeypatch):
+    """覆盖率防线：模型特征大部分不在基线 parquet → 拒绝（防垃圾分冒充实时）。"""
+    import backend.services.api.routers.admin.realtime as rt
+
+    import pandas as pd
+
+    parquet = tmp_path / "model_features_2026.parquet"
+    pd.DataFrame({"symbol": ["600036"], "f1": [0.1], "f2": [0.2]}).to_parquet(parquet)
+    monkeypatch.setattr(rt, "BASELINE_PARQUET_TMPL", str(tmp_path / "model_features_{year}.parquet"))
+
+    assert rt.feature_coverage("x", ["f1", "f2"]) == (2, 2, 1.0)
+    rt.validate_feature_coverage("x", ["f1", "f2"])  # 全覆盖 → 通过
+    with pytest.raises(ValueError) as exc:
+        rt.validate_feature_coverage("x", ["f1", "nope1", "nope2", "nope3"])
+    assert "覆盖率过低" in str(exc.value)
