@@ -127,7 +127,7 @@ export const AdminDataManagement: React.FC = () => {
           <Button
             icon={<SettingOutlined />}
             className="rounded-xl h-10 px-5 font-bold border-slate-200 text-slate-600 hover:bg-slate-50 transition-all"
-            onClick={() => navigate('/user-center?tab=data-platform')}
+            onClick={() => navigate('/admin/profile?tab=data-platform')}
           >
             云端节点与 API 配置
           </Button>

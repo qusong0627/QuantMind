@@ -774,6 +774,8 @@ export default function App() {
                     <Route path="inference" element={<Suspense fallback={<Spin size="large" />}><AdminInferenceMonitor /></Suspense>} />
                     <Route path="orders" element={<Suspense fallback={<Spin size="large" />}><AdminOrderManagement /></Suspense>} />
                     <Route path="risk" element={<Suspense fallback={<Spin size="large" />}><AdminRiskControl /></Suspense>} />
+                    {/* 个人中心：内嵌在后台 shell 右侧内容区（同一 UserCenterPage，按路由自适应布局） */}
+                    <Route path="profile" element={<Suspense fallback={<Spin size="large" />}><UserCenterPage /></Suspense>} />
                     <Route path="quotes" element={<Suspense fallback={<Spin size="large" />}><AdminDataPlatform /></Suspense>} />
                     <Route path="settings" element={<Suspense fallback={<Spin size="large" />}><AdminSystemSettings /></Suspense>} />
                   </Route>

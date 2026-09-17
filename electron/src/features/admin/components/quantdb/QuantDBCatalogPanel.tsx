@@ -204,7 +204,7 @@ export function QuantDBCatalogPanel({ connected, apiKeyConfigured = false, onPre
     };
 
     const goConfigureKey = useCallback(() => {
-        navigate('/user-center?tab=data-platform');
+        navigate('/admin/profile?tab=data-platform');
     }, [navigate]);
 
     const triggerSync = async () => {

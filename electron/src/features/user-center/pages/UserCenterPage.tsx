@@ -234,10 +234,18 @@ const UserCenterPage: React.FC = () => {
     },
   ];
 
+  // 后台管理内嵌模式（/admin/profile）：外壳（侧边菜单/头部）由后台 shell 提供，
+  // 本页只渲染内容面——去掉 32px 大卡片外壳与页面内边距；独立路由 /user-center 保持原样
+  const embeddedInAdmin = location.pathname.startsWith('/admin/profile');
+
   return (
-    <div className="w-full h-full bg-[#f8fafc] p-6 overflow-hidden">
+    <div className={embeddedInAdmin ? 'w-full h-full overflow-hidden' : 'w-full h-full bg-[#f8fafc] p-6 overflow-hidden'}>
       <div
-        className="bg-white border border-gray-200 shadow-sm flex flex-col w-full h-full rounded-[32px] overflow-hidden"
+        className={`bg-white flex flex-col w-full h-full overflow-hidden ${
+          embeddedInAdmin
+            ? 'border border-slate-200/80 shadow-sm rounded-2xl'
+            : 'border border-gray-200 shadow-sm rounded-[32px]'
+        }`}
       >
         {/* 顶部标题栏 - 对齐回测中心 */}
         <div className="flex-shrink-0 bg-white border-b border-gray-200 px-6 flex items-center justify-between z-10"

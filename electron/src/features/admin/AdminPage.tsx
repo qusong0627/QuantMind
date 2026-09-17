@@ -105,11 +105,7 @@ const AdminPage: React.FC = () => {
                     <Menu
                         mode="inline"
                         selectedKeys={[currentKey]}
-                        onClick={({ key }) => {
-                            // 个人中心打开独立页面（与其在后台的其它引用一致，见 AdminQuantDBPanel 的跳转先例）
-                            if (key === 'profile') { navigate('/user-center'); return; }
-                            navigate(`/admin/${key}`);
-                        }}
+                        onClick={({ key }) => navigate(`/admin/${key}`)}
                         className="border-none admin-menu-modern"
                         items={menuItems}
                         inlineCollapsed={collapsed}
@@ -148,17 +144,17 @@ const AdminPage: React.FC = () => {
                 {/* Content Container */}
                 <main
                     className={`flex-1 px-6 pt-6 pb-[60px] bg-slate-50/50 ${
-                        ['orders', 'risk', 'inference'].includes(currentKey)
+                        ['orders', 'risk', 'inference', 'profile'].includes(currentKey)
                             ? 'overflow-hidden flex flex-col min-h-0'
                             : 'overflow-y-auto'
                     }`}
                 >
-                    {/* 资讯监控 / 订单 / 风控等大屏页面用全宽，其余保留 1400px 阅读宽度 */}
+                    {/* 资讯监控 / 订单 / 风控 / 个人中心等大屏页面用全宽，其余保留 1400px 阅读宽度 */}
                     <div
                         className={
-                            ['news', 'inference', 'tags', 'settings', 'stock-pools', 'orders', 'risk'].includes(currentKey)
+                            ['news', 'inference', 'tags', 'settings', 'stock-pools', 'orders', 'risk', 'profile'].includes(currentKey)
                                 ? `min-h-0 animate-in fade-in slide-in-from-bottom-4 duration-500 ${
-                                      ['orders', 'risk'].includes(currentKey)
+                                      ['orders', 'risk', 'profile'].includes(currentKey)
                                           ? 'flex w-full flex-1 flex-col'
                                           : currentKey === 'inference'
                                             ? 'mx-auto flex w-full max-w-[1400px] flex-1 flex-col'
