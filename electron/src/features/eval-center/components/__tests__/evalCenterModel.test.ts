@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { EvalScoreRow } from '../../../types/evalCenter';
+import type { EvalScoreRow } from '../../types/evalCenter';
 import {
   averageScore,
   coverageSummary,

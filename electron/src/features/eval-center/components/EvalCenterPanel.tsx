@@ -29,8 +29,8 @@ import {
   getScoreHistory,
   getStrategyHealth,
   listScores,
-} from '../../services/evalCenterService';
-import type { EvalObjectType, EvalScoreRow, StrategyHealthArchive } from '../../types/evalCenter';
+} from '../services/evalCenterService';
+import type { EvalObjectType, EvalScoreRow, StrategyHealthArchive } from '../types/evalCenter';
 import {
   averageScore,
   coverageSummary,
@@ -42,9 +42,9 @@ import {
   radarEntries,
   rowLabels,
 } from './evalCenterModel';
-import { useUiMode } from '../../../shared/useUiMode';
+import { useUiMode } from '../../shared/useUiMode';
 import { SelfHealthUpload } from './SelfHealthUpload';
-import { TermTooltip } from '../../../shared/TermTooltip';
+import { TermTooltip } from '../../shared/TermTooltip';
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : '请求失败';

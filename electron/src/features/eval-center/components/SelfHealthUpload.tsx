@@ -8,9 +8,9 @@
 import React, { useRef, useState } from 'react';
 import { FileUp, Stethoscope } from 'lucide-react';
 import { message } from 'antd';
-import { uploadHealthCheck } from '../../services/evalCenterService';
-import { HealthReportView } from '../../../../components/backtestCenter/analysis/HealthReportView';
-import type { HealthReport } from '../../../../services/backtestService';
+import { uploadHealthCheck } from '../services/evalCenterService';
+import { HealthReportView } from '../../../components/backtestCenter/analysis/HealthReportView';
+import type { HealthReport } from '../../../services/backtestService';
 
 interface UploadState {
   report: HealthReport | null;

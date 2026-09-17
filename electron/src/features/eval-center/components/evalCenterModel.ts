@@ -1,6 +1,6 @@
 /** 评估中心纯函数（评分卡展示模型；可单测，无副作用） */
 
-import type { EvalScoreRow } from '../../types/evalCenter';
+import type { EvalScoreRow } from '../types/evalCenter';
 
 export interface GradeMeta {
   label: string;

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { LayoutDashboard, PieChart, FileText, Settings, User, ClipboardList, Clock, Gauge } from 'lucide-react';
+import { LayoutDashboard, PieChart, FileText, Settings, User, ClipboardList, Clock, Gauge, Award } from 'lucide-react';
 import HelpCenterLink from '../../components/common/HelpCenterLink';
 import type { LucideIcon } from 'lucide-react';
 import { Button, Collapse, Modal, Spin, Tag, message } from 'antd';
@@ -12,6 +12,7 @@ import TradingHistory from './tabs/TradingHistory';
 import SettingsCenter from './tabs/SettingsCenter';
 import ReplayPage from './tabs/ReplayPage';
 import DeskTodayPage from '../../features/desk/DeskTodayPage';
+import { EvalCenterPanel } from '../../features/eval-center/components/EvalCenterPanel';
 import type { RealTradingStatus, AccountInfo, PreflightCheckResponse, PreflightCheckItem } from '../../services/realTradingService';
 import { authService } from '../../features/auth/services/authService';
 import type { StrategyFile } from '../../types/backtest/strategy';
@@ -25,7 +26,7 @@ import LiveTradeConfigWizard from './components/LiveTradeConfigWizard';
 import type { DeployMode, ExecutionConfig, LiveTradeConfig } from '../../types/liveTrading';
 
 type TradingMode = 'real' | 'simulation';  // 支持实盘(通达信桥)与模拟盘
-type ActiveTab = 'desk' | 'manage' | 'manual-task' | 'personal' | 'position' | 'history' | 'settings' | 'replay';
+type ActiveTab = 'desk' | 'eval' | 'manage' | 'manual-task' | 'personal' | 'position' | 'history' | 'settings' | 'replay';
 type PreflightStage = 'trading-readiness' | 'preflight';
 type PendingDeploy = {
     strategyId: string;
@@ -86,7 +87,16 @@ const BROKER_LABELS: Record<string, string> = {
 const RealTradingPage: React.FC = () => {
     const currentMarket = useAppSelector(selectCurrentMarket);
     const marketConfig = getMarketConfig(currentMarket);
-    const [activeTab, setActiveTab] = useState<ActiveTab>('manage');
+    // 深链：/?...&tab=eval（评估徽章跳转）→ 初始落在评估中心页签
+    const initialTab: ActiveTab = (() => {
+        if (typeof window === 'undefined') return 'manage';
+        const hash = window.location.hash || '';
+        const qi = hash.indexOf('?');
+        const params = new URLSearchParams(qi >= 0 ? hash.slice(qi + 1) : '');
+        const t = params.get('tab');
+        return t === 'eval' ? 'eval' : 'manage';
+    })();
+    const [activeTab, setActiveTab] = useState<ActiveTab>(initialTab);
 
     // 券商通道卡「去配置凭证」跳转：切到设置页签
     useEffect(() => {
@@ -485,6 +495,8 @@ const RealTradingPage: React.FC = () => {
     const tabs: Array<{ id: ActiveTab; label: string; icon: LucideIcon }> = [
         // 今日交易台自底部栏迁入（2026-09-17），置于功能导航首位
         { id: 'desk', label: '今日交易台', icon: Gauge },
+        // 评估中心自因子研究迁入（2026-09-17），置于策略管理之前（评估与策略同组）
+        { id: 'eval', label: '评估中心', icon: Award },
         { id: 'manage', label: '策略管理', icon: LayoutDashboard },
         // 时光回放功能尚存多处问题，暂时隐藏入口，完善后取消注释即可恢复（ReplayPage 渲染分支保留）
         // { id: 'replay', label: '时光回放', icon: Clock },
@@ -572,6 +584,11 @@ const RealTradingPage: React.FC = () => {
                     {/* Right Content Area */}
                     <div className="flex-1 overflow-hidden relative bg-gray-50/50">
                     {activeTab === 'desk' && <DeskTodayPage embedded />}
+                    {activeTab === 'eval' && (
+                        <div className="h-full overflow-y-auto p-4">
+                            <EvalCenterPanel />
+                        </div>
+                    )}
                     {activeTab === 'manage' && (
                             <TopologyConsole
                                 tenantId={tenantId}
