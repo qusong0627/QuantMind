@@ -59,6 +59,19 @@ JOBS: tuple[JobSpec, ...] = (
         "消化 status=pending 的模拟单",
     ),
     JobSpec(
+        "sentinel_push", "哨兵告警消费（P6）", "worker", "trade", "5s 长轮询（消费组 sentinel）",
+        "QM_SENTINEL_WORKER_ENABLED", True, 600,
+        "python -m backend.services.trade.services.sentinel_alert_service",
+        "intel:events → sentinel_alerts 留痕 + 分级推送（Redis 门控 qm:sentinel:config，T-P6-15）",
+    ),
+    JobSpec(
+        "sentinel_backfill", "哨兵 T+1 回填（P6）", "worker", "trade",
+        "交易日 16:10（300s 轮询）",
+        "QM_SENTINEL_WORKER_ENABLED", True, 900,
+        "python -m backend.services.trade.services.sentinel_backfill",
+        "告警 T+1 兑现回填（命中/误报）→ 误报率报表（T-P6-15）",
+    ),
+    JobSpec(
         "hot_set_builder", "热集构建（P6）", "worker", "trade", "60s 周期",
         "QM_HOT_SET_BUILD_ENABLED", True, 300, None,
         "全用户持仓并集 ∪ 候选池 → Redis 热集集合（订阅采集数据源，T-P6-06）",

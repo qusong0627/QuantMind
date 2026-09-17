@@ -60,6 +60,8 @@ async def lifespan(app: FastAPI):
     dual_book_reconcile_task = None
     shadow_compare_task = None
     eval_scores_task = None
+    sentinel_alert_task = None
+    sentinel_backfill_task = None
     health_recheck_task = None
     close_audit_task = None
     tdx_quote_feed_task = None
@@ -257,6 +259,28 @@ async def lifespan(app: FastAPI):
             run_eval_scores_worker(),
             name="eval-scores-worker",
         )
+        # 哨兵告警（T-P6-15）：总线消费→留痕→分级推送 + T+1 回填（Redis 门控热读）
+        if str(os.getenv("QM_SENTINEL_WORKER_ENABLED", "true")).strip().lower() not in {
+            "0", "false", "no", "off",
+        }:
+            from backend.services.trade.services.sentinel_alert_service import (
+                run_sentinel_alert_worker,
+            )
+            from backend.services.trade.services.sentinel_backfill import (
+                run_sentinel_backfill_worker,
+            )
+
+            sentinel_alert_task = asyncio.create_task(
+                run_sentinel_alert_worker(), name="sentinel-alert-worker"
+            )
+            sentinel_backfill_task = asyncio.create_task(
+                run_sentinel_backfill_worker(), name="sentinel-backfill-worker"
+            )
+        else:
+            sentinel_alert_task = None
+            sentinel_backfill_task = None
+            logger.info("sentinel workers disabled (QM_SENTINEL_WORKER_ENABLED=false)")
+
         # 月度体检复检（T-P4-06 ③）：每月首周对 SIM/LIVE 策略重跑回测体检
         from backend.services.trade.services.health_recheck_service import (
             run_health_recheck_worker,
@@ -567,7 +591,7 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning("trade risk trigger scanner stop failed: %s", e)
 
-    for task in (scanner_task, margin_task, snapshot_task, ledger_settlement_task, manual_execution_task, sandbox_signal_task, tdx_account_sync_task, qmt_account_sync_task, qmt_exec_poller_task, mirror_queue_drainer_task, qmt_sltp_executor_task, qmt_quote_backup_task, dual_book_reconcile_task, shadow_compare_task, eval_scores_task, health_recheck_task, close_audit_task, tdx_quote_feed_task, tdx_l2_capture_task, tdx_l2_realtime_task, t1_unlock_task, simulation_pending_order_task, corp_action_task, simulation_eod_task, hot_set_builder_task):
+    for task in (scanner_task, margin_task, snapshot_task, ledger_settlement_task, manual_execution_task, sandbox_signal_task, tdx_account_sync_task, qmt_account_sync_task, qmt_exec_poller_task, mirror_queue_drainer_task, qmt_sltp_executor_task, qmt_quote_backup_task, dual_book_reconcile_task, shadow_compare_task, eval_scores_task, health_recheck_task, close_audit_task, tdx_quote_feed_task, tdx_l2_capture_task, tdx_l2_realtime_task, t1_unlock_task, simulation_pending_order_task, corp_action_task, simulation_eod_task, hot_set_builder_task, sentinel_alert_task, sentinel_backfill_task):
         if task is None:
             continue
         task.cancel()

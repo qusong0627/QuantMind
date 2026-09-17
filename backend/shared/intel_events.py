@@ -187,10 +187,16 @@ def publish_event(client: Any, event: dict[str, Any], *, key: str = STREAM_KEY, 
     return str(client.xadd(key, fields, maxlen=maxlen, approximate=True))
 
 
-def ensure_group(client: Any, *, key: str = STREAM_KEY, group: str = CONSUMER_GROUP) -> None:
-    """建消费组（已存在忽略；mkstream 使总线不存在也可先建组）。"""
+def ensure_group(
+    client: Any, *, key: str = STREAM_KEY, group: str = CONSUMER_GROUP, start_id: str = "0"
+) -> None:
+    """建消费组（已存在忽略；mkstream 使总线不存在也可先建组）。
+
+    start_id="0"（默认，兼容既有 intel:ws 订阅）从已有事件开始；新消费者若只关心
+    增量（如哨兵留痕，避免回放历史事件风暴）传 start_id="$"。
+    """
     try:
-        client.xgroup_create(key, group, id="0", mkstream=True)
+        client.xgroup_create(key, group, id=start_id, mkstream=True)
     except Exception as exc:  # noqa: BLE001 - BUSYGROUP 属正常
         if "BUSYGROUP" not in str(exc):
             raise
