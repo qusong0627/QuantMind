@@ -125,71 +125,76 @@ const QuantBotPage: React.FC = () => {
   }, [iframeKey, clearTimer]);
 
   return (
-    <div className="w-full h-full flex flex-col overflow-hidden bg-[#f8fafc] pt-12 pb-[74px] px-3 sm:px-4">
+    // Electron 下顶部有 h-12 的 TitleBar 覆盖层需让位；Web 无 TitleBar，直接贴顶（此前统一 pt-12 留出 48px 空白）
+    <div
+      className={`w-full h-full flex flex-col overflow-hidden bg-[#f8fafc] pb-[74px] px-3 sm:px-4 ${
+        isElectronEnv() ? 'pt-12' : 'pt-4'
+      }`}
+    >
       {/* 顶部工具栏 — 清爽融合，规避 TitleBar 遮挡 */}
-      <div className="h-10 flex-shrink-0 bg-white border border-slate-200/80 rounded-t-xl px-4 flex items-center justify-between shadow-xs">
-        <div className="flex items-center gap-2.5">
-          <div className="w-5 h-5 rounded-md bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center shadow-xs">
-            <Bot className="w-3.5 h-3.5 text-white" />
+      <div className="h-12 flex-shrink-0 bg-white border border-slate-200/80 rounded-t-xl px-4 flex items-center justify-between shadow-xs">
+        <div className="flex items-center gap-3">
+          <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center shadow-xs">
+            <Bot className="w-4 h-4 text-white" />
           </div>
-          <span className="text-xs font-bold text-slate-800 tracking-tight">QuantBot · DSH</span>
+          <span className="text-base font-bold text-slate-800 tracking-tight">QuantBot · DSH</span>
           <button
             type="button"
             onClick={() => setShowPrompts(true)}
-            className="inline-flex items-center gap-1 text-[11px] font-semibold text-slate-500 hover:text-blue-600 transition-colors"
+            className="inline-flex items-center gap-1.5 text-sm font-semibold text-slate-500 hover:text-blue-600 transition-colors"
             title="提示词库：示例 + 技能模板，复制后粘贴到下方对话框"
           >
-            <BookMarked className="w-3.5 h-3.5 text-indigo-500" />
+            <BookMarked className="w-4 h-4 text-indigo-500" />
             提示词库
-            <span className="text-[9px] font-bold text-slate-400 bg-slate-100 px-1 py-px rounded">{PROMPT_LIBRARY_TOTAL}</span>
+            <span className="text-[11px] font-bold text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded">{PROMPT_LIBRARY_TOTAL}</span>
           </button>
           <button
             type="button"
             onClick={() => setShowReports(true)}
-            className="inline-flex items-center gap-1 text-[11px] font-semibold text-slate-500 hover:text-blue-600 transition-colors"
+            className="inline-flex items-center gap-1.5 text-sm font-semibold text-slate-500 hover:text-blue-600 transition-colors"
             title="调研报告：QuantBot 生成的 md + PDF 自动归档，点击文件直接预览"
           >
-            <FileText className="w-3.5 h-3.5 text-indigo-500" />
+            <FileText className="w-4 h-4 text-indigo-500" />
             调研报告
           </button>
-          <span className="text-[10px] font-medium text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded">AI 智能助理</span>
+          <span className="text-xs font-medium text-slate-400 bg-slate-100 px-2 py-1 rounded">AI 智能助理</span>
         </div>
 
         <div className="flex items-center gap-2">
-          <div className={`flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full ${
-            connected 
-              ? 'bg-emerald-50 text-emerald-600 border border-emerald-200/60' 
-              : timedOut 
-                ? 'bg-rose-50 text-rose-600 border border-rose-200/60' 
-                : loading 
-                  ? 'bg-amber-50 text-amber-600 border border-amber-200/60' 
+          <div className={`flex items-center gap-1.5 text-sm font-medium px-2.5 py-1 rounded-full ${
+            connected
+              ? 'bg-emerald-50 text-emerald-600 border border-emerald-200/60'
+              : timedOut
+                ? 'bg-rose-50 text-rose-600 border border-rose-200/60'
+                : loading
+                  ? 'bg-amber-50 text-amber-600 border border-amber-200/60'
                   : 'bg-slate-100 text-slate-500'
           }`}>
             {connected ? (
-              <Wifi className="w-3 h-3 text-emerald-500" />
+              <Wifi className="w-3.5 h-3.5 text-emerald-500" />
             ) : timedOut ? (
-              <AlertTriangle className="w-3 h-3 text-rose-500" />
+              <AlertTriangle className="w-3.5 h-3.5 text-rose-500" />
             ) : loading ? (
               <div className="w-3 h-3 border-2 border-amber-500 border-t-transparent rounded-full animate-spin" />
             ) : (
-              <WifiOff className="w-3 h-3 text-slate-400" />
+              <WifiOff className="w-3.5 h-3.5 text-slate-400" />
             )}
-            <span className="text-[11px]">{connected ? '已连接' : timedOut ? '连接超时' : loading ? '连接中…' : '断开'}</span>
+            <span className="text-xs">{connected ? '已连接' : timedOut ? '连接超时' : loading ? '连接中…' : '断开'}</span>
           </div>
 
           <button
             onClick={handleOpenExternal}
-            className="flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium text-slate-600 hover:text-blue-600 hover:bg-slate-100 transition-colors"
+            className="flex items-center gap-1 rounded-md px-2.5 py-1.5 text-sm font-medium text-slate-600 hover:text-blue-600 hover:bg-slate-100 transition-colors"
             title="在外部浏览器打开"
           >
-            <ExternalLink className="w-3.5 h-3.5" />
+            <ExternalLink className="w-4 h-4" />
           </button>
           <button
             onClick={handleReload}
-            className="flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium text-slate-600 hover:text-blue-600 hover:bg-slate-100 transition-colors"
+            className="flex items-center gap-1 rounded-md px-2.5 py-1.5 text-sm font-medium text-slate-600 hover:text-blue-600 hover:bg-slate-100 transition-colors"
             title="重新加载"
           >
-            <RefreshCw className="w-3.5 h-3.5" />
+            <RefreshCw className="w-4 h-4" />
           </button>
         </div>
       </div>
