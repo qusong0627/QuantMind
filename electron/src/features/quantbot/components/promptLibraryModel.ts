@@ -1,9 +1,9 @@
 /**
  * QuantBot 提示词库数据模型（纯函数，可单测）— 合并两个来源为一个库：
  * 1) 意图示例：quantbotIntents（34 条短示例，"点选即发"）；
- * 2) 技能模板：skills-center/prompts.generated（25 条长模板，含 {占位符}，由 scripts/gen_prompts.py 生成）。
+ * 2) 技能模板：data/prompts.generated（24 条长模板，含 {占位符}，由 scripts/gen_prompts.py 从 prompts/*.md 生成）。
  */
-import { PROMPTS } from '../../skills-center/prompts.generated';
+import { PROMPTS } from '../data/prompts.generated';
 import { QUANTBOT_INTENTS } from '../intents/quantbotIntents';
 
 export type LibPromptKind = 'example' | 'template';

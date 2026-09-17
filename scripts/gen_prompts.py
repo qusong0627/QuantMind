@@ -204,8 +204,8 @@ def write(name, title, category, desc, outputs, body):
 for item in P:
     write(*item)
 
-# 同步生成前端数据模块（技能中心提示词卡片数据源，构建期打包进 bundle）
-TS_OUT = os.path.join(os.getcwd(), "..", "electron", "src", "features", "skills-center",
+# 同步生成前端数据模块（QuantBot 顶栏提示词库数据源，构建期打包进 bundle）
+TS_OUT = os.path.join(os.getcwd(), "..", "electron", "src", "features", "quantbot", "data",
                       "prompts.generated.ts")
 lines = [
     "/**",

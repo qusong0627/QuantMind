@@ -98,7 +98,6 @@ const AdminRiskControl = lazy(() => import('./features/admin/components/AdminRis
 const AdminOrderManagement = lazy(() => import('./features/admin/components/AdminOrderManagement').then(m => ({ default: m.AdminOrderManagement })));
 const AdminInferenceMonitor = lazy(() => import('./features/admin/components/AdminInferenceMonitor').then(m => ({ default: m.AdminInferenceMonitor })));
 const AlphaResearchPage = lazy(() => import('./features/alpha-research/pages/AlphaResearchPage'));
-const SkillsCenterPage = lazy(() => import('./features/skills-center/pages/SkillsCenterPage'));
 const DeskTodayPage = lazy(() => import('./features/desk/DeskTodayPage'));
 const FactorResearchPage = lazy(() => import('./features/factor-research/pages/FactorResearchPage'));
 
@@ -231,7 +230,6 @@ export default function App() {
       'rss-news': '/rss-news',
       'alpha-research': '/alpha-research',
       'factor-research': '/factor-research',
-      skills: '/skills',
       'profile': '/user-center',
       'admin': '/admin',
     };
@@ -271,12 +269,8 @@ export default function App() {
       dispatch(setCurrentTab('stock-terminal' as DashboardTab));
     } else if (location.pathname.startsWith('/research')) {
       dispatch(setCurrentTab('research' as DashboardTab));
-    } else if (location.pathname.startsWith('/trading-agents')) {
-      dispatch(setCurrentTab('skills' as DashboardTab));
     } else if (location.pathname.startsWith('/desk')) {
       dispatch(setCurrentTab('desk' as DashboardTab));
-    } else if (location.pathname.startsWith('/skills')) {
-      dispatch(setCurrentTab('skills' as DashboardTab));
     } else if (location.pathname.startsWith('/trading')) {
       dispatch(setCurrentTab('trading' as DashboardTab));
     } else if (location.pathname.startsWith('/rss-news')) {
@@ -743,16 +737,7 @@ export default function App() {
                       </ProtectedRoute>
                     }
                   />
-                  <Route
-                    path="/skills"
-                    element={
-                      <ProtectedRoute>
-                        <Suspense fallback={<Spin size="large" />}>
-                          <SkillsCenterPage />
-                        </Suspense>
-                      </ProtectedRoute>
-                    }
-                  />
+                  <Route path="/skills" element={<Navigate to="/quantbot" replace />} />
                   <Route
                     path="/factor-research"
                     element={
@@ -763,7 +748,7 @@ export default function App() {
                       </ProtectedRoute>
                     }
                   />
-                  <Route path="/trading-agents" element={<Navigate to="/skills" replace />} />
+                  <Route path="/trading-agents" element={<Navigate to="/quantbot" replace />} />
                   <Route
                     path="/admin"
                     element={

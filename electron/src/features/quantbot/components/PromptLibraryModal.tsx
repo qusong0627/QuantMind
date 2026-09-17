@@ -1,8 +1,7 @@
 /**
  * 提示词库弹窗（QuantBot 顶栏入口）— 意图示例（34 条）+ 技能模板（24 条）合并为一个库。
- * 居中模态：24px 圆角 + 毛玻璃遮罩；双栏版式对齐技能中心 PromptsLibrary——
- * 左 = 搜索 + 分组列表（示例区块 / 模板区块），右 = 详情卡片 + 全文 + 复制。
- * 列表行右侧悬浮复制按钮支持一键复制。
+ * 居中模态：24px 圆角 + 毛玻璃遮罩；双栏版式——左 = 搜索 + 分组列表（示例区块 / 模板区块），
+ * 右 = 详情卡片 + 全文 + 复制。列表行右侧悬浮复制按钮支持一键复制。
  */
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Modal, message } from 'antd';
@@ -47,7 +46,7 @@ const INTENT_STYLE: Record<string, CategoryStyle> = {
   操作帮助: { dot: '#d97706', chipBg: '#fffbeb', chipText: '#b45309', chipBorder: '#fef3c7', accent: '#f59e0b' },
 };
 
-/** 模板分类配色（与技能中心 PromptsLibrary 保持一致） */
+/** 模板分类配色（与原技能中心提示词库保持一致） */
 const TEMPLATE_STYLE: Record<string, CategoryStyle> = {
   研究分析: { dot: '#2563eb', chipBg: '#eff6ff', chipText: '#1d4ed8', chipBorder: '#dbeafe', accent: '#3b82f6' },
   '策略·因子·模型·回测': { dot: '#7c3aed', chipBg: '#f5f3ff', chipText: '#6d28d9', chipBorder: '#ede9fe', accent: '#8b5cf6' },

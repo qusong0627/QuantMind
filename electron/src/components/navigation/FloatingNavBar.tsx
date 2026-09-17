@@ -13,7 +13,6 @@ import {
   SquareTerminal,
   TestTube2,
   FileText,
-  Sparkles,
   Brain,
   BarChart3,
   Cpu,
@@ -58,7 +57,6 @@ export const FloatingNavBar: React.FC<FloatingNavBarProps> = ({ current, onChang
     { id: 'research', label: '投研平台', icon: Search },
     { id: 'alpha-research', label: '因子挖掘', icon: TestTube2 },
     { id: 'factor-research', label: '因子研究', icon: Sigma },
-    { id: 'skills', label: '技能中心', icon: Sparkles },
     { id: 'agent', label: 'QuantBot', icon: Orbit },
     // 5. 个人中心
     { id: 'profile', label: '个人中心', icon: CircleUserRound }
@@ -76,7 +74,7 @@ export const FloatingNavBar: React.FC<FloatingNavBarProps> = ({ current, onChang
     // 3. 模型区域
     navItems.filter((item) => ['model-training', 'model-registry', 'inference-center'].includes(item.id)),
     // 4. 智能投研区域
-    navItems.filter((item) => ['research', 'alpha-research', 'factor-research', 'skills', 'agent'].includes(item.id)),
+    navItems.filter((item) => ['research', 'alpha-research', 'factor-research', 'agent'].includes(item.id)),
     // 5. 个人与系统组
     navItems.filter((item) => ['profile', 'admin'].includes(item.id))
   ].filter((group) => group.length > 0);

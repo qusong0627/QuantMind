@@ -43,7 +43,7 @@ describe('QuantBot 提示词库数据模型', () => {
     }
   });
 
-  it('示例按意图声明顺序分组，模板按技能中心固定顺序分组', () => {
+  it('示例按意图声明顺序分组，模板按固定分类顺序分组', () => {
     // Arrange & Act
     const exampleGroups = groupByCategory(
       ALL_PROMPTS.filter((p) => p.kind === 'example'),

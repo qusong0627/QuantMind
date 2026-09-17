@@ -137,7 +137,7 @@ export const FactorClusterModal: React.FC<Props> = ({ open, dataset, datasetLabe
               <span className="text-slate-400">（最大簇 {summary.largest_cluster} 个成员）</span>
               <div className="text-[11px] text-slate-500 mt-0.5">
                 每簇保留 |ICIR| 最高的代表；相关性取绝对值 —— 负相关同样是同源（反向因子）。
-                完整 PDF 见「技能中心 → 报告档案 → factor_dedup」。
+                完整 PDF 见 QuantBot 顶栏「调研报告」→ factor_dedup。
               </div>
             </div>
           )}
