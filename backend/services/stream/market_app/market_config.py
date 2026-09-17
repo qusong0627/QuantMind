@@ -137,6 +137,15 @@ class Settings(BaseSettings):
             raise ValueError(f"DEFAULT_SOURCE={v} 不在 DATA_SOURCES={data_sources} 中")
         return v
 
+    @field_validator("REMOTE_QUOTE_REDIS_PORT", mode="before")
+    @classmethod
+    def _empty_remote_quote_port_to_default(cls, v):
+        # compose 远端行情块以「留空 = 用共享配置默认值」注入该变量（空串），
+        # 空串不能进 int 解析——回落到本字段声明的默认端口（否则 stream 启动即崩）。
+        if v is None or (isinstance(v, str) and not v.strip()):
+            return MARKET_REDIS_PORT
+        return v
+
     @property
     def REDIS_SENTINELS(self) -> list[tuple]:
         text = (self.REDIS_SENTINELS_RAW or "").strip()
