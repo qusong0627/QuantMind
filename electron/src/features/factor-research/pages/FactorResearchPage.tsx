@@ -3,12 +3,12 @@
  *
  * 布局：左侧因子目录（分类树 + 搜索 + 标签筛选）· 顶部区间选择 · 两组页签：
  * 研究：排行榜 / 单因子分析 / 多因子对比 / 多因子合成 / 筛选
- * 工具：因子报告 / 策略模板 / 评估中心（2026-09-17 由技能中心迁入，全宽渲染）
+ * 工具：因子报告 / 评估中心（2026-09-17 由技能中心迁入，全宽渲染；策略模板已迁至回测中心·策略管理右侧）
  * 数据：/api/v1/factor-research（引擎服务，快照由 build_factor_research.py 构建）
  */
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { ArrowRightLeft, Award, BarChart3, Database, Filter, Layers, LibraryBig, LineChart, Sigma, TableProperties } from 'lucide-react';
+import { ArrowRightLeft, Award, BarChart3, Database, Filter, Layers, LineChart, Sigma, TableProperties } from 'lucide-react';
 import { PAGE_LAYOUT } from '../../../config/pageLayout';
 import { ApiError, getCatalog, getLeaderboard } from '../services/factorResearchService';
 import type { FactorDataset, RangeParams } from '../services/factorResearchService';
@@ -24,9 +24,8 @@ import { ScreeningTab } from '../components/ScreeningTab';
 import { SnapshotPanel } from '../components/SnapshotPanel';
 import { FactorReportPanel } from '../components/factor-report/FactorReportPanel';
 import { EvalCenterPanel } from '../components/eval-center/EvalCenterPanel';
-import { StrategyTemplateGallery } from '../components/template-gallery/StrategyTemplateGallery';
 
-type Tab = 'leaderboard' | 'single' | 'compare' | 'compose' | 'screening' | 'factor-report' | 'templates' | 'eval';
+type Tab = 'leaderboard' | 'single' | 'compare' | 'compose' | 'screening' | 'factor-report' | 'eval';
 
 const TABS: Array<{ key: Tab; label: string; icon: React.ComponentType<{ className?: string }> }> = [
   { key: 'leaderboard', label: '排行榜', icon: BarChart3 },
@@ -35,12 +34,11 @@ const TABS: Array<{ key: Tab; label: string; icon: React.ComponentType<{ classNa
   { key: 'compose', label: '多因子合成', icon: Layers },
   { key: 'screening', label: '筛选', icon: Filter },
   { key: 'factor-report', label: '因子报告', icon: LineChart },
-  { key: 'templates', label: '策略模板', icon: LibraryBig },
   { key: 'eval', label: '评估中心', icon: Award },
 ];
 
 /** 工具页签：不依赖因子目录/区间工具条，整页全宽渲染 */
-const TOOL_TABS: Tab[] = ['factor-report', 'templates', 'eval'];
+const TOOL_TABS: Tab[] = ['factor-report', 'eval'];
 const isToolTab = (t: Tab): boolean => TOOL_TABS.includes(t);
 const isValidTab = (v: string | null): v is Tab => TABS.some((t) => t.key === v);
 
@@ -175,7 +173,7 @@ const FactorResearchPage: React.FC = () => {
             <div className="flex items-center gap-2.5 ml-1 min-w-0">
               <h1 className="text-xl font-bold text-slate-800 tracking-tight">因子研究</h1>
               <div className="h-4 w-[1px] bg-slate-200 self-center shrink-0" />
-              <span className="text-sm font-medium text-slate-500 truncate">因子排行榜 · 单因子体检 · 对比 · 合成 · 因子报告 · 策略模板 · 评估中心</span>
+              <span className="text-sm font-medium text-slate-500 truncate">因子排行榜 · 单因子体检 · 对比 · 合成 · 因子报告 · 评估中心</span>
             </div>
           </div>
           <div className="flex items-center gap-2 shrink-0">
@@ -212,7 +210,7 @@ const FactorResearchPage: React.FC = () => {
           </div>
         </header>
 
-        {/* 工具页签：整页全宽（原技能中心的因子报告/策略模板/评估中心） */}
+        {/* 工具页签：整页全宽（原技能中心的因子报告/评估中心） */}
         {isTool && tab === 'factor-report' && (
           <div className="flex-1 min-h-0 min-w-0 overflow-hidden">
             <FactorReportPanel />
@@ -221,7 +219,7 @@ const FactorResearchPage: React.FC = () => {
 
         {isTool && tab !== 'factor-report' && (
           <div className="flex-1 min-h-0 min-w-0 overflow-y-auto p-4">
-            {tab === 'templates' ? <StrategyTemplateGallery /> : <EvalCenterPanel />}
+            <EvalCenterPanel />
           </div>
         )}
 

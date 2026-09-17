@@ -8,9 +8,9 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useDispatch } from 'react-redux';
-import { setCurrentTab } from '../../../../store/slices/aiStrategySlice';
+import { setCurrentTab } from '../../../store/slices/aiStrategySlice';
 import { BookOpen, ChevronDown, Play, RefreshCw, Search } from 'lucide-react';
-import { strategyTemplateService } from '../../../strategy-wizard/services/strategyTemplateService';
+import { strategyTemplateService } from '../../../features/strategy-wizard/services/strategyTemplateService';
 import {
   difficultyLabel,
   filterTemplates,
@@ -77,7 +77,7 @@ export const StrategyTemplateGallery: React.FC = () => {
     // 模板经后端 _perform_sync 自动镜像进"个人中心"（去重键 parameters.strategy_type=模板 id）
     // → 走回测中心已支持的"个人中心策略"预选机制（选中即为该模板策略）
     try {
-      const { strategyManagementService } = await import('../../../../services/strategyManagementService');
+      const { strategyManagementService } = await import('../../../services/strategyManagementService');
       const items = await strategyManagementService.loadStrategies(undefined, undefined);
       const match = (items || []).find(
         (s: { parameters?: { strategy_type?: string } }) =>
@@ -177,7 +177,7 @@ export const StrategyTemplateGallery: React.FC = () => {
           无匹配模板——调整筛选或关键词
         </div>
       ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+        <div className="grid grid-cols-1 gap-3">
           {filtered.map((t) => (
             <div key={t.id} className="rounded-2xl border border-gray-200 bg-white p-4 flex flex-col">
               <div className="flex items-start justify-between gap-2">

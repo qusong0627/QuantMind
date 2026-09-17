@@ -12,6 +12,7 @@ import { motion } from 'framer-motion';
 import {
   Zap,
   Code2,
+  SquareTerminal,
   History,
   GitCompare,
   Settings,
@@ -31,6 +32,13 @@ interface Module {
 }
 
 const modules: Module[] = [
+  {
+    id: 'strategy-editor',
+    name: '策略编辑',
+    icon: SquareTerminal,
+    color: 'text-emerald-400',
+    description: 'AI-IDE 策略工作台：编写 / 调试 / 一键回测'
+  },
   {
     id: 'quick-backtest',
     name: '快速回测',

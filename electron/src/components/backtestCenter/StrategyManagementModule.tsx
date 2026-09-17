@@ -28,6 +28,7 @@ import {
     Lock,
 } from 'lucide-react';
 import { EvalScoreBadge } from '../shared/EvalScoreBadge';
+import { StrategyTemplateGallery } from './template-gallery/StrategyTemplateGallery';
 import { useUiMode } from '../../features/shared/useUiMode';
 import { message, Modal, Popover } from 'antd';
 import { PromotionGateCard } from '../shared/PromotionGateCard';
@@ -187,8 +188,10 @@ export const StrategyManagementModule: React.FC = () => {
             initial={{ opacity: 0, y: 8 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.25 }}
-            className="h-full flex flex-col bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden"
+            className="h-full"
         >
+            <div className="h-full flex gap-4">
+            <div className="flex-1 min-w-0 h-full flex flex-col bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
             <div className="px-6 py-4 border-b border-gray-200">
                 <div className="flex items-center justify-between mb-4">
                     <div>
@@ -307,6 +310,15 @@ export const StrategyManagementModule: React.FC = () => {
                         ))}
                     </div>
                 )}
+            </div>
+            </div>
+
+            {/* 右侧：策略模板库（T-FE-11，2026-09-17 自因子研究迁入）——选中模板「立即回测」到回测页自动选中 */}
+            <div className="w-[380px] xl:w-[430px] shrink-0 h-full flex flex-col bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
+                <div className="flex-1 min-h-0 overflow-y-auto px-5 py-4">
+                    <StrategyTemplateGallery />
+                </div>
+            </div>
             </div>
 
             {/* T-FE-18：删除属于危险动作——统一后果文案确认卡 */}
