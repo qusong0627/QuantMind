@@ -162,12 +162,13 @@ class RealtimeInferenceService:
 
     def _default_hot_set(self) -> list[str]:
         from backend.shared.remote_quote_config import make_sync_client
+        from backend.shared.tdx_aidata import config as tdx_config
 
         client = make_sync_client()
         if client is None:
             return []
         try:
-            return sorted(client.smembers("qm:hot_set:symbols") or [])
+            return sorted(client.smembers(tdx_config.hot_set_key()) or [])
         finally:
             try:
                 client.close()

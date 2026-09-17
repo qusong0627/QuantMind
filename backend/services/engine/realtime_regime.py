@@ -194,7 +194,9 @@ class RealtimeRegimeService:
         if client is None:
             return None
         try:
-            hot = sorted(client.smembers("qm:hot_set:symbols") or [])
+            from backend.shared.tdx_aidata import config as tdx_config
+
+            hot = sorted(client.smembers(tdx_config.hot_set_key()) or [])
             if not hot:
                 return None
             up = down = flat = 0

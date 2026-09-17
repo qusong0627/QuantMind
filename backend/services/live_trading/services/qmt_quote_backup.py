@@ -37,7 +37,11 @@ logger = logging.getLogger(__name__)
 CST = timezone(timedelta(hours=8))
 CONFIG_KEY = "qm:qmt:quote:backup:config"
 STATUS_KEY = "qm:qmt:quote:backup:status"
-HOT_SET_KEY = "qm:hot_set:symbols"
+def _hot_set_key() -> str:
+    """热集键单一事实源（``QM_HOT_SET_KEY`` 可隔离；与订阅 worker 同键）。"""
+    from backend.shared.tdx_aidata import config as tdx_config
+
+    return tdx_config.hot_set_key()
 BACKUP_SOURCE = "qmt_big"
 BACKUP_LATENCY_STAGE = "market_snapshot_qmt"
 SNAPSHOT_TTL = 300
@@ -314,7 +318,7 @@ class QmtQuoteBackupService:
         if client is None:
             return []
         try:
-            return sorted(client.smembers(HOT_SET_KEY) or [])
+            return sorted(client.smembers(_hot_set_key()) or [])
         finally:
             try:
                 client.close()

@@ -179,12 +179,19 @@ def collect_shards() -> dict[str, Any] | None:
         return None
 
 
+def _hot_set_key() -> str:
+    """热集键单一事实源（env ``QM_HOT_SET_KEY`` 可隔离；与 builder/worker 同键）。"""
+    from backend.shared.tdx_aidata import config as tdx_config
+
+    return tdx_config.hot_set_key()
+
+
 def collect_landing(sample: int) -> dict[str, Any]:
     r = _remote_redis()
     if r is None:
         return {"readable": False}
     try:
-        hot = sorted(r.smembers("qm:hot_set:symbols") or [])
+        hot = sorted(r.smembers(_hot_set_key()) or [])
         if not hot:
             return {"readable": True, "hot": 0, "sampled": 0, "fresh": 0, "rate": None}
         step = max(1, len(hot) // sample)
@@ -247,7 +254,7 @@ def collect_cadence(sample: int, series_len: int) -> dict[str, Any]:
     if r is None:
         return {"p95_s": None, "n_symbols": 0}
     try:
-        hot = sorted(r.smembers("qm:hot_set:symbols") or [])
+        hot = sorted(r.smembers(_hot_set_key()) or [])
         if not hot:
             return {"p95_s": None, "n_symbols": 0}
         step = max(1, len(hot) // sample)
