@@ -65,39 +65,40 @@ export const PositionVisualBoard: React.FC<{
     return kw ? arr.filter((h) => (h.name || '').toLowerCase().includes(kw) || h.code.toLowerCase().includes(kw)) : arr;
   }, [holdings, sortKey, q]);
 
-  // —— 图表①：市值 Treemap（面积=市值，颜色=盈亏） ——
-  const treemapOption = useMemo(
-    () => ({
-      tooltip: {
-        formatter: (info: { name: string; value: number }) => {
-          const h = holdings.find((x) => (x.name || x.code) === info.name);
-          if (!h) return info.name;
-          return `${h.name}（${h.code}）<br/>市值 ${fmtMoney(h.value)} · 占比 ${((h.value / base) * 100).toFixed(1)}%<br/>盈亏 ${h.profit > 0 ? '+' : ''}${fmtMoney(h.profit)}（${fmtRowPct(h.profitPercent)}）`;
-        },
-      },
-      series: [
-        {
-          type: 'treemap',
-          roam: false,
-          nodeClick: false,
-          breadcrumb: { show: false },
-          width: '100%',
-          height: '100%',
-          label: { show: true, fontSize: 10, color: '#fff', overflow: 'truncate' },
-          upperLabel: { show: false },
-          itemStyle: { borderColor: '#ffffff', borderWidth: 1.5, gapWidth: 1 },
-          data: sorted
-            .filter((h) => h.value > 0)
-            .map((h) => ({
-              name: h.name || h.code,
-              value: Math.round(h.value),
-              itemStyle: { color: tileColor(h.profit, h.profitPercent) },
-            })),
-        },
-      ],
-    }),
-    [sorted, holdings, base],
-  );
+  // —— 图表①：市值分布货架马赛克（自绘：两行货架，块宽=占比，大块在上，小块归并） ——
+  const shelves = useMemo(() => {
+    const items = [...holdings].sort((a, b) => b.value - a.value);
+    const total = items.reduce((sum, h) => sum + Math.max(h.value, 0), 0) || 1;
+    // 第一行：市值最大的块，累计占比 ≥ 55% 截止（至少 2 块、至多 5 块）
+    const row1: NormalizedHolding[] = [];
+    let cum = 0;
+    for (const h of items) {
+      if (row1.length >= 5 || (row1.length >= 2 && cum / total >= 0.55)) break;
+      row1.push(h);
+      cum += Math.max(h.value, 0);
+    }
+    const rest = items.slice(row1.length);
+    // 第二行：占比 ≥ 1.2% 的逐块展示；更小的归并「其余 N 只」
+    const row2 = rest.filter((h) => Math.max(h.value, 0) / total >= 0.012);
+    const tail = rest.slice(row2.length);
+    const tailValue = tail.reduce((sum, h) => sum + Math.max(h.value, 0), 0);
+    return { row1, row2, tail, tailValue, total };
+  }, [holdings]);
+
+  const mosaicTile = (h: NormalizedHolding, key: string) => {
+    const share = Math.max(h.value, 0) / shelves.total;
+    return (
+      <div
+        key={key}
+        title={`${h.name}（${h.code}）\n市值 ${fmtMoney(h.value)} · 占比 ${(share * 100).toFixed(1)}%\n盈亏 ${h.profit > 0 ? '+' : ''}${fmtMoney(h.profit)}（${fmtRowPct(h.profitPercent)}）`}
+        style={{ flexGrow: Math.max(share, 0.004), flexBasis: 0, backgroundColor: tileColor(h.profit, h.profitPercent) }}
+        className="min-w-[30px] h-full rounded-md px-1.5 py-1 overflow-hidden cursor-default transition-transform hover:scale-[1.015]"
+      >
+        <div className="truncate text-[10px] font-bold text-white/95 leading-3.5">{(h.name || h.code).slice(0, 5)}</div>
+        <div className="truncate font-mono text-[9px] text-white/80 leading-3">{(share * 100).toFixed(1)}%</div>
+      </div>
+    );
+  };
 
   // —— 图表②：盈亏贡献 Top12（横向柱，红正绿负） ——
   const contribOption = useMemo(() => {
@@ -185,28 +186,11 @@ export const PositionVisualBoard: React.FC<{
         </div>
       </div>
 
-      {/* ② 图表行：市值 Treemap + 盈亏贡献 */}
-      <div className="shrink-0 grid grid-cols-1 lg:grid-cols-2 gap-2 px-4 pt-2 pb-1 border-b border-slate-100">
-        <div className="min-w-0">
-          <div className="mb-0.5 text-[10px] font-bold text-slate-400" title="块面积=持仓市值，颜色=盈亏（红涨绿跌，越深幅度越大）">
-            市值分布
-          </div>
-          <ReactECharts option={treemapOption} style={{ height: 150 }} notMerge />
-        </div>
-        <div className="min-w-0">
-          <div className="mb-0.5 text-[10px] font-bold text-slate-400" title="盈亏金额绝对值 Top12（红=盈利、绿=亏损）">
-            盈亏贡献 Top12
-          </div>
-          {holdings.some((h) => h.profit !== 0) ? (
-            <ReactECharts option={contribOption} style={{ height: 150 }} notMerge />
-          ) : (
-            <div className="flex h-[150px] items-center justify-center text-[11px] text-slate-300">暂无盈亏数据</div>
-          )}
-        </div>
-      </div>
-
-      {/* ③ 明细工具行：排序 + 过滤 */}
-      <div className="shrink-0 flex items-center gap-2 px-4 pt-2 pb-1">
+      {/* ② 主体两栏：左=明细列表，右=图表（市值分布 + 盈亏贡献） */}
+      <div className="flex-1 min-h-0 flex flex-col lg:flex-row gap-2 px-3 pt-1.5 pb-2">
+        {/* 左栏：工具行 + 明细列表 */}
+        <div className="flex-1 min-w-0 min-h-0 flex flex-col">
+        <div className="shrink-0 flex items-center gap-2 pb-1">
         <div className="grid grid-cols-[minmax(0,1.3fr)_minmax(0,2.2fr)_minmax(0,1fr)_minmax(0,1.1fr)] items-center gap-3 flex-1 text-[10px] font-bold text-slate-400">
           <span>股票</span>
           <span title="条宽 = 个股市值 ÷ 持仓总市值（红涨绿跌）">市值占比</span>
@@ -277,6 +261,53 @@ export const PositionVisualBoard: React.FC<{
             {holdings.length === 0 ? '暂无持仓数据' : '无匹配持仓'}
           </div>
         )}
+        </div>
+        </div>
+
+        {/* 右栏：图表（上下两块，各占一半高） */}
+        <div className="w-full lg:w-[430px] xl:w-[470px] shrink-0 min-h-0 flex flex-col gap-2">
+          <div className="flex-1 min-h-[170px] rounded-xl border border-slate-100 bg-slate-50/20 p-2 flex flex-col">
+            <div className="mb-1 text-[10px] font-bold text-slate-400" title="货架马赛克：块宽=持仓市值占比（两行按市值降序），颜色=盈亏（红涨绿跌，越深幅度越大）；小块归并「其余」">
+              市值分布
+            </div>
+            {holdings.length > 0 ? (
+              <div className="flex flex-1 min-h-0 flex-col gap-1">
+                <div className="flex flex-1 gap-1 min-h-0">{shelves.row1.map((h) => mosaicTile(h, h.code))}</div>
+                {(shelves.row2.length > 0 || shelves.tail.length > 0) && (
+                  <div className="flex flex-1 gap-1 min-h-0">
+                    {shelves.row2.map((h) => mosaicTile(h, h.code))}
+                    {shelves.tail.length > 0 && (
+                      <div
+                        title={`其余 ${shelves.tail.length} 只（合计占比 ${((shelves.tailValue / shelves.total) * 100).toFixed(1)}%）\n${shelves.tail.map((h) => h.name || h.code).join('、')}`}
+                        style={{ flexGrow: Math.max(shelves.tailValue / shelves.total, 0.06), flexBasis: 0 }}
+                        className="min-w-[30px] h-full rounded-md bg-slate-200 px-1.5 py-1 overflow-hidden cursor-default"
+                      >
+                        <div className="truncate text-[10px] font-bold text-slate-600 leading-3.5">其余 {shelves.tail.length} 只</div>
+                        <div className="truncate font-mono text-[9px] text-slate-500 leading-3">
+                          {((shelves.tailValue / shelves.total) * 100).toFixed(1)}%
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="flex flex-1 items-center justify-center text-[11px] text-slate-300">暂无持仓</div>
+            )}
+          </div>
+          <div className="flex-1 min-h-[170px] rounded-xl border border-slate-100 bg-slate-50/20 p-2 flex flex-col">
+            <div className="mb-1 text-[10px] font-bold text-slate-400" title="盈亏金额绝对值 Top12（红=盈利、绿=亏损）">
+              盈亏贡献 Top12
+            </div>
+            {holdings.some((h) => h.profit !== 0) ? (
+              <div className="flex-1 min-h-0">
+                <ReactECharts option={contribOption} style={{ height: '100%' }} notMerge />
+              </div>
+            ) : (
+              <div className="flex flex-1 items-center justify-center text-[11px] text-slate-300">暂无盈亏数据</div>
+            )}
+          </div>
+        </div>
       </div>
     </div>
   );
