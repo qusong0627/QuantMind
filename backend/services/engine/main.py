@@ -119,6 +119,18 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"⚠️ RealtimeRegime startup skipped: {e}")
 
+    # 启动识别引擎（P6 T-P6-14；Redis 配置门控默认关；含异动类型契约自愈）
+    try:
+        from backend.shared.anomaly_contract import ensure_anomaly_types
+
+        await asyncio.to_thread(ensure_anomaly_types)
+        from backend.services.engine.anomaly_engine import default_service as anomaly_service
+
+        anomaly_service().start()
+        logger.info("✅ AnomalyEngine service loop created (active if qm:engine:anomaly:config.enabled=true)")
+    except Exception as e:
+        logger.warning(f"⚠️ AnomalyEngine startup skipped: {e}")
+
     # 启动预热向量解析/字段检索（2026-05-03：暂时关闭强制预热以加快启动速度）
     warmup_enabled = os.getenv("AI_STRATEGY_WARMUP", "false").strip().lower() not in ("0", "false", "no", "off")
     if warmup_enabled:

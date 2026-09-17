@@ -122,9 +122,16 @@ class HotSetBuilder:
         except Exception as exc:  # noqa: BLE001
             return [], f"候选采集失败: {exc}"
 
+    ANOMALY_POOL_MAX = 100  # 异动池并入热集的条数上限（防单轮异动风暴挤占候选）
+
     def _collect_anomalies(self) -> tuple[list[str], str | None]:
-        """异动池：T-P6-14 识别引擎接线位（现为空）。"""
-        return [], None
+        """异动池：读识别引擎（T-P6-14）近 1h 异动标的（有界；读失败隔离为告警不阻断）。"""
+        try:
+            from backend.shared.anomaly_contract import read_recent_anomaly_symbols
+
+            return read_recent_anomaly_symbols(limit=self.ANOMALY_POOL_MAX)[: self.ANOMALY_POOL_MAX], None
+        except Exception as exc:  # noqa: BLE001 - 异动源失败不阻断构建
+            return [], f"异动池采集失败: {exc}"
 
     # ── 构建与写入 ──────────────────────────────────────────────────
 

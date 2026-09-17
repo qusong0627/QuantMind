@@ -134,6 +134,14 @@ async def realtime_regime_status():
     return {"ok": True, "data": default_service().status()}
 
 
+@router.get("/realtime/anomaly/status")
+async def anomaly_engine_status():
+    """识别引擎状态（T-P6-14）：配置/计数器/近 1h 异动标的（只读）。"""
+    from backend.services.engine.anomaly_engine import default_service
+
+    return {"ok": True, "data": default_service().status()}
+
+
 @router.post("/runs/{run_id}/feature-ready")
 async def mark_feature_ready(run_id: str, payload: FeatureReadyRequest):
     sql = text("""

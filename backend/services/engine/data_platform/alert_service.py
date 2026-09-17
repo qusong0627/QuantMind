@@ -175,20 +175,10 @@ class DataAlertService:
 
 # ---------------------------------------------------------------------------
 def _resolve_db_url() -> str:
-    raw = os.getenv("DATABASE_URL", "").strip()
-    if raw:
-        if "asyncpg" in raw:
-            return raw.replace("asyncpg", "psycopg2")
-        if raw.startswith("postgresql://"):
-            return raw.replace("postgresql://", "postgresql+psycopg2://", 1)
-        return raw
-    from urllib.parse import quote_plus as _q
-    host = os.getenv("DB_MASTER_HOST", "quantmind-db")
-    port = os.getenv("DB_MASTER_PORT", "5432")
-    user = os.getenv("DB_USER", "quantmind")
-    pwd = _q(os.getenv("DB_PASSWORD", "quantmind"))
-    name = os.getenv("DB_NAME", "quantmind")
-    return f"postgresql+psycopg2://{user}:{pwd}@{host}:{port}/{name}"
+    """同步 URL：委托 ``backend.shared.sync_db`` 唯一事实源（2026-09-17 收敛）。"""
+    from backend.shared.sync_db import resolve_sync_db_url
+
+    return resolve_sync_db_url()
 
 
 # ---------------------------------------------------------------------------
