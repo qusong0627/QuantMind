@@ -33,10 +33,16 @@ const US_THEME: TerminalTheme = {
   klineNote: '未复权原始价 · 橙色竖线为拆股日',
 };
 
-export default function StockTerminalPage() {
+export default function StockTerminalPage({
+  initialSymbol,
+  bottomReserve,
+}: {
+  initialSymbol?: string;
+  bottomReserve?: number;
+}) {
   return (
     <StockTerminalProvider market="US" theme={US_THEME} service={stockTerminalService}>
-      <StockTerminalShell renderDetail={(ctx) => <UsDetailBody symbol={ctx.symbol} />} />
+      <StockTerminalShell initialSymbol={initialSymbol} bottomReserve={bottomReserve} renderDetail={(ctx) => <UsDetailBody symbol={ctx.symbol} />} />
     </StockTerminalProvider>
   );
 }

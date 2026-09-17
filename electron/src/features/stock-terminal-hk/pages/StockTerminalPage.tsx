@@ -39,10 +39,18 @@ const HK_THEME: TerminalTheme = {
   defaultAdjust: 'qfq',
 };
 
-export default function StockTerminalPage() {
+export default function StockTerminalPage({
+  initialSymbol,
+  bottomReserve,
+}: {
+  initialSymbol?: string;
+  bottomReserve?: number;
+}) {
   return (
     <StockTerminalProvider market="HK" theme={HK_THEME} config={HK_CONFIG} toWatchSymbol={toPrefix}>
       <StockTerminalShell
+        initialSymbol={initialSymbol}
+        bottomReserve={bottomReserve}
         renderDetail={(ctx) => <HkDetailBody symbol={ctx.symbol} name={ctx.name} close={ctx.close ?? undefined} />}
       />
     </StockTerminalProvider>

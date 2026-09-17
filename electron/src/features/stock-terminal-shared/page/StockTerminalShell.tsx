@@ -174,7 +174,7 @@ export default function StockTerminalShell({ renderDetail, renderHeaderExtra, re
     (async () => {
       const normalize = (s: string) => s.replace(/[^0-9A-Za-z]/g, '').toUpperCase();
       const queries = [code];
-      const bare = code.replace(/^(SH|SZ|BJ)/i, '').replace(/\.(SH|SZ|BJ)$/i, '');
+      const bare = code.replace(/^(SH|SZ|BJ)/i, '').replace(/\.(SH|SZ|BJ|HK)$/i, '');
       if (bare !== code) queries.push(bare);
       for (const q of queries) {
         let resp;

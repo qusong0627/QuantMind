@@ -1,19 +1,47 @@
 /**
- * 个股终端浮窗（市场分析顶栏搜索联动）——无遮罩浮动窗口：
- * - 拖动标题栏移动、右下角手柄缩放（最小 900×560，钳制在视口内）；
- * - 最大化/还原、最小化到右下悬浮条（点击恢复，可一边看盘一边留着）；
- * - 不带遮罩，背后页面可继续操作。
- * 内容复用个股终端（CN）页面 + initialSymbol 自动选中；懒加载 + 关闭即卸载。
+ * 个股终端浮窗（三市场共用）——市场分析页顶栏搜索联动的弹窗载体。
+ *
+ * 无遮罩可拖拽窗口：标题栏拖动 / 右下角缩放（最小 900×560、视口钳制）/
+ * 最大化-还原 / 最小化到右下悬浮条（随时恢复，背后页面可继续操作）。
+ * 终端页按 market 懒加载（首次打开才载入 chunk；`prefetchTerminal` 供搜索框预取）。
  */
 import React, { Suspense, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { CandlestickChart, Maximize2, Minimize2, RotateCcw, X } from 'lucide-react';
 
-const StockTerminalPage = React.lazy(() => import('../../stock-terminal/pages/StockTerminalPage'));
+export type TerminalMarket = 'CN' | 'HK' | 'US';
 
-interface StockTerminalModalProps {
+type TerminalPageProps = { initialSymbol?: string; bottomReserve?: number };
+type TerminalPageComponent = React.ComponentType<TerminalPageProps>;
+
+const PAGE_IMPORTS: Record<TerminalMarket, () => Promise<{ default: TerminalPageComponent }>> = {
+  CN: () => import('../../stock-terminal/pages/StockTerminalPage'),
+  HK: () => import('../../stock-terminal-hk/pages/StockTerminalPage'),
+  US: () => import('../../stock-terminal-us/pages/StockTerminalPage'),
+};
+
+const LAZY_PAGES: Record<TerminalMarket, React.LazyExoticComponent<TerminalPageComponent>> = {
+  CN: React.lazy(PAGE_IMPORTS.CN),
+  HK: React.lazy(PAGE_IMPORTS.HK),
+  US: React.lazy(PAGE_IMPORTS.US),
+};
+
+/** 预取终端代码包（搜索框聚焦/输入时调用，消除点选后 2-3s 懒加载等待） */
+export function prefetchTerminal(market: TerminalMarket): void {
+  void PAGE_IMPORTS[market]().catch(() => {});
+}
+
+/** 代码展示口径：CN 600519.SH → SH600519（前端前缀式）；港/美按原格式 */
+export function formatTerminalSymbol(market: TerminalMarket, symbol: string): string {
+  if (market !== 'CN') return symbol;
+  const m = symbol.match(/^(\d{6})\.(SH|SZ|BJ)$/i);
+  return m ? `${m[2].toUpperCase()}${m[1]}` : symbol;
+}
+
+interface StockTerminalWindowProps {
   open: boolean;
   symbol: string | null;
+  market: TerminalMarket;
   onClose: () => void;
 }
 
@@ -26,12 +54,6 @@ interface Rect {
 
 const MIN_W = 900;
 const MIN_H = 560;
-
-/** 300857.SZ → SZ300857（前端展示口径；传入终端的仍是原始 symbol） */
-const displaySymbol = (s: string): string => {
-  const m = s.match(/^(\d{6})\.(SH|SZ|BJ)$/i);
-  return m ? `${m[2].toUpperCase()}${m[1]}` : s;
-};
 
 function defaultRect(): Rect {
   const vw = window.innerWidth;
@@ -46,7 +68,7 @@ function defaultRect(): Rect {
   };
 }
 
-export const StockTerminalModal: React.FC<StockTerminalModalProps> = ({ open, symbol, onClose }) => {
+export const StockTerminalWindow: React.FC<StockTerminalWindowProps> = ({ open, symbol, market, onClose }) => {
   const [rect, setRect] = useState<Rect>(() => defaultRect());
   const [maximized, setMaximized] = useState(false);
   const [minimized, setMinimized] = useState(false);
@@ -59,9 +81,12 @@ export const StockTerminalModal: React.FC<StockTerminalModalProps> = ({ open, sy
     setRect(defaultRect());
     setMaximized(false);
     setMinimized(false);
-  }, [open, symbol]);
+  }, [open, symbol, market]);
 
   if (!open || !symbol) return null;
+
+  const Page = LAZY_PAGES[market];
+  const shown = formatTerminalSymbol(market, symbol);
 
   const startDrag = (mode: 'move' | 'resize') => (e: React.MouseEvent) => {
     if (maximized) return;
@@ -127,7 +152,7 @@ export const StockTerminalModal: React.FC<StockTerminalModalProps> = ({ open, sy
               <CandlestickChart className="w-3 h-3 text-white" />
             </span>
             个股终端
-            <span className="font-mono text-slate-500">{displaySymbol(symbol)}</span>
+            <span className="font-mono text-slate-500">{shown}</span>
           </button>
           <button
             type="button"
@@ -153,7 +178,7 @@ export const StockTerminalModal: React.FC<StockTerminalModalProps> = ({ open, sy
               <CandlestickChart className="w-3.5 h-3.5 text-white" />
             </div>
             <span className="text-sm font-bold text-slate-800 tracking-tight">个股终端</span>
-            <span className="text-[11px] font-mono font-bold text-slate-500 bg-slate-100 px-2 py-0.5 rounded">{displaySymbol(symbol)}</span>
+            <span className="text-[11px] font-mono font-bold text-slate-500 bg-slate-100 px-2 py-0.5 rounded">{shown}</span>
             <div className="ml-auto flex items-center gap-0.5" onMouseDown={(e) => e.stopPropagation()}>
               <button type="button" onClick={toggleMaximize} className={chromeBtn} title={maximized ? '还原' : '最大化'}>
                 {maximized ? <RotateCcw className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
@@ -167,7 +192,7 @@ export const StockTerminalModal: React.FC<StockTerminalModalProps> = ({ open, sy
             </div>
           </div>
 
-          {/* 主体：个股终端（CN）；浮窗内无 Dock 遮挡，缩小底部预留 */}
+          {/* 主体：个股终端（按市场懒加载）；浮窗内无 Dock 遮挡，缩小底部预留 */}
           <div className="flex-1 min-h-0 overflow-hidden bg-[#f8fafc]">
             <Suspense
               fallback={
@@ -176,7 +201,7 @@ export const StockTerminalModal: React.FC<StockTerminalModalProps> = ({ open, sy
                 </div>
               }
             >
-              <StockTerminalPage initialSymbol={symbol} bottomReserve={12} />
+              <Page initialSymbol={symbol} bottomReserve={12} />
             </Suspense>
           </div>
 
@@ -199,4 +224,4 @@ export const StockTerminalModal: React.FC<StockTerminalModalProps> = ({ open, sy
   );
 };
 
-export default StockTerminalModal;
+export default StockTerminalWindow;

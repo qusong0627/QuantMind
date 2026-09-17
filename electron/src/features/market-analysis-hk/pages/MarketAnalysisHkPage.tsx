@@ -22,6 +22,7 @@ import { HkRotationPanel } from '../components/HkRotationPanel';
 import { HkSectorValuationPanel } from '../components/HkSectorValuationPanel';
 import { HkAhPanel } from '../components/HkAhPanel';
 import { HkInstitutionalPanel } from '../components/HkInstitutionalPanel';
+import { StockTerminalSearchBox } from '../../market-analysis-shared/components/StockTerminalSearchBox';
 import {
   getBreadth, getHeatmap, getIndicesOverview, getStatus, refreshMarket,
 } from '../services/api';
@@ -110,6 +111,8 @@ export const MarketAnalysisHkPage: React.FC = () => {
           <h1 className="text-base font-extrabold tracking-tight bg-gradient-to-r from-indigo-950 via-sky-900 to-slate-900 bg-clip-text text-transparent whitespace-nowrap">
             港股市场多维分析与资金穿透
           </h1>
+          {/* 个股搜索：选中 → 弹出港股个股终端浮窗 */}
+          <StockTerminalSearchBox market="HK" accent="indigo" />
         </div>
 
         <div className="flex items-center gap-2.5 flex-shrink-0">
