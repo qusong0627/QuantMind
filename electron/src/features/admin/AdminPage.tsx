@@ -69,15 +69,17 @@ const AdminPage: React.FC = () => {
             ]
         },
         { type: 'divider' as const },
-        { 
-            key: 'trade-service', 
-            icon: <SwapOutlined />, 
-            label: '交易核心', 
+        {
+            key: 'trade-service',
+            icon: <SwapOutlined />,
+            label: '交易核心',
             children: [
                 { key: 'orders', label: '订单管理' },
                 { key: 'risk', label: '风险控制' },
             ]
         },
+        // 个人中心：入口由底部栏移入后台（独立页面 /user-center，非 /admin 子路由）
+        { key: 'profile', icon: <UserOutlined />, label: '个人中心' },
         { key: 'settings', icon: <SettingOutlined />, label: '系统设置' },
     ];
 
@@ -103,7 +105,11 @@ const AdminPage: React.FC = () => {
                     <Menu
                         mode="inline"
                         selectedKeys={[currentKey]}
-                        onClick={({ key }) => navigate(`/admin/${key}`)}
+                        onClick={({ key }) => {
+                            // 个人中心打开独立页面（与其在后台的其它引用一致，见 AdminQuantDBPanel 的跳转先例）
+                            if (key === 'profile') { navigate('/user-center'); return; }
+                            navigate(`/admin/${key}`);
+                        }}
                         className="border-none admin-menu-modern"
                         items={menuItems}
                         inlineCollapsed={collapsed}

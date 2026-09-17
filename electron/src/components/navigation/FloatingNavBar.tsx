@@ -3,7 +3,6 @@ import {
   ArrowLeftRight,
   Boxes,
   Layers,
-  CircleUserRound,
   FlaskConical,
   LayoutDashboard,
   Orbit,
@@ -58,8 +57,6 @@ export const FloatingNavBar: React.FC<FloatingNavBarProps> = ({ current, onChang
     { id: 'alpha-research', label: '因子挖掘', icon: TestTube2 },
     { id: 'factor-research', label: '因子研究', icon: Sigma },
     { id: 'agent', label: 'QuantBot', icon: Orbit },
-    // 5. 个人中心
-    { id: 'profile', label: '个人中心', icon: CircleUserRound }
   ];
 
   if (isAdmin) {
@@ -75,8 +72,8 @@ export const FloatingNavBar: React.FC<FloatingNavBarProps> = ({ current, onChang
     navItems.filter((item) => ['model-training', 'model-registry', 'inference-center'].includes(item.id)),
     // 4. 智能投研区域
     navItems.filter((item) => ['research', 'alpha-research', 'factor-research', 'agent'].includes(item.id)),
-    // 5. 个人与系统组
-    navItems.filter((item) => ['profile', 'admin'].includes(item.id))
+    // 5. 个人与系统组（个人中心已移入后台管理，底部栏不再占据）
+    navItems.filter((item) => ['admin'].includes(item.id))
   ].filter((group) => group.length > 0);
 
   return (
