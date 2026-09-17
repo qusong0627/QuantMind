@@ -61,6 +61,7 @@ hot_set_feed_status: dict = {
     "last_error": None,
     "bridge_ok": None,
     "l05": None,
+    "latency": None,
 }
 
 # ── L0.5 归档（T-P6-04 原料）：桥源席写标准键的成功快照同步喂归档器 ──────────────
@@ -143,6 +144,36 @@ def _flush_archiver_if_pending() -> None:
         _refresh_l05_status()
 
 
+# ── 时延打点（T-P6-05）：桥调用+写入耗时（stage=market_snapshot_bridge）───────────
+# 口径如实标注：桥的 get_market_snapshot 载荷无 tick 时间戳（3s 服务端缓存也不透传），
+# 无法测「行情源→本机」时延；本档记录**取数+写键**的处理耗时（P95 参考线：调用实测
+# p50≈11ms + Redis 写 <5ms）。
+BRIDGE_LATENCY_STAGE = "market_snapshot_bridge"
+_latency: Any | None = None
+
+
+def _ensure_latency() -> Any:
+    global _latency
+    if _latency is None:
+        from backend.shared.latency_metrics import LatencyRecorder
+
+        _latency = LatencyRecorder(BRIDGE_LATENCY_STAGE)
+        logger.info("[TdxHotSet] 时延打点开启 stage=%s", BRIDGE_LATENCY_STAGE)
+    return _latency
+
+
+def _latency_observe(elapsed_ms: float) -> None:
+    """记录一次处理耗时（打点关闭时静默 no-op；失败不阻断实时链）。"""
+    if str(os.getenv("QM_LATENCY_ENABLED", "true")).strip().lower() in {"0", "false", "no", "off"}:
+        return
+    try:
+        rec = _ensure_latency()
+        rec.observe(float(elapsed_ms))
+        rec.maybe_flush()
+    except Exception:  # noqa: BLE001 - 打点 best-effort
+        pass
+
+
 def load_hot_set_symbols() -> list[str]:
     """热集（本地 Redis，Qlib 后缀式）→ 排序列表；读失败返回空（下轮重试）。"""
     try:
@@ -214,6 +245,7 @@ async def run_tdx_hot_set_feed_task() -> None:
                 # 与持仓馈送 _write_snapshot 的入参口径一致——2026-09-17 实测键形状错）
                 suffix = StockCodeUtil.to_suffix(symbol) or symbol
                 prefix = StockCodeUtil.to_prefix(symbol) or symbol
+                call_t0 = time.monotonic()
                 try:
                     result = await tdx_pusher.tdx_call(
                         "get_market_snapshot", {"stock_code": suffix}
@@ -235,12 +267,18 @@ async def run_tdx_hot_set_feed_task() -> None:
                     hot_set_feed_status["last_feed_at"] = _now_sh().isoformat(timespec="seconds")
                     # L0.5 同源归档（写失败只计数不抛出，不阻断实时链）
                     _ensure_archiver().append(snapshot_l05_record(suffix, snap))
+                    _latency_observe((time.monotonic() - call_t0) * 1000.0)
                 else:
                     hot_set_feed_status["errors"] += 1
                 await asyncio.sleep(PACING_S)
 
             hot_set_feed_status["last_cycle_s"] = round(time.monotonic() - cycle_t0, 2)
             _refresh_l05_status()
+            if _latency is not None:
+                hot_set_feed_status["latency"] = {
+                    "stage": BRIDGE_LATENCY_STAGE,
+                    **_latency.counters,
+                }
             if rate_limited:
                 backoff = BACKOFF_START_S if backoff <= 0 else min(BACKOFF_MAX_S, backoff * 2)
                 hot_set_feed_status["rate_limited"] = True

@@ -163,3 +163,31 @@ def test_l05_archiver_roundtrip(tmp_path):
     assert float(row["bid1"]) == pytest.approx(40.59)
     assert int(row["bid_vol1"]) == 40
     assert str(row["source"]) == "tdx_bridge"
+
+
+@pytest.mark.unit
+def test_latency_observe_records_bridge_stage(monkeypatch):
+    """时延打点：桥源席走 stage=market_snapshot_bridge；关闭开关时静默 no-op。"""
+    from backend.services.live_trading.services import tdx_hot_set_feed as feed
+
+    recorded: list[float] = []
+
+    class _FakeRec:
+        counters = {"observed": 0}
+
+        def observe(self, ms):
+            recorded.append(ms)
+
+        def maybe_flush(self):
+            pass
+
+    monkeypatch.setenv("QM_LATENCY_ENABLED", "true")
+    monkeypatch.setattr(feed, "_latency", _FakeRec())
+    feed._latency_observe(12.5)
+    feed._latency_observe(31.0)
+    assert recorded == [12.5, 31.0]
+    assert feed.BRIDGE_LATENCY_STAGE == "market_snapshot_bridge"
+
+    monkeypatch.setenv("QM_LATENCY_ENABLED", "false")
+    feed._latency_observe(99.0)
+    assert recorded == [12.5, 31.0]  # 关闭后不再记录
