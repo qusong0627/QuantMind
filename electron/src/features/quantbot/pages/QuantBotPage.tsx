@@ -10,7 +10,7 @@
  */
 
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
-import { message } from 'antd';
+import { message, Popover } from 'antd';
 import { Lightbulb } from 'lucide-react';
 import { QUANTBOT_INTENTS } from '../intents/quantbotIntents';
 import { Bot, RefreshCw, Wifi, WifiOff, ExternalLink, AlertTriangle } from 'lucide-react';
@@ -77,7 +77,8 @@ async function copyText(text: string): Promise<boolean> {
 const QuantBotPage: React.FC = () => {
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const [iframeKey, setIframeKey] = useState<number>(0);
-  // T-FE-13：四类意图示例条（聊天宿主在 dsh iframe 内——示例一键复制、粘贴即用）；默认折叠
+  // T-FE-13：意图示例浮层（聊天宿主在 dsh iframe 内——示例一键复制、粘贴即用）；
+  // 点击按钮弹出 Popover 悬浮在 iframe 之上，不占用顶部/布局空间；默认关闭
   const [showIntents, setShowIntents] = useState(false);
   const [loading, setLoading] = useState<boolean>(true);
   const [connected, setConnected] = useState<boolean>(false);
@@ -160,15 +161,67 @@ const QuantBotPage: React.FC = () => {
             <Bot className="w-3.5 h-3.5 text-white" />
           </div>
           <span className="text-xs font-bold text-slate-800 tracking-tight">QuantBot · DSH</span>
-          <button
-            type="button"
-            onClick={() => setShowIntents(!showIntents)}
-            className="inline-flex items-center gap-1 text-[11px] font-semibold text-slate-500 hover:text-blue-600 transition-colors"
-            title="展开 / 收起四类意图示例"
+          <Popover
+            open={showIntents}
+            onOpenChange={setShowIntents}
+            trigger="click"
+            placement="bottomLeft"
+            arrow={false}
+            zIndex={1200}
+            styles={{ body: { padding: 0, borderRadius: 12, boxShadow: '0 12px 32px rgba(15, 23, 42, 0.14)' } }}
+            content={
+              <div className="w-[min(92vw,780px)] max-h-[62vh] overflow-y-auto">
+                <div className="flex items-center justify-between px-4 pt-3 pb-2 border-b border-slate-100">
+                  <p className="text-[11px] font-semibold text-slate-500">点击任一提示词复制 → 粘贴到下方对话框发送</p>
+                  <p className="text-[10px] text-slate-300">
+                    {QUANTBOT_INTENTS.reduce((n, it) => n + it.examples.length, 0)} 条示例 · 五类场景
+                  </p>
+                </div>
+                <div className="px-4">
+                  {QUANTBOT_INTENTS.map((intent) => (
+                    <div key={intent.key} className="flex items-start gap-3 py-2 border-b border-slate-50 last:border-b-0">
+                      <div className="w-[68px] flex-shrink-0 pt-0.5">
+                        <span className="text-[11px] font-bold text-slate-600">{intent.label}</span>
+                        <p className="text-[9px] leading-3 text-slate-300 mt-0.5">{intent.description}</p>
+                      </div>
+                      <div className="flex flex-wrap gap-1.5">
+                        {intent.examples.map((ex) => (
+                          <button
+                            key={ex.label}
+                            type="button"
+                            title={ex.prompt}
+                            onClick={async () => {
+                              const ok = await copyText(ex.prompt);
+                              if (ok) {
+                                message.success('已复制提示词——粘贴到下方对话框发送即可');
+                              } else {
+                                message.warning('复制失败（剪贴板不可用），请手动输入示例内容');
+                              }
+                            }}
+                            className="text-[10px] px-2 py-0.5 rounded-full border border-slate-200 bg-slate-50 text-slate-600 hover:bg-blue-50 hover:border-blue-200 hover:text-blue-700 transition-colors"
+                          >
+                            {ex.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                <p className="text-[10px] text-slate-400 px-4 py-2.5">
+                  写操作（下单 / 清仓 / 上实盘等）不由助手直达执行——一律在正式页面经二次确认后生效
+                </p>
+              </div>
+            }
           >
-            <Lightbulb className="w-3.5 h-3.5 text-amber-500" />
-            示例提示词 {showIntents ? '▾' : '▸'}
-          </button>
+            <button
+              type="button"
+              className="inline-flex items-center gap-1 text-[11px] font-semibold text-slate-500 hover:text-blue-600 transition-colors"
+              title="点击弹出示例提示词（浮层，不占页面空间）"
+            >
+              <Lightbulb className="w-3.5 h-3.5 text-amber-500" />
+              示例提示词 {showIntents ? '▾' : '▸'}
+            </button>
+          </Popover>
           <span className="text-[10px] font-medium text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded">AI 智能助理</span>
         </div>
 
@@ -212,40 +265,7 @@ const QuantBotPage: React.FC = () => {
       </div>
 
       {/* iframe 内容区域 — 避开底部 Dock 悬浮栏 */}
-      {/* T-FE-13 四类意图示例：写策略 / 选股筛选 / 分析问答 / 操作帮助 —— 点击复制提示词
-          （展开开关在顶栏标题旁；本面板仅承载展开后的示例 chips） */}
-      {showIntents && (
-        <div className="flex-shrink-0 bg-white border-x border-slate-200/80 px-4 py-2">
-          <div className="flex flex-wrap items-start gap-x-3 gap-y-1.5">
-            {QUANTBOT_INTENTS.map((intent) => (
-              <span key={intent.key} className="inline-flex items-center gap-1 flex-wrap">
-                <span className="text-[10px] font-bold text-slate-400">{intent.label}</span>
-                {intent.examples.map((ex) => (
-                  <button
-                    key={ex.label}
-                    type="button"
-                    title={ex.prompt}
-                    onClick={async () => {
-                      const ok = await copyText(ex.prompt);
-                      if (ok) {
-                        message.success('已复制提示词——粘贴到下方对话框发送即可');
-                      } else {
-                        message.warning('复制失败（剪贴板不可用），请手动输入示例内容');
-                      }
-                    }}
-                    className="text-[10px] px-2 py-0.5 rounded-full border border-slate-200 bg-slate-50 text-slate-600 hover:bg-blue-50 hover:border-blue-200 hover:text-blue-700 transition-colors"
-                  >
-                    {ex.label}
-                  </button>
-                ))}
-              </span>
-            ))}
-          </div>
-          <p className="text-[10px] text-slate-400 mt-1">
-            写操作（下单 / 清仓 / 上实盘等）不由助手直达执行——一律在正式页面经二次确认后生效
-          </p>
-        </div>
-      )}
+      {/* T-FE-13 意图示例已是顶栏按钮的 Popover 浮层（悬浮于 iframe 之上，不占布局） */}
 
       <div className="flex-1 relative overflow-hidden bg-white border-x border-b border-slate-200/80 rounded-b-xl shadow-xs">
         {loading && !timedOut && (

@@ -5,12 +5,13 @@ import {
   needsTwoStepConfirm,
 } from '../quantbotIntents';
 
-describe('四类意图模型（T-FE-13）', () => {
-  it('恰好四类意图，key 唯一，每类 ≥3 个示例且文案非空', () => {
+describe('五类意图模型（T-FE-13）', () => {
+  it('恰好五类意图，key 唯一，每类 ≥3 个示例且文案非空', () => {
     expect(QUANTBOT_INTENTS.map((i) => i.key)).toEqual([
       'write_strategy',
       'screen_stocks',
       'analyze',
+      'data_ops',
       'help',
     ]);
     for (const intent of QUANTBOT_INTENTS) {

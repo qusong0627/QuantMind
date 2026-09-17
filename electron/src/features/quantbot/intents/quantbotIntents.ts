@@ -1,5 +1,5 @@
 /**
- * QuantBot 意图模型（T-FE-13）：四类意图示例 + 危险动作两步确认判定（纯函数，可单测）。
+ * QuantBot 意图模型（T-FE-13）：五类意图示例 + 危险动作两步确认判定（纯函数，可单测）。
  *
  * 纪律（LLM 接入六铁律）：助手**永不直达写操作**——危险动作在 UI 层强制两步确认，
  * 涉及实际委托的动作只给"去交易台执行"的深链（人工作业），聊天界面不提供直接下单按钮。
@@ -11,7 +11,7 @@ export interface IntentExample {
 }
 
 export interface QuantbotIntent {
-  key: 'write_strategy' | 'screen_stocks' | 'analyze' | 'help';
+  key: 'write_strategy' | 'screen_stocks' | 'analyze' | 'data_ops' | 'help';
   label: string;
   description: string;
   examples: IntentExample[];
@@ -59,10 +59,26 @@ export const QUANTBOT_INTENTS: QuantbotIntent[] = [
     ],
   },
   {
+    key: 'data_ops',
+    label: '数据运维',
+    description: '行情/新闻数据的同步、更新与体检',
+    examples: [
+      { label: '更新今日数据', prompt: '把今天的 A 股行情数据同步一下：日线入库并刷新特征，完成后告诉我数据覆盖到哪个交易日。' },
+      { label: '多市场同步', prompt: '同步港股和美股的最新日线数据，A股如果今天没同步也一起跑；各市场分别汇报更新到哪天、有没有失败。' },
+      { label: '检查数据缺口', prompt: '帮我检查 600036.SH 最近 3 个月的日线有没有缺口，缺失的交易日补上，补完说明数据来源。' },
+      { label: '新闻抓取与情绪', prompt: 'RSS 新闻今天抓取了吗？把最新的财经新闻按情绪标注一遍，并按影响到的股票归类。' },
+      { label: '定时同步调度', prompt: '帮我确认各市场的定时同步调度配置：分别安排在什么时间跑、最近一次执行成功了吗？' },
+      { label: '数据落盘位置', prompt: 'QuantDB 的数据在服务器上存在哪个目录？按数据集说下路径、分区格式和单文件命名口径。' },
+    ],
+  },
+  {
     key: 'help',
     label: '操作帮助',
-    description: '平台功能怎么用、门槛/口径怎么理解',
+    description: '功能怎么用、导入/升级怎么做、口径怎么理解',
     examples: [
+      { label: '导入新技能', prompt: '怎么给 QuantBot 导入新技能？我有现成的 SKILL.md，想让它出现在技能池里并生效。' },
+      { label: '加一个 MCP', prompt: '我想给 QuantBot 接一个 MCP 工具，配置应该写在哪里？怎么验证已经接上了？' },
+      { label: '升级平台', prompt: '平台怎么升级到最新版本？升级前后各要注意什么，已有的数据和模型会不会受影响？' },
       { label: '怎么晋级模拟盘', prompt: '策略怎么从回测晋级到模拟盘？体检结论要达到什么才有资格？' },
       { label: '体检结论怎么看', prompt: '体检报告的 A/B/L/E 分别是什么意思？我这个策略是 E，应该先做什么？' },
       { label: '同步数据失败', prompt: '今天的数据同步失败了，我应该按什么顺序排查？' },
