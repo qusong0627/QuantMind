@@ -31,6 +31,27 @@ cp /app/dsh/nginx.conf "$NGINX_CONF_DIR/dsh.conf"
 # persona 指引 dsh 读 $DSH_HOME/AGENTS.md；改 docker/dsh/AGENTS.md 后 restart 容器生效
 cp /app/dsh/AGENTS.md "$DSH_HOME/AGENTS.md"
 
+# dsh 插件集（仓库 docker/dsh/profile/ 为源）：清单或依赖缺失时自动安装。
+# 首次/清单变更时经 pnpm 拉取（锁文件固定版本）；已装齐则跳过（约 0s）。
+PROFILE_DIR="$DSH_HOME/profiles/web"
+PROFILE_SRC=/app/dsh/profile
+if [[ -f "$PROFILE_SRC/package.json" ]]; then
+    mkdir -p "$PROFILE_DIR"
+    _want=$(sha256sum "$PROFILE_SRC/package.json" | cut -d' ' -f1)
+    _have=$(cat "$PROFILE_DIR/.manifest.sha" 2>/dev/null || true)
+    if [[ "$_want" != "$_have" ]]; then
+        log "同步 dsh 插件清单（$PROFILE_SRC/package.json）并安装…"
+        cp "$PROFILE_SRC/package.json" "$PROFILE_DIR/package.json"
+        [[ -f "$PROFILE_SRC/pnpm-lock.yaml" ]] && cp "$PROFILE_SRC/pnpm-lock.yaml" "$PROFILE_DIR/pnpm-lock.yaml"
+        if (cd "$DSH_HOME" && dsh plugin --profile web install --frozen-lockfile); then
+            echo "$_want" > "$PROFILE_DIR/.manifest.sha"
+            log "插件安装完成"
+        else
+            log "警告：插件安装失败（网络？）——本次以现有依赖启动，下次重启自动重试"
+        fi
+    fi
+fi
+
 # ② 起 dsh web。cwd 必须无 .env（dsh 会读 cwd 的 .env 并拒绝其中的启动类键）；
 #    工作区根 = 启动目录 → cd 到 $DSH_WORKSPACE，会话文件落在持久化卷里。
 cd "$DSH_WORKSPACE"

@@ -1,0 +1,27 @@
+{
+  "name": "dsh-profile-web",
+  "private": true,
+  "dependencies": {
+    "@furongjun1999/dsh-memory": "^0.4.7",
+    "@xmanrui/dsh-im": "^4.21.0",
+    "dsh-free-search": "^0.4.28",
+    "dsh-mcp-connector": "^0.2.49",
+    "dsh-univer-office": "^0.2.14",
+    "dshmarket": "^1.47.0"
+  },
+  "dsh": {
+    "profile": {
+      "bundles": [
+        "@deepseek-ai/dsh-base",
+        "@deepseek-ai/dsh-web-app",
+        "dsh-free-search",
+        "dshmarket",
+        "dsh-mcp-connector",
+        "dsh-univer-office",
+        "@furongjun1999/dsh-memory",
+        "@xmanrui/dsh-im"
+      ],
+      "patchReload": "live"
+    }
+  }
+}
