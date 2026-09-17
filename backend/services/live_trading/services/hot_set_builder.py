@@ -47,12 +47,9 @@ class HotSetBuilder:
 
     @staticmethod
     def _default_output_factory():
-        from backend.shared.remote_quote_config import make_sync_client
+        from backend.shared.hot_set_store import make_hot_set_client
 
-        client = make_sync_client()
-        if client is None:
-            raise RuntimeError("远端行情 Redis 未配置/已禁用")
-        return client
+        return make_hot_set_client()
 
     def _trade_redis(self):
         if self._positions_redis is not None:

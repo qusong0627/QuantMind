@@ -161,14 +161,11 @@ class RealtimeInferenceService:
     # ── 供测注入的默认实现 ────────────────────────────────────────────
 
     def _default_hot_set(self) -> list[str]:
-        from backend.shared.remote_quote_config import make_sync_client
-        from backend.shared.tdx_aidata import config as tdx_config
+        from backend.shared.hot_set_store import hot_set_key, make_hot_set_client
 
-        client = make_sync_client()
-        if client is None:
-            return []
+        client = make_hot_set_client()
         try:
-            return sorted(client.smembers(tdx_config.hot_set_key()) or [])
+            return sorted(client.smembers(hot_set_key()) or [])
         finally:
             try:
                 client.close()

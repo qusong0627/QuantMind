@@ -269,35 +269,22 @@ async def test_two_shard_cluster_e2e():
     """2 分片订阅 120 只真实热集标的：双侧活体（元帧>0）+ 聚合；结束全清理。"""
     import asyncio
 
-    from backend.shared.remote_quote_config import resolve_remote_quote_redis
+    from backend.shared.hot_set_store import hot_set_key, make_hot_set_client
     from backend.shared.tdx_aidata import config
     from backend.shared.tdx_aidata.client import TdxAiDataCluster
 
     if not config.dir_ready(config.resolve_dir()):
         pytest.skip(f"TdxAiData 安装目录不完整: {config.resolve_dir()}")
-    resolved = resolve_remote_quote_redis()
-    if resolved is None:
-        pytest.skip("远端行情 Redis 未配置")
-    import redis as redis_lib
-
-    host, port, password, db = resolved
-    r = redis_lib.Redis(
-        host=host,
-        port=port,
-        password=password,
-        db=db,
-        decode_responses=True,
-        socket_connect_timeout=5,
-        socket_timeout=10,
-    )
+    # 热集读取侧 = **部署本地 Redis**（hot_set_store 单一事实源，2026-09-17 起）
+    r = make_hot_set_client(socket_connect_timeout=5, socket_timeout=10)
     try:
-        prod = sorted(r.smembers("qm:hot_set:symbols"))
+        prod = sorted(r.smembers(hot_set_key()))
     except Exception as exc:  # noqa: BLE001
         r.close()
-        pytest.skip(f"远端热集不可读: {exc}")
+        pytest.skip(f"本地热集不可读: {exc}")
     if len(prod) < 4:
         r.close()
-        pytest.skip("远端热集样本不足")
+        pytest.skip("本地热集样本不足")
 
     symbols = prod[:120] if len(prod) >= 120 else prod
     base_socket = "/tmp/qm-tdx-shard-e2e.sock"
@@ -506,3 +493,59 @@ def test_stale_socket_does_not_block_spawn(tmp_path, monkeypatch):
         assert c2._spawn_worker_proc() is True and spawned["n"] == before
     finally:
         s2.close()
+
+
+@pytest.mark.unit
+def test_engine_reads_hot_set_via_local_reader_not_write_client():
+    """热集读取走独立 reader（部署本地 Redis），**不**经写侧客户端（远端行情服）。
+
+    回归 2026-09-17 事故：写侧（快照落远端）与读侧（热集）同客户端时，热集被迫放
+    公共服全局键上、多实例互覆。本测试锁定两侧解耦：reader 提供什么就读什么，
+    写侧客户端里的成员绝不参与订阅。
+    """
+    from backend.shared.tdx_aidata.collector import SubscriptionEngine
+
+    write_side_members = {"999999.SH"}  # 写侧客户端可见成员（不应被读）
+    read_side_members = {"600036.SH", "000001.SZ"}
+    calls = {"subscribe": []}
+
+    engine = SubscriptionEngine(
+        sdk_subscribe=lambda codes, cb: calls["subscribe"].append(list(codes)),
+        sdk_unsubscribe=lambda: None,
+        budget_gate=_FakeBudget(),
+        redis_factory=lambda: _FakeRedis(write_side_members),
+        hot_set_reader=lambda: set(read_side_members),
+        shard_id=0,
+        shard_count=1,
+    )
+    result = engine.sync_hot_set_once()
+    assert result["changed"] is True
+    assert engine._current == {"600036.SH", "000001.SZ"}
+    assert "999999.SH" not in engine._current
+    assert calls["subscribe"] and set(calls["subscribe"][-1]) == {"600036.SH", "000001.SZ"}
+
+
+@pytest.mark.unit
+def test_engine_hot_set_reader_failure_is_visible_and_non_fatal():
+    """reader 抛错：如实记 last_error（进计数器）、不改订阅集合、不崩循环。"""
+    from backend.shared.tdx_aidata.collector import SubscriptionEngine
+
+    calls = {"subscribe": []}
+
+    def _boom():
+        raise TimeoutError("Timeout connecting to server")
+
+    engine = SubscriptionEngine(
+        sdk_subscribe=lambda codes, cb: calls["subscribe"].append(list(codes)),
+        sdk_unsubscribe=lambda: None,
+        budget_gate=_FakeBudget(),
+        redis_factory=lambda: _FakeRedis({"600036.SH"}),
+        hot_set_reader=_boom,
+        shard_id=0,
+        shard_count=1,
+    )
+    result = engine.sync_hot_set_once()
+    assert result["changed"] is False
+    assert result["reason"] == "hot_set_unreadable"
+    assert "hot_set read" in (engine.counters.get("last_error") or "")
+    assert not calls["subscribe"]

@@ -194,9 +194,17 @@ class RealtimeRegimeService:
         if client is None:
             return None
         try:
-            from backend.shared.tdx_aidata import config as tdx_config
+            from backend.shared.hot_set_store import make_hot_set_client, hot_set_key
 
-            hot = sorted(client.smembers(tdx_config.hot_set_key()) or [])
+            # 热集在部署本地 Redis（hot_set_store 单一事实源）；行情快照仍走远端行情服
+            hs_client = make_hot_set_client()
+            try:
+                hot = sorted(hs_client.smembers(hot_set_key()) or [])
+            finally:
+                try:
+                    hs_client.close()
+                except Exception:  # noqa: BLE001
+                    pass
             if not hot:
                 return None
             up = down = flat = 0

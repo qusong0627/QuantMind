@@ -181,9 +181,23 @@ def collect_shards() -> dict[str, Any] | None:
 
 def _hot_set_key() -> str:
     """热集键单一事实源（env ``QM_HOT_SET_KEY`` 可隔离；与 builder/worker 同键）。"""
-    from backend.shared.tdx_aidata import config as tdx_config
+    from backend.shared.hot_set_store import hot_set_key
 
-    return tdx_config.hot_set_key()
+    return hot_set_key()
+
+
+def _read_hot_set() -> list[str]:
+    """热集读取（**部署本地 Redis**——hot_set_store 单一事实源；快照/序列仍读远端）。"""
+    from backend.shared.hot_set_store import make_hot_set_client
+
+    client = make_hot_set_client()
+    try:
+        return sorted(client.smembers(_hot_set_key()) or [])
+    finally:
+        try:
+            client.close()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def collect_landing(sample: int) -> dict[str, Any]:
@@ -191,7 +205,7 @@ def collect_landing(sample: int) -> dict[str, Any]:
     if r is None:
         return {"readable": False}
     try:
-        hot = sorted(r.smembers(_hot_set_key()) or [])
+        hot = _read_hot_set()
         if not hot:
             return {"readable": True, "hot": 0, "sampled": 0, "fresh": 0, "rate": None}
         step = max(1, len(hot) // sample)
@@ -254,7 +268,7 @@ def collect_cadence(sample: int, series_len: int) -> dict[str, Any]:
     if r is None:
         return {"p95_s": None, "n_symbols": 0}
     try:
-        hot = sorted(r.smembers(_hot_set_key()) or [])
+        hot = _read_hot_set()
         if not hot:
             return {"p95_s": None, "n_symbols": 0}
         step = max(1, len(hot) // sample)

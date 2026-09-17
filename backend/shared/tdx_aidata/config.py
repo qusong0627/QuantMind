@@ -97,9 +97,10 @@ def subscription_enabled() -> bool:
 
 
 def hot_set_key() -> str:
-    """热集符号集 Redis 键（T-P6-06 维护；测试可 env 隔离）。"""
-    env = str(os.getenv("QM_HOT_SET_KEY") or "").strip()
-    return env or DEFAULT_HOT_SET_KEY
+    """热集符号集 Redis 键（委托 ``hot_set_store`` 单一事实源；测试/多实例可 env 隔离）。"""
+    from backend.shared.hot_set_store import hot_set_key as _key
+
+    return _key()
 
 
 def shard_count() -> int:

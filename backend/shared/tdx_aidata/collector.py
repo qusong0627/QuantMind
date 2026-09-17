@@ -219,6 +219,7 @@ class SubscriptionEngine:
         sdk_unsubscribe: Callable[[], Any],
         budget_gate,
         redis_factory: Callable[[], Any] | None,
+        hot_set_reader: Callable[[], set] | None = None,
         archiver: Any | None = None,
         latency: Any | None = None,
         hot_set_key: str = DEFAULT_HOT_SET_KEY,
@@ -233,6 +234,7 @@ class SubscriptionEngine:
         self._sdk_unsubscribe = sdk_unsubscribe
         self._gate = budget_gate
         self._redis_factory = redis_factory
+        self._hot_set_reader = hot_set_reader  # 热集读取（部署本地 Redis；None=回落写侧客户端，测试/兼容路径）
         self._archiver = archiver  # l05_store.SnapshotArchiver | None（L0.5 落盘 sink）
         self._latency = latency  # latency_metrics.LatencyRecorder | None（T-P6-05 时延打点）
         self._hot_set_key = hot_set_key
@@ -369,18 +371,23 @@ class SubscriptionEngine:
     # ── 热集同步 ────────────────────────────────────────────────────
 
     def _read_hot_set(self) -> set[str] | None:
+        reader = self._hot_set_reader
+        if reader is not None:
+            # 热集在**部署本地 Redis**（hot_set_store 单一事实源）：与写侧（远端行情服）
+            # 解耦——2026-09-17 裁决，公共服全局键多实例互覆 + 远端读超时两个坑一并消除。
+            try:
+                members = set(reader() or set())
+            except Exception as exc:  # noqa: BLE001
+                self.counters["last_error"] = f"hot_set read: {exc}"
+                return None
+            return self._normalize_members(members)
         if self._redis_factory is None:
             return None
         client = None
         try:
             client = self._redis_factory()
             members = client.smembers(self._hot_set_key) or set()
-            out = set()
-            for m in members:
-                norm = normalize_subscription_symbol(m)
-                if norm is not None:
-                    out.add(norm[0])
-            return out
+            return self._normalize_members(set(members))
         except Exception as exc:  # noqa: BLE001
             self.counters["last_error"] = f"hot_set read: {exc}"
             return None
@@ -390,6 +397,15 @@ class SubscriptionEngine:
                     client.close()
                 except Exception:  # noqa: BLE001
                     pass
+
+    @staticmethod
+    def _normalize_members(members: set) -> set[str]:
+        out: set[str] = set()
+        for m in members:
+            norm = normalize_subscription_symbol(m)
+            if norm is not None:
+                out.add(norm[0])
+        return out
 
     def resubscribe(self, symbols: set[str]) -> bool:
         """native 全量替换：unsub-all + sub-new。

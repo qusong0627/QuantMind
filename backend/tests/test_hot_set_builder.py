@@ -3,7 +3,7 @@
 覆盖：
 1. U：compose_hot_set——优先级（持仓 > 异动 > 候选）、去重保序、上限截断统计、空池；
 2. I：真夹具（2 个模拟账户持仓 + 当日候选信号行）→ build_once → 输出键断言 → 清理；
-   输出用**真实远端行情 Redis**（与订阅 worker 同一实例）但独立测试键（隔离生产热集）；
+   输出用**部署本地 Redis**（hot_set_store 单一事实源，2026-09-17 由远端行情服迁回）＋独立测试键；
 3. D：空源 → 空集替换；超限截断如实计数；
 4. G：输出键唯一（builder 写入面）与 collector 读取键一致。
 """
@@ -86,18 +86,11 @@ async def _ensure_db_pool():
         await probe.execute(_t("SELECT 1"))
 
 
-def _quote_redis():
-    import redis as _redis
+def _hot_set_redis():
+    """热集输出客户端（**部署本地 Redis**——hot_set_store 单一事实源，2026-09-17 起）。"""
+    from backend.shared.hot_set_store import make_hot_set_client
 
-    from backend.shared.remote_quote_config import resolve_remote_quote_redis
-
-    resolved = resolve_remote_quote_redis()
-    assert resolved is not None, "远端行情 Redis 不可解析"
-    host, port, password, db = resolved
-    return _redis.Redis(
-        host=host, port=port, password=password, db=db,
-        decode_responses=True, socket_connect_timeout=3,
-    )
+    return make_hot_set_client()
 
 
 @pytest.mark.integration
@@ -111,7 +104,7 @@ async def test_build_once_multi_user_union_real_env():
     tenant = f"{_TEST_TENANT_PREFIX}-{uuid.uuid4().hex[:6]}"
     hot_key = f"qm:hot_set:test-{uuid.uuid4().hex[:6]}"
     today = date.today()
-    qr = _quote_redis()
+    hs = _hot_set_redis()
     try:
         # 夹具①：两个用户（两租户维度也可）的模拟账户持仓（trade Redis）
         from backend.services.trade_shared.redis_client import redis_client as trade_redis
@@ -147,17 +140,17 @@ async def test_build_once_multi_user_union_real_env():
                 )
             await session.commit()
 
-        # 执行：build_once（输出到真实远端行情 Redis 的隔离键）
+        # 执行：build_once（输出到**部署本地 Redis** 的隔离键）
         from backend.services.live_trading.services.hot_set_builder import HotSetBuilder
 
         builder = HotSetBuilder(hot_set_key=hot_key, cap=2000, candidate_top_n=500)
         report = await builder.build_once(tenant_filter=tenant)
 
-        members = qr.smembers(hot_key)
+        members = hs.smembers(hot_key)
         assert {"600036.SH", "000001.SZ"} <= members, f"持仓并集缺失: {members}"
         assert {"300750.SZ", "601318.SH"} <= members, f"候选缺失: {members}"
         assert report["kept"] >= 4 and report["kept"] == len(members)
-        meta = qr.hgetall(f"{hot_key}:meta")
+        meta = hs.hgetall(f"{hot_key}:meta")
         assert meta.get("kept") and meta.get("built_at")
     finally:
         try:
@@ -172,8 +165,8 @@ async def test_build_once_multi_user_union_real_env():
                 sa_text("DELETE FROM engine_signal_scores WHERE tenant_id=:t"), {"t": tenant}
             )
             await session.commit()
-        qr.delete(hot_key, f"{hot_key}:meta")
-        qr.close()
+        hs.delete(hot_key, f"{hot_key}:meta")
+        hs.close()
         await close_database()
 
 
@@ -185,20 +178,20 @@ async def test_build_once_empty_sources_replaces_empty_real_env():
 
     tenant = f"{_TEST_TENANT_PREFIX}-empty-{uuid.uuid4().hex[:6]}"
     hot_key = f"qm:hot_set:test-{uuid.uuid4().hex[:6]}"
-    qr = _quote_redis()
+    hs = _hot_set_redis()
     try:
-        qr.sadd(hot_key, "600036.SH")  # 旧集合：本次构建应被空集**替换**（过期订阅退订）
+        hs.sadd(hot_key, "600036.SH")  # 旧集合：本次构建应被空集**替换**（过期订阅退订）
         from backend.services.live_trading.services.hot_set_builder import HotSetBuilder
 
         builder = HotSetBuilder(hot_set_key=hot_key, cap=10)
         report = await builder.build_once(tenant_filter=tenant)
         # T-P6-13 起：空股票源 → 仅常驻指数（regime 源）；旧集合被**替换**（过期订阅退订）
         assert report["kept"] == 2
-        assert set(qr.smembers(hot_key)) == {"000300.SH", "000001.SH"}
-        assert json.loads(qr.hget(f"{hot_key}:meta", "sources") or "{}").get("indexes") == 2
+        assert set(hs.smembers(hot_key)) == {"000300.SH", "000001.SH"}
+        assert json.loads(hs.hget(f"{hot_key}:meta", "sources") or "{}").get("indexes") == 2
     finally:
-        qr.delete(hot_key, f"{hot_key}:meta")
-        qr.close()
+        hs.delete(hot_key, f"{hot_key}:meta")
+        hs.close()
         await close_database()
 
 

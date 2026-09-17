@@ -188,6 +188,20 @@ class AidataWorker:
             decode_responses=True,
         )
 
+    def _read_hot_set_local(self) -> set:
+        """读热集（**部署本地 Redis**——hot_set_store 单一事实源，与远端行情服解耦）。"""
+        from backend.shared.hot_set_store import make_hot_set_client
+        from backend.shared.tdx_aidata import config as _cfg
+
+        client = make_hot_set_client()
+        try:
+            return set(client.smembers(_cfg.hot_set_key()) or set())
+        finally:
+            try:
+                client.close()
+            except Exception:  # noqa: BLE001
+                pass
+
     def _sdk_subscribe(self, codes: list[str], cb) -> None:
         """订阅（**先重置 tqs 累积账本**——引擎语义为全量替换）。
 
@@ -247,6 +261,7 @@ class AidataWorker:
             sdk_unsubscribe=lambda: self.tqs._tdx().unsubscribe(),
             budget_gate=self.gate,
             redis_factory=self._redis_factory,
+            hot_set_reader=self._read_hot_set_local,
             archiver=archiver,
             latency=latency,
             hot_set_key=_cfg.hot_set_key(),

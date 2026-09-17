@@ -37,6 +37,13 @@ def _remote_redis():
     )
 
 
+def _hot_set_redis():
+    """热集读取侧客户端（**部署本地 Redis**，与 worker 读取侧同源）。"""
+    from backend.shared.hot_set_store import make_hot_set_client
+
+    return make_hot_set_client()
+
+
 @pytest_asyncio.fixture
 async def sub_env():
     """隔离环境：独立热集键 + 订阅开关（env 由子进程继承）+ 独立 socket。"""
@@ -78,8 +85,17 @@ async def sub_env():
                     code, market = sym.split(".")
                     r.delete(f"market:snapshot:{market.lower()}{code}")
                     r.delete(f"market:series:{market}{code}")
-                r.delete(hot_set_key)
                 r.close()
+            except Exception:  # noqa: BLE001
+                pass
+        hs = _hot_set_redis()
+        try:
+            hs.delete(hot_set_key)
+        except Exception:  # noqa: BLE001
+            pass
+        finally:
+            try:
+                hs.close()
             except Exception:  # noqa: BLE001
                 pass
         try:
@@ -101,9 +117,10 @@ async def test_subscription_writes_standard_keys_with_value_crosscheck(sub_env):
 
     r = _remote_redis()
     assert r is not None, "远端行情 Redis 不可解析（订阅写侧依赖）"
+    hs = _hot_set_redis()
     try:
-        # 1) 播种热集（隔离键）
-        r.sadd(hot_set_key, *_SYMBOLS)
+        # 1) 播种热集（隔离键；**部署本地 Redis**——worker 读取侧同源）
+        hs.sadd(hot_set_key, *_SYMBOLS)
 
         # 2) 拉起 worker（订阅引擎随启动挂载）
         assert await client.ensure_worker(), "worker 拉起失败"
@@ -204,6 +221,7 @@ async def test_subscription_writes_standard_keys_with_value_crosscheck(sub_env):
         assert checked >= 1, "无任何标的落地（订阅帧可能全被跳过）"
     finally:
         r.close()
+        hs.close()
 
 
 @pytest.mark.integration
@@ -214,10 +232,9 @@ async def test_hot_set_change_triggers_resubscribe(sub_env):
 
     client = sub_env["client"]
     hot_set_key = sub_env["hot_set_key"]
-    r = _remote_redis()
-    assert r is not None
+    hs = _hot_set_redis()
     try:
-        r.sadd(hot_set_key, "600036.SH")
+        hs.sadd(hot_set_key, "600036.SH")
         assert await client.ensure_worker()
         base = None
         for _ in range(30):
@@ -229,7 +246,7 @@ async def test_hot_set_change_triggers_resubscribe(sub_env):
         assert base is not None, "基线订阅未建立"
         resub_before = int((base.get("counters") or {}).get("resubscribes") or 0)
 
-        r.sadd(hot_set_key, "000858.SZ")
+        hs.sadd(hot_set_key, "000858.SZ")
         got = False
         for _ in range(30):
             await asyncio.sleep(2)
@@ -241,4 +258,4 @@ async def test_hot_set_change_triggers_resubscribe(sub_env):
                 break
         assert got, f"热集变更未触发重订阅: {sub}"
     finally:
-        r.close()
+        hs.close()
