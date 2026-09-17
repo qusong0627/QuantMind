@@ -55,19 +55,21 @@ export const DrillDownDrawer: React.FC<DrillDownDrawerProps> = ({
   const [copied, setCopied] = useState(false);
   // 层级栈：空 = 根层（props 提供）；元素 = 逐层穿透的下一层
   const [stack, setStack] = useState<DrillLevelSpec[]>([]);
-  // 原始载荷默认折叠（核对时展开，减少视觉噪音）
-  const [rawOpen, setRawOpen] = useState(false);
+  // 原始载荷折叠：modal 默认折叠（减少视觉噪音，核对时展开）；
+  // drawer 保持展开（个股终端既有行为，不在本次变更范围）
+  const defaultRawOpen = presentation !== 'modal';
+  const [rawOpen, setRawOpen] = useState(defaultRawOpen);
 
   // 关闭即复位；打开/换内容（title 变化）也回到根层——
   // 注意只依赖字符串字段：entries/raw 每次父渲染都是新对象，依赖它们会误清层级栈
   useEffect(() => {
     setStack([]);
-    setRawOpen(false);
+    setRawOpen(defaultRawOpen);
   }, [open, title, subtitle]);
 
-  // 穿透/返回换层时收起载荷（新层的载荷上下文已变）
+  // 穿透/返回换层时载荷回到默认态（新层的载荷上下文已变）
   useEffect(() => {
-    setRawOpen(false);
+    setRawOpen(defaultRawOpen);
   }, [stack.length]);
 
   const current: DrillLevelSpec = stack.length
@@ -225,6 +227,7 @@ export const DrillDownDrawer: React.FC<DrillDownDrawerProps> = ({
         width={780}
         title={null}
         destroyOnHidden
+        maskClosable={false}
         styles={{ content: { borderRadius: 20 } }}
       >
         {content}
