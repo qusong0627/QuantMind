@@ -12,13 +12,14 @@ import { CandlestickChart } from 'lucide-react';
 import { StockSidebar, toPrefix } from '../../../features/stock-terminal/components/StockSidebar';
 import type { ListFilters } from '../../../features/stock-terminal/components/StockFilterPanel';
 import type { StockListItem } from '../../../features/stock-terminal/types';
-import { StockTerminalWindow } from '../../../features/market-analysis-shared/components/StockTerminalWindow';
+import { StockTerminalWindow, prefetchTerminal } from '../../../features/market-analysis-shared/components/StockTerminalWindow';
 import { StatTile } from '../../../features/desk/components/cardKit';
 import { getDeskToday } from '../../../features/desk/services/deskService';
 import { EvalScoreBadge } from '../../../components/shared/EvalScoreBadge';
 import type { SignalsBlock } from '../../../features/desk/types';
-import { BarChart3 } from 'lucide-react';
+import { BarChart3, TrendingDown } from 'lucide-react';
 import { researchService } from '../../../services/researchService';
+import { stockTerminalService as cnTerminalService } from '../../../features/stock-terminal/services/stockTerminalService';
 
 interface SignalsExplorerPageProps {
   /** 模型刷新（日历补推理）完成 → 宿主页跳「系统健康」 */
@@ -37,6 +38,35 @@ const SignalsExplorerPage: React.FC<SignalsExplorerPageProps> = ({ onModelRefres
   const [signalDate, setSignalDate] = useState<string | undefined>(undefined);
   const [watchlist, setWatchlist] = useState<Set<string>>(new Set());
   const [onlyWatchlist, setOnlyWatchlist] = useState(false);
+  // 低分股（末位 10 只，全市场按得分升序的尾部）——右侧筛选展示
+  const [lowScores, setLowScores] = useState<Array<{ symbol: string; name: string; score: number | null }>>([]);
+
+  // 预取个股终端代码包：点行弹窗即刻可用（性能优化）
+  useEffect(() => {
+    prefetchTerminal('CN');
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const first = await cnTerminalService.getStockList({ page: 1, page_size: 100 });
+        const total = first.total || 0;
+        const lastPage = Math.max(1, Math.ceil(total / 100));
+        const resp = lastPage === 1 ? first : await cnTerminalService.getStockList({ page: lastPage, page_size: 100 });
+        const items = [...(resp.items || [])]
+          .sort((a, b) => (a.fusion ?? 0) - (b.fusion ?? 0))
+          .slice(0, 10)
+          .map((i) => ({ symbol: i.symbol, name: i.name || i.symbol, score: i.fusion ?? null }));
+        if (!cancelled) setLowScores(items);
+      } catch {
+        /* 低分股为增强位：失败静默 */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   // 右栏「信号分布」概览（全市场 BUY/SELL/HOLD 计数；明细在左侧列表，不重复渲染 Top 列表）
   const [signals, setSignals] = useState<SignalsBlock | null>(null);
   useEffect(() => {
@@ -117,6 +147,11 @@ const SignalsExplorerPage: React.FC<SignalsExplorerPageProps> = ({ onModelRefres
           onSignalDate={setSignalDate}
           fullTotal={fullTotal}
           onModelRefreshed={onModelRefreshed}
+          onOpen={(item) => {
+            setSelected(item.symbol);
+            setSelectedName(item.name || '');
+            setWindowSymbol(item.symbol);
+          }}
         />
       </div>
 
@@ -141,6 +176,40 @@ const SignalsExplorerPage: React.FC<SignalsExplorerPageProps> = ({ onModelRefres
             个股终端
           </button>
         </div>
+        {/* 低分股（末位 10）——右侧筛选展示，点击即开个股终端 */}
+        <div className="rounded-2xl border border-gray-200 bg-white p-3">
+          <div className="flex items-center gap-2 mb-2">
+            <TrendingDown className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+            <span className="text-xs font-bold text-slate-700">低分股（末位 10）</span>
+            <span className="text-[10px] text-slate-400">得分最弱 · 回避/观察</span>
+          </div>
+          {lowScores.length === 0 ? (
+            <div className="py-4 text-center text-[11px] text-slate-300">加载中…</div>
+          ) : (
+            <div className="space-y-0.5">
+              {lowScores.map((it) => (
+                <button
+                  key={it.symbol}
+                  type="button"
+                  onClick={() => {
+                    setSelected(it.symbol);
+                    setSelectedName(it.name);
+                    setWindowSymbol(it.symbol);
+                  }}
+                  className="flex w-full items-center gap-2 rounded-lg px-2 py-1 text-left transition-colors hover:bg-slate-50"
+                  title={`${it.name}（${it.symbol}） 得分 ${it.score != null ? it.score.toFixed(4) : '--'}`}
+                >
+                  <span className="min-w-0 flex-1 truncate text-[11px] font-semibold text-slate-700">{it.name}</span>
+                  <span className="shrink-0 font-mono text-[10px] text-slate-400">{it.symbol.split('.')[0]}</span>
+                  <span className="w-14 shrink-0 text-right font-mono text-[11px] font-bold text-slate-500">
+                    {it.score != null ? it.score.toFixed(3) : '--'}
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+
         {/* 信号分布概览（原右侧「候选信号」卡与左侧列表重复，2026-09-17 精简为分布 + 评分徽章） */}
         <div className="rounded-2xl border border-gray-200 bg-white p-3">
           <div className="flex items-center gap-2 mb-2">

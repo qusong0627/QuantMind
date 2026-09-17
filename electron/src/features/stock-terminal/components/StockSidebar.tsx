@@ -6,7 +6,7 @@ import { Input, Spin, message, Dropdown } from 'antd';
 import { StockListItem, StockListResponse } from '../types';
 import { stockTerminalService } from '../services/stockTerminalService';
 import { ListFilters, bucketScoreRange, StockFilterPanel, BOARD_OPTIONS, CAP_TIER_OPTIONS, TREND_OPTIONS, BUCKET_OPTIONS } from './StockFilterPanel';
-import { Sparkline } from './Sparkline';
+import { EvalScoreBadge } from '../../../components/shared/EvalScoreBadge';
 
 interface Props {
   selected: string | null;
@@ -32,6 +32,8 @@ interface Props {
   fullTotal?: number;
   /** 模型刷新（日历补推理）完成回调——宿主页据此跳转「系统健康」（2026-09-17 用户指定） */
   onModelRefreshed?: () => void;
+  /** 行点击（用户主动点）额外回调——宿主页用于直接弹出个股终端（自动选中不触发） */
+  onOpen?: (item: StockListItem) => void;
 }
 
 /** 持仓来源：REAL=实盘，SIM=模拟盘，BOTH=两处都持仓 */
@@ -102,7 +104,7 @@ export function positionToneOf(v: number | null | undefined): { cls: string; txt
 
 const MARKETS: [string, string][] = [['ALL', '全部'], ['SH', '沪市'], ['SZ', '深市'], ['BJ', '北交']];
 
-export function StockSidebar({ selected, onSelect, watchlistSymbols, positions = new Map<string, PositionKind>(), onlyWatchlist, onOnlyWatchlist, onToggleWatch, filters, onFiltersChange, onModels, models: modelOptions = [], onTotals, onSignalDate, fullTotal = 0, onModelRefreshed }: Props) {
+export function StockSidebar({ selected, onSelect, watchlistSymbols, positions = new Map<string, PositionKind>(), onlyWatchlist, onOnlyWatchlist, onToggleWatch, filters, onFiltersChange, onModels, models: modelOptions = [], onTotals, onSignalDate, fullTotal = 0, onModelRefreshed, onOpen }: Props) {
   const [market, setMarket] = useState('ALL');
   const [q, setQ] = useState('');
   const [data, setData] = useState<StockListResponse | null>(null);
@@ -249,8 +251,9 @@ export function StockSidebar({ selected, onSelect, watchlistSymbols, positions =
   );
 
   // 单一 grid 贯穿表头+每行，所有列严格对齐。
-  // 列：排名 | 股票 | 走势(微缩折线) | 板块·分 | 行业·分 | 市值·分 | 趋势 | 得分 | 仓位 | 信号
-  const GRID = 'grid grid-cols-[24px_1.4fr_48px_56px_70px_50px_42px_56px_38px_30px] gap-1';
+  // 列：排名 | 股票 | 板块·分 | 行业·分 | 市值·分 | 趋势 | 得分 | 仓位 | 信号
+  // （2026-09-17 去走势迷你线列：每行懒加载 K 线极易卡顿，牺牲此列换流畅度）
+  const GRID = 'grid grid-cols-[24px_1.4fr_56px_70px_50px_42px_56px_38px_30px] gap-1';
 
   const SIDE_LABEL: Record<string, string> = { BUY: '买入', SELL: '卖出', HOLD: '持有' };
   /** 得分档表头短名（列宽有限） */
@@ -329,21 +332,57 @@ export function StockSidebar({ selected, onSelect, watchlistSymbols, positions =
       </div>
 
       {/* 筛选面板：columnOnly 只留 模型+概念 两列（其余维度在列表表头筛选）；日历补推理后刷新列表 */}
-      <StockFilterPanel
-        filters={filters}
-        onChange={onFiltersChange}
-        total={data?.total ?? 0}
-        fullTotal={fullTotal}
-        models={modelOptions}
-        compact
-        columnOnly
-        optionCounts={optionCounts}
-        showMarketCalendar
-        onInferred={() => {
-          fetchList(1, false);
-          onModelRefreshed?.();
-        }}
-      />
+      {/* 筛选行 + 页码同排（概念板块/日历/推理模型/页码页数 一行），节省纵向空间 */}
+      <div className="flex items-start gap-2 shrink-0">
+        <div className="flex-1 min-w-0">
+          <StockFilterPanel
+            filters={filters}
+            onChange={onFiltersChange}
+            total={data?.total ?? 0}
+            fullTotal={fullTotal}
+            models={modelOptions}
+            compact
+            columnOnly
+            optionCounts={optionCounts}
+            showMarketCalendar
+            onInferred={() => {
+              fetchList(1, false);
+              onModelRefreshed?.();
+            }}
+          />
+        </div>
+        {data && data.total > 0 && (
+          <div className="flex shrink-0 items-center gap-0.5 pt-[26px] font-mono text-[10px] text-slate-500 whitespace-nowrap">
+            <button onClick={goFirst} disabled={data.page <= 1 || loading} title="首页（排名第1）"
+              className="flex items-center rounded-md border border-slate-200 bg-slate-50 px-1 py-0.5 text-slate-600 hover:bg-blue-50 hover:text-blue-600 disabled:opacity-30 disabled:cursor-not-allowed">
+              <ChevronsUp className="w-3 h-3" />
+            </button>
+            <button onClick={goPrev} disabled={data.page <= 1 || loading} title="上一页"
+              className="flex items-center rounded-md border border-slate-200 bg-slate-50 px-1 py-0.5 text-slate-600 hover:bg-blue-50 hover:text-blue-600 disabled:opacity-30 disabled:cursor-not-allowed">
+              <ChevronLeft className="w-3 h-3" />
+            </button>
+            <input
+              value={pageInput}
+              onChange={e => setPageInput(e.target.value.replace(/[^\d]/g, ''))}
+              onKeyDown={e => { if (e.key === 'Enter') { e.currentTarget.blur(); jumpToPage(); } }}
+              onBlur={jumpToPage}
+              inputMode="numeric"
+              aria-label="页码"
+              title="输入页码后回车跳转"
+              className="w-8 rounded border border-slate-200 px-1 py-0.5 text-center text-[10px] text-slate-700 bg-white focus:border-blue-400 focus:outline-none"
+            />
+            <span className="px-0.5">/ {totalPages} 页 · {data.total} 只</span>
+            <button onClick={goNext} disabled={data.page >= totalPages || loading} title="下一页"
+              className="flex items-center rounded-md border border-slate-200 bg-slate-50 px-1 py-0.5 text-slate-600 hover:bg-blue-50 hover:text-blue-600 disabled:opacity-30 disabled:cursor-not-allowed">
+              <ChevronRight className="w-3 h-3" />
+            </button>
+            <button onClick={goLast} disabled={data.page >= totalPages || loading} title="末页（排名最后）"
+              className="flex items-center rounded-md border border-slate-200 bg-slate-50 px-1 py-0.5 text-slate-600 hover:bg-blue-50 hover:text-blue-600 disabled:opacity-30 disabled:cursor-not-allowed">
+              <ChevronsDown className="w-3 h-3" />
+            </button>
+          </div>
+        )}
+      </div>
 
       {/* 当前信号日 chip：随日历切换显示该日期（琥珀底色），点击回到最新；后备注当天各维度头部均分基准 */}
       {(() => {
@@ -377,72 +416,19 @@ export function StockSidebar({ selected, onSelect, watchlistSymbols, positions =
                 {top!.cap_top10_avg != null && <span className="text-slate-500"> 市{top!.cap_top10_avg >= 0 ? '+' : ''}{top!.cap_top10_avg.toFixed(3)}</span>}
               </span>
             )}
+            {/* 选股评分徽章（空位利用；与信号分布卡同源） */}
+            <span className="ml-auto">
+              {data?.signal_date && (
+                <EvalScoreBadge objectType="daily_selection" objectId={data.signal_date} prefix="选股评分" />
+              )}
+            </span>
           </div>
         );
       })()}
-
-      {/* 分页跳转栏：首页/上一页 · 当前页 · 下一页/末页（放条件筛选后、列表前，避免底部遮住列表） */}
-      {data && data.total > 0 && (
-        <div className="flex items-center justify-between gap-1 px-1 py-1 shrink-0">
-          <div className="flex items-center gap-1">
-            <button
-              onClick={goFirst}
-              disabled={data.page <= 1 || loading}
-              title="跳到首页（排名第1）"
-              className="flex items-center px-1.5 py-1 rounded-md text-[10px] font-bold border transition-colors disabled:opacity-30 disabled:cursor-not-allowed bg-slate-50 text-slate-600 border-slate-200 hover:bg-blue-50 hover:text-blue-600 hover:border-blue-200"
-            >
-              <ChevronsUp className="w-3 h-3" />
-            </button>
-            <button
-              onClick={goPrev}
-              disabled={data.page <= 1 || loading}
-              title="上一页"
-              className="flex items-center gap-0.5 px-1.5 py-1 rounded-md text-[10px] font-bold border transition-colors disabled:opacity-30 disabled:cursor-not-allowed bg-slate-50 text-slate-600 border-slate-200 hover:bg-blue-50 hover:text-blue-600 hover:border-blue-200"
-            >
-              <ChevronLeft className="w-3 h-3" />上一页
-            </button>
-          </div>
-          <span className="flex items-center gap-1 text-[10px] font-mono text-slate-500 whitespace-nowrap">
-            第
-            <input
-              value={pageInput}
-              onChange={e => setPageInput(e.target.value.replace(/[^\d]/g, ''))}
-              onKeyDown={e => { if (e.key === 'Enter') { e.currentTarget.blur(); jumpToPage(); } }}
-              onBlur={jumpToPage}
-              inputMode="numeric"
-              aria-label="页码"
-              title="输入页码后回车跳转"
-              className="w-9 px-1 py-0.5 text-center font-mono text-[10px] text-slate-700 bg-white border border-slate-200 rounded focus:border-blue-400 focus:outline-none"
-            />
-            <span>/ {totalPages} 页</span>
-            <span className="text-slate-400">· {data.total} 只</span>
-          </span>
-          <div className="flex items-center gap-1">
-            <button
-              onClick={goNext}
-              disabled={data.page >= totalPages || loading}
-              title="下一页"
-              className="flex items-center gap-0.5 px-1.5 py-1 rounded-md text-[10px] font-bold border transition-colors disabled:opacity-30 disabled:cursor-not-allowed bg-slate-50 text-slate-600 border-slate-200 hover:bg-blue-50 hover:text-blue-600 hover:border-blue-200"
-            >
-              下一页<ChevronRight className="w-3 h-3" />
-            </button>
-            <button
-              onClick={goLast}
-              disabled={data.page >= totalPages || loading}
-              title="跳到末页（排名最后）"
-              className="flex items-center px-1.5 py-1 rounded-md text-[10px] font-bold border transition-colors disabled:opacity-30 disabled:cursor-not-allowed bg-slate-50 text-slate-600 border-slate-200 hover:bg-blue-50 hover:text-blue-600 hover:border-blue-200"
-            >
-              <ChevronsDown className="w-3 h-3" />
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* 列表头：单行 10 列，与每行严格对齐；点击表头筛选 */}
+      {/* 列表头：单行 9 列，与每行严格对齐；点击表头筛选 */}
       <div className={`${GRID} px-1 pb-1 pt-2 text-[10px] font-bold text-slate-400 border-b border-slate-100 shrink-0 items-center`}>
         <span className="text-center">排名</span>
         <span>股票</span>
-        <span className="text-center" title="近15日收盘价走势（红涨绿跌）">走势</span>
         <span className="text-center">{headerDropdown(fac('board', BOARD_OPTIONS.map(b => ({ value: b, label: b }))), filters.board, v => onFiltersChange({ ...filters, board: v }), '板块')}</span>
         <span className="text-center">{headerDropdown(fac('industry', []), filters.industry, v => onFiltersChange({ ...filters, industry: v }), '行业')}</span>
         <span className="text-center">{headerDropdown(fac('cap_tier', CAP_TIER_OPTIONS), filters.capTier, v => onFiltersChange({ ...filters, capTier: v }), '市值')}</span>
@@ -469,7 +455,7 @@ export function StockSidebar({ selected, onSelect, watchlistSymbols, positions =
               <button
                 key={it.symbol}
                 data-symbol={it.symbol}
-                onClick={() => onSelect(it)}
+                onClick={() => { onSelect(it); onOpen?.(it); }}
                 className={`w-full ${GRID} items-center px-1.5 py-1 rounded-lg text-left transition-colors ${
                   isSel ? 'bg-blue-50 border border-blue-200' : 'hover:bg-slate-50 border border-transparent'
                 }`}
@@ -508,10 +494,6 @@ export function StockSidebar({ selected, onSelect, watchlistSymbols, positions =
                     <span className="text-[9px] text-slate-400 font-mono truncate">{it.symbol}</span>
                     <span className="text-[9px] text-slate-500 font-mono shrink-0">{it.close?.toFixed(2) ?? '--'} · {fmtMv(it.total_mv)}</span>
                   </span>
-                </span>
-                {/* 近15日走势微缩折线（懒加载，红涨绿跌） */}
-                <span className="flex items-center justify-center">
-                  <Sparkline symbol={it.symbol} days={15} />
                 </span>
                 {/* 板块 + 当天头部 top10 均分 */}
                 <span className="flex flex-col items-center min-w-0 gap-0" title={`${it.board ?? '--'} · top10 ${it.board_top10_avg != null ? (it.board_top10_avg >= 0 ? '+' : '') + it.board_top10_avg.toFixed(3) : '--'}`}>
