@@ -1,12 +1,14 @@
 /**
- * 因子研究 — 独立栏目页（factor-lib-demo 完整复刻）
+ * 因子研究 — 独立栏目页（factor-lib-demo 完整复刻 + 因子工具页签）
  *
- * 布局：左侧因子目录（分类树 + 搜索 + 标签筛选）· 顶部区间选择 · 五个页签：
- * 排行榜 / 单因子分析 / 多因子对比 / 多因子合成 / 筛选
+ * 布局：左侧因子目录（分类树 + 搜索 + 标签筛选）· 顶部区间选择 · 两组页签：
+ * 研究：排行榜 / 单因子分析 / 多因子对比 / 多因子合成 / 筛选
+ * 工具：因子报告 / 策略模板 / 评估中心（2026-09-17 由技能中心迁入，全宽渲染）
  * 数据：/api/v1/factor-research（引擎服务，快照由 build_factor_research.py 构建）
  */
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { ArrowRightLeft, BarChart3, Database, Filter, Layers, Sigma, TableProperties } from 'lucide-react';
+import { useSearchParams } from 'react-router-dom';
+import { ArrowRightLeft, Award, BarChart3, Database, Filter, Layers, LibraryBig, LineChart, Sigma, TableProperties } from 'lucide-react';
 import { PAGE_LAYOUT } from '../../../config/pageLayout';
 import { ApiError, getCatalog, getLeaderboard } from '../services/factorResearchService';
 import type { FactorDataset, RangeParams } from '../services/factorResearchService';
@@ -20,8 +22,11 @@ import { CompareTab } from '../components/CompareTab';
 import { ComposeTab } from '../components/ComposeTab';
 import { ScreeningTab } from '../components/ScreeningTab';
 import { SnapshotPanel } from '../components/SnapshotPanel';
+import { FactorReportPanel } from '../components/factor-report/FactorReportPanel';
+import { EvalCenterPanel } from '../components/eval-center/EvalCenterPanel';
+import { StrategyTemplateGallery } from '../components/template-gallery/StrategyTemplateGallery';
 
-type Tab = 'leaderboard' | 'single' | 'compare' | 'compose' | 'screening';
+type Tab = 'leaderboard' | 'single' | 'compare' | 'compose' | 'screening' | 'factor-report' | 'templates' | 'eval';
 
 const TABS: Array<{ key: Tab; label: string; icon: React.ComponentType<{ className?: string }> }> = [
   { key: 'leaderboard', label: '排行榜', icon: BarChart3 },
@@ -29,10 +34,37 @@ const TABS: Array<{ key: Tab; label: string; icon: React.ComponentType<{ classNa
   { key: 'compare', label: '多因子对比', icon: ArrowRightLeft },
   { key: 'compose', label: '多因子合成', icon: Layers },
   { key: 'screening', label: '筛选', icon: Filter },
+  { key: 'factor-report', label: '因子报告', icon: LineChart },
+  { key: 'templates', label: '策略模板', icon: LibraryBig },
+  { key: 'eval', label: '评估中心', icon: Award },
 ];
 
+/** 工具页签：不依赖因子目录/区间工具条，整页全宽渲染 */
+const TOOL_TABS: Tab[] = ['factor-report', 'templates', 'eval'];
+const isToolTab = (t: Tab): boolean => TOOL_TABS.includes(t);
+const isValidTab = (v: string | null): v is Tab => TABS.some((t) => t.key === v);
+
 const FactorResearchPage: React.FC = () => {
-  const [tab, setTab] = useState<Tab>('leaderboard');
+  // 页签支持深链（如评估徽章跳 /factor-research?tab=eval）；切换时同步回 URL
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [tab, setTabState] = useState<Tab>(() => {
+    const fromUrl = searchParams.get('tab');
+    return isValidTab(fromUrl) ? fromUrl : 'leaderboard';
+  });
+  const setTab = useCallback(
+    (t: Tab) => {
+      setTabState(t);
+      setSearchParams(t === 'leaderboard' ? {} : { tab: t }, { replace: true });
+    },
+    [setSearchParams],
+  );
+  const isTool = isToolTab(tab);
+
+  // URL 为准：外部导航（徽章深链等）带 ?tab= 时同步切换页签
+  useEffect(() => {
+    const fromUrl = searchParams.get('tab');
+    if (isValidTab(fromUrl) && fromUrl !== tab) setTabState(fromUrl);
+  }, [searchParams, tab]);
   const [factors, setFactors] = useState<FactorMeta[]>([]);
   const [l1Order, setL1Order] = useState<string[]>([]);
   const [l2Order, setL2Order] = useState<Record<string, string[]>>({});
@@ -143,7 +175,7 @@ const FactorResearchPage: React.FC = () => {
             <div className="flex items-center gap-2.5 ml-1 min-w-0">
               <h1 className="text-xl font-bold text-slate-800 tracking-tight">因子研究</h1>
               <div className="h-4 w-[1px] bg-slate-200 self-center shrink-0" />
-              <span className="text-sm font-medium text-slate-500 truncate">因子排行榜 · 单因子体检 · 对比 · 合成</span>
+              <span className="text-sm font-medium text-slate-500 truncate">因子排行榜 · 单因子体检 · 对比 · 合成 · 因子报告 · 策略模板 · 评估中心</span>
             </div>
           </div>
           <div className="flex items-center gap-2 shrink-0">
@@ -164,18 +196,36 @@ const FactorResearchPage: React.FC = () => {
                 );
               })}
             </div>
-            <span className="hidden lg:inline-flex items-center gap-1.5 rounded-full bg-slate-100 border border-slate-200 px-3 py-1 text-[11px] font-bold text-slate-500">
-              <span className="h-1.5 w-1.5 rounded-full bg-indigo-500" />
-              {available}/{factors.length || 82} 因子可用
-            </span>
-            {window_ && (
-              <span className="hidden xl:inline-flex items-center rounded-full bg-indigo-50 border border-indigo-100 px-2.5 py-1 text-[11px] font-bold text-indigo-600">
-                样本 {window_[0]} ~ {window_[1]}
-              </span>
+            {!isTool && (
+              <>
+                <span className="hidden lg:inline-flex items-center gap-1.5 rounded-full bg-slate-100 border border-slate-200 px-3 py-1 text-[11px] font-bold text-slate-500">
+                  <span className="h-1.5 w-1.5 rounded-full bg-indigo-500" />
+                  {available}/{factors.length || 82} 因子可用
+                </span>
+                {window_ && (
+                  <span className="hidden xl:inline-flex items-center rounded-full bg-indigo-50 border border-indigo-100 px-2.5 py-1 text-[11px] font-bold text-indigo-600">
+                    样本 {window_[0]} ~ {window_[1]}
+                  </span>
+                )}
+              </>
             )}
           </div>
         </header>
 
+        {/* 工具页签：整页全宽（原技能中心的因子报告/策略模板/评估中心） */}
+        {isTool && tab === 'factor-report' && (
+          <div className="flex-1 min-h-0 min-w-0 overflow-hidden">
+            <FactorReportPanel />
+          </div>
+        )}
+
+        {isTool && tab !== 'factor-report' && (
+          <div className="flex-1 min-h-0 min-w-0 overflow-y-auto p-4">
+            {tab === 'templates' ? <StrategyTemplateGallery /> : <EvalCenterPanel />}
+          </div>
+        )}
+
+        {!isTool && (
         <div className="flex-1 min-h-0 min-w-0 flex gap-2 p-3">
           {/* 左侧目录 */}
           <CatalogSidebar
@@ -288,6 +338,7 @@ const FactorResearchPage: React.FC = () => {
             )}
           </div>
         </div>
+        )}
       </div>
     </div>
   );

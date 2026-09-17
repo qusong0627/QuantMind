@@ -7,9 +7,9 @@
 
 import React, { useEffect, useState } from 'react';
 import { DoorOpen, RefreshCw, ShieldAlert, ShieldCheck } from 'lucide-react';
-import { getStrategyHealth } from '../../features/skills-center/services/evalCenterService';
-import type { StrategyHealthArchive } from '../../features/skills-center/types/evalCenter';
-import { gradeMeta } from '../../features/skills-center/components/eval-center/evalCenterModel';
+import { getStrategyHealth } from '../../features/factor-research/services/evalCenterService';
+import type { StrategyHealthArchive } from '../../features/factor-research/types/evalCenter';
+import { gradeMeta } from '../../features/factor-research/components/eval-center/evalCenterModel';
 
 interface PromotionGateCardProps {
   strategyId: string;

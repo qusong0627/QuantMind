@@ -4,13 +4,13 @@
  *
  * 契约：objectType ∈ eval API 枚举；objectId 对齐写侧（model=model_id、
  * strategy_health=策略 id、daily_selection=信号交易日）。无记录 → 渲染「未评分」
- * 灰态（不隐藏、不伪造）。点击跳转技能中心评估中心。
+ * 灰态（不隐藏、不伪造）。点击跳转因子研究-评估中心。
  */
 
 import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { listScores } from '../../features/skills-center/services/evalCenterService';
-import { gradeMeta } from '../../features/skills-center/components/eval-center/evalCenterModel';
+import { listScores } from '../../features/factor-research/services/evalCenterService';
+import { gradeMeta } from '../../features/factor-research/components/eval-center/evalCenterModel';
 
 interface EvalScoreBadgeProps {
   objectType: 'model' | 'strategy_health' | 'daily_selection' | 'factor' | 'account' | 'strategy';
@@ -97,7 +97,7 @@ export const EvalScoreBadge: React.FC<EvalScoreBadgeProps> = ({
       type="button"
       onClick={(e) => {
         e.stopPropagation();
-        navigate('/skills');
+        navigate('/factor-research?tab=eval');
       }}
       title={title}
       className={`text-[10px] px-1.5 py-0.5 rounded-full border cursor-pointer hover:brightness-95 ${meta.className} ${className || ''}`}
