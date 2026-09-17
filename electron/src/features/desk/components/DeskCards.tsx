@@ -293,7 +293,7 @@ export const HealthCard: React.FC<{ health: HealthBlock | null | undefined }> = 
         }
       />
       {/* 体检项卡片网格：状态图标 + 名称 + 结论 + 明细两行截断（悬停看全文/建议） */}
-      <div className="grid grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 gap-2 flex-1 content-start auto-rows-min">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2 flex-1 content-start auto-rows-min">
         {items.map((item) => (
           <div
             key={item.id}

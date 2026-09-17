@@ -5,7 +5,7 @@
  */
 
 import React, { useCallback, useEffect, useState } from 'react';
-import { Activity, BellRing, Check, Loader2, RefreshCw, ShieldQuestion, X } from 'lucide-react';
+import { Activity, AlertTriangle, BellRing, Check, Info, Loader2, RefreshCw, ShieldQuestion, X } from 'lucide-react';
 import { CARD, CardHeader, StatTile } from './cardKit';
 import {
   actionLine,
@@ -159,22 +159,30 @@ export const CopilotPanel: React.FC = () => {
             const sev = severityMeta(event.severity);
             const outcome = outcomeMeta(event);
             return (
-              <li key={event.alert_id} className="flex items-start gap-2 rounded-lg border border-slate-100 px-2 py-1.5">
-                <span className={`mt-1 h-1.5 w-1.5 shrink-0 rounded-full ${sev.tone === 'red' ? 'bg-red-500' : sev.tone === 'amber' ? 'bg-amber-500' : 'bg-slate-300'}`} />
+              <li key={event.alert_id} className={`group relative overflow-hidden rounded-xl border bg-white pl-3.5 pr-2 py-2 transition-all hover:shadow-sm ${
+                sev.tone === 'red' ? 'border-red-100' : sev.tone === 'amber' ? 'border-amber-100' : 'border-slate-200/80'
+              }`}>
+                {/* 左侧严重度色条 */}
+                <span className={`absolute left-0 top-0 h-full w-1 ${sev.tone === 'red' ? 'bg-red-400' : sev.tone === 'amber' ? 'bg-amber-400' : 'bg-slate-300'}`} />
+                <div className="flex items-start gap-2">
                 <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-1.5 text-[11px]">
-                    <span className="font-semibold text-slate-700">{alertTypeLabel(event.alert_type)}</span>
+                  <div className="flex items-center gap-1.5 text-[11px] flex-wrap">
+                    <span className={`inline-flex items-center gap-1 font-bold ${
+                      sev.tone === 'red' ? 'text-red-600' : sev.tone === 'amber' ? 'text-amber-600' : 'text-slate-500'
+                    }`}>
+                      {sev.tone === 'red' ? <AlertTriangle className="w-3 h-3" /> : sev.tone === 'amber' ? <BellRing className="w-3 h-3" /> : <Info className="w-3 h-3" />}
+                      {alertTypeLabel(event.alert_type)}
+                    </span>
                     <span className="font-mono text-slate-500">{event.symbol}</span>
-                    <Chip tone={sev.tone}>{sev.label}</Chip>
                     <Chip tone={outcome.tone}>{outcome.label}</Chip>
                     {event.pushed && <Chip tone="blue">已推送</Chip>}
                   </div>
-                  <div className="truncate text-[11px] text-slate-500" title={event.title}>{event.title}</div>
+                  <div className="mt-0.5 line-clamp-2 text-[11px] leading-4 text-slate-600" title={event.title}>{event.title}</div>
                 </div>
                 {event.annotation ? (
-                  <span className="shrink-0 text-[10px] text-slate-400">已标注</span>
+                  <span className="shrink-0 rounded-full border border-slate-200 bg-slate-50 px-1.5 py-0.5 text-[10px] text-slate-400">已标注</span>
                 ) : (
-                  <div className="flex shrink-0 gap-1">
+                  <div className="flex shrink-0 gap-1 opacity-70 transition-opacity group-hover:opacity-100">
                     <button
                       type="button"
                       title="标注为真实告警"
@@ -195,6 +203,7 @@ export const CopilotPanel: React.FC = () => {
                     </button>
                   </div>
                 )}
+                </div>
               </li>
             );
           })}

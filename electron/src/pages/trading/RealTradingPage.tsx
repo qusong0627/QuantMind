@@ -13,7 +13,7 @@ import SettingsCenter from './tabs/SettingsCenter';
 import ReplayPage from './tabs/ReplayPage';
 import DeskTodayPage from '../../features/desk/DeskTodayPage';
 import { EvalCenterPanel } from '../../features/eval-center/components/EvalCenterPanel';
-import { SignalsSection } from '../../features/desk/components/DeskSections';
+import SignalsExplorerPage from './tabs/SignalsExplorerPage';
 import type { RealTradingStatus, AccountInfo, PreflightCheckResponse, PreflightCheckItem } from '../../services/realTradingService';
 import { authService } from '../../features/auth/services/authService';
 import type { StrategyFile } from '../../types/backtest/strategy';
@@ -589,9 +589,9 @@ const RealTradingPage: React.FC = () => {
                     <div className="flex-1 overflow-hidden relative bg-gray-50/50">
                     {activeTab === 'desk' && <DeskTodayPage embedded />}
                     {activeTab === 'signals' && (
-                        <div className="h-full overflow-y-auto p-4">
-                            <SignalsSection />
-                        </div>
+                        /* 候选信号：quant-Trader 个股终端左栏复刻（列表/筛选/补推理）；
+                           模型刷新（补推理）完成后跳「系统健康」 */
+                        <SignalsExplorerPage onModelRefreshed={() => setActiveTab('desk')} />
                     )}
                     {activeTab === 'eval' && (
                         <div className="h-full overflow-y-auto p-4">

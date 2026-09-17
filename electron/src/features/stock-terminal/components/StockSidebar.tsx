@@ -1,7 +1,7 @@
 /** 个股终端左侧栏：搜索 + 市场分段 + 看板筛选（页面持有条件）+ 信息丰富的股票列表 */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Search, RefreshCw, Star, ChevronDown, ChevronsUp, ChevronsDown } from 'lucide-react';
+import { Search, RefreshCw, Star, ChevronDown, ChevronLeft, ChevronRight, ChevronsUp, ChevronsDown } from 'lucide-react';
 import { Input, Spin, message, Dropdown } from 'antd';
 import { StockListItem, StockListResponse } from '../types';
 import { stockTerminalService } from '../services/stockTerminalService';
@@ -30,6 +30,8 @@ interface Props {
   onSignalDate?: (d?: string) => void;
   /** 全市场总量（筛选面板命中统计） */
   fullTotal?: number;
+  /** 模型刷新（日历补推理）完成回调——宿主页据此跳转「系统健康」（2026-09-17 用户指定） */
+  onModelRefreshed?: () => void;
 }
 
 /** 持仓来源：REAL=实盘，SIM=模拟盘，BOTH=两处都持仓 */
@@ -53,6 +55,12 @@ export function toPrefix(symbol: string): string {
   const [code, ex] = symbol.split('.');
   return ex && code ? `${ex}${code}` : symbol;
 }
+
+const SIDE_COLOR: Record<string, string> = {
+  BUY: 'bg-rose-50 text-rose-600',
+  SELL: 'bg-emerald-50 text-emerald-600',
+  HOLD: 'bg-slate-50 text-slate-400',
+};
 
 /** 持仓来源徽标样式：模拟=蓝、实盘=紫、双持仓=靛蓝 */
 const POSITION_BADGE: Record<PositionKind, { cls: string; label: string; title: string }> = {
@@ -82,11 +90,11 @@ export function boardToneOf(board?: string): string {
   return board ? (BOARD_TONE[board] ?? 'bg-slate-50 text-slate-500 border-slate-200') : 'bg-slate-50 text-slate-400 border-slate-200';
 }
 
-/** 仓位数值着色：0=低 / 0.1~0.5 淡红 / 0.5~0.8 中红 / 0.8~0.99 深红白字。
- *  A 股涨红跌绿，数值越高色调越深。 */
+/** 仓位信号着色：0=灰禁 / 0.1~0.5 淡红 / 0.5~0.8 中红 / 0.8~0.99 深红白字。
+ *  A 股涨红跌绿，仓位建议越高越红。 */
 export function positionToneOf(v: number | null | undefined): { cls: string; txt: string } {
   if (v == null) return { cls: 'bg-slate-50 text-slate-300 border-slate-100', txt: '--' };
-  if (v <= 0) return { cls: 'bg-slate-100 text-slate-400 border-slate-200', txt: '0%' };
+  if (v <= 0) return { cls: 'bg-slate-100 text-slate-400 border-slate-200', txt: '禁' };
   if (v < 0.5) return { cls: 'bg-rose-50 text-rose-500 border-rose-200', txt: `${Math.round(v * 100)}%` };
   if (v < 0.8) return { cls: 'bg-rose-200 text-rose-700 border-rose-300', txt: `${Math.round(v * 100)}%` };
   return { cls: 'bg-rose-600 text-white border-rose-700', txt: `${Math.round(v * 100)}%` };
@@ -94,7 +102,7 @@ export function positionToneOf(v: number | null | undefined): { cls: string; txt
 
 const MARKETS: [string, string][] = [['ALL', '全部'], ['SH', '沪市'], ['SZ', '深市'], ['BJ', '北交']];
 
-export function StockSidebar({ selected, onSelect, watchlistSymbols, positions = new Map<string, PositionKind>(), onlyWatchlist, onOnlyWatchlist, onToggleWatch, filters, onFiltersChange, onModels, models: modelOptions = [], onTotals, onSignalDate, fullTotal = 0 }: Props) {
+export function StockSidebar({ selected, onSelect, watchlistSymbols, positions = new Map<string, PositionKind>(), onlyWatchlist, onOnlyWatchlist, onToggleWatch, filters, onFiltersChange, onModels, models: modelOptions = [], onTotals, onSignalDate, fullTotal = 0, onModelRefreshed }: Props) {
   const [market, setMarket] = useState('ALL');
   const [q, setQ] = useState('');
   const [data, setData] = useState<StockListResponse | null>(null);
@@ -208,6 +216,32 @@ export function StockSidebar({ selected, onSelect, watchlistSymbols, positions =
     fetchList(totalPages, false);
     listRef.current?.scrollTo({ top: 0 });
   }, [data, totalPages, loading, fetchList]);
+  // 上一页/下一页：逐页翻（区别于首页/末页的跳转）
+  const goPrev = useCallback(() => {
+    if (!data || data.page <= 1 || loading) return;
+    fetchList(data.page - 1, false);
+    listRef.current?.scrollTo({ top: 0 });
+  }, [data, loading, fetchList]);
+  const goNext = useCallback(() => {
+    if (!data || data.page >= totalPages || loading) return;
+    fetchList(data.page + 1, false);
+    listRef.current?.scrollTo({ top: 0 });
+  }, [data, totalPages, loading, fetchList]);
+
+  // 页码输入跳转：输入框内容与当前页同步；回车/失焦时提交，越界自动夹到 [1, totalPages]
+  const [pageInput, setPageInput] = useState('');
+  useEffect(() => { setPageInput(String(data?.page ?? 1)); }, [data?.page]);
+  const jumpToPage = useCallback(() => {
+    if (!data) return;
+    const n = parseInt(pageInput, 10);
+    if (!Number.isFinite(n)) { setPageInput(String(data.page)); return; }
+    const target = Math.min(Math.max(1, n), totalPages);
+    setPageInput(String(target));
+    if (target !== data.page) {
+      fetchList(target, false);
+      listRef.current?.scrollTo({ top: 0 });
+    }
+  }, [data, pageInput, totalPages, fetchList]);
 
   const visibleItems = useMemo(
     () => onlyWatchlist ? (data?.items ?? []).filter(it => watchlistSymbols.has(toPrefix(it.symbol))) : (data?.items ?? []),
@@ -215,13 +249,14 @@ export function StockSidebar({ selected, onSelect, watchlistSymbols, positions =
   );
 
   // 单一 grid 贯穿表头+每行，所有列严格对齐。
-  // 列：排名 | 股票 | 走势(微缩折线) | 板块·分 | 行业·分 | 市值·分 | 趋势 | 得分 | 仓位
-  const GRID = 'grid grid-cols-[24px_1.4fr_48px_56px_70px_50px_42px_56px_38px] gap-1';
+  // 列：排名 | 股票 | 走势(微缩折线) | 板块·分 | 行业·分 | 市值·分 | 趋势 | 得分 | 仓位 | 信号
+  const GRID = 'grid grid-cols-[24px_1.4fr_48px_56px_70px_50px_42px_56px_38px_30px] gap-1';
 
+  const SIDE_LABEL: Record<string, string> = { BUY: '买入', SELL: '卖出', HOLD: '持有' };
   /** 得分档表头短名（列宽有限） */
   const BUCKET_SHORT: Record<string, string> = {
-    golden: '0.10-0.12', optional: '0.12-0.15', caution: '0.15-0.20', extreme: '≥0.20',
-    neg_extreme: '≤-0.20', neg_short: '≤-0.15', pos: '≥0', neg: '<0',
+    golden: '黄金', optional: '可选', caution: '谨慎', extreme: '极端高',
+    neg_extreme: '极端低', neg_short: '做空', pos: '正分', neg: '负分',
   };
 
   /** 表头列筛选下拉（板块/行业/市值/趋势/得分/信号），长菜单限高滚动避免盖住整个列表 */
@@ -241,7 +276,7 @@ export function StockSidebar({ selected, onSelect, watchlistSymbols, positions =
       }}
     >
       <button className={`flex items-center justify-center gap-0.5 px-0.5 rounded transition-colors ${current ? 'text-blue-600 font-black' : 'hover:text-blue-500'}`}>
-        <span className="truncate">{current ?? placeholder}</span>
+        <span className="truncate">{current ? (SIDE_LABEL[current] ?? current) : placeholder}</span>
         <ChevronDown className="w-2.5 h-2.5 shrink-0 opacity-60" />
       </button>
     </Dropdown>
@@ -304,7 +339,10 @@ export function StockSidebar({ selected, onSelect, watchlistSymbols, positions =
         columnOnly
         optionCounts={optionCounts}
         showMarketCalendar
-        onInferred={() => fetchList(1, false)}
+        onInferred={() => {
+          fetchList(1, false);
+          onModelRefreshed?.();
+        }}
       />
 
       {/* 当前信号日 chip：随日历切换显示该日期（琥珀底色），点击回到最新；后备注当天各维度头部均分基准 */}
@@ -343,34 +381,65 @@ export function StockSidebar({ selected, onSelect, watchlistSymbols, positions =
         );
       })()}
 
-      {/* 分页跳转栏：首页/末页 + 当前页/总页数（放条件筛选后、列表前，避免底部遮住列表） */}
+      {/* 分页跳转栏：首页/上一页 · 当前页 · 下一页/末页（放条件筛选后、列表前，避免底部遮住列表） */}
       {data && data.total > 0 && (
-        <div className="flex items-center justify-between gap-1.5 px-1 py-1 shrink-0">
-          <button
-            onClick={goFirst}
-            disabled={data.page <= 1 || loading}
-            title="跳到首页（排名第1）"
-            className="flex items-center gap-0.5 px-2 py-1 rounded-md text-[10px] font-bold border transition-colors disabled:opacity-30 disabled:cursor-not-allowed bg-slate-50 text-slate-600 border-slate-200 hover:bg-blue-50 hover:text-blue-600 hover:border-blue-200"
-          >
-            <ChevronsUp className="w-3 h-3" /> 首页
-          </button>
-          <span className="text-[10px] font-mono text-slate-500">
-            第 <b className="text-slate-700">{data.page}</b> / {totalPages} 页
-            <span className="text-slate-400"> · 共 {data.total} 只</span>
+        <div className="flex items-center justify-between gap-1 px-1 py-1 shrink-0">
+          <div className="flex items-center gap-1">
+            <button
+              onClick={goFirst}
+              disabled={data.page <= 1 || loading}
+              title="跳到首页（排名第1）"
+              className="flex items-center px-1.5 py-1 rounded-md text-[10px] font-bold border transition-colors disabled:opacity-30 disabled:cursor-not-allowed bg-slate-50 text-slate-600 border-slate-200 hover:bg-blue-50 hover:text-blue-600 hover:border-blue-200"
+            >
+              <ChevronsUp className="w-3 h-3" />
+            </button>
+            <button
+              onClick={goPrev}
+              disabled={data.page <= 1 || loading}
+              title="上一页"
+              className="flex items-center gap-0.5 px-1.5 py-1 rounded-md text-[10px] font-bold border transition-colors disabled:opacity-30 disabled:cursor-not-allowed bg-slate-50 text-slate-600 border-slate-200 hover:bg-blue-50 hover:text-blue-600 hover:border-blue-200"
+            >
+              <ChevronLeft className="w-3 h-3" />上一页
+            </button>
+          </div>
+          <span className="flex items-center gap-1 text-[10px] font-mono text-slate-500 whitespace-nowrap">
+            第
+            <input
+              value={pageInput}
+              onChange={e => setPageInput(e.target.value.replace(/[^\d]/g, ''))}
+              onKeyDown={e => { if (e.key === 'Enter') { e.currentTarget.blur(); jumpToPage(); } }}
+              onBlur={jumpToPage}
+              inputMode="numeric"
+              aria-label="页码"
+              title="输入页码后回车跳转"
+              className="w-9 px-1 py-0.5 text-center font-mono text-[10px] text-slate-700 bg-white border border-slate-200 rounded focus:border-blue-400 focus:outline-none"
+            />
+            <span>/ {totalPages} 页</span>
+            <span className="text-slate-400">· {data.total} 只</span>
           </span>
-          <button
-            onClick={goLast}
-            disabled={data.page >= totalPages || loading}
-            title="跳到末页（排名最后）"
-            className="flex items-center gap-0.5 px-2 py-1 rounded-md text-[10px] font-bold border transition-colors disabled:opacity-30 disabled:cursor-not-allowed bg-slate-50 text-slate-600 border-slate-200 hover:bg-blue-50 hover:text-blue-600 hover:border-blue-200"
-          >
-            末页 <ChevronsDown className="w-3 h-3" />
-          </button>
+          <div className="flex items-center gap-1">
+            <button
+              onClick={goNext}
+              disabled={data.page >= totalPages || loading}
+              title="下一页"
+              className="flex items-center gap-0.5 px-1.5 py-1 rounded-md text-[10px] font-bold border transition-colors disabled:opacity-30 disabled:cursor-not-allowed bg-slate-50 text-slate-600 border-slate-200 hover:bg-blue-50 hover:text-blue-600 hover:border-blue-200"
+            >
+              下一页<ChevronRight className="w-3 h-3" />
+            </button>
+            <button
+              onClick={goLast}
+              disabled={data.page >= totalPages || loading}
+              title="跳到末页（排名最后）"
+              className="flex items-center px-1.5 py-1 rounded-md text-[10px] font-bold border transition-colors disabled:opacity-30 disabled:cursor-not-allowed bg-slate-50 text-slate-600 border-slate-200 hover:bg-blue-50 hover:text-blue-600 hover:border-blue-200"
+            >
+              <ChevronsDown className="w-3 h-3" />
+            </button>
+          </div>
         </div>
       )}
 
       {/* 列表头：单行 10 列，与每行严格对齐；点击表头筛选 */}
-      <div className={`${GRID} px-1 pb-1 pt-2 text-[11px] font-bold text-slate-400 border-b border-slate-100 shrink-0 items-center`}>
+      <div className={`${GRID} px-1 pb-1 pt-2 text-[10px] font-bold text-slate-400 border-b border-slate-100 shrink-0 items-center`}>
         <span className="text-center">排名</span>
         <span>股票</span>
         <span className="text-center" title="近15日收盘价走势（红涨绿跌）">走势</span>
@@ -380,7 +449,8 @@ export function StockSidebar({ selected, onSelect, watchlistSymbols, positions =
         <span className="text-center">{headerDropdown(fac('trend', TREND_OPTIONS), filters.trend, v => onFiltersChange({ ...filters, trend: v }), '趋势')}</span>
         <span className="text-right">{headerDropdown(fac('bucket', BUCKET_OPTIONS), filters.bucket, v => onFiltersChange({ ...filters, bucket: v, scoreMin: undefined }),
           filters.bucket ? (BUCKET_SHORT[filters.bucket] ?? '得分') : '得分')}</span>
-        <span className="text-center" title="仓位数值：0=极低，0.1~0.99=数值越高色调越深">仓位</span>
+        <span className="text-center" title="仓位信号：0=不入场（低于行业头部/大盘空仓），0.1~0.99=建议投入比例（半凯利）">仓位</span>
+        <span className="text-center">{headerDropdown(fac('side', [{ value: 'BUY', label: '买入' }, { value: 'SELL', label: '卖出' }, { value: 'HOLD', label: '持有' }]), filters.side, v => onFiltersChange({ ...filters, side: v }), '信号')}</span>
       </div>
 
       {/* 股票列表 */}
@@ -400,15 +470,15 @@ export function StockSidebar({ selected, onSelect, watchlistSymbols, positions =
                 key={it.symbol}
                 data-symbol={it.symbol}
                 onClick={() => onSelect(it)}
-                className={`w-full ${GRID} items-center px-1.5 py-1.5 rounded-lg text-left transition-colors ${
+                className={`w-full ${GRID} items-center px-1.5 py-1 rounded-lg text-left transition-colors ${
                   isSel ? 'bg-blue-50 border border-blue-200' : 'hover:bg-slate-50 border border-transparent'
                 }`}
               >
-                <span className={`text-center text-[11px] font-mono font-bold ${rank <= 3 ? 'text-base leading-none' : 'text-slate-400'}`}>{rankMedal}</span>
+                <span className={`text-center text-[10px] font-mono font-bold ${rank <= 3 ? 'text-sm leading-none' : 'text-slate-400'}`}>{rankMedal}</span>
                 {/* 股票单元格：主行(名称|涨幅) + 副行(代码|价格·市值)，单列内 flex-col */}
                 <span className="flex flex-col min-w-0 gap-0.5">
                   <span className="flex items-center justify-between gap-1">
-                    <span className="text-[13px] font-bold text-slate-700 truncate flex items-center gap-0.5 min-w-0">
+                    <span className="text-xs font-bold text-slate-700 truncate flex items-center gap-0.5 min-w-0">
                       {(() => {
                         const watched = watchlistSymbols.has(toPrefix(it.symbol));
                         return (
@@ -427,16 +497,16 @@ export function StockSidebar({ selected, onSelect, watchlistSymbols, positions =
                         const kind = positions.get(toPrefix(it.symbol));
                         if (!kind) return null;
                         const badge = POSITION_BADGE[kind];
-                        return <span title={badge.title} className={`text-[9px] font-bold rounded px-0.5 shrink-0 border ${badge.cls}`}>{badge.label}</span>;
+                        return <span title={badge.title} className={`text-[8px] font-bold rounded px-0.5 shrink-0 border ${badge.cls}`}>{badge.label}</span>;
                       })()}
-                      {it.is_st && <span className="text-[10px] bg-rose-50 text-rose-500 rounded px-0.5 shrink-0">ST</span>}
+                      {it.is_st && <span className="text-[9px] bg-rose-50 text-rose-500 rounded px-0.5 shrink-0">ST</span>}
                       <span className="truncate">{it.name}</span>
                     </span>
-                    <span className={`text-[11px] font-mono shrink-0 ${up ? 'text-rose-500' : 'text-emerald-500'}`}>{fmtPct(it.pct_change)}</span>
+                    <span className={`text-[10px] font-mono shrink-0 ${up ? 'text-rose-500' : 'text-emerald-500'}`}>{fmtPct(it.pct_change)}</span>
                   </span>
                   <span className="flex items-center justify-between gap-1">
-                    <span className="text-[10px] text-slate-400 font-mono truncate">{it.symbol}</span>
-                    <span className="text-[10px] text-slate-500 font-mono shrink-0">{it.close?.toFixed(2) ?? '--'} · {fmtMv(it.total_mv)}</span>
+                    <span className="text-[9px] text-slate-400 font-mono truncate">{it.symbol}</span>
+                    <span className="text-[9px] text-slate-500 font-mono shrink-0">{it.close?.toFixed(2) ?? '--'} · {fmtMv(it.total_mv)}</span>
                   </span>
                 </span>
                 {/* 近15日走势微缩折线（懒加载，红涨绿跌） */}
@@ -445,40 +515,49 @@ export function StockSidebar({ selected, onSelect, watchlistSymbols, positions =
                 </span>
                 {/* 板块 + 当天头部 top10 均分 */}
                 <span className="flex flex-col items-center min-w-0 gap-0" title={`${it.board ?? '--'} · top10 ${it.board_top10_avg != null ? (it.board_top10_avg >= 0 ? '+' : '') + it.board_top10_avg.toFixed(3) : '--'}`}>
-                  <span className={`inline-block text-[10px] font-bold rounded px-0.5 border truncate max-w-full ${boardToneOf(it.board)}`}>{it.board?.replace('市主板', '主板') ?? '--'}</span>
-                  <span className="text-[10px] font-mono text-slate-400 truncate">{it.board_top10_avg != null ? `${it.board_top10_avg >= 0 ? '+' : ''}${it.board_top10_avg.toFixed(3)}` : ''}</span>
+                  <span className={`inline-block text-[8px] font-bold rounded px-0.5 border truncate max-w-full ${boardToneOf(it.board)}`}>{it.board?.replace('市主板', '主板') ?? '--'}</span>
+                  <span className="text-[7px] font-mono text-slate-400 truncate">{it.board_top10_avg != null ? `${it.board_top10_avg >= 0 ? '+' : ''}${it.board_top10_avg.toFixed(3)}` : ''}</span>
                 </span>
                 {/* 行业 + 当天头部 top10 均分 */}
                 <span className="flex flex-col items-center min-w-0 gap-0" title={`${it.industry ?? '--'} · top10 ${it.industry_top10_avg != null ? (it.industry_top10_avg >= 0 ? '+' : '') + it.industry_top10_avg.toFixed(3) : '--'}`}>
-                  <span className="text-[10px] text-slate-600 truncate max-w-full">{it.industry ?? '--'}</span>
-                  <span className="text-[10px] font-mono text-slate-400 truncate">{it.industry_top10_avg != null ? `${it.industry_top10_avg >= 0 ? '+' : ''}${it.industry_top10_avg.toFixed(3)}` : ''}</span>
+                  <span className="text-[9px] text-slate-600 truncate max-w-full">{it.industry ?? '--'}</span>
+                  <span className="text-[7px] font-mono text-slate-400 truncate">{it.industry_top10_avg != null ? `${it.industry_top10_avg >= 0 ? '+' : ''}${it.industry_top10_avg.toFixed(3)}` : ''}</span>
                 </span>
                 {/* 市值档 + 当天头部 top10 均分 */}
                 <span className="flex flex-col items-center min-w-0 gap-0" title={`${it.cap_tier || '--'} · top10 ${it.cap_top10_avg != null ? (it.cap_top10_avg >= 0 ? '+' : '') + it.cap_top10_avg.toFixed(3) : '--'}`}>
-                  <span className="text-[10px] text-slate-600 shrink-0">{it.cap_tier || '--'}</span>
-                  <span className="text-[10px] font-mono text-slate-400 truncate">{it.cap_top10_avg != null ? `${it.cap_top10_avg >= 0 ? '+' : ''}${it.cap_top10_avg.toFixed(3)}` : ''}</span>
+                  <span className="text-[9px] text-slate-600 shrink-0">{it.cap_tier || '--'}</span>
+                  <span className="text-[7px] font-mono text-slate-400 truncate">{it.cap_top10_avg != null ? `${it.cap_top10_avg >= 0 ? '+' : ''}${it.cap_top10_avg.toFixed(3)}` : ''}</span>
                 </span>
                 {/* 趋势 */}
-                <span className={`text-center text-[10px] truncate ${TREND_COLOR[it.trend ?? ''] ?? 'text-slate-400'}`}>{it.trend ?? '-'}</span>
+                <span className={`text-center text-[9px] truncate ${TREND_COLOR[it.trend ?? ''] ?? 'text-slate-400'}`}>{it.trend ?? '-'}</span>
                 {/* 得分 */}
-                <span className={`text-right text-[12px] font-mono font-bold ${(it.fusion ?? 0) >= 0 ? 'text-blue-600' : 'text-slate-400'}`}>
+                <span className={`text-right text-[11px] font-mono font-bold ${(it.fusion ?? 0) >= 0 ? 'text-blue-600' : 'text-slate-400'}`}>
                   {it.fusion != null ? `+${(it.fusion).toFixed(3)}`.replace('+-', '-') : '--'}
                 </span>
-                {/* 仓位数值 */}
+                {/* 仓位信号 */}
                 <span className="text-center">
                   {(() => {
                     const ps = it.position_score;
                     const tone = positionToneOf(ps);
                     const pct = it.pct_industry;
+                    const empty = it.market_empty;
                     const tip = ps == null
-                      ? '该日无仓位数据（未推理或缺失基准）'
-                      : `仓位数值 ${(ps * 100).toFixed(0)}%${pct != null ? ` · 行业百分位 ${(pct * 100).toFixed(0)}%` : ''}`;
+                      ? '该日无仓位信号（未推理或缺失基准）'
+                      : ps <= 0
+                        ? (empty ? '大盘空仓信号，不入场' : (pct != null && pct < 0.8 ? `行业百分位 ${(pct * 100).toFixed(0)}% < 80%，不入场` : '不入场'))
+                        : `建议投入 ${Math.round(ps * 100)}%（半凯利）· 行业百分位 ${pct != null ? (pct * 100).toFixed(0) + '%' : '--'}`;
                     return (
-                      <span className={`inline-block text-[10px] font-bold rounded px-0.5 py-0.5 border ${tone.cls}`} title={tip}>
+                      <span className={`inline-block text-[9px] font-bold rounded px-0.5 py-0.5 border ${tone.cls}`} title={tip}>
                         {tone.txt}
                       </span>
                     );
                   })()}
+                </span>
+                {/* 信号方向 */}
+                <span className="text-center">
+                  <span className={`text-[9px] rounded px-1 py-0.5 font-bold ${SIDE_COLOR[it.side ?? 'HOLD'] ?? SIDE_COLOR.HOLD}`}>
+                    {(it.side ?? 'HOLD') === 'HOLD' ? '-' : it.side}
+                  </span>
                 </span>
               </button>
             );

@@ -263,7 +263,28 @@ export function ScoreCalendar({ symbol, onBarClick, selectedDate, modelId, onInf
     });
   };
 
-  const months = useMemo(() => bucketByMonth(items), [items]);
+  const months = useMemo(() => {
+    const real = bucketByMonth(items);
+    if (real.length) return real;
+    // 无推理数据时也要把日历画出来：用最近 3 个月的空月份兜底。
+    // 空月历不是空窗——格子可点、可拖选，用来触发该日推理
+    // （格子 tooltip：「无推理 · 点击推理该日；按住拖动可批量选多日」）。
+    // 之前直接显示"暂无推理分数历史"，等于把推理入口本身也一起藏掉了。
+    const out: MonthBucket[] = [];
+    const now = new Date();
+    for (let i = 2; i >= 0; i--) {
+      const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+      const year = d.getFullYear();
+      const month = d.getMonth() + 1;
+      out.push({
+        key: `${year}-${String(month).padStart(2, '0')}`,
+        year, month,
+        scores: new Map<string, number>(),
+        sides: new Map<string, string>(),
+      });
+    }
+    return out;
+  }, [items]);
 
   // 默认跳到最新有分数的月份
   const [initialized, setInitialized] = useState(false);
@@ -400,6 +421,7 @@ export function ScoreCalendar({ symbol, onBarClick, selectedDate, modelId, onInf
               } ${c.today ? 'ring-2 ring-blue-400 ring-offset-1' : ''} ${c.active ? 'ring-2 ring-amber-500 ring-offset-1' : ''}`}
             >
               {c.day}
+              {c.value != null && <span className="text-[7px] opacity-80">{c.side === 'BUY' ? 'B' : c.side === 'SELL' ? 'S' : ''}</span>}
             </button>
           ))}
           {cells.length === 0 && (
@@ -437,6 +459,7 @@ export function ScoreCalendar({ symbol, onBarClick, selectedDate, modelId, onInf
           <span className="w-3 h-3 rounded-sm bg-emerald-300" />
           <span className="w-3 h-3 rounded-sm bg-emerald-500" />
           <span className="w-3 h-3 rounded-sm bg-emerald-600" />
+          <span className="ml-1">B=买入 S=卖出</span>
         </div>
       </div>
     </div>
