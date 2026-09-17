@@ -5,7 +5,7 @@
  */
 
 import React, { useCallback, useEffect, useState } from 'react';
-import { BellRing, Check, Loader2, RefreshCw, ShieldQuestion, X } from 'lucide-react';
+import { Activity, BellRing, Check, Loader2, RefreshCw, ShieldQuestion, X } from 'lucide-react';
 import { CARD, CardHeader, StatTile } from './cardKit';
 import {
   actionLine,
@@ -129,14 +129,22 @@ export const CopilotPanel: React.FC = () => {
       )}
 
       <div className="mb-3 grid grid-cols-4 gap-2">
-        <StatTile label="时延 P95" value={metrics.latencyP95} tone="blue" />
+        <StatTile label="时延 P95" value={metrics.latencyP95} tone={metrics.latencyP95Ms !== null && metrics.latencyP95Ms >= 60000 ? 'amber' : 'blue'} />
         <StatTile label="误报率(30d)" value={metrics.missRate} tone={metrics.missRate === '—' ? 'slate' : 'amber'} />
         <StatTile label="24h 事件" value={metrics.events} tone="slate" />
         <StatTile label="P6 资源" value={<span className="text-[11px]">{metrics.budgetText}</span>} tone="slate" />
       </div>
 
-      {/* 事件流 */}
-      <div className="mb-1 text-[11px] font-semibold text-slate-500">情报事件流（24h）</div>
+      {/* 事件流（卡片） */}
+      <div className="mb-3 overflow-hidden rounded-xl border border-slate-200/80">
+        <div className="flex items-center gap-2 border-b border-slate-100 bg-slate-50/70 px-3 py-2">
+          <Activity size={13} className="shrink-0 text-blue-500" />
+          <span className="text-[12px] font-bold text-slate-700">情报事件流（24h）</span>
+          <span className="ml-auto rounded-full border border-slate-200 bg-white px-1.5 py-0.5 text-[10px] font-semibold text-slate-500">
+            {events.length} 条
+          </span>
+        </div>
+        <div className="p-2">
       {panel?.events?.available === false ? (
         <div className="rounded-lg border border-dashed border-slate-200 px-2 py-3 text-[11px] text-slate-400">
           事件流不可用：{panel.events.reason || '未知原因'}
@@ -193,8 +201,19 @@ export const CopilotPanel: React.FC = () => {
         </ul>
       )}
 
-      {/* 建议卡 */}
-      <div className="mt-3 mb-1 text-[11px] font-semibold text-slate-500">建议卡</div>
+        </div>
+      </div>
+
+      {/* 建议卡（卡片） */}
+      <div className="overflow-hidden rounded-xl border border-slate-200/80">
+        <div className="flex items-center gap-2 border-b border-slate-100 bg-slate-50/70 px-3 py-2">
+          <ShieldQuestion size={13} className="shrink-0 text-indigo-500" />
+          <span className="text-[12px] font-bold text-slate-700">建议卡</span>
+          <span className="ml-auto rounded-full border border-slate-200 bg-white px-1.5 py-0.5 text-[10px] font-semibold text-slate-500">
+            {advice.length} 条
+          </span>
+        </div>
+        <div className="p-2">
       {advice.length === 0 ? (
         <div className="rounded-lg border border-dashed border-slate-200 px-2 py-3 text-[11px] text-slate-400">
           暂无建议卡（QuantBot 生成后在此决策）
@@ -257,6 +276,8 @@ export const CopilotPanel: React.FC = () => {
           })}
         </ul>
       )}
+        </div>
+      </div>
     </section>
   );
 };

@@ -102,14 +102,22 @@ export function adviceStatusMeta(status: string): { label: string; tone: 'blue' 
   return map[status] || { label: status, tone: 'slate' };
 }
 
+/** 时延自适应单位：<1s 毫秒 / <60s 秒 / 以上分钟（15min 级数值是水印陈旧告警而非格式化问题） */
+function formatLatency(ms: number): string {
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
+  return `${(ms / 60000).toFixed(1)}min`;
+}
+
 /** 面板指标摘要（缺失如实 —） */
 export function panelMetrics(panel: CopilotPanel | null): {
   latencyP95: string;
+  latencyP95Ms: number | null;
   missRate: string;
   events: number;
   budgetText: string;
 } {
-  if (!panel) return { latencyP95: '—', missRate: '—', events: 0, budgetText: '—' };
+  if (!panel) return { latencyP95: '—', latencyP95Ms: null, missRate: '—', events: 0, budgetText: '—' };
   const p95 = panel.latency?.market_snapshot?.p95_ms;
   const miss = panel.miss_rate?.miss_rate;
   const detail = panel.budget?.detail as Record<string, unknown> | null | undefined;
@@ -117,7 +125,8 @@ export function panelMetrics(panel: CopilotPanel | null): {
     ? `tdx ${String(detail.tdx_rss_mb ?? '-')}MB · 引擎 ${String(detail.engine_rss_mb ?? '-')}MB`
     : '—';
   return {
-    latencyP95: typeof p95 === 'number' ? `${Math.round(p95)}ms` : '—',
+    latencyP95: typeof p95 === 'number' ? formatLatency(p95) : '—',
+    latencyP95Ms: typeof p95 === 'number' ? p95 : null,
     missRate: typeof miss === 'number' ? `${(miss * 100).toFixed(1)}%` : '—',
     events: panel.events?.items?.length ?? 0,
     budgetText,
