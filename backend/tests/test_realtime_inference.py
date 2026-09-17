@@ -414,10 +414,25 @@ def _qdb_meta(**extra):
 
 @pytest.mark.unit
 def test_load_baseline_for_model_quantdb_dispatch():
-    """quantdb 绑定 → 直读：最近可用日、只请求源内存在的列、历史 tail(45)、键归一纯数字。"""
+    """quantdb 绑定 → 直读：最近可用日、只请求源内存在的列、历史 qfq tail(45)、键归一纯数字。"""
     import pandas as pd
 
     from backend.services.engine.inference.realtime_core import load_baseline_for_model
+
+    class _FakeHub:
+        """日线 hub 假体：录制 fetch_daily_kline_batch 参数并返回可控历史。"""
+
+        def __init__(self, df, avail_dates=None):
+            self.df = df
+            self.avail = list(avail_dates or [])
+            self.calls: list[tuple] = []
+
+        def _partition_dates(self, rel_path, start=None, end=None):
+            return [d for d in self.avail if end is None or d <= end.strftime("%Y%m%d")]
+
+        def fetch_daily_kline_batch(self, symbols, start, end, *, adjust="qfq"):
+            self.calls.append((tuple(symbols), start, end, adjust))
+            return self.df
 
     dates = ["2026-08-01", "2026-09-11", "2026-09-14"]
     day_df = pd.DataFrame(
@@ -426,7 +441,7 @@ def test_load_baseline_for_model_quantdb_dispatch():
     hist_df = pd.DataFrame(
         [
             {
-                "symbol": "SH600036", "trade_date": f"2026-07-{i % 28 + 1:02d}",
+                "symbol": "600036.SH", "trade_date": f"2026-07-{i % 28 + 1:02d}",
                 "open": 1.0, "high": 1.1, "low": 0.9, "close": 1.0,
                 "volume": 1e6, "amount": 1e7,
             }
@@ -437,8 +452,9 @@ def test_load_baseline_for_model_quantdb_dispatch():
         dates=dates,
         columns=["symbol", "date", "f1", "open", "close"],
         day_df=day_df,
-        hist_df=hist_df,
+        hist_df=pd.DataFrame(),
     )
+    hub = _FakeHub(hist_df, avail_dates=["20260914", "20260915", "20260916"])
     bundle = load_baseline_for_model(
         ["600036.SH", "000001.SZ"],
         date(2026, 9, 17),
@@ -446,6 +462,7 @@ def test_load_baseline_for_model_quantdb_dispatch():
         cols=["f1", "f9", "open"],
         parquet_path="/nonexistent.parquet",
         reader=reader,
+        history_hub=hub,
     )
     calls = {c[0]: c for c in reader.calls}
     assert calls["available_dates"][3] == "2026-09-16"      # day-1 上界
@@ -455,8 +472,12 @@ def test_load_baseline_for_model_quantdb_dispatch():
     assert set(rows) == {"600036", "000001"}                # 前缀式返回 → 归一纯数字键
     assert rows["600036"]["f1"] == pytest.approx(0.5)
     assert rows["600036"]["f9"] is None                     # 缺列交 fill 兜底
-    assert calls["read_range"][2] == "2026-08-01"           # 历史窗口 = 可用日集合
-    assert calls["read_range"][3] == "2026-09-14"
+    # 历史走 daily_forward 前复权直读（与快照价/批量特征同口径；后复权混用会致 mom_* 偏负），
+    # 结束日放宽到「≤ day-1 的最新 K 线可用日」（09-16，因子源只到 09-14）
+    assert len(hub.calls) == 1
+    _syms, h_start, h_end, h_adjust = hub.calls[0]
+    assert h_start.isoformat() == "2026-08-01" and h_end.isoformat() == "2026-09-16"
+    assert h_adjust == "qfq"
     assert len(bundle["history"]["600036"]) == 45           # tail(45)
 
 

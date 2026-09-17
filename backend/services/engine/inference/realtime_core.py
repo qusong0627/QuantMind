@@ -293,6 +293,51 @@ def load_baseline_bundle(
 QUANTDB_DATA_SOURCE = "quantdb_factors"
 
 
+def _load_qfq_history(
+    symbols: list[str],
+    start: str,
+    end_upper: str,
+    *,
+    history_len: int = 45,
+    hub: Any = None,
+) -> dict[str, Any]:
+    """前复权日线历史（增量引擎引导专用，唯一口径）。
+
+    为什么不用因子源自带 OHLCV：l1_l2 的行情补给是 daily_backward（后复权），而实时
+    快照价=原始价≈前复权尾段——混用会让 mom_* 全族系统性偏负（2026-09-17 实测
+    600036：40.60/57.08-1=-0.289 假收益）。批量侧特征基于 daily_forward（前复权），
+    实时必须同口径（daily_forward 直读，配额与量纲纪律见 quantdb_hub）。
+
+    ``end_upper`` = 日线可取的上界（**day-1**，严格防盘中未收盘行泄漏）；实际结束日
+    放宽到「≤ end_upper 的最新 K 线可用日」——因子源比 K 线晚 1–2 个交易日，若锚在
+    因子日上，引擎重启后首日的 mom 短窗基准会偏旧（历史环补不到最近完整交易日）。
+    """
+    if hub is None:
+        from backend.services.engine.data_platform.quantdb_hub import QuantDBDataHub
+
+        hub = QuantDBDataHub.get_instance()
+    day0 = date.fromisoformat(str(start)[:10])
+    day1 = date.fromisoformat(str(end_upper)[:10])
+    avail = hub._partition_dates("1_kline_data/daily_forward", None, day1)
+    if avail:
+        last = avail[-1]
+        day1 = date(int(last[:4]), int(last[4:6]), int(last[6:]))
+    df = hub.fetch_daily_kline_batch(symbols, day0, day1, adjust="qfq")
+    history: dict[str, Any] = {}
+    if df is None or not len(df):
+        return history
+    raw = ["symbol", "trade_date", "open", "high", "low", "close", "volume", "amount"]
+    keep = [c for c in raw if c in df.columns]
+    wanted = {digits(s) for s in symbols}
+    work = df.assign(_norm=df["symbol"].map(digits))
+    work = work[work["_norm"].isin(wanted)]
+    for norm, g in work.groupby("_norm"):
+        history[str(norm)] = (
+            g.sort_values("trade_date")[keep].tail(history_len).reset_index(drop=True)
+        )
+    return history
+
+
 def _quantdb_reader_for_meta(meta: dict[str, Any]) -> Any:
     from backend.services.engine.data_platform.quantdb_factor_reader import (
         QuantDBFactorReader,
@@ -310,6 +355,7 @@ def load_baseline_quantdb(
     meta: dict[str, Any],
     cols: list[str],
     reader: Any | None = None,
+    history_hub: Any | None = None,
     history_len: int = 45,
 ) -> dict[str, Any]:
     """QuantDB 直读基线（2026-09-17 迁移）：取数面与批量推理 ``load_date_data`` 同源。
@@ -321,7 +367,9 @@ def load_baseline_quantdb(
     - rows：**最近可用因子日**（``available_dates`` ≤ day-1）的模型特征行；
       仅请求该源真实存在的列——缺列统一缺席（``compute_cycle`` 交 fill 兜底，
       与 parquet 路径同纪律：口径不符不硬来）；
-    - history：近 ``history_len`` 个可用交易日的 OHLCV（增量引擎引导用，引导仅发生一次）。
+    - history：近 ``history_len`` 个可用交易日的**前复权**日线（daily_forward 直读；
+      增量引擎引导用，引导仅发生一次）——与快照价/批量特征同口径（后复权混用会致
+      mom_* 系统性偏负，2026-09-17 实测）。
     直读失败**显式抛出**（由调用方记 last_error），绝不静默回落 parquet 防混源。
     """
     if reader is None:
@@ -354,19 +402,14 @@ def load_baseline_quantdb(
             rows[str(norm)] = {c: last.get(c) for c in cols}
 
     history: dict[str, Any] = {}
-    raw = ["symbol", "trade_date", "open", "high", "low", "close", "volume", "amount"]
     hist_dates = dates[-max(1, int(history_len)):]
-    hist_df = reader.read_range(
-        source, features=[], start=hist_dates[0], end=latest, include_ohlcv=True
+    history = _load_qfq_history(
+        symbols,
+        hist_dates[0],
+        (day - timedelta(days=1)).isoformat(),  # 上界=day-1（K 线可补到比因子日新）
+        history_len=history_len,
+        hub=history_hub,
     )
-    if hist_df is not None and len(hist_df):
-        keep = [c for c in raw if c in hist_df.columns]
-        hist_df = hist_df.assign(_norm=hist_df["symbol"].map(digits))
-        hist_df = hist_df[hist_df["_norm"].isin(wanted)]
-        for norm, g in hist_df.groupby("_norm"):
-            history[str(norm)] = (
-                g.sort_values("trade_date")[keep].tail(history_len).reset_index(drop=True)
-            )
     return {"rows": rows, "history": history}
 
 
@@ -379,6 +422,7 @@ def load_baseline_for_model(
     parquet_path: str | Path,
     history_len: int = 45,
     reader: Any | None = None,
+    history_hub: Any | None = None,
 ) -> dict[str, Any]:
     """基线加载唯一分派（在线服务/回放验收共用）：取数面由模型 ``data_source`` 绑定裁定。
 
@@ -387,7 +431,13 @@ def load_baseline_for_model(
     """
     if str(meta.get("data_source") or "").strip() == QUANTDB_DATA_SOURCE:
         return load_baseline_quantdb(
-            symbols, day, meta=meta, cols=cols, reader=reader, history_len=history_len
+            symbols,
+            day,
+            meta=meta,
+            cols=cols,
+            reader=reader,
+            history_hub=history_hub,
+            history_len=history_len,
         )
     return load_baseline_bundle(
         symbols, day, parquet_path=parquet_path, cols=cols, history_len=history_len
