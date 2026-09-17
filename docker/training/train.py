@@ -353,6 +353,34 @@ def _get_model_framework(model_type: str) -> str:
     return mapping.get(model_type, "unknown")
 
 
+def _predict_chunked_frame(
+    model: Any,
+    frame: pd.DataFrame,
+    model_type: str,
+    features: list[str],
+    fill,
+    chunk_days: int = 100,
+) -> np.ndarray:
+    """按 100 交易日分块预测（树/MLP 指标预测用，峰值降为单块）。
+
+    内存模型（2026-09-17 v10）：指标预测旧实现在整帧上 _fill(≈7GB float32)
+    后直接送入模型，sklearn MLP 内部再转 float64 + 激活矩阵 ≈2×——28 秒内
+    +11GB 顶穿主机（v9 死在最后一个模型 MLP 实证）。与全量预测同款 100 日切法；
+    预测逐行独立，掩码原位回填后行序与整帧一致、逐值等价（分块仅浮点 ulp 级差）。
+    """
+    if "trade_date" not in frame.columns:
+        # 遗留无键帧：无分块依据，保持整帧预测
+        return _predict_with_model(model, fill(frame), model_type, features)
+    out = np.empty(len(frame), dtype=np.float64)
+    dates = pd.Index(frame["trade_date"].unique())
+    for i in range(0, len(dates), chunk_days):
+        mask = frame["trade_date"].isin(dates[i : i + chunk_days]).to_numpy()
+        if not mask.any():
+            continue
+        out[mask] = _predict_with_model(model, fill(frame.loc[mask]), model_type, features)
+    return out
+
+
 def train_model(df: pd.DataFrame, features: list[str], cfg: dict, hardware: dict | None = None,
                 need_full_pred: bool = True) -> tuple:
     """统一训练入口：根据 model_type 路由到对应训练函数。"""
@@ -437,10 +465,10 @@ def train_model(df: pd.DataFrame, features: list[str], cfg: dict, hardware: dict
     del X_train, X_val
     _trim_memory("after training")
 
-    # 统一预测 (树模型)
-    y_train_pred = _predict_with_model(model, _fill(train_df), model_type, features)
-    y_val_pred = _predict_with_model(model, _fill(val_df), model_type, features)
-    y_test_pred = _predict_with_model(model, _fill(test_df), model_type, features)
+    # 统一预测 (树模型)：分块预测，峰值从整帧 _fill(≈7GB)+模型内放大降为单块
+    y_train_pred = _predict_chunked_frame(model, train_df, model_type, features, _fill)
+    y_val_pred = _predict_chunked_frame(model, val_df, model_type, features, _fill)
+    y_test_pred = _predict_chunked_frame(model, test_df, model_type, features, _fill)
     train_m = _compute_metrics(train_df, y_train, y_train_pred)
     val_m   = _compute_metrics(val_df,   y_val,   y_val_pred)
     test_m  = _compute_metrics(test_df,  test_df["label"].astype("float32").to_numpy(), y_test_pred)
@@ -637,10 +665,10 @@ def _train_single_model(
     del X_train, X_val
     _trim_memory("after training (single)")
 
-    # 树模型预测
-    y_train_pred = _predict_with_model(model, _fill(train_df), model_type, features)
-    y_val_pred = _predict_with_model(model, _fill(val_df), model_type, features)
-    y_test_pred = _predict_with_model(model, _fill(test_df), model_type, features)
+    # 树/MLP 模型预测：分块（同 train_model，防 MLP 全帧 float64 放大，v9 实证）
+    y_train_pred = _predict_chunked_frame(model, train_df, model_type, features, _fill)
+    y_val_pred = _predict_chunked_frame(model, val_df, model_type, features, _fill)
+    y_test_pred = _predict_chunked_frame(model, test_df, model_type, features, _fill)
     train_m = _compute_metrics(train_df, y_train, y_train_pred)
     val_m = _compute_metrics(val_df, y_val, y_val_pred)
     test_m = _compute_metrics(test_df, test_df["label"].astype("float32").to_numpy(), y_test_pred)
