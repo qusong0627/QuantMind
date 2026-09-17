@@ -40,7 +40,7 @@ from backend.services.engine.inference.realtime_core import (
     ledger_entry,
     ledger_json,
     live_coverage,
-    load_baseline_bundle,
+    load_baseline_for_model,
     snapshot_key,
 )
 
@@ -210,12 +210,29 @@ class RealtimeInferenceService:
                 pass
 
     def _default_baseline(self, symbols: list[str], day: date) -> dict[str, Any]:
-        """T-1 行 + 价格历史（共享核心实现：与回放器同源）。"""
-        meta = _read_metadata(Path(self._current_model_dir()))
+        """T-1 行 + 价格历史（分派：quantdb 直读 / 遗留快照——与回放器同源）。
+
+        日级缓存：T-1 数据盘中不变，15s 周期不必反复读（此前每周期整读快照 parquet）。
+        缓存键含日与模型目录；换日/换模型即淘汰。
+        """
+        model_dir = self._current_model_dir()
+        cache_key = f"{day.isoformat()}|{model_dir}"
+        with self._lock:
+            if self._baseline_day == cache_key and cache_key in self._baselines:
+                return self._baselines[cache_key]
+        meta = _read_metadata(Path(model_dir))
         cols = list(meta.get("feature_columns") or [])
-        return load_baseline_bundle(
-            symbols, day, parquet_path=DEFAULT_SNAPSHOT_PARQUET, cols=cols
+        bundle = load_baseline_for_model(
+            symbols,
+            day,
+            meta=meta,
+            cols=cols,
+            parquet_path=DEFAULT_SNAPSHOT_PARQUET,
         )
+        with self._lock:
+            self._baseline_day = cache_key
+            self._baselines = {cache_key: bundle}
+        return bundle
 
     def _append_ledger(self, entry: dict[str, Any]) -> None:
         """账本落 Redis（best-effort：失败计数不阻断发布——回放验收依赖它的完整性计数）。"""

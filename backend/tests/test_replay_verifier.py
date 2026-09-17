@@ -20,10 +20,13 @@ import pytest
 _CST = timezone(timedelta(hours=8))
 
 
-def _today_ts(hhmmss: str) -> float:
-    now = datetime.now(tz=_CST)
-    dt = now.replace(hour=int(hhmmss[:2]), minute=int(hhmmss[2:4]), second=int(hhmmss[4:]), microsecond=0)
-    return dt.timestamp()
+def _recent_ts(seconds_ago: float) -> float:
+    """相对当前时刻（当日）的时间戳——快照必须落在实时可用线内，否则被覆盖率闸门拦下。
+
+    2026-09-17 实测：本测试原用固定 ``today 10:00`` 时刻，闸门（min_live_coverage=0.5）上线后
+    任何 10:05 之后跑都会因 age > 300s 被判"行情未到达"→ ledger 空 → 假红。改为相对时刻。
+    """
+    return datetime.now(tz=_CST).timestamp() - seconds_ago
 
 
 def _snap(price: float, ts: float, *, open_: float = 11.0, high: float | None = None,
@@ -88,7 +91,7 @@ def _build_day(tmp_path):
 
     model_dir = _make_model_dir(tmp_path)
     hot, snaps1, bundle = _fake_engine_inputs(price=12.0)
-    ts1, ts2 = _today_ts("100000"), _today_ts("100015")
+    ts1, ts2 = _recent_ts(30.0), _recent_ts(15.0)
     snaps1 = {k: {**v, "timestamp": str(int(ts1))} for k, v in snaps1.items()}
     snaps2 = {
         "600036.SH": _snap(12.4, ts2, high=12.4),

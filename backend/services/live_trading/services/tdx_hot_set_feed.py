@@ -14,7 +14,9 @@ RATE_LIMITED → 指数退避（30s→300s 封顶），不当作故障。
 
 **写侧**：复用 `tdx_quote_feed.map_snapshot` / `_write_snapshot`（同源契约：小写前缀
 snapshot + 大写前缀 series，source=tdx_bridge）；本模块扩展五档映射（Buyp/Buyv/Sellp/Sellv
-→ bid1-5/ask1-5，单位=手与 TDX 帧一致，F2 内核按 ×100 归一为股）。
+→ bid1-5/ask1-5，单位=手与 TDX 帧一致，F2 内核按 ×100 归一为股）。**L0.5 同源归档**：
+写键成功的快照同步喂 `l05_store.SnapshotArchiver`（tag=bridge，行契约与订阅侧一致），
+补齐订阅零帧期间空转的 T-P6-04 落盘与 T-P6-09 回放原料。
 """
 
 from __future__ import annotations
@@ -23,11 +25,14 @@ import asyncio
 import logging
 import os
 import time
+from datetime import datetime
+from typing import Any
 
 from backend.shared.stock_utils import StockCodeUtil
 from backend.services.live_trading.services.tdx_push_service import tdx_pusher
 from backend.services.live_trading.services.tdx_quote_feed import (
     OFF_HOURS_SLEEP,
+    TZ,
     _now_sh,
     _write_snapshot,
     is_trading_time,
@@ -55,7 +60,87 @@ hot_set_feed_status: dict = {
     "last_feed_at": None,
     "last_error": None,
     "bridge_ok": None,
+    "l05": None,
 }
+
+# ── L0.5 归档（T-P6-04 原料）：桥源席写标准键的成功快照同步喂归档器 ──────────────
+# 背景：归档器只内嵌在订阅写侧，而订阅盘中零数据帧 → L0.5 长期空转、回放验收无原料；
+# 桥源席成为生产唯一供数席后，必须同源归档（行契约与订阅侧完全一致，读取工具零改动）。
+L05_TAG = "bridge"  # 文件名分片 tag（与订阅侧 s{i} 并列，防同日多写侧同毫秒撞名）
+
+_L05_PRICE_MAP = {
+    "price": "Now",
+    "pre_close": "PreClose",
+    "open": "Open",
+    "high": "High",
+    "low": "Low",
+    "volume": "Volume",
+    "amount": "Amount",
+}
+# 五档 20 字段（与 l05_store._FLOAT_FIELDS 契约一致，名字相同直接透传）
+_L05_BOOK_FIELDS = tuple(
+    [f"bid{i}" for i in range(1, 6)]
+    + [f"bid_vol{i}" for i in range(1, 6)]
+    + [f"ask{i}" for i in range(1, 6)]
+    + [f"ask_vol{i}" for i in range(1, 6)]
+)
+
+
+def snapshot_l05_record(suffix: str, snap: dict) -> dict:
+    """标准键快照 → L0.5 归档行（symbol=后缀式、ts=epoch 秒，与订阅侧写侧同契约）。
+
+    桥的 ``get_market_snapshot`` 不提供涨跌停/封单字段 → 对应列如实 None（不假填）。
+    """
+    ts = int(snap["timestamp"])
+    record: dict[str, Any] = {
+        "symbol": suffix,
+        "ts": ts,
+        "refresh_time": datetime.fromtimestamp(ts, tz=TZ).strftime("%H%M%S"),
+        "source": "tdx_bridge",
+        "limit_up": None,
+        "limit_down": None,
+        "seal_amount": None,
+    }
+    for dst, src in _L05_PRICE_MAP.items():
+        record[dst] = snap.get(src)
+    for field in _L05_BOOK_FIELDS:
+        record[field] = snap.get(field)
+    return record
+
+
+_archiver: Any | None = None
+
+
+def _ensure_archiver() -> Any:
+    """L0.5 归档器懒建单例（env 与订阅侧同源：QM_L05_DIR/FLUSH_ROWS/FLUSH_S/KEEP_DAYS）。"""
+    global _archiver
+    if _archiver is None:
+        from backend.shared.l05_store import DEFAULT_BASE_DIR, SnapshotArchiver
+
+        _archiver = SnapshotArchiver(
+            base_dir=os.getenv("QM_L05_DIR") or DEFAULT_BASE_DIR,
+            flush_rows=int(os.getenv("QM_L05_FLUSH_ROWS", "50000")),
+            flush_seconds=float(os.getenv("QM_L05_FLUSH_S", "30")),
+            keep_days=int(os.getenv("QM_L05_KEEP_DAYS", "90")),
+            tag=L05_TAG,
+        )
+        logger.info("[TdxHotSet] l05 归档开启 dir=%s tag=%s", _archiver.base_dir, L05_TAG)
+    return _archiver
+
+
+def _refresh_l05_status() -> None:
+    if _archiver is not None:
+        hot_set_feed_status["l05"] = {
+            "base_dir": _archiver.base_dir,
+            "pending_rows": _archiver.pending_rows,
+            **_archiver.counters,
+        }
+
+
+def _flush_archiver_if_pending() -> None:
+    if _archiver is not None and _archiver.pending_rows:
+        _archiver.flush()
+        _refresh_l05_status()
 
 
 def load_hot_set_symbols() -> list[str]:
@@ -110,6 +195,7 @@ async def run_tdx_hot_set_feed_task() -> None:
     while True:
         try:
             if not is_trading_time(_now_sh()):
+                _flush_archiver_if_pending()  # 收市终刷（缓冲不跨场次滞留）
                 await asyncio.sleep(OFF_HOURS_SLEEP)
                 continue
             symbols = load_hot_set_symbols()
@@ -147,11 +233,14 @@ async def run_tdx_hot_set_feed_task() -> None:
                     hot_set_feed_status["written"] += 1
                     hot_set_feed_status["last_symbol"] = symbol
                     hot_set_feed_status["last_feed_at"] = _now_sh().isoformat(timespec="seconds")
+                    # L0.5 同源归档（写失败只计数不抛出，不阻断实时链）
+                    _ensure_archiver().append(snapshot_l05_record(suffix, snap))
                 else:
                     hot_set_feed_status["errors"] += 1
                 await asyncio.sleep(PACING_S)
 
             hot_set_feed_status["last_cycle_s"] = round(time.monotonic() - cycle_t0, 2)
+            _refresh_l05_status()
             if rate_limited:
                 backoff = BACKOFF_START_S if backoff <= 0 else min(BACKOFF_MAX_S, backoff * 2)
                 hot_set_feed_status["rate_limited"] = True
@@ -165,6 +254,7 @@ async def run_tdx_hot_set_feed_task() -> None:
             hot_set_feed_status["backoff_s"] = 0.0
             hot_set_feed_status["bridge_ok"] = True
         except asyncio.CancelledError:
+            _flush_archiver_if_pending()  # 停机终刷（与订阅侧归档器同纪律）
             raise
         except Exception as exc:  # noqa: BLE001 - 循环永续
             hot_set_feed_status["last_error"] = str(exc)[:200]

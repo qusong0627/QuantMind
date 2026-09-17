@@ -15,7 +15,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -288,6 +288,110 @@ def load_baseline_bundle(
             row = last.iloc[-1]
             rows[str(sym)] = {c: row.get(c) for c in cols}
     return {"rows": rows, "history": history}
+
+
+QUANTDB_DATA_SOURCE = "quantdb_factors"
+
+
+def _quantdb_reader_for_meta(meta: dict[str, Any]) -> Any:
+    from backend.services.engine.data_platform.quantdb_factor_reader import (
+        QuantDBFactorReader,
+    )
+
+    pinned = str(meta.get("quantdb_dir") or "").strip()
+    market = str((meta.get("context") or {}).get("market") or "").strip().upper() or None
+    return QuantDBFactorReader(pinned or None, market=market)
+
+
+def load_baseline_quantdb(
+    symbols: list[str],
+    day: date,
+    *,
+    meta: dict[str, Any],
+    cols: list[str],
+    reader: Any | None = None,
+    history_len: int = 45,
+) -> dict[str, Any]:
+    """QuantDB 直读基线（2026-09-17 迁移）：取数面与批量推理 ``load_date_data`` 同源。
+
+    背景：模型 metadata 绑定 ``data_source=quantdb_factors`` 时，批量链已走
+    ``QuantDBFactorReader`` 直读原始因子源；实时基线此前仍读遗留 ``model_features_{year}``
+    快照（该文件 2026-08 起停更/格式污染 → 「T-1」实际停在 08-24，属另一种伪实时）。
+
+    - rows：**最近可用因子日**（``available_dates`` ≤ day-1）的模型特征行；
+      仅请求该源真实存在的列——缺列统一缺席（``compute_cycle`` 交 fill 兜底，
+      与 parquet 路径同纪律：口径不符不硬来）；
+    - history：近 ``history_len`` 个可用交易日的 OHLCV（增量引擎引导用，引导仅发生一次）。
+    直读失败**显式抛出**（由调用方记 last_error），绝不静默回落 parquet 防混源。
+    """
+    if reader is None:
+        reader = _quantdb_reader_for_meta(meta)
+    source = str(meta.get("factor_source") or "l1_l2_factors")
+    dates = reader.available_dates(source, end=(day - timedelta(days=1)).isoformat())
+    if not dates:
+        return {"rows": {}, "history": {}}
+    latest = dates[-1]
+
+    available = set(reader.describe(source).columns)
+    mapping = {
+        str(k): str(v) for k, v in (meta.get("factor_field_sources") or {}).items()
+    }
+    requested = [c for c in dict.fromkeys(cols) if mapping.get(c, c) in available]
+    wanted = {digits(s) for s in symbols}
+
+    rows: dict[str, dict[str, Any]] = {}
+    if requested:
+        day_df = reader.read_day(
+            source,
+            features=requested,
+            trade_date=latest,
+            feature_sources=mapping or None,
+        )
+        day_df = day_df.assign(_norm=day_df["symbol"].map(digits))
+        day_df = day_df[day_df["_norm"].isin(wanted)]
+        for norm, g in day_df.groupby("_norm"):
+            last = g.iloc[-1]
+            rows[str(norm)] = {c: last.get(c) for c in cols}
+
+    history: dict[str, Any] = {}
+    raw = ["symbol", "trade_date", "open", "high", "low", "close", "volume", "amount"]
+    hist_dates = dates[-max(1, int(history_len)):]
+    hist_df = reader.read_range(
+        source, features=[], start=hist_dates[0], end=latest, include_ohlcv=True
+    )
+    if hist_df is not None and len(hist_df):
+        keep = [c for c in raw if c in hist_df.columns]
+        hist_df = hist_df.assign(_norm=hist_df["symbol"].map(digits))
+        hist_df = hist_df[hist_df["_norm"].isin(wanted)]
+        for norm, g in hist_df.groupby("_norm"):
+            history[str(norm)] = (
+                g.sort_values("trade_date")[keep].tail(history_len).reset_index(drop=True)
+            )
+    return {"rows": rows, "history": history}
+
+
+def load_baseline_for_model(
+    symbols: list[str],
+    day: date,
+    *,
+    meta: dict[str, Any],
+    cols: list[str],
+    parquet_path: str | Path,
+    history_len: int = 45,
+    reader: Any | None = None,
+) -> dict[str, Any]:
+    """基线加载唯一分派（在线服务/回放验收共用）：取数面由模型 ``data_source`` 绑定裁定。
+
+    - ``quantdb_factors`` → QuantDB 直读（与批量链同源）；
+    - 其余（遗留快照模型）→ ``model_features_{year}.parquet``（不可变快照语义，保持不动）。
+    """
+    if str(meta.get("data_source") or "").strip() == QUANTDB_DATA_SOURCE:
+        return load_baseline_quantdb(
+            symbols, day, meta=meta, cols=cols, reader=reader, history_len=history_len
+        )
+    return load_baseline_bundle(
+        symbols, day, parquet_path=parquet_path, cols=cols, history_len=history_len
+    )
 
 
 def effective_override(whitelist: tuple[str, ...] | list[str], cols: list[str]) -> set[str]:

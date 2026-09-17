@@ -364,3 +364,171 @@ def test_baseline_loader_tolerates_unknown_feature_columns(tmp_path):
     assert row["f1"] == 0.3           # 存在的列正常取到
     assert row.get("JQ110_52week_rank") is None  # 未收录列不崩、交 fill 兜底
     assert len(bundle["history"]["600036"]) == 3
+
+
+# ── 基线分派（2026-09-17 迁移）：quantdb 直读 / 遗留快照 ──────────────────────
+
+
+class _FakeQuantDBReader:
+    """QuantDBFactorReader 假体：录制调用参数并返回可控 DataFrame。"""
+
+    def __init__(self, *, dates, columns, day_df, hist_df):
+        self.dates = list(dates)
+        self.columns = list(columns)
+        self.day_df = day_df
+        self.hist_df = hist_df
+        self.calls: list[tuple] = []
+
+    def available_dates(self, source, *, start=None, end=None):
+        self.calls.append(("available_dates", source, start, end))
+        return [
+            d for d in self.dates
+            if (not start or d >= start) and (not end or d <= end)
+        ]
+
+    def describe(self, source):
+        from types import SimpleNamespace
+
+        self.calls.append(("describe", source))
+        return SimpleNamespace(columns=list(self.columns))
+
+    def read_day(self, source, *, features, trade_date, feature_sources=None):
+        self.calls.append(("read_day", source, tuple(features), trade_date, feature_sources))
+        return self.day_df
+
+    def read_range(self, source, *, features, start, end, include_ohlcv=True, feature_sources=None):
+        self.calls.append(("read_range", source, start, end, tuple(features)))
+        return self.hist_df
+
+
+def _qdb_meta(**extra):
+    meta = {
+        "data_source": "quantdb_factors",
+        "factor_source": "l1_l2_factors",
+        "quantdb_dir": "/data/quantdb",
+        "context": {"market": "CN"},
+    }
+    meta.update(extra)
+    return meta
+
+
+@pytest.mark.unit
+def test_load_baseline_for_model_quantdb_dispatch():
+    """quantdb 绑定 → 直读：最近可用日、只请求源内存在的列、历史 tail(45)、键归一纯数字。"""
+    import pandas as pd
+
+    from backend.services.engine.inference.realtime_core import load_baseline_for_model
+
+    dates = ["2026-08-01", "2026-09-11", "2026-09-14"]
+    day_df = pd.DataFrame(
+        {"symbol": ["SH600036", "SZ000001"], "f1": [0.5, -0.2], "open": [10.0, 5.0]}
+    )
+    hist_df = pd.DataFrame(
+        [
+            {
+                "symbol": "SH600036", "trade_date": f"2026-07-{i % 28 + 1:02d}",
+                "open": 1.0, "high": 1.1, "low": 0.9, "close": 1.0,
+                "volume": 1e6, "amount": 1e7,
+            }
+            for i in range(50)
+        ]
+    )
+    reader = _FakeQuantDBReader(
+        dates=dates,
+        columns=["symbol", "date", "f1", "open", "close"],
+        day_df=day_df,
+        hist_df=hist_df,
+    )
+    bundle = load_baseline_for_model(
+        ["600036.SH", "000001.SZ"],
+        date(2026, 9, 17),
+        meta=_qdb_meta(),
+        cols=["f1", "f9", "open"],
+        parquet_path="/nonexistent.parquet",
+        reader=reader,
+    )
+    calls = {c[0]: c for c in reader.calls}
+    assert calls["available_dates"][3] == "2026-09-16"      # day-1 上界
+    assert calls["read_day"][2] == ("f1", "open")           # f9 源内不存在 → 不请求
+    assert calls["read_day"][3] == "2026-09-14"             # 最近可用日
+    rows = bundle["rows"]
+    assert set(rows) == {"600036", "000001"}                # 前缀式返回 → 归一纯数字键
+    assert rows["600036"]["f1"] == pytest.approx(0.5)
+    assert rows["600036"]["f9"] is None                     # 缺列交 fill 兜底
+    assert calls["read_range"][2] == "2026-08-01"           # 历史窗口 = 可用日集合
+    assert calls["read_range"][3] == "2026-09-14"
+    assert len(bundle["history"]["600036"]) == 45           # tail(45)
+
+
+@pytest.mark.unit
+def test_load_baseline_for_model_legacy_keeps_parquet(tmp_path):
+    """未绑定 quantdb 的模型 → 遗留快照 parquet（不可变快照语义保持不动）。"""
+    import pandas as pd
+
+    from backend.services.engine.inference.realtime_core import load_baseline_for_model
+
+    parquet = tmp_path / "feat.parquet"
+    pd.DataFrame(
+        {
+            "symbol": ["600036"], "trade_date": pd.to_datetime(["2026-09-14"]),
+            "open": [10.0], "high": [10.1], "low": [9.9], "close": [10.0],
+            "volume": [1e6], "amount": [1e7], "f1": [0.3],
+        }
+    ).to_parquet(parquet)
+    bundle = load_baseline_for_model(
+        ["600036.SH"],
+        date(2026, 9, 17),
+        meta={"feature_columns": ["f1"]},
+        cols=["f1"],
+        parquet_path=parquet,
+    )
+    assert bundle["rows"]["600036"]["f1"] == pytest.approx(0.3)
+    assert len(bundle["history"]["600036"]) == 1
+
+
+@pytest.mark.unit
+def test_default_baseline_daily_cache(tmp_path, monkeypatch):
+    """基线日级缓存：同日二次调用不重读；换日重新加载（15s 周期不重复整读）。"""
+    from backend.services.engine.inference import realtime_service as rs
+
+    model_dir = tmp_path / "mdl_cache"
+    model_dir.mkdir()
+    (model_dir / "metadata.json").write_text(
+        json.dumps({"feature_columns": ["f1"]}), encoding="utf-8"
+    )
+    calls: list = []
+
+    def _fake_loader(*args, **kwargs):
+        calls.append(args)
+        return {"rows": {}, "history": {}}
+
+    monkeypatch.setattr(rs, "load_baseline_for_model", _fake_loader)
+    svc = rs.RealtimeInferenceService()
+    svc._model_dir = str(model_dir)
+    svc._default_baseline(["600036.SH"], date(2026, 9, 17))
+    svc._default_baseline(["600036.SH"], date(2026, 9, 17))
+    assert len(calls) == 1
+    svc._default_baseline(["600036.SH"], date(2026, 9, 18))
+    assert len(calls) == 2
+
+
+@pytest.mark.integration
+def test_quantdb_baseline_real_source():
+    """真源直读（集成）：l1_l2_factors 最近可用日行 + OHLCV 历史可用。"""
+    from pathlib import Path as _P
+
+    if not _P("/data/quantdb/6_ml_datasets/l1_factors").is_dir():
+        pytest.skip("QuantDB 因子源不存在（非容器环境）")
+    from backend.services.engine.inference.realtime_core import load_baseline_quantdb
+
+    cols = ["mom_ret_1d", "mom_ret_5d", "vol_std_20"]
+    bundle = load_baseline_quantdb(
+        ["600036.SH", "000001.SZ"], date.today(), meta=_qdb_meta(), cols=cols
+    )
+    rows = bundle["rows"]
+    assert rows, "最近可用日应触达热集标的"
+    assert "600036" in rows and "000001" in rows
+    assert rows["600036"]["mom_ret_1d"] is not None
+    hist = bundle["history"]["600036"]
+    assert 1 <= len(hist) <= 45
+    assert {"open", "high", "low", "close", "volume", "amount"} <= set(hist.columns)

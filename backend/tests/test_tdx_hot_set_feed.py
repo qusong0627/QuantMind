@@ -93,3 +93,73 @@ def test_hot_set_feed_writes_standard_keys_via_real_bridge():
 
     written = asyncio.run(_flow())
     assert len(written) == 2
+
+
+def _sample_raw() -> dict:
+    return {
+        "Now": "40.60", "Open": "40.90", "Max": "40.95", "Min": "40.45",
+        "LastClose": "40.92", "Volume": "554798", "Amount": "225468.42",
+        "Buyp": ["40.59", "40.58", "40.57", "0.00", "0.00"],
+        "Buyv": ["40", "120", "300", "0", "0"],
+        "Sellp": ["40.60", "40.61", "40.62", "0.00", "0.00"],
+        "Sellv": ["69", "55", "88", "0", "0"],
+    }
+
+
+@pytest.mark.unit
+def test_snapshot_l05_record_fields():
+    """桥快照 → L0.5 归档行：列名与订阅侧写侧契约一致（缺列如实 None 不假填）。"""
+    from backend.services.live_trading.services.tdx_hot_set_feed import (
+        map_snapshot_with_book,
+        snapshot_l05_record,
+    )
+
+    snap = map_snapshot_with_book(_sample_raw())
+    assert snap is not None
+    rec = snapshot_l05_record("600036.SH", snap)
+    assert rec["symbol"] == "600036.SH"          # 后缀式（l05 列口径）
+    assert rec["ts"] == int(snap["timestamp"])   # epoch 秒
+    assert rec["source"] == "tdx_bridge"
+    assert len(rec["refresh_time"]) == 6 and rec["refresh_time"].isdigit()
+    assert rec["price"] == pytest.approx(40.60) and rec["pre_close"] == pytest.approx(40.92)
+    assert rec["open"] == pytest.approx(40.90) and rec["high"] == pytest.approx(40.95)
+    assert rec["low"] == pytest.approx(40.45)
+    assert rec["volume"] == 554798 and rec["amount"] == pytest.approx(225468.42)
+    assert rec["bid1"] == pytest.approx(40.59) and rec["bid_vol1"] == 40
+    assert rec["bid2"] == pytest.approx(40.58) and rec["ask_vol2"] == 55
+    assert rec["ask5"] == 0.0 and rec["ask_vol5"] == 0
+    # 桥 get_market_snapshot 不提供涨跌停/封单 → 如实 None
+    assert rec["limit_up"] is None and rec["limit_down"] is None and rec["seal_amount"] is None
+
+
+@pytest.mark.unit
+def test_l05_archiver_roundtrip(tmp_path):
+    """归档行 → l05_store 真实落盘 → read_day 读回（与订阅侧归档完全同构）。"""
+    from datetime import datetime
+
+    from backend.shared.l05_store import CST, SnapshotArchiver, read_day
+    from backend.services.live_trading.services.tdx_hot_set_feed import (
+        map_snapshot_with_book,
+        snapshot_l05_record,
+    )
+
+    snap = map_snapshot_with_book(_sample_raw())
+    assert snap is not None
+    rec = snapshot_l05_record("600036.SH", snap)
+    arch = SnapshotArchiver(
+        base_dir=str(tmp_path), flush_rows=1, flush_seconds=0.01, tag="bridge"
+    )
+    arch.append(rec)
+    arch.flush()
+    assert arch.counters["rows"] == 1 and arch.counters["flush_errors"] == 0
+
+    day = datetime.fromtimestamp(rec["ts"], tz=CST).date()
+    df = read_day(day, base_dir=str(tmp_path))
+    assert len(df) == 1
+    row = df.iloc[0]
+    assert row["symbol"] == "600036.SH"
+    assert int(row["ts"]) == rec["ts"]
+    assert float(row["price"]) == pytest.approx(40.60)
+    assert float(row["bid1"]) == pytest.approx(40.59)
+    assert int(row["bid_vol1"]) == 40
+    assert str(row["source"]) == "tdx_bridge"

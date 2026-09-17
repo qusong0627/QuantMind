@@ -26,7 +26,7 @@ from backend.services.engine.inference.realtime_core import (
     compute_cycle,
     digits,
     effective_override,
-    load_baseline_bundle,
+    load_baseline_for_model,
     matrix_digest,
     scores_digest,
 )
@@ -179,8 +179,9 @@ def verify_day(
     if baseline_bundle is None:
         from backend.services.engine.inference.realtime_service import DEFAULT_SNAPSHOT_PARQUET
 
-        baseline_bundle = load_baseline_bundle(
-            symbols_union, day, parquet_path=DEFAULT_SNAPSHOT_PARQUET, cols=cols
+        # 与在线服务同一分派（quantdb 绑定 → 直读；遗留模型 → 快照），保证两侧同源可比
+        baseline_bundle = load_baseline_for_model(
+            symbols_union, day, meta=meta, cols=cols, parquet_path=DEFAULT_SNAPSHOT_PARQUET
         )
     baseline = baseline_bundle.get("rows") or {}
     histories = baseline_bundle.get("history") or {}

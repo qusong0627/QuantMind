@@ -129,3 +129,45 @@ def test_feature_coverage_guard(tmp_path, monkeypatch):
     with pytest.raises(ValueError) as exc:
         rt.validate_feature_coverage("x", ["f1", "nope1", "nope2", "nope3"])
     assert "覆盖率过低" in str(exc.value)
+
+
+@pytest.mark.unit
+def test_feature_coverage_quantdb_binding(tmp_path, monkeypatch):
+    """quantdb_factors 绑定模型：覆盖率按**因子源列**判定（不再拿遗留 parquet 误导判定）。"""
+    import backend.services.api.routers.admin.realtime as rt
+
+    model_dir = tmp_path / "mdl_qdb"
+    model_dir.mkdir()
+    (model_dir / "metadata.json").write_text(
+        json.dumps(
+            {
+                "data_source": "quantdb_factors",
+                "factor_source": "l1_l2_factors",
+                "quantdb_dir": str(tmp_path / "quantdb"),
+                "context": {"market": "CN"},
+                "feature_columns": ["f1", "f2"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class _FakeReader:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def describe(self, source):
+            from types import SimpleNamespace
+
+            assert source == "l1_l2_factors"
+            return SimpleNamespace(columns=["symbol", "date", "f1", "open"])
+
+    monkeypatch.setattr(
+        "backend.services.engine.data_platform.quantdb_factor_reader.QuantDBFactorReader",
+        _FakeReader,
+    )
+    hit, total, ratio = rt.feature_coverage(str(model_dir), ["f1", "f2"])
+    assert (hit, total) == (1, 2) and ratio == pytest.approx(0.5)
+    assert "quantdb_factors" in rt.baseline_source_label(str(model_dir))
+    with pytest.raises(ValueError) as exc:
+        rt.validate_feature_coverage(str(model_dir), ["f2", "f3", "f4"])
+    assert "quantdb_factors" in str(exc.value)  # 文案如实标注取数面

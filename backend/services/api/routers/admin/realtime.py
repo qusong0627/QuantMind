@@ -80,12 +80,67 @@ BASELINE_PARQUET_TMPL = "/app/db/feature_snapshots/model_features_{year}.parquet
 MIN_COLUMN_COVERAGE = 0.5
 
 
+def _model_meta(model_dir: str) -> dict[str, Any]:
+    """模型 metadata.json → dict；不可读 → 空 dict（调用方回落默认口径）。"""
+    from pathlib import Path
+
+    try:
+        return json.loads(
+            (Path(str(model_dir or "")) / "metadata.json").read_text(encoding="utf-8")
+        )
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def baseline_source_label(model_dir: str) -> str:
+    """基线取数面描述（管理面透明化：读哪、按什么口径）。"""
+    source = str(_model_meta(model_dir).get("data_source") or "").strip()
+    if source == "quantdb_factors":
+        return "quantdb_factors 直读（QuantDBFactorReader，与批量推理同源）"
+    if source:
+        return f"{source} → 遗留快照 parquet"
+    return "遗留快照 parquet（model_features_{year}）"
+
+
+def _quantdb_columns(meta: dict[str, Any]) -> set[str] | None:
+    """quantdb 绑定模型的因子源列集合；不可判 → None（回落 parquet 口径）。"""
+    try:
+        from backend.services.engine.data_platform.quantdb_factor_reader import (
+            QuantDBFactorReader,
+        )
+
+        source = str(meta.get("factor_source") or "l1_l2_factors")
+        pinned = str(meta.get("quantdb_dir") or "").strip()
+        market = (
+            str((meta.get("context") or {}).get("market") or "").strip().upper() or None
+        )
+        reader = QuantDBFactorReader(pinned or None, market=market)
+        return set(reader.describe(source).columns)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def feature_coverage(model_dir: str, feature_columns: list[str]) -> tuple[int, int, float]:
-    """模型特征列在实时基线 parquet 中的覆盖率（0~1）。
+    """模型特征列在**其基线取数面**的覆盖率（0~1）。
+
+    - ``data_source=quantdb_factors`` 绑定 → 按因子源列判定（2026-09-17 迁移：
+      运行时直读同一源，校验必须同口径，否则对 quantdb 模型拿遗留 parquet 判定=误导）；
+    - 其余 → 遗留快照 parquet（原口径）。
 
     机构级防线（2026-09-17 实测）：覆盖率过低（如 273 列自定义模型仅 8% 命中）时，
     打分矩阵 92% 走 fill 值 = **垃圾分冒充实时信号** → 配置层直接拒绝。
     """
+    meta = _model_meta(model_dir)
+    if str(meta.get("data_source") or "").strip() == "quantdb_factors":
+        available = _quantdb_columns(meta)
+        if available is not None:
+            mapping = {
+                str(k): str(v) for k, v in (meta.get("factor_field_sources") or {}).items()
+            }
+            hit = sum(1 for c in feature_columns if mapping.get(c, c) in available)
+            total = max(1, len(feature_columns))
+            return (hit, len(feature_columns), hit / total)
+
     import datetime as _dt
     from pathlib import Path
 
@@ -108,7 +163,8 @@ def validate_feature_coverage(model_dir: str, feature_columns: list[str]) -> Non
     if ratio < MIN_COLUMN_COVERAGE:
         raise ValueError(
             f"模型特征覆盖率过低（{hit}/{total}={ratio:.0%} < {MIN_COLUMN_COVERAGE:.0%}）："
-            "基线 parquet 未收录大部分特征，实时打分将大量走 fill 值（疑似错误模型）"
+            f"基线取数面（{baseline_source_label(model_dir)}）未收录大部分特征，"
+            "实时打分将大量走 fill 值（疑似错误模型）"
         )
 
 
@@ -141,6 +197,7 @@ async def get_infer_config() -> dict[str, Any]:
         "success": True,
         "data": {
             "config": config,
+            "baseline_source": baseline_source_label(str(config.get("model_dir") or "")),
             "status": {
                 "updated_at": status.get("updated_at"),
                 "counters": counters,

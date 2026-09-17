@@ -176,7 +176,7 @@ Electron 前端在本地开发时使用 Vite HMR；修改 `electron/src` 后运�
 - `backend/shared/feature_incremental.py` + `backend/services/engine/inference/incremental_features.py` - 增量特征引擎（32 列快车道与批量 ε=1e-9 金样锁定 + 快照状态机/分钟桶/provenance，T-P6-07）
 - `backend/shared/market_regime.py` + `backend/services/engine/realtime_regime.py` - 市场状态（regime）口径单源（日频/日内共用）+ 日内服务（指数 live + 热集广度 → 快照/总线，T-P6-13）
 - `backend/shared/intel_events.py` + `backend/services/stream/ws_core/intel_pusher.py` - 盘中情报总线（Redis Stream `intel:events`，schema 校验/生产消费 SDK/WS `intel.{tenant}.market.*` 鉴权，T-P6-11）
-- `backend/services/engine/inference/realtime_{core,service}.py` + `replay_verifier.py` - 热集实时推理（ONNX、账本 `qm:realtime:infer:ledger:*`）与回放复现验收（同数据同特征同模型 → 信号 diff=0；CLI `scripts/p6_replay_verify.py`，T-P6-08/09）
+- `backend/services/engine/inference/realtime_{core,service}.py` + `replay_verifier.py` - 热集实时推理（ONNX、账本 `qm:realtime:infer:ledger:*`）与回放复现验收（同数据同特征同模型 → 信号 diff=0；CLI `scripts/p6_replay_verify.py`，T-P6-08/09）；**基线取数按模型 `metadata.data_source` 分派**（`load_baseline_for_model`：`quantdb_factors` → `QuantDBFactorReader` 直读最近可用因子日，其余 → 遗留 `model_features_{year}.parquet` 不可变快照；在线/回放共用，日级缓存）
 - `backend/shared/latency_metrics.py` - 端到端时延打点（`intel:latency` 滚动统计；报表 `backend/scripts/latency_report.py`，T-P6-05）
 - `backend/scripts/l05_maintenance.py` - L0.5 留存运维（质检报告 `report` / 容量 `capacity` / 降冷 `prune` 默认 dry-run）
 - `backend/services/live_trading/services/qmt_quote_backup.py` - 大 QMT 备源行情席（全推订阅 → 主源陈旧超 30s 时旁路写 `market:snapshot/series`，source=qmt_big；状态 `qm:qmt:quote:backup:status`）
