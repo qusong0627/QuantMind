@@ -39,6 +39,7 @@ from backend.services.engine.inference.realtime_core import (
     effective_override,
     ledger_entry,
     ledger_json,
+    live_coverage,
     load_baseline_bundle,
     snapshot_key,
 )
@@ -47,6 +48,7 @@ logger = logging.getLogger(__name__)
 
 CST = timezone(timedelta(hours=8))
 CONFIG_KEY = "qm:realtime:infer:config"
+STATUS_KEY = "qm:realtime:infer:status"  # 状态镜像（api/admin 面板读；与 qm:anomaly:status 同范式）
 LEDGER_KEY_PREFIX = "qm:realtime:infer:ledger"
 LEDGER_TTL_S = 7 * 86400
 LEDGER_MAX_ENTRIES = 4000
@@ -63,7 +65,8 @@ def _now() -> datetime:
 
 
 class RealtimeInferConfig:
-    __slots__ = ("enabled", "model_dir", "cadence_s", "override_whitelist", "tenant_id", "user_id")
+    __slots__ = ("enabled", "model_dir", "cadence_s", "override_whitelist", "tenant_id",
+                 "user_id", "min_live_coverage")
 
     def __init__(
         self,
@@ -74,6 +77,7 @@ class RealtimeInferConfig:
         override_whitelist: tuple[str, ...] = (),
         tenant_id: str = "default",
         user_id: str = "admin",
+        min_live_coverage: float = 0.5,
     ) -> None:
         self.enabled = enabled
         self.model_dir = model_dir
@@ -81,6 +85,8 @@ class RealtimeInferConfig:
         self.override_whitelist = tuple(override_whitelist)
         self.tenant_id = tenant_id
         self.user_id = user_id
+        # 发布闸门：可用实时快照覆盖率下限（< 阈值 → 不发布"伪实时"信号，只计数）
+        self.min_live_coverage = min(max(float(min_live_coverage), 0.0), 1.0)
 
     @classmethod
     def from_mapping(cls, raw: dict[str, Any] | None) -> RealtimeInferConfig:
@@ -93,6 +99,10 @@ class RealtimeInferConfig:
             cadence = float(raw.get("cadence_s") or 15.0)
         except (TypeError, ValueError):
             cadence = 15.0
+        try:
+            min_cov = float(raw.get("min_live_coverage") or 0.5)
+        except (TypeError, ValueError):
+            min_cov = 0.5
         return cls(
             enabled=str(raw.get("enabled") or "").strip().lower() in truthy,
             model_dir=str(raw.get("model_dir") or "").strip(),
@@ -100,6 +110,7 @@ class RealtimeInferConfig:
             override_whitelist=whitelist,
             tenant_id=str(raw.get("tenant_id") or "default").strip() or "default",
             user_id=str(raw.get("user_id") or "admin").strip() or "admin",
+            min_live_coverage=min_cov,
         )
 
 
@@ -154,6 +165,7 @@ class RealtimeInferenceService:
         self.counters: dict[str, Any] = {
             "cycles": 0, "published": 0, "scores": 0, "skipped": 0,
             "ledger_entries": 0, "ledger_errors": 0,
+            "skipped_no_live": 0, "last_live_coverage": None, "last_skip": None,
             "last_ms": None, "last_error": None, "last_run_id": None,
             "last_cycle_at": None, "last_scores": 0,
         }
@@ -309,6 +321,21 @@ class RealtimeInferenceService:
         if not hot:
             raise RuntimeError("热集为空（远端 Redis 不可读或未构建）")
         snapshots = (self._snapshot_fetcher or self._default_snapshots)(hot)
+        # ── 发布闸门（2026-09-17 收口）：可用实时快照覆盖率不足 → 不发布"伪实时"信号 ──
+        # 背景：基线为 T-1 特征，若行情未到达仍打分发布，消费方按 source=realtime 采信会失真。
+        coverage = live_coverage(hot, snapshots, now=time.time())
+        with self._lock:
+            self.counters["last_live_coverage"] = round(coverage, 4)
+        if coverage < cfg.min_live_coverage:
+            with self._lock:
+                self.counters["skipped_no_live"] += 1
+                self.counters["last_skip"] = (
+                    f"live_coverage {coverage:.0%} < {cfg.min_live_coverage:.0%}"
+                    "（行情未到达，不发布伪实时信号）"
+                )
+            return None
+        with self._lock:
+            self.counters["last_skip"] = None
         today = _now().date()
         bundle = (self._baseline_loader or self._default_baseline)(hot, today)
         baseline = bundle.get("rows") or {}
@@ -350,6 +377,7 @@ class RealtimeInferenceService:
             model_version=model_version, override=override,
         )
         ledger["trade_date"] = today.strftime("%Y%m%d")
+        ledger["live_coverage"] = round(coverage, 4)
         ledger["degraded_level"] = int(degrade_level)
         (self._ledger_sink or self._append_ledger)(ledger)
 
@@ -374,9 +402,11 @@ class RealtimeInferenceService:
             "missing_symbols": result.missing,
             "overridden_cells": result.overridden,
             "degraded_level": int(degrade_level),
+            "live_coverage": round(coverage, 4),
             "quality": {
                 "override_whitelist": sorted(override),
                 "degraded_level": int(degrade_level),
+                "live_coverage": round(coverage, 4),
                 "note": OVERRIDE_GUARD_NOTE,
             },
             "scores": items,
@@ -444,10 +474,51 @@ class RealtimeInferenceService:
                 with self._lock:
                     self.counters["last_ms"] = round(elapsed_ms, 1)
                     self.counters["degrade_level"] = level
+                self._write_status_mirror(cfg)
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=governor.effective_cadence_s())
             except asyncio.TimeoutError:
                 pass
+
+    def _write_status_mirror(self, cfg: RealtimeInferConfig) -> None:
+        """状态镜像到 Redis（best-effort）：admin/前端面板唯一读面（不做跨服务 HTTP）。"""
+        try:
+            import os
+
+            import redis as redis_lib
+
+            client = redis_lib.Redis(
+                host=os.getenv("REDIS_HOST") or "redis",
+                port=int(os.getenv("REDIS_PORT", "6379")),
+                db=int(os.getenv("REDIS_DB", "0")),
+                password=os.getenv("REDIS_PASSWORD") or None,
+                decode_responses=True, socket_connect_timeout=2, socket_timeout=2,
+            )
+            with self._lock:
+                counters = dict(self.counters)
+            try:
+                client.hset(
+                    STATUS_KEY,
+                    mapping={
+                        "updated_at": _now().isoformat(),
+                        "counters": json.dumps(counters, ensure_ascii=False, default=str),
+                        "config": json.dumps(
+                            {
+                                "enabled": cfg.enabled,
+                                "model_dir": cfg.model_dir,
+                                "cadence_s": cfg.cadence_s,
+                                "override_whitelist": list(cfg.override_whitelist),
+                                "min_live_coverage": cfg.min_live_coverage,
+                            },
+                            ensure_ascii=False,
+                        ),
+                    },
+                )
+                client.expire(STATUS_KEY, 86400)
+            finally:
+                client.close()
+        except Exception:  # noqa: BLE001 - 镜像失败不影响推理循环
+            pass
 
     def _governor_for(self, cfg: RealtimeInferConfig) -> LoadGovernor:
         """按配置节拍维护治理器（节拍变更即重建，窗口不跨节拍混算）。"""

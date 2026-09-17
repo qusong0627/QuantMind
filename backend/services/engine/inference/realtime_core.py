@@ -130,6 +130,45 @@ def ledger_entry(
     }
 
 
+def live_coverage(
+    hot: list[str], snapshots: dict[str, dict[str, Any]], *, now: float
+) -> float:
+    """实时快照覆盖率（0~1）：**可用**快照的占比——ts 缺失或超 STALE 线一律不算。
+
+    口径与消费方新鲜度同源（``shared/freshness.classify_age``；阈值仅在该模块读取）。
+    用于发布闸门：覆盖率不足时**不发布伪实时信号**（基线 T-1 打分不等于实时）。
+    """
+    if not hot:
+        return 0.0
+    from backend.shared.freshness import UNAVAILABLE, classify_age, quote_policy
+
+    policy = quote_policy()
+    usable = 0
+    for sym in hot:
+        snap = snapshots.get(sym)
+        if not snap:
+            continue
+        try:
+            ts = float(snap.get("timestamp") or snap.get("ts") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if ts > 1e12:
+            ts /= 1000.0
+        if ts <= 0:
+            continue
+        if (
+            classify_age(
+                now - ts,  # 不夹取负值：未来偏斜由 classify_age 的容差守卫裁定
+
+                fresh_within_s=policy.fresh_within_s,
+                stale_within_s=policy.stale_within_s,
+            )
+            != UNAVAILABLE
+        ):
+            usable += 1
+    return usable / len(hot)
+
+
 def compute_cycle(
     *,
     session: Any,

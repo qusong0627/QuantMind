@@ -230,3 +230,106 @@ def test_snapshot_key_forms():
     assert snapshot_key("600519") == "market:snapshot:sh600519"
     assert snapshot_key("430047") == "market:snapshot:bj430047"
     assert snapshot_key("BAD!!!") is None
+
+
+# ── 发布闸门（2026-09-17 收口）：可用实时快照覆盖率不足 → 不发布"伪实时" ──
+
+
+@pytest.mark.unit
+def test_live_coverage_pure_rules():
+    import time as _t
+
+    from backend.services.engine.inference.realtime_core import live_coverage
+
+    now = _t.time()
+    fresh = {"timestamp": str(int(now - 5))}
+    stale_ok = {"timestamp": str(int(now - 120))}   # ≤ stale 线（300s）仍可用
+    dead = {"timestamp": str(int(now - 900))}       # > stale 线 → 不可用
+    no_ts = {"Now": "10.0"}
+    future = {"timestamp": str(int(now + 600))}     # 未来偏斜超容差 → 不可用
+
+    assert live_coverage(["A"], {"A": fresh}, now=now) == 1.0
+    assert live_coverage(["A"], {"A": stale_ok}, now=now) == 1.0
+    assert live_coverage(["A", "B"], {"A": fresh, "B": dead}, now=now) == 0.5
+    assert live_coverage(["A"], {"A": no_ts}, now=now) == 0.0
+    assert live_coverage(["A"], {"A": future}, now=now) == 0.0
+    assert live_coverage(["A"], {}, now=now) == 0.0
+    assert live_coverage([], {}, now=now) == 0.0
+
+
+@pytest.mark.unit
+def test_build_cycle_gated_without_live(tmp_path):
+    """零/陈旧快照：不发布（None）+ 计数可见；min_live_coverage=0 时放行（旋钮语义）。"""
+    from backend.services.engine.inference.realtime_service import RealtimeInferenceService
+
+    model_dir = _make_model_dir(tmp_path)
+    hot, fresh_snaps, bundle = _fake_engine_inputs()
+    ledger: list = []
+
+    def _svc(snaps, min_cov):
+        cfg = _cfg(model_dir)
+        cfg.min_live_coverage = min_cov
+        return RealtimeInferenceService(
+            config_loader=lambda: cfg,
+            hot_set_fetcher=lambda: hot,
+            snapshot_fetcher=lambda symbols: snaps,
+            baseline_loader=lambda symbols, day: bundle,
+            publisher=lambda payload, cfg: None,
+            ledger_sink=ledger.append,
+        )
+
+    # 零快照 → 闸门拦截
+    svc = _svc({}, 0.5)
+    assert svc.build_cycle() is None
+    assert svc.counters["skipped_no_live"] == 1
+    assert "行情未到达" in (svc.counters["last_skip"] or "")
+    assert ledger == []  # 账本不落（没有周期发生）
+
+    # 陈旧快照（超 stale 线）→ 同样拦截
+    import time as _t
+
+    old_ts = str(int(_t.time() - 900))
+    stale = {sym: {**snap, "timestamp": old_ts} for sym, snap in fresh_snaps.items()}
+    svc2 = _svc(stale, 0.5)
+    assert svc2.build_cycle() is None and svc2.counters["skipped_no_live"] == 1
+
+    # min_live_coverage=0 → 显式放行（旋钮语义：运维明确承担 T-1 基线口径才可关闸门）
+    svc3 = _svc({}, 0.0)
+    payload = svc3.build_cycle()
+    assert payload is not None and payload["scores"]
+    assert payload["live_coverage"] == 0.0
+    assert ledger and ledger[0]["live_coverage"] == 0.0
+
+
+@pytest.mark.unit
+def test_build_cycle_full_coverage_passes_and_reports(tmp_path):
+    from backend.services.engine.inference.realtime_service import RealtimeInferenceService
+
+    model_dir = _make_model_dir(tmp_path)
+    hot, snaps, bundle = _fake_engine_inputs()
+    ledger: list = []
+    cfg = _cfg(model_dir)
+    svc = RealtimeInferenceService(
+        config_loader=lambda: cfg,
+        hot_set_fetcher=lambda: hot,
+        snapshot_fetcher=lambda symbols: snaps,
+        baseline_loader=lambda symbols, day: bundle,
+        publisher=lambda payload, cfg: None,
+        ledger_sink=ledger.append,
+    )
+    payload = svc.build_cycle()
+    assert payload is not None
+    assert payload["live_coverage"] == 1.0
+    assert payload["quality"]["live_coverage"] == 1.0
+    assert svc.counters["last_skip"] is None
+    assert ledger and ledger[0]["live_coverage"] == 1.0
+
+
+@pytest.mark.unit
+def test_min_live_coverage_config_parsing():
+    from backend.services.engine.inference.realtime_service import RealtimeInferConfig
+
+    assert RealtimeInferConfig.from_mapping({}).min_live_coverage == 0.5
+    assert RealtimeInferConfig.from_mapping({"min_live_coverage": "0.8"}).min_live_coverage == 0.8
+    assert RealtimeInferConfig.from_mapping({"min_live_coverage": "5"}).min_live_coverage == 1.0
+    assert RealtimeInferConfig.from_mapping({"min_live_coverage": "-1"}).min_live_coverage == 0.0

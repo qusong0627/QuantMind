@@ -23,6 +23,7 @@ import { PipelineBar } from './components/PipelineBar';
 import { EvidenceMatrix } from './components/EvidenceMatrix';
 import { HealthCard } from './components/DeskCards';
 import { CopilotPanel } from './components/CopilotPanel';
+import { RealtimeInferenceCard } from './components/RealtimeInferenceCard';
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : '请求失败';
