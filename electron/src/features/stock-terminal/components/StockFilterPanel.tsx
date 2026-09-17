@@ -3,6 +3,8 @@
 import { useEffect, useState } from 'react';
 import { SlidersHorizontal, X, RotateCcw } from 'lucide-react';
 import { Select } from 'antd';
+
+// 概念板块限宽 200px（网格列约束）+ 选中项省略号，避免长概念名把后面控件挤在一起
 import { stockTerminalService } from '../services/stockTerminalService';
 import { MarketCalendarFilter } from './MarketCalendarFilter';
 
@@ -140,7 +142,7 @@ export function StockFilterPanel({ filters, onChange, total, fullTotal, models: 
       </div>
 
       {/* 筛选下拉网格：columnOnly 只留 概念+日历+模型，其余维度在列表表头筛选 */}
-      <div className={`grid gap-1.5 items-center ${compact ? (showMarketCalendar ? 'grid-cols-[1fr_auto_1fr]' : 'grid-cols-2') : 'grid-cols-4'}`}>
+      <div className={`grid gap-1.5 items-center ${compact ? (showMarketCalendar ? 'grid-cols-[minmax(0,200px)_auto_minmax(0,1fr)]' : 'grid-cols-[minmax(0,200px)_minmax(0,1fr)]') : 'grid-cols-4'}`}>
         {!columnOnly && (
           <>
             <Select allowClear size="small" placeholder="板块" value={filters.board || undefined}
@@ -160,7 +162,9 @@ export function StockFilterPanel({ filters, onChange, total, fullTotal, models: 
         <Select allowClear showSearch size="small" placeholder="概念板块" value={filters.concept || undefined}
           optionFilterProp="label" onChange={v => set({ concept: v })}
           options={concepts.map(c => ({ label: c, value: c }))}
-          maxTagCount={1} listHeight={200} />
+          maxTagCount={1} listHeight={200}
+          className="news-concept-select"
+          title={filters.concept || '概念板块'} />
         {showMarketCalendar && (
           <MarketCalendarFilter
             date={filters.date}
