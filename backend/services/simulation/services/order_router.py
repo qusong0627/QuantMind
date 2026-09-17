@@ -74,7 +74,13 @@ def is_duplicate_message(message: str | None) -> bool:
 
 
 async def submit_order(db, redis, req: OrderRequest) -> RouterOutcome:
-    """唯一入口。db=AsyncSession；redis=交易 Redis 客户端（SimulationAccountManager 用）。"""
+    """唯一入口。db=AsyncSession；redis=交易 Redis 客户端（SimulationAccountManager 用）。
+
+    **风控卡点（T-RC-02）**：参数校验后、任何建单动作前，一律过 `risk_gate_service.check_order`
+    ——影子模式只留痕不拦单；强制模式 REJECT/HALT 即拒（消息含 rule_id，可解释）。
+    判定异常/配置不可读 = fail-closed 拒单（见 risk_gate_service 文档）。
+    """
+    from backend.services.trade.services.risk_gate_service import check_order as _risk_check
     from backend.services.trade_shared.simulation_manager import SimulationAccountManager
 
     if not str(req.symbol or "").strip():
@@ -85,6 +91,13 @@ async def submit_order(db, redis, req: OrderRequest) -> RouterOutcome:
     if uid <= 0:
         return RouterOutcome(success=False, message="无效用户 ID")
 
+    risk = await _risk_check(req, db=db, redis=redis)
+    if not risk.passed:
+        return RouterOutcome(
+            success=False,
+            message=f"风控拒单[{risk.rule_id or 'risk'}]：{risk.reason}"[:300],
+        )
+
     manager = SimulationAccountManager(redis)
     if req.bar is None:
         routed = await _submit_immediate(db, manager, req)
@@ -94,6 +107,42 @@ async def submit_order(db, redis, req: OrderRequest) -> RouterOutcome:
     if req.mirror and routed.success and not routed.duplicate:
         routed.mirror = await _mirror_fill(redis, req, routed)
     return routed
+
+
+async def cancel_all(
+    db,
+    redis,
+    *,
+    tenant_id: str,
+    user_id: int,
+    reason: str = "risk_halt",
+    limit: int = 500,
+) -> dict[str, Any]:
+    """HALT 全撤（T-RC-02 首版）：撤销该账户全部**未成交模拟单**（pending/submitted）。
+
+    复用 `SimOrderService.cancel_order`（状态守卫 + V2 投影镜像——否则 worker 重放已撤单）。
+    实盘/影子环境的全撤走各自通道（QMT 撤单通道属 T-RC-03 批；此处 scope 限定模拟域）。
+    返回 {cancelled, failed, orders:[...]}；单笔失败不中断其余（如实计数）。
+    """
+    from backend.services.simulation.models.order import OrderStatus
+    from backend.services.simulation.services.order_service import SimOrderService
+
+    service = SimOrderService(db)
+    cancelled: list[str] = []
+    failed: list[dict[str, str]] = []
+    for status in (OrderStatus.PENDING.value, OrderStatus.SUBMITTED.value):
+        orders = await service.list_orders(tenant_id, str(user_id), status=status, limit=limit)
+        for order in orders:
+            try:
+                await service.cancel_order(order, reason=reason)
+                cancelled.append(str(order.order_id))
+            except Exception as exc:  # noqa: BLE001 - 单笔失败不中断
+                failed.append({"order_id": str(order.order_id), "error": str(exc)[:120]})
+    logger.warning(
+        "[OrderRouter] cancel_all tenant=%s user=%s reason=%s → 撤 %d 失败 %d",
+        tenant_id, user_id, reason, len(cancelled), len(failed),
+    )
+    return {"cancelled": len(cancelled), "failed": len(failed), "orders": cancelled, "errors": failed}
 
 
 async def _submit_immediate(db, manager, req: OrderRequest) -> RouterOutcome:
