@@ -6,6 +6,7 @@ import { selectCurrentMarket } from '../../../../store/slices/uiSlice';
 import type { StrategyFile } from '../../../../types/backtest/strategy';
 import { useRuntimeOverview } from './hooks/useRuntimeOverview';
 import type { ConsoleTradingMode } from './hooks/useRuntimeOverview';
+import { PlanSection } from '../../../../features/desk/components/DeskSections';
 import InputLayer from './layers/InputLayer';
 import RuntimeLayer from './layers/RuntimeLayer';
 import OutputLayer from './layers/OutputLayer';
@@ -172,6 +173,9 @@ const TopologyConsole: React.FC<TopologyConsoleProps> = ({
                     latestRun={latestRun}
                     defaultModelName={defaultModelName}
                 />
+
+                {/* L2.5 调仓计划（预演）+ 一键执行（2026-09-17 自手动任务迁入，置于交易记录上方） */}
+                <PlanSection />
 
                 {/* L3 交易记录（全宽） */}
                 <OutputLayer

@@ -102,7 +102,7 @@ const DeskTodayPage: React.FC<{ embedded?: boolean }> = ({ embedded = false }) =
       ) : desk ? (
         <>
           {/* 首行：系统健康 | 副驾驶（并列，2026-09-17 置顶）。分栏归位：候选信号→「候选信号」
-              页签、调仓计划→「手动任务」、今日执行→「持仓监控」；账户盈亏卡同屏重复已移除。 */}
+              页签、调仓计划→「策略管理·交易记录上方」、今日执行→「持仓监控」；账户盈亏卡同屏重复已移除。 */}
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
             <div className="lg:col-span-6 grid">
               <HealthCard health={desk.health} />
