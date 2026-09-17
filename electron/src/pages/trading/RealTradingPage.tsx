@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { LayoutDashboard, PieChart, FileText, Settings, User, ClipboardList, Clock, Gauge, Award } from 'lucide-react';
+import { LayoutDashboard, PieChart, FileText, Settings, User, ClipboardList, Clock, HeartPulse, BarChart3, Award } from 'lucide-react';
 import HelpCenterLink from '../../components/common/HelpCenterLink';
 import type { LucideIcon } from 'lucide-react';
 import { Button, Collapse, Modal, Spin, Tag, message } from 'antd';
@@ -13,6 +13,7 @@ import SettingsCenter from './tabs/SettingsCenter';
 import ReplayPage from './tabs/ReplayPage';
 import DeskTodayPage from '../../features/desk/DeskTodayPage';
 import { EvalCenterPanel } from '../../features/eval-center/components/EvalCenterPanel';
+import { SignalsSection } from '../../features/desk/components/DeskSections';
 import type { RealTradingStatus, AccountInfo, PreflightCheckResponse, PreflightCheckItem } from '../../services/realTradingService';
 import { authService } from '../../features/auth/services/authService';
 import type { StrategyFile } from '../../types/backtest/strategy';
@@ -26,7 +27,7 @@ import LiveTradeConfigWizard from './components/LiveTradeConfigWizard';
 import type { DeployMode, ExecutionConfig, LiveTradeConfig } from '../../types/liveTrading';
 
 type TradingMode = 'real' | 'simulation';  // 支持实盘(通达信桥)与模拟盘
-type ActiveTab = 'desk' | 'eval' | 'manage' | 'manual-task' | 'personal' | 'position' | 'history' | 'settings' | 'replay';
+type ActiveTab = 'desk' | 'signals' | 'eval' | 'manage' | 'manual-task' | 'personal' | 'position' | 'history' | 'settings' | 'replay';
 type PreflightStage = 'trading-readiness' | 'preflight';
 type PendingDeploy = {
     strategyId: string;
@@ -94,7 +95,8 @@ const RealTradingPage: React.FC = () => {
         const qi = hash.indexOf('?');
         const params = new URLSearchParams(qi >= 0 ? hash.slice(qi + 1) : '');
         const t = params.get('tab');
-        return t === 'eval' ? 'eval' : 'manage';
+        if (t === 'eval' || t === 'signals') return t as ActiveTab;
+        return 'manage';
     })();
     const [activeTab, setActiveTab] = useState<ActiveTab>(initialTab);
 
@@ -493,8 +495,10 @@ const RealTradingPage: React.FC = () => {
     };
 
     const tabs: Array<{ id: ActiveTab; label: string; icon: LucideIcon }> = [
-        // 今日交易台自底部栏迁入（2026-09-17），置于功能导航首位
-        { id: 'desk', label: '今日交易台', icon: Gauge },
+        // 系统健康（原「今日交易台」自底部栏迁入，2026-09-17 分栏归位后更名）
+        { id: 'desk', label: '系统健康', icon: HeartPulse },
+        // 候选信号独立成栏（2026-09-17 自交易台拆出）
+        { id: 'signals', label: '候选信号', icon: BarChart3 },
         // 评估中心自因子研究迁入（2026-09-17），置于策略管理之前（评估与策略同组）
         { id: 'eval', label: '评估中心', icon: Award },
         { id: 'manage', label: '策略管理', icon: LayoutDashboard },
@@ -584,6 +588,11 @@ const RealTradingPage: React.FC = () => {
                     {/* Right Content Area */}
                     <div className="flex-1 overflow-hidden relative bg-gray-50/50">
                     {activeTab === 'desk' && <DeskTodayPage embedded />}
+                    {activeTab === 'signals' && (
+                        <div className="h-full overflow-y-auto p-4">
+                            <SignalsSection />
+                        </div>
+                    )}
                     {activeTab === 'eval' && (
                         <div className="h-full overflow-y-auto p-4">
                             <EvalCenterPanel />

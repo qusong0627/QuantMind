@@ -2,6 +2,7 @@ import { useAppSelector } from '../../../store';
 import { selectCurrentMarket } from '../../../store/slices/uiSlice';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowLeft, CheckCircle2, ClipboardList, Loader2, Search, Zap, BarChart3, User as UserIcon, Settings2, Sparkles, Filter, Link, ArrowRight, Layers, TrendingUp, Activity, History, Cpu, Clock, Brain, Target, Database, Code, Calendar, Wand2, Eye, Play, CreditCard, Binary, ShieldAlert, Info, TerminalSquare, AlertTriangle } from 'lucide-react';
+import { PlanSection } from '../../../features/desk/components/DeskSections';
 import { DatePicker, Empty, Input, Select, Spin, Tag, message, Tooltip, Badge } from 'antd';
 import dayjs from 'dayjs';
 import utc from 'dayjs/plugin/utc';
@@ -578,6 +579,11 @@ const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack }) 
                         )}
                     </div>
                 </div>
+            </div>
+
+            {/* 调仓计划（预演）+ 一键执行（2026-09-17 自今日交易台迁入） */}
+            <div className="mb-3">
+                <PlanSection />
             </div>
 
             <div className="grid grid-cols-1 lg:grid-cols-5 gap-2 mb-3 px-0.5">

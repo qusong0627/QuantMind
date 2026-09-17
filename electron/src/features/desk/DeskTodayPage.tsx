@@ -15,14 +15,13 @@ import { Gauge, RefreshCw } from 'lucide-react';
 import { PAGE_LAYOUT } from '../../config/pageLayout';
 import { getDeskToday } from './services/deskService';
 import type { DeskToday } from './types';
-import { evidenceRingDrillEntries, executionItemDrillEntries, pipelineStepDrillEntries, pipelineSummary, planDrillEntries, planOrderDrillEntries, signalItemDrillEntries, statusStyle, symbolLabel } from './deskModel';
+import { evidenceRingDrillEntries, pipelineStepDrillEntries, pipelineSummary, statusStyle } from './deskModel';
 import { DrillDownDrawer, type DrillEntry } from '../shared/DrillDownDrawer';
 import { UiModeToggle } from '../shared/UiModeToggle';
 import { ComplianceFooter } from '../../components/shared/compliance/ComplianceChrome';
 import { PipelineBar } from './components/PipelineBar';
 import { EvidenceMatrix } from './components/EvidenceMatrix';
-import { PlanCard } from './components/PlanCard';
-import { ExecutionCard, HealthCard, SignalsCard } from './components/DeskCards';
+import { HealthCard } from './components/DeskCards';
 import { CopilotPanel } from './components/CopilotPanel';
 
 function errorText(error: unknown): string {
@@ -127,63 +126,10 @@ const DeskTodayPage: React.FC<{ embedded?: boolean }> = ({ embedded = false }) =
             }
           />
 
-          {/* 对齐网格（统一 12 栅格、gap-4、卡片等高）：主行 信号(4) + 计划(8)；次行 执行/健康（6+6）。
-              账户盈亏卡已移除（2026-09-17）：模拟交易顶栏「资产概览」常显同一份盈亏数字，同屏重复。 */}
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
-            <div className="lg:col-span-4 grid">
-              <SignalsCard
-                signals={desk.signals}
-                onItemDrill={(item) =>
-                  setDrawer({
-                    title: `信号 · ${symbolLabel(item.symbol, item.name)}`,
-                    subtitle: '字段分解 → 原始条目 → 信号块载荷（engine_signal_scores）',
-                    entries: signalItemDrillEntries(item, desk.signals) as DrillEntry[],
-                    raw: item,
-                  })
-                }
-              />
-            </div>
-            <div className="lg:col-span-8 grid">
-              <PlanCard
-                plan={desk.plan}
-                onExecuted={() => void load()}
-                onOrderDrill={(order) =>
-                  setDrawer({
-                    title: `计划单 · ${symbolLabel(order.symbol, order.name)}`,
-                    subtitle: '单字段 → 触发类别/当日信号 → 原始条目（dry-run 输出）',
-                    entries: planOrderDrillEntries(order, desk.plan, desk.signals) as DrillEntry[],
-                    raw: order,
-                  })
-                }
-                onDrillDown={() =>
-                  setDrawer({
-                    title: '调仓计划 · 来源链',
-                    subtitle: '预演与执行共用同一 RebalanceCalculator（dry-run，未执行）',
-                    entries: planDrillEntries(desk.plan) as DrillEntry[],
-                    raw: desk.plan,
-                  })
-                }
-              />
-            </div>
-          </div>
-
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
-            <div className="lg:col-span-6 grid">
-              <ExecutionCard
-                execution={desk.execution}
-                onItemDrill={(item) =>
-                  setDrawer({
-                    title: `执行 · ${symbolLabel(item.symbol, item.name)}`,
-                    subtitle: '订单字段 → 取价来源说明 → 原始条目（sim_orders 投影）',
-                    entries: executionItemDrillEntries(item, desk.execution) as DrillEntry[],
-                    raw: item,
-                  })
-                }
-              />
-            </div>
-            <div className="lg:col-span-6 grid">
-              <HealthCard health={desk.health} />
-            </div>
+          {/* 系统健康（整行通栏）。2026-09-17 分栏归位：候选信号→「候选信号」页签、
+              调仓计划→「手动任务」、今日执行→「持仓监控」；账户盈亏卡同屏重复已移除。 */}
+          <div className="grid grid-cols-1">
+            <HealthCard health={desk.health} />
           </div>
 
           {/* 副驾驶（T-P6-16）：情报事件流 + 误报标注 + 建议卡一键执行（无 mock） */}

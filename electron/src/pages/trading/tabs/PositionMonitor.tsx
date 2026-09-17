@@ -6,6 +6,7 @@ import { AccountInfo } from '../../../services/realTradingService';
 import { marketDataService } from '../../../services/marketDataService';
 import { websocketService, MessageType } from '../../../services/websocketService';
 import { buildNormalizedHoldings, extractPositionCodes, getPositionSummary, NormalizedHolding } from '../utils/positionMetrics';
+import { ExecutionSection } from '../../../features/desk/components/DeskSections';
 import PositionOverview from '../components/PositionOverview';
 import { SERVICE_URLS } from '../../../config/services';
 
@@ -191,6 +192,8 @@ const PositionMonitor: React.FC<PositionMonitorProps> = ({ userId: _userId, isAc
                     监控 {feedStatus?.symbols?.length ?? 0} 只持仓 · 实时提醒仅限持仓股
                 </span>
             </div>
+            {/* 今日执行（2026-09-17 自今日交易台迁入） */}
+            <ExecutionSection />
             <div className="flex-1 min-h-0">
                 <PositionOverview holdings={holdings} summary={summary} variant="full" />
             </div>
