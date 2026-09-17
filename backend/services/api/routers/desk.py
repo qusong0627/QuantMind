@@ -30,6 +30,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from backend.services.api.user_app.middleware.auth import get_current_user
 from backend.shared.database_manager_v2 import get_session
+from backend.shared.stock_name_mapper import resolve_name
 
 logger = logging.getLogger(__name__)
 
@@ -155,6 +156,8 @@ async def _collect_signals(tenant_id: str) -> dict[str, Any]:
         "top_buy": [
             {
                 "symbol": str(r.symbol),
+                # 中文名（stocks_index.json 归一查表；未收录为空串，前端回退显示代码）
+                "name": resolve_name(str(r.symbol)),
                 "side": str(r.signal_side),
                 "rank_pct": float(r.rank_pct) if r.rank_pct is not None else None,
                 "score": float(r.score) if r.score is not None else None,
@@ -194,10 +197,12 @@ async def _collect_execution(tenant_id: str, sim_uid: int, raw_user: str) -> dic
             )
         ).all()
 
-    items = [
-        {
-            "mode": "SIM",
+    def _item(mode: str, r: Any) -> dict[str, Any]:
+        return {
+            "mode": mode,
             "symbol": str(r.symbol),
+            # 中文名（stocks_index.json 归一查表；未收录为空串，前端回退显示代码）
+            "name": resolve_name(str(r.symbol)),
             "side": str(r.side),
             "quantity": float(r.quantity or 0),
             "status": str(r.status),
@@ -207,22 +212,8 @@ async def _collect_execution(tenant_id: str, sim_uid: int, raw_user: str) -> dic
             "reason": r.remarks,
             "created_at": r.created_at.isoformat() if r.created_at else None,
         }
-        for r in sim_rows
-    ] + [
-        {
-            "mode": "REAL",
-            "symbol": str(r.symbol),
-            "side": str(r.side),
-            "quantity": float(r.quantity or 0),
-            "status": str(r.status),
-            "price_source": r.price_source,
-            "client_order_id": r.client_order_id,
-            "origin": r.source,
-            "reason": r.remarks,
-            "created_at": r.created_at.isoformat() if r.created_at else None,
-        }
-        for r in real_rows
-    ]
+
+    items = [_item("SIM", r) for r in sim_rows] + [_item("REAL", r) for r in real_rows]
     items.sort(key=lambda x: x.get("created_at") or "", reverse=True)
     return {
         "sim_count": len(sim_rows),
@@ -709,6 +700,12 @@ async def _collect_plan(
             "source": "simulation engine dry-run（RebalanceCalculator 单一实现，未执行）",
         }
     )
+    # 中文名 enrichment（在 desk 边界做，不污染引擎预演服务）；未收录为空串
+    orders = result.get("orders")
+    if isinstance(orders, list):
+        for order in orders:
+            if isinstance(order, dict) and order.get("symbol"):
+                order["name"] = resolve_name(str(order["symbol"]))
     return result
 
 
