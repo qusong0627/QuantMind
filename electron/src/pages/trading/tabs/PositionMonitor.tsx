@@ -6,8 +6,7 @@ import { AccountInfo } from '../../../services/realTradingService';
 import { marketDataService } from '../../../services/marketDataService';
 import { websocketService, MessageType } from '../../../services/websocketService';
 import { buildNormalizedHoldings, extractPositionCodes, getPositionSummary, NormalizedHolding } from '../utils/positionMetrics';
-import { ExecutionSection } from '../../../features/desk/components/DeskSections';
-import PositionOverview from '../components/PositionOverview';
+import { PositionVisualBoard, ExecutionStrip } from '../components/PositionVisualBoard';
 import { SERVICE_URLS } from '../../../config/services';
 
 interface PositionMonitorProps {
@@ -192,11 +191,10 @@ const PositionMonitor: React.FC<PositionMonitorProps> = ({ userId: _userId, isAc
                     监控 {feedStatus?.symbols?.length ?? 0} 只持仓 · 实时提醒仅限持仓股
                 </span>
             </div>
-            {/* 今日执行（2026-09-17 自今日交易台迁入） */}
-            <ExecutionSection />
-            <div className="flex-1 min-h-0">
-                <PositionOverview holdings={holdings} summary={summary} variant="full" />
-            </div>
+            {/* 持仓可视化主卡（2026-09-17 重设计：KPI + 市值占比条形列表，替代 分布饼图+宽表格 两块） */}
+            <PositionVisualBoard holdings={holdings} summary={summary} />
+            {/* 今日执行折叠条（并入同页，不再单起卡片） */}
+            <ExecutionStrip />
         </div>
     );
 };
