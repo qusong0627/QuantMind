@@ -10,11 +10,12 @@
  */
 
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
-import { message, Popover } from 'antd';
-import { Lightbulb } from 'lucide-react';
-import { QUANTBOT_INTENTS } from '../intents/quantbotIntents';
+import { BookMarked, FileText } from 'lucide-react';
 import { Bot, RefreshCw, Wifi, WifiOff, ExternalLink, AlertTriangle } from 'lucide-react';
 import { isElectronEnv, SERVICE_URLS } from '../../../config/services';
+import PromptLibraryDrawer from '../components/PromptLibraryDrawer';
+import ReportsDrawer from '../components/ReportsDrawer';
+import { PROMPT_LIBRARY_TOTAL } from '../components/promptLibraryModel';
 
 /** 无任何服务器配置时的兜底地址（dsh 容器宿主映射端口） */
 const QWENPAW_LOCAL_FALLBACK_URL = 'http://127.0.0.1:8088/';
@@ -45,41 +46,12 @@ export function getQwenPawDirectUrl(): string {
 /** iframe 加载超时时间（毫秒） */
 const IFRAME_LOAD_TIMEOUT_MS = 15_000;
 
-/**
- * 复制文本：优先 Clipboard API；不可用（HTTP 非安全上下文 / 无权限）时降级
- * textarea + execCommand——局域网 http 访问是常态场景，必须可复制。
- */
-async function copyText(text: string): Promise<boolean> {
-  try {
-    if (typeof navigator !== 'undefined' && navigator.clipboard && window.isSecureContext) {
-      await navigator.clipboard.writeText(text);
-      return true;
-    }
-  } catch {
-    // 落入降级路径
-  }
-  try {
-    const ta = document.createElement('textarea');
-    ta.value = text;
-    ta.style.position = 'fixed';
-    ta.style.opacity = '0';
-    document.body.appendChild(ta);
-    ta.focus();
-    ta.select();
-    const ok = document.execCommand('copy');
-    document.body.removeChild(ta);
-    return ok;
-  } catch {
-    return false;
-  }
-}
-
 const QuantBotPage: React.FC = () => {
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const [iframeKey, setIframeKey] = useState<number>(0);
-  // T-FE-13：意图示例浮层（聊天宿主在 dsh iframe 内——示例一键复制、粘贴即用）；
-  // 点击按钮弹出 Popover 悬浮在 iframe 之上，不占用顶部/布局空间；默认关闭
-  const [showIntents, setShowIntents] = useState(false);
+  // 提示词库（示例 34 条 + 模板 25 条，合并为一个抽屉）与调研报告档案，均为悬浮抽屉，不占 iframe 布局
+  const [showPrompts, setShowPrompts] = useState(false);
+  const [showReports, setShowReports] = useState(false);
   const [loading, setLoading] = useState<boolean>(true);
   const [connected, setConnected] = useState<boolean>(false);
   const [timedOut, setTimedOut] = useState<boolean>(false);
@@ -161,67 +133,25 @@ const QuantBotPage: React.FC = () => {
             <Bot className="w-3.5 h-3.5 text-white" />
           </div>
           <span className="text-xs font-bold text-slate-800 tracking-tight">QuantBot · DSH</span>
-          <Popover
-            open={showIntents}
-            onOpenChange={setShowIntents}
-            trigger="click"
-            placement="bottomLeft"
-            arrow={false}
-            zIndex={1200}
-            styles={{ body: { padding: 0, borderRadius: 12, boxShadow: '0 12px 32px rgba(15, 23, 42, 0.14)' } }}
-            content={
-              <div className="w-[min(92vw,780px)] max-h-[62vh] overflow-y-auto">
-                <div className="flex items-center justify-between px-4 pt-3 pb-2 border-b border-slate-100">
-                  <p className="text-[11px] font-semibold text-slate-500">点击任一提示词复制 → 粘贴到下方对话框发送</p>
-                  <p className="text-[10px] text-slate-300">
-                    {QUANTBOT_INTENTS.reduce((n, it) => n + it.examples.length, 0)} 条示例 · 五类场景
-                  </p>
-                </div>
-                <div className="px-4">
-                  {QUANTBOT_INTENTS.map((intent) => (
-                    <div key={intent.key} className="flex items-start gap-3 py-2 border-b border-slate-50 last:border-b-0">
-                      <div className="w-[68px] flex-shrink-0 pt-0.5">
-                        <span className="text-[11px] font-bold text-slate-600">{intent.label}</span>
-                        <p className="text-[9px] leading-3 text-slate-300 mt-0.5">{intent.description}</p>
-                      </div>
-                      <div className="flex flex-wrap gap-1.5">
-                        {intent.examples.map((ex) => (
-                          <button
-                            key={ex.label}
-                            type="button"
-                            title={ex.prompt}
-                            onClick={async () => {
-                              const ok = await copyText(ex.prompt);
-                              if (ok) {
-                                message.success('已复制提示词——粘贴到下方对话框发送即可');
-                              } else {
-                                message.warning('复制失败（剪贴板不可用），请手动输入示例内容');
-                              }
-                            }}
-                            className="text-[10px] px-2 py-0.5 rounded-full border border-slate-200 bg-slate-50 text-slate-600 hover:bg-blue-50 hover:border-blue-200 hover:text-blue-700 transition-colors"
-                          >
-                            {ex.label}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-                <p className="text-[10px] text-slate-400 px-4 py-2.5">
-                  写操作（下单 / 清仓 / 上实盘等）不由助手直达执行——一律在正式页面经二次确认后生效
-                </p>
-              </div>
-            }
+          <button
+            type="button"
+            onClick={() => setShowPrompts(true)}
+            className="inline-flex items-center gap-1 text-[11px] font-semibold text-slate-500 hover:text-blue-600 transition-colors"
+            title="提示词库：示例 + 技能模板，复制后粘贴到下方对话框"
           >
-            <button
-              type="button"
-              className="inline-flex items-center gap-1 text-[11px] font-semibold text-slate-500 hover:text-blue-600 transition-colors"
-              title="点击弹出示例提示词（浮层，不占页面空间）"
-            >
-              <Lightbulb className="w-3.5 h-3.5 text-amber-500" />
-              示例提示词 {showIntents ? '▾' : '▸'}
-            </button>
-          </Popover>
+            <BookMarked className="w-3.5 h-3.5 text-indigo-500" />
+            提示词库
+            <span className="text-[9px] font-bold text-slate-400 bg-slate-100 px-1 py-px rounded">{PROMPT_LIBRARY_TOTAL}</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setShowReports(true)}
+            className="inline-flex items-center gap-1 text-[11px] font-semibold text-slate-500 hover:text-blue-600 transition-colors"
+            title="调研报告：QuantBot 生成的 md + PDF 自动归档，点击文件直接预览"
+          >
+            <FileText className="w-3.5 h-3.5 text-indigo-500" />
+            调研报告
+          </button>
           <span className="text-[10px] font-medium text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded">AI 智能助理</span>
         </div>
 
@@ -265,7 +195,7 @@ const QuantBotPage: React.FC = () => {
       </div>
 
       {/* iframe 内容区域 — 避开底部 Dock 悬浮栏 */}
-      {/* T-FE-13 意图示例已是顶栏按钮的 Popover 浮层（悬浮于 iframe 之上，不占布局） */}
+      {/* 提示词库 / 调研报告均为顶栏按钮唤起的抽屉（悬浮于 iframe 之上，不占布局） */}
 
       <div className="flex-1 relative overflow-hidden bg-white border-x border-b border-slate-200/80 rounded-b-xl shadow-xs">
         {loading && !timedOut && (
@@ -318,6 +248,11 @@ const QuantBotPage: React.FC = () => {
           onError={handleIframeError}
         />
       </div>
+
+      {/* 提示词库（示例 + 模板合并） */}
+      <PromptLibraryDrawer open={showPrompts} onClose={() => setShowPrompts(false)} />
+      {/* 调研报告档案（md + PDF 自动归档，内嵌预览） */}
+      <ReportsDrawer open={showReports} onClose={() => setShowReports(false)} />
     </div>
   );
 };
