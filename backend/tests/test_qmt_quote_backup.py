@@ -331,3 +331,49 @@ def test_bridge_offline_backoff_and_status():
     svc2._last_symbols_refresh = 0  # 允许立即再试一次 → 应被 backoff 拦下
     svc2.sync_subscription()
     assert calls["n"] == 1, "退避窗口内不得重试风暴"
+
+
+@pytest.mark.unit
+def test_bridge_recovers_after_outage():
+    """桥恢复闭环：两次超时（退避）→ 第三次成功 → bridge_ok 翻转、last_error 清空、
+    订阅记录建立、退避清零（P0 备源席恢复路径，2026-09-17 桥离线事故回归）。"""
+    from backend.services.live_trading.services.qmt_quote_backup import (
+        BackupConfig,
+        QmtQuoteBackupService,
+    )
+
+    attempts = {"n": 0}
+
+    def _flaky(codes, callback):
+        attempts["n"] += 1
+        if attempts["n"] <= 2:
+            raise TimeoutError("redis rpc timeout: subscribe_whole_quote")
+        return "sub-recovered"
+
+    svc = QmtQuoteBackupService(
+        config_loader=lambda: BackupConfig(enabled=True, symbols_refresh_s=0.0),
+        hot_set_fetcher=lambda: ["600036.SH"],
+        subscribe_fn=_flaky,
+        unsubscribe_fn=lambda sub: None,
+        writer_client_factory=lambda: None,
+        latency_recorder=_FakeLatency(),
+    )
+
+    svc.sync_subscription()  # ① 桥离线
+    st = svc.status()
+    assert st["bridge_ok"] is False
+    assert "TimeoutError" in (st["last_error"] or "")
+    assert svc._backoff_s > 0.0, "离线必须进入退避"
+
+    svc._backoff_s = 0.0  # 模拟退避窗结束
+    svc.sync_subscription()  # ② 桥仍离线 → 再次失败（退避重试语义）
+    assert attempts["n"] == 2 and svc.status()["bridge_ok"] is False
+
+    svc._backoff_s = 0.0
+    svc.sync_subscription()  # ③ 桥恢复 → 订阅成功
+    st = svc.status()
+    assert attempts["n"] == 3
+    assert st["bridge_ok"] is True
+    assert st["last_error"] is None
+    assert st["subscribed"] == 1
+    assert svc._backoff_s == 0.0, "恢复后退避必须清零（不再拦下一次维护）"
