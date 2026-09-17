@@ -18,7 +18,6 @@ import type { StrategyFile } from '../../types/backtest/strategy';
 import { useAppSelector } from '../../store';
 import { selectCurrentMarket } from '../../store/slices/uiSlice';
 import { useTradingModeSwitch } from '../../features/shared/useTradingModeSwitch';
-import { ComplianceFooter } from '../../components/shared/compliance/ComplianceChrome';
 import { getMarketConfig } from '../../config/marketConfig';
 import { useTradeWebSocket } from '../../hooks/useTradeWebSocket';
 import { buildTradingTopBarAccountInfo, resolveTradingAccountMode } from './utils/accountAdapter';
@@ -566,8 +565,7 @@ const RealTradingPage: React.FC = () => {
                                 </button>
                             </div>
                             <HelpCenterLink className="w-full text-xs font-semibold tracking-wide" />
-                            {/* T-FE-17 免责页脚：真实资金操作区常驻可见 */}
-                            <ComplianceFooter />
+                            {/* T-FE-17 免责页脚自左侧底部移除（2026-09-17）：改由顶栏「本地沙箱」后的顶部免责小字承载 */}
                         </div>
                     </div>
 

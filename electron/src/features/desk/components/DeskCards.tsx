@@ -69,8 +69,8 @@ export const SignalsCard: React.FC<{
       <StatTile label="HOLD" value={signals?.hold} tone="slate" />
     </div>
 
-    <div className="space-y-0.5 flex-1">
-      {(signals?.top_buy || []).slice(0, 5).map((item, index) => {
+    <div className="space-y-0.5 flex-1 min-h-0 overflow-y-auto">
+      {(signals?.top_buy || []).map((item, index) => {
         const rank = item.rank_pct === null || item.rank_pct === undefined ? null : item.rank_pct;
         return (
           <button
@@ -110,6 +110,11 @@ export const SignalsCard: React.FC<{
         <p className="text-xs text-slate-400 px-2 py-1">暂无 BUY 信号</p>
       )}
     </div>
+    {!!signals?.buy && (
+      <p className="px-2 pt-1.5 text-[10px] text-slate-400">
+        共 {signals.buy} 只 BUY 信号，按 rank 分位强弱展示前 {signals.top_buy?.length || 0} 只（列表内可滚动）
+      </p>
+    )}
     <SourceFooter source={signals?.source || '—'} />
   </section>
 );

@@ -141,7 +141,7 @@ async def _collect_signals(tenant_id: str) -> dict[str, Any]:
                     "SELECT symbol, signal_side, round(rank_pct::numeric, 4) AS rank_pct, "
                     "round(fusion_score::numeric, 4) AS score "
                     "FROM engine_signal_scores WHERE trade_date = :d AND signal_side = 'BUY' "
-                    "ORDER BY rank_pct DESC NULLS LAST LIMIT 5"
+                    "ORDER BY rank_pct DESC NULLS LAST LIMIT 10"
                 ),
                 {"d": trade_date},
             )
