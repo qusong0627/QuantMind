@@ -201,7 +201,7 @@ import_images() {
         quantmind-oss:latest \
         quantmind-data-gateway:latest \
         postgres:15-alpine redis:7-alpine \
-        lcomplete/huntly:latest agentscope/qwenpaw:latest \
+        lcomplete/huntly:latest quantmind-dsh:latest \
         ghcr.io/gnzsnz/ib-gateway:latest \
         python:3.10-slim-bookworm; do
         if ! docker image inspect "$image" >/dev/null 2>&1; then
@@ -223,12 +223,20 @@ import_images() {
         quantmind-oss:latest \
         quantmind-data-gateway:latest \
         postgres:15-alpine redis:7-alpine \
-        lcomplete/huntly:latest agentscope/qwenpaw:latest \
+        lcomplete/huntly:latest \
         ghcr.io/gnzsnz/ib-gateway:latest \
         python:3.10-slim-bookworm; do
         docker image inspect "$image" >/dev/null 2>&1 \
             || die "离线镜像包未包含必需镜像: $image"
     done
+
+    # quantmind-dsh（QuantBot 默认后端）：离线包管线加入该镜像前的过渡——允许缺失，
+    # 本地构建兜底（需网络；构建源见 repo docker/Dockerfile.dsh）。
+    if ! docker image inspect quantmind-dsh:latest >/dev/null 2>&1; then
+        log '警告：离线镜像包未包含 quantmind-dsh:latest，尝试本地构建（需网络）'
+        docker compose -f "$PROJECT_DIR/docker-compose.yml" build dsh \
+            || die 'quantmind-dsh 镜像缺失且本地构建失败：请更新离线包或排查构建'
+    fi
 }
 
 restore_payload_data() {

@@ -6,7 +6,7 @@ description: 复盘后多维打分选股：L2 微观结构 + 模型融合分 + �
 outputs: data/reports/stock_picks/ + PDF 报告
 ---
 
-> 复制下方提示词到 QuantBot（QwenPaw 控制台）即可使用；`{占位符}` 处替换为你的实际内容。
+> 复制下方提示词到 QuantBot（DeepSeek Harness 控制台，http://<宿主>:8088）即可使用；`{占位符}` 处替换为你的实际内容。
 
 请基于最新复盘数据给我做今日股票推荐。
 

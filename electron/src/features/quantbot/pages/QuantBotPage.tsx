@@ -1,12 +1,12 @@
 /**
- * QuantBot 主页面 — 完整嵌入 QwenPaw 智能体 Web 界面
+ * QuantBot 主页面 — 完整嵌入 dsh（DeepSeek Harness）智能体 Web 界面
  *
- * QwenPaw 是项目的大脑，提供完整 AI 智能体能力：
+ * dsh 是项目的大脑，提供完整 AI 智能体能力：
  * 执行命令、写代码、跑回测、跑因子挖掘、获取股票数据 AI 分析、获取新闻数据等。
  *
  * 加载策略：
- * - Web 浏览器端：通过当前域名的 /api/v1/qwenpaw-ui/ 反向代理（局域网访问同样适用）
- * - Electron 桌面端：通过用户配置的服务器地址代理；未配置时回退本机 8088
+ * - Web 浏览器端：按当前主机名直连 8088（dsh 容器宿主映射端口，同源 SSE/WebSocket）
+ * - Electron 桌面端：通过用户配置的服务器地址推导 8088；未配置时回退本机 8088
  */
 
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
@@ -16,16 +16,16 @@ import { QUANTBOT_INTENTS } from '../intents/quantbotIntents';
 import { Bot, RefreshCw, Wifi, WifiOff, ExternalLink, AlertTriangle } from 'lucide-react';
 import { isElectronEnv, SERVICE_URLS } from '../../../config/services';
 
-/** 无任何服务器配置时的兜底地址（QwenPaw 容器宿主映射端口） */
+/** 无任何服务器配置时的兜底地址（dsh 容器宿主映射端口） */
 const QWENPAW_LOCAL_FALLBACK_URL = 'http://127.0.0.1:8088/';
 
-/** QwenPaw 直连 Web UI 端口（服务器上 qwenpaw 容器的宿主映射端口） */
+/** dsh 直连 Web UI 端口（quantmind-dsh 容器的宿主映射端口；前端 iframe 硬编码依赖 8088） */
 const QWENPAW_DIRECT_PORT = 8088;
 
 /**
- * 推导 QwenPaw 直连 Web UI 地址（供“在外部浏览器打开”使用）。
+ * 推导 dsh 直连 Web UI 地址（供“在外部浏览器打开”使用）。
  * 基于已配置的 API 网关地址（如 http://1.2.3.4:8000）取同名主机、换到 8088 端口，
- * 直接打开 qwenpaw 容器自身托管的界面；未配置网关时回退本机。
+ * 直接打开 dsh 容器自身托管的界面；未配置网关时回退本机。
  */
 export function getQwenPawDirectUrl(): string {
   const gateway = SERVICE_URLS.API_GATEWAY;
@@ -48,7 +48,7 @@ const IFRAME_LOAD_TIMEOUT_MS = 15_000;
 const QuantBotPage: React.FC = () => {
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const [iframeKey, setIframeKey] = useState<number>(0);
-  // T-FE-13：四类意图示例条（聊天宿主在 QwenPaw iframe 内——示例一键复制、粘贴即用）
+  // T-FE-13：四类意图示例条（聊天宿主在 dsh iframe 内——示例一键复制、粘贴即用）
   const [showIntents, setShowIntents] = useState(true);
   const [loading, setLoading] = useState<boolean>(true);
   const [connected, setConnected] = useState<boolean>(false);
@@ -56,14 +56,14 @@ const QuantBotPage: React.FC = () => {
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const embedUrl = useMemo(() => {
-    // Electron：qwenpaw 部署在用户配置的远端服务器，直连其 8088。
-    // 直连时 qwenpaw SPA 自身的 /api 与 WebSocket 都走 ip:8088 同源，
+    // Electron：dsh 部署在用户配置的远端服务器，直连其 8088。
+    // 直连时 dsh SPA 自身的 /api 与 WebSocket 都走 ip:8088 同源，
     // 实时推送可原生工作，无需网关代理及其路径重写。
     if (isElectronEnv()) {
       return getQwenPawDirectUrl();
     }
 
-    // Web：qwenpaw 部署在提供页面的同一台服务器，按当前主机名直连 8088，
+    // Web：dsh 部署在提供页面的同一台服务器，按当前主机名直连 8088，
     // 避免走网关代理导致实时（WebSocket）链路不稳定。
     if (typeof window !== 'undefined' && window.location?.hostname) {
       return `http://${window.location.hostname}:8088/`;
@@ -130,7 +130,16 @@ const QuantBotPage: React.FC = () => {
           <div className="w-5 h-5 rounded-md bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center shadow-xs">
             <Bot className="w-3.5 h-3.5 text-white" />
           </div>
-          <span className="text-xs font-bold text-slate-800 tracking-tight">QuantBot · QwenPaw</span>
+          <span className="text-xs font-bold text-slate-800 tracking-tight">QuantBot · DSH</span>
+          <button
+            type="button"
+            onClick={() => setShowIntents(!showIntents)}
+            className="inline-flex items-center gap-1 text-[11px] font-semibold text-slate-500 hover:text-blue-600 transition-colors"
+            title="展开 / 收起四类意图示例"
+          >
+            <Lightbulb className="w-3.5 h-3.5 text-amber-500" />
+            示例提示词 {showIntents ? '▾' : '▸'}
+          </button>
           <span className="text-[10px] font-medium text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded">AI 智能助理</span>
         </div>
 
@@ -174,20 +183,12 @@ const QuantBotPage: React.FC = () => {
       </div>
 
       {/* iframe 内容区域 — 避开底部 Dock 悬浮栏 */}
-      {/* T-FE-13 四类意图示例：写策略 / 选股筛选 / 分析问答 / 操作帮助 —— 点击复制提示词 */}
-      <div className="flex-shrink-0 bg-white border-x border-slate-200/80 px-4 py-2">
-        <div className="flex flex-wrap items-start gap-x-3 gap-y-1.5">
-          <button
-            type="button"
-            onClick={() => setShowIntents(!showIntents)}
-            className="inline-flex items-center gap-1 text-[11px] font-bold text-slate-600 hover:text-blue-600 mt-0.5"
-            title="展开 / 收起四类意图示例"
-          >
-            <Lightbulb className="w-3.5 h-3.5 text-amber-500" />
-            示例提示词 {showIntents ? '▾' : '▸'}
-          </button>
-          {showIntents &&
-            QUANTBOT_INTENTS.map((intent) => (
+      {/* T-FE-13 四类意图示例：写策略 / 选股筛选 / 分析问答 / 操作帮助 —— 点击复制提示词
+          （展开开关在顶栏标题旁；本面板仅承载展开后的示例 chips） */}
+      {showIntents && (
+        <div className="flex-shrink-0 bg-white border-x border-slate-200/80 px-4 py-2">
+          <div className="flex flex-wrap items-start gap-x-3 gap-y-1.5">
+            {QUANTBOT_INTENTS.map((intent) => (
               <span key={intent.key} className="inline-flex items-center gap-1 flex-wrap">
                 <span className="text-[10px] font-bold text-slate-400">{intent.label}</span>
                 {intent.examples.map((ex) => (
@@ -210,13 +211,12 @@ const QuantBotPage: React.FC = () => {
                 ))}
               </span>
             ))}
-        </div>
-        {showIntents && (
+          </div>
           <p className="text-[10px] text-slate-400 mt-1">
             写操作（下单 / 清仓 / 上实盘等）不由助手直达执行——一律在正式页面经二次确认后生效
           </p>
-        )}
-      </div>
+        </div>
+      )}
 
       <div className="flex-1 relative overflow-hidden bg-white border-x border-b border-slate-200/80 rounded-b-xl shadow-xs">
         {loading && !timedOut && (
@@ -224,7 +224,7 @@ const QuantBotPage: React.FC = () => {
             <div className="flex flex-col items-center gap-3">
               <div className="w-10 h-10 border-3 border-blue-500 border-t-transparent rounded-full animate-spin" />
               <div className="text-center">
-                <p className="text-xs font-semibold text-slate-700">QwenPaw 智能体加载中…</p>
+                <p className="text-xs font-semibold text-slate-700">QuantBot 智能体加载中…</p>
                 <p className="text-[11px] text-slate-400 mt-0.5">AI Brain · Code · Backtest · Factor · Data</p>
               </div>
             </div>
@@ -238,12 +238,12 @@ const QuantBotPage: React.FC = () => {
                 <AlertTriangle className="w-6 h-6 text-rose-500" />
               </div>
               <div>
-                <p className="text-sm font-bold text-slate-800">QwenPaw 服务未响应</p>
+                <p className="text-sm font-bold text-slate-800">QuantBot 服务未响应</p>
                 <p className="text-xs text-slate-500 mt-1.5 leading-relaxed">
-                  请检查后端 QwenPaw 容器状态：
+                  请检查后端 dsh 容器状态：
                 </p>
                 <code className="block mt-2 px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs text-emerald-600 font-mono">
-                  docker compose up -d qwenpaw
+                  docker compose up -d dsh
                 </code>
               </div>
               <button
@@ -262,7 +262,7 @@ const QuantBotPage: React.FC = () => {
           key={iframeKey}
           src={embedUrl}
           className="w-full h-full border-0"
-          title="QwenPaw Agent"
+          title="QuantBot Agent"
           allow="clipboard-read; clipboard-write; fullscreen; microphone; camera"
           sandbox="allow-scripts allow-same-origin allow-forms allow-downloads allow-popups allow-popups-to-escape-sandbox allow-modals allow-presentation"
           onLoad={handleIframeLoad}

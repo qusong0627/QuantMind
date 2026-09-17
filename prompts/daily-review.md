@@ -6,7 +6,7 @@ description: 盘后专业复盘：指数、涨停梯队、行业轮动、资金�
 outputs: data/reports/daily_review/ + PDF 报告
 ---
 
-> 复制下方提示词到 QuantBot（QwenPaw 控制台）即可使用；`{占位符}` 处替换为你的实际内容。
+> 复制下方提示词到 QuantBot（DeepSeek Harness 控制台，http://<宿主>:8088）即可使用；`{占位符}` 处替换为你的实际内容。
 
 今天是 {日期，如 2026-08-29}，请给我做 A 股每日复盘。
 

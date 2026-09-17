@@ -6,7 +6,7 @@ description: Alpha 库 429 因子的 Alphalens 式体检：分位收益单调性
 outputs: 因子体检结论 + 入选/剔除清单
 ---
 
-> 复制下方提示词到 QuantBot（QwenPaw 控制台）即可使用；`{占位符}` 处替换为你的实际内容。
+> 复制下方提示词到 QuantBot（DeepSeek Harness 控制台，http://<宿主>:8088）即可使用；`{占位符}` 处替换为你的实际内容。
 
 请给因子做体检：范围 {全部 429 个 / 指定因子如 a158_ROC20 / 某个库 alpha101}，前瞻期 T+{1/2/5/10/20}。
 

@@ -1,0 +1,50 @@
+# QuantMind QuantBot 后端镜像：dsh（DeepSeek Harness）
+#
+# 结构：dsh web（容器内 127.0.0.1:3081）
+#     + nginx 前门（容器内 0.0.0.0:8088，注入 dsh 浏览器鉴权 cookie，见 docker/dsh/nginx.conf）
+#     + entrypoint 编排（docker/dsh/entrypoint.sh：起 dsh → 签 cookie → 起 nginx）
+#
+# 蓝本：/home/zbox/baymax 的生产 dsh 部署（Dockerfile.dsh / dsh/proxy / scripts/dsh_auth_cookie.py）
+FROM node:22-slim
+
+# ⚠️ dsh 仍是开发者预览版（破坏性变更常见）：钉版本，不要裸装 latest。
+# 升级流程：先在非交易时段用 --dump-config 与真实 boot 双重验证新版本，再改这里重建。
+ARG DSH_VERSION=0.1.5-rc.1
+# pnpm：`dsh plugin add` 会把参数转给 profile 目录下的 pnpm，镜像里没有就无法装插件
+ARG PNPM_VERSION=11.24.0
+# docker CLI 静态二进制（技能契约：docker cp/exec quantmind 执行重依赖脚本）
+ARG DOCKER_CLI_VERSION=29.7.2
+
+RUN npm install -g --no-audit --no-fund \
+      "@deepseek-ai/dsh@${DSH_VERSION}" \
+      "pnpm@${PNPM_VERSION}"
+
+# python3：mint_cookies.py（纯标准库）与技能里的纯标准库脚本；
+#   python-is-python3 补 `python` 命令名（部分插件/脚本按 python 调用）
+# nginx：容器内前门；curl：调试/健康检查
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      python3 python-is-python3 nginx curl ca-certificates \
+ && rm -rf /var/lib/apt/lists/* \
+ && rm -f /etc/nginx/sites-enabled/default
+
+RUN curl -fsSL \
+      "https://mirrors.aliyun.com/docker-ce/linux/static/stable/x86_64/docker-${DOCKER_CLI_VERSION}.tgz" \
+      -o /tmp/docker.tgz \
+ && tar -xzf /tmp/docker.tgz -C /tmp docker/docker \
+ && mv /tmp/docker/docker /usr/local/bin/docker \
+ && chmod +x /usr/local/bin/docker \
+ && rm -rf /tmp/docker /tmp/docker.tgz
+
+# ⚠️ WORKDIR 必须不含 .env：dsh 启动时会读取 cwd 的 .env 文件，并拒绝其中的
+# 「启动类」环境变量（如 DEEPSEEK_BASE_URL）——放在 .env 里会直接启动失败。
+# 进程环境变量（compose environment）不受此限制。
+WORKDIR /app
+
+COPY docker/dsh/ /app/dsh/
+RUN chmod +x /app/dsh/entrypoint.sh /app/dsh/mint_cookies.py
+
+ENV DSH_HOME=/root/.dsh
+# 用 bash 显式调起脚本：compose 会用宿主 ./docker/dsh bind mount 覆盖 /app/dsh，
+# 宿主检出（尤其 Windows/便携包）可能丢执行位——显式 bash 调用不依赖 exec bit。
+ENTRYPOINT ["bash", "/app/dsh/entrypoint.sh"]

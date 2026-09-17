@@ -290,10 +290,13 @@ services:
       # 市值单位配置：数据库存储单位为元，1亿=100,000,000
       - AI_STRATEGY_TOTAL_MV_PER_YI=100000000.0
 
-      # QuantBot 代理（QwenPaw 机器人集成）
-      # qwenpaw 容器已加入同一网络，通过 http://qwenpaw:8088 访问
+      # QuantBot 代理（legacy QwenPaw 集成——QuantBot 页面现由 dsh 直连 <宿主>:8088 承载，
+      # 以下地址指向 legacy qwenpaw 容器；其未启用时 /api/v1/openclaw、/api/v1/qwenpaw-ui
+      # 等旧代理接口 502，属预期）
       - COPAW_BASE_URL=${COPAW_BASE_URL:-http://qwenpaw:8088}
       - QWENPAW_BASE_URL=${QWENPAW_BASE_URL:-http://qwenpaw:8088}
+      # 管理面板 QuantBot 健康探针指向 dsh 容器（纯 TCP 探测，端口与旧 qwenpaw 相同 8088）
+      - ADMIN_DASHBOARD_QWENPAW_HOST=dsh
       # QwenPaw 上游认证信息（按需配置）
       - QWENPAW_AUTH_USERNAME=${QWENPAW_AUTH_USERNAME:-}
       - QWENPAW_AUTH_PASSWORD=${QWENPAW_AUTH_PASSWORD:-}
@@ -687,6 +690,10 @@ services:
       dockerfile: docker/Dockerfile.qwenpaw
     image: agentscope/qwenpaw:latest
     container_name: qwenpaw
+    # 已由 dsh（DeepSeek Harness）接替为 QuantBot 默认后端：默认不启动（legacy 备份）。
+    # 回滚：docker compose stop dsh && docker compose --profile legacy up -d qwenpaw
+    # ⚠️ 与 dsh 同时只能开一个（两者都占宿主 8088；compose up 默认不会拉起本服务）。
+    profiles: ["legacy"]
     ports:
       # 默认对外绑定 0.0.0.0：QuantBot 页面由浏览器/Electron 直连 <宿主>:8088，
       # 回环绑定会导致外部无法访问。qwenpaw 为免登录模式，请配合云安全组/防火墙
@@ -753,6 +760,100 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
     restart: unless-stopped
 
+  # 8b. dsh（DeepSeek Harness，QuantBot 默认后端）
+  # 接替原 QwenPaw：容器内 = dsh web(127.0.0.1:3081) + nginx 前门(0.0.0.0:8088)，
+  # 宿主端口与旧 qwenpaw 完全一致（前端 QuantBot 页 iframe 直连 <宿主>:8088，地址不变）。
+  # 蓝本：baymax 生产部署；移植说明见 docker/Dockerfile.dsh 与 docker/dsh/*。
+  # 回滚：docker compose stop dsh && docker compose --profile legacy up -d qwenpaw
+  # ⚠️ 与 qwenpaw 同时只能开一个（宿主 8088 冲突）。
+  dsh:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.dsh
+      args:
+        # dsh 预览版：钉版本；升级须先 --dump-config + 真实 boot 双验证再改（非交易时段重建）
+        DSH_VERSION: ${DSH_VERSION:-0.1.5-rc.1}
+    image: quantmind-dsh:latest
+    container_name: quantmind-dsh
+    ports:
+      # DSH_PORT 必须保持 8088：前端 iframe 硬编码该端口（QuantBotPage.tsx）。
+      # 免登录（同旧 qwenpaw），浏览器/Electron 直连；请配合云安全组/防火墙限制来源 IP。
+      - "${DSH_BIND:-0.0.0.0}:${DSH_PORT:-8088}:8088"
+    networks:
+      - quantmind-net
+    environment:
+      - TZ=Asia/Shanghai
+      # 模型接口：DeepSeek 官方通道（deepseek-official），复用平台 DEEPSEEK_API_KEY。
+      # ⚠️ 不要为 dsh 设 DEEPSEEK_BASE_URL（dsh 拒绝由 .env 注入的启动类变量，且会改掉官方端点）。
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
+      # 浏览器访问 QuantBot 的主机白名单（host[:port]，逗号/空格分隔）：
+      # dsh 的 trusted-host 围栏与鉴权 cookie 都按 host:port 精确匹配 → 填实际访问地址（LAN IP/域名）；
+      # 留空时仅 localhost/127.0.0.1 可用。
+      - DSH_TRUSTED_HOSTS=${DSH_TRUSTED_HOSTS:-}
+      - DSH_EXTERNAL_PORT=${DSH_PORT:-8088}
+      # agent 权限模式：danger-full-access 与旧 qwenpaw（无限制 shell + docker.sock）对等；
+      # 收紧可改 workspace-write（越界写操作需在 UI 逐次批准，部分技能会受影响）
+      - DSH_PERMISSION_MODE=${DSH_PERMISSION_MODE:-danger-full-access}
+      # QuantMind 代码库和数据库访问（与 quantmind/qwenpaw 容器一致）
+      - PYTHONPATH=/app
+      - DB_DRIVER=asyncpg
+      - DB_HOST=db
+      - DB_PORT=5432
+      - DB_NAME=${DB_NAME:-quantmind}
+      - DB_USER=${DB_USER:-quantmind}
+      - DB_PASSWORD=${DB_PASSWORD:-quantmind2026}
+      - DATABASE_URL=postgresql+asyncpg://${DB_USER:-quantmind}:${DB_PASSWORD:-quantmind2026}@db:5432/${DB_NAME:-quantmind}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=
+      - STORAGE_MODE=local
+      - STORAGE_ROOT=/data
+      - MARGIN_STOCK_POOL_PATH=/data/融资融券.json
+      - STRATEGY_TEMPLATES_DIR=/app/strategy_templates
+      - QLIB_BACKTEST_RESULT_DIR=/data/backtest_results
+      - QLIB_BACKTEST_KERNELS=1
+      - INTERNAL_CALL_SECRET=${INTERNAL_CALL_SECRET:-changeme-internal-secret}
+      - QUANTMIND_API_BASE_URL=http://quantmind:8000
+      - QUANTMIND_ENGINE_URL=http://quantmind:8001
+      - QUANTMIND_USER_ID=qwenpaw
+      # 远程数据源（用于数据同步脚本）
+      - SOURCE_DATABASE_URL=${SOURCE_DATABASE_URL:-postgresql://user:pass@localhost:5432/quantmind}
+      - SYNC_MAX_DAYS=30
+    volumes:
+      # dsh 持久化：会话/配置/凭据（.credentials.yaml = cookie 签名密钥，容器重建不丢）
+      - dsh-data:/root/.dsh
+      # 会话工作区（dsh 以启动目录为默认 workspace 根，entrypoint 会 cd 到这里）
+      - dsh-workspace:/root/workspace
+      # 技能：仓库 skills/ 只读挂载（单一事实源；改仓库即生效，无上传步骤）
+      - ./skills:/root/.dsh/skills:ro
+      # 本目录（cordis patch / nginx / cookie 脚本）：改后 docker compose restart dsh 生效
+      - ./docker/dsh:/app/dsh:ro
+      # QuantMind 代码库（只读，避免误修改）
+      - ./backend:/app/backend:ro
+      - ./config:/app/config:ro
+      - ./scripts:/app/scripts:ro
+      - ./strategy_templates:/app/strategy_templates:ro
+      - ./CLAUDE.md:/app/CLAUDE.md:ro
+      # 项目根目录（只读，供 Agent 查找本地文件/技能脚本）
+      - ./:/quantmind:ro
+      # 研报 PDF 中文字体（md_to_pdf_report.py 按 /app/docker/training/fonts 解析）
+      - ./docker/training/fonts:/app/docker/training/fonts:ro
+      # QuantMind 数据（读写）
+      - ./data:/data
+      - ./db:/app/db
+      - ./models:/app/models
+      - ./logs:/app/logs
+      - ./user_pools_local:/app/user_pools_local
+      # 允许调用宿主机 Docker（技能契约：docker cp/exec quantmind 执行重依赖脚本）
+      - /var/run/docker.sock:/var/run/docker.sock
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:8088/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 120s
+    restart: unless-stopped
+
   # ── IB Gateway（盈透证券官方安装包 + IBC 自动登录，社区标准镜像）─────────
   # 在 .env 配置 IB_ACCOUNT / IB_PASSWORD / IB_TRADING_MODE(paper|live)。
   # 4001=实盘 API，4002=模拟 API，5901=VNC（首次登录/2FA 用）。
@@ -785,3 +886,6 @@ volumes:
   qwenpaw-secrets:
   qwenpaw-backups:
   qwenpaw-shared:
+  # QuantBot（dsh）持久化：/root/.dsh（会话/配置/cookie 签名密钥）+ 会话工作区
+  dsh-data:
+  dsh-workspace:

@@ -6,7 +6,7 @@ description: Qlib 回测：快速/专家模式、向量化极速回测、策略�
 outputs: 回测结果报告
 ---
 
-> 复制下方提示词到 QuantBot（QwenPaw 控制台）即可使用；`{占位符}` 处替换为你的实际内容。
+> 复制下方提示词到 QuantBot（DeepSeek Harness 控制台，http://<宿主>:8088）即可使用；`{占位符}` 处替换为你的实际内容。
 
 我需要回测：{快速回测 / 专家模式 / 对比策略 / 参数优化 / 查历史}，市场 {CN/HK/US/CRYPTO/FUTURES}，股票池 {csi300 / pool:自定义池code / 留空全市场}。
 

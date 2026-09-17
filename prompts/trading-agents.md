@@ -6,7 +6,7 @@ description: 本地数据 → 多空子代理辩论 → 综合研判 → PDF 报
 outputs: data/reports/trading_agents/ PDF 报告
 ---
 
-> 复制下方提示词到 QuantBot（QwenPaw 控制台）即可使用；`{占位符}` 处替换为你的实际内容。
+> 复制下方提示词到 QuantBot（DeepSeek Harness 控制台，http://<宿主>:8088）即可使用；`{占位符}` 处替换为你的实际内容。
 
 请用智能体自主模式深度分析 {股票名称及代码}。
 

@@ -112,12 +112,13 @@ ssh ${SSH_TARGET} "cd ${PROJECT_DIR} && git pull && docker compose restart quant
 - **重build 方式**（利用 Docker build cache，通常仅增量安装新增包）：服务器上执行 `docker compose build quantmind`，再 `docker compose up -d`。
 - 本地 Windows 无法直接构建 linux/amd64 镜像，重build 一律在服务器或 CI 上进行。
 
-### 4. QwenPaw（QuantBot）技能更新
-- **统一入口**：`bash scripts/quantbot_init.sh`（在服务器上、项目根目录执行）。一次完成：本地 `skills/` 全部技能经 API 导入技能池 → 广播到 `default` 工作区并启用 → 写入量化人格（SOUL/PROFILE/AGENTS）。
-- **禁止手工拷贝技能目录**（如直接 `rsync`/`docker cp` 到 `skill_pool/` 或 `workspaces/default/skills/`）：磁盘文件与 `skill.json` 清单会漂移，导致后续上传冲突（31 个技能全量 conflict）且无法经 API 删除，只能逐个手工清理。
-- 只更新技能：`--skills-only`；只写人格：`--persona-only`。
-- 技能更新后需 `docker restart qwenpaw` 使其生效；验证用 `docker exec qwenpaw qwenpaw skills list`（技能数与启用数应一致）和 `docker exec qwenpaw qwenpaw skills test <name>`。
-- QwenPaw 镜像自带 reportlab 与中文字体（`docker/Dockerfile.qwenpaw`），报告 PDF 转换优先在 qwenpaw 容器内直接执行 `python3 /app/backend/scripts/md_to_pdf_report.py`（backend 为 bind mount，共享 `/data` 卷），无需 `docker exec quantmind`。
+### 4. QuantBot（dsh）技能与人格更新
+- **技能：改仓库即生效**。技能经 `./skills` 只读挂载进 dsh 容器（容器内 `/root/.dsh/skills`），新增/修改 `skills/<name>/SKILL.md` 后 `docker compose restart dsh`，新会话即用；无上传/清单同步步骤，也不存在手工拷贝漂移问题。
+- **人格与提示词**：`docker/dsh/dsh.cordis.yml`（persona/默认模型/连接）与 `docker/dsh/AGENTS.md`（路由表/平台 API/挂载地图/术语映射），改后 `docker compose restart dsh` 生效。
+- 容器与端口：`quantmind-dsh`，宿主 8088（与旧 qwenpaw 相同，前端 QuantBot 页 iframe 直连）；外部用 IP/域名访问需 `.env` 配 `DSH_TRUSTED_HOSTS`。
+- 排查：`docker compose logs -f dsh`；`docker exec quantmind-dsh ls /root/.dsh/skills | wc -l` 核对技能数。
+- **旧 QwenPaw 为 legacy 备份（默认不启动）**：`docker compose --profile legacy up -d qwenpaw` 回滚（与 dsh 端口冲突，只能开一个）；其技能/人格更新入口仍是 `bash scripts/quantbot_init.sh`（仅 legacy 场景使用）。
+- PDF 生成：dsh 容器不带 reportlab，统一走 `docker exec -w /app quantmind python3 backend/scripts/md_to_pdf_report.py`（技能契约首选路径）。
 
 ### 5. Web 前端部署（Nginx 预编译）
 - **预编译目录**：`web/dist` 已纳入版本（`.gitignore` 放行 `!web/dist/**`），本地 `npm run dashboard:build` 后 `cp -r electron/dist-react/* web/dist/` 并提交，服务器 `git pull` 即更新，无需在服务器构建 `node`
@@ -131,5 +132,7 @@ ssh ${SSH_TARGET} "cd ${PROJECT_DIR} && git pull && docker compose restart quant
 - `backend/run_tests.py` - 多模式测试运行器
 - `backend/shared/` - 跨服务共享模块
 - `docker-compose.yml` - 本地部署配置
-- `scripts/quantbot_init.sh` - QwenPaw 技能/人格一键初始化（技能更新唯一入口）
-- `docker/Dockerfile.qwenpaw` - QwenPaw 扩展镜像（reportlab + docker CLI）
+- `scripts/quantbot_init.sh` - 【legacy】QwenPaw 技能/人格一键初始化（回滚场景专用）
+- `docker/Dockerfile.dsh` - QuantBot 默认后端 dsh（DeepSeek Harness）镜像（node + dsh + nginx + docker CLI）
+- `docker/dsh/` - dsh 配置：dsh.cordis.yml（persona/模型/连接）、AGENTS.md（工作区规则）、nginx.conf（前门+cookie 注入）、mint_cookies.py（鉴权 cookie 签发）、entrypoint.sh
+- `docker/Dockerfile.qwenpaw` - 【legacy】QwenPaw 扩展镜像（reportlab + docker CLI）

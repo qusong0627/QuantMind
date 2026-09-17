@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
 # ============================================================================
-# quantbot-init.sh — QuantBot (QwenPaw) 初始化脚本
+# quantbot-init.sh — QuantBot【legacy QwenPaw】初始化脚本
 # ============================================================================
+# ⚠️ QuantBot 默认后端已切换为 dsh（DeepSeek Harness）：技能经 ./skills 只读挂载
+#    （容器内 /root/.dsh/skills）、人格在 docker/dsh/{dsh.cordis.yml,AGENTS.md}，
+#    改仓库 + docker compose restart dsh 即生效，无需本脚本。
+#    本脚本仅用于【回滚启用 legacy QwenPaw】时（docker compose --profile legacy up -d qwenpaw）
+#    的技能/人格注入。
 # 用途：QwenPaw 容器装好后，一键完成：
 #   1. 将本地 skills/ 目录全部技能包安装到 QwenPaw 技能池
 #   2. 广播到目标工作区并启用

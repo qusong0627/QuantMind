@@ -6,7 +6,7 @@ description: 5 分析师并行（技术/新闻/资金情绪/基本面/市场）�
 outputs: data/reports/stock_research/ + data/reports/trading_agents/ PDF
 ---
 
-> 复制下方提示词到 QuantBot（QwenPaw 控制台）即可使用；`{占位符}` 处替换为你的实际内容。
+> 复制下方提示词到 QuantBot（DeepSeek Harness 控制台，http://<宿主>:8088）即可使用；`{占位符}` 处替换为你的实际内容。
 
 请对 {股票名称及代码，如：贵州茅台 600519} 做一次个股深度研究。
 

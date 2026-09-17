@@ -6,7 +6,7 @@ description: 模型训练（5 步流程、特征字典、AutoDL 节点）、模�
 outputs: 视具体操作而定
 ---
 
-> 复制下方提示词到 QuantBot（QwenPaw 控制台）即可使用；`{占位符}` 处替换为你的实际内容。
+> 复制下方提示词到 QuantBot（DeepSeek Harness 控制台，http://<宿主>:8088）即可使用；`{占位符}` 处替换为你的实际内容。
 
 我需要执行平台运营操作：{操作内容，如：训练 lightgbm / 查特征字典 / 更新今日数据 / 对接 RSS}。
 

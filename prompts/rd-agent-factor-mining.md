@@ -6,7 +6,7 @@ description: factor_pipeline 一键管线：preflight → 演化 → 回测 → 
 outputs: 因子报告 + quantcustom 入库
 ---
 
-> 复制下方提示词到 QuantBot（QwenPaw 控制台）即可使用；`{占位符}` 处替换为你的实际内容。
+> 复制下方提示词到 QuantBot（DeepSeek Harness 控制台，http://<宿主>:8088）即可使用；`{占位符}` 处替换为你的实际内容。
 
 请帮我挖掘新因子：方向「{挖掘假设，如：筹码集中度上行伴随低位换手放大}」，股票池 {csi300 / 自定义全局池 code}，市场 {a_share 等}。
 

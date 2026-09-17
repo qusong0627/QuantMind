@@ -106,15 +106,18 @@ DB_PASSWORD=$(openssl rand -hex 24)
 SECRET_KEY=$(openssl rand -hex 32)
 JWT_SECRET_KEY=$(openssl rand -hex 32)
 STORAGE_MODE=local
+# QuantBot（dsh）浏览器访问主机白名单：默认取本机首个 IP（多网卡/域名场景请手动改 .env，
+# 填浏览器实际访问 QuantBot 用的地址；dsh 的 trusted-host 围栏与 cookie 按 host:port 精确匹配）
+DSH_TRUSTED_HOSTS=$(hostname -I 2>/dev/null | awk '{print $1}')
 # 系统一键更新（Web 控制台「更新系统」）：docker socket 已挂载，默认开启。
 # 如需关闭，改此行后 `docker compose up -d --force-recreate quantmind` 生效。
 QUANTMIND_ENABLE_WEB_UPDATE=true
 EOF
 }
 
-# QwenPaw 运行时契约兜底：确保 venv 含 reportlab（研报 MD→PDF）、容器含 docker CLI
+# [legacy 兜底] QwenPaw 运行时契约：确保 venv 含 reportlab（研报 MD→PDF）、容器含 docker CLI
 # （配合挂载的 /var/run/docker.sock 执行 `docker exec quantmind ...`）。
-# 定制镜像构建时已内置；此处为兜底，安装失败仅告警不中断（对齐 full-deploy.sh）。
+# QuantBot 已切换为 dsh（见 verify_dsh_runtime）；仅回滚启用 qwenpaw 时手动调用本函数。
 configure_qwenpaw_runtime() {
     log '    校验 QwenPaw 运行时（reportlab / docker CLI）'
     if ! docker ps --format '{{.Names}}' | grep -qx qwenpaw; then
@@ -147,6 +150,21 @@ configure_qwenpaw_runtime() {
     fi
 }
 
+# dsh（QuantBot 默认后端）运行时校验：镜像内已烘焙 python3/nginx/docker CLI，无需运行时补装，
+# 只需确认容器进程健康（安装失败仅告警不中断）。
+verify_dsh_runtime() {
+    log '    校验 dsh（QuantBot）运行时'
+    if ! docker ps --format '{{.Names}}' | grep -qx quantmind-dsh; then
+        log '    警告：quantmind-dsh 容器未运行，QuantBot 页面（:8088）将不可用'
+        return 0
+    fi
+    if docker exec quantmind-dsh docker --version >/dev/null 2>&1; then
+        log '    docker CLI 已就绪（技能契约 docker cp/exec quantmind 可用）'
+    else
+        log '    警告：容器内 docker CLI 不可用，重依赖取数脚本契约将失效'
+    fi
+}
+
 start_services() {
     log '4/5 构建并启动服务'
     cd "$PROJECT_DIR"
@@ -168,10 +186,12 @@ start_services() {
         --build-arg PIP_TRUSTED_HOST="$PIP_TRUSTED_HOST" \
         --build-arg QM_REQ_SHA="${req_sha:-unknown}" \
         quantmind
-    # qwenpaw 定制层（reportlab + docker CLI）：buildkit 自动拉取上游基础层后叠加。
-    docker compose build qwenpaw
+    # dsh（QuantBot 默认后端）：镜像内已烘焙 python3/nginx/docker CLI（docker/Dockerfile.dsh），
+    # buildkit 自动拉取 node:22-slim 基础层后叠加。legacy qwenpaw 不再默认构建
+    # （回滚需要时：docker compose --profile legacy build qwenpaw）。
+    docker compose build dsh
     docker compose up -d --remove-orphans
-    configure_qwenpaw_runtime
+    verify_dsh_runtime
 }
 
 health_check() {
@@ -197,6 +217,7 @@ show_completion_tips() {
     echo " 🌐 Web 控制台  : http://<服务器 IP>:3000"
     echo " 📖 API 文档    : http://<服务器 IP>:8000/docs"
     echo " 👤 默认账号    : admin / admin123"
+    echo " 🤖 QuantBot    : http://<服务器 IP>:8088（dsh；用 IP/域名访问前需在 .env 配 DSH_TRUSTED_HOSTS）"
     echo " -------------------------------------------------------------------------"
     echo " 💡 【重要：数据准备与更新提示】"
     echo " 系统正常运行需基础量化数据，请选择以下任一方式准备数据："

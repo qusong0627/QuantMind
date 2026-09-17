@@ -6,7 +6,7 @@ description: 大盘快照版市场分析：核心指数、广度情绪、行业�
 outputs: data/reports/market_analysis/ + PDF 报告
 ---
 
-> 复制下方提示词到 QuantBot（QwenPaw 控制台）即可使用；`{占位符}` 处替换为你的实际内容。
+> 复制下方提示词到 QuantBot（DeepSeek Harness 控制台，http://<宿主>:8088）即可使用；`{占位符}` 处替换为你的实际内容。
 
 请给我做一份今日市场分析报告（大盘快照版）。
 

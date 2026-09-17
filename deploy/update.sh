@@ -307,7 +307,7 @@ build_core() {
 }
 
 # 关键步骤：强制重建 application 层容器（bind mount 代码需进程重启才生效），
-# 其余服务（含 db/redis/qwenpaw）不强制重启，仅在 compose 配置发生漂移时按需重建。
+# 其余服务（含 db/redis/dsh）不强制重启，仅在 compose 配置发生漂移时按需重建。
 restart_services() {
     log '3/4 重启后端服务（强制重建 quantmind + celery）'
     cd "$PROJECT_DIR"
@@ -320,14 +320,25 @@ restart_services() {
     done
     docker compose up -d --no-deps --force-recreate "${services[@]}"
 
+    # legacy 迁移（一次性）：QuantBot 后端已由 qwenpaw 切换为 dsh；旧 qwenpaw 若仍在
+    # 运行会与 dsh 抢宿主 8088 → 自动停掉（数据卷保留；回滚见 compose 中 qwenpaw 注释）。
+    if docker compose config --services 2>/dev/null | grep -qx dsh \
+        && docker ps --format '{{.Names}}' | grep -qx qwenpaw; then
+        log '    停止 legacy qwenpaw 容器（已由 dsh 接管 8088；回滚用 --profile legacy）'
+        docker stop qwenpaw >/dev/null 2>&1 || true
+    fi
+
     # 配置漂移 reconcile：对其余服务执行一次 up -d，Compose 按配置 hash 仅重建
     # 端口/环境/镜像/挂载发生变化的容器，未变更者原地不动（db/redis 不会被无谓重启）。
-    # 修复场景：改了 qwenpaw 的绑定/环境等 compose 配置后，update 流程此前从不重建它，
-    # 导致改动长期不生效（例如 qwenpaw 端口回退 127.0.0.1）。
+    # 修复场景：改了 dsh 的绑定/环境等 compose 配置后，update 流程此前从不重建它，
+    # 导致改动长期不生效。
     local others=()
     while IFS= read -r service; do
         [[ -z "$service" ]] && continue
         [[ " ${services[*]} " == *" $service "* ]] && continue
+        # qwenpaw 已改 legacy profile：不参与 drift reconcile（各版本 compose 对 profile
+        # 服务的 config --services 过滤行为不一致，显式跳过最稳）
+        [[ "$service" == "qwenpaw" ]] && continue
         others+=("$service")
     done < <(docker compose config --services)
     if (( ${#others[@]} > 0 )); then
