@@ -1,13 +1,14 @@
 /**
- * 策略版本与变更抽屉（T-FE-10）：状态机/版本号/参数锁 + 版本 diff（参数表 + 代码行级）+ 生效参数及来源。
+ * 策略版本与变更弹窗（T-FE-10）：状态机/版本号/参数锁 + 版本 diff（参数表 + 代码行级）+ 生效参数及来源。
  *
  * 数据源：/api/v1/strategies/{id}/versions（保存时同事务快照，T-FE-10 后端契约）；
  * 来源列与模板默认值比对（模板经 strategy_type 关联，缺失如实标"用户自定义"）。
+ * 2026-09-17：由右侧抽屉改为居中弹窗（与全站弹窗样式一致），组件名保留历史叫法。
  */
 
 import React, { useEffect, useMemo, useState } from 'react';
-import { Drawer } from 'antd';
-import { History, Lock, RefreshCw } from 'lucide-react';
+import { Modal } from 'antd';
+import { History, Lock, RefreshCw, X } from 'lucide-react';
 import { strategyManagementService } from '../../../services/strategyManagementService';
 import { strategyTemplateService } from '../../../features/strategy-wizard/services/strategyTemplateService';
 import {
@@ -101,21 +102,57 @@ export const StrategyVersionDrawer: React.FC<StrategyVersionDrawerProps> = ({ op
   const isLocked = ['sim', 'live'].includes(String(strategy?.rawStatus || '').toLowerCase());
 
   return (
-    <Drawer open={open} onClose={onClose} width={760} title={null} destroyOnHidden>
-      <div className="space-y-4">
-        <header className="flex items-center gap-2">
-          <History className="w-4 h-4 text-blue-600" />
-          <h3 className="text-base font-bold text-slate-800">版本与变更 · {strategy?.name}</h3>
-          <span className="text-xs text-slate-400">v{strategy?.version ?? base?.version ?? '—'}</span>
+    <Modal
+      open={open}
+      onCancel={onClose}
+      centered
+      footer={null}
+      closable={false}
+      width="min(920px, 92vw)"
+      zIndex={1200}
+      destroyOnHidden
+      styles={{
+        content: {
+          padding: 0,
+          borderRadius: 24,
+          overflow: 'hidden',
+          boxShadow: '0 32px 80px -20px rgba(15, 23, 42, 0.4)',
+        },
+        body: { padding: 0 },
+        mask: { background: 'rgba(15, 23, 42, 0.45)', backdropFilter: 'blur(4px)' },
+      }}
+    >
+      <div className="flex flex-col" style={{ height: 'min(82vh, 860px)' }}>
+        {/* 弹窗头部 */}
+        <div className="flex items-center gap-2.5 px-5 h-14 shrink-0 border-b border-slate-100 bg-gradient-to-r from-slate-50/80 via-white to-white">
+          <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-blue-500 to-indigo-500 flex items-center justify-center shadow-md shrink-0">
+            <History className="w-4 h-4 text-white" />
+          </div>
+          <span className="text-[15px] font-bold text-slate-800 tracking-tight truncate">
+            版本与变更 · {strategy?.name}
+          </span>
+          <span className="text-xs text-slate-400 shrink-0">v{strategy?.version ?? base?.version ?? '—'}</span>
           {isLocked && (
             <span
-              className="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full bg-amber-50 border border-amber-200 text-amber-700"
+              className="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full bg-amber-50 border border-amber-200 text-amber-700 shrink-0"
               title="参数锁（T-P3-01）：运行中策略修改内容必须显式升版本（携带当前 version）"
             >
               <Lock className="w-3 h-3" /> 参数锁（运行中）
             </span>
           )}
-        </header>
+          <button
+            type="button"
+            onClick={onClose}
+            className="ml-auto flex w-7 h-7 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-600 transition-colors shrink-0"
+            title="关闭"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        {/* 主体（可滚动） */}
+        <div className="flex-1 min-h-0 overflow-y-auto px-5 py-4">
+          <div className="space-y-4">
 
         {loading ? (
           <div className="flex items-center gap-2 text-xs text-slate-400 py-4">
@@ -249,7 +286,9 @@ export const StrategyVersionDrawer: React.FC<StrategyVersionDrawerProps> = ({ op
             来源对照：与模板（{strategy?.strategyType || '—'}）默认值一致=模板默认；不同=已修改；模板无此键=用户自定义
           </p>
         </div>
+          </div>
+        </div>
       </div>
-    </Drawer>
+    </Modal>
   );
 };

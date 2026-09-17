@@ -314,7 +314,7 @@ export const StrategyManagementModule: React.FC = () => {
             </div>
 
             {/* 右侧：策略模板库（T-FE-11，2026-09-17 自因子研究迁入）——选中模板「立即回测」到回测页自动选中 */}
-            <div className="w-[380px] xl:w-[430px] shrink-0 h-full flex flex-col bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
+            <div className="w-[440px] xl:w-[520px] 2xl:w-[600px] shrink-0 h-full flex flex-col bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
                 <div className="flex-1 min-h-0 overflow-y-auto px-5 py-4">
                     <StrategyTemplateGallery />
                 </div>
