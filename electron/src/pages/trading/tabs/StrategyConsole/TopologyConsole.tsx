@@ -174,18 +174,18 @@ const TopologyConsole: React.FC<TopologyConsoleProps> = ({
                     defaultModelName={defaultModelName}
                 />
 
-                {/* L2.5 调仓计划（预演）+ 一键执行（2026-09-17 自手动任务迁入，置于交易记录上方） */}
-                <PlanSection />
-
-                {/* L3 交易记录（全宽） */}
-                <OutputLayer
-                    recentOrders={overview.recentOrders}
-                    ordersLoading={!overview.ordersReady}
-                    onOpenHistory={onOpenHistory}
-                    onOpenManualTask={onOpenManualTask}
-                    logsOpen={logsOpen}
-                    onToggleLogs={() => setLogsOpen(!logsOpen)}
-                />
+                {/* L2.5/L3 调仓计划 ｜ 交易记录（2026-09-17 两栏并排；窄屏自动上下堆叠） */}
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 items-start">
+                    <PlanSection />
+                    <OutputLayer
+                        recentOrders={overview.recentOrders}
+                        ordersLoading={!overview.ordersReady}
+                        onOpenHistory={onOpenHistory}
+                        onOpenManualTask={onOpenManualTask}
+                        logsOpen={logsOpen}
+                        onToggleLogs={() => setLogsOpen(!logsOpen)}
+                    />
+                </div>
 
                 {/* L4 日志折叠 */}
                 <LogPanel
