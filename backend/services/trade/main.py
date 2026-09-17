@@ -94,6 +94,38 @@ async def lifespan(app: FastAPI):
         app.state.startup_healthy = False
         logger.error("trade database init failed: %s", e, exc_info=True)
 
+    # 契约列/表自愈：老库升级后这些只在写入路径补，而本服务的读路径
+    # （超时扫描器 / EOD / 热集 / 对账 / 评估）先用到就每轮报 UndefinedColumn。
+    # 启动期统一补齐——各 ensure 幂等，单个失败只告警，不置 startup_healthy。
+    try:
+        from backend.shared.eval_contract import ensure_eval_scores_table_async
+        from backend.shared.fund_snapshot_contract import (
+            ensure_fund_snapshot_contract_async,
+        )
+        from backend.shared.ledger_contract import (
+            ensure_accounts_market_contract_async,
+            ensure_ledger_contract_columns_async,
+        )
+        from backend.shared.order_contract import ensure_order_contract_columns_async
+        from backend.shared.signal_contract import (
+            ensure_signal_contract_columns_async,
+        )
+
+        for _ensure in (
+            ensure_order_contract_columns_async,
+            ensure_accounts_market_contract_async,
+            ensure_ledger_contract_columns_async,
+            ensure_fund_snapshot_contract_async,
+            ensure_signal_contract_columns_async,
+            ensure_eval_scores_table_async,
+        ):
+            try:
+                await _ensure()
+            except Exception as e:  # noqa: BLE001 - 单个契约失败不阻断启动
+                logger.warning("契约自愈失败 %s: %s", _ensure.__name__, e)
+    except Exception as e:  # noqa: BLE001 - 自愈模块导入失败不阻断启动
+        logger.warning("契约自愈模块加载失败: %s", e)
+
     from backend.services.trade_shared.redis_client import redis_client
 
     try:

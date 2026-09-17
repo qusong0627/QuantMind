@@ -104,6 +104,23 @@ def test_stream_consumer_writer_wired():
     assert "ensure_order_contract_columns_async()" in src
 
 
+def test_trade_startup_ensures_contract_columns():
+    """启动期补齐契约列：列自愈此前只挂在写入路径，老库升级后读路径先用到
+    （超时扫描器 orders.price_source、EOD simulation_accounts.market、
+    热集 engine_signal_scores.market）会每轮报 UndefinedColumn；
+    trade 启动期要把它读到的各契约 ensure 都跑一遍。"""
+    src = (_BACKEND / "services/trade/main.py").read_text(encoding="utf-8")
+    for ensure in (
+        "ensure_order_contract_columns_async",
+        "ensure_accounts_market_contract_async",
+        "ensure_ledger_contract_columns_async",
+        "ensure_fund_snapshot_contract_async",
+        "ensure_signal_contract_columns_async",
+        "ensure_eval_scores_table_async",
+    ):
+        assert ensure in src
+
+
 def test_models_have_contract_fields():
     from backend.services.simulation.models.order import SimOrder
     from backend.services.trade_shared.models.order import Order
