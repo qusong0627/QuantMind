@@ -56,6 +56,14 @@
   flex-wrap: wrap;
   min-width: 0;
 }
+/* 第一行中段：从第二行上移的紧凑筛选（全部/事件/收藏 + 情绪 + 强信号） */
+.news-toolbar-mid {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
 .news-toolbar-actions {
   display: flex;
   align-items: center;

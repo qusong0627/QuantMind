@@ -739,6 +739,34 @@ export const NewsPanel: React.FC = () => {
               </Tooltip>
               <Badge count={totalUnread} overflowCount={9999} style={{ backgroundColor: '#6366f1' }} className="news-toolbar-badge" />
             </div>
+            {/* Row 1 中段：高频紧凑筛选（自第二行上移） */}
+            <div className="news-toolbar-mid">
+              <Segmented
+                size="small"
+                value={f.feedMode}
+                onChange={(v) => updateF({ feedMode: v as FeedMode })}
+                options={[
+                  { label: <span><GlobalOutlined /> 全部</span>, value: 'all' },
+                  { label: <span><ThunderboltOutlined /> 事件</span>, value: 'events' },
+                  { label: <span><StarFilled style={{ color: '#fbbf24', fontSize: 12 }} /> 收藏</span>, value: 'starred' },
+                ]}
+              />
+              <Segmented
+                size="small"
+                value={f.sentiment}
+                onChange={(v) => updateF({ sentiment: v as SentimentFilter })}
+                options={[
+                  { label: '全部', value: 'any' },
+                  { label: <span style={{ color: COLOR_BULLISH }}>利好</span>, value: 'bullish' },
+                  { label: <span style={{ color: COLOR_BEARISH }}>利空</span>, value: 'bearish' },
+                  { label: <span style={{ color: COLOR_NEUTRAL }}>中性</span>, value: 'neutral' },
+                ]}
+              />
+              <Tooltip title="仅显示强信号 (|情感分|>=0.5)">
+                <Button size="small" type={f.strongOnly ? 'primary' : 'default'} danger={f.strongOnly}
+                  icon={<FireOutlined />} onClick={() => updateF({ strongOnly: !f.strongOnly })}>强信号</Button>
+              </Tooltip>
+            </div>
             <div className="news-toolbar-actions">
               <Tooltip title="立即刷新">
                 <Button size="small" type="primary" ghost icon={<ReloadOutlined spin={loading} />} onClick={handleRefresh}>刷新</Button>
@@ -765,16 +793,6 @@ export const NewsPanel: React.FC = () => {
           </div>
           {/* Row 2: filters — always aligned */}
           <div className="news-toolbar-row news-toolbar-filters">
-            <Segmented
-              size="small"
-              value={f.feedMode}
-              onChange={(v) => updateF({ feedMode: v as FeedMode })}
-              options={[
-                { label: <span><GlobalOutlined /> 全部</span>, value: 'all' },
-                { label: <span><ThunderboltOutlined /> 事件</span>, value: 'events' },
-                { label: <span><StarFilled style={{ color: '#fbbf24', fontSize: 12 }} /> 收藏</span>, value: 'starred' },
-              ]}
-            />
             <Input
               allowClear
               size="small"
@@ -784,21 +802,6 @@ export const NewsPanel: React.FC = () => {
               onChange={(e) => updateF({ keyword: e.target.value })}
               style={{ width: 220 }}
             />
-            <Segmented
-              size="small"
-              value={f.sentiment}
-              onChange={(v) => updateF({ sentiment: v as SentimentFilter })}
-              options={[
-                { label: '全部', value: 'any' },
-                { label: <span style={{ color: COLOR_BULLISH }}>利好</span>, value: 'bullish' },
-                { label: <span style={{ color: COLOR_BEARISH }}>利空</span>, value: 'bearish' },
-                { label: <span style={{ color: COLOR_NEUTRAL }}>中性</span>, value: 'neutral' },
-              ]}
-            />
-            <Tooltip title="仅显示强信号 (|情感分|>=0.5)">
-              <Button size="small" type={f.strongOnly ? 'primary' : 'default'} danger={f.strongOnly}
-                icon={<FireOutlined />} onClick={() => updateF({ strongOnly: !f.strongOnly })}>强信号</Button>
-            </Tooltip>
             <div style={{ flex: 1 }} />
             <Segmented
               size="small"
