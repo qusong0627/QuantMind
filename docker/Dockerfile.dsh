@@ -19,6 +19,13 @@ RUN npm install -g --no-audit --no-fund \
       "@deepseek-ai/dsh@${DSH_VERSION}" \
       "pnpm@${PNPM_VERSION}"
 
+# 客户端补丁：可信前门（nginx 注入 __DSH_TRUSTED_LOOPBACK__）下把设置持久化视为本机。
+# 不打的后果：局域网/远程浏览器访问时，dsh 设置镜像终态 unavailable → 模型提供方、
+# MCP 连接器等设置页全部报 "settings are unavailable in this browser"（2026-09-17 实测定根因）。
+# 锚点失配（dsh 升级改了实现）会 grep 不到 → 构建直接失败，提醒人工复核（补丁文件头部有说明）。
+COPY docker/dsh/patch-settings-loopback.mjs /app/dsh/patch-settings-loopback.mjs
+RUN node /app/dsh/patch-settings-loopback.mjs
+
 # python3：mint_cookies.py（纯标准库）与技能里的纯标准库脚本；
 #   python-is-python3 补 `python` 命令名（部分插件/脚本按 python 调用）
 # nginx：容器内前门；curl：调试/健康检查
