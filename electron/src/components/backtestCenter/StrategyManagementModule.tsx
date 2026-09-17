@@ -26,6 +26,7 @@ import {
     ShieldAlert,
     History,
     Lock,
+    Zap,
 } from 'lucide-react';
 import { EvalScoreBadge } from '../shared/EvalScoreBadge';
 import { StrategyTemplateGallery } from './template-gallery/StrategyTemplateGallery';
@@ -192,39 +193,48 @@ export const StrategyManagementModule: React.FC = () => {
         >
             <div className="h-full flex gap-4">
             <div className="flex-1 min-w-0 h-full flex flex-col bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
-            <div className="px-6 py-4 border-b border-gray-200">
-                <div className="flex items-center justify-between mb-4">
-                    <div>
-                        <p className="text-[11px] font-semibold text-gray-500 uppercase tracking-wider mb-1">Strategy Library</p>
-                        <h2 className="text-lg font-bold text-slate-800 tracking-tight">策略管理</h2>
-                        <p className="text-sm text-gray-500">管理策略生命周期：草稿 → 仓库 → 模拟盘</p>
+            <div className="px-6 py-4 border-b border-gray-200 space-y-3">
+                {/* 头部一行：标题组（大字 Strategy Library + 小字 策略管理 + 说明，基线对齐）+ 动作组（搜索 + 快速回测入口 + 刷新）；不折行，说明溢出截断 */}
+                <div className="flex items-center justify-between gap-3">
+                    <div className="flex items-baseline gap-2.5 min-w-0">
+                        <h2 className="text-xl font-bold text-slate-800 tracking-tight whitespace-nowrap">Strategy Library</h2>
+                        <span className="text-sm font-semibold text-slate-500 whitespace-nowrap">策略管理</span>
+                        <span className="text-sm text-gray-400 truncate">管理策略生命周期：草稿 → 仓库 → 模拟盘</span>
                     </div>
-                    <button onClick={loadStrategies} className="p-2 hover:bg-gray-100 rounded-xl transition-colors">
-                        <RefreshCw className={`w-5 h-5 text-gray-600 ${loading ? 'animate-spin' : ''}`} />
-                    </button>
+                    <div className="flex items-center gap-2 shrink-0">
+                        <div className="relative w-48">
+                            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+                            <input
+                                type="text"
+                                placeholder="搜索策略..."
+                                value={searchTerm}
+                                onChange={(e) => setSearchTerm(e.target.value)}
+                                className="w-full pl-10 pr-4 py-2 border border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none"
+                            />
+                        </div>
+                        <button
+                            onClick={() => setActiveModule('quick-backtest')}
+                            className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-slate-800 text-white text-sm font-semibold shadow-sm hover:bg-slate-700 active:scale-95 focus:outline-none focus-visible:ring-2 focus-visible:ring-slate-400 focus-visible:ring-offset-1 transition-all whitespace-nowrap"
+                            title="前往快速回测模块"
+                        >
+                            <Zap className="w-4 h-4" /> 快速回测
+                        </button>
+                        <button onClick={loadStrategies} className="p-2 hover:bg-gray-100 rounded-xl transition-colors" title="刷新策略列表">
+                            <RefreshCw className={`w-5 h-5 text-gray-600 ${loading ? 'animate-spin' : ''}`} />
+                        </button>
+                    </div>
                 </div>
-                <div className="flex items-center gap-3">
-                    <div className="flex-1 relative">
-                        <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
-                        <input
-                            type="text"
-                            placeholder="搜索策略..."
-                            value={searchTerm}
-                            onChange={(e) => setSearchTerm(e.target.value)}
-                            className="w-full pl-10 pr-4 py-2 border border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none"
-                        />
-                    </div>
-                    <div className="flex gap-2">
-                        {(['all', 'draft', 'repository', 'live_trading'] as const).map((f) => (
-                            <button
-                                key={f}
-                                onClick={() => setFilter(f)}
-                                className={`px-4 py-2 rounded-xl text-sm font-semibold transition-colors ${filter === f ? 'bg-gradient-to-br from-blue-500 to-purple-500 text-white shadow-sm' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
-                            >
-                                {f === 'all' ? '全部' : f === 'draft' ? '草稿' : f === 'repository' ? '仓库' : '模拟'}
-                            </button>
-                        ))}
-                    </div>
+                {/* 状态筛选（保持原交互） */}
+                <div className="flex items-center gap-2">
+                    {(['all', 'draft', 'repository', 'live_trading'] as const).map((f) => (
+                        <button
+                            key={f}
+                            onClick={() => setFilter(f)}
+                            className={`px-4 py-2 rounded-xl text-sm font-semibold transition-colors ${filter === f ? 'bg-gradient-to-br from-blue-500 to-purple-500 text-white shadow-sm' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
+                        >
+                            {f === 'all' ? '全部' : f === 'draft' ? '草稿' : f === 'repository' ? '仓库' : '模拟'}
+                        </button>
+                    ))}
                 </div>
             </div>
 
