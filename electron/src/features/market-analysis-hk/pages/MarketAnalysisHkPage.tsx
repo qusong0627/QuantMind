@@ -111,8 +111,11 @@ export const MarketAnalysisHkPage: React.FC = () => {
           <h1 className="text-base font-extrabold tracking-tight bg-gradient-to-r from-indigo-950 via-sky-900 to-slate-900 bg-clip-text text-transparent whitespace-nowrap">
             港股市场多维分析与资金穿透
           </h1>
-          {/* 个股搜索：选中 → 弹出港股个股终端浮窗 */}
-          <StockTerminalSearchBox market="HK" accent="indigo" />
+        </div>
+
+        {/* 个股搜索：顶栏空白处居中；选中 → 弹出港股个股终端浮窗 */}
+        <div className="flex-1 min-w-0 flex justify-center px-4">
+          <StockTerminalSearchBox market="HK" accent="indigo" widthClass="w-full max-w-[520px]" />
         </div>
 
         <div className="flex items-center gap-2.5 flex-shrink-0">

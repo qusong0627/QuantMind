@@ -118,11 +118,14 @@ export const MarketAnalysisUsPage: React.FC = () => {
           <h1 className="text-[13px] font-extrabold tracking-tight text-slate-800 whitespace-nowrap">
             美股市场多维分析
           </h1>
-          {/* 个股搜索：选中 → 弹出美股个股终端浮窗 */}
-          <StockTerminalSearchBox market="US" accent="blue" widthClass="w-44 sm:w-56" />
           <span className="hidden lg:inline text-[9px] text-slate-400 font-mono whitespace-nowrap" title="本模块只覆盖标普500 + 纳指补充的标的池，不是全市场">
             标的池 517 只 · 非全市场
           </span>
+        </div>
+
+        {/* 个股搜索：顶栏空白处居中；选中 → 弹出美股个股终端浮窗 */}
+        <div className="flex-1 min-w-0 flex justify-center px-3">
+          <StockTerminalSearchBox market="US" accent="blue" widthClass="w-full max-w-[500px]" />
         </div>
         <div className="flex items-center gap-2 flex-shrink-0">
           {dataDate && (

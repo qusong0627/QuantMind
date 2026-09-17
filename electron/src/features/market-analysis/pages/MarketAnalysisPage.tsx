@@ -353,9 +353,13 @@ export const MarketAnalysisPage: React.FC = () => {
                 <span>QuantDB 2.0 数据引擎</span>
               </span>
             </div>
-            {/* 全局搜索（行业或股票）：选中个股 → 弹出个股终端浮窗联动 */}
+          </div>
+
+          {/* 全局搜索（行业或股票）：顶栏空白处居中；选中个股 → 弹出个股终端浮窗联动 */}
+          <div className="flex-1 min-w-0 flex justify-center px-4">
             <StockTerminalSearchBox
               market="CN"
+              widthClass="w-full max-w-[520px]"
               hint="温馨提示：请先下载完整行情数据包并保持每日更新，否则可能搜不到标的、K线或推理分为空。"
               onPick={(symbol) => {
                 // 与资金流聚焦联动：命中本地资金流榜时同步聚焦，关闭浮窗后仍在聚焦位
