@@ -13,7 +13,11 @@ import { StockSidebar, toPrefix } from '../../../features/stock-terminal/compone
 import type { ListFilters } from '../../../features/stock-terminal/components/StockFilterPanel';
 import type { StockListItem } from '../../../features/stock-terminal/types';
 import { StockTerminalWindow } from '../../../features/market-analysis-shared/components/StockTerminalWindow';
-import { SignalsSection } from '../../../features/desk/components/DeskSections';
+import { StatTile } from '../../../features/desk/components/cardKit';
+import { getDeskToday } from '../../../features/desk/services/deskService';
+import { EvalScoreBadge } from '../../../components/shared/EvalScoreBadge';
+import type { SignalsBlock } from '../../../features/desk/types';
+import { BarChart3 } from 'lucide-react';
 import { researchService } from '../../../services/researchService';
 
 interface SignalsExplorerPageProps {
@@ -33,6 +37,19 @@ const SignalsExplorerPage: React.FC<SignalsExplorerPageProps> = ({ onModelRefres
   const [signalDate, setSignalDate] = useState<string | undefined>(undefined);
   const [watchlist, setWatchlist] = useState<Set<string>>(new Set());
   const [onlyWatchlist, setOnlyWatchlist] = useState(false);
+  // 右栏「信号分布」概览（全市场 BUY/SELL/HOLD 计数；明细在左侧列表，不重复渲染 Top 列表）
+  const [signals, setSignals] = useState<SignalsBlock | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    getDeskToday({ health: false, plan: false })
+      .then((resp) => {
+        if (!cancelled) setSignals(resp?.data?.signals || null);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -124,7 +141,29 @@ const SignalsExplorerPage: React.FC<SignalsExplorerPageProps> = ({ onModelRefres
             个股终端
           </button>
         </div>
-        <SignalsSection />
+        {/* 信号分布概览（原右侧「候选信号」卡与左侧列表重复，2026-09-17 精简为分布 + 评分徽章） */}
+        <div className="rounded-2xl border border-gray-200 bg-white p-3">
+          <div className="flex items-center gap-2 mb-2">
+            <BarChart3 className="w-3.5 h-3.5 text-blue-500 shrink-0" />
+            <span className="text-xs font-bold text-slate-700">信号分布</span>
+            {signals?.trade_date && (
+              <span className="text-[10px] font-mono text-slate-400">{signals.trade_date}</span>
+            )}
+            {signals?.trade_date && (
+              <span className="ml-auto">
+                <EvalScoreBadge objectType="daily_selection" objectId={signals.trade_date} prefix="选股评分" />
+              </span>
+            )}
+          </div>
+          <div className="grid grid-cols-3 gap-2">
+            <StatTile label="BUY" value={signals?.buy} tone="red" />
+            <StatTile label="SELL" value={signals?.sell} tone="green" />
+            <StatTile label="HOLD" value={signals?.hold} tone="slate" />
+          </div>
+          <p className="mt-2 text-[10px] leading-4 text-slate-400">
+            全市场信号计数；候选明细即左侧列表（默认「信号 = 买入」），点行选中后可从上方打开个股终端。
+          </p>
+        </div>
         <p className="px-1 text-[10px] text-slate-400">
           共 {listTotal} 只命中{fullTotal > 0 ? ` / 全市场 ${fullTotal} 只` : ''}；行内星标加自选，点行选中后可在上方打开个股终端浮窗。
         </p>
