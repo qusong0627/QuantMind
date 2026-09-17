@@ -53,7 +53,7 @@ export const HeaderBar: React.FC = () => {
 
   return (
     <div className="relative px-8 pt-6 pb-2 grid grid-cols-3 items-center bg-transparent">
-      <div className="flex items-center gap-4 justify-start flex-nowrap overflow-hidden">
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2 justify-start min-w-0">
         <motion.div
           initial={{ opacity: 0, x: -10 }}
           animate={{ opacity: 1, x: 0 }}

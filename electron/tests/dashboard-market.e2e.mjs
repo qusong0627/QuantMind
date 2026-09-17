@@ -59,6 +59,13 @@ if ((await page.locator('input[type=password]').count()) > 0) {
   await page.waitForTimeout(7000);
 }
 
+// 首启「投资适当性评估」弹窗会遮住整页（ant-modal-wrap 拦截一切点击），必须先关掉
+const riskModal = page.locator('button', { hasText: '稍后再答' });
+if (await riskModal.count()) {
+  await riskModal.first().click().catch(() => {});
+  await page.waitForTimeout(800);
+}
+
 const results = [];
 for (const market of MARKETS) {
   // 切市场（顶部市场切换器）

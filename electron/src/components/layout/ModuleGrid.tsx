@@ -81,9 +81,8 @@ export const ModuleGrid: React.FC<ModuleGridProps> = ({ modules, onLayoutChange 
       <HeaderBar />
 
       <div
-        className="grid gap-5 px-6 pb-20 flex-1 min-h-0"
+        className="grid gap-5 px-6 pb-20 flex-1 min-h-0 grid-cols-1 min-[820px]:grid-cols-2 xl:grid-cols-3"
         style={{
-          gridTemplateColumns: 'repeat(3, minmax(0, 1fr))',
           gridAutoRows: 'minmax(340px, 1fr)',
           overflowY: 'auto'
         }}
@@ -95,7 +94,7 @@ export const ModuleGrid: React.FC<ModuleGridProps> = ({ modules, onLayoutChange 
               initial={{ opacity: 0, scale: 0.98 }}
               animate={{ opacity: 1, scale: 1 }}
               transition={{ duration: 0.4 }}
-              className="flex flex-col h-full"
+              className="flex flex-col h-full min-w-0"
             >
               {renderModule(module.component)}
             </motion.div>

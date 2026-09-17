@@ -69,9 +69,10 @@ const IntelligenceChartsCard: React.FC = () => {
           {content.panelNote}
         </div>
       )}
-      <div className="grid grid-rows-[1.05fr_1fr] gap-3 h-full">
+      {/* min-w-0：ECharts 内部 div 会保留初始化时的像素宽，不给 0 最小宽会把栅格撑住不缩（窗口缩放后图表被裁） */}
+      <div className="grid grid-cols-1 grid-rows-[1.05fr_1fr] gap-3 h-full min-w-0">
         <motion.div
-          className="rounded-xl bg-white/30 border border-white/40 p-2"
+          className="rounded-xl bg-white/30 border border-white/40 p-2 min-w-0"
           whileHover={{ backgroundColor: 'rgba(255, 255, 255, 0.5)' }}
         >
           <div className="text-xs text-[var(--text-secondary)] px-1 pb-1">每日收益率</div>
@@ -94,7 +95,7 @@ const IntelligenceChartsCard: React.FC = () => {
 
         <div className="grid grid-cols-2 gap-3 min-h-0">
           <motion.div
-            className="rounded-xl bg-white/30 border border-white/40 p-2 min-h-0 flex flex-col"
+            className="rounded-xl bg-white/30 border border-white/40 p-2 min-h-0 flex flex-col min-w-0"
             whileHover={{ backgroundColor: 'rgba(255, 255, 255, 0.5)' }}
           >
             <div className="text-xs text-[var(--text-secondary)] px-1 pb-1">交易次数</div>
@@ -117,7 +118,7 @@ const IntelligenceChartsCard: React.FC = () => {
           </motion.div>
 
           <motion.div
-            className="rounded-xl bg-white/30 border border-white/40 p-2 min-h-0"
+            className="rounded-xl bg-white/30 border border-white/40 p-2 min-h-0 min-w-0"
             whileHover={{ backgroundColor: 'rgba(255, 255, 255, 0.5)' }}
           >
             <div className="text-xs text-[var(--text-secondary)] px-1 pb-1">持仓占比</div>
