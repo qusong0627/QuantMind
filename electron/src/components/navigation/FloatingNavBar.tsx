@@ -9,7 +9,6 @@ import {
   Rss,
   Search,
   ShieldCheck,
-  SquareTerminal,
   TestTube2,
   FileText,
   Brain,
@@ -44,7 +43,6 @@ export const FloatingNavBar: React.FC<FloatingNavBarProps> = ({ current, onChang
     { id: 'market-analysis', label: '市场分析', icon: BarChart3 },
     { id: 'rss-news', label: 'RSS信息流', icon: Rss },
     { id: 'stock-terminal', label: '个股终端', icon: CandlestickChart },
-    { id: 'ai-ide', label: 'AI-IDE', icon: SquareTerminal },
     { id: 'desk', label: '今日交易台', icon: Gauge },
     { id: 'backtest', label: '回测中心', icon: FlaskConical },
     { id: 'trading', label: '模拟交易', icon: ArrowLeftRight },
@@ -66,8 +64,8 @@ export const FloatingNavBar: React.FC<FloatingNavBarProps> = ({ current, onChang
   const groupedNavItems: NavItemConfig[][] = [
     // 1. 大盘分析模块
     navItems.filter((item) => ['dashboard', 'market-analysis', 'rss-news'].includes(item.id)),
-    // 2. 回测与交易区域
-    navItems.filter((item) => ['desk', 'stock-terminal', 'ai-ide', 'backtest', 'trading'].includes(item.id)),
+    // 2. 回测与交易区域（AI-IDE 已迁至 QuantBot 顶栏弹窗入口，全屏路由保留）
+    navItems.filter((item) => ['desk', 'stock-terminal', 'backtest', 'trading'].includes(item.id)),
     // 3. 模型区域
     navItems.filter((item) => ['model-training', 'model-registry', 'inference-center'].includes(item.id)),
     // 4. 智能投研区域
