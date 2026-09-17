@@ -112,6 +112,7 @@ def test_display_name_helpers():
         account_display_label,
         backtest_display_label,
         factor_display_name,
+        fallback_model_label,
     )
 
     # 因子：复用引擎词典（alpha158 窗口族 / gtja 编号）
@@ -122,6 +123,22 @@ def test_display_name_helpers():
 
     # 模型：系统内置有标签；未知 id 由调用方回退
     assert "Qlib" in SYSTEM_MODEL_LABELS["model_qlib"]
+
+    # 用户模型 id 兜底名（训练元数据缺 display_name 时）
+    assert (
+        fallback_model_label("mdl_cn_train_20260906064130_43e64ff0_b4cf437f")
+        == "A股 训练模型 · 2026-09-06 06:41"
+    )
+    assert (
+        fallback_model_label("mdl_us_train_20260912134006_566f6da2_8d0709f2_xgboost_8f4ac5a6")
+        == "美股 训练模型 · xgboost · 2026-09-12 13:40"
+    )
+    assert (
+        fallback_model_label("mdl_us_train_20260912134006_566f6da2_8d0709f2_random_forest_4555743f")
+        == "美股 训练模型 · random forest · 2026-09-12 13:40"
+    )
+    assert fallback_model_label("model_qlib") is None
+    assert fallback_model_label("") is None
 
     # 策略：策略名优先，其次 标的·区间，无信息 → None
     assert backtest_display_label({"strategy_name": "美股多空 TopK"}) == "美股多空 TopK"

@@ -69,12 +69,27 @@ async def _run_factor_card(save: bool, *, top: int, dataset: str) -> dict[str, A
 
 
 async def _run_model_card(save: bool, *, limit: int = 50) -> dict[str, Any]:
-    from backend.scripts.eval.model_card import list_production_models, score_model
+    from backend.scripts.eval.model_card import (
+        list_production_models,
+        list_user_models,
+        score_model,
+    )
 
-    results = []
-    for model_id in list_production_models(limit=limit):
+    targets: list[tuple[str, Path | None]] = [
+        (model_id, None) for model_id in list_production_models(limit=limit)
+    ]
+    try:
+        targets += [
+            (item["model_id"], Path(item["meta_path"]))
+            for item in await list_user_models()
+        ]
+    except Exception as exc:  # noqa: BLE001 - 用户模型清单失败不拖垮系统模型卡
+        logger.warning("[EvalRunAll] 用户模型清单获取失败: %s", exc)
+
+    results: list[dict[str, Any]] = []
+    for model_id, meta_path in targets:
         try:
-            results.append(score_model(model_id))
+            results.append(score_model(model_id, meta_path=meta_path))
         except Exception as exc:  # noqa: BLE001 - 单模型隔离
             results.append(
                 {

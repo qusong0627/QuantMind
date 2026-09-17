@@ -128,15 +128,72 @@ def list_production_models(*, limit: int = 50) -> list[str]:
     return out
 
 
-def score_model(model_id: str) -> dict[str, Any]:
-    meta_path = PRODUCTION_DIR / model_id / "metadata.json"
-    if not meta_path.is_file():
+# 用户训练模型纳入评分卡的状态（归档不评；候选也评，便于训练后立即体检）
+USER_MODEL_STATUSES = ("ready", "candidate")
+
+
+def _user_meta_path(model_id: str, storage_path: str = "") -> Path | None:
+    """用户模型 metadata.json 定位：storage_path 直读（容器内）→ ``/app/models``
+    前缀映射 PROJECT_ROOT（宿主直跑）→ users 树按 model_id 兜底搜索。"""
+    sp = str(storage_path or "").strip()
+    candidates: list[Path] = []
+    if sp:
+        candidates.append(Path(sp) / "metadata.json")
+        if sp.startswith("/app/models"):
+            candidates.append(
+                PROJECT_ROOT / "models" / sp[len("/app/models/") :] / "metadata.json"
+            )
+    for path in candidates:
+        if path.is_file():
+            return path
+    users_root = PROJECT_ROOT / "models" / "users"
+    for pattern in (f"*/*/{model_id}/metadata.json", f"*/*/*/{model_id}/metadata.json"):
+        hits = sorted(users_root.glob(pattern))
+        if hits:
+            return hits[0]
+    return None
+
+
+async def list_user_models(*, limit: int = 300) -> list[dict[str, Any]]:
+    """用户训练模型清单（``qm_user_models``，ready/candidate；产物缺失的跳过）。
+
+    返回 ``[{model_id, meta_path}]``；DB 不可用向上抛，由调用方隔离。
+    """
+    from sqlalchemy import text as _text
+
+    from backend.shared.database_manager_v2 import get_session
+
+    async with get_session(read_only=True) as session:
+        rows = (
+            await session.execute(
+                _text(
+                    "SELECT model_id, storage_path FROM qm_user_models "
+                    "WHERE status = ANY(:sts) "
+                    "ORDER BY updated_at DESC LIMIT :n"
+                ),
+                {"sts": list(USER_MODEL_STATUSES), "n": max(1, int(limit))},
+            )
+        ).fetchall()
+    out: list[dict[str, Any]] = []
+    for model_id, storage_path in rows:
+        if not model_id:
+            continue
+        meta_path = _user_meta_path(str(model_id), str(storage_path or ""))
+        if meta_path is None:
+            continue  # 产物已清理（归档残留）——无从评分，跳过而非报错
+        out.append({"model_id": str(model_id), "meta_path": str(meta_path)})
+    return out
+
+
+def score_model(model_id: str, *, meta_path: Path | None = None) -> dict[str, Any]:
+    meta_file = meta_path or (PRODUCTION_DIR / model_id / "metadata.json")
+    if not meta_file.is_file():
         return {
             "object_type": "model",
             "object_id": model_id,
-            "error": f"metadata 不存在: {meta_path}",
+            "error": f"metadata 不存在: {meta_file}",
         }
-    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    meta = json.loads(Path(meta_file).read_text(encoding="utf-8"))
     metrics, metrics_source = extract_oos_metrics(meta)
     dims = [
         score_oos(metrics),
@@ -159,7 +216,8 @@ def score_model(model_id: str) -> dict[str, Any]:
             "model_id": model_id,
             "run_id": meta.get("run_id"),
             "weights": WEIGHTS,
-            "source": "models/production metadata.metrics",
+            "source": "metadata.metrics",
+            "meta_path": str(meta_file),
             "metrics_source": metrics_source,
         },
         **combined,
@@ -208,7 +266,57 @@ def main() -> int:
     parser.add_argument("--model-id", default="model_qlib")
     parser.add_argument("--save", action="store_true")
     parser.add_argument("--json", action="store_true")
+    parser.add_argument(
+        "--all", action="store_true", help="系统模型 + 用户训练模型全量（常配 --save）"
+    )
     args = parser.parse_args()
+
+    if args.all:
+
+        async def _run_all_models() -> list[dict[str, Any]]:
+            from backend.shared.database_manager_v2 import close_database
+
+            try:
+                targets: list[tuple[str, Path | None]] = [
+                    (m, None) for m in list_production_models()
+                ]
+                targets += [
+                    (item["model_id"], Path(item["meta_path"]))
+                    for item in await list_user_models()
+                ]
+                results: list[dict[str, Any]] = []
+                for model_id, meta_path in targets:
+                    try:
+                        results.append(score_model(model_id, meta_path=meta_path))
+                    except Exception as exc:  # noqa: BLE001 - 单模型隔离
+                        results.append(
+                            {
+                                "object_type": "model",
+                                "object_id": model_id,
+                                "error": f"评分失败: {exc}",
+                            }
+                        )
+                if args.save:
+                    for r in results:
+                        if not r.get("error") and r.get("score") is not None:
+                            await _save(r)
+                return results
+            finally:
+                await close_database()
+
+        results = asyncio.run(_run_all_models())
+        ok = [r for r in results if not r.get("error") and r.get("score") is not None]
+        print(
+            f"模型评分卡全量：{len(ok)} 落分 / {len(results)} 个对象"
+            + ("（已落表）" if args.save else "（未落表，加 --save）")
+        )
+        for r in results:
+            if r.get("error"):
+                print(f"  ERROR {r['object_id']}: {str(r['error'])[:120]}")
+            elif r.get("score") is None:
+                print(f"  SKIP  {r['object_id']}: 无 OOS 指标（如 ensemble）")
+        return 0 if ok else 1
+
     result = score_model(args.model_id)
     if args.save and not result.get("error"):
 

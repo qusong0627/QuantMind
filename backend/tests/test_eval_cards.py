@@ -163,6 +163,43 @@ def test_model_card_renormalizes_missing_dims(tmp_path, monkeypatch):
     assert model_card.list_production_models() == ["m1"]
 
 
+@pytest.mark.unit
+def test_user_model_meta_path_resolution(tmp_path, monkeypatch):
+    """用户模型 metadata 定位（2026-09-17 纳入评分卡）：
+
+    storage_path 直读优先 → ``/app/models`` 前缀映射 PROJECT_ROOT（宿主直跑）→
+    users 树按 model_id 兜底（CN 两层 / 非 CN 三层布局均可）→ 缺失 None。
+    """
+    import json as _json
+
+    from backend.scripts.eval import model_card
+
+    monkeypatch.setattr(model_card, "PROJECT_ROOT", tmp_path)
+    d1 = tmp_path / "models" / "users" / "default" / "00000001" / "mdl_a"
+    d1.mkdir(parents=True)
+    (d1 / "metadata.json").write_text(
+        _json.dumps({"metrics": {"test_rank_ic": 0.05, "test_rank_icir": 0.8}}),
+        encoding="utf-8",
+    )
+    d2 = tmp_path / "models" / "users" / "default" / "00000001" / "us" / "mdl_b"
+    d2.mkdir(parents=True)
+    (d2 / "metadata.json").write_text("{}", encoding="utf-8")
+
+    assert model_card._user_meta_path("mdl_a") == d1 / "metadata.json"
+    assert model_card._user_meta_path("mdl_b") == d2 / "metadata.json"
+    assert model_card._user_meta_path("x", str(d1)) == d1 / "metadata.json"
+    assert (
+        model_card._user_meta_path("x", "/app/models/users/default/00000001/mdl_a")
+        == d1 / "metadata.json"
+    )
+    assert model_card._user_meta_path("nope") is None
+
+    # 带 meta_path 评分与系统模型同口径（OOS 维度可算出分）
+    result = model_card.score_model("mdl_a", meta_path=d1 / "metadata.json")
+    assert result["score"] is not None
+    assert result["inputs_version"]["meta_path"].endswith("mdl_a/metadata.json")
+
+
 # ── 策略卡 ──────────────────────────────────────────────────────────
 
 

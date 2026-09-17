@@ -83,6 +83,42 @@ SYSTEM_MODEL_LABELS: dict[str, str] = {
 
 _MARKET_LABELS = {"CN": "A股", "HK": "港股", "US": "美股", "CRYPTO": "加密", "FUTURES": "期货"}
 
+# 用户模型 id 前缀 → 中文（mdl_<market>_<kind>_<ts>_...；训练元数据缺 display_name 时的兜底名）
+_MODEL_MARKET_LABELS = {"cn": "A股", "hk": "港股", "us": "美股", "cust": "自定义", "crypto": "加密"}
+_MODEL_KIND_LABELS = {"train": "训练模型", "ensemble": "融合模型"}
+
+
+def fallback_model_label(model_id: str) -> str | None:
+    """用户模型 id 解析兜底名（训练元数据无 display_name 时）：
+
+    ``mdl_cn_train_20260906064130_<hash>`` → 「A股 训练模型 · 2026-09-06 06:41」；
+    带算法段的 ``mdl_us_train_..._xgboost_<hash>`` → 「美股 训练模型 · xgboost · …」。
+    解析不出（非 mdl_ 结构）→ None，由前端回退原始 id。
+    """
+    parts = str(model_id or "").split("_")
+    if len(parts) < 4 or parts[0] != "mdl":
+        return None
+    market = _MODEL_MARKET_LABELS.get(parts[1].lower(), parts[1].upper())
+    kind = _MODEL_KIND_LABELS.get(parts[2].lower(), parts[2])
+    ts = parts[3]
+    when = ""
+    if len(ts) >= 12 and ts.isdigit():
+        when = f" · {ts[:4]}-{ts[4:6]}-{ts[6:8]} {ts[8:10]}:{ts[10:12]}"
+    # 时间戳后的段里找算法名（跳过 hex 段；连续字母段合并，如 random forest）
+    words: list[str] = []
+    for seg in parts[4:]:
+        is_hex = len(seg) in (8, 16, 32, 64) and all(c in "0123456789abcdef" for c in seg.lower())
+        if is_hex:
+            if words:
+                break
+            continue
+        if seg.isalpha():
+            words.append(seg)
+        else:
+            break
+    algo = f" · {' '.join(words)}" if words else ""
+    return f"{market} {kind}{algo}{when}"
+
 
 def factor_display_name(code: str) -> str | None:
     """因子代码 → 中文名（复用引擎因子词典唯一实现；词典不可用 → None）。"""
@@ -156,6 +192,10 @@ async def _resolve_display_names(
                 for model_id, label in rows:
                     if label:
                         names[str(model_id)] = str(label).strip() or None
+            # 元数据无 display_name 的训练模型 → 按 id 解析兜底名
+            for i in missing:
+                if not names.get(i):
+                    names[i] = fallback_model_label(i)
             return names
         if object_type == "strategy":
             rows = (
