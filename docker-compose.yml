@@ -300,8 +300,6 @@ services:
       # QwenPaw 上游认证信息（按需配置）
       - QWENPAW_AUTH_USERNAME=${QWENPAW_AUTH_USERNAME:-}
       - QWENPAW_AUTH_PASSWORD=${QWENPAW_AUTH_PASSWORD:-}
-      # QwenPaw 共享文件目录
-      - QWENPAW_SHARED_FILES_DIR=/qwenpaw-shared
 
       # Huntly 资讯聚合 (后端代理调用)
       - HUNTLY_BASE_URL=${HUNTLY_BASE_URL:-http://quantmind-huntly}
@@ -355,8 +353,6 @@ services:
       # 允许 API 容器调用宿主机 Docker 启动训练容器
       - /var/run/docker.sock:/var/run/docker.sock
       # QwenPaw 共享文件目录
-      - qwenpaw-shared:/qwenpaw-shared
-    # TradingAgents 源码已随镜像提供；将其加入模块路径，避免每次启动
     # 都访问 PyPI 安装依赖（离线/受限网络会一直卡在此步骤）。
     command: >
       sh -c "PYTHONPATH=/app/TradingAgents-astock:$$PYTHONPATH python backend/main_oss.py"
@@ -680,92 +676,11 @@ services:
     networks:
       - quantmind-net
 
-  # 7. QwenPaw (QuantBot 聊天机器人)
-  qwenpaw:
-    # Docker registry mirror 由部署脚本统一配置。
-    # 扩展镜像：在上游基础上加装 reportlab（研报 MD→PDF）与 docker CLI，
-    # 见 docker/Dockerfile.qwenpaw。image 标签保留以兼容离线包保存/加载。
-    build:
-      context: .
-      dockerfile: docker/Dockerfile.qwenpaw
-    image: agentscope/qwenpaw:latest
-    container_name: qwenpaw
-    # 已由 dsh（DeepSeek Harness）接替为 QuantBot 默认后端：默认不启动（legacy 备份）。
-    # 回滚：docker compose stop dsh && docker compose --profile legacy up -d qwenpaw
-    # ⚠️ 与 dsh 同时只能开一个（两者都占宿主 8088；compose up 默认不会拉起本服务）。
-    profiles: ["legacy"]
-    ports:
-      # 默认对外绑定 0.0.0.0：QuantBot 页面由浏览器/Electron 直连 <宿主>:8088，
-      # 回环绑定会导致外部无法访问。qwenpaw 为免登录模式，请配合云安全组/防火墙
-      # 限制来源 IP；确需仅本机访问的机器在 .env 设置 QWENPAW_BIND=127.0.0.1。
-      - "${QWENPAW_BIND:-0.0.0.0}:${QWENPAW_PORT:-8088}:8088"
-    networks:
-      quantmind-net:
-        aliases:
-          - copaw
-    environment:
-      # QuantMind 代码库和数据库访问（与 quantmind 容器一致）
-      - PYTHONPATH=/app
-      - DB_DRIVER=asyncpg
-      - DB_HOST=db
-      - DB_PORT=5432
-      - DB_NAME=${DB_NAME:-quantmind}
-      - DB_USER=${DB_USER:-quantmind}
-      - DB_PASSWORD=${DB_PASSWORD:-quantmind2026}
-      - DATABASE_URL=postgresql+asyncpg://${DB_USER:-quantmind}:${DB_PASSWORD:-quantmind2026}@db:5432/${DB_NAME:-quantmind}
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - REDIS_PASSWORD=
-      - STORAGE_MODE=local
-      - STORAGE_ROOT=/data
-      - MARGIN_STOCK_POOL_PATH=/data/融资融券.json
-      - STRATEGY_TEMPLATES_DIR=/app/strategy_templates
-      - QLIB_BACKTEST_RESULT_DIR=/data/backtest_results
-      - QLIB_BACKTEST_KERNELS=1
-      - INTERNAL_CALL_SECRET=${INTERNAL_CALL_SECRET:-changeme-internal-secret}
-      - QUANTMIND_API_BASE_URL=http://quantmind:8000
-      - QUANTMIND_ENGINE_URL=http://quantmind:8001
-      - QUANTMIND_USER_ID=qwenpaw
-      - QWENPAW_SHARED_FILES_DIR=/qwenpaw-shared
-      - QWENPAW_CORS_ORIGINS=http://192.168.31.68:3080,http://localhost:3080,http://127.0.0.1:3080,http://192.168.31.68:8088,http://localhost:8088,http://127.0.0.1:8088
-      # 远程数据源（用于数据同步脚本）
-      - SOURCE_DATABASE_URL=${SOURCE_DATABASE_URL:-postgresql://user:pass@localhost:5432/quantmind}
-      - SYNC_MAX_DAYS=30
-      - TZ=Asia/Shanghai
-    volumes:
-      # QwenPaw 自有数据
-      - qwenpaw-data:/app/working
-      - qwenpaw-secrets:/app/working.secret
-      - qwenpaw-backups:/app/working.backups
-      # QuantMind 代码库（只读，避免误修改）
-      - ./backend:/app/backend:ro
-      - ./config:/app/config:ro
-      - ./scripts:/app/scripts:ro
-      - ./strategy_templates:/app/strategy_templates:ro
-      - ./CLAUDE.md:/app/CLAUDE.md:ro
-      # 项目根目录（只读，供 Agent 查找本地文件/技能 zip 等）
-      - ./:/quantmind:ro
-      # 研报 PDF 中文字体（md_to_pdf_report.py 按 /app/docker/training/fonts 解析）
-      - ./docker/training/fonts:/app/docker/training/fonts:ro
-      # RD-Agent 已 pip install 到镜像中，不再需要运行时挂载
-      # QuantMind 数据（读写）
-      - ./data:/data
-      - ./db:/app/db
-      - ./models:/app/models
-      - ./logs:/app/logs
-      - ./user_pools_local:/app/user_pools_local
-      # 共享文件目录
-      - qwenpaw-shared:/qwenpaw-shared
-      # 允许调用宿主机 Docker（启动训练容器等）
-      - /var/run/docker.sock:/var/run/docker.sock
-    restart: unless-stopped
-
   # 8b. dsh（DeepSeek Harness，QuantBot 默认后端）
   # 接替原 QwenPaw：容器内 = dsh web(127.0.0.1:3081) + nginx 前门(0.0.0.0:8088)，
   # 宿主端口与旧 qwenpaw 完全一致（前端 QuantBot 页 iframe 直连 <宿主>:8088，地址不变）。
   # 蓝本：baymax 生产部署；移植说明见 docker/Dockerfile.dsh 与 docker/dsh/*。
-  # 回滚：docker compose stop dsh && docker compose --profile legacy up -d qwenpaw
-  # ⚠️ 与 qwenpaw 同时只能开一个（宿主 8088 冲突）。
+  # 旧 QwenPaw 服务已随迁移删除（需要时从 git 历史取回服务定义与镜像构建文件）。
   dsh:
     build:
       context: .
@@ -882,10 +797,6 @@ networks:
 volumes:
   postgres-data:
   redis-data:
-  qwenpaw-data:
-  qwenpaw-secrets:
-  qwenpaw-backups:
-  qwenpaw-shared:
   # QuantBot（dsh）持久化：/root/.dsh（会话/配置/cookie 签名密钥）+ 会话工作区
   dsh-data:
   dsh-workspace:

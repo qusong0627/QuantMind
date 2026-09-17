@@ -67,7 +67,7 @@ python3 /quantmind/skills/qwenpaw-migrate/scripts/qwenpaw_migrate.py cleanup --r
 - 停止并删除所有 `qwenpaw*` 容器（含旧版 8088 占用——dsh 与 qwenpaw 端口冲突，只能留一个）；
 - `--remove-volumes`：四个卷（data/secrets/backups/shared）逐一 `tar.gz` 到 `/data/backups/`（宿主 ./data 卷，随平台数据长期保留）→ 再 `docker volume rm`。
 - `qwenpaw-shared` 若仍被 quantmind 主容器挂载（compose 引用未清）会删不掉——属零头卷，脚本会保留并提示；主容器下次重建后即可删（或在 compose 里清掉该挂载）。
-- 若部署走 compose legacy profile：`docker compose --profile legacy` 相关服务已随容器删除停用，无需再动 compose 文件（回滚能力在 dsh 侧由 compose 注释保留）。
+- 若部署走 compose legacy profile：服务/镜像/构建文件已随退役清理删除（git 历史可取）；本技能只处理**数据面**。
 
 ## 边界与已知限制
 

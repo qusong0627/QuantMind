@@ -117,7 +117,7 @@ ssh ${SSH_TARGET} "cd ${PROJECT_DIR} && git pull && docker compose restart quant
 - **人格与提示词**：`docker/dsh/dsh.cordis.yml`（persona/默认模型/连接）与 `docker/dsh/AGENTS.md`（路由表/平台 API/挂载地图/术语映射），改后 `docker compose restart dsh` 生效。
 - 容器与端口：`quantmind-dsh`，宿主 8088（与旧 qwenpaw 相同，前端 QuantBot 页 iframe 直连）；外部用 IP/域名访问需 `.env` 配 `DSH_TRUSTED_HOSTS`。
 - 排查：`docker compose logs -f dsh`；`docker exec quantmind-dsh ls /root/.dsh/skills | wc -l` 核对技能数。
-- **旧 QwenPaw 为 legacy 备份（默认不启动）**：`docker compose --profile legacy up -d qwenpaw` 回滚（与 dsh 端口冲突，只能开一个）；其技能/人格更新入口仍是 `bash scripts/quantbot_init.sh`（仅 legacy 场景使用）。
+- **旧 QwenPaw 已退役**：服务定义/镜像/构建文件已随迁移删除（需要时从 git 历史找回）；旧数据卷已迁移清理，存量用户升级走 `skills/qwenpaw-migrate` 技能。
 - PDF 生成：dsh 容器不带 reportlab，统一走 `docker exec -w /app quantmind python3 backend/scripts/md_to_pdf_report.py`（技能契约首选路径）。
 
 ### 5. Web 前端部署（Nginx 预编译）
@@ -135,4 +135,4 @@ ssh ${SSH_TARGET} "cd ${PROJECT_DIR} && git pull && docker compose restart quant
 - `scripts/quantbot_init.sh` - 【legacy】QwenPaw 技能/人格一键初始化（回滚场景专用）
 - `docker/Dockerfile.dsh` - QuantBot 默认后端 dsh（DeepSeek Harness）镜像（node + dsh + nginx + docker CLI）
 - `docker/dsh/` - dsh 配置：dsh.cordis.yml（persona/模型/连接）、AGENTS.md（工作区规则）、nginx.conf（前门+cookie 注入）、mint_cookies.py（鉴权 cookie 签发）、entrypoint.sh
-- `docker/Dockerfile.qwenpaw` - 【legacy】QwenPaw 扩展镜像（reportlab + docker CLI）
+- `docker/Dockerfile.qwenpaw` - 【已删除】QwenPaw 扩展镜像构建文件（退役清理，git 历史可取）

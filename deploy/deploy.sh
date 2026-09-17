@@ -171,10 +171,6 @@ start_services() {
     # 仅预拉取第三方外部镜像（postgres/redis/huntly/rsshub/ib-gateway）。
     # 自研镜像（quantmind-oss / data-gateway / dashboard 等）未上传镜像仓库，
     # 由下方 docker compose build 本地构建，不可对它们执行 pull。
-    # qwenpaw 例外：本地 tag agentscope/qwenpaw:latest 是「上游 + reportlab + docker CLI」
-    # 的定制镜像（docker/Dockerfile.qwenpaw）。直接 pull 会用上游原版覆盖该 tag 并丢掉
-    # 定制层，故这里不 pull，改由下方 build 自动拉取上游基础层后叠加定制
-    # （对齐 full-deploy.sh「绝不覆盖定制镜像」的原则）。
     docker compose pull db redis huntly rsshub ib-gateway \
         || log '部分外部镜像未能预拉取，将在启动时重试'
     # 构建时注入 pip 源加速（国内网络），可通过 QUANTMIND_PIP_MIRROR 覆盖
@@ -187,8 +183,7 @@ start_services() {
         --build-arg QM_REQ_SHA="${req_sha:-unknown}" \
         quantmind
     # dsh（QuantBot 默认后端）：镜像内已烘焙 python3/nginx/docker CLI（docker/Dockerfile.dsh），
-    # buildkit 自动拉取 node:22-slim 基础层后叠加。legacy qwenpaw 不再默认构建
-    # （回滚需要时：docker compose --profile legacy build qwenpaw）。
+    # buildkit 自动拉取 node:22-slim 基础层后叠加。旧 QwenPaw 服务/镜像已退役删除。
     docker compose build dsh
     docker compose up -d --remove-orphans
     verify_dsh_runtime

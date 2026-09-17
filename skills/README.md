@@ -127,7 +127,7 @@ QuantBot（dsh 容器 / DeepSeek Harness）**无需安装**：docker-compose 把
 
 - 富途 OpenD 网关：compose **未内置**该服务，按 [install-futu-opend](install-futu-opend/) 在本地/服务器安装启动（API 端口 11111）
 - IB Gateway：`docker compose up -d ib-gateway`（.env 配置 IB_ACCOUNT/IB_PASSWORD，端口 4001=实盘 / 4002=模拟）
-- QuantBot（dsh / DeepSeek Harness）：`docker compose up -d dsh`，控制台端口 8088（前端 QuantBot 页直连 `<宿主>:8088`；用 IP/域名访问前在 `.env` 配 `DSH_TRUSTED_HOSTS`）。技能经 `./skills` 只读挂载（dsh 容器 `/root/.dsh/skills`），改仓库即生效、无需上传。旧 QwenPaw 为回滚备份：`docker compose --profile legacy up -d qwenpaw`（与 dsh 端口冲突，只能开一个）
+- QuantBot（dsh / DeepSeek Harness）：`docker compose up -d dsh`，控制台端口 8088（前端 QuantBot 页直连 `<宿主>:8088`；用 IP/域名访问前在 `.env` 配 `DSH_TRUSTED_HOSTS`）。技能经 `./skills` 只读挂载（dsh 容器 `/root/.dsh/skills`），改仓库即生效、无需上传。旧 QwenPaw 已退役（服务/镜像已删除，存量迁移见 [qwenpaw-migrate](qwenpaw-migrate/)）
 
 ## 技能开发约定
 
