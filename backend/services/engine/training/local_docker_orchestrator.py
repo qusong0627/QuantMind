@@ -235,7 +235,9 @@ class LocalDockerOrchestrator(TrainingOrchestrator):
         self.api_base = (
             os.getenv("QUANTMIND_API_BASE_URL") or "http://quantmind-api:8000"
         ).strip()
-        self.internal_secret = (os.getenv("INTERNAL_CALL_SECRET") or "").strip()
+        from backend.shared.auth import get_internal_call_secret
+
+        self.internal_secret = get_internal_call_secret()
         # P0-3: 强制 fail-closed。secret 缺失直接抛错，不再用空 secret 走 fail-open。
         if not self.internal_secret:
             raise RuntimeError(

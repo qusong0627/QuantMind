@@ -273,3 +273,4 @@ deploy/portable/dist/
 minibt/**/__pycache__/
 minibt/**/*.so
 minibt/build/
+.env.*

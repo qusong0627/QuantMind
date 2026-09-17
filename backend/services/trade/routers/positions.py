@@ -23,6 +23,7 @@ from backend.services.trade_shared.portfolio.schemas import (
 from backend.services.trade_shared.portfolio.services import PortfolioService, PositionService
 from backend.services.trade_shared.portfolio.utils import get_db
 from backend.services.trade_shared.portfolio.utils.limiter import limiter
+from backend.services.trade.routers.internal_strategy_utils import verify_internal_call
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Positions"])
@@ -104,7 +105,7 @@ async def list_positions(
 async def sync_trade(
     data: TradeSync,
     db: AsyncSession = Depends(get_db),
-    # 暂时不加 User ID 校验，因为是服务间调用。生产环境应加 Service Token 校验。
+    _internal: None = Depends(verify_internal_call),  # H1 加固：内部密钥校验（原注释自认缺此防线）
 ):
     try:
         position = await PositionService.sync_trade_update(db, data)

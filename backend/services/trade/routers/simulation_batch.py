@@ -3,14 +3,18 @@ from typing import Any, Dict
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from backend.services.trade_shared.deps import get_db
+from backend.services.trade_shared.deps import get_db, require_admin
 from backend.services.simulation.services.simulation_settler import settler
 
 router = APIRouter(prefix="/api/v1/simulation/batch", tags=["Simulation Batch Operations"])
 
 
 @router.post("/step")
-async def trigger_simulation_step(payload: dict[str, Any], db: Session = Depends(get_db)):
+async def trigger_simulation_step(
+    payload: dict[str, Any],
+    db: Session = Depends(get_db),
+    auth: Any = Depends(require_admin),  # H2 加固：原匿名可代任意用户触发日终结算
+):
     """
     手动触发一次模拟交易的步进（结算）
     用于测试“单一写权限”和“数据驱动模拟盘”流程

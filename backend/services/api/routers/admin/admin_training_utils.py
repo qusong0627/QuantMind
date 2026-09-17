@@ -997,7 +997,9 @@ def _verify_internal_call_secret(provided: str) -> None:
 
     用 secrets.compare_digest 替代 ==，避免 timing attack。
     """
-    expected = os.getenv("INTERNAL_CALL_SECRET", "")
+    from backend.shared.auth import get_internal_call_secret
+
+    expected = get_internal_call_secret()
     if not expected:
         logger.error(
             "INTERNAL_CALL_SECRET env not set; refusing internal callback"

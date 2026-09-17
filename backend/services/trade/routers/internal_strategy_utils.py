@@ -25,15 +25,23 @@ router = APIRouter(
 )
 logger = logging.getLogger(__name__)
 
-INTERNAL_CALL_SECRET = get_internal_call_secret()
-
-
 async def verify_internal_call(x_internal_call: str = Header(None)):
-    """验证请求是否来自受信任的内部 K8s 集群"""
-    if not x_internal_call or x_internal_call != INTERNAL_CALL_SECRET:
-        logger.warning(
-            f"Unauthorized internal call attempt with secret: {x_internal_call}"
-        )
+    """验证请求是否来自受信任的内部服务。
+
+    C1 加固（2026-09-17）：密钥**逐次实时读取**（runtime.env 权威，轮换免重启）；
+    无有效密钥（含公开默认值被拒后为空）→ 一律 401；日志只记尝试值的 sha8（M1：不落原文）。
+    """
+    import hashlib
+    import secrets
+
+    expected = get_internal_call_secret()
+    if (
+        not expected
+        or not x_internal_call
+        or not secrets.compare_digest(str(x_internal_call), expected)
+    ):
+        digest = hashlib.sha256(str(x_internal_call or "").encode()).hexdigest()[:8]
+        logger.warning("Unauthorized internal call attempt (secret_sha8=%s)", digest)
         raise HTTPException(status_code=401, detail="Invalid internal secret")
 
 

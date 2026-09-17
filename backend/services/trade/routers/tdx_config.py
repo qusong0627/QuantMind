@@ -12,7 +12,11 @@ from typing import Literal
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from backend.services.trade_shared.deps import AuthContext, get_auth_context
+from backend.services.trade_shared.deps import (
+    AuthContext,
+    get_auth_context,
+    require_admin,
+)
 from backend.services.trade_shared.trade_config import settings
 
 logger = logging.getLogger(__name__)
@@ -135,7 +139,7 @@ async def get_tdx_config(auth: AuthContext = Depends(get_auth_context)):
 @router.post("/tdx/config")
 async def update_tdx_config(
     data: TdxConfigUpdate,
-    auth: AuthContext = Depends(get_auth_context),
+    auth: AuthContext = Depends(require_admin),  # H4 加固：全局桥地址/token 属管理员面（SSRF/凭证外带防线）
 ):
     """更新通达信桥配置 (运行时, 进程内生效)."""
     # 运行时覆盖 pydantic-settings (进程内生效)

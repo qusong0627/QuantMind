@@ -1,8 +1,8 @@
 """统一认证中间件"""
 
+import secrets as _secrets
 from datetime import datetime, timedelta
 from typing import Any, Dict, Optional
-
 import jwt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -17,12 +17,39 @@ security = HTTPBearer()
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 DEFAULT_INTERNAL_CALL_SECRET = "dev-internal-call-secret"
 
+# 已知公开默认值（compose/代码兜底常量）——**一律视为未配置**（C1 安全加固，2026-09-17）。
+# 背景：compose 的 `${INTERNAL_CALL_SECRET:-changeme-internal-secret}` 回退值令匿名者仅凭
+# `X-Internal-Call: changeme-internal-secret` + `X-User-Id` 两枚请求头即可冒充任意用户
+# （含 admin）并经内部网关直下真单（trading_mode 缺省 REAL）。轮换后应同步清理 .env 与
+# compose 的默认回退值。
+_PUBLIC_INTERNAL_DEFAULTS = frozenset(
+    {"changeme-internal-secret", "dev-internal-call-secret"}
+)
+
 
 def get_internal_call_secret() -> str:
-    """Shared internal secret for service-to-service calls."""
+    """内部调用密钥（服务间信任链唯一读取点）。
+
+    权威优先级（C1 加固后）：**runtime.env（管理台/运维可热换）** > 环境变量（非公开默认）
+    > ""（空 = 无有效密钥，一切内部校验必须失败 = fail-closed）。
+
+    与 `runtime_secrets.get_secret` 的不同：本键**文件优先**——compose 会给本键注入
+    （可能过期的）环境变量，若按"env 优先"会把轮换后的新密钥遮蔽掉（2026-09-17 实测事故）。
+    """
     import os
 
-    return str(os.getenv("INTERNAL_CALL_SECRET", DEFAULT_INTERNAL_CALL_SECRET)).strip()
+    try:
+        from .runtime_secrets import _parse, runtime_env_path
+
+        v = str(_parse(runtime_env_path()).get("INTERNAL_CALL_SECRET", "")).strip()
+        if v and v not in _PUBLIC_INTERNAL_DEFAULTS:
+            return v
+    except Exception:  # noqa: BLE001 - 读取失败回落环境变量
+        pass
+    env_val = str(os.getenv("INTERNAL_CALL_SECRET", "")).strip()
+    if env_val and env_val not in _PUBLIC_INTERNAL_DEFAULTS:
+        return env_val
+    return ""
 
 
 class AuthManager:
@@ -118,11 +145,11 @@ def get_current_user(
     credentials: HTTPAuthorizationCredentials | None = Depends(HTTPBearer(auto_error=False)),
 ) -> dict[str, Any]:
     """获取当前用户信息的依赖注入函数（支持内部 Secret 和 JWT）"""
-    # 1. 内部调用校验
+    # 1. 内部调用校验（C1 加固：空密钥必败；compare_digest 防时序侧信道）
     internal_secret = request.headers.get("X-Internal-Call")
     if internal_secret:
         expected = get_internal_call_secret()
-        if internal_secret == expected:
+        if expected and _secrets.compare_digest(str(internal_secret), expected):
             user_id = request.headers.get("X-User-Id", "0")
             return {
                 "sub": user_id,

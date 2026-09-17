@@ -59,11 +59,15 @@ class RemoteService:
             "trade_id": str(trade.trade_id),
         }
 
+        headers = {
+            "X-User-Id": str(getattr(trade, "user_id", "") or ""),
+            "X-Internal-Call": get_internal_call_secret(),
+        }
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             try:
                 # Fire and forget mechanism or wait?
                 # Since it's called from TradeService, we should probably await but catch errors so we don't block trading
-                response = await client.post(url, json=payload)
+                response = await client.post(url, json=payload, headers=headers)
                 response.raise_for_status()
                 logger.info(f"Synced trade {trade.trade_id} to portfolio {trade.portfolio_id}")
             except Exception as e:

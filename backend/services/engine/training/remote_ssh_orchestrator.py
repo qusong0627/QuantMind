@@ -100,7 +100,9 @@ class RemoteSSHOrchestrator(TrainingOrchestrator):
         self.api_base = _env_or("QUANTMIND_API_BASE_URL", "http://quantmind-api:8000")
         # 主节点局域网地址（供远端容器回调）；为空则回退 api_base（可能不可达）
         self.master_host = _env_or("TRAINING_MASTER_HOST", "")
-        self.internal_secret = _env_or("INTERNAL_CALL_SECRET", "")
+        from backend.shared.auth import get_internal_call_secret
+
+        self.internal_secret = get_internal_call_secret()
         self.log_stream = TrainingRunLogStream()
         self._tenant_id = _env_or("TRAINING_DEFAULT_TENANT", "default")
         self._user_id = _env_or("TRAINING_DEFAULT_USER", "admin")

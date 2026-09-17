@@ -123,7 +123,9 @@ async def preflight_check(
         await db.rollback()
 
     # 3) Internal Secret
-    internal_secret = str(os.getenv("INTERNAL_CALL_SECRET", "")).strip()
+    from backend.shared.auth import get_internal_call_secret
+
+    internal_secret = get_internal_call_secret()
     if internal_secret:
         add_check("internal_secret", "内部密钥", True, True, "INTERNAL_CALL_SECRET 已配置")
     else:

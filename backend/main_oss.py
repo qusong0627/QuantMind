@@ -32,28 +32,30 @@ _runtime_loaded = load_runtime_env()
 if _runtime_loaded:
     logger.info("Loaded %d runtime secrets from runtime.env", _runtime_loaded)
 
-# ── P0-3: 启动时强制 INTERNAL_CALL_SECRET 存在（fail-closed）──
-# 训练完成回调依赖此 secret；缺失会导致任意人都能伪造回调。
-# 生产环境直接 raise，dev/test 自动生成避免本地启动挂掉。
+# ── P0-3 + C1 加固（2026-09-17）：内部密钥必须为**非公开默认**的有效值（fail-closed）──
+# 读取走 shared.auth.get_internal_call_secret（runtime.env 权威；公开默认值 changeme-*/dev-*
+# 一律视为未配置）。缺失 → 自动生成强随机并**持久化 runtime.env**（全服务热可见；
+# 生产同规则，避免"盘上无值即拒启"的死锁）。事故背景：compose 的公开默认回退值曾令匿名者
+# 仅凭两枚请求头即可冒充任意用户并直下真单。
 import secrets as _secrets
-if not os.getenv("INTERNAL_CALL_SECRET"):
-    _env = os.getenv("QUANTMIND_ENV", "").lower()
-    if _env in ("production", "prod"):
-        raise RuntimeError(
-            "INTERNAL_CALL_SECRET must be set in production. "
-            "Set it in .env or generate with: openssl rand -hex 32"
-        )
-    _auto = _secrets.token_urlsafe(32)
-    os.environ["INTERNAL_CALL_SECRET"] = _auto
-    if _env == "development":
+
+from backend.shared.auth import get_internal_call_secret as _get_internal_secret
+from backend.shared.runtime_secrets import set_secret as _set_secret
+
+if not _get_internal_secret():
+    _auto = _secrets.token_urlsafe(48)
+    try:
+        _set_secret("INTERNAL_CALL_SECRET", _auto)
         logger.warning(
-            "INTERNAL_CALL_SECRET auto-generated for development"
+            "INTERNAL_CALL_SECRET 缺失或为公开默认值 → 已生成强随机并写入 runtime.env（全服务生效）"
         )
-    else:
-        logger.warning(
-            "INTERNAL_CALL_SECRET not set; auto-generated for local. "
-            "Set QUANTMIND_ENV=production to require explicit secret."
-        )
+    except Exception as _exc:  # noqa: BLE001
+        if os.getenv("QUANTMIND_ENV", "").lower() in ("production", "prod"):
+            raise RuntimeError(
+                f"INTERNAL_CALL_SECRET 无法生成/持久化: {_exc}"
+            ) from _exc
+        os.environ["INTERNAL_CALL_SECRET"] = _auto
+        logger.warning("INTERNAL_CALL_SECRET 自动生成（仅本进程；落盘失败: %s）", _exc)
 
 # ── Qlib 数据目录修复 ──
 # features_real 是实际数据目录，Qlib 期望 features/

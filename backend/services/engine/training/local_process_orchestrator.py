@@ -51,7 +51,9 @@ class LocalProcessOrchestrator(LocalDockerOrchestrator):
         # 会急切连接 daemon 抓取 server version，免 Docker 环境直接抛错。
         # 直跑模式不需要 docker client，仅复用父类的编排常量与编排骨架。
         self.api_base = default_api_base_url()
-        self.internal_secret = (os.getenv("INTERNAL_CALL_SECRET") or "").strip()
+        from backend.shared.auth import get_internal_call_secret
+
+        self.internal_secret = get_internal_call_secret()
         # P0-3: 与父类一致的 fail-closed 语义，缺失时明确报错
         if not self.internal_secret:
             raise RuntimeError(

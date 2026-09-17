@@ -21,7 +21,12 @@ TRADE_BASE_URL = os.getenv("TRADE_SERVICE_URL", "http://trade-core:8002").rstrip
 
 router = APIRouter(tags=["Trade-Proxy"])
 
-_SKIP_HEADERS = {"host", "content-length", "transfer-encoding"}
+# 剥离清单（C1 纵深 2026-09-17）：客户端携带的内部信任头一律不得透传给 trade——
+# 身份头由下方按鉴权上下文**重建**；X-Internal-Call 只允许服务间直连（容器网络）携带。
+_SKIP_HEADERS = {
+    "host", "content-length", "transfer-encoding",
+    "x-internal-call", "x-user-id", "x-tenant-id",
+}
 
 
 _client: httpx.AsyncClient | None = None
