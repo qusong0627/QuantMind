@@ -142,6 +142,14 @@ async def anomaly_engine_status():
     return {"ok": True, "data": default_service().status()}
 
 
+@router.get("/realtime/news-intel/status")
+async def news_intel_status():
+    """新闻情报服务状态（T-P6-12）：配置/计数器/游标（只读）。"""
+    from backend.services.engine.news_intel_engine import default_service
+
+    return {"ok": True, "data": default_service().status()}
+
+
 @router.post("/runs/{run_id}/feature-ready")
 async def mark_feature_ready(run_id: str, payload: FeatureReadyRequest):
     sql = text("""

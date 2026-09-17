@@ -131,6 +131,15 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"⚠️ AnomalyEngine startup skipped: {e}")
 
+    # 启动新闻情报服务（P6 T-P6-12；Redis 配置门控默认关）
+    try:
+        from backend.services.engine.news_intel_engine import default_service as news_intel_service
+
+        news_intel_service().start()
+        logger.info("✅ NewsIntel service loop created (active if qm:engine:news_intel:config.enabled=true)")
+    except Exception as e:
+        logger.warning(f"⚠️ NewsIntel startup skipped: {e}")
+
     # 启动预热向量解析/字段检索（2026-05-03：暂时关闭强制预热以加快启动速度）
     warmup_enabled = os.getenv("AI_STRATEGY_WARMUP", "false").strip().lower() not in ("0", "false", "no", "off")
     if warmup_enabled:

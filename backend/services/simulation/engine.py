@@ -434,6 +434,10 @@ class SimulationEngine:
                 orders = self._apply_risk_buy_locks(
                     orders, tenant=tenant, user_id=uid, trade_date=datetime.now().date()
                 )
+                # T-P6-12：新闻风险 veto（策略配置 risk.veto.news_event=true 时生效；留痕）
+                orders = await self._apply_news_veto(
+                    orders, tenant=tenant, user_id=uid, strategy_id=strategy_id
+                )
                 orders = exit_orders + orders
                 report.order_count = len(orders)
 
@@ -877,6 +881,56 @@ class SimulationEngine:
             return kept
         except Exception as exc:
             logger.warning("SimulationEngine: 读取风控禁买锁失败: %s", exc)
+            return orders
+
+    async def _apply_news_veto(
+        self,
+        orders: list[Order],
+        *,
+        tenant: str,
+        user_id: str,
+        strategy_id: str,
+    ) -> list[Order]:
+        """新闻风险 veto（T-P6-12）：策略开启 ``risk.veto.news_event`` 时拦截当日被风险
+        新闻命中的**买单**，并写 risk_events 留痕（rule_type=news_event_veto）。
+
+        保守口径：策略未开启 / veto 集合为空 / 读取失败 → 一律放行（只记日志）。
+        """
+        if not orders:
+            return orders
+        try:
+            from backend.services.live_trading.services import news_veto
+
+            enabled = await asyncio.to_thread(
+                news_veto.strategy_news_veto_enabled, strategy_id
+            )
+            if not enabled:
+                return orders
+            vetoes = await asyncio.to_thread(news_veto.load_news_vetoes, self.redis)
+            if not vetoes:
+                return orders
+            kept, dropped = news_veto.filter_news_veto_buys(orders, vetoes)
+            if dropped:
+                symbols = sorted({str(getattr(o, "symbol", "") or "") for o in dropped})
+                logger.info(
+                    "SimulationEngine: 新闻veto过滤 tenant=%s user=%s strategy=%s dropped=%d symbols=%s",
+                    tenant,
+                    user_id,
+                    strategy_id,
+                    len(dropped),
+                    symbols[:8],
+                )
+                await asyncio.to_thread(
+                    news_veto.audit_veto_drop,
+                    tenant_id=tenant,
+                    user_id=user_id,
+                    trade_date=None,
+                    symbols=symbols,
+                    message="news_event_veto",
+                )
+            return kept
+        except Exception as exc:  # noqa: BLE001 - 过滤失败绝不阻断交易主链（保守放行）
+            logger.warning("SimulationEngine: 新闻veto过滤失败（放行）: %s", exc)
             return orders
 
     async def _execute_order(
