@@ -113,7 +113,9 @@ async def collect_day_pairs(date_str: str, *, tenant_id: str | None = None) -> d
         "SELECT t.order_id::text AS order_id, t.symbol, t.side::text AS side, "
         "t.price AS fill_price, t.quantity AS filled_quantity, t.total_fee, "
         "t.user_id::text AS user_id, o.client_order_id, o.remarks, "
-        "o.status::text AS status "
+        "o.status::text AS status, "
+        # F2（T-P6-19）：模拟侧取价来源/执行核（daily=synthetic_price / F2=snapshot_core）
+        "o.execution_model, o.price AS order_price, t.price_source "
         "FROM sim_trades t LEFT JOIN sim_orders o ON o.order_id = t.order_id "
         "WHERE t.executed_at >= :s AND t.executed_at < :e"
     )

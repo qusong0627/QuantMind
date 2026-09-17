@@ -49,6 +49,7 @@ SOURCE_CO_PILOT = "co_pilot"  # 副驾驶建议卡一键执行（T-P6-16）
 
 # Fill 取价来源（REAL 侧：成交回报来自券商）
 PRICE_SOURCE_BROKER_FILL = "broker_fill"
+PRICE_SOURCE_SNAPSHOT = "snapshot"  # F2 快照级撮合取价（T-P6-17）
 
 # 幂等键长度上限（与 VARCHAR(100) 对齐）
 MAX_CLIENT_ORDER_ID_LEN = 100

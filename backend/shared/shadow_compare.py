@@ -122,6 +122,9 @@ def pair_orders(
                 "real_commission": float(real.get("commission") or 0.0),
                 "real_remarks": str(real.get("remarks") or ""),
                 "price_source": str(real.get("price_source") or ""),
+                # F2（T-P6-19）：模拟侧取价来源/执行核（daily=synthetic_price / F2=snapshot_core）
+                "sim_price_source": str(sim.get("price_source") or ""),
+                "sim_execution_model": str(sim.get("execution_model") or ""),
                 "symbol_mismatch": symbol_mismatch or side_mismatch,
             }
         )
@@ -323,6 +326,37 @@ def compute_tracking_error(
     return result
 
 
+def build_f2_report(pairs: list[dict[str, Any]], *, configured_bps: float) -> dict[str, Any]:
+    """F2 维度（T-P6-19）：仅对快照级（snapshot_core）模拟单算同口径三指标。
+
+    无 F2 单 → 如实 ``sufficient=False``（不把 F1 数据冒充 F2）。
+    """
+    f2_pairs = [
+        p for p in pairs
+        if str(p.get("sim_execution_model") or "") == "snapshot_core"
+        or str(p.get("sim_price_source") or "") == "snapshot"
+    ]
+    if not f2_pairs:
+        return {
+            "sufficient": False,
+            "reason": "当日无 F2（快照级）模拟单（exec_core=snapshot 未启用或盘口不可用）",
+            "paired": 0,
+        }
+    return {
+        "sufficient": True,
+        "paired": len(f2_pairs),
+        "price_deviation": compute_price_deviation(f2_pairs),
+        "fill": compute_fill_stats(f2_pairs),
+        "slippage": compute_slippage_realization(f2_pairs, configured_bps),
+        "partial_fill_diff": {
+            "sim_partial": sum(1 for p in f2_pairs if float(p.get("sim_quantity") or 0) < float(p.get("real_quantity") or 0)),
+            "real_partial": sum(1 for p in f2_pairs if float(p.get("real_quantity") or 0) < float(p.get("sim_quantity") or 0)),
+            "paired": len(f2_pairs),
+        },
+        "source": "shared/shadow_compare.build_f2_report（T-P6-19）",
+    }
+
+
 def build_shadow_report(
     *,
     date_str: str,
@@ -350,6 +384,8 @@ def build_shadow_report(
         "tracking_error": tracking
         if tracking is not None
         else {"sufficient": False, "reason": "未提供跟踪误差输入（模拟/实盘日度净值）"},
+        # F2 维度（T-P6-19）：快照级模拟单 vs 实盘同单（价格/成交/部分成交差异）
+        "f2": build_f2_report(pairs, configured_bps=configured_bps),
         "ok": mismatch == 0,
         "source": "shared/shadow_compare.py（T-P2-06 影子对照唯一实现）",
     }

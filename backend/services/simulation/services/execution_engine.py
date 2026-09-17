@@ -964,8 +964,59 @@ return tostring(granted)
                 success=False, message=f"Unsupported order type: {order.order_type}"
             )
 
+        # ── F2 快照级撮合（T-P6-17，exec_core=snapshot）：盘口新鲜且完整时以盘口深度为准；
+        #    不可用（缺失/陈旧/封板排队）自动回退日频核（回退计数可见，绝不静默）。
+        book_capacity: float | None = None
+        try:
+            from backend.services.simulation.services.exec_core import (
+                MODE_DAILY,
+                MODE_SNAPSHOT,
+                resolve_exec_core,
+                try_snapshot_fill,
+            )
+
+            if not after_hours_fixed and resolve_exec_core() == MODE_SNAPSHOT:
+                from backend.services.simulation.services.market_rules import (
+                    lot_size_for_symbol,
+                )
+
+                lot = int(lot_size_for_symbol(order.symbol, rules.market))
+                fill_plan, _book = try_snapshot_fill(
+                    symbol=order.symbol,
+                    side=side,
+                    quantity=requested_qty,
+                    order_type=str(getattr(order.order_type, "value", order.order_type)).lower(),
+                    limit_price=order.price,
+                    lot_size=lot,
+                )
+                if fill_plan is not None:
+                    exec_price = float(fill_plan.fill_price)
+                    price_source = "snapshot"
+                    book_capacity = float(fill_plan.fill_qty)
+                    logger.info(
+                        "[RULE:F2-SNAPSHOT] %s %s 盘口撮合 价 %.2f 量 %.0f/%.0f（穿 %d 档%s）",
+                        order.symbol, side, exec_price, fill_plan.fill_qty, requested_qty,
+                        fill_plan.levels_consumed,
+                        ("；" + ",".join(fill_plan.notes)) if fill_plan.notes else "",
+                    )
+        except Exception as exc:  # noqa: BLE001 - 快照核失败一律回退日频核（不阻断交易主链）
+            logger.warning("[RULE:F2-SNAPSHOT] 快照核异常，回退日频核: %s", exc)
+
         fill_quantity = requested_qty
-        if snapshot.recent_volume is not None:
+        if book_capacity is not None:
+            # 盘口深度=容量基数；_reserve_liquidity 仍作**跨单防重复消耗**账本（同窗口约束）
+            fill_quantity = self._reserve_liquidity(
+                symbol=order.symbol,
+                requested=requested_qty,
+                capacity=book_capacity,
+                quote_timestamp=snapshot.quote_timestamp,
+            )
+            if fill_quantity <= 0:
+                return ExecutionResult(
+                    success=False,
+                    message="insufficient_realtime_liquidity",
+                )
+        elif snapshot.recent_volume is not None:
             import os
 
             try:
@@ -1141,7 +1192,9 @@ return tostring(granted)
         order.total_fee = float(order.total_fee or 0.0) + total_fee
         # 委托金额以实际成交金额为准（市价单无委托价，此前 quantity*(price or 0)=0 失真）
         order.order_value = trade_value
-        order.execution_model = "synthetic_price"
+        order.execution_model = (
+            "snapshot_core" if result.price_source == "snapshot" else "synthetic_price"
+        )
         order.price_source = result.price_source
         audit = (
             f"quote_ts={result.quote_timestamp or 'unknown'} "

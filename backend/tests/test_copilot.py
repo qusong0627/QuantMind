@@ -17,6 +17,24 @@ import pytest
 _CST = timezone(timedelta(hours=8))
 
 
+async def _ensure_fresh_db_pool() -> None:
+    """批跑防坑：前序测试的 asyncio.run 会把 asyncpg 连接绑死在已关闭的 loop 上——
+    刷新池（与 test_hot_set_builder._ensure_db_pool 同范式）。"""
+    from sqlalchemy import text as _t
+
+    from backend.shared.database_manager_v2 import close_database, get_session
+
+    try:
+        async with get_session(read_only=True) as probe:
+            await probe.execute(_t("SELECT 1"))
+        return
+    except Exception:  # noqa: BLE001
+        await close_database()
+    async with get_session(read_only=True) as probe:
+        await probe.execute(_t("SELECT 1"))
+
+
+
 @pytest.mark.unit
 def test_validate_actions_rules():
     from backend.services.api.routers.copilot import AdviceAction, validate_actions
@@ -54,6 +72,7 @@ def test_copilot_client_order_id_stable_and_scoped():
 
 @pytest.mark.integration
 def test_advice_execute_via_router_with_audit_and_cleanup():
+    import asyncio as _asyncio_early  # noqa: F401
     from sqlalchemy import text as sql_text
 
     from backend.services.api.routers.copilot import (
@@ -78,6 +97,7 @@ def test_advice_execute_via_router_with_audit_and_cleanup():
 
     async def _flow():
         """单一事件循环内跑完整链路（asyncpg 池绑定 loop，跨 asyncio.run 会炸）。"""
+        await _ensure_fresh_db_pool()
         out: dict = {}
         # ① 创建建议卡（900 股 600036.SH 买入——金额小、可控）
         payload = AdviceCreate(

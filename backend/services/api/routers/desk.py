@@ -225,6 +225,101 @@ async def _collect_execution(tenant_id: str, sim_uid: int, raw_user: str) -> dic
     }
 
 
+async def _collect_fidelity(tenant_id: str, sim_uid: int) -> dict[str, Any]:
+    """F2 保真度（T-P6-18）：当日模拟委托 → 成交率/部分成交/成交价偏差/滑点实现/执行核分布。
+
+    参考价 = 当日真实收盘（QuantDB 前复权，与影子对照同源口径）；口径随块返回（caliber）。
+    """
+    import asyncio
+
+    from sqlalchemy import text as sa_text
+
+    from backend.shared.fill_quality import fidelity_metrics
+
+    source = "db:sim_orders ≈ QuantDB(qdb_daily_forward.close) + shared/fill_quality.py"
+    try:
+        async with get_session(read_only=True) as session:
+            rows = (
+                await session.execute(
+                    sa_text(
+                        "SELECT symbol, side::text AS side, quantity, filled_quantity, status::text AS status, "
+                        "       average_price, execution_model, price_source "
+                        "FROM sim_orders WHERE tenant_id = :t AND user_id = :u "
+                        "AND created_at >= date_trunc('day', now()) "
+                        "ORDER BY created_at DESC LIMIT 500"
+                    ),
+                    {"t": tenant_id, "u": sim_uid},
+                )
+            ).all()
+    except Exception as exc:  # noqa: BLE001
+        return {"available": False, "reason": f"委托读取失败: {exc}"[:200], "source": source}
+
+    symbols = sorted({str(r.symbol) for r in rows if r.symbol})
+    refs: dict[str, float] = {}
+    if symbols:
+        def _load_closes() -> dict[str, float]:
+            from backend.services.engine.data_platform.quantdb_hub import QuantDBDataHub
+            from backend.shared.stock_utils import StockCodeUtil
+
+            out: dict[str, float] = {}
+            df = QuantDBDataHub.get_instance().fetch_latest_rows(
+                "qdb_daily_forward", [StockCodeUtil.to_suffix(s) or s for s in symbols][:400],
+                columns=["close"],
+            )
+            if df is not None and not df.empty:
+                for _, row in df.iterrows():
+                    out[str(row.get("symbol"))] = float(row.get("close") or 0)
+            return out
+
+        try:
+            refs = await asyncio.to_thread(_load_closes)
+        except Exception:  # noqa: BLE001 - 参考价缺失如实计 missing_ref
+            refs = {}
+
+    try:
+        from backend.services.trade_shared.trade_config import settings as _settings
+
+        configured_bps = float(_settings.SIMULATION_SLIPPAGE_BPS)
+    except Exception:  # noqa: BLE001
+        configured_bps = None
+
+    def _norm_symbol(raw: str) -> str:
+        from backend.shared.stock_utils import StockCodeUtil
+
+        return StockCodeUtil.to_suffix(str(raw or "").strip()) or str(raw or "")
+
+    metrics = fidelity_metrics(
+        [
+            {
+                "symbol": _norm_symbol(str(r.symbol)),
+                "side": str(r.side),
+                "quantity": float(r.quantity or 0),
+                "filled_quantity": float(r.filled_quantity or 0),
+                "fill_price": float(r.average_price or 0) or None,
+                "status": str(r.status),
+                "execution_model": str(r.execution_model or "unknown"),
+                "price_source": str(r.price_source or ""),
+            }
+            for r in rows
+        ],
+        reference_prices={_norm_symbol(k): v for k, v in refs.items()},
+        configured_slippage_bps=configured_bps,
+    )
+    # 执行核切换现值 + 快照核运行计数（降级可见）
+    try:
+        from backend.services.simulation.services.exec_core import (
+            resolve_exec_core,
+            snapshot_core_stats,
+        )
+
+        metrics["exec_core_mode"] = resolve_exec_core()
+        metrics["snapshot_core_stats"] = snapshot_core_stats()
+    except Exception:  # noqa: BLE001
+        metrics["exec_core_mode"] = None
+    metrics.update({"available": True, "source": source})
+    return metrics
+
+
 async def _collect_pnl(tenant_id: str, sim_user_id: str) -> dict[str, Any]:
     async with get_session(read_only=True) as session:
         from sqlalchemy import text as sa_text
@@ -831,7 +926,7 @@ async def desk_today(
     sim_uid = require_sim_user_id(raw_user, tenant_id=tenant_id)
 
     health_items = await _run_health() if health else {}
-    signals, execution, pnl, shadow, plan_block = await asyncio.gather(
+    signals, execution, pnl, shadow, plan_block, fidelity = await asyncio.gather(
         _collect_signals(tenant_id),
         _collect_execution(tenant_id, int(sim_uid), raw_user),
         _collect_pnl(tenant_id, str(sim_uid)),
@@ -839,6 +934,7 @@ async def desk_today(
         _collect_plan(tenant_id, raw_user, parse_exclude_symbols(exclude))
         if plan
         else _async_unavailable("调仓计划预演已跳过（?plan=false）"),
+        _collect_fidelity(tenant_id, int(sim_uid)),
     )
     health_summary = {
         "ok": sum(1 for i in health_items.values() if i.get("level") == "ok"),
@@ -860,6 +956,7 @@ async def desk_today(
             "execution": execution,
             "pnl": pnl,
             "shadow": shadow,
+            "fidelity": fidelity,
             "health": health_summary,
             "evidence": await _collect_evidence(
                 health_items=health_items,

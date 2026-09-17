@@ -19,6 +19,23 @@ pytestmark = pytest.mark.integration
 _CST = timezone(timedelta(hours=8))
 
 
+async def _ensure_fresh_db_pool() -> None:
+    """批跑防坑：前序测试的 asyncio.run 会把 asyncpg 连接绑死在已关闭的 loop 上——
+    刷新池（与 test_hot_set_builder._ensure_db_pool 同范式）。"""
+    from sqlalchemy import text as _t
+
+    from backend.shared.database_manager_v2 import close_database, get_session
+
+    try:
+        async with get_session(read_only=True) as probe:
+            await probe.execute(_t("SELECT 1"))
+        return
+    except Exception:  # noqa: BLE001
+        await close_database()
+    async with get_session(read_only=True) as probe:
+        await probe.execute(_t("SELECT 1"))
+
+
 def _redis(db: int = 0):
     import os
 
@@ -152,6 +169,7 @@ def test_sentinel_alert_backfill_report_annotation_cycle(monkeypatch):
         created_alert_ids.append(str(target_id))
 
         async def _report_flow():
+            await _ensure_fresh_db_pool()
             r1 = await sentinel_report(days=30, current_user={"user_id": "10000001"})
             a = await annotate_alert(
                 alert_id=str(target_id),
