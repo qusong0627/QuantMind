@@ -10,6 +10,7 @@ import {
   saveRiskProfile,
 } from './riskProfile';
 import { recordComplianceEvent } from './complianceLog';
+import { useIsMobile } from '../../../hooks/useIsMobile';
 
 interface RiskProfileModalProps {
   open: boolean;
@@ -21,6 +22,8 @@ export const RiskProfileModal: React.FC<RiskProfileModalProps> = ({ open, onDone
   const [answers, setAnswers] = useState<Array<number | null>>(
     RISK_QUESTIONS.map(() => null)
   );
+  // 手机屏放不下整份问卷：正文限高可滚，底部按钮恒在屏内可点（否则首个弹窗关不掉、全站进不去）
+  const isMobile = useIsMobile();
   const answeredAll = answers.every((a) => a !== null);
 
   const submit = () => {
@@ -46,7 +49,9 @@ export const RiskProfileModal: React.FC<RiskProfileModalProps> = ({ open, onDone
       okButtonProps={{ disabled: !answeredAll }}
       onOk={submit}
       onCancel={skip}
-      width={560}
+      width={isMobile ? '94vw' : 560}
+      centered={isMobile}
+      styles={{ body: { maxHeight: isMobile ? '58vh' : undefined, overflowY: isMobile ? 'auto' : undefined } }}
       destroyOnHidden
     >
       <div className="space-y-3 text-xs text-slate-600">

@@ -12,11 +12,13 @@
 
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import { useDebounce } from '../../../hooks/useDebounce';
+import { useIsMobile } from '../../../hooks/useIsMobile';
 import { SERVICE_ENDPOINTS } from '../../../config/services';
 import {
   Badge,
   Button,
   DatePicker,
+  Drawer,
   Empty,
   Input,
   List,
@@ -36,6 +38,7 @@ import {
 } from 'antd';
 import {
   ArrowDownOutlined,
+  ArrowLeftOutlined,
   ArrowUpOutlined,
   BellOutlined,
   DeleteOutlined,
@@ -53,6 +56,7 @@ import {
   StarOutlined,
   SyncOutlined,
   ThunderboltOutlined,
+  UnorderedListOutlined,
   ClearOutlined,
   ClockCircleOutlined,
 } from '@ant-design/icons';
@@ -259,6 +263,12 @@ export const NewsPanel: React.FC = () => {
   const dragRef = useRef<{ side: 'left' | 'right'; startX: number; startLeft: number; startMid: number } | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const pollTimer = useRef<number | null>(null);
+
+  // —— 移动端（≤767px）：三栏塌缩为「列表 ⇄ 正文」单栏，订阅源树改抽屉，筛选区折叠 ——
+  const isMobile = useIsMobile();
+  const [mobileSourcesOpen, setMobileSourcesOpen] = useState(false);
+  const [mobileDetailOpen, setMobileDetailOpen] = useState(false);
+  const [mobileFiltersOpen, setMobileFiltersOpen] = useState(false);
 
   // —— data fetching ——
   const checkHealth = useCallback(async () => {
@@ -720,6 +730,28 @@ export const NewsPanel: React.FC = () => {
     );
   };
 
+  // —— 订阅源树（桌面左栏与移动端抽屉共用同一份渲染） ——
+  const renderSourceTree = () => (
+    sources.length === 0 ? (
+      <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={<span style={{ fontSize: 12 }}>无订阅源</span>} style={{ marginTop: 60 }} />
+    ) : (
+      <Tree
+        checkable
+        blockNode
+        treeData={treeData}
+        checkedKeys={checkedKeys}
+        expandedKeys={expandedKeys}
+        onExpand={(keys) => setExpandedKeys(keys)}
+        onCheck={(checked) => {
+          const keys = (checked as React.Key[]).filter((k) => String(k).startsWith('source-'));
+          const ids = keys.map((k) => Number(String(k).replace('source-', ''))).filter((n) => !Number.isNaN(n));
+          updateF({ selectedSourceIds: ids });
+        }}
+        style={{ background: 'transparent', fontSize: 13 }}
+      />
+    )
+  );
+
   // —— render ——
   return (
     <div className="news-panel">
@@ -734,13 +766,23 @@ export const NewsPanel: React.FC = () => {
               </div>
               <Title level={5} style={{ margin: 0, fontSize: 16, fontWeight: 700, whiteSpace: 'nowrap' }}>RSS信息流</Title>
               <Tag color={health?.huntly_status === 'up' ? 'green' : 'red'} style={{ margin: 0 }}>{health?.huntly_status === 'up' ? '已连接' : '未连接'}</Tag>
-              <Tooltip title={latestPublishedAt ? `最新发布于 ${new Date(latestPublishedAt).toLocaleString('zh-CN')}` : '暂无'}>
-                <Tag icon={<SyncOutlined spin={loading} />} color="processing" style={{ margin: 0 }}>最新：{formatRelative(latestPublishedAt)}</Tag>
-              </Tooltip>
+              {!isMobile && (
+                <Tooltip title={latestPublishedAt ? `最新发布于 ${new Date(latestPublishedAt).toLocaleString('zh-CN')}` : '暂无'}>
+                  <Tag icon={<SyncOutlined spin={loading} />} color="processing" style={{ margin: 0 }}>最新：{formatRelative(latestPublishedAt)}</Tag>
+                </Tooltip>
+              )}
               <Badge count={totalUnread} overflowCount={9999} style={{ backgroundColor: '#6366f1' }} className="news-toolbar-badge" />
+              {isMobile && (
+                <Button size="small" icon={<UnorderedListOutlined />} onClick={() => setMobileSourcesOpen(true)}>
+                  订阅源{f.selectedSourceIds.length > 0 ? `(${f.selectedSourceIds.length})` : ''}
+                </Button>
+              )}
             </div>
-            {/* Row 1 中段：高频紧凑筛选（自第二行上移） */}
+            {/* Row 1 中段：高频紧凑筛选（自第二行上移）；移动端收进可折叠的「筛选」面板 */}
             <div className="news-toolbar-mid">
+              <div className={`news-toolbar-filters${mobileFiltersOpen ? ' is-open' : ''}`}>
+              {/* 移动端未展开时只留「搜索框 + 筛选/分类」两个控件，其余筛选收起 */}
+              {(!isMobile || mobileFiltersOpen) && (<>
               <Segmented
                 size="small"
                 value={f.feedMode}
@@ -766,15 +808,30 @@ export const NewsPanel: React.FC = () => {
                 <Button size="small" type={f.strongOnly ? 'primary' : 'default'} danger={f.strongOnly}
                   icon={<FireOutlined />} onClick={() => updateF({ strongOnly: !f.strongOnly })}>强信号</Button>
               </Tooltip>
+              </>)}
               <Input
                 allowClear
                 size="small"
+                className="news-toolbar-search"
                 prefix={<SearchOutlined style={{ color: '#94a3b8' }} />}
                 placeholder="搜索标题/内容/股票/标签..."
                 value={f.keyword}
                 onChange={(e) => updateF({ keyword: e.target.value })}
                 style={{ flex: '1 1 170px', minWidth: 150, maxWidth: 240 }}
               />
+              {isMobile && (
+                <Button
+                  size="small"
+                  className="news-toolbar-filter-toggle"
+                  icon={<FilterOutlined />}
+                  type={mobileFiltersOpen || activeFilterCount > 0 ? 'primary' : 'default'}
+                  ghost={mobileFiltersOpen || activeFilterCount > 0}
+                  onClick={() => setMobileFiltersOpen(!mobileFiltersOpen)}
+                >
+                  筛选/分类{mobileFiltersOpen ? ' ▴' : ' ▾'}
+                </Button>
+              )}
+              {(!isMobile || mobileFiltersOpen) && (<>
               <Segmented
                 size="small"
                 value={f.datePreset}
@@ -816,6 +873,8 @@ export const NewsPanel: React.FC = () => {
                   筛选{activeFilterCount > 0 ? `(${activeFilterCount})` : ''}
                 </Button>
               </Tooltip>
+              </>)}
+              </div>
             </div>
             <div className="news-toolbar-actions">
               <Tooltip title="立即刷新">
@@ -832,7 +891,7 @@ export const NewsPanel: React.FC = () => {
               <Tooltip title="一键清理超过 24 小时的资讯（不可恢复）">
                 <Button size="small" danger icon={<DeleteOutlined />} loading={purging} onClick={handlePurgeOld}>清理</Button>
               </Tooltip>
-              {health?.huntly_base_url && (
+              {!isMobile && health?.huntly_base_url && (
                 <Tooltip title="Huntly 后台">
                   <a href={`${SERVICE_ENDPOINTS.USER_SERVICE}/news/huntly-ui/`} target="_blank" rel="noreferrer" style={{ fontSize: 12, color: '#6366f1', whiteSpace: 'nowrap' }}>
                     <LinkOutlined /> 后台
@@ -844,7 +903,7 @@ export const NewsPanel: React.FC = () => {
         </div>
 
       {/* ===== 分类导航：词典大类 + 全部高频事件标签（含文章数），点击按 event_tags 筛选 ===== */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 2, padding: '4px 16px', borderBottom: '1px solid rgba(226,232,240,0.8)', background: 'rgba(255,255,255,0.85)', flexWrap: 'wrap' }}>
+      <div className="news-category-row" style={{ display: isMobile && !mobileFiltersOpen ? 'none' : 'flex', alignItems: 'center', gap: 2, padding: '4px 16px', borderBottom: '1px solid rgba(226,232,240,0.8)', background: 'rgba(255,255,255,0.85)', flexWrap: 'wrap' }}>
         <Text type="secondary" style={{ fontSize: 12, marginRight: 6, whiteSpace: 'nowrap' }}>分类:</Text>
         {QUICK_EVENT_CHIPS.map((chip) => {
           const active = chip.value === '' ? f.selectedEventTags.length === 0 : f.selectedEventTags.includes(chip.value);
@@ -923,39 +982,27 @@ export const NewsPanel: React.FC = () => {
         </div>
       )}
 
-      {/* ===== Main 3-panel container card ===== */}
+      {/* ===== Main 3-panel container card（移动端塌缩为单栏：列表 ⇄ 正文） ===== */}
       <div ref={containerRef} className="news-content-card">
-        {/* Left: source tree */}
-        <div className="news-left-panel" style={{ flex: `0 0 ${leftWidth}%` }}>
-          {sources.length === 0 ? (
-            <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={<span style={{ fontSize: 12 }}>无订阅源</span>} style={{ marginTop: 60 }} />
-          ) : (
-            <Tree
-              checkable
-              blockNode
-              treeData={treeData}
-              checkedKeys={checkedKeys}
-              expandedKeys={expandedKeys}
-              onExpand={(keys) => setExpandedKeys(keys)}
-              onCheck={(checked) => {
-                const keys = (checked as React.Key[]).filter((k) => String(k).startsWith('source-'));
-                const ids = keys.map((k) => Number(String(k).replace('source-', ''))).filter((n) => !Number.isNaN(n));
-                updateF({ selectedSourceIds: ids });
-              }}
-              style={{ background: 'transparent', fontSize: 13 }}
-            />
-          )}
-        </div>
+        {/* Left: source tree（桌面左栏；移动端在抽屉里，见文件末尾） */}
+        {!isMobile && (
+          <>
+            <div className="news-left-panel" style={{ flex: `0 0 ${leftWidth}%` }}>
+              {renderSourceTree()}
+            </div>
 
-        {/* Drag handle L-M */}
-        <div className="news-drag-handle" onMouseDown={(e) => {
-          e.preventDefault();
-          dragRef.current = { side: 'left', startX: e.clientX, startLeft: leftWidth, startMid: midWidth };
-          document.body.style.cursor = 'col-resize'; document.body.style.userSelect = 'none';
-        }}><div className="news-drag-bar" /></div>
+            {/* Drag handle L-M */}
+            <div className="news-drag-handle" onMouseDown={(e) => {
+              e.preventDefault();
+              dragRef.current = { side: 'left', startX: e.clientX, startLeft: leftWidth, startMid: midWidth };
+              document.body.style.cursor = 'col-resize'; document.body.style.userSelect = 'none';
+            }}><div className="news-drag-bar" /></div>
+          </>
+        )}
 
-        {/* Center: article list */}
-        <div className="news-center-panel" style={{ flex: `0 0 ${midWidth}%` }}>
+        {/* Center: article list（移动端进入正文时让位） */}
+        {(!isMobile || !mobileDetailOpen) && (
+        <div className="news-center-panel" style={isMobile ? { flex: '1 1 auto' } : { flex: `0 0 ${midWidth}%` }}>
           {/* Sentiment stats bar */}
           {stats?.sentiment_counts && (() => {
             const total = (stats.sentiment_counts.bullish || 0) + (stats.sentiment_counts.bearish || 0) + (stats.sentiment_counts.neutral || 0);
@@ -990,7 +1037,7 @@ export const NewsPanel: React.FC = () => {
                   const active = selectedArticleId === a.id;
                   return (
                     <List.Item className={`news-article-item ${active ? 'news-article-active' : ''} ${a.read ? 'news-article-read' : ''}`}
-                      onClick={() => setSelectedArticleId(a.id)}>
+                      onClick={() => { setSelectedArticleId(a.id); if (isMobile) setMobileDetailOpen(true); }}>
                       <div style={{ width: '100%' }}>
                         <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
                           <Avatar src={a.thumbnail} size={28} style={{ flexShrink: 0, marginTop: 2 }}>{(a.source_name || '?')[0]}</Avatar>
@@ -1048,7 +1095,8 @@ export const NewsPanel: React.FC = () => {
               </div>
               <div className="news-pagination-bar news-pagination-bar--centered">
                 <Pagination size="small" current={currentPage} pageSize={pageSize} total={totalArticles}
-                  showSizeChanger showQuickJumper showLessItems
+                  simple={isMobile}
+                  showSizeChanger={!isMobile} showQuickJumper={!isMobile} showLessItems
                   pageSizeOptions={['20', '50', '100', '200']}
                   onChange={(page, size) => { setCurrentPage(page); setPageSize(size); }}
                   onShowSizeChange={(_current, size) => { setCurrentPage(1); setPageSize(size); }} />
@@ -1056,16 +1104,25 @@ export const NewsPanel: React.FC = () => {
             </>
           )}
         </div>
+        )}
 
-        {/* Drag handle M-R */}
-        <div className="news-drag-handle" onMouseDown={(e) => {
-          e.preventDefault();
-          dragRef.current = { side: 'right', startX: e.clientX, startLeft: leftWidth, startMid: midWidth };
-          document.body.style.cursor = 'col-resize'; document.body.style.userSelect = 'none';
-        }}><div className="news-drag-bar" /></div>
+        {/* Drag handle M-R（桌面） */}
+        {!isMobile && (
+          <div className="news-drag-handle" onMouseDown={(e) => {
+            e.preventDefault();
+            dragRef.current = { side: 'right', startX: e.clientX, startLeft: leftWidth, startMid: midWidth };
+            document.body.style.cursor = 'col-resize'; document.body.style.userSelect = 'none';
+          }}><div className="news-drag-bar" /></div>
+        )}
 
-        {/* Right: article detail */}
+        {/* Right: article detail（桌面常显；移动端仅正文态） */}
+        {(!isMobile || mobileDetailOpen) && (
         <div className="news-right-panel">
+          {isMobile && (
+            <Button icon={<ArrowLeftOutlined />} onClick={() => setMobileDetailOpen(false)} style={{ marginBottom: 12 }}>
+              返回列表
+            </Button>
+          )}
           {detailLoading ? (
             <div style={{ padding: 80, textAlign: 'center' }}><Spin /></div>
           ) : !articleDetail ? (
@@ -1170,7 +1227,22 @@ export const NewsPanel: React.FC = () => {
             </div>
           )}
         </div>
+        )}
       </div>
+
+      {/* 移动端：订阅源抽屉（桌面为左栏，见 news-content-card 内） */}
+      {isMobile && (
+        <Drawer
+          title="订阅源"
+          placement="left"
+          open={mobileSourcesOpen}
+          onClose={() => setMobileSourcesOpen(false)}
+          width="86vw"
+          styles={{ body: { padding: '10px 8px 48px' } }}
+        >
+          {renderSourceTree()}
+        </Drawer>
+      )}
     </div>
   </div>
   );

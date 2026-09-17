@@ -116,6 +116,12 @@
   flex-shrink: 0;
 }
 
+/* 中段筛选组：桌面用 display:contents 让子项直接参与 .news-toolbar-mid 的流式布局
+   （等于没有这一层）；移动端收成可折叠面板，见下方 media query */
+.news-toolbar-filters {
+  display: contents;
+}
+
 /* —— Main 3-panel container —— */
 .news-content-card {
   flex: 1;
@@ -128,6 +134,9 @@
 /* —— Left panel (source tree) —— */
 .news-left-panel {
   overflow-y: auto;
+  /* 窄栏（平板 768–834px 实测左栏仅 132px）时源名节点会横向溢出栏外，裁掉即可，
+     名称本身已有省略号 */
+  overflow-x: hidden;
   padding: 12px 10px 64px;
   background: #ffffff;
   border-right: 1px solid #e2e8f0;
@@ -138,6 +147,7 @@
   align-items: center;
   gap: 6px;
   width: 100%;
+  min-width: 0;
 }
 
 .news-tree-label {
@@ -262,3 +272,130 @@
     padding: 10px 14px;
   }
 }
+
+/* ===== Mobile（≤767px，与 useIsMobile 同口径）=====
+   三栏塌缩为单栏「列表 ⇄ 正文」：左栏（订阅源树）在 JSX 里移入 Drawer，
+   这里负责去边框/减内边距/放大触控目标。 */
+@media (max-width: 767px) {
+  .news-panel {
+    padding: 0;
+  }
+  .news-frame {
+    border-radius: 0;
+    border-left: 0;
+    border-right: 0;
+  }
+  .news-toolbar {
+    padding: 8px 10px;
+    gap: 8px;
+  }
+  .news-toolbar-left,
+  .news-toolbar-row {
+    gap: 8px;
+  }
+  /* 筛选区占满整行，输入框不再被挤成一条 */
+  .news-toolbar-mid {
+    width: 100%;
+    flex: 1 1 100%;
+    gap: 8px;
+  }
+  /* 手机屏高度有限：工具栏自身可滚动，别把列表挤没（实测 664px 屏曾被吃到 610px） */
+  .news-toolbar {
+    max-height: 46vh;
+    overflow-y: auto;
+  }
+  /* 筛选组：桌面/移动都是 display:contents（本层透明），移动端靠 order 把
+     「搜索 + 筛选/分类」排到第一行，展开的筛选控件排到其后 */
+  .news-toolbar-search {
+    order: 0;
+    flex: 1 1 160px !important;
+    min-width: 0 !important;
+    max-width: none !important;
+  }
+  .news-toolbar-filter-toggle {
+    order: 1;
+  }
+  .news-toolbar-filters.is-open > * {
+    order: 2;
+  }
+  .news-toolbar-filters.is-open > .news-toolbar-search {
+    order: 0;
+  }
+  .news-toolbar-filters.is-open > .news-toolbar-filter-toggle {
+    order: 1;
+  }
+  /* 操作按钮（刷新/重建/全量/清理）在手机上换行，不做横向滚动；
+     基础样式里的 flex-shrink:0 会把 4 个按钮顶出屏外（320px 实测右侧溢出 2px） */
+  .news-toolbar-actions {
+    margin-left: 0;
+    flex-wrap: wrap;
+    flex-shrink: 1;
+    min-width: 0;
+    width: 100%;
+    overflow-x: visible;
+  }
+  /* 搜索框清除按钮 / 分页翻页按钮：命中区补到 ≥32px */
+  .news-panel .ant-input-clear-icon {
+    padding: 8px;
+    font-size: 14px;
+  }
+  .news-panel .ant-pagination .ant-pagination-item-link,
+  .news-panel .ant-pagination .ant-pagination-prev,
+  .news-panel .ant-pagination .ant-pagination-next {
+    min-width: 32px;
+    min-height: 32px;
+  }
+  /* 触控目标放大到 ≥32px（桌面 small 只有 24px） */
+  .news-panel .ant-btn-sm {
+    min-height: 32px;
+    min-width: 32px;
+    padding: 0 10px;
+  }
+  .news-panel .ant-select-sm .ant-select-selector,
+  .news-panel .ant-segmented-item-label,
+  .news-panel .ant-picker-sm {
+    min-height: 32px;
+    line-height: 30px;
+  }
+  .news-panel .ant-segmented-item-label {
+    padding: 0 8px;
+  }
+  /* 可关闭筛选 Tag 的关闭图标在手机上加到 20px 命中区 */
+  .news-panel .ant-tag .ant-tag-close-icon {
+    font-size: 13px;
+    padding: 4px;
+    margin-left: 2px;
+  }
+  .news-advanced-panel {
+    padding: 10px 12px;
+  }
+  /* 默认 antd 高级筛选里的定宽控件（230px）在窄屏要能缩 */
+  .news-advanced-panel .ant-picker,
+  .news-advanced-panel .ant-select {
+    width: 100% !important;
+    max-width: 100%;
+  }
+  .news-advanced-panel > .news-advanced-row > div {
+    flex: 1 1 100%;
+    min-width: 0;
+  }
+  .news-active-chips {
+    padding: 6px 10px;
+  }
+  .news-article-item {
+    padding: 10px 10px !important;
+  }
+  .news-left-panel {
+    padding: 10px 8px 64px;
+  }
+  .news-right-panel {
+    padding: 12px 12px 96px;
+  }
+  .news-pagination-bar {
+    padding: 8px 10px 68px;
+  }
+  .news-detail-content {
+    font-size: 15px;
+  }
+}
+

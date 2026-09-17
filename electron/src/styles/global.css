@@ -785,6 +785,19 @@ html.platform-win32.os-win10 .module-grid-container {
   }
 }
 
+@media (max-width: 767px) {
+  /* 移动端 Dock：内容宽度超过屏宽时，center 对齐会把左端项裁到屏幕外
+     （实测 390px 宽下「RSS信息流」左边界 -57px，点不到），改为从左侧起排可左右滑动 */
+  .bottom-dock {
+    padding: 0 8px 6px;
+  }
+
+  .bottom-dock-inner {
+    justify-content: flex-start;
+    padding: 0 8px;
+  }
+}
+
 @media (max-width: 1080px) {
   .console-header-wrap {
     padding: 64px 16px 16px;
