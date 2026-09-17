@@ -11,10 +11,11 @@
 
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import { BookMarked, FileText } from 'lucide-react';
-import { Bot, RefreshCw, Wifi, WifiOff, ExternalLink, AlertTriangle } from 'lucide-react';
+import { Bot, RefreshCw, SquareTerminal, Wifi, WifiOff, ExternalLink, AlertTriangle } from 'lucide-react';
 import { isElectronEnv, SERVICE_URLS } from '../../../config/services';
 import PromptLibraryModal from '../components/PromptLibraryModal';
 import ReportsModal from '../components/ReportsModal';
+import AiIdeModal from '../components/AiIdeModal';
 import { PROMPT_LIBRARY_TOTAL } from '../components/promptLibraryModel';
 
 /** 无任何服务器配置时的兜底地址（dsh 容器宿主映射端口） */
@@ -49,9 +50,11 @@ const IFRAME_LOAD_TIMEOUT_MS = 15_000;
 const QuantBotPage: React.FC = () => {
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const [iframeKey, setIframeKey] = useState<number>(0);
-  // 提示词库（示例 34 条 + 模板 24 条，合并为一个弹窗）与调研报告档案，均为居中弹窗，不占 iframe 布局
+  // 提示词库（示例 34 条 + 模板 24 条，合并为一个弹窗）、调研报告档案、AI-IDE 策略台，
+  // 均为居中弹窗，不占 iframe 布局
   const [showPrompts, setShowPrompts] = useState(false);
   const [showReports, setShowReports] = useState(false);
+  const [showAiIde, setShowAiIde] = useState(false);
   const [loading, setLoading] = useState<boolean>(true);
   const [connected, setConnected] = useState<boolean>(false);
   const [timedOut, setTimedOut] = useState<boolean>(false);
@@ -157,6 +160,15 @@ const QuantBotPage: React.FC = () => {
             <FileText className="w-4 h-4 text-indigo-500" />
             调研报告
           </button>
+          <button
+            type="button"
+            onClick={() => setShowAiIde(true)}
+            className="inline-flex items-center gap-1.5 text-sm font-semibold text-slate-500 hover:text-blue-600 transition-colors"
+            title="AI-IDE：策略工作台（写策略 / 调试 / 一键回测），与 QuantBot 对话联动"
+          >
+            <SquareTerminal className="w-4 h-4 text-indigo-500" />
+            AI-IDE
+          </button>
           <span className="text-xs font-medium text-slate-400 bg-slate-100 px-2 py-1 rounded">AI 智能助理</span>
         </div>
 
@@ -258,6 +270,8 @@ const QuantBotPage: React.FC = () => {
       <PromptLibraryModal open={showPrompts} onClose={() => setShowPrompts(false)} />
       {/* 调研报告档案（md + PDF 自动归档，内嵌预览，居中弹窗） */}
       <ReportsModal open={showReports} onClose={() => setShowReports(false)} />
+      {/* AI-IDE 策略台（懒加载，居中弹窗） */}
+      <AiIdeModal open={showAiIde} onClose={() => setShowAiIde(false)} />
     </div>
   );
 };
