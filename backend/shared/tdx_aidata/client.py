@@ -106,9 +106,22 @@ class TdxAiDataClient:
         try:
             if lock_file is not None:
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-            # 双检：锁内再连一次（其他服务可能刚拉起）
+            # 双检：锁内再探——**必须验“活着”而非仅文件存在**。进程被 SIGKILL 后
+            # socket 文件会残留，旧实现见文件即认为已拉起 → 按需拉起永久跳过 →
+            # 全片静默且无任何错误（2026-09-17 盘中受外部重启波及的次生故障）。
             if os.path.exists(self.socket_path):
-                return True
+                import socket as _socket
+
+                try:
+                    with _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM) as probe:
+                        probe.settimeout(0.5)
+                        probe.connect(self.socket_path)
+                    return True  # 真有监听者
+                except OSError:
+                    try:
+                        os.unlink(self.socket_path)  # 残留文件：清理后走拉起
+                    except OSError:
+                        pass
             log_dir = Path(_PROJECT_ROOT) / "logs"
             log_dir.mkdir(exist_ok=True)
             log_file = open(log_dir / "tdx_aidata_worker.log", "ab")

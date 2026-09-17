@@ -188,6 +188,22 @@ class AidataWorker:
             decode_responses=True,
         )
 
+    def _sdk_subscribe(self, codes: list[str], cb) -> None:
+        """订阅（**先重置 tqs 累积账本**——引擎语义为全量替换）。
+
+        2026-09-17 盘中事故根因：``tqs.subscribe`` 内部把历史代码并集（``_sub_codes``）
+        每次重发。热集漂移使该并集单调膨胀，某次重订阅并集越过 SDK 单批 100 上限 →
+        **整批拒绝（错误码 2 仅打印不抛）→ 全片静默**；引擎的原生 unsub 不清 tqs 账本，
+        重订阅无法自愈。本包装每次先清账本再订阅，与「unsub-all + sub-new」语义等价。
+        """
+        try:
+            with self.tqs._sub_lock:
+                self.tqs._sub_codes.clear()
+                self.tqs._sub_callbacks.clear()
+        except Exception:  # noqa: BLE001 - SDK 内部结构变化时尽力而为
+            pass
+        self.tqs.subscribe(stock_list=codes, callback=cb)
+
     def _start_subscription(self) -> None:
         from backend.shared.tdx_aidata import config as _cfg
         from backend.shared.tdx_aidata.collector import SubscriptionEngine
@@ -227,9 +243,7 @@ class AidataWorker:
         self.latency = latency
 
         engine = SubscriptionEngine(
-            sdk_subscribe=lambda codes, cb: self.tqs.subscribe(
-                stock_list=codes, callback=cb
-            ),
+            sdk_subscribe=self._sdk_subscribe,
             sdk_unsubscribe=lambda: self.tqs._tdx().unsubscribe(),
             budget_gate=self.gate,
             redis_factory=self._redis_factory,

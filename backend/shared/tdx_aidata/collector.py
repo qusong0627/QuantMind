@@ -257,6 +257,7 @@ class SubscriptionEngine:
             "parse_errors": 0,
             "redis_errors": 0,
             "resubscribes": 0,
+            "resubscribe_deferred_gap": 0,  # 热集差分因最小间隔推迟（下轮收敛）
             "set_syncs": 0,
             "hot_set_size": 0,  # 全量热集规模（分片前）
             "over_cap": False,  # 本片超 SDK 上限被截断（显式降级，绝不静默）
@@ -391,20 +392,22 @@ class SubscriptionEngine:
                     pass
 
     def resubscribe(self, symbols: set[str]) -> bool:
-        """native 全量替换：unsub-all + sub-new（受预算闸门约束；失败可重试）。"""
-        wait_s = self._gate.check()
-        if wait_s is not None:
-            self.counters["last_error"] = f"resubscribe deferred: 配额冷却 {wait_s}s"
-            return False
+        """native 全量替换：unsub-all + sub-new。
+
+        **不占请求预算（2026-09-17 盘中事故修正）**：订阅通道实测**零请求配额**
+        （T-P6-01 探针：订阅期间请求仍受限流但订阅本身不耗窗口；盘中多分片反复重订
+        亦无 Token Insufficient）。旧版把订阅计入「3 次/窗口」请求闸门——热集每 60s
+        漂移时预算瞬耗 → 重订被 defer 饿死 → 全片静默（叠加 tqs 累积 bug 后无法自愈）。
+        订阅节流改由两道自有约束：热集差分最小间隔（sync_hot_set_once）+ 静默重订
+        最小间隔（resubscribe_min_gap_s，run 循环）。
+        """
         try:
             if self._current:
-                self._gate.consume()
                 try:
                     self._sdk_unsubscribe()
                 except Exception:  # noqa: BLE001 - 空集/首订时 unsub 报错容忍
                     pass
             if symbols:
-                self._gate.consume()
                 self._sdk_subscribe(sorted(symbols), self.on_push)
         except Exception as exc:  # noqa: BLE001
             code, msg = protocol.map_sdk_error(exc)
@@ -444,6 +447,11 @@ class SubscriptionEngine:
         to_add, to_remove = hot_set_diff(self._current, desired, cap=SDK_SUBSCRIBE_MAX)
         if not to_add and not to_remove:
             return {"changed": False, "current": len(self._current)}
+        # 热集差分重订最小间隔（防 churn 抖动；订阅不占请求预算后的自有节流，见 resubscribe）
+        now = time.time()
+        if self._last_resubscribe_ts and now - self._last_resubscribe_ts < self.resubscribe_min_gap_s:
+            self.counters["resubscribe_deferred_gap"] += 1
+            return {"changed": False, "reason": "min_gap", "current": len(self._current)}
         ok = self.resubscribe(desired)
         return {
             "changed": ok,

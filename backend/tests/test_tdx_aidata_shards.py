@@ -367,3 +367,142 @@ async def test_two_shard_cluster_e2e():
                 os.unlink(path)
             except OSError:
                 pass
+
+
+# ── 7. 回归：tqs 累积账本必须每订先清（2026-09-17 盘中静默事故）─────────
+
+
+@pytest.mark.unit
+def test_sdk_subscribe_resets_tqs_accumulator():
+    """tqs.subscribe 内部会重发历史并集——worker 包装必须每次先清账本，
+    否则并集单调膨胀越过 SDK 单批 100 上限 → 整批拒绝 → 全片静默（事故实锤）。"""
+    import threading
+
+    from backend.shared.tdx_aidata.worker import AidataWorker
+
+    class _FakeTqs:
+        _sub_codes: list = []
+        _sub_callbacks: dict = {}
+        _sub_lock = threading.RLock()
+
+        def __init__(self):
+            self.sent: list[list] = []
+            type(self)._sub_codes = []
+            type(self)._sub_callbacks = {}
+
+        def subscribe(self, stock_list, callback):
+            with self._sub_lock:
+                type(self)._sub_codes = list(
+                    dict.fromkeys(self._sub_codes + list(stock_list))
+                )
+                self.sent.append(list(type(self)._sub_codes))
+
+    worker = AidataWorker.__new__(AidataWorker)
+    worker.tqs = _FakeTqs()
+    cb = lambda text: 1  # noqa: E731
+    first = [f"60{i:04d}.SH" for i in range(90)]
+    second = [f"00{i:04d}.SZ" for i in range(80)]
+    worker._sdk_subscribe(first, cb)
+    worker._sdk_subscribe(second, cb)
+    assert len(worker.tqs.sent[0]) == 90
+    assert len(worker.tqs.sent[1]) == 80, (
+        f"第二次订阅须为纯新集（80），实际 {len(worker.tqs.sent[1])}——账本未复位将复现静默事故"
+    )
+
+
+# ── 8. 回归：订阅不占请求预算 + 差分最小间隔（2026-09-17 盘中饿死事故）──
+
+
+@pytest.mark.unit
+def test_resubscribe_not_charged_to_request_budget_and_min_gap():
+    """订阅通道零配额（实证）——重订不得走「3 次/窗口」请求闸门；
+    热集差分重订须受最小间隔约束（防 churn），间隔内推迟并计数。"""
+    import time as _time
+
+    from backend.shared.tdx_aidata.collector import SubscriptionEngine
+
+    class _CountingGate:
+        def __init__(self):
+            self.consumed = 0
+
+        def check(self):
+            return None
+
+        def consume(self):
+            self.consumed += 1
+
+        def note_rate_limited(self):
+            return 60.0
+
+        def note_success(self):
+            pass
+
+    members = {f"{600000 + i}.SH" for i in range(10)}
+    gate = _CountingGate()
+    subs: list[list[str]] = []
+    engine = SubscriptionEngine(
+        sdk_subscribe=lambda codes, cb: subs.append(list(codes)),
+        sdk_unsubscribe=lambda: None,
+        budget_gate=gate,
+        redis_factory=lambda: type("R", (), {"smembers": lambda self, k: set(members), "close": lambda self: None})(),
+        resubscribe_min_gap_s=60.0,
+    )
+    engine.sync_hot_set_once()
+    assert subs and engine.counters["resubscribes"] == 1
+    assert gate.consumed == 0, "订阅调用不得消耗请求预算（零配额实证；旧版饿死根因）"
+
+    # 热集变化但在最小间隔内 → 推迟计数，不发第二次订阅
+    for extra in range(1, 3):
+        members.add(f"{300000 + extra}.SZ")
+    engine.sync_hot_set_once()
+    assert len(subs) == 1 and engine.counters["resubscribe_deferred_gap"] == 1
+
+    # 越过最小间隔 → 正常重订
+    engine._last_resubscribe_ts = _time.time() - 61
+    engine.sync_hot_set_once()
+    assert engine.counters["resubscribes"] == 2 and len(subs) == 2
+
+
+# ── 9. 回归：残留 socket 文件不得阻塞按需拉起（2026-09-17 次生故障）──────
+
+
+@pytest.mark.unit
+def test_stale_socket_does_not_block_spawn(tmp_path, monkeypatch):
+    """SIGKILL 残留的 socket 文件必须被存活探测识破并清理，否则拉起永久跳过→全片静默。"""
+    import socket as _socket
+    from pathlib import Path as _Path
+
+    from backend.shared.tdx_aidata.client import TdxAiDataClient
+
+    sock_path = str(tmp_path / "stale.sock")
+    # 制造“文件存在但无监听”的残留：bind 后立即关闭（unix socket 文件留存）
+    s = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+    s.bind(sock_path)
+    s.close()
+    assert _Path(sock_path).exists()
+
+    spawned = {"n": 0}
+
+    class _FakePopen:
+        def __init__(self, *a, **k):
+            spawned["n"] += 1
+
+    import backend.shared.tdx_aidata.client as client_mod
+
+    monkeypatch.setattr(client_mod.subprocess, "Popen", _FakePopen)
+    client = TdxAiDataClient(socket_path=sock_path)
+    ok = client._spawn_worker_proc()
+    assert ok is True and spawned["n"] == 1, "残留 socket 必须被剔除并重新拉起"
+    assert not _Path(sock_path).exists()  # 残留文件已清理（被 Popen 桩替代，不会重建）
+
+    # 对照：真有监听者 → 不重复拉起
+    s2 = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+    live_path = str(tmp_path / "live.sock")
+    s2.bind(live_path)
+    s2.listen(1)
+    try:
+        c2 = TdxAiDataClient(socket_path=live_path)
+        before = spawned["n"]
+        assert c2._spawn_worker_proc() is True and spawned["n"] == before
+    finally:
+        s2.close()
