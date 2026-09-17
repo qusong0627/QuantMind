@@ -183,6 +183,32 @@ def md5_of(path: Path) -> str:
     return h.hexdigest()
 
 
+def _etag_is_md5(etag: str) -> bool:
+    e = str(etag or "").strip().strip('"').lower()
+    return len(e) == 32 and all(c in "0123456789abcdef" for c in e)
+
+
+def verify_content(obj: dict, target: Path) -> tuple[bool, str]:
+    """已登记文件的云端一致性判定（**唯一实现**）：返回 (是否一致, 本地 sha256)。
+
+    判定优先级：manifest.sha256 → manifest.etag(MD5)。
+    背景（2026-09-17 事故）：云侧 manifest schema 变更，`sha256` 字段整列消失
+    （实测 daily_unadjusted 0/2603 条带 sha256，仅剩 etag=内容 MD5、与本地 md5 实测
+    逐字节一致）。旧逻辑 ``actual == expected("")`` 恒假 → 4 个全量重写数据集每轮
+    把 2600 个分区全部判为"待重下"，下载风暴 + celery 超时被杀 → 全部后续数据集
+    停更（09-15 起 features_daily/l1/l2/valuation 无新分区）。
+    两个字段都不可用 → 返回不一致（保守重下，宁可多下不可漏改）。
+    """
+    actual_sha = sha256_of(target)
+    expected_sha = str(obj.get("sha256") or "").strip().lower()
+    if expected_sha:
+        return actual_sha == expected_sha, actual_sha
+    etag = str(obj.get("etag") or "").strip().strip('"').lower()
+    if _etag_is_md5(etag):
+        return md5_of(target) == etag, actual_sha
+    return False, actual_sha
+
+
 def _is_patch_key(key: str) -> bool:
     """patches/ 是上游重算的中间态快照，与 dt=* 分区重复且复权基准可能过期。
 
@@ -328,9 +354,11 @@ def _sync_v2_dataset(client, state, cat_id: str, dataset: str, progress_cb: Call
 
         def verify_work(item):
             key, obj, target = item
-            expected = str(obj.get("sha256") or "").strip().lower()
-            actual = sha256_of(target)
-            return key, obj, target, actual if (actual and actual == expected) else None
+            try:
+                ok, actual = verify_content(obj, target)
+            except OSError:
+                ok, actual = False, None
+            return key, obj, target, actual if ok else None
 
         with ThreadPoolExecutor(max_workers=SYNC_WORKERS) as pool:
             for key, obj, target, actual in pool.map(verify_work, verify):
