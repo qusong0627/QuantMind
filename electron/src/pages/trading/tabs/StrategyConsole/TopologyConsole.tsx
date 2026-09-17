@@ -174,8 +174,8 @@ const TopologyConsole: React.FC<TopologyConsoleProps> = ({
                     defaultModelName={defaultModelName}
                 />
 
-                {/* L2.5/L3 调仓计划 ｜ 交易记录（2026-09-17 两栏并排；窄屏自动上下堆叠） */}
-                <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 items-start">
+                {/* L2.5/L3 调仓计划 ｜ 交易记录（2026-09-17 两栏并排、拉伸等高底边齐平；窄屏自动上下堆叠） */}
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 items-stretch">
                     <PlanSection />
                     <OutputLayer
                         recentOrders={overview.recentOrders}
