@@ -15,14 +15,14 @@ import { Gauge, RefreshCw } from 'lucide-react';
 import { PAGE_LAYOUT } from '../../config/pageLayout';
 import { getDeskToday } from './services/deskService';
 import type { DeskToday } from './types';
-import { evidenceRingDrillEntries, executionItemDrillEntries, pipelineStepDrillEntries, pipelineSummary, planDrillEntries, planOrderDrillEntries, pnlDrillEntries, signalItemDrillEntries, statusStyle, symbolLabel } from './deskModel';
+import { evidenceRingDrillEntries, executionItemDrillEntries, pipelineStepDrillEntries, pipelineSummary, planDrillEntries, planOrderDrillEntries, signalItemDrillEntries, statusStyle, symbolLabel } from './deskModel';
 import { DrillDownDrawer, type DrillEntry } from '../shared/DrillDownDrawer';
 import { UiModeToggle } from '../shared/UiModeToggle';
 import { ComplianceFooter } from '../../components/shared/compliance/ComplianceChrome';
 import { PipelineBar } from './components/PipelineBar';
 import { EvidenceMatrix } from './components/EvidenceMatrix';
 import { PlanCard } from './components/PlanCard';
-import { ExecutionCard, HealthCard, PnlCard, SignalsCard } from './components/DeskCards';
+import { ExecutionCard, HealthCard, SignalsCard } from './components/DeskCards';
 import { CopilotPanel } from './components/CopilotPanel';
 
 function errorText(error: unknown): string {
