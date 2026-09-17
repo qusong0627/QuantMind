@@ -84,6 +84,15 @@ if ls data/upgrade_*.sql >/dev/null 2>&1; then
     echo "[i] 增量升级 SQL 随补丁分发: $(ls data/upgrade_*.sql | wc -l) 个"
 fi
 
+# 2d) 股票名称索引（data/stocks/stocks_index.json → 补丁内 data/stocks/）。
+#     stock_name_mapper 只认这一个查表源，缺了中文名全退化成代码、日志只有一条
+#     WARNING；与 SQL 同理整份随每次补丁分发（旧包从未带过该文件，全量补齐才收敛）。
+if [ -f data/stocks/stocks_index.json ]; then
+    mkdir -p "$STAGE/data/stocks"
+    cp -f data/stocks/stocks_index.json "$STAGE/data/stocks/"
+    echo "[i] 股票名称索引随补丁分发: data/stocks/stocks_index.json ($(du -h data/stocks/stocks_index.json | cut -f1))"
+fi
+
 if [ "$changed" = "0" ]; then
     echo "[!] $BASE..HEAD 没有代码类改动,无需补丁"
     exit 0

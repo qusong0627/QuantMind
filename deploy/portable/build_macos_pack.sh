@@ -157,6 +157,15 @@ if ls "$REPO_ROOT"/data/upgrade_*.sql >/dev/null 2>&1; then
 else
     fail "仓库 data/upgrade_*.sql 缺失（system_events 等增量迁移将不执行）"
 fi
+# 静态数据：股票名称索引（stock_name_mapper 唯一查表源）。容器版靠 /data 挂载
+# 天然可见，便携包必须随包——缺了只有一条 WARNING，中文名会静默退化成代码。
+if [ -f "$REPO_ROOT/data/stocks/stocks_index.json" ]; then
+    mkdir -p "$STAGE/data/stocks"
+    cp -f "$REPO_ROOT/data/stocks/stocks_index.json" "$STAGE/data/stocks/"
+    ok "股票名称索引已打包: data/stocks/stocks_index.json ($(du -h "$STAGE/data/stocks/stocks_index.json" | cut -f1))"
+else
+    fail "仓库 data/stocks/stocks_index.json 缺失（股票中文名将全部为空）"
+fi
 
 # 打包
 cd "$BUILD"
