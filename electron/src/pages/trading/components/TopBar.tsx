@@ -148,6 +148,13 @@ const TopBar: React.FC<TopBarProps> = ({ accountInfo, isConnected, strategyStatu
                         <Server size={13} />
                         <span>{deployChannelLabel}</span>
                     </span>
+                    {/* 顶部免责小字（用户指定：放「本地沙箱」后面） */}
+                    <span
+                        className="hidden xl:inline text-[10px] leading-none text-slate-400 truncate max-w-[520px] cursor-default"
+                        title="本页为量化研究工具，展示研究结果与信号，不构成投资建议、不代客理财；股市有风险，投资需谨慎。历史数据与回测结果不代表未来收益。"
+                    >
+                        本页为量化研究工具，展示研究结果与信号，不构成投资建议、不代客理财；股市有风险，投资需谨慎。历史数据与回测结果不代表未来收益。
+                    </span>
                 </div>
 
                 <div className="flex items-center gap-2">

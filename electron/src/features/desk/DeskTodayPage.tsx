@@ -113,9 +113,22 @@ const DeskTodayPage: React.FC<{ embedded?: boolean }> = ({ embedded = false }) =
             }
           />
 
-          {/* 主行：候选信号（输入）→ 调仓计划（行动） */}
+          {/* 全链证据矩阵（2026-09-17 上移至管线正下方；整行通栏） */}
+          <EvidenceMatrix
+            evidence={desk.evidence}
+            onDrill={(ring) =>
+              setDrawer({
+                title: `证据环 · ${ring.label}（${statusStyle(ring.level).label}）`,
+                subtitle: `${ring.artifact} · ${ring.frequency}——每项可核对来源`,
+                entries: evidenceRingDrillEntries(ring) as DrillEntry[],
+                raw: ring,
+              })
+            }
+          />
+
+          {/* 对齐网格（统一 12 栅格、gap-4、卡片等高）：主行 信号(4) + 计划(8)；次行 盈亏/执行/健康（4+4+4）；包装器 flex 使卡片纵向拉伸对齐 */}
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
-            <div className="lg:col-span-5 xl:col-span-4 flex flex-col">
+            <div className="lg:col-span-4 grid">
               <SignalsCard
                 signals={desk.signals}
                 onItemDrill={(item) =>
@@ -128,7 +141,7 @@ const DeskTodayPage: React.FC<{ embedded?: boolean }> = ({ embedded = false }) =
                 }
               />
             </div>
-            <div className="lg:col-span-7 xl:col-span-8 flex flex-col">
+            <div className="lg:col-span-8 grid">
               <PlanCard
                 plan={desk.plan}
                 onExecuted={() => void load()}
@@ -152,44 +165,37 @@ const DeskTodayPage: React.FC<{ embedded?: boolean }> = ({ embedded = false }) =
             </div>
           </div>
 
-          {/* 次行：账户状态（盈亏 hero / 执行 / 健康） */}
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <PnlCard
-              pnl={desk.pnl}
-              onDrillDown={() =>
-                setDrawer({
-                  title: '账户盈亏 · 来源链',
-                  subtitle: '资金快照行字段分解（数字直接来自该行，不重算）',
-                  entries: pnlDrillEntries(desk.pnl) as DrillEntry[],
-                  raw: desk.pnl,
-                })
-              }
-            />
-            <ExecutionCard
-              execution={desk.execution}
-              onItemDrill={(item) =>
-                setDrawer({
-                  title: `执行 · ${symbolLabel(item.symbol, item.name)}`,
-                  subtitle: '订单字段 → 取价来源说明 → 原始条目（sim_orders 投影）',
-                  entries: executionItemDrillEntries(item, desk.execution) as DrillEntry[],
-                  raw: item,
-                })
-              }
-            />
-            <HealthCard health={desk.health} />
+          <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-12 gap-4">
+            <div className="lg:col-span-4 grid">
+              <PnlCard
+                pnl={desk.pnl}
+                onDrillDown={() =>
+                  setDrawer({
+                    title: '账户盈亏 · 来源链',
+                    subtitle: '资金快照行字段分解（数字直接来自该行，不重算）',
+                    entries: pnlDrillEntries(desk.pnl) as DrillEntry[],
+                    raw: desk.pnl,
+                  })
+                }
+              />
+            </div>
+            <div className="lg:col-span-4 grid">
+              <ExecutionCard
+                execution={desk.execution}
+                onItemDrill={(item) =>
+                  setDrawer({
+                    title: `执行 · ${symbolLabel(item.symbol, item.name)}`,
+                    subtitle: '订单字段 → 取价来源说明 → 原始条目（sim_orders 投影）',
+                    entries: executionItemDrillEntries(item, desk.execution) as DrillEntry[],
+                    raw: item,
+                  })
+                }
+              />
+            </div>
+            <div className="lg:col-span-4 grid">
+              <HealthCard health={desk.health} />
+            </div>
           </div>
-
-          <EvidenceMatrix
-            evidence={desk.evidence}
-            onDrill={(ring) =>
-              setDrawer({
-                title: `证据环 · ${ring.label}（${statusStyle(ring.level).label}）`,
-                subtitle: `${ring.artifact} · ${ring.frequency}——每项可核对来源`,
-                entries: evidenceRingDrillEntries(ring) as DrillEntry[],
-                raw: ring,
-              })
-            }
-          />
         </>
       ) : (
         <div className="bg-gray-50 rounded-2xl border border-gray-200 p-10 text-center text-sm text-gray-500">
