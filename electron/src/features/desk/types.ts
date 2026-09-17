@@ -10,6 +10,8 @@ export interface PipelineStep {
 
 export interface SignalItem {
   symbol: string;
+  /** 中文名（后端 enrichment；未收录为空串，前端回退显示代码） */
+  name?: string;
   side: string;
   rank_pct: number | null;
   score: number | null;
@@ -27,6 +29,8 @@ export interface SignalsBlock {
 
 export interface PlanOrder {
   symbol: string;
+  /** 中文名（后端 enrichment；未收录为空串） */
+  name?: string;
   side: string;
   quantity: number;
   price: number;
@@ -55,6 +59,8 @@ export interface PlanBlock {
 export interface ExecutionItem {
   mode: 'SIM' | 'REAL';
   symbol: string;
+  /** 中文名（后端 enrichment；未收录为空串） */
+  name?: string;
   side: string;
   quantity: number;
   status: string;

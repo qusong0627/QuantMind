@@ -24,7 +24,15 @@ _FALLBACK_PATHS = [
 ]
 
 # 裸码 → 交易所推断（与 CLAUDE.md 分层口径一致）：6/9→SH、0/2/3→SZ、4/8→BJ
-_CODE_HEAD_TO_EXCHANGE = {"6": "SH", "9": "SH", "0": "SZ", "2": "SZ", "3": "SZ", "4": "BJ", "8": "BJ"}
+_CODE_HEAD_TO_EXCHANGE = {
+    "6": "SH",
+    "9": "SH",
+    "0": "SZ",
+    "2": "SZ",
+    "3": "SZ",
+    "4": "BJ",
+    "8": "BJ",
+}
 
 
 def normalize_symbol(symbol: str) -> str | None:

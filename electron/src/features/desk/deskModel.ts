@@ -193,7 +193,7 @@ export function planDrillEntries(plan: PlanBlock | null | undefined, topN = 10):
   ];
   for (const order of (plan.orders || []).slice(0, topN)) {
     entries.push({
-      label: `${order.side === 'BUY' ? '买' : '卖'} ${order.symbol}`,
+      label: `${sideLabel(order.side)} ${symbolLabel(order.symbol, order.name)}`,
       value: `${order.quantity} 股 @ ${order.price}（约 ${formatMoney(order.estimated_amount)}）`,
       source: planKindLabel(order.kind),
       hint: order.reason,
@@ -206,6 +206,12 @@ export function planDrillEntries(plan: PlanBlock | null | undefined, topN = 10):
 
 function sideLabel(side: string): string {
   return String(side).toUpperCase() === 'BUY' ? '买' : '卖';
+}
+
+/** 标的展示口径（名称为主、代码辅）：有名称 → 「名称（代码）」；未收录 → 代码原样（不伪造） */
+export function symbolLabel(symbol: string, name?: string | null): string {
+  const n = String(name || '').trim();
+  return n ? `${n}（${symbol}）` : symbol;
 }
 
 /** 取价来源 → 人话（T-P2-03 取价链的降级标记如实解释） */
@@ -227,7 +233,7 @@ export function signalItemDrillEntries(
   const rankText =
     item.rank_pct === null || item.rank_pct === undefined ? '—' : item.rank_pct.toFixed(3);
   return [
-    { label: '标的', value: item.symbol },
+    { label: '标的', value: symbolLabel(item.symbol, item.name) },
     { label: '方向', value: sideLabel(item.side) },
     {
       label: 'rank_pct（当日分位）',
@@ -240,7 +246,7 @@ export function signalItemDrillEntries(
       label: '原始条目（该标的全部列）',
       value: '展开',
       drill: {
-        title: `信号原始条目 · ${item.symbol}`,
+        title: `信号原始条目 · ${symbolLabel(item.symbol, item.name)}`,
         subtitle: 'engine_signal_scores 行原样（含市场/来源/时间戳）',
         entries: Object.entries(item as unknown as Record<string, unknown>).map(([k, v]) => ({
           label: k,
@@ -273,7 +279,7 @@ export function executionItemDrillEntries(
 ): DrillEntryLike[] {
   return [
     { label: '模式', value: item.mode === 'REAL' ? '实盘（镜像）' : '模拟盘' },
-    { label: '标的/方向', value: `${sideLabel(item.side)} ${item.symbol}` },
+    { label: '标的/方向', value: `${sideLabel(item.side)} ${symbolLabel(item.symbol, item.name)}` },
     { label: '数量', value: `${item.quantity} 股` },
     { label: '状态', value: item.status },
     {
@@ -296,7 +302,7 @@ export function executionItemDrillEntries(
       label: '原始条目',
       value: '展开',
       drill: {
-        title: `执行原始条目 · ${item.symbol}`,
+        title: `执行原始条目 · ${symbolLabel(item.symbol, item.name)}`,
         subtitle: 'sim_orders/trades 投影行（含 reason/时间）',
         entries: Object.entries(item as unknown as Record<string, unknown>).map(([k, v]) => ({
           label: k,
@@ -317,7 +323,7 @@ export function planOrderDrillEntries(
   const isExit = order.kind === 'exit';
   const matchedSignal = (signals?.top_buy || []).find((s) => s.symbol === order.symbol);
   const entries: DrillEntryLike[] = [
-    { label: '标的/方向', value: `${sideLabel(order.side)} ${order.symbol}` },
+    { label: '标的/方向', value: `${sideLabel(order.side)} ${symbolLabel(order.symbol, order.name)}` },
     { label: '计划数量', value: `${order.quantity} 股` },
     { label: '计划价格', value: String(order.price), hint: '预演取价；真实成交以执行时行情为准' },
     {
@@ -355,7 +361,7 @@ export function planOrderDrillEntries(
       label: '计划单原始条目',
       value: '展开',
       drill: {
-        title: `计划单原始条目 · ${order.symbol}`,
+        title: `计划单原始条目 · ${symbolLabel(order.symbol, order.name)}`,
         subtitle: 'dry-run 引擎输出（未执行，字段原样）',
         entries: Object.entries(order as unknown as Record<string, unknown>).map(([k, v]) => ({
           label: k,
@@ -371,7 +377,7 @@ export function planOrderDrillEntries(
       value: `rank_pct ${matchedSignal.rank_pct?.toFixed(3) ?? '—'} · 分 ${matchedSignal.score?.toFixed(4) ?? '—'}`,
       hint: '该标的同时在当日候选信号内——可继续下钻信号来源',
       drill: {
-        title: `信号 · ${order.symbol}`,
+        title: `信号 · ${symbolLabel(order.symbol, order.name)}`,
         subtitle: '当日候选信号条目（engine_signal_scores）',
         entries: signalItemDrillEntries(matchedSignal, signals),
         raw: matchedSignal,

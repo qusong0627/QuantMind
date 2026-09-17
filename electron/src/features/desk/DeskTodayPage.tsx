@@ -1,6 +1,9 @@
 /**
  * 今日交易台（FE-B / T-FE-04）：一屏闭环——管线进度 + 候选信号 + 调仓计划（预演）
  * + 今日执行 + 账户盈亏 + 系统健康；每个数字带 source 下钻（来源脚注/Tooltip）。
+ *
+ * 排版（浅色专业金融风）：管线步进条整行 → 信号/计划主行 → 盈亏/执行/健康次行 → 证据矩阵；
+ * 所有点击下钻统一走居中弹窗（DrillDownDrawer presentation="modal"）。
  */
 
 import React, { useEffect, useState } from 'react';
@@ -8,7 +11,7 @@ import { Gauge, RefreshCw } from 'lucide-react';
 import { PAGE_LAYOUT } from '../../config/pageLayout';
 import { getDeskToday } from './services/deskService';
 import type { DeskToday } from './types';
-import { evidenceRingDrillEntries, executionItemDrillEntries, pipelineStepDrillEntries, pipelineSummary, planDrillEntries, planOrderDrillEntries, pnlDrillEntries, signalItemDrillEntries, statusStyle } from './deskModel';
+import { evidenceRingDrillEntries, executionItemDrillEntries, pipelineStepDrillEntries, pipelineSummary, planDrillEntries, planOrderDrillEntries, pnlDrillEntries, signalItemDrillEntries, statusStyle, symbolLabel } from './deskModel';
 import { DrillDownDrawer, type DrillEntry } from '../shared/DrillDownDrawer';
 import { UiModeToggle } from '../shared/UiModeToggle';
 import { ComplianceFooter } from '../../components/shared/compliance/ComplianceChrome';
@@ -59,7 +62,7 @@ const DeskTodayPage: React.FC = () => {
       <div className={PAGE_LAYOUT.frameClass}>
         <header className={PAGE_LAYOUT.headerClass} style={{ height: `${PAGE_LAYOUT.headerHeight}px` }}>
           <div className="flex items-center gap-3 min-w-0">
-            <div className="w-10 h-10 bg-gradient-to-br from-blue-500 to-purple-500 rounded-2xl flex items-center justify-center shadow-lg shrink-0">
+            <div className="w-10 h-10 bg-gradient-to-br from-blue-600 to-indigo-600 rounded-2xl flex items-center justify-center shadow-lg shadow-blue-500/20 shrink-0">
               <Gauge className="w-5 h-5 text-white" />
             </div>
             <div className="flex items-center gap-2.5 ml-1 min-w-0">
@@ -76,7 +79,7 @@ const DeskTodayPage: React.FC = () => {
               管线 {worstStyle.label}
             </span>
             {desk?.as_of && (
-              <span className="hidden md:inline-flex rounded-full bg-slate-100 border border-slate-200 px-3 py-1 text-[11px] font-bold text-slate-500">
+              <span className="hidden md:inline-flex rounded-full bg-slate-100 border border-slate-200 px-3 py-1 text-[11px] font-bold text-slate-500 font-mono tabular-nums">
                 {new Date(desk.as_of).toLocaleString('zh-CN')}
               </span>
             )}
@@ -85,7 +88,7 @@ const DeskTodayPage: React.FC = () => {
               type="button"
               onClick={() => void load()}
               disabled={loading}
-              className="px-3 py-1.5 text-xs rounded-xl border border-gray-200 bg-white hover:bg-gray-100 text-gray-700 disabled:opacity-50"
+              className="px-3 py-1.5 text-xs rounded-xl border border-slate-200 bg-white hover:bg-slate-50 hover:border-slate-300 text-slate-700 disabled:opacity-50 transition-colors"
             >
               <span className="inline-flex items-center gap-1">
                 <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
@@ -121,25 +124,28 @@ const DeskTodayPage: React.FC = () => {
                 }
               />
 
-              <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-4 gap-4">
-                <SignalsCard
-                  signals={desk.signals}
-                  onItemDrill={(item) =>
-                    setDrawer({
-                      title: `信号 · ${item.symbol}`,
-                      subtitle: '字段分解 → 原始条目 → 信号块载荷（engine_signal_scores）',
-                      entries: signalItemDrillEntries(item, desk.signals) as DrillEntry[],
-                      raw: item,
-                    })
-                  }
-                />
-                <div className="xl:col-span-2">
+              {/* 主行：候选信号（输入）→ 调仓计划（行动） */}
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
+                <div className="lg:col-span-5 xl:col-span-4 flex flex-col">
+                  <SignalsCard
+                    signals={desk.signals}
+                    onItemDrill={(item) =>
+                      setDrawer({
+                        title: `信号 · ${symbolLabel(item.symbol, item.name)}`,
+                        subtitle: '字段分解 → 原始条目 → 信号块载荷（engine_signal_scores）',
+                        entries: signalItemDrillEntries(item, desk.signals) as DrillEntry[],
+                        raw: item,
+                      })
+                    }
+                  />
+                </div>
+                <div className="lg:col-span-7 xl:col-span-8 flex flex-col">
                   <PlanCard
                     plan={desk.plan}
                     onExecuted={() => void load()}
                     onOrderDrill={(order) =>
                       setDrawer({
-                        title: `计划单 · ${order.symbol}`,
+                        title: `计划单 · ${symbolLabel(order.symbol, order.name)}`,
                         subtitle: '单字段 → 触发类别/当日信号 → 原始条目（dry-run 输出）',
                         entries: planOrderDrillEntries(order, desk.plan, desk.signals) as DrillEntry[],
                         raw: order,
@@ -155,17 +161,33 @@ const DeskTodayPage: React.FC = () => {
                     }
                   />
                 </div>
+              </div>
+
+              {/* 次行：账户状态（盈亏 hero / 执行 / 健康） */}
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <PnlCard
+                  pnl={desk.pnl}
+                  onDrillDown={() =>
+                    setDrawer({
+                      title: '账户盈亏 · 来源链',
+                      subtitle: '资金快照行字段分解（数字直接来自该行，不重算）',
+                      entries: pnlDrillEntries(desk.pnl) as DrillEntry[],
+                      raw: desk.pnl,
+                    })
+                  }
+                />
                 <ExecutionCard
                   execution={desk.execution}
                   onItemDrill={(item) =>
                     setDrawer({
-                      title: `执行 · ${item.symbol}`,
+                      title: `执行 · ${symbolLabel(item.symbol, item.name)}`,
                       subtitle: '订单字段 → 取价来源说明 → 原始条目（sim_orders 投影）',
                       entries: executionItemDrillEntries(item, desk.execution) as DrillEntry[],
                       raw: item,
                     })
                   }
                 />
+                <HealthCard health={desk.health} />
               </div>
 
               <EvidenceMatrix
@@ -179,21 +201,6 @@ const DeskTodayPage: React.FC = () => {
                   })
                 }
               />
-
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-                <PnlCard
-                  pnl={desk.pnl}
-                  onDrillDown={() =>
-                    setDrawer({
-                      title: '账户盈亏 · 来源链',
-                      subtitle: '资金快照行字段分解（数字直接来自该行，不重算）',
-                      entries: pnlDrillEntries(desk.pnl) as DrillEntry[],
-                      raw: desk.pnl,
-                    })
-                  }
-                />
-                <HealthCard health={desk.health} />
-              </div>
             </>
           ) : (
             <div className="bg-gray-50 rounded-2xl border border-gray-200 p-10 text-center text-sm text-gray-500">
@@ -208,6 +215,7 @@ const DeskTodayPage: React.FC = () => {
 
       <DrillDownDrawer
         open={!!drawer}
+        presentation="modal"
         title={drawer?.title || ''}
         subtitle={drawer?.subtitle}
         entries={drawer?.entries || []}
