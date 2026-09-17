@@ -332,57 +332,55 @@ export function StockSidebar({ selected, onSelect, watchlistSymbols, positions =
       </div>
 
       {/* 筛选面板：columnOnly 只留 模型+概念 两列（其余维度在列表表头筛选）；日历补推理后刷新列表 */}
-      {/* 筛选行 + 页码同排（概念板块/日历/推理模型/页码页数 一行），节省纵向空间 */}
-      <div className="flex items-start gap-2 shrink-0">
-        <div className="flex-1 min-w-0">
-          <StockFilterPanel
-            filters={filters}
-            onChange={onFiltersChange}
-            total={data?.total ?? 0}
-            fullTotal={fullTotal}
-            models={modelOptions}
-            compact
-            columnOnly
-            optionCounts={optionCounts}
-            showMarketCalendar
-            onInferred={() => {
-              fetchList(1, false);
-              onModelRefreshed?.();
-            }}
-          />
-        </div>
-        {data && data.total > 0 && (
-          <div className="flex shrink-0 items-center gap-0.5 pt-[26px] font-mono text-[10px] text-slate-500 whitespace-nowrap">
-            <button onClick={goFirst} disabled={data.page <= 1 || loading} title="首页（排名第1）"
-              className="flex items-center rounded-md border border-slate-200 bg-slate-50 px-1 py-0.5 text-slate-600 hover:bg-blue-50 hover:text-blue-600 disabled:opacity-30 disabled:cursor-not-allowed">
-              <ChevronsUp className="w-3 h-3" />
-            </button>
-            <button onClick={goPrev} disabled={data.page <= 1 || loading} title="上一页"
-              className="flex items-center rounded-md border border-slate-200 bg-slate-50 px-1 py-0.5 text-slate-600 hover:bg-blue-50 hover:text-blue-600 disabled:opacity-30 disabled:cursor-not-allowed">
-              <ChevronLeft className="w-3 h-3" />
-            </button>
-            <input
-              value={pageInput}
-              onChange={e => setPageInput(e.target.value.replace(/[^\d]/g, ''))}
-              onKeyDown={e => { if (e.key === 'Enter') { e.currentTarget.blur(); jumpToPage(); } }}
-              onBlur={jumpToPage}
-              inputMode="numeric"
-              aria-label="页码"
-              title="输入页码后回车跳转"
-              className="w-8 rounded border border-slate-200 px-1 py-0.5 text-center text-[10px] text-slate-700 bg-white focus:border-blue-400 focus:outline-none"
-            />
-            <span className="px-0.5">/ {totalPages} 页 · {data.total} 只</span>
-            <button onClick={goNext} disabled={data.page >= totalPages || loading} title="下一页"
-              className="flex items-center rounded-md border border-slate-200 bg-slate-50 px-1 py-0.5 text-slate-600 hover:bg-blue-50 hover:text-blue-600 disabled:opacity-30 disabled:cursor-not-allowed">
-              <ChevronRight className="w-3 h-3" />
-            </button>
-            <button onClick={goLast} disabled={data.page >= totalPages || loading} title="末页（排名最后）"
-              className="flex items-center rounded-md border border-slate-200 bg-slate-50 px-1 py-0.5 text-slate-600 hover:bg-blue-50 hover:text-blue-600 disabled:opacity-30 disabled:cursor-not-allowed">
-              <ChevronsDown className="w-3 h-3" />
-            </button>
-          </div>
-        )}
-      </div>
+      {/* 筛选行（统一网格：概念 1fr | 日历 | 推理模型 1fr | 页码 auto 右贴边——比例协调，无死区） */}
+      <StockFilterPanel
+        filters={filters}
+        onChange={onFiltersChange}
+        total={data?.total ?? 0}
+        fullTotal={fullTotal}
+        models={modelOptions}
+        compact
+        columnOnly
+        optionCounts={optionCounts}
+        showMarketCalendar
+        onInferred={() => {
+          fetchList(1, false);
+          onModelRefreshed?.();
+        }}
+        extraRight={
+          data && data.total > 0 ? (
+            <div className="flex items-center gap-0.5 font-mono text-[10px] text-slate-500 whitespace-nowrap">
+              <button onClick={goFirst} disabled={data.page <= 1 || loading} title="首页（排名第1）"
+                className="flex items-center rounded-md border border-slate-200 bg-slate-50 px-1 py-0.5 text-slate-600 hover:bg-blue-50 hover:text-blue-600 disabled:opacity-30 disabled:cursor-not-allowed">
+                <ChevronsUp className="w-3 h-3" />
+              </button>
+              <button onClick={goPrev} disabled={data.page <= 1 || loading} title="上一页"
+                className="flex items-center rounded-md border border-slate-200 bg-slate-50 px-1 py-0.5 text-slate-600 hover:bg-blue-50 hover:text-blue-600 disabled:opacity-30 disabled:cursor-not-allowed">
+                <ChevronLeft className="w-3 h-3" />
+              </button>
+              <input
+                value={pageInput}
+                onChange={e => setPageInput(e.target.value.replace(/[^\d]/g, ''))}
+                onKeyDown={e => { if (e.key === 'Enter') { e.currentTarget.blur(); jumpToPage(); } }}
+                onBlur={jumpToPage}
+                inputMode="numeric"
+                aria-label="页码"
+                title="输入页码后回车跳转"
+                className="w-8 rounded border border-slate-200 px-1 py-0.5 text-center text-[10px] text-slate-700 bg-white focus:border-blue-400 focus:outline-none"
+              />
+              <span className="px-0.5">/ {totalPages} 页 · {data.total} 只</span>
+              <button onClick={goNext} disabled={data.page >= totalPages || loading} title="下一页"
+                className="flex items-center rounded-md border border-slate-200 bg-slate-50 px-1 py-0.5 text-slate-600 hover:bg-blue-50 hover:text-blue-600 disabled:opacity-30 disabled:cursor-not-allowed">
+                <ChevronRight className="w-3 h-3" />
+              </button>
+              <button onClick={goLast} disabled={data.page >= totalPages || loading} title="末页（排名最后）"
+                className="flex items-center rounded-md border border-slate-200 bg-slate-50 px-1 py-0.5 text-slate-600 hover:bg-blue-50 hover:text-blue-600 disabled:opacity-30 disabled:cursor-not-allowed">
+                <ChevronsDown className="w-3 h-3" />
+              </button>
+            </div>
+          ) : null
+        }
+      />
 
       {/* 当前信号日 chip：随日历切换显示该日期（琥珀底色），点击回到最新；后备注当天各维度头部均分基准 */}
       {(() => {

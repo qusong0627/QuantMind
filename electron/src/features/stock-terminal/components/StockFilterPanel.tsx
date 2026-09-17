@@ -74,9 +74,11 @@ interface Props {
   showMarketCalendar?: boolean;
   /** 日历补推理完成后回调（外层刷新列表） */
   onInferred?: () => void;
+  /** 同排右侧槽位（如页码控制），作为网格最后一列右贴边 */
+  extraRight?: React.ReactNode;
 }
 
-export function StockFilterPanel({ filters, onChange, total, fullTotal, models: modelOptions = [], compact = false, optionCounts = {}, columnOnly = false, showMarketCalendar = false, onInferred }: Props) {
+export function StockFilterPanel({ filters, onChange, total, fullTotal, models: modelOptions = [], compact = false, optionCounts = {}, columnOnly = false, showMarketCalendar = false, onInferred, extraRight }: Props) {
   const [industries, setIndustries] = useState<string[]>([]);
   const [concepts, setConcepts] = useState<string[]>([]);
 
@@ -86,6 +88,17 @@ export function StockFilterPanel({ filters, onChange, total, fullTotal, models: 
   }, []);
 
   const set = (patch: Partial<ListFilters>) => onChange({ ...filters, ...patch });
+
+  // 完整字面量（Tailwind 只能扫描到完整类名，动态拼接会丢列定义）
+  const gridCols = compact
+    ? showMarketCalendar
+      ? extraRight
+        ? 'grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)_auto]'
+        : 'grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)]'
+      : extraRight
+        ? 'grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto]'
+        : 'grid-cols-[minmax(0,1fr)_minmax(0,1fr)]'
+    : 'grid-cols-4';
 
   /** 选项 label：名称 + 命中数量（父级传的统计），未统计则只显示名称 */
   const opt = (dim: string, name: string) => {
@@ -142,7 +155,7 @@ export function StockFilterPanel({ filters, onChange, total, fullTotal, models: 
       </div>
 
       {/* 筛选下拉网格：columnOnly 只留 概念+日历+模型，其余维度在列表表头筛选 */}
-      <div className={`grid gap-1.5 items-center ${compact ? (showMarketCalendar ? 'grid-cols-[minmax(0,200px)_auto_minmax(0,220px)]' : 'grid-cols-[minmax(0,200px)_minmax(0,220px)]') : 'grid-cols-4'}`}>
+      <div className={`grid gap-1.5 items-center ${gridCols}`}>
         {!columnOnly && (
           <>
             <Select allowClear size="small" placeholder="板块" value={filters.board || undefined}
@@ -176,6 +189,7 @@ export function StockFilterPanel({ filters, onChange, total, fullTotal, models: 
         <Select allowClear showSearch size="small" placeholder="推理模型" value={filters.model || undefined}
           optionFilterProp="label" onChange={v => set({ model: v })}
           options={modelOptions.map(m => ({ label: m.display_name || m.model_id, value: m.model_id }))} />
+        {extraRight && <div className="flex items-center justify-end min-w-0">{extraRight}</div>}
       </div>
 
       {/* 已选条件：每条件单独一行；columnOnly 模式不渲染（状态已在列表表头高亮） */}
