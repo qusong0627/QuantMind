@@ -59,6 +59,12 @@ JOBS: tuple[JobSpec, ...] = (
         "消化 status=pending 的模拟单",
     ),
     JobSpec(
+        "tdx_hot_set_feed", "TDX 桥热集行情（P6）", "worker", "trade",
+        "盘中持续轮转（0.18s/只，预算 333/min）",
+        "TDX_HOTSET_FEED_ENABLED", True, 600, None,
+        "热集 529 只经通达信桥(.13:8550/L2)取快照 → market:snapshot/series（T-P6-02 桥源席）",
+    ),
+    JobSpec(
         "sentinel_push", "哨兵告警消费（P6）", "worker", "trade", "5s 长轮询（消费组 sentinel）",
         "QM_SENTINEL_WORKER_ENABLED", True, 600,
         "python -m backend.services.trade.services.sentinel_alert_service",

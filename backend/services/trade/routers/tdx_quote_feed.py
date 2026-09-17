@@ -33,8 +33,13 @@ class SltpConfigUpdate(BaseModel):
 
 @router.get("/tdx/quote-feed/status")
 async def get_quote_feed_status(auth: AuthContext = Depends(get_auth_context)):
-    """实时行情 Feed 状态：是否运行、桥连通性、最后喂价时间、监控持仓。"""
+    """实时行情 Feed 状态：持仓馈送 + **热集轮询（hot_set 段）**。"""
+    from backend.services.live_trading.services.tdx_hot_set_feed import (
+        hot_set_feed_status,
+    )
+
     status = dict(feed_status)
+    status["hot_set"] = dict(hot_set_feed_status)
     status["is_trading_time"] = is_trading_time()
     status["server_time"] = datetime.now(timezone.utc).isoformat()
     if status.get("last_feed_at"):
