@@ -766,6 +766,56 @@ export const NewsPanel: React.FC = () => {
                 <Button size="small" type={f.strongOnly ? 'primary' : 'default'} danger={f.strongOnly}
                   icon={<FireOutlined />} onClick={() => updateF({ strongOnly: !f.strongOnly })}>强信号</Button>
               </Tooltip>
+              <Input
+                allowClear
+                size="small"
+                prefix={<SearchOutlined style={{ color: '#94a3b8' }} />}
+                placeholder="搜索标题/内容/股票/标签..."
+                value={f.keyword}
+                onChange={(e) => updateF({ keyword: e.target.value })}
+                style={{ flex: '1 1 170px', minWidth: 150, maxWidth: 240 }}
+              />
+              <Segmented
+                size="small"
+                value={f.datePreset}
+                onChange={(v) => {
+                  const today = dayjs().endOf('day');
+                  let range: [Dayjs | null, Dayjs | null] = null;
+                  switch (v) {
+                    case 'all': range = null; break;
+                    case '1d': range = [dayjs().startOf('day'), today]; break;
+                    case '3d': range = [dayjs().subtract(2, 'day').startOf('day'), today]; break;
+                    case '7d': range = [dayjs().subtract(6, 'day').startOf('day'), today]; break;
+                    case '30d': range = [dayjs().subtract(29, 'day').startOf('day'), today]; break;
+                  }
+                  updateF({
+                    datePreset: v as string,
+                    dateRange: range ? [range[0]!.toISOString(), range[1]!.toISOString()] : [null, null],
+                  });
+                }}
+                options={[
+                  { label: '不限', value: 'all' },
+                  { label: '今日', value: '1d' },
+                  { label: '3日', value: '3d' },
+                  { label: '7日', value: '7d' },
+                  { label: '30日', value: '30d' },
+                ]}
+              />
+              <Select
+                size="small"
+                value={f.sort}
+                onChange={(v) => updateF({ sort: v as SortMode })}
+                options={SORT_OPTIONS.map((o) => ({ value: o.value, label: o.label as any }))}
+                style={{ width: 110 }}
+              />
+              <Tooltip title={`高级筛选${activeFilterCount > 0 ? ` (${activeFilterCount} 项激活)` : ''}`}>
+                <Button size="small" icon={<FilterOutlined />}
+                  type={activeFilterCount > 0 ? 'primary' : 'default'}
+                  ghost={activeFilterCount > 0}
+                  onClick={() => updateF({ advancedOpen: !f.advancedOpen })}>
+                  筛选{activeFilterCount > 0 ? `(${activeFilterCount})` : ''}
+                </Button>
+              </Tooltip>
             </div>
             <div className="news-toolbar-actions">
               <Tooltip title="立即刷新">
@@ -790,60 +840,6 @@ export const NewsPanel: React.FC = () => {
                 </Tooltip>
               )}
             </div>
-          </div>
-          {/* Row 2: filters — always aligned */}
-          <div className="news-toolbar-row news-toolbar-filters">
-            <Input
-              allowClear
-              size="small"
-              prefix={<SearchOutlined style={{ color: '#94a3b8' }} />}
-              placeholder="搜索标题/内容/股票/标签..."
-              value={f.keyword}
-              onChange={(e) => updateF({ keyword: e.target.value })}
-              style={{ width: 220 }}
-            />
-            <div style={{ flex: 1 }} />
-            <Segmented
-              size="small"
-              value={f.datePreset}
-              onChange={(v) => {
-                const today = dayjs().endOf('day');
-                let range: [Dayjs | null, Dayjs | null] = null;
-                switch (v) {
-                  case 'all': range = null; break;
-                  case '1d': range = [dayjs().startOf('day'), today]; break;
-                  case '3d': range = [dayjs().subtract(2, 'day').startOf('day'), today]; break;
-                  case '7d': range = [dayjs().subtract(6, 'day').startOf('day'), today]; break;
-                  case '30d': range = [dayjs().subtract(29, 'day').startOf('day'), today]; break;
-                }
-                updateF({
-                  datePreset: v as string,
-                  dateRange: range ? [range[0]!.toISOString(), range[1]!.toISOString()] : [null, null],
-                });
-              }}
-              options={[
-                { label: '不限', value: 'all' },
-                { label: '今日', value: '1d' },
-                { label: '近3日', value: '3d' },
-                { label: '近7日', value: '7d' },
-                { label: '近30日', value: '30d' },
-              ]}
-            />
-            <Select
-              size="small"
-              value={f.sort}
-              onChange={(v) => updateF({ sort: v as SortMode })}
-              options={SORT_OPTIONS.map((o) => ({ value: o.value, label: o.label as any }))}
-              style={{ width: 130 }}
-            />
-            <Tooltip title={`高级筛选${activeFilterCount > 0 ? ` (${activeFilterCount} 项激活)` : ''}`}>
-              <Button size="small" icon={<FilterOutlined />}
-                type={activeFilterCount > 0 ? 'primary' : 'default'}
-                ghost={activeFilterCount > 0}
-                onClick={() => updateF({ advancedOpen: !f.advancedOpen })}>
-                筛选{activeFilterCount > 0 ? `(${activeFilterCount})` : ''}
-              </Button>
-            </Tooltip>
           </div>
         </div>
 

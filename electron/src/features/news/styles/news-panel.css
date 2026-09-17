@@ -56,11 +56,12 @@
   flex-wrap: wrap;
   min-width: 0;
 }
-/* 第一行中段：从第二行上移的紧凑筛选（全部/事件/收藏 + 情绪 + 强信号） */
+/* 第一行中段：全部筛选 + 搜索（单行工具条，放不下时自动折行） */
 .news-toolbar-mid {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
+  flex: 1 1 auto;
   flex-wrap: wrap;
   min-width: 0;
 }
@@ -72,10 +73,6 @@
   margin-left: auto;
   flex-shrink: 0;
   overflow-x: auto;
-}
-.news-toolbar-filters {
-  align-items: center;
-  gap: 8px;
 }
 .news-toolbar-badge {
   margin-left: 2px;
