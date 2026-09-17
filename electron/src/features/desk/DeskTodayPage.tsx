@@ -100,6 +100,18 @@ const DeskTodayPage: React.FC<{ embedded?: boolean }> = ({ embedded = false }) =
         </div>
       ) : desk ? (
         <>
+          {/* 首行：系统健康 | 副驾驶（并列，2026-09-17 置顶）。分栏归位：候选信号→「候选信号」
+              页签、调仓计划→「手动任务」、今日执行→「持仓监控」；账户盈亏卡同屏重复已移除。 */}
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
+            <div className="lg:col-span-6 grid">
+              <HealthCard health={desk.health} />
+            </div>
+            <div className="lg:col-span-6 grid">
+              {/* 副驾驶（T-P6-16）：情报事件流 + 误报标注 + 建议卡一键执行（无 mock） */}
+              <CopilotPanel />
+            </div>
+          </div>
+
           {/* T-FE-03 v2 逐层穿透：管线四步 → 证据环 → 证据项 */}
           <PipelineBar
             steps={desk.pipeline}
@@ -113,7 +125,7 @@ const DeskTodayPage: React.FC<{ embedded?: boolean }> = ({ embedded = false }) =
             }
           />
 
-          {/* 全链证据矩阵（2026-09-17 上移至管线正下方；整行通栏） */}
+          {/* 全链证据矩阵（整行通栏） */}
           <EvidenceMatrix
             evidence={desk.evidence}
             onDrill={(ring) =>
@@ -125,15 +137,6 @@ const DeskTodayPage: React.FC<{ embedded?: boolean }> = ({ embedded = false }) =
               })
             }
           />
-
-          {/* 系统健康（整行通栏）。2026-09-17 分栏归位：候选信号→「候选信号」页签、
-              调仓计划→「手动任务」、今日执行→「持仓监控」；账户盈亏卡同屏重复已移除。 */}
-          <div className="grid grid-cols-1">
-            <HealthCard health={desk.health} />
-          </div>
-
-          {/* 副驾驶（T-P6-16）：情报事件流 + 误报标注 + 建议卡一键执行（无 mock） */}
-          <CopilotPanel />
         </>
       ) : (
         <div className="bg-gray-50 rounded-2xl border border-gray-200 p-10 text-center text-sm text-gray-500">

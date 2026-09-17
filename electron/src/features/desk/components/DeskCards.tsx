@@ -5,7 +5,7 @@
  */
 
 import React from 'react';
-import { Activity, BarChart3, HeartPulse, Wallet } from 'lucide-react';
+import { Activity, AlertTriangle, BarChart3, CheckCircle2, HeartPulse, HelpCircle, Wallet, XCircle } from 'lucide-react';
 import type { ExecutionBlock, ExecutionItem, HealthBlock, PnlBlock, SignalItem, SignalsBlock } from '../types';
 import { TermTooltip } from '../../shared/TermTooltip';
 import { EvalScoreBadge } from '../../../components/shared/EvalScoreBadge';
@@ -251,6 +251,25 @@ export const PnlCard: React.FC<{
 
 export const HealthCard: React.FC<{ health: HealthBlock | null | undefined }> = ({ health }) => {
   const items = healthItemViews(health);
+  const levelCard: Record<string, string> = {
+    ok: 'border-emerald-200/70 bg-emerald-50/40',
+    warn: 'border-amber-200/70 bg-amber-50/50',
+    fail: 'border-rose-200/70 bg-rose-50/50',
+    unknown: 'border-slate-200 bg-slate-50/60',
+  };
+  const levelText: Record<string, string> = {
+    ok: 'text-emerald-600',
+    warn: 'text-amber-600',
+    fail: 'text-rose-600',
+    unknown: 'text-slate-400',
+  };
+  const levelLabel: Record<string, string> = { ok: '正常', warn: '警告', fail: '异常', unknown: '未知' };
+  const levelIcon = (level: string) => {
+    if (level === 'ok') return <CheckCircle2 className="h-3.5 w-3.5" />;
+    if (level === 'warn') return <AlertTriangle className="h-3.5 w-3.5" />;
+    if (level === 'fail') return <XCircle className="h-3.5 w-3.5" />;
+    return <HelpCircle className="h-3.5 w-3.5" />;
+  };
   return (
     <section className={CARD}>
       <CardHeader
@@ -259,7 +278,7 @@ export const HealthCard: React.FC<{ health: HealthBlock | null | undefined }> = 
         extra={
           <span className="inline-flex items-center gap-2 text-[11px] font-medium text-slate-500">
             <span className="inline-flex items-center gap-1">
-              <span className="h-1.5 w-1.5 rounded-full bg-red-500" />
+              <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
               {health?.ok ?? 0} 正常
             </span>
             <span className="inline-flex items-center gap-1">
@@ -273,16 +292,25 @@ export const HealthCard: React.FC<{ health: HealthBlock | null | undefined }> = 
           </span>
         }
       />
-      <div className="flex flex-wrap gap-1.5 flex-1 content-start">
+      {/* 体检项卡片网格：状态图标 + 名称 + 结论 + 明细两行截断（悬停看全文/建议） */}
+      <div className="grid grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 gap-2 flex-1 content-start auto-rows-min">
         {items.map((item) => (
-          <span
+          <div
             key={item.id}
             title={`${item.detail}${item.suggestion ? `\n建议：${item.suggestion}` : ''}`}
-            className={`text-[11px] px-2 py-0.5 rounded-full border border-slate-200 bg-white inline-flex items-center gap-1.5 cursor-default hover:border-slate-300 transition-colors ${item.style.text}`}
+            className={`rounded-xl border p-2.5 min-w-0 flex flex-col gap-1 transition-all hover:shadow-sm ${levelCard[item.level] || levelCard.unknown}`}
           >
-            <span className={`h-1.5 w-1.5 rounded-full ${item.style.dot}`} />
-            {item.name}
-          </span>
+            <div className="flex items-center gap-1.5 min-w-0">
+              <span className={`shrink-0 ${levelText[item.level] || levelText.unknown}`}>{levelIcon(item.level)}</span>
+              <span className="text-[12px] font-bold text-slate-800 truncate">{item.name}</span>
+              <span className={`ml-auto shrink-0 text-[10px] font-bold ${levelText[item.level] || levelText.unknown}`}>
+                {levelLabel[item.level] || '未知'}
+              </span>
+            </div>
+            <div className="text-[10px] leading-4 text-slate-500 line-clamp-2">
+              {item.detail || '—'}
+            </div>
+          </div>
         ))}
         {items.length === 0 && <p className="text-xs text-slate-400">体检未运行（?health=false）</p>}
       </div>
