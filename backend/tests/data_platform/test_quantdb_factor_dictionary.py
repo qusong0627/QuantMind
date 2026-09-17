@@ -46,3 +46,31 @@ def test_alpha_library_names_keep_factor_number_and_no_control_chars():
     # 不同因子的显示名必须可区分
     assert definition_for("a101_001")["display_name"] != a101
     assert definition_for("gtja_001")["display_name"] != gtja
+
+
+def test_alpha158_window_family_uses_chinese_names():
+    """a158_{TOKEN}{N} 窗口族必须渲染为中文语义名（不再是「VMA 因子（30 日窗口）」）。
+
+    评估中心/特征目录直接消费这些显示名，退化模板会被用户当成"没有中文名"。
+    """
+    names = {
+        code: definition_for(code)["display_name"]
+        for code in (
+            "a158_MIN5",
+            "a158_MIN10",
+            "a158_QTLD30",
+            "a158_VMA30",
+            "a158_VMA60",
+            "a158_VSUMN60",
+            "a158_VSUMD60",
+        )
+    }
+    for code, name in names.items():
+        assert "因子（" not in str(name), f"{code} 仍是通用模板: {name}"
+        assert any("一" <= ch <= "鿿" for ch in str(name)), f"{code} 无中文: {name}"
+    # 同族不同窗口必须可区分
+    assert names["a158_VMA30"] != names["a158_VMA60"]
+    assert names["a158_MIN5"] != names["a158_MIN10"]
+    assert len(set(names.values())) == len(names)
+    # 未知 token 仍回退通用渲染（不吞代码）
+    assert "ZZZ9" in str(definition_for("a158_ZZZ9")["display_name"])

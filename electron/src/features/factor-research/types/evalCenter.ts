@@ -11,6 +11,8 @@ export interface EvalDimension {
 export interface EvalScoreRow {
   object_type: string;
   object_id: string;
+  /** 人话名（后端尽力解析：因子词典/模型元数据/回测配置/账户用户名；无 → null 由前端回退 object_id） */
+  display_name?: string | null;
   snapshot_date: string | null;
   score: number | null;
   grade: string | null;

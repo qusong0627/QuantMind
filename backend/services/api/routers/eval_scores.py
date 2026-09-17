@@ -9,7 +9,8 @@
 - 只读；前端禁止直连表（契约收口在本路由）；
 - 可见性：`tenant_id = 当前租户 AND (user_id = 当前用户 OR user_id = '')`——因子/模型等
   全租户共享行（写侧 user_id 为空）对所有用户可见，用户私有行（策略/账户/选股）仅本人可见；
-- 行数据 → 前端契约的转换纯函数化（可单测），SQL 与转换分层。
+- 行数据 → 前端契约的转换纯函数化（可单测），SQL 与转换分层；
+- 列表行附 `display_name`（人话名，尽力而为；查不到为 None，前端回退展示 object_id）。
 """
 
 from __future__ import annotations
@@ -71,6 +72,130 @@ def _validate_object_type(object_type: str) -> str:
     return ot
 
 
+# ── 展示名解析（评分卡列表 → 人话名；纯函数优先，可单测） ─────────────
+
+# 无 metadata 展示名的系统/存量模型（人工标签）
+SYSTEM_MODEL_LABELS: dict[str, str] = {
+    "model_qlib": "Qlib 集成模型（系统内置）",
+    "alpha158": "Alpha158 系统模型（系统内置）",
+    "ensemble_cn": "多模型融合（CN）",
+}
+
+_MARKET_LABELS = {"CN": "A股", "HK": "港股", "US": "美股", "CRYPTO": "加密", "FUTURES": "期货"}
+
+
+def factor_display_name(code: str) -> str | None:
+    """因子代码 → 中文名（复用引擎因子词典唯一实现；词典不可用 → None）。"""
+    if not code:
+        return None
+    try:
+        from backend.services.engine.data_platform.quantdb_factor_dictionary import (
+            definition_for,
+        )
+
+        name = str(definition_for(str(code)).get("display_name") or "").strip()
+        return name or None
+    except Exception:  # noqa: BLE001 — 词典不可用不拖垮读接口
+        logger.warning("因子词典解析失败: %s", code, exc_info=True)
+        return None
+
+
+def backtest_display_label(config: dict[str, Any] | None) -> str | None:
+    """回测配置 → 可读标签（策略名优先，其次 标的·区间）；无信息 → None。"""
+    cfg = config or {}
+    for key in ("strategy_name", "name", "title"):
+        value = str(cfg.get(key) or "").strip()
+        if value:
+            return value
+    symbol = str(cfg.get("symbol") or "").strip()
+    start = str(cfg.get("start_date") or "").strip()
+    end = str(cfg.get("end_date") or "").strip()
+    if symbol and start and end:
+        return f"回测 · {symbol} · {start} ~ {end}"
+    return None
+
+
+def account_display_label(object_id: str, username: str | None = None) -> str | None:
+    """账户 object_id（`{user}:{market}` 口径）→ 可读名。"""
+    raw = str(object_id or "").strip()
+    if not raw:
+        return None
+    user_part, _, market_part = raw.partition(":")
+    market = _MARKET_LABELS.get(market_part.upper(), market_part.upper())
+    base = f"{market} 模拟账户" if market else "模拟账户"
+    who = str(username or "").strip() or (f"用户 {user_part}" if user_part else "")
+    return f"{base}（{who}）" if who else base
+
+
+async def _resolve_display_names(
+    session: Any, object_type: str, ids: list[str]
+) -> dict[str, str | None]:
+    """object_id → display_name（尽力而为；任何子查询失败 → {}，绝不影响读接口）。"""
+    from sqlalchemy import text as _text
+
+    unique = sorted({str(i) for i in ids if str(i)})
+    if not unique:
+        return {}
+    try:
+        if object_type == "factor":
+            return {i: factor_display_name(i) for i in unique}
+        if object_type == "model":
+            names: dict[str, str | None] = {i: SYSTEM_MODEL_LABELS.get(i) for i in unique}
+            missing = [i for i in unique if names.get(i) is None]
+            if missing:
+                rows = (
+                    await session.execute(
+                        _text(
+                            "SELECT model_id, MAX(COALESCE(metadata_json->>'display_name', "
+                            "metadata_json->'model_info'->>'name')) AS label "
+                            "FROM qm_user_models WHERE model_id = ANY(:ids) GROUP BY model_id"
+                        ),
+                        {"ids": missing},
+                    )
+                ).fetchall()
+                for model_id, label in rows:
+                    if label:
+                        names[str(model_id)] = str(label).strip() or None
+            return names
+        if object_type == "strategy":
+            rows = (
+                (
+                    await session.execute(
+                        _text(
+                            "SELECT backtest_id, config_json FROM qlib_backtest_runs "
+                            "WHERE backtest_id = ANY(:ids)"
+                        ),
+                        {"ids": unique},
+                    )
+                )
+                .mappings()
+                .all()
+            )
+            cfg_by_id = {str(r["backtest_id"]): r["config_json"] for r in rows}
+            return {i: backtest_display_label(cfg_by_id.get(i)) for i in unique}
+        if object_type == "account":
+            heads = {i: i.partition(":")[0] for i in unique}
+            int_ids = [int(h) for h in heads.values() if h.isdigit()]
+            unames: dict[str, str] = {}
+            if int_ids:
+                rows = (
+                    await session.execute(
+                        _text(
+                            "SELECT CAST(id AS TEXT), username FROM users "
+                            "WHERE id = ANY(:uids) OR user_id = ANY(:utexts)"
+                        ),
+                        {"uids": int_ids, "utexts": [str(i) for i in int_ids]},
+                    )
+                ).fetchall()
+                unames = {str(r[0]): str(r[1]) for r in rows if r[1]}
+            return {i: account_display_label(i, unames.get(heads[i])) for i in unique}
+    except Exception:  # noqa: BLE001
+        logger.warning("评估展示名解析失败（object_type=%s）", object_type, exc_info=True)
+        return {}
+    # daily_selection 等：object_id 本身可读（日期），无需替换
+    return {i: None for i in unique}
+
+
 @router.get("/scores")
 async def list_scores(
     object_type: str = Query(..., description="评分卡类型"),
@@ -81,6 +206,11 @@ async def list_scores(
 ) -> dict[str, Any]:
     """评分卡最新快照列表（最新优先）。"""
     from sqlalchemy import text as _text
+
+    # 直接以 Python 调用（测试/脚本）时，未传的 Query 默认值是 Query 对象而非 None——
+    # 归一化，防止 `if object_id:` 恒真导致静默空集（HTTP 路径不受影响）。
+    if not isinstance(object_id, str):
+        object_id = None
 
     ot = _validate_object_type(object_type)
     tenant_id = str(current_user.get("tenant_id") or "default")
@@ -108,7 +238,10 @@ async def list_scores(
 
     async with get_session(read_only=True) as session:
         rows = (await session.execute(_text(sql), params)).mappings().all()
-    data = [_row_to_score(r) for r in rows]
+        data = [_row_to_score(r) for r in rows]
+        names = await _resolve_display_names(session, ot, [d["object_id"] for d in data])
+    for item in data:
+        item["display_name"] = names.get(item["object_id"])
     return {"success": True, "data": data, "meta": {"count": len(data), "object_type": ot}}
 
 

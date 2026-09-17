@@ -104,6 +104,41 @@ def test_eval_router_registered_and_visibility_clause():
         assert verb not in src
 
 
+@pytest.mark.unit
+def test_display_name_helpers():
+    """展示名纯函数（评估中心列表的人话名；2026-09-17 新增）。"""
+    from backend.services.api.routers.eval_scores import (
+        SYSTEM_MODEL_LABELS,
+        account_display_label,
+        backtest_display_label,
+        factor_display_name,
+    )
+
+    # 因子：复用引擎词典（alpha158 窗口族 / gtja 编号）
+    assert factor_display_name("a158_LOW0") == "最低相对收盘"
+    assert factor_display_name("a158_VMA30") == "30日均量比（均量/当日量）"
+    assert "GTJA191 #095" in str(factor_display_name("gtja_095"))
+    assert factor_display_name("") is None
+
+    # 模型：系统内置有标签；未知 id 由调用方回退
+    assert "Qlib" in SYSTEM_MODEL_LABELS["model_qlib"]
+
+    # 策略：策略名优先，其次 标的·区间，无信息 → None
+    assert backtest_display_label({"strategy_name": "美股多空 TopK"}) == "美股多空 TopK"
+    assert (
+        backtest_display_label(
+            {"symbol": "csi1000", "start_date": "2025-09-09", "end_date": "2026-09-09"}
+        )
+        == "回测 · csi1000 · 2025-09-09 ~ 2026-09-09"
+    )
+    assert backtest_display_label({}) is None
+
+    # 账户：{user}:{market} 口径
+    assert account_display_label("999:CN") == "A股 模拟账户（用户 999）"
+    assert account_display_label("999:CN", "张三") == "A股 模拟账户（张三）"
+    assert account_display_label("") is None
+
+
 # ── 真库 E2E ────────────────────────────────────────────────────────
 
 
@@ -178,11 +213,17 @@ async def test_eval_api_endpoints_real_db():
                 )
             await session.commit()
 
-        # 1) 网格：latest_only → 每对象一条（取最新 9/16 的 72）
+        # 1) 网格：latest_only → 每对象一条（取最新 9/16 的 72）；附 display_name 键
         listing = await list_scores(object_type="model", object_id=model_id, latest_only=True, limit=10, current_user=user)
         assert listing["success"] is True
         assert listing["meta"]["count"] == 1
         assert listing["data"][0]["score"] == 72.0
+        assert listing["data"][0]["display_name"] is None  # 随机 model_id 查不到人话名 → None 由前端回退
+
+        # 1b) 因子列表：display_name 来自引擎词典
+        from backend.services.api.routers.eval_scores import factor_display_name
+
+        assert factor_display_name("a158_QTLD30") == "30日收盘低分位"
 
         # 2) 历史：升序两根
         hist = await score_history(object_type="model", object_id=model_id, limit=10, current_user=user)

@@ -36,6 +36,64 @@ export function gradeMeta(grade: string | null | undefined, lowConfidence = fals
   };
 }
 
+/** 评级 → 主色（图表/进度条用 hex；语义遵循 A 股红涨：A 红 / B 蓝 / C 橙 / D 灰） */
+export function gradeColor(grade: string | null | undefined): string {
+  const base = String(grade || '').trim().toUpperCase().replace('†', '');
+  const colorMap: Record<string, string> = {
+    A: '#dc2626',
+    B: '#2563eb',
+    C: '#ea580c',
+    D: '#64748b',
+    L: '#d97706',
+    E: '#94a3b8',
+  };
+  return colorMap[base] || '#6366f1';
+}
+
+export interface GradeCount {
+  grade: string;
+  count: number;
+}
+
+/** 评级分布（A/B/C/D/L/E 固定顺序；未评级归 '?'；零值不出现） */
+export function gradeCounts(rows: EvalScoreRow[] | null | undefined): GradeCount[] {
+  const list = rows || [];
+  const order = ['A', 'B', 'C', 'D', 'L', 'E', '?'];
+  const tally = new Map<string, number>();
+  for (const row of list) {
+    const base = String(row.grade || '').trim().toUpperCase().replace('†', '') || '?';
+    const key = order.includes(base) ? base : '?';
+    tally.set(key, (tally.get(key) || 0) + 1);
+  }
+  return order
+    .filter((g) => (tally.get(g) || 0) > 0)
+    .map((g) => ({ grade: g, count: tally.get(g) as number }));
+}
+
+/** 平均分（只统计有效分数；一位小数；无有效分数 → null） */
+export function averageScore(rows: EvalScoreRow[] | null | undefined): number | null {
+  const scores = (rows || [])
+    .map((r) => r.score)
+    .filter((s): s is number => typeof s === 'number');
+  if (scores.length === 0) return null;
+  return Math.round((scores.reduce((a, b) => a + b, 0) / scores.length) * 10) / 10;
+}
+
+export interface RowLabels {
+  primary: string;
+  secondary: string | null;
+}
+
+/** 列表主/副标题：display_name 优先、原 id 作副标题；无名字时按类型兜底 */
+export function rowLabels(row: Pick<EvalScoreRow, 'object_type' | 'object_id' | 'display_name'>): RowLabels {
+  const name = String(row.display_name || '').trim();
+  if (name) return { primary: name, secondary: row.object_id };
+  if (row.object_type === 'strategy') {
+    return { primary: `策略回测 ${row.object_id.slice(0, 8)}…`, secondary: row.object_id };
+  }
+  return { primary: row.object_id, secondary: null };
+}
+
 export interface DimensionView {
   key: string;
   label: string;

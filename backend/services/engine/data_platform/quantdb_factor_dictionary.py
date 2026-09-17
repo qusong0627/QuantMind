@@ -175,9 +175,47 @@ def _group(column: str) -> tuple[str, str, int]:
     return "other", "其他因子", 9999
 
 
+# Alpha158 `{TOKEN}{N}` 窗口因子族的中文名（口径：Qlib Alpha158DL 标准定义，
+# 见 6_ml_datasets/alpha_library/expressions/02_alpha158.md）。{n} = 窗口天数。
+_A158_WINDOW_NAMES: dict[str, str] = {
+    "ROC": "{n}日价格动量",
+    "MA": "{n}日均线乖离",
+    "BETA": "{n}日价格斜率",
+    "RSQR": "{n}日趋势拟合优度",
+    "RESI": "{n}日趋势残差",
+    "STD": "{n}日收盘波动率",
+    "MAX": "{n}日最高价相对收盘",
+    "MIN": "{n}日最低价相对收盘",
+    "QTLU": "{n}日收盘高分位",
+    "QTLD": "{n}日收盘低分位",
+    "RANK": "{n}日收盘价排名分位",
+    "RSV": "{n}日RSV区间位置",
+    "IMAX": "最高价日位置（{n}日窗口）",
+    "IMIN": "最低价日位置（{n}日窗口）",
+    "IMXD": "高低价日间距（{n}日窗口）",
+    "CORR": "{n}日量价相关性",
+    "CORD": "{n}日收益量相关性",
+    "CNTP": "{n}日上涨天数占比",
+    "CNTN": "{n}日下跌天数占比",
+    "CNTD": "{n}日涨跌天数差",
+    "SUMP": "{n}日上涨幅度占比",
+    "SUMN": "{n}日下跌幅度占比",
+    "SUMD": "{n}日涨跌幅度差",
+    "VMA": "{n}日均量比（均量/当日量）",
+    "VSTD": "{n}日成交量波动率",
+    "WVMA": "{n}日量价波动一致性",
+    "VSUMP": "{n}日放量占比",
+    "VSUMN": "{n}日缩量占比",
+    "VSUMD": "{n}日放缩量差",
+}
+
+
 def _render_name(column: str) -> str:
     if column in _EXACT:
         return _EXACT[column][0]
+    window_match = re.fullmatch(r"a158_([A-Z]+)(\d+)", column)
+    if window_match and window_match.group(1) in _A158_WINDOW_NAMES:
+        return _A158_WINDOW_NAMES[window_match.group(1)].format(n=window_match.group(2))
     patterns = (
         (r"mom_ret_(\d+)d", "{0}日收益率"),
         (r"mom_ma_gap_(\d+)", "收盘价偏离{0}日均线"),
@@ -224,8 +262,7 @@ def _render_name(column: str) -> str:
         (r"a158_HIGH0", "最高相对收盘"),
         (r"a158_LOW0", "最低相对收盘"),
         (r"a158_VWAP0", "VWAP相对收盘"),
-        (r"a158_(ROC|MA|BETA|RSQR|RESI|STD|MAX|MIN|QTLU|QTLD|RANK|RSV|IMAX|IMIN|IMXD|CORR|CORD|CNTP|CNTN|CNTD|SUMP|SUMN|SUMD|VMA|VSTD|WVMA|VSUMP|VSUMN|VSUMD)(\d+)",
-         "{0} 因子（{1} 日窗口）"),
+        # 其余 a158_{TOKEN}{N} 窗口族见 _A158_WINDOW_NAMES
     )
     for pattern, template in patterns:
         match = re.fullmatch(pattern, column)
