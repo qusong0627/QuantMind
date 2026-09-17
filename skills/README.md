@@ -35,6 +35,7 @@ QuantBot（dsh 容器 / DeepSeek Harness）**无需安装**：docker-compose 把
 | [quantdb-fields](quantdb-fields/) | QuantDB 字段单位速查：各数据集实测单位、口径与陷阱（volume=股、amount=万元、L2 逐笔等） | 字段单位、成交量单位、数据口径、逐笔、十档盘口 |
 | [quantdb-data-structure](quantdb-data-structure/) | QuantDB 数据结构：目录组织、Hive 分区、parquet 路径、代码格式、quantdb_hub 入口、quantdb vs quantcustom | quantdb 结构、数据目录、dt 分区、parquet 路径、数据在哪里 |
 | [qwenpaw-migrate](qwenpaw-migrate/) | QwenPaw（千问）→ DSH 迁移向导：旧容器用户技能与 MCP 配置导入、核验平台技能库、停用并清理旧容器与数据卷（含整卷备份） | 迁移、QwenPaw、千问、旧数据导入、升级清理 |
+| [copilot-advice](copilot-advice/) | 副驾驶实时上下文与建议卡：工具化查询持仓/信号/告警（/api/v1/copilot/context），生成建议卡由用户一键执行（OrderRouter，source=co_pilot 留痕） | 副驾驶、实时上下文、操作建议、建议卡、持仓快照 |
 | [tdx-aidata-ops](tdx-aidata-ops/) | TdxAiData（通达信 AI 数据 SDK）通道运维：状态体检（分片/帧/热集）、订阅推送 vs 请求通道语义与配额（3 次/窗口）、SDK API 方法表、故障与证据采集（盘中零数据帧、错误码 10/13） | TdxAiData、订阅推送、行情主源、零帧、配额、Token Insufficient、错误码10/13、tdx 自检 |
 | [qmt-bridge-ops](qmt-bridge-ops/) | 大 QMT 桥运维：桥状态体检（bridge_ok/position_events/RPC 队列）、Redis 重启后离线恢复三步（清队列→QMT 重载策略→验证）、队列卫生工具（订单类硬护栏）、备源行情席语义 | QMT桥、桥离线、bridge_ok、备源席、RPC队列积压、position_events、重载策略、BIGQMT_REDIS_DRYRUN |
 

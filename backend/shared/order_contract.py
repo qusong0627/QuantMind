@@ -45,6 +45,7 @@ SOURCE_MIRROR = "mirror"
 SOURCE_SLTP = "sltp"
 SOURCE_SANDBOX = "sandbox"  # 沙箱策略信号（T-P2-01 收敛入 Router）
 SOURCE_TDX_ROLLING = "tdx_rolling"  # 通达信滚动 paper 单（T-P2-01 收敛入 Router）
+SOURCE_CO_PILOT = "co_pilot"  # 副驾驶建议卡一键执行（T-P6-16）
 
 # Fill 取价来源（REAL 侧：成交回报来自券商）
 PRICE_SOURCE_BROKER_FILL = "broker_fill"
@@ -53,6 +54,14 @@ PRICE_SOURCE_BROKER_FILL = "broker_fill"
 MAX_CLIENT_ORDER_ID_LEN = 100
 
 _ensured = False
+
+
+def build_copilot_client_order_id(advice_id: str, symbol: str, side: str) -> str:
+    """副驾驶建议执行幂等键：同建议同标的同方向 → 同键（重复点击不重复下单）。"""
+    aid = "".join(ch for ch in str(advice_id or "") if ch.isalnum())[:8] or "noadv"
+    sym = str(symbol or "").strip().upper() or "NA"
+    sd = str(side or "").strip().lower() or "na"
+    return f"cop-{aid}-{sym}-{sd}"[:MAX_CLIENT_ORDER_ID_LEN]
 
 
 def build_sim_client_order_id(run_id: str, symbol: str, side: str) -> str | None:

@@ -23,6 +23,7 @@ import { PipelineBar } from './components/PipelineBar';
 import { EvidenceMatrix } from './components/EvidenceMatrix';
 import { PlanCard } from './components/PlanCard';
 import { ExecutionCard, HealthCard, PnlCard, SignalsCard } from './components/DeskCards';
+import { CopilotPanel } from './components/CopilotPanel';
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : '请求失败';
@@ -126,7 +127,8 @@ const DeskTodayPage: React.FC<{ embedded?: boolean }> = ({ embedded = false }) =
             }
           />
 
-          {/* 对齐网格（统一 12 栅格、gap-4、卡片等高）：主行 信号(4) + 计划(8)；次行 盈亏/执行/健康（4+4+4）；包装器 flex 使卡片纵向拉伸对齐 */}
+          {/* 对齐网格（统一 12 栅格、gap-4、卡片等高）：主行 信号(4) + 计划(8)；次行 执行/健康（6+6）。
+              账户盈亏卡已移除（2026-09-17）：模拟交易顶栏「资产概览」常显同一份盈亏数字，同屏重复。 */}
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
             <div className="lg:col-span-4 grid">
               <SignalsCard
@@ -165,21 +167,8 @@ const DeskTodayPage: React.FC<{ embedded?: boolean }> = ({ embedded = false }) =
             </div>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-12 gap-4">
-            <div className="lg:col-span-4 grid">
-              <PnlCard
-                pnl={desk.pnl}
-                onDrillDown={() =>
-                  setDrawer({
-                    title: '账户盈亏 · 来源链',
-                    subtitle: '资金快照行字段分解（数字直接来自该行，不重算）',
-                    entries: pnlDrillEntries(desk.pnl) as DrillEntry[],
-                    raw: desk.pnl,
-                  })
-                }
-              />
-            </div>
-            <div className="lg:col-span-4 grid">
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
+            <div className="lg:col-span-6 grid">
               <ExecutionCard
                 execution={desk.execution}
                 onItemDrill={(item) =>
@@ -192,10 +181,13 @@ const DeskTodayPage: React.FC<{ embedded?: boolean }> = ({ embedded = false }) =
                 }
               />
             </div>
-            <div className="lg:col-span-4 grid">
+            <div className="lg:col-span-6 grid">
               <HealthCard health={desk.health} />
             </div>
           </div>
+
+          {/* 副驾驶（T-P6-16）：情报事件流 + 误报标注 + 建议卡一键执行（无 mock） */}
+          <CopilotPanel />
         </>
       ) : (
         <div className="bg-gray-50 rounded-2xl border border-gray-200 p-10 text-center text-sm text-gray-500">

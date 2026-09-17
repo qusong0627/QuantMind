@@ -22,6 +22,7 @@
 | 部署、装不上、服务起不来、数据库初始化 | `quantmind-deploy` |
 | TdxAiData、订阅推送、零帧、行情主源有没有数据、配额/错误码10/13 | `tdx-aidata-ops` |
 | QMT桥、桥离线、bridge_ok、备源席、RPC队列积压、重载策略 | `qmt-bridge-ops` |
+| 副驾驶、实时上下文、操作建议、建议卡、持仓快照、今日告警 | `copilot-advice` |
 | 训练模型、模型管理、后台数据更新、RSS | `quantmind-operations` |
 | 挖因子、因子演化、RD-Agent、alpha | `rd-agent-factor-mining` |
 | 模拟交易、下单、持仓、资金 | `simulation-trading` |
@@ -43,7 +44,7 @@
 | 联网搜索、查网页、找现成技能 | `tavily-search`、`web-search`、`find-skills` |
 | 迁移、旧 QwenPaw/千问数据、升级后导入旧技能/MCP、停掉千问 | `qwenpaw-migrate` |
 
-完整技能清单（97 个）见 `/root/.dsh/skills/`（= 仓库 `skills/`，索引见 `skills/README.md`）。没有匹配的技能时，用工具自己查，别硬套。
+完整技能清单（98 个）见 `/root/.dsh/skills/`（= 仓库 `skills/`，索引见 `skills/README.md`）。没有匹配的技能时，用工具自己查，别硬套。
 
 ## 平台连接信息
 
