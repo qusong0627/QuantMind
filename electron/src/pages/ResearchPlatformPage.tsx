@@ -403,11 +403,26 @@ const CATEGORICAL_COLUMNS = new Set(['sector', 'status']);
 /** 表头高度兜底值：首帧还没有 .ant-table-header 时用它估算表体高度 */
 const TABLE_HEADER_FALLBACK_HEIGHT = 46;
 
+/** 表体高度下限：首帧还没量出来时的兜底，虚拟滚动也要求 scroll.y 必须是数字 */
+const TABLE_BODY_MIN_HEIGHT = 160;
+
 /** 可见列选择的持久化键：刷新/切页后保持同一套列 */
 const COLUMN_PREF_STORAGE_KEY = 'qm:research:visible-columns';
 
 /** 固定显示的列（表格标识列，不允许隐藏） */
 const ALWAYS_VISIBLE_COLUMNS = new Set(['stock']);
+
+/** 滚动续页：距底部多少像素内算「滚到底」 */
+const AUTO_LOAD_TRIGGER_GAP_PX = 320;
+
+/** 滚动续页：节流窗口。窗口内的滚动信号合并成一次续页，窗口结束时补加载 */
+const AUTO_LOAD_THROTTLE_MS = 260;
+
+/** 滚动续页：一次至少续这么多行（默认每页 20 条，即一次续一页；每页 10 条时会一次续两页） */
+const AUTO_LOAD_MIN_ROWS = 20;
+
+/** 虚拟滚动没有原生 scroll 事件，改为轮询「已加载的最后一行是否已渲染」，这是轮询间隔 */
+const AUTO_LOAD_POLL_MS = 200;
 
 /** 读取上次的列选择；缺失/损坏/全空时回退为全量列 */
 const readStoredColumns = (allKeys: string[]): string[] => {
@@ -1096,7 +1111,7 @@ export const ResearchPlatformPage: React.FC = () => {
 
   // ---- 分页状态 ----
   const [candidatePage, setCandidatePage] = React.useState<number>(1);
-  const [candidatePageSize, setCandidatePageSize] = React.useState<number>(10);
+  const [candidatePageSize, setCandidatePageSize] = React.useState<number>(20);
   const [watchlistPage, setWatchlistPage] = React.useState<number>(1);
   const [watchlistPageSize, setWatchlistPageSize] = React.useState<number>(12);
   const [poolPage, setPoolPage] = React.useState<number>(1);
@@ -1746,13 +1761,29 @@ export const ResearchPlatformPage: React.FC = () => {
 
   /* 候选池无限滚动：从「当前页」起连续渲染 candidateLoadedPages 页，滚到底自动再续一页 */
   const [candidateLoadedPages, setCandidateLoadedPages] = React.useState<number>(1);
-  /** 滚动事件很密，用时间戳节流，避免一次甩到底连跳好几页 */
+  /** 上一轮续页的时间戳：滚动事件很密，靠它做节流 */
   const lastAutoLoadAt = React.useRef<number>(0);
+  /** 已排队的续页定时器 + 待办标记：节流窗口内被挡下的信号要在窗口结束时补加载 */
+  const autoLoadTimer = React.useRef<number | null>(null);
+  const autoLoadPending = React.useRef<boolean>(false);
 
-  // 换筛选/换页/换数据源都回到「只加载一页」
+  // 换筛选/换页/换数据源都回到「只加载一页」，并丢掉还在排队的续页
   React.useEffect(() => {
     setCandidateLoadedPages(1);
+    autoLoadPending.current = false;
+    if (autoLoadTimer.current !== null) {
+      window.clearTimeout(autoLoadTimer.current);
+      autoLoadTimer.current = null;
+    }
   }, [filteredRows, candidatePage, candidatePageSize, activeDataSource]);
+
+  // 卸载时清掉未触发的定时器，避免对已卸载组件 setState
+  React.useEffect(
+    () => () => {
+      if (autoLoadTimer.current !== null) window.clearTimeout(autoLoadTimer.current);
+    },
+    []
+  );
 
   // 列显示只作用于候选池宽表，切到自选/研究池时收起
   React.useEffect(() => {
@@ -1771,7 +1802,7 @@ export const ResearchPlatformPage: React.FC = () => {
       // 有 scroll.y 之后表格拆成表头 + 表体两段，剩余高度就是表体可用高度
       const head = host.querySelector<HTMLElement>('.ant-table-header');
       const headHeight = head ? head.offsetHeight : TABLE_HEADER_FALLBACK_HEIGHT;
-      const next = Math.max(160, Math.round(host.clientHeight - headHeight));
+      const next = Math.max(TABLE_BODY_MIN_HEIGHT, Math.round(host.clientHeight - headHeight));
       if (Math.abs(next - tableBodyHeightRef.current) <= 1) return;
       tableBodyHeightRef.current = next;
       setTableBodyHeight(next);
@@ -2651,17 +2682,86 @@ export const ResearchPlatformPage: React.FC = () => {
   const candidateTotalPages = activePager.totalPages;
   const candidateLoadedThrough = Math.min(candidatePage - 1 + candidateLoadedPages, candidateTotalPages);
 
+  /* 定时器里读到的是「最新」续页进度（闭包里的值在排队期间会过期） */
+  const autoLoadInfoRef = React.useRef<{ page: number; pageSize: number; loadedPages: number; totalPages: number }>({
+    page: candidatePage,
+    pageSize: candidatePageSize,
+    loadedPages: candidateLoadedPages,
+    totalPages: candidateTotalPages,
+  });
+  React.useEffect(() => {
+    autoLoadInfoRef.current = {
+      page: candidatePage,
+      pageSize: candidatePageSize,
+      loadedPages: candidateLoadedPages,
+      totalPages: candidateTotalPages,
+    };
+  }, [candidatePage, candidatePageSize, candidateLoadedPages, candidateTotalPages]);
+
+  /** 真正续页：按页大小一次续够 AUTO_LOAD_MIN_ROWS 行，已到最后一页就不再排队 */
+  const flushAutoLoad = (): void => {
+    autoLoadTimer.current = null;
+    if (!autoLoadPending.current) return;
+    autoLoadPending.current = false;
+    const info = autoLoadInfoRef.current;
+    const loadedThrough = Math.min(info.page - 1 + info.loadedPages, info.totalPages);
+    const remain = info.totalPages - loadedThrough;
+    if (remain <= 0) return;
+    const pagesPerLoad = Math.max(1, Math.ceil(AUTO_LOAD_MIN_ROWS / Math.max(1, info.pageSize)));
+    lastAutoLoadAt.current = Date.now();
+    setCandidateLoadedPages(info.loadedPages + Math.min(pagesPerLoad, remain));
+  };
+
+  /**
+   * 排队一次续页：节流窗口内的多次信号合并成一次，窗口结束时必定补加载。
+   * 注意不能只做「前缘节流」——滚到底后内容不再变化，就不会再冒新的滚动信号，
+   * 被挡掉的那次如果不补加载，界面就永远停在「已加载 N/50 页」不动（表现为卡住）。
+   */
+  const scheduleAutoLoad = (): void => {
+    autoLoadPending.current = true;
+    if (autoLoadTimer.current !== null) return;
+    const wait = Math.max(0, AUTO_LOAD_THROTTLE_MS - (Date.now() - lastAutoLoadAt.current));
+    autoLoadTimer.current = window.setTimeout(flushAutoLoad, wait);
+  };
+
+  /** 原生滚动条模式：表体滚到接近底部即续页 */
   const handleTableScroll = (event: React.UIEvent<HTMLDivElement>): void => {
     if (activeDataSource !== 'candidates') return;
     const el = event.currentTarget;
-    // 距底部 240px 内即视为「滚到底」
-    if (el.scrollHeight - el.scrollTop - el.clientHeight > 240) return;
-    if (candidateLoadedThrough >= candidateTotalPages) return;
-    const now = Date.now();
-    if (now - lastAutoLoadAt.current < 400) return;
-    lastAutoLoadAt.current = now;
-    setCandidateLoadedPages(candidateLoadedPages + 1);
+    if (el.scrollHeight - el.scrollTop - el.clientHeight > AUTO_LOAD_TRIGGER_GAP_PX) return;
+    scheduleAutoLoad();
   };
+
+  /* 候选池用虚拟滚动（行多列宽，全量渲染会随加载页数变卡）。
+     虚拟滚动没有原生 scroll 事件，改为看「已加载的最后一行有没有被渲染出来」：
+     它出现在 DOM 里，就说明视口已经滚到已加载数据的底部。 */
+  const lastLoadedRowKey = visibleCandidateRows.length
+    ? String(visibleCandidateRows[visibleCandidateRows.length - 1].key)
+    : '';
+  const lastLoadedRowKeyRef = React.useRef<string>('');
+  React.useEffect(() => {
+    lastLoadedRowKeyRef.current = lastLoadedRowKey;
+  }, [lastLoadedRowKey]);
+
+  React.useEffect(() => {
+    if (activeDataSource !== 'candidates') return undefined;
+    const timer = window.setInterval(() => {
+      const targetKey = lastLoadedRowKeyRef.current;
+      const host = tableHostRef.current;
+      if (!targetKey || !host) return;
+      const info = autoLoadInfoRef.current;
+      // 已经加载到最后一行就没什么可续的了，别再空转
+      if (Math.min(info.page - 1 + info.loadedPages, info.totalPages) >= info.totalPages) return;
+      const rendered = host.querySelectorAll<HTMLElement>('[data-row-key]');
+      for (let index = 0; index < rendered.length; index += 1) {
+        if (rendered[index].dataset.rowKey === targetKey) {
+          scheduleAutoLoad();
+          return;
+        }
+      }
+    }, AUTO_LOAD_POLL_MS);
+    return () => window.clearInterval(timer);
+  }, [activeDataSource]);
 
   return (
     <>
@@ -3330,7 +3430,10 @@ export const ResearchPlatformPage: React.FC = () => {
                             columns={columns}
                             dataSource={visibleCandidateRows}
                             pagination={false}
-                            scroll={{ x: candidateScrollX, y: tableBodyHeight || undefined }}
+                            /* 虚拟滚动：行数随续页增长到 500 行 × 41 列，全量渲染会越来越卡；
+                               只渲染视口内的行，DOM 大小与加载页数无关。表体高度必须是数字。 */
+                            virtual
+                            scroll={{ x: candidateScrollX, y: tableBodyHeight || TABLE_BODY_MIN_HEIGHT }}
                             onScroll={handleTableScroll}
                             size="middle"
                             locale={{ emptyText: <Empty description="暂无符合条件的候选个股。" /> }}

@@ -41,3 +41,12 @@ html, body, #root {
   overflow-x: scroll !important;
   scrollbar-width: thin;
 }
+
+/*
+ * 候选池表开了虚拟滚动（virtual），横条改由 rc-virtual-list 自己画的浮层承担：
+ * 它叠在表体底部（position: absolute; bottom: 0; height: 8px），拖动、滚轮左右都能用，
+ * 但默认静止一会儿就 visibility: hidden 自己藏起来。宽表要一直能左右拖，这里强制常驻。
+ */
+.research-next-table .ant-table-tbody-virtual-scrollbar {
+  visibility: visible !important;
+}
