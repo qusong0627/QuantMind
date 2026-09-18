@@ -31,6 +31,7 @@ QuantBot（dsh 容器 / DeepSeek Harness）**无需安装**：docker-compose 把
 |------|------|-----------|
 | [quantmind-operations](quantmind-operations/) | 平台运营总指南：模型训练（5 步流程）、模型管理、后台数据更新、RSS 新闻对接 | 模型训练、数据更新、RSS、新闻分析 |
 | [quantmind-deploy](quantmind-deploy/) | 部署运维：一键/快速/手动部署、数据库初始化、健康检查、问题排查、AutoDL 云端 GPU 训练 | 部署、一键部署、部署失败、装不上 |
+| [portable-pack-update](portable-pack-update/) | 一键启动包（便携包/免 Docker）更新：更新类型判断、后端/web 补丁包生成与套用、stop→start 重启与验证口径 | 便携包、升级包、覆盖前端、补丁包、重启便携包 |
 | [quantdb-sdk](quantdb-sdk/) | QuantDB 数据 SDK：API Key 配置、数据集目录、字段查询、K线/财务/因子远程查询 | quantdb、数据key、数据集、查询K线 |
 | [quantdb-fields](quantdb-fields/) | QuantDB 字段单位速查：各数据集实测单位、口径与陷阱（volume=股、amount=万元、L2 逐笔等） | 字段单位、成交量单位、数据口径、逐笔、十档盘口 |
 | [quantdb-data-structure](quantdb-data-structure/) | QuantDB 数据结构：目录组织、Hive 分区、parquet 路径、代码格式、quantdb_hub 入口、quantdb vs quantcustom | quantdb 结构、数据目录、dt 分区、parquet 路径、数据在哪里 |
