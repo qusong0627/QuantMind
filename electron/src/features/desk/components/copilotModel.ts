@@ -35,7 +35,7 @@ export interface CopilotAdvice {
   status: string;
   created_at: string;
   execution?: Array<{ symbol: string; side: string; success: boolean; message?: string; duplicate?: boolean }> | null;
-  /** 兑现结果（决策日收盘→T+h 收盘，超额 vs 沪深300；回填每日 16:15） */
+  /** 兑现结果（决策日收盘→T+h 收盘，超额 vs 沪深300；次日凌晨回填） */
   outcome?: {
     base_date?: string;
     benchmark?: string;
@@ -184,7 +184,7 @@ export function adviceStatsLine(stats: AdviceStats | null): string {
   const head = `近 ${stats.days ?? 90} 天：发出 ${total} · 已决 ${stats.decided ?? 0}（执行 ${stats.executed ?? 0} / 拒绝 ${stats.rejected ?? 0}）`;
   const t1 = stats.by_horizon?.['1'];
   if (!stats.scored || !t1 || !t1.n) {
-    return `${head} · 兑现回填每日 16:15 产出`;
+    return `${head} · 兑现回填次日凌晨产出`;
   }
   const rate =
     t1.hit_rate === null || t1.hit_rate === undefined

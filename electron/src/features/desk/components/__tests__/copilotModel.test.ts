@@ -108,7 +108,7 @@ describe('copilotModel', () => {
       rejected: 0,
       scored: 0,
     });
-    expect(waiting).toContain('兑现回填每日 16:15 产出');
+    expect(waiting).toContain('兑现回填次日凌晨产出');
     expect(adviceStatsLine(null)).toContain('暂不可用');
   });
 
