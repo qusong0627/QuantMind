@@ -19,6 +19,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
+from backend.shared.simulation_account_keys import resolve_db_account_user
 from backend.shared.stock_utils import StockCodeUtil
 from backend.services.live_trading.services.tdx_push_service import tdx_pusher
 
@@ -757,7 +758,7 @@ async def run_tdx_quote_feed_task(interval: float = POLL_INTERVAL):
         logger.info("[TdxFeed] TDX_BRIDGE_URL/TOKEN 未配置，行情 Feed 跳过")
         return
     tenant_id = "default"
-    user_id = os.getenv("TDX_ACCOUNT_USER_ID", "00000001")
+    user_id = resolve_db_account_user("TDX_ACCOUNT_USER_ID")
     try:
         await ensure_tdx_quote_tables()
         await restore_open_sessions()

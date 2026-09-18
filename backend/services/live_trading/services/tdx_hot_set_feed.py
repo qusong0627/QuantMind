@@ -225,6 +225,13 @@ async def run_tdx_hot_set_feed_task() -> None:
     backoff = 0.0
     while True:
         try:
+            # 调度心跳（T-P1-06）：每次循环写入（含盘外低频探测），体检 C07 依此判活
+            try:
+                from backend.shared.scheduler_registry import heartbeat as _sched_heartbeat
+
+                _sched_heartbeat("tdx_hot_set_feed")
+            except Exception:  # noqa: BLE001 - best-effort
+                pass
             if not is_trading_time(_now_sh()):
                 _flush_archiver_if_pending()  # 收市终刷（缓冲不跨场次滞留）
                 await asyncio.sleep(OFF_HOURS_SLEEP)

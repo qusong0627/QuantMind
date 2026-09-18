@@ -29,6 +29,7 @@ from backend.services.live_trading.services.tdx_l2_capture_task import (
     _REALTIME_KEY,
 )
 from backend.services.live_trading.services.tdx_push_service import tdx_pusher
+from backend.shared.simulation_account_keys import resolve_db_account_user
 from backend.shared.stock_utils import StockCodeUtil
 
 logger = logging.getLogger(__name__)
@@ -561,7 +562,8 @@ async def run_tdx_l2_realtime_task(interval_sec: int = 0) -> None:
     )
 
     svc = TdxRollingTradeService()
-    tenant_id, user_id = "default", "00000001"
+    # 账户名唯一口径：规范名 10000001（前端配置/分数/模拟盘均按规范名读写）
+    tenant_id, user_id = "default", resolve_db_account_user("TDX_ACCOUNT_USER_ID")
     base_interval = float(interval_sec or 0)
     realtime_status["running"] = True
     realtime_status["started_at"] = datetime.now().isoformat(timespec="seconds")

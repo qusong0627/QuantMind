@@ -46,6 +46,7 @@ from backend.services.live_trading.services.trading_session import (
     is_trading_time,
     trade_date_str,
 )
+from backend.shared.simulation_account_keys import resolve_db_account_user
 from backend.shared.stock_utils import StockCodeUtil
 
 logger = logging.getLogger(__name__)
@@ -685,7 +686,7 @@ def notify(*, title: str, content: str, level: str = "warning") -> None:
 
         asyncio.create_task(
             publish_notification_async(
-                user_id=os.getenv("MIRROR_NOTIFY_USER_ID", "00000001"),
+                user_id=resolve_db_account_user("MIRROR_NOTIFY_USER_ID"),
                 tenant_id="default",
                 title=title,
                 content=content,

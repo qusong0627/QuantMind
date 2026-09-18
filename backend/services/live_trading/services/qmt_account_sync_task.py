@@ -19,6 +19,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any
 
+from backend.shared.simulation_account_keys import resolve_db_account_user
 from backend.services.live_trading.services.qmt_exec_client import (
     QmtExecClient,
     QmtExecError,
@@ -333,7 +334,8 @@ async def run_qmt_account_sync_task(interval_seconds: int = 30) -> None:
                 continue
             result = await qmt_account_sync.sync_account_to_pg(
                 tenant_id="default",
-                user_id=os.getenv("QMT_EXEC_ACCOUNT_USER_ID", "00000001"),
+                # 账户名唯一口径：规范名 10000001（与 TDX 链路/前端读侧一致）
+                user_id=resolve_db_account_user("QMT_EXEC_ACCOUNT_USER_ID"),
             )
             health.record(result)
             _maybe_alert_stale(

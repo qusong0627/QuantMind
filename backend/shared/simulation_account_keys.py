@@ -11,6 +11,8 @@
 
 from __future__ import annotations
 
+import os
+
 ACCOUNT_KEY_PREFIX = "simulation:account:"
 SETTINGS_KEY_PREFIX = "simulation:settings:"
 
@@ -228,6 +230,17 @@ def normalize_runtime_user(raw_user_id: object) -> str:
     if is_admin_sim_user(raw):
         return CANONICAL_ADMIN_SIM_USER
     return raw.zfill(8) if raw.isdigit() else raw
+
+
+def resolve_db_account_user(env_var: str, default: str = CANONICAL_ADMIN_SIM_USER) -> str:
+    """实盘/账户后台链路的 DB user_id 唯一解析（TDX/QMT 循环共用）。
+
+    env 未配置/为空用规范名（管理员族 10000001）；配置了老口径
+    （00000001/1/admin）也经 normalize_runtime_user 收口，避免后台循环
+    与前端（JWT 规范化后 10000001）各写各的账户名（曾致委托落库唯一键
+    冲突刷屏 + 账户快照写到前端看不见的账户下）。
+    """
+    return normalize_runtime_user(os.getenv(env_var, "") or default)
 
 
 def normalize_runtime_tenant(tenant_id: object) -> str:

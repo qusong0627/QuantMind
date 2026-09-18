@@ -26,6 +26,7 @@ from typing import Any
 from sqlalchemy import text
 
 from backend.shared.database_manager_v2 import get_session
+from backend.shared.simulation_account_keys import resolve_db_account_user
 from backend.shared.stock_utils import StockCodeUtil
 from backend.services.trade_shared.redis_client import redis_client as trade_redis
 
@@ -576,7 +577,8 @@ async def run_tdx_l2_capture_task(interval_sec: int = 0) -> None:
             scores = {}
             try:
                 _, scores, _ = await svc.load_latest_scores(
-                    tenant_id="default", user_id="00000001"
+                    tenant_id="default",
+                    user_id=resolve_db_account_user("TDX_ACCOUNT_USER_ID"),
                 )
             except Exception as exc:
                 logger.warning("[TdxL2] 拉取推理分数失败(用缓存候选池): %s", exc)
@@ -590,7 +592,9 @@ async def run_tdx_l2_capture_task(interval_sec: int = 0) -> None:
                 logger.warning("[TdxL2] %s", l2_status["last_error"])
             paper_positions: list[dict[str, Any]] = []
             try:
-                paper_positions, _ = await svc.load_positions_from_paper("default", "00000001")
+                paper_positions, _ = await svc.load_positions_from_paper(
+                    "default", resolve_db_account_user("TDX_ACCOUNT_USER_ID")
+                )
             except Exception as exc:
                 logger.warning("[TdxL2] 模拟盘持仓查询失败: %s", exc)
             watchlist = _resolve_watchlist(scores, tdx_positions, paper_positions, pool_size)
