@@ -243,13 +243,19 @@ export const CopilotPanel: React.FC = () => {
                 {item.rationale && (
                   <div className="mt-1 text-[11px] text-slate-500">{item.rationale}</div>
                 )}
-                <ul className="mt-1 space-y-0.5">
-                  {item.actions.map((action, idx) => (
-                    <li key={`${item.advice_id}-${idx}`} className="font-mono text-[11px] text-slate-600">
-                      · {actionLine(action)}
-                    </li>
-                  ))}
-                </ul>
+                {item.actions.length > 0 ? (
+                  <ul className="mt-1 space-y-0.5">
+                    {item.actions.map((action, idx) => (
+                      <li key={`${item.advice_id}-${idx}`} className="font-mono text-[11px] text-slate-600">
+                        · {actionLine(action)}
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <div className="mt-1 text-[10px] text-slate-400">
+                    纯建议（无动作）——仅供决策参考，不可一键执行
+                  </div>
+                )}
                 {item.execution && item.execution.length > 0 && (
                   <div className="mt-1 space-y-0.5">
                     {item.execution.map((exec, idx) => (
@@ -262,14 +268,16 @@ export const CopilotPanel: React.FC = () => {
                 )}
                 {isPending && (
                   <div className="mt-2 flex gap-2">
-                    <button
-                      type="button"
-                      disabled={busy === item.advice_id}
-                      onClick={() => void onExecute(item.advice_id)}
-                      className="rounded-lg bg-blue-600 px-3 py-1 text-[11px] font-semibold text-white hover:bg-blue-500 disabled:opacity-50"
-                    >
-                      {busy === item.advice_id ? '执行中…' : '一键执行（OrderRouter）'}
-                    </button>
+                    {item.actions.length > 0 && (
+                      <button
+                        type="button"
+                        disabled={busy === item.advice_id}
+                        onClick={() => void onExecute(item.advice_id)}
+                        className="rounded-lg bg-blue-600 px-3 py-1 text-[11px] font-semibold text-white hover:bg-blue-500 disabled:opacity-50"
+                      >
+                        {busy === item.advice_id ? '执行中…' : '一键执行（OrderRouter）'}
+                      </button>
+                    )}
                     <button
                       type="button"
                       disabled={busy === item.advice_id}

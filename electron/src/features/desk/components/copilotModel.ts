@@ -40,7 +40,16 @@ export interface CopilotAdvice {
 export interface CopilotPanel {
   as_of?: string;
   events?: { available?: boolean; items?: CopilotEvent[]; reason?: string; source?: string };
-  latency?: { available?: boolean; market_snapshot?: Record<string, number | null> | null; reason?: string };
+  latency?: {
+    available?: boolean;
+    /** 展示档（_fresh 口径，行情到达时延） */
+    display?: Record<string, number | null> | null;
+    display_stage?: string;
+    market_snapshot_bridge_fresh?: Record<string, number | null> | null;
+    market_snapshot_fresh?: Record<string, number | null> | null;
+    market_snapshot?: Record<string, number | null> | null;
+    reason?: string;
+  };
   budget?: { available?: boolean; detail?: Record<string, unknown> | null; reason?: string };
   miss_rate?: { available?: boolean; miss_rate?: number | null; filled?: number; hit?: number; reason?: string };
 }
@@ -118,7 +127,8 @@ export function panelMetrics(panel: CopilotPanel | null): {
   budgetText: string;
 } {
   if (!panel) return { latencyP95: '—', latencyP95Ms: null, missRate: '—', events: 0, budgetText: '—' };
-  const p95 = panel.latency?.market_snapshot?.p95_ms;
+  const p95 =
+    panel.latency?.display?.p95_ms ?? panel.latency?.market_snapshot?.p95_ms;
   const miss = panel.miss_rate?.miss_rate;
   const detail = panel.budget?.detail as Record<string, unknown> | null | undefined;
   const budgetText = detail
