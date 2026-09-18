@@ -4,8 +4,8 @@
  * 用法：QM_BASE=http://localhost:3080 node tests/inference-center.e2e.mjs
  *      QM_MARKETS=US 只跑部分市场
  *
- * 走真实用户路径：登录 → 切市场 → 进「推理中心」→ 截面推理 Tab → 个股预测 Tab
- * （搜标的 → 选建议 → 开始个股推理 → 断言 K 线与结果块）。
+ * 走真实用户路径：登录 → 切市场 → 进「推理中心」→ 断言同屏双栏
+ * （左栏截面推理 + 右栏个股预测同时在，无需切 Tab）→ 搜标的 → 选建议 → 断言 K 线与结果块。
  */
 import { chromium } from 'playwright';
 
@@ -94,21 +94,18 @@ for (const mk of TO_RUN) {
   let f = flat(await p.locator('body').innerText().catch(() => ''));
   check(f.includes(mk.label), `市场标识「${mk.label}」（三个市场各渲染自己的页面）`);
 
-  // ── Tab 1：市场截面推理 ──
-  const crossTab = p.locator('button', { hasText: '市场截面推理' }).first();
-  await crossTab.click({ timeout: 8000 }).catch(() => {});
+  // ── 同屏双栏：左栏截面推理 + 右栏个股预测同时在场 ──
   await p.waitForTimeout(6000);
   f = flat(await p.locator('body').innerText().catch(() => ''));
-  check(f.includes('推理历史') || f.includes('单日推理'), '截面 Tab 渲染出二级导航');
-  check(!f.includes('加载中…') || f.includes('模型'), '截面 Tab 内容非空');
+  check(f.includes('推理前置预检'), '左栏渲染出推理前置预检');
+  check(f.includes('手动推理执行'), '左栏渲染出手动推理执行');
+  check(f.includes('本次推理排名'), '左栏渲染出本次推理排名');
+  check(f.includes('推理历史'), '左栏渲染出推理历史入口');
+  check(!f.includes('市场截面推理') && !f.includes('个股预测推理'), '顶层 Tab 已移除（两个模块同屏，无 Tab 切换）');
 
-  // ── Tab 2：个股预测推理 ──
-  const indTab = p.locator('button', { hasText: '个股预测推理' }).first();
-  await indTab.click({ timeout: 8000 }).catch(() => {});
-  await p.waitForTimeout(4000);
   const input = p.locator('input[placeholder*="搜索"]').first();
   const hasInput = (await input.count()) > 0;
-  check(hasInput, '个股预测 Tab 渲染出标的输入框');
+  check(hasInput, '右栏个股预测标的输入框与左栏同时在屏');
   if (!hasInput) continue;
 
   await input.click();
@@ -135,7 +132,7 @@ for (const mk of TO_RUN) {
   check(canvases > 0, `K 线/预测图 canvas 已渲染（${canvases} 个）`);
   check(f.includes('模型信号分数'), '结果区渲染出模型信号分数');
   check(!f.includes('推理接口异常'), '未出现推理接口异常提示');
-  check(f.includes('多维量化分析') === false, '结果区已从空态切换到数据态');
+  check(f.includes('这里会直接出该股的预测与因子归因') === false, '结果区已从空态切换到数据态');
 }
 
 console.log('\n---- 接口调用 ----');

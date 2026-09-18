@@ -27,7 +27,7 @@ interface Props {
 const MetricCell: React.FC<{ label: string; value: string; valueClass?: string; sub?: string }> = ({
   label, value, valueClass, sub,
 }) => (
-  <div className="rounded-2xl border border-slate-100 bg-slate-50/60 p-3 text-center">
+  <div className="rounded-xl border border-slate-200 bg-white p-3 text-center">
     <div className="text-xs font-bold text-slate-500 mb-1">{label}</div>
     <div className={clsx('font-mono font-black text-lg leading-none', valueClass || 'text-slate-800')}>{value}</div>
     {sub && <div className="text-[11px] text-slate-400 mt-1">{sub}</div>}
@@ -183,69 +183,70 @@ export const InferenceRunDetailView: React.FC<Props> = ({ runId, result, loading
   };
 
   return (
-    <div className="space-y-4">
-      {/* 页头：返回 + 标题 + 导出 */}
-      <div className="glass-panel rounded-3xl p-5 border border-slate-100/50">
-        <div className="flex items-center gap-3">
-          <Button
-            size="small"
-            icon={<ArrowLeft size={13} />}
-            onClick={onBack}
-            className="rounded-xl h-8 px-3 text-xs font-bold border-slate-200 flex-shrink-0"
-          >
-            返回列表
-          </Button>
-          <div className="w-10 h-10 bg-blue-50 rounded-2xl flex items-center justify-center text-blue-600 shadow-sm border border-blue-100/50 flex-shrink-0">
-            <TrendingUp size={18} />
-          </div>
-          <div className="flex flex-col min-w-0 flex-1">
-            <span className="font-black text-slate-800 text-lg tracking-tight leading-none truncate">排名结果</span>
-            <span className="text-xs font-bold text-slate-400 mt-1 uppercase tracking-widest truncate font-mono">
-              {runId} · {result?.target_date ? `目标交易日 ${result.target_date}` : '加载中…'}
-            </span>
-          </div>
-          {onNavigateDate && (
-            <div className="flex items-center gap-1.5 flex-shrink-0">
-              <Tooltip title="前一天">
-                <Button size="small" icon={<ArrowLeft size={13} />} className="rounded-xl h-8 w-8 p-0 text-xs font-bold border-slate-200" onClick={() => handleShiftDate(-1)} />
-              </Tooltip>
-              <DatePicker
-                size="small"
-                value={datePickerValue}
-                onChange={handlePickDate}
-                allowClear={false}
-                placeholder="选日期"
-                className="rounded-xl !text-xs !w-28"
-              />
-              <Tooltip title="后一天">
-                <Button size="small" icon={<ArrowRight size={13} />} className="rounded-xl h-8 w-8 p-0 text-xs font-bold border-slate-200" onClick={() => handleShiftDate(1)} />
-              </Tooltip>
-            </div>
-          )}
-          {result?.summary?.status === 'failed' && onRetry && (
-            <Tooltip title="重新加载">
-              <Button size="small" icon={<Search size={13} />} onClick={onRetry} className="rounded-xl text-xs font-bold h-8 px-3">
-                重试
-              </Button>
+    <div className="p-4 space-y-3">
+      {/* 工具条：返回 + 身份 + 日期导航 + 导出（一条，不再占用一整张卡的高度） */}
+      {/* pr-12：给弹窗右上角浮动的关闭 X 留位 */}
+      <div className="flex items-center gap-3 h-10 pl-3 pr-12 rounded-xl bg-white border border-slate-200">
+        <Button
+          size="small"
+          icon={<ArrowLeft size={13} />}
+          onClick={onBack}
+          className="rounded-md h-7 px-2.5 text-[11px] font-bold border-slate-200 flex-shrink-0"
+        >
+          返回列表
+        </Button>
+
+        <div className="flex items-baseline gap-2 min-w-0 flex-1">
+          <span className="text-sm font-black text-slate-800 tracking-tight leading-none shrink-0">排名结果</span>
+          <span className="text-[11px] text-slate-400 font-mono truncate">
+            {result?.target_date ? `目标交易日 ${result.target_date}` : '加载中…'}
+            <span className="text-slate-300"> · </span>{runId}
+          </span>
+        </div>
+
+        {onNavigateDate && (
+          <div className="flex items-center gap-1 flex-shrink-0">
+            <Tooltip title="前一天">
+              <Button size="small" icon={<ArrowLeft size={12} />} className="rounded-md h-7 w-7 p-0 border-slate-200" onClick={() => handleShiftDate(-1)} />
             </Tooltip>
-          )}
-          <Tooltip title={!result?.rankings?.length ? '当前没有可导出的排名数据' : '导出当前排名结果为 CSV'}>
-            <Button
-              type="default"
-              icon={<Download size={14} className={exporting ? 'animate-pulse' : ''} />}
-              className="rounded-xl h-9 px-4 font-black border-slate-200 text-xs shadow-sm hover:translate-y-[-1px] transition-all flex-shrink-0"
-              disabled={exporting || !result || !result.rankings?.length}
-              loading={exporting}
-              onClick={handleExport}
-            >
-              {exporting ? '导出中...' : '导出 CSV'}
+            <DatePicker
+              size="small"
+              value={datePickerValue}
+              onChange={handlePickDate}
+              allowClear={false}
+              placeholder="选日期"
+              className="rounded-md !text-xs !w-28"
+            />
+            <Tooltip title="后一天">
+              <Button size="small" icon={<ArrowRight size={12} />} className="rounded-md h-7 w-7 p-0 border-slate-200" onClick={() => handleShiftDate(1)} />
+            </Tooltip>
+          </div>
+        )}
+
+        {result?.summary?.status === 'failed' && onRetry && (
+          <Tooltip title="重新加载">
+            <Button size="small" icon={<Search size={12} />} onClick={onRetry} className="rounded-md h-7 px-2.5 text-[11px] font-bold flex-shrink-0">
+              重试
             </Button>
           </Tooltip>
-        </div>
+        )}
+
+        <Tooltip title={!result?.rankings?.length ? '当前没有可导出的排名数据' : '导出当前排名结果为 CSV'}>
+          <Button
+            size="small"
+            icon={<Download size={13} className={exporting ? 'animate-pulse' : ''} />}
+            className="rounded-md h-7 px-2.5 font-bold border-slate-200 text-[11px] flex-shrink-0"
+            disabled={exporting || !result || !result.rankings?.length}
+            loading={exporting}
+            onClick={handleExport}
+          >
+            {exporting ? '导出中...' : '导出 CSV'}
+          </Button>
+        </Tooltip>
       </div>
 
       {loading ? (
-        <div className="glass-panel rounded-3xl p-10 border border-slate-100/50 flex items-center justify-center">
+        <div className="rounded-xl p-10 bg-white border border-slate-200 flex items-center justify-center">
           <div className="flex flex-col items-center gap-3 py-8">
             <Spin size="large" />
             <Text className="text-xs text-slate-400 font-medium">正在加载推理结果…</Text>
@@ -253,23 +254,21 @@ export const InferenceRunDetailView: React.FC<Props> = ({ runId, result, loading
         </div>
       ) : result ? (
         <div className="space-y-3">
-          {/* 4 指标 */}
-          <div className="glass-panel rounded-3xl p-5 border border-slate-100/50">
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
-              <MetricCell label="正分标的" value={String(distStats.pos)} valueClass="text-rose-600" sub={`共 ${distStats.total} 只`} />
-              <MetricCell label="负分标的" value={String(distStats.neg)} valueClass="text-emerald-600" />
-              <MetricCell label="平分标的" value={String(distStats.zero)} />
-              <MetricCell
-                label="平均分"
-                value={distStats.mean === null ? '—' : distStats.mean.toFixed(4)}
-                valueClass={distStats.mean === null ? undefined : distStats.mean >= 0 ? 'text-rose-600' : 'text-emerald-600'}
-              />
-            </div>
+          {/* 4 指标：一条统计带，不再单独占一张卡 */}
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+            <MetricCell label="正分标的" value={String(distStats.pos)} valueClass="text-rose-600" sub={`共 ${distStats.total} 只`} />
+            <MetricCell label="负分标的" value={String(distStats.neg)} valueClass="text-emerald-600" />
+            <MetricCell label="平分标的" value={String(distStats.zero)} />
+            <MetricCell
+              label="平均分"
+              value={distStats.mean === null ? '—' : distStats.mean.toFixed(4)}
+              valueClass={distStats.mean === null ? undefined : distStats.mean >= 0 ? 'text-rose-600' : 'text-emerald-600'}
+            />
           </div>
 
           {/* 双列：左正分 Top100 / 右负分 100 只倒序 */}
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-            <div className="glass-panel rounded-3xl p-5 border border-slate-100/50 flex flex-col overflow-hidden">
+            <div className="rounded-xl p-3 bg-white border border-slate-200 flex flex-col overflow-hidden">
               <div className="flex items-center justify-between mb-3 shrink-0">
                 <Text className="text-xs font-bold text-slate-500">正分 Top100</Text>
                 <Tag className="m-0 border-0 text-xs font-bold px-2 rounded-md bg-rose-50 text-rose-600">
@@ -288,7 +287,7 @@ export const InferenceRunDetailView: React.FC<Props> = ({ runId, result, loading
                 <div className="flex-1 flex items-center justify-center py-10 text-xs text-slate-400">暂无正分标的</div>
               )}
             </div>
-            <div className="glass-panel rounded-3xl p-5 border border-slate-100/50 flex flex-col overflow-hidden">
+            <div className="rounded-xl p-3 bg-white border border-slate-200 flex flex-col overflow-hidden">
               <div className="flex items-center justify-between mb-3 shrink-0">
                 <Text className="text-xs font-bold text-slate-500">负分 Bottom100 · 倒序</Text>
                 <Tag className="m-0 border-0 text-xs font-bold px-2 rounded-md bg-emerald-50 text-emerald-600">
@@ -310,7 +309,7 @@ export const InferenceRunDetailView: React.FC<Props> = ({ runId, result, loading
           </div>
 
           {result.summary && (
-            <div className="glass-panel rounded-3xl p-5 border border-slate-100/50">
+            <div className="rounded-xl p-3 bg-white border border-slate-200">
               <Collapse
                 ghost
                 className="inference-result-collapse run-detail-collapse"
@@ -373,33 +372,33 @@ export const InferenceRunDetailView: React.FC<Props> = ({ runId, result, loading
                     label: <span className="text-xs font-black text-slate-700">诊断信息</span>,
                     children: (
                       <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-                        <div className="rounded-2xl border border-slate-100 bg-white p-3">
+                        <div className="rounded-lg border border-slate-200 bg-white p-3">
                           <Text className="text-xs text-slate-400 font-black uppercase block">失败阶段</Text>
                           <Text className="text-xs font-black text-slate-800">{result.summary.failure_stage || '—'}</Text>
                         </div>
-                        <div className="rounded-2xl border border-slate-100 bg-white p-3">
+                        <div className="rounded-lg border border-slate-200 bg-white p-3">
                           <Text className="text-xs text-slate-400 font-black uppercase block">模型切换原因</Text>
                           <Text className="text-xs font-black text-slate-800 break-all">{result.summary.model_switch_reason || result.summary.fallback_reason || '—'}</Text>
                         </div>
-                        <div className="rounded-2xl border border-slate-100 bg-white p-3">
+                        <div className="rounded-lg border border-slate-200 bg-white p-3">
                           <Text className="text-xs text-slate-400 font-black uppercase block">实际模型</Text>
                           <Text className="text-xs font-black text-slate-800 font-mono break-all">
                             {result.summary.active_model_id || '—'}
                           </Text>
                         </div>
-                        <div className="rounded-2xl border border-slate-100 bg-white p-3">
+                        <div className="rounded-lg border border-slate-200 bg-white p-3">
                           <Text className="text-xs text-slate-400 font-black uppercase block">生效模型</Text>
                           <Text className="text-xs font-black text-slate-800 font-mono break-all">
                             {result.summary.effective_model_id || '—'}
                           </Text>
                         </div>
-                        <div className="rounded-2xl border border-slate-100 bg-white p-3 sm:col-span-2">
+                        <div className="rounded-lg border border-slate-200 bg-white p-3 sm:col-span-2">
                           <Text className="text-xs text-slate-400 font-black uppercase block">数据源</Text>
                           <Text className="text-xs font-black text-slate-800 font-mono break-all">
                             {result.summary.active_data_source || '—'}
                           </Text>
                         </div>
-                        <div className="rounded-2xl border border-slate-100 bg-white p-3 sm:col-span-2">
+                        <div className="rounded-lg border border-slate-200 bg-white p-3 sm:col-span-2">
                           <Text className="text-xs text-slate-400 font-black uppercase block">错误信息</Text>
                           <Text className="text-xs font-black text-rose-600 break-all">
                             {result.summary.error_message || result.summary.error_msg || '—'}
@@ -503,7 +502,7 @@ export const InferenceRunDetailView: React.FC<Props> = ({ runId, result, loading
           )}
         </div>
       ) : (
-        <div className="glass-panel rounded-3xl p-10 border border-slate-100/50 flex items-center justify-center">
+        <div className="rounded-xl p-10 bg-white border border-slate-200 flex items-center justify-center">
           <Empty description={<span className="text-xs text-slate-400">暂无数据</span>} />
         </div>
       )}
