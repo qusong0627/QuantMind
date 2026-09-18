@@ -73,6 +73,7 @@ REPORT_DATASETS = [
     "alpha360",
     "l1_factors",
     "l2_factors",
+    "gap_mined",  # GAP_MINED_MARK
 ]
 OURS = "factor_research"
 DATASET_LABEL = {
@@ -83,6 +84,7 @@ DATASET_LABEL = {
     "l1_factors": "L1 因子（量价/换手/波动等基础因子）",
     "l2_factors": "L2 因子（逐笔微观结构，2022 起）",
     "factor_research": "因子研究（行情+财务+行为）",
+    "gap_mined": "空档挖掘因子（股东机构/财务PIT/板块概念/两融/L2二阶/新闻情绪）",  # GAP_MINED_MARK
 }
 
 

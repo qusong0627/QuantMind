@@ -78,6 +78,15 @@ DATASETS: dict[str, dict] = {
         "library_rule": "fixed:alpha360",
         "universe": "A股全市场 · 60 日原始量价序列（DL 用）",
     },
+    # GAP_MINED_MARK: 空档挖掘因子库（2026-09 从 QuantDB 未开采矿脉挖出，69 因子）
+    "gap_mined": {
+        "label": "空档挖掘因子（股东机构/财务PIT/板块概念/两融/L2二阶/新闻情绪，69）",
+        "dir_parts": ("6_ml_datasets", "gap_mined"),
+        "label_mode": "close_fwd",
+        "meta_cols": _ID_COLS + _OHLCV_COLS,
+        "library_rule": "gap_family",
+        "universe": "A股全市场 · 空档挖掘因子（2020-01 起，L2二阶自 2022-01）",
+    },
 }
 
 DEFAULT_DATASET = "alpha_library"
@@ -130,4 +139,19 @@ def library_of(dataset: str, column: str, l2_cols: set[str] | None = None) -> st
     if rule == "l2_membership":
         cols = l2_cols if l2_cols is not None else l2_columns()
         return "L2" if column in cols else "L1"
+    if rule == "gap_family":
+        # GAP_MINED_MARK: 按因子名前缀判子库（因子名自带家族语义）
+        if column.startswith("HD_"):
+            return "股东机构筹码"
+        if column.startswith("FIN_"):
+            return "财务基本面PIT"
+        if column.startswith("MG2_"):
+            return "融资融券"
+        if column.startswith("N2_"):
+            return "北向持股"
+        if column.startswith(("IND_", "CONCEPT_")):
+            return "板块概念"
+        if column.startswith("NEWS_"):
+            return "新闻情绪"
+        return "L2二阶微观结构"
     return "unknown"

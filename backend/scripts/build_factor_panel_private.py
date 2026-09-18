@@ -81,6 +81,7 @@ LIB_LABELS = {
     "tdxgs": "通达信指标",
     "features_daily": "每日特征（技术+估值）",
     "factor_research": "经典因子（demo 复刻）",
+    "gap_mined": "空档挖掘因子",  # GAP_MINED_MARK
 }
 # 非因子列（标识与行情行情列不入库；date 为分区日期的冗余列）
 DROP_COLS = {
