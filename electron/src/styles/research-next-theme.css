@@ -32,3 +32,12 @@ html, body, #root {
 .research-next-table .ant-table-measure-row {
   display: none !important;
 }
+
+/*
+ * 表体的横向滚动条常驻：宽表要左右移动，滚动条不能随纵向滚动跑出视野。
+ * rc-table 在固定表头模式下把横条画在 .ant-table-body 底部，这里强制 scroll 让轨道始终占位。
+ */
+.research-next-table .ant-table-body {
+  overflow-x: scroll !important;
+  scrollbar-width: thin;
+}

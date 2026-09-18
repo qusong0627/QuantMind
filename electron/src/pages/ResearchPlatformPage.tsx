@@ -400,6 +400,9 @@ const NON_FILTERABLE_COLUMNS = new Set(['rank', 'stock']);
 /** 枚举类列（走取值勾选而不是区间）：行业、状态 */
 const CATEGORICAL_COLUMNS = new Set(['sector', 'status']);
 
+/** 表头高度兜底值：首帧还没有 .ant-table-header 时用它估算表体高度 */
+const TABLE_HEADER_FALLBACK_HEIGHT = 46;
+
 /** 可见列选择的持久化键：刷新/切页后保持同一套列 */
 const COLUMN_PREF_STORAGE_KEY = 'qm:research:visible-columns';
 
@@ -1756,6 +1759,29 @@ export const ResearchPlatformPage: React.FC = () => {
     setOpenColumnPicker(false);
   }, [activeDataSource]);
 
+  /* 表头固定：表格自己纵向滚动（antd scroll.y），需要把可用高度量出来给表格体 */
+  const tableHostRef = React.useRef<HTMLDivElement | null>(null);
+  const [tableBodyHeight, setTableBodyHeight] = React.useState<number>(0);
+  const tableBodyHeightRef = React.useRef<number>(0);
+
+  React.useEffect(() => {
+    const host = tableHostRef.current;
+    if (!host) return;
+    const measure = (): void => {
+      // 有 scroll.y 之后表格拆成表头 + 表体两段，剩余高度就是表体可用高度
+      const head = host.querySelector<HTMLElement>('.ant-table-header');
+      const headHeight = head ? head.offsetHeight : TABLE_HEADER_FALLBACK_HEIGHT;
+      const next = Math.max(160, Math.round(host.clientHeight - headHeight));
+      if (Math.abs(next - tableBodyHeightRef.current) <= 1) return;
+      tableBodyHeightRef.current = next;
+      setTableBodyHeight(next);
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(host);
+    return () => observer.disconnect();
+  }, [activeDataSource]);
+
   // 当前分页的行（表格展示范围：候选池为「当前页起连续 N 页」）
   const visibleCandidateRows = React.useMemo(
     () =>
@@ -3013,9 +3039,8 @@ export const ResearchPlatformPage: React.FC = () => {
 
                 {/* ---------------- 右侧主内容 ---------------- */}
                 <motion.div
-                  /* 不留底部内边距：空结果时右侧卡片底边要贴齐左侧卡片底边 */
-                  className="custom-scrollbar flex min-h-0 min-w-0 flex-1 flex-col gap-4 overflow-y-auto"
-                  onScroll={handleTableScroll}
+                  /* 本栏不再整体滚动：纵向滚动交给表格体，表头与翻页条常驻可见 */
+                  className="flex min-h-0 min-w-0 flex-1 flex-col gap-4"
                   initial="hidden"
                   animate="visible"
                   variants={{
@@ -3025,7 +3050,7 @@ export const ResearchPlatformPage: React.FC = () => {
                 >
                   <motion.div
                     variants={{ hidden: { opacity: 0, y: 20 }, visible: { opacity: 1, y: 0 } }}
-                    className="glass-panel flex min-h-0 min-w-0 shrink-0 grow flex-col overflow-hidden rounded-3xl p-1 shadow-sm"
+                    className="glass-panel flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-3xl p-1 shadow-sm"
                   >
                     {/* 控制带：条件 / 排序 / 状态与动作（数据源与搜索已上移到顶栏） */}
                     <div className="mx-1 mt-1 flex flex-shrink-0 flex-wrap items-center gap-x-2 gap-y-1.5 rounded-2xl border border-slate-100 bg-slate-50/60 px-3 py-2">
@@ -3296,8 +3321,8 @@ export const ResearchPlatformPage: React.FC = () => {
                       />
                     </div>
 
-                    <div className="flex flex-1 flex-col">
-                      <div className="relative flex-1">
+                    <div className="flex min-h-0 flex-1 flex-col">
+                      <div ref={tableHostRef} className="relative min-h-0 flex-1 overflow-hidden">
                         {activeDataSource === 'candidates' && (
                           <Table<ResearchStockRow>
                             className={FIELD_STYLES.table}
@@ -3305,7 +3330,8 @@ export const ResearchPlatformPage: React.FC = () => {
                             columns={columns}
                             dataSource={visibleCandidateRows}
                             pagination={false}
-                            scroll={{ x: candidateScrollX }}
+                            scroll={{ x: candidateScrollX, y: tableBodyHeight || undefined }}
+                            onScroll={handleTableScroll}
                             size="middle"
                             locale={{ emptyText: <Empty description="暂无符合条件的候选个股。" /> }}
                             onRow={(record) => ({
