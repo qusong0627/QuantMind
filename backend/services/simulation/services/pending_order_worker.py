@@ -140,6 +140,64 @@ class SimulationPendingOrderWorker:
                         processed += 1
                     continue
 
+                # P0-2：派发环节 fresh 风控复检（入队时刻的时段/时效约束已按语义降级为
+                # 告警，此处才是真正的"申报前闸"——行情按当前 fresh 口径判定）。
+                # 判定 passed=False（含闸内部 fail-closed）→ 拒单；闸 plumbing 异常 →
+                # 本轮推迟（订单保持 pending，下轮重扫，不因基础设施抖动误杀用户单）。
+                try:
+                    from types import SimpleNamespace as _SNS
+
+                    from backend.services.trade.services.risk_gate_service import (
+                        check_order as _risk_check,
+                    )
+
+                    if getattr(redis_client, "client", None) is None:
+                        redis_client.connect()
+                    _side = getattr(runtime_order.side, "value", runtime_order.side)
+                    _otype = getattr(
+                        runtime_order.order_type, "value", runtime_order.order_type
+                    )
+                    _risk = await _risk_check(
+                        _SNS(
+                            tenant_id=str(getattr(runtime_order, "tenant_id", "default")),
+                            user_id=int(getattr(runtime_order, "user_id", 0) or 0),
+                            symbol=str(getattr(runtime_order, "symbol", "")),
+                            side=str(_side or "").lower(),
+                            quantity=float(projection_order.quantity or 0.0),
+                            price=(
+                                float(runtime_order.price)
+                                if getattr(runtime_order, "price", None)
+                                else None
+                            ),
+                            order_type=str(_otype or "market").lower(),
+                            trading_mode="SIMULATION",
+                            source="pending_dispatch",
+                            remarks=getattr(runtime_order, "remarks", None),
+                            client_order_id=str(
+                                getattr(runtime_order, "client_order_id", "") or ""
+                            ),
+                            strategy_id=str(getattr(runtime_order, "strategy_id", "") or ""),
+                        ),
+                        db=session,
+                        redis=redis_client,
+                    )
+                    if not _risk.passed:
+                        _msg = (
+                            f"风控拒单[{_risk.rule_id or 'risk'}]（派发复检）: "
+                            f"{_risk.reason}"
+                        )
+                        await engine.mark_rejected(runtime_order, _msg)
+                        await order_service.sync_order_projection(
+                            runtime_order, rejected_reason=_msg[:500]
+                        )
+                        processed += 1
+                        continue
+                except Exception as exc:  # noqa: BLE001 - plumbing 抖动=推迟本轮
+                    logger.warning(
+                        "pending dispatch risk recheck deferred: %s", exc
+                    )
+                    continue
+
                 claim = await session.execute(
                     update(SimulationOrderV2)
                     .where(

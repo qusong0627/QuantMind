@@ -195,7 +195,11 @@ def backfill_pending(limit: int = 200, *, today: date | None = None) -> dict[str
 
 
 async def run_sentinel_backfill_worker() -> None:
-    """常驻：交易日 16:10 后回填一次（Redis done 键防重跑；失败不置键下轮重试）。"""
+    """常驻：每日 01:35 后回填一次（Redis done 键防重跑；失败不置键下轮重试）。
+
+    时点口径（2026-09-18 调整）：T+1 退出柱为次日数据、次日 00:55 落盘——01:35 是
+    最早可兑现时点；原 16:10 场次对同批数据零增益（晚 ~15h），故前移。
+    """
     from backend.shared.scheduler_registry import heartbeat as _sched_heartbeat
 
     logger.info("[sentinel-backfill] 回填循环启动")
@@ -205,7 +209,7 @@ async def run_sentinel_backfill_worker() -> None:
         except Exception:  # noqa: BLE001
             pass
         now = datetime.now(_SH_TZ)
-        if now.weekday() < 5 and (now.hour, now.minute) >= (16, 10):
+        if now.weekday() < 5 and (now.hour, now.minute) >= (1, 35):
             done_key = f"{BACKFILL_DONE_PREFIX}{now.date().isoformat()}"
             try:
                 from backend.shared.sync_db import sync_session  # noqa: F401

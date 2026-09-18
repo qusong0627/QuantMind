@@ -79,10 +79,17 @@ JOBS: tuple[JobSpec, ...] = (
     ),
     JobSpec(
         "advice_backfill", "建议卡兑现回填（P6）", "worker", "trade",
-        "交易日 16:15（300s 轮询）",
+        "每日 01:40（300s 轮询；日键防重）",
         "QM_ADVICE_BACKFILL_ENABLED", True, 900,
         "python -m backend.services.trade.services.advice_backfill",
         "建议卡 T+1/T+3/T+5 超额兑现（决策日收盘口径）→ 建议成功率统计（T-P6-16 闭环）",
+    ),
+    JobSpec(
+        "advice_generator", "建议卡规则生成（P6）", "worker", "trade",
+        "交易日 16:20（300s 轮询；日键防重）",
+        "QM_ADVICE_GEN_ENABLED", True, 900,
+        "python -m backend.services.trade.services.advice_generator",
+        "信号×情报共振 → 观察仓建议卡（否决/去重/regime 门控/每日≤3 张，人在环执行）",
     ),
     JobSpec(
         "hot_set_builder", "热集构建（P6）", "worker", "trade", "60s 周期",

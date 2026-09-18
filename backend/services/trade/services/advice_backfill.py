@@ -213,7 +213,11 @@ def backfill_once(limit: int = 200, *, today: date | None = None) -> dict[str, i
 
 
 async def run_advice_backfill_worker() -> None:
-    """常驻：交易日 16:15 后回填一次（Redis done 键防重跑；失败不置键下轮重试）。"""
+    """常驻：每日 01:40 后回填一次（Redis done 键防重跑；失败不置键下轮重试）。
+
+    时点口径（2026-09-18 调整）：horizon 收盘柱次日 00:55 落盘——01:40 为最早可兑现
+    时点；原 16:15 场次对同批数据零增益，故前移。
+    """
     from backend.shared.scheduler_registry import heartbeat as _sched_heartbeat
 
     logger.info("[advice-backfill] 回填循环启动")
@@ -223,7 +227,7 @@ async def run_advice_backfill_worker() -> None:
         except Exception:  # noqa: BLE001
             pass
         now = datetime.now(_SH_TZ)
-        if now.weekday() < 5 and (now.hour, now.minute) >= (16, 15):
+        if now.weekday() < 5 and (now.hour, now.minute) >= (1, 40):
             done_key = f"{BACKFILL_DONE_PREFIX}{now.date().isoformat()}"
             try:
                 import redis as _redis
