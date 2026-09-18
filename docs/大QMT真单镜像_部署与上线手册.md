@@ -244,14 +244,22 @@ docker exec -w /app/backend -e PYTHONPATH=/app quantmind \
 
 日志关键词：`[Mirror]`、`[QmtExec]`、`[QmtExecPoller]`、`[MirrorAPI]`（trade 服务 `logs/`）。
 
-### 8.1 桥离线恢复（Redis 重启/容器重建后必读，2026-09-17 实盘案例）
+### 8.1 桥离线恢复（Redis 重启/容器重建后必读，2026-09-17/18 实盘案例）
 
-**成因**：Redis 容器重启或重建会断开 Windows 侧 QMT 策略里的 RPC 连接；big-convert
-runtime **不会自动重连**，需在 QMT 策略编辑器里重载入口。表现为：
-`qm:qmt:quote:backup:status` 的 `bridge_ok=false`、订阅超时退避重试、
-`bigqmt:position_events:{account}` 流停更、`bigqmt:rpc:queue:{account}` 持续积压。
+**成因（2026-09-18 修正为两层）**：
+1. **端口层（先查这个）**：安全修复 93f5bbe5 把 Redis 端口映射改绑 `127.0.0.1`，
+   该改动**只随容器重建生效**。2026-09-17 09:52 Redis 容器重建后，Windows 桥
+   （192.168.31.13）在 LAN 上 TCP 层即不可达——此时**重载策略永远无效**。
+   已上常驻转发桥 `quantmind-redis-lan-bridge`（`deploy/redis_lan_bridge.py`，
+   源 IP 白名单，仅放行 .13，Redis 本体保持回环）。排查：
+   `ss -ltn | grep 6379`（应有 .68/.56 监听）、
+   `docker logs quantmind-redis-lan-bridge`（应有 .13 接入记录）、
+   `docker inspect quantmind-redis -f '{{.Created}}'`（是否刚重建）。
+2. **会话层**：可直达的前提下，Redis 重启仍会断 RPC 会话，big-convert runtime
+   **不会自动重连**，需重载入口。表现为：`bridge_ok=false`、订阅超时退避、
+   `bigqmt:position_events:{account}` 停更、`bigqmt:rpc:queue:{account}` 持续积压。
 
-**恢复三步**：
+**恢复三步（会话层问题适用）**：
 
 ```bash
 # ① 先清理积压（桥离线期间容器侧入队的过期请求；订单类会被硬护栏保护，不会误删）
@@ -260,14 +268,15 @@ docker exec -w /app/backend -e PYTHONPATH=/app quantmind \
 docker exec -w /app/backend -e PYTHONPATH=/app quantmind \
     python scripts/qmt_rpc_queue_hygiene.py --account <资金账号> --trim \
     --drop-methods query_stock_orders,query_stock_asset,subscribe_whole_quote
-# ② Windows 侧：QMT 策略编辑器 → 重新加载运行 BIGQMT_REDIS_DRYRUN.py（见 §三.4）
+# ② Windows 侧：QMT 策略编辑器 → 先停旧实例，再重新加载运行 BIGQMT_REDIS_DRYRUN.py（见 §三.4）
 # ③ 验证（容器内）：
 docker exec quantmind-redis redis-cli -n 0 hget qm:qmt:quote:backup:status bridge_ok   # → True
 docker exec quantmind-redis redis-cli -n 5 xrevrange bigqmt:position_events:<账号> + - COUNT 1
 ```
 
-**预防**：交易时段**不要**重建/重启 Redis 容器；确需重建时，重建后按上述三步恢复，
-并确认备源席 `written` 增长、`source=qmt_big` 快照恢复（`market:snapshot:*`）。
+**预防**：交易时段**不要**重建/重启 Redis 容器；确需重建时，重建后按上述步骤恢复
+（先验端口可达、再重载策略），并确认备源席 `written` 增长、`source=qmt_big`
+快照恢复（`market:snapshot:*`）。
 
 ---
 
