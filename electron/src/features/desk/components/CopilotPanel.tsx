@@ -9,17 +9,22 @@ import { Activity, AlertTriangle, BellRing, Check, Info, Loader2, RefreshCw, Shi
 import { CARD, CardHeader, StatTile } from './cardKit';
 import {
   actionLine,
+  adviceOutcomeText,
+  adviceOutcomeTone,
+  adviceStatsLine,
   adviceStatusMeta,
   alertTypeLabel,
   outcomeMeta,
   panelMetrics,
   severityMeta,
+  type AdviceStats,
   type CopilotAdvice,
   type CopilotPanel as CopilotPanelData,
 } from './copilotModel';
 import {
   annotateAlert,
   executeAdvice,
+  getAdviceStats,
   getCopilotPanel,
   listAdvice,
   rejectAdvice,
@@ -42,6 +47,7 @@ const Chip: React.FC<{ tone: string; children: React.ReactNode }> = ({ tone, chi
 export const CopilotPanel: React.FC = () => {
   const [panel, setPanel] = useState<CopilotPanelData | null>(null);
   const [advice, setAdvice] = useState<CopilotAdvice[]>([]);
+  const [adviceStats, setAdviceStats] = useState<AdviceStats | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string>('');
   const [error, setError] = useState<string>('');
@@ -50,9 +56,14 @@ export const CopilotPanel: React.FC = () => {
     setLoading(true);
     setError('');
     try {
-      const [p, a] = await Promise.all([getCopilotPanel(24), listAdvice('', 10)]);
+      const [p, a, s] = await Promise.all([
+        getCopilotPanel(24),
+        listAdvice('', 10),
+        getAdviceStats(90).catch(() => null),
+      ]);
       setPanel(p);
       setAdvice(a);
+      setAdviceStats(s);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -222,6 +233,9 @@ export const CopilotPanel: React.FC = () => {
             {advice.length} 条
           </span>
         </div>
+        <div className="border-b border-slate-100 bg-white px-3 py-1.5 text-[10px] text-slate-500">
+          {adviceStatsLine(adviceStats)}
+        </div>
         <div className="p-2">
       {advice.length === 0 ? (
         <div className="rounded-lg border border-dashed border-slate-200 px-2 py-3 text-[11px] text-slate-400">
@@ -264,6 +278,20 @@ export const CopilotPanel: React.FC = () => {
                         {exec.duplicate ? '（幂等命中）' : ''}
                       </div>
                     ))}
+                  </div>
+                )}
+                {item.outcome && (
+                  <div
+                    className={`mt-1 text-[10px] ${
+                      adviceOutcomeTone(item) === 'good'
+                        ? 'text-emerald-600'
+                        : adviceOutcomeTone(item) === 'bad'
+                          ? 'text-red-500'
+                          : 'text-slate-400'
+                    }`}
+                  >
+                    兑现（决策日收盘口径）：{adviceOutcomeText(item) || '—'}
+                    {item.outcome_status === 'partial' ? '（渐进回填中）' : ''}
                   </div>
                 )}
                 {isPending && (

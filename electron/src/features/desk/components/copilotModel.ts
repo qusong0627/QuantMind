@@ -35,6 +35,33 @@ export interface CopilotAdvice {
   status: string;
   created_at: string;
   execution?: Array<{ symbol: string; side: string; success: boolean; message?: string; duplicate?: boolean }> | null;
+  /** 兑现结果（决策日收盘→T+h 收盘，超额 vs 沪深300；回填每日 16:15） */
+  outcome?: {
+    base_date?: string;
+    benchmark?: string;
+    summary?: Record<string, { n?: number; hits?: number; avg_excess?: number | null }>;
+  } | null;
+  outcome_status?: string;
+}
+
+export interface AdviceStatsHorizon {
+  n: number;
+  hits: number;
+  hit_rate: number | null;
+  avg_excess: number | null;
+}
+
+export interface AdviceStats {
+  available?: boolean;
+  days?: number;
+  total?: number;
+  decided?: number;
+  executed?: number;
+  rejected?: number;
+  decide_rate?: number | null;
+  scored?: number;
+  by_horizon?: Record<string, AdviceStatsHorizon>;
+  source?: string;
 }
 
 export interface CopilotPanel {
@@ -141,4 +168,47 @@ export function panelMetrics(panel: CopilotPanel | null): {
     events: panel.events?.items?.length ?? 0,
     budgetText,
   };
+}
+
+function _signedPct(v: number | null | undefined, digits = 1): string {
+  if (v === null || v === undefined || !Number.isFinite(Number(v))) return '—';
+  const p = Number(v) * 100;
+  return `${p >= 0 ? '+' : ''}${p.toFixed(digits)}%`;
+}
+
+/** 建议战绩一行（近 N 天）：发出/已决（执行/拒绝）+ T+1 胜率与平均超额；无兑现如实标注。 */
+export function adviceStatsLine(stats: AdviceStats | null): string {
+  if (!stats || stats.available === false) return '建议战绩：暂不可用';
+  const total = stats.total ?? 0;
+  if (!total) return '暂无建议卡';
+  const head = `近 ${stats.days ?? 90} 天：发出 ${total} · 已决 ${stats.decided ?? 0}（执行 ${stats.executed ?? 0} / 拒绝 ${stats.rejected ?? 0}）`;
+  const t1 = stats.by_horizon?.['1'];
+  if (!stats.scored || !t1 || !t1.n) {
+    return `${head} · 兑现回填每日 16:15 产出`;
+  }
+  const rate =
+    t1.hit_rate === null || t1.hit_rate === undefined
+      ? '—'
+      : `${Math.round(t1.hit_rate * 100)}%`;
+  return `${head} · T+1 胜率 ${rate}（n=${t1.n}） · 平均超额 ${_signedPct(t1.avg_excess)}`;
+}
+
+/** 单卡兑现一行（决策日收盘口径）；无 outcome → 空串。 */
+export function adviceOutcomeText(item: CopilotAdvice): string {
+  const summary = item.outcome?.summary;
+  if (!summary) return '';
+  const parts: string[] = [];
+  for (const h of ['1', '3', '5']) {
+    const s = summary[h];
+    if (!s || !s.n) continue;
+    parts.push(`T+${h} ${_signedPct(s.avg_excess)}（${s.hits ?? 0}/${s.n} 命中）`);
+  }
+  return parts.join(' · ');
+}
+
+/** 单卡兑现色调：T+1 平均超额 >0 → good，<0 → bad，无数据 → flat。 */
+export function adviceOutcomeTone(item: CopilotAdvice): 'good' | 'bad' | 'flat' {
+  const ex = item.outcome?.summary?.['1']?.avg_excess;
+  if (ex === null || ex === undefined || !Number.isFinite(Number(ex))) return 'flat';
+  return Number(ex) > 0 ? 'good' : 'bad';
 }

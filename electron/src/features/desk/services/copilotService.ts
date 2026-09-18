@@ -1,7 +1,7 @@
 /** 副驾驶 API 服务层（/api/v1/copilot/*，/api/v1/sentinel/annotate；面板/建议卡/执行/标注） */
 
 import { SERVICE_ENDPOINTS } from '../../../config/services';
-import type { CopilotAdvice, CopilotPanel } from '../components/copilotModel';
+import type { AdviceStats, CopilotAdvice, CopilotPanel } from '../components/copilotModel';
 
 const API = `${SERVICE_ENDPOINTS.USER_SERVICE}`;
 
@@ -46,6 +46,14 @@ export async function listAdvice(status = '', limit = 20): Promise<CopilotAdvice
     `/copilot/advice?${qs}`,
   );
   return res.data.items || [];
+}
+
+/** 建议卡战绩统计（近 N 天：采纳/拒绝 + T+1/T+3/T+5 胜率与平均超额） */
+export async function getAdviceStats(days = 90): Promise<AdviceStats> {
+  const res = await request<{ success: boolean; data: AdviceStats }>(
+    `/copilot/advice/stats?days=${days}`,
+  );
+  return res.data;
 }
 
 /** 一键执行（OrderRouter，来源 co_pilot） */

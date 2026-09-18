@@ -1,11 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import {
   actionLine,
+  adviceOutcomeText,
+  adviceOutcomeTone,
+  adviceStatsLine,
   adviceStatusMeta,
   alertTypeLabel,
   outcomeMeta,
   panelMetrics,
   severityMeta,
+  type CopilotAdvice,
   type CopilotEvent,
 } from '../copilotModel';
 
@@ -61,7 +65,7 @@ describe('copilotModel', () => {
 
   it('panelMetrics 缺失如实 —（无假数据）', () => {
     const empty = panelMetrics(null);
-    expect(empty).toEqual({ latencyP95: '—', missRate: '—', events: 0, budgetText: '—' });
+    expect(empty).toEqual({ latencyP95: '—', latencyP95Ms: null, missRate: '—', events: 0, budgetText: '—' });
 
     const filled = panelMetrics({
       latency: { available: true, market_snapshot: { p95_ms: 1234.6 } },
@@ -69,10 +73,74 @@ describe('copilotModel', () => {
       events: { available: true, items: [baseEvent] },
       budget: { available: true, detail: { tdx_rss_mb: 700, engine_rss_mb: 200 } },
     });
-    expect(filled).toEqual({ latencyP95: '1235ms', missRate: '23.4%', events: 1, budgetText: 'tdx 700MB · 引擎 200MB' });
+    expect(filled).toEqual({ latencyP95: '1.2s', latencyP95Ms: 1234.6, missRate: '23.4%', events: 1, budgetText: 'tdx 700MB · 引擎 200MB' });
 
     const unavailable = panelMetrics({ events: { available: false, reason: 'db down' } });
     expect(unavailable.latencyP95).toBe('—');
     expect(unavailable.events).toBe(0);
+  });
+
+  it('建议战绩行：含胜率与平均超额；无兑现如实标注', () => {
+    const filled = adviceStatsLine({
+      available: true,
+      days: 90,
+      total: 5,
+      decided: 4,
+      executed: 3,
+      rejected: 1,
+      scored: 2,
+      by_horizon: {
+        '1': { n: 4, hits: 3, hit_rate: 0.75, avg_excess: 0.012 },
+        '3': { n: 0, hits: 0, hit_rate: null, avg_excess: null },
+        '5': { n: 0, hits: 0, hit_rate: null, avg_excess: null },
+      },
+    });
+    expect(filled).toContain('已决 4（执行 3 / 拒绝 1）');
+    expect(filled).toContain('T+1 胜率 75%');
+    expect(filled).toContain('平均超额 +1.2%');
+
+    const waiting = adviceStatsLine({
+      available: true,
+      days: 90,
+      total: 2,
+      decided: 0,
+      executed: 0,
+      rejected: 0,
+      scored: 0,
+    });
+    expect(waiting).toContain('兑现回填每日 16:15 产出');
+    expect(adviceStatsLine(null)).toContain('暂不可用');
+  });
+
+  it('单卡兑现文本与色调（决策日收盘口径）', () => {
+    const item: CopilotAdvice = {
+      advice_id: 'x',
+      source: 'quantbot',
+      title: 't',
+      rationale: '',
+      actions: [],
+      status: 'executed',
+      created_at: '',
+      outcome: {
+        base_date: '2026-09-08',
+        benchmark: '000300.SH',
+        summary: {
+          '1': { n: 1, hits: 1, avg_excess: 0.016 },
+          '3': { n: 1, hits: 0, avg_excess: -0.008 },
+        },
+      },
+      outcome_status: 'partial',
+    };
+    expect(adviceOutcomeText(item)).toContain('T+1 +1.6%（1/1 命中）');
+    expect(adviceOutcomeText(item)).toContain('T+3 -0.8%（0/1 命中）');
+    expect(adviceOutcomeTone(item)).toBe('good');
+
+    const bad: CopilotAdvice = {
+      ...item,
+      outcome: { summary: { '1': { n: 1, hits: 0, avg_excess: -0.02 } } },
+    };
+    expect(adviceOutcomeTone(bad)).toBe('bad');
+    expect(adviceOutcomeText({ ...item, outcome: null })).toBe('');
+    expect(adviceOutcomeTone({ ...item, outcome: null })).toBe('flat');
   });
 });
