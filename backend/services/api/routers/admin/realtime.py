@@ -206,10 +206,45 @@ def _ensure_under_models_root(model_dir: str) -> Path:
     return p
 
 
-def list_infer_models(limit: int = 60) -> list[dict[str, Any]]:
+async def _load_model_display_names(model_ids: list[str]) -> dict[str, str]:
+    """model_id(=目录名) → 中文显示名（qm_user_models.metadata_json.display_name）。
+
+    显示名权威源是 PG 注册表（模型目录 metadata.json 里没有）；缺失不猜，回落空串。
+    """
+    ids = sorted({str(m).strip() for m in model_ids if str(m).strip()})
+    if not ids:
+        return {}
+    from sqlalchemy import text as _text
+
+    from backend.shared.database_manager_v2 import get_session
+
+    out: dict[str, str] = {}
+    try:
+        async with get_session(read_only=True) as db:
+            rows = (
+                await db.execute(
+                    _text(
+                        "SELECT model_id, metadata_json FROM qm_user_models "
+                        "WHERE model_id = ANY(:ids)"
+                    ),
+                    {"ids": ids},
+                )
+            ).fetchall()
+        for model_id, meta_raw in rows:
+            meta = meta_raw if isinstance(meta_raw, dict) else json.loads(meta_raw or "{}")
+            meta = meta if isinstance(meta, dict) else {}
+            name = str(meta.get("display_name") or meta.get("model_name") or "").strip()
+            if name:
+                out[str(model_id)] = name
+    except Exception as exc:  # noqa: BLE001 - 显示名缺失不判失败
+        logger.warning("[RealtimeAdmin] 模型显示名查询失败: %s", exc)
+    return out
+
+
+async def list_infer_models(limit: int = 60) -> list[dict[str, Any]]:
     """实时推理候选模型（CN，轻量扫描）：users/{tenant}/{user}/mdl_cn*/metadata.json。
 
-    只报目录/名称/ONNX 有无/更新时间——不做特征覆盖等重校验（保存时由 POST 校验兜底）。
+    只报目录/显示名/ONNX 有无/更新时间——不做特征覆盖等重校验（保存时由 POST 校验兜底）。
     """
     out: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -233,22 +268,29 @@ def list_infer_models(limit: int = 60) -> list[dict[str, Any]]:
                     "name": str(
                         meta.get("display_name") or meta.get("model_name") or d.name
                     ),
+                    "display_name": str(meta.get("display_name") or "").strip(),
                     "dir_name": d.name,
                     "has_onnx": (d / "model.onnx").is_file(),
                     "feature_count": len(meta.get("feature_columns") or []),
                     "updated_at": mtime,
                 }
             )
+    names = await _load_model_display_names([item["dir_name"] for item in out])
+    for item in out:
+        dn = names.get(item["dir_name"], "")
+        if dn:
+            item["display_name"] = dn
+            item["name"] = dn
     out.sort(key=lambda x: str(x.get("updated_at") or ""), reverse=True)
     return out[:limit]
 
 
 @router.get("/infer/models")
 async def get_infer_models() -> dict[str, Any]:
-    """实时推理候选模型列表（CN；供前端选择 model_dir）。"""
+    """实时推理候选模型列表（CN；供前端选择 model_dir，含中文显示名）。"""
     return {
         "success": True,
-        "data": {"models": await asyncio.to_thread(list_infer_models)},
+        "data": {"models": await list_infer_models()},
     }
 
 
@@ -317,12 +359,17 @@ async def get_infer_config() -> dict[str, Any]:
             counters = json.loads(status["counters"])
         except (TypeError, ValueError):
             counters = {}
+    model_dir = str(config.get("model_dir") or "").strip()
+    display_names = await _load_model_display_names(
+        [Path(model_dir).name] if model_dir else []
+    )
     return {
         "success": True,
         "data": {
             "config": config,
-            "baseline_source": baseline_source_label(str(config.get("model_dir") or "")),
-            "model_onnx": _onnx_status(str(config.get("model_dir") or "")),
+            "baseline_source": baseline_source_label(model_dir),
+            "model_onnx": _onnx_status(model_dir),
+            "model_display_name": display_names.get(Path(model_dir).name, "") if model_dir else "",
             "status": {
                 "updated_at": status.get("updated_at"),
                 "counters": counters,

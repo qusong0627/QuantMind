@@ -22,10 +22,12 @@ export interface InferConfigPayload {
   min_live_coverage?: number;
 }
 
-/** 实时推理候选模型（GET /infer/models；CN，轻量扫描） */
+/** 实时推理候选模型（GET /infer/models；CN，轻量扫描 + 中文显示名） */
 export interface InferModelOption {
   model_dir: string;
   name: string;
+  /** 中文显示名（qm_user_models 注册表；缺失为空串） */
+  display_name: string;
   dir_name: string;
   has_onnx: boolean;
   feature_count: number;
@@ -69,6 +71,7 @@ export async function getInferConfig(): Promise<{
   config: InferConfigView;
   status: InferStatusView;
   model_onnx?: ModelOnnxStatus;
+  model_display_name?: string;
   baseline_source?: string;
 }> {
   const res = await request<{
@@ -77,6 +80,7 @@ export async function getInferConfig(): Promise<{
       config: InferConfigView;
       status: InferStatusView;
       model_onnx?: ModelOnnxStatus;
+      model_display_name?: string;
       baseline_source?: string;
     };
   }>('/config');

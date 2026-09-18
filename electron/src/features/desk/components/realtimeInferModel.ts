@@ -28,7 +28,10 @@ export interface InferViewState {
   enabled: boolean;
   /** 配置里的完整模型目录（选择器的 value） */
   modelDir: string;
+  /** 目录基名（mdl_cn_train_…，中文名缺失时的回落） */
   modelName: string;
+  /** 中文显示名（qm_user_models 注册表；缺失回落 modelName） */
+  modelDisplayName: string;
   cadenceS: number;
   minCoverage: number;
   coverageText: string;
@@ -66,6 +69,7 @@ export function inferViewState(
   nowMs: number = Date.now(),
   needAdmin = false,
   modelOnnx: ModelOnnxStatus | null = null,
+  modelDisplayName = '',
 ): InferViewState {
   const counters = (status?.counters || {}) as Record<string, unknown>;
   const minCoverage = _num(config?.min_live_coverage, 0.5);
@@ -76,6 +80,7 @@ export function inferViewState(
       : `${Math.round(_num(coverage) * 100)}%`;
   const modelDir = String(config?.model_dir || '');
   const modelName = modelDir ? modelDir.split('/').filter(Boolean).pop() || modelDir : '未配置';
+  const displayName = String(modelDisplayName || '').trim();
   const updatedAt = status?.updated_at ? new Date(String(status.updated_at)).getTime() : 0;
   const enabled = String(config?.enabled || '').toLowerCase() === 'true';
   const onnxReady = modelOnnx && modelDir ? !!modelOnnx.ready : null;
@@ -91,6 +96,7 @@ export function inferViewState(
     enabled,
     modelDir,
     modelName,
+    modelDisplayName: displayName || modelName,
     cadenceS: _num(config?.cadence_s, 15),
     minCoverage,
     coverageText,

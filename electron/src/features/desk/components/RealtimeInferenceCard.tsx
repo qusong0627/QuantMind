@@ -20,6 +20,7 @@ export const RealtimeInferenceCard: React.FC = () => {
   const [config, setConfig] = useState<InferConfigView | null>(null);
   const [status, setStatus] = useState<InferStatusView | null>(null);
   const [onnx, setOnnx] = useState<ModelOnnxStatus | null>(null);
+  const [displayName, setDisplayName] = useState('');
   const [models, setModels] = useState<InferModelOption[]>([]);
   const [needAdmin, setNeedAdmin] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -38,6 +39,7 @@ export const RealtimeInferenceCard: React.FC = () => {
       setConfig(data.config);
       setStatus(data.status);
       setOnnx(data.model_onnx ?? null);
+      setDisplayName(String(data.model_display_name || ''));
       setNeedAdmin(false);
       setGateDraft(String(data.config?.min_live_coverage ?? ''));
       setCadenceDraft(String(data.config?.cadence_s ?? ''));
@@ -66,7 +68,7 @@ export const RealtimeInferenceCard: React.FC = () => {
       .catch(() => setModels([]));
   }, []);
 
-  const view = inferViewState(config, status, Date.now(), needAdmin, onnx);
+  const view = inferViewState(config, status, Date.now(), needAdmin, onnx, displayName);
 
   const runOp = async (fn: () => Promise<void>) => {
     setBusy(true);
@@ -153,7 +155,7 @@ export const RealtimeInferenceCard: React.FC = () => {
   const modelOptions = models.some((m) => m.model_dir === view.modelDir)
     ? models
     : view.modelDir
-      ? [{ model_dir: view.modelDir, name: view.modelName, dir_name: view.modelName, has_onnx: view.onnxReady === true, feature_count: 0, updated_at: '' }, ...models]
+      ? [{ model_dir: view.modelDir, name: view.modelName, display_name: '', dir_name: view.modelName, has_onnx: view.onnxReady === true, feature_count: 0, updated_at: '' }, ...models]
       : models;
 
   return (
@@ -188,8 +190,8 @@ export const RealtimeInferenceCard: React.FC = () => {
       )}
 
       <div className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-slate-500">
-        <span>
-          模型 <span className="font-mono text-slate-700">{view.modelName}</span>
+        <span title={view.modelDir || undefined}>
+          模型 <span className="text-slate-700">{view.modelDisplayName}</span>
         </span>
         <span>节拍 {view.cadenceS}s</span>
         <span>
@@ -239,8 +241,8 @@ export const RealtimeInferenceCard: React.FC = () => {
               <option value="">{modelDraft || '未配置'}</option>
             )}
             {modelOptions.map((m) => (
-              <option key={m.model_dir} value={m.model_dir}>
-                {m.dir_name}
+              <option key={m.model_dir} value={m.model_dir} title={m.dir_name}>
+                {(m.display_name || m.dir_name).replace(/_CN$/, '')}
                 {m.has_onnx ? '' : '（无 ONNX）'}
               </option>
             ))}

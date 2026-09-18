@@ -61,4 +61,14 @@ describe('realtimeInferModel', () => {
     expect(unknown.onnxReady).toBeNull();
     expect(unknown.onnxText).toBe('—');
   });
+
+  it('中文模型名：有显示名用显示名，缺失回落目录基名', () => {
+    const base = { enabled: 'true', model_dir: '/app/models/users/1/CN/mdl_cn_train_x' };
+    const withName = inferViewState(base, null, Date.now(), false, null, '远程测试9_2024全年_CN');
+    expect(withName.modelDisplayName).toBe('远程测试9_2024全年_CN');
+    expect(withName.modelName).toBe('mdl_cn_train_x');
+
+    const without = inferViewState(base, null, Date.now(), false, null, '');
+    expect(without.modelDisplayName).toBe('mdl_cn_train_x');
+  });
 });
