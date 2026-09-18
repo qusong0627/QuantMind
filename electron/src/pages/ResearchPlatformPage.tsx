@@ -3,27 +3,34 @@ import { motion } from 'framer-motion';
 import {
   Activity,
   BarChart3,
+  Building2,
   CalendarDays,
   CandlestickChart,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
   Columns3,
   Download,
   Filter,
   Flame,
+  Gauge,
   LibraryBig,
+  ListFilter,
   Microscope,
   Quote,
   RefreshCw,
   Search,
+  SlidersHorizontal,
   Sparkles,
+  Tags,
   Target,
+  TrendingUp,
+  X,
 } from 'lucide-react';
 import ReactECharts from 'echarts-for-react';
 import {
   Button,
   Checkbox,
-  Collapse,
   Empty,
   Input,
   InputNumber,
@@ -387,6 +394,50 @@ const SIMPLE_TABLE_COLUMN_KEYS = [
   'rank', 'stock', 'score', 'latestChange', 'turnoverRate', 'amount', 'pe', 'roe', 'rsi', 'sector', 'status',
 ];
 
+/** 表头不给列筛选的列：排名是视图序号，股票列已由关键词搜索覆盖 */
+const NON_FILTERABLE_COLUMNS = new Set(['rank', 'stock']);
+
+/** 枚举类列（走取值勾选而不是区间）：行业、状态 */
+const CATEGORICAL_COLUMNS = new Set(['sector', 'status']);
+
+/** 可见列选择的持久化键：刷新/切页后保持同一套列 */
+const COLUMN_PREF_STORAGE_KEY = 'qm:research:visible-columns';
+
+/** 固定显示的列（表格标识列，不允许隐藏） */
+const ALWAYS_VISIBLE_COLUMNS = new Set(['stock']);
+
+/** 读取上次的列选择；缺失/损坏/全空时回退为全量列 */
+const readStoredColumns = (allKeys: string[]): string[] => {
+  try {
+    const raw = window.localStorage.getItem(COLUMN_PREF_STORAGE_KEY);
+    if (!raw) return allKeys;
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return allKeys;
+    const stored = allKeys.filter((key) => (parsed as string[]).includes(key));
+    return stored.length ? stored : allKeys;
+  } catch {
+    return allKeys;
+  }
+};
+
+const writeStoredColumns = (keys: string[]): void => {
+  try {
+    window.localStorage.setItem(COLUMN_PREF_STORAGE_KEY, JSON.stringify(keys));
+  } catch {
+    // 隐私模式 / 配额满：降级为仅本次会话生效，不影响功能
+  }
+};
+
+/** 移除某列的筛选（不改原对象） */
+const omitColumnFilter = (
+  filters: Record<string, ColumnFilterValue>,
+  columnKey: string
+): Record<string, ColumnFilterValue> => {
+  const next = { ...filters };
+  delete next[columnKey];
+  return next;
+};
+
 /* ------------------------------------------------------------------ *
  * 筛选侧栏配置
  * ------------------------------------------------------------------ */
@@ -477,6 +528,27 @@ const FILTER_SECTIONS: FilterSectionConfig[] = [
     fields: [],
   },
 ];
+
+/**
+ * 条件带的外观元数据。
+ *
+ * 字段多的组气泡铺两列（面板放高会顶出屏幕），因此宽度比单列组大一截。
+ */
+const FILTER_SECTION_META: Record<
+  FilterSectionKey,
+  { icon: React.ComponentType<{ className?: string }>; panelWidth: number }
+> = {
+  common: { icon: SlidersHorizontal, panelWidth: 380 },
+  market: { icon: Gauge, panelWidth: 660 },
+  momentum: { icon: TrendingUp, panelWidth: 660 },
+  volatility: { icon: Activity, panelWidth: 660 },
+  technical: { icon: CandlestickChart, panelWidth: 660 },
+  fundamental: { icon: Building2, panelWidth: 660 },
+  sector: { icon: Tags, panelWidth: 440 },
+};
+
+/** 字段数 ≥ 4 的组在气泡里铺两列，避免单个气泡高过半个屏幕 */
+const isWideFilterSection = (section: FilterSectionConfig): boolean => section.fields.length >= 4;
 
 /**
  * 区间筛选字段 -> 行数据字段映射。
@@ -598,41 +670,65 @@ const ResearchMetricCard: React.FC<{
   value: string | number;
   subLabel: string;
   accentColor: string;
-}> = ({ icon: Icon, label, value, subLabel, accentColor }) => (
+  /** 窄栏（左轨）形态：顶部色条 + 更小的字级与间距 */
+  compact?: boolean;
+}> = ({ icon: Icon, label, value, subLabel, accentColor, compact = false }) => (
   <motion.div
-    whileHover={{ y: -4, transition: { type: 'spring', stiffness: 400, damping: 15 } }}
-    className="group relative overflow-hidden rounded-2xl border border-slate-200/80 bg-white p-5 shadow-xs transition-all duration-300 hover:shadow-md hover:border-slate-300"
+    whileHover={{ y: compact ? -3 : -4, transition: { type: 'spring', stiffness: 400, damping: 15 } }}
+    className={`group relative overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-xs transition-all duration-300 hover:border-slate-300 hover:shadow-md ${
+      compact ? 'p-3' : 'p-5'
+    }`}
   >
+    {/* 顶部色条：窄栏里靠它区分指标，比整块光晕克制 */}
+    <span
+      className="absolute inset-x-0 top-0 h-0.5 opacity-60 transition-opacity duration-300 group-hover:opacity-100"
+      style={{ backgroundColor: accentColor }}
+    />
+
     {/* 背景微光晕 */}
     <div
-      className="pointer-events-none absolute -right-8 -top-8 h-28 w-28 rounded-full opacity-10 blur-2xl transition-all duration-500 group-hover:scale-125 group-hover:opacity-25"
+      className={`pointer-events-none absolute rounded-full opacity-10 blur-2xl transition-all duration-500 group-hover:scale-125 group-hover:opacity-25 ${
+        compact ? '-right-6 -top-6 h-20 w-20' : '-right-8 -top-8 h-28 w-28'
+      }`}
       style={{ backgroundColor: accentColor }}
     />
 
     {/* 容器右上角统一图标胶囊 */}
     <div
-      className="absolute top-4 right-4 flex h-10 w-10 items-center justify-center rounded-xl border transition-all duration-300 group-hover:scale-105 shadow-2xs"
+      className={`absolute flex items-center justify-center rounded-xl border shadow-2xs transition-all duration-300 group-hover:scale-105 ${
+        compact ? 'right-2.5 top-2.5 h-7 w-7' : 'right-4 top-4 h-10 w-10'
+      }`}
       style={{
         backgroundColor: `${accentColor}12`,
         borderColor: `${accentColor}25`,
         color: accentColor,
       }}
     >
-      <Icon className="h-5 w-5" style={{ color: accentColor }} />
+      <Icon className={compact ? 'h-3.5 w-3.5' : 'h-5 w-5'} style={{ color: accentColor }} />
     </div>
 
     {/* 指标文本内容 */}
-    <div className="relative z-10 flex flex-col pr-12">
+    <div className={`relative z-10 flex flex-col ${compact ? 'pr-8' : 'pr-12'}`}>
       <div className="flex items-center gap-1.5">
-        <span className="h-1.5 w-1.5 rounded-full" style={{ backgroundColor: accentColor }} />
-        <span className="text-xs font-bold uppercase tracking-wider text-slate-500">{label}</span>
+        <span className={`rounded-full ${compact ? 'h-1 w-1' : 'h-1.5 w-1.5'}`} style={{ backgroundColor: accentColor }} />
+        <span
+          className={`font-bold uppercase tracking-wider text-slate-500 ${
+            compact ? 'text-[10px]' : 'text-xs'
+          }`}
+        >
+          {label}
+        </span>
       </div>
 
-      <div className="mt-2.5 mb-1 text-3xl font-extrabold tracking-tight text-slate-900 transition-colors group-hover:text-slate-800">
+      <div
+        className={`font-extrabold tracking-tight text-slate-900 transition-colors group-hover:text-slate-800 ${
+          compact ? 'mt-1.5 mb-0.5 text-xl' : 'mt-2.5 mb-1 text-3xl'
+        }`}
+      >
         {value}
       </div>
 
-      <div className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-400">
+      <div className={`flex items-center gap-1.5 font-semibold text-slate-400 ${compact ? 'text-[9px]' : 'text-[11px]'}`}>
         <span className="truncate">{subLabel}</span>
       </div>
     </div>
@@ -700,6 +796,246 @@ const RangeInput: React.FC<{
         )}
       </div>
     </div>
+  );
+};
+
+/** 表头列筛选（Excel 式）：数值列用区间，文本/枚举列用取值勾选 */
+interface ColumnFilterValue {
+  min?: number | null;
+  max?: number | null;
+  values?: string[];
+}
+
+const hasColumnFilterValue = (filter?: ColumnFilterValue): boolean =>
+  !!filter && (filter.min != null || filter.max != null || (filter.values?.length ?? 0) > 0);
+
+/** 过滤面板统一页脚：清除 / 应用 */
+const ColumnFilterFooter: React.FC<{ onClear: () => void; onApply: () => void }> = ({ onClear, onApply }) => (
+  <div className="flex items-center justify-end gap-2 border-t border-slate-100 pt-2">
+    <Button
+      size="small"
+      onClick={onClear}
+      className="h-7 rounded-lg border-slate-200 px-3 text-[11px] font-bold text-slate-600 transition-all hover:border-slate-300 active:scale-95"
+    >
+      清除
+    </Button>
+    <Button
+      size="small"
+      type="primary"
+      onClick={onApply}
+      className="h-7 rounded-lg bg-blue-600 px-3.5 text-[11px] font-black shadow-sm transition-all hover:bg-blue-500 active:scale-95"
+    >
+      应用
+    </Button>
+  </div>
+);
+
+/**
+ * 表头数值列筛选：Excel 式区间。
+ *
+ * 快捷区间按当前列分位取值——不同批次/不同字段量纲差异大，写死阈值必然在部分字段上失效。
+ */
+const ColumnRangeFilterPanel: React.FC<{
+  label: string;
+  initial?: ColumnFilterValue;
+  samples: number[];
+  step?: number;
+  precision?: number;
+  suffix?: string;
+  onApply: (next: ColumnFilterValue) => void;
+  onClear: () => void;
+}> = ({ label, initial, samples, step = 0.01, precision, suffix, onApply, onClear }) => {
+  const [min, setMin] = React.useState<number | null>(initial?.min ?? null);
+  const [max, setMax] = React.useState<number | null>(initial?.max ?? null);
+
+  const quantile = (percentile: number): number | null => {
+    if (!samples.length) return null;
+    const idx = Math.min(samples.length - 1, Math.max(0, Math.round((samples.length - 1) * percentile)));
+    return samples[idx];
+  };
+
+  const presets: Array<{ label: string; apply: () => void }> = [
+    { label: '全部', apply: () => { setMin(null); setMax(null); } },
+    { label: '最低 25%', apply: () => { setMin(null); setMax(quantile(0.25)); } },
+    { label: '中间 50%', apply: () => { setMin(quantile(0.25)); setMax(quantile(0.75)); } },
+    { label: '最高 25%', apply: () => { setMin(quantile(0.75)); setMax(null); } },
+  ];
+
+  return (
+    <div className="w-[268px] space-y-3">
+      <div className="flex items-baseline justify-between">
+        <span className="text-[11px] font-black tracking-tight text-slate-800">{label} · 区间</span>
+        <span className="text-[9px] font-semibold text-slate-400">留空＝不限</span>
+      </div>
+      <div className="flex items-center gap-2">
+        <InputNumber
+          className="research-next-input-number flex-1"
+          size="small"
+          placeholder="最小值"
+          value={min}
+          onChange={(value) => setMin(value ?? null)}
+          step={step}
+          precision={precision}
+          suffix={suffix}
+          controls={false}
+        />
+        <span className="h-[1px] w-2.5 flex-shrink-0 bg-slate-300" />
+        <InputNumber
+          className="research-next-input-number flex-1"
+          size="small"
+          placeholder="最大值"
+          value={max}
+          onChange={(value) => setMax(value ?? null)}
+          step={step}
+          precision={precision}
+          suffix={suffix}
+          controls={false}
+        />
+      </div>
+      <div className="flex flex-wrap gap-1">
+        {presets.map((preset) => (
+          <button
+            key={preset.label}
+            type="button"
+            onClick={preset.apply}
+            className="rounded-full border border-slate-200 bg-white px-2 py-0.5 text-[10px] font-bold text-slate-500 transition-all hover:border-blue-300 hover:text-blue-600 active:scale-95"
+          >
+            {preset.label}
+          </button>
+        ))}
+      </div>
+      <ColumnFilterFooter onClear={onClear} onApply={() => onApply({ min, max })} />
+    </div>
+  );
+};
+
+/** 表头枚举列筛选：取值清单 + 搜索 + 全选/清空（清单取自当前候选池，带出现次数） */
+const ColumnValueFilterPanel: React.FC<{
+  label: string;
+  options: Array<{ value: string; count: number }>;
+  initial?: ColumnFilterValue;
+  onApply: (next: ColumnFilterValue) => void;
+  onClear: () => void;
+}> = ({ label, options, initial, onApply, onClear }) => {
+  const [selected, setSelected] = React.useState<string[]>(initial?.values ?? []);
+  const [search, setSearch] = React.useState('');
+  const trimmed = search.trim().toLowerCase();
+  const visibleOptions = trimmed
+    ? options.filter((option) => option.value.toLowerCase().includes(trimmed))
+    : options;
+
+  // 注意：本仓库的 React 类型下函数式 setter 会报错，统一按值更新
+  const toggle = (value: string): void =>
+    setSelected(selected.includes(value) ? selected.filter((item) => item !== value) : [...selected, value]);
+
+  return (
+    <div className="flex w-[248px] flex-col gap-2">
+      <div className="flex items-baseline justify-between">
+        <span className="text-[11px] font-black tracking-tight text-slate-800">{label} · 取值</span>
+        <span className="text-[9px] font-semibold text-slate-400">
+          {selected.length ? `已选 ${selected.length}` : '不限'}
+        </span>
+      </div>
+      <Input
+        size="small"
+        placeholder="搜索取值..."
+        prefix={<Search className="h-3 w-3 text-slate-400" />}
+        value={search}
+        onChange={(event) => setSearch(event.target.value)}
+        allowClear
+        className="rounded-lg"
+      />
+      <div className="flex items-center gap-2 text-[10px] font-bold">
+        <button type="button" onClick={() => setSelected(visibleOptions.map((option) => option.value))} className="text-blue-600 hover:underline">
+          全选
+        </button>
+        <span className="text-slate-200">|</span>
+        <button type="button" onClick={() => setSelected([])} className="text-slate-500 hover:underline">
+          清空
+        </button>
+        <span className="ml-auto tabular-nums text-slate-400">{visibleOptions.length} 项</span>
+      </div>
+      <div className="custom-scrollbar max-h-[220px] overflow-y-auto pr-1">
+        {visibleOptions.map((option) => {
+          const checked = selected.includes(option.value);
+          return (
+            <label
+              key={option.value}
+              className={`flex cursor-pointer items-center gap-2 rounded-lg px-2 py-1 text-[11px] font-semibold transition-colors ${
+                checked ? 'bg-blue-50 text-blue-700' : 'text-slate-600 hover:bg-slate-50'
+              }`}
+            >
+              <Checkbox checked={checked} onChange={() => toggle(option.value)} />
+              <span className="truncate" title={option.value}>{option.value}</span>
+              <span className="ml-auto tabular-nums text-[9px] text-slate-400">{option.count}</span>
+            </label>
+          );
+        })}
+        {visibleOptions.length === 0 && (
+          <div className="px-2 py-3 text-center text-[10px] text-slate-400">无匹配取值</div>
+        )}
+      </div>
+      <ColumnFilterFooter onClear={onClear} onApply={() => onApply({ values: selected })} />
+    </div>
+  );
+};
+
+/** 表头筛选气泡内容：按列类型分派，取数（分位/取值清单）只在气泡真正打开时才计算 */
+const ColumnFilterBody: React.FC<{
+  columnKey: string;
+  field: keyof ResearchStockRow;
+  title: string;
+  pool: ResearchStockRow[];
+  categorical: boolean;
+  initial?: ColumnFilterValue;
+  onApply: (next: ColumnFilterValue) => void;
+  onClear: () => void;
+}> = ({ columnKey, field, title, pool, categorical, initial, onApply, onClear }) => {
+  const samples = React.useMemo(
+    () =>
+      categorical
+        ? []
+        : pool
+            .map((item) => Number(item[field]))
+            .filter((value) => Number.isFinite(value))
+            .sort((left, right) => left - right),
+    [categorical, field, pool]
+  );
+
+  const options = React.useMemo(() => {
+    if (!categorical) return [];
+    const counter = new Map<string, number>();
+    pool.forEach((item) => {
+      const raw = item[field];
+      const value = raw == null || raw === '' ? '-' : String(raw);
+      counter.set(value, (counter.get(value) || 0) + 1);
+    });
+    return [...counter.entries()]
+      .map(([value, count]) => ({ value, count }))
+      .sort((left, right) => right.count - left.count || left.value.localeCompare(right.value));
+  }, [categorical, field, pool]);
+
+  if (categorical) {
+    return (
+      <ColumnValueFilterPanel label={title} options={options} initial={initial} onApply={onApply} onClear={onClear} />
+    );
+  }
+
+  const def = COLUMN_DEFS[columnKey];
+  const rangeField = FILTER_SECTIONS.flatMap((section) => section.fields).find(
+    (item) => (item.key as string) === (def?.dataIndex ?? columnKey)
+  );
+  return (
+    <ColumnRangeFilterPanel
+      label={title}
+      initial={initial}
+      samples={samples}
+      step={rangeField?.step ?? 0.01}
+      precision={rangeField?.precision}
+      suffix={rangeField?.suffix}
+      onApply={onApply}
+      onClear={onClear}
+    />
   );
 };
 
@@ -777,7 +1113,13 @@ export const ResearchPlatformPage: React.FC = () => {
   const [draftFilters, setDraftFilters] = React.useState<ResearchFiltersState>(() => cloneFilters(DEFAULT_RESEARCH_FILTERS));
   const [appliedFilters, setAppliedFilters] = React.useState<ResearchFiltersState>(() => cloneFilters(DEFAULT_RESEARCH_FILTERS));
   const [activePreset, setActivePreset] = React.useState<string | null>(null);
-  const [activeFilterSections, setActiveFilterSections] = React.useState<FilterSectionKey[]>(['common']);
+  /** 条件带同时只开一个气泡（null = 全关） */
+  const [openFilterSection, setOpenFilterSection] = React.useState<FilterSectionKey | null>(null);
+  /** 表头列筛选（Excel 式）：key = 列 key，作用在量化条件之上 */
+  const [columnFilters, setColumnFilters] = React.useState<Record<string, ColumnFilterValue>>({});
+  const [openColumnFilter, setOpenColumnFilter] = React.useState<string | null>(null);
+  /** 列显示选择器气泡（与上面两类气泡互斥） */
+  const [openColumnPicker, setOpenColumnPicker] = React.useState<boolean>(false);
 
   // 用 ref 递增刷新计数：异步回调里读取 state 会拿到过期闭包值
   const refreshCounter = React.useRef<number>(0);
@@ -1366,6 +1708,25 @@ export const ResearchPlatformPage: React.FC = () => {
         if (!nameHit && !codeHit) return;
       }
 
+      // --- 表头列筛选（逐列叠加，Excel 式） ---
+      for (const [columnKey, columnFilter] of Object.entries(columnFilters)) {
+        if (!hasColumnFilterValue(columnFilter)) continue;
+        const field = (COLUMN_DEFS[columnKey]?.dataIndex ?? columnKey) as keyof ResearchStockRow;
+
+        if (columnFilter.values && columnFilter.values.length > 0) {
+          const raw = item[field];
+          const text = raw == null || raw === '' ? '-' : String(raw);
+          if (!columnFilter.values.includes(text)) return;
+        }
+        if (columnFilter.min != null || columnFilter.max != null) {
+          const value = Number(item[field]);
+          // 区间筛选下，缺值行视为不命中（与 Excel 一致；条件区的区间筛选另有 coerceZero 口径）
+          if (!Number.isFinite(value)) return;
+          if (columnFilter.min != null && value < columnFilter.min) return;
+          if (columnFilter.max != null && value > columnFilter.max) return;
+        }
+      }
+
       matches.push({ ...item, isMatched: true });
     });
 
@@ -1378,12 +1739,31 @@ export const ResearchPlatformPage: React.FC = () => {
     });
 
     return matches.slice(0, loadRange).map((item, index) => ({ ...item, rank: index + 1 }));
-  }, [appliedFilters, activeRangeFilters, enrichedPool, keyword, sortKey, loadRange]);
+  }, [appliedFilters, activeRangeFilters, columnFilters, enrichedPool, keyword, sortKey, loadRange]);
 
-  // 当前分页的行（表格展示范围）
+  /* 候选池无限滚动：从「当前页」起连续渲染 candidateLoadedPages 页，滚到底自动再续一页 */
+  const [candidateLoadedPages, setCandidateLoadedPages] = React.useState<number>(1);
+  /** 滚动事件很密，用时间戳节流，避免一次甩到底连跳好几页 */
+  const lastAutoLoadAt = React.useRef<number>(0);
+
+  // 换筛选/换页/换数据源都回到「只加载一页」
+  React.useEffect(() => {
+    setCandidateLoadedPages(1);
+  }, [filteredRows, candidatePage, candidatePageSize, activeDataSource]);
+
+  // 列显示只作用于候选池宽表，切到自选/研究池时收起
+  React.useEffect(() => {
+    setOpenColumnPicker(false);
+  }, [activeDataSource]);
+
+  // 当前分页的行（表格展示范围：候选池为「当前页起连续 N 页」）
   const visibleCandidateRows = React.useMemo(
-    () => filteredRows.slice((candidatePage - 1) * candidatePageSize, candidatePage * candidatePageSize),
-    [filteredRows, candidatePage, candidatePageSize]
+    () =>
+      filteredRows.slice(
+        (candidatePage - 1) * candidatePageSize,
+        (candidatePage - 1 + candidateLoadedPages) * candidatePageSize
+      ),
+    [filteredRows, candidatePage, candidatePageSize, candidateLoadedPages]
   );
 
   React.useEffect(() => {
@@ -1404,17 +1784,145 @@ export const ResearchPlatformPage: React.FC = () => {
 
   /* ------------------------------ 表格列 ------------------------------ */
 
-  /** 固定列集：按 COLUMN_GROUPS 顺序展开（50 维宽表字段 + universe 基础列，不支持自定义） */
-  const visibleColumnKeys = React.useMemo(
+  /** 全量列 key：按 COLUMN_GROUPS 顺序展开（50 维宽表字段 + universe 基础列） */
+  const allColumnKeys = React.useMemo(
     () => COLUMN_GROUPS
       .flatMap((group) => group.columns)
       .filter((key) => COLUMN_DEFS[key] !== undefined),
     []
   );
 
+  /** 勾选可见列（默认全开，选择结果按用户维度持久化到 localStorage） */
+  const [visibleColumnKeys, setVisibleColumnKeys] = React.useState<string[]>(() =>
+    readStoredColumns(allColumnKeys)
+  );
+
+  /** 批量设置若干列的显隐（按组「全选/清空」要一次算完，逐列调用会丢状态） */
+  const setColumnsVisible = (columnKeys: string[], visible: boolean): void => {
+    const next = visible
+      ? allColumnKeys.filter((key) => columnKeys.includes(key) || visibleColumnKeys.includes(key))
+      : visibleColumnKeys.filter((key) => !columnKeys.includes(key) || ALWAYS_VISIBLE_COLUMNS.has(key));
+    // 至少保留一列，否则表格会渲染成空壳
+    if (next.length === 0 || next.length === visibleColumnKeys.length) return;
+    setVisibleColumnKeys(next);
+    writeStoredColumns(next);
+  };
+
+  const resetVisibleColumns = (): void => {
+    setVisibleColumnKeys(allColumnKeys);
+    writeStoredColumns(allColumnKeys);
+  };
+
+  /** 三类气泡（条件组 / 表头列筛选 / 列显示）同屏只允许一个，避免跳出两个框 */
+  const toggleFilterSection = (sectionKey: FilterSectionKey | null): void => {
+    setOpenFilterSection(sectionKey);
+    if (sectionKey) {
+      setOpenColumnFilter(null);
+      setOpenColumnPicker(false);
+    }
+  };
+
+  const toggleColumnFilter = (columnKey: string | null): void => {
+    setOpenColumnFilter(columnKey);
+    if (columnKey) {
+      setOpenFilterSection(null);
+      setOpenColumnPicker(false);
+    }
+  };
+
+  const toggleColumnPicker = (open: boolean): void => {
+    setOpenColumnPicker(open);
+    if (open) closeAllFilterPopovers();
+  };
+
+  const closeAllFilterPopovers = (): void => {
+    setOpenFilterSection(null);
+    setOpenColumnFilter(null);
+  };
+
+  const applyColumnFilter = (columnKey: string, next: ColumnFilterValue): void => {
+    setColumnFilters(
+      hasColumnFilterValue(next)
+        ? { ...columnFilters, [columnKey]: next }
+        : omitColumnFilter(columnFilters, columnKey)
+    );
+    setOpenColumnFilter(null);
+  };
+
+  const clearColumnFilter = (columnKey: string): void => {
+    setColumnFilters(omitColumnFilter(columnFilters, columnKey));
+    setOpenColumnFilter(null);
+  };
+
+  /** 表头：列名 + 漏斗按钮（Excel 式列筛选入口） */
+  const renderColumnTitle = React.useCallback(
+    (columnKey: string) => {
+      const def = COLUMN_DEFS[columnKey];
+      const title = def?.title ?? columnKey;
+      if (NON_FILTERABLE_COLUMNS.has(columnKey)) {
+        return <span className="whitespace-nowrap">{title}</span>;
+      }
+
+      const field = (def?.dataIndex ?? columnKey) as keyof ResearchStockRow;
+      const filter = columnFilters[columnKey];
+      const isActive = hasColumnFilterValue(filter);
+      const isOpen = openColumnFilter === columnKey;
+
+      return (
+        <span className="flex items-center justify-center gap-1 whitespace-nowrap">
+          <span className="truncate">{title}</span>
+          <Popover
+            trigger="click"
+            placement="bottom"
+            arrow={false}
+            open={isOpen}
+            onOpenChange={(next) => toggleColumnFilter(next ? columnKey : null)}
+            content={
+              <ColumnFilterBody
+                columnKey={columnKey}
+                field={field}
+                title={title}
+                pool={enrichedPool}
+                categorical={CATEGORICAL_COLUMNS.has(columnKey)}
+                initial={filter}
+                onApply={(next) => applyColumnFilter(columnKey, next)}
+                onClear={() => clearColumnFilter(columnKey)}
+              />
+            }
+          >
+            <button
+              type="button"
+              title={`${title}：列筛选`}
+              onClick={(event) => event.stopPropagation()}
+              className={`flex-shrink-0 rounded p-0.5 transition-colors ${
+                isOpen
+                  ? 'bg-blue-100 text-blue-700'
+                  : isActive
+                    ? 'text-blue-600 hover:bg-blue-50'
+                    : 'text-slate-300 hover:bg-slate-100 hover:text-blue-500'
+              }`}
+            >
+              <ListFilter className="h-3 w-3" />
+            </button>
+          </Popover>
+        </span>
+      );
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [columnFilters, openColumnFilter, enrichedPool]
+  );
+
   const columns = React.useMemo<ColumnsType<ResearchStockRow>>(
-    () => buildColumns(visibleColumnKeys),
-    [visibleColumnKeys]
+    () =>
+      visibleColumnKeys
+        .map((key) => buildColumn(key, { title: renderColumnTitle(key) }))
+        .filter((item): item is ColumnType<ResearchStockRow> => item !== null),
+    [visibleColumnKeys, renderColumnTitle]
+  );
+
+  const activeColumnFilterCount = React.useMemo(
+    () => Object.values(columnFilters).filter(hasColumnFilterValue).length,
+    [columnFilters]
   );
 
   const candidateScrollX = React.useMemo(
@@ -1952,6 +2460,19 @@ export const ResearchPlatformPage: React.FC = () => {
 
   /* ------------------------------ 渲染 ------------------------------ */
 
+  /** 筛选同步态：文案/配色单源，左轨批次卡与右区筛选卡共用同一口径 */
+  const filterStatus = universeFeaturesLoading
+    ? { color: 'processing', text: `加载因子 ${candidatePool.length} 只`, icon: <RefreshCw className="h-2.5 w-2.5 animate-spin" /> }
+    : hasPendingFilterChanges
+      ? { color: 'warning', text: '待应用', icon: <RefreshCw className="h-2.5 w-2.5 animate-spin" /> }
+      : { color: 'success', text: '已同步', icon: <Search className="h-2.5 w-2.5" /> };
+
+  const renderFilterStatus = (className: string) => (
+    <Tag color={filterStatus.color} icon={filterStatus.icon} className={className}>
+      {filterStatus.text}
+    </Tag>
+  );
+
   const selectStyleFilter = (
     fieldKey: 'selectedSectors' | 'selectedConcepts' | 'selectedIndices',
     label: string,
@@ -1978,18 +2499,34 @@ export const ResearchPlatformPage: React.FC = () => {
     </div>
   );
 
-  const filterCollapseItems = FILTER_SECTIONS.map((section) => ({
-    key: section.key,
-    label: (
-      <span className="text-xs font-bold uppercase tracking-wide text-slate-700">
-        {section.label}
-        {section.fields.length > 0 && (
-          <span className="ml-1.5 text-[10px] font-medium text-slate-400">({section.fields.length})</span>
-        )}
-      </span>
-    ),
-    children: (
-      <div className="-ml-[5px] space-y-3 pt-1">
+  /** 该组条件是否已偏离默认（条件带上以蓝点提示，避免逐组点开确认） */
+  const isFilterSectionDirty = (section: FilterSectionConfig): boolean => {
+    if (section.key === 'common') {
+      return (
+        draftFilters.minScore !== DEFAULT_RESEARCH_FILTERS.minScore ||
+        draftFilters.excludeSt !== DEFAULT_RESEARCH_FILTERS.excludeSt ||
+        draftFilters.highConfidenceOnly !== DEFAULT_RESEARCH_FILTERS.highConfidenceOnly ||
+        draftFilters.volumeTrendOnly !== DEFAULT_RESEARCH_FILTERS.volumeTrendOnly
+      );
+    }
+    if (section.key === 'sector') {
+      return (
+        draftFilters.marketType !== DEFAULT_RESEARCH_FILTERS.marketType ||
+        draftFilters.selectedSectors.length > 0 ||
+        draftFilters.selectedConcepts.length > 0 ||
+        draftFilters.selectedIndices.length > 0
+      );
+    }
+    return section.fields.some((field) => {
+      const value = draftFilters[field.key];
+      const preset = DEFAULT_RESEARCH_FILTERS[field.key];
+      if (!Array.isArray(value) || !Array.isArray(preset)) return false;
+      return value[0] !== preset[0] || value[1] !== preset[1];
+    });
+  };
+
+  const renderFilterSectionBody = (section: FilterSectionConfig) => (
+      <div className="space-y-3">
         {section.key === 'common' && (
           <>
             <div className="flex items-center justify-between rounded-xl border border-slate-100 bg-slate-50/50 px-3 py-1.5">
@@ -2020,7 +2557,7 @@ export const ResearchPlatformPage: React.FC = () => {
         )}
 
         {section.fields.length > 0 && (
-          <div className="space-y-1.5">
+          <div className={isWideFilterSection(section) ? 'grid grid-cols-2 gap-x-4 gap-y-1.5' : 'space-y-1.5'}>
             {section.fields.map((field) => (
               <RangeInput
                 key={field.key as string}
@@ -2057,8 +2594,7 @@ export const ResearchPlatformPage: React.FC = () => {
           </>
         )}
       </div>
-    ),
-  }));
+  );
 
   const activeTableTotal = activeDataSource === 'candidates'
     ? filteredRows.length
@@ -2066,27 +2602,82 @@ export const ResearchPlatformPage: React.FC = () => {
       ? filteredWatchlist.length
       : filteredPool.length;
 
+  /** 当前数据源的分页口径（顶部翻页条与表格共用同一份状态） */
+  const activePager = (() => {
+    const state =
+      activeDataSource === 'candidates'
+        ? { current: candidatePage, pageSize: candidatePageSize, setPage: setCandidatePage, setPageSize: setCandidatePageSize }
+        : activeDataSource === 'watchlist'
+          ? { current: watchlistPage, pageSize: watchlistPageSize, setPage: setWatchlistPage, setPageSize: setWatchlistPageSize }
+          : { current: poolPage, pageSize: poolPageSize, setPage: setPoolPage, setPageSize: setPoolPageSize };
+    return {
+      ...state,
+      totalPages: Math.max(1, Math.ceil(activeTableTotal / state.pageSize)),
+      pageRows: Math.max(0, Math.min(state.pageSize, activeTableTotal - (state.current - 1) * state.pageSize)),
+      onChange: (page: number, pageSize: number): void => {
+        state.setPage(page);
+        state.setPageSize(pageSize);
+      },
+    };
+  })();
+
+  /** 候选池滚动续页：已渲染到第 candidateLoadedThrough 页（共 candidateTotalPages 页） */
+  const candidateTotalPages = activePager.totalPages;
+  const candidateLoadedThrough = Math.min(candidatePage - 1 + candidateLoadedPages, candidateTotalPages);
+
+  const handleTableScroll = (event: React.UIEvent<HTMLDivElement>): void => {
+    if (activeDataSource !== 'candidates') return;
+    const el = event.currentTarget;
+    // 距底部 240px 内即视为「滚到底」
+    if (el.scrollHeight - el.scrollTop - el.clientHeight > 240) return;
+    if (candidateLoadedThrough >= candidateTotalPages) return;
+    const now = Date.now();
+    if (now - lastAutoLoadAt.current < 400) return;
+    lastAutoLoadAt.current = now;
+    setCandidateLoadedPages(candidateLoadedPages + 1);
+  };
+
   return (
     <>
       <div className={`${PAGE_LAYOUT.outerClass} research-platform-page`}>
         {/* 左右分栏各自独立滚动：桌面宽度下外层框架不再整体滚动，左侧筛选区保持固定 */}
         <div className={`${PAGE_LAYOUT.frameClass} custom-scrollbar overflow-y-auto xl:overflow-hidden`}>
           <header className={`${PAGE_LAYOUT.headerClass}`} style={{ height: `${PAGE_LAYOUT.headerHeight}px` }}>
-            <div className="flex items-center gap-3">
-              <div className="flex h-9 w-9 items-center justify-center rounded-2xl bg-gradient-to-br from-blue-500 via-indigo-500 to-violet-400 text-white shadow-lg shadow-blue-900/20">
+            <div className="flex min-w-0 items-center gap-3">
+              <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-2xl bg-gradient-to-br from-blue-500 via-indigo-500 to-violet-400 text-white shadow-lg shadow-blue-900/20">
                 <Microscope className="h-5 w-5" />
               </div>
-              <div>
+              <div className="min-w-0">
                 <div className="flex items-baseline gap-2">
                   <h1 className="text-lg font-bold tracking-tight text-slate-900">投研平台 ({marketConfig.label})</h1>
                   <p className="text-[10px] font-bold uppercase tracking-[0.24em] text-slate-500">Professional Quant Workspace</p>
                 </div>
-                <p className="mt-0.5 whitespace-nowrap text-[11px] font-semibold text-slate-800">
+                {/* 顶栏右侧控件变多，说明文字改为可截断，窗口变窄时优先让位 */}
+                <p className="mt-0.5 truncate text-[11px] font-semibold text-slate-800">
                   注：本页收益均为未来收益，用于评测模型在过去某一时期的推理结果在随后区间的真实表现。
                 </p>
               </div>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex flex-shrink-0 items-center gap-2">
+              {/* 数据源切换 + 搜索上移到顶栏（刷新数据左侧），控制带里只留条件与动作 */}
+              <Segmented
+                value={activeDataSource}
+                onChange={(value) => setActiveDataSource(value as DataSourceTab)}
+                options={[
+                  { label: <div className="flex items-center gap-1.5 px-1.5"><LibraryBig className="h-3.5 w-3.5" />候选池 ({filteredRows.length})</div>, value: 'candidates' },
+                  { label: <div className="flex items-center gap-1.5 px-1.5"><Quote className="h-3.5 w-3.5" />自选 ({watchlistTotal})</div>, value: 'watchlist' },
+                  { label: <div className="flex items-center gap-1.5 px-1.5"><Microscope className="h-3.5 w-3.5" />研究池 ({poolTotal})</div>, value: 'pool' },
+                ]}
+                className="research-next-segmented h-9 rounded-xl bg-slate-100 p-0.5"
+              />
+              <Input
+                className="premium-search-bar h-9 w-[190px] rounded-xl border-slate-200 font-bold"
+                placeholder="搜索代码/名称..."
+                prefix={<Search className="h-4 w-4 text-slate-400" />}
+                value={keyword}
+                onChange={(event) => setKeyword(event.target.value)}
+                allowClear
+              />
               <Button
                 icon={<RefreshCw className="h-4 w-4" />}
                 className={BUTTON_STYLES.headerRefresh}
@@ -2110,8 +2701,8 @@ export const ResearchPlatformPage: React.FC = () => {
             {/* 底部按 Dock 高度预留，并上探 12px 让左右两栏尽量吃满可视高度 */}
             <div className={`${PAGE_LAYOUT.contentOuterClass} flex min-h-0 flex-1 flex-col pb-[calc(var(--dock-height)-12px)]`}>
               <div className="grid min-h-0 flex-1 gap-4 xl:grid-rows-[minmax(0,1fr)] xl:grid-cols-[340px_minmax(0,1fr)] 2xl:grid-cols-[360px_minmax(0,1fr)]">
-                {/* ---------------- 左侧筛选侧栏（固定，不随右侧滚动） ---------------- */}
-                <div className="flex min-h-0 flex-col gap-4">
+                {/* ---------------- 左侧轨：入口 + 批次概览（固定，不随右侧滚动） ---------------- */}
+                <div className="custom-scrollbar flex min-h-0 flex-col gap-4 overflow-y-auto pb-2 pr-0.5">
                   <div className="flex-shrink-0 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
                     <div className="mb-3 flex items-center gap-2 text-[9px] font-black uppercase tracking-[0.2em] text-slate-500">
                       <LibraryBig className="h-3.5 w-3.5" />
@@ -2290,53 +2881,131 @@ export const ResearchPlatformPage: React.FC = () => {
                     </div>
                   </div>
 
-                  <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
-                    <div className="custom-scrollbar flex-1 overflow-y-auto p-4">
-                      <div className="mb-3 flex items-center gap-2 text-[9px] font-black uppercase tracking-[0.2em] text-slate-500">
-                        <Filter className="h-3.5 w-3.5" />
-                        量化研究条件
-                      </div>
+                  {/* 概览指标：自右侧主区下沉到左轨（2×2 紧凑形态） */}
+                  <div className="grid flex-shrink-0 grid-cols-2 gap-3">
+                    <ResearchMetricCard
+                      compact
+                      icon={LibraryBig}
+                      label="候选池"
+                      value={overview?.summary?.total || 0}
+                      subLabel="批次预测总量"
+                      accentColor="#3b82f6"
+                    />
+                    <ResearchMetricCard
+                      compact
+                      icon={Filter}
+                      label="筛选结果"
+                      value={filteredRows.length}
+                      subLabel="符合条件个股"
+                      accentColor="#8b5cf6"
+                    />
+                    <ResearchMetricCard
+                      compact
+                      icon={Flame}
+                      label="高强度"
+                      value={overview?.summary?.strongCount || 0}
+                      subLabel="高分命中 ≥0.05"
+                      accentColor="#f43f5e"
+                    />
+                    <ResearchMetricCard
+                      compact
+                      icon={BarChart3}
+                      label="平均分数"
+                      value={avgScore}
+                      subLabel="筛选结果均值"
+                      accentColor="#0ea5e9"
+                    />
+                  </div>
 
-                      <Collapse
-                        className={FIELD_STYLES.collapse}
-                        ghost
-                        activeKey={activeFilterSections}
-                        onChange={(keys) =>
-                          setActiveFilterSections(
-                            (Array.isArray(keys) ? keys : [keys]) as FilterSectionKey[]
-                          )
-                        }
-                        items={filterCollapseItems}
-                      />
+                  {/* 当前研究批次：自右侧主区下沉到左轨，窄栏下改为竖向排布 */}
+                  <div className="flex-shrink-0 overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+                    <div className="flex items-center justify-between gap-2 border-b border-slate-100 bg-slate-50/70 px-4 py-2.5">
+                      <div className="flex items-center gap-2">
+                        <Sparkles className="h-3.5 w-3.5 text-blue-500" />
+                        <span className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-500">
+                          当前研究批次
+                        </span>
+                      </div>
+                      {renderFilterStatus(
+                        'm-0 flex items-center gap-1 rounded-md border-none px-1.5 py-0 text-[9px] font-black uppercase tracking-wide'
+                      )}
                     </div>
 
-                    <div className="absolute bottom-0 left-0 right-0 z-40 rounded-b-3xl border-t border-slate-200/80 bg-white/95 px-4 py-3 shadow-[0_-10px_30px_-15px_rgba(0,0,0,0.1)] backdrop-blur-xl supports-[backdrop-filter]:bg-white/90">
-                      <div className="mb-2 text-center text-[10px] font-medium text-slate-500">
-                        {universeFeaturesLoading ? (
-                          <span className="text-sky-600">⏳ 正在加载 QuantDB 因子（{candidatePool.length} 只）…</span>
-                        ) : hasPendingFilterChanges ? (
-                          <span className="text-amber-600">⚠ 筛选条件已变更，点击应用后生效</span>
-                        ) : (
-                          <span className="text-emerald-600">✓ 当前筛选条件已同步</span>
+                    <div className="space-y-3 p-4">
+                      <div>
+                        <h3 className="overflow-hidden text-sm font-black leading-snug tracking-tight text-slate-900 [display:-webkit-box] [-webkit-box-orient:vertical] [-webkit-line-clamp:2]">
+                          {availableModels.find((item) => item.modelId === selectedModelId)?.name || '未选择模型'}
+                        </h3>
+                        {selectedDate && (
+                          <div className="mt-1.5 inline-flex items-center gap-1 rounded-md bg-slate-900 px-1.5 py-0.5 text-[10px] font-black text-white shadow-sm shadow-slate-900/20">
+                            <Activity className="h-2.5 w-2.5" />
+                            {selectedDate} 批次
+                          </div>
                         )}
                       </div>
-                      <div className="flex gap-2">
-                        <Button size="small" className="flex-1 rounded-xl border-slate-200 text-[11px] font-bold" onClick={resetFilters}>
-                          恢复默认
-                        </Button>
-                        <Button
-                          size="small"
-                          type="primary"
-                          className={`flex-1 rounded-xl text-[11px] font-black shadow-md transition-all ${
-                            hasPendingFilterChanges
-                              ? 'bg-blue-600 hover:-translate-y-0.5 hover:bg-blue-500'
-                              : 'border-none bg-slate-300 text-slate-50 shadow-none'
-                          }`}
-                          disabled={!hasPendingFilterChanges}
-                          onClick={applyCurrentFilters}
-                        >
-                          应用筛选
-                        </Button>
+
+                      {/* 窄栏放不下「日期 → 日期」两列并排，执行周期独占一行 */}
+                      <div className="rounded-xl border border-slate-100 bg-slate-50/60 px-3 py-2">
+                        <div className="text-[9px] font-bold uppercase tracking-wider text-slate-400">执行周期</div>
+                        <div className="mt-1 flex items-center gap-1.5 text-[11px] font-black text-slate-700">
+                          <Target className="h-3 w-3 flex-shrink-0 text-blue-500" />
+                          <span>{selectedDate || '-'}</span>
+                          <span className="flex-shrink-0 text-slate-300">→</span>
+                          <CandlestickChart className="h-3 w-3 flex-shrink-0 text-emerald-500" />
+                          <span>{selectedRunEntry?.targetDate || '-'}</span>
+                        </div>
+                      </div>
+
+                      <div>
+                        <div className="mb-1.5 flex items-center gap-1.5 text-[9px] font-black uppercase tracking-widest text-slate-400">
+                          <Filter className="h-2.5 w-2.5" />
+                          当前生效筛选条件
+                        </div>
+                        <div className="flex flex-wrap gap-1">
+                          {activeConditionSummary.length > 0 ? (
+                            activeConditionSummary.map((condition) => (
+                              <motion.span
+                                key={condition}
+                                whileHover={{ y: -1 }}
+                                className="flex items-center gap-1 rounded-md border border-slate-200/60 bg-slate-100/80 px-1.5 py-0.5 text-[10px] font-bold text-slate-600 transition-colors hover:bg-white"
+                              >
+                                <div className="h-1 w-1 rounded-full bg-blue-400" />
+                                {condition}
+                              </motion.span>
+                            ))
+                          ) : (
+                            <span className="text-[10px] font-bold italic text-slate-400">未应用特定条件筛选</span>
+                          )}
+                        </div>
+                      </div>
+
+                      <div>
+                        <div className="mb-1.5 flex items-center gap-1.5 text-[9px] font-black uppercase tracking-widest text-slate-400">
+                          <BarChart3 className="h-2.5 w-2.5" />
+                          核心板块分布
+                        </div>
+                        <div className="flex flex-wrap gap-1">
+                          {sectorBreakdown.slice(0, 3).map((item, idx) => (
+                            <motion.div
+                              key={item.name}
+                              whileHover={{ scale: 1.05 }}
+                              className="flex items-center gap-1.5 rounded-md border border-slate-200 bg-white/80 px-1.5 py-0.5 text-[10px] font-bold shadow-sm"
+                            >
+                              <span className="text-slate-600">{item.name}</span>
+                              <span className={`rounded px-1 py-0.5 text-[9px] ${idx === 0 ? 'bg-blue-500 text-white' : 'bg-slate-100 text-slate-500'}`}>
+                                {item.count}
+                              </span>
+                            </motion.div>
+                          ))}
+                          {sectorBreakdown.length > 3 && (
+                            <div
+                              className="flex cursor-help items-center px-1.5 text-[9px] font-black text-slate-400"
+                              title={sectorBreakdown.slice(3).map((item) => `${item.name}(${item.count})`).join(', ')}
+                            >
+                              + {sectorBreakdown.length - 3} OTHERS
+                            </div>
+                          )}
+                        </div>
                       </div>
                     </div>
                   </div>
@@ -2344,7 +3013,9 @@ export const ResearchPlatformPage: React.FC = () => {
 
                 {/* ---------------- 右侧主内容 ---------------- */}
                 <motion.div
-                  className="custom-scrollbar flex min-h-0 min-w-0 flex-1 flex-col gap-4 overflow-y-auto pb-4"
+                  /* 不留底部内边距：空结果时右侧卡片底边要贴齐左侧卡片底边 */
+                  className="custom-scrollbar flex min-h-0 min-w-0 flex-1 flex-col gap-4 overflow-y-auto"
+                  onScroll={handleTableScroll}
                   initial="hidden"
                   animate="visible"
                   variants={{
@@ -2354,190 +3025,275 @@ export const ResearchPlatformPage: React.FC = () => {
                 >
                   <motion.div
                     variants={{ hidden: { opacity: 0, y: 20 }, visible: { opacity: 1, y: 0 } }}
-                    className="grid flex-shrink-0 gap-4 md:grid-cols-2 xl:grid-cols-4"
-                  >
-                    <ResearchMetricCard
-                      icon={LibraryBig}
-                      label="候选池"
-                      value={overview?.summary?.total || 0}
-                      subLabel="当前批次预测总量"
-                      accentColor="#3b82f6"
-                    />
-                    <ResearchMetricCard
-                      icon={Filter}
-                      label="筛选结果"
-                      value={filteredRows.length}
-                      subLabel="符合当前条件的个股"
-                      accentColor="#8b5cf6"
-                    />
-                    <ResearchMetricCard
-                      icon={Flame}
-                      label="高强度标的"
-                      value={overview?.summary?.strongCount || 0}
-                      subLabel="模型高分命中 (≥0.05)"
-                      accentColor="#f43f5e"
-                    />
-                    <ResearchMetricCard
-                      icon={BarChart3}
-                      label="平均分数"
-                      value={avgScore}
-                      subLabel="筛选结果均值"
-                      accentColor="#0ea5e9"
-                    />
-                  </motion.div>
-
-                  <motion.div
-                    variants={{ hidden: { opacity: 0, y: 20 }, visible: { opacity: 1, y: 0 } }}
                     className="glass-panel flex min-h-0 min-w-0 shrink-0 grow flex-col overflow-hidden rounded-3xl p-1 shadow-sm"
                   >
-                    <motion.div
-                      initial={{ opacity: 0, y: 15 }}
-                      animate={{ opacity: 1, y: 0 }}
-                      className="glass-panel mb-4 flex-shrink-0 rounded-2xl border border-white/60 bg-white/40 p-4 shadow-xl shadow-slate-200/50"
-                    >
-                      <div className="flex flex-col justify-between gap-3 border-b border-slate-100/60 pb-3 md:flex-row md:items-end">
-                        <div className="space-y-1">
-                          <div className="flex items-center gap-2 text-[9px] font-black uppercase tracking-widest text-slate-400">
-                            <Sparkles className="h-3 w-3 text-blue-500" />
-                            当前研究模型与批次
-                          </div>
-                          <div className="flex items-end gap-3">
-                            <h2 className="text-2xl font-black leading-none tracking-tight text-slate-900">
-                              {availableModels.find((item) => item.modelId === selectedModelId)?.name || '未选择模型'}
-                            </h2>
-                            {selectedDate && (
-                              <div className="mb-0.5 flex items-center gap-1 rounded-lg bg-slate-900 px-2 py-0.5 text-[10px] font-black text-white shadow-lg shadow-slate-900/20">
-                                <Activity className="h-2.5 w-2.5" />
-                                {selectedDate}
-                              </div>
-                            )}
-                          </div>
-                        </div>
+                    {/* 控制带：条件 / 排序 / 状态与动作（数据源与搜索已上移到顶栏） */}
+                    <div className="mx-1 mt-1 flex flex-shrink-0 flex-wrap items-center gap-x-2 gap-y-1.5 rounded-2xl border border-slate-100 bg-slate-50/60 px-3 py-2">
+                      <span className="flex items-center gap-1.5 pr-1 text-[11px] font-black tracking-tight text-slate-900">
+                        <Filter className="h-3.5 w-3.5 text-blue-600" />
+                        量化研究条件
+                      </span>
 
-                        <div className="flex flex-wrap items-center gap-3">
-                          <div className="flex flex-col gap-0.5 border-r border-slate-100 pr-4">
-                            <span className="text-[9px] font-bold uppercase tracking-wider text-slate-400">执行周期</span>
-                            <div className="flex items-center gap-2">
-                              <div className="flex items-center gap-1 text-[11px] font-black text-slate-700">
-                                <Target className="h-3 w-3 text-blue-500" />
-                                {selectedDate || '-'}
+                      {FILTER_SECTIONS.map((section) => {
+                        const meta = FILTER_SECTION_META[section.key];
+                        const SectionIcon = meta.icon;
+                        const isOpen = openFilterSection === section.key;
+                        const isDirty = isFilterSectionDirty(section);
+                        return (
+                          <Popover
+                            key={section.key}
+                            trigger="click"
+                            placement="bottomLeft"
+                            arrow={false}
+                            open={isOpen}
+                            onOpenChange={(next) => toggleFilterSection(next ? section.key : null)}
+                            content={
+                              <div style={{ width: meta.panelWidth }}>{renderFilterSectionBody(section)}</div>
+                            }
+                          >
+                            <button
+                              type="button"
+                              className={`group flex items-center gap-1 rounded-full border px-2 py-1 text-[10.5px] font-bold transition-all duration-200 active:scale-95 ${
+                                isOpen
+                                  ? 'border-blue-500 bg-blue-50 text-blue-700 shadow-sm ring-2 ring-blue-500/15'
+                                  : isDirty
+                                    ? 'border-blue-200 bg-blue-50/70 text-blue-700 hover:border-blue-400'
+                                    : 'border-slate-200 bg-white text-slate-600 hover:border-blue-300 hover:bg-blue-50/40 hover:text-blue-600'
+                              }`}
+                            >
+                              <SectionIcon
+                                className={`h-3 w-3 ${isOpen || isDirty ? 'text-blue-500' : 'text-slate-400 group-hover:text-blue-500'}`}
+                              />
+                              {section.label}
+                              {isDirty && <span className="h-1.5 w-1.5 rounded-full bg-blue-500" />}
+                              <ChevronDown
+                                className={`h-3 w-3 text-slate-400 transition-transform duration-200 ${isOpen ? 'rotate-180' : ''}`}
+                              />
+                            </button>
+                          </Popover>
+                        );
+                      })}
+
+                      {activeDataSource === 'candidates' && (
+                        <div className="flex items-center gap-0.5 rounded-[18px] border border-slate-200 bg-white/70 p-0.5">
+                          {SORT_OPTIONS.map((item) => (
+                            <button
+                              key={item.key}
+                              type="button"
+                              onClick={() => setSortKey(item.key)}
+                              className={`min-w-[44px] whitespace-nowrap rounded-xl px-2 py-1 text-[10.5px] font-black transition-all ${
+                                sortKey === item.key
+                                  ? 'scale-[1.02] bg-slate-800 text-white shadow-md shadow-slate-400/20'
+                                  : 'text-slate-500 hover:bg-white hover:text-slate-700'
+                              }`}
+                            >
+                              {item.label}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+
+                      <div className="ml-auto flex flex-wrap items-center gap-2 pl-2">
+                        {activeColumnFilterCount > 0 && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setColumnFilters({});
+                              closeAllFilterPopovers();
+                            }}
+                            title="清除全部列筛选"
+                            className="flex items-center gap-1 rounded-full border border-blue-200 bg-blue-50/70 px-2 py-0.5 text-[10px] font-bold text-blue-700 transition-all hover:border-blue-400 active:scale-95"
+                          >
+                            <ListFilter className="h-3 w-3" />
+                            列筛选 {activeColumnFilterCount} 列
+                            <X className="h-3 w-3 opacity-70" />
+                          </button>
+                        )}
+                        <span className="hidden items-baseline gap-1 text-[10px] font-semibold text-slate-400 lg:flex">
+                          命中
+                          <b className="text-[13px] font-black tabular-nums tracking-tight text-blue-600">
+                            {filteredRows.length}
+                          </b>
+                          <span className="text-slate-300">/</span>
+                          <span className="tabular-nums text-slate-500">{candidatePool.length}</span>
+                        </span>
+                        {renderFilterStatus(
+                          'm-0 flex items-center gap-1 rounded-lg border-none px-2 py-0 text-[9px] font-black uppercase tracking-wide'
+                        )}
+                        <span className="hidden h-4 w-px bg-slate-200 sm:block" />
+                        <Button
+                          size="small"
+                          onClick={() => {
+                            resetFilters();
+                            closeAllFilterPopovers();
+                          }}
+                          className="h-7 rounded-lg border-slate-200 px-2.5 text-[11px] font-bold text-slate-600 transition-all hover:border-slate-300 hover:text-slate-900 active:scale-95"
+                        >
+                          恢复默认
+                        </Button>
+                        <Button
+                          size="small"
+                          type="primary"
+                          className={`h-7 rounded-lg px-4 text-[11px] font-black shadow-sm transition-all active:scale-95 ${
+                            hasPendingFilterChanges
+                              ? 'bg-blue-600 hover:bg-blue-500'
+                              : 'border-none bg-slate-300 text-white shadow-none'
+                          }`}
+                          disabled={!hasPendingFilterChanges}
+                          onClick={() => {
+                            applyCurrentFilters();
+                            closeAllFilterPopovers();
+                          }}
+                        >
+                          应用筛选
+                        </Button>
+                      </div>
+                    </div>
+
+                    {/* 分页上移到表格顶部：原底部条被 Dock 遮挡，且翻页时不必先滚到底 */}
+                    <div className="flex flex-shrink-0 flex-wrap items-center justify-between gap-2 px-1 pb-1.5">
+                      <div className="flex items-center gap-2">
+                        <span className="text-[10px] font-semibold text-slate-400">
+                          第 <b className="tabular-nums text-slate-700">{activePager.current}</b> /{' '}
+                          <b className="tabular-nums text-slate-700">{activePager.totalPages}</b> 页 ·{' '}
+                          {activeDataSource === 'candidates' ? (
+                            <>
+                              已加载{' '}
+                              <b className="tabular-nums text-slate-700">{visibleCandidateRows.length}</b> /{' '}
+                              <b className="tabular-nums text-slate-700">{filteredRows.length}</b> 条
+                            </>
+                          ) : (
+                            <>
+                              本页 <b className="tabular-nums text-slate-700">{activePager.pageRows}</b> 条
+                            </>
+                          )}
+                        </span>
+                        {/* 列显示：宽表 50 列，按分组勾选显隐，选择结果本地持久化（只作用于候选池宽表） */}
+                        {activeDataSource === 'candidates' && (
+                        <Popover
+                          open={openColumnPicker}
+                          onOpenChange={toggleColumnPicker}
+                          trigger="click"
+                          placement="bottomLeft"
+                          arrow={false}
+                          content={
+                            <div className="w-[520px]">
+                              <div className="mb-2 flex items-center justify-between">
+                                <span className="flex items-center gap-1.5 text-[11px] font-black tracking-tight text-slate-900">
+                                  <Columns3 className="h-3.5 w-3.5 text-blue-600" />
+                                  列显示
+                                </span>
+                                <button
+                                  type="button"
+                                  className="rounded-md px-1.5 py-0.5 text-[10px] font-bold text-slate-500 transition-colors hover:bg-slate-100 hover:text-blue-600"
+                                  onClick={resetVisibleColumns}
+                                >
+                                  恢复默认（全部）
+                                </button>
                               </div>
-                              <div className="h-1 w-1 rounded-full bg-slate-300" />
-                              <div className="flex items-center gap-1 text-[11px] font-black text-slate-700">
-                                <CandlestickChart className="h-3 w-3 text-emerald-500" />
-                                {selectedRunEntry?.targetDate || '-'}
+                              <div className="custom-scrollbar max-h-[380px] space-y-1.5 overflow-y-auto pr-1">
+                                {COLUMN_GROUPS.map((group) => {
+                                  const keys = group.columns.filter((key) => COLUMN_DEFS[key] !== undefined);
+                                  if (keys.length === 0) return null;
+                                  const shown = keys.filter((key) => visibleColumnKeys.includes(key)).length;
+                                  return (
+                                    <div key={group.key} className="rounded-xl border border-slate-100 bg-slate-50/50 p-2">
+                                      <div className="mb-1 flex items-center justify-between">
+                                        <span className="text-[10px] font-black uppercase tracking-wide text-slate-500">
+                                          {group.label}
+                                          <span className="ml-1.5 font-bold tabular-nums text-slate-400">
+                                            {shown}/{keys.length}
+                                          </span>
+                                        </span>
+                                        <span className="flex items-center gap-2 text-[10px] font-bold">
+                                          <button
+                                            type="button"
+                                            className="rounded px-1 text-blue-600 transition-colors hover:bg-blue-50"
+                                            onClick={() => setColumnsVisible(keys, true)}
+                                          >
+                                            全选
+                                          </button>
+                                          <button
+                                            type="button"
+                                            className="rounded px-1 text-slate-500 transition-colors hover:bg-slate-200/60"
+                                            onClick={() => setColumnsVisible(keys, false)}
+                                          >
+                                            清空
+                                          </button>
+                                        </span>
+                                      </div>
+                                      <div className="grid grid-cols-3 gap-x-2 gap-y-0.5">
+                                        {keys.map((key) => {
+                                          const isShown = visibleColumnKeys.includes(key);
+                                          return (
+                                            <label
+                                              key={key}
+                                              className={`flex cursor-pointer items-center gap-1.5 rounded-md px-1 py-0.5 text-[11px] font-semibold transition-colors hover:bg-white ${
+                                                isShown ? 'text-slate-700' : 'text-slate-400'
+                                              }`}
+                                              title={String(COLUMN_DEFS[key]?.title ?? key)}
+                                            >
+                                              <Checkbox
+                                                checked={isShown}
+                                                disabled={ALWAYS_VISIBLE_COLUMNS.has(key)}
+                                                onChange={(event) => setColumnsVisible([key], event.target.checked)}
+                                              />
+                                              <span className="truncate">{String(COLUMN_DEFS[key]?.title ?? key)}</span>
+                                            </label>
+                                          );
+                                        })}
+                                      </div>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                              <div className="mt-2 flex items-center justify-between border-t border-slate-100 pt-2">
+                                <span className="text-[10px] font-semibold text-slate-400">
+                                  已显示 <b className="tabular-nums text-slate-700">{visibleColumnKeys.length}</b> /{' '}
+                                  {allColumnKeys.length} 列 · 选择会自动保存
+                                </span>
+                                <Button
+                                  size="small"
+                                  className="h-6 rounded-lg border-slate-200 px-3 text-[11px] font-bold"
+                                  onClick={() => setOpenColumnPicker(false)}
+                                >
+                                  完成
+                                </Button>
                               </div>
                             </div>
-                          </div>
-
-                          <div className="flex flex-col gap-0.5">
-                            <span className="text-[9px] font-bold uppercase tracking-wider text-slate-400">同步状态</span>
-                            <Tag
-                              color={hasPendingFilterChanges ? 'warning' : 'success'}
-                              icon={hasPendingFilterChanges ? <RefreshCw className="h-2.5 w-2.5 animate-spin-slow" /> : <Search className="h-2.5 w-2.5" />}
-                              className="m-0 flex items-center gap-1 rounded-lg border-none px-2.5 py-0.5 text-[10px] font-black uppercase tracking-wide shadow-sm"
-                            >
-                              {hasPendingFilterChanges ? '待应用' : '已同步'}
-                            </Tag>
-                          </div>
-                        </div>
-                      </div>
-
-                      <div className="grid grid-cols-1 items-start gap-4 pt-3 lg:grid-cols-12">
-                        <div className="space-y-1.5 lg:col-span-7">
-                          <div className="flex items-center gap-1.5 text-[9px] font-black uppercase tracking-widest text-slate-400">
-                            <Filter className="h-2.5 w-2.5" />
-                            当前生效筛选条件
-                          </div>
-                          <div className="flex flex-wrap gap-1.5">
-                            {activeConditionSummary.length > 0 ? (
-                              activeConditionSummary.map((condition) => (
-                                <motion.span
-                                  key={condition}
-                                  whileHover={{ y: -1 }}
-                                  className="flex items-center gap-1 rounded-lg border border-slate-200/50 bg-slate-100/80 px-2 py-0.5 text-[10px] font-bold text-slate-600 shadow-sm transition-colors hover:bg-white"
-                                >
-                                  <div className="h-1 w-1 rounded-full bg-blue-400" />
-                                  {condition}
-                                </motion.span>
-                              ))
-                            ) : (
-                              <span className="text-[10px] font-bold italic text-slate-400">未应用特定条件筛选</span>
-                            )}
-                          </div>
-                        </div>
-
-                        <div className="space-y-1.5 lg:col-span-5">
-                          <div className="flex items-center gap-1.5 text-[9px] font-black uppercase tracking-widest text-slate-400">
-                            <BarChart3 className="h-2.5 w-2.5" />
-                            核心板块分布
-                          </div>
-                          <div className="flex flex-wrap gap-1.5">
-                            {sectorBreakdown.slice(0, 3).map((item, idx) => (
-                              <motion.div
-                                key={item.name}
-                                whileHover={{ scale: 1.05 }}
-                                className="flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white/80 px-2 py-0.5 text-[10px] font-bold shadow-sm"
-                              >
-                                <span className="text-slate-600">{item.name}</span>
-                                <span className={`rounded px-1 py-0.5 text-[9px] ${idx === 0 ? 'bg-blue-500 text-white' : 'bg-slate-100 text-slate-500'}`}>
-                                  {item.count}
-                                </span>
-                              </motion.div>
-                            ))}
-                            {sectorBreakdown.length > 3 && (
-                              <div
-                                className="flex cursor-help items-center px-1.5 text-[9px] font-black text-slate-400"
-                                title={sectorBreakdown.slice(3).map((item) => `${item.name}(${item.count})`).join(', ')}
-                              >
-                                + {sectorBreakdown.length - 3} OTHERS
-                              </div>
-                            )}
-                          </div>
-                        </div>
-                      </div>
-                    </motion.div>
-
-                    {/* 工具栏：数据源 / 排序 / 搜索 / 列显示 */}
-                    <div className="mb-4 mt-2 flex flex-shrink-0 flex-wrap items-center justify-between gap-4 border-b border-slate-100 pb-4">
-                      <Segmented
-                        value={activeDataSource}
-                        onChange={(value) => setActiveDataSource(value as DataSourceTab)}
-                        options={[
-                          { label: <div className="flex items-center gap-2 px-2"><LibraryBig className="h-3.5 w-3.5" />候选池 ({filteredRows.length})</div>, value: 'candidates' },
-                          { label: <div className="flex items-center gap-2 px-2"><Quote className="h-3.5 w-3.5" />自选 ({watchlistTotal})</div>, value: 'watchlist' },
-                          { label: <div className="flex items-center gap-2 px-2"><Microscope className="h-3.5 w-3.5" />研究池 ({poolTotal})</div>, value: 'pool' },
-                        ]}
-                        className="research-next-segmented p-1.5"
-                      />
-                      <div className="flex flex-wrap items-center gap-3">
-                        {activeDataSource === 'candidates' && (
-                          <div className="flex items-center gap-1 rounded-[18px] border border-slate-200 bg-slate-50/50 p-1">
-                            {SORT_OPTIONS.map((item) => (
-                              <button
-                                key={item.key}
-                                type="button"
-                                onClick={() => setSortKey(item.key)}
-                                className={`min-w-[48px] whitespace-nowrap rounded-xl px-2 py-1.5 text-[10.5px] font-black transition-all ${
-                                  sortKey === item.key
-                                    ? 'scale-[1.02] bg-slate-800 text-white shadow-lg shadow-slate-400/20'
-                                    : 'text-slate-500 hover:bg-white hover:text-slate-700'
-                                }`}
-                              >
-                                {item.label}
-                              </button>
-                            ))}
-                          </div>
+                          }
+                        >
+                          <button
+                            type="button"
+                            title="显示/隐藏列"
+                            className={`flex h-7 items-center gap-1 rounded-full border px-2.5 text-[10px] font-bold transition-colors ${
+                              openColumnPicker
+                                ? 'border-blue-200 bg-blue-50 text-blue-700'
+                                : 'border-slate-200 bg-white text-slate-500 hover:border-blue-200 hover:text-blue-600'
+                            }`}
+                          >
+                            <Columns3 className="h-3.5 w-3.5" />
+                            列显示
+                            <span className="tabular-nums">
+                              {visibleColumnKeys.length}/{allColumnKeys.length}
+                            </span>
+                            <ChevronDown className="h-3 w-3" />
+                          </button>
+                        </Popover>
                         )}
-                        <Input
-                          className="premium-search-bar h-10 max-w-[240px] rounded-[18px] border-slate-200 font-bold"
-                          placeholder="搜索代码/名称..."
-                          prefix={<Search className="h-4 w-4 text-slate-400" />}
-                          value={keyword}
-                          onChange={(event) => setKeyword(event.target.value)}
-                          allowClear
-                        />
                       </div>
+                      <Pagination
+                        current={activePager.current}
+                        pageSize={activePager.pageSize}
+                        total={activeTableTotal}
+                        onChange={activePager.onChange}
+                        size="small"
+                        showSizeChanger
+                        showQuickJumper
+                        pageSizeOptions={[10, 20, 50, 100]}
+                        showTotal={(total, range) => `${range[0]}-${range[1]} / 共 ${total} 条`}
+                        className="research-next-pagination"
+                      />
                     </div>
 
                     <div className="flex flex-1 flex-col">
@@ -2602,32 +3358,20 @@ export const ResearchPlatformPage: React.FC = () => {
                           </div>
                         )}
                       </div>
-                      <div className="flex items-center justify-end border-t border-slate-100 bg-white/80 px-2 py-2 backdrop-blur-sm">
-                        <Pagination
-                          current={
-                            activeDataSource === 'candidates' ? candidatePage : activeDataSource === 'watchlist' ? watchlistPage : poolPage
-                          }
-                          pageSize={
-                            activeDataSource === 'candidates' ? candidatePageSize : activeDataSource === 'watchlist' ? watchlistPageSize : poolPageSize
-                          }
-                          total={activeTableTotal}
-                          onChange={(page, pageSize) => {
-                            if (activeDataSource === 'candidates') {
-                              setCandidatePage(page);
-                              setCandidatePageSize(pageSize);
-                            } else if (activeDataSource === 'watchlist') {
-                              setWatchlistPage(page);
-                              setWatchlistPageSize(pageSize);
-                            } else {
-                              setPoolPage(page);
-                              setPoolPageSize(pageSize);
-                            }
-                          }}
-                          size="small"
-                          showSizeChanger
-                          showTotal={(total) => `共 ${total} 条`}
-                        />
-                      </div>
+
+                      {/* 滚动续页提示：滚到底自动追加下一页，到底后显示已全部加载 */}
+                      {activeDataSource === 'candidates' && filteredRows.length > 0 && (
+                        <div className="flex flex-shrink-0 items-center justify-center gap-2 py-1.5 text-[10px] font-semibold text-slate-400">
+                          {candidateLoadedThrough >= candidateTotalPages ? (
+                            <span>已加载全部 {filteredRows.length} 条 · 共 {candidateTotalPages} 页</span>
+                          ) : (
+                            <>
+                              <Spin size="small" />
+                              <span>向下滚动自动加载下一页（已加载 {candidateLoadedThrough}/{candidateTotalPages} 页）</span>
+                            </>
+                          )}
+                        </div>
+                      )}
                     </div>
                   </motion.div>
                 </motion.div>

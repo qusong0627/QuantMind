@@ -23,3 +23,12 @@ html, body, #root {
 .hyper-compact-table .ant-table-tbody > tr > td {
   padding: 4px 8px !important;
 }
+
+/*
+ * antd 的「列宽测量行」（.ant-table-measure-row）会用同一份 column.title 再渲染一次表头内容。
+ * 投研平台的表头标题里带列筛选 Popover，于是同一次点击会冒出两个一样的弹窗。
+ * 本表所有列都显式给了 width，且横向滚动宽度由前端自己算，测量行无实际用途，直接隐藏。
+ */
+.research-next-table .ant-table-measure-row {
+  display: none !important;
+}
