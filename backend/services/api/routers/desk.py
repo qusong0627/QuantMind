@@ -435,6 +435,22 @@ _RING_HEALTH_IDS: dict[str, tuple[str, ...]] = {
 }
 
 
+def _previous_trading_ymd(ymd: str) -> str | None:
+    """ymd(YYYYMMDD) 的**前一交易日**（严格早于当日）；解析失败返回 None。"""
+    try:
+        import pandas as pd
+        from exchange_calendars import get_calendar
+
+        from backend.shared.market_sessions import market_calendar
+
+        cal = get_calendar(market_calendar("CN"))
+        ts = pd.Timestamp(f"{ymd[:4]}-{ymd[4:6]}-{ymd[6:]}") - pd.Timedelta(days=1)
+        session = cal.date_to_session(ts, direction="previous")
+        return str(session.date()).replace("-", "")
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def build_evidence_rings(sources: dict[str, Any]) -> list[dict[str, Any]]:
     """十环证据矩阵（纯函数）→ 每环 {key, label, artifact, frequency, level, summary, items}。
 
@@ -470,14 +486,24 @@ def build_evidence_rings(sources: dict[str, Any]) -> list[dict[str, Any]]:
         if key == "feature":
             trade_date = str(signals.get("trade_date") or "").replace("-", "")
             if features_latest:
-                lag = "同交易日" if features_latest == trade_date else "滞后"
+                # 信号日 = T+1 预测日：特征分区只可能到「上一交易日」（当日特征收盘后才产出），
+                # 拿 trade_date 本身当基准会恒判滞后（2026-09-18 实测误报）；基准 = 前一交易日。
+                expected = _previous_trading_ymd(trade_date) if trade_date else None
+                fresh = features_latest in (trade_date, expected)
+                lag = (
+                    "同类交易日口径"
+                    if fresh
+                    else (f"滞后（期望 {expected}）" if expected else "滞后")
+                )
                 items.append(
                     {
                         "id": "feature_freshness",
                         "name": "特征分区新鲜度",
-                        "level": "ok" if features_latest == trade_date else "warn",
+                        "level": "ok" if fresh else "warn",
                         "detail": f"最新特征分区 {features_latest}，信号日 {trade_date or '—'}（{lag}）",
-                        "suggestion": "" if features_latest == trade_date else "检查特征计算/同步任务（滞后会断推理）",
+                        "suggestion": ""
+                        if fresh
+                        else "检查特征计算/同步任务（滞后会断推理）",
                         "source": "fs:6_ml_datasets/features_daily/dt=*",
                     }
                 )

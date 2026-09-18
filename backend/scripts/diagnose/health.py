@@ -426,16 +426,33 @@ async def check_c07_scheduler_heartbeat(ctx: HealthContext) -> CheckResult:
         )
     level, detail, metrics = classify_scheduler_status(entries)
 
-    # 收盘核对（非心跳类任务，保留原有检查）；与心跳判定取更严者
+    # 收盘核对（非心跳类任务，保留原有检查）；与心跳判定取更严者。
+    # 时点闸门（2026-09-18 修误报）：只在「该标记应当已产生」时判定——信号日在未来
+    # （前夜已出次日信号）或当日收盘核对时刻（CLOSE_AUDIT_TIME，默认 15:05）未到，
+    # 一律跳过，避免每个交易日从出信号起到收盘核对前恒报「标记缺失」。
+    from datetime import datetime as _dt
+    from zoneinfo import ZoneInfo as _ZoneInfo
+
     rows = ctx.query("SELECT max(trade_date) AS d FROM engine_signal_scores")
     latest = rows[0]["d"] if rows else None
     if latest is not None:
         ymd = str(latest).replace("-", "")
-        audit = ctx.redis_get(f"trade:close-audit:done:{ymd}", REDIS_DB_TRADE)
-        if not audit:
-            if level == "ok":
-                level = "warn"
-            detail = f"{detail}；收盘核对标记缺失（{ymd}）"
+        now_sh = _dt.now(_ZoneInfo("Asia/Shanghai"))
+        today_ymd = now_sh.strftime("%Y%m%d")
+        try:
+            _h, _m = str(os.getenv("CLOSE_AUDIT_TIME", "15:05")).strip().split(":", 1)
+            audit_hhmm = (int(_h), int(_m))
+        except (TypeError, ValueError):
+            audit_hhmm = (15, 5)
+        due = ymd < today_ymd or (
+            ymd == today_ymd and (now_sh.hour, now_sh.minute) >= audit_hhmm
+        )
+        if due:
+            audit = ctx.redis_get(f"trade:close-audit:done:{ymd}", REDIS_DB_TRADE)
+            if not audit:
+                if level == "ok":
+                    level = "warn"
+                detail = f"{detail}；收盘核对标记缺失（{ymd}）"
     return CheckResult("C07", "调度心跳", level, detail, "", metrics)
 
 
