@@ -997,7 +997,7 @@ class InferenceScriptRunner:
             )
         signals = kept
         if persist:
-            self._persist_and_publish(
+            persisted = self._persist_and_publish(
                 run_id,
                 prediction_trade_date,
                 tenant_id,
@@ -1009,6 +1009,23 @@ class InferenceScriptRunner:
                 # 兜底+池组合同样局部覆盖，避免池 run 清空同日全市场信号
                 partial=bool(pool_id),
             )
+            if not persisted:
+                return ExecutionResult(
+                    success=False,
+                    exit_code=1,
+                    stdout=fb_stdout,
+                    stderr=fb_stderr,
+                    signals_count=0,
+                    run_id=run_id,
+                    error="兜底推理明细写库失败（事务已回滚，engine_signal_scores 无本批次数据）",
+                    failure_stage="persist",
+                    fallback_used=True,
+                    fallback_reason=fallback_reason,
+                    active_model_id=self.fallback_model_id,
+                    active_data_source=self.fallback_data_dir,
+                    data_trade_date=date,
+                    prediction_trade_date=prediction_trade_date,
+                )
 
         if persist and redis_client is not None:
             try:
@@ -1492,7 +1509,7 @@ class InferenceScriptRunner:
         # 导致推理历史的分布统计查不到明细（09-11 全市场 5189 行被池 run 清空事故）。
         pool_scoped = bool(pool_id)
         if persist:
-            self._persist_and_publish(
+            persisted = self._persist_and_publish(
                 run_id,
                 prediction_trade_date,
                 tenant_id,
@@ -1503,6 +1520,21 @@ class InferenceScriptRunner:
                 partial=(partial_applied or pool_scoped),
                 market=persist_market,
             )
+            if not persisted:
+                # 明细没写进 engine_signal_scores 就不能报成功：否则批次显示 completed、
+                # signals_count 有值，而推理历史与排名榜查不到任何明细行
+                return ExecutionResult(
+                    success=False,
+                    exit_code=1,
+                    stdout=stdout,
+                    stderr=stderr,
+                    signals_count=0,
+                    run_id=run_id,
+                    error="推理明细写库失败（事务已回滚，engine_signal_scores 无本批次数据）",
+                    failure_stage="persist",
+                    data_trade_date=date,
+                    prediction_trade_date=prediction_trade_date,
+                )
 
         # 写 Redis 完成标记
         if persist and redis_client is not None:
@@ -1876,16 +1908,19 @@ class InferenceScriptRunner:
         data_trade_date: str | None = None,
         partial: bool = False,
         market: str | None = None,
-    ) -> None:
+    ) -> bool:
         """
         将推理结果写入 engine_signal_scores 并发布到 Redis Stream。
 
         存储策略：按模型桶覆盖（同 tenant/user/date/model），保证同日不同模型可并存。
         partial=True（单股补推/股票池）时只覆盖目标 symbol 的行，不整桶删除当日全市场信号。
 
-        Args:
-            data_trade_date: 推理日期（数据截止日期），若不传则默认等于 prediction_trade_date
+        Returns:
+            True = 明细已提交；False = 写库事务回滚（调用方必须据此把该批次记为失败，
+            历史上这里只记日志不返回，于是「completed + signals_count 有值 + 0 条明细」
+            的批次在推理历史里静默存在，排名榜永远空）。
         """
+        persist_ok = True
         # 按分数降序排列，排名越靠前分数越高
         signals_sorted = sorted(signals, key=lambda x: x["score"], reverse=True)
         # symbol 统一归一为纯数字（落库/信号流/position_score 约定），
@@ -1956,14 +1991,21 @@ class InferenceScriptRunner:
             except Exception as exc:
                 logger.warning("[InferenceScriptRunner] position_score 计算失败（信号已落库，忽略）: %s", exc)
         except Exception as exc:
-            logger.error(f"[InferenceScriptRunner] 写库失败: {exc}")
+            # exc_info：写库失败必须留完整栈，只打一句 message 会让这类事故查不出来
+            logger.error(f"[InferenceScriptRunner] 写库失败: {exc}", exc_info=True)
             db.rollback()
+            persist_ok = False
         finally:
             db.close()
             try:
                 sync_engine.dispose()
             except Exception:
                 pass
+
+        if not persist_ok:
+            # 明细没落库就不能往下走（Redis 完成标记 / 就绪标记都会让下游以为有信号），
+            # 直接把成功与否如实返回给调用方
+            return False
 
         # 发布信号到 Redis Stream（失败不影响主流程）
         try:
@@ -2006,7 +2048,7 @@ class InferenceScriptRunner:
                             market,
                             run_id,
                         )
-                        return
+                        return True
                     import asyncio
 
                     from backend.services.live_trading.services.tdx_signal_push_service import (
@@ -2086,6 +2128,8 @@ class InferenceScriptRunner:
             logger.warning(
                 f"[InferenceScriptRunner] 信号发布失败（不影响 DB 结果）: {exc}"
             )
+
+        return True
 
     def _persist_locked(
         self,
@@ -2251,11 +2295,18 @@ class InferenceScriptRunner:
 
         import redis as redis_lib
 
+        # 行情 Redis 地址走共享配置（compose 以空串表示「用默认/公共行情服」）。
+        # 直读 env 会踩空串陷阱：os.getenv 的默认值只在变量「未设置」时生效，
+        # 拿到 "" 再 int() 会抛 ValueError，把整个写库事务连同 DELETE 一起回滚，
+        # 而批次记录已写成 completed —— 表现为「推理成功但排名永远是空的」。
+        from backend.shared.remote_quote_config import resolve_remote_quote_redis
+
+        resolved = resolve_remote_quote_redis()
         redis_host = os.getenv("REMOTE_QUOTE_REDIS_HOST", "redis")
-        redis_port = int(os.getenv("REMOTE_QUOTE_REDIS_PORT", "6379"))
-        redis_password = os.getenv(
-            "REMOTE_QUOTE_REDIS_PASSWORD", ""
-        ) or None
+        redis_port = 6379
+        redis_password = None
+        if resolved is not None:
+            redis_host, redis_port, redis_password, _db = resolved
         try:
             quote_redis = redis_lib.Redis(
                 host=redis_host,

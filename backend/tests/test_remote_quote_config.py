@@ -13,6 +13,14 @@ import pytest
 
 from backend.shared import remote_quote_config as rqc
 
+_SCRIPT_RUNNER = (
+    Path(__file__).resolve().parents[1]
+    / "services"
+    / "engine"
+    / "inference"
+    / "script_runner.py"
+)
+
 _ENV_KEYS = [
     "REMOTE_QUOTE_REDIS_HOST",
     "REMOTE_QUOTE_REDIS_PORT",
@@ -50,6 +58,39 @@ def test_disabled_returns_none(monkeypatch):
     _clear(monkeypatch)
     monkeypatch.setenv("REMOTE_QUOTE_DISABLED", "true")
     assert rqc.resolve_remote_quote_redis() is None
+
+
+def test_empty_env_falls_back_to_free_feed(monkeypatch):
+    """空串环境变量必须当作「未设置」处理（compose 是用 ${VAR:-} 传参的）。
+
+    2026-09-18 事故：推理写库路径直读 `os.getenv("REMOTE_QUOTE_REDIS_PORT", "6379")`，
+    而 os.getenv 的默认值只在变量「未设置」时生效 —— compose 传的空串会原样返回，
+    `int("")` 抛 ValueError 把整个写库事务（含 DELETE）一起回滚，批次却仍记为
+    completed + signals_count 有值，于是推理历史/排名榜永远是空的。
+    """
+    _clear(monkeypatch)
+    monkeypatch.setenv("REMOTE_QUOTE_REDIS_HOST", "")
+    monkeypatch.setenv("REMOTE_QUOTE_REDIS_PORT", "")
+    monkeypatch.setenv("REMOTE_QUOTE_REDIS_PASSWORD", "")
+    monkeypatch.setenv("REMOTE_QUOTE_REDIS_DB", "")
+
+    host, port, password, db = rqc.resolve_remote_quote_redis()
+
+    assert (host, port, password, db) == (
+        rqc.FREE_FEED_HOST,
+        rqc.FREE_FEED_PORT,
+        rqc.FREE_FEED_PASSWORD,
+        rqc.FREE_FEED_DB,
+    )
+    assert isinstance(port, int)
+
+
+def test_script_runner_uses_shared_quote_config():
+    """推理写库路径取行情地址必须走共享配置，不得再直读 env（空串陷阱）。"""
+    src = _SCRIPT_RUNNER.read_text(encoding="utf-8")
+
+    assert "resolve_remote_quote_redis" in src
+    assert 'os.getenv("REMOTE_QUOTE_REDIS_PORT"' not in src
 
 
 def test_root_env_fallback(monkeypatch):

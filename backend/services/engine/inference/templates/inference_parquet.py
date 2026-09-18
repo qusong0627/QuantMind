@@ -218,21 +218,75 @@ def _load_pytorch_model(model_path: Path, meta: dict):
     return ("torch", model)
 
 
-def load_model(model_dir: Path, meta: dict):
-    model_file = meta.get("model_file", "")
-    model_path = model_dir / model_file if model_file else None
+# 模型目录里权重与训练产物同处一室（pred.parquet / pred.pkl / result.json …）。
+# 按扩展名盲搜时必须排除这些非权重文件：训练端 metadata 记的是 per-algorithm 名
+# （model_gru.pth）而产物同步按白名单落成通用名（model.pth），声明文件找不到就掉进
+# 盲搜，此时 *.pkl 会先命中 61MB 的 pred.pkl（预测结果 DataFrame），被当成 sklearn
+# 模型加载后在 model.predict() 处崩：
+#   AttributeError: 'DataFrame' object has no attribute 'predict'
+_ARTIFACT_STEMS = frozenset({
+    "pred", "result", "metadata", "config", "inference",
+    "shap_summary", "feature_importance", "training_log",
+})
 
-    # 如果 metadata 没指定，按扩展名搜索
-    if not model_path or not model_path.exists():
-        for ext in ("*.xgb", "*.lgb", "*.cbm", "*.pkl", "*.pth", "*.pt", "*.txt", "*.bin"):
-            candidates = list(model_dir.glob(ext))
-            if candidates:
-                model_path = candidates[0]
-                break
-        else:
-            logger.error("未找到模型文件: %s", model_dir)
-            sys.exit(1)
-        logger.warning("使用候选模型文件: %s", model_path.name)
+# 权重扩展名：专用格式优先；.pkl 是任意对象的通用容器（预测产物也常用它），排最后
+_MODEL_GLOBS = ("*.xgb", "*.lgb", "*.cbm", "*.bin", "*.pth", "*.pt", "*.txt", "*.pkl")
+
+
+def _is_model_weight(path: Path) -> bool:
+    """该文件是否可能是模型权重（排除预测产物、配置脚本等训练副产品）。"""
+    stem = path.stem.lower()
+    return stem not in _ARTIFACT_STEMS and not stem.startswith("pred_")
+
+
+def _model_candidates(model_dir: Path) -> list[Path]:
+    """按扩展名列候选权重：通用名 model.* 优先，带算法后缀的（拆分产物）随后。"""
+    generic: list[Path] = []
+    suffixed: list[Path] = []
+    for pattern in _MODEL_GLOBS:
+        for path in sorted(model_dir.glob(pattern)):
+            if not _is_model_weight(path):
+                continue
+            (generic if path.stem.lower() == "model" else suffixed).append(path)
+    return generic + suffixed
+
+
+def _resolve_model_path(model_dir: Path, meta: dict) -> Path | None:
+    """定位模型权重文件；确实没有权重时返回 None，由调用方报错退出。"""
+    declared = str(meta.get("model_file") or "").strip()
+    if declared:
+        model_path = model_dir / declared
+        if model_path.is_file():
+            return model_path
+        # 声明名对不上时先试「同后缀的通用名」——per-algorithm 名与 model.<ext>
+        # 指的是同一个文件，命中它就不必盲搜，也不会误选 pred.pkl
+        if "." in declared:
+            same_ext = model_dir / f"model.{declared.rsplit('.', 1)[1]}"
+            if same_ext.is_file():
+                logger.warning(
+                    "metadata.model_file=%s 不存在，改用同后缀的 %s",
+                    declared, same_ext.name,
+                )
+                return same_ext
+        logger.warning("metadata.model_file=%s 不存在，按扩展名搜索模型目录", declared)
+
+    candidates = _model_candidates(model_dir)
+    if not candidates:
+        return None
+    if len(candidates) > 1:
+        logger.warning(
+            "目录存在多个候选权重，取 %s（其余: %s）",
+            candidates[0].name,
+            ", ".join(p.name for p in candidates[1:]),
+        )
+    return candidates[0]
+
+
+def load_model(model_dir: Path, meta: dict):
+    model_path = _resolve_model_path(model_dir, meta)
+    if model_path is None:
+        logger.error("未找到模型文件: %s", model_dir)
+        sys.exit(1)
 
     suffix = model_path.suffix.lower()
     logger.info("加载模型: %s (格式=%s)", model_path.name, suffix)

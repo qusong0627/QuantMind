@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import os
 import shutil
 from dataclasses import dataclass
@@ -2603,6 +2604,7 @@ class ModelRegistryService:
                 break
 
         if (target_dir / "metadata.json").exists() and model_file:
+            self._reconcile_metadata_model_file(target_dir, model_file)
             return "ready", "", model_file
 
         cos = get_cos_service()
@@ -2643,7 +2645,42 @@ class ModelRegistryService:
                 model_file,
             )
 
+        self._reconcile_metadata_model_file(target_dir, model_file)
         return "ready", "", model_file
+
+    @staticmethod
+    def _reconcile_metadata_model_file(target_dir: Path, model_file: str) -> None:
+        """把 metadata.json 的 `model_file` 校准成磁盘上真实存在的权重名。
+
+        训练端 metadata 记的是 per-algorithm 名（model_gru.pth / model_nativetft.pth），
+        而产物同步按白名单落成通用名（model.pth）。两者不一致时推理脚本找不到声明文件，
+        就退到「按扩展名盲搜模型目录」，线上曾因此把预测产物 pred.pkl 当成模型加载，
+        全部 DL 模型推理失败。在模型落盘时一次性对齐，DB 列与 metadata 从此同源。
+        """
+        if not model_file:
+            return
+        meta_path = target_dir / "metadata.json"
+        if not meta_path.is_file():
+            return
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            logger.warning("校准 model_file 失败（metadata.json 无法解析）: %s", meta_path)
+            return
+        if not isinstance(meta, dict):
+            return
+        declared = str(meta.get("model_file") or "").strip()
+        # 声明名已经对得上就不动它（人工放进去的权重名同样受保护）
+        if declared == model_file or (declared and (target_dir / declared).is_file()):
+            return
+        meta["model_file"] = model_file
+        meta_path.write_text(
+            json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        logger.info(
+            "metadata.model_file 已校准: %s → %s (%s)",
+            declared or "(空)", model_file, target_dir.name,
+        )
 
     @staticmethod
     def _extract_test_rank_icir(metadata: dict, metrics: dict) -> float | None:

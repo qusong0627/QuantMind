@@ -15,6 +15,21 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
+# 模型目录里与权重同放的训练产物：它们不是模型，盲搜扩展名时必须排除。
+# 训练端 metadata 记的名字（model_gru.pth）与产物落盘名（model.pth）曾对不上，
+# 兜底 glob 会把 pred.pkl（预测结果 DataFrame）当成 sklearn 模型加载，
+# 直到调用 predict() 才崩 —— 见同目录 templates/inference_parquet.py 的同类修复。
+_ARTIFACT_STEMS = frozenset({
+    "pred", "result", "metadata", "config", "inference",
+    "shap_summary", "feature_importance", "training_log",
+})
+
+
+def _is_model_weight(path: Path) -> bool:
+    """该文件是否可能是模型权重（排除预测产物、配置脚本等训练副产品）。"""
+    stem = path.stem.lower()
+    return stem not in _ARTIFACT_STEMS and not stem.startswith("pred_")
+
 # 默认最大缓存模型数
 DEFAULT_MAX_MODELS = 5
 
@@ -196,7 +211,7 @@ class ModelLoader:
         """加载 sklearn 模型 (pickle)"""
         model_file = model_dir / metadata.get("model_file", "model.pkl")
         if not model_file.exists():
-            candidates = list(model_dir.glob("*.pkl"))
+            candidates = [p for p in sorted(model_dir.glob("*.pkl")) if _is_model_weight(p)]
             if not candidates:
                 raise FileNotFoundError(f"No sklearn model file found in {model_dir}")
             model_file = candidates[0]
