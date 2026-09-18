@@ -117,8 +117,11 @@ const DeskTodayPage: React.FC<{ embedded?: boolean; tradingRunning?: boolean }> 
           {/* 首行：系统健康 | 副驾驶（并列，2026-09-17 置顶）。分栏归位：候选信号→「候选信号」
               页签、调仓计划→「策略管理·交易记录上方」、今日执行→「持仓监控」；账户盈亏卡同屏重复已移除。 */}
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
-            <div className="lg:col-span-5 grid">
+            <div className="lg:col-span-5 grid gap-4">
               <HealthCard health={desk.health} tradingRunning={tradingRunning} />
+              {/* 实时推理（T-P6-08）：状态/开关/模型切换/节拍/ONNX 状态与重建。
+                  2026-09-18 补挂载——此前仅 import 未渲染（卡从收口起从未出现在页面上）。 */}
+              <RealtimeInferenceCard />
             </div>
             <div className="lg:col-span-7 grid">
               {/* 副驾驶（T-P6-16）：情报事件流 + 误报标注 + 建议卡一键执行（无 mock） */}

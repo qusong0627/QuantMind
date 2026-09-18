@@ -41,4 +41,24 @@ describe('realtimeInferModel', () => {
     expect(v.lastSkip).toContain('live_coverage');
     expect(v.lastError).toContain('ONNX');
   });
+
+  it('ONNX 三态 + modelDir 透传（就绪/缺失/未取到）', () => {
+    const base = { enabled: 'true', model_dir: '/app/models/users/1/CN/mdl_x' };
+    const ready = inferViewState(base, null, Date.now(), false, {
+      ready: true,
+      size_bytes: 18445,
+    });
+    expect(ready.modelDir).toBe('/app/models/users/1/CN/mdl_x');
+    expect(ready.onnxReady).toBe(true);
+    expect(ready.onnxText).toContain('就绪');
+    expect(ready.onnxText).toContain('KB');
+
+    const missing = inferViewState(base, null, Date.now(), false, { ready: false });
+    expect(missing.onnxReady).toBe(false);
+    expect(missing.onnxText).toContain('缺失');
+
+    const unknown = inferViewState(base, null, Date.now(), false, null);
+    expect(unknown.onnxReady).toBeNull();
+    expect(unknown.onnxText).toBe('—');
+  });
 });

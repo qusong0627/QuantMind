@@ -13,11 +13,21 @@ export interface InferStatusView {
   counters?: Record<string, unknown>;
 }
 
+/** 当前模型 ONNX 产物状态（GET /infer/config 附带；ready=false 时首次运行会自动导出） */
+export interface ModelOnnxStatus {
+  ready: boolean;
+  path?: string;
+  size_bytes?: number | null;
+  mtime?: string | null;
+}
+
 export interface InferViewState {
   available: boolean;
   /** 需管理员（403）——非管理员打开交易台时的诚实降级 */
   needAdmin: boolean;
   enabled: boolean;
+  /** 配置里的完整模型目录（选择器的 value） */
+  modelDir: string;
   modelName: string;
   cadenceS: number;
   minCoverage: number;
@@ -29,6 +39,9 @@ export interface InferViewState {
   lastError: string;
   lastCycleAt: string;
   staleMirror: boolean;
+  /** ONNX 就绪三态：true/false/null（未取到状态） */
+  onnxReady: boolean | null;
+  onnxText: string;
 }
 
 const GATE_HINT = (min: number): string =>
@@ -41,11 +54,18 @@ function _num(v: unknown, d = 0): number {
   return Number.isFinite(n) ? n : d;
 }
 
+function _sizeText(bytes: number | null | undefined): string {
+  if (!Number.isFinite(Number(bytes)) || Number(bytes) <= 0) return '';
+  const kb = Number(bytes) / 1024;
+  return kb >= 1024 ? `${(kb / 1024).toFixed(1)} MB` : `${Math.round(kb)} KB`;
+}
+
 export function inferViewState(
   config: InferConfigView | null,
   status: InferStatusView | null,
   nowMs: number = Date.now(),
   needAdmin = false,
+  modelOnnx: ModelOnnxStatus | null = null,
 ): InferViewState {
   const counters = (status?.counters || {}) as Record<string, unknown>;
   const minCoverage = _num(config?.min_live_coverage, 0.5);
@@ -58,10 +78,18 @@ export function inferViewState(
   const modelName = modelDir ? modelDir.split('/').filter(Boolean).pop() || modelDir : '未配置';
   const updatedAt = status?.updated_at ? new Date(String(status.updated_at)).getTime() : 0;
   const enabled = String(config?.enabled || '').toLowerCase() === 'true';
+  const onnxReady = modelOnnx && modelDir ? !!modelOnnx.ready : null;
+  const onnxText =
+    onnxReady === null
+      ? '—'
+      : onnxReady
+        ? `已就绪${_sizeText(modelOnnx?.size_bytes) ? `（${_sizeText(modelOnnx?.size_bytes)}）` : ''}`
+        : '缺失（首次运行自动导出）';
   return {
     available: !!config,
     needAdmin,
     enabled,
+    modelDir,
     modelName,
     cadenceS: _num(config?.cadence_s, 15),
     minCoverage,
@@ -74,6 +102,8 @@ export function inferViewState(
     lastCycleAt: String(counters['last_cycle_at'] || ''),
     // 镜像超过 5 分钟未更新 = 引擎循环可能不在跑（如实提示，不猜）
     staleMirror: updatedAt > 0 ? nowMs - updatedAt > 5 * 60 * 1000 : false,
+    onnxReady,
+    onnxText,
   };
 }
 

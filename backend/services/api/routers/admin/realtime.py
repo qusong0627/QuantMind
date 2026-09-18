@@ -16,9 +16,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -32,6 +35,7 @@ router = APIRouter(dependencies=[Depends(require_admin)])  # 前缀由 admin 聚
 
 CONFIG_KEY = "qm:realtime:infer:config"
 STATUS_KEY = "qm:realtime:infer:status"
+MODELS_ROOT = Path(os.getenv("QM_MODELS_ROOT", "/app/models"))
 
 
 class InferConfigRequest(BaseModel):
@@ -175,6 +179,126 @@ def validate_override_whitelist(whitelist: list[str] | None, feature_columns: li
         raise ValueError(f"override 白名单含模型未定义列: {unknown[:6]}（防静默错分，拒绝）")
 
 
+def _onnx_status(model_dir: str) -> dict[str, Any]:
+    """当前模型 ONNX 产物状态（只读；不触发导出——导出由引擎自动链或手动端点负责）。"""
+    path = Path(str(model_dir or "").strip())
+    onnx_path = path / "model.onnx"
+    try:
+        if onnx_path.is_file():
+            stat = onnx_path.stat()
+            return {
+                "ready": True,
+                "path": str(onnx_path),
+                "size_bytes": int(stat.st_size),
+                "mtime": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+            }
+        return {"ready": False, "path": str(onnx_path), "size_bytes": None, "mtime": None}
+    except OSError:
+        return {"ready": False, "path": str(onnx_path), "size_bytes": None, "mtime": None}
+
+
+def _ensure_under_models_root(model_dir: str) -> Path:
+    """导出目标必须位于模型根目录内（防路径穿越）；返回 resolve 后路径。"""
+    root = MODELS_ROOT.resolve()
+    p = Path(str(model_dir or "").strip()).resolve()
+    if p != root and root not in p.parents:
+        raise HTTPException(status_code=400, detail="model_dir 必须位于模型根目录内")
+    return p
+
+
+def list_infer_models(limit: int = 60) -> list[dict[str, Any]]:
+    """实时推理候选模型（CN，轻量扫描）：users/{tenant}/{user}/mdl_cn*/metadata.json。
+
+    只报目录/名称/ONNX 有无/更新时间——不做特征覆盖等重校验（保存时由 POST 校验兜底）。
+    """
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for pattern in ("users/*/*/mdl_cn*/metadata.json", "mdl_cn*/metadata.json"):
+        for meta_path in MODELS_ROOT.glob(pattern):
+            d = meta_path.parent
+            key = str(d)
+            if key in seen:
+                continue
+            seen.add(key)
+            meta = _model_meta(key)
+            try:
+                mtime = datetime.fromtimestamp(
+                    meta_path.stat().st_mtime, tz=timezone.utc
+                ).isoformat()
+            except OSError:
+                mtime = ""
+            out.append(
+                {
+                    "model_dir": key,
+                    "name": str(
+                        meta.get("display_name") or meta.get("model_name") or d.name
+                    ),
+                    "dir_name": d.name,
+                    "has_onnx": (d / "model.onnx").is_file(),
+                    "feature_count": len(meta.get("feature_columns") or []),
+                    "updated_at": mtime,
+                }
+            )
+    out.sort(key=lambda x: str(x.get("updated_at") or ""), reverse=True)
+    return out[:limit]
+
+
+@router.get("/infer/models")
+async def get_infer_models() -> dict[str, Any]:
+    """实时推理候选模型列表（CN；供前端选择 model_dir）。"""
+    return {
+        "success": True,
+        "data": {"models": await asyncio.to_thread(list_infer_models)},
+    }
+
+
+class ExportOnnxRequest(BaseModel):
+    model_dir: str | None = None
+
+
+@router.post("/infer/export-onnx")
+async def export_onnx(payload: ExportOnnxRequest) -> dict[str, Any]:
+    """手动导出/重建 ONNX（修复缺失/损坏的 model.onnx；含原模型对照校验，结果如实返回）。
+
+    不传 model_dir 时导出当前配置的模型。导出产物替换模型目录内 model.onnx；
+    已加载的 ONNX session 保持旧值直到下次会话加载（停/启用或进程重启后生效）。
+    """
+    target = str(payload.model_dir or "").strip()
+    if not target:
+        try:
+            client = _redis()
+            try:
+                target = str((client.hgetall(CONFIG_KEY) or {}).get("model_dir") or "").strip()
+            finally:
+                client.close()
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=503, detail=f"Redis 不可用: {exc}") from exc
+    if not target:
+        raise HTTPException(status_code=400, detail="未指定 model_dir 且当前配置无模型")
+    path = _ensure_under_models_root(target)
+    try:
+        validate_model_dir(str(path))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    from backend.services.engine.inference.onnx_exporter import export_model_to_onnx
+
+    try:
+        report = await asyncio.to_thread(
+            export_model_to_onnx, str(path), output_path=path / "model.onnx"
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[RealtimeAdmin] ONNX 导出异常 %s: %s", path, exc)
+        report = {"ok": False, "reason": str(exc)[:300]}
+    return {
+        "success": True,
+        "data": {
+            "model_dir": str(path),
+            "report": report,
+            "model_onnx": _onnx_status(str(path)),
+        },
+    }
+
+
 @router.get("/infer/config")
 async def get_infer_config() -> dict[str, Any]:
     """当前配置 + 服务状态镜像（只读）。"""
@@ -198,6 +322,7 @@ async def get_infer_config() -> dict[str, Any]:
         "data": {
             "config": config,
             "baseline_source": baseline_source_label(str(config.get("model_dir") or "")),
+            "model_onnx": _onnx_status(str(config.get("model_dir") or "")),
             "status": {
                 "updated_at": status.get("updated_at"),
                 "counters": counters,
