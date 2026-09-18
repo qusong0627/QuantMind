@@ -275,7 +275,8 @@ async def list_advice(
         rows = (await session.execute(
             text(
                 "SELECT advice_id::text, source, title, rationale, actions, context_refs, status, "
-                "       created_at::text, decided_at::text, reject_reason, executed_at::text, execution "
+                "       created_at::text, decided_at::text, reject_reason, executed_at::text, execution, "
+                "       outcome, outcome_status "
                 f"FROM copilot_advice WHERE {where} ORDER BY created_at DESC LIMIT :lim"
             ),
             params,
@@ -283,9 +284,78 @@ async def list_advice(
     return {"success": True, "data": {"items": [
         {"advice_id": r[0], "source": r[1], "title": r[2], "rationale": r[3], "actions": r[4],
          "context_refs": r[5], "status": r[6], "created_at": r[7], "decided_at": r[8],
-         "reject_reason": r[9], "executed_at": r[10], "execution": r[11]}
+         "reject_reason": r[9], "executed_at": r[10], "execution": r[11],
+         "outcome": r[12], "outcome_status": r[13]}
         for r in rows
     ], "available": True}}
+
+
+@router.get("/advice/stats")
+async def advice_stats(
+    days: int = Query(90, ge=7, le=365),
+    current_user: dict = Depends(get_current_user),
+):
+    """建议卡成功率统计（近 days 天，租户视图）：采纳率 + T+1/T+3/T+5 胜率与平均超额。
+
+    口径（与回调服务同源）：决策日收盘→第 h 交易日收盘，卖出取规避收益，超额=个股−沪深300；
+    拒绝的卡同样兑现（反事实），统计上可分列。
+    """
+    from backend.shared.copilot_contract import ensure_copilot_advice_table
+
+    if not ensure_copilot_advice_table():
+        return {"success": True, "data": {"available": False}}
+    tenant_id = str(current_user.get("tenant_id") or "default")
+    async with get_session(read_only=True) as session:
+        rows = (await session.execute(
+            text(
+                "SELECT status, outcome FROM copilot_advice "
+                "WHERE tenant_id = :t AND created_at > NOW() - make_interval(days => :d)"
+            ),
+            {"t": tenant_id, "d": int(days)},
+        )).fetchall()
+    total = len(rows)
+    executed = sum(1 for s, _ in rows if s in ("executed", "partial", "failed"))
+    rejected = sum(1 for s, _ in rows if s == "rejected")
+    decided = executed + rejected
+    scored = 0
+    hz: dict[str, dict[str, float]] = {
+        h: {"n": 0.0, "hits": 0.0, "excess_sum": 0.0, "excess_n": 0.0} for h in ("1", "3", "5")
+    }
+    for _status, outcome in rows:
+        doc = outcome if isinstance(outcome, dict) else None
+        if not doc:
+            continue
+        scored += 1
+        for h, s in (doc.get("summary") or {}).items():
+            if h not in hz or not isinstance(s, dict):
+                continue
+            n = float(s.get("n") or 0)
+            hz[h]["n"] += n
+            hz[h]["hits"] += float(s.get("hits") or 0)
+            if s.get("avg_excess") is not None and n > 0:
+                hz[h]["excess_sum"] += float(s["avg_excess"]) * n
+                hz[h]["excess_n"] += n
+    by_horizon = {
+        h: {
+            "n": int(v["n"]),
+            "hits": int(v["hits"]),
+            "hit_rate": round(v["hits"] / v["n"], 4) if v["n"] else None,
+            "avg_excess": round(v["excess_sum"] / v["excess_n"], 6) if v["excess_n"] else None,
+        }
+        for h, v in hz.items()
+    }
+    return {"success": True, "data": {
+        "available": True,
+        "days": int(days),
+        "total": total,
+        "decided": decided,
+        "executed": executed,
+        "rejected": rejected,
+        "decide_rate": round(decided / total, 4) if total else None,
+        "scored": scored,
+        "by_horizon": by_horizon,
+        "source": "db:copilot_advice（决策日收盘→T+h 收盘，超额 vs 沪深300；拒绝同样兑现）",
+    }}
 
 
 async def _load_pending_advice(session, advice_id: str, tenant_id: str, user_id: int):

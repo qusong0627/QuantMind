@@ -78,6 +78,13 @@ JOBS: tuple[JobSpec, ...] = (
         "告警 T+1 兑现回填（命中/误报）→ 误报率报表（T-P6-15）",
     ),
     JobSpec(
+        "advice_backfill", "建议卡兑现回填（P6）", "worker", "trade",
+        "交易日 16:15（300s 轮询）",
+        "QM_ADVICE_BACKFILL_ENABLED", True, 900,
+        "python -m backend.services.trade.services.advice_backfill",
+        "建议卡 T+1/T+3/T+5 超额兑现（决策日收盘口径）→ 建议成功率统计（T-P6-16 闭环）",
+    ),
+    JobSpec(
         "hot_set_builder", "热集构建（P6）", "worker", "trade", "60s 周期",
         "QM_HOT_SET_BUILD_ENABLED", True, 300, None,
         "全用户持仓并集 ∪ 候选池 → Redis 热集集合（订阅采集数据源，T-P6-06）",

@@ -43,13 +43,20 @@ def _dt_int(d: date) -> int:
     return int(d.strftime("%Y%m%d"))
 
 
-def load_forward_pair(
-    symbol: str, alert_date: date, *, view: str | None = None, normalize: bool = True
-) -> tuple[float, float] | None:
-    """(入场收盘, 出场收盘)：入场=≥告警日首个交易日，出场=其下一交易日；不足两行 → None。
+def load_relative_closes(
+    symbol: str,
+    base_date: date,
+    horizons: tuple[int, ...] = (1,),
+    *,
+    view: str | None = None,
+    normalize: bool = True,
+) -> tuple[float, dict[int, float]] | None:
+    """(基准收盘, {h: 第 h 个后续交易日收盘})：基准=≥base_date 首个交易日。
 
     指数（INDEX_SYMBOLS）走 ``qdb_index_daily`` 且不做后缀归一（000300→SZ 误判）；
     其余走 ``qdb_daily_forward`` + ``StockCodeUtil.to_suffix``。
+    horizon 缺行不进 dict（渐进兑现用，如 T+5 数据未到）；基准行缺失 → None。
+    **唯一实现**：哨兵 T+1 回填（h=1）与建议卡 T+1/T+3/T+5 兑现共用，禁第三份。
     """
     text = str(symbol or "").strip().upper()
     if view is None:
@@ -59,31 +66,53 @@ def load_forward_pair(
         from backend.shared.stock_utils import StockCodeUtil
 
         text = StockCodeUtil.to_suffix(text) or text
-    start = alert_date - timedelta(days=5)
-    end = alert_date + timedelta(days=15)
+    max_h = max(horizons) if horizons else 1
+    start = base_date - timedelta(days=5)
+    end = base_date + timedelta(days=max(15, 6 * max_h))
     try:
         df = _hub().fetch_series(
             view, text, _dt_int(start), _dt_int(end), columns=["close"]
         )
     except Exception as exc:  # noqa: BLE001
-        logger.warning("[sentinel-backfill] %s 行情读取失败: %s", symbol, exc)
+        logger.warning("[forward-prices] %s 行情读取失败: %s", symbol, exc)
         return None
     if df is None or df.empty:
         return None
     rows = df.dropna(subset=["close"]).sort_values("dt")
     entry_i = None
-    alert_int = _dt_int(alert_date)
+    base_int = _dt_int(base_date)
     for i, (_, row) in enumerate(rows.iterrows()):
-        if int(row["dt"]) >= alert_int:
+        if int(row["dt"]) >= base_int:
             entry_i = i
             break
-    if entry_i is None or entry_i + 1 >= len(rows):
+    if entry_i is None:
         return None
     entry = float(rows.iloc[entry_i]["close"])
-    exit_ = float(rows.iloc[entry_i + 1]["close"])
-    if entry <= 0 or exit_ <= 0:
+    if entry <= 0:
         return None
-    return entry, exit_
+    path: dict[int, float] = {}
+    for h in horizons:
+        idx = entry_i + h
+        if idx < len(rows):
+            close = float(rows.iloc[idx]["close"])
+            if close > 0:
+                path[int(h)] = close
+    return entry, path
+
+
+def load_forward_pair(
+    symbol: str, alert_date: date, *, view: str | None = None, normalize: bool = True
+) -> tuple[float, float] | None:
+    """(入场收盘, 出场收盘)：入场=≥告警日首个交易日，出场=其下一交易日；不足两行 → None。"""
+    res = load_relative_closes(
+        symbol, alert_date, (1,), view=view, normalize=normalize
+    )
+    if res is None:
+        return None
+    entry, path = res
+    if 1 not in path:
+        return None
+    return entry, path[1]
 
 
 def score_row(symbol: str, alert_date: date) -> dict[str, Any] | None:
