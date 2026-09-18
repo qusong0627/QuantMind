@@ -23,9 +23,21 @@ def _get_internal_user_from_headers(request: Request) -> dict | None:
     """
     仅在内部调用 secret 匹配时，信任网关注入的身份头。
     注意：网关中间件会剥离外部传入的这些头，避免客户端伪造。
+
+    密钥校验走 shared.auth 唯一读取点（runtime.env 权威、公开默认值一律视为未配置、
+    fail-closed；C1 治理）。此前直接比 settings.INTERNAL_CALL_SECRET——compose 注入的
+    公开默认值会遮蔽轮换后的密钥（2026-09-18 实测内部调用 401），且拿公开默认值即可
+    通过该校验（隐患）。
     """
+    from hmac import compare_digest
+
+    from backend.shared.auth import get_internal_call_secret
+
     secret = request.headers.get("X-Internal-Call")
-    if not secret or secret != settings.INTERNAL_CALL_SECRET:
+    if not secret:
+        return None
+    expected = get_internal_call_secret()
+    if not expected or not compare_digest(str(secret), expected):
         return None
 
     user_id = request.headers.get("X-User-Id")
