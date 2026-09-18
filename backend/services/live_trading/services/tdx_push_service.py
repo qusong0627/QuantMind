@@ -26,6 +26,9 @@ COMMISSION_RATE = 0.00025  # 佣金 万2.5，双边收取
 COMMISSION_MIN = 5.0  # 佣金最低 5 元/笔
 STAMP_TAX_RATE = 0.0005  # 印花税 万5，仅卖出单边（2023-08-28 起）
 TRANSFER_FEE_RATE = 0.00001  # 过户费 万0.1，双边收取
+# tqcenter 市价单的 WtPrice 哨兵值（2026-09-18 实测：市价卖单 319893 返回 1.0）——
+# 落库时须归 MARKET，否则交易记录显示"限价 1.00 元"
+MARKET_ORDER_PRICE_SENTINEL = 1.0
 
 
 def estimate_order_fee(filled_value: float, side: str = "buy") -> float:
@@ -514,14 +517,14 @@ class TdxPushService:
                         )
                     except (ValueError, TypeError):
                         pass
-                order_type = (
-                    OrderType.LIMIT
-                    if float(o.get("order_price") or 0) > 0
-                    else OrderType.MARKET
+                raw_price = float(o.get("order_price") or 0)
+                is_market = (
+                    raw_price <= 0 or raw_price == MARKET_ORDER_PRICE_SENTINEL
                 )
+                order_type = OrderType.MARKET if is_market else OrderType.LIMIT
                 total_volume = float(o.get("total_volume") or 0)
                 filled_volume = float(o.get("filled_volume") or 0)
-                price = float(o.get("order_price") or 0)
+                price = 0.0 if is_market else raw_price
                 filled_price = float(o.get("filled_price") or price)
                 filled_value = round(filled_volume * filled_price, 2)
                 fee = estimate_order_fee(filled_value, side)
@@ -624,8 +627,25 @@ class TdxPushService:
         """
         order = await self.pull_order_status(wtbh)
         if not order:
-            return {"wtbh": wtbh, "status_code": -1, "status_text": "未找到", "filled": False}
-        code = int(order.get("status", -1))
+            return {
+                "wtbh": wtbh,
+                "status_code": -1,
+                "status_text": "未找到",
+                "filled": False,
+                "all_filled": False,
+            }
+        # 桥返回字符串状态（pull_orders 协议），旧实现 int(status) 直接 ValueError
+        # （2026-09-18 实测）；按字符串映射为旧数字码保持接口兼容。
+        code = {
+            "rejected": 0,
+            "submitted": 1,
+            "partial_fill": 2,
+            "partially_filled": 2,
+            "filled": 3,
+            "partial_cancelled": 4,
+            "cancelled": 5,
+            "cancel": 5,
+        }.get(str(order.get("status") or "").strip().lower(), 1)
         status_map = {0: "无效单", 1: "未成交", 2: "部分成交", 3: "全部成交",
                       4: "部分成交部分撤单", 5: "全部撤单"}
         filled = code in (2, 3)
