@@ -472,6 +472,32 @@ async def _retry_inflight_orders(
             stats["given_up"].append(sym)
             continue
         new_plan_id = f"rolling_l2_{sym}_{side}_{int(time.time() * 1000)}"
+        # 风控闸（T-RC-02b 覆盖扩展）：重挂同样过闸（影子期不拦；fail-closed 拒单）
+        try:
+            from backend.services.trade.services.risk_gate_service import (
+                check_direct_order as _risk_check,
+            )
+            from backend.shared.simulation_account_keys import resolve_db_account_user
+
+            risk = await _risk_check(
+                tenant_id="default",
+                user_id=resolve_db_account_user("TDX_ACCOUNT_USER_ID"),
+                symbol=sym,
+                side=side,
+                quantity=new_volume,
+                price=price or None,
+                order_type="market",
+                source="tdx_l2",
+                remarks=new_plan_id,
+            )
+        except Exception as exc:  # noqa: BLE001 - 闸不可用=fail-closed
+            logger.warning("[TdxL2] %s 风控闸不可用（fail-closed，本轮跳过）: %s", sym, exc)
+            continue
+        if not risk.passed:
+            logger.warning(
+                "[TdxL2] %s 风控拒单[%s]: %s", sym, risk.rule_id or "risk", risk.reason
+            )
+            continue
         try:
             resp = await tdx_pusher.place_order(
                 stock_code=sym, side=side, volume=new_volume,
@@ -549,7 +575,10 @@ async def _execute_signals(
         )
         return placed, failed, None
     if execute_mode == "tdx":
-        placed, failed = await svc.place_rolling_orders(run_id=run_id, buys=buys, sells=sells)
+        placed, failed = await svc.place_rolling_orders(
+            run_id=run_id, buys=buys, sells=sells,
+            tenant_id=tenant_id, user_id=user_id, source="tdx_l2",
+        )
         return placed, failed, None
     return [], [], f"execute_mode={execute_mode} 仅预警不执行"
 

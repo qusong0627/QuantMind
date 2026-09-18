@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -25,6 +26,28 @@ from typing import Any
 from backend.shared.risk import RiskContext, RiskGateCore
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class DirectOrderReq:
+    """非 OrderRouter 直连路径的最小订单视图（TDX 桥循环 / QMT 执行端接线用，T-RC-02b）。
+
+    与 OrderRequest 同形（build_context 按 getattr 读取），trading_mode=REAL 时
+    账户上下文取 real_account_snapshots 最近快照（而非模拟账户）。
+    """
+
+    tenant_id: str
+    user_id: int
+    symbol: str
+    side: str
+    quantity: float
+    price: float | None = None
+    order_type: str = "market"
+    trading_mode: str = "REAL"
+    source: str = "tdx_bridge"
+    remarks: str | None = None
+    strategy_id: str = ""
+    client_order_id: str = ""
 
 CST = timezone(timedelta(hours=8))
 CONFIG_KEY = "qm:risk:config"
@@ -151,6 +174,42 @@ def _positions_lookup(positions: dict[str, Any], symbol: str) -> dict[str, Any] 
     return None
 
 
+def _last_close_fallback(symbol: str) -> float | None:
+    """最近一根已收盘日线（QuantDB 前复权）——快照缺失时金额类校验的兜底价。
+
+    只用于金额估算（资金/占比/单笔上限）；行情时效由 queued_intent 语义单独裁定。
+    单测可 monkeypatch 本函数（同步执行，调用方 to_thread）。
+    """
+    try:
+        from datetime import date as _date, timedelta as _td
+
+        from backend.services.trade.services.sentinel_backfill import (
+            INDEX_SYMBOLS,
+            _dt_int,
+            _hub,
+        )
+
+        text = str(symbol or "").strip().upper()
+        view = "qdb_index_daily" if text in INDEX_SYMBOLS else "qdb_daily_forward"
+        if text not in INDEX_SYMBOLS:
+            from backend.shared.stock_utils import StockCodeUtil
+
+            text = StockCodeUtil.to_suffix(text) or text
+        start = _date.today() - _td(days=15)
+        df = _hub().fetch_series(
+            view, text, _dt_int(start), _dt_int(_date.today()), columns=["close"]
+        )
+        if df is None or df.empty:
+            return None
+        rows = df.dropna(subset=["close"]).sort_values("dt")
+        if rows.empty:
+            return None
+        close = float(rows.iloc[-1]["close"])
+        return close if close > 0 else None
+    except Exception:  # noqa: BLE001 - 兜底失败=价格不可得（金额规则 fail-closed）
+        return None
+
+
 async def build_context(req: Any, *, db: Any, redis: Any, need_counts: bool = False) -> RiskContext:
     """OrderRequest → RiskContext（纯读；任何子项失败仅缺省该字段并留痕于 evidence）。"""
     now_ts = time.time()
@@ -162,6 +221,19 @@ async def build_context(req: Any, *, db: Any, redis: Any, need_counts: bool = Fa
     remarks = getattr(req, "remarks", None)
     uid = int(getattr(req, "user_id", 0) or 0)
     tenant = str(getattr(req, "tenant_id", "") or "default")
+    trading_mode = str(getattr(req, "trading_mode", "") or "").upper()
+    source = str(getattr(req, "source", "") or "")
+
+    # 盘后入队语义（2026-09-18 影子实测修复）：OrderRouter 盘后接单进入 pending 队列，
+    # 下一交易时段由派发环节申报——时段/行情时效约束不应在入队时刻拒绝；强平类不适用。
+    try:
+        from backend.shared.risk.builtin_rules import CN_SESSION_DEFAULT, _hm_ok
+
+        in_window = _hm_ok(datetime.now(tz=CST).strftime("%H:%M"), CN_SESSION_DEFAULT)
+    except Exception:  # noqa: BLE001 - 判定失败按在场处理（保守：走 reject 路径）
+        in_window = True
+    forced_exit = _is_forced_exit(remarks)
+    queued_intent = (not in_window) and (not forced_exit) and side in ("BUY", "SELL")
 
     # 急停（fail-closed：读失败按已急停）
     kill = False
@@ -174,35 +246,120 @@ async def build_context(req: Any, *, db: Any, redis: Any, need_counts: bool = Fa
     except Exception:  # noqa: BLE001
         kill = True
 
-    # 行情
+    # 行情（快照优先；缺失回落到最近收盘供金额类规则——来源如实标注）
     snap = _quote_snapshot(symbol)
     last_price = _f(snap.get("Now"))
     ts = _f(snap.get("timestamp"))
     quote_age = (now_ts - ts) if ts and ts > 0 else None
+    price_source = "snapshot" if (last_price and last_price > 0) else ""
+    if not price_source:
+        fallback_close = await asyncio.to_thread(_last_close_fallback, symbol)
+        if fallback_close:
+            last_price = fallback_close
+            quote_age = None  # 兜底价无"快照时效"语义（时效规则按 queued_intent 裁定）
+            price_source = "fallback_close"
 
-    # 账户快照（best-effort）
+    # 账户快照（best-effort）；REAL=真账户最近快照（TDX/QMT 直连接线），否则模拟账户
     available_cash = total_assets = position_pct = sellable = None
-    try:
-        from backend.services.trade_shared.simulation_manager import (
-            SimulationAccountManager,
-        )
+    if trading_mode == "REAL":
+        try:
+            from sqlalchemy import text as _sql_text
 
-        account = await SimulationAccountManager(redis).get_account(uid, tenant)
-        if account:
-            available_cash = _f(account.get("cash"))
-            total_assets = _f(account.get("total_asset"))
-            pos = _positions_lookup(account.get("positions") or {}, symbol)
-            if pos:
-                sellable = int(float(pos.get("available_volume") or 0))
-                mv = _f(pos.get("market_value"))
-                if total_assets and mv is not None:
-                    position_pct = mv / total_assets
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("[RiskGate] 账户快照读取失败（字段按缺省，fail-closed 语义由规则裁定）: %s", exc)
+            snap_source = (
+                "tdx_bridge"
+                if source.startswith("tdx")
+                else ("qmt_exec" if source.startswith("qmt") else None)
+            )
+            sql = (
+                "SELECT cash, total_asset, payload_json FROM real_account_snapshots "
+                "WHERE tenant_id = :t"
+                + (" AND source = :s" if snap_source else "")
+                + " ORDER BY snapshot_at DESC LIMIT 1"
+            )
+            params: dict[str, Any] = {"t": tenant}
+            if snap_source:
+                params["s"] = snap_source
+            row = (await db.execute(_sql_text(sql), params)).fetchone()
+            if row:
+                available_cash = _f(row[0])
+                total_assets = _f(row[1])
+                payload = (
+                    row[2] if isinstance(row[2], dict) else json.loads(row[2] or "{}")
+                )
+                from backend.shared.stock_utils import StockCodeUtil
 
-    # 次数（仅启用了频率/撤单率规则时才查库）
+                target = (StockCodeUtil.to_suffix(symbol) or symbol).upper()
+                for p in payload.get("positions") or []:
+                    if str(p.get("symbol") or "").strip().upper() == target:
+                        sellable = int(float(p.get("available_volume") or 0))
+                        mv = _f(p.get("market_value"))
+                        if total_assets and mv is not None:
+                            position_pct = mv / total_assets
+                        break
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[RiskGate] 真账户快照读取失败（字段按缺省，fail-closed 语义由规则裁定）: %s", exc
+            )
+    else:
+        try:
+            from backend.services.trade_shared.simulation_manager import (
+                SimulationAccountManager,
+            )
+
+            account = await SimulationAccountManager(redis).get_account(uid, tenant)
+            if account:
+                available_cash = _f(account.get("cash"))
+                total_assets = _f(account.get("total_asset"))
+                pos = _positions_lookup(account.get("positions") or {}, symbol)
+                if pos:
+                    sellable = int(float(pos.get("available_volume") or 0))
+                    mv = _f(pos.get("market_value"))
+                    if total_assets and mv is not None:
+                        position_pct = mv / total_assets
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[RiskGate] 账户快照读取失败（字段按缺省，fail-closed 语义由规则裁定）: %s", exc)
+
+    # 次数（仅启用了频率/撤单率规则时才查库）；REAL=orders 真单表，否则 sim_orders
     orders_last_minute = orders_today = cancels_today = 0
-    if need_counts:
+    if need_counts and trading_mode == "REAL":
+        try:
+            from sqlalchemy import text as _sql_text
+
+            # orders.created_at/updated_at 为 naive UTC（写入侧惯例）——参数同口径
+            day_start = (
+                datetime.now(tz=CST)
+                .replace(hour=0, minute=0, second=0, microsecond=0)
+                .astimezone(timezone.utc)
+                .replace(tzinfo=None)
+            )
+            minute_ago = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(
+                seconds=60
+            )
+            row = (
+                await db.execute(
+                    _sql_text(
+                        "SELECT "
+                        " count(*) FILTER (WHERE created_at >= :day) AS today, "
+                        " count(*) FILTER (WHERE created_at >= :minute) AS last_min, "
+                        " count(*) FILTER (WHERE status = 'cancelled' AND updated_at >= :day) AS cancels "
+                        "FROM orders WHERE tenant_id = :t AND user_id = :u "
+                        "AND trading_mode::text = 'REAL'"
+                    ),
+                    {
+                        "t": tenant,
+                        "u": str(uid),
+                        "day": day_start,
+                        "minute": minute_ago,
+                    },
+                )
+            ).fetchone()
+            if row:
+                orders_today = int(row[0] or 0)
+                orders_last_minute = int(row[1] or 0)
+                cancels_today = int(row[2] or 0)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[RiskGate] 真单频率计数查询失败: %s", exc)
+    elif need_counts:
         try:
             from sqlalchemy import String, cast, func, select
 
@@ -239,8 +396,10 @@ async def build_context(req: Any, *, db: Any, redis: Any, need_counts: bool = Fa
         quantity=qty,
         amount=amount,
         client_order_id=str(getattr(req, "client_order_id", "") or ""),
-        forced_exit=_is_forced_exit(remarks),
+        forced_exit=forced_exit,
         strategy_id=str(getattr(req, "strategy_id", "") or ""),
+        queued_intent=queued_intent,
+        price_source=price_source,
         available_cash=available_cash,
         sellable_volume=sellable,
         total_assets=total_assets,
@@ -256,6 +415,52 @@ async def build_context(req: Any, *, db: Any, redis: Any, need_counts: bool = Fa
 
 
 # ── 判定与留痕 ───────────────────────────────────────────────────────
+
+
+async def check_direct_order(
+    *,
+    tenant_id: str,
+    user_id: Any,
+    symbol: str,
+    side: str,
+    quantity: float,
+    price: float | None,
+    order_type: str = "market",
+    source: str = "tdx_bridge",
+    remarks: str | None = None,
+    redis_client: Any = None,
+) -> "RiskCheck":
+    """直连路径（TDX 滚动/L2/QMT）过闸便捷入口：自建只读会话 + trade Redis。
+
+    fail-closed 纪律与 OrderRouter 内嵌一致：判定异常/闸不可用 → passed=False（拒单），
+    调用方应按拒单处理并留痕。影子期（默认）恒放行、判定照记。
+    """
+    raw_uid = str(user_id if user_id is not None else "").strip()
+    uid = int(raw_uid) if raw_uid.isdigit() else 0
+    req = DirectOrderReq(
+        tenant_id=str(tenant_id or "default"),
+        user_id=uid,
+        symbol=str(symbol or ""),
+        side=str(side or "").lower(),
+        quantity=float(quantity or 0),
+        price=float(price) if price else None,
+        order_type=str(order_type or "market"),
+        trading_mode="REAL",
+        source=str(source or "tdx_bridge"),
+        remarks=remarks,
+    )
+    if redis_client is None:
+        from backend.services.trade_shared.redis_client import (
+            get_redis as _get_trade_redis,
+        )
+
+        redis_client = _get_trade_redis()
+        if getattr(redis_client, "client", None) is None:
+            redis_client.connect()
+    from backend.shared.database_manager_v2 import get_session
+
+    async with get_session(read_only=True) as db:
+        return await check_order(req, db=db, redis=redis_client)
 
 
 @dataclass(frozen=True)

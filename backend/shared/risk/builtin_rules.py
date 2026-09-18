@@ -83,6 +83,10 @@ def l0_session(ctx: RiskContext, params: Mapping[str, Any]) -> Decision | None:
         return _reject("l0.session", "L0", "非交易日（周末）", date=str(local.date()))
     now_hm = local.strftime("%H:%M")
     if not _hm_ok(now_hm, windows):
+        if ctx.queued_intent:
+            # 盘后入队（挂单）：申报时段约束由派发环节（下一交易时段）保证——
+            # 此处降级为告警并留痕，避免"盘后挂单"被时段规则误拒（2026-09-18 影子实测）
+            return _warn("l0.session", "L0", "盘后入队：申报时段校验延后到派发环节", hm=now_hm)
         return _reject("l0.session", "L0", "非申报时段", hm=now_hm, windows=windows)
     return None
 
@@ -211,13 +215,23 @@ def l3_price_deviation(ctx: RiskContext, params: Mapping[str, Any]) -> Decision 
 
 @rule("l3.stale_quote", "L3", "陈旧价拒单（行情时间戳早于阈值；不可得=拒）", max_age_s=5.0)
 def l3_stale_quote(ctx: RiskContext, params: Mapping[str, Any]) -> Decision | None:
-    if ctx.quote_age_s is None:
-        return _reject("l3.stale_quote", "L3", "行情时间戳不可得，fail-closed")
     max_age = float(params.get("max_age_s", 5.0))
-    if float(ctx.quote_age_s) > max_age:
-        return _reject("l3.stale_quote", "L3", "行情陈旧",
-                       age_s=ctx.quote_age_s, max_age_s=max_age)
-    return None
+    age = ctx.quote_age_s
+    if age is not None and float(age) <= max_age:
+        return None
+    # 陈旧或不可得。盘后入队：快照过期属常态（有可用市场价参与金额类校验即可），
+    # 真实行情在派发环节重取——降级为告警并留痕（2026-09-18 影子+现场实测；
+    # 注意用 last_price[市场价] 而非 price[委托限价]，市价单 price 恒为 None）
+    if ctx.queued_intent and ctx.last_price is not None:
+        return _warn(
+            "l3.stale_quote", "L3",
+            "盘后入队：行情时效校验延后到派发环节",
+            age_s=age, price_source=ctx.price_source,
+        )
+    if age is None:
+        return _reject("l3.stale_quote", "L3", "行情时间戳不可得，fail-closed")
+    return _reject("l3.stale_quote", "L3", "行情陈旧",
+                   age_s=ctx.quote_age_s, max_age_s=max_age)
 
 
 @rule("l3.order_frequency", "L3", "下单频率上限（每分钟）", max_per_minute=20)

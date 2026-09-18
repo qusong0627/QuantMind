@@ -272,3 +272,133 @@ def test_single_chokepoint_source_guard():
     src = (root / "backend/services/simulation/services/order_router.py").read_text(encoding="utf-8")
     assert src.count("_risk_check(req, db=db, redis=redis)") == 1
     assert "risk_gate_service" in src
+
+
+# ── T-RC-02b：直连路径（TDX 滚动/L2）接线 + 盘后入队语义（影子实测修复）──────
+
+
+class _FakeSessionCtx:
+    async def __aenter__(self):
+        return object()
+
+    async def __aexit__(self, *a):
+        return False
+
+
+@pytest.mark.asyncio
+async def test_check_direct_order_builds_real_req_and_shadow_pass(monkeypatch):
+    captured = {}
+
+    async def _fake_check(req, *, db, redis):
+        captured["req"] = req
+        return rgs.RiskCheck(passed=True, enforced=False, version=1)
+
+    monkeypatch.setattr(rgs, "check_order", _fake_check)
+    monkeypatch.setattr(
+        "backend.shared.database_manager_v2.get_session",
+        lambda read_only=True: _FakeSessionCtx(),
+    )
+    check = await rgs.check_direct_order(
+        tenant_id="default", user_id="10000001", symbol="600036.SH", side="sell",
+        quantity=100, price=None, order_type="market", source="tdx_rolling",
+        remarks="rolling_x_600036.SH_sell", redis_client=FakeRedis(),
+    )
+    assert check.passed
+    req = captured["req"]
+    assert isinstance(req, rgs.DirectOrderReq)
+    assert req.trading_mode == "REAL" and req.source == "tdx_rolling"
+    assert req.user_id == 10000001 and req.side == "sell"
+    assert req.remarks == "rolling_x_600036.SH_sell"
+
+
+@pytest.mark.unit
+def test_l0_session_queued_intent_downgrades():
+    from datetime import datetime
+
+    from backend.shared.risk import RiskContext
+    from backend.shared.risk.builtin_rules import l0_session
+
+    ts = datetime(2026, 9, 18, 15, 34, tzinfo=rgs.CST).timestamp()  # 交易日盘后
+    queued = l0_session(RiskContext(side="BUY", queued_intent=True, now_ts=ts), {})
+    assert queued is not None and queued.action == "WARN"
+    plain = l0_session(RiskContext(side="BUY", queued_intent=False, now_ts=ts), {})
+    assert plain is not None and plain.action == "REJECT"
+
+
+@pytest.mark.unit
+def test_l3_stale_quote_queued_intent_downgrades():
+    from backend.shared.risk import RiskContext
+    from backend.shared.risk.builtin_rules import l3_stale_quote
+
+    # 时刻不可得 + 有市场价 + 入队 → 告警（注意用 last_price 而非委托限价 price）
+    queued = l3_stale_quote(
+        RiskContext(quote_age_s=None, last_price=7.5, price=None, queued_intent=True, price_source="fallback_close"),
+        {},
+    )
+    assert queued is not None and queued.action == "WARN"
+    # 陈旧但已知 age（现场实测：盘后快照 age≈87min）+ 入队 → 同样降级告警
+    stale_queued = l3_stale_quote(
+        RiskContext(quote_age_s=5220.0, last_price=7.57, queued_intent=True, price_source="snapshot"),
+        {},
+    )
+    assert stale_queued is not None and stale_queued.action == "WARN"
+    # 非入队 + 陈旧 → 拒
+    strict = l3_stale_quote(
+        RiskContext(quote_age_s=5220.0, last_price=7.5, queued_intent=False), {}
+    )
+    assert strict is not None and strict.action == "REJECT"
+    none_price = l3_stale_quote(
+        RiskContext(quote_age_s=None, last_price=None, queued_intent=True), {}
+    )
+    assert none_price is not None and none_price.action == "REJECT"
+
+
+@pytest.mark.asyncio
+async def test_build_context_after_hours_fallback_price_and_queued(monkeypatch):
+    """盘后入队：快照缺失 → 最近收盘兜底价 + queued_intent（时段/时效校验延后）。"""
+    from datetime import datetime as _dt
+
+    class _FakeDT(_dt):
+        @classmethod
+        def now(cls, tz=None):
+            base = _dt(2026, 9, 18, 15, 34, tzinfo=rgs.CST)
+            return base.astimezone(tz) if tz else base.replace(tzinfo=None)
+
+    monkeypatch.setattr(rgs, "datetime", _FakeDT)
+    monkeypatch.setattr(rgs, "_quote_snapshot", lambda sym: {})  # 盘后快照缺失
+    monkeypatch.setattr(rgs, "_last_close_fallback", lambda sym: 7.57)
+    monkeypatch.setattr(
+        "backend.services.live_trading.services.real_mirror_service.kill_switch_on",
+        lambda redis: False,
+    )
+
+    class _Mgr:
+        def __init__(self, redis):
+            pass
+
+        async def get_account(self, uid, tenant, market="CN"):
+            return None
+
+    monkeypatch.setattr(
+        "backend.services.trade_shared.simulation_manager.SimulationAccountManager", _Mgr
+    )
+    ctx = await rgs.build_context(
+        _req(order_type="market", price=None, source="co_pilot"), db=None, redis=FakeRedis()
+    )
+    assert ctx.queued_intent is True
+    assert ctx.price_source == "fallback_close"
+    assert ctx.last_price == pytest.approx(7.57)
+    assert ctx.amount == pytest.approx(7.57 * 100)
+    assert ctx.quote_age_s is None
+
+
+@pytest.mark.unit
+def test_direct_paths_source_guard():
+    """G：TDX 直连下单路径必须过闸（滚动/L2 共用 place_rolling_orders + L2 重挂各一处）。"""
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    rolling = (root / "backend/services/live_trading/services/tdx_rolling_trade_service.py").read_text(encoding="utf-8")
+    l2 = (root / "backend/services/live_trading/services/tdx_l2_realtime.py").read_text(encoding="utf-8")
+    assert "check_direct_order" in rolling
+    assert "check_direct_order" in l2

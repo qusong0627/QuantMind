@@ -466,6 +466,9 @@ class TdxRollingTradeService:
         run_id: str,
         buys: list[dict[str, Any]],
         sells: list[dict[str, Any]],
+        tenant_id: str = "default",
+        user_id: str | None = None,
+        source: str = "tdx_rolling",
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         """把滚动买卖信号生成为真实委托推给通达信（客户端弹确认框）。
 
@@ -489,6 +492,46 @@ class TdxRollingTradeService:
                 failed.append({**item, "side": side, "error": "数量或价格无效"})
                 return
             plan_id = f"rolling_{run_id}_{item['symbol']}_{side}"
+            # 风控闸（T-RC-02b 覆盖扩展：滚动 + L2 主单共用本函数）：影子期判定留痕不拦单；
+            # 闸不可用/判定异常 = fail-closed 拒单（与 OrderRouter 内嵌同纪律）
+            try:
+                from backend.services.trade.services.risk_gate_service import (
+                    check_direct_order as _risk_check,
+                )
+
+                if user_id:
+                    _risk_uid: Any = user_id
+                else:
+                    from backend.shared.simulation_account_keys import (
+                        resolve_db_account_user,
+                    )
+
+                    _risk_uid = resolve_db_account_user("TDX_ACCOUNT_USER_ID")
+                risk = await _risk_check(
+                    tenant_id=tenant_id,
+                    user_id=_risk_uid,
+                    symbol=item["symbol"],
+                    side=side,
+                    quantity=volume,
+                    price=price,
+                    order_type="market" if side == "sell" else "limit",
+                    source=source,
+                    remarks=plan_id,
+                )
+            except Exception as exc:  # noqa: BLE001 - 闸不可用=fail-closed
+                failed.append(
+                    {**item, "side": side, "error": f"风控闸不可用（fail-closed）: {exc}"}
+                )
+                return
+            if not risk.passed:
+                failed.append(
+                    {
+                        **item,
+                        "side": side,
+                        "error": f"风控拒单[{risk.rule_id or 'risk'}]: {risk.reason}",
+                    }
+                )
+                return
             try:
                 resp = await tdx_pusher.place_order(
                     stock_code=item["symbol"],

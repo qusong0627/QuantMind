@@ -83,6 +83,8 @@ class RiskContext:
     fingerprint: str = ""                  # 参数指纹（重复单检测）
     forced_exit: bool = False              # 强平单：价格偏离闸门 bypass（保 sanity 上界）
     strategy_id: str = ""
+    queued_intent: bool = False            # 盘后入队单：申报时段/行情时效校验延后到派发环节
+    price_source: str = ""                 # 价格来源：snapshot / fallback_close / ""（不可得）
 
     # ── 账户快照（L1）──
     available_cash: float | None = None
