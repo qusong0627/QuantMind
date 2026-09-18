@@ -61,6 +61,17 @@ def test_validate_actions_rules():
 
 
 @pytest.mark.unit
+def test_advice_create_allows_advisory_only_cards():
+    """纯建议卡（actions 空）= 观察/纪律类建议（2026-09-18 契约扩展）；校验空表恒等。"""
+    from backend.services.api.routers.copilot import AdviceCreate, validate_actions
+
+    payload = AdviceCreate(title="不追热点：新闻单透镜不构成入场依据", rationale="…")
+    assert payload.actions == []
+    assert payload.source == "quantbot"
+    assert validate_actions([]) == []
+
+
+@pytest.mark.unit
 def test_copilot_client_order_id_stable_and_scoped():
     from backend.shared.order_contract import build_copilot_client_order_id
 

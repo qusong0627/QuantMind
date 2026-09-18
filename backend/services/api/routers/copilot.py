@@ -48,7 +48,8 @@ class AdviceAction(BaseModel):
 class AdviceCreate(BaseModel):
     title: str = Field(..., min_length=1, max_length=200)
     rationale: str = ""
-    actions: list[AdviceAction] = Field(..., min_length=1, max_length=_MAX_ACTIONS)
+    # actions 允许为空 = 纯建议卡（观察/纪律类，如"不追热点"）；执行端点对空动作 400
+    actions: list[AdviceAction] = Field(default_factory=list, max_length=_MAX_ACTIONS)
     context_refs: dict[str, Any] = Field(default_factory=dict)
     source: str = "quantbot"
 
@@ -353,6 +354,10 @@ async def execute_advice(advice_id: str, current_user: dict = Depends(get_curren
         if row[3] != "pending":
             raise HTTPException(status_code=409, detail=f"建议卡已定局（{row[3]}）")
         title, actions = row[1], row[2] or []
+        if not actions:
+            raise HTTPException(
+                status_code=400, detail="纯建议卡（无动作）不可执行——接受/拒绝即可"
+            )
 
     redis = get_trade_redis()
     if getattr(redis, "client", None) is None:
@@ -437,12 +442,27 @@ async def copilot_panel(
         }
     except Exception as exc:  # noqa: BLE001
         panel["events"] = {"available": False, "reason": str(exc)[:200], "items": []}
-    # 时延（新鲜档滚动统计）
+    # 时延（T-P6-05 双通道口径：展示用 _fresh 档——全量档含停牌/夜盘陈旧重放帧，
+    # 不是传输时延；2026-09-18 面板曾因读全量档显示 15.3min 误报）
     try:
         from backend.shared.latency_metrics import read_latency
 
-        panel["latency"] = {"available": True, "market_snapshot": read_latency("market_snapshot"),
-                            "source": "redis:intel:latency"}
+        bridge_fresh = read_latency("market_snapshot_bridge_fresh")
+        subscriber_fresh = read_latency("market_snapshot_fresh")
+        display, display_stage = (
+            (bridge_fresh, "market_snapshot_bridge_fresh")
+            if bridge_fresh
+            else (subscriber_fresh, "market_snapshot_fresh")
+        )
+        panel["latency"] = {
+            "available": display is not None,
+            "display": display,
+            "display_stage": display_stage,
+            "market_snapshot_bridge_fresh": bridge_fresh,
+            "market_snapshot_fresh": subscriber_fresh,
+            "note": "展示口径=_fresh 档（行情到达时延）；全量档含陈旧重放帧，不用于展示",
+            "source": "redis:intel:latency",
+        }
     except Exception as exc:  # noqa: BLE001
         panel["latency"] = {"available": False, "reason": str(exc)[:200]}
     # 资源预算（T-P6-10）：复用验收器的资源汇总（tdx worker 群 + 引擎 + 容器内存）
