@@ -23,6 +23,7 @@ from typing import Any
 import numpy as np
 import pyarrow.parquet as pq
 
+from . import blocks as BLK
 from .datasets import DATASETS, DEFAULT_DATASET, dataset_dir, label_dir
 
 log = logging.getLogger(__name__)
@@ -30,9 +31,16 @@ log = logging.getLogger(__name__)
 N_QUANTILES = 10
 HORIZONS = ("fwd_ret_1", "fwd_ret_2", "fwd_ret_3", "fwd_ret_5", "fwd_ret_10", "fwd_ret_20")
 
-# 明细结果的进程内缓存（{dataset:factor:horizon:lookback} → payload）
+# 明细结果的进程内缓存（{dataset:factor:horizon:lookback:分组:成本:基准} → payload）
+#
+# ⚠️ 分组/成本/基准**必须在键里**：它们改的是多空曲线本身，不进键就会出现
+# 「把 G3/G9 改成 G1/G10 后页面还是旧曲线」——静默错数，且刷新页面也不消失。
 _DETAIL_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 _DETAIL_TTL_SECONDS = 600
+
+DEFAULT_LONG_GROUP = 3
+DEFAULT_SHORT_GROUP = 9
+DEFAULT_COST_BPS = 20.0
 
 
 def normalize_dataset(dataset: str | None) -> str:
@@ -119,10 +127,17 @@ def _rank(x: np.ndarray) -> np.ndarray:
     return r
 
 
-def _detail_from_series(dataset: str, factor: str, horizon: str, lookback: int) -> dict[str, Any] | None:
+def _detail_from_series(
+    dataset: str, factor: str, horizon: str, lookback: int,
+    *, long_group: int, short_group: int, cost_bps: float, bench: str | None,
+) -> dict[str, Any] | None:
     """从预计算序列 parquet 取明细（毫秒级）。
 
     返回 None 表示序列文件不可用（或快照的前瞻期与请求不一致），由调用方回退按需扫描。
+
+    ⚠️ 读的是**全窗口**再切片，不是直接 tail：累计型指标（累计 IC、净值、超额累计）
+    必须全窗口才有意义，而噪声型的日序列只需 ``lookback`` 个点。整列读进来
+    也就几百 KB，不做两次 IO。
     """
     path = series_path(dataset)
     if not path.exists():
@@ -137,10 +152,12 @@ def _detail_from_series(dataset: str, factor: str, horizon: str, lookback: int) 
     except Exception as e:  # noqa: BLE001 — 文件损坏/字段不符时回退扫描
         log.warning(f"读取因子序列失败，回退按需扫描: {e}")
         return None
-    df = tbl.to_pandas()
-    if df.empty:
+    full = tbl.to_pandas()
+    if full.empty:
         return None
-    df = df.sort_values("date").tail(max(lookback, 20))
+    # lookback <= 0 = 全窗口（与下方按需扫描路径 :302 同义）；否则至少 20 天
+    full = full.sort_values("date")
+    df = full if lookback <= 0 else full.tail(max(lookback, 20))
     dates = [str(int(d)) for d in df["date"].tolist()]
     q_cols = [f"q{i}" for i in range(1, N_QUANTILES + 1)]
     q_mat = df[q_cols].to_numpy(dtype=np.float64)          # T × 10
@@ -157,12 +174,24 @@ def _detail_from_series(dataset: str, factor: str, horizon: str, lookback: int) 
         seg = ic_arr[i + 1 - roll : i + 1]
         ic_roll.append(None if not np.isfinite(seg).any() else float(np.nanmean(seg)))
     turnover = df["turnover"].to_numpy(dtype=np.float64)
+    # 机构级九个块（读时派生）；任一数据源缺失时内部降级为 available=False + reason
+    try:
+        blocks = BLK.build_blocks(
+            full, factor=factor, horizon=horizon, lookback=lookback,
+            long_group=long_group, short_group=short_group, cost_bps=cost_bps,
+            snapshot=snap, bench_symbol=bench,
+        )
+    except Exception as e:  # noqa: BLE001 — 新块失败不该让既有明细整页打不开
+        log.exception("因子明细块派生失败(%s/%s)", dataset, factor)
+        blocks = {"error": f"{type(e).__name__}: {e}"}
     return {
         "dataset": normalize_dataset(dataset),
         "factor": factor,
         "horizon": horizon,
         "empty": False,
         "source": "series_snapshot",
+        "schema_version": meta.get("schema_version"),
+        "blocks": blocks,
         "dates": dates,
         "quantile_mean": [float(v) for v in np.nanmean(q_mat, axis=0)],
         "quantile_curves": [[float(v) for v in curves[:, j]] for j in range(N_QUANTILES)],
@@ -223,23 +252,36 @@ def _load_pairs(dataset: str, dt: str, factor: str, horizon: str, label_mode: st
     return dt, fac, lab
 
 
-def compute_detail(dataset: str, factor: str, horizon: str = "fwd_ret_5", lookback: int = 250) -> dict[str, Any]:
-    """单因子明细：分位净值曲线、分位平均收益、IC 序列、换手序列、覆盖率。
+def compute_detail(
+    dataset: str, factor: str, horizon: str = "fwd_ret_5", lookback: int = 250,
+    *, long_group: int = DEFAULT_LONG_GROUP, short_group: int = DEFAULT_SHORT_GROUP,
+    cost_bps: float = DEFAULT_COST_BPS, bench: str | None = None,
+) -> dict[str, Any]:
+    """单因子明细：分位净值曲线、分位平均收益、IC 序列、换手序列、覆盖率 + 九个机构级块。
 
-    优先读预计算序列（毫秒级）；缺失时回退扫分区。
+    优先读预计算序列（毫秒级）；缺失时回退扫分区（回退路径不产新块）。
     """
     ds = normalize_dataset(dataset)
     if horizon not in HORIZONS:
         raise ValueError(f"不支持的前瞻期: {horizon}")
     if not factor or not factor.replace("_", "").isalnum():
         raise ValueError("非法因子名")
+    long_group, short_group = int(long_group), int(short_group)
+    if not (1 <= long_group <= N_QUANTILES and 1 <= short_group <= N_QUANTILES):
+        raise ValueError(f"分组下标越界（合法 1..{N_QUANTILES}）：长 {long_group} / 空 {short_group}")
+    if long_group == short_group:
+        raise ValueError("多空不能是同一组（曲线会恒等于 0 且看起来像「没行情」）")
+    cost_bps = float(cost_bps)
+    if not (0.0 <= cost_bps <= 1000.0):
+        raise ValueError(f"成本 bps 超出合理范围 0..1000：{cost_bps}")
 
-    key = f"{ds}:{factor}:{horizon}:{lookback}"
+    key = f"{ds}:{factor}:{horizon}:{lookback}:{long_group}:{short_group}:{cost_bps:g}:{bench or ''}"
     hit = _DETAIL_CACHE.get(key)
     if hit and time.time() - hit[0] < _DETAIL_TTL_SECONDS:
         return hit[1]
 
-    fast = _detail_from_series(ds, factor, horizon, lookback)
+    fast = _detail_from_series(ds, factor, horizon, lookback, long_group=long_group,
+                               short_group=short_group, cost_bps=cost_bps, bench=bench)
     if fast is not None:
         _DETAIL_CACHE[key] = (time.time(), fast)
         return fast

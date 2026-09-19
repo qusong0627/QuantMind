@@ -90,9 +90,16 @@ async def factor_detail(
     dataset: str = Query(default=DEFAULT_DATASET, description=_DATASET_DESC),
     horizon: str = Query(default="fwd_ret_5", description="前瞻期：fwd_ret_1/2/3/5/10/20"),
     lookback: int = Query(default=250, ge=20, le=1200, description="回看交易日数"),
+    long_group: int = Query(default=service.DEFAULT_LONG_GROUP, ge=1, le=10, description="多头组（G1=因子值最小）"),
+    short_group: int = Query(default=service.DEFAULT_SHORT_GROUP, ge=1, le=10, description="空头组"),
+    cost_bps: float = Query(default=service.DEFAULT_COST_BPS, ge=0, le=1000, description="双边成本（bps）"),
+    bench: str | None = Query(default=None, description="主基准指数代码，如 000300.SH（默认沪深300）"),
 ):
     try:
-        return service.compute_detail(dataset, factor, horizon=horizon, lookback=lookback)
+        return service.compute_detail(
+            dataset, factor, horizon=horizon, lookback=lookback,
+            long_group=long_group, short_group=short_group, cost_bps=cost_bps, bench=bench,
+        )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 

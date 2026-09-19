@@ -34,11 +34,15 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from backend.services.engine.factor_report.datasets import DATASETS, dataset_dir  # noqa: E402
+from backend.services.engine.factor_report.neutralize import (  # noqa: E402
+    load_industry_map,
+    load_mv_rank,
+    neutralize_ic,
+)
+from backend.services.engine.factor_report.optimize import max_icir_weights  # noqa: E402
 from backend.services.engine.factor_report.service import load_snapshot  # noqa: E402
 from backend.shared.quantdb_paths import resolve_quantdb_subdir  # noqa: E402
 
-VALUATION_DIR = resolve_quantdb_subdir("5_technical_derived", "valuation")
-INSTRUMENT_GLOB = str(resolve_quantdb_subdir("2_base_sector", "instrument_detail") / "*.parquet")
 HORIZON_KEYS = ["fwd_ret_1", "fwd_ret_2", "fwd_ret_5", "fwd_ret_10", "fwd_ret_20"]
 META_COLS = {"symbol", "date", "time", "dt", "open", "high", "low", "close",
              "volume", "amount", "release_id", "published_at"}
@@ -56,16 +60,7 @@ def limit_threshold(symbol: str) -> float:
     return 0.098
 
 
-def archive_root() -> Path:
-    try:
-        from backend.services.engine.routers.trading_agents import _resolve_results_dir
-
-        return _resolve_results_dir()
-    except Exception:  # noqa: BLE001
-        for cand in (Path("/data/reports/trading_agents"), Path("/app/db/trading_agents_results")):
-            if cand.is_dir():
-                return cand
-        return Path("/data/reports/trading_agents")
+from backend.shared.report_archive import archive_root  # noqa: E402  （原三份副本已收口）
 
 
 def _fnum(v, digits: int = 4) -> str:
@@ -119,29 +114,8 @@ def section_ic_decay(dataset: str, top_n: int = 12) -> tuple[list[str], list[dic
 
 
 # ═══════════════ B. 中性化 IC（行业 + 市值残差）═══════════════
-
-def _load_industry() -> pd.Series:
-    # 注意：pyarrow 不展开 glob（DuckDB 才展开），必须先用 glob 解析成文件列表
-    import glob as _glob
-
-    files = _glob.glob(INSTRUMENT_GLOB)
-    if not files:
-        return pd.Series(dtype=str)
-    df = pq.read_table(files, columns=["Symbol", "rs_hycode_sim"]).to_pandas()
-    df = df.dropna(subset=["rs_hycode_sim"]).drop_duplicates("Symbol")
-    return df.set_index("Symbol")["rs_hycode_sim"].astype(str)
-
-
-def _load_mv_for(dates: list[str]) -> pd.DataFrame:
-    """读指定日期的总市值（元），index=date, columns=symbol。"""
-    out = {}
-    for dt in dates:
-        p = VALUATION_DIR / f"dt={dt}" / "data.parquet"
-        if not p.exists():
-            continue
-        t = pq.read_table(p, columns=["symbol", "total_mv"]).to_pandas().set_index("symbol")["total_mv"]
-        out[dt] = t
-    return pd.DataFrame(out).T if out else pd.DataFrame()
+# 取数与投影均收口到 factor_report.neutralize（同一套口径还被
+# evaluate_signal_factors 与因子报告构建器使用，此前各写各的）。
 
 
 def neutralized_ic(dataset: str, sample_step: int = 5, max_factors: int | None = None) -> pd.DataFrame:
@@ -151,7 +125,7 @@ def neutralized_ic(dataset: str, sample_step: int = 5, max_factors: int | None =
     if not parts:
         return pd.DataFrame()
     parts = parts[:: max(sample_step, 1)]
-    ind = _load_industry()
+    ind = load_industry_map()
 
     sch = pq.ParquetFile(f"{parts[-1]}/data.parquet").schema_arrow
     cols = [c for c in sch.names
@@ -196,47 +170,22 @@ def neutralized_ic(dataset: str, sample_step: int = 5, max_factors: int | None =
         if y is None or len(y) < 100:
             continue
 
-        # 市值 → 秩
-        mv = _load_mv_for([dt])
-        if mv.empty:
+        # 市值 → 秩。pandas 的 rank 不给 NaN 计分母，故「先在全候选集上取秩、
+        # 再 dropna」与旧代码「先取交集、再在交集上取秩」逐位相同（已实测）。
+        mv_rank_s = load_mv_rank(dt, t.index.intersection(y.dropna().index)).dropna()
+        if mv_rank_s.empty:
             continue
-        mv = mv.iloc[0]
-        idx = t.index.intersection(y.dropna().index).intersection(mv.dropna().index)
+        idx = mv_rank_s.index
         if len(idx) < 100:
             continue
         X = t.loc[idx, cols]
         yy = y.loc[idx].to_numpy(dtype=np.float64)
-        mv_rank = mv.loc[idx].rank(pct=True).to_numpy(dtype=np.float64)
+        mv_rank = mv_rank_s.to_numpy(dtype=np.float64)
         inds = ind.reindex(idx).fillna("UNKNOWN").to_numpy()
 
-        # ① 横截面秩
-        Rk = X.rank(pct=True)
-        M = Rk.to_numpy(dtype=np.float64)
-        # ② 行业去均值：哑变量矩阵乘法（5000×128 稠密哑变量 @ 128×K 行业均值），
-        #    比 pandas groupby().transform() 快一个数量级（后者对 5000×429 要 1-2 秒/日）
-        codes, inv = np.unique(inds, return_inverse=True)
-        n_ind = len(codes)
-        Dm = np.zeros((len(idx), n_ind), dtype=np.float32)
-        Dm[np.arange(len(idx)), inv] = 1.0
-        cnt = Dm.sum(axis=0)
-        cnt[cnt == 0] = 1.0
-        ind_mean = (Dm.T @ M) / cnt[:, None]          # n_ind × K
-        M = M - Dm @ ind_mean
-        # ③ 对 rank(mv) 正交（一次最小二乘拿下所有因子）
-        mvc = mv_rank - mv_rank.mean()
-        denom = float(mvc @ mvc)
-        if denom <= 0:
-            continue
-        beta = (mvc @ M) / denom
-        resid = M - np.outer(mvc, beta)
-        # ④ 残差 IC（Spearman on residual ranks ≈ Pearson on residual）
-        yv = yy - yy.mean()
-        sd_y = yv.std()
-        if sd_y <= 0:
-            continue
-        sd_r = resid.std(axis=0)
-        with np.errstate(invalid="ignore"):
-            ic = (resid * yv[:, None]).mean(axis=0) / (sd_r * sd_y)
+        # ① 横截面秩 ② 行业去均值 ③ 对 rank(mv) 正交 ④ 残差 IC —— 全部在共享模块
+        ic = neutralize_ic(X.rank(pct=True).to_numpy(dtype=np.float64), yy,
+                           ind_codes=inds, control=mv_rank)
         for c, v in zip(cols, ic, strict=False):
             if np.isfinite(v):
                 acc[c].append(float(v))
@@ -414,14 +363,12 @@ def portfolio_construction(dataset: str, top_k: int = 30) -> tuple[list[str], di
     # ② |IC| 加权
     a = np.abs(mu)
     w_ic = sign * (a / a.sum())
-    # ③ 最大 ICIR（Σ⁻¹μ，含收缩 + 多空约束的简单解）
-    shrink = 0.3
-    S = (1 - shrink) * Sigma + shrink * np.eye(len(sel))
-    try:
-        w_mv = np.linalg.solve(S, mu)
-        w_mv = w_mv / np.abs(w_mv).sum()
-    except np.linalg.LinAlgError:
-        w_mv = w_ic
+    # ③ 最大 ICIR（Σ⁻¹μ，收缩 + 方向符号 + gross=1）
+    # ⚠️ 与旧内联版的一处差异：本实现把每个权重**强制对齐到该因子 IC 的符号**
+    #    （方向即观点），旧版直接用 Σ⁻¹μ 的原始符号 —— 在因子间强相关时 Σ⁻¹ 可能
+    #    解出与 IC 相反的权重，等于"做空自己看好的因子"。此处与 portfolio.py 的
+    #    口径取齐，两处组合权重从此可比。
+    w_mv = max_icir_weights(Sigma, mu)["weights"]
     # 归一化到 gross exposure = 1
     for w in (w_eq, w_ic, w_mv):
         w /= np.abs(w).sum()

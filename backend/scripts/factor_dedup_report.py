@@ -33,28 +33,10 @@ from backend.services.engine.factor_report.clusters import summarize  # noqa: E4
 from backend.services.engine.factor_report.datasets import DATASETS  # noqa: E402
 
 
-def archive_root() -> Path:
-    """报告档案根目录 —— 必须与 skills-center「报告档案」读取的**同一个**目录。
-
-    ⚠️ 历史教训：本脚本最初写死 `/data/reports/trading_agents`，而当时该目录不存在、
-    档案实际回退到旧目录 `db/trading_agents_results`。脚本一跑就把新目录建了出来，
-    档案解析随即改指新目录 → 老用户的股票研报历史在 UI 里"消失"（数据仍在旧目录）。
-    所以这里复用 router 的解析函数（env → 新目录 → 旧目录），保证写与读同源。
-    """
-    try:
-        from backend.services.engine.routers.trading_agents import _resolve_results_dir
-
-        return _resolve_results_dir()
-    except Exception:  # noqa: BLE001 — 脱离服务环境时按同序回退
-        import os
-
-        env_val = os.getenv("TRADING_AGENTS_RESULTS_DIR", "").strip()
-        if env_val and Path(env_val).is_dir():
-            return Path(env_val)
-        for cand in (Path("/data/reports/trading_agents"), Path("/app/db/trading_agents_results")):
-            if cand.is_dir():
-                return cand
-        return Path("/data/reports/trading_agents")
+# 报告档案根目录 —— 必须与 skills-center「报告档案」读取的**同一个**目录。
+# 解析逻辑（含「建目录会改变解析结果」这条历史教训）已收口到 backend/shared/report_archive.py，
+# 该模块自带单测覆盖解析顺序与「不得有建目录副作用」；本脚本只是调用方。
+from backend.shared.report_archive import archive_root  # noqa: E402
 
 
 OUT_DIR = archive_root() / "因子去重"

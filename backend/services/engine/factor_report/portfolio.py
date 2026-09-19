@@ -24,6 +24,7 @@ import numpy as np
 import pyarrow.parquet as pq
 
 from .clusters import cluster_by_correlation
+from .optimize import composite_ic_series, max_icir_weights
 from .service import dataset_dir, load_snapshot, normalize_dataset
 
 log = logging.getLogger(__name__)
@@ -139,24 +140,22 @@ def build_portfolio(
         return {"available": False, "dataset": ds,
                 "reason": f"通过门槛的因子只有 {len(sel)} 个（<3），请放宽 n_top/icir_min 或关闭净收益门槛"}
 
-    # ── 权重：最大 ICIR（收缩 Σ⁻¹μ，带方向）
+    # ── 权重：最大 ICIR（收缩 Σ⁻¹μ，带方向）—— 口径与回退路径统一在 optimize.py
     idx = {n: i for i, n in enumerate(all_names)}
     ii = [idx[n] for n in sel]
     mat = np.asarray(matrix, dtype=np.float64)
     Sigma = mat[np.ix_(ii, ii)]
-    sign = np.array([1.0 if float(metrics[n].get("ic_mean") or 0) >= 0 else -1.0 for n in sel])
-    mu = np.array([abs(float(metrics[n].get("ic_mean") or 0)) for n in sel])
-    shrink = 0.3
-    S = (1 - shrink) * Sigma + shrink * np.eye(len(sel))
-    try:
-        w = np.linalg.solve(S, mu * sign)
-    except np.linalg.LinAlgError:
-        w = mu * sign
-    if not np.isfinite(w).all() or np.abs(w).sum() <= 0:
-        w = mu * sign
-    w = sign * (np.abs(w) / np.abs(w).sum())      # 方向符号 + gross=1 归一
+    ic_means = [float(metrics[n].get("ic_mean") or 0) for n in sel]
+    # 无有效 IC 的因子按 0 强度参与：旧实现在这里会发出 NaN 权重，整个组合跟着变 NaN
+    # （表现为权重列全是 None）。取 0 是「该因子不提供方向与强度」的显式表达。
+    bad = [n for n, v in zip(sel, ic_means, strict=True) if not np.isfinite(v)]
+    if bad:
+        log.warning("因子 %s 无有效 IC，权重按 0 强度参与", bad)
+        ic_means = [v if np.isfinite(v) else 0.0 for v in ic_means]
+    w = max_icir_weights(Sigma, ic_means)["weights"]
 
-    # ── 组合表现：用逐日 IC 序列合成（与单因子 ICIR 同口径）
+    # ── 组合表现：用**逐日 IC 序列**合成（与单因子 ICIR 同口径；
+    #    为何不能用相关矩阵合成，见 optimize.composite_ic_series 的模块注释）
     comp_ic = comp_icir = None
     sp = dataset_dir(ds) / "report" / "factor_series.parquet"
     if sp.exists():
@@ -165,11 +164,10 @@ def build_portfolio(
         cols = [n for n in sel if n in piv.columns]
         if len(cols) >= 3:
             ww = np.array([w[sel.index(n)] for n in cols])
-            series = piv[cols].to_numpy(dtype=float) @ ww
-            series = series[np.isfinite(series)]
-            if series.size > 20 and series.std() > 0:
-                comp_ic = float(series.mean())
-                comp_icir = float(series.mean() / series.std())
+            comp = composite_ic_series(piv[cols].to_numpy(dtype=float), ww)
+            if comp is not None:
+                comp_ic = comp["ic_mean"]
+                comp_icir = comp["icir"]
 
     def _clean(v):
         """NaN/Inf → None：JSON 不能带非有限数（FastAPI 序列化会直接 500）。"""

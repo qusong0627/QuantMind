@@ -7,6 +7,7 @@ import type {
   FactorCorrelation,
   FactorDatasetList,
   FactorDetail,
+  FactorDetailParams,
   FactorRelated,
   FactorSummaryResponse,
 } from '../types/factorReport';
@@ -54,14 +55,27 @@ export function getFactorSummary(params: {
   return getJson<FactorSummaryResponse>(`/summary${suffix}`);
 }
 
-/** 单因子明细（预计算序列，毫秒级） */
+/**
+ * 单因子明细（预计算序列 + 读时派生块，毫秒级）。
+ *
+ * ⚠️ `longGroup` / `shortGroup` / `costBps` / `bench` 改的是**多空曲线本身**，
+ * 后端已把它们纳入缓存键；前端切参数后必须重新请求，不能复用旧响应。
+ */
 export function getFactorDetail(
   factor: string,
   dataset: string,
-  horizon = 'fwd_ret_5',
-  lookback = 250,
+  params: FactorDetailParams = {},
 ): Promise<FactorDetail> {
-  const qs = new URLSearchParams({ factor, dataset, horizon, lookback: String(lookback) });
+  const qs = new URLSearchParams({
+    factor,
+    dataset,
+    horizon: params.horizon ?? 'fwd_ret_5',
+    lookback: String(params.lookback ?? 250),
+    long_group: String(params.longGroup ?? 3),
+    short_group: String(params.shortGroup ?? 9),
+    cost_bps: String(params.costBps ?? 20),
+  });
+  if (params.bench) qs.set('bench', params.bench);
   return getJson<FactorDetail>(`/detail?${qs}`, 90000);
 }
 

@@ -134,11 +134,12 @@ ssh ${SSH_TARGET} "cd ${PROJECT_DIR} && sudo bash deploy/update.sh"
 
 Electron 前端在本地开发时使用 Vite HMR；修改 `electron/src` 后运行 `npm run typecheck` 即可，不需要复制构建产物到服务器的 `web` 容器。
 
-### Web 前端部署（Nginx 预编译）
-- **预编译目录**：`web/dist` 已纳入版本（`.gitignore` 放行 `!web/dist/**`），本地 `npm run dashboard:build` 后 `cp -r electron/dist-react/* web/dist/` 并提交，服务器 `git pull` 即更新，无需在服务器构建 `node`
-- **服务**：`web` 容器 `nginx:alpine`（`docker-compose.yml:web`），挂载 `./web/dist:/usr/share/nginx/html:ro` + `./docker/web/nginx.conf:ro`，反代 `/api/ → quantmind:8000`、`/ws/ → quantmind:8003`，`resolver 127.0.0.11` 动态解析
-- **更新**：`git pull && docker compose up -d web`（或 `restart web`），前端日常开发仍用 `npm run dev` HMR，无需每次重建
-- **构建过滤**：`deploy/update.sh` 仅在 `requirements*.txt`/`Dockerfile` 变更时重建后端镜像，前端走 `web/dist` Volume，与后端构建解耦
+### Web 前端部署（独立 nginx 容器 `quantmind-web`）
+- **⚠️ `docker-compose.yml` 里没有 `web` 服务**（实测 grep 确认；服务只有 db/redis/quantmind/celery-worker/celery-beat/data-gateway/huntly/rsshub/dsh/ib-gateway）。`quantmind-web` 是独立容器（镜像 `quantmind-web:latest`），**不受 `docker compose` 管理**，`docker compose up -d web` / `restart web` 都是无效命令。
+- **唯一部署入口**：`bash scripts/deploy_frontend.sh`（先 `cd electron && npm run build`，再 `docker cp dist-react/. quantmind-web:/usr/share/nginx/html/`，带旧 chunk 清理 + main 文件校验 + assets 数量比对 + curl 健康检查）
+- **改前端后的完整流程**：`npm run typecheck` → `bash scripts/deploy_frontend.sh` → 浏览器强刷 `Ctrl+Shift+R`
+- **`web/dist` 是遗留产物**：曾经由 `web` 服务的 Volume 挂载伺服，该服务已不在 compose 中；`cp -r electron/dist-react/* web/dist/` 现在不产生任何效果，不要走这条路
+- **注意容器重建即丢失**：`docker cp` 的产物在容器重建后消失（回到镜像内旧版本），需重新跑一次 `deploy_frontend.sh`
 
 ## 关键文件
 

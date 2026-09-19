@@ -54,12 +54,15 @@ MARKET_FACTOR_SOURCES: dict[str, tuple[FactorSource, ...]] = {
 # ── 6_ml_datasets 下不参与训练直读的目录（“刷新字段”自动发现时排除）─────────────
 # - features_daily：含未来收益标签列（return_Nd）与 OHLCV 重复列，作为特征会泄漏；
 # - alpha_library_labels：纯标签库；
-# - alpha_library：历史策略预计算 Alpha 库（如需纳入训练直读，从本集合移除即可）。
+# - alpha_library：历史策略预计算 Alpha 库（如需纳入训练直读，从本集合移除即可）；
+# - factor_defs：同属「清单库」性质（1300+ 条，与研究/报告同源），
+#   让它自动进训练候选池会让「刷新字段」突然多出一个超长列表；要训练时显式移除即可。
 # 其余新增因子目录（如未来上线的 xxx_factors）无需改代码，刷新字段即自动注册。
 EXCLUDED_TRAIN_DATASETS: frozenset[str] = frozenset({
     "features_daily",
     "alpha_library_labels",
     "alpha_library",
+    "factor_defs",
 })
 DEFAULT_FACTOR_SOURCE_BY_MARKET: dict[str, FactorSource] = {
     "CN": "l1_factors",

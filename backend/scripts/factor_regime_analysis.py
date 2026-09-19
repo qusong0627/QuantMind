@@ -44,17 +44,8 @@ BULL_MOM, BEAR_MOM = 0.10, -0.10   # 250 日动量阈值
 MA_WINDOW = 200
 
 
-def archive_root() -> Path:
-    """报告档案根（与 skills-center「报告档案」同源；详见 factor_dedup_report.archive_root 注释）。"""
-    try:
-        from backend.services.engine.routers.trading_agents import _resolve_results_dir
-
-        return _resolve_results_dir()
-    except Exception:  # noqa: BLE001
-        for cand in (Path("/data/reports/trading_agents"), Path("/app/db/trading_agents_results")):
-            if cand.is_dir():
-                return cand
-        return Path("/data/reports/trading_agents")
+# 报告档案根（与 skills-center「报告档案」同源）—— 已收口到共享模块，勿再抄。
+from backend.shared.report_archive import archive_root  # noqa: E402
 
 
 def load_index() -> tuple[str, pd.Series]:

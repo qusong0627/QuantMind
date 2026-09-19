@@ -111,10 +111,19 @@ _CHINEXT_20PCT_FROM = date(2020, 8, 24)
 
 _CENT = Decimal("0.01")
 
-# amount/volume 的单位在 2026-07-21 前后发生切换，因此按日自动识别而非硬编码：
-#   旧口径：volume=股, amount=万元  -> close*volume/amount ≈ 1e4
-#   新口径：volume=手, amount=元    -> close*volume/amount ≈ 1e-2
-# 两者相差 6 个数量级，用中位数判别非常稳健。搞错会让成交额/vwap 偏 1e4 倍。
+# amount/volume 的单位按日**自动识别**而非硬编码 —— 两者相差 6 个数量级，
+# 搞错会让成交额/vwap 偏 1e4 倍：
+#   旧口径(LEGACY)：volume=股,  amount=万元 -> close*volume/amount ≈ 1e4
+#   新口径(CURRENT)：volume=手, amount=元   -> close*volume/amount ≈ 1e-2
+#
+# ⚠️ 2026-09-19 实测订正：`1_kline_data/daily_{unadjusted,forward,backward}` **全期**
+# 都是 volume=股 / amount=万元（2020-01-02 / 2024-06-03 / 2026-06-01 / **2026-07-21** /
+# 2026-07-31 / 2026-09-18 六个抽样日，全市场 ratio 中位数 9950~10177，
+# |log10(ratio)−4|>0.5 的行占比 0.000000）——**不存在「2026-07-21 前后切换」这回事**，
+# 本注释此前如此声称，与数据不符，已按实测改掉。`_detect_amount_scale` 因此恒返回
+# `_SCALE_LEGACY`。保留自动识别是给**其它市场/其它源**兜底；真正的「手/元」混源在
+# `1_kline_data/tick_data`（wind 导入=股/万元、旧 QuantDB tick 同步=手/元，用 `pvolume`
+# 区分），daily_* 没有这个问题。别再照旧注释去"验证"一次不存在的切换。
 _SCALE_LEGACY = 1e4  # amount 万元→元；volume 已是股
 _SCALE_CURRENT = 1e-2  # volume 手→股需 ×100，amount 已是元
 _SCALE_DECISION_BOUNDARY = 1.0

@@ -30,6 +30,22 @@ DATASETS: dict[str, dict] = {
         "library_rule": "alpha_prefix",
         "universe": "A股全市场 · Alpha 库（Alpha101/GTJA191/Alpha158）",
     },
+    # 因子清单库：只含**日频可复现**的因子。
+    # ⚠️ 分钟族、财务 PIT 族，以及需要 point-in-time 指数成分股的，都不在内
+    # （各自的缺口原因不同，补齐所需的数据依赖也不同）。
+    # 具体的纳入/剔除清单见 <数据集>/MANIFEST.json。
+    # 标签复用 alpha_library_labels：同一份 load_kline 网格、且标签只依赖 close。
+    "factor_defs": {
+        "label": "因子清单库（日频可复现部分）",
+        "dir_parts": ("6_ml_datasets", "factor_defs"),
+        "label_mode": "labels_table",
+        "label_parts": ("6_ml_datasets", "alpha_library_labels"),
+        "meta_cols": _ID_COLS,
+        # 暂无子库切分：源清单的「分类」字段 46% 是「其他/未分类」，硬切反而误导；
+        # 单库直出排行表，要按家族筛再看是否需要规则化。
+        "library_rule": "fixed:factor_defs",
+        "universe": "A股全市场 · 因子清单库（日频可复现因子）",
+    },
     "l1_factors": {
         "label": "L1 因子（量价/换手/波动等基础因子）",
         "dir_parts": ("6_ml_datasets", "l1_factors"),

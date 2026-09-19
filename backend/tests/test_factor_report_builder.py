@@ -529,3 +529,357 @@ def test_parallel_and_serial_runs_agree(monkeypatch, tmp_path):
         assert a["ic_mean"] == pytest.approx(b["ic_mean"], abs=0)
         assert a["quantiles"] == pytest.approx(b["quantiles"], abs=0)
         assert a["turnover"] == pytest.approx(b["turnover"], abs=0)
+
+
+# ═══════════ E. 截面附加口径（半/中性化/分域 IC、数据质量、风格相关）═══════════
+#
+# 这一组锁的是「构建期只加需要当日截面矩阵的东西」这条分工：
+# 附加列的**数值口径**由 test_factor_report_metrics.py / _neutralize.py 锁定，
+# 这里只锁**接线**——列有没有真的落进 parquet、快照与序列是否同源、
+# 取数降级时是显式 None 还是冒充的 0。
+
+
+def test_快照带结构版本与风格供给状态(run_labels_table):
+    report, _, _, _ = run_labels_table
+    meta = report["meta"]
+    assert meta["schema_version"] == bfr.SCHEMA_VERSION >= 2
+    # 未构建风格产物时必须显式记 missing（前端据此降级），而不是假装有数据
+    assert meta["style_model"] in ("ok", "missing")
+    assert isinstance(meta["style_names"], list)
+
+
+def test_附加列全部落进明细_parquet_且不加行(run_labels_table):
+    _, series, _, _ = run_labels_table
+    for col in ("ic_top", "ic_bot", "ic_neutral", "ic_large", "ic_mid",
+                "ic_small", "clip_frac", "n_valid"):
+        assert col in series.columns, f"明细 parquet 缺列 {col}"
+    # 附加列是加列不是加行：3 因子 × 3 天
+    assert len(series) == len(DAYS) * 3
+
+
+def test_数据质量列有已知答案(run_labels_table):
+    """合成因子严格等距（无极端值）→ clip_frac≈0；有效样本恒为全部 200 只。"""
+    _, series, _, _ = run_labels_table
+    assert (series["n_valid"] == N_SYMBOLS).all()
+    assert float(np.nanmax(series["clip_frac"])) < 0.02
+
+
+def test_半截面IC_在主前瞻期上算且符号随因子(run_labels_table):
+    """f_inverse 与主期 fwd_ret_5 完全同序 → 上下半 IC 都 = +1；
+    f_rank 与之反向 → 上下半 IC 都 = −1。**取错前瞻期会得到反号**（其余四期斜率同号）。"""
+    report, _, _, _ = run_labels_table
+    inv = _factor(report, "f_inverse")
+    rnk = _factor(report, "f_rank")
+    assert inv["ic_top_mean"] == pytest.approx(1.0, abs=RND)
+    assert inv["ic_bot_mean"] == pytest.approx(1.0, abs=RND)
+    assert rnk["ic_top_mean"] == pytest.approx(-1.0, abs=RND)
+    assert rnk["ic_bot_mean"] == pytest.approx(-1.0, abs=RND)
+    # 噪声因子的半 IC 必须**有值**（不是 NaN）—— 有值才说明它真的算过
+    assert np.isfinite(_factor(report, "f_noise")["ic_top_mean"])
+
+
+def test_快照的附加均值与明细列逐因子同源(run_labels_table):
+    """快照 *_mean 必须等于明细列按因子的均值 —— 两处不同源是本项目反复踩的坑。"""
+    report, series, _, _ = run_labels_table
+    for name, key, col in (("f_inverse", "ic_top_mean", "ic_top"),
+                           ("f_rank", "ic_bot_mean", "ic_bot"),
+                           ("f_noise", "ic_top_mean", "ic_top")):
+        want = float(series.loc[series["factor"] == name, col].mean())
+        assert _factor(report, name)[key] == pytest.approx(want, abs=RND)
+
+
+# ── 取数降级 / 已知答案（直接调 compute_cross_section，不落盘）──
+
+def _cs_inputs(n: int = 600):
+    syms = np.array([f"S{i:03d}" for i in range(n)])
+    i = np.arange(n, dtype=np.float64)
+    return syms, i.reshape(-1, 1), np.ones(n, dtype=bool)
+
+
+def test_纯行业因子_中性化IC_无定义而非_0(monkeypatch):
+    """因子在每个行业内取常数 → 行业去均值后无截面信息。
+
+    正确输出是 **NaN（无定义）**，不是 0（0 会被读成「测过，没效果」）。
+    同时原始 IC 很高 —— 这一对比正是「中性化 IC」要回答的问题。
+    """
+    n = 600
+    syms, _, ok_y = _cs_inputs(n)
+    ind = np.array(["A"] * (n // 2) + ["B"] * (n - n // 2))
+    level = {"A": 0.0, "B": 1.0}
+    X = np.array([[level[c]] for c in ind], dtype=np.float64)
+    y = np.where(ind == "B", 0.01, -0.01)          # 收益完全由行业解释（有噪声才非退化）
+    y = y + np.random.default_rng(11).normal(0, 1e-4, n)
+    monkeypatch.setattr(bfr, "load_mv", lambda dt, symbols=None: pd.Series(
+        np.linspace(1.0, 1000.0, n), index=pd.Index(syms)))
+    monkeypatch.setattr(bfr, "load_industry_map", lambda: pd.Series(ind, index=pd.Index(syms)))
+    out = bfr.compute_cross_section(X, X, y, ok_y, syms, "20240102",
+                                    {"neutral": True, "style_dir": None})
+    # 原始 IC 很强（pandas 的 Spearman 独立重算）—— 「行业上有效、中性化后无定义」
+    # 正是这组对比要说的。（注：分域 IC 在这份样例里同样无定义 —— 行业边界恰好与
+    # 市值三分位重合，每个子域内因子取值恒定，零方差；这是样例构造使然，非缺陷。）
+    raw_ic = float(pd.Series(X[:, 0]).corr(pd.Series(y), method="spearman"))
+    assert raw_ic > 0.5, f"原始 IC 应当很强，实测 {raw_ic:.3f}"
+    assert not np.isfinite(out["ic_neutral"][0]), "纯行业因子不该有中性化 IC"
+
+
+def test_与市值共线的因子_中性化IC_无定义而非_0(monkeypatch):
+    """因子 = a·市值 + b → 对 rank(市值) 正交后残差无方差 → NaN。"""
+    n = 600
+    syms, _, ok_y = _cs_inputs(n)
+    mv = np.linspace(1.0, 1000.0, n)
+    X = (3.0 * mv + 7.0).reshape(-1, 1)
+    y = np.random.default_rng(13).normal(0, 0.01, n)
+    monkeypatch.setattr(bfr, "load_mv", lambda dt, symbols=None: pd.Series(mv, index=pd.Index(syms)))
+    monkeypatch.setattr(bfr, "load_industry_map", lambda: pd.Series(
+        ["UNKNOWN"] * n, index=pd.Index(syms)))
+    out = bfr.compute_cross_section(X, X, y, ok_y, syms, "20240102",
+                                    {"neutral": True, "style_dir": None})
+    assert not np.isfinite(out["ic_neutral"][0]), "与市值共线不该有中性化 IC"
+
+
+def test_分域IC_大小盘各一段(monkeypatch):
+    """市值递增、因子与收益在**小盘段**完全同序、大盘段是噪声 →
+    小盘 IC ≈ +1、大盘 IC ≈ 0。分域切点跨因子一致（用当日全体市值定分位）。"""
+    n = 900
+    syms, R, ok_y = _cs_inputs(n)
+    mv = np.arange(1.0, n + 1.0)
+    rng = np.random.default_rng(17)
+    y = np.where(mv < n / 3.0, R[:, 0], rng.normal(0, 1, n))
+    monkeypatch.setattr(bfr, "load_mv", lambda dt, symbols=None: pd.Series(mv, index=pd.Index(syms)))
+    monkeypatch.setattr(bfr, "load_industry_map", lambda: pd.Series(
+        ["UNKNOWN"] * n, index=pd.Index(syms)))
+    out = bfr.compute_cross_section(R, R, y, ok_y, syms, "20240102",
+                                    {"neutral": True, "style_dir": None})
+    assert out["ic_small"][0] > 0.9
+    assert abs(out["ic_large"][0]) < 0.2
+
+
+def test_取数降级_中性化块留_NaN_而不是_0(monkeypatch):
+    """市值取不到（旧库/未同步）→ 中性化与分域 IC 全 NaN，半 IC 与数据质量照常。"""
+    n = 300
+    syms, R, ok_y = _cs_inputs(n)
+    y = R[:, 0]
+    monkeypatch.setattr(bfr, "load_mv", lambda dt, symbols=None: pd.Series(dtype=float))
+    out = bfr.compute_cross_section(R, R, y, ok_y, syms, "20240102",
+                                    {"neutral": True, "style_dir": None})
+    for key in ("ic_neutral", "ic_large", "ic_mid", "ic_small"):
+        assert not np.isfinite(out[key]).any(), f"{key} 在取数失败时应为 NaN"
+    assert np.isfinite(out["ic_top"][0])            # 半 IC 不依赖外部取数
+    assert np.isfinite(out["clip_frac"][0])
+
+
+def test_skip_neutral_只关掉依赖取数的块(monkeypatch):
+    n = 300
+    syms, R, ok_y = _cs_inputs(n)
+    out = bfr.compute_cross_section(R, R, R[:, 0], ok_y, syms, "20240102",
+                                    {"neutral": False, "style_dir": None})
+    assert not np.isfinite(out["ic_neutral"]).any()
+    assert np.isfinite(out["ic_top"][0])
+
+
+def test_风格产物缺失_返回_None_而不是_0(monkeypatch, tmp_path):
+    n = 300
+    syms, R, ok_y = _cs_inputs(n)
+    out = bfr.compute_cross_section(R, R, R[:, 0], ok_y, syms, "20240102",
+                                    {"neutral": False, "style_dir": str(tmp_path / "nope")})
+    assert out["style_corr"] is None and out["style_names"] == ()
+
+
+def test_风格产物存在时给出因子与各风格的秩相关(monkeypatch, tmp_path):
+    """风格名从产物 schema 读（不硬编码）；size 与因子同序 → ρ=+1。"""
+    n = 300
+    syms, R, ok_y = _cs_inputs(n)
+    sdir = tmp_path / "style"
+    _write(sdir, "20240102", pd.DataFrame({
+        "symbol": syms,
+        "size": np.arange(1.0, n + 1.0),          # 与 R 同序
+        "beta": -np.arange(1.0, n + 1.0),         # 与 R 反序
+    }))
+    out = bfr.compute_cross_section(R, R, R[:, 0], ok_y, syms, "20240102",
+                                    {"neutral": False, "style_dir": str(sdir)})
+    assert out["style_names"] == ("size", "beta")
+    assert out["style_corr"].shape == (1, 2)
+    assert out["style_corr"][0, 0] == pytest.approx(1.0)
+    assert out["style_corr"][0, 1] == pytest.approx(-1.0)
+
+
+# ── 逐组换手（组合换手 vs 全截面换组比例）──
+
+
+def _gt(a: list[int], b: list[int], k: int) -> np.ndarray:
+    """测试夹具：按 day-a → day-b 的组号名单直接调被测函数（n 只 × k 因子）。"""
+    av = np.array(a, dtype=np.int16).reshape(-1, 1)
+    bv = np.array(b, dtype=np.int16).reshape(-1, 1)
+    valid = (av >= 0) & (bv >= 0)
+    return bfr._group_turnover(av, bv, valid, k)
+
+
+def test_逐组换手_分母是昨日该组只数():
+    """3 只昨日在 G1（组号 0），今日 1 只留、2 只走 → G1 换手 = 2/3。
+
+    「分母写成今日只数」或「分子写成双向变动」都会给出别的数，故这里用**不等量**的
+    进出来锁死语义：只有 2 只进去、0 只出来时，换出比例必须是 0 而不是 2/5。
+    """
+    gt = _gt([0, 0, 0, 1, 1], [0, 1, 2, 1, 1], 1)
+    assert gt[0, 0] == pytest.approx(2.0 / 3.0)
+    assert gt[1, 0] == pytest.approx(0.0), "昨日 G2 全员留任 → 换手 0"
+    assert np.isnan(gt[2, 0]), "昨日空仓的组换手无定义（NaN），不是 0"
+
+
+def test_逐组换手_低于全截面换组比例():
+    """组合换手必须能与全截面数字分开：一只从 G5 挪到 G6，全截面记 1 次变动，
+    但 G3/G9 两条腿**完全没动** —— 把两者混为一谈就会凭空多出成本。"""
+    a = [9, 9, 4, 4]
+    b = [9, 9, 5, 4]
+    gt = _gt(a, b, 1)
+    cross = float(np.mean(np.array(a) != np.array(b)))
+    assert cross == pytest.approx(0.25)
+    # 组号 9 = G10、组号 4 = G5（下标 1-based 展开成 0-based）
+    assert gt[9, 0] == pytest.approx(0.0), "G10 腿没动"
+    assert gt[4, 0] == pytest.approx(0.5), "G5 走掉一只"
+
+
+def test_逐组换手_无效样本不进任何组():
+    """-1（当日该因子无效）必须整只剔除，不能落进某组污染分母。"""
+    gt = _gt([-1, -1, 0, 0], [0, 1, 0, 0], 1)
+    assert gt[0, 0] == pytest.approx(0.0)
+    assert float(np.nansum(gt[:, 0])) == pytest.approx(0.0)
+
+
+def test_逐组换手_形状不符即报错而不是静默广播():
+    """`a` 给 (n,1) 而 k=2 时，`a*k + cols` 会广播成 (n,2) —— 凭空把第一列复印一份。
+
+    广播在本函数的写法里永远不是想要的行为，故必须显式失败。
+    """
+    av = np.array([[0], [0], [0], [0]], dtype=np.int16)
+    with pytest.raises(ValueError):
+        bfr._group_turnover(av, av, np.ones((4, 1), bool), 2)
+
+
+def test_逐组换手_逐因子独立不串列():
+    """两列的分组各不相同：列偏移漏乘就会让两列共用一组 bin，数字互相串味。
+
+    构造：列 0 全部留在 G1（换手 0）；列 1 整组从 G2 挪到 G3（G2 换手 1、G3 昨日空仓）。
+    串列时列 1 会读成 0 或列 0 会读成 1，两种都能被下面四条断言抓住。
+    """
+    av = np.array([[0, 1], [0, 1], [0, 1], [0, 1]], dtype=np.int16)
+    bv = np.array([[0, 2], [0, 2], [0, 2], [0, 2]], dtype=np.int16)
+    gt = bfr._group_turnover(av, bv, np.ones((4, 2), bool), 2)
+    assert gt.shape == (10, 2)
+    assert gt[0, 0] == pytest.approx(0.0), "列 0 的 G1 全员留任"
+    assert gt[1, 1] == pytest.approx(1.0), "列 1 的 G2 整组换出"
+    assert np.isnan(gt[0, 1]), "列 1 的 G1 昨日空仓 → 无定义（不得借来列 0 的 0）"
+    assert np.isnan(gt[1, 0]), "列 0 的 G2 昨日空仓 → 无定义"
+
+
+def test_逐组换手落进明细_parquet(run_labels_table):
+    _, series, _, _ = run_labels_table
+    cols = [f"gt{i}" for i in range(1, 11)]
+    for col in cols:
+        assert col in series.columns, f"明细 parquet 缺列 {col}"
+    # 逐组换手是「与日期无关」的汇总量：同一因子的值在每一天都相同
+    sub = series[series["factor"] == "f_rank"]
+    assert sub["gt3"].nunique(dropna=False) == 1
+
+
+# ─────────────── 快照 headline（7 指标环的全库分位基准）───────────────
+#
+# 存在的理由：环的弧长是**全库百分位**而不是裸值，故全库每个因子都要有同一口径的
+# Returns/IR/Turnover/Fitness/Margin。此前快照只有 IC/ICIR，其余五项无从比较。
+# 本组测试的**核心**不是「算得对」，而是「构建期与读时算的是同一件事」——
+# 两处各写一份公式，改了一处就会静默产出「环上一个值、页签里另一个值」。
+
+def _q_gt(k: int = 3, t: int = 60):
+    """合成 (T, 10, K) 分位收益与 (10, K) 逐组换手。
+
+    噪声刻意取 1%/日（真实多空组合的量级）而不是极小值：σ 太小会把 IR 推到几百，
+    此时恒等式两边的**落盘舍入**被放大，容差再也说不清「多少才算口径差异」。
+    """
+    rng = np.random.default_rng(7)
+    q = np.zeros((t, 10, k), dtype=np.float64)
+    for j in range(k):
+        base = (np.arange(10, dtype=np.float64) - 8.5) * 0.001 * (j + 1)   # G3>G9 的单调梯度
+        q[:, :, j] = base + rng.normal(0.0, 0.01, size=(t, 10))
+    gt = np.full((10, k), 0.2, dtype=np.float64)
+    gt[2, :] = 0.3
+    gt[8, :] = 0.5          # 两条腿均值 = 0.4
+    return q, gt
+
+
+def test_headline_与读时_blocks_逐位一致():
+    """**本条是这组测试的全部意义**：构建期写进快照的 headline，必须与读时从
+    明细 parquet 现算的 headline_block 一致。两处公式一旦漂移，页面上就是
+    「指标环一个数、分组回测页签另一个数」，而且都不报错。"""
+    from backend.services.engine.factor_report import blocks as B
+
+    q, gt = _q_gt()
+    snap = bfr.build_headline_snapshot(q, gt, k_main=5, n_factors=3)
+
+    df = pd.DataFrame({f"gt{i + 1}": gt[i] for i in range(10)})
+    for j in range(3):
+        read = B.headline_block(
+            df, q[:, :, j], np.zeros(q.shape[0]), long_group=3, short_group=9, cost_bps=20.0, k=5,
+        )
+        for key in ("returns", "ir", "turnover", "fitness", "margin"):
+            # 容差 = 落盘的四舍五入（_r6 存 6 位小数），不是公式差异：
+            # round(x, 6) 与 x 的偏差上界恰为 5e-7，超出即说明两处口径真的不同。
+            assert snap[j][key] == pytest.approx(read[key], abs=5.1e-7), (
+                f"因子 {j} 的 {key}：快照 {snap[j][key]} vs 读时 {read[key]}"
+            )
+
+
+def test_headline_缺少逐组换手时_fitness_margin_为_None_而_returns_照常():
+    """旧快照没有 gt 列。此时 Fitness/Margin 无定义（它们的分母就是换手），
+    写 0 会让人以为「盈亏比为零」；Returns/IR 不受影响，必须照常给。"""
+    q, _ = _q_gt()
+    snap = bfr.build_headline_snapshot(q, None, k_main=5, n_factors=3)
+    assert snap[0]["turnover"] is None
+    assert snap[0]["fitness"] is None and snap[0]["margin"] is None
+    assert snap[0]["returns"] is not None and snap[0]["ir"] is not None
+
+
+def test_headline_满足_brain_恒等式():
+    """恒等式在**落盘精度内**成立。
+
+    容差取相对 1e-5：三个量各自 round 到 6 位小数后，误差会被 Div/sqrt 放大 ——
+    这个量级（~1e-6 相对）与任何真实口径差异（动辄百分之几十）差四个数量级，
+    既能过、又抓得住错。同时先断言量级非退化：否则「两边都是 0」也满足恒等式
+    （零项假通过）。
+    """
+    q, gt = _q_gt(k=1)
+    h = bfr.build_headline_snapshot(q, gt, k_main=5, n_factors=1)[0]
+    assert h["turnover"] == pytest.approx(0.4), "取两条腿的均值，不是某个单组"
+    assert abs(h["returns"]) > 1e-4 and abs(h["ir"]) > 0.1 and abs(h["fitness"]) > 0.1, (
+        f"合成序列退化，恒等式会空成立：{h}"
+    )
+    tol = {"rel": 1e-5}
+    assert h["margin"] == pytest.approx(h["returns"] / h["turnover"], **tol)
+    expect_fit = h["ir"] * np.sqrt(abs(h["returns"]) / max(h["turnover"], 0.125))
+    assert h["fitness"] == pytest.approx(expect_fit, **tol)
+
+
+def test_headline_记录所用分组_便于前端标注():
+    """环上的数字是「默认 G3/G9 口径」。用户把页面切到 G1/G10 后，环不能再声称
+    自己还是默认口径 —— 故分组必须随值一起存下来。"""
+    q, gt = _q_gt(k=1)
+    h = bfr.build_headline_snapshot(q, gt, k_main=5, n_factors=1)[0]
+    assert h["long_group"] == bfr.DEF_LONG and h["short_group"] == bfr.DEF_SHORT
+
+
+def test_headline_形状不符即抛_而不是静默错位():
+    """(T,10,K) 与 (10,K) 都是三维/二维的近似形状，串列后不会抛、只会算错。"""
+    q, gt = _q_gt(k=3)
+    with pytest.raises(ValueError, match="分位序列形状"):
+        bfr.build_headline_snapshot(q, gt, k_main=5, n_factors=99)
+    with pytest.raises(ValueError, match="逐组换手形状"):
+        bfr.build_headline_snapshot(q, gt[:, :2], k_main=5, n_factors=3)
+
+
+def test_headline_空序列时全为_None_而不是_NaN():
+    """JSON 里出现 NaN 会让前端 JSON.parse 直接抛 —— 必须落成 null。"""
+    q = np.full((0, 10, 1), np.nan)
+    h = bfr.build_headline_snapshot(q, None, k_main=5, n_factors=1)[0]
+    assert h["n_days"] == 0
+    for key in ("returns", "ir", "turnover", "fitness", "margin"):
+        assert h[key] is None, f"{key} 应为 None，实得 {h[key]!r}"
+        assert isinstance(h[key], type(None)), "不得是 NaN/Inf"

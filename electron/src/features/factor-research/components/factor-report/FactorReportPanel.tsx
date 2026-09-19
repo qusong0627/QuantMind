@@ -15,10 +15,8 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { AlertCircle, Layers, RefreshCw, Sparkles, Target } from 'lucide-react';
 import { FactorRankList } from './FactorRankList';
 import { FactorClusterModal } from './FactorClusterModal';
-import { HorizonDecayChart } from './HorizonDecayChart';
 import { FactorPortfolioModal } from './FactorPortfolioModal';
-import { FactorDetailCharts } from './FactorDetailCharts';
-import { FactorCorrelationHeatmap } from './FactorCorrelationHeatmap';
+import { FactorDetailTabs } from './FactorDetailTabs';
 import {
   getFactorCorrelation,
   getFactorDatasets,
@@ -30,25 +28,11 @@ import type {
   FactorCorrelation,
   FactorDatasetInfo,
   FactorDetail,
+  FactorDetailParams,
   FactorRelated,
   FactorReportMeta,
   FactorSummary,
 } from '../../types/factorReport';
-
-function MetricTile({ label, value, tone = 'slate', title }: {
-  label: string;
-  value: string;
-  tone?: 'slate' | 'up' | 'down';
-  title?: string;
-}) {
-  const color = tone === 'up' ? 'text-rose-600' : tone === 'down' ? 'text-emerald-600' : 'text-slate-800';
-  return (
-    <div className="bg-white rounded-xl border border-slate-200/80 px-3 py-2 min-w-[86px]" title={title}>
-      <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wide">{label}</div>
-      <div className={`text-sm font-black font-mono leading-tight mt-0.5 ${color}`}>{value}</div>
-    </div>
-  );
-}
 
 export const FactorReportPanel: React.FC = () => {
   const [datasets, setDatasets] = useState<FactorDatasetInfo[]>([]);
@@ -65,6 +49,10 @@ export const FactorReportPanel: React.FC = () => {
   const [corrLoading, setCorrLoading] = useState(false);
   const [clusterOpen, setClusterOpen] = useState(false);
   const [portfolioOpen, setPortfolioOpen] = useState(false);
+  // 分组 / 成本 / 基准 —— 后端已把它们纳入缓存键，改了必须重新请求
+  const [params, setParams] = useState<FactorDetailParams>({
+    longGroup: 3, shortGroup: 9, costBps: 20, bench: '000300.SH',
+  });
 
   // 数据集清单（含快照状态；未生成的数据集置灰）
   useEffect(() => {
@@ -112,16 +100,26 @@ export const FactorReportPanel: React.FC = () => {
   }, [dataset]);
 
   // 选中因子变化 → 明细 + 相关因子 → 相关性矩阵
+  // ⚠️ 明细依赖 params：改分组/成本/基准会改变多空曲线本身，必须重新取数（后端已纳入缓存键）
   useEffect(() => {
     if (!selected || !dataset) return;
     let cancelled = false;
     setDetailLoading(true);
     setDetail(null);
-    getFactorDetail(selected, dataset)
+    getFactorDetail(selected, dataset, params)
       .then((d) => !cancelled && setDetail(d))
       .catch(() => !cancelled && setDetail(null))
       .finally(() => !cancelled && setDetailLoading(false));
 
+    return () => {
+      cancelled = true;
+    };
+  }, [selected, dataset, params]);
+
+  // 相关性与分组/成本/基准无关 → 单独一个 effect，改参数时不重复拉
+  useEffect(() => {
+    if (!selected || !dataset) return;
+    let cancelled = false;
     setCorrLoading(true);
     getFactorRelated(selected, dataset, 7)
       .then(async (r) => {
@@ -227,72 +225,31 @@ export const FactorReportPanel: React.FC = () => {
           </button>
         </div>
 
-        {/* 当前因子 + 指标条 */}
-        {!unavailable && selected && (
-          <div className="flex items-center gap-3 flex-wrap shrink-0">
-            <div className="min-w-[190px]">
-              <div className="flex items-center gap-2">
-                <span className="text-sm font-black text-slate-800">{current?.display_name || selected}</span>
-                {current && (
-                  <span className="rounded-full bg-indigo-50 border border-indigo-100 px-2 py-[1px] text-[10px] font-bold text-indigo-600">
-                    {current.library}
-                  </span>
-                )}
-              </div>
-              <span className="text-[10px] text-slate-400 font-mono">
-                {current?.display_name ? `${selected} · ${current.category_name || ''}` : current?.category_name || ''}
-              </span>
-            </div>
-            <MetricTile
-              label="IC 均值"
-              value={current ? `${current.ic_mean >= 0 ? '+' : ''}${current.ic_mean.toFixed(4)}` : '—'}
-              tone={current && current.ic_mean >= 0 ? 'up' : 'down'}
-              title="横截面秩相关（Spearman）的日均值，|IC|>0.03 通常算有效"
-            />
-            <MetricTile
-              label="ICIR"
-              value={current ? current.icir.toFixed(3) : '—'}
-              tone={current && current.icir >= 0 ? 'up' : 'down'}
-              title="IC 均值 / IC 标准差，衡量稳定性；|ICIR|>0.3 较好"
-            />
-            <MetricTile label="t 值" value={current ? current.t_value.toFixed(1) : '—'} title="ICIR × √样本数；|t|>2 显著" />
-            <MetricTile label="IC 胜率" value={current ? `${(current.win_rate * 100).toFixed(1)}%` : '—'} title="IC>0 的交易日占比" />
-            <MetricTile
-              label="多空价差"
-              value={current ? `${current.ls_mean >= 0 ? '+' : ''}${(current.ls_mean * 100).toFixed(3)}%` : '—'}
-              tone={current && current.ls_mean >= 0 ? 'up' : 'down'}
-              title="Q10 组 − Q1 组的平均前瞻收益（每个调仓周期）"
-            />
-            <MetricTile
-              label="单边换手"
-              value={current ? `${(current.turnover * 100).toFixed(0)}%` : '—'}
-              title="十分位组合每日成员变动比例，直接决定交易成本"
-            />
-            <MetricTile label="单调性" value={monotoneText} title="分位序号与分位收益的秩相关，±1 = 完美单调" />
-            <HorizonDecayChart icByHorizon={current?.ic_by_horizon} />
-          </div>
-        )}
-
         {unavailable ? (
           <div className="flex-1 min-h-0 flex flex-col items-center justify-center gap-2 rounded-2xl border border-dashed border-amber-200 bg-amber-50/50 text-center px-6">
             <AlertCircle className="w-5 h-5 text-amber-500" />
             <span className="text-xs font-bold text-amber-700">因子报告快照不可用</span>
             <span className="text-[11px] text-amber-600/90 leading-5 max-w-xl">{unavailable}</span>
           </div>
+        ) : !selected ? (
+          <div className="flex-1 min-h-0 flex items-center justify-center rounded-2xl border border-dashed border-slate-200 bg-white/60">
+            <span className="text-xs text-slate-400">请选择一个因子查看机构级报告</span>
+          </div>
         ) : (
-          <>
-            <FactorDetailCharts detail={detail} loading={detailLoading} />
-            <div className="h-[240px] shrink-0 flex">
-              <div className="flex-1 min-w-0">
-                <FactorCorrelationHeatmap
-                  correlation={correlation}
-                  related={related}
-                  loading={corrLoading}
-                  onPick={setSelected}
-                />
-              </div>
-            </div>
-          </>
+          <FactorDetailTabs
+            factor={selected}
+            dataset={dataset}
+            summary={current}
+            library={factors}
+            detail={detail}
+            loading={detailLoading}
+            params={params}
+            onParams={setParams}
+            correlation={correlation}
+            related={related}
+            corrLoading={corrLoading}
+            onPick={setSelected}
+          />
         )}
       </main>
 

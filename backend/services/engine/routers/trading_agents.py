@@ -14,6 +14,9 @@ from typing import Optional
 from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
 from pydantic import BaseModel, Field
 
+from backend.shared.report_archive import RESULTS_DIR as _RESULTS_DIR
+from backend.shared.report_archive import resolve_results_dir as _resolve_results_dir
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/trading-agents", tags=["TradingAgents"])
@@ -21,10 +24,6 @@ router = APIRouter(prefix="/api/v1/trading-agents", tags=["TradingAgents"])
 # In-memory tracker registry (keyed by analysis_id)
 _trackers: dict[str, object] = {}
 _threads: dict[str, object] = {}
-
-# Results storage directory（统一报告根 data/reports 下的投研报告子目录）
-_RESULTS_DIR = Path("/data/reports/trading_agents")
-_LEGACY_RESULTS_DIR = Path("/app/db/trading_agents_results")
 
 
 class AnalyzeRequest(BaseModel):
@@ -422,18 +421,9 @@ def _safe_folder_path(path: str) -> bool:
     return all(_safe_filename(part) for part in path.split("/"))
 
 
-def _resolve_results_dir() -> Path:
-    """解析报告目录（宿主机/容器均可）。新目录不存在时回退旧目录，保证历史报告可见。"""
-    env_val = os.getenv("TRADING_AGENTS_RESULTS_DIR", "").strip()
-    if env_val:
-        p = Path(env_val)
-        if p.is_dir():
-            return p
-    if _RESULTS_DIR.is_dir():
-        return _RESULTS_DIR
-    if _LEGACY_RESULTS_DIR.is_dir():
-        return _LEGACY_RESULTS_DIR
-    return _RESULTS_DIR
+# _resolve_results_dir 现由 backend/shared/report_archive.py 提供（顶部已导入）：
+# 解析顺序 env → 新目录 → 旧目录，且**不创建目录**。本模块与三个报告脚本共用同一实现。
+
 
 
 def _parse_report_meta(filename: str) -> dict:
