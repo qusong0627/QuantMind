@@ -25,11 +25,13 @@ from datetime import date, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from backend.shared.benchmark import BENCHMARK_SYMBOL
+
 logger = logging.getLogger(__name__)
 _SH_TZ = ZoneInfo("Asia/Shanghai")
 
 HORIZONS: tuple[int, ...] = (1, 3, 5)
-BENCHMARK = "000300.SH"
+BENCHMARK = BENCHMARK_SYMBOL
 GRACE_DAYS = 10  # 决策日之后超过宽限仍无基准行 → no_data
 BACKFILL_DONE_PREFIX = "trade:advice-backfill:done:"
 

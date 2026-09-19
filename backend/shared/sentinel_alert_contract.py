@@ -15,10 +15,11 @@ import logging
 from collections.abc import Mapping
 from typing import Any
 
+from backend.shared.benchmark import BENCHMARK_SYMBOL
+
 logger = logging.getLogger(__name__)
 
 TABLE = "sentinel_alerts"
-BENCHMARK_SYMBOL = "000300.SH"
 
 _CREATE_SQL = f"""
 CREATE TABLE IF NOT EXISTS {TABLE} (

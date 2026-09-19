@@ -33,10 +33,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from backend.services.engine.factor_report.datasets import DATASETS, dataset_dir, label_dir  # noqa: E402
-from backend.shared.quantdb_paths import resolve_quantdb_subdir  # noqa: E402
+from backend.shared.benchmark import load_benchmark_closes  # noqa: E402
 
-IDX_DIR = resolve_quantdb_subdir("1_kline_data", "index_daily")
-BENCHMARKS = ("000300.SH", "000001.SH")   # 沪深300 优先，回退上证
+# 基准指数口径单源：000300.SH（沪深300）优先、000001.SH（上证）回退。
+# 台账（基准 / 择时 / 市场腿三角色）见 backend/shared/benchmark.py。
 META_COLS = {"symbol", "date", "time", "dt", "open", "high", "low", "close",
              "volume", "amount", "release_id", "published_at"}
 
@@ -58,18 +58,11 @@ def archive_root() -> Path:
 
 
 def load_index() -> tuple[str, pd.Series]:
-    """读基准指数日线（收盘价，按日期升序）。"""
-    files = [str(p) for p in sorted(IDX_DIR.glob("dt=*/data.parquet"))]
-    if not files:
-        raise SystemExit(f"找不到指数数据：{IDX_DIR}")
-    df = pq.read_table(files, columns=["symbol", "time", "close"]).to_pandas()
-    df["time"] = pd.to_datetime(df["time"])
-    for sym in BENCHMARKS:
-        sub = df[df["symbol"] == sym].sort_values("time")
-        if len(sub) > 500:
-            s = sub.set_index("time")["close"].astype(float)
-            return sym, s
-    raise SystemExit("基准指数（000300.SH / 000001.SH）没有足够数据")
+    """读基准指数日线（收盘价，按日期升序）。口径与取数均委托共享单源。"""
+    try:
+        return load_benchmark_closes()
+    except (FileNotFoundError, ValueError) as exc:
+        raise SystemExit(str(exc)) from exc
 
 
 def label_regimes(close: pd.Series) -> pd.DataFrame:

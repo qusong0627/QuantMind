@@ -26,9 +26,12 @@ from typing import Any
 
 import numpy as np
 
+from backend.shared.benchmark import BENCHMARK_SYMBOL
+
 logger = logging.getLogger(__name__)
 
-DEFAULT_BENCHMARK = "000300.SH"
+DEFAULT_BENCHMARK = BENCHMARK_SYMBOL
+# regime/择时角色，与「基准」角色分离（口径台账见 backend/shared/benchmark.py），勿合并
 DEFAULT_REGIME_INDEX = "000300.SH"
 MIN_CURVE_DAYS = 30  # 曲线点 < 此值连回归都做不了，直接跳过（不产垃圾报告）
 

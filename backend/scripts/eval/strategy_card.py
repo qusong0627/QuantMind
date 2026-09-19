@@ -25,6 +25,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from backend.shared.benchmark import BENCHMARK_SYMBOL  # noqa: E402
 from backend.shared.eval_scoring import (  # noqa: E402
     DimensionScore,
     combine_dimension_scores,
@@ -40,7 +41,7 @@ WEIGHTS = {
     "capacity": 10.0,
 }
 TRADING_DAYS = 252
-BENCHMARK = "000300.SH"
+BENCHMARK = BENCHMARK_SYMBOL
 
 
 # ── 纯计算（可单测）────────────────────────────────────────────────

@@ -22,11 +22,12 @@ import numpy as np
 import pandas as pd
 
 from backend.services.engine.factor_research import analysis
+from backend.shared.benchmark import BENCHMARK_NAME, BENCHMARK_SYMBOL
 
 COST_RATE = analysis.COST_RATE
-BENCH_PRIMARY = "000300.SH"
-BENCH_ORDER = ("000300.SH", "000906.SH", "000905.SH")
-BENCH_NAMES = {"000300.SH": "沪深300", "000906.SH": "中证800", "000905.SH": "中证500"}
+BENCH_PRIMARY = BENCHMARK_SYMBOL
+BENCH_ORDER = (BENCHMARK_SYMBOL, "000906.SH", "000905.SH")
+BENCH_NAMES = {BENCHMARK_SYMBOL: BENCHMARK_NAME, "000906.SH": "中证800", "000905.SH": "中证500"}
 MAX_SCAN_N = 100
 
 # 环境标签阈值（demo 口径）

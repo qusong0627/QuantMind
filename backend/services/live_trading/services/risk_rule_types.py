@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from backend.shared.benchmark import BENCHMARK_SYMBOL
+
 GATE_RULE_TYPES = frozenset(
     {
         "max_order_size",
@@ -29,7 +31,7 @@ TRIGGER_RULE_TYPES = frozenset(
 KNOWN_RULE_TYPES = GATE_RULE_TYPES | TRIGGER_RULE_TYPES
 
 TRADING_MODES = frozenset({"SIMULATION", "REAL", "BOTH"})
-DEFAULT_INDEX = "000300.SH"
+DEFAULT_INDEX = BENCHMARK_SYMBOL
 DEFAULT_MARKETS = ("CN",)
 
 

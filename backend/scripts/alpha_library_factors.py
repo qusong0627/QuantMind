@@ -37,6 +37,8 @@ import numpy as np
 import pandas as pd
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:  # 供 backend.shared.* 导入（基准口径）
+    sys.path.insert(0, str(PROJECT_ROOT))
 DATA_ROOT = PROJECT_ROOT / "data" / "quantdb"
 OUT_ROOT = DATA_ROOT / "6_ml_datasets" / "alpha_library"
 PLAN = OUT_ROOT / "PLAN.md"
@@ -47,7 +49,6 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 WAN = 10_000.0  # amount 万元 → 元
 QUANTDB = str(DATA_ROOT)
 KLINE = f"{QUANTDB}/1_kline_data/daily_forward/dt=*/data.parquet"
-INDEX = f"{QUANTDB}/1_kline_data/index_daily/dt=*/data.parquet"
 VALUATION = f"{QUANTDB}/5_technical_derived/valuation/dt=*/data.parquet"
 INSTRUMENT = f"{QUANTDB}/2_base_sector/instrument_detail/*.parquet"
 
@@ -122,19 +123,20 @@ def load_kline(start_year: int | None = None, max_symbols: int | None = None) ->
 
 
 def load_benchmark() -> tuple[pd.Series, pd.Series]:
-    """基准指数 000001.SH（上证综指）open/close，对齐到 kline 日期。"""
-    con = duckdb.connect()
-    q = (
-        f"SELECT time, open, close FROM read_parquet('{INDEX}') "
-        f"WHERE symbol='000001.SH' ORDER BY time"
-    )
-    df = con.execute(q).fetchdf()
-    con.close()
-    df["time"] = pd.to_datetime(df["time"])
-    return (
-        df.set_index("time")["open"].astype(float),
-        df.set_index("time")["close"].astype(float),
-    )
+    """基准指数 open/close，对齐到 kline 日期。
+
+    口径统一到 :mod:`backend.shared.benchmark`：**000300.SH（沪深300）优先，
+    000001.SH（上证综指）回退**，回退时打 warning，不静默。
+
+    变更影响面（2026-09-19 实测）：全库仅 ``gtja_075`` / ``gtja_182`` 两条因子
+    消费基准，且只用「基准涨/跌」布尔（``bench_close > bench_open``），
+    不涉幅度 —— 其余 427 条与 a101/a158 完全不受影响。
+
+    返回的 Series 未与个股日历对齐（``compute_gtja`` 内 ``_bcast`` 会 reindex）。
+    """
+    from backend.shared.benchmark import load_benchmark_ohlc
+
+    return load_benchmark_ohlc()
 
 
 def load_industry_map() -> pd.Series:

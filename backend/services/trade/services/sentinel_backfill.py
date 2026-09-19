@@ -22,12 +22,14 @@ from datetime import date, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from backend.shared.benchmark import BENCHMARK_SYMBOL
+
 logger = logging.getLogger(__name__)
 _SH_TZ = ZoneInfo("Asia/Shanghai")
 
 BACKFILL_DONE_PREFIX = "qm:sentinel:backfill:"
 GRACE_DAYS = 7  # 告警日之后超过宽限仍无行情 → no_data（停牌/退市）
-BENCHMARK = "000300.SH"
+BENCHMARK = BENCHMARK_SYMBOL
 # 指数标的集合（走 qdb_index_daily 且**不做** to_suffix 归一——指数码 000300 会被误判 SZ）
 INDEX_SYMBOLS = {"000300.SH", "000001.SH", "000905.SH", "000016.SH", "000688.SH",
                  "399001.SZ", "399006.SZ", "399300.SZ"}
