@@ -335,23 +335,34 @@ def SCALE(df: pd.DataFrame, k: float = 1.0) -> pd.DataFrame:
 
 
 def IN(df: pd.DataFrame, ind_onehot: np.ndarray) -> pd.DataFrame:
-    """行业中性化: 当日截面内减行业均值（128 行业）。ind_onehot: (n_sym, n_ind) 列归一化。
-    ⚠️ inf 必须先行转为 NaN（否则 inf×0=NaN 会污染整行行业均值，2026-08-29 实测）。"""
+    """行业中性化: 当日截面内减行业均值（128 行业）。
+
+    ``ind_onehot``: ``(n_sym, n_ind)`` 的 **0/1 归属矩阵**（行=个股，行序须与
+    ``df`` 的列一一对应；列=行业）。**不要**按 1/count 归一后再传进来 ——
+    本函数自己按「当日有效成分数」归一（见下），再除一次会把行业均值缩成
+    `均值 / 行业只数`（≈ 原来的 1/43），中性化名存实亡。
+
+    ⚠️ inf 必须先行转为 NaN（否则 inf×0=NaN 会污染整行行业均值，2026-08-29 实测）。
+    ⚠️ 2026-09-19 修：旧实现对**列归一**的 onehot 再除一次 ``cnt_ind``，实际减去的是
+    ``行业均值 / 行业有效成分数`` —— 128 行业下修正量约为应有值的 1/43，等价于没中性化。
+    数值实证（4 票 2 行业，期望 `[-1, 1, -2, 2]`）旧实现给 `[0, 2, 4, 8]`。
+    受影响：``compute_a101`` 里所有走 ``wi()`` 的因子（源码内以
+    ``# ---- 行业中性化族`` 标注，用 ``grep -c 'wi(' `` 可数）。
+    **既有 alpha_library 产物是旧口径**，要重跑该数据集才会更新。
+    """
     df = _as_df(df).replace([np.inf, -np.inf], np.nan)
     vals = df.values
     if np.isnan(vals).all():
         return df.copy()
-    # 每行(每日)行业均值 = vals @ onehot → 每符号回填 = mean_mat @ onehot.T
-    mean_ind = vals @ ind_onehot  # (n_days, n_ind)；NaN 会污染，按列均值替代
-    # NaN 处理：把 NaN 视为 0 参与，行业均值按有效计数归一（onehot 已按 1/count 归一）
+    # NaN 处理：把 NaN 视为 0 参与分子，分母按**当日该行业有效成分数**归一 ——
+    # 这样缺数的票不会把行业均值往下拽，也不会让整行变成 NaN。
     valid = ~np.isnan(vals)
     vals_filled = np.where(valid, vals, 0.0)
-    sum_ind = vals_filled @ ind_onehot  # (n_days, n_ind) 分子
-    cnt_ind = valid.astype(float) @ ind_onehot  # 有效计数加权
+    sum_ind = vals_filled @ ind_onehot            # (n_days, n_ind) 行业求和
+    cnt_ind = valid.astype(float) @ ind_onehot    # (n_days, n_ind) 有效计数
     mean_ind = np.divide(sum_ind, cnt_ind, out=np.zeros_like(sum_ind), where=cnt_ind > 0)
-    sym_mean = mean_ind @ ind_onehot.T  # (n_days, n_sym)
-    out = vals - sym_mean
-    return _wrap(df, out)
+    sym_mean = mean_ind @ ind_onehot.T            # (n_days, n_sym) 回填；非成员为 0
+    return _wrap(df, vals - sym_mean)
 
 
 # ---------------------------------------------------------------------------
@@ -569,7 +580,8 @@ def compute_a101(W: dict[str, pd.DataFrame], ind_map: pd.Series, mv: pd.DataFram
     onehot = np.zeros((len(syms), len(cats)))
     for i, s in enumerate(syms):
         onehot[i, cats.index(codes[s])] = 1.0
-    onehot = onehot / onehot.sum(axis=0, keepdims=True)  # 列归一 → 均值矩阵
+    # ⚠️ 传**0/1 归属矩阵**，不要在这里做列归一：归一由 IN() 内部按「当日有效
+    # 成分数」完成。此处曾多除一次 1/count，两层归一叠加使中性化退化成 ~1/43 的修正。
 
     def wi(x: pd.DataFrame) -> pd.DataFrame:
         return IN(x, onehot)
