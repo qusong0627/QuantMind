@@ -50,15 +50,13 @@ import pyarrow.parquet as pq
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from backend.shared.quantdb_paths import resolve_quantdb_subdir  # noqa: E402
-
 log = logging.getLogger("factor_report")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
-# 数据目录一律经 quantdb_paths 解析（容器 /data/quantdb、便携包 $ROOT/data/quantdb、Windows 盘符都覆盖）
-IC_CSV = resolve_quantdb_subdir("6_ml_datasets", "alpha_library", "ic_evaluation", "ic_results_all.csv")
-
-# 数据集注册表在服务侧（构建脚本与 API 共用同一份口径）
+# 数据集注册表在服务侧（构建脚本与 API 共用同一份口径）。
+# 数据目录不在本脚本里拼路径：DATASETS/dataset_dir 内部一律经 quantdb_paths 解析，
+# 容器 /data/quantdb、便携包 $ROOT/data/quantdb、Windows 盘符都覆盖 —— 绕开它直接
+# 拼字符串，换部署形态就会静默读空目录。
 from backend.services.engine.factor_report.datasets import (  # noqa: E402
     DATASETS,
     dataset_dir,
@@ -92,13 +90,14 @@ def compute_one_date(args: tuple) -> dict | None:
     """算一天：返回该日的秩相关累加块、分位收益、换手、IC 等中间量。
 
     任务参数（全部为可 pickle 的朴素类型，跨进程传递）：
-      dt, horizon, factor_dir, factor_cols, meta_ignore, label_mode, label_ref
+      dt, horizons, primary, factor_dir, factor_cols, meta_ignore, label_mode, label_ref
+    ``primary`` 是**主前瞻期**（分位/换手/序列以它为准），必须 ∈ ``horizons``。
     label_mode:
       "labels_table" —— label_ref 为标签目录，读 dt 分区的 horizon 列
       "close_fwd"    —— label_ref 为**未来第 k 个交易日**的分区日期，
                         用本表 close 算 close_{T+k}/close_T - 1（与训练侧 return_Nd 同口径）
     """
-    dt, horizons, factor_dir, factor_cols, meta_ignore, label_mode, label_ref = args
+    dt, horizons, primary, factor_dir, factor_cols, meta_ignore, label_mode, label_ref = args
     try:
         fac = pq.read_table(f"{factor_dir}/dt={dt}/data.parquet").to_pandas()
     except FileNotFoundError:
@@ -140,7 +139,10 @@ def compute_one_date(args: tuple) -> dict | None:
 
     cols = [c for c in factor_cols if c not in meta_ignore]
     X = merged[cols].to_numpy(dtype=np.float32)
-    horizon = horizons[0]                     # 主前瞻期：分位/换手/序列以它为准
+    # 主前瞻期由任务参数**显式**给出。曾写成 ``horizons[0]``，而 --horizons 默认首项是
+    # fwd_ret_1，于是 meta 记 fwd_ret_5、headline 指标（ic_mean/quantiles/ls_mean…）
+    # 算的却是 fwd_ret_1 —— 静默错期，2026-09-19 修。
+    horizon = primary
     y = y_by_h.get(horizon, np.full(len(merged), np.nan))
     ok_y = ~np.isnan(y)
 
@@ -178,7 +180,10 @@ def compute_one_date(args: tuple) -> dict | None:
         # 混进分位数后 mean 变 NaN（实测 a158_KMID 的 q1）——脏数据不能流进报告与选因子
         q_ret = np.where(np.isfinite(q_ret), q_ret, np.nan)
         q_by_h[h] = q_ret
-        qcnt_by_h[h] = np.isfinite(q_ret).sum(axis=0)
+        # 逐**分位**计有效天数（形状 (NQ, K)）：q_mean 的分母必须是「该分位自己的有效
+        # 天数」。曾按列求和成 (K,)，等于把 10 个分位的计数都累进去，满分位因子的分位
+        # 均值被压成真值的 1/10（2026-09-19 修）。
+        qcnt_by_h[h] = np.isfinite(q_ret).astype(np.float64)
 
         ic = np.full(len(cols), np.nan)
         if okh.sum() >= 30:
@@ -218,7 +223,7 @@ def compute_one_date(args: tuple) -> dict | None:
         "col_sum": col_sum,
         "n_rows": n_rows,
         "q_ret": q_by_h.get(horizon, np.full((N_QUANTILES, len(cols)), np.nan)),
-        "q_cnt": qcnt_by_h.get(horizon, np.zeros(len(cols), dtype=int)),
+        "q_cnt": qcnt_by_h.get(horizon, np.zeros((N_QUANTILES, len(cols)), dtype=np.float64)),
         "ic": ic_by_h.get(horizon, np.full(len(cols), np.nan)),
         "ic_by_h": ic_by_h,
         "q_by_h": q_by_h,
@@ -247,13 +252,11 @@ def merge_partials(partials: Iterable[dict], n_factors: int, horizons: list[str]
     col_sum = np.zeros(n_factors, dtype=np.float64)
     n_rows = 0
     q_sum = np.zeros((N_QUANTILES, n_factors), dtype=np.float64)
-    q_cnt = np.zeros(n_factors, dtype=np.int64)
+    q_cnt = np.zeros((N_QUANTILES, n_factors), dtype=np.float64)
     ic_list: list[np.ndarray] = []
     # 多前瞻期累加器（键 = horizon）
     h_keys: list[str] = []
     ic_lists: dict[str, list[np.ndarray]] = {}
-    q_sums: dict[str, np.ndarray] = {}
-    q_cnts: dict[str, np.ndarray] = {}
     ls_rows: dict[str, list[np.ndarray]] = {}
     turnover_changed = np.zeros(n_factors, dtype=np.float64)
     turnover_valid = np.zeros(n_factors, dtype=np.float64)
@@ -280,15 +283,11 @@ def merge_partials(partials: Iterable[dict], n_factors: int, horizons: list[str]
             if h not in ic_lists:
                 h_keys.append(h)
                 ic_lists[h] = []
-                q_sums[h] = np.zeros((N_QUANTILES, n_factors), dtype=np.float64)
-                q_cnts[h] = np.zeros(n_factors, dtype=np.int64)
                 ls_rows[h] = []
             v = (p.get("ic_by_h") or {}).get(h)
             ic_lists[h].append(v if v is not None else np.full(n_factors, np.nan, dtype=np.float32))
             qh = (p.get("q_by_h") or {}).get(h)
             if qh is not None:
-                q_sums[h] += np.where(np.isfinite(qh), qh, 0.0)
-                q_cnts[h] += p["qcnt_by_h"].get(h, np.zeros(n_factors, dtype=np.int64))
                 with np.errstate(invalid="ignore"):
                     ls_rows[h].append((qh[-1] - qh[0]).astype(np.float32))
             else:
@@ -328,7 +327,7 @@ def merge_partials(partials: Iterable[dict], n_factors: int, horizons: list[str]
     corr = np.clip(np.nan_to_num(corr, nan=0.0), -1.0, 1.0)
     np.fill_diagonal(corr, 1.0)
 
-    q_mean = np.divide(q_sum, np.maximum(q_cnt, 1)[None, :], out=np.zeros_like(q_sum), where=q_cnt[None, :] > 0)
+    q_mean = np.divide(q_sum, np.maximum(q_cnt, 1.0), out=np.zeros_like(q_sum), where=q_cnt > 0)
     ic_stack = np.vstack(ic_list) if ic_list else np.zeros((1, n_factors))
     ic_mean = np.nanmean(ic_stack, axis=0)
     ic_std = np.nanstd(ic_stack, axis=0)
@@ -490,11 +489,14 @@ def main() -> int:
     t0 = time.time()
     horizons = [h.strip() for h in str(args.horizons).split(",") if h.strip()]
     if args.horizon not in horizons:
-        horizons.insert(0, args.horizon)      # 主前瞻期必须在列表里（序列/分位以它为准）
+        horizons.insert(0, args.horizon)      # 主前瞻期必须在列表里，否则算不到它
     log.info(f"前瞻期：主 {args.horizon}，同趟计算 {horizons}")
     if cfg["label_mode"] == "labels_table":
         label_dir = str(dataset_label_dir(args.dataset))
-        tasks = [(dt, horizons, str(factor_dir), factor_cols, meta_cols, "labels_table", label_dir) for dt in dts]
+        tasks = [
+            (dt, horizons, args.horizon, str(factor_dir), factor_cols, meta_cols, "labels_table", label_dir)
+            for dt in dts
+        ]
     else:
         idx = {d: i for i, d in enumerate(all_dts)}
         tasks = []
@@ -505,7 +507,7 @@ def main() -> int:
                 kk = int(h.split("_")[-1])
                 jj = j0 + kk
                 ref[h] = all_dts[jj] if jj < len(all_dts) else None
-            tasks.append((dt, horizons, str(factor_dir), factor_cols, meta_cols, "close_fwd", ref))
+            tasks.append((dt, horizons, args.horizon, str(factor_dir), factor_cols, meta_cols, "close_fwd", ref))
 
     def _ordered_partials() -> Iterator[dict]:
         """按 dt 升序产出逐日中间量，**用完即弃**，不把所有天攒成一个 list。
@@ -578,7 +580,13 @@ def main() -> int:
         return 1
     corr = merged["corr"]
     q_mean = merged["q_mean"]
-    ls = q_mean[-1] - q_mean[0]
+    # 多空价差（headline）取**主前瞻期**的日频口径：与 ls_by_horizon[主] 及 parquet 的
+    # ls_* 列同源，保证三处自洽。曾是 `q_mean[-1] - q_mean[0]`（跨日先平均分位再相减），
+    # 口径不同且继承分位均值的分母 bug，实测与日频口径差 ~32×（2026-09-19 修）。
+    ls = merged["by_horizon"].get(args.horizon, {}).get("ls_mean")
+    if ls is None:
+        log.warning(f"主前瞻期 {args.horizon} 无多空价差口径，回退 q10-q1 平均分位之差")
+        ls = q_mean[-1] - q_mean[0]
     # 单调性：分位序号与平均收益的秩相关
     qi = np.arange(N_QUANTILES, dtype=np.float64)
     mono = np.full(n_factors, np.nan)
@@ -586,18 +594,6 @@ def main() -> int:
         v = q_mean[:, j]
         if np.isfinite(v).all() and np.std(v) > 0:
             mono[j] = np.corrcoef(qi, v)[0, 1]
-
-    ic_csv: dict[str, dict] = {}
-    if IC_CSV.exists():
-        try:
-            import csv as _csv
-
-            with open(IC_CSV, encoding="utf-8") as f:
-                for row in _csv.DictReader(f):
-                    if row.get("horizon") == args.horizon:
-                        ic_csv[row["factor"]] = row
-        except Exception as e:  # noqa: BLE001
-            log.warning(f"读取既有 IC CSV 失败（忽略）：{e}")
 
     # 库归属（共享规则：alpha 前缀 / 固定 L1·L2 / 按 L2 成员关系）
     from backend.services.engine.factor_report.datasets import l2_columns  # noqa: PLC0415
