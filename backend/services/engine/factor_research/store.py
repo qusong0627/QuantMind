@@ -66,6 +66,15 @@ def _file_key(p: Path, prefix: str, extra: str = "") -> str:
     return f"{prefix}:{p}:{mtime}:{extra}"
 
 
+def panel_stamp(dataset: str = "classic") -> str:
+    """面板快照标识（路径 + mtime）。
+
+    给上层当缓存键用：重建脚本一落盘，键就变，上层那份重算几十秒的上下文自动作废 ——
+    不需要再靠 TTL 猜什么时候过期。
+    """
+    return _file_key(artifact_dir(dataset) / "factor_panel.parquet", "obj")
+
+
 def load_json(name: str, dataset: str = "classic"):
     p = artifact_dir(dataset) / name
 

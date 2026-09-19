@@ -58,7 +58,6 @@ class Panel:
         tds = pd.to_datetime(df["trade_date"]).to_numpy()  # datetime64[ns]
         dates = np.unique(tds)
         codes = sorted(str(c) for c in df["factor_code"].unique())
-        di = {int(d): i for i, d in enumerate(dates)}  # int64 ns 键，规避哈希口径差异
         ci = {c: i for i, c in enumerate(codes)}
         k = int(df["rank"].max())
         f, m = len(codes), len(dates)
@@ -67,7 +66,11 @@ class Panel:
         self.raw = np.full((f, m, k), np.nan, dtype=np.float32)
         self._sym_codes = np.full((f, m, k), -1, dtype=np.int32)
         fi = df["factor_code"].astype(str).map(ci).to_numpy(dtype=int)
-        mi = np.array([di[int(x)] for x in tds], dtype=int)
+        # 月份下标：`dates` 就是 `tds` 的取值集合且已排序，searchsorted 与「建字典再逐行查」
+        # 逐元素等价。原写法是 Python 循环 + 字典查找，2754 因子 × 3226 万行实测 24.8s，
+        # 且整个循环持 GIL —— 引擎健康检查正是被这一段饿死、进而被看门狗判「无响应」重启的。
+        # searchsorted 实测 0.45s。
+        mi = np.searchsorted(dates, tds)
         rk = df["rank"].to_numpy(dtype=int) - 1
         self.fwd[fi, mi, rk] = df["fwd_ret"].to_numpy(dtype=np.float32)
         self.score[fi, mi, rk] = df["score"].to_numpy(dtype=np.float32)
@@ -238,14 +241,33 @@ def nscan(
     return rows
 
 
-def ic_stats(ic: pd.DataFrame, code: str, mask_dates: np.ndarray) -> dict:
-    """区间内 RankIC 统计（ic.parquet 长表）。"""
-    sub = ic[(ic["factor_code"] == code)]
-    if sub.empty:
-        return {"ic_mean": None, "ic_std": None, "ic_ir": None, "ic_win_rate": None}
-    s = sub.set_index("trade_date")["ic"].reindex(pd.DatetimeIndex(mask_dates)).dropna()
+_EMPTY_IC_STATS = {
+    "ic_mean": None,
+    "ic_std": None,
+    "ic_ir": None,
+    "ic_win_rate": None,
+}
+
+
+def ic_index(ic: pd.DataFrame) -> dict[str, pd.Series]:
+    """factor_code →（trade_date → RankIC）索引，供批量场景用。
+
+    `ic_stats` 每调一次就 `ic[ic["factor_code"] == code]` 把长表全扫一遍；私人库
+    2746 因子 × 21.2 万行实测 22.2s —— 排行榜 26.7s 里的大头就是它。分组一次约 0.3s。
+    """
+    return {
+        str(code): g.set_index("trade_date")["ic"]
+        for code, g in ic.groupby("factor_code", sort=False)
+    }
+
+
+def ic_stats_from(series: pd.Series | None, mask_dates: np.ndarray) -> dict:
+    """单因子区间 IC 统计；series 取自 `ic_index()`（None = 该因子无 IC）。"""
+    if series is None or series.empty:
+        return dict(_EMPTY_IC_STATS)
+    s = series.reindex(pd.DatetimeIndex(mask_dates)).dropna()
     if s.empty:
-        return {"ic_mean": None, "ic_std": None, "ic_ir": None, "ic_win_rate": None}
+        return dict(_EMPTY_IC_STATS)
     mean, std = float(s.mean()), float(s.std())
     return {
         "ic_mean": round(mean, 4),
@@ -253,6 +275,18 @@ def ic_stats(ic: pd.DataFrame, code: str, mask_dates: np.ndarray) -> dict:
         "ic_ir": round(mean / std, 3) if std > 0 else None,
         "ic_win_rate": round(float((s > 0).mean()), 4),
     }
+
+
+def ic_stats(ic: pd.DataFrame, code: str, mask_dates: np.ndarray) -> dict:
+    """区间内 RankIC 统计（ic.parquet 长表）。
+
+    单因子入口；批量（每因子一次）请先 `ic_index()` 再走 `ic_stats_from()`，
+    否则每个因子都要全表扫一遍。
+    """
+    sub = ic[(ic["factor_code"] == code)]
+    if sub.empty:
+        return dict(_EMPTY_IC_STATS)
+    return ic_stats_from(sub.set_index("trade_date")["ic"], mask_dates)
 
 
 def env_tags(

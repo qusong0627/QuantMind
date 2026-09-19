@@ -18,6 +18,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -26,20 +27,6 @@ import pandas as pd
 
 from backend.services.engine.factor_research import analysis, scorecard, store
 from backend.services.engine.factor_research.catalog import BY_CODE, FACTORS, L1_ORDER
-
-_TTL = 600
-_cache: dict = {}
-
-
-def _cached(key, builder):
-    """进程内 TTL 缓存（快照重建后 10 分钟内自动失效，与 store 层一致）。"""
-    now = time.time()
-    hit = _cache.get(key)
-    if hit and now - hit[0] < _TTL:
-        return hit[1]
-    val = builder()
-    _cache[key] = (now, val)
-    return val
 
 
 def _points(dates, values) -> list[dict]:
@@ -124,49 +111,108 @@ def catalog(dataset: str = "classic") -> dict:
 
 
 # ---------------------------------------------------------------------------
-# 区间公共上下文（排行/单因子/对比共用；带 TTL 缓存）
+# 区间公共上下文（排行/单因子/对比共用）
 # ---------------------------------------------------------------------------
+# 上下文分两级，因为两级的代价差一个数量级：
+# - 轻上下文（面板/掩码/基准/IC/区间元信息）：人人都要，构建 ~10s；
+# - 派生量（全因子 top-30 序列 + 环境/时效标签）：只有排行榜与单因子详情用，
+#   而它是逐因子的 Python 循环，2754 因子上要几十秒 —— 对比/合成/寻优端点本来
+#   一秒能出，不该陪着等。故按需构建。
+#
+# 缓存键里带面板快照 mtime（store.panel_stamp），**不设 TTL**：快照只在重建时变，
+# 而重建一次要付几十秒冷启动，按固定时间过期等于每 10 分钟让第一个请求白卡一次。
+_ctx_cache: dict[tuple, dict] = {}
+_derived_cache: dict[tuple, dict] = {}
+_ctx_lock = threading.Lock()
+_derived_lock = threading.Lock()
+_MAX_CTX = 4  # 面板本体在 store 里另有共享缓存，这里每份只几十 MB，留几份够切数据集
+
+
+def _range_key(start: str | None, end: str | None, dataset: str) -> tuple:
+    return (start or "", end or "", dataset, store.panel_stamp(dataset))
+
+
+def _build_ctx(key: tuple, start: str | None, end: str | None, dataset: str) -> dict:
+    p = store.panel(dataset)
+    if p is None:
+        raise FileNotFoundError(
+            f"factor_panel.parquet 缺失（数据集 {dataset}；请先跑构建或点「快照-一键计算」）"
+        )
+    bench = store.benchmark_table(dataset)
+    ic = store.ic_table(dataset)
+    mask = scorecard.month_mask(p.dates, start, end)
+    benches = scorecard.bench_series(bench, mask, p.dates) if bench is not None else {}
+    rdates = p.dates[mask]
+    bench_ret = None
+    prim = benches.get(scorecard.BENCH_PRIMARY)
+    if prim is not None and len(prim["nav"]) > 1:
+        nav = prim["nav"]
+        bench_ret = nav[1:] / nav[:-1] - 1
+    return {
+        "_key": key,
+        "panel": p,
+        "mask": mask,
+        "rdates": rdates,
+        "benches": benches,
+        "ic": ic,
+        "ic_index": scorecard.ic_index(ic) if ic is not None else {},
+        "bench_ret": bench_ret,
+    }
+
+
 def _range_ctx(start: str | None, end: str | None, dataset: str = "classic") -> dict:
-    key = ("range", start or "", end or "", dataset)
+    """区间轻上下文。冷构建持 _ctx_lock 单飞 —— 并发请求各建一份会把内存与 GIL
+    一起打满：2026-09-19 实测因子研究页并发 6 个请求把引擎顶到健康检查 3/3 失败、
+    被看门狗当作「无响应」重启。"""
+    key = _range_key(start, end, dataset)
+    hit = _ctx_cache.get(key)
+    if hit is not None:
+        return hit
+    with _ctx_lock:
+        hit = _ctx_cache.get(key)  # 等锁期间可能已被别的请求建好
+        if hit is not None:
+            return hit
+        ctx = _build_ctx(key, start, end, dataset)
+        while len(_ctx_cache) >= _MAX_CTX:
+            _ctx_cache.pop(next(iter(_ctx_cache)))  # 插入序 → 最旧的一份
+        _ctx_cache[key] = ctx
+        return ctx
 
-    def build() -> dict:
-        p = store.panel(dataset)
-        if p is None:
-            raise FileNotFoundError(
-                f"factor_panel.parquet 缺失（数据集 {dataset}；请先跑构建或点「快照-一键计算」）"
-            )
-        bench = store.benchmark_table(dataset)
-        ic = store.ic_table(dataset)
-        mask = scorecard.month_mask(p.dates, start, end)
-        benches = (
-            scorecard.bench_series(bench, mask, p.dates) if bench is not None else {}
-        )
-        series30 = {c: scorecard.topn_series(p, p.index(c), 30, mask) for c in p.codes}
-        rdates = p.dates[mask]
-        bench_ret = None
-        prim = benches.get(scorecard.BENCH_PRIMARY)
-        if prim is not None and len(prim["nav"]) > 1:
-            nav = prim["nav"]
-            bench_ret = nav[1:] / nav[:-1] - 1
-        env = (
-            scorecard.env_tags({c: s["ret"] for c, s in series30.items()}, bench_ret)
-            if bench_ret is not None and len(bench_ret) >= 6
-            else {}
-        )
-        ttag = scorecard.time_tags(ic, p.codes, rdates) if ic is not None else {}
-        return {
-            "panel": p,
-            "mask": mask,
-            "rdates": rdates,
-            "benches": benches,
-            "ic": ic,
-            "series30": series30,
-            "bench_ret": bench_ret,
-            "env_tags": env,
-            "time_tags": ttag,
-        }
 
-    return _cached(key, build)
+def _build_derived(ctx: dict) -> dict:
+    """派生量：全因子 top-30 序列 + 环境标签 + 时效标签（逐因子循环，最慢的一段）。"""
+    p, mask = ctx["panel"], ctx["mask"]
+    series30 = {c: scorecard.topn_series(p, p.index(c), 30, mask) for c in p.codes}
+    bench_ret = ctx["bench_ret"]
+    env = (
+        scorecard.env_tags({c: s["ret"] for c, s in series30.items()}, bench_ret)
+        if bench_ret is not None and len(bench_ret) >= 6
+        else {}
+    )
+    ic = ctx["ic"]
+    ttag = scorecard.time_tags(ic, p.codes, ctx["rdates"]) if ic is not None else {}
+    return {"series30": series30, "env_tags": env, "time_tags": ttag}
+
+
+def _range_ctx_full(
+    start: str | None, end: str | None, dataset: str = "classic"
+) -> dict:
+    """轻上下文 + 派生量（排行榜 / 单因子详情专用）。
+
+    派生量单独一把锁：它与轻上下文互不阻塞 —— 否则一次排行榜冷启动会把
+    对比/合成这类秒级端点也堵上几十秒。
+    """
+    ctx = _range_ctx(start, end, dataset)
+    key = ctx["_key"]
+    d = _derived_cache.get(key)
+    if d is None:
+        with _derived_lock:
+            d = _derived_cache.get(key)
+            if d is None:
+                d = _build_derived(ctx)
+                _derived_cache.clear()  # 只留当前快照的一份
+                _derived_cache[key] = d
+    return {**ctx, **d}  # ctx 里的 "_key" 一并带上，调用方不关心
 
 
 def _range_meta(ctx: dict) -> dict:
@@ -181,8 +227,27 @@ def _range_meta(ctx: dict) -> dict:
 # ---------------------------------------------------------------------------
 # 排行榜
 # ---------------------------------------------------------------------------
+def _snapshot_maps(snap: pd.DataFrame | None) -> tuple[dict, dict]:
+    """个股快照 → (symbol → 总市值亿, symbol → 行业)。
+
+    排行榜要给 2754 个因子各查 30 只持仓（82,620 次）；原先是把 DataFrame 传进去逐行
+    `snap_idx.loc[sym]`，每次都要现造一个 Series，实测 7.7s —— 占排行榜剩下的全部时间。
+    预先转成 dict 后是纯哈希查表。
+    """
+    if snap is None or "symbol" not in snap.columns:
+        return {}, {}
+    syms = snap["symbol"]
+    mv = (
+        dict(zip(syms, snap["total_mv_yi"], strict=True))
+        if "total_mv_yi" in snap
+        else {}
+    )
+    ind = dict(zip(syms, snap["industry"], strict=True)) if "industry" in snap else {}
+    return mv, ind
+
+
 def _holdings_profile(
-    p, fi: int, n: int, snap_idx: pd.DataFrame | None
+    p, fi: int, n: int, snap_mv: dict, snap_ind: dict
 ) -> tuple[float | None, str | None, list[dict]]:
     """最新截面 Top-N 持仓画像：(中位市值亿, 市值风格, 前三行业)。
 
@@ -192,13 +257,10 @@ def _holdings_profile(
     mvs: list[float] = []
     inds: dict[str, int] = {}
     for sym in p.sym_at(fi, last, n):
-        if snap_idx is None or sym not in snap_idx.index:
-            continue
-        row = snap_idx.loc[sym]
-        mv = row.get("total_mv_yi")
+        mv = snap_mv.get(sym)
         if mv is not None and np.isfinite(mv):
             mvs.append(float(mv))
-        ind = row.get("industry")
+        ind = snap_ind.get(sym)
         if isinstance(ind, str) and ind:
             inds[ind] = inds.get(ind, 0) + 1
     med = round(float(np.median(mvs)), 1) if mvs else None
@@ -227,7 +289,7 @@ def leaderboard(
     dataset: str = "classic",
 ) -> dict:
     """排行榜。n=业绩 KPI 的持仓数（默认 30；标签恒按 top-30 基准自动判定）。"""
-    ctx = _range_ctx(start, end, dataset)
+    ctx = _range_ctx_full(start, end, dataset)  # 用到 series30/env_tags/time_tags
     p, ic = ctx["panel"], ctx["ic"]
     fmeta = _meta_map(dataset)
     rdates = ctx["rdates"]
@@ -237,17 +299,19 @@ def leaderboard(
         if n == 30
         else {c: scorecard.topn_series(p, p.index(c), n, ctx["mask"]) for c in p.codes}
     )
-    snap = store.stock_snapshot()
-    snap_idx = snap.set_index("symbol") if snap is not None else None
+    snap_mv, snap_ind = _snapshot_maps(store.stock_snapshot())
     rows = []
+    ic_index = ctx["ic_index"]  # 全表分好组再逐因子取，别在循环里全表扫（22s → 秒级）
     for code in p.codes:
         meta = fmeta.get(code, {})
         s = series[code]
         kpi = scorecard.gate_kpi(dict(s["kpi"]))
         if ic is not None:
-            kpi.update(scorecard.ic_stats(ic, code, rdates))
+            kpi.update(scorecard.ic_stats_from(ic_index.get(code), rdates))
         ex = scorecard.excess_vs(ctx["benches"], kpi)
-        med_mv, mv_style, top_ind = _holdings_profile(p, p.index(code), n, snap_idx)
+        med_mv, mv_style, top_ind = _holdings_profile(
+            p, p.index(code), n, snap_mv, snap_ind
+        )
         rows.append(
             {
                 "code": code,
@@ -298,7 +362,7 @@ def factor_detail(
     meta = _meta_map(dataset).get(code)
     if meta is None:
         return None
-    ctx = _range_ctx(start, end, dataset)
+    ctx = _range_ctx_full(start, end, dataset)  # 用到 env_tags/time_tags
     p, ic = ctx["panel"], ctx["ic"]
     if code not in p.ci:
         return None
@@ -338,7 +402,7 @@ def factor_detail(
         sub = ic[ic["factor_code"] == code].set_index("trade_date")["ic"]
         sub = sub.reindex(pd.DatetimeIndex(ctx["rdates"])).dropna()
         ic_points = _points(sub.index, sub.to_numpy(dtype=float))
-        ic_kpi = scorecard.ic_stats(ic, code, ctx["rdates"])
+        ic_kpi = scorecard.ic_stats_from(ctx["ic_index"].get(code), ctx["rdates"])
 
     # 最新月末截面的 Top-N 个股表（始终为全样本最新截面）
     last = len(p.dates) - 1
@@ -467,7 +531,7 @@ def compare(
                 "n": n,
                 "kpi": {
                     **s["kpi"],
-                    **scorecard.ic_stats(ctx["ic"], code, ctx["rdates"]),
+                    **scorecard.ic_stats_from(ctx["ic_index"].get(code), ctx["rdates"]),
                 }
                 if ctx["ic"] is not None
                 else s["kpi"],
