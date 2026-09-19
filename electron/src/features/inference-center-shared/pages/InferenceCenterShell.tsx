@@ -1,16 +1,19 @@
 /**
  * 模型推理中心（三市场共用）。
  *
- * 版面为「主从联动·同屏双栏」：
- *   左栏 = 市场截面推理工作台（预检 → 执行 → 排名/历史），
- *   右栏 = 个股预测推理（K 线扇形 + 指标 + 归因 + 共识）。
- * 两者不是两个 Tab，而是一条链路：点左栏排名榜任意一行，右栏直接出该股的个股预测。
+ * 版面为「顶栏状态带 + 三工作区」：
+ *   顶栏   = 页面身份 + 工作区切换 + 截面模型选型
+ *   状态带 = 市场 · 数据基准日与陈旧度 · 预测交易日 · 模型/榜行数 · 预检结论
+ *   工作区 = 单票研判（主从双栏）/ 截面选股（全宽榜）/ 模型治理（资产体检）
+ *
+ * 三个工作区共享同一份 hook 状态（模型选型、基准日、已选标的、预检结论），
+ * 切换不丢上下文：在截面榜点一行 → 切到单票研判并直接出该股预测。
  *
  * 窄屏（<1280，主要出现在 Web 而非 Electron：Electron 窗口 minWidth 1440）
- * 退化为「右栏变抽屉」：点排名后抽屉滑出承载同一份结果。
+ * 只有「单票研判」需要退化：右侧工作台改由抽屉承载；另两个工作区本就是单列。
  */
 
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Select, Tag, Drawer, Tooltip, Typography } from 'antd';
 import { clsx } from 'clsx';
 import { Cpu, Database, Star, Layers, TrendingUp } from 'lucide-react';
@@ -20,14 +23,18 @@ import { useCrossSectionInference } from '../hooks/useCrossSectionInference';
 import { useIndividualPrediction } from '../hooks/useIndividualPrediction';
 import { CrossSectionRail } from '../components/CrossSectionRail';
 import { IndividualWorkbench } from '../components/IndividualWorkbench';
+import { CrossSectionTable } from '../components/CrossSectionTable';
+import { MarketStatusBar } from '../components/MarketStatusBar';
+import { ModelGovernancePanel } from '../components/ModelGovernancePanel';
+import { WorkspaceTabs, type WorkspaceKey } from '../components/WorkspaceTabs';
 import { StockPoolPickerModal } from '../../../components/backtest/StockPoolPickerModal';
 import type { StockPoolOption } from '../../../services/stockPoolOptionService';
-import type { InferenceRankingItem } from '../../../services/modelTrainingService';
+import type { InferenceRankingItem, UserModelRecord } from '../../../services/modelTrainingService';
 import { extractModelType, modelDisplayName } from '../../../pages/modelRegistryUtils';
 
 const { Text } = Typography;
 
-/** 低于此宽度不再并排，右栏改抽屉（Electron 窗口 minWidth 1440，正常不会触发） */
+/** 低于此宽度不再并排，右侧工作台改抽屉（Electron 窗口 minWidth 1440，正常不会触发） */
 const NARROW_BREAKPOINT = 1280;
 
 /** 视口宽度是否小于断点（监听 resize，SSR 缺失时按宽屏处理） */
@@ -55,6 +62,7 @@ export const InferenceCenterShell: React.FC = () => {
   const ip = useIndividualPrediction(adapter);
 
   const isNarrow = useIsNarrow(NARROW_BREAKPOINT);
+  const [workspace, setWorkspace] = useState<WorkspaceKey>('single');
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [poolPickerOpen, setPoolPickerOpen] = useState(false);
 
@@ -65,7 +73,7 @@ export const InferenceCenterShell: React.FC = () => {
     });
   }, [adapter]);
 
-  // ── 主从联动：排名榜 → 个股预测 ────────────────────────────
+  // ── 主从联动：排名榜 / 治理表 → 个股研判 ────────────────────
   const { predictFor } = ip;
   const { selectedModel: crossSelectedModel } = cs;
   const availableSingleModels = ip.models;
@@ -81,10 +89,29 @@ export const InferenceCenterShell: React.FC = () => {
           ? crossModelId
           : undefined;
       predictFor(item.code, { modelId: reusable });
+      setWorkspace('single');
       if (isNarrow) setDrawerOpen(true);
     },
     [predictFor, crossModelId, availableSingleModels, isNarrow],
   );
+
+  /** 治理表点行 → 切到单票研判；模型在该市场个股端点可用时预选，否则交给默认模型 */
+  const handleInspectModel = useCallback(
+    (model: UserModelRecord) => {
+      const usable = availableSingleModels.some((m) => m.modelId === model.model_id);
+      if (usable) ip.setModelId(model.model_id);
+      setWorkspace('single');
+    },
+    [availableSingleModels, ip],
+  );
+
+  // ── 顶栏状态带数据 ──────────────────────────────────────────
+  const precheckFailDetail = useMemo(() => {
+    const failed = cs.precheck?.items?.find((i) => !i.passed && i.severity !== 'soft');
+    return failed ? `${failed.label}：${failed.detail}` : null;
+  }, [cs.precheck]);
+
+  const rankingCount = cs.ranking?.rankings?.length ?? 0;
 
   const workbench = (
     <IndividualWorkbench
@@ -96,60 +123,112 @@ export const InferenceCenterShell: React.FC = () => {
     />
   );
 
+  const crossSectionRail = cs.selectedModel ? (
+    <CrossSectionRail
+      model={cs.selectedModel}
+      cs={cs}
+      activeCode={ip.symbol}
+      onSelectRanking={handleSelectRanking}
+      onDeleteHistory={cs.deleteHistory}
+      poolSlot={
+        market === 'CN' ? (
+          <div className="flex items-center gap-1.5">
+            <button
+              type="button"
+              onClick={() => {
+                if (!cs.pool) setPoolPickerOpen(true);
+                else cs.setPool(null);
+              }}
+              title={cs.pool ? `股票池: ${cs.pool.name}（点击恢复全市场）` : '全市场（点击选择股票池）'}
+              className={clsx(
+                'border rounded-lg px-2 py-1 flex items-center gap-1 whitespace-nowrap transition-colors',
+                cs.pool ? 'bg-blue-50 border-blue-300' : 'bg-white border-slate-200 hover:border-blue-200',
+              )}
+            >
+              <Layers size={11} className={cs.pool ? 'text-blue-600' : 'text-slate-400'} />
+              <span className="text-[11px] font-bold text-slate-700">股票池</span>
+              <span className={clsx('text-[11px] font-black max-w-[110px] truncate', cs.pool ? 'text-blue-700' : 'text-slate-500')}>
+                {cs.pool ? cs.pool.name : '全市场'}
+              </span>
+            </button>
+            {cs.pool && (
+              <button
+                type="button"
+                onClick={() => setPoolPickerOpen(true)}
+                title="更换股票池"
+                className="border border-blue-200 bg-white rounded-lg px-2 py-1 whitespace-nowrap text-[11px] font-bold text-blue-600 hover:bg-blue-50 transition-colors"
+              >
+                更换
+              </button>
+            )}
+          </div>
+        ) : undefined
+      }
+    />
+  ) : (
+    <div className="h-full flex items-center justify-center bg-white border border-slate-200 rounded-xl">
+      <Text className="text-xs text-slate-500">当前市场无可用模型</Text>
+    </div>
+  );
+
   return (
     <div
       className="w-full h-full bg-[#f8fafc] p-4 flex flex-col overflow-hidden box-border select-none"
       style={{ fontFamily: "'Microsoft YaHei', '微软雅黑', 'PingFang SC', 'Hiragino Sans GB', sans-serif" }}
     >
-      {/* ── 顶栏：页面身份 + 截面推理模型选型（压到一条，纵向空间让给数据区）── */}
-      <div className="flex items-center justify-between gap-4 bg-white border border-slate-200 rounded-xl px-4 h-12 mb-3 shrink-0">
-        <div className="flex items-center gap-2.5 shrink-0">
-          <div className="w-7 h-7 rounded-lg bg-blue-600 flex items-center justify-center text-white">
+      {/* ── 顶栏：页面身份 + 工作区切换 + 截面模型选型 ── */}
+      <div className="flex items-center justify-between gap-4 bg-white border border-slate-200 rounded-xl px-4 h-12 mb-2 shrink-0">
+        <div className="flex items-center gap-2.5 min-w-0">
+          <div className="w-7 h-7 rounded-lg bg-blue-600 flex items-center justify-center text-white shrink-0">
             <Cpu className="w-4 h-4" />
           </div>
           <h1 className="text-sm font-black text-slate-800 m-0 tracking-tight whitespace-nowrap">模型推理中心</h1>
-          <Tag color="blue" className="rounded text-[11px] font-bold border-0 px-1.5 py-0 m-0">
+          <Tag color="blue" className="rounded text-[11px] font-bold border-0 px-1.5 py-0 m-0 shrink-0">
             {marketLabel}
           </Tag>
-          <Tooltip title="左侧跑全市场截面打分 · 点排名即出右侧个股预测与因子归因">
-            <span className="text-[11px] text-slate-400 whitespace-nowrap cursor-help hidden xl:inline">
-              截面打分 · 点排名出个股预测
-            </span>
-          </Tooltip>
+          <WorkspaceTabs
+            active={workspace}
+            onChange={setWorkspace}
+            badges={{
+              cross: rankingCount > 0 ? String(rankingCount) : undefined,
+              governance: cs.registeredModels.length > 0 ? String(cs.registeredModels.length) : undefined,
+            }}
+          />
         </div>
 
-        <div className="flex items-center gap-2 min-w-0">
-          <span className="text-[11px] font-bold text-slate-500 flex items-center gap-1.5 whitespace-nowrap">
-            <Database size={13} className="text-slate-400" />
-            截面模型
-          </span>
-          <Select
-            value={cs.selectedModelId}
-            onChange={cs.setSelectedModelId}
-            loading={cs.modelsLoading}
-            size="small"
-            showSearch
-            // 可选模型常有几十个（CN 当前 34+），必须能按名称搜；
-            // label 是 ReactNode 不能直接参与过滤，回到注册表按展示名匹配。
-            filterOption={(input, option) => {
-              const hit = cs.registeredModels.find((m) => m.model_id === option?.value);
-              return Boolean(hit) && modelDisplayName(hit!).toLowerCase().includes(input.trim().toLowerCase());
-            }}
-            className="!w-64 [&_.ant-select-selection-item]:text-xs [&_.ant-select-selection-item]:font-bold [&_.ant-select-selection-item]:text-slate-800"
-            options={cs.registeredModels.map((m) => ({
-              value: m.model_id,
-              label: (
-                <div className="flex items-center justify-between text-xs">
-                  <span className="font-semibold truncate">{modelDisplayName(m)}</span>
-                  {m.is_default && <Tag color="gold" className="!mr-0 text-[10px] leading-tight">默认</Tag>}
-                </div>
-              ),
-            }))}
-          />
-          {crossSelectedModel && (
-            <div className="flex items-center gap-2 shrink-0 pl-2 border-l border-slate-200">
+        {/* 截面模型选型只对「单票研判 / 截面选股」有意义：两个工作区共用这一份上下文 */}
+        {cs.selectedModel && workspace !== 'governance' && (
+          <div className="flex items-center gap-2 min-w-0">
+            <span className="text-[11px] font-bold text-slate-500 flex items-center gap-1.5 whitespace-nowrap">
+              <Database size={13} className="text-slate-400" />
+              截面模型
+            </span>
+            <Select
+              value={cs.selectedModelId}
+              onChange={cs.setSelectedModelId}
+              loading={cs.modelsLoading}
+              size="small"
+              showSearch
+              // 可选模型常有几十个（CN 当前 34+），必须能按名称搜；
+              // label 是 ReactNode 不能直接参与过滤，回到注册表按展示名匹配。
+              filterOption={(input, option) => {
+                const hit = cs.registeredModels.find((m) => m.model_id === option?.value);
+                return Boolean(hit) && modelDisplayName(hit!).toLowerCase().includes(input.trim().toLowerCase());
+              }}
+              className="!w-64 [&_.ant-select-selection-item]:text-xs [&_.ant-select-selection-item]:font-bold [&_.ant-select-selection-item]:text-slate-800"
+              options={cs.registeredModels.map((m) => ({
+                value: m.model_id,
+                label: (
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="font-semibold truncate">{modelDisplayName(m)}</span>
+                    {m.is_default && <Tag color="gold" className="!mr-0 text-[10px] leading-tight">默认</Tag>}
+                  </div>
+                ),
+              }))}
+            />
+            <div className="hidden 2xl:flex items-center gap-2 shrink-0 pl-2 border-l border-slate-200">
               <span className="text-[11px] text-slate-500 whitespace-nowrap">
-                架构 <strong className="font-mono text-slate-800">{extractModelType(crossSelectedModel)}</strong>
+                架构 <strong className="font-mono text-slate-800">{extractModelType(crossSelectedModel!)}</strong>
               </span>
               <span className="text-[11px] text-slate-500 whitespace-nowrap">
                 目标 <strong className="font-mono text-blue-700">T+{cs.horizonDays}</strong>
@@ -157,84 +236,84 @@ export const InferenceCenterShell: React.FC = () => {
               <span
                 className={clsx(
                   'text-[10px] font-bold px-1.5 py-0.5 rounded whitespace-nowrap',
-                  crossSelectedModel.is_default
+                  crossSelectedModel!.is_default
                     ? 'bg-amber-50 border border-amber-200 text-amber-600'
                     : 'bg-slate-50 border border-slate-200 text-slate-500',
                 )}
               >
-                {crossSelectedModel.is_default ? (
+                {crossSelectedModel!.is_default ? (
                   <span className="flex items-center gap-1"><Star size={10} fill="currentColor" /> 默认生效</span>
                 ) : '非默认模型'}
               </span>
             </div>
-          )}
-        </div>
-      </div>
-
-      {/* ── 主体：左栏截面 / 右栏个股 ─────────────────────────── */}
-      <div className="flex-1 min-h-0 flex gap-3">
-        <div className="w-[520px] shrink-0 min-h-0">
-          {cs.selectedModel ? (
-            <CrossSectionRail
-              model={cs.selectedModel}
-              cs={cs}
-              activeCode={ip.symbol}
-              onSelectRanking={handleSelectRanking}
-              onDeleteHistory={cs.deleteHistory}
-              poolSlot={
-                market === 'CN' ? (
-                  <div className="flex items-center gap-1.5">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        if (!cs.pool) setPoolPickerOpen(true);
-                        else cs.setPool(null);
-                      }}
-                      title={cs.pool ? `股票池: ${cs.pool.name}（点击恢复全市场）` : '全市场（点击选择股票池）'}
-                      className={clsx(
-                        'border rounded-lg px-2 py-1 flex items-center gap-1 whitespace-nowrap transition-colors',
-                        cs.pool ? 'bg-blue-50 border-blue-300' : 'bg-white border-slate-200 hover:border-blue-200',
-                      )}
-                    >
-                      <Layers size={11} className={cs.pool ? 'text-blue-600' : 'text-slate-400'} />
-                      <span className="text-[11px] font-bold text-slate-700">股票池</span>
-                      <span className={clsx('text-[11px] font-black max-w-[110px] truncate', cs.pool ? 'text-blue-700' : 'text-slate-500')}>
-                        {cs.pool ? cs.pool.name : '全市场'}
-                      </span>
-                    </button>
-                    {cs.pool && (
-                      <button
-                        type="button"
-                        onClick={() => setPoolPickerOpen(true)}
-                        title="更换股票池"
-                        className="border border-blue-200 bg-white rounded-lg px-2 py-1 whitespace-nowrap text-[11px] font-bold text-blue-600 hover:bg-blue-50 transition-colors"
-                      >
-                        更换
-                      </button>
-                    )}
-                  </div>
-                ) : undefined
-              }
-            />
-          ) : (
-            <div className="h-full flex items-center justify-center bg-white border border-slate-200 rounded-xl">
-              <Text className="text-xs text-slate-500">当前市场无可用模型</Text>
-            </div>
-          )}
-        </div>
-
-        {isNarrow ? (
-          <div className="flex-1 min-w-0 flex flex-col items-center justify-center gap-3 bg-white border border-dashed border-slate-200 rounded-xl text-slate-500">
-            <TrendingUp size={26} className="opacity-30" />
-            <span className="text-xs font-semibold">点左侧排名任意一行，个股预测从右侧滑出</span>
           </div>
-        ) : (
-          workbench
+        )}
+
+        {workspace === 'governance' && (
+          <Tooltip title="盘点该市场已注册模型的周期口径、区间能力、归因可用性与产物健康度">
+            <span className="text-[11px] text-slate-400 whitespace-nowrap cursor-help hidden xl:inline">
+              模型资产盘点 · 不依赖截面选型
+            </span>
+          </Tooltip>
         )}
       </div>
 
-      {/* 窄屏：右栏以抽屉承载同一份结果（hook 状态在 Shell，关掉再开结果不丢） */}
-      {isNarrow && (
+      {/* ── 状态带：任何工作区都可见的市场/数据/模型上下文 ── */}
+      <div className="shrink-0 mb-3">
+        <MarketStatusBar
+          marketLabel={marketLabel}
+          calendar={calendar}
+          dataTradeDate={cs.precheck?.data_trade_date ?? null}
+          predictionTradeDate={cs.precheck?.prediction_trade_date ?? null}
+          precheckPassed={cs.precheck ? cs.precheck.passed : null}
+          precheckError={precheckFailDetail}
+          modelCount={cs.registeredModels.length}
+          rankingCount={rankingCount}
+          rankingFallbackFrom={cs.rankingFallbackFrom}
+        />
+      </div>
+
+      {/* ── 工作区主体 ─────────────────────────────────────── */}
+      {workspace === 'single' && (
+        <div className="flex-1 min-h-0 flex gap-3">
+          <div className="w-[520px] shrink-0 min-h-0">{crossSectionRail}</div>
+
+          {isNarrow ? (
+            <div className="flex-1 min-w-0 flex flex-col items-center justify-center gap-3 bg-white border border-dashed border-slate-200 rounded-xl text-slate-500">
+              <TrendingUp size={26} className="opacity-30" />
+              <span className="text-xs font-semibold">点左侧排名任意一行，个股预测从右侧滑出</span>
+            </div>
+          ) : (
+            workbench
+          )}
+        </div>
+      )}
+
+      {workspace === 'cross' && (
+        <div className="flex-1 min-h-0 flex flex-col">
+          <CrossSectionTable
+            ranking={cs.ranking}
+            loading={cs.rankingLoading}
+            fallbackFrom={cs.rankingFallbackFrom}
+            onSelect={handleSelectRanking}
+            activeCode={ip.symbol}
+          />
+        </div>
+      )}
+
+      {workspace === 'governance' && (
+        <div className="flex-1 min-h-0 flex flex-col">
+          <ModelGovernancePanel
+            models={cs.registeredModels}
+            loading={cs.modelsLoading}
+            marketLabel={marketLabel}
+            onInspect={handleInspectModel}
+          />
+        </div>
+      )}
+
+      {/* 窄屏：单票研判右侧工作台以抽屉承载同一份结果（hook 状态在 Shell，关掉再开结果不丢） */}
+      {isNarrow && workspace === 'single' && (
         <Drawer
           placement="right"
           width="92%"

@@ -9,7 +9,7 @@ import { InferenceCenterProvider, type InferenceCenterAdapter } from '../feature
 import { InferenceCenterShell } from '../features/inference-center-shared/pages/InferenceCenterShell';
 import { inferenceCenterService } from '../services/inferenceCenterService';
 import { hkStockListService } from '../services/hkStockListService';
-import { normalizeStockCode } from '../utils/portfolioUtils';
+import { normalizeHkCode } from '../utils/marketSymbol';
 
 const HK_ADAPTER: InferenceCenterAdapter = {
   market: 'HK',
@@ -25,13 +25,15 @@ const HK_ADAPTER: InferenceCenterAdapter = {
     return hkStockListService.search(kw, 8).map((s) => ({ symbol: s.symbol, name: s.name }));
   },
   suggestionLabel: (s) => s.symbol,
-  toSymbol: (s) => normalizeStockCode(s.symbol),
-  normalize: (raw) => normalizeStockCode(raw),
+  // 港股规范形态是 4 位 + .HK（0700.HK）。此处**不能**用 A 股口径的
+  // normalizeStockCode：排名榜给的 4 位裸码（2057）会被原样透传，而手输 6 位
+  // （000700）会被补成 SZ000700 —— 跨市场串号查出一只深市股票。
+  toSymbol: (s) => normalizeHkCode(s.symbol),
+  normalize: (raw) => normalizeHkCode(raw),
 
   fetchKline: (symbol, days, endDate, startDate) =>
     inferenceCenterService.getStockKline(symbol, days, endDate, startDate),
-  // 港股代码本身就是后缀式（0700.HK），无需转换
-  toSuffixSymbol: (symbol) => normalizeStockCode(symbol),
+  toSuffixSymbol: (symbol) => normalizeHkCode(symbol),
 };
 
 export const InferenceCenterHkPage = () => (

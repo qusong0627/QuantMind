@@ -53,15 +53,29 @@ _describe_cache: dict[str, tuple[float, Any]] = {}
 _describe_lock = threading.Lock()
 
 
+def _describe_cache_key(reader, source: str) -> str:
+    """缓存键 = 数据目录 + 因子源。
+
+    只按 source 做键会让三市场互相污染：api 是单进程服务 CN/HK/US，
+    CN 预检写入 ``l1_factors`` 后，HK/US 在 TTL 内直接读到 CN 的 schema_hash
+    与日期范围 —— 港美股硬门禁报「QuantDB schema hash differs from model
+    metadata」，前端「立即执行」按钮置灰，且 300 秒内不可恢复。
+    """
+    data_dir = str(getattr(reader, "data_dir", "") or "").rstrip("/")
+    market = str(getattr(reader, "market", "") or "")
+    return f"{data_dir}::{market}::{source}"
+
+
 def _cached_describe(reader, source: str) -> Any:
     now = time.monotonic()
+    key = _describe_cache_key(reader, source)
     with _describe_lock:
-        hit = _describe_cache.get(source)
+        hit = _describe_cache.get(key)
         if hit and now - hit[0] < _DESCRIBE_TTL:
             return hit[1]
     status = reader.describe(source)
     with _describe_lock:
-        _describe_cache[source] = (time.monotonic(), status)
+        _describe_cache[key] = (time.monotonic(), status)
     return status
 from sqlalchemy.orm import sessionmaker
 
@@ -93,6 +107,21 @@ def _resolve_quantdb_data_dir() -> str:
         return str(_resolve_data_dir())
     except Exception:  # noqa: BLE001
         return "/data/quantdb"
+
+
+def _resolve_model_market(meta: dict) -> str:
+    """从模型 metadata 解析所属市场（默认 CN），与 ``_resolve_market_factor_data_dir`` 同源。
+
+    QuantDBFactorReader 的 market 决定 ``validate_source`` 的校验口径
+    （CUSTOM 只扫因子列、不强制 OHLCV），解析目录与校验口径必须取同一个市场，
+    否则自定义数据集训练的模型会被按常规市场口径误判为不可用。
+    """
+    try:
+        from backend.services.engine.data_platform.quantdb_factor_reader import normalize_market
+
+        return normalize_market(str((meta.get("context") or {}).get("market") or "CN"))
+    except Exception:  # noqa: BLE001
+        return "CN"
 
 
 def _resolve_market_factor_data_dir(meta: dict) -> str:
@@ -454,12 +483,32 @@ class InferenceScriptRunner:
         except Exception:
             return str(os.getenv("QLIB_PRIMARY_DATA_PATH", "db/qlib_data"))
 
+    def query_readiness(self, trade_date: str) -> tuple[str, dict]:
+        """按 ``data_source`` 分派就绪检查，返回 ``(展示标签, 结果)``。
+
+        唯一分派表：推理前检与运维体检脚本（`scripts/diagnose/model_readiness_audit.py`）
+        共用同一份，避免两边各写一条 if/elif 链、然后慢慢分叉成两种门禁。
+        """
+        meta = self._read_primary_metadata()
+        data_source = str(meta.get("data_source") or "").lower()
+        if data_source == "quantdb_factors":
+            return "QuantDB 因子数据就绪", self._query_quantdb_readiness(trade_date=trade_date)
+        if data_source == "parquet":
+            return "历史 Parquet 数据就绪", self._query_parquet_readiness(trade_date=trade_date)
+        if data_source in ("qlib", "qlib_bin", "bin"):
+            return "Qlib 二进制数据就绪", self._query_qlib_readiness(trade_date=trade_date)
+        return "当日数据覆盖就绪", self._query_dimension_readiness(
+            trade_date=trade_date, expected_dim=self._resolve_expected_feature_dim()
+        )
+
     def _query_quantdb_readiness(self, trade_date: str) -> dict:
         meta = self._read_primary_metadata()
         try:
             from backend.services.engine.data_platform.quantdb_factor_reader import QuantDBFactorReader
             data_dir = Path(_resolve_market_factor_data_dir(meta))
-            reader = QuantDBFactorReader(data_dir)
+            # market 必须与目录解析同源：CUSTOM 市场只扫描因子列、不强制 OHLCV，
+            # 用默认 CN 口径校验自定义数据集会把合规模型误判为不可用。
+            reader = QuantDBFactorReader(data_dir, market=_resolve_model_market(meta))
             source = str(meta.get("factor_source") or "l1_l2_factors")
             # describe() 会全量扫描 parquet 求 min/max，开销大；做 TTL 缓存避免每次预检 2.6s
             status = _cached_describe(reader, source)
@@ -485,14 +534,40 @@ class InferenceScriptRunner:
                         "detail": f"QuantDB {source} 最早 {status.min_date}，请求 {trade_date} 早于数据起点",
                         "latest_available_date": status.min_date,
                     }
+            # 可用性判据 = 「模型要用的列是否都能按名取到」，而不是「整库列集一字不差」。
+            #
+            # schema_hash 是 `sha256("\n".join(column_names))` —— 只覆盖**列名集合**，
+            # 不含取值口径。它能抓到的两类问题里，「列被删/改名」已被下面的
+            # missing 检查更准确地覆盖（且会指名道姓），而「列被新增」对按名取数的
+            # 推理脚本无害。反过来拿它当硬闸门的代价很大：因子库每加一列（实测
+            # quantcustom 从 273 涨到 282，多出的 9 列全是 OHLCV 基础列）就把全部
+            # 存量模型锁死，表现为「注册表里 ready、点下去必然失败」。
+            #
+            # 所以：缺列 ⇒ 硬失败；仅仅哈希不同 ⇒ 放行但带上 drift 标记，
+            # 由 precheck 渲染成 soft 项。漂移必须可见，但不必可阻断。
+            #
+            # 已知缺口（本检查覆盖不到）：列名不变而**取值口径**变了（量纲、复权、
+            # 单位）——哈希只看列名，抓不到，推理会静默出错。这类只能靠数据侧
+            # 单位契约与金样回归守，别指望这道门。
             schema_hash = str(meta.get("factor_schema_hash") or "")
-            if schema_hash and schema_hash != status.schema_hash:
-                return {"ready": False, "detail": "QuantDB schema hash differs from model metadata"}
+            hash_drift = bool(schema_hash) and schema_hash != status.schema_hash
             missing = [
-                source for source in (meta.get("factor_field_sources") or {}).values()
-                if source not in status.columns
+                column for column in (meta.get("factor_field_sources") or {}).values()
+                if column not in status.columns
             ]
-            return {"ready": not missing, "detail": "ok" if not missing else f"missing mapped fields: {missing[:5]}"}
+            if missing:
+                return {
+                    "ready": False,
+                    "detail": f"missing mapped fields: {missing[:5]}",
+                }
+            result: dict = {"ready": True, "detail": "ok"}
+            if hash_drift:
+                result["schema_drift"] = {
+                    "recorded": schema_hash[:16],
+                    "current": str(status.schema_hash or "")[:16],
+                    "columns": len(status.columns or []),
+                }
+            return result
         except Exception as exc:
             return {"ready": False, "detail": f"QuantDB unavailable: {exc}"}
 
@@ -2197,6 +2272,44 @@ class InferenceScriptRunner:
                 "user_id": user_id,
                 "feature_version": feature_version,
                 "retention_floor": retention_floor,
+            },
+        )
+
+        # ── Step 0.15: 登记运行记录（run → model 可追溯）───────────────
+        #
+        # 推理脚本自己生成 run_id（run_YYYYMMDD_xxxxxxxx），但只有 UI/批量入口会在
+        # 事后调 model_inference_persistence.create_run 落记录；定时批次、实时链路
+        # 直接写库的路径**没有 run 行**。读侧（个股预测的归因/共识）靠
+        # `LEFT JOIN qm_model_inference_runs ON run_id` 反查 model_id，join 不上就
+        # `chosen_model_id = run_id` → 模型目录 glob 找不到 → SHAP 归因 100% 静默空、
+        # 共识行模型名退化成 run_xxxx。实测 engine_signal_scores 1432 万行里仅
+        # 298 万行 join 得上（21%），近期新行（如 run_20260917_9689b276，5192 行）
+        # 全部落空。
+        #
+        # 在写分数**之前**登记：同一事务内要么两者都有、要么都没有，不会出现
+        # 「有分数没 run 行」的半截状态。ON CONFLICT 保证 UI 路径事后 create_run 幂等。
+        db.execute(
+            text("""
+                INSERT INTO qm_model_inference_runs (
+                  run_id, tenant_id, user_id, model_id, data_trade_date, prediction_trade_date,
+                  status, signals_count, created_at, updated_at
+                ) VALUES (
+                  :run_id, :tenant_id, :user_id, :model_id, :data_trade_date, :prediction_trade_date,
+                  'completed', :signals_count, NOW(), NOW()
+                )
+                ON CONFLICT (run_id) DO UPDATE SET
+                  model_id = EXCLUDED.model_id,
+                  signals_count = EXCLUDED.signals_count,
+                  updated_at = EXCLUDED.updated_at
+            """),
+            {
+                "run_id": run_id,
+                "tenant_id": tenant_id,
+                "user_id": user_id,
+                "model_id": model_name,
+                "data_trade_date": date.fromisoformat(inference_date),
+                "prediction_trade_date": prediction_day,
+                "signals_count": len(symbols),
             },
         )
 

@@ -36,6 +36,13 @@ export interface UserModelRecord {
   created_at?: string | null;
   updated_at?: string | null;
   activated_at?: string | null;
+  /**
+   * 推理必需产物缺项（空数组 = 健全）。由后端 `GET /models` 附带，
+   * 让治理面板在选中模型之前就能标出「点了也跑不起来」的注册项。
+   * 只覆盖「够不够得着」（目录/脚本/权重/预测产物），不覆盖 schema 漂移
+   * 这类语义问题——那是推理前检的结论。
+   */
+  asset_gaps?: string[];
 }
 
 export interface ModelShapSummaryItem {

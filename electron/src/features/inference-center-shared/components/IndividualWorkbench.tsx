@@ -10,26 +10,37 @@
  */
 
 import React from 'react';
-import { Button, DatePicker, Input, Select, Spin, Tag, Tooltip, Typography } from 'antd';
+import { Button, DatePicker, Input, Select, Spin, Tag, Tooltip, Typography, message } from 'antd';
 import { clsx } from 'clsx';
 import {
-  Search, Clock, Calendar, Database, Play, TrendingUp, Sparkles,
+  Search, Clock, Calendar, Database, Play, TrendingUp, Sparkles, Layers, X,
 } from 'lucide-react';
 import { StockForecastChart } from './StockForecastChart';
 import { ModelScoreCurveGrid } from './ModelScoreCurveGrid';
 import { FeatureDriversPanel } from './FeatureDriversPanel';
 import { ModelConsensusPanel } from './ModelConsensusPanel';
-import type { IndividualPrediction, ModelCategoryFilter } from '../hooks/useIndividualPrediction';
+import {
+  CONSENSUS_PICK_LIMIT,
+  type IndividualPrediction,
+  type ModelCategoryFilter,
+} from '../hooks/useIndividualPrediction';
 import type { SuggestionItem } from '../adapter';
 
 const { Text } = Typography;
 
-const HORIZON_OPTIONS = [
-  { label: 'T+1 次日预期', value: 1 },
-  { label: 'T+3 短线周期', value: 3 },
-  { label: 'T+5 一周趋势 (推荐)', value: 5 },
-  { label: 'T+10 双周展望', value: 10 },
-];
+/**
+ * 周期下拉的兜底项：仅在该市场模型一条周期都没记录时使用。
+ * 正常情况下选项由 `ip.horizonOptions` 从**模型真实训练周期**生成 —— 早先这份
+ * 写死的 T+1/T+3/T+5/T+10 是无源之水：选了 T+3 而后端一个 T+3 模型都没有，
+ * 分数纹丝不动，用户却以为换了周期。
+ */
+const HORIZON_FALLBACK = [{ label: '周期未记录', value: 5 }];
+
+/** 周期标签：T+1 说「次日」，其余说「N 日」，并带出该周期有多少模型 */
+export function horizonLabel(horizon: number, modelCount: number): string {
+  const span = horizon === 1 ? '次日' : `${horizon} 日`;
+  return `T+${horizon} ${span} · ${modelCount} 个模型`;
+}
 
 const CATEGORY_OPTIONS: { value: ModelCategoryFilter; label: string }[] = [
   { value: 'all', label: '全部' },
@@ -106,6 +117,21 @@ export const IndividualWorkbench: React.FC<IndividualWorkbenchProps> = ({
     : '—';
   const ic = ip.selectedModel?.accuracy;
 
+  /**
+   * 共识点名守卫。`maxCount` 只挡下拉里的点选，挡不住程序化写入与
+   * 「先点满再切市场」这类边界；上限同时是后端的 CPU 护栏，越界必须显式拦下
+   * 而不是让请求跑到服务端才发现。
+   */
+  const handleConsensusChange = (ids: string[]) => {
+    if (ids.length > CONSENSUS_PICK_LIMIT) {
+      message.warning(`共识模型最多点 ${CONSENSUS_PICK_LIMIT} 个：每多一个都要现场跑一次完整推理`);
+      return;
+    }
+    ip.setConsensusModelIds(ids);
+  };
+
+  const consensusCount = ip.consensusModelIds.length;
+
   return (
     <div className="flex-1 min-w-0 flex flex-col bg-white border border-slate-200 rounded-xl overflow-hidden">
       {/* ── 配置工具条（一行，窄窗口自动折行）──────────────────── */}
@@ -173,9 +199,17 @@ export const IndividualWorkbench: React.FC<IndividualWorkbenchProps> = ({
           value={ip.horizon}
           onChange={ip.setHorizon}
           size="small"
-          className="w-[112px] shrink-0"
+          className="w-[168px] shrink-0"
           suffixIcon={<Clock size={12} className="text-indigo-500" />}
-          options={HORIZON_OPTIONS}
+          title="预测周期取自该市场模型的真实训练周期（T+N）"
+          options={
+            ip.horizonOptions.length > 0
+              ? ip.horizonOptions.map((o) => ({
+                  value: o.horizon,
+                  label: horizonLabel(o.horizon, o.modelCount),
+                }))
+              : HORIZON_FALLBACK
+          }
         />
 
         <span className="w-px h-5 bg-slate-200 shrink-0" />
@@ -233,10 +267,91 @@ export const IndividualWorkbench: React.FC<IndividualWorkbenchProps> = ({
         </Button>
       </div>
 
+      {/* ── 共识点名条：多模型共识的唯一入口 ─────────────────────────
+          日更批推理只跑「生效模型」一个，落库分数天然是每标的每日 1 行，
+          所以「不点名」= 共识矩阵只有 1 个样本（后端会标注为样本过少）。
+          点名后由前端传 consensus_model_ids，后端在 execute=true 时现场补算。 */}
+      <div
+        data-testid="consensus-picker"
+        className="shrink-0 px-3 py-1.5 border-b border-slate-200 bg-violet-50/40 flex flex-wrap items-center gap-2"
+      >
+        <Tooltip title="点名参与横向共识的模型。执行推理时后端会为这些模型现场补算该标的分数（不写库、不发布），共识矩阵即由这些模型 + 主模型构成。">
+          <span className="flex items-center gap-1 text-[10px] font-bold text-violet-700 shrink-0 cursor-help">
+            <Layers size={12} className="text-violet-500" />
+            共识点名
+          </span>
+        </Tooltip>
+
+        <Select
+          mode="multiple"
+          size="small"
+          maxCount={CONSENSUS_PICK_LIMIT}
+          value={ip.consensusModelIds}
+          onChange={handleConsensusChange}
+          disabled={ip.models.length === 0}
+          className="flex-1 min-w-[240px]"
+          placeholder={
+            ip.models.length === 0
+              ? '该市场暂无可点名的模型'
+              : `不选 = 只读当日已落库分数（通常仅 1 个模型）；最多点名 ${CONSENSUS_PICK_LIMIT} 个模型现场补算`
+          }
+          optionLabelProp="label"
+          maxTagCount="responsive"
+          options={ip.models.map((m) => ({
+            value: m.modelId,
+            label: m.modelName,
+            display: (
+              <div className="flex items-center justify-between gap-3">
+                <span className="truncate">{m.modelName}</span>
+                <span className="text-[10px] font-bold font-mono px-1.5 py-0.5 rounded bg-slate-100 border border-slate-300 text-slate-600 shrink-0">
+                  {m.horizonDesc}
+                </span>
+              </div>
+            ),
+          }))}
+          optionRender={(option) => option.data.display}
+        />
+
+        {/* 主模型恒参与共识，点名里重复选它不会重复计数（后端按 id 去重） */}
+        {consensusCount > 0 && (
+          <span
+            data-testid="consensus-picker-count"
+            className="shrink-0 flex items-center gap-1 text-[10px] font-bold font-mono text-violet-700 bg-white border border-violet-200 rounded px-1.5 py-0.5"
+          >
+            {consensusCount}/{CONSENSUS_PICK_LIMIT}
+          </span>
+        )}
+
+        <span className="shrink-0 text-[10px] text-slate-500 leading-tight">
+          {consensusCount > 0
+            ? `点「开始个股推理」现场补算 ${consensusCount} 个模型（并发执行，数十秒起）`
+            : '多模型共识需点名，否则只有主模型一个样本'}
+        </span>
+
+        {consensusCount > 0 && (
+          <Button
+            size="small"
+            type="text"
+            icon={<X size={11} />}
+            onClick={() => ip.setConsensusModelIds([])}
+            className="shrink-0 h-6 px-1.5 text-[10px] text-slate-500 hover:text-slate-800"
+          >
+            清空
+          </Button>
+        )}
+      </div>
+
       {/* 基准日回退提示：所选日无数据时后端会回退，必须显式告知 */}
       {prediction?.as_of_date && ip.date && prediction.as_of_date !== ip.date.format('YYYY-MM-DD') && (
         <div className="shrink-0 px-3 py-1 bg-amber-50 border-b border-amber-100 text-[10px] text-amber-700 font-semibold">
           实际数据日：{prediction.as_of_date}（所选日期无数据已回退）
+        </div>
+      )}
+
+      {/* 周期未落实提示：请求周期该市场无模型时后端会改用最近周期，分数口径随之改变 */}
+      {prediction?.horizon_warning && (
+        <div className="shrink-0 px-3 py-1.5 bg-rose-50 border-b border-rose-100 text-[10px] text-rose-700 font-semibold leading-relaxed">
+          {prediction.horizon_warning}
         </div>
       )}
 
@@ -256,7 +371,8 @@ export const IndividualWorkbench: React.FC<IndividualWorkbenchProps> = ({
                 {currencySymbol}{prediction.current_price ? prediction.current_price.toFixed(2) : '—'}
               </span>
             </QuoteCell>
-            <QuoteCell label="模型信号分数">
+            {/* 标签带出周期：分数是「T+N 的模型输出」，脱离周期谈分数没有意义 */}
+            <QuoteCell label={`模型信号分数 · T+${prediction.horizon ?? ip.horizon}`}>
               <span className={scoreColor(prediction.expected_return)}>{prediction.predicted_score.toFixed(4)}</span>
             </QuoteCell>
           </div>
@@ -325,10 +441,30 @@ export const IndividualWorkbench: React.FC<IndividualWorkbenchProps> = ({
                 </div>
 
                 <div className="flex-1 min-h-0 p-3 flex flex-col gap-3">
+                  {/* 区间口径：模型分位头 vs 已实现波动率推算的锥体。二者可信度不同，
+                      标题与角标必须随 forecast_basis 切换——把波动率锥渲染成
+                      「模型分位预测」是口径造假，会把统计假设当成模型的判断力。 */}
                   <div className="p-3 bg-slate-50 rounded-lg border border-slate-200">
                     <div className="flex items-center justify-between mb-2">
-                      <span className="text-[11px] font-bold text-slate-600">分位数区间</span>
-                      <span className="text-[10px] text-slate-400">验证集校准</span>
+                      <span className="text-[11px] font-bold text-slate-600">
+                        {prediction.forecast_basis === 'realized_vol'
+                          ? '波动率锥区间'
+                          : prediction.p10_return != null
+                            ? '分位数区间'
+                            : '收益区间'}
+                      </span>
+                      <span
+                        className={clsx(
+                          'text-[10px] px-1.5 py-0.5 rounded border font-bold',
+                          prediction.forecast_basis === 'realized_vol'
+                            ? 'text-slate-500 bg-white border-slate-200'
+                            : 'text-indigo-600 bg-indigo-50 border-indigo-100',
+                        )}
+                      >
+                        {prediction.forecast_basis === 'realized_vol'
+                          ? '统计口径 · 非模型分位'
+                          : '验证集校准'}
+                      </span>
                     </div>
                     {prediction.p10_return != null && prediction.p90_return != null ? (
                       <>
@@ -346,13 +482,23 @@ export const IndividualWorkbench: React.FC<IndividualWorkbenchProps> = ({
                             <div className="font-mono text-xs font-bold text-rose-700">{prediction.p90_return.toFixed(2)}%</div>
                           </div>
                         </div>
-                        <p className="mt-2.5 pt-2 border-t border-slate-200 text-[10px] text-slate-500 m-0">
+                        <p className="mt-2.5 pt-2 border-t border-slate-200 text-[10px] text-slate-500 m-0 leading-relaxed">
                           区间覆盖率 <strong className="font-mono text-slate-700">{coverage}</strong>
+                          {prediction.daily_vol_pct != null && prediction.forecast_basis === 'realized_vol' && (
+                            <>
+                              {' · '}日波动 <strong className="font-mono text-slate-700">{(prediction.daily_vol_pct * 100).toFixed(2)}%</strong>
+                            </>
+                          )}
                         </p>
                       </>
                     ) : (
                       <p className="text-[11px] leading-relaxed text-slate-500 m-0">
                         该模型未启用分位推理；当前仅提供真实信号分数。
+                      </p>
+                    )}
+                    {prediction.forecast_note && (
+                      <p className="mt-2 pt-2 border-t border-slate-200 text-[10px] text-slate-500 m-0 leading-relaxed">
+                        {prediction.forecast_note}
                       </p>
                     )}
                   </div>
@@ -378,7 +524,9 @@ export const IndividualWorkbench: React.FC<IndividualWorkbenchProps> = ({
               <ModelScoreCurveGrid
                 consensus={prediction.consensus}
                 consensusScore={prediction.consensus_score}
-                selectedCount={0}
+                coverage={prediction.consensus_coverage}
+                coverageNote={prediction.consensus_note}
+                selectedCount={consensusCount}
                 suffixSymbol={toSuffixSymbol(prediction.symbol || ip.symbol)}
                 asOfDate={prediction.as_of_date}
               />
@@ -386,13 +534,20 @@ export const IndividualWorkbench: React.FC<IndividualWorkbenchProps> = ({
 
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 flex-none" style={{ minHeight: '240px' }}>
               <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
-                <FeatureDriversPanel drivers={prediction.drivers} source={prediction.drivers_source} />
+                <FeatureDriversPanel
+                  drivers={prediction.drivers}
+                  source={prediction.drivers_source}
+                  note={prediction.drivers_note}
+                  modelName={prediction.drivers_model_name}
+                />
               </div>
               <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
                 <ModelConsensusPanel
                   consensus={prediction.consensus}
                   consensusScore={prediction.consensus_score}
-                  selectedCount={0}
+                  coverage={prediction.consensus_coverage}
+                  coverageNote={prediction.consensus_note}
+                  selectedCount={consensusCount}
                 />
               </div>
             </div>

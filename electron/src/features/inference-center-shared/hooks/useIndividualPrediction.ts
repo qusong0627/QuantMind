@@ -20,8 +20,15 @@ import type { SuggestionItem } from '../adapter';
 export type ModelCardOption = AvailableModelOption & {
   category: 'tree' | 'dl' | 'ensemble';
   tag: string;
+  /** 周期描述：由模型真实训练周期生成（不再硬编码「T+1 ~ T+10 灵活周期」） */
   horizonDesc: string;
 };
+
+/** 一个可选的预测周期及其在该市场的模型覆盖 */
+export interface HorizonOption {
+  horizon: number;
+  modelCount: number;
+}
 
 export interface IndividualPrediction {
   symbol: string;
@@ -35,11 +42,21 @@ export interface IndividualPrediction {
 
   models: ModelCardOption[];
   filteredModels: ModelCardOption[];
+  /** 该市场真实存在的预测周期（按 T+N 升序）；周期选择器只渲染这些 */
+  horizonOptions: HorizonOption[];
   modelId: string;
   setModelId: (id: string) => void;
   selectedModel: ModelCardOption | undefined;
   categoryFilter: ModelCategoryFilter;
   setCategoryFilter: (c: ModelCategoryFilter) => void;
+
+  /**
+   * 点名参与共识的模型（最多 CONSENSUS_PICK_LIMIT 个）。
+   * 空 = 只显示当日已落库的分数；非空 + execute=true 时后端会**现场补算**
+   * 这些模型在该标的该日的分数——这是「多模型共识」唯一能拿到多行数据的路径。
+   */
+  consensusModelIds: string[];
+  setConsensusModelIds: (ids: string[]) => void;
 
   loading: boolean;
   prediction: SingleStockPredictionResponse | null;
@@ -71,10 +88,13 @@ const KLINE_LOOKBACK_DAYS = 60;
 const KLINE_PRE_BASE_DAYS = 100;
 
 /**
- * 共识矩阵成员：当前版本没有选择 UI，空数组 = 后端自动取当日全部有分数的模型。
- * 保留该常量是为了让请求里的语义显式，后续加多选时只改这里。
+ * 共识点名上限：与后端 `CONSENSUS_EXEC_LIMIT` 一致。
+ *
+ * 这不是随手定的数——每点名一个模型，`execute=true` 时后端就要现场起一个完整
+ * 推理进程（实测单模型约 30s），并发度也等于这个上限。所以它同时是「一次研判
+ * 最多点几个模型」的产品约束和 CPU 护栏，前后端必须同步改。
  */
-const CONSENSUS_MODEL_IDS: string[] = [];
+export const CONSENSUS_PICK_LIMIT = 4;
 
 /** 模型 id/类型 → 分类：ensemble > dl > tree */
 function classifyModel(kind: string): ModelCardOption['category'] {
@@ -102,6 +122,8 @@ export function useIndividualPrediction(
   const [models, setModels] = useState<ModelCardOption[]>([]);
   const [modelId, setModelId] = useState('');
   const [categoryFilter, setCategoryFilter] = useState<ModelCategoryFilter>('all');
+  /** 点名参与共识的模型 id；空 = 自动模式（只读当日已落库分数） */
+  const [consensusModelIds, setConsensusModelIds] = useState<string[]>([]);
 
   const [loading, setLoading] = useState(false);
   const [kline, setKline] = useState<KlineItem[]>([]);
@@ -119,12 +141,16 @@ export function useIndividualPrediction(
         if (cancelled) return;
         const options: ModelCardOption[] = (list || [])
           .filter((m) => Boolean(m.modelId))
-          .map((m) => ({
-            ...m,
-            category: classifyModel(String(m.modelType || m.modelId || '')),
-            tag: m.hasInference ? '已训练' : '生产可用',
-            horizonDesc: 'T+1 ~ T+10 灵活周期',
-          }));
+          .map((m) => {
+            const h = typeof m.horizon === 'number' && m.horizon > 0 ? m.horizon : null;
+            return {
+              ...m,
+              category: classifyModel(String(m.modelType || m.modelId || '')),
+              tag: m.hasInference ? '已训练' : '生产可用',
+              // 周期描述取自模型 metadata；老模型未记录周期时如实说明而非编造
+              horizonDesc: h ? `${h === 1 ? '次日' : `${h} 日`}周期 T+${h}` : '周期未记录',
+            };
+          });
         setModels(options);
       })
       .catch((err) => {
@@ -142,6 +168,16 @@ export function useIndividualPrediction(
     if (modelId && models.some((m) => m.modelId === modelId)) return;
     setModelId(models[0].modelId);
   }, [models, modelId]);
+
+  // 共识点名对账：切换市场会换掉整份模型列表，旧市场点名的 id 留在状态里会变成
+  // 一次注定失败的现场推理（后端按 id 解析、解不到就记失败）。这里按下沉列表剔除，
+  // 并保留用户原有的相对顺序。
+  useEffect(() => {
+    if (consensusModelIds.length === 0 || models.length === 0) return;
+    const alive = new Set(models.map((m) => m.modelId));
+    const kept = consensusModelIds.filter((id) => alive.has(id));
+    if (kept.length !== consensusModelIds.length) setConsensusModelIds(kept);
+  }, [models, consensusModelIds]);
 
   // ── 标的联想（防抖）─────────────────────────────────────────
   useEffect(() => {
@@ -175,6 +211,30 @@ export function useIndividualPrediction(
     [models, modelId],
   );
 
+  // 可用周期 = 该市场模型真实覆盖的周期并集。前端不再凭空提供 T+1/T+3/T+5/T+10
+  // （实测 T+3 在部分市场一个模型都没有，选了也只是回显请求值、分数不变）。
+  const horizonOptions = useMemo<HorizonOption[]>(() => {
+    const counts = new Map<number, number>();
+    for (const m of models) {
+      const h = typeof m.horizon === 'number' && m.horizon > 0 ? m.horizon : null;
+      if (h) counts.set(h, (counts.get(h) || 0) + 1);
+    }
+    return [...counts.entries()]
+      .map(([h, modelCount]) => ({ horizon: h, modelCount }))
+      .sort((a, b) => a.horizon - b.horizon);
+  }, [models]);
+
+  // 周期对账：当前选中周期在该市场无模型时，落到最近的有模型周期。
+  // 直接发请求也能跑（后端会代选并回告警），但 UI 先对齐能少一次无效往返。
+  useEffect(() => {
+    if (horizonOptions.length === 0) return;
+    if (horizonOptions.some((o) => o.horizon === horizon)) return;
+    const nearest = horizonOptions.reduce((best, o) =>
+      Math.abs(o.horizon - horizon) < Math.abs(best.horizon - horizon) ? o : best,
+    );
+    setHorizon(nearest.horizon);
+  }, [horizonOptions, horizon]);
+
   const run = useCallback(
     async (target: { symbol: string; modelId?: string; execute: boolean }) => {
       const sym = target.symbol.trim();
@@ -191,7 +251,10 @@ export function useIndividualPrediction(
       setLoading(true);
       try {
         const klineData = await fetchKline(sym, KLINE_LOOKBACK_DAYS, undefined, startStr);
-        if (klineData && klineData.length > 0) setKline(klineData);
+        // 必须先清空再写入：早先只在「有数据」时 setKline，取数失败/该标的无行情时
+        // 会**保留上一只股票的 K 线**，于是 A 股的价格曲线配着港股/美股的预测扇形
+        // 同屏显示 —— 对研判是灾难级误导。
+        setKline(klineData || []);
 
         const res = await inferenceCenterService.predictSingleStock({
           symbol: sym,
@@ -199,7 +262,7 @@ export function useIndividualPrediction(
           date: dateStr,
           horizon,
           market,
-          consensus_model_ids: CONSENSUS_MODEL_IDS.length ? CONSENSUS_MODEL_IDS : undefined,
+          consensus_model_ids: consensusModelIds.length ? consensusModelIds : undefined,
           execute: target.execute,
         });
 
@@ -222,7 +285,7 @@ export function useIndividualPrediction(
         setLoading(false);
       }
     },
-    [date, horizon, market, modelId, fetchKline],
+    [date, horizon, market, modelId, consensusModelIds, fetchKline],
   );
 
   const commitCode = useCallback(
@@ -272,11 +335,14 @@ export function useIndividualPrediction(
     setDate,
     models,
     filteredModels,
+    horizonOptions,
     modelId,
     setModelId,
     selectedModel,
     categoryFilter,
     setCategoryFilter,
+    consensusModelIds,
+    setConsensusModelIds,
     loading,
     prediction,
     kline,

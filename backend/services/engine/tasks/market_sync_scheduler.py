@@ -228,7 +228,18 @@ def run_market_sync(market: str, cfg: dict[str, Any]) -> dict[str, Any]:
 
 
 def dispatch_due_syncs() -> dict[str, Any]:
-    """检查所有市场定时配置，到点且今天未跑过的派发同步任务。"""
+    """检查所有市场定时配置，到点且今天未跑过的派发同步任务。
+
+    **标记在派发成功之后写**，不在此之前。last_run 标记的语义是「今天这件事已经
+    交出去了」，但它同时是唯一的去重依据：一旦先写标记再派发，任何派发失败
+    （broker 写不进去、连接抖一下就够）都会留下一个「今天跑过了」的假记录，
+    当天的同步永不重试——数据静默停在昨天，而所有依赖新数据的模型集体失效。
+    2026-09-18 21:34 Redis `stop-writes-on-bgsave-error` 期间 beat 报
+    `Couldn't apply scheduled task market-sync-dispatch`，走的正是这条路径。
+
+    反过来的代价是：派发成功但进程随后崩溃会丢掉标记，下一分钟重复派发一次。
+    各市场同步都是增量落分区，重复执行的代价远小于整天不执行。
+    """
     from backend.services.engine.qlib_app.celery_config import celery_app
 
     now = datetime.now()
@@ -244,12 +255,21 @@ def dispatch_due_syncs() -> dict[str, Any]:
             continue
         if _last_run_today(market, date_str):
             continue
+        try:
+            celery_app.send_task(
+                task_name_for(market),
+                args=[market, cfg],
+                queue="qlib_backtest_srv",
+            )
+        except Exception as exc:  # noqa: BLE001 - 单个市场失败不拖垮同分钟的其他市场
+            logger.error(
+                "[SyncSchedule] %s 派发失败，今日不写标记以便下一分钟重试: %s",
+                MARKETS[market],
+                exc,
+                exc_info=True,
+            )
+            continue
         _mark_run(market, date_str)
-        celery_app.send_task(
-            task_name_for(market),
-            args=[market, cfg],
-            queue="qlib_backtest_srv",
-        )
         dispatched.append(market)
         logger.info(
             "[SyncSchedule] %s 到点 %s，已派发同步任务", MARKETS[market], now_hm

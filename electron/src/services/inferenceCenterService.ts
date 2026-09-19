@@ -40,7 +40,13 @@ export interface SingleStockPredictionResponse {
   model_type: string;
   as_of_date: string;
   current_price: number;
+  /** 模型**实际**训练周期（分数语义周期），未必等于请求周期 */
   horizon: number;
+  /** 调用方请求的周期；与 horizon 不一致时 horizon_warning 非空 */
+  requested_horizon?: number;
+  horizon_warning?: string | null;
+  /** 该市场现存模型覆盖的周期分布（周期选择器据此渲染可用性） */
+  available_horizons?: { horizon: number; model_count: number }[];
   predicted_score: number;
   expected_return: number;
   confidence: number;
@@ -50,9 +56,45 @@ export interface SingleStockPredictionResponse {
   p90_return: number | null;
   forecast_curve: ForecastPoint[];
   forecast_warning?: string | null;
+  /**
+   * 区间口径：
+   * - `model_quantile` = 模型自带分位头（真正的分位数预测）
+   * - `realized_vol` = 由已实现波动率推算的波动率锥（**统计口径，非模型分位数**）
+   * UI 必须按此换标题，不得把波动率锥渲染成「模型分位预测」。
+   */
+  forecast_basis?: 'model_quantile' | 'realized_vol' | null;
+  /** 口径说明（后端生成，面向用户的一句话解释） */
+  forecast_note?: string | null;
+  /** 日波动率（小数），波动率锥的输入，用于展示与复核 */
+  daily_vol_pct?: number;
   drivers: FeatureDriverItem[];
+  /**
+   * 归因取不到时的原因说明（drivers 非空时仍可能带说明：例如归因来自替代模型
+   * 或元数据是从注册表恢复的）。UI 必须渲染它——空白归因面板与「功能坏了」
+   * 在用户看来没有区别。
+   */
+  drivers_note?: string | null;
+  /** 归因实际描述的模型；与 model_id 不同表示用了同批次的替代树模型。 */
+  drivers_model_id?: string | null;
+  drivers_model_name?: string | null;
   consensus: ModelConsensusItem[];
   consensus_score: number;
+  /**
+   * 共识覆盖度。`scored` 很小时「看多占比」是单模型观点而非共识，
+   * UI 必须据此改措辞（不能只甩一个百分比）。
+   */
+  consensus_coverage?: {
+    scored: number;
+    total: number;
+    trade_date?: string | null;
+    is_thin?: boolean;
+    /** 未参与共识的原因分布，运维排查用 */
+    skip_reasons?: Record<string, number>;
+    /** 点名后仍未算出分数的模型及失败步骤（error 为机器码，detail 为原始报错） */
+    failed_models?: { model_id: string; error: string; detail?: string }[];
+  } | null;
+  /** 覆盖不足时后端生成的说明句；通常为空 */
+  consensus_note?: string | null;
   /** 仅为真实持久化模型推理分数。 */
   data_source?: 'persisted';
   /** 仅在模型可提供时返回真实 SHAP。 */
@@ -89,6 +131,10 @@ export interface AvailableModelOption {
   accuracy?: number;
   isEnsemble?: boolean;
   hasInference?: boolean;
+  /** 训练周期 T+N（来自 metadata.target_horizon_days）；缺失表示老模型未记录 */
+  horizon?: number | null;
+  /** 目标口径（return / rank / …）；非 return 时区间数值不是收益率 */
+  targetMode?: string;
 }
 
 class InferenceCenterService {
@@ -100,7 +146,10 @@ class InferenceCenterService {
     const client = axios.create({
       baseURL,
       // 实际模型执行会跑完整个推理批次，30 秒不足以覆盖生产模型冷启动与落库。
-      timeout: 120000,
+      // execute=true 且点名了共识模型时，后端要现场跑完主模型 + 最多 4 个共识模型
+      // （实测 4 个树模型并发约 77s，含深度学习模型更久），120s 会把正常请求打成
+      // 「超时」——而服务端仍在算，用户看到失败但分数其实已出，是更坏的结果。
+      timeout: 300000,
     });
     client.interceptors.request.use((config) => {
       const token = authService.getAccessToken();
@@ -145,6 +194,9 @@ class InferenceCenterService {
         description: m.description,
         accuracy: m.ic ?? m.accuracy ?? m.ic_value,
         hasInference: m.hasInference ?? m.has_inference ?? false,
+        // 周期与口径必须透传：周期选择器与「分数含义」标注都以它为准
+        horizon: m.horizon ?? m.target_horizon_days ?? null,
+        targetMode: m.targetMode || m.target_mode || '',
       }));
     } catch (e) {
       console.warn('获取可用模型列表失败:', e);

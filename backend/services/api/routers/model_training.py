@@ -52,6 +52,7 @@ from backend.services.engine.services.model_inference_persistence import (
 from backend.shared.database_manager_v2 import get_session
 from backend.shared.inference_stats import compute_score_distribution
 from backend.shared.inference_coverage import find_inference_gap_dates
+from backend.shared.model_assets import model_asset_gaps
 from backend.shared.model_registry import model_registry_service
 from backend.shared.redis_sentinel_client import get_redis_sentinel_client
 from backend.shared.trading_calendar import calendar_service
@@ -758,7 +759,13 @@ async def list_user_models(
         include_archived=include_archived,
         market=market,
     )
-    return {"items": models, "total": len(models)}
+    # 补资产健全性：注册表里的行可能指向已被清走/从未落盘的目录。治理面板
+    # 要能一眼看出「哪些模型点了也跑不起来」，否则只能靠逐个试错发现。
+    enriched = [
+        {**m, "asset_gaps": model_asset_gaps(str(m.get("storage_path") or ""))}
+        for m in models
+    ]
+    return {"items": enriched, "total": len(enriched)}
 
 
 @router.get("/default", summary="获取当前用户默认模型（用户态）")
@@ -2062,25 +2069,8 @@ def _build_precheck_items(
         }
     )
 
-    # 根据数据源选择对应的就绪检查逻辑
-    primary_meta = runner._read_primary_metadata()
-    data_source = str(primary_meta.get("data_source") or "").lower()
-
-    if data_source == "quantdb_factors":
-        readiness = runner._query_quantdb_readiness(trade_date=data_trade_date)
-        readiness_label = "QuantDB 因子数据就绪"
-    elif data_source == "parquet":
-        readiness = runner._query_parquet_readiness(trade_date=data_trade_date)
-        readiness_label = "历史 Parquet 数据就绪"
-    elif data_source in ("qlib", "qlib_bin", "bin"):
-        readiness = runner._query_qlib_readiness(trade_date=data_trade_date)
-        readiness_label = "Qlib 二进制数据就绪"
-    else:
-        expected_feature_dim = runner._resolve_expected_feature_dim()
-        readiness = runner._query_dimension_readiness(
-            trade_date=data_trade_date, expected_dim=expected_feature_dim
-        )
-        readiness_label = "当日数据覆盖就绪"
+    # 就绪检查按数据源分派；分派表由 runner 单点维护，运维体检脚本共用同一份
+    readiness_label, readiness = runner.query_readiness(trade_date=data_trade_date)
 
     market_data_item: dict[str, Any] = {
         "key": "market_data_ready",
@@ -2092,6 +2082,25 @@ def _build_precheck_items(
     if readiness.get("latest_available_date"):
         market_data_item["latest_available_date"] = readiness["latest_available_date"]
     items.append(market_data_item)
+
+    # 因子库列名漂移：不阻断，但必须可见。放行是因为「模型要用的列都在」，
+    # 而不是因为漂移无所谓——列名不变而取值口径变了的漂移，这道门抓不到，
+    # 所以更不能让用户以为「没报警 = 数据没变」。
+    drift = readiness.get("schema_drift")
+    if isinstance(drift, dict):
+        items.append(
+            {
+                "key": "factor_schema_drift",
+                "label": "因子库列名漂移",
+                "passed": False,
+                "severity": "soft",
+                "detail": (
+                    f"模型记录 {drift.get('recorded')}… ≠ 当前 {drift.get('current')}…"
+                    f"（当前 {drift.get('columns')} 列）。模型需要的列都在，可正常推理；"
+                    "若近期改过因子定义，请重训以确认口径一致。"
+                ),
+            }
+        )
 
     items.append(
         {
@@ -4207,10 +4216,17 @@ async def get_stock_inference_history(
         anchor = date.today()
     cutoff = anchor - _td(days=days)
 
-    # 归一化 symbol：兼容纯数字 / SH前缀 / suffix 三种格式
-    norm = sym
-    if "." not in norm and not norm.startswith(("SH", "SZ", "BJ")):
-        norm = StockCodeUtil.to_suffix(norm)
+    # 归一化 symbol：兼容纯数字 / SH前缀 / suffix 三种格式。
+    # 港股必须先归到 4 位 + .HK：pred.parquet 的 symbol 列就是该形态（实测
+    # `2057.HK`），而 `_load_stock_pred_history` 对非 CN 按「去非字母数字后整串」
+    # 匹配，裸码 `2057` 得到 key `2057`、库里是 `2057HK` → 分数曲线静默 0 点；
+    # 5 位 `00700` 更会因前导零得到 `00700` 与库里 `0700HK` 也不同键。
+    if eff_market == "HK":
+        sym = norm = StockCodeUtil.to_hk_suffix(sym)
+    else:
+        norm = sym
+        if "." not in norm and not norm.startswith(("SH", "SZ", "BJ")):
+            norm = StockCodeUtil.to_suffix(norm)
 
     params: dict[str, Any] = {
         "cutoff": cutoff,

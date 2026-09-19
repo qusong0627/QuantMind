@@ -37,7 +37,13 @@ from backend.services.api.routers.research_service import (
 )
 from backend.services.engine.data_platform.quantus_hub import _resolve_quantus_data_dir
 
-_TENANT, _USER = "default", "00000001"
+_TENANT, _USER = "default", "10000001"
+# 账户 id：平台已把管理员账号从老口径 00000001 迁到 10000001，注册表里 78 个模型
+# 全挂在新 id 名下。这里若继续用老 id，`get_model(user_id=...)` 一律查空，
+# 表现成三个**假**缺陷——predict-stock 404「未找到可执行的已注册模型」、
+# 分数曲线 used 为 None、路由回落成 inference_runs——与业务代码无关，
+# 但红灯会一直在（实测：老 id items=0/model=None，新 id items=398）。
+# 见 memory: live-account-user-id-10000001。
 _US_SYMBOL = "AAPL"
 # 日线分区允许的滞后：超过即认为 QuantUS 停更 / 美股表没跟上同步
 _SDL_LAG_DAYS = 15
@@ -465,8 +471,121 @@ def test_shap_drivers_us_tree_model():
     if tree_mid is None:
         pytest.skip("没有美股树模型")
 
-    drivers = _compute_shap_drivers_sync(tree_mid, _US_SYMBOL, as_of.isoformat(), "US")
-    assert drivers, "美股树模型 SHAP 归因为空：模型目录/快照列名的市场分派又断了"
+    drivers, reason, meta_src = _compute_shap_drivers_sync(
+        tree_mid, _US_SYMBOL, as_of.isoformat(), "US"
+    )
+    # 失败时 reason 必须给出诊断码：空列表 + None 会让「架构不支持」与「快照缺列」
+    # 无法区分，界面上都是同一个空白面板。
+    assert drivers, f"美股树模型 SHAP 归因为空（原因码: {reason}）：市场分派又断了"
+    assert reason is None, f"有归因结果时不应带失败码，得到 {reason}"
+    assert meta_src in ("disk", "registry_recovered")
     assert len(drivers) >= 3
     assert all(d["category"] == "模型SHAP" for d in drivers)
     assert all(d["name"] for d in drivers)
+
+
+def test_shap_drivers_unsupported_framework_reports_reason():
+    """非树模型必须返回明确的失败码，而不是静默空列表。"""
+    from backend.services.api.routers.research_service import _compute_shap_drivers_sync
+
+    # 不存在的模型 id：走 metadata_not_found 分支，drivers 为空但原因必须可读
+    drivers, reason, meta_src = _compute_shap_drivers_sync(
+        "mdl_does_not_exist_for_test", _US_SYMBOL, date.today().isoformat(), "US"
+    )
+    assert drivers == []
+    assert reason == "metadata_not_found"
+    assert meta_src is None
+
+
+def test_shap_recovers_from_clobbered_metadata():
+    """磁盘 metadata 被同批其他算法覆写时，应按注册表恢复出真实归因。
+
+    港股 0902 那批树模型（lightgbm/xgboost/catboost）的 metadata.json 全被同批 GRU
+    覆写，声明 model_gru.pth 而目录里只有 model_lgb.lgb 等——照磁盘判会得出
+    「架构不支持归因」的错误结论，把可用的树模型白白判死。
+    """
+    import glob
+    import json
+    import os
+
+    from pathlib import Path
+
+    from backend.services.api.routers.research_service import (
+        _SHAP_TREE_FRAMEWORKS,
+        _compute_shap_drivers_sync,
+        _load_model_registry_meta_sync,
+        _resolve_tree_artifact,
+    )
+
+    # 港股模型目录比 A 股多一层：/app/models/users/{tenant}/{user}/{market}/{model_id}
+    # （且 market 段历史上出现过小写 hk + 老账号 00000001 的写法），两种布局都要覆盖。
+    victims = []
+    hk_metas = glob.glob("/app/models/users/*/*/mdl_hk_*/metadata.json") + glob.glob(
+        "/app/models/users/*/*/*/mdl_hk_*/metadata.json"
+    )
+    for meta_path in hk_metas:
+        d = os.path.dirname(meta_path)
+        if not os.path.exists(os.path.join(d, "pred.parquet")):
+            continue
+        try:
+            meta = json.load(open(meta_path, encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        declared = str(meta.get("model_file") or "")
+        # 命中的形态：磁盘声明的权重文件不存在（被同批其他算法覆写）
+        if declared and not os.path.exists(os.path.join(d, declared)):
+            victims.append((d, meta))
+    if not victims:
+        pytest.skip("没有 metadata 与产物不符的港股模型目录")
+
+    # 可恢复 = 目录里真的躺着树模型产物，且注册表（feature_columns 的来源）有记录。
+    # **不能拿 framework 字段判**：这批模型注册表里写的也是 pytorch，
+    # 与 model_type=lightgbm、产物 model_lgb.lgb 自相矛盾——判据只能是实际产物。
+    recoverable = []
+    for model_dir, disk_meta in victims:
+        model_id = os.path.basename(model_dir)
+        registry = _load_model_registry_meta_sync(model_id)
+        if not registry:
+            continue
+        art = _resolve_tree_artifact(Path(model_dir), str(registry.get("model_file") or ""))
+        if not art:
+            continue
+        fw, path = art
+        # 磁盘声明的框架若已支持归因，就不属于本用例覆盖的场景
+        disk_fw = str(disk_meta.get("framework") or "").lower()
+        if disk_fw in _SHAP_TREE_FRAMEWORKS:
+            continue
+        recoverable.append((model_id, path.name, fw))
+
+    assert recoverable, (
+        "没有任何可恢复的港股树模型：磁盘 metadata 覆写问题可能已被修复，"
+        "或注册表回落链断了——两种情况都需要人工确认，不能用 skip 掩盖"
+    )
+    for model_id, artifact, fw in recoverable:
+        assert fw in _SHAP_TREE_FRAMEWORKS, f"{model_id}: 产物 {artifact} 判出的 {fw} 不是树框架"
+
+    # 端到端：任取一个可恢复模型，归因必须真的算出来且标出 registry_recovered
+    model_id = recoverable[0][0]
+    drivers, reason, meta_src = _compute_shap_drivers_sync(model_id, "0700.HK", "2026-09-03", "HK")
+    assert drivers, f"{model_id}: 目录里有树产物却仍算不出归因（reason={reason}）"
+    assert reason is None
+    assert meta_src == "registry_recovered", f"应走注册表回落，实际 {meta_src}"
+    assert all(d["category"] == "模型SHAP" for d in drivers)
+
+
+def test_shap_reason_note_covers_every_code():
+    """每个失败码都要有面向人的说明，且框架不支持一档要带出框架名。"""
+    from backend.services.api.routers.research_service import (
+        _SHAP_REASON_NOTES,
+        _shap_reason_note,
+    )
+
+    # 零项参与即失败：字典为空时下面的循环会「通过」
+    assert _SHAP_REASON_NOTES, "失败码说明表为空"
+    for code in _SHAP_REASON_NOTES:
+        note = _shap_reason_note(code)
+        assert note and note != f"归因不可用（{code}）。", f"失败码 {code} 没有专属说明"
+
+    note = _shap_reason_note("framework_unsupported:pytorch")
+    assert note and "pytorch" in note
+    assert _shap_reason_note(None) is None
