@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """因子报告快照（多数据集 × 分位收益 / 换手 / 相关性 / IC）→ JSON + parquet。
 
-支持的数据集（注册表见 backend/services/engine/factor_report/datasets.py）：
-  alpha_library / l1_factors / l2_factors / l1_l2_factors
+支持的数据集 = backend/services/engine/factor_report/datasets.py 里的 DATASETS 注册表
+（以该注册表为准，此处不再罗列，免得加数据集时两处漂移）。
 
 与 evaluate_alpha_library.py 的分工：
   - 那个脚本只算 IC（RankIC/ICIR/胜率/t 值），产出排序表 CSV；
@@ -39,7 +39,8 @@ import logging
 import multiprocessing as mp
 import sys
 import time
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from collections.abc import Iterable, Iterator
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from datetime import datetime
 from pathlib import Path
 
@@ -229,11 +230,18 @@ def compute_one_date(args: tuple) -> dict | None:
 
 # ─────────────────────────── 主流程 ───────────────────────────
 
-def merge_partials(partials: list[dict], n_factors: int, horizons: list[str] | None = None) -> dict:
+def merge_partials(partials: Iterable[dict], n_factors: int, horizons: list[str] | None = None) -> dict:
     """合并各日中间量 → 全局指标 + 单因子明细序列。
 
     明细序列（IC/十分位收益/换手/覆盖率，逐日 × 逐因子）同时在这里落成数组，
     由 main() 写成 parquet —— 报告页的 detail 接口靠它把「2.4s 扫分区」变成一次切片。
+
+    ``partials`` 收 **任意可迭代对象**，且只遍历一次：可加的量（gram/col_sum/q_sum…）
+    就地累加、换手只留前一日，故内存与天数无关、只与「一天」同阶。调用方
+    （``main`` 的 ``_ordered_partials``）因此能流式喂入而不必先把所有天攒成 list ——
+    1336 条因子 × 2589 天攒齐约 73GB，本机 available 仅 23GB，攒就是 OOM。
+
+    ⚠️ 换手率依赖**相邻两日**，故传入顺序必须是 dt 升序（调用方负责保证）。
     """
     gram = np.zeros((n_factors, n_factors), dtype=np.float64)
     col_sum = np.zeros(n_factors, dtype=np.float64)
@@ -345,6 +353,9 @@ def merge_partials(partials: list[dict], n_factors: int, horizons: list[str] | N
         "t_value": t_value,
         "turnover": turnover,
         "n_dates": len(dates_out),
+        # 实际参与合并的日期（升序）。main() 取首尾写 meta —— 流式消费后调用方
+        # 手上不再有 partials 列表，窗口端点只能从这里回传。
+        "dates": dates_out,
         # 多前瞻期汇总：IC 均值与多空价差
         "by_horizon": {
             h: {
@@ -495,30 +506,76 @@ def main() -> int:
                 jj = j0 + kk
                 ref[h] = all_dts[jj] if jj < len(all_dts) else None
             tasks.append((dt, horizons, str(factor_dir), factor_cols, meta_cols, "close_fwd", ref))
-    partials: list[dict] = []
-    if args.workers <= 1:
-        for i, task in enumerate(tasks, 1):
-            p = compute_one_date(task)
-            if p:
-                partials.append(p)
-            if i % 50 == 0:
-                log.info(f"  {i}/{len(tasks)} 天，用时 {time.time() - t0:.0f}s，有效 {len(partials)} 天")
-    else:
-        with ProcessPoolExecutor(max_workers=args.workers) as ex:
-            futures = [ex.submit(compute_one_date, t) for t in tasks]
-            for i, fut in enumerate(as_completed(futures), 1):
-                p = fut.result()
-                if p:
-                    partials.append(p)
-                if i % 100 == 0:
-                    log.info(f"  {i}/{len(tasks)} 天，用时 {time.time() - t0:.0f}s，有效 {len(partials)} 天")
 
-    partials.sort(key=lambda p: p["dt"])  # 换手依赖日期顺序
-    if not partials:
+    def _ordered_partials() -> Iterator[dict]:
+        """按 dt 升序产出逐日中间量，**用完即弃**，不把所有天攒成一个 list。
+
+        每天的结果随带一份 ``(n_factors, n_factors)`` 的 gram 与 ``(n_rows, n_factors)``
+        的分位成员矩阵：1336 条因子 × 2589 天约 73GB，攒齐再 merge 必然 OOM（本机
+        available 仅 23GB，swap 亦已耗尽）。这里按窗口提交、按序消费，在飞的结果
+        至多 ``window`` 天 —— 内存与天数解耦。gram/col_sum 等可加量由 merge_partials
+        就地累加，换手只留前一日。
+
+        ⚠️ 顺序必须是 dt 升序：换手率拿**相邻两日**的分位成员比出来（见 merge_partials），
+        乱序等于把不同交易日拼着比，会把换手算成噪声。
+        """
+        n_ok = 0
+        if args.workers <= 1:
+            for i, task in enumerate(tasks, 1):
+                p = compute_one_date(task)
+                if p:
+                    n_ok += 1
+                    yield p
+                if i % 50 == 0:
+                    log.info(f"  {i}/{len(tasks)} 天，用时 {time.time() - t0:.0f}s，有效 {n_ok} 天")
+            return
+        with ProcessPoolExecutor(max_workers=args.workers) as ex:
+            # 窗口 = 在飞上限（含乱序缓冲）：太小 worker 吃不饱，太大攒回内存。
+            # 4× workers 既让每个进程始终有活干，又把峰值压在 (4×workers) 天。
+            window = max(args.workers * 4, 16)
+            it = iter(enumerate(tasks))
+            inflight: dict = {}
+            buf: dict[int, dict | None] = {}
+            next_i = 0
+
+            def _pump(n: int) -> None:
+                """补 n 个任务进在飞集合 —— 一有空闲就补，不攒够一整窗再发。
+
+                按窗口整批提交、整批排空（``Executor.map`` 那样）会在每个窗口尾部
+                让 worker 空转等最后几个任务收尾；实测 77 天窗口下慢 50%。这里改成
+                完成一个立刻补一个，worker 全程不空转。
+                """
+                for _ in range(n):
+                    try:
+                        i, t = next(it)
+                    except StopIteration:
+                        return
+                    inflight[ex.submit(compute_one_date, t)] = i
+
+            _pump(window)
+            done = 0
+            while inflight:
+                finished, _ = wait(inflight, return_when=FIRST_COMPLETED)
+                for fut in finished:
+                    buf[inflight.pop(fut)] = fut.result()
+                    _pump(1)
+                # 严格按 dt 升序吐给 merge_partials —— 换手拿相邻两日比，顺序不能乱。
+                # 乱序缓冲 buf 至多 window 项，与总天数无关。
+                while next_i in buf:
+                    p = buf.pop(next_i)
+                    next_i += 1
+                    done += 1
+                    if p:
+                        n_ok += 1
+                        yield p
+                    if done % 100 == 0:
+                        log.info(f"  {done}/{len(tasks)} 天，用时 {time.time() - t0:.0f}s，有效 {n_ok} 天")
+
+    merged = merge_partials(_ordered_partials(), n_factors, horizons=horizons)
+    dates = merged["dates"]
+    if not dates:
         log.error("没有任何有效日期（标签可能尚未落地）")
         return 1
-
-    merged = merge_partials(partials, n_factors, horizons=horizons)
     corr = merged["corr"]
     q_mean = merged["q_mean"]
     ls = q_mean[-1] - q_mean[0]
@@ -590,9 +647,9 @@ def main() -> int:
             "horizon": args.horizon,
             "horizons": horizons,
             "label_mode": cfg["label_mode"],
-            "start": partials[0]["dt"],
-            "end": partials[-1]["dt"],
-            "n_dates": len(partials),
+            "start": dates[0],
+            "end": dates[-1],
+            "n_dates": len(dates),
             "n_factors": n_factors,
             "step": args.step,
             "universe": universe,
