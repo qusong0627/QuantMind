@@ -19,6 +19,7 @@ import { AlertTriangle, RefreshCw, Send, ShieldCheck } from 'lucide-react';
 import { Checkbox, Input, Modal, Segmented, Spin, Tooltip, message } from 'antd';
 import { stockTerminalService } from '../services/stockTerminalService';
 import { riskChips } from '../riskModel';
+import { newUuid } from '../../../utils/uuid';
 import {
   CHANNEL_OPTIONS,
   MAX_PICK,
@@ -123,7 +124,9 @@ export function PushConfirmPanel({ open, symbols, side, channels, onChannelsChan
   // 而同一批里反复点确认始终是同一个 id → 服务端幂等键命中，不会重复下单。
   useEffect(() => {
     if (!open) return;
-    setBatchId(crypto.randomUUID());
+    // 必须走 newUuid()：`crypto.randomUUID` 只在安全上下文存在，局域网 http 打开时
+    // 裸调会 TypeError 把整页崩掉（预检面板一点「卖出」就崩，2026-09-20 实测）
+    setBatchId(newUuid());
     setData(null);
     setErr('');
     setDeselected([]);

@@ -5,6 +5,7 @@ import { AlertCircle, TrendingUp, Activity, BarChart2 } from 'lucide-react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 import { authService } from '../../features/auth/services/authService';
 import { useBacktestCenterStore } from '../../stores/backtestCenterStore';
+import { newUuid } from '../../utils/uuid';
 
 interface OptimizationLog {
     timestamp: string;
@@ -74,7 +75,7 @@ export const GeneticOptimizationPanel: React.FC = () => {
 
         abortControllerRef.current = new AbortController();
 
-        const optimizationId = crypto.randomUUID().replace(/-/g, '');
+        const optimizationId = newUuid().replace(/-/g, '');
         setOptimizationId(optimizationId);
 
         addLog(`准备开始遗传算法优化 (Population=${geneticConfig.ga.population_size}, Gens=${geneticConfig.ga.generations})`, 'info');

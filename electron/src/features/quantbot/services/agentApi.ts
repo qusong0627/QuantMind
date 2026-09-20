@@ -5,6 +5,7 @@
 import { apiClient } from '../../../services/api-client';
 import { authService } from '../../auth/services/authService';
 import { SERVICE_URLS } from '../../../config/services';
+import { newUuid } from '../../../utils/uuid';
 
 const API_BASE_URL = '/api/v1/openclaw'; 
 
@@ -167,14 +168,8 @@ class QuantBotApiService {
   }
 
   private createLocalSessionId(): string {
-    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
-      return crypto.randomUUID();
-    }
-    const bytes = Array.from({ length: 16 }, () => Math.floor(Math.random() * 256));
-    bytes[6] = (bytes[6] & 0x0f) | 0x40;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    const hex = bytes.map((b) => b.toString(16).padStart(2, '0')).join('');
-    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+    // 兜底逻辑收敛到 utils/uuid.newUuid（非安全上下文没有 crypto.randomUUID）
+    return newUuid();
   }
 
   private readLocalSessions(): Session[] {
