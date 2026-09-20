@@ -14,11 +14,19 @@ import { EvalScoreBadge } from '../../../components/shared/EvalScoreBadge';
 interface Props {
   selected: string | null;
   onSelect: (item: StockListItem) => void;
-  watchlistSymbols: Set<string>;   // prefix 格式（SH600519）
+  watchlistSymbols: Set<string>;   // prefix 格式（SH600519）· **手工自选真身**，只驱动星标
   /** 行内星标点击：加/移自选（watchlistSymbols 只读，页面持有真实状态） */
   onToggleWatch?: (item: StockListItem, watched: boolean) => void;
+  /**
+   * 「只看自选」的过滤集合（prefix）。缺省回退 `watchlistSymbols`。
+   * 统一视图下 = 手工自选 ∪ 全部持仓（用户的持仓就在自选里）；**星标仍只认手工集合**，
+   * 否则给持仓票点星会变成「取消持仓」，语义打架。
+   */
+  watchFilterSymbols?: Set<string>;
   /** 持仓来源映射（prefix -> 模拟/实盘/BOTH，自选列表「持仓」标记，实时推导） */
   positions?: Map<string, PositionKind>;
+  /** 实时价覆盖（prefix -> 最新价，WS 推送）。有值时优先于日线 `close` 渲染，并标注「实时」 */
+  livePrices?: Record<string, number>;
   onlyWatchlist: boolean;
   onOnlyWatchlist: (v: boolean) => void;
   /** 筛选条件（页面持有，看板面板在左侧列表上方） */
@@ -122,9 +130,11 @@ function RiskBadges({ risk }: { risk?: StockRisk | null }): ReactElement | null 
   );
 }
 
-export function StockSidebar({ selected, onSelect, watchlistSymbols, positions = new Map<string, PositionKind>(), onlyWatchlist, onOnlyWatchlist, onToggleWatch, filters, onFiltersChange, onModels, models: modelOptions = [], onTotals, onSignalDate, fullTotal = 0, onModelRefreshed, onOpen }: Props) {
+export function StockSidebar({ selected, onSelect, watchlistSymbols, watchFilterSymbols, positions = new Map<string, PositionKind>(), livePrices = {}, onlyWatchlist, onOnlyWatchlist, onToggleWatch, filters, onFiltersChange, onModels, models: modelOptions = [], onTotals, onSignalDate, fullTotal = 0, onModelRefreshed, onOpen }: Props) {
   const [market, setMarket] = useState('ALL');
   const [q, setQ] = useState('');
+  /** 「只看自选」口径（手工 ∪ 持仓）；星标与推送仍走 watchlistSymbols/manual，两者不混 */
+  const watchFilter = watchFilterSymbols ?? watchlistSymbols;
   const [data, setData] = useState<StockListResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [optionCounts, setOptionCounts] = useState<Record<string, Record<string, number>>>({});
@@ -202,19 +212,25 @@ export function StockSidebar({ selected, onSelect, watchlistSymbols, positions =
       trend: filters.trend,
       tag: filters.tagId,
       index_code: filters.indexCode,
-      side: searching ? undefined : filters.side,
+      // 检索模式与自选视图都让开「信号」闸：页面的 side=BUY 默认是**候选列表**的语义，
+      // 而「我的自选」问的是「我池子里有什么」—— 一只 SELL 信号的持仓若被这条默认筛掉，
+      // 用户视角就是自己的票凭空消失。侧栏信号列照常逐行标注方向，信息不藏。
+      side: searching || onlyWatchlist ? undefined : filters.side,
       // 风险排除闸**显式传布尔**（后端三个开关默认 false，是为了服务检索框/自选股；
       // 候选列表是「要排除的调用方」，默认全开——见 StockFilterPanel.EXCLUDE_ON）。
       // 检索模式下强制放行：用户搜一只票是为了看它，不是为了被名单静默吞掉。
-      exclude_st: !searching && EXCLUDE_ON(filters.excludeSt),
-      exclude_risk_list: !searching && EXCLUDE_ON(filters.excludeRiskList),
-      exclude_news_risk: !searching && EXCLUDE_ON(filters.excludeNewsRisk),
+      // 只看自选同样强制放行 —— 后端排除闸跑在 `symbols=` **之前**（stock_terminal.py 里
+      // 名单/新闻过滤在前、symbols 过滤在后），闸开着时用户自己的 ST / 名单 / 新闻命中持仓
+      // 会从「我的自选」里静默消失：那是他自己的票，也是最该看见的。
+      exclude_st: !searching && !onlyWatchlist && EXCLUDE_ON(filters.excludeSt),
+      exclude_risk_list: !searching && !onlyWatchlist && EXCLUDE_ON(filters.excludeRiskList),
+      exclude_news_risk: !searching && !onlyWatchlist && EXCLUDE_ON(filters.excludeNewsRisk),
       // 只看自选：把全量自选传给后端过滤（保留分数序），否则前端只过滤已加载页导致列表不全
-      symbols: onlyWatchlist && watchlistSymbols.size ? [...watchlistSymbols].join(',') : undefined,
+      symbols: onlyWatchlist && watchFilter.size ? [...watchFilter].join(',') : undefined,
       ...(withCounts ? { with_counts: true } : {}),
       ...(withCounts && selectedRef.current ? { find_symbol: selectedRef.current } : {}),
     };
-  }, [market, q, filters, onlyWatchlist, watchlistSymbols, searching]);
+  }, [market, q, filters, onlyWatchlist, watchFilter, searching]);
 
   const fetchList = useCallback(async (page = 1, append = false) => {
     setLoading(true);
@@ -330,8 +346,8 @@ export function StockSidebar({ selected, onSelect, watchlistSymbols, positions =
   }, [data, pageInput, totalPages, fetchList]);
 
   const visibleItems = useMemo(
-    () => onlyWatchlist ? (data?.items ?? []).filter(it => watchlistSymbols.has(toPrefix(it.symbol))) : (data?.items ?? []),
-    [data, onlyWatchlist, watchlistSymbols],
+    () => onlyWatchlist ? (data?.items ?? []).filter(it => watchFilter.has(toPrefix(it.symbol))) : (data?.items ?? []),
+    [data, onlyWatchlist, watchFilter],
   );
 
   /** 勾/取消一只。单批上限与服务端 `MAX_BATCH_SYMBOLS` 同口径 —— 超了当场说，不留给 400。 */
@@ -388,28 +404,43 @@ export function StockSidebar({ selected, onSelect, watchlistSymbols, positions =
     neg_extreme: '极端低', neg_short: '做空', pos: '正分', neg: '负分',
   };
 
-  /** 表头列筛选下拉（板块/行业/市值/趋势/得分/信号），长菜单限高滚动避免盖住整个列表 */
-  const headerDropdown = (items: { value: string; label: string }[], current: string | undefined, onPick: (v?: string) => void, placeholder: string) => (
-    <Dropdown
-      trigger={['click']}
-      placement="bottom"
-      menu={{
-        items: [
-          { key: '__all', label: `全部${placeholder}` },
-          ...items.map(x => ({ key: x.value, label: x.label })),
-        ],
-        selectable: true,
-        selectedKeys: current ? [current] : ['__all'],
-        onClick: ({ key }) => onPick(key === '__all' ? undefined : key),
-        style: { maxHeight: 260, overflowY: 'auto' },
-      }}
-    >
-      <button className={`flex items-center justify-center gap-0.5 px-0.5 rounded transition-colors ${current ? 'text-blue-600 font-black' : 'hover:text-blue-500'}`}>
-        <span className="truncate">{current ? (SIDE_LABEL[current] ?? current) : placeholder}</span>
-        <ChevronDown className="w-2.5 h-2.5 shrink-0 opacity-60" />
-      </button>
-    </Dropdown>
-  );
+  /** 表头列筛选下拉（板块/行业/市值/趋势/得分/信号），长菜单限高滚动避免盖住整个列表。
+   *  `locked` = 该列在当前模式下被放行（值不参与请求）：此时**不给下拉**，
+   *  改为灰字 + 说明 title —— 能点却无效果比不能点更糟。 */
+  const headerDropdown = (items: { value: string; label: string }[], current: string | undefined, onPick: (v?: string) => void, placeholder: string, locked = false) => {
+    if (locked) {
+      return (
+        <button
+          disabled
+          title={`${placeholder}筛选项在「自选」/检索模式下已放行（列表含全部方向）——关掉「自选」并清空搜索框后可筛选`}
+          className="flex items-center justify-center gap-0.5 px-0.5 rounded text-slate-300 cursor-not-allowed"
+        >
+          <span className="truncate">{current ? (SIDE_LABEL[current] ?? current) : placeholder}</span>
+        </button>
+      );
+    }
+    return (
+      <Dropdown
+        trigger={['click']}
+        placement="bottom"
+        menu={{
+          items: [
+            { key: '__all', label: `全部${placeholder}` },
+            ...items.map(x => ({ key: x.value, label: x.label })),
+          ],
+          selectable: true,
+          selectedKeys: current ? [current] : ['__all'],
+          onClick: ({ key }) => onPick(key === '__all' ? undefined : key),
+          style: { maxHeight: 260, overflowY: 'auto' },
+        }}
+      >
+        <button className={`flex items-center justify-center gap-0.5 px-0.5 rounded transition-colors ${current ? 'text-blue-600 font-black' : 'hover:text-blue-500'}`}>
+          <span className="truncate">{current ? (SIDE_LABEL[current] ?? current) : placeholder}</span>
+          <ChevronDown className="w-2.5 h-2.5 shrink-0 opacity-60" />
+        </button>
+      </Dropdown>
+    );
+  };
 
   /** 列筛选值集合（优先后端 facets，回退全量选项） */
   const fac = (key: string, fallback: { value: string; label: string }[]): { value: string; label: string }[] => {
@@ -460,13 +491,28 @@ export function StockSidebar({ selected, onSelect, watchlistSymbols, positions =
       {/* 检索模式声明：搜索时让开了候选列表的默认闸门，必须**说出来**。
           不说的话，用户会以为「列表里这些票就是候选」——而检索结果里恰恰包含
           非买入信号与被名单/新闻拦下的票。让开是行为，声明才是证据。 */}
-      {searching && (
+      {searching && !onlyWatchlist && (
         <div className="flex items-center gap-1.5 shrink-0 mb-1.5 rounded-lg border border-blue-100 bg-blue-50/70 px-2 py-1">
           <Search className="w-3 h-3 text-blue-500 shrink-0" />
           <span className="text-[10px] font-bold text-blue-700 shrink-0">检索模式</span>
           <span className="text-[9px] text-slate-600 leading-tight">
             已暂时放行「信号=买入」与三道风险排除闸 —— 你搜的票若信号不是买入、或被名单/新闻拦下，
             这里仍会列出来并逐行标注原因；关掉搜索框即恢复候选视图。
+          </span>
+        </div>
+      )}
+
+      {/* 自选视图声明：与检索模式同理，让开闸门必须**说出来**。
+          后端三道风险闸跑在 `symbols=` 之前 —— 闸开着时，自己持仓里的 ST / 名单命中票
+          会从「只看自选」里静默消失（用户视角：我的票丢了）。故自选视图下一律放行，
+          并在此声明；行内风险徽章照常逐行标注，不藏信息。 */}
+      {onlyWatchlist && (
+        <div className="flex items-center gap-1.5 shrink-0 mb-1.5 rounded-lg border border-amber-200 bg-amber-50/70 px-2 py-1">
+          <Star className="w-3 h-3 text-amber-500 shrink-0" />
+          <span className="text-[10px] font-bold text-amber-700 shrink-0">自选视图</span>
+          <span className="text-[9px] text-slate-600 leading-tight">
+            已放行三道风险排除闸与「信号」筛选{searching ? '（并含检索模式的放行）' : ''} —— 你的持仓 / 自选即使 ST、在名单上、
+            有新闻利空，或当日信号不是买入，也会列出来并逐行标注；关掉「自选」即恢复候选视图的默认闸门。
           </span>
         </div>
       )}
@@ -539,23 +585,31 @@ export function StockSidebar({ selected, onSelect, watchlistSymbols, positions =
         const stOn = EXCLUDE_ON(filters.excludeSt);
         const riskOn = EXCLUDE_ON(filters.excludeRiskList);
         const newsOn = EXCLUDE_ON(filters.excludeNewsRisk);
+        // 自选视图下 buildParams 强制放行三道闸：按钮点了不生效，必须**锁住**——
+        // 可点却无效果比不存在更糟（用户以为自己开了闸，实际列表一只没排）。
+        const gateLocked = onlyWatchlist;
         const channel = (
           label: string, on: boolean, n: number, tip: string, isBad: boolean, onToggle: () => void,
         ) => (
           <button
             key={label}
             type="button"
+            disabled={gateLocked}
             onClick={onToggle}
-            title={tip}
+            title={gateLocked
+              ? '自选视图期间强制放行（避免你自己的持仓被名单静默吞掉）；关掉「自选」后可调'
+              : tip}
             className={`shrink-0 rounded border px-1 py-0.5 text-[9px] font-bold transition-colors ${
-              isBad
-                ? 'border-rose-200 bg-rose-50 text-rose-600 hover:bg-rose-100'
-                : on
-                  ? 'border-amber-200 bg-white text-amber-700 hover:bg-amber-100'
-                  : 'border-slate-200 bg-slate-100 text-slate-400 hover:bg-white'
+              gateLocked
+                ? 'border-slate-200 bg-slate-50 text-slate-300 cursor-not-allowed'
+                : isBad
+                  ? 'border-rose-200 bg-rose-50 text-rose-600 hover:bg-rose-100'
+                  : on
+                    ? 'border-amber-200 bg-white text-amber-700 hover:bg-amber-100'
+                    : 'border-slate-200 bg-slate-100 text-slate-400 hover:bg-white'
             }`}
           >
-            {label} {isBad ? '不可用' : channelText(on, n)}
+            {label} {gateLocked ? '放行' : isBad ? '不可用' : channelText(on, n)}
           </button>
         );
         const asofShort = (listMeta.asof || '').slice(5);   // 2026-09-18 → 09-18
@@ -563,7 +617,7 @@ export function StockSidebar({ selected, onSelect, watchlistSymbols, positions =
           <div className="flex items-center gap-1 flex-wrap shrink-0 mt-0.5 rounded-lg border border-amber-100 bg-amber-50/70 px-1.5 py-1">
             <ShieldCheck className="w-3 h-3 text-amber-500 shrink-0" />
             <span className="text-[10px] font-black text-amber-700 shrink-0">风险闸</span>
-            <span className="text-[9px] text-slate-500 shrink-0">已排除</span>
+            <span className="text-[9px] text-slate-500 shrink-0">{onlyWatchlist ? '放行中' : '已排除'}</span>
             {channel('ST', stOn, em.excluded?.st ?? 0,
               'ST / *ST：QuantDB instrument_detail.IsSTGP 快照，只在实盘窗口内有真值（历史日不套用，避免前视偏差）',
               false, () => onFiltersChange({ ...filters, excludeSt: !stOn }))}
@@ -657,7 +711,7 @@ export function StockSidebar({ selected, onSelect, watchlistSymbols, positions =
         <span className="text-right">{headerDropdown(fac('bucket', BUCKET_OPTIONS), filters.bucket, v => onFiltersChange({ ...filters, bucket: v, scoreMin: undefined }),
           filters.bucket ? (BUCKET_SHORT[filters.bucket] ?? '得分') : '得分')}</span>
         <span className="text-center" title="仓位信号：0=不入场（低于行业头部/大盘空仓），0.1~0.99=建议投入比例（半凯利）">仓位</span>
-        <span className="text-center">{headerDropdown(fac('side', [{ value: 'BUY', label: '买入' }, { value: 'SELL', label: '卖出' }, { value: 'HOLD', label: '持有' }]), filters.side, v => onFiltersChange({ ...filters, side: v }), '信号')}</span>
+        <span className="text-center">{headerDropdown(fac('side', [{ value: 'BUY', label: '买入' }, { value: 'SELL', label: '卖出' }, { value: 'HOLD', label: '持有' }]), filters.side, v => onFiltersChange({ ...filters, side: v }), '信号', searching || onlyWatchlist)}</span>
       </div>
 
       {/* 股票列表 */}
@@ -670,7 +724,17 @@ export function StockSidebar({ selected, onSelect, watchlistSymbols, positions =
         {visibleItems.map((it, i) => {
             const isSel = it.symbol === selected;
             const isPicked = picked.has(it.symbol);
-            const up = (it.pct_change ?? 0) >= 0;
+            const prefix = toPrefix(it.symbol);
+            // 实时价覆盖（WS `stock.{code}`，2s 一帧）：有帧时显示盘中价、涨跌幅相对
+            // 最近收盘价重算；无帧回退日线 close/pct_change。两种情况各自如实呈现，
+            // 不把日线收盘价标成实时，也不拿实时价冒充收盘价。
+            const live = livePrices[prefix];
+            const hasLive = live != null && Number.isFinite(live) && live > 0;
+            const price = hasLive ? live : it.close;
+            const pct = hasLive && it.close != null && it.close > 0
+              ? ((live - it.close) / it.close) * 100
+              : it.pct_change;
+            const up = (pct ?? 0) >= 0;
             const rank = pageOffsetRef.current + i + 1;   // 跳页后显示真实名次
             const rankMedal = rank <= 3 ? ['🥇', '🥈', '🥉'][rank - 1] : String(rank);
             return (
@@ -703,7 +767,7 @@ export function StockSidebar({ selected, onSelect, watchlistSymbols, positions =
                   <span className="flex items-center justify-between gap-1">
                     <span className="text-xs font-bold text-slate-700 truncate flex items-center gap-0.5 min-w-0">
                       {(() => {
-                        const watched = watchlistSymbols.has(toPrefix(it.symbol));
+                        const watched = watchlistSymbols.has(prefix);
                         return (
                           <span
                             role="button"
@@ -717,7 +781,7 @@ export function StockSidebar({ selected, onSelect, watchlistSymbols, positions =
                         );
                       })()}
                       {(() => {
-                        const kind = positions.get(toPrefix(it.symbol));
+                        const kind = positions.get(prefix);
                         if (!kind) return null;
                         const badge = POSITION_BADGE[kind];
                         return <span title={badge.title} className={`text-[8px] font-bold rounded px-0.5 shrink-0 border ${badge.cls}`}>{badge.label}</span>;
@@ -726,11 +790,19 @@ export function StockSidebar({ selected, onSelect, watchlistSymbols, positions =
                       <RiskBadges risk={it.risk} />
                       <span className="truncate">{it.name}</span>
                     </span>
-                    <span className={`text-[10px] font-mono shrink-0 ${up ? 'text-rose-500' : 'text-emerald-500'}`}>{fmtPct(it.pct_change)}</span>
+                    <span
+                      className={`text-[10px] font-mono shrink-0 ${up ? 'text-rose-500' : 'text-emerald-500'}`}
+                      title={hasLive ? `实时涨跌幅（相对最近收盘 ${it.close?.toFixed(2) ?? '--'}）` : undefined}
+                    >
+                      {fmtPct(pct)}{hasLive && <span className="ml-0.5 text-[8px] text-sky-500 font-bold">实时</span>}
+                    </span>
                   </span>
                   <span className="flex items-center justify-between gap-1">
                     <span className="text-[9px] text-slate-400 font-mono truncate">{it.symbol}</span>
-                    <span className="text-[9px] text-slate-500 font-mono shrink-0">{it.close?.toFixed(2) ?? '--'} · {fmtMv(it.total_mv)}</span>
+                    <span className="text-[9px] font-mono shrink-0" title={hasLive ? '盘中实时价' : '日线收盘价'}>
+                      <span className={hasLive ? 'text-sky-600 font-bold' : 'text-slate-500'}>{price?.toFixed(2) ?? '--'}</span>
+                      {' · '}{fmtMv(it.total_mv)}
+                    </span>
                   </span>
                 </span>
                 {/* 板块 + 当天头部 top10 均分 */}

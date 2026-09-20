@@ -6,7 +6,7 @@
  * 右侧：选中股终端入口 + 信号分布卡（原 SignalsSection）。
  * 纪律：模型刷新（日历补推理）完成后按用户指定跳转「系统健康」（onModelRefreshed 上抛给宿主页签容器）。
  */
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { message } from 'antd';
 import { CandlestickChart } from 'lucide-react';
 import { StockSidebar, toPrefix } from '../../../features/stock-terminal/components/StockSidebar';
@@ -21,6 +21,39 @@ import type { SignalsBlock } from '../../../features/desk/types';
 import { BarChart3, TrendingDown } from 'lucide-react';
 import { researchService } from '../../../services/researchService';
 import { stockTerminalService as cnTerminalService } from '../../../features/stock-terminal/services/stockTerminalService';
+import type { PositionKind } from '../../../features/stock-terminal/components/StockSidebar';
+import { websocketService, MessageType } from '../../../services/websocketService';
+
+/** A 股交易时段（含集合竞价尾段与尾盘），用于自选池实时刷新节流 */
+function isCnTradingHours(d = new Date()): boolean {
+  const day = d.getDay();
+  if (day === 0 || day === 6) return false;
+  const m = d.getHours() * 60 + d.getMinutes();
+  return (m >= 9 * 60 + 25 && m <= 11 * 60 + 35) || (m >= 12 * 60 + 55 && m <= 15 * 60 + 5);
+}
+
+/** stream 服务实时行情（topic stock.{code}，2s 推一次；与持仓监控同管道） */
+interface LiveQuote {
+  stock_code?: string;
+  data?: { price?: number | null };
+}
+
+/**
+ * 内容相等判定 —— 60s 轮询每次都新建 Set/Map，若原样塞进 state，引用变更会顺着
+ * props → buildParams → fetchList 一路传下去，让侧栏列表**每分钟被重置回第 1 页**
+ * （用户正翻到第 5 页看候选，轮询一到就被拽回来）。内容没变就复用旧引用。
+ */
+function sameSymbols(a: Set<string>, b: Set<string>): boolean {
+  if (a.size !== b.size) return false;
+  for (const x of a) if (!b.has(x)) return false;
+  return true;
+}
+
+function samePositions(a: Map<string, PositionKind>, b: Map<string, PositionKind>): boolean {
+  if (a.size !== b.size) return false;
+  for (const [k, v] of a) if (b.get(k) !== v) return false;
+  return true;
+}
 
 interface SignalsExplorerPageProps {
   /** 模型刷新（日历补推理）完成 → 宿主页跳「系统健康」 */
@@ -37,10 +70,23 @@ const SignalsExplorerPage: React.FC<SignalsExplorerPageProps> = ({ onModelRefres
   const [listTotal, setListTotal] = useState(0);
   const [fullTotal, setFullTotal] = useState(0);
   const [signalDate, setSignalDate] = useState<string | undefined>(undefined);
-  const [watchlist, setWatchlist] = useState<Set<string>>(new Set());
+  const [watchlist, setWatchlist] = useState<Set<string>>(new Set());          // 手工自选（星标真身）
+  const [watchFilterSymbols, setWatchFilterSymbols] = useState<Set<string>>(new Set()); // 手工 ∪ 持仓（只看自选口径）
+  const [positions, setPositions] = useState<Map<string, PositionKind>>(new Map());      // 持仓徽章
+  const [livePrices, setLivePrices] = useState<Record<string, number>>({});              // prefix -> 实时价
   const [onlyWatchlist, setOnlyWatchlist] = useState(false);
   // 低分股（末位 10 只，全市场按得分升序的尾部）——右侧筛选展示
   const [lowScores, setLowScores] = useState<Array<{ symbol: string; name: string; score: number | null }>>([]);
+  // 上面三个集合的渲染期镜像 ref：轮询回调（useCallback 空依赖）需要读「上一次的值」
+  // 才能做内容比对，而本项目 tsc 不接受函数式 setter（见 useState-functional-setter-type-bug）。
+  const watchlistRef = useRef(watchlist);
+  watchlistRef.current = watchlist;
+  const positionsRef = useRef(positions);
+  positionsRef.current = positions;
+  const watchFilterRef = useRef(watchFilterSymbols);
+  watchFilterRef.current = watchFilterSymbols;
+  // 实时价用「ref 作真源、state 作渲染镜像」：WS 帧快于渲染时也不会丢更新
+  const livePricesRef = useRef<Record<string, number>>({});
 
   // 预取个股终端代码包：点行弹窗即刻可用（性能优化）
   useEffect(() => {
@@ -82,17 +128,92 @@ const SignalsExplorerPage: React.FC<SignalsExplorerPageProps> = ({ onModelRefres
     };
   }, []);
 
+  /**
+   * 自选池统一视图（手工 ∪ 模拟持仓 ∪ 实盘持仓 ∪ 正分候选），读时并集不写库：
+   * - 星标只用 manual（点击加/移的是手工自选真身，持仓不会因为点星消失）
+   * - 「只看自选」用 手工 ∪ 持仓（用户口径：我的持仓就在自选里）
+   * - 持仓明细给出行内 模拟/实盘/双 徽章（此前是留好的空插槽）
+   */
+  const loadUnifiedWatchlist = useCallback(async () => {
+    const d = await researchService.getUnifiedWatchlist(300, 200);
+    const manual = new Set<string>();
+    const pos = new Map<string, PositionKind>();
+    const filterSet = new Set<string>();
+    for (const it of d.items ?? []) {
+      const p = it.symbol;
+      const hasSim = !!it.position?.sim;
+      const hasReal = !!it.position?.real;
+      if (it.sources.includes('manual')) {
+        manual.add(p);
+        filterSet.add(p);
+      }
+      if (hasSim || hasReal) {
+        pos.set(p, hasSim && hasReal ? 'BOTH' : hasReal ? 'REAL' : 'SIM');
+        filterSet.add(p);
+      }
+    }
+    if (!sameSymbols(watchlistRef.current, manual)) setWatchlist(manual);
+    if (!samePositions(positionsRef.current, pos)) setPositions(pos);
+    if (!sameSymbols(watchFilterRef.current, filterSet)) setWatchFilterSymbols(filterSet);
+    return filterSet;
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
-    researchService
-      .getWatchlist(300)
-      .then((resp) => {
-        if (!cancelled) setWatchlist(new Set((resp.items || []).map((i) => i.symbol)));
-      })
-      .catch(() => {});
+    loadUnifiedWatchlist().catch(() => {});
     return () => {
       cancelled = true;
     };
+  }, [loadUnifiedWatchlist]);
+
+  // 自选/持仓池实时刷新：交易时段 60s 一次（分数由日频/实时推理落库，价格走下方 WS）
+  useEffect(() => {
+    const timer = setInterval(() => {
+      if (document.hidden) return;
+      if (!isCnTradingHours()) return;
+      loadUnifiedWatchlist().catch(() => {});
+    }, 60_000);
+    return () => clearInterval(timer);
+  }, [loadUnifiedWatchlist]);
+
+  // 订阅自选/持仓池实时价（topic stock.{code}；与持仓监控同一管道，2s 一推）
+  const subscribedRef = React.useRef<string[]>([]);
+  useEffect(() => {
+    const symbols = [...watchFilterSymbols];
+    if (symbols.length === 0) return;
+    const toSubscribe = symbols.filter((c) => !subscribedRef.current.includes(c));
+    if (toSubscribe.length === 0) return;
+    subscribedRef.current = [...subscribedRef.current, ...toSubscribe];
+    websocketService.subscribe({ symbols: toSubscribe });
+  }, [watchFilterSymbols]);
+
+  useEffect(() => {
+    const handler = (data: unknown) => {
+      const msg = data as LiveQuote;
+      const code = String(msg?.stock_code || '').toUpperCase();
+      const price = Number(msg?.data?.price);
+      if (!code || !Number.isFinite(price) || price <= 0) return;
+      // stock_code 可能是代码或 prefix/suffix，归一到 prefix 键
+      const prefix = /^(SH|SZ|BJ)\d{6}$/.test(code)
+        ? code
+        : toPrefix(code.includes('.') ? code : `${code}.SH`);
+      const prev = livePricesRef.current;
+      if (prev[prefix] === price) return;
+      livePricesRef.current = { ...prev, [prefix]: price };
+      setLivePrices(livePricesRef.current);
+    };
+    websocketService.addMessageHandler('quote' as MessageType, handler);
+    return () => {
+      websocketService.removeMessageHandler('quote' as MessageType, handler);
+    };
+  }, []);
+
+  // 退页时退订
+  useEffect(() => () => {
+    if (subscribedRef.current.length) {
+      websocketService.unsubscribe(subscribedRef.current);
+      subscribedRef.current = [];
+    }
   }, []);
 
   const onSelect = useCallback((item: StockListItem) => {
@@ -145,6 +266,9 @@ const SignalsExplorerPage: React.FC<SignalsExplorerPageProps> = ({ onModelRefres
             selected={selected}
             onSelect={onSelect}
             watchlistSymbols={watchlist}
+            watchFilterSymbols={watchFilterSymbols}
+            positions={positions}
+            livePrices={livePrices}
             onToggleWatch={(item, watched) => void toggleWatch(item, watched)}
             onlyWatchlist={onlyWatchlist}
             onOnlyWatchlist={setOnlyWatchlist}

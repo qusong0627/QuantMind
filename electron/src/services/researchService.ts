@@ -206,6 +206,20 @@ class ResearchService {
     return resp.data?.data ?? { positions: [] };
   }
 
+  /**
+   * 自选池统一视图：手工自选 ∪ 模拟持仓 ∪ 实盘持仓 ∪ 正分候选（读时并集，不写库）。
+   *
+   * 与 `getWatchlist`（手工自选真身）不同：这里一次拿到四来源 + 每只票的
+   * 分通道持仓明细、分数（实时分标 freq='realtime'）与风险载荷。
+   * 来源可用性看 `meta.sources[*].ok`——false 时该项**取不到**，不是「没有」。
+   */
+  async getUnifiedWatchlist(limit = 300, candidateCap = 200): Promise<UnifiedWatchlistPayload> {
+    const resp = await this.client.get<{ data: UnifiedWatchlistPayload }>(
+      `/research/watchlist/unified?limit=${limit}&candidate_cap=${candidateCap}`,
+    );
+    return resp.data.data;
+  }
+
   // ============ 研究池接口 ============
 
   async addToResearchPool(symbol: string, options?: {
@@ -358,6 +372,68 @@ export interface WatchlistItem {
   sourceRunId: string | null;
   notes: string | null;
   tags: string[];
+}
+
+/** 自选池来源（读时并集；manual 是唯一落库的真身） */
+export type WatchlistSource = 'manual' | 'position_sim' | 'position_real' | 'candidate';
+
+export interface UnifiedPosition {
+  volume: number | null;
+  availableVolume: number | null;
+  cost: number | null;
+  marketValue: number | null;
+  price: number | null;
+  side: string;
+  /** 实盘出处（qmt_exec / tdx_bridge）——同一 user 下可能有两个真实账户 */
+  source?: string;
+  sources?: string[];
+}
+
+export interface UnifiedScore {
+  value: number | null;
+  side: string | null;
+  /** realtime = 盘中热集实时分；daily = 日频信号分（降级路径） */
+  freq: 'daily' | 'realtime';
+  asOf: string | null;
+}
+
+export interface UnifiedRisk {
+  excluded: boolean;
+  hits?: Array<Record<string, unknown>>;
+  news?: Record<string, Array<Record<string, unknown>>>;
+}
+
+export interface UnifiedWatchlistItem {
+  symbol: string;              // prefix（SH600036）
+  stockName: string | null;
+  sources: WatchlistSource[];
+  position: { sim?: UnifiedPosition; real?: UnifiedPosition };
+  score: UnifiedScore | null;
+  risk?: UnifiedRisk;
+  addedAt?: string | null;
+}
+
+export interface UnifiedWatchlistPayload {
+  items: UnifiedWatchlistItem[];
+  counts: {
+    manual: number;
+    position_sim: number;
+    position_real: number;
+    candidate_total: number;
+    candidate_shown: number;
+    total: number;
+    shown: number;
+    risk_annotated: number;
+  };
+  meta: {
+    sources: Record<string, { ok: boolean; reason?: string }>;
+    signal_date: string | null;
+    realtime_rows: number;
+    real_snapshot_at: string | null;
+    real_sources: Record<string, { snapshot_at: string | null; positions: number; stale: boolean; lag_min: number | null; active_broker: boolean }>;
+    real_active_broker: string | null;
+    exclusion: Record<string, unknown>;
+  };
 }
 
 export interface ResearchPoolItem {
