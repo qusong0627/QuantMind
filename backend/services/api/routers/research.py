@@ -27,6 +27,7 @@ from backend.services.api.routers.research_service import (
     get_research_universe_by_date as get_research_universe_by_date_service,
     get_stock_kline as get_stock_kline_service,
     get_symbols_features as get_symbols_features_service,
+    get_unified_watchlist as get_unified_watchlist_service,
     get_user_research_pool as get_user_research_pool_service,
     get_user_watchlist as get_user_watchlist_service,
     predict_single_stock as predict_single_stock_service,
@@ -169,6 +170,25 @@ async def get_user_watchlist(
 ):
     tid, uid = str(current_user["tenant_id"]), str(current_user["user_id"])
     return await get_user_watchlist_service(tid, uid, limit, offset)
+
+
+@router.get("/watchlist/unified")
+async def get_unified_watchlist(
+    request: Request,
+    limit: int = Query(300, ge=1, le=1000),
+    candidate_cap: int = Query(200, ge=0, le=1000),
+    current_user: dict = Depends(get_current_user),
+):
+    """自选池统一视图：手工自选 ∪ 模拟持仓 ∪ 实盘持仓 ∪ 正分候选。
+
+    读时并集、不写库——`qm_user_watchlist` 仍是手工自选的唯一真身，持仓/候选
+    不落库，卖出后持仓源自然消失。四个来源各自的可用性在 `meta.sources` 里
+    如实标注（取不到 ≠ 没有）。
+    """
+    auth = request.headers.get("authorization") or request.headers.get("Authorization") or ""
+    return await get_unified_watchlist_service(
+        str(current_user["tenant_id"]), str(current_user["user_id"]), auth, limit, candidate_cap
+    )
 
 
 @router.post("/watchlist/sync-positions")

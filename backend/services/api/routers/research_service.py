@@ -2351,6 +2351,32 @@ async def sync_watchlist_positions_service(tid: str, uid: str, authorization: st
     return {"code": 200, "data": {"positions": positions}}
 
 
+async def get_unified_watchlist(
+    tid: str, uid: str, authorization: str, limit: int, candidate_cap: int
+) -> dict[str, Any]:
+    """自选池统一视图（手工 ∪ 模拟持仓 ∪ 实盘持仓 ∪ 正分候选，读时并集）。
+
+    实现在 `unified_watchlist` 模块；这里只补一步「股票简称」回填——候选来自
+    `engine_signal_scores`，那表没有名称列，缺名会在界面上显示成裸代码。
+    """
+    from backend.services.api import unified_watchlist as _unified
+
+    payload = await _unified.build_unified_watchlist(
+        tenant_id=tid,
+        user_id=uid,
+        authorization=authorization,
+        trade_base_url=TRADE_BASE_URL,
+        limit=limit,
+        candidate_cap=candidate_cap,
+    )
+    if any(not it.get("stockName") for it in payload["items"]):
+        names = await asyncio.to_thread(_get_quantdb_stock_names)
+        for it in payload["items"]:
+            if not it.get("stockName"):
+                it["stockName"] = names.get(StockCodeUtil.to_suffix(it["symbol"]))
+    return {"code": 200, "data": payload}
+
+
 async def get_user_research_pool(tid: str, uid: str, status: str | None, limit: int, offset: int) -> dict[str, Any]:
     where = "tenant_id = :tid AND user_id = :uid"
     params: dict[str, Any] = {"tid": tid, "uid": uid, "limit": limit, "offset": offset}
