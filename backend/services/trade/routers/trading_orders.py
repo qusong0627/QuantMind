@@ -3,13 +3,15 @@ Order API Routes
 """
 
 import logging
-from typing import List, Optional
+from typing import Optional
+from collections.abc import Callable
 from uuid import UUID
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.shared.stock_name_mapper import resolve_name
 from backend.services.trade_shared.deps import AuthContext, get_auth_context, get_db, get_redis
 from backend.services.trade_shared.models.order import OrderStatus, TradingMode
 from backend.services.trade_shared.redis_client import RedisClient
@@ -33,6 +35,30 @@ def _require_user_id(raw_user_id: str) -> str:
     if not raw_user_id:
         raise HTTPException(status_code=400, detail="Invalid user_id in token")
     return raw_user_id
+
+
+def fill_order_names(
+    orders: list[OrderResponse],
+    resolver: Callable[[str], str] | None = None,
+) -> list[OrderResponse]:
+    """给缺失名称的委托补上股票名（就地补在**响应对象**上，不碰 ORM 实例）。
+
+    为什么不碰 ORM：`orders.symbol_name` 是真实映射列，在 GET 里给持久化对象赋值
+    会把会话标脏 → 收尾 flush 时读出 UPDATE（只读副本直接报错）。补在已序列化的
+    `OrderResponse` 上则是一次纯内存加工。
+
+    只补空值：库里写好的名字优先（人工修正不得被覆盖）。查不到保持 None，
+    由前端回落显示代码——不写空串、更不把代码塞进名称列，否则「有名字」与
+    「没名字」在界面上就分不出来了。
+    """
+    lookup = resolver or resolve_name
+    for order in orders:
+        if order.symbol_name:
+            continue
+        name = lookup(order.symbol) or ""
+        if name:
+            order.symbol_name = name
+    return orders
 
 
 @router.post("/", response_model=OrderResponse, status_code=status.HTTP_201_CREATED)
@@ -257,7 +283,11 @@ async def list_orders(
     order_service = OrderService(db, redis)
     orders = await order_service.list_orders(query)
 
-    return orders
+    # 桥接写入路径不写 symbol_name（199 行里 114 行 NULL），前端「股票」列只剩代码。
+    # 列表是所有交易记录界面的取数口（策略管理/交易记录页签），补在最里层一次到位。
+    return fill_order_names(
+        [OrderResponse.model_validate(o) for o in orders]
+    )
 
 
 @router.get("/stats/summary")

@@ -383,6 +383,12 @@ export interface Order {
     filled_quantity: number;
     average_price?: number;
     filled_value?: number;
+    /** 手续费（后端 OrderResponse 已返回；缺失表示该行没有这个数，不是 0） */
+    commission?: number;
+    /** 备注；撤单原因由后端追加为 `[CANCELLED: 原因]` */
+    remarks?: string;
+    trading_mode?: string;
+    strategy_id?: number | null;
     trade_action?: string;
     submitted_at?: string;
     created_at: string;
