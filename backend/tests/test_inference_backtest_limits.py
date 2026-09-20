@@ -41,8 +41,10 @@ from backend.services.engine.inference.inference_backtest_service import (
 )
 from backend.shared.stock_utils import StockCodeUtil
 
-#: 与实现同源的取整余量（百分点），沿用旧值 9.8 = 10 − 0.2。
-_SLACK_PCT = 0.2
+#: 与实现同源的取整余量（百分点）—— 唯一事实源 `local_market_data.LIMIT_TOLERANCE`
+#: （比例 0.005 × 100 = 0.5pp）。旧值 0.2pp（9.8 = 10 − 0.2 的旧写死线）由实测证伪：
+#: 股价 < ¥2.50 时漏判真涨停。
+_SLACK_PCT = 0.5
 
 #: ST 主板 5% 保护期内的一个**未封板**跌幅：-4.9% 已贴住 5% 线以内，
 #: 但它本身不是断言的目标，只是喂给判定的输入。

@@ -111,6 +111,19 @@ _CHINEXT_20PCT_FROM = date(2020, 8, 24)
 
 _CENT = Decimal("0.01")
 
+#: 涨跌停判定的取整容差（比例）—— **唯一事实源**，各处不得再自备副本。
+#:
+#: 限价按分取整：真封板的收盘价 = round_half_up(pre_close × (1+板别), 2)，故实际涨幅
+#: 最多比名义板别低 ``0.005/pre_close``。股价 ≥ ¥1 时上界即 0.5pp；北交所截尾取整，
+#: 上界翻倍为 1pp。
+#:
+#: ⚠️ 实测订正（2026-09-20，daily_unadjusted，41 个交易日 × 2864 个真实封板事件，
+#: 判据 = close 逐分等于本模块 compute_limits 的限价）：涨停最大偏差 0.278pp，
+#: **0.2pp 容差漏判 4 条**（前收 1.23 / 1.43 / 1.44 / 1.74），0.5pp 漏判 0 条。
+#: 0.2pp 只在股价 ≥ ¥2.50 时才够用 —— 它是 9.8 那个旧写死线留下的余量，已废弃。
+LIMIT_TOLERANCE = 0.005
+LIMIT_TOLERANCE_BSE = 0.01
+
 # amount/volume 的单位按日**自动识别**而非硬编码 —— 两者相差 6 个数量级，
 # 搞错会让成交额/vwap 偏 1e4 倍：
 #   旧口径(LEGACY)：volume=股,  amount=万元 -> close*volume/amount ≈ 1e4

@@ -194,10 +194,6 @@ class SimulationExecutionEngine:
             return False
         return abs(price - limit_price) / max(limit_price, 1e-6) <= tolerance
 
-    #: 涨跌停判定的取整容差。与 `cn_exchange._LIMIT_TOLERANCE` 同源同值（0.5pp），
-    #: 用于吸收「涨跌停价按分取整」后实际涨幅略低于名义幅度的情形。
-    _LIMIT_TOLERANCE = 0.005
-
     @classmethod
     def _board_limit_threshold(cls, symbol: str) -> float:
         """按标的返回涨跌停判定阈值（ask1/bid1缺失时的兜底）。
@@ -214,10 +210,14 @@ class SimulationExecutionEngine:
         """
         from datetime import date as _date
 
+        # 取整容差（比例）—— 唯一事实源，本类不再持有 `_LIMIT_TOLERANCE` 副本。
+        from backend.services.simulation.services.local_market_data import (
+            LIMIT_TOLERANCE,
+            limit_pct,
+        )
+
         pct = 0.10  # 兜底：无法解析时按主板 10%
         try:
-            from backend.services.simulation.services.local_market_data import limit_pct
-
             pct = float(
                 limit_pct(
                     symbol,
@@ -232,7 +232,7 @@ class SimulationExecutionEngine:
             logger.warning(
                 "涨跌停板规解析失败，按主板 10% 兜底 (symbol=%s)", symbol, exc_info=True
             )
-        return pct - cls._LIMIT_TOLERANCE
+        return pct - LIMIT_TOLERANCE
 
     @staticmethod
     def _enrich_cn_limits(

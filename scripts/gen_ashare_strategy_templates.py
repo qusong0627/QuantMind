@@ -730,10 +730,6 @@ class LimitUpGuardStrategy(RedisRecordingStrategy):
     覆写 ``_adjust_signal``（基类的 generate_trade_decision 真正调用的钩子）。
     """
 
-    #: 「贴板」容差（比例），沿用旧表的内置余量：封板价要按分取整，真封死的票
-    #: 可能只显示 9.97%，不留余量会把真涨停判丢。
-    _LIMIT_TOLERANCE = 0.005
-
     def __init__(self, *args, **kwargs):
         self.lookback_days = int(kwargs.pop("lookback_days", 10))
         self.max_limit_ups = int(kwargs.pop("max_limit_ups", 0))
@@ -753,16 +749,23 @@ class LimitUpGuardStrategy(RedisRecordingStrategy):
         """
         from datetime import date as _date
 
-        from backend.services.simulation.services.local_market_data import limit_pct
-
         try:
-            # 日期解析也必须在 try 内 —— 放在外面时，救不了「ref_date 不可解析」
+            # 导入也在 try 内：本模板会被用户克隆成独立策略在别处跑，「拿不到权威
+            # 实现」是真实场景，此时必须走下面的保守兜底而不是抛出去。
+            from backend.services.simulation.services.local_market_data import (
+                LIMIT_TOLERANCE,
+                limit_pct,
+            )
+
+            # 日期解析同理必须在 try 内 —— 放在外面时，救不了「ref_date 不可解析」
             # 这个最可能触发兜底的场景，兜底分支等于死代码。
             td = (
                 pd.Timestamp(ref_date).date()
                 if ref_date is not None
                 else _date.today()
             )
+            # 余量唯一事实源 = LIMIT_TOLERANCE（0.5pp）：封板价要按分取整，
+            # 真封死的票可能只显示 9.97%，不留余量会把真涨停判丢。
             return (
                 float(
                     limit_pct(
@@ -771,7 +774,7 @@ class LimitUpGuardStrategy(RedisRecordingStrategy):
                         trade_date=td,
                     )
                 )
-                - LimitUpGuardStrategy._LIMIT_TOLERANCE
+                - LIMIT_TOLERANCE
             )
         except Exception:  # noqa: BLE001
             # 兜底只降级、不改口径**方向**：拿不到权威实现时按最严的主板线判，

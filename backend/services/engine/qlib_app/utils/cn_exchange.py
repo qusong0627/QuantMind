@@ -16,11 +16,11 @@ from backend.services.engine.qlib_app.utils.structured_logger import StructuredT
 
 task_logger = StructuredTaskLogger(logger, "CnExchange")
 
-#: 涨跌停判定的取整容差。`$change` 是四舍五入后的日收益，涨跌停价本身还要按分
-#: 取整，真正封板的票可能只显示 9.97%。阈值统一下浮 0.5pp 吸收这两处取整 ——
-#: 与原硬编码常量（0.095/0.195/0.295）在数值上完全一致，属**保留的既有行为**，
-#: 不是新引入的口径。
-_LIMIT_TOLERANCE = 0.005
+# 涨跌停判定的取整容差不再在本模块持有数值：唯一事实源 =
+# ``local_market_data.LIMIT_TOLERANCE``（0.5pp），用时在函数内导入。
+# 本模块曾有 `_LIMIT_TOLERANCE = 0.005` 的独立字面量，与另 4 处同值副本并存 ——
+# 同值不代表同源，下一次改口径只会改到一份。`$change` 是四舍五入后的日收益，
+# 涨跌停价本身又按分取整，两处取整都由该容差吸收。
 
 
 def _as_trade_date(value: object) -> date | None:
@@ -340,13 +340,16 @@ class CnExchange(Exchange):
         2. 0.5pp 容差是启发式，用来吸收 $change 的舍入与涨跌停价的按分取整。
            真要做到精确，得用 ``compute_limits`` 算出涨跌停价再比价位。
         """
-        from backend.services.simulation.services.local_market_data import limit_pct
+        from backend.services.simulation.services.local_market_data import (
+            LIMIT_TOLERANCE,
+            limit_pct,
+        )
 
         return (
             float(
                 limit_pct(stock_id, is_st=is_st, trade_date=trade_date or date.today())
             )
-            - _LIMIT_TOLERANCE
+            - LIMIT_TOLERANCE
         )
 
     def check_stock_limit(

@@ -15,10 +15,11 @@ import pytest
 
 from backend.scripts.factor_deep_dive import limit_threshold
 
-# 期望值：板别带宽减贴板缓冲 —— 钉住既有口径
-_MAIN = 0.098  # fidelity: allow-limit-threshold — 期望值，钉住既有口径
-_WIDE = 0.198  # fidelity: allow-limit-threshold — 期望值，钉住既有口径
-_BSE = 0.298  # fidelity: allow-limit-threshold — 期望值，钉住既有口径
+# 期望值：板别带宽减贴板缓冲（0.5pp，唯一事实源 local_market_data.LIMIT_TOLERANCE）
+# —— 写成字面量，口径再变必须同时改这里。
+_MAIN = 0.095  # fidelity: allow-limit-threshold — 期望值，钉住既有口径
+_WIDE = 0.195  # fidelity: allow-limit-threshold — 期望值，钉住既有口径
+_BSE = 0.295  # fidelity: allow-limit-threshold — 期望值，钉住既有口径
 
 _DAY = "20260918"
 

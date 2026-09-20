@@ -1017,23 +1017,22 @@ class RedisStopLossStrategy(DynamicRiskMixin, TopkDropoutStrategy, RedisLoggerMi
         self.log_executed_trades(execute_result)
 
 
-#: 「贴板」判定的取整容差（比例）。沿用旧的 0.095 = 0.10 − 0.005：涨跌停价要按分
-#: 取整，真正封板的票可能只显示 9.97%，不留余量会把真贴板判丢。
-_LIMIT_TOLERANCE = 0.005
-
-
 def _limit_band(symbols, trade_date) -> pd.Series:
     """各标的在 ``trade_date`` 的涨跌停带宽（**比例**，已扣取整余量）。
 
     口径唯一事实源 = ``local_market_data.limit_pct``（板别 + 创业板 2020-08-24
-    注册制改革 + ST 主板 5%→10%）。
+    注册制改革 + ST 主板 5%→10%）；扣掉的余量同源 = ``LIMIT_TOLERANCE``（0.5pp），
+    因为涨跌停价按分取整，真正封板的票可能只显示 9.97%，不留余量会把真贴板判丢。
 
     旧实现是一条写死的 ±0.095，对沪深 300 里的创业板/科创板成分股（真实 20% 板）
     把 −12% 的普通下跌日误判成「贴板」而剔除 —— 恰恰是 ``as41_crash_dip``
     要买的**跌得最深**的那批票（300750/300760/300059/300124 都在池内），
     方向是系统性的：越该买越被扔掉。
     """
-    from backend.services.simulation.services.local_market_data import limit_pct
+    from backend.services.simulation.services.local_market_data import (
+        LIMIT_TOLERANCE,
+        limit_pct,
+    )
 
     td = pd.Timestamp(trade_date).date()
     return pd.Series(
@@ -1045,7 +1044,7 @@ def _limit_band(symbols, trade_date) -> pd.Series:
                     trade_date=td,
                 )
             )
-            - _LIMIT_TOLERANCE
+            - LIMIT_TOLERANCE
             for s in symbols
         ],
         index=symbols,

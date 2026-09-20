@@ -25,9 +25,10 @@ _LIMIT_BY_MARKET: dict[str, float] = {
 }
 _DEFAULT_PRICE_LIMIT = 0.10
 
-# 判定为触及涨跌停的容差：数据源 pctchange 有舍入误差，
-# 且 ST 股限制为 5%，这里只做保守判定（宁可少剔除也不误杀）。
-_LIMIT_TOLERANCE = 0.005
+# 判定为触及涨跌停的取整容差不再在本模块持有数值：唯一事实源 =
+# ``local_market_data.LIMIT_TOLERANCE``（0.5pp），用时在函数内导入。
+# 数据源 pctchange 有舍入误差，涨跌停价本身又按分取整；0.5pp 是实测订正过的
+# 上界（2026-09-20：0.2pp 会漏判 4/2488 条真封板，0.5pp 漏判 0 条）。
 
 
 @dataclass(frozen=True)
@@ -108,5 +109,13 @@ def price_limit_for_market(listing_market: object) -> float:
 
 
 def limit_threshold(listing_market: object) -> float:
-    """触及涨跌停的判定阈值（含容差）。"""
-    return price_limit_for_market(listing_market) - _LIMIT_TOLERANCE
+    """触及涨跌停的判定阈值（含容差）。
+
+    容差唯一事实源 = ``local_market_data.LIMIT_TOLERANCE``。**惰性导入**：该模块
+    是行情栈的重模块（实测多花 3.5s，且会拉起 LiteLLM 的远程模型价目表抓取），
+    而本函数被 ``data_loader`` 逐行调用 —— 不能在导入期付这个代价。
+    ``sys.modules`` 缓存后，每次调用只是一个字典查找。
+    """
+    from backend.services.simulation.services.local_market_data import LIMIT_TOLERANCE
+
+    return price_limit_for_market(listing_market) - LIMIT_TOLERANCE

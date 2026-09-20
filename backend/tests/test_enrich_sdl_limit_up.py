@@ -38,8 +38,10 @@ sys.path.append(project_root)
 from backend.scripts.enrich_sdl_data import limit_up_flags
 
 #: 与实现同源的取整余量（百分数）。断言里重述一次是刻意的：
-#: 它同时钉住「余量存在」和「余量就是 0.2pp」。
-_SLACK_PCT = 0.2
+#: 它同时钉住「余量存在」和「余量就是 0.5pp」—— 唯一事实源
+#: `local_market_data.LIMIT_TOLERANCE`（0.5pp = 比例 0.005 × 100）。
+#: 旧值 0.2pp 由实测证伪：股价 < ¥2.50 时漏判真涨停。
+_SLACK_PCT = 0.5
 
 
 def _frame(rows: list[tuple]) -> pd.DataFrame:

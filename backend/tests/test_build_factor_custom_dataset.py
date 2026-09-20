@@ -23,11 +23,14 @@ from backend.scripts.build_factor_custom_dataset import (
     _selection_fingerprint,
 )
 
-#: 主板的 10% 扣掉 0.2pp 取整余量。三个期望值提出来是因为同一行里既要有字面量
-#: 又要有豁免注释，写在断言里会超行宽。
-_MAIN = 0.098  # fidelity: allow-limit-threshold — 期望值，钉住既有口径
-_GROWTH = 0.198  # fidelity: allow-limit-threshold — 期望值，钉住既有口径
-_BSE = 0.298  # fidelity: allow-limit-threshold — 期望值，钉住既有口径
+#: 主板的 10% 扣掉 0.5pp 取整余量（唯一事实源 `local_market_data.LIMIT_TOLERANCE`）。
+#: 三个期望值提出来是因为同一行里既要有字面量又要有豁免注释，写在断言里会超行宽。
+#:
+#: 刻意**不**从 `LIMIT_TOLERANCE` 现算：现算出来的期望值恒等于实现，钉不住任何东西。
+#: 写成字面量后，改口径必须同时改这里，改动是被看见的。
+_MAIN = 0.095  # fidelity: allow-limit-threshold — 期望值，钉住既有口径
+_GROWTH = 0.195  # fidelity: allow-limit-threshold — 期望值，钉住既有口径
+_BSE = 0.295  # fidelity: allow-limit-threshold — 期望值，钉住既有口径
 
 #: 改革分界线两侧 —— 两侧用的是**同一个**创业板代码，差异必须全部来自交易日。
 _REFORM_BEFORE = "2019-06-03"

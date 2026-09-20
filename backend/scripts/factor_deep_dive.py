@@ -50,10 +50,6 @@ META_COLS = {"symbol", "date", "time", "dt", "open", "high", "low", "close",
 # A 股默认往返成本（单边）：佣金 0.025% + 印花税 0.05%（卖出）+ 滑点 0.05%
 DEFAULT_ROUND_TRIP_COST = 0.00025 * 2 + 0.0005 + 0.0005 * 2   # ≈ 0.20%
 
-#: 「贴板」缓冲（比例）：封板价按分取整，真封死的票可能只显示 9.98%，不留余量会判丢。
-_LIMIT_SLACK = 0.002
-
-
 def _as_trade_date(value) -> date:
     """交易日解析：分区标签 ``20260918`` 与 ISO ``2026-09-18`` 都收。"""
     s = str(value).strip()
@@ -69,8 +65,15 @@ def limit_threshold(symbol: str, trade_date=None) -> float:
     ``302`` 段落在创业板 20% 板内却被按主板算；北交所前缀 ``("4", "8")``
     比 ``_BSE_PREFIXES`` 宽（把 400xxx 老三板也当 30%）；且完全不知道创业板
     2020-08-24 的 10%→20% 改革 —— 回看该日之前的窗口会把真涨停判丢。
+
+    「贴板」缓冲同源：唯一事实源 = ``local_market_data.LIMIT_TOLERANCE``（0.5pp）。
+    本文件曾自带 ``_LIMIT_SLACK = 0.002``（0.2pp）—— 那正是 9.8 那条旧写死线留下的
+    余量，实测在股价 < ¥2.50 时覆盖不足。
     """
-    from backend.services.simulation.services.local_market_data import limit_pct
+    from backend.services.simulation.services.local_market_data import (
+        LIMIT_TOLERANCE,
+        limit_pct,
+    )
 
     td = _as_trade_date(trade_date) if trade_date is not None else date.today()
     return (
@@ -81,7 +84,7 @@ def limit_threshold(symbol: str, trade_date=None) -> float:
                 trade_date=td,
             )
         )
-        - _LIMIT_SLACK
+        - LIMIT_TOLERANCE
     )
 
 

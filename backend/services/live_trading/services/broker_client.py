@@ -26,10 +26,10 @@ from backend.shared.database_manager_v2 import get_session
 
 logger = logging.getLogger(__name__)
 
-#: 涨跌停判定的取整容差（比例）。`_LIMIT_TOLERANCE` 与
-#: `cn_exchange._LIMIT_TOLERANCE`、`execution_engine._LIMIT_TOLERANCE` 同值
-#: （0.5pp），用来吸收涨跌停价按分取整后实际涨幅略低于名义幅度的情形。
-_LIMIT_TOLERANCE = 0.005
+# 涨跌停判定的取整容差不再在本模块持有数值：唯一事实源 =
+# ``local_market_data.LIMIT_TOLERANCE``（0.5pp），用时在函数内导入。
+# 本模块曾有 `_LIMIT_TOLERANCE = 0.005`，与 cn_exchange / execution_engine /
+# extended_strategies / trading_cost 四处同值副本并存 —— 同值不代表同源。
 
 
 class BrokerResult:
@@ -172,9 +172,15 @@ class PaperTradingBroker(BaseBroker):
         """
         from datetime import date
 
-        try:
-            from backend.services.simulation.services.local_market_data import limit_pct
+        # 常量与函数取自同一模块，故**同一次**导入。刻意放在 try 之外：模块导不进来
+        # 属于部署损坏，此时按 10% 静默继续才是真危险（券商通道上误报「买不进」）。
+        # try 内仍保留 limit_pct 的**运行期**失败兜底，语义与改动前一致。
+        from backend.services.simulation.services.local_market_data import (
+            LIMIT_TOLERANCE,
+            limit_pct,
+        )
 
+        try:
             pct = float(
                 limit_pct(
                     symbol,
@@ -190,7 +196,7 @@ class PaperTradingBroker(BaseBroker):
                 "涨跌停板规解析失败，按主板 10% 兜底 (symbol=%s)", symbol, exc_info=True
             )
             pct = 0.10
-        return pct - _LIMIT_TOLERANCE
+        return pct - LIMIT_TOLERANCE
 
     async def _get_market_snapshot(self, symbol: str) -> MarketQuoteSnapshot:
         # Level 1: 实时行情

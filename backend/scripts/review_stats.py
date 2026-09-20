@@ -1,15 +1,27 @@
-"""每日复盘统计核心逻辑（纯函数，可单测，不碰 IO）。
+"""每日复盘统计 —— **转发到** ``backend.shared.market_breadth``（唯一事实源）。
 
-涨跌停规则复用 backend/services/trade/simulation/services/local_market_data.py
-（compute_limits / limit_pct，与 instrument_detail ZTPrice/DTPrice 交叉验证 99.71% 一致），
-本模块只做复盘视角的封装：价格精确判定、除权日检测、容差兜底、连板、分布、板块聚合。
+本模块历史上是 ``market_breadth`` 的整份副本：24 个同名定义（常量、分类函数、
+聚合函数）逐一对齐。2026-09-20 用 AST 逐段比对，两份除 docstring 措辞、
+``dict.fromkeys`` vs 字典推导、以及一句 ``0.004 if not is_bse(x) else 0.004``
+（两个分支同值）之外**零行为差异** —— 即副本从未真正分叉，只是白养了一份。
+
+副本的危害不在于此刻不同，而在于**下一处口径改动只会改到一份**。本模块此前就带着
+``TOL_SHSZ = 0.50`` 的独立字面量，而 ``market_breadth`` 的同一常量已收口到
+``local_market_data.LIMIT_TOLERANCE``；再晚收口一次就是两个口径。
+
+同时删掉原来的 ``except ImportError`` 退化路径：它把 ``limit_pct`` / ``compute_limits``
+用 Python 内建 ``round()``（银行家舍入）重实现了一遍，与交易所的「四舍五入到分」
+在 .005 边界上不一致 —— 拿不到权威实现时应当**响亮地失败**，而不是静默换一套
+舍入规则继续出报告。
+
+保留 ``_find_repo_root`` / sys.path 引导：本模块会被当普通模块 import
+（``daily_review.py`` 的 ``import review_stats as rs``），需自行保证 ``backend`` 可导入。
 """
 from __future__ import annotations
 
-from datetime import date
+import sys
 from pathlib import Path
 
-import pandas as pd
 
 def _find_repo_root(start: Path) -> Path:
     for p in [start, *start.parents]:
@@ -19,244 +31,65 @@ def _find_repo_root(start: Path) -> Path:
 
 
 _REPO_ROOT = _find_repo_root(Path(__file__).resolve())
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
-try:
-    import sys
+from backend.services.simulation.services.local_market_data import (  # noqa: E402
+    compute_limits,
+    limit_pct,
+)
+from backend.shared.market_breadth import (  # noqa: E402
+    CAT_BROKE_UP,
+    CAT_CORP_ACTION,
+    CAT_DOWN,
+    CAT_FLAT,
+    CAT_LIMIT_DOWN,
+    CAT_LIMIT_UP,
+    CAT_NORMAL,
+    CAT_UP,
+    TOL_BJ,
+    TOL_SHSZ,
+    breadth_distribution,
+    classify_by_pct,
+    classify_price,
+    fmt_yi,
+    is_bse_symbol,
+    is_corp_action_pct,
+    is_ex_div,
+    limit_up_down_counts,
+    market_breadth,
+    price_tolerance,
+    sector_aggregate,
+    streak_from_tail,
+    volume_ratio_5,
+    wan_to_yi,
+)
 
-    if str(_REPO_ROOT) not in sys.path:
-        sys.path.insert(0, str(_REPO_ROOT))
-    from backend.services.simulation.services.local_market_data import (
-        compute_limits,
-        limit_pct,
-    )
-except ImportError:  # 脱离仓库运行时的退化路径（仅报告基本数值，不判定涨跌停）
-    def _board_pct(symbol: str) -> float:
-        code = symbol.partition(".")[0]
-        if symbol.endswith(".BJ") or code[:2] in ("43", "83", "87", "88", "92"):
-            return 0.30
-        if code[:3] in ("300", "301", "302", "688", "689"):
-            return 0.20
-        return 0.10
-
-    def limit_pct(symbol: str, *, is_st: bool, trade_date: date) -> float:
-        pct = _board_pct(symbol)
-        if is_st and pct == 0.10 and trade_date < date(2026, 7, 6):
-            return 0.05
-        return pct
-
-    def compute_limits(
-        symbol: str, pre_close: float, *, is_st: bool, trade_date: date
-    ) -> tuple[float, float]:
-        pct = limit_pct(symbol, is_st=is_st, trade_date=trade_date)
-        return round(pre_close * (1 + pct), 2), round(pre_close * (1 - pct), 2)
-
-
-# 容差：SH/SZ 四舍五入到分最多压低 0.5%（股价 ≥1 元）；BJ 截尾到分最多压低 1%
-TOL_SHSZ = 0.50
-TOL_BJ = 1.00
-
-CAT_LIMIT_UP = "limit_up"
-CAT_LIMIT_DOWN = "limit_down"
-CAT_BROKE_UP = "broke_up"
-CAT_CORP_ACTION = "corp_action"
-CAT_NORMAL = "normal"
-CAT_UP = "up"
-CAT_DOWN = "down"
-CAT_FLAT = "flat"
-
-
-def is_bse_symbol(symbol: str) -> bool:
-    code = symbol.partition(".")[0]
-    return symbol.endswith(".BJ") or code[:2] in ("43", "83", "87", "88", "92")
-
-
-def price_tolerance(symbol: str) -> float:
-    """价格比较容差（元）：比较涨停价时允许的分位浮点误差。"""
-    return 0.004 if not is_bse_symbol(symbol) else 0.004
-
-
-def classify_price(
-    close: float, high: float, up_price: float, down_price: float
-) -> str:
-    """按价格精确判定：收盘封板 / 炸板 / 跌停 / 普通（NORMAL，方向由 pct 符号定）。
-
-    up_price 过 0 表示无涨跌幅限制（新股首日）。无方向信息，普通涨跌由
-    调用方按 pct_change 符号归入 up/down/flat。
-    """
-    if up_price > 0:
-        if close >= up_price - price_tolerance("600000.SH"):
-            return CAT_LIMIT_UP
-        if high >= up_price - price_tolerance("600000.SH"):
-            return CAT_BROKE_UP
-    if down_price > 0 and close <= down_price + price_tolerance("600000.SH"):
-        return CAT_LIMIT_DOWN
-    return CAT_NORMAL
-
-
-def is_corp_action_pct(pct: float, board_pct: float) -> bool:
-    """涨跌幅显著超过板块限制 → 除权/拆并股等公司行为（非交易性波动）。
-
-    阈值 = 板块限制 × 100 + 1.0 个百分点（容纳封板价向上舍入的余量）。
-    """
-    return abs(pct) > board_pct * 100 + 1.0
-
-
-def classify_by_pct(pct: float, symbol: str, is_st: bool, trade_date: date) -> str:
-    """按涨跌幅 + 容差兜底判定（除权日昨收不可信时用）。"""
-    board = float(limit_pct(symbol, is_st=is_st, trade_date=trade_date)) * 100
-    tol = TOL_BJ if is_bse_symbol(symbol) else TOL_SHSZ
-    if pct >= board - tol:
-        return CAT_LIMIT_UP
-    if pct <= -(board - tol):
-        return CAT_LIMIT_DOWN
-    if pct > 0:
-        return CAT_UP
-    if pct < 0:
-        return CAT_DOWN
-    return CAT_FLAT
-
-
-def is_ex_div(official_pct: float, close: float, prev_close: float) -> bool:
-    """除权除息日检测：官方 pct_change 与 (close/prev_close-1) 自算值差 > 0.5%。"""
-    if prev_close is None or prev_close <= 0 or close is None:
-        return False
-    self_pct = (close / prev_close - 1) * 100
-    return abs(official_pct - self_pct) > 0.5
-
-
-def streak_from_tail(days: list[float], min_pct: float) -> int:
-    """从最近一日（列表尾部）往前数，连续 ≥ min_pct 的天数。"""
-    n = 0
-    for v in reversed(days):
-        if v is not None and v >= min_pct:
-            n += 1
-        else:
-            break
-    return n
-
-
-_LABELS = ["涨停", ">7", "5~7", "3~5", "1~3", "0~1", "平盘",
-           "-1~0", "-3~-1", "-5~-3", "-7~-5", "<-7", "跌停"]
-
-
-def breadth_distribution(pct: pd.Series, limit_thresh: float = 9.7) -> dict[str, int]:
-    """涨跌幅分布直方图（±limit_thresh 视为涨停/跌停近似桶）。
-
-    涨停/跌停为近似（按主板 10% 阈值），精确分类（分板块/ST）由调用方
-    用 classify_price / classify_by_pct 统计后覆盖这两个桶。
-    """
-    dist: dict[str, int] = {label: 0 for label in _LABELS}
-    for v in pct.dropna():
-        if v >= limit_thresh:
-            dist["涨停"] += 1
-        elif 7.0 <= v < limit_thresh:
-            dist[">7"] += 1
-        elif 5.0 <= v < 7.0:
-            dist["5~7"] += 1
-        elif 3.0 <= v < 5.0:
-            dist["3~5"] += 1
-        elif 1.0 <= v < 3.0:
-            dist["1~3"] += 1
-        elif 0.0 < v < 1.0:
-            dist["0~1"] += 1
-        elif v == 0.0:
-            dist["平盘"] += 1
-        elif -1.0 < v < 0.0:
-            dist["-1~0"] += 1
-        elif -3.0 < v <= -1.0:
-            dist["-3~-1"] += 1
-        elif -5.0 < v <= -3.0:
-            dist["-5~-3"] += 1
-        elif -7.0 < v <= -5.0:
-            dist["-7~-5"] += 1
-        elif -limit_thresh < v <= -7.0:
-            dist["<-7"] += 1
-        else:
-            dist["跌停"] += 1
-    return dist
-
-
-def market_breadth(pct: pd.Series) -> dict:
-    """涨跌家数与涨跌比。"""
-    up = int((pct > 0).sum())
-    down = int((pct < 0).sum())
-    flat = int((pct == 0).sum())
-    ratio = round(up / down, 2) if down else None
-    return {"up_count": up, "down_count": down, "flat_count": flat, "up_down_ratio": ratio}
-
-
-def sector_aggregate(
-    members: pd.DataFrame,
-    pct: pd.Series,
-    mv: pd.Series | None = None,
-) -> pd.DataFrame:
-    """板块表现聚合：成员 (SectorCode, SectorName, SectorType, Symbol) × 个股涨跌幅。
-
-    - 同一 (板块, 股票) 去重只计一次
-    - 涨跌幅缺失的成员剔除并计入 ignored 列
-    - mv 提供时算市值加权涨跌幅；覆盖 <60% 时该板块加权值置 NaN（防小样本偏置）
-    """
-    cols = ["SectorCode", "SectorName", "SectorType", "Symbol"]
-    m = (
-        members[cols]
-        .drop_duplicates(subset=["SectorCode", "Symbol"])
-        .set_index("Symbol")
-        .join(pct.rename("pct"), how="inner")
-    )
-    if m.empty:
-        return pd.DataFrame(
-            columns=["SectorCode", "SectorName", "SectorType", "n", "avg_pct",
-                     "mv_weighted_pct", "ignored"]
-        )
-    if mv is not None:
-        m = m.join(mv.rename("mv"), how="left")
-
-    rows = []
-    for (sec_code, sec_name, sec_type), g in m.groupby(["SectorCode", "SectorName", "SectorType"]):
-        avg = float(g["pct"].mean())
-        if mv is not None and g["mv"].notna().mean() >= 0.6:
-            w = g["mv"].dropna()
-            weighted = round(float((g.loc[w.index, "pct"] * w).sum() / w.sum()), 2)
-        else:
-            weighted = None
-        rows.append(
-            {
-                "SectorCode": sec_code,
-                "SectorName": sec_name,
-                "SectorType": sec_type,
-                "n": len(g),
-                "avg_pct": round(avg, 2),
-                "mv_weighted_pct": weighted,
-                "ignored": 0,
-            }
-        )
-    out = pd.DataFrame(rows)
-    if out.empty:
-        return pd.DataFrame(
-            columns=["SectorCode", "SectorName", "SectorType", "n", "avg_pct",
-                     "mv_weighted_pct", "ignored"]
-        )
-    return out.sort_values("avg_pct", ascending=False).reset_index(drop=True)
-
-
-def wan_to_yi(value_wan: float | None) -> float | None:
-    """万元 → 亿元。"""
-    if value_wan is None:
-        return None
-    return value_wan / 1e4
-
-
-def fmt_yi(value_wan: float | None) -> str:
-    """万元 → 亿元格式化。"""
-    yi = wan_to_yi(value_wan)
-    if yi is None:
-        return "[数据缺失]"
-    return f"{yi:,.2f} 亿元"
-
-
-def volume_ratio_5(current: float | None, prior_amounts: list[float]) -> float | None:
-    """量比：当日 / 前 5 日成交额均值。"""
-    usable = [a for a in prior_amounts if a is not None and a > 0]
-    if current is None or current <= 0 or not usable:
-        return None
-    return round(current / (sum(usable) / len(usable)), 2)
+__all__ = [
+    "CAT_BROKE_UP",
+    "CAT_CORP_ACTION",
+    "CAT_DOWN",
+    "CAT_FLAT",
+    "CAT_LIMIT_DOWN",
+    "CAT_LIMIT_UP",
+    "CAT_NORMAL",
+    "CAT_UP",
+    "TOL_BJ",
+    "TOL_SHSZ",
+    "breadth_distribution",
+    "classify_by_pct",
+    "classify_price",
+    "compute_limits",
+    "fmt_yi",
+    "is_bse_symbol",
+    "is_corp_action_pct",
+    "is_ex_div",
+    "limit_pct",
+    "limit_up_down_counts",
+    "market_breadth",
+    "price_tolerance",
+    "sector_aggregate",
+    "streak_from_tail",
+    "volume_ratio_5",
+    "wan_to_yi",
+]

@@ -10,13 +10,16 @@ from datetime import date
 import pandas as pd
 
 from backend.services.simulation.services.local_market_data import (
+    LIMIT_TOLERANCE,
+    LIMIT_TOLERANCE_BSE,
     compute_limits,
     limit_pct,
 )
 
-# 容差：SH/SZ 四舍五入到分最多压低 0.5%（股价 ≥1 元）；BJ 截尾到分最多压低 1%
-TOL_SHSZ = 0.50
-TOL_BJ = 1.00
+# 容差（百分点）：唯一事实源是 local_market_data 的比例形态，此处只做单位换算。
+# 不在本模块另立数值 —— 曾有第三份副本（scripts/review_stats.py）就是这样漂移的。
+TOL_SHSZ = LIMIT_TOLERANCE * 100
+TOL_BJ = LIMIT_TOLERANCE_BSE * 100
 
 CAT_LIMIT_UP = "limit_up"
 CAT_LIMIT_DOWN = "limit_down"

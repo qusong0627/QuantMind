@@ -74,16 +74,10 @@ _OHLCV = ("open", "high", "low", "close", "volume", "amount")
 #: 涨跌停剔除规则的版本号。**判定口径一变就必须 +1** —— 否则 `can_incremental`
 #: 会认定历史分区仍然有效，新口径只作用于往后新增的交易日，磁盘上于是留下
 #: 两套口径拼起来的训练集（前半段旧线、后半段新线，且看不出接缝）。
-LIMIT_RULE_VERSION = 2
-
-#: 取整容差（**百分点**，仅本常量的单位）。沿用旧值 9.8 = 10 − 0.2 的既有余量：
-#: 涨跌停价本身要按分取整，真正封板的票可能只显示 9.97%，不留余量会把真涨停判丢。
-_LIMIT_SLACK_PCT = 0.2
-
-#: 同上，换算成**比例**。用 Decimal 减而不是浮点减：`0.1 - 0.002` 与字面量 0.098
-#: 在二进制下相差一个 ulp，直接比较会假阴性 —— 这里要的是逐位等于
-#: `limit_pct - 0.002`，因为调用点拿它与 `ret = close/pre_close - 1` 做同单位比较。
-_LIMIT_SLACK = Decimal(str(_LIMIT_SLACK_PCT)) / 100
+#:
+#: v3：取整容差 0.2pp → 0.5pp（唯一事实源 `local_market_data.LIMIT_TOLERANCE`）。
+#: 实测依据见 `_limit_slack()`。**已在盘上的 v2 分区全部作废**，下次重建会全量重算。
+LIMIT_RULE_VERSION = 3
 
 
 def _as_trade_date(value: Any) -> date:
@@ -125,9 +119,13 @@ def _limit_thresholds(symbols, trade_date: Any) -> np.ndarray:
     的票 —— 它们历史窗口内的 5% 涨停仍判不出。不拿静态快照去补，因为那是单日
     口径，回放历史会带前视偏差，比漏判更严重。
     """
-    from backend.services.simulation.services.local_market_data import limit_pct
+    from backend.services.simulation.services.local_market_data import (
+        LIMIT_TOLERANCE,
+        limit_pct,
+    )
 
     td = _as_trade_date(trade_date)
+    slack = _limit_slack(LIMIT_TOLERANCE)
     return np.array(
         [
             float(
@@ -136,12 +134,30 @@ def _limit_thresholds(symbols, trade_date: Any) -> np.ndarray:
                     is_st=False,  # fidelity: allow-limit-threshold — 股票池已排除 ST
                     trade_date=td,
                 )
-                - _LIMIT_SLACK
+                - slack
             )
             for s in symbols
         ],
         dtype=np.float64,
     )
+
+
+def _limit_slack(tolerance: float) -> Decimal:
+    """比例形态的取整余量（Decimal）。
+
+    用 Decimal 减而不是浮点减：`0.1 - 0.005` 与字面量 0.095 在二进制下相差一个
+    ulp，直接比较会假阴性 —— 这里要的是逐位等于 `limit_pct - LIMIT_TOLERANCE`，
+    因为调用点拿它与 `ret = close/pre_close - 1` 做同单位比较。
+
+    旧实现自带 `_LIMIT_SLACK_PCT = 0.2`，理由写作「沿用旧值 9.8 = 10 − 0.2 的既有
+    余量」。2026-09-20 拿 daily_unadjusted 实测推翻了这个理由：41 个交易日 × 2864
+    个真实封板事件（判据 = close 逐分等于 `compute_limits` 的限价），涨停最大偏差
+    0.278pp，**0.2pp 漏判 4 条**真涨停（前收 1.23 / 1.43 / 1.44 / 1.74 —— 都是低价股，
+    因为偏差上界 `0.005/pre_close` 随股价走），0.5pp 漏判 0 条。
+    """
+    # str() 而非 repr()：str(0.005) == "0.005"（最短正确十进制），Decimal 拿到的是
+    # 精确的 0.005；repr 同值，但 str 更直白地表达「这是十进制字面量」。
+    return Decimal(str(tolerance))
 
 
 def _limit_threshold(code: str, trade_date: Any) -> float:

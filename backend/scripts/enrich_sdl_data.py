@@ -361,25 +361,26 @@ def phase_tencent(engine, dry_run: bool = False) -> int:
 # Phase B: DB 重算 (连板/指数/ST/衍生因子) — 无需外部源
 # ─────────────────────────────────────────────────────────────────────────
 
-#: 涨停判定的取整余量（百分点）。`pct_change` 是四舍五入后的百分数，涨跌停价
-#: 本身还要按分取整，真正封板的票可能只显示 9.97%。这不是新引入的口径，而是
-#: **保留**旧实现的既有余量（旧值 9.8 = 10 − 0.2），否则会把真涨停判丢。
-_LIMIT_SLACK_PCT = 0.2
-
-
 def _limit_threshold_pct(symbol: object, is_st: bool, trade_date: object) -> float:
     """单行涨停线（百分数，已扣取整余量）。
 
     板规/ST/制度日期全部委托 `limit_pct` —— 本模块不再自持任何阈值常量。
     交易日不可解析时退化为「按当日板规」：这只影响宽板改制前的历史窗口，
     但绝不为了一个坏日期让整批 1000 万行的补数任务崩掉。
+
+    余量同源：唯一事实源 = `local_market_data.LIMIT_TOLERANCE`（0.5pp，取比例形态
+    后 ×100 得百分点）。旧实现自带 `_LIMIT_SLACK_PCT = 0.2`，实测在股价 < ¥2.50 时
+    覆盖不足（漏判 4/2488 条真涨停），已废弃。
     """
-    from backend.services.simulation.services.local_market_data import limit_pct
+    from backend.services.simulation.services.local_market_data import (
+        LIMIT_TOLERANCE,
+        limit_pct,
+    )
 
     td = date.today() if pd.isna(trade_date) else trade_date
     return (
         float(limit_pct(str(symbol), is_st=is_st, trade_date=td)) * 100.0
-        - _LIMIT_SLACK_PCT
+        - LIMIT_TOLERANCE * 100.0
     )
 
 
