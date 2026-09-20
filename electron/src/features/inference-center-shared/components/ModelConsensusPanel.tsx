@@ -24,8 +24,9 @@ export const ModelConsensusPanel: React.FC<ModelConsensusPanelProps> = ({
   const isThin = Boolean(coverage?.is_thin);
   const skipEntries = Object.entries(coverage?.skip_reasons ?? {}).filter(([, n]) => n > 0);
   const failedModels = coverage?.failed_models ?? [];
+  // 卡片身份由外层 wrapper 提供，这里不再叠一层（双边框 + 双层内边距）
   return (
-    <div className="flex flex-col h-full bg-white/70 backdrop-blur-md rounded-2xl p-5 border border-white/80 shadow-sm">
+    <div className="flex flex-col h-full p-4">
       <div className="flex items-center justify-between pb-3 border-b border-slate-100 mb-3">
         <div className="flex items-center gap-2">
           <div className="w-7 h-7 rounded-lg bg-blue-50 border border-blue-100 flex items-center justify-center text-blue-600">
@@ -91,10 +92,11 @@ export const ModelConsensusPanel: React.FC<ModelConsensusPanelProps> = ({
         </div>
       )}
 
-      <div className="grid grid-cols-2 gap-3 flex-1 min-h-0 overflow-y-auto">
+      {/* 模型卡两列：窄屏每列只剩 ~190px，模型名和分数标签都挤在一起；1520 以上才分两列 */}
+      <div className="grid grid-cols-1 2xl:grid-cols-2 gap-3 flex-1 min-h-0 overflow-y-auto">
         {consensus.length === 0 ? (
           selectedCount > 0 ? (
-            <div className="col-span-2 flex flex-col items-center justify-center gap-2 py-8 text-center">
+            <div className="col-span-1 2xl:col-span-2 flex flex-col items-center justify-center gap-2 py-8 text-center">
               <div className="w-10 h-10 rounded-xl bg-amber-50 border border-amber-100 flex items-center justify-center text-amber-400">
                 <Inbox className="w-5 h-5" />
               </div>
@@ -106,7 +108,7 @@ export const ModelConsensusPanel: React.FC<ModelConsensusPanelProps> = ({
               </p>
             </div>
           ) : (
-            <div className="col-span-2 flex flex-col items-center justify-center gap-2 py-8 text-center">
+            <div className="col-span-1 2xl:col-span-2 flex flex-col items-center justify-center gap-2 py-8 text-center">
               <div className="w-10 h-10 rounded-xl bg-slate-50 border border-slate-100 flex items-center justify-center text-slate-300">
                 <Inbox className="w-5 h-5" />
               </div>

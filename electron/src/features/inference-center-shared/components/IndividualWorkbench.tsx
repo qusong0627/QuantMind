@@ -134,9 +134,12 @@ export const IndividualWorkbench: React.FC<IndividualWorkbenchProps> = ({
 
   return (
     <div className="flex-1 min-w-0 flex flex-col bg-white border border-slate-200 rounded-xl overflow-hidden">
-      {/* ── 配置工具条（一行，窄窗口自动折行）──────────────────── */}
-      <div className="shrink-0 px-3 py-2 border-b border-slate-200 bg-slate-50/60 flex flex-wrap items-center gap-2">
-        <div className="relative flex-1 min-w-[170px]">
+      {/* ── 配置工具条 ────────────────────────────────────────
+          七个控件在 1440（Electron 最小宽）的 876px 里本来刚好放不下，
+          「开始个股推理」会被挤到第二行、整条吃掉 89px。这里把两处弹性下限
+          收到实际需要的最小值、间距收一档，换 1440 下单行（实测 49px）。 */}
+      <div className="shrink-0 px-3 py-2 border-b border-slate-200 bg-slate-50/60 flex flex-wrap items-center gap-1.5">
+        <div className="relative flex-1 min-w-[140px]">
           <div className="flex items-center bg-white border border-slate-200 hover:border-blue-400 focus-within:border-blue-500 focus-within:ring-2 focus-within:ring-blue-100 rounded-md pl-2.5 pr-2 h-8 transition-all">
             <Search size={13} className="text-slate-400 shrink-0 mr-1.5" />
             <Input
@@ -218,7 +221,7 @@ export const IndividualWorkbench: React.FC<IndividualWorkbenchProps> = ({
           value={ip.modelId}
           onChange={ip.setModelId}
           size="small"
-          className="flex-1 min-w-[160px]"
+          className="flex-1 min-w-[130px]"
           suffixIcon={<Database size={12} className="text-purple-500" />}
           optionLabelProp="label"
           options={ip.filteredModels.map((m) => ({
@@ -417,8 +420,16 @@ export const IndividualWorkbench: React.FC<IndividualWorkbenchProps> = ({
               </div>
             )}
 
-            <div className="grid grid-cols-1 lg:grid-cols-5 gap-3 shrink-0" style={{ minHeight: '340px' }}>
-              <div className="lg:col-span-3 bg-white rounded-xl border border-slate-200 flex flex-col overflow-hidden min-h-[320px]">
+            {/* 上排：K 线自适应 + 指标定宽侧栏。
+                刻意**不用**按比例的分栏网格 —— 指标卡的内容高度是恒定的，按比例发宽度
+                会在超宽屏把它拉成一大片空白（2560 下实测 781px 宽、约 200px 高的空档），
+                而 K 线图真正缺的是宽与高。宽度增量全部给图，侧栏钉一个够放内容的定宽。
+                高度随视口走（clamp），短窗口不矮于原值，高窗口才长得起来。 */}
+            <div
+              className="flex flex-col xl:flex-row gap-3 shrink-0"
+              style={{ height: 'clamp(340px, 42vh, 520px)' }}
+            >
+              <div className="flex-1 min-w-0 min-h-0 bg-white rounded-xl border border-slate-200 flex flex-col overflow-hidden">
                 <StockForecastChart
                   currencySymbol={currencySymbol}
                   kline={ip.kline}
@@ -431,8 +442,9 @@ export const IndividualWorkbench: React.FC<IndividualWorkbenchProps> = ({
                 />
               </div>
 
-              {/* 指标卡：分数已在报价条出现过，这里只放它没有的（分位区间 / 校准 / IC） */}
-              <div className="lg:col-span-2 bg-white rounded-xl border border-slate-200 flex flex-col">
+              {/* 指标卡：分数已在报价条出现过，这里只放它没有的（分位区间 / 校准 / IC）。
+                  定宽（340px）而非按比例 —— 内容宽度需求是恒定的，多给的宽度只会变成留白。 */}
+              <div className="w-full xl:w-[340px] xl:shrink-0 min-h-0 bg-white rounded-xl border border-slate-200 flex flex-col">
                 <div className="shrink-0 flex items-center justify-between px-3 h-9 border-b border-slate-100">
                   <span className="text-[11px] font-bold text-slate-700">模型推理指标</span>
                   <Tooltip title="分数取自落库的模型推理结果（Persisted Model Score）">
@@ -503,24 +515,34 @@ export const IndividualWorkbench: React.FC<IndividualWorkbenchProps> = ({
                     )}
                   </div>
 
-                  <div className="mt-auto grid grid-cols-2 gap-2 text-center">
-                    <div className="px-2 py-2 bg-slate-50 rounded-lg border border-slate-200">
-                      <div className="text-[10px] text-slate-400 font-semibold">模型准确率 (IC)</div>
-                      <div className="font-mono text-xs font-bold text-slate-700">
+                  {/* 两个指标格吃掉剩余高度（原先 `mt-auto` 只贴底，中间留出一条死白）。
+                      排成**上下两行**而不是左右两列：卡宽固定 340，两列会把格子拉成两个
+                      又高又空的方框；横向两行则随高度自然长高，标签左、数值右，一眼扫完。 */}
+                  {/* `auto-rows-fr` 不能省：只写 flex-1 的话栅格行仍是 auto 高，
+                      两行会挤在顶部、把剩余高度全留成底部一段死白。 */}
+                  <div className="flex-1 grid grid-cols-1 auto-rows-fr gap-2 min-h-[76px]">
+                    <div className="px-3 bg-slate-50 rounded-lg border border-slate-200 flex items-center justify-between gap-2">
+                      <span className="text-[11px] text-slate-500 font-semibold">模型准确率 (IC)</span>
+                      <span className="font-mono text-xl font-black text-slate-700 leading-none">
                         {ic != null && ic !== 0 ? (typeof ic === 'number' ? ic.toFixed(3) : ic) : '—'}
-                      </div>
+                      </span>
                     </div>
-                    <div className="px-2 py-2 bg-slate-50 rounded-lg border border-slate-200">
-                      <div className="text-[10px] text-slate-400 font-semibold">区间覆盖率</div>
-                      <div className="font-mono text-xs font-bold text-slate-700">{coverage}</div>
+                    <div className="px-3 bg-slate-50 rounded-lg border border-slate-200 flex items-center justify-between gap-2">
+                      <span className="text-[11px] text-slate-500 font-semibold">区间覆盖率</span>
+                      <span className="font-mono text-xl font-black text-slate-700 leading-none">{coverage}</span>
                     </div>
                   </div>
                 </div>
               </div>
             </div>
 
-            {/* 多模型分数曲线：与下方归因/共识是不同维度，并存而非二选一 */}
-            <div className="bg-white rounded-xl border border-slate-200 overflow-hidden flex-none" style={{ height: '250px' }}>
+            {/* 多模型分数曲线：与下方归因/共识是不同维度，并存而非二选一。
+                面板内是横向滚动、纵向 hidden，高度不够时下面的模型卡会被**裁掉**而不是
+                出现滚动条 —— 所以这里给的是随视口增长的下限，不是固定 250px。 */}
+            <div
+              className="bg-white rounded-xl border border-slate-200 overflow-hidden flex-none"
+              style={{ height: 'clamp(250px, 28vh, 400px)' }}
+            >
               <ModelScoreCurveGrid
                 consensus={prediction.consensus}
                 consensusScore={prediction.consensus_score}
@@ -532,7 +554,10 @@ export const IndividualWorkbench: React.FC<IndividualWorkbenchProps> = ({
               />
             </div>
 
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 flex-none" style={{ minHeight: '240px' }}>
+            <div
+              className="grid grid-cols-1 lg:grid-cols-2 gap-3 flex-none"
+              style={{ minHeight: 'clamp(240px, 26vh, 360px)' }}
+            >
               <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
                 <FeatureDriversPanel
                   drivers={prediction.drivers}

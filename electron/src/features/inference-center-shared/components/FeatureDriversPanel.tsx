@@ -24,8 +24,11 @@ export const FeatureDriversPanel: React.FC<FeatureDriversPanelProps> = ({
   const positiveDrivers = drivers.filter(d => d.direction === 'positive' || d.impact > 0);
   const negativeDrivers = drivers.filter(d => d.direction === 'negative' || d.impact < 0);
 
+  // 外层 wrapper 已经是卡片（bg-white + rounded-xl + border），这里**不再套一层**。
+  // 原来的 `rounded-2xl p-5 border shadow backdrop-blur` 与其叠成双边框 + 双层内边距，
+  // 左右各白吃 32px、上下各 16px，窄屏下正是「挤压」的主要来源。
   return (
-    <div className="flex flex-col h-full bg-white/70 backdrop-blur-md rounded-2xl p-5 border border-white/80 shadow-sm">
+    <div className="flex flex-col h-full p-4">
       <div className="flex items-center justify-between pb-3 border-b border-slate-100 mb-3">
         <div className="flex items-center gap-2">
           <div className="w-7 h-7 rounded-lg bg-indigo-50 border border-indigo-100 flex items-center justify-center text-indigo-600">
@@ -65,9 +68,11 @@ export const FeatureDriversPanel: React.FC<FeatureDriversPanelProps> = ({
         </div>
       )}
 
-      <div className="grid grid-cols-2 gap-4 flex-1 min-h-0 overflow-y-auto">
+      {/* 归因两列（正向/负向）在窄屏硬挤成两列时每列只剩 ~190px，特征名全被截断；
+          1520 以上（本机与常见副屏）才分两列，否则单列通栏。 */}
+      <div className="grid grid-cols-1 2xl:grid-cols-2 gap-x-4 gap-y-3 flex-1 min-h-0 overflow-y-auto">
         {drivers.length === 0 ? (
-          <div className="col-span-2 flex flex-col items-center justify-center gap-2 py-8 text-center">
+          <div className="col-span-1 2xl:col-span-2 flex flex-col items-center justify-center gap-2 py-8 text-center">
             <div className="w-10 h-10 rounded-xl bg-slate-50 border border-slate-100 flex items-center justify-center text-slate-300">
               <Inbox className="w-5 h-5" />
             </div>

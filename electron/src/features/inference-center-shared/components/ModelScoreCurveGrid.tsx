@@ -67,8 +67,9 @@ export const ModelScoreCurveGrid: React.FC<ModelScoreCurveGridProps> = ({
   );
   const failedModels = coverage?.failed_models ?? [];
 
+  // 卡片身份由外层 wrapper 提供，这里不再叠一层（双边框 + 双层内边距）
   return (
-    <div className="flex flex-col h-full bg-white/70 backdrop-blur-md rounded-2xl p-5 border border-white/80 shadow-sm">
+    <div className="flex flex-col h-full p-4">
       <div className="flex items-center justify-between pb-3 border-b border-slate-100 mb-3">
         <div className="flex items-center gap-2">
           <div className="w-7 h-7 rounded-lg bg-blue-50 border border-blue-100 flex items-center justify-center text-blue-600">

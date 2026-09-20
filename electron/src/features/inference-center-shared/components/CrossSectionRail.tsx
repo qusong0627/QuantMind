@@ -210,10 +210,13 @@ export const CrossSectionRail: React.FC<CrossSectionRailProps> = ({
             size="small"
           />
 
-          <span className="flex items-center gap-1 shrink-0 px-2 h-6 bg-blue-50/60 rounded border border-blue-100">
+          {/* 这一行控制项全是 shrink-0，整行最小宽被钉死在 ~500px；排名榜可拖窄后
+              会溢出。让 T+N 日期块做唯一的收缩位（它本来就是可截断的日期文本），
+              其余控件保持定宽不挤压。 */}
+          <span className="flex items-center gap-1 min-w-0 px-2 h-6 bg-blue-50/60 rounded border border-blue-100">
             <Calendar size={11} className="text-blue-400 shrink-0" />
-            <span className="text-[10px] font-bold text-blue-500">T+{cs.horizonDays}</span>
-            <span className="text-[11px] font-mono font-bold text-blue-700 truncate max-w-[78px]">
+            <span className="text-[10px] font-bold text-blue-500 shrink-0">T+{cs.horizonDays}</span>
+            <span className="text-[11px] font-mono font-bold text-blue-700 truncate">
               {cs.targetDateLoading ? '…' : cs.targetDate || '—'}
             </span>
           </span>

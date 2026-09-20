@@ -13,13 +13,19 @@
  * 只有「单票研判」需要退化：右侧工作台改由抽屉承载；另两个工作区本就是单列。
  */
 
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Select, Tag, Drawer, Tooltip, Typography } from 'antd';
 import { clsx } from 'clsx';
 import { Cpu, Database, Star, Layers, TrendingUp } from 'lucide-react';
 import { useLocation } from 'react-router-dom';
 import { useInferenceCenter } from '../adapter';
 import { useCrossSectionInference } from '../hooks/useCrossSectionInference';
+import {
+  RAIL_WIDTH_KEY,
+  nextRailWidth,
+  parseSavedRailWidth,
+  railWidthStyle,
+} from '../railWidth';
 import { useIndividualPrediction } from '../hooks/useIndividualPrediction';
 import { CrossSectionRail } from '../components/CrossSectionRail';
 import { IndividualWorkbench } from '../components/IndividualWorkbench';
@@ -36,6 +42,7 @@ const { Text } = Typography;
 
 /** 低于此宽度不再并排，右侧工作台改抽屉（Electron 窗口 minWidth 1440，正常不会触发） */
 const NARROW_BREAKPOINT = 1280;
+
 
 /** 视口宽度是否小于断点（监听 resize，SSR 缺失时按宽屏处理） */
 function useIsNarrow(breakpoint: number): boolean {
@@ -65,6 +72,53 @@ export const InferenceCenterShell: React.FC = () => {
   const [workspace, setWorkspace] = useState<WorkspaceKey>('single');
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [poolPickerOpen, setPoolPickerOpen] = useState(false);
+
+  // ── 排名榜宽度（可拖，落 localStorage）───────────────────────
+  // null = 用默认的 clamp；一旦拖过就固定成像素值（拖动中不做 clamp 免得跟手起来一跳一跳）
+  const railRef = useRef<HTMLDivElement | null>(null);
+  const [railWidth, setRailWidth] = useState<number | null>(() =>
+    typeof localStorage === 'undefined'
+      ? null
+      : parseSavedRailWidth(localStorage.getItem(RAIL_WIDTH_KEY)),
+  );
+  /**
+   * 拖动起点以「按下那一刻的实测宽度」为基准，而不是 state —— state 可能还是 null
+   * （走默认 clamp），拿它当基准会从 0 开始跳。`last` 记最后一帧的宽度，抬手时落盘；
+   * `moved` 用来区分「真拖过」与「只是点了一下」——后者不该把 clamp 默认值固化成像素。
+   */
+  const railDrag = useRef<{ x: number; w: number; last: number; moved: boolean } | null>(null);
+
+  const startRailDrag = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    const el = railRef.current;
+    if (!el) return;
+    const w = el.getBoundingClientRect().width;
+    railDrag.current = { x: e.clientX, w, last: w, moved: false };
+    e.currentTarget.setPointerCapture(e.pointerId);
+  }, []);
+
+  const moveRailDrag = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    const d = railDrag.current;
+    if (!d) return;
+    const next = nextRailWidth(d.w, e.clientX - d.x);
+    if (next == null) return;   // 越界：这一帧不动
+    d.moved = true;
+    d.last = next;
+    setRailWidth(next);
+  }, []);
+
+  const endRailDrag = useCallback(() => {
+    const d = railDrag.current;
+    railDrag.current = null;
+    if (d?.moved && typeof localStorage !== 'undefined') {
+      localStorage.setItem(RAIL_WIDTH_KEY, String(d.last));
+    }
+  }, []);
+
+  const resetRailWidth = useCallback(() => {
+    railDrag.current = null;
+    setRailWidth(null);
+    if (typeof localStorage !== 'undefined') localStorage.removeItem(RAIL_WIDTH_KEY);
+  }, []);
 
   // 挂载时预加载联想数据源（CN 本地静态表 / HK 名称接口 / US 标的池；失败静默降级为直接输入）
   useEffect(() => {
@@ -275,8 +329,33 @@ export const InferenceCenterShell: React.FC = () => {
 
       {/* ── 工作区主体 ─────────────────────────────────────── */}
       {workspace === 'single' && (
-        <div className="flex-1 min-h-0 flex gap-3">
-          <div className="w-[520px] shrink-0 min-h-0">{crossSectionRail}</div>
+        <div className="flex-1 min-h-0 flex">
+          {/* 排名榜宽度：默认随视口走，但**可拖**。
+              两侧对宽度都有真实诉求 —— 榜单那行「手动推理执行 + 日期 + T+N + 立即执行 + 设默认」
+              实测最少要 ~500px（给 460 会溢出 20px），而右栏的 K 线图越宽越好。
+              固定分配必然有一侧受挤，所以交给用户：拖完记住，双击复位。 */}
+          <div
+            ref={railRef}
+            className="shrink-0 min-h-0"
+            style={{ width: railWidthStyle(railWidth) }}
+          >
+            {crossSectionRail}
+          </div>
+          <div
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="调整排名榜宽度"
+            title="拖动调整宽度 · 双击复位"
+            onPointerDown={startRailDrag}
+            onPointerMove={moveRailDrag}
+            onPointerUp={endRailDrag}
+            onPointerCancel={endRailDrag}
+            onDoubleClick={resetRailWidth}
+            className={clsx(
+              'shrink-0 w-3 cursor-col-resize rounded-md transition-colors',
+              'hover:bg-blue-300/60 active:bg-blue-400/70',
+            )}
+          />
 
           {isNarrow ? (
             <div className="flex-1 min-w-0 flex flex-col items-center justify-center gap-3 bg-white border border-dashed border-slate-200 rounded-xl text-slate-500">

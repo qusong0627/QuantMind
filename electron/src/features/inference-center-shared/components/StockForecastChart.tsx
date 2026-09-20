@@ -120,9 +120,14 @@ export const StockForecastChart: React.FC<StockForecastChartProps> = ({
         data: hasForecast
           ? ['日K线', 'P50 基准中枢 (50%)', 'P90 乐观上界 (90%)', 'P10 悲观下界 (10%)']
           : ['日K线'],
-        bottom: 8,
-        itemGap: 18,
-        textStyle: { color: '#334155', fontSize: 11, fontWeight: 500 },
+        // 图例是固定高度、从绘图区里切的：四项在 505px 宽的图里会折成 3 行、白吃 ~60px 高度。
+        // 去掉分位百分号（tooltip 里仍是全名，语义不丢）+ 收紧间距，压回一行。
+        formatter: (name: string) => name.replace(/\s*\(\d+%\)$/, ''),
+        bottom: 4,
+        itemGap: 12,
+        itemWidth: 14,
+        itemHeight: 8,
+        textStyle: { color: '#334155', fontSize: 10, fontWeight: 500 },
       },
       grid: {
         left: '4%',
@@ -252,16 +257,21 @@ export const StockForecastChart: React.FC<StockForecastChartProps> = ({
           </span>
         </div>
 
-        {/* 第二行：基准日 + 模型信息 */}
-        <div className="flex items-center gap-3 text-xs text-slate-600">
+        {/* 第二行：基准日 + 模型信息。
+            基准日必须 `whitespace-nowrap` —— 否则图一窄就在「基准日 / 期:」中间断行，
+            日期写成两截读不成。要截断就整段让位给后面的模型名。 */}
+        <div className="flex items-center gap-3 text-xs text-slate-600 min-w-0">
           {asOfDate && (
-            <span className="flex items-center gap-1 font-mono">
+            <span className="flex items-center gap-1 font-mono whitespace-nowrap shrink-0">
               基准日期: <strong className="text-slate-600 font-semibold">{asOfDate}</strong>
             </span>
           )}
           {modelName && (
-            <span className="flex items-center gap-1 font-mono truncate">
-              模型: <strong className="text-slate-700 font-semibold bg-slate-50 px-1.5 py-0.2 rounded border border-slate-100 truncate">{modelName}</strong>
+            <span className="flex items-center gap-1 font-mono min-w-0">
+              {/* 「模型:」必须自己 nowrap + shrink-0：夹在 flex 行里的中文裸文本会被压成
+                  一列一字（实测挤到只显示「模」/「型:」两行）。只让模型名截断。 */}
+              <span className="whitespace-nowrap shrink-0">模型:</span>
+              <strong className="text-slate-700 font-semibold bg-slate-50 px-1.5 py-0.2 rounded border border-slate-100 truncate min-w-0">{modelName}</strong>
             </span>
           )}
         </div>
