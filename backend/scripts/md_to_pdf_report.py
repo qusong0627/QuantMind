@@ -570,7 +570,7 @@ def main(md_path: str, pdf_path: str) -> None:
             spaceBefore=4, spaceAfter=3, textColor=C_PRIMARY,
         ),
         "blockquote": ParagraphStyle(
-            "blockquote", fontName=FONT_NAME, fontSize=9.5, leading=15,
+            "blockquote", fontName=FONT_NAME, fontSize=9.5, leading=15,  # fidelity: allow-limit-threshold — 非阈值：字号 9.5pt
             textColor=C_MUTED, leftIndent=2 * mm,
         ),
         "body": ParagraphStyle(
@@ -687,7 +687,7 @@ def main(md_path: str, pdf_path: str) -> None:
             self.line(18 * mm, 14 * mm, w - 18 * mm, 14 * mm)
             self.setFillColor(C_MUTED)
             self.setFont(FONT_NAME, 7.5)
-            self.drawCentredString(w / 2, 9.5 * mm, build_footer_text(page, total))
+            self.drawCentredString(w / 2, 9.5 * mm, build_footer_text(page, total))  # fidelity: allow-limit-threshold — 非阈值：页脚 Y 坐标 9.5mm
 
     def _canvasmaker(filename, **kwargs):
         return NumberedCanvas(filename, **kwargs)

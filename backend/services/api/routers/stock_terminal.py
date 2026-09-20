@@ -413,7 +413,7 @@ L2_RECOMMENDED_FACTORS: list[dict[str, Any]] = [
      "desc": "第6时段（约13:30-14:00）成交量与日均量的比值"},
     {"name": "micro_zone_vol_ratio_T5", "category": "时段", "icir": 0.316, "label": "T5 时段量比",
      "desc": "第5时段（约11:00-11:30）成交量与日均量的比值"},
-    {"name": "micro_zone_vol_ratio_T3", "category": "时段", "icir": 0.198, "label": "T3 时段量比",
+    {"name": "micro_zone_vol_ratio_T3", "category": "时段", "icir": 0.198, "label": "T3 时段量比",  # fidelity: allow-limit-threshold — 非阈值：因子 ICIR 权重
      "desc": "第3时段（约10:00-10:30）成交量与日均量的比值"},
     {"name": "micro_zone_rv_ratio_close", "category": "时段", "icir": 0.156, "label": "尾盘实现波动",
      "desc": "收盘时段已实现波动相对日均的比值。越高=尾盘波动放大，多空博弈加剧"},

@@ -438,7 +438,7 @@ class DataValidator(DatabaseDataOperation):
                 "symbol": "000001",
                 "open": [10.0 + i * 0.1 for i in range(len(dates))],
                 "high": [10.5 + i * 0.1 for i in range(len(dates))],
-                "low": [9.5 + i * 0.1 for i in range(len(dates))],
+                "low": [9.5 + i * 0.1 for i in range(len(dates))],  # fidelity: allow-limit-threshold — 非阈值：mock 夹具构造价
                 "close": [10.2 + i * 0.1 for i in range(len(dates))],
                 "volume": [1000000 + i * 10000 for i in range(len(dates))],
             }

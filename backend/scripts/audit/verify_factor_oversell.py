@@ -116,7 +116,7 @@ def main() -> int:
                     phantom_cash += excess * price
                     qty_ratio = qty / open_raw
                     fac_ratio = expected_raw / open_raw
-                    rel_err = abs(qty_ratio - fac_ratio) / fac_ratio if fac_ratio > 0 else 9.9
+                    rel_err = abs(qty_ratio - fac_ratio) / fac_ratio if fac_ratio > 0 else 9.9  # fidelity: allow-limit-threshold — 非阈值：除零哨兵值
                     if rel_err < 1e-3:
                         match_ok += 1
                     else:

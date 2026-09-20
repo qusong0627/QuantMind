@@ -58,7 +58,7 @@ FACTOR_ICIR = {
     "micro_open_gap": 0.273,
     "micro_impact_decay_half_life": 0.271,
     "micro_liquidity_daily_pattern": 0.237,
-    "micro_zone_vol_ratio_T3": 0.198,
+    "micro_zone_vol_ratio_T3": 0.198,  # fidelity: allow-limit-threshold — 非阈值：因子 ICIR 权重
     "flow_imbalance_revert_speed": 0.161,
     "micro_zone_rv_ratio_close": 0.156,
 }
