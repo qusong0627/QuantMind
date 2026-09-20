@@ -50,6 +50,208 @@ async def _build_signal_source_status(
     return latest_run_id, hosted_status
 
 
+async def _build_market_and_config_block(
+    *,
+    active_data: dict,
+    strategy: dict | None,
+    declared_market: str | None,
+    tenant_id: str,
+    user_id: str,
+) -> dict:
+    """``/status`` 的市场与配置回显块（T-RC-15，全部为新增字段，向后兼容）。
+
+    三个 return 分支共用——只在 running 分支加会让「未运行」时页签闸门失效。
+    """
+    from backend.shared.active_strategy_market import (
+        market_gate,
+        resolve_active_strategy_market,
+        strategy_declared_market,
+    )
+
+    active_market, market_source = resolve_active_strategy_market(active_data)
+    block: dict = {
+        "market": active_market,
+        "strategy_market": strategy_declared_market(strategy),
+        "market_source": market_source,
+        "market_gate": market_gate(declared_market, active_market),
+        "config_version": int(active_data.get("config_version") or 0),
+        "config_updated_at": active_data.get("config_updated_at"),
+        "latest_cycle": None,
+    }
+    if str(user_id or "").strip():
+        try:
+            from backend.services.live_trading.services.runtime_log_stream import (
+                runtime_log_stream,
+            )
+
+            state = runtime_log_stream.read_state(tenant_id=tenant_id, user_id=user_id)
+            if state:
+                block["latest_cycle"] = {
+                    "status": state.get("status") or "",
+                    "stage": state.get("stage") or "",
+                    "at": state.get("updated_at") or "",
+                    "last_line": state.get("last_line") or "",
+                }
+        except Exception as exc:  # noqa: BLE001 - 回显失败不得让 /status 500
+            logger.debug("runtime state read failed: %s", exc)
+    # T-RC-16：风控口径分裂体检（D9）。快照里的生效值与策略参数里的值本应一致
+    # （/start 与 /runtime-config 都会回写），但历史策略、手工改库、同步失败都会
+    # 让它们再次分裂——而分裂的表现是「止损看着配了却不触发」，最隐蔽的一类事故。
+    # 只报事实，不在 /status 里偷偷修（读接口不该有副作用）。
+    block["execution_config_divergence"] = _execution_config_divergence(
+        active_data=active_data, strategy=strategy
+    )
+    # T-RC-20：守护条数据源。只取与「策略还在不在跑」直接相关的几个循环——
+    # 25 个 JobSpec 全量回传会让 /status 变成体检接口，前端也只关心这几个。
+    block["schedulers"] = _build_scheduler_health_block()
+    return block
+
+
+#: 守护条关注的调度循环：没有一个活着，托管策略就不会推进
+_GUARDIAN_JOB_KEYS = (
+    "sim_hosted",  # 进程内模拟托管（SIM）
+    "manual_execution",  # 容器/远程 runner 托管（REAL/SHADOW）
+    "sentinel_push",  # 盘中哨兵消费（预警链路）
+)
+
+
+def _build_scheduler_health_block() -> list[dict]:
+    """采集守护条心跳；任何异常都退化为空列表（/status 不因体检失败而 500）。"""
+    try:
+        from backend.shared.scheduler_registry import read_heartbeats
+
+        return read_heartbeats(_GUARDIAN_JOB_KEYS)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("scheduler heartbeat block failed: %s", exc)
+        return []
+
+
+def _execution_config_divergence(
+    *, active_data: dict, strategy: dict | None
+) -> dict | None:
+    """比对角逐 ``_RISK_EXEC_KEYS``：快照生效值 vs 策略参数值。
+
+    返回 None 表示无从比对（无策略/无参数/未声明），不臆造一致。
+    """
+    if not isinstance(strategy, dict):
+        return None
+    params = strategy.get("parameters")
+    if not isinstance(params, dict):
+        return None
+    strategy_exec = params.get("execution_config")
+    if not isinstance(strategy_exec, dict):
+        return None
+    active_exec = (active_data or {}).get("execution_config")
+    if not isinstance(active_exec, dict):
+        return None
+    fields: dict = {}
+    for key in _RISK_EXEC_KEYS:
+        active_value = active_exec.get(key)
+        strategy_value = strategy_exec.get(key)
+        if active_value != strategy_value:
+            fields[key] = {"active": active_value, "strategy": strategy_value}
+    if not fields:
+        return {"diverged": False, "fields": {}}
+    return {
+        "diverged": True,
+        "fields": fields,
+        "message": (
+            "风控生效值与策略参数不一致："
+            + "；".join(
+                f"{k} 快照={v['active']} 策略={v['strategy']}" for k, v in fields.items()
+            )
+            + "。退出规则按策略参数执行，请重启策略或提交一次热更新以对齐。"
+        ),
+    }
+
+
+#: ``execution_config`` 里属于「风控口径」的键（启动时可被用户配置覆盖）。
+#: 其余键（take_profit / max_hold_days / trailing_stop*）属策略作者的退出规则，
+#: 同步时必须保留，否则会把策略原有退出规则抹掉。
+_RISK_EXEC_KEYS = ("max_buy_drop", "stop_loss")
+
+
+async def _sync_execution_config_to_strategy(
+    *,
+    strategy_id: str,
+    user_id: str,
+    exec_config: dict,
+) -> dict:
+    """把启动时生效的风控口径合并进策略参数（T-RC-16，修口径分裂）。
+
+    背景：``execution_config`` 有两个读取方，此前从**不同源**取：
+
+    - 隐式止损风控读**运行快照**（``risk_trigger_service.load_implicit_stop_loss``）
+    - 持仓退出规则读**策略参数** ``parameters.execution_config``
+      （``simulation/engine.py::_load_exit_ruleset``）
+
+    启动向导配的止损只写进快照，于是「用户设定的止损」在退出规则侧根本不生效——
+    界面显示止损 -5%，实际退出仍按策略作者（或缺失）的值走。
+
+    这里把生效值**合并**进策略参数：只写风控键，保留策略作者自定的退出规则。
+    走 ``strategy_storage.save`` + ``expected_version``，因此运行中改会自然升版并
+    留版本快照（受参数锁保护，不绕过审计）。
+
+    返回 ``{"synced", "reason", "version"}``——**不抛异常**：同步失败不应阻断启动，
+    但必须如实回传给调用方展示，绝不静默。
+    """
+    if not str(strategy_id or "").strip().isdigit():
+        return {"synced": False, "reason": "非库内策略（系统模板），无参数可写"}
+    risk_values = {
+        key: exec_config[key]
+        for key in _RISK_EXEC_KEYS
+        if isinstance(exec_config, dict) and exec_config.get(key) is not None
+    }
+    if not risk_values:
+        return {"synced": False, "reason": "生效配置中无风控参数可同步"}
+    try:
+        storage_svc = get_strategy_storage_service()
+        existing = await storage_svc.get(
+            strategy_id=int(strategy_id), user_id=user_id
+        )
+        if not existing:
+            return {"synced": False, "reason": "策略不存在，无法写回参数"}
+        parameters = dict(existing.get("parameters") or {})
+        current_exec = dict(parameters.get("execution_config") or {})
+        merged = {**current_exec, **risk_values}
+        if merged == current_exec:
+            return {
+                "synced": True,
+                "reason": "策略参数已与生效配置一致",
+                "version": existing.get("version"),
+            }
+        parameters["execution_config"] = merged
+        saved = await storage_svc.save(
+            user_id=user_id,
+            strategy_id=strategy_id,
+            name=existing.get("name", ""),
+            code=existing.get("code", ""),
+            metadata={
+                "description": existing.get("description", ""),
+                "tags": existing.get("tags", []) or [],
+                "status": existing.get("status", "DRAFT"),
+                "is_verified": existing.get("is_verified", False),
+                "parameters": parameters,
+            },
+            expected_version=existing.get("version"),
+        )
+        return {
+            "synced": True,
+            "reason": "已写入策略参数（下一轮周期生效）",
+            "version": saved.get("version"),
+        }
+    except (StrategyLockedError, VersionConflictError) as exc:
+        return {
+            "synced": False,
+            "reason": f"策略参数被并发修改，请刷新后重试：{exc}",
+        }
+    except Exception as exc:  # noqa: BLE001 - 不阻断启动
+        logger.warning(
+            "sync execution_config to strategy failed strategy=%s: %s", strategy_id, exc
+        )
+        return {"synced": False, "reason": f"同步失败：{exc}"}
+
+
 async def _resolve_strategy_detail(*, strategy_id: str, user_id: str) -> dict:
     """解析策略来源并返回标准化元数据。"""
     if strategy_id.startswith("sys_"):
@@ -85,8 +287,13 @@ async def _resolve_strategy_detail(*, strategy_id: str, user_id: str) -> dict:
     strategy = await storage_svc.get(strategy_id=int(strategy_id), user_id=user_id)
     if not strategy:
         raise HTTPException(status_code=404, detail="用户策略不存在")
+    # T-RC-15：策略归属市场（parameters.market），供 /start 一致性校验。
+    # 存储详情此前不回传 parameters，调用方无从判定；未声明时为 None（不判定）。
+    from backend.shared.active_strategy_market import strategy_declared_market
+
     return {
         "strategy_name": strategy.get("name") or f"strategy_{strategy_id}",
+        "market": strategy_declared_market(strategy),
         "execution_config": strategy.get("execution_config")
         or _default_execution_config(),
         "live_trade_config": strategy.get("live_trade_config")
@@ -202,11 +409,13 @@ async def start_trading(
         strategy_name = "uploaded_strategy.py"
         exec_config = _default_execution_config()
         live_config = _default_live_trade_config()
+        declared_market: Optional[str] = None
         if strategy_id:
             detail = await _resolve_strategy_detail(
                 strategy_id=strategy_id, user_id=resolved_user_id
             )
             strategy_name = detail["strategy_name"]
+            declared_market = detail.get("market")
             exec_config = detail["execution_config"]
             live_config = (
                 detail.get("live_trade_config") or _default_live_trade_config()
@@ -301,6 +510,18 @@ async def start_trading(
             or (exec_config or {}).get("market")
             or "CN"
         ).upper()
+        # T-RC-15：策略归属市场 vs 本次部署市场一致性校验。此前完全不校验，
+        # 港股策略能被 A 股页签启动（反之亦然），跑起来后信号/行情/账户口径
+        # 全错却无人拦截。无声明不判定（老策略 parameters 里没有 market）。
+        if strategy_id and declared_market and declared_market != deployment_market:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"策略归属市场为 {declared_market}，本次启动市场为 {deployment_market}，"
+                    f"二者不一致。请切换到 {declared_market} 市场后再启动，"
+                    f"或改用归属该市场的策略。"
+                ),
+            )
         readiness = await run_trading_readiness_precheck(
             db,
             mode=mode,
@@ -443,6 +664,11 @@ async def start_trading(
         import hashlib as _hashlib
 
         _code_sha = _hashlib.sha256(code_str.encode("utf-8")).hexdigest()[:12] if code_str else None
+        # T-RC-15：把解析出的部署市场写回快照，让市场判定有稳定出处
+        # （此前不写回，desk/status 只能靠 live_config.market 缺省回退到 CN，
+        # 港股/美股策略在快照里看不出市场）。仅在配置未显式声明时补写。
+        if isinstance(live_config, dict) and not str(live_config.get("market") or "").strip():
+            live_config = {**live_config, "market": deployment_market}
         redis.client.set(
             _active_strategy_key(resolved_tenant_id, resolved_user_id),
             json.dumps(
@@ -460,11 +686,22 @@ async def start_trading(
                     "code_sha": _code_sha,
                     "code_str": code_str[:8000] if code_str else None,
                     "code_overrides": code_overrides,
+                    # T-RC-16：配置版本，热更新（/runtime-config）据此乐观并发与留痕
+                    "config_version": 1,
+                    "config_updated_at": started_at_iso,
+                    "config_history": [],
                     # 重启恢复/托管调度解析身份用，避免按键后缀反推（历史 000admin 坑）
                     "runtime_tenant_id": resolved_tenant_id,
                     "runtime_user_id": resolved_user_id,
                 }
             ),
+        )
+        # T-RC-16：把生效风控口径合并进策略参数，消除「快照止损生效、退出规则不生效」
+        # 的分裂。失败不阻断启动，但结果如实回传（execution_config_sync）。
+        execution_config_sync = await _sync_execution_config_to_strategy(
+            strategy_id=strategy_id,
+            user_id=resolved_user_id,
+            exec_config=exec_config if isinstance(exec_config, dict) else {},
         )
         _schedule_user_notification(
             user_id=resolved_user_id,
@@ -578,6 +815,12 @@ async def start_trading(
             "effective_execution_config": exec_config,
             "effective_live_trade_config": live_config,
             "code_overrides": code_overrides,
+            # T-RC-15/16：市场口径与配置版本回显——前端据此判定页签闸门、
+            # 显示「当前生效版本」并作为 /runtime-config 的乐观并发基线。
+            "market": deployment_market,
+            "strategy_market": declared_market,
+            "config_version": 1,
+            "execution_config_sync": execution_config_sync,
             "trading_permission": trading_permission,
             "signal_readiness": signal_readiness,
             "bootstrap": {
@@ -618,6 +861,7 @@ async def start_trading(
 async def stop_trading(
     user_id: Optional[str] = Form(None),
     tenant_id: Optional[str] = Form(None),
+    reason: Optional[str] = Form(None),
     auth: AuthContext = Depends(get_auth_context),
     redis: RedisClient = Depends(get_redis),
     db: AsyncSession = Depends(get_db),
@@ -630,7 +874,11 @@ async def stop_trading(
         active_strat_raw = _read_active_strategy_raw(
             redis, resolved_tenant_id, resolved_user_id
         )
-        result = {"status": "success", "message": "Stopped"}
+        # T-RC-19：停止原因随请求落审计。之前 /stop 不留原因，事后只能看到
+        # 「某时刻停了」，分不清是人工、换策略还是风控告警——而这三者的处置
+        # 完全不同（换策略要接着启新的，风控要复盘）。未传则如实记「未填写」。
+        stop_reason = str(reason or "").strip() or "unspecified"
+        result = {"status": "success", "message": "Stopped", "reason": stop_reason}
         stopped_strategy_id = None
 
         if active_strat_raw:
@@ -642,7 +890,26 @@ async def stop_trading(
             sandbox_manager.stop_strategy(
                 resolved_tenant_id, resolved_user_id, strat_id
             )
-            logger.info(f"[Sim] 用户 {resolved_user_id} 停止了沙箱模拟盘")
+            logger.info(
+                "[Sim] 用户 %s 停止了沙箱模拟盘（原因=%s）", resolved_user_id, stop_reason
+            )
+
+        # 停止原因写入运行日志流：用户在界面上看到的「为什么停了」与审计同源
+        try:
+            from backend.services.live_trading.services.runtime_log_stream import (
+                runtime_log_stream,
+            )
+
+            runtime_log_stream.log(
+                tenant_id=resolved_tenant_id,
+                user_id=resolved_user_id,
+                line=f"策略已停止（原因：{stop_reason}）",
+                level="warning",
+                stage="stop",
+                summary={"reason": stop_reason, "strategy_id": stopped_strategy_id},
+            )
+        except Exception as exc:  # noqa: BLE001 - 日志失败不得阻断停止
+            logger.debug("stop runtime log failed: %s", exc)
 
         # Clear active strategy in Redis（含管理员历史别名）
         _delete_active_strategy_aliases(redis, resolved_tenant_id, resolved_user_id)
@@ -704,7 +971,7 @@ async def stop_trading(
             user_id=resolved_user_id,
             tenant_id=resolved_tenant_id,
             title="策略已停止",
-            content="当前实盘/模拟策略已停止运行",
+            content=f"当前实盘/模拟策略已停止运行（原因：{stop_reason}）",
             type="strategy",
             level="info",
             action_url="/trading",
@@ -742,6 +1009,7 @@ async def get_status(
     user_id: Optional[str] = None,
     tenant_id: Optional[str] = None,
     trading_mode: Optional[str] = None,
+    market: Optional[str] = None,
     auth: AuthContext = Depends(get_auth_context),
     redis: RedisClient = Depends(get_redis),
     db: AsyncSession = Depends(get_db),
@@ -771,6 +1039,10 @@ async def get_status(
     active_live_trade_config = None
     trading_permission = "trade_enabled"
     signal_readiness = None
+    # 必须显式初始化，不能只在 `if active_strat_raw:` 里绑定：没有活跃策略时后者不执行，
+    # 后面 `isinstance(active_data, dict)` 会抛 UnboundLocalError → /status 500，
+    # 而前端会带着缺省值照常渲染，表现为「界面像在运行、心跳/版本全空」的静默故障。
+    active_data: dict = {}
     if active_strat_raw:
         try:
             active_data = json.loads(active_strat_raw)
@@ -846,6 +1118,24 @@ async def get_status(
             except Exception:
                 pass
 
+    # T-RC-15：市场/配置回显块（三个分支共用）。策略详情单独取一次——
+    # strategy_market 要的是策略自身声明的市场，与运行快照的市场是两个概念。
+    status_strategy: dict | None = None
+    if isinstance(active_strat_id, str) and active_strat_id.isdigit():
+        try:
+            status_strategy = await get_strategy_storage_service().get(
+                strategy_id=int(active_strat_id), user_id=resolved_user_id
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("status strategy lookup failed: %s", exc)
+    market_block = await _build_market_and_config_block(
+        active_data=active_data if isinstance(active_data, dict) else {},
+        strategy=status_strategy,
+        declared_market=market,
+        tenant_id=resolved_tenant_id,
+        user_id=resolved_user_id,
+    )
+
     latest_signal_run_id, signal_source_status = await _build_signal_source_status(
         redis.client,
         resolved_tenant_id,
@@ -855,7 +1145,7 @@ async def get_status(
         tenant_id=resolved_tenant_id,
         user_id=resolved_user_id,
         active_runtime_id=active_data.get("run_id")
-        if "active_data" in locals() and isinstance(active_data, dict)
+        if isinstance(active_data, dict)
         else None,
     )
 
@@ -910,6 +1200,7 @@ async def get_status(
                 "latest_hosted_task": latest_hosted_task,
                 "latest_signal_run_id": latest_signal_run_id,
                 "signal_source_status": signal_source_status,
+                **market_block,
             }
 
         return {
@@ -927,6 +1218,7 @@ async def get_status(
             "signal_source_status": signal_source_status,
             "trading_permission": trading_permission,
             "signal_readiness": signal_readiness,
+            **market_block,
         }
 
     # No active strategy
@@ -945,20 +1237,481 @@ async def get_status(
         "signal_source_status": signal_source_status,
         "trading_permission": trading_permission,
         "signal_readiness": signal_readiness,
+        **market_block,
+    }
+
+
+@router.get("/risk-status")
+async def get_risk_status(
+    user_id: Optional[str] = None,
+    tenant_id: Optional[str] = None,
+    trade_date: Optional[str] = None,
+    auth: AuthContext = Depends(get_auth_context),
+    redis: RedisClient = Depends(get_redis),
+):
+    """风控一屏（T-RC-22）：现在的止损到底是多少、有没有被锁。
+
+    「生效止损」此前散在三处——运行快照、策略参数、界面回显——用户无法自证哪个
+    是真的。本端点把三者并排给出并标注 ``source``，同时回传当日风险锁。
+
+    只读，无副作用；Redis 读失败时 ``locks.available=false``（**不谎报「无锁」**：
+    「读不到」与「确实没锁」对交易者的含义完全不同）。
+    """
+    resolved_user_id, resolved_tenant_id = _normalize_identity(
+        auth, user_id=user_id, tenant_id=tenant_id
+    )
+
+    raw = _read_active_strategy_raw(redis, resolved_tenant_id, resolved_user_id)
+    try:
+        active_data = json.loads(raw) if raw else {}
+    except (TypeError, ValueError):
+        active_data = {}
+    if not isinstance(active_data, dict):
+        active_data = {}
+    active_exec = active_data.get("execution_config")
+    active_exec = active_exec if isinstance(active_exec, dict) else {}
+
+    strategy: dict | None = None
+    strategy_id = str(active_data.get("strategy_id") or "").strip()
+    if strategy_id:
+        try:
+            from backend.shared.strategy_storage import get_strategy_storage_service
+
+            strategy = await get_strategy_storage_service().get(
+                strategy_id, user_id=resolved_user_id
+            )
+        except Exception as exc:  # noqa: BLE001 - 诊断接口不得因取策略失败而 500
+            logger.debug("risk-status strategy load failed: %s", exc)
+
+    # 风险锁：与下单时同一判定源（risk_lock 模块），不重算
+    locks_block: dict = {
+        "available": False,
+        "account_frozen": False,
+        "symbols": [],
+        "reason": None,
+    }
+    try:
+        from datetime import date as _date
+
+        from backend.services.live_trading.services.risk_lock import load_risk_locks
+
+        # 锁按**交易日**维度写（TTL 到当日收盘 +4h），读的时候必须用同一个维度，
+        # 否则会读到空的当日键然后报「无锁」——比不报更危险。
+        text = str(trade_date or "").strip()
+        day = _date.fromisoformat(text) if text else datetime.now(timezone.utc).date()
+        locks = load_risk_locks(redis, resolved_tenant_id, resolved_user_id, day)
+        locks_block = {
+            "available": True,
+            "trade_date": day.isoformat(),
+            "account_frozen": bool(locks.account_frozen),
+            "symbols": sorted(locks.symbols),
+            "reason": None,
+        }
+    except Exception as exc:  # noqa: BLE001
+        locks_block["reason"] = f"风险锁读取失败：{exc}"
+
+    params = (strategy or {}).get("parameters")
+    return {
+        "status": "success",
+        "user_id": resolved_user_id,
+        # 生效值：运行快照（托管链路每周期重读的就是它）
+        "effective_execution_config": active_exec,
+        "source": "runtime_snapshot",
+        "strategy_id": strategy_id or None,
+        "strategy_execution_config": (
+            params.get("execution_config") if isinstance(params, dict) else None
+        ),
+        "execution_config_divergence": _execution_config_divergence(
+            active_data=active_data, strategy=strategy
+        ),
+        "locks": locks_block,
+        "running": bool(active_data),
     }
 
 
 @router.get("/logs")
 async def get_logs(
     tail: int = 100,
+    after_id: str = "0-0",
+    limit: int = 200,
+    level: Optional[str] = None,
+    stage: Optional[str] = None,
+    source: Optional[str] = None,
     user_id: Optional[str] = None,
     tenant_id: Optional[str] = None,
     auth: AuthContext = Depends(get_auth_context),
 ):
+    """运行日志（T-RC-14）：策略「现在在做什么、为什么没做」。
+
+    与 ``/manual-executions/{task_id}/logs`` 的分工：这里是**运行维度**
+    （键为 tenant+user，纯模拟托管链路没有任务行也能读），那里是**单次任务**的
+    逐单明细。两者互不替代。
+
+    不加 ``@redis_cache``——日志绝不能缓存（``/status`` 的 5s 缓存对它是灾难）。
+    """
     resolved_user_id, resolved_tenant_id = _normalize_identity(
         auth, user_id=user_id, tenant_id=tenant_id
     )
-    return {"user_id": resolved_user_id, "logs": [], "message": "模拟盘日志暂不支持远程查看"}
+    from backend.services.live_trading.services.runtime_log_stream import (
+        runtime_log_stream,
+    )
+
+    capped = max(1, min(int(limit or 200), 500))
+    data = runtime_log_stream.fetch_scope_entries(
+        tenant_id=resolved_tenant_id,
+        user_id=resolved_user_id,
+        after_id=after_id or "0-0",
+        limit=capped,
+        level=level,
+        stage=stage,
+        source=source,
+    )
+    entries = data.get("entries") or []
+    tail_count = max(1, min(int(tail or 100), 500))
+    # logs 必须是 **string**：既有前端按 RealTradingLogs.logs: string 渲染
+    # （<pre>{logs}</pre>），此处返回 list 会渲染成空白——这正是此前"看不到日志"的一半原因。
+    text_tail = "\n".join(
+        f"[{entry.get('level') or 'info'}] {entry.get('ts') or ''} {entry.get('line') or ''}"
+        for entry in entries[-tail_count:]
+    )
+    return {
+        "tenant_id": resolved_tenant_id,
+        "user_id": resolved_user_id,
+        "logs": text_tail,
+        "entries": entries,
+        "next_id": data.get("next_id") or (after_id or "0-0"),
+        "snapshot": data.get("snapshot"),
+        "message": "" if entries else "暂无运行日志：策略尚未产生任何周期记录",
+    }
+
+
+# 影响「何时调仓」的字段。交易日中途改这些会让当天已经跑过的一轮与新的节奏
+# 叠加（要么重复建单、要么当天直接不再触发），故同日二次触发需显式 force。
+_RHYTHM_KEYS = (
+    "rebalance_days",
+    "schedule_type",
+    "trade_weekdays",
+    "enabled_sessions",
+    "sell_time",
+    "buy_time",
+    "sell_first",
+    "trigger_window_seconds",
+)
+
+#: 热更新**不得**触碰的快照键：它们刻画「这一轮运行的身份与代码」，
+#: 改了等于换了一个运行实例（沙箱 code_str 重建 = 重启，run_id 变 = 账本断链）。
+_RUNTIME_IDENTITY_KEYS = (
+    "run_id",
+    "started_at",
+    "code_str",
+    "code_sha",
+    "code_overrides",
+    "strategy_id",
+    "strategy_name",
+    "launch_result",
+    "runtime_tenant_id",
+    "runtime_user_id",
+)
+
+
+def _runtime_config_diff(before: dict, after: dict, keys: tuple[str, ...]) -> dict:
+    """逐 key 比较（仅列变化项），用于响应与 config_history 留痕。"""
+    diff: dict = {}
+    for key in keys:
+        old = before.get(key)
+        new = after.get(key)
+        if old != new:
+            diff[key] = {"from": old, "to": new}
+    return diff
+
+
+def _today_fired_phases(*, redis, tenant_id: str, user_id: str, strategy_id: str, market: str) -> list[str]:
+    """今日已触发过的阶段（BUY/SELL/ALL 幂等锁仍在 → 该阶段已跑过）。
+
+    锁键见 ``simulation_hosted_scheduler._lock_key``，TTL 36h、按 phase 区分，
+    因此无需扫描 KEYS，逐个精确探测即可。
+    """
+    try:
+        from backend.shared.market_sessions import market_timezone as _tz
+    except Exception:  # noqa: BLE001 - 兜底不判定
+        return []
+    try:
+        trade_date = datetime.now(_tz(market)).date().isoformat()
+    except Exception:  # noqa: BLE001
+        return []
+    fired: list[str] = []
+    for phase in ("BUY", "SELL", "ALL"):
+        key = f"qm:hosted:simulation:{tenant_id}:{user_id}:{strategy_id}:{trade_date}:{phase}"
+        try:
+            if redis.client.exists(key):
+                fired.append(phase)
+        except Exception:  # noqa: BLE001
+            continue
+    return fired
+
+
+@router.post("/runtime-config")
+async def update_runtime_config(
+    execution_config: Optional[str] = Form(None),
+    live_trade_config: Optional[str] = Form(None),
+    expected_config_version: Optional[int] = Form(None),
+    user_id: Optional[str] = Form(None),
+    tenant_id: Optional[str] = Form(None),
+    dry_run: bool = Form(False),
+    force: bool = Form(False),
+    operator: Optional[str] = Form(None),
+    change_reason: Optional[str] = Form(None),
+    auth: AuthContext = Depends(get_auth_context),
+    redis: RedisClient = Depends(get_redis),
+):
+    """盘中热更新：改「怎么调仓、怎么风控」，不动持仓、不重启（T-RC-16）。
+
+    生效时机有代码证据（不是承诺）：
+    - 调仓节奏：``SimulationHostedScheduler`` **每周期重读**快照（30s 一次）；
+    - 退出规则：``SimulationEngine._load_exit_ruleset`` **每周期**从库里读策略参数。
+    二者都是「下一周期生效」，故 ``effective_at="next_cycle"``。
+
+    三条硬边界（不满足直接拒绝，绝不「尽力而为」地改一半）：
+    1. **REAL/SHADOW 拒绝热更新**：容器 runner 的交易参数是容器 env
+       （``k8s_manager``），改配置必须重建容器 → 409 + ``requires_restart=true``。
+       谎称零中断比不支持更糟。
+    2. **不碰运行身份**：``run_id``/``started_at``/``code_str``/``code_sha`` 原样保留。
+       改策略**代码**要另走 ``PUT /user-strategies/{id}``（且沙箱需重启），此端点只管配置。
+    3. **同日二次触发需 force**：当天已按旧节奏跑过一轮，再改节奏字段会叠加。
+    """
+    resolved_user_id, resolved_tenant_id = _normalize_identity(
+        auth, user_id=user_id, tenant_id=tenant_id
+    )
+    key = _active_strategy_key(resolved_tenant_id, resolved_user_id)
+    # 注意：函数签名里的 `redis` 是 RedisClient 依赖，遮蔽了同名模块，
+    # 故异常类必须显式导入（写 `redis.exceptions.WatchError` 会 AttributeError）。
+    from redis.exceptions import WatchError as _WatchError
+
+    if execution_config is None and live_trade_config is None:
+        raise HTTPException(
+            status_code=400,
+            detail="execution_config 与 live_trade_config 至少提供一个",
+        )
+
+    patch_exec: dict = {}
+    patch_live: dict = {}
+    if execution_config is not None:
+        try:
+            parsed = json.loads(execution_config)
+        except Exception:
+            raise HTTPException(status_code=400, detail="execution_config 不是合法 JSON")
+        if not isinstance(parsed, dict):
+            raise HTTPException(status_code=400, detail="execution_config 必须是对象")
+        patch_exec = parsed
+    if live_trade_config is not None:
+        try:
+            parsed_live = json.loads(live_trade_config)
+        except Exception:
+            raise HTTPException(status_code=400, detail="live_trade_config 不是合法 JSON")
+        if not isinstance(parsed_live, dict):
+            raise HTTPException(status_code=400, detail="live_trade_config 必须是对象")
+        patch_live = parsed_live
+    # 身份键由服务端持有，客户端提交一律丢弃（防伪造 run_id 断账本）
+    for identity_key in _RUNTIME_IDENTITY_KEYS:
+        patch_exec.pop(identity_key, None)
+        patch_live.pop(identity_key, None)
+
+    client = redis.client
+    if client is None:
+        raise HTTPException(status_code=503, detail="Redis 不可用，无法热更新")
+
+    pipe = client.pipeline()
+    try:
+        pipe.watch(key)
+        raw = pipe.get(key)
+        if not raw:
+            pipe.unwatch()
+            raise HTTPException(
+                status_code=409,
+                detail="当前没有运行中的策略，无法热更新；请先在控制台启动策略",
+            )
+        try:
+            snapshot = json.loads(raw)
+        except Exception:
+            pipe.unwatch()
+            raise HTTPException(status_code=500, detail="活跃策略快照损坏，无法解析")
+        if not isinstance(snapshot, dict):
+            pipe.unwatch()
+            raise HTTPException(status_code=500, detail="活跃策略快照格式异常")
+
+        run_mode = str(snapshot.get("mode") or "").upper()
+        if run_mode and run_mode != "SIMULATION":
+            pipe.unwatch()
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"当前为 {run_mode} 模式：交易参数在运行容器内以环境变量固化，"
+                    "热更新不生效，需重建运行容器（持仓不受影响）"
+                ),
+                headers={"X-Requires-Restart": "true"},
+            )
+
+        current_version = int(snapshot.get("config_version") or 0)
+        if expected_config_version is not None and int(expected_config_version) != current_version:
+            pipe.unwatch()
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"配置版本已变更（当前 {current_version}，提交基线 {expected_config_version}），"
+                    "请刷新后重试"
+                ),
+            )
+
+        old_exec = snapshot.get("execution_config") if isinstance(snapshot.get("execution_config"), dict) else {}
+        old_live = snapshot.get("live_trade_config") if isinstance(snapshot.get("live_trade_config"), dict) else {}
+        new_exec = _normalize_execution_config({}, {**old_exec, **patch_exec}) if patch_exec else dict(old_exec)
+        new_live = (
+            _normalize_live_trade_config({}, {**old_live, **patch_live}, allow_after_hours=True)
+            if patch_live
+            else dict(old_live)
+        )
+        # 校验与 /start 同源（不新写一套），非法值在这里就被拒绝。
+        # 包成 400 而非 500：越界是用户输入问题，不是服务端故障。
+        try:
+            ExecutionConfigSchema.model_validate(new_exec)
+        except Exception as schema_exc:  # noqa: BLE001 - pydantic ValidationError
+            pipe.unwatch()
+            raise HTTPException(
+                status_code=400, detail=f"execution_config 校验失败：{schema_exc}"
+            )
+
+        exec_diff = _runtime_config_diff(old_exec, new_exec, tuple(sorted(set(old_exec) | set(new_exec))))
+        live_diff = _runtime_config_diff(old_live, new_live, tuple(sorted(set(old_live) | set(new_live))))
+        rhythm_diff = {
+            k: v for k, v in live_diff.items() if k in _RHYTHM_KEYS
+        }
+
+        strategy_id_for_lock = str(snapshot.get("strategy_id") or "").strip()
+        fired_phases: list[str] = []
+        if rhythm_diff and strategy_id_for_lock:
+            market = str((new_live or {}).get("market") or (new_exec or {}).get("market") or "CN").upper()
+            fired_phases = _today_fired_phases(
+                redis=redis,
+                tenant_id=resolved_tenant_id,
+                user_id=resolved_user_id,
+                strategy_id=strategy_id_for_lock,
+                market=market,
+            )
+            # 预演（dry_run）不拦：它不写任何东西，而「今天已经跑过一轮」恰恰是
+            # 操作者做决定前最需要看到的信息（响应里已带 already_fired_phases）。
+            if fired_phases and not force and not dry_run:
+                pipe.unwatch()
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"今日已按原节奏触发过 {'/'.join(fired_phases)} 阶段，此时修改调仓节奏"
+                        "可能与已执行的一轮叠加。确认要改请带 force=true 重试。"
+                    ),
+                )
+
+        if dry_run:
+            pipe.unwatch()
+            return {
+                "status": "dry_run",
+                "message": "预演：未写入任何变更",
+                "config_version": current_version,
+                "effective_execution_config": new_exec,
+                "effective_live_trade_config": new_live,
+                "diff": {"execution_config": exec_diff, "live_trade_config": live_diff},
+                "rhythm_changed": bool(rhythm_diff),
+                "already_fired_phases": fired_phases,
+                "effective_at": "next_cycle",
+            }
+
+        next_version = current_version + 1
+        now_iso = datetime.now(timezone.utc).isoformat()
+        history = snapshot.get("config_history")
+        history = list(history) if isinstance(history, list) else []
+        history.append(
+            {
+                "config_version": next_version,
+                "at": now_iso,
+                "operator": str(operator or resolved_user_id),
+                "reason": str(change_reason or ""),
+                "forced": bool(force and fired_phases),
+                "already_fired_phases": fired_phases,
+                "diff": {"execution_config": exec_diff, "live_trade_config": live_diff},
+            }
+        )
+        # 身份键原样保留（run_id/code_str/...），只替换配置与版本元数据
+        new_snapshot = {
+            **snapshot,
+            "execution_config": new_exec,
+            "live_trade_config": new_live,
+            "config_version": next_version,
+            "config_updated_at": now_iso,
+            "config_history": history[-50:],
+        }
+        try:
+            pipe.multi()
+            pipe.set(key, json.dumps(new_snapshot))
+            pipe.execute()
+        except _WatchError:
+            raise HTTPException(
+                status_code=409,
+                detail="配置在提交瞬间被其他会话改动（调度器或另一处编辑），请刷新后重试",
+            )
+    finally:
+        try:
+            pipe.reset()
+        except Exception:  # noqa: BLE001
+            pass
+
+    # 风控口径同步进策略参数（D9：快照止损与退出规则必须同源）。失败不阻断，
+    # 但如实回传，让前端能提示「生效值已变、策略参数未写回」。
+    exec_sync = await _sync_execution_config_to_strategy(
+        strategy_id=strategy_id_for_lock,
+        user_id=resolved_user_id,
+        exec_config=new_exec,
+    )
+
+    try:
+        from backend.services.live_trading.services.runtime_log_stream import (
+            SOURCE_SYSTEM,
+            runtime_log_stream,
+        )
+
+        changed = ", ".join(
+            sorted(set(exec_diff) | set(live_diff))
+        ) or "（无字段变化）"
+        runtime_log_stream.log(
+            tenant_id=resolved_tenant_id,
+            user_id=resolved_user_id,
+            line=(
+                f"配置热更新 → v{next_version}（{changed}）"
+                + (f"，原因：{change_reason}" if change_reason else "")
+                + (f"，今日已触发 {'/'.join(fired_phases)} 但强制提交" if force and fired_phases else "")
+                + "；下一周期生效，持仓不变"
+            ),
+            level="warning" if (force and fired_phases) else "info",
+            source=SOURCE_SYSTEM,
+            stage="config_update",
+            status="applied",
+            strategy_id=strategy_id_for_lock,
+        )
+    except Exception as exc:  # noqa: BLE001 - 日志失败不影响已生效的配置
+        logger.debug("runtime config log failed: %s", exc)
+
+    return {
+        "status": "success",
+        "message": f"配置已更新至 v{next_version}，将于下一周期生效",
+        "config_version": next_version,
+        "previous_config_version": current_version,
+        "effective_at": "next_cycle",
+        "effective_execution_config": new_exec,
+        "effective_live_trade_config": new_live,
+        "diff": {"execution_config": exec_diff, "live_trade_config": live_diff},
+        "rhythm_changed": bool(rhythm_diff),
+        "already_fired_phases": fired_phases,
+        "forced": bool(force and fired_phases),
+        "execution_config_sync": exec_sync,
+        "position_untouched": True,
+    }
 
 
 @router.get("/orders")

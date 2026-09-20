@@ -54,6 +54,10 @@ const RuntimeLayer: React.FC<RuntimeLayerProps> = ({
     const meta = RUN_STATE_META[runState];
     const live = status?.live_trade_config;
     const exec = status?.execution_config;
+    // 「有活跃策略」的唯一口径：后端要么回了策略身份，要么状态机说在跑。
+    // 二者皆无时 `status.mode` 是缺省值，不能当作运行档位展示。
+    const active = !!status?.strategy?.id
+        || ['running', 'starting'].includes(String(status?.status || '').toLowerCase());
 
     const scheduleText = live?.schedule_type === 'weekly'
         ? (live.trade_weekdays && live.trade_weekdays.length > 0 ? `每周 ${live.trade_weekdays.join(' / ')}` : '每周执行')
@@ -102,13 +106,48 @@ const RuntimeLayer: React.FC<RuntimeLayerProps> = ({
                 {runState === 'observing' && (
                     <span className="text-xs font-medium">当前无可交易信号，只跑观察链路，不自动下单</span>
                 )}
-                {status?.mode && (
+                {active && (
                     <span className="ml-auto text-[11px] font-bold opacity-70">
                         {status.mode === 'SIMULATION' ? '模拟运行' : status.mode === 'SHADOW' ? '影子运行' : '实盘运行'}
                         {status.orchestration_mode ? ` · ${status.orchestration_mode}` : ''}
                     </span>
                 )}
             </div>
+
+            {/* 运行档位 / 配置版本 / 生效状态：热更新的「新版本什么时候生效」必须一眼可见。
+                仅在有活跃策略时显示档位——未运行时后端返回的 `mode` 是个缺省值
+                （SIMULATION），照抄会在实盘页签里写「沙箱模拟」，正是本次要消灭的
+                「界面把系统默认值说成用户的选择」。 */}
+            {status && active && (
+                <div className="mb-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] font-bold text-slate-500">
+                    <span title="运行档位由后端 mode 决定，不随页签切换而变">
+                        档位：
+                        <span className="text-slate-700">
+                            {status.mode === 'SIMULATION' ? '沙箱模拟（不碰真钱）'
+                                : status.mode === 'SHADOW' ? '影子运行（真行情不下单）'
+                                    : '实盘运行'}
+                        </span>
+                    </span>
+                    <span className="text-slate-200">|</span>
+                    <span>托管方式：{status.orchestration_mode || '进程内调度'}</span>
+                    {status.config_version !== undefined && status.config_version > 0 && (
+                        <>
+                            <span className="text-slate-200">|</span>
+                            <span title={status.config_updated_at ? `最近一次配置变更：${status.config_updated_at}` : undefined}>
+                                配置版本：v{status.config_version}
+                            </span>
+                        </>
+                    )}
+                    <span className="text-slate-200">|</span>
+                    {runState === 'config_pending' ? (
+                        <span className="text-amber-700" title="托管调度器在下一个周期读取新配置；本轮仍按原参数执行">
+                            生效状态：新版本待下个周期生效
+                        </span>
+                    ) : (
+                        <span className="text-emerald-700">生效状态：当前版本已生效</span>
+                    )}
+                </div>
+            )}
 
             {/* 两行网格：同行两卡自动等高，第二行即 策略参数 vs 任务汇报 底部对齐 */}
             <div className="grid grid-cols-1 lg:grid-cols-5 gap-3 items-stretch">

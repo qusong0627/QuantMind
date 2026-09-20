@@ -446,7 +446,7 @@ const RealTradingPage: React.FC = () => {
         }
     }, [preflightResult, tradingReadinessResult]);
 
-    const handleStop = async () => {
+    const handleStop = async (reason?: string) => {
         // 允许在 running/starting 状态下停止，也允许在不确定状态下尝试停止（防止状态不同步）
         const isStoppable = status?.status === 'running' || status?.status === 'starting';
         if (!isStoppable && status?.status !== undefined) {
@@ -457,7 +457,8 @@ const RealTradingPage: React.FC = () => {
         try {
             const currentStrategyId = status?.strategy?.id;
             const { realTradingService } = await import('../../services/realTradingService');
-            await realTradingService.stop(userId, tenantId);
+            // 停止原因随请求带给后端，落审计与运行日志（T-RC-19）
+            await realTradingService.stop(userId, tenantId, reason);
 
             // 10万并发架构核心：从 Redis 匹配池移除策略
             if (currentStrategyId) {

@@ -38,7 +38,22 @@ _HEARTBEAT_WIRED = {
     "health_recheck": "services/trade/services/health_recheck_service.py",
     # P6 T-P6-06 新增（热集构建）
     "hot_set_builder": "services/live_trading/services/hot_set_builder.py",
+    # T-RC-14 新增（策略控制台守护）：两条关键交易循环此前不在册，
+    # 挂掉时 C07 无项可判 → 表现为「体检全绿但策略不再调仓」。
+    "sim_hosted": "services/simulation/services/simulation_hosted_scheduler.py",
+    "manual_execution": "services/live_trading/services/manual_execution_worker.py",
+    # P6 期补登注册表时漏登记进本守卫（守卫因此长期为红——红灯的守卫等于没有守卫）
+    "tdx_hot_set_feed": "services/live_trading/services/tdx_hot_set_feed.py",
+    "sentinel_push": "services/trade/services/sentinel_alert_service.py",
+    "sentinel_backfill": "services/trade/services/sentinel_backfill.py",
+    "advice_backfill": "services/trade/services/advice_backfill.py",
+    "advice_generator": "services/trade/services/advice_generator.py",
+    "holding_sentinel": "services/trade/services/holding_sentinel.py",
 }
+
+#: 心跳用模块常量（``_sched_heartbeat(SCHEDULER_NAME)``）间接引用的任务：
+#: 字面量断言扫不到，改判「常量声明与调用同文件共存」。
+_HEARTBEAT_VIA_CONSTANT = {"holding_sentinel": "SCHEDULER_NAME"}
 
 
 def test_registry_integrity():
@@ -114,7 +129,12 @@ def test_all_jobs_heartbeat_wired_in_source():
     )
     for job_key, rel in _HEARTBEAT_WIRED.items():
         src = (_BACKEND / rel).read_text(encoding="utf-8")
-        assert f'_sched_heartbeat("{job_key}")' in src, f"{job_key} 未接心跳（{rel}）"
+        const = _HEARTBEAT_VIA_CONSTANT.get(job_key)
+        if const:
+            assert f'{const} = "{job_key}"' in src, f"{job_key} 常量名不符（{rel}）"
+            assert f"_sched_heartbeat({const})" in src, f"{job_key} 未接心跳（{rel}）"
+        else:
+            assert f'_sched_heartbeat("{job_key}")' in src, f"{job_key} 未接心跳（{rel}）"
     for job_key in (
         "auto_inference",
         "news_enrich",
@@ -159,6 +179,10 @@ def test_schedule_ctl_dispatch_covers_rerun_declared_jobs():
         "market_sync_dispatch",
         "eval_scores",
         "health_recheck",
+        # T-RC-14 补齐（此前注册表声明了 rerun 却缺分发，守卫长期为红）
+        "sentinel_backfill",
+        "advice_backfill",
+        "advice_generator",
     }
 
     # 未知任务 → 退出码 2（纯函数路径，不触发真实执行）

@@ -148,12 +148,83 @@ export interface RealTradingStatus {
     } | null;
     trading_permission?: TradingPermission;
     signal_readiness?: SignalReadiness | null;
+    // ── T-RC-15 市场闸门与配置版本（后端新增字段，全部可选以兼容旧后端）──
+    /** 当前运行策略的归属市场（服务端判定），`null` 表示载荷未声明市场 */
+    market?: string | null;
+    /** 策略自身声明的市场（`parameters.market`） */
+    strategy_market?: string | null;
+    /** 市场判定依据：active/live_trade_config/strategy_params/undeclared… */
+    market_source?: string | null;
+    /** 页签市场与运行市场不一致时的话术；一致时为 null */
+    market_gate?: string | null;
+    /** 配置版本号；>0 说明发生过热更新（含 /start 的初值 1） */
+    config_version?: number;
+    config_updated_at?: string | null;
+    /** 最近一个调仓周期的执行摘要（来自运行维度状态键） */
+    latest_cycle?: {
+        status?: string;
+        stage?: string;
+        at?: string;
+        last_line?: string;
+    } | null;
+    /**
+     * 风控口径分裂体检（D9）：`diverged=true` 说明「界面上配的止损」与
+     * 「策略实际读到的止损」不一致——止损看着配了却不触发，最隐蔽的一类事故。
+     * `null` 表示无从比对（未声明/无策略），**不是一致**。
+     */
+    execution_config_divergence?: {
+        diverged: boolean;
+        fields?: Record<string, { snapshot?: unknown; strategy?: unknown }>;
+        message?: string;
+    } | null;
+    /**
+     * 守护条心跳（T-RC-20）：托管循环是否还活着。
+     * `state` 口径与体检 C07 一致：ok / stale / off / missing。
+     * 空数组表示后端未提供该块（旧版本），**不等于「没有调度在跑」**。
+     */
+    schedulers?: Array<{
+        key: string;
+        name: string;
+        enabled: boolean;
+        state: 'ok' | 'stale' | 'off' | 'missing' | string;
+        age: number | null;
+        ttl: number | null;
+    }>;
 }
 
-export interface RealTradingLogs {
-    tenant_id?: string;
-    user_id: string;
-    logs: string;
+/** 单字段变更（`{from,to}`）；热更新响应里的 diff 用这个结构。 */
+export interface RuntimeConfigFieldDiff {
+    from?: unknown;
+    to?: unknown;
+}
+
+/**
+ * 热更新响应（`POST /runtime-config`）。
+ *
+ * `effective_at: 'next_cycle'` 是**事实陈述**：写入只落 Redis 快照，托管调度器
+ * 下一周期重读才生效——界面必须照此措辞，不能显示成「已立即生效」。
+ */
+export interface RuntimeConfigUpdateResult {
+    /** `'success'`（已写入）或 `'dry_run'`（预演，未写任何东西） */
+    status: 'success' | 'dry_run' | string;
+    message: string;
+    config_version: number;
+    previous_config_version?: number;
+    effective_at: 'next_cycle' | string;
+    effective_execution_config?: ExecutionConfig | null;
+    effective_live_trade_config?: LiveTradeConfig | null;
+    diff?: {
+        execution_config?: Record<string, RuntimeConfigFieldDiff>;
+        live_trade_config?: Record<string, RuntimeConfigFieldDiff>;
+    };
+    /** 改动是否触及调仓节奏（节奏变更会触发同日重复执行守卫） */
+    rhythm_changed?: boolean;
+    /** 今日已触发的阶段；非空且未 force 时后端回 409 */
+    already_fired_phases?: string[];
+    forced?: boolean;
+    execution_config_sync?: { synced: boolean; reason?: string } | null;
+    /** 恒为 true：热更新不触碰持仓（后端断言回传，供界面明示） */
+    position_untouched?: boolean;
 }
 
 export interface ManualExecutionTaskRecord {
@@ -201,6 +272,12 @@ export interface ManualExecutionLogEntry {
     signal_index?: number;
     order_index?: number;
     summary?: Record<string, unknown> | string;
+    /**
+     * 来源（`hosted_sim` / `hosted_runner` / `manual` / `bootstrap` / `system`）。
+     * 运行流（`/runtime-logs`）每条都有，由后端按 task_id 前缀推断；
+     * 旧的单任务流（`/{task_id}/logs`）没有该字段，故可选。
+     */
+    source?: string;
 }
 
 export interface ManualExecutionLogSnapshot {
@@ -611,11 +688,19 @@ export const realTradingService = {
     },
 
     // Stop Real Trading
-    stop: async (_userId: string, _tenantId: string = getTenantId()) => {
+    /** 停止策略。`reason` 落服务端审计与运行日志（T-RC-19 停止留痕）。 */
+    stop: async (
+        _userId: string,
+        _tenantId: string = getTenantId(),
+        reason?: string,
+    ) => {
+        const form = new URLSearchParams();
+        if (reason) form.set('reason', reason);
         return await requestRealTradingWithFallback({
             method: 'post',
             url: '/stop',
-            data: {},
+            data: form.toString(),
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         });
     },
 
@@ -633,12 +718,98 @@ export const realTradingService = {
         });
     },
 
-    // Get Logs
-    getLogs: async (_userId: string, tail: number = 100, _tenantId: string = getTenantId()): Promise<RealTradingLogs> => {
-        return await requestRealTradingWithFallback<RealTradingLogs>({
+    /**
+     * 运行维度日志（T-RC-14，游标增量读）。
+     *
+     * 键为 tenant+user，**纯模拟托管链路没有任务行也能读**（这正是旧 `LogPanel`
+     * 认 `latest_hosted_task.task_id` 时模拟盘永远空白的原因）；响应结构与
+     * 单任务流对齐，故前端复用同一套游标轮询逻辑。
+     *
+     * 端点就是 `GET /logs`——它此前是「暂不支持远程查看」的空壳，现已改为读运行流。
+     * 不复用旧名 `getLogs` 是因为返回体不同（那边只给一段拼好的文本，这边给结构化
+     * entries + 游标），同名两种形状必然有人接错。
+     */
+    getRuntimeLogs: async (params?: {
+        afterId?: string;
+        limit?: number;
+        level?: string;
+        stage?: string;
+        source?: string;
+    }): Promise<ManualExecutionLogsResponse> => {
+        return await requestRealTradingWithFallback<ManualExecutionLogsResponse>({
             method: 'get',
             url: '/logs',
-            params: { tail },
+            params: {
+                after_id: params?.afterId ?? '0-0',
+                limit: params?.limit ?? 200,
+                level: params?.level,
+                stage: params?.stage,
+                source: params?.source,
+            },
+        });
+    },
+
+    /**
+     * 风控一屏（T-RC-22）：生效止损/大跌拦截 + 当日风险锁 + 口径分裂诊断。
+     *
+     * 与下单侧同源（`risk_lock` 模块），因此「界面上看到的锁」就是「下单时判的锁」。
+     * `locks.available=false` 表示**读不到**，不是「没有锁」。
+     */
+    getRiskStatus: async (tradeDate?: string): Promise<{
+        status: string;
+        user_id: string;
+        effective_execution_config?: Record<string, unknown> | null;
+        source?: string;
+        strategy_id?: string | null;
+        strategy_execution_config?: Record<string, unknown> | null;
+        execution_config_divergence?: { diverged: boolean; fields?: Record<string, unknown>; message?: string } | null;
+        locks?: {
+            available: boolean;
+            trade_date?: string;
+            account_frozen?: boolean;
+            symbols?: string[];
+            reason?: string | null;
+        } | null;
+        running?: boolean;
+    }> => {
+        return await requestRealTradingWithFallback({
+            method: 'get',
+            url: '/risk-status',
+            params: { trade_date: tradeDate },
+        });
+    },
+
+    /**
+     * 盘中热更新配置（T-RC-16）。只改配置、不动持仓、不重启进程；
+     * `expectedConfigVersion` 不符时后端回 409（乐观并发，不静默覆盖）。
+     *
+     * REAL/SHADOW 会回 409 且响应头带 `X-Requires-Restart`——容器 runner 的配置
+     * 是 env，改配置必须重建容器，前端据此提示而不是谎称已生效。
+     */
+    updateRuntimeConfig: async (payload: {
+        executionConfig?: Partial<ExecutionConfig>;
+        liveTradeConfig?: Partial<LiveTradeConfig>;
+        expectedConfigVersion?: number;
+        dryRun?: boolean;
+        force?: boolean;
+    }): Promise<RuntimeConfigUpdateResult> => {
+        const form = new URLSearchParams();
+        if (payload.executionConfig) {
+            form.set('execution_config_json', JSON.stringify(payload.executionConfig));
+        }
+        if (payload.liveTradeConfig) {
+            form.set('live_trade_config_json', JSON.stringify(payload.liveTradeConfig));
+        }
+        if (payload.expectedConfigVersion !== undefined) {
+            form.set('expected_config_version', String(payload.expectedConfigVersion));
+        }
+        if (payload.dryRun) form.set('dry_run', 'true');
+        if (payload.force) form.set('force', 'true');
+        return await requestRealTradingWithFallback<RuntimeConfigUpdateResult>({
+            method: 'post',
+            url: '/runtime-config',
+            data: form.toString(),
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         });
     },
 

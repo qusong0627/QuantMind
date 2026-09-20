@@ -31,6 +31,10 @@ class ManualExecutionLogStream:
         self.stream_prefix = str(os.getenv("MANUAL_EXECUTION_LOG_STREAM_PREFIX", "qm:real-trading:manual-execution")).strip() or "qm:real-trading:manual-execution"
         self.stream_maxlen = max(500, _int_env("MANUAL_EXECUTION_LOG_STREAM_MAXLEN", 4000))
         self.state_ttl_sec = max(600, _int_env("MANUAL_EXECUTION_LOG_STATE_TTL_SECONDS", 172800))
+        # T-RC-14：任务日志镜像进运行维度流（默认开）。整体开关便于线上降噪/回退。
+        self.mirror_to_runtime = str(
+            os.getenv("MANUAL_EXECUTION_LOG_MIRROR_RUNTIME", "true")
+        ).strip().lower() in {"1", "true", "yes", "on"}
         self._client = None
         self._client_init_failed = False
 
@@ -63,6 +67,33 @@ class ManualExecutionLogStream:
     def _state_key(self, task_id: str) -> str:
         return f"{self.stream_prefix}:state:{task_id}"
 
+    def _mirror_to_runtime(self, *, tenant_id: str, user_id: str, line: str, **fields: Any) -> None:
+        """把任务日志镜像进运行维度流（T-RC-14）。
+
+        容器/远程 runner（REAL/SHADOW）与手动单的日志全部经本类落盘，调用点约 30 处；
+        在**此处**做一次 fan-out 即可让运行日志面板看到它们，无需改任何业务调用点。
+
+        子类 ``RuntimeLogStream`` 必须覆写为 no-op，否则运行流写自己会无限递归。
+        """
+        if not self.mirror_to_runtime:
+            return
+        try:
+            from backend.services.live_trading.services.runtime_log_stream import (
+                infer_source,
+                runtime_log_stream,
+            )
+
+            runtime_log_stream.log(
+                tenant_id=tenant_id,
+                user_id=user_id,
+                line=line,
+                source=infer_source(fields.get("task_id")),
+                task_id=fields.get("task_id"),
+                **{k: v for k, v in fields.items() if k != "task_id"},
+            )
+        except Exception as exc:  # noqa: BLE001 - 镜像失败绝不能影响任务日志
+            logger.debug("mirror to runtime stream failed: %s", exc)
+
     @staticmethod
     def _decode(value: Any) -> str:
         if value is None:
@@ -85,14 +116,37 @@ class ManualExecutionLogStream:
         signal_index: int | None = None,
         order_index: int | None = None,
         summary: dict[str, Any] | None = None,
-    ) -> None:
+        extra_fields: dict[str, Any] | None = None,
+    ) -> bool:
+        """追加一条日志，返回**是否真的写进 Redis**。
+
+        返回值不是装饰：写失败此前一律静默 ``return``，调用方无从区分「写了」与
+        「Redis 挂了什么也没写」。运行流的 ``log_skip_once`` 依赖它决定要不要落
+        去重标记——标记先落而写失败，会让该原因被永久静默。
+        既有约 30 处调用点忽略返回值，语义不变。
+        """
         text = str(line or "").rstrip("\n")
         if not text:
-            return
+            return False
+
+        # 先镜像到运行流（T-RC-14）：即便任务流 Redis 句柄拿不到，运行面板也该看到这条
+        self._mirror_to_runtime(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            line=text,
+            level=level,
+            stage=stage,
+            status=status,
+            progress=progress,
+            signal_index=signal_index,
+            order_index=order_index,
+            summary=summary,
+            task_id=task_id,
+        )
 
         client = self._get_client()
         if client is None:
-            return
+            return False
 
         now_iso = datetime.now(timezone.utc).isoformat()
         fields: dict[str, str] = {
@@ -115,6 +169,11 @@ class ManualExecutionLogStream:
             fields["order_index"] = str(int(order_index))
         if summary is not None:
             fields["summary"] = json.dumps(summary, ensure_ascii=False)
+        if extra_fields:
+            # 运行流用（source/strategy_id/run_id/phase）：任务流不传即为空，口径不变
+            for extra_key, extra_value in extra_fields.items():
+                if extra_value is not None and str(extra_value) != "":
+                    fields[str(extra_key)] = str(extra_value)
 
         try:
             client.xadd(
@@ -123,8 +182,9 @@ class ManualExecutionLogStream:
                 maxlen=self.stream_maxlen,
                 approximate=True,
             )
-        except Exception:
-            return
+        except Exception as exc:  # noqa: BLE001 - 日志失败不抛出，但如实回传 False
+            logger.debug("log stream xadd failed task=%s: %s", task_id, exc)
+            return False
 
         self.update_state(
             task_id=task_id,
@@ -138,6 +198,7 @@ class ManualExecutionLogStream:
             order_index=order_index,
             summary=summary,
         )
+        return True
 
     def update_state(
         self,
@@ -246,7 +307,20 @@ class ManualExecutionLogStream:
             "logs_tail": "\n".join(lines).strip(),
         }
 
-    def fetch_entries(self, task_id: str, *, after_id: str = "0-0", limit: int = 200) -> dict[str, Any]:
+    def fetch_entries(
+        self,
+        task_id: str,
+        *,
+        after_id: str = "0-0",
+        limit: int = 200,
+        latest: bool = False,
+    ) -> dict[str, Any]:
+        """读条目。
+
+        ``latest=True`` 取**最近** N 条（首屏用），否则取 ``after_id`` 之后的
+        前 N 条（游标轮询用）。首屏若用 after_id 语义会拿到流里最老的 N 条——
+        运行流 maxlen 4000，用户看到的将是很久以前的日志。
+        """
         client = self._get_client()
         if client is None:
             return {"entries": [], "next_id": after_id, "snapshot": None}
@@ -254,7 +328,12 @@ class ManualExecutionLogStream:
         min_id = "-" if not after_id or after_id == "0-0" else f"({after_id}"
         max_count = max(1, min(int(limit), 500))
         try:
-            records = client.xrange(self._stream_key(task_id), min=min_id, max="+", count=max_count)
+            if latest:
+                records = list(
+                    reversed(client.xrevrange(self._stream_key(task_id), count=max_count))
+                )
+            else:
+                records = client.xrange(self._stream_key(task_id), min=min_id, max="+", count=max_count)
         except Exception:
             records = []
 
@@ -273,6 +352,11 @@ class ManualExecutionLogStream:
                 "stage": self._decode(payload.get("stage")),
                 "status": self._decode(payload.get("status")),
             }
+            # 运行流附加维度（T-RC-14）：任务流里这些键为空，返回空串不影响旧解析
+            for extra_key in ("source", "strategy_id", "run_id", "phase"):
+                value = self._decode(payload.get(extra_key))
+                if value:
+                    item[extra_key] = value
             if payload.get("progress") is not None:
                 try:
                     item["progress"] = int(float(self._decode(payload.get("progress"))))

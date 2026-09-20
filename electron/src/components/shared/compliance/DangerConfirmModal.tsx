@@ -18,6 +18,14 @@ interface DangerConfirmModalProps {
   onConfirm: () => void;
   onCancel: () => void;
   loading?: boolean;
+  /**
+   * 后果文案下方的自定义区（如「停止原因」选择器）。
+   * 留出插槽而不是让调用方自己拼一个 Modal：后果文案的加粗渲染与审计留痕
+   * 都必须走同一处，否则「用了自拼弹窗的那个入口」就静默失去留痕。
+   */
+  extra?: React.ReactNode;
+  /** 一起记进留痕的补充信息（如所选停止原因），与 title 拼成一条 detail */
+  confirmDetail?: string;
 }
 
 /** 后果文案里的 **强调** 以粗体渲染（设计口径：说清后果，重点加粗） */
@@ -40,8 +48,11 @@ export const DangerConfirmModal: React.FC<DangerConfirmModalProps> = ({
   onConfirm,
   onCancel,
   loading,
+  extra,
+  confirmDetail,
 }) => {
   const title = scenario?.title || '危险操作确认';
+  const auditDetail = confirmDetail ? `${title}｜${confirmDetail}` : title;
   return (
   <Modal
     open={open && !!scenario}
@@ -57,7 +68,7 @@ export const DangerConfirmModal: React.FC<DangerConfirmModalProps> = ({
     confirmLoading={loading}
     onOk={() => {
       // 留痕（T-FE-17）：每次危险动作的确认/取消都记录一条
-      recordComplianceEvent('danger_confirmed', title);
+      recordComplianceEvent('danger_confirmed', auditDetail);
       onConfirm();
     }}
     onCancel={() => {
@@ -70,6 +81,7 @@ export const DangerConfirmModal: React.FC<DangerConfirmModalProps> = ({
       {(scenario?.consequences || []).map((line, i) => (
         <div key={i}>· {renderLine(line)}</div>
       ))}
+      {extra}
       <p className="text-[10px] text-slate-400 pt-1">确认前不会触发任何动作；取消立即回到原状态。</p>
     </div>
   </Modal>

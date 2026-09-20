@@ -67,28 +67,28 @@ JOBS: tuple[JobSpec, ...] = (
     JobSpec(
         "sentinel_push", "哨兵告警消费（P6）", "worker", "trade", "5s 长轮询（消费组 sentinel）",
         "QM_SENTINEL_WORKER_ENABLED", True, 600,
-        "python -m backend.services.trade.services.sentinel_alert_service",
+        None,  # 常驻消费循环，无「跑一次」语义 → 不可重跑（此前声明命令但无分发，守卫为红）
         "intel:events → sentinel_alerts 留痕 + 分级推送（Redis 门控 qm:sentinel:config，T-P6-15）",
     ),
     JobSpec(
         "sentinel_backfill", "哨兵 T+1 回填（P6）", "worker", "trade",
         "交易日 16:10（300s 轮询）",
         "QM_SENTINEL_WORKER_ENABLED", True, 900,
-        "python -m backend.services.trade.services.sentinel_backfill",
+        "python backend/scripts/schedule_ctl.py run sentinel_backfill --date YYYY-MM-DD",
         "告警 T+1 兑现回填（命中/误报）→ 误报率报表（T-P6-15）",
     ),
     JobSpec(
         "advice_backfill", "建议卡兑现回填（P6）", "worker", "trade",
         "每日 01:40（300s 轮询；日键防重）",
         "QM_ADVICE_BACKFILL_ENABLED", True, 900,
-        "python -m backend.services.trade.services.advice_backfill",
+        "python backend/scripts/schedule_ctl.py run advice_backfill --date YYYY-MM-DD",
         "建议卡 T+1/T+3/T+5 超额兑现（决策日收盘口径）→ 建议成功率统计（T-P6-16 闭环）",
     ),
     JobSpec(
         "advice_generator", "建议卡规则生成（P6）", "worker", "trade",
         "交易日 16:20（300s 轮询；日键防重）",
         "QM_ADVICE_GEN_ENABLED", True, 900,
-        "python -m backend.services.trade.services.advice_generator",
+        "python backend/scripts/schedule_ctl.py run advice_generator",
         "信号×情报共振 → 观察仓建议卡（否决/去重/regime 门控/每日≤3 张，人在环执行）",
     ),
     JobSpec(
@@ -172,6 +172,19 @@ JOBS: tuple[JobSpec, ...] = (
         "backfill_quality", "推理质量回填", "celery_beat", "celery", "每日 02:30",
         None, True, 345600, None, "滞后 5 天回填真实收益算 Rank IC",
     ),
+    # T-RC-14：两个关键交易循环此前不在册——它们挂掉时 C07 无项可判，
+    # 表现为「体检全绿但策略不再调仓」。心跳写 ``qm:sched:hb:*``（db0）。
+    JobSpec(
+        "sim_hosted", "模拟盘托管调度", "worker", "trade", "30s 轮询（窗口内触发）",
+        "ENABLE_SIMULATION_HOSTED_SCHEDULER", True, 300, None,
+        "读活跃快照→判定调仓日/时段→SimulationEngine.run_cycle（T-P3 托管）",
+    ),
+    JobSpec(
+        "manual_execution", "手动执行任务消费", "worker", "trade", "1s 长轮询队列",
+        None, True, 300,
+        None,  # 常驻消费循环，无「跑一次」语义 → 不可重跑
+        "队列 → process_task：REAL/SHADOW 托管任务与手动单（无开关，随 trade 服务常开）",
+    ),
 )
 
 JOBS_BY_KEY: dict[str, JobSpec] = {job.key: job for job in JOBS}
@@ -210,6 +223,75 @@ def heartbeat(job_key: str, *, redis_client=None, ttl: int | None = None) -> boo
     except Exception as exc:  # noqa: BLE001
         logger.warning("[Scheduler] 心跳写入失败 %s: %s", job_key, exc)
         return False
+
+
+def read_heartbeats(
+    job_keys: "tuple[str, ...] | list[str]",
+    *,
+    now_ts: float | None = None,
+    redis_client: Any = None,
+    env: dict[str, str] | None = None,
+) -> list[dict[str, Any]]:
+    """批量读心跳 → ``[{key,name,enabled,state,age,ttl}]``（T-RC-20）。
+
+    判定规则与体检 C07 完全一致（``ok``/``stale``/``off``/``missing``）。抽到这里
+    是为了让**前端守护条**与体检看到同一个结论——两处各写一遍必然漂移，而「界面上
+    显示活着、体检报死了」比只有一处更糟。
+
+    读失败不抛：守护条拿不到心跳时如实报 ``missing``，不假装 ``ok``。
+    """
+    now = time.time() if now_ts is None else float(now_ts)
+    client = redis_client
+    if client is None:
+        try:
+            from backend.shared.redis_sentinel_client import get_redis_sentinel_client
+
+            client = get_redis_sentinel_client()
+        except Exception as exc:  # noqa: BLE001 - 连不上 Redis 也要给出结论
+            logger.debug("[Scheduler] 心跳读取客户端不可用: %s", exc)
+            client = None
+
+    entries: list[dict[str, Any]] = []
+    for key in job_keys:
+        spec = JOBS_BY_KEY.get(key)
+        if spec is None:
+            logger.warning("[Scheduler] 未注册任务读心跳: %s", key)
+            continue
+        enabled = switch_enabled(spec, env)
+        raw = None
+        if client is not None:
+            try:
+                raw = client.get(heartbeat_key(key))
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("[Scheduler] 心跳读取失败 %s: %s", key, exc)
+                raw = None
+        age: int | None = None
+        if raw is not None:
+            try:
+                value = raw.decode() if isinstance(raw, bytes) else raw
+                age = int(now - float(value))
+            except (TypeError, ValueError):
+                age = None
+        ttl = spec.heartbeat_ttl
+        if not enabled:
+            state = "off"
+        elif age is None or ttl is None:
+            state = "missing"
+        elif age <= ttl:
+            state = "ok"
+        else:
+            state = "stale"
+        entries.append(
+            {
+                "key": spec.key,
+                "name": spec.name,
+                "enabled": enabled,
+                "state": state,
+                "age": age,
+                "ttl": ttl,
+            }
+        )
+    return entries
 
 
 def classify_scheduler_status(entries: list[dict[str, Any]]) -> tuple[str, str, dict[str, Any]]:

@@ -12,6 +12,7 @@ import type { StrategyFile } from '../../../../../types/backtest/strategy';
 import { buildInputNodes, deriveRunState } from '../topologyTypes';
 import type { RunState, TopologyNode } from '../topologyTypes';
 import { sortTradingStrategies } from '../../../utils/sortTradingStrategies';
+import { filterStrategiesByMarket } from '../../../utils/strategyMarket';
 
 export type ConsoleTradingMode = 'real' | 'simulation';
 
@@ -32,12 +33,15 @@ export interface RuntimeOverview {
     ready: SectionReady;
     ordersReady: boolean;
     lastUpdatedAt: string | null;
+    /** 每次 status 成功刷新 +1。供需要「跟着状态一起重拉」的子面板做依赖（如 L4 风控层）。 */
+    refreshTick: number;
     error: string | null;
     refresh: () => void;
     strategies: StrategyFile[];
     strategiesLoading: boolean;
     strategiesLoaded: boolean;
-    ensureStrategies: () => Promise<StrategyFile[]>;
+    /** `force=true` 绕过缓存重拉（页签市场变化、用户点刷新时用） */
+    ensureStrategies: (force?: boolean) => Promise<StrategyFile[]>;
 }
 
 const toDeployMode = (mode: ConsoleTradingMode): 'REAL' | 'SIMULATION' =>
@@ -63,6 +67,7 @@ export function useRuntimeOverview(
     const [latestRun, setLatestRun] = useState<LatestInferenceRunInfo | null>(null);
     const [ready, setReady] = useState<SectionReady>({ status: false, precheck: false, model: false });
     const [lastUpdatedAt, setLastUpdatedAt] = useState<string | null>(null);
+    const [refreshTick, setRefreshTick] = useState(0);
     const [error, setError] = useState<string | null>(null);
     const [strategies, setStrategies] = useState<StrategyFile[]>([]);
     const [strategiesLoading, setStrategiesLoading] = useState(false);
@@ -76,6 +81,7 @@ export function useRuntimeOverview(
     const fetchingRef = useRef({ status: false, precheck: false, model: false, orders: false });
     const readyRef = useRef<SectionReady>({ status: false, precheck: false, model: false });
     const strategiesFetchingRef = useRef(false);
+    const tickRef = useRef(0);
     statusRef.current = status;
     marketRef.current = market;
 
@@ -93,6 +99,9 @@ export function useRuntimeOverview(
             const data = await realTradingService.getStatus(userId, tradingMode, tenantId);
             setStatus(data);
             setLastUpdatedAt(new Date().toISOString());
+            // 项目内 setState 不收函数式更新（tsc 下报错），用 ref 自增再赋值
+            tickRef.current += 1;
+            setRefreshTick(tickRef.current);
         } catch (e) {
             console.warn('[TopologyConsole] status failed', e);
         } finally {
@@ -186,6 +195,12 @@ export function useRuntimeOverview(
         refresh();
     }, [enabled, tenantId, userId, tradingMode, market, refresh]);
 
+    // 切页签市场 → 已加载的策略列表作废（否则 A 股页签会一直用港股那次的结果）
+    useEffect(() => {
+        setStrategies([]);
+        setStrategiesLoaded(false);
+    }, [market, tradingMode]);
+
     // 分级轮询：运行中 status+precheck 10s，空闲 30s；模型链 60s
     useEffect(() => {
         if (!enabled) return;
@@ -231,16 +246,27 @@ export function useRuntimeOverview(
         };
     }, [enabled, tenantId, userId, tradingMode, loadStatus, loadPrecheck, loadModelChain, loadRecentOrders]);
 
-    // 策略列表懒加载：点下拉框才拉
-    const ensureStrategies = useCallback(async (): Promise<StrategyFile[]> => {
-        if (strategiesLoaded) return strategies;
+    // 策略列表懒加载：点下拉框才拉。
+    //
+    // T-RC-15（修 D4）：**必须带 market**。此前漏传 → 后端返回全市场策略 →
+    // 港股策略出现在 A 股页签的下拉里，用户以为在给 A 股策略配参数，实际配的是
+    // 港股策略，启动后行情/信号/账户口径全错。
+    // 双保险：即使后端过滤失效（旧版本），前端再按 `strategyMarket` 兜一层。
+    const ensureStrategies = useCallback(async (force = false): Promise<StrategyFile[]> => {
+        if (strategiesLoaded && !force) return strategies;
         if (strategiesFetchingRef.current) return strategies;
         strategiesFetchingRef.current = true;
         setStrategiesLoading(true);
         try {
             const { strategyManagementService } = await import('../../../../../services/strategyManagementService');
-            const list = await strategyManagementService.loadStrategies(userId);
-            const sorted = sortTradingStrategies(list);
+            const list = await strategyManagementService.loadStrategies(userId, marketRef.current);
+            const forMarket = filterStrategiesByMarket(list, marketRef.current);
+            if (forMarket.length !== list.length) {
+                console.warn(
+                    `[TopologyConsole] 后端返回了 ${list.length - forMarket.length} 个非 ${marketRef.current} 市场策略，已在前端兜底过滤`,
+                );
+            }
+            const sorted = sortTradingStrategies(forMarket);
             setStrategies(sorted);
             setStrategiesLoaded(true);
             return sorted;
@@ -267,6 +293,7 @@ export function useRuntimeOverview(
         ready,
         ordersReady,
         lastUpdatedAt,
+        refreshTick,
         error,
         refresh,
         strategies,

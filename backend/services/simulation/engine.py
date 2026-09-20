@@ -12,6 +12,45 @@ from dataclasses import dataclass, field, replace
 from datetime import date, datetime
 from typing import Any
 
+logger = logging.getLogger(__name__)
+
+
+def _runtime_log(
+    *,
+    log_source: str | None,
+    tenant: str,
+    user_id: str,
+    strategy_id: str,
+    line: str,
+    level: str = "info",
+    stage: str | None = None,
+    **kwargs: Any,
+) -> None:
+    """引擎侧运行日志（T-RC-14）。
+
+    ``log_source`` 为 None 时**完全不写**——dry-run 预演与每日批处理走这条路径，
+    避免把「只看不执行」的调用污染成用户看到的运行日志。仅托管/手动执行显式传值。
+    """
+    if not log_source:
+        return
+    try:
+        from backend.services.live_trading.services.runtime_log_stream import (
+            log_runtime,
+        )
+
+        log_runtime(
+            tenant_id=tenant,
+            user_id=user_id,
+            line=line,
+            level=level,
+            source=log_source,
+            strategy_id=strategy_id,
+            stage=stage,
+            **kwargs,
+        )
+    except Exception as exc:  # noqa: BLE001 - 日志失败不得影响交易
+        logger.debug("engine runtime log failed: %s", exc)
+
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.services.trade_shared.redis_client import RedisClient, redis_client
@@ -216,6 +255,7 @@ class SimulationEngine:
         exclude_symbols: set[str] | None = None,
         quantity_overrides: dict[tuple[str, str], int] | None = None,
         signal_run_id: str | None = None,
+        log_source: str | None = None,
     ) -> ExecutionReport:
         """
         执行一次模拟盘调仓周期。
@@ -237,6 +277,8 @@ class SimulationEngine:
             quantity_overrides: 人工改量（T-FE-05 审后可调 v2），键 (symbol, side) → 申报数量；
                 **退出规则单不受改量影响**（风控动作不绕过）；未命中/归一失败不静默——
                 逐条裁定记入 ``report.quantity_adjustments``（见 ``apply_quantity_overrides``）。
+            log_source: 运行日志来源（T-RC-14，``hosted_sim``/``manual``）；None 表示
+                **不写运行日志**（dry-run 预演与每日批处理走这条，避免污染用户视图）。
 
         Returns:
             执行报告（dry_run 时 executed_at 仅为计算时刻）
@@ -483,11 +525,24 @@ class SimulationEngine:
                         tenant,
                         uid,
                     )
+                    _runtime_log(
+                        log_source=log_source,
+                        tenant=tenant,
+                        user_id=uid,
+                        strategy_id=strategy_id,
+                        line=(
+                            f"本轮无需调仓：{report.signal_count} 条信号经持仓比对后"
+                            "未产生委托（已持仓达标或全部被风控/池过滤剔除）"
+                        ),
+                        level="info",
+                        stage="no_order",
+                        status="succeeded",
+                    )
                     return report
 
                 # 6. 模拟撮合（ashare_matcher + 当日不复权日 K）
                 exec_engine = SimulationExecutionEngine(db, self.account_manager)
-                for order in orders:
+                for index, order in enumerate(orders):
                     result = await self._execute_order(
                         db=db,
                         exec_engine=exec_engine,
@@ -505,6 +560,41 @@ class SimulationEngine:
                         report.total_commission += result.commission
                     else:
                         report.rejected_count += 1
+                    # 逐单留痕：SIM 链路没有任务流，这里是「策略到底做了什么」的唯一明细
+                    _runtime_log(
+                        log_source=log_source,
+                        tenant=tenant,
+                        user_id=uid,
+                        strategy_id=strategy_id,
+                        line=(
+                            f"{'买入' if str(order.side).upper().startswith('B') else '卖出'} "
+                            f"{order.symbol} {order.quantity} 股 "
+                            f"{'成交' if result.success else '被拒'}"
+                            + (
+                                f" @{getattr(result, 'price', None)}"
+                                if result.success and getattr(result, "price", None)
+                                else ""
+                            )
+                            + (
+                                ""
+                                if result.success
+                                else f"：{getattr(result, 'message', '') or '原因未提供'}"
+                            )
+                            + (f"（{order.reason}）" if order.reason else "")
+                        ),
+                        level="info" if result.success else "warning",
+                        stage="order",
+                        status="filled" if result.success else "rejected",
+                        run_id=exec_run_id,
+                        signal_index=None,
+                        order_index=index,
+                        summary={
+                            "symbol": order.symbol,
+                            "side": str(order.side),
+                            "quantity": int(getattr(order, "quantity", 0) or 0),
+                            "success": bool(result.success),
+                        },
+                    )
 
                 await db.commit()
 
@@ -536,6 +626,18 @@ class SimulationEngine:
                 uid,
                 e,
                 exc_info=True,
+            )
+            _runtime_log(
+                log_source=log_source,
+                tenant=tenant,
+                user_id=uid,
+                strategy_id=strategy_id,
+                line=f"模拟周期异常：{e}",
+                level="error",
+                stage="cycle_error",
+                status="failed",
+                run_id=exec_run_id,
+                summary={"error": str(e)},
             )
             report.error = str(e)
             return report

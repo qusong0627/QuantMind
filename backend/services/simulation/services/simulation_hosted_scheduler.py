@@ -103,6 +103,92 @@ def hosted_cycle_ready(phase: str) -> bool:
     return str(phase or "").upper() in {"BUY", "ALL"}
 
 
+#: 跳过原因 → 可读文案（T-RC-14）：控制台「为什么今天没动」的唯一答案。
+#: 键与 ``SimulationScheduleDecision.reason`` 逐一对应，新增原因必须在此补齐。
+SKIP_REASON_TEXT: dict[str, str] = {
+    "non_trading_day": "非交易日",
+    "outside_session": "不在已启用执行时段内",
+    "weekday_skip": "周内日不匹配（weekly 调度）",
+    "interval_skip": "未到调仓日（interval 节奏）",
+    "before_window": "尚未进入当日触发窗口",
+    "sell_only_window": "处于卖出时段：引擎买卖原子执行，仅在买入窗口跑整轮",
+    "lock_held": "该执行窗口已触发过（幂等锁占用）",
+    "lock_error": "分布式执行锁获取失败",
+}
+
+
+def skip_reason_text(reason: str) -> str:
+    """原因码 → 文案；未知码原样透出，不静默吞掉。"""
+    key = str(reason or "").strip()
+    return SKIP_REASON_TEXT.get(key, key or "未知原因")
+
+
+def hosted_sim_log(
+    *,
+    tenant_id: str,
+    user_id: str,
+    line: str,
+    strategy_id: str = "",
+    level: str = "info",
+    **kwargs: Any,
+) -> None:
+    """托管模拟链路写运行日志（source=hosted_sim）。惰性 import，绝不抛出。"""
+    try:
+        from backend.services.live_trading.services.runtime_log_stream import (
+            SOURCE_HOSTED_SIM,
+            log_runtime,
+        )
+
+        log_runtime(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            line=line,
+            level=level,
+            source=SOURCE_HOSTED_SIM,
+            strategy_id=strategy_id,
+            **kwargs,
+        )
+    except Exception as exc:  # noqa: BLE001 - 日志失败不得影响调度
+        logger.debug("hosted sim runtime log failed: %s", exc)
+
+
+def hosted_sim_skip_once(
+    *, tenant_id: str, user_id: str, reason: str, strategy_id: str = ""
+) -> None:
+    """跳过原因**变化时**记一条（30s 轮询下同因不重复写，见 log_skip_once）。"""
+    try:
+        from backend.services.live_trading.services.runtime_log_stream import (
+            SOURCE_HOSTED_SIM,
+            runtime_log_stream,
+        )
+
+        runtime_log_stream.log_skip_once(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            reason=reason,
+            line=f"本轮未触发：{skip_reason_text(reason)}",
+            level="debug",
+            stage="skip",
+            status="skipped",
+            source=SOURCE_HOSTED_SIM,
+            strategy_id=strategy_id,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("hosted sim skip log failed: %s", exc)
+
+
+def hosted_sim_clear_skip_marker(*, tenant_id: str, user_id: str) -> None:
+    """离开跳过态（本轮真的触发）后复位标记，下次跳过能照常记一条。"""
+    try:
+        from backend.services.live_trading.services.runtime_log_stream import (
+            runtime_log_stream,
+        )
+
+        runtime_log_stream.clear_skip_marker(tenant_id=tenant_id, user_id=user_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("hosted sim skip marker clear failed: %s", exc)
+
+
 def report_to_hosted_result(report: Any) -> dict[str, Any]:
     return {
         "task_id": getattr(report, "run_id", None),
@@ -124,6 +210,7 @@ async def run_simulation_cycle_for_active(
     run_id: str | None = None,
     exclude_symbols: set[str] | None = None,
     quantity_overrides: dict[tuple[str, str], int] | None = None,
+    log_source: str | None = "hosted_sim",
 ) -> dict[str, Any]:
     """托管模拟盘唯一执行入口：RebalanceCalculator + ashare_matcher。"""
     from backend.services.simulation.engine import simulation_engine
@@ -141,6 +228,7 @@ async def run_simulation_cycle_for_active(
         pool_id=cfg.get("pool_id"),
         exclude_symbols=exclude_symbols,
         quantity_overrides=quantity_overrides,
+        log_source=log_source,
     )
     result = report_to_hosted_result(report)
     # T-FE-05 v2：人工改量裁定随报告透传（前端如实展示 applied/ignored）
@@ -214,6 +302,7 @@ async def execute_simulation_plan_for_active(
         run_id=run_id,
         exclude_symbols=exclude_symbols,
         quantity_overrides=quantity_overrides,
+        log_source="manual",
     )
 
 
@@ -542,6 +631,15 @@ class SimulationHostedScheduler:
             "simulation hosted scheduler started, interval=%ss", self.interval_seconds
         )
         while not self._stopped.is_set():
+            # T-RC-14：心跳必须在每轮**开始**写（而非结束），否则本轮卡死时
+            # 心跳反而"新鲜"，正是要检出的停摆形态。redis_client 不传——heartbeat
+            # 默认走 db0，与体检 C07 读取口径一致（传 trade 客户端会写到 db2 读不到）。
+            try:
+                from backend.shared.scheduler_registry import heartbeat as _sched_heartbeat
+
+                _sched_heartbeat("sim_hosted")
+            except Exception as exc:  # noqa: BLE001 - 心跳失败不得影响调度
+                logger.debug("sim_hosted heartbeat failed: %s", exc)
             try:
                 await self.run_once()
             except asyncio.CancelledError:
@@ -620,6 +718,12 @@ class SimulationHostedScheduler:
             started_day=started_day,
         )
         if not decision.should_trigger:
+            hosted_sim_skip_once(
+                tenant_id=tenant_id,
+                user_id=user_id,
+                reason=decision.reason,
+                strategy_id=strategy_id,
+            )
             return False
         if not hosted_cycle_ready(decision.phase):
             logger.info(
@@ -629,7 +733,15 @@ class SimulationHostedScheduler:
                 user_id,
                 strategy_id,
             )
+            hosted_sim_skip_once(
+                tenant_id=tenant_id,
+                user_id=user_id,
+                reason="sell_only_window",
+                strategy_id=strategy_id,
+            )
             return False
+        # 真的进入触发态：复位跳过标记，下一段静默期（如收盘后）能重新记录原因
+        hosted_sim_clear_skip_marker(tenant_id=tenant_id, user_id=user_id)
 
         lock_key = _lock_key(
             tenant_id=tenant_id,
@@ -664,6 +776,12 @@ class SimulationHostedScheduler:
                     task_id,
                     last_error="idempotency lock already exists for this execution window",
                 )
+                hosted_sim_skip_once(
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    reason="lock_held",
+                    strategy_id=strategy_id,
+                )
                 return False
         except Exception:
             logger.warning("failed to write simulation hosted lock: %s", lock_key)
@@ -671,7 +789,27 @@ class SimulationHostedScheduler:
                 task_id,
                 last_error="failed to acquire distributed execution lock",
             )
+            hosted_sim_skip_once(
+                tenant_id=tenant_id,
+                user_id=user_id,
+                reason="lock_error",
+                strategy_id=strategy_id,
+            )
             return False
+        hosted_sim_log(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            strategy_id=strategy_id,
+            line=(
+                f"托管周期开轮 phase={decision.phase} 交易日={decision.trade_date} "
+                f"任务={task_id} 调仓节奏={live_trade_config.get('rebalance_days')}日"
+            ),
+            level="info",
+            stage="cycle_start",
+            status="running",
+            run_id=task_id,
+            phase=decision.phase,
+        )
 
         try:
             await SimulationRebalanceJobService.mark_started(task_id)
@@ -700,12 +838,45 @@ class SimulationHostedScheduler:
                 task_id,
                 status="succeeded",
             )
+            hosted_sim_log(
+                tenant_id=tenant_id,
+                user_id=user_id,
+                strategy_id=strategy_id,
+                line=(
+                    f"托管周期结束 status={result.get('status')} "
+                    f"信号={result.get('signal_count', 0)} 计划={result.get('order_count', 0)} "
+                    f"成交={result.get('filled_count', 0)} 拒绝={result.get('rejected_count', 0)}"
+                ),
+                level="info",
+                stage="cycle_end",
+                status=str(result.get("status") or "succeeded"),
+                run_id=task_id,
+                phase=decision.phase,
+                summary={
+                    "signal_count": result.get("signal_count", 0),
+                    "order_count": result.get("order_count", 0),
+                    "filled_count": result.get("filled_count", 0),
+                    "rejected_count": result.get("rejected_count", 0),
+                },
+            )
             return True
         except Exception as exc:
             await SimulationRebalanceJobService.mark_finished(
                 task_id,
                 status="failed",
                 last_error=str(exc),
+            )
+            hosted_sim_log(
+                tenant_id=tenant_id,
+                user_id=user_id,
+                strategy_id=strategy_id,
+                line=f"托管周期失败：{exc}",
+                level="error",
+                stage="cycle_error",
+                status="failed",
+                run_id=task_id,
+                phase=decision.phase,
+                summary={"error": str(exc)},
             )
             try:
                 self.redis.client.delete(lock_key)

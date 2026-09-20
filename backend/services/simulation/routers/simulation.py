@@ -357,6 +357,19 @@ async def reset_simulation_account(
                     redis.delete_pattern(pat)
                 except Exception:
                     pass
+            # T-RC-14：运行日志流按 {tenant}:{user} 归档，与策略无绑定。账户重置后
+            # 若不清，用户会看到「账户已重置」但日志里还挂着上一轮策略的周期记录，
+            # 误以为策略仍在跑。三种身份写法都要清（与上面 active_strategy 同口径）。
+            for _scope in {
+                f"{auth.tenant_id}:{uid}",
+                f"{auth.tenant_id}:{auth.user_id}",
+                f"{_runtime_tenant}:{_runtime_user}",
+            }:
+                for _kind in ("logs", "state", "lastskip"):
+                    try:
+                        redis.client.delete(f"qm:real-trading:runtime:{_kind}:{_scope}")
+                    except Exception:
+                        pass
             # 1) 先停沙箱：精确 sid + 按用户前缀兜底双保险，避免 sid 为空/口径不一致时漏杀
             try:
                 from backend.services.trade.sandbox.manager import sandbox_manager

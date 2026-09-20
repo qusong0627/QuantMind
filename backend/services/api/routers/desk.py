@@ -880,21 +880,14 @@ def parse_quantity_overrides(raw: Any, max_items: int = 50) -> dict[tuple[str, s
 
 
 def active_strategy_market(payload: dict[str, Any] | None) -> str:
-    """活跃策略所属市场（纯函数）——口径与启动链路一致。
+    """活跃策略所属市场（纯函数）——委托 ``shared.active_strategy_market``。
 
-    唯一事实源：``real_trading_lifecycle`` 启动时
-    ``deployment_market = live_config.market or exec_config.market or "CN"``。
-    活跃策略键（``qm:trade:active_strategy:{tenant}:{user}``）**不带市场维度**，
-    所以策略属于哪个市场只能从载荷里读，不能从键后缀猜。
+    实现已上提为共享模块（``/real-trading/status`` 需同一口径判页签闸门），
+    此处保留同名函数以兼容既有调用点，**不再保留第二份实现**。
     """
-    from backend.shared.simulation_account_keys import normalize_market
+    from backend.shared.active_strategy_market import active_strategy_market as _impl
 
-    data = payload if isinstance(payload, dict) else {}
-    for field in ("live_trade_config", "execution_config"):
-        cfg = data.get(field)
-        if isinstance(cfg, dict) and str(cfg.get("market") or "").strip():
-            return normalize_market(cfg.get("market"))
-    return "CN"
+    return _impl(payload)
 
 
 def _resolve_active_strategy(tenant_id: str, raw_user: str) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:

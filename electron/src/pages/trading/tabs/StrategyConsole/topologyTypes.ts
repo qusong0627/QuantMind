@@ -13,13 +13,19 @@ export interface TopologyNode {
     details: Array<{ label: string; state: NodeState; message: string }>;
 }
 
-export type RunState = 'idle' | 'starting' | 'running' | 'observing' | 'stopped' | 'error';
+export type RunState = 'idle' | 'starting' | 'running' | 'observing' | 'config_pending' | 'stopped' | 'error';
 
-export const RUN_STATE_META: Record<RunState, { label: string; dot: string; banner: string }> = {
+export const RUN_STATE_META: Record<RunState, { label: string; dot: string; banner: string; hint?: string }> = {
     idle: { label: '未启动', dot: 'bg-slate-300', banner: 'bg-slate-50 border-slate-200 text-slate-600' },
     starting: { label: '启动中', dot: 'bg-amber-500 animate-pulse', banner: 'bg-amber-50 border-amber-200 text-amber-700' },
     running: { label: '运行中', dot: 'bg-emerald-500 animate-pulse', banner: 'bg-emerald-50 border-emerald-200 text-emerald-700' },
     observing: { label: '观察态', dot: 'bg-sky-500 animate-pulse', banner: 'bg-sky-50 border-sky-200 text-sky-700' },
+    config_pending: {
+        label: '运行中 · 新版本待生效',
+        dot: 'bg-emerald-500 animate-pulse',
+        banner: 'bg-amber-50 border-amber-300 text-amber-800',
+        hint: '配置已更新，托管调度器将在**下一个周期**读取；本轮仍按原参数执行',
+    },
     stopped: { label: '已停止', dot: 'bg-slate-300', banner: 'bg-slate-50 border-slate-200 text-slate-500' },
     error: { label: '异常', dot: 'bg-rose-500', banner: 'bg-rose-50 border-rose-200 text-rose-700' },
 };
@@ -110,13 +116,38 @@ export function buildInputNodes(items: TradingPrecheckItem[], isSim: boolean): T
         });
 }
 
+/** 解析时间戳；不可解析返回 NaN（调用方据此放弃判断，而不是当成 0）。 */
+const parseTs = (raw: unknown): number => {
+    const text = String(raw ?? '').trim();
+    if (!text) return NaN;
+    const ms = Date.parse(text);
+    return Number.isFinite(ms) ? ms : NaN;
+};
+
+/**
+ * 热更新是否「尚未被周期读到」（T-RC-20）。
+ *
+ * 判定必须有证据：有 config_version（说明确实热更过）+ 有 config_updated_at
+ * + 有 latest_cycle.at，且 `周期时间 < 配置更新时间`。任一缺失就**不判**——
+ * 没有周期记录时说「待生效」是编造，用户会白等一轮。
+ */
+function isConfigPending(status: RealTradingStatus): boolean {
+    const version = Number(status.config_version ?? 0);
+    if (!Number.isFinite(version) || version <= 0) return false;
+    const updatedAt = parseTs(status.config_updated_at);
+    const cycleAt = parseTs(status.latest_cycle?.at);
+    if (!Number.isFinite(updatedAt) || !Number.isFinite(cycleAt)) return false;
+    return cycleAt < updatedAt;
+}
+
 /** status → L2 运行状态机 */
 export function deriveRunState(status: RealTradingStatus | null): RunState {
     if (!status) return 'idle';
     const s = String(status.status || '').toLowerCase();
     if (s === 'starting') return 'starting';
     if (s === 'running') {
-        return status.trading_permission === 'observe_only' ? 'observing' : 'running';
+        if (status.trading_permission === 'observe_only') return 'observing';
+        return isConfigPending(status) ? 'config_pending' : 'running';
     }
     if (s === 'error') return 'error';
     if (s === 'stopped' || s === 'not_running') return 'stopped';

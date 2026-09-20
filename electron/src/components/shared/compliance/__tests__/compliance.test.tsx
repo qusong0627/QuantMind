@@ -17,6 +17,7 @@ import {
 import {
   DANGER_SCENARIOS,
   buildLargeOrderScenario,
+  buildStopStrategyScenario,
   isLargeOrderAmount,
   LARGE_ORDER_THRESHOLD,
   needsTwoStepConfirm,
@@ -253,6 +254,28 @@ describe('危险确认卡渲染（T-FE-18）', () => {
     expect(onCancel).toHaveBeenCalledTimes(1);
     expect(onConfirm).not.toHaveBeenCalled();
     expect(listComplianceEvents().some((e) => e.kind === 'danger_cancelled')).toBe(true);
+  });
+
+  it('extra 插槽渲染在后果文案下方，且 confirmDetail 一起进留痕', async () => {
+    const user = userEvent.setup();
+    const onConfirm = vi.fn();
+    render(
+      <DangerConfirmModal
+        open
+        scenario={buildStopStrategyScenario({ mode: 'simulation', strategyName: '动量轮动', positionCount: 7 })}
+        confirmDetail="停止原因：更换策略（准备启动新策略）"
+        onConfirm={onConfirm}
+        onCancel={vi.fn()}
+        extra={<div>停止原因选择器</div>}
+      />
+    );
+    expect(screen.getByText('停止原因选择器')).toBeTruthy();
+
+    await user.click(screen.getByRole('button', { name: /确认停止/ }));
+    expect(onConfirm).toHaveBeenCalledTimes(1);
+    // 留痕必须带上原因——否则事后只知「停过」，不知「为什么停」
+    const recorded = listComplianceEvents().filter((e) => e.kind === 'danger_confirmed');
+    expect(recorded[recorded.length - 1].detail).toContain('更换策略');
   });
 });
 

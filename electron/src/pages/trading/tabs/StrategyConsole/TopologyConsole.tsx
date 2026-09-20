@@ -1,18 +1,23 @@
-import React, { useMemo, useState } from 'react';
-import { Activity, Play, RefreshCw, Square } from 'lucide-react';
-import { Select } from 'antd';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useAppSelector } from '../../../../store';
 import { selectCurrentMarket } from '../../../../store/slices/uiSlice';
 import type { StrategyFile } from '../../../../types/backtest/strategy';
 import { useRuntimeOverview } from './hooks/useRuntimeOverview';
 import type { ConsoleTradingMode } from './hooks/useRuntimeOverview';
+import { useAwayWhileRunning } from './hooks/useAwayWhileRunning';
 import { PlanSection } from '../../../../features/desk/components/DeskSections';
+import CommandBar from './layers/CommandBar';
+import GuardianStrip from './layers/GuardianStrip';
 import InputLayer from './layers/InputLayer';
 import RuntimeLayer from './layers/RuntimeLayer';
+import RhythmLayer from './layers/RhythmLayer';
+import RiskLayer from './layers/RiskLayer';
 import OutputLayer from './layers/OutputLayer';
-import LogPanel from './layers/LogPanel';
-import { RUN_STATE_META } from './topologyTypes';
+import RuntimeLogPanel from './layers/RuntimeLogPanel';
 import { sortTradingStrategies } from '../../utils/sortTradingStrategies';
+import { normalizeTradingMode } from '../../utils/tradingModeCopy';
+import { DangerConfirmModal } from '../../../../components/shared/compliance/DangerConfirmModal';
+import { buildStopStrategyScenario, STOP_REASONS } from '../../../../components/shared/compliance/dangerAction';
 
 interface TopologyConsoleProps {
     tenantId: string;
@@ -23,23 +28,24 @@ interface TopologyConsoleProps {
         isShadow: boolean,
         strategy?: StrategyFile | null,
     ) => Promise<void>;
-    onStop: () => Promise<void>;
+    onStop: (reason?: string) => Promise<void>;
     onOpenManualTask?: () => void;
     onOpenHistory?: () => void;
 }
 
-const MARKET_BROKER_LABEL: Record<string, string> = {
-    CN: '通达信实盘交易',
-    HK: '券商实盘交易（富途/老虎/IB）',
-    US: '券商实盘交易（老虎/IB/富途）',
-    FUTURES: '券商实盘交易（IB）',
-    CRYPTO: '暂无券商通道',
-};
+/** 判定「策略是否在跑」的唯一口径：待生效也算在跑（调度器还在推进）。 */
+const isLiveState = (runState: string): boolean =>
+    runState === 'running' || runState === 'starting' || runState === 'config_pending';
 
 /**
- * 拓扑控制台：输入层 → 运行层（状态+计划） → 交易记录 → 日志折叠。
- * 数据经 useRuntimeOverview 聚合：首屏 3 路并行、preflight 不进轮询、
- * 策略列表懒加载、每层独立骨架。
+ * 策略控制台（T-RC-17/20）——机构级实时监控台，五层拓扑 + 守护条。
+ *
+ * 与旧版的关键差别不是「多几个卡片」，而是三条硬约束：
+ * 1. **模式不张冠李戴**：所有「模拟/实盘」字样出自 `tradingModeCopy`（旧版把
+ *    isSim 的分支写反，实盘页签的按钮写着「启动模拟交易」）；
+ * 2. **运行不因离开而停**：守护条常驻服务端心跳，离开过再回来有显式提示；
+ * 3. **停止必二次确认并留痕**：走 `DangerConfirmModal`（内部 `recordComplianceEvent`），
+ *    弹窗内选停止原因，随 `/stop` 落服务端审计与运行日志。
  */
 const TopologyConsole: React.FC<TopologyConsoleProps> = ({
     tenantId,
@@ -52,12 +58,19 @@ const TopologyConsole: React.FC<TopologyConsoleProps> = ({
 }) => {
     const currentMarket = useAppSelector(selectCurrentMarket);
     const mode: ConsoleTradingMode = tradingMode === 'simulation' ? 'simulation' : 'real';
-    const isSim = mode === 'simulation';
+    const copyMode = normalizeTradingMode(mode);
     const overview = useRuntimeOverview(tenantId, userId, mode, currentMarket, true);
     const { status, latestRun, defaultModel, runState, nodes, ready } = overview;
 
     const [selectedStrategyId, setSelectedStrategyId] = useState('');
-    const [logsOpen, setLogsOpen] = useState(false);
+    const [logsOpen, setLogsOpen] = useState(true);
+    const [stopOpen, setStopOpen] = useState(false);
+    const [stopReason, setStopReason] = useState<string>(STOP_REASONS[0].value);
+    const [stopping, setStopping] = useState(false);
+
+    const isRunning = isLiveState(runState);
+    // 「关闭页面不影响运行」不能只是一句承诺：记录用户是否真的离开过，回来时明示。
+    const awayWhileRunning = useAwayWhileRunning(isRunning);
 
     const strategyOptions = useMemo(
         () => sortTradingStrategies(overview.strategies).map((s) => ({
@@ -67,9 +80,6 @@ const TopologyConsole: React.FC<TopologyConsoleProps> = ({
         [overview.strategies],
     );
     const selectedStrategy = overview.strategies.find((s) => s.id === selectedStrategyId);
-    const isDeployDisabled = !selectedStrategyId || !selectedStrategy?.is_verified;
-    const isRunning = runState === 'running' || runState === 'starting';
-    const runMeta = RUN_STATE_META[runState];
 
     const defaultModelName = useMemo(() => {
         const metadata = (defaultModel?.metadata_json || {}) as Record<string, unknown>;
@@ -78,94 +88,65 @@ const TopologyConsole: React.FC<TopologyConsoleProps> = ({
     }, [defaultModel]);
 
     const handleDeploy = () => {
-        if (!selectedStrategyId || isDeployDisabled) return;
+        if (!selectedStrategyId) return;
         void onDeploy(selectedStrategyId, false, selectedStrategy || null);
     };
 
+    const handleStopConfirmed = async () => {
+        setStopping(true);
+        try {
+            await onStop(stopReason);
+            setStopOpen(false);
+        } finally {
+            setStopping(false);
+        }
+    };
+
+    const stopScenario = useMemo(
+        () => buildStopStrategyScenario({
+            mode: copyMode,
+            strategyName: status?.strategy?.name,
+            positionCount: status?.portfolio?.position_count ?? null,
+        }),
+        [copyMode, status?.strategy?.name, status?.portfolio?.position_count],
+    );
+    const stopReasonLabel = STOP_REASONS.find((r) => r.value === stopReason)?.label || stopReason;
+
     return (
-        <div className="h-full overflow-y-auto custom-scrollbar">
+        <div
+            className="h-full overflow-y-auto custom-scrollbar"
+            // 探针落点：模式与市场挂在根节点上，E2E 才能在「实盘页签」这个上下文里
+            // 断言文案——否则只能全页扫文本，被左侧的模式切换器误伤。
+            data-testid="strategy-console"
+            data-mode={copyMode}
+            data-market={currentMarket}
+        >
+            <GuardianStrip status={status} loading={!ready.status} />
             <div className="p-4 flex flex-col gap-3 pb-12">
-                {/* Header 控制条：模式 + 策略选择 + 启动/停止 */}
-                <div className="bg-white rounded-2xl shadow-xs border border-slate-200/80 p-4 px-6 flex flex-col md:flex-row items-center justify-between gap-4">
-                    <div className="flex-1">
-                        <div className="flex items-center gap-3 mb-1.5">
-                            <div className={`w-2.5 h-2.5 rounded-full ${runMeta.dot}`} />
-                            <h2 className="text-lg font-bold text-slate-800">
-                                {isSim ? '全自动实盘模拟控制台' : '全自动实盘交易控制台'}
-                            </h2>
-                            <span className={`px-2 py-0.5 rounded-full text-[10px] font-black border ${runMeta.banner}`}>
-                                {runMeta.label}
-                            </span>
-                        </div>
-                        <div className="flex items-center gap-4 text-slate-500 text-xs">
-                            <span className="flex items-center gap-1.5">
-                                <Activity size={13} className={isSim ? 'text-indigo-500' : 'text-rose-500'} />
-                                模式: <span className={`font-bold ${isSim ? 'text-indigo-600' : 'text-rose-600'}`}>
-                                    {isSim ? '实盘模拟运行' : (MARKET_BROKER_LABEL[currentMarket] || '通达信实盘交易')}
-                                </span>
-                            </span>
-                            <span className="text-slate-200">|</span>
-                            <span className="font-mono">USER: {userId}</span>
-                            {overview.lastUpdatedAt && (
-                                <>
-                                    <span className="text-slate-200">|</span>
-                                    <span className="text-slate-400">
-                                        更新于 {new Date(overview.lastUpdatedAt).toLocaleTimeString()}
-                                    </span>
-                                </>
-                            )}
-                        </div>
-                    </div>
-                    <div className="flex items-center gap-2.5">
-                        {!isRunning ? (
-                            <>
-                                <div className="w-60">
-                                    <Select
-                                        value={selectedStrategyId || undefined}
-                                        onChange={(value) => setSelectedStrategyId(String(value))}
-                                        onOpenChange={(open) => {
-                                            if (open) void overview.ensureStrategies();
-                                        }}
-                                        options={strategyOptions}
-                                        placeholder="选择已验证策略..."
-                                        className="w-full custom-antd-select-v2"
-                                        size="middle"
-                                        showSearch
-                                        loading={overview.strategiesLoading}
-                                        notFoundContent={overview.strategiesLoading ? '加载中…' : '暂无策略'}
-                                    />
-                                </div>
-                                <button
-                                    onClick={() => void overview.ensureStrategies()}
-                                    className="p-2 text-slate-400 hover:text-blue-600 border border-slate-200 rounded-xl"
-                                    title="刷新策略列表"
-                                >
-                                    <RefreshCw size={16} className={overview.strategiesLoading ? 'animate-spin' : ''} />
-                                </button>
-                                <button
-                                    onClick={handleDeploy}
-                                    disabled={isDeployDisabled}
-                                    className={`px-6 py-2 rounded-xl text-xs font-bold text-white transition-all ${isDeployDisabled ? 'bg-slate-300' : (isSim ? 'bg-indigo-500 hover:bg-indigo-600' : 'bg-blue-600 hover:bg-blue-700')}`}
-                                >
-                                    <Play size={16} className="inline mr-1.5" />
-                                    {selectedStrategy?.is_verified ? (isSim ? '开启实时模拟' : '启动模拟交易') : '未经验证'}
-                                </button>
-                            </>
-                        ) : (
-                            <button
-                                onClick={() => void onStop()}
-                                className="px-8 py-2.5 bg-rose-500 hover:bg-rose-600 text-white rounded-xl font-bold shadow-lg shadow-rose-100 flex items-center gap-2 text-xs"
-                            >
-                                <Square size={16} fill="currentColor" /> 停止运行
-                            </button>
-                        )}
-                    </div>
-                </div>
+                {/* 顶部状态条 */}
+                <CommandBar
+                    mode={copyMode}
+                    market={currentMarket}
+                    status={status}
+                    loading={!ready.status}
+                    runState={runState}
+                    lastUpdatedAt={overview.lastUpdatedAt}
+                    userId={userId}
+                    strategyOptions={strategyOptions}
+                    strategiesLoading={overview.strategiesLoading}
+                    selectedStrategyId={selectedStrategyId}
+                    selectedStrategy={selectedStrategy}
+                    onSelectStrategy={setSelectedStrategyId}
+                    onRefreshStrategies={() => void overview.ensureStrategies(true)}
+                    onDeploy={handleDeploy}
+                    onStop={() => setStopOpen(true)}
+                    awayWhileRunning={awayWhileRunning}
+                />
 
                 {/* L1 输入层 */}
                 <InputLayer nodes={nodes} loading={!ready.precheck} />
 
-                {/* L2 运行层：左运行策略+参数，右下个交易日计划+任务汇报 */}
+                {/* L2 运行层 */}
                 <RuntimeLayer
                     runState={runState}
                     status={status}
@@ -174,7 +155,13 @@ const TopologyConsole: React.FC<TopologyConsoleProps> = ({
                     defaultModelName={defaultModelName}
                 />
 
-                {/* L2.5/L3 调仓计划 ｜ 交易记录（2026-09-17 两栏并排、拉伸等高底边齐平；窄屏自动上下堆叠） */}
+                {/* L3 节奏层：频率档位 / 调仓 / 时段 / 响应 */}
+                <RhythmLayer status={status} loading={!ready.status} />
+
+                {/* L4 风控层：生效风控值 + 风险锁 + 口径分裂告警 */}
+                <RiskLayer status={status} enabled={true} refreshKey={overview.refreshTick} />
+
+                {/* L5 输出层：调仓计划 ｜ 交易记录（窄屏自动堆叠） */}
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 items-stretch">
                     <PlanSection />
                     <OutputLayer
@@ -187,13 +174,44 @@ const TopologyConsole: React.FC<TopologyConsoleProps> = ({
                     />
                 </div>
 
-                {/* L4 日志折叠 */}
-                <LogPanel
-                    taskId={status?.latest_hosted_task?.task_id || null}
+                {/* L5 运行日志流：两条托管链路共用同一运行维度流 */}
+                <RuntimeLogPanel
                     open={logsOpen}
                     onToggle={() => setLogsOpen(!logsOpen)}
+                    isRunning={isRunning}
                 />
             </div>
+
+            {/* 停止二次确认（T-RC-19）：后果文案 + 原因选择，确认后随 /stop 落审计 */}
+            <DangerConfirmModal
+                open={stopOpen}
+                scenario={stopScenario}
+                loading={stopping}
+                confirmDetail={`停止原因：${stopReasonLabel}`}
+                onConfirm={() => void handleStopConfirmed()}
+                onCancel={() => setStopOpen(false)}
+                extra={
+                    <div className="pt-1.5">
+                        <div className="font-bold text-slate-700 mb-1">停止原因（记入审计）</div>
+                        <div className="flex flex-wrap gap-1.5">
+                            {STOP_REASONS.map((r) => (
+                                <button
+                                    key={r.value}
+                                    type="button"
+                                    onClick={() => setStopReason(r.value)}
+                                    className={`px-2.5 py-1 rounded-lg border text-[11px] font-bold transition-colors ${
+                                        stopReason === r.value
+                                            ? 'bg-rose-50 border-rose-300 text-rose-700'
+                                            : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'
+                                    }`}
+                                >
+                                    {r.label}
+                                </button>
+                            ))}
+                        </div>
+                    </div>
+                }
+            />
         </div>
     );
 };

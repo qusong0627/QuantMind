@@ -116,3 +116,75 @@ export function buildLargeOrderScenario({ buyAmount, sellAmount }: LargeOrderSce
     cancelText: '回去再核对',
   };
 }
+
+// ---------------------------------------------------------------------------
+// 停止策略二次确认（T-RC-19：用户硬要求「停止必须二次确认并留痕」）
+// ---------------------------------------------------------------------------
+
+/** 停止原因：随 `/stop` 请求落审计，供事后回溯「这次为什么停」。 */
+export const STOP_REASONS = [
+  { value: 'manual', label: '人工干预（临时停一下）' },
+  { value: 'switch', label: '更换策略（准备启动新策略）' },
+  { value: 'risk', label: '风控告警（主动避险）' },
+  { value: 'debug', label: '调试排查（参数或代码异常）' },
+] as const;
+
+export type StopReasonValue = (typeof STOP_REASONS)[number]['value'];
+
+export interface StopStrategyInput {
+  /** 'SIMULATION' | 'REAL'；未知按模拟口径（与后端 Form 默认值一致） */
+  mode?: unknown;
+  strategyName?: string;
+  /** 当前持仓只数；给出时写入文案，`undefined`/非数则不提 */
+  positionCount?: number | null;
+}
+
+/**
+ * 停止确认文案（随模式生成）。
+ *
+ * 两种模式**必须分开写**，因为用户最需要知道的那件事不同：
+ * - 模拟盘：钱是虚拟的，「停止是否影响台账」是唯一悬念
+ * - 实盘：停止**不等于撤单**——在途委托仍可能成交，这是真实亏损来源，
+ *   不写清楚等于让用户以为「点了停止就安全了」
+ */
+export function buildStopStrategyScenario({ mode, strategyName, positionCount }: StopStrategyInput): {
+  title: string;
+  consequences: readonly string[];
+  confirmText: string;
+  cancelText: string;
+} {
+  const name = String(strategyName || '').trim();
+  const isReal = String(mode ?? '').trim().toLowerCase() === 'real';
+  const count = Number(positionCount);
+  // 0 只 = 没有持仓，走「无持仓」话术；只有正数才报笔数
+  const hasCount = Number.isFinite(count) && count > 0;
+  const lines: string[] = [];
+
+  lines.push('停止后**不再产生新的委托**；已在途的执行轮次跑完即止，不会中途砍断');
+
+  if (isReal) {
+    lines.push('⚠️ 停止**不会自动撤回**已提交至券商的委托——它们仍可能成交，请到券商端核对');
+    lines.push(
+      hasCount
+        ? `当前 ${count} 只持仓**保留在券商账户**中，停止后不再有策略托管（止损/调仓均停止）`
+        : '**当前无持仓**；已有委托与成交记录保留在券商账户'
+    );
+  } else {
+    lines.push(
+      hasCount
+        ? `当前 ${count} 只模拟持仓与台账**全部保留**，停止后不再自动调仓`
+        : '**当前无持仓**；已有模拟台账保留，可随时回看'
+    );
+  }
+
+  lines.push(`想继续跑时，回到本页**重新启动**即可，历史运行记录不丢`);
+
+  return {
+    title: isReal
+      ? `停止实盘策略${name ? `「${name}」` : ''}`
+      : `停止模拟策略${name ? `「${name}」` : ''}`,
+    consequences: lines,
+    confirmText: '确认停止',
+    cancelText: '继续运行',
+  };
+}
