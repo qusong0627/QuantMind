@@ -182,7 +182,14 @@ def run_backtest(signals, klines, commission=COMMISSION, stamp_tax=STAMP_TAX, in
         pre_close = sym_close_map[day_dates[-1]]
         code = suffix.split(".")[0]
         try:
-            lu, ld = compute_limits(code, pre_close, is_st=False, trade_date=date.fromisoformat(day))
+            # is_st 与选股口径（`st_symbols`）保持一致 —— 见 backtest_l2_year.py
+            # 同处的说明：写死 False 会把 ST 5% 板的封板日判成可成交。
+            lu, ld = compute_limits(
+                code,
+                pre_close,
+                is_st=suffix in st_symbols,
+                trade_date=date.fromisoformat(day),
+            )
         except Exception:
             return None
         return float(lu), float(ld)

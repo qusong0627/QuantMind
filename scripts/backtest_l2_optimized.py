@@ -182,7 +182,15 @@ def run_backtest(signals, klines, st_symbols, index_ma=None):
         pre = m[day_dates[-1]]
         code = suffix.split(".")[0]
         try:
-            lu, ld = compute_limits(code, pre, is_st=False, trade_date=date.fromisoformat(day))
+            # is_st 必须与**选股**口径一致（选股用 `sym not in st_symbols` 剔 ST）。
+            # 写死 False 时 ST 主板 5% 板（<2026-07-06）的封板日被当成可成交。
+            # 静态集合有前视偏差，但它本来就已在决定选股；用它只是消除自相矛盾。
+            lu, ld = compute_limits(
+                code,
+                pre,
+                is_st=suffix in st_symbols,
+                trade_date=date.fromisoformat(day),
+            )
         except Exception:
             return None
         return float(lu), float(ld)

@@ -671,7 +671,13 @@ class QlibBacktestServiceRuntimeMixin(QlibBacktestServiceQueryMixin):
                     "freq": "day",
                     "start_time": request.start_date,
                     "end_time": request.end_date,
-                    "limit_threshold": 0.095,
+                    # 此处**不再**传 limit_threshold：那个 kwarg 只会被 qlib 的
+                    # Exchange.__init__ 存下来，用于派生 $limit_buy/$limit_sell 两列；
+                    # 而唯一的读者 Exchange.check_stock_limit 已被 CnExchange 整个
+                    # 覆写（走 limit_pct，见 cn_exchange.py 的 _get_limit_threshold）。
+                    # 两列全仓库无人读，属性.limit_threshold 也没有读者，所以这条
+                    # 0.095 是**惰性**字面量 —— 删掉与保留行为完全一致，但留着会让
+                    # 后来者以为它就是涨跌停线（它并不是）。
                     "deal_price": request.deal_price,
                     "commission": comm,
                     "min_commission": request.min_commission,

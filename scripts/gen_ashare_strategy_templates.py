@@ -730,7 +730,7 @@ class LimitUpGuardStrategy(RedisRecordingStrategy):
     覆写 ``_adjust_signal``（基类的 generate_trade_decision 真正调用的钩子）。
     """
 
-    #: 「贴板」容差（比例）。0.095 = 0.10 − 0.005：封板价要按分取整，真封死的票
+    #: 「贴板」容差（比例），沿用旧表的内置余量：封板价要按分取整，真封死的票
     #: 可能只显示 9.97%，不留余量会把真涨停判丢。
     _LIMIT_TOLERANCE = 0.005
 
@@ -743,8 +743,9 @@ class LimitUpGuardStrategy(RedisRecordingStrategy):
     def _limit_threshold(symbol, ref_date) -> float:
         """涨停判定阈值（比例）。口径唯一事实源 = local_market_data.limit_pct。
 
-        旧实现按代码前缀返回 0.095/0.195/0.295，不看日期、没有 ST 档：
-        - 2020-08-24 注册制改革前的创业板是 10% 板，被套上 19.5% 的线 ——
+        旧实现按代码前缀返回一张静态表（主板 / 宽板 / 北交所三档，各留 0.5pp
+        取整余量），不看日期、没有 ST 档：
+        - 2020-08-24 注册制改革前的创业板是 10% 板，却按宽板（20%）的线判 ——
           那几年的真涨停从不计数，本模板宣称的「涨停规避」在最需要它的
           年份（2016~2020 中）**静默失效**，且回测看不出来；
         - ``("4","8","9")`` 兜底把沪市 900xxx 的 B 股（10% 板）当成北交所 30%；
@@ -775,7 +776,8 @@ class LimitUpGuardStrategy(RedisRecordingStrategy):
         except Exception:  # noqa: BLE001
             # 兜底只降级、不改口径**方向**：拿不到权威实现时按最严的主板线判，
             # 宽板票因此被过度剔除（少交易），而不是把真涨停放进来（假收益）。
-            return 0.095
+            # 这个字面量是**故意的**保守下界，不是又一张板别表 —— 见 allow 标记。
+            return 0.095  # fidelity: allow-limit-threshold — 兜底按最严主板线
 
     def _limit_up_counts(self, stocks, ref_date):
         span = int(self.lookback_days * 2.5) + 20
