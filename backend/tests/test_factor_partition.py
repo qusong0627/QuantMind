@@ -334,3 +334,98 @@ def test_schema_subset_is_not_reported_as_drift(tmp_path):
     # Assert
     assert stat.drifted == 0
     assert det["plan"] == []
+
+
+# ── schema 增长陷阱：union_by_name 的两副面孔 ──────────────────────────────
+# 实测背景（2026-09-20 生产）：features_daily 自 20260914 起由 50 列变为 78 列
+# （新增 is_st / industry_name / in_hs300 / list_date / pb_mrq ...），且是**永久**变更；
+# l1_factors 自 20260826 起丢掉 published_at / release_id。两者都跨 schema 边界。
+#
+# 于是同一段 glob 有两种读法，且**两种都危险**：
+#   不带 union_by_name → 静默只给首个文件的列（新列凭空消失，行数却是全量）
+#   带   union_by_name → 新列在老分区全为 NULL ⇒ 完美的「年代指示器」，喂给模型即泄露
+# 所以「补上 union_by_name」不是修复。真正安全的是 read_partition / 显式列清单。
+
+
+def _make_growing_schema_library(root):
+    """老分区 2 列、新分区多一列（模拟 features_daily 的 50→78）。"""
+    _make_library(root, {"20240102": {"symbol": ["A"], "f_old": [1.0]}})
+    _make_library(root, {"20240103": {"symbol": ["A"], "f_old": [2.0]}})
+    _make_library(
+        root, {"20240104": {"symbol": ["A"], "f_old": [3.0], "f_new": [30.0]}}
+    )
+
+
+def test_duckdb_glob_without_union_by_name_silently_drops_later_schema_columns(
+    tmp_path,
+):
+    """不带 union_by_name：行数是全量，**列却只有首个文件的** —— 静默丢列。
+
+    这就是「跨 schema glob」的真实形态：不报错、行数正常、新列凭空消失。
+    """
+    duckdb = pytest.importorskip("duckdb")
+    # Arrange
+    lib = tmp_path / "features_daily"
+    _make_growing_schema_library(lib)
+    files = [
+        str(lib / f"dt={dt}" / "data.parquet")
+        for dt in ("20240102", "20240103", "20240104")
+    ]
+    con = duckdb.connect()
+    # Act
+    cols = [
+        r[0]
+        for r in con.execute(
+            f"DESCRIBE SELECT * FROM read_parquet({files!r})"
+        ).fetchall()
+    ]
+    n = con.execute(f"SELECT count(*) FROM read_parquet({files!r})").fetchone()[0]
+    # Assert：全量 3 行，但只有首文件的两列（dt 是 hive 分区列，自动识别）
+    assert n == 3
+    assert "f_new" not in cols
+    assert sorted(cols) == ["dt", "f_old", "symbol"]
+
+
+def test_duckdb_glob_with_union_by_name_turns_new_columns_into_era_separator(tmp_path):
+    """补 union_by_name：新列在老分区**全 NULL**、在新分区全非 NULL ⇒ 年代泄露。
+
+    这不是「修复」而是把静默丢列换成静默泄露 —— 任何树模型都会拿它做一刀切。
+    """
+    duckdb = pytest.importorskip("duckdb")
+    # Arrange
+    lib = tmp_path / "features_daily"
+    _make_growing_schema_library(lib)
+    files = [
+        str(lib / f"dt={dt}" / "data.parquet")
+        for dt in ("20240102", "20240103", "20240104")
+    ]
+    con = duckdb.connect()
+    # Act
+    rows = con.execute(
+        f"SELECT dt, f_new FROM read_parquet({files!r}, union_by_name=true, "
+        "hive_partitioning=true) ORDER BY dt"
+    ).fetchall()
+    # Assert：新的两行 NULL/非 NULL 与日期完全共线
+    assert [r[1] for r in rows] == [None, None, 30.0]
+    assert [r[0] for r in rows] == [20240102, 20240103, 20240104]  # dt 为整数
+
+
+def test_read_partition_keeps_named_columns_across_a_schema_growth(tmp_path):
+    """契约读法：跨 schema 边界按名取列，缺列即抛，不会 NULL 填充。"""
+    # Arrange
+    lib = tmp_path / "features_daily"
+    _make_growing_schema_library(lib)
+    old = lib / "dt=20240102" / "data.parquet"
+    new = lib / "dt=20240104" / "data.parquet"
+    # Act
+    df_old = read_partition(old)
+    df_new = read_partition(new)
+    # Assert：两日都读到各自真实存在的列，无凭空 NULL 列
+    # （特征按名排序 ⇒ f_new 在 f_old 之前，与物理序无关）
+    assert list(df_old.columns) == ["symbol", "f_old"]
+    assert list(df_new.columns) == ["symbol", "f_new", "f_old"]
+    # 跨 schema 累积应由 ColumnContract 拦住（而非静默补 NULL）
+    contract = ColumnContract("features_daily")
+    contract.check(df_old.columns, context="20240102")
+    with pytest.raises(RuntimeError, match="列集合与首日不一致"):
+        contract.check(df_new.columns, context="20240104")
