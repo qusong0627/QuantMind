@@ -79,6 +79,44 @@ def test_project_root_candidate_missing_returns_last_default(tmp_path, monkeypat
 
 
 @pytest.mark.unit
+def test_pinned_dir_honoured_when_exists(tmp_path):
+    """pin 指向真实存在的目录 → 原样采纳（模型自带数据源的场景不能被回退掉）。"""
+    pinned = tmp_path / "quantdb"
+    pinned.mkdir()
+
+    assert quantdb_paths.resolve_pinned_data_dir(str(pinned)) == pinned
+
+
+@pytest.mark.unit
+def test_pinned_dir_missing_returns_none(tmp_path):
+    """pin 不存在 → None，调用方回落本机根。
+
+    真实踩坑：训练节点把 ``/tmp/quantdb_data`` 写进 metadata.quantdb_dir，
+    服务端该路径不存在。旧代码照样把死 pin 交给 QuantDBFactorReader →
+    describe() 返回 0 列（**不抛异常**）→ 特征覆盖率 0% → 实时推理配置写入
+    被 400 拒绝，用户改不了模型；实时打分则全列走 fill。
+    """
+    assert quantdb_paths.resolve_pinned_data_dir("/tmp/quantdb_data_not_a_real_dir") is None
+
+
+@pytest.mark.unit
+def test_pinned_dir_empty_value_returns_none():
+    """None / 空串 / 纯空白 → None（老模型 metadata 里没有这个字段）。"""
+    assert quantdb_paths.resolve_pinned_data_dir(None) is None
+    assert quantdb_paths.resolve_pinned_data_dir("") is None
+    assert quantdb_paths.resolve_pinned_data_dir("   ") is None
+
+
+@pytest.mark.unit
+def test_pinned_dir_file_returns_none(tmp_path):
+    """pin 指向文件而非目录 → None（不能把它当数据根）。"""
+    f = tmp_path / "not_a_dir"
+    f.write_text("x", encoding="utf-8")
+
+    assert quantdb_paths.resolve_pinned_data_dir(str(f)) is None
+
+
+@pytest.mark.unit
 def test_hub_resolver_equivalent(tmp_path, monkeypatch):
     """零差异护栏：与 quantdb_hub._resolve_data_dir() 结果一致。"""
     pytest.importorskip("pandas")

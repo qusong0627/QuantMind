@@ -72,3 +72,27 @@ def resolve_quantdb_dir() -> Path:
 def resolve_quantdb_subdir(*parts: str) -> Path:
     """QuantDB 数据目录下的子路径（不检查存在性，由调用方决定如何降级）。"""
     return resolve_quantdb_dir().joinpath(*parts)
+
+
+def resolve_pinned_data_dir(pinned: object) -> Path | None:
+    """模型 ``metadata.quantdb_dir``（训练时 pin）→ 可采纳的目录，采纳不了返回 None。
+
+    pin 是**训练节点视角**的路径：远程训练机 / 便携包上可能是 ``/tmp/quantdb_data``
+    这类只在该机器上成立的位置。服务端读模型时该路径往往不存在，此时必须返回
+    ``None`` 让调用方各自回落。**回落口径不统一，由调用方自持**：``data_loader`` /
+    ``inference_parquet`` 用 :func:`resolve_quantdb_dir`（认 ``/data/quantdb``、
+    ``D:/quant_data`` 等），``batch_predict`` 用自己的 ``QUANTDB_DATA_DIR`` 候选表。
+    本函数只负责「pin 能不能采纳」，不替调用方决定落到哪。
+
+    为什么不能「照单全收」：``QuantDBFactorReader(死 pin)`` **不抛异常**，而是
+    ``describe()`` 返回 0 列 —— 表现为特征覆盖率 0%（实时推理配置写入被 400 拒绝，
+    用户改不了模型）或实时打分全列走 fill 值。缺了这层判断，坏 pin 会一路静默。
+    """
+    raw = str(pinned or "").strip()
+    if not raw:
+        return None
+    path = Path(raw)
+    if not path.is_dir():
+        logger.warning("模型 pin 的 quantdb_dir=%s 不存在，回落本机 QuantDB 根", raw)
+        return None
+    return path

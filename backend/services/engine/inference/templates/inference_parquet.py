@@ -72,8 +72,11 @@ def _quantdb_reader(meta: dict, data_dir: Path):
     if meta.get("data_source") != "quantdb_factors":
         return None
     from backend.services.engine.data_platform.quantdb_factor_reader import QuantDBFactorReader
-    pinned_dir = Path(str(meta.get("quantdb_dir") or ""))
-    return QuantDBFactorReader(pinned_dir if pinned_dir.is_dir() else data_dir)
+    from backend.shared.quantdb_paths import resolve_pinned_data_dir
+
+    # pin 口径唯一实现见 backend/shared/quantdb_paths.resolve_pinned_data_dir
+    pinned_dir = resolve_pinned_data_dir(meta.get("quantdb_dir"))
+    return QuantDBFactorReader(str(pinned_dir) if pinned_dir else data_dir)
 
 
 # ═══════════════════════════════════════════════════════════════════════════

@@ -39,6 +39,67 @@ def test_validate_model_dir_and_whitelist(tmp_path):
     assert "未定义列" in str(exc.value)
 
 
+class _RecordingReader:
+    """记录构造时收到的 root，并按 root 真假决定「源里有几列」。"""
+
+    seen_roots: list[object] = []
+    cols_when_unpinned: tuple[str, ...] = ()
+
+    def __init__(self, root=None, market=None):
+        type(self).seen_roots.append(root)
+        self._cols = () if root else type(self).cols_when_unpinned
+
+    def describe(self, source):
+        import types
+
+        return types.SimpleNamespace(columns=list(self._cols))
+
+
+@pytest.mark.unit
+def test_dead_pin_falls_back_so_coverage_gate_can_pass(monkeypatch, tmp_path):
+    """死 pin 不得交给 reader —— 否则覆盖率恒 0%，所有 quantdb 模型都改不了配置。
+
+    实测现场：训练节点把 ``/tmp/quantdb_data`` 写进 metadata.quantdb_dir，
+    服务端无此路径。QuantDBFactorReader(死 pin) 不抛异常、describe() 返回 0 列，
+    于是 validate_feature_coverage 拿 0% 把**好模型**判成「疑似错误模型」→
+    实时推理配置写入恒 400 → 用户改不了模型，旧配置每 15s 刷 metadata.json 不存在。
+    """
+    from backend.services.api.routers.admin import realtime as rt
+    from backend.services.engine.data_platform import quantdb_factor_reader as qfr
+
+    _RecordingReader.seen_roots = []
+    _RecordingReader.cols_when_unpinned = ("amt_log", "turn_1")
+    monkeypatch.setattr(qfr, "QuantDBFactorReader", _RecordingReader)
+
+    meta = {
+        "data_source": "quantdb_factors",
+        "factor_source": "l1_l2_factors",
+        "quantdb_dir": str(tmp_path / "dead_pin"),  # 不存在
+        "context": {"market": "CN"},
+    }
+    cols = rt._quantdb_columns(meta)
+
+    assert _RecordingReader.seen_roots == [None], "死 pin 必须回退成 None（读本机根）"
+    assert cols == {"amt_log", "turn_1"}
+
+
+@pytest.mark.unit
+def test_live_pin_is_still_honoured(monkeypatch, tmp_path):
+    """pin 真实存在 → 原样采纳（自定义数据集模型必须读自己的源，不能被回退掉）。"""
+    from backend.services.api.routers.admin import realtime as rt
+    from backend.services.engine.data_platform import quantdb_factor_reader as qfr
+
+    _RecordingReader.seen_roots = []
+    _RecordingReader.cols_when_unpinned = ()
+    monkeypatch.setattr(qfr, "QuantDBFactorReader", _RecordingReader)
+
+    pin = tmp_path / "quantdb"
+    pin.mkdir()
+    rt._quantdb_columns({"data_source": "quantdb_factors", "quantdb_dir": str(pin)})
+
+    assert _RecordingReader.seen_roots == [str(pin)]
+
+
 @pytest.mark.integration
 def test_admin_realtime_config_roundtrip_real_redis(tmp_path):
     import os

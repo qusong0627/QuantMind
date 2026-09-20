@@ -29,9 +29,12 @@ def _quantdb_reader(meta: dict, data_dir: Path):
     if meta.get("data_source") != "quantdb_factors":
         return None
     from backend.services.engine.data_platform.quantdb_factor_reader import QuantDBFactorReader
+    from backend.shared.quantdb_paths import resolve_pinned_data_dir
 
-    pinned_dir = Path(str(meta.get("quantdb_dir") or ""))
-    return QuantDBFactorReader(pinned_dir if pinned_dir.is_dir() else data_dir)
+    # pin 只在服务端真实存在时才采纳（训练节点路径常常不存在）——口径唯一实现在
+    # backend/shared/quantdb_paths.resolve_pinned_data_dir，勿再手写 is_dir 判断。
+    pinned_dir = resolve_pinned_data_dir(meta.get("quantdb_dir"))
+    return QuantDBFactorReader(str(pinned_dir) if pinned_dir else data_dir)
 
 
 def resolve_parquet_path(data_dir: Path, trade_date: str, meta: dict | None = None) -> Path | None:

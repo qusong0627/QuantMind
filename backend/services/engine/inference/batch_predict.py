@@ -61,10 +61,13 @@ def run_batch_inference(model_id: str = "", target_date=None):
         logger.error("模型元数据中未发现特征列定义")
         return
 
-    pinned_dir = Path(str(metadata.get("quantdb_dir") or ""))
+    # pin 口径唯一实现见 backend/shared/quantdb_paths.resolve_pinned_data_dir
+    from backend.shared.quantdb_paths import resolve_pinned_data_dir
+
+    pinned_dir = resolve_pinned_data_dir(metadata.get("quantdb_dir"))
     data_dir = (
         pinned_dir
-        if pinned_dir.is_dir()
+        if pinned_dir
         else Path(os.getenv("QUANTDB_DATA_DIR")
                   or os.getenv("QM_QUANTDB_DATA_DIR")
                   or str(PROJECT_ROOT / "data" / "quantdb"))

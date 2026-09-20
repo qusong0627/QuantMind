@@ -342,10 +342,13 @@ def _quantdb_reader_for_meta(meta: dict[str, Any]) -> Any:
     from backend.services.engine.data_platform.quantdb_factor_reader import (
         QuantDBFactorReader,
     )
+    from backend.shared.quantdb_paths import resolve_pinned_data_dir
 
-    pinned = str(meta.get("quantdb_dir") or "").strip()
+    # 死 pin（训练节点路径，服务端不存在）→ None，由读取器回落本机根；
+    # 直接把死 pin 交进去会静默返回 0 列，实时打分全列走 fill。
+    pinned = resolve_pinned_data_dir(meta.get("quantdb_dir"))
     market = str((meta.get("context") or {}).get("market") or "").strip().upper() or None
-    return QuantDBFactorReader(pinned or None, market=market)
+    return QuantDBFactorReader(str(pinned) if pinned else None, market=market)
 
 
 def load_baseline_quantdb(

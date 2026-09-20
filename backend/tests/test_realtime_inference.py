@@ -553,3 +553,67 @@ def test_quantdb_baseline_real_source():
     hist = bundle["history"]["600036"]
     assert 1 <= len(hist) <= 45
     assert {"open", "high", "low", "close", "volume", "amount"} <= set(hist.columns)
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_tick_clears_stale_error_on_normal_skip(tmp_path):
+    """周期正常走完（含「无实时行情→不发布」的跳过）必须清掉 last_error。
+
+    实测现场：模型目录被删 → 每 15s 记一次 metadata.json 不存在；修好配置后
+    收盘期间 live_coverage=0 一直跳过，`last_error` 因为只在**发布成功**时才清，
+    永远停在旧错误上 → 系统健康面板对着已修的故障反复报警。
+    口径：last_error = **最近一次完成的周期**的错误；跳过不是错误（另有 last_skip）。
+    """
+    from backend.services.engine.inference.realtime_service import RealtimeInferenceService
+
+    model_dir = _make_model_dir(tmp_path)
+    hot, snaps, bundle = _fake_engine_inputs()
+    cfg = _cfg(model_dir, enabled=True)
+
+    svc = RealtimeInferenceService(
+        config_loader=lambda: cfg,
+        hot_set_fetcher=lambda: hot,
+        snapshot_fetcher=lambda symbols: snaps,
+        baseline_loader=lambda symbols, day: bundle,
+        publisher=lambda payload, cfg: None,
+    )
+
+    # 第一条：模型目录失效 → 记错误
+    broken = _cfg(tmp_path / "gone", enabled=True)
+    svc._config_loader = lambda: broken
+    await svc.tick_once()
+    assert "metadata.json 不存在" in (svc.counters["last_error"] or "")
+
+    # 第二条：配置已修好，但零快照 → 正常跳过；旧错误必须被清掉
+    svc._config_loader = lambda: cfg
+    svc._snapshot_fetcher = lambda symbols: {}
+    await svc.tick_once()
+    assert svc.counters["last_error"] is None, "跳过不是错误，不能让旧错误常驻"
+    assert svc.counters["skipped_no_live"] >= 1
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_tick_enabled_without_model_dir_leaves_skip_trace(tmp_path):
+    """已启用但 model_dir 为空 = 配置缺失，必须在 last_skip 留痕。
+
+    该路径整个周期体被跳过：cycles 冻住、last_error 停在旧错误、此前又不写 last_skip
+    —— 运维只看到"周期不涨 + 一个旧错误"，分不清配置缺失还是服务卡死。
+    """
+    from backend.services.engine.inference.realtime_service import (
+        RealtimeInferenceService,
+        RealtimeInferConfig,
+    )
+
+    cfg = RealtimeInferConfig(enabled=True, model_dir="", cadence_s=3)
+
+    svc = RealtimeInferenceService(config_loader=lambda: cfg)
+
+    await svc.tick_once()
+
+    assert svc.counters["last_error"] is None
+    assert "未配置模型目录" in (svc.counters["last_skip"] or ""), (
+        "启用但无模型目录时必须留下跳过原因，不能静默变绿"
+    )
+    assert svc.counters["published"] == 0

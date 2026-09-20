@@ -28,6 +28,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from backend.services.api.user_app.middleware.auth import require_admin
+from backend.shared.quantdb_paths import resolve_pinned_data_dir
 
 logger = logging.getLogger(__name__)
 
@@ -114,11 +115,13 @@ def _quantdb_columns(meta: dict[str, Any]) -> set[str] | None:
         )
 
         source = str(meta.get("factor_source") or "l1_l2_factors")
-        pinned = str(meta.get("quantdb_dir") or "").strip()
+        # 死 pin 直接交给 reader 会静默返回 0 列 → 覆盖率 0% → 配置写入被 400 拒绝
+        # （实测：训练节点写死的 /tmp/quantdb_data 让整批 CN 模型都改不了模型）。
+        pinned = resolve_pinned_data_dir(meta.get("quantdb_dir"))
         market = (
             str((meta.get("context") or {}).get("market") or "").strip().upper() or None
         )
-        reader = QuantDBFactorReader(pinned or None, market=market)
+        reader = QuantDBFactorReader(str(pinned) if pinned else None, market=market)
         return set(reader.describe(source).columns)
     except Exception:  # noqa: BLE001
         return None

@@ -457,45 +457,64 @@ class RealtimeInferenceService:
     async def run_forever(self) -> None:
         logger.info("[realtime-infer] service loop started")
         while not self._stop.is_set():
-            cfg = self._config_loader()
-            governor = self._governor_for(cfg)
-            t0 = time.monotonic()
-            try:
-                if cfg.enabled and cfg.model_dir:
-                    payload = await asyncio.to_thread(
-                        self.build_cycle,
-                        governor.level if governor.skip_optional() else 0,
-                    )
-                    if payload:
-                        publisher = self._publisher or self._default_publish
-                        result = publisher(payload, cfg)
-                        if asyncio.iscoroutine(result):
-                            await result
-                        with self._lock:
-                            self.counters["published"] += 1
-                            self.counters["scores"] += len(payload["scores"])
-                            self.counters["last_scores"] = len(payload["scores"])
-                            self.counters["last_run_id"] = payload["run_id"]
-                            self.counters["last_error"] = None
-                    with self._lock:
-                        self.counters["cycles"] += 1
-                        self.counters["last_cycle_at"] = _now().isoformat()
-            except Exception as exc:  # noqa: BLE001 - 循环永续
-                with self._lock:
-                    self.counters["skipped"] += 1
-                    self.counters["last_error"] = f"{type(exc).__name__}: {exc}"
-                logger.warning("[realtime-infer] 周期失败: %s", exc)
-            finally:
-                elapsed_ms = (time.monotonic() - t0) * 1000
-                level = governor.record(elapsed_ms)
-                with self._lock:
-                    self.counters["last_ms"] = round(elapsed_ms, 1)
-                    self.counters["degrade_level"] = level
-                self._write_status_mirror(cfg)
+            governor = await self.tick_once()
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=governor.effective_cadence_s())
             except asyncio.TimeoutError:
                 pass
+
+    async def tick_once(self) -> LoadGovernor:
+        """执行一个周期（含计数与状态镜像），返回本轮 governor 供循环取节拍。
+
+        `last_error` 的清除口径：**周期正常走完即清**（含「无实时行情→不发布」的
+        正常跳过）；只有抛异常的周期才写。旧实现只在发布成功时清 → 收盘期间一直
+        跳过时，面板会永远停在最后一次异常上（实测：模型目录已修复，系统健康仍
+        显示 metadata.json 不存在，运维对着已修的故障反复排查）。
+        """
+        cfg = self._config_loader()
+        governor = self._governor_for(cfg)
+        t0 = time.monotonic()
+        try:
+            if cfg.enabled and cfg.model_dir:
+                payload = await asyncio.to_thread(
+                    self.build_cycle,
+                    governor.level if governor.skip_optional() else 0,
+                )
+                if payload:
+                    publisher = self._publisher or self._default_publish
+                    result = publisher(payload, cfg)
+                    if asyncio.iscoroutine(result):
+                        await result
+                    with self._lock:
+                        self.counters["published"] += 1
+                        self.counters["scores"] += len(payload["scores"])
+                        self.counters["last_scores"] = len(payload["scores"])
+                        self.counters["last_run_id"] = payload["run_id"]
+                with self._lock:
+                    self.counters["last_error"] = None
+                    self.counters["cycles"] += 1
+                    self.counters["last_cycle_at"] = _now().isoformat()
+            elif cfg.enabled:
+                # 已启用却没配模型目录 = 配置缺失，不是"空闲"。这条路径整个周期体被跳过：
+                # cycles 冻住、last_error 停在上一次错误、又不写 last_skip —— 运维只看到
+                # "周期不涨 + 一个旧错误"，分不清是配置缺失还是服务卡死。如实留痕。
+                with self._lock:
+                    self.counters["last_skip"] = (
+                        "实时推理已启用但未配置模型目录（model_dir 为空）"
+                    )
+        except Exception as exc:  # noqa: BLE001 - 循环永续
+            with self._lock:
+                self.counters["skipped"] += 1
+                self.counters["last_error"] = f"{type(exc).__name__}: {exc}"
+            logger.warning("[realtime-infer] 周期失败: %s", exc)
+        finally:
+            elapsed_ms = (time.monotonic() - t0) * 1000
+            level = governor.record(elapsed_ms)
+            with self._lock:
+                self.counters["last_ms"] = round(elapsed_ms, 1)
+                self.counters["degrade_level"] = level
+            self._write_status_mirror(cfg)
+        return governor
 
     def _write_status_mirror(self, cfg: RealtimeInferConfig) -> None:
         """状态镜像到 Redis（best-effort）：admin/前端面板唯一读面（不做跨服务 HTTP）。"""
