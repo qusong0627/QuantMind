@@ -252,9 +252,13 @@ def limit_threshold(symbol: str, *, is_st: bool, trade_date: date) -> float:
 
     ⚠️ 实测（2026-09-20，daily_unadjusted 近 60 个交易日）北交所这 0.5pp 的差别
     **在当前样本上不产生任何差异**：37 次真封板的实际涨幅最低 29.82%（偏离
-    ≤0.18pp），两档容差都漏判 0 条。即本次收敛是**消重**而非改判；真要见到差异，
-    需要出现前收 < ¥2.85 的北交所封板（偏离上界 ``0.005/pre_close``）。
-    另外两个单位不同、**不可**互换：``market_breadth`` 那边是百分点（×100）。
+    ≤0.18pp），两档容差都漏判 0 条。即本次收敛是**消重**而非改判。
+
+    两档容差**何时才会分歧**（逐分扫描 ¥1.00–¥2000.00 实算）：截尾偏离 =
+    ``(1.30·pc − floor(1.30·pc·100)/100) / pc``，上界 ``0.01/pre_close``（在
+    ``pre_close = ¥1.03`` 处取到 0.874pp）。要够到 0.5pp 的差，必须
+    ``pre_close ≤ ¥1.90`` —— 即「北交所封板 + 股价近面值退市线」同时成立。
+    另两个单位不同、**不可**互换：``market_breadth`` 那边是百分点（×100）。
     """
     tol = LIMIT_TOLERANCE_BSE if _is_bse(symbol) else LIMIT_TOLERANCE
     return float(limit_pct(symbol, is_st=is_st, trade_date=trade_date)) - tol
