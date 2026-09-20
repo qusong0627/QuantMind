@@ -409,9 +409,14 @@ def test_hardcoded_limit_scanner_ignores_authoritative_module(tmp_path):
     文件里故意放一个**会被匹配**的字面量，确保豁免来自文件名判定而非巧合。
     """
     # Arrange
+    # 夹具字面量单独成行：它**必须**保持可被匹配（否则本用例退化为恒真），
+    # 所以按门禁的豁免语法就地声明理由。反过来把 `# fidelity: ...` 塞进被写入
+    # 的字符串里是错的 —— 豁免会跟着字符串进到临时文件，测试就成了「因为豁免
+    # 所以通过」，恰好放掉它要证明的那件事。
+    legacy = "_LEGACY = 0.098"  # fidelity: allow-limit-threshold — 夹具字面量
     src = tmp_path / "local_market_data.py"
     src.write_text(
-        '_PCT_MAIN = Decimal("0.10")\n_LEGACY = 0.098  # 权威模块内部的制度常量\n',
+        f'_PCT_MAIN = Decimal("0.10")\n{legacy}  # 权威模块内部的制度常量\n',
         encoding="utf-8",
     )
 
@@ -665,3 +670,79 @@ def test_collect_fractions_treats_missing_column_as_fully_absent(tmp_path):
 
     # Assert
     assert [fractions["g"][d] for d in dates] == [1.0, 1.0, 0.0, 0.0]
+
+
+def test_hardcoded_limit_scanner_ignores_docstring_prose(tmp_path):
+    """docstring 是散文，不是实现。
+
+    讲清一个缺陷往往**必须**引用被废弃的旧常量（「旧实现返回
+    0.095/0.195/0.295」）。若不排除 docstring，门禁会惩罚「把理由写下来」——
+    方向正好反了，且会逼着后来者删注释来换绿灯。
+    """
+    # Arrange
+    src = tmp_path / "bt.py"
+    src.write_text(
+        '"""旧实现按前缀返回 0.095/0.195/0.295，不认创业板改革。"""\n'
+        "\n"
+        "\n"
+        "def f(pct):\n"
+        '    """阈值 0.098 是史前遗留。"""\n'
+        "    return pct\n",
+        encoding="utf-8",
+    )
+
+    # Act / Assert
+    assert scan_hardcoded_limit_thresholds([src]) == []
+
+
+def test_hardcoded_limit_scanner_still_finds_threshold_after_docstring(tmp_path):
+    """排除 docstring 不得顺带放过整个函数体。"""
+    # Arrange
+    src = tmp_path / "bt.py"
+    src.write_text(
+        'def f(pct):\n    """阈值 0.098 是史前遗留。"""\n    return abs(pct) >= 9.8\n',
+        encoding="utf-8",
+    )
+
+    # Act
+    out = scan_hardcoded_limit_thresholds([src])
+
+    # Assert
+    assert len(out) == 1
+    assert out[0].subject.endswith(":3")
+
+
+def test_hardcoded_limit_scanner_still_finds_threshold_in_plain_string(tmp_path):
+    """只豁免 docstring —— 普通字符串里的阈值是**活的**。
+
+    策略模板/DSL 就是把阈值写成字符串再喂给引擎的
+    （`gen_ashare_strategy_templates.py` 即此类），豁免它等于开一个真实盲区。
+    """
+    # Arrange
+    src = tmp_path / "bt.py"
+    src.write_text(
+        'TPL = "if pct_change >= 0.098: skip"\n',
+        encoding="utf-8",
+    )
+
+    # Act
+    out = scan_hardcoded_limit_thresholds([src])
+
+    # Assert
+    assert len(out) == 1
+
+
+def test_hardcoded_limit_scanner_fails_safe_on_unparseable_source(tmp_path):
+    """语法错误时不做任何豁免：宁可多报，不可漏报。"""
+    # Arrange
+    src = tmp_path / "broken.py"
+    src.write_text(
+        '"""docstring 里的 0.098"""\ndef f(:\n    return 9.8\n',
+        encoding="utf-8",
+    )
+
+    # Act
+    out = scan_hardcoded_limit_thresholds([src])
+
+    # Assert — 两行都要报：docstring 那行不获豁免，才是 fail-safe 的含义
+    assert sorted(f.subject.rsplit(":", 1)[1] for f in out) == ["1", "3"]

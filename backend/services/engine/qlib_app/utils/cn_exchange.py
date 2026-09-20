@@ -1,6 +1,6 @@
 import json
 import logging
-from datetime import datetime
+from datetime import date, datetime
 from typing import Optional, Tuple
 
 import numpy as np
@@ -15,6 +15,25 @@ logger = logging.getLogger(__name__)
 from backend.services.engine.qlib_app.utils.structured_logger import StructuredTaskLogger
 
 task_logger = StructuredTaskLogger(logger, "CnExchange")
+
+#: 涨跌停判定的取整容差。`$change` 是四舍五入后的日收益，涨跌停价本身还要按分
+#: 取整，真正封板的票可能只显示 9.97%。阈值统一下浮 0.5pp 吸收这两处取整 ——
+#: 与原硬编码常量（0.095/0.195/0.295）在数值上完全一致，属**保留的既有行为**，
+#: 不是新引入的口径。
+_LIMIT_TOLERANCE = 0.005
+
+
+def _as_trade_date(value: object) -> date | None:
+    """把 qlib 传进来的时间戳收敛成 ``date``；认不出来时返回 None。
+
+    返回 None 而非抛异常：调用方会退化成「按当日板规」。这条降级路径在
+    **当日**检查（盘后风控、实盘下单前的封板校验）上是正确的，只有回测历史
+    窗口才可能因板规差异判错，所以降级要留痕（见调用点的 warning 日志）。
+    """
+    try:
+        return pd.Timestamp(value).date()
+    except Exception:
+        return None
 
 
 class CnExchange(Exchange):
@@ -295,32 +314,40 @@ class CnExchange(Exchange):
         return amount
 
     @staticmethod
-    def _get_limit_threshold(stock_id: str) -> float:
-        """Return the daily price limit threshold for a stock based on its code.
+    def _get_limit_threshold(
+        stock_id: str,
+        trade_date: date | None = None,
+        *,
+        is_st: bool = False,
+    ) -> float:
+        """该标的在 ``trade_date`` 当日的涨跌停阈值（含取整容差）。
 
-        Main board (SH60xxxx, SZ00xxxx, SZ20xxxx): ±10%
-        ChiNext (SZ30xxxx): ±20%
-        STAR Market (SH68xxxx): ±20%
-        Beijing (BJ8xxxxx, BJ4xxxxx): ±30%
-        ST stocks: ±5% (cannot be detected from code alone; 5% moves are
-        covered by the 10% threshold — a 5% ST limit shows as change ≈ 5%
-        which is below the 9.5% gate, so ST stocks are NOT falsely filtered).
+        口径**唯一事实源** = ``local_market_data.limit_pct``：板块前缀
+        （300/301/302、688/689、北交所 43/83/87/88/92）、创业板 2020-08-24
+        注册制改革、ST 主板 5%→10% 切换全在那里，本函数不再自持任何板规常量。
+
+        旧实现按代码前缀直接返回 0.095/0.195/0.295，对改革**前**的创业板
+        一律给 20%，于是 +9.99% 的真涨停被判成「可交易」——回测里表现为在
+        涨停价上成交。本函数现在的契约是「恒等于权威口径减容差」。
+
+        两处**显式**缺口（不是静默降级）：
+
+        1. ``is_st`` 默认 False —— Qlib 撮合层拿不到逐日 ST 口径。影响有限且
+           随时间收敛：ST 主板的 5% 保护期只到 2026-07-06，此后 ST 主板同为
+           10%，默认值对当日及以后**正确**；只有回测早于该日的窗口才会把 ST
+           的 5% 涨停当成可交易。刻意不拿 ``_st_symbol_set()`` 的静态快照来补
+           ——那是单日快照，历史回放会带前视偏差，比漏判更严重。
+        2. 0.5pp 容差是启发式，用来吸收 $change 的舍入与涨跌停价的按分取整。
+           真要做到精确，得用 ``compute_limits`` 算出涨跌停价再比价位。
         """
-        code = stock_id.split(".")[0] if "." in stock_id else stock_id
-        # Remove market prefix if present (SH/SZ/BJ)
-        pure = code.upper()
-        for pfx in ("SH", "SZ", "BJ"):
-            if pure.startswith(pfx):
-                pure = pure[len(pfx):]
-                break
+        from backend.services.simulation.services.local_market_data import limit_pct
 
-        if pure.startswith("68"):
-            return 0.195   # STAR ±20%
-        if pure.startswith("30"):
-            return 0.195   # ChiNext ±20%
-        if pure.startswith("8") or pure.startswith("4"):
-            return 0.295   # Beijing ±30%
-        return 0.095       # Main board ±10%
+        return (
+            float(
+                limit_pct(stock_id, is_st=is_st, trade_date=trade_date or date.today())
+            )
+            - _LIMIT_TOLERANCE
+        )
 
     def check_stock_limit(
         self,
@@ -348,7 +375,16 @@ class CnExchange(Exchange):
                 return False
 
             change = float(change)
-            threshold = self._get_limit_threshold(stock_id)
+            # 用 signal 日而非「今天」定板规：创业板注册制改革两侧阈值不同。
+            trade_date = _as_trade_date(start_time)
+            if trade_date is None:
+                logger.warning(
+                    "涨跌停板规回退到当日：无法从 start_time 解析交易日 "
+                    "(stock_id=%s, start_time=%r)，历史窗口可能因板规差异判错",
+                    stock_id,
+                    start_time,
+                )
+            threshold = self._get_limit_threshold(stock_id, trade_date)
 
             if direction is None:
                 # Any limit → not tradable
@@ -362,7 +398,10 @@ class CnExchange(Exchange):
             else:
                 return False
         except Exception:
-            # If we can't read change data, don't block the trade
+            # 读不到 $change 就不拦单 —— 这是**乐观**方向的降级（放行可能已封板的
+            # 委托）。刻意保留该行为以免改变既有回测结论，但必须留痕，否则将来
+            # 「阈值算错了」和「数据读不到」在日志里长得一模一样。
+            logger.exception("涨跌停判定失败，按可交易放行 (stock_id=%s)", stock_id)
             return False
 
     def quote_clipping(self, order: Order) -> Order | None:

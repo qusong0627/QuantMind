@@ -360,6 +360,48 @@ def phase_tencent(engine, dry_run: bool = False) -> int:
 # ─────────────────────────────────────────────────────────────────────────
 # Phase B: DB 重算 (连板/指数/ST/衍生因子) — 无需外部源
 # ─────────────────────────────────────────────────────────────────────────
+
+#: 涨停判定的取整余量（百分点）。`pct_change` 是四舍五入后的百分数，涨跌停价
+#: 本身还要按分取整，真正封板的票可能只显示 9.97%。这不是新引入的口径，而是
+#: **保留**旧实现的既有余量（旧值 9.8 = 10 − 0.2），否则会把真涨停判丢。
+_LIMIT_SLACK_PCT = 0.2
+
+
+def _limit_threshold_pct(symbol: object, is_st: bool, trade_date: object) -> float:
+    """单行涨停线（百分数，已扣取整余量）。
+
+    板规/ST/制度日期全部委托 `limit_pct` —— 本模块不再自持任何阈值常量。
+    交易日不可解析时退化为「按当日板规」：这只影响宽板改制前的历史窗口，
+    但绝不为了一个坏日期让整批 1000 万行的补数任务崩掉。
+    """
+    from backend.services.simulation.services.local_market_data import limit_pct
+
+    td = date.today() if pd.isna(trade_date) else trade_date
+    return (
+        float(limit_pct(str(symbol), is_st=is_st, trade_date=td)) * 100.0
+        - _LIMIT_SLACK_PCT
+    )
+
+
+def limit_up_flags(df: pd.DataFrame) -> pd.Series:
+    """逐行判定是否涨停（`pct_change` 单位：百分数）。
+
+    纯函数，与 DB 读写分开 —— 阈值口径是本文件最容易错、也最值得单测的一段。
+
+    逐行调 `limit_pct`（约 1.9 µs/行）在 1000 万行上要 ~20 秒。这是离线补数
+    任务，20 秒换「口径唯一」是划算的；为省这点时间去复述板块前缀表反而是
+    把缺陷再抄一遍。
+    """
+    pct = pd.to_numeric(df["pct_change"], errors="coerce").fillna(-99)
+    is_st = df["is_st"].fillna(0).astype(int) != 0
+    trade_dates = pd.to_datetime(df["trade_date"], errors="coerce").dt.date
+    limits = [
+        _limit_threshold_pct(sym, st, td)
+        for sym, st, td in zip(df["symbol"], is_st, trade_dates, strict=True)
+    ]
+    return pd.Series((pct >= limits).to_numpy(), index=df.index, name="is_lz")
+
+
 def _recompute_limit_up(engine, dry_run: bool = False) -> int:
     """重算 consecutive_limit_up_days: 连续涨停天数 (pandas 实现, 依赖 is_st 已先算).
     A股涨停: 主板±10%, 创业板/科创板±20%, ST股±5%. ST用4.8%阈值, 其余9.8%."""
@@ -377,10 +419,7 @@ def _recompute_limit_up(engine, dry_run: bool = False) -> int:
     df = pd.DataFrame(rows, columns=["symbol", "trade_date", "pct_change", "is_st"])
     df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.date
     df["pct_change"] = pd.to_numeric(df["pct_change"], errors="coerce")
-    # 涨停判定: ST>=4.8%, 其余>=9.8% (创业板/科创板20%也能被9.8%捕获)
-    is_st = df["is_st"].fillna(0).astype(int) != 0
-    thresh = np.where(is_st, 4.8, 9.8)
-    is_lz = (df["pct_change"].fillna(-99) >= thresh).astype(int)
+    is_lz = limit_up_flags(df)
 
     # 连续涨停天数: 每只股票内, 对 is_lz 序列做 "未涨停作为断点" 的累计计数
     # 用 cumsum 断点分组: 每遇到 is_lz=0 开新组, 组内累计涨停天数

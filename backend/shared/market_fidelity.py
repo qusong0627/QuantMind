@@ -24,6 +24,7 @@
 
 from __future__ import annotations
 
+import ast
 import re
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
@@ -408,13 +409,51 @@ def _is_limit_literal(token: str) -> bool:
         return False
 
 
+def _docstring_lines(text: str) -> set[int]:
+    """模块/类/函数首个字符串字面量（docstring）所占的行号集合。
+
+    docstring 是**散文**，不是实现。讲清一处缺陷往往必须引用被废弃的旧常量
+    （「旧实现按前缀返回 0.095/0.195/0.295」），不排除它，门禁就会惩罚
+    「把理由写下来」——方向正好反了，且会逼着后来者删注释换绿灯。
+
+    只排除 docstring，**不排除普通字符串**：策略模板/DSL 里的阈值是活的
+    （`gen_ashare_strategy_templates.py` 即此类），豁免它等于开一个真实盲区。
+
+    解析失败时返回空集 —— 一行都不豁免，宁可多报不可漏报。
+    """
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, ValueError):
+        return set()
+
+    lines: set[int] = set()
+    for node in ast.walk(tree):
+        if not isinstance(
+            node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+        ):
+            continue
+        if not node.body:
+            continue
+        first = node.body[0]
+        if (
+            isinstance(first, ast.Expr)
+            and isinstance(first.value, ast.Constant)
+            and isinstance(first.value.value, str)
+        ):
+            lines.update(range(first.lineno, (first.end_lineno or first.lineno) + 1))
+    return lines
+
+
 def _scan_source(text: str, subject_prefix: str) -> list[Finding]:
     findings: list[Finding] = []
+    docstrings = _docstring_lines(text)
     for lineno, raw in enumerate(text.splitlines(), start=1):
         if _ALLOW_RE.search(raw):
             continue
         # 只判代码部分；注释里提到 9.8 不算实现缺陷。
         code = raw.split("#", 1)[0]
+        if lineno in docstrings:
+            continue
         subject = f"{subject_prefix}:{lineno}"
 
         if _ST_FALSE_RE.search(code):

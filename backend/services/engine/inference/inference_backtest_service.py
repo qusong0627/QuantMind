@@ -425,6 +425,32 @@ def _check_three_day_trend(
     return True, "趋势未知"
 
 
+#: 涨跌停判定的取整余量（百分点）。价格序列里的 `pct_change` 是四舍五入后的
+#: 百分数，涨跌停价本身还要按分取整，真正封板的票可能只显示 9.97%。这不是新
+#: 引入的口径，而是**保留**旧实现的既有余量（旧值 9.8 = 10 − 0.2）。
+#:
+#: 注意与 `cn_exchange._LIMIT_TOLERANCE`（0.5pp）不同源：两处各自沿用了自己
+#: 的历史余量。本文件与 `enrich_sdl_data._LIMIT_SLACK_PCT` 同为 0.2pp。
+_LIMIT_SLACK_PCT = 0.2
+
+
+def _limit_threshold_pct(
+    symbol: str, trade_date: object, is_st: object = False
+) -> float:
+    """该标的当日的涨跌停幅度（**百分数**，已扣取整余量）。
+
+    板规/ST/制度日期全部委托 `limit_pct`（唯一权威实现），本模块不再自持阈值。
+    `limit_pct` 返回比例（0.20），而本文件的 `pct_change` 是百分数，故 ×100。
+    """
+    from backend.services.simulation.services.local_market_data import limit_pct
+
+    td = date.today() if pd.isna(trade_date) else pd.Timestamp(trade_date).date()
+    return (
+        float(limit_pct(str(symbol), is_st=bool(is_st), trade_date=td)) * 100.0
+        - _LIMIT_SLACK_PCT
+    )
+
+
 def _select_stocks_daily(
     day_scores: pd.DataFrame,
     industry_map: dict[str, str],
@@ -485,7 +511,13 @@ def _select_stocks_daily(
                 continue
             if config.exclude_limit_moves and pd.notna(p.get("pct_change")):
                 pct = float(p["pct_change"])
-                if abs(pct) >= 9.8:  # 接近涨停
+                is_st = (
+                    bool(p.get("is_st"))
+                    if has_st_col and pd.notna(p.get("is_st"))
+                    else False
+                )
+                thresh = _limit_threshold_pct(row["symbol"], p.get("trade_date"), is_st)
+                if abs(pct) >= thresh:  # 触及涨停或跌停（按该板块当日的真实幅度）
                     keep.append(False)
                     continue
             keep.append(True)
@@ -726,8 +758,16 @@ class _SimulationEngine:
         ]
         if row.empty or "pct_change" not in row.columns:
             return False
-        pct = row.iloc[0].get("pct_change")
-        return pct is not None and float(pct) <= -9.8
+        rec = row.iloc[0]
+        pct = rec.get("pct_change")
+        if pct is None or pd.isna(pct):
+            return False
+        is_st = (
+            bool(rec.get("is_st"))
+            if "is_st" in row.columns and pd.notna(rec.get("is_st"))
+            else False
+        )
+        return float(pct) <= -_limit_threshold_pct(symbol, trade_date, is_st)
 
     def _execute_sell(self, pos: Position, trade_date: str, reason: str) -> None:
         price = self._get_prices(pos.symbol, trade_date)
