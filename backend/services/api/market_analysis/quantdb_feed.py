@@ -689,6 +689,35 @@ def get_money_flow_sankey() -> dict[str, Any] | None:
     }
 
 
+def _limit_counts(pct: pd.Series, symbols: pd.Series, trade_date: str) -> tuple[int, int]:
+    """涨停/跌停家数 —— 口径唯一事实源见 ``shared.market_breadth``。
+
+    旧实现是两条写死的 `pct >= 9.8` / `pct <= -9.8`：20%/30% 板上任何
+    +9.8% 以上的普通阳线都被计成涨停（家数虚高），ST 5% 板上真封死的票
+    又永远漏计 —— 用户看到的「涨停 N 家」既偏高又偏低。
+
+    ``trade_date`` 是**最新**交易日（YYYYMMDD），所以用当前 ST 快照是**同期**
+    口径而非历史回放，不存在前视偏差。今日（≥ 2026-07-06）ST 主板与主板同为
+    10%，ST 集合对当日家数实际无影响；保留它是为了让历史日期调用时口径正确。
+    """
+    from datetime import date as _date
+
+    from backend.shared.market_breadth import limit_up_down_counts
+
+    try:
+        from backend.services.simulation.services.local_market_data import (
+            get_local_market_data,
+        )
+
+        st = get_local_market_data()._st_symbol_set()
+    except Exception as exc:  # noqa: BLE001
+        # 不静默：ST 快照缺失在 2026-07-06 之前会让 5% 板整批漏计
+        logger.warning("ST 快照不可用，涨停/跌停家数按非 ST 口径统计: %s", exc)
+        st = frozenset()
+    td = _date(int(trade_date[:4]), int(trade_date[4:6]), int(trade_date[6:8]))
+    return limit_up_down_counts(pct, symbols, trade_date=td, st_symbols=st)
+
+
 def get_market_breadth() -> dict[str, Any]:
     """全市场情绪温度计与赚钱效应（上涨/下跌/平盘/涨跌停/总成交额/赚钱效应指数）。"""
     def _empty(trade_date: str = ""):
@@ -715,8 +744,7 @@ def get_market_breadth() -> dict[str, Any]:
         adv = int((pct > 0).sum())
         dec = int((pct < 0).sum())
         flat = int((pct == 0).sum())
-        l_up = int((pct >= 9.8).sum())
-        l_down = int((pct <= -9.8).sum())
+        l_up, l_down = _limit_counts(pct, snap["symbol"], latest)
         total_amt = float(snap["amount"].sum() or 0.0)
         if total_amt > 1e11:
             turnover_yi = round(total_amt / 1e8, 1)

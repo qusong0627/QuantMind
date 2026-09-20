@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import math
 import os
 import sqlite3
@@ -25,6 +26,8 @@ import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 # 允许直接从仓库根运行（python backend/scripts/market_snapshot/compute.py）
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -338,6 +341,31 @@ def get_indices_overview(con, data_dir: Path) -> list[dict]:
     return result
 
 
+def _limit_counts(pct: pd.Series, symbols: pd.Series, trade_date: str) -> tuple[int, int]:
+    """涨停/跌停家数 —— 与 API 侧 ``market_analysis/quantdb_feed`` 同一实现。
+
+    两个路径曾各自写死 `pct >= 9.8`，改一处就会让快照与实时页对不上；
+    现在都走 ``shared.market_breadth.limit_up_down_counts``。
+
+    ``trade_date`` 是**最新**交易日（YYYYMMDD），ST 用当前快照即同期口径。
+    """
+    from datetime import date as _date
+
+    from backend.shared.market_breadth import limit_up_down_counts
+
+    try:
+        from backend.services.simulation.services.local_market_data import (
+            get_local_market_data,
+        )
+
+        st = get_local_market_data()._st_symbol_set()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("ST 快照不可用，涨停/跌停家数按非 ST 口径统计: %s", exc)
+        st = frozenset()
+    td = _date(int(trade_date[:4]), int(trade_date[4:6]), int(trade_date[6:8]))
+    return limit_up_down_counts(pct, symbols, trade_date=td, st_symbols=st)
+
+
 def get_market_breadth(con, data_dir: Path) -> dict:
     empty = {
         "trade_date": "", "advance_count": 0, "decline_count": 0, "flat_count": 0,
@@ -351,7 +379,7 @@ def get_market_breadth(con, data_dir: Path) -> dict:
         return empty
     pct = snap["pct_change"].fillna(0.0)
     adv = int((pct > 0).sum()); dec = int((pct < 0).sum()); flat = int((pct == 0).sum())
-    l_up = int((pct >= 9.8).sum()); l_down = int((pct <= -9.8).sum())
+    l_up, l_down = _limit_counts(pct, snap["symbol"], latest)
     total_amt = float(snap["amount"].sum() or 0.0)
     if total_amt > 1e11:
         turnover_yi = round(total_amt / 1e8, 1)

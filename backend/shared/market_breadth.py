@@ -72,6 +72,47 @@ def classify_by_pct(pct: float, symbol: str, is_st: bool, trade_date: date) -> s
     return CAT_FLAT
 
 
+def limit_up_down_counts(
+    pct: pd.Series,
+    symbols: pd.Series,
+    *,
+    trade_date: date,
+    st_symbols: frozenset[str] | set[str] | None = None,
+) -> tuple[int, int]:
+    """全市场涨停/跌停家数（单一事实源，市场分析页与快照脚本共用）。
+
+    与 :func:`classify_by_pct` 同口径，只是把「逐行」换成「按 unique symbol
+    先算好带宽再查表」—— 全市场 5500 行逐行调 limit_pct 要走 5500 次
+    Decimal 运算，而 unique 后同样多，真正省掉的是重复的 Series 索引开销。
+
+    **为什么必须换掉 `pct >= 9.8`**：这是一条写死的主板线，两个方向都错 ——
+    20%/30% 板上任何 +9.8% 以上的普通阳线都被计成涨停（家数虚高），
+    而 ST 5% 板上真封死的票（+5.0%）永远漏计。市场分析页显示的「涨停 N 家」
+    因此既偏高又偏低，取决于当日哪个板块活跃。
+
+    容差走 TOL_SHSZ/TOL_BJ（沪深 0.5pp、北交所 1pp），与 daily_review 一致。
+    """
+    st = set(st_symbols or ())
+    band = {
+        s: float(limit_pct(str(s), is_st=str(s) in st, trade_date=trade_date)) * 100
+        - (TOL_BJ if is_bse_symbol(str(s)) else TOL_SHSZ)
+        for s in pd.unique(symbols)
+    }
+    up = down = 0
+    # strict=True：长度不等说明调用点传错了（如 pct 已被过滤），宁可报错也
+    # 不要静默截断 —— 截断会让家数偏小且看不出原因。
+    for p, s in zip(pct.tolist(), symbols.tolist(), strict=True):
+        b = band.get(s, 0.0)
+        # NaN 与「无涨跌幅限制」（新股首日等，带宽 ≤ 0）都不计入
+        if b <= 0 or p != p:
+            continue
+        if p >= b:
+            up += 1
+        elif p <= -b:
+            down += 1
+    return up, down
+
+
 def is_ex_div(official_pct: float, close: float, prev_close: float) -> bool:
     """除权除息日检测：官方 pct_change 与 (close/prev_close-1) 自算值差 > 0.5%。"""
     if prev_close is None or prev_close <= 0 or close is None:
