@@ -23,21 +23,35 @@
 from __future__ import annotations
 
 import json
-import re
 from datetime import date
 from typing import Any
 
 import httpx
 
 from backend.shared.logging_config import get_logger
+from backend.shared.signal_scores import (
+    MIN_SIGNAL_COVERAGE,
+    SQL_LATEST_ANY_DATE,
+    SQL_LATEST_COVERED_DATE,
+    SQL_SCORES_BY_DATE,
+    build_score_map,
+    normalize_a_share_symbol,
+)
 from backend.shared.stock_utils import StockCodeUtil
 
 logger = get_logger(__name__)
 
-#: 与 `/stock-terminal/list` 同源的「信号日覆盖充分」判据（该处 _MIN_SIGNAL_COVERAGE）。
-#: 复制常量而不是 import：两边分属 router 层与 service 层，反向依赖会造成循环导入；
-#: 改口径时两处必须一起改（同一条 SQL 的 HAVING 子句）。
-MIN_SIGNAL_COVERAGE = 1000
+__all__ = [
+    "MIN_SIGNAL_COVERAGE",
+    "DEFAULT_CANDIDATE_CAP",
+    "DEFAULT_LIMIT",
+    "build_unified_watchlist",
+    "load_manual_watchlist",
+    "load_real_positions",
+    "load_signal_scores",
+    "load_sim_positions",
+    "merge_sources",
+]
 
 #: 候选通道默认截断只数。全市场正分候选约 650 只，全量返回会把自选表撑爆；
 #: 截断数在 counts 里如实给出（candidate_total vs candidate_shown）。
@@ -46,8 +60,6 @@ DEFAULT_CANDIDATE_CAP = 200
 #: 单次响应默认上限（持仓与手工自选不参与截断——它们天然有限，且有操作价值）
 DEFAULT_LIMIT = 300
 
-_CN_PREFIX_RE = r"^(SH|SZ|BJ)\d{6}$"
-
 
 def _norm_symbol(raw: Any) -> str | None:
     """任意键形 → prefix 规范形（``SH600036``）；非 A 股返回 None。
@@ -55,10 +67,7 @@ def _norm_symbol(raw: Any) -> str | None:
     持仓键可能带侧标（``SH600036::long``，两融），先切掉再归一。
     """
     base = str(raw or "").split("::", 1)[0].strip()
-    if not base:
-        return None
-    prefix = StockCodeUtil.to_prefix(base)
-    return prefix if re.match(_CN_PREFIX_RE, prefix) else None
+    return normalize_a_share_symbol(base)
 
 
 def _position_payload(row: dict[str, Any]) -> dict[str, Any]:
@@ -334,9 +343,13 @@ async def load_real_positions(
             try:
                 payload = json.loads(payload)
             except (TypeError, ValueError):
-                logger.warning("real snapshot payload_json 二次解码失败（source=%s）", source)
+                logger.warning(
+                    "real snapshot payload_json 二次解码失败（source=%s）", source
+                )
                 payload = {}
-        items = [p for p in (payload or {}).get("positions") or [] if isinstance(p, dict)]
+        items = [
+            p for p in (payload or {}).get("positions") or [] if isinstance(p, dict)
+        ]
         src_meta[str(source)] = {
             "snapshot_at": _ts(snap_at),
             "positions": len(items),
@@ -356,9 +369,7 @@ async def load_real_positions(
             # 同一只票出现在两个账户：优先活跃券商，否则取量大者（并记 sources）
             if prev is not None:
                 prev_src = str(prev.get("source") or "")
-                prefer_new = (
-                    str(source) == active_src and prev_src != active_src
-                ) or (
+                prefer_new = (str(source) == active_src and prev_src != active_src) or (
                     (str(source) == active_src) == (prev_src == active_src)
                     and float(row.get("volume") or 0) > float(prev.get("volume") or 0)
                 )
@@ -404,62 +415,36 @@ async def load_signal_scores(
     async with get_session(read_only=True) as session:
         d0 = (
             await session.execute(
-                text(
-                    "SELECT trade_date FROM engine_signal_scores "
-                    "WHERE tenant_id = :tid AND (market IS NULL OR market = 'CN') "
-                    "GROUP BY trade_date HAVING COUNT(DISTINCT symbol) >= :min_cov "
-                    "ORDER BY trade_date DESC LIMIT 1"
-                ),
+                text(SQL_LATEST_COVERED_DATE),
                 {"tid": tenant_id, "min_cov": MIN_SIGNAL_COVERAGE},
             )
         ).scalar_one_or_none()
         if d0 is None:
             d0 = (
-                await session.execute(
-                    text(
-                        "SELECT trade_date FROM engine_signal_scores "
-                        "WHERE tenant_id = :tid AND (market IS NULL OR market = 'CN') "
-                        "GROUP BY trade_date ORDER BY trade_date DESC LIMIT 1"
-                    ),
-                    {"tid": tenant_id},
-                )
+                await session.execute(text(SQL_LATEST_ANY_DATE), {"tid": tenant_id})
             ).scalar_one_or_none()
         if d0 is None:
             return [], {}, meta
 
         meta["signal_date"] = str(d0)[:10]
         rows = (
-            await session.execute(
-                text(
-                    "SELECT DISTINCT ON (symbol) symbol, fusion_score, signal_side, source "
-                    "FROM engine_signal_scores "
-                    "WHERE tenant_id = :tid AND trade_date = :d AND (market IS NULL OR market = 'CN') "
-                    "ORDER BY symbol, created_at DESC, id DESC"
-                ),
-                {"tid": tenant_id, "d": d0},
-            )
+            await session.execute(text(SQL_SCORES_BY_DATE), {"tid": tenant_id, "d": d0})
         ).fetchall()
 
     as_of = meta["signal_date"]
-    score_map: dict[str, dict[str, Any]] = {}
+    score_map, realtime_rows = build_score_map(list(rows), as_of)
+    meta["realtime_rows"] = realtime_rows
     candidates: list[dict[str, Any]] = []
-    for r in rows:
-        sym = _norm_symbol(r[0])
-        if not sym:
-            continue
-        score = float(r[1]) if r[1] is not None else None
-        freq = "realtime" if str(r[3] or "") == "realtime" else "daily"
-        if freq == "realtime":
-            meta["realtime_rows"] += 1
-        score_map[sym] = {"value": score, "side": r[2], "freq": freq, "asOf": as_of}
-        if r[2] == "BUY" and score is not None and score > 0:
+    for sym, entry in score_map.items():
+        score = entry["value"]
+        if entry["side"] == "BUY" and score is not None and score > 0:
             candidates.append(
                 {
                     "symbol": sym,
                     "score": score,
                     "side": "BUY",
-                    "freq": freq,
-                    "asOf": as_of,
+                    "freq": entry["freq"],
+                    "asOf": entry["asOf"],
                 }
             )
 
