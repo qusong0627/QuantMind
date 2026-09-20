@@ -63,6 +63,34 @@ bash deploy/portable/build_windows_pack.sh
 
 增量构建：脚本有缓存（build/cache 下载缓存、runtime 已装依赖自动跳过），改代码后重跑只需重新复制源码 + 重压缩；改依赖后删 build/QuantMind-Portable-*/runtime 重装。
 
+## ⚠️ 已知：现有构建产物带旧涨跌停口径（2026-09-20 记账，待下次发版重建）
+
+`build/` 下两个 staging 目录与 `dist/` 下现成的包都**早于** 2026-09-20 的涨跌停口径
+收敛（提交 `609df61c`、`90640ec7`）。实测 `build/QuantMind-Portable-{linux,win}-x64/`
+里 12 个收敛文件中 **10 个是旧版**，其中：
+
+- `backend/services/engine/qlib_app/utils/cn_exchange.py`（包内 mtime 09-03）仍是
+  **按代码前缀返回 0.195/0.295/0.095** 的静态表 —— 无 `trade_date`、无 ST 档，
+  且把 900xxx 沪市 B 股当北交所 30%。源码版本早已改为委托 `limit_pct`。
+- `backend/services/simulation/services/local_market_data.py`、`backend/shared/market_breadth.py`、
+  `backend/scripts/review_stats.py`、`execution_engine.py`、`broker_client.py`、
+  `trading_cost.py`、`inference_backtest_service.py`、`extended_strategies.py`、
+  `enrich_sdl_data.py` 同为旧版。
+
+**为什么要紧**：包是发给用户的出厂产物，源码修好 ≠ 出厂修好。旧口径的具体后果是
+回测/实盘在创业板 2020-08-24 改革前后、ST 5% 板、北交所与 B 股上判错涨跌停，而
+报告看不出来 —— 正是「漂亮数据而非真实市场」。
+
+**重建即修复**（无需改脚本，源码已是收敛后的）：`$STAGE` 已存在时 Python 运行时 /
+PostgreSQL / Redis 的下载与编译会自动跳过，只需重新复制源码 + 重压缩：
+
+```bash
+bash deploy/portable/build_linux_pack.sh      # → dist/QuantMind-Portable-linux-x64.tar.gz
+bash deploy/portable/build_windows_pack.sh    # → dist/QuantMind-Portable-win-x64.zip（须真机验证）
+```
+
+建完按下面「发布检查单」走一遍再分发。重建后请把本节删掉或改为已重建的提交号。
+
 ## 发布检查单
 
 - [ ] Linux 包：本机解压到新路径跑 `bash start.sh`，/health 200、前端页面可打开、数据管理页可发起同步
