@@ -299,6 +299,52 @@ def test_scan_actually_covers_the_modules_that_were_converged():
     assert len(rels) > 200, f"扫描集只有 {len(rels)} 个文件，疑似根目录写错"
 
 
+def test_no_production_import_goes_through_the_legacy_shim_tree():
+    """``services/trade/simulation/`` 是只剩 ``import *`` 的并行旧树，不该再被引用。
+
+    它转发的是同一批对象（实测 ``compute_limits`` / ``limit_pct`` /
+    ``LIMIT_TOLERANCE`` 都是 ``is`` 同一个），因此**没有口径分叉** —— 但它是一条
+    会误导人的路径：`tradability.py` 与 `market_breadth.py` 的文档都不得不专门
+    写一句「不是这棵树」。2026-09-20 之前还有 5 个回测脚本从这里取
+    ``compute_limits``，现已收口。
+
+    这条断言钉住的是**没有新消费者**，不是「文件已删除」。
+    """
+    offenders: list[str] = []
+    for p in _iter_py_files():
+        rel = p.relative_to(_REPO_ROOT).as_posix()
+        if rel.startswith("backend/services/trade/simulation/"):
+            continue  # 旧树自身
+        if "/tests/" in f"/{rel}" or rel.startswith("tests/"):
+            continue
+        try:
+            src = p.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        for i, line in enumerate(src.splitlines(), 1):
+            code = line.split("#", 1)[0]
+            if "services.trade.simulation" in code:
+                offenders.append(f"{rel}:{i} — {line.strip()}")
+    assert not offenders, (
+        "以下位置仍从并行旧树取权威实现，请改为 "
+        "backend.services.simulation.services.local_market_data：\n" + "\n".join(offenders)
+    )
+
+
+def test_legacy_shim_still_forwards_the_same_objects():
+    """空壳若被仓库外的旧脚本引用，必须仍转发**同一对象**（不是同值副本）。"""
+    import importlib
+
+    old = importlib.import_module(
+        "backend.services.trade.simulation.services.local_market_data"
+    )
+    new = importlib.import_module(
+        "backend.services.simulation.services.local_market_data"
+    )
+    for name in ("compute_limits", "limit_pct", "LIMIT_TOLERANCE", "LIMIT_TOLERANCE_BSE"):
+        assert getattr(old, name) is getattr(new, name), f"{name} 在旧树上不是同一对象"
+
+
 def test_generated_template_body_carries_the_canonical_import():
     """出厂模板（用户会克隆走的那些）也必须不带自己的容差。"""
     import importlib.util

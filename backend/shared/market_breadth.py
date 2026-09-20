@@ -1,7 +1,11 @@
 """市场广度与涨跌停判定纯函数（单一事实源，被复盘脚本与市场分析共用）。
 
-涨跌停规则复用 backend/services/trade/simulation/services/local_market_data.py
+涨跌停规则复用 ``backend/services/simulation/services/local_market_data.py``
 （compute_limits / limit_pct，与 instrument_detail ZTPrice/DTPrice 交叉验证 99.71% 一致）。
+
+⚠️ 路径是 ``services/simulation/...``，**不是** ``services/trade/simulation/...`` ——
+后者是一棵只剩 ``import *`` 空壳的并行旧树（见 tradability.py 的同类告警）。
+本 docstring 曾指向旧树，读者照着去找会拿到空壳，故订正。
 """
 from __future__ import annotations
 

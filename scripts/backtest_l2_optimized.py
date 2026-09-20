@@ -37,7 +37,7 @@ TARGET_USAGE = 0.9
 
 from backend.shared.database_manager_v2 import get_session
 from backend.shared.stock_utils import StockCodeUtil
-from backend.services.trade.simulation.services.local_market_data import compute_limits
+from backend.services.simulation.services.local_market_data import compute_limits
 from sqlalchemy import text
 
 logger = None  # 不需要
