@@ -21,6 +21,7 @@ import {
   healthItemViews,
   pnlSummary,
   priceSourceHint,
+  statusStyle,
 } from '../deskModel';
 
 function SourceFooter({ source, onDrillDown }: { source: string; onDrillDown?: () => void }) {
@@ -304,19 +305,6 @@ export const HealthCard: React.FC<{ health: HealthBlock | null | undefined; trad
   })();
   const nodeRunning = l2Status?.realtime?.running === true || l2Status?.capture?.running === true;
   const running = Boolean(tradingRunning) || nodeRunning;
-  const levelCard: Record<string, string> = {
-    ok: 'border-emerald-200/70 bg-emerald-50/40',
-    warn: 'border-amber-200/70 bg-amber-50/50',
-    fail: 'border-rose-200/70 bg-rose-50/50',
-    unknown: 'border-slate-200 bg-slate-50/60',
-  };
-  const levelText: Record<string, string> = {
-    ok: 'text-emerald-600',
-    warn: 'text-amber-600',
-    fail: 'text-rose-600',
-    unknown: 'text-slate-400',
-  };
-  const levelLabel: Record<string, string> = { ok: '正常', warn: '警告', fail: '异常', unknown: '未知' };
   const levelIcon = (level: string) => {
     if (level === 'ok') return <CheckCircle2 className="h-3.5 w-3.5" />;
     if (level === 'warn') return <AlertTriangle className="h-3.5 w-3.5" />;
@@ -330,18 +318,17 @@ export const HealthCard: React.FC<{ health: HealthBlock | null | undefined; trad
         title="系统健康"
         extra={
           <span className="inline-flex items-center gap-2 text-[11px] font-medium text-slate-500">
-            <span className="inline-flex items-center gap-1">
-              <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
-              {health?.ok ?? 0} 正常
-            </span>
-            <span className="inline-flex items-center gap-1">
-              <span className="h-1.5 w-1.5 rounded-full bg-amber-500" />
-              {health?.warn ?? 0} 警告
-            </span>
-            <span className="inline-flex items-center gap-1">
-              <span className="h-1.5 w-1.5 rounded-full bg-rose-600" />
-              {health?.fail ?? 0} 异常
-            </span>
+            {([['ok', health?.ok], ['warn', health?.warn], ['fail', health?.fail]] as const).map(
+              ([level, count]) => {
+                const style = statusStyle(level);
+                return (
+                  <span key={level} className="inline-flex items-center gap-1">
+                    <span className={`h-1.5 w-1.5 rounded-full ${style.dot}`} />
+                    <span className={style.text}>{count ?? 0}</span> {style.label}
+                  </span>
+                );
+              }
+            )}
           </span>
         }
       />
@@ -377,24 +364,27 @@ export const HealthCard: React.FC<{ health: HealthBlock | null | undefined; trad
 
       {/* 体检项卡片网格：状态图标 + 名称 + 结论 + 明细两行截断（悬停看全文/建议） */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2 flex-1 content-start auto-rows-min">
-        {items.map((item) => (
-          <div
-            key={item.id}
-            title={`${item.detail}${item.suggestion ? `\n建议：${item.suggestion}` : ''}`}
-            className={`rounded-xl border p-2.5 min-w-0 flex flex-col gap-1 transition-all hover:shadow-sm ${levelCard[item.level] || levelCard.unknown}`}
-          >
-            <div className="flex items-center gap-1.5 min-w-0">
-              <span className={`shrink-0 ${levelText[item.level] || levelText.unknown}`}>{levelIcon(item.level)}</span>
-              <span className="text-[12px] font-bold text-slate-800 truncate">{item.name}</span>
-              <span className={`ml-auto shrink-0 text-[10px] font-bold ${levelText[item.level] || levelText.unknown}`}>
-                {levelLabel[item.level] || '未知'}
-              </span>
+        {items.map((item) => {
+          const style = statusStyle(item.level);
+          return (
+            <div
+              key={item.id}
+              title={`${item.detail}${item.suggestion ? `\n建议：${item.suggestion}` : ''}`}
+              className={`rounded-xl border p-2.5 min-w-0 flex flex-col gap-1 transition-all hover:shadow-sm ${style.card}`}
+            >
+              <div className="flex items-center gap-1.5 min-w-0">
+                <span className={`shrink-0 ${style.text}`}>{levelIcon(item.level)}</span>
+                <span className="text-[12px] font-bold text-slate-800 truncate">{item.name}</span>
+                <span className={`ml-auto shrink-0 text-[10px] font-bold ${style.text}`}>
+                  {style.label}
+                </span>
+              </div>
+              <div className="text-[10px] leading-4 text-slate-500 line-clamp-2">
+                {item.detail || '—'}
+              </div>
             </div>
-            <div className="text-[10px] leading-4 text-slate-500 line-clamp-2">
-              {item.detail || '—'}
-            </div>
-          </div>
-        ))}
+          );
+        })}
         {items.length === 0 && <p className="text-xs text-slate-400">体检未运行（?health=false）</p>}
       </div>
       <SourceFooter source={health?.source || '—'} />

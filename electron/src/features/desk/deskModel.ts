@@ -26,16 +26,58 @@ export interface DrillEntryLike {
 export interface StatusStyle {
   label: string;
   dot: string;
+  /** tile 左侧状态色条（与 dot 同源——各处别再抄一份色表，抄了就会漂） */
+  bar: string;
   text: string;
+  /** 带底色容器（健康项卡片用）：边框 + 背景 */
+  card: string;
 }
 
+/**
+ * 健康状态配色：绿=正常 / 黄=警告 / 红=异常 / 深黄=无证据（不能用）。
+ *
+ * 与行情侧的「涨红跌绿」是**两套**语义，不要互相套用：涨跌红绿说的是价格方向
+ * （见 planSummary 的买红卖绿、PnL 的 pnlTone），这里说的是"这条链验没验成"。
+ * 此前 ok 与 fail 都是红的（red-500 / rose-600），肉眼分不出正常与异常。
+ */
 const STATUS_STYLES: Record<string, StatusStyle> = {
-  ok: { label: '正常', dot: 'bg-red-500', text: 'text-red-600' },
-  warn: { label: '警告', dot: 'bg-amber-500', text: 'text-amber-600' },
-  fail: { label: '异常', dot: 'bg-rose-600', text: 'text-rose-700' },
-  unknown: { label: '未运行', dot: 'bg-slate-300', text: 'text-slate-500' },
-  // T-FE-16：无证据 ≠ 绿——独立灰态（验收要求任一环节"无证据"可见）
-  no_evidence: { label: '无证据', dot: 'bg-slate-200 border border-dashed border-slate-400', text: 'text-slate-400' },
+  ok: {
+    label: '正常',
+    dot: 'bg-emerald-500',
+    bar: 'bg-emerald-500',
+    text: 'text-emerald-600',
+    card: 'border-emerald-200/70 bg-emerald-50/40',
+  },
+  warn: {
+    label: '警告',
+    dot: 'bg-amber-500',
+    bar: 'bg-amber-500',
+    text: 'text-amber-600',
+    card: 'border-amber-200/70 bg-amber-50/50',
+  },
+  fail: {
+    label: '异常',
+    dot: 'bg-red-600',
+    bar: 'bg-red-600',
+    text: 'text-red-700',
+    card: 'border-red-200/70 bg-red-50/50',
+  },
+  unknown: {
+    label: '未运行',
+    dot: 'bg-slate-300',
+    bar: 'bg-slate-300',
+    text: 'text-slate-500',
+    card: 'border-slate-200 bg-slate-50/60',
+  },
+  // T-FE-16：无证据 ≠ 绿——深黄「不能用」态（该环没验成，结论不可采信）。
+  // 虚线保留"没判过"这层意思，与"验过且通过"区分。
+  no_evidence: {
+    label: '无证据',
+    dot: 'bg-amber-700 border border-dashed border-amber-300',
+    bar: 'bg-amber-700',
+    text: 'text-amber-700',
+    card: 'border-dashed border-amber-300 bg-amber-50/40',
+  },
 };
 
 export function statusStyle(status: string | undefined): StatusStyle {

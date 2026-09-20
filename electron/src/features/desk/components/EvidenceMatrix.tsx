@@ -1,6 +1,8 @@
 /**
  * 全链证据矩阵（T-FE-16，设计《评估与打分体系》§七）：十环一屏——数据/特征/模型/信号/回测/
- * 模拟/执行/账本/策略/系统；每格红黄绿 + **无证据独立灰态（不粉饰）** + 点击下钻证据原文。
+ * 模拟/执行/账本/策略/系统；每格绿黄红 + **无证据独立深黄态（不粉饰）** + 点击下钻证据原文。
+ *
+ * 配色唯一出处是 deskModel 的 statusStyle()——本文件不再自持色表。
  *
  * 排版：tile 化（左侧状态色条 + hover 浮起），点击 → 居中下钻弹窗。
  */
@@ -17,13 +19,8 @@ interface EvidenceMatrixProps {
   onDrill: (ring: EvidenceRing) => void;
 }
 
-/** tile 左侧状态色条（与 statusStyle 语义一致；no_evidence 走虚线灰态） */
-const RING_BAR: Record<string, string> = {
-  ok: 'bg-red-500',
-  warn: 'bg-amber-500',
-  fail: 'bg-rose-600',
-  no_evidence: 'bg-slate-200',
-};
+/** 图例顺序（label 与配色全部取自 statusStyle，此处只定顺序与计数字段） */
+const LEGEND_ORDER = ['ok', 'warn', 'fail', 'no_evidence'] as const;
 
 export const EvidenceMatrix: React.FC<EvidenceMatrixProps> = ({ evidence, onDrill }) => {
   const { isSimple } = useUiMode();
@@ -38,22 +35,16 @@ export const EvidenceMatrix: React.FC<EvidenceMatrixProps> = ({ evidence, onDril
         title="全链证据矩阵"
         extra={
           <span className="inline-flex items-center gap-2 text-[11px] font-medium text-slate-500">
-            <span className="inline-flex items-center gap-1">
-              <span className="h-1.5 w-1.5 rounded-full bg-red-500" />
-              {summary.ok} 正常
-            </span>
-            <span className="inline-flex items-center gap-1">
-              <span className="h-1.5 w-1.5 rounded-full bg-amber-500" />
-              {summary.warn} 警告
-            </span>
-            <span className="inline-flex items-center gap-1">
-              <span className="h-1.5 w-1.5 rounded-full bg-rose-600" />
-              {summary.fail} 异常
-            </span>
-            <span className="inline-flex items-center gap-1">
-              <span className="h-1.5 w-1.5 rounded-full bg-slate-300" />
-              {summary.noEvidence} 无证据
-            </span>
+            {LEGEND_ORDER.map((level) => {
+              const style = statusStyle(level);
+              const count = level === 'no_evidence' ? summary.noEvidence : summary[level];
+              return (
+                <span key={level} className="inline-flex items-center gap-1">
+                  <span className={`h-1.5 w-1.5 rounded-full ${style.dot}`} />
+                  <span className={style.text}>{count}</span> {style.label}
+                </span>
+              );
+            })}
             {summary.gapLabels.length > 0 && (
               <span className="text-slate-400 font-normal hidden 2xl:inline">
                 （{summary.gapLabels.join('、')}）
@@ -74,10 +65,10 @@ export const EvidenceMatrix: React.FC<EvidenceMatrixProps> = ({ evidence, onDril
               onClick={() => onDrill(ring)}
               title={`[点击下钻] ${ring.artifact}（${ring.frequency}）\n${ring.summary || ''}`}
               className={`group relative overflow-hidden text-left rounded-xl border p-2.5 pl-3.5 transition-all hover:shadow-md hover:-translate-y-px ${
-                isNoEvidence ? 'border-dashed border-slate-300 bg-slate-50/60' : 'border-slate-200/80 bg-white hover:border-slate-300'
+                isNoEvidence ? 'border-dashed border-amber-300 bg-amber-50/40' : 'border-slate-200/80 bg-white hover:border-slate-300'
               }`}
             >
-              <span className={`absolute left-0 top-0 h-full w-1 ${RING_BAR[ring.level] || 'bg-slate-200'}`} />
+              <span className={`absolute left-0 top-0 h-full w-1 ${style.bar}`} />
               <div className="flex items-center gap-1.5">
                 <span className="text-xs font-semibold text-slate-800 truncate">{ring.label}</span>
                 <span className={`text-[10px] ml-auto shrink-0 font-medium ${style.text}`}>{style.label}</span>
@@ -88,7 +79,7 @@ export const EvidenceMatrix: React.FC<EvidenceMatrixProps> = ({ evidence, onDril
                   <span className="text-slate-300"> · {ring.frequency}</span>
                 </div>
               )}
-              <div className={`text-[10px] mt-1 leading-4 line-clamp-2 ${isNoEvidence ? 'text-slate-400' : 'text-slate-500'}`}>
+              <div className={`text-[10px] mt-1 leading-4 line-clamp-2 ${isNoEvidence ? 'text-amber-700/80' : 'text-slate-500'}`}>
                 {ring.summary || '—'}
               </div>
             </button>

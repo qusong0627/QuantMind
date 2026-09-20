@@ -42,7 +42,7 @@ const order = (over: Partial<PlanOrder>): PlanOrder => ({
 
 describe('statusStyle / pipelineSummary', () => {
   it('四态样式与最差状态优先级（fail > warn > unknown > ok）', () => {
-    expect(statusStyle('fail').dot).toContain('rose');
+    expect(statusStyle('fail').dot).toContain('red');
     expect(statusStyle(undefined).label).toBe('未运行');
 
     const steps = [
@@ -144,7 +144,7 @@ describe('executionSummary / healthItemViews / 格式化', () => {
       ],
     });
     expect(views).toHaveLength(2);
-    expect(views[0].style.dot).toContain('red');
+    expect(views[0].style.dot).toContain('emerald');
     expect(views[1].style.dot).toContain('amber');
     expect(views[1].suggestion).toContain('台账');
   });
@@ -256,9 +256,29 @@ describe('证据矩阵（T-FE-16）', () => {
     expect(evidenceSummary(null).noEvidence).toBe(0);
   });
 
-  it('no_evidence 状态样式为灰态「无证据」（专属样式，不是"未运行"）', () => {
-    expect(statusStyle('no_evidence').label).toBe('无证据');
-    expect(statusStyle('no_evidence').dot).toContain('dashed');
+  it('no_evidence 为深黄「无证据」（不是绿、也不是"未运行"）', () => {
+    const style = statusStyle('no_evidence');
+    expect(style.label).toBe('无证据');
+    expect(style.dot).toContain('amber-700');
+    expect(style.dot).toContain('dashed');
+    // 没验成 ≠ 通过：无证据绝不能与 ok 同色
+    expect(style.dot).not.toContain('emerald');
+    expect(style.dot).not.toBe(statusStyle('unknown').dot);
+  });
+
+  it('健康状态色语义：绿=正常 / 黄=警告 / 红=异常，且正常与异常不同色', () => {
+    // 回归：ok 与 fail 曾同为红（red-500 / rose-600），肉眼分不出正常与异常
+    expect(statusStyle('ok').dot).toContain('emerald');
+    expect(statusStyle('warn').dot).toContain('amber-500');
+    expect(statusStyle('fail').dot).toContain('red-600');
+    expect(statusStyle('ok').dot).not.toBe(statusStyle('fail').dot);
+    expect(statusStyle('warn').dot).not.toBe(statusStyle('no_evidence').dot);
+  });
+
+  it('每档都带 bar（tile 左侧色条），与 dot 同源不另抄色表', () => {
+    for (const level of ['ok', 'warn', 'fail', 'unknown', 'no_evidence']) {
+      expect(statusStyle(level).bar).toContain('bg-');
+    }
   });
 
   it('下钻条目：环头三行 + 逐证据项（detail 与建议进 hint、来源保留）', () => {
