@@ -130,7 +130,22 @@ const DeskTodayPage: React.FC<{ embedded?: boolean; tradingRunning?: boolean }> 
             }
           />
 
-          {/* 首行：系统健康 | 副驾驶（并列，2026-09-17 置顶）。分栏归位：候选信号→「候选信号」
+          {/* 全链证据矩阵（整行通栏）。2026-09-20 上移到第 2 位、系统健康之上——
+              用户要求「移到第二个」：管线四步只回答「走到哪一步」，证据矩阵回答「每一步有没有
+              证据、能不能核对来源」，是判断当天数据可不可信的第一入口，故排在健康/副驾驶之前。 */}
+          <EvidenceMatrix
+            evidence={desk.evidence}
+            onDrill={(ring) =>
+              setDrawer({
+                title: `证据环 · ${ring.label}（${statusStyle(ring.level).label}）`,
+                subtitle: `${ring.artifact} · ${ring.frequency}——每项可核对来源`,
+                entries: evidenceRingDrillEntries(ring) as DrillEntry[],
+                raw: ring,
+              })
+            }
+          />
+
+          {/* 第三行：系统健康 | 副驾驶（并列，2026-09-17 置顶）。分栏归位：候选信号→「候选信号」
               页签、调仓计划→「策略管理·交易记录上方」、今日执行→「持仓监控」；账户盈亏卡同屏重复已移除。 */}
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
             <div className="lg:col-span-5 grid gap-4">
@@ -153,19 +168,6 @@ const DeskTodayPage: React.FC<{ embedded?: boolean; tradingRunning?: boolean }> 
               <CopilotPanel />
             </div>
           </div>
-
-          {/* 全链证据矩阵（整行通栏） */}
-          <EvidenceMatrix
-            evidence={desk.evidence}
-            onDrill={(ring) =>
-              setDrawer({
-                title: `证据环 · ${ring.label}（${statusStyle(ring.level).label}）`,
-                subtitle: `${ring.artifact} · ${ring.frequency}——每项可核对来源`,
-                entries: evidenceRingDrillEntries(ring) as DrillEntry[],
-                raw: ring,
-              })
-            }
-          />
         </>
       ) : (
         <div className="bg-gray-50 rounded-2xl border border-gray-200 p-10 text-center text-sm text-gray-500">
