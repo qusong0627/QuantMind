@@ -23,7 +23,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 import numpy as np
@@ -50,14 +50,39 @@ META_COLS = {"symbol", "date", "time", "dt", "open", "high", "low", "close",
 # A 股默认往返成本（单边）：佣金 0.025% + 印花税 0.05%（卖出）+ 滑点 0.05%
 DEFAULT_ROUND_TRIP_COST = 0.00025 * 2 + 0.0005 + 0.0005 * 2   # ≈ 0.20%
 
-# 涨跌停阈值（按板块）：主板 10%、创业板/科创板 20%、北交所 30%（留 0.2pct 缓冲）
-def limit_threshold(symbol: str) -> float:
-    s = str(symbol)
-    if s.startswith(("300", "301", "688", "689")):
-        return 0.198
-    if s.startswith(("4", "8")):
-        return 0.298
-    return 0.098
+#: 「贴板」缓冲（比例）：封板价按分取整，真封死的票可能只显示 9.98%，不留余量会判丢。
+_LIMIT_SLACK = 0.002
+
+
+def _as_trade_date(value) -> date:
+    """交易日解析：分区标签 ``20260918`` 与 ISO ``2026-09-18`` 都收。"""
+    s = str(value).strip()
+    if len(s) == 8 and s.isdigit():
+        return date(int(s[0:4]), int(s[4:6]), int(s[6:8]))
+    return date.fromisoformat(s)
+
+
+def limit_threshold(symbol: str, trade_date=None) -> float:
+    """涨跌停阈值（比例）—— 口径唯一事实源 = ``local_market_data.limit_pct``。
+
+    原实现是一张写死的前缀表（0.098/0.198/0.298），与权威口径有三处偏差：
+    ``302`` 段落在创业板 20% 板内却被按主板算；北交所前缀 ``("4", "8")``
+    比 ``_BSE_PREFIXES`` 宽（把 400xxx 老三板也当 30%）；且完全不知道创业板
+    2020-08-24 的 10%→20% 改革 —— 回看该日之前的窗口会把真涨停判丢。
+    """
+    from backend.services.simulation.services.local_market_data import limit_pct
+
+    td = _as_trade_date(trade_date) if trade_date is not None else date.today()
+    return (
+        float(
+            limit_pct(
+                str(symbol),
+                is_st=False,  # fidelity: allow-limit-threshold — 无逐日 ST 源（同 factor_report/tradability.py）
+                trade_date=td,
+            )
+        )
+        - _LIMIT_SLACK
+    )
 
 
 from backend.shared.report_archive import archive_root  # noqa: E402  （原三份副本已收口）
@@ -453,7 +478,7 @@ def tradability(dataset: str, sample_step: int = 5) -> tuple[list[str], dict]:
         pc = prev.reindex(df.index)
         ok = df["close"].notna() & pc.notna() & (pc > 0)
         chg = (df["close"][ok] / pc[ok] - 1.0)
-        thr = pd.Series([limit_threshold(s) for s in chg.index], index=chg.index)
+        thr = pd.Series([limit_threshold(s, dt) for s in chg.index], index=chg.index)
         limit_up = (chg >= thr).sum()
         limit_down = (chg <= -thr).sum()
         suspended = int((df["volume"].fillna(0) <= 0).sum())
