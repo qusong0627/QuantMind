@@ -60,15 +60,31 @@ def _available(data_dir: Path, rel: str) -> bool:
     return any(p.is_dir() and p.name.startswith("dt=") for p in d.iterdir())
 
 
+def _parquet_columns(con: duckdb.DuckDBPyConnection, path_glob: str) -> set[str]:
+    """探测 parquet（含 dt=* 分区 glob）实际列名；失败返回空集合。"""
+    try:
+        cols = con.execute(
+            f"SELECT * FROM read_parquet('{path_glob}',"
+            " hive_partitioning=1, union_by_name=true) LIMIT 0"
+        ).description
+        return {c[0] for c in cols} if cols else set()
+    except Exception:  # noqa: BLE001
+        return set()
+
+
 def create_views(con: duckdb.DuckDBPyConnection, data_dir: Path) -> duckdb.DuckDBPyConnection:
-    """在给定 DuckDB 连接上挂载归一后的规范视图（幂等）。"""
-    # 日线不复权（小写 symbol + time）
+    """在给定 DuckDB 连接上挂好一套规范的视图（幂等）。"""
+    # 日线不复权（小写 symbol + time）。
+    # 注意：`vol_in_stock` 是 `volume` 的旧别名（见 quantdb_hub._VOLUME_ALIASES），
+    # 魔搭等精简 schema 只给 `volume`，缺失时用 volume 兜底，避免 Binder Error。
     if _available(data_dir, DATASET_DIRS["daily_unadjusted"]):
+        glob = _partition_glob(data_dir, DATASET_DIRS["daily_unadjusted"])
+        cols = _parquet_columns(con, glob)
+        vol_expr = "vol_in_stock" if "vol_in_stock" in cols else "volume AS vol_in_stock"
         con.execute(f"""
             CREATE VIEW IF NOT EXISTS qdb_daily_unadjusted AS
-            SELECT symbol, dt, time, open, high, low, close, volume, amount, vol_in_stock
-            FROM read_parquet('{_partition_glob(data_dir, DATASET_DIRS["daily_unadjusted"])}',
-                              hive_partitioning=1, union_by_name=true)
+            SELECT symbol, dt, time, open, high, low, close, volume, amount, {vol_expr}
+            FROM read_parquet('{glob}', hive_partitioning=1, union_by_name=true)
         """)
     # 指数日线
     if _available(data_dir, DATASET_DIRS["index_daily"]):
