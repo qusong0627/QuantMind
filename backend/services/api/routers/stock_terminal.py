@@ -1799,6 +1799,15 @@ async def list_stocks(
     q: str | None = Query(None, description="代码/名称模糊检索"),
     only_st: bool = Query(False, description="仅 ST 股"),
     exclude_st: bool = Query(False, description="排除 ST 股"),
+    # 两个排除开关**默认关**：/list 同时服务检索框与自选股（只传 q 不传排除参数），
+    # 默认开会让用户搜不到自己在名单上的票、自选股凭空少一只。要排除的调用方
+    # （候选列表）显式传 true —— 前端 StockFilterPanel 默认即勾上。
+    exclude_risk_list: bool = Query(
+        False, description="排除「不买入」名单（data/exclusions/cn.json）"
+    ),
+    exclude_news_risk: bool = Query(
+        False, description="排除近 20 天有监管/司法类新闻利空的股票"
+    ),
     date: str | None = Query(None, description="推理分数基准日 YYYY-MM-DD，缺省=最近有分数日"),
     model: str | None = Query(None, description="推理模型（qm_model_inference_runs.model_id），缺省=全部模型融合"),
     score_min: float | None = Query(None, description="推理分数下限（fusion_score）"),
@@ -1819,6 +1828,10 @@ async def list_stocks(
     current_user: dict = Depends(get_current_user),
 ):
     _ = current_user
+    # 风险排除两通道（名单 / 新闻标签）的读数集中在这个模块里；函数内导入避免
+    # 让「只是查一下行业列表」的进程也要拉起新闻词表
+    from backend.services.api import stock_terminal_exclusions as excl
+
     # 日历点选历史日时 close/pct_change 也读该日快照（左右整页随日期联动）
     # _load_universe 同步读 parquet+merge，跑在 event loop 上会阻塞全部并发请求
     # （单 worker uvicorn），挪到线程池执行，list 接口并发不再互相排队
@@ -1843,10 +1856,48 @@ async def list_stocks(
             df = df[hit_sym | df["Name"].astype(str).str.contains(kw, case=False, regex=False, na=False)]
         else:
             df = df[df["Symbol"].str.contains(kw, case=False, regex=False, na=False) | df["Name"].astype(str).str.contains(kw, case=False, regex=False, na=False)]
+    # 名单型排除（ST / 不买入名单 / 新闻利空）算在 base_df 快照之前，
+    # 让 option_counts 的命中数自动跟随——否则下拉里的数字会把已排除的票算进去，
+    # 用户按数字选出来的结果和列表对不上
+    excluded_counts = {"st": 0, "risk_list": 0, "news_risk": 0}
+    exclusion_meta: dict[str, Any] = {}
+    excl_list = None
+    blocked_symbols: frozenset[str] = frozenset()
     if only_st:
         df = df[_st_mask(df)]
     if exclude_st:
-        df = df[~_st_mask(df)]
+        _st_hit = _st_mask(df)
+        excluded_counts["st"] = int(_st_hit.sum())
+        df = df[~_st_hit]
+    if m != "HK":
+        # 两条通道都只覆盖 A 股：名单是 A 股名单，新闻标签只落 A 股后缀式 ticker
+        try:
+            excl_list, blocked_symbols, list_meta = excl.list_channel()
+            news_risk, news_meta = await excl.news_risk_channel()
+            df, _ch = excl.apply_exclusions(
+                df,
+                blocked=blocked_symbols,
+                news_risk=news_risk,
+                exclude_risk_list=exclude_risk_list,
+                exclude_news_risk=exclude_news_risk,
+            )
+            excluded_counts.update(_ch)
+            exclusion_meta = excl.exclusion_meta(
+                list_meta=list_meta,
+                news_meta=news_meta,
+                counts=excluded_counts,
+                extra={
+                    "risk_list_size": len(blocked_symbols),
+                    "news_risk_size": len(news_risk),
+                },
+            )
+        except Exception as exc:  # noqa: BLE001 - 排除失败不能让列表整个打不开
+            logger.warning("exclusion filters failed: %s", exc)
+            exclusion_meta = {
+                "list": {"imported": False, "reason": f"排除通道异常：{exc}"},
+                "news": {"available": False, "reason": f"排除通道异常：{exc}"},
+                "excluded": excluded_counts,
+            }
     if concept:
         members = await asyncio.to_thread(_concept_members, concept)
         if members:
@@ -2189,6 +2240,31 @@ async def list_stocks(
     # 100 行 items 要 4s+，且在 event loop 主线程执行——并发请求全部被拖慢
     st_mask_series = _st_mask(df)
 
+    # 逐行新闻标注（利空/利好徽章）：只取本页标的。数据源与上面的筛选判据同一份
+    # 缓存，不会出现「标签说有利空，但排除时没排掉」这种自相矛盾
+    news_map: dict[str, Any] = {}
+    if m != "HK" and len(rows):
+        try:
+            news_map = await excl.news_annotations(
+                [str(s) for s in rows["Symbol"].tolist()]
+            )
+        except Exception as exc:  # noqa: BLE001 - 标注失败不影响列表本身
+            logger.warning("news annotations failed: %s", exc)
+
+    def _row_risk(r: pd.Series) -> dict[str, Any] | None:
+        """单行风险载荷。开关关掉时**照样**返回——前端要把这些行标出来。"""
+        symbol = str(r.get("Symbol"))
+        try:
+            return excl.row_risk(
+                symbol,
+                lst=excl_list,
+                blocked=blocked_symbols,
+                news=news_map.get(symbol),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("row risk failed for %s: %s", symbol, exc)
+            return None
+
     def _item(r: pd.Series) -> dict[str, Any]:
         info = score_info.get(str(r.get("Symbol")).split(".")[0]) if score_info else {}
         return {
@@ -2218,6 +2294,9 @@ async def list_stocks(
                 trend_map.get(str(r.get("Symbol")).split(".")[0], "-")
                 if trend_map else "-"
             ),
+            # 风险载荷：名单命中 + 近 20 天新闻标签（利空/利好并存时都带上，
+            # 不做优先级吞并）。无命中时为 None，前端据此不渲染徽章区
+            "risk": _row_risk(r),
         }
 
     return {
@@ -2233,6 +2312,8 @@ async def list_stocks(
             "models": model_options,
             "option_counts": option_counts,
             "facets": facets,
+            # 本轮实际排除只数 + 两通道基准/新鲜度（名单没导入要显式说出来）
+            "exclusion_meta": exclusion_meta,
         },
     }
 

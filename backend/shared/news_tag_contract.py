@@ -224,6 +224,12 @@ def _json_dumps(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
+_SELECT_TAGS_SQL = (
+    "SELECT symbol, tag, direction, n, first_published, "
+    "last_published, sample_titles, window_end FROM " + STOCK_TAGS_TABLE
+)
+
+
 async def load_stock_tags(
     symbols: Sequence[str],
 ) -> dict[str, dict[str, list[dict[str, Any]]]]:
@@ -232,29 +238,34 @@ async def load_stock_tags(
     窗口由表内 ``window_end`` 自证（rollup 每轮清理窗口外的行），故这里不再按
     时间过滤——加一道会掩盖「rollup 没跑」这个真问题。
     """
+    wanted = [str(s) for s in dict.fromkeys(symbols or []) if s]
+    if not wanted:
+        return {}
+    return await _read_tags(
+        f"{_SELECT_TAGS_SQL} WHERE symbol = ANY(:syms)", {"syms": wanted}
+    )
+
+
+async def load_all_stock_tags() -> dict[str, dict[str, list[dict[str, Any]]]]:
+    """全表标签（约千行）按标的分桶。
+
+    列表侧一次取全量而不是「筛选查一次集合、标注再查一次本页」：表本身只有
+    20 天 × 约 757 只的量级，一次拉全比两次往返更省，而且两个用途天然同源——
+    不会出现「界面标了利空却没被排除」这种自相矛盾。
+    """
+    return await _read_tags(_SELECT_TAGS_SQL, {})
+
+
+async def _read_tags(
+    sql: str, params: dict[str, Any]
+) -> dict[str, dict[str, list[dict[str, Any]]]]:
     from sqlalchemy import text as _text
 
     from backend.shared.database_manager_v2 import get_session
 
-    wanted = [str(s) for s in dict.fromkeys(symbols or []) if s]
-    if not wanted:
-        return {}
     try:
         async with get_session(read_only=True) as session:
-            rows = (
-                (
-                    await session.execute(
-                        _text(
-                            "SELECT symbol, tag, direction, n, first_published, "
-                            "last_published, sample_titles, window_end "
-                            f"FROM {STOCK_TAGS_TABLE} WHERE symbol = ANY(:syms)"
-                        ),
-                        {"syms": wanted},
-                    )
-                )
-                .mappings()
-                .all()
-            )
+            rows = (await session.execute(_text(sql), params)).mappings().all()
     except Exception as exc:  # noqa: BLE001 - 读不到就是「无标注」，不阻断列表
         logger.warning("[NewsTagContract] 标签读取失败（按无标注处理）: %s", exc)
         return {}
