@@ -5,15 +5,20 @@
  *   ① KPI 行：总市值 / 持仓数 / 盈利·亏损家数 / 现金占比 / 浮动盈亏（涨红跌绿）
  *   ② 图表行：左「市值 Treemap」（块面积=市值、颜色=盈亏深浅）＋ 右「盈亏贡献 Top12 横向柱」
  *   ③ 持仓明细：市值占比条形列表（排序切换 市值/盈亏/比例 + 关键字过滤）
+ *      + 行内「卖出」/ 批量「清仓选中」→ 预检确认面板（只预填与转发，不自己下单）
  * - ExecutionStrip：今日执行折叠条（默认一行摘要，点开列单）。
  */
 import React, { useMemo, useState, useEffect } from 'react';
 import ReactECharts from 'echarts-for-react';
 import { Activity, ArrowDownUp, ChevronDown, ChevronUp, PieChart, Search } from 'lucide-react';
+import { Checkbox, message } from 'antd';
 import type { NormalizedHolding, PositionSummary } from '../utils/positionMetrics';
 import { getDeskToday } from '../../../features/desk/services/deskService';
 import { executionUnavailableReason } from '../../../features/desk/deskModel';
 import type { ExecutionItem } from '../../../features/desk/types';
+import { toSuffixCode } from '../../../utils/portfolioUtils';
+import { PushConfirmPanel } from '../../../features/stock-terminal/components/PushConfirmPanel';
+import type { PushChannel, PushExecute } from '../../../features/stock-terminal-shared/types';
 
 const fmtMoney = (v: number | null | undefined): string =>
   v === null || v === undefined || Number.isNaN(Number(v))
@@ -47,9 +52,16 @@ type SortKey = 'value' | 'profit' | 'pct';
 export const PositionVisualBoard: React.FC<{
   holdings: NormalizedHolding[];
   summary: PositionSummary;
-}> = ({ holdings, summary }) => {
+  /** 卖出预检的默认通道（跟随页面顶栏 模拟/实盘） */
+  defaultChannels?: PushChannel[];
+}> = ({ holdings, summary, defaultChannels = ['sim'] }) => {
   const [sortKey, setSortKey] = useState<SortKey>('value');
   const [q, setQ] = useState('');
+
+  // 卖出入口：勾选集合 + 当前要卖的标的（null = 面板关闭）
+  const [picked, setPicked] = useState<Set<string>>(new Set());
+  const [sellSymbols, setSellSymbols] = useState<string[] | null>(null);
+  const [channels, setChannels] = useState<PushChannel[]>(defaultChannels);
 
   const totalPnl = useMemo(() => holdings.reduce((s, h) => s + (h.profit || 0), 0), [holdings]);
   const winCount = holdings.filter((h) => h.profit > 0).length;
@@ -65,6 +77,42 @@ export const PositionVisualBoard: React.FC<{
     const kw = q.trim().toLowerCase();
     return kw ? arr.filter((h) => (h.name || '').toLowerCase().includes(kw) || h.code.toLowerCase().includes(kw)) : arr;
   }, [holdings, sortKey, q]);
+
+  // —— 卖出入口 ——
+  // 持仓行的 code 是**前缀式**（SH600036），预检接口要**后缀式**（600036.SH）：
+  // 直接透传会被当成非法代码逐笔拦下。
+  // 本仓库 tsc 下函数式 setter（`setX(prev => …)`）一律 TS2345，只能传值更新。
+  const togglePick = (code: string) => {
+    const next = new Set(picked);
+    if (next.has(code)) next.delete(code);
+    else next.add(code);
+    setPicked(next);
+  };
+  const togglePickAll = () =>
+    setPicked(
+      sorted.length > 0 && sorted.every((h) => picked.has(h.code))
+        ? new Set<string>()
+        : new Set(sorted.map((h) => h.code)),
+    );
+  // 勾选集以**当前持仓**为准重算：卖出后市集刷新，勾选里会留下已不在持仓的代码，
+  // 直接拿 `[...picked]` 去预检会为一只已经卖掉的票再发一张卖单。
+  const pickedRows = sorted.filter((h) => picked.has(h.code));
+  const openSell = (codes: string[]) => {
+    const symbols = codes.map(toSuffixCode).filter(Boolean);
+    if (symbols.length === 0) {
+      message.warning('没有可提交的标的');
+      return;
+    }
+    setSellSymbols(symbols);
+  };
+  const closeSell = () => setSellSymbols(null);
+  const sellDone = (outcome: PushExecute) => {
+    // 只有真的成交/部分成交才清勾选。被拦下时保留勾选，用户改完条件可以重推——
+    // 无条件清空会让「被风控拦下」看起来像「已经卖掉了」。
+    const succeeded = Number(outcome?.summary?.succeeded ?? 0);
+    if (!outcome?.dry_run && succeeded > 0) setPicked(new Set());
+    else message.warning('本次未提交成功，勾选保留——请查看预检面板里的逐笔原因');
+  };
 
   // —— 图表①：市值分布货架马赛克（自绘：两行货架，块宽=占比，大块在上，小块归并） ——
   const shelves = useMemo(() => {
@@ -192,13 +240,35 @@ export const PositionVisualBoard: React.FC<{
         {/* 左栏：工具行 + 明细列表 */}
         <div className="flex-1 min-w-0 min-h-0 flex flex-col">
         <div className="shrink-0 flex items-center gap-2 pb-1">
-        <div className="grid grid-cols-[minmax(0,1.3fr)_minmax(0,2.2fr)_minmax(0,1fr)_minmax(0,1.1fr)] items-center gap-3 flex-1 text-[10px] font-bold text-slate-400">
+        <div className="grid grid-cols-[1.1rem_minmax(0,1.3fr)_minmax(0,2.2fr)_minmax(0,1fr)_minmax(0,1.1fr)_3.5rem] items-center gap-3 flex-1 text-[10px] font-bold text-slate-400">
+          <span />
           <span>股票</span>
           <span title="条宽 = 个股市值 ÷ 持仓总市值（红涨绿跌）">市值占比</span>
           <span className="text-right">现价 / 成本</span>
           <span className="text-right">盈亏（金额 / 比例）</span>
+          <span className="text-right">操作</span>
         </div>
-        <div className="flex shrink-0 items-center gap-1">
+        <div className="flex shrink-0 items-center gap-1.5">
+          {sorted.length > 0 && (
+            <Checkbox
+              checked={pickedRows.length === sorted.length}
+              indeterminate={pickedRows.length > 0 && pickedRows.length < sorted.length}
+              onChange={togglePickAll}
+              className="!text-[10px] !font-bold !text-slate-500"
+            >
+              全选
+            </Checkbox>
+          )}
+          {pickedRows.length > 0 && (
+            <button
+              type="button"
+              onClick={() => openSell(pickedRows.map((h) => h.code))}
+              title="对勾选的持仓发起整仓卖出预检（数量由服务端按可用持仓给，仍需在确认面板里手动确认）"
+              className="flex items-center gap-1 rounded-lg bg-emerald-600 px-2 py-0.5 text-[10px] font-bold text-white transition-colors hover:bg-emerald-700"
+            >
+              清仓选中 {pickedRows.length} 只
+            </button>
+          )}
           <div className="relative">
             <Search className="absolute left-2 top-1/2 h-3 w-3 -translate-y-1/2 text-slate-300" />
             <input
@@ -228,8 +298,9 @@ export const PositionVisualBoard: React.FC<{
             <div
               key={h.code}
               title={`${h.name}（${h.code}） 持仓 ${h.shares} 股 · 市值 ${fmtMoney(h.value)}`}
-              className="grid grid-cols-[minmax(0,1.3fr)_minmax(0,2.2fr)_minmax(0,1fr)_minmax(0,1.1fr)] items-center gap-3 rounded-xl border border-transparent px-2 py-1.5 transition-colors hover:border-slate-200 hover:bg-slate-50/70"
+              className="grid grid-cols-[1.1rem_minmax(0,1.3fr)_minmax(0,2.2fr)_minmax(0,1fr)_minmax(0,1.1fr)_3.5rem] items-center gap-3 rounded-xl border border-transparent px-2 py-1.5 transition-colors hover:border-slate-200 hover:bg-slate-50/70"
             >
+              <Checkbox checked={picked.has(h.code)} onChange={() => togglePick(h.code)} />
               <div className="min-w-0">
                 <div className="truncate text-xs font-bold text-slate-800">{h.name || h.code}</div>
                 <div className="truncate font-mono text-[10px] text-slate-400">{h.code}</div>
@@ -254,6 +325,17 @@ export const PositionVisualBoard: React.FC<{
                   {fmtRowPct(h.profitPercent)}
                 </div>
               </div>
+              {/* 只有一个「卖出」而不是「卖出 / 清仓」两个：预检面板本来就把数量预填成
+                  全部可用持仓，想卖一半才需要手动改数。批量清仓走上方「全选 → 清仓选中」。
+                  绿色 = 卖（A 股买红卖绿）。 */}
+              <button
+                type="button"
+                onClick={() => openSell([h.code])}
+                title={`卖出 ${h.name || h.code}（打开预检确认面板，不会自动下单）`}
+                className="justify-self-end rounded-lg bg-emerald-600 px-2 py-0.5 text-[10px] font-bold text-white transition-colors hover:bg-emerald-700"
+              >
+                卖出
+              </button>
             </div>
           );
         })}
@@ -310,6 +392,18 @@ export const PositionVisualBoard: React.FC<{
           </div>
         </div>
       </div>
+
+      {/* 卖出预检确认面板：本板只负责「预填 + 打开」，数量/风控/新闻全部由服务端
+          `_build_legs` 给，与真正下单同源。`sellSymbols` 非空即打开，关闭时置 null。 */}
+      <PushConfirmPanel
+        open={sellSymbols !== null}
+        symbols={sellSymbols ?? []}
+        side="sell"
+        channels={channels}
+        onChannelsChange={setChannels}
+        onClose={closeSell}
+        onDone={sellDone}
+      />
     </div>
   );
 };

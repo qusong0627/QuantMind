@@ -8,11 +8,15 @@ import { websocketService, MessageType } from '../../../services/websocketServic
 import { buildNormalizedHoldings, extractPositionCodes, getPositionSummary, NormalizedHolding } from '../utils/positionMetrics';
 import { PositionVisualBoard, ExecutionStrip } from '../components/PositionVisualBoard';
 import { SERVICE_URLS } from '../../../config/services';
+import type { TradingAccountMode } from '../utils/accountAdapter';
 
 interface PositionMonitorProps {
     userId: string;
     isActive: boolean;
     accountInfo: AccountInfo | null;
+    /** 当前看的是哪个账户（页面顶栏 模拟/实盘）。卖出预检的默认通道跟随它——
+     *  看实盘持仓却默认发模拟腿，会因为「模拟账户没有这只票」逐笔被拦。 */
+    accountMode?: TradingAccountMode;
 }
 
 /** stream 服务推送的实时行情消息（topic stock.{code}） */
@@ -61,7 +65,7 @@ const mergeLivePrices = (holdings: NormalizedHolding[], live: Record<string, num
     });
 };
 
-const PositionMonitor: React.FC<PositionMonitorProps> = ({ userId: _userId, isActive, accountInfo }) => {
+const PositionMonitor: React.FC<PositionMonitorProps> = ({ userId: _userId, isActive, accountInfo, accountMode = 'simulation' }) => {
     const currentMarket = useAppSelector(selectCurrentMarket);
     const [stockNames, setStockNames] = useState<Record<string, string>>({});
     const [livePrices, setLivePrices] = useState<Record<string, number>>({});
@@ -192,7 +196,11 @@ const PositionMonitor: React.FC<PositionMonitorProps> = ({ userId: _userId, isAc
                 </span>
             </div>
             {/* 持仓可视化主卡（2026-09-17 重设计：KPI + 市值占比条形列表，替代 分布饼图+宽表格 两块） */}
-            <PositionVisualBoard holdings={holdings} summary={summary} />
+            <PositionVisualBoard
+                holdings={holdings}
+                summary={summary}
+                defaultChannels={accountMode === 'real' ? ['sim', 'real'] : ['sim']}
+            />
             {/* 今日执行折叠条（并入同页，不再单起卡片） */}
             <ExecutionStrip />
         </div>

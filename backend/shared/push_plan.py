@@ -150,8 +150,23 @@ def plan_quantity(
             )
         if qty <= 0:
             return QuantityPlan(qty, "blocked", problem="手填数量必须大于 0")
+        # 手填卖满**全部**可用持仓 = 整仓卖出，零股可随整仓一次性卖出（A 股规则）。
+        # 不这么判的话，持仓 246 股（送转/配股来的零股）的用户看得见持仓却卖不掉：
+        # 数量确实不是整手，但它不是"部分卖出"。只认「已取到可用持仓且手填 ≥ 它」——
+        # 取不到持仓时按不知道处理，不能凭想象替用户放行一张碎股卖单。
+        full_sell = (
+            side_raw == "sell"
+            and available_position is not None
+            and float(available_position) > 0
+            and qty >= float(available_position)
+        )
         return QuantityPlan(
-            qty, "manual", problem=describe_violation(symbol, side_raw, qty) or ""
+            qty,
+            "manual",
+            problem=describe_violation(
+                symbol, side_raw, qty, full_position_sell=full_sell
+            )
+            or "",
         )
 
     if side_raw == "sell":

@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
 import { Search, RefreshCw, Star, ChevronDown, ChevronLeft, ChevronRight, ChevronsUp, ChevronsDown, ShieldCheck, AlertTriangle, Send, X } from 'lucide-react';
 import { Checkbox, Input, Spin, message, Dropdown, Segmented } from 'antd';
-import { StockListItem, StockListResponse, StockRisk, ExclusionMeta, PushChannel } from '../types';
+import { StockListItem, StockListResponse, StockRisk, ExclusionMeta, PushChannel, PushSide } from '../types';
 import { EXCLUDE_ON, riskChips, channelText } from '../riskModel';
 import { CHANNEL_OPTIONS, MAX_PICK } from '../pushModel';
 import { stockTerminalService } from '../services/stockTerminalService';
@@ -161,6 +161,8 @@ export function StockSidebar({ selected, onSelect, watchlistSymbols, watchFilter
   const [picked, setPicked] = useState<Map<string, StockListItem>>(new Map());
   const [pushChannels, setPushChannels] = useState<PushChannel[]>(['sim']);
   const [pushOpen, setPushOpen] = useState(false);
+  /** 由操作条上点的那颗按钮决定（买/卖各一颗），不从列表筛选推导——见操作条注释 */
+  const [pushSide, setPushSide] = useState<PushSide>('buy');
 
   /**
    * 检索模式：搜索框有内容时，让开「候选列表专属」的那几道闸。
@@ -895,7 +897,6 @@ export function StockSidebar({ selected, onSelect, watchlistSymbols, watchFilter
           <span className="text-[10px] text-slate-500 truncate min-w-0 flex-1" title={[...picked.values()].map(x => `${x.symbol} ${x.name}`).join('\n')}>
             {[...picked.values()].slice(0, 3).map(x => x.name || x.symbol).join('、')}
             {picked.size > 3 ? ` 等 ${picked.size} 只` : ''}
-            <span className="ml-1 text-slate-400">· {filters.side === 'SELL' ? '卖出' : '买入'}</span>
           </span>
           <Segmented
             size="small"
@@ -911,12 +912,23 @@ export function StockSidebar({ selected, onSelect, watchlistSymbols, watchFilter
           >
             <X className="w-3 h-3" /> 清空
           </button>
+          {/* 买卖**各一个按钮**，不跟随列表的「信号」筛选：检索模式下那个筛选根本不生效
+              （列表请求不带 side、控件也置灰），从前用 `filters.side === 'SELL' ? sell : buy`
+              推导，搜到一只票直接点推送会**悄悄发成买单**——用户看不见自己在买。
+              买红卖绿沿用 A 股口径（同 ReplayReportPage）。 */}
           <button
             type="button"
-            onClick={() => setPushOpen(true)}
-            className="shrink-0 flex items-center gap-1 rounded-lg bg-blue-600 px-3 py-1 text-[11px] font-bold text-white shadow-sm hover:bg-blue-700"
+            onClick={() => { setPushSide('buy'); setPushOpen(true); }}
+            className="shrink-0 flex items-center gap-1 rounded-lg bg-red-600 px-3 py-1 text-[11px] font-bold text-white shadow-sm hover:bg-red-700"
           >
-            <Send className="w-3 h-3" /> 一键推送
+            <Send className="w-3 h-3" /> 一键买入
+          </button>
+          <button
+            type="button"
+            onClick={() => { setPushSide('sell'); setPushOpen(true); }}
+            className="shrink-0 flex items-center gap-1 rounded-lg bg-emerald-600 px-3 py-1 text-[11px] font-bold text-white shadow-sm hover:bg-emerald-700"
+          >
+            <Send className="w-3 h-3" /> 一键卖出
           </button>
         </div>
       )}
@@ -924,7 +936,7 @@ export function StockSidebar({ selected, onSelect, watchlistSymbols, watchFilter
       <PushConfirmPanel
         open={pushOpen}
         symbols={[...picked.keys()]}
-        side={filters.side === 'SELL' ? 'sell' : 'buy'}
+        side={pushSide}
         channels={pushChannels}
         onChannelsChange={setPushChannels}
         onDone={() => { pushDoneRef.current = true; }}

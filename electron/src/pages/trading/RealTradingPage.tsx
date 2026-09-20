@@ -619,6 +619,7 @@ const RealTradingPage: React.FC = () => {
                             userId={userId}
                             isActive={activeTab === 'position'}
                             accountInfo={accountInfo}
+                            accountMode={tradingMode}
                         />
                     )}
                     {activeTab === 'history' && (

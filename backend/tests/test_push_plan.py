@@ -420,6 +420,89 @@ class TestPlanQuantityManualOverride:
         assert plan.executable is False
 
 
+class TestManualFullPositionSell:
+    """手填**全量**卖出碎股要放行：A 股零股只能随整仓一次性卖出。
+
+    真实场景：持仓 246 股（送转/配股来的零股），用户手填 246 全卖掉——
+    数量确实不是 100 的整数倍，但它不是「部分卖出」，柜台收。此前一律按
+    「部分卖出需整手」拦下，用户看得见持仓却卖不出去。
+    """
+
+    def test_manual_quantity_covering_whole_position_passes(self):
+        # Arrange：可用 246，用户手填 246
+        # Act
+        plan = plan_quantity(
+            symbol="600036.SH",
+            side="sell",
+            price=10.0,
+            position_score=0.5,
+            available_cash=0.0,
+            available_position=246.0,
+            override=246,
+        )
+
+        # Assert：放行且不报违规
+        assert plan.quantity == 246
+        assert plan.source == "manual"
+        assert plan.problem == ""
+        assert plan.executable is True
+
+    def test_manual_quantity_above_position_also_counts_as_full(self):
+        """手填比可用还多（用户按总持仓填，T+1 锁了一部分）：按全量卖出体检放行，
+        真实可卖量由后续腿数量/镜像侧二次校验兜底 —— 这里只判「形状对不对」。"""
+        # Arrange / Act
+        plan = plan_quantity(
+            symbol="600036.SH",
+            side="sell",
+            price=10.0,
+            position_score=0.5,
+            available_cash=0.0,
+            available_position=246.0,
+            override=300,
+        )
+
+        # Assert
+        assert plan.problem == ""
+
+    def test_manual_partial_sell_still_requires_whole_lot(self):
+        """真·部分卖出（数量 < 可用持仓）仍按整手拦——这条不能顺手放过。"""
+        # Arrange：可用 346，用户只想卖 246
+        # Act
+        plan = plan_quantity(
+            symbol="600036.SH",
+            side="sell",
+            price=10.0,
+            position_score=0.5,
+            available_cash=0.0,
+            available_position=346.0,
+            override=246,
+        )
+
+        # Assert
+        assert plan.executable is False
+        assert "整数倍" in plan.problem
+
+    def test_manual_sell_without_known_position_stays_strict(self):
+        """可用持仓取不到（模拟账户里没有这只票）时**不臆断**成全量卖出，仍按整手判。
+
+        把「不知道持仓多少」当成「那就是全仓」，等于凭想象给用户放行一张碎股卖单。
+        """
+        # Arrange / Act
+        plan = plan_quantity(
+            symbol="600036.SH",
+            side="sell",
+            price=10.0,
+            position_score=0.5,
+            available_cash=0.0,
+            available_position=0.0,
+            override=246,
+        )
+
+        # Assert
+        assert plan.executable is False
+        assert "整数倍" in plan.problem
+
+
 # --------------------------------------------------------------------------
 # mirror_outcome_class：只有 ok/submitted 是成功
 # --------------------------------------------------------------------------
