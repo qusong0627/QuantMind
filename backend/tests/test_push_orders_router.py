@@ -607,3 +607,369 @@ class TestCandidateClientOrderId:
 
         # Assert
         assert "nobatch" in key
+
+
+# --------------------------------------------------------------------------
+# 卖出取数来源：模拟台账优先，模拟没有才看实盘（实盘独有持仓直发）
+# --------------------------------------------------------------------------
+
+
+def _run(coro):
+    """路由里的这套链路是 async 的；单测用一次性事件循环跑完（与 qmt 镜像测试同法）。"""
+    import asyncio
+
+    return asyncio.run(coro)
+
+
+def _patch_leg_deps(
+    monkeypatch,
+    *,
+    sim_positions: dict,
+    real_positions: dict | None = None,
+    real_sources: dict | None = None,
+    prices: float = 40.0,
+):
+    """把 ``_build_legs`` 的外部依赖换成假体：价格/信号/名单/模拟账户/实盘快照。"""
+    from backend.services.trade_shared import simulation_manager as sm
+    from backend.shared import real_positions as rp
+
+    class _Mgr:
+        def __init__(self, _redis):
+            pass
+
+        async def get_account(self, _uid, _tenant):
+            return {"cash": 0.0, "positions": sim_positions}
+
+    async def _scores(_symbols):
+        return {}, "2026-09-19"
+
+    async def _risk(_symbols):
+        return {"by_symbol": {}, "meta": {}, "imported": True}
+
+    async def _load(_tenant, _uid):
+        return real_positions or {}, {
+            "sources": real_sources if real_sources is not None else {},
+            "snapshot_at": "2026-09-20T01:00:00+00:00",
+            "active_broker": "qmt_exec",
+        }
+
+    monkeypatch.setattr(sm, "SimulationAccountManager", _Mgr)
+    monkeypatch.setattr(
+        sm, "require_sim_user_id", lambda _raw, tenant_id="default": 10000001
+    )
+    monkeypatch.setattr(po, "_resolve_prices", lambda syms: {s: prices for s in syms})
+    monkeypatch.setattr(po, "_resolve_position_scores", _scores)
+    monkeypatch.setattr(po, "_resolve_risk", _risk)
+    monkeypatch.setattr(rp, "load_real_positions", _load)
+
+
+def _sell_body(channels: list[str]) -> "po.PushIn":
+    return po.PushIn(
+        symbols=["600036.SH"],
+        side="sell",
+        channels=channels,  # type: ignore[arg-type]
+        batch_id="batch-sell-0001",
+    )
+
+
+class TestBuildLegsSellSource:
+    def test_sim_position_keeps_the_sim_path(self, monkeypatch):
+        """模拟台账有票 → 一切照旧（模拟建单 + 可选镜像），实盘有多少不改变本笔。"""
+        # Arrange
+        _patch_leg_deps(
+            monkeypatch,
+            sim_positions={"600036.SH": {"available_volume": 246}},
+            real_positions={"SH600036": {"available_volume": 246}},
+            real_sources={"qmt_exec": {"stale": False}},
+        )
+
+        # Act
+        legs, meta = _run(
+            po._build_legs(
+                _sell_body(["sim", "real"]),
+                {"tenant_id": "default", "user_id": "10000001"},
+                redis=SimpleNamespace(),
+                db_available=False,
+            )
+        )
+
+        # Assert
+        leg = legs[0]
+        assert leg["quantity"] == 246
+        assert leg["exec_path"] == "sim"
+        assert leg["position_source"] == "sim"
+        assert leg["note"] == "整仓卖出"
+        assert meta["meta"]["real_positions"]["held"] == 1
+
+    def test_real_only_position_is_quantified_and_routed_direct(self, monkeypatch):
+        """模拟 0 股、实盘 300 股 → 数量取实盘，路径标 real_direct。"""
+        # Arrange
+        _patch_leg_deps(
+            monkeypatch,
+            sim_positions={},
+            real_positions={"SH600036": {"available_volume": 300}},
+            real_sources={"qmt_exec": {"stale": False}},
+        )
+
+        # Act
+        legs, _ = _run(
+            po._build_legs(
+                _sell_body(["sim", "real"]),
+                {"tenant_id": "default", "user_id": "10000001"},
+                redis=SimpleNamespace(),
+                db_available=False,
+            )
+        )
+
+        # Assert
+        leg = legs[0]
+        assert leg["quantity"] == 300
+        assert leg["exec_path"] == "real_direct"
+        assert leg["position_source"] == "real"
+        assert leg["executable"] is True
+        assert "实盘" in leg["note"]
+
+    def test_real_only_without_the_real_channel_is_actionable(self, monkeypatch):
+        """只勾模拟盘时不能说「未持有」——那是假话；要给出可执行的下一步。"""
+        # Arrange
+        _patch_leg_deps(
+            monkeypatch,
+            sim_positions={},
+            real_positions={"SH600036": {"available_volume": 300}},
+            real_sources={"qmt_exec": {"stale": False}},
+        )
+
+        # Act
+        legs, _ = _run(
+            po._build_legs(
+                _sell_body(["sim"]),
+                {"tenant_id": "default", "user_id": "10000001"},
+                redis=SimpleNamespace(),
+                db_available=False,
+            )
+        )
+
+        # Assert
+        leg = legs[0]
+        assert leg["executable"] is False
+        assert leg["blocked_by"] == "quantity"
+        assert "通道" in leg["problem"]
+        assert "未持有" not in leg["problem"]
+
+    def test_unreadable_real_snapshot_is_not_reported_as_zero(self, monkeypatch):
+        """从未收到过快照 ≠ 持有 0 股：如实说读不到，不冒充空仓。"""
+        # Arrange
+        _patch_leg_deps(monkeypatch, sim_positions={}, real_positions={}, real_sources={})
+
+        # Act
+        legs, meta = _run(
+            po._build_legs(
+                _sell_body(["sim", "real"]),
+                {"tenant_id": "default", "user_id": "10000001"},
+                redis=SimpleNamespace(),
+                db_available=False,
+            )
+        )
+
+        # Assert
+        leg = legs[0]
+        assert leg["executable"] is False
+        assert "读不到" in leg["problem"]
+        assert meta["meta"]["real_positions"]["known"] is False
+
+    def test_nobody_holds_it_keeps_the_generic_block(self, monkeypatch):
+        """两边都没有 → 通用阻断（不另编理由），来源标 none。"""
+        # Arrange
+        _patch_leg_deps(
+            monkeypatch,
+            sim_positions={},
+            real_positions={},
+            real_sources={"qmt_exec": {"stale": False}},
+        )
+
+        # Act
+        legs, _ = _run(
+            po._build_legs(
+                _sell_body(["sim", "real"]),
+                {"tenant_id": "default", "user_id": "10000001"},
+                redis=SimpleNamespace(),
+                db_available=False,
+            )
+        )
+
+        # Assert
+        leg = legs[0]
+        assert leg["position_source"] == "none"
+        assert leg["exec_path"] == ""
+        assert "无可用持仓" in leg["problem"]
+
+    def test_buy_batch_never_reads_the_real_account(self, monkeypatch):
+        """买入与实盘持仓无关：不查（查了反而会让预检凭空多一次 PG 往返）。"""
+        # Arrange
+        from backend.shared import real_positions as rp
+
+        def _boom(*_a, **_kw):  # pragma: no cover - 被调用即失败
+            raise AssertionError("买入批次不应读取实盘持仓")
+
+        _patch_leg_deps(monkeypatch, sim_positions={})
+        monkeypatch.setattr(rp, "load_real_positions", _boom)
+
+        # Act
+        legs, meta = _run(
+            po._build_legs(
+                po.PushIn(
+                    symbols=["600036.SH"],
+                    side="buy",
+                    channels=["sim"],
+                    batch_id="batch-buy-0001",
+                ),
+                {"tenant_id": "default", "user_id": "10000001"},
+                redis=SimpleNamespace(),
+                db_available=False,
+            )
+        )
+
+        # Assert
+        assert meta["meta"]["real_positions"] is None
+        assert legs[0]["exec_path"] == "sim"
+
+
+# --------------------------------------------------------------------------
+# _execute_real_direct：直发真单的回执（没有模拟腿）
+# --------------------------------------------------------------------------
+
+
+class TestExecuteRealDirect:
+    def _execute(self, monkeypatch, payload: dict, **over):
+        """用假体替换镜像链，录下调用参数。"""
+        from backend.services.live_trading.services import real_mirror_service as rms
+
+        calls: list[dict] = []
+
+        async def _fake(**kw):
+            calls.append(kw)
+            return payload
+
+        monkeypatch.setattr(rms, "mirror_virtual_fill", _fake)
+        leg = {
+            "symbol": "600036.SH",
+            "quantity": 300,
+            "price": 40.0,
+            **over,
+        }
+        result = _run(
+            po._execute_real_direct(
+                leg,
+                body=_sell_body(["sim", "real"]),
+                tenant_id="default",
+                uid=10000001,
+                redis=SimpleNamespace(),
+                db=SimpleNamespace(),
+            )
+        )
+        return result, calls
+
+    def test_submitted_is_admitted_but_not_claimed_as_filled(self, monkeypatch):
+        # Arrange
+        payload = {
+            "status": "submitted",
+            "symbol": "600036.SH",
+            "order_id": "ORD-9",
+            "client_order_id": "mir-cand-batch-sell-0001-600036.SH-sell",
+            "limit_price": 39.6,
+            "order_value": 11880.0,
+        }
+
+        # Act
+        result, calls = self._execute(monkeypatch, payload)
+
+        # Assert
+        assert result["success"] is True
+        assert result["executed"] is True
+        assert result["exec_path"] == "real_direct"
+        assert result["real_direct"]["class"] == "success"
+        assert result["real_direct"]["limit_price"] == 39.6
+        # 没有模拟腿 → 没有镜像回执；成交价/成交量的位置必须留空而不是编一个
+        assert result["mirror"] is None
+        assert "fill_price" not in result
+        assert "已提交" in result["message"]
+        # 真钱路径必须走用户已有的那道闸链，并如实标来源与来意
+        assert calls[0]["source"] == "real_direct"
+        assert calls[0]["side"] == "SELL"
+        assert calls[0]["quantity"] == 300
+        assert "不经模拟台账" in calls[0]["trigger"]
+
+    def test_queued_is_not_a_fill(self, monkeypatch):
+        # Arrange
+        payload = {"status": "queued", "symbol": "600036.SH", "client_order_id": "mir-x"}
+
+        # Act
+        result, _ = self._execute(monkeypatch, payload)
+
+        # Assert：受理了，但真钱还没出去 —— 措辞不能与已提交混同
+        assert result["executed"] is True
+        assert result["success"] is False
+        assert result["real_direct"]["class"] == "queued"
+        assert "入队" in result["message"]
+
+    def test_duplicate_is_idempotent_not_a_second_order(self, monkeypatch):
+        # Arrange
+        payload = {"status": "duplicate", "symbol": "600036.SH", "order_id": "ORD-1"}
+
+        # Act
+        result, _ = self._execute(monkeypatch, payload)
+
+        # Assert
+        assert result["duplicate"] is True
+        assert result["real_direct"]["class"] == "duplicate"
+        assert "幂等" in result["message"]
+
+    def test_gate_skip_is_reported_as_not_submitted(self, monkeypatch):
+        # Arrange：闸门拦下（白名单/急停/配额/非交易时段不排队…）
+        payload = {"status": "skipped", "reason": "whitelist", "symbol": "600036.SH"}
+
+        # Act
+        result, _ = self._execute(monkeypatch, payload)
+
+        # Assert
+        assert result["executed"] is False
+        assert result["success"] is False
+        assert result["skipped_reason"] == "whitelist"
+
+    def test_error_payload_lands_in_failed(self, monkeypatch):
+        # Arrange
+        payload = {"status": "error", "reason": "boom", "symbol": "600036.SH"}
+
+        # Act
+        result, _ = self._execute(monkeypatch, payload)
+
+        # Assert
+        assert result["success"] is False
+        assert result["executed"] is True
+        assert result["real_direct"]["class"] == "failed"
+
+    def test_mirror_raising_does_not_break_the_batch(self, monkeypatch):
+        # Arrange：镜像侧声称「永不抛」，真抛了也不能把整批带走
+        from backend.services.live_trading.services import real_mirror_service as rms
+
+        async def _boom(**_kw):
+            raise RuntimeError("broker offline")
+
+        monkeypatch.setattr(rms, "mirror_virtual_fill", _boom)
+
+        # Act
+        result = _run(
+            po._execute_real_direct(
+                {"symbol": "600036.SH", "quantity": 300, "price": 40.0},
+                body=_sell_body(["sim", "real"]),
+                tenant_id="default",
+                uid=10000001,
+                redis=SimpleNamespace(),
+                db=SimpleNamespace(),
+            )
+        )
+
+        # Assert
+        assert result["success"] is False
+        assert result["executed"] is True
+        assert "broker offline" in result["message"]

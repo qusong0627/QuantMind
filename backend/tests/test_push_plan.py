@@ -14,6 +14,7 @@ from backend.shared.push_plan import (
     align_buy_quantity,
     apply_batch_scale,
     batch_scale,
+    choose_sell_source,
     classify_decisions,
     mirror_outcome_class,
     plan_quantity,
@@ -903,3 +904,106 @@ class TestApplyBatchScale:
         out, budget = apply_batch_scale(legs, 1000.0, "buy")
         assert out is legs
         assert budget == {"applied": False, "factor": 1.0}
+
+
+# --------------------------------------------------------------------------
+# choose_sell_source：卖出数量按通道取源（模拟台账 / 实盘直发）
+# --------------------------------------------------------------------------
+
+
+class TestChooseSellSource:
+    def test_sim_position_wins_and_stays_on_the_sim_ledger(self):
+        """模拟盘有票 → 一切照旧（模拟建单 + 可选镜像），实盘有多少都不改变本笔。"""
+        # Arrange / Act
+        plan = choose_sell_source(
+            sim_available=246, real_available=246, real_requested=True
+        )
+
+        # Assert
+        assert plan.available == 246
+        assert plan.source == "sim"
+        assert plan.exec_path == "sim"
+
+    def test_real_only_position_goes_direct(self):
+        """模拟盘没有、实盘有 → 直发实盘，数量取实盘可用量。"""
+        # Arrange / Act
+        plan = choose_sell_source(
+            sim_available=0, real_available=300, real_requested=True
+        )
+
+        # Assert
+        assert plan.available == 300
+        assert plan.source == "real"
+        assert plan.exec_path == "real_direct"
+        assert "实盘" in plan.note
+
+    def test_real_only_without_real_channel_tells_the_user_to_enable_it(self):
+        """勾的是「只模拟盘」而票只在实盘：**不能**说「无可用持仓」——那是假话，
+        用户看得见自己持有这只票。要给出可执行的下一步。"""
+        # Arrange / Act
+        plan = choose_sell_source(
+            sim_available=0, real_available=300, real_requested=False
+        )
+
+        # Assert
+        assert plan.available == 0
+        assert plan.exec_path == ""
+        assert "实盘" in plan.problem
+        assert "通道" in plan.problem
+
+    def test_nobody_holds_it_stays_a_plain_zero(self):
+        """两个账户都没有 → 交回 ``plan_quantity`` 的通用阻断，不另编理由。"""
+        # Arrange / Act
+        plan = choose_sell_source(
+            sim_available=0, real_available=0, real_requested=True
+        )
+
+        # Assert
+        assert plan.available == 0
+        assert plan.problem == ""
+
+    def test_unknown_real_position_is_not_treated_as_held(self):
+        """实盘持仓读不到（None）≠ 持有 0 股，但也不能凭想象放行一张真单。"""
+        # Arrange / Act
+        plan = choose_sell_source(
+            sim_available=0, real_available=None, real_requested=True
+        )
+
+        # Assert
+        assert plan.available == 0
+        assert plan.exec_path == ""
+
+    def test_overlap_notes_the_remainder_on_the_real_account(self):
+        """同票两个账户都有：本笔只卖模拟台账的可用量，实盘多出来的部分是**事实**，
+        要写出来（用户按「一键卖出」后发现自己还持有一大截会以为系统没卖）。"""
+        # Arrange / Act
+        plan = choose_sell_source(
+            sim_available=100, real_available=500, real_requested=True
+        )
+
+        # Assert
+        assert plan.source == "sim"
+        assert plan.available == 100
+        assert "400" in plan.note
+
+    def test_sim_only_request_never_mentions_the_real_account(self):
+        """没勾实盘通道就不该提实盘（用户会以为系统打算动真账户）。"""
+        # Arrange / Act
+        plan = choose_sell_source(
+            sim_available=100, real_available=500, real_requested=False
+        )
+
+        # Assert
+        assert plan.note == ""
+
+    def test_empty_sim_position_with_unknown_real_and_no_channel(self):
+        """两个来源都没数：不编理由，也不放行。"""
+        # Arrange / Act
+        plan = choose_sell_source(
+            sim_available=0, real_available=None, real_requested=False
+        )
+
+        # Assert
+        assert plan.available == 0
+        assert plan.exec_path == ""
+        assert plan.problem == ""

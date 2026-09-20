@@ -96,6 +96,24 @@ export function mirrorPrecheckText(leg: PushLeg): string {
   return `不会下发真单（${mirrorReasonText(p.reason)}）`;
 }
 
+/** 这一笔是不是「实盘独有持仓直发」（没有模拟腿） */
+export function isRealDirect(leg: PushLeg): boolean {
+  return String(leg.exec_path ?? '') === 'real_direct';
+}
+
+/**
+ * 实盘直发腿在「通道」列的文案。
+ *
+ * 不能沿用镜像腿的「将下发真单」：那句旁边总有一条模拟成交，而这一笔**没有**——
+ * 用户按下去就是真钱出仓，模拟台账里不会有任何记录。两件事必须长得不一样。
+ */
+export function realDirectText(leg: PushLeg): string {
+  const p = leg.mirror_precheck;
+  if (p?.will_skip) return `实盘直发 · 不会下发（${mirrorReasonText(p.reason)}）`;
+  return '实盘直发（不经模拟台账）';
+}
+
+
 // ---------------------------------------------------------------------------
 // 实盘闸门三态 + 配额
 // ---------------------------------------------------------------------------
@@ -284,7 +302,7 @@ export function pushGate(
 // ---------------------------------------------------------------------------
 
 export interface LegResultView {
-  tone: 'ok' | 'dup' | 'skipped' | 'fail';
+  tone: 'ok' | 'queued' | 'dup' | 'skipped' | 'fail';
   label: string;
   detail: string;
 }
@@ -296,6 +314,7 @@ export interface LegResultView {
  * 但对用户来说「我点了两次」这件事必须看得见。
  */
 export function legResultView(r: PushLegResult): LegResultView {
+  if (String(r.exec_path ?? '') === 'real_direct') return realDirectView(r);
   if (!r.executed) {
     return { tone: 'skipped', label: '未提交', detail: String(r.skipped_reason || '预检阻断') };
   }
@@ -312,6 +331,45 @@ export function legResultView(r: PushLegResult): LegResultView {
     };
   }
   return { tone: 'fail', label: '失败', detail: String(r.message || '未说明原因') };
+}
+
+/**
+ * 实盘直发腿的回执（`exec_path === 'real_direct'`）。
+ *
+ * 与模拟腿分开渲染是因为**同一个 `success` 在两个语境里不是一件事**：模拟腿的
+ * `success=true` 配着一条模拟成交（「已成交」），而直发腿的 `success=true` 只说明
+ * 真单**已提交到券商**，成交与否要等回报。把后者渲染成「已成交」就是对着真钱撒谎。
+ */
+export function realDirectView(r: PushLegResult): LegResultView {
+  const d = r.real_direct;
+  const cls = String(d?.class || '');
+  if (!r.executed) {
+    return {
+      tone: 'skipped',
+      label: '未提交',
+      detail: String(r.skipped_reason || d?.reason || '实盘闸门未放行'),
+    };
+  }
+  if (cls === 'success') {
+    const limit = d?.limit_price != null ? `限价 ${Number(d.limit_price).toFixed(2)}` : '';
+    return {
+      tone: 'ok',
+      label: '真单已提交',
+      detail: [limit, String(r.message || '')].filter(Boolean).join(' · '),
+    };
+  }
+  if (cls === 'queued') {
+    return { tone: 'queued', label: '真单排队中（未发出）', detail: String(r.message || '非交易时段入队，开盘后自动下发') };
+  }
+  if (cls === 'duplicate' || (!cls && r.duplicate)) {
+    return { tone: 'dup', label: '重复（未重复下单）', detail: String(r.message || '幂等键命中，未产生新委托') };
+  }
+  // 无 `class` / 未知 class 一律归失败：真钱路径宁可让人多看一眼
+  return {
+    tone: 'fail',
+    label: cls ? '真单失败' : '真单状态未知',
+    detail: String(r.message || d?.reason || '无回执'),
+  };
 }
 
 interface MirrorReceiptView {

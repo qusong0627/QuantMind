@@ -26,6 +26,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -371,7 +372,29 @@ async def _build_legs(
     available_cash = float((account or {}).get("cash") or 0.0)
     positions = (account or {}).get("positions") or {}
 
-    from backend.shared.push_plan import apply_batch_scale, plan_quantity
+    # 卖出的可卖量还要看实盘账户：模拟台账没有的票，可能只持有在实盘（直发，Phase 4）。
+    # 买入不读 —— 与实盘持仓无关，白读一次 PG 只会让预检变慢。
+    is_sell = str(body.side).strip().lower() == "sell"
+    real_positions: dict[str, Any] = {}
+    real_meta: dict[str, Any] = {}
+    real_known = False
+    if is_sell:
+        try:
+            from backend.shared.real_positions import load_real_positions
+
+            real_positions, real_meta = await load_real_positions(
+                tenant_id, str(current_user.get("user_id") or "")
+            )
+            # 「收到过快照」与「持有 0 股」是两件事：只有前者才敢对用户说未持有。
+            real_known = bool(real_meta.get("sources"))
+        except Exception as exc:  # noqa: BLE001 - 读不到不等于空仓，交给来源裁定如实标注
+            logger.warning("[push] 实盘持仓读取失败（按读不到处理）: %s", exc)
+
+    from backend.shared.push_plan import (
+        apply_batch_scale,
+        choose_sell_source,
+        plan_quantity,
+    )
 
     legs: list[dict[str, Any]] = []
     for sym in normalized:
@@ -380,6 +403,20 @@ async def _build_legs(
         risk_payload = risk["by_symbol"].get(sym)
         pos = _find_position(positions, sym)
         available_position = float(pos.get("available_volume") or 0) if pos else 0.0
+        source_plan = None
+        if is_sell:
+            real_pos = _find_position(real_positions, sym)
+            real_available = (
+                (float(real_pos.get("available_volume") or 0) if real_pos else 0.0)
+                if real_known
+                else None
+            )
+            source_plan = choose_sell_source(
+                sim_available=available_position,
+                real_available=real_available,
+                real_requested="real" in body.channels,
+            )
+            available_position = source_plan.available
 
         override = None
         if body.quantities:
@@ -398,6 +435,17 @@ async def _build_legs(
             override=override,
         )
 
+        # 来源裁定的阻断理由优先于 plan_quantity 的通用句：后者只会说「无可用持仓
+        # （T+1 锁定或未持有）」，而用户屏幕上明明看得见这只持仓 —— 那是句假话。
+        if source_plan is not None and source_plan.problem:
+            plan = replace(
+                plan,
+                quantity=0.0,
+                source="blocked",
+                note="",
+                problem=source_plan.problem,
+            )
+
         leg: dict[str, Any] = {
             "symbol": sym,
             "name": _name_of(sym),
@@ -408,10 +456,15 @@ async def _build_legs(
             "amount": round((price or 0.0) * plan.quantity, 2),
             "risk": risk_payload,
             "blocked_by": "",
+            # 可卖量的取数来源与下单路径（`sim` 走模拟台账；`real_direct` 实盘独有持仓直发）
+            "position_source": source_plan.source if source_plan else "sim",
+            "exec_path": source_plan.exec_path if source_plan else "sim",
             # 镜像预检结果由 _mirror_plan 回填
             "mirror_precheck": None,
         }
         leg.update(plan.as_dict())
+        if source_plan is not None and source_plan.note and leg.get("executable"):
+            leg["note"] = f"{leg['note']}；{source_plan.note}" if leg.get("note") else source_plan.note
 
         if not plan.executable:
             leg["blocked_by"] = "quantity"
@@ -455,6 +508,18 @@ async def _build_legs(
         "exclusion": risk["meta"],
         "exclusion_imported": risk["imported"],
         "budget": budget,
+        # 卖出取数的第二个来源（买入批次不查，如实报 null 而不是编一个空快照）
+        "real_positions": (
+            {
+                "known": real_known,
+                "held": len(real_positions),
+                "snapshot_at": real_meta.get("snapshot_at"),
+                "sources": real_meta.get("sources") or {},
+                "active_broker": real_meta.get("active_broker"),
+            }
+            if is_sell
+            else None
+        ),
     }
     return legs, {"mirror": mirror_info, "summary": summary, "meta": meta}
 
@@ -712,6 +777,18 @@ async def push_orders(body: PushIn, current_user: dict = Depends(get_current_use
                 )
                 continue
             try:
+                if str(leg.get("exec_path") or "") == "real_direct":
+                    results.append(
+                        await _execute_real_direct(
+                            leg,
+                            body=body,
+                            tenant_id=tenant_id,
+                            uid=uid,
+                            redis=redis,
+                            db=session,
+                        )
+                    )
+                    continue
                 outcome = await submit_order(
                     session,
                     redis,
@@ -791,6 +868,90 @@ async def push_orders(body: PushIn, current_user: dict = Depends(get_current_use
                 "skipped": len(results) - len(attempted),
             },
             "mirror": extra.get("mirror"),
+        },
+    }
+
+
+async def _execute_real_direct(
+    leg: dict[str, Any],
+    *,
+    body: PushIn,
+    tenant_id: str,
+    uid: int,
+    redis: Any,
+    db: Any,
+) -> dict[str, Any]:
+    """实盘独有持仓直卖：**不经模拟台账**，直接向真账户下卖单。
+
+    刻意复用 ``mirror_virtual_fill`` 而不是另开一条下单路径：用户已有的急停开关、
+    白/黑名单、价格偏离闸门、持仓与当日限额全在那条链上 —— 「一键卖出」若绕开它，
+    就会出现「点了急停，持仓页的卖出按钮照样把真单打出去」。与镜像路径的唯一区别是
+    这只票没有模拟腿：``trigger`` 改写通知首句（原句「模拟盘成交触发真单镜像」在这里
+    是假话），``source`` 标 ``real_direct``（真钱留痕要分得清是谁发起的）。
+    """
+    from backend.services.live_trading.services.real_mirror_service import (
+        mirror_virtual_fill,
+    )
+    from backend.shared.order_contract import (
+        SOURCE_REAL_DIRECT,
+        build_candidate_client_order_id,
+    )
+    from backend.shared.push_plan import mirror_outcome_class
+
+    symbol = str(leg.get("symbol") or "")
+    quantity = float(leg.get("quantity") or 0)
+    try:
+        payload = await mirror_virtual_fill(
+            db=db,
+            redis=redis,
+            tenant_id=tenant_id,
+            user_id=str(uid),
+            symbol=symbol,
+            side="SELL",
+            quantity=quantity,
+            price=float(leg.get("price") or 0),
+            client_order_id=build_candidate_client_order_id(
+                body.batch_id, symbol, "sell"
+            ),
+            source=SOURCE_REAL_DIRECT,
+            trigger="用户从持仓页一键卖出实盘持仓（不经模拟台账）",
+        )
+    except Exception as exc:  # noqa: BLE001 - 单腿失败不阻断其余（mirror 本就不该抛）
+        logger.warning("[push] 实盘直卖异常 %s: %s", symbol, exc)
+        payload = {"status": "error", "reason": str(exc), "symbol": symbol}
+
+    status = str(payload.get("status") or "error")
+    cls = mirror_outcome_class(status)
+    reason = str(payload.get("reason") or "")
+    limit_price = payload.get("limit_price")
+    # 「已提交」「排队中」「重复跳过」都是**受理**，但都不等于已成交：措辞分开，
+    # 真钱路径上把排队/重复说成「已卖出」是最贵的一种错。
+    message = {
+        "success": f"实盘真单已提交（限价 {limit_price}）",
+        "queued": "非交易时段：真单已入队，开盘后自动下发（尚未成交）",
+        "duplicate": "这一笔此前已提交过（幂等跳过，未重复下单）",
+        "skipped": f"实盘闸门未放行：{reason or '未说明'}",
+    }.get(cls, f"实盘真单失败：{reason or status or '未说明'}")
+    attempted = cls != "skipped"
+    return {
+        "symbol": symbol,
+        "success": cls == "success",
+        "executed": attempted,
+        **({"skipped_reason": reason or "skipped"} if not attempted else {}),
+        "order_id": payload.get("order_id"),
+        "message": message,
+        "duplicate": cls == "duplicate",
+        # 无模拟腿，因此没有镜像回执；真单结论在下方的 real_direct 里
+        "mirror": None,
+        "exec_path": "real_direct",
+        "real_direct": {
+            "status": status,
+            "class": cls,
+            "reason": reason,
+            "order_id": payload.get("order_id"),
+            "client_order_id": payload.get("client_order_id"),
+            "limit_price": limit_price,
+            "order_value": payload.get("order_value"),
         },
     }
 

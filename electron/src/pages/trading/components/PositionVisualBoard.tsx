@@ -103,6 +103,11 @@ export const PositionVisualBoard: React.FC<{
       message.warning('没有可提交的标的');
       return;
     }
+    // 通道默认值每次**打开时**重取：`useState(defaultChannels)` 只在挂载那一次生效，
+    // 而账户视图（模拟/实盘）可以在页面生命周期内随时切换 —— 切到实盘后再点卖出，
+    // 面板若还停在「仅模拟盘」，实盘持仓会被逐笔拦成「未勾选实盘通道」。
+    // 面板里手动改过的通道只在本次打开内有效，重开时重新跟随账户视图。
+    setChannels(defaultChannels);
     setSellSymbols(symbols);
   };
   const closeSell = () => setSellSymbols(null);

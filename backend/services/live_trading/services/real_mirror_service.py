@@ -803,8 +803,13 @@ async def mirror_virtual_fill(
     market: str = "",
     source: str = "",
     bypass_price_gate: bool = False,
+    trigger: str = "",
 ) -> dict[str, Any]:
     """虚拟成交 → 真单镜像。**永不抛异常**，返回结构化决策结果。
+
+    ``trigger``：成交通知里那句「这笔真单为什么会有」的原因是**可覆盖**的。默认句是
+    「模拟盘成交触发真单镜像」，但实盘独有持仓直卖（``SOURCE_REAL_DIRECT``）没有模拟腿，
+    照原样说出去就是假话 —— 真钱通知的第一句必须是真的。
 
     ``db`` 缺省时自建独立会话（调用方持有未提交事务时用，避免真单写入
     提前提交调用方的事务）。
@@ -836,6 +841,7 @@ async def mirror_virtual_fill(
             market=str(market or ""),
             source=str(source or ""),
             bypass_price_gate=bool(bypass_price_gate),
+            trigger=str(trigger or ""),
         )
     except Exception as exc:  # noqa: BLE001 - 镜像失败绝不影响虚拟账本
         logger.error(
@@ -866,6 +872,7 @@ async def _mirror_virtual_fill(
     market: str,
     source: str,
     bypass_price_gate: bool = False,
+    trigger: str = "",
 ) -> dict[str, Any]:
     def _skip(reason: str) -> dict[str, Any]:
         logger.info(
@@ -930,6 +937,9 @@ async def _mirror_virtual_fill(
     }
     if bypass_price_gate:
         payload["bypass_price_gate"] = True
+    if trigger:
+        # 只在被覆盖时入载荷：队列里的这一笔开盘后仍要说同一句真话
+        payload["trigger"] = str(trigger)
     if not is_trading_time():
         if not cfg.queue_outside_hours:
             return _skip("outside_trading_hours")
@@ -1244,7 +1254,8 @@ async def _submit_payload(
     notify(
         title=f"真单已提交：{side} {symbol}",
         content=(
-            f"模拟盘成交触发真单镜像。\n标的：{symbol}\n方向：{side}\n"
+            f"{str(payload.get('trigger') or '模拟盘成交触发真单镜像').rstrip('。')}。\n"
+            f"标的：{symbol}\n方向：{side}\n"
             f"数量：{quantity}\n限价：{limit_price:.2f}\n"
             f"金额：{order_value:.2f}\n镜像单号：{mirror_cid}"
         ),

@@ -200,6 +200,88 @@ def plan_quantity(
     return QuantityPlan(qty, "auto", note=f"{note}；{basis}" if note else basis)
 
 
+@dataclass(frozen=True)
+class SellSourcePlan:
+    """卖出腿的**取数来源**裁定：这个可卖量从哪个账户取、这张单走哪条路。
+
+    与 ``QuantityPlan`` 分两层是刻意的：那一层管「多少股」，这一层管「数从哪来」。
+    不分开的话，「模拟账户 0 股」与「只在实盘持有」会长得一模一样，被同一句
+    「无可用持仓（T+1 锁定或未持有）」打发掉 —— 而用户屏幕上明明看得见这只持仓。
+    """
+
+    available: float  # 交给 plan_quantity(available_position=…) 的数
+    source: str  # sim | real | none
+    exec_path: str  # sim | real_direct | ""（不执行）
+    note: str = ""
+    problem: str = ""
+
+    @property
+    def is_real_direct(self) -> bool:
+        return self.exec_path == "real_direct"
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "available": self.available,
+            "source": self.source,
+            "exec_path": self.exec_path,
+            "note": self.note,
+            "problem": self.problem,
+        }
+
+
+def choose_sell_source(
+    *,
+    sim_available: float,
+    real_available: float | None,
+    real_requested: bool,
+) -> SellSourcePlan:
+    """卖出取数：优先模拟台账，模拟没有才看实盘。
+
+    ``real_available`` 的 ``None`` 是**「读不到」而不是「持有 0 股」**：实盘快照是
+    外部世界，从未收到过快照 ≠ 没持仓，混同的代价是对着真实持仓说「未持有」，
+    或者凭想象发一张真单。模拟账户是本地台账，取不到即异常，调用方按 0 处理。
+    """
+    sim = float(sim_available or 0)
+    if sim > 0:
+        note = ""
+        if real_requested:
+            if real_available is None:
+                note = f"实盘持仓读不到，本笔只卖模拟台账的 {sim:g} 股"
+            else:
+                extra = float(real_available) - sim
+                if extra > 0:
+                    note = f"实盘另持有 {extra:g} 股，本笔只卖模拟台账的 {sim:g} 股"
+        return SellSourcePlan(sim, "sim", "sim", note=note)
+
+    if real_available is None:
+        if real_requested:
+            return SellSourcePlan(
+                0.0,
+                "none",
+                "",
+                problem="实盘持仓快照读不到（未同步或券商离线），无法确认可卖数量",
+            )
+        return SellSourcePlan(0.0, "none", "")
+
+    real = float(real_available)
+    if real <= 0:
+        # 两边都没有：交回 plan_quantity 的通用阻断，不在这里另编理由
+        return SellSourcePlan(0.0, "none", "")
+    if not real_requested:
+        return SellSourcePlan(
+            0.0,
+            "none",
+            "",
+            problem="该持仓只在实盘账户，本次未勾选实盘通道 —— 请把通道切到「模拟盘 + 实盘」",
+        )
+    return SellSourcePlan(
+        real,
+        "real",
+        "real_direct",
+        note=f"实盘独有持仓，直发实盘（不经模拟台账）{real:g} 股",
+    )
+
+
 def batch_scale(available_cash: float | None, needs: list[float]) -> float:
     """整批资金约束下的**统一缩放系数**（1.0 = 不必缩放）。
 

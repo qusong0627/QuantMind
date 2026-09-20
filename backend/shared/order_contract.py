@@ -47,6 +47,7 @@ SOURCE_SANDBOX = "sandbox"  # 沙箱策略信号（T-P2-01 收敛入 Router）
 SOURCE_TDX_ROLLING = "tdx_rolling"  # 通达信滚动 paper 单（T-P2-01 收敛入 Router）
 SOURCE_CO_PILOT = "co_pilot"  # 副驾驶建议卡一键执行（T-P6-16）
 SOURCE_CANDIDATE_PUSH = "candidate_push"  # 候选信号页多选一键推送（T-FE-09）
+SOURCE_REAL_DIRECT = "real_direct"  # 实盘独有持仓直卖（用户一键卖出，不经模拟台账）
 
 # Fill 取价来源（REAL 侧：成交回报来自券商）
 PRICE_SOURCE_BROKER_FILL = "broker_fill"

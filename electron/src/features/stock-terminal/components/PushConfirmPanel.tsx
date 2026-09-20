@@ -29,6 +29,7 @@ import {
   channelLabel,
   effectiveQuantity,
   executeHeadline,
+  isRealDirect,
   legAmount,
   legResultView,
   mirrorPlanIssues,
@@ -38,6 +39,7 @@ import {
   parseQuantity,
   pushGate,
   quotaLine,
+  realDirectText,
   riskVerdictView,
 } from '../pushModel';
 import type {
@@ -308,7 +310,10 @@ export function PushConfirmPanel({ open, symbols, side, channels, onChannelsChan
                 <span className="text-right">金额</span>
                 <span>名单 / 新闻</span>
                 <span className="text-center">风控</span>
-                <span className="text-center">{real ? '真单镜像' : '通道'}</span>
+                {/* 有实盘直发腿时改口径：那一列不再全是「镜像」（直发的真单没有模拟腿） */}
+                <span className="text-center">
+                  {legs.some(isRealDirect) ? '真单路径' : real ? '真单镜像' : '通道'}
+                </span>
               </div>
               {legs.map(leg => {
                 const blocked = !leg.executable;
@@ -387,7 +392,11 @@ export function PushConfirmPanel({ open, symbols, side, channels, onChannelsChan
                       </Tooltip>
                     </span>
                     <span className="text-center text-[10px] leading-snug">
-                      {real ? (
+                      {isRealDirect(leg) ? (
+                        <span className={leg.mirror_precheck?.will_skip ? 'text-amber-700 font-bold' : 'text-rose-600 font-bold'}>
+                          {realDirectText(leg)}
+                        </span>
+                      ) : real ? (
                         <span className={leg.mirror_precheck?.will_skip ? 'text-amber-700 font-bold' : 'text-slate-500'}>
                           {mirrorPrecheckText(leg)}
                         </span>

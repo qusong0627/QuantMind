@@ -17,15 +17,18 @@ import {
   channelLabel,
   effectiveQuantity,
   executeHeadline,
+  isRealDirect,
   legAmount,
   legResultView,
   mirrorPlanIssues,
   mirrorPrecheckText,
+  mirrorReasonText,
   mirrorReceiptView,
   panelSummary,
   parseQuantity,
   pushGate,
   quotaLine,
+  realDirectText,
   riskVerdictView,
 } from '../pushModel';
 import type { PushExecute, PushLeg, PushLegResult, PushMirrorPlan } from '../../stock-terminal-shared/types';
@@ -511,5 +514,101 @@ describe('budgetBanner', () => {
   it('缺金额时退化成一句只说系数的提示，也不返回空串', () => {
     // Act / Assert
     expect(budgetBanner({ applied: true, factor: 0.5 })).toContain('0.5000');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 实盘直发腿（exec_path='real_direct'）：没有模拟腿的那一类
+// ---------------------------------------------------------------------------
+
+describe('realDirectText', () => {
+  it('实盘直发要说得出来「不经模拟台账」', () => {
+    // Arrange
+    const l = leg({ exec_path: 'real_direct', position_source: 'real' });
+
+    // Act / Assert
+    expect(isRealDirect(l)).toBe(true);
+    expect(realDirectText(l)).toContain('不经模拟台账');
+  });
+
+  it('闸门要跳过时说「不会下发」，不说「将下发真单」', () => {
+    // Arrange：这一笔是真钱，措辞与镜像腿的「将下发真单」不能混
+    const l = leg({
+      exec_path: 'real_direct',
+      mirror_precheck: { will_skip: true, reason: 'max_daily_value' },
+    });
+
+    // Act
+    const txt = realDirectText(l);
+
+    // Assert
+    expect(txt).toContain('不会下发');
+    // 理由沿用镜像那套词（同一个 reason 码只有一份文案，不另编一句）
+    expect(txt).toContain(mirrorReasonText('max_daily_value'));
+  });
+
+  it('模拟腿（含镜像）不落进直发口径', () => {
+    // Arrange
+    const l = leg({ exec_path: 'sim' });
+
+    // Act / Assert
+    expect(isRealDirect(l)).toBe(false);
+  });
+});
+
+describe('legResultView · 实盘直发腿', () => {
+  const rd = (over: Partial<PushLegResult> = {}): PushLegResult => ({
+    symbol: '600036.SH',
+    success: true,
+    executed: true,
+    exec_path: 'real_direct',
+    real_direct: { status: 'submitted', class: 'success', limit_price: 39.8 },
+    ...over,
+  });
+
+  it('已提交不等于已成交（直发腿没有模拟成交）', () => {
+    // Arrange / Act
+    const v = legResultView(rd());
+
+    // Assert
+    expect(v.label).toBe('真单已提交');
+    expect(v.label).not.toBe('已成交');
+    expect(v.detail).toContain('39.80');
+  });
+
+  it('排队中与已提交分开说（真钱还没出去）', () => {
+    // Arrange / Act
+    const v = legResultView(
+      rd({ success: false, real_direct: { status: 'queued', class: 'queued' } }),
+    );
+
+    // Assert
+    expect(v.tone).toBe('queued');
+    expect(v.label).toContain('未发出');
+  });
+
+  it('闸门未放行显示成「未提交」，不是失败也不是成功', () => {
+    // Arrange / Act
+    const v = legResultView(
+      rd({
+        success: false,
+        executed: false,
+        skipped_reason: 'outside_trading_hours',
+        real_direct: { status: 'skipped', class: 'skipped', reason: 'outside_trading_hours' },
+      }),
+    );
+
+    // Assert
+    expect(v.tone).toBe('skipped');
+    expect(v.detail).toBe('outside_trading_hours');
+  });
+
+  it('回执缺失时归失败（不默认落进成功）', () => {
+    // Arrange / Act
+    const v = legResultView(rd({ real_direct: null }));
+
+    // Assert
+    expect(v.tone).toBe('fail');
+    expect(v.label).toContain('未知');
   });
 });

@@ -324,6 +324,17 @@ export type PushChannel = 'sim' | 'real';
 /** 服务端逐笔的阻断位；空串 = 没被阻断 */
 export type PushBlockedBy = '' | 'quantity' | 'list' | 'risk';
 
+/** 这一笔的可卖量取自哪个账户：模拟台账 / 实盘快照 / 两边都没有 */
+export type PushPositionSource = 'sim' | 'real' | 'none';
+
+/**
+ * 这一笔走哪条下单路径。
+ *
+ * `sim` = 模拟台账建单（勾了实盘则再镜像真单）；`real_direct` = **实盘独有持仓直发**，
+ * 没有模拟腿 —— 面板与回执都必须把它与镜像腿分开说（镜像腿的「已成交」指模拟成交）。
+ */
+export type PushExecPath = 'sim' | 'real_direct' | '';
+
 /** 实盘配额试算：这一笔会不会被镜像闸跳过（`will_skip` 必须显示成「不会下发真单」） */
 export interface MirrorPrecheck {
   will_skip: boolean;
@@ -360,6 +371,10 @@ export interface PushLeg {
   problem: string;
   blocked_by: PushBlockedBy | string;
   executable: boolean;
+  /** 可卖量取自哪个账户（卖出批次恒发；买入恒为 `sim`） */
+  position_source?: PushPositionSource;
+  /** 下单路径；`real_direct` 的腿**没有模拟成交**，回执措辞必须与镜像腿分开 */
+  exec_path?: PushExecPath;
   /** 服务端恒发（`null` 与 `{will_skip:false}` 是「没查」与「查了没事」两件事） */
   mirror_precheck: MirrorPrecheck | null;
   risk_verdict?: string;
@@ -450,8 +465,20 @@ export interface PushLegResult {
   commission?: number | null;
   message?: string;
   duplicate?: boolean;
+  /** `real_direct` = 实盘直发腿（无模拟成交，`success` 指真单已提交，不是已成交） */
+  exec_path?: PushExecPath;
   /** 仅实盘腿有；`class` 只有 success 才算真发出去了 */
   mirror?: { status: string; class: string; reason?: string; order_id?: string | null; client_order_id?: string | null } | null;
+  /** 仅实盘直发腿有（与 `mirror` 并列的两个回执位：一个真单只能走其中一条路） */
+  real_direct?: {
+    status: string;
+    class: string;
+    reason?: string;
+    order_id?: string | null;
+    client_order_id?: string | null;
+    limit_price?: number | null;
+    order_value?: number | null;
+  } | null;
 }
 
 export interface PushExecute {
