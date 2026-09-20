@@ -32,6 +32,65 @@ export interface StockListItem {
   market_empty: boolean | null;
   cap_tier?: string;   // 微盘/小盘/中盘/大盘/超大盘
   trend?: string;      // 连续上升/连续下降/先升后降/上升/下降/持平/-
+  /** 风险载荷（仅 A 股候选列表返回；无任何命中/标注时整个字段缺席） */
+  risk?: StockRisk | null;
+}
+
+/** 近 20 天新闻标签的一条（通道 B）。`samples` 只有利空档带——用户要能看到「凭什么说它利空」 */
+export interface NewsTagBucket {
+  tag: string;
+  n: number;
+  last?: string | null;   // 最近发布时间（ISO8601，UTC）
+  samples?: string[];     // 证据标题（最多 3 条，仅 risk 档）
+}
+
+/** 名单命中一条（通道 A）。`reason` 可能很长（多条来源拼接），只在悬停里展开 */
+export interface StockRiskHit {
+  symbol: string;
+  sources: string[];
+  source_labels?: string[];
+  flags?: string[];
+  reason?: string;
+  /** 时间窗到期日（如解禁类）；已过期的条目不计入 blocking */
+  expire?: string | null;
+  blocking?: boolean;
+  expired?: boolean;
+}
+
+export interface StockRisk {
+  /** 命中「默认排除判据」。与开关是否打开无关——关掉开关后前端仍要把这些行标出来 */
+  excluded: boolean;
+  hits?: StockRiskHit[];
+  /** 五档方向固定存在（空桶保留），前端按固定桶渲染 */
+  news?: Record<string, NewsTagBucket[]>;
+}
+
+/** 列表响应级排除元信息：两条通道各自的基准/新鲜度 + 本轮实际排除只数 */
+export interface ExclusionMeta {
+  list: {
+    imported: boolean;
+    market?: string;
+    asof?: string;
+    generated_at?: string;
+    stale_days?: number | null;
+    stale?: boolean;
+    counts?: { total?: number; blocking?: number; by_source?: Record<string, number> };
+    sources?: Record<string, { label?: string; count?: number; asof?: string; blocking?: boolean }>;
+    /** imported=false 时的原因（名单文件未导入） */
+    reason?: string;
+  };
+  news: {
+    available: boolean;
+    window_end?: string;
+    stale_days?: number | null;
+    tags?: number;
+    symbols?: number;
+    reason?: string;
+  };
+  /** 本轮各通道**实际**排除的只数（只减不说的列表会让用户以为数据丢了） */
+  excluded: { st?: number; risk_list?: number; news_risk?: number };
+  risk_list_size?: number;
+  news_risk_size?: number;
 }
 
 /** 事件竖线（如美股拆股）：在指定日期画一条竖虚线并标注，用于解释未复权价的跳变 */
@@ -62,6 +121,8 @@ export interface StockListResponse {
   option_counts?: Record<string, Record<string, number>>;
   /** 列表内各列的取值集合（表头筛选选项），如 { board: [...], industry: [...], cap_tier: [...], trend: [...], side: [...] } */
   facets?: Record<string, string[]>;
+  /** 排除闸门元信息（仅 A 股返回；港股/美股无该字段，前端自动降级不渲染） */
+  exclusion_meta?: ExclusionMeta | null;
 }
 
 export interface IndexMembership {

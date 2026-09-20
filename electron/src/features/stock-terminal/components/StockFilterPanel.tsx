@@ -1,12 +1,13 @@
 /** 看板风格筛选面板：驱动左侧股票列表（状态由页面持有，compact=左侧列内嵌模式） */
 
 import { useEffect, useState } from 'react';
-import { SlidersHorizontal, X, RotateCcw } from 'lucide-react';
+import { SlidersHorizontal, X, RotateCcw, ShieldAlert } from 'lucide-react';
 import { Select } from 'antd';
 
 // 概念板块限宽 200px（网格列约束）+ 选中项省略号，避免长概念名把后面控件挤在一起
 import { stockTerminalService } from '../services/stockTerminalService';
 import { MarketCalendarFilter } from './MarketCalendarFilter';
+import { EXCLUDE_ON } from '../riskModel';
 
 export interface ListFilters {
   board?: string;
@@ -23,7 +24,10 @@ export interface ListFilters {
   tagId?: string;
   tagName?: string;
   side?: string;       // 信号方向 BUY/SELL/HOLD（列表表头筛选）
-  excludeSt?: boolean; // 排除 ST 股
+  // 风险排除闸：**未显式置 false 即视为开启**（判据在 ../riskModel 的 EXCLUDE_ON）
+  excludeSt?: boolean;        // 排除 ST 股
+  excludeRiskList?: boolean;  // 排除「不买入」名单（通道 A）
+  excludeNewsRisk?: boolean;  // 排除近 20 天新闻利空（通道 B）
 }
 
 export const BOARD_OPTIONS = ['沪市主板', '深市主板', '科创板', '创业板', '北交所'];
@@ -106,6 +110,27 @@ export function StockFilterPanel({ filters, onChange, total, fullTotal, models: 
     return n != null ? `${name} ${n}` : name;
   };
 
+  /** 排除闸开关（开启=琥珀，关闭=灰）。title 交代口径——被排除的票看不见，得让用户知道凭什么 */
+  const excludeChip = (label: string, on: boolean, tip: string, onToggle: () => void) => (
+    <button
+      key={label}
+      type="button"
+      onClick={onToggle}
+      title={`${on ? '点击放行' : '点击排除'}：${tip}`}
+      className={`text-[10px] font-bold px-1.5 py-0.5 rounded border transition-colors shrink-0 ${
+        on
+          ? 'bg-amber-50 text-amber-600 border-amber-200 hover:bg-amber-100'
+          : 'bg-slate-50 text-slate-400 border-slate-200 hover:border-slate-300'
+      }`}
+    >
+      {label}
+    </button>
+  );
+
+  const stOn = EXCLUDE_ON(filters.excludeSt);
+  const riskListOn = EXCLUDE_ON(filters.excludeRiskList);
+  const newsOn = EXCLUDE_ON(filters.excludeNewsRisk);
+
   const activeChips: { key: string; label: string; clear: () => void }[] = [];
   if (!columnOnly) {
     if (filters.board) activeChips.push({ key: 'board', label: `板块 ${filters.board}`, clear: () => set({ board: undefined }) });
@@ -129,26 +154,28 @@ export function StockFilterPanel({ filters, onChange, total, fullTotal, models: 
   return (
     <div className="flex flex-col gap-1.5 shrink-0">
       {/* 标题行 */}
-      <div className="flex items-center justify-between px-1">
-        <div className="flex items-center gap-1.5">
-          <SlidersHorizontal className="w-3.5 h-3.5 text-blue-500" />
-          <span className="text-xs font-black text-slate-700">条件筛选</span>
-          <span className="text-[10px] text-slate-400 font-bold">
+      <div className="flex items-center justify-between gap-1 px-1">
+        <div className="flex items-center gap-1.5 min-w-0 flex-wrap">
+          <SlidersHorizontal className="w-3.5 h-3.5 text-blue-500 shrink-0" />
+          <span className="text-xs font-black text-slate-700 shrink-0">条件筛选</span>
+          <span className="text-[10px] text-slate-400 font-bold shrink-0">
             {fullTotal > 0 && <>命中 <b className="text-blue-600">{total}</b> / {fullTotal} 只</>}
           </span>
-          <button
-            onClick={() => set({ excludeSt: !filters.excludeSt })}
-            className={`text-[10px] font-bold px-1.5 py-0.5 rounded border transition-colors ${
-              filters.excludeSt
-                ? 'bg-amber-50 text-amber-600 border-amber-200'
-                : 'bg-slate-50 text-slate-400 border-slate-200 hover:border-slate-300'
-            }`}
-          >
-            {filters.excludeSt ? '已排除ST' : '排除ST'}
-          </button>
+          {/* 风险排除闸（默认全开；通道 A/B 的命中数与基准日在列表头的风险条里逐项交代） */}
+          <span className="flex items-center gap-1 shrink-0">
+            <ShieldAlert className="w-3 h-3 text-amber-500 shrink-0" />
+            <span className="text-[10px] font-bold text-slate-400">排除</span>
+            {excludeChip('ST', stOn, 'ST / *ST（QuantDB instrument_detail.IsSTGP 快照，仅实盘窗口内生效）',
+              () => set({ excludeSt: !stOn }))}
+            {excludeChip('名单', riskListOn, '用户「不买入」名单（data/exclusions/cn.json，含基本面长期排除 / 事件风险 / 年内新闻黑名单）',
+              () => set({ excludeRiskList: !riskListOn }))}
+            {excludeChip('新闻利空', newsOn, '近 20 天监管 / 司法类新闻标签（立案调查、内幕交易、财务造假等）',
+              () => set({ excludeNewsRisk: !newsOn }))}
+          </span>
         </div>
-        {(activeChips.length > 0 || filters.excludeSt) && (
-          <button onClick={() => onChange({})} className="flex items-center gap-1 text-[10px] font-bold text-slate-400 hover:text-rose-500 transition-colors">
+        {/* 清空只清「筛选条件」，不重置上方的排除闸——清空是用户想看得更多，不是想买风险股 */}
+        {activeChips.length > 0 && (
+          <button onClick={() => onChange({})} className="flex items-center gap-1 text-[10px] font-bold text-slate-400 hover:text-rose-500 transition-colors shrink-0">
             <RotateCcw className="w-3 h-3" /> 清空
           </button>
         )}

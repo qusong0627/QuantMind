@@ -60,6 +60,10 @@ export interface StockListParams {
   side?: string;
   /** 排除 ST 股 */
   exclude_st?: boolean;
+  /** 排除「不买入」名单（通道 A：data/exclusions/cn.json，仅 A 股） */
+  exclude_risk_list?: boolean;
+  /** 排除近 20 天有监管/司法类新闻利空的股票（通道 B，仅 A 股） */
+  exclude_news_risk?: boolean;
   page?: number;
   page_size?: number;
   /** 附带各筛选下拉选项的命中数（option_counts） */

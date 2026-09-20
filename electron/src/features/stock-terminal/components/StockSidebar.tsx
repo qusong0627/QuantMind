@@ -1,9 +1,10 @@
 /** 个股终端左侧栏：搜索 + 市场分段 + 看板筛选（页面持有条件）+ 信息丰富的股票列表 */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Search, RefreshCw, Star, ChevronDown, ChevronLeft, ChevronRight, ChevronsUp, ChevronsDown } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
+import { Search, RefreshCw, Star, ChevronDown, ChevronLeft, ChevronRight, ChevronsUp, ChevronsDown, ShieldCheck, AlertTriangle } from 'lucide-react';
 import { Input, Spin, message, Dropdown } from 'antd';
-import { StockListItem, StockListResponse } from '../types';
+import { StockListItem, StockListResponse, StockRisk, ExclusionMeta } from '../types';
+import { EXCLUDE_ON, riskChips, channelText } from '../riskModel';
 import { stockTerminalService } from '../services/stockTerminalService';
 import { ListFilters, bucketScoreRange, StockFilterPanel, BOARD_OPTIONS, CAP_TIER_OPTIONS, TREND_OPTIONS, BUCKET_OPTIONS } from './StockFilterPanel';
 import { EvalScoreBadge } from '../../../components/shared/EvalScoreBadge';
@@ -104,6 +105,21 @@ export function positionToneOf(v: number | null | undefined): { cls: string; txt
 
 const MARKETS: [string, string][] = [['ALL', '全部'], ['SH', '沪市'], ['SZ', '深市'], ['BJ', '北交']];
 
+/** 行内风险/新闻徽章：判据在 riskModel.riskChips（纯函数，单测盯口径），这里只管画 */
+function RiskBadges({ risk }: { risk?: StockRisk | null }): ReactElement | null {
+  const chips = riskChips(risk);
+  if (!chips.length) return null;
+  return (
+    <>
+      {chips.map(c => (
+        <span key={c.key} title={c.title} className={`text-[9px] rounded px-0.5 shrink-0 ${c.cls}`}>
+          {c.label}
+        </span>
+      ))}
+    </>
+  );
+}
+
 export function StockSidebar({ selected, onSelect, watchlistSymbols, positions = new Map<string, PositionKind>(), onlyWatchlist, onOnlyWatchlist, onToggleWatch, filters, onFiltersChange, onModels, models: modelOptions = [], onTotals, onSignalDate, fullTotal = 0, onModelRefreshed, onOpen }: Props) {
   const [market, setMarket] = useState('ALL');
   const [q, setQ] = useState('');
@@ -139,7 +155,11 @@ export function StockSidebar({ selected, onSelect, watchlistSymbols, positions =
       tag: filters.tagId,
       index_code: filters.indexCode,
       side: filters.side,
-      exclude_st: filters.excludeSt || undefined,
+      // 风险排除闸**显式传布尔**（后端三个开关默认 false，是为了服务检索框/自选股；
+      // 候选列表是「要排除的调用方」，默认全开——见 StockFilterPanel.EXCLUDE_ON）
+      exclude_st: EXCLUDE_ON(filters.excludeSt),
+      exclude_risk_list: EXCLUDE_ON(filters.excludeRiskList),
+      exclude_news_risk: EXCLUDE_ON(filters.excludeNewsRisk),
       // 只看自选：把全量自选传给后端过滤（保留分数序），否则前端只过滤已加载页导致列表不全
       symbols: onlyWatchlist && watchlistSymbols.size ? [...watchlistSymbols].join(',') : undefined,
       ...(withCounts ? { with_counts: true } : {}),
@@ -382,6 +402,79 @@ export function StockSidebar({ selected, onSelect, watchlistSymbols, positions =
         }
       />
 
+      {/* 风险闸收据：默认排除了什么、各排掉多少、名单是哪天的 —— 摆在列表头上，
+          让「列表怎么少了」有一个当场可查的答案（只减不说的列表会被当成数据丢了）。
+
+          **只列分项、不给合计**：三个通道的计数会互相重叠（同一只票既在名单又有新闻时
+          各记一笔，实测 204+1808+65=2077 而真实剔除 2038），加出来摆上去就是假证据。
+          计数落后端**实际**剔掉的只数，通道关掉时为 0 —— 所以关掉时显示「放行」而不是
+          「0」，否则读起来像「这个通道一只都没命中」。 */}
+      {(() => {
+        const em = data?.exclusion_meta;
+        if (!em) return null;
+        // 兜底走「未导入 / 不可用」而不是空对象：字段缺失时**不能**渲染成
+        // 「已按名单过滤、一只都没命中」——那是把「不知道」说成了「没问题」
+        const listMeta: ExclusionMeta['list'] = em.list ?? { imported: false, reason: '响应缺 exclusion_meta.list' };
+        const newsMeta: ExclusionMeta['news'] = em.news ?? { available: false, reason: '响应缺 exclusion_meta.news' };
+        const stOn = EXCLUDE_ON(filters.excludeSt);
+        const riskOn = EXCLUDE_ON(filters.excludeRiskList);
+        const newsOn = EXCLUDE_ON(filters.excludeNewsRisk);
+        const channel = (
+          label: string, on: boolean, n: number, tip: string, isBad: boolean, onToggle: () => void,
+        ) => (
+          <button
+            key={label}
+            type="button"
+            onClick={onToggle}
+            title={tip}
+            className={`shrink-0 rounded border px-1 py-0.5 text-[9px] font-bold transition-colors ${
+              isBad
+                ? 'border-rose-200 bg-rose-50 text-rose-600 hover:bg-rose-100'
+                : on
+                  ? 'border-amber-200 bg-white text-amber-700 hover:bg-amber-100'
+                  : 'border-slate-200 bg-slate-100 text-slate-400 hover:bg-white'
+            }`}
+          >
+            {label} {isBad ? '不可用' : channelText(on, n)}
+          </button>
+        );
+        const asofShort = (listMeta.asof || '').slice(5);   // 2026-09-18 → 09-18
+        return (
+          <div className="flex items-center gap-1 flex-wrap shrink-0 mt-0.5 rounded-lg border border-amber-100 bg-amber-50/70 px-1.5 py-1">
+            <ShieldCheck className="w-3 h-3 text-amber-500 shrink-0" />
+            <span className="text-[10px] font-black text-amber-700 shrink-0">风险闸</span>
+            <span className="text-[9px] text-slate-500 shrink-0">已排除</span>
+            {channel('ST', stOn, em.excluded?.st ?? 0,
+              'ST / *ST：QuantDB instrument_detail.IsSTGP 快照，只在实盘窗口内有真值（历史日不套用，避免前视偏差）',
+              false, () => onFiltersChange({ ...filters, excludeSt: !stOn }))}
+            {channel('名单', riskOn, em.excluded?.risk_list ?? 0,
+              listMeta.imported === false
+                ? `名单未导入：${listMeta.reason ?? '文件不在盘'}（当前一只都没排掉）`
+                : `用户不买入名单 ${em.risk_list_size ?? 0} 只（基准 ${listMeta.asof || '未知'}，${listMeta.stale_days ?? 0} 天前）· 点击放行`,
+              listMeta.imported === false, () => onFiltersChange({ ...filters, excludeRiskList: !riskOn }))}
+            {channel('新闻', newsOn, em.excluded?.news_risk ?? 0,
+              newsMeta.available === false
+                ? `新闻标签不可用：${newsMeta.reason ?? '汇总任务未产出'}（当前一只都没排掉）`
+                : `近 20 天监管/司法类新闻利空 ${em.news_risk_size ?? 0} 只（窗口至 ${newsMeta.window_end || '未知'}）· 点击放行`,
+              newsMeta.available === false, () => onFiltersChange({ ...filters, excludeNewsRisk: !newsOn }))}
+            <span className="ml-auto flex items-center gap-1 shrink-0">
+              {listMeta.stale ? (
+                <span className="flex items-center gap-0.5 rounded bg-rose-50 px-1 py-0.5 text-[9px] font-bold text-rose-600"
+                  title={`名单基准 ${listMeta.asof || '未知'}，已 ${listMeta.stale_days ?? '?'} 天未更新 —— 请重跑 backend/scripts/import_exclusion_list.py`}>
+                  <AlertTriangle className="w-2.5 h-2.5" />名单 {listMeta.stale_days ?? '?'} 天未更新
+                </span>
+              ) : (
+                <span className="text-[9px] font-mono text-slate-400"
+                  title={`名单基准日 ${listMeta.asof || '未知'}（生成于 ${listMeta.generated_at || '未知'}），来源逐项：${
+                    Object.entries(listMeta.sources ?? {}).map(([k, v]) => `${v.label || k} ${v.count ?? 0}${v.blocking === false ? '(只提示)' : ''}`).join('、') || '—'}`}>
+                  名单 {asofShort || '—'}
+                </span>
+              )}
+            </span>
+          </div>
+        );
+      })()}
+
       {/* 当前信号日 chip：随日历切换显示该日期（琥珀底色），点击回到最新；后备注当天各维度头部均分基准 */}
       {(() => {
         // 切了历史日优先显示 filters.date；否则显示最近信号日 signal_date
@@ -484,6 +577,7 @@ export function StockSidebar({ selected, onSelect, watchlistSymbols, positions =
                         return <span title={badge.title} className={`text-[8px] font-bold rounded px-0.5 shrink-0 border ${badge.cls}`}>{badge.label}</span>;
                       })()}
                       {it.is_st && <span className="text-[9px] bg-rose-50 text-rose-500 rounded px-0.5 shrink-0">ST</span>}
+                      <RiskBadges risk={it.risk} />
                       <span className="truncate">{it.name}</span>
                     </span>
                     <span className={`text-[10px] font-mono shrink-0 ${up ? 'text-rose-500' : 'text-emerald-500'}`}>{fmtPct(it.pct_change)}</span>
