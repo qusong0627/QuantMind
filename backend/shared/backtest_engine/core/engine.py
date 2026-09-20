@@ -67,6 +67,33 @@ else:
     logger = logging.getLogger(__name__)
 
 
+def resolve_is_st(symbol: object) -> bool:
+    """该标的是否 ST —— 复用 LocalMarketData 的 instrument_detail 快照。
+
+    这是**兜底**口径，不是逐日口径：快照只有一份，历史回放会带前视偏差，
+    所以只在拿不到逐日 ST 时使用。因此失败时不静默（旧实现 `except: is_st =
+    False`）：无声地当作非 ST 会让 ST 主板 5% 板上的涨停被判成可成交，
+    方向是**乐观**的，恰好把回测数据做漂亮。
+    """
+    try:
+        from backend.services.simulation.services.local_market_data import (
+            get_local_market_data,
+        )
+        from backend.shared.stock_utils import StockCodeUtil
+
+        # to_suffix 统一成 600036.SH 形态，ST 集合即按该形态存
+        return (
+            StockCodeUtil.to_suffix(symbol) in get_local_market_data()._st_symbol_set()
+        )
+    except Exception:
+        logger.warning(
+            "ST 判定失败，按非 ST 处理（symbol=%s）；"
+            "2026-07-06 前的 ST 主板是 5% 板，此窗口内可能误判涨停",
+            symbol,
+        )
+        return False
+
+
 def get_price_limit_threshold(
     code: str,
     *,
@@ -521,27 +548,12 @@ class BacktestEngine:
 
         # 涨跌停过滤：买入无法在涨停成交，卖出无法在跌停成交（严谨口径：ST/分位舍入）
         if prev_close is not None and float(prev_close) > 0:
+            # 先解析 ST：两个分支都要用，而 resolve_is_st 自身不抛、必定有值。
+            # 放在 try 外还避免「import 失败 → except 里引用未绑定的 is_st」。
+            is_st = resolve_is_st(order.symbol)
             try:
                 from backend.services.simulation.services.local_market_data import compute_limits
 
-                is_st = False
-                try:
-                    # 复用 LocalMarketData 的 ST 缓存（instrument_detail 快照）
-                    from backend.services.simulation.services.local_market_data import (
-                        get_local_market_data,
-                    )
-
-                    _sym_sfx = str(order.symbol)
-                    # to_suffix 统一为 600036.SH 形态以查 ST 集合
-                    try:
-                        from backend.shared.stock_utils import StockCodeUtil
-
-                        _sym_sfx = StockCodeUtil.to_suffix(order.symbol)
-                    except Exception:
-                        pass
-                    is_st = _sym_sfx in get_local_market_data()._st_symbol_set()
-                except Exception:
-                    is_st = False
                 td = self.current_date
                 if hasattr(td, "date") and not isinstance(td, __import__("datetime").date):
                     try:
@@ -552,8 +564,15 @@ class BacktestEngine:
                     str(order.symbol), float(prev_close), is_st=is_st, trade_date=td
                 )
             except Exception:
+                # 降级但仍**沿用已判定的 is_st** —— 旧实现在这里写死 False，
+                # 把上一段辛苦查到的 ST 结果丢掉，ST 保护期内又退回 10% 板。
+                logger.warning(
+                    "compute_limits 失败，退回 limit_pct 单点阈值（symbol=%s, is_st=%s）",
+                    order.symbol,
+                    is_st,
+                )
                 threshold = get_price_limit_threshold(
-                    order.symbol, is_st=False, trade_date=self.current_date
+                    order.symbol, is_st=is_st, trade_date=self.current_date
                 )
                 limit_up = float(prev_close) * (1 + threshold)
                 limit_down = float(prev_close) * (1 - threshold)

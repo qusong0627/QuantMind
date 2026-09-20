@@ -26,6 +26,11 @@ from backend.shared.database_manager_v2 import get_session
 
 logger = logging.getLogger(__name__)
 
+#: 涨跌停判定的取整容差（比例）。`_LIMIT_TOLERANCE` 与
+#: `cn_exchange._LIMIT_TOLERANCE`、`execution_engine._LIMIT_TOLERANCE` 同值
+#: （0.5pp），用来吸收涨跌停价按分取整后实际涨幅略低于名义幅度的情形。
+_LIMIT_TOLERANCE = 0.005
+
 
 class BrokerResult:
     """Broker 执行结果"""
@@ -152,6 +157,41 @@ class PaperTradingBroker(BaseBroker):
             return False
         return abs(price - limit_price) / max(limit_price, 1e-6) <= tolerance
 
+    @staticmethod
+    def _limit_threshold(symbol: str) -> float:
+        """该标的当前的涨跌停判定阈值（比例，已扣取整容差）。
+
+        口径**唯一事实源** = ``local_market_data.limit_pct``。旧实现写死 0.095
+        （主板 10%），对创业板/科创板（20%）与北交所（30%）意味着阈值只有真实
+        线的一半 —— 一根 12% 的普通阳线会被判成涨停，进而在券商通道上误报
+        「买不进」；反向地，ST 主板 5% 板（2026-07-06 前）的真实涨停又够不到
+        9.5%，漏判。
+
+        ``is_st`` 默认 False 是**显式**缺口：本路径拿不到逐日 ST 口径。
+        该缺口随时间收敛 —— 2026-07-06 起 ST 主板同为 10%。
+        """
+        from datetime import date
+
+        try:
+            from backend.services.simulation.services.local_market_data import limit_pct
+
+            pct = float(
+                limit_pct(
+                    symbol,
+                    # 本路径只取「今天」，而今天已 ≥ 2026-07-06 —— 该日起 ST 主板
+                    # 同为 10%，is_st 不再改变结果，故写 False 与写 True 等价。
+                    # 与 cn_exchange 不同：那里要判**历史**日期，缺口是真的。
+                    is_st=False,  # fidelity: allow-limit-threshold — 只取今天
+                    trade_date=date.today(),
+                )
+            )
+        except Exception:
+            logger.warning(
+                "涨跌停板规解析失败，按主板 10% 兜底 (symbol=%s)", symbol, exc_info=True
+            )
+            pct = 0.10
+        return pct - _LIMIT_TOLERANCE
+
     async def _get_market_snapshot(self, symbol: str) -> MarketQuoteSnapshot:
         # Level 1: 实时行情
         try:
@@ -177,9 +217,20 @@ class PaperTradingBroker(BaseBroker):
                     bid1_volume = self._as_int(data.get("bid1_volume"))
                     if pre_close and pre_close > 0:
                         change_ratio = (px - pre_close) / pre_close
-                        if not limit_up and ask1_volume is not None and ask1_volume <= 0 and change_ratio >= 0.095:
+                        threshold = self._limit_threshold(symbol)
+                        if (
+                            not limit_up
+                            and ask1_volume is not None
+                            and ask1_volume <= 0
+                            and change_ratio >= threshold
+                        ):
                             limit_up = True
-                        if not limit_down and bid1_volume is not None and bid1_volume <= 0 and change_ratio <= -0.095:
+                        if (
+                            not limit_down
+                            and bid1_volume is not None
+                            and bid1_volume <= 0
+                            and change_ratio <= -threshold
+                        ):
                             limit_down = True
 
                     return MarketQuoteSnapshot(

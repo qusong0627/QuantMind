@@ -194,26 +194,45 @@ class SimulationExecutionEngine:
             return False
         return abs(price - limit_price) / max(limit_price, 1e-6) <= tolerance
 
-    @staticmethod
-    def _board_limit_threshold(symbol: str) -> float:
-        """按板块返回涨跌停启发式判定阈值（ask1/bid1缺失时的兜底）。
+    #: 涨跌停判定的取整容差。与 `cn_exchange._LIMIT_TOLERANCE` 同源同值（0.5pp），
+    #: 用于吸收「涨跌停价按分取整」后实际涨幅略低于名义幅度的情形。
+    _LIMIT_TOLERANCE = 0.005
 
-        主板 10% -> 0.095；创业板/科创 20% -> 0.195；北交所 30% -> 0.295。
-        取整-0.005容差，避免恰好压线时漏判。
+    @classmethod
+    def _board_limit_threshold(cls, symbol: str) -> float:
+        """按标的返回涨跌停判定阈值（ask1/bid1缺失时的兜底）。
+
+        口径**唯一事实源** = ``local_market_data.limit_pct``：主板 10%、创业板/科创
+        20%、北交所 30%、ST 主板 5%→10%（2026-07-06 切换）、创业板 2020-08-24
+        注册制改革全在那里。旧实现自己复述板块常量，并且 ``except: return 0.095``
+        对**任何**失败都退回主板 10% —— 创业板/北交所的真实 20%/30% 被压成 10%，
+        于是一根 12% 的普通阳线被误判成涨停。
+
+        ``is_st`` 默认 False：本路径拿不到逐日 ST 口径（同 ``cn_exchange`` 的
+        已知缺口）。ST 主板 5% 保护期只到 2026-07-06，此后 ST 主板同为 10%，
+        故默认值对当日及以后正确。
         """
-        try:
-            from backend.services.simulation.services.local_market_data import (
-                _board_pct,
-            )
+        from datetime import date as _date
 
-            pct = float(_board_pct(symbol))
-            if pct >= 0.29:
-                return 0.295
-            if pct >= 0.19:
-                return 0.195
-            return 0.095
+        pct = 0.10  # 兜底：无法解析时按主板 10%
+        try:
+            from backend.services.simulation.services.local_market_data import limit_pct
+
+            pct = float(
+                limit_pct(
+                    symbol,
+                    # 只取「今天」，而今天已 ≥ 2026-07-06 —— 该日起 ST 主板同为
+                    # 10%，is_st 不再改变结果。判历史日期的路径不适用此豁免。
+                    is_st=False,  # fidelity: allow-limit-threshold — 只取今天
+                    trade_date=_date.today(),
+                )
+            )
         except Exception:
-            return 0.095
+            # 不静默：退回主板口径会让宽板的涨停判定失真（见 docstring）
+            logger.warning(
+                "涨跌停板规解析失败，按主板 10% 兜底 (symbol=%s)", symbol, exc_info=True
+            )
+        return pct - cls._LIMIT_TOLERANCE
 
     @staticmethod
     def _enrich_cn_limits(
