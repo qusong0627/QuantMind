@@ -14,6 +14,7 @@ from backend.shared.signal_scores import (
     SQL_SCORES_BY_DATE,
     build_score_map,
     normalize_a_share_symbol,
+    score_freq_of,
 )
 
 
@@ -106,6 +107,25 @@ class TestBuildScoreMap:
         assert score_map["SH600036"]["value"] == -0.2
         assert score_map["SH600036"]["side"] == "SELL"
         assert realtime_rows == 1
+
+
+class TestScoreFreqOf:
+    """分频标注的唯一判定：只有 ``source='realtime'`` 才敢说「实时」。
+
+    宁可把实时行标成日频（欠标 → 用户当成降级路径保守看），也不能把批次日频
+    标成实时 —— 后者会让用户拿隔夜分当盘中分下单。所以未知/空/大小写不符
+    一律日频。
+    """
+
+    def test_realtime_source_is_realtime(self):
+        assert score_freq_of("realtime") == "realtime"
+
+    def test_batch_source_is_daily(self):
+        assert score_freq_of("batch") == "daily"
+
+    def test_unknown_or_blank_source_is_daily(self):
+        for raw in (None, "", "  ", "Realtime", "REALTIME", "realtime_v2", 0):
+            assert score_freq_of(raw) == "daily"
 
 
 class TestSqlConstants:

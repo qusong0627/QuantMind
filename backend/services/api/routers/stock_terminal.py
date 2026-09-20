@@ -29,6 +29,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from backend.services.api.user_app.middleware.auth import get_current_user
 from backend.shared.database_manager_v2 import get_session
 from backend.shared.logging_config import get_logger
+from backend.shared.signal_scores import score_freq_of
 
 logger = get_logger(__name__)
 
@@ -2009,8 +2010,10 @@ async def list_stocks(
                 # 否则下面的 score_info[sym] = ... 是「按 DB 返回顺序后写覆盖」= 任意挑一个。
                 # 实测同日不同 run 的 fusion_score 量纲互不相同（相关系数可为 −0.03），
                 # 混着取会让列表分数不确定。约定同 _trend_map：按 created_at 取最新。
+                # source 必须一起取：同一天既有日频批次行、又有盘中实时行，
+                # 列表得如实标出这一行的分是「实时」还是「日频」（frontend 打分频徽章）
                 "SELECT DISTINCT ON (symbol) "
-                "symbol, fusion_score, signal_side, model_version, quality "
+                "symbol, fusion_score, signal_side, model_version, quality, source "
                 f"FROM engine_signal_scores WHERE {where} "
                 "ORDER BY symbol, created_at DESC, id DESC"
             )
@@ -2030,6 +2033,7 @@ async def list_stocks(
                     "side": str(r[2] or "HOLD"),
                     "date": str(latest)[:10],
                     "model": str(r[3] or ""),
+                    "freq": score_freq_of(r[5]),
                     "position_score": (float(pos.get("position_score")) if pos and pos.get("position_score") is not None else None),
                     "industry_top10_avg": (float(pos.get("industry_top10_avg")) if pos and pos.get("industry_top10_avg") is not None else None),
                     "board_top10_avg": (float(pos.get("board_top10_avg")) if pos and pos.get("board_top10_avg") is not None else None),
@@ -2281,6 +2285,9 @@ async def list_stocks(
             "is_st": bool(st_mask_series.loc[r.name]) if r.name in st_mask_series.index else False,
             "fusion": (info.get("fusion") if info else None),
             "side": (info.get("side") if info else None),
+            # 分频如实标注：realtime=盘中热集推理分，daily=日频批次分（降级路径）。
+            # 没有分数信息时给 None，前端据此不渲染徽章（不能默认成「实时」）
+            "freq": (info.get("freq") if info else None),
             "signal_date": (info.get("date") if info else None),
             "model": (info.get("model") if info else None),
             "position_score": (info.get("position_score") if info else None),
@@ -2307,6 +2314,11 @@ async def list_stocks(
             "page_size": page_size,
             "trade_date": trade_date,
             "signal_date": _signal_date,
+            # 当日分数里有多少只是盘中实时分（列表头部据此标「实时/日频」；
+            # 0 = 实时推理未开启或本轮未产出行 → 整页都是日频降级分）
+            "realtime_rows": sum(
+                1 for v in score_info.values() if v.get("freq") == "realtime"
+            ),
             "find_rank": find_rank,
             "items": [_item(r) for _, r in rows.iterrows()],
             "models": model_options,

@@ -1,5 +1,8 @@
 /** 个股终端类型定义 */
 
+/** 分数频率（后端 `score_freq_of` 的唯一口径：只有 source='realtime' 才算实时） */
+export type ScoreFreq = 'realtime' | 'daily';
+
 export interface StockListItem {
   symbol: string;        // 600519.SH
   name: string;
@@ -16,6 +19,9 @@ export interface StockListItem {
   is_st: boolean;
   fusion: number | null;
   side: string | null;
+  /** 这一行分数的频率：realtime=盘中热集实时推理分，daily=日频批次分（降级路径）。
+   *  null=没有分数信息（不渲染徽章，**不能默认当实时**） */
+  freq?: ScoreFreq | null;
   signal_date: string | null;
   model: string | null;
   /** 仓位信号分 0=不入场 / 0.1~0.99=建议投入比例（半凯利+截面基准） */
@@ -112,6 +118,8 @@ export interface StockListResponse {
   page_size: number;
   trade_date: string;
   signal_date?: string;
+  /** 本日分数里有多少只是盘中实时分（0 = 整页都是日频降级分；老后端无此字段） */
+  realtime_rows?: number | null;
   items: StockListItem[];
   /** 定位股票在当前排序中的名次（find_symbol 参数时返回，1-based；无分数为 null） */
   find_rank?: number | null;

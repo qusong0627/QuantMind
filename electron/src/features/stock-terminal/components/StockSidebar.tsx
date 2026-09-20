@@ -6,6 +6,7 @@ import { Checkbox, Input, Spin, message, Dropdown, Segmented } from 'antd';
 import { StockListItem, StockListResponse, StockRisk, ExclusionMeta, PushChannel, PushSide } from '../types';
 import { EXCLUDE_ON, riskChips, channelText } from '../riskModel';
 import { CHANNEL_OPTIONS, MAX_PICK } from '../pushModel';
+import { scoreFreqView, tableFreqView } from '../scoreFreq';
 import { stockTerminalService } from '../services/stockTerminalService';
 import { ListFilters, bucketScoreRange, StockFilterPanel, BOARD_OPTIONS, CAP_TIER_OPTIONS, TREND_OPTIONS, BUCKET_OPTIONS } from './StockFilterPanel';
 import { PushConfirmPanel } from './PushConfirmPanel';
@@ -675,6 +676,20 @@ export function StockSidebar({ selected, onSelect, watchlistSymbols, watchFilter
               {shownDate}
               {isHistorical && <span className="ml-0.5 opacity-70">✕</span>}
             </button>
+            {/* 分频标注：本页分数是盘中实时分还是隔夜日频分。计数来自后端实测
+                （开关开着但行情未到达时后端不发布伪实时分，计数仍为 0），
+                不是「开关是否打开」的猜测 */}
+            {(() => {
+              const fv = tableFreqView(data?.realtime_rows, data?.signal_date);
+              return (
+                <span
+                  title={fv.title}
+                  className={`shrink-0 rounded-md border px-1 py-0.5 text-[9px] font-bold ${fv.cls}`}
+                >
+                  {fv.label}
+                </span>
+              );
+            })()}
             {bench && (
               <span className="text-[9px] text-slate-400 font-mono" title="当天各维度头部前10均分基准（排名第1股票所在维度）">
                 头部基准
@@ -824,9 +839,20 @@ export function StockSidebar({ selected, onSelect, watchlistSymbols, watchFilter
                 </span>
                 {/* 趋势 */}
                 <span className={`text-center text-[9px] truncate ${TREND_COLOR[it.trend ?? ''] ?? 'text-slate-400'}`}>{it.trend ?? '-'}</span>
-                {/* 得分 */}
-                <span className={`text-right text-[11px] font-mono font-bold ${(it.fusion ?? 0) >= 0 ? 'text-blue-600' : 'text-slate-400'}`}>
-                  {it.fusion != null ? `+${(it.fusion).toFixed(3)}`.replace('+-', '-') : '--'}
+                {/* 得分（盘中实时分带「实时」徽章；日频不逐行标，由头部统一说明） */}
+                <span className="flex items-center justify-end gap-0.5 min-w-0">
+                  {(() => {
+                    const fv = scoreFreqView(it.freq, it.signal_date);
+                    if (!fv || fv.freq !== 'realtime') return null;
+                    return (
+                      <span title={fv.title} className={`shrink-0 rounded border px-0.5 text-[8px] font-bold ${fv.cls}`}>
+                        {fv.label}
+                      </span>
+                    );
+                  })()}
+                  <span className={`text-right text-[11px] font-mono font-bold ${(it.fusion ?? 0) >= 0 ? 'text-blue-600' : 'text-slate-400'}`}>
+                    {it.fusion != null ? `+${(it.fusion).toFixed(3)}`.replace('+-', '-') : '--'}
+                  </span>
                 </span>
                 {/* 仓位信号 */}
                 <span className="text-center">

@@ -56,6 +56,19 @@ SQL_SCORES_BY_DATE = (
 )
 
 
+def score_freq_of(source: Any) -> str:
+    """分数行来源 → 频率标注（``"realtime"`` / ``"daily"``）。
+
+    只有 ``source == 'realtime'``（热集盘中推理落库）才敢说「实时」；``batch``、
+    空值、未知来源、大小写不符一律 ``daily``。**欠标优先**：把实时行标成日频只是
+    让用户保守看，把日频行标成实时会让用户拿隔夜分当盘中分下单。
+
+    列表页（``stock_terminal``）与快照（本模块 + 自选/哨兵）共用这一处判定，
+    否则同一行分数在两个页面会显示成不同频率。
+    """
+    return "realtime" if source == "realtime" else "daily"
+
+
 def normalize_a_share_symbol(raw: Any) -> str | None:
     """任意键形 → prefix 规范形（``SH600036``）；非 A 股返回 None。
 
@@ -93,8 +106,7 @@ def build_score_map(
         sym = normalize_a_share_symbol(r[0])
         if not sym:
             continue
-        source = str(r[3] or "")
-        freq = "realtime" if source == "realtime" else "daily"
+        freq = score_freq_of(r[3])
         if freq == "realtime":
             realtime_rows += 1
         score_map[sym] = {
