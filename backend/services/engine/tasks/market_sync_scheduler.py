@@ -44,6 +44,30 @@ MARKETS = {
     "CUSTOM": "QuantCustom 自定义因子集",
 }
 
+# 业务市场码 → 同步市场码（Redis 键第二段）。**CN 的同步码是 "A" 不是 "CN"**，
+# CRYPTO 是 "BC"：同步键 `quantmind:sync_schedule_last_run:{token}:{date}` 按这套码写，
+# 用 normalize_market 的 CN/CRYPTO 去拼键会永远查不到（体检 C08 假报「无同步记录」）。
+_MARKET_TO_SYNC_TOKEN = {
+    "CN": "A",
+    "A": "A",
+    "HK": "HK",
+    "US": "US",
+    "CRYPTO": "BC",
+    "BC": "BC",
+    "FUTURES": "FUTURES",
+    "CUSTOM": "CUSTOM",
+}
+
+
+def sync_market_token(market: str | None) -> str:
+    """业务市场码（CN/HK/US/CRYPTO…）→ 同步键市场码（A/HK/US/BC…）。
+
+    无法识别的市场原样大写返回，由调用方决定是否回落。
+    """
+    raw = str(market or "CN").upper().strip()
+    return _MARKET_TO_SYNC_TOKEN.get(raw, raw)
+
+
 DEFAULT_SCHEDULE = {
     "enabled": False,
     "time": "03:00",

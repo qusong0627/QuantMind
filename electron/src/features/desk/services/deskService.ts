@@ -15,14 +15,17 @@ export interface DeskTodayOptions {
   health?: boolean;
   /** 是否运行调仓计划预演（dry-run，约 1-3s） */
   plan?: boolean;
+  /** 市场（CN/HK/US/FUTURES/CRYPTO）——不传则由服务端按 CN 处理（旧行为） */
+  market?: string;
   timeoutMs?: number;
 }
 
-/** 今日交易台聚合（管线/信号/计划预演/执行/盈亏/影子/健康） */
+/** 今日交易台聚合（管线/信号/计划预演/执行/盈亏/影子/健康）；market 决定整屏口径 */
 export async function getDeskToday(options: DeskTodayOptions = {}): Promise<DeskTodayResponse> {
   const qs = new URLSearchParams();
   if (options.health === false) qs.set('health', 'false');
   if (options.plan === false) qs.set('plan', 'false');
+  if (options.market) qs.set('market', options.market);
   const suffix = qs.toString() ? `?${qs}` : '';
 
   const controller = new AbortController();
@@ -60,7 +63,8 @@ export interface ExecutePlanResponse {
  */
 export async function executePlan(
   excludeSymbols: string[],
-  quantityOverrides: { symbol: string; side: string; quantity: number }[] = []
+  quantityOverrides: { symbol: string; side: string; quantity: number }[] = [],
+  market?: string
 ): Promise<ExecutePlanResponse> {
   const controller = new AbortController();
   const timer = window.setTimeout(() => controller.abort(), 120000);
@@ -71,6 +75,8 @@ export async function executePlan(
       body: JSON.stringify({
         exclude_symbols: excludeSymbols,
         quantity_overrides: quantityOverrides,
+        // 声明市场 → 服务端拒绝「港股页签执行 A 股活跃策略」；不传则保持旧行为
+        ...(market ? { market } : {}),
       }),
       signal: controller.signal,
     });

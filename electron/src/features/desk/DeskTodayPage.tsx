@@ -10,9 +10,11 @@
  * - embedded：内嵌进模拟交易栏目页签（外框由宿主提供，仅保留管线状态/数据时间/刷新细条）。
  */
 
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Gauge, RefreshCw } from 'lucide-react';
 import { PAGE_LAYOUT } from '../../config/pageLayout';
+import { useAppSelector } from '../../store';
+import { selectCurrentMarket } from '../../store/slices/uiSlice';
 import { getDeskToday } from './services/deskService';
 import type { DeskToday } from './types';
 import { evidenceRingDrillEntries, pipelineStepDrillEntries, pipelineSummary, statusStyle } from './deskModel';
@@ -37,28 +39,42 @@ interface DrawerState {
 }
 
 const DeskTodayPage: React.FC<{ embedded?: boolean; tradingRunning?: boolean }> = ({ embedded = false, tradingRunning }) => {
+  // 整屏口径由顶栏市场决定：切市场必须重取，否则港股/美股页签一直显示 A 股信号与盈亏
+  const currentMarket = useAppSelector(selectCurrentMarket);
   const [desk, setDesk] = useState<DeskToday | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [drawer, setDrawer] = useState<DrawerState | null>(null);
 
-  useEffect(() => {
-    void load();
-  }, []);
+  // 请求代次：/desk/today 带 health+plan 要 1-3s，CN→HK 快速切换时旧市场的响应可能后到，
+  // 无条件 setDesk 会把港股页签写成 A 股数据——正是本次要修的现象，且带随机性。
+  // 无法从中途取消请求（service 的 AbortController 只管超时），故按代次丢弃过期响应。
+  const requestSeq = useRef(0);
 
-  const load = async () => {
+  const load = useCallback(async () => {
+    const seq = ++requestSeq.current;
     setLoading(true);
     setError('');
     try {
-      const resp = await getDeskToday({ health: true, plan: true });
-      setDesk(resp?.data || null);
+      const resp = await getDeskToday({ health: true, plan: true, market: currentMarket });
+      if (seq !== requestSeq.current) return; // 已有更新的请求发出，丢弃本轮
+      // 双保险：响应的 market 与服务端实际取数市场对不上同样丢弃
+      const data = resp?.data || null;
+      if (data?.market && data.market !== currentMarket) return;
+      setDesk(data);
     } catch (err: unknown) {
+      if (seq !== requestSeq.current) return;
       setError(errorText(err));
     } finally {
-      setLoading(false);
+      if (seq === requestSeq.current) setLoading(false);
     }
-  };
+  }, [currentMarket]);
 
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const isCnMarket = currentMarket === 'CN';
   const pipeline = pipelineSummary(desk?.pipeline);
   const worstStyle = statusStyle(pipeline.worst);
 
@@ -120,8 +136,17 @@ const DeskTodayPage: React.FC<{ embedded?: boolean; tradingRunning?: boolean }> 
             <div className="lg:col-span-5 grid gap-4">
               <HealthCard health={desk.health} tradingRunning={tradingRunning} />
               {/* 实时推理（T-P6-08）：状态/开关/模型切换/节拍/ONNX 状态与重建。
-                  2026-09-18 补挂载——此前仅 import 未渲染（卡从收口起从未出现在页面上）。 */}
-              <RealtimeInferenceCard />
+                  2026-09-18 补挂载——此前仅 import 未渲染（卡从收口起从未出现在页面上）。
+                  该服务是**单份全局配置**（Redis qm:realtime:infer:config，当前指向 A 股模型），
+                  没有市场维度——挂到港股/美股页签会显示 A 股模型与特征覆盖率，故仅 CN 渲染。 */}
+              {isCnMarket ? (
+                <RealtimeInferenceCard />
+              ) : (
+                <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3 text-[11px] text-slate-500">
+                  实时推理为 A 股服务（单份全局配置，无市场维度），在 {currentMarket} 页签不适用；
+                  查看请切回 A 股。
+                </div>
+              )}
             </div>
             <div className="lg:col-span-7 grid">
               {/* 副驾驶（T-P6-16）：情报事件流 + 误报标注 + 建议卡一键执行（无 mock） */}

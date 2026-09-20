@@ -72,6 +72,14 @@ export interface ExecutionItem {
 }
 
 export interface ExecutionBlock {
+  /**
+   * false = 该市场**无法归集**委托（`sim_orders` 无 market 列）。
+   * 此时 `sim_count/filled/rejected/items` 一律缺失——**必须渲染 `reason`**，
+   * 不能按缺字段回退 0，否则"归集不了"会被显示成"今天没交易"（假证据）。
+   */
+  available?: boolean;
+  market?: string;
+  reason?: string;
   sim_count?: number;
   real_count?: number;
   filled?: number;
@@ -150,6 +158,8 @@ export interface DeskToday {
   tenant_id: string;
   user_id: string;
   sim_user_id: string;
+  /** 服务端实际取数的市场（未声明时回落 CN）；用于丢弃过期响应 */
+  market?: string;
   pipeline: PipelineStep[];
   signals: SignalsBlock;
   plan: PlanBlock;

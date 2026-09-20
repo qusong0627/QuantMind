@@ -74,8 +74,12 @@ def build_pipeline(health_items: dict[str, dict[str, Any]]) -> list[dict[str, An
     return out
 
 
-async def _run_health() -> dict[str, dict[str, Any]]:
-    """在线程池跑同步体检（不阻塞事件循环）；异常降级为空表。"""
+async def _run_health(market: str = "CN") -> dict[str, dict[str, Any]]:
+    """在线程池跑同步体检（不阻塞事件循环）；异常降级为空表。
+
+    ``market`` 透传给 ``HealthContext``：C01/C02/C08 按市场取数（信号分布/就绪/同步），
+    其余断言是账户/系统级、与市场无关。不传市场等于按 CN 体检。
+    """
 
     def _sync() -> dict[str, dict[str, Any]]:
         try:
@@ -83,7 +87,7 @@ async def _run_health() -> dict[str, dict[str, Any]]:
 
             from backend.scripts.diagnose import health as health_mod
 
-            ctx = health_mod._build_context()
+            ctx = health_mod._build_context(market)
             items: dict[str, dict[str, Any]] = {}
             # health.py 的检查是 async（内部只做同步 IO）——在专属事件循环里统一执行
             loop = _aio.new_event_loop()
@@ -114,25 +118,47 @@ async def _run_health() -> dict[str, dict[str, Any]]:
     return await asyncio.to_thread(_sync)
 
 
-async def _collect_signals(tenant_id: str) -> dict[str, Any]:
+async def _collect_signals(tenant_id: str, market: str = "CN") -> dict[str, Any]:
+    """当日信号分布（**按市场**取最新 trade_date 与分布）。
+
+    市场必须进 SQL：`engine_signal_scores` 带 market 列，不滤等于把各市场信号
+    混在一张分布里（港股/美股页签翻出 A 股信号的直接原因）。
+
+    谓词一律 `COALESCE(market,'CN')`——该列可空且**契约只加列不回填**
+    （``signal_contract.py`` 无 UPDATE，回填脚本无启动期调用点），裸 `market = :m`
+    在未回填的实例上会把 CN 查成空。仓库读侧同口径见 copilot.py / hot_set_builder.py。
+    """
     async with get_session(read_only=True) as session:
         from sqlalchemy import text as sa_text
 
         date_row = (
             await session.execute(
-                sa_text("SELECT max(trade_date) AS d FROM engine_signal_scores")
+                sa_text(
+                    "SELECT max(trade_date) AS d FROM engine_signal_scores "
+                    "WHERE COALESCE(market, 'CN') = :m"
+                ),
+                {"m": market},
             )
         ).one()
         trade_date = date_row.d
         if trade_date is None:
-            return {"trade_date": None, "market": "CN", "source": "db:engine_signal_scores"}
+            return {
+                "trade_date": None,
+                "market": market,
+                "buy": 0,
+                "sell": 0,
+                "hold": 0,
+                "top_buy": [],
+                "source": "db:engine_signal_scores",
+            }
         counts = (
             await session.execute(
                 sa_text(
                     "SELECT signal_side, count(*) AS n FROM engine_signal_scores "
-                    "WHERE trade_date = :d GROUP BY signal_side"
+                    "WHERE trade_date = :d AND COALESCE(market, 'CN') = :m "
+                    "GROUP BY signal_side"
                 ),
-                {"d": trade_date},
+                {"d": trade_date, "m": market},
             )
         ).all()
         top = (
@@ -140,16 +166,18 @@ async def _collect_signals(tenant_id: str) -> dict[str, Any]:
                 sa_text(
                     "SELECT symbol, signal_side, round(rank_pct::numeric, 4) AS rank_pct, "
                     "round(fusion_score::numeric, 4) AS score "
-                    "FROM engine_signal_scores WHERE trade_date = :d AND signal_side = 'BUY' "
+                    "FROM engine_signal_scores "
+                    "WHERE trade_date = :d AND COALESCE(market, 'CN') = :m "
+                    "AND signal_side = 'BUY' "
                     "ORDER BY rank_pct DESC NULLS LAST LIMIT 10"
                 ),
-                {"d": trade_date},
+                {"d": trade_date, "m": market},
             )
         ).all()
     by_side = {str(r.signal_side): int(r.n) for r in counts}
     return {
         "trade_date": str(trade_date),
-        "market": "CN",
+        "market": market,
         "buy": by_side.get("BUY", 0),
         "sell": by_side.get("SELL", 0),
         "hold": by_side.get("HOLD", 0),
@@ -168,7 +196,34 @@ async def _collect_signals(tenant_id: str) -> dict[str, Any]:
     }
 
 
-async def _collect_execution(tenant_id: str, sim_uid: int, raw_user: str) -> dict[str, Any]:
+def _orders_market_unsupported(market: str) -> dict[str, Any] | None:
+    """委托表**无 market 列** → 非 CN 市场无法按市场归集委托，返回不可用块（CN 返回 None）。
+
+    市场维度落在账户键（``simulation:account:{t}:{u}:{MARKET}``）与台账
+    （``simulation_accounts.market`` / ``simulation_position_lots.market``）上，
+    委托行（``sim_orders`` / ``orders``）本身不带市场。要让港股/美股委托可归集，
+    需给委托表加 market 列并在下单链路写入——在那之前非 CN 一律如实返回不可用，
+    绝不把 A 股委托数当成港股/美股的。
+    """
+    if market == "CN":
+        return None
+    return {
+        "available": False,
+        "market": market,
+        "reason": (
+            f"{market} 市场委托暂不可按市场归集：委托表 sim_orders 无 market 列"
+            "（市场维度只记在账户键/台账上）"
+        ),
+        "source": "desk:market-scope",
+    }
+
+
+async def _collect_execution(
+    tenant_id: str, sim_uid: int, raw_user: str, market: str = "CN"
+) -> dict[str, Any]:
+    unsupported = _orders_market_unsupported(market)
+    if unsupported is not None:
+        return unsupported
     async with get_session(read_only=True) as session:
         from sqlalchemy import text as sa_text
 
@@ -216,6 +271,8 @@ async def _collect_execution(tenant_id: str, sim_uid: int, raw_user: str) -> dic
     items = [_item("SIM", r) for r in sim_rows] + [_item("REAL", r) for r in real_rows]
     items.sort(key=lambda x: x.get("created_at") or "", reverse=True)
     return {
+        "available": True,
+        "market": market,
         "sim_count": len(sim_rows),
         "real_count": len(real_rows),
         "filled": sum(1 for i in items if i["status"] == "filled"),
@@ -225,7 +282,7 @@ async def _collect_execution(tenant_id: str, sim_uid: int, raw_user: str) -> dic
     }
 
 
-async def _collect_fidelity(tenant_id: str, sim_uid: int) -> dict[str, Any]:
+async def _collect_fidelity(tenant_id: str, sim_uid: int, market: str = "CN") -> dict[str, Any]:
     """F2 保真度（T-P6-18）：当日模拟委托 → 成交率/部分成交/成交价偏差/滑点实现/执行核分布。
 
     参考价 = 当日真实收盘（QuantDB 前复权，与影子对照同源口径）；口径随块返回（caliber）。
@@ -237,6 +294,9 @@ async def _collect_fidelity(tenant_id: str, sim_uid: int) -> dict[str, Any]:
     from backend.shared.fill_quality import fidelity_metrics
 
     source = "db:sim_orders ≈ QuantDB(qdb_daily_forward.close) + shared/fill_quality.py"
+    unsupported = _orders_market_unsupported(market)
+    if unsupported is not None:
+        return unsupported
     try:
         async with get_session(read_only=True) as session:
             rows = (
@@ -316,23 +376,29 @@ async def _collect_fidelity(tenant_id: str, sim_uid: int) -> dict[str, Any]:
         metrics["snapshot_core_stats"] = snapshot_core_stats()
     except Exception:  # noqa: BLE001
         metrics["exec_core_mode"] = None
-    metrics.update({"available": True, "source": source})
+    metrics.update({"available": True, "market": market, "source": source})
     return metrics
 
 
-async def _collect_pnl(tenant_id: str, sim_user_id: str) -> dict[str, Any]:
+async def _collect_pnl(tenant_id: str, sim_user_id: str, market: str = "CN") -> dict[str, Any]:
+    """账户盈亏（**按市场**取快照行）。
+
+    T-P1-07：快照带市场维度后同日各市场行与合并行混排，LIMIT 1 会取到不确定的一行，
+    因此必须显式限定市场：页面市场 = 哪个市场就取哪个市场行；
+    ``market=ALL`` 才取跨市场合并行（不滤 market 的裸查询一律视为口径错误）。
+    """
     async with get_session(read_only=True) as session:
         from sqlalchemy import text as sa_text
 
-        # T-P1-07：快照带市场维度后必须显式取合并行（'ALL'），
-        # 否则同日各市场行与合并行混排、LIMIT 1 会取到不确定的一行
         from backend.shared.fund_snapshot_contract import (
             fund_snapshot_has_market_column_async,
         )
 
-        market_clause = (
-            "AND market = 'ALL' " if await fund_snapshot_has_market_column_async() else ""
-        )
+        has_market = await fund_snapshot_has_market_column_async()
+        market_clause = "AND market = :m " if has_market else ""
+        params: dict[str, Any] = {"t": tenant_id, "u": sim_user_id}
+        if has_market:
+            params["m"] = market
         row = (
             await session.execute(
                 sa_text(
@@ -342,17 +408,23 @@ async def _collect_pnl(tenant_id: str, sim_user_id: str) -> dict[str, Any]:
                     f"{market_clause}"
                     "ORDER BY snapshot_date DESC LIMIT 1"
                 ),
-                {"t": tenant_id, "u": sim_user_id},
+                params,
             )
         ).first()
     if row is None:
         return {
             "available": False,
-            "detail": "无资金快照（账户未初始化或权益结算未运行）",
+            "market": market,
+            "detail": (
+                f"无资金快照（账户未初始化或权益结算未运行）——市场 {market}"
+                if has_market
+                else "无资金快照（账户未初始化或权益结算未运行）"
+            ),
             "source": "db:simulation_fund_snapshots",
         }
     return {
         "available": True,
+        "market": market,
         "snapshot_date": str(row.snapshot_date),
         "total_asset": float(row.total_asset or 0),
         "initial_capital": float(row.initial_capital or 0),
@@ -364,12 +436,27 @@ async def _collect_pnl(tenant_id: str, sim_user_id: str) -> dict[str, Any]:
     }
 
 
-async def _collect_shadow() -> dict[str, Any]:
+async def _collect_shadow(market: str = "CN") -> dict[str, Any]:
     """影子对照块（T-P2-06）：读最近一份日报（Redis），不重复计算。
 
     指标口径见 ``shared/shadow_compare.py``（成交价偏差 bps/成交率/滑点实现/
     跟踪误差）；无日报时如实返回不可用（不伪造数字）。
+
+    日报**全局一份、键无市场段**，基准是跨市场合并行（``simulation_fund_snapshots``
+    的 `market='ALL'`）与 REAL 成交。因此非 CN 页签拿它当"本市场的模拟对照"结论
+    属于张冠李戴——与执行环同口径处理：如实返回不可用，让证据环落到 no_evidence。
     """
+    if market != "CN":
+        return {
+            "available": False,
+            "market": market,
+            "reason": (
+                f"{market} 市场无独立的影子对照日报：日报全局一份"
+                "（redis:mirror:shadow:{date} 键无市场段，基准为跨市场合并行）"
+            ),
+            "suggestion": "给日报键加市场段（或按市场生成）后可对照",
+            "source": "desk:market-scope",
+        }
 
     def _sync() -> dict | None:
         try:
@@ -435,16 +522,24 @@ _RING_HEALTH_IDS: dict[str, tuple[str, ...]] = {
 }
 
 
-def _previous_trading_ymd(ymd: str) -> str | None:
-    """ymd(YYYYMMDD) 的**前一交易日**（严格早于当日）；解析失败返回 None。"""
+def _previous_trading_ymd(ymd: str, market: str = "CN") -> str | None:
+    """ymd(YYYYMMDD) 在给定市场的**前一交易日**（严格早于当日）；解析失败返回 None。
+
+    必须按市场取日历：拿 XSHG 的上一交易日当港股/美股的基准，跨市场节假日会
+    把「同类交易日」判成滞后（或反之），属口径错误。FUTURES/CRYPTO 无日历
+    （``market_calendar`` 返回 None）→ 回落自然日前一天，并在失败时返回 None。
+    """
     try:
         import pandas as pd
         from exchange_calendars import get_calendar
 
         from backend.shared.market_sessions import market_calendar
 
-        cal = get_calendar(market_calendar("CN"))
         ts = pd.Timestamp(f"{ymd[:4]}-{ymd[4:6]}-{ymd[6:]}") - pd.Timedelta(days=1)
+        cal_name = market_calendar(market)
+        if not cal_name:
+            return str(ts.date()).replace("-", "")
+        cal = get_calendar(cal_name)
         session = cal.date_to_session(ts, direction="previous")
         return str(session.date()).replace("-", "")
     except Exception:  # noqa: BLE001
@@ -488,7 +583,12 @@ def build_evidence_rings(sources: dict[str, Any]) -> list[dict[str, Any]]:
             if features_latest:
                 # 信号日 = T+1 预测日：特征分区只可能到「上一交易日」（当日特征收盘后才产出），
                 # 拿 trade_date 本身当基准会恒判滞后（2026-09-18 实测误报）；基准 = 前一交易日。
-                expected = _previous_trading_ymd(trade_date) if trade_date else None
+                # 日历按**页面市场**取（signals.market），跨市场节假日口径不同。
+                expected = (
+                    _previous_trading_ymd(trade_date, str(signals.get("market") or "CN"))
+                    if trade_date
+                    else None
+                )
                 fresh = features_latest in (trade_date, expected)
                 lag = (
                     "同类交易日口径"
@@ -552,25 +652,46 @@ def build_evidence_rings(sources: dict[str, Any]) -> list[dict[str, Any]]:
                         if shadow.get("available")
                         else str(shadow.get("reason") or "无影子对照日报")
                     ),
-                    "suggestion": "" if shadow.get("available") else "无真单镜像时该环天然无证据（影子需 REAL 轨迹）",
+                    "suggestion": ""
+                    if shadow.get("available")
+                    else str(
+                        shadow.get("suggestion")
+                        or "无真单镜像时该环天然无证据（影子需 REAL 轨迹）"
+                    ),
                     "source": "redis:mirror:shadow:{date}（T-P2-06）",
                 }
             )
         elif key == "execution":
-            rejected = int(execution.get("rejected") or 0)
-            filled = int(execution.get("filled") or 0)
-            total = int(execution.get("sim_count") or 0) + int(execution.get("real_count") or 0)
-            items.append(
-                {
-                    "id": "execution_today",
-                    "name": "今日执行",
-                    "level": "warn" if rejected > 0 else "ok",
-                    "detail": f"委托 {total} 笔（成交 {filled} / 拒单 {rejected}）"
-                    + ("" if total else "——今日无委托（含盘前，正常空态）"),
-                    "suggestion": "核查拒单原因（资金/涨跌停/风控）" if rejected > 0 else "",
-                    "source": "db:sim_orders+orders（今日）",
-                }
-            )
+            if execution.get("available") is False:
+                # 委托表无市场列 → 非 CN 市场无证据可挂。**不可**退化成"0 笔委托"：
+                # 那会把"归集不了"说成"今天没交易"，是另一种形式的假证据。
+                items.append(
+                    {
+                        "id": "execution_today",
+                        "name": "今日执行",
+                        "level": "no_evidence",
+                        "detail": str(execution.get("reason") or "该市场委托不可归集"),
+                        "suggestion": "给 sim_orders 加 market 列并按下单链路写入后可归集",
+                        "source": str(execution.get("source") or "desk:market-scope"),
+                    }
+                )
+            else:
+                rejected = int(execution.get("rejected") or 0)
+                filled = int(execution.get("filled") or 0)
+                total = int(execution.get("sim_count") or 0) + int(
+                    execution.get("real_count") or 0
+                )
+                items.append(
+                    {
+                        "id": "execution_today",
+                        "name": "今日执行",
+                        "level": "warn" if rejected > 0 else "ok",
+                        "detail": f"委托 {total} 笔（成交 {filled} / 拒单 {rejected}）"
+                        + ("" if total else "——今日无委托（含盘前，正常空态）"),
+                        "suggestion": "核查拒单原因（资金/涨跌停/风控）" if rejected > 0 else "",
+                        "source": "db:sim_orders+orders（今日）",
+                    }
+                )
         elif key == "strategy":
             row = eval_summary.get("strategy")
             items.append(
@@ -610,6 +731,7 @@ async def _collect_evidence(
     signals: dict[str, Any],
     execution: dict[str, Any],
     shadow: dict[str, Any],
+    market: str = "CN",
 ) -> dict[str, Any]:
     """十环证据采集（只做轻量补充查询：评估留档摘要 + 特征分区新鲜度）。"""
     eval_summary: dict[str, Any] = {}
@@ -657,7 +779,14 @@ async def _collect_evidence(
         import glob as _glob
         import os as _os
 
-        root = _os.getenv("QM_QUANTDB_DATA_DIR") or "/data/quantdb"
+        # 特征分区根按**页面市场**取（CN=quantdb，HK=quanthk，US=quantus…）：
+        # 写死 QM_QUANTDB_DATA_DIR 会让港股/美股页签拿 A 股分区日期当自己的新鲜度。
+        from backend.shared.training_runtime import local_market_data_root
+
+        root_path = local_market_data_root(market)
+        root = str(root_path) if root_path else (
+            _os.getenv("QM_QUANTDB_DATA_DIR") or "/data/quantdb"
+        )
         parts = sorted(_glob.glob(_os.path.join(root, "6_ml_datasets", "features_daily", "dt=*")))
         if parts:
             features_latest = _os.path.basename(parts[-1]).replace("dt=", "")
@@ -750,6 +879,24 @@ def parse_quantity_overrides(raw: Any, max_items: int = 50) -> dict[tuple[str, s
     return result
 
 
+def active_strategy_market(payload: dict[str, Any] | None) -> str:
+    """活跃策略所属市场（纯函数）——口径与启动链路一致。
+
+    唯一事实源：``real_trading_lifecycle`` 启动时
+    ``deployment_market = live_config.market or exec_config.market or "CN"``。
+    活跃策略键（``qm:trade:active_strategy:{tenant}:{user}``）**不带市场维度**，
+    所以策略属于哪个市场只能从载荷里读，不能从键后缀猜。
+    """
+    from backend.shared.simulation_account_keys import normalize_market
+
+    data = payload if isinstance(payload, dict) else {}
+    for field in ("live_trade_config", "execution_config"):
+        cfg = data.get(field)
+        if isinstance(cfg, dict) and str(cfg.get("market") or "").strip():
+            return normalize_market(cfg.get("market"))
+    return "CN"
+
+
 def _resolve_active_strategy(tenant_id: str, raw_user: str) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
     """活跃策略解析（预演/执行唯一共用）→ (payload, error_block)。"""
     source = "redis:trade:active_strategy"
@@ -774,20 +921,51 @@ def _resolve_active_strategy(tenant_id: str, raw_user: str) -> tuple[dict[str, A
 
 
 async def _collect_plan(
-    tenant_id: str, raw_user: str, exclude_symbols: set[str] | None = None
+    tenant_id: str,
+    raw_user: str,
+    exclude_symbols: set[str] | None = None,
+    market: str | None = None,
 ) -> dict[str, Any]:
     """调仓计划预演卡（T-FE-05）：活跃策略（Redis）→ 引擎 dry-run（唯一调仓实现）。
 
     纪律：只读预演——RebalanceCalculator 单一实现复用（退出规则+池过滤+风控买锁同源），
     但绝不撮合/落单/写快照；无活跃策略时如实返回不可用原因。
+
+    市场闸门：活跃策略键无市场维度，策略市场从载荷读（``active_strategy_market``）。
+    页面市场 ≠ 策略市场时如实说明，不拿别市场的计划充数。
+
+    ``market=None`` = 调用方**未声明**页签市场（「手动任务」页签等旧调用点）→ 不设闸门，
+    保持改造前行为。闸门必须由"声明"触发而不是靠默认值：缺省成 CN 会把港股活跃策略
+    在港股页签上误判成"与页签（CN）不一致"，并连带隐藏一键执行按钮（回退）。
     """
     source = "redis:trade:active_strategy → simulation engine dry-run"
     payload, error_block = _resolve_active_strategy(tenant_id, raw_user)
+    strategy_market = active_strategy_market(payload) if payload is not None else None
+    # 未声明市场 → 回落策略自身市场，保证返回值里的 market 描述的是这份计划
+    scope_market = market if market is not None else strategy_market
     if error_block is not None:
+        error_block["market"] = scope_market
         return error_block
+    if market is not None and strategy_market != market:
+        return {
+            "available": False,
+            "market": market,
+            "strategy_market": strategy_market,
+            "strategy_id": str(payload.get("strategy_id") or "").strip() or None,
+            "reason": (
+                f"当前活跃策略属于 {strategy_market} 市场，与当前页签（{market}）不一致"
+                "——活跃策略按账户记一份，切市场后需在目标市场重新启动策略"
+            ),
+            "source": source,
+        }
     strategy_id = str(payload.get("strategy_id") or "").strip()
     if not strategy_id:
-        return {"available": False, "reason": "活跃策略未记录 strategy_id", "source": source}
+        return {
+            "available": False,
+            "market": scope_market,
+            "reason": "活跃策略未记录 strategy_id",
+            "source": source,
+        }
     live_cfg = payload.get("live_trade_config")
     if not isinstance(live_cfg, dict):
         live_cfg = {}
@@ -808,6 +986,7 @@ async def _collect_plan(
         logger.warning("desk plan preview failed: %s", exc)
         return {
             "available": False,
+            "market": scope_market,
             "reason": f"计划预演失败: {exc}",
             "strategy_id": strategy_id,
             "source": source,
@@ -818,6 +997,7 @@ async def _collect_plan(
             "strategy_id": strategy_id,
             "strategy_name": payload.get("strategy_name"),
             "mode": str(payload.get("mode") or "SIMULATION"),
+            "market": scope_market,
             "source": "simulation engine dry-run（RebalanceCalculator 单一实现，未执行）",
         }
     )
@@ -880,6 +1060,29 @@ async def execute_plan(
             status_code=409,
             detail=f"当前活跃策略为 {mode} 模式——交易台一键执行仅限模拟盘（实盘请走实盘确认链）",
         )
+
+    # 市场闸门（仅当调用方**显式声明**市场）：页面在港股而活跃策略是 A 股时，
+    # 一键执行会把 A 股计划当成港股计划执行——声明了就必须拒。
+    #
+    # 现状（2026-09-20）：**尚无调用方声明**——`PlanCard` 只传 exclude/quantity 两个参数，
+    # 因此本闸门目前不会触发，它保护的是「将来/第三方按声明市场调用」的路径。
+    # 别把它当成已经生效的防线；反过来，也正因为不声明即不触发，改造前那些不传市场的
+    # 调用点行为完全不变（不会因为缺省 CN 而被误拒）。
+    declared_market = str(body.get("market") or "").strip()
+    if declared_market:
+        from backend.shared.simulation_account_keys import normalize_market
+
+        want = normalize_market(declared_market)
+        have = active_strategy_market(active)
+        if want != have:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"当前活跃策略属于 {have} 市场，与请求市场（{want}）不一致"
+                    "——请先切回对应市场或在目标市场重新启动策略"
+                ),
+            )
+
     live_cfg = active.get("live_trade_config")
     if not isinstance(live_cfg, dict):
         live_cfg = {}
@@ -942,25 +1145,48 @@ async def desk_today(
     health: bool = Query(True, description="是否运行体检（10 项断言，约 1-2s）"),
     plan: bool = Query(True, description="是否运行调仓计划预演（dry-run 引擎，约 1-3s）"),
     exclude: str | None = Query(None, description="人工排除标的（逗号分隔；退出规则单不受影响）"),
+    market: str | None = Query(
+        None,
+        description=(
+            "页签市场（CN/HK/US/FUTURES/CRYPTO）。**不传 = 旧行为按 CN 取数且不设计划闸门**；"
+            "传了才启用「页面市场 vs 活跃策略市场」闸门"
+        ),
+    ),
     current_user: dict = Depends(get_current_user),
 ) -> dict[str, Any]:
-    """今日交易台聚合：管线/信号/计划预演/执行/盈亏/影子对照/健康——每个数字带 source 下钻字段。"""
+    """今日交易台聚合：管线/信号/计划预演/执行/盈亏/影子对照/健康——每个数字带 source 下钻字段。
+
+    **市场维度**：页签市场 = 前端顶栏市场，随 `?market=` 传入。信号/盈亏按市场列过滤，
+    计划按活跃策略市场闸门，证据矩阵特征分区按市场根目录、交易日历按市场取；
+    委托类块（执行/保真度）因 `sim_orders` 无 market 列，非 CN 市场如实返回不可用
+    （见 ``_orders_market_unsupported``）——绝不把 A 股数字当成别的市场的。
+
+    **不传 `market` 与传 `market=CN` 不等价**：前者是「调用方未声明页签市场」（旧调用点），
+    数据仍按 CN 取（保持改造前行为），但**不设**计划闸门；后者是显式声明，闸门生效。
+    若把缺省当 CN 用，港股活跃策略在港股页签上会被误判为「与页签（CN）不一致」。
+    """
     from backend.services.trade_shared.simulation_manager import require_sim_user_id
+    from backend.shared.simulation_account_keys import normalize_market
 
     tenant_id = str(current_user.get("tenant_id") or "default")
     raw_user = str(current_user.get("user_id") or "")
     sim_uid = require_sim_user_id(raw_user, tenant_id=tenant_id)
+    declared_market = normalize_market(market) if market else None
+    # 数据面按市场取数：未声明 → CN（改造前行为）；声明了 → 按声明
+    market_norm = declared_market or "CN"
 
-    health_items = await _run_health() if health else {}
+    health_items = await _run_health(market_norm) if health else {}
     signals, execution, pnl, shadow, plan_block, fidelity = await asyncio.gather(
-        _collect_signals(tenant_id),
-        _collect_execution(tenant_id, int(sim_uid), raw_user),
-        _collect_pnl(tenant_id, str(sim_uid)),
-        _collect_shadow(),
-        _collect_plan(tenant_id, raw_user, parse_exclude_symbols(exclude))
+        _collect_signals(tenant_id, market_norm),
+        _collect_execution(tenant_id, int(sim_uid), raw_user, market_norm),
+        _collect_pnl(tenant_id, str(sim_uid), market_norm),
+        _collect_shadow(market_norm),
+        _collect_plan(
+            tenant_id, raw_user, parse_exclude_symbols(exclude), declared_market
+        )
         if plan
         else _async_unavailable("调仓计划预演已跳过（?plan=false）"),
-        _collect_fidelity(tenant_id, int(sim_uid)),
+        _collect_fidelity(tenant_id, int(sim_uid), market_norm),
     )
     health_summary = {
         "ok": sum(1 for i in health_items.values() if i.get("level") == "ok"),
@@ -976,6 +1202,7 @@ async def desk_today(
             "tenant_id": tenant_id,
             "user_id": raw_user,
             "sim_user_id": str(sim_uid),
+            "market": market_norm,
             "pipeline": build_pipeline(health_items),
             "signals": signals,
             "plan": plan_block,
@@ -989,6 +1216,7 @@ async def desk_today(
                 signals=signals,
                 execution=execution,
                 shadow=shadow,
+                market=market_norm,
             ),
         },
     }

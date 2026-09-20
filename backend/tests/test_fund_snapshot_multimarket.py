@@ -404,8 +404,12 @@ def test_fund_snapshot_contract_and_reader_source_guards():
     assert "不阻断" in contract  # 失败不抛出不阻断业务
     assert "DROP CONSTRAINT IF EXISTS" in contract and "CREATE UNIQUE INDEX IF NOT EXISTS" in contract
 
+    # 交易台按**页签市场**取快照行（比写死 'ALL' 更严：页面在哪个市场就取哪个市场的行，
+    # 与 account_card 的 per-market 口径一致）。要防的仍是同一事故形态：同日多市场行
+    # 不带市场谓词 LIMIT 1 → 取到不确定的一行。故守卫改为"必须有绑定市场谓词"。
     desk = (root / "services/api/routers/desk.py").read_text(encoding="utf-8")
-    assert "market = 'ALL'" in desk, "desk 盈亏卡未显式取合并行（会混排）"
+    assert "AND market = :m " in desk, "desk 盈亏卡未按市场取行（会混排）"
+    assert 'params["m"] = market' in desk, "desk 盈亏卡市场谓词未绑定页签市场"
 
     shadow = (root / "services/trade/services/shadow_compare_service.py").read_text(encoding="utf-8")
     assert "market = 'ALL'" in shadow

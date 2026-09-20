@@ -7,6 +7,7 @@ import {
   excludedSymbolsFromPlan,
   executionItemDrillEntries,
   executionSummary,
+  executionUnavailableReason,
   formatMoney,
   formatPct,
   hasInvalidQuantityEdit,
@@ -113,6 +114,25 @@ describe('executionSummary / healthItemViews / 格式化', () => {
     expect(
       executionSummary({ source: 's', sim_count: 2, real_count: 1, filled: 1, rejected: 1 })
     ).toEqual({ simCount: 2, realCount: 1, filled: 1, rejected: 1 });
+  });
+
+  it('不可归集的委托块识别出原因（不退化成"今天没交易"）', () => {
+    // CN / 正常块 → 无原因
+    expect(executionUnavailableReason(undefined)).toBeNull();
+    expect(executionUnavailableReason({ source: 's' })).toBeNull();
+    expect(executionUnavailableReason({ source: 's', available: true, sim_count: 0 })).toBeNull();
+
+    // available:false（非 CN 市场无 market 列）→ 必须回传后端原因
+    const reason = executionUnavailableReason({
+      source: 'desk:market-scope',
+      available: false,
+      market: 'HK',
+      reason: 'HK 市场委托暂不可按市场归集：委托表 sim_orders 无 market 列',
+    });
+    expect(reason).toContain('sim_orders');
+
+    // 后端没给 reason 时也要有可读兜底，不能返回空串
+    expect(executionUnavailableReason({ source: 's', available: false, market: 'US' })).toContain('US');
   });
 
   it('健康项 → 视图（样式映射 + 下钻 detail/suggestion 保留）', () => {

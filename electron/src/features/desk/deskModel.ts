@@ -115,6 +115,20 @@ export function pnlSummary(pnl: PnlBlock | null | undefined): PnlSummary {
   };
 }
 
+/**
+ * 委托块「不可归集」原因（可用时返回 null）。
+ *
+ * 后端对无 market 列的市场返回 `available:false` + `reason`，且**刻意不带**
+ * sim_count/filled/rejected/items。这类块必须先判此函数再渲染——否则缺字段回退 0，
+ * 页面会把"这个市场归集不了委托"显示成"今天没交易（正常空态）"，即假证据。
+ */
+export function executionUnavailableReason(
+  execution: ExecutionBlock | null | undefined,
+): string | null {
+  if (execution?.available !== false) return null;
+  return execution.reason || `${execution.market || '该市场'}委托暂不可按市场归集`;
+}
+
 /** 执行卡汇总：成交/拒单（缺字段回退 0，不推断） */
 export function executionSummary(execution: ExecutionBlock | null | undefined): {
   simCount: number;

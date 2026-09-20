@@ -12,6 +12,7 @@ import ReactECharts from 'echarts-for-react';
 import { Activity, ArrowDownUp, ChevronDown, ChevronUp, PieChart, Search } from 'lucide-react';
 import type { NormalizedHolding, PositionSummary } from '../utils/positionMetrics';
 import { getDeskToday } from '../../../features/desk/services/deskService';
+import { executionUnavailableReason } from '../../../features/desk/deskModel';
 import type { ExecutionItem } from '../../../features/desk/types';
 
 const fmtMoney = (v: number | null | undefined): string =>
@@ -317,6 +318,7 @@ export const PositionVisualBoard: React.FC<{
 export const ExecutionStrip: React.FC = () => {
   const [open, setOpen] = useState(false);
   const [items, setItems] = useState<ExecutionItem[]>([]);
+  const [unavailableReason, setUnavailableReason] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
 
   useEffect(() => {
@@ -324,7 +326,10 @@ export const ExecutionStrip: React.FC = () => {
     getDeskToday({ health: false, plan: false })
       .then((resp) => {
         if (!cancelled) {
-          setItems(resp?.data?.execution?.items || []);
+          const execution = resp?.data?.execution;
+          // 不可归集 ≠ 没交易：留着原因，别让下面渲染成"共 0 单"
+          setUnavailableReason(executionUnavailableReason(execution));
+          setItems(execution?.items || []);
           setLoaded(true);
         }
       })
@@ -349,14 +354,22 @@ export const ExecutionStrip: React.FC = () => {
         </span>
         <span className="text-xs font-bold text-slate-700">今日执行</span>
         <span className="text-[11px] text-slate-400">
-          {loaded ? `共 ${items.length} 单` : '加载中…'}
-          {loaded && items.length > 0 && ` · 成交 ${filled} · 拒单 ${rejected}`}
+          {unavailableReason
+            ? '暂不可按市场归集'
+            : loaded
+              ? `共 ${items.length} 单`
+              : '加载中…'}
+          {!unavailableReason && loaded && items.length > 0 && ` · 成交 ${filled} · 拒单 ${rejected}`}
         </span>
         <span className="ml-auto text-slate-400">{open ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}</span>
       </button>
       {open && (
         <div className="max-h-52 overflow-y-auto px-3 pb-2 space-y-0.5 border-t border-slate-100 pt-1.5">
-          {items.length === 0 && <div className="py-3 text-center text-[11px] text-slate-400">今日暂无委托/成交记录</div>}
+          {unavailableReason ? (
+            <div className="py-3 px-2 text-[11px] leading-relaxed text-slate-500">{unavailableReason}</div>
+          ) : (
+            items.length === 0 && <div className="py-3 text-center text-[11px] text-slate-400">今日暂无委托/成交记录</div>
+          )}
           {items.map((it, idx) => {
             const s = String(it.status || '').toUpperCase();
             const isBuy = String(it.side).toUpperCase() === 'BUY';

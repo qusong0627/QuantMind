@@ -29,7 +29,7 @@ import json
 import os
 import re
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date
 from typing import Any
 from collections.abc import Callable
@@ -57,12 +57,18 @@ class CheckResult:
 
 @dataclass
 class HealthContext:
-    """注入式上下文：query(sql, **params)->list[dict]；redis_* 带 db 号。"""
+    """注入式上下文：query(sql, **params)->list[dict]；redis_* 带 db 号。
+
+    ``market``：体检的**数据市场**（CN/HK/US/FUTURES/CRYPTO）。默认 CN 保持命令行
+    旧行为；交易台按页签市场传入，否则港股/美股页签会拿 A 股信号与同步记录当
+    自己的健康结论（C01 信号分布 / C02 信号就绪 / C08 数据同步 三处按市场取数）。
+    """
 
     query: Callable[..., list[dict]]
     redis_get: Callable[[str, int], str | None]
     redis_scan: Callable[[str, int], list[str]]
     today: date
+    market: str = "CN"
 
 
 # ---------------------------------------------------------------------------
@@ -200,31 +206,48 @@ _USER_KEY_RE = re.compile(r"^simulation:account:([^:]+):([^:]+)(?::([A-Z]+))?$")
 async def check_c01_signal_distribution(ctx: HealthContext) -> CheckResult:
     rows = ctx.query(
         "SELECT signal_side, count(*) AS n FROM engine_signal_scores "
-        "WHERE trade_date = (SELECT max(trade_date) FROM engine_signal_scores) "
-        "GROUP BY signal_side"
+        "WHERE COALESCE(market, 'CN') = :m "
+        "AND trade_date = (SELECT max(trade_date) FROM engine_signal_scores WHERE COALESCE(market, 'CN') = :m) "
+        "GROUP BY signal_side",
+        m=ctx.market,
     )
     counts = {str(r["signal_side"]): int(r["n"]) for r in rows}
-    return classify_signal_distribution(counts)
+    result = classify_signal_distribution(counts)
+    # 空态说明市场：不分市场时「无任何信号数据」看不出是哪个市场没有
+    if result.level == "fail" and not counts:
+        return CheckResult(
+            "C01", "信号分布", "fail", f"{ctx.market} 市场无任何信号数据", "检查该市场推理任务是否执行"
+        )
+    return replace(result, metrics={**result.metrics, "market": ctx.market})
 
 
 async def check_c02_signal_readiness(ctx: HealthContext) -> CheckResult:
     rows = ctx.query(
-        "SELECT max(trade_date) AS d FROM engine_signal_scores"
+        "SELECT max(trade_date) AS d FROM engine_signal_scores WHERE COALESCE(market, 'CN') = :m",
+        m=ctx.market,
     )
     latest = rows[0]["d"] if rows else None
     if latest is None:
-        return CheckResult("C02", "信号就绪", "fail", "信号表为空", "检查推理任务")
+        return CheckResult(
+            "C02",
+            "信号就绪",
+            "fail",
+            f"{ctx.market} 市场信号表为空",
+            "检查该市场推理任务",
+            {"market": ctx.market},
+        )
     latest_str = str(latest)
     # T-P1-02：首选就绪标记（全量校验通过才置位）；完成标记为兼容回退
     from backend.shared.inference_lock import ready_key
 
-    ready_raw = ctx.redis_get(ready_key("CN", latest_str), REDIS_DB_GENERAL)
+    ready_raw = ctx.redis_get(ready_key(ctx.market, latest_str), REDIS_DB_GENERAL)
     marker = ctx.redis_get(f"qm:inference:completed:{latest_str}", REDIS_DB_GENERAL)
     # 残 run 迹象：近 7 日单日多 run（>2 说明重跑/竞态频发）
     run_rows = ctx.query(
         "SELECT count(DISTINCT run_id) AS n FROM engine_signal_scores "
-        "WHERE trade_date = :d",
+        "WHERE trade_date = :d AND COALESCE(market, 'CN') = :m",
         d=latest,
+        m=ctx.market,
     )
     runs = int(run_rows[0]["n"]) if run_rows else 0
     if not ready_raw and not marker:
@@ -232,17 +255,20 @@ async def check_c02_signal_readiness(ctx: HealthContext) -> CheckResult:
             "C02",
             "信号就绪",
             "warn",
-            f"{latest_str} 无就绪/完成标记（runs={runs}）",
+            f"{ctx.market} {latest_str} 无就绪/完成标记（runs={runs}）",
             "确认推理调度执行；标记键 qm:signal:ready:{market}:{date}",
-            {"trade_date": latest_str, "runs": runs},
+            {"trade_date": latest_str, "runs": runs, "market": ctx.market},
         )
     ready_desc = (
         f"就绪标记={str(ready_raw)[:48]}…" if ready_raw else "无就绪标记（回退读完成标记）"
     )
     detail = f"{latest_str} {ready_desc} runs={runs}"
+    metrics = {"trade_date": latest_str, "runs": runs, "market": ctx.market}
     if runs > 2:
-        return CheckResult("C02", "信号就绪", "warn", detail + "（同日多 run，检查竞态/回填）")
-    return CheckResult("C02", "信号就绪", "ok", detail)
+        return CheckResult(
+            "C02", "信号就绪", "warn", detail + "（同日多 run，检查竞态/回填）", metrics=metrics
+        )
+    return CheckResult("C02", "信号就绪", "ok", detail, metrics=metrics)
 
 
 async def check_c03_account_key_consistency(ctx: HealthContext) -> CheckResult:
@@ -457,17 +483,36 @@ async def check_c07_scheduler_heartbeat(ctx: HealthContext) -> CheckResult:
 
 
 async def check_c08_data_sync_freshness(ctx: HealthContext) -> CheckResult:
-    rows = ctx.query("SELECT max(trade_date) AS d FROM engine_signal_scores")
+    rows = ctx.query(
+        "SELECT max(trade_date) AS d FROM engine_signal_scores WHERE COALESCE(market, 'CN') = :m",
+        m=ctx.market,
+    )
     latest = rows[0]["d"] if rows else None
     if latest is None:
-        return CheckResult("C08", "数据同步", "warn", "无交易日基准")
+        return CheckResult("C08", "数据同步", "warn", f"{ctx.market} 市场无交易日基准")
     d = str(latest)
-    marker = ctx.redis_get(f"quantmind:sync_schedule_last_run:A:{d}", REDIS_DB_GENERAL)
+    # 同步键的市场码与业务市场码**不同名**（CN→A、CRYPTO→BC），映射唯一实现在
+    # market_sync_scheduler.sync_market_token；手写 "A" 会让港股/美股永远查不到。
+    from backend.services.engine.tasks.market_sync_scheduler import sync_market_token
+
+    token = sync_market_token(ctx.market)
+    marker = ctx.redis_get(f"quantmind:sync_schedule_last_run:{token}:{d}", REDIS_DB_GENERAL)
     if not marker:
         return CheckResult(
-            "C08", "数据同步", "warn", f"A 股最近交易日 {d} 无同步记录", "检查同步调度配置与执行"
+            "C08",
+            "数据同步",
+            "warn",
+            f"{ctx.market} 市场最近交易日 {d} 无同步记录",
+            "检查同步调度配置与执行",
+            {"market": ctx.market, "trade_date": d, "sync_token": token},
         )
-    return CheckResult("C08", "数据同步", "ok", f"A 股 {d} 已同步")
+    return CheckResult(
+        "C08",
+        "数据同步",
+        "ok",
+        f"{ctx.market} 市场 {d} 已同步",
+        metrics={"market": ctx.market, "trade_date": d, "sync_token": token},
+    )
 
 
 async def check_c09_remote_quote_config(ctx: HealthContext) -> CheckResult:
@@ -660,7 +705,7 @@ def exit_code(results: list[CheckResult]) -> int:
 # ---------------------------------------------------------------------------
 
 
-def _build_context() -> HealthContext:
+def _build_context(market: str = "CN") -> HealthContext:
     import redis as redis_lib
     from sqlalchemy import create_engine, text
 
@@ -694,17 +739,28 @@ def _build_context() -> HealthContext:
     def redis_scan(pattern: str, db: int) -> list[str]:
         return [k.decode() if isinstance(k, bytes) else str(k) for k in clients[db].scan_iter(pattern)]
 
-    return HealthContext(query=query, redis_get=redis_get, redis_scan=redis_scan, today=date.today())
+    from backend.shared.simulation_account_keys import normalize_market
+
+    return HealthContext(
+        query=query,
+        redis_get=redis_get,
+        redis_scan=redis_scan,
+        today=date.today(),
+        market=normalize_market(market),
+    )
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="模拟盘/信号/调度一键体检")
     parser.add_argument("--only", default="", help="只跑指定项，如 C01,C03")
     parser.add_argument("--json", action="store_true", help="JSON 输出")
+    parser.add_argument(
+        "--market", default="CN", help="数据市场（CN/HK/US/FUTURES/CRYPTO），默认 CN"
+    )
     args = parser.parse_args()
 
     selected = {s.strip().upper() for s in args.only.split(",") if s.strip()}
-    ctx = _build_context()
+    ctx = _build_context(args.market)
     results: list[CheckResult] = []
     for cid, _name, fn in CHECKS:
         if selected and cid not in selected:

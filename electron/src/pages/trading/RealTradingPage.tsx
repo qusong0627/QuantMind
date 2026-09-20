@@ -20,7 +20,6 @@ import type { StrategyFile } from '../../types/backtest/strategy';
 import { useAppSelector } from '../../store';
 import { selectCurrentMarket } from '../../store/slices/uiSlice';
 import { useTradingModeSwitch } from '../../features/shared/useTradingModeSwitch';
-import { getMarketConfig } from '../../config/marketConfig';
 import { useTradeWebSocket } from '../../hooks/useTradeWebSocket';
 import { buildTradingTopBarAccountInfo, resolveTradingAccountMode } from './utils/accountAdapter';
 import LiveTradeConfigWizard from './components/LiveTradeConfigWizard';
@@ -87,7 +86,6 @@ const BROKER_LABELS: Record<string, string> = {
 
 const RealTradingPage: React.FC = () => {
     const currentMarket = useAppSelector(selectCurrentMarket);
-    const marketConfig = getMarketConfig(currentMarket);
     // 深链：/?...&tab=eval（评估徽章跳转）→ 初始落在评估中心页签
     const initialTab: ActiveTab = (() => {
         if (typeof window === 'undefined') return 'manage';
@@ -192,7 +190,9 @@ const RealTradingPage: React.FC = () => {
         } finally {
             isFetchingRef.current = false;
         }
-    }, [tenantId, userId, tradingMode]);
+        // currentMarket 必须在内：顶栏账户随市场切换（getRuntimeAccount 带 market），
+        // 漏了它 → 切港股/美股后闭包仍是旧市场，页面继续显示 A 股账户。
+    }, [tenantId, userId, tradingMode, currentMarket]);
 
     useEffect(() => {
         if (pollingPausedByAuth) {

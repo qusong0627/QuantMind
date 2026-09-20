@@ -16,6 +16,7 @@ import { CARD, CardHeader, StatTile } from './cardKit';
 import { SERVICE_URLS } from '../../../config/services';
 import {
   executionSummary,
+  executionUnavailableReason,
   formatMoney,
   healthItemViews,
   pnlSummary,
@@ -136,16 +137,25 @@ export const ExecutionCard: React.FC<{
   onItemDrill?: (item: ExecutionItem) => void;
 }> = ({ execution, onItemDrill }) => {
   const summary = executionSummary(execution);
+  const unavailableReason = executionUnavailableReason(execution);
   return (
     <section className={CARD}>
       <CardHeader icon={<Activity className="h-4 w-4" />} title="今日执行" />
 
-      <div className="grid grid-cols-4 gap-1.5 mb-3">
-        <StatTile label="SIM" value={summary.simCount} tone="slate" />
-        <StatTile label="REAL" value={summary.realCount} tone="slate" />
-        <StatTile label="成交" value={summary.filled} tone="red" />
-        <StatTile label="拒单" value={summary.rejected} tone={summary.rejected > 0 ? 'amber' : 'slate'} />
-      </div>
+      {unavailableReason ? (
+        // 不可归集 ≠ 没交易：不渲染 0 值统计带，也不显示"今日暂无委托"
+        <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5 mb-3">
+          <p className="text-[11px] font-semibold text-slate-600 mb-0.5">暂不可按市场归集</p>
+          <p className="text-[11px] leading-relaxed text-slate-500">{unavailableReason}</p>
+        </div>
+      ) : (
+        <div className="grid grid-cols-4 gap-1.5 mb-3">
+          <StatTile label="SIM" value={summary.simCount} tone="slate" />
+          <StatTile label="REAL" value={summary.realCount} tone="slate" />
+          <StatTile label="成交" value={summary.filled} tone="red" />
+          <StatTile label="拒单" value={summary.rejected} tone={summary.rejected > 0 ? 'amber' : 'slate'} />
+        </div>
+      )}
 
       <div className="space-y-0.5 max-h-[190px] overflow-y-auto pr-1 flex-1">
         {(execution?.items || []).slice(0, 6).map((item, index) => {
@@ -179,7 +189,7 @@ export const ExecutionCard: React.FC<{
             </button>
           );
         })}
-        {(!execution?.items || execution.items.length === 0) && (
+        {!unavailableReason && (!execution?.items || execution.items.length === 0) && (
           <p className="text-xs text-slate-400 px-2 py-1">今日暂无委托（含盘前挂单）</p>
         )}
       </div>
