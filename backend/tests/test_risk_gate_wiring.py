@@ -402,3 +402,101 @@ def test_direct_paths_source_guard():
     l2 = (root / "backend/services/live_trading/services/tdx_l2_realtime.py").read_text(encoding="utf-8")
     assert "check_direct_order" in rolling
     assert "check_direct_order" in l2
+
+
+# ── 预检（推送确认面板逐笔跑的那条路）────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_preflight_returns_full_verdict_without_any_trace(monkeypatch):
+    """预检：判定全貌照给，**留痕一条不写**。
+
+    这是本次推送功能的关键不变式。`check_order` 每次调用都 `hincrby evaluated`，
+    若预检复用它，一次「选 10 只点推送」就等于往当日 metrics 灌 10 次判定 ——
+    影子报告会显示「今天拦了 10 单」，而那 10 单**一次都没发出去**。
+    """
+    # Arrange：急停触发 HALT
+    redis = FakeRedis(config=_cfg())
+
+    async def _ctx(req, *, db, redis, need_counts=False):
+        from backend.shared.risk import RiskContext
+
+        return RiskContext(market="CN", symbol="600036.SH", side="BUY", quantity=100,
+                           now_ts=0.0, kill_switch=True)
+
+    import backend.services.trade.services.risk_gate_service as mod
+    monkeypatch.setattr(mod, "build_context", _ctx)
+
+    # Act
+    verdict = await rgs.preflight_order(_req(), db=None, redis=redis)
+
+    # Assert：裁定可见。**要的是 decisions 全表而不是一条主因** —— 同一笔单会同时踩中
+    # 多条（急停 + 时段 + 陈旧行情），确认面板要按规则前缀分组呈现环境闸门与标的级原因。
+    assert verdict.verdict == "halt"
+    assert verdict.shadow is True                # 影子期：会拦但不拦
+    assert verdict.passed is True
+    rule_ids = [d["rule_id"] for d in verdict.decisions]
+    assert "l0.kill_switch" in rule_ids and len(rule_ids) > 1
+    assert all({"rule_id", "level", "action", "reason", "evidence"} <= set(d) for d in verdict.decisions)
+    # 但一条留痕都没有（决策流 + 计数双向为空）
+    assert redis.xadds == []
+    assert redis.hincr == {}
+
+
+@pytest.mark.asyncio
+async def test_preflight_matches_check_order_verdict(monkeypatch):
+    """同数据下预检与真实判定的裁定必须逐字一致 —— 否则「预检说能过、下单被拒」。"""
+    # Arrange
+    def _ctx_factory():
+        async def _ctx(req, *, db, redis, need_counts=False):
+            from backend.shared.risk import RiskContext
+
+            return RiskContext(market="CN", symbol="600036.SH", side="BUY", quantity=100,
+                               now_ts=0.0, kill_switch=True)
+
+        return _ctx
+
+    import backend.services.trade.services.risk_gate_service as mod
+    monkeypatch.setattr(mod, "build_context", _ctx_factory())
+
+    # Act：强制模式（会真拒），两条路各跑一次
+    pre_redis = FakeRedis(config=_cfg(shadow="false"))
+    pre = await rgs.preflight_order(_req(), db=None, redis=pre_redis)
+    real_redis = FakeRedis(config=_cfg(shadow="false"))
+    real = await rgs.check_order(_req(), db=None, redis=real_redis)
+
+    # Assert
+    assert pre.passed is False and real.passed is False
+    assert pre.rule_id == real.rule_id == "l0.kill_switch"
+    assert pre.reason == real.reason
+    # 真实那条留痕、预检那条不留 —— 差值恰好是一次
+    assert real_redis.hincr.get("halted") == 1
+    assert pre_redis.hincr == {}
+
+
+@pytest.mark.asyncio
+async def test_preflight_fail_closed_without_trace():
+    """配置不可读时预检同样 fail-closed，且不写 errors 计数。"""
+    # Arrange
+    redis = FakeRedis(fail_hgetall=True)
+
+    # Act
+    verdict = await rgs.preflight_order(_req(), db=None, redis=redis)
+
+    # Assert
+    assert verdict.passed is False and verdict.rule_id == "l0.config"
+    assert redis.xadds == [] and redis.hincr == {}
+
+
+@pytest.mark.asyncio
+async def test_preflight_disabled_gate_passes_quietly():
+    """风控未启用：预检放行（与 check_order 的 disabled 分支同判），且不留痕。"""
+    # Arrange
+    redis = FakeRedis(config={})
+
+    # Act
+    verdict = await rgs.preflight_order(_req(), db=None, redis=redis)
+
+    # Assert
+    assert verdict.passed is True and verdict.verdict == "disabled"
+    assert redis.xadds == [] and redis.hincr == {}

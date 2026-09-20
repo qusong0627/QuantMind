@@ -31,7 +31,8 @@ import os
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
+from collections.abc import Mapping
 
 from backend.shared.stock_utils import StockCodeUtil
 
@@ -42,11 +43,19 @@ EXCLUSION_DIR_ENV = "QM_EXCLUSION_DIR"
 DEFAULT_EXCLUSION_DIR = "/data/exclusions"
 
 #: 源 → 是否参与「排除」。其余进 :data:`WARN_SOURCES`，只做标注。
+#: ``user_manual`` 是用户在界面上手工加的票——与机器源**同等效力**（用户按自己的
+#: 纪律排除，不该因为我们它是手写的就降级成「只提示」）。
 BLOCKING_SOURCES: frozenset[str] = frozenset(
-    {"fundamental_flags", "risk_block", "news_blacklist", "block_buy"}
+    {"fundamental_flags", "risk_block", "news_blacklist", "block_buy", "user_manual"}
 )
 #: 源 → 只标注不拦买（隔壁口径：质押只告警、监管关注只提醒）
 WARN_SOURCES: frozenset[str] = frozenset({"risk_block_warn", "risk_block_watch"})
+
+#: 用户层两个来源名（``exclusion_overlay`` 写入同一套字面量，两处必须一致）。
+#: 定义在这里是因为**读侧要用它们做判定**（放行到期后要回落到机器判据），
+#: 而写侧只是把同样的字符串写进 JSON。
+SOURCE_MANUAL = "user_manual"
+SOURCE_ALLOW = "user_allow"
 
 #: 基准日超过这个天数就在界面上提示「名单该刷新了」（隔壁是每日刷新，本仓导入是手动一步）
 STALE_WARN_DAYS = 14
@@ -58,6 +67,8 @@ _SOURCE_LABELS: dict[str, str] = {
     "block_buy": "操作员黑名单",
     "risk_block_warn": "质押告警（只提示）",
     "risk_block_watch": "监管关注（只提示）",
+    "user_manual": "手工排除（本人在个人中心添加）",
+    "user_allow": "手工放行（本人在个人中心解除）",
 }
 
 
@@ -90,7 +101,9 @@ def _clean_flags(raw: Any) -> list[str]:
     return sorted(out)
 
 
-def _collect(raw: Mapping[str, Any]) -> tuple[dict[str, list[dict[str, Any]]], dict[str, str]]:
+def _collect(
+    raw: Mapping[str, Any],
+) -> tuple[dict[str, list[dict[str, Any]]], dict[str, str]]:
     """把四份源文档摊平成 ``({symbol: [逐源命中]}, {源: 基准日})``（纯归集，不做合并判断）。
 
     源名 = **策略名**而非文件名：``live_symbols.json`` 里只有 ``block_buy`` 这一条
@@ -109,12 +122,15 @@ def _collect(raw: Mapping[str, Any]) -> tuple[dict[str, list[dict[str, Any]]], d
     source_asof["fundamental_flags"] = str(fundamental.get("asof") or "").strip()
     for code, item in (fundamental.get("items") or {}).items():
         item = item if isinstance(item, dict) else {}
-        _add(code, {
-            "source": "fundamental_flags",
-            "flags": _clean_flags(item.get("flags")),
-            "reason": str(item.get("reason") or "").strip(),
-            "expire": None,
-        })
+        _add(
+            code,
+            {
+                "source": "fundamental_flags",
+                "flags": _clean_flags(item.get("flags")),
+                "reason": str(item.get("reason") or "").strip(),
+                "expire": None,
+            },
+        )
 
     risk_block = raw.get("risk_block") or {}
     source_asof["risk_block"] = str(risk_block.get("asof") or "").strip()
@@ -124,29 +140,38 @@ def _collect(raw: Mapping[str, Any]) -> tuple[dict[str, list[dict[str, Any]]], d
     ).strip()
     for code, item in (risk_block.get("items") or {}).items():
         item = item if isinstance(item, dict) else {}
-        _add(code, {
-            "source": "risk_block",
-            "flags": _clean_flags(item.get("kind")),
-            "reason": str(item.get("reason") or "").strip(),
-            "expire": str(item.get("expire") or "").strip() or None,
-        })
+        _add(
+            code,
+            {
+                "source": "risk_block",
+                "flags": _clean_flags(item.get("kind")),
+                "reason": str(item.get("reason") or "").strip(),
+                "expire": str(item.get("expire") or "").strip() or None,
+            },
+        )
     # 质押比例：隔壁明写「只告警不拦买」
     for code, reason in (risk_block.get("warns") or {}).items():
-        _add(code, {
-            "source": "risk_block_warn",
-            "flags": ["pledge"],
-            "reason": str(reason or "").strip(),
-            "expire": None,
-        })
+        _add(
+            code,
+            {
+                "source": "risk_block_warn",
+                "flags": ["pledge"],
+                "reason": str(reason or "").strip(),
+                "expire": None,
+            },
+        )
     # 监管关注（问询函/监管函/警示函）：隔壁明写「只提醒不禁买，当因子看」
     for code, item in (risk_block.get("watch") or {}).items():
         item = item if isinstance(item, dict) else {}
-        _add(code, {
-            "source": "risk_block_watch",
-            "flags": _clean_flags(item.get("kind")),
-            "reason": str(item.get("reason") or "").strip(),
-            "expire": str(item.get("until") or "").strip() or None,
-        })
+        _add(
+            code,
+            {
+                "source": "risk_block_watch",
+                "flags": _clean_flags(item.get("kind")),
+                "reason": str(item.get("reason") or "").strip(),
+                "expire": str(item.get("until") or "").strip() or None,
+            },
+        )
 
     news = raw.get("news_blacklist") or {}
     # 年度累计名单：``until`` 是它的覆盖终点，比 ``since`` 更接近「基准日」
@@ -159,24 +184,52 @@ def _collect(raw: Mapping[str, Any]) -> tuple[dict[str, list[dict[str, Any]]], d
         window = ""
         if item.get("first") or item.get("last"):
             window = f"（{item.get('first') or '?'}~{item.get('last') or '?'}）"
-        _add(item.get("code"), {
-            "source": "news_blacklist",
-            "flags": near,
-            "reason": f"{item.get('name') or ''} 年内负面新闻 {item.get('n') or 0} 条{window}".strip(),
-            "expire": None,
-        })
+        _add(
+            item.get("code"),
+            {
+                "source": "news_blacklist",
+                "flags": near,
+                "reason": f"{item.get('name') or ''} 年内负面新闻 {item.get('n') or 0} 条{window}".strip(),
+                "expire": None,
+            },
+        )
 
     live = raw.get("live_symbols") or {}
     source_asof["block_buy"] = str(live.get("asof") or "").strip()
     for code in live.get("block_buy") or []:
-        _add(code, {
-            "source": "block_buy",
-            "flags": ["operator"],
-            "reason": "操作员黑名单（人工复核后禁止买入）",
-            "expire": None,
-        })
+        _add(
+            code,
+            {
+                "source": "block_buy",
+                "flags": ["operator"],
+                "reason": "操作员黑名单（人工复核后禁止买入）",
+                "expire": None,
+            },
+        )
 
     return hits, source_asof
+
+
+def _merge_reasons(reasons: list[str]) -> list[str]:
+    """多个来源的理由 → 去重后的分句列表（**按分句**去重，不是按整段）。
+
+    隔壁两份源文档经常各自带上同一句话：实测 ``600606.SH`` 的
+    ``fundamental_flags`` 写「连续3年亏损（2023-2025）；资产负债率92%（高杠杆）；多年阴跌…」，
+    ``risk_block`` 又原样重复这三句、前面再加自己那句「股价1.32元低于2.0元预警线…」。
+    整段比对去不掉（两段文字并不相同），合并后同一句话出现两遍，读起来像系统复读，
+    在表格里还会把真正独有的那句挤到看不见的地方。
+
+    ``by_source`` 里各源的原话一字不动 —— 逐源明细要能对得上源文件，只有合并展示去重。
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+    for reason in reasons or []:
+        for clause in str(reason or "").split("；"):
+            c = clause.strip()
+            if c and c not in seen:
+                seen.add(c)
+                out.append(c)
+    return out
 
 
 def _merge(entries: list[dict[str, Any]]) -> dict[str, Any]:
@@ -195,10 +248,7 @@ def _merge(entries: list[dict[str, Any]]) -> dict[str, Any]:
         for e in ordered
     }
     flags = _clean_flags([f for e in ordered for f in e["flags"]])
-    reasons: list[str] = []
-    for e in ordered:
-        if e["reason"] and e["reason"] not in reasons:
-            reasons.append(e["reason"])
+    reasons = _merge_reasons([e["reason"] for e in ordered])
     expires = [e["expire"] for e in ordered]
     expire = max(expires) if all(expires) else None
     sources = [e["source"] for e in ordered]
@@ -299,9 +349,13 @@ class ExclusionList:
     sources: Mapping[str, Mapping[str, Any]]
     counts: Mapping[str, int]
     items: Mapping[str, ExclusionHit]
+    #: 用户层摘要（``{updated_at, manual, allow, allow_miss}``）；无手工条目时为 ``None``。
+    #: 挂在只读视图上而不是让调用方自己再读一次文件：读一次算一次，两次读之间文件可能
+    #: 已经变了，界面上就会出现「条数说了 3 条、表里只有 2 行」。
+    overlay: Mapping[str, Any] | None = None
 
     @classmethod
-    def from_payload(cls, payload: Mapping[str, Any]) -> "ExclusionList":
+    def from_payload(cls, payload: Mapping[str, Any]) -> ExclusionList:
         items: dict[str, ExclusionHit] = {}
         for symbol, raw in (payload.get("items") or {}).items():
             raw = raw if isinstance(raw, dict) else {}
@@ -321,6 +375,7 @@ class ExclusionList:
             sources=payload.get("sources") or {},
             counts=payload.get("counts") or {},
             items=items,
+            overlay=payload.get("overlay") or None,
         )
 
     def explain(self, symbol: str, *, today: str | None = None) -> ExclusionHit | None:
@@ -334,7 +389,9 @@ class ExclusionList:
         """当前**有效**的排除集合（只含 blocking 且未过期）——过滤侧直接用。"""
         ref = today or _today_iso()
         return frozenset(
-            sym for sym, hit in self.items.items() if hit.blocking and not _is_expired(hit, ref)
+            sym
+            for sym, hit in self.items.items()
+            if _effective_blocking(hit, ref) and not _is_expired(hit, ref)
         )
 
     def warn_hits(self, symbol: str, *, today: str | None = None) -> list[ExclusionHit]:
@@ -358,6 +415,7 @@ class ExclusionList:
             "counts": dict(self.counts),
             "sources": {k: dict(v) for k, v in self.sources.items()},
             "blocking_now": len(self.symbols(today=ref)),
+            "overlay": dict(self.overlay) if self.overlay else None,
         }
 
     def _with_expiry(self, hit: ExclusionHit, today: str) -> ExclusionHit:
@@ -367,7 +425,7 @@ class ExclusionList:
             flags=hit.flags,
             reason=hit.reason,
             expire=hit.expire,
-            blocking=hit.blocking,
+            blocking=_effective_blocking(hit, today),
             by_source=hit.by_source,
             expired=_is_expired(hit, today),
         )
@@ -378,6 +436,26 @@ def _is_expired(hit: ExclusionHit, today: str) -> bool:
     if not hit.expire:
         return False
     return hit.expire < today
+
+
+def _effective_blocking(hit: ExclusionHit, today: str) -> bool:
+    """在 ``hit.blocking`` 之上再判一次**用户放行窗口**。
+
+    用户层的 ``allow`` 把条目的 ``blocking`` 翻成 ``False``，但那个覆盖本身可以带
+    到期日：``allow expire=2026-09-01`` 的意思是「9/1 之前可以买」。窗口一过必须
+    **自动回到机器判据**（这只票本来就还在机器名单上），而不是等用户回去再点一次
+    「取消放行」——他会忘，而忘掉的代价是买进一只他自己明令不买的票。
+
+    判据放在读侧（``today`` 逐次传入）而不是合并时烘焙进载荷：服务进程可能连跑数天，
+    烘焙的结果会在跨日那一刻静默过期失效——正是「配置改了但没生效」那类最难查的故障。
+    """
+    allow = (hit.by_source or {}).get(SOURCE_ALLOW)
+    if not allow:
+        return hit.blocking
+    expire = allow.get("expire")
+    if expire and str(expire) < today:
+        return True
+    return False
 
 
 def _stale_days(asof: str, today: str) -> int | None:
@@ -417,27 +495,59 @@ def _load_uncached(root: Path, market: str) -> ExclusionList | None:
     if not isinstance(payload, dict) or "items" not in payload:
         logger.warning("[ExclusionList] 名单结构不符，按未导入处理 %s", path)
         return None
-    return ExclusionList.from_payload(payload)
+    return ExclusionList.from_payload(_with_overlay(payload, market, root))
+
+
+def _with_overlay(
+    payload: Mapping[str, Any], market: str, root: Path
+) -> dict[str, Any]:
+    """叠上用户层（手工增删）。用户层读不到就是「还没手工加过」，不影响机器名单。
+
+    **机器名单存在但用户层损坏**时只丢手工条目、保留机器基线——两个文件是独立故障域，
+    让一份坏文件把另一份一起拖成「未导入」会把「名单坏了」与「我想加的那只没加上」
+    混成同一个提示，用户没法从中判断该修哪个。
+    """
+    from backend.shared.exclusion_overlay import load_overlay, merge_into_payload
+
+    overlay = load_overlay(market, root=root)
+    if not overlay.entries:
+        return dict(payload)
+    merged, stats = merge_into_payload(payload, overlay)
+    logger.debug(
+        "[ExclusionList] 用户层合并 %s：手工 %d / 放行 %d / 放行未命中 %d",
+        market,
+        stats["manual"],
+        stats["allow"],
+        stats["allow_miss"],
+    )
+    return merged
 
 
 _CACHE: dict[str, ExclusionList | None] = {}
 
 
+def _stamp(path: Path) -> str:
+    try:
+        return str(path.stat().st_mtime_ns)
+    except OSError:
+        return "missing"
+
+
 def _load_cached(root: str, market: str) -> ExclusionList | None:
     """进程内缓存。
 
-    名单是**每日刷新**的产物、不是热点数据，故按 ``(root, market, mtime)`` 缓存：
-    mtime 变了自动失效（导入器覆盖写会改 mtime），不需要 TTL 轮询。
+    名单是**每日刷新**的产物、不是热点数据，故按 ``(root, market, 两个文件的 mtime)``
+    缓存：mtime 变了自动失效（导入器覆盖写改 ``cn.json``、个人中心改 ``cn_user.json``），
+    不需要 TTL 轮询。
+
+    **两个 mtime 都要进键**：只盯机器名单的话，用户在个人中心加了票、下一次拉列表
+    却还是旧结果——而他刚刚在界面上看到了「已保存」。
     """
-    path = Path(root) / f"{market.lower()}.json"
-    try:
-        stamp = f"{path.stat().st_mtime_ns}"
-    except OSError:
-        stamp = "missing"
-    key = f"{root}|{market}|{stamp}"
+    base = Path(root)
+    key = f"{root}|{market}|{_stamp(base / f'{market.lower()}.json')}|{_stamp(base / f'{market.lower()}_user.json')}"
     if key not in _CACHE:
         _CACHE.clear()  # 只保留当前版本，避免导入多次后缓存无界增长
-        _CACHE[key] = _load_uncached(Path(root), market)
+        _CACHE[key] = _load_uncached(base, market)
     return _CACHE[key]
 
 
@@ -448,4 +558,8 @@ def clear_cache() -> None:
 
 def now_iso() -> str:
     """带 Z 的 aware UTC 时间戳（与平台瞬时时间口径一致）。"""
-    return datetime.now(tz=timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    return (
+        datetime.now(tz=timezone.utc)
+        .isoformat(timespec="seconds")
+        .replace("+00:00", "Z")
+    )

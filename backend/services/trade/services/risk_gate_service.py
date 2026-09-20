@@ -429,7 +429,7 @@ async def check_direct_order(
     source: str = "tdx_bridge",
     remarks: str | None = None,
     redis_client: Any = None,
-) -> "RiskCheck":
+) -> RiskCheck:
     """直连路径（TDX 滚动/L2/QMT）过闸便捷入口：自建只读会话 + trade Redis。
 
     fail-closed 纪律与 OrderRouter 内嵌一致：判定异常/闸不可用 → passed=False（拒单），
@@ -470,6 +470,24 @@ class RiskCheck:
     rule_id: str | None = None
     reason: str = ""
     version: int = 0
+
+
+@dataclass(frozen=True)
+class RiskVerdict:
+    """判定全貌（预检用）：比 RiskCheck 多出 `decisions` 全表与原始 verdict 词。
+
+    「会不会被拦」与「被哪几条拦」是两件事：影子期下 `passed` 恒 True，只看它
+    永远看不到 `l1.position_cap` 已经超了 —— 推送确认面板要的正是后者。
+    """
+
+    passed: bool
+    verdict: str                    # pass | warn | reject | halt | disabled | error
+    enforced: bool = False
+    rule_id: str | None = None
+    reason: str = ""
+    version: int = 0
+    shadow: bool = False
+    decisions: list[dict[str, Any]] = field(default_factory=list)
 
 
 _PASS = RiskCheck(passed=True)
@@ -520,25 +538,41 @@ def _record(redis: Any, req: Any, *, verdict: str, enforced: bool, version: int,
         logger.warning("[RiskGate] 决策留痕失败: %s", exc)
 
 
-async def check_order(req: Any, *, db: Any, redis: Any) -> RiskCheck:
-    """OrderRouter 内嵌调用点：返回 RiskCheck（passed=False 即拒单）。"""
+async def evaluate_order(
+    req: Any, *, db: Any, redis: Any, record: bool = True
+) -> RiskVerdict:
+    """风控判定**唯一实现**。`record=False` 即预检：同一套规则、同一份上下文，但不落留痕。
+
+    预检必须走 `record=False`：`_record` 每次调用都会 `hincrby evaluated`，逐笔预检一次
+    10 只候选就等于往当日 metrics 里灌 10 次判定，影子报告会显示「今天拦了 N 单」而
+    实际一单未发 —— 那是把「没发生的事」写进了证据。见 `preflight_order`。
+    """
     try:
         cfg = load_config(redis)
     except Exception as exc:  # noqa: BLE001 - 配置不可读 = fail-closed
-        _record(redis, req, verdict="reject", enforced=True, version=0, error=f"config: {exc}")
-        return RiskCheck(passed=False, enforced=True, rule_id="l0.config", reason=f"风控配置不可读（fail-closed）: {exc}"[:180])
+        if record:
+            _record(redis, req, verdict="reject", enforced=True, version=0, error=f"config: {exc}")
+        return RiskVerdict(
+            passed=False, verdict="error", enforced=True, rule_id="l0.config",
+            reason=f"风控配置不可读（fail-closed）: {exc}"[:180],
+        )
     if cfg is None or not cfg.enabled:
-        # 未启用：不判定不拦单（计数一次 missing，便于运维确认部署状态）
-        _record(redis, req, verdict="disabled", enforced=False, version=0)
-        return _PASS
+        # 未启用：不判定不拦单（计数一次 disabled，便于运维确认部署状态）
+        if record:
+            _record(redis, req, verdict="disabled", enforced=False, version=0)
+        return RiskVerdict(passed=True, verdict="disabled")
 
     try:
         need_counts = any(k in cfg.rules for k in ("l3.order_frequency", "l3.cancel_ratio"))
         ctx = await build_context(req, db=db, redis=redis, need_counts=need_counts)
         verdict = _CORE.evaluate(ctx, cfg.rules, version=cfg.version)
     except Exception as exc:  # noqa: BLE001 - 判定异常 = fail-closed
-        _record(redis, req, verdict="reject", enforced=True, version=cfg.version, error=f"evaluate: {exc}")
-        return RiskCheck(passed=False, enforced=True, rule_id="l0.evaluate", reason=f"风控判定异常（fail-closed）: {exc}"[:180])
+        if record:
+            _record(redis, req, verdict="reject", enforced=True, version=cfg.version, error=f"evaluate: {exc}")
+        return RiskVerdict(
+            passed=False, verdict="error", enforced=True, rule_id="l0.evaluate",
+            reason=f"风控判定异常（fail-closed）: {exc}"[:180], version=cfg.version,
+        )
 
     decisions = [
         {"rule_id": d.rule_id, "level": d.level, "action": d.action, "reason": d.reason, "evidence": dict(d.evidence)}
@@ -554,11 +588,39 @@ async def check_order(req: Any, *, db: Any, redis: Any) -> RiskCheck:
         v, primary = "pass", None
 
     enforced = (not cfg.shadow) and v in ("reject", "halt")
-    _record(redis, req, verdict=v, enforced=enforced, version=cfg.version, decisions=decisions)
+    if record:
+        _record(redis, req, verdict=v, enforced=enforced, version=cfg.version, decisions=decisions)
 
     if cfg.shadow or v == "pass" or v == "warn":
-        return RiskCheck(passed=True, enforced=False, version=cfg.version)
+        return RiskVerdict(
+            passed=True, verdict=v, enforced=False, version=cfg.version,
+            shadow=bool(cfg.shadow), decisions=decisions,
+        )
     rule_id = str((primary or {}).get("rule_id") or "risk")
     reason = str((primary or {}).get("reason") or "风控拦截")
-    logger.warning("[RiskGate] 拒单 %s %s: [%s] %s", getattr(req, "side", ""), getattr(req, "symbol", ""), rule_id, reason)
-    return RiskCheck(passed=False, enforced=True, rule_id=rule_id, reason=reason, version=cfg.version)
+    if record:
+        logger.warning("[RiskGate] 拒单 %s %s: [%s] %s", getattr(req, "side", ""), getattr(req, "symbol", ""), rule_id, reason)
+    return RiskVerdict(
+        passed=False, verdict=v, enforced=True, rule_id=rule_id, reason=reason,
+        version=cfg.version, shadow=bool(cfg.shadow), decisions=decisions,
+    )
+
+
+async def check_order(req: Any, *, db: Any, redis: Any) -> RiskCheck:
+    """OrderRouter 内嵌调用点：返回 RiskCheck（passed=False 即拒单）。"""
+    v = await evaluate_order(req, db=db, redis=redis, record=True)
+    if v.verdict == "disabled":
+        return _PASS
+    return RiskCheck(
+        passed=v.passed, enforced=v.enforced, rule_id=v.rule_id,
+        reason=v.reason, version=v.version,
+    )
+
+
+async def preflight_order(req: Any, *, db: Any, redis: Any) -> RiskVerdict:
+    """推送前预检：判定照跑、**不落留痕**，并回传 decisions 全表。
+
+    与真实下单共用 `evaluate_order`，所以「预检说会过、下单却被拒」只可能来自
+    下单那一刻的上下文变化（时段推移、资金变化），不会是两套口径。
+    """
+    return await evaluate_order(req, db=db, redis=redis, record=False)

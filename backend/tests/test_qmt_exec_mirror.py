@@ -860,3 +860,90 @@ class TestRealTradingGate:
         ):
             ready, reason = m._real_trading_ready(redis, "CN")
         assert ready is True and reason == ""
+
+
+class TestWhitelistKeyFormNormalization:
+    """白名单两侧键形归一 —— 实盘通道的「静默无反应」根因。
+
+    线上实测 ``mirror:whitelist = {default:00000001, default:1}``，而调用方传的是
+    规范账户 ``10000001``（``CANONICAL_ADMIN_SIM_USER``）。精确串匹配下两者永不相等，
+    真单被判 ``skipped(whitelist)`` 且**没有任何界面症状** —— 用户只看到「推了但没成交」。
+    """
+
+    def test_legacy_alias_entry_matches_canonical_account(self) -> None:
+        # Arrange：存量白名单只写着历史别名 00000001
+        redis = _redis(sets={"mirror:whitelist": {"default:00000001"}})
+
+        # Act / Assert：规范账户必须能过闸
+        assert m.whitelist_allows(redis, tenant_id="default", user_id="10000001") is True
+
+    def test_short_alias_entry_matches_canonical_account(self) -> None:
+        # Arrange：另一条存量别名（int 化后是 1）
+        redis = _redis(sets={"mirror:whitelist": {"default:1"}})
+
+        # Act / Assert
+        assert m.whitelist_allows(redis, tenant_id="default", user_id="10000001") is True
+
+    def test_canonical_entry_matches_legacy_caller(self) -> None:
+        """反向也要通：白名单已改成规范键形，但某个老调用方仍传 00000001。"""
+        # Arrange
+        redis = _redis(sets={"mirror:whitelist": {"default:10000001"}})
+
+        # Act / Assert
+        assert m.whitelist_allows(redis, tenant_id="default", user_id="00000001") is True
+
+    def test_ordinary_numeric_user_is_not_collapsed(self) -> None:
+        """归一只作用于管理员族：普通数字用户仍按原值精确匹配。
+
+        这是防止「归一过头」的钉子 —— 若把 42 也归成 10000001，
+        给 42 开的白名单会变成给管理员账户放行。
+        """
+        # Arrange
+        redis = _redis(sets={"mirror:whitelist": {"default:42"}})
+
+        # Act / Assert：42 自己命中，管理员账户不命中
+        assert m.whitelist_allows(redis, tenant_id="default", user_id="42") is True
+        assert m.whitelist_allows(redis, tenant_id="default", user_id="10000001") is False
+
+    def test_alias_entry_with_strategy_matches(self) -> None:
+        """三段式（tenant:user:strategy）也要归一段 —— 只有用户段有别名族。"""
+        # Arrange
+        redis = _redis(sets={"mirror:whitelist": {"default:00000001:42"}})
+
+        # Act / Assert
+        assert (
+            m.whitelist_allows(
+                redis, tenant_id="default", user_id="10000001", strategy_id="42"
+            )
+            is True
+        )
+
+    def test_bare_tenant_entry_still_matches(self) -> None:
+        """单段（裸 tenant）不含用户段，归一是恒等，语义不变。"""
+        # Arrange
+        redis = _redis(sets={"mirror:whitelist": {"default"}})
+
+        # Act / Assert
+        assert m.whitelist_allows(redis, tenant_id="default", user_id="10000001") is True
+
+    def test_unrelated_tenant_alias_still_blocks(self) -> None:
+        """别把「归一」做成「一律放行」：别的租户的条目不能命中本租户。"""
+        # Arrange
+        redis = _redis(sets={"mirror:whitelist": {"other:00000001"}})
+
+        # Act / Assert
+        assert m.whitelist_allows(redis, tenant_id="default", user_id="10000001") is False
+
+    def test_empty_whitelist_blocks(self) -> None:
+        # Arrange
+        redis = _redis(sets={"mirror:whitelist": set()})
+
+        # Act / Assert
+        assert m.whitelist_allows(redis, tenant_id="default", user_id="10000001") is False
+
+    def test_wildcard_still_allows(self) -> None:
+        # Arrange
+        redis = _redis(sets={"mirror:whitelist": {"*"}})
+
+        # Act / Assert
+        assert m.whitelist_allows(redis, tenant_id="default", user_id="10000001") is True

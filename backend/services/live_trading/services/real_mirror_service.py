@@ -46,7 +46,10 @@ from backend.services.live_trading.services.trading_session import (
     is_trading_time,
     trade_date_str,
 )
-from backend.shared.simulation_account_keys import resolve_db_account_user
+from backend.shared.simulation_account_keys import (
+    canonical_sim_user_suffix,
+    resolve_db_account_user,
+)
 from backend.shared.stock_utils import StockCodeUtil
 
 logger = logging.getLogger(__name__)
@@ -280,10 +283,32 @@ def mirror_enabled(redis: Any, cfg: MirrorConfig) -> bool:
     return _one(raw)
 
 
+def _canonical_whitelist_entry(entry: str) -> str:
+    """把白名单条目里的用户段归一到规范键形（管理员族一律 10000001）。
+
+    条目形如 ``tenant`` / ``tenant:user`` / ``tenant:user:strategy``；只归第二段，
+    tenant 与 strategy 原样保留（strategy_id 是 UUID，不存在别名族）。非管理员族的
+    数字用户（``default:42``）经 ``canonical_sim_user_suffix`` 是恒等变换，不受影响。
+    """
+    text = str(entry or "").strip()
+    if not text or text == "*" or ":" not in text:
+        return text
+    tenant, _, rest = text.partition(":")
+    user, sep, strategy = rest.partition(":")
+    canonical = canonical_sim_user_suffix(user)
+    return f"{tenant}:{canonical}{sep}{strategy}" if sep else f"{tenant}:{canonical}"
+
+
 def whitelist_allows(
     redis: Any, *, tenant_id: str, user_id: str, strategy_id: str = ""
 ) -> bool:
-    """白名单匹配：``*`` / tenant / tenant:user / tenant:user:strategy。空集合=全否。"""
+    """白名单匹配：``*`` / tenant / tenant:user / tenant:user:strategy。空集合=全否。
+
+    **两侧都过键形归一**。存量白名单写的是历史别名（实测线上是
+    ``{default:00000001, default:1}``），而调用方传的是规范账户 ``10000001``；
+    精确串匹配下两者永不相等 → 真单被静默 ``skipped(whitelist)``，界面上只表现为
+    「实盘通道没反应」。归一只在用户段做：tenant 原样、strategy 原样（UUID 无别名）。
+    """
     client = _redis_client(redis)
     if client is None:
         return False
@@ -295,11 +320,13 @@ def whitelist_allows(
     if not entries:
         return False
     normalized = {
-        (e.decode() if isinstance(e, (bytes, bytearray)) else str(e)).strip()
+        _canonical_whitelist_entry(
+            e.decode() if isinstance(e, (bytes, bytearray)) else str(e)
+        )
         for e in entries
     }
     tenant = str(tenant_id or "default").strip() or "default"
-    user = str(user_id or "").strip()
+    user = canonical_sim_user_suffix(str(user_id or "").strip())
     strategy = str(strategy_id or "").strip()
     keys = {tenant, f"{tenant}:{user}"}
     if strategy:
@@ -493,6 +520,11 @@ def status_snapshot(redis: Any) -> dict[str, Any]:
         "trading_time": is_trading_time(),
         "broker_selected": selected,
         "real_trading_ready": ready,
+        # ``blocked_reason`` 只回答「镜像为什么没开」；通道就绪是另一个问题，
+        # 且**镜像开着也可能不就绪**（ENABLE_REAL_TRADING 未开 / 券商不是 qmt_exec）。
+        # 分开报：推送确认面板要并列展示这两态，合成一个字段会让「就绪=false 但 reason 为空」
+        # 变成一句没法行动的空话。``blocked_reason`` 语义保持不变（存量消费方在用）。
+        "not_ready_reason": "" if ready else (reason or "unknown"),
         "blocked_reason": ""
         if enabled
         else ("kill_switch" if kill else reason or "disabled"),

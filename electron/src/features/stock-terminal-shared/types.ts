@@ -310,3 +310,171 @@ export interface SignalLookbackParams {
   page?: number;
   page_size?: number;
 }
+
+// ---------------------------------------------------------------------------
+// 候选信号多选一键推送（契约类型放共享层，展示口径纯函数在
+// `features/stock-terminal/pushModel.ts`）。
+// 后端唯一事实源：`backend/services/api/routers/push_orders.py`。
+// ---------------------------------------------------------------------------
+
+export type PushSide = 'buy' | 'sell';
+/** `real` 是**叠加**在模拟盘建单之上的真单镜像，不是替代品（见 channels_effective） */
+export type PushChannel = 'sim' | 'real';
+
+/** 服务端逐笔的阻断位；空串 = 没被阻断 */
+export type PushBlockedBy = '' | 'quantity' | 'list' | 'risk';
+
+/** 实盘配额试算：这一笔会不会被镜像闸跳过（`will_skip` 必须显示成「不会下发真单」） */
+export interface MirrorPrecheck {
+  will_skip: boolean;
+  /** max_daily_orders / max_daily_symbols / max_daily_value / max_order_value */
+  reason: string;
+}
+
+/** 风控单条决策（`l0.*` 进 environment，其余进 subject） */
+export interface RiskDecisionRow {
+  rule_id: string;
+  level?: string;
+  /** REJECT | WARN | HALT */
+  action?: string;
+  reason?: string;
+  evidence?: Record<string, unknown>;
+}
+
+/** 确认面板的一行（= 服务端算出来的这一笔） */
+export interface PushLeg {
+  symbol: string;
+  name: string;
+  price: number | null;
+  position_score: number | null;
+  signal_date: string | null;
+  available_position: number;
+  amount: number;
+  risk: StockRisk | null;
+  quantity: number;
+  /** `auto`=服务端按 可用资金×仓位 算的 / `manual`=手填 / `blocked`=算不出 */
+  source: string;
+  /** 给人看的说明（整手对齐、资金来源），不阻断 */
+  note: string;
+  /** 必须阻断的违规（与 note 分开：整手对齐照常下单，违规必须点不动确认） */
+  problem: string;
+  blocked_by: PushBlockedBy | string;
+  executable: boolean;
+  /** 服务端恒发（`null` 与 `{will_skip:false}` 是「没查」与「查了没事」两件事） */
+  mirror_precheck: MirrorPrecheck | null;
+  risk_verdict?: string;
+  risk_enforced?: boolean;
+  risk_rule_id?: string;
+  risk_reason?: string;
+  environment?: RiskDecisionRow[];
+  subject?: RiskDecisionRow[];
+}
+
+/** 实盘闸门快照（仅 `channels` 含 `real` 时是真实内容，否则只有 `requested:false`） */
+export interface PushMirrorPlan {
+  requested: boolean;
+  available?: boolean;
+  reason?: string;
+  enabled?: boolean;
+  kill_switch?: boolean;
+  trading_time?: boolean;
+  real_trading_ready?: boolean;
+  blocked_reason?: string;
+  /** 通道不就绪的原因（镜像开着也可能不就绪，与 blocked_reason 是两个问题） */
+  not_ready_reason?: string;
+  /** 非交易时段下单不丢，而是入队等开盘——「排队」与「已成交」对真钱必须分清 */
+  will_queue?: boolean;
+  broker_selected?: string;
+  whitelist?: string[];
+  blacklist?: string[];
+  queue_length?: number | null;
+  config?: Record<string, number | string | boolean>;
+  quota?: Record<string, number | null | undefined>;
+}
+
+export interface PushLegSummary {
+  total: number;
+  executable: number;
+  blocked: number;
+  est_amount: number;
+}
+
+/**
+ * 整批资金约束（`meta.budget`）。
+ *
+ * 逐笔各自按**全量**可用资金算量会系统性超配（实测 3 只候选 vs 48.9 万 → 合计 124.5 万，
+ * 2.5 倍），多出来的单子在账户层逐笔被拒，看起来像「莫名其妙下单失败」。后端按系数把
+ * **自动算出的**量等比例缩回来；手填量不缩。`applied=false` 时只有 `factor:1`。
+ */
+export interface PushBudget {
+  applied: boolean;
+  factor: number;
+  available_cash?: number;
+  planned_amount?: number;
+  /** 缩量说明（`applied=false` 时为空串；UI 只在 applied 时展示） */
+  note?: string;
+}
+
+export interface PushPreflightMeta {
+  signal_date: string | null;
+  available_cash: number;
+  account_found: boolean;
+  exclusion?: Record<string, unknown>;
+  /** false = 名单未导入（要显式提示，不能当空名单静默放行） */
+  exclusion_imported?: boolean;
+  budget?: PushBudget;
+}
+
+export interface PushPreflight {
+  batch_id: string;
+  side: PushSide;
+  channels: PushChannel[];
+  channels_effective: string[];
+  ack_risk: boolean;
+  legs: PushLeg[];
+  mirror: PushMirrorPlan;
+  summary: PushLegSummary;
+  meta?: PushPreflightMeta;
+}
+
+export interface PushLegResult {
+  symbol: string;
+  success: boolean;
+  /** false = 预检就阻断，压根没提交（`skipped_reason` 有原因） */
+  executed: boolean;
+  skipped_reason?: string;
+  order_id?: string | null;
+  trade_id?: string | null;
+  fill_price?: number | null;
+  filled_quantity?: number | null;
+  commission?: number | null;
+  message?: string;
+  duplicate?: boolean;
+  /** 仅实盘腿有；`class` 只有 success 才算真发出去了 */
+  mirror?: { status: string; class: string; reason?: string; order_id?: string | null; client_order_id?: string | null } | null;
+}
+
+export interface PushExecute {
+  batch_id: string;
+  dry_run: boolean;
+  /** executed | partial | failed | blocked | preview */
+  status: string;
+  side?: PushSide;
+  channels: PushChannel[];
+  channels_effective: string[];
+  results: PushLegResult[];
+  summary: PushLegSummary & { attempted: number; succeeded: number; failed: number; skipped: number };
+  mirror?: PushMirrorPlan;
+}
+
+export interface PushOrdersParams {
+  symbols: string[];
+  side: PushSide;
+  channels: PushChannel[];
+  /** 打开确认面板时生成一次；幂等键的一部分，重复点击不重复下单 */
+  batch_id: string;
+  /** {symbol: 股数} 手填覆盖（键后缀/前缀/裸码都认） */
+  quantities?: Record<string, number>;
+  ack_risk?: boolean;
+  dry_run?: boolean;
+}

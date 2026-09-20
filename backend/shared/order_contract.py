@@ -46,6 +46,7 @@ SOURCE_SLTP = "sltp"
 SOURCE_SANDBOX = "sandbox"  # 沙箱策略信号（T-P2-01 收敛入 Router）
 SOURCE_TDX_ROLLING = "tdx_rolling"  # 通达信滚动 paper 单（T-P2-01 收敛入 Router）
 SOURCE_CO_PILOT = "co_pilot"  # 副驾驶建议卡一键执行（T-P6-16）
+SOURCE_CANDIDATE_PUSH = "candidate_push"  # 候选信号页多选一键推送（T-FE-09）
 
 # Fill 取价来源（REAL 侧：成交回报来自券商）
 PRICE_SOURCE_BROKER_FILL = "broker_fill"
@@ -63,6 +64,24 @@ def build_copilot_client_order_id(advice_id: str, symbol: str, side: str) -> str
     sym = str(symbol or "").strip().upper() or "NA"
     sd = str(side or "").strip().lower() or "na"
     return f"cop-{aid}-{sym}-{sd}"[:MAX_CLIENT_ORDER_ID_LEN]
+
+
+def build_candidate_client_order_id(batch_id: str, symbol: str, side: str) -> str:
+    """候选信号一键推送的幂等键：同批量同标的同方向 → 同键。
+
+    ``batch_id`` 由前端在**打开确认面板时生成一次**（而不是点「确认」时），
+    这样重复点击、网络重试、浏览器重放都落在同一个键上；用户若想真的再下一单，
+    重新打开一次面板即可。
+
+    长度预算：``cand-`` 5 + batch 24 + ``-`` 1 + symbol 9（``600036.SH`` 上限）
+    + ``-`` 1 + side 4 = 44 < 100，正常输入下**截断永不触发**；batch 超出 24 字符的
+    部分被裁掉，因此两个 batch_id 只有第 25 位以后不同时会撞键（前端用 UUID4 前 24 位，
+    可忽略）。
+    """
+    bid = "".join(ch for ch in str(batch_id or "") if ch.isalnum())[:24] or "nobatch"
+    sym = str(symbol or "").strip().upper() or "NA"
+    sd = str(side or "").strip().lower() or "na"
+    return f"cand-{bid}-{sym}-{sd}"[:MAX_CLIENT_ORDER_ID_LEN]
 
 
 def build_sim_client_order_id(run_id: str, symbol: str, side: str) -> str | None:

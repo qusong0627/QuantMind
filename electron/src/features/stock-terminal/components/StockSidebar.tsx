@@ -1,12 +1,14 @@
 /** 个股终端左侧栏：搜索 + 市场分段 + 看板筛选（页面持有条件）+ 信息丰富的股票列表 */
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
-import { Search, RefreshCw, Star, ChevronDown, ChevronLeft, ChevronRight, ChevronsUp, ChevronsDown, ShieldCheck, AlertTriangle } from 'lucide-react';
-import { Input, Spin, message, Dropdown } from 'antd';
-import { StockListItem, StockListResponse, StockRisk, ExclusionMeta } from '../types';
+import { Search, RefreshCw, Star, ChevronDown, ChevronLeft, ChevronRight, ChevronsUp, ChevronsDown, ShieldCheck, AlertTriangle, Send, X } from 'lucide-react';
+import { Checkbox, Input, Spin, message, Dropdown, Segmented } from 'antd';
+import { StockListItem, StockListResponse, StockRisk, ExclusionMeta, PushChannel } from '../types';
 import { EXCLUDE_ON, riskChips, channelText } from '../riskModel';
+import { CHANNEL_OPTIONS, MAX_PICK } from '../pushModel';
 import { stockTerminalService } from '../services/stockTerminalService';
 import { ListFilters, bucketScoreRange, StockFilterPanel, BOARD_OPTIONS, CAP_TIER_OPTIONS, TREND_OPTIONS, BUCKET_OPTIONS } from './StockFilterPanel';
+import { PushConfirmPanel } from './PushConfirmPanel';
 import { EvalScoreBadge } from '../../../components/shared/EvalScoreBadge';
 
 interface Props {
@@ -138,6 +140,52 @@ export function StockSidebar({ selected, onSelect, watchlistSymbols, positions =
   const jumpKeyRef = useRef<string>('');
   const pageOffsetRef = useRef(0);
 
+  /**
+   * 多选推送（T-FE-09）：勾选的票 + 目标通道 + 面板开关。
+   *
+   * 存整条 `StockListItem` 而不是只存代码：勾中的票滚出已加载页之后，底部操作条仍要
+   * 说得清「你选的是哪几只」（只留代码的话用户只能靠记忆核对）。
+   * **勾选不参与任何请求**：它不进 `buildParams`，所以勾一只票不会让整表重拉
+   * （与 `selectedRef` 同一条纪律，见上方注释）。
+   */
+  const [picked, setPicked] = useState<Map<string, StockListItem>>(new Map());
+  const [pushChannels, setPushChannels] = useState<PushChannel[]>(['sim']);
+  const [pushOpen, setPushOpen] = useState(false);
+
+  /**
+   * 检索模式：搜索框有内容时，让开「候选列表专属」的那几道闸。
+   *
+   * 信号=买入 与三道风险排除闸都是**页面默认**，用户从没主动勾过；而搜索框的语义是
+   * 「找到这只票」，不是「在候选里找这只票」。实测：搜 600036（招商银行）在默认参数下
+   * `total=0` —— 它当日信号是 SELL、且命中通道 A 的年内新闻黑名单，两条都不是用户输入
+   * 造成的，界面却统一显示成「搜不到」。用户自己设的筛选（行业/板块/分数/模型…）保持不动，
+   * 那些是他明确表达过的意图，见下方 `activeNarrowing` 的空结果提示。
+   */
+  const searching = q.trim().length > 0;
+
+  /**
+   * 用户**主动设置**且会缩小股票集合的条件 —— 搜索空结果时用来回答「是没这只票，
+   * 还是被你自己的条件挡住了」。
+   * 排除闸不算（那是页面默认），date 只换基准日不改集合，side 在检索模式下已让开。
+   */
+  const NARROWING_KEYS = [
+    ['board', '板块'], ['capTier', '市值'], ['bucket', '分数档'], ['trend', '趋势'],
+    ['industry', '行业'], ['concept', '概念'], ['indexCode', '宽基'], ['model', '推理模型'],
+    ['scoreMin', '分数下限'], ['tagId', '标签'],
+  ] as const;
+
+  const activeNarrowing = NARROWING_KEYS.filter(([k]) => {
+    const v = (filters as Record<string, unknown>)[k];
+    return v != null && v !== '';
+  });
+
+  /** 清掉上面那些条件（保留 date 与排除闸开关状态）后重新检索 */
+  const clearNarrowing = useCallback(() => {
+    const next: ListFilters = { ...filters };
+    for (const [k] of NARROWING_KEYS) delete next[k];
+    onFiltersChange(next);
+  }, [filters, onFiltersChange]); // eslint-disable-line react-hooks/exhaustive-deps
+
   /** 组装 /list 请求参数（首页附带 with_counts / find_symbol） */
   const buildParams = useCallback((page: number, withCounts: boolean) => {
     const range = bucketScoreRange(filters.bucket);
@@ -154,18 +202,19 @@ export function StockSidebar({ selected, onSelect, watchlistSymbols, positions =
       trend: filters.trend,
       tag: filters.tagId,
       index_code: filters.indexCode,
-      side: filters.side,
+      side: searching ? undefined : filters.side,
       // 风险排除闸**显式传布尔**（后端三个开关默认 false，是为了服务检索框/自选股；
-      // 候选列表是「要排除的调用方」，默认全开——见 StockFilterPanel.EXCLUDE_ON）
-      exclude_st: EXCLUDE_ON(filters.excludeSt),
-      exclude_risk_list: EXCLUDE_ON(filters.excludeRiskList),
-      exclude_news_risk: EXCLUDE_ON(filters.excludeNewsRisk),
+      // 候选列表是「要排除的调用方」，默认全开——见 StockFilterPanel.EXCLUDE_ON）。
+      // 检索模式下强制放行：用户搜一只票是为了看它，不是为了被名单静默吞掉。
+      exclude_st: !searching && EXCLUDE_ON(filters.excludeSt),
+      exclude_risk_list: !searching && EXCLUDE_ON(filters.excludeRiskList),
+      exclude_news_risk: !searching && EXCLUDE_ON(filters.excludeNewsRisk),
       // 只看自选：把全量自选传给后端过滤（保留分数序），否则前端只过滤已加载页导致列表不全
       symbols: onlyWatchlist && watchlistSymbols.size ? [...watchlistSymbols].join(',') : undefined,
       ...(withCounts ? { with_counts: true } : {}),
       ...(withCounts && selectedRef.current ? { find_symbol: selectedRef.current } : {}),
     };
-  }, [market, q, filters, onlyWatchlist, watchlistSymbols]);
+  }, [market, q, filters, onlyWatchlist, watchlistSymbols, searching]);
 
   const fetchList = useCallback(async (page = 1, append = false) => {
     setLoading(true);
@@ -217,6 +266,21 @@ export function StockSidebar({ selected, onSelect, watchlistSymbols, positions =
     const t = setTimeout(() => fetchList(1, false), q ? 300 : 0);
     return () => clearTimeout(t);
   }, [fetchList, q]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  /**
+   * 换一批候选（改筛选/换市场/换基准日/切检索词）就清空勾选。
+   *
+   * 不清的话会出现「勾了 5 只 → 换筛选 → 推送」把一个已经不在当前视角里的组合发出去：
+   * 勾中的票里可能有已被新条件排除、甚至已删号的，而确认面板之外没人会再看一遍。
+   * 清空是明面上的行为（操作条消失），残留才是隐形的。
+   */
+  const queryKey = useMemo(
+    () => JSON.stringify([market, q, filters, onlyWatchlist]),
+    [market, q, filters, onlyWatchlist],
+  );
+  useEffect(() => {
+    setPicked(new Map());
+  }, [queryKey]);
 
   const handleScroll = useCallback(() => {
     const el = listRef.current;
@@ -270,10 +334,52 @@ export function StockSidebar({ selected, onSelect, watchlistSymbols, positions =
     [data, onlyWatchlist, watchlistSymbols],
   );
 
+  /** 勾/取消一只。单批上限与服务端 `MAX_BATCH_SYMBOLS` 同口径 —— 超了当场说，不留给 400。 */
+  const togglePick = useCallback((item: StockListItem) => {
+    const next = new Map(picked);
+    if (next.has(item.symbol)) {
+      next.delete(item.symbol);
+    } else {
+      if (next.size >= MAX_PICK) {
+        message.warning(`单批最多 ${MAX_PICK} 只（已选 ${next.size} 只），请分两批推送`);
+        return;
+      }
+      next.set(item.symbol, item);
+    }
+    setPicked(next);
+  }, [picked]);
+
+  /** 全选/取消全选**当前已加载的**可见行（不做「全市场全选」——那会把没看过的票也算进去） */
+  const pickAllVisible = useCallback((checked: boolean) => {
+    if (!checked) {
+      setPicked(new Map());
+      return;
+    }
+    const next = new Map<string, StockListItem>();
+    for (const it of visibleItems) {
+      if (next.size >= MAX_PICK) { message.warning(`单批最多 ${MAX_PICK} 只，已按顺序取前 ${MAX_PICK} 只`); break; }
+      next.set(it.symbol, it);
+    }
+    setPicked(next);
+  }, [visibleItems]);
+
+  const allVisiblePicked = visibleItems.length > 0 && visibleItems.every(it => picked.has(it.symbol));
+
+  // 推送完成后**关掉面板才**清空勾选：面板开着的时候 `symbols` 是它的入参，
+  // 当场清空会让正在看的回执失去上下文（那一刻 `symbols` 变空数组）。
+  const pushDoneRef = useRef(false);
+  const closePush = useCallback(() => {
+    setPushOpen(false);
+    if (pushDoneRef.current) {
+      pushDoneRef.current = false;
+      setPicked(new Map());
+    }
+  }, []);
+
   // 单一 grid 贯穿表头+每行，所有列严格对齐。
-  // 列：排名 | 股票 | 板块·分 | 行业·分 | 市值·分 | 趋势 | 得分 | 仓位 | 信号
+  // 列：勾选 | 排名 | 股票 | 板块·分 | 行业·分 | 市值·分 | 趋势 | 得分 | 仓位 | 信号
   // （2026-09-17 去走势迷你线列：每行懒加载 K 线极易卡顿，牺牲此列换流畅度）
-  const GRID = 'grid grid-cols-[24px_1.4fr_56px_70px_50px_42px_56px_38px_30px] gap-1';
+  const GRID = 'grid grid-cols-[16px_24px_1.4fr_56px_70px_50px_42px_56px_38px_30px] gap-1';
 
   const SIDE_LABEL: Record<string, string> = { BUY: '买入', SELL: '卖出', HOLD: '持有' };
   /** 得分档表头短名（列宽有限） */
@@ -350,6 +456,20 @@ export function StockSidebar({ selected, onSelect, watchlistSymbols, positions =
           </button>
         </div>
       </div>
+
+      {/* 检索模式声明：搜索时让开了候选列表的默认闸门，必须**说出来**。
+          不说的话，用户会以为「列表里这些票就是候选」——而检索结果里恰恰包含
+          非买入信号与被名单/新闻拦下的票。让开是行为，声明才是证据。 */}
+      {searching && (
+        <div className="flex items-center gap-1.5 shrink-0 mb-1.5 rounded-lg border border-blue-100 bg-blue-50/70 px-2 py-1">
+          <Search className="w-3 h-3 text-blue-500 shrink-0" />
+          <span className="text-[10px] font-bold text-blue-700 shrink-0">检索模式</span>
+          <span className="text-[9px] text-slate-600 leading-tight">
+            已暂时放行「信号=买入」与三道风险排除闸 —— 你搜的票若信号不是买入、或被名单/新闻拦下，
+            这里仍会列出来并逐行标注原因；关掉搜索框即恢复候选视图。
+          </span>
+        </div>
+      )}
 
       {/* 筛选面板：columnOnly 只留 模型+概念 两列（其余维度在列表表头筛选）；日历补推理后刷新列表 */}
       {/* 筛选行（统一网格：概念 1fr | 日历 | 推理模型 1fr | 页码 auto 右贴边——比例协调，无死区） */}
@@ -516,8 +636,18 @@ export function StockSidebar({ selected, onSelect, watchlistSymbols, positions =
           </div>
         );
       })()}
-      {/* 列表头：单行 9 列，与每行严格对齐；点击表头筛选 */}
+      {/* 列表头：单行 10 列，与每行严格对齐；点击表头筛选 */}
       <div className={`${GRID} px-1 pb-1 pt-2 text-[10px] font-bold text-slate-400 border-b border-slate-100 shrink-0 items-center`}>
+        {/* 勾选表头 = 全选**当前已加载的**可见行（不做全市场全选：没看过的票不该被勾上） */}
+        <span className="flex justify-center" title="全选 / 取消全选当前已加载的行">
+          <Checkbox
+            checked={allVisiblePicked}
+            indeterminate={picked.size > 0 && !allVisiblePicked}
+            disabled={visibleItems.length === 0}
+            onChange={e => pickAllVisible(e.target.checked)}
+            aria-label="全选当前列表"
+          />
+        </span>
         <span className="text-center">排名</span>
         <span>股票</span>
         <span className="text-center">{headerDropdown(fac('board', BOARD_OPTIONS.map(b => ({ value: b, label: b }))), filters.board, v => onFiltersChange({ ...filters, board: v }), '板块')}</span>
@@ -539,6 +669,7 @@ export function StockSidebar({ selected, onSelect, watchlistSymbols, positions =
         )}
         {visibleItems.map((it, i) => {
             const isSel = it.symbol === selected;
+            const isPicked = picked.has(it.symbol);
             const up = (it.pct_change ?? 0) >= 0;
             const rank = pageOffsetRef.current + i + 1;   // 跳页后显示真实名次
             const rankMedal = rank <= 3 ? ['🥇', '🥈', '🥉'][rank - 1] : String(rank);
@@ -551,6 +682,21 @@ export function StockSidebar({ selected, onSelect, watchlistSymbols, positions =
                   isSel ? 'bg-blue-50 border border-blue-200' : 'hover:bg-slate-50 border border-transparent'
                 }`}
               >
+                {/* 勾选格：整行是 <button>，故用嵌套 role="checkbox" + stopPropagation
+                    （与下面星标同一范式）——换成真 <input> 嵌在按钮里既非法也点不准 */}
+                <span
+                  role="checkbox"
+                  aria-checked={isPicked}
+                  aria-label={`${it.symbol} 加入推送`}
+                  tabIndex={-1}
+                  title={isPicked ? '取消勾选' : '勾选（可多选后一键推送）'}
+                  onClick={(e) => { e.stopPropagation(); togglePick(it); }}
+                  className="flex justify-center items-center cursor-pointer py-1"
+                >
+                  <span className={`w-3 h-3 rounded border flex items-center justify-center text-[8px] leading-none ${
+                    isPicked ? 'bg-blue-600 border-blue-600 text-white' : 'border-slate-300 hover:border-blue-400'
+                  }`}>{isPicked ? '✓' : ''}</span>
+                </span>
                 <span className={`text-center text-[10px] font-mono font-bold ${rank <= 3 ? 'text-sm leading-none' : 'text-slate-400'}`}>{rankMedal}</span>
                 {/* 股票单元格：主行(名称|涨幅) + 副行(代码|价格·市值)，单列内 flex-col */}
                 <span className="flex flex-col min-w-0 gap-0.5">
@@ -641,10 +787,77 @@ export function StockSidebar({ selected, onSelect, watchlistSymbols, positions =
               <RefreshCw className="w-3 h-3 animate-spin" /> 加载更多…
             </div>
           )}
+          {/* 空结果必须分清「没有这只票」和「被条件挡住了」——两者都渲染成一句
+              「无匹配股票」时，用户只会以为自己搜错了代码，然后反复重搜。 */}
           {!loading && visibleItems.length === 0 && (
-            <div className="text-center py-8 text-[11px] text-slate-400">无匹配股票</div>
+            searching && activeNarrowing.length > 0 ? (
+              <div className="text-center py-6 px-3">
+                <div className="text-[11px] text-slate-500">
+                  没有命中「{q.trim()}」—— 但当前还有 {activeNarrowing.length} 个筛选条件在生效
+                </div>
+                <div className="mt-1 text-[10px] text-slate-400">
+                  {activeNarrowing.map(([, label]) => label).join(' · ')}
+                  {onlyWatchlist ? ' · 只看自选' : ''}
+                </div>
+                <button
+                  type="button"
+                  onClick={clearNarrowing}
+                  className="mt-2 rounded-lg border border-blue-200 bg-blue-50 px-2.5 py-1 text-[11px] font-bold text-blue-600 hover:bg-blue-100 transition-colors"
+                >
+                  清除这些条件，全市场重新检索
+                </button>
+              </div>
+            ) : (
+              <div className="text-center py-8 text-[11px] text-slate-400">
+                {searching ? `全市场没有匹配「${q.trim()}」的股票代码或名称` : '无匹配股票'}
+              </div>
+            )
           )}
       </div>
+
+      {/* 多选操作条：勾了才浮出。通道摆在这里而不是藏进弹窗——用户点推送之前就该知道
+          这一批是「只动模拟盘」还是「连真单一起发」。 */}
+      {picked.size > 0 && (
+        <div className="shrink-0 mt-2 flex items-center gap-2 rounded-2xl border border-blue-200 bg-blue-50/80 px-2.5 py-1.5">
+          <span className="text-[11px] font-bold text-blue-700 shrink-0">已选 {picked.size} 只</span>
+          <span className="text-[10px] text-slate-500 truncate min-w-0 flex-1" title={[...picked.values()].map(x => `${x.symbol} ${x.name}`).join('\n')}>
+            {[...picked.values()].slice(0, 3).map(x => x.name || x.symbol).join('、')}
+            {picked.size > 3 ? ` 等 ${picked.size} 只` : ''}
+            <span className="ml-1 text-slate-400">· {filters.side === 'SELL' ? '卖出' : '买入'}</span>
+          </span>
+          <Segmented
+            size="small"
+            value={pushChannels.includes('real') ? 'real' : 'sim'}
+            onChange={v => setPushChannels(v === 'real' ? ['sim', 'real'] : ['sim'])}
+            options={CHANNEL_OPTIONS.map(o => ({ value: o.value, label: o.label, title: o.hint }))}
+          />
+          <button
+            type="button"
+            onClick={() => setPicked(new Map())}
+            title="清空勾选"
+            className="shrink-0 flex items-center gap-0.5 rounded-lg border border-slate-200 bg-white px-2 py-1 text-[11px] font-bold text-slate-500 hover:bg-slate-50"
+          >
+            <X className="w-3 h-3" /> 清空
+          </button>
+          <button
+            type="button"
+            onClick={() => setPushOpen(true)}
+            className="shrink-0 flex items-center gap-1 rounded-lg bg-blue-600 px-3 py-1 text-[11px] font-bold text-white shadow-sm hover:bg-blue-700"
+          >
+            <Send className="w-3 h-3" /> 一键推送
+          </button>
+        </div>
+      )}
+
+      <PushConfirmPanel
+        open={pushOpen}
+        symbols={[...picked.keys()]}
+        side={filters.side === 'SELL' ? 'sell' : 'buy'}
+        channels={pushChannels}
+        onChannelsChange={setPushChannels}
+        onDone={() => { pushDoneRef.current = true; }}
+        onClose={closePush}
+      />
     </div>
   );
 }

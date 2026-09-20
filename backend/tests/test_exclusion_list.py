@@ -149,6 +149,40 @@ def test_merged_flags_are_deduped_and_sorted() -> None:
 # ---------------------------------------------------------------- expire 语义
 
 
+def test_merged_reason_dedupes_shared_clauses_across_sources() -> None:
+    """两个来源各自带上同一句话时，合并理由只留一遍，逐源明细一句不动。
+
+    实测：隔壁 ``fundamental_flags`` 与 ``risk_block`` 都会写「连续3年亏损…」，
+    整段比对去不掉（两段文字并不相同），合并后同一句话出现两遍 ——
+    在表格里读起来像系统复读，还会把该来源独有的那句挤到看不见的地方。
+    """
+    # Arrange：两个来源，前半句相同、后半句各自独有
+    raw = {
+        "fundamental_flags": {
+            "asof": "2026-09-18",
+            "items": {"600606": {"flags": ["fin"], "reason": "连续3年亏损；资产负债率92%"}},
+        },
+        "risk_block": {
+            "asof": "2026-09-18",
+            "items": {
+                "600606": {"reason": "股价1.32元低于2.0元预警线；连续3年亏损", "kind": "penny"}
+            },
+        },
+    }
+
+    # Act
+    payload = build_payload(raw, generated_at="2026-09-20T10:00:00Z")
+    item = payload["items"]["600606.SH"]
+
+    # Assert：合并后「连续3年亏损」只出现一次，两句独有的话都留着
+    assert item["reason"].count("连续3年亏损") == 1
+    assert "资产负债率92%" in item["reason"]
+    assert "股价1.32元低于2.0元预警线" in item["reason"]
+    # 逐源明细对得上源文件（`by_source` 不去重，下钻要能看到各源原话）
+    assert "连续3年亏损" in item["by_source"]["fundamental_flags"]["reason"]
+    assert "连续3年亏损" in item["by_source"]["risk_block"]["reason"]
+
+
 def test_expire_is_none_when_any_source_is_permanent() -> None:
     """有永久来源（基本面）时，不被另一来源的 expire 带过期。"""
     # Arrange

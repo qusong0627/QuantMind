@@ -12,6 +12,7 @@ import { SERVICE_ENDPOINTS, resolveWebSafeServiceBase } from '../../config/servi
 import { authService } from '../auth/services/authService';
 import { KlineBar, KlineMarker, KlineSplitsEvent, StockListResponse, StockProfile, type TradeMarker } from './types';
 import type { SignalLookbackData, SignalLookbackParams } from './types';
+import type { PushExecute, PushOrdersParams, PushPreflight } from './types';
 
 /** 复权方式：qfq=前复权（默认）/ hfq=后复权 / none=不复权。仅 A 股日线后端真正支持三种；港股/美股固定 none */
 export type KlineAdjust = 'qfq' | 'hfq' | 'none';
@@ -167,6 +168,28 @@ export class StockTerminalService {
     );
     // 后端「覆盖不足」是正常的业务态（返回 status='unavailable'），不是错误
     return resp.data?.data ?? { status: 'unavailable', reason: '接口无返回' };
+  }
+
+  /**
+   * 推送前预检：逐笔给数量、名单/新闻命中、风控裁定、实盘配额，**服务端不产生任何副作用**。
+   *
+   * 返回的 `legs` 不是「建议」——推送端点复用同一份组装逻辑，所以这里看到的
+   * 就是下单那一刻会被同样算出来的东西（价格与仓位信号一律服务端解析，前端只给通道与手填量）。
+   */
+  async pushOrdersPreflight(params: PushOrdersParams): Promise<PushPreflight> {
+    const resp = await this.client.post('/stock-terminal/push-orders/preflight', params, { timeout: 60000 });
+    return resp.data?.data;
+  }
+
+  /**
+   * 执行推送（逐笔下单，可选叠加实盘镜像）。
+   *
+   * **幂等靠 `batch_id`**：它在打开确认面板时生成一次，服务端据此拼
+   * `client_order_id`；重复提交同一批不会重复下单（回执里如实标 `duplicate`）。
+   */
+  async pushOrders(params: PushOrdersParams): Promise<PushExecute> {
+    const resp = await this.client.post('/stock-terminal/push-orders', params, { timeout: 120000 });
+    return resp.data?.data;
   }
 
   async getConcepts(): Promise<string[]> {
