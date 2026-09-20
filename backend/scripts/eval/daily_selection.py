@@ -26,12 +26,17 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from backend.shared.benchmark import BENCHMARK_SYMBOL  # noqa: E402
+from backend.scripts.eval.daily_selection_series import (  # noqa: E402
+    daily_selection_series_payload,
+    history_upto,
+)
 from backend.shared.eval_scoring import (  # noqa: E402
     DimensionScore,
     combine_dimension_scores,
     score_from_quantile,
     score_from_thresholds,
 )
+from backend.shared.eval_series import save_series  # noqa: E402
 
 V1_WEIGHTS = {
     "quality": 25.0,
@@ -215,6 +220,88 @@ def _load_forward_closes(
     return df.sort_values("dt")["close"].astype(float).tolist()
 
 
+async def load_selection_history(
+    *, tenant_id: str = "default", user_id: str = "", limit: int = 400
+) -> list[dict[str, Any]]:
+    """`eval_scores` 里本租户的每日选股历史（日期升序，含 dimensions）。
+
+    只取**同一 user_id 键形**的行：`eval_scores` 的唯一键含 user_id，混键形会把
+    别的用户的选股曲线画进这张图。``limit`` 取最近 N 天（升序返回）。
+    """
+    from sqlalchemy import text as _text
+
+    from backend.shared.database_manager_v2 import get_session
+
+    async with get_session(read_only=True) as session:
+        rows = (
+            (
+                await session.execute(
+                    _text(
+                        "SELECT snapshot_date, dimensions FROM eval_scores "
+                        "WHERE object_type = 'daily_selection' AND tenant_id = :t "
+                        "AND COALESCE(user_id, '') = :u "
+                        "ORDER BY snapshot_date DESC LIMIT :n"
+                    ),
+                    {"t": tenant_id, "u": user_id, "n": max(1, int(limit))},
+                )
+            )
+            .mappings()
+            .all()
+        )
+    return [
+        {
+            "snapshot_date": r["snapshot_date"].isoformat()
+            if r["snapshot_date"]
+            else "",
+            "dimensions": r["dimensions"],
+        }
+        for r in rows
+    ][::-1]
+
+
+async def save_selection_sidecar(
+    trade_date: str,
+    combined: dict[str, Any],
+    *,
+    tenant_id: str = "default",
+    user_id: str = "",
+    horizon: int = 5,
+    pending: bool = False,
+) -> dict[str, Any]:
+    """当日选股 → 跨日期序列侧车（``data/eval_series/daily_selection/<日期>.json``）。
+
+    历史来自 `eval_scores`（还没落库的当天由 ``combined`` 现算现并——顺序上排最后，
+    同日重跑以当天为准）。历史读不到就只画当天并写明原因：**缺数据可以，不说不行**。
+    """
+    history: list[dict[str, Any]] = []
+    note = ""
+    try:
+        history = await load_selection_history(tenant_id=tenant_id, user_id=user_id)
+    except Exception as exc:  # noqa: BLE001 — 序列是附加证据，读不到要留痕不能断卡
+        note = f"历史行读取失败（{type(exc).__name__}）：{exc}"
+    today_row = {
+        "snapshot_date": trade_date,
+        "dimensions": combined.get("dimensions") or {},
+    }
+    rows = [*history_upto(history, trade_date), today_row]
+    payload = daily_selection_series_payload(
+        rows,
+        extra_note=note,
+        scalars={
+            "score": combined.get("score"),
+            "grade": combined.get("grade"),
+            # 当天入选数不在这里另给一份：coverage.detail.picked 就是它
+            # （score_coverage 写的就是 len(opportunities)），两个键会有对不上的风险
+            "pending_backfill": bool(pending),
+            "horizon": horizon,
+        },
+    )
+    sidecar = save_series("daily_selection", trade_date, payload)
+    if note:
+        sidecar["history_note"] = note
+    return sidecar
+
+
 async def score_daily_selection(
     trade_date: str | None = None,
     *,
@@ -325,6 +412,16 @@ async def score_daily_selection(
     dims.append(score_coverage(opportunities, meta))
 
     combined = combine_dimension_scores(dims, low_confidence=bool(pending))
+    sidecar: dict[str, Any] | None = None
+    if resolved_date:
+        sidecar = await save_selection_sidecar(
+            resolved_date,
+            combined,
+            tenant_id=tenant_id,
+            user_id=str(user_id or ""),
+            horizon=horizon,
+            pending=pending,
+        )
     result = {
         "object_type": "daily_selection",
         "object_id": resolved_date,
@@ -337,6 +434,9 @@ async def score_daily_selection(
             "mode": report.get("mode"),
             "horizon": horizon,
             "weights": V1_WEIGHTS,
+            # 长序列走 `data/eval_series/daily_selection/<日期>.json`（§1.6）：
+            # 每条只装**该日及以前**的历史（详情页不画当时看不到的未来）
+            **({"series_sidecar": sidecar} if sidecar else {}),
         },
         **combined,
     }

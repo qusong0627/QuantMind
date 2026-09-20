@@ -516,7 +516,7 @@ async def object_series(
     """
     from sqlalchemy import text as _text
 
-    from backend.shared.eval_series import load_series, safe_object_id
+    from backend.shared.eval_series import is_series_id, load_series
 
     ot = _validate_object_type(object_type)
     tenant_id = str(current_user.get("tenant_id") or "default")
@@ -524,8 +524,10 @@ async def object_series(
     oid = str(object_id)
 
     # 先验输入再碰库：`../` 这种 id 不该换来一次 DB 往返，而且它是个输入错误，
-    # 不该混进「看不见 → 404」那条路（否则穿越尝试与不存在的对象无法区分）
-    if not safe_object_id(oid):
+    # 不该混进「看不见 → 404」那条路（否则穿越尝试与不存在的对象无法区分）。
+    # 用 is_series_id 而非 safe_object_id：账户 id 是「用户:市场」（`10000001:CN`），
+    # 冒号经 series_filename 编码后可以落盘，原样形态判据会把它误判成非法。
+    if not is_series_id(oid):
         raise HTTPException(status_code=400, detail=f"object_id 非法（禁止路径穿越）: {oid!r}")
 
     # 可见性：侧车在盘上没有租户/用户维度，先按 eval_scores 的同一谓词确认调用方

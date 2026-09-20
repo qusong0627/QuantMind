@@ -104,7 +104,7 @@ export const EvalSeriesSection: React.FC<EvalSeriesSectionProps> = ({
           <div className="grid grid-cols-1 gap-3 xl:grid-cols-2">
             {charts.map((chart) => (
               <figure
-                key={chart.kind}
+                key={`${chart.kind}:${chart.key}`}
                 className="rounded-xl border border-slate-200/80 bg-slate-50/40 p-2.5"
               >
                 <figcaption className="mb-1.5 flex items-start gap-1.5">
@@ -112,9 +112,17 @@ export const EvalSeriesSection: React.FC<EvalSeriesSectionProps> = ({
                   <span className="text-[11px] font-semibold text-slate-700">{chart.question}</span>
                 </figcaption>
                 {chart.option ? (
-                  <div className="h-[168px] min-w-0">
-                    <EChartsChart option={chart.option} />
-                  </div>
+                  <>
+                    <div className="h-[168px] min-w-0">
+                      <EChartsChart option={chart.option} />
+                    </div>
+                    {/* 有数据的图也要摊开后端 notes：样本只有 5 天、截断、几个点缺测 */}
+                    {chart.note && (
+                      <p className="mt-1 rounded-lg bg-amber-50/70 px-2 py-1 text-[10px] leading-4 text-amber-800">
+                        {chart.note}
+                      </p>
+                    )}
+                  </>
                 ) : (
                   <div className={`flex h-[168px] items-center rounded-lg px-3 text-[11px] text-amber-800 ${NO_EVIDENCE_CARD}`}>
                     无图：{chart.answer}

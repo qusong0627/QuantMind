@@ -9,9 +9,16 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
-from backend.scripts.eval.strategy_card import strategy_dims
+from backend.scripts.eval.strategy_card import (
+    curve_scalars,
+    parse_equity_curve,
+    save_curve_sidecar,
+    strategy_dims,
+)
 from backend.scripts.eval.strategy_realized import (
     capacity_dim,
     cost_dim,
@@ -302,6 +309,167 @@ def test_normalize_symbols_maps_qlib_lowercase_to_suffix():
     )
 
     assert out == ["300750.SZ", "600000.SH", "600007.SH", "600036.SH"]
+
+
+# ── 曲线装载 + 长序列侧车（设计 §1.6）───────────────────────────────
+
+
+@pytest.mark.unit
+def test_parse_equity_curve_drops_missing_values_and_keeps_dates_aligned():
+    """缺测点连日期一起丢（两个列表必须等长，调用方 zip 时才不错位）；
+    真 0 净值是有效点，不能被当成缺测剔除。"""
+    # Arrange
+    curve = [
+        {"date": "2025-10-16", "value": 1.0},
+        {"date": "2025-10-17", "value": None},
+        {"date": "2025-10-20"},
+        {"date": "2025-10-21", "value": float("nan")},
+        {"date": "2025-10-22", "value": 0.0},
+    ]
+
+    # Act
+    dates, values, dropped = parse_equity_curve(curve)
+
+    # Assert
+    assert dates == ["2025-10-16", "2025-10-22"]
+    assert values == [1.0, 0.0]
+    assert dropped == 3
+
+
+@pytest.mark.unit
+def test_parse_equity_curve_handles_empty_and_non_mapping_rows():
+    """裸数字/字符串行不是净值点（老形态没有这种行），一律丢弃并计数。"""
+    assert parse_equity_curve([]) == ([], [], 0)
+
+    dates, values, dropped = parse_equity_curve([1.5, "x", {}, {"value": "2.5"}])
+
+    assert values == [2.5]
+    assert dates == [""]  # 数字形态的 value 可解析，但没有日期
+    assert dropped == 3
+    assert len(dates) == len(values)
+
+
+@pytest.mark.unit
+def test_curve_scalars_reads_numbers_already_computed_by_the_card():
+    """图上标量必须与卡上分数同源：年化/最大回撤只从维度 detail 里取，不重算。"""
+    # Arrange
+    combined = {
+        "score": 61.5,
+        "grade": "C",
+        "dimensions": {
+            "return": {
+                "detail": {
+                    "annual_return": 0.1834,
+                    "benchmark_annual": 0.09,
+                    "excess_annual": 0.0934,
+                }
+            },
+            "risk": {"detail": {"max_drawdown": -0.2146, "annual_vol": 0.31}},
+            "stability": {"detail": {"months": 12, "monthly_win_rate": 0.5833}},
+        },
+    }
+
+    # Act
+    scalars = curve_scalars(combined)
+
+    # Assert
+    assert scalars["score"] == 61.5
+    assert scalars["annual_return"] == 0.1834
+    assert scalars["max_drawdown"] == -0.2146
+    assert scalars["n_months"] == 12
+
+
+@pytest.mark.unit
+def test_curve_scalars_on_empty_combined_gives_none_not_zero():
+    """维度全缺时不编数：None 让前端走缺省分支，0 会被读成「回撤为 0」。"""
+    scalars = curve_scalars({})
+
+    assert scalars["score"] is None
+    assert scalars["max_drawdown"] is None
+    assert scalars["annual_return"] is None
+
+
+@pytest.mark.unit
+def test_save_curve_sidecar_writes_series_named_by_backtest_id(tmp_path, monkeypatch):
+    """侧车落在 `data/eval_series/strategy/<backtest_id>.json`，两条曲线与月度柱齐全。"""
+    # Arrange
+    monkeypatch.setenv("QM_EVAL_SERIES_DIR", str(tmp_path))
+    loaded = {
+        "dates": ["2025-10-16", "2025-10-17", "2025-10-20"],
+        "equity_curve": [1.0, 1.1, 1.2],
+        "drawdown_entries": [
+            ("2025-10-16", 0.0),
+            ("2025-10-17", -0.02),
+            ("2025-10-20", 0.0),
+        ],
+        "drawdown_dropped": 0,
+        "equity_dropped": 1,
+        "path": "data/backtest_results/bt_abc.json",
+    }
+    combined = {"score": 61.5, "grade": "C", "dimensions": {}}
+
+    # Act
+    status = save_curve_sidecar(
+        loaded,
+        {"monthly": [("2025-10", 0.2)]},
+        combined,
+        object_id="bt_abc",
+        backtest_id="bt_abc",
+    )
+
+    # Assert
+    assert status["written"] is True
+    assert status["note"] is None
+    raw = json.loads((tmp_path / "strategy" / "bt_abc.json").read_text("utf-8"))
+    assert [p["value"] for p in raw["series"]["equity"]] == [1.0, 1.1, 1.2]
+    assert [p["value"] for p in raw["series"]["drawdown"]] == [0.0, -0.02, 0.0]
+    assert raw["series"]["monthly_return"] == [{"label": "2025-10", "value": 0.2}]
+    assert raw["scalars"]["score"] == 61.5
+    # 装载层丢的点也要进 notes（否则「读进来时丢了几个点」无人知晓）
+    assert "1 个净值点值非法已剔除" in raw["notes"]["equity"]
+
+
+@pytest.mark.unit
+def test_save_curve_sidecar_flags_id_mismatch_for_cli_file_runs(tmp_path, monkeypatch):
+    """CLI `--file` 直跑：卡片 object_id 是结果文件路径，侧车只能用文件主名落盘。
+    两者不一致时必须在 note 里说出来（详情页按 object_id 取不到这张图）。"""
+    # Arrange
+    monkeypatch.setenv("QM_EVAL_SERIES_DIR", str(tmp_path))
+    loaded = {
+        "dates": ["2025-10-16", "2025-10-17"],
+        "equity_curve": [1.0, 1.1],
+        "path": "data/backtest_results/bt_abc.json",
+    }
+
+    # Act
+    status = save_curve_sidecar(
+        loaded, {}, {}, object_id="data/backtest_results/bt_abc.json"
+    )
+
+    # Assert
+    assert status["written"] is True
+    assert status["object_id"] == "bt_abc"
+    assert "侧车 id bt_abc" in str(status["note"])
+    assert "取不到这张图" in str(status["note"])
+    assert (tmp_path / "strategy" / "bt_abc.json").is_file()
+
+
+@pytest.mark.unit
+def test_save_curve_sidecar_reports_instead_of_raising_without_a_safe_id(
+    tmp_path, monkeypatch
+):
+    """无回测 ID 也无文件路径 → 如实记 note，而不是抛异常把整张卡带垮。"""
+    # Arrange
+    monkeypatch.setenv("QM_EVAL_SERIES_DIR", str(tmp_path))
+
+    # Act
+    status = save_curve_sidecar({}, {}, {}, object_id="")
+
+    # Assert
+    assert status["written"] is False
+    assert status["bytes"] == 0
+    assert "不能作为侧车文件名" in str(status["note"])
+    assert list(tmp_path.rglob("*.json")) == []
 
 
 @pytest.mark.unit

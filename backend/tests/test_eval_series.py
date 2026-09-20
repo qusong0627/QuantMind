@@ -21,6 +21,7 @@ import pytest
 from backend.shared.eval_series import (
     SERIES_VERSION,
     UnsafeObjectId,
+    is_series_id,
     load_series,
     resolve_series_dir,
     safe_object_id,
@@ -168,3 +169,96 @@ def test_load_unsafe_object_id_reports_instead_of_raising(tmp_path: Path):
 
     assert loaded["available"] is False
     assert loaded["reason"] == "unsafe_object_id"
+
+
+# ── 含冒号的账户 id（object_id 编码）────────────────────────────────
+
+
+@pytest.mark.unit
+def test_series_filename_encodes_account_id_with_colon(tmp_path: Path):
+    """账户 object_id 是 `用户:市场`，冒号在 Windows 文件名里非法 —— 编码后落盘。"""
+    # Act
+    path = series_path("account", "10000001:CN", root=tmp_path)
+
+    # Assert
+    assert path.parent == tmp_path / "account"
+    assert path.name == "10000001%3ACN.json"
+
+
+@pytest.mark.unit
+def test_series_filename_round_trips_account_id(tmp_path: Path):
+    """写与读走同一个映射：save 之后 load 必须能读回同一个对象。"""
+    # Arrange
+    written = save_series("account", "10000001:CN", {"series": {}}, root=tmp_path)
+
+    # Act
+    loaded = load_series("account", "10000001:CN", root=tmp_path)
+
+    # Assert
+    assert written["written"] is True
+    assert loaded["available"] is True
+    assert loaded["data"]["object_id"] == "10000001:CN"
+
+
+@pytest.mark.unit
+def test_series_filename_keeps_plain_ids_unchanged(tmp_path: Path):
+    """安全 id 原样用（既有因子/模型侧车文件名不许变，否则线上文件全部读空）。"""
+    for ot, oid in (
+        ("model", "mdl_cn_train_20260906064130_ab12cd"),
+        ("factor", "a158_KMID"),
+        ("strategy", "8fe477cae8ae4673885ed00bf1917bdb"),
+        ("daily_selection", "2026-09-18"),
+    ):
+        assert series_path(ot, oid, root=tmp_path).name == f"{oid}.json"
+
+
+@pytest.mark.unit
+def test_series_filename_still_blocks_traversal_after_encoding(tmp_path: Path):
+    """编码不得成为穿越的后门：路径分隔符 / 前导点 / 已编码形态一律拒绝。"""
+    for bad in (
+        "../../etc/passwd",
+        "..",
+        "a/../../b",
+        "a/b",
+        "%2e%2e/x",
+        ".hidden",
+        "",
+        " ",
+    ):
+        with pytest.raises(UnsafeObjectId):
+            series_path("account", bad, root=tmp_path)
+
+
+@pytest.mark.unit
+def test_series_filename_rejects_path_separators_instead_of_encoding():
+    """分隔符不做编码而是直接拒：含分隔符的输入是**路径**，不是对象 id。"""
+    for bad in ("a/b", "a\\b", "a/../../b"):
+        with pytest.raises(UnsafeObjectId):
+            series_path("account", bad, root="/tmp")
+
+
+@pytest.mark.unit
+def test_series_filename_never_collides_between_plain_and_encoded():
+    """原样 id 永不含 `%`，编码结果必含 `%` —— 两段不撞名（否则两个对象共用一个文件）。"""
+    # Arrange
+    plain = "10000001_CN"  # 看起来像编码结果，但它是原样 id
+    encoded_source = "10000001:CN"
+
+    # Act
+    plain_name = series_path("account", plain, root="/tmp").name
+    encoded_name = series_path("account", encoded_source, root="/tmp").name
+
+    # Assert
+    assert plain_name == "10000001_CN.json"
+    assert encoded_name == "10000001%3ACN.json"
+    assert plain_name != encoded_name
+
+
+@pytest.mark.unit
+def test_is_series_id_accepts_encodable_and_rejects_traversal():
+    """路由的入参闸门（不抛异常）：可编码的 id 放行，穿越尝试拒绝。"""
+    assert is_series_id("10000001:CN") is True
+    assert is_series_id("2026-09-18") is True
+    assert is_series_id("../../etc/passwd") is False
+    assert is_series_id("") is False
+    assert is_series_id(None) is False

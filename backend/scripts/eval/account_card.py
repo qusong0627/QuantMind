@@ -42,6 +42,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from backend.shared.benchmark import BENCHMARK_SYMBOL  # noqa: E402
+from backend.scripts.eval.account_series import account_series_payload  # noqa: E402
 from backend.scripts.eval.risk_events import (  # noqa: E402
     load_risk_summary,
     score_risk_events,
@@ -51,6 +52,7 @@ from backend.shared.eval_scoring import (  # noqa: E402
     combine_dimension_scores,
     score_from_thresholds,
 )
+from backend.shared.eval_series import is_series_id, save_series  # noqa: E402
 
 WEIGHTS = {
     "exposure": 30.0,
@@ -343,40 +345,76 @@ def list_accounts(client) -> list[dict[str, Any]]:
     return out
 
 
-async def load_fund_series(
-    tenant: str, user_raw: str, *, days: int = 90
-) -> list[tuple[str, float]]:
-    """模拟盘日度净值序列（键形探测取第一个有数据的；ISO 日期升序）。"""
+async def load_fund_snapshot_rows(
+    tenant: str, user_raw: str, *, market: str = "CN", days: int = 90
+) -> list[dict[str, Any]]:
+    """模拟盘日度快照行（键形探测取第一个有数据的；ISO 日期升序）。
+
+    返回 ``[{date, total_asset, today_pnl}]``——长序列侧车与净值序列共用这一份
+    取数，避免两处 SQL 各写一遍、口径悄悄分叉。
+
+    **市场口径**：快照表带 market 列时按市场取行（``FUTURES``/``ALL`` 各自成序列，
+    不混）；v1 形态无列 → 只有 CN 有数据，非 CN 直接返回空，绝不拿 CN 行顶替。
+    """
     from sqlalchemy import text as _text
 
     from backend.shared.database_manager_v2 import get_session
 
     since = date.today() - timedelta(days=max(7, int(days)))
-    # T-P1-07：本函数是 CN-only 口径（调用方 L606 已按市场门控）——
-    # 快照带市场维度后必须显式取 CN 行，否则会混入其它市场的序列
     from backend.shared.fund_snapshot_contract import (
         fund_snapshot_has_market_column_async,
     )
 
-    market_clause = (
-        "AND market = 'CN' " if await fund_snapshot_has_market_column_async() else ""
-    )
+    if await fund_snapshot_has_market_column_async():
+        market_clause = "AND market = :m "
+        extra_params: dict[str, Any] = {"m": str(market or "CN").upper()}
+    elif str(market or "CN").upper() != "CN":
+        # 无市场列 = 只有 CN 的账有序列（v1）：非 CN 不误读 CN 行
+        return []
+    else:
+        market_clause = ""
+        extra_params = {}
     async with get_session(read_only=True) as session:
         for form in uid_forms(user_raw):
             rows = (
                 await session.execute(
                     _text(
-                        "SELECT snapshot_date, total_asset FROM simulation_fund_snapshots "
+                        "SELECT snapshot_date, total_asset, today_pnl "
+                        "FROM simulation_fund_snapshots "
                         "WHERE tenant_id = :t AND user_id = :u "
                         f"{market_clause}AND snapshot_date >= :since "
                         "ORDER BY snapshot_date"
                     ),
-                    {"t": tenant, "u": form, "since": since},
+                    {"t": tenant, "u": form, "since": since, **extra_params},
                 )
             ).fetchall()
             if rows:
-                return [(r[0].isoformat(), float(r[1] or 0.0)) for r in rows]
+                return [
+                    {
+                        "date": r[0].isoformat(),
+                        # 净值为空的行退回 0 会画成「账户归零」：留 None 让上层剔除并计数
+                        "total_asset": float(r[1]) if r[1] is not None else None,
+                        "today_pnl": float(r[2]) if r[2] is not None else None,
+                    }
+                    for r in rows
+                ]
     return []
+
+
+async def load_fund_series(
+    tenant: str, user_raw: str, *, days: int = 90
+) -> list[tuple[str, float]]:
+    """模拟盘日度**净值**序列（CN 口径，ISO 日期升序）；净值为空的行跳过。
+
+    CN-only 是评分侧的口径（归因维的基准是沪深300）：其它市场各有自己的基准，
+    要按市场取序列请直接用 :func:`load_fund_snapshot_rows`。
+    """
+    rows = await load_fund_snapshot_rows(tenant, user_raw, market="CN", days=days)
+    return [
+        (str(r["date"]), float(r["total_asset"]))
+        for r in rows
+        if r.get("total_asset") is not None
+    ]
 
 
 def benchmark_probe_start(start_iso: str, *, lookback_days: int = 12) -> int:
@@ -475,6 +513,48 @@ def _read_raw_account(
     return read_json_cache(client, account_key(tenant, user, market))
 
 
+def save_account_sidecar(
+    rows: list[dict[str, Any]],
+    *,
+    market: str,
+    combined: dict[str, Any],
+    object_id: str,
+    live_total_asset: float | None = None,
+    n_positions: int | None = None,
+) -> dict[str, Any]:
+    """模拟盘快照行 → 长序列侧车（``data/eval_series/account/<id>.json``，设计 §1.6）。
+
+    **账户序列天生薄**（实测 5~10 个交易日），所以样本量说明由载荷写进 ``notes``，
+    详情页要照着显示——5 个点不是趋势。写失败如实留痕，不静默丢图。
+    """
+    if not is_series_id(object_id):
+        return {
+            "object_id": object_id,
+            "written": False,
+            "bytes": 0,
+            "note": f"object_id 不能作为侧车文件名（{object_id!r}），未写长序列",
+        }
+    payload = account_series_payload(
+        rows,
+        market=market,
+        scalars={
+            "score": combined.get("score"),
+            "grade": combined.get("grade"),
+            # 账户卡自己的数（图上标量与卡上分同源）；live 是 Redis 实时总资产，
+            # 与快照末值不同属正常（快照每日一次），分开命名免混淆
+            "n_positions": n_positions,
+            "live_total_asset": live_total_asset,
+        },
+    )
+    sidecar = save_series("account", object_id, payload)
+    return {
+        "object_id": object_id,
+        "written": sidecar["written"],
+        "bytes": sidecar["bytes"],
+        "note": sidecar["note"],
+    }
+
+
 async def score_account(
     user: str,
     market: str = "CN",
@@ -520,13 +600,17 @@ async def score_account(
             "error": "空账户（无持仓、无委托历史），跳过评分",
         }
 
-    # 净值序列仅 CN 有表（simulation_fund_snapshots 无市场列）；非 CN 市场不误用 CN 序列
+    # 归因维的口径仍是 CN-only（基准=沪深300）；非 CN 市场不误用 CN 序列
     series: list[tuple[str, float]] = []
     bench: list[tuple[str, float]] = []
     if str(market).upper() == "CN":
         series = await load_fund_series(tenant, user, days=max(90, window_days * 3))
         if len(series) >= 3:
             bench = load_benchmark_closes(series[0][0], series[-1][0])
+    # 长序列侧车按**本市场**取行（快照表带 market 列时 FUTURES/ALL 各有自己的序列）
+    snapshot_rows = await load_fund_snapshot_rows(
+        tenant, user, market=market, days=max(90, window_days * 3)
+    )
 
     industry_map: dict[str, str] = {}
     try:
@@ -564,6 +648,14 @@ async def score_account(
         ),
     ]
     combined = combine_dimension_scores(dims)
+    sidecar = save_account_sidecar(
+        snapshot_rows,
+        market=market,
+        combined=combined,
+        object_id=object_id,
+        live_total_asset=round(total_asset, 2),
+        n_positions=len(positions),
+    )
     result: dict[str, Any] = {
         "object_type": "account",
         "object_id": object_id,
@@ -579,6 +671,9 @@ async def score_account(
             "benchmark": BENCHMARK,
             "industry_map": bool(industry_map),
             "position_source": "simulation_account",
+            # 长序列走 `data/eval_series/account/<用户>%3A<市场>.json`（§1.6）：
+            # 快照只有个位数天，写失败/样本少都由 note 如实带出
+            "series_sidecar": sidecar,
         },
         **combined,
     }

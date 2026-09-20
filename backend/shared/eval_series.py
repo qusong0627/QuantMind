@@ -11,7 +11,8 @@
    / ``unsafe_object_id``）。返回空序列是最坏的选择——前端会把它画成一条平线，
    等于伪造证据；
 2. **object_id 进路径段**，直接来自 URL：``..``/``/`` 一律拒（路径穿越），
-   并且 ``object_type`` 只认六类白名单。
+   并且 ``object_type`` 只认六类白名单；含冒号的账户 id（``10000001:CN``）经
+   ``series_filename`` 编码成单段文件名，读写走同一映射。
 
 写侧原子（tmp + replace）：进程被杀时留下的半截 JSON 不许被读成有效侧车。
 """
@@ -25,6 +26,7 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 logger = logging.getLogger(__name__)
 
@@ -40,8 +42,12 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _ALLOWED_TYPES = frozenset(
     {"factor", "model", "strategy", "account", "daily_selection", "strategy_health"}
 )
-# 真实 id 形态：模型带下划线、因子带点号、日期带横线、账户为数字。首字符不许是点
+# 原样形态：模型带下划线、因子带点号、日期带横线、账户为数字。首字符不许是点
 _ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+# 编码形态（quote 之后）：只多出 `%`，且首字符不许是点（隐藏文件）
+_SLUG_PATTERN = re.compile(r"^[A-Za-z0-9%][A-Za-z0-9._%~-]{0,255}$")
+# 原样形态的上限；编码形态会变长，所以在编码前先卡原长
+_MAX_ID_LEN = 128
 
 
 class UnsafeObjectId(ValueError):
@@ -49,8 +55,55 @@ class UnsafeObjectId(ValueError):
 
 
 def safe_object_id(object_id: Any) -> bool:
-    """object_id 是否可安全作为文件名（写侧用，不抛异常）。"""
+    """object_id 是否可**原样**作为文件名（写侧用，不抛异常）。
+
+    注意这比「可落盘」更严：账户 id ``10000001:CN`` 含冒号，原样形态为假、
+    但经 :func:`series_filename` 编码后可以落盘。判「能不能读」请用
+    :func:`is_series_id`。
+    """
     return bool(_ID_PATTERN.match(str(object_id or "")))
+
+
+def series_filename(object_id: Any) -> str:
+    """object_id → 落盘文件名（读写两侧唯一映射）。
+
+    真实 id 里有 Windows 文件名非法字符：账户卡是 ``用户:市场``（``10000001:CN``），
+    策略卡的 object_id 在 CLI 直跑时甚至可能是结果文件路径。所以这里两段式：
+
+    - **原样形态**（``_ID_PATTERN``）→ 原样返回，既有因子/模型侧车文件名不变；
+    - 其余 → 百分号编码（``:`` → ``%3A``、``/`` → ``%2F``），编码结果必然是
+      单个路径段；仍须落在 ``_SLUG_PATTERN`` 里，否则拒绝。
+
+    两段不会撞名：原样形态永不含 ``%``（含 ``%`` 的输入直接拒），而编码结果
+    只要发生编码就必然含 ``%``。
+
+    三类输入**直接拒、不编码**：路径分隔符（``/`` ``\\``——含分隔符的不是 id 是路径）、
+    ``%``（已编码形态再编码一次会把穿越尝试洗成无辜文件名）、首字符为点（隐藏文件）。
+    """
+    raw = str(object_id or "")
+    if _ID_PATTERN.match(raw):
+        return raw
+    if (
+        not raw.strip()
+        or "%" in raw
+        or "/" in raw
+        or "\\" in raw
+        or len(raw) > _MAX_ID_LEN
+    ):
+        raise UnsafeObjectId(f"object_id 含非法字符（禁止路径穿越）: {object_id!r}")
+    slug = quote(raw, safe="")
+    if not _SLUG_PATTERN.match(slug):
+        raise UnsafeObjectId(f"object_id 编码后仍不安全: {object_id!r}")
+    return slug
+
+
+def is_series_id(object_id: Any) -> bool:
+    """object_id 能否落盘/读取（非抛错闸门，给路由用）。"""
+    try:
+        series_filename(object_id)
+    except UnsafeObjectId:
+        return False
+    return True
 
 
 def _check_type(object_type: Any) -> str:
@@ -82,9 +135,7 @@ def series_path(
     在拿到 URL 参数时就撞上这堵墙，而不是把文件写到目录外面。
     """
     ot = _check_type(object_type)
-    if not safe_object_id(object_id):
-        raise UnsafeObjectId(f"object_id 含非法字符（禁止路径穿越）: {object_id!r}")
-    return resolve_series_dir(root) / ot / f"{object_id}.json"
+    return resolve_series_dir(root) / ot / f"{series_filename(object_id)}.json"
 
 
 def save_series(

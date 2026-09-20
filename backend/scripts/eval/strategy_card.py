@@ -7,6 +7,8 @@ drawdown_curve / trades[]）；基准 = 同窗口指数（index_daily，默认�
 成本 15 ✅（成交换手 + 成本占比，红线「成本吃掉 >50% 毛利」）/
 容量 10 ✅（假设模型，假设说明随卡带出）/ 一致性 20 🟡（回测↔模拟盘曲线对照未接评估侧）；
 缺失维度权重归一（如实）。
+长序列：逐日净值 + 逐日回撤 + 逐月收益 → `data/eval_series/strategy/<backtest_id>.json`（§1.6，
+详情页「一图一问」的曲线；标量取卡上已算好的维度 detail，不重算）。
 
 用法：python backend/scripts/eval/strategy_card.py [--backtest-id ID | --file PATH] [--save] [--json]
 """
@@ -36,11 +38,16 @@ from backend.scripts.eval.strategy_realized import (  # noqa: E402
     consistency_dim,
     trade_stats,
 )
+from backend.scripts.eval.strategy_series import (  # noqa: E402
+    parse_drawdown_entries,
+    strategy_series_payload,
+)
 from backend.shared.eval_scoring import (  # noqa: E402
     DimensionScore,
     combine_dimension_scores,
     score_from_thresholds,
 )
+from backend.shared.eval_series import is_series_id, save_series  # noqa: E402
 
 WEIGHTS = {
     "return": 20.0,
@@ -246,7 +253,13 @@ def strategy_dims(
             amount_note=amount.get("note"),
         ),
     ]
-    return dims, {"trades": stats, "amount": amount, "annual_return": ann}
+    return dims, {
+        "trades": stats,
+        "amount": amount,
+        "annual_return": ann,
+        # 月度收益与稳定性维**同一次**计算：图上柱子与卡上「月度胜率」必须对得上
+        "monthly": monthly,
+    }
 
 
 # ── IO / 编排 ───────────────────────────────────────────────────────
@@ -373,10 +386,35 @@ def _round_trip_cost() -> tuple[float, str]:
         )
 
 
+def parse_equity_curve(curve: list[Any]) -> tuple[list[str], list[float], int]:
+    """``equity_curve`` → ``(dates, values, 丢弃点数)``。
+
+    日期与净值**成对**取（丢点也丢日期）——两个列表必须始终等长，否则
+    `zip(dates, values)` 的调用方（health_recheck）会静默错位。
+    值为空/非数/NaN 的点剔除并计数：旧写法 ``float(row.get("value") or 0.0)``
+    会把缺测读成 0，净值瞬间归零意味着 −100% 的假收益。
+    """
+    dates: list[str] = []
+    values: list[float] = []
+    dropped = 0
+    for row in curve:
+        value = _as_float(row.get("value")) if isinstance(row, dict) else None
+        if value is None:
+            dropped += 1
+            continue
+        dates.append(str(row.get("date") or ""))
+        values.append(value)
+    return dates, values, dropped
+
+
 async def load_backtest_curve(
     backtest_id: str | None, file_path: str | None
 ) -> dict[str, Any]:
-    """结果 JSON → {equity_curve, drawdown_curve, trades, start, end, dates}。"""
+    """结果 JSON → {equity_curve, drawdown_curve, drawdown_entries, trades, …}。
+
+    ``drawdown_curve`` 只给风险维算分用（值列表）；``drawdown_entries`` 是带日期的
+    点对，给长序列侧车用（回撤曲线要与净值曲线共用 x 轴，没日期对不上）。
+    """
     path = file_path
     if not path:
         from sqlalchemy import text as _text
@@ -431,14 +469,18 @@ async def load_backtest_curve(
     curve = data.get("equity_curve") or []
     if not curve:
         return {"error": "结果缺 equity_curve"}
-    dates = [str(row.get("date")) for row in curve]
-    values = [float(row.get("value") or 0.0) for row in curve]
-    drawdowns = [
-        float(row.get("value") or 0.0) for row in (data.get("drawdown_curve") or [])
-    ]
+    dates, values, equity_dropped = parse_equity_curve(curve)
+    if not values:
+        return {"error": "结果 equity_curve 无有效净值点"}
+    # 回撤键名实测有两派（`drawdown` 51 份 / 兼带 `value` 10 份，另 2 份无回撤曲线）：
+    # 只认 `value` 会把 51 份读成一条 0 线——「没证据」被当成「没回撤」
+    dd_entries, dd_dropped = parse_drawdown_entries(data.get("drawdown_curve"))
     return {
         "equity_curve": values,
-        "drawdown_curve": drawdowns or None,
+        "equity_dropped": equity_dropped,
+        "drawdown_curve": [v for _d, v in dd_entries] or None,
+        "drawdown_entries": dd_entries,
+        "drawdown_dropped": dd_dropped,
         "trades": data.get("trades") or [],
         "start": dates[0] if dates else "",
         "end": dates[-1] if dates else "",
@@ -485,6 +527,78 @@ async def save_result(result: dict[str, Any], *, snapshot_date: Any = None) -> b
     )
 
 
+def curve_scalars(combined: dict[str, Any]) -> dict[str, Any]:
+    """图上的标量一律取自**卡上已算好的**维度 detail（同源，不重算）。
+
+    重算会出现「图上年化 18.2%、卡上写 17.9%」这种两套数——用户只会怀疑整页。
+    """
+    dims = combined.get("dimensions") or {}
+    ret = (dims.get("return") or {}).get("detail") or {}
+    risk = (dims.get("risk") or {}).get("detail") or {}
+    stab = (dims.get("stability") or {}).get("detail") or {}
+    return {
+        "score": combined.get("score"),
+        "grade": combined.get("grade"),
+        "annual_return": ret.get("annual_return"),
+        "benchmark_annual": ret.get("benchmark_annual"),
+        "excess_annual": ret.get("excess_annual"),
+        "max_drawdown": risk.get("max_drawdown"),
+        "annual_vol": risk.get("annual_vol"),
+        "n_months": stab.get("months"),
+        "monthly_win_rate": stab.get("monthly_win_rate"),
+    }
+
+
+def save_curve_sidecar(
+    loaded: dict[str, Any],
+    evidence: dict[str, Any],
+    combined: dict[str, Any],
+    *,
+    object_id: str,
+    backtest_id: str | None = None,
+) -> dict[str, Any]:
+    """回测曲线 → 长序列侧车（``data/eval_series/strategy/<id>.json``，设计 §1.6）。
+
+    侧车文件名用回测 ID（CLI ``--file`` 直跑时退回结果文件主名——盘上文件名即 ID）。
+    写不成不算失败，但**必须留痕**：``note`` 会随卡进 ``inputs_version``，前端缺图时
+    能查到是没写还是没数据。
+    """
+    sidecar_id = (
+        str(backtest_id or "").strip() or Path(str(loaded.get("path") or "")).stem
+    )
+    if not is_series_id(sidecar_id):
+        return {
+            "object_id": sidecar_id,
+            "written": False,
+            "bytes": 0,
+            "note": f"object_id 不能作为侧车文件名（{sidecar_id!r}），未写长序列",
+        }
+    payload = strategy_series_payload(
+        dates=loaded.get("dates") or [],
+        equity=loaded.get("equity_curve") or [],
+        drawdown_entries=loaded.get("drawdown_entries"),
+        drawdown_dropped=int(loaded.get("drawdown_dropped") or 0),
+        equity_dropped=int(loaded.get("equity_dropped") or 0),
+        monthly=evidence.get("monthly"),
+        scalars=curve_scalars(combined),
+    )
+    sidecar = save_series("strategy", sidecar_id, payload)
+    parts: list[str] = []
+    if sidecar_id != str(object_id):
+        parts.append(
+            f"侧车 id {sidecar_id} 与卡片 object_id {object_id} 不同（CLI 直跑），"
+            "详情页按 object_id 取不到这张图"
+        )
+    if sidecar["note"]:
+        parts.append(str(sidecar["note"]))
+    return {
+        "object_id": sidecar_id,
+        "written": sidecar["written"],
+        "bytes": sidecar["bytes"],
+        "note": "；".join(parts) or None,
+    }
+
+
 async def score_strategy(
     backtest_id: str | None = None, file_path: str | None = None
 ) -> dict[str, Any]:
@@ -515,9 +629,13 @@ async def score_strategy(
         round_trip_cost=round_trip_cost,
     )
     combined = combine_dimension_scores(dims)
+    object_id = backtest_id or loaded.get("path") or str(file_path)
+    sidecar = save_curve_sidecar(
+        loaded, evidence, combined, object_id=object_id, backtest_id=backtest_id
+    )
     return {
         "object_type": "strategy",
-        "object_id": backtest_id or loaded.get("path") or str(file_path),
+        "object_id": object_id,
         "window": [loaded["start"], loaded["end"]],
         "n_days": len(curve_to_returns(loaded["equity_curve"])),
         "inputs_version": {
@@ -529,12 +647,19 @@ async def score_strategy(
             "cost_source": cost_source,
             "evidence": {
                 **evidence,
+                "monthly": [
+                    [month, round(float(ret), 6)]
+                    for month, ret in evidence.get("monthly") or []
+                ],
                 "annual_return": (
                     round(evidence["annual_return"], 6)
                     if evidence.get("annual_return") is not None
                     else None
                 ),
             },
+            # 长序列走 `data/eval_series/strategy/<id>.json`（§1.6）：列表接口只带
+            # 标量，曲线按需取——写失败在这里如实留痕，不静默丢图
+            "series_sidecar": sidecar,
         },
         **combined,
     }
