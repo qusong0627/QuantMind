@@ -13,14 +13,10 @@
 
 from __future__ import annotations
 
-import os
-import sys
+from pathlib import Path
 
 import pandas as pd
 import pytest
-
-project_root = os.path.join(os.path.dirname(__file__), "../../")
-sys.path.append(project_root)
 
 
 #: 主板 / 宽板 / 北交所，各扣 0.5pp 取整余量。
@@ -32,10 +28,34 @@ _REFORM_BEFORE = pd.Timestamp("2019-06-03")
 _REFORM_AFTER = pd.Timestamp("2024-01-02")
 
 
+_GEN_PATH = (
+    Path(__file__).resolve().parents[2] / "scripts" / "gen_ashare_strategy_templates.py"
+)
+
+
+def _load_limit_up_body() -> str:
+    """按**文件路径**加载生成器，取出 `_LIMIT_UP_BODY`。
+
+    不走 ``import scripts.gen_ashare_strategy_templates``：生成器在仓库根的
+    ``scripts/`` 下，而 ``backend/scripts/`` 是个**同名的包**（有 ``__init__.py``）
+    却不含该模块。一旦别的测试把 ``backend/`` 插到 ``sys.path`` 前部，
+    ``import scripts`` 就解析到 ``backend/scripts``，本文件全红 —— 实测跑满
+    98 个文件时 9 条全 ERROR，单跑却全绿。按路径加载与解释器全局状态无关。
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("_gen_ashare_under_test", _GEN_PATH)
+    if spec is None or spec.loader is None:  # pragma: no cover - 布局损坏才会走到
+        raise RuntimeError(f"无法加载生成器: {_GEN_PATH}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module._LIMIT_UP_BODY
+
+
 @pytest.fixture(scope="module")
 def limit_threshold():
     """exec 生成体，取出 `LimitUpGuardStrategy._limit_threshold`。"""
-    from scripts.gen_ashare_strategy_templates import _LIMIT_UP_BODY
+    _LIMIT_UP_BODY = _load_limit_up_body()
 
     class _StubRecordingStrategy:  # 生成体的唯一外部依赖
         pass
@@ -47,6 +67,15 @@ def limit_threshold():
     }
     exec(compile(_LIMIT_UP_BODY, "<_LIMIT_UP_BODY>", "exec"), ns)  # noqa: S102
     return ns["LimitUpGuardStrategy"]._limit_threshold
+
+
+def test_generator_path_resolves_to_the_repo_root_script():
+    """生成器必须解析到仓库根的 ``scripts/``，不是 ``backend/scripts/``。"""
+    assert _GEN_PATH.is_file()
+    assert _GEN_PATH.name == "gen_ashare_strategy_templates.py"
+    assert _GEN_PATH.parent.name == "scripts"
+    # 根因：backend/scripts 是个同名包但不含该模块，落到那里就会 ModuleNotFound
+    assert _GEN_PATH.parent.parent.name != "backend"
 
 
 def test_threshold_main_board(limit_threshold):
@@ -96,7 +125,7 @@ def test_threshold_falls_back_to_the_strictest_board():
     兜底方向比数值更重要：退回 0.095 只会让宽板票被过度剔除（少交易），
     退回 0.295 则会把宽板的真涨停当普通日放进买入清单（假收益）。
     """
-    from scripts.gen_ashare_strategy_templates import _LIMIT_UP_BODY
+    _LIMIT_UP_BODY = _load_limit_up_body()
 
     class _StubRecordingStrategy:
         pass
@@ -118,7 +147,7 @@ def test_generated_body_has_no_prefix_table():
 
     否则「收敛到权威口径」会被下一次改动悄悄回退，而所有数值型用例仍可能通过。
     """
-    from scripts.gen_ashare_strategy_templates import _LIMIT_UP_BODY
+    _LIMIT_UP_BODY = _load_limit_up_body()
 
     assert "startswith" not in _LIMIT_UP_BODY
     assert "limit_pct" in _LIMIT_UP_BODY
