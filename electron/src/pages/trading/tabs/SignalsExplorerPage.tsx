@@ -130,134 +130,156 @@ const SignalsExplorerPage: React.FC<SignalsExplorerPageProps> = ({ onModelRefres
   );
 
   return (
-    <div className="h-full flex flex-col gap-3 p-3 overflow-hidden bg-gray-50/50">
-      {/* 上：左栏（列表）+ 右栏（终端入口/低分股/信号分布） */}
-      <div className="flex-1 min-h-0 flex gap-3">
-      {/* 左栏：检索 + 筛选 + 排名列表（quant-Trader 个股终端左栏复刻） */}
-      <div className="flex-1 min-w-0 min-h-0 flex">
-        <StockSidebar
-          selected={selected}
-          onSelect={onSelect}
-          watchlistSymbols={watchlist}
-          onToggleWatch={(item, watched) => void toggleWatch(item, watched)}
-          onlyWatchlist={onlyWatchlist}
-          onOnlyWatchlist={setOnlyWatchlist}
-          filters={filters}
-          onFiltersChange={setFilters}
-          onModels={setModels}
-          models={models}
-          onTotals={handleTotals}
-          onSignalDate={setSignalDate}
-          fullTotal={fullTotal}
-          onModelRefreshed={onModelRefreshed}
-          onOpen={(item) => {
-            setSelected(item.symbol);
-            setSelectedName(item.name || '');
-            setWindowSymbol(item.symbol);
-          }}
-        />
-      </div>
-
-      {/* 右栏：选中股终端入口 + 信号分布 */}
-      <div className="w-[330px] xl:w-[370px] shrink-0 min-h-0 overflow-y-auto space-y-3 pr-0.5">
-        <div className="rounded-2xl border border-gray-200 bg-white p-3 flex items-center gap-2.5">
-          <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-blue-500 to-indigo-500 flex items-center justify-center shrink-0">
-            <CandlestickChart className="w-4 h-4 text-white" />
-          </div>
-          <div className="min-w-0 flex-1">
-            <div className="text-[10px] text-slate-400 font-bold">
-              当前选中{signalDate ? ` · 信号日 ${signalDate}` : ''}
-            </div>
-            <div className="text-xs font-bold text-slate-800 truncate">{selectedName || selected || '—'}</div>
-          </div>
-          <button
-            type="button"
-            disabled={!selected}
-            onClick={() => selected && setWindowSymbol(selected)}
-            className="shrink-0 rounded-xl bg-slate-800 px-3 py-1.5 text-[11px] font-bold text-white shadow-sm hover:bg-slate-700 active:scale-95 disabled:opacity-40 transition-all"
-          >
-            个股终端
-          </button>
-        </div>
-        {/* 低分股（末位 10）——右侧筛选展示，点击即开个股终端 */}
-        <div className="rounded-2xl border border-gray-200 bg-white p-3">
-          <div className="flex items-center gap-2 mb-2">
-            <TrendingDown className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
-            <span className="text-xs font-bold text-slate-700">低分股（末位 10）</span>
-            <span className="text-[10px] text-slate-400">得分最弱 · 回避/观察</span>
-          </div>
-          {lowScores.length === 0 ? (
-            <div className="py-4 text-center text-[11px] text-slate-300">加载中…</div>
-          ) : (
-            <div className="space-y-0.5">
-              {lowScores.map((it) => (
-                <button
-                  key={it.symbol}
-                  type="button"
-                  onClick={() => {
-                    setSelected(it.symbol);
-                    setSelectedName(it.name);
-                    setWindowSymbol(it.symbol);
-                  }}
-                  className="flex w-full items-center gap-2 rounded-lg px-2 py-1 text-left transition-colors hover:bg-slate-50"
-                  title={`${it.name}（${it.symbol}） 得分 ${it.score != null ? it.score.toFixed(4) : '--'}`}
-                >
-                  <span className="min-w-0 flex-1 truncate text-[11px] font-semibold text-slate-700">{it.name}</span>
-                  <span className="shrink-0 font-mono text-[10px] text-slate-400">{it.symbol.split('.')[0]}</span>
-                  <span className="w-14 shrink-0 text-right font-mono text-[11px] font-bold text-slate-500">
-                    {it.score != null ? it.score.toFixed(3) : '--'}
-                  </span>
-                </button>
-              ))}
-            </div>
-          )}
+    // 整页可滚动：回看卡展开后约 1150px（要露 20 行明细），比视口高。
+    // 以前这里是 overflow-hidden + 两栏 flex-1，卡片一展开就把候选列表压到只剩 3 行。
+    <div className="h-full overflow-y-auto bg-gray-50/50">
+      {/* h-full 而非 min-h-full：min-h-full 下容器高度随内容长，左栏（flex-1）会被撑成
+          内容高度（实测 4335px，50 行全铺开、失去自身滚动）。h-full 让两栏高度确定，
+          卡片超出时由外层滚动条接管。 */}
+      <div className="flex h-full flex-col gap-3 px-3 py-3">
+        {/* 上：左栏（列表）+ 右栏（终端入口/低分股/信号分布） */}
+        <div className="flex-1 min-h-[420px] flex gap-3">
+        {/* 左栏：检索 + 筛选 + 排名列表（quant-Trader 个股终端左栏复刻） */}
+        <div className="flex-1 min-w-0 min-h-0 flex">
+          <StockSidebar
+            selected={selected}
+            onSelect={onSelect}
+            watchlistSymbols={watchlist}
+            onToggleWatch={(item, watched) => void toggleWatch(item, watched)}
+            onlyWatchlist={onlyWatchlist}
+            onOnlyWatchlist={setOnlyWatchlist}
+            filters={filters}
+            onFiltersChange={setFilters}
+            onModels={setModels}
+            models={models}
+            onTotals={handleTotals}
+            onSignalDate={setSignalDate}
+            fullTotal={fullTotal}
+            onModelRefreshed={onModelRefreshed}
+            onOpen={(item) => {
+              setSelected(item.symbol);
+              setSelectedName(item.name || '');
+              setWindowSymbol(item.symbol);
+            }}
+          />
         </div>
 
-        {/* 信号分布概览（原右侧「候选信号」卡与左侧列表重复，2026-09-17 精简为分布 + 评分徽章） */}
-        <div className="rounded-2xl border border-gray-200 bg-white p-3">
-          <div className="flex items-center gap-2 mb-2">
-            <BarChart3 className="w-3.5 h-3.5 text-blue-500 shrink-0" />
-            <span className="text-xs font-bold text-slate-700">信号分布</span>
-            {signals?.trade_date && (
-              <span className="text-[10px] font-mono text-slate-400">{signals.trade_date}</span>
-            )}
-            {signals?.trade_date && (
-              <span className="ml-auto">
-                <EvalScoreBadge objectType="daily_selection" objectId={signals.trade_date} prefix="选股评分" />
-              </span>
+        {/* 右栏：选中股终端入口 + 信号分布 */}
+        <div className="w-[330px] xl:w-[370px] shrink-0 min-h-0 overflow-y-auto space-y-3 pr-0.5">
+          <div className="rounded-2xl border border-gray-200 bg-white p-3 flex items-center gap-2.5">
+            <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-blue-500 to-indigo-500 flex items-center justify-center shrink-0">
+              <CandlestickChart className="w-4 h-4 text-white" />
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className="text-[10px] text-slate-400 font-bold">
+                当前选中{signalDate ? ` · 信号日 ${signalDate}` : ''}
+              </div>
+              <div className="text-xs font-bold text-slate-800 truncate">{selectedName || selected || '—'}</div>
+            </div>
+            <button
+              type="button"
+              disabled={!selected}
+              onClick={() => selected && setWindowSymbol(selected)}
+              className="shrink-0 rounded-xl bg-slate-800 px-3 py-1.5 text-[11px] font-bold text-white shadow-sm hover:bg-slate-700 active:scale-95 disabled:opacity-40 transition-all"
+            >
+              个股终端
+            </button>
+          </div>
+          {/* 低分股（末位 10）——右侧筛选展示，点击即开个股终端 */}
+          <div className="rounded-2xl border border-gray-200 bg-white p-3">
+            <div className="flex items-center gap-2 mb-2">
+              <TrendingDown className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+              <span className="text-xs font-bold text-slate-700">低分股（末位 10）</span>
+              <span className="text-[10px] text-slate-400">得分最弱 · 回避/观察</span>
+            </div>
+            {lowScores.length === 0 ? (
+              <div className="py-4 text-center text-[11px] text-slate-300">加载中…</div>
+            ) : (
+              <div className="space-y-0.5">
+                {lowScores.map((it) => (
+                  <button
+                    key={it.symbol}
+                    type="button"
+                    onClick={() => {
+                      setSelected(it.symbol);
+                      setSelectedName(it.name);
+                      setWindowSymbol(it.symbol);
+                    }}
+                    className="flex w-full items-center gap-2 rounded-lg px-2 py-1 text-left transition-colors hover:bg-slate-50"
+                    title={`${it.name}（${it.symbol}） 得分 ${it.score != null ? it.score.toFixed(4) : '--'}`}
+                  >
+                    <span className="min-w-0 flex-1 truncate text-[11px] font-semibold text-slate-700">{it.name}</span>
+                    <span className="shrink-0 font-mono text-[10px] text-slate-400">{it.symbol.split('.')[0]}</span>
+                    <span className="w-14 shrink-0 text-right font-mono text-[11px] font-bold text-slate-500">
+                      {it.score != null ? it.score.toFixed(3) : '--'}
+                    </span>
+                  </button>
+                ))}
+              </div>
             )}
           </div>
-          <div className="grid grid-cols-3 gap-2">
-            <StatTile label="BUY" value={signals?.buy} tone="red" />
-            <StatTile label="SELL" value={signals?.sell} tone="green" />
-            <StatTile label="HOLD" value={signals?.hold} tone="slate" />
+
+          {/* 信号分布概览（原右侧「候选信号」卡与左侧列表重复，2026-09-17 精简为分布 + 评分徽章） */}
+          <div className="rounded-2xl border border-gray-200 bg-white p-3">
+            <div className="flex items-center gap-2 mb-2">
+              <BarChart3 className="w-3.5 h-3.5 text-blue-500 shrink-0" />
+              <span className="text-xs font-bold text-slate-700">信号分布</span>
+              {signals?.trade_date && (
+                <span className="text-[10px] font-mono text-slate-400">{signals.trade_date}</span>
+              )}
+              {signals?.trade_date && (
+                <span className="ml-auto">
+                  <EvalScoreBadge objectType="daily_selection" objectId={signals.trade_date} prefix="选股评分" />
+                </span>
+              )}
+            </div>
+            <div className="grid grid-cols-3 gap-2">
+              <StatTile label="BUY" value={signals?.buy} tone="red" />
+              <StatTile label="SELL" value={signals?.sell} tone="green" />
+              <StatTile label="HOLD" value={signals?.hold} tone="slate" />
+            </div>
+            <p className="mt-2 text-[10px] leading-4 text-slate-400">
+              全市场信号计数；候选明细即左侧列表（默认「信号 = 买入」），点行选中后可从上方打开个股终端。
+            </p>
           </div>
-          <p className="mt-2 text-[10px] leading-4 text-slate-400">
-            全市场信号计数；候选明细即左侧列表（默认「信号 = 买入」），点行选中后可从上方打开个股终端。
+          <p className="px-1 text-[10px] text-slate-400">
+            共 {listTotal} 只命中{fullTotal > 0 ? ` / 全市场 ${fullTotal} 只` : ''}；行内星标加自选，点行选中后可在上方打开个股终端浮窗。
           </p>
         </div>
-        <p className="px-1 text-[10px] text-slate-400">
-          共 {listTotal} 只命中{fullTotal > 0 ? ` / 全市场 ${fullTotal} 只` : ''}；行内星标加自选，点行选中后可在上方打开个股终端浮窗。
-        </p>
-      </div>
-      </div>
+        </div>
 
-      {/* 下：信号准确率回看（通栏）。side/model/asof 与上方列表联动，
-          保证同一只票在两处的当日分数是同一个 run 的数 */}
-      <SignalLookbackCard
-        className="shrink-0"
-        side={filters.side}
-        model={filters.model}
-        asof={signalDate}
-      />
+        {/* 下：信号准确率回看（通栏）。side/model/asof 与上方列表联动，
+            保证同一只票在两处的当日分数是同一个 run 的数 */}
+        <SignalLookbackCard
+          className="shrink-0"
+          side={filters.side}
+          model={filters.model}
+          asof={signalDate}
+        />
 
-      {/* 个股终端浮窗（点「个股终端」打开选中股） */}
-      <StockTerminalWindow
-        open={!!windowSymbol}
-        symbol={windowSymbol}
-        market="CN"
-        onClose={() => setWindowSymbol(null)}
-      />
+        {/* 给悬浮 Dock 让位。.bottom-dock 是 absolute 覆盖层（z-index 1050，不占布局），
+            本页滚动区又不为它留高度，于是滚到底时回看卡的拖动手柄正好落在 Dock 底下
+            （实测手柄 935~947、Dock 922~966），elementFromPoint 命中的是 dock-item
+            —— 鼠标事件全被接走，真实用户也抓不到这个手柄。
+
+            必须是**占位的实体块**，不能靠给滚动容器加 padding-bottom：
+            (a) 挂在 h-full 的内层 wrapper 上时，padding 只是从它内部抠掉一块，
+                可滚动区纹丝不动（实测 scrollHeight 前后同为 1772）；
+            (b) 挂在滚动容器自己身上同样无效 —— 容器的 end-padding 只能在内容末端
+                之前补足，内容已经溢出到更下面时它一点都延伸不出去，还顺手把 wrapper
+                压矮 52px（左栏可见行数跟着少一行）。
+            高度算式沿用 ResearchPlatformPage 的 --dock-height 约定；max() 兜住无 Dock
+            的页面，否则 calc(0px-12px) 是负值，整条声明失效变 0。 */}
+        <div aria-hidden className="h-[max(12px,calc(var(--dock-height)-12px))] shrink-0" />
+
+        {/* 个股终端浮窗（点「个股终端」打开选中股） */}
+        <StockTerminalWindow
+          open={!!windowSymbol}
+          symbol={windowSymbol}
+          market="CN"
+          onClose={() => setWindowSymbol(null)}
+        />
+      </div>
     </div>
   );
 };
