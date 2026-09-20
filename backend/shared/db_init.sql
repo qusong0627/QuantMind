@@ -96,7 +96,12 @@ CREATE TABLE IF NOT EXISTS stock_daily_latest (
     volume_ratio_20   DOUBLE PRECISION,
     volume_ma_5       DOUBLE PRECISION,
     amount_ma_5       DOUBLE PRECISION,
-    volume_trend_3d   BOOLEAN,
+    -- v1.1.0（data/upgrade_v1.1.0.sql）起是**数值**趋势值（正=递增/负=递减），
+    -- 前端 rVolumeTrend 也按符号渲染。这里长期误留 BOOLEAN：活库经 upgrade 脚本
+    -- 已是 double precision，但全新库由本文件建表会建成 boolean，投研平台候选池
+    -- 的 COALESCE(volume_trend_3d, 0) 随即抛 DatatypeMismatchError —— 即
+    -- 2026-09 那次「候选池接口 500」在纯净部署上的复现。
+    volume_trend_3d   DOUBLE PRECISION,
     main_flow         DOUBLE PRECISION,
     flow_net_amount   DOUBLE PRECISION,
     inst_ownership    DOUBLE PRECISION,

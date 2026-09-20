@@ -103,6 +103,28 @@ def run_pipeline_run(self, run_id: str) -> dict[str, Any]:
     return result.model_dump()
 
 
+def _already_done_probe_sql(model_name: str | None) -> str:
+    """「该模型当日是否已出信号」的探测 SQL。
+
+    「已完成」必须**按模型**判定，不能只按 (trade_date, tenant, user)：落库契约本身
+    允许同 tenant/user/trade_date 下多模型并存（按 `feature_version = script_v1_<模型桶>`
+    各自覆盖写入，见 `InferenceScriptRunner._persist_and_publish` 的存储策略注释）。
+    早先这里没有 model 维度，于是同一天第一个跑成的模型会把同用户其余模型全判成
+    ALREADY_DONE —— 实测 `qm_model_inference_dispatch_logs` 里 `settings` 开了两个
+    模型的那些天，永远是「一个 success + 紧随其后一个 skipped」。
+
+    模型解析不出来时传 None，退回旧的无模型维度口径（宁可少跑，不要重复跑）。
+    """
+    sql = (
+        "SELECT 1 FROM engine_feature_runs "
+        "WHERE trade_date = :d AND status = 'signal_ready' "
+        "AND tenant_id = :tid AND user_id = :uid"
+    )
+    if model_name:
+        sql += " AND model_name = :mid"
+    return sql + " LIMIT 1"
+
+
 @celery_app.task(
     name="engine.tasks.auto_inference_if_needed",
     max_retries=1,
@@ -129,6 +151,7 @@ def auto_inference_if_needed() -> dict[str, Any]:
     from sqlalchemy.orm import sessionmaker as sa_sessionmaker
     from backend.shared.trading_calendar import calendar_service
     from backend.services.engine.inference.router_service import InferenceRouterService
+    from backend.shared.model_registry import model_registry_service
 
     now_local = datetime.now(ZoneInfo("Asia/Shanghai"))
 
@@ -347,15 +370,43 @@ def auto_inference_if_needed() -> dict[str, Any]:
             sid = task.get("strategy_id")
             mid = task.get("model_id")
 
-            # 检查当日是否已完成 (DB 记录)
-            # 对于全局任务，检查 source='inference_script'，对于策略，检查 strategy_id
+            # 解析本次实际要跑的模型：settings 任务自带 model_id，策略/全局任务靠
+            # 策略绑定或用户默认模型解析。解析结果既用于下面的「当日已完成」判定，
+            # 也原样传给 run_daily_inference_script，避免两处各解析一次跑出两个模型。
+            resolved_model = None
+            effective_mid = mid
+            try:
+                resolved_model = model_registry_service.resolve_effective_model_sync(
+                    tenant_id=str(tid),
+                    user_id=str(uid),
+                    strategy_id=None if sid in (None, "global") else str(sid),
+                    model_id=mid,
+                )
+                effective_mid = (
+                    str(resolved_model.get("effective_model_id") or "") or mid
+                )
+            except Exception as exc:  # noqa: BLE001
+                # 解析失败不拦路：退回「无模型维度」的旧判定，执行侧自己会再解析一次。
+                # 这里静默降级会掩盖配置错误，所以必须留痕。
+                logger.warning(
+                    "[AutoInference] 模型解析失败，本次按无模型维度判重: tid=%s uid=%s mid=%s err=%s",
+                    tid,
+                    uid,
+                    mid,
+                    exc,
+                )
+                resolved_model = None
+
+            # 检查当日是否已完成 (DB 记录)，按模型维度 —— 口径见 _already_done_probe_sql
+            exists_params: dict[str, Any] = {
+                "d": prediction_trade_date,
+                "tid": tid,
+                "uid": uid,
+            }
+            if effective_mid:
+                exists_params["mid"] = effective_mid
             exists = db.execute(
-                sa_text(
-                    "SELECT 1 FROM engine_feature_runs "
-                    "WHERE trade_date = :d AND status = 'signal_ready' "
-                    "AND tenant_id = :tid AND user_id = :uid LIMIT 1"
-                ),
-                {"d": prediction_trade_date, "tid": tid, "uid": uid},
+                sa_text(_already_done_probe_sql(effective_mid)), exists_params
             ).first()
 
             if exists:
@@ -363,10 +414,15 @@ def auto_inference_if_needed() -> dict[str, Any]:
                     tenant_id=tid,
                     user_id=uid,
                     strategy_id=sid,
-                    model_id=mid,
+                    # 解析出来的模型也要落到日志里，否则 settings 任务的 None
+                    # 会让「到底哪个模型被跳过」无从查起
+                    model_id=mid or effective_mid,
                     status="skipped",
                     reason_code="ALREADY_DONE",
-                    reason_detail="engine_feature_runs already has signal_ready record for target trade date",
+                    reason_detail=(
+                        "engine_feature_runs already has signal_ready record "
+                        f"for target trade date (model={effective_mid or 'any'})"
+                    ),
                 )
                 continue
 
@@ -405,6 +461,7 @@ def auto_inference_if_needed() -> dict[str, Any]:
                     user_id=uid,
                     strategy_id=None if sid == "global" else sid,
                     model_id=mid,
+                    resolved_model=resolved_model,
                     redis_client=redis,
                 )
                 results.append(

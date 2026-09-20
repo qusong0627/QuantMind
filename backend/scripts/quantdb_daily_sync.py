@@ -729,7 +729,12 @@ _FEATURE_COLS = {
 # （源表是后复权口径，与 OHLCV 混用导致风险评分/报告误判）
 _PRICE_DERIVED_COLS = ("ma5", "ma10", "ma20", "ma60", "ma_gap_5", "ma_gap_10",
                        "ma_gap_20", "vol_atr_14")
-# PG volume_trend_3d 是 boolean（量能是否上升），QuantDB 同名列是数值趋势，语义不同，不映射
+# PG volume_trend_3d **不是** boolean 了：v1.1.0（data/upgrade_v1.1.0.sql）起已统一为
+# double precision 的数值趋势，与 QuantDB 同名列语义一致。本映射仍不含该列，于是
+# stock_daily_latest / stock_daily_new_* 里该列实测 100% NULL（2026-09-20 核：
+# 1085 万行 count(volume_trend_3d)=0）。投研平台的「3日量能」另有 QuantDB parquet
+# 投影供数，所以前端不空 —— 但如果哪天有人改为直读 PG 这一列，会全线显示为空。
+# 要不要接线是独立决策，别照着旧注释「boolean 语义不同」去推断（那是过期结论）。
 
 
 def _trade_dates(hub, start: date, end: date) -> list[date]:

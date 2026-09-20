@@ -528,7 +528,11 @@ async def _load_sdl_pg_map(session, trade_date: date, market: str | None) -> dic
             COALESCE(macd_hist, 0) AS macd_hist,
             COALESCE(volume_ratio_5, 0) AS volume_ratio_5,
             COALESCE(volume_ratio_20, 0) AS volume_ratio_20,
-            CASE WHEN COALESCE(volume_trend_3d, false) THEN 1 ELSE 0 END AS volume_trend_3d,
+            /* volume_trend_3d 自 v1.1.0（data/upgrade_v1.1.0.sql）起是 double precision
+               的数值趋势（前端 rVolumeTrend 按正/负渲染「递增/递减」）。曾写成
+               COALESCE(volume_trend_3d, false)，CN 表上直接 DatatypeMismatchError
+               把整个候选池截面打成 500。 */
+            COALESCE(volume_trend_3d, 0) AS volume_trend_3d,
             COALESCE(main_flow, 0) AS main_flow,
             COALESCE(flow_net_amount, 0) AS flow_net_amount,
             COALESCE(inst_ownership, 0) AS inst_ownership,
@@ -682,10 +686,9 @@ _SDL_SELECT_BY_RUN_DATE = """
     COALESCE(sdl_run.macd_hist, 0) AS macd_hist,
     COALESCE(sdl_run.volume_ratio_5, 0) AS volume_ratio_5,
     COALESCE(sdl_run.volume_ratio_20, 0) AS volume_ratio_20,
-    CASE
-        WHEN sdl_run.volume_trend_3d IS NOT NULL THEN CASE WHEN sdl_run.volume_trend_3d THEN 1.0 ELSE 0.0 END
-        ELSE sdl_run.volume_trend_3d_calc
-    END AS volume_trend_3d,
+    /* 同上：数值列不能当布尔用（`CASE WHEN <double precision>` 会被 PG 拒绝），
+       直接取值，缺失时回落到窗口函数算出的 volume_trend_3d_calc。 */
+    COALESCE(sdl_run.volume_trend_3d, sdl_run.volume_trend_3d_calc) AS volume_trend_3d,
     COALESCE(sdl_run.main_flow, 0) AS main_flow,
     COALESCE(sdl_run.flow_net_amount, 0) AS flow_net_amount,
     COALESCE(sdl_run.inst_ownership, 0) AS inst_ownership,
@@ -2068,6 +2071,14 @@ async def get_research_universe(tid: str, uid: str, run_id: str, limit: int, off
 
 async def _best_snapshot_run_for_date(tid: str, uid: str, model_id: str, trade_date: str) -> str | None:
     """某数据日行数最多的候选池快照 run（同日多 run 时排除单股推理 1 行快照）。"""
+    # 调用方给的是 'YYYY-MM-DD' 字符串（URL 直传）。asyncpg 对 `CAST(:d AS DATE)`
+    # 会把参数推断成 date，再喂字符串就抛 DataError: 'str' object has no attribute
+    # 'toordinal' —— 于是「按数据日直读」这条主路径在 pred.parquet 缺该日分数、
+    # 回落到候选池快照时整条 500。这里显式转 date 再绑定。
+    try:
+        bind_date = date.fromisoformat(str(trade_date)[:10])
+    except ValueError:
+        return None
     async with get_session(read_only=True) as session:
         res = await session.execute(
             text(
@@ -2075,13 +2086,13 @@ async def _best_snapshot_run_for_date(tid: str, uid: str, model_id: str, trade_d
                 SELECT run_id, COUNT(*) AS cnt
                 FROM qm_research_candidate_snapshot
                 WHERE tenant_id = :tid AND user_id = :uid AND model_id = :mid
-                  AND data_trade_date = CAST(:d AS DATE)
+                  AND data_trade_date = :d
                 GROUP BY run_id
                 ORDER BY cnt DESC
                 LIMIT 1
                 """
             ),
-            {"tid": tid, "uid": uid, "mid": model_id, "d": trade_date},
+            {"tid": tid, "uid": uid, "mid": model_id, "d": bind_date},
         )
         row = res.first()
         return str(row[0]) if row and row[0] else None
@@ -2195,7 +2206,11 @@ async def get_research_universe_by_date(
             "isCsi1000": bool((quantdb_labels.get(r["symbol"]) or {}).get("is_csi1000")),
         }
         for r in pred_rows[offset : offset + limit]
-    ],
+    ]
+    # 这里曾经是个尾逗号，`items` 因此成了单元素 tuple `([...],)`，接口返回
+    # `items: [[{...}, ...]]`。前端 researchService 直接把它当候选池数组
+    # （`candidates: data.items`）再 `.map()`，展开成一个「字段全空」的伪行 ——
+    # 于是投研平台候选池计数显示 3271、表格却一行不渲染。别再补逗号。
 
     score_vals = [float(r["score"]) for r in pred_rows]
     score_dist: dict[str, Any] = {}

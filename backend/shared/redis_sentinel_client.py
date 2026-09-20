@@ -443,6 +443,22 @@ class RedisSentinelClient:
             logger.error(f"Redis TTL failed for key {key}: {e}")
             return -2
 
+    def eval(self, script: str, numkeys: int, *keys_and_args: Any):
+        """执行 Lua 脚本（走 master，读写在主库才有一致性）。
+
+        包装类早先没有透出 `eval`，而 `backend/shared/inference_lock.py` 的 CAS
+        释放依赖服务端「比较后删除」的原子性（客户端 GET+DEL 会退化成竞态，正是
+        该模块要消灭的 bug）。于是运行期恒抛
+        `'RedisSentinelClient' object has no attribute 'eval'`，锁每次都得等
+        1 小时 TTL 才释放 —— 同模型同日 1 小时内的重跑/回填一律被 LOCK_HELD 挡掉。
+        单测用的是原生 redis 客户端（有 eval），所以这个缺口一直测试全绿。
+
+        与 `pipeline()` 一致：失败向上抛，由调用方决定降级策略；这里静默返回 0
+        会让「锁没释放」变成无声失败。
+        """
+        self._ensure_connection()
+        return self._master_client.eval(script, numkeys, *keys_and_args)
+
     def pipeline(self):
         """
         创建Pipeline用于批量操作
