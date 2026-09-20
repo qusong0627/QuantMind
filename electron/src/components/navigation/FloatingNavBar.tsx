@@ -16,8 +16,9 @@ import {
   Cpu,
   Sigma } from 'lucide-react';
 import { useSelector } from 'react-redux';
-import { selectCurrentMarket } from '../../store/slices/uiSlice';
+import { selectCurrentMarket, selectTradingMode } from '../../store/slices/uiSlice';
 import { getMarketConfig } from '../../config/marketConfig';
+import { modeCopy } from '../../pages/trading/utils/tradingModeCopy';
 
 interface FloatingNavBarProps {
   current?: string;
@@ -35,6 +36,9 @@ export const FloatingNavBar: React.FC<FloatingNavBarProps> = ({ current, onChang
   const isAdmin = user?.is_admin || false;
   const currentMarket = useSelector(selectCurrentMarket);
   const marketLabel = getMarketConfig(currentMarket).label;
+  // 交易栏目名跟随模式（与交易页内所有模式文案同取唯一事实源）：
+  // 切了实盘还写着「模拟交易」，用户会以为真金白银的单只是模拟单。
+  const tradingMode = useSelector(selectTradingMode);
 
   const navItems: NavItemConfig[] = [
     // 1. 大盘分析模块
@@ -42,7 +46,7 @@ export const FloatingNavBar: React.FC<FloatingNavBarProps> = ({ current, onChang
     { id: 'market-analysis', label: '市场分析', icon: BarChart3 },
     { id: 'rss-news', label: 'RSS信息流', icon: Rss },
     { id: 'backtest', label: '回测中心', icon: FlaskConical },
-    { id: 'trading', label: '模拟交易', icon: ArrowLeftRight },
+    { id: 'trading', label: modeCopy(tradingMode).full, icon: ArrowLeftRight },
     // 3. 模型区域
     { id: 'model-training', label: '模型训练', icon: Layers },
     { id: 'model-registry', label: '模型管理', icon: Boxes },
