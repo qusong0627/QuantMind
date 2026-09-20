@@ -41,7 +41,7 @@ import { userCenterService } from '../../../features/user-center/services/userCe
 import { resolveTradingAccountMode } from '../utils/accountAdapter';
 import { SERVICE_URLS } from '../../../config/services';
 import { TradingBlacklistPanel } from '../../../features/trading-blacklist/TradingBlacklistPanel';
-import { HoldingMonitorCard } from '../../../features/holding-alerts/HoldingMonitorCard';
+import { HoldingAlertSettings } from '../../../features/holding-alerts/HoldingAlertSettings';
 
 interface PersonalCenterProps {
     tenantId: string;
@@ -538,8 +538,8 @@ const PersonalCenter: React.FC<PersonalCenterProps> = ({ tenantId, userId, statu
                         </section>
                     </div>
 
-                    {/* 第二排：持仓监控与提醒（持仓哨兵的开关/阈值/三通道） */}
-                    <HoldingMonitorCard />
+                    {/* 第二排：持仓预警设置（左「持仓监控与提醒」/ 右「提醒通道」，两列对称） */}
+                    <HoldingAlertSettings />
 
                     {/* 第三排：交易黑名单（本页的主内容） */}
                     <TradingBlacklistPanel />

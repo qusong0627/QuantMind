@@ -2,6 +2,7 @@ import { describe, test, expect } from 'vitest';
 import {
   alertActionTarget,
   alertAgeText,
+  channelSummary,
   kindLabel,
   panelCounts,
   parseAlertTime,
@@ -12,7 +13,12 @@ import {
   SENTINEL_STALE_SECONDS,
   formatScore,
 } from '../alertModel';
-import type { HoldingAlertItem, HoldingSentinelStatus } from '../../../services/holdingAlertService';
+import { DEFAULT_ALERT_CONFIG } from '../../../services/holdingAlertService';
+import type {
+  HoldingAlertConfig,
+  HoldingAlertItem,
+  HoldingSentinelStatus,
+} from '../../../services/holdingAlertService';
 
 const mkItem = (over: Partial<HoldingAlertItem> = {}): HoldingAlertItem => ({
   id: 1,
@@ -195,5 +201,49 @@ describe('深链目标', () => {
     expect(alertActionTarget('https://evil.example.com')).toBe('/trading');
     expect(alertActionTarget('')).toBe('/trading');
     expect(alertActionTarget(null)).toBe('/trading');
+  });
+});
+
+describe('提醒通道状态带', () => {
+  const cfg = (over: Partial<HoldingAlertConfig> = {}): HoldingAlertConfig => ({
+    ...DEFAULT_ALERT_CONFIG,
+    ...over,
+  });
+
+  test('全开时报 3/3，且不报错色', () => {
+    const s = channelSummary(cfg(), false);
+    expect(s.text).toContain('3/3');
+    expect(s.warn).toBe(false);
+  });
+
+  test('三条通道全关要报错色——「一条都不会响」不能是平静的绿色', () => {
+    const s = channelSummary(cfg({ notify_inapp: false, notify_desktop: false, notify_sound: false }), false);
+    expect(s.text).toContain('0/3');
+    expect(s.warn).toBe(true);
+  });
+
+  test('总开关关着时，先说通道必然不响，而不是数还有几条开着', () => {
+    const s = channelSummary(cfg({ enabled: false }), false);
+    expect(s.text).toContain('总开关');
+    expect(s.warn).toBe(true);
+  });
+
+  test('桌面通知开着但浏览器拒绝 → 点名这条通道不会响，并给出其余条数', () => {
+    const s = channelSummary(cfg(), true);
+    expect(s.text).toContain('拒绝');
+    expect(s.text).toContain('2 条');
+    expect(s.warn).toBe(true);
+  });
+
+  test('桌面通知本就没开时，权限被拒不算问题（不该为一条用户已关的通道报警）', () => {
+    const s = channelSummary(cfg({ notify_desktop: false }), true);
+    expect(s.text).toContain('2/3');
+    expect(s.warn).toBe(false);
+  });
+
+  test('只开桌面通知且被拒 → 实质零通道，如实报 0 条并报警', () => {
+    const s = channelSummary(cfg({ notify_inapp: false, notify_sound: false }), true);
+    expect(s.text).toContain('0 条');
+    expect(s.warn).toBe(true);
   });
 });

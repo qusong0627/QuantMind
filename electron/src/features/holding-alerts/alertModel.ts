@@ -5,6 +5,7 @@
  */
 
 import type {
+  HoldingAlertConfig,
   HoldingAlertItem,
   HoldingAlertKind,
   HoldingAlertSeverity,
@@ -133,6 +134,27 @@ export function sentinelHeadline(
     return { tone: 'amber', text: `哨兵运行中，但没扫到你的持仓/自选（${when}）`, warn: true };
   }
   return { tone: 'green', text: `哨兵运行中 · ${scope}${when ? ` · ${when}` : ''}`, warn: false };
+}
+
+/**
+ * 提醒通道状态带（个人中心右列）。
+ *
+ * 回答的是「真出事时我到底会被怎么打扰」——通道开着但**实际不会响**的两种情况必须点名：
+ * 总开关关着（三条全废）、桌面通知被浏览器拒（这条废）。二者都不说，用户会以为提醒坏了。
+ */
+export function channelSummary(
+  config: Pick<HoldingAlertConfig, 'enabled' | 'notify_inapp' | 'notify_desktop' | 'notify_sound'>,
+  desktopDenied: boolean,
+): { text: string; warn: boolean } {
+  if (!config.enabled) {
+    return { text: '监控总开关已关闭：三条通道都不会触发', warn: true };
+  }
+  const on = [config.notify_inapp, config.notify_desktop, config.notify_sound].filter(Boolean).length;
+  // 只有「用户开着桌面通知」时权限被拒才算故障；用户自己关了这条，权限无所谓
+  if (config.notify_desktop && desktopDenied) {
+    return { text: `桌面通知被浏览器拒绝，其余 ${on - 1} 条通道照常`, warn: true };
+  }
+  return { text: `已开启 ${on}/3 条通道`, warn: on === 0 };
 }
 
 /** 推送回执的最小结构（结构化入参，避免 alertModel 依赖终端模块的具体类型） */
