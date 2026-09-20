@@ -149,6 +149,36 @@ class StockCodeUtil:
         return [StockCodeUtil.to_suffix(c) for c in codes if c]
 
     @staticmethod
+    def classify_board(code: str) -> str:
+        """A 股上市板：科创板 / 创业板 / 中小板 / 深主板 / 沪主板 / 北交所。
+
+        非 A 股代码（港股、美股、空）一律返回「其他」—— 不猜市场。
+        口径唯一实现：推理侧 ``position_signal._classify_board`` 也转发到这里，
+        避免两处前缀规则漂移（688/300/002… 的边界改一处漏一处）。
+
+        9 开头（沪市 B 股）沿用原 position_signal 口径并入北交所组 —— 改它会
+        挪动 ``compute_position_scores`` 的板内百分位分组，属评分口径变更，
+        不是展示层能顺手做的事。
+        """
+        prefix = StockCodeUtil.to_prefix(code)
+        if not re.match(r"^(SH|SZ|BJ)\d{6}$", prefix):
+            return "其他"
+        digits = prefix[2:]
+        if digits.startswith("688"):
+            return "科创板"
+        if digits.startswith("30"):
+            return "创业板"
+        if digits.startswith(("002", "003")):
+            return "中小板"
+        if digits.startswith(("000", "001")):
+            return "深主板"
+        if digits.startswith("60"):
+            return "沪主板"
+        if digits.startswith(("4", "8", "9")):
+            return "北交所"
+        return "其他"
+
+    @staticmethod
     def detect_market(code: str) -> Optional[str]:
         """由代码形态推断市场，返回 'CN' / 'HK' / 'US'；无法判定返回 None。
 

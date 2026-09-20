@@ -240,9 +240,11 @@ export const PositionVisualBoard: React.FC<{
         </div>
       </div>
 
-      {/* ② 主体两栏：左=明细列表，右=图表（市值分布 + 盈亏贡献） */}
-      <div className="flex-1 min-h-0 flex flex-col lg:flex-row gap-2 px-3 pt-1.5 pb-2">
-        {/* 左栏：工具行 + 明细列表 */}
+      {/* ② 主体：明细列表占满整行宽度，图表（市值分布 + 盈亏贡献）沉到底部一行。
+          2026-09-20 用户要求：图表原本挤在右侧 430px 的窄列里（中间被挤着），
+          改为底部整行两列 —— 明细列因此拿回宽度，图表也从「窄高」变成「宽扁」。 */}
+      <div className="flex-1 min-h-0 flex flex-col gap-2 px-3 pt-1.5 pb-2">
+        {/* 上部：工具行 + 明细列表（整行宽） */}
         <div className="flex-1 min-w-0 min-h-0 flex flex-col">
         <div className="shrink-0 flex items-center gap-2 pb-1">
         <div className="grid grid-cols-[1.1rem_minmax(0,1.3fr)_minmax(0,2.2fr)_minmax(0,1fr)_minmax(0,1.1fr)_3.5rem] items-center gap-3 flex-1 text-[10px] font-bold text-slate-400">
@@ -352,9 +354,10 @@ export const PositionVisualBoard: React.FC<{
         </div>
         </div>
 
-        {/* 右栏：图表（上下两块，各占一半高） */}
-        <div className="w-full lg:w-[430px] xl:w-[470px] shrink-0 min-h-0 flex flex-col gap-2">
-          <div className="flex-1 min-h-[170px] rounded-xl border border-slate-100 bg-slate-50/20 p-2 flex flex-col">
+        {/* 底部：图表一行两列（窄屏堆叠）。min-w-0 必须给：grid 子项默认 min-width:auto，
+            ECharts 内部的 canvas 会把列撑破（memory: echarts-resize-deadlock-minw0）。 */}
+        <div className="shrink-0 grid grid-cols-1 lg:grid-cols-2 gap-2">
+          <div className="min-w-0 h-[190px] lg:h-[200px] rounded-xl border border-slate-100 bg-slate-50/20 p-2 flex flex-col">
             <div className="mb-1 text-[10px] font-bold text-slate-400" title="货架马赛克：块宽=持仓市值占比（两行按市值降序），颜色=盈亏（红涨绿跌，越深幅度越大）；小块归并「其余」">
               市值分布
             </div>
@@ -383,7 +386,7 @@ export const PositionVisualBoard: React.FC<{
               <div className="flex flex-1 items-center justify-center text-[11px] text-slate-300">暂无持仓</div>
             )}
           </div>
-          <div className="flex-1 min-h-[170px] rounded-xl border border-slate-100 bg-slate-50/20 p-2 flex flex-col">
+          <div className="min-w-0 h-[190px] lg:h-[200px] rounded-xl border border-slate-100 bg-slate-50/20 p-2 flex flex-col">
             <div className="mb-1 text-[10px] font-bold text-slate-400" title="盈亏金额绝对值 Top12（红=盈利、绿=亏损）">
               盈亏贡献 Top12
             </div>

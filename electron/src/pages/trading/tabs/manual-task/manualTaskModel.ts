@@ -26,6 +26,12 @@ export const formatMoney = (value?: number | null): string => {
     return `¥${Number(value).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 };
 
+export interface RiskSymbolLabel {
+    symbol: string;
+    /** 股票名（后端补名；缺失为空串，此时只显示代码） */
+    name: string;
+}
+
 export interface RiskGroup {
     /** 拦截原因原文（后端给的中文短句，同上同因归一组） */
     reason: string;
@@ -33,6 +39,8 @@ export interface RiskGroup {
     action: string;
     count: number;
     symbols: string[];
+    /** 与 symbols 一一对应的展示标签（名称），展开区 chip 用 */
+    labels: RiskSymbolLabel[];
 }
 
 export interface RiskSummary {
@@ -46,19 +54,35 @@ export interface RiskSummary {
  */
 export function summarizeSkipped(items?: ManualExecutionPreviewSkippedItem[] | null): RiskSummary {
     const list = Array.isArray(items) ? items : [];
-    const buckets = new Map<string, { reason: string; action: string; count: number; symbols: string[] }>();
+    const buckets = new Map<string, {
+        reason: string;
+        action: string;
+        count: number;
+        symbols: string[];
+        labels: RiskSymbolLabel[];
+    }>();
 
     for (const item of list) {
         const reason = String(item?.reason || '').trim() || '未标注原因';
         const action = String(item?.action || '').trim().toUpperCase() || 'FILTER';
         const symbol = String(item?.symbol || '').trim();
+        const name = String(item?.name || '').trim();
         const key = `${reason}|${action}`;
         const bucket = buckets.get(key);
         if (bucket) {
             bucket.count += 1;
-            if (symbol) bucket.symbols.push(symbol);
+            if (symbol) {
+                bucket.symbols.push(symbol);
+                bucket.labels.push({ symbol, name });
+            }
         } else {
-            buckets.set(key, { reason, action, count: 1, symbols: symbol ? [symbol] : [] });
+            buckets.set(key, {
+                reason,
+                action,
+                count: 1,
+                symbols: symbol ? [symbol] : [],
+                labels: symbol ? [{ symbol, name }] : [],
+            });
         }
     }
 
@@ -67,6 +91,7 @@ export function summarizeSkipped(items?: ManualExecutionPreviewSkippedItem[] | n
         action: bucket.action,
         count: bucket.count,
         symbols: bucket.symbols,
+        labels: bucket.labels,
     }));
 
     groups.sort((a, b) => b.count - a.count || a.reason.localeCompare(b.reason, 'zh-Hans-CN'));
@@ -156,6 +181,10 @@ export function commonReason(orders?: ManualExecutionPreviewOrder[] | null): str
 export interface OrderRowView {
     symbol: string;
     name: string;
+    /** 申万行业；为空表示后端未补到（渲染时隐藏该标签） */
+    industry: string;
+    /** 上市板；「其他」= 非 A 股或未识别，渲染时隐藏该标签 */
+    board: string;
     side: TradeSide;
     sideLabel: '买' | '卖';
     quantityText: string;
@@ -187,6 +216,8 @@ export function orderRowView(order: ManualExecutionPreviewOrder): OrderRowView {
     return {
         symbol: String(order?.symbol || ''),
         name: String(order?.name || ''),
+        industry: String(order?.industry || ''),
+        board: String(order?.board || ''),
         side,
         sideLabel: side === 'sell' ? '卖' : '买',
         quantityText: Number.isFinite(quantity) ? quantity.toLocaleString('zh-CN') : '--',

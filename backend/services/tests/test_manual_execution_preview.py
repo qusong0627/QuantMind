@@ -12,6 +12,7 @@ from backend.services.live_trading.services.manual_execution_service import (
     PreparedManualExecution,
     _build_execution_plan_from_signals,
     _build_preview_hash,
+    _enrich_preview_display_fields,
     _manual_task_account_poll_interval_seconds,
     _manual_task_buy_cancel_timeout_seconds,
     _manual_task_wait_next_account_timeout_seconds,
@@ -533,3 +534,147 @@ def test_build_execution_plan_uses_star_board_lot_size_for_buy():
     assert plan["buy_orders"]
     assert plan["buy_orders"][0]["quantity"] >= 200
     assert plan["buy_orders"][0]["quantity"] % 200 == 0
+
+
+# ─────────────────────────── 预案展示字段补全 ───────────────────────────
+# 改版前：买单 name 是硬编码空串、风控 skipped 行只有 symbol，前端台账只能显示
+# 一串代码，人工复核看不出「这是哪只票、哪个板、什么行业」。以下用例锁三件事：
+# 补什么、不许覆盖什么、外部映射挂了不许把整个预案带崩。
+
+_SENTINEL_SYMBOLS = {
+    "600036.SH": "招商银行",
+    "300750.SZ": "宁德时代",
+}
+
+
+def _fake_resolve_name(symbol: str) -> str:
+    return _SENTINEL_SYMBOLS.get(str(symbol).strip(), "")
+
+
+def _patch_display_sources(monkeypatch, industry_map: dict[str, str] | None = None) -> None:
+    """把名称/行业两个外部依赖换成确定性桩，只留被测函数自己的逻辑。"""
+    from backend.services.engine.inference import shenwan_industry
+    from backend.shared import stock_name_mapper
+
+    monkeypatch.setattr(stock_name_mapper, "resolve_name", _fake_resolve_name)
+    monkeypatch.setattr(
+        shenwan_industry,
+        "load_shenwan_industry_map",
+        lambda: dict(industry_map or {"600036.SH": "银行", "300750.SZ": "电力设备"}),
+    )
+
+
+def test_enrich_preview_display_fields_fills_name_board_industry(monkeypatch):
+    _patch_display_sources(monkeypatch)
+
+    rows = [
+        {"symbol": "600036.SH", "name": ""},  # 买单：计划构造处 name 恒为空串
+        {"symbol": "300750.SZ"},  # 风控 skipped：连 name 键都没有
+    ]
+
+    _enrich_preview_display_fields(rows)
+
+    assert rows[0]["name"] == "招商银行"
+    assert rows[0]["board"] == "沪主板"
+    assert rows[0]["industry"] == "银行"
+    assert rows[1]["name"] == "宁德时代"
+    assert rows[1]["board"] == "创业板"
+    assert rows[1]["industry"] == "电力设备"
+
+
+def test_enrich_preview_display_fields_never_overwrites_existing(monkeypatch):
+    """卖单 name 来自持仓快照、行业可能已由上游填过：只补空值，不夺权。"""
+    _patch_display_sources(monkeypatch)
+
+    rows = [
+        {
+            "symbol": "600036.SH",
+            "name": "招行（持仓快照名）",
+            "board": "陆股通标的",
+            "industry": "银行(申万一级)",
+        }
+    ]
+
+    _enrich_preview_display_fields(rows)
+
+    assert rows[0]["name"] == "招行（持仓快照名）"
+    assert rows[0]["board"] == "陆股通标的"
+    assert rows[0]["industry"] == "银行(申万一级)"
+
+
+def test_enrich_preview_display_fields_queries_industry_by_suffix_key(monkeypatch):
+    """行业表键是后缀式：前缀式/裸码入参也必须查到（否则前端行业列全空）。"""
+    _patch_display_sources(monkeypatch)
+
+    rows = [{"symbol": "SH600036"}, {"symbol": "600036"}]
+
+    _enrich_preview_display_fields(rows)
+
+    assert rows[0]["industry"] == "银行"
+    assert rows[1]["industry"] == "银行"
+
+
+def test_enrich_preview_display_fields_survives_missing_industry_map(monkeypatch):
+    """行业映射加载失败只降级行业字段，名称/板别照补，且绝不抛。"""
+    from backend.services.engine.inference import shenwan_industry
+    from backend.shared import stock_name_mapper
+
+    monkeypatch.setattr(stock_name_mapper, "resolve_name", _fake_resolve_name)
+
+    def _boom():
+        raise FileNotFoundError("instrument_detail 缺失")
+
+    monkeypatch.setattr(shenwan_industry, "load_shenwan_industry_map", _boom)
+
+    rows = [{"symbol": "600036.SH", "name": ""}]
+
+    _enrich_preview_display_fields(rows)
+
+    assert rows[0]["name"] == "招商银行"
+    assert rows[0]["board"] == "沪主板"
+    assert rows[0]["industry"] == ""
+
+
+def test_enrich_preview_display_fields_skips_blank_symbol_and_empty_input(monkeypatch):
+    """脏行（空 symbol）跳过而不是抛；空列表是合法输入（无委托也要能算预案）。"""
+    _patch_display_sources(monkeypatch)
+
+    rows = [{"symbol": ""}, {"symbol": "   "}, {"symbol": None}]
+    _enrich_preview_display_fields(rows)  # 不抛即通过
+    assert all("name" not in row for row in rows)
+
+    _enrich_preview_display_fields([])  # 空列表不炸
+
+
+def test_enrich_changes_hash_so_it_must_run_after_hash(monkeypatch):
+    """补展示字段会改变预案哈希 —— 顺序是承重的，不是风格问题。
+
+    实测：``_build_preview_hash`` 对整条委托 dict 取哈希（不是只取 symbol/quantity），
+    所以「先补字段再算哈希」得到的哈希，与 client 手里那份（算完再补）**不一致**，
+    submit 侧比对就会误报 409 要求重新生成预案。``build_execution_preview`` 因此把
+    ``_enrich_preview_display_fields`` 排在哈希之后；submit 每次都从原始计划重新构建、
+    重新算哈希，两边天然对齐。本用例把这个前提钉死：谁把调用顺序挪到前面，这里就红。
+    """
+    _patch_display_sources(monkeypatch)
+
+    def _raw_preview() -> dict:
+        return {
+            "strategy_context": {"model_id": "m1", "run_id": "r1", "strategy_id": "s1"},
+            "sell_orders": [{"symbol": "600036.SH", "quantity": 100, "price": 10.0}],
+            "buy_orders": [{"symbol": "300750.SZ", "quantity": 200, "price": 20.0, "name": ""}],
+            "skipped_items": [{"symbol": "600036.SH", "action": "BUY", "reason": "涨停无法买入"}],
+        }
+
+    # 同一份原始计划两次构建 → 哈希可复现（submit 侧重算的前提）
+    assert _build_preview_hash(_raw_preview()) == _build_preview_hash(_raw_preview())
+
+    preview = _raw_preview()
+    hash_before = _build_preview_hash(preview)
+
+    _enrich_preview_display_fields(
+        list(preview["sell_orders"]) + list(preview["buy_orders"]) + list(preview["skipped_items"])
+    )
+
+    assert preview["buy_orders"][0]["name"] == "宁德时代"
+    assert preview["sell_orders"][0]["name"] == "招商银行"
+    assert _build_preview_hash(preview) != hash_before

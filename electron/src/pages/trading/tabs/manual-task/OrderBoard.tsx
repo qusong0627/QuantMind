@@ -48,6 +48,7 @@ const actionTone = (action: string): string => {
 const OrderRow: React.FC<{ order: ManualExecutionPreviewOrder; showReason: boolean }> = ({ order, showReason }) => {
     const row = orderRowView(order);
     const tone = SIDE_TONE[row.side];
+    const codeText = normalizeStockCode(row.symbol);
 
     return (
         <div className="group flex items-center gap-3 px-3 py-2 transition-colors hover:bg-gray-50/70">
@@ -56,8 +57,27 @@ const OrderRow: React.FC<{ order: ManualExecutionPreviewOrder; showReason: boole
             </span>
             <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-1.5">
-                    <span className="shrink-0 font-mono text-[11px] font-bold text-gray-900">{normalizeStockCode(row.symbol)}</span>
-                    {row.name && <span className="truncate text-[10px] text-gray-400">{row.name}</span>}
+                    {/* 名称在前、代码在后：只给代码看不出这是什么票（机构口径） */}
+                    {row.name ? (
+                        <>
+                            <span className="min-w-0 truncate text-[11px] font-bold text-gray-900" title={`${row.name} ${codeText}`}>
+                                {row.name}
+                            </span>
+                            <span className="shrink-0 font-mono text-[10px] text-gray-400">{codeText}</span>
+                        </>
+                    ) : (
+                        <span className="shrink-0 font-mono text-[11px] font-bold text-gray-900">{codeText}</span>
+                    )}
+                    {row.board && row.board !== '其他' && (
+                        <span className="shrink-0 rounded border border-gray-100 bg-gray-50 px-1 py-px text-[9px] text-gray-500">
+                            {row.board}
+                        </span>
+                    )}
+                    {row.industry && (
+                        <span className="shrink-0 rounded border border-sky-100 bg-sky-50/70 px-1 py-px text-[9px] text-sky-700">
+                            {row.industry}
+                        </span>
+                    )}
                     {showReason && row.reason && (
                         <span className="ml-auto max-w-[140px] shrink-0 truncate text-[9px] text-gray-300" title={row.reason}>
                             {row.reason}
@@ -191,14 +211,21 @@ export const RiskGroupList: React.FC<RiskGroupListProps> = ({ items }) => {
                                 </button>
                                 {open && (
                                     <div className="flex flex-wrap gap-1 px-3 pb-3">
-                                        {group.symbols.slice(0, SYMBOLS_PREVIEW_LIMIT).map((symbol) => (
-                                            <span
-                                                key={symbol}
-                                                className="rounded-md border border-gray-100 bg-gray-50 px-1.5 py-0.5 font-mono text-[10px] text-gray-500"
-                                            >
-                                                {normalizeStockCode(symbol)}
-                                            </span>
-                                        ))}
+                                        {group.labels.slice(0, SYMBOLS_PREVIEW_LIMIT).map(({ symbol, name }) => {
+                                            const codeText = normalizeStockCode(symbol);
+                                            return (
+                                                <span
+                                                    key={symbol}
+                                                    title={name ? `${name} ${codeText}` : codeText}
+                                                    className="rounded-md border border-gray-100 bg-gray-50 px-1.5 py-0.5 text-[10px] text-gray-500"
+                                                >
+                                                    {name && <span className="text-gray-700">{name}</span>}
+                                                    <span className={`font-mono text-[9px] text-gray-400 ${name ? 'ml-1' : ''}`}>
+                                                        {codeText}
+                                                    </span>
+                                                </span>
+                                            );
+                                        })}
                                         {group.symbols.length > SYMBOLS_PREVIEW_LIMIT && (
                                             <span className="px-1.5 py-0.5 text-[10px] text-gray-400">
                                                 +{group.symbols.length - SYMBOLS_PREVIEW_LIMIT}

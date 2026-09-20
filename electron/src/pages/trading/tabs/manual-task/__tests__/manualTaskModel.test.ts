@@ -292,3 +292,51 @@ describe('sideOf / formatMoney', () => {
         expect(formatMoney(517537)).toBe('¥517,537.00');
     });
 });
+
+describe('台账展示字段（名称 / 行业 / 板块）', () => {
+    it('风控拦截 chip 带出股票名，且与 symbols 一一对应', () => {
+        // Arrange：后端已补名（_enrich_preview_display_fields），前端不能再丢
+        const items = [
+            { symbol: '600036.SH', name: '招商银行', action: 'BUY', reason: '涨停无法买入' },
+            { symbol: '300750.SZ', name: '宁德时代', action: 'BUY', reason: '涨停无法买入' },
+            { symbol: '600036.SH', name: '', action: 'BUY', reason: '涨停无法买入' },
+        ];
+
+        // Act
+        const group = summarizeSkipped(items).groups[0];
+
+        // Assert
+        expect(group.count).toBe(3);
+        expect(group.symbols).toHaveLength(3);
+        expect(group.labels.map((l) => l.name)).toEqual(['招商银行', '宁德时代', '']);
+        expect(group.labels.map((l) => l.symbol)).toEqual(group.symbols);
+    });
+
+    it('无 symbol 的脏行不进 labels，但照样计入 count（不能静默丢拦截）', () => {
+        const group = summarizeSkipped([
+            { symbol: '', name: '幽灵', action: 'SELL', reason: '当前无可卖持仓' },
+            { symbol: '600036.SH', name: '招商银行', action: 'SELL', reason: '当前无可卖持仓' },
+        ]).groups[0];
+
+        expect(group.count).toBe(2);
+        expect(group.labels).toHaveLength(1);
+    });
+
+    it('委托行透出行业与板块（机构口径：光有代码看不出这是什么票）', () => {
+        const row = orderRowView(
+            mkOrder({ name: '招商银行', industry: '银行', board: '沪主板' }),
+        );
+
+        expect(row.name).toBe('招商银行');
+        expect(row.industry).toBe('银行');
+        expect(row.board).toBe('沪主板');
+    });
+
+    it('未补到名称/行业时给空串而不是 undefined，渲染层才能安全判断', () => {
+        const row = orderRowView({ symbol: 'A.SH', side: 'BUY' } as ManualExecutionPreviewOrder);
+
+        expect(row.name).toBe('');
+        expect(row.industry).toBe('');
+        expect(row.board).toBe('');
+    });
+});

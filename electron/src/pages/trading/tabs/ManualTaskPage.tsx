@@ -10,6 +10,7 @@ dayjs.extend(utc);
 dayjs.extend(timezone);
 import { strategyManagementService } from '../../../services/strategyManagementService';
 import { sortTradingStrategies } from '../utils/sortTradingStrategies';
+import { filterStrategiesByMarket } from '../utils/strategyMarket';
 import {
     modelTrainingService,
     type InferenceRankingResult,
@@ -206,12 +207,22 @@ const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack }) 
 
     const loadStrategies = useCallback(async () => {
         try {
-            setStrategies(await strategyManagementService.loadStrategies());
+            // market 必须传：缺省时后端不过滤（strategy_storage.list 只在传了 market 时才加 where），
+            // 港股策略就会混进 A 股视图 —— 与 strategyMarket.ts 头部记录的事故同源。
+            // 再叠一层前端兜底：后端漏过滤 / 策略未声明市场时也能拦住。
+            const list = await strategyManagementService.loadStrategies(undefined, currentMarket);
+            const forMarket = filterStrategiesByMarket(list, currentMarket);
+            if (forMarket.length !== list.length) {
+                console.warn(
+                    `[ManualTask] 后端返回了 ${list.length - forMarket.length} 个非 ${currentMarket} 市场策略，已在前端兜底过滤`,
+                );
+            }
+            setStrategies(forMarket);
         } catch (error) {
             console.error('Failed to load strategies', error);
             message.error('无法加载策略列表');
         }
-    }, []);
+    }, [currentMarket]);
 
     const loadModels = useCallback(async () => {
         try {
@@ -519,6 +530,19 @@ const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack }) 
                     </div>
                 </div>
             </div>
+
+            {/* 口径声明：手动任务的信号读取在后端硬编码 A 股股票池
+                （manual_execution_service._load_signal_rows_raw：universe_tag IS NULL OR = 'CN'），
+                下单也走 A 股券商账户。切到港股/美股页签不会切换这条链路 —— 不说清楚就是静默错配。 */}
+            {currentMarket !== 'CN' && (
+                <div className="mb-3 flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] text-amber-800">
+                    <TerminalSquare size={13} className="mt-0.5 shrink-0" />
+                    <span>
+                        手动任务当前只支持 <b>A 股（CN）</b> 口径：批次信号按 A 股股票池读取、下单走 A 股券商账户。
+                        当前页签是 <b>{currentMarket}</b>，此处不会跟随切换 —— 请在 A 股页签下执行。
+                    </span>
+                </div>
+            )}
 
             <div className="grid grid-cols-1 lg:grid-cols-5 gap-2 mb-3 px-0.5">
                 {STEP_TITLES.map((title, index) => (
@@ -909,6 +933,41 @@ const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack }) 
                                                             <span className="font-mono text-[10px] font-bold">{run.signals_count ?? 0}</span>
                                                         </div>
                                                     </div>
+                                                    {/* 批次的截面画像（后端早已返回，此前完全不显示）：
+                                                        龙一板块/行业 = 该批次的资金聚焦方向；市场信号 = 是否值得进场。 */}
+                                                    {(run.board_top1?.[0] || run.industry_top1?.[0] || run.market_signal || run.gold_zone_count != null) && (
+                                                        <div className="mt-2 flex flex-wrap items-center gap-1 w-full text-[9px]">
+                                                            {run.board_top1?.[0] && (
+                                                                <span className="rounded bg-slate-100 px-1 font-bold text-slate-600" title={`龙一 ${run.board_top1[0].top1_name}(${run.board_top1[0].top1_symbol}) 分数 ${run.board_top1[0].top1_score?.toFixed?.(4) ?? '-'}`}>
+                                                                    {run.board_top1[0].board}
+                                                                </span>
+                                                            )}
+                                                            {run.industry_top1?.[0] && (
+                                                                <span className="rounded bg-blue-50 px-1 font-bold text-blue-600" title={`行业龙一 ${run.industry_top1[0].top1_name}(${run.industry_top1[0].top1_symbol})`}>
+                                                                    {run.industry_top1[0].industry}
+                                                                </span>
+                                                            )}
+                                                            {run.market_signal && (
+                                                                <span
+                                                                    className={`rounded px-1 font-bold ${
+                                                                        run.market_signal.entry_signal === 'strong'
+                                                                            ? 'bg-red-50 text-red-600'
+                                                                            : run.market_signal.entry_signal === 'empty'
+                                                                                ? 'bg-gray-100 text-gray-400'
+                                                                                : 'bg-amber-50 text-amber-600'
+                                                                    }`}
+                                                                    title={`市场信号：${run.market_signal.label}（强 ≥ ${run.market_signal.strong_threshold}，空 ≤ ${run.market_signal.empty_threshold}）`}
+                                                                >
+                                                                    {run.market_signal.label || run.market_signal.entry_signal}
+                                                                </span>
+                                                            )}
+                                                            {run.gold_zone_count != null && (
+                                                                <span className="rounded bg-amber-50 px-1 font-mono font-bold text-amber-600" title="黄金区（高分带）个股数">
+                                                                    金区 {run.gold_zone_count}
+                                                                </span>
+                                                            )}
+                                                        </div>
+                                                    )}
                                                 </button>
                                             );
                                         }) : (
@@ -958,20 +1017,66 @@ const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack }) 
                                                 </div>
                                             </div>
                                             
+                                            {/* 信号行（2026-09-20 重做）：此前只有「代码 + 分数」——名称/板块/行业
+                                                后端早就返回（见 getInferenceResult 的 stock_name/board/industry），
+                                                只是没渲染。选股结果只给代码，人工复核时等于没有信息。 */}
                                             <div className="flex-1 overflow-y-auto space-y-1.5 pr-1 custom-scrollbar">
-                                                {selectedRunDetail.rankings.slice(0, 10).map((item) => (
-                                                    <div key={`${item.code}-${item.rank}`} className="group flex items-center justify-between p-2.5 rounded-xl bg-white border border-gray-50 hover:border-blue-100 transition-colors shadow-sm">
-                                                        <div className="flex items-center gap-3 flex-1 overflow-hidden">
-                                                            <div className="flex items-center justify-center min-w-[28px] h-7 rounded-lg bg-gray-50 text-[10px] font-bold text-gray-400 shrink-0">
-                                                                #{item.rank}
+                                                {selectedRunDetail.rankings.slice(0, 10).map((item) => {
+                                                    const delta = item.prev_score != null ? item.score - item.prev_score : null;
+                                                    const signalTone = item.signal === 'buy'
+                                                        ? 'bg-red-50 text-red-600 border-red-100'
+                                                        : item.signal === 'sell'
+                                                            ? 'bg-emerald-50 text-emerald-600 border-emerald-100'
+                                                            : 'bg-gray-50 text-gray-400 border-gray-100';
+                                                    return (
+                                                    <div key={`${item.code}-${item.rank}`} className="group flex items-center gap-2.5 p-2.5 rounded-xl bg-white border border-gray-50 hover:border-blue-100 transition-colors shadow-sm">
+                                                        <div className="flex items-center justify-center min-w-[28px] h-7 rounded-lg bg-gray-50 text-[10px] font-bold text-gray-400 shrink-0">
+                                                            #{item.rank}
+                                                        </div>
+                                                        <div className="min-w-0 flex-1">
+                                                            <div className="flex items-center gap-1.5 min-w-0">
+                                                                <span className="truncate text-xs font-bold text-gray-900" title={item.name}>
+                                                                    {item.name && item.name !== item.code ? item.name : normalizeStockCode(item.code)}
+                                                                </span>
+                                                                {/* 名称缺失时 service 层会回落成代码，此时别再重复渲染一遍 */}
+                                                                {item.name && item.name !== item.code && (
+                                                                    <span className="shrink-0 font-mono text-[9px] text-gray-400">{normalizeStockCode(item.code)}</span>
+                                                                )}
+                                                                {item.signal !== 'hold' && (
+                                                                    <span className={`shrink-0 rounded border px-1 text-[9px] font-bold ${signalTone}`}>
+                                                                        {item.signal === 'buy' ? '买入' : '卖出'}
+                                                                    </span>
+                                                                )}
                                                             </div>
-                                                            <div className="flex items-center justify-between flex-1 pr-1">
-                                                                    <div className="font-mono text-[11px] font-bold text-gray-900">{normalizeStockCode(item.code)}</div>
-                                                                    <div className="text-[9px] text-gray-400 uppercase tracking-tighter">Score: {item.score.toFixed(4)}</div>
+                                                            <div className="mt-0.5 flex items-center gap-1.5 text-[9px] text-gray-500 overflow-hidden">
+                                                                {item.board && (
+                                                                    <span className="shrink-0 rounded bg-slate-100 px-1 font-bold text-slate-600">{item.board}</span>
+                                                                )}
+                                                                {item.industry && (
+                                                                    <span className="shrink-0 truncate rounded bg-blue-50 px-1 font-bold text-blue-600" title={`申万行业：${item.industry}`}>
+                                                                        {item.industry}
+                                                                    </span>
+                                                                )}
+                                                                {item.market_cap_yi != null && (
+                                                                    <span className="shrink-0 font-mono text-gray-400">{item.market_cap_yi.toFixed(0)} 亿</span>
+                                                                )}
+                                                                {item.negative_tag && (
+                                                                    <span className="shrink-0 font-bold text-rose-500" title="负面标签（消息面）">{item.negative_tag}</span>
+                                                                )}
                                                             </div>
                                                         </div>
+                                                        <div className="shrink-0 text-right">
+                                                            <div className="font-mono text-[11px] font-bold text-gray-900">{item.score.toFixed(4)}</div>
+                                                            {delta != null && (
+                                                                <div className={`font-mono text-[9px] font-bold ${delta > 0 ? 'text-red-500' : delta < 0 ? 'text-emerald-600' : 'text-gray-400'}`}
+                                                                     title="相对该股上一交易日分数">
+                                                                    {delta > 0 ? '+' : ''}{delta.toFixed(4)}
+                                                                </div>
+                                                            )}
+                                                        </div>
                                                     </div>
-                                                ))}
+                                                    );
+                                                })}
                                             </div>
                                         </div>
                                     ) : (
@@ -1048,10 +1153,25 @@ const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack }) 
                                                     #{strategy.id}
                                                 </div>
                                                 
-                                                {/* Strategy Info */}
+                                                {/* Strategy Info：名称 + 一句话说明 + 调仓周期/参数数。
+                                                    只给名称等于让用户凭记忆选策略（2026-09-20 用户反馈「信息太少，不专业」）。 */}
                                                 <div className="flex-1 min-w-0 mx-3 text-left">
                                                     <div className={`font-bold text-[12px] truncate ${isActive ? 'text-blue-900' : 'text-slate-700'}`}>
                                                         {strategy.name}
+                                                    </div>
+                                                    <div className="mt-0.5 truncate text-[10px] font-medium text-gray-400" title={strategy.description || undefined}>
+                                                        {strategy.description || '（无说明）'}
+                                                    </div>
+                                                    <div className="mt-1 flex items-center gap-2 text-[9px] text-gray-400">
+                                                        {strategy.live_trade_config?.rebalance_days != null && (
+                                                            <span className="font-bold">调仓 T+{strategy.live_trade_config.rebalance_days}</span>
+                                                        )}
+                                                        {strategy.parameters && Object.keys(strategy.parameters).length > 0 && (
+                                                            <span className="font-mono">{Object.keys(strategy.parameters).length} 参数</span>
+                                                        )}
+                                                        {strategy.tags?.slice(0, 2).map(tag => (
+                                                            <span key={tag} className="rounded bg-gray-100 px-1 font-bold text-gray-500">{tag}</span>
+                                                        ))}
                                                     </div>
                                                 </div>
 

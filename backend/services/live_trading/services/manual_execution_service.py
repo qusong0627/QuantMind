@@ -428,6 +428,45 @@ def _build_preview_hash(payload: dict[str, Any]) -> str:
     return hashlib.sha256(_stable_json(stable).encode("utf-8")).hexdigest()
 
 
+def _enrich_preview_display_fields(rows: list[dict[str, Any]]) -> None:
+    """就地给预案行补展示字段：中文名 / 申万行业 / 上市板。
+
+    背景：买单的 ``name`` 在计划构造处是空串（信号行 SQL 只查 symbol/score，不查名称），
+    风控 skipped 行更是只有 symbol —— 前端台账因此只能显示一串代码，人工复核无从下手。
+
+    **必须在 ``_build_preview_hash`` 之后调用**：预案哈希只对「执行意图」
+    （strategy_context + 买卖单）负责，把展示字段并进去会让 submit 侧重算哈希不匹配、
+    误报 409 要求重新生成预案。
+
+    只补空值，不覆盖已有内容（卖单的 name 来自持仓快照，优先信它）。
+    """
+    if not rows:
+        return
+    try:
+        from backend.services.engine.inference.shenwan_industry import (
+            load_shenwan_industry_map,
+        )
+
+        industry_map = load_shenwan_industry_map()
+    except Exception as exc:  # pragma: no cover - 行业映射不可用不该拖垮整个预案
+        logger.warning("申万行业映射加载失败，预案行业字段留空: %s", exc)
+        industry_map = {}
+
+    from backend.shared.stock_name_mapper import resolve_name
+    from backend.shared.stock_utils import StockCodeUtil
+
+    for row in rows:
+        symbol = str(row.get("symbol") or "").strip()
+        if not symbol:
+            continue
+        if not str(row.get("name") or "").strip():
+            row["name"] = resolve_name(symbol) or ""
+        if not row.get("board"):
+            row["board"] = StockCodeUtil.classify_board(symbol)
+        if not row.get("industry"):
+            row["industry"] = industry_map.get(StockCodeUtil.to_suffix(symbol), "")
+
+
 def _normalize_strategy_params(strategy: dict[str, Any] | None) -> dict[str, Any]:
     params = strategy.get("parameters") if isinstance(strategy, dict) else {}
     return params if isinstance(params, dict) else {}
@@ -1767,6 +1806,10 @@ class ManualExecutionService:
             "summary": plan["summary"],
         }
         preview["preview_hash"] = _build_preview_hash(preview)
+        # 展示字段必须在哈希之后补：哈希只认「执行意图」，见 _enrich_preview_display_fields
+        _enrich_preview_display_fields(
+            list(preview["sell_orders"]) + list(preview["buy_orders"]) + list(preview["skipped_items"])
+        )
         return preview
 
     async def create_manual_task(

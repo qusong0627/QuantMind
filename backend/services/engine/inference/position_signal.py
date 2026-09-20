@@ -98,19 +98,10 @@ def _load_calibration() -> tuple[dict[str, float], dict[str, Any]]:
 
 
 def _classify_board(code: str) -> str:
-    if code.startswith("688"):
-        return "科创板"
-    if code.startswith("30"):
-        return "创业板"
-    if code.startswith(("002", "003")):
-        return "中小板"
-    if code.startswith(("000", "001")):
-        return "深主板"
-    if code.startswith("60"):
-        return "沪主板"
-    if code.startswith(("4", "8", "9")):
-        return "北交所"
-    return "其他"
+    """转发到 StockCodeUtil.classify_board（口径唯一实现，含非 A 股 → 其他）。"""
+    from backend.shared.stock_utils import StockCodeUtil
+
+    return StockCodeUtil.classify_board(code)
 
 
 def _cap_tier(ltsz_yi: float | None) -> str:
