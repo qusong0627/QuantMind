@@ -95,6 +95,11 @@ AUTO_INFERENCE_ENABLED = os.getenv("AUTO_INFERENCE_ENABLED", "true").lower() == 
 NEWS_ENRICH_ENABLED = os.getenv("NEWS_ENRICH_ENABLED", "true").lower() == "true"
 NEWS_ENRICH_INTERVAL_SEC = int(os.getenv("NEWS_ENRICH_INTERVAL_SEC", "60"))
 NEWS_MATCHER_RELOAD_SEC = int(os.getenv("NEWS_MATCHER_RELOAD_SEC", "600"))
+# 新闻 20 天标签汇总：窗口天数（用户指定 20）+ 独立开关。
+# 独立开关的理由：注册表按 switch_env 判定「任务关掉」还是「任务停摆」，
+# 借用 NEWS_ENRICH_ENABLED 的话，关掉富化会把汇总报成停摆（体检假阳性）。
+NEWS_TAG_ROLLUP_ENABLED = os.getenv("NEWS_TAG_ROLLUP_ENABLED", "true").lower() == "true"
+NEWS_TAG_WINDOW_DAYS = int(os.getenv("NEWS_TAG_WINDOW_DAYS", "20"))
 
 # Celery配置
 beat_schedule = {}
@@ -123,6 +128,15 @@ if NEWS_ENRICH_ENABLED:
     beat_schedule["news-matcher-reload"] = {
         "task": "engine.tasks.news_matcher_reload",
         "schedule": float(NEWS_MATCHER_RELOAD_SEC),
+    }
+# 新闻 20 天标签汇总（候选列表的新闻利空/利好标注、推送前风险排除的数据源）。
+# 半小时一跑而非日频：隔夜才算一次的话，早上刚出的立案调查要等第二天才拦得住。
+# 单轮实测约 5s（发布时间索引只增量补新 id），任务自带单实例锁。
+if NEWS_TAG_ROLLUP_ENABLED:
+    beat_schedule["news-tag-rollup"] = {
+        "task": "engine.tasks.news_tag_rollup",
+        "schedule": crontab(minute="*/30"),
+        "kwargs": {"days": NEWS_TAG_WINDOW_DAYS},
     }
 
 # 每日自动同步上游数据建议设置到次日 00:00 以后，按需错峰触发，避免集中请求。

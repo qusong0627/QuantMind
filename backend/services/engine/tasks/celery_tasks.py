@@ -764,6 +764,27 @@ def news_matcher_reload_task() -> dict[str, Any]:
         return {"status": "failed", "error": str(e)}
 
 
+@celery_app.task(name="engine.tasks.news_tag_rollup", ignore_result=True)
+def news_tag_rollup_task(days: int = 20) -> dict[str, Any]:
+    """近 N 天新闻标签汇总（通道 B）：候选列表的新闻利空/利好标注来源。
+
+    **半小时一跑而不是日频**：产物要服务「推送下单前的风险排除」，隔夜才算一次
+    的话，早上刚出的立案调查要等到第二天才会拦住股票。单轮实测约 5s
+    （增量只补新 id），代价可忽略；任务自带单实例锁，重叠不会互相删行。
+    """
+    from backend.shared.scheduler_registry import heartbeat as _sched_heartbeat
+
+    _sched_heartbeat("news_tag_rollup")
+    try:
+        from backend.scripts.news_tag_rollup import run as _rollup
+
+        code = asyncio.run(_rollup(int(days), quiet=True))
+        return {"status": "success" if code == 0 else "failed", "exit_code": code}
+    except Exception as e:
+        logger.exception("[NewsTagRollup] 失败: %s", e)
+        return {"status": "failed", "error": str(e)}
+
+
 @celery_app.task(name="engine.tasks.daily_data_sync", max_retries=0, bind=True)
 def daily_data_sync_task(
     self,

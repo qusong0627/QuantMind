@@ -155,6 +155,11 @@ JOBS: tuple[JobSpec, ...] = (
         None, True, 900, None, "新闻标题匹配器热重载",
     ),
     JobSpec(
+        "news_tag_rollup", "新闻标签汇总", "celery_beat", "celery", "每 30 分钟",
+        "NEWS_TAG_ROLLUP_ENABLED", True, 5400, None,
+        "近 20 天新闻标签（利空/利好）→ news_stock_tags，供候选列表与推送前风险排除",
+    ),
+    JobSpec(
         "strategy_lab_scan", "策略实验室日扫", "celery_beat", "celery", "交易日 23:00",
         "STRATEGY_LAB_SCAN_ENABLED", True, 345600, None,
     ),
