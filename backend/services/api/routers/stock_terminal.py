@@ -1688,8 +1688,14 @@ async def list_stocks(
             if only_signaled:
                 where += " AND signal_side IN ('BUY','SELL')"
             sql = (
-                "SELECT symbol, fusion_score, signal_side, model_version, quality "
-                f"FROM engine_signal_scores WHERE {where}"
+                # 同一天可能跑了多个 run（同一批数据的多次打分），必须去重后取一条，
+                # 否则下面的 score_info[sym] = ... 是「按 DB 返回顺序后写覆盖」= 任意挑一个。
+                # 实测同日不同 run 的 fusion_score 量纲互不相同（相关系数可为 −0.03），
+                # 混着取会让列表分数不确定。约定同 _trend_map：按 created_at 取最新。
+                "SELECT DISTINCT ON (symbol) "
+                "symbol, fusion_score, signal_side, model_version, quality "
+                f"FROM engine_signal_scores WHERE {where} "
+                "ORDER BY symbol, created_at DESC, id DESC"
             )
             async with get_session() as session:
                 from sqlalchemy import text as _txt
