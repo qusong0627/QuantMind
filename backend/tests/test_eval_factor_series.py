@@ -13,7 +13,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from backend.scripts.eval.factor_series import factor_series_payload
+from backend.scripts.eval.factor_series import factor_series_payload, top_correlations
 
 
 def _panel() -> pd.DataFrame:
@@ -92,6 +92,64 @@ def test_scalars_carry_ic_ir_and_counts():
     assert payload["scalars"]["ic_mean"] == pytest.approx((0.03 - 0.01 + 0.05) / 3)
     assert payload["scalars"]["n_days"] == 3
     assert payload["scalars"]["ic_ir"] is not None
+
+
+# ── 相关性（「有没有重复」） ─────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_top_correlations_sorts_by_absolute_value_and_skips_self():
+    """只报一个 max_corr 数字看不出跟谁重 —— 对手名字必须一起带上。"""
+    names = ["a", "b", "c", "d"]
+    matrix = [
+        [1.0, 0.91, -0.30, 0.62],  # a 行：|−0.30| < 0.62 < 0.91
+        [0.91, 1.0, 0.10, 0.05],
+        [-0.30, 0.10, 1.0, 0.0],
+        [0.62, 0.05, 0.0, 1.0],
+    ]
+
+    top = top_correlations(names, matrix, 0, limit=3)
+
+    assert [t["name"] for t in top] == ["b", "d", "c"]
+    assert top[0]["value"] == pytest.approx(0.91)
+    assert top[2]["value"] == pytest.approx(0.30)  # 取绝对值：反向因子也是重复
+
+
+@pytest.mark.unit
+def test_top_correlations_skips_missing_and_out_of_range_rows():
+    """缺测（None）不当 0 相关；行比名字短时只看到有的那几列，越界整行放弃。"""
+    names = ["a", "b", "c", "d"]
+    matrix = [[1.0, None, 0.5], [0.9, 1.0, 0.2]]
+
+    assert top_correlations(names, matrix, 1, limit=5) == [
+        {"name": "a", "value": 0.9},
+        {"name": "c", "value": 0.2},
+    ]
+    # 行比名字短 → 只按行上有的列算（d 那一列没数据，不能当 0）
+    assert top_correlations(["a", "b", "c"], [[1.0, 0.4]], 0, limit=5) == [
+        {"name": "b", "value": 0.4}
+    ]
+    assert top_correlations(names, matrix, 9) == []
+    assert top_correlations(names, matrix, -1) == []
+
+
+@pytest.mark.unit
+def test_payload_reports_why_correlation_is_missing():
+    payload = factor_series_payload(_panel())
+
+    assert payload["series"]["correlation"] == []
+    assert "correlation" in payload["notes"]
+    assert "matrix" in payload["notes"]["correlation"]
+
+
+@pytest.mark.unit
+def test_payload_carries_the_handed_in_correlation_row():
+    row = [{"name": "gtja_042", "value": 0.87}]
+
+    payload = factor_series_payload(_panel(), correlations=row)
+
+    assert payload["series"]["correlation"] == row
+    assert "correlation" not in payload["notes"]
 
 
 # ── 退化输入 ─────────────────────────────────────────────────────────

@@ -5,6 +5,7 @@ import type {
   EvalHistoryResponse,
   EvalListResponse,
   EvalObjectType,
+  EvalSeriesResponse,
   StrategyHealthResponse,
 } from '../types/evalCenter';
 
@@ -64,6 +65,17 @@ export function getScoreHistory(
     limit: String(limit),
   });
   return getJson(`/scores/history?${qs.toString()}`);
+}
+
+/**
+ * 单对象长序列侧车（逐日 IC / 分档收益 / 衰减 / 换手 / 相关性）。
+ *
+ * `meta.available=false` 是**正常返回**（该对象尚未产出序列，或侧车版本过期），
+ * 前端据此展示 `meta.note`，不要当成请求失败。
+ */
+export function getObjectSeries(objectType: string, objectId: string): Promise<EvalSeriesResponse> {
+  const qs = new URLSearchParams({ object_type: objectType, object_id: objectId });
+  return getJson(`/series?${qs.toString()}`);
 }
 
 /** 策略体检档案（最新 + 历史 + 晋级门禁预演，与执行点同源） */

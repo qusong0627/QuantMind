@@ -37,8 +37,44 @@ def _mean(frame: Any, col: str) -> float | None:
     return None if values.size == 0 else float(values.mean())
 
 
-def factor_series_payload(frame: Any) -> dict[str, Any]:
-    """单因子面板（已按 factor 过滤）→ ``{series, scalars, notes}``。"""
+def top_correlations(
+    names: list[str], matrix: list[list[Any]], index: int, *, limit: int = 5
+) -> list[dict[str, Any]]:
+    """相关矩阵单行 → 最相关的 k 个因子（``[{name, value}]``，|相关| 降序）。
+
+    「有没有重复」这个问题只报一个 ``max_corr`` 数字看不出跟谁重——把对手名字一起
+    带上；矩阵行里 None/非法值跳过（缺测不等于 0 相关）。
+    """
+    if index < 0 or index >= len(names) or index >= len(matrix):
+        return []
+    row = matrix[index] or []
+    pairs: list[tuple[str, float]] = []
+    for j, name in enumerate(names):
+        if j == index or j >= len(row):
+            continue
+        raw = row[j]
+        if raw is None:
+            continue
+        try:
+            value = abs(float(raw))
+        except (TypeError, ValueError):
+            continue
+        if np.isfinite(value):
+            pairs.append((str(name), value))
+    pairs.sort(key=lambda item: item[1], reverse=True)
+    return [
+        {"name": name, "value": value} for name, value in pairs[: max(1, int(limit))]
+    ]
+
+
+def factor_series_payload(
+    frame: Any, *, correlations: list[dict[str, Any]] | None = None
+) -> dict[str, Any]:
+    """单因子面板（已按 factor 过滤）→ ``{series, scalars, notes}``。
+
+    ``correlations`` 由评分卡从 ``factor_report.json`` 的相关矩阵取好传入（本函数
+    不读盘）；缺该参数时如实记 note，不留空白序列。
+    """
     notes: dict[str, Any] = {}
     dates = [_date_iso(v) for v in frame["date"].tolist()] if "date" in frame else []
     ic = frame["ic"].to_numpy(dtype=float) if "ic" in frame else np.array([])
@@ -75,12 +111,20 @@ def factor_series_payload(frame: Any) -> dict[str, Any]:
     if not segment_ic:
         notes["segment_ic"] = "分年 IC 缺省（有效日不足或日期列缺失）"
 
+    corr = list(correlations or [])
+    if not corr:
+        notes["correlation"] = (
+            "相关性缺该因子（factor_report.json 的 correlation.matrix 里没有它，"
+            "或矩阵未生成）"
+        )
+
     return {
         "series": {
             "daily_ic": daily_ic,
             "decile_mean": decile_mean,
             "ic_decay": ic_decay,
             "segment_ic": segment_ic,
+            "correlation": corr,
         },
         "scalars": {
             "ic_mean": _mean(frame, "ic"),

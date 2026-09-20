@@ -34,7 +34,10 @@ from backend.scripts.eval.factor_pfs import (  # noqa: E402
     compute_pfs_for,
     quality_gate_dim,
 )
-from backend.scripts.eval.factor_series import factor_series_payload  # noqa: E402
+from backend.scripts.eval.factor_series import (  # noqa: E402
+    factor_series_payload,
+    top_correlations,
+)
 from backend.shared.eval_scoring import (  # noqa: E402
     DimensionScore,
     combine_dimension_scores,
@@ -371,7 +374,12 @@ def score_factors(
             ]
             if pairs:
                 max_corr = max(pairs)
-        payload = factor_series_payload(sub)
+        payload = factor_series_payload(
+            sub,
+            correlations=top_correlations(
+                corr_names, corr_matrix, idx if idx is not None else -1
+            ),
+        )
         sidecar = save_series("factor", name, payload)
         return {
             **score_factor(

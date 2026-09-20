@@ -40,6 +40,44 @@ export interface EvalObjectType {
   label: string;
 }
 
+/** 长序列侧车的一个点（各序列的键不同：date/label/bucket/horizon/pair/name） */
+export interface EvalSeriesPoint {
+  date?: string;
+  label?: string;
+  name?: string;
+  bucket?: number;
+  horizon?: number;
+  pair?: number;
+  value: number;
+  n_days?: number;
+  is_min_segment?: boolean;
+}
+
+/** `/eval/series` 的 data（后端 factor_series / model_series 摊平产物，前端不重算） */
+export interface EvalSeriesData {
+  series?: Record<string, EvalSeriesPoint[]>;
+  scalars?: Record<string, number | null>;
+  /** 序列缺省原因（键与 series 同名）；缺省时这里是唯一解释来源，必须展示 */
+  notes?: Record<string, string>;
+}
+
+export interface EvalSeriesMeta {
+  object_type: string;
+  object_id: string;
+  /** false = 该对象尚未产出序列（正常返回，不是错误） */
+  available: boolean;
+  reason: string | null;
+  note: string | null;
+  generated_at: string | null;
+  version: number | null;
+}
+
+export interface EvalSeriesResponse {
+  success: boolean;
+  data: EvalSeriesData;
+  meta: EvalSeriesMeta;
+}
+
 export interface HealthSnapshot {
   verdict: string | null;
   verdict_label?: string | null;

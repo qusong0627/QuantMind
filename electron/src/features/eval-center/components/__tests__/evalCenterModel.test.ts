@@ -4,6 +4,9 @@ import {
   averageScore,
   coverageSummary,
   dimensionViews,
+  formatNumber,
+  formatPercent,
+  formatSignedPct,
   gradeColor,
   gradeCounts,
   gradeMeta,
@@ -172,5 +175,30 @@ describe('gradeColor / gradeCounts / averageScore / rowLabels（2026-09-17 改�
 
     const daily = rowLabels(makeRow({ object_type: 'daily_selection', object_id: '2026-09-15', display_name: null }));
     expect(daily).toEqual({ primary: '2026-09-15', secondary: null });
+  });
+});
+
+describe('数值格式化（实测量与曲线标注共用口径）', () => {
+  it('formatNumber：按位数四舍五入，缺值给「—」而不是 0', () => {
+    expect(formatNumber(0.0412, 4)).toBe('0.0412');
+    expect(formatNumber(0.04125, 4)).toBe('0.0413');
+    expect(formatNumber(-1.12, 2)).toBe('-1.12');
+    expect(formatNumber(null)).toBe('—');
+    expect(formatNumber(undefined)).toBe('—');
+    expect(formatNumber(Number.NaN)).toBe('—');
+  });
+
+  it('formatPercent：小数 → 百分数（默认带符号，正数带 +）', () => {
+    expect(formatPercent(0.724, 1)).toBe('72.4%');
+    expect(formatPercent(0.625, 1)).toBe('62.5%');
+    expect(formatPercent(0.66, 0)).toBe('66%');
+    expect(formatPercent(null)).toBe('—');
+  });
+
+  it('formatSignedPct：收益率带正负号（A 股口径：正=涨/红）', () => {
+    expect(formatSignedPct(0.183)).toBe('+18.3%');
+    expect(formatSignedPct(-0.081)).toBe('-8.1%');
+    expect(formatSignedPct(0)).toBe('0.0%');
+    expect(formatSignedPct(null)).toBe('—');
   });
 });

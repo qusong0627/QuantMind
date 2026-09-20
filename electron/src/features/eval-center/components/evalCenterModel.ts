@@ -152,6 +152,47 @@ export function historySeries(rows: EvalScoreRow[] | null | undefined): HistoryS
   };
 }
 
+/**
+ * 图表色（评估中心唯一色值出口）：与 `cardKit` 的 TONES 同色系，语义守 A 股红涨
+ * —— 红=正向/做多侧，绿=负向/做空侧，琥珀=风险量（回撤、红线、缺证据）。
+ * 组件里不许再出现别的 hex。
+ */
+export const CHART_COLORS = {
+  up: '#dc2626',
+  down: '#059669',
+  neutral: '#64748b',
+  risk: '#d97706',
+  axis: '#94a3b8',
+  split: '#e2e8f0',
+} as const;
+
+/** 窄化外部值 → number；null/undefined/空串/NaN/Infinity → null（缺值不与 0 同形） */
+export function toNumber(value: unknown): number | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value === 'string' && value.trim() === '') return null;
+  const num = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(num) ? num : null;
+}
+
+/** 数字 → 定长小数；缺值 → '—' */
+export function formatNumber(value: unknown, digits = 4): string {
+  const num = toNumber(value);
+  return num === null ? '—' : num.toFixed(digits);
+}
+
+/** 小数 → 百分数（不带符号，用于占比/利用率这类天然非负量） */
+export function formatPercent(value: unknown, digits = 1): string {
+  const num = toNumber(value);
+  return num === null ? '—' : `${(num * 100).toFixed(digits)}%`;
+}
+
+/** 收益率 → 带符号百分数：正数显式加 `+`（符号本身是信息，A 股红涨口径） */
+export function formatSignedPct(value: unknown, digits = 1): string {
+  const num = toNumber(value);
+  if (num === null) return '—';
+  return `${num > 0 ? '+' : ''}${(num * 100).toFixed(digits)}%`;
+}
+
 /** 覆盖描述：可评维度数/总维度数 + 红线数（评分卡列表行摘要） */
 export function coverageSummary(row: EvalScoreRow | null | undefined): string {
   const views = dimensionViews(row);
