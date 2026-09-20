@@ -11,6 +11,7 @@ import axios, { AxiosInstance } from 'axios';
 import { SERVICE_ENDPOINTS, resolveWebSafeServiceBase } from '../../config/services';
 import { authService } from '../auth/services/authService';
 import { KlineBar, KlineMarker, KlineSplitsEvent, StockListResponse, StockProfile, type TradeMarker } from './types';
+import type { SignalLookbackData, SignalLookbackParams } from './types';
 
 /** 复权方式：qfq=前复权（默认）/ hfq=后复权 / none=不复权。仅 A 股日线后端真正支持三种；港股/美股固定 none */
 export type KlineAdjust = 'qfq' | 'hfq' | 'none';
@@ -37,6 +38,8 @@ export interface TerminalMarketConfig {
     profile?: string;
     kline?: string;
     news?: string;
+    /** 信号准确率回看（仅 A 股后端有；美股/港股走各自的路径覆盖） */
+    signalLookback?: string;
   };
 }
 
@@ -144,6 +147,22 @@ export class StockTerminalService {
     const withMarket = this.cfg.listMarket ? { ...params, market: this.cfg.listMarket } : params;
     const resp = await this.client.get(this.cfg.paths?.stockList ?? '/stock-terminal/list', { params: withMarket });
     return resp.data?.data ?? { total: 0, page: 1, page_size: 100, trade_date: '', items: [] };
+  }
+
+  /**
+   * 信号准确率回看：T-N 的分数/名次 + 从那日到现在的涨跌。
+   *
+   * 涨跌**一律由后端算**（`backend/services/api/stock_lookback.py` 是唯一事实源）——
+   * 前端重算一遍必然与「现价=实时/收盘混合」「除权校正」这些口径漂开。
+   * 这里只透传参数，不做二次加工。
+   */
+  async getSignalLookback(params: SignalLookbackParams = {}): Promise<SignalLookbackData> {
+    const resp = await this.client.get(
+      this.cfg.paths?.signalLookback ?? '/stock-terminal/signal-lookback',
+      { params, timeout: 60000 }, // 比默认 30s 长：要读 4 个 parquet 分区 + 扫 Redis
+    );
+    // 后端「覆盖不足」是正常的业务态（返回 status='unavailable'），不是错误
+    return resp.data?.data ?? { status: 'unavailable', reason: '接口无返回' };
   }
 
   async getConcepts(): Promise<string[]> {

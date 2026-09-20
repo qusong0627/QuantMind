@@ -16,6 +16,7 @@ import { StockTerminalWindow, prefetchTerminal } from '../../../features/market-
 import { StatTile } from '../../../features/desk/components/cardKit';
 import { getDeskToday } from '../../../features/desk/services/deskService';
 import { EvalScoreBadge } from '../../../components/shared/EvalScoreBadge';
+import SignalLookbackCard from '../../../features/stock-terminal/components/SignalLookbackCard';
 import type { SignalsBlock } from '../../../features/desk/types';
 import { BarChart3, TrendingDown } from 'lucide-react';
 import { researchService } from '../../../services/researchService';
@@ -129,7 +130,9 @@ const SignalsExplorerPage: React.FC<SignalsExplorerPageProps> = ({ onModelRefres
   );
 
   return (
-    <div className="h-full flex gap-3 p-3 overflow-hidden bg-gray-50/50">
+    <div className="h-full flex flex-col gap-3 p-3 overflow-hidden bg-gray-50/50">
+      {/* 上：左栏（列表）+ 右栏（终端入口/低分股/信号分布） */}
+      <div className="flex-1 min-h-0 flex gap-3">
       {/* 左栏：检索 + 筛选 + 排名列表（quant-Trader 个股终端左栏复刻） */}
       <div className="flex-1 min-w-0 min-h-0 flex">
         <StockSidebar
@@ -237,6 +240,16 @@ const SignalsExplorerPage: React.FC<SignalsExplorerPageProps> = ({ onModelRefres
           共 {listTotal} 只命中{fullTotal > 0 ? ` / 全市场 ${fullTotal} 只` : ''}；行内星标加自选，点行选中后可在上方打开个股终端浮窗。
         </p>
       </div>
+      </div>
+
+      {/* 下：信号准确率回看（通栏）。side/model/asof 与上方列表联动，
+          保证同一只票在两处的当日分数是同一个 run 的数 */}
+      <SignalLookbackCard
+        className="shrink-0"
+        side={filters.side}
+        model={filters.model}
+        asof={signalDate}
+      />
 
       {/* 个股终端浮窗（点「个股终端」打开选中股） */}
       <StockTerminalWindow

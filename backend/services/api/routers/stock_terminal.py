@@ -1526,6 +1526,272 @@ async def _trend_map(model: str | None, before=None) -> dict[str, str]:
     return out
 
 
+# ---------------------------------------------------------------------------
+# 信号准确率回看（T-N 分数/排名 → 至今涨跌）
+# 口径与取数全部在 `backend/services/api/stock_lookback.py`，本段只做编排与响应组装。
+# ---------------------------------------------------------------------------
+
+_LOOKBACK_MIN, _LOOKBACK_MAX, _LOOKBACK_LIMIT = 1, 60, 5
+
+
+def _parse_lookbacks(raw: str) -> list[int]:
+    """`'3,5,10'` → `[3, 5, 10]`（去重、升序）；非法值直接 400，不静默丢弃。"""
+    out: list[int] = []
+    for part in str(raw or "").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            n = int(part)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"lookbacks 含非整数：{part}") from None
+        if not _LOOKBACK_MIN <= n <= _LOOKBACK_MAX:
+            raise HTTPException(
+                status_code=400,
+                detail=f"回看点须在 {_LOOKBACK_MIN}~{_LOOKBACK_MAX} 之间：{n}",
+            )
+        if n not in out:
+            out.append(n)
+    if not out:
+        raise HTTPException(status_code=400, detail="lookbacks 不能为空")
+    if len(out) > _LOOKBACK_LIMIT:
+        raise HTTPException(status_code=400, detail=f"回看点最多 {_LOOKBACK_LIMIT} 个")
+    return sorted(out)
+
+
+def _fmt_partition(ymd: str | None) -> str | None:
+    return f"{ymd[:4]}-{ymd[4:6]}-{ymd[6:]}" if ymd and len(ymd) >= 8 else None
+
+
+@router.get("/signal-lookback")
+async def signal_lookback(
+    lookbacks: str = Query("3,5,10", description="回看点：信号日往前第 N 个交易日，逗号分隔"),
+    model: str | None = Query(None, description="推理模型（qm_model_inference_runs.model_id）；缺省=各日各自最新 run"),
+    side: str | None = Query(None, description="明细行范围（锚点日信号方向）：BUY/SELL/HOLD；缺省=全部"),
+    bucket_pct: float = Query(0.2, ge=0.01, le=0.49, description="高/低分档宽度（分位）"),
+    price_source: str = Query("auto", pattern="^(auto|close)$", description="auto=实时优先缺则收盘；close=只用收盘"),
+    asof: str | None = Query(None, description="锚定信号日 YYYY-MM-DD；缺省=最近覆盖充分日"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+):
+    """候选信号的准确率回看：T-N 的分数/名次 + 从那日到现在的涨跌。
+
+    汇总（每回看点一行，覆盖**全市场**打分集）用来判模型有没有区分度；
+    明细（一行一只票，受 `side` 约束）用来逐只核对。缺分数或缺价一律 null，
+    绝不补 0——补 0 等于宣称「没涨没跌」。
+    """
+    from backend.services.api import stock_lookback as sl
+
+    wanted = _parse_lookbacks(lookbacks)
+    try:
+        sl.parse_asof(asof)  # 只做校验；真正绑参在 fetch_signal_ladder 里转 date
+    except ValueError:
+        raise HTTPException(status_code=400, detail="asof 须为 YYYY-MM-DD") from None
+
+    ladder = await sl.fetch_signal_ladder(wanted, model=model, asof=asof)
+    if not ladder:
+        return {
+            "success": True,
+            "data": {
+                "status": "unavailable",
+                "reason": f"最近 180 天内没有覆盖充分（≥{_MIN_SIGNAL_COVERAGE} 只）的信号日",
+                "summary": [],
+                "detail": {"total": 0, "page": 1, "page_size": page_size, "items": []},
+            },
+        }
+
+    anchor = ladder[0]
+    picked = sl.pick_lookback_dates(ladder, wanted)
+    dates = [anchor, *sorted(set(picked.values()))]
+    score_rows = await sl.fetch_lookback_scores(dates, model=model)
+
+    by_date: dict[str, list[dict]] = {}
+    for r in score_rows:
+        by_date.setdefault(r["signal_date"], []).append(r)
+
+    # 基准价分区（每回看日「不晚于该日的最近分区」）与现价分区。
+    # 锚点可能是未来日（信号先于行情落库），所以现价分区同样走 on_or_before。
+    base_part: dict[str, str] = {}
+    for d in sorted(set(picked.values())):
+        part = await asyncio.to_thread(sl.latest_partition_on_or_before, d)
+        if part:
+            base_part[d] = part
+    now_part = await asyncio.to_thread(sl.latest_partition_on_or_before, anchor)
+
+    panels = await asyncio.to_thread(
+        sl.fetch_close_panel, sorted({*base_part.values(), *([now_part] if now_part else [])})
+    )
+    close_at: dict[tuple[str, str], float] = {}
+    now_close: dict[str, float] = {}
+    # strict=True：三列同出一张 DataFrame，长度不等只可能是列缺失/读坏——宁可响亮报错，
+    # 也别静默截断成「这些票没价格」，那会被 UI 读成「没有区分度」。
+    for sym, dt, close in zip(
+        panels.get("symbol", []), panels.get("dt", []), panels.get("close", []), strict=True
+    ):
+        if close is None or pd.isna(close):
+            continue
+        close_at[(str(sym), str(dt))] = float(close)
+        if str(dt) == str(now_part):
+            now_close[str(sym)] = float(close)
+
+    universe = sorted({r["symbol"] for r in score_rows if r["symbol"]})
+    live = (
+        {}
+        if price_source == "close"
+        else await asyncio.to_thread(sl.load_live_quotes, universe)
+    )
+
+    def _resolve_now(symbol: str) -> tuple[float | None, str]:
+        """现价与来源标签。实时快照优先，缺失回退最新收盘。"""
+        quote = live.get(symbol)
+        if quote:
+            price, _scaled = sl.apply_scale(
+                quote.get("now"), quote.get("pre_close"), now_close.get(symbol)
+            )
+            if price is not None:
+                return price, "live"
+        return now_close.get(symbol), "close"
+
+    # 同一只票在三个回看点用的是同一个现价，解析一次就够。
+    _now_cache: dict[str, tuple[float | None, str]] = {}
+
+    def _now_price(symbol: str) -> tuple[float | None, str]:
+        if symbol not in _now_cache:
+            _now_cache[symbol] = _resolve_now(symbol)
+        return _now_cache[symbol]
+
+    # 明细单元格：(回看日, symbol) → 该点的分数/名次/涨跌
+    cell: dict[tuple[str, str], dict] = {}
+    ret_by_date: dict[str, dict[str, float | None]] = {}
+    for n in sorted(picked, reverse=True):
+        d = picked[n]
+        part = base_part.get(d)
+        rets: dict[str, float | None] = {}
+        for r in by_date.get(d, []):
+            symbol = r["symbol"]
+            ret = None
+            if symbol:
+                base = close_at.get((symbol, part)) if part else None
+                price, src = _now_price(symbol)
+                ret = sl.compute_return(base, price)
+                cell[(d, symbol)] = {
+                    "lookback": n,
+                    "signal_date": d,
+                    "score": r["score"],
+                    "rank": r["rank"],
+                    "rank_pct": r["pct"],
+                    "day_n": r["day_n"],
+                    "ret": ret,
+                    "price_source": src,
+                }
+            rets[symbol or r["raw_symbol"]] = ret
+        ret_by_date[d] = rets
+
+    anchor_stats = sl.summarise_day(
+        [{"pct": r["pct"], "score": r["score"], "ret": None} for r in by_date.get(anchor, [])],
+        bucket_pct,
+    )
+    anchor_std = anchor_stats["score_std"]
+
+    summary = []
+    for n in sorted(picked, reverse=True):
+        d = picked[n]
+        rows_d = by_date.get(d, [])
+        rets = ret_by_date.get(d, {})
+        stats = sl.summarise_day(
+            [
+                {
+                    "pct": r["pct"],
+                    "score": r["score"],
+                    "ret": rets.get(r["symbol"] or r["raw_symbol"]),
+                }
+                for r in rows_d
+            ],
+            bucket_pct,
+        )
+        run_ids = sorted({r["run_id"] for r in rows_d})
+        versions = sorted({r["model_version"] for r in rows_d if r["model_version"]})
+        stats.update(
+            {
+                "lookback": n,
+                "label": f"T-{n}",
+                "signal_date": d,
+                # 基准价日 = 回看日自己的分区（顶层 price_as_of 是**现价**日，两者别混）
+                "base_price_date": _fmt_partition(base_part.get(d)),
+                "run_id": run_ids[0] if run_ids else None,
+                "model_version": versions[0] if len(versions) == 1 else None,
+                "n_runs": len(run_ids),
+                # 逐行判口径：实测 T-10 那天压根没有与锚点同族的 run，全局判定会
+                # 把本来可信的 T-3/T-5 一起拖黑（详见 stock_lookback 模块头）。
+                "comparable": sl.scale_comparable(stats["score_std"], anchor_std),
+            }
+        )
+        summary.append(stats)
+
+    anchor_rows = by_date.get(anchor, [])
+    if side:
+        anchor_rows = [r for r in anchor_rows if r["side"] == side]
+    anchor_rows = sorted(anchor_rows, key=lambda r: (r["rank"] is None, r["rank"] or 0))
+
+    name_map = await _symbol_name_map()
+    total = len(anchor_rows)
+    window = anchor_rows[(page - 1) * page_size : (page - 1) * page_size + page_size]
+    items = []
+    for r in window:
+        symbol = r["symbol"]
+        items.append(
+            {
+                "symbol": symbol or r["raw_symbol"],
+                "name": name_map.get(symbol or "", ""),
+                "score_now": r["score"],
+                "rank_now": r["rank"],
+                "side_now": r["side"],
+                "points": [
+                    cell[(picked[n], symbol)]
+                    for n in sorted(picked, reverse=True)
+                    if symbol and (picked[n], symbol) in cell
+                ],
+            }
+        )
+
+    # 价格来源按**锚点日全部候选**统计，不按当前页——否则翻页时表头徽章会自己变。
+    n_live = sum(1 for r in anchor_rows if r["symbol"] and _now_price(r["symbol"])[1] == "live")
+    price_kind = "live" if n_live == total and total else ("mixed" if n_live else "close")
+    return {
+        "success": True,
+        "data": {
+            "status": "ok",
+            "as_of": anchor,
+            "price_as_of": _fmt_partition(now_part),
+            "price_source": price_kind,
+            "live_count": n_live,
+            "close_count": total - n_live,
+            "comparable": all(s["comparable"] for s in summary),
+            "bucket_pct": bucket_pct,
+            "lookbacks": sorted(picked),
+            "summary": summary,
+            "detail": {"total": total, "page": page, "page_size": page_size, "items": items},
+            # 路径从唯一事实源取，连来源标签里也不留第二份字面量
+            "source": (
+                "db:engine_signal_scores + quantdb:"
+                f"{sl.REL_DAILY_FORWARD} + redis:market:snapshot"
+            ),
+        },
+    }
+
+
+async def _symbol_name_map() -> dict[str, str]:
+    """`600519.SH` → 中文名。复用 universe 缓存，失败返回空表（名称是增强位）。"""
+    try:
+        df, _td = await asyncio.to_thread(_load_universe)
+        if df is None or df.empty:
+            return {}
+        return {str(s): str(n or "") for s, n in zip(df["Symbol"], df["Name"], strict=True)}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("signal-lookback 名称映射失败：%s", exc)
+        return {}
+
+
 @router.get("/list")
 async def list_stocks(
     market: str = Query("ALL", description="SH / SZ / BJ / ALL"),

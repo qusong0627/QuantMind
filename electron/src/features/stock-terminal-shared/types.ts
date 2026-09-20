@@ -151,3 +151,101 @@ export interface TradeMarker {
   amount?: number;
   fee?: number;
 }
+
+// ---------------------------------------------------------------------------
+// 信号准确率回看（T-N 分数/排名 → 至今涨跌）
+//
+// 契约类型放共享层（与 StockListResponse 同理：描述接口形状）；
+// 展示口径的纯函数在 `features/stock-terminal/lookbackModel.ts`。
+// 后端唯一事实源：`backend/services/api/stock_lookback.py`。
+// ---------------------------------------------------------------------------
+
+/** 单个回看点的涨跌用了什么价：实时快照 还是 最新收盘 */
+export type PriceSourceKind = 'live' | 'close';
+/** 整张表的价格构成：全实时 / 混合 / 全收盘 */
+export type PriceKind = 'live' | 'mixed' | 'close';
+
+/** 某只票在 T-N 那天的分数/名次 + 从那天的基准价到现价的涨跌。null 一律表示**缺**。 */
+export interface LookbackPoint {
+  lookback: number;
+  signal_date: string;
+  score: number | null;
+  rank: number | null;
+  /** 该 run 内的分位（0~1，1 = 最高分） */
+  rank_pct: number | null;
+  /** 当日参与打分的全市场只数（名次的分母） */
+  day_n: number | null;
+  /** 相对该回看日基准价的涨跌（小数） */
+  ret: number | null;
+  price_source: PriceSourceKind;
+}
+
+export interface LookbackSummaryRow {
+  lookback: number;
+  label: string;
+  signal_date: string;
+  /** 基准价取自分区日（= 回看日自己）；与顶层 `price_as_of`（现价日）不是一回事 */
+  base_price_date: string | null;
+  run_id: string | null;
+  model_version: string | null;
+  /** 该行 run 的分数离散度与锚点同档。**只表示量纲可比，不表示同一个模型** */
+  comparable: boolean;
+  sample: number;
+  n_hi: number;
+  n_lo: number;
+  n_neg: number;
+  missing_price: number;
+  score_std: number | null;
+  hi_avg: number | null;
+  lo_avg: number | null;
+  spread: number | null;
+  hi_hit: number | null;
+  lo_hit: number | null;
+  neg_avg: number | null;
+  avg_score_hi: number | null;
+  avg_score_lo: number | null;
+}
+
+export interface LookbackDetailItem {
+  symbol: string;
+  name: string;
+  score_now: number | null;
+  rank_now: number | null;
+  side_now: string;
+  points: LookbackPoint[];
+}
+
+export interface SignalLookbackData {
+  status: 'ok' | 'unavailable';
+  reason?: string;
+  as_of?: string;
+  /** 现价取数日（可能是锚点日之前的最近分区） */
+  price_as_of?: string | null;
+  price_source?: PriceKind;
+  live_count?: number;
+  close_count?: number;
+  /** 所有回看点都同口径才为 true；逐行的判定看 `summary[].comparable` */
+  comparable?: boolean;
+  bucket_pct?: number;
+  lookbacks?: number[];
+  summary?: LookbackSummaryRow[];
+  detail?: {
+    total: number;
+    page: number;
+    page_size: number;
+    items: LookbackDetailItem[];
+  };
+}
+
+export interface SignalLookbackParams {
+  lookbacks?: string;
+  model?: string;
+  side?: string;
+  bucket_pct?: number;
+  /** auto = 实时优先缺则收盘；close = 只用收盘 */
+  price_source?: 'auto' | 'close';
+  /** 锚定信号日 YYYY-MM-DD；缺省 = 最近覆盖充分日 */
+  asof?: string;
+  page?: number;
+  page_size?: number;
+}
