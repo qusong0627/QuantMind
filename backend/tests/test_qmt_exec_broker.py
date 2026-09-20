@@ -41,7 +41,7 @@ class FakeExecClient:
                 "stock_code": "600519.SH",
                 "volume": 200,
                 "can_use_volume": 100,
-                "avg_price": 9.5,
+                "avg_price": 9.5,  # fidelity: allow-limit-threshold — 非阈值：持仓成本价夹具
                 "market_value": 2000.0,
             }
         ]
@@ -159,7 +159,7 @@ class TestQueryAccount:
         position = account["positions"][0]
         assert position["symbol"] == "SH600519"
         assert position["available_volume"] == 100
-        assert position["cost_price"] == 9.5
+        assert position["cost_price"] == 9.5  # fidelity: allow-limit-threshold — 非阈值：断言成本价原样透传（值即夹具）
 
     def test_rpc_error_returns_empty(self) -> None:
         class Broken(FakeExecClient):

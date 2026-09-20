@@ -46,7 +46,7 @@ _BACKEND = Path(__file__).resolve().parents[1]
 
 def _bar(
     close: float = 10.0,
-    pre_close: float = 9.5,
+    pre_close: float = 9.5,  # fidelity: allow-limit-threshold — 非阈值：日线夹具的 pre_close
     limit_up: float = 10.45,
     limit_down: float = 8.55,
     suspended: bool = False,
@@ -65,7 +65,7 @@ def _bar(
         pre_close=pre_close,
         limit_up=limit_up,
         limit_down=limit_down,
-        is_st=False,
+        is_st=False,  # fidelity: allow-limit-threshold — 夹具字段：_bar 固定构造非 ST 日线（本文件不测 ST 分支）
         suspended=suspended,
     )
 

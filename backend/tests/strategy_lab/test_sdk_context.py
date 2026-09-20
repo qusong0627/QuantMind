@@ -167,7 +167,7 @@ def test_set_param_unknown_raises():
 # ---------------------------------------------------------------------------
 def test_buy_records_order():
     c = Context()
-    c.buy("SH600036", weight=0.05, reason="S1_hit", detail={"s1": 9.9})
+    c.buy("SH600036", weight=0.05, reason="S1_hit", detail={"s1": 9.9})  # fidelity: allow-limit-threshold — 非阈值：detail 夹具值（不是价格）
     intents = c._drain_orders()
     assert len(intents) == 1
     o = intents[0]
@@ -176,7 +176,7 @@ def test_buy_records_order():
     assert o.side == "buy"
     assert o.weight == 0.05
     assert o.reason == "S1_hit"
-    assert o.detail == {"s1": 9.9}
+    assert o.detail == {"s1": 9.9}  # fidelity: allow-limit-threshold — 非阈值：断言 detail 原样透传
     # Drained -> empty
     assert c._drain_orders() == []
 
@@ -325,12 +325,12 @@ def test_log_levels():
 def test_plot_line_drops_nan():
     c = Context()
     c._set_today(pd.Timestamp("2025-06-12"))
-    c.plot_line("s1", 9.9, symbol="SH600036")
+    c.plot_line("s1", 9.9, symbol="SH600036")  # fidelity: allow-limit-threshold — 非阈值：绘图值夹具（不是价格）
     c.plot_line("s1", float("nan"))
     c.plot_line("s1", float("inf"))
     c.plot_line("s1", "not-a-number")  # type: ignore[arg-type]
     assert len(c._plot_lines) == 1
-    assert c._plot_lines[0]["value"] == 9.9
+    assert c._plot_lines[0]["value"] == 9.9  # fidelity: allow-limit-threshold — 非阈值：断言绘图值原样透传
 
 
 def test_plot_marker():

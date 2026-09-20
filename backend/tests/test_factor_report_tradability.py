@@ -19,7 +19,7 @@ from backend.services.engine.factor_report import tradability as TB
 class _Bar:
     """DailyBar 的最小替身：只带本模块读取的字段。"""
 
-    def __init__(self, close, limit_up=np.inf, limit_down=0.0, volume=1e6, is_st=False):
+    def __init__(self, close, limit_up=np.inf, limit_down=0.0, volume=1e6, is_st=False):  # fidelity: allow-limit-threshold — 夹具默认值：替身 bar 的非 ST 字段（用例逐条覆盖）
         self.close = close
         self.limit_up = limit_up
         self.limit_down = limit_down
@@ -46,7 +46,7 @@ def test_ST_标的整票不入掩码():
     """ST 名单是静态快照（前视偏差），且其历史限价被按 ±5% 折减会误判涨停。"""
     bars = {
         "600000.SH": _Bar(11.0, limit_up=11.0, limit_down=9.0, is_st=True),
-        "600001.SH": _Bar(11.0, limit_up=11.0, limit_down=9.0, is_st=False),
+        "600001.SH": _Bar(11.0, limit_up=11.0, limit_down=9.0, is_st=False),  # fidelity: allow-limit-threshold — 夹具字段：该票非 ST（上一条即 is_st=True 的反例）
     }
     rows = TB.blocked_rows_for_date(bars, 20260101)
     assert [r[1] for r in rows] == ["600001.SH"], "ST 标的必须缺席（既不当阻挡也不假装可交易）"

@@ -23,7 +23,7 @@ _BACKEND = Path(__file__).resolve().parents[1]
 # --- matcher external_price ------------------------------------------------
 
 
-def _bar(close=10.0, open_=9.5, vwap=9.8, trade_date=None):
+def _bar(close=10.0, open_=9.5, vwap=9.8, trade_date=None):  # fidelity: allow-limit-threshold — 非阈值：日线夹具的 open/vwap
     import datetime as _dt
 
     return SimpleNamespace(
@@ -105,7 +105,7 @@ async def test_hosted_today_bar_labeled_fresh():
     import datetime as _dt
 
     eng = _engine_with_snapshot(0.0, "unavailable")
-    bar = _bar(close=9.9, trade_date=_dt.datetime.now().date())
+    bar = _bar(close=9.9, trade_date=_dt.datetime.now().date())  # fidelity: allow-limit-threshold — 非阈值：日线夹具的收盘价
     r = await eng._resolve_fill_price(_order(), bar, strict_market=False)
     assert r.ok and r.source == "today_bar_close"
 

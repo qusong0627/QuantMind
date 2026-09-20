@@ -27,7 +27,7 @@ def test_score_actions_direction_hit_and_progressive(monkeypatch):
         if str(symbol) == "600036.SH":
             return 40.0, {1: 40.8}  # buy：T+1 +2%，T+3/T+5 未到
         if str(symbol) == "600000.SH":
-            return 10.0, {1: 9.8, 3: 9.6}  # sell：下跌 = 规避收益为正
+            return 10.0, {1: 9.8, 3: 9.6}  # sell：下跌 = 规避收益为正  # fidelity: allow-limit-threshold — 非阈值：假行情 T+1 价（制造 -2%）
         return None
 
     monkeypatch.setattr(sb, "load_relative_closes", fake_loader)

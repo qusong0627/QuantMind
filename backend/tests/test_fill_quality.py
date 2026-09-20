@@ -42,7 +42,7 @@ def test_fidelity_metrics_direction_and_rates():
          "fill_price": 10.10, "status": "filled", "execution_model": "snapshot_core"},
         # 卖出成交价 9.90 < 收盘 10.00 → 成本 +100bps（少收）
         {"symbol": "600036.SH", "side": "sell", "quantity": 1000, "filled_quantity": 1000,
-         "fill_price": 9.90, "status": "filled", "execution_model": "synthetic_price"},
+         "fill_price": 9.90, "status": "filled", "execution_model": "synthetic_price"},  # fidelity: allow-limit-threshold — 非阈值：成交价夹具（9.90 vs 收盘 10.00 = 100bps）
         # 部分成交：委托 1000 成交 500
         {"symbol": "000001.SZ", "side": "buy", "quantity": 1000, "filled_quantity": 500,
          "fill_price": 12.00, "status": "pending", "execution_model": "synthetic_price"},

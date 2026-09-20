@@ -37,11 +37,10 @@ sys.path.append(project_root)
 
 from backend.scripts.enrich_sdl_data import limit_up_flags
 
-#: 与实现同源的取整余量（百分数）。断言里重述一次是刻意的：
-#: 它同时钉住「余量存在」和「余量就是 0.5pp」—— 唯一事实源
-#: `local_market_data.LIMIT_TOLERANCE`（0.5pp = 比例 0.005 × 100）。
-#: 旧值 0.2pp 由实测证伪：股价 < ¥2.50 时漏判真涨停。
-_SLACK_PCT = 0.5
+# 贴板余量（0.5pp）的来历：旧值 0.2pp 由实测证伪 —— 股价 < ¥2.50 时漏判真涨停。
+# 现由 `local_market_data.LIMIT_TOLERANCE` 决定，且**北交所翻倍**（截尾取整）。
+# `test_thresholds_track_authority` 直接取权威阈值函数，所以这里不再重述数值：
+# 重述出来的数只会跟着板别一起错（0.5pp 对北交所偏宽）。
 
 
 def _frame(rows: list[tuple]) -> pd.DataFrame:
@@ -147,7 +146,9 @@ def test_empty_frame_returns_empty():
 
 def test_thresholds_track_authority():
     """判据不是「等于某常量」而是「与权威口径一致」，板规变化时会继续报警。"""
-    from backend.services.simulation.services.local_market_data import limit_pct
+    from backend.services.simulation.services.local_market_data import (
+        limit_threshold,
+    )
 
     cases = [
         ("SH600000", date(2026, 9, 1), False),
@@ -160,14 +161,12 @@ def test_thresholds_track_authority():
         ("SH600000", date(2026, 9, 1), True),
     ]
     for symbol, trade_date, is_st in cases:
-        limit = float(limit_pct(symbol, is_st=is_st, trade_date=trade_date)) * 100.0
+        # 期望线取自权威的**阈值**函数（板别幅度 − 该板别容差）；北交所容差翻倍，
+        # 自己写「比例×100 − 固定 0.5pp」会少减 0.5pp。
+        limit = limit_threshold(symbol, is_st=is_st, trade_date=trade_date) * 100.0
         # 恰好在线上 → 涨停；线下 1pp → 非涨停。两侧都验，避免「恒真」也能过。
-        assert _flags([(symbol, trade_date, limit - _SLACK_PCT, is_st)]) == [True], (
-            symbol
-        )
-        assert _flags([(symbol, trade_date, limit - _SLACK_PCT - 0.01, is_st)]) == [
-            False
-        ], symbol
+        assert _flags([(symbol, trade_date, limit, is_st)]) == [True], symbol
+        assert _flags([(symbol, trade_date, limit - 0.01, is_st)]) == [False], symbol
 
 
 @pytest.mark.parametrize("bad_date", [None, "", "not-a-date"])

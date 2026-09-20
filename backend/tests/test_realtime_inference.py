@@ -351,7 +351,7 @@ def test_baseline_loader_tolerates_unknown_feature_columns(tmp_path):
             "symbol": ["600036"] * 3,
             "trade_date": pd.to_datetime(["2026-09-09", "2026-09-10", "2026-09-11"]),
             "open": [10.0, 10.1, 10.2], "high": [10.2, 10.3, 10.4],
-            "low": [9.9, 10.0, 10.1], "close": [10.1, 10.2, 10.3],
+            "low": [9.9, 10.0, 10.1], "close": [10.1, 10.2, 10.3],  # fidelity: allow-limit-threshold — 非阈值：特征快照夹具的 low
             "volume": [1e6, 1e6, 1e6], "amount": [1e7, 1e7, 1e7],
             "f1": [0.1, 0.2, 0.3],
         }
@@ -492,7 +492,7 @@ def test_load_baseline_for_model_legacy_keeps_parquet(tmp_path):
     pd.DataFrame(
         {
             "symbol": ["600036"], "trade_date": pd.to_datetime(["2026-09-14"]),
-            "open": [10.0], "high": [10.1], "low": [9.9], "close": [10.0],
+            "open": [10.0], "high": [10.1], "low": [9.9], "close": [10.0],  # fidelity: allow-limit-threshold — 非阈值：特征快照夹具的 low
             "volume": [1e6], "amount": [1e7], "f1": [0.3],
         }
     ).to_parquet(parquet)

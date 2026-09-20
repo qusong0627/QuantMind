@@ -83,8 +83,8 @@ def _fixture_snapshot(scores_scale: float = 1.0, scores_shift: float = 0.0):
         ("603288.SH", 0.107, "食品饮料"),
         ("002594.SZ", 0.101, "汽车"),
         ("600030.SH", 0.113, "非银金融"),
-        ("600887.SH", 0.099, "食品饮料"),
-        ("000002.SZ", 0.095, "房地产"),
+        ("600887.SH", 0.099, "食品饮料"),  # fidelity: allow-limit-threshold — 非阈值：信号分数夹具（不是涨跌幅）
+        ("000002.SZ", 0.095, "房地产"),  # fidelity: allow-limit-threshold — 非阈值：信号分数夹具（不是涨跌幅）
     ]
     rows = [
         {"symbol": s, "score": sc * scores_scale + scores_shift} for s, sc, _ in raw

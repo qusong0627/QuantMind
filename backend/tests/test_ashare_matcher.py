@@ -20,7 +20,7 @@ from backend.services.simulation.services.local_market_data import DailyBar
 
 def _bar(
     close: float = 10.0,
-    pre_close: float = 9.5,
+    pre_close: float = 9.5,  # fidelity: allow-limit-threshold — 非阈值：日线夹具的 pre_close
     limit_up: float = 10.45,
     limit_down: float = 8.55,
     is_st: bool = False,
@@ -164,7 +164,7 @@ def test_sell_allows_odd_lot():
 
 @pytest.mark.unit
 def test_close_price_mode():
-    bar = _bar(close=10.0, vwap=9.8, open_price=9.6)
+    bar = _bar(close=10.0, vwap=9.8, open_price=9.6)  # fidelity: allow-limit-threshold — 非阈值：撮合价夹具的 vwap
     cfg = MatchConfig(price_mode="close", slippage_bps=0)
     r = match_order("buy", 100, bar, cfg)
     assert r.success
@@ -173,16 +173,16 @@ def test_close_price_mode():
 
 @pytest.mark.unit
 def test_vwap_price_mode():
-    bar = _bar(close=10.0, vwap=9.8, open_price=9.6)
+    bar = _bar(close=10.0, vwap=9.8, open_price=9.6)  # fidelity: allow-limit-threshold — 非阈值：撮合价夹具的 vwap
     cfg = MatchConfig(price_mode="vwap", slippage_bps=0)
     r = match_order("buy", 100, bar, cfg)
     assert r.success
-    assert r.fill_price == 9.8
+    assert r.fill_price == 9.8  # fidelity: allow-limit-threshold — 非阈值：断言 vwap 模式成交价（值即夹具）
 
 
 @pytest.mark.unit
 def test_open_price_mode():
-    bar = _bar(close=10.0, vwap=9.8, open_price=9.6)
+    bar = _bar(close=10.0, vwap=9.8, open_price=9.6)  # fidelity: allow-limit-threshold — 非阈值：撮合价夹具的 vwap
     cfg = MatchConfig(price_mode="open", slippage_bps=0)
     r = match_order("buy", 100, bar, cfg)
     assert r.success

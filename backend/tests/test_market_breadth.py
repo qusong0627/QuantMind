@@ -51,7 +51,7 @@ class TestLimitClassification:
 
     def test_pct_st_pre_relax(self):
         assert classify_by_pct(5.0, "600301.SH", True, PRE_RELAX) == "limit_up"
-        assert classify_by_pct(9.9, "600301.SH", True, D) == "limit_up"
+        assert classify_by_pct(9.9, "600301.SH", True, D) == "limit_up"  # fidelity: allow-limit-threshold — 用例入参：涨幅百分比（判定在被测 classify_by_pct 内）
 
     def test_pct_growth_and_bse(self):
         assert classify_by_pct(20.0, "300750.SZ", False, D) == "limit_up"
@@ -61,10 +61,10 @@ class TestLimitClassification:
 
 class TestStreak:
     def test_streak_count(self):
-        assert streak_from_tail([-3.0, 10.0, 10.0, 9.99], 9.5) == 3
+        assert streak_from_tail([-3.0, 10.0, 10.0, 9.99], 9.5) == 3  # fidelity: allow-limit-threshold — 入参：阈值是 streak_from_tail 的必填参数（判定逻辑必须在被测函数内）
 
     def test_streak_broken(self):
-        assert streak_from_tail([10.0, -2.0, 10.0], 9.5) == 1
+        assert streak_from_tail([10.0, -2.0, 10.0], 9.5) == 1  # fidelity: allow-limit-threshold — 入参：阈值是 streak_from_tail 的必填参数（判定逻辑必须在被测函数内）
 
 
 class TestBreadth:

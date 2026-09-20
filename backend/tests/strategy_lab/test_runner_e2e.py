@@ -21,7 +21,7 @@ def _make_provider() -> InMemoryProvider:
         {
             "open": [10 + i * 0.1 for i in range(10)],
             "high": [10.5 + i * 0.1 for i in range(10)],
-            "low": [9.5 + i * 0.1 for i in range(10)],
+            "low": [9.5 + i * 0.1 for i in range(10)],  # fidelity: allow-limit-threshold — 非阈值：K 线夹具的 low 序列
             "close": [10 + i * 0.1 for i in range(10)],
             "volume": [10000.0] * 10,
             "adj_close": [10 + i * 0.1 for i in range(10)],

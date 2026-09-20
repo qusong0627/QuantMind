@@ -35,19 +35,19 @@ from backend.services.simulation.services.local_market_data import (
 
 class TestLimitPct:
     def test_main_board(self):
-        assert limit_pct("600036.SH", is_st=False, trade_date=date(2026, 6, 1)) == Decimal("0.10")
+        assert limit_pct("600036.SH", is_st=False, trade_date=date(2026, 6, 1)) == Decimal("0.10")  # fidelity: allow-limit-threshold — 入参：非 ST 分支（本文件即 limit_pct/compute_limits 自身的用例，板别由 symbol/日期 决定）
 
     def test_chinext(self):
-        assert limit_pct("300750.SZ", is_st=False, trade_date=date(2026, 6, 1)) == Decimal("0.20")
+        assert limit_pct("300750.SZ", is_st=False, trade_date=date(2026, 6, 1)) == Decimal("0.20")  # fidelity: allow-limit-threshold — 入参：非 ST 分支（本文件即 limit_pct/compute_limits 自身的用例，板别由 symbol/日期 决定）
 
     def test_star(self):
-        assert limit_pct("688981.SH", is_st=False, trade_date=date(2026, 6, 1)) == Decimal("0.20")
+        assert limit_pct("688981.SH", is_st=False, trade_date=date(2026, 6, 1)) == Decimal("0.20")  # fidelity: allow-limit-threshold — 入参：非 ST 分支（本文件即 limit_pct/compute_limits 自身的用例，板别由 symbol/日期 决定）
 
     def test_bse(self):
-        assert limit_pct("830001.BJ", is_st=False, trade_date=date(2026, 6, 1)) == Decimal("0.30")
+        assert limit_pct("830001.BJ", is_st=False, trade_date=date(2026, 6, 1)) == Decimal("0.30")  # fidelity: allow-limit-threshold — 入参：非 ST 分支（本文件即 limit_pct/compute_limits 自身的用例，板别由 symbol/日期 决定）
 
     def test_bse_prefix_92(self):
-        assert limit_pct("920001.BJ", is_st=False, trade_date=date(2026, 6, 1)) == Decimal("0.30")
+        assert limit_pct("920001.BJ", is_st=False, trade_date=date(2026, 6, 1)) == Decimal("0.30")  # fidelity: allow-limit-threshold — 入参：非 ST 分支（本文件即 limit_pct/compute_limits 自身的用例，板别由 symbol/日期 决定）
 
     def test_st_main_before_relaxation(self):
         assert limit_pct("000010.SZ", is_st=True, trade_date=date(2026, 7, 5)) == Decimal("0.05")
@@ -68,7 +68,7 @@ class TestLimitPct:
 
 class TestComputeLimits:
     def test_main_board_normal(self):
-        up, down = compute_limits("600036.SH", 10.0, is_st=False, trade_date=date(2026, 6, 1))
+        up, down = compute_limits("600036.SH", 10.0, is_st=False, trade_date=date(2026, 6, 1))  # fidelity: allow-limit-threshold — 入参：非 ST 分支（本文件即 limit_pct/compute_limits 自身的用例，板别由 symbol/日期 决定）
         assert up == 11.0
         assert down == 9.0
 
@@ -83,45 +83,45 @@ class TestComputeLimits:
         assert down == 1.80
 
     def test_chinext_20pct(self):
-        up, down = compute_limits("300750.SZ", 50.0, is_st=False, trade_date=date(2026, 6, 1))
+        up, down = compute_limits("300750.SZ", 50.0, is_st=False, trade_date=date(2026, 6, 1))  # fidelity: allow-limit-threshold — 入参：非 ST 分支（本文件即 limit_pct/compute_limits 自身的用例，板别由 symbol/日期 决定）
         assert up == 60.0
         assert down == 40.0
 
     def test_star_20pct(self):
-        up, down = compute_limits("688981.SH", 100.0, is_st=False, trade_date=date(2026, 6, 1))
+        up, down = compute_limits("688981.SH", 100.0, is_st=False, trade_date=date(2026, 6, 1))  # fidelity: allow-limit-threshold — 入参：非 ST 分支（本文件即 limit_pct/compute_limits 自身的用例，板别由 symbol/日期 决定）
         assert up == 120.0
         assert down == 80.0
 
     def test_bse_30pct_rounding(self):
         # BSE: 涨停截尾、跌停进位
-        up, down = compute_limits("920000.BJ", 11.85, is_st=False, trade_date=date(2026, 6, 1))
+        up, down = compute_limits("920000.BJ", 11.85, is_st=False, trade_date=date(2026, 6, 1))  # fidelity: allow-limit-threshold — 入参：非 ST 分支（本文件即 limit_pct/compute_limits 自身的用例，板别由 symbol/日期 决定）
         # 11.85 * 1.3 = 15.405 → 截尾 → 15.40
         assert up == 15.40
         # 11.85 * 0.7 = 8.295 → 进位 → 8.30
         assert down == 8.30
 
     def test_bse_no_fractional(self):
-        up, down = compute_limits("830001.BJ", 10.0, is_st=False, trade_date=date(2026, 6, 1))
+        up, down = compute_limits("830001.BJ", 10.0, is_st=False, trade_date=date(2026, 6, 1))  # fidelity: allow-limit-threshold — 入参：非 ST 分支（本文件即 limit_pct/compute_limits 自身的用例，板别由 symbol/日期 决定）
         assert up == 13.0
         assert down == 7.0
 
     def test_sse_half_up_rounding(self):
         # 10.78 * 1.1 = 11.858 → 四舍五入 → 11.86
-        up, down = compute_limits("600000.SH", 10.78, is_st=False, trade_date=date(2026, 6, 1))
+        up, down = compute_limits("600000.SH", 10.78, is_st=False, trade_date=date(2026, 6, 1))  # fidelity: allow-limit-threshold — 入参：非 ST 分支（本文件即 limit_pct/compute_limits 自身的用例，板别由 symbol/日期 决定）
         assert up == 11.86
 
     def test_no_pre_close_new_listing(self):
-        up, down = compute_limits("600000.SH", 0.0, is_st=False, trade_date=date(2026, 6, 1))
+        up, down = compute_limits("600000.SH", 0.0, is_st=False, trade_date=date(2026, 6, 1))  # fidelity: allow-limit-threshold — 入参：非 ST 分支（本文件即 limit_pct/compute_limits 自身的用例，板别由 symbol/日期 决定）
         assert up == math.inf
         assert down == 0.0
 
     def test_none_pre_close(self):
-        up, down = compute_limits("600000.SH", None, is_st=False, trade_date=date(2026, 6, 1))
+        up, down = compute_limits("600000.SH", None, is_st=False, trade_date=date(2026, 6, 1))  # fidelity: allow-limit-threshold — 入参：非 ST 分支（本文件即 limit_pct/compute_limits 自身的用例，板别由 symbol/日期 决定）
         assert up == math.inf
         assert down == 0.0
 
     def test_negative_pre_close(self):
-        up, down = compute_limits("600000.SH", -5.0, is_st=False, trade_date=date(2026, 6, 1))
+        up, down = compute_limits("600000.SH", -5.0, is_st=False, trade_date=date(2026, 6, 1))  # fidelity: allow-limit-threshold — 入参：非 ST 分支（本文件即 limit_pct/compute_limits 自身的用例，板别由 symbol/日期 决定）
         assert up == math.inf
         assert down == 0.0
 

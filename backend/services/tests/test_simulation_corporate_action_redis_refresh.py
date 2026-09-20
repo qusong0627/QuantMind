@@ -95,7 +95,7 @@ async def test_dividend_apply_writes_redis_cache(monkeypatch):
         await session.execute(
             text(
                 "INSERT INTO stock_daily_latest(symbol, trade_date, close, adj_factor) "
-                "VALUES ('SH600519', '2026-06-13', 9.5, 1.0)"
+                "VALUES ('SH600519', '2026-06-13', 9.5, 1.0)"  # fidelity: allow-limit-threshold — 非阈值：INSERT 假数据的收盘价
             )
         )
         await session.flush()

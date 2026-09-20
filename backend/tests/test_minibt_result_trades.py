@@ -95,7 +95,7 @@ class TestExtractTrades:
     def test_maps_order_fields_to_trade_records(self):
         bt = _bt_with([
             _Order(side=0, size=1000.0, price=38.5, fee=9.6, value=38500.0),
-            _Order(side=1, size=1000.0, price=39.1, fee=19.5, value=39100.0,
+            _Order(side=1, size=1000.0, price=39.1, fee=19.5, value=39100.0,  # fidelity: allow-limit-threshold — 非阈值：手续费金额（fee）
                    when="2024-01-03 15:00:00"),
         ])
 

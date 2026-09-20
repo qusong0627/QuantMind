@@ -37,7 +37,7 @@ class _DummyAdapter(OfflineDataSourceAdapter):
                     "trade_date": date(2025, 1, 2),
                     "open": 10.0,
                     "high": 11.0,
-                    "low": 9.5,
+                    "low": 9.5,  # fidelity: allow-limit-threshold — 非阈值：K 线夹具的 low
                     "close": 10.5,
                     "volume": 1000,
                     "amount": 10500,
@@ -142,7 +142,7 @@ def test_parquet_writer_round_trip(tmp_path):
                 "trade_date": date(2025, 1, 2),
                 "open": 10.0,
                 "high": 11.0,
-                "low": 9.5,
+                "low": 9.5,  # fidelity: allow-limit-threshold — 非阈值：K 线夹具的 low
                 "close": 10.5,
                 "volume": 1000,
                 "amount": 10500,
@@ -167,7 +167,7 @@ def test_parquet_writer_empty_noop(tmp_path):
 def test_parquet_writer_incremental_merge(tmp_path):
     w = ParquetWriter(root=tmp_path)
     base_row = dict(
-        symbol="600519.SH", open=10.0, high=11.0, low=9.5,
+        symbol="600519.SH", open=10.0, high=11.0, low=9.5,  # fidelity: allow-limit-threshold — 非阈值：K 线夹具的 low
         volume=1000, amount=10500, adj_factor=1.0, source="dummy",
     )
     df1 = pd.DataFrame([{**base_row, "trade_date": date(2025, 1, 2), "close": 10.5}])

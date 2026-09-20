@@ -26,7 +26,7 @@ def test_compute_market_signals_quantile_narrow_distribution():
     # 构造：300 只个股，分数在 [-0.048, 0.012]，20 只头部集中在几个行业
     signals = []
     for i in range(300):
-        score = -0.048 + 0.06 * (i / 299)
+        score = -0.048 + 0.06 * (i / 299)  # fidelity: allow-limit-threshold — 非阈值：fusion_score 上下界夹具
         signals.append(
             {
                 "symbol": f"60{i:04d}.SH",

@@ -133,7 +133,7 @@ class TestMapMinibtResult:
                     "direction": "SELL",
                     "price": 39.1,
                     "qty": 1000.0,
-                    "detail": {"fee": 19.5, "value": 39100.0},
+                    "detail": {"fee": 19.5, "value": 39100.0},  # fidelity: allow-limit-threshold — 非阈值：手续费金额（fee）
                 },
             ],
             "warnings": ["minibt 撮合口径: 信号当根K线收盘价成交"],

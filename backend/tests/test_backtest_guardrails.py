@@ -674,7 +674,7 @@ def test_crash_buy_dip_enters_after_crash_without_lookahead(monkeypatch):
 
     day_strs = ["2024-01-02", "2024-01-03", "2024-01-04", "2024-01-05", "2024-01-08"]
     days = [pd.Timestamp(d) for d in day_strs]
-    close = {d: c for d, c in zip(day_strs, [10.0, 10.2, 9.6, 9.65, 9.8])}
+    close = {d: c for d, c in zip(day_strs, [10.0, 10.2, 9.6, 9.65, 9.8])}  # fidelity: allow-limit-threshold — 非阈值：收盘价序列夹具
     change = {
         "2024-01-02": 0.01,
         "2024-01-03": 0.02,

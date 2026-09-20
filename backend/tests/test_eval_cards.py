@@ -346,7 +346,7 @@ def test_account_risk_events_and_keys():
         {"available": True, "failed": 3, "rejected_orders": 2, "skipped": 1, "alert": 0}
     )
     assert bad.red_line_failed is True and bad.score < 50
-    assert bad.detail["penalty"] == pytest.approx(9.5)
+    assert bad.detail["penalty"] == pytest.approx(9.5)  # fidelity: allow-limit-threshold — 非阈值：风险事件罚分（9.5 分）
 
     # 基准回看日期：YYYYMMDD 整数的历史 bug（20260911-12=20260899 非法日期）
     assert benchmark_probe_start("2026-09-11") == 20260830

@@ -152,10 +152,27 @@ class PaperTradingBroker(BaseBroker):
         return text in {"1", "true", "yes", "y", "on"}
 
     @staticmethod
-    def _is_price_near(price: float, limit_price: float | None, tolerance: float = 0.0015) -> bool:
+    def _is_price_near(price: float, limit_price: float | None) -> bool:
+        """成交价是否贴上涨跌停价（**纸面撮合**侧的判据）。
+
+        容差唯一事实源 = ``local_market_data.TOUCH_TOLERANCE``；本方法与
+        ``simulation.execution_engine`` 的同名实现（同值同类）本次只统一**取值
+        来源**，不合并这两个函数 —— 合并属跨服务重构，不在口径收敛的范围里。
+        惰性导入理由见同模块 ``_limit_threshold``。
+
+        适用范围值得写清楚：本类是本服务里的纸面撮合（``PaperTradingBroker``），
+        真单通道（``QMTBroker`` / ``QmtExecBroker`` / ``RedisBroker`` / ``TdxBroker``）
+        **不做这个判断**，涨跌停由柜台自己的 ``UpStopPrice/DownStopPrice`` 兜（本模块
+        只用它做越界拒单，见 ``check_price_protection_band``）。所以这 0.15% 只影响
+        模拟与纸面成交的判定，不影响真单是否被拒。
+        """
+        from backend.services.simulation.services.local_market_data import (
+            TOUCH_TOLERANCE,
+        )
+
         if limit_price is None or limit_price <= 0 or price <= 0:
             return False
-        return abs(price - limit_price) / max(limit_price, 1e-6) <= tolerance
+        return abs(price - limit_price) / max(limit_price, 1e-6) <= TOUCH_TOLERANCE
 
     @staticmethod
     def _limit_threshold(symbol: str) -> float:
@@ -172,31 +189,28 @@ class PaperTradingBroker(BaseBroker):
         """
         from datetime import date
 
-        # 常量与函数取自同一模块，故**同一次**导入。刻意放在 try 之外：模块导不进来
-        # 属于部署损坏，此时按 10% 静默继续才是真危险（券商通道上误报「买不进」）。
-        # try 内仍保留 limit_pct 的**运行期**失败兜底，语义与改动前一致。
+        # 导入刻意放在 try 之外：模块导不进来属于部署损坏，此时按 10% 静默继续才是
+        # 真危险（券商通道上误报「买不进」）。try 内仍保留**运行期**失败兜底 ——
+        # 退回最严主板线 0.095（= 10% − 0.5pp），宁少判放行不放真涨停进来。
         from backend.services.simulation.services.local_market_data import (
-            LIMIT_TOLERANCE,
-            limit_pct,
+            limit_threshold,
         )
 
         try:
-            pct = float(
-                limit_pct(
-                    symbol,
-                    # 本路径只取「今天」，而今天已 ≥ 2026-07-06 —— 该日起 ST 主板
-                    # 同为 10%，is_st 不再改变结果，故写 False 与写 True 等价。
-                    # 与 cn_exchange 不同：那里要判**历史**日期，缺口是真的。
-                    is_st=False,  # fidelity: allow-limit-threshold — 只取今天
-                    trade_date=date.today(),
-                )
+            pct = limit_threshold(
+                symbol,
+                # 本路径只取「今天」，而今天已 ≥ 2026-07-06 —— 该日起 ST 主板
+                # 同为 10%，is_st 不再改变结果，故写 False 与写 True 等价。
+                # 与 cn_exchange 不同：那里要判**历史**日期，缺口是真的。
+                is_st=False,  # fidelity: allow-limit-threshold — 只取今天
+                trade_date=date.today(),
             )
         except Exception:
             logger.warning(
                 "涨跌停板规解析失败，按主板 10% 兜底 (symbol=%s)", symbol, exc_info=True
             )
-            pct = 0.10
-        return pct - LIMIT_TOLERANCE
+            pct = 0.095  # fidelity: allow-limit-threshold — 兜底按最严主板线
+        return pct
 
     async def _get_market_snapshot(self, symbol: str) -> MarketQuoteSnapshot:
         # Level 1: 实时行情

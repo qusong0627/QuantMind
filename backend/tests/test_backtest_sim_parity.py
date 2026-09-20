@@ -96,7 +96,7 @@ def _sim_expectation(
     prev_close = float(prev_row["close"])
     exec_day = pd.Timestamp(bars.index[exec_day_idx]).date()
     limit_up, limit_down = compute_limits(
-        symbol, prev_close, is_st=False, trade_date=exec_day
+        symbol, prev_close, is_st=False, trade_date=exec_day  # fidelity: allow-limit-threshold — 显式传参：该标的非 ST，权当权威 compute_limits 的入参
     )
     bar = DailyBar(
         symbol=symbol,
@@ -111,7 +111,7 @@ def _sim_expectation(
         pre_close=prev_close,
         limit_up=limit_up,
         limit_down=limit_down,
-        is_st=False,
+        is_st=False,  # fidelity: allow-limit-threshold — 夹具字段：构造的 DailyBar 非 ST
         suspended=float(bar_row["volume"]) <= 0,
     )
     cfg = MatchConfig(slippage_bps=_SLIPPAGE_BPS)

@@ -13,7 +13,7 @@ def test_bar_basic_attrs():
         date=pd.Timestamp("2025-06-12"),
         open=10.0,
         high=11.0,
-        low=9.5,
+        low=9.5,  # fidelity: allow-limit-threshold — 非阈值：Bar 夹具的 low
         close=10.5,
         volume=1_000_000,
         adj_close=10.5,
@@ -27,7 +27,7 @@ def test_bar_feature_lookup():
     b = Bar(
         symbol="SH600036",
         date=pd.Timestamp("2025-06-12"),
-        open=10.0, high=11.0, low=9.5, close=10.5, volume=0,
+        open=10.0, high=11.0, low=9.5, close=10.5, volume=0,  # fidelity: allow-limit-threshold — 非阈值：Bar 夹具的 low
         _features={"momentum_20": 0.123, "pe": 12.3, "missing_nan": float("nan")},
     )
     assert b.feature("momentum_20") == 0.123
@@ -56,7 +56,7 @@ def test_bar_features_property_is_copy():
 def test_bar_to_dict():
     b = Bar(
         symbol="SH600036", date=pd.Timestamp("2025-06-12"),
-        open=10.0, high=11.0, low=9.5, close=10.5, volume=1_000_000,
+        open=10.0, high=11.0, low=9.5, close=10.5, volume=1_000_000,  # fidelity: allow-limit-threshold — 非阈值：Bar 夹具的 low
     )
     d = b.to_dict()
     assert d["symbol"] == "SH600036"

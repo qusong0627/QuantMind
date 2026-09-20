@@ -16,7 +16,7 @@ def _order(symbol="SH600036", side=OrderSide.BUY, qty=100, otype=OrderType.MARKE
     return Order(symbol=symbol, side=side, order_type=otype, quantity=qty)
 
 
-def _bar(volume=100_000, close=10.0, high=10.0, low=9.5):
+def _bar(volume=100_000, close=10.0, high=10.0, low=9.5):  # fidelity: allow-limit-threshold — 非阈值：日线夹具的 low
     return pd.Series({"volume": volume, "close": close, "high": high, "low": low})
 
 
@@ -99,7 +99,7 @@ def test_suspended_stock_cannot_trade():
 
 def test_normal_day_can_trade():
     eng = BacktestEngine(enable_risk_management=False)
-    assert eng._can_execute_order(_order(side=OrderSide.BUY), _bar(volume=100_000, close=10.0), prev_close=9.5)
+    assert eng._can_execute_order(_order(side=OrderSide.BUY), _bar(volume=100_000, close=10.0), prev_close=9.5)  # fidelity: allow-limit-threshold — 非阈值：前收夹具（10.0 vs 9.5 = +5.3% 普通日）
 
 
 # ---------- 涨跌停过滤（主板10% / 创业板·科创板20% / 北交所30%）----------

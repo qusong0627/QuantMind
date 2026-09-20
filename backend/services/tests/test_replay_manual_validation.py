@@ -261,7 +261,7 @@ def test_sell_falls_back_to_volume_when_available_is_none():
 def test_stop_loss_forced_when_user_omits_it():
     """用户没勾止损 → 仍然强制执行。"""
     props = [
-        _sell("600036.SH", 900, origin="stop_loss", cancellable=False, stop_price=9.5),
+        _sell("600036.SH", 900, origin="stop_loss", cancellable=False, stop_price=9.5),  # fidelity: allow-limit-threshold — 非阈值：止损价夹具（stop_price）
         _buy("000001.SZ", 100),
     ]
     acc, rej = validate_confirmed(
@@ -283,7 +283,7 @@ def test_stop_loss_forced_when_user_omits_it():
 def test_stop_loss_quantity_cannot_be_reduced():
     """用户试图把止损数量改小 → 仍按提案全量执行。"""
     props = [
-        _sell("600036.SH", 900, origin="stop_loss", cancellable=False, stop_price=9.5),
+        _sell("600036.SH", 900, origin="stop_loss", cancellable=False, stop_price=9.5),  # fidelity: allow-limit-threshold — 非阈值：止损价夹具（stop_price）
     ]
     acc, _rej = validate_confirmed(
         [{"symbol": "600036.SH", "side": "SELL", "quantity": 100}],
@@ -296,13 +296,13 @@ def test_stop_loss_quantity_cannot_be_reduced():
 
 def test_stop_loss_carries_stop_price_through():
     props = [
-        _sell("600036.SH", 900, origin="stop_loss", cancellable=False, stop_price=9.5),
+        _sell("600036.SH", 900, origin="stop_loss", cancellable=False, stop_price=9.5),  # fidelity: allow-limit-threshold — 非阈值：止损价夹具（stop_price）
     ]
     acc, _ = validate_confirmed(
         [], props,
         _account(positions={"600036.SH": {"volume": 900, "available_volume": 900}}),
     )
-    assert acc[0]["stop_price"] == 9.5
+    assert acc[0]["stop_price"] == 9.5  # fidelity: allow-limit-threshold — 非阈值：断言止损价原样透传（值即上方夹具）
 
 
 # ---------------------------------------------------------------------------
@@ -331,7 +331,7 @@ def test_accepted_follows_proposal_order_not_user_order():
 
 def test_empty_confirmed_executes_only_stop_loss():
     props = [
-        _sell("600036.SH", 900, origin="stop_loss", cancellable=False, stop_price=9.5),
+        _sell("600036.SH", 900, origin="stop_loss", cancellable=False, stop_price=9.5),  # fidelity: allow-limit-threshold — 非阈值：止损价夹具（stop_price）
         _buy("000001.SZ", 100),
     ]
     acc, rej = validate_confirmed(

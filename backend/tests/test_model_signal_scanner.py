@@ -51,7 +51,7 @@ def _fixture_snapshot():
             {"symbol": "600036.SH", "pct_change": 1.2, "is_st": 0},
             {"symbol": "000001.SZ", "pct_change": -0.5, "is_st": 0},
             {"symbol": "601318.SH", "pct_change": 0.3, "is_st": 1},  # ST
-            {"symbol": "603288.SH", "pct_change": 9.9, "is_st": 0},  # 接近涨停
+            {"symbol": "603288.SH", "pct_change": 9.9, "is_st": 0},  # 接近涨停  # fidelity: allow-limit-threshold — 用例入参：涨幅百分比（构造接近涨停的样本）
         ]
     )
     rank_map = {

@@ -168,7 +168,7 @@ def test_simonlin_reads_local_parquet(tmp_path, monkeypatch):
     daily.mkdir(parents=True)
     df = pd.DataFrame([
         {"symbol": "000001.SZ", "trade_date": pd.Timestamp("2025-01-02"),
-         "open": 10, "high": 11, "low": 9.5, "close": 10.5,
+         "open": 10, "high": 11, "low": 9.5, "close": 10.5,  # fidelity: allow-limit-threshold — 非阈值：K 线夹具的 low
          "volume": 1000, "amount": 10500, "adj_factor": 1.0},
         {"symbol": "000001.SZ", "trade_date": pd.Timestamp("2025-01-03"),
          "open": 10.5, "high": 11.2, "low": 10.3, "close": 11.0,

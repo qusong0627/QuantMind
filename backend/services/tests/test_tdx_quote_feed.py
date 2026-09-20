@@ -60,13 +60,13 @@ class TestIsTradingTime:
 class TestMapSnapshot:
     def test_full_mapping(self):
         result = map_snapshot({
-            "Now": 10.5, "Open": 10.0, "Max": 10.8, "Min": 9.9,
+            "Now": 10.5, "Open": 10.0, "Max": 10.8, "Min": 9.9,  # fidelity: allow-limit-threshold — 非阈值：TDX 快照夹具的 Min
             "LastClose": 10.2, "Volume": 12345, "Amount": 12345678.0,
         })
         assert result["Now"] == 10.5
         assert result["Open"] == 10.0
         assert result["High"] == 10.8
-        assert result["Low"] == 9.9
+        assert result["Low"] == 9.9  # fidelity: allow-limit-threshold — 非阈值：断言 Min 原样映射（值即夹具）
         assert result["PreClose"] == 10.2
         assert result["Volume"] == 12345
         assert result["Amount"] == 12345678.0
@@ -76,7 +76,7 @@ class TestMapSnapshot:
         # Now 为 NaN 视为无有效快照（必填字段缺失）
         result = map_snapshot({
             "Now": float("nan"), "Open": 10.0, "LastClose": 10.2,
-            "Max": 10.8, "Min": 9.9, "Volume": 1, "Amount": 0,
+            "Max": 10.8, "Min": 9.9, "Volume": 1, "Amount": 0,  # fidelity: allow-limit-threshold — 非阈值：TDX 快照夹具的 Min
         })
         assert result is None
 
@@ -84,7 +84,7 @@ class TestMapSnapshot:
         # 仅 High(Max) 为 NaN 时其余字段保留
         result = map_snapshot({
             "Now": 10.5, "Open": 10.0, "LastClose": 10.2,
-            "Max": float("nan"), "Min": 9.9, "Volume": 1, "Amount": 0,
+            "Max": float("nan"), "Min": 9.9, "Volume": 1, "Amount": 0,  # fidelity: allow-limit-threshold — 非阈值：TDX 快照夹具的 Min
         })
         assert result["Now"] == 10.5
         assert result["High"] is None
@@ -254,7 +254,7 @@ class TestBuildTickRow:
             symbol="SH600036",
             session_id="tdx:default:00000001:SH600036:20260825090000",
             snap={
-                "Now": 10.5, "Open": 10.0, "High": 10.8, "Low": 9.9,
+                "Now": 10.5, "Open": 10.0, "High": 10.8, "Low": 9.9,  # fidelity: allow-limit-threshold — 非阈值：TDX 快照夹具的 Min
                 "Volume": 1000, "Amount": 10500.0,
             },
             now=now,

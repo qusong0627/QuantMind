@@ -7,7 +7,7 @@
 2. 北交所前缀 ``("4", "8")`` 比 ``_BSE_PREFIXES`` 宽，把 400xxx 老三板也当 30%；
 3. 不知道创业板 2020-08-24 的 10%→20% 改革，回看更早窗口会把真涨停判丢。
 
-期望值 = 板别带宽 − 0.2pp 贴板缓冲（沿用旧表的内置余量）。
+期望值 = 板别带宽 − 贴板缓冲，缓冲按板别取（主板/创业板 0.5pp，北交所 1.0pp）。
 """
 from __future__ import annotations
 
@@ -15,11 +15,14 @@ import pytest
 
 from backend.scripts.factor_deep_dive import limit_threshold
 
-# 期望值：板别带宽减贴板缓冲（0.5pp，唯一事实源 local_market_data.LIMIT_TOLERANCE）
-# —— 写成字面量，口径再变必须同时改这里。
+# 期望值：板别带宽减贴板缓冲 —— 写成字面量，口径再变必须同时改这里。
+# 缓冲由板别决定：主板/创业板 0.5pp（`LIMIT_TOLERANCE`），北交所 1.0pp
+# （`LIMIT_TOLERANCE_BSE`）。北交所涨跌停价**截尾**取整（向上取整到分），偏离
+# 标称幅度可达 0.01/pre_close，是主板的两倍，故容差也翻倍。旧值 0.295 是按主板
+# 容差手减出来的，对北交所偏宽 0.5pp。
 _MAIN = 0.095  # fidelity: allow-limit-threshold — 期望值，钉住既有口径
 _WIDE = 0.195  # fidelity: allow-limit-threshold — 期望值，钉住既有口径
-_BSE = 0.295  # fidelity: allow-limit-threshold — 期望值，钉住既有口径
+_BSE = 0.29  # fidelity: allow-limit-threshold — 期望值，含北交所翻倍后的 1.0pp 缓冲
 
 _DAY = "20260918"
 

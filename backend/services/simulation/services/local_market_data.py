@@ -124,6 +124,35 @@ _CENT = Decimal("0.01")
 LIMIT_TOLERANCE = 0.005
 LIMIT_TOLERANCE_BSE = 0.01
 
+#: 「触及涨跌停价」的价格比较容差（**比例**）—— 唯一事实源。
+#:
+#: 与 ``LIMIT_TOLERANCE`` 是两件事，别混：那个是「涨幅离名义板别差多少还算封板」，
+#: 这个是「现价离涨跌停价差多少算贴板」，比的是**价位**不是涨幅。前者用于回测
+#: 剔除/因子标注，后者用于实盘/模拟撮合判「买不进/卖不出」。
+#:
+#: ⚠️ 全库还有**第二个价位容差**：``market_breadth.price_tolerance()`` 返回 0.004，
+#: 单位是**元**而非比例，按 ``close >= up_price - 0.004`` 直接比价位。两者不等价 ——
+#: 对 ¥10 的票 0.0015 比例 = ¥0.015（更松），对 ¥2 的票 = ¥0.003（更紧）。
+#: 刻意**不**在这次收敛里合并：哪一个对需要实测（同 LIMIT_TOLERANCE 的做法），
+#: 未经测量就在两者间选一个，等于把一处不一致换成另一处。
+#:
+#: ⚠️ 与 LIMIT_TOLERANCE 不同，**本值 0.0015 至今没实测依据** —— 它是 8 处同值硬编码
+#: 的原值，本次只收敛来源、不改数值。真正的判据应该是「行情源给的限价与撮合侧的
+#: 限价能差几分」：相对容差在低价股上会跌破一分（¥5 的票 0.0015 = ¥0.0075 < ¥0.01），
+#: 若两路限价来自不同供应商，1 分的偏差在 ¥5 以下就判不出「贴板」。要下结论需
+#: 同源对比实测（如 qmt ``UpStopPrice`` vs 本地 ``compute_limits``），未做之前
+#: 不要把它当已验证口径。
+TOUCH_TOLERANCE = 0.0015
+
+#: 价格等值比较的**绝对**容差（元）—— 用于「两边都是分位价，只差浮点噪声」的场合
+#: （``market_breadth.classify_price`` 拿 close/high 与当日涨跌停价比大小）。
+#:
+#: ⚠️ 0.004 < 半分，**只能吸收浮点噪声，吸不了 1 分的来源差异**：若两个价格来自
+#: 不同来源（如复权价 vs 不复权限价），差 1 分就会判成「没封板」。这是与上面两个
+#: 比例容差并列的第三种口径，三者的适用范围（元 / 相对比例）不同，**不可互换**。
+#: 原值散在 market_breadth 里且带一个被忽略的 symbol 参数，本次只收敛来源、不改数值。
+PRICE_EPS_YUAN = 0.004
+
 # amount/volume 的单位按日**自动识别**而非硬编码 —— 两者相差 6 个数量级，
 # 搞错会让成交额/vwap 偏 1e4 倍：
 #   旧口径(LEGACY)：volume=股,  amount=万元 -> close*volume/amount ≈ 1e4
@@ -211,6 +240,24 @@ def limit_pct(symbol: str, *, is_st: bool, trade_date: date) -> Decimal:
         pct = _PCT_MAIN
     st_reduces = is_st and pct == _PCT_MAIN and trade_date < _ST_LIMIT_RELAXED_FROM
     return _PCT_ST_MAIN if st_reduces else pct
+
+
+def limit_threshold(symbol: str, *, is_st: bool, trade_date: date) -> float:
+    """「触及涨跌停」的判定阈值（**比例**）= 板别幅度 − 该板别的取整容差。
+
+    这是各消费点想要的那个数，也是**唯一**该由本模块给出的形态：全库曾有 7 处
+    各自写 ``limit_pct(...) - LIMIT_TOLERANCE``，其中没有一处对北交所换成
+    ``LIMIT_TOLERANCE_BSE``（截尾取整、偏离上界翻倍）。收敛到这里后，
+    「用哪个容差」由板别决定，调用方不必也不该自己挑。
+
+    ⚠️ 实测（2026-09-20，daily_unadjusted 近 60 个交易日）北交所这 0.5pp 的差别
+    **在当前样本上不产生任何差异**：37 次真封板的实际涨幅最低 29.82%（偏离
+    ≤0.18pp），两档容差都漏判 0 条。即本次收敛是**消重**而非改判；真要见到差异，
+    需要出现前收 < ¥2.85 的北交所封板（偏离上界 ``0.005/pre_close``）。
+    另外两个单位不同、**不可**互换：``market_breadth`` 那边是百分点（×100）。
+    """
+    tol = LIMIT_TOLERANCE_BSE if _is_bse(symbol) else LIMIT_TOLERANCE
+    return float(limit_pct(symbol, is_st=is_st, trade_date=trade_date)) - tol
 
 
 def compute_limits(

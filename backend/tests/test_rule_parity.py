@@ -45,7 +45,7 @@ def test_fee_parity_backtest_engine():
     from backend.shared.backtest_engine.core.order import Order, OrderSide, OrderType
 
     engine = BacktestEngine(initial_cash=10_000_000.0, enable_risk_management=False)
-    bar = pd.Series({"volume": 1_000_000, "close": 10.0, "high": 10.2, "low": 9.8})
+    bar = pd.Series({"volume": 1_000_000, "close": 10.0, "high": 10.2, "low": 9.8})  # fidelity: allow-limit-threshold — 非阈值：日线夹具的 low
 
     # 买入 150 股 → 应归一为 100（主板 100 整数倍）
     engine._execute_order(
@@ -110,7 +110,7 @@ def test_price_limit_threshold_single_source():
     from backend.shared.backtest_engine.core.engine import get_price_limit_threshold
 
     assert get_price_limit_threshold("SH600036") == float(
-        limit_pct("600036", is_st=False, trade_date=date(2026, 9, 16))
+        limit_pct("600036", is_st=False, trade_date=date(2026, 9, 16))  # fidelity: allow-limit-threshold — 显式传参：与权威同传非 ST，保证两侧可比
     )
     assert get_price_limit_threshold("SZ300750") == 0.20
     assert get_price_limit_threshold("SH688981") == 0.20

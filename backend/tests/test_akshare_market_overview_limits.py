@@ -216,7 +216,7 @@ def test_overview_body_has_no_hardcoded_scalar_threshold():
     src = inspect.getsource(AkShareProvider.get_market_overview)
 
     # Assert
-    assert "9.9" not in src
+    assert "9.9" not in src  # fidelity: allow-limit-threshold — 断言语料：钉住实现里没有 9.9 标量线，不是涨跌停判定
     assert "_count_limits" in src
 
 

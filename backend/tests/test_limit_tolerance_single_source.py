@@ -41,9 +41,16 @@ _TOL_BSE_LITERAL = 0.01  # fidelity: allow-limit-threshold — 期望值，钉�
 #: 扫描根与 ``check_market_fidelity.py`` 保持一致。
 _SCAN_ROOTS = ("backend", "scripts", "tools")
 
-#: 自持容差的写法：`_LIMIT_TOLERANCE = ...` / `_LIMIT_SLACK_PCT = ...`。
+#: 自持容差的写法：`_LIMIT_TOLERANCE = ...` / `_LIMIT_SLACK_PCT = ...` /
+#: `TOUCH_TOLERANCE = ...` / `PRICE_EPS_YUAN = ...`。
 #: 只认**赋值**，不认注释里的叙述 —— 本次收敛在多处留了「本模块曾有 X」的说明。
-_ASSIGN_RE = re.compile(r"^\s*_?LIMIT_(?:TOLERANCE\w*|SLACK\w*)\s*=\s*[0-9]")
+_ASSIGN_RE = re.compile(
+    r"^\s*_?(?:"
+    r"LIMIT_(?:TOLERANCE\w*|SLACK\w*)"
+    r"|TOUCH_TOLERANCE\w*"
+    r"|PRICE_EPS\w*"
+    r")\s*=\s*[0-9]"
+)
 
 
 def _iter_py_files() -> list[Path]:
@@ -155,28 +162,58 @@ def test_cn_exchange_threshold_equals_authority_minus_tolerance():
         ("SH688981", date(2026, 9, 18)),
         ("SZ300750", date(2019, 6, 3)),  # 注册制改革前 = 主板 10%
     ]:
-        expected = float(limit_pct(symbol, is_st=False, trade_date=td)) - LIMIT_TOLERANCE
+        expected = float(limit_pct(symbol, is_st=False, trade_date=td)) - LIMIT_TOLERANCE  # fidelity: allow-limit-threshold — 显式传参：夹具里没有 ST，两侧同传非 ST 才可比
         assert CnExchange._get_limit_threshold(symbol, trade_date=td) == expected
 
 
-def test_trading_cost_and_simulation_thresholds_agree_with_authority():
-    """回测成本模型 / 模拟撮合的兜底阈值同样恒等于「权威口径 − 容差」。"""
-    from backend.services.engine.inference.trading_cost import limit_threshold
+def test_trading_cost_carries_no_threshold_table_any_more():
+    """`trading_cost` 里那张板块表必须保持退役。
+
+    它曾按 `listing_market` 的**中文板名**查表（「沪市主板」→ 9.5%），而库里
+    该列的真实取值是 `SH`/`SZ`/`BJ`/字符串 `"None"` —— **一处都匹配不上**，
+    于是每一行都落到 9.5% 兜底：2026 年特征快照实测 436 行被剔、其中 132 行是
+    误剔（20% 板 115 行 + 北交所 17 行，被剔行 |涨跌%| 中位数 11.4%）。
+
+    这里钉住「符号不存在」而不是钉住某个数值：真正的回归风险是有人再种一张
+    按板名/板别查表的常量表 —— 板别**永远**定不出阈值（`SZ` 同时覆盖 10% 与 20%）。
+    """
+    import importlib
+
+    mod = importlib.import_module("backend.services.engine.inference.trading_cost")
+    for name in (
+        "limit_threshold",
+        "price_limit_for_market",
+        "_LIMIT_BY_MARKET",
+        "_DEFAULT_PRICE_LIMIT",
+    ):
+        assert not hasattr(mod, name), f"trading_cost 又长出了 {name}"
+
+
+@pytest.mark.parametrize(
+    ("symbol", "tolerance"),
+    [
+        ("SH600036", LIMIT_TOLERANCE),
+        ("SZ300750", LIMIT_TOLERANCE),
+        ("SH688981", LIMIT_TOLERANCE),
+        ("BJ430047", LIMIT_TOLERANCE_BSE),  # 截尾取整 → 容差翻倍
+    ],
+)
+def test_simulation_fallback_threshold_agrees_with_authority(symbol, tolerance):
+    """模拟撮合的兜底阈值 = 权威口径 − **该板别的**容差。
+
+    期望值手工拼出来（而不是调用权威的 `limit_threshold`）：被测函数内部就是调它，
+    拿它当期望会退化成恒真断言。这里独立地钉住「北交所换容差」这件事本身。
+    """
     from backend.services.simulation.services.execution_engine import (
         SimulationExecutionEngine,
     )
 
-    # trading_cost 按 listing_market 字符串取板别，主板 = 10%
-    assert limit_threshold("沪市主板") == pytest.approx(0.10 - LIMIT_TOLERANCE)
-
-    for symbol in ("SH600036", "SZ300750", "SH688981"):
-        expected = (
-            float(limit_pct(symbol, is_st=False, trade_date=date.today()))
-            - LIMIT_TOLERANCE
-        )
-        assert SimulationExecutionEngine._board_limit_threshold(
-            symbol
-        ) == pytest.approx(expected), f"{symbol} 的撮合兜底阈值未跟随唯一事实源"
+    expected = (
+        float(limit_pct(symbol, is_st=False, trade_date=date.today())) - tolerance  # fidelity: allow-limit-threshold — 显式传参：非 ST 一侧，独立于被测函数手拼期望值
+    )
+    assert SimulationExecutionEngine._board_limit_threshold(
+        symbol
+    ) == pytest.approx(expected), f"{symbol} 的撮合兜底阈值未跟随唯一事实源"
 
 
 def test_legacy_two_tenths_family_is_gone():
@@ -201,7 +238,7 @@ def test_factor_deep_dive_slack_follows_the_authority():
     from backend.scripts.factor_deep_dive import limit_threshold
 
     td = "20260918"
-    expected = float(limit_pct("600036.SH", is_st=False, trade_date=date(2026, 9, 18)))
+    expected = float(limit_pct("600036.SH", is_st=False, trade_date=date(2026, 9, 18)))  # fidelity: allow-limit-threshold — 显式传参：主板非 ST 一侧，与权威同传才可比
     assert limit_threshold("600036.SH", td) == expected - LIMIT_TOLERANCE
 
 
@@ -258,7 +295,7 @@ def test_low_price_case_that_two_tenths_would_have_missed():
     assert nominal_pct - actual_pct > 0.2  # 旧容差覆盖不到
     assert nominal_pct - actual_pct <= 0.5  # 新容差覆盖得到
     # 与实现同口径再确认一次：真封板价确实等于 compute_limits 的限价
-    up, _ = compute_limits("000639.SZ", 1.44, is_st=False, trade_date=date(2026, 9, 18))
+    up, _ = compute_limits("000639.SZ", 1.44, is_st=False, trade_date=date(2026, 9, 18))  # fidelity: allow-limit-threshold — 显式传参：该票当日非 ST，与权威同传才可比
     assert float(up) == 1.58
 
 
@@ -272,6 +309,10 @@ def test_ast_scan_finds_no_python2_style_assignment_regression():
     assert _ASSIGN_RE.match("    _LIMIT_TOLERANCE = 0.005")
     assert _ASSIGN_RE.match("_LIMIT_SLACK_PCT = 0.2")
     assert _ASSIGN_RE.match("LIMIT_TOLERANCE_BSE = 0.01")
+    # 贴板容差族与绝对价格容差族同样在扫描范围内
+    assert _ASSIGN_RE.match("TOUCH_TOLERANCE = 0.0015")
+    assert _ASSIGN_RE.match("_TOUCH_TOLERANCE = 0.0015")
+    assert _ASSIGN_RE.match("PRICE_EPS_YUAN = 0.004")
     # 注释里的叙述不该命中（调用点会先剥注释，这里验证模式本身）
     assert not _ASSIGN_RE.match("    # 本模块曾有 _LIMIT_TOLERANCE = 0.005")
 
@@ -360,4 +401,134 @@ def test_generated_template_body_carries_the_canonical_import():
     assert "LIMIT_TOLERANCE" in body
     assert "_LIMIT_TOLERANCE" not in body, "生成体仍在自持容差副本"
     # 保守兜底保留：拿不到权威实现时按最严主板线判，宁少交易不放真涨停进来
-    assert "return 0.095" in body
+    assert "return 0.095" in body  # fidelity: allow-limit-threshold — 断言语料：钉住生成体确实保留了「按最严主板线」的兜底字面量
+
+
+# ---------------------------------------------------------------------------
+# 「贴板」容差族：TOUCH_TOLERANCE（比例）与 PRICE_EPS_YUAN（元）
+#
+# 与上面的 LIMIT_TOLERANCE 是**三个不同的量**，别互相换算：
+#   LIMIT_TOLERANCE    比例  判「涨幅够不够涨停」（回测/因子标注）
+#   TOUCH_TOLERANCE    比例  判「成交价够不够贴涨停价」（实盘/模拟撮合）
+#   PRICE_EPS_YUAN     元    判「两个分位价是不是同一个数」（日线封板分类）
+# 2026-09-20 之前，前者的消费点自持 0.0015 共 8 处（2 个默认参数 + 6 处内联），
+# 后者带一个被忽略的 symbol 参数散在 market_breadth 里。
+# ---------------------------------------------------------------------------
+
+_TOUCH_LITERAL = 0.0015  # fidelity: allow-limit-threshold — 期望值，钉住既有口径
+_PRICE_EPS_LITERAL = 0.004  # fidelity: allow-limit-threshold — 期望值，钉住既有口径
+
+#: 持有「成交价 vs 涨跌停价」比较逻辑的两个模块：模拟撮合栈与实盘服务里的纸面撮合。
+#: 二者各有一份同名 ``_is_price_near``（同值同类）—— 本次只统一取值来源，
+#: **不合并这两个函数**：跨服务合并属重构，不在口径收敛范围内。
+#: 真单通道（QMTBroker / QmtExecBroker / RedisBroker / TdxBroker）不判贴板，
+#: 涨跌停交给柜台，因此这组容差只影响模拟与纸面成交。
+_TOUCH_CONSUMERS = (
+    "backend/services/simulation/services/execution_engine.py",
+    "backend/services/live_trading/services/broker_client.py",
+)
+
+
+def test_touch_tolerance_values_are_pinned():
+    """三个容差各自的数值 —— 改它必须是一次有意识的改动。"""
+    from backend.services.simulation.services.local_market_data import (
+        PRICE_EPS_YUAN,
+        TOUCH_TOLERANCE,
+    )
+
+    assert TOUCH_TOLERANCE == _TOUCH_LITERAL
+    assert PRICE_EPS_YUAN == _PRICE_EPS_LITERAL
+    # 单位不同、量级不同，不可互换；0.004 元 < 半分，吸不了 1 分的来源差异，
+    # 所以它**不能**当比例容差用，反之亦然。
+    assert PRICE_EPS_YUAN < 0.005
+    assert TOUCH_TOLERANCE <= 0.005
+
+
+def _float_literals(path: Path) -> list[float]:
+    """模块里出现过的全部浮点字面量。
+
+    用 AST 而不是正则：本次收敛在多处留了「本模块曾有 …… = 0.0015」的说明，
+    正则会把 docstring 里的叙述也算成命中，AST 只认真正的常量节点。
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    return [
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant) and isinstance(node.value, float)
+    ]
+
+
+@pytest.mark.parametrize("rel", _TOUCH_CONSUMERS)
+def test_touch_consumers_hold_no_touch_tolerance_literal(rel):
+    """消费点不得再自带 0.0015 —— 内联写法（``* (1 - 0.0015)``）正是这次漏网的形态。"""
+    path = _REPO_ROOT / rel
+    literals = _float_literals(path)
+    # 防空转：扫到 0 个字面量说明文件读错了或路径失效，此时「没有 0.0015」毫无意义
+    assert literals, f"{rel} 里一个浮点字面量都没有，扫描疑似失效"
+    assert "TOUCH_TOLERANCE" in path.read_text(encoding="utf-8"), (
+        f"{rel} 完全没有引用 TOUCH_TOLERANCE，本断言覆盖不到它"
+    )
+    assert _TOUCH_LITERAL not in literals, (
+        f"{rel} 仍自带 {_TOUCH_LITERAL} 字面量，应改为导入 TOUCH_TOLERANCE"
+    )
+
+
+@pytest.mark.parametrize(
+    "module_path,class_name",
+    [
+        (
+            "backend.services.simulation.services.execution_engine",
+            "SimulationExecutionEngine",
+        ),
+        ("backend.services.live_trading.services.broker_client", "PaperTradingBroker"),
+    ],
+)
+def test_touch_helper_reads_the_authority_at_call_time(
+    module_path, class_name, monkeypatch
+):
+    """两栈的 ``_is_price_near`` 必须**每次调用**读事实源。
+
+    断言方式不是「值等于 0.0015」（同值不代表同源 —— 正是这样漂移出 8 份的），
+    而是**改权威常量，消费点行为随之改变**。为此导入必须写在函数体内（函数内的
+    ``from X import Y`` 每次调用都重新取值）；写成模块常量或默认参数就断不了。
+    """
+    import importlib
+    import inspect
+
+    from backend.services.simulation.services import local_market_data as lmd
+
+    cls = getattr(importlib.import_module(module_path), class_name)
+    near = cls._is_price_near
+
+    # 默认参数曾是这个容差的第二份副本，且开了「调用方可传旧口径」的口子
+    assert "tolerance" not in inspect.signature(near).parameters
+
+    limit = 10.0
+    assert near(limit, limit) is True
+    assert near(limit * (1 - 0.001), limit) is True  # 偏差 0.1% < 0.15%
+    assert near(limit * (1 - 0.003), limit) is False  # 偏差 0.3% > 0.15%
+    # 取不到限价 / 价格非正 → 一律「不贴板」，不因缺数据误报
+    assert near(limit, None) is False
+    assert near(0.0, limit) is False
+
+    monkeypatch.setattr(lmd, "TOUCH_TOLERANCE", 0.5)
+    assert near(5.0, limit) is True, "贴板容差没有跟随唯一事实源（可能是模块期快照）"
+    monkeypatch.setattr(lmd, "TOUCH_TOLERANCE", 0.0)
+    assert near(5.0, limit) is False
+
+
+def test_market_breadth_price_tolerance_forwards_the_authority():
+    """``price_tolerance`` 的 0.004 同样只有一份来源。
+
+    注意它与上面两条断言形态不同：这里 import 在**模块级**，是导入期快照，
+    改事实源不会回写 —— 所以只能断言「是同一个对象」，不能断言运行期联动。
+    """
+    from backend.services.simulation.services.local_market_data import (
+        PRICE_EPS_YUAN,
+    )
+    from backend.shared import market_breadth as mb
+
+    assert mb.PRICE_EPS_YUAN is PRICE_EPS_YUAN
+    assert mb.price_tolerance("600000.SH") == _PRICE_EPS_LITERAL
+    # symbol 参数是历史遗留、被忽略；两个不同板别取到同一个值
+    assert mb.price_tolerance("300750.SZ") == mb.price_tolerance("830799.BJ")

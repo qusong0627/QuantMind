@@ -192,7 +192,7 @@ def _sim_only(**over: Any) -> dict[str, Any]:
         "remarks": None,
         "symbol": "600036.SH",
         "side": "sell",
-        "fill_price": 9.5,
+        "fill_price": 9.5,  # fidelity: allow-limit-threshold — 非阈值：成交价夹具
         "filled_quantity": 50.0,
         "total_fee": 3.0,
         "status": "filled",

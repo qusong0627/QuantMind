@@ -114,7 +114,7 @@ def test_data_jump_gap_zero_volume():
 
     # 跳变：11.0 → 20.0（+82%），远超涨跌停包络
     latest = {"date": "2026-09-14", "close": 20.0, "volume": 1000,
-              "limit_up": 12.1, "limit_down": 9.9}
+              "limit_up": 12.1, "limit_down": 9.9}  # fidelity: allow-limit-threshold — 非阈值：跌停价夹具（供包络判定）
     prev = {"date": "2026-09-11", "close": 11.0}
     out = detect_data_anomaly(latest, prev, subject="600036.SH")
     assert any(d.kind == "data_jump" for d in out)
@@ -134,7 +134,7 @@ def test_data_jump_gap_zero_volume():
 
     # 正常样本：不误报
     ok = detect_data_anomaly(
-        {"date": "2026-09-14", "close": 11.1, "volume": 1000, "limit_up": 12.1, "limit_down": 9.9},
+        {"date": "2026-09-14", "close": 11.1, "volume": 1000, "limit_up": 12.1, "limit_down": 9.9},  # fidelity: allow-limit-threshold — 非阈值：跌停价夹具（供包络判定）
         {"date": "2026-09-11", "close": 11.0},
         expected_prev_date="2026-09-11", subject="600036.SH",
     )

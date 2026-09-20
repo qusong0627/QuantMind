@@ -26,8 +26,8 @@ MATRIX = [
 
 METRICS = {
     "f_strong": {"ic_mean": 0.05, "icir": 0.60, "turnover": 0.3, "display_name": "强因子"},
-    "f_dup": {"ic_mean": 0.048, "icir": 0.40, "turnover": 0.5},
-    "f_neg": {"ic_mean": -0.049, "icir": -0.55, "turnover": 0.2},
+    "f_dup": {"ic_mean": 0.048, "icir": 0.40, "turnover": 0.5},  # fidelity: allow-limit-threshold — 非阈值：因子 IC 均值夹具
+    "f_neg": {"ic_mean": -0.049, "icir": -0.55, "turnover": 0.2},  # fidelity: allow-limit-threshold — 非阈值：因子 IC 均值夹具
     "f_weak_dup": {"ic_mean": 0.04, "icir": 0.30, "turnover": 0.6},
     "f_alone": {"ic_mean": 0.02, "icir": 0.25, "turnover": 0.1},
 }

@@ -69,22 +69,19 @@ def limit_threshold(symbol: str, trade_date=None) -> float:
     「贴板」缓冲同源：唯一事实源 = ``local_market_data.LIMIT_TOLERANCE``（0.5pp）。
     本文件曾自带 ``_LIMIT_SLACK = 0.002``（0.2pp）—— 那正是 9.8 那条旧写死线留下的
     余量，实测在股价 < ¥2.50 时覆盖不足。
+
+    容差由 ``limit_threshold`` 按板别自己挑（北交所截尾取整、容差翻倍），
+    本函数不再做「幅度减容差」的减法。
     """
     from backend.services.simulation.services.local_market_data import (
-        LIMIT_TOLERANCE,
-        limit_pct,
+        limit_threshold,
     )
 
     td = _as_trade_date(trade_date) if trade_date is not None else date.today()
-    return (
-        float(
-            limit_pct(
-                str(symbol),
-                is_st=False,  # fidelity: allow-limit-threshold — 无逐日 ST 源（同 factor_report/tradability.py）
-                trade_date=td,
-            )
-        )
-        - LIMIT_TOLERANCE
+    return limit_threshold(
+        str(symbol),
+        is_st=False,  # fidelity: allow-limit-threshold — 无逐日 ST 源（同 factor_report/tradability.py）
+        trade_date=td,
     )
 
 

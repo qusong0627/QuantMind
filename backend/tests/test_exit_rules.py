@@ -28,7 +28,7 @@ def test_hard_stop_first():
     rules = ExitRuleSet(hard_stop_pct=0.05, take_profit_pct=0.08)
     d = evaluate_exit(rules, PositionState(entry_price=10.0, last_price=9.4))
     assert d.should_exit and d.rule_id == RULE_HARD_STOP and d.priority == 1
-    assert d.snapshot["line"] == 9.5 and d.snapshot["price"] == 9.4
+    assert d.snapshot["line"] == 9.5 and d.snapshot["price"] == 9.4  # fidelity: allow-limit-threshold — 非阈值：止损线 10.0×(1-5%)
 
 
 def test_take_profit_before_trailing_on_overlap():
@@ -84,7 +84,7 @@ def test_sltp_wrapper_parity_with_legacy_cases():
         "highest_price": 12.0,
     }
     hit, reason = check_sltp_trigger(9.4, 10.0, cfg)
-    assert hit and reason == "止损触发 现价9.40 ≤ 9.50"
+    assert hit and reason == "止损触发 现价9.40 ≤ 9.50"  # fidelity: allow-limit-threshold — 非阈值：止损提示文案里的止损线
     hit, reason = check_sltp_trigger(11.1, 10.0, cfg)
     assert hit and reason == "止盈触发 现价11.10 ≥ 11.00"
     # 10.9：低于止盈线 11.00（不触发止盈）、低于移动线 12.0×(1-0.04)=11.52 → 移动止损
@@ -120,7 +120,7 @@ def test_replay_scan_uses_canonical_low_trigger():
     bars = {"600036.SH": _bar(9.4), "000001.SZ": _bar(9.6)}
     out = scan_stop_loss(account, bars, 0.05)
     assert len(out) == 1 and out[0]["symbol"] == "600036.SH"
-    assert out[0]["origin"] == "stop_loss" and out[0]["stop_price"] == 9.5
+    assert out[0]["origin"] == "stop_loss" and out[0]["stop_price"] == 9.5  # fidelity: allow-limit-threshold — 非阈值：止损提案价 10.0×(1-5%)
     # 停牌不扫
     out2 = scan_stop_loss(account, {"600036.SH": _bar(9.4, suspended=True)}, 0.05)
     assert out2 == []

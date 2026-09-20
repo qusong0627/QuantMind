@@ -174,7 +174,7 @@ class TestReconstructMtmEquity:
 
 class TestApplyMtmMetrics:
     def test_recomputes_return_drawdown_sharpe(self):
-        metrics = {"max_drawdown": 0.0, "sharpe": 9.9, "cum_return": 0.0,
+        metrics = {"max_drawdown": 0.0, "sharpe": 9.9, "cum_return": 0.0,  # fidelity: allow-limit-threshold — 非阈值：sharpe 占位值
                    "win_rate": 0.5, "n_trades": 2.0}
 
         out = _apply_mtm_metrics(metrics, [1.0, 1.1, 0.9, 1.2])

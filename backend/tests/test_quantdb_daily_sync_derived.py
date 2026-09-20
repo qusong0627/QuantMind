@@ -74,7 +74,7 @@ def test_atr_wilder_smoothing():
     closes = [10.0] * 30
     df = _frame(closes)
     df["high"] = 10.2
-    df["low"] = 9.8
+    df["low"] = 9.8  # fidelity: allow-limit-threshold — 非阈值：ATR 夹具的 low（凑 TR=0.4）
     out = _add_price_derived_cols(df)
     assert out["vol_atr_14"].iloc[-1] == pytest.approx(0.4, abs=1e-9)
     # 前 13 行 ewm 预热期也有值（adjust=False 从第 1 行开始）

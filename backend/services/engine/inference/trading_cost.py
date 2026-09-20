@@ -15,20 +15,19 @@ _DEFAULT_STAMP_DUTY = 0.001  # 印花税，仅卖出
 _DEFAULT_TRANSFER_FEE = 0.00001  # 过户费，仅沪市
 _DEFAULT_SLIPPAGE = 0.001  # 滑点，买卖各计
 
-# 涨跌幅限制，按 listing_market 区分
-_LIMIT_BY_MARKET: dict[str, float] = {
-    "沪市主板": 0.10,
-    "深市主板": 0.10,
-    "创业板": 0.20,
-    "科创板": 0.20,
-    "北交所": 0.30,
-}
-_DEFAULT_PRICE_LIMIT = 0.10
-
-# 判定为触及涨跌停的取整容差不再在本模块持有数值：唯一事实源 =
-# ``local_market_data.LIMIT_TOLERANCE``（0.5pp），用时在函数内导入。
-# 数据源 pctchange 有舍入误差，涨跌停价本身又按分取整；0.5pp 是实测订正过的
-# 上界（2026-09-20：0.2pp 会漏判 4/2488 条真封板，0.5pp 漏判 0 条）。
+# 涨跌停阈值**不在本模块**：唯一事实源 = ``local_market_data`` 的
+# ``limit_pct`` / ``compute_limits``（按 symbol + is_st + trade_date 判定）。
+#
+# 本模块曾持有一张「按 listing_market 中文板名查表」的 _LIMIT_BY_MARKET
+# （沪市主板/创业板/北交所…，未命中落 0.10），2026-09-20 已删除。删因是实测：
+# 写进取数面的 listing_market 实际取值是 ``SH``/``SZ``/``BJ``/``"None"``
+# （model_features_2026.parquet 实测），中文键**一个都命不中** → 全市场一律
+# 走 10% 默认线。后果不是「略偏」而是系统性误剔：22,185 行有涨跌幅的样本里，
+# 旧表剔 436 行、按 symbol 的权威口径应剔 304 行，多剔 132 行（20% 板 115、
+# 北交所 17），被误剔的 |涨幅| 中位数 11.4% —— 剔掉的恰是高动量样本。
+#
+# 按板名查表这个做法本身也不成立：``SZ`` 同时覆盖深市主板（10%）与创业板
+# （20%），标签不足以决定阈值；能决定阈值的只有 symbol。
 
 
 @dataclass(frozen=True)
@@ -103,19 +102,3 @@ class CostModel:
         }
 
 
-def price_limit_for_market(listing_market: object) -> float:
-    """按上市板块返回涨跌幅限制。未知板块回退到主板 10%。"""
-    return _LIMIT_BY_MARKET.get(str(listing_market or "").strip(), _DEFAULT_PRICE_LIMIT)
-
-
-def limit_threshold(listing_market: object) -> float:
-    """触及涨跌停的判定阈值（含容差）。
-
-    容差唯一事实源 = ``local_market_data.LIMIT_TOLERANCE``。**惰性导入**：该模块
-    是行情栈的重模块（实测多花 3.5s，且会拉起 LiteLLM 的远程模型价目表抓取），
-    而本函数被 ``data_loader`` 逐行调用 —— 不能在导入期付这个代价。
-    ``sys.modules`` 缓存后，每次调用只是一个字典查找。
-    """
-    from backend.services.simulation.services.local_market_data import LIMIT_TOLERANCE
-
-    return price_limit_for_market(listing_market) - LIMIT_TOLERANCE

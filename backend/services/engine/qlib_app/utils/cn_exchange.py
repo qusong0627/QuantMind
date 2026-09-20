@@ -341,15 +341,11 @@ class CnExchange(Exchange):
            真要做到精确，得用 ``compute_limits`` 算出涨跌停价再比价位。
         """
         from backend.services.simulation.services.local_market_data import (
-            LIMIT_TOLERANCE,
-            limit_pct,
+            limit_threshold,
         )
 
-        return (
-            float(
-                limit_pct(stock_id, is_st=is_st, trade_date=trade_date or date.today())
-            )
-            - LIMIT_TOLERANCE
+        return limit_threshold(
+            stock_id, is_st=is_st, trade_date=trade_date or date.today()
         )
 
     def check_stock_limit(

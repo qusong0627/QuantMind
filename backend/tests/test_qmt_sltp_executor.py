@@ -326,10 +326,10 @@ class TestProtectPrice:
 
     def test_resolve_protect_price_pure(self) -> None:
         assert ex.resolve_protect_price("market", None, 10.0)[0] == "MARKET"
-        assert ex.resolve_protect_price("limit_floor", {"DownStopPrice": 9.5}, 10.0) == (
+        assert ex.resolve_protect_price("limit_floor", {"DownStopPrice": 9.5}, 10.0) == (  # fidelity: allow-limit-threshold — 非阈值：券商回报的跌停保护价（DownStopPrice）夹具
             "LIMIT",
-            9.5,
-            "跌停保护价 9.50",
+            9.5,  # fidelity: allow-limit-threshold — 非阈值：断言保护价原样透传（值即夹具）
+            "跌停保护价 9.50",  # fidelity: allow-limit-threshold — 非阈值：文案里的保护价
         )
         assert ex.resolve_protect_price("limit_floor", {}, 10.0)[0] is None
         assert ex.resolve_protect_price("limit_floor", {"DownStopPrice": 0}, 10.0)[0] is None
@@ -782,7 +782,7 @@ class TestStateWriteMerge:
         state = ex.load_state(redis, DAY)
         before = {symbol: dict(item) for symbol, item in state["rules"].items()}
         # 执行器本轮只改了 600036
-        state["rules"]["600036.SH"]["last_price"] = 9.9
+        state["rules"]["600036.SH"]["last_price"] = 9.9  # fidelity: allow-limit-threshold — 非阈值：last_price 夹具
         # 并发：CLI 新武装了 300750、并删掉了别的规则
         stored = redis.store[ex.STATE_KEY]["rules"]
         stored["300750.SZ"] = {"status": ex.ST_ARMED}
@@ -791,7 +791,7 @@ class TestStateWriteMerge:
         ex.save_state(redis, state, dirty=dirty, removed=removed)
 
         after = redis.store[ex.STATE_KEY]["rules"]
-        assert after["600036.SH"]["last_price"] == 9.9
+        assert after["600036.SH"]["last_price"] == 9.9  # fidelity: allow-limit-threshold — 非阈值：断言 last_price 合并结果（值即夹具）
         assert after["300750.SZ"] == {"status": ex.ST_ARMED}  # 并发新增没被冲掉
 
     def test_full_save_still_overwrites(self) -> None:

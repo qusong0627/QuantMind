@@ -348,7 +348,7 @@ def test_hardcoded_limit_scanner_finds_bare_threshold(tmp_path):
     # Arrange
     src = tmp_path / "bt.py"
     src.write_text(
-        "def f(pct):\n    return abs(pct) >= 9.8  # 接近涨停\n", encoding="utf-8"
+        "def f(pct):\n    return abs(pct) >= 9.8  # 接近涨停\n", encoding="utf-8"  # fidelity: allow-limit-threshold — 扫描器测试语料：字符串写入临时文件供门禁自扫，不是涨跌停判定
     )
 
     # Act
@@ -357,7 +357,7 @@ def test_hardcoded_limit_scanner_finds_bare_threshold(tmp_path):
     # Assert
     assert len(out) == 1
     assert out[0].severity == "HIGH"
-    assert "9.8" in out[0].detail
+    assert "9.8" in out[0].detail  # fidelity: allow-limit-threshold — 断言语料：扫描器 detail 必须含被扫出的字面量 9.8
 
 
 def test_hardcoded_limit_scanner_finds_hardcoded_st_false(tmp_path):
@@ -365,7 +365,7 @@ def test_hardcoded_limit_scanner_finds_hardcoded_st_false(tmp_path):
     # Arrange
     src = tmp_path / "bt.py"
     src.write_text(
-        "compute_limits(code, pre, is_st=False, trade_date=d)\n", encoding="utf-8"
+        "compute_limits(code, pre, is_st=False, trade_date=d)\n", encoding="utf-8"  # fidelity: allow-limit-threshold — 扫描器测试语料：字符串写入临时文件供门禁自扫，不是涨跌停判定
     )
 
     # Act
@@ -373,7 +373,7 @@ def test_hardcoded_limit_scanner_finds_hardcoded_st_false(tmp_path):
 
     # Assert
     assert len(out) == 1
-    assert "is_st=False" in out[0].detail
+    assert "is_st=False" in out[0].detail  # fidelity: allow-limit-threshold — 断言语料：扫描器 detail 必须含被扫出的 is_st=False
 
 
 def test_hardcoded_limit_scanner_honours_allow_pragma(tmp_path):
@@ -394,7 +394,7 @@ def test_hardcoded_limit_scanner_does_not_honour_ruff_noqa(tmp_path):
     ruff 对每处合法豁免报「非法指令」。豁免只认 `# fidelity: allow-limit-threshold`。"""
     # Arrange
     src = tmp_path / "bt.py"
-    src.write_text("x = 9.8  # noqa: limit-threshold\n", encoding="utf-8")
+    src.write_text("x = 9.8  # noqa: limit-threshold\n", encoding="utf-8")  # fidelity: allow-limit-threshold — 扫描器测试语料：字符串写入临时文件供门禁自扫，不是涨跌停判定
 
     # Act
     out = scan_hardcoded_limit_thresholds([src])
@@ -613,7 +613,7 @@ def test_fail_on_works_on_either_side_of_the_subcommand(tmp_path):
     # Arrange: 一个只有 HIGH 发现的源码目录（区分 critical/high 才有意义）
     src = tmp_path / "src"
     src.mkdir()
-    (src / "bt.py").write_text("y = abs(pct) >= 9.8\n", encoding="utf-8")
+    (src / "bt.py").write_text("y = abs(pct) >= 9.8\n", encoding="utf-8")  # fidelity: allow-limit-threshold — 扫描器测试语料：字符串写入临时文件供门禁自扫，不是涨跌停判定
     cli = _load_cli()
 
     # Act / Assert: 默认门槛 critical → HIGH 不阻断
@@ -682,11 +682,11 @@ def test_hardcoded_limit_scanner_ignores_docstring_prose(tmp_path):
     # Arrange
     src = tmp_path / "bt.py"
     src.write_text(
-        '"""旧实现按前缀返回 0.095/0.195/0.295，不认创业板改革。"""\n'
+        '"""旧实现按前缀返回 0.095/0.195/0.295，不认创业板改革。"""\n'  # fidelity: allow-limit-threshold — 扫描器测试语料：字符串写入临时文件供门禁自扫，不是涨跌停判定
         "\n"
         "\n"
         "def f(pct):\n"
-        '    """阈值 0.098 是史前遗留。"""\n'
+        '    """阈值 0.098 是史前遗留。"""\n'  # fidelity: allow-limit-threshold — 扫描器测试语料：字符串写入临时文件供门禁自扫，不是涨跌停判定
         "    return pct\n",
         encoding="utf-8",
     )
@@ -700,7 +700,7 @@ def test_hardcoded_limit_scanner_still_finds_threshold_after_docstring(tmp_path)
     # Arrange
     src = tmp_path / "bt.py"
     src.write_text(
-        'def f(pct):\n    """阈值 0.098 是史前遗留。"""\n    return abs(pct) >= 9.8\n',
+        'def f(pct):\n    """阈值 0.098 是史前遗留。"""\n    return abs(pct) >= 9.8\n',  # fidelity: allow-limit-threshold — 扫描器测试语料：字符串写入临时文件供门禁自扫，不是涨跌停判定
         encoding="utf-8",
     )
 
@@ -721,7 +721,7 @@ def test_hardcoded_limit_scanner_still_finds_threshold_in_plain_string(tmp_path)
     # Arrange
     src = tmp_path / "bt.py"
     src.write_text(
-        'TPL = "if pct_change >= 0.098: skip"\n',
+        'TPL = "if pct_change >= 0.098: skip"\n',  # fidelity: allow-limit-threshold — 扫描器测试语料：字符串写入临时文件供门禁自扫，不是涨跌停判定
         encoding="utf-8",
     )
 
@@ -737,7 +737,7 @@ def test_hardcoded_limit_scanner_fails_safe_on_unparseable_source(tmp_path):
     # Arrange
     src = tmp_path / "broken.py"
     src.write_text(
-        '"""docstring 里的 0.098"""\ndef f(:\n    return 9.8\n',
+        '"""docstring 里的 0.098"""\ndef f(:\n    return 9.8\n',  # fidelity: allow-limit-threshold — 扫描器测试语料：字符串写入临时文件供门禁自扫，不是涨跌停判定
         encoding="utf-8",
     )
 

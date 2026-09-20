@@ -93,7 +93,7 @@ def test_efinance_normalize_kline():
     from backend.services.engine.data_platform.adapters.efinance_adapter import _normalize_kline
     raw = pd.DataFrame([
         {"日期": "2025-01-02", "开盘": 10.0, "收盘": 10.5, "最高": 11.0,
-         "最低": 9.9, "成交量": 100, "成交额": 1050},
+         "最低": 9.9, "成交量": 100, "成交额": 1050},  # fidelity: allow-limit-threshold — 非阈值：K 线夹具的「最低」
     ])
     df = _normalize_kline(raw, symbol="600519.SH", source="efinance")
     assert df.iloc[0]["close"] == 10.5

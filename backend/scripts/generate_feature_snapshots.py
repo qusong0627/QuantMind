@@ -216,8 +216,10 @@ def _build_snapshot(year: int, dry_run: bool = False) -> dict | None:
     -- ⚠ features_daily 自 20260914 起由 50 列**永久**扩为 78 列（新增 is_st /
     -- industry_name / in_hs300 / list_date / pb_mrq 等 30 列），本 glob 跨该 schema 边界。
     -- 这里**故意不加** union_by_name：
-    --   不加 → DuckDB 取首个文件的 schema，本查询枚举的老列全都在，结果正确；
-    --           若日后有人往 SELECT 里加 f.is_st，会直接 Binder 报错（响亮的失败）。
+    --   不加 → DuckDB 取首个文件的 schema：SELECT * 会**静默**少掉后加列，
+    --           但本查询逐列点名，老列全都在，结果正确；若日后有人往 SELECT 里加
+    --           f.is_st，会直接报错（glob 下是 "schema mismatch in glob" 读时炸，
+    --           显式文件清单下是 Binder 报错）—— 两种都是响亮的失败，可接受。
     --   加了 → 那 30 列在老分区**全 NULL**、新分区全非 NULL，正好是个「年代指示器」，
     --           一旦被选入就是静默泄露（树模型必拿它做一刀切）。
     -- 所以「补上 union_by_name」不是修复。要新列请显式点名，并先想清楚 NULL 段怎么处理。

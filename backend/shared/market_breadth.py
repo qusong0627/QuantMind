@@ -16,6 +16,7 @@ import pandas as pd
 from backend.services.simulation.services.local_market_data import (
     LIMIT_TOLERANCE,
     LIMIT_TOLERANCE_BSE,
+    PRICE_EPS_YUAN,
     compute_limits,
     limit_pct,
 )
@@ -41,8 +42,15 @@ def is_bse_symbol(symbol: str) -> bool:
 
 
 def price_tolerance(symbol: str) -> float:
-    """价格比较容差（元）：比较涨停价时允许的分位浮点误差。"""
-    return 0.004
+    """价格比较容差（**元**）：比较涨停价时允许的分位浮点误差。
+
+    取值来源 = ``local_market_data.PRICE_EPS_YUAN``（唯一事实源）。``symbol`` 参数
+    是历史遗留、**被忽略** —— 保留是为了兼容仓库外的调用方（本模块经
+    ``scripts/review_stats.py`` 转发导出）；本模块内三处调用也都传的是写死的
+    ``"600000.SH"``。新代码不要传它，也不要假设它按板别变化。
+    """
+    _ = symbol
+    return PRICE_EPS_YUAN
 
 
 def classify_price(

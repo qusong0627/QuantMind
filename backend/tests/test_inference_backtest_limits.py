@@ -41,10 +41,9 @@ from backend.services.engine.inference.inference_backtest_service import (
 )
 from backend.shared.stock_utils import StockCodeUtil
 
-#: 与实现同源的取整余量（百分点）—— 唯一事实源 `local_market_data.LIMIT_TOLERANCE`
-#: （比例 0.005 × 100 = 0.5pp）。旧值 0.2pp（9.8 = 10 − 0.2 的旧写死线）由实测证伪：
-#: 股价 < ¥2.50 时漏判真涨停。
-_SLACK_PCT = 0.5
+# 贴板余量（0.5pp）的来历：旧值 0.2pp（9.8 = 10 − 0.2 的旧写死线）由实测证伪 ——
+# 股价 < ¥2.50 时漏判真涨停。现由 `local_market_data.LIMIT_TOLERANCE` 决定，且
+# **北交所翻倍**（截尾取整），所以这里不再重述数值：重述出来的数只会跟着板别一起错。
 
 #: ST 主板 5% 保护期内的一个**未封板**跌幅：-4.9% 已贴住 5% 线以内，
 #: 但它本身不是断言的目标，只是喂给判定的输入。
@@ -123,12 +122,13 @@ def _panel(
     ],
 )
 def test_threshold_tracks_authority(symbol, trade_date, is_st):
-    from backend.services.simulation.services.local_market_data import limit_pct
-
-    expected = (
-        float(limit_pct(symbol, is_st=is_st, trade_date=trade_date)) * 100.0
-        - _SLACK_PCT
+    from backend.services.simulation.services.local_market_data import (
+        limit_threshold,
     )
+
+    # 期望值取自权威的**阈值**函数（板别幅度 − 该板别容差），不再自己写
+    # 「比例×100 − 固定 0.5pp」：北交所截尾取整、容差翻倍，自己减会少减 0.5pp。
+    expected = limit_threshold(symbol, is_st=is_st, trade_date=trade_date) * 100.0
     assert _limit_threshold_pct(symbol, trade_date, is_st) == pytest.approx(expected)
 
 

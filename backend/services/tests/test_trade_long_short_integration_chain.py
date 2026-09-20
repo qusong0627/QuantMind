@@ -253,7 +253,7 @@ async def test_internal_strategy_order_buy_to_close_success(monkeypatch):
             "symbol": "600000.SH",
             "side": "BUY",
             "quantity": 100,
-            "price": 9.8,
+            "price": 9.8,  # fidelity: allow-limit-threshold — 非阈值：委托价夹具
             "order_type": "LIMIT",
             "trade_action": "buy_to_close",
             "position_side": "short",

@@ -37,7 +37,7 @@ def _counts(pcts, syms, **kw):
 
 def test_main_board_ten_percent_board():
     # Arrange：主板票 +9.9%（容差 0.5pp → 阈值 9.5）算涨停，+9.0% 不算
-    up, down = _counts([9.9, 9.0, -9.9, -9.0], ["600000.SH"] * 4)
+    up, down = _counts([9.9, 9.0, -9.9, -9.0], ["600000.SH"] * 4)  # fidelity: allow-limit-threshold — 用例入参：涨幅百分比（阈值由被测函数内部取权威口径）
 
     assert (up, down) == (1, 1)
 
@@ -97,7 +97,7 @@ def test_agrees_with_classify_by_pct_row_by_row():
 
     两者分叉就会让「复盘」与「市场分析页」对同一天给出不同的涨停家数。
     """
-    pcts = [9.9, 12.0, -9.9, 5.0, 19.6, -19.6, 0.0]
+    pcts = [9.9, 12.0, -9.9, 5.0, 19.6, -19.6, 0.0]  # fidelity: allow-limit-threshold — 用例入参：涨幅百分比（阈值由被测函数内部取权威口径）
     syms = ["600000.SH", "300750.SZ", "600000.SH", "600000.SH",
             "300750.SZ", "300750.SZ", "000001.SZ"]
 
@@ -114,7 +114,7 @@ def test_counts_are_index_independent():
     调用点传的是 `snap["symbol"]` 与 `pct`，两者 index 未必一致（一个来自
     merge、一个来自 fillna）。
     """
-    pct = pd.Series([9.9, 12.0], index=[10, 20], dtype=float)
+    pct = pd.Series([9.9, 12.0], index=[10, 20], dtype=float)  # fidelity: allow-limit-threshold — 用例入参：涨幅百分比（阈值由被测函数内部取权威口径）
     sym = pd.Series(["600000.SH", "300750.SZ"], index=[7, 8])
 
     assert limit_up_down_counts(pct, sym, trade_date=_D) == (1, 0)
@@ -124,6 +124,6 @@ def test_counts_are_index_independent():
 def test_real_symbol_format_is_suffix(field):
     """符号按后缀式（000001.SZ）传入 —— 这是量化层的统一口径。"""
     sym = "000001.SZ"
-    pct = 9.9 if field == "limit_up" else -9.9
+    pct = 9.9 if field == "limit_up" else -9.9  # fidelity: allow-limit-threshold — 用例入参：涨幅百分比（阈值由被测函数内部取权威口径）
 
     assert _counts([pct], [sym]) == ((1, 0) if field == "limit_up" else (0, 1))

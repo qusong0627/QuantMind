@@ -187,12 +187,22 @@ class SimulationExecutionEngine:
             return None
 
     @staticmethod
-    def _is_price_near(
-        price: float, limit_price: float | None, tolerance: float = 0.0015
-    ) -> bool:
+    def _is_price_near(price: float, limit_price: float | None) -> bool:
+        """成交价是否贴上涨跌停价。
+
+        容差**唯一事实源** = ``local_market_data.TOUCH_TOLERANCE``。原先容差是
+        默认参数（``tolerance: float = 0.0015``），8 处同值硬编码之一 —— 已去掉该
+        参数：默认参数在**定义期**求值，要接权威常量就得在导入期导入行情栈重模块
+        （实测多花 3.5s 且会拉起 LiteLLM 远程价目表抓取），不划算；而留着默认值
+        等于又开了一个「调用方可传旧口径」的口子。全库无调用方传过该参数。
+        """
+        from backend.services.simulation.services.local_market_data import (
+            TOUCH_TOLERANCE,
+        )
+
         if limit_price is None or limit_price <= 0 or price <= 0:
             return False
-        return abs(price - limit_price) / max(limit_price, 1e-6) <= tolerance
+        return abs(price - limit_price) / max(limit_price, 1e-6) <= TOUCH_TOLERANCE
 
     @classmethod
     def _board_limit_threshold(cls, symbol: str) -> float:
@@ -210,29 +220,27 @@ class SimulationExecutionEngine:
         """
         from datetime import date as _date
 
-        # 取整容差（比例）—— 唯一事实源，本类不再持有 `_LIMIT_TOLERANCE` 副本。
+        # 阈值（板别 − 取整容差）—— 唯一事实源，本类不再持有容差副本，
+        # 也不再自己挑容差：北交所截尾取整、容差翻倍，这件事只有事实源知道。
         from backend.services.simulation.services.local_market_data import (
-            LIMIT_TOLERANCE,
-            limit_pct,
+            limit_threshold,
         )
 
-        pct = 0.10  # 兜底：无法解析时按主板 10%
+        pct = 0.095  # fidelity: allow-limit-threshold — 兜底按最严主板线（10% − 0.5pp）
         try:
-            pct = float(
-                limit_pct(
-                    symbol,
-                    # 只取「今天」，而今天已 ≥ 2026-07-06 —— 该日起 ST 主板同为
-                    # 10%，is_st 不再改变结果。判历史日期的路径不适用此豁免。
-                    is_st=False,  # fidelity: allow-limit-threshold — 只取今天
-                    trade_date=_date.today(),
-                )
+            pct = limit_threshold(
+                symbol,
+                # 只取「今天」，而今天已 ≥ 2026-07-06 —— 该日起 ST 主板同为
+                # 10%，is_st 不再改变结果。判历史日期的路径不适用此豁免。
+                is_st=False,  # fidelity: allow-limit-threshold — 只取今天
+                trade_date=_date.today(),
             )
         except Exception:
             # 不静默：退回主板口径会让宽板的涨停判定失真（见 docstring）
             logger.warning(
                 "涨跌停板规解析失败，按主板 10% 兜底 (symbol=%s)", symbol, exc_info=True
             )
-        return pct - LIMIT_TOLERANCE
+        return pct
 
     @staticmethod
     def _enrich_cn_limits(
@@ -247,6 +255,7 @@ class SimulationExecutionEngine:
             from datetime import date as _date
 
             from backend.services.simulation.services.local_market_data import (
+                TOUCH_TOLERANCE,
                 get_local_market_data,
             )
             from backend.services.simulation.services.market_rules import infer_market
@@ -277,12 +286,14 @@ class SimulationExecutionEngine:
             if limit_down_price is not None and limit_down_price <= 0:
                 limit_down_price = None
             limit_up = bool(
-                limit_up_price and price > 0 and price >= limit_up_price * (1 - 0.0015)
+                limit_up_price
+                and price > 0
+                and price >= limit_up_price * (1 - TOUCH_TOLERANCE)
             )
             limit_down = bool(
                 limit_down_price
                 and price > 0
-                and price <= limit_down_price * (1 + 0.0015)
+                and price <= limit_down_price * (1 + TOUCH_TOLERANCE)
             )
             return limit_up, limit_down, False, limit_up_price, limit_down_price
         except Exception:
@@ -540,6 +551,7 @@ return tostring(granted)
         # 模拟盘核心兜底：直读本地不复权日线，用开盘价作为撮合价，不依赖实时流
         def _local_daily_snapshot() -> MarketSnapshot | None:
             from backend.services.simulation.services.local_market_data import (
+                TOUCH_TOLERANCE,
                 get_local_market_data,
             )
             from backend.services.simulation.services.market_rules import infer_market
@@ -561,12 +573,12 @@ return tostring(granted)
                     )
                     px = float(bar.open)
                     lu = (
-                        bool(px >= float(bar.limit_up or 0) * (1 - 0.0015))
+                        bool(px >= float(bar.limit_up or 0) * (1 - TOUCH_TOLERANCE))
                         if (bar.limit_up and bar.limit_up != float("inf"))
                         else False
                     )
                     ld = (
-                        bool(px <= float(bar.limit_down or 0) * (1 + 0.0015))
+                        bool(px <= float(bar.limit_down or 0) * (1 + TOUCH_TOLERANCE))
                         if (bar.limit_down and bar.limit_down > 0)
                         else False
                     )
@@ -592,12 +604,12 @@ return tostring(granted)
                     )
                     px = float(bar.close)
                     lu = (
-                        bool(px >= float(bar.limit_up or 0) * (1 - 0.0015))
+                        bool(px >= float(bar.limit_up or 0) * (1 - TOUCH_TOLERANCE))
                         if (bar.limit_up and bar.limit_up != float("inf"))
                         else False
                     )
                     ld = (
-                        bool(px <= float(bar.limit_down or 0) * (1 + 0.0015))
+                        bool(px <= float(bar.limit_down or 0) * (1 + TOUCH_TOLERANCE))
                         if (bar.limit_down and bar.limit_down > 0)
                         else False
                     )

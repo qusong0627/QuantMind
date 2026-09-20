@@ -196,8 +196,8 @@ async def test_get_stock_kline_uses_sdl_cache(monkeypatch):
         async def execute(self, statement, params=None):
             calls["count"] += 1
             return [
-                ("2026-05-09", 10.0, 10.5, 9.8, 10.2, 1000000.0, 1.0),
-                ("2026-05-08", 9.9, 10.1, 9.7, 10.0, 900000.0, 1.0),
+                ("2026-05-09", 10.0, 10.5, 9.8, 10.2, 1000000.0, 1.0),  # fidelity: allow-limit-threshold — 非阈值：假 K 线夹具的 low
+                ("2026-05-08", 9.9, 10.1, 9.7, 10.0, 900000.0, 1.0),  # fidelity: allow-limit-threshold — 非阈值：假 K 线夹具的开价
             ]
 
     @asynccontextmanager

@@ -4,8 +4,11 @@
 回测里能成交的单，券商通道上被判成涨停；反之亦然。这类缺陷不会报错，
 只会让回测好看、实盘不符。
 
-本文件钉住的是「**恒等于权威口径减容差**」这一契约，而不是某个具体数值。
+本文件钉住的是「**恒等于权威口径减该板别的容差**」这一契约，而不是某个具体数值。
 写死期望值只能钉住今天的分支；钉住与权威一致，才能在板规变化时继续报警。
+
+⚠️ 容差**不是**一个全局常量：北交所涨跌停价截尾取整，偏差是沪深的两倍，容差也翻倍。
+把 0.005 当常量用会让北交所那几行静默偏宽 0.5pp（旧文本即如此）。
 """
 
 from __future__ import annotations
@@ -19,16 +22,33 @@ import pytest
 project_root = os.path.join(os.path.dirname(__file__), "../../")
 sys.path.append(project_root)
 
-#: 三处实现共用的取整容差（比例）。
-_TOLERANCE = 0.005
-
-
 def _authority(
     symbol: str, *, is_st: bool = False, trade_date=date(2026, 9, 1)
 ) -> float:
     from backend.services.simulation.services.local_market_data import limit_pct
 
     return float(limit_pct(symbol, is_st=is_st, trade_date=trade_date))
+
+
+def _tolerance(symbol: str) -> float:
+    """该板别的取整容差（**比例**）—— 按板别分派，不是一个常量。
+
+    北交所涨跌停价**截尾**取整（向上取整到分），偏离标称幅度可达
+    ``0.01/pre_close``，是沪深（四舍五入，``0.005/pre_close``）的两倍，
+    故其容差也翻倍。这里刻意沿用权威自己的板别谓词 `_is_bse`，而不是在测试里
+    再写一遍前缀表 —— 那样两边会各自漂移。
+
+    「北交所容差翻倍」这件事本身的**独立**钉子在
+    `test_limit_tolerance_single_source.py`（那里手写字面量、不调权威）；
+    本文件只负责跨路径一致性，故可以复用权威的分解。
+    """
+    from backend.services.simulation.services.local_market_data import (
+        LIMIT_TOLERANCE,
+        LIMIT_TOLERANCE_BSE,
+        _is_bse,
+    )
+
+    return LIMIT_TOLERANCE_BSE if _is_bse(symbol) else LIMIT_TOLERANCE
 
 
 # ───────────────────── 模拟撮合：execution_engine ─────────────────────
@@ -47,11 +67,10 @@ def test_execution_engine_threshold_tracks_authority():
 
     threshold = SimulationExecutionEngine._board_limit_threshold
 
-    assert threshold("SH600000") == pytest.approx(_authority("SH600000") - _TOLERANCE)
-    assert threshold("SZ000001") == pytest.approx(_authority("SZ000001") - _TOLERANCE)
-    assert threshold("SZ300750") == pytest.approx(_authority("SZ300750") - _TOLERANCE)
-    assert threshold("SH688111") == pytest.approx(_authority("SH688111") - _TOLERANCE)
-    assert threshold("BJ430047") == pytest.approx(_authority("BJ430047") - _TOLERANCE)
+    for symbol in ("SH600000", "SZ000001", "SZ300750", "SH688111", "BJ430047"):
+        assert threshold(symbol) == pytest.approx(
+            _authority(symbol) - _tolerance(symbol)
+        ), symbol
 
 
 def test_execution_engine_wide_board_threshold_is_not_main_board():
@@ -76,10 +95,9 @@ def test_execution_engine_preserves_legacy_main_board_value():
         SimulationExecutionEngine,
     )
 
-    # fidelity: allow-limit-threshold — 断言值，钉住既有行为
     assert SimulationExecutionEngine._board_limit_threshold(
         "SH600000"
-    ) == pytest.approx(0.095)
+    ) == pytest.approx(0.095)  # fidelity: allow-limit-threshold — 期望值：钉住主板阈值 0.095（=10% − 0.5pp 容差；用例名 preserves_legacy_main_board_value）
 
 
 # ───────────────────── 券商通道：broker_client ─────────────────────
@@ -98,9 +116,9 @@ def test_broker_threshold_tracks_authority():
     threshold = PaperTradingBroker._limit_threshold
 
     for symbol in ("SH600000", "SZ000001", "SZ300750", "SH688111", "BJ430047"):
-        assert threshold(symbol) == pytest.approx(_authority(symbol) - _TOLERANCE), (
-            symbol
-        )
+        assert threshold(symbol) == pytest.approx(
+            _authority(symbol) - _tolerance(symbol)
+        ), symbol
 
 
 def test_broker_wide_board_threshold_is_not_main_board():
@@ -147,12 +165,12 @@ def test_backtest_engine_threshold_tracks_authority_with_st():
         "SH600000", is_st=True, trade_date=d
     ) == pytest.approx(_authority("SH600000", is_st=True, trade_date=d))
     assert get_price_limit_threshold(
-        "SH600000", is_st=False, trade_date=d
-    ) == pytest.approx(_authority("SH600000", is_st=False, trade_date=d))
+        "SH600000", is_st=False, trade_date=d  # fidelity: allow-limit-threshold — 显式传参：非 ST 分支，被测与权威同传才可比
+    ) == pytest.approx(_authority("SH600000", is_st=False, trade_date=d))  # fidelity: allow-limit-threshold — 显式传参：非 ST 分支，被测与权威同传才可比
     # 保护期内 ST 与主板必须**不同**，否则上面两条恒真
     assert get_price_limit_threshold(
         "SH600000", is_st=True, trade_date=d
-    ) < get_price_limit_threshold("SH600000", is_st=False, trade_date=d)
+    ) < get_price_limit_threshold("SH600000", is_st=False, trade_date=d)  # fidelity: allow-limit-threshold — 显式传参：反向控制里的非 ST 一侧
 
 
 def test_backtest_engine_threshold_tracks_authority_across_reform():

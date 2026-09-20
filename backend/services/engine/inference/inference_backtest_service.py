@@ -433,21 +433,18 @@ def _limit_threshold_pct(
     板规/ST/制度日期全部委托 `limit_pct`（唯一权威实现），本模块不再自持阈值。
     `limit_pct` 返回比例（0.20），而本文件的 `pct_change` 是百分数，故 ×100。
 
-    余量同源：唯一事实源 = `local_market_data.LIMIT_TOLERANCE`（0.5pp）。本文件曾
-    自带 `_LIMIT_SLACK_PCT = 0.2`，并在注释里承认「与 cn_exchange 不同源：两处各自
+    余量同源：唯一事实源 = `local_market_data.limit_threshold`（= 板别幅度 − 该板别
+    的取整容差，北交所容差翻倍；本文件的 `pct_change` 是百分数，故 ×100）。本文件
+    曾自带 `_LIMIT_SLACK_PCT = 0.2`，并在注释里承认「与 cn_exchange 不同源：两处各自
     沿用了自己的历史余量」—— 同值或异值都不该由各文件自己决定。0.2pp 已由实测
     证伪：在股价 < ¥2.50 时漏判真涨停（41 个交易日 × 2864 个封板事件中漏 4 条）。
     """
     from backend.services.simulation.services.local_market_data import (
-        LIMIT_TOLERANCE,
-        limit_pct,
+        limit_threshold,
     )
 
     td = date.today() if pd.isna(trade_date) else pd.Timestamp(trade_date).date()
-    return (
-        float(limit_pct(str(symbol), is_st=bool(is_st), trade_date=td)) * 100.0
-        - LIMIT_TOLERANCE * 100.0
-    )
+    return limit_threshold(str(symbol), is_st=bool(is_st), trade_date=td) * 100.0
 
 
 def _select_stocks_daily(

@@ -330,7 +330,7 @@ def test_engine_out_of_order_duplicate_and_gap_counters():
     )
     # 乱序：整帧拒绝，close 不变
     r = engine.on_snapshot(
-        "600036.SH", {"price": 9.9, "ts": _day_ts("20260917", "095900")}
+        "600036.SH", {"price": 9.9, "ts": _day_ts("20260917", "095900")}  # fidelity: allow-limit-threshold — 非阈值：乱序 tick 的价格夹具
     )
     assert r == {"accepted": False, "reason": "out_of_order"}
     assert engine.forming_bar("600036.SH")["close"] == 10.5

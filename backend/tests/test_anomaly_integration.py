@@ -63,7 +63,7 @@ def test_anomaly_engine_real_actions_end_to_end():
     def data_fetcher(cfg):
         return [{"symbol": "600036.SH",
                  "latest": {"date": "2026-09-14", "close": 20.0, "volume": 1000,
-                            "limit_up": 12.1, "limit_down": 9.9},
+                            "limit_up": 12.1, "limit_down": 9.9},  # fidelity: allow-limit-threshold — 非阈值：跌停价夹具（供包络判定）
                  "prev": {"date": "2026-09-11", "close": 11.0},
                  "expected_prev_date": "2026-09-11"}]
 

@@ -274,7 +274,7 @@ def test_cleaner_l3_marks_outlier():
     cleaner = DataCleaner(strict=False)
     df = pd.DataFrame([
         {"symbol": "X", "trade_date": date(2025, 1, 2), "open": 10, "high": 10.5,
-         "low": 9.5, "close": 10.0, "volume": 100},
+         "low": 9.5, "close": 10.0, "volume": 100},  # fidelity: allow-limit-threshold — 非阈值：K 线夹具的 low
         {"symbol": "X", "trade_date": date(2025, 1, 3), "open": 100, "high": 110,
          "low": 95, "close": 105.0, "volume": 100},  # 10x change
     ])

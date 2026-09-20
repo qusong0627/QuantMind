@@ -368,19 +368,18 @@ def _limit_threshold_pct(symbol: object, is_st: bool, trade_date: object) -> flo
     交易日不可解析时退化为「按当日板规」：这只影响宽板改制前的历史窗口，
     但绝不为了一个坏日期让整批 1000 万行的补数任务崩掉。
 
-    余量同源：唯一事实源 = `local_market_data.LIMIT_TOLERANCE`（0.5pp，取比例形态
-    后 ×100 得百分点）。旧实现自带 `_LIMIT_SLACK_PCT = 0.2`，实测在股价 < ¥2.50 时
-    覆盖不足（漏判 4/2488 条真涨停），已废弃。
+    余量同源：唯一事实源 = `local_market_data.limit_threshold`（= 板别幅度 − 该板别
+    的取整容差，北交所容差翻倍；本行要的是百分点形态，故 ×100）。旧实现自带
+    `_LIMIT_SLACK_PCT = 0.2`，实测在股价 < ¥2.50 时覆盖不足（漏判 4/2488 条真涨停），
+    已废弃。
     """
     from backend.services.simulation.services.local_market_data import (
-        LIMIT_TOLERANCE,
-        limit_pct,
+        limit_threshold,
     )
 
     td = date.today() if pd.isna(trade_date) else trade_date
     return (
-        float(limit_pct(str(symbol), is_st=is_st, trade_date=td)) * 100.0
-        - LIMIT_TOLERANCE * 100.0
+        limit_threshold(str(symbol), is_st=is_st, trade_date=td) * 100.0
     )
 
 

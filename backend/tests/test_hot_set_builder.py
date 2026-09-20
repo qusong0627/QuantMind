@@ -136,7 +136,7 @@ async def test_build_once_multi_user_union_real_env():
                         "VALUES (:r, :t, :u, :d, :s, :f, 'test', 'test')"
                     ),
                     {"r": f"hotset-{uuid.uuid4().hex[:8]}", "t": tenant, "u": "41",
-                     "d": today, "s": sym, "f": 9.9 - i},
+                     "d": today, "s": sym, "f": 9.9 - i},  # fidelity: allow-limit-threshold — 非阈值：fusion_score 递减夹具
                 )
             await session.commit()
 

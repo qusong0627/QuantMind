@@ -6,16 +6,20 @@ Extracted from inference_parquet.py template to avoid code duplication.
 from __future__ import annotations
 
 import logging
+from datetime import date, datetime
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-from .trading_cost import limit_threshold
-
 logger = logging.getLogger(__name__)
 
 _DEFAULT_DATA_DIR = "/app/db/feature_snapshots"
+
+#: 定不出板别时的兜底阈值（**比例**）= 最严的主板线（10% − 0.5pp 容差）。
+#: 两个触发点都**必然**伴随 WARNING：一是取数面没有 symbol 列，二是权威实现
+#: 对某个 symbol 抛错。宁可多剔也不放真涨停进来，但绝不静默。
+_FALLBACK_LIMIT_THRESHOLD = 0.095  # fidelity: allow-limit-threshold — 兜底按最严主板线
 
 # 前瞻标签列名。绝不能与任何特征列同名 —— 见 load_forward_labels 文档。
 FORWARD_RETURN_COL = "fwd_return"
@@ -72,15 +76,83 @@ def resolve_parquet_path(data_dir: Path, trade_date: str, meta: dict | None = No
     return None
 
 
+def _as_trade_date(value: object) -> date | None:
+    """``"20260918"`` / ``"2026-09-18"`` / ``date`` 都收，认不出返回 None。"""
+    if isinstance(value, date) and not isinstance(value, datetime):
+        return value
+    if isinstance(value, datetime):
+        return value.date()
+    text = str(value or "").strip()
+    if len(text) == 8 and text.isdigit():
+        return date(int(text[:4]), int(text[4:6]), int(text[6:8]))
+    try:
+        return date.fromisoformat(text[:10])
+    except ValueError:
+        return None
+
+
+def _limit_thresholds_by_symbol(
+    symbols: pd.Series,
+    *,
+    is_st: pd.Series | None,
+    trade_date: date | None,
+) -> pd.Series:
+    """逐票当日的涨跌停判定阈值（**比例**）。
+
+    口径唯一事实源 = ``local_market_data.limit_threshold``（= 板别幅度 − 取整
+    容差，北交所容差翻倍）。取数面的 symbol 是 ``000001.SZ`` 形态，三种写法
+    权威实现都认。
+
+    ⚠️ 本函数取代了原先按 ``listing_market`` 字符串查表的老路（
+    ``trading_cost._LIMIT_BY_MARKET``）：那张表的键是中文板名，而取数面实际写入的
+    是 ``SH``/``SZ``/``BJ``/``"None"``，**一个都命不中**，全市场一律落 10% 默认线。
+    2026-09-20 在 ``model_features_2026.parquet`` 实测（22,185 行有涨跌幅）：
+    旧路剔 436 行、按 symbol 应剔 304 行，**多剔 132 行**（20% 板 115、北交所 17），
+    被误剔的 |涨幅| 中位数 11.4% —— 剔掉的恰是高动量样本。
+
+    同一 symbol + ST 状态只算一次：逐票调用约 1.9 µs，全池逐行重算没必要。
+    """
+    from backend.services.simulation.services.local_market_data import (
+        limit_threshold,
+    )
+
+    st_flags = None
+    if is_st is not None:
+        st_flags = pd.to_numeric(is_st, errors="coerce").fillna(0) == 1
+    # 拿不到交易日时按今天算：制度线（创业板 2020-08-24、ST 主板 2026-07-06）
+    # 会偏保守 —— 历史回测里会把改革后的宽线套在改革前，故调用方应尽量透传。
+    td = trade_date or date.today()
+
+    cache: dict[tuple[str, bool], float] = {}
+    values: list[float] = []
+    for pos, raw in enumerate(symbols):
+        sym = str(raw)
+        st = bool(st_flags.iloc[pos]) if st_flags is not None else False
+        key = (sym, st)
+        if key not in cache:
+            try:
+                cache[key] = float(
+                    limit_threshold(sym, is_st=st, trade_date=td)
+                )
+            except Exception as exc:  # 单票取不到不该炸掉整轮回测
+                logger.warning("涨跌停阈值取不到 %s: %s", sym, exc)
+                cache[key] = _FALLBACK_LIMIT_THRESHOLD
+        values.append(cache[key])
+    return pd.Series(values, index=symbols.index, dtype="float64")
+
+
 def filter_untradable_rows(
     df: pd.DataFrame,
     exclude_limit_moves: bool = False,
+    trade_date: object = None,
 ) -> pd.DataFrame:
     """Filter untradable rows (suspended, zero volume, ST stocks).
 
     exclude_limit_moves: 额外剔除信号日触及涨跌停的标的。回测须开启 ——
     信号日涨停的股票次日一字板买不进，计入组合会高估收益。推理路径保持
     默认关闭，以免改变现有线上行为。
+    trade_date: 阈值所用的交易日（决定 ST/创业板制度线）。回测**应传** ——
+    缺省按今天算，会把改革后的宽线套到改革前。
     """
     if df.empty:
         return df
@@ -104,10 +176,23 @@ def filter_untradable_rows(
 
     if exclude_limit_moves and "pctchange" in filtered.columns:
         pct = pd.to_numeric(filtered["pctchange"], errors="coerce")
-        if "listing_market" in filtered.columns:
-            threshold = filtered["listing_market"].map(limit_threshold)
+        if "symbol" in filtered.columns:
+            threshold = _limit_thresholds_by_symbol(
+                filtered["symbol"],
+                is_st=filtered["is_st"] if "is_st" in filtered.columns else None,
+                trade_date=_as_trade_date(trade_date),
+            )
         else:
-            threshold = pd.Series(limit_threshold(None), index=filtered.index)
+            # 没有 symbol 就定不了板别。退回 10% 默认线并**说出来** —— 静默按
+            # 主板线处理，会把 20%/30% 板的高动量样本当涨停剔掉（实测多剔
+            # 132/436），正是「报告漂亮、结论失真」的典型。
+            logger.warning(
+                "exclude_limit_moves 生效但取数面没有 symbol 列：全池按 10%% 默认线"
+                "判定（20%%/30%% 板会被过度剔除）"
+            )
+            threshold = pd.Series(
+                _FALLBACK_LIMIT_THRESHOLD, index=filtered.index, dtype="float64"
+            )
         at_limit = pct.abs() >= threshold
         dropped = int(at_limit.sum())
         if dropped:
@@ -170,7 +255,11 @@ def load_date_data(
     day_df = day_df.drop_duplicates(subset=["symbol"], keep="last")
 
     before_filter = len(day_df)
-    day_df = filter_untradable_rows(day_df, exclude_limit_moves=exclude_limit_moves)
+    day_df = filter_untradable_rows(
+        day_df,
+        exclude_limit_moves=exclude_limit_moves,
+        trade_date=trade_date,
+    )
     after_filter = len(day_df)
     if before_filter != after_filter:
         logger.info(
