@@ -138,6 +138,26 @@ def scan_model_signals(
                 state="watch",
             )
         )
+    # ST 闸口的**实况**：只报开关等于自证（此前 PG 侧 is_st 恒 NULL，配了
+    # exclude_st=true 实际一只都没排掉，meta 却照样写 true）。这里给出候选池里
+    # 真正被标记为 ST 的只数与判据来源，让「开关开着但没生效」无法再隐身。
+    st_flagged = 0
+    if snapshot.price_day is not None and not snapshot.price_day.empty:
+        if "is_st" in snapshot.price_day.columns:
+            st_flagged = int(
+                pd.to_numeric(snapshot.price_day["is_st"], errors="coerce")
+                .fillna(0)
+                .gt(0)
+                .sum()
+            )
+    st_source = ""
+    try:
+        from backend.services.engine.routers.selection import st_source_hint
+
+        st_source = st_source_hint(str(snapshot.trade_date or ""))
+    except Exception:  # noqa: BLE001 - 口径说明是证据位，失败不阻断扫描
+        st_source = ""
+
     meta: dict[str, Any] = {
         "trade_date": snapshot.trade_date,
         "scanner": "model_signal",
@@ -149,6 +169,12 @@ def scan_model_signals(
             "main_board_only": cfg.main_board_only,
             "exclude_st": cfg.exclude_st,
             "exclude_limit_moves": cfg.exclude_limit_moves,
+        },
+        "st_filter": {
+            "enabled": bool(cfg.exclude_st),
+            # 开关打开时这就是**被剔掉的只数**；为 0 即「开着但没生效」
+            "flagged_in_candidates": st_flagged,
+            "source": st_source,
         },
         "avg_top1": round(float(avg_top1), 6),
         "strong_industry_count": int(strong_count),

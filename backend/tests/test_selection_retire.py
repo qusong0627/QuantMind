@@ -92,7 +92,9 @@ async def test_selection_daily_real_data_fixed_and_deprecated():
     from backend.services.engine.routers.selection import daily_selection
 
     request = SimpleNamespace(
-        state=SimpleNamespace(user={"user_id": "00000001", "tenant_id": "default"})
+        # 规范管理员模拟账户是 10000001；00000001 已停用（信号不落在该 id 名下，
+        # 用它查会走「无信号」早退分支，测出来的红是账户口径过期而非选股链坏了）
+        state=SimpleNamespace(user={"user_id": "10000001", "tenant_id": "default"})
     )
     response = Response()
     try:

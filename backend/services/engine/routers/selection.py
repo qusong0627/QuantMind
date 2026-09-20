@@ -207,6 +207,70 @@ async def _load_index_above_ma20(target_date: str | None = None) -> tuple[bool, 
         return True, "指数数据不可用"
 
 
+#: QuantDB `instrument_detail.IsSTGP` 是**单一静态快照**（实测全表只有一个 HqDate），
+#: 不是逐日序列。所以它只在「最近的实盘窗口」内可信：拿今天的 ST 名单去过滤一个月前
+#: 的日期就是前视偏差（`factor_report/tradability.py` 有完整论证，回测轨因此一律不做
+#: ST 过滤）。超出这个窗口就如实返回「无 ST 信息」，而不是拿静态快照硬套。
+_ST_LIVE_WINDOW_DAYS = 7
+_ST_TTL = 600.0
+_st_cache: dict[str, Any] = {"map": None, "hqdate": "", "ts": 0.0}
+
+
+def _load_st_snapshot() -> tuple[dict[str, int], str]:
+    """QuantDB ST 快照 → ``({后缀式 symbol: 0/1}, HqDate)``；读不到返回空 dict。
+
+    这是**唯一可用的 ST 口径**：PG 侧 `stock_daily_latest.is_st`（1085 万行）与
+    `stock_daily_new_*` 的 is_st 列实测 `count(is_st)=0` —— 全为 NULL。既有代码拿它
+    判 ``is_st == 1`` 是恒假，等于「配了 exclude_st=true 却一只都没排掉」，而
+    `model_signal_scanner` 照样把该开关写进 meta。
+    """
+    now = _now()
+    cached = _st_cache["map"]
+    if cached is not None and now - float(_st_cache["ts"]) < _ST_TTL:
+        return cached, str(_st_cache["hqdate"])
+
+    out: dict[str, int] = {}
+    hqdate = ""
+    try:
+        from backend.services.engine.data_platform.quantdb_hub import QuantDBDataHub
+
+        df = QuantDBDataHub().fetch_stock_list()
+        if df is not None and not df.empty and "symbol" in df.columns and "IsSTGP" in df.columns:
+            st = pd.to_numeric(df["IsSTGP"], errors="coerce").fillna(0) > 0
+            # 只装 ST 的那些（1）；缺席的标的一律当 0，由调用方按需补
+            out = {str(s): 1 for s in df.loc[st, "symbol"].astype(str)}
+            if "HqDate" in df.columns and len(df):
+                hqdate = str(df["HqDate"].iloc[0] or "")
+    except Exception as exc:  # noqa: BLE001 - 读不到就是「无 ST 信息」，不阻断选股
+        logger.warning("加载 ST 快照失败（按无 ST 信息处理）: %s", exc)
+        return {}, ""
+
+    _st_cache.update({"map": out, "hqdate": hqdate, "ts": now})
+    return out, hqdate
+
+
+def _st_for(trade_date: str, symbols: set[str]) -> tuple[dict[str, int], str]:
+    """按交易日取 ST 标记 → ``({symbol: 0/1}, 口径说明)``。
+
+    只有落在实盘窗口内的交易日才给真值；历史日返回全 0 并**在说明里写明原因**，
+    让下游 meta 能如实交代，而不是静默当成「非 ST」。
+    """
+    try:
+        d = date.fromisoformat(trade_date)
+    except (TypeError, ValueError):
+        return {}, "交易日不可解析"
+    age = (date.today() - d).days
+    if age > _ST_LIVE_WINDOW_DAYS or age < -1:
+        return {}, f"历史日（距今 {age} 天）不套用静态 ST 快照（前视偏差）"
+    st_map, hqdate = _load_st_snapshot()
+    if not st_map:
+        return {}, "ST 快照不可用"
+    return (
+        {s: st_map.get(s, 0) for s in symbols},
+        f"quantdb:instrument_detail.IsSTGP（快照 {hqdate or '未知'}）",
+    )
+
+
 async def _load_price_flags(
     trade_date: str,
     symbols: list[str],
@@ -214,6 +278,8 @@ async def _load_price_flags(
     """加载个股价格/涨跌停/ST 标记（stock_daily_latest，当日或最近一条）。
 
     用于实盘过滤涨停买不进/跌停卖不出、ST 剔除。取当日若缺失则取最近一日。
+
+    ``pct_change`` 走 PG；``is_st`` 走 QuantDB 快照（见 `_st_for`）——PG 那列是死的。
     """
     if not symbols:
         return {}
@@ -222,13 +288,14 @@ async def _load_price_flags(
     d_param = date.fromisoformat(trade_date) if trade_date else None
     if d_param is None:
         return {}
+    st_map, _st_source_used = _st_for(trade_date, set(symbols))
     async with get_session(read_only=True) as session:
         seen: set[str] = set()
         for chunk in _chunks(list(normalized.keys()), 300):
             # DISTINCT ON 取每个 symbol 最新一条（<= trade_date），避免拉全历史
             q = text(
                 """
-                SELECT DISTINCT ON (symbol) symbol, trade_date, pct_change, is_st
+                SELECT DISTINCT ON (symbol) symbol, trade_date, pct_change
                 FROM stock_daily_latest
                 WHERE symbol = ANY(:codes)
                   AND trade_date <= :d
@@ -244,9 +311,23 @@ async def _load_price_flags(
                 seen.add(suffix)
                 flags[suffix] = {
                     "pct_change": float(row["pct_change"]) if row["pct_change"] is not None else None,
-                    "is_st": int(row["is_st"] or 0),
+                    "is_st": int(st_map.get(suffix, 0)),
                 }
+    # 日线表里缺席的标的也要给一行：否则 ST 判据跟着一起缺席（缺席会被下游当成
+    # 「非 ST」放过去，等于给停牌/新股开了后门）。pct_change 留 None，下游按
+    # 「无涨跌停信息」处理，行为与改前一致
+    for suffix in normalized.values():
+        flags.setdefault(
+            suffix,
+            {"pct_change": None, "is_st": int(st_map.get(suffix, 0))},
+        )
     return flags
+
+
+def st_source_hint(trade_date: str) -> str:
+    """本次 ST 判据的口径说明（供 meta 如实交代「依据什么、是否只到最近一周」）。"""
+    _, source = _st_for(trade_date, set())
+    return source or "quantdb:instrument_detail.IsSTGP"
 
 
 @router.get("/daily")
