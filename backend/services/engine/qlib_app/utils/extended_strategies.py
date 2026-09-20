@@ -1017,6 +1017,42 @@ class RedisStopLossStrategy(DynamicRiskMixin, TopkDropoutStrategy, RedisLoggerMi
         self.log_executed_trades(execute_result)
 
 
+#: 「贴板」判定的取整容差（比例）。沿用旧的 0.095 = 0.10 − 0.005：涨跌停价要按分
+#: 取整，真正封板的票可能只显示 9.97%，不留余量会把真贴板判丢。
+_LIMIT_TOLERANCE = 0.005
+
+
+def _limit_band(symbols, trade_date) -> pd.Series:
+    """各标的在 ``trade_date`` 的涨跌停带宽（**比例**，已扣取整余量）。
+
+    口径唯一事实源 = ``local_market_data.limit_pct``（板别 + 创业板 2020-08-24
+    注册制改革 + ST 主板 5%→10%）。
+
+    旧实现是一条写死的 ±0.095，对沪深 300 里的创业板/科创板成分股（真实 20% 板）
+    把 −12% 的普通下跌日误判成「贴板」而剔除 —— 恰恰是 ``as41_crash_dip``
+    要买的**跌得最深**的那批票（300750/300760/300059/300124 都在池内），
+    方向是系统性的：越该买越被扔掉。
+    """
+    from backend.services.simulation.services.local_market_data import limit_pct
+
+    td = pd.Timestamp(trade_date).date()
+    return pd.Series(
+        [
+            float(
+                limit_pct(
+                    str(s),
+                    is_st=False,  # fidelity: allow-limit-threshold — csi300 无 ST
+                    trade_date=td,
+                )
+            )
+            - _LIMIT_TOLERANCE
+            for s in symbols
+        ],
+        index=symbols,
+        dtype=float,
+    )
+
+
 class RedisCrashBuyDipStrategy(DynamicRiskMixin, WeightStrategyBase, RedisLoggerMixin):
     """
     大盘暴跌抄底策略 (Crash Buy-the-Dip)
@@ -1153,9 +1189,12 @@ class RedisCrashBuyDipStrategy(DynamicRiskMixin, WeightStrategyBase, RedisLogger
             return []
         if dd.empty:
             return []
+        # 贴板带宽逐票取（板别/改革日），不再是写死的 ±0.095 —— 见 _limit_band。
+        # 判定当日的日期用 crash_date：_factor_df 覆盖整个回测窗口，用今天会错。
+        limit_band = _limit_band(dd.index, crash_date)
         mask = (dd.get(f"ROC{self.trend_window}", pd.Series(dtype=float)) > 0) & \
                (dd.get(f"MA{self.ma_fast}", pd.Series(dtype=float)) > dd.get(f"MA{self.ma_slow}", pd.Series(dtype=float))) & \
-               (dd["$change"] > -0.095) & (dd["$change"] < 0.095) & \
+               (dd["$change"].abs() < limit_band) & \
                (dd["$change"] < idx_pct - self.min_oversold_margin) & \
                (dd.get("VOL_RATIO", pd.Series(dtype=float)) > 0.5)
         cands = dd[mask].copy()
