@@ -27,6 +27,7 @@ from backend.shared.factor_partition import (
     iter_partitions,
     partition_signature,
     read_partition,
+    resolve_features,
     scan_order_groups,
 )
 
@@ -429,3 +430,117 @@ def test_read_partition_keeps_named_columns_across_a_schema_growth(tmp_path):
     contract.check(df_old.columns, context="20240102")
     with pytest.raises(RuntimeError, match="列集合与首日不一致"):
         contract.check(df_new.columns, context="20240104")
+
+
+# ── 开工前定清单：训练/回测按名读取永不报错 ────────────────────────────────
+
+
+def test_resolve_features_then_read_partition_never_raises_across_schema_break(
+    tmp_path,
+):
+    """这就是「训练不报错、回测不报错」的正解，端到端钉住。
+
+    跨 schema 断点（这里是 3 列→4 列），先 resolve_features 取交集，
+    再拿同一份 columns 逐日 read_partition —— 全程零异常。
+    """
+    # Arrange
+    lib = tmp_path / "features_daily"
+    _make_library(lib, {"20240102": {"symbol": ["A"], "f_a": [1.0], "f_b": [2.0]}})
+    _make_library(lib, {"20240103": {"symbol": ["A"], "f_a": [3.0], "f_b": [4.0]}})
+    _make_library(
+        lib,
+        {"20240104": {"symbol": ["A"], "f_a": [5.0], "f_b": [6.0], "f_new": [70.0]}},
+    )
+    wanted = ["f_a", "f_b", "f_new"]  # f_new 只在最后一天有
+    paths = sorted(iter_partitions(lib))
+
+    # Act
+    resolved = resolve_features(paths, wanted, library="features_daily")
+    frames = [read_partition(p, columns=resolved.read_columns) for p in paths]
+
+    # Assert：f_new 被剔除，剩下的逐日都在，维度恒定
+    assert resolved.columns == ("f_a", "f_b")
+    # read_columns 必须带上 symbol，否则没法对齐标签
+    assert resolved.key_columns == ("symbol",)
+    assert [tuple(f.columns) for f in frames] == [("symbol", "f_a", "f_b")] * 3
+    assert [f["f_a"].iloc[0] for f in frames] == [1.0, 3.0, 5.0]
+
+
+def test_resolve_features_drops_column_only_present_in_some_partitions(tmp_path):
+    # Arrange
+    lib = tmp_path / "features_daily"
+    _make_growing_schema_library(lib)
+    # Act
+    r = resolve_features(
+        iter_partitions(lib), ["f_old", "f_new"], library="features_daily"
+    )
+    # Assert
+    assert r.columns == ("f_old",)
+    assert [c for c, _ in r.dropped] == ["f_new"]
+    assert "缺" in dict(r.dropped)["f_new"]
+
+
+def test_resolve_features_keeps_everything_when_schema_is_uniform(tmp_path):
+    # Arrange
+    lib = tmp_path / "l1_factors"
+    _make_library(lib, {"20240102": {"symbol": ["A"], "f_b": [1.0], "f_a": [2.0]}})
+    _make_library(lib, {"20240103": {"symbol": ["A"], "f_a": [3.0], "f_b": [4.0]}})
+    # Act：列序不同不算缺失
+    r = resolve_features(iter_partitions(lib), ["f_a", "f_b"], library="l1_factors")
+    # Assert
+    assert r.columns == ("f_a", "f_b")
+    assert r.dropped == ()
+    assert r.n_partitions == 2
+    assert r.span == ("20240102", "20240103")
+
+
+def test_resolve_features_raise_mode_reports_which_columns_and_why(tmp_path):
+    # Arrange
+    lib = tmp_path / "features_daily"
+    _make_growing_schema_library(lib)
+    # Act / Assert：严格模式必须点名是哪一列、缺在哪
+    with pytest.raises(RuntimeError, match="f_new"):
+        resolve_features(iter_partitions(lib), ["f_old", "f_new"], on_missing="raise")
+
+
+def test_resolve_features_missing_reason_carries_the_span(tmp_path):
+    """缺失说明要给出区间，调用方才能判断该「截断窗口」还是「去掉该列」。"""
+    # Arrange
+    lib = tmp_path / "lib"
+    _make_library(lib, {"20240102": {"symbol": ["A"], "f_old": [1.0]}})
+    _make_library(
+        lib,
+        {"20240103": {"symbol": ["A"], "f_old": [2.0], "f_side": [9.0]}},
+    )
+    _make_library(
+        lib,
+        {"20240104": {"symbol": ["A"], "f_old": [3.0], "f_side": [9.0]}},
+    )
+    # Act
+    r = resolve_features(iter_partitions(lib), ["f_old", "f_side"])
+    # Assert：f_side 只从 20240103 起才有
+    assert dict(r.dropped)["f_side"] == "仅 20240102 缺"
+
+
+def test_resolve_features_rejects_nan_fill_policy(tmp_path):
+    """刻意不提供「填 NaN」：那是泄露不是容错（老分区全 NULL = 年代指示器）。"""
+    lib = tmp_path / "lib"
+    _make_growing_schema_library(lib)
+    with pytest.raises(ValueError, match="intersect/raise"):
+        resolve_features(iter_partitions(lib), ["f_old"], on_missing="nan")
+
+
+def test_resolve_features_rejects_empty_inputs(tmp_path):
+    lib = tmp_path / "lib"
+    _make_growing_schema_library(lib)
+    with pytest.raises(ValueError, match="至少一个分区"):
+        resolve_features([], ["f_old"])
+    with pytest.raises(ValueError, match="非空 wanted"):
+        resolve_features(iter_partitions(lib), [])
+
+
+def test_resolve_features_raises_when_intersection_is_empty(tmp_path):
+    lib = tmp_path / "lib"
+    _make_growing_schema_library(lib)
+    with pytest.raises(ValueError, match="交集为空"):
+        resolve_features(iter_partitions(lib), ["f_new"])

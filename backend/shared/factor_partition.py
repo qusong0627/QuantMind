@@ -231,6 +231,126 @@ class ColumnContract:
         return list(feats)
 
 
+@dataclass(frozen=True)
+class ResolvedFeatures:
+    """一次性定死的特征清单（训练与回测必须共用同一份）。"""
+
+    library: str
+    columns: tuple[str, ...]  # 特征轴：喂给模型的那几列
+    key_columns: tuple[str, ...]  # 键/元列，用于对齐标签与股票池
+    dropped: tuple[tuple[str, str], ...]  # (列名, 缺失说明)
+    n_partitions: int
+    span: tuple[str, str] | None  # (首日, 末日)
+
+    @property
+    def read_columns(self) -> tuple[str, ...]:
+        """传给 ``read_partition(columns=...)`` 的完整清单（键 + 特征）。
+
+        ``read_partition`` 只返回你点名要的列，所以**不能只传特征** ——
+        否则拿不到 ``symbol``/``date``，也就没法对齐标签。
+        """
+        return self.key_columns + self.columns
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "library": self.library,
+            "columns": list(self.columns),
+            "key_columns": list(self.key_columns),
+            "n_features": len(self.columns),
+            "dropped": [{"column": c, "reason": r} for c, r in self.dropped],
+            "n_partitions": self.n_partitions,
+            "span": list(self.span) if self.span else None,
+        }
+
+    def summary(self) -> str:
+        span = f"{self.span[0]}~{self.span[1]}" if self.span else "—"
+        lines = [
+            f"{self.library or '?'}: {len(self.columns)} 维特征"
+            f"（{self.n_partitions} 个分区 {span}）",
+            f"  键列: {', '.join(self.key_columns) or '—'}",
+        ]
+        if self.dropped:
+            lines.append(f"  已剔除 {len(self.dropped)} 列（各分区不完全存在）：")
+            lines += [f"    - {c}: {r}" for c, r in self.dropped]
+        return "\n".join(lines)
+
+
+def resolve_features(
+    paths: Iterable[str | Path],
+    wanted: Iterable[str],
+    *,
+    on_missing: str = "intersect",
+    library: str = "",
+) -> ResolvedFeatures:
+    """训练/回测开工前**一次性**定死特征清单，之后按名读取永不报错。
+
+    为什么需要它：列集合会跨 schema 断点变化（实测 ``features_daily`` 20260914 起
+    50→78 列、``l1_factors`` 20260826 起 121→119 列）。若逐分区调用 :class:`ColumnContract`，
+    训练会在断点当天中断。正确做法不是在读取期容忍，而是**建模前把清单定死**：
+
+    - ``intersect``（默认）：只保留在**所有**分区都存在的列，缺的进 ``dropped``。
+      确定、可复现、不注入 NULL。**训练与回测必须共用返回的** ``columns``。
+    - ``raise``：缺任何一列即抛，等价于严格模式。
+
+    ⚠ 不要用「缺列填 NaN」代替本函数：老分区全 NaN、新分区全非 NULL 会构成完美的
+    年代指示器，树模型必然学它 —— 那是泄露，不是容错。
+
+    只读 parquet footer，不读数据。空 ``paths`` 或无列时抛 ``ValueError``。
+    """
+    if on_missing not in ("intersect", "raise"):
+        raise ValueError(f"on_missing 只支持 intersect/raise，收到 {on_missing!r}")
+
+    plist = [Path(p) for p in paths]
+    if not plist:
+        raise ValueError("resolve_features 需要至少一个分区")
+    wanted_list = list(dict.fromkeys(wanted))  # 去重且保序
+    if not wanted_list:
+        raise ValueError("resolve_features 需要非空 wanted 特征清单")
+
+    per_file = {p: set(partition_signature(p)) for p in plist}
+    present_in_all = set.intersection(*per_file.values())
+    missing_map: dict[str, list[Path]] = {c: [] for c in wanted_list}
+    for p, cols in per_file.items():
+        for c in wanted_list:
+            if c not in cols:
+                missing_map[c].append(p)
+
+    dropped = tuple(
+        (c, _missing_reason(missing_map[c], len(plist)))
+        for c in wanted_list
+        if missing_map[c]
+    )
+    if dropped and on_missing == "raise":
+        raise RuntimeError(
+            f"{library or '?'} 特征清单有 {len(dropped)} 列并非全程存在："
+            + "；".join(f"{c}（{r}）" for c, r in dropped[:5])
+        )
+
+    keep = tuple(sorted(c for c in wanted_list if not missing_map[c]))
+    if not keep:
+        raise ValueError(
+            f"{library or '?'} 特征清单在全部 {len(plist)} 个分区里都不完整，交集为空"
+        )
+    dates = sorted(p.parent.name.split("=", 1)[-1] for p in plist)
+    return ResolvedFeatures(
+        library=library,
+        columns=keep,
+        # 键列同样只取「全程都在」的：l1_factors 20260826 起就丢了 published_at
+        key_columns=tuple(c for c in META_COLUMNS if c in present_in_all),
+        dropped=dropped,
+        n_partitions=len(plist),
+        span=(dates[0], dates[-1]),
+    )
+
+
+def _missing_reason(missing: list[Path], total: int) -> str:
+    """把「哪些分区缺这一列」压成一句可读的说明（含缺失区间）。"""
+    dts = sorted(p.parent.name.split("=", 1)[-1] for p in missing)
+    if len(dts) == 1:
+        return f"仅 {dts[0]} 缺"
+    return f"{len(missing)}/{total} 个分区缺（{dts[0]} ~ {dts[-1]}）"
+
+
 def default_market_roots() -> dict[str, Path]:
     """各市场 QuantDB 根目录（env 优先，与 CLAUDE.md 的数据目录约定一致）。"""
     project = Path(__file__).resolve().parents[2]
