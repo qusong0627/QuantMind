@@ -1,7 +1,7 @@
 import { useAppSelector } from '../../../store';
 import { selectCurrentMarket } from '../../../store/slices/uiSlice';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowLeft, CheckCircle2, ClipboardList, Loader2, Search, Zap, BarChart3, User as UserIcon, Settings2, Sparkles, Filter, Link, ArrowRight, Layers, TrendingUp, Activity, History, Cpu, Clock, Brain, Target, Database, Code, Calendar, Wand2, Eye, Play, CreditCard, Binary, ShieldAlert, Info, TerminalSquare, AlertTriangle } from 'lucide-react';
+import { ArrowLeft, CheckCircle2, ClipboardList, Search, Zap, BarChart3, User as UserIcon, Settings2, Sparkles, Filter, Link, ArrowRight, Layers, History, Cpu, Clock, Brain, Target, Database, Calendar, Wand2, Eye, TerminalSquare } from 'lucide-react';
 import { DatePicker, Empty, Input, Select, Spin, Tag, message, Tooltip, Badge } from 'antd';
 import dayjs from 'dayjs';
 import utc from 'dayjs/plugin/utc';
@@ -27,7 +27,6 @@ import type {
     ManualExecutionLogEntry,
     ManualExecutionLogSnapshot,
     ManualExecutionPreview,
-    ManualExecutionPreviewOrder,
     ManualExecutionTaskRecord,
 } from '../../../services/realTradingService';
 import type { StrategyFile } from '../../../types/backtest/strategy';
@@ -36,6 +35,9 @@ import {
     buildLargeOrderScenario,
     isLargeOrderAmount,
 } from '../../../components/shared/compliance/dangerAction';
+import { ManualTaskRail } from './manual-task/ManualTaskRail';
+import { OrderColumn, RiskGroupList } from './manual-task/OrderBoard';
+import { formatMoney as renderMoney } from './manual-task/manualTaskModel';
 
 interface ManualTaskPageProps {
     tenantId: string;
@@ -112,73 +114,11 @@ const statusTone = (index: number, currentStep: number) => {
     return 'border-gray-200 bg-white text-gray-400';
 };
 
-const renderMoney = (value?: number) => {
-    if (!Number.isFinite(value)) return '--';
-    return `¥${Number(value).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-};
-
 const modelDisplayName = (model: any) => {
     if (!model) return '-';
     const meta = getMeta(model as any);
     return (meta.display_name || meta.model_name || model.model_id) as string;
 };
-
-const renderOrderCard = (order: ManualExecutionPreviewOrder, tone: 'buy' | 'sell') => (
-    <div
-        key={`${order.side}-${order.symbol}-${order.quantity}`}
-        className={`group relative overflow-hidden rounded-xl border transition-all duration-300 hover:shadow-md ${
-            tone === 'sell' 
-                ? 'border-rose-100 bg-white hover:border-rose-300' 
-                : 'border-emerald-100 bg-white hover:border-emerald-300'
-        }`}
-    >
-        <div className={`absolute top-0 left-0 w-1 h-full ${tone === 'sell' ? 'bg-rose-500' : 'bg-emerald-500'}`} />
-        <div className="p-3">
-            <div className="flex items-center justify-between gap-2.5 mb-2.5">
-                <div className="flex items-center gap-2">
-                    <div className={`w-7 h-7 rounded-lg flex items-center justify-center font-bold text-[10px] ${tone === 'sell' ? 'bg-rose-50 text-rose-600' : 'bg-emerald-50 text-emerald-600'}`}>
-                        {tone === 'sell' ? 'S' : 'B'}
-                    </div>
-                    <div>
-                        <div className="font-mono text-xs font-bold text-gray-900 leading-none">{order.symbol}</div>
-                        <div className="text-[9px] text-gray-400 mt-1 uppercase tracking-tighter">{order.reason || (tone === 'sell' ? 'EXIT' : 'ENTRY')}</div>
-                    </div>
-                </div>
-                <Tag color={tone === 'sell' ? 'volcano' : 'cyan'} bordered={false} className="m-0 text-[10px] font-bold px-1.5 py-0 rounded-md">
-                    {order.side}
-                </Tag>
-            </div>
-            
-            <div className="grid grid-cols-2 gap-x-4 gap-y-2 pt-2.5 border-t border-gray-50 text-[10px]">
-                <div className="flex flex-col">
-                    <span className="text-gray-400 font-bold uppercase tracking-tighter">数量</span>
-                    <span className="font-mono text-gray-900 font-bold">{order.quantity.toLocaleString()}</span>
-                </div>
-                <div className="flex flex-col">
-                    <span className="text-gray-400 font-bold uppercase tracking-tighter">委托</span>
-                    <span className="font-mono text-gray-900 font-bold">{order.order_type}</span>
-                </div>
-                <div className="flex flex-col">
-                    <span className="text-gray-400 font-bold uppercase tracking-tighter">目标价</span>
-                    <span className="font-mono text-blue-600 font-bold">
-                        {order.price === 0 ? <span className="text-gray-400 font-medium">未获取</span> : renderMoney(order.price)}
-                    </span>
-                </div>
-                <div className="flex flex-col">
-                    <span className="text-gray-400 font-bold uppercase tracking-tighter">预估金额</span>
-                    <span className="font-mono text-gray-900 font-bold">
-                        {order.price === 0 ? <span className="text-gray-300">--</span> : renderMoney(order.estimated_notional)}
-                    </span>
-                </div>
-            </div>
-
-            <div className="mt-2.5 flex items-center justify-between bg-gray-50/50 rounded-lg p-2 text-[9px] font-medium">
-                <span className="text-gray-400">持仓: <span className="text-gray-700">{order.current_volume ?? 0}</span></span>
-                <span className="text-gray-400">Ref: {order.reference_price === 0 ? '未获取' : renderMoney(order.reference_price)}</span>
-            </div>
-        </div>
-    </div>
-);
 
 const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack }) => {
     const currentMarket = useAppSelector(selectCurrentMarket);
@@ -1199,213 +1139,76 @@ const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack }) 
                 {currentStep === 3 ? (
                     <div className="animate-in fade-in slide-in-from-bottom-2 duration-500">
                         <div className="flex flex-col lg:flex-row gap-6">
-                            <div className="flex-1 space-y-5">
+                            <div className="flex-1 space-y-4">
                                 <div>
                                     <h2 className="text-lg font-bold text-gray-900 flex items-center gap-2">
                                         第四步：向导生成执行预案
                                         <Eye className="text-blue-500" size={18} />
                                     </h2>
                                     <p className="text-[13px] text-gray-500 mt-1">
-                                        系统已根据行情和策略逻辑生成指令概要。此步骤不会发起真实报单，仅供核对执行细节。
+                                        此步骤不会发起真实报单，仅供核对委托细节与风控裁定。
                                     </p>
                                 </div>
 
-                                {!preview && (
-                                    <div className="p-10 rounded-2xl border-2 border-dashed border-gray-100 bg-gray-50/50 flex flex-col items-center justify-center text-center">
+                                {!preview ? (
+                                    <div className="p-12 rounded-2xl border-2 border-dashed border-gray-100 bg-gray-50/50 flex flex-col items-center justify-center text-center">
                                         <div className="w-16 h-16 rounded-2xl bg-white shadow-md shadow-gray-200/50 flex items-center justify-center text-blue-500 mb-5">
                                             <Wand2 size={32} />
                                         </div>
-                                        <h3 className="text-base font-bold text-gray-900 mb-1.5">生成预案以继续</h3>
-                                        <p className="text-xs text-gray-400 max-w-xs mb-6 font-medium">点击右侧按钮计算本次任务的具体委托细节。</p>
-                                        <button
-                                            type="button"
-                                            onClick={() => void generatePreview()}
-                                            disabled={previewLoading}
-                                            className="px-6 py-3 rounded-xl bg-blue-600 text-white text-xs font-bold hover:bg-blue-700 disabled:opacity-50 shadow-md shadow-blue-100 transition-all flex items-center gap-2"
-                                        >
-                                            {previewLoading ? <Loader2 size={16} className="animate-spin" /> : <Play size={16} fill="currentColor" />}
-                                            立即计算调仓预案
-                                        </button>
+                                        <h3 className="text-base font-bold text-gray-900 mb-1.5">尚未生成调仓预案</h3>
+                                        <p className="text-xs text-gray-400 max-w-xs font-medium">
+                                            点击右侧「立即计算调仓预案」，系统将按策略生成委托明细与风控拦截清单。
+                                        </p>
                                     </div>
-                                )}
-
-                                {preview && (
-                                    <div className="space-y-6 animate-in fade-in duration-500">
-                                        <div className="grid grid-cols-1 xl:grid-cols-2 gap-3">
-                                            <div className="p-4 rounded-xl border border-gray-100 bg-gray-50/50">
-                                                <div className="text-[9px] font-bold text-gray-400 uppercase tracking-widest mb-3 flex items-center gap-2">
-                                                    <CreditCard size={12} className="text-blue-500" />
-                                                    资产快照
-                                                </div>
-                                                <div className="grid grid-cols-2 gap-4">
-                                                    <div>
-                                                        <div className="text-[9px] text-gray-400 font-bold mb-0.5 uppercase">现金</div>
-                                                        <div className="font-mono text-sm font-bold text-gray-900">{renderMoney(preview.account_snapshot.available_cash)}</div>
-                                                    </div>
-                                                    <div>
-                                                        <div className="text-[9px] text-gray-400 font-bold mb-0.5 uppercase">市值</div>
-                                                        <div className="font-mono text-sm font-bold text-gray-900">{renderMoney(preview.account_snapshot.market_value)}</div>
-                                                    </div>
+                                ) : (
+                                    <div className="space-y-4 animate-in fade-in duration-500">
+                                        <div className="grid grid-cols-2 md:grid-cols-4 divide-x divide-gray-100 rounded-xl border border-gray-100 bg-gray-50/50">
+                                            <div className="px-3 py-2.5">
+                                                <div className="text-[9px] font-bold uppercase tracking-widest text-gray-400 mb-0.5">可用现金</div>
+                                                <div className="font-mono text-[12px] font-bold text-gray-900">{renderMoney(preview.account_snapshot.available_cash)}</div>
+                                            </div>
+                                            <div className="px-3 py-2.5">
+                                                <div className="text-[9px] font-bold uppercase tracking-widest text-gray-400 mb-0.5">持仓市值</div>
+                                                <div className="font-mono text-[12px] font-bold text-gray-900">{renderMoney(preview.account_snapshot.market_value)}</div>
+                                            </div>
+                                            <div className="px-3 py-2.5 min-w-0">
+                                                <div className="text-[9px] font-bold uppercase tracking-widest text-gray-400 mb-0.5">模型</div>
+                                                <div className="truncate font-mono text-[11px] font-bold text-gray-900" title={preview.strategy_context.model_id}>
+                                                    {preview.strategy_context.model_id}
                                                 </div>
                                             </div>
-                                            <div className="p-4 rounded-xl border border-gray-100 bg-gray-50/50">
-                                                <div className="text-[9px] font-bold text-gray-400 uppercase tracking-widest mb-3 flex items-center gap-2">
-                                                    <Binary size={12} className="text-emerald-500" />
-                                                    运行节点
-                                                </div>
-                                                <div className="grid grid-cols-2 gap-4">
-                                                    <div className="truncate">
-                                                        <div className="text-[9px] text-gray-400 font-bold mb-0.5 uppercase">模型 ID</div>
-                                                        <div className="font-bold text-[11px] text-gray-900 truncate">{preview.strategy_context.model_id}</div>
-                                                    </div>
-                                                    <div>
-                                                        <div className="text-[9px] text-gray-400 font-bold mb-0.5 uppercase">日期</div>
-                                                        <div className="font-mono font-bold text-[11px] text-gray-900">{preview.strategy_context.prediction_trade_date}</div>
-                                                    </div>
-                                                </div>
+                                            <div className="px-3 py-2.5">
+                                                <div className="text-[9px] font-bold uppercase tracking-widest text-gray-400 mb-0.5">信号日</div>
+                                                <div className="font-mono text-[11px] font-bold text-gray-900">{preview.strategy_context.prediction_trade_date}</div>
                                             </div>
                                         </div>
 
-                                        <div className="grid grid-cols-1 xl:grid-cols-2 gap-5">
-                                            <div className="space-y-3">
-                                                <h4 className="text-[11px] font-bold text-gray-900 px-1 flex items-center gap-2 uppercase tracking-wider">
-                                                    <div className="w-1 h-3 bg-rose-500 rounded-full" />
-                                                    卖出列表 ({preview.sell_orders.length})
-                                                </h4>
-                                                <div className="space-y-2.5 max-h-[400px] overflow-y-auto pr-1 custom-scrollbar">
-                                                    {preview.sell_orders.length > 0 ? preview.sell_orders.map((order) => renderOrderCard(order, 'sell')) : (
-                                                        <div className="py-10 border border-dashed border-gray-100 rounded-xl text-center text-[10px] font-bold text-gray-300 uppercase tracking-widest">Empty</div>
-                                                    )}
-                                                </div>
-                                            </div>
-
-                                            <div className="space-y-3">
-                                                <h4 className="text-[11px] font-bold text-gray-900 px-1 flex items-center gap-2 uppercase tracking-wider">
-                                                    <div className="w-1 h-3 bg-emerald-500 rounded-full" />
-                                                    买入列表 ({preview.buy_orders.length})
-                                                </h4>
-                                                <div className="space-y-2.5 max-h-[400px] overflow-y-auto pr-1 custom-scrollbar">
-                                                    {preview.buy_orders.length > 0 ? preview.buy_orders.map((order) => renderOrderCard(order, 'buy')) : (
-                                                        <div className="py-10 border border-dashed border-gray-100 rounded-xl text-center text-[10px] font-bold text-gray-300 uppercase tracking-widest">Empty</div>
-                                                    )}
-                                                </div>
-                                            </div>
+                                        {/* 买红卖绿：A 股口径，做多排在前面；两列各自按内容收高，不做等高拉伸 */}
+                                        <div className="grid grid-cols-1 xl:grid-cols-2 items-start gap-4">
+                                            <OrderColumn title="买入列表" side="buy" orders={preview.buy_orders} />
+                                            <OrderColumn title="卖出列表" side="sell" orders={preview.sell_orders} />
                                         </div>
 
-                                        <div className="p-4 rounded-2xl bg-rose-50/30 border border-rose-100/60 shadow-sm transition-all animate-in fade-in zoom-in-95 duration-700">
-                                            <div className="flex items-center gap-2 mb-3 text-[10px] font-bold text-rose-600 uppercase tracking-widest">
-                                                <ShieldAlert size={14} />
-                                                风控/过滤项 ({preview.skipped_items.length})
-                                            </div>
-                                            <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5 max-h-[180px] overflow-y-auto pr-1 custom-scrollbar pb-1">
-                                                {preview.skipped_items.length > 0 ? preview.skipped_items.map((item, idx) => (
-                                                    <div key={idx} className="p-2.5 rounded-xl bg-white border border-rose-100/40 flex items-center gap-3 shadow-sm shadow-rose-50/50">
-                                                        <div className="w-8 h-8 rounded-lg bg-rose-50 flex items-center justify-center font-mono text-[10px] font-black text-rose-400">
-                                                            {item.symbol.slice(0, 2)}
-                                                        </div>
-                                                        <div className="flex-1 min-w-0">
-                                                            <div className="text-[11px] font-bold text-gray-900">{normalizeStockCode(item.symbol)}</div>
-                                                            <div className="text-[9px] text-gray-500 line-clamp-1 font-medium italic">{item.reason}</div>
-                                                        </div>
-                                                        <div className="text-[8px] font-black px-1.5 py-0.5 rounded-md bg-rose-100/50 text-rose-600 uppercase">
-                                                            {item.action}
-                                                        </div>
-                                                    </div>
-                                                )) : (
-                                                    <div className="col-span-2 py-6 text-center text-[10px] text-gray-400 font-bold uppercase tracking-widest bg-white/50 rounded-xl border border-dashed border-gray-100">
-                                                        No Risk Detected
-                                                    </div>
-                                                )}
-                                            </div>
-                                        </div>
+                                        <RiskGroupList items={preview.skipped_items} />
                                     </div>
                                 )}
                             </div>
 
-                            <div className="w-full lg:w-[320px] shrink-0">
-                                <div className="sticky top-4 space-y-3">
-                                    <div className="p-5 rounded-2xl bg-white border border-gray-100 shadow-sm flex flex-col h-full font-bold">
-                                        <h3 className="font-bold text-gray-900 flex items-center gap-2 mb-5 text-sm">
-                                            <Activity size={16} className="text-blue-500" />
-                                            执行摘要
-                                        </h3>
-                                        
-                                        <div className="space-y-5 flex-1">
-                                            <div className="space-y-1">
-                                                <div className="text-[9px] font-bold text-gray-400 uppercase tracking-widest ml-1">预案指纹</div>
-                                                <div className="font-mono text-[10px] text-gray-600 bg-gray-50 px-3 py-2 rounded-xl flex items-center justify-between border border-gray-100">
-                                                    {preview ? preview.preview_hash.slice(0, 16) : 'PENDING'}...
-                                                    <CheckCircle2 size={12} className={preview ? 'text-emerald-500' : 'text-gray-300'} />
-                                                </div>
-                                            </div>
-
-                                            <div className="p-4 rounded-xl bg-blue-50/50 border border-blue-100 space-y-3.5">
-                                                <div className="flex items-center justify-between text-[11px]">
-                                                    <span className="text-blue-600/70 uppercase">卖出总额</span>
-                                                    <span className="font-mono text-gray-900">{renderMoney(previewSummary?.estimated_sell_proceeds)}</span>
-                                                </div>
-                                                <div className="flex items-center justify-between text-[11px]">
-                                                    <span className="text-blue-600/70 uppercase">买入总额</span>
-                                                    <span className="font-mono text-gray-900">{renderMoney(previewSummary?.estimated_buy_amount)}</span>
-                                                </div>
-                                                <div className="h-px bg-blue-100" />
-                                                <div className="flex items-center justify-between text-[11px]">
-                                                    <span className="text-blue-600 uppercase tracking-tighter">预估剩余</span>
-                                                    <span className="font-mono text-blue-700">{renderMoney(previewSummary?.estimated_remaining_cash)}</span>
-                                                </div>
-                                            </div>
-
-                                            <div className="grid grid-cols-2 gap-2">
-                                                <div className="p-3 rounded-xl bg-gray-50 border border-gray-100 flex flex-col items-center justify-center">
-                                                    <span className="text-[9px] font-bold text-gray-400 uppercase mb-0.5">信号</span>
-                                                    <span className="text-xs text-gray-900">{previewSummary?.signal_count ?? 0}</span>
-                                                </div>
-                                                <div className="p-3 rounded-xl bg-gray-50 border border-gray-100 flex flex-col items-center justify-center">
-                                                    <span className="text-[9px] font-bold text-gray-400 uppercase mb-0.5">派发</span>
-                                                    <span className="text-xs text-emerald-600">{(previewSummary?.buy_order_count || 0) + (previewSummary?.sell_order_count || 0)}</span>
-                                                </div>
-                                            </div>
-                                        </div>
-
-                                        <div className="mt-6 space-y-2">
-                                            <button
-                                                type="button"
-                                                onClick={() => {
-                                                    if (!preview) void generatePreview();
-                                                }}
-                                                disabled={previewLoading || !!preview}
-                                                className={`w-full py-3.5 rounded-2xl text-[13px] font-black transition-all active:scale-[0.95] flex items-center justify-center gap-2 ${preview
-                                                        ? 'bg-emerald-50 text-emerald-600 border border-emerald-100 cursor-default'
-                                                        : 'bg-blue-600 text-white hover:bg-blue-700 shadow-xl shadow-blue-200/50'
-                                                    }`}
-                                            >
-                                                {previewLoading ? (
-                                                    <Loader2 size={16} className="animate-spin" />
-                                                ) : preview ? (
-                                                    <>预案计算完成 <CheckCircle2 size={14} /></>
-                                                ) : (
-                                                    <>开始计算调仓预案 <Play size={14} fill="currentColor" /></>
-                                                )}
-                                            </button>
-                                            <button 
-                                                type="button" 
-                                                onClick={() => { setPreview(null); setCurrentStep(2); }} 
-                                                className="w-full py-2 text-[10px] font-bold text-gray-400 hover:text-gray-900 transition-colors uppercase tracking-widest text-center"
-                                            >
-                                                Back to Strategy
-                                            </button>
-                                        </div>
-                                    </div>
-                                    
-                                    <div className="p-4 rounded-xl bg-amber-50 border border-amber-100 flex gap-3">
-                                        <div className="shrink-0 w-8 h-8 rounded-lg bg-amber-200/50 flex items-center justify-center text-amber-700">
-                                            <Info size={16} />
-                                        </div>
-                                        <div className="text-[10px] text-amber-800 leading-relaxed font-bold">
-                                            手动任务采用「原子级幂等」设计，系统通过 Hash 校验确保不会产生重复报单。
-                                        </div>
-                                    </div>
-                                </div>
+                            <div className="w-full lg:w-[340px] shrink-0">
+                                <ManualTaskRail
+                                    step="preview"
+                                    preview={preview}
+                                    previewLoading={previewLoading}
+                                    submitting={submitting}
+                                    isRealMode={isRealMode}
+                                    taskId={selectedTaskId}
+                                    taskCompleted={false}
+                                    onGenerate={() => void generatePreview()}
+                                    onAdvance={() => setCurrentStep(4)}
+                                    onSubmit={handleSubmitClick}
+                                    onReview={() => setCurrentStep(2)}
+                                    onViewResult={() => message.success('请在左边栏查看订单明细')}
+                                />
                             </div>
                         </div>
                     </div>
@@ -1421,7 +1224,9 @@ const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack }) 
                                         <TerminalSquare className="text-slate-900" size={18} />
                                     </h2>
                                     <p className="text-[13px] text-gray-500 mt-1">
-                                        任务已提交至执行队列，控制台显示执行引擎的实时链路状态。
+                                        {selectedTaskId
+                                            ? '任务已提交至执行队列，控制台显示执行引擎的实时链路状态。'
+                                            : '核对右侧风控裁定后推送执行，控制台将实时显示执行引擎链路状态。'}
                                     </p>
                                 </div>
 
@@ -1497,85 +1302,23 @@ const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack }) 
                                 </div>
                             </div>
 
-                            <div className="w-full lg:w-[320px] shrink-0">
-                                <div className="p-5 rounded-2xl bg-white border border-gray-100 shadow-sm space-y-6 h-full flex flex-col font-bold">
-                                    <div className="space-y-5 flex-1">
-                                        <div className="flex items-center gap-3">
-                                            <div className="w-9 h-9 rounded-xl bg-red-50 text-red-600 flex items-center justify-center">
-                                                <AlertTriangle size={18} />
-                                            </div>
-                                            <div>
-                                                <div className="text-sm font-bold text-gray-900">执行确认</div>
-                                                <div className="text-[9px] text-gray-400 font-bold uppercase tracking-wider">Final Authorization</div>
-                                            </div>
-                                        </div>
-
-                                        <div className="p-4 rounded-xl bg-gray-50/50 border border-gray-100 space-y-3 shadow-inner">
-                                            <div className="flex items-center justify-between text-[11px]">
-                                                <span className="text-gray-400">委托笔数</span>
-                                                <span className="text-gray-900">{(previewSummary?.buy_order_count || 0) + (previewSummary?.sell_order_count || 0)} 笔</span>
-                                            </div>
-                                            <div className="flex items-center justify-between text-[11px]">
-                                                <span className="text-gray-400">预估买入</span>
-                                                <span className="text-gray-900">{renderMoney(previewSummary?.estimated_buy_amount)}</span>
-                                            </div>
-                                            <div className="flex items-center justify-between text-[11px]">
-                                                <span className="text-gray-400">风险拦截</span>
-                                                <span className="text-rose-500">{previewSummary?.skipped_count ?? 0}</span>
-                                            </div>
-                                        </div>
-                                    </div>
-
-                                    {!selectedTaskId ? (
-                                        <div className="space-y-2">
-                                            <button
-                                                type="button"
-                                                onClick={handleSubmitClick}
-                                                disabled={submitting || !preview}
-                                                className="w-full py-3.5 rounded-xl bg-red-600 text-white text-xs font-bold hover:bg-red-700 shadow-md shadow-red-100 transition-all active:scale-[0.98] flex items-center justify-center gap-2"
-                                            >
-                                                {submitting ? (
-                                                    <Loader2 size={16} className="animate-spin" />
-                                                ) : (
-                                                    <>推送执行 <Zap size={14} fill="currentColor" /></>
-                                                )}
-                                            </button>
-                                            <button 
-                                                type="button" 
-                                                disabled={submitting}
-                                                onClick={() => setCurrentStep(3)} 
-                                                className="w-full py-2 text-[10px] font-bold text-gray-400 hover:text-gray-900 transition-colors uppercase tracking-widest text-center"
-                                            >
-                                                Review Preview
-                                            </button>
-                                        </div>
-                                    ) : (
-                                        <div className="space-y-3">
-                                            <div className="p-4 rounded-xl bg-emerald-50 border border-emerald-100 flex flex-col items-center text-center">
-                                                <div className="w-10 h-10 rounded-xl bg-emerald-100 text-emerald-600 flex items-center justify-center mb-3">
-                                                    <CheckCircle2 size={24} />
-                                                </div>
-                                                <div className="text-xs font-bold text-emerald-900 leading-none">正在执行</div>
-                                                <div className="text-[9px] text-emerald-600/70 mt-1 uppercase tracking-tighter">Executing</div>
-                                            </div>
-                                            {(selectedTask?.stage === 'completed' || selectedTask?.status === 'completed') && (
-                                                <button
-                                                    onClick={() => message.success('请在左边栏查看订单明细')}
-                                                    className="w-full py-3 rounded-xl border border-gray-200 bg-white text-gray-900 text-[11px] font-bold hover:bg-gray-50 transition-all shadow-sm"
-                                                >
-                                                    查看成交结果
-                                                </button>
-                                            )}
-                                        </div>
-                                    )}
-
-                                    <div className="p-4 rounded-xl border border-gray-50 bg-gray-50/20">
-                                        <div className="text-[9px] font-bold text-gray-400 uppercase tracking-widest mb-1.5 opacity-60">风险披露</div>
-                                        <div className="text-[9px] text-gray-400 leading-relaxed italic">
-                                            指令通过执行引擎报送。请确保账户已就绪且资金充足。
-                                        </div>
-                                    </div>
-                                </div>
+                            <div className="w-full lg:w-[340px] shrink-0">
+                                <ManualTaskRail
+                                    step="submit"
+                                    preview={preview}
+                                    previewLoading={previewLoading}
+                                    submitting={submitting}
+                                    isRealMode={isRealMode}
+                                    taskId={selectedTaskId}
+                                    taskCompleted={
+                                        selectedTask?.stage === 'completed' || selectedTask?.status === 'completed'
+                                    }
+                                    onGenerate={() => void generatePreview()}
+                                    onAdvance={() => setCurrentStep(4)}
+                                    onSubmit={handleSubmitClick}
+                                    onReview={() => setCurrentStep(3)}
+                                    onViewResult={() => message.success('请在左边栏查看订单明细')}
+                                />
                             </div>
                         </div>
                     </div>
