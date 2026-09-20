@@ -25,7 +25,10 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from backend.shared.logging_config import get_logger
 from backend.shared.stock_utils import StockCodeUtil
+
+logger = get_logger(__name__)
 
 #: 「信号日覆盖充分」判据（全市场 CN 标的数千只，覆盖不足说明推理残缺）
 MIN_SIGNAL_COVERAGE = 1000
@@ -66,6 +69,16 @@ def normalize_a_share_symbol(raw: Any) -> str | None:
     return prefix if _CN_PREFIX_RE.match(prefix) else None
 
 
+def normalize_position_symbol(raw: Any) -> str | None:
+    """持仓/自选键形 → prefix 规范形；非 A 股返回 None。
+
+    与 :func:`normalize_a_share_symbol` 的差别只有一处：持仓键可能带侧标
+    （``SH600036::long``，两融），先切掉再归一。切法放这里是为了让「切侧标」
+    也只有一份实现——切漏了同一只票会变成两行。
+    """
+    return normalize_a_share_symbol(str(raw or "").split("::", 1)[0].strip())
+
+
 def build_score_map(
     rows: list[Any], trade_date: str
 ) -> tuple[dict[str, dict[str, Any]], int]:
@@ -91,3 +104,61 @@ def build_score_map(
             "asOf": str(r[4])[:10] if len(r) > 4 and r[4] is not None else trade_date,
         }
     return score_map, realtime_rows
+
+
+async def load_score_snapshot(
+    tenant_id: str,
+) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+    """读一次分数快照 → ``(score_map, meta)``。
+
+    自选池统一视图与持仓哨兵**必须**经此函数取分：两处各写一份 SQL，迟早在
+    「覆盖充分日回退」或「实时行取哪条」上分叉（见模块 docstring）。
+
+    ``meta`` 带 ``signal_date``（实际取到的信号日）、``fallback``（覆盖不足回退到
+    最近日）、``realtime_rows``（其中盘中实时行条数）、``ok``/``reason``。
+    取数失败不抛：返回空 map + ``ok=False``，调用方按「没取到 ≠ 分数是 0」处理。
+    """
+    from sqlalchemy import text
+
+    from backend.shared.database_manager_v2 import get_session
+
+    meta: dict[str, Any] = {
+        "signal_date": None,
+        "fallback": False,
+        "realtime_rows": 0,
+        "ok": False,
+        "reason": None,
+    }
+    try:
+        async with get_session(read_only=True) as session:
+            d0 = (
+                await session.execute(
+                    text(SQL_LATEST_COVERED_DATE),
+                    {"tid": tenant_id, "min_cov": MIN_SIGNAL_COVERAGE},
+                )
+            ).scalar_one_or_none()
+            if d0 is None:
+                d0 = (
+                    await session.execute(text(SQL_LATEST_ANY_DATE), {"tid": tenant_id})
+                ).scalar_one_or_none()
+                meta["fallback"] = True
+            if d0 is None:
+                meta["ok"] = True  # 查得到，只是库里还没有任何信号日
+                meta["reason"] = "engine_signal_scores 无数据"
+                return {}, meta
+            rows = (
+                await session.execute(
+                    text(SQL_SCORES_BY_DATE), {"tid": tenant_id, "d": d0}
+                )
+            ).fetchall()
+    except Exception as exc:  # noqa: BLE001 - 取不到分不是致命错（哨兵跳过本轮）
+        meta["reason"] = f"分数快照取数失败: {exc}"
+        logger.warning("[signal_scores] %s", meta["reason"])
+        return {}, meta
+
+    meta["signal_date"] = str(d0)[:10]
+    score_map, realtime_rows = build_score_map(list(rows), meta["signal_date"])
+    meta["realtime_rows"] = realtime_rows
+    meta["rows"] = len(score_map)
+    meta["ok"] = True
+    return score_map, meta

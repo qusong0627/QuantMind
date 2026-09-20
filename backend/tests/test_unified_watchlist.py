@@ -12,9 +12,9 @@ import pytest
 from backend.services.api.unified_watchlist import (
     _norm_symbol,
     _position_payload,
-    _snapshot_source_for_broker,
     merge_sources,
 )
+from backend.shared.real_positions import snapshot_source_for_broker
 
 
 def _cand(symbol: str, score: float) -> dict:
@@ -196,13 +196,13 @@ class TestMergeSources:
 
 class TestSnapshotSourceForBroker:
     def test_maps_tdx_and_qmt_variants(self):
-        assert _snapshot_source_for_broker("tdx") == "tdx_bridge"
-        assert _snapshot_source_for_broker("tdx_bridge") == "tdx_bridge"
-        assert _snapshot_source_for_broker("qmt_exec") == "qmt_exec"
-        assert _snapshot_source_for_broker("qmt") == "qmt_exec"
+        assert snapshot_source_for_broker("tdx") == "tdx_bridge"
+        assert snapshot_source_for_broker("tdx_bridge") == "tdx_bridge"
+        assert snapshot_source_for_broker("qmt_exec") == "qmt_exec"
+        assert snapshot_source_for_broker("qmt") == "qmt_exec"
 
     def test_unknown_broker_has_no_snapshot_source(self):
         # tiger/futu/ib 没有落 real_account_snapshots，不能误映射到别人的快照
-        assert _snapshot_source_for_broker("tiger") is None
-        assert _snapshot_source_for_broker("") is None
-        assert _snapshot_source_for_broker(None) is None
+        assert snapshot_source_for_broker("tiger") is None
+        assert snapshot_source_for_broker("") is None
+        assert snapshot_source_for_broker(None) is None

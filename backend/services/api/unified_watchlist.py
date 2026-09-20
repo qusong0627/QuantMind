@@ -29,13 +29,11 @@ from typing import Any
 import httpx
 
 from backend.shared.logging_config import get_logger
+from backend.shared.real_positions import load_real_positions as _load_real_positions
 from backend.shared.signal_scores import (
     MIN_SIGNAL_COVERAGE,
-    SQL_LATEST_ANY_DATE,
-    SQL_LATEST_COVERED_DATE,
-    SQL_SCORES_BY_DATE,
-    build_score_map,
-    normalize_a_share_symbol,
+    load_score_snapshot,
+    normalize_position_symbol,
 )
 from backend.shared.stock_utils import StockCodeUtil
 
@@ -64,10 +62,10 @@ DEFAULT_LIMIT = 300
 def _norm_symbol(raw: Any) -> str | None:
     """任意键形 → prefix 规范形（``SH600036``）；非 A 股返回 None。
 
-    持仓键可能带侧标（``SH600036::long``，两融），先切掉再归一。
+    持仓键可能带侧标（``SH600036::long``，两融）；切侧标与归一同在
+    :mod:`backend.shared.signal_scores`（持仓哨兵走同一条路）。
     """
-    base = str(raw or "").split("::", 1)[0].strip()
-    return normalize_a_share_symbol(base)
+    return normalize_position_symbol(raw)
 
 
 def _position_payload(row: dict[str, Any]) -> dict[str, Any]:
@@ -256,138 +254,16 @@ async def load_sim_positions(
     return out
 
 
-#: 同一 user 下多个券商账户快照并存（实测 qmt_exec 50 只 / tdx_bridge 8 只，持仓集合
-#: 完全不相交）。相对新鲜度窗口：某源的最新快照落后「全源最新」超过这个分钟数，
-#: 视为该源已停更，不并入（陈旧源会把早已卖出的持仓一直留在表上）。
-_REAL_SOURCE_STALE_MINUTES = 60
-
-
-def _snapshot_source_for_broker(broker_type: str | None) -> str | None:
-    """券商类型 → 快照 source（与 risk_gate_service 同一映射）。"""
-    b = str(broker_type or "").lower()
-    if b.startswith("tdx"):
-        return "tdx_bridge"
-    if b.startswith("qmt"):
-        return "qmt_exec"
-    return None
-
-
-def _active_broker_type() -> str | None:
-    """当前实盘券商：Redis ``broker:selected:CN``（券商接入页选定）→ settings 回退。"""
-    try:
-        from backend.shared.redis_sentinel_client import get_redis_sentinel_client
-
-        client = get_redis_sentinel_client()
-        if client and client.client:
-            raw = client.client.get("broker:selected:CN")
-            if raw:
-                return raw.decode() if isinstance(raw, (bytes, bytearray)) else str(raw)
-    except Exception as exc:  # noqa: BLE001 - 选谁只是并列时的偏好，取不到不影响并集
-        logger.debug("读取 broker:selected:CN 失败: %s", exc)
-    try:
-        from backend.services.trade_shared.trade_config import settings
-
-        return str(getattr(settings, "REAL_BROKER_TYPE", "") or "")
-    except Exception:  # noqa: BLE001
-        return None
-
-
 async def load_real_positions(
     tenant_id: str, user_id: str
 ) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
     """实盘持仓明细（prefix 键）+ 各源快照元信息。
 
-    **多券商账户取并集**，不是「取最新一条」：实测同一 (tenant, user) 下
-    ``qmt_exec``（50 只）与 ``tdx_bridge``（8 只）是两个互不相交的真实账户，
-    两条流每 30s 交错写库——``ORDER BY snapshot_at DESC LIMIT 1`` 等于掷硬币，
-    一半概率把 221 万持仓显示成 8 只。
-
-    每个持仓带 ``source`` 出处（Phase 4 一键卖出要按出处路由券商）；两源都报
-    同一只票时取活跃券商的量（``broker:selected:CN`` → ``REAL_BROKER_TYPE``）。
-    停更源（落后全源最新 > ``_REAL_SOURCE_STALE_MINUTES``）不并入但在 meta 里
-    如实报出。``payload_json`` 实测是**双层编码**（JSON 字符串套 JSON），容忍两种形态。
+    口径（多券商并集 / 停更源不并入 / 活跃券商优先 / ``payload_json`` 双层编码）
+    全在 :mod:`backend.shared.real_positions`——持仓哨兵读的是同一个函数，
+    否则会出现「自选里没有的实盘票收到卖出提醒」这种两边都看似正常的错。
     """
-    from backend.shared.database_manager_v2 import get_session
-    from sqlalchemy import text
-
-    async with get_session(read_only=True) as session:
-        rows = (
-            await session.execute(
-                text(
-                    "SELECT DISTINCT ON (source) source, snapshot_at, payload_json "
-                    "FROM real_account_snapshots "
-                    "WHERE tenant_id = :tid AND user_id = :uid "
-                    "ORDER BY source, snapshot_at DESC"
-                ),
-                {"tid": tenant_id, "uid": user_id},
-            )
-        ).fetchall()
-    if not rows:
-        return {}, {"sources": {}, "snapshot_at": None, "active_broker": None}
-
-    def _ts(v: Any) -> str | None:
-        return v.isoformat() if hasattr(v, "isoformat") else (str(v) if v else None)
-
-    # 相对新鲜度：以全源最新快照为基准（免疫容器/DB 时钟偏移）
-    newest = max((r[1] for r in rows if r[1] is not None), default=None)
-    active_src = _snapshot_source_for_broker(_active_broker_type())
-
-    out: dict[str, dict[str, Any]] = {}
-    src_meta: dict[str, Any] = {}
-    for source, snap_at, payload in rows:
-        age_min = None
-        if newest is not None and snap_at is not None:
-            age_min = round((newest - snap_at).total_seconds() / 60.0, 1)
-        stale = age_min is not None and age_min > _REAL_SOURCE_STALE_MINUTES
-        if isinstance(payload, str):
-            try:
-                payload = json.loads(payload)
-            except (TypeError, ValueError):
-                logger.warning(
-                    "real snapshot payload_json 二次解码失败（source=%s）", source
-                )
-                payload = {}
-        items = [
-            p for p in (payload or {}).get("positions") or [] if isinstance(p, dict)
-        ]
-        src_meta[str(source)] = {
-            "snapshot_at": _ts(snap_at),
-            "positions": len(items),
-            "stale": stale,
-            "lag_min": age_min,
-            "active_broker": str(source) == active_src,
-        }
-        if stale:
-            continue
-        for item in items:
-            sym = _norm_symbol(item.get("symbol"))
-            if not sym:
-                continue
-            row = dict(item)
-            row["source"] = str(source)
-            prev = out.get(sym)
-            # 同一只票出现在两个账户：优先活跃券商，否则取量大者（并记 sources）
-            if prev is not None:
-                prev_src = str(prev.get("source") or "")
-                prefer_new = (str(source) == active_src and prev_src != active_src) or (
-                    (str(source) == active_src) == (prev_src == active_src)
-                    and float(row.get("volume") or 0) > float(prev.get("volume") or 0)
-                )
-                merged_sources = sorted({*prev.get("sources", [prev_src]), str(source)})
-                if prefer_new:
-                    row["sources"] = merged_sources
-                    out[sym] = row
-                else:
-                    prev["sources"] = merged_sources
-                continue
-            row["sources"] = [str(source)]
-            out[sym] = row
-
-    return out, {
-        "sources": src_meta,
-        "snapshot_at": _ts(newest),
-        "active_broker": active_src,
-    }
+    return await _load_real_positions(tenant_id, user_id)
 
 
 async def load_signal_scores(
@@ -404,36 +280,8 @@ async def load_signal_scores(
       ``created_at`` 取最新——混着取会让分数不确定），供持仓/自选行显示分数；
       ``source='realtime'`` 的行即盘中实时分（热集推理落库）。
     """
-    from backend.shared.database_manager_v2 import get_session
-    from sqlalchemy import text
-
-    meta: dict[str, Any] = {
-        "signal_date": None,
-        "candidate_total": 0,
-        "realtime_rows": 0,
-    }
-    async with get_session(read_only=True) as session:
-        d0 = (
-            await session.execute(
-                text(SQL_LATEST_COVERED_DATE),
-                {"tid": tenant_id, "min_cov": MIN_SIGNAL_COVERAGE},
-            )
-        ).scalar_one_or_none()
-        if d0 is None:
-            d0 = (
-                await session.execute(text(SQL_LATEST_ANY_DATE), {"tid": tenant_id})
-            ).scalar_one_or_none()
-        if d0 is None:
-            return [], {}, meta
-
-        meta["signal_date"] = str(d0)[:10]
-        rows = (
-            await session.execute(text(SQL_SCORES_BY_DATE), {"tid": tenant_id, "d": d0})
-        ).fetchall()
-
-    as_of = meta["signal_date"]
-    score_map, realtime_rows = build_score_map(list(rows), as_of)
-    meta["realtime_rows"] = realtime_rows
+    score_map, meta = await load_score_snapshot(tenant_id)
+    meta.setdefault("candidate_total", 0)
     candidates: list[dict[str, Any]] = []
     for sym, entry in score_map.items():
         score = entry["value"]
