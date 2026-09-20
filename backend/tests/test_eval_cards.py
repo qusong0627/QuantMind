@@ -340,13 +340,30 @@ def test_account_risk_events_and_keys():
 
     assert score_risk_events({"available": False}).score is None
     assert score_risk_events(None).score is None
-    clean = score_risk_events({"available": True, "failed": 0, "rejected_orders": 0})
+    # 窗口内零事件 → 缺省：「无记录」不等于「无事件」（实测 user=42 曾是静默满分）
+    assert score_risk_events({"available": True, "n_events": 0}).score is None
+    clean = score_risk_events(
+        {
+            "available": True,
+            "n_events": 12,
+            "filled": 12,
+            "failed": 0,
+            "rejected_orders": 0,
+        }
+    )
     assert clean.score == pytest.approx(100.0) and not clean.red_line_failed
     bad = score_risk_events(
-        {"available": True, "failed": 3, "rejected_orders": 2, "skipped": 1, "alert": 0}
+        {
+            "available": True,
+            "n_events": 6,
+            "failed": 3,
+            "rejected_orders": 2,
+            "skipped": 1,
+            "alert": 0,
+        }
     )
     assert bad.red_line_failed is True and bad.score < 50
-    assert bad.detail["penalty"] == pytest.approx(9.5)  # fidelity: allow-limit-threshold — 非阈值：风险事件罚分（9.5 分）
+    assert bad.detail["penalty"] == pytest.approx(9.0)  # fidelity: allow-limit-threshold — 非阈值：风险事件罚分（9.0 分；skipped 已移入盲区覆盖率）
 
     # 基准回看日期：YYYYMMDD 整数的历史 bug（20260911-12=20260899 非法日期）
     assert benchmark_probe_start("2026-09-11") == 20260830

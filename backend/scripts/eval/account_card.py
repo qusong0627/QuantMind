@@ -4,8 +4,8 @@
 - 持仓：Redis `simulation:account:{tenant}:{user}[:MARKET]`（经 SimulationAccountManager
   读取，缓存缺失时由 PG 台账自愈重建），positions{symbol:{market_value,price,cost,volume}}；
 - 净值序列：PG `simulation_fund_snapshots`（日度 total_asset/market_value，键形探测同影子对照）；
-- 风控事件：PG `risk_events`（触发审计：filled/skipped/failed/alert）+ `sim_orders`
-  status='rejected'（拒单）；
+- 风控事件：PG `risk_events`（**真实状态词表**：skipped_no_quote/no_targets/…，
+  分类与评分见 `scripts/eval/risk_events.py`）+ `sim_orders` status='rejected'（拒单）；
 - 基准：index_daily 沪深300（窗口首尾对齐，同策略卡口径）。
 
 四维（v1 权重 30/20/25/25）：
@@ -13,8 +13,10 @@
   未映射占比 >50% → 行业子项缺省）；净敞口入 detail；
 - 归因 20：**v1 简化口径**（净值窗口超额 + 盈利贡献集中度），Brinson 三段分解待基准
   行业权重接线（detail 如实标注）；
-- 风控事件 25：窗口内 failed/skipped/alert 计数 + 拒单（红线 failed≥3）；风控机制
-  从未启用（租户无规则无事件）→ 维度缺省（不假评"无事件=满分"）；
+- 风控事件 25：执行失败罚分（failed/rejected/alert 计数）+ **盲区占比**
+  （skipped_no_quote = 有持仓但取不到行情 → 判不了止损），两条红线
+  （失败 ≥3 / 盲区 ≥90%）；风控机制从未启用（无事件且无活跃规则）→ 维度缺省
+  （不假评"无事件=满分"）；
 - 资金效率 25：现金拖累（cash/total_asset 阶梯映射）。
 
 空账户（无持仓且无任何委托记录）→ 不评分（error 说明），避免污染评级分布。
@@ -40,6 +42,10 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from backend.shared.benchmark import BENCHMARK_SYMBOL  # noqa: E402
+from backend.scripts.eval.risk_events import (  # noqa: E402
+    load_risk_summary,
+    score_risk_events,
+)
 from backend.shared.eval_scoring import (  # noqa: E402
     DimensionScore,
     combine_dimension_scores,
@@ -252,46 +258,6 @@ def score_attribution(
     )
 
 
-def score_risk_events(summary: dict[str, Any] | None) -> DimensionScore:
-    """风控事件：窗口内 failed/rejected/skipped/alert 加权罚分（红线 failed≥3）。"""
-    if not summary or not summary.get("available"):
-        return DimensionScore(
-            "risk_events",
-            "风控事件",
-            WEIGHTS["risk_events"],
-            None,
-            False,
-            {
-                "insufficient": True,
-                "note": "风控机制未启用或历史为零（无法把「无记录」当「无事件」）",
-                "summary": summary,
-            },
-        )
-    failed = int(summary.get("failed") or 0)
-    rejected = int(summary.get("rejected_orders") or 0)
-    skipped = int(summary.get("skipped") or 0)
-    alert = int(summary.get("alert") or 0)
-    penalty = 2.0 * failed + 1.5 * rejected + 0.5 * skipped + 0.2 * alert
-    score = score_from_thresholds(
-        penalty, [(0.0, 100.0), (2.0, 75.0), (5.0, 50.0), (10.0, 20.0), (20.0, 0.0)]
-    )
-    red = failed >= 3
-    detail = {
-        "window_days": summary.get("window_days"),
-        "failed": failed,
-        "rejected_orders": rejected,
-        "skipped": skipped,
-        "alert": alert,
-        "filled": int(summary.get("filled") or 0),
-        "penalty": round(penalty, 2),
-    }
-    if red:
-        detail["red_line"] = "风控执行失败 ≥3 次"
-    return DimensionScore(
-        "risk_events", "风控事件", WEIGHTS["risk_events"], score, red, detail
-    )
-
-
 def score_capital_efficiency(
     total_asset: float | None, cash: float | None, market_value: float | None
 ) -> DimensionScore:
@@ -458,67 +424,6 @@ def load_benchmark_closes(start_iso: str, end_iso: str) -> list[tuple[str, float
     if not base:
         return window
     return [base[-1], *window]
-
-
-async def load_risk_summary(
-    tenant: str, user_raw: str, *, days: int = DEFAULT_WINDOW_DAYS
-) -> dict[str, Any]:
-    """风控事件窗口汇总（risk_events + 拒单）；机制可用性按「租户历史/规则」判定。"""
-    from sqlalchemy import text as _text
-
-    from backend.shared.database_manager_v2 import get_session
-
-    summary: dict[str, Any] = {"available": False, "window_days": int(days)}
-    uid = str(user_raw or "").strip()
-    since = date.today() - timedelta(days=max(1, int(days)))
-    try:
-        async with get_session(read_only=True) as session:
-            tenant_total = (
-                await session.execute(
-                    _text("SELECT count(*) FROM risk_events WHERE tenant_id = :t"),
-                    {"t": tenant},
-                )
-            ).scalar() or 0
-            try:
-                rules_total = (
-                    await session.execute(
-                        _text("SELECT count(*) FROM risk_rules WHERE tenant_id = :t"),
-                        {"t": tenant},
-                    )
-                ).scalar() or 0
-            except Exception:  # noqa: BLE001 - 表不存在按 0 计
-                rules_total = 0
-            summary["available"] = bool(int(tenant_total) > 0 or int(rules_total) > 0)
-            summary["tenant_events_all_time"] = int(tenant_total)
-            summary["rules_configured"] = int(rules_total)
-            if not summary["available"]:
-                return summary
-            if uid.isdigit():
-                rows = (
-                    await session.execute(
-                        _text(
-                            "SELECT status, count(*) FROM risk_events "
-                            "WHERE tenant_id = :t AND user_id = :u AND trade_date >= :since "
-                            "GROUP BY status"
-                        ),
-                        {"t": tenant, "u": int(uid), "since": since},
-                    )
-                ).fetchall()
-                for status, cnt in rows:
-                    summary[str(status)] = int(cnt)
-                rejected = (
-                    await session.execute(
-                        _text(
-                            "SELECT count(*) FROM sim_orders WHERE tenant_id = :t "
-                            "AND user_id = :u AND status = 'rejected' AND created_at >= :since"
-                        ),
-                        {"t": tenant, "u": int(uid), "since": since},
-                    )
-                ).scalar() or 0
-                summary["rejected_orders"] = int(rejected)
-    except Exception:  # noqa: BLE001 - 风控表缺失不拖垮评分
-        summary["available"] = False
-    return summary
 
 
 async def _has_trade_history(tenant: str, user_raw: str) -> bool:

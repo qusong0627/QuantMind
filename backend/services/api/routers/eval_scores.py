@@ -233,7 +233,7 @@ async def _resolve_display_names(
         logger.warning("评估展示名解析失败（object_type=%s）", object_type, exc_info=True)
         return {}
     # daily_selection 等：object_id 本身可读（日期），无需替换
-    return {i: None for i in unique}
+    return dict.fromkeys(unique)
 
 
 @router.get("/scores")
@@ -496,6 +496,70 @@ async def strategy_health(
             "gate": build_gate_preview(latest_health, mode="SIMULATION"),
         },
         "meta": {"count": len(history)},
+    }
+
+
+@router.get("/series")
+async def object_series(
+    object_type: str = Query(..., description="评分卡类型"),
+    object_id: str = Query(..., description="对象 ID"),
+    current_user: dict = Depends(get_current_user),
+) -> dict[str, Any]:
+    """单对象长序列侧车（逐日 IC / 分位线等，设计 §1.6）。
+
+    列表接口（`/scores`）只带标量 detail，长序列按需取——选中对象时才读这一个
+    文件，列表刷新不必拖着几十条序列走。
+
+    `available=false` 是**正常返回**（该对象尚未产出序列 / 侧车口径过期），
+    前端据此显示「暂无序列」而不是报错；只有非法 `object_id`（路径穿越）
+    与「本租户看不见这个对象」才是 400/404。
+    """
+    from sqlalchemy import text as _text
+
+    from backend.shared.eval_series import load_series, safe_object_id
+
+    ot = _validate_object_type(object_type)
+    tenant_id = str(current_user.get("tenant_id") or "default")
+    user_id = str(current_user.get("user_id") or "")
+    oid = str(object_id)
+
+    # 先验输入再碰库：`../` 这种 id 不该换来一次 DB 往返，而且它是个输入错误，
+    # 不该混进「看不见 → 404」那条路（否则穿越尝试与不存在的对象无法区分）
+    if not safe_object_id(oid):
+        raise HTTPException(status_code=400, detail=f"object_id 非法（禁止路径穿越）: {oid!r}")
+
+    # 可见性：侧车在盘上没有租户/用户维度，先按 eval_scores 的同一谓词确认调用方
+    # 看得见这个对象，否则「知道 id 就能读别人策略的序列」。
+    async with get_session(read_only=True) as session:
+        visible = (
+            await session.execute(
+                _text(
+                    "SELECT 1 FROM eval_scores WHERE object_type = :ot AND object_id = :oid "
+                    "AND tenant_id = :t AND (user_id = :u OR user_id = '') LIMIT 1"
+                ),
+                {"ot": ot, "oid": oid, "t": tenant_id, "u": user_id},
+            )
+        ).first()
+    if visible is None:
+        raise HTTPException(status_code=404, detail=f"评分对象不存在或不可见: {ot}/{oid}")
+
+    loaded = load_series(ot, oid)
+    if loaded["reason"] == "unsafe_object_id":
+        # 上面已拦过，正常到不了这里。保底是因为 load_series 的失败态是
+        # `available=false`（前端读作「暂无序列」）——输入错误不该被化妆成「没有数据」。
+        raise HTTPException(status_code=400, detail=loaded["note"])
+    return {
+        "success": True,
+        "data": loaded["data"],
+        "meta": {
+            "object_type": ot,
+            "object_id": oid,
+            "available": loaded["available"],
+            "reason": loaded["reason"],
+            "note": loaded["note"],
+            "generated_at": loaded["generated_at"],
+            "version": loaded["version"],
+        },
     }
 
 

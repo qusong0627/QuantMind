@@ -1,10 +1,12 @@
 """策略评分卡（T-P4-05b-2，设计 §2.3）：回测产物 → 收益/风险/稳定性三维修订 + 诚实缺省维。
 
-数据源：`qlib_backtest_runs.result_file_path`（实测 28 份结果 JSON 在盘，含
-equity_curve/drawdown_curve）；基准 = 同窗口指数（index_daily，默认沪深300）。
-v1 覆盖率：收益 20 ✅ / 风险 20 ✅ / 稳定性 15 ✅（月度胜率+连续三月红红线）/
-成本 15 🟡（向量化引擎无成交明细 → 缺省）/ 一致性 20 🟡（无同期模拟曲线 → 缺省）/
-容量 10 🟡（缺省）；缺失维度权重归一（如实）。
+数据源：`qlib_backtest_runs.result_file_path`（实测结果 JSON 含 equity_curve /
+drawdown_curve / trades[]）；基准 = 同窗口指数（index_daily，默认沪深300）；
+容量维的持仓日成交额取 `daily_forward.amount`（万元）。
+覆盖：收益 20 ✅ / 风险 20 ✅ / 稳定性 15 ✅（月度胜率+连续三月负红线）/
+成本 15 ✅（成交换手 + 成本占比，红线「成本吃掉 >50% 毛利」）/
+容量 10 ✅（假设模型，假设说明随卡带出）/ 一致性 20 🟡（回测↔模拟盘曲线对照未接评估侧）；
+缺失维度权重归一（如实）。
 
 用法：python backend/scripts/eval/strategy_card.py [--backtest-id ID | --file PATH] [--save] [--json]
 """
@@ -14,6 +16,8 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import math
+import re
 import sys
 from datetime import date
 from pathlib import Path
@@ -26,6 +30,12 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from backend.shared.benchmark import BENCHMARK_SYMBOL  # noqa: E402
+from backend.scripts.eval.strategy_realized import (  # noqa: E402
+    capacity_dim,
+    cost_dim,
+    consistency_dim,
+    trade_stats,
+)
 from backend.shared.eval_scoring import (  # noqa: E402
     DimensionScore,
     combine_dimension_scores,
@@ -42,6 +52,11 @@ WEIGHTS = {
 }
 TRADING_DAYS = 252
 BENCHMARK = BENCHMARK_SYMBOL
+
+# 成本模型不可用时的兜底双边成本率（metrics_core 的 BRAIN 默认 20bp）
+FALLBACK_ROUND_TRIP_COST = 0.002
+MAX_CAPACITY_SYMBOLS = 1200  # 实测单个回测最多 933 只成交标的
+_SYMBOL_RE = re.compile(r"^[A-Za-z0-9.]+$")
 
 
 # ── 纯计算（可单测）────────────────────────────────────────────────
@@ -201,6 +216,39 @@ def score_stability_dim(monthly: list[tuple[str, float]]) -> DimensionScore:
     )
 
 
+def strategy_dims(
+    loaded: dict[str, Any],
+    *,
+    bench_ann: float | None,
+    amount_stats: dict[str, Any] | None,
+    round_trip_cost: float | None,
+) -> tuple[list[DimensionScore], dict[str, Any]]:
+    """已加载的回测产物 → 六维（不读库；基准年化与成交额由调用方取好传入）。"""
+    equity = [float(v) for v in loaded["equity_curve"]]
+    returns = curve_to_returns(equity)
+    ann = annualized_return(returns)
+    monthly = monthly_returns(loaded["dates"], equity)
+    stats = trade_stats(loaded.get("trades") or [], equity)
+    gross_pnl = (equity[-1] - equity[0]) if len(equity) >= 2 else None
+    amount = amount_stats or {}
+    dims = [
+        score_return_dim(ann, bench_ann),
+        score_risk_dim(returns, loaded.get("drawdown_curve"), ann),
+        score_stability_dim(monthly),
+        cost_dim(
+            stats, gross_pnl=gross_pnl, ann_return=ann, round_trip_cost=round_trip_cost
+        ),
+        consistency_dim(),
+        capacity_dim(
+            stats,
+            median_amount_wan=amount.get("median_amount_wan"),
+            n_positions=stats.get("median_holdings"),
+            amount_note=amount.get("note"),
+        ),
+    ]
+    return dims, {"trades": stats, "amount": amount, "annual_return": ann}
+
+
 # ── IO / 编排 ───────────────────────────────────────────────────────
 
 
@@ -220,10 +268,115 @@ def _benchmark_returns(start: str, end: str) -> np.ndarray:
     return curve_to_returns(df.sort_values("dt")["close"].astype(float).tolist())
 
 
+def normalize_symbols(symbols: list[str]) -> list[str]:
+    """成交代码 → QuantDB 后缀式（``sh600007``／``SH600007``／``600007`` → ``600007.SH``）。
+
+    口径必须分层（CLAUDE.md）：回测 trades 里的小写 Qlib 形 ``sh600007`` 直接拿去查
+    ``daily_forward`` 会**一行都匹配不上**，而 ``median()`` 对空集返回 NULL——
+    静默变成 NaN，容量维看起来「算了」其实没数据。
+    """
+    from backend.shared.stock_utils import StockCodeUtil
+
+    out: list[str] = []
+    for raw in symbols:
+        code = str(raw or "").strip()
+        if not code or not _SYMBOL_RE.match(code):
+            continue
+        suffix = StockCodeUtil.to_suffix(code)
+        if suffix:
+            out.append(suffix)
+    return sorted(set(out))
+
+
+def _as_float(raw: Any) -> float | None:
+    """数值或 None（NaN/Inf 一律当「没有值」——`median()` 对空集给的就是 NaN）。"""
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return v if math.isfinite(v) else None
+
+
+def _sample_evenly(items: list[str], cap: int) -> list[str]:
+    """超上限时**等距抽样**（不取前 N 只）：按代码序截断会系统性偏向某个交易所。"""
+    idx = np.linspace(0, len(items) - 1, num=cap).round().astype(int)
+    return [items[i] for i in sorted(set(idx.tolist()))]
+
+
+def _median_amount_wan(symbols: list[str], start: str, end: str) -> dict[str, Any]:
+    """窗口内成交标的的 ``daily_forward.amount`` 中位（**万元**）→ 容量维输入。
+
+    取不到就返回 ``{"note": …}``（调用方据此把容量维标缺省）——不抛、也不填 0；
+    匹配到 0 行与 ``amount`` 全空是**两种不同的失败**，note 要分清。
+    """
+    clean = normalize_symbols(symbols)
+    if not clean:
+        return {"note": "无成交标的（symbol 缺失或不可归一），日成交额无从取数"}
+    note = None
+    if len(clean) > MAX_CAPACITY_SYMBOLS:
+        note = f"成交标的 {len(clean)} 只超上限，等距抽 {MAX_CAPACITY_SYMBOLS} 只取中位"
+        clean = _sample_evenly(clean, MAX_CAPACITY_SYMBOLS)
+    try:
+        from backend.services.engine.data_platform.quantdb_hub import QuantDBDataHub
+
+        start_dt = int(str(start).replace("-", "").replace("/", "")[:8] or 0)
+        end_dt = int(str(end).replace("-", "").replace("/", "")[:8] or 0)
+        if not start_dt or not end_dt:
+            return {"note": f"回测窗口不可解析（{start} ~ {end}）"}
+        in_list = ", ".join(f"'{s}'" for s in clean)
+        df = QuantDBDataHub.get_instance().query(
+            "SELECT median(amount) AS m, count(*) AS n, count(amount) AS n_amount "
+            "FROM qdb_daily_forward "
+            f"WHERE symbol IN ({in_list}) AND dt BETWEEN {start_dt} AND {end_dt}"
+        )
+        row = df.iloc[0] if df is not None and len(df) else None
+        matched = int(row["n"]) if row is not None else 0
+        valued = int(row["n_amount"]) if row is not None else 0
+        if matched == 0:
+            return {
+                "note": (
+                    f"daily_forward 在 {start_dt}~{end_dt} 无匹配行"
+                    f"（{len(clean)} 只归一后代码如 {clean[:3]}）——成交额取不到"
+                )
+            }
+        median_wan = _as_float(row["m"]) if row is not None else None
+        if median_wan is None:
+            return {
+                "note": (
+                    f"匹配到 {matched} 行但 amount 全为空（{valued} 行有值）"
+                    "——成交额取不到"
+                )
+            }
+        return {
+            "median_amount_wan": median_wan,
+            "n_amount_rows": valued,
+            "n_matched_rows": matched,
+            "n_symbols_queried": len(clean),
+            "amount_unit": "万元",
+            **({"note": note} if note else {}),
+        }
+    except Exception as exc:  # noqa: BLE001 — 取数失败只影响容量维，如实带出原因
+        return {"note": f"daily_forward.amount 取数失败：{type(exc).__name__}: {exc}"}
+
+
+def _round_trip_cost() -> tuple[float, str]:
+    """双边成本率：优先 CostModel 口径，取不到退回 BRAIN 默认 20bp 并写明降级。"""
+    try:
+        from backend.services.engine.inference.trading_cost import CostModel
+
+        model = CostModel()
+        return model.round_trip_cost(), "CostModel 默认（佣金+印花税+过户费+滑点）"
+    except Exception as exc:  # noqa: BLE001 — 缺依赖时按文档默认值兜底
+        return (
+            FALLBACK_ROUND_TRIP_COST,
+            f"CostModel 不可用（{type(exc).__name__}），退回 BRAIN 默认 20bp 双边",
+        )
+
+
 async def load_backtest_curve(
     backtest_id: str | None, file_path: str | None
 ) -> dict[str, Any]:
-    """结果 JSON → {equity_curve, drawdown_curve, start, end}（async：run_all 复用）。"""
+    """结果 JSON → {equity_curve, drawdown_curve, trades, start, end, dates}。"""
     path = file_path
     if not path:
         from sqlalchemy import text as _text
@@ -286,6 +439,7 @@ async def load_backtest_curve(
     return {
         "equity_curve": values,
         "drawdown_curve": drawdowns or None,
+        "trades": data.get("trades") or [],
         "start": dates[0] if dates else "",
         "end": dates[-1] if dates else "",
         "dates": dates,
@@ -343,56 +497,44 @@ async def score_strategy(
             "error": loaded["error"],
             "skipped": True,
         }
-    returns = curve_to_returns(loaded["equity_curve"])
-    ann = annualized_return(returns)
     bench = (
         _benchmark_returns(loaded["start"], loaded["end"])
         if loaded.get("start") and loaded.get("end")
         else np.empty(0)
     )
     bench_ann = annualized_return(bench) if len(bench) else None
-    monthly = monthly_returns(loaded["dates"], loaded["equity_curve"])
-
-    dims = [
-        score_return_dim(ann, bench_ann),
-        score_risk_dim(returns, loaded.get("drawdown_curve"), ann),
-        score_stability_dim(monthly),
-        DimensionScore(
-            "cost",
-            "成本",
-            WEIGHTS["cost"],
-            None,
-            False,
-            {"insufficient": True, "note": "向量化引擎无成交明细（v1 缺省）"},
-        ),
-        DimensionScore(
-            "consistency",
-            "一致性",
-            WEIGHTS["consistency"],
-            None,
-            False,
-            {"insufficient": True, "note": "无同期模拟曲线对照（v1 缺省）"},
-        ),
-        DimensionScore(
-            "capacity",
-            "容量",
-            WEIGHTS["capacity"],
-            None,
-            False,
-            {"insufficient": True, "note": "容量粗估未接线（v1 缺省）"},
-        ),
-    ]
+    round_trip_cost, cost_source = _round_trip_cost()
+    symbols = [str(t.get("symbol") or "") for t in (loaded.get("trades") or [])]
+    amount_stats = _median_amount_wan(
+        symbols, loaded.get("start", ""), loaded.get("end", "")
+    )
+    dims, evidence = strategy_dims(
+        loaded,
+        bench_ann=bench_ann,
+        amount_stats=amount_stats,
+        round_trip_cost=round_trip_cost,
+    )
     combined = combine_dimension_scores(dims)
     return {
         "object_type": "strategy",
         "object_id": backtest_id or loaded.get("path") or str(file_path),
         "window": [loaded["start"], loaded["end"]],
-        "n_days": len(returns),
+        "n_days": len(curve_to_returns(loaded["equity_curve"])),
         "inputs_version": {
             "backtest_id": backtest_id,
             "file": str(file_path),
             "weights": WEIGHTS,
             "benchmark": BENCHMARK,
+            "round_trip_cost": round_trip_cost,
+            "cost_source": cost_source,
+            "evidence": {
+                **evidence,
+                "annual_return": (
+                    round(evidence["annual_return"], 6)
+                    if evidence.get("annual_return") is not None
+                    else None
+                ),
+            },
         },
         **combined,
     }

@@ -30,11 +30,17 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from backend.scripts.eval.factor_pfs import (  # noqa: E402
+    compute_pfs_for,
+    quality_gate_dim,
+)
+from backend.scripts.eval.factor_series import factor_series_payload  # noqa: E402
 from backend.shared.eval_scoring import (  # noqa: E402
     DimensionScore,
     combine_dimension_scores,
     score_from_thresholds,
 )
+from backend.shared.eval_series import save_series  # noqa: E402
 
 WEIGHTS = {
     "predictive": 30.0,
@@ -80,8 +86,15 @@ def score_factor(
     series: dict[str, np.ndarray],
     report_factor: dict[str, Any] | None,
     max_corr: float | None,
+    pfs_record: dict[str, Any] | None = None,
+    *,
+    pfs_note: str | None = None,
 ) -> dict[str, Any]:
-    """单因子五维评分（series 为逐列 numpy 数组）。"""
+    """单因子五维评分（series 为逐列 numpy 数组）。
+
+    ``pfs_record`` 由 ``factor_pfs.compute_pfs_for`` 取好传入（本函数不读盘）；
+    为 None 时质量闸门维如实缺省，``pfs_note`` 写明为什么没有。
+    """
     ic = series.get("ic")
     dims: list[DimensionScore] = []
 
@@ -222,46 +235,12 @@ def score_factor(
             )
         )
 
-    # 质量闸门（PFS/DH —— v1 未落库，若有则用）
-    pfs = (report_factor or {}).get("pfs")
+    # 质量闸门（PFS/DH）：优先用现算的 PFS（factor_pfs 侧车），退回 report 里的 DH
+    record: dict[str, Any] | None = dict(pfs_record) if pfs_record else None
     dh = (report_factor or {}).get("diversity_gain") or (report_factor or {}).get("dh")
-    if pfs is not None or dh is not None:
-        parts = []
-        if pfs is not None:
-            parts.append(
-                score_from_thresholds(
-                    pfs, [(0.0, 0.0), (0.5, 40.0), (0.7, 70.0), (0.9, 100.0)]
-                )
-                or 0
-            )
-        if dh is not None:
-            parts.append(
-                score_from_thresholds(
-                    dh, [(0.0, 0.0), (0.01, 40.0), (0.05, 80.0), (0.1, 100.0)]
-                )
-                or 0
-            )
-        dims.append(
-            DimensionScore(
-                "quality_gate",
-                "质量闸门",
-                WEIGHTS["quality_gate"],
-                round(float(np.mean(parts)), 2),
-                False,
-                {"pfs": pfs, "dh": dh},
-            )
-        )
-    else:
-        dims.append(
-            DimensionScore(
-                "quality_gate",
-                "质量闸门",
-                WEIGHTS["quality_gate"],
-                None,
-                False,
-                {"insufficient": True, "note": "PFS/DH 未落库（训练期计算，v1 缺省）"},
-            )
-        )
+    if dh is not None:
+        record = {**(record or {}), "dh": dh}
+    dims.append(quality_gate_dim(record, note=pfs_note))
 
     # 覆盖
     cov = series.get("coverage")
@@ -334,7 +313,11 @@ def _parse_correlation(raw: Any) -> tuple[list[str], list[list[Any]]]:
 
 
 def score_factors(
-    dataset: str = "alpha_library", factor: str | None = None, top: int | None = None
+    dataset: str = "alpha_library",
+    factor: str | None = None,
+    top: int | None = None,
+    *,
+    with_pfs: bool = True,
 ) -> list[dict[str, Any]]:
     loaded = _load_dataset(dataset)
     if loaded is None:
@@ -350,6 +333,20 @@ def score_factors(
     report_factors = {
         str(f.get("factor") or f.get("name")): f for f in (report.get("factors") or [])
     }
+
+    if factor:
+        names = [factor]
+    else:
+        # top N：按 |mean ic| 排名
+        means = (
+            df.groupby("factor", observed=True)["ic"]
+            .mean()
+            .abs()
+            .sort_values(ascending=False)
+        )
+        names = [str(n) for n in means.index[: int(top or 20)]]
+
+    pfs_map, pfs_evidence = _pfs_for(dataset, names, enabled=with_pfs)
 
     def _score_one(name: str) -> dict[str, Any]:
         sub = df[df["factor"] == name]
@@ -374,22 +371,44 @@ def score_factors(
             ]
             if pairs:
                 max_corr = max(pairs)
+        payload = factor_series_payload(sub)
+        sidecar = save_series("factor", name, payload)
         return {
-            **score_factor(name, series, report_factors.get(name), max_corr),
-            "inputs_version": {"weights": WEIGHTS, "dataset": dataset},
+            **score_factor(
+                name,
+                series,
+                report_factors.get(name),
+                max_corr,
+                pfs_map.get(name),
+                pfs_note=pfs_evidence.get("note"),
+            ),
+            "inputs_version": {
+                "weights": WEIGHTS,
+                "dataset": dataset,
+                "pfs": {**pfs_evidence, "enabled": bool(with_pfs)},
+                # 长序列走 `data/eval_series/factor/<code>.json`（§1.6）：列表接口
+                # 只带标量，序列按需取——写失败在这里如实留痕，不静默丢图
+                "series_sidecar": {
+                    "written": sidecar["written"],
+                    "bytes": sidecar["bytes"],
+                    "note": sidecar["note"],
+                },
+            },
         }
 
-    if factor:
-        return [_score_one(factor)]
-    # top N：按 |mean ic| 排名
-    means = (
-        df.groupby("factor", observed=True)["ic"]
-        .mean()
-        .abs()
-        .sort_values(ascending=False)
-    )
-    names = list(means.index[: int(top or 20)])
     return [_score_one(str(n)) for n in names]
+
+
+def _pfs_for(
+    dataset: str, factors: list[str], *, enabled: bool
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """PFS 取数（异常隔离在评估侧，不因面板读不到而中断整批评分）。"""
+    if not enabled:
+        return {}, {"note": "PFS 已按调用方要求跳过（--no-pfs）"}
+    try:
+        return compute_pfs_for(dataset, [f for f in factors if f])
+    except Exception as exc:  # noqa: BLE001 — 取数失败只影响质量闸门维
+        return {}, {"note": f"PFS 取数失败：{type(exc).__name__}: {exc}"}
 
 
 async def _save_many(
@@ -443,8 +462,15 @@ def main() -> int:
     )
     parser.add_argument("--save", action="store_true")
     parser.add_argument("--json", action="store_true")
+    parser.add_argument(
+        "--no-pfs",
+        action="store_true",
+        help="跳过错动保真（PFS）取数，质量闸门维将如实缺省",
+    )
     args = parser.parse_args()
-    results = score_factors(args.dataset, args.factor, args.top)
+    results = score_factors(
+        args.dataset, args.factor, args.top, with_pfs=not args.no_pfs
+    )
     if args.save:
         asyncio.run(_save_many(results, args.dataset))
     if args.json:

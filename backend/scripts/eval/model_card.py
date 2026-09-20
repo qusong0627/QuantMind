@@ -3,12 +3,14 @@
 数据源：`models/production/<model_id>/metadata.json`——**两代 schema 兼容**：
 新代 `metrics.{train,val,test}_{rank_ic,rank_icir}`；旧代 `performance_metrics.test.{mean_ic,icir}`
 （alpha158 等存量模型，已实测归一）。
-v1 覆盖率（诚实口径，缺维按剩余权重归一）：
-- OOS 预测力（30）✅ 直接可算（test RankIC/ICIR，红线 IC<0.02 或 ICIR<0.3）；
-- 分层能力（25）🟡 需预测+标签重算 → v1 insufficient；
-- 稳健性（15）🟡 子样本分段 → v1 insufficient；
-- 滚动健康（15）🟡 依赖 model_ic_monitor 历史接线 → v1 insufficient；
-- 换手与成本（15）🟡 需持仓序列 → v1 insufficient。
+
+五维与证据（缺维按剩余权重归一，**缺省与「评过」在 detail 里可分辨**）：
+- OOS 预测力（30）：metadata test RankIC/ICIR，红线 IC<0.02 或 ICIR<0.3；
+- 分层能力（25）/ 稳健性（15）/ 滚动健康（15）/ 换手与成本（15）：
+  由 `model_realized.resolve_dims` 按证据优先级实算——
+  `pred.parquet(test)` → `metadata.eval_report` → `qm_model_inference_quality`
+  → 如实缺省（note 说明缺的是什么）；四条红线见 `model_realized` 各 `score_*`。
+  用了哪一级证据记在 `inputs_version.evidence`（降级必留痕）。
 ensemble 模型（无 metrics）→ 全部维度缺省、不评分（组件模型各自评分）。
 
 用法：python backend/scripts/eval/model_card.py [--model-id model_qlib] [--save] [--json]
@@ -27,11 +29,19 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from backend.scripts.eval.model_realized import (  # noqa: E402
+    DIM_ORDER,
+    OFF_DISK_NOTE,
+    TIER_NONE,
+    insufficient_dims,
+    resolve_dims,
+)
 from backend.shared.eval_scoring import (  # noqa: E402
     DimensionScore,
     combine_dimension_scores,
     score_from_thresholds,
 )
+from backend.shared.eval_series import save_series  # noqa: E402
 
 WEIGHTS = {
     "oos_predictive": 30.0,
@@ -107,12 +117,6 @@ def score_oos(metrics: dict[str, Any]) -> DimensionScore:
     )
 
 
-def _insufficient(key: str, label: str, note: str) -> DimensionScore:
-    return DimensionScore(
-        key, label, WEIGHTS[key], None, False, {"insufficient": True, "note": note}
-    )
-
-
 def list_production_models(*, limit: int = 50) -> list[str]:
     """生产模型目录清单（跳过 ``.bak`` 备份；无 metadata.json 的目录自然不纳入）。"""
     if not PRODUCTION_DIR.is_dir():
@@ -155,9 +159,11 @@ def _user_meta_path(model_id: str, storage_path: str = "") -> Path | None:
 
 
 async def list_user_models(*, limit: int = 300) -> list[dict[str, Any]]:
-    """用户训练模型清单（``qm_user_models``，ready/candidate；产物缺失的跳过）。
+    """用户训练模型清单（``qm_user_models``，ready/candidate）。
 
-    返回 ``[{model_id, meta_path}]``；DB 不可用向上抛，由调用方隔离。
+    产物已清理的对象**照样返回**（``meta_path=None``，附 storage_path）：跳过它
+    会让库里的旧 A 级分数永远没人覆盖，正是「榜首模型已不在盘」的成因。
+    返回 ``[{model_id, meta_path, storage_path}]``；DB 不可用向上抛，由调用方隔离。
     """
     from sqlalchemy import text as _text
 
@@ -178,11 +184,83 @@ async def list_user_models(*, limit: int = 300) -> list[dict[str, Any]]:
     for model_id, storage_path in rows:
         if not model_id:
             continue
-        meta_path = _user_meta_path(str(model_id), str(storage_path or ""))
-        if meta_path is None:
-            continue  # 产物已清理（归档残留）——无从评分，跳过而非报错
-        out.append({"model_id": str(model_id), "meta_path": str(meta_path)})
+        sp = str(storage_path or "")
+        meta_path = _user_meta_path(str(model_id), sp)
+        out.append(
+            {
+                "model_id": str(model_id),
+                "meta_path": str(meta_path) if meta_path else None,
+                "storage_path": sp,
+            }
+        )
     return out
+
+
+def partition_user_models(
+    items: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[tuple[str, Path]]]:
+    """DB 行 → (缺省卡, 待评分目标)：产物不在盘的不再被丢掉。"""
+    cards: list[dict[str, Any]] = []
+    targets: list[tuple[str, Path]] = []
+    for item in items:
+        model_id = str(item.get("model_id") or "")
+        if not model_id:
+            continue
+        meta_path = item.get("meta_path")
+        if not meta_path:
+            cards.append(
+                missing_artifact_card(model_id, item.get("storage_path") or "")
+            )
+        else:
+            targets.append((model_id, Path(str(meta_path))))
+    return cards, targets
+
+
+def missing_artifact_card(model_id: str, storage_path: str = "") -> dict[str, Any]:
+    """产物不在盘的模型：出一张**如实缺省的卡**（不是 error，也不是跳过）。
+
+    目的是让库里陈旧的 A 级自己现形：这张卡 ``score=None``，覆盖写回同一
+    ``(object_type, object_id, snapshot_date)`` 后，旧分不再有落脚处。
+    """
+    dims = insufficient_dims(OFF_DISK_NOTE)
+    combined = combine_dimension_scores(
+        [score_oos({})] + [dims[key] for key in DIM_ORDER], low_confidence=True
+    )
+    return {
+        "object_type": "model",
+        "object_id": model_id,
+        "artifact_missing": True,
+        "inputs_version": {
+            "model_id": model_id,
+            "weights": WEIGHTS,
+            "source": "none",
+            "storage_path": storage_path or None,
+            "evidence": {"tier": TIER_NONE, "on_disk": False, "note": OFF_DISK_NOTE},
+        },
+        **combined,
+    }
+
+
+def _persist_series(model_id: str, evidence: dict[str, Any]) -> dict[str, Any]:
+    """长序列落侧车，返回**不含序列本身**的证据（列表接口就靠只有标量才轻）。"""
+    light = {k: v for k, v in evidence.items() if k not in {"series", "series_note"}}
+    series = evidence.get("series")
+    if isinstance(series, dict) and series:
+        written = save_series("model", model_id, series)
+        light["series_sidecar"] = {
+            "written": written["written"],
+            "bytes": written["bytes"],
+            "note": written["note"],
+        }
+    else:
+        # 没有序列就如实说为什么（缓存未带 / 该级证据本就不产序列），不留空白
+        light["series_sidecar"] = {
+            "written": False,
+            "bytes": 0,
+            "note": evidence.get("series_note")
+            or f"该级证据（{evidence.get('tier')}）不产长序列——只有 pred.parquet 一级才逐日重算",
+        }
+    return light
 
 
 def score_model(model_id: str, *, meta_path: Path | None = None) -> dict[str, Any]:
@@ -195,15 +273,10 @@ def score_model(model_id: str, *, meta_path: Path | None = None) -> dict[str, An
         }
     meta = json.loads(Path(meta_file).read_text(encoding="utf-8"))
     metrics, metrics_source = extract_oos_metrics(meta)
-    dims = [
-        score_oos(metrics),
-        _insufficient("stratification", "分层能力", "需预测+标签重算（v1 缺省）"),
-        _insufficient("robustness", "稳健性", "子样本分段回填未接线（v1 缺省）"),
-        _insufficient(
-            "rolling_health", "滚动健康", "model_ic_monitor 历史未接线（v1 缺省）"
-        ),
-        _insufficient("turnover_cost", "换手与成本", "需持仓序列（v1 缺省）"),
-    ]
+    real_dims, evidence = resolve_dims(
+        model_id, meta=meta, model_dir=meta_file.parent, collect_series=True
+    )
+    dims = [score_oos(metrics)] + [real_dims[key] for key in DIM_ORDER]
     combined = combine_dimension_scores(dims)
     return {
         "object_type": "model",
@@ -219,6 +292,10 @@ def score_model(model_id: str, *, meta_path: Path | None = None) -> dict[str, An
             "source": "metadata.metrics",
             "meta_path": str(meta_file),
             "metrics_source": metrics_source,
+            # 四维用了哪一级实证证据（降级必留痕，前端页脚照抄这一行）。
+            # 长序列在此**已摘除**：它走 `data/eval_series/model/<id>.json`，
+            # 进了这里就等于每次列表刷新都拖着上千点走。
+            "evidence": _persist_series(model_id, evidence),
         },
         **combined,
     }
@@ -280,11 +357,10 @@ def main() -> int:
                 targets: list[tuple[str, Path | None]] = [
                     (m, None) for m in list_production_models()
                 ]
-                targets += [
-                    (item["model_id"], Path(item["meta_path"]))
-                    for item in await list_user_models()
-                ]
-                results: list[dict[str, Any]] = []
+                # 产物不在盘的用户模型出缺省卡（要覆盖写回，否则旧 A 级永远留着）
+                cards, user_targets = partition_user_models(await list_user_models())
+                results: list[dict[str, Any]] = list(cards)
+                targets += user_targets
                 for model_id, meta_path in targets:
                     try:
                         results.append(score_model(model_id, meta_path=meta_path))
@@ -298,7 +374,10 @@ def main() -> int:
                         )
                 if args.save:
                     for r in results:
-                        if not r.get("error") and r.get("score") is not None:
+                        if r.get("error"):
+                            continue
+                        # score 为 None 也可写入：这正是「证据不在盘」要表达的现状
+                        if r.get("score") is not None or r.get("artifact_missing"):
                             await _save(r)
                 return results
             finally:
@@ -306,13 +385,17 @@ def main() -> int:
 
         results = asyncio.run(_run_all_models())
         ok = [r for r in results if not r.get("error") and r.get("score") is not None]
+        gone = [r for r in results if r.get("artifact_missing")]
         print(
             f"模型评分卡全量：{len(ok)} 落分 / {len(results)} 个对象"
+            + (f"（其中 {len(gone)} 个产物不在盘，已写缺省卡）" if gone else "")
             + ("（已落表）" if args.save else "（未落表，加 --save）")
         )
         for r in results:
             if r.get("error"):
                 print(f"  ERROR {r['object_id']}: {str(r['error'])[:120]}")
+            elif r.get("artifact_missing"):
+                print(f"  MISSING {r['object_id']}: {OFF_DISK_NOTE[:60]}")
             elif r.get("score") is None:
                 print(f"  SKIP  {r['object_id']}: 无 OOS 指标（如 ensemble）")
         return 0 if ok else 1

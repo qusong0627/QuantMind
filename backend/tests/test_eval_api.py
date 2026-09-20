@@ -102,6 +102,9 @@ def test_eval_router_registered_and_visibility_clause():
     # 只读纪律：无 INSERT/UPDATE/DELETE
     for verb in ("INSERT INTO", "UPDATE ", "DELETE FROM"):
         assert verb not in src
+    # 长序列侧车（§1.6）：单独的按需端点，且复用同一可见性谓词——
+    # 侧车在盘上没有租户/用户维度，若绕过 eval_scores 就是「知道 id 就能读别人的序列」
+    assert '@router.get("/series")' in src
 
 
 @pytest.mark.unit
@@ -266,6 +269,123 @@ async def test_eval_api_endpoints_real_db():
             await session.execute(
                 text("DELETE FROM eval_scores WHERE object_id IN (:m, :s)"),
                 {"m": model_id, "s": sid},
+            )
+            await session.commit()
+        from backend.shared.database_manager_v2 import close_database
+
+        await close_database()
+
+
+@pytest.mark.asyncio
+async def test_object_series_endpoint_real_db(tmp_path, monkeypatch):
+    """长序列侧车端到端（设计 §1.6）：写→读回、看不见 404、穿越 400、缺侧车 200 但如实说。"""
+    try:
+        from sqlalchemy import text
+
+        from backend.shared.database_manager_v2 import get_session
+    except Exception as exc:  # noqa: BLE001
+        pytest.skip(f"依赖不可用: {exc}")
+    try:
+        async with get_session(read_only=True) as probe:
+            await probe.execute(text("SELECT 1"))
+    except Exception:
+        from backend.shared.database_manager_v2 import close_database
+
+        await close_database()
+        try:
+            async with get_session(read_only=True) as probe:
+                await probe.execute(text("SELECT 1"))
+        except Exception as exc:  # noqa: BLE001
+            pytest.skip(f"DB 连接抖动: {exc}")
+
+    from backend.services.api.routers.eval_scores import object_series
+    from backend.shared.eval_series import save_series
+
+    tag = uuid.uuid4().hex[:8]
+    model_id = f"pytest_series_{tag}"
+    user = {"tenant_id": "default", "user_id": "00000001"}
+    monkeypatch.setenv("QM_EVAL_SERIES_DIR", str(tmp_path))
+
+    try:
+        # Arrange：一条共享行（user_id='' 默认）让该对象对任何人可见 + 一份侧车
+        async with get_session() as session:
+            await session.execute(
+                text(
+                    "INSERT INTO eval_scores (object_type, object_id, snapshot_date, score, "
+                    "grade, low_confidence, red_line_failed, dimensions, inputs_version) "
+                    "VALUES ('model', :oid, :d, 72, 'B', FALSE, '[]'::jsonb, "
+                    "'{}'::jsonb, '{}'::jsonb)"
+                ),
+                {"oid": model_id, "d": _date.fromisoformat("2026-09-16")},
+            )
+            await session.commit()
+        written = save_series(
+            "model",
+            model_id,
+            {
+                "series": {"daily_ic": [{"date": "2026-09-15", "value": 0.031}]},
+                "scalars": {"monotonicity": 0.72},
+            },
+        )
+        assert written["written"] is True
+        assert Path(written["path"]).parent == tmp_path / "model"
+
+        # Act
+        resp = await object_series(
+            object_type="model", object_id=model_id, current_user=user
+        )
+
+        # Assert：序列与标量原样回来（路由不重算、不改写），信封带生成时刻
+        assert resp["success"] is True
+        assert resp["meta"]["available"] is True
+        assert resp["meta"]["reason"] is None
+        assert resp["data"]["series"]["daily_ic"] == [
+            {"date": "2026-09-15", "value": 0.031}
+        ]
+        assert resp["data"]["scalars"]["monotonicity"] == 0.72
+        assert resp["meta"]["generated_at"] and resp["meta"]["version"] == 1
+
+        # 可见但尚无侧车：200 + available=false 且 reason 说清是「还没产出」
+        empty_id = f"pytest_series_none_{tag}"
+        async with get_session() as session:
+            await session.execute(
+                text(
+                    "INSERT INTO eval_scores (object_type, object_id, snapshot_date, score, "
+                    "grade, low_confidence, red_line_failed, dimensions, inputs_version) "
+                    "VALUES ('factor', :oid, :d, 70, 'B', FALSE, '[]'::jsonb, "
+                    "'{}'::jsonb, '{}'::jsonb)"
+                ),
+                {"oid": empty_id, "d": _date.fromisoformat("2026-09-16")},
+            )
+            await session.commit()
+        missing = await object_series(
+            object_type="factor", object_id=empty_id, current_user=user
+        )
+        assert missing["meta"]["available"] is False
+        assert missing["meta"]["reason"] == "missing"
+        assert "尚未产出" in missing["meta"]["note"]
+
+        # 库里没有该对象 → 404（不是「空序列」）
+        with pytest.raises(HTTPException) as exc:
+            await object_series(
+                object_type="model", object_id=f"pytest_absent_{tag}", current_user=user
+            )
+        assert exc.value.status_code == 404
+
+        # 路径穿越 → 400（输入错误，不改妆成 404「看不见」）
+        with pytest.raises(HTTPException) as exc2:
+            await object_series(
+                object_type="model", object_id="../../etc/passwd", current_user=user
+            )
+        assert exc2.value.status_code == 400
+        assert "穿越" in exc2.value.detail
+    finally:
+        from backend.shared.database_manager_v2 import get_session as _gs
+
+        async with _gs() as session:
+            await session.execute(
+                text("DELETE FROM eval_scores WHERE object_id LIKE :p"),
+                {"p": f"pytest_series_%{tag}"},
             )
             await session.commit()
         from backend.shared.database_manager_v2 import close_database
