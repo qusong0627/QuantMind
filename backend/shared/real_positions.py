@@ -49,6 +49,37 @@ def snapshot_source_for_broker(broker_type: str | None) -> str | None:
     return None
 
 
+#: 快照 source → CN 券商键（``PUT /broker-config/selected/CN`` 的取值口径）。
+#: 「按源看」的视图源要能反查回可选券商，否则前端只能自己猜映射、猜错就切错券商。
+#: 与 ``broker_config.MARKET_BROKERS["CN"]`` 的一致性由测试锁定（反查表口径同源）。
+_CN_SOURCE_TO_BROKER: dict[str, str] = {
+    "qmt_exec": "qmt_exec",
+    "tdx_bridge": "tdx",
+}
+
+
+def broker_for_snapshot_source(source: str | None) -> str | None:
+    """快照 source → CN 券商键；非 CN 实盘源（手工录入等）返回 None（=不可选为交易券商）。"""
+    return _CN_SOURCE_TO_BROKER.get(str(source or "").strip().lower())
+
+
+def selected_broker_is_explicit() -> bool:
+    """``broker:selected:CN`` 是否**被显式设置**（区别于 ``REAL_BROKER_TYPE`` 兜底）。
+
+    页面「当前交易券商」必须说清是「你选的」还是「环境变量兜底」——两者行为不同，
+    后者随时可能随部署变化，用户以为是自己选的就错了。
+    """
+    try:
+        from backend.shared.redis_sentinel_client import get_redis_sentinel_client
+
+        client = get_redis_sentinel_client()
+        if client and client.client:
+            return bool(client.client.get("broker:selected:CN"))
+    except Exception as exc:  # noqa: BLE001 - 读不到 = 未显式设置，不阻断页面
+        logger.debug("读取 broker:selected:CN 失败: %s", exc)
+    return False
+
+
 def active_broker_type() -> str | None:
     """当前实盘券商：Redis ``broker:selected:CN``（券商接入页选定）→ settings 回退。"""
     try:

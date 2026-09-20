@@ -112,6 +112,39 @@ def test_standby_decision_matrix():
     )
 
 
+@pytest.mark.unit
+def test_default_takeover_threshold_exceeds_bridge_rotation_cycle():
+    """默认接管阈值必须 > 桥热集一整圈（529 只 × 0.18s ≈ 95s）。
+
+    否则桥刚写的键下一拍就被判陈旧 → 桥与备源轮流接管同一批键 →
+    持仓监控的来源标签与现价来回跳（2026-09-20 实况：阈值 30s < 轮转 95s）。
+    """
+    from backend.services.live_trading.services.qmt_quote_backup import (
+        BRIDGE_ROTATION_REFERENCE_S,
+        DEFAULT_STALE_AFTER_S,
+        BackupConfig,
+    )
+
+    assert DEFAULT_STALE_AFTER_S > BRIDGE_ROTATION_REFERENCE_S
+    assert BackupConfig().stale_after_s == DEFAULT_STALE_AFTER_S
+    # Redis 未配置时取同为默认（守卫的是「不配置就静默回到 30s」这种回退）
+    assert BackupConfig.from_mapping({}).stale_after_s == DEFAULT_STALE_AFTER_S
+    assert BackupConfig.from_mapping({"stale_after_s": "90"}).stale_after_s == 90.0
+
+
+@pytest.mark.unit
+def test_bridge_rotation_reference_matches_hot_set_pacing():
+    """参考圈速与桥侧节拍常量的口径一致（节拍改了这里要跟着改，避免守卫变空转）。"""
+    from backend.services.live_trading.services.qmt_quote_backup import (
+        BRIDGE_ROTATION_REFERENCE_S,
+    )
+    from backend.services.live_trading.services.tdx_hot_set_feed import PACING_S
+
+    # 参考值 = 529 只热集（含指数）× 节拍，允许 ±20% 口径漂移
+    expected = 529 * PACING_S
+    assert 0.8 * expected <= BRIDGE_ROTATION_REFERENCE_S <= 1.2 * expected
+
+
 class _FakeLatency:
     def __init__(self):
         self.observed: list[float] = []

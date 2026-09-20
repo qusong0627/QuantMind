@@ -15,6 +15,10 @@ import DeskTodayPage from '../../features/desk/DeskTodayPage';
 import { EvalCenterPanel } from '../../features/eval-center/components/EvalCenterPanel';
 import SignalsExplorerPage from './tabs/SignalsExplorerPage';
 import type { RealTradingStatus, AccountInfo, PreflightCheckResponse, PreflightCheckItem } from '../../services/realTradingService';
+import {
+    getPreferredAccountSource,
+    subscribeAccountSourceChange,
+} from './utils/accountSourcePreference';
 import { authService } from '../../features/auth/services/authService';
 import type { StrategyFile } from '../../types/backtest/strategy';
 import { useAppSelector } from '../../store';
@@ -134,9 +138,26 @@ const RealTradingPage: React.FC = () => {
     const [isRevealing, setIsRevealing] = useState(false);
     const preflightRequestSeqRef = useRef(0);
     const isFetchingRef = useRef(false);
+    // 被「已有请求在飞」挡掉的重取（切源/切市场/成交事件）：等当前请求落地立刻补一次，
+    // 否则点了持仓监控的账户源 chip 要等下一个 5s 周期才看到数字变（实测 ~7s）。
+    const pendingRefetchRef = useRef(false);
+    const fetchDataRef = useRef<(() => void) | null>(null);
+    // 账户「按源看」偏好（持仓监控 chips 点选）：多券商的 QMT / 通达信是两个真实账户，
+    // 不指定源时后端按「最新一行」取，数字会在两个账户之间跳。null = 跟随交易券商。
+    const [accountSource, setAccountSource] = useState<string | null>(() => getPreferredAccountSource(currentMarket));
+
+    useEffect(() => {
+        setAccountSource(getPreferredAccountSource(currentMarket));
+        return subscribeAccountSourceChange(() => {
+            setAccountSource(getPreferredAccountSource(currentMarket));
+        });
+    }, [currentMarket]);
 
     const fetchData = useCallback(async () => {
-        if (isFetchingRef.current) return;
+        if (isFetchingRef.current) {
+            pendingRefetchRef.current = true;
+            return;
+        }
 
         const token = authService.getAccessToken();
         if (!token) {
@@ -152,7 +173,7 @@ const RealTradingPage: React.FC = () => {
             const { realTradingService } = await import('../../services/realTradingService');
             const statusData = await realTradingService.getStatus(userId, tradingMode, tenantId);
             const runtimeMode = resolveTradingAccountMode(statusData?.mode, tradingMode);
-            const accountData = await realTradingService.getRuntimeAccount(userId, tenantId, runtimeMode, currentMarket).catch(() => null);
+            const accountData = await realTradingService.getRuntimeAccount(userId, tenantId, runtimeMode, currentMarket, accountSource).catch(() => null);
 
             setStatus(statusData);
             setAccountInfo(accountData);
@@ -183,10 +204,20 @@ const RealTradingPage: React.FC = () => {
             setEffectiveLiveTradeConfig(null);
         } finally {
             isFetchingRef.current = false;
+            if (pendingRefetchRef.current) {
+                pendingRefetchRef.current = false;
+                fetchDataRef.current?.(); // 用最新闭包补跑（含刚切到的 source）
+            }
         }
         // currentMarket 必须在内：顶栏账户随市场切换（getRuntimeAccount 带 market），
         // 漏了它 → 切港股/美股后闭包仍是旧市场，页面继续显示 A 股账户。
-    }, [tenantId, userId, tradingMode, currentMarket]);
+        // accountSource 同理：切源要立刻重取，否则点了 chip 还得等下一个 5s 周期。
+    }, [tenantId, userId, tradingMode, currentMarket, accountSource]);
+
+    // 保持「最新一次渲染的 fetchData」可被异步补跑调用（见上面的 pendingRefetchRef）
+    useEffect(() => {
+        fetchDataRef.current = fetchData;
+    }, [fetchData]);
 
     useEffect(() => {
         if (pollingPausedByAuth) {

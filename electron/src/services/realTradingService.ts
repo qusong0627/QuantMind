@@ -307,6 +307,10 @@ export interface ManualExecutionLogsResponse {
 export interface ManualExecutionPreviewOrder {
     symbol: string;
     name?: string;
+    /** 申万行业（后端 _enrich_preview_display_fields 补，缺失为空串） */
+    industry?: string;
+    /** A 股上市板：科创板 / 创业板 / 中小板 / 深主板 / 沪主板 / 北交所 / 其他 */
+    board?: string;
     side: 'BUY' | 'SELL' | string;
     trade_action?: string;
     quantity: number;
@@ -322,6 +326,9 @@ export interface ManualExecutionPreviewOrder {
 
 export interface ManualExecutionPreviewSkippedItem {
     symbol: string;
+    name?: string;
+    industry?: string;
+    board?: string;
     action: 'BUY' | 'SELL' | string;
     reason: string;
     source?: string;
@@ -943,11 +950,18 @@ export const realTradingService = {
     },
 
     // Get Account Info
-    getAccount: async (userId: string, tenantId: string = getTenantId()): Promise<AccountInfo> => {
+    // source：按源看（qmt_exec / tdx_bridge）。留空 = 当前实盘券商对应的源（后端仲裁）。
+    // 多券商并行上报时两个源是两个真实账户，不指定就会在两边的最新行之间抖动。
+    getAccount: async (
+        userId: string,
+        tenantId: string = getTenantId(),
+        source?: string | null,
+    ): Promise<AccountInfo> => {
         try {
             return await requestRealTradingWithFallback<AccountInfo>({
                 method: 'get',
                 url: '/account',
+                params: source ? { source } : undefined,
             });
         } catch (error: any) {
             const status = Number(error?.response?.status ?? 0);
@@ -970,12 +984,28 @@ export const realTradingService = {
         tenantId: string = getTenantId(),
         runtimeMode?: string | null,
         market?: string,
+        source?: string | null,
     ): Promise<AccountInfo | null> => {
         const normalizedMode = String(runtimeMode || '').trim().toUpperCase();
         if (normalizedMode === 'SIMULATION') {
             return await realTradingService.getSimulationAccount(userId, tenantId, market).catch(() => null);
         }
-        return await realTradingService.getAccount(userId, tenantId).catch(() => null);
+        return await realTradingService.getAccount(userId, tenantId, source).catch(() => null);
+    },
+
+    // 实盘账户「按源看」概览（各券商源最新快照 + 新鲜度 + 当前选定源）
+    getAccountSources: async (): Promise<AccountSourcesPayload | null> => {
+        try {
+            const resp = await requestRealTradingWithFallback<AccountSourcesPayload>({
+                method: 'get',
+                url: '/account/sources',
+            });
+            return resp;
+        } catch (error: any) {
+            const status = Number(error?.response?.status ?? 0);
+            if (status === 401 || status === 403) throw error;
+            return null;
+        }
     },
 
     // Get Simulation Account Info
@@ -1154,6 +1184,15 @@ export interface AccountInfo {
     message?: string;
     account_unavailable_reason?: 'unbound' | 'not_reported' | 'not_found';
     position_count?: number;
+    // ── 来源仲裁（多券商并行上报时；见 /account?source=） ──
+    /** 本条快照实际来自哪个源（account_source） */
+    account_source?: string;
+    account_source_label?: string;
+    /** 本次请求指定的源（留空时=当前实盘券商源） */
+    requested_source?: string;
+    /** true=请求源不可用、本条是全源最新可用（数字不是你要的那个账户） */
+    source_downgraded?: boolean;
+    source_downgraded_reason?: 'requested_source_no_snapshot' | 'requested_source_no_usable_snapshot';
     positions: Array<{
         symbol?: string;
         volume?: number;
@@ -1169,4 +1208,34 @@ export interface AccountInfo {
         last_price?: number;
         cost_price?: number;
     }>;
+}
+
+/** GET /account/sources：各券商源的快照概览（「按源看」chips 的数据源） */
+export interface AccountSourceItem {
+    source: string;
+    label: string;
+    account_id?: string | null;
+    snapshot_at?: string | null;
+    age_sec?: number | null;
+    freshness?: 'fresh' | 'stale' | 'unavailable';
+    is_usable?: boolean;
+    /** 当前实盘券商对应的源（= 下单走的那个账户） */
+    selected?: boolean;
+    /** 回查得到的 CN 券商键；null = 无可选券商（如手工录入），页面只能看不能切 */
+    broker?: string | null;
+    selectable?: boolean;
+    total_asset?: number;
+    cash?: number;
+    market_value?: number;
+    position_count?: number;
+}
+
+export interface AccountSourcesPayload {
+    selected_source?: string | null;
+    selected_source_label?: string | null;
+    /** false = 当前券商来自 REAL_BROKER_TYPE 兜底，不是用户在页面上选的 */
+    selected_source_explicit?: boolean;
+    sources: AccountSourceItem[];
+    policy?: { fresh_within_s: number; stale_within_s: number };
+    server_time?: string;
 }

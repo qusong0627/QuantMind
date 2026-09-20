@@ -7,7 +7,9 @@ import { marketDataService } from '../../../services/marketDataService';
 import { websocketService, MessageType } from '../../../services/websocketService';
 import { buildNormalizedHoldings, extractPositionCodes, getPositionSummary, NormalizedHolding } from '../utils/positionMetrics';
 import { PositionVisualBoard, ExecutionStrip } from '../components/PositionVisualBoard';
-import { SERVICE_URLS } from '../../../config/services';
+import { PositionSourceBar } from '../components/PositionSourceBar';
+import { HoldingAlertPanel } from '../../../features/holding-alerts/HoldingAlertPanel';
+import { CopilotPanel } from '../../../features/desk/components/CopilotPanel';
 import type { TradingAccountMode } from '../utils/accountAdapter';
 
 interface PositionMonitorProps {
@@ -32,20 +34,8 @@ interface LiveQuote {
     };
 }
 
-interface QuoteFeedStatus {
-    running?: boolean;
-    bridge_ok?: boolean;
-    last_feed_at?: string | null;
-    last_feed_age_sec?: number | null;
-    symbols?: string[];
-    is_trading_time?: boolean;
-    last_error?: string | null;
-}
-
-const authHeader = () => ({
-    'Content-Type': 'application/json',
-    Authorization: `Bearer ${localStorage.getItem('access_token') || ''}`,
-});
+/** 窄屏（不足 2xl 并排）时主卡的高度：主卡内部要有个确定高度才能自己滚动 */
+const STACKED_BOARD_MIN_H = 'h-[560px]';
 
 /** 持仓明细叠加实时价：现价/市值/盈亏全部按 live price 重算 */
 const mergeLivePrices = (holdings: NormalizedHolding[], live: Record<string, number>): NormalizedHolding[] => {
@@ -70,9 +60,7 @@ const PositionMonitor: React.FC<PositionMonitorProps> = ({ userId: _userId, isAc
     const [stockNames, setStockNames] = useState<Record<string, string>>({});
     const [livePrices, setLivePrices] = useState<Record<string, number>>({});
     const livePricesRef = useRef<Record<string, number>>({});
-    const [feedStatus, setFeedStatus] = useState<QuoteFeedStatus | null>(null);
     const subscribedRef = useRef<string[]>([]);
-    const apiGatewayBase = SERVICE_URLS.API_GATEWAY.replace(/\/+$/, '');
 
     React.useEffect(() => {
         if (!accountInfo || !accountInfo.positions) return;
@@ -134,34 +122,12 @@ const PositionMonitor: React.FC<PositionMonitorProps> = ({ userId: _userId, isAc
         subscribedRef.current = [];
     }, [isActive]);
 
-    // 行情 Feed 状态轮询（Data Feed 检查口径：last_feed_age < 300s）
-    const fetchFeedStatus = useCallback(async () => {
-        try {
-            const res = await fetch(`${apiGatewayBase}/api/v1/tdx/quote-feed/status`, {
-                headers: authHeader(),
-            });
-            if (res.status === 403) {
-                setFeedStatus(null);
-                return;
-            }
-            if (res.ok) {
-                setFeedStatus(await res.json());
-            }
-        } catch (e) {
-            console.error('Failed to fetch quote feed status', e);
-        }
-    }, [apiGatewayBase]);
-
-    useEffect(() => {
-        if (!isActive) return;
-        fetchFeedStatus();
-        const timer = setInterval(fetchFeedStatus, 20000);
-        return () => clearInterval(timer);
-    }, [isActive, fetchFeedStatus]);
-
     const holdings = React.useMemo(() => {
         return mergeLivePrices(buildNormalizedHoldings(accountInfo, stockNames), livePrices);
     }, [accountInfo, stockNames, livePrices]);
+
+    // 行情源采样的标的集 = 当前显示的持仓（换源后自动变成另一个账户的持仓）
+    const positionCodes = React.useMemo(() => extractPositionCodes(accountInfo), [accountInfo]);
 
     const summary = React.useMemo(
         () => getPositionSummary(accountInfo, holdings),
@@ -170,39 +136,58 @@ const PositionMonitor: React.FC<PositionMonitorProps> = ({ userId: _userId, isAc
 
     if (!isActive) return null;
 
-    const feedLive = !!feedStatus?.bridge_ok && (feedStatus?.last_feed_age_sec ?? 999) < 300;
-
     return (
         <div className="h-full p-2.5 pb-[50px] flex flex-col gap-2">
-            {/* 实时行情来源指示：TDX 桥实时 vs QuantDB 日线兜底（仅 CN；其余市场为日线数据） */}
-            <div className={`flex items-center gap-2 px-3 py-1.5 rounded-xl border bg-white/70 text-[11px] shrink-0 ${currentMarket !== 'CN' ? 'hidden' : ''}`}>
-                <span className="font-black text-slate-500">行情来源</span>
-                {feedLive ? (
-                    <span className="inline-flex items-center gap-1.5 font-bold text-emerald-600">
-                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-                        通达信实时（{feedStatus!.last_feed_age_sec}s 前）
-                    </span>
-                ) : (
-                    <span className="inline-flex items-center gap-1.5 font-bold text-amber-600">
-                        <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
-                        QuantDB 日线兜底{feedStatus?.last_error ? ` · ${feedStatus.last_error}` : ''}
-                    </span>
-                )}
-                {feedStatus?.is_trading_time === false && (
-                    <span className="text-slate-400 font-medium">（非交易时段）</span>
-                )}
-                <span className="ml-auto text-slate-300 font-mono text-[10px]">
-                    监控 {feedStatus?.symbols?.length ?? 0} 只持仓 · 实时提醒仅限持仓股
-                </span>
-            </div>
-            {/* 持仓可视化主卡（2026-09-17 重设计：KPI + 市值占比条形列表，替代 分布饼图+宽表格 两块） */}
-            <PositionVisualBoard
-                holdings={holdings}
-                summary={summary}
-                defaultChannels={accountMode === 'real' ? ['sim', 'real'] : ['sim']}
+            {/* 来源条（2026-09-20 重做）：账户源 chips（看哪个券商账户，可切换视图/交易券商）
+                + 行情源（按持仓标的采样 market:snapshot 的 source 字段，如实报主供数与并写源）。
+                旧版这里读的是 TDX 持仓馈送的心跳（bridge_ok），与真正供数方无关 —— 桥与
+                QMT 备源轮转时文案来回切，正是用户报的第二个现象。 */}
+            <PositionSourceBar
+                market={currentMarket}
+                isActive={isActive}
+                accountMode={accountMode}
+                accountSource={accountInfo?.account_source}
+                sourceDowngraded={accountInfo?.source_downgraded}
+                sourceDowngradedReason={accountInfo?.source_downgraded_reason}
+                positionCodes={positionCodes}
             />
-            {/* 今日执行折叠条（并入同页，不再单起卡片） */}
-            <ExecutionStrip />
+
+            {/* 两栏（2026-09-20 用户要求「持仓监控放 2 栏」）：
+                左 = 持仓本体（KPI/明细/图表 + 今日执行），右 = 风险与情报栏（哨兵 + 副驾驶）。
+                这两块原本挂在「系统健康」页脚：它们讲的全是**持仓**的风险与盘中情报，
+                跟持仓明细分在两页看，等于风险永远和平仓对不上号；且刻意不按市场门控——
+                切到港股/美股页签时 A 股持仓的风险并不会消失。
+                并排只在 ≥2xl 生效：主卡内部还有固定的图表列（430~470px），
+                再窄并排会把明细列压到读不了；不足 2xl 时右栏落到下方、两卡并排。 */}
+            <div className="flex-1 min-h-0 flex flex-col 2xl:flex-row gap-2 overflow-y-auto 2xl:overflow-hidden custom-scrollbar">
+                <div className={`${STACKED_BOARD_MIN_H} shrink-0 min-w-0 flex flex-col gap-2 2xl:h-auto 2xl:min-h-0 2xl:flex-1 2xl:shrink`}>
+                    {/* 持仓可视化主卡（2026-09-17 重设计：KPI + 市值占比条形列表，替代 分布饼图+宽表格 两块） */}
+                    <PositionVisualBoard
+                        holdings={holdings}
+                        summary={summary}
+                        defaultChannels={accountMode === 'real' ? ['sim', 'real'] : ['sim']}
+                    />
+                    {/* 今日执行折叠条（并入同页，不再单起卡片） */}
+                    <ExecutionStrip />
+                </div>
+
+                {/* 右栏：风险与情报。grid 让「不足 2xl」时两卡并排（4 列 → 2 列），
+                    ≥2xl 收成单列窄栏并各自内部滚动（不撑破页面高度）。 */}
+                <aside
+                    data-testid="position-rail"
+                    aria-label="持仓风险与情报"
+                    className="shrink-0 min-h-0 grid content-start grid-cols-1 xl:grid-cols-2 2xl:grid-cols-1 gap-2 2xl:w-[380px] 2xl:overflow-y-auto custom-scrollbar"
+                >
+                    <HoldingAlertPanel />
+                    <CopilotPanel />
+                    {/* 悬浮 Dock 是覆盖层不占布局（memory: dock-overlay-bottom-clearance）：
+                        窄屏时右栏铺满整行、底部会被 Dock 吞掉，滚动末端补实体占位块。 */}
+                    <div
+                        aria-hidden
+                        className="h-[max(12px,calc(var(--dock-height)-12px))] shrink-0 2xl:hidden"
+                    />
+                </aside>
+            </div>
         </div>
     );
 };

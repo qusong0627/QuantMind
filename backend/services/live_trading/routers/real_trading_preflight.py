@@ -852,17 +852,111 @@ async def list_preflight_snapshots_daily(
     ]
 
 
-@router.get("/account")
-async def get_account(
+@router.get("/account/sources")
+async def list_account_sources(
     tenant_id: Optional[str] = None,
     user_id: Optional[str] = None,
     auth: AuthContext = Depends(get_auth_context),
     db: AsyncSession = Depends(get_db),
 ):
+    """实盘账户「按源看」概览：各券商源的最新快照 + 新鲜度 + 当前选定源。
+
+    多券商并行上报时（QMT 与通达信是两个真实账户，实测 50 只 / 8 只），
+    页面必须能分别展示两边的总资产与持仓数，而不是把数字抖在一起。
+    ``selected_source`` = 当前实盘券商对应源（下单也走它）；点其它源 = 只看不改路由。
     """
-    获取账户资金与持仓。
+    resolved_user_id, resolved_tenant_id = _normalize_identity(
+        auth, user_id=user_id, tenant_id=tenant_id
+    )
+    rows = await fetch_account_source_rows(
+        db, tenant_id=resolved_tenant_id, user_id=resolved_user_id
+    )
+    selected_source = resolve_account_snapshot_source(None)
+    policy = quote_policy()
+    now_ts = time.time()
+
+    sources: list[dict[str, Any]] = []
+    for row in rows:
+        source = str(row.get("source") or "")
+        ts = _parse_snapshot_timestamp(row.get("snapshot_at"))
+        age_sec = None if ts is None else max(0.0, now_ts - ts)
+        payload = row.get("payload_json") or {}
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except (TypeError, ValueError):
+                payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        positions = [
+            p
+            for p in (payload.get("positions") or [])
+            if isinstance(p, dict) and float(p.get("volume") or 0) > 0
+        ]
+        sources.append(
+            {
+                "source": source,
+                "label": snapshot_source_label(source),
+                "account_id": row.get("account_id"),
+                "snapshot_at": row["snapshot_at"].isoformat()
+                if isinstance(row.get("snapshot_at"), datetime)
+                else row.get("snapshot_at"),
+                "age_sec": None if age_sec is None else int(age_sec),
+                "freshness": policy.classify(age_sec),
+                "is_usable": is_usable_account_snapshot_row(dict(row)),
+                "selected": bool(selected_source) and source == selected_source,
+                # 反查回可选券商（「设为交易券商」按钮用）；非 CN 实盘源为 None = 不可选
+                "broker": account_snapshot_broker_key(source),
+                "total_asset": float(row.get("total_asset") or 0.0),
+                "cash": float(row.get("cash") or 0.0),
+                "market_value": float(row.get("market_value") or 0.0),
+                "position_count": len(positions),
+            }
+        )
+    # 选定源排最前，其余按新鲜度升序（页面 chips 的顺序 = 认知优先级）
+    sources.sort(
+        key=lambda item: (
+            not item["selected"],
+            item["age_sec"] if item["age_sec"] is not None else float("inf"),
+        )
+    )
+    # 每源补 selectable：可选券商键存在才允许「设为交易券商」，否则前端只能展示
+    for item in sources:
+        item["selectable"] = bool(item.get("broker"))
+    return {
+        "selected_source": selected_source,
+        "selected_source_label": snapshot_source_label(selected_source)
+        if selected_source
+        else None,
+        # true=用户在页面上选的；false=环境变量兜底（页面须如实区分，别让兜底看起来像选择）
+        "selected_source_explicit": is_account_source_explicitly_selected(),
+        "sources": sources,
+        "policy": {
+            "fresh_within_s": policy.fresh_within_s,
+            "stale_within_s": policy.stale_within_s,
+        },
+        "server_time": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+@router.get("/account")
+async def get_account(
+    tenant_id: Optional[str] = None,
+    user_id: Optional[str] = None,
+    source: Optional[str] = Query(
+        None,
+        description="快照源（qmt_exec / tdx_bridge）。留空=当前实盘券商；显式传入=按源看",
+    ),
+    auth: AuthContext = Depends(get_auth_context),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    获取账户资金与持仓（**按源仲裁**：选定就用选定的，降级在字段里如实标注）。
 
     只读取 PostgreSQL 中最近一次持久化快照，不再用 Redis 参与展示口径。
+    QMT 与通达信是两个互不相交的真实账户、两条流交错写库，故必须按源取，
+    否则总资产 / 可用 / 持仓数会成对跳动（2026-09-20 修复）。
+    响应含 ``account_source`` / ``source_downgraded`` 供前端标注实际口径。
     """
     try:
         resolved_user_id, resolved_tenant_id = _normalize_identity(auth, user_id=user_id, tenant_id=tenant_id)
@@ -870,12 +964,18 @@ async def get_account(
             db,
             tenant_id=resolved_tenant_id,
             user_id=resolved_user_id,
+            source=source,
         )
         if latest_snapshot is None:
             # 未绑定/尚未上报是真实交易页面的正常初始状态，而不是接口错误。
             # 返回与前端 AccountInfo 兼容的空账户，避免轮询时持续产生 404。
             return {
                 "account_id": None,
+                "account_source": None,
+                "account_source_label": None,
+                "requested_source": resolve_account_snapshot_source(source),
+                "source_downgraded": False,
+                "source_downgraded_reason": None,
                 "total_asset": 0.0,
                 "cash": 0.0,
                 "available_cash": 0.0,

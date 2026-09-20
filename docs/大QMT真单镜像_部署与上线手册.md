@@ -295,7 +295,8 @@ docker exec quantmind-redis redis-cli -n 5 xrevrange bigqmt:position_events:<账
 桥的 RPC runtime **自带全推行情订阅服务**（``QuoteSubscriptionManager``，默认常开）——
 容器侧容器已上线备源席（trade 服务任务，``qmt_quote_backup``），**Windows 侧无需任何额外配置**：
 
-- 容器启用/停用：``redis-cli -n 0 hset qm:qmt:quote:backup:config enabled true stale_after_s 30``；
+- 容器启用/停用：``redis-cli -n 0 hset qm:qmt:quote:backup:config enabled true stale_after_s 150``
+  （**接管阈值必须 > 桥热集轮转一圈 ~102s**，否则桥与备源轮流接管同一批键、来源与现价来回跳；150s 为 2026-09-20 起的默认值）；
 - 状态面：``redis-cli -n 0 hgetall qm:qmt:quote:backup:status``——``bridge_ok`` 反映桥在线、
   ``written/skipped_fresh`` 反映席位接管量；桥离线时 ``last_error`` 如实记录并指数退避重试；
 - 席位语义：仅当标准键缺失或主源（TdxAiData）陈旧超过 ``stale_after_s`` 才写入（source=``qmt_big``），

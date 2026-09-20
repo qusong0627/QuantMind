@@ -244,9 +244,7 @@ async def test_trading_precheck_shadow_skips_qmt(monkeypatch, tmp_path):
 
 @pytest.mark.asyncio
 async def test_fetch_latest_real_account_snapshot_returns_ledger_metrics():
-    fake_db = _FakeDb(
-        [
-            {
+    row = {
                 "id": 1,
                 "tenant_id": "default",
                 "user_id": "00001001",
@@ -265,9 +263,9 @@ async def test_fetch_latest_real_account_snapshot_returns_ledger_metrics():
                 "month_open_equity": 20500000.0,
                 "source": "qmt_bridge",
                 "payload_json": {"positions": []},
-            }
-        ]
-    )
+    }
+    # 第 1 次 execute = 各源最新行（源仲裁），第 2 次 = 视图取行
+    fake_db = _FakeDb([row, row])
 
     snapshot = await real_utils._fetch_latest_real_account_snapshot(
         fake_db,
@@ -770,7 +768,8 @@ async def test_fetch_latest_real_account_snapshot_prefers_view_row():
     }
 
     snapshot = await real_utils._fetch_latest_real_account_snapshot(
-        _FakeDb([row]),
+        # 第 1 次 execute = 各源最新行（源仲裁），第 2 次 = 视图取行
+        _FakeDb([row, row]),
         tenant_id="default",
         user_id="1001",
     )
@@ -833,7 +832,8 @@ async def test_fetch_latest_real_account_snapshot_skips_empty_tail_row():
     ]
 
     snapshot = await real_utils._fetch_latest_real_account_snapshot(
-        _FakeDb([rows]),
+        # 第 1 次 execute = 各源最新行（源仲裁），第 2 次 = 视图取行（逐行回退跳过空壳）
+        _FakeDb([rows, rows]),
         tenant_id="default",
         user_id="1001",
     )
@@ -841,6 +841,336 @@ async def test_fetch_latest_real_account_snapshot_skips_empty_tail_row():
     assert snapshot is not None
     assert snapshot["total_asset"] == 21852149.35
     assert snapshot["position_count"] == 1
+
+
+# ── 账户快照「按源仲裁」（2026-09-20）────────────────────────────────────────
+# 现象：QMT 与通达信是两条互不相交的真实账户流、每 30s 交错写库，读侧取最新一行
+# 导致总资产 / 可用资金 / 持仓数成对跳动，且「看得见的账户」与「下得了单的账户」
+# 可能不是同一个。口径：选定就用选定的（broker:selected:CN），降级必标注。
+
+
+def _account_snapshot_row(
+    *,
+    source: str,
+    snapshot_at: datetime,
+    total_asset: float,
+    cash: float | None = None,
+    positions: list | None = None,
+    row_id: int = 1,
+) -> dict:
+    return {
+        "id": row_id,
+        "tenant_id": "default",
+        "user_id": "10000001",
+        "account_id": f"{source}-default-10000001",
+        "snapshot_at": snapshot_at,
+        "snapshot_date": snapshot_at.date(),
+        "snapshot_month": snapshot_at.strftime("%Y-%m"),
+        "total_asset": total_asset,
+        "cash": cash if cash is not None else total_asset * 0.5,
+        "market_value": total_asset * 0.5,
+        "today_pnl_raw": 0.0,
+        "total_pnl_raw": 0.0,
+        "floating_pnl_raw": 0.0,
+        "initial_equity": total_asset,
+        "day_open_equity": total_asset,
+        "month_open_equity": total_asset,
+        "source": source,
+        "payload_json": {
+            "positions": positions
+            if positions is not None
+            else [{"symbol": "600036.SH", "volume": 100}]
+        },
+    }
+
+
+def test_resolve_account_snapshot_source_prefers_explicit_then_active_broker(monkeypatch):
+    from backend.shared import real_positions
+
+    monkeypatch.setattr(real_positions, "active_broker_type", lambda: "tdx")
+
+    # 显式指定优先（前端「按源看」不被券商选择覆盖）
+    assert real_utils.resolve_account_snapshot_source("qmt_exec") == "qmt_exec"
+    # 留空 → 跟随当前实盘券商
+    assert real_utils.resolve_account_snapshot_source(None) == "tdx_bridge"
+    assert real_utils.resolve_account_snapshot_source("") == "tdx_bridge"
+
+
+def test_select_account_snapshot_target_keeps_requested_even_when_other_newer():
+    rows = [
+        _account_snapshot_row(
+            source="qmt_exec", snapshot_at=datetime(2026, 9, 20, 6, 0), total_asset=23_887_910.76
+        ),
+        _account_snapshot_row(
+            source="tdx_bridge", snapshot_at=datetime(2026, 9, 20, 6, 1), total_asset=919_185.63
+        ),
+    ]
+
+    target, reason = real_utils.select_account_snapshot_target(
+        rows, requested_source="qmt_exec"
+    )
+
+    assert target == "qmt_exec"
+    assert reason is None
+
+
+def test_select_account_snapshot_target_flags_missing_requested_source():
+    tdx_only = [
+        _account_snapshot_row(
+            source="tdx_bridge", snapshot_at=datetime(2026, 9, 20, 6, 1), total_asset=919_185.63
+        )
+    ]
+
+    target, reason = real_utils.select_account_snapshot_target(
+        tdx_only, requested_source="qmt_exec"
+    )
+    assert (target, reason) == ("tdx_bridge", real_utils.DOWNGRADE_SOURCE_MISSING)
+
+    target, reason = real_utils.select_account_snapshot_target(
+        [], requested_source="qmt_exec"
+    )
+    assert (target, reason) == (None, real_utils.DOWNGRADE_SOURCE_MISSING)
+
+    target, reason = real_utils.select_account_snapshot_target([], requested_source=None)
+    assert (target, reason) == (None, None)
+
+
+@pytest.mark.asyncio
+async def test_fetch_snapshot_reads_requested_source_not_newer_other():
+    """按源看：即便另一源更新，也只读指定源（选定即权威，页面不许自己换账户）。"""
+    qmt = _account_snapshot_row(
+        source="qmt_exec",
+        snapshot_at=datetime(2026, 9, 20, 6, 0),
+        total_asset=23_887_910.76,
+        cash=21_626_955.16,
+        positions=[{"symbol": "600036.SH", "volume": 100}],
+    )
+    tdx = _account_snapshot_row(
+        source="tdx_bridge",
+        snapshot_at=datetime(2026, 9, 20, 6, 1),
+        total_asset=919_185.63,
+        cash=842_000.63,
+        positions=[{"symbol": "000001.SZ", "volume": 200}],
+        row_id=2,
+    )
+
+    snapshot = await real_utils._fetch_latest_real_account_snapshot(
+        _FakeDb([[qmt, tdx], [qmt]]),
+        tenant_id="default",
+        user_id="10000001",
+        source="qmt_exec",
+    )
+
+    assert snapshot["account_source"] == "qmt_exec"
+    assert snapshot["account_source_label"] == "QMT 迅投"
+    assert snapshot["requested_source"] == "qmt_exec"
+    assert snapshot["source_downgraded"] is False
+    assert snapshot["total_asset"] == 23_887_910.76
+    assert snapshot["available_cash"] == 21_626_955.16
+    assert snapshot["position_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_fetch_snapshot_defaults_to_active_broker_source(monkeypatch):
+    """留空 source → 跟随当前实盘券商；更旧的选定源也优先于更新的另一源。"""
+    from backend.shared import real_positions
+
+    monkeypatch.setattr(real_positions, "active_broker_type", lambda: "tdx")
+    tdx = _account_snapshot_row(
+        source="tdx_bridge", snapshot_at=datetime(2026, 9, 20, 6, 0), total_asset=919_185.63
+    )
+    qmt = _account_snapshot_row(
+        source="qmt_exec", snapshot_at=datetime(2026, 9, 20, 6, 1), total_asset=23_887_910.76
+    )
+
+    snapshot = await real_utils._fetch_latest_real_account_snapshot(
+        _FakeDb([[tdx, qmt], [tdx]]),
+        tenant_id="default",
+        user_id="10000001",
+    )
+
+    assert snapshot["account_source"] == "tdx_bridge"
+    assert snapshot["source_downgraded"] is False
+    assert snapshot["total_asset"] == 919_185.63
+
+
+@pytest.mark.asyncio
+async def test_fetch_snapshot_flags_downgrade_when_requested_source_missing():
+    """请求源没有任何快照 → 退回最新可用源，但必须如实标注降级（不静默顶包）。"""
+    tdx = _account_snapshot_row(
+        source="tdx_bridge", snapshot_at=datetime(2026, 9, 20, 6, 1), total_asset=919_185.63
+    )
+
+    snapshot = await real_utils._fetch_latest_real_account_snapshot(
+        _FakeDb([[tdx], [tdx]]),
+        tenant_id="default",
+        user_id="10000001",
+        source="qmt_exec",
+    )
+
+    assert snapshot["account_source"] == "tdx_bridge"
+    assert snapshot["requested_source"] == "qmt_exec"
+    assert snapshot["source_downgraded"] is True
+    assert snapshot["source_downgraded_reason"] == real_utils.DOWNGRADE_SOURCE_MISSING
+
+
+@pytest.mark.asyncio
+async def test_fetch_snapshot_falls_back_to_all_sources_when_requested_source_unusable(
+    monkeypatch,
+):
+    """请求源有行但全不可用（空壳）→ 用全源最新可用行 + 标注 requested_source_no_usable_snapshot。"""
+    monkeypatch.setattr(
+        real_utils, "resolve_account_snapshot_source", lambda explicit=None: "qmt_exec"
+    )
+    empty_qmt = _account_snapshot_row(
+        source="qmt_exec",
+        snapshot_at=datetime(2026, 9, 20, 6, 2),
+        total_asset=0.0,
+        cash=0.0,
+        positions=[],
+    )
+    good_tdx = _account_snapshot_row(
+        source="tdx_bridge", snapshot_at=datetime(2026, 9, 20, 6, 1), total_asset=919_185.63
+    )
+
+    snapshot = await real_utils._fetch_latest_real_account_snapshot(
+        # 第 1 次 execute=各源最新行；第 2 次=按请求源取（空壳）；第 3 次=全源取
+        _FakeDb([[empty_qmt, good_tdx], [empty_qmt], [empty_qmt, good_tdx]]),
+        tenant_id="default",
+        user_id="10000001",
+    )
+
+    assert snapshot["account_source"] == "tdx_bridge"
+    assert snapshot["source_downgraded"] is True
+    assert (
+        snapshot["source_downgraded_reason"]
+        == real_utils.DOWNGRADE_SOURCE_UNUSABLE
+    )
+
+
+@pytest.mark.asyncio
+async def test_list_account_sources_reports_each_broker_stream(monkeypatch):
+    """GET /account/sources：两源并列 + 新鲜度分级 + 持仓数，选定源排最前。"""
+    fixed_now = datetime(2026, 9, 20, 6, 10, 0, tzinfo=timezone.utc).timestamp()
+    monkeypatch.setattr(real_preflight.time, "time", lambda: fixed_now)
+    monkeypatch.setattr(
+        real_preflight,
+        "_normalize_identity",
+        lambda auth, user_id=None, tenant_id=None: ("10000001", "default"),
+    )
+    fresh_qmt = _account_snapshot_row(
+        source="qmt_exec",
+        snapshot_at=datetime(2026, 9, 20, 6, 9, 48),
+        total_asset=23_887_910.76,
+        positions=[
+            {"symbol": "600036.SH", "volume": 100},
+            {"symbol": "000001.SZ", "volume": 0},
+        ],
+    )
+    stale_tdx = _account_snapshot_row(
+        source="tdx_bridge",
+        snapshot_at=datetime(2026, 9, 20, 3, 0, 0),
+        total_asset=919_185.63,
+        positions=[{"symbol": "000651.SZ", "volume": 300}],
+    )
+    monkeypatch.setattr(
+        real_preflight,
+        "fetch_account_source_rows",
+        AsyncMock(return_value=[stale_tdx, fresh_qmt]),
+    )
+    monkeypatch.setattr(
+        real_preflight, "resolve_account_snapshot_source", lambda explicit=None: "qmt_exec"
+    )
+
+    result = await real_preflight.list_account_sources(
+        tenant_id=None,
+        user_id=None,
+        auth=AuthContext(
+            user_id="10000001", tenant_id="default", raw_sub="10000001", roles=["user"]
+        ),
+        db=object(),
+    )
+
+    assert result["selected_source"] == "qmt_exec"
+    assert [item["source"] for item in result["sources"]] == ["qmt_exec", "tdx_bridge"]
+    freshest, older = result["sources"]
+    assert freshest["selected"] is True
+    assert freshest["freshness"] == "fresh"
+    # 清仓残留（volume=0）不计入持仓数
+    assert freshest["position_count"] == 1
+    assert freshest["total_asset"] == 23_887_910.76
+    assert older["freshness"] == "unavailable"
+    assert older["age_sec"] == 3 * 3600 + 10 * 60  # 06:10 − 03:00
+    assert result["policy"]["fresh_within_s"] > 0
+    # 「设为交易券商」要能反查回 broker-config 的取值；反查不到(手工录入等)则不可选
+    assert freshest["broker"] == "qmt_exec" and freshest["selectable"] is True
+    assert older["broker"] == "tdx" and older["selectable"] is True
+
+
+@pytest.mark.asyncio
+async def test_list_account_sources_marks_manual_rows_unselectable(monkeypatch):
+    """非 CN 实盘源（手工录入）没有对应券商键 → selectable=False，页面只展示不可切。"""
+    monkeypatch.setattr(
+        real_preflight,
+        "_normalize_identity",
+        lambda auth, user_id=None, tenant_id=None: ("10000001", "default"),
+    )
+    monkeypatch.setattr(
+        real_preflight,
+        "fetch_account_source_rows",
+        AsyncMock(
+            return_value=[
+                _account_snapshot_row(
+                    source="manual_override",
+                    snapshot_at=datetime(2026, 9, 20, 6, 9, 48),
+                    total_asset=1_000_000.0,
+                )
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        real_preflight, "resolve_account_snapshot_source", lambda explicit=None: None
+    )
+    monkeypatch.setattr(
+        real_preflight, "is_account_source_explicitly_selected", lambda: False
+    )
+
+    result = await real_preflight.list_account_sources(
+        tenant_id=None,
+        user_id=None,
+        auth=AuthContext(
+            user_id="10000001", tenant_id="default", raw_sub="10000001", roles=["user"]
+        ),
+        db=object(),
+    )
+
+    item = result["sources"][0]
+    assert item["broker"] is None and item["selectable"] is False
+    assert item["selected"] is False
+    assert result["selected_source"] is None
+    # 未显式选择（REAL_BROKER_TYPE 兜底）必须如实标出，别让兜底看起来像用户的选择
+    assert result["selected_source_explicit"] is False
+
+
+@pytest.mark.unit
+def test_account_source_to_broker_map_matches_broker_config_market_brokers():
+    """source→券商 反查表与 broker-config 的 CN 可选券商集合互逆（防两边漂移）。
+
+    漂移的后果不是报错：页面拿一个不存在的券商键去 PUT，被 422 拦下或静默切错券商。
+    """
+    from backend.shared.real_positions import (
+        broker_for_snapshot_source,
+        snapshot_source_for_broker,
+    )
+    from backend.services.trade.routers.broker_config import MARKET_BROKERS
+
+    for broker in MARKET_BROKERS["CN"]:
+        source = snapshot_source_for_broker(broker)
+        assert source, f"CN 券商 {broker} 没有对应快照源"
+        assert broker_for_snapshot_source(source) == broker, f"{broker} 反查不回去"
+
+    assert broker_for_snapshot_source("manual_override") is None
+    assert broker_for_snapshot_source(None) is None
 
 
 @pytest.mark.asyncio

@@ -4,7 +4,8 @@
 - 主源 = TdxAiData 订阅（写 ``market:snapshot:``/``market:series:``，source=tdx_aidata_sub）；
 - 本模块 = **备源**：静默订阅大 QMT 全推（``ContextInfo.subscribe_whole_quote``，服务端
   订阅管理器随 RPC runtime **默认常开**——Windows 侧零改动），**仅当标准键缺失或主源陈旧
-  超过 ``stale_after_s`` 时才写**（standby 席位：避免双源交错抖动），写入 source=``qmt_big``，
+  超过 ``stale_after_s``（默认 150s > 桥轮转一圈 ~102s，保证单键同一时刻只有一个写席）时才写**
+  （standby 席位：避免双源交错抖动），写入 source=``qmt_big``，
   消费方契约字段（Now/Open/PreClose/High/Low/Volume/Amount/timestamp + 五档）与主源同构。
 - 桥离线（Windows 未开机/QMT 未登录）→ 如实记 ``last_error`` + 指数退避重试，**绝不假装有数据**。
 
@@ -38,6 +39,15 @@ CST = timezone(timedelta(hours=8))
 CONFIG_KEY = "qm:qmt:quote:backup:config"
 STATUS_KEY = "qm:qmt:quote:backup:status"
 BACKUP_SOURCE = "qmt_big"
+
+#: 桥热集一整圈的耗时参考：529 只 × 0.18s/只 ≈ 95s，实测 ~102s（桥限流下会略拉长）。
+#: **接管阈值必须大于它**——否则桥刚写完的键下一拍就被判「陈旧」而被本备源接管，
+#: 同一 key 两个写席轮流易主，消费侧表现为来源标签与现价来回跳
+#:（2026-09-20 实况：阈值 30s < 轮转 ~100s；docs/P6实时轨_实施细案.md 已记为待办「上调 ≥150s」）。
+BRIDGE_ROTATION_REFERENCE_S = 102.0
+#: 默认接管阈值：> 轮转一圈并留约 50% 余量（容忍桥限流拉长/漏一圈）；
+#: 仍 < freshness 的 300s 可用线，故桥真离线时接管前的旧值只标 stale，不会显示为不可用。
+DEFAULT_STALE_AFTER_S = 150.0
 BACKUP_LATENCY_STAGE = "market_snapshot_qmt"
 SNAPSHOT_TTL = 300
 SERIES_TTL = 172800
@@ -216,7 +226,8 @@ def build_series_payload(record: dict[str, Any]) -> dict[str, Any]:
 @dataclass
 class BackupConfig:
     enabled: bool = False
-    stale_after_s: float = 30.0
+    #: 主源陈旧判定阈值（秒）：默认 120 > 桥轮转一圈 95s，保证单键同一时刻只有一个写席
+    stale_after_s: float = DEFAULT_STALE_AFTER_S
     symbols_refresh_s: float = 300.0
     poll_interval_s: float = 30.0
 
@@ -233,7 +244,7 @@ class BackupConfig:
         return cls(
             enabled=str(raw.get("enabled") or "").strip().lower()
             in {"1", "true", "yes", "on"},
-            stale_after_s=max(5.0, _num("stale_after_s", 30.0)),
+            stale_after_s=max(5.0, _num("stale_after_s", DEFAULT_STALE_AFTER_S)),
             symbols_refresh_s=max(30.0, _num("symbols_refresh_s", 300.0)),
             poll_interval_s=max(5.0, _num("poll_interval_s", 30.0)),
         )
@@ -260,7 +271,16 @@ def _load_config_sync() -> BackupConfig:
         client = _main_redis()
         raw = client.hgetall(CONFIG_KEY) or {}
         client.close()
-        return BackupConfig.from_mapping(raw)
+        cfg = BackupConfig.from_mapping(raw)
+        if cfg.enabled and cfg.stale_after_s < BRIDGE_ROTATION_REFERENCE_S:
+            logger.warning(
+                "[QmtQuoteBackup] stale_after_s=%.0fs < 桥轮转一圈 %.0fs —— 备源会与桥轮流"
+                "接管同一批键（来源/现价来回跳）；建议 ≥ %.0fs",
+                cfg.stale_after_s,
+                BRIDGE_ROTATION_REFERENCE_S,
+                DEFAULT_STALE_AFTER_S,
+            )
+        return cfg
     except Exception:  # noqa: BLE001
         return BackupConfig()
 

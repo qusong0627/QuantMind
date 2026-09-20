@@ -1,11 +1,12 @@
 """
 TDX 实时行情 Feed 路由
 
-- GET /tdx/quote-feed/status  - 行情 Feed 运行状态（Data Feed 检查用）
+- GET /tdx/quote-feed/status  - 行情 Feed 运行状态（Data Feed 检查用；含真实供数源段）
 - GET/PUT /tdx/sltp-config    - 持仓股止损/止盈/移动止损配置
 - GET /tdx/quote-tick-sessions - 持仓 tick 会话列表（开会话=持仓开始，闭会话=清仓）
 - GET /tdx/quote-ticks        - 持仓 tick 明细查询（后期 tick 计算用）
 """
+import asyncio
 import logging
 from datetime import datetime, timezone
 
@@ -23,6 +24,16 @@ from backend.services.live_trading.services.tdx_quote_feed import (
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
+#: quote_sources 段单次采样的标的数上限（持仓/热集 100~600 量级，键读走 pipeline 一次往返）
+QUOTE_SOURCE_SAMPLE_LIMIT = 300
+
+
+def _parse_symbols_arg(raw: str | None) -> list[str]:
+    """逗号分隔采样标的（兼容全角逗号）；留空返回空列表（调用方回落到持仓）。"""
+    if not raw:
+        return []
+    return [part.strip() for part in str(raw).replace("，", ",").split(",") if part.strip()]
+
 
 class SltpConfigUpdate(BaseModel):
     stop_loss_pct: float = Field(0.08, ge=0.0, le=0.5, description="止损幅度 0.08=跌8%提醒")
@@ -32,8 +43,23 @@ class SltpConfigUpdate(BaseModel):
 
 
 @router.get("/tdx/quote-feed/status")
-async def get_quote_feed_status(auth: AuthContext = Depends(get_auth_context)):
-    """实时行情 Feed 状态：持仓馈送 + **热集轮询（hot_set 段）**。"""
+async def get_quote_feed_status(
+    symbols: str | None = Query(
+        None,
+        description="采样标的（逗号分隔，前缀/后缀/裸码均可）；留空=本馈送当前监控持仓",
+    ),
+    auth: AuthContext = Depends(get_auth_context),
+):
+    """实时行情 Feed 状态：持仓馈送 + **热集轮询（hot_set 段）** + **真实供数源（quote_sources 段）**。
+
+    quote_sources 回答「谁在喂我的持仓」：按标的采样 ``market:snapshot:*`` 的 source 字段
+    （桥 / QMT 备源 / TDX 订阅）聚合。WS 推送不带 source，页面此前只能拿本馈送的心跳
+    （bridge_ok）冒充行情来源，两个写席轮转时文案就来回切——故在此按真实写侧字段聚合。
+    采样读的是同步 Redis 客户端，放线程里跑，避免阻塞事件循环。
+    """
+    from backend.services.live_trading.services.quote_source_audit import (
+        collect_quote_sources,
+    )
     from backend.services.live_trading.services.tdx_hot_set_feed import (
         hot_set_feed_status,
     )
@@ -49,6 +75,11 @@ async def get_quote_feed_status(auth: AuthContext = Depends(get_auth_context)):
             status["last_feed_age_sec"] = max(0, age)
         except (TypeError, ValueError):
             pass
+
+    sample = _parse_symbols_arg(symbols) or [str(s) for s in (status.get("symbols") or [])]
+    status["quote_sources"] = await asyncio.to_thread(
+        collect_quote_sources, sample, limit=QUOTE_SOURCE_SAMPLE_LIMIT
+    )
     return status
 
 

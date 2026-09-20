@@ -61,8 +61,10 @@ docker exec quantmind-redis redis-cli -n 5 xrevrange bigqmt:position_events:<账
 
 ## 4. 备源行情席语义（T-P6-02）
 
-- **standby 席位**：仅当标准键缺失或主源（TdxAiData 订阅）**陈旧超过 `stale_after_s`(30s)**
+- **standby 席位**：仅当标准键缺失或主源（TdxAiData 订阅）**陈旧超过 `stale_after_s`(默认 150s)**
   才写，写入 `source=qmt_big`（避免双源交错抖动）；主源新鲜时计数走 `skipped_fresh`。
+  **阈值必须 > 桥热集轮转一圈（529 只 × `TDX_HOTSET_PACING_S` ≈ 95s，实测 ~102s）**——
+  设小了（曾为 30s）桥与备源会轮流接管同一批键，持仓监控上表现为来源标签与现价来回跳。
 - 量纲：QMT `volume=手`、`amount=元` 原样透传（消费方按 `source` 区分口径）。
 - 推送载荷是 **msgpack 二进制**——通道客户端必须 `decode_responses=False`。
 - 桥离线时**如实记 `last_error` 并指数退避，绝不假装有数据**。

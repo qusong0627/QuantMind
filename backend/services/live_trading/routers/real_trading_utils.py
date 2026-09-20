@@ -59,6 +59,170 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 REAL_ACCOUNT_SNAPSHOT_VIEW_NAME = "real_account_snapshot_overview_v"
 
+#: 快照 source 显示名（后端唯一处；前端直接吃 ``account_source_label``，不再各写一份）
+SNAPSHOT_SOURCE_LABELS: dict[str, str] = {
+    "qmt_exec": "QMT 迅投",
+    "qmt_bridge": "QMT 桥",
+    "tdx_bridge": "通达信桥",
+    "manual_override": "手工录入",
+}
+
+#: 请求源没有可用数据时的降级原因（如实标注，绝不静默拿另一个账户的数字顶包）
+DOWNGRADE_SOURCE_MISSING = "requested_source_no_snapshot"
+DOWNGRADE_SOURCE_UNUSABLE = "requested_source_no_usable_snapshot"
+
+#: 各源最新一行的查询：同一 (tenant, user) 下 QMT 与通达信是两个**互不相交的真实账户**
+#: （实测 50 只 / 8 只），两条流每 30s 交错写库，混在一起取最新等于掷硬币。
+_PER_SOURCE_LATEST_SQL = """
+    SELECT DISTINCT ON (source)
+        source,
+        account_id,
+        user_id,
+        snapshot_at,
+        snapshot_date,
+        snapshot_month,
+        total_asset,
+        cash,
+        market_value,
+        today_pnl_raw,
+        total_pnl_raw,
+        floating_pnl_raw,
+        payload_json
+    FROM real_account_snapshots
+    WHERE tenant_id = :tenant_id
+      AND user_id IN :user_ids
+    ORDER BY source, snapshot_at DESC, id DESC
+"""
+
+
+def snapshot_source_label(source: str | None) -> str:
+    """快照源显示名（未知源原样返回，不编造中文名）。"""
+    src = str(source or "").strip()
+    if not src:
+        return "未知来源"
+    return SNAPSHOT_SOURCE_LABELS.get(src, src)
+
+
+def account_snapshot_broker_key(source: str | None) -> str | None:
+    """快照 source → CN 券商键（页面「设为交易券商」按它调 PUT /broker-config/selected/CN）。
+
+    反查表住在 ``backend.shared.real_positions``（券商↔源映射的唯一家），此处只转发：
+    前端若自己猜映射，映射一变就切错券商，而切错券商的后果是订单换个柜台发。
+    """
+    from backend.shared.real_positions import broker_for_snapshot_source
+
+    return broker_for_snapshot_source(source)
+
+
+def is_account_source_explicitly_selected() -> bool:
+    """当前实盘券商是否为用户在页面上显式选定（否则是 REAL_BROKER_TYPE 兜底）。"""
+    from backend.shared.real_positions import selected_broker_is_explicit
+
+    return selected_broker_is_explicit()
+
+
+def resolve_account_snapshot_source(explicit: str | None = None) -> str | None:
+    """账户快照读取源仲裁（唯一实现）：显式指定 > 当前实盘券商 > 不指定（全源最新可用）。
+
+    「同源」是硬约束：本模块同时服务展示、预检、风控与下单预算。读的是 A 账户、
+    订单发往 B 柜台，风控就是拿另一个账户的资金在对单。
+    """
+    chosen = str(explicit or "").strip()
+    if chosen:
+        return chosen
+    try:
+        from backend.shared.real_positions import (
+            active_broker_type,
+            snapshot_source_for_broker,
+        )
+
+        return snapshot_source_for_broker(active_broker_type())
+    except Exception as exc:  # noqa: BLE001 - 取不到券商选择就退回「全源最新可用」
+        logger.debug("账户快照源仲裁失败，退回全源最新: %s", exc)
+        return None
+
+
+def _snapshot_candidate_user_ids(user_id: str) -> list[str]:
+    """user_id 候选集（历史写入过前导零 / 去零两种形态，都要对上）。"""
+    normalized = str(user_id or "").strip()
+    if not normalized:
+        return []
+    candidates = {normalized}
+    if normalized.isdigit():
+        candidates.add(str(int(normalized)))
+        candidates.add(normalized.zfill(8))
+    return sorted(candidates)
+
+
+def _snapshot_ts_key(value: Any) -> float:
+    """快照时间戳排序键（naive 时间按 UTC 口径，与 ``_parse_snapshot_timestamp`` 一致）。"""
+    if isinstance(value, datetime):
+        ts = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        return ts.timestamp()
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        except ValueError:
+            return 0.0
+        return (parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)).timestamp()
+    return 0.0
+
+
+def select_account_snapshot_target(
+    source_rows: list[dict[str, Any]], *, requested_source: str | None
+) -> tuple[str | None, str | None]:
+    """源仲裁（纯函数）：返回 ``(目标源, 降级原因)``。
+
+    请求源只要有数据就用它——**哪怕另一个源更新**（选定即权威，页面不许自己换账户）；
+    请求源完全没数据时退回最新源并如实标注降级原因。
+    """
+    if not source_rows:
+        return None, (DOWNGRADE_SOURCE_MISSING if requested_source else None)
+    newest = max(source_rows, key=lambda r: _snapshot_ts_key(r.get("snapshot_at")))
+    newest_source = str(newest.get("source") or "") or None
+    if not requested_source:
+        return newest_source, None
+    known = {str(r.get("source") or "") for r in source_rows}
+    if requested_source in known:
+        return requested_source, None
+    return newest_source, DOWNGRADE_SOURCE_MISSING
+
+
+async def fetch_account_source_rows(
+    db: AsyncSession, *, tenant_id: str, user_id: str
+) -> list[dict[str, Any]]:
+    """各 source 最新一行快照（含 payload）：源仲裁与「按源看」摘要共用同一查询。"""
+    user_ids = _snapshot_candidate_user_ids(user_id)
+    if not user_ids:
+        return []
+    stmt = text(_PER_SOURCE_LATEST_SQL).bindparams(bindparam("user_ids", expanding=True))
+    result = await db.execute(stmt, {"tenant_id": tenant_id, "user_ids": user_ids})
+    return [dict(row) for row in result.mappings().all()]
+
+
+def _annotate_account_source(
+    contract: dict[str, Any],
+    *,
+    requested_source: str | None,
+    downgrade_reason: str | None,
+) -> dict[str, Any]:
+    """补源标注：本次读的是哪个源、请求的是哪个源、是否拿别的账户顶了包。"""
+    actual = str(contract.get("source") or "")
+    dropped = bool(requested_source) and actual != requested_source
+    return {
+        **contract,
+        "account_source": actual,
+        "account_source_label": snapshot_source_label(actual),
+        "requested_source": requested_source,
+        "source_downgraded": dropped,
+        "source_downgraded_reason": downgrade_reason if dropped else None,
+    }
+
+
+def is_usable_account_snapshot_row(row: dict[str, Any]) -> bool:
+    """该行快照是否可用（空壳 / 总资产矛盾行都不算），供「按源看」逐源标注。"""
+    return _select_latest_usable_snapshot_row([row]) is not None
+
 
 def _select_latest_usable_snapshot_row(
     rows: list[dict[str, Any]],
@@ -492,22 +656,15 @@ async def _upsert_real_account_baseline(
     await db.commit()
 
 
-async def _fetch_latest_real_account_snapshot(
+async def _query_snapshot_view_rows(
     db: AsyncSession,
     *,
     tenant_id: str,
-    user_id: str,
-) -> dict[str, Any] | None:
-    normalized_user_id = str(user_id or "").strip()
-    if not normalized_user_id:
-        return None
-
-    candidate_user_ids = {normalized_user_id}
-    if normalized_user_id.isdigit():
-        candidate_user_ids.add(str(int(normalized_user_id)))
-        candidate_user_ids.add(normalized_user_id.zfill(8))
-
-    candidate_ids = sorted(candidate_user_ids)
+    user_ids: list[str],
+    source: str | None,
+) -> list[dict[str, Any]]:
+    """账户快照视图取行（可选按源过滤；先按 snapshot_at 倒序，供逐行回退）。"""
+    source_clause = "AND source = :source" if source else ""
     view_stmt = text(
         f"""
             SELECT
@@ -532,16 +689,125 @@ async def _fetch_latest_real_account_snapshot(
             FROM {REAL_ACCOUNT_SNAPSHOT_VIEW_NAME}
             WHERE tenant_id = :tenant_id
               AND user_id IN :user_ids
+              {source_clause}
             ORDER BY snapshot_at DESC, id DESC
             LIMIT 20
             """
     ).bindparams(bindparam("user_ids", expanding=True))
+    params: dict[str, Any] = {"tenant_id": tenant_id, "user_ids": user_ids}
+    if source:
+        params["source"] = source
+    result = await db.execute(view_stmt, params)
+    return [dict(row) for row in result.mappings().all()]
+
+
+async def _query_snapshot_table_rows(
+    db: AsyncSession,
+    *,
+    tenant_id: str,
+    user_ids: list[str],
+    source: str | None,
+) -> list[RealAccountSnapshot]:
+    """视图不可用时的表兜底取行（同样支持按源过滤）。"""
+    stmt = select(RealAccountSnapshot).where(
+        RealAccountSnapshot.tenant_id == tenant_id,
+        RealAccountSnapshot.user_id.in_(user_ids),
+    )
+    if source:
+        stmt = stmt.where(RealAccountSnapshot.source == source)
+    stmt = stmt.order_by(
+        desc(RealAccountSnapshot.snapshot_at), desc(RealAccountSnapshot.id)
+    ).limit(20)
+    result = await db.execute(stmt)
+    return list(result.scalars().all())
+
+
+def _select_latest_usable_snapshot_entity(
+    rows: list[Any],
+) -> Any | None:
+    """表兜底路径的可用行选择（与视图路径同一套守卫，只是入参是 ORM 实体）。"""
+    for candidate in rows:
+        if is_effectively_empty_snapshot(
+            total_asset=getattr(candidate, "total_asset", 0.0),
+            cash=getattr(candidate, "cash", 0.0),
+            market_value=getattr(candidate, "market_value", 0.0),
+            payload_json=getattr(candidate, "payload_json", None),
+        ):
+            continue
+        if is_inconsistent_zero_total_snapshot(
+            total_asset=getattr(candidate, "total_asset", 0.0),
+            cash=getattr(candidate, "cash", 0.0),
+            market_value=getattr(candidate, "market_value", 0.0),
+            payload_json=getattr(candidate, "payload_json", None),
+        ):
+            continue
+        if float(getattr(candidate, "total_asset", 0.0) or 0.0) <= 1e-8:
+            continue
+        return candidate
+    return None
+
+
+async def _fetch_latest_real_account_snapshot(
+    db: AsyncSession,
+    *,
+    tenant_id: str,
+    user_id: str,
+    source: str | None = None,
+) -> dict[str, Any] | None:
+    """最新实盘账户快照（**按源仲裁**：选定就用选定的，降级必标注）。
+
+    ``source=None`` → 当前实盘券商（Redis ``broker:selected:CN``）对应的源；
+    显式传 ``source`` → 只读该源（前端「按源看」）。
+    请求源没有可用快照时退回全源最新可用行，并在 ``source_downgraded`` /
+    ``source_downgraded_reason`` 里如实报出——绝不把另一个账户的数字当自己的用。
+    """
+    normalized_user_id = str(user_id or "").strip()
+    if not normalized_user_id:
+        return None
+
+    candidate_ids = _snapshot_candidate_user_ids(normalized_user_id)
+    requested_source = resolve_account_snapshot_source(source)
+
+    # 先按源取各自最新一行 → 仲裁出本次该读哪个源（这一步同时回答「有没有这个源」）
+    target_source: str | None = requested_source
+    downgrade_reason: str | None = None
     try:
-        result = await db.execute(
-            view_stmt, {"tenant_id": tenant_id, "user_ids": candidate_ids}
+        source_rows = await fetch_account_source_rows(
+            db, tenant_id=tenant_id, user_id=normalized_user_id
         )
-        snapshots = list(result.mappings().all())
+        target_source, downgrade_reason = select_account_snapshot_target(
+            source_rows, requested_source=requested_source
+        )
+    except Exception as exc:
+        logger.warning(
+            "real account source summary unavailable, read requested source directly: tenant=%s user=%s err=%s",
+            tenant_id,
+            normalized_user_id,
+            exc,
+        )
+        try:
+            await db.rollback()
+        except Exception as rollback_exc:
+            logger.warning(
+                "real account source summary rollback failed: tenant=%s user=%s err=%s",
+                tenant_id,
+                normalized_user_id,
+                rollback_exc,
+            )
+
+    try:
+        snapshots = await _query_snapshot_view_rows(
+            db, tenant_id=tenant_id, user_ids=candidate_ids, source=target_source
+        )
         snapshot = _select_latest_usable_snapshot_row(snapshots)
+        if snapshot is None and target_source is not None:
+            # 目标源窗口内没有可用行（该源从未上报 / 最新行是空壳或矛盾行）→ 全源最新 + 标注
+            snapshots = await _query_snapshot_view_rows(
+                db, tenant_id=tenant_id, user_ids=candidate_ids, source=None
+            )
+            snapshot = _select_latest_usable_snapshot_row(snapshots)
+            if snapshot is not None:
+                downgrade_reason = downgrade_reason or DOWNGRADE_SOURCE_UNUSABLE
         if snapshot is not None:
             payload_json = snapshot.get("payload_json") or {}
             if not isinstance(payload_json, dict):
@@ -551,7 +817,7 @@ async def _fetch_latest_real_account_snapshot(
             month_open_equity = float(snapshot.get("month_open_equity") or 0.0)
             initial_equity = float(snapshot.get("initial_equity") or 0.0)
             today_pnl_raw = float(snapshot.get("today_pnl_raw") or 0.0)
-            return _build_real_account_contract(
+            contract = _build_real_account_contract(
                 user_id=str(snapshot.get("user_id") or normalized_user_id),
                 tenant_id=str(snapshot.get("tenant_id") or tenant_id),
                 account_id=str(snapshot.get("account_id") or normalized_user_id),
@@ -574,6 +840,11 @@ async def _fetch_latest_real_account_snapshot(
                 source=str(snapshot.get("source") or "qmt_bridge"),
                 payload_json=payload_json,
             )
+            return _annotate_account_source(
+                contract,
+                requested_source=requested_source,
+                downgrade_reason=downgrade_reason,
+            )
     except Exception as exc:
         logger.warning(
             "real account snapshot view unavailable, fallback to table query: tenant=%s user=%s err=%s",
@@ -591,37 +862,17 @@ async def _fetch_latest_real_account_snapshot(
                 rollback_exc,
             )
 
-    stmt = (
-        select(RealAccountSnapshot)
-        .where(
-            RealAccountSnapshot.tenant_id == tenant_id,
-            RealAccountSnapshot.user_id.in_(candidate_ids),
-        )
-        .order_by(desc(RealAccountSnapshot.snapshot_at), desc(RealAccountSnapshot.id))
-        .limit(20)
+    rows = await _query_snapshot_table_rows(
+        db, tenant_id=tenant_id, user_ids=candidate_ids, source=target_source
     )
-    result = await db.execute(stmt)
-    rows = list(result.scalars().all())
-    snapshot = None
-    for candidate in rows:
-        if is_effectively_empty_snapshot(
-            total_asset=getattr(candidate, "total_asset", 0.0),
-            cash=getattr(candidate, "cash", 0.0),
-            market_value=getattr(candidate, "market_value", 0.0),
-            payload_json=getattr(candidate, "payload_json", None),
-        ):
-            continue
-        if is_inconsistent_zero_total_snapshot(
-            total_asset=getattr(candidate, "total_asset", 0.0),
-            cash=getattr(candidate, "cash", 0.0),
-            market_value=getattr(candidate, "market_value", 0.0),
-            payload_json=getattr(candidate, "payload_json", None),
-        ):
-            continue
-        if float(getattr(candidate, "total_asset", 0.0) or 0.0) <= 1e-8:
-            continue
-        snapshot = candidate
-        break
+    snapshot = _select_latest_usable_snapshot_entity(rows)
+    if snapshot is None and target_source is not None:
+        rows = await _query_snapshot_table_rows(
+            db, tenant_id=tenant_id, user_ids=candidate_ids, source=None
+        )
+        snapshot = _select_latest_usable_snapshot_entity(rows)
+        if snapshot is not None:
+            downgrade_reason = downgrade_reason or DOWNGRADE_SOURCE_UNUSABLE
     if snapshot is None:
         return None
 
@@ -689,7 +940,7 @@ async def _fetch_latest_real_account_snapshot(
         else (same_day_first_equity or 0.0)
     )
     month_open_equity = float(month_first_equity or 0.0)
-    return _build_real_account_contract(
+    contract = _build_real_account_contract(
         user_id=str(snapshot.user_id),
         tenant_id=str(snapshot.tenant_id),
         account_id=str(snapshot.account_id),
@@ -709,6 +960,11 @@ async def _fetch_latest_real_account_snapshot(
         month_open_equity=month_open_equity,
         source=str(snapshot.source or "qmt_bridge"),
         payload_json=snapshot.payload_json or {},
+    )
+    return _annotate_account_source(
+        contract,
+        requested_source=requested_source,
+        downgrade_reason=downgrade_reason,
     )
 
 
