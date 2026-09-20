@@ -3007,8 +3007,24 @@ def _compute_shap_drivers_sync(
             )
 
     if framework not in _SHAP_TREE_FRAMEWORKS or not model_file.is_file():
-        # 既拿不到可用树产物，也无法证明它是树模型：如实说明，不猜也不编
-        if not disk_ok and meta_source == "disk" and model_file.name and not model_file.is_file():
+        # 既拿不到可用树产物，也无法证明它是树模型：如实说明，不猜也不编。
+        #
+        # 但「产物不一致」只在本该能归因时才说 —— 即声明框架是树模型、或声明的文件名
+        # 本身就是树产物（.lgb/.xgb/.cbm），却被磁盘打了脸。否则真实结论是「架构不支持
+        # 归因」，那是模型的**固有属性**，不是产物坏了。
+        # 反例（实测 20260920）：CN 那批 torch 模型 metadata 声明 model_nativetft.pth、
+        # 目录里只有 model.pth，会落进「产物不一致，建议重新训练」分支；用户拿着一条
+        # 本该是「该架构不提供树 SHAP」的说明，白白去重训一遍。
+        tree_intended = framework in _SHAP_TREE_FRAMEWORKS or (
+            Path(declared_file).suffix.lower() in _TREE_ARTIFACT_FRAMEWORKS
+        )
+        if (
+            not disk_ok
+            and meta_source == "disk"
+            and tree_intended
+            and model_file.name
+            and not model_file.is_file()
+        ):
             return [], "model_artifact_mismatch", None
         return [], f"framework_unsupported:{framework or 'unknown'}", None
     feat_cols = list(meta.get("feature_columns") or [])
