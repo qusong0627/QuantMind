@@ -207,6 +207,26 @@ def _list_blocking(risk: dict[str, Any] | None) -> tuple[bool, str]:
     return False, ""
 
 
+def _list_gate(
+    side: str, risk: dict[str, Any] | None, ack_risk: bool
+) -> tuple[bool, str, str]:
+    """名单/新闻对**这一笔**的处置 → ``(是否阻断, problem, note)``。
+
+    **卖出不阻断，只提示。** 名单是买入纪律（用户原话「我不买入的」）：持有期里标的
+    进了名单（利空、连续亏损、逼近退市），用户恰恰要卖出来减风险 —— 把卖出一起挡住
+    等于把人锁在仓位里，而且「在排除名单内」对卖出根本不是理由。实测持有 27 只的
+    账户里两只全在名单上，若不分开，任何一次卖出推送都是 0 成交。
+    """
+    hit, why = _list_blocking(risk)
+    if not hit:
+        return False, "", ""
+    if str(side or "").strip().lower() == "sell":
+        return False, "", f"{why}（卖出不受名单限制，仅提示）"
+    if ack_risk:
+        return False, "", ""
+    return True, why, ""
+
+
 # ---------------------------------------------------------------------------
 # 预检
 # ---------------------------------------------------------------------------
@@ -396,11 +416,13 @@ async def _build_legs(
         if not plan.executable:
             leg["blocked_by"] = "quantity"
         else:
-            hit, why = _list_blocking(risk_payload)
-            if hit and not body.ack_risk:
+            blocked, problem, note = _list_gate(body.side, risk_payload, body.ack_risk)
+            if blocked:
                 leg["executable"] = False
                 leg["blocked_by"] = "list"
-                leg["problem"] = why
+                leg["problem"] = problem
+            elif note:
+                leg["note"] = f"{leg.get('note')}；{note}" if leg.get("note") else note
         legs.append(leg)
 
     # 整批资金约束（仅买入）：逐笔各自按全量可用资金算量会系统性超配，

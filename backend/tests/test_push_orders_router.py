@@ -106,6 +106,70 @@ class TestListBlocking:
 
 
 # --------------------------------------------------------------------------
+# _list_gate：买入阻断 / 卖出只提示（名单是买入纪律，不能把卖出一起锁死）
+# --------------------------------------------------------------------------
+
+
+class TestListGate:
+    _EXCLUDED = {
+        "excluded": True,
+        "hits": [{"source": "fundamental_flags", "reason": "连续4年亏损（2022-2025）"}],
+    }
+
+    def test_buy_hit_blocks(self):
+        # Arrange / Act
+        blocked, problem, note = po._list_gate("buy", self._EXCLUDED, False)
+
+        # Assert
+        assert blocked is True
+        assert "连续4年亏损" in problem
+        assert note == ""
+
+    def test_buy_hit_with_ack_is_released_without_note(self):
+        """勾了「已知悉」就放行 —— 此时不再重复提示（用户已经表过态）。"""
+        # Arrange / Act
+        blocked, problem, note = po._list_gate("buy", self._EXCLUDED, True)
+
+        # Assert
+        assert (blocked, problem, note) == (False, "", "")
+
+    def test_sell_hit_is_never_blocked_and_says_why(self):
+        """实测账户持有 27 只、其中两只全在名单上：卖出若也按买入判，卖出推送恒 0 成交。"""
+        # Arrange / Act
+        blocked, problem, note = po._list_gate("sell", self._EXCLUDED, False)
+
+        # Assert
+        assert blocked is False
+        assert problem == ""
+        assert "连续4年亏损" in note and "卖出不受名单限制" in note
+
+    def test_sell_hit_still_annotated_even_when_acked(self):
+        """卖出侧的提示与 ack 无关：ack 是「允许买」，不是「别告诉我它利空」。"""
+        # Arrange / Act
+        blocked, _problem, note = po._list_gate("sell", self._EXCLUDED, True)
+
+        # Assert
+        assert blocked is False
+        assert note != ""
+
+    def test_sell_news_risk_is_only_a_note(self):
+        # Arrange
+        risk = {"excluded": False, "news": {"risk": [{"tag": "立案调查"}]}}
+
+        # Act
+        blocked, _problem, note = po._list_gate("sell", risk, False)
+
+        # Assert
+        assert blocked is False
+        assert "立案调查" in note
+
+    def test_clean_sell_is_silent(self):
+        """没命中就不该多出一句话（干净的腿多一段提示 = 噪声）。"""
+        # Arrange / Act / Assert
+        assert po._list_gate("sell", None, False) == (False, "", "")
+
+
+# --------------------------------------------------------------------------
 # _find_position：四种键形
 # --------------------------------------------------------------------------
 
