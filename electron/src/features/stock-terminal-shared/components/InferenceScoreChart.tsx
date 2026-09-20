@@ -15,7 +15,8 @@ interface Props {
   /** 模型列表 + 当前选中模型名回传（供页面顶部模型下拉使用） */
   onModelsLoaded?: (models: Array<{ model_id: string; display_name?: string }>, modelName: string) => void;
   refreshKey?: number;
-  height?: number;
+  /** 像素数，或 '100%' 让图随外层 flex 撑满（多模型小卡用后者，避免写死高度被裁） */
+  height?: number | string;
   /** 分数回溯窗口（自然日）。默认 180；个股终端需传更大值以覆盖「当前日期向前 2 年」的 K 线全区间，
    * 否则 K 线副图左侧交易日没有分数。 */
   days?: number;
@@ -236,7 +237,7 @@ export function InferenceScoreChart({ symbol, modelId, selectedDate, onPointClic
           option={option as any}
           notMerge
           lazyUpdate
-          style={{ width: '100%', height: height - 28 }}
+          style={{ width: '100%', height: typeof height === 'number' ? height - 28 : height }}
           opts={{ renderer: 'canvas' }}
           onEvents={
             onPointClick

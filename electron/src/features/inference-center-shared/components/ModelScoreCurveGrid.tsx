@@ -145,6 +145,10 @@ export const ModelScoreCurveGrid: React.FC<ModelScoreCurveGridProps> = ({
         </div>
       )}
 
+      {/* 这里必须能纵向裁切：小卡高度由 flex 决定，一旦允许滚动条出现，
+          卡片会在「撑满」和「溢出可滚」之间抖。前提是下方小卡真的会长缩 —— 见那里的注释。
+          列数也跟着实际条数走：只有 2 个模型时还留 3 列，第三列就是一条空槽，
+          图还白白窄掉三分之一。 */}
       <div className="flex-1 min-h-0 overflow-x-auto overflow-y-hidden custom-scrollbar pb-2">
         {consensus.length === 0 ? (
           <div className="flex flex-col items-center justify-center gap-2 py-8 text-center">
@@ -162,13 +166,16 @@ export const ModelScoreCurveGrid: React.FC<ModelScoreCurveGridProps> = ({
             )}
           </div>
         ) : (
-          <div className="grid grid-cols-3 gap-3">
+          <div
+            className="grid gap-3 h-full"
+            style={{ gridTemplateColumns: `repeat(${Math.min(pageItems.length, PAGE_SIZE)}, minmax(0, 1fr))` }}
+          >
             {pageItems.map((item, idx) => (
               <div
                 key={item.model_id || `row-${idx}`}
-                className="flex flex-col rounded-xl bg-white border border-slate-200 shadow-xs overflow-hidden min-w-0"
+                className="flex flex-col h-full min-h-0 rounded-xl bg-white border border-slate-200 shadow-xs overflow-hidden min-w-0"
               >
-                <div className="flex items-center justify-between px-3 pt-2 pb-1">
+                <div className="shrink-0 flex items-center justify-between px-3 pt-2 pb-1">
                   <div className="flex items-center gap-1.5 min-w-0 pr-2">
                     <div className={`w-2 h-2 rounded-full shrink-0 ${item.score >= 0 ? 'bg-rose-500' : 'bg-emerald-500'}`} />
                     <span className="text-xs font-bold text-slate-800 truncate" title={item.model_name}>
@@ -179,18 +186,22 @@ export const ModelScoreCurveGrid: React.FC<ModelScoreCurveGridProps> = ({
                     {Number(item.score).toFixed(4)}
                   </span>
                 </div>
-                <div style={{ height: 158 }}>
+                {/* 曲线高度**不能写死**。原先硬编码 158px，小卡自然高就是
+                    28(标题) + 158 + 29(页脚) = 215px；而外层 `overflow-y-hidden` 的
+                    容器只给 146px（实测），于是每次都被裁掉 79px —— 页脚整条消失，
+                    曲线底部连同负值量程标签、x 轴日期一起被切。改成随容器长缩。 */}
+                <div className="flex-1 min-h-[120px] min-w-0">
                   <InferenceScoreChart
                     symbol={suffixSymbol}
                     modelId={item.model_id || undefined}
                     selectedDate={asOfDate}
                     endDate={asOfDate}
-                    height={158}
+                    height="100%"
                     days={30}
                     compact
                   />
                 </div>
-                <div className="px-3 py-1.5 bg-slate-50/70 border-t border-slate-100 flex items-center justify-between text-[10px] leading-none">
+                <div className="shrink-0 px-3 py-1.5 bg-slate-50/70 border-t border-slate-100 flex items-center justify-between text-[10px] leading-none">
                   <span className="flex items-center gap-1 text-slate-600">
                     <span className="px-1.5 py-0.5 rounded bg-white border border-slate-200 font-mono text-[10px]">{item.model_type || '—'}</span>
                     <span className="font-mono">T+{item.horizon || 5}</span>

@@ -383,7 +383,10 @@ export const IndividualWorkbench: React.FC<IndividualWorkbenchProps> = ({
           <div className="ml-auto flex items-center gap-2 shrink-0 flex-wrap">
             {prediction.rating && ratingBadge(prediction.rating)}
             <Tooltip title={prediction.model_name || ip.selectedModel?.modelName || '—'}>
-              <span className="flex items-center gap-1.5 bg-slate-50 border border-slate-200 px-2 py-0.5 rounded-md max-w-[200px]">
+              {/* 模型名动辄「ML7 solo · nativeftt · 2016-24/2025val/2026test_CN」这种
+                  三段式，200px 只露出前两段，最关键的验证窗口被截掉。放宽到 340px，
+                  表述仍由外层 flex-wrap 兜底（窄屏换行而不是挤压其它字段）。 */}
+              <span className="flex items-center gap-1.5 bg-slate-50 border border-slate-200 px-2 py-0.5 rounded-md max-w-[340px]">
                 <span className="text-[10px] text-slate-400 font-semibold shrink-0">模型</span>
                 <span className="text-[11px] font-bold text-slate-700 truncate">
                   {prediction.model_name || ip.selectedModel?.modelName || '—'}
@@ -538,10 +541,13 @@ export const IndividualWorkbench: React.FC<IndividualWorkbenchProps> = ({
 
             {/* 多模型分数曲线：与下方归因/共识是不同维度，并存而非二选一。
                 面板内是横向滚动、纵向 hidden，高度不够时下面的模型卡会被**裁掉**而不是
-                出现滚动条 —— 所以这里给的是随视口增长的下限，不是固定 250px。 */}
+                出现滚动条 —— 所以这里的下限必须真的够放一张小卡：
+                标题 49 + 覆盖度横幅 41 + 小卡(标题 28 + 曲线 + 页脚 29) + 内边距 40。
+                原 250px 给不出这些（1080 下 28vh=302，小卡只剩 146，实测裁掉 79px：
+                页脚整条 + 曲线负值段一起消失）。取 330 起步，曲线才有 ~160px。 */}
             <div
               className="bg-white rounded-xl border border-slate-200 overflow-hidden flex-none"
-              style={{ height: 'clamp(250px, 28vh, 400px)' }}
+              style={{ height: 'clamp(330px, 32vh, 460px)' }}
             >
               <ModelScoreCurveGrid
                 consensus={prediction.consensus}
