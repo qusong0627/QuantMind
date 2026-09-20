@@ -10,8 +10,9 @@
 
 口径（与回测一致）：
 - 股票池：全 A 非 ST/退市（instrument_detail 静态口径，同 build_universe）；
-- 可交易性：当日涨停（按板别阈值 9.8/19.8/29.8%）或次日跌停 → 该 (日,股) 行剔除
-  （买入买不进/卖出卖不出，避免把不可成交的账面收益当样本）；
+- 可交易性：当日涨停或跌停 → 该 (日,股) 行 close 置 NaN（标签不可算 = 样本剔除）。
+  阈值**逐日逐票**取 ``local_market_data.limit_pct``（板别 + 创业板改革日 + ST），
+  不再复述 9.8/19.8/29.8 的静态表 —— 见 `_limit_thresholds`；
 - 因子取值缺失写 NaN（训练端截面预处理负责填充）；
 - close 用 daily_forward（前复权）。
 
@@ -37,6 +38,7 @@ import os
 import sys
 import time
 from datetime import date, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -69,14 +71,82 @@ DEFAULT_MIN_COVERAGE = 0.65
 _OHLCV = ("open", "high", "low", "close", "volume", "amount")
 
 
-def _limit_threshold(code: str) -> float:
-    """按板块返回近似涨跌停阈值（复权价口径）。"""
-    raw = str(code).split(".")[0]
-    if raw.startswith(("300", "301", "688", "689")):
-        return 0.198
-    if raw.startswith(("4", "8", "92")):
-        return 0.298
-    return 0.098
+#: 涨跌停剔除规则的版本号。**判定口径一变就必须 +1** —— 否则 `can_incremental`
+#: 会认定历史分区仍然有效，新口径只作用于往后新增的交易日，磁盘上于是留下
+#: 两套口径拼起来的训练集（前半段旧线、后半段新线，且看不出接缝）。
+LIMIT_RULE_VERSION = 2
+
+#: 取整容差（**百分点**，仅本常量的单位）。沿用旧值 9.8 = 10 − 0.2 的既有余量：
+#: 涨跌停价本身要按分取整，真正封板的票可能只显示 9.97%，不留余量会把真涨停判丢。
+_LIMIT_SLACK_PCT = 0.2
+
+#: 同上，换算成**比例**。用 Decimal 减而不是浮点减：`0.1 - 0.002` 与字面量 0.098
+#: 在二进制下相差一个 ulp，直接比较会假阴性 —— 这里要的是逐位等于
+#: `limit_pct - 0.002`，因为调用点拿它与 `ret = close/pre_close - 1` 做同单位比较。
+_LIMIT_SLACK = Decimal(str(_LIMIT_SLACK_PCT)) / 100
+
+
+def _as_trade_date(value: Any) -> date:
+    """交易日解析：**两种格式都收** —— 分区标签 ``20260918`` 与 ISO ``2026-09-18``。
+
+    调用点传的是 ``dt=YYYYMMDD`` 目录名，而用例写 ISO；只认一种的话接口就变成
+    「只有测试跑得通」。这种不一致不会在单测里暴露，只在跑真数据时才炸。
+    """
+    s = str(value).strip()
+    if len(s) == 8 and s.isdigit():
+        return date(int(s[0:4]), int(s[4:6]), int(s[6:8]))
+    return date.fromisoformat(s)
+
+
+def _limit_thresholds(symbols, trade_date: Any) -> np.ndarray:
+    """全池在 ``trade_date`` 当日的涨跌停阈值（**比例**，已扣取整余量）。
+
+    ⚠️ 单位是**比例**（0.098）而非百分数（9.8）—— 调用点与
+    `ret = ohlcv["close"] / prev_close - 1` 比较。写成百分数不会报错，只会让
+    `ret.abs() >= threshold` 恒假、整个可交易性剔除静默失效，正是本项目最
+    典型的一类失真。`tests/test_build_factor_custom_dataset.py` 有专门的
+    单位护栏用例。
+
+    口径**唯一事实源** = ``local_market_data.limit_pct``：板块前缀（300/301/302、
+    688/689、北交所 43/83/87/88/92）、创业板 2020-08-24 注册制改革、ST 主板
+    5%→10% 全在那里。
+
+    旧实现按代码前缀返回 9.8/19.8/29.8 且**不看交易日**，于是 2020-08-24 之前的
+    创业板（真实 10% 板）被套上 19.8% 的线 —— 那些年份的涨停日判不出来，以
+    「可买入」的身份留在训练标签里，正是「漂亮数据」。同一处还漏了 302 前缀，
+    使 302 票按主板 9.8% 被**过度**剔除（真实 20% 板上的普通阳线被当成涨停）。
+
+    逐票调用约 1.9 µs，全量重建约 8.5M 次 ≈ 16 秒。这是每天 03:00 的离线任务，
+    十几秒换「口径唯一」是划算的；为省这点时间去复述板块前缀表，等于把缺陷
+    再抄一遍。
+
+    ``is_st`` 传 False 不是疏漏而是**前提**：股票池在构建时已排除 ST（见模块
+    docstring 的 instrument_detail 静态口径）。残余缺口是「当年是 ST、如今不是」
+    的票 —— 它们历史窗口内的 5% 涨停仍判不出。不拿静态快照去补，因为那是单日
+    口径，回放历史会带前视偏差，比漏判更严重。
+    """
+    from backend.services.simulation.services.local_market_data import limit_pct
+
+    td = _as_trade_date(trade_date)
+    return np.array(
+        [
+            float(
+                limit_pct(
+                    str(s),
+                    is_st=False,  # fidelity: allow-limit-threshold — 股票池已排除 ST
+                    trade_date=td,
+                )
+                - _LIMIT_SLACK
+            )
+            for s in symbols
+        ],
+        dtype=np.float64,
+    )
+
+
+def _limit_threshold(code: str, trade_date: Any) -> float:
+    """单票阈值 —— `_limit_thresholds` 的标量包装（测试与单点调用用）。"""
+    return float(_limit_thresholds([str(code)], trade_date)[0])
 
 
 def _load_kept_columns(root: Path) -> dict[str, list[str]]:
@@ -171,9 +241,16 @@ def rebuild(
         and prev_meta.get("selection_fingerprint") == fingerprint
         and float(prev_meta.get("min_coverage") or 0) == float(min_coverage)
         and str(prev_meta.get("start") or "") == start
+        # 涨跌停口径也是「参数」：改了判定规则却不重建，历史分区仍是旧线，
+        # 新分区是新线 —— 磁盘上并存两套口径且看不出接缝（历史 meta 无此键
+        # 时取 0 ≠ 2，故老产物一律强制全量重建一次）。
+        and int(prev_meta.get("limit_rule_version") or 0) == LIMIT_RULE_VERSION
     )
     if incremental and not force_full and not can_incremental:
-        log("[i] 元数据缺失或不一致（筛选集 / start / min-coverage 变化）→ 全量重建")
+        log(
+            "[i] 元数据缺失或不一致"
+            "（筛选集 / start / min-coverage / 涨跌停口径版本 变化）→ 全量重建"
+        )
 
     log(f"[2/5] 股票池（非 ST/退市）: {len(ok_sym)} 只，窗口 {len(dates)} 日")
     if smoke:
@@ -201,7 +278,6 @@ def rebuild(
         log(f"      覆盖率 ≥ {min_coverage:.0%}: 保留 {len(ok_sym)} 只")
 
     sym_index = pd.Index(ok_sym)
-    threshold = sym_index.map(_limit_threshold).to_numpy(dtype=np.float64)
 
     # 3) 逐日合并（5 库 × 单日分区 → 1 个自定分区）
     if can_incremental:
@@ -251,6 +327,9 @@ def rebuild(
             #  当日涨停（买不进）或当日跌停（前一日标签卖不出）→ close(t) 置 NaN；
             #  同时使 t-1 的对应样本不可算（保守剔除，无虚假收益）。
             ret = ohlcv["close"] / prev_close - 1
+            # 阈值**逐日**取：创业板 2020-08-24 两侧板规不同，用一条静态线
+            # 会把改革前的涨停日放行成可成交样本（见 _limit_thresholds）。
+            threshold = _limit_thresholds(sym_index, dt)
             blocked = (
                 (ret.abs() >= threshold) | ohlcv["close"].isna() | prev_close.isna()
             )
@@ -282,11 +361,13 @@ def rebuild(
             "start": start,
             "min_coverage": float(min_coverage),
             "selection_fingerprint": fingerprint,
+            "limit_rule_version": LIMIT_RULE_VERSION,
             "symbols": ok_sym,
             "universe": "全 A 非 ST/退市（静态口径）",
             "n_factors": total_cols,
             "factors_by_source": {k: len(v) for k, v in cols_by_lib.items()},
-            "exclusions": "当日涨停行 close 置 NaN（标签不可算 = 样本剔除）；次日跌停由标签自然不可实现未单列",
+            "limit_source": "local_market_data.limit_pct（逐日逐票；板别 + 创业板 2020-08-24 + ST 主板 5%→10%），取整余量 -0.2pp",
+            "exclusions": "当日涨停/跌停行 close 置 NaN（标签不可算 = 样本剔除）；次日跌停由标签自然不可实现未单列",
             "conventions": "close=daily_forward 前复权；因子缺失 NaN 由训练端截面预处理（中位数填充+1%/99%缩尾+Z-score）处理",
         }
         meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=1))
