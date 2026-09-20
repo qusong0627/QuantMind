@@ -725,9 +725,14 @@ class LimitUpGuardStrategy(RedisRecordingStrategy):
 
     A 股逻辑：涨停股次日大概率高开、难以按模型目标价成交，且开板后常有回吐。
     与其在涨停板上排队，不如把名额让给同样高分但可成交的标的。
-    涨跌幅阈值按板块区分：主板 10%、创业板/科创板 20%、北交所 30%。
+    涨跌幅阈值**逐日逐票**取权威口径（板别 + 创业板 2020-08-24 注册制改革 +
+    ST 主板 5%→10%，见 local_market_data.limit_pct），不再复述前缀表。
     覆写 ``_adjust_signal``（基类的 generate_trade_decision 真正调用的钩子）。
     """
+
+    #: 「贴板」容差（比例）。0.095 = 0.10 − 0.005：封板价要按分取整，真封死的票
+    #: 可能只显示 9.97%，不留余量会把真涨停判丢。
+    _LIMIT_TOLERANCE = 0.005
 
     def __init__(self, *args, **kwargs):
         self.lookback_days = int(kwargs.pop("lookback_days", 10))
@@ -735,13 +740,42 @@ class LimitUpGuardStrategy(RedisRecordingStrategy):
         super().__init__(*args, **kwargs)
 
     @staticmethod
-    def _limit_threshold(symbol) -> float:
-        code = str(symbol)[-6:]
-        if code.startswith(("300", "301", "688", "689")):
-            return 0.195
-        if code.startswith(("4", "8", "9")):
-            return 0.295
-        return 0.095
+    def _limit_threshold(symbol, ref_date) -> float:
+        """涨停判定阈值（比例）。口径唯一事实源 = local_market_data.limit_pct。
+
+        旧实现按代码前缀返回 0.095/0.195/0.295，不看日期、没有 ST 档：
+        - 2020-08-24 注册制改革前的创业板是 10% 板，被套上 19.5% 的线 ——
+          那几年的真涨停从不计数，本模板宣称的「涨停规避」在最需要它的
+          年份（2016~2020 中）**静默失效**，且回测看不出来；
+        - ``("4","8","9")`` 兜底把沪市 900xxx 的 B 股（10% 板）当成北交所 30%；
+        - 完全没有 5% 的 ST 档，ST 票 5% 封板时判定为「没涨停」照买不误。
+        """
+        from datetime import date as _date
+
+        from backend.services.simulation.services.local_market_data import limit_pct
+
+        try:
+            # 日期解析也必须在 try 内 —— 放在外面时，救不了「ref_date 不可解析」
+            # 这个最可能触发兜底的场景，兜底分支等于死代码。
+            td = (
+                pd.Timestamp(ref_date).date()
+                if ref_date is not None
+                else _date.today()
+            )
+            return (
+                float(
+                    limit_pct(
+                        str(symbol),
+                        is_st=False,  # fidelity: allow-limit-threshold — 无逐日 ST 源
+                        trade_date=td,
+                    )
+                )
+                - LimitUpGuardStrategy._LIMIT_TOLERANCE
+            )
+        except Exception:  # noqa: BLE001
+            # 兜底只降级、不改口径**方向**：拿不到权威实现时按最严的主板线判，
+            # 宽板票因此被过度剔除（少交易），而不是把真涨停放进来（假收益）。
+            return 0.095
 
     def _limit_up_counts(self, stocks, ref_date):
         span = int(self.lookback_days * 2.5) + 20
@@ -752,7 +786,8 @@ class LimitUpGuardStrategy(RedisRecordingStrategy):
         returns = prices.pct_change().iloc[-self.lookback_days :]
         counts = {}
         for symbol in returns.columns:
-            threshold = self._limit_threshold(symbol)
+            # ref_date = 上一交易日：阈值本身也必须是**那一天**的板规（改革分界线）。
+            threshold = self._limit_threshold(symbol, ref_date)
             counts[symbol] = int((returns[symbol] >= threshold).sum())
         return counts
 
@@ -1282,7 +1317,7 @@ def build_specs() -> list[dict]:
         cls="LimitUpGuardStrategy",
         kwargs=_base(topk=30, n_drop=10, rebalance_days=3, lookback_days=10,
                      max_limit_ups=0, f_total_mv_min=3e9, f_amount_ma_5_min=5000),
-        tips=["涨停阈值按板块自动区分：主板 9.5%、创业板/科创板 19.5%、北交所 29.5%。",
+        tips=["涨停阈值逐日逐票取权威口径（板别 + 创业板 2020-08-24 改革 + ST 档），留 0.5pp 取整余量。",
               "max_limit_ups=0 表示近 10 日一次涨停都不能有；放宽到 1 可保留部分强势股。"],
     )
     add(
