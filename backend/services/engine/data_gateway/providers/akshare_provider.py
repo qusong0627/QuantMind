@@ -6,9 +6,53 @@ AKShare 数据源
 import logging
 from typing import Any, Dict, List, Optional
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 logger = logging.getLogger(__name__)
+
+
+def _is_st_name(name: Any) -> bool:
+    """名称前缀判 ST。
+
+    现货快照自带**当日**名称，属当日口径 —— 不是 ``instrument_detail``
+    那种静态快照，因此不存在「拿未来 ST 状态回判历史」的前视偏差。
+    """
+    return str(name or "").replace(" ", "").upper().startswith(("ST", "*ST"))
+
+
+def _count_limits(df: pd.DataFrame) -> tuple[int, int]:
+    """全市场涨停/跌停家数 —— 口径唯一事实源 = ``market_breadth``。
+
+    原实现按固定 ``>= 9.9`` 判定，是一张写死的主板线，两个方向都错：
+    20%/30% 板（创业板/科创板/北交所）上任何 +9.9% 以上的普通阳线被计成
+    涨停，「涨停 N 家」虚高；主板 ST 5% 板上真封死的票（+5.0%）则永远漏计。
+
+    容差（沪深 0.5pp / 北交所 1pp）由 ``limit_up_down_counts`` 内部处理，
+    此处不重复定义，避免同一指标出现第二个口径。
+    """
+    pct_col, code_col = df.get("涨跌幅"), df.get("代码")
+    if pct_col is None or code_col is None:
+        logger.warning("市场概览缺少 涨跌幅/代码 列，涨跌停家数降级为 0")
+        return 0, 0
+
+    name_col = df.get("名称")
+    names = name_col.tolist() if name_col is not None else [""] * len(df)
+    st_symbols = {
+        str(c)
+        for c, n in zip(code_col.tolist(), names, strict=True)
+        if _is_st_name(n)
+    }
+
+    # 惰性导入：local_market_data 会拉起 QuantDB 行情栈，而本 provider 的多数
+    # 方法（搜索、历史 K 线）并不需要它，放在模块顶层会拖慢整个 data-gateway 启动。
+    from backend.shared.market_breadth import limit_up_down_counts
+
+    return limit_up_down_counts(
+        pd.to_numeric(pct_col, errors="coerce"),
+        code_col.astype(str),
+        trade_date=date.today(),
+        st_symbols=st_symbols,
+    )
 
 
 class AkShareProvider:
@@ -156,8 +200,7 @@ class AkShareProvider:
         up = len(df[df["涨跌幅"] > 0])
         down = len(df[df["涨跌幅"] < 0])
         flat = total - up - down
-        limit_up = len(df[df["涨跌幅"] >= 9.9])
-        limit_down = len(df[df["涨跌幅"] <= -9.9])
+        limit_up, limit_down = _count_limits(df)
         total_amount = df["成交额"].sum()
 
         return {
