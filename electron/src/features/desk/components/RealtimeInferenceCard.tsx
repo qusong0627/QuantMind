@@ -1,13 +1,23 @@
-/** 交易台「实时推理」卡（T-P6-08 收口）：状态/开关/模型切换/节拍/ONNX 状态与重建（admin）。
+/** 交易台「实时推理」卡：开关 / 模型切换 / 节拍 / ONNX + **运行面**（心跳·时延·治理·台账）。
  *
  * 数据源：/api/v1/admin/realtime/infer/{config,models,export-onnx}（配置 + 引擎状态镜像）。
- * 非管理员：诚实降级为「需管理员权限」；镜像超 5 分钟未更新 → 提示引擎循环可能未运行。
+ * 非管理员：诚实降级为「需管理员权限」。
+ *
+ * 运行面数据引擎侧每周期就镜像到 Redis，此前面板只摆了 4 个计数器——看这张卡回答不了
+ * 「循环还活着吗 / 跑一轮多久 / 有没有在降级 / 这批分能不能复现」。注意卡头**不写内部
+ * 工单号**（T-… 是开发期编号，对使用者是噪音）。降级/停滞一律如实报，不在缺数据时假绿。
  */
 
 import React, { useCallback, useEffect, useState } from 'react';
 import { Activity, Loader2, RefreshCw } from 'lucide-react';
 import { CARD, CardHeader, StatTile } from './cardKit';
-import { gateHint, inferViewState, type InferConfigView, type InferStatusView, type ModelOnnxStatus } from './realtimeInferModel';
+import {
+  gateHint,
+  inferViewState,
+  type InferConfigView,
+  type InferStatusView,
+  type ModelOnnxStatus,
+} from './realtimeInferModel';
 import {
   exportOnnx,
   getInferConfig,
@@ -16,12 +26,47 @@ import {
   type InferModelOption,
 } from '../services/realtimeInferService';
 
+const HEARTBEAT_DOT: Record<'ok' | 'warn' | 'off', string> = {
+  ok: 'bg-emerald-500',
+  warn: 'bg-amber-500',
+  off: 'bg-slate-300',
+};
+const HEARTBEAT_TEXT: Record<'ok' | 'warn' | 'off', string> = {
+  ok: 'text-emerald-600',
+  warn: 'text-amber-600',
+  off: 'text-slate-400',
+};
+/** 治理器档位 → 色（与模型里的语义 tone 对齐） */
+const DEGRADE_CLS: Record<'ok' | 'warn' | 'bad', string> = {
+  ok: 'text-emerald-600',
+  warn: 'text-amber-600',
+  bad: 'text-red-600',
+};
+/** 运行面一行（标签 + 值）。父级是 4 列网格时自动两两成对；full 行独占整行。
+ *  值默认截断（超长的 run_id 靠 title 看全），wrap 行允许换行（时延那行带预警话术）。 */
+const RunRow: React.FC<{ label: string; full?: boolean; wrap?: boolean; children: React.ReactNode }> = ({
+  label,
+  full = false,
+  wrap = false,
+  children,
+}) => (
+  <>
+    <span className="text-slate-400">{label}</span>
+    <span
+      className={`min-w-0 text-slate-600 ${full ? 'md:col-span-3' : ''} ${wrap ? '' : 'truncate'}`}
+    >
+      {children}
+    </span>
+  </>
+);
+
 export const RealtimeInferenceCard: React.FC = () => {
   const [config, setConfig] = useState<InferConfigView | null>(null);
   const [status, setStatus] = useState<InferStatusView | null>(null);
   const [onnx, setOnnx] = useState<ModelOnnxStatus | null>(null);
   const [displayName, setDisplayName] = useState('');
   const [models, setModels] = useState<InferModelOption[]>([]);
+  const [baselineSource, setBaselineSource] = useState('');
   const [needAdmin, setNeedAdmin] = useState(false);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -40,6 +85,7 @@ export const RealtimeInferenceCard: React.FC = () => {
       setStatus(data.status);
       setOnnx(data.model_onnx ?? null);
       setDisplayName(String(data.model_display_name || ''));
+      setBaselineSource(String(data.baseline_source || ''));
       setNeedAdmin(false);
       setGateDraft(String(data.config?.min_live_coverage ?? ''));
       setCadenceDraft(String(data.config?.cadence_s ?? ''));
@@ -68,7 +114,24 @@ export const RealtimeInferenceCard: React.FC = () => {
       .catch(() => setModels([]));
   }, []);
 
-  const view = inferViewState(config, status, Date.now(), needAdmin, onnx, displayName);
+  // 心跳年龄要**逐秒在走**才有诊断价值：数据 30s 拉一次，但「上次镜像到现在多久」
+  // 必须每秒重算，否则用户看到的年龄永远停在 0s 或 30s 的台阶上。
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    const t = window.setInterval(() => setNowMs(Date.now()), 1000);
+    return () => window.clearInterval(t);
+  }, []);
+
+  const view = inferViewState(
+    config,
+    status,
+    nowMs,
+    needAdmin,
+    onnx,
+    displayName,
+    status?.governor ?? null,
+    baselineSource,
+  );
 
   const runOp = async (fn: () => Promise<void>) => {
     setBusy(true);
@@ -144,13 +207,32 @@ export const RealtimeInferenceCard: React.FC = () => {
   if (needAdmin) {
     return (
       <section className={CARD} data-testid="realtime-infer-card">
-        <CardHeader icon={<Activity size={15} />} title="实时推理 · T-P6-08" />
+        <CardHeader icon={<Activity size={15} />} title="实时推理" />
         <div className="rounded-lg border border-dashed border-slate-200 px-2 py-3 text-[11px] text-slate-400">
           需管理员权限查看与配置（热集实时推理为平台级服务）
         </div>
       </section>
     );
   }
+
+  // 头部状态灯：停用时不报心跳警（关了就是关了，别扮成故障），启用后按心跳分级。
+  const dashTone: 'ok' | 'warn' | 'off' = !view.enabled
+    ? 'off'
+    : view.heartbeat === 'live'
+      ? 'ok'
+      : view.heartbeat === 'stale' || view.heartbeat === 'skewed'
+        ? 'warn'
+        : 'off';
+  const dashLabel = !view.enabled
+    ? '已停用'
+    : view.heartbeat === 'live'
+      ? '运行中'
+      : view.heartbeat === 'stale'
+        ? '心跳停更'
+        : view.heartbeat === 'skewed'
+          ? '时钟偏差'
+          : '无状态镜像';
+  const heartbeatPulse = dashTone === 'ok' ? ' animate-pulse' : '';
 
   const modelOptions = models.some((m) => m.model_dir === view.modelDir)
     ? models
@@ -162,13 +244,11 @@ export const RealtimeInferenceCard: React.FC = () => {
     <section className={CARD} data-testid="realtime-infer-card">
       <CardHeader
         icon={<Activity size={15} />}
-        title="实时推理 · T-P6-08"
+        title="实时推理"
         meta={
           <span className="inline-flex items-center gap-1.5 text-[10px]">
-            <span className={`h-1.5 w-1.5 rounded-full ${view.enabled ? 'bg-emerald-500' : 'bg-slate-300'}`} />
-            <span className={view.enabled ? 'text-emerald-600' : 'text-slate-400'}>
-              {view.enabled ? '运行中' : '已停用'}
-            </span>
+            <span className={`h-1.5 w-1.5 rounded-full ${HEARTBEAT_DOT[dashTone]} ${heartbeatPulse}`} />
+            <span className={HEARTBEAT_TEXT[dashTone]}>{dashLabel}</span>
           </span>
         }
         extra={
@@ -189,6 +269,60 @@ export const RealtimeInferenceCard: React.FC = () => {
         <div className="mb-2 rounded-lg border border-emerald-100 bg-emerald-50 px-2 py-1 text-[11px] text-emerald-700">{note}</div>
       )}
 
+      {/* ── 运行面：心跳 / 时延 / 治理 / 台账 / 可复现线索 ───────────────── */}
+      <div className="mb-3 rounded-xl border border-slate-200/80 bg-slate-50/50 px-3 py-2">
+        <div className="mb-1.5 flex items-center gap-2">
+          <span className="text-[10px] font-bold tracking-wide text-slate-400">运行面</span>
+          <span className="h-px flex-1 bg-slate-200/70" />
+        </div>
+        {/* 窄屏 2 列（标签｜值）、md+ 4 列（两组成对），信息密度向专业台看齐 */}
+        <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-[11px] md:grid-cols-[auto_1fr_auto_1fr]">
+          <RunRow label="心跳">
+            <span className={HEARTBEAT_TEXT[dashTone]}>{view.heartbeatText}</span>
+          </RunRow>
+          <RunRow label="发布">
+            <span className="font-mono">{view.publishRateText}</span>
+            <span className="ml-1.5 text-slate-400">· 拦截 {view.skippedNoLive} 次</span>
+          </RunRow>
+          <RunRow label="最近周期">
+            <span className="font-mono" title={status?.updated_at ? String(status.updated_at) : undefined}>
+              {view.mirrorUpdatedText}
+            </span>
+            <span className="ml-1.5 text-slate-400">（状态镜像写入时刻）</span>
+          </RunRow>
+          <RunRow label="时延" wrap>
+            本周期 <span className="font-mono">{view.lastMsText}</span>
+            <span className="mx-1 text-slate-300">·</span>
+            p95 <span className="font-mono">{view.p95Text}</span>
+            {view.p95OverBudget && (
+              <span className="ml-1.5 font-semibold text-amber-600">逼近节拍上限（余量 &lt; 20%）</span>
+            )}
+          </RunRow>
+          <RunRow label="台账">
+            <span className={`font-mono ${view.ledgerErrors > 0 ? 'font-bold text-red-600' : ''}`}>
+              {view.ledgerText}
+            </span>
+            <span className="ml-1.5 text-slate-400">（当日可复现凭据）</span>
+          </RunRow>
+          <RunRow label="治理">
+            <span className={`font-semibold ${DEGRADE_CLS[view.degradeTone]}`}>{view.degradeText}</span>
+            <span className="ml-1.5 text-slate-400">
+              生效节拍 <span className="font-mono">{view.effectiveCadenceS}s</span>
+            </span>
+          </RunRow>
+          <RunRow label="可复现" full>
+            {view.lastRunId ? (
+              <span className="font-mono" title={view.lastRunId}>
+                run_id {view.lastRunId}
+              </span>
+            ) : (
+              <span className="text-slate-400">run_id —</span>
+            )}
+            <span className="ml-1.5 text-slate-400">· 基线 {view.baselineSource || '—'}</span>
+          </RunRow>
+        </div>
+      </div>
+
       <div className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-slate-500">
         <span title={view.modelDir || undefined}>
           模型 <span className="text-slate-700">{view.modelDisplayName}</span>
@@ -205,20 +339,29 @@ export const RealtimeInferenceCard: React.FC = () => {
             {view.onnxText}
           </span>
         </span>
-        {view.staleMirror && <span className="text-amber-600">状态镜像超 5 分钟未更新（引擎循环可能未运行）</span>}
       </div>
       <div className="mb-3 rounded-lg border border-slate-100 bg-slate-50/60 px-2 py-1 text-[10px] text-slate-500">
-        发布闸门：{gateHint(view.minCoverage)}
+        发布闸门：{gateHint(view.minCoverage)}（近 {view.cycles} 个周期里发布了 {view.published} 次，
+        拦截 {view.skippedNoLive} 次）
       </div>
 
       <div className="mb-3 grid grid-cols-4 gap-2">
-        <StatTile label="已发布" value={view.published} tone="green" />
+        <StatTile
+          label="已发布"
+          value={
+            <>
+              {view.published}
+              <span className="ml-0.5 text-[10px] font-normal opacity-60">/{view.cycles}</span>
+            </>
+          }
+          tone="green"
+        />
         <StatTile label="分数条数" value={view.scores} tone="blue" />
         <StatTile label="闸门拦截" value={view.skippedNoLive} tone={view.skippedNoLive > 0 ? 'amber' : 'slate'} />
         <StatTile
-          label="最近周期"
-          value={<span className="text-[10px]">{view.lastCycleAt ? view.lastCycleAt.slice(11, 19) : '—'}</span>}
-          tone="slate"
+          label="本周期时延"
+          value={<span className="text-sm">{view.lastMsText}</span>}
+          tone={view.p95OverBudget ? 'amber' : 'slate'}
         />
       </div>
 

@@ -143,7 +143,8 @@ export const CopilotPanel: React.FC = () => {
         <StatTile label="时延 P95" value={metrics.latencyP95} tone={metrics.latencyP95Ms !== null && metrics.latencyP95Ms >= 60000 ? 'amber' : 'blue'} />
         <StatTile label="误报率(30d)" value={metrics.missRate} tone={metrics.missRate === '—' ? 'slate' : 'amber'} />
         <StatTile label="24h 事件" value={metrics.events} tone="slate" />
-        <StatTile label="P6 资源" value={<span className="text-[11px]">{metrics.budgetText}</span>} tone="slate" />
+        {/* 标签写「进程内存」而不是内部批次号：这里量的就是 tdx 通道 + 引擎两个进程的 RSS */}
+        <StatTile label="进程内存" value={<span className="text-[11px]">{metrics.budgetText}</span>} tone="slate" />
       </div>
 
       {/* 事件流（卡片） */}

@@ -232,3 +232,94 @@ def test_feature_coverage_quantdb_binding(tmp_path, monkeypatch):
     with pytest.raises(ValueError) as exc:
         rt.validate_feature_coverage(str(model_dir), ["f2", "f3", "f4"])
     assert "quantdb_factors" in str(exc.value)  # 文案如实标注取数面
+
+
+@pytest.mark.integration
+def test_infer_config_exposes_governor_and_mirror_age(tmp_path):
+    """`GET /infer/config` 必须把治理器快照透出给面板（真 Redis，读写后原样恢复）。
+
+    面板要回答「引擎循环还活着吗 / 近窗 p95 有没有压着节拍预算 / 有没有在降级」，
+    这三问的数据源只有引擎进程内的治理器 —— 它经状态镜像到 Redis，admin 端点再透出。
+    少了这一层，面板只能显示「已发布 N 条」，看起来就不像一个实时推理服务。
+    """
+    import os
+
+    import redis as redis_lib
+
+    from backend.services.api.routers.admin.realtime import (
+        CONFIG_KEY,
+        STATUS_KEY,
+        get_infer_config,
+    )
+
+    client = redis_lib.Redis(
+        host=os.getenv("REDIS_HOST") or "redis",
+        port=int(os.getenv("REDIS_PORT", "6379")),
+        password=os.getenv("REDIS_PASSWORD") or None,
+        db=int(os.getenv("REDIS_DB", "0")),
+        decode_responses=True,
+    )
+    original_status = client.hgetall(STATUS_KEY) or {}
+    original_config = client.hgetall(CONFIG_KEY) or {}
+    d = tmp_path / "mdl_gov"
+    d.mkdir()
+    (d / "metadata.json").write_text(
+        json.dumps({"feature_columns": ["mom_ret_1d", "f1"]}), encoding="utf-8"
+    )
+    try:
+        client.hset(
+            STATUS_KEY,
+            mapping={
+                "updated_at": "2026-09-20T14:30:00+08:00",
+                "counters": json.dumps({"published": 19, "last_ms": 486.6, "degrade_level": 1}),
+                "governor": json.dumps(
+                    {
+                        "level": 1, "base_cadence_s": 15.0, "effective_cadence_s": 15.0,
+                        "degraded": True, "p95_ms": 13000.0, "last_ms": 486.6,
+                        "cycles": 119, "degradations": 1, "recoveries": 0,
+                        "level_since": 9876.5,
+                    }
+                ),
+            },
+        )
+        client.hset(CONFIG_KEY, mapping={"enabled": "true", "model_dir": str(d), "cadence_s": "15.0"})
+
+        got = asyncio.run(get_infer_config())
+
+        assert got["success"] is True
+        status = got["data"]["status"]
+        assert status["updated_at"] == "2026-09-20T14:30:00+08:00"
+        assert status["counters"]["published"] == 19
+        assert status["governor"]["p95_ms"] == 13000.0, "治理器快照必须透出（面板的时延/降级面）"
+        assert status["governor"]["degraded"] is True
+    finally:
+        client.delete(STATUS_KEY)
+        if original_status:
+            client.hset(STATUS_KEY, mapping=original_status)
+        client.delete(CONFIG_KEY)
+        if original_config:
+            client.hset(CONFIG_KEY, mapping=original_config)
+        client.close()
+
+
+@pytest.mark.unit
+def test_infer_config_tolerates_missing_or_corrupt_governor(monkeypatch):
+    """镜像里没有/坏掉的 governor 不能让整个端点 500——面板宁可少一格，不能整卡打不开。"""
+    import backend.services.api.routers.admin.realtime as rt
+
+    class _FakeRedis:
+        def hgetall(self, key):
+            if key == rt.CONFIG_KEY:
+                return {"enabled": "false", "model_dir": "", "cadence_s": "15"}
+            return {"counters": "{bad json", "governor": "not-json"}
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(rt, "_redis", lambda: _FakeRedis())
+
+    got = asyncio.run(rt.get_infer_config())
+
+    assert got["success"] is True
+    assert got["data"]["status"]["counters"] == {}
+    assert got["data"]["status"]["governor"] is None

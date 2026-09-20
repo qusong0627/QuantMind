@@ -24,6 +24,7 @@ import { ComplianceFooter } from '../../components/shared/compliance/ComplianceC
 import { PipelineBar } from './components/PipelineBar';
 import { EvidenceMatrix } from './components/EvidenceMatrix';
 import { HealthCard } from './components/DeskCards';
+import { CARD } from './components/cardKit';
 import { CopilotPanel } from './components/CopilotPanel';
 import { RealtimeInferenceCard } from './components/RealtimeInferenceCard';
 import { HoldingAlertPanel } from '../holding-alerts/HoldingAlertPanel';
@@ -146,32 +147,33 @@ const DeskTodayPage: React.FC<{ embedded?: boolean; tradingRunning?: boolean }> 
             }
           />
 
-          {/* 第三行：系统健康 | 副驾驶（并列，2026-09-17 置顶）。分栏归位：候选信号→「候选信号」
-              页签、调仓计划→「策略管理·交易记录上方」、今日执行→「持仓监控」；账户盈亏卡同屏重复已移除。 */}
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
-            <div className="lg:col-span-5 grid gap-4">
-              <HealthCard health={desk.health} tradingRunning={tradingRunning} />
-              {/* 实时推理（T-P6-08）：状态/开关/模型切换/节拍/ONNX 状态与重建。
-                  2026-09-18 补挂载——此前仅 import 未渲染（卡从收口起从未出现在页面上）。
-                  该服务是**单份全局配置**（Redis qm:realtime:infer:config，当前指向 A 股模型），
-                  没有市场维度——挂到港股/美股页签会显示 A 股模型与特征覆盖率，故仅 CN 渲染。 */}
-              {isCnMarket ? (
-                <RealtimeInferenceCard />
-              ) : (
-                <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3 text-[11px] text-slate-500">
-                  实时推理为 A 股服务（单份全局配置，无市场维度），在 {currentMarket} 页签不适用；
-                  查看请切回 A 股。
-                </div>
-              )}
-            </div>
-            <div className="lg:col-span-7 grid gap-4">
-              {/* 副驾驶（T-P6-16）：情报事件流 + 误报标注 + 建议卡一键执行（无 mock） */}
-              <CopilotPanel />
-              {/* 持仓预警（哨兵）：分数跌破 / 盘中利空 / 名单新增 → 一键卖出。
-                  刻意**不按市场门控**：切到港股/美股页签时 A 股持仓的风险并不会消失，
-                  藏起来就等于「离开这一页就不提醒了」。 */}
-              <HoldingAlertPanel />
-            </div>
+          {/* 第三行：系统健康 ｜ 实时推理（两列对齐）。
+              2026-09-20 用户要求「实时推理放系统监控右侧对齐」：此前是 5/7 分栏左右各竖排两张，
+              实时推理被压在系统健康下面，两列的底边永远不齐；改成两列等宽后每行自成一组。
+
+              实时推理（T-P6-08）：状态/开关/模型切换/节拍/ONNX 状态与重建。
+              该服务是**单份全局配置**（Redis qm:realtime:infer:config，当前指向 A 股模型），
+              没有市场维度——挂到港股/美股页签会显示 A 股模型与特征覆盖率，故仅 CN 渲染。 */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 items-stretch">
+            <HealthCard health={desk.health} tradingRunning={tradingRunning} />
+            {isCnMarket ? (
+              <RealtimeInferenceCard />
+            ) : (
+              <section className={`${CARD} justify-center text-[11px] text-slate-500`} data-testid="realtime-infer-na">
+                实时推理为 A 股服务（单份全局配置，无市场维度），在 {currentMarket} 页签不适用；
+                查看请切回 A 股。
+              </section>
+            )}
+          </div>
+
+          {/* 第四行：副驾驶 ｜ 持仓预警（两列对齐）。
+              副驾驶（T-P6-16）：情报事件流 + 误报标注 + 建议卡一键执行（无 mock）。
+              持仓预警（哨兵）：分数跌破 / 盘中利空 / 名单新增 → 一键卖出。
+              刻意**不按市场门控**：切到港股/美股页签时 A 股持仓的风险并不会消失，
+              藏起来就等于「离开这一页就不提醒了」。 */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 items-stretch">
+            <CopilotPanel />
+            <HoldingAlertPanel />
           </div>
         </>
       ) : (

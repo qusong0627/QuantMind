@@ -312,7 +312,7 @@ export const HealthCard: React.FC<{ health: HealthBlock | null | undefined; trad
     return <HelpCircle className="h-3.5 w-3.5" />;
   };
   return (
-    <section className={CARD}>
+    <section className={CARD} data-testid="health-card">
       <CardHeader
         icon={<HeartPulse className="h-4 w-4" />}
         title="系统健康"

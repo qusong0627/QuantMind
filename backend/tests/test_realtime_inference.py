@@ -617,3 +617,58 @@ async def test_tick_enabled_without_model_dir_leaves_skip_trace(tmp_path):
         "启用但无模型目录时必须留下跳过原因，不能静默变绿"
     )
     assert svc.counters["published"] == 0
+
+
+# ── 状态镜像载荷（面板唯一读面）─────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_status_mirror_payload_carries_governor(tmp_path):
+    """镜像必须带治理器快照——否则面板只能看到「已发布/拦截」计数，
+    看不到「近窗 p95 时延 / 降级阶梯 / 有效节拍」，专业实时推理面板缺的正是这层。
+
+    治理器跑在引擎进程内（非 Redis），镜像它是把这份数据送达面板的**唯一**通道：
+    admin 端点按约定不做跨服务 HTTP（realtime_service 注释明写）。
+    """
+    from backend.services.engine.inference.realtime_service import (
+        RealtimeInferConfig,
+        status_mirror_payload,
+    )
+
+    cfg = RealtimeInferConfig(enabled=True, model_dir="/m/mdl_a", cadence_s=15.0)
+    payload = status_mirror_payload(
+        counters={"published": 3, "last_ms": 120.5},
+        cfg=cfg,
+        governor={
+            "level": 1, "base_cadence_s": 15.0, "effective_cadence_s": 15.0,
+            "degraded": True, "p95_ms": 13000.0, "degradations": 2, "recoveries": 0,
+            "last_ms": 120.5, "cycles": 40, "level_since": 12345.6,
+        },
+    )
+
+    assert json.loads(payload["counters"])["published"] == 3
+    assert json.loads(payload["config"])["cadence_s"] == 15.0
+    gov = json.loads(payload["governor"])
+    assert gov["level"] == 1 and gov["p95_ms"] == 13000.0
+    assert gov["degradations"] == 2
+
+
+@pytest.mark.unit
+def test_status_mirror_payload_governor_absent_is_explicit(tmp_path):
+    """治理器还没建立时（首周期前/节拍刚变更）如实写 null，不写假快照。
+
+    面板据此显示「治理器未建立」，而不是把 level=0 当成「一切正常」——
+    「没数据」与「数据说正常」必须能分开。
+    """
+    from backend.services.engine.inference.realtime_service import (
+        RealtimeInferConfig,
+        status_mirror_payload,
+    )
+
+    payload = status_mirror_payload(
+        counters={}, cfg=RealtimeInferConfig(enabled=False, model_dir="", cadence_s=15.0),
+        governor=None,
+    )
+
+    # 两种写法都算如实：键缺失，或显式 "null"。不允许出现一个假的 level=0 快照。
+    assert json.loads(payload.get("governor") or "null") is None

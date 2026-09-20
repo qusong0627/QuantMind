@@ -64,6 +64,38 @@ def _now() -> datetime:
     return datetime.now(tz=CST)
 
 
+def status_mirror_payload(
+    *,
+    counters: dict[str, Any],
+    cfg: RealtimeInferConfig,
+    governor: dict[str, Any] | None,
+) -> dict[str, str]:
+    """状态镜像载荷（纯函数，便于单测；`_write_status_mirror` 只负责写）。
+
+    这三个字段回答面板的三个问题：`counters`=发了多少、`config`=按什么参数在发、
+    `governor`=**发得动吗**（近窗 p95 时延 / 降级阶梯 / 生效节拍）。
+
+    治理器只活在引擎进程内，镜像它是把这份数据送达面板的唯一通道——admin 端点
+    按约定不做跨服务 HTTP。`governor=None` 时如实写 "null"：面板必须能区分
+    「治理器未建立」与「治理器说一切正常」。
+    """
+    return {
+        "updated_at": _now().isoformat(),
+        "counters": json.dumps(counters, ensure_ascii=False, default=str),
+        "config": json.dumps(
+            {
+                "enabled": cfg.enabled,
+                "model_dir": cfg.model_dir,
+                "cadence_s": cfg.cadence_s,
+                "override_whitelist": list(cfg.override_whitelist),
+                "min_live_coverage": cfg.min_live_coverage,
+            },
+            ensure_ascii=False,
+        ),
+        "governor": json.dumps(governor, ensure_ascii=False, default=str),
+    }
+
+
 class RealtimeInferConfig:
     __slots__ = ("enabled", "model_dir", "cadence_s", "override_whitelist", "tenant_id",
                  "user_id", "min_live_coverage")
@@ -532,23 +564,18 @@ class RealtimeInferenceService:
             )
             with self._lock:
                 counters = dict(self.counters)
+            # 治理器快照与 counters 同锁语义：两者都要与本次周期一致，
+            # 否则面板可能看到「周期数已 +1、p95 还是上一轮」的错配。
+            governor = None
+            with self._lock:
+                if self._governor is not None:
+                    governor = self._governor.snapshot()
             try:
                 client.hset(
                     STATUS_KEY,
-                    mapping={
-                        "updated_at": _now().isoformat(),
-                        "counters": json.dumps(counters, ensure_ascii=False, default=str),
-                        "config": json.dumps(
-                            {
-                                "enabled": cfg.enabled,
-                                "model_dir": cfg.model_dir,
-                                "cadence_s": cfg.cadence_s,
-                                "override_whitelist": list(cfg.override_whitelist),
-                                "min_live_coverage": cfg.min_live_coverage,
-                            },
-                            ensure_ascii=False,
-                        ),
-                    },
+                    mapping=status_mirror_payload(
+                        counters=counters, cfg=cfg, governor=governor
+                    ),
                 )
                 client.expire(STATUS_KEY, 86400)
             finally:

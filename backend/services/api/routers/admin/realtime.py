@@ -362,6 +362,15 @@ async def get_infer_config() -> dict[str, Any]:
             counters = json.loads(status["counters"])
         except (TypeError, ValueError):
             counters = {}
+    # 治理器快照（引擎进程内状态的镜像）：近窗 p95 时延 / 降级阶梯 / 生效节拍。
+    # 坏 JSON 或缺失都当 None —— 面板少一格，不能整卡 500。
+    governor: dict[str, Any] | None = None
+    if status.get("governor"):
+        try:
+            parsed = json.loads(status["governor"])
+            governor = parsed if isinstance(parsed, dict) else None
+        except (TypeError, ValueError):
+            governor = None
     model_dir = str(config.get("model_dir") or "").strip()
     display_names = await _load_model_display_names(
         [Path(model_dir).name] if model_dir else []
@@ -376,6 +385,7 @@ async def get_infer_config() -> dict[str, Any]:
             "status": {
                 "updated_at": status.get("updated_at"),
                 "counters": counters,
+                "governor": governor,
                 "source": "redis:qm:realtime:infer:status（引擎侧每周期镜像）",
             },
         },
