@@ -41,6 +41,7 @@ import { userCenterService } from '../../../features/user-center/services/userCe
 import { resolveTradingAccountMode } from '../utils/accountAdapter';
 import { SERVICE_URLS } from '../../../config/services';
 import { TradingBlacklistPanel } from '../../../features/trading-blacklist/TradingBlacklistPanel';
+import { HoldingMonitorCard } from '../../../features/holding-alerts/HoldingMonitorCard';
 
 interface PersonalCenterProps {
     tenantId: string;
@@ -537,7 +538,10 @@ const PersonalCenter: React.FC<PersonalCenterProps> = ({ tenantId, userId, statu
                         </section>
                     </div>
 
-                    {/* 第二排：交易黑名单（本页的主内容） */}
+                    {/* 第二排：持仓监控与提醒（持仓哨兵的开关/阈值/三通道） */}
+                    <HoldingMonitorCard />
+
+                    {/* 第三排：交易黑名单（本页的主内容） */}
                     <TradingBlacklistPanel />
 
                     {/* 给悬浮 Dock 让位。.bottom-dock 是 absolute 覆盖层（z-index 1050，不占布局），

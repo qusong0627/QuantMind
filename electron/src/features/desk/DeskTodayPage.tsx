@@ -26,6 +26,7 @@ import { EvidenceMatrix } from './components/EvidenceMatrix';
 import { HealthCard } from './components/DeskCards';
 import { CopilotPanel } from './components/CopilotPanel';
 import { RealtimeInferenceCard } from './components/RealtimeInferenceCard';
+import { HoldingAlertPanel } from '../holding-alerts/HoldingAlertPanel';
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : '请求失败';
@@ -163,9 +164,13 @@ const DeskTodayPage: React.FC<{ embedded?: boolean; tradingRunning?: boolean }> 
                 </div>
               )}
             </div>
-            <div className="lg:col-span-7 grid">
+            <div className="lg:col-span-7 grid gap-4">
               {/* 副驾驶（T-P6-16）：情报事件流 + 误报标注 + 建议卡一键执行（无 mock） */}
               <CopilotPanel />
+              {/* 持仓预警（哨兵）：分数跌破 / 盘中利空 / 名单新增 → 一键卖出。
+                  刻意**不按市场门控**：切到港股/美股页签时 A 股持仓的风险并不会消失，
+                  藏起来就等于「离开这一页就不提醒了」。 */}
+              <HoldingAlertPanel />
             </div>
           </div>
         </>

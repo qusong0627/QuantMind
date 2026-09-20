@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from 'react';
 import { useDispatch } from 'react-redux';
-import { Bell, AlertCircle, TrendingUp, Settings, ArrowRight, RefreshCw, WifiOff, X, CheckCheck, Trash2, HeartPulse } from 'lucide-react';
+import { Bell, AlertCircle, TrendingUp, Settings, ArrowRight, RefreshCw, WifiOff, X, CheckCheck, Trash2, HeartPulse, ShieldAlert } from 'lucide-react';
 import { motion } from 'framer-motion';
 import { setCurrentTab } from '../../store/slices/aiStrategySlice';
 import { useNotifications, resolveNotificationTarget, getNavigationHint } from '../../hooks/useNotifications';
@@ -32,6 +32,8 @@ const TYPE_CONFIG = {
   strategy: { color: 'text-[var(--notification-strategy)]', bg: 'bg-[var(--success-bg)]', Icon: Bell },
   // T-P4-06 通知接线：体检复检退化告警（策略体检 A/B → L/E）
   health: { color: 'text-indigo-500', bg: 'bg-indigo-50', Icon: HeartPulse },
+  // 持仓哨兵：分数跌破/盘中利空/名单新增 —— 与「交易」区分，用警醒的玫红
+  holding_alert: { color: 'text-rose-600', bg: 'bg-rose-50', Icon: ShieldAlert },
 } as const;
 
 export const NotificationQuickCard: React.FC<NotificationQuickCardProps> = ({

@@ -21,8 +21,33 @@ export interface ToastNotification {
 
 // ==================== 业务通知（持久化） ====================
 
-export type BusinessNotificationType = 'system' | 'trading' | 'market' | 'strategy' | 'health';
+/**
+ * 业务通知类型的**唯一事实源**（运行时常量 → 类型）。
+ *
+ * WS 实时推送要走白名单校验，白名单与类型联合此前是两份手写清单：漏加一个类型不会报错，
+ * 只会把通知**静默降级成 `system`**（图标错、按类型分派的提醒通道不响）。
+ * 这里由常量派生类型，加类型只改一处。
+ */
+export const BUSINESS_NOTIFICATION_TYPES = [
+  'system',
+  'trading',
+  'market',
+  'strategy',
+  'health',
+  // 持仓哨兵：分数跌破/盘中利空/名单新增（后端 publish_notification type="holding_alert"）
+  'holding_alert',
+] as const;
+
+export type BusinessNotificationType = (typeof BUSINESS_NOTIFICATION_TYPES)[number];
 export type BusinessNotificationLevel = 'info' | 'warning' | 'error' | 'success';
+
+/** 运行时白名单校验（WS 推送入口用；非法值回退 `system`） */
+export function normalizeNotificationType(value: unknown): BusinessNotificationType {
+  const raw = String(value ?? '');
+  return (BUSINESS_NOTIFICATION_TYPES as readonly string[]).includes(raw)
+    ? (raw as BusinessNotificationType)
+    : 'system';
+}
 
 export interface BusinessNotification {
   id: number;

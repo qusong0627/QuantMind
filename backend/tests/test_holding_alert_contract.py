@@ -273,8 +273,10 @@ class TestSeverityAndText:
         assert format_score(0.1234) == "+0.123"
 
     def test_action_url_deep_links_to_positions(self):
-        assert alert_action_url("SH600036") == "/trading?tab=positions&symbol=SH600036"
-        assert alert_action_url(None) == "/trading?tab=positions"
+        # tab 值必须与前端页签 id 逐字一致（`position`，不是复数）——写错时前端
+        # 只会静默回落「系统健康」，点了不报错也到不了持仓页。
+        assert alert_action_url("SH600036") == "/trading?tab=position&symbol=SH600036"
+        assert alert_action_url(None) == "/trading?tab=position"
 
     def test_status_normalization(self):
         assert normalize_status("EXECUTED") == "executed"

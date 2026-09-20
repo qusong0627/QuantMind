@@ -29,8 +29,12 @@ describe('resolveInitialTab', () => {
     expect(resolveInitialTab('?tab=eval')).toBe('eval');
   });
 
+  it('持仓预警深链 tab=position 直达持仓监控（哨兵「去持仓」落点）', () => {
+    expect(resolveInitialTab('#/trading?tab=position')).toBe('position');
+    expect(resolveInitialTab('#/trading?tab=position&symbol=SZ000001')).toBe('position');
+  });
+
   it('未列入深链白名单的页签回落默认，不盲信 URL', () => {
-    expect(resolveInitialTab('#/trading?tab=position')).toBe('desk');
     expect(resolveInitialTab('#/trading?tab=manage')).toBe('desk');
     expect(resolveInitialTab('#/trading?tab=__evil__')).toBe('desk');
   });

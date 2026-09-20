@@ -67,6 +67,13 @@ export const API_ENDPOINTS = {
   ORDER_CANCEL: (id: string) => `${API_PATHS.V1}/orders/${id}/cancel`,
   TRADING_STATS: `${API_PATHS.V1}/trades/stats/summary`, // 交易统计
 
+  // 持仓预警（持仓哨兵：分数跌破/盘中利空/名单新增）
+  HOLDING_ALERTS: `${API_PATHS.V1}/trading/holding-alerts`,
+  HOLDING_ALERT_DISMISS: (id: number) => `${API_PATHS.V1}/trading/holding-alerts/${id}/dismiss`,
+  HOLDING_ALERT_EXECUTED: (id: number) => `${API_PATHS.V1}/trading/holding-alerts/${id}/executed`,
+  HOLDING_ALERT_CONFIG: `${API_PATHS.V1}/trading/holding-alerts/config`,
+  HOLDING_ALERT_STATUS: `${API_PATHS.V1}/trading/holding-alerts/status`,
+
   // 通知中心
   NOTIFICATIONS: `${API_PATHS.V1}/notifications`,
   NOTIFICATION_READ: (id: number) => `${API_PATHS.V1}/notifications/${id}/read`,

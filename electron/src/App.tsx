@@ -32,6 +32,7 @@ import AppRoutes from './features/auth/AppRoutes';
 import { useAuth } from './features/auth/hooks/useAuth';
 import { LazyProtectedRoute as ProtectedRoute } from './features/auth/utils/lazyLoad';
 import { preloadAiIdeResources } from './features/auth/utils/lazyLoad';
+import { useHoldingAlertDelivery } from './hooks/useHoldingAlertDelivery';
 
 import './styles/global.css';
 import './styles/mac-theme.css';
@@ -205,6 +206,11 @@ export default function App() {
   const isPublicRoute = publicRoutes.some(route =>
     location.pathname.startsWith(route)
   );
+
+  // 持仓预警的桌面通知 + 声音：必须挂在**根**上，不能挂在 DashboardLayout——
+  // /trading（交易台、持仓监控、个人中心）与 /desk 都是独立路由，不在那个外壳里，
+  // 挂在外壳上等于「用户在盯持仓的那一页反而收不到提醒」。登录页不武装。
+  useHoldingAlertDelivery(isAuthenticated && !isPublicRoute);
 
   // T-FE-17：登录后且无风险档案（或跳过已过期）时弹首启问卷一次
   React.useEffect(() => {

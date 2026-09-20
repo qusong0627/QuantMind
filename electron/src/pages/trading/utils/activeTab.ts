@@ -26,9 +26,10 @@ export const DEFAULT_ACTIVE_TAB: ActiveTab = 'desk';
 
 /**
  * 只有这几条支持深链直达——别的一律回落默认，不盲信 URL。
- * `eval` 来自评估徽章跳转，`signals` 来自候选信号跳转。
+ * `eval` 来自评估徽章跳转，`signals` 来自候选信号跳转，
+ * `position` 来自持仓预警（哨兵 `action_url`，点「去持仓」要真的落到持仓页）。
  */
-const DEEP_LINKABLE: readonly ActiveTab[] = ['eval', 'signals'];
+const DEEP_LINKABLE: readonly ActiveTab[] = ['eval', 'signals', 'position'];
 
 /** 从 `window.location.hash` 解析初始页签；`hash` 传入而非内部读取，便于测试与 SSR。 */
 export function resolveInitialTab(hash: string | null | undefined): ActiveTab {

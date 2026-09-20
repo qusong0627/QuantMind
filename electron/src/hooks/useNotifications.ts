@@ -23,6 +23,7 @@ import type {
   UseNotificationsReturn,
   NotificationRouteTarget,
 } from '../types/notification';
+import { normalizeNotificationType } from '../types/notification';
 
 const NOTIFICATION_ROUTE_MAP: Record<string, NotificationRouteTarget> = {
   '/backtest': 'backtest-history',
@@ -334,9 +335,7 @@ export const useNotifications = (options: UseNotificationsOptions = {}): UseNoti
         title: String(raw?.title ?? '系统通知'),
         content: String(raw?.content ?? ''),
         action_url: raw?.action_url ? String(raw.action_url) : undefined,
-        type: (['system', 'trading', 'market', 'strategy', 'health'].includes(String(raw?.type))
-          ? String(raw?.type)
-          : 'system') as BusinessNotification['type'],
+        type: normalizeNotificationType(raw?.type),
         level: (['info', 'warning', 'error', 'success'].includes(String(raw?.level))
           ? String(raw?.level)
           : 'info') as BusinessNotification['level'],
@@ -428,7 +427,13 @@ export const resolveNotificationTarget = (
   }
 
   const text = `${notification.title} ${notification.content || ''}`.toLowerCase();
-  
+
+  // 持仓预警：显式归到交易台（哨兵的 action_url 已带 symbol 深链；这里只做兜底，
+  // 否则标题里没写「持仓」的预警会掉到最后 return null、点了不跳）
+  if (notification.type === 'holding_alert') {
+    return 'trading';
+  }
+
   if (notification.type === 'strategy' || text.includes('回测') || text.includes('backtest')) {
     return 'backtest-history';
   }

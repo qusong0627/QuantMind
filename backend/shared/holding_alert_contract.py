@@ -298,8 +298,13 @@ def make_holding_dedupe_key(
 
 
 def alert_action_url(symbol: str | None = None) -> str:
-    """站内通知点击落点（交易台 → 持仓监控）。"""
-    base = "/trading?tab=positions"
+    """站内通知点击落点（交易台 → 持仓监控）。
+
+    ``tab=position`` 必须与前端页签 id 逐字一致，且该 id 在前端深链白名单里
+    （``pages/trading/utils/activeTab.ts`` 的 ``DEEP_LINKABLE``）。写成复数
+    ``positions`` 时前端只会静默回落「系统健康」——点了不报错、也到不了持仓页。
+    """
+    base = "/trading?tab=position"
     sym = str(symbol or "").strip()
     return f"{base}&symbol={sym}" if sym else base
 
