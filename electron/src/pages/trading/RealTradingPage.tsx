@@ -22,11 +22,11 @@ import { selectCurrentMarket } from '../../store/slices/uiSlice';
 import { useTradingModeSwitch } from '../../features/shared/useTradingModeSwitch';
 import { useTradeWebSocket } from '../../hooks/useTradeWebSocket';
 import { buildTradingTopBarAccountInfo, resolveTradingAccountMode } from './utils/accountAdapter';
+import { resolveInitialTab, type ActiveTab } from './utils/activeTab';
 import LiveTradeConfigWizard from './components/LiveTradeConfigWizard';
 import type { DeployMode, ExecutionConfig, LiveTradeConfig } from '../../types/liveTrading';
 
 type TradingMode = 'real' | 'simulation';  // 支持实盘(通达信桥)与模拟盘
-type ActiveTab = 'desk' | 'signals' | 'eval' | 'manage' | 'manual-task' | 'personal' | 'position' | 'history' | 'settings' | 'replay';
 type PreflightStage = 'trading-readiness' | 'preflight';
 type PendingDeploy = {
     strategyId: string;
@@ -86,16 +86,10 @@ const BROKER_LABELS: Record<string, string> = {
 
 const RealTradingPage: React.FC = () => {
     const currentMarket = useAppSelector(selectCurrentMarket);
-    // 深链：/?...&tab=eval（评估徽章跳转）→ 初始落在评估中心页签
-    const initialTab: ActiveTab = (() => {
-        if (typeof window === 'undefined') return 'manage';
-        const hash = window.location.hash || '';
-        const qi = hash.indexOf('?');
-        const params = new URLSearchParams(qi >= 0 ? hash.slice(qi + 1) : '');
-        const t = params.get('tab');
-        if (t === 'eval' || t === 'signals') return t as ActiveTab;
-        return 'manage';
-    })();
+    // 默认「系统健康」，深链 ?tab=eval|signals 直达 —— 规则见 utils/activeTab.ts（有测试锁定）
+    const initialTab: ActiveTab = resolveInitialTab(
+        typeof window === 'undefined' ? null : window.location.hash,
+    );
     const [activeTab, setActiveTab] = useState<ActiveTab>(initialTab);
 
     // 券商通道卡「去配置凭证」跳转：切到设置页签
