@@ -2446,3 +2446,37 @@ CREATE INDEX IF NOT EXISTS idx_order_history_symbol_date ON order_history (symbo
 CREATE INDEX IF NOT EXISTS idx_order_history_user_status ON order_history (user_id, status);
 CREATE INDEX IF NOT EXISTS idx_order_history_archived ON order_history (archived_at);
 
+
+-- ---------------------------------------------------------------------------
+-- qm_holding_alerts：持仓预警留痕（持仓哨兵 T1/T2/T3 产出）
+-- 由 backend/shared/holding_alert_contract.py 在 trade 服务启动期自愈建表；
+-- 这里同步一份给全新安装的库（sentinel_alert_contract 同款两层做法）。
+-- dedupe_key 含 30 分钟冷却桶：同 (user, symbol, kind) 冷却期内只会有一行，
+-- 并发扫描也靠这个唯一索引兜底。
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS qm_holding_alerts (
+    id             BIGSERIAL PRIMARY KEY,
+    tenant_id      VARCHAR(64) NOT NULL DEFAULT 'default',
+    user_id        VARCHAR(64) NOT NULL,
+    symbol         VARCHAR(32) NOT NULL,
+    stock_name     VARCHAR(64),
+    kind           VARCHAR(32) NOT NULL,
+    severity       VARCHAR(16) NOT NULL,
+    source         VARCHAR(64) NOT NULL DEFAULT 'holding_sentinel',
+    title          VARCHAR(256) NOT NULL,
+    content        TEXT NOT NULL DEFAULT '',
+    detail         JSONB NOT NULL DEFAULT '{}',
+    score_prev     DOUBLE PRECISION,
+    score_now      DOUBLE PRECISION,
+    score_as_of    DATE,
+    dedupe_key     VARCHAR(64) NOT NULL,
+    status         VARCHAR(16) NOT NULL DEFAULT 'active',
+    notified       BOOLEAN NOT NULL DEFAULT FALSE,
+    action_url     VARCHAR(512),
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    resolved_at    TIMESTAMPTZ
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_holding_alerts_dedupe ON qm_holding_alerts (dedupe_key);
+CREATE INDEX IF NOT EXISTS idx_holding_alerts_user ON qm_holding_alerts (tenant_id, user_id, status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_holding_alerts_symbol ON qm_holding_alerts (tenant_id, user_id, symbol, created_at DESC);

@@ -92,6 +92,11 @@ JOBS: tuple[JobSpec, ...] = (
         "信号×情报共振 → 观察仓建议卡（否决/去重/regime 门控/每日≤3 张，人在环执行）",
     ),
     JobSpec(
+        "holding_sentinel", "持仓哨兵（用户级预警）", "worker", "trade", "60s 周期",
+        "QM_SENTINEL_WORKER_ENABLED", True, 300, None,
+        "持仓/自选 ∪ 分数迁移 ∪ sentinel_alerts 利空 → qm_holding_alerts + 站内通知",
+    ),
+    JobSpec(
         "hot_set_builder", "热集构建（P6）", "worker", "trade", "60s 周期",
         "QM_HOT_SET_BUILD_ENABLED", True, 300, None,
         "全用户持仓并集 ∪ 候选池 → Redis 热集集合（订阅采集数据源，T-P6-06）",

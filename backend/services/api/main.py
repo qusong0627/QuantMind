@@ -42,6 +42,7 @@ from backend.services.api.routers.desk import router as desk_router
 from backend.services.api.routers.eval_scores import router as eval_router
 from backend.services.api.routers.sentinel import router as sentinel_router
 from backend.services.api.routers.copilot import router as copilot_router
+from backend.services.api.routers.holding_alerts import router as holding_alerts_router
 from backend.services.api.routers.stocks_search import router as stocks_search_router
 from backend.services.api.routers.exclusion_admin import router as exclusion_admin_router
 from backend.services.api.routers.stock_terminal import router as stock_terminal_router
@@ -418,6 +419,7 @@ app.include_router(desk_router)  # T-P1-05 今日交易台（/api/v1/desk/today�
 app.include_router(eval_router)  # FE-E 评估读 API（/api/v1/eval/*，评分卡/体检档案）
 app.include_router(sentinel_router)  # 哨兵告警 API（/api/v1/sentinel/*，T-P6-15）
 app.include_router(copilot_router)  # 副驾驶 API（/api/v1/copilot/*，T-P6-16）
+app.include_router(holding_alerts_router)  # 持仓预警（/api/v1/trading/holding-alerts/*）
 
 # CORS
 app.add_middleware(

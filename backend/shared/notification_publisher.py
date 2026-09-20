@@ -33,7 +33,16 @@ except Exception:  # pragma: no cover
 
 logger = logging.getLogger(__name__)
 
-_ALLOWED_TYPES = {"system", "trading", "market", "strategy", "health", "data_quality", "sentinel"}
+_ALLOWED_TYPES = {
+    "system",
+    "trading",
+    "market",
+    "strategy",
+    "health",
+    "data_quality",
+    "sentinel",
+    "holding_alert",
+}
 _ALLOWED_LEVELS = {"info", "warning", "error", "success"}
 NOTIFICATION_EVENTS_STREAM = "notification_events"
 

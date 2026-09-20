@@ -62,6 +62,7 @@ async def lifespan(app: FastAPI):
     eval_scores_task = None
     sentinel_alert_task = None
     sentinel_backfill_task = None
+    holding_sentinel_task = None
     advice_backfill_task = None
     advice_generator_task = None
     tdx_hot_set_feed_task = None
@@ -108,6 +109,9 @@ async def lifespan(app: FastAPI):
         from backend.shared.fund_snapshot_contract import (
             ensure_fund_snapshot_contract_async,
         )
+        from backend.shared.holding_alert_contract import (
+            ensure_holding_alerts_table_async,
+        )
         from backend.shared.ledger_contract import (
             ensure_accounts_market_contract_async,
             ensure_ledger_contract_columns_async,
@@ -124,6 +128,7 @@ async def lifespan(app: FastAPI):
             ensure_fund_snapshot_contract_async,
             ensure_signal_contract_columns_async,
             ensure_eval_scores_table_async,
+            ensure_holding_alerts_table_async,
         ):
             try:
                 await _ensure()
@@ -294,9 +299,21 @@ async def lifespan(app: FastAPI):
             sentinel_backfill_task = asyncio.create_task(
                 run_sentinel_backfill_worker(), name="sentinel-backfill-worker"
             )
+
+            # 持仓哨兵（用户级）：市场级 sentinel_alerts 已由上面两个 worker 产出，
+            # 这里只做「这只票在不在这个用户的持仓/自选里」的扇出 + 分数迁移判定。
+            # 与市场级 worker 同开关：总台关了，持仓侧没有上游可扇出。
+            from backend.services.trade.services.holding_sentinel import (
+                run_holding_sentinel_worker,
+            )
+
+            holding_sentinel_task = asyncio.create_task(
+                run_holding_sentinel_worker(), name="holding-sentinel-worker"
+            )
         else:
             sentinel_alert_task = None
             sentinel_backfill_task = None
+            holding_sentinel_task = None
             logger.info("sentinel workers disabled (QM_SENTINEL_WORKER_ENABLED=false)")
 
         # 建议卡兑现回填（T-P6-16 闭环）：决策日收盘 → T+1/T+3/T+5 超额 vs 沪深300
@@ -639,7 +656,7 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning("trade risk trigger scanner stop failed: %s", e)
 
-    for task in (scanner_task, margin_task, snapshot_task, ledger_settlement_task, manual_execution_task, sandbox_signal_task, tdx_account_sync_task, qmt_account_sync_task, qmt_exec_poller_task, mirror_queue_drainer_task, qmt_sltp_executor_task, qmt_quote_backup_task, dual_book_reconcile_task, shadow_compare_task, eval_scores_task, health_recheck_task, close_audit_task, tdx_quote_feed_task, tdx_l2_capture_task, tdx_l2_realtime_task, t1_unlock_task, simulation_pending_order_task, corp_action_task, simulation_eod_task, hot_set_builder_task, sentinel_alert_task, sentinel_backfill_task, advice_backfill_task, advice_generator_task, tdx_hot_set_feed_task):
+    for task in (scanner_task, margin_task, snapshot_task, ledger_settlement_task, manual_execution_task, sandbox_signal_task, tdx_account_sync_task, qmt_account_sync_task, qmt_exec_poller_task, mirror_queue_drainer_task, qmt_sltp_executor_task, qmt_quote_backup_task, dual_book_reconcile_task, shadow_compare_task, eval_scores_task, health_recheck_task, close_audit_task, tdx_quote_feed_task, tdx_l2_capture_task, tdx_l2_realtime_task, t1_unlock_task, simulation_pending_order_task, corp_action_task, simulation_eod_task, hot_set_builder_task, sentinel_alert_task, sentinel_backfill_task, holding_sentinel_task, advice_backfill_task, advice_generator_task, tdx_hot_set_feed_task):
         if task is None:
             continue
         task.cancel()
