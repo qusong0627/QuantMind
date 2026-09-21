@@ -24,7 +24,9 @@ try:
         _EM_TO_MM,
         _CELL_PAD_MM,
     )
+    from backend.shared.export_disclaimer import DISCLAIMER_SENTENCE
 except ImportError:
+    DISCLAIMER_SENTENCE = None
     render_inline_md = None
     unescape_html = None
     classify_semantic = None
@@ -219,7 +221,11 @@ def test_footer_text_contains_page_numbers():
     footer = build_footer_text(3, 12)
     assert "第 3 页" in footer
     assert "共 12 页" in footer
-    assert "不构成投资建议" in footer
+    # 断言的必须是**单源那句**，不是这里手抄的字面量：手抄的那份一旦与
+    # `shared/export_disclaimer` 漂开，就会像这次一样在措辞统一时假红
+    # （原先抄的是「不构成投资建议」，而单源是「不构成任何投资建议」——
+    # 页脚其实一直是合规的，红的是断言）。
+    assert DISCLAIMER_SENTENCE in footer
 
 
 # ---------- 表格列宽自适应 ----------

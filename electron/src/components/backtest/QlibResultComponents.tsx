@@ -10,6 +10,8 @@ import ReactECharts from 'echarts-for-react';
 import { QlibBacktestResult, QlibBacktestConfig } from '../../types/backtest/qlib';
 import type { BacktestResult, BacktestConfig } from '../../services/backtestService';
 import { backtestClient } from '../../services/aiStrategyClients';
+import { buildCsvText, downloadCsvFile } from '../../utils/csvExport';
+import { dataRangeRow } from '../../utils/exportDisclaimer';
 
 type Trade = {
   date: string;
@@ -208,10 +210,20 @@ export const QlibResultDisplay: React.FC<{ result: BacktestResult | QlibBacktest
       Number(t.commission || 0).toFixed(2),
       Number.isFinite(t.equityBalance as number) ? Number(t.equityBalance).toFixed(2) : '',
     ]);
-    const csvContent = [headers, ...csvRows]
-      .map((row) => row.map(escapeCsvCell).join(','))
-      .join('\n');
-    downloadCsv(filename, csvContent);
+    // 走共享实现（utils/csvExport）：转义、BOM、免责段一次到位。此前这里是本地
+    // 手拼 + 本文件私有的 escapeCsvCell/downloadCsv 两个副本 —— 免责段也就漏了
+    // 这一条链路（本文件导出的是回测成交流水，正是最容易被当成依据的那类）。
+    // 区间取回测自身的权益曲线首末点（它是有序的日期轴）；曲线为空则整行省略。
+    const axis = equityCurve.map((d) => d.date).filter((d): d is string => !!d);
+    downloadCsvFile(
+      buildCsvText(headers, csvRows, {
+        textColumns: [1], // 代码列按文本导出，防 Excel 丢掉 000/002 开头的前导零
+        dataRange: axis.length
+          ? dataRangeRow(axis[0], axis[axis.length - 1])
+          : undefined,
+      }),
+      filename,
+    );
   };
 
   return (
@@ -586,16 +598,4 @@ function getResultTrades(result: BacktestResult | QlibBacktestResult): Trade[] {
   if (directTrades.length) return directTrades;
   const legacyTrades = Array.isArray((result as any)?.trade_list) ? (result as any).trade_list : [];
   return legacyTrades;
-}
-function escapeCsvCell(value: string): string { return `"${String(value ?? '').replace(/"/g, '""')}"`; }
-function downloadCsv(filename: string, content: string): void {
-  const blob = new Blob([`\ufeff${content}`], { type: 'text/csv;charset=utf-8;' });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement('a');
-  link.href = url;
-  link.setAttribute('download', filename);
-  document.body.appendChild(link);
-  link.click();
-  document.body.removeChild(link);
-  URL.revokeObjectURL(url);
 }

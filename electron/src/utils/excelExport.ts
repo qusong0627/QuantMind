@@ -1,6 +1,37 @@
 import ExcelJS from 'exceljs';
 import { saveAs } from 'file-saver';
 
+import {
+  dataRangeRow,
+  disclaimerRows,
+  type ExportDisclaimerMeta,
+} from './exportDisclaimer';
+
+/** 免责工作表名。常量而非字面量：幂等判定与测试都按它认表。 */
+const DISCLAIMER_SHEET_NAME = '免责声明';
+
+/**
+ * 追加「免责声明」工作表（生成时间 + 数据区间 + 不构成投资建议）。
+ *
+ * **独立成表**，不往数据表尾部加行：加行会顶乱 `worksheet.columns` 的列宽，
+ * 也会污染任何按行号取数的消费方；独立表则一个数据格子都不碰
+ * （`__tests__/exportDisclaimer.test.ts` 有断言钉住）。
+ *
+ * 幂等：已有同名表就复用，避免经多个 helper 导出时叠出两张。
+ * 措辞与行序由 `exportDisclaimer` 单源提供 —— 本函数只管落格。
+ */
+export function appendDisclaimerSheet(
+  workbook: ExcelJS.Workbook,
+  meta?: ExportDisclaimerMeta,
+): void {
+  const sheet =
+    workbook.getWorksheet(DISCLAIMER_SHEET_NAME) ?? workbook.addWorksheet(DISCLAIMER_SHEET_NAME);
+  if (sheet.rowCount > 0) return;
+
+  disclaimerRows(meta).forEach(([label, value]) => sheet.addRow([label, value]));
+  sheet.columns = [{ width: 12 }, { width: 80 }];
+}
+
 export interface ExcelExportData {
   strategy_name: string;
   symbol: string;
@@ -65,6 +96,24 @@ export class ExcelExporter {
     if (data.daily_returns) {
       this.addDailyReturnsSheet(data.daily_returns);
     }
+
+    // 5. 免责声明工作表（文件离开应用后仍带着免责段）
+    appendDisclaimerSheet(this.workbook, { dataRange: this.resolveDataRange(data) });
+  }
+
+  /**
+   * 回测数据区间：**只取回测自身的日期轴**（首/末即区间）。
+   *
+   * 不把成交日期并进来一起排序：成交日期列的格式与排序都不保证（可能是
+   * `2026/9/21` 或带时分秒），字典序取首末会算出一个假区间 —— 而假区间
+   * 比没有区间更糟，它会被当成真的读。取不到就返回 `undefined`，免责段
+   * 整行省略（见 `exportDisclaimer` 的「不编造」纪律）。
+   */
+  private resolveDataRange(data: ExcelExportData): string | undefined {
+    const axis = data.equity_curve?.dates ?? data.daily_returns?.dates ?? [];
+    const clean = axis.filter((d): d is string => typeof d === 'string' && d.trim() !== '');
+    if (clean.length === 0) return undefined;
+    return dataRangeRow(clean[0], clean[clean.length - 1]);
   }
 
   /**
@@ -234,6 +283,10 @@ export const exportTradeRecordsToExcel = async (
     { width: 12 },
   ];
 
+  // 不传数据区间：成交台账的「时间」列是给人看的展示串，且列表常按倒序排，
+  // 取首末会得到一个反向的假区间（比没有更糟）。生成时间 + 免责语句照旧。
+  appendDisclaimerSheet(workbook);
+
   const buffer = await workbook.xlsx.writeBuffer();
   const blob = new Blob([buffer], {
     type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
@@ -299,6 +352,9 @@ export const exportBatchBacktestComparison = async (
     { width: 10 },
     { width: 10 },
   ];
+
+  // 不传数据区间：本表是「每只标的一行」的截面，本身没有时间轴。
+  appendDisclaimerSheet(workbook);
 
   const buffer = await workbook.xlsx.writeBuffer();
   const blob = new Blob([buffer], {

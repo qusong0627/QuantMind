@@ -3,11 +3,17 @@
  * 支持将各种数据导出为CSV格式
  */
 
+import { disclaimerRows } from '../../utils/exportDisclaimer';
+
 export interface CSVExportOptions {
   filename?: string;
   delimiter?: string;
   includeHeaders?: boolean;
   encoding?: string;
+  /** 数据覆盖区间（人读文本）。拿不到就别传 —— 免责段会省略该行，不编造。 */
+  dataRange?: string;
+  /** 覆盖免责段的「生成时间」，仅供测试固定时钟用。 */
+  now?: Date;
 }
 
 // 类型定义
@@ -169,6 +175,15 @@ export class CSVExporter {
     data.forEach(row => {
       const values = Object.values(row).map(v => this.escapeCSV(String(v)));
       lines.push(values.join(delimiter));
+    });
+
+    // 免责段压尾（生成时间 / 数据区间 / 不构成投资建议）。
+    // 空行分隔 + 数据行宽度不变：本类此前完全不写免责段，而它导出的是交易记录、
+    // K线与回测结果 —— 正是最容易被当成操作依据的三类。措辞取自单源，见
+    // `utils/exportDisclaimer`（与后端 `shared/export_disclaimer.py` 同金样）。
+    lines.push('');
+    disclaimerRows(options).forEach(([label, value]) => {
+      lines.push([label, value].map(v => this.escapeCSV(v)).join(delimiter));
     });
 
     return lines.join('\n');

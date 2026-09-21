@@ -1,0 +1,11 @@
+{
+  "_note": "导出件免责段金样 —— 前后端措辞的唯一锚点。前端 electron/src/utils/exportDisclaimer.ts 与后端 backend/shared/export_disclaimer.py 各持一份实现（不同语言、不同产物，无法共享代码），本文件是「两侧不许漂」的机器可查凭据：任一侧改措辞而另一侧没跟，两侧测试都红。金样放在后端包内是因为后端测试跑在容器里、只挂载了 ./backend（与 researchScoreGolden.json 同一考虑）。",
+  "_wording_source": "措辞取自项目根 CLAUDE.md 的免责声明段：「本项目仅供学习研究与技术演示，不构成任何投资建议」，导出件沿用同一句话，不另创一套说法。",
+  "sentence": "本文件由 QuantMind 自动生成，仅供学习研究与技术演示，不构成任何投资建议。",
+  "labels": {
+    "exportedAt": "生成时间",
+    "dataRange": "数据区间",
+    "sentence": "免责声明"
+  },
+  "requiredPhrases": ["学习研究", "技术演示", "不构成任何投资建议"]
+}

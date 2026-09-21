@@ -28,9 +28,24 @@ from reportlab.platypus import (
 matplotlib.use("Agg")  # 非 GUI 后端
 
 from backend.services.engine.qlib_app.utils.structured_logger import StructuredTaskLogger
+from backend.shared.export_disclaimer import disclaimer_rows
 
 logger = logging.getLogger(__name__)
 task_logger = StructuredTaskLogger(logger, "ReportGenerator")
+
+
+def _result_data_range(result: dict[str, Any]) -> tuple[object, object]:
+    """回测结果里的数据区间（start/end 两字段）。
+
+    两种形态都在用：顶层 ``start_date``（导出 CSV 那条链路）与
+    ``config.start_date``（本模块概览段读的）。这里一并取，取值规则只写一处 ——
+    两个生成器各判一次必然漂。
+    """
+    config = result.get("config") or {}
+    return (
+        result.get("start_date") or config.get("start_date"),
+        result.get("end_date") or config.get("end_date"),
+    )
 
 
 class PDFReportGenerator:
@@ -52,6 +67,14 @@ class PDFReportGenerator:
             fontSize=16,
             textColor=colors.HexColor("#333333"),
             spaceAfter=12,
+        )
+        # 免责段用的小字灰体：要看得见，但不要抢正文的注意力
+        self.disclaimer_style = ParagraphStyle(
+            "Disclaimer",
+            parent=self.styles["Normal"],
+            fontSize=9,
+            leading=13,
+            textColor=colors.HexColor("#666666"),
         )
 
     def generate(self, backtest_result: dict[str, Any]) -> bytes:
@@ -108,12 +131,31 @@ class PDFReportGenerator:
             story.append(Paragraph("持仓分布（最后一日）", self.heading_style))
             story.append(position_img)
 
+        # 8. 免责段（生成时间 / 数据区间 / 不构成投资建议）
+        #
+        # 放在正文末尾而不是页脚画布：本生成器用的是 SimpleDocTemplate，
+        # 没有 onPage 回调；末尾段落同样"随文件走"，且不依赖 reportlab 的
+        # 画布 API（那是另一套坐标系，容易在分页边界上画丢）。
+        story.append(Spacer(1, 0.4 * inch))
+        story.extend(self._build_disclaimer_section(backtest_result))
+
         # 构建 PDF
         doc.build(story)
         pdf_bytes = buffer.getvalue()
         buffer.close()
 
         return pdf_bytes
+
+    def _build_disclaimer_section(self, result: dict[str, Any]) -> list:
+        """免责段：生成时间 / 数据区间 / 不构成投资建议（措辞取自单源）。
+
+        行序与「有区间才出现区间」由 ``disclaimer_rows`` 决定 —— 这里不再判一次，
+        否则 PDF 与 Excel 两个生成器迟早各判各的。
+        """
+        return [
+            Paragraph(f"{label}：{value}", self.disclaimer_style)
+            for label, value in disclaimer_rows(data_range=_result_data_range(result))
+        ]
 
     def _build_overview_section(self, result: dict[str, Any]) -> list:
         """构建概览部分"""
@@ -352,6 +394,9 @@ class ExcelReportGenerator:
         # Sheet 5: 每日收益率
         self._create_daily_returns_sheet(wb, backtest_result)
 
+        # Sheet 6: 免责声明
+        self._create_disclaimer_sheet(wb, backtest_result)
+
         # 保存到字节流
         buffer = io.BytesIO()
         wb.save(buffer)
@@ -359,6 +404,19 @@ class ExcelReportGenerator:
         buffer.close()
 
         return excel_bytes
+
+    def _create_disclaimer_sheet(self, wb: Workbook, result: dict[str, Any]):
+        """免责声明 Sheet。
+
+        **独立成表**，不往各数据表尾部加行：加行会顶乱既有表头与任何按行号取数的
+        消费方（与前端 ``excelExport.appendDisclaimerSheet`` 同一取舍）。
+        行序与「有区间才出现」由 ``disclaimer_rows`` 决定。
+        """
+        ws = wb.create_sheet("免责声明")
+        ws.column_dimensions["A"].width = 14
+        ws.column_dimensions["B"].width = 80
+        for label, value in disclaimer_rows(data_range=_result_data_range(result)):
+            ws.append([label, value])
 
     def _create_metrics_sheet(self, wb: Workbook, result: dict[str, Any]):
         """创建核心指标 Sheet"""

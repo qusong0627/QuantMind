@@ -3,6 +3,9 @@ import { motion } from 'framer-motion';
 import { Download, FileText, Table, BarChart3, Calendar, Filter } from 'lucide-react';
 import { Buffer } from 'buffer';
 
+import { buildCsvText } from '../../utils/csvExport';
+import { dataRangeRow, formatExportTime } from '../../utils/exportDisclaimer';
+
 interface ExportOptions {
   format: 'csv' | 'xlsx' | 'pdf' | 'json';
   dateRange: {
@@ -301,7 +304,7 @@ export class DataExportService {
   }
 
   private static async exportToCSV(data: any, options: ExportOptions) {
-    const csv = this.convertToCSV(data);
+    const csv = this.convertToCSV(data, options);
     const blob = new Blob([csv], { type: 'text/csv' });
     this.downloadFile(blob, `quantmind_export_${Date.now()}.csv`);
   }
@@ -317,18 +320,23 @@ export class DataExportService {
     this.downloadFile(blob, `quantmind_export_${Date.now()}.json`);
   }
 
-  private static convertToCSV(data: any): string {
-    // 简单的CSV转换实现
+  private static convertToCSV(data: any, options: ExportOptions): string {
     const items = data.trades || [];
     if (items.length === 0) return '';
 
     const headers = Object.keys(items[0]);
-    const csvContent = [
-      headers.join(','),
-      ...items.map((item: any) => headers.map(header => item[header]).join(','))
-    ].join('\n');
+    const rows = items.map((item: any) => headers.map((header) => item[header]));
 
-    return csvContent;
+    // 走共享实现（utils/csvExport）：转义、BOM、免责段一次到位。
+    // 此前这里手拼 `join(',')` —— 值里带逗号就破列（代码/名称列很常见），
+    // 且完全没有免责段。区间取弹窗里用户选的那个，它就是本次导出的覆盖面；
+    // `formatExportTime` 的补零保证切片出来的日期段是 YYYY-MM-DD。
+    const range = options?.dateRange;
+    const day = (d: Date) => formatExportTime(d).slice(0, 10);
+
+    return buildCsvText(headers, rows, {
+      dataRange: range ? dataRangeRow(day(range.start), day(range.end)) : undefined,
+    });
   }
 
   private static async downloadFile(blob: Blob, filename: string) {

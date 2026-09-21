@@ -13,6 +13,7 @@ from backend.services.engine.qlib_app.api.export_utils import (
     _to_finite_float,
 )
 from backend.services.engine.qlib_app.api.identity import _identity_from_request
+from backend.shared.export_disclaimer import write_csv_disclaimer
 
 router = APIRouter(tags=["qlib"])
 
@@ -118,6 +119,16 @@ async def export_backtest(
                 ]
             )
         filename = f"backtest_{backtest_id[:8]}_trades.csv"
+
+    # 免责段压尾（生成时间 + 数据区间 + 不构成投资建议）。
+    #
+    # 区间取回测自身的 start/end_date —— 这是回测覆盖面的事实来源；两者缺失时
+    # `normalize_data_range` 返回 None，该行整行不出现，不写空值也不写半截区间。
+    # 导出件会离开应用（转发、存档、打印），屏幕上的免责条跟不出去，所以必须进文件。
+    write_csv_disclaimer(
+        writer,
+        data_range=(r.get("start_date"), r.get("end_date")),
+    )
 
     output.seek(0)
     return StreamingResponse(

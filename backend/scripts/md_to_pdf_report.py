@@ -35,6 +35,15 @@ from reportlab.platypus import (
     SimpleDocTemplate,
 )
 
+# 直跑支持：`python backend/scripts/md_to_pdf_report.py in.md out.pdf` 时 sys.path[0]
+# 是本目录，仓库根不在路径上，`backend.*` 会导入失败（被 `report_exporter` 以
+# `import backend.scripts.md_to_pdf_report` 调用时则正常）。两种用法都要在，
+# 否则要么脚本跑不了、要么免责措辞被迫在本文件里再抄一份。
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from backend.shared.export_disclaimer import DISCLAIMER_SENTENCE  # noqa: E402
+
 PAGE_W, PAGE_H = A4
 
 # ---------- 设计 token（金融蓝 + 金色点缀，券商研报风） ----------
@@ -308,9 +317,13 @@ def extract_cover_meta(content: str) -> tuple[str, list[str]]:
 
 
 def build_footer_text(page: int, total: int) -> str:
-    """页脚：免责声明 + 第 X 页 / 共 Y 页。"""
-    disc = "本报告由 QuantMind 自动生成，仅供研究参考，不构成投资建议"
-    return f"{disc}　|　第 {page} 页 / 共 {total} 页"
+    """页脚：免责声明 + 第 X 页 / 共 Y 页。
+
+    措辞取自单源（`shared/export_disclaimer`）——本文件此前自带一份变体
+    （「仅供研究参考」），而同一份 PDF 的正文由 report_exporter 写入
+    「仅供学习研究」，于是同一页上两句话不一样。现在两侧同源。
+    """
+    return f"{DISCLAIMER_SENTENCE}　|　第 {page} 页 / 共 {total} 页"
 
 
 # ---------- 块级换页保护（表/标题不被 LayoutError 打断） ----------
@@ -703,10 +716,7 @@ def main(md_path: str, pdf_path: str) -> None:
         canvas.drawCentredString(PAGE_W / 2, PAGE_H - 24 * mm, "QuantMind · 量化投研")
         canvas.setFillColor(colors.HexColor("#8FA3C0"))
         canvas.setFont(FONT_NAME, 7.5)
-        canvas.drawCentredString(
-            PAGE_W / 2, 12 * mm,
-            "本报告由 AI 自动生成，仅供研究参考，不构成投资建议",
-        )
+        canvas.drawCentredString(PAGE_W / 2, 12 * mm, DISCLAIMER_SENTENCE)
         canvas.restoreState()
 
     def _full_story() -> list:

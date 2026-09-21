@@ -25,6 +25,7 @@ from backend.services.engine.trading_agents.progress import (
     PIPELINE_STAGES,
     ProgressTracker,
 )
+from backend.shared.export_disclaimer import DISCLAIMER_SENTENCE, format_export_time
 
 logger = logging.getLogger(__name__)
 
@@ -112,7 +113,11 @@ def _build_report_md(
     market: str,
 ) -> str:
     """组装带标题（股票名 + 日期 + 分析时间）的 Markdown 报告。"""
-    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    # 一个时刻、两种格式：分析时间（到分，沿用既有展示）与免责段的生成时间
+    # （到秒，与其它导出件同格式）。分两次 `datetime.now()` 会让同一份报告里
+    # 出现两个差几秒的时间戳 —— 那种"看起来像两个事件"的假象没必要制造。
+    now_dt = datetime.now()
+    now = now_dt.strftime("%Y-%m-%d %H:%M")
     title = f"{stock_name}({ticker})" if stock_name else ticker
 
     lines: list[str] = []
@@ -136,11 +141,13 @@ def _build_report_md(
         lines.append(text)
         lines.append("")
 
+    # 免责段：措辞取自单源（`shared/export_disclaimer`），生成时间由同一模块给出。
+    # 此前这里自带一份变体（「投研分析管线自动生成（{now}）」），与 PDF 转换脚本
+    # 里的另一份（「仅供研究参考」）同时出现在同一份 PDF 上 —— 一页两句话不一样。
     lines.append("---")
     lines.append("")
-    lines.append(
-        f"> 本报告由 QuantMind 投研分析管线自动生成（{now}），仅供学习研究，不构成投资建议。"
-    )
+    lines.append(f"> {DISCLAIMER_SENTENCE}")
+    lines.append(f"> 生成时间：{format_export_time(now_dt)}")
     lines.append("")
     return "\n".join(lines)
 
