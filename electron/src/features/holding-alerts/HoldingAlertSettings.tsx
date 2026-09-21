@@ -186,7 +186,7 @@ const MonitorColumn: React.FC<
         </button>
       </div>
       <p className="mt-1 text-[10px] leading-relaxed text-gray-400">
-        分数由正转负始终提醒；此处是额外的下穿线，0 = 只报转负
+        分数下穿 0 始终提醒；此处是额外的预警线，填 0 = 只报下穿 0
       </p>
     </div>
   </section>

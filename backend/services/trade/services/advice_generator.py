@@ -94,13 +94,21 @@ def build_card(*, candidate: dict[str, Any], gen_key: str, trade_date: str, side
     res = "情报共振（近24h 正面情报）" if candidate["resonance"] else "无风险告警（近24h）"
     regime_txt = f"{regime_hint:.2f}" if regime_hint is not None else "未取到"
     counts = side_counts or {}
+    # 分布文案必须走中性位置词：BUY/SELL/HOLD 是内部枚举，原样渲染英文枚举既漏内部
+    # 契约、又等于把「买入/卖出」的判定直接摆给用户看。译法表在后端唯一刻度模块里，
+    # 与前端 signalVocabulary.ts 是同一份口径（改一边必须改另一边）。
+    from backend.shared.research_score import signal_position_label
+
+    dist_txt = " / ".join(
+        f"{signal_position_label(k)} {counts.get(k, '—')}"
+        for k in ("BUY", "SELL", "HOLD")
+    )
     return {
         "title": f"观察仓（自动）：{sym} 融合信号截面靠前（{res}）",
         "rationale": (
             f"自动生成（规则 v1 · 信号×情报共振）：{trade_date} 融合信号靠前梯队 Top{TOP_N} 之列"
             f"（序列第 {candidate['rank']}，分 {candidate['fusion_score']:.4f}）；{res}；"
-            f"当日信号分布 BUY {counts.get('BUY', '—')} / SELL {counts.get('SELL', '—')} / "
-            f"HOLD {counts.get('HOLD', '—')}；日内 regime 仓位提示 {regime_txt}。"
+            f"当日信号分布 {dist_txt}；日内 regime 仓位提示 {regime_txt}。"
             f"纪律声明：单一信号透镜、仅最小观察仓 {OBSERVE_LOT} 股，执行与否由你在交易台决策；"
             f"规模样本（n≥20）前只看流程不看胜负。"
         ),
@@ -282,7 +290,6 @@ async def generate_once(*, today: date | None = None) -> dict[str, int]:
     if not ensure_copilot_advice_table():
         return {"created": 0, "failed": 1}
     today = today or datetime.now(_CST).date()
-    today_str = today.strftime("%Y-%m-%d")
     stats = {"created": 0, "skipped_regime": 0, "candidates": 0, "failed": 0}
 
     regime_hint = _load_regime_hint()

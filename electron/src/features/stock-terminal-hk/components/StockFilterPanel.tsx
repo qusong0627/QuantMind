@@ -155,7 +155,12 @@ export function StockFilterPanel({ filters, onChange, total, fullTotal, models: 
               onChange={v => set({ capTier: v })} options={CAP_TIER_OPTIONS.map(c => ({ label: opt('capTier', c.value), value: c.value }))} />
             <Select allowClear size="small" placeholder="分数档" value={filters.bucket || undefined}
               onChange={v => set({ bucket: v, scoreMin: undefined })}
-              options={BUCKET_OPTIONS.map(b => ({ label: opt('bucket', b.value), value: b.value }))} />
+              options={
+                // 这里**不能**用 opt('bucket', …)：option_counts 只统计 board/capTier/trend/model
+                // （stock_terminal.py 的 with_counts 分支），没有 bucket 维度 —— opt 会一路回退成
+                // 原始 key，下拉里给用户看的就是 golden / neg_short 这种英文内部键。
+                BUCKET_OPTIONS.map(b => ({ label: b.label, value: b.value }))
+              } />
             <Select allowClear size="small" placeholder="趋势" value={filters.trend || undefined}
               onChange={v => set({ trend: v })} options={TREND_OPTIONS.map(t => ({ label: opt('trend', t.value), value: t.value }))} />
             <Select allowClear showSearch size="small" placeholder="行业" value={filters.industry || undefined}

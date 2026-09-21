@@ -15,14 +15,21 @@ import pytest
 from backend.shared.research_score import (
     RESEARCH_SCORE_BANDS,
     RESEARCH_SCORE_HINT,
+    SIGNAL_POSITION_LABELS,
     format_rank_pct_as_research_score,
     format_research_score,
     format_research_score_with_band,
     research_score,
     research_score_band,
+    signal_position_label,
 )
 
 GOLDEN_PATH = Path(__file__).resolve().parent / "fixtures" / "researchScoreGolden.json"
+#: 信号位置词金样。前端 ``signalVocabulary.test.ts`` 反向读同一份——两侧各存一份
+#: 迟早漂移，而「展示面不许出现方向词」这条纪律恰恰是最容易在一侧松掉的那种。
+POSITION_GOLDEN_PATH = (
+    Path(__file__).resolve().parent / "fixtures" / "signalPositionGolden.json"
+)
 
 
 @pytest.fixture(scope="module")
@@ -123,3 +130,50 @@ def test_口径声明说明跨市场不可比() -> None:
     assert "截面" in RESEARCH_SCORE_HINT
     assert "跨市场" in RESEARCH_SCORE_HINT
     assert "不可直接比较" in RESEARCH_SCORE_HINT
+
+
+# ---------------------------------------------------------------------------
+# 信号位置词：同一张表的另一侧实现在前端 signalVocabulary.ts，共用金样防漂移。
+# 每条都先断言金样非空 —— 空金样会让测试零项通过，那是最坏的一种绿。
+# ---------------------------------------------------------------------------
+
+
+def _position_golden() -> dict:
+    return json.loads(POSITION_GOLDEN_PATH.read_text(encoding="utf-8"))
+
+
+def test_位置词与金样逐条一致() -> None:
+    golden = _position_golden()
+    assert golden["labels"], "金样 labels 为空 —— 这条测试将零项通过"
+    assert SIGNAL_POSITION_LABELS == golden["labels"]
+
+
+def test_位置词不含方向性措辞() -> None:
+    golden = _position_golden()
+    banned = golden["bannedWords"]
+    assert banned, "金样 bannedWords 为空 —— 禁词校验将零项通过"
+    for side, label in golden["labels"].items():
+        for word in banned:
+            assert word not in label, f"{side} 的译法 {label!r} 含方向词 {word!r}"
+
+
+def test_未知值与缺失一律破折号不猜() -> None:
+    """猜一个方向出来是最坏的结果：既错，又等于替用户下了判断。"""
+    golden = _position_golden()
+    assert golden["unknownInputs"], "金样 unknownInputs 为空 —— 这条测试将零项通过"
+    for raw in golden["unknownInputs"]:
+        assert signal_position_label(raw) == "—", f"{raw!r} 不该被译出位置"
+    assert signal_position_label(None) == "—"
+
+
+def test_大小写与空白都归一() -> None:
+    assert signal_position_label("buy") == signal_position_label("BUY")
+    assert signal_position_label("  sell ") == signal_position_label("SELL")
+
+
+def test_位置词不是百分比也不是数字档() -> None:
+    """不写「前 20% / 后 20%」：该判定有分位与绝对阈值两条来源，写死百分比会在其中一条上变成假话。"""
+    assert SIGNAL_POSITION_LABELS, "译法表为空 —— 这条测试将零项通过"
+    for label in SIGNAL_POSITION_LABELS.values():
+        assert "%" not in label
+        assert not any(ch.isdigit() for ch in label)

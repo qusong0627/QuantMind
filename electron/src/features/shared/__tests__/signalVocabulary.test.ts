@@ -5,12 +5,33 @@
  * 必须继续说「买入/卖出」——用户在那儿要按的是真按钮，含糊化反而危险。
  */
 
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
     SIGNAL_POSITION_HINT,
     SIGNAL_POSITION_LABELS,
     signalPositionLabel,
 } from '../signalVocabulary';
+
+/**
+ * 与后端共用同一份金样：`backend/shared/research_score.py` 的 `SIGNAL_POSITION_LABELS`
+ * 是同一条口径的第二份实现。只改一侧，另一侧的测试当场红。
+ *
+ * 路径与 `researchScore.test.ts` 同款：金样存在**后端包内**，因为后端测试跑在容器里、
+ * 只挂了 `./backend`，放后端侧两边才都读得到。直接读文件而非 `import`——金样在
+ * `electron/` 之外，走模块解析会撞上 vite 的 root 限制。
+ */
+const GOLDEN_PATH = path.resolve(
+    __dirname,
+    '../../../../..',
+    'backend/tests/fixtures/signalPositionGolden.json',
+);
+const golden: {
+    labels: Record<string, string>;
+    bannedWords: string[];
+    unknownInputs: string[];
+} = JSON.parse(readFileSync(GOLDEN_PATH, 'utf-8'));
 
 describe('signalPositionLabel', () => {
     it('三态各有中性译法，且都不含方向动词', () => {
@@ -46,6 +67,30 @@ describe('signalPositionLabel', () => {
         expect(SIGNAL_POSITION_HINT).toContain('不构成');
         for (const word of ['买入', '卖出', '看多', '看空']) {
             expect(SIGNAL_POSITION_HINT).not.toContain(word);
+        }
+    });
+});
+
+describe('与后端共用金样（防两侧漂移）', () => {
+    // 每条都先断言金样非空：空金样会让用例零项通过，那是最坏的一种绿。
+    it('译法表逐条一致', () => {
+        expect(Object.keys(golden.labels).length).toBeGreaterThan(0);
+        expect(SIGNAL_POSITION_LABELS).toEqual(golden.labels);
+    });
+
+    it('金样禁词表逐条不命中', () => {
+        expect(golden.bannedWords.length).toBeGreaterThan(0);
+        for (const label of Object.values(golden.labels)) {
+            for (const word of golden.bannedWords) {
+                expect(label).not.toContain(word);
+            }
+        }
+    });
+
+    it('金样未知输入一律 —', () => {
+        expect(golden.unknownInputs.length).toBeGreaterThan(0);
+        for (const raw of golden.unknownInputs) {
+            expect(signalPositionLabel(raw)).toBe('—');
         }
     });
 });

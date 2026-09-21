@@ -301,7 +301,7 @@ async def dismiss_alert(alert_id: int, current_user: dict = Depends(get_current_
 
 @router.post("/{alert_id}/executed")
 async def mark_executed(alert_id: int, current_user: dict = Depends(get_current_user)):
-    """标记已卖出（前端一键卖出推送成功后的回写）。"""
+    """标记已卖出（前端面板上的动作按钮推送成功后的回写）。"""
     return await _set_status(alert_id, current_user, STATUS_EXECUTED)
 
 

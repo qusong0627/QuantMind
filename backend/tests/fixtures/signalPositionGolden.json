@@ -1,0 +1,11 @@
+{
+  "note": "信号位置词金样：前端 electron/src/features/shared/signalVocabulary.ts 的 SIGNAL_POSITION_LABELS 与后端 backend/shared/research_score.py 的同名表必须**逐条一致**。改译法必须两侧同改并更新本文件——只改一侧的测试会立刻红。",
+  "labels": {
+    "BUY": "靠前",
+    "SELL": "靠后",
+    "HOLD": "居中"
+  },
+  "unknownInputs": ["STRONG_BUY", "WATCH", "", "  ", "buy_strong"],
+  "bannedWords": ["买", "卖", "多", "空", "建议", "推荐", "持有", "清仓", "止损"],
+  "why": "signal_side 是推理链路的内部判定，展示面只描述该标的在当日截面里的位置。不写「前 20%/后 20%」是因为该判定有分位与绝对阈值两条来源，写死百分比会在其中一条上变成假话。执行面（下单/台账/成交）不在本表管辖内，必须继续说买入卖出。"
+}

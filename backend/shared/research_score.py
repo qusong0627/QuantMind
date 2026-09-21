@@ -19,6 +19,8 @@ __all__ = [
     "RESEARCH_SCORE_BANDS",
     "RESEARCH_SCORE_MISSING",
     "RESEARCH_SCORE_HINT",
+    "SIGNAL_POSITION_LABELS",
+    "signal_position_label",
     "research_score",
     "format_research_score",
     "research_score_band",
@@ -47,6 +49,34 @@ RESEARCH_SCORE_HINT = (
     "该标的在同一模型、同一交易日的截面内所处百分位（0–100，越高越靠前）。"
     "跨模型/跨市场不可直接比较，仅反映当日截面相对位置。"
 )
+
+#: 内部信号枚举 → 中性位置词。与前端 ``electron/src/features/shared/signalVocabulary.ts``
+#: 的 ``SIGNAL_POSITION_LABELS`` **字面量必须一致**——同一套展示口径的两份实现，改一边必须改另一边。
+#:
+#: 为什么要译：``signal_side`` 是推理链路的内部判定（筛选、撮合、推送都在消费它），
+#: 直接渲染成「买入/卖出」就是在向用户输出**投资建议**的形态；展示面一律只说位置。
+#:
+#: **不写「前 20% / 后 20%」**：该判定有两条来源——推理链路按百分位
+#: （``_resolve_signal_sides`` 的 ``buy_pct=0.20``）加共识/置信闸门，而 pred.parquet 回退线
+#: 按**绝对阈值**（``fusion > 0.2``）。写死百分比会在其中一条来源上变成假话，所以只给定性位置。
+#:
+#: **边界**：执行面（下单表单、委托台账、成交回报、手动任务）必须继续说买入/卖出，
+#: 含糊化会让人下错单——故这张表只用于展示面文案。
+SIGNAL_POSITION_LABELS: dict[str, str] = {
+    "BUY": "靠前",
+    "SELL": "靠后",
+    "HOLD": "居中",
+}
+
+
+def signal_position_label(side: object) -> str:
+    """``signal_side`` → 中性位置词。未知值/缺失一律 ``—``。
+
+    **不猜**：把不认识的枚举硬套成「靠前」是在替一个我们没定义的判定编含义。
+    """
+    if side is None:
+        return RESEARCH_SCORE_MISSING
+    return SIGNAL_POSITION_LABELS.get(str(side).strip().upper(), RESEARCH_SCORE_MISSING)
 
 
 def _as_finite_number(value: object) -> float | None:

@@ -3531,30 +3531,34 @@ async def get_model_inference_run_detail(
         # 自适应：检测分数范围，若明显超出普通模型区间（max > 0.35），改用
         # 基于实际分布的分位数分桶，保证每个桶都有意义、高分始终在最上层。
         score_buckets: list[dict[str, Any]] = []
+        # `action` 是**展示面**文案（前端 ScoreDistributionPanel 的 STRATEGY_BUCKETS
+        # 为同一份定义），一律只说分数落在哪个区间：原先的「不买 / 黄金区间·首选 /
+        # 可选 / 谨慎 / 极谨慎」是替用户下判断，正是要收敛掉的形态。
+        # `key` 不能动——gold_zone_count 等下游按 key 取数（见本函数末尾）。
         bucket_cfg = [
-            ("lt_010", "< 0.10", "不买", lambda s: s < 0.10, "slate"),
+            ("lt_010", "< 0.10", "分数 < 0.10", lambda s: s < 0.10, "slate"),
             (
                 "gold",
                 "0.10 - 0.12",
-                "黄金区间 · 首选",
+                "分数 0.10-0.12",
                 lambda s: 0.10 <= s < 0.12,
                 "emerald",
             ),
             (
                 "opt_012_015",
                 "0.12 - 0.15",
-                "可选 · 主板优先",
+                "分数 0.12-0.15",
                 lambda s: 0.12 <= s < 0.15,
                 "amber",
             ),
             (
                 "warn_015_020",
                 "0.15 - 0.20",
-                "谨慎 · 仅强市",
+                "分数 0.15-0.20",
                 lambda s: 0.15 <= s < 0.20,
                 "orange",
             ),
-            ("gte_020", "≥ 0.20", "极谨慎 · 样本少", lambda s: s >= 0.20, "rose"),
+            ("gte_020", "≥ 0.20", "分数 ≥ 0.20", lambda s: s >= 0.20, "rose"),
         ]
         _is_wide_scale = bool(fusion_scores) and (
             max(fusion_scores) > 0.35 or min(fusion_scores) < -0.35

@@ -461,10 +461,19 @@ export function StockSidebar({ selected, onSelect, watchlistSymbols, watchFilter
     );
   };
 
-  /** 列筛选值集合（优先后端 facets，回退全量选项） */
-  const fac = (key: string, fallback: { value: string; label: string }[]): { value: string; label: string }[] => {
+  /** 列筛选值集合（优先后端 facets，回退全量选项）。
+   *  `labelOf` 专给**契约枚举**维度用（如 side 的 BUY/SELL/HOLD）：后端 facets 非空时
+   *  中文 fallback 根本不生效，而 `label: v` 会把英文枚举原样渲染给用户 —— 只改 fallback
+   *  的文案是改不到这个下拉的，必须在这里做值→文案的映射。 */
+  const fac = (
+    key: string,
+    fallback: { value: string; label: string }[],
+    labelOf?: (v: string) => string,
+  ): { value: string; label: string }[] => {
     const f = facets[key];
-    return f && f.length ? f.map(v => ({ value: v, label: v })) : fallback;
+    return f && f.length
+      ? f.map(v => ({ value: v, label: labelOf ? labelOf(v) : v }))
+      : fallback;
   };
 
   return (
@@ -748,7 +757,7 @@ export function StockSidebar({ selected, onSelect, watchlistSymbols, watchFilter
           { value: 'BUY', label: signalPositionLabel('BUY') },
           { value: 'SELL', label: signalPositionLabel('SELL') },
           { value: 'HOLD', label: signalPositionLabel('HOLD') },
-        ]), filters.side, v => onFiltersChange({ ...filters, side: v }), '位置', searching || onlyWatchlist)}</span>
+        ], signalPositionLabel), filters.side, v => onFiltersChange({ ...filters, side: v }), '位置', searching || onlyWatchlist)}</span>
       </div>
 
       {/* 股票列表 */}

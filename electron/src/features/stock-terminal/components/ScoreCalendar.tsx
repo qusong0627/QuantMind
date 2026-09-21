@@ -100,7 +100,9 @@ export function showInferenceResult(date: string, res: InferenceExecutionResult 
           {mkt ? <Stat label="市场信号" value={mkt.label} /> : null}
           {dist ? <Stat label="正分占比" value={`${(dist.positive_pct * 100).toFixed(1)}%`} /> : null}
           {dist ? <Stat label="均分/中位" value={`${fmtScore(dist.mean)} / ${fmtScore(dist.median)}`} /> : null}
-          {typeof goldZone === 'number' ? <Stat label="黄金区个股" value={goldZone.toLocaleString()} /> : null}
+          {/* 「黄金区」是价值判断词，且区间本来就能从后端证实：model_training.py 的
+              bucket_cfg 里 key="gold" 即 0.10 <= fusion_score < 0.12，故直接写区间。 */}
+          {typeof goldZone === 'number' ? <Stat label="模型分 0.10-0.12" value={goldZone.toLocaleString()} /> : null}
         </div>
         {boards.length > 0 && (
           <div className="border-t border-slate-100 pt-1.5">
