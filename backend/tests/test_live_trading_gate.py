@@ -289,3 +289,125 @@ def test_middleware_respects_root_path() -> None:
     app = _build_app()
     client = TestClient(app, root_path="/qm")
     assert client.post(f"{API}/orders").status_code == 403
+
+
+# ── 单一读取实现：两个读者必须对同一原始值一致 ──────────────────────────
+
+# 真实运维会写出来的形态：正常、大小写、前后空白/制表符、CRLF 残留、空串，
+# 以及**不得**被当成 true 的写法（1/yes/on）。
+_RAW_FLAG_VALUES = [
+    "true",
+    "TRUE",
+    "True",
+    " true ",
+    "\ttrue",
+    "true\r",
+    "true\n",
+    "false",
+    "FALSE",
+    "false ",
+    "",
+    " ",
+    "0",
+    "1",
+    "yes",
+    "on",
+    "no",
+]
+
+# 只有这些（strip + 小写后）算 true。其余一律 false —— 词表放宽 = 更多写法能打开实盘。
+_TRUE_AFTER_NORMALIZE = {"true"}
+
+
+@pytest.mark.parametrize("raw", _RAW_FLAG_VALUES)
+def test_real_trading_flag_readers_agree(monkeypatch, raw: str) -> None:
+    """`ENABLE_REAL_TRADING` 的两个读者，对同一个原始值必须给出一致判定。
+
+    两者读同一个变量：`shared/live_trading_gate.is_real_trading_enabled()`（端点咽喉）
+    与 `trade_shared/trade_config.settings.ENABLE_REAL_TRADING`（引擎据此选券商，
+    进而决定 `create_broker(enable_real=...)`）。本模块 docstring 把这写成
+    「读的是同一个环境变量」，但**两份读取实现**已经在 `strip` 上分叉：
+    闸门是 `.strip().lower()`，settings 只有 `.lower()`（实测：`" true "` → 闸门 True、
+    settings False）。后果不是「少个功能」而是**静默降级**：闸门放行 REAL 请求，
+    `_get_broker` 却因 settings 判关回落到 `PaperTradingBroker`，于是一笔实盘单
+    被纸面成交并返回 `success=True` —— 与 `internal_strategy_dispatcher` 修过的
+    事故同形（那次是 REAL 走 else 分支，这次是同名变量的两种读法）。
+
+    这类「两个读者、一份变量」的分叉没有症状，只能靠**对同一批输入断言一致**来防。
+    """
+    monkeypatch.setenv(gate.ENV_KEY, raw)
+
+    from backend.services.trade_shared.trade_config import Settings
+
+    gate_says = gate.is_real_trading_enabled()
+    engine_says = Settings().ENABLE_REAL_TRADING
+
+    assert gate_says == engine_says, (
+        f"两个读者对 {gate.ENV_KEY}={raw!r} 判定不一致："
+        f"闸门={gate_says} 引擎={engine_says}"
+    )
+
+
+@pytest.mark.parametrize("raw", _RAW_FLAG_VALUES)
+def test_real_trading_flag_vocabulary_is_true_only(monkeypatch, raw: str) -> None:
+    """词表**只有 `true`**：`1`/`yes`/`on` 不得打开实盘。
+
+    这是默认关闭的合规闸门，接受词越宽 = 越容易误开。若哪天有人「顺手」把词表
+    扩成 `{"1","true","yes","on"}`，本用例会红 —— 那是要人复核的决定，不是重构。
+    """
+    monkeypatch.setenv(gate.ENV_KEY, raw)
+
+    expected = raw.strip().lower() in _TRUE_AFTER_NORMALIZE
+    assert gate.is_real_trading_enabled() is expected, (
+        f"{gate.ENV_KEY}={raw!r} 的判定与词表不符（应 {expected}）"
+    )
+
+
+def test_real_trading_flag_readers_agree_when_unset(monkeypatch) -> None:
+    """变量缺席时两侧都判关（默认关闭是合规底线）。
+
+    传 `_env_file=None` 关掉 `.env` 文件源：本项目还有**第三种结构差异** ——
+    闸门只读进程环境（`os.getenv`），settings 额外读 `.env`；`.env` 存在但没被
+    export 时，闸门判关、settings 判开。这个方向的差**是安全的**（中间件 403 在前，
+    不会出现「放行但纸面成交」），且让闸门读 `.env` 就得把 stdlib 的它绑上 dotenv，
+    故**有意不修**，只记录。本用例钉的是「两边读同一份输入时答案必须一致」，
+    所以把文件源关掉，只留进程环境这一份。
+    """
+    monkeypatch.delenv(gate.ENV_KEY, raising=False)
+
+    from backend.services.trade_shared.trade_config import Settings
+
+    assert gate.is_real_trading_enabled() is False
+    assert Settings(_env_file=None).ENABLE_REAL_TRADING is False
+
+
+def test_no_second_env_reader_of_real_trading_flag() -> None:
+    """源断言：全仓不得再有第二处**直接读 env** 的 `ENABLE_REAL_TRADING`。
+
+    上面的对拍用例能证明「今天这两处一致」，证明不了「明天不会多出第三处」——
+    而分叉的成因恰恰是「再写一份也无处可挡」。故把纪律钉在源上（同
+    `test_rule_parity.test_source_single_implementation` 的做法）：判实盘开关
+    只能走 `shared/env_flags`，读 `trade_config.settings` 的消费者不受影响
+    （`trading_engine` 走 `getattr(settings, ...)`、`real_mirror_service` 走闸门谓词）。
+    """
+    import re
+    from pathlib import Path
+
+    backend = Path(__file__).resolve().parents[1]
+    # 直接读 env 的各种写法；`ENV_KEY = "ENABLE_REAL_TRADING"` 这种常量声明不算。
+    pattern = re.compile(
+        r"""os\.getenv\(\s*["']ENABLE_REAL_TRADING["']"""
+        r"""|os\.environ(?:\.get)?[\(\[]\s*["']ENABLE_REAL_TRADING["']"""
+    )
+    offenders = []
+    for path in backend.rglob("*.py"):
+        if path.name == "env_flags.py":
+            continue  # 唯一实现本身
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        if pattern.search(text):
+            offenders.append(str(path.relative_to(backend)))
+
+    assert not offenders, (
+        "实盘开关只能经 shared.env_flags 读，禁止就地 os.getenv："
+        f"{offenders}（同名变量两种读法已实测分叉过，见 env_flags 模块 docstring）"
+    )

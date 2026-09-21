@@ -29,20 +29,25 @@
 
 与 `ENABLE_REAL_TRADING` 的关系
 --------------------------------
-与 `backend/services/trade_shared/trade_config.py::ENABLE_REAL_TRADING` 读的是
-**同一个环境变量**（同 `ENABLE_CRYPTO` 在 `quantbc_hub` 与 `market_adapters` 各有
-一份读取实现的既成做法）。前端另有构建期开关 `VITE_ENABLE_REAL_TRADING`
-（`electron/src/config/tradingFlags.ts`）管「渲染不渲染」；本模块管「端点通不通」。
-恢复实盘必须两端同时打开。
+与 `backend/services/trade_shared/trade_config.py::ENABLE_REAL_TRADING` 读**同一个
+环境变量**，且共用**同一份读取实现**（`backend/shared/env_flags.py`）—— 这里曾经
+是「各写一份」：闸门 `strip().lower()`、settings 只有 `lower()` 且由 pydantic
+自己解析，实测分叉出「闸门放行而 settings 抛 ValidationError」（`" true "`）与
+「闸门判关而 settings 判开」（`"1"`/`"yes"`/`"on"`）两类。同一个开关有两种答案时，
+运维看到的和引擎执行的可以不是同一件事，故收敛为一份（分叉矩阵见 `env_flags`）。
+
+前端另有构建期开关 `VITE_ENABLE_REAL_TRADING`（`electron/src/config/tradingFlags.ts`）
+管「渲染不渲染」；本模块管「端点通不通」。恢复实盘必须两端同时打开。
 """
 
 from __future__ import annotations
 
 import logging
-import os
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
+
+from backend.shared.env_flags import env_flag
 
 logger = logging.getLogger(__name__)
 
@@ -128,8 +133,12 @@ _SIMULATION_TOKENS = frozenset(
 
 def is_real_trading_enabled() -> bool:
     """实盘是否启用。**调用时读 env**（不是 import 时冻结）——
-    测试要能 monkeypatch，运维改 env 重启即生效，没有中间态。"""
-    return os.getenv(ENV_KEY, "false").strip().lower() == "true"
+    测试要能 monkeypatch，运维改 env 重启即生效，没有中间态。
+
+    读法与 `trade_config.ENABLE_REAL_TRADING` 共用 `shared/env_flags`（见模块
+    docstring「与 ENABLE_REAL_TRADING 的关系」）：两份实现已实测分叉过。
+    """
+    return env_flag(ENV_KEY)
 
 
 def _normalize(path: str) -> str:

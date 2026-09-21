@@ -5,10 +5,11 @@ Trading Service Configuration
 import os
 from typing import Optional
 
-from pydantic import AliasChoices, Field
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from backend.services.simulation.services.market_rules import CN_RULES
+from backend.shared.env_flags import normalize_env_flag
 
 # A 股费率默认值 —— 唯一来源派生（`CN_RULES` 是费用分项唯一实现）。
 # 提到模块级常量而非内联在 `os.getenv` 默认参里，是为了让「默认值」可被测试直接断言：
@@ -75,9 +76,27 @@ class Settings(BaseSettings):
     JWT_ALGORITHM: str = "HS256"
 
     # Trading Engine
-    ENABLE_REAL_TRADING: bool = (
-        os.getenv("ENABLE_REAL_TRADING", "false").lower() == "true"
-    )
+    #
+    # 实盘总开关。**与 `shared/live_trading_gate` 共用一份读取实现**（`shared/env_flags`），
+    # 见 `test_real_trading_flag_readers_agree`。
+    #
+    # 光把默认值换成 `env_flag(...)` 是不够的：本类 `env_file=".env"` + pydantic-settings
+    # 会**按字段名自己去读同名环境变量**，读到的原始串直接进 pydantic 的 bool 解析器 ——
+    # 于是 `" true "` / `"true\r"` / `""` 在此抛 `ValidationError`（模块级
+    # `settings = Settings()` 在 import 时就炸，整个 trade 栈起不来），而 `"1"`/`"yes"`/`"on"`
+    # 解析成 `True`，与闸门的词表和空白容忍度都不一致。故原始串先经 before 校验器
+    # 按**闸门口径**归一。
+    #
+    # 词表收窄（`1`/`yes`/`on` 由 True 变 False）是有意的：那三个值在闸门侧今天就是关，
+    # 端点在中间件已被 403，收窄只是把 settings 拉回同一个答案，不改可达行为。
+    ENABLE_REAL_TRADING: bool = False
+
+    @field_validator("ENABLE_REAL_TRADING", mode="before")
+    @classmethod
+    def _normalize_real_trading_flag(cls, raw: object) -> object:
+        """原始串（env / .env 来源）先按闸门口径归一，再交给 pydantic 的 bool 解析。"""
+        return normalize_env_flag(raw) if isinstance(raw, str) else raw
+
     REAL_BROKER_TYPE: str = os.getenv("REAL_BROKER_TYPE", "tdx")
     ORDER_TIMEOUT: int = 30  # seconds
     MAX_ORDER_SIZE: float = 1000000.0  # max order value
