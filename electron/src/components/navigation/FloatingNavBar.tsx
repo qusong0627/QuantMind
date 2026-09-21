@@ -14,11 +14,13 @@ import {
   Brain,
   BarChart3,
   Cpu,
+  Radio,
   Sigma } from 'lucide-react';
 import { useSelector } from 'react-redux';
 import { selectCurrentMarket, selectTradingMode } from '../../store/slices/uiSlice';
 import { getMarketConfig } from '../../config/marketConfig';
 import { isLiveTradingEnabled } from '../../config/tradingFlags';
+import { isLocalLiveAvailable } from '../../features/shared/localLive';
 import { modeCopy } from '../../pages/trading/utils/tradingModeCopy';
 
 interface FloatingNavBarProps {
@@ -65,11 +67,20 @@ export const FloatingNavBar: React.FC<FloatingNavBarProps> = ({ current, onChang
     navItems.push({ id: 'admin', label: '后台管理', icon: ShieldCheck });
   }
 
+  // 本机独有的「实盘交易」栏目：公开仓没有 electron/src/features/local-live/ 目录，
+  // isLocalLiveAvailable 恒为 false，这一项根本不进数组——不是"藏起来"，是没构造。
+  // 刻意不接 isLiveTradingEnabled：那个开关管的是"公开树里实盘组件渲染不渲染"，
+  // 而这一项在本机就是常驻入口（开发者自用的真实盘，与控制公开发行的开关无关）。
+  if (isLocalLiveAvailable) {
+    navItems.push({ id: 'live', label: '实盘交易', icon: Radio });
+  }
+
   const groupedNavItems: NavItemConfig[][] = [
     // 1. 大盘分析模块
     navItems.filter((item) => ['dashboard', 'market-analysis', 'rss-news'].includes(item.id)),
     // 2. 回测与交易区域（AI-IDE/个股终端/今日交易台已迁移入口：QuantBot 顶栏 / 市场分析搜索浮窗 / 模拟交易页签，全屏路由保留）
-    navItems.filter((item) => ['backtest', 'trading'].includes(item.id)),
+    // 'live' 排在这一组末尾：本机存在时它是同组的第三项，不存在时 filter 自动只剩前两项。
+    navItems.filter((item) => ['backtest', 'trading', 'live'].includes(item.id)),
     // 3. 模型区域
     navItems.filter((item) => ['model-training', 'model-registry', 'inference-center'].includes(item.id)),
     // 4. 智能投研区域
@@ -95,6 +106,10 @@ export const FloatingNavBar: React.FC<FloatingNavBarProps> = ({ current, onChang
                     onClick={() => onChange?.(item.id)}
                     className={`dock-item ${isActive ? 'active' : ''}`}
                     aria-current={isActive ? 'page' : undefined}
+                    // 栏目身份。**按 id 断言，不要按文案断言**：文案随交易模式变
+                    // （模拟交易/实盘交易），而本机还会多出一个同名的「实盘交易」
+                    // 栏目 —— 按文案取会在本机形态下取到两个元素。
+                    data-nav-id={item.id}
                     title={item.label}
                   >
                     <Icon className="dock-icon" />

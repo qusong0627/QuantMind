@@ -10,13 +10,14 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { render, screen, cleanup } from '@testing-library/react';
+import { render, cleanup } from '@testing-library/react';
 import { Provider } from 'react-redux';
 import React from 'react';
 import store from '../../../store';
 import { setTradingMode } from '../../../store/slices/uiSlice';
 import { FloatingNavBar } from '../FloatingNavBar';
 import { modeCopy, containsSimulationWording } from '../../../pages/trading/utils/tradingModeCopy';
+import { isLocalLiveAvailable } from '../../../features/shared/localLive';
 
 const renderNav = () =>
   render(
@@ -28,6 +29,22 @@ const renderNav = () =>
 /** 只取底部导航里的栏目名，避免把页面别处的「模拟交易」一起捞进来 */
 const dockLabels = (): string[] =>
   Array.from(document.querySelectorAll('.dock-label')).map((el) => (el.textContent || '').trim());
+
+/**
+ * 按**栏目身份**取文案，而不是按文案反查栏目。
+ *
+ * 起因：本机形态下底部栏会多出一个「实盘交易」栏目（实盘模式的交易栏目也叫这个名），
+ * 凡是「全 dock 文案里不许出现某个词」或「总数应为 N」的写法都会被它误伤。
+ * 这些断言真正说的是「**交易那一个栏目**随模式改名」，所以就该锚在 trading 上。
+ */
+const navItem = (id: string): HTMLElement | null =>
+  document.querySelector<HTMLElement>(`[data-nav-id="${id}"]`);
+
+const navItemLabel = (id: string): string =>
+  (navItem(id)?.querySelector('.dock-label')?.textContent || '').trim();
+
+/** 非交易类栏目数：本机的「实盘交易」栏目是额外一个，公开仓为 0 */
+const EXTRA_LOCAL_ITEMS = isLocalLiveAvailable ? 1 : 0;
 
 describe('FloatingNavBar 交易栏目名', () => {
   beforeEach(() => {
@@ -41,8 +58,9 @@ describe('FloatingNavBar 交易栏目名', () => {
   it('模拟模式下栏目名是「模拟交易」', () => {
     renderNav();
 
-    expect(dockLabels()).toContain('模拟交易');
-    expect(dockLabels()).not.toContain('实盘交易');
+    expect(navItemLabel('trading')).toBe('模拟交易');
+    // 交易栏目的实盘文案必须消失（其它栏目叫什么都不算数）
+    expect(navItemLabel('trading')).not.toBe('实盘交易');
   });
 
   it('切到实盘后栏目名变成「实盘交易」', () => {
@@ -50,7 +68,7 @@ describe('FloatingNavBar 交易栏目名', () => {
 
     renderNav();
 
-    expect(dockLabels()).toContain('实盘交易');
+    expect(navItemLabel('trading')).toBe('实盘交易');
   });
 
   it('实盘下底部导航不再出现「模拟」字样', () => {
@@ -70,7 +88,9 @@ describe('FloatingNavBar 交易栏目名', () => {
     const labels = dockLabels();
     expect(labels).toContain('回测中心');
     expect(labels).toContain('模型训练');
-    expect(labels).toHaveLength(12); // 非管理员：12 个栏目，无「后台管理」
+    // 非管理员：12 个栏目，无「后台管理」。本机形态下多一个「实盘交易」栏目，
+    // 走同一个垫片取偏移量——写死 13 会让公开仓变红，写死 12 会让本机变红。
+    expect(labels).toHaveLength(12 + EXTRA_LOCAL_ITEMS);
   });
 
   it('栏目名与模式全称同源（防止有人再抄一份字面量）', () => {
@@ -98,7 +118,10 @@ describe('FloatingNavBar 交易栏目名', () => {
 
     renderNav();
 
-    const btn = screen.getByTitle('实盘交易');
-    expect(btn.querySelector('.dock-label')?.textContent).toBe('实盘交易');
+    // 按身份取（不是 getByTitle('实盘交易')）：本机形态下同名的还有本机栏目，
+    // 按文案取会命中两个元素直接抛错。
+    const btn = navItem('trading');
+    expect(btn?.getAttribute('title')).toBe('实盘交易');
+    expect(btn?.querySelector('.dock-label')?.textContent).toBe('实盘交易');
   });
 });

@@ -28,7 +28,10 @@ export type ValidationError = {
 import { TemplateMatch } from '../../types/template';
 
 // 从原Recoil atoms.ts导入的类型定义
-export type DashboardTab = 'dashboard' | 'desk' | 'market-analysis' | 'backtest' | 'trading' | 'profile' | 'agent' | 'ai-ide' | 'admin' | 'model-training' | 'model-registry' | 'inference-center' | 'research' | 'rss-news' | 'alpha-research' | 'factor-research' | 'stock-terminal';
+// 'live' = 本机独有的「实盘交易」栏目。公开仓不会有人 dispatch 它（导航项不 push、
+// 路由不注册），但类型里必须留位——否则 App.tsx 的接线只能写 `as any`，
+// 而这个栏目的接线是**唯一**需要在公开仓里存在的一行。
+export type DashboardTab = 'dashboard' | 'desk' | 'market-analysis' | 'backtest' | 'trading' | 'profile' | 'agent' | 'ai-ide' | 'admin' | 'model-training' | 'model-registry' | 'inference-center' | 'research' | 'rss-news' | 'alpha-research' | 'factor-research' | 'stock-terminal' | 'live';
 
 // 创建兼容的StrategyParams接口，保持原有字段但使用正确的类型
 export interface AIStrategyParams extends Omit<StrategyParams, 'style'> {

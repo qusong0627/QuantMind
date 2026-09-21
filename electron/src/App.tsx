@@ -10,6 +10,7 @@ import 'dayjs/locale/zh-cn';
 import { DashboardSkeleton } from './components/common/DashboardSkeleton';
 import { DashboardLayout } from './components/layout/DashboardLayout';
 import { FloatingNavBar } from './components/navigation/FloatingNavBar';
+import { loadLocalLivePage } from './features/shared/localLive';
 import { TitleBar } from './components/layout/TitleBar';
 import { ErrorBoundary } from './components/common/ErrorBoundary';
 import { useMenuExport } from './hooks/useMenuExport';
@@ -101,6 +102,14 @@ const AdminInferenceMonitor = lazy(() => import('./features/admin/components/Adm
 const AlphaResearchPage = lazy(() => import('./features/alpha-research/pages/AlphaResearchPage'));
 const DeskTodayPage = lazy(() => import('./features/desk/DeskTodayPage'));
 const FactorResearchPage = lazy(() => import('./features/factor-research/pages/FactorResearchPage'));
+
+// 本机独有的「实盘交易」栏目（源码在 .gitignore 目录 electron/src/features/local-live/）。
+// 公开仓形态：glob 匹配为空 → isLocalLiveAvailable=false → loader 为 null →
+// 下面既不构造 React.lazy，也不注册路由，整条链路不参与构建。
+// 注意**不能**写成 `lazy(() => import('./features/local-live/LiveTradingPage'))`：
+// 那是构建期解析，公开仓没这个文件 → Rollup unresolved import → 构建直接失败。
+const localLiveLoader = loadLocalLivePage();
+const LocalLivePage = localLiveLoader ? lazy(localLiveLoader) : null;
 
 // 主题切换hook
 // 主题管理已移除 - 应用统一使用浅色主题
@@ -233,6 +242,8 @@ export default function App() {
       'stock-terminal': '/stock-terminal',
       'research': '/research',
       'trading': '/trading',
+      // 本机独有的「实盘交易」栏目。公开仓里导航项不 push，这条映射永远查不到。
+      'live': '/live',
       'rss-news': '/rss-news',
       'alpha-research': '/alpha-research',
       'factor-research': '/factor-research',
@@ -279,6 +290,9 @@ export default function App() {
       dispatch(setCurrentTab('desk' as DashboardTab));
     } else if (location.pathname.startsWith('/trading')) {
       dispatch(setCurrentTab('trading' as DashboardTab));
+    } else if (location.pathname.startsWith('/live')) {
+      // 本机独有栏目的高亮回写。公开仓该路由不存在，此分支永不命中。
+      dispatch(setCurrentTab('live' as DashboardTab));
     } else if (location.pathname.startsWith('/rss-news')) {
       dispatch(setCurrentTab('rss-news' as DashboardTab));
     } else if (location.pathname.startsWith('/alpha-research')) {
@@ -698,6 +712,20 @@ export default function App() {
                       </ProtectedRoute>
                     }
                   />
+                  {/* 本机独有的「实盘交易」栏目。公开仓 LocalLivePage 恒为 null，
+                      这一整块不渲染、不注册路由——不是隐藏，是没构造。 */}
+                  {LocalLivePage && (
+                    <Route
+                      path="/live"
+                      element={
+                        <ProtectedRoute>
+                          <Suspense fallback={<Spin size="large" />}>
+                            <LocalLivePage />
+                          </Suspense>
+                        </ProtectedRoute>
+                      }
+                    />
+                  )}
                   <Route
                     path="/rss-news"
                     element={
