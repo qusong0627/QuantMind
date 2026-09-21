@@ -21,6 +21,20 @@ class _FakeResult:
         return self._value
 
 
+class _RiskPassed:
+    """风控桩（T-RC-02 之后必需）。
+
+    本文件的被测对象是**派发是否走统一 submit_and_fill**，不是风控。风控 fail-closed，
+    而这里传的是 `MagicMock()` —— 读不出 `qm:risk:config.rules` 即拒单，于是闸门合入后
+    本文件变红，报错还只显示 `status='failed'`、看不出是风控拒的。风控自身的覆盖在
+    `test_risk_gate_wiring.py`。
+    """
+
+    passed = True
+    rule_id = None
+    reason = ""
+
+
 def test_simulation_dispatch_uses_submit_and_fill_not_hand_insert():
     async def _run():
         db = MagicMock()
@@ -44,6 +58,10 @@ def test_simulation_dispatch_uses_submit_and_fill_not_hand_insert():
                 "backend.services.simulation.services.order_submission_service."
                 "SimulationOrderSubmissionService",
                 return_value=submission,
+            ),
+            patch(
+                "backend.services.trade.services.risk_gate_service.check_order",
+                new=AsyncMock(return_value=_RiskPassed()),
             ),
             patch(
                 "backend.services.live_trading.services.internal_strategy_dispatcher."

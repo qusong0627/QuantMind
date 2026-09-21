@@ -442,10 +442,21 @@ class SimulationEngine:
                 ]
                 symbols = list(dict.fromkeys([s.symbol for s in signals] + position_symbols))
                 quotes, live_ticks = await self._load_live_quotes(symbols)
+                # 本地日线 bars 仅在**完全没有新鲜实时行情**时加载（一次分区直读，
+                # 不白花）。两个用途：① 计划/预演可用（T-FE-05）；② 执行降级档取价。
+                #
+                # ② 是 2026-09-21 接回的：此前 bars 只喂 quotes，执行侧从不传 bar，
+                # 于是 `OrderRequest.resolved_strict()` 恒为 True —— 而该函数的注释写的
+                # 是「托管允许如实降级」，描述的是一个**不存在的行为**；`_submit_from_bar`
+                # 与 `execute_from_bar` 因此成了生产死支路（全仓无一处传 bar=）。
+                #
+                # 现在 bar 随单进取价链：有新鲜实时价仍按实时价成交（`_resolve_fill_price`
+                # 规则 1 永远优先），无则按当日/前收 bar 成交并如实标注
+                # `today_bar_close`/`prev_close_bar` + `RULE:PRICE-STALE` WARNING 点名。
+                # **是否允许**降级由 `resolved_strict()` 决定（托管 False、手动 True），
+                # **是否可成交**由会话闸决定——本次只接回取价来源，不放松任何闸门。
+                bars: dict[str, Any] = {}
                 if not quotes:
-                    # 无新鲜实时行情：回落本地日线 bars（盘后/停更期的计划与预演可用，
-                    # 保住 T-FE-05 dry-run/计划链）。**执行**不受影响：取价契约逐单守卫，
-                    # strict 市价单遇陈旧价一律拒单（防止按昨收静默成交）。
                     bars = await self._load_bars(symbols, market=market)
                     quotes = self._quotes_from_bars(bars)
                     if not quotes:
@@ -553,6 +564,9 @@ class SimulationEngine:
                         market=market,
                         run_id=exec_run_id,
                         live_tick=self._tick_for_symbol(live_ticks, order.symbol),
+                        # 无实时行情时段（盘后固定价格 15:05–15:30 / 停更期）的取价来源。
+                        # 实时行情在场时 bars 为空 → None，取价链按原有 strict 语义走。
+                        bar=self._bar_for_symbol(bars, order.symbol),
                     )
                     report.orders.append(self._order_to_dict(order, result))
                     if result.success:

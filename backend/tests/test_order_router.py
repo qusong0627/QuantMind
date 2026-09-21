@@ -73,8 +73,34 @@ class _FakeSubmissionService:
         return _FakeSubmissionService.response
 
 
+class _RiskPassed:
+    passed = True
+    rule_id = None
+    reason = ""
+
+
+@pytest.fixture
+def risk_gate_passes(monkeypatch):
+    """风控桩：本文件的被测对象是 Router 的**委派契约**，不是风控本身。
+
+    `submit_order` 在委派前一律过 `risk_gate_service.check_order`（T-RC-02），且它
+    fail-closed —— 用例传 `redis=object()` 时配置读不出即拒单，于是这些用例在风控
+    闸门合入后集体变红，而断言信息只显示 `success=False`、看不出是闸门拒的
+    （实测报错：`风控拒单[l0.config]：'object' object has no attribute 'hgetall'`）。
+    风控自身的覆盖在 `test_risk_gate_wiring.py`；此处显式桩掉，免得用例名义上测委派、
+    实际上测风控。**反向钉子**见 `test_risk_gate_rejection_short_circuits_delegation`。
+    """
+    from backend.services.trade.services import risk_gate_service
+
+    async def _ok(req, db=None, redis=None):  # noqa: ARG001
+        return _RiskPassed()
+
+    monkeypatch.setattr(risk_gate_service, "check_order", _ok)
+    return _ok
+
+
 @pytest.mark.asyncio
-async def test_immediate_delegates_and_passes_source_strict(monkeypatch):
+async def test_immediate_delegates_and_passes_source_strict(monkeypatch, risk_gate_passes):
     monkeypatch.setattr(
         "backend.services.simulation.services.order_submission_service."
         "SimulationOrderSubmissionService",
@@ -108,10 +134,13 @@ async def test_immediate_delegates_and_passes_source_strict(monkeypatch):
     assert captured["trigger_source"] == "sandbox"
     assert captured["strict_market"] is False
     assert captured["client_order_id"] == "cid-1"
+    # bar 透传（2026-09-21 接回）：不是新增形参而是接上被掐断的线——此前引擎从不传
+    # bar，取价链的降级分支不可达。此处钉住 Router 这一跳不吞 bar。
+    assert "bar" in captured and captured["bar"] is req.bar
 
 
 @pytest.mark.asyncio
-async def test_immediate_duplicate_mapped(monkeypatch):
+async def test_immediate_duplicate_mapped(monkeypatch, risk_gate_passes):
     monkeypatch.setattr(
         "backend.services.simulation.services.order_submission_service."
         "SimulationOrderSubmissionService",
@@ -136,6 +165,44 @@ async def test_immediate_duplicate_mapped(monkeypatch):
         ),
     )
     assert out.success and out.duplicate is True  # 镜像将因 duplicate 跳过
+
+
+@pytest.mark.asyncio
+async def test_risk_gate_rejection_short_circuits_delegation(monkeypatch):
+    """反向钉子：闸门拒单时**不得**触达委派，且拒因带规则号（可解释）。
+
+    存在的意义是防止上面那个 `risk_gate_passes` 桩把「风控确实被咨询、且拦在执行之前」
+    这条契约一并桩没 —— 只桩掉、不验证，就是「验收假通过」。
+    """
+    from backend.services.trade.services import risk_gate_service
+
+    class _Rejected:
+        passed = False
+        rule_id = "l1.position_limit"
+        reason = "单票持仓超限"
+
+    async def _reject(req, db=None, redis=None):  # noqa: ARG001
+        return _Rejected()
+
+    monkeypatch.setattr(risk_gate_service, "check_order", _reject)
+    monkeypatch.setattr(
+        "backend.services.simulation.services.order_submission_service."
+        "SimulationOrderSubmissionService",
+        _FakeSubmissionService,
+    )
+    _FakeSubmissionService.captured = {}
+
+    out = await submit_order(
+        db=object(),
+        redis=object(),
+        req=OrderRequest(
+            tenant_id="default", user_id=7, symbol="600036.SH", side="buy", quantity=100
+        ),
+    )
+
+    assert out.success is False
+    assert _FakeSubmissionService.captured == {}, "风控拒单后仍走到了撮合"
+    assert "l1.position_limit" in out.message and "单票持仓超限" in out.message
 
 
 # --- 五路径接线源断言 --------------------------------------------------------

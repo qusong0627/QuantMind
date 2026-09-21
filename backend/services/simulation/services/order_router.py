@@ -99,10 +99,17 @@ async def submit_order(db, redis, req: OrderRequest) -> RouterOutcome:
         )
 
     manager = SimulationAccountManager(redis)
-    if req.bar is None:
-        routed = await _submit_immediate(db, manager, req)
-    else:
-        routed = await _submit_from_bar(db, manager, req)
+    # bar **不再切换执行链**，只经即时链传给取价（`bar → submit_and_fill → execute_order
+    # → _resolve_fill_price`）。
+    #
+    # 此前 `req.bar is not None` 会路由到 `_submit_from_bar`，而那条链**不调用
+    # `assess_execution_window`** —— 即没有交易时段闸。让它可路由，等于让托管的每张
+    # 调仓单在周末/深夜/任意时刻都能按日线 bar 成交；且它与即时链是两套平行实现
+    # （会话窗、幂等、投影、申报数量校验各写一遍），正是取价口径悄悄分裂的温床。
+    #
+    # 降级取价不需要第二条链：`_resolve_fill_price(order, bar, strict_market=...)` 早已把
+    # 「实时价优先、无则按 bar 如实标注降级」单点实现，即时链传入即可。
+    routed = await _submit_immediate(db, manager, req)
 
     if req.mirror and routed.success and not routed.duplicate:
         routed.mirror = await _mirror_fill(redis, req, routed)
@@ -169,6 +176,7 @@ async def _submit_immediate(db, manager, req: OrderRequest) -> RouterOutcome:
         client_order_id=req.client_order_id,
         trigger_source=req.source,
         strict_market=req.resolved_strict(),
+        bar=req.bar,
     )
     return RouterOutcome(
         success=bool(outcome.success),

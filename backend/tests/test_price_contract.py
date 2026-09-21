@@ -131,7 +131,25 @@ def test_both_paths_wired_to_resolver():
     # 手动即时路径：strict（保持 P0-5 语义；strict_market 参数化于 T-P2-01；
     # snapshot 透传为上游合入的执行增强参数）
     assert "strict_market=strict_market" in src
-    assert "_resolve_fill_price(\n            order, None, strict_market=strict_market" in src
+    # bar 由上游传入（2026-09-21 接回），不再硬编码 None。
+    #
+    # 此断言原先钉的是 `order, None, ...` —— 即「即时链永远拿不到 bar」。那正是缺陷
+    # 本身：托管引擎从不传 bar → `resolved_strict()` 恒为 True → `_submit_from_bar` 与
+    # `execute_from_bar` 成生产死支路，`resolved_strict` 注释里的「托管允许如实降级」
+    # 描述的是一个不存在的行为。断言把 bug 当契约钉住了，故随之更正。
+    #
+    # **P0-5 语义不变**：手动单没有任何调用方传 bar（恒为 None），strict_market 仍为
+    # True，取价结果与改动前逐位一致。变化只对「传了 bar 且 strict=False」的托管路径
+    # 生效——而那正是设计意图。反向钉子见
+    # `test_after_hours_fixed_execution_gate.py::test_hosted_engine_threads_bar_into_order_request`。
+    assert (
+        "_resolve_fill_price(\n            order, bar, strict_market=strict_market"
+        in src
+    )
+    assert (
+        "_resolve_fill_price(\n            order, None, strict_market=strict_market"
+        not in src
+    )
     # 不再有旧的双份守卫/谎报来源
     assert 'price_source=f"local_{cfg.price_mode}"' not in src
     assert "RULE:PRICE-STALE" in src

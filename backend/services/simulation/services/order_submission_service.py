@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -71,6 +72,7 @@ class SimulationOrderSubmissionService:
         time_in_force: str = "DAY",
         expires_at: datetime | None = None,
         strict_market: bool = True,
+        bar: Any = None,
     ) -> SimulationSubmissionOutcome:
         # P0-1/P0-4：同用户临界区串行化（幂等查+建单+撮合+落库），防并发双花与
         # 融券读-改-写丢更新。锁忙直接失败由调用方重试，不静默放行。
@@ -107,6 +109,7 @@ class SimulationOrderSubmissionService:
                     time_in_force=time_in_force,
                     expires_at=expires_at,
                     strict_market=strict_market,
+                    bar=bar,
                 )
         except RuntimeError:
             return SimulationSubmissionOutcome(
@@ -136,6 +139,7 @@ class SimulationOrderSubmissionService:
         time_in_force: str = "DAY",
         expires_at: datetime | None = None,
         strict_market: bool = True,
+        bar: Any = None,
     ) -> SimulationSubmissionOutcome:
         normalized_client_order_id = str(client_order_id or "").strip() or None
         if normalized_client_order_id:
@@ -256,7 +260,9 @@ class SimulationOrderSubmissionService:
         await self.order_service.sync_order_projection(order)
         await self.db.commit()
 
-        execution_result = await self.engine.execute_order(order, strict_market=strict_market)
+        execution_result = await self.engine.execute_order(
+            order, strict_market=strict_market, bar=bar
+        )
         if not execution_result.success:
             if str(execution_result.message or "") == "Order expired before execution":
                 await self.engine.mark_expired(order, execution_result.message)

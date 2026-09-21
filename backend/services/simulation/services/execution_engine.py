@@ -836,12 +836,19 @@ return tostring(granted)
         requested_quantity: float | None = None,
         *,
         strict_market: bool = True,
+        bar: Any = None,
     ) -> ExecutionResult:
         # T-P2-03：价格与陈旧价守卫收敛到 _resolve_fill_price（唯一实现）；
         # strict_market=True（手动即时单，默认）保持 P0-5 语义——非实时市价单拒绝成交；
         # 自动化路径（沙箱/TDX/由 Router 传入 False）允许如实标注的降级。
+        #
+        # bar：非空时供 `_resolve_fill_price` 在**降级档**取价（`today_bar_close` /
+        # `prev_close_bar`，带 `RULE:PRICE-STALE` WARNING 点名，绝不静默）。
+        # 此前恒传 None，把 bar 降级分支锁死成不可达——托管路径因此拿不到
+        # 「如实降级」，只能按即时单被拒。新鲜实时价永远优先（该函数的规则 1），
+        # 所以传 bar 不会改变有实时行情时的成交价。
         resolved = await self._resolve_fill_price(
-            order, None, strict_market=strict_market, snapshot=snapshot
+            order, bar, strict_market=strict_market, snapshot=snapshot
         )
         if not resolved.ok:
             return ExecutionResult(
@@ -1524,6 +1531,26 @@ return tostring(granted)
                 (13, 0) <= (local_now.hour, local_now.minute) < afternoon_close
             )
             can_execute = is_session and (morning or afternoon)
+            if not can_execute and market.value == "CN":
+                # 盘后固定价格交易（15:05–15:30 按当日收盘价，2026-07-06 新规）是
+                # **可执行的会话**，不是「已收盘」。
+                #
+                # 此前这里只认上午/下午连续竞价，于是 15:05–15:30 一律判不可执行 →
+                # 「排队到下一交易日」。而同一个时段在系统里另有三处判定**全都认**：
+                # 调度会话门 `_is_enabled_session`（时段表 AFTER_HOURS）、撮合会话推导
+                # `_resolve_match_session`（喂给 MatchConfig.session）、风控 L0 时段校验。
+                # 后果：托管周期配在 AFTER_HOURS 触发时（调度器明确支持该时段），
+                # 调度器按时放行、系统算出调仓单，本闸却把每一单排队到明天——撮合器里的
+                # `_CAP_AFTER_HOURS` 根本轮不到，制度等于没实现。手动单同理。
+                #
+                # 会话判定复用 `market_rules` 的唯一谓词，不在这里另写时分比较：
+                # 各写各的时间比较正是这次口径分裂的成因。**仅 CN**——盘后固定价格是
+                # A 股专属制度，与 `_resolve_match_session` 同款约束（不误用收盘价固定成交）。
+                from backend.services.simulation.services.market_rules import (
+                    is_after_hours_fixed_session,
+                )
+
+                can_execute = is_session and is_after_hours_fixed_session(local_now)
         elif market.value == "US":
             can_execute = is_session and (
                 (9, 30) <= (local_now.hour, local_now.minute) < (16, 0)
