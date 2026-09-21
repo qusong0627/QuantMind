@@ -361,11 +361,22 @@ def test_get_broker_real_routes_to_selected_ib_for_hk():
     assert isinstance(broker, IBBroker)
 
 
-def test_get_broker_real_disabled_uses_paper_broker():
+def test_get_broker_real_disabled_refuses_instead_of_paper():
+    """实盘关闭 + REAL：**拒**，不回落纸面。
+
+    本用例此前断言的是 `PaperTradingBroker` —— 那条断言钉的正是**静默降级**：
+    一笔 REAL 单拿纸面成交、返回 `success=True`，调用方以为下了真单。
+    它与 `_get_broker` 自己的 docstring 矛盾（纸面只服务 SIMULATION/BACKTEST），
+    且在所有已枚举入口上都被闸门 403 挡在前面——但那些闸**全在调用方**，
+    「取券商」这个共用决定点自己仍是静默的。故不变量上移到决定点，
+    本用例改为钉新行为（全貌见 `tests/test_real_order_never_paper_filled.py`）。
+    """
     engine = _engine_with_redis({"US": "tiger"})
-    with mock.patch("backend.services.live_trading.services.trading_engine.settings.ENABLE_REAL_TRADING", False):
-        broker = engine._get_broker(TradingMode.REAL, "AAPL")
-    assert broker.__class__.__name__ == "PaperTradingBroker"
+    with mock.patch(
+        "backend.services.live_trading.services.trading_engine.settings.ENABLE_REAL_TRADING",
+        False,
+    ), pytest.raises(RuntimeError, match="实盘未启用"):
+        engine._get_broker(TradingMode.REAL, "AAPL")
 
 
 def test_get_broker_simulation_uses_paper_broker():

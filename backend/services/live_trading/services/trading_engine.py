@@ -92,6 +92,7 @@ class TradingEngine:
           - REAL/SHADOW 且启用实盘 → 按标的市场路由券商：
             broker:selected:{market}（用户在「券商接入」页选定，tiger/futu/ib/tdx/qmt_exec）
             优先，未选定回退 settings.REAL_BROKER_TYPE
+          - REAL/SHADOW 但**未启用实盘** → 抛 (绝不回落纸面，见下方不变量注释)
           - 其余 (SIMULATION/BACKTEST) → PaperTradingBroker (本地模拟撮合)
         通过缓存避免重复构造。
         """
@@ -99,6 +100,34 @@ class TradingEngine:
         enable_real = getattr(settings, "ENABLE_REAL_TRADING", False)
         broker_type = getattr(settings, "REAL_BROKER_TYPE", "tdx")
         market = "CN"
+
+        # 兜底不变量：实盘侧模式取不到真券商就**抛**，绝不回落纸面。
+        #
+        # 此处原先无条件走下面的 else 分支 → `create_broker(enable_real=False)`
+        # → PaperTradingBroker：一笔 REAL 单会落一行真 orders、过一次风控、拿一个
+        # 纸面成交、返回 success=True，调用方以为自己下了真单。**静默降级**，
+        # 与 3d410ab7（内部策略派发链）同族。
+        #
+        # 已枚举的入口今天都各自有闸（HTTP 中间件 / internal_strategy_dispatcher
+        # （内部策略与止损执行器共用）/ `/manual-executions` 与 `/real-trading/*`
+        # 的 handler 级 `ensure_real_trading_allowed`）。**但闸全在调用方**，而
+        # 「取券商」是共用的决定点、且它自己的行为是静默的——任何新增调用方
+        # （或今天还没被枚举到的后台循环）都会重演。故不变量钉在这里：闸可以漏，
+        # 兜底不会。
+        #
+        # SHADOW 与 REAL 同判：闸门的 `is_real_side_mode` 就把两者都归实盘侧
+        # （「不下真单但要拉 k8s runner，同属实盘运维面」）。两处口径必须一致，
+        # 否则「影子」在这里是纸面、在闸门里是实盘——又一份变量两个答案。
+        #
+        # 抛而非 return：`submit_order` 的 except 会记 error 日志 + 把订单转
+        # REJECTED 并留备注（如实上报失败），比一个纸面成交诚实得多。
+        if mode in ("REAL", "SHADOW") and not enable_real:
+            raise RuntimeError(
+                f"实盘未启用（ENABLE_REAL_TRADING=false），拒绝为 {mode} 模式构造券商："
+                "本引擎不会把实盘单降级成纸面成交。请用 SIMULATION 模式下单，"
+                "或先打开实盘开关（前后端两个开关都要开）。"
+            )
+
         if mode in ("REAL", "SHADOW") and enable_real:
             market = _infer_broker_market(symbol)
             selected = _selected_broker_type(self.redis, market)
