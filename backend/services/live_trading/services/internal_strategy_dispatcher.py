@@ -23,6 +23,7 @@ from backend.services.live_trading.routers.real_trading_utils import (
 from backend.services.live_trading.services.real_mirror_service import (
     mirror_virtual_fill,
 )
+from backend.shared.live_trading_gate import ensure_real_trading_allowed
 
 logger = logging.getLogger(__name__)
 
@@ -269,6 +270,26 @@ async def dispatch_internal_strategy_order(
         trading_mode = TradingMode(trading_mode_raw)
     except ValueError:
         raise HTTPException(status_code=400, detail=f"invalid trading_mode: {trading_mode_raw}")
+
+    # 实盘闸门（防线在**副作用之前**：不建单、不过风控、不提交）。
+    #
+    # 中间件拦不到这条路径：internal_strategy.router 挂在根路径（/order、
+    # /hosted-executions），而 live_trading_gate 的 _BLOCKED_PREFIXES 全是
+    # /api/v1/...，`_matches("/order", "/api/v1/orders")` 为假 —— 那道闸拦的是
+    # 另一个端点。且 trading_mode 在 body 里，中间件本来也读不到。
+    #
+    # 不加这道闸不是「报错」而是**静默降级**：TradingEngine._get_broker 在
+    # enable_real=False 时回落到 PaperTradingBroker，于是 REAL 请求会落一行真单
+    # orders、过一次风控、拿一个纸面成交，再返回 {"success": true, "status": "FILLED"}
+    # —— 调用方以为自己下了真单。宁可 403，绝不降级。
+    #
+    # 用既有的 ensure_real_trading_allowed 而不是自写判断：REAL/SHADOW 归实盘侧、
+    # SIMULATION 放行，与 manual_executions / push_orders / 中间件同一套策略。
+    #
+    # 必须传 .value，不能传枚举本身：TradingMode 是 (str, Enum) 混入，`str()` 得到的是
+    # "TradingMode.SIMULATION" 而非 "simulation"，而 isinstance(x, str) 又恒真、看不出
+    # 毛病——is_real_side_mode 会把它当成**无法识别的写法**判到实盘侧，把模拟盘一起 403。
+    ensure_real_trading_allowed(trading_mode.value)
 
     symbol = str(order_data.get("symbol") or "").strip().upper()
     side_raw = str(order_data.get("side") or "").strip().upper()

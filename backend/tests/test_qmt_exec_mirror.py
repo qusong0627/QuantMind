@@ -13,6 +13,7 @@ from typing import Any
 from unittest.mock import AsyncMock, patch
 
 from backend.services.live_trading.services import real_mirror_service as m
+from backend.shared.live_trading_gate import ENV_KEY
 
 
 class FakeRedisClient:
@@ -829,36 +830,32 @@ class TestQuotaAndBreaker:
 
 
 class TestRealTradingGate:
-    def test_disabled_by_default(self) -> None:
+    """开关的**唯一**事实源是 env（``is_real_trading_enabled()`` 调用时读）。
+
+    这三条原先 patch 的是 ``trade_config.settings.ENABLE_REAL_TRADING`` ——
+    那是 import 期快照，``_real_trading_ready`` 早不改读它了（见该函数注释：
+    运维改 env 重启后两份开关会在运行期分叉）。于是 patch 打空，
+    用例结论取决于机器/容器里恰好有没有设这个 env：干净部署过、本机容器（true）红。
+    """
+
+    def test_disabled_by_default(self, monkeypatch) -> None:
+        monkeypatch.delenv(ENV_KEY, raising=False)
         redis = _redis()
-        with patch(
-            "backend.services.trade_shared.trade_config.settings.ENABLE_REAL_TRADING",
-            False,
-            create=True,
-        ):
-            ready, reason = m._real_trading_ready(redis, "CN")
+        ready, reason = m._real_trading_ready(redis, "CN")
         assert ready is False
         assert reason == "real_trading_disabled"
 
-    def test_requires_qmt_exec_selected(self) -> None:
+    def test_requires_qmt_exec_selected(self, monkeypatch) -> None:
+        monkeypatch.setenv(ENV_KEY, "true")
         redis = _redis(strings={"broker:selected:CN": "tdx"})
-        with patch(
-            "backend.services.trade_shared.trade_config.settings.ENABLE_REAL_TRADING",
-            True,
-            create=True,
-        ):
-            ready, reason = m._real_trading_ready(redis, "CN")
+        ready, reason = m._real_trading_ready(redis, "CN")
         assert ready is False
         assert reason == "broker_not_qmt_exec:tdx"
 
-    def test_ready_when_enabled_and_selected(self) -> None:
+    def test_ready_when_enabled_and_selected(self, monkeypatch) -> None:
+        monkeypatch.setenv(ENV_KEY, "true")
         redis = _redis(strings={"broker:selected:CN": "qmt_exec"})
-        with patch(
-            "backend.services.trade_shared.trade_config.settings.ENABLE_REAL_TRADING",
-            True,
-            create=True,
-        ):
-            ready, reason = m._real_trading_ready(redis, "CN")
+        ready, reason = m._real_trading_ready(redis, "CN")
         assert ready is True and reason == ""
 
 

@@ -11,6 +11,7 @@ from backend.services.trade_shared.portfolio.models import Portfolio, Position
 from backend.services.trade_shared.redis_client import RedisClient
 from backend.services.live_trading.services.internal_strategy_dispatcher import dispatch_internal_strategy_order
 from backend.services.live_trading.services.manual_execution_service import manual_execution_service
+from backend.shared.live_trading_gate import ensure_real_trading_allowed
 from .internal_strategy_utils import verify_internal_call
 
 router = APIRouter(tags=["Internal Strategy Gateway"])
@@ -151,6 +152,11 @@ async def create_hosted_execution(
     x_user_id: str = Header(...),
     x_tenant_id: str | None = Header(None),
 ):
+    # 实盘闸门（早拦）：本端点**默认 trading_mode="REAL"**，而任务记录在 create_hosted_task
+    # 里就落库了、真正下单要等到 process_task → _submit_one_order → 调度器。
+    # 只在调度器拦，会留下一批「建好了但永远下不出单」的孤儿任务；这里按 body 模式先判，
+    # 与 manual_executions / push_orders 同一套策略（REAL/SHADOW 拒，SIMULATION 放行）。
+    ensure_real_trading_allowed(payload.trading_mode)
     result = await manual_execution_service.create_hosted_task(
         tenant_id=(x_tenant_id or "default"),
         user_id=x_user_id,

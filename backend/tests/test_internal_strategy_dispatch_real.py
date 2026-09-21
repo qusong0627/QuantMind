@@ -20,8 +20,24 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
+import pytest
+
 from backend.services.live_trading.routers.real_trading_utils import normalize_db_user_id
 from backend.services.live_trading.services import internal_strategy_dispatcher as d
+from backend.shared.live_trading_gate import ENV_KEY
+
+
+@pytest.fixture(autouse=True)
+def _real_trading_on(monkeypatch):
+    """本文件的用例测的是 REAL 分支**机制**（user_id 口径、幂等、组合兜底），
+    按定义只在实盘启用时才成立。
+
+    必须显式打开：否则结果取决于跑测试的机器/容器恰好有没有设 ENABLE_REAL_TRADING
+    ——本机容器是 true，干净部署是 false，同一份用例两种结论。
+    （实盘关闭时该被拒这件事，由 test_internal_strategy_real_trading_gate.py 覆盖。）
+    """
+    monkeypatch.setenv(ENV_KEY, "true")
+    yield
 
 
 class FakeResult:
