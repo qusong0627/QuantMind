@@ -11,7 +11,12 @@ from dataclasses import dataclass, replace
 # A 股标准费率（2026 年口径）
 _DEFAULT_COMMISSION_RATE = 0.00025  # 佣金，买卖各收
 _DEFAULT_MIN_COMMISSION = 5.0  # 单笔最低佣金（元）
-_DEFAULT_STAMP_DUTY = 0.001  # 印花税，仅卖出
+# 印花税，仅卖出。**0.05%，不是 0.1%**：2023-08-28 起减半征收。此处曾写 0.001
+# （减半前的旧值，2 倍），与 `CN_RULES.stamp_duty_rate`、`CnExchange`、
+# `trade_config.SIMULATION_STAMP_DUTY_RATE` 三处都对不上——三处都是 0.0005。
+# 漂移能存续是因为费率平价网（`test_rule_parity`）只覆盖了 matcher↔rules↔回测引擎，
+# 本模块在网外、不和任何人比。现已被 `test_fee_parity_eval_cost_model` 纳入。
+_DEFAULT_STAMP_DUTY = 0.0005  # 印花税，仅卖出
 _DEFAULT_TRANSFER_FEE = 0.00001  # 过户费，仅沪市
 _DEFAULT_SLIPPAGE = 0.001  # 滑点，买卖各计
 

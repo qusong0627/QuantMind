@@ -8,6 +8,19 @@ from typing import Optional
 from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from backend.services.simulation.services.market_rules import CN_RULES
+
+# A 股费率默认值 —— 唯一来源派生（`CN_RULES` 是费用分项唯一实现）。
+# 提到模块级常量而非内联在 `os.getenv` 默认参里，是为了让「默认值」可被测试直接断言：
+# `settings.*` 会被 env 覆盖（覆盖是有意的），断言它会因部署设了 env 而假红。
+CN_COMMISSION_DEFAULT: float = CN_RULES.commission_rate
+CN_COMMISSION_MIN_DEFAULT: float = CN_RULES.commission_min
+CN_STAMP_DUTY_DEFAULT: float = CN_RULES.stamp_duty_rate
+CN_SELL_ALLIN_DEFAULT: float = round(
+    CN_RULES.commission_rate + CN_RULES.stamp_duty_rate + CN_RULES.transfer_fee_rate,
+    6,
+)
+
 
 class Settings(BaseSettings):
     """Trading Service settings"""
@@ -143,24 +156,33 @@ class Settings(BaseSettings):
 
     # Simulation
     SIMULATION_SLIPPAGE_BPS: float = float(os.getenv("SIMULATION_SLIPPAGE_BPS", "5"))
+    # 以下三项是喂给 `CN_RULES.compute_fee_breakdown` 的**覆盖值**（同为 env 可调），
+    # 默认值一律取 `CN_RULES` 自身 —— 与上面同一条单源纪律：抄写同值副本今天不错，
+    # 但费率一变就有第二处要改，而这一族的教训正是「不在网里就没人比」。
     SIMULATION_COMMISSION_RATE: float = float(
-        os.getenv("SIMULATION_COMMISSION_RATE", "0.0003")
+        os.getenv("SIMULATION_COMMISSION_RATE", str(CN_COMMISSION_DEFAULT))
     )
     # 模拟盘最低佣金（元），对齐真实券商，单笔 < 最低佣金按最低收取
     SIMULATION_COMMISSION_MIN: float = float(
-        os.getenv("SIMULATION_COMMISSION_MIN", "5")
+        os.getenv("SIMULATION_COMMISSION_MIN", str(CN_COMMISSION_MIN_DEFAULT))
     )
     # 证券交易印花税（卖出单边费率）。A 股当前 0.05%，仅 CN 卖出收取。
     SIMULATION_STAMP_DUTY_RATE: float = float(
-        os.getenv("SIMULATION_STAMP_DUTY_RATE", "0.0005")
+        os.getenv("SIMULATION_STAMP_DUTY_RATE", str(CN_STAMP_DUTY_DEFAULT))
     )
 
     # Commission rates for risk purchasing-power check
-    # A 股买入佣金约 0.03%（券商最低 5 元）；卖出另含印花税 0.1%+过户费 0.001%
-    COMMISSION_RATE_BUY: float = float(os.getenv("COMMISSION_RATE_BUY", "0.0003"))
+    # 默认值**派生自 `CN_RULES`**（费用分项唯一实现），不在此手写数字：
+    # 此处曾写死 0.0003 / 0.0013，后者是「0.03% 佣金 + 0.1% 印花税 + 0.001% 过户费」
+    # 的旧合计。印花税 2023-08-28 减半到 0.05% 后这个合计没跟着动，且卖出侧全仓
+    # **零消费者**（唯一读它的 risk_service 只取 BUY），两处失真都没症状。
+    # 费率变了这里跟着变；`test_trade_config_commission_derives_from_single_source` 钉双向。
+    COMMISSION_RATE_BUY: float = float(
+        os.getenv("COMMISSION_RATE_BUY", str(CN_COMMISSION_DEFAULT))
+    )
     COMMISSION_RATE_SELL: float = float(
-        os.getenv("COMMISSION_RATE_SELL", "0.0013")
-    )  # 0.03%+0.1%+0.001%
+        os.getenv("COMMISSION_RATE_SELL", str(CN_SELL_ALLIN_DEFAULT))
+    )
 
 
 settings = Settings()

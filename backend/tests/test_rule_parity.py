@@ -8,6 +8,7 @@ matcher / market_rules / 回测引擎 三处费用**逐分相等**（含最低�
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from backend.services.simulation.services.ashare_matcher import (
     MatchConfig,
@@ -144,3 +145,87 @@ def test_source_single_implementation():
     ).read_text(encoding="utf-8")
     assert "normalize_order_quantity" in rebalance_src
     assert "def _floor_to_lot" not in rebalance_src
+
+
+def test_fee_parity_eval_cost_model():
+    """费率平价网必须覆盖**评估/研究侧**的 `CostModel` —— 此前正是网外的缺口。
+
+    上面两张网（matcher↔rules、回测引擎↔rules）都对着 `CN_RULES` 比，唯独
+    `trading_cost.CostModel`（eval / strategy_card / backtest_service 的费率唯一
+    出处）在网外：它的印花税静静漂到 **0.001**（2 倍法定值，2023-08-28 起是 0.05%），
+    而另外三处（`CN_RULES` / `CnExchange` / `trade_config`）都是 0.0005。
+    没人发现，因为它不和任何人比 —— 平价网的**成员资格**就是这条契约。
+
+    佣金**不**要求与 `CN_RULES` 相同：评估/回测的历史默认 0.00025 是券商成本假设，
+    模拟盘默认 0.0003 更保守，这是有意的差异。但 `trading_cost` 的 docstring 明确
+    承诺「与 cn_exchange 保持一致」，故佣金与最低佣金只对 `CnExchange` 断言。
+
+    `CnExchange` 需要 qlib 全局配置才能实例化（`Exchange.__init__` 读
+    `C.trade_unit`），故取**签名默认值**而非实例 —— 结论等价且不依赖运行环境。
+    """
+    import inspect
+
+    from backend.services.engine.inference.trading_cost import CostModel
+    from backend.services.engine.qlib_app.utils.cn_exchange import CnExchange
+
+    model = CostModel()
+    ex = {
+        name: param.default
+        for name, param in inspect.signature(CnExchange.__init__).parameters.items()
+        if param.default is not inspect.Parameter.empty
+    }
+
+    # ① 法定费率：政策数字，没有「口径差异」的余地，三侧必须逐位相同
+    assert model.stamp_duty == CN_RULES.stamp_duty_rate == ex["stamp_duty"], (
+        f"印花税三侧不一致：cost={model.stamp_duty} "
+        f"rules={CN_RULES.stamp_duty_rate} cn_exchange={ex['stamp_duty']}"
+    )
+    assert model.transfer_fee == CN_RULES.transfer_fee_rate == ex["transfer_fee"], (
+        f"过户费三侧不一致：cost={model.transfer_fee} "
+        f"rules={CN_RULES.transfer_fee_rate} cn_exchange={ex['transfer_fee']}"
+    )
+
+    # ② docstring 承诺「与 cn_exchange 口径保持一致」：佣金与最低佣金同值
+    assert model.commission_rate == ex["commission"], (
+        f"佣金与 cn_exchange 不一致：cost={model.commission_rate} "
+        f"cn_exchange={ex['commission']}"
+    )
+    assert model.min_commission == ex["min_commission"]
+
+
+def test_trade_config_commission_derives_from_single_source():
+    """`trade_config` 的买卖佣金默认值必须**派生自 `CN_RULES`**，不得再手写数字。
+
+    此处曾硬编码 `COMMISSION_RATE_BUY = 0.0003` / `COMMISSION_RATE_SELL = 0.0013`，
+    后者是「0.03% 佣金 + 0.1% 印花税 + 0.001% 过户费」的旧合计。印花税 2023-08-28
+    减半到 0.05% 之后这个合计没跟着动，且 `COMMISSION_RATE_SELL` 全仓**零消费者**
+    （唯一读 `COMMISSION_RATE_*` 的 `risk_service` 只读 BUY 侧），所以两处失真
+    都没有症状 —— 又一个「不在平价网里就没人比」的实例（同 `CostModel` 印花税）。
+
+    断言取**派生常量**而非 `settings.*`：后者可被 env 覆盖（覆盖是有意的，
+    本用例不该因部署设了 env 而红），前者是默认值本身。
+    """
+    import backend.services.trade_shared.trade_config as tc
+
+    assert tc.CN_COMMISSION_DEFAULT == pytest.approx(CN_RULES.commission_rate)
+    assert tc.CN_SELL_ALLIN_DEFAULT == pytest.approx(
+        CN_RULES.commission_rate
+        + CN_RULES.stamp_duty_rate
+        + CN_RULES.transfer_fee_rate
+    ), "卖出合计须 = 佣金 + 印花税 + 过户费（派生，非手写）"
+
+    # 反向钉子：这几个键不得再手写数字默认值（精确到键，不误伤别处的同值字面量——
+    # 初版写成 `'"0.0003"' not in src` 就误伤了 `SIMULATION_COMMISSION_RATE`，实际它
+    # 同样该派生，只是键不同）。
+    src = (_BACKEND / "services/trade_shared/trade_config.py").read_text(encoding="utf-8")
+    for key in (
+        "COMMISSION_RATE_BUY",
+        "COMMISSION_RATE_SELL",
+        "SIMULATION_COMMISSION_RATE",
+        "SIMULATION_COMMISSION_MIN",
+        "SIMULATION_STAMP_DUTY_RATE",
+    ):
+        assert f'os.getenv("{key}", "' not in src, (
+            f"{key} 的默认值须派生自 CN_RULES（传常量名），不得手写数字"
+        )
+    assert '"0.0013"' not in src, "0.0013 是印花税减半前的旧合计，不得再出现"
