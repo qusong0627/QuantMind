@@ -3,6 +3,7 @@ import { Button, Card, Descriptions, Drawer, Empty, Pagination, Select, Space, S
 import { ReloadOutlined, RightOutlined } from '@ant-design/icons';
 import { adminService } from '../services/adminService';
 import type { AdminOrderHistoryItem, AdminPlannedOrderItem } from '../types';
+import { isLiveTradingEnabled } from '../../../config/tradingFlags';
 
 const { Title, Text } = Typography;
 
@@ -157,7 +158,9 @@ export const AdminOrderManagement: React.FC = () => {
                         onChange={setMode}
                         options={[
                             { label: '模拟盘', value: 'SIMULATION' },
-                            { label: '实盘', value: 'REAL' },
+                            // 实盘关闭时不提供该筛选项；MODE_LABEL 里的 'REAL' 保留，
+                            // 存量实盘单仍要显示成「实盘」而不是错标成别的
+                            ...(isLiveTradingEnabled() ? [{ label: '实盘', value: 'REAL' }] : []),
                         ]}
                     />
                     <Select

@@ -13,6 +13,7 @@ import { useUiMode } from '../../shared/useUiMode';
 import { ComplianceReturn } from '../../../components/shared/compliance/ComplianceChrome';
 import { StockLabel } from './StockLabel';
 import { CARD, CardHeader, StatTile } from './cardKit';
+import { formatResearchScore, researchScore } from '../../shared/researchScore';
 import { SERVICE_URLS } from '../../../config/services';
 import {
   executionSummary,
@@ -66,10 +67,16 @@ export const SignalsCard: React.FC<{
       }
     />
 
+    {/* 三态计数按**截面位置**呈现，不写 BUY/SELL/HOLD：那是模型输出的枚举，
+        直接印出来读着就是「系统给了 N 个买入」。位置词与 `signalVocabulary.ts` 同一口径。
+
+        配色刻意**不用红绿**：A 股红涨绿跌，红绿一上来就等于把「靠前」翻译成「该买」，
+        等于换个说法把方向又装回去。两端同用中性蓝、中间压灰，让颜色只承担「两极 / 中间」的
+        分组，含义全部交给文字。 */}
     <div className="grid grid-cols-3 gap-2 mb-3">
-      <StatTile label="BUY" value={signals?.buy} tone="red" />
-      <StatTile label="SELL" value={signals?.sell} tone="green" />
-      <StatTile label="HOLD" value={signals?.hold} tone="slate" />
+      <StatTile label="靠前" value={signals?.buy} tone="blue" />
+      <StatTile label="靠后" value={signals?.sell} tone="blue" />
+      <StatTile label="居中" value={signals?.hold} tone="slate" />
     </div>
 
     <div className="space-y-0.5 flex-1 min-h-0 overflow-y-auto">
@@ -92,14 +99,14 @@ export const SignalsCard: React.FC<{
               {rank !== null && (
                 <span className="h-1 w-12 rounded-full bg-slate-100 overflow-hidden hidden sm:block">
                   <span
-                    className="block h-full rounded-full bg-red-400"
+                    className="block h-full rounded-full bg-blue-400"
                     style={{ width: `${Math.max(0, Math.min(1, rank)) * 100}%` }}
                   />
                 </span>
               )}
               <TermTooltip term="rank_pct">
                 <span className="text-[11px] font-mono text-slate-500 tabular-nums">
-                  {rank === null ? '—' : rank.toFixed(3)}
+                  {formatResearchScore(researchScore(item.rank_pct))}
                 </span>
               </TermTooltip>
               <span className="text-[10px] font-mono text-slate-400 tabular-nums w-14 text-right">
@@ -110,12 +117,12 @@ export const SignalsCard: React.FC<{
         );
       })}
       {(!signals?.top_buy || signals.top_buy.length === 0) && (
-        <p className="text-xs text-slate-400 px-2 py-1">暂无 BUY 信号</p>
+        <p className="text-xs text-slate-400 px-2 py-1">暂无靠前标的</p>
       )}
     </div>
     {!!signals?.buy && (
       <p className="px-2 pt-1.5 text-[10px] text-slate-400">
-        共 {signals.buy} 只 BUY 信号，按 rank 分位强弱展示前 {signals.top_buy?.length || 0} 只（列表内可滚动）
+        共 {signals.buy} 只截面靠前，按研究评分高低展示前 {signals.top_buy?.length || 0} 只（列表内可滚动）
       </p>
     )}
     <SourceFooter source={signals?.source || '—'} />

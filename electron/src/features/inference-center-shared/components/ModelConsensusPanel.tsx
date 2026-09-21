@@ -38,7 +38,10 @@ export const ModelConsensusPanel: React.FC<ModelConsensusPanelProps> = ({
           </div>
         </div>
         <div className={`flex items-center gap-1.5 border px-3 py-1 rounded-xl ${isThin ? 'bg-amber-50 border-amber-200' : 'bg-blue-50 border-blue-100'}`}>
-          <span className="text-[11px] text-slate-500 font-semibold">{isThin ? '样本不足·看多占比:' : '综合共识得分:'}</span>
+          {/* 「靠前占比」不是换个温和说法，是**算得更准**：后端 consensus_score
+              = 判为 BUY 的模型数 / 参与模型数（research_service.py），本来就是占比，
+              不是「看多」这种方向结论。 */}
+          <span className="text-[11px] text-slate-500 font-semibold">{isThin ? '样本不足·靠前占比:' : '综合共识得分:'}</span>
           <span className={`text-sm font-black font-mono ${isThin ? 'text-amber-600' : 'text-blue-600'}`}>{consensusScore.toFixed(1)}/100</span>
           {coverage && (
             <span className="text-[10px] text-slate-500 font-mono">({coverage.scored}/{coverage.total})</span>

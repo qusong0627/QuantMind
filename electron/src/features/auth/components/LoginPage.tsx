@@ -18,6 +18,7 @@ import { useAuth, useLoginForm } from '../hooks/useAuth';
 import { useAppDispatch, useAppSelector } from '../../../store';
 import { setUser } from '../store/authSlice';
 import { PageLoading } from './LoadingStates';
+import { ComplianceStrip } from '../../../components/shared/compliance/ComplianceChrome';
 import type { LoginCredentials } from '../types/auth.types';
 import { preloadAiIdeResources } from '../utils/lazyLoad';
 import { isElectronEnv, initDynamicServerUrl, setDynamicServerUrl, getDynamicServerUrl } from '../../../config/services';
@@ -689,6 +690,11 @@ const LoginPage: React.FC = () => {
         >
           <SafetyCertificateOutlined style={{ marginRight: '6px', color: '#52c41a' }} />
           <span>SSL加密传输 | 数据安全保护</span>
+        </div>
+
+        {/* 免责声明（文案与全站页脚同源；放卡内浅色区，深色渐变页脚上会看不清） */}
+        <div style={{ marginTop: 12, paddingTop: 12, borderTop: '1px solid rgba(0,0,0,0.06)' }}>
+          <ComplianceStrip />
         </div>
         </div>
       </Card>

@@ -34,14 +34,23 @@ describe('tradeMarkerDrillEntries（T-FE-08 买卖点下钻）', () => {
 });
 
 describe('signalPointDrillEntries（信号点下钻）', () => {
-  it('BUY/SELL 人话化 + 分数来源标注（同源副图口径）', () => {
+  it('位置中性化 + 分数来源标注（同源副图口径）', () => {
     const buy = signalPointDrillEntries({ date: '2026-09-15', side: 'BUY', fusion: 0.011234 });
     const byLabel = Object.fromEntries(buy.map((e) => [e.label, e]));
-    expect(byLabel['方向'].value).toBe('买入信号');
+    // 展示面只说位置，不说「买入信号」——那是替用户做决定
+    expect(byLabel['相对位置'].value).toBe('靠前');
+    expect(byLabel['相对位置'].hint).toBeTruthy();
     expect(byLabel['推理分数'].value).toBe('0.011234');
     expect(byLabel['推理分数'].source).toContain('engine_signal_scores');
 
     const sell = signalPointDrillEntries({ date: '2026-09-15', side: 'SELL', fusion: null });
-    expect(Object.fromEntries(sell.map((e) => [e.label, e]))['推理分数'].value).toBe('—');
+    const sellByLabel = Object.fromEntries(sell.map((e) => [e.label, e]));
+    expect(sellByLabel['相对位置'].value).toBe('靠后');
+    expect(sellByLabel['推理分数'].value).toBe('—');
+  });
+
+  it('认不出的判定显示 —，不硬套成某个位置', () => {
+    const odd = signalPointDrillEntries({ date: '2026-09-15', side: 'STRONG_BUY', fusion: 1 });
+    expect(Object.fromEntries(odd.map((e) => [e.label, e]))['相对位置'].value).toBe('—');
   });
 });

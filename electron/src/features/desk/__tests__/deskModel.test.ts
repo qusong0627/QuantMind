@@ -392,12 +392,23 @@ describe('逐层穿透下钻（T-FE-03 v2）', () => {
   it('信号条目：字段分解 + 两层可穿透（原始条目/信号块载荷）', () => {
     const entries = signalItemDrillEntries(signal, signalsBlock);
     expect(entries[0]).toMatchObject({ label: '标的', value: '600036' });
-    expect(entries[2].value).toBe('0.982');
+    // 信号条目说「截面位置」不说「方向」：rank_pct 0.982 → 研究评分 98.2
+    expect(entries[1].label).toBe('截面位置');
+    expect(entries[1].value).toBe('靠前');
+    expect(entries[2].label).toBe('研究评分');
+    expect(entries[2].value).toBe('98.2');
     const rawEntry = entries.find((e) => e.label.includes('原始条目'));
     expect(rawEntry?.drill?.entries.some((x) => x.label === 'rank_pct')).toBe(true);
     expect(rawEntry?.drill?.raw).toBe(signal);
     const blockEntry = entries.find((e) => e.label === '当日全体分布');
     expect(blockEntry?.drill?.raw).toBe(signalsBlock);
+  });
+
+  it('缺截面分位显示「—」而不是 0（0 是「最靠后」，不是「没算出」）', () => {
+    const entries = signalItemDrillEntries({ ...signal, rank_pct: null }, signalsBlock);
+    const score = entries.find((e) => e.label === '研究评分');
+    expect(score?.value).toBe('—');
+    expect(score?.hint).toContain('不可直接比较');
   });
 
   it('执行条目：取价来源挂解释层（broker_fill/降级标记如实）', () => {

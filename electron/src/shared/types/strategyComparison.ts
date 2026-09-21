@@ -304,7 +304,11 @@ export function calculateComprehensiveScore(
 }
 
 /**
- * 工具函数：生成智能建议
+ * 工具函数：生成比较结论
+ *
+ * 合规约束（开源发行）：只陈述本页口径下的比较结果，不得出现「建议优先考虑」
+ * 「适合稳健型投资者」「推荐组合配置」这类**投资建议 / 适当性结论** —— 本工具
+ * 不是持牌投顾，无权对投资者做适当性判断。
  */
 export function generateRecommendations(
   strategies: StrategyComparisonItem[],
@@ -318,22 +322,22 @@ export function generateRecommendations(
   const topStrategy = result.rankings[0];
   if (topStrategy) {
     recommendations.push(
-      `${topStrategy.strategy_name}综合表现最佳，综合评分${topStrategy.score.toFixed(1)}分，建议优先考虑。`
+      `${topStrategy.strategy_name}综合评分最高（${topStrategy.score.toFixed(1)}分，按本页比较口径计算）。`
     );
   }
 
-  // 分析风险收益比
+  // 风险收益比：只陈述筛选口径，不落到投资者适当性结论上
   const highReturnLowRisk = strategies.filter(s =>
     s.performance.annual_return > 10 && Math.abs(s.performance.max_drawdown) < 15
   );
 
   if (highReturnLowRisk.length > 0) {
     recommendations.push(
-      `${highReturnLowRisk.map(s => s.strategy_name).join('、')}兼具高收益和低风险特征，适合稳健型投资者。`
+      `${highReturnLowRisk.map(s => s.strategy_name).join('、')}在本页口径下年化收益高于10%且最大回撤小于15%（历史样本区间，不代表未来）。`
     );
   }
 
-  // 组合建议
+  // 组合权重（不是「推荐配置」：配置决策由用户自己做）
   if (strategies.length >= 2 && result.optimal_allocation) {
     const allocation = result.optimal_allocation
       .map(a => {
@@ -342,7 +346,7 @@ export function generateRecommendations(
       })
       .join(' + ');
 
-    recommendations.push(`推荐组合配置：${allocation}`);
+    recommendations.push(`组合权重（按比较口径计算）：${allocation}`);
   }
 
   return recommendations;

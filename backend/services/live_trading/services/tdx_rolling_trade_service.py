@@ -2,7 +2,7 @@
 TDX Rolling Trade Service - 按分数滚动买卖并推送（三档执行模式）
 
 规则（每日推理完成后执行一次）：
-  1. 个股 fusion_score > SCORE_THRESHOLD（2.2）→ 买入候选
+  1. 个股 fusion_score > SCORE_THRESHOLD（2.2）→ 进入买入候选
   2. 已持仓且最新分数 <= 2.2（或最新推理不再有该股）→ 卖出
   3. 已持仓且最新分数仍 > 2.2 → 持有不动
   4. 上证指数（000001.SH）收盘 < MA20 → 只卖不买（强制过滤）
@@ -30,7 +30,9 @@ from backend.services.live_trading.services.tdx_push_service import (
 
 logger = logging.getLogger(__name__)
 
-# 默认分数阈值: fusion_score > 2.2 视为买入信号（可在设置页修改，存 Redis）
+# 默认分数阈值: fusion_score 高于该阈值即进入买入候选（可在设置页修改，存 Redis）。
+# ⚠️ 这是**绝对分**阈值不是截面分位：`fusion_score > 2.2` 说明不了「当日排前几%」
+# （那要看 rank_pct）。注释与推送文案都别把它说成「截面靠前/靠后」——没算过的排名不能说。
 DEFAULT_SCORE_THRESHOLD = 2.2
 # 默认每只股票固定买入金额（元）
 DEFAULT_FIXED_BUY_AMOUNT = 10000.0

@@ -19,6 +19,7 @@ import { clsx } from 'clsx';
 import { Cpu, Database, Star, Layers, TrendingUp } from 'lucide-react';
 import { useLocation } from 'react-router-dom';
 import { useInferenceCenter } from '../adapter';
+import { ComplianceStrip } from '../../../components/shared/compliance/ComplianceChrome';
 import { useCrossSectionInference } from '../hooks/useCrossSectionInference';
 import {
   RAIL_WIDTH_KEY,
@@ -418,6 +419,13 @@ export const InferenceCenterShell: React.FC = () => {
           }}
         />
       )}
+      {/* 合规免责横条（A股/港股/美股三市场共用本页壳，改一处三处生效） */}
+      <ComplianceStrip className="shrink-0 pt-1" />
+      {/* 给悬浮 Dock 让位：root 只有 p-4（16px），不足 Dock 胶囊的 64px，
+          不留实体占位块的话免责横条正好被 .bottom-dock 盖住（padding 无效，
+          实测见 SignalsExplorerPage 同名注释）。无 Dock 页面 --dock-height 为 0，
+          max() 兜住 calc(0px-8px) 负值。 */}
+      <div aria-hidden className="h-[max(0px,calc(var(--dock-height)-8px))] shrink-0" />
     </div>
   );
 };

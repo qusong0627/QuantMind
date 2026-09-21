@@ -18,8 +18,9 @@ export interface GlossaryEntry {
 export const GLOSSARY: Record<string, GlossaryEntry> = {
   // ── 信号/选股 ─────────────────────────────────────────────
   rank_pct: {
-    plain: '当日全市场排名分位（越高越靠前）',
-    detail: '当日截面百分位排名（0~1）。1.0=全市场第一；选股阈值按分位口径（如 p98）而非原始分数，跨模型/量纲稳定。',
+    plain: '研究评分：当日截面分位（越高越靠前）',
+    detail:
+      '同一次推理、同一交易日内该标的的截面百分位（0~1，乘 100 即 0–100 研究评分）。**分母是这一次推理跑出的那批标的**，不是整个市场，所以跨模型/跨市场不可直接比较。选股阈值按分位口径（如 p98）而非原始分数，因为原始分量纲随模型变。',
     category: '信号',
   },
   fusion_score: {
@@ -28,8 +29,9 @@ export const GLOSSARY: Record<string, GlossaryEntry> = {
     category: '信号',
   },
   signal_side: {
-    plain: '信号方向：买 / 卖 / 观望',
-    detail: 'BUY/SELL/HOLD 三态，由推理链路按分位与置信归一生成（T-P4 修复后带 confidence 共识，不再绝对阈值判死）。',
+    plain: '当日截面位置：靠前 / 靠后 / 居中',
+    detail:
+      'BUY/SELL/HOLD 三态，是模型在**当日截面中的相对位置**，不是买卖指令。推理链路按分位 + 共识 + 置信归一生成（pred.parquet 回退路线按绝对阈值，故两条来源的阈值不同、仅同源可比）。展示面只说位置；执行面（模拟盘下单、委托台账）仍按买入/卖出表述。',
     category: '信号',
   },
 

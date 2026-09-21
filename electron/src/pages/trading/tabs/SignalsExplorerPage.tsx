@@ -16,6 +16,7 @@ import { StockTerminalWindow, prefetchTerminal } from '../../../features/market-
 import { StatTile } from '../../../features/desk/components/cardKit';
 import { getDeskToday } from '../../../features/desk/services/deskService';
 import { EvalScoreBadge } from '../../../components/shared/EvalScoreBadge';
+import { ComplianceStrip } from '../../../components/shared/compliance/ComplianceChrome';
 import SignalLookbackCard from '../../../features/stock-terminal/components/SignalLookbackCard';
 import type { SignalsBlock } from '../../../features/desk/types';
 import { BarChart3, TrendingDown } from 'lucide-react';
@@ -64,7 +65,9 @@ const SignalsExplorerPage: React.FC<SignalsExplorerPageProps> = ({ onModelRefres
   const [selected, setSelected] = useState<string | null>(null);
   const [selectedName, setSelectedName] = useState('');
   const [windowSymbol, setWindowSymbol] = useState<string | null>(null);
-  // 默认只买入候选（页签语义 = 候选信号）
+  // 默认只到「截面靠前」（页签语义 = 候选信号）：这是一道**位置**筛选，不是方向默认——
+  // 筛的是模型当日输出里排在前面的一批，筛完该怎么处理由用户自己定。
+  // 展示层走 signalPositionLabel，所以筛选条上显示的是「位置 靠前」而不是「BUY」。
   const [filters, setFilters] = useState<ListFilters>({ side: 'BUY' });
   const [models, setModels] = useState<{ model_id: string; display_name?: string }[]>([]);
   const [listTotal, setListTotal] = useState(0);
@@ -394,6 +397,10 @@ const SignalsExplorerPage: React.FC<SignalsExplorerPageProps> = ({ onModelRefres
                 压矮 52px（左栏可见行数跟着少一行）。
             高度算式沿用 ResearchPlatformPage 的 --dock-height 约定；max() 兜住无 Dock
             的页面，否则 calc(0px-12px) 是负值，整条声明失效变 0。 */}
+        {/* 合规免责横条：放在 Dock 占位块**之上**，否则会被悬浮 Dock 盖住。
+            gap-3（12px）+ 占位块 52px + 容器 py-3（12px）= 距底 76px > Dock 胶囊顶沿 64px */}
+        <ComplianceStrip className="shrink-0 px-1" />
+
         <div aria-hidden className="h-[max(12px,calc(var(--dock-height)-12px))] shrink-0" />
 
         {/* 个股终端浮窗（点「个股终端」打开选中股） */}

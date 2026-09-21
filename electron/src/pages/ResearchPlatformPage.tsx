@@ -84,6 +84,7 @@ import {
 } from '../features/research/utils/featureMapper';
 import '../styles/research-next-theme.css';
 import { useAppSelector } from '../store';
+import { ComplianceStrip } from '../components/shared/compliance/ComplianceChrome';
 import { selectCurrentMarket } from '../store/slices/uiSlice';
 import { getMarketConfig } from '../config/marketConfig';
 
@@ -3505,6 +3506,10 @@ export const ResearchPlatformPage: React.FC = () => {
                   </motion.div>
                 </motion.div>
               </div>
+
+              {/* 合规免责横条：放在页面底部、Dock 预留区（contentOuter 的
+                  pb-[calc(var(--dock-height)-12px)]）之上，不会被悬浮 Dock 盖住 */}
+              <ComplianceStrip className="shrink-0 px-1 pt-2" />
             </div>
           </div>
         </div>

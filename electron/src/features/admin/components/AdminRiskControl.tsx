@@ -22,6 +22,7 @@ import {
 import type { ColumnsType } from 'antd/es/table';
 import { adminService } from '../services/adminService';
 import type { RiskEventAdmin, RiskRuleAdmin } from '../types';
+import { isLiveTradingEnabled } from '../../../config/tradingFlags';
 
 const { Title, Text } = Typography;
 
@@ -399,8 +400,12 @@ export const AdminRiskControl: React.FC = () => {
                         <Select
                             options={[
                                 { label: '仅模拟盘', value: 'SIMULATION' },
-                                { label: '仅实盘告警', value: 'REAL' },
-                                { label: '模拟+实盘告警', value: 'BOTH' },
+                                ...(isLiveTradingEnabled()
+                                    ? [
+                                        { label: '仅实盘告警', value: 'REAL' },
+                                        { label: '模拟+实盘告警', value: 'BOTH' },
+                                    ]
+                                    : []),
                             ]}
                         />
                     </Form.Item>

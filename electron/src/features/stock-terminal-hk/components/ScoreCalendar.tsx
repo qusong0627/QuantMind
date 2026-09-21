@@ -11,6 +11,9 @@ import { ChevronLeft, ChevronRight, CalendarDays, Zap, TrendingUp, Activity } fr
 import { Modal, Spin, message } from 'antd';
 import type { InferenceExecutionResult } from '../../../services/modelTrainingService';
 import { modelTrainingService } from '../../../services/modelTrainingService';
+// 展示面口径：signal_side 只说「靠前/靠后/居中」，不写成买卖标记
+// （见 features/shared/signalVocabulary.ts）
+import { signalPositionLabel } from '../../shared/signalVocabulary';
 
 /** 单日分数条目：value 用于着色，score 为基准值（同 value），side 为信号方向 */
 export interface CalendarScore { date: string; value: number; side: string | null; }
@@ -389,7 +392,7 @@ export function ScoreCalendar({ symbol, onBarClick, selectedDate, modelId, onInf
               }}
               disabled={c.value == null && inferring}
               title={c.value != null
-                ? `${c.date} 分数 ${fmtScore(c.value)}${c.side ? ` · ${c.side}` : ''}（点击整表切换当天）`
+                ? `${c.date} 分数 ${fmtScore(c.value)}${c.side ? ` · ${signalPositionLabel(c.side)}` : ''}（点击整表切换当天）`
                 : `${c.date} 无推理 · 点击推理该日；按住拖动可批量选多日`}
               className={`aspect-square rounded-md text-[9px] font-mono font-bold flex flex-col items-center justify-center leading-none border transition-transform ${
                 c.value != null ? 'hover:scale-105 cursor-pointer' : 'cursor-pointer hover:border-blue-300 hover:bg-blue-50'
@@ -400,7 +403,12 @@ export function ScoreCalendar({ symbol, onBarClick, selectedDate, modelId, onInf
               } ${c.today ? 'ring-2 ring-blue-400 ring-offset-1' : ''} ${c.active ? 'ring-2 ring-amber-500 ring-offset-1' : ''}`}
             >
               {c.day}
-              {c.value != null && <span className="text-[7px] opacity-80">{c.side === 'BUY' ? 'B' : c.side === 'SELL' ? 'S' : ''}</span>}
+              {/* 角标只标「当日截面位置」：▲=靠前 / ▼=靠后，HOLD 与未知判定留空。
+                  颜色不单独指定，继承格子的文字色——而格子颜色由**分数符号**决定
+                  （红=正分 / 绿=负分，港股同为涨红跌绿），所以红色并不表示「买入」，
+                  ▲/▼ 也不表示「要涨/要跌」。两条轴互相独立：负分格子上出现 ▲
+                  并不矛盾（分数低但截面位置靠前），此刻说的仍是位置，不是方向。 */}
+              {c.value != null && <span className="text-[7px] opacity-80">{c.side === 'BUY' ? '▲' : c.side === 'SELL' ? '▼' : ''}</span>}
             </button>
           ))}
           {cells.length === 0 && (
@@ -438,7 +446,7 @@ export function ScoreCalendar({ symbol, onBarClick, selectedDate, modelId, onInf
           <span className="w-3 h-3 rounded-sm bg-emerald-300" />
           <span className="w-3 h-3 rounded-sm bg-emerald-500" />
           <span className="w-3 h-3 rounded-sm bg-emerald-600" />
-          <span className="ml-1">B=买入 S=卖出</span>
+          <span className="ml-1">▲ 靠前 · ▼ 靠后</span>
         </div>
       </div>
     </div>

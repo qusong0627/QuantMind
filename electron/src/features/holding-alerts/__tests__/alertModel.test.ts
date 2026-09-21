@@ -6,6 +6,7 @@ import {
   kindLabel,
   panelCounts,
   parseAlertTime,
+  scoreFreqBadge,
   scoreTransition,
   sentinelHeadline,
   severityMeta,
@@ -65,6 +66,43 @@ describe('展示口径', () => {
     expect(scoreTransition({ scorePrev: null, scoreNow: -0.153 })).toBe('现 -0.153');
     expect(scoreTransition({ scorePrev: 0.2, scoreNow: null })).toBe('曾 +0.200');
     expect(scoreTransition({ scorePrev: null, scoreNow: null })).toBe('—');
+  });
+});
+
+describe('预警卡片分频标注', () => {
+  test('分数类预警：实时分标「实时分」并写明判定依据', () => {
+    const badge = scoreFreqBadge({ freq: 'realtime', score_as_of: '2026-09-20' });
+
+    expect(badge?.label).toBe('实时分');
+    expect(badge?.title).toContain('盘中实时分');
+    expect(badge?.title).toContain('2026-09-20');
+  });
+
+  test('日频分如实标「日频分」：必须说清是隔夜分且为何不刷新', () => {
+    const badge = scoreFreqBadge({ freq: 'daily', score_as_of: '2026-09-21' });
+
+    expect(badge?.label).toBe('日频分');
+    expect(badge?.title).toContain('日频批次分');
+    expect(badge?.title).toContain('2026-09-21');
+    expect(badge?.title).toContain('未开启');
+  });
+
+  test('缺 freq = 不渲染徽章（利空/异动/名单类没有分频概念，不能默认成实时）', () => {
+    expect(scoreFreqBadge({})).toBeNull();
+    expect(scoreFreqBadge(null)).toBeNull();
+    expect(scoreFreqBadge(undefined)).toBeNull();
+    expect(scoreFreqBadge({ freq: 'intraday' })).toBeNull();
+  });
+
+  test('缺 score_as_of 不崩，只是不写日期', () => {
+    const badge = scoreFreqBadge({ freq: 'daily' });
+
+    expect(badge?.label).toBe('日频分');
+    expect(badge?.title).not.toContain('信号日 ');
+  });
+
+  test('mkItem 的 detail 是空对象 → 分数预警卡不冒充实时分', () => {
+    expect(scoreFreqBadge(mkItem().detail)).toBeNull();
   });
 });
 

@@ -129,7 +129,7 @@ export const QlibStrategyConfigurator: React.FC<Props> = ({ strategyType, params
         />
         {nDrop === 0 && (
           <div className="mt-1 text-[10px] text-blue-500 italic">
-            * 设置为 0 表示只要股票跌出前 N 名即立即卖出，不设对冲限制。
+            * 设置为 0 表示只要股票跌出前 N 名即移出持仓，不设对冲限制。
           </div>
         )}
       </div>

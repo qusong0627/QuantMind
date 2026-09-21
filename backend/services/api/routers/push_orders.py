@@ -33,6 +33,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from backend.services.api.user_app.middleware.auth import get_current_user
+from backend.shared.live_trading_gate import ensure_real_trading_allowed
 from backend.shared.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -655,6 +656,20 @@ async def _apply_risk_verdicts(
             leg.setdefault("risk_verdict", "unavailable")
 
 
+def _ensure_channels_allowed(body: PushIn) -> None:
+    """实盘闸门关闭时拒绝 ``real`` 通道。
+
+    **显式 403，不静默降级成纯模拟**：调用方勾了「实盘镜像」却只拿到一笔虚拟撮合，
+    比报错糟得多——用户会以为下的是真单。前端 ``pushModel.pushGate`` 已有一份
+    同样的判定（开关关闭时连勾选项都不渲染），这里是兜底，防的是绕过 UI 的直接
+    调用与旧客户端。
+
+    走共享闸门（而不是自己读 env），403 的机器可读 detail 与中间件一致，
+    前端一处识别即可。
+    """
+    ensure_real_trading_allowed("REAL" if "real" in body.channels else "SIMULATION")
+
+
 @router.post("/push-orders/preflight")
 async def push_orders_preflight(
     body: PushIn, current_user: dict = Depends(get_current_user)
@@ -667,6 +682,7 @@ async def push_orders_preflight(
     """
     from backend.services.trade_shared.redis_client import get_redis as get_trade_redis
 
+    _ensure_channels_allowed(body)
     redis = get_trade_redis()
     if getattr(redis, "client", None) is None:
         redis.connect()
@@ -701,6 +717,8 @@ async def push_orders(body: PushIn, current_user: dict = Depends(get_current_use
     逐笔循环、**单笔失败不阻断其余**（照抄 ``copilot.execute_advice`` 的批量范式）；
     幂等键 ``cand-{batch_id}-{symbol}-{side}`` 保证重复点击不重复下单。
     """
+    _ensure_channels_allowed(body)
+
     from backend.services.simulation.services.order_router import (
         OrderRequest,
         submit_order,

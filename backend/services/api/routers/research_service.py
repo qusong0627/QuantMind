@@ -349,6 +349,42 @@ def _to_bool(v: Any) -> bool:
     return bool(v)
 
 
+def _rank_pct_of(row: Any) -> float | None:
+    """从分数行里取截面分位（0–1）；取不到或越界一律 ``None``。
+
+    越界宁可返回 ``None``（前端显示「—」）也不截断：分位越界说明这一行的来源
+    不对（例如被当成百分数写进来了），把它夹到 1.0 会渲染成一个看起来很正常的
+    「100 分」，把口径错误藏起来。
+    """
+    if row is None:
+        return None
+    if isinstance(row, dict):
+        raw = row.get("rank_pct")
+    else:
+        # SQLAlchemy Row：必须走 `_mapping` 按列名取。注意**不能**写
+        # `"rank_pct" in row` —— Row 的 `in` 判的是「值」不是「键」，永远为假。
+        try:
+            raw = row._mapping.get("rank_pct")
+        except AttributeError:
+            try:
+                raw = row["rank_pct"]
+            except (TypeError, KeyError, IndexError):
+                return None
+    # 显式挡掉字符串/布尔：`float("0.5")` 能过，但前端 `typeof x !== 'number'`
+    # 会把同一个值判为缺失——两端判定必须一致，否则同一行数据一边显示分数、
+    # 一边显示「—」。（DB 的 DOUBLE PRECISION 走 asyncpg 是 float，
+    # parquet 走 numpy.float64 也是 float 子类，两条来源都不受影响。）
+    if raw is None or isinstance(raw, (bool, str, bytes)):
+        return None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(value) or value < 0.0 or value > 1.0:
+        return None
+    return value
+
+
 def _load_quantdb_labels() -> dict[str, dict[str, Any]]:
     """从 QuantDB 静态数据加载概念/指数标签。
 
@@ -3530,6 +3566,9 @@ async def predict_single_stock(
                         """
                         SELECT e.fusion_score, e.signal_side, e.score_rank, e.quality,
                                e.expected_price,
+                               -- 截面分位（T-P1-01 契约列）：对外展示的唯一分数刻度，
+                               -- 由 compute_rank_pct 在写入时算好（同一次推理内百分位）。
+                               e.rank_pct,
                                -- run → model 解析：qm_model_inference_runs 只登记
                                -- UI/批量入口的 run（803 completed，覆盖 21% 分数行），
                                -- 定时批次与实时链路自造 run_id 不落该表 → run_model_id
@@ -3592,8 +3631,9 @@ async def predict_single_stock(
             consensus_rows.append(r)
 
     # 独立轻路线主分（内存态：pred.parquet 直读或实时信号，不读信号表）。
-    # 分位扇形所需 quality 允许从信号表同模型同日行只读复用（零写入），
-    # 无则保持 None（旧模型不伪造区间）。
+    # 分位扇形所需 quality 与对外展示的 rank_pct 允许从信号表同模型同日行只读复用
+    # （零写入），无则保持 None（**不伪造**：分位要一整条截面才算得出来，
+    # 单只标的的轻路线拿不到截面，宁可在界面上显示「—」）。
     if independent_main is not None:
         main_row = independent_main
         resolved_date = str(independent_main["trade_date"])
@@ -3605,6 +3645,8 @@ async def predict_single_stock(
                 independent_main.get("run_model_id"),
             }:
                 continue
+            if main_row.get("rank_pct") is None and qr.get("rank_pct") is not None:
+                main_row["rank_pct"] = qr.get("rank_pct")
             if isinstance(qr.get("quality"), str) and qr.get("quality"):
                 main_row["quality"] = qr.get("quality")
                 break
@@ -4023,6 +4065,11 @@ async def predict_single_stock(
         "expected_return": p50_ret,
         "confidence": confidence,
         "rating": rating,
+        # 对外展示的中性刻度：同一模型同交易日的截面分位（0–1），前端自行换算成
+        # 0–100 研究评分（`electron/src/features/shared/researchScore.ts`）。
+        # 不在这里换算，是为了「分位 → 评分」只有一处实现。
+        # 取不到截面（独立轻路线、老行）时为 None，前端显示「—」而不是 0。
+        "rank_pct": _rank_pct_of(main_row),
         "p10_return": round(p10_ret * 100, 2) if quantile_prediction else None,
         "p50_return": round(p50_ret * 100, 2),
         "p90_return": round(p90_ret * 100, 2) if quantile_prediction else None,

@@ -7,8 +7,9 @@
  * 三条纪律：
  * 1. **哨兵状态如实展示**：没在跑 / 心跳过期 / 你名下 0 只，都要显式说出来 ——
  *    否则「列表为空」会被读成「我的持仓没问题」，而这正是最危险的误读。
- * 2. **一键卖出**复用候选推送的 `PushConfirmPanel(side='sell')`：数量由服务端按
- *    `available_volume` 给，预检逐笔列风险，**不自动下单**（用户明确要求只提醒 + 手动确认）。
+ * 2. **由预警直接发起的卖单默认关闭**（`ALLOW_ALERT_PROPOSED_SELL`）：整条链路
+ *    （`PushConfirmPanel(side='sell')`、服务端按 `available_volume` 定量、逐笔预检、
+ *    绝不自动下单）都还在，但卡片上不再出现那个按钮。理由见常量处的注释。
  * 3. **只有真提交出去才回写「已卖出」**（`shouldMarkExecuted`）；被拦截/预演/零成功
  *    一律保持待处理，绝不显示假的已完成。
  */
@@ -38,6 +39,7 @@ import {
   alertAgeText,
   kindLabel,
   panelCounts,
+  scoreFreqBadge,
   scoreTransition,
   sentinelHeadline,
   severityMeta,
@@ -65,6 +67,20 @@ const HEADLINE_TONE: Record<string, string> = {
 
 const DEFAULT_CHANNELS: PushChannel[] = ['sim'];
 
+/**
+ * 预警卡片上是否给出「直接按这条预警推卖单」的按钮。**默认 false（不渲染）**。
+ *
+ * 为什么和交易台侧栏的买/卖按钮区别对待：那边是**用户**先从列表里挑好票，按钮只是把
+ * 他挑中的票送进下单流程，决定是用户下的；这里反过来——**是系统**判定评分下滑，然后
+ * 在同一张卡上递给你一个卖出按钮。机器提议具体标的的卖出时机，正是「荐股软件」的形态，
+ * 与是否要点确认无关。所以卡片只陈述事实（评分由 X 降至 Y）+ 提供「去持仓」，
+ * 卖不卖、怎么卖由用户到执行面自己决定。
+ *
+ * 翻成 true 会完整恢复旧行为（链路一行未删）：`PushConfirmPanel(side='sell')`、
+ * 服务端按 `available_volume` 定量、逐笔预检、仍然不自动下单。
+ */
+const ALLOW_ALERT_PROPOSED_SELL = false;
+
 export const HoldingAlertPanel: React.FC = () => {
   const navigate = useNavigate();
   const [items, setItems] = useState<HoldingAlertItem[]>([]);
@@ -75,7 +91,7 @@ export const HoldingAlertPanel: React.FC = () => {
   const [error, setError] = useState('');
   const [busyId, setBusyId] = useState(0);
   const [notice, setNotice] = useState('');
-  /** 正在卖出/清仓的那条预警（null = 面板关着） */
+  /** 正在按预警卡片推送卖单的那条记录（null = 面板关着） */
   const [sellTarget, setSellTarget] = useState<HoldingAlertItem | null>(null);
   const [channels, setChannels] = useState<PushChannel[]>(DEFAULT_CHANNELS);
 
@@ -237,14 +253,29 @@ export const HoldingAlertPanel: React.FC = () => {
                   <span className="shrink-0 font-mono text-[11px] font-semibold text-slate-700">
                     {scoreTransition(item)}
                   </span>
+                  {/* 分频标注：这条是按盘中实时分还是隔夜日频分judged出来的
+                      （标题里的「（日频分）」不在卡片上显示，只能这里出） */}
+                  {(() => {
+                    const fb = scoreFreqBadge(item.detail);
+                    if (!fb) return null;
+                    return (
+                      <span title={fb.title} className={`shrink-0 rounded-md border px-1 py-0.5 text-[9px] font-bold ${fb.cls}`}>
+                        {fb.label}
+                      </span>
+                    );
+                  })()}
                   <span className="ml-auto flex shrink-0 items-center gap-1.5">
-                    <button
-                      type="button"
-                      onClick={() => setSellTarget(item)}
-                      className="rounded-lg bg-red-600 px-2 py-1 text-[11px] font-bold text-white hover:bg-red-700"
-                    >
-                      一键卖出
-                    </button>
+                    {/* 卡片上的「卖出」按钮默认**不渲染**，只留「去持仓」——见 ALLOW_ALERT_PROPOSED_SELL
+                        的说明。下方 PushConfirmPanel 那一整套仍然接着，把常量翻成 true 即可恢复。 */}
+                    {ALLOW_ALERT_PROPOSED_SELL && (
+                      <button
+                        type="button"
+                        onClick={() => setSellTarget(item)}
+                        className="rounded-lg bg-red-600 px-2 py-1 text-[11px] font-bold text-white hover:bg-red-700"
+                      >
+                        卖出
+                      </button>
+                    )}
                     <button
                       type="button"
                       disabled={busy}

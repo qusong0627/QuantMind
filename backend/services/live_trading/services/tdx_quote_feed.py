@@ -660,9 +660,13 @@ async def _check_strategy_alerts(
     user_id: str,
     positions: list[dict],
 ) -> None:
-    """策略提醒：持仓股最新推理 fusion_score ≤ 滚动阈值 → 卖出提醒。
+    """策略提醒：持仓股最新推理 fusion_score ≤ 滚动阈值 → 提醒分数已落到阈值下。
 
     每个新推理 run 检查一次（last_run 存 Redis，避免每 3s 重复查库/重复提醒）。
+
+    站内通知只说**分数与阈值的关系**（这条查询根本没取 `rank_pct`，写成「截面靠后」
+    就是编造一个没算过的排名）；通达信预警仍按 sell 侧推送 —— 那是执行面，
+    客户端收的是委托要素，不是给人读的结论。
     """
     held = {p["symbol"]: p for p in positions}
     if not held:
@@ -726,12 +730,15 @@ async def _check_strategy_alerts(
             if float(score) <= threshold:
                 name = p.get("name") or symbol
                 reason = f"最新推理分数 {float(score):.2f} ≤ 阈值 {threshold:.2f}"
-                logger.info("[TdxFeed] 策略卖出提醒 %s %s: %s", name, symbol, reason)
+                logger.info("[TdxFeed] 策略分数提醒 %s %s: %s", name, symbol, reason)
                 await _notify(
                     tenant_id=tenant_id,
                     user_id=user_id,
                     title=f"策略提醒 · {name}",
-                    content=f"{symbol} {reason}，建议卖出（预测日 {row.get('prediction_trade_date') or '--'}）",
+                    content=(
+                        f"{symbol} {reason}"
+                        f"（预测日 {row.get('prediction_trade_date') or '--'}）"
+                    ),
                     level="warning",
                     push_tdx=[{
                         "symbol": p["suffix"],

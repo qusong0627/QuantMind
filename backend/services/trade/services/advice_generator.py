@@ -1,12 +1,12 @@
 """建议卡规则生成器（T-P6-16 闭环补全）：信号×情报共振 → 观察仓建议卡（人在环）。
 
 机构口径（v1，严格；所有卡片 source="rule_engine"、context_refs.gen 幂等）：
-- 候选 = 当日融合信号 **BUY 侧 Top20**（fusion_score 降序）；
+- 候选 = 当日融合信号 **靠前梯队 Top20**（fusion_score 降序，即 signal_side='BUY' 侧）；
 - **否决**：近 24h 存在风险类告警（news:negative / news:risk_event / critical）的标的不生成
   ——与新闻 veto 同纪律；同时列出共振项（近 24h news:positive）作为排序与理由增益；
 - **去重**：模拟账户已持仓的标的不生成；近 7 自然日（≈5 交易日）已自动生成过同标的的不再生成；
 - **regime 门控**：日内 regime position_hint ≤ 0.4（弱市）→ 整体停发；
-- 产出上限：每交易日 ≤ 3 张；动作 = 最小观察仓（100 股，市价）；执行仍由用户面板一键决策。
+- 产出上限：每交易日 ≤ 3 张；动作 = 最小观察仓（100 股，市价）；执行仍由用户在面板自行决定。
 - rationale 强制纪律声明（自动生成/单一信号透镜/仅观察仓/执行前复核）。
 
 调度：trade 常驻 worker，交易日 ≥16:20 一次（Redis done 键防重跑）；也可 CLI：
@@ -95,9 +95,9 @@ def build_card(*, candidate: dict[str, Any], gen_key: str, trade_date: str, side
     regime_txt = f"{regime_hint:.2f}" if regime_hint is not None else "未取到"
     counts = side_counts or {}
     return {
-        "title": f"观察仓（自动）：{sym} 融合信号居前（{res}）",
+        "title": f"观察仓（自动）：{sym} 融合信号截面靠前（{res}）",
         "rationale": (
-            f"自动生成（规则 v1 · 信号×情报共振）：{trade_date} 融合信号 BUY 侧 Top{TOP_N} 之列"
+            f"自动生成（规则 v1 · 信号×情报共振）：{trade_date} 融合信号靠前梯队 Top{TOP_N} 之列"
             f"（序列第 {candidate['rank']}，分 {candidate['fusion_score']:.4f}）；{res}；"
             f"当日信号分布 BUY {counts.get('BUY', '—')} / SELL {counts.get('SELL', '—')} / "
             f"HOLD {counts.get('HOLD', '—')}；日内 regime 仓位提示 {regime_txt}。"

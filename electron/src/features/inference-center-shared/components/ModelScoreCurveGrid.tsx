@@ -140,7 +140,9 @@ export const ModelScoreCurveGrid: React.FC<ModelScoreCurveGridProps> = ({
           <span className="font-bold text-violet-600">自选模式</span>
           <span>已匹配 {consensus.length}/{selectedCount} 个模型当日分数</span>
           <span className="text-slate-600">
-            · {isThin ? '看多占比（样本过少）' : '看多占比'} {consensusScore.toFixed(1)}%
+            {/* 该值是「判为靠前的模型数 / 参与模型数」，本来就是占比（见后端
+                research_service.consensus_score），说「占比」比说「看多」更贴事实 */}
+            · {isThin ? '靠前占比（样本过少）' : '靠前占比'} {consensusScore.toFixed(1)}%
           </span>
         </div>
       )}

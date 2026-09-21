@@ -290,54 +290,6 @@ class StrategyService {
             config as unknown as Record<string, unknown>,
         );
     }
-
-    /**
-     * 获取Mock数据 (降级用)
-     */
-    private getMockStrategies(): Strategy[] {
-        return [
-            {
-                id: '1',
-                name: 'AI量化策略A (模拟)',
-                status: 'running',
-                total_return: 15.67,
-                today_return: 2.45,
-                risk_level: 'medium',
-                created_at: new Date().toISOString(),
-                updated_at: new Date().toISOString()
-            },
-            {
-                id: '2',
-                name: '市场中性策略 (模拟)',
-                status: 'running',
-                total_return: 8.92,
-                today_return: 1.23,
-                risk_level: 'low',
-                created_at: new Date().toISOString(),
-                updated_at: new Date().toISOString()
-            },
-            {
-                id: '3',
-                name: '趋势跟踪策略 (模拟)',
-                status: 'paused',
-                total_return: -2.34,
-                today_return: -0.56,
-                risk_level: 'high',
-                created_at: new Date().toISOString(),
-                updated_at: new Date().toISOString()
-            },
-            {
-                id: '4',
-                name: '套利策略B (模拟)',
-                status: 'error',
-                total_return: 5.67,
-                today_return: 0.00,
-                risk_level: 'medium',
-                created_at: new Date().toISOString(),
-                updated_at: new Date().toISOString()
-            }
-        ];
-    }
 }
 
 export const strategyService = new StrategyService();

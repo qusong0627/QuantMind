@@ -17,6 +17,7 @@ import {
   ShieldCheck,
 } from 'lucide-react';
 import { SERVICE_URLS } from '../../../config/services';
+import { isLiveTradingEnabled } from '../../../config/tradingFlags';
 
 // 与后端 ApiKeyInfo 对齐：/api-keys/init 是幂等接口，永不返回 secret_key
 interface ApiKeyInfo {
@@ -55,6 +56,8 @@ const SettingsCenter: React.FC<SettingsCenterProps> = ({ userId, isActive }) => 
   const [showSecretKey, setShowSecretKey] = useState(false);
   const [secretKey, setSecretKey] = useState<string | null>(null);
 
+  // 实盘开关关闭时只有凭证页存在；初值直接落 credentials，避免首帧选中一个不渲染的面板
+  const liveEnabled = isLiveTradingEnabled();
   const [activeTab, setActiveTab] = useState<'credentials' | 'brokers' | 'mirror'>('credentials');
 
   // 大 QMT 真单镜像仅 A 股；切换市场后回到凭证页，避免停在无入口的面板上
@@ -63,6 +66,13 @@ const SettingsCenter: React.FC<SettingsCenterProps> = ({ userId, isActive }) => 
       setActiveTab('credentials');
     }
   }, [currentMarket, activeTab]);
+
+  // 实盘开关在会话内失效（重新构建后热更新）时同样回落到凭证页
+  useEffect(() => {
+    if (!liveEnabled && activeTab !== 'credentials') {
+      setActiveTab('credentials');
+    }
+  }, [liveEnabled, activeTab]);
 
   const handleCopy = async (text: string, key: string) => {
     await navigator.clipboard.writeText(text);
@@ -133,7 +143,9 @@ const SettingsCenter: React.FC<SettingsCenterProps> = ({ userId, isActive }) => 
           模拟交易设置
         </h3>
         <p className="text-xs text-gray-500 mt-1">
-          管理接入凭证、券商实盘通道与大 QMT 真单镜像。
+          {liveEnabled
+            ? '管理接入凭证、券商实盘通道与大 QMT 真单镜像。'
+            : '管理接入凭证与 API 密钥。'}
         </p>
       </div>
 
@@ -150,6 +162,7 @@ const SettingsCenter: React.FC<SettingsCenterProps> = ({ userId, isActive }) => 
           <Key size={13} className="inline mr-1.5 -mt-0.5" />
           接入凭证 / API 密钥
         </button>
+        {liveEnabled && (
         <button
           onClick={() => setActiveTab('brokers')}
           className={`px-4 py-2 rounded-xl text-xs font-bold transition-colors ${
@@ -161,7 +174,8 @@ const SettingsCenter: React.FC<SettingsCenterProps> = ({ userId, isActive }) => 
           <BankOutlined className="inline mr-1.5 -mt-0.5" />
           券商实盘接入
         </button>
-        {currentMarket === 'CN' && (
+        )}
+        {liveEnabled && currentMarket === 'CN' && (
         <button
           onClick={() => setActiveTab('mirror')}
           className={`px-4 py-2 rounded-xl text-xs font-bold transition-colors ${
@@ -272,7 +286,10 @@ const SettingsCenter: React.FC<SettingsCenterProps> = ({ userId, isActive }) => 
         </div>
         </div>
 
-        {/* 券商实盘接入卡片 */}
+        {/* 券商实盘接入卡片：实盘开关关闭时整个不挂载——
+            注意这两个面板原本用 `hidden` 类常驻挂载，只藏 tab 不够，
+            组件仍会发请求（在实盘关闭的部署上会拿到 403 并刷错误提示）。 */}
+        {liveEnabled && (
         <div
           className={`h-full bg-white rounded-3xl border border-gray-200 shadow-sm overflow-y-auto custom-scrollbar ${
             activeTab === 'brokers' ? '' : 'hidden'
@@ -283,8 +300,10 @@ const SettingsCenter: React.FC<SettingsCenterProps> = ({ userId, isActive }) => 
             <BrokerConfigCard market={currentMarket} />
           </div>
         </div>
+        )}
 
         {/* 大 QMT 真单镜像（仅 A 股） */}
+        {liveEnabled && (
         <div
           className={`h-full bg-white rounded-3xl border border-gray-200 shadow-sm overflow-y-auto custom-scrollbar ${
             activeTab === 'mirror' ? '' : 'hidden'
@@ -294,6 +313,7 @@ const SettingsCenter: React.FC<SettingsCenterProps> = ({ userId, isActive }) => 
             <QmtMirrorCard />
           </div>
         </div>
+        )}
       </div>
     </div>
   );

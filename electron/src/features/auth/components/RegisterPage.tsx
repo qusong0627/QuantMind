@@ -33,6 +33,8 @@ import { setUser } from '../store/authSlice';
 import { validatePasswordStrength, createValidationRules, debounce } from '../utils/validation';
 import { PageLoading } from './LoadingStates';
 import HelpCenterLink from '../../../components/common/HelpCenterLink';
+import { ComplianceStrip } from '../../../components/shared/compliance/ComplianceChrome';
+import { RegistrationConsent } from '../../../components/shared/compliance/RegistrationConsent';
 import type { RegisterData } from '../types/auth.types';
 
 const { Title, Text } = Typography;
@@ -60,6 +62,8 @@ const RegisterPage: React.FC = () => {
   const [passwordStrength, setPasswordStrength] = useState<any>(null);
   const [isInitialLoading, setIsInitialLoading] = useState(true);
   const [isMobile, setIsMobile] = useState(false);
+  // 合规确认项：未勾选不允许提交（勾选动作由 RegistrationConsent 落 terms_consent 留痕）
+  const [consentAccepted, setConsentAccepted] = useState(false);
   const dispatch = useAppDispatch();
   const [passwordVisible, setPasswordVisible] = useState(false);
   const [confirmPasswordVisible, setConfirmPasswordVisible] = useState(false);
@@ -89,7 +93,7 @@ const RegisterPage: React.FC = () => {
     }, 100);
     return () => clearTimeout(timer);
   }, []);
-            <HelpCenterLink variant="white" />
+
   // 密码强度检测（使用新的验证工具）
   const checkPasswordStrength = (password: string) => {
     if (!password) {
@@ -176,6 +180,13 @@ const RegisterPage: React.FC = () => {
     try {
       setRegisterError(null);
       clearErrors();
+
+      // 合规确认：未勾选不得提交（按钮虽已禁用，这里再兜一层，回车提交同样拦住）
+      if (!consentAccepted) {
+        setRegisterError('请先阅读并勾选合规确认项');
+        message.warning('请先阅读并勾选合规确认项', 3);
+        return;
+      }
 
       // 验证密码强度
       if (!passwordStrength || !passwordStrength.passed) {
@@ -422,6 +433,11 @@ const RegisterPage: React.FC = () => {
             />
           </Form.Item>
 
+          {/* 合规确认项：必须勾选，否则提交按钮禁用 */}
+          <Form.Item style={{ marginBottom: '16px' }}>
+            <RegistrationConsent checked={consentAccepted} onChange={setConsentAccepted} />
+          </Form.Item>
+
           <Form.Item style={{ marginBottom: '16px' }}>
             <Button
               type="primary"
@@ -429,6 +445,7 @@ const RegisterPage: React.FC = () => {
               size={isMobile ? 'large' : 'large'}
               block
               loading={isLoading}
+              disabled={!consentAccepted}
               style={{
                 height: isMobile ? '44px' : '48px',
                 borderRadius: '8px',
@@ -480,6 +497,11 @@ const RegisterPage: React.FC = () => {
           showIcon={false}
           style={{ fontSize: '12px' }}
         />
+
+        {/* 免责声明（文案与全站页脚同源；放卡内浅色区，深色渐变页脚上会看不清） */}
+        <div style={{ marginTop: 12, paddingTop: 12, borderTop: '1px solid rgba(0,0,0,0.06)' }}>
+          <ComplianceStrip />
+        </div>
 
         {/* 移动端登录链接 */}
         {isMobile && (

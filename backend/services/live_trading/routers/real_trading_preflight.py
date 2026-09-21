@@ -21,6 +21,7 @@ from backend.services.live_trading.services.signal_readiness_service import (
     signal_readiness_service,
 )
 from backend.shared.trade_redis_keys import build_trade_agent_heartbeat_key
+from backend.shared.live_trading_gate import ensure_real_trading_allowed
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -79,6 +80,9 @@ async def preflight_check(
     mode = str(trading_mode or "REAL").strip().upper()
     if mode not in {"REAL", "SHADOW", "SIMULATION"}:
         raise HTTPException(status_code=400, detail=f"unsupported trading_mode: {mode}")
+    # 模拟盘部署同样要过 preflight（REAL 只是入参默认值），所以不能按路径拦。
+    # 实盘关闭时 REAL/SHADOW 直接 403，SIMULATION 照常走完自检。
+    ensure_real_trading_allowed(mode)
 
     checks = []
 
@@ -796,6 +800,9 @@ async def trading_precheck(
     mode = str(trading_mode or "REAL").strip().upper()
     if mode not in {"REAL", "SHADOW", "SIMULATION"}:
         raise HTTPException(status_code=400, detail=f"unsupported trading_mode: {mode}")
+    # 同 preflight_check：模拟盘部署也要调它（`getTradingPrecheck('SIMULATION')`），
+    # 按模式判而不是按路径拦
+    ensure_real_trading_allowed(mode)
     resolved_user_id, resolved_tenant_id = _normalize_identity(auth)
     return await run_trading_readiness_precheck(
         db,

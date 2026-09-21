@@ -34,6 +34,23 @@ export interface SystemVersion {
   update?: SystemUpdateInfo | null;
 }
 
+/** 程序化交易报告的待填报信息（后端按版本单一事实源拼好；本工具不代为报告） */
+export interface ProgrammaticTradingDisclosure {
+  software_name: string;
+  version: string;
+  developer: string;
+  /** 逐行形态（前端本来想分行渲染时用） */
+  lines: string[];
+  /** 可直接整体复制的文本块，与 `lines.join('\n')` 一致 */
+  text: string;
+  high_frequency?: {
+    orders_per_second: number;
+    orders_per_minute: number;
+    orders_per_day: number;
+    note: string;
+  } | null;
+}
+
 export const systemService = {
   /**
    * 获取系统能力与版本信息
@@ -48,5 +65,15 @@ export const systemService = {
    */
   getVersion: async (force = false): Promise<SystemVersion> => {
     return apiClient.get<SystemVersion>('/api/v1/system/version', { params: { force } });
+  },
+
+  /**
+   * 程序化交易报告的待填报信息（软件名称/版本号/开发者 + 高频阈值提示）。
+   * 报告义务由用户自行履行，这里只保证「抄不错版本号」。
+   */
+  getProgrammaticTradingDisclosure: async (): Promise<ProgrammaticTradingDisclosure> => {
+    return apiClient.get<ProgrammaticTradingDisclosure>(
+      '/api/v1/system/programmatic-trading-disclosure',
+    );
   }
 };

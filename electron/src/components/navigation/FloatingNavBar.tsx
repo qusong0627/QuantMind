@@ -18,6 +18,7 @@ import {
 import { useSelector } from 'react-redux';
 import { selectCurrentMarket, selectTradingMode } from '../../store/slices/uiSlice';
 import { getMarketConfig } from '../../config/marketConfig';
+import { isLiveTradingEnabled } from '../../config/tradingFlags';
 import { modeCopy } from '../../pages/trading/utils/tradingModeCopy';
 
 interface FloatingNavBarProps {
@@ -38,7 +39,9 @@ export const FloatingNavBar: React.FC<FloatingNavBarProps> = ({ current, onChang
   const marketLabel = getMarketConfig(currentMarket).label;
   // 交易栏目名跟随模式（与交易页内所有模式文案同取唯一事实源）：
   // 切了实盘还写着「模拟交易」，用户会以为真金白银的单只是模拟单。
-  const tradingMode = useSelector(selectTradingMode);
+  // 实盘开关关闭时恒为模拟盘——栏目名不再跟随，避免出现指向已隐藏功能的入口。
+  const rawTradingMode = useSelector(selectTradingMode);
+  const tradingMode = isLiveTradingEnabled() ? rawTradingMode : 'simulation';
 
   const navItems: NavItemConfig[] = [
     // 1. 大盘分析模块

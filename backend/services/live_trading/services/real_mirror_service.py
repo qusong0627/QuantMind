@@ -46,6 +46,7 @@ from backend.services.live_trading.services.trading_session import (
     is_trading_time,
     trade_date_str,
 )
+from backend.shared.live_trading_gate import is_real_trading_enabled
 from backend.shared.simulation_account_keys import (
     canonical_sim_user_suffix,
     resolve_db_account_user,
@@ -270,7 +271,15 @@ def set_kill_switch(redis: Any, on: bool) -> None:
 
 
 def mirror_enabled(redis: Any, cfg: MirrorConfig) -> bool:
-    """总开关：急停 > Redis 热开关 > env。"""
+    """总开关：实盘闸门 > 急停 > Redis 热开关 > env。
+
+    闸门排最前：`ENABLE_REAL_TRADING=false` 时镜像**恒关**，不看 Redis 里留了什么。
+    Redis 的 ``mirror:enabled`` 是运维热开关，可能来自之前开着实盘的会话——不清掉
+    会让一个「本部署没有实盘」的实例在状态页上报「镜像已启用」。判定方向与
+    ``_real_trading_ready`` 一致，两处不会互相打架。
+    """
+    if not is_real_trading_enabled():
+        return False
     if kill_switch_on(redis):
         return False
     try:
@@ -431,6 +440,38 @@ def set_enabled(redis: Any, enabled: bool) -> None:
     if client is None:
         raise RuntimeError("Redis 不可用")
     client.set(_ENABLED_KEY, "1" if enabled else "0")
+
+
+def enforce_disabled_on_startup(redis: Any) -> bool:
+    """启动期自检：实盘闸门关闭时，把遗留的 ``mirror:enabled`` 热开关复位为 ``"0"``。
+
+    返回是否发生过复位。**先 WARNING 再写**——不复位则每次进程重启都会带着一个
+    「镜像已启用」的状态活在 Redis 里；静默复位则运维看不到它曾经存在过。
+
+    只动这一个键：白名单/黑名单/限额计数是运维配置，不属于「实盘开关」的辖域，
+    擅自清掉会让重新启用实盘时丢失白名单。
+    """
+    if is_real_trading_enabled():
+        return False
+    try:
+        raw = _redis_get(redis, _ENABLED_KEY)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[Mirror] 启动自检读 %s 失败: %s", _ENABLED_KEY, exc)
+        return False
+    if not raw.strip() or not _one(raw):
+        return False
+    logger.warning(
+        "[Mirror] 检测到遗留热开关 %s=%s，但 ENABLE_REAL_TRADING=false —— "
+        "强制复位为 0（实盘关闭时镜像恒关，见 mirror_enabled）",
+        _ENABLED_KEY,
+        raw,
+    )
+    try:
+        _redis_client(redis).set(_ENABLED_KEY, "0")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[Mirror] 复位 %s 失败: %s", _ENABLED_KEY, exc)
+        return False
+    return True
 
 
 def read_config_overrides(redis: Any) -> dict[str, Any]:
@@ -752,13 +793,11 @@ def build_mirror_client_order_id(
 
 def _real_trading_ready(redis: Any, market: str) -> tuple[bool, str]:
     """实盘通道就绪：ENABLE_REAL_TRADING 且该市场选定 qmt_exec。"""
-    try:
-        from backend.services.trade_shared.trade_config import settings
-
-        if not getattr(settings, "ENABLE_REAL_TRADING", False):
-            return False, "real_trading_disabled"
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("[Mirror] 读取实盘开关失败，按未就绪处理: %s", exc)
+    # 走共享闸门读 env（**调用时读**，不是 import 时冻结），与中间件、
+    # 与 `/real-trading/preflight`、与 `mirror_enabled` 的判定同一处。
+    # 原来这里读 `trade_config.settings`，那份是 import 期快照——运维改了
+    # env 重启后两份开关会在运行期分叉。
+    if not is_real_trading_enabled():
         return False, "real_trading_disabled"
     selected = ""
     try:

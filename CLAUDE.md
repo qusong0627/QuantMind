@@ -57,6 +57,10 @@ npm run dashboard:build  # 生产环境构建
 - **共享模块**：`backend/shared/` 存放跨服务代码（DB 管理器、Redis 客户端、配置、日志）
 - **瞬时时间（成交/委托）**：`sim_trades.executed_at` 等瞬时列一律 `TIMESTAMPTZ` + aware UTC。写入走 `backend/shared/utc_datetime.py` 的 `utc_now()` / `UtcDateTime`，JSON 输出带 `Z`。禁止 naive UTC 与上海墙钟混用。存量库由 `data/upgrade_v1.0.7.sql` 对齐。
 - **策略存储**：`backend/shared/strategy_storage.py` 是所有策略增删改查的唯一入口
+- **实盘双开关（开源版默认全关）**：后端 `ENABLE_REAL_TRADING`（`backend/shared/live_trading_gate.py` 中间件按**端点**拦，非按前缀——`/api/v1/tdx/*` 下行情与交易同前缀，按前缀拦会误杀盘中行情主源）+ 前端 `VITE_ENABLE_REAL_TRADING`（`electron/src/config/tradingFlags.ts` 唯一读取点，三态同 `marketFlags.ts`）。两个都开才显示实盘 UI；任一为 false 都不渲染 / 都 403（`detail=real_trading_disabled`）。代码全留，仅收敛入口。
+- **展示面/执行面用词边界**：展示面（研究评分卡、信号点下钻、K线标记、日历、筛选器、desk 信号卡）只说**位置**——`electron/src/features/shared/signalVocabulary.ts`（靠前/靠后/居中）与 `researchScore.ts`（0–100 截面分位）；执行面（下单表单、委托台账、成交回报、调仓计划单）保留「买入/卖出」，含糊化会让人下错单。**不要写「前 20%/后 20%」**：`signal_side` 有分位与绝对阈值两条生成路径，百分比标签在其中一条上是假的。
+- **研究评分口径**：`rank_pct`（`engine_signal_scores` 契约列）的分母是**同一次推理的那批标的**，不是全市场，跨模型/跨市场不可直接比较。前后端同一公式（`research_score.py` / `researchScore.ts`，金样 `backend/tests/fixtures/researchScoreGolden.json`，两侧测试都读它）。**缺失一律 `—`，绝不显示成 0**（`position_score=0` 的语义是「引擎明确不入场」）。
+- **程序化交易报告义务**：`backend/shared/programmatic_trading_disclosure.py` 是法规常量（高频阈值 300 笔/秒、20000 笔/日）与待填报信息（软件名称/版本号/开发者）的唯一出处；`GET /api/v1/system/programmatic-trading-disclosure` 供「设置→系统信息」复制填报。风控 `l3.order_frequency.max_per_minute` 撞线时**只告警不拦单**。合规边界见根目录 `DISCLAIMER.md`。
 - **Celery worker 必须唯一**：`SERVICE_MODE=all` 下 `main_oss.py` 默认**不启动**内嵌 worker（需 `EMBEDDED_CELERY_WORKER=true`），消费队列的只有 `celery-worker` 容器。重复 worker 会瓜分 `qlib_backtest_srv` 队列消息，表现为定时任务随机「不执行」；排查看 `redis-cli client list | grep cmd=brpop` 应只有 1 个。
 - **市场数据同步不内置默认调度**：是否开启、何时触发一律以用户在前端「同步调度」保存的 Redis 配置为准（`quantmind:sync_schedule:{market}`），未配置时 5 个市场全部 `enabled=false`；`MARKET_SUGGESTED_TIMES` 只是前端时间预填建议值（次日 00:00 以后错峰），不参与触发。详见 `backend/services/engine/README.md` →「定时调度与市场数据同步」。
 - **Alpha Agent**：`backend/services/engine/alpha_agent/` - 因子演化启动器，经 RD-Agent 支持多市场

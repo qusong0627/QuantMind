@@ -10,6 +10,7 @@ import { useAppDispatch, useAppSelector } from '../../store';
 import { selectTradingMode, setTradingMode } from '../../store/slices/uiSlice';
 import { DangerConfirmModal } from '../../components/shared/compliance/DangerConfirmModal';
 import { DANGER_SCENARIOS } from '../../components/shared/compliance/dangerAction';
+import { isLiveTradingEnabled } from '../../config/tradingFlags';
 
 export type TradingModePref = 'real' | 'simulation';
 
@@ -22,27 +23,36 @@ export function useTradingModeSwitch(): {
   confirmModal: React.ReactNode;
 } {
   const dispatch = useAppDispatch();
-  const tradingMode = useAppSelector(selectTradingMode);
+  const rawTradingMode = useAppSelector(selectTradingMode);
+  // 实盘开关关闭时对外一律报模拟盘：本 hook 是模式的两个入口（顶栏 / 交易页）的唯一
+  // 收口点，在这里归一，下游组件不必各自判一遍
+  const liveEnabled = isLiveTradingEnabled();
+  const tradingMode: TradingModePref =
+    rawTradingMode === 'real' && liveEnabled ? 'real' : 'simulation';
   const [pendingReal, setPendingReal] = useState(false);
 
   const applyMode = useCallback(
     (mode: TradingModePref) => {
-      localStorage.setItem(TRADING_MODE_PREF_KEY, mode);
-      dispatch(setTradingMode(mode));
+      const next: TradingModePref = mode === 'real' && !liveEnabled ? 'simulation' : mode;
+      localStorage.setItem(TRADING_MODE_PREF_KEY, next);
+      dispatch(setTradingMode(next));
     },
-    [dispatch]
+    [dispatch, liveEnabled]
   );
 
   const requestSwitch = useCallback(
     (mode: TradingModePref) => {
       if (mode === tradingMode) return;
       if (mode === 'real') {
+        // 开关关闭时直接吞掉，连确认卡都不弹——弹一张「我已知悉，切换实盘」
+        // 却切不过去的卡，比没反应更像坏了
+        if (!liveEnabled) return;
         setPendingReal(true); // 两步确认：确认卡未确认前不改状态
         return;
       }
       applyMode('simulation');
     },
-    [tradingMode, applyMode]
+    [tradingMode, applyMode, liveEnabled]
   );
 
   const confirmModal = (

@@ -720,7 +720,7 @@ function rowReducer(state: ProposalRowState[], action: RowAction): ProposalRowSt
             if (isNaN(val) || val < 0) {
                 next[action.idx] = { ...next[action.idx], quantity: 0, rejectReason: '数量无效' };
             } else if (val > action.proposal.quantity) {
-                next[action.idx] = { ...next[action.idx], quantity: action.proposal.quantity, rejectReason: `不能超过建议数量 ${action.proposal.quantity}` };
+                next[action.idx] = { ...next[action.idx], quantity: action.proposal.quantity, rejectReason: `不能超过原计划数量 ${action.proposal.quantity}` };
             } else if (action.proposal.side === 'BUY' && val % action.lotSize !== 0) {
                 next[action.idx] = { ...next[action.idx], quantity: val, rejectReason: `买入须为整手（${action.lotSize} 的倍数）` };
             } else {
@@ -804,7 +804,9 @@ function ProposalTable({
                             </th>
                             <th className="py-2.5 px-2 text-left">标的</th>
                             <th className="py-2.5 px-2 text-center">方向</th>
-                            <th className="py-2.5 px-2 text-right">建议股数</th>
+                            {/* 「建议股数」→「原计划股数」：这一列是**回放当天引擎提出的**
+                                数量（可改、有整手校验），是重演出来的历史事实，不是给今天的建议。 */}
+                            <th className="py-2.5 px-2 text-right">原计划股数</th>
                             <th className="py-2.5 px-2 text-right">预估价</th>
                             <th className="py-2.5 px-2 text-right">预计金额</th>
                             <th className="py-2.5 px-2 text-right">预估盈亏</th>

@@ -10,6 +10,7 @@ import { UiModeToggle } from '../../features/shared/UiModeToggle';
 import { useTradingModeSwitch } from '../../features/shared/useTradingModeSwitch';
 
 import { SERVICE_URLS } from '../../config/services';
+import { isLiveTradingEnabled } from '../../config/tradingFlags';
 
 export const HeaderBar: React.FC = () => {
   const [currentTime, setCurrentTime] = useState(new Date());
@@ -95,6 +96,7 @@ export const HeaderBar: React.FC = () => {
           <MarketSelector />
         </motion.div>
 
+        {isLiveTradingEnabled() && (
         <motion.div
           initial={{ opacity: 0, scale: 0.95 }}
           animate={{ opacity: 1, scale: 1 }}
@@ -124,6 +126,7 @@ export const HeaderBar: React.FC = () => {
             </span>
           </button>
         </motion.div>
+        )}
 
         {/* T-FE-02 简单/专业模式（与底部导航共用同一控件） */}
         <motion.div

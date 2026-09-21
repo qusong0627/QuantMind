@@ -8,6 +8,8 @@
 export type ComplianceEventKind =
   | 'risk_profile_taken'
   | 'risk_profile_skipped'
+  /** 注册页勾选「已阅读并理解」免责与资质边界（开源发行合规留痕） */
+  | 'terms_consent'
   | 'danger_confirmed'
   | 'danger_cancelled';
 

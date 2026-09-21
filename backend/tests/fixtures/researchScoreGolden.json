@@ -1,0 +1,25 @@
+{
+  "note": "研究评分金样：前端 researchScore.ts 与后端 backend/shared/research_score.py 必须逐例一致。改公式必须两侧同改并更新本文件。",
+  "cases": [
+    { "rankPct": 0.0, "score": 0.0 },
+    { "rankPct": 0.0005, "score": 0.1 },
+    { "rankPct": 0.001, "score": 0.1 },
+    { "rankPct": 0.0125, "score": 1.3 },
+    { "rankPct": 0.125, "score": 12.5 },
+    { "rankPct": 0.3333, "score": 33.3 },
+    { "rankPct": 0.4567, "score": 45.7 },
+    { "rankPct": 0.5, "score": 50.0 },
+    { "rankPct": 0.8625, "score": 86.3 },
+    { "rankPct": 0.865, "score": 86.5 },
+    { "rankPct": 0.871, "score": 87.1 },
+    { "rankPct": 0.999, "score": 99.9 },
+    { "rankPct": 1.0, "score": 100.0 }
+  ],
+  "bands": [
+    { "min": 85, "label": "头部" },
+    { "min": 70, "label": "居前" },
+    { "min": 60, "label": "居中" },
+    { "min": 40, "label": "居后" },
+    { "min": 0, "label": "尾部" }
+  ]
+}

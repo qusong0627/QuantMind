@@ -25,6 +25,7 @@ import {
   formatActivityTime,
 } from '../../../shared/types/activity';
 import { userCenterService } from '../services/userCenterService';
+import { ComplianceReturn } from '../../../components/shared/compliance/ComplianceChrome';
 
 const { Option } = Select;
 
@@ -80,14 +81,16 @@ export const ActivitiesPage: React.FC<ActivitiesPageProps> = ({ userId }) => {
     }
   };
 
-  // 加载个人中心活动（模拟数据）
+  // 加载个人中心活动（示例数据）
   const loadUserCenterActivities = async (userId: string): Promise<Activity[]> => {
     try {
       // TODO: 调用真实API
       // const response = await userCenterService.getActivities(userId);
       // return response.data;
 
-      // 模拟数据
+      // 示例数据：注意这是**无条件**返回的演示数据（不是接口失败兜底 —— try 块在 return
+      // 之前不会抛错），所以页面顶部必须挂「示例数据」标注，免得被当成用户真实活动史。
+      // 收益字段一律为 null（真实回测结果只能来自后端），UI 侧走 ComplianceReturn 的缺失口径。
       return [
         {
           id: '1',
@@ -109,14 +112,15 @@ export const ActivitiesPage: React.FC<ActivitiesPageProps> = ({ userId }) => {
           type: ActivityType.STRATEGY_BACKTEST,
           source: ActivitySource.BACKTEST,
           title: '回测了策略',
-          description: '回测结果：年化收益15.6%',
+          description: '双均线交叉策略',
           created_at: new Date(Date.now() - 3600000).toISOString(),
           metadata: {
             strategy_id: 'strategy_001',
             strategy_name: '双均线交叉策略',
+            // 公开版不得出现编造的收益数字：留键、置 null，UI 渲染为「—」
             performance: {
-              return_pct: 15.6,
-              sharpe_ratio: 1.38,
+              return_pct: null,
+              sharpe_ratio: null,
             },
           },
         },
@@ -161,8 +165,8 @@ export const ActivitiesPage: React.FC<ActivitiesPageProps> = ({ userId }) => {
       post_title?: string;
       post_id?: number;
       performance?: {
-        return_pct?: number;
-        sharpe_ratio?: number;
+        return_pct?: number | null;
+        sharpe_ratio?: number | null;
       };
       [key: string]: any;
     }
@@ -209,7 +213,17 @@ export const ActivitiesPage: React.FC<ActivitiesPageProps> = ({ userId }) => {
                   )}
                   {meta.performance && (
                     <span className="px-2 py-0.5 bg-amber-50 text-amber-600 rounded-lg text-[10px] font-bold border border-amber-100">
-                      收益 {meta.performance.return_pct?.toFixed(2)}%
+                      {/* 收益数字禁止裸渲染：缺失显示「—」，有值自动附「过往不代表未来」。
+                          ComplianceReturn 收的是小数，meta 里是百分数，故 /100。 */}
+                      收益{' '}
+                      <ComplianceReturn
+                        value={
+                          meta.performance.return_pct === null ||
+                          meta.performance.return_pct === undefined
+                            ? null
+                            : meta.performance.return_pct / 100
+                        }
+                      />
                     </span>
                   )}
                 </div>
@@ -235,6 +249,15 @@ export const ActivitiesPage: React.FC<ActivitiesPageProps> = ({ userId }) => {
 
   return (
     <div className="activities-page">
+      {/* 合规标注：本页活动（含上面的统计口径）来自演示数据，未接真实接口，
+          不标注就会被当成用户真实活动史与真实回测结果 */}
+      <div className="mb-4 flex items-center gap-2 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-2.5">
+        <Tag color="orange" className="!mr-0 shrink-0 font-black">示例数据</Tag>
+        <span className="text-xs font-medium text-amber-800">
+          本页活动记录为界面演示数据（尚未接入真实接口），不代表任何真实交易或回测结果。
+        </span>
+      </div>
+
       {/* 统计卡片 */}
       {stats && (
         <div className="bg-white rounded-2xl border border-gray-200 p-6 mb-8 grid grid-cols-4 gap-6 shadow-sm">

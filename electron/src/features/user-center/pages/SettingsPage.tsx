@@ -6,7 +6,12 @@ import React, { useEffect, useState } from 'react';
 import { useUserConfig, useNotificationSettings, usePrivacySettings } from '../hooks';
 import { Form, Switch, message, Spin, Alert } from 'antd';
 import { Bell, ShieldCheck, Mail, Smartphone, Zap, Globe, MessageCircle, BarChart3, Users, RefreshCw, Info } from 'lucide-react';
-import { systemService, type SystemVersion } from '../../../services/systemService';
+import {
+  systemService,
+  type ProgrammaticTradingDisclosure,
+  type SystemVersion,
+} from '../../../services/systemService';
+import { ComplianceFooter } from '../../../components/shared/compliance/ComplianceChrome';
 
 interface SettingsPageProps {
   userId: string;
@@ -14,6 +19,7 @@ interface SettingsPageProps {
 
 const SettingsPage: React.FC<SettingsPageProps> = ({ userId }) => {
   const [versionInfo, setVersionInfo] = useState<SystemVersion | null>(null);
+  const [disclosure, setDisclosure] = useState<ProgrammaticTradingDisclosure | null>(null);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
 
   const loadVersion = (force = false) => {
@@ -25,6 +31,11 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ userId }) => {
 
   useEffect(() => {
     loadVersion();
+    // 程序化交易报告的待填报信息：取不到就整块不渲染（宁可不显示，也不显示半截）
+    systemService
+      .getProgrammaticTradingDisclosure()
+      .then(setDisclosure)
+      .catch(() => setDisclosure(null));
   }, []);
 
   // 主动刷新「落后上游」检查（绕过缓存实时请求上游平台）
@@ -124,7 +135,50 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ userId }) => {
             {checkingUpdate ? '检查中…' : '检查更新'}
           </button>
         </div>
+
+        {/* 程序化交易报告义务：本卡片只**提供**要填的信息，不代为报告、不做合规判定。
+            放在「系统信息」下面是因为它本质上就是「我这个部署是什么版本」的延伸。 */}
+        {disclosure && (
+          <div className="px-6 pb-6 pt-4 border-t border-gray-100">
+            <div className="flex items-baseline gap-2 flex-wrap">
+              <h3 className="text-xs font-black text-slate-600 tracking-widest">程序化交易报告信息</h3>
+              <span className="text-[11px] text-slate-400">
+                从事程序化交易前须通过券商向交易所报告，下表信息可直接复制填报
+              </span>
+            </div>
+            <div className="mt-3 flex items-start gap-2">
+              <pre className="flex-1 min-w-0 overflow-x-auto rounded-lg bg-slate-50 border border-slate-100 px-3 py-2 text-[11px] leading-5 text-slate-700 font-mono whitespace-pre-wrap break-all">
+                {disclosure.text}
+              </pre>
+              <button
+                type="button"
+                onClick={() => {
+                  void navigator.clipboard?.writeText(disclosure.text).then(
+                    () => message.success('已复制'),
+                    () => message.error('复制失败，请手动选择文本'),
+                  );
+                }}
+                className="shrink-0 inline-flex items-center gap-1 rounded-lg border border-slate-200 px-2.5 py-1 text-[11px] text-slate-600 hover:bg-slate-50"
+              >
+                复制
+              </button>
+            </div>
+            {disclosure.high_frequency && (
+              <p className="mt-2 text-[10px] leading-4 text-slate-400">
+                高频阈值（仅提示，本工具不拦单也不代为报告）：每秒申报+撤单 ≥
+                {disclosure.high_frequency.orders_per_second} 笔（即每分钟 ≥
+                {disclosure.high_frequency.orders_per_minute} 笔）、或单日 ≥
+                {disclosure.high_frequency.orders_per_day} 笔。{disclosure.high_frequency.note}
+              </p>
+            )}
+            <p className="mt-2 text-[10px] leading-4 text-slate-400">
+              本工具不代为报告，也不判断你是否构成高频交易；口径与阈值以券商和交易所最新要求为准。
+            </p>
+          </div>
+        )}
       </div>
+
+      <ComplianceFooter />
 
       {/* 通知设置 */}
       <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">

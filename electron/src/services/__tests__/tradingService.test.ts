@@ -337,3 +337,70 @@ describe('TradingService', () => {
         });
     });
 });
+
+/**
+ * 实盘闸门 403（`ENABLE_REAL_TRADING=false` 的部署）与既有 404 熔断的分工。
+ *
+ * 走动态 import 拿**新的单例**：熔断位是实例状态，复用文件顶部的单例会让
+ * 用例之间互相污染（前一个用例熔断，后一个用例连 mock 都不再被调到）。
+ */
+describe('TradingService 实盘闸门 403', () => {
+    const DISABLED = { status: 403, data: { detail: 'real_trading_disabled' } };
+
+    // 本块是文件级 describe 的兄弟节点，拿不到上面那个 `beforeEach`，
+    // 必须自己清调用记录——否则 `toHaveBeenCalledTimes` 数的是整个文件累计的调用数
+    beforeEach(() => {
+        vi.clearAllMocks();
+    });
+
+    const loadFresh = async () => {
+        vi.resetModules();
+        return (await import('../tradingService')).tradingService;
+    };
+
+    it('listOrders 遇闸门 403 时抛出而非返回空数组', async () => {
+        // Arrange：返回空数组会渲染成「没有委托」，而事实是「这一路不可用」
+        const service = await loadFresh();
+        mocks.get.mockRejectedValue(DISABLED);
+
+        // Act / Assert
+        await expect(service.listOrders({ limit: 10 })).rejects.toMatchObject({ status: 403 });
+    });
+
+    it('闸门 403 之后熔断，不再反复打后端', async () => {
+        // Arrange
+        const service = await loadFresh();
+        mocks.get.mockRejectedValue(DISABLED);
+        await expect(service.listOrders({ limit: 10 })).rejects.toBeDefined();
+
+        // Act
+        const second = await service.listOrders({ limit: 10 });
+
+        // Assert：熔断生效 → 空数组且没有再发请求
+        expect(second).toEqual([]);
+        expect(mocks.get).toHaveBeenCalledTimes(1);
+    });
+
+    it('普通 403（权限不足）不熔断，原样抛给用户看', async () => {
+        // Arrange：只看状态码分不出「本部署没开实盘」与「你没权限」，
+        // 后者被当成前者静默吞掉，用户就永远看不到真正的原因
+        const service = await loadFresh();
+        mocks.get.mockRejectedValue({ status: 403, data: { detail: 'forbidden' } });
+
+        // Act / Assert
+        await expect(service.listOrders({ limit: 10 })).rejects.toMatchObject({ status: 403 });
+        await expect(service.listOrders({ limit: 10 })).rejects.toMatchObject({ status: 403 });
+        expect(mocks.get).toHaveBeenCalledTimes(2);
+    });
+
+    it('listTrades 遇闸门 403 也熔断', async () => {
+        // Arrange
+        const service = await loadFresh();
+        mocks.get.mockRejectedValue(DISABLED);
+        await expect(service.listTrades({ limit: 10 })).rejects.toBeDefined();
+
+        // Act / Assert：熔断后直接抛「unavailable」，不再发请求
+        await expect(service.listTrades({ limit: 10 })).rejects.toThrow('trades endpoint unavailable');
+        expect(mocks.get).toHaveBeenCalledTimes(1);
+    });
+});

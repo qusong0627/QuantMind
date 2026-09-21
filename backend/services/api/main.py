@@ -60,6 +60,7 @@ from backend.shared.config_manager import init_unified_config
 from backend.shared.cors import resolve_cors_origins
 from backend.shared.database_pool import init_default_databases as init_sync_db_pool
 from backend.shared.error_contract import install_error_contract_handlers
+from backend.shared.live_trading_gate import install_live_trading_gate_middleware
 from backend.shared.logging_config import get_logger, setup_logging
 from backend.shared.openapi_utils import quantmind_generate_unique_id
 from backend.shared.request_id import install_request_id_middleware
@@ -169,6 +170,11 @@ app = FastAPI(
 install_request_id_middleware(app)
 install_error_contract_handlers(app)
 install_access_log_middleware(app, service_name="quantmind-api")
+# 实盘闸门：`ENABLE_REAL_TRADING=false`（默认）时拒绝实盘专有端点。
+# 网关与 trade 服务各挂一道——网关这道的意义是请求不出进程就被挡掉；
+# 双模式共用端点（/real-trading/preflight 等）由 handler 内的
+# `ensure_real_trading_allowed()` 判定，中间件读不到 body 里的模式。
+install_live_trading_gate_middleware(app, service_name="quantmind-api")
 
 # 2. 注册具体业务路由 (高优先级)
 # 使用环境变量或默认路径，Docker 容器中 /data/uploads，本地开发 data/uploads

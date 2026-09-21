@@ -5,12 +5,14 @@ import { Search, RefreshCw, Star, ChevronDown, ChevronLeft, ChevronRight, Chevro
 import { Checkbox, Input, Spin, message, Dropdown, Segmented } from 'antd';
 import { StockListItem, StockListResponse, StockRisk, ExclusionMeta, PushChannel, PushSide } from '../types';
 import { EXCLUDE_ON, riskChips, channelText } from '../riskModel';
-import { CHANNEL_OPTIONS, MAX_PICK } from '../pushModel';
+import { channelOptions, MAX_PICK } from '../pushModel';
 import { scoreFreqView, tableFreqView } from '../scoreFreq';
 import { stockTerminalService } from '../services/stockTerminalService';
 import { ListFilters, bucketScoreRange, StockFilterPanel, BOARD_OPTIONS, CAP_TIER_OPTIONS, TREND_OPTIONS, BUCKET_OPTIONS } from './StockFilterPanel';
 import { PushConfirmPanel } from './PushConfirmPanel';
 import { EvalScoreBadge } from '../../../components/shared/EvalScoreBadge';
+// 展示面口径：signal_side 只译成「靠前/靠后/居中」（见 features/shared/signalVocabulary.ts）
+import { signalPositionLabel } from '../../shared/signalVocabulary';
 
 interface Props {
   selected: string | null;
@@ -70,9 +72,15 @@ export function toPrefix(symbol: string): string {
   return ex && code ? `${ex}${code}` : symbol;
 }
 
+/**
+ * 截面位置徽标配色：**单色深浅，不用红绿**。
+ *
+ * A 股红涨绿跌，红绿一上来就把「靠前」翻译成「该买」——刚用位置词换掉的方向，
+ * 会从颜色通道原样回来，而且比文字更难察觉。深浅只表达位置前后，不表达涨跌。
+ */
 const SIDE_COLOR: Record<string, string> = {
-  BUY: 'bg-rose-50 text-rose-600',
-  SELL: 'bg-emerald-50 text-emerald-600',
+  BUY: 'bg-blue-100 text-blue-700',
+  SELL: 'bg-slate-100 text-slate-500',
   HOLD: 'bg-slate-50 text-slate-400',
 };
 
@@ -400,11 +408,19 @@ export function StockSidebar({ selected, onSelect, watchlistSymbols, watchFilter
   // （2026-09-17 去走势迷你线列：每行懒加载 K 线极易卡顿，牺牲此列换流畅度）
   const GRID = 'grid grid-cols-[16px_24px_1.4fr_56px_70px_50px_42px_56px_38px_30px] gap-1';
 
-  const SIDE_LABEL: Record<string, string> = { BUY: '买入', SELL: '卖出', HOLD: '持有' };
-  /** 得分档表头短名（列宽有限） */
+  /** 表头兜底名：走全站唯一的展示面译法（见 features/shared/signalVocabulary.ts）。
+   *  正常情况下标签来自后端 facets，这里只在 facets 缺该值时兜底。 */
+  const SIDE_LABEL: Record<string, string> = {
+    BUY: signalPositionLabel('BUY'),
+    SELL: signalPositionLabel('SELL'),
+    HOLD: signalPositionLabel('HOLD'),
+  };
+  /** 得分档表头短名（列宽有限）。**只写区间，不评价区间**：
+   *  原来的「黄金 / 谨慎 / 做空」是在替用户判断哪一段值得下手，而这列本来就是
+   *  模型原始分的分区，用户看的是「落在哪一段」而不是「该不该动手」。 */
   const BUCKET_SHORT: Record<string, string> = {
-    golden: '黄金', optional: '可选', caution: '谨慎', extreme: '极端高',
-    neg_extreme: '极端低', neg_short: '做空', pos: '正分', neg: '负分',
+    golden: '0.10-0.12', optional: '0.12-0.15', caution: '0.15-0.20', extreme: '≥0.20',
+    neg_extreme: '≤-0.20', neg_short: '≤-0.15', pos: '≥0', neg: '<0',
   };
 
   /** 表头列筛选下拉（板块/行业/市值/趋势/得分/信号），长菜单限高滚动避免盖住整个列表。
@@ -727,8 +743,12 @@ export function StockSidebar({ selected, onSelect, watchlistSymbols, watchFilter
         <span className="text-center">{headerDropdown(fac('trend', TREND_OPTIONS), filters.trend, v => onFiltersChange({ ...filters, trend: v }), '趋势')}</span>
         <span className="text-right">{headerDropdown(fac('bucket', BUCKET_OPTIONS), filters.bucket, v => onFiltersChange({ ...filters, bucket: v, scoreMin: undefined }),
           filters.bucket ? (BUCKET_SHORT[filters.bucket] ?? '得分') : '得分')}</span>
-        <span className="text-center" title="仓位信号：0=不入场（低于行业头部/大盘空仓），0.1~0.99=建议投入比例（半凯利）">仓位</span>
-        <span className="text-center">{headerDropdown(fac('side', [{ value: 'BUY', label: '买入' }, { value: 'SELL', label: '卖出' }, { value: 'HOLD', label: '持有' }]), filters.side, v => onFiltersChange({ ...filters, side: v }), '信号', searching || onlyWatchlist)}</span>
+        <span className="text-center" title="仓位系数：0=模型不给出仓位（低于行业头部或大盘空仓），0.1~0.99=参考仓位系数（半凯利）。它是模型输出，不是给你的下单建议。">仓位</span>
+        <span className="text-center">{headerDropdown(fac('side', [
+          { value: 'BUY', label: signalPositionLabel('BUY') },
+          { value: 'SELL', label: signalPositionLabel('SELL') },
+          { value: 'HOLD', label: signalPositionLabel('HOLD') },
+        ]), filters.side, v => onFiltersChange({ ...filters, side: v }), '位置', searching || onlyWatchlist)}</span>
       </div>
 
       {/* 股票列表 */}
@@ -861,11 +881,13 @@ export function StockSidebar({ selected, onSelect, watchlistSymbols, watchFilter
                     const tone = positionToneOf(ps);
                     const pct = it.pct_industry;
                     const empty = it.market_empty;
+                    // 措辞一律归到「模型给出的系数」：数值照旧（下游撮合要用），
+                    // 但不写「建议投入」——那是替用户决定投多少
                     const tip = ps == null
                       ? '该日无仓位信号（未推理或缺失基准）'
                       : ps <= 0
-                        ? (empty ? '大盘空仓信号，不入场' : (pct != null && pct < 0.8 ? `行业百分位 ${(pct * 100).toFixed(0)}% < 80%，不入场` : '不入场'))
-                        : `建议投入 ${Math.round(ps * 100)}%（半凯利）· 行业百分位 ${pct != null ? (pct * 100).toFixed(0) + '%' : '--'}`;
+                        ? (empty ? '模型不给出仓位（大盘空仓）' : (pct != null && pct < 0.8 ? `模型不给出仓位（行业百分位 ${(pct * 100).toFixed(0)}% < 80%）` : '模型不给出仓位'))
+                        : `参考仓位系数 ${Math.round(ps * 100)}%（半凯利）· 行业百分位 ${pct != null ? (pct * 100).toFixed(0) + '%' : '--'}`;
                     return (
                       <span className={`inline-block text-[9px] font-bold rounded px-0.5 py-0.5 border ${tone.cls}`} title={tip}>
                         {tone.txt}
@@ -873,10 +895,11 @@ export function StockSidebar({ selected, onSelect, watchlistSymbols, watchFilter
                     );
                   })()}
                 </span>
-                {/* 信号方向 */}
+                {/* 截面位置：这一格原来直接印枚举（BUY/SELL），读着就是「买入/卖出」。
+                    走全站唯一译法换成位置词；HOLD 不写出来，留空格子更好扫。 */}
                 <span className="text-center">
                   <span className={`text-[9px] rounded px-1 py-0.5 font-bold ${SIDE_COLOR[it.side ?? 'HOLD'] ?? SIDE_COLOR.HOLD}`}>
-                    {(it.side ?? 'HOLD') === 'HOLD' ? '-' : it.side}
+                    {(it.side ?? 'HOLD') === 'HOLD' ? '-' : signalPositionLabel(it.side)}
                   </span>
                 </span>
               </button>
@@ -928,7 +951,7 @@ export function StockSidebar({ selected, onSelect, watchlistSymbols, watchFilter
             size="small"
             value={pushChannels.includes('real') ? 'real' : 'sim'}
             onChange={v => setPushChannels(v === 'real' ? ['sim', 'real'] : ['sim'])}
-            options={CHANNEL_OPTIONS.map(o => ({ value: o.value, label: o.label, title: o.hint }))}
+            options={channelOptions().map(o => ({ value: o.value, label: o.label, title: o.hint }))}
           />
           <button
             type="button"
@@ -941,20 +964,26 @@ export function StockSidebar({ selected, onSelect, watchlistSymbols, watchFilter
           {/* 买卖**各一个按钮**，不跟随列表的「信号」筛选：检索模式下那个筛选根本不生效
               （列表请求不带 side、控件也置灰），从前用 `filters.side === 'SELL' ? sell : buy`
               推导，搜到一只票直接点推送会**悄悄发成买单**——用户看不见自己在买。
-              买红卖绿沿用 A 股口径（同 ReplayReportPage）。 */}
+              买红卖绿沿用 A 股口径（同 ReplayReportPage）。
+
+              这里说得直白（买入/卖出）是**故意的**：本栏挂在交易台里，用户点下去要选股数、
+              要确认，属于执行面，含糊化会让人下错单。同理去掉「一键」二字——它暗示
+              「不必细看」，而下一屏的确认面板才是这道操作真正的把关处。
+              展示面（研究页、评分卡、信号点下钻）一律只说「靠前/靠后」，见
+              `features/shared/signalVocabulary.ts`。 */}
           <button
             type="button"
             onClick={() => { setPushSide('buy'); setPushOpen(true); }}
             className="shrink-0 flex items-center gap-1 rounded-lg bg-red-600 px-3 py-1 text-[11px] font-bold text-white shadow-sm hover:bg-red-700"
           >
-            <Send className="w-3 h-3" /> 一键买入
+            <Send className="w-3 h-3" /> 买入
           </button>
           <button
             type="button"
             onClick={() => { setPushSide('sell'); setPushOpen(true); }}
             className="shrink-0 flex items-center gap-1 rounded-lg bg-emerald-600 px-3 py-1 text-[11px] font-bold text-white shadow-sm hover:bg-emerald-700"
           >
-            <Send className="w-3 h-3" /> 一键卖出
+            <Send className="w-3 h-3" /> 卖出
           </button>
         </div>
       )}

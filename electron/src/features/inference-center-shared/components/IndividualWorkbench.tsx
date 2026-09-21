@@ -25,8 +25,29 @@ import {
   type ModelCategoryFilter,
 } from '../hooks/useIndividualPrediction';
 import type { SuggestionItem } from '../adapter';
+import {
+    RESEARCH_SCORE_HINT,
+    formatResearchScore,
+    researchScore,
+    researchScoreBand,
+} from '../../shared/researchScore';
 
 const { Text } = Typography;
+
+/**
+ * 档位配色：**同一色相的深浅**，不用红绿。
+ *
+ * 红绿是涨跌语义，会给一个中性的分位分数带上方向暗示；单色深浅只表达
+ * 「靠前/靠后」的强弱，与本徽标要说的事一致。
+ */
+const RESEARCH_SCORE_TONE: Record<string, string> = {
+    头部: 'text-indigo-700 bg-indigo-50 border-indigo-200',
+    居前: 'text-indigo-600 bg-indigo-50/70 border-indigo-200',
+    居中: 'text-slate-600 bg-slate-100 border-slate-200',
+    居后: 'text-slate-500 bg-slate-50 border-slate-200',
+    尾部: 'text-slate-400 bg-slate-50 border-slate-200',
+    '—': 'text-slate-400 bg-slate-50 border-slate-200 border-dashed',
+};
 
 /**
  * 周期下拉的兜底项：仅在该市场模型一条周期都没记录时使用。
@@ -77,41 +98,40 @@ export const IndividualWorkbench: React.FC<IndividualWorkbenchProps> = ({
 }) => {
   const { prediction } = ip;
 
-  /** 评级徽标：沿用全站「涨红跌绿」（三市场一致） */
-  const ratingBadge = (rating: string) => {
-    switch (rating) {
-      case 'STRONG_BUY':
-        return (
-          <span className="flex items-center gap-1.5 text-rose-700 bg-rose-50 border border-rose-200 px-2 py-0.5 rounded-md font-black text-[11px]">
-            <span className="w-1.5 h-1.5 rounded-full bg-rose-500 animate-pulse" />
-            强烈看多
-          </span>
-        );
-      case 'BUY':
-        return (
-          <span className="flex items-center gap-1.5 text-red-600 bg-red-50 border border-red-200 px-2 py-0.5 rounded-md font-black text-[11px]">
-            <span className="w-1.5 h-1.5 rounded-full bg-red-500" />
-            偏多研判
-          </span>
-        );
-      case 'HOLD':
-        return (
-          <span className="flex items-center gap-1.5 text-slate-600 bg-slate-100 border border-slate-200 px-2 py-0.5 rounded-md font-black text-[11px]">
-            <span className="w-1.5 h-1.5 rounded-full bg-slate-400" />
-            中性观望
-          </span>
-        );
-      default:
-        return (
-          <span className="flex items-center gap-1.5 text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-md font-black text-[11px]">
-            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
-            看空警示
-          </span>
-        );
-    }
+  /**
+   * 研究评分徽标：显示该标的在**同一模型、同一交易日**截面内的分位（0–100）。
+   *
+   * 这里原本是「强烈看多／偏多研判／中性观望／看空警示」四档方向结论。方向性结论
+   * 是投资建议的形态，开源发行版一律改为中性的**位置**描述——只回答「今天排在
+   * 前面还是后面」，回答「该不该买」是使用者自己的事。
+   *
+   * 配色按档位单色深浅，**不用红绿**：红绿本身就在暗示涨跌方向，等于把刚去掉的
+   * 方向结论从颜色里又加回来。
+   */
+  const researchScoreBadge = (rankPct: number | null | undefined) => {
+    const score = researchScore(rankPct);
+    const band = researchScoreBand(score);
+    const tone = RESEARCH_SCORE_TONE[band] ?? RESEARCH_SCORE_TONE['居中'];
+    return (
+      <span
+        className={`flex items-center gap-1.5 border px-2 py-0.5 rounded-md font-black text-[11px] ${tone}`}
+        title={RESEARCH_SCORE_HINT}
+      >
+        <span className="w-1.5 h-1.5 rounded-full bg-current opacity-70" />
+        研究评分 {formatResearchScore(score)}
+        {score === null ? '' : ` · ${band}`}
+      </span>
+    );
   };
 
-  const scoreColor = (v: number) => (v >= 0 ? 'text-rose-600' : 'text-emerald-600');
+  /**
+   * 模型信号分数的字色。**固定中性色，不按涨跌着色。**
+   *
+   * 原实现是 `expected_return >= 0 ? 红 : 绿` —— 按预期收益的正负上色。A 股红涨绿跌，
+   * 这个着色等于把「模型认为它会涨」直接翻译成红字：同一句话换个通道又说了一遍，
+   * 而且比文字更难察觉。研究评分徽标去掉红绿是同一个理由，两处要一致。
+   */
+  const SCORE_TEXT_TONE = 'text-slate-700';
   const coverage = prediction && prediction.confidence > 0
     ? `${(prediction.confidence * 100).toFixed(1)}%`
     : '—';
@@ -376,12 +396,12 @@ export const IndividualWorkbench: React.FC<IndividualWorkbenchProps> = ({
             </QuoteCell>
             {/* 标签带出周期：分数是「T+N 的模型输出」，脱离周期谈分数没有意义 */}
             <QuoteCell label={`模型信号分数 · T+${prediction.horizon ?? ip.horizon}`}>
-              <span className={scoreColor(prediction.expected_return)}>{prediction.predicted_score.toFixed(4)}</span>
+              <span className={SCORE_TEXT_TONE}>{prediction.predicted_score.toFixed(4)}</span>
             </QuoteCell>
           </div>
 
           <div className="ml-auto flex items-center gap-2 shrink-0 flex-wrap">
-            {prediction.rating && ratingBadge(prediction.rating)}
+            {researchScoreBadge(prediction.rank_pct)}
             <Tooltip title={prediction.model_name || ip.selectedModel?.modelName || '—'}>
               {/* 模型名动辄「ML7 solo · nativeftt · 2016-24/2025val/2026test_CN」这种
                   三段式，200px 只露出前两段，最关键的验证窗口被截掉。放宽到 340px，

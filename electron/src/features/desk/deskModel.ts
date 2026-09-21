@@ -13,6 +13,8 @@ import type {
   SignalsBlock,
 } from './types';
 import type { DrillLevelSpec } from '../shared/DrillDownDrawer';
+import { SIGNAL_POSITION_HINT, signalPositionLabel } from '../shared/signalVocabulary';
+import { RESEARCH_SCORE_HINT, formatResearchScore, researchScore } from '../shared/researchScore';
 
 export interface DrillEntryLike {
   label: string;
@@ -260,6 +262,11 @@ export function planDrillEntries(plan: PlanBlock | null | undefined, topN = 10):
 
 // ── 逐层穿透（T-FE-03 v2）：条目 → 下一层（计划单→信号→原始载荷 等）────────
 
+/**
+ * 订单方向 → 中文。**只用于执行面**（调仓计划单、今日执行条目）：
+ * 那里必须说清买还是卖，含糊化会让人下错单。
+ * 信号条目走 `signalPositionLabel`（靠前/靠后），见 `features/shared/signalVocabulary.ts`。
+ */
 function sideLabel(side: string): string {
   return String(side).toUpperCase() === 'BUY' ? '买' : '卖';
 }
@@ -286,15 +293,16 @@ export function signalItemDrillEntries(
   item: SignalItem,
   signals: SignalsBlock | null | undefined
 ): DrillEntryLike[] {
-  const rankText =
-    item.rank_pct === null || item.rank_pct === undefined ? '—' : item.rank_pct.toFixed(3);
+  const score = researchScore(item.rank_pct);
   return [
     { label: '标的', value: symbolLabel(item.symbol, item.name) },
-    { label: '方向', value: sideLabel(item.side) },
+    // 信号条目说「位置」不说「方向」：BUY/SELL 描述的是该标的在当日截面里的相对位置，
+    // 读成「系统说买」就是替用户做决定。执行面（计划单/成交）仍按买/卖表述。
+    { label: '截面位置', value: signalPositionLabel(item.side), hint: SIGNAL_POSITION_HINT },
     {
-      label: 'rank_pct（当日分位）',
-      value: rankText,
-      hint: '0=全市场最弱、1=最强；阈值按当日分布分位自适应（不硬编码）',
+      label: '研究评分',
+      value: formatResearchScore(score),
+      hint: RESEARCH_SCORE_HINT,
     },
     { label: '模型分', value: item.score === null || item.score === undefined ? '—' : item.score.toFixed(4) },
     { label: '交易日', value: signals?.trade_date || '—', source: signals?.source },

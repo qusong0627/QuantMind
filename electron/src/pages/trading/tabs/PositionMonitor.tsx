@@ -11,6 +11,7 @@ import { PositionSourceBar } from '../components/PositionSourceBar';
 import { HoldingAlertPanel } from '../../../features/holding-alerts/HoldingAlertPanel';
 import { CopilotPanel } from '../../../features/desk/components/CopilotPanel';
 import type { TradingAccountMode } from '../utils/accountAdapter';
+import { isLiveTradingEnabled } from '../../../config/tradingFlags';
 
 interface PositionMonitorProps {
     userId: string;
@@ -165,7 +166,12 @@ const PositionMonitor: React.FC<PositionMonitorProps> = ({ userId: _userId, isAc
                     <PositionVisualBoard
                         holdings={holdings}
                         summary={summary}
-                        defaultChannels={accountMode === 'real' ? ['sim', 'real'] : ['sim']}
+                        defaultChannels={
+                            // 实盘开关关闭时恒为模拟盘：这里是实盘关闭后最容易漏的一处——
+                            // 账户态仍可能是 real（历史数据），默认通道若不跟着收敛，
+                            // 一进持仓页就预勾了实盘镜像
+                            accountMode === 'real' && isLiveTradingEnabled() ? ['sim', 'real'] : ['sim']
+                        }
                     />
                     {/* 今日执行折叠条（并入同页，不再单起卡片） */}
                     <ExecutionStrip />

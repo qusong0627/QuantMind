@@ -23,6 +23,7 @@ from backend.services.live_trading.services.manual_execution_service import (
 from backend.services.simulation.services.simulation_hosted_scheduler import (
     run_simulation_cycle_for_active,
 )
+from backend.shared.live_trading_gate import ensure_real_trading_allowed
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -390,16 +391,10 @@ async def start_trading(
                 status_code=400,
                 detail=f"不支持的交易模式: {mode}。支持 SIMULATION(模拟盘) / REAL(通达信实盘)",
             )
-        # REAL 模式需确认通达信实盘桥已启用
-        if mode == "REAL":
-            enable_real = (
-                os.getenv("ENABLE_REAL_TRADING", "false").strip().lower() == "true"
-            )
-            if not enable_real:
-                raise HTTPException(
-                    status_code=400,
-                    detail="REAL 模式需要设置 ENABLE_REAL_TRADING=true 并配置 TDX 桥，请检查 .env",
-                )
+        # 实盘关闭时 REAL 一律 403。改用共享闸门（原来这里自己读 env 回 400）：
+        # 判定口径与中间件、与 `/preflight`、与 `/manual-executions` 全部对齐，
+        # 机器可读 detail 也统一成 `real_trading_disabled`，前端一处识别即可。
+        ensure_real_trading_allowed(mode)
 
         if not strategy_id and not strategy_file:
             raise HTTPException(

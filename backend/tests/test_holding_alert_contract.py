@@ -1,8 +1,11 @@
 """持仓预警判定口径的单测（纯函数层）。
 
 这套规则决定「什么时候吵醒用户」。盯死四类边界：
-由正转负只报一次、跌破阈值与转负不重复报、没有基线不报（首次见到负分不是「跌了」）、
+下穿 0 只报一次、跌破阈值与下穿 0 不重复报、没有基线不报（首次见到非正分不是「跌了」）、
 停摆一周后不把陈年下跌报成「今天跌了」。
+
+文案侧只有一条纪律（``test_no_directional_wording``）：提醒只描述分数/标的位置，
+不得出现买卖方向或祈使句。
 """
 
 from __future__ import annotations
@@ -10,6 +13,8 @@ from __future__ import annotations
 from backend.shared.holding_alert_contract import (
     COOLDOWN_SECONDS,
     DEFAULT_CONFIG,
+    KIND_RISK_ANOMALY,
+    KIND_RISK_LIST,
     KIND_RISK_NEWS,
     KIND_SCORE_BELOW_THRESHOLD,
     KIND_SCORE_CROSS_ZERO,
@@ -35,14 +40,14 @@ from backend.shared.holding_alert_contract import (
 
 class TestEvaluateScoreTransition:
     def test_cross_zero_is_critical(self):
-        # 用户口径：由正转负 = 该走了
+        # 用户口径：分数下穿 0 是要吵醒用户的位置变化（判据本身不含方向结论）
         assert evaluate_score_transition(0.12, -0.03) == (
             KIND_SCORE_CROSS_ZERO,
             SEVERITY_CRITICAL,
         )
 
     def test_exactly_zero_counts_as_crossed(self):
-        # 0 已经是「没有买入理由」；停在 0 上不报会让持有等到负分才走
+        # 0 已经算「落到非正侧」；停在 0 上不报会让用户晚一层才被提醒
         assert evaluate_score_transition(0.12, 0.0) == (
             KIND_SCORE_CROSS_ZERO,
             SEVERITY_CRITICAL,
@@ -237,7 +242,7 @@ class TestSeverityAndText:
         assert notification_level(SEVERITY_INFO) == "info"
 
     def test_title_says_what_happened(self):
-        assert "由正转负" in build_alert_title(
+        assert "0 及以下" in build_alert_title(
             KIND_SCORE_CROSS_ZERO, "招商银行", "SH600036"
         )
         assert "招商银行" in build_alert_title(
@@ -267,6 +272,36 @@ class TestSeverityAndText:
         )
 
         assert "证监会立案调查" in text
+
+    def test_no_directional_wording(self):
+        """展示面只描述位置：标题/正文都不得出现买卖方向或祈使句。
+
+        正文会进 ``notifications`` 与 ``qm_holding_alerts.content``（用户直接读到），
+        出现操作指令就变成了「替用户做决定」；实际下单入口在交易台面板里。
+        """
+        banned = ("买入", "卖出", "看多", "看空", "建议", "一键", "满仓", "清仓")
+        for kind in (
+            KIND_SCORE_CROSS_ZERO,
+            KIND_SCORE_BELOW_THRESHOLD,
+            KIND_RISK_NEWS,
+            KIND_RISK_ANOMALY,
+            KIND_RISK_LIST,
+        ):
+            title = build_alert_title(kind, "招商银行", "SH600036")
+            content = build_alert_content(
+                kind=kind,
+                symbol="SH600036",
+                score_prev=0.12,
+                score_now=-0.03,
+                extra="测试附加说明",
+            )
+            for word in banned:
+                assert word not in title, (
+                    f"{kind} 标题出现方向性措辞「{word}」: {title}"
+                )
+                assert word not in content, (
+                    f"{kind} 正文出现方向性措辞「{word}」: {content}"
+                )
 
     def test_format_score_handles_missing(self):
         assert format_score(None) == "—"

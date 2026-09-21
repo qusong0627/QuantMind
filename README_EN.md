@@ -52,4 +52,17 @@ Internal stock symbols use prefix notation, for example `SH600036`.
 
 ## Disclaimer
 
-QuantMind is for research and educational purposes only. It is not investment advice.
+QuantMind is a **quantitative research and backtesting tool** for research and educational
+purposes only. **It is not investment advice**, not an advisory or asset-management service, and
+it does not recommend buying or selling any specific security or provide any return guarantee.
+Model output is expressed as a neutral **research score** (0–100 cross-sectional percentile) and
+a **cross-sectional position** (leading / trailing / middle); these are not buy or sell signals,
+and are not comparable across models, markets, or trading days.
+
+**Real-trading functionality is disabled by default** in the open-source distribution
+(`ENABLE_REAL_TRADING` / `VITE_ENABLE_REAL_TRADING` must both be enabled explicitly). If you
+enable it, you bear all trading risk and are solely responsible for any programmatic-trading
+reporting obligations in your jurisdiction (including reporting the trading software name,
+version, and developer, and any additional high-frequency-trading reports).
+
+See **[DISCLAIMER.md](DISCLAIMER.md)** for the full terms.

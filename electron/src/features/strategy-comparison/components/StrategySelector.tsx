@@ -9,7 +9,7 @@
  */
 
 import React, { useState, useEffect } from 'react';
-import { Select, Tag, Space, Button, List, Card, Empty, Input, Spin } from 'antd';
+import { Alert, Select, Tag, Space, Button, List, Card, Empty, Input, Spin } from 'antd';
 import { PlusOutlined, CloseCircleOutlined, SearchOutlined } from '@ant-design/icons';
 import type { StrategyComparisonItem } from '../../../shared/types/strategyComparison';
 
@@ -49,6 +49,9 @@ export const StrategySelector: React.FC<StrategySelectorProps> = ({
   const [loading, setLoading] = useState(false);
 
   const [personalStrategies, setPersonalStrategies] = useState<StrategyListItem[]>([]);
+  // 当前列表是否为写死的示例数据 —— 决定是否挂「示例数据」标注。
+  // 接上真实接口后必须置 false，标注会自动消失（不要靠人记得删文案）。
+  const [isDemoData, setIsDemoData] = useState(false);
 
   // 加载个人策略列表
   useEffect(() => {
@@ -62,8 +65,11 @@ export const StrategySelector: React.FC<StrategySelectorProps> = ({
     try {
       // TODO: 调用真实API
       // const response = await userCenterService.getStrategies(userId);
+      // setIsDemoData(false);          // 接上真实接口后务必关掉示例标注
+      // setPersonalStrategies(response.data);
 
-      // 模拟数据
+      // 示例数据（公开版）：没有真实接口前一律标注「示例数据」，
+      // 避免界面上的年化/夏普被当成用户真实回测业绩
       const mockStrategies: StrategyListItem[] = [
         {
           id: 'ps_001',
@@ -91,6 +97,7 @@ export const StrategySelector: React.FC<StrategySelectorProps> = ({
         },
       ];
 
+      setIsDemoData(true);
       setPersonalStrategies(mockStrategies);
     } catch (error) {
       console.error('加载个人策略失败:', error);
@@ -213,6 +220,10 @@ export const StrategySelector: React.FC<StrategySelectorProps> = ({
                     夏普 {strategy.sharpe_ratio.toFixed(2)}
                   </span>
                 )}
+                {/* 行级标注：截图裁到单行时也能看出这不是真实业绩 */}
+                {isDemoData && (
+                  <Tag color="orange" style={{ marginLeft: 4 }}>示例数据</Tag>
+                )}
               </Space>
             </div>
 
@@ -285,6 +296,17 @@ export const StrategySelector: React.FC<StrategySelectorProps> = ({
             </Button>
           }
         >
+          {/* 合规标注：本列表是写死的示例数据（真实接口见 loadPersonalStrategies 的 TODO），
+              不标注就会被当成用户真实策略业绩 */}
+          {isDemoData && (
+            <Alert
+              type="warning"
+              showIcon
+              message="示例数据：以下策略及其年化/夏普为界面演示值，尚未接入真实接口，不代表任何真实回测结果。"
+              style={{ marginBottom: 12, fontSize: 12 }}
+            />
+          )}
+
           <Search
             placeholder="搜索策略..."
             value={searchQuery}

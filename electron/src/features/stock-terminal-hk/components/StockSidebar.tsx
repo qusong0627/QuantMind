@@ -7,6 +7,8 @@ import { StockListItem, StockListResponse } from '../types';
 import { stockTerminalService } from '../services/stockTerminalService';
 import { ListFilters, bucketScoreRange, StockFilterPanel, BOARD_OPTIONS, CAP_TIER_OPTIONS, TREND_OPTIONS, BUCKET_OPTIONS } from './StockFilterPanel';
 import { Sparkline } from './Sparkline';
+// 展示面口径：signal_side 只译成「靠前/靠后/居中」（见 features/shared/signalVocabulary.ts）
+import { signalPositionLabel } from '../../shared/signalVocabulary';
 
 interface Props {
   selected: string | null;
@@ -54,9 +56,13 @@ export function toPrefix(symbol: string): string {
   return ex && code ? `${ex}${code}` : symbol;
 }
 
+/**
+ * 截面位置徽标配色：**单色深浅，不用红绿**（与 A 股版同一口径）。
+ * 红绿把「靠前」直接读成「该买」；深浅只表达位置前后，不表达涨跌。
+ */
 const SIDE_COLOR: Record<string, string> = {
-  BUY: 'bg-rose-50 text-rose-600',
-  SELL: 'bg-emerald-50 text-emerald-600',
+  BUY: 'bg-blue-100 text-blue-700',
+  SELL: 'bg-slate-100 text-slate-500',
   HOLD: 'bg-slate-50 text-slate-400',
 };
 
@@ -224,11 +230,17 @@ export function StockSidebar({ selected, onSelect, watchlistSymbols, positions =
   // 列：排名 | 股票 | 走势(微缩折线) | 板块·分 | 行业·分 | 市值·分 | 趋势 | 得分 | 仓位 | 信号
   const GRID = 'grid grid-cols-[24px_1.4fr_48px_56px_70px_50px_42px_56px_38px_30px] gap-1';
 
-  const SIDE_LABEL: Record<string, string> = { BUY: '买入', SELL: '卖出', HOLD: '持有' };
-  /** 得分档表头短名（列宽有限） */
+  /** 表头兜底名：走全站唯一的展示面译法（见 features/shared/signalVocabulary.ts） */
+  const SIDE_LABEL: Record<string, string> = {
+    BUY: signalPositionLabel('BUY'),
+    SELL: signalPositionLabel('SELL'),
+    HOLD: signalPositionLabel('HOLD'),
+  };
+  /** 得分档表头短名（列宽有限）。**只写区间，不评价区间**（与 A 股版同一口径）：
+   *  「黄金 / 谨慎 / 做空」是替用户判断哪一段值得下手，这一列只是模型原始分的分区。 */
   const BUCKET_SHORT: Record<string, string> = {
-    golden: '黄金', optional: '可选', caution: '谨慎', extreme: '极端高',
-    neg_extreme: '极端低', neg_short: '做空', pos: '正分', neg: '负分',
+    golden: '0.10-0.12', optional: '0.12-0.15', caution: '0.15-0.20', extreme: '≥0.20',
+    neg_extreme: '≤-0.20', neg_short: '≤-0.15', pos: '≥0', neg: '<0',
   };
 
   /** 表头列筛选下拉（板块/行业/市值/趋势/得分/信号），长菜单限高滚动避免盖住整个列表 */
@@ -387,8 +399,12 @@ export function StockSidebar({ selected, onSelect, watchlistSymbols, positions =
         <span className="text-center">{headerDropdown(fac('trend', TREND_OPTIONS), filters.trend, v => onFiltersChange({ ...filters, trend: v }), '趋势')}</span>
         <span className="text-right">{headerDropdown(fac('bucket', BUCKET_OPTIONS), filters.bucket, v => onFiltersChange({ ...filters, bucket: v, scoreMin: undefined }),
           filters.bucket ? (BUCKET_SHORT[filters.bucket] ?? '得分') : '得分')}</span>
-        <span className="text-center" title="仓位信号：0=不入场（低于行业头部/大盘空仓），0.1~0.99=建议投入比例（半凯利）">仓位</span>
-        <span className="text-center">{headerDropdown(fac('side', [{ value: 'BUY', label: '买入' }, { value: 'SELL', label: '卖出' }, { value: 'HOLD', label: '持有' }]), filters.side, v => onFiltersChange({ ...filters, side: v }), '信号')}</span>
+        <span className="text-center" title="参考仓位系数（模型输出）：0=模型不给出系数（低于行业头部/大盘空仓），0.1~0.99=半凯利系数。系数是模型的输出值，不构成投入金额建议。">仓位</span>
+        <span className="text-center">{headerDropdown(fac('side', [
+          { value: 'BUY', label: signalPositionLabel('BUY') },
+          { value: 'SELL', label: signalPositionLabel('SELL') },
+          { value: 'HOLD', label: signalPositionLabel('HOLD') },
+        ]), filters.side, v => onFiltersChange({ ...filters, side: v }), '位置')}</span>
       </div>
 
       {/* 股票列表 */}
@@ -479,11 +495,13 @@ export function StockSidebar({ selected, onSelect, watchlistSymbols, positions =
                     const tone = positionToneOf(ps);
                     const pct = it.pct_industry;
                     const empty = it.market_empty;
+                    // 措辞归到「模型给出的系数」：数值照旧（下游撮合要用），
+                    // 但不写「建议投入」——那是替用户决定投多少（与 A 股版同一口径）
                     const tip = ps == null
-                      ? '该日无仓位信号（未推理或缺失基准）'
+                      ? '该日无参考仓位系数（未推理或缺失基准）'
                       : ps <= 0
-                        ? (empty ? '大盘空仓信号，不入场' : (pct != null && pct < 0.8 ? `行业百分位 ${(pct * 100).toFixed(0)}% < 80%，不入场` : '不入场'))
-                        : `建议投入 ${Math.round(ps * 100)}%（半凯利）· 行业百分位 ${pct != null ? (pct * 100).toFixed(0) + '%' : '--'}`;
+                        ? (empty ? '模型不给出仓位系数（大盘空仓）' : (pct != null && pct < 0.8 ? `模型不给出仓位系数（行业百分位 ${(pct * 100).toFixed(0)}% < 80%）` : '模型不给出仓位系数'))
+                        : `参考仓位系数 ${Math.round(ps * 100)}%（半凯利）· 行业百分位 ${pct != null ? (pct * 100).toFixed(0) + '%' : '--'}`;
                     return (
                       <span className={`inline-block text-[10px] font-bold rounded px-0.5 py-0.5 border ${tone.cls}`} title={tip}>
                         {tone.txt}
@@ -491,10 +509,11 @@ export function StockSidebar({ selected, onSelect, watchlistSymbols, positions =
                     );
                   })()}
                 </span>
-                {/* 信号方向 */}
+                {/* 截面位置：原来直接印枚举（BUY/SELL），读着就是「买入/卖出」。
+                    走全站唯一译法换成位置词；HOLD 不写出来，留空格子更好扫。 */}
                 <span className="text-center">
                   <span className={`text-[10px] rounded px-1 py-0.5 font-bold ${SIDE_COLOR[it.side ?? 'HOLD'] ?? SIDE_COLOR.HOLD}`}>
-                    {(it.side ?? 'HOLD') === 'HOLD' ? '-' : it.side}
+                    {(it.side ?? 'HOLD') === 'HOLD' ? '-' : signalPositionLabel(it.side)}
                   </span>
                 </span>
               </button>

@@ -13,6 +13,7 @@ import { API_ENDPOINTS } from './config';
 import { SERVICE_URLS } from '../config/services';
 import { ChartDataPoint } from './portfolioService';
 import { symbolMatchesMarket } from '../utils/marketInfer';
+import { REAL_TRADING_DISABLED_DETAIL } from '../config/tradingFlags';
 
 // ==================== 接口定义 ====================
 
@@ -222,6 +223,12 @@ class TradingService {
                 this.ordersEndpointUnavailableUntil = Date.now() + 5 * 60 * 1000;
                 return [];
             }
+            if (this.isRealTradingDisabledError(error)) {
+                // 本部署未启用实盘：后端对 /api/v1/orders 回 403。
+                // **不返回空数组**——那会渲染成「没有委托」，而事实是「这一路不可用」。
+                // 熔断掉刷屏，原样抛出，让调用方的离线态照常生效。
+                this.ordersEndpointUnavailableUntil = Date.now() + 5 * 60 * 1000;
+            }
             throw error;
         }
     }
@@ -257,8 +264,9 @@ class TradingService {
         try {
             return await this.client.get<Trade[]>(API_ENDPOINTS.TRADES, queryParams);
         } catch (error: any) {
-            if (this.isNotFoundError(error)) {
-                // 网关未接入 trades 路由时，短时熔断避免控制台反复 404
+            if (this.isNotFoundError(error) || this.isRealTradingDisabledError(error)) {
+                // 网关未接入 trades 路由（404），或本部署未启用实盘（403）：
+                // 两者都不是暂时性故障，短时熔断避免控制台反复刷屏
                 this.tradesEndpointUnavailableUntil = Date.now() + 5 * 60 * 1000;
             }
             throw error;
@@ -517,6 +525,27 @@ class TradingService {
         if (!error || typeof error !== 'object') return false;
         const maybe = error as { status?: number; code?: string };
         return maybe.status === 404 || maybe.code === 'HTTP_404';
+    }
+
+    /**
+     * 实盘闸门拒绝：后端 `ENABLE_REAL_TRADING=false` 时对实盘专有端点回
+     * 403 + `detail=real_trading_disabled`（见 `backend/shared/live_trading_gate.py`）。
+     *
+     * 正常情况下前端到不了这里——实盘关闭时 `useTradingModeSwitch` 已把模式钳制成
+     * simulation，`getRecentTrades` 走 `/simulation/trades`。只有存量偏好、
+     * 直接调用或旧客户端才会带着 real 打过来。所以这里做的是**止损**（别再刷），
+     * 不是分流。
+     *
+     * 必须同时看 detail 而不能只看 403：403 也可能是权限不足，
+     * 那种情况要原样抛给用户看，不能被当成「实盘没开」静默吞掉。
+     */
+    private isRealTradingDisabledError(error: unknown): boolean {
+        if (!error || typeof error !== 'object') return false;
+        const maybe = error as { status?: number; data?: { detail?: string } };
+        return (
+            maybe.status === 403 &&
+            maybe.data?.detail === REAL_TRADING_DISABLED_DETAIL
+        );
     }
 }
 

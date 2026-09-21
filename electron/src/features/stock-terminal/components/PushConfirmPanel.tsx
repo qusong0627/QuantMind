@@ -21,7 +21,7 @@ import { stockTerminalService } from '../services/stockTerminalService';
 import { riskChips } from '../riskModel';
 import { newUuid } from '../../../utils/uuid';
 import {
-  CHANNEL_OPTIONS,
+  channelOptions,
   MAX_PICK,
   REAL_CONFIRM_WORD,
   blockedReason,
@@ -239,10 +239,10 @@ export function PushConfirmPanel({ open, symbols, side, channels, onChannelsChan
             size="small"
             value={real ? 'real' : 'sim'}
             onChange={(v) => onChannelsChange(v === 'real' ? ['sim', 'real'] : ['sim'])}
-            options={CHANNEL_OPTIONS.map(o => ({ value: o.value, label: o.label, title: o.hint }))}
+            options={channelOptions().map(o => ({ value: o.value, label: o.label, title: o.hint }))}
           />
           <span className="text-[11px] text-slate-400">
-            {CHANNEL_OPTIONS.find(o => o.value === (real ? 'real' : 'sim'))?.hint}
+            {channelOptions().find(o => o.value === (real ? 'real' : 'sim'))?.hint}
           </span>
           <button
             type="button"

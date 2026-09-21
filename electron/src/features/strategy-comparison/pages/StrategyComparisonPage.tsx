@@ -96,22 +96,23 @@ export const StrategyComparisonPage: React.FC = () => {
     return scored;
   }, [selectedStrategies]);
 
-  // 生成智能建议
+  // 生成比较结论（**不是投资建议**：只陈述本页口径下的比较结果，不给适当性结论、
+  // 不说「适合稳健型投资者」—— 我们不是持牌投顾，无权对投资者做适当性判断）
   const recommendations = useMemo((): string[] => {
     if (selectedStrategies.length < 2 || rankings.length === 0) return [];
 
     const recs: string[] = [];
     const topStrategy = rankings[0];
 
-    recs.push(`${topStrategy.strategy_name} 综合表现最佳，综合评分 ${topStrategy.score.toFixed(1)} 分，建议优先考虑。`);
+    recs.push(`${topStrategy.strategy_name} 综合评分最高（${topStrategy.score.toFixed(1)} 分，按本页比较口径计算）。`);
 
-    // 分析高收益低风险的策略
+    // 高收益低风险特征的策略（仅陈述筛选口径，不做适当性判断）
     const balanced = selectedStrategies.filter(s =>
       s.performance.annual_return > 10 && Math.abs(s.performance.max_drawdown) < 15
     );
 
     if (balanced.length > 0) {
-      recs.push(`${balanced.map(s => s.strategy_name).join('、')} 兼具高收益和低风险特征，适合稳健型投资者。`);
+      recs.push(`${balanced.map(s => s.strategy_name).join('、')} 在本页口径下年化收益高于 10% 且最大回撤小于 15%（历史样本区间，不代表未来）。`);
     }
 
     // 风险警告
@@ -198,9 +199,9 @@ export const StrategyComparisonPage: React.FC = () => {
       {/* 对比结果 */}
       {selectedStrategies.length >= 2 ? (
         <>
-          {/* 智能建议 */}
+          {/* 比较结论（措辞避开「建议」：不构成投资建议，也不做投资者适当性判断） */}
           {recommendations.length > 0 && (
-            <Card title="💡 智能建议" style={{ marginBottom: 24 }}>
+            <Card title="💡 比较结论（非投资建议）" style={{ marginBottom: 24 }}>
               <Space direction="vertical" style={{ width: '100%' }}>
                 {recommendations.map((rec, index) => (
                   <Alert

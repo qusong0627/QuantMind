@@ -21,6 +21,7 @@ import {
 } from './utils/accountSourcePreference';
 import { authService } from '../../features/auth/services/authService';
 import type { StrategyFile } from '../../types/backtest/strategy';
+import { isLiveTradingEnabled } from '../../config/tradingFlags';
 import { useAppSelector } from '../../store';
 import { selectCurrentMarket } from '../../store/slices/uiSlice';
 import { useTradingModeSwitch } from '../../features/shared/useTradingModeSwitch';
@@ -582,6 +583,7 @@ const RealTradingPage: React.FC = () => {
 
                         {/* Bottom help, explicit mode selector, and trading disclaimer. */}
                         <div className="p-3 pb-6 border-t border-gray-200 shrink-0 bg-white space-y-1.5">
+                            {isLiveTradingEnabled() && (
                             <div className="flex items-center justify-between gap-2 px-1 pb-1">
                                 <span className="text-[11px] font-semibold text-slate-400">交易模式</span>
                                 <button
@@ -606,6 +608,7 @@ const RealTradingPage: React.FC = () => {
                                     </span>
                                 </button>
                             </div>
+                            )}
                             <HelpCenterLink className="w-full text-xs font-semibold tracking-wide" />
                             {/* T-FE-17 免责页脚自左侧底部移除（2026-09-17）：改由顶栏「本地沙箱」后的顶部免责小字承载 */}
                         </div>

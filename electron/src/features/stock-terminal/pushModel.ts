@@ -21,6 +21,7 @@ import type {
   PushLegResult,
   PushMirrorPlan,
 } from '../stock-terminal-shared/types';
+import { isLiveTradingEnabled } from '../../config/tradingFlags';
 
 /** 与后端 `push_orders.MAX_BATCH_SYMBOLS` 同口径：再多就该分两批（每笔一次风控，很慢） */
 export const MAX_PICK = 50;
@@ -29,11 +30,21 @@ export const MAX_QUANTITY = 1_000_000;
 /** 实盘硬确认的确认词（真钱路径不做「点两下就过」） */
 export const REAL_CONFIRM_WORD = '确认下单';
 
-/** 通道选项（`real` 是叠加语义：实盘 = 模拟盘建单 + 镜像真单，不存在「只实盘」） */
+/**
+ * 通道全量选项（`real` 是叠加语义：实盘 = 模拟盘建单 + 镜像真单，不存在「只实盘」）。
+ *
+ * 界面请用 `channelOptions()` 而不是直接读本常量——实盘开关关闭时 `real`
+ * 不得出现在选项里。常量本身保留全量，恢复实盘时无需改这里。
+ */
 export const CHANNEL_OPTIONS: { value: PushChannel; label: string; hint: string }[] = [
   { value: 'sim', label: '仅模拟盘', hint: '只写模拟盘台账，不碰真钱' },
   { value: 'real', label: '模拟盘 + 实盘', hint: '模拟盘建单 + 镜像真单（受白名单/急停/日配额四道闸约束）' },
 ];
+
+/** 当前部署可选的通道（实盘开关关闭时只剩模拟盘）。 */
+export function channelOptions(): { value: PushChannel; label: string; hint: string }[] {
+  return isLiveTradingEnabled() ? CHANNEL_OPTIONS : CHANNEL_OPTIONS.filter((o) => o.value !== 'real');
+}
 
 export function channelLabel(channels: PushChannel[]): string {
   return channels.includes('real') ? '模拟盘 + 实盘镜像' : '仅模拟盘';
@@ -282,6 +293,12 @@ export function pushGate(
   opts: { channels: PushChannel[]; realAck: boolean; loading?: boolean },
 ): PushGate {
   if (opts.loading) return { ok: false, why: '正在预检…' };
+  // 实盘开关关闭时 `real` 通道不存在。UI 已经给不出这个选项，这里是兜底：
+  // 调用方若把 real 塞进 channels（例如旧的默认通道偏好），必须显式失败而不是
+  // 悄悄降级成模拟盘——用户以为下了真单而实际没下，比报错更糟。
+  if (opts.channels.includes('real') && !isLiveTradingEnabled()) {
+    return { ok: false, why: '本部署未启用实盘交易' };
+  }
   if (summary.invalid > 0) return { ok: false, why: `有 ${summary.invalid} 笔数量不合法，修正后才能推送` };
   if (summary.willRun === 0) {
     return {

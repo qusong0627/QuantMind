@@ -25,6 +25,7 @@ from backend.services.simulation.replay.router import router as replay_router
 from backend.shared.config_manager import init_unified_config
 from backend.shared.cors import resolve_cors_origins
 from backend.shared.error_contract import install_error_contract_handlers
+from backend.shared.live_trading_gate import install_live_trading_gate_middleware
 from backend.shared.logging_config import get_logger
 from backend.shared.openapi_utils import quantmind_generate_unique_id
 from backend.shared.request_id import install_request_id_middleware
@@ -153,6 +154,19 @@ async def lifespan(app: FastAPI):
         apply_runtime_config()
     except Exception as e:
         logger.warning("trade tdx runtime config apply failed: %s", e)
+
+    # 实盘闸门启动自检：`ENABLE_REAL_TRADING=false` 时把 Redis 遗留的
+    # `mirror:enabled=1` 复位为 0。不复位的话，一个「本部署没有实盘」的实例会
+    # 一直带着「镜像已启用」的状态活着；失败不阻断启动——闸门（中间件 +
+    # `_real_trading_ready`）本身仍在，复位只是让状态诚实。
+    try:
+        from backend.services.live_trading.services.real_mirror_service import (
+            enforce_disabled_on_startup,
+        )
+
+        enforce_disabled_on_startup(redis_client)
+    except Exception as e:  # noqa: BLE001 - 自检失败不阻断启动
+        logger.warning("mirror startup gate check failed: %s", e)
 
     try:
         from backend.services.trade_shared.utils.stock_lookup import warmup_stock_cache
@@ -757,6 +771,10 @@ app = FastAPI(
 install_request_id_middleware(app)
 install_error_contract_handlers(app)
 install_access_log_middleware(app, service_name="quantmind-trade")
+# 实盘闸门：`ENABLE_REAL_TRADING=false`（默认）时拒绝实盘专有端点。
+# 双模式共用端点（/real-trading/preflight、/manual-executions 等，模拟盘同样在用）
+# 由 handler 内的 `ensure_real_trading_allowed()` 按模式判定——中间件读不到 body。
+install_live_trading_gate_middleware(app, service_name="quantmind-trade")
 
 app.include_router(trading_orders.router, prefix="/api/v1/orders", tags=["Orders"])
 app.include_router(trading_history.router, prefix="/api/v1/trades", tags=["Trades"])

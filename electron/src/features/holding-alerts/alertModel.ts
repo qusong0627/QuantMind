@@ -35,6 +35,33 @@ export function kindLabel(kind: string): string {
   return KIND_LABEL[kind as HoldingAlertKind] || kind || '预警';
 }
 
+/**
+ * 预警卡片的分频标注。
+ *
+ * 后端的 `freq` 只出现在分数类预警的 `detail` 里（利空/异动/名单类没有分频概念），
+ * 所以缺 `freq` = 不渲染徽章。**注意标题里的「（日频分）」在卡片上并不显示**
+ * （卡片渲染的是 content），分频只能从这里出，否则用户永远看不到自己是拿隔夜分被提醒的。
+ */
+export function scoreFreqBadge(
+  detail: Record<string, unknown> | null | undefined,
+): { label: string; cls: string; title: string } | null {
+  const freq = String((detail || {}).freq || '');
+  if (freq !== 'realtime' && freq !== 'daily') return null;
+  const asOf = String((detail || {}).score_as_of || '').trim();
+  if (freq === 'realtime') {
+    return {
+      label: '实时分',
+      cls: 'bg-sky-50 text-sky-700 border-sky-200',
+      title: `按盘中实时分判定${asOf ? `（${asOf}）` : ''}`,
+    };
+  }
+  return {
+    label: '日频分',
+    cls: 'bg-slate-100 text-slate-500 border-slate-200',
+    title: `按日频批次分判定${asOf ? `（信号日 ${asOf}）` : ''} —— 盘中实时推理未开启或该标的未进热集`,
+  };
+}
+
 export function severityMeta(severity: string): ToneMeta {
   return SEVERITY_META[severity as HoldingAlertSeverity] || SEVERITY_META.info;
 }

@@ -20,7 +20,9 @@ import { StockSearchBar } from '../components/StockSearchBar';
 import type { Point as ScorePoint } from '../components/InferenceScoreChart';
 import { KlineChart, type SignalPoint } from '../components/KlineChart';
 import { DrillDownDrawer } from '../../shared/DrillDownDrawer';
+import { ComplianceStrip } from '../../../components/shared/compliance/ComplianceChrome';
 import { signalPointDrillEntries, tradeMarkerDrillEntries } from '../utils';
+import { signalPositionLabel } from '../../shared/signalVocabulary';
 
 export interface DetailRenderContext {
   symbol: string;
@@ -423,8 +425,8 @@ export default function StockTerminalShell({ renderDetail, renderHeaderExtra, re
                         }
                         onSignalClick={(sig) =>
                           setDrill({
-                            title: `信号 ${sig.side} · ${sig.date}`,
-                            subtitle: '推理信号（与分数副图同源同模型）',
+                            title: `相对位置 ${signalPositionLabel(sig.side)} · ${sig.date}`,
+                            subtitle: '模型当日截面位置（与分数副图同源同模型）',
                             entries: signalPointDrillEntries(sig),
                             raw: sig,
                           })
@@ -520,6 +522,12 @@ export default function StockTerminalShell({ renderDetail, renderHeaderExtra, re
             </div>
           </div>
         )}
+
+        {/* 合规免责横条（A股/港股/美股三市场共用本页壳，改一处三处生效）。
+            放主体之后、框架内最底部：框架底部已被 root 的 paddingBottom 抬到悬浮 Dock
+            之上（整页 bottomReserve 默认 84px > Dock 胶囊 64px），所以这里常显不被遮。
+            常显可换行，不得再套 hidden / truncate。 */}
+        <ComplianceStrip className="shrink-0 border-t border-slate-100 px-4 pb-2 pt-1.5" />
       </div>
 
       <DrillDownDrawer

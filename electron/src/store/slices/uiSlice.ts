@@ -1,5 +1,6 @@
 import { createSlice, PayloadAction } from '@reduxjs/toolkit';
 import { isMarketEnabled } from '../../config/marketFlags';
+import { isLiveTradingEnabled } from '../../config/tradingFlags';
 
 export type AppMarket = 'CN' | 'US' | 'HK' | 'CRYPTO' | 'FUTURES';
 
@@ -20,9 +21,18 @@ const MARKET_PREF_KEY = 'qm:current_market';
 const UI_MODE_PREF_KEY = 'qm:ui_mode_pref';
 
 const savedMode = localStorage.getItem(TRADING_MODE_PREF_KEY);
-// 未显式保存过偏好时默认模拟盘：实盘态须由用户主动切换一次（切换会写入偏好）
+// 未显式保存过偏好时默认模拟盘：实盘态须由用户主动切换一次（切换会写入偏好）。
+// 实盘开关关闭时**即便 localStorage 存着 'real' 也不认**。
 const initialTradingMode: 'real' | 'simulation' =
-  (savedMode === 'real' || savedMode === 'simulation') ? savedMode : 'simulation';
+  savedMode === 'real' && isLiveTradingEnabled() ? 'real' : 'simulation';
+// 把失效的偏好键回写掉（与下方市场偏好同款）。
+//
+// 这里**必须写掉而不是只忽略**：偏好会跨版本存活，若把 'real' 留在 localStorage 里，
+// 那么运维哪天把开关打开，所有存量用户会在下一次刷新时**自动落进实盘态**——
+// 切到真钱必须是一次当场的显式动作，不能由一个陈年偏好替用户做决定。
+if (savedMode === 'real' && !isLiveTradingEnabled()) {
+  localStorage.setItem(TRADING_MODE_PREF_KEY, 'simulation');
+}
 
 const savedMarket = localStorage.getItem(MARKET_PREF_KEY);
 const validMarkets: AppMarket[] = (['CN', 'US', 'HK', 'CRYPTO', 'FUTURES'] as AppMarket[]).filter((m) => isMarketEnabled(m));
@@ -64,7 +74,10 @@ const uiSlice = createSlice({
       state.notifications = state.notifications.filter(n => n.id !== action.payload);
     },
     setTradingMode: (state, action: PayloadAction<'real' | 'simulation'>) => {
-      state.tradingMode = action.payload;
+      // 实盘开关关闭时钳制为模拟盘：reducer 是最后一道，绕过 hook 直接 dispatch
+      // （或持久化状态回放）都不该能把界面带进实盘态
+      state.tradingMode =
+        action.payload === 'real' && !isLiveTradingEnabled() ? 'simulation' : action.payload;
     },
     setMarket: (state, action: PayloadAction<AppMarket>) => {
       const market = isMarketEnabled(action.payload) ? action.payload : 'CN';

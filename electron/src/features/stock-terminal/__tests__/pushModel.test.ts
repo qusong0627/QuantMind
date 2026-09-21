@@ -8,7 +8,7 @@
  * 4. 回执里 skipped/fail 不得渲染成成功（这条链最后会动真钱）。
  */
 
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   MAX_QUANTITY,
   blockedReason,
@@ -610,5 +610,57 @@ describe('legResultView · 实盘直发腿', () => {
     // Assert
     expect(v.tone).toBe('fail');
     expect(v.label).toContain('未知');
+  });
+});
+
+/**
+ * 实盘开关关闭时（生产默认态）的通道收敛。
+ *
+ * 这一组必须走动态 import：`isLiveTradingEnabled()` 读的是模块加载期算好的常量
+ * （三态 env 判定），静态 import 的实例在文件顶部就已经冻住了。
+ */
+describe('实盘开关关闭', () => {
+  const load = async () => {
+    vi.resetModules();
+    vi.stubEnv('VITE_ENABLE_REAL_TRADING', 'false');
+    return await import('../pushModel');
+  };
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it('channelOptions() 只剩模拟盘', async () => {
+    // Act
+    const { channelOptions } = await load();
+
+    // Assert
+    expect(channelOptions().map((o) => o.value)).toEqual(['sim']);
+  });
+
+  it('调用方硬塞 real 通道时显式失败，不静默降级成纯模拟', async () => {
+    // Arrange
+    const { pushGate } = await load();
+    const base = { willRun: 1, blocked: 0, invalid: 0, total: 1, deselected: 0, estAmount: 100, mirrorSkips: 0 };
+
+    // Act
+    const gate = pushGate(base, { channels: ['sim', 'real'], realAck: true });
+
+    // Assert：确认词都打对了也不放行——用户以为下的是真单、实际只成交虚拟盘，比报错糟得多
+    expect(gate.ok).toBe(false);
+    expect(gate.why).toContain('未启用实盘');
+  });
+
+  it('开关打开时 real 通道与确认词逻辑原样保留', async () => {
+    // Arrange
+    vi.resetModules();
+    vi.stubEnv('VITE_ENABLE_REAL_TRADING', 'true');
+    const { channelOptions, pushGate } = await import('../pushModel');
+    const base = { willRun: 1, blocked: 0, invalid: 0, total: 1, deselected: 0, estAmount: 100, mirrorSkips: 0 };
+
+    // Assert
+    expect(channelOptions().map((o) => o.value)).toEqual(['sim', 'real']);
+    expect(pushGate(base, { channels: ['sim', 'real'], realAck: false }).why).toContain('确认下单');
+    expect(pushGate(base, { channels: ['sim', 'real'], realAck: true }).ok).toBe(true);
   });
 });

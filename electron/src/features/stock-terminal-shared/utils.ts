@@ -1,5 +1,7 @@
 /** 个股终端跨市场共用的小工具：代码格式归一与数值格式化 */
 
+import { SIGNAL_POSITION_HINT, signalPositionLabel } from '../shared/signalVocabulary';
+
 /** suffix(600519.SH) -> prefix(SH600519)，自选表用 prefix 格式；无后缀时原样返回（美股 ticker 即此情形） */
 export function toPrefix(symbol: string): string {
   const [code, ex] = symbol.split('.');
@@ -68,14 +70,24 @@ export function tradeMarkerDrillEntries(marker: {
   return entries;
 }
 
-/** 信号标记 → 下钻条目（T-FE-08：信号三角点击；与分数副图同一模型/同一来源） */
+/**
+ * 信号标记 → 下钻条目（T-FE-08：信号三角点击；与分数副图同一模型/同一来源）。
+ *
+ * 「方向」而不是「买入/卖出信号」：模型判定的是该标的在当日截面里的位置，
+ * 说成买卖信号就成了替用户做决定，见 `features/shared/signalVocabulary.ts`。
+ */
 export function signalPointDrillEntries(signal: {
   date: string;
   side: string;
   fusion: number | null;
 }): Array<{ label: string; value: string; source?: string; hint?: string }> {
   return [
-    { label: '方向', value: signal.side === 'BUY' ? '买入信号' : signal.side === 'SELL' ? '卖出信号' : signal.side },
+    {
+      label: '相对位置',
+      value: signalPositionLabel(signal.side),
+      source: 'engine_signal_scores.signal_side',
+      hint: SIGNAL_POSITION_HINT,
+    },
     { label: '日期', value: signal.date || '—' },
     {
       label: '推理分数',

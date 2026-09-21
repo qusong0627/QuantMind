@@ -1,5 +1,6 @@
 import React from 'react';
 import { Wallet, Wifi, Activity, Layers, Cpu, Server } from 'lucide-react';
+import { ComplianceStrip } from '../../../components/shared/compliance/ComplianceChrome';
 
 interface AccountInfo {
     total_asset: number;
@@ -129,7 +130,7 @@ const TopBar: React.FC<TopBarProps> = ({ accountInfo, isConnected, strategyStatu
         <div className="flex flex-col gap-2 px-6 pt-3 pb-3 bg-white w-full">
             {/* Header: Title, Tags, and Status Indicators */}
             <div className="flex items-center justify-between gap-3">
-                <div className="flex items-center gap-2.5">
+                <div className="flex flex-wrap items-center gap-2.5">
                     <div className="p-1.5 bg-blue-50 text-blue-600 rounded-xl">
                         <Wallet size={18} />
                     </div>
@@ -148,13 +149,12 @@ const TopBar: React.FC<TopBarProps> = ({ accountInfo, isConnected, strategyStatu
                         <Server size={13} />
                         <span>{deployChannelLabel}</span>
                     </span>
-                    {/* 顶部免责小字（用户指定：放「本地沙箱」后面） */}
-                    <span
-                        className="hidden xl:inline text-[10px] leading-none text-slate-400 truncate max-w-[520px] cursor-default"
-                        title="本页为量化研究工具，展示研究结果与信号，不构成投资建议、不代客理财；股市有风险，投资需谨慎。历史数据与回测结果不代表未来收益。"
-                    >
-                        本页为量化研究工具，展示研究结果与信号，不构成投资建议、不代客理财；股市有风险，投资需谨慎。历史数据与回测结果不代表未来收益。
-                    </span>
+                    {/* 顶部免责小字（用户指定：放「本地沙箱」后面）。
+                        常显 + 可换行：原先 hidden xl:inline + truncate 会让 <1280px 直接看不到，
+                        免责声明在窄屏消失等于没写。文案复用合规组件，禁止在此另抄字面量。
+                        basis-[320px] 配 flex-wrap：窄屏放不下时整条落到第二行吃满整行宽，
+                        而不是被挤成一条几十像素宽的竖排文字。 */}
+                    <ComplianceStrip className="min-w-0 flex-1 basis-[320px]" />
                 </div>
 
                 <div className="flex items-center gap-2">

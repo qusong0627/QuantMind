@@ -62,6 +62,32 @@ def test_build_card_contract():
 
 
 @pytest.mark.unit
+def test_card_wording_describes_position_only():
+    """展示面（title/rationale）只描述截面位置；执行契约（actions.side）原样保留。
+
+    卡片标题/理由会推到用户面前，出现方向词就是「替用户做决定」；而 `actions`
+    里的 side 是下单契约，含糊化会让人下错单——两边的纪律相反，别一起改。
+    """
+    card = ag.build_card(
+        candidate={
+            "symbol": "600834.SH",
+            "fusion_score": 0.0115,
+            "rank": 1,
+            "resonance": True,
+        },
+        gen_key="adv-gen-20260918-600834.sh",
+        trade_date="2026-09-18",
+        side_counts={"BUY": 1073, "SELL": 830, "HOLD": 3290},
+        regime_hint=0.7,
+    )
+    shown = card["title"] + card["rationale"]
+    for word in ("买入", "卖出", "看多", "看空", "建议", "一键", "满仓", "清仓"):
+        assert word not in shown, f"卡片展示面出现方向性措辞「{word}」: {shown}"
+    assert "截面靠前" in card["title"] or "靠前" in shown
+    assert card["actions"][0]["side"] == "buy"  # 执行面语义必须保留
+
+
+@pytest.mark.unit
 def test_generate_skips_on_weak_regime(monkeypatch):
     import asyncio
 

@@ -24,7 +24,8 @@ export interface StockListItem {
   freq?: ScoreFreq | null;
   signal_date: string | null;
   model: string | null;
-  /** 仓位信号分 0=不入场 / 0.1~0.99=建议投入比例（半凯利+截面基准） */
+  /** 参考仓位系数（模型输出）0=模型不给出系数 / 0.1~0.99=半凯利系数+截面基准。
+   *  数值下游撮合要用，**措辞一律说「系数」不说「建议投入」**——后者是替用户决定投多少。 */
   position_score: number | null;
   /** 所在行业前10均分基准（直观参照） */
   industry_top10_avg: number | null;

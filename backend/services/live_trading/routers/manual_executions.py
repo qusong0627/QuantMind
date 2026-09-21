@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 
 from backend.services.trade_shared.deps import AuthContext, get_auth_context
 from backend.services.live_trading.services.manual_execution_service import manual_execution_service
+from backend.shared.live_trading_gate import ensure_real_trading_allowed
 
 router = APIRouter(prefix="/manual-executions", tags=["Manual Executions"])
 
@@ -33,6 +34,9 @@ async def preview_manual_execution(
     payload: ManualExecutionPreviewRequest,
     auth: AuthContext = Depends(get_auth_context),
 ):
+    # 本端点模拟盘也在用（手动任务两种模式共用），所以不能按路径拦——
+    # 按 body 里的模式判：实盘关闭时 REAL/SHADOW 一律 403，SIMULATION 照常
+    ensure_real_trading_allowed(payload.trading_mode)
     return await manual_execution_service.build_execution_preview(
         tenant_id=auth.tenant_id,
         user_id=auth.user_id,
@@ -49,6 +53,8 @@ async def create_manual_execution(
     payload: ManualExecutionCreateRequest,
     auth: AuthContext = Depends(get_auth_context),
 ):
+    # 同 preview：按 body 模式判，实盘关闭时不接受 REAL/SHADOW
+    ensure_real_trading_allowed(payload.trading_mode)
     result = await manual_execution_service.create_manual_task(
         tenant_id=auth.tenant_id,
         user_id=auth.user_id,

@@ -51,6 +51,12 @@ export interface SingleStockPredictionResponse {
   expected_return: number;
   confidence: number;
   rating: 'STRONG_BUY' | 'BUY' | 'HOLD' | 'SELL';
+  /**
+   * 截面分位（0–1）：该标的在**同一模型、同一交易日**的截面内所处位置。
+   * 这是对外展示的唯一分数刻度（`features/shared/researchScore.ts` 换算成 0–100）。
+   * 取不到截面时后端返回 null —— UI 显示「—」，**不得显示成 0**。
+   */
+  rank_pct?: number | null;
   p10_return: number | null;
   p50_return: number;
   p90_return: number | null;

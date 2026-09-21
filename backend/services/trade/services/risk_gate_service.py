@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from backend.shared.programmatic_trading_disclosure import log_high_frequency_warning
 from backend.shared.risk import RiskContext, RiskGateCore
 
 logger = logging.getLogger(__name__)
@@ -49,6 +50,7 @@ class DirectOrderReq:
     strategy_id: str = ""
     client_order_id: str = ""
 
+
 CST = timezone(timedelta(hours=8))
 CONFIG_KEY = "qm:risk:config"
 DECISIONS_KEY = "qm:risk:decisions:{date}"
@@ -71,7 +73,14 @@ DEFAULT_RULES: dict[str, dict[str, Any]] = {
     "l6.book_invalid": {},
 }
 
-_FORCED_EXIT_PREFIXES = ("sltp:", "flatten:", "forced-exit:", "forced_exit:", "flat-", "mir-")
+_FORCED_EXIT_PREFIXES = (
+    "sltp:",
+    "flatten:",
+    "forced-exit:",
+    "forced_exit:",
+    "flat-",
+    "mir-",
+)
 
 _CORE = RiskGateCore()
 _quote_client: Any = None  # 远端行情 Redis（懒建；快照读用）
@@ -118,12 +127,24 @@ def load_config(redis: Any) -> RiskConfig | None:
         version = int(raw.get("version") or 0)
     except (TypeError, ValueError):
         version = 0
+    _warn_if_order_rate_reaches_hft(rules)
     return RiskConfig(
         enabled=_as_bool(raw.get("enabled"), False),
         shadow=_as_bool(raw.get("shadow"), True),
         version=version,
         rules=rules,
     )
+
+
+def _warn_if_order_rate_reaches_hft(rules: dict[str, dict[str, Any]]) -> None:
+    """下单频率配置撞上高频认定线时告警。
+
+    只告警、不改配置、不拒绝加载：撞线不违法，但要额外向券商报告并接受更严监管，
+    真正的风险是**用户不知道自己已经在那一侧**。判定与阈值见
+    `shared/programmatic_trading_disclosure.py`（法规常量的唯一出处）。
+    """
+    rule = rules.get("l3.order_frequency") or {}
+    log_high_frequency_warning(rule.get("max_per_minute"), source=f"redis:{CONFIG_KEY}")
 
 
 # ── 上下文构建 ───────────────────────────────────────────────────────
@@ -210,7 +231,9 @@ def _last_close_fallback(symbol: str) -> float | None:
         return None
 
 
-async def build_context(req: Any, *, db: Any, redis: Any, need_counts: bool = False) -> RiskContext:
+async def build_context(
+    req: Any, *, db: Any, redis: Any, need_counts: bool = False
+) -> RiskContext:
     """OrderRequest → RiskContext（纯读；任何子项失败仅缺省该字段并留痕于 evidence）。"""
     now_ts = time.time()
     side = str(getattr(req, "side", "") or "").strip().upper()
@@ -298,7 +321,8 @@ async def build_context(req: Any, *, db: Any, redis: Any, need_counts: bool = Fa
                         break
         except Exception as exc:  # noqa: BLE001
             logger.warning(
-                "[RiskGate] 真账户快照读取失败（字段按缺省，fail-closed 语义由规则裁定）: %s", exc
+                "[RiskGate] 真账户快照读取失败（字段按缺省，fail-closed 语义由规则裁定）: %s",
+                exc,
             )
     else:
         try:
@@ -317,7 +341,10 @@ async def build_context(req: Any, *, db: Any, redis: Any, need_counts: bool = Fa
                     if total_assets and mv is not None:
                         position_pct = mv / total_assets
         except Exception as exc:  # noqa: BLE001
-            logger.warning("[RiskGate] 账户快照读取失败（字段按缺省，fail-closed 语义由规则裁定）: %s", exc)
+            logger.warning(
+                "[RiskGate] 账户快照读取失败（字段按缺省，fail-closed 语义由规则裁定）: %s",
+                exc,
+            )
 
     # 次数（仅启用了频率/撤单率规则时才查库）；REAL=orders 真单表，否则 sim_orders
     orders_last_minute = orders_today = cancels_today = 0
@@ -365,18 +392,44 @@ async def build_context(req: Any, *, db: Any, redis: Any, need_counts: bool = Fa
 
             from backend.services.simulation.models.order import SimOrder
 
-            day_start = datetime.now(tz=CST).replace(hour=0, minute=0, second=0, microsecond=0)
-            base = select(func.count()).select_from(SimOrder).where(
-                SimOrder.tenant_id == tenant, cast(SimOrder.user_id, String) == str(uid)
+            day_start = datetime.now(tz=CST).replace(
+                hour=0, minute=0, second=0, microsecond=0
+            )
+            base = (
+                select(func.count())
+                .select_from(SimOrder)
+                .where(
+                    SimOrder.tenant_id == tenant,
+                    cast(SimOrder.user_id, String) == str(uid),
+                )
             )
             orders_last_minute = int(
-                (await db.execute(
-                    base.where(SimOrder.created_at >= datetime.now(timezone.utc) - timedelta(seconds=60))
-                )).scalar() or 0
+                (
+                    await db.execute(
+                        base.where(
+                            SimOrder.created_at
+                            >= datetime.now(timezone.utc) - timedelta(seconds=60)
+                        )
+                    )
+                ).scalar()
+                or 0
             )
-            orders_today = int((await db.execute(base.where(SimOrder.created_at >= day_start))).scalar() or 0)
+            orders_today = int(
+                (
+                    await db.execute(base.where(SimOrder.created_at >= day_start))
+                ).scalar()
+                or 0
+            )
             cancels_today = int(
-                (await db.execute(base.where(SimOrder.status == "cancelled", SimOrder.cancelled_at >= day_start))).scalar() or 0
+                (
+                    await db.execute(
+                        base.where(
+                            SimOrder.status == "cancelled",
+                            SimOrder.cancelled_at >= day_start,
+                        )
+                    )
+                ).scalar()
+                or 0
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("[RiskGate] 频率计数查询失败: %s", exc)
@@ -466,7 +519,7 @@ async def check_direct_order(
 @dataclass(frozen=True)
 class RiskCheck:
     passed: bool
-    enforced: bool = False          # True=强制模式下的拦截；False=影子放行
+    enforced: bool = False  # True=强制模式下的拦截；False=影子放行
     rule_id: str | None = None
     reason: str = ""
     version: int = 0
@@ -481,7 +534,7 @@ class RiskVerdict:
     """
 
     passed: bool
-    verdict: str                    # pass | warn | reject | halt | disabled | error
+    verdict: str  # pass | warn | reject | halt | disabled | error
     enforced: bool = False
     rule_id: str | None = None
     reason: str = ""
@@ -493,8 +546,16 @@ class RiskVerdict:
 _PASS = RiskCheck(passed=True)
 
 
-def _record(redis: Any, req: Any, *, verdict: str, enforced: bool, version: int,
-            decisions: list[dict[str, Any]] | None = None, error: str | None = None) -> None:
+def _record(
+    redis: Any,
+    req: Any,
+    *,
+    verdict: str,
+    enforced: bool,
+    version: int,
+    decisions: list[dict[str, Any]] | None = None,
+    error: str | None = None,
+) -> None:
     """决策留痕（best-effort：留痕失败不改变放行/拦截结果，但计数 errors）。"""
     try:
         client = _client(redis)
@@ -515,7 +576,9 @@ def _record(redis: Any, req: Any, *, verdict: str, enforced: bool, version: int,
             fields["decisions"] = json.dumps(decisions, ensure_ascii=False)[:2000]
         if error:
             fields["error"] = str(error)[:500]
-        pipe.xadd(_date_key(DECISIONS_KEY), fields, maxlen=DECISIONS_MAXLEN, approximate=True)
+        pipe.xadd(
+            _date_key(DECISIONS_KEY), fields, maxlen=DECISIONS_MAXLEN, approximate=True
+        )
         metrics = _date_key(METRICS_KEY)
         pipe.hincrby(metrics, "evaluated", 1)
         if verdict == "reject":
@@ -551,9 +614,19 @@ async def evaluate_order(
         cfg = load_config(redis)
     except Exception as exc:  # noqa: BLE001 - 配置不可读 = fail-closed
         if record:
-            _record(redis, req, verdict="reject", enforced=True, version=0, error=f"config: {exc}")
+            _record(
+                redis,
+                req,
+                verdict="reject",
+                enforced=True,
+                version=0,
+                error=f"config: {exc}",
+            )
         return RiskVerdict(
-            passed=False, verdict="error", enforced=True, rule_id="l0.config",
+            passed=False,
+            verdict="error",
+            enforced=True,
+            rule_id="l0.config",
             reason=f"风控配置不可读（fail-closed）: {exc}"[:180],
         )
     if cfg is None or not cfg.enabled:
@@ -563,19 +636,38 @@ async def evaluate_order(
         return RiskVerdict(passed=True, verdict="disabled")
 
     try:
-        need_counts = any(k in cfg.rules for k in ("l3.order_frequency", "l3.cancel_ratio"))
+        need_counts = any(
+            k in cfg.rules for k in ("l3.order_frequency", "l3.cancel_ratio")
+        )
         ctx = await build_context(req, db=db, redis=redis, need_counts=need_counts)
         verdict = _CORE.evaluate(ctx, cfg.rules, version=cfg.version)
     except Exception as exc:  # noqa: BLE001 - 判定异常 = fail-closed
         if record:
-            _record(redis, req, verdict="reject", enforced=True, version=cfg.version, error=f"evaluate: {exc}")
+            _record(
+                redis,
+                req,
+                verdict="reject",
+                enforced=True,
+                version=cfg.version,
+                error=f"evaluate: {exc}",
+            )
         return RiskVerdict(
-            passed=False, verdict="error", enforced=True, rule_id="l0.evaluate",
-            reason=f"风控判定异常（fail-closed）: {exc}"[:180], version=cfg.version,
+            passed=False,
+            verdict="error",
+            enforced=True,
+            rule_id="l0.evaluate",
+            reason=f"风控判定异常（fail-closed）: {exc}"[:180],
+            version=cfg.version,
         )
 
     decisions = [
-        {"rule_id": d.rule_id, "level": d.level, "action": d.action, "reason": d.reason, "evidence": dict(d.evidence)}
+        {
+            "rule_id": d.rule_id,
+            "level": d.level,
+            "action": d.action,
+            "reason": d.reason,
+            "evidence": dict(d.evidence),
+        }
         for d in verdict.decisions
     ]
     if verdict.halt:
@@ -589,20 +681,43 @@ async def evaluate_order(
 
     enforced = (not cfg.shadow) and v in ("reject", "halt")
     if record:
-        _record(redis, req, verdict=v, enforced=enforced, version=cfg.version, decisions=decisions)
+        _record(
+            redis,
+            req,
+            verdict=v,
+            enforced=enforced,
+            version=cfg.version,
+            decisions=decisions,
+        )
 
     if cfg.shadow or v == "pass" or v == "warn":
         return RiskVerdict(
-            passed=True, verdict=v, enforced=False, version=cfg.version,
-            shadow=bool(cfg.shadow), decisions=decisions,
+            passed=True,
+            verdict=v,
+            enforced=False,
+            version=cfg.version,
+            shadow=bool(cfg.shadow),
+            decisions=decisions,
         )
     rule_id = str((primary or {}).get("rule_id") or "risk")
     reason = str((primary or {}).get("reason") or "风控拦截")
     if record:
-        logger.warning("[RiskGate] 拒单 %s %s: [%s] %s", getattr(req, "side", ""), getattr(req, "symbol", ""), rule_id, reason)
+        logger.warning(
+            "[RiskGate] 拒单 %s %s: [%s] %s",
+            getattr(req, "side", ""),
+            getattr(req, "symbol", ""),
+            rule_id,
+            reason,
+        )
     return RiskVerdict(
-        passed=False, verdict=v, enforced=True, rule_id=rule_id, reason=reason,
-        version=cfg.version, shadow=bool(cfg.shadow), decisions=decisions,
+        passed=False,
+        verdict=v,
+        enforced=True,
+        rule_id=rule_id,
+        reason=reason,
+        version=cfg.version,
+        shadow=bool(cfg.shadow),
+        decisions=decisions,
     )
 
 
@@ -612,8 +727,11 @@ async def check_order(req: Any, *, db: Any, redis: Any) -> RiskCheck:
     if v.verdict == "disabled":
         return _PASS
     return RiskCheck(
-        passed=v.passed, enforced=v.enforced, rule_id=v.rule_id,
-        reason=v.reason, version=v.version,
+        passed=v.passed,
+        enforced=v.enforced,
+        rule_id=v.rule_id,
+        reason=v.reason,
+        version=v.version,
     )
 
 

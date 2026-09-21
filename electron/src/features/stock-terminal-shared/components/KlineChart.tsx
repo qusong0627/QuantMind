@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import ReactECharts from 'echarts-for-react';
 import { TermTooltip } from '../../shared/TermTooltip';
+import { signalPositionLabel } from '../../shared/signalVocabulary';
 import { KlineBar, KlineMarker, type TradeMarker } from '../types';
 import { boll, kdj, macd, rsi, sma, volMa, Series } from '../engine/indicators';
 import { useStockTerminal } from '../adapter';
@@ -30,6 +31,13 @@ export interface SignalPoint {
   fusion: number | null;
   side: string;
 }
+
+/**
+ * 信号散点的 series 名（图例文字 + 点击派发的匹配键）。
+ * 提成常量是因为它被**两处**用到（建 series 与 `onEvents` 里按 `seriesName` 分派点击），
+ * 分别写字面量时改一处忘一处会让下钻**静默失效**（点上去没反应，不报错）。
+ */
+const SIGNAL_SERIES_NAME = '相对位置';
 
 /** 推理分数历史叠加（多模型）：每模型一条分数线 */
 export interface ScoreSeries {
@@ -133,7 +141,7 @@ interface Props {
   adjust?: KlineAdjust;
   /** T-FE-08 买卖点下钻：点击交易标记（含理由/订单号） */
   onTradeClick?: (marker: TradeMarker) => void;
-  /** T-FE-08 信号点下钻：点击推理信号三角标记 */
+  /** T-FE-08 信号点下钻：点击截面位置三角标记 */
   onSignalClick?: (signal: SignalPoint) => void;
 }
 
@@ -301,22 +309,25 @@ export function KlineChart({
       });
     }
 
-    // 推理信号标记
+    // 推理信号标记（标注的是**当日截面位置**，不是买卖信号——见 `features/shared/signalVocabulary.ts`）
     if (signals.length) {
       const buyData: any[] = [], sellData: any[] = [];
       for (const sig of signals) {
         const i = idxByDate.get(sig.date);
         if (i == null) continue;
         const bar = bars[i];
+        // 三角落在 K 线下方（靠前）或上方（靠后），几何本身只表示位置高低
         const v = sig.side === 'BUY' ? bar.low * 0.99 : bar.high * 1.01;
         if (sig.side === 'BUY') buyData.push({ value: [i, Number(v.toFixed(2))], sig });
         else if (sig.side === 'SELL') sellData.push({ value: [i, Number(v.toFixed(2))], sig });
       }
       const mk = (data: any[], symbol: string, color: string, offset: number) => ({
-        name: '信号', type: 'scatter', xAxisIndex: 0, yAxisIndex: 0,
+        name: SIGNAL_SERIES_NAME, type: 'scatter', xAxisIndex: 0, yAxisIndex: 0,
         data, symbol, symbolSize: 11, symbolOffset: [0, offset],
         itemStyle: { color, borderColor: '#fff', borderWidth: 1 },
-        label: { show: true, formatter: (p: any) => p.data.sig.side, fontSize: 8, color, fontWeight: 'bold', position: 'top' },
+        // 直接渲染 `sig.side` 会把 BUY/SELL 这两个枚举字面打到图上，读起来就是买卖标记；
+        // 走 `signalPositionLabel` 换成「靠前/靠后」。未知判定不会走到这里（上面已按 BUY/SELL 分流）。
+        label: { show: true, formatter: (p: any) => signalPositionLabel(p.data.sig.side), fontSize: 8, color, fontWeight: 'bold', position: 'top' },
         z: 10,
       });
       if (buyData.length) series.push(mk(buyData, 'triangle', COLORS.up, -8));
@@ -607,7 +618,7 @@ export function KlineChart({
         onTradeClick(payload.t as TradeMarker);
         return;
       }
-      if (params?.seriesName === '信号' && onSignalClick && payload?.sig) {
+      if (params?.seriesName === SIGNAL_SERIES_NAME && onSignalClick && payload?.sig) {
         onSignalClick(payload.sig as SignalPoint);
         return;
       }

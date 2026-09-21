@@ -26,7 +26,14 @@ import {
 import { checkDiversification } from '../diversification';
 import { recordComplianceEvent, listComplianceEvents } from '../complianceLog';
 import { DangerConfirmModal } from '../DangerConfirmModal';
-import { ComplianceReturn, ComplianceFooter } from '../ComplianceChrome';
+import {
+  ComplianceReturn,
+  ComplianceFooter,
+  ComplianceStrip,
+  COMPLIANCE_TOOL_BOUNDARY_TEXT,
+  COMPLIANCE_HISTORY_TEXT,
+} from '../ComplianceChrome';
+import { RegistrationConsent } from '../RegistrationConsent';
 
 beforeEach(() => {
   window.localStorage.clear();
@@ -297,5 +304,51 @@ describe('收益展示规范（T-FE-17）', () => {
     expect(screen.getByText(/不构成投资建议/)).toBeTruthy();
     expect(screen.getByText(/股市有风险/)).toBeTruthy();
     expect(screen.getByText(/不代表未来收益/)).toBeTruthy();
+  });
+});
+
+describe('免责横条（开源发行合规：页脚空间不足的页头/窄容器）', () => {
+  it('与页脚共用同一份文案字面量，不复制字符串', () => {
+    render(<ComplianceStrip />);
+    // 直接用导出的常量断言 —— 组件若另抄一份字面量，这里就会对不上
+    expect(screen.getByText(COMPLIANCE_TOOL_BOUNDARY_TEXT)).toBeTruthy();
+    expect(screen.getByText(COMPLIANCE_HISTORY_TEXT)).toBeTruthy();
+  });
+
+  it('页脚与横条渲染出完全相同的免责句子（单一来源）', () => {
+    render(<ComplianceFooter />);
+    expect(screen.getByText(COMPLIANCE_TOOL_BOUNDARY_TEXT)).toBeTruthy();
+    expect(screen.getByText(COMPLIANCE_HISTORY_TEXT)).toBeTruthy();
+  });
+
+  it('常显可换行：不得带 hidden / truncate（窄屏消失即失去意义）', () => {
+    render(<ComplianceStrip />);
+    const el = screen.getByRole('note');
+    expect(el.className).not.toMatch(/(^|\s)hidden(\s|$)/);
+    expect(el.className).not.toMatch(/(^|\s)truncate(\s|$)/);
+    expect(el.className).toMatch(/flex-wrap/);
+  });
+});
+
+describe('注册页合规确认项（必须勾选）', () => {
+  it('渲染资质边界文案，未勾选不产生回调', () => {
+    const onChange = vi.fn();
+    render(<RegistrationConsent checked={false} onChange={onChange} />);
+    expect(screen.getByText(/我已阅读并理解/)).toBeTruthy();
+    expect(screen.getByText(/不构成投资建议/)).toBeTruthy();
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it('勾选后回调置位并留痕（terms_consent）', async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(<RegistrationConsent checked={false} onChange={onChange} />);
+
+    await user.click(screen.getByRole('checkbox'));
+
+    expect(onChange).toHaveBeenCalledWith(true);
+    const logged = listComplianceEvents().filter((e) => e.kind === 'terms_consent');
+    expect(logged).toHaveLength(1);
+    expect(logged[0].detail).toContain('不构成投资建议');
   });
 });

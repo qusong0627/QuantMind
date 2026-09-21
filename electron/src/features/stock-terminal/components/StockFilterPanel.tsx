@@ -8,6 +8,8 @@ import { Select } from 'antd';
 import { stockTerminalService } from '../services/stockTerminalService';
 import { MarketCalendarFilter } from './MarketCalendarFilter';
 import { EXCLUDE_ON } from '../riskModel';
+// 展示面口径：signal_side 只说「靠前/靠后/居中」（见 features/shared/signalVocabulary.ts）
+import { signalPositionLabel } from '../../shared/signalVocabulary';
 
 export interface ListFilters {
   board?: string;
@@ -41,18 +43,20 @@ export const CAP_TIER_OPTIONS = [
 export const TREND_OPTIONS = [
   { value: '连续上升', label: '连续上升' },
   { value: '连续下降', label: '连续下降' },
-  { value: '先升后降', label: '先升后降 · 最佳买点' },
+  { value: '先升后降', label: '先升后降' },
   { value: '上升', label: '单日上升' },
   { value: '下降', label: '单日下降' },
   { value: '持平', label: '持平' },
 ];
+/** 分数档：min/max 是 **fusion_score 原始分**的区间（不是 0-100 的研究评分），
+ *  数值不可动；label 只说明「是哪一段区间」，不评价这段区间好坏、不指向买卖动作。 */
 export const BUCKET_OPTIONS: { value: string; label: string; min?: number; max?: number }[] = [
-  { value: 'golden', label: '黄金区间 0.10-0.12', min: 0.10, max: 0.12 },
-  { value: 'optional', label: '可选 0.12-0.15', min: 0.12, max: 0.15 },
-  { value: 'caution', label: '谨慎 0.15-0.20', min: 0.15, max: 0.20 },
-  { value: 'extreme', label: '极端高分 ≥0.20', min: 0.20 },
-  { value: 'neg_extreme', label: '极端负分 ≤-0.20', max: -0.20 },
-  { value: 'neg_short', label: '做空候选 ≤-0.15', max: -0.15 },
+  { value: 'golden', label: '模型分 0.10-0.12', min: 0.10, max: 0.12 },
+  { value: 'optional', label: '模型分 0.12-0.15', min: 0.12, max: 0.15 },
+  { value: 'caution', label: '模型分 0.15-0.20', min: 0.15, max: 0.20 },
+  { value: 'extreme', label: '模型分 ≥0.20', min: 0.20 },
+  { value: 'neg_extreme', label: '模型分 ≤-0.20', max: -0.20 },
+  { value: 'neg_short', label: '模型分 ≤-0.15', max: -0.15 },
   { value: 'pos', label: '全部正分 ≥0', min: 0 },
   { value: 'neg', label: '全部负分 <0', max: 0 },
 ];
@@ -139,7 +143,9 @@ export function StockFilterPanel({ filters, onChange, total, fullTotal, models: 
     if (bd) activeChips.push({ key: 'bucket', label: `分数 ${bd.label}`, clear: () => set({ bucket: undefined, scoreMin: undefined }) });
     if (filters.trend) activeChips.push({ key: 'trend', label: `趋势 ${filters.trend}`, clear: () => set({ trend: undefined }) });
     if (filters.industry) activeChips.push({ key: 'industry', label: `行业 ${filters.industry}`, clear: () => set({ industry: undefined }) });
-    if (filters.side) activeChips.push({ key: 'side', label: `信号 ${filters.side}`, clear: () => set({ side: undefined }) });
+    // 直接印 `filters.side` 会把 BUY/SELL/HOLD 枚举打到已选条件上，读着就是买卖信号；
+    // 走 signalPositionLabel 换成位置词（未知值显示 —，不猜）
+    if (filters.side) activeChips.push({ key: 'side', label: `信号 ${signalPositionLabel(filters.side)}`, clear: () => set({ side: undefined }) });
   }
   if (filters.concept) activeChips.push({ key: 'concept', label: `概念 ${filters.concept}`, clear: () => set({ concept: undefined }) });
   if (filters.indexCode) activeChips.push({ key: 'index', label: `宽基 ${filters.indexName ?? filters.indexCode}`, clear: () => set({ indexCode: undefined, indexName: undefined }) });

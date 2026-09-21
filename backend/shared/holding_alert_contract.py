@@ -6,9 +6,10 @@
 
 口径（用户已确认）：
 
-- **由正转负**（``prev > 0 and now <= 0``）→ ``critical``。这是「该走了」的信号。
+- **分数下穿 0**（``prev > 0 and now <= 0``）→ ``critical``。只陈述分数在评分轴上
+  由正侧移到非正侧这一**事实**，不下方向结论（怎么处理由用户自己判断）。
 - **跌破自定阈值**（``threshold > 0 and prev >= threshold > now``）→ ``warning``。
-  阈值 0 表示不启用该规则（与「由正转负」重合，不重复报）。
+  阈值 0 表示不启用该规则（与「下穿 0」重合，不重复报）。
 - **没有基线不报警**（``prev is None``）——首次见到一只票时它是负分不是「跌了」，
   否则开启哨兵当天所有持仓一起报警（假警报会把真警报淹掉）。
 - **基线过期不比较**（隔了 ``MAX_BASELINE_GAP_DAYS`` 天以上）——哨兵停摆一周后
@@ -70,7 +71,7 @@ RISK_CURSOR_KEY_PREFIX = "qm:holding:alert:riskcursor:"
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "enabled": True,
-    # 跌破该值告警；0 = 关闭该规则（由正转负仍然报）
+    # 跌破该值告警；0 = 关闭该规则（下穿 0 仍然报）
     "score_threshold": 0.0,
     # 监控范围：默认「持仓 + 手工自选」，候选不监控（几百只票全监控等于没有监控）
     "watch_sim": True,
@@ -312,11 +313,15 @@ def alert_action_url(symbol: str | None = None) -> str:
 def build_alert_title(
     kind: str, stock_name: str | None, symbol: str, *, freq: str = "daily"
 ) -> str:
-    """预警标题（人读的，一眼能看出是什么事）。"""
+    """预警标题（人读的，一眼能看出是什么事）。
+
+    文案只描述分数/标的位置（下穿 0、低于自定阈值、进入名单……），**不出现
+    买卖方向或祈使句**——这类提醒是「把位置如实告诉用户」，不是操作指令。
+    """
     name = str(stock_name or "").strip() or symbol
     tag = "（日频分）" if str(freq) != "realtime" else ""
     if kind == KIND_SCORE_CROSS_ZERO:
-        return f"{name} 分数由正转负{tag}"
+        return f"{name} 分数降至 0 及以下{tag}"
     if kind == KIND_SCORE_BELOW_THRESHOLD:
         return f"{name} 分数跌破阈值{tag}"
     if kind == KIND_RISK_NEWS:
@@ -340,7 +345,12 @@ def build_alert_content(
     score_now: float | None = None,
     extra: str = "",
 ) -> str:
-    """预警正文（把数字原样写出来，用户自己判断，不做措辞安抚）。"""
+    """预警正文（把数字原样写出来，用户自己判断，不做措辞安抚）。
+
+    尾句只说明「去哪儿看」，不写成祈使句：正文会进 ``notifications`` 与
+    ``qm_holding_alerts.content``，是给用户读的展示面；实际下单动作在交易台
+    面板里由用户自己发起，提醒本身不下指令。
+    """
     parts: list[str] = []
     if kind in {KIND_SCORE_CROSS_ZERO, KIND_SCORE_BELOW_THRESHOLD}:
         parts.append(
@@ -350,7 +360,7 @@ def build_alert_content(
         parts.append(str(symbol))
     if extra:
         parts.append(str(extra).strip())
-    parts.append("可在此处一键卖出（需手动确认）。")
+    parts.append("详情见交易台 · 持仓监控。")
     return " ".join(p for p in parts if p)
 
 
