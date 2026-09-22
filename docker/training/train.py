@@ -1008,9 +1008,24 @@ def train_stacking(
             "pred": test_ensemble_pred,
         }),
     ], ignore_index=True)
-    pred_df = df[["trade_date", "symbol"]].merge(
+    # 评估链（eval_report / eval_arms_ic / stage_* 复盘脚本）需要 label/label_return/split：
+    # 只发 trade_date/symbol/pred 会让 stacking 的预测产物在整条评估链上**静默缺席**
+    # （单模型路径一直在发这三列，这里对齐；split 边界与单模型一致按 val/test 日期区间划）。
+    _fp_cols = ["trade_date", "symbol", label_col] + (
+        ["label_return"] if "label_return" in df.columns else []
+    )
+    pred_df = df[_fp_cols].merge(
         pred_parts, on=["trade_date", "symbol"], how="left"
     )
+    pred_df["split"] = "train"
+    pred_df.loc[
+        (pred_df["trade_date"] >= val_df["trade_date"].min())
+        & (pred_df["trade_date"] <= val_df["trade_date"].max()), "split"
+    ] = "valid"
+    pred_df.loc[
+        (pred_df["trade_date"] >= test_df["trade_date"].min())
+        & (pred_df["trade_date"] <= test_df["trade_date"].max()), "split"
+    ] = "test"
 
     # 保存 OOF 预测（诊断用）
     oof_df = pd.DataFrame({
@@ -1380,6 +1395,27 @@ def main() -> int:
             pred_qlib.to_pickle(pred_pkl_path)
             logger.info(f"Backtest-compatible pred.pkl saved ({len(pred_qlib):,} rows)")
 
+            # ── 模型评估报告（与单模型路径同口径）──
+            # 缺了它，评估中心对 stacking 模型整页空白 —— 不是「没数据」，是产物没生成。
+            eval_report = None
+            try:
+                eval_report = compute_eval_report(
+                    pred_df,
+                    horizon_days=int((cfg.get("label", {}) or {}).get("target_horizon_days") or 1),
+                )
+                (workspace / "eval_report.json").write_text(
+                    json.dumps(eval_report, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+                _ric = eval_report.get("rank_ic") or {}
+                _ls = eval_report.get("long_short") or {}
+                logger.info(
+                    "Eval report: basis=%s rank_ic=%s icir=%s ls_sharpe=%s groups_mono=%s",
+                    eval_report.get("return_basis"), _ric.get("mean"), _ric.get("icir"),
+                    _ls.get("sharpe"), (eval_report.get("groups") or {}).get("monotonicity"),
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Eval report failed: %s", exc, exc_info=True)
+
             # 保存对比报告
             comparison_path = workspace / "model_comparison.json"
             comparison_path.write_text(json.dumps(multi_result["comparison"], ensure_ascii=False, indent=2, default=str))
@@ -1485,6 +1521,7 @@ def main() -> int:
                 "pred_coverage_end": str(pred_df["trade_date"].max().date()) if not pred_df.empty else "",
                 "pred_rows": int(len(pred_df)),
                 "shap": shap_info,
+                "eval_report": eval_report,
                 "generated_at": datetime.utcnow().isoformat(),
                 "elapsed_seconds": elapsed,
             }
@@ -1544,6 +1581,11 @@ def main() -> int:
                 "error": "",
                 "logs": f"val_rmse={val_m['rmse']:.6f}, val_auc={val_m['auc']:.6f}, best={primary_type}",
             }
+            if eval_report:
+                result["eval_report"] = eval_report
+                result["artifacts"].append(
+                    {"name": "eval_report.json", "local": str(workspace / "eval_report.json")}
+                )
             if is_stacking:
                 result["artifacts"].extend([
                     {"name": "meta_model.pkl", "local": str(workspace / "meta_model.pkl")},
