@@ -125,11 +125,29 @@ def load_panels(dates: list[str], symbols: np.ndarray) -> dict[str, np.ndarray]:
     return panels
 
 
+def pit_order(ann: np.ndarray, tt: np.ndarray) -> np.ndarray:
+    """PIT 排序键：**主序公告日，次序报告期**。
+
+    同日双披露（A 股常见的「年报 + 一季报同日公告」）必须让**报告期更新**的那条胜出。
+    只按公告日排时同日的取舍无人作主，两条路各有一个坑：
+
+    * ``load_balance_pit`` 原用 ``np.argsort(ann)``（默认**非稳定**）—— 取哪条是
+      实现定义的。2026-09-22 独立实现对拍实测：854 格里 15 格两边不一致，全部是同日双披露。
+    * ``load_flow_pit`` 原用 ``kind="stable"``：可复现，但顺序**继承源文件行序**，
+      行序变了（重排、追加、换数据源）读数就跟着变，且不保证是报告期序。
+
+    两条路现在共用本函数，顺序由数据本身决定、与文件行序无关。
+
+    公告日仍是主序：重述公告（更晚的公告日、同一报告期）照旧覆盖原值。
+    """
+    return np.lexsort((np.asarray(tt, dtype=np.float64), np.asarray(ann, dtype=np.float64)))
+
+
 def pit_align(ann_sorted: np.ndarray, val_sorted: np.ndarray, date_int: np.ndarray) -> np.ndarray:
     """按公告日的 PIT 对齐：每个 dt 取「公告日 ≤ dt 的最近一期」的值（无 → NaN）。
 
-    ``ann_sorted`` 必须已按公告日升序 —— 同日内多期取报告期最晚的那条
-    （``side="right"`` 落在同值末尾），重述公告因此稳定地覆盖原值。
+    ``ann_sorted`` 必须已按 :func:`pit_order` 排好（公告日升序、同日按报告期升序）——
+    ``side="right"`` 落在同值末尾，故同日多条里报告期最新的那条胜出。
     """
     pos = np.searchsorted(ann_sorted, date_int, side="right") - 1
     out = np.full(date_int.shape, np.nan)
@@ -204,7 +222,7 @@ def load_balance_pit(dates: list[str], symbols: np.ndarray) -> dict[str, np.ndar
         if not path.exists():
             continue
         try:
-            df = pd.read_parquet(path, columns=["m_anntime", *cols])
+            df = pd.read_parquet(path, columns=["m_anntime", "m_timetag", *cols])
         except Exception as e:  # noqa: BLE001 — 单票损坏不该中断全量构建
             log.debug("balance 读取失败 %s: %s", sym, e)
             continue
@@ -212,7 +230,8 @@ def load_balance_pit(dates: list[str], symbols: np.ndarray) -> dict[str, np.ndar
         ok = ann.notna().to_numpy()
         if not ok.any():
             continue
-        order = np.argsort(ann.to_numpy()[ok])
+        tt = pd.to_numeric(df["m_timetag"], errors="coerce").to_numpy()[ok]
+        order = pit_order(ann.to_numpy()[ok], np.where(np.isfinite(tt), tt, 0.0))
         ann_s = ann.to_numpy()[ok][order]
         ld = pd.to_numeric(df["long_term_loans"], errors="coerce").fillna(0.0) + pd.to_numeric(
             df["bonds_payable"], errors="coerce"
@@ -262,7 +281,8 @@ def load_flow_pit(dates: list[str], symbols: np.ndarray, panel_key: str) -> np.n
         by_period = np.argsort(tt_a, kind="stable")
         ttm = ttm_from_reports(tt_a[by_period], val_a[by_period], cumulative=cumulative)
         ann_a = ann.to_numpy()[ok]
-        by_ann = np.argsort(ann_a, kind="stable")
+        tt_a = tt.to_numpy()[ok]
+        by_ann = pit_order(ann_a, np.where(np.isfinite(tt_a), tt_a, 0.0))
         out[:, j] = pit_align(ann_a[by_ann], ttm[by_period][by_ann], date_int)
         hit += 1
         if (j + 1) % 1000 == 0:

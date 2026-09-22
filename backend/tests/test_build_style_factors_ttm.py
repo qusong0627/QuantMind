@@ -19,7 +19,7 @@ def _quarters(per_year: list[tuple[int, list[float]]]):
     tags, vals = [], []
     for y, vs in per_year:
         assert len(vs) == 4
-        for q, v in zip(Q, vs):
+        for q, v in zip(Q, vs, strict=True):
             tags.append(y * 10000 + q)
             vals.append(v)
     return np.array(tags, dtype=np.int64), np.array(vals, dtype=float)
@@ -79,3 +79,56 @@ def test_pit对齐_公告日之前看不到_当日可见():
     assert out[1] == 11.0, "公告当日即可见"
     assert out[2] == 11.0 and out[3] == 22.0, "H1 公告前后各取其值"
     assert out[4] == 33.0
+
+
+# ═══════════════ 同日双披露：报告期更新的那条必须胜出 ═══════════════
+
+
+def test_pit排序_同日双披露取报告期最新():
+    """年报 + 一季报同日公告（A 股常见）时，一季报必须赢。
+
+    这条曾经是**未定义行为**：资产负债表面板只按公告日 ``np.argsort``（默认非稳定）
+    排序，同日多条谁在最后由实现决定 —— 独立实现对拍实测 854 格里 15 格两边不一致，
+    全部是同日双披露，且生产侧取到的是**更旧**的年报（净资产滞后一个季度）。
+    （利润/现金流面板当时已用 ``kind="stable"``，取数可复现，但顺序继承源文件行序、
+    不保证是报告期序 —— 一并收敛到 ``pit_order``。）
+    """
+    from backend.scripts.build_style_factors import pit_align, pit_order
+
+    ann = np.array([20260428, 20260428, 20260828])
+    tt = np.array([20251231, 20260331, 20260630])
+    val = np.array([100.0, 200.0, 300.0])
+    o = pit_order(ann, tt)
+    assert list(ann[o]) == [20260428, 20260428, 20260828]
+    assert list(tt[o]) == [20251231, 20260331, 20260630], "同日两条必须按报告期升序，最新的排在最后"
+
+    dates = np.array([20260427, 20260428, 20260501])
+    out = pit_align(ann[o], val[o], dates)
+    assert np.isnan(out[0]), "公告前不可见"
+    assert out[1] == 200.0, "公告当日应取一季报（报告期 20260331）而不是年报"
+    assert out[2] == 200.0
+
+
+def test_pit排序_重述公告照旧覆盖():
+    """更晚的公告日仍是主序：重述（旧报告期、新公告日）必须压过原披露。"""
+    from backend.scripts.build_style_factors import pit_align, pit_order
+
+    ann = np.array([20260428, 20260428, 20260815])   # 第 3 条 = FY2025 重述
+    tt = np.array([20251231, 20260331, 20251231])
+    val = np.array([100.0, 200.0, 150.0])
+    o = pit_order(ann, tt)
+    dates = np.array([20260428, 20260815])
+    out = pit_align(ann[o], val[o], dates)
+    assert out[0] == 200.0, "重述前：一季报胜出"
+    assert out[1] == 150.0, "重述当日：重述值覆盖"
+
+
+def test_pit排序_报告期缺失的条目排最后():
+    """tt 缺失（NaN）不能靠 NaN 比较碰运气 —— 显式降级为同日最不重要。"""
+    from backend.scripts.build_style_factors import pit_order
+
+    ann = np.array([20260428, 20260428])
+    tt = np.array([np.nan, 20260331])
+    o = pit_order(ann, np.where(np.isfinite(tt), tt, 0.0))
+    assert np.isnan(tt[o][0]), "缺报告期的排在前（同日里最不重要）"
+    assert tt[o][1] == 20260331, "有报告期的那条必须赢"
