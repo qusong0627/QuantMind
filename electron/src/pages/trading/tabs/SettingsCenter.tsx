@@ -37,6 +37,22 @@ interface RotateSecretInfo {
   secret_key: string;
 }
 
+/**
+ * 追加到设置页顶部按钮条的面板（与 RealTradingExtraTab 同一约定：**公开树不感知调用方**）。
+ *
+ * 本机实盘栏用它把 arena 的「总控」「数据」两块嵌进设置里 —— 用户口径「总控放设置里面、
+ * 数据也放设置里面」，即不在交易台另起入口。无调用方时 `extraPanels` 为 undefined，
+ * 追加分支整段不参与渲染，公开仓形态与本机制引入前逐位相同。
+ */
+export interface SettingsExtraPanel {
+  id: string;
+  label: string;
+  icon?: React.ComponentType<{ size?: number | string; className?: string }>;
+  render: () => React.ReactNode;
+  /** 点开这一栏时的标题色（缺省 indigo，与内置栏一致） */
+  accent?: 'indigo' | 'rose';
+}
+
 interface SettingsCenterProps {
   userId: string;
   isActive: boolean;
@@ -54,9 +70,14 @@ interface SettingsCenterProps {
    * `normalizeTradingMode` 同向：宁可少认一个实盘。
    */
   tradingMode?: 'real' | 'simulation';
+  /**
+   * 追加面板（排在「大 QMT 真单镜像」之后）。缺省不追加 —— 见 `SettingsExtraPanel`。
+   * 与内置栏同规矩：**条件挂载**（只有选中时才渲染），切走即卸载，不留后台轮询。
+   */
+  extraPanels?: readonly SettingsExtraPanel[];
 }
 
-const SettingsCenter: React.FC<SettingsCenterProps> = ({ userId, isActive, liveConfigVisible = true, tradingMode = 'simulation' }) => {
+const SettingsCenter: React.FC<SettingsCenterProps> = ({ userId, isActive, liveConfigVisible = true, tradingMode = 'simulation', extraPanels }) => {
     const currentMarket = useAppSelector(selectCurrentMarket);
   const apiGatewayBase = SERVICE_URLS.API_GATEWAY.replace(/\/+$/, '');
   const authHeader = () => ({
@@ -74,7 +95,7 @@ const SettingsCenter: React.FC<SettingsCenterProps> = ({ userId, isActive, liveC
   // 实盘开关关闭（或本栏不含实盘配置）时只有凭证页存在；初值直接落 credentials，
   // 避免首帧选中一个不渲染的面板
   const liveEnabled = isLiveTradingEnabled() && liveConfigVisible;
-  const [activeTab, setActiveTab] = useState<'credentials' | 'brokers' | 'mirror'>('credentials');
+  const [activeTab, setActiveTab] = useState<string>('credentials');
 
   // 大 QMT 真单镜像仅 A 股；切换市场后回到凭证页，避免停在无入口的面板上
   useEffect(() => {
@@ -83,9 +104,11 @@ const SettingsCenter: React.FC<SettingsCenterProps> = ({ userId, isActive, liveC
     }
   }, [currentMarket, activeTab]);
 
-  // 实盘开关在会话内失效（重新构建后热更新）时同样回落到凭证页
+  // 实盘开关在会话内失效（重新构建后热更新）时同样回落到凭证页。
+  // 只管两个**跟随实盘开关**的内置栏：追加面板（extraPanels）的可见性由调用方决定，
+  // 在这里一并踢回凭证页会把本机实盘栏的「总控/数据」误伤（开关一断就再也点不开）。
   useEffect(() => {
-    if (!liveEnabled && activeTab !== 'credentials') {
+    if (!liveEnabled && (activeTab === 'brokers' || activeTab === 'mirror')) {
       setActiveTab('credentials');
     }
   }, [liveEnabled, activeTab]);
@@ -206,6 +229,25 @@ const SettingsCenter: React.FC<SettingsCenterProps> = ({ userId, isActive, liveC
           大 QMT 真单镜像
         </button>
         )}
+        {/* 追加面板（本机实盘栏：总控 / 数据）。不跟实盘开关联动——内容由调用方负责 */}
+        {extraPanels?.map((panel) => {
+          const Icon = panel.icon;
+          const isOn = activeTab === panel.id;
+          return (
+            <button
+              key={panel.id}
+              onClick={() => setActiveTab(panel.id)}
+              className={`px-4 py-2 rounded-xl text-xs font-bold transition-colors ${
+                isOn
+                  ? `bg-white ${panel.accent === 'rose' ? 'text-rose-700 border-rose-200' : 'text-indigo-700 border-indigo-200'} border shadow-sm`
+                  : 'bg-white/60 text-gray-500 border border-gray-200 hover:text-gray-700'
+              }`}
+            >
+              {Icon && <Icon size={13} className="inline mr-1.5 -mt-0.5" />}
+              {panel.label}
+            </button>
+          );
+        })}
       </div>
 
       {/* 内容区：两个面板各自独立滚动 */}
@@ -331,6 +373,19 @@ const SettingsCenter: React.FC<SettingsCenterProps> = ({ userId, isActive, liveC
             <QmtMirrorCard />
           </div>
         </div>
+        )}
+
+        {/* 追加面板（本机实盘栏）：与内置栏同规矩——**选中才挂载**，切走即卸载。
+            面板自己铺满卡片并自管滚动（内嵌 arena 页面时给 min-h-full，滚动留给本卡片）。 */}
+        {extraPanels?.map((panel) =>
+          activeTab === panel.id ? (
+            <div
+              key={panel.id}
+              className="h-full bg-white rounded-3xl border border-gray-200 shadow-sm overflow-y-auto custom-scrollbar"
+            >
+              {panel.render()}
+            </div>
+          ) : null,
         )}
       </div>
     </div>

@@ -8,7 +8,7 @@ import ManualTaskPage from './tabs/ManualTaskPage';
 import PersonalCenter from './tabs/PersonalCenter';
 import PositionMonitor from './tabs/PositionMonitor';
 import TradingHistory from './tabs/TradingHistory';
-import SettingsCenter from './tabs/SettingsCenter';
+import SettingsCenter, { type SettingsExtraPanel } from './tabs/SettingsCenter';
 import ReplayPage from './tabs/ReplayPage';
 import DeskTodayPage from '../../features/desk/DeskTodayPage';
 import { EvalCenterPanel } from '../../features/eval-center/components/EvalCenterPanel';
@@ -148,9 +148,18 @@ export interface RealTradingPageProps {
      * 在那一栏被看见。
      */
     banner?: (ctx: RealTradingTabContext) => React.ReactNode;
+    /**
+     * 追加到「设置」页顶部按钮条的面板。缺省不追加。
+     *
+     * 与 `extraTabs` 同一约定：**公开树不感知调用方是谁** —— 无调用方时 prop 为
+     * undefined，设置页与本机制引入前逐位相同。用途是「属于设置范畴、但只有本机
+     * 实盘栏才有」的配置面（本机把 arena 的总控/数据嵌在设置里，用户口径
+     * 「总控放设置里面、数据也放设置里面」，不在侧栏另起入口）。
+     */
+    settingsPanels?: readonly SettingsExtraPanel[];
 }
 
-const RealTradingPage: React.FC<RealTradingPageProps> = ({ forcedTradingMode, extraTabs, banner }) => {
+const RealTradingPage: React.FC<RealTradingPageProps> = ({ forcedTradingMode, extraTabs, banner, settingsPanels }) => {
     const currentMarket = useAppSelector(selectCurrentMarket);
     // 默认「系统健康」，深链 ?tab=eval|signals 直达 —— 规则见 utils/activeTab.ts（有测试锁定）
     const initialTab: ActiveTab = resolveInitialTab(
@@ -766,6 +775,7 @@ const RealTradingPage: React.FC<RealTradingPageProps> = ({ forcedTradingMode, ex
                             // 标题取词用**生效模式**（与顶栏、侧栏同一个值）：
                             // 实盘栏的「实盘交易设置」、模拟栏的「模拟交易设置」。
                             tradingMode={tradingMode}
+                            extraPanels={settingsPanels}
                         />
                     )}
                     {activeTab === 'replay' && <ReplayPage />}

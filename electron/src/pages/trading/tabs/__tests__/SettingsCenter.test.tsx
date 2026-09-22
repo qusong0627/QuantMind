@@ -12,18 +12,20 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, cleanup, screen } from '@testing-library/react';
+import { render, cleanup, screen, fireEvent } from '@testing-library/react';
 import { Provider } from 'react-redux';
 import React from 'react';
 
 import store from '../../../../store';
 import { setMarket } from '../../../../store/slices/uiSlice';
-import SettingsCenter from '../SettingsCenter';
+import SettingsCenter, { type SettingsExtraPanel } from '../SettingsCenter';
 
-// 实盘开关固定为**开**：本文件问的是「开关开着的时候，哪一栏还该不该看见实盘配置」。
-// 关掉的话两种取值都只剩凭证页，断言会退化成恒真。
+// 实盘开关默认**开**：前半段问的是「开关开着的时候，哪一栏还该不该看见实盘配置」；
+// 关掉的话两种取值都只剩凭证页，断言会退化成恒真。追加面板那一组会临时改成关，
+// 验的是反过来的事：追加面板**不跟**这个开关联动（它的内容由调用方负责）。
+let liveFlag = true;
 vi.mock('../../../../config/tradingFlags', () => ({
-    isLiveTradingEnabled: () => true,
+    isLiveTradingEnabled: () => liveFlag,
 }));
 
 vi.mock('../../components/BrokerConfigCard', () => ({
@@ -63,6 +65,7 @@ const tabLabels = (): string[] => {
 
 describe('SettingsCenter 实盘配置闸门', () => {
     beforeEach(() => {
+        liveFlag = true;
         // 大 QMT 真单镜像只在 A 股出现，钉住市场免得到别的机器上少一个页签
         store.dispatch(setMarket('CN'));
         // 挂载即拉 /api-keys/init。**永不落地**：本文件只断言页签，凭证数据回来与否
@@ -121,5 +124,79 @@ describe('SettingsCenter 实盘配置闸门', () => {
         renderSettings(true);
 
         expect(screen.queryByText('模拟交易设置')).not.toBeNull();
+    });
+});
+
+/**
+ * 追加面板（`extraPanels`）：公开树不感知调用方，本机实盘栏用它把 arena 的
+ * 「总控 / 数据」嵌进设置里。契约有三条，都在这里钉住。
+ */
+describe('SettingsCenter 追加面板', () => {
+    const panels: SettingsExtraPanel[] = [
+        { id: 'arena-control', label: '总控', render: () => <div data-testid="panel-control" /> },
+        { id: 'arena-data', label: '数据', render: () => <div data-testid="panel-data" /> },
+    ];
+
+    const renderWithPanels = (extraPanels?: readonly SettingsExtraPanel[]) =>
+        render(
+            <Provider store={store}>
+                <SettingsCenter
+                    userId="u-1"
+                    isActive
+                    liveConfigVisible={false}
+                    extraPanels={extraPanels}
+                />
+            </Provider>,
+        );
+
+    beforeEach(() => {
+        liveFlag = true;
+        store.dispatch(setMarket('CN'));
+        vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {})));
+    });
+
+    afterEach(() => {
+        cleanup();
+        vi.unstubAllGlobals();
+    });
+
+    it('不传 = 公开树形态：页签条与引入本机制前逐位相同', () => {
+        renderWithPanels();
+
+        expect(tabLabels()).toEqual(['接入凭证 / API 密钥']);
+    });
+
+    it('页签追加在内置栏之后，点了才挂载内容', () => {
+        renderWithPanels(panels);
+
+        expect(tabLabels()).toEqual(['接入凭证 / API 密钥', '总控', '数据']);
+        expect(screen.queryByTestId('panel-control')).toBeNull();
+
+        fireEvent.click(screen.getByText('总控'));
+        expect(screen.queryByTestId('panel-control')).not.toBeNull();
+        expect(screen.queryByTestId('panel-data')).toBeNull();
+    });
+
+    it('切走即卸载（不留后台轮询），切回凭证页也不残留', () => {
+        renderWithPanels(panels);
+
+        fireEvent.click(screen.getByText('数据'));
+        expect(screen.queryByTestId('panel-data')).not.toBeNull();
+
+        fireEvent.click(screen.getByText('接入凭证 / API 密钥'));
+        expect(screen.queryByTestId('panel-data')).toBeNull();
+    });
+
+    it('不跟实盘开关联动：开关关掉时内置面板回凭证页，追加面板仍可点开', () => {
+        liveFlag = false;
+        renderWithPanels(panels);
+
+        // 内置两个已经不在（liveConfigVisible=false）
+        expect(screen.queryByText('券商实盘接入')).toBeNull();
+
+        fireEvent.click(screen.getByText('总控'));
+        expect(screen.queryByTestId('panel-control')).not.toBeNull();
+        // 闸门只踢内置栏：追加面板选中后不会被 setActiveTab('credentials') 顶掉
+        expect(tabLabels()).toEqual(['接入凭证 / API 密钥', '总控', '数据']);
     });
 });

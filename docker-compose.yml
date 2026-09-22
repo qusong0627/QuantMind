@@ -310,6 +310,12 @@ services:
       - HUNTLY_USERNAME=${HUNTLY_USERNAME:-changeme}
       - HUNTLY_PASSWORD=${HUNTLY_PASSWORD:-changeme}
 
+      # 本机 arena（quant-Trader）代理，供电给「实盘交易」栏里的 arena 页面。
+      # 缺省留空：代理模块本身是本地独有（gitignore），公开仓里连路由都不注册；
+      # 配上时容器内地址要指宿主（如 http://192.168.31.68:8091），token 同 arena 的 API_TOKEN。
+      - AGENT_ARENA_BASE_URL=${AGENT_ARENA_BASE_URL:-}
+      - AGENT_ARENA_API_TOKEN=${AGENT_ARENA_API_TOKEN:-}
+
       # 资讯情绪识别 (FinBERT 中文金融模型, 本地离线权重)
       # 仅 GPU 环境启用：留空时代码默认按 FINBERT_DEVICE>=0 判定
       - NEWS_USE_FINBERT=${NEWS_USE_FINBERT:-}

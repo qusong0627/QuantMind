@@ -56,6 +56,15 @@ from backend.services.api.user_app.api.v1.api_keys import router as api_keys_rou
 from backend.services.api.user_app.api.v1.subscriptions import (
     router as subscriptions_router,
 )
+# 本机 arena（quant-Trader）代理：模块随「实盘交易」栏一起本地独有、不进公开仓
+# （electron/src/features/local-live/ 同纪律）。公开仓缺该文件时静默跳过，
+# 端点树与本机制引入前逐位相同。
+try:  # pragma: no cover - 取决于本地是否存在该模块
+    from backend.services.api.routers.agent_arena_proxy import (
+        router as agent_arena_proxy_router,
+    )
+except ImportError:  # pragma: no cover
+    agent_arena_proxy_router = None
 from backend.shared.config_manager import init_unified_config
 from backend.shared.cors import resolve_cors_origins
 from backend.shared.database_pool import init_default_databases as init_sync_db_pool
@@ -409,6 +418,10 @@ app.include_router(market_analysis_us_router)
 app.include_router(
     subscriptions_router, prefix="/api/v1/subscription", tags=["Subscriptions"]
 )
+# arena 代理（本机实盘栏用；公开仓无此模块，见文件顶部 try/except）。
+# 必须排在下面的 engine_proxy 兜底段之前，否则 /api/v1/agent-arena/* 会被通配吃掉。
+if agent_arena_proxy_router is not None:
+    app.include_router(agent_arena_proxy_router)
 
 # 3. 注册代理路由 (低优先级，兜底捕获)
 app.include_router(ws_proxy_router)  # WebSocket 代理，优先级最高
