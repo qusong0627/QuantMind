@@ -1,7 +1,5 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { LayoutDashboard, PieChart, FileText, Settings, User, ClipboardList, Clock, HeartPulse, BarChart3, Award } from 'lucide-react';
 import HelpCenterLink from '../../components/common/HelpCenterLink';
-import type { LucideIcon } from 'lucide-react';
 import { Button, Collapse, Modal, Spin, Tag, message } from 'antd';
 import TopBar from './components/TopBar';
 import TopologyConsole from './tabs/StrategyConsole/TopologyConsole';
@@ -27,11 +25,18 @@ import { selectCurrentMarket } from '../../store/slices/uiSlice';
 import { useTradingModeSwitch } from '../../features/shared/useTradingModeSwitch';
 import { useTradeWebSocket } from '../../hooks/useTradeWebSocket';
 import { buildTradingTopBarAccountInfo, resolveTradingAccountMode } from './utils/accountAdapter';
-import { resolveInitialTab, type ActiveTab } from './utils/activeTab';
+import { DEFAULT_ACTIVE_TAB, resolveInitialTab, type ActiveTab } from './utils/activeTab';
+import {
+    composeConsoleTabs,
+    resolveConsoleTab,
+    resolveConsoleTradingMode,
+    type ConsoleTab,
+} from './utils/consoleTabs';
 import LiveTradeConfigWizard from './components/LiveTradeConfigWizard';
 import type { DeployMode, ExecutionConfig, LiveTradeConfig } from '../../types/liveTrading';
 
-type TradingMode = 'real' | 'simulation';  // 支持实盘(通达信桥)与模拟盘
+/** 支持实盘(通达信桥)与模拟盘。口径见 `utils/consoleTabs.ts::ConsoleTradingMode`。 */
+type TradingMode = 'real' | 'simulation';
 type PreflightStage = 'trading-readiness' | 'preflight';
 type PendingDeploy = {
     strategyId: string;
@@ -89,13 +94,52 @@ const BROKER_LABELS: Record<string, string> = {
   CRYPTO: '暂无',
 };
 
-const RealTradingPage: React.FC = () => {
+/**
+ * 追加页签渲染时拿得到的运行期上下文。
+ *
+ * 值全部由本页提供（不额外发请求）：追加页签与基础页签看到的是**同一份**账户、
+ * 同一个刷新入口，所以两边的数字不可能有相位差。
+ */
+export interface RealTradingTabContext {
+    userId: string;
+    tenantId: string;
+    /** 当前市场（CN/HK/US/FUTURES/CRYPTO），追加页签据此判可用性 */
+    market: string;
+    status: RealTradingStatus | null;
+    accountInfo: AccountInfo | null;
+    /** 触发一次账户/状态重取，与页内 5s 轮询同一个入口 */
+    refresh: () => void;
+}
+
+/** 追加到侧栏末尾的页签；`render` 每次渲染都会被调用，返回该栏内容。 */
+export interface RealTradingExtraTab extends ConsoleTab {
+    render: (ctx: RealTradingTabContext) => React.ReactNode;
+}
+
+export interface RealTradingPageProps {
+    /**
+     * 固定交易模式：不挂「模拟/实盘」开关、不弹切换确认，恒按给定模式取数与部署。
+     * 缺省（不传）= 跟随全局模式，即公开发行版的既有行为。
+     */
+    forcedTradingMode?: TradingMode;
+    /**
+     * 追加到侧栏末尾的页签。缺省不追加。
+     *
+     * 本机独有「实盘交易」栏目（`features/local-live/`，不入库）用它把实盘专属面板
+     * 挂到同一个控制台上 —— **公开树不感知调用方是谁**：无调用方时这个 prop 为
+     * undefined，追加分支整段不参与渲染，公开仓形态与本机制引入前逐位相同。
+     */
+    extraTabs?: readonly RealTradingExtraTab[];
+}
+
+const RealTradingPage: React.FC<RealTradingPageProps> = ({ forcedTradingMode, extraTabs }) => {
     const currentMarket = useAppSelector(selectCurrentMarket);
     // 默认「系统健康」，深链 ?tab=eval|signals 直达 —— 规则见 utils/activeTab.ts（有测试锁定）
     const initialTab: ActiveTab = resolveInitialTab(
         typeof window === 'undefined' ? null : window.location.hash,
     );
-    const [activeTab, setActiveTab] = useState<ActiveTab>(initialTab);
+    // 取值域含追加页签 id，故为 string；基础 9 栏的 id 仍由 consoleTabs 钉在 ActiveTab 上
+    const [activeTab, setActiveTab] = useState<string>(initialTab);
 
     // 券商通道卡「去配置凭证」跳转：切到设置页签
     useEffect(() => {
@@ -117,7 +161,14 @@ const RealTradingPage: React.FC = () => {
         return 'user_1001';
     });
     // T-FE-18：交易模式切换统一入口（切实盘前置二次确认，与顶栏同源）
-    const { tradingMode, requestSwitch, confirmModal: tradingModeConfirmModal } = useTradingModeSwitch();
+    const modeSwitch = useTradingModeSwitch();
+    // 固定模式（本机「实盘交易」栏目）优先，未固定时跟随全局。归一规则与理由
+    // 见 `utils/consoleTabs.ts::resolveConsoleTradingMode`。
+    const tradingMode: TradingMode = resolveConsoleTradingMode(
+        forcedTradingMode,
+        modeSwitch.tradingMode,
+    );
+    const { requestSwitch } = modeSwitch;
     const [status, setStatus] = useState<RealTradingStatus | null>(null);
     const [accountInfo, setAccountInfo] = useState<AccountInfo | null>(null);
     const [preflightResult, setPreflightResult] = useState<PreflightCheckResponse | null>(null);
@@ -521,22 +572,31 @@ const RealTradingPage: React.FC = () => {
         }
     };
 
-    const tabs: Array<{ id: ActiveTab; label: string; icon: LucideIcon }> = [
-        // 系统健康（原「今日交易台」自底部栏迁入，2026-09-17 分栏归位后更名）
-        { id: 'desk', label: '系统健康', icon: HeartPulse },
-        // 候选信号独立成栏（2026-09-17 自交易台拆出）
-        { id: 'signals', label: '候选信号', icon: BarChart3 },
-        // 评估中心自因子研究迁入（2026-09-17），置于策略管理之前（评估与策略同组）
-        { id: 'eval', label: '评估中心', icon: Award },
-        { id: 'manage', label: '策略管理', icon: LayoutDashboard },
-        // 时光回放功能尚存多处问题，暂时隐藏入口，完善后取消注释即可恢复（ReplayPage 渲染分支保留）
-        // { id: 'replay', label: '时光回放', icon: Clock },
-        { id: 'manual-task', label: '手动任务', icon: ClipboardList },
-        { id: 'position', label: '持仓监控', icon: PieChart },
-        { id: 'history', label: '交易记录', icon: FileText },
-        { id: 'personal', label: '个人中心', icon: User },
-        { id: 'settings', label: '设置', icon: Settings },
-    ];
+    // 基础 9 栏 + 调用方追加栏（本机「实盘交易」栏目）。清单与顺序的唯一事实源在
+    // `utils/consoleTabs.ts`——实盘与模拟共用同一张表，改一处两边同时生效。
+    const tabs = useMemo(() => composeConsoleTabs(extraTabs), [extraTabs]);
+
+    // 切市场后原页签可能已不存在（如停在美股下没有的「大 QMT 真单镜像」）→ 回落默认页，
+    // 否则内容区渲染成整块空白。公开树无追加页签时 id 集合恒定，该分支恒不触发。
+    useEffect(() => {
+        const next = resolveConsoleTab(activeTab, tabs, DEFAULT_ACTIVE_TAB);
+        if (next !== activeTab) setActiveTab(next);
+    }, [activeTab, tabs]);
+
+    // 传给追加页签的运行期上下文：与基础页签同一份数据、同一个刷新入口
+    const tabContext = useMemo<RealTradingTabContext>(
+        () => ({
+            userId,
+            tenantId,
+            market: currentMarket,
+            status,
+            accountInfo,
+            refresh: () => {
+                void fetchData();
+            },
+        }),
+        [userId, tenantId, currentMarket, status, accountInfo, fetchData],
+    );
 
     return (
         <div className="w-full h-full bg-[#f8fafc] p-6 flex flex-col overflow-hidden font-sans box-border">
@@ -583,7 +643,10 @@ const RealTradingPage: React.FC = () => {
 
                         {/* Bottom help, explicit mode selector, and trading disclaimer. */}
                         <div className="p-3 pb-6 border-t border-gray-200 shrink-0 bg-white space-y-1.5">
-                            {isLiveTradingEnabled() && (
+                            {/* 固定模式下不挂开关：本页模式由调用方定死，开关切不动它，
+                                却会写全局偏好（localStorage + store），把「模拟交易」页
+                                一起带过去——一个按不动的按钮比没有按钮更像坏了。 */}
+                            {!forcedTradingMode && isLiveTradingEnabled() && (
                             <div className="flex items-center justify-between gap-2 px-1 pb-1">
                                 <span className="text-[11px] font-semibold text-slate-400">交易模式</span>
                                 <button
@@ -666,6 +729,13 @@ const RealTradingPage: React.FC = () => {
                     )}
                     {activeTab === 'settings' && <SettingsCenter userId={userId} isActive={activeTab === 'settings'} />}
                     {activeTab === 'replay' && <ReplayPage />}
+                    {/* 追加页签内容。按 id 命中才挂载：与基础栏同规矩，切走即卸载，
+                        面板内的草稿/轮询不留在后台空转。无追加页签时这段不产出节点。 */}
+                    {extraTabs?.map((tab) =>
+                        activeTab === tab.id ? (
+                            <React.Fragment key={tab.id}>{tab.render(tabContext)}</React.Fragment>
+                        ) : null,
+                    )}
                 </div>
             </div>
         </div>
@@ -906,7 +976,8 @@ const RealTradingPage: React.FC = () => {
                 onCancel={() => setWizardOpen(false)}
                 onConfirm={handleWizardConfirm}
             />
-            {tradingModeConfirmModal}
+            {/* 切换确认卡只在模式可切时存在；固定模式没有「待确认的切换」 */}
+            {!forcedTradingMode && modeSwitch.confirmModal}
         </div>
     );
 };
