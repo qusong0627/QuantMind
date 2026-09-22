@@ -26,6 +26,7 @@ import { useTradingModeInitialization } from './hooks/useTradingModeInitializati
 import { useMarketReset } from './hooks/useMarketReset';
 import { authService } from './features/auth/services/authService';
 import { initDynamicServerUrl, isElectronEnv } from './config/services';
+import { LIVE_NODE_ONLY } from './config/liveNodeFlags';
 import { RiskProfileModal } from './components/shared/compliance/RiskProfileModal';
 import { shouldAskRiskProfile } from './components/shared/compliance/riskProfile';
 
@@ -819,10 +820,18 @@ export default function App() {
                     <Route path="settings" element={<Suspense fallback={<Spin size="large" />}><AdminSystemSettings /></Suspense>} />
                   </Route>
 
-                  {/* 主应用路由 - 仪表盘等 */}
+                  {/* 主应用路由 - 仪表盘等。
+                      实盘节点形态下这个兜底改成回 QuantBot：该形态只有
+                      QuantBot 与实盘交易两栏，根路径和已裁掉的栏目路径
+                      （/dashboard、/backtest…）都不该落到仪表盘上。
+                      显式注册的路由（/live、/trading、/admin…）不受影响 ——
+                      React Router 里它们比 "/*" 更具体，仍旧可达（栏目只是
+                      不在 Dock 里，页面内的深链不会断）。 */}
                   <Route
                     path="/*"
-                    element={
+                    element={LIVE_NODE_ONLY ? (
+                      <Navigate to="/quantbot" replace />
+                    ) : (
                       <motion.div
                         key={tab}
                         initial={false}
@@ -831,7 +840,7 @@ export default function App() {
                       >
                         <DashboardLayout modules={modules} onLayoutChange={handleLayoutChange} />
                       </motion.div>
-                    }
+                    )}
                   />
                 </Routes>
               </Suspense>

@@ -13,6 +13,7 @@ import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react'
 import { BookMarked, FileText } from 'lucide-react';
 import { Bot, RefreshCw, SquareTerminal, Wifi, WifiOff, ExternalLink, AlertTriangle } from 'lucide-react';
 import { isElectronEnv, SERVICE_URLS } from '../../../config/services';
+import { LIVE_NODE_ONLY } from '../../../config/liveNodeFlags';
 import PromptLibraryModal from '../components/PromptLibraryModal';
 import ReportsModal from '../components/ReportsModal';
 import AiIdeModal from '../components/AiIdeModal';
@@ -235,11 +236,14 @@ const QuantBotPage: React.FC = () => {
               </div>
               <div>
                 <p className="text-sm font-bold text-slate-800">QuantBot 服务未响应</p>
+                {/* 两种部署形态的启动方式不同，提示跟着形态走：容器栈里 dsh 是 compose
+                    服务；实盘 Win 节点没有 Docker，dsh 是包内 node 载荷，由回环前门
+                    quantbot_front.py 拉起。提示一条本形态不存在的命令只会让人白折腾。 */}
                 <p className="text-xs text-slate-500 mt-1.5 leading-relaxed">
-                  请检查后端 dsh 容器状态：
+                  请确认 dsh 已经启动：
                 </p>
                 <code className="block mt-2 px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs text-emerald-600 font-mono">
-                  docker compose up -d dsh
+                  {LIVE_NODE_ONLY ? '双击包根目录的 start-quantbot.bat' : 'docker compose up -d dsh'}
                 </code>
               </div>
               <button
