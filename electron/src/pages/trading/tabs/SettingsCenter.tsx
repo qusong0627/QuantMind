@@ -18,6 +18,7 @@ import {
 } from 'lucide-react';
 import { SERVICE_URLS } from '../../../config/services';
 import { isLiveTradingEnabled } from '../../../config/tradingFlags';
+import { modeCopy } from '../utils/tradingModeCopy';
 
 // 与后端 ApiKeyInfo 对齐：/api-keys/init 是幂等接口，永不返回 secret_key
 interface ApiKeyInfo {
@@ -39,9 +40,23 @@ interface RotateSecretInfo {
 interface SettingsCenterProps {
   userId: string;
   isActive: boolean;
+  /**
+   * 是否允许出现实盘配置面板（券商实盘接入 / 大 QMT 真单镜像）。缺省允许。
+   *
+   * 由调用方按**本栏口径**给：定死模拟盘的「模拟交易」栏目传 false——两栏各管一边
+   * 之后，实盘配置留在模拟栏里就等于把实盘又搬回来了（改完凭证下一步就是下单）。
+   * 公开树只有一栏、模式由开关切换，不传 = 维持原行为。
+   */
+  liveConfigVisible?: boolean;
+  /**
+   * 本栏的**生效模式**（`resolveConsoleTradingMode` 之后的值，不是全局偏好）。
+   * 只用来给标题取词。缺省按模拟盘——未知模式一律判为模拟，与
+   * `normalizeTradingMode` 同向：宁可少认一个实盘。
+   */
+  tradingMode?: 'real' | 'simulation';
 }
 
-const SettingsCenter: React.FC<SettingsCenterProps> = ({ userId, isActive }) => {
+const SettingsCenter: React.FC<SettingsCenterProps> = ({ userId, isActive, liveConfigVisible = true, tradingMode = 'simulation' }) => {
     const currentMarket = useAppSelector(selectCurrentMarket);
   const apiGatewayBase = SERVICE_URLS.API_GATEWAY.replace(/\/+$/, '');
   const authHeader = () => ({
@@ -56,8 +71,9 @@ const SettingsCenter: React.FC<SettingsCenterProps> = ({ userId, isActive }) => 
   const [showSecretKey, setShowSecretKey] = useState(false);
   const [secretKey, setSecretKey] = useState<string | null>(null);
 
-  // 实盘开关关闭时只有凭证页存在；初值直接落 credentials，避免首帧选中一个不渲染的面板
-  const liveEnabled = isLiveTradingEnabled();
+  // 实盘开关关闭（或本栏不含实盘配置）时只有凭证页存在；初值直接落 credentials，
+  // 避免首帧选中一个不渲染的面板
+  const liveEnabled = isLiveTradingEnabled() && liveConfigVisible;
   const [activeTab, setActiveTab] = useState<'credentials' | 'brokers' | 'mirror'>('credentials');
 
   // 大 QMT 真单镜像仅 A 股；切换市场后回到凭证页，避免停在无入口的面板上
@@ -140,7 +156,9 @@ const SettingsCenter: React.FC<SettingsCenterProps> = ({ userId, isActive }) => 
       <div className="px-4 pt-4 pb-3 border-b border-gray-200 bg-gray-50/30 shrink-0">
         <h3 className="text-xl font-bold text-gray-800 flex items-center">
           <Settings className="mr-3 text-blue-600" size={24} />
-          模拟交易设置
+          {/* 标题跟随本栏模式：实盘栏里顶着「模拟交易设置」配真券商账号，
+              正是本次分栏要消除的错配（`modeCopy` 是模式文案唯一事实源）。 */}
+          {modeCopy(tradingMode).full}设置
         </h3>
         <p className="text-xs text-gray-500 mt-1">
           {liveEnabled

@@ -11,6 +11,7 @@ import { DashboardSkeleton } from './components/common/DashboardSkeleton';
 import { DashboardLayout } from './components/layout/DashboardLayout';
 import { FloatingNavBar } from './components/navigation/FloatingNavBar';
 import { loadLocalLivePage } from './features/shared/localLive';
+import { resolveSimColumnForcedMode } from './pages/trading/utils/consoleTabs';
 import { TitleBar } from './components/layout/TitleBar';
 import { ErrorBoundary } from './components/common/ErrorBoundary';
 import { useMenuExport } from './hooks/useMenuExport';
@@ -110,6 +111,9 @@ const FactorResearchPage = lazy(() => import('./features/factor-research/pages/F
 // 那是构建期解析，公开仓没这个文件 → Rollup unresolved import → 构建直接失败。
 const localLiveLoader = loadLocalLivePage();
 const LocalLivePage = localLiveLoader ? lazy(localLiveLoader) : null;
+// 有独立实盘栏目时，「模拟交易」栏目定死模拟盘（两栏各管一边，见
+// `resolveSimColumnForcedMode` 的理由）；公开树返回 undefined = 跟随全局模式。
+const simColumnForcedMode = resolveSimColumnForcedMode(LocalLivePage !== null);
 
 // 主题切换hook
 // 主题管理已移除 - 应用统一使用浅色主题
@@ -708,7 +712,8 @@ export default function App() {
                     path="/trading"
                     element={
                       <ProtectedRoute>
-                        <RealTradingPage />
+                        {/* 「模拟交易」栏目：有独立实盘栏目时 mode 定死模拟盘 */}
+                        <RealTradingPage forcedTradingMode={simColumnForcedMode} />
                       </ProtectedRoute>
                     }
                   />

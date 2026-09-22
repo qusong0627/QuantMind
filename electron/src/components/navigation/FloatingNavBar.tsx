@@ -44,6 +44,10 @@ export const FloatingNavBar: React.FC<FloatingNavBarProps> = ({ current, onChang
   // 实盘开关关闭时恒为模拟盘——栏目名不再跟随，避免出现指向已隐藏功能的入口。
   const rawTradingMode = useSelector(selectTradingMode);
   const tradingMode = isLiveTradingEnabled() ? rawTradingMode : 'simulation';
+  // 本机有独立的「实盘交易」栏目时，交易栏目**恒为模拟交易**：那一栏的模式已定死
+  // （`resolveSimColumnForcedMode`），栏目名再跟着全局模式走，就会出现两个都叫
+  // 「实盘交易」的入口，而其中一个点进去是模拟盘。
+  const tradingLabelKey = isLocalLiveAvailable ? 'simulation' : tradingMode;
 
   const navItems: NavItemConfig[] = [
     // 1. 大盘分析模块
@@ -51,7 +55,7 @@ export const FloatingNavBar: React.FC<FloatingNavBarProps> = ({ current, onChang
     { id: 'market-analysis', label: '市场分析', icon: BarChart3 },
     { id: 'rss-news', label: 'RSS信息流', icon: Rss },
     { id: 'backtest', label: '回测中心', icon: FlaskConical },
-    { id: 'trading', label: modeCopy(tradingMode).full, icon: ArrowLeftRight },
+    { id: 'trading', label: modeCopy(tradingLabelKey).full, icon: ArrowLeftRight },
     // 3. 模型区域
     { id: 'model-training', label: '模型训练', icon: Layers },
     { id: 'model-registry', label: '模型管理', icon: Boxes },

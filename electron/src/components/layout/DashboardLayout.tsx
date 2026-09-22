@@ -5,8 +5,13 @@ import { ModuleGrid } from './ModuleGrid';
 import { NewBacktestCenterPage } from '../../pages/NewBacktestCenterPage';
 import { MarketWeatherBackground } from './MarketWeatherBackground';
 import { ComplianceFooter } from '../shared/compliance/ComplianceChrome';
+import { isLocalLiveAvailable } from '../../features/shared/localLive';
+import { resolveSimColumnForcedMode } from '../../pages/trading/utils/consoleTabs';
 
 const UserCenterPage = React.lazy(() => import('../../features/user-center/pages/UserCenterPage'));
+// 「模拟交易」栏目定死模拟盘（存在独立实盘栏目时）——与 App.tsx 的 /trading 路由同口径，
+// 见 `resolveSimColumnForcedMode`。这里不接的话，模块宫格进交易页会退回「跟随全局模式」。
+const SIM_COLUMN_FORCED_MODE = resolveSimColumnForcedMode(isLocalLiveAvailable);
 const RealTradingPage = React.lazy(() => import('../../pages/trading/RealTradingPage'));
 const QuantBotPage = React.lazy(() => import('../../features/quantbot/pages/QuantBotPage'));
 
@@ -40,7 +45,7 @@ export const DashboardLayout: React.FC<DashboardLayoutProps> = ({ modules, onLay
         return (
           <React.Suspense fallback={<div className="w-full h-full" />}>
             <div className="w-full h-full">
-              <RealTradingPage />
+              <RealTradingPage forcedTradingMode={SIM_COLUMN_FORCED_MODE} />
             </div>
           </React.Suspense>
         );

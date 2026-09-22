@@ -58,7 +58,21 @@ vi.mock('../tabs/TradingHistory', () => ({
     default: () => <div data-testid="pane-history" />,
 }));
 vi.mock('../tabs/SettingsCenter', () => ({
-    default: () => <div data-testid="pane-settings" />,
+    // 把 liveConfigVisible / tradingMode 暴露到 DOM：公开树的默认值（true）与模拟栏的
+    // 取值（false）只能从这里观测——真面板要挂 live 组件，桩不掉。
+    default: ({
+        liveConfigVisible,
+        tradingMode,
+    }: {
+        liveConfigVisible?: boolean;
+        tradingMode?: string;
+    }) => (
+        <div
+            data-testid="pane-settings"
+            data-live-config={String(liveConfigVisible)}
+            data-trading-mode={tradingMode}
+        />
+    ),
 }));
 vi.mock('../tabs/ReplayPage', () => ({
     default: () => <div data-testid="pane-replay" />,
@@ -201,6 +215,24 @@ describe('RealTradingPage 外壳接线', () => {
         renderPage({ extraTabs: [] });
 
         expect(sidebarLabels()).toEqual(BASE_LABELS);
+    });
+
+    it('设置栏：未固定模式时实盘配置照常可见（公开树的老路径）', () => {
+        renderPage();
+        clickTab('设置');
+
+        expect(pane('settings')?.getAttribute('data-live-config')).toBe('true');
+    });
+
+    it('设置栏：定死模拟盘时实盘配置整块收起', () => {
+        // 「模拟交易」栏目的最后一道闸：账户、下发、顶栏都已是模拟盘，设置里再留
+        // 「券商实盘接入」就等于把实盘又搬回来了（改完凭证下一步就是下单）。
+        renderPage({ forcedTradingMode: 'simulation' });
+        clickTab('设置');
+
+        expect(pane('settings')?.getAttribute('data-live-config')).toBe('false');
+        // 标题取的是**生效模式**：全局偏好留在实盘，这一栏也仍是模拟盘设置
+        expect(pane('settings')?.getAttribute('data-trading-mode')).toBe('simulation');
     });
 
     it('顶栏横幅缺省：不传 banner 就整段不渲染', () => {

@@ -739,7 +739,22 @@ const RealTradingPage: React.FC<RealTradingPageProps> = ({ forcedTradingMode, ex
                             tradingMode={tradingMode}
                         />
                     )}
-                    {activeTab === 'settings' && <SettingsCenter userId={userId} isActive={activeTab === 'settings'} />}
+                    {activeTab === 'settings' && (
+                        <SettingsCenter
+                            userId={userId}
+                            isActive={activeTab === 'settings'}
+                            // 只看**固定模式**，不看生效模式：公开树只有一栏、模式由顶栏开关
+                            // 切换，那里模拟态也必须能配券商凭证（配完才切得过去），
+                            // 按生效模式藏会平白砍掉一条既有路径。
+                            // 会被藏起来的只有一种情形：调用方把模式**定死**成模拟盘
+                            // （`resolveSimColumnForcedMode`，即本机并存的「实盘交易」栏目），
+                            // 那时实盘配置归另一栏管。
+                            liveConfigVisible={forcedTradingMode !== 'simulation'}
+                            // 标题取词用**生效模式**（与顶栏、侧栏同一个值）：
+                            // 实盘栏的「实盘交易设置」、模拟栏的「模拟交易设置」。
+                            tradingMode={tradingMode}
+                        />
+                    )}
                     {activeTab === 'replay' && <ReplayPage />}
                     {/* 追加页签内容。按 id 命中才挂载：与基础栏同规矩，切走即卸载，
                         面板内的草稿/轮询不留在后台空转。无追加页签时这段不产出节点。 */}

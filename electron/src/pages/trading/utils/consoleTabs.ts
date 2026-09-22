@@ -111,3 +111,24 @@ export function resolveConsoleTradingMode(
 ): ConsoleTradingMode {
     return forced ?? ambient;
 }
+
+/**
+ * 「模拟交易」栏目的固定模式 —— 存在**独立实盘栏目**时定死模拟盘，否则不固定。
+ *
+ * 用户原话：「模拟盘栏目，就搞模拟盘，实盘的都去掉吧、现在 2 个模块的。一个模拟、
+ * 一个实盘。」两栏各管一边之后，这一栏再留着「模拟/实盘」开关就等于把实盘又搬回来：
+ * 同样的账户、同样的下发对话框，用户在「模拟交易」里点一下就到了实盘，栏目名却还写着
+ * 模拟交易（`FloatingNavBar` 的栏目名跟的是全局模式，不跟这个入口）。
+ *
+ * 固定的是**整栏口径**：账户取模拟账户（`resolveTradingAccountMode` 的
+ * preferredMode 就是它）、下发走 `SIMULATION`、顶栏标「模拟盘」、设置里不出现
+ * 实盘面板。于是这一栏任何一处都不可能出现真实券商数字。
+ *
+ * 公开树没有独立实盘栏目（`isLocalLiveAvailable` 恒 false）→ 返回 `undefined`，
+ * 即「跟随全局模式」：那里模式开关是通往实盘的**唯一**入口，固定住就没有实盘了。
+ */
+export function resolveSimColumnForcedMode(
+    hasSeparateLiveColumn: boolean,
+): ConsoleTradingMode | undefined {
+    return hasSeparateLiveColumn ? 'simulation' : undefined;
+}

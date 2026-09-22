@@ -14,6 +14,7 @@ import {
     composeConsoleTabs,
     resolveConsoleTab,
     resolveConsoleTradingMode,
+    resolveSimColumnForcedMode,
     type ConsoleTab,
 } from '../consoleTabs';
 
@@ -122,5 +123,20 @@ describe('resolveConsoleTradingMode', () => {
         // 悄悄换成模拟账户等于让人对着假数字看实盘。
         expect(resolveConsoleTradingMode('real', 'simulation')).toBe('real');
         expect(resolveConsoleTradingMode('real', 'real')).toBe('real');
+    });
+});
+
+describe('resolveSimColumnForcedMode', () => {
+    it('有独立实盘栏目时定死模拟盘 —— 两栏各管一边', () => {
+        expect(resolveSimColumnForcedMode(true)).toBe('simulation');
+    });
+
+    it('没有独立实盘栏目时不固定，跟随全局模式', () => {
+        // 公开树只有这一栏，模式开关是通往实盘的唯一入口：固定住就等于没有实盘了
+        expect(resolveSimColumnForcedMode(false)).toBeUndefined();
+    });
+
+    it('固定后不被全局模式翻过去（全局停在实盘也一样）', () => {
+        expect(resolveConsoleTradingMode(resolveSimColumnForcedMode(true), 'real')).toBe('simulation');
     });
 });
