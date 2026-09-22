@@ -202,4 +202,32 @@ describe('RealTradingPage 外壳接线', () => {
 
         expect(sidebarLabels()).toEqual(BASE_LABELS);
     });
+
+    it('顶栏横幅缺省：不传 banner 就整段不渲染', () => {
+        renderPage();
+
+        expect(document.querySelector('[data-testid="banner-probe"]')).toBeNull();
+        // 顶栏本身还在（说明不是把整块顶栏一起省掉了）
+        expect(document.querySelector('[data-testid="topbar"]')).not.toBeNull();
+    });
+
+    it('顶栏横幅：拿到与追加页签同一份运行期上下文', () => {
+        // 「同一份」是这条槽位的全部意义：横幅报的账户状态与页内看到的不可能有相位差。
+        // 关键在 `toBe` —— 只要有人把 ctx 拆成两个 useMemo（哪怕字段一样），当场变红。
+        let seenBanner: RealTradingTabContext | null = null;
+        let seenTab: RealTradingTabContext | null = null;
+        renderPage({
+            banner: (ctx) => {
+                seenBanner = ctx;
+                return <div data-testid="banner-probe" />;
+            },
+            extraTabs: [makeExtraTab((ctx) => { seenTab = ctx; })],
+        });
+
+        clickTab('探针栏');
+
+        expect(document.querySelector('[data-testid="banner-probe"]')).not.toBeNull();
+        expect(seenBanner).not.toBeNull();
+        expect(seenBanner).toBe(seenTab);
+    });
 });

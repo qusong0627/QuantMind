@@ -130,9 +130,18 @@ export interface RealTradingPageProps {
      * undefined，追加分支整段不参与渲染，公开仓形态与本机制引入前逐位相同。
      */
     extraTabs?: readonly RealTradingExtraTab[];
+    /**
+     * 顶栏下方的横幅槽位，拿到与追加页签同一份运行期上下文。缺省不渲染。
+     *
+     * 与 `extraTabs` 同一约定：**公开树不感知调用方是谁** —— 无调用方时整个
+     * 分支不参与渲染，公开仓形态与本机制引入前逐位相同。用途是「账户/交易端
+     * 不可用」这类**跨页签**的状态提示：它不是某一栏的内容，挂进任何一栏都只能
+     * 在那一栏被看见。
+     */
+    banner?: (ctx: RealTradingTabContext) => React.ReactNode;
 }
 
-const RealTradingPage: React.FC<RealTradingPageProps> = ({ forcedTradingMode, extraTabs }) => {
+const RealTradingPage: React.FC<RealTradingPageProps> = ({ forcedTradingMode, extraTabs, banner }) => {
     const currentMarket = useAppSelector(selectCurrentMarket);
     // 默认「系统健康」，深链 ?tab=eval|signals 直达 —— 规则见 utils/activeTab.ts（有测试锁定）
     const initialTab: ActiveTab = resolveInitialTab(
@@ -614,6 +623,9 @@ const RealTradingPage: React.FC<RealTradingPageProps> = ({ forcedTradingMode, ex
                             return accountInfo ? buildTradingTopBarAccountInfo(accountInfo, status) : undefined;
                         })()}
                     />
+                    {/* 调用方横幅：无调用方时 `banner` 为 undefined，整段不渲染。
+                        `ctx` 与追加页签同源，两边看到的是同一份账户快照。 */}
+                    {banner && <div className="shrink-0">{banner(tabContext)}</div>}
                 </div>
 
                 {/* Bottom Section - Sidebar & Content（占满剩余高度） */}
