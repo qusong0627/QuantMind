@@ -79,6 +79,20 @@ command -v curl >/dev/null || fail "需要 curl"
 command -v python3 >/dev/null || fail "需要 python3"
 [ -f "$REPO_ROOT/electron/dist-react/index.html" ] || fail "缺少前端构建产物 electron/dist-react/"
 
+# 前端产物形态闸：通用便携包必须是**全栏目**形态。
+# 实盘节点包（deploy/live-win/build_live_pack.sh，本机专用/未进版本库）要求
+# 同一份 dist-react 带 VITE_LIVE_NODE_ONLY=true 构建 —— 只留 QuantBot 与实盘
+# 交易两栏。两个包共用这个产物目录，且都从这里取 web/，于是打完实盘包之后
+# 直接跑本脚本，就会把「两栏 UI」静默装进通用便携包：用户点不到大盘分析/
+# 模型训练/投研，而构建日志里一行异常都没有。这里挡在构建期。
+# 判据只看 "true"：该变量不在任何 .env 文件里，全栏目形态下产物中根本没有
+# 这个键（Vite 只注入已定义的 VITE_ 变量），传 false 也与源码语义一致（只认 true）。
+if grep -rqs 'VITE_LIVE_NODE_ONLY:"true"' "$REPO_ROOT/electron/dist-react/assets"; then
+    fail "前端产物是实盘节点形态（VITE_LIVE_NODE_ONLY=true，只剩 QuantBot/实盘交易两栏）。
+       多半是刚打完实盘节点包。重新构建全栏目产物:
+         npm run dashboard:build   # 在仓库根目录执行，不带 VITE_LIVE_NODE_ONLY"
+fi
+
 mkdir -p "$BUILD/cache" "$STAGE"
 AVAIL_KB=$(df -k "$BUILD" | awk 'NR==2{print $4}')
 [ "${AVAIL_KB:-0}" -lt 23000000 ] && fail "磁盘剩余空间不足 23GB"
