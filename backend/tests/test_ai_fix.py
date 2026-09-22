@@ -3,7 +3,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from backend.services.engine.qlib_app.api.backtest import ai_fix_strategy
+# 端点已从 api/backtest.py 拆到 api/ai_fix.py（backtest 只 include_router）——
+# 老路径 import 直接失败，会让**整个** unit 套件在收集期中断（零项参与即失败）。
+from backend.services.engine.qlib_app.api.ai_fix import ai_fix_strategy
 from backend.services.engine.qlib_app.schemas.backtest import QlibAIFixRequest
 
 

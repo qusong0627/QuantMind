@@ -8,6 +8,7 @@
 """
 
 import importlib.util
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -17,6 +18,11 @@ import pandas as pd
 def _load_training_module():
     root = Path(__file__).resolve().parents[2]
     module_path = root / "docker" / "training" / "train.py"
+    # train.py 是**训练容器**的入口，import 的是同目录下的 `model_trainers.*` 包。
+    # 主容器里 docker/training 不在 sys.path 上 → 收集期 ImportError 会中断整个 unit 套件。
+    training_dir = str(module_path.parent)
+    if training_dir not in sys.path:
+        sys.path.insert(0, training_dir)
     spec = importlib.util.spec_from_file_location("quant_training_train", module_path)
     module = importlib.util.module_from_spec(spec)
     assert spec and spec.loader
@@ -25,7 +31,11 @@ def _load_training_module():
 
 
 mod = _load_training_module()
-_psi_single = mod._psi_single
+# compute_psi_drift 由 train.py 转出（同时也验证了这层转出还在）；
+# _psi_single / _rank_displacement 是 drift.py 的私有实现，P1 拆包后 train.py 不再转出
+# 它们 → 向属主模块取（train.py 只转出 compute_psi_drift 这一个公开名）。
+from diagnostics.drift import _psi_single, _rank_displacement  # noqa: E402
+
 compute_psi_drift = mod.compute_psi_drift
 
 
@@ -129,7 +139,7 @@ def test_level_shift_does_not_trigger_rank_psi():
     recent_df = df[df["trade_date"] >= dates[15]]
 
     level_psi = _psi_single(train_df["feat"].to_numpy(), recent_df["feat"].to_numpy())
-    rank_disp = mod._rank_displacement(train_df, recent_df, "feat")
+    rank_disp = _rank_displacement(train_df, recent_df, "feat")
 
     assert level_psi > 0.5  # 水平明显漂移
     assert rank_disp < 0.05  # 但截面结构稳定
@@ -159,7 +169,7 @@ def test_structure_shift_triggers_rank_psi():
     train_df = df[df["trade_date"] < dates[15]]
     recent_df = df[df["trade_date"] >= dates[15]]
 
-    rank_disp = mod._rank_displacement(train_df, recent_df, "feat")
+    rank_disp = _rank_displacement(train_df, recent_df, "feat")
 
     assert rank_disp > 0.2
 
@@ -241,7 +251,7 @@ def test_rank_displacement_unreliable_does_not_mask_drift():
 
     train_df = df[df["trade_date"] < dates[25]]
     recent_df = df[df["trade_date"] >= dates[25]]
-    rank_disp = mod._rank_displacement(train_df, recent_df, "feat")
+    rank_disp = _rank_displacement(train_df, recent_df, "feat")
     assert np.isnan(rank_disp)  # 交集为空 → nan
 
     # compute_psi_drift 整体：水平漂移显著但 rank 不可估计 → 不应因置 0 判 stable
@@ -285,7 +295,7 @@ def test_stationary_autocorrelated_market_not_severe():
     syms = [f"S{i:04d}" for i in range(n_stocks)]
     df = pd.DataFrame([(d, s) for d in dates for s in syms], columns=["trade_date", "symbol"])
     # 每股 AR(1) 平稳过程：截面排序缓慢游走（强自相关），但任何窗口间无系统漂移
-    for j, feat in enumerate(["mom_ret_20d", "fun_pe", "turn_20"]):
+    for feat in ["mom_ret_20d", "fun_pe", "turn_20"]:
         vals = np.empty((n_days, n_stocks))
         x = rng.normal(0, 1, n_stocks)
         for i in range(n_days):
