@@ -520,6 +520,52 @@ class TestPartitionScan:
         assert lmd.load_date(date(2026, 7, 2)) == {}
         assert hub.queries == []
 
+    def test_empty_result_is_not_pinned_for_the_process_lifetime(self, tmp_path):
+        """空结果不进缓存 —— 分区晚到时必须能自愈。
+
+        实测事故（2026-09-22 实盘持仓监控显示 −84,778.90）：夜更把 `dt=<当日>`
+        落盘的那一秒，TDX 推送正在取价。见下一条用例，那一刻 `_sessions()` 已经
+        认这个分区「有数据」、而 `_build_date` 只读得到 0 行 → 返回 {}。旧实现把
+        这个 {} 写进 `_date_cache`，于是该交易日**在本进程余下的生命周期里恒定
+        读出 0 根**：持仓现价/市值全部落库为 0，前端把「缺价」画成「亏 100%」。
+
+        `_sessions()` 早就写了同一条规则（「失败时不写缓存：避免把空的 session
+        列表永久钉住」），`_load_date_cached` 漏了。
+        """
+        _write_partition(tmp_path, 20260720, _DAILY)
+        lmd = LocalMarketData(hub=_FakeHub(tmp_path), market="CN")
+
+        # 分区还没落盘：返回空是对的
+        assert lmd.load_date(date(2026, 7, 21)) == {}
+
+        # 分区落盘后必须读得到，而不是继续吃那份空缓存
+        _write_partition(tmp_path, 20260721, _DAILY)
+
+        assert lmd.load_date(date(2026, 7, 21))["600036.SH"].close == 38.65
+
+    def test_zero_row_partition_reads_empty_but_still_counts_as_a_session(
+        self, tmp_path
+    ):
+        """0 行分区：交易日认它、取数读空 —— 正是事故那一刻的组合。
+
+        同步先落占位文件再回填时，`_partition_has_data` 只判文件存在，
+        而 `_to_bar_frame` 对 0 行表静默产出空表。两者合起来给出
+        「这个交易日有数据」（latest_trade_date 指向它）＋「读出来一根没有」，
+        而全程不产生任何日志 —— 排查时看不出发生过什么。
+        """
+        _write_partition(tmp_path, 20260720, _DAILY)
+        _write_partition(tmp_path, 20260721, _DAILY.iloc[0:0])  # 合法 parquet，0 行
+        lmd = LocalMarketData(hub=_FakeHub(tmp_path), market="CN")
+
+        assert lmd.latest_trade_date() == date(2026, 7, 21)
+        assert lmd.get_bar("600036.SH", date(2026, 7, 21)) is None
+
+        # 同一天回填出真数据后，无需重启进程即可读到
+        _write_partition(tmp_path, 20260721, _DAILY)
+
+        bar = lmd.get_bar("600036.SH", date(2026, 7, 21))
+        assert bar is not None and bar.close == 38.65
+
     def test_bad_columns_fall_back_to_view(self, tmp_path):
         _write_partition(tmp_path, 20260720, pd.DataFrame({"foo": [1]}))
         hub = _FakeHub(tmp_path)

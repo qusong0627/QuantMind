@@ -52,6 +52,8 @@ const mergeLivePrices = (holdings: NormalizedHolding[], live: Record<string, num
             value,
             profit,
             profitPercent: costValue > 0 ? (profit / costValue) * 100 : 0,
+            // 实时价到了就不再是缺价行 —— 不清这个标记会让拿到价的行继续显示 —
+            priceMissing: false,
         };
     });
 };

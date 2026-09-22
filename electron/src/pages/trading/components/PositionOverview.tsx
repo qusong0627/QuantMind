@@ -168,24 +168,26 @@ const PositionOverview: React.FC<PositionOverviewProps> = ({ holdings, summary, 
                                         )}
                                         {!compact && (
                                             <td className="px-3 py-1.5 text-center text-sm font-semibold text-gray-900">
-                                                ¥{holding.current.toFixed(2)}
+                                                {/* 缺价行出 —：`current` 是 0，直接 toFixed 会画成「¥0.00」，
+                                                    看起来像股价归零而不是「取不到价」 */}
+                                                {holding.priceMissing ? '—' : `¥${holding.current.toFixed(2)}`}
                                             </td>
                                         )}
                                         <td className="px-3 py-1.5 text-center text-sm font-bold text-gray-900">
-                                            {formatAmount(holding.value)}
+                                            {holding.priceMissing ? '—' : formatAmount(holding.value)}
                                         </td>
                                         {!compact && (
                                             <td className={`px-3 py-1.5 text-center text-sm font-bold flex items-center justify-center gap-1 ${
-                                                holding.profit > 0 ? 'text-red-500' : holding.profit < 0 ? 'text-emerald-500' : 'text-black'
+                                                holding.priceMissing ? 'text-gray-400' : holding.profit > 0 ? 'text-red-500' : holding.profit < 0 ? 'text-emerald-500' : 'text-black'
                                             }`}>
-                                                {holding.profit > 0 ? <TrendingUp size={14} /> : holding.profit < 0 ? <TrendingDown size={14} /> : <Minus size={14} />}
-                                                {holding.profit > 0 ? '+' : ''}{formatAmount(holding.profit)}
+                                                {holding.priceMissing ? <Minus size={14} /> : holding.profit > 0 ? <TrendingUp size={14} /> : holding.profit < 0 ? <TrendingDown size={14} /> : <Minus size={14} />}
+                                                {holding.priceMissing ? '—' : `${holding.profit > 0 ? '+' : ''}${formatAmount(holding.profit)}`}
                                             </td>
                                         )}
                                         <td className={`px-3 py-1.5 text-center text-sm font-semibold ${
-                                            holding.profitPercent > 0 ? 'text-red-500' : holding.profitPercent < 0 ? 'text-emerald-500' : 'text-black'
+                                            holding.priceMissing ? 'text-gray-400' : holding.profitPercent > 0 ? 'text-red-500' : holding.profitPercent < 0 ? 'text-emerald-500' : 'text-black'
                                         }`}>
-                                            {holding.profitPercent > 0 ? '+' : ''}{holding.profitPercent.toFixed(2)}%
+                                            {holding.priceMissing ? '—' : `${holding.profitPercent > 0 ? '+' : ''}${holding.profitPercent.toFixed(2)}%`}
                                         </td>
                                     </tr>
                                 ))}

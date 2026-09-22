@@ -435,6 +435,16 @@ class LocalMarketData:
 
         bars = self._build_date(trade_date)
 
+        # 空结果**不进缓存**：分区晚到是常态（夜更落盘前后、同步中断、占位文件先落
+        # 数据后回填），钉住空的会让该交易日在本进程余下的生命周期里恒定读出 0 根。
+        # 2026-09-22 实测：TDX 取价正好撞上 `dt=<当日>` 落盘那一秒，读到 0 行 → {} 被
+        # 缓存 → 此后每 30s 的实盘快照持仓现价/市值全为 0，前端画成每行 −100%，
+        # 直到进程重启。命中空结果最常见的原因是"该分区还不存在"，重算只是几次
+        # is_dir()，不读 parquet，代价可忽略。
+        # 同规则见 _sessions()：「失败时不写缓存，避免把空的 session 列表永久钉住」。
+        if not bars:
+            return bars
+
         with self._lock:
             self._date_cache[trade_date] = bars
             self._date_cache.move_to_end(trade_date)

@@ -63,9 +63,16 @@ export const PositionVisualBoard: React.FC<{
   const [sellSymbols, setSellSymbols] = useState<string[] | null>(null);
   const [channels, setChannels] = useState<PushChannel[]>(defaultChannels);
 
-  const totalPnl = useMemo(() => holdings.reduce((s, h) => s + (h.profit || 0), 0), [holdings]);
-  const winCount = holdings.filter((h) => h.profit > 0).length;
-  const loseCount = holdings.filter((h) => h.profit < 0).length;
+  // 缺价行（`priceMissing`）不参与任何加减：它的盈亏是「不知道」，不是 0。
+  // 2026-09-22 事故就出在这行合计上 —— 十行缺价被算成「市值 0 − 成本」，
+  // 浮动盈亏显示 −84,778.90（= 全部持仓成本），而实际是小幅盈利。
+  const priced = useMemo(() => holdings.filter((h) => !h.priceMissing), [holdings]);
+  const missingCount = holdings.length - priced.length;
+  const totalPnl = useMemo(() => priced.reduce((s, h) => s + (h.profit || 0), 0), [priced]);
+  const winCount = priced.filter((h) => h.profit > 0).length;
+  const loseCount = priced.filter((h) => h.profit < 0).length;
+  // 一行都算不出来时宁可不报数：0 在这里会被读成「不赚不亏」，与「拿不到价」是两回事。
+  const pnlUnknown = holdings.length > 0 && priced.length === 0;
   const base = summary.positionValue > 0 ? summary.positionValue : 1;
 
   const sorted = useMemo(() => {
@@ -144,12 +151,16 @@ export const PositionVisualBoard: React.FC<{
     return (
       <div
         key={key}
-        title={`${h.name}（${h.code}）\n市值 ${fmtMoney(h.value)} · 占比 ${(share * 100).toFixed(1)}%\n盈亏 ${h.profit > 0 ? '+' : ''}${fmtMoney(h.profit)}（${fmtRowPct(h.profitPercent)}）`}
+        title={
+          h.priceMissing
+            ? `${h.name}（${h.code}）\n持仓 ${h.shares} 股 · 成本 ${fmtMoney(h.cost)}\n现价缺失，市值与盈亏暂不可知`
+            : `${h.name}（${h.code}）\n市值 ${fmtMoney(h.value)} · 占比 ${(share * 100).toFixed(1)}%\n盈亏 ${h.profit > 0 ? '+' : ''}${fmtMoney(h.profit)}（${fmtRowPct(h.profitPercent)}）`
+        }
         style={{ flexGrow: Math.max(share, 0.004), flexBasis: 0, backgroundColor: tileColor(h.profit, h.profitPercent) }}
         className="min-w-[30px] h-full rounded-md px-1.5 py-1 overflow-hidden cursor-default transition-transform hover:scale-[1.015]"
       >
         <div className="truncate text-[10px] font-bold text-white/95 leading-3.5">{(h.name || h.code).slice(0, 5)}</div>
-        <div className="truncate font-mono text-[9px] text-white/80 leading-3">{(share * 100).toFixed(1)}%</div>
+        <div className="truncate font-mono text-[9px] text-white/80 leading-3">{h.priceMissing ? '—' : `${(share * 100).toFixed(1)}%`}</div>
       </div>
     );
   };
@@ -220,6 +231,16 @@ export const PositionVisualBoard: React.FC<{
           <span className="rounded-full border border-emerald-100 bg-emerald-50/60 px-2.5 py-1 text-emerald-600">
             亏损 <span className="font-mono">{loseCount}</span>
           </span>
+          {/* 缺价单列一格：这些行的盈亏没被算进「盈利/亏损」，但也没消失——
+              不单独报数的话，用户会以为持仓数对不上。 */}
+          {missingCount > 0 && (
+            <span
+              className="rounded-full border border-amber-200 bg-amber-50 px-2.5 py-1 text-amber-700"
+              title="这些持仓拿不到现价（补价失败 / 停牌 / 退市），市值与盈亏暂不可知，未计入盈亏合计"
+            >
+              缺价 <span className="font-mono">{missingCount}</span>
+            </span>
+          )}
           <span
             className="rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1 text-slate-600"
             title={summary.cashRatio > 1.5 ? '现金/总资产 > 100%，账户口径数据异常，暂显 —' : undefined}
@@ -228,14 +249,26 @@ export const PositionVisualBoard: React.FC<{
           </span>
           <span
             className={`rounded-full border px-2.5 py-1 ${
-              totalPnl > 0
-                ? 'border-red-200 bg-red-50 text-red-600'
-                : totalPnl < 0
-                  ? 'border-emerald-200 bg-emerald-50 text-emerald-600'
-                  : 'border-slate-200 bg-slate-50 text-slate-500'
+              pnlUnknown
+                ? 'border-slate-200 bg-slate-50 text-slate-500'
+                : totalPnl > 0
+                  ? 'border-red-200 bg-red-50 text-red-600'
+                  : totalPnl < 0
+                    ? 'border-emerald-200 bg-emerald-50 text-emerald-600'
+                    : 'border-slate-200 bg-slate-50 text-slate-500'
             }`}
+            title={
+              pnlUnknown
+                ? '全部持仓都拿不到现价，盈亏不可知'
+                : missingCount > 0
+                  ? `${missingCount} 只缺价未计入`
+                  : undefined
+            }
           >
-            浮动盈亏 <span className="font-mono">{totalPnl > 0 ? '+' : ''}{fmtMoney(totalPnl)}</span>
+            浮动盈亏{' '}
+            <span className="font-mono">
+              {pnlUnknown ? '—' : `${totalPnl > 0 ? '+' : ''}${fmtMoney(totalPnl)}`}
+            </span>
           </span>
         </div>
       </div>
@@ -304,7 +337,7 @@ export const PositionVisualBoard: React.FC<{
           return (
             <div
               key={h.code}
-              title={`${h.name}（${h.code}） 持仓 ${h.shares} 股 · 市值 ${fmtMoney(h.value)}`}
+              title={`${h.name}（${h.code}） 持仓 ${h.shares} 股 · 市值 ${h.priceMissing ? '—（缺现价）' : fmtMoney(h.value)}`}
               className="grid grid-cols-[1.1rem_minmax(0,1.3fr)_minmax(0,2.2fr)_minmax(0,1fr)_minmax(0,1.1fr)_3.5rem] items-center gap-3 rounded-xl border border-transparent px-2 py-1.5 transition-colors hover:border-slate-200 hover:bg-slate-50/70"
             >
               <Checkbox checked={picked.has(h.code)} onChange={() => togglePick(h.code)} />
@@ -316,21 +349,34 @@ export const PositionVisualBoard: React.FC<{
                 <div className="flex-1 h-2 rounded-full bg-slate-100 overflow-hidden">
                   <div className={`h-full rounded-full transition-all ${barTone(h.profit)}`} style={{ width: `${(pct * 100).toFixed(1)}%` }} />
                 </div>
-                <span className="shrink-0 w-12 text-right font-mono text-[11px] font-bold text-slate-600">{(pct * 100).toFixed(1)}%</span>
+                <span className="shrink-0 w-12 text-right font-mono text-[11px] font-bold text-slate-600">
+                  {h.priceMissing ? '—' : `${(pct * 100).toFixed(1)}%`}
+                </span>
               </div>
+              {/* 缺价行：现价与盈亏一律出 `—`。市值占比同理——0% 会读成「这只票不值钱」，
+                  它其实只是「不知道」。成本价照常显示，缺的是价不是成本。 */}
               <div className="min-w-0 text-right">
-                <div className="truncate font-mono text-xs font-bold text-slate-800">{fmtMoney(h.current)}</div>
+                <div className="truncate font-mono text-xs font-bold text-slate-800">{h.priceMissing ? '—' : fmtMoney(h.current)}</div>
                 <div className="truncate font-mono text-[10px] text-slate-400">成本 {fmtMoney(h.cost)}</div>
               </div>
               <div className="min-w-0 text-right">
-                <div className={`truncate font-mono text-xs font-bold ${pnlTone(h.profit)}`}>
-                  {h.profit > 0 ? '+' : ''}
-                  {fmtMoney(h.profit)}
-                </div>
-                <div className={`truncate font-mono text-[10px] ${pnlTone(h.profit)}`}>
-                  {h.profitPercent > 0 ? '+' : ''}
-                  {fmtRowPct(h.profitPercent)}
-                </div>
+                {h.priceMissing ? (
+                  <>
+                    <div className="truncate font-mono text-xs font-bold text-slate-400">—</div>
+                    <div className="truncate font-mono text-[10px] text-slate-400">缺现价</div>
+                  </>
+                ) : (
+                  <>
+                    <div className={`truncate font-mono text-xs font-bold ${pnlTone(h.profit)}`}>
+                      {h.profit > 0 ? '+' : ''}
+                      {fmtMoney(h.profit)}
+                    </div>
+                    <div className={`truncate font-mono text-[10px] ${pnlTone(h.profit)}`}>
+                      {h.profitPercent > 0 ? '+' : ''}
+                      {fmtRowPct(h.profitPercent)}
+                    </div>
+                  </>
+                )}
               </div>
               {/* 只有一个「卖出」而不是「卖出 / 清仓」两个：预检面板本来就把数量预填成
                   全部可用持仓，想卖一半才需要手动改数。批量清仓走上方「全选 → 清仓选中」。
@@ -395,7 +441,9 @@ export const PositionVisualBoard: React.FC<{
                 <ReactECharts option={contribOption} style={{ height: '100%' }} notMerge />
               </div>
             ) : (
-              <div className="flex flex-1 items-center justify-center text-[11px] text-slate-300">暂无盈亏数据</div>
+              <div className="flex flex-1 items-center justify-center text-[11px] text-slate-300">
+                {missingCount > 0 ? '持仓缺现价，盈亏不可知' : '暂无盈亏数据'}
+              </div>
             )}
           </div>
         </div>
