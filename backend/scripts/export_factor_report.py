@@ -398,12 +398,12 @@ def sec_style(blocks: dict[str, Any]) -> str:
     if not ok(st):
         return "\n".join(lines + [f"> 风格块不可用：{reason_of(st)}\n"])
 
-    lines.append("> 风格模型为**自算 CNE5 式口径**（十大风格描述子标准化后 WLS 求纯因子收益），"
+    lines.append("> 风格模型为**自算 CNE5 式口径**（风格描述子标准化后 WLS 求纯因子收益），"
                  "不声称与商业 Barra 数据完全可比。\n")
 
     exp = st.get("exposures") or []
     if exp:
-        lines.append("### Barra 十大风格 · 观测期均值相关\n")
+        lines.append(f"### Barra 风格 · 观测期均值相关（{len(exp)} 项）\n")
         lines.append(table(["排名", "风格", "说明", "均值相关", "标准差", "有效天数"], [
             [ints(e.get("rank")), str(e.get("style")), str(e.get("label") or ""),
              num(e.get("mean_corr"), 4), raw(e.get("std_corr"), 4), ints(e.get("n_days"))]

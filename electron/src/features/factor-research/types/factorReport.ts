@@ -38,7 +38,7 @@ export interface FactorSummary {
   clip_frac_mean?: number | null;
   n_valid_mean?: number | null;
   ic_half_life?: number | null;
-  /** Barra 十大风格相关性（构建期列） */
+  /** Barra 风格相关性（构建期列，风格清单见 style_block.styles） */
   style_corr?: Record<string, number | null> | null;
 }
 
@@ -454,7 +454,7 @@ export interface StyleExposureRow {
   n_days: number;
 }
 
-/** 收益对十大风格纯因子收益的时序回归 —— 回答「超额是真本事还是风格 beta」 */
+/** 收益对风格纯因子收益的时序回归 —— 回答「超额是真本事还是风格 beta」 */
 export interface StyleAttribution {
   alpha: number | null;
   t_alpha: number | null;
@@ -467,6 +467,8 @@ export interface StyleAttribution {
 export interface StyleBlock {
   available: boolean;
   reason?: string;
+  /** 风格目录（后端按 STYLE_NAMES 顺序给出 key → 中文名）；口径声明据此列举，前端不自持清单 */
+  styles?: Array<{ key: string; label: string }>;
   exposures?: StyleExposureRow[];
   /** 风格 → 逐日相关性序列（与 dates 同长） */
   exposure_ts?: Record<string, (number | null)[]>;

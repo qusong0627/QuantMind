@@ -406,7 +406,7 @@ def excess_block(dates: list[str], long_daily: np.ndarray, ls_daily: np.ndarray,
 
 def style_block(df: Any, dates_all: list[str], ls_daily: np.ndarray,
                 long_excess: np.ndarray | None, horizon: int) -> dict[str, Any]:
-    """Barra 十大风格：均值相关表 + 日序列 + 纯因子收益归因回归。"""
+    """Barra 风格（自算 CNE5 式口径）：均值相关表 + 日序列 + 纯因子收益归因回归。"""
     from .style_model import STYLE_LABELS, STYLE_NAMES, load_pure_returns
 
     cols = {s: _col(df, f"sc_{s}") for s in STYLE_NAMES}
@@ -429,6 +429,9 @@ def style_block(df: Any, dates_all: list[str], ls_daily: np.ndarray,
         r["rank"] = i + 1
     out: dict[str, Any] = {
         "available": True,
+        # 风格目录随 STYLE_NAMES 走：前端口径声明按它列举风格名，避免前端再写一份
+        # 会过期的硬编码清单（expanded 到 12 风格时就是被这份硬编码漏掉的）。
+        "styles": [{"key": s, "label": STYLE_LABELS.get(s, s)} for s in STYLE_NAMES],
         "exposures": rows,
         "exposure_ts": {s: _seq(cols[s]) for s in STYLE_NAMES if cols[s] is not None},
         "dates": dates_all,
@@ -447,7 +450,17 @@ def style_block(df: Any, dates_all: list[str], ls_daily: np.ndarray,
         out["excess_corr_reason"] = out["attribution_reason"]
         return out
     idx = np.asarray([dt_keys[d] for d in common])
-    style_ret = {s: np.asarray([pure[d][s] for d in common], dtype=np.float64) for s in STYLE_NAMES}
+    style_all = {s: np.asarray([pure[d][s] for d in common], dtype=np.float64) for s in STYLE_NAMES}
+    # 代码风格集与产物风格集可能错位（新增风格后产物尚未重建）：整列无覆盖的风格
+    # 若硬塞进回归，style_attribution 会把它按行丢弃 → 全体行被剔光 → α 直接变 None。
+    # 剔除必须**点名**落进产物：报告上「回归里少了一个风格」否则完全看不出来。
+    style_ret = {s: v for s, v in style_all.items() if np.isfinite(v).any()}
+    dropped = [s for s in style_all if s not in style_ret]
+    if dropped:
+        out["attribution_dropped_styles"] = dropped
+    if not style_ret:
+        out["attribution_reason"] = "风格纯因子收益在报告区间内全部无覆盖（产物可能未重建）"
+        return out
     out["attribution"] = M.style_attribution(ls_daily[idx], style_ret)
     if long_excess is not None:
         out["excess_attribution"] = M.style_attribution(long_excess[idx], style_ret)

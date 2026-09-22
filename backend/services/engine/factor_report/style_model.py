@@ -4,10 +4,10 @@
 零命中），而「超额收益是真本事还是风格 beta」是机构级因子报告必须回答的问题。
 本模块产出两样东西，供 ``build_factor_report.py`` 与详情接口消费：
 
-1. 逐日**风格暴露**（标准化后的 10 列）→ 因子与风格的截面秩相关、风格归因的回归元
-2. 逐日**纯因子收益**（WLS 解出的 10 列）→ 多空/超额收益对风格的时序归因
+1. 逐日**风格暴露**（标准化后的 12 列）→ 因子与风格的截面秩相关、风格归因的回归元
+2. 逐日**纯因子收益**（WLS 解出的 12 列）→ 多空/超额收益对风格的时序归因
 
-## 十个风格（口径写死在这里，改口径只能改这里）
+## 十二个风格（口径写死在这里，改口径只能改这里）
 
 | 风格 | 口径 |
 |---|---|
@@ -21,6 +21,13 @@
 | earningsyield | ``net_profit_ttm / total_mv`` |
 | growth | ``0.5·z(营收TTM同比) + 0.5·z(净利TTM同比)`` |
 | leverage | ``(ME + 长期借款 + 应付债券) / ME``，ME = total_mv |
+| rmw | ``扣非净利TTM / 净资产``（用户指定的 A 股 RMW 口径，非学术 OP/BE） |
+| cma | ``−资本开支TTM / 总资产``（用户指定口径；取负号使**高暴露 = 投资保守**，同 FF5 方向） |
+
+后两个是 Fama–French 五因子的 RMW/CMA 在 A 股的对应物（用户 2026-09-22 指定口径：
+价值用 BP、盈利用扣非 ROE、投资用资本开支/总资产）。财务面板是按公告日 PIT 的
+TTM 序列，由 ``build_style_factors.py`` 取数；**面板缺财务键时这两个风格整体缺席**
+（见 :func:`descriptors_from_panels`），此时全链路退化为原来的 10 风格，不会 KeyError。
 
 标准化流水线（逐日，见 :func:`standardize_pipeline`）：
 **±3MAD 缩尾 → z-score → 对 size 正交（部分风格）→ 行业去均值 → 重新标准化**。
@@ -65,6 +72,8 @@ STYLE_NAMES: tuple[str, ...] = (
     "earningsyield",
     "growth",
     "leverage",
+    "rmw",
+    "cma",
 )
 
 SIZE_ORTHOGONAL_STYLES: tuple[str, ...] = (
@@ -74,6 +83,8 @@ SIZE_ORTHOGONAL_STYLES: tuple[str, ...] = (
     "earningsyield",
     "growth",
     "leverage",
+    "rmw",
+    "cma",
 )
 """对 size 正交的风格 —— 让「价值/成长/杠杆」讲的是自身，不是市值的影子。"""
 
@@ -379,16 +390,45 @@ def leverage(total_mv: np.ndarray, long_term_debt: np.ndarray) -> np.ndarray:
     return np.where((out > 0) & (out <= LEVERAGE_MAX), out, np.nan)
 
 
+def rmw_exposure(deducted_net_profit_ttm: np.ndarray, book_equity: np.ndarray) -> np.ndarray:
+    """``扣非净利TTM / 净资产``（扣非 ROE 口径的 RMW，用户 2026-09-22 指定）。
+
+    净资产 ≤ 0（资不抵债）→ NaN：负分母会让「亏损但净资产为负」的票在比率上
+    翻正，得到一个假的「高盈利」。分子为负（真亏损）**保留**——那是低盈利暴露的
+    真实取值，FF5 的 RMW 多空腿本来就靠它。
+    """
+    p = np.asarray(deducted_net_profit_ttm, dtype=np.float64)
+    be = np.asarray(book_equity, dtype=np.float64)
+    return np.where(be > 0, p / np.where(be > 0, be, 1.0), np.nan)
+
+
+def cma_exposure(capex_ttm: np.ndarray, total_assets: np.ndarray) -> np.ndarray:
+    """``−资本开支TTM / 总资产``（用户指定口径；负号使高暴露 = 投资保守，同 FF5 CMA 方向）。
+
+    学术 FF5 用资本开支的**增速**；这里按用户要求改用强度（水平比值）——
+    增速对低基数公司爆量级、对一次性大额投资过度敏感，水平比值稳健得多。
+    总资产 ≤ 0 → NaN。
+    """
+    cx = np.asarray(capex_ttm, dtype=np.float64)
+    ta = np.asarray(total_assets, dtype=np.float64)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        out = -cx / np.where(ta > 0, ta, np.nan)
+    return np.where(np.isfinite(out), out, np.nan)
+
+
 def descriptors_from_panels(
     panels: dict[str, np.ndarray],
     bench_ret: np.ndarray,
 ) -> dict[str, np.ndarray]:
-    """把原始数据面板拼成 10 个风格描述子（**未标准化**，标准化见 :func:`standardize_pipeline`）。
+    """把原始数据面板拼成风格描述子（**未标准化**，标准化见 :func:`standardize_pipeline`）。
 
     Args:
         panels: ``total_mv / float_mv / pb / net_profit_ttm / revenue_ttm /
             circulating_capital / volume / close`` 与 ``long_term_debt``，
             全部是 (T, N) 面板（N 为股票，列顺序在所有面板间一致）。
+            另有两组**可选**财务面板：``deducted_net_profit_ttm + book_equity``（出 rmw）
+            与 ``capex_ttm + total_assets``（出 cma）——缺任一键则该风格整体不出，
+            返回值退化为 10 风格（老数据/老测试路径不受影响）。
         bench_ret: 长度 T 的指数日收益（与面板日期对齐）。
     """
     close = panels["close"]
@@ -409,6 +449,10 @@ def descriptors_from_panels(
         "growth": growth(panels["revenue_ttm"], panels["net_profit_ttm"]),
         "leverage": leverage(total_mv, panels["long_term_debt"]),
     }
+    if "deducted_net_profit_ttm" in panels and "book_equity" in panels:
+        raw["rmw"] = rmw_exposure(panels["deducted_net_profit_ttm"], panels["book_equity"])
+    if "capex_ttm" in panels and "total_assets" in panels:
+        raw["cma"] = cma_exposure(panels["capex_ttm"], panels["total_assets"])
     # 面板前 252 行没有完整的回看窗口。不遮蔽的话：momentum 用 0 补缺失（得到一个
     # 「标签写 252 日、实际只有几十日」的数）、beta/residvol 靠覆盖率判据在 t≈150 就出数、
     # liquidity 只剩 21/63 日分量 —— 三者都与标签口径不符，且与后面的值不可比。
@@ -453,7 +497,7 @@ def size_residual_corr(exposures: dict[str, np.ndarray]) -> dict[str, float | No
     取不到任何有效截面（全 NaN）时给 ``None``，**不给 0**（0 会被读成「完全正交」）。"""
     size = np.asarray(exposures["size"], dtype=np.float64)
     out: dict[str, float | None] = {}
-    for k in STYLE_NAMES:
+    for k in (s for s in STYLE_NAMES if s in exposures):
         v = np.asarray(exposures[k], dtype=np.float64)
         ok = np.isfinite(v) & np.isfinite(size)
         n = np.maximum(ok.sum(axis=1), 1)
@@ -477,7 +521,7 @@ def pure_factor_returns(
     fwd_ret: np.ndarray,
     weights: np.ndarray,
 ) -> tuple[np.ndarray, dict[str, np.ndarray]]:
-    """横截面 WLS 解 ``r = Σ X_k f_k + Σ D_j d_j + ε``，返回 (T, 10) 的纯因子收益。
+    """横截面 WLS 解 ``r = Σ X_k f_k + Σ D_j d_j + ε``，返回 (T, K) 的纯因子收益。
 
     权重 = ``√clip(float_mv)``。行业哑变量与截距共线（哑变量和为 1），用
     ``lstsq`` 的 SVD 最小范数解处理，不手删基准组（删哪一组是任意的，结果不可比）。
@@ -486,12 +530,16 @@ def pure_factor_returns(
     让「纯」因子收益里混进填充值，而填充的正是缺失最严重的股票。剔除比例写入
     ``returns.parquet`` 的 ``n_used`` / ``n_universe`` 两列备查。
 
+    解的风格集 = ``exposures`` 实际含有的 :data:`STYLE_NAMES` 子集：财务面板缺失时
+    rmw/cma 不在字典里，模型就退化为 10 风格（而不是把整列 NaN 塞进回归 ——
+    那会把**每一天**的样本全部剔空，产出整段空区间）。
+
     Returns:
-        ``(pure, diag)``：``pure`` 是 (T, 10) 的纯因子收益（样本不足的日全 NaN）；
+        ``(pure, diag)``：``pure`` 是 (T, K) 的纯因子收益（样本不足的日全 NaN）；
         ``diag`` 含逐日 ``n_used`` / ``n_universe``，用于把「剔除比例」写进产物备查。
     """
     T = _first_shape(exposures)
-    styles = list(STYLE_NAMES)
+    styles = [s for s in STYLE_NAMES if s in exposures]
     codes = np.asarray(list(ind_codes), dtype=object)
     out = np.full((T, len(styles)), np.nan)
     used = np.zeros(T, dtype=int)
@@ -502,7 +550,7 @@ def pure_factor_returns(
             out[t] = f
         used[t] = n_used
         universe[t] = n_uni
-    return out, {"n_used": used, "n_universe": universe}
+    return out, {"n_used": used, "n_universe": universe, "styles": styles}
 
 
 def _first_shape(exposures: dict[str, np.ndarray]) -> int:
@@ -549,6 +597,8 @@ STYLE_LABELS: dict[str, str] = {
     "earningsyield": "盈利收益",
     "growth": "成长",
     "leverage": "杠杆",
+    "rmw": "扣非ROE",
+    "cma": "投资保守",
 }
 """风格中文名（前端表头用）。与 :data:`STYLE_NAMES` 必须同键 —— 缺一个就
 在页面显示成英文标识，故由 :func:`label_of` 兜底而不是直接下标。"""

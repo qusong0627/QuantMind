@@ -3,8 +3,8 @@
 产物落在 ``5_technical_derived/style_factors/``（经 ``quantdb_paths`` 解析）：:
 
     style_factors/
-      exposures/dt=YYYYMMDD/data.parquet    # symbol + 10 个风格暴露（float32，已标准化）
-      returns.parquet                       # dt,horizon,n_used,n_universe + 10 个纯因子收益
+      exposures/dt=YYYYMMDD/data.parquet    # symbol + 12 个风格暴露（float32，已标准化）
+      returns.parquet                       # dt,horizon,n_used,n_universe + 12 个纯因子收益
       meta.json                             # 覆盖率、口径假设、残差 size 相关、单位实测记录
 
 ``build_factor_report.py`` 的 ``--style-dir`` 指向 ``style_factors/exposures``（默认自动探测
@@ -12,12 +12,18 @@
 
 ## 口径
 
-十个风格的定义、标准化流水线、NaN 纪律**全在** ``factor_report/style_model.py``，
+十二个风格的定义、标准化流水线、NaN 纪律**全在** ``factor_report/style_model.py``，
 本脚本只负责取数与落盘。这样单测可以对着纯函数写已知答案，不必搭数据环境。
 
-**爬坡段**：面板从 ``--start`` 起算，其前 252 行没有完整回看窗口 → 四个窗口型风格
+**爬坡段（一）**：面板从 ``--start`` 起算，其前 252 行没有完整回看窗口 → 四个窗口型风格
 （beta/momentum/residvol/liquidity）在该段一律 NaN（口径见 ``style_model.WINDOW_DESCRIPTORS``）。
 故报告窗口要从 ``--start`` 往后至少 252 个交易日 —— 建 2016 起、报 2018 起即满足。
+
+**爬坡段（二）**：rmw/cma 的分子是四季 TTM，而 QuantDB 财务表从 2016Q1 起收录
+（逐票还更晚）→ 完整四季要等到 2016 年报公告（约 2017-04）才出现。故纯因子收益的
+有效起点从「建 2016」时的 2017-01 顺延到 2017Q2；报告窗口取 2018+ 完全不受影响。
+WLS 的「存在缺失即整只剔除」会把这段的 n_used 压到 0（逐日 n_used/n_universe 已落盘备查），
+这是**有意**的诚实行为：不拿规则外的插值去凑一整段风格收益。
 
 ## 单位（2026-09-19 实测，勿凭印象改）
 
@@ -119,15 +125,78 @@ def load_panels(dates: list[str], symbols: np.ndarray) -> dict[str, np.ndarray]:
     return panels
 
 
-def load_debt_pit(dates: list[str], symbols: np.ndarray) -> np.ndarray:
-    """长期负债面板（PIT）：``long_term_loans + bonds_payable``，按 ``m_anntime ≤ dt`` 取最近一期。
+def pit_align(ann_sorted: np.ndarray, val_sorted: np.ndarray, date_int: np.ndarray) -> np.ndarray:
+    """按公告日的 PIT 对齐：每个 dt 取「公告日 ≤ dt 的最近一期」的值（无 → NaN）。
+
+    ``ann_sorted`` 必须已按公告日升序 —— 同日内多期取报告期最晚的那条
+    （``side="right"`` 落在同值末尾），重述公告因此稳定地覆盖原值。
+    """
+    pos = np.searchsorted(ann_sorted, date_int, side="right") - 1
+    out = np.full(date_int.shape, np.nan)
+    valid = pos >= 0
+    out[valid] = val_sorted[pos[valid]]
+    return out
+
+
+def ttm_from_reports(timetags: np.ndarray, values: np.ndarray, *, cumulative: bool) -> np.ndarray:
+    """按报告期序列算「每个报告日的 TTM」，不足四季 / 季度不连续 / 值缺失 → NaN。
+
+    ``cumulative=False``（income 实测为**单季**值）：直接滚动四季求和。
+    ``cumulative=True``（cashflow 实测为**年初至今累计**）：先差分还原单季
+    （Q1 即累计值的年初重置点，原样取用），再滚动四季求和。
+
+    语义实测（2026-09-22，勿凭印象改）：income.revenue 逐季不单调（单季），
+    cashflow.cash_pay_acq_const_fiolta 年内单调上升、跨年重置（累计），
+    且 600036 的 income 扣非四季和 ≈ valuation.net_profit_ttm（比值 0.8~1.1）。
+    """
+    tt = np.asarray(timetags, dtype=np.int64).ravel()
+    v = np.asarray(values, dtype=np.float64).ravel()
+    n = tt.size
+    out = np.full(n, np.nan)
+    if n == 0:
+        return out
+    qidx = (tt // 100 % 100 - 1) // 3                 # 0..3（报告月份 → 季度序号）
+    ordinal = tt // 10000 * 4 + qidx                  # 相邻季度相差 1
+    adjacent = np.zeros(n, dtype=bool)
+    adjacent[1:] = (ordinal[1:] - ordinal[:-1]) == 1
+    if cumulative:
+        # Q1 是累计值的年初重置点（当日披露值即单季，**优先于差分**）；非相邻上一期无法差分 → NaN
+        prev_v = np.concatenate([[np.nan], v[:-1]])
+        q = np.where(qidx == 0, v, np.where(adjacent, v - prev_v, np.nan))
+    else:
+        q = v.copy()
+    # 连续四季（且值齐全）才出 TTM：中间缺一期就整段作废，不用「有多少算多少」
+    run = np.zeros(n, dtype=np.int64)
+    for i in range(n):
+        if not np.isfinite(q[i]):
+            continue
+        run[i] = run[i - 1] + 1 if (i > 0 and adjacent[i] and run[i - 1] > 0) else 1
+        if run[i] >= 4:
+            out[i] = q[i] + q[i - 1] + q[i - 2] + q[i - 3]
+    return out
+
+
+BALANCE_COLS = ("total_equity", "tot_assets")
+FLOW_SOURCES = {
+    # 面板键 → (子目录, 列名, 是否年初至今累计)
+    "deducted_net_profit_ttm": ("income", "deducted_net_profit", False),
+    "capex_ttm": ("cashflow", "cash_pay_acq_const_fiolta", True),
+}
+
+
+def load_balance_pit(dates: list[str], symbols: np.ndarray) -> dict[str, np.ndarray]:
+    """资产负债表面板（PIT）：长期负债 + 净资产 + 总资产，按 ``m_anntime ≤ dt`` 取最近一期。
 
     用公告日而非报告期：用报告期会让 3 月就看到年报数据（前视偏差），
-    这是财务数据接入最经典的一类错。
+    这是财务数据接入最经典的一类错。三列共用一次读盘（单票只读一遍 balance）。
+
+    Returns:
+        ``{"long_term_debt": (T,N), "book_equity": (T,N), "total_assets": (T,N)}``
     """
     bal_dir = resolve_quantdb_subdir("3_financial_data", "balance")
     date_int = np.array([int(d) for d in dates], dtype=np.int64)
-    out = np.full((len(dates), len(symbols)), np.nan)
+    cols = ("long_term_loans", "bonds_payable", *BALANCE_COLS)
+    out = {k: np.full((len(dates), len(symbols)), np.nan) for k in ("long_term_debt", "book_equity", "total_assets")}
     t0 = time.time()
     hit = 0
     for j, sym in enumerate(symbols):
@@ -135,27 +204,70 @@ def load_debt_pit(dates: list[str], symbols: np.ndarray) -> np.ndarray:
         if not path.exists():
             continue
         try:
-            df = pd.read_parquet(path, columns=["m_anntime", "long_term_loans", "bonds_payable"])
+            df = pd.read_parquet(path, columns=["m_anntime", *cols])
         except Exception as e:  # noqa: BLE001 — 单票损坏不该中断全量构建
             log.debug("balance 读取失败 %s: %s", sym, e)
             continue
         ann = pd.to_numeric(df["m_anntime"], errors="coerce")
-        ld = pd.to_numeric(df["long_term_loans"], errors="coerce").fillna(0.0) + pd.to_numeric(
-            df["bonds_payable"], errors="coerce"
-        ).fillna(0.0)
         ok = ann.notna().to_numpy()
         if not ok.any():
             continue
         order = np.argsort(ann.to_numpy()[ok])
         ann_s = ann.to_numpy()[ok][order]
-        ld_s = ld.to_numpy()[ok][order]
-        pos = np.searchsorted(ann_s, date_int, side="right") - 1
-        valid = pos >= 0
-        out[valid, j] = ld_s[pos[valid]]
+        ld = pd.to_numeric(df["long_term_loans"], errors="coerce").fillna(0.0) + pd.to_numeric(
+            df["bonds_payable"], errors="coerce"
+        ).fillna(0.0)
+        series = {
+            "long_term_debt": ld,
+            "book_equity": pd.to_numeric(df["total_equity"], errors="coerce"),
+            "total_assets": pd.to_numeric(df["tot_assets"], errors="coerce"),
+        }
+        for key, s in series.items():
+            out[key][:, j] = pit_align(ann_s, s.to_numpy()[ok][order], date_int)
         hit += 1
         if (j + 1) % 1000 == 0:
-            log.info("负债面板 %d/%d（%.0fs）", j + 1, len(symbols), time.time() - t0)
-    log.info("负债面板完成：%d/%d 只取到（%.0fs）", hit, len(symbols), time.time() - t0)
+            log.info("资产负债表面板 %d/%d（%.0fs）", j + 1, len(symbols), time.time() - t0)
+    log.info("资产负债表面板完成：%d/%d 只取到（%.0fs）", hit, len(symbols), time.time() - t0)
+    return out
+
+
+def load_flow_pit(dates: list[str], symbols: np.ndarray, panel_key: str) -> np.ndarray:
+    """利润/现金流面板（PIT）：把单票的季度序列转成 TTM，再按公告日对齐到交易日。
+
+    语义与差分规则见 :func:`ttm_from_reports`（income 单季、cashflow 累计）。
+    """
+    subdir, col, cumulative = FLOW_SOURCES[panel_key]
+    src_dir = resolve_quantdb_subdir("3_financial_data", subdir)
+    date_int = np.array([int(d) for d in dates], dtype=np.int64)
+    out = np.full((len(dates), len(symbols)), np.nan)
+    t0 = time.time()
+    hit = 0
+    for j, sym in enumerate(symbols):
+        path = src_dir / f"{sym}.parquet"
+        if not path.exists():
+            continue
+        try:
+            df = pd.read_parquet(path, columns=["m_anntime", "m_timetag", col])
+        except Exception as e:  # noqa: BLE001 — 单票损坏不该中断全量构建
+            log.debug("%s 读取失败 %s: %s", subdir, sym, e)
+            continue
+        ann = pd.to_numeric(df["m_anntime"], errors="coerce")
+        tt = pd.to_numeric(df["m_timetag"], errors="coerce")
+        val = pd.to_numeric(df[col], errors="coerce")
+        ok = (ann.notna() & tt.notna()).to_numpy()
+        if not ok.any():
+            continue
+        # TTM 按报告期顺序算 → 再按公告日排序做 PIT（重述公告 = 更晚的公告日，自然覆盖）
+        tt_a, val_a = tt.to_numpy()[ok], val.to_numpy()[ok]
+        by_period = np.argsort(tt_a, kind="stable")
+        ttm = ttm_from_reports(tt_a[by_period], val_a[by_period], cumulative=cumulative)
+        ann_a = ann.to_numpy()[ok]
+        by_ann = np.argsort(ann_a, kind="stable")
+        out[:, j] = pit_align(ann_a[by_ann], ttm[by_period][by_ann], date_int)
+        hit += 1
+        if (j + 1) % 1000 == 0:
+            log.info("%s TTM 面板 %d/%d（%.0fs）", subdir, j + 1, len(symbols), time.time() - t0)
+    log.info("%s TTM 面板完成：%d/%d 只取到（%.0fs）", subdir, hit, len(symbols), time.time() - t0)
     return out
 
 
@@ -241,7 +353,7 @@ def write_returns(out_dir: Path, dates: list[str], horizons, panels, exposures, 
         pure, diag = SM.pure_factor_returns(exposures, codes, fwd, weight)
         frames.append(pd.DataFrame({"dt": dates, "horizon": h, **{
             "n_used": diag["n_used"], "n_universe": diag["n_universe"],
-            **{k: pure[:, j] for j, k in enumerate(SM.STYLE_NAMES)},
+            **{k: pure[:, j] for j, k in enumerate(diag["styles"])},
         }}))
         stats[h] = {
             "days": int(np.isfinite(pure).any(axis=1).sum()),
@@ -274,7 +386,7 @@ def build_meta(dates, symbols, exposures, coverage, codes, elapsed) -> dict:
         "range": [dates[0], dates[-1]] if dates else [],
         "n_days": len(dates),
         "n_symbols": len(symbols),
-        "styles": list(SM.STYLE_NAMES),
+        "styles": list(exposures),
         "size_orthogonal_styles": list(SM.SIZE_ORTHOGONAL_STYLES),
         "size_corr_residual": SM.size_residual_corr(exposures),
         "coverage": by_style,
@@ -288,6 +400,13 @@ def build_meta(dates, symbols, exposures, coverage, codes, elapsed) -> dict:
             "min_window_fraction": SM.MIN_WINDOW_FRACTION,
             "residvol_weights": dict(SM.RESIDVOL_WEIGHTS),
             "liquidity_windows": {str(w): f for w, f in SM.LIQUIDITY_WINDOWS},
+            "rmw": "扣非净利TTM / 净资产（balance.total_equity，PIT 最近一期公告）",
+            "cma": "−资本开支TTM / 总资产（负号：高暴露 = 投资保守），非 FF5 原版的增速口径",
+            "flow_ttm": {
+                "income.deducted_net_profit": "单季值直接滚动四季求和（实测非累计）",
+                "cashflow.cash_pay_acq_const_fiolta": "年初至今累计，先差分还原单季再滚动四季",
+                "rule": "四季必须连续且值齐全，否则该报告期 TTM 为 NaN",
+            },
         },
         "units_verified": "valuation:元/股; daily_forward:volume=股; balance:元（2026-09-19 实测）",
         "caveat": "自算 CNE5 式口径，与商业 Barra 数据不可比（Beta 无贝叶斯收缩、Growth 用 1 年 TTM 同比）",
@@ -324,7 +443,9 @@ def main() -> int:
     log.info("区间 %s ~ %s：%d 个交易日 × %d 只股票", dates[0], dates[-1], len(dates), len(symbols))
 
     panels = load_panels(dates, symbols)
-    panels["long_term_debt"] = load_debt_pit(dates, symbols)
+    panels.update(load_balance_pit(dates, symbols))
+    for key in FLOW_SOURCES:
+        panels[key] = load_flow_pit(dates, symbols, key)
     bench = load_bench_returns(dates)
     codes = industry_codes(symbols)
 

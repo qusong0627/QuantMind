@@ -1,10 +1,10 @@
 /**
- * 风格相关性页签：Barra 十大风格（**自算 CNE5 式口径**）。
+ * 风格相关性页签：Barra 风格（**自算 CNE5 式口径**，风格清单随后端 STYLE_NAMES）。
  *
  * 回答两个问题：
  *   1. 这个因子到底在赌什么风格 —— 相关性表 / 排序条形 / 雷达 / 逐日时序；
  *   2. 它的超额是「真本事」还是「风格 beta」—— 把多空日收益与超额日收益
- *      分别对十大风格**纯因子收益**做时序回归，看 α 的 t 值。
+ *      分别对风格**纯因子收益**做时序回归，看 α 的 t 值。
  *
  * ⚠️ 风格产物（`build_style_factors.py`）未构建时整块降级，**不显示 0 也不留白**：
  * 「无数据」与「相关性恰好为 0」在视觉上无法区分，这是本项目已有教训。
@@ -28,22 +28,26 @@ const H = 240;
 
 /** 风格产物缺失时的兜底文案（后端通常给了更具体的原因，优先用后端的） */
 const NO_PRODUCT =
-  '风格产物未构建：需先跑 backend/scripts/build_style_factors.py 生成十大风格暴露与纯因子收益，再重跑报告构建（属于可选产物缺失，不是报错）';
+  '风格产物未构建：需先跑 backend/scripts/build_style_factors.py 生成风格暴露与纯因子收益，再重跑报告构建（属于可选产物缺失，不是报错）';
 
-/** 自算口径声明 —— 常驻，避免把本地算的风格当成商业 Barra 读数 */
-const CNE5_NOTE =
-  '本页十大风格为平台**自算的 CNE5 式口径**（规模 / 贝塔 / 动量 / 残差波动 / 非线性规模 / 账面市值比 / 流动性 / 盈利收益 / 成长 / 杠杆），由本地行情与因子库自行构建，**不与商业 Barra（CNE5 / CNE6）数据完全可比**，仅用于内部横向比较与归因解读。';
+/** 自算口径声明 —— 常驻，避免把本地算的风格当成商业 Barra 读数。
+ *  风格清单由后端 `style_block.styles` 给（STYLE_NAMES 的顺序），前端不再自持一份。 */
+const CNE5_NOTE = (styleList: string): string =>
+  `本页风格为平台**自算的 CNE5 式口径**（${styleList}），由本地行情与因子库自行构建，**不与商业 Barra（CNE5 / CNE6）数据完全可比**，仅用于内部横向比较与归因解读。`;
+/** 后端未给风格目录时的兜底枚举（正常路径读 st.styles；两者都缺才用） */
+const STYLE_LIST_FALLBACK =
+  '规模 / 贝塔 / 动量 / 残差波动 / 非线性规模 / 账面市值比 / 流动性 / 盈利收益 / 成长 / 杠杆 / 扣非ROE / 投资保守';
 
 const LS_TARGET =
-  '回归对象：**多空组合日收益**（多头组 − 空头组）对十大风格**纯因子收益**的时序回归 —— 直接回答「这份超额是真本事还是风格 beta」；α 是剥离风格后剩下的日度超额。';
+  '回归对象：**多空组合日收益**（多头组 − 空头组）对风格**纯因子收益**的时序回归 —— 直接回答「这份超额是真本事还是风格 beta」；α 是剥离风格后剩下的日度超额。';
 const EXCESS_TARGET =
-  '回归对象：**相对基准的日度超额收益**（多头腿 − 基准指数）对十大风格**纯因子收益**的时序回归，口径与左图一致，仅被解释变量不同。';
+  '回归对象：**相对基准的日度超额收益**（多头腿 − 基准指数）对风格**纯因子收益**的时序回归，口径与左图一致，仅被解释变量不同。';
 const EXCESS_ATTR_REASON =
   '该快照未提供超额归因：基准收益不可用（基准取数失败或未选基准），或与风格收益的日期交集不足以回归。';
 
 /** 相关 / β 配色：涨红跌绿；null 走中性灰（不可用 ≠ 0，不能画成红色） */
 const valColor = (v: number | null): string => (v == null ? NEUTRAL : bySign(v));
-/** 时序折线的色相轮转：十条约挤在一张图，靠色相分离而非图例文字 */
+/** 时序折线的色相轮转：十几条线挤在一张图，靠色相分离而非图例文字 */
 const styleHue = (i: number): string => `hsl(${(i * 36) % 360}, 60%, 50%)`;
 const isNum = (v: number | null | undefined): v is number => v != null && Number.isFinite(v);
 
@@ -55,7 +59,7 @@ function alphaVerdict(t: number | null): { text: string; significant: boolean } 
   return {
     significant: sig,
     text: sig
-      ? `t(α) = ${s}，|t| > 2：α 显著非零 —— 剥离十大风格 beta 后仍有超额，这部分不是靠风格暴露赚来的。`
+      ? `t(α) = ${s}，|t| > 2：α 显著非零 —— 剥离风格 beta 后仍有超额，这部分不是靠风格暴露赚来的。`
       : `t(α) = ${s}，|t| ≤ 2：α 与 0 无显著差异 —— 收益更可能由风格暴露（β）解释，不能算独立本事。`,
   };
 }
@@ -73,7 +77,7 @@ const Stat: React.FC<{ label: string; value: string; highlight?: boolean; title?
   </div>
 );
 
-/** 十大风格暴露表：顺序沿用后端的 |均值相关| 降序，前端不再重排 */
+/** 风格暴露表：顺序沿用后端的 |均值相关| 降序，前端不再重排 */
 const ExposureTable: React.FC<{ rows: StyleExposureRow[] }> = ({ rows }) => (
   <div className="h-full min-h-0 overflow-auto">
     <table className="w-full text-[11px]">
@@ -154,7 +158,7 @@ const ExcessCorrTable: React.FC<{ rows: StyleBlock['excess_corr']; reason?: stri
 };
 
 /**
- * 归因回归体：α / t / R² / n + 十个风格的 β 与 t。
+ * 归因回归体：α / t / R² / n + 各风格的 β 与 t。
  * 只出内容不出卡壳 —— 外层由调用方用 ChartShell 包（嵌套两层卡会变成双边框）。
  */
 const AttributionBody: React.FC<{
@@ -179,7 +183,7 @@ const AttributionBody: React.FC<{
           highlight={isNum(attr.t_alpha) && Math.abs(attr.t_alpha) > 2} />
         {/* R² 用无符号格式：它天然落在 [0,1]，带 + 号会读成「收益」 */}
         <Stat label="R²（被风格解释的比例）" value={fmtNum(attr.r_squared, 3, false)}
-          title="日度收益的方差中，能被十大风格纯因子收益线性解释的占比。R² 越高，越说明收益来自风格暴露而非独立 alpha。" />
+          title="日度收益的方差中，能被风格纯因子收益线性解释的占比。R² 越高，越说明收益来自风格暴露而非独立 alpha。" />
         <Stat label="样本天数 n" value={fmtInt(attr.n)} />
       </div>
 
@@ -213,9 +217,10 @@ const AttributionBody: React.FC<{
 );
 
 /** 口径声明条：自算 CNE5 与商业 Barra 不可比，这条必须常驻 */
-const StyleNotice: React.FC = () => (
+const StyleNotice: React.FC<{ styles?: StyleBlock['styles'] }> = ({ styles }) => (
   <div className="rounded-2xl border border-indigo-100 bg-indigo-50/50 px-3 py-2 text-[10px] leading-relaxed text-slate-600">
-    <span className="font-bold text-indigo-700">口径声明：</span>{CNE5_NOTE}
+    <span className="font-bold text-indigo-700">口径声明：</span>
+    {CNE5_NOTE(styles?.length ? styles.map((s) => s.label).join(' / ') : STYLE_LIST_FALLBACK)}
   </div>
 );
 
@@ -335,11 +340,11 @@ export const StyleTab: React.FC<Props> = ({ blocks, definitions }) => {
 
   return (
     <div className="flex flex-col gap-3 min-h-0">
-      <StyleNotice />
+      <StyleNotice styles={st.styles} />
 
       <div className="grid grid-cols-2 gap-3">
-        <ChartShell title="Barra 十大风格相关性" hint={`${exposures.length} 项${thinCount ? ` · ${thinCount} 项天数不足` : ''}`}
-          info={def('style_corr', '因子值与自算 Barra CNE5 式十大风格暴露的横截面秩相关（逐日均值）。')}>
+        <ChartShell title="Barra 风格相关性" hint={`${exposures.length} 项${thinCount ? ` · ${thinCount} 项天数不足` : ''}`}
+          info={def('style_corr', '因子值与自算 Barra CNE5 式风格暴露的横截面秩相关（逐日均值）。')}>
           {exposures.length
             ? <div className="h-[240px] min-h-0 min-w-0"><ExposureTable rows={exposures} /></div>
             : <Degraded reason="该快照没有风格暴露行（exposures 为空），不显示空表。" />}
@@ -378,7 +383,7 @@ export const StyleTab: React.FC<Props> = ({ blocks, definitions }) => {
 
       <div className="grid grid-cols-2 gap-3">
         <ChartShell title="风格归因回归" hint={attrHint}
-          info={def('style_attribution', '把日收益对十大风格纯因子收益做时序回归 y = α + Σβ·f + ε：α 是风格之外的部分，t(α) 看它是否显著非零。')}>
+          info={def('style_attribution', '把日收益对风格纯因子收益做时序回归 y = α + Σβ·f + ε：α 是风格之外的部分，t(α) 看它是否显著非零。')}>
           <div className="h-[320px] min-h-0 min-w-0">
             <AttributionBody target={LS_TARGET} attr={st.attribution ?? null}
               reason={st.attribution_reason || '风格归因未构建：风格纯因子收益产物缺失，或与报告日期的交集不足以回归。'}

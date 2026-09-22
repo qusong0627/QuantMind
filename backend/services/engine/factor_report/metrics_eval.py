@@ -467,7 +467,7 @@ def style_attribution(
         "betas": betas,
         "r_squared": _none_if_nan(r2),
         "n": int(y.size),
-        "note": "α 是剥离十大风格纯因子收益后的日度超额；α 的 t 值看它是否显著非零。",
+        "note": "α 是剥离风格纯因子收益后的日度超额；α 的 t 值看它是否显著非零。",
     }
 
 
