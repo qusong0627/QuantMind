@@ -821,16 +821,17 @@ export default function App() {
                   </Route>
 
                   {/* 主应用路由 - 仪表盘等。
-                      实盘节点形态下这个兜底改成回 QuantBot：该形态只有
-                      QuantBot 与实盘交易两栏，根路径和已裁掉的栏目路径
-                      （/dashboard、/backtest…）都不该落到仪表盘上。
-                      显式注册的路由（/live、/trading、/admin…）不受影响 ——
-                      React Router 里它们比 "/*" 更具体，仍旧可达（栏目只是
-                      不在 Dock 里，页面内的深链不会断）。 */}
+                      实盘节点形态下这个兜底改成回实盘交易页：该形态没有底部导航，
+                      整个界面就是那一栏（QuantBot 是它侧栏里「设置」下面的一栏），根路径和已裁掉的
+                      栏目路径（/dashboard、/backtest…）都不该落到仪表盘上。
+                      公开仓里 LocalLivePage 恒为 null（features/local-live 不随包发布），
+                      那时退回 /quantbot —— 否则会跳到一个根本没注册的路由上打转。
+                      显式注册的路由（/live、/trading、/admin…）不受影响 —— React Router
+                      里它们比 "/*" 更具体，仍旧可达（页面内深链不会断）。 */}
                   <Route
                     path="/*"
                     element={LIVE_NODE_ONLY ? (
-                      <Navigate to="/quantbot" replace />
+                      <Navigate to={LocalLivePage ? '/live' : '/quantbot'} replace />
                     ) : (
                       <motion.div
                         key={tab}

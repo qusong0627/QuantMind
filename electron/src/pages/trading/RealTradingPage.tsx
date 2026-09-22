@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import HelpCenterLink from '../../components/common/HelpCenterLink';
+import { LIVE_NODE_ONLY } from '../../config/liveNodeFlags';
 import { Button, Collapse, Modal, Spin, Tag, message } from 'antd';
 import TopBar from './components/TopBar';
 import TopologyConsole from './tabs/StrategyConsole/TopologyConsole';
@@ -114,6 +115,14 @@ export interface RealTradingTabContext {
 /** 追加到侧栏末尾的页签；`render` 每次渲染都会被调用，返回该栏内容。 */
 export interface RealTradingExtraTab extends ConsoleTab {
     render: (ctx: RealTradingTabContext) => React.ReactNode;
+    /**
+     * 切走后**只隐藏不卸载**（缺省 false ＝切走即卸载，与基础栏同规矩）。
+     *
+     * 给内嵌长连接的栏用：iframe 里的 SPA 靠自己的 WebSocket 推流，卸了再挂回来
+     * 等于每次切栏都断一次流、重连一次。代价是**开页即挂载**（不等第一次点击），
+     * 所以只有确实要保流的栏才开；普通面板留缺省，草稿/轮询不留在后台空转。
+     */
+    keepMounted?: boolean;
 }
 
 export interface RealTradingPageProps {
@@ -684,7 +693,11 @@ const RealTradingPage: React.FC<RealTradingPageProps> = ({ forcedTradingMode, ex
                                 </button>
                             </div>
                             )}
-                            <HelpCenterLink className="w-full text-xs font-semibold tracking-wide" />
+                            {/* 实盘节点形态不挂帮助中心：那台机器通常没有外网，
+                                点开只有浏览器错误页。 */}
+                            {!LIVE_NODE_ONLY && (
+                                <HelpCenterLink className="w-full text-xs font-semibold tracking-wide" />
+                            )}
                             {/* T-FE-17 免责页脚自左侧底部移除（2026-09-17）：改由顶栏「本地沙箱」后的顶部免责小字承载 */}
                         </div>
                     </div>
@@ -757,12 +770,19 @@ const RealTradingPage: React.FC<RealTradingPageProps> = ({ forcedTradingMode, ex
                     )}
                     {activeTab === 'replay' && <ReplayPage />}
                     {/* 追加页签内容。按 id 命中才挂载：与基础栏同规矩，切走即卸载，
-                        面板内的草稿/轮询不留在后台空转。无追加页签时这段不产出节点。 */}
-                    {extraTabs?.map((tab) =>
-                        activeTab === tab.id ? (
-                            <React.Fragment key={tab.id}>{tab.render(tabContext)}</React.Fragment>
-                        ) : null,
-                    )}
+                        面板内的草稿/轮询不留在后台空转；开了 `keepMounted` 的栏换成
+                        `hidden`，保住里面的长连接（见 RealTradingExtraTab.keepMounted）。
+                        包壳走 `contents`：不生成盒子，与逐位裸渲染等价，别改成 `block`。
+                        无追加页签时这段不产出节点。 */}
+                    {extraTabs?.map((tab) => {
+                        const isActive = activeTab === tab.id;
+                        if (!isActive && !tab.keepMounted) return null;
+                        return (
+                            <div key={tab.id} className={isActive ? 'contents' : 'hidden'}>
+                                {tab.render(tabContext)}
+                            </div>
+                        );
+                    })}
                 </div>
             </div>
         </div>

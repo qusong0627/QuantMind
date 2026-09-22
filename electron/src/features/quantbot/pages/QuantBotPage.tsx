@@ -4,136 +4,41 @@
  * dsh 是项目的大脑，提供完整 AI 智能体能力：
  * 执行命令、写代码、跑回测、跑因子挖掘、获取股票数据 AI 分析、获取新闻数据等。
  *
- * 加载策略：
+ * 加载策略（地址推导与状态机在 components/QuantBotFrame.tsx）：
  * - Web 浏览器端：按当前主机名直连 8088（dsh 容器宿主映射端口，同源 SSE/WebSocket）
  * - Electron 桌面端：通过用户配置的服务器地址推导 8088；未配置时回退本机 8088
+ *
+ * 实盘节点形态下本页不再是主入口（节点没有底部导航；QuantBot 是实盘交易页侧栏里
+ * 「设置」下面的一栏，见 features/local-live/LiveTradingPage.tsx），但路由保留 ——
+ * 直接敲 /quantbot 仍可用，且与本页共用同一个 iframe 与加载状态机。
  */
 
-import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
+import React, { useState } from 'react';
 import { BookMarked, FileText } from 'lucide-react';
 import { Bot, RefreshCw, SquareTerminal, Wifi, WifiOff, ExternalLink, AlertTriangle } from 'lucide-react';
-import { isElectronEnv, SERVICE_URLS } from '../../../config/services';
+import { isElectronEnv } from '../../../config/services';
 import { LIVE_NODE_ONLY } from '../../../config/liveNodeFlags';
+import { QuantBotSurface, useQuantBotFrame } from '../components/QuantBotFrame';
 import PromptLibraryModal from '../components/PromptLibraryModal';
 import ReportsModal from '../components/ReportsModal';
 import AiIdeModal from '../components/AiIdeModal';
 import { PROMPT_LIBRARY_TOTAL } from '../components/promptLibraryModel';
 
-/** 无任何服务器配置时的兜底地址（dsh 容器宿主映射端口） */
-const QWENPAW_LOCAL_FALLBACK_URL = 'http://127.0.0.1:8088/';
-
-/** dsh 直连 Web UI 端口（quantmind-dsh 容器的宿主映射端口；前端 iframe 硬编码依赖 8088） */
-const QWENPAW_DIRECT_PORT = 8088;
-
-/**
- * 推导 dsh 直连 Web UI 地址（供“在外部浏览器打开”使用）。
- * 基于已配置的 API 网关地址（如 http://1.2.3.4:8000）取同名主机、换到 8088 端口，
- * 直接打开 dsh 容器自身托管的界面；未配置网关时回退本机。
- */
-export function getQwenPawDirectUrl(): string {
-  const gateway = SERVICE_URLS.API_GATEWAY;
-  if (!gateway) return QWENPAW_LOCAL_FALLBACK_URL;
-  try {
-    const u = new URL(gateway);
-    u.port = String(QWENPAW_DIRECT_PORT);
-    u.pathname = '/';
-    u.search = '';
-    u.hash = '';
-    return u.toString();
-  } catch {
-    return `${gateway.replace(/\/+$/, '')}:${QWENPAW_DIRECT_PORT}/`;
-  }
-}
-
-/** iframe 加载超时时间（毫秒） */
-const IFRAME_LOAD_TIMEOUT_MS = 15_000;
-
 const QuantBotPage: React.FC = () => {
-  const iframeRef = useRef<HTMLIFrameElement>(null);
-  const [iframeKey, setIframeKey] = useState<number>(0);
+  const frame = useQuantBotFrame();
   // 提示词库（示例 34 条 + 模板 24 条，合并为一个弹窗）、调研报告档案、AI-IDE 策略台，
   // 均为居中弹窗，不占 iframe 布局
   const [showPrompts, setShowPrompts] = useState(false);
   const [showReports, setShowReports] = useState(false);
   const [showAiIde, setShowAiIde] = useState(false);
-  const [loading, setLoading] = useState<boolean>(true);
-  const [connected, setConnected] = useState<boolean>(false);
-  const [timedOut, setTimedOut] = useState<boolean>(false);
-  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  const embedUrl = useMemo(() => {
-    // Electron：dsh 部署在用户配置的远端服务器，直连其 8088。
-    // 直连时 dsh SPA 自身的 /api 与 WebSocket 都走 ip:8088 同源，
-    // 实时推送可原生工作，无需网关代理及其路径重写。
-    if (isElectronEnv()) {
-      return getQwenPawDirectUrl();
-    }
-
-    // Web：dsh 部署在提供页面的同一台服务器，按当前主机名直连 8088，
-    // 避免走网关代理导致实时（WebSocket）链路不稳定。
-    if (typeof window !== 'undefined' && window.location?.hostname) {
-      return `http://${window.location.hostname}:8088/`;
-    }
-
-    return QWENPAW_LOCAL_FALLBACK_URL;
-  }, []);
-
-  const clearTimer = useCallback(() => {
-    if (timerRef.current) {
-      clearTimeout(timerRef.current);
-      timerRef.current = null;
-    }
-  }, []);
-
-  const handleReload = useCallback(() => {
-    setLoading(true);
-    setConnected(false);
-    setTimedOut(false);
-    clearTimer();
-    setIframeKey(iframeKey + 1);
-  }, [clearTimer]);
-
-  const handleOpenExternal = useCallback(() => {
-    window.open(getQwenPawDirectUrl(), '_blank');
-  }, []);
-
-  const handleIframeLoad = useCallback(() => {
-    clearTimer();
-    setLoading(false);
-    setConnected(true);
-    setTimedOut(false);
-  }, [clearTimer]);
-
-  const handleIframeError = useCallback(() => {
-    clearTimer();
-    setLoading(false);
-    setConnected(false);
-    setTimedOut(true);
-  }, [clearTimer]);
-
-  useEffect(() => {
-    setLoading(true);
-    setConnected(false);
-    setTimedOut(false);
-    clearTimer();
-
-    // 启动超时计时器：如果 iframe 在指定时间内未触发 onLoad，标记为超时
-    timerRef.current = setTimeout(() => {
-      setLoading(false);
-      setTimedOut(true);
-    }, IFRAME_LOAD_TIMEOUT_MS);
-
-    return () => {
-      clearTimer();
-    };
-  }, [iframeKey, clearTimer]);
 
   return (
-    // Electron 下顶部有 h-12 的 TitleBar 覆盖层需让位；Web 无 TitleBar，直接贴顶（此前统一 pt-12 留出 48px 空白）
+    // Electron 下顶部有 h-12 的 TitleBar 覆盖层需让位；Web 无 TitleBar，直接贴顶（此前统一 pt-12 留出 48px 空白）。
+    // 底部留白是给悬浮 Dock 让位的实体占位（padding 对 absolute 覆盖层无效）：节点形态没有 Dock，留白一并去掉。
     <div
-      className={`w-full h-full flex flex-col overflow-hidden bg-[#f8fafc] pb-[74px] px-3 sm:px-4 ${
-        isElectronEnv() ? 'pt-12' : 'pt-4'
-      }`}
+      className={`w-full h-full flex flex-col overflow-hidden bg-[#f8fafc] ${
+        LIVE_NODE_ONLY ? 'pb-0' : 'pb-[74px]'
+      } px-3 sm:px-4 ${isElectronEnv() ? 'pt-12' : 'pt-4'}`}
     >
       {/* 顶部工具栏 — 清爽融合，规避 TitleBar 遮挡 */}
       <div className="h-12 flex-shrink-0 bg-white border border-slate-200/80 rounded-t-xl px-4 flex items-center justify-between shadow-xs">
@@ -175,35 +80,35 @@ const QuantBotPage: React.FC = () => {
 
         <div className="flex items-center gap-2">
           <div className={`flex items-center gap-1.5 text-sm font-medium px-2.5 py-1 rounded-full ${
-            connected
+            frame.connected
               ? 'bg-emerald-50 text-emerald-600 border border-emerald-200/60'
-              : timedOut
+              : frame.timedOut
                 ? 'bg-rose-50 text-rose-600 border border-rose-200/60'
-                : loading
+                : frame.loading
                   ? 'bg-amber-50 text-amber-600 border border-amber-200/60'
                   : 'bg-slate-100 text-slate-500'
           }`}>
-            {connected ? (
+            {frame.connected ? (
               <Wifi className="w-3.5 h-3.5 text-emerald-500" />
-            ) : timedOut ? (
+            ) : frame.timedOut ? (
               <AlertTriangle className="w-3.5 h-3.5 text-rose-500" />
-            ) : loading ? (
+            ) : frame.loading ? (
               <div className="w-3 h-3 border-2 border-amber-500 border-t-transparent rounded-full animate-spin" />
             ) : (
               <WifiOff className="w-3.5 h-3.5 text-slate-400" />
             )}
-            <span className="text-xs">{connected ? '已连接' : timedOut ? '连接超时' : loading ? '连接中…' : '断开'}</span>
+            <span className="text-xs">{frame.connected ? '已连接' : frame.timedOut ? '连接超时' : frame.loading ? '连接中…' : '断开'}</span>
           </div>
 
           <button
-            onClick={handleOpenExternal}
+            onClick={frame.openExternal}
             className="flex items-center gap-1 rounded-md px-2.5 py-1.5 text-sm font-medium text-slate-600 hover:text-blue-600 hover:bg-slate-100 transition-colors"
             title="在外部浏览器打开"
           >
             <ExternalLink className="w-4 h-4" />
           </button>
           <button
-            onClick={handleReload}
+            onClick={frame.reload}
             className="flex items-center gap-1 rounded-md px-2.5 py-1.5 text-sm font-medium text-slate-600 hover:text-blue-600 hover:bg-slate-100 transition-colors"
             title="重新加载"
           >
@@ -212,63 +117,8 @@ const QuantBotPage: React.FC = () => {
         </div>
       </div>
 
-      {/* iframe 内容区域 — 避开底部 Dock 悬浮栏 */}
-      {/* 提示词库 / 调研报告均为顶栏按钮唤起的居中弹窗（悬浮于 iframe 之上，不占布局） */}
-
-      <div className="flex-1 relative overflow-hidden bg-white border-x border-b border-slate-200/80 rounded-b-xl shadow-xs">
-        {loading && !timedOut && (
-          <div className="absolute inset-0 z-10 flex items-center justify-center bg-white/90 backdrop-blur-xs">
-            <div className="flex flex-col items-center gap-3">
-              <div className="w-10 h-10 border-3 border-blue-500 border-t-transparent rounded-full animate-spin" />
-              <div className="text-center">
-                <p className="text-xs font-semibold text-slate-700">QuantBot 智能体加载中…</p>
-                <p className="text-[11px] text-slate-400 mt-0.5">AI Brain · Code · Backtest · Factor · Data</p>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {timedOut && !connected && (
-          <div className="absolute inset-0 z-10 flex items-center justify-center bg-white/95">
-            <div className="flex flex-col items-center gap-3.5 max-w-md text-center px-4">
-              <div className="w-12 h-12 rounded-full bg-rose-50 border border-rose-100 flex items-center justify-center">
-                <AlertTriangle className="w-6 h-6 text-rose-500" />
-              </div>
-              <div>
-                <p className="text-sm font-bold text-slate-800">QuantBot 服务未响应</p>
-                {/* 两种部署形态的启动方式不同，提示跟着形态走：容器栈里 dsh 是 compose
-                    服务；实盘 Win 节点没有 Docker，dsh 是包内 node 载荷，由回环前门
-                    quantbot_front.py 拉起。提示一条本形态不存在的命令只会让人白折腾。 */}
-                <p className="text-xs text-slate-500 mt-1.5 leading-relaxed">
-                  请确认 dsh 已经启动：
-                </p>
-                <code className="block mt-2 px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs text-emerald-600 font-mono">
-                  {LIVE_NODE_ONLY ? '双击包根目录的 start-quantbot.bat' : 'docker compose up -d dsh'}
-                </code>
-              </div>
-              <button
-                onClick={handleReload}
-                className="flex items-center gap-1.5 mt-1 px-4 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-medium transition-colors shadow-xs"
-              >
-                <RefreshCw className="w-3.5 h-3.5" />
-                重新连接
-              </button>
-            </div>
-          </div>
-        )}
-
-        <iframe
-          ref={iframeRef}
-          key={iframeKey}
-          src={embedUrl}
-          className="w-full h-full border-0"
-          title="QuantBot Agent"
-          allow="clipboard-read; clipboard-write; fullscreen; microphone; camera"
-          sandbox="allow-scripts allow-same-origin allow-forms allow-downloads allow-popups allow-popups-to-escape-sandbox allow-modals allow-presentation"
-          onLoad={handleIframeLoad}
-          onError={handleIframeError}
-        />
-      </div>
+      {/* iframe 内容区域（加载中 / 未响应两套遮罩在 QuantBotSurface 内） */}
+      <QuantBotSurface frame={frame} />
 
       {/* 提示词库（示例 + 模板合并，居中弹窗） */}
       <PromptLibraryModal open={showPrompts} onClose={() => setShowPrompts(false)} />

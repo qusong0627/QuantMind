@@ -189,6 +189,26 @@ describe('RealTradingPage 外壳接线', () => {
         expect(pane('extra-probe')).toBeNull();
     });
 
+    it('追加页签 keepMounted：开页即挂载，切走只隐藏不卸载', () => {
+        // 这条是给「iframe 里跑着 dsh」的那一栏立的（QuantBot 栏）：卸载＝断流、重来一次。
+        // 代价与收益各钉一半 —— 两侧任一被改回去，这里都要红。
+        renderPage({ extraTabs: [{ ...makeExtraTab(), keepMounted: true }] });
+
+        // 代价：还没点过它就挂上了（所以只有确实要保流的栏才配开这个开关）
+        expect(pane('extra-probe')).not.toBeNull();
+
+        clickTab('探针栏');
+        // 包壳走 contents：不生成盒子，与裸渲染等价（改成 block 会把 h-full 撑坏）
+        expect(pane('extra-probe')!.parentElement?.className).toContain('contents');
+
+        // 收益：换到基础栏后它仍在 DOM 里，只是被隐藏
+        clickTab('系统健康');
+        expect(pane('desk')).not.toBeNull();
+        const kept = pane('extra-probe');
+        expect(kept).not.toBeNull();
+        expect(kept!.parentElement?.className).toContain('hidden');
+    });
+
     it('追加页签：render 拿到当前市场与可调用的 refresh', () => {
         let seen: RealTradingTabContext | null = null;
         renderPage({
