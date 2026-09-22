@@ -243,6 +243,42 @@ async def test_trading_precheck_shadow_skips_qmt(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_trading_precheck_orchestration_none_passes_without_docker(monkeypatch, tmp_path):
+    """免容器节点（QM_ORCHESTRATION_MODE=none）：本机没有 Docker 引擎也判通过。
+
+    否则纯实盘节点会被准备度永久拦住（/start 复用同一份检测，任一项不过即
+    409），而它并不需要容器 —— 策略在本机进程内执行。故此处**故意不**
+    `_mock_k8s_ready`，把 k8s_manager 的客户端置空来模拟真实节点。
+    """
+    model_dir = tmp_path / "model_qlib"
+    model_dir.mkdir(parents=True)
+    (model_dir / "model.lgb").write_bytes(b"fake_model")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("MODELS_PRODUCTION", str(model_dir))
+    monkeypatch.setenv("STRATEGY_RUNNER_IMAGE", "quantmind-ml-runtime:latest")
+    monkeypatch.setenv("INTERNAL_CALL_SECRET", "secret")
+    monkeypatch.setenv("QM_ORCHESTRATION_MODE", "none")
+    _mock_signal_ready(monkeypatch)
+    _mock_stream_fresh(monkeypatch)
+    monkeypatch.setattr(precheck_service.k8s_manager, "api", None, raising=False)
+    monkeypatch.setattr(precheck_service.k8s_manager, "core_api", None, raising=False)
+
+    result = await run_trading_readiness_precheck(
+        _FakeDb([{"ok": 1}]),
+        mode="SHADOW",
+        redis_client=_FakeRedisClient(),
+        user_id="1001",
+        tenant_id="default",
+    )
+
+    item = next(i for i in result["items"] if i["key"] == "k8s_and_runner_ready")
+    assert item["passed"] is True
+    assert "本机不使用" in item["label"]
+    assert "模型训练" in item["detail"], "影响面必须写清楚，不能只说通过"
+    assert result["passed"] is True
+
+
+@pytest.mark.asyncio
 async def test_fetch_latest_real_account_snapshot_returns_ledger_metrics():
     row = {
                 "id": 1,

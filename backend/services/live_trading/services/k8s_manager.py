@@ -14,6 +14,39 @@ from backend.shared.auth import get_internal_call_secret
 
 logger = logging.getLogger(__name__)
 
+# 编排模式唯一读取点（env `QM_ORCHESTRATION_MODE`）。只有两种取值：
+#   docker（缺省）—— 与今天一致：容器编排就绪度按 Docker 引擎判；
+#   none          —— 免容器节点（Windows 实盘节点包）显式声明「本机不做容器编排」。
+#
+# 为什么需要 none：实盘策略执行走的是**本机进程内沙箱**
+# （real_trading_lifecycle `/start` → sandbox_manager.submit_strategy），
+# `create_deployment`/`delete_deployment` 在整个代码库里没有被任何路径调用；
+# Docker 只服务 AI-IDE 代码执行、minibt 回测与模型训练。缺省「按 Docker 判」
+# 会让一台只用实盘的机器被准备度检测永久拦在启动之外（/start 复用同一份检测，
+# 任一项不过即 409）。
+ORCHESTRATION_MODE_ENV = "QM_ORCHESTRATION_MODE"
+ORCHESTRATION_MODE_DOCKER = "docker"
+ORCHESTRATION_MODE_NONE = "none"
+
+
+def orchestration_mode() -> str:
+    """本机编排模式；未配置/取值不认识时回 docker（缺省即今天的行为）。"""
+    raw = str(os.getenv(ORCHESTRATION_MODE_ENV, "")).strip().lower()
+    if raw == ORCHESTRATION_MODE_NONE:
+        return ORCHESTRATION_MODE_NONE
+    if raw and raw != ORCHESTRATION_MODE_DOCKER:
+        logger.warning(
+            "[Orchestration] %s=%r 取值不认识（只认 docker/none），按 docker 处理",
+            ORCHESTRATION_MODE_ENV,
+            raw,
+        )
+    return ORCHESTRATION_MODE_DOCKER
+
+
+def orchestration_disabled() -> bool:
+    """本机是否显式声明不使用容器编排（免容器节点）。"""
+    return orchestration_mode() == ORCHESTRATION_MODE_NONE
+
 
 class K8sManager:
     """

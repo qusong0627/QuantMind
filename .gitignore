@@ -282,3 +282,9 @@ minibt/**/__pycache__/
 minibt/**/*.so
 minibt/build/
 .env.*
+
+# 实盘 Win 节点专用（本地，不进公开仓；与 local-live 同纪律）
+deploy/live-win/
+# 导出的实盘增量包（推理结果 + 策略的 CSV，属业务数据；CSV 已被 *.csv 覆盖，
+# 这里连 manifest.json/目录本身一起挡掉）
+deploy/portable/live-out/

@@ -25,7 +25,11 @@ services:
       retries: 5
     restart: unless-stopped
     ports:
-      - "127.0.0.1:5432:5432"
+      # 缺省只绑回环。免容器的 Windows 实盘节点要直连本机库（节点只负责交易，
+      # 不落任何数据副本）时，在 .env 里设 QM_DB_BIND=192.168.x.x —— 只暴露到
+      # 那一块网卡，不要写 0.0.0.0。跨机鉴权走密码（官方镜像的 pg_hba 已含
+      # `host all all all scram-sha-256`，无需另配）。
+      - "${QM_DB_BIND:-127.0.0.1}:5432:5432"
     networks:
       - quantmind-net
 

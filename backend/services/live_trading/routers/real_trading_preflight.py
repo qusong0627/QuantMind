@@ -17,6 +17,7 @@ from .real_trading_utils import (
     _resolve_runner_image_for_mode,
     _upsert_preflight_snapshot,
 )
+from backend.services.live_trading.services.k8s_manager import orchestration_disabled
 from backend.services.live_trading.services.signal_readiness_service import (
     signal_readiness_service,
 )
@@ -213,16 +214,26 @@ async def preflight_check(
             {"image": image, "image_source": image_source},
         )
 
-    # 6) 容器编排客户端 (Docker/K8s)
-    orchestration_required = mode in {"REAL", "SHADOW"}
-    orchestration_ok = bool(k8s_manager.api and k8s_manager.core_api)
-    orchestration_label = "Docker 引擎" if k8s_manager.mode == "docker" else "K8s 集群"
-    if orchestration_required:
+    # 6) 容器编排客户端 (Docker)
+    # 免容器节点（QM_ORCHESTRATION_MODE=none）如实判通过并说明影响面：
+    # 实盘执行走本机进程内沙箱，不需要容器；缺的是 AI-IDE / minibt / 训练。
+    if orchestration_disabled():
+        add_check(
+            "orchestration",
+            "容器编排（本机不使用）",
+            True,
+            False,
+            "QM_ORCHESTRATION_MODE=none：本机不做容器编排，"
+            "AI-IDE 代码执行 / minibt 回测 / 模型训练不可用",
+        )
+    elif mode in {"REAL", "SHADOW"}:
+        orchestration_ok = bool(k8s_manager.api and k8s_manager.core_api)
+        orchestration_label = "Docker 引擎" if k8s_manager.mode == "docker" else "K8s 集群"
         add_check(
             "orchestration",
             orchestration_label,
             orchestration_ok,
-            orchestration_required,
+            True,
             f"{orchestration_label} 客户端已就绪" if orchestration_ok else f"{orchestration_label} 客户端未初始化",
         )
 

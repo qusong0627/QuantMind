@@ -10,7 +10,10 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import redis as redis_lib
-from backend.services.live_trading.services.k8s_manager import k8s_manager
+from backend.services.live_trading.services.k8s_manager import (
+    k8s_manager,
+    orchestration_disabled,
+)
 from backend.services.live_trading.services.signal_readiness_service import (
     signal_readiness_service,
 )
@@ -564,26 +567,39 @@ async def run_trading_readiness_precheck(
         )
 
     resolved_image, image_source = _resolve_runner_image()
-    # 容器编排就绪度检测 (支持 Docker 或 K8s)
-    orchestration_ready = bool(k8s_manager.api and k8s_manager.core_api)
-    orchestration_label = (
-        "容器编排服务 (Docker) 与执行镜像已就绪"
-        if k8s_manager.mode == "docker"
-        else "Kubernetes 服务与执行镜像已就绪"
-    )
-
-    checks.append(
-        _build_check(
-            "k8s_and_runner_ready",
-            orchestration_label,
-            orchestration_ready and bool(resolved_image),
-            (
-                f"orchestration_mode={k8s_manager.mode}, "
-                f"orchestration_ready={orchestration_ready}, "
-                f"runner_image={resolved_image}, image_source={image_source}"
-            ),
+    # 容器编排就绪度检测 (Docker)。免容器节点（QM_ORCHESTRATION_MODE=none）
+    # 如实判「通过」并写明影响面：实盘策略在本机进程内执行，不需要容器；
+    # 该节点上不能用的是 AI-IDE 代码执行 / minibt 回测 / 模型训练。
+    if orchestration_disabled():
+        checks.append(
+            _build_check(
+                "k8s_and_runner_ready",
+                "容器编排（本机不使用）",
+                True,
+                "QM_ORCHESTRATION_MODE=none：本机不做容器编排，策略在本机进程内执行；"
+                "AI-IDE 代码执行 / minibt 回测 / 模型训练等需要容器的功能不可用",
+            )
         )
-    )
+    else:
+        orchestration_ready = bool(k8s_manager.api and k8s_manager.core_api)
+        orchestration_label = (
+            "容器编排服务 (Docker) 与执行镜像已就绪"
+            if k8s_manager.mode == "docker"
+            else "Kubernetes 服务与执行镜像已就绪"
+        )
+
+        checks.append(
+            _build_check(
+                "k8s_and_runner_ready",
+                orchestration_label,
+                orchestration_ready and bool(resolved_image),
+                (
+                    f"orchestration_mode={k8s_manager.mode}, "
+                    f"orchestration_ready={orchestration_ready}, "
+                    f"runner_image={resolved_image}, image_source={image_source}"
+                ),
+            )
+        )
 
     from backend.services.live_trading.routers.real_trading_utils import check_stream_series_freshness
     # REAL 模式同样回退 QuantDB 日线兜底：TDX 通道无实时行情流时仍可交易
@@ -606,6 +622,7 @@ async def run_trading_readiness_precheck(
         qmt_ok, qmt_detail = await _check_qmt_agent_online(
             db, redis_client, tenant_id, user_id
         )
+        qmt_label = "QMT Agent 在线且数据已上报"
         if not qmt_ok:
             # QMT Agent 未就绪时回退通达信桥（用户使用 TDX 通道）
             from backend.services.live_trading.routers.real_trading_utils import (
@@ -615,13 +632,19 @@ async def run_trading_readiness_precheck(
             tdx_online, tdx_detail = check_tdx_bridge_online()
             if tdx_online:
                 qmt_ok = True
+                # 标签跟着通道换。判定走的是通达信桥，标题还写「QMT Agent 在线且
+                # 数据已上报」时，界面呈现的是「通过 + 明细写 QMT 未接入」，
+                # 看着像两条规则拼在一行 —— 同一份回退在 `/preflight` 里会把
+                # 标题换成「交易通道（通达信桥）」（real_trading_preflight.py 回退分支），
+                # 这里与它对齐。
+                qmt_label = "交易通道（通达信桥）"
                 qmt_detail = f"{tdx_detail}（QMT Agent 未接入: {qmt_detail}）"
             else:
                 qmt_detail = f"{qmt_detail}；且 {tdx_detail}"
         checks.append(
             _build_check(
                 "qmt_agent_online",
-                "QMT Agent 在线且数据已上报",
+                qmt_label,
                 qmt_ok,
                 qmt_detail,
             )

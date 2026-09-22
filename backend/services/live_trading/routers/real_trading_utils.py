@@ -1446,7 +1446,6 @@ def check_stream_series_freshness(
     """
     market_upper = str(market or "CN").upper()
     stream_symbols = _resolve_preflight_symbols()
-    stream_redis, stream_redis_host, stream_redis_port = _get_stream_series_redis_client()
     policy = quote_policy()
     threshold_sec = int(policy.stale_within_s)
 
@@ -1456,7 +1455,13 @@ def check_stream_series_freshness(
     level = UNAVAILABLE
     remote_probe_error = ""
     used_fallback = False
+    stream_redis_host, stream_redis_port = "", 0
+    # 客户端**构造**也要在 try 里：远端行情未配置/`REMOTE_QUOTE_DISABLED=true` 时
+    # `_get_remote_quote_redis_config()` 直接抛 RuntimeError。此前构造在 try 之外，
+    # 于 `/trading-precheck`（REAL 分支无 try 兜底）表现为整个端点 500 ——
+    # 语义上「远端行情关掉」是**该降级到日线兜底**，不是探测失败。
     try:
+        stream_redis, stream_redis_host, stream_redis_port = _get_stream_series_redis_client()
         stream_redis.ping()
         matched_symbol, latest_age_raw = _probe_freshest_series_age(stream_redis, stream_symbols)
         level = policy.classify(latest_age_raw)
