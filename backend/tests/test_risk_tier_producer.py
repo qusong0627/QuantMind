@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import json
+import re
 import statistics
 from datetime import date
 
@@ -568,8 +569,14 @@ def test_worker_switch_and_cancel_wired_in_trade_main():
     assert spec.switch_env and spec.switch_env in src, "开关名必须与注册表一致"
     assert "run_risk_tier_worker()" in src
     assert "risk_tier_task" in src
-    # shutdown 的 cancel 元组必须包含它，否则退出时任务泄漏
-    assert "tdx_hot_set_feed_task, risk_tier_task" in src
+    # shutdown 的 cancel 元组必须包含它，否则退出时任务泄漏。
+    # **按元组成员判定，不按排版**：原先断言的是两个字面量写在同一行
+    # （``"tdx_hot_set_feed_task, risk_tier_task"``），而这一行早就被格式化成各占
+    # 一行——断言因此恒假，「红灯的守卫等于没有守卫」（2026-09-24 决策轮接线时发现）。
+    cancel = re.search(r"for task in \(([^)]*)\)", src)
+    assert cancel is not None, "找不到 shutdown 的取消清单"
+    cancelled = {n.strip() for n in cancel.group(1).split(",") if n.strip()}
+    assert "risk_tier_task" in cancelled
 
 
 def test_decide_time_matches_registry_schedule():

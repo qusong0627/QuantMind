@@ -356,6 +356,7 @@ def build_context(
     ledger_positions: Mapping[str, Any] | None = None,
     risk_block: str = "",
     industry_caution_block: str = "",
+    quota_total: float | None = None,
     quota_used: float = 0.0,
     per_stock_pct: float | None = None,
     max_new_buys: int | None = None,
@@ -366,8 +367,16 @@ def build_context(
     风控档位（``per_stock_pct``/``max_new_buys``）不传就取 ``decision/context``
     的默认值——由调用方从 ``shared/risk/tiers`` 按当前档位取，**别在本模块里读
     Redis**：取数与渲染分层是本模块存在的理由。
+
+    ``quota_total`` 不传同样是 ``decision/context`` 的默认值
+    （``AGENT_QUOTA_TOTAL``，隔壁那 10 万虚拟分账尺子）。实盘轮次要传**真实账户
+    口径**（``cash + market_value``，与 ``quota_used=market_value`` 同源同刻），
+    否则提示词首行会出现「管理 ¥100000、已用 ¥3500000、剩余 −¥3400000」——
+    模型会按一个编出来的剩余额度下单，而 ``quota_remaining`` 本该恒等于可用现金。
     """
     kwargs: dict[str, Any] = {}
+    if quota_total is not None:
+        kwargs["quota_total"] = quota_total
     if per_stock_pct is not None:
         kwargs["per_stock_pct"] = per_stock_pct
     if max_new_buys is not None:

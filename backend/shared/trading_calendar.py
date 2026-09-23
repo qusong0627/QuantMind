@@ -130,7 +130,20 @@ _MARKET_ALIASES = {
     "NYSE": "XNYS", "US": "XNYS", "NASD": "XNAS", "NASDAQ": "XNAS",
     "HKEX": "XHKG", "HK": "XHKG",
     "SSE": "SSE", "SH": "SSE", "SZSE": "SZSE", "SZ": "SZSE",
+    # "CN" 是全仓的市场维度口径（signal_scores / 账户键 / qlib_paths 都用它），而本表的键
+    # 是交易所码。缺这一条时 A 股调用方（如决策轮的交易日闸门）会走同一条退化路径：
+    # 抛错 → 调用方吞掉 → 只看周末 → **国庆/春节/中秋被当成交易日**。SSE 与 SZSE 的
+    # xcal_name 同为 XSHG，节假日口径一致，故 CN 落 SSE。
+    "CN": "SSE",
 }
+
+
+#: 交易日判定的依据（provenance），由 ``TradingCalendarService.trading_day_verdict`` 返回。
+#: ``SRC_WEEKDAY_FALLBACK`` 是**降级**：日历取不到（未安装 / 超出日历覆盖年限 / 拉取失败）
+#: 时只按周末判断，节假日会被当成交易日。真钱路径必须拒绝降级结果而不是照单全收。
+SRC_DB_OVERRIDE = "db_override"
+SRC_EXCHANGE_CALENDAR = "exchange_calendar"
+SRC_WEEKDAY_FALLBACK = "weekday_fallback"
 
 
 def get_market(market_code: str) -> MarketDefinition:
@@ -445,26 +458,51 @@ class TradingCalendarService:
         tenant_id: str,
         user_id: str,
     ) -> bool:
+        verdict, _source = await self.trading_day_verdict(
+            market=market,
+            trade_date=trade_date,
+            tenant_id=tenant_id,
+            user_id=user_id,
+        )
+        return verdict
+
+    async def trading_day_verdict(
+        self,
+        *,
+        market: str,
+        trade_date: date | datetime | str,
+        tenant_id: str,
+        user_id: str,
+    ) -> tuple[bool, str]:
+        """交易日判定 + **依据**（``is_trading_day`` 是它的薄封装）。
+
+        为什么要把依据一并吐出来：日历不可用时本服务会退化成「只看周末」，于是节假日
+        被判成交易日。多数消费方错了只影响一批数据（日报空跑、同步多跑一轮），
+        **真钱决策轮错了会开盘下单**——它必须能分辨「权威判定」与「降级判定」，
+        并对后者拒绝执行（见 ``decision_round_io._is_trading_day``）。
+        """
         mkt = self._normalize_market(market)
         d = self._normalize_trade_date(trade_date)
 
-        # 1. 先查 DB override
+        # 1. 先查 DB override（人工明示的例外，权威）
         db_override = await self._find_db_override(
             market=mkt, trade_date=d, tenant_id=tenant_id, user_id=user_id
         )
         if db_override is not None:
-            return db_override
+            return db_override, SRC_DB_OVERRIDE
 
         # 2. 主数据源：exchange_calendars
         xcal_result = self._is_trading_day_xcal(mkt, d)
         if xcal_result is not None:
-            return xcal_result
+            return xcal_result, SRC_EXCHANGE_CALENDAR
 
-        # 3. Fallback：周末判断
+        # 3. Fallback：周末判断（**降级**，依据如实返回）
         if d.weekday() >= 5:
-            return False
-        logger.warning("calendar unavailable for market=%s date=%s, fallback to weekday check", mkt, d)
-        return True
+            return False, SRC_WEEKDAY_FALLBACK
+        logger.warning(
+            "calendar unavailable for market=%s date=%s, fallback to weekday check", mkt, d
+        )
+        return True, SRC_WEEKDAY_FALLBACK
 
     async def next_trading_day(
         self,

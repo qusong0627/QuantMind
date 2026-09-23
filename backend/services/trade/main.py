@@ -81,6 +81,7 @@ async def lifespan(app: FastAPI):
     corp_action_task = None
     simulation_eod_task = None
     hot_set_builder_task = None
+    decision_round_task = None
 
     try:
         await init_unified_config(service_name="quantmind-trade")
@@ -423,6 +424,28 @@ async def lifespan(app: FastAPI):
         else:
             risk_tier_task = None
             logger.info("risk tier worker disabled (QM_RISK_TIER_ENABLED=false)")
+
+        # 决策轮（P2.8）：到点槽位 → 闸门筛池 → LLM 决策 → 执行段 → 审计/守护规则。
+        # 开关走 ``env_flag``（**只有 "true" 生效**）而非本文件常见的
+        # not-in-{0,false,no,off} 宽词表：这是**真钱**生产者的唯一闸门，宽词表等于
+        # 让更多写法能把它打开。**默认关闭**——切流是 P5 的显式动作。
+        # worker 在驱动层（decision_round_runner）：本文件只负责起停，编排与 IO 在
+        # decision_round / _io 两层，runner 本身不含下单代码。
+        from backend.shared.env_flags import env_flag as _env_flag
+
+        if _env_flag("QM_DECISION_ROUND_ENABLED"):
+            from backend.services.trade.services.decision_round_runner import (
+                run_decision_round_worker,
+            )
+
+            decision_round_task = asyncio.create_task(
+                run_decision_round_worker(), name="decision-round-worker"
+            )
+            logger.info(
+                "decision round worker started (QM_DECISION_ROUND_ENABLED=true)"
+            )
+        else:
+            decision_round_task = None
 
         # 月度体检复检（T-P4-06 ③）：每月首周对 SIM/LIVE 策略重跑回测体检
         from backend.services.trade.services.health_recheck_service import (
@@ -785,6 +808,7 @@ async def lifespan(app: FastAPI):
         advice_generator_task,
         tdx_hot_set_feed_task,
         risk_tier_task,
+        decision_round_task,
     ):
         if task is None:
             continue

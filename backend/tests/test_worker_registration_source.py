@@ -100,3 +100,32 @@ def test_started_worker_tasks_are_cancelled_on_shutdown():
         )
     assert checked > 0, "没有匹配到任何 create_task 赋值 —— 这条测试零项通过"
 
+
+#: 允许不进取消清单的任务变量。**空集是有意的**：本文件里每一个 create_task 都是
+#: 随 lifespan 起停的常驻任务，没有一个该漏在退出路径外。真要加，理由写在这里。
+_NOT_CANCELLED_OK: frozenset[str] = frozenset()
+
+
+def test_shutdown_cancels_every_started_task():
+    """全量版取消可达性：声明块里起的每一个任务都必须在取消清单里。
+
+    上面的 `_REQUIRED_WORKERS` 版本只覆盖 3 个模拟盘 worker。2026-09-24 接决策轮
+    （P2.8）时实测两个集合恰好相等（33=33），说明这条不变量在本文件**当前成立**
+    ——成立却没人钉，等于「下一个人在声明块加一行、忘了进取消清单」时无人拦。
+    漏进的后果不是「任务多跑一会」：进程退出时协程还在跑，它持有的 DB/Redis 连接
+    已被半关闭，循环体每轮都抛异常刷日志（心跳停止、状态键不写），而进程起不来新的
+    ——除了刷日志没有别的可观测信号。
+    """
+    src = _TRADE_MAIN.read_text(encoding="utf-8")
+    started = set(re.findall(r"(\w+)\s*=\s*asyncio\.create_task\(", src))
+    assert started, "没扫到任何 create_task 赋值 —— 这条测试零项通过"
+
+    cancel_list = re.search(r"for task in \(([^)]*)\)", src)
+    assert cancel_list is not None, "找不到 shutdown 的取消清单"
+    cancelled = {n.strip() for n in cancel_list.group(1).split(",") if n.strip()}
+
+    missing = started - cancelled - _NOT_CANCELLED_OK
+    assert not missing, (
+        f"这些任务起了但不在 shutdown 取消清单里（进程退出时会泄漏）: {sorted(missing)}"
+    )
+

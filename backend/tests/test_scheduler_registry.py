@@ -52,6 +52,10 @@ _HEARTBEAT_WIRED = {
     # P1.8 生产者（风险档位定档）：档位缺失时闸门按买入侧防守收紧，心跳是
     # "档位到底有没有人在定" 的唯一可观测信号，必须接线。
     "risk_tier": "services/trade/services/risk_tier_producer.py",
+    # P2.8 决策轮（真钱生产者）：开关默认关，心跳是「到底有没有人在跑」的唯一信号
+    # ——关着时 C07 记 off（不算故障），开了却没心跳就是故障。
+    # 心跳写在**驱动层**（runner 的常驻循环里），编排层不含 worker。
+    "decision_round": "services/trade/services/decision_round_runner.py",
 }
 
 #: 心跳用模块常量（``_sched_heartbeat(SCHEDULER_NAME)``）间接引用的任务：
@@ -188,9 +192,26 @@ def test_schedule_ctl_dispatch_covers_rerun_declared_jobs():
         "advice_generator",
         # P1.8 生产者
         "risk_tier",
+        # P2.8 决策轮
+        "decision_round",
     }
 
     # 未知任务 → 退出码 2（纯函数路径，不触发真实执行）
     assert schedule_ctl.cmd_run("nonexistent", None, False) == 2
     # 不支持重跑的任务 → 退出码 2
     assert schedule_ctl.cmd_run("equity_settle", None, False) == 2
+
+
+def test_force_notice_states_the_real_semantics_per_job():
+    """控制台的 ``--force`` 提示必须与任务真实语义一致。
+
+    旧文案是「保留参数（当前无带守卫的任务需要绕过）」——decision_round 落地后那句
+    不再是事实：它的 ``--force`` 会抢占槽位**真的再下一批单**。出口含糊在真钱路径上
+    等于误导（操作员会以为只是重算一遍）。逐任务断言，防文案回退。
+    """
+    from backend.scripts import schedule_ctl
+
+    heavy = schedule_ctl._force_notice("decision_round")
+    assert "抢占" in heavy and "新订单" in heavy, heavy
+    light = schedule_ctl._force_notice("sim_eod")
+    assert "新订单" not in light, light

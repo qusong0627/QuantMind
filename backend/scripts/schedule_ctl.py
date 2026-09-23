@@ -10,8 +10,9 @@
 设计：
 - 任务清单唯一事实源 = backend/shared/scheduler_registry.py（禁止在本脚本另列任务）；
 - `run` 只支持注册表里声明了 `rerun` 的任务（分发表 _RERUN_DISPATCH），未知/不支持 → 退出码 2；
-- `--force`：保留参数——供未来有"当日已执行守卫"的任务显式绕过；当前无守卫任务，
-  传参会提示（不造假语义）。
+- `--force`：**语义按任务而定**（见 `_force_notice`）——多数任务不看它，
+  `decision_round` 看它并且是真钱语义（抢占槽位、会真的再下一批单）。
+  出口只说该任务真实会发生什么，不含糊、不造假语义。
 
 退出码：0 成功 / 1 执行失败 / 2 参数或任务不支持。
 """
@@ -231,6 +232,29 @@ def _run_advice_generator(date_str: str | None, force: bool) -> int:
     return _service_main()
 
 
+def _run_decision_round(date_str: str | None, force: bool) -> int:
+    """跑一次决策轮（P2.8）：默认按时刻表跑到点槽位，``--force`` 抢占槽位重跑。
+
+    ``date_str`` 语义不适用（一轮的提示词、账户额度、池文件与槽位判定**全取当下**，
+    回补某一天需要的是那天的池文件与账，不是参数），传了也不假装生效。真要补跑某个
+    槽位用 ``--slot HHMM``——那才是本任务的重跑语义；控制台入口跑的是时刻表，因为
+    「按下重跑」时用户要的是「现在这一轮别漏」，而不是复现 08:30。
+
+    ``force`` 进来的含义比其他任务重：本任务是**真钱生产者**，这里的 ``--force``
+    不是「重算一遍报告」，而是「抢占槽位、再问一次模型、可能再下一批单」（同槽同
+    标的同向腿被幂等键挡住，模型给出新意图则照下）。所以它只在控制台的显式重跑
+    路径上传下去，不影响 worker 的自动 tick。
+    """
+    if date_str:
+        print(f"提示：decision_round 不接受日期参数（收到 {date_str}），按当下槽位执行")
+    # 驱动层（runner）持有 CLI；编排层 decision_round 只有 round_tick/run_once。
+    from backend.services.trade.services.decision_round_runner import (
+        main as _service_main,
+    )
+
+    return _service_main(["--force"] if force else [])
+
+
 def _run_risk_tier(date_str: str | None, force: bool) -> int:
     """手动定档（P1.8 生产者）：直接算一次并按当日口径写入，不走 worker 的日键。
 
@@ -288,7 +312,24 @@ _RERUN_DISPATCH: dict[str, Callable[[str | None, bool], int]] = {
     "sentinel_backfill": _run_sentinel_backfill,
     "advice_backfill": _run_advice_backfill,
     "advice_generator": _run_advice_generator,
+    # P2.8 决策轮（真钱生产者）：一次性入口就是 CLI 本身，「重跑」= 立刻跑一轮。
+    "decision_round": _run_decision_round,
 }
+
+
+def _force_notice(job_key: str) -> str:
+    """``--force`` 的提示文案：按任务说清"会发生什么"。
+
+    这段曾是「保留参数（当前无带守卫的任务需要绕过）」——在 decision_round 落地后
+    那句话不再是事实：它的 ``--force`` 会抢占槽位、**真的再下一批单**。在真钱路径
+    上，含糊的提示等于误导（操作员会当它是"重算一遍报告"）。
+    """
+    if job_key == "decision_round":
+        return (
+            "提示：--force = 抢占已认领的槽位、忽略当日 done 键，"
+            "会真的再发一批新订单（同槽同标的同向腿被订单幂等键挡住）"
+        )
+    return f"提示：--force 已传给 {job_key}；该任务的重跑本身不看这个参数"
 
 
 def cmd_run(job_key: str, date_str: str | None, force: bool) -> int:
@@ -303,7 +344,7 @@ def cmd_run(job_key: str, date_str: str | None, force: bool) -> int:
         )
         return 2
     if force:
-        print("提示：--force 为保留参数（当前无带守卫的任务需要绕过）")
+        print(_force_notice(job_key))
     print(f"== 手动重跑 {spec.key}（{spec.name}）{f'date={date_str}' if date_str else ''} ==")
     return _RERUN_DISPATCH[job_key](date_str, force)
 
@@ -315,7 +356,11 @@ def main() -> int:
     run_p = sub.add_parser("run", help="手动重跑指定任务")
     run_p.add_argument("job", help="任务 key（如 sim_eod/inference/data_sync）")
     run_p.add_argument("--date", default="", help="目标日期 YYYY-MM-DD（语义按任务而定）")
-    run_p.add_argument("--force", action="store_true", help="保留参数（绕过守卫，供未来使用）")
+    run_p.add_argument(
+        "--force",
+        action="store_true",
+        help="按任务而定的重跑语义（decision_round：抢占槽位、会真的再下单）",
+    )
     args = parser.parse_args()
 
     if args.cmd == "list":

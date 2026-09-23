@@ -192,6 +192,20 @@ JOBS: tuple[JobSpec, ...] = (
         None,  # 常驻消费循环，无「跑一次」语义 → 不可重跑
         "队列 → process_task：REAL/SHADOW 托管任务与手动单（无开关，随 trade 服务常开）",
     ),
+    # P2.8（决策层移植）：隔壁 crontab 的决策时刻 → 本仓常驻 worker（11 个槽位：
+    # 8 个盘中 + 3 个建仓，其中 2 个是补跑槽）。
+    # 开关口径是 ``env_flags.env_flag``（**只有 "true" 生效**），比本注册表
+    # switch_enabled 的宽词表（1/yes/on 也算真）窄——``list`` 在 ``=1/yes/on`` 时会
+    # 显示「开」而 worker 并未启动，此时以 C07 的「无记录」为准（心跳是这条差异的
+    # 唯一可观测信号）。**默认关闭**：切流是 P5 的显式动作。
+    JobSpec(
+        "decision_round", "决策轮（P2.8）", "worker", "trade",
+        "交易日 11 个槽位（08:30~14:45，30s 轮询、45min 补跑窗）",
+        "QM_DECISION_ROUND_ENABLED", False, 300,
+        "python backend/scripts/schedule_ctl.py run decision_round --force",
+        "池 → 闸门筛 → LLM 决策 → 执行段（下单/守护规则）→ 审计表；真钱生产者，默认关。"
+        "重跑 = 抢占槽位再跑一轮 = 会真的再下单（同槽同向同标的被幂等键挡住）",
+    ),
 )
 
 JOBS_BY_KEY: dict[str, JobSpec] = {job.key: job for job in JOBS}
