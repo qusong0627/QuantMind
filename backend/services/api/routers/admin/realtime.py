@@ -127,18 +127,6 @@ def _quantdb_reader_for_meta(meta: dict[str, Any]) -> tuple[Any, str] | None:
         return None
 
 
-def _quantdb_columns(meta: dict[str, Any]) -> set[str] | None:
-    """quantdb 绑定模型的**锚源**列集合；不可判 → None。"""
-    resolved = _quantdb_reader_for_meta(meta)
-    if resolved is None:
-        return None
-    reader, source = resolved
-    try:
-        return set(reader.describe(source).columns)
-    except Exception:  # noqa: BLE001
-        return None
-
-
 def feature_coverage(model_dir: str, feature_columns: list[str]) -> tuple[int, int, float]:
     """模型特征列在**其基线取数面**的覆盖率（0~1）。
 

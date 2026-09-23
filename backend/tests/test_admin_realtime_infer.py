@@ -77,10 +77,13 @@ def test_dead_pin_falls_back_so_coverage_gate_can_pass(monkeypatch, tmp_path):
         "quantdb_dir": str(tmp_path / "dead_pin"),  # 不存在
         "context": {"market": "CN"},
     }
-    cols = rt._quantdb_columns(meta)
+    resolved = rt._quantdb_reader_for_meta(meta)
 
     assert _RecordingReader.seen_roots == [None], "死 pin 必须回退成 None（读本机根）"
-    assert cols == {"amt_log", "turn_1"}
+    assert resolved is not None, "构造失败会静默回落 parquet 口径，这里必须判得出"
+    reader, anchor = resolved
+    assert anchor == "l1_l2_factors", "锚源取自 metadata.factor_source"
+    assert set(reader.describe(anchor).columns) == {"amt_log", "turn_1"}
 
 
 @pytest.mark.unit
@@ -90,13 +93,15 @@ def test_live_pin_is_still_honoured(monkeypatch, tmp_path):
     from backend.services.engine.data_platform import quantdb_factor_reader as qfr
 
     _RecordingReader.seen_roots = []
-    _RecordingReader.cols_when_unpinned = ()
     monkeypatch.setattr(qfr, "QuantDBFactorReader", _RecordingReader)
 
     pin = tmp_path / "quantdb"
     pin.mkdir()
-    rt._quantdb_columns({"data_source": "quantdb_factors", "quantdb_dir": str(pin)})
+    resolved = rt._quantdb_reader_for_meta(
+        {"data_source": "quantdb_factors", "quantdb_dir": str(pin)}
+    )
 
+    assert resolved is not None
     assert _RecordingReader.seen_roots == [str(pin)]
 
 
