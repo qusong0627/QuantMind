@@ -286,11 +286,15 @@ def test_capabilities_reports_real_trading_state_honestly(
 #: 每个面当前的真实状态。**批次落地时改这里**——改完下面那条断言会把
 #: 「声明为可用」与「真的有路由」对齐检查一遍。
 EXPECTED_PLANE_AVAILABILITY = {
-    "control": False,  # 批次 4
-    "task": False,  # 批次 4
+    "control": True,  # 批次 4（只读：策略/模型清单）
+    "task": True,  # 批次 4（202 + ref + 轮询）
     "data": True,  # 批次 3
-    "stream": False,  # 批次 4
-    "trading": False,  # 批次 4
+    # 批次 4 落地时**没有**实现 stream，这是有意的：跨公网 RTT 下 WS 相对轮询
+    # 没有优势，而现成的两份流都是全市场、未按租户切分的数据，对外凭据的
+    # 授权单位（`api_keys.permissions`）推不出该按什么收窄。理由写在
+    # `external/README.md` §6.4，不是排期借口。
+    "stream": False,
+    "trading": True,  # 批次 4（**只有模拟盘**；实盘等幂等补齐后单独一批）
 }
 
 

@@ -4,8 +4,22 @@
 **每个对外端点都去 `_ALLOWED_EXT_ENDPOINTS` 登记一行**，否则实盘关闭的部署上
 它一律 403。加端点时别忘了；`test_external_api_gate_coverage.py` 会盯着。
 
-当前只有两件事：换令牌（握手）和问「你这儿有什么」。真正的数据/任务/交易面
-在后续批次里加——先把手握做扎实，否则后面每个端点都要自己想办法鉴权。
+四个面挂在本命名空间下：
+
+| 面 | 模块 | 状态 |
+|----|------|------|
+| 数据 | `data.py` | 已开通（游标增量 + parquet over HTTP） |
+| 控制 | `control.py` | 已开通（只读：策略清单、模型清单） |
+| 任务 | `task.py` | 已开通（提交 + 轮询，**不含取消**） |
+| 交易 | `trading.py` | 已开通，**只有模拟盘**，且挂 `trade.read`/`trade.write` 权限码 |
+
+第五个面（`stream`）刻意未开，`capabilities` 里写了理由——不是排期问题。
+每加一个面都要回来把 `capabilities` 里那行 `available` 翻对：外部节点是
+**按它决定要不要试**的，写错会让它去调一组不存在的端点。
+
+✅ 本文件里**不许出现**命名空间字面量（连注释里也不行）：
+`test_router_does_not_hardcode_the_namespace` 会做一次朴素的引号扫描。
+前缀一律写成相对的（`/data`），字面量只在 `live_trading_gate.EXT_API` 一处。
 """
 
 from __future__ import annotations
@@ -20,7 +34,10 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
+from backend.services.api.routers.external import control as control_plane
 from backend.services.api.routers.external import data as data_plane
+from backend.services.api.routers.external import task as task_plane
+from backend.services.api.routers.external import trading as trading_plane
 from backend.services.api.routers.external.auth import (
     DEFAULT_TTL_SECONDS,
     AuthBackendUnavailable,
@@ -380,15 +397,18 @@ async def get_capabilities(
         planes=[
             PlaneInfo(
                 plane="control",
-                description="策略/模型/账户/能力",
+                description="策略清单、模型清单（只读）",
                 transport="json-rest",
-                available=False,
+                available=True,
             ),
             PlaneInfo(
                 plane="task",
-                description="训练、因子演化、回测、数据同步、TradingAgents 分析",
-                transport="202 + task_id + SSE",
-                available=False,
+                description="训练、回测、因子演化、数据同步、TradingAgents 分析",
+                # 规划时写的是「202 + task_id + SSE」，落地改成轮询。
+                # 理由见 `task.py` 模块 docstring「为什么是轮询，不是 SSE」——
+                # 一句话：上游五个任务里没有一个值得为它维持一条长连接。
+                transport="202 + ref + polling",
+                available=True,
             ),
             PlaneInfo(
                 plane="data",
@@ -400,13 +420,23 @@ async def get_capabilities(
                 plane="stream",
                 description="实时行情、情报总线、信号",
                 transport="websocket",
+                # ⚠️ 刻意仍未开，且**不是**因为没排上期。实时推送的价值全在
+                # 「单条消息的时延」，而外部节点在**另一个网络**里：
+                # 容器内 WebSocket 那点优势会被跨网 RTT 和重连退避吃掉，
+                # 拿到的反而是一条比轮询更脆的链路。
+                #
+                # 更重要的是安全面：`market:snapshot/series` 是**全市场**的
+                # 未过滤行情，而对外凭据的授权单位是 `api_keys.permissions`
+                # 里的字符串。开流之前必须先回答「这条流按什么维度收窄」，
+                # 否则一枚只读凭据就能订阅整个市场——数据面的订阅制是另一批
+                # 要设计的事，不是把 WS 端点搬过来就行。
                 available=False,
             ),
             PlaneInfo(
                 plane="trading",
-                description="订单/持仓/风控",
+                description="模拟盘：账户/持仓/委托/成交（**不含实盘**）",
                 transport="rest + idempotency-key",
-                available=False,
+                available=True,
             ),
         ],
     )
@@ -423,6 +453,9 @@ async def get_capabilities(
 # 做笨，免得「只扫代码」这种聪明规则自己长出漏洞。所以本段也不写那个字面量。
 
 router.include_router(data_plane.router, prefix="/data")
+router.include_router(control_plane.router, prefix="/control")
+router.include_router(task_plane.router, prefix="/task")
+router.include_router(trading_plane.router, prefix="/trading")
 
 
 __all__ = [

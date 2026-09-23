@@ -146,8 +146,20 @@ _BLOCKED_EXACT: frozenset[tuple[str, str]] = frozenset(
 EXT_API = "/api/ext/v1"
 
 #: 对外命名空间的实盘拒绝表（与 `/api/v1` 同构）。
-#: 目前为空——第一批对外端点（握手 / 能力查询）都不碰交易。
-#: 将来加对外交易端点时登记到这里，`test_external_api_gate_coverage.py` 会强制。
+#:
+#: ⚠️ **仍然为空，这是批次 4（控制/任务/交易面）落地后的刻意结论，不是忘了填。**
+#:
+#: 对外交易面**只开了模拟盘**，路径是 `/api/ext/v1/trading/sim/…`。往这张表里
+#: 写一个 `/api/ext/v1/trading`（看起来最自然的那一行）会**连带打死模拟盘**——
+#: 本表是前缀语义（`_matches`，边界落在 `/`），而 OSS 默认
+#: `ENABLE_REAL_TRADING=false`，也就是**每一个** OSS 部署上模拟交易都会 403。
+#: 那是一个比「实盘没关住」更糟的结果：模拟盘恰恰是实盘关闭时唯一该能用的东西。
+#:
+#: 所以规矩是：**拒绝表只登记实盘侧端点，且登记的前缀不得覆盖 `trading/sim/`。**
+#: 等真加了对外实盘端点（幂等补齐后单独一批），把它们的**实盘专用段**
+#: （如 `/api/ext/v1/trading/real`）写进来，不要图省事写父路径。
+#: `test_external_api_gate_coverage.py::test_blocked_prefix_never_covers_simulation`
+#: 会拿具体路径逐条跑一遍判定，把这条钉死。
 _BLOCKED_EXT_PREFIXES: tuple[str, ...] = ()
 
 #: 对外命名空间的**显式放行**表。不在这张表里、也不在拒绝表里 = 拒绝。
@@ -163,6 +175,11 @@ _ALLOWED_EXT_ENDPOINTS: tuple[str, ...] = (
     f"{EXT_API}/capabilities",
     # 数据面（批次 3）。不带路径参数的那几条走精确表，带参数的走下面的模式表。
     f"{EXT_API}/data/datasets",
+    # 控制面（批次 4）——只读，不碰交易。
+    f"{EXT_API}/control/strategies",
+    f"{EXT_API}/control/models",
+    # 任务面（批次 4）的「有哪些任务种类」。提交/查询带参数，走下面的模式表。
+    f"{EXT_API}/task/kinds",
 )
 
 #: 带**路径参数**的对外端点。上面那张表是精确相等，表达不了
@@ -185,6 +202,17 @@ _ALLOWED_EXT_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(rf"{EXT_API}/data/datasets/[a-z0-9_]+/blob"),
     # 行级增量（游标）——**不碰交易**，所以放行；放行的是「读」，不是「下单」
     re.compile(rf"{EXT_API}/data/[a-z0-9_]+/changes"),
+    # 任务面：提交 / 查状态。`{kind}` 是窄字符类（它只会是 `train` 这类
+    # snake_case 标识），`{ref}` 是作业 id——上游的 id 有 uuid4().hex[:16]、
+    # `str(uuid4())[:8]`、数字自增等好几种形状，所以字符类放宽到
+    # `[A-Za-z0-9_.-]`，但**仍然逐段锚死**：路径参数里出现 `/` 就匹配不上。
+    re.compile(rf"{EXT_API}/task/[a-z_]+"),
+    re.compile(rf"{EXT_API}/task/[a-z_]+/[A-Za-z0-9_.-]+"),
+    # 交易面：**只有模拟盘**，且 id 位是 UUID 的标准 36 字符形（不是 `[^/]+`）。
+    # 窄是有意的——这层宽一格，「未登记即拒绝」就松一格。
+    re.compile(rf"{EXT_API}/trading/sim/(account|trades|orders)"),
+    re.compile(rf"{EXT_API}/trading/sim/orders/[0-9a-fA-F-]{{36}}"),
+    re.compile(rf"{EXT_API}/trading/sim/orders/[0-9a-fA-F-]{{36}}/cancel"),
 )
 
 

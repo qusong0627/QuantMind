@@ -81,6 +81,19 @@ EXPECTED_EXT_ROUTES = {
     "/api/ext/v1/data/datasets/{name}/partitions/{partition}/file",
     "/api/ext/v1/data/datasets/{name}/blob",
     "/api/ext/v1/data/{dataset}/changes",
+    # 批次 4：控制面（只读）
+    "/api/ext/v1/control/strategies",
+    "/api/ext/v1/control/models",
+    # 批次 4：任务面
+    "/api/ext/v1/task/kinds",
+    "/api/ext/v1/task/{kind}",
+    "/api/ext/v1/task/{kind}/{ref}",
+    # 批次 4：交易面（**只有模拟盘**，实盘见 live_trading_gate 的说明）
+    "/api/ext/v1/trading/sim/account",
+    "/api/ext/v1/trading/sim/orders",
+    "/api/ext/v1/trading/sim/orders/{order_id}",
+    "/api/ext/v1/trading/sim/orders/{order_id}/cancel",
+    "/api/ext/v1/trading/sim/trades",
 }
 
 #: 把形状里的参数位换成**真实取值**，用来跑闸门判定。
@@ -90,6 +103,13 @@ _SAMPLE_PARAMS = {
     "{name}": "daily_forward",
     "{dataset}": "news_enrichment",
     "{partition}": "2026-09-22",
+    # 任务种类取自 `task.py` 的注册表（用真名字，不用 `{kind}` 占位）。
+    "{kind}": "training",
+    # 作业 id：上游几种形状之一（uuid4().hex[:16]）。闸门的字符类要吃得下
+    # 全部几种，所以这里特意用最长的那个形状。
+    "{ref}": "3f9a1c0d5e7b2468",
+    # UUID 的标准 36 字符小写形（`sim_orders.order_id`）。
+    "{order_id}": "0b6d2f4a-7c31-4e58-9a02-1f8b3c5d7e90",
 }
 
 
@@ -208,6 +228,68 @@ def test_ext_denies_are_not_confused_with_v1() -> None:
     assert gate.is_blocked("GET", "/api/ext/v1/market") is True
 
 
+#: 对外模拟盘的全部路径（形状已具体化）。
+_SIM_PATHS = (
+    "/api/ext/v1/trading/sim/account",
+    "/api/ext/v1/trading/sim/orders",
+    "/api/ext/v1/trading/sim/orders/0b6d2f4a-7c31-4e58-9a02-1f8b3c5d7e90",
+    "/api/ext/v1/trading/sim/orders/0b6d2f4a-7c31-4e58-9a02-1f8b3c5d7e90/cancel",
+    "/api/ext/v1/trading/sim/trades",
+)
+
+
+def test_blocked_prefix_never_covers_simulation() -> None:
+    """**实盘拒绝表不许覆盖 `trading/sim/`。**
+
+    这条守的是一个很容易犯、后果很具体的错。想「在实盘关闭的部署上关掉对外
+    交易面」时，最自然的一行是往 `_BLOCKED_EXT_PREFIXES` 里写：
+
+        "/api/ext/v1/trading"          # ← 看起来对，其实错
+
+    那是个**前缀**匹配（边界落在 `/`），于是 `/api/ext/v1/trading/sim/orders`
+    一起被拒。而 OSS 默认 `ENABLE_REAL_TRADING=false`，也就是**每一个** OSS
+    部署上模拟交易都会 403——恰恰是实盘关闭时唯一该能用的那条路。
+
+    今天这张表是空的，所以断言本身平凡成立。**平凡成立的断言不算数**，
+    所以下面还有一段：把那个诱人的错值塞进去，先证明它**真的会**打死模拟盘，
+    再证明本测试的检查逻辑确实能发现它。少了那一段，这个文件就只是在
+    复述「表是空的」，而表明天就可能不空。
+    """
+    blocked = [p for p in _SIM_PATHS if gate.is_blocked("GET", p) is True]
+    assert not blocked, (
+        f"这些模拟盘路径被 `_BLOCKED_EXT_PREFIXES` 覆盖了：{blocked}。"
+        "登记实盘侧端点时不要写父路径 `/api/ext/v1/trading`——它会连带打死"
+        "模拟盘，见 live_trading_gate 里那段说明。"
+    )
+
+
+def test_the_simulation_guard_would_actually_catch_a_bad_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """证明上一条**有牙**：塞进那个错值，它必须能被打死、也能被发现。
+
+    两件事都要验：
+
+    1. 那个前缀**确实**会拦住模拟盘（否则上一条的检查是在防一个不存在的风险，
+       将来有人真写了它，大家会以为已经防住了）；
+    2. 上一条用的检查逻辑（`is_blocked` 跑具体路径）会把它揪出来——
+       不是「拿前缀做字符串比较」那种同义复述。
+    """
+    monkeypatch.setattr(gate, "_BLOCKED_EXT_PREFIXES", ("/api/ext/v1/trading",))
+
+    hit = [p for p in _SIM_PATHS if gate.is_blocked("GET", p) is True]
+    assert hit == list(_SIM_PATHS), (
+        "把 `/api/ext/v1/trading` 放进拒绝表居然没有拦住模拟盘——"
+        "那说明本文件的模型（前缀语义会连带覆盖子树）已经不对了，"
+        "上一条测试的前提需要重新推导。实际被拦住的："
+        f"{hit}"
+    )
+
+    # 而按端点登记（模拟盘之外的另一段）不该误伤：
+    monkeypatch.setattr(gate, "_BLOCKED_EXT_PREFIXES", ("/api/ext/v1/trading/real",))
+    assert [p for p in _SIM_PATHS if gate.is_blocked("GET", p) is True] == []
+
+
 # ---------------------------------------------------------------------------
 # 承重性：放行表真的在起作用（防「策略写了但没接线」）
 # ---------------------------------------------------------------------------
@@ -278,6 +360,22 @@ def test_pattern_entries_are_shape_scoped_not_prefix_scoped() -> None:
         # 参数位后面直接跟别的东西，以及整个数据面之外的路径
         "/api/ext/v1/data/datasets/x",
         "/api/ext/v1/data/orders",
+        # --- 批次 4 的形状：控制面是精确登记，多一段就不认 ---
+        "/api/ext/v1/control/strategies/123",
+        "/api/ext/v1/control/models/ready",
+        "/api/ext/v1/control/models/../strategies",
+        "/api/ext/v1/control/accounts",  # 没这个端点（账户在交易面）
+        # --- 任务面：kind 是窄字符类，ref 逐段锚死 ---
+        "/api/ext/v1/task/TRAINING",  # 大写不在 [a-z_]+ 里
+        "/api/ext/v1/task/training/3f9a/extra",  # 多一段
+        "/api/ext/v1/task/training/../../control/models",  # 想拼路径
+        # --- 交易面：**实盘侧一个都没开**，父路径也不许整段放行 ---
+        "/api/ext/v1/trading/real/orders",
+        "/api/ext/v1/trading/orders",
+        "/api/ext/v1/trading/sim/positions",  # 没这个端点：分组是精确枚举
+        "/api/ext/v1/trading/sim/orders/not-a-uuid",
+        "/api/ext/v1/trading/sim/orders/"
+        "0b6d2f4a-7c31-4e58-9a02-1f8b3c5d7e90/extra",
     )
     leaked = [p for p in near_miss if gate.is_blocked("GET", p) is False]
     assert not leaked, (
