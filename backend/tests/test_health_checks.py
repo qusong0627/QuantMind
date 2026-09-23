@@ -377,11 +377,18 @@ async def test_c12_check_reports_missing_market_with_reason(monkeypatch):
 # --- C14 分账账本一致性 ----------------------------------------------------
 
 SYNTH = "qmt-synth-"
+SEED = "legacy-seed:"
 
 
 def _parity(trades, ledger, *, index=True):
     return classify_agent_ledger_parity(
-        ledger_parity(trades, ledger, index_enabled=index, synth_prefix=SYNTH)
+        ledger_parity(
+            trades,
+            ledger,
+            index_enabled=index,
+            synth_prefix=SYNTH,
+            seed_prefix=SEED,
+        )
     )
 
 
@@ -458,6 +465,50 @@ def test_c14_synth_partner_still_checks_agent():
     r = _parity([_t("T1", agent="beta")], [_l(f"{SYNTH}o1", agent="alpha")])
     assert r.level == "fail"
     assert r.metrics["agent_mismatch"] == 1
+
+
+def test_c14_seed_rows_are_counted_not_orphaned():
+    """期初结转流水（P3 迁入时就有的仓）单独计数，不当「无对应成交」报。
+
+    它们本来就没有本仓成交可配；混进 orphans 的话，切换后 30 天里这条检查常亮 warn，
+    真异常来了反而看不出来。
+    """
+    seed = _l(f"{SEED}600036.SH", order="", applied=100.0)
+    r = _parity([], [seed])
+    assert r.level == "ok"
+    assert r.metrics["seeds"] == 1
+    assert r.metrics["orphans"] == 0
+    assert "期初结转" in r.detail
+    assert "未参与" in r.detail  # 结转不是「分账跑起来了」：窗口里仍无 LLM 腿成交
+
+
+def test_c14_seed_rows_coexist_with_real_pairs():
+    """结转行与真实成交行同窗口：真实配对照常判，结转只报条数。"""
+    seed = _l(f"{SEED}600036.SH", order="", applied=100.0)
+    r = _parity([_t("k1")], [_l("k1"), seed])
+    assert r.level == "ok"
+    assert r.metrics["posted"] == 1
+    assert r.metrics["seeds"] == 1
+    assert r.metrics["orphans"] == 0
+    assert "期初结转 1 条" in r.detail
+
+
+def test_c14_seed_rows_do_not_claim_trades():
+    """结转行的 fill_key 不许被拿去顶一笔真实成交的配对（否则漏记会被瞒过去）。"""
+    seed = _l(f"{SEED}600036.SH", order="o1", applied=100.0)
+    r = _parity([_t("k1")], [seed])
+    assert r.level == "fail"
+    assert r.metrics["missing"] == 1
+    assert r.metrics["seeds"] == 1
+
+
+def test_c14_seed_rows_skip_the_unapplied_bucket():
+    """结转行不进 unapplied（``applied_volume = 0`` 那是「记了未生效」的口径，
+    结转要么整条在（``= volume``）要么压根不写，不存在「记了没生效」的中间态）。"""
+    seed = _l(f"{SEED}600036.SH", order="", applied=0.0)
+    r = _parity([], [seed])
+    assert r.metrics["unapplied"] == 0
+    assert r.metrics["seeds"] == 1
 
 
 def test_c14_orphan_and_unapplied_warn_without_failing():
@@ -551,3 +602,26 @@ async def test_c14_check_missing_ledger_table_with_llm_fills_is_warn():
     r = await check_c14_agent_ledger_parity(ctx)
     assert r.level == "warn"
     assert r.metrics["trades"] == 1
+
+
+@pytest.mark.asyncio
+async def test_c14_check_wires_the_seed_prefix_from_the_writer_side():
+    """结转行**经生产调用点**（不是测试自传前缀）必须落进 ``seeds``。
+
+    上面几条 ``_parity(...)`` 用例自带前缀，证的是判定函数；这一条证的是
+    **接线**——体检认的前缀一旦与写入侧（``seed_fill_key``）脱钩，结转行就会
+    被当成「无对应成交」的孤儿，切换后头 30 天这条检查常亮 warn。
+    """
+    seed = _l("legacy-seed:600036.SH", order="", applied=100.0)
+    assert seed["fill_key"].startswith(SEED), "常量与语料同源，防止各写一份"
+    ctx = FakeCtx(
+        {
+            "FROM trades t JOIN orders o": [],
+            "FROM qm_agent_ledger_fill": [seed],
+            "pg_indexes": [{"present": 1}],
+        }
+    )
+    r = await check_c14_agent_ledger_parity(ctx)
+    assert r.level == "ok", r.detail
+    assert r.metrics["seeds"] == 1
+    assert r.metrics["orphans"] == 0

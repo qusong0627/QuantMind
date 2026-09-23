@@ -1,14 +1,20 @@
-"""分账账本落库读写侧（P2.7）——``apply_fill`` 是这本账**唯一**的记账入口。
+"""分账账本落库读写侧（P2.7）——``apply_fill`` 记账、``import_legacy_seed`` 结转。
 
 表结构见 :mod:`backend.shared.agent_ledger_contract`；记账算术见纯核心
 :mod:`backend.shared.decision.agent_ledger`。本模块只做一件事：**把一笔成交
 原子地记进那四张表**，并把账本读回成提示词要的形状。
 
+**两个写入口，语义不同、互不重叠**（第三个写入者没有）：
+
+* :func:`apply_fill` —— 记**一笔成交**，全书通用，任何时刻可调用；
+* :func:`import_legacy_seed` —— 搬**迁入那一刻的状态**（P3 数据迁移），
+  **只许在空账本上执行**（这三个 agent 一行都没有），否则整批拒绝。
+
 三段职责，逐段可单测
 --------------------
 * **纯映射**（无 DB）：:func:`normalize_code` / :func:`position_deltas`；
 * **读**：:func:`load_ledger` / :func:`load_agent_positions`；
-* **写**：:func:`apply_fill`（唯一入口）。
+* **写**：:func:`apply_fill` / :func:`import_legacy_seed`。
 
 写纪律 1：**收调用方的事务**，自己不开事务、不 commit
 ------------------------------------------------------
@@ -62,6 +68,7 @@ from backend.shared.decision.agent_ledger import (
     BAD_TICK_TOLERANCE,
     DEFAULT_AGENT_QUOTA,
     LedgerChange,
+    LegacySeed,
     agent_cash,
     agent_positions,
     record_buy,
@@ -426,6 +433,185 @@ async def apply_fill(
     )
 
 
+# ── 期初结转（P3 数据迁移）────────────────────────────────────────────
+
+
+@dataclass(frozen=True, slots=True)
+class SeedWrite:
+    """一个 agent 结转了什么（报告行）。"""
+
+    agent: str
+    virtual_cash: float
+    positions: int
+    cost: float
+
+
+@dataclass(frozen=True, slots=True)
+class SeedImportReport:
+    """结转结果。``refused`` 非空 = **一行都没写**（含 dry-run 下的拒绝）。"""
+
+    applied: bool
+    dry_run: bool
+    refused: tuple[str, ...] = ()
+    agents: tuple[SeedWrite, ...] = ()
+    accounts_written: int = 0
+    positions_written: int = 0
+    fills_written: int = 0
+    fills_skipped: int = 0
+
+    @property
+    def cost_total(self) -> float:
+        return round(sum(a.cost for a in self.agents), 2)
+
+
+async def import_legacy_seed(
+    session: Any,
+    *,
+    tenant_id: str,
+    user_id: str,
+    seed: LegacySeed,
+    as_of: date | str,
+    dry_run: bool = False,
+) -> SeedImportReport:
+    """把隔壁账本的 ``agents`` 段结转成本仓账本的**期初状态**（收调用方的 session）。
+
+    与 :func:`apply_fill` 的关系：两者写的是同一批表，但语义不同——``apply_fill``
+    记的是**这一笔成交**，本函数搬的是**迁入那一刻的状态**。故有两条独有纪律：
+
+    1. **只许在空账本上执行**：这三个 agent 只要在账户表/持仓表/流水表里已有任何一行，
+       整批拒绝（一行不写）。半本账上再叠一层期初状态，等于同一批仓记两遍——
+       ``used`` 翻倍、``virtual_cash`` 被覆盖，且**新账本里看不出这是怎么来的**。
+       拒绝时逐 agent 报出脏在哪张表、几行，由人来决定（本函数不删不改任何行）。
+    2. **流水行照写**（``applied_volume = volume`` 的买入行，``fill_key`` 带
+       :data:`SEED_FILL_PREFIX`）：账本状态要能从流水推回来，否则「流水即事实」在
+       迁入这一刻就断了。对账侧（体检 C14）按同一前缀把这类行单独计数，不当异常。
+
+    ``as_of``：结转日。**由调用方给**，且只用于没有 ``buy_ts`` 的持仓的流水日期
+    （有 ``buy_ts`` 的按它的 **UTC 日**记，与 ``post_fill_for_order`` 的缺省口径一致）。
+
+    返回 :class:`SeedImportReport`；**不 commit**（写纪律 1）。``dry_run=True``
+    时只做到「查空账本」这一步，一行不写，报告里照样给出将写入的内容。
+    """
+    from backend.shared.decision.agent_ledger import seed_fill_key
+
+    if not seed.ok:
+        return SeedImportReport(
+            applied=False, dry_run=dry_run, refused=tuple(seed.problems)
+        )
+    if not seed.agents:
+        # 空计划不是错误：文件里没有 agent（或全被 problems 挡掉）。如实报 0。
+        return SeedImportReport(applied=True, dry_run=dry_run)
+
+    names = [a.agent for a in seed.agents]
+    dirty = await _seed_dirty_agents(
+        session, tenant_id=tenant_id, user_id=user_id, agents=names
+    )
+    if dirty:
+        return SeedImportReport(applied=False, dry_run=dry_run, refused=tuple(dirty))
+
+    writes: list[SeedWrite] = []
+    accounts = positions = fills = skipped = 0
+    day = _to_date(as_of)
+    for a in seed.agents:
+        writes.append(SeedWrite(a.agent, a.virtual_cash, len(a.positions), a.used))
+        if dry_run:
+            continue
+        await session.execute(
+            pg_insert(_table(ACCOUNT_TABLE)).values(
+                tenant_id=str(tenant_id or "default")[:64],
+                user_id=str(user_id or "")[:64],
+                agent=a.agent[:AGENT_COL_LEN],
+                virtual_cash=a.virtual_cash,
+            )
+        )
+        accounts += 1
+        upserts = [
+            {
+                "code": p.code,
+                "volume": p.volume,
+                "cost_price": p.cost_price,
+                "buy_ts": p.buy_ts,
+                "last_ts": p.last_ts,
+            }
+            for p in a.positions
+        ]
+        await _write_positions(
+            session,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            agent=a.agent,
+            upserts=upserts,
+            removed=(),
+        )
+        positions += len(upserts)
+        for p in a.positions:
+            buy_day = p.buy_ts.date() if p.buy_ts is not None else day
+            duplicated = await _insert_fill(
+                session,
+                tenant_id=str(tenant_id or "default")[:64],
+                user_id=str(user_id or "")[:64],
+                agent=a.agent[:AGENT_COL_LEN],
+                fill_key=seed_fill_key(p.code)[:FILL_KEY_LEN],
+                order_id="",
+                trade_date=buy_day,
+                code=p.code[:32],
+                side=SIDE_BUY,
+                volume=p.volume,
+                price=p.cost_price,
+                applied_volume=p.volume,
+                approx_price=False,
+                note=_SEED_NOTE,
+                filled_at=p.buy_ts or utc_now(),
+            )
+            if duplicated:
+                skipped += 1
+            else:
+                fills += 1
+
+    return SeedImportReport(
+        applied=True,
+        dry_run=dry_run,
+        agents=tuple(writes),
+        accounts_written=accounts,
+        positions_written=positions,
+        fills_written=fills,
+        fills_skipped=skipped,
+    )
+
+
+#: 结转流水的 ``note``（人话：这一行为什么没有对应的本仓成交）。
+_SEED_NOTE = "期初结转：迁入时就持有的仓（来源=隔壁 live_ledger.json，非本仓成交）"
+
+
+async def _seed_dirty_agents(
+    session: Any, *, tenant_id: str, user_id: str, agents: Sequence[str]
+) -> list[str]:
+    """这三个 agent 在账本三张表里有没有既有行；有则返回逐条拒绝理由。"""
+    t = str(tenant_id or "default")
+    u = str(user_id or "")
+    labels = (
+        (ACCOUNT_TABLE, "账户行"),
+        (POSITION_TABLE, "持仓行"),
+        (FILL_TABLE, "流水行"),
+    )
+    reasons: list[str] = []
+    for table, label in labels:
+        res = await session.execute(
+            text(
+                f"SELECT agent, COUNT(*) FROM {table} "
+                "WHERE tenant_id = :t AND user_id = :u AND agent IN :ags "
+                "GROUP BY agent"
+            ).bindparams(bindparam("ags", expanding=True)),
+            {"t": t, "u": u, "ags": list(agents)},
+        )
+        for row in res.all():
+            reasons.append(
+                f"{row[0]}: 已有{label} {int(row[1])} 行——拒绝结转"
+                "（空账本才许结转：否则同一批仓会被记两遍）"
+            )
+    return reasons
+
+
 def _roundtrip_of(change: LedgerChange, direction: str) -> dict[str, Any] | None:
     """卖出记账产出的**最后一条**回合记录（``_write_roundtrip`` 的入参）。
 
@@ -747,7 +933,10 @@ __all__ = [
     "SIDE_BUY",
     "SIDE_SELL",
     "ApplyOutcome",
+    "SeedImportReport",
+    "SeedWrite",
     "apply_fill",
+    "import_legacy_seed",
     "load_agent_positions",
     "load_ledger",
     "normalize_code",

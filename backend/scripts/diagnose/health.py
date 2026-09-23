@@ -241,6 +241,9 @@ class LedgerParity:
     orphans: tuple[str, ...]
     unapplied: tuple[str, ...]
     index_enabled: bool
+    #: 期初结转流水（``legacy-seed:*``，P3 迁入时就有的仓）：**不参与配对**，
+    #: 单独计数——它们本来就没有对应的本仓成交，混进 orphans 会把「迁入」报成异常。
+    seeds: tuple[str, ...] = ()
 
 
 def _group_by_order(rows: Any) -> dict[tuple[str, str, str], list[dict]]:
@@ -287,6 +290,7 @@ def ledger_parity(
     *,
     index_enabled: bool,
     synth_prefix: str,
+    seed_prefix: str,
 ) -> LedgerParity:
     """逐单配对（纯函数）：成交行 ↔ 账本流水行，分成五类偏差。
 
@@ -298,7 +302,9 @@ def ledger_parity(
     * ``unapplied`` —— 流水落了但 ``applied_volume = 0``（方向未知/代码识别不出/卖出超
       持仓被裁剪）：账本其实没反映这笔成交，原因在 ``note`` 列。
 
-    ``synth_prefix`` 由调用方给（与写入方同一个常量），不在这里写死字面量。
+    ``synth_prefix`` / ``seed_prefix`` 由调用方给（与写入方**同一个常量**），
+    不在这里写死字面量。带 ``seed_prefix`` 的行是期初结转（P3 迁入时就有的仓），
+    归 ``seeds`` 单独计数：它们本来就没有对应的本仓成交。
     """
     trades_by_order = _group_by_order(trades)
     ledger_by_order = _group_by_order(ledger_fills)
@@ -308,6 +314,7 @@ def ledger_parity(
     dup_posts: list[str] = []
     orphans: list[str] = []
     unapplied: list[str] = []
+    seeds: list[str] = []
 
     for key in sorted(set(trades_by_order) | set(ledger_by_order)):
         order_id = key[2]
@@ -315,6 +322,9 @@ def ledger_parity(
         by_fill_key: dict[str, list[int]] = {}
         for i, row in enumerate(pool):
             fill_key = str(row.get("fill_key") or "")
+            if fill_key.startswith(seed_prefix):
+                seeds.append(f"{order_id}:{fill_key}")
+                continue
             by_fill_key.setdefault(fill_key, []).append(i)
             if float(row.get("applied_volume") or 0.0) == 0.0:
                 unapplied.append(f"{order_id}:{fill_key}")
@@ -337,6 +347,8 @@ def ledger_parity(
             if i in used:
                 continue
             fill_key = str(row.get("fill_key") or "")
+            if fill_key.startswith(seed_prefix):
+                continue  # 上面已归 seeds（这里的 continue 只防将来改结构时漏一刀）
             if fill_key.startswith(synth_prefix):
                 dup_posts.append(f"{order_id}:{fill_key}")
             else:
@@ -353,6 +365,7 @@ def ledger_parity(
         orphans=tuple(orphans),
         unapplied=tuple(unapplied),
         index_enabled=index_enabled,
+        seeds=tuple(seeds),
     )
 
 
@@ -428,6 +441,7 @@ def classify_agent_ledger_parity(p: LedgerParity) -> CheckResult:
         "dup_posts": len(p.dup_posts),
         "orphans": len(p.orphans),
         "unapplied": len(p.unapplied),
+        "seeds": len(p.seeds),
         "trade_unique_index": p.index_enabled,
     }
     index_note = "" if p.index_enabled else "；成交唯一键未启用（并发双写无 DB 兜底）"
@@ -436,17 +450,23 @@ def classify_agent_ledger_parity(p: LedgerParity) -> CheckResult:
         "账本可能双记。正常由 trade 服务启动期自愈；建不起来多半是存量重复成交挡着"
         "（先去重），见 C14 告警里的重复组"
     )
-    if p.trades == 0 and p.ledger_rows == 0:
+    # 期初结转（P3）的流水**不是**「多出来的账」：它们没有对应的本仓成交，如实报出条数。
+    seed_note = f"，另含期初结转 {len(p.seeds)} 条" if p.seeds else ""
+    if p.trades == 0 and p.ledger_rows == len(p.seeds):
         if p.index_enabled:
             return CheckResult(
-                "C14", "分账账本一致性", "ok", "近 30 日无 LLM 腿成交、账本无流水（分账未参与）",
+                "C14",
+                "分账账本一致性",
+                "ok",
+                f"近 30 日无 LLM 腿成交、账本无本仓流水{seed_note}（分账未参与）",
                 metrics=metrics,
             )
         return CheckResult(
             "C14",
             "分账账本一致性",
             "warn",
-            f"近 30 日无 LLM 腿成交、账本无流水（分账未参与）{index_note}",
+            f"近 30 日无 LLM 腿成交、账本无本仓流水{seed_note}"
+            f"（分账未参与）{index_note}",
             index_fix,
             metrics,
         )
@@ -472,14 +492,16 @@ def classify_agent_ledger_parity(p: LedgerParity) -> CheckResult:
             "C14",
             "分账账本一致性",
             "ok",
-            f"近 30 日 {p.trades} 笔 LLM 腿成交全部落账（账本 {p.ledger_rows} 行，归属一致）",
+            f"近 30 日 {p.trades} 笔 LLM 腿成交全部落账（账本 {p.ledger_rows} 行，"
+            f"归属一致{seed_note}）",
             metrics=metrics,
         )
     return CheckResult(
         "C14",
         "分账账本一致性",
         level,
-        f"近 30 日 {p.trades} 笔 LLM 腿成交 / 账本 {p.ledger_rows} 行：" + "；".join(parts),
+        f"近 30 日 {p.trades} 笔 LLM 腿成交 / 账本 {p.ledger_rows} 行{seed_note}："
+        + "；".join(parts),
         " ".join(dict.fromkeys(suggestions)),
         metrics,
     )
@@ -1034,6 +1056,7 @@ async def check_c14_agent_ledger_parity(ctx: HealthContext) -> CheckResult:
     模拟盘（``sim_trades``）不写账本。窗口 :data:`AGENT_LEDGER_WINDOW_DAYS` 天，
     两侧各放宽 :data:`AGENT_LEDGER_WINDOW_SLACK_DAYS` 天（见该常量）。
     """
+    from backend.shared.decision.agent_ledger import SEED_FILL_PREFIX
     from backend.shared.trade_contract import (
         DUP_FILLS_SQL,
         SYNTH_TRADE_PREFIX,
@@ -1096,7 +1119,11 @@ async def check_c14_agent_ledger_parity(ctx: HealthContext) -> CheckResult:
         indexed = False
     return classify_agent_ledger_parity(
         ledger_parity(
-            trades, ledger, index_enabled=indexed, synth_prefix=SYNTH_TRADE_PREFIX
+            trades,
+            ledger,
+            index_enabled=indexed,
+            synth_prefix=SYNTH_TRADE_PREFIX,
+            seed_prefix=SEED_FILL_PREFIX,
         )
     )
 

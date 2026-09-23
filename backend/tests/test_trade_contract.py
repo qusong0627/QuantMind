@@ -340,6 +340,7 @@ async def test_c14_sql_pairs_a_real_fill_with_its_ledger_row() -> None:
         classify_agent_ledger_parity,
         ledger_parity,
     )
+    from backend.shared.decision.agent_ledger import SEED_FILL_PREFIX
     from backend.shared.database_manager_v2 import close_database, get_session
 
     for attempt in range(2):
@@ -414,7 +415,11 @@ async def test_c14_sql_pairs_a_real_fill_with_its_ledger_row() -> None:
         assert len(ledger) == 1, f"C14 账本取数没取到这一行: {ledger}"
         r = classify_agent_ledger_parity(
             ledger_parity(
-                trades, ledger, index_enabled=True, synth_prefix=SYNTH_TRADE_PREFIX
+                trades,
+                ledger,
+                index_enabled=True,
+                synth_prefix=SYNTH_TRADE_PREFIX,
+                seed_prefix=SEED_FILL_PREFIX,
             )
         )
         assert r.level == "ok", r.detail

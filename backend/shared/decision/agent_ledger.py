@@ -47,20 +47,34 @@
   ``l1.available_cash`` 的事；本层只**供给** ``virtual_cash`` 这个数。
 * **不做成交去重的判定**：唯一键是 DB 的事，本层只提供幂等**算术**
   （:func:`recorded_baseline` / :func:`fill_delta`）。
+
+期初结转（P3 数据迁移）
+-----------------------
+:func:`parse_legacy_ledger` 把隔壁 ``logs/live_ledger.json`` 解析成结转计划（纯函数，
+同一份文件两次解析逐字相同）。切换日之后本仓账本从零起，而三个 agent 名下的仓已经在
+真实账户里——不搬这一段，模型看不见自己的持仓（``mine_of`` 全空），与 2026-09-08
+事故同族、只是方向反过来。只搬 ``agents`` 段；搬的是**状态**，故 store 侧另有一条
+只许在空账本上执行的结转写入（见 ``agent_ledger_store.import_legacy_seed``）。
 """
 
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+from backend.shared.stock_utils import StockCodeUtil
 from backend.shared.utc_datetime import as_utc, to_utc_iso
 
 __all__ = [
     "DEFAULT_AGENT_QUOTA",
+    "SEED_FILL_PREFIX",
     "LedgerChange",
+    "LegacySeed",
+    "SeedAgent",
+    "SeedPosition",
     "agent_cash",
     "agent_positions",
     "agent_remaining",
@@ -69,10 +83,12 @@ __all__ = [
     "fill_delta",
     "holding_days",
     "mine_of",
+    "parse_legacy_ledger",
     "record_buy",
     "record_sell",
     "recorded_baseline",
     "sane_fill_price",
+    "seed_fill_key",
 ]
 
 #: 每个 agent 的初始虚拟额度（元）。¥10 万是隔壁 ``scripts/live_ledger.py:33`` 的
@@ -387,6 +403,242 @@ def holding_days(buy_ts: Any, sell_ts: Any) -> float | None:
     if b is None or s is None:
         return None
     return round((s - b).total_seconds() / 86400, 3)
+
+
+# ── 期初结转（P3：隔壁 live_ledger.json → 本仓账本）────────────────────
+#
+# 切换日之后本仓的账本从零开始，而三个 agent 名下的仓**已经在真实账户里**——
+# 不把这一段搬过来，模型看不到自己的持仓（``mine_of`` 全空 ⇒ 提示词被裁空 ⇒
+# 该止盈止损的仓永远不卖），而账面全绿。这正是 2026-09-08 事故的同族形态：
+# 「账本看不见真实持仓」，只是方向反过来。
+#
+# 只搬 ``agents`` 段（持仓 + 子账户现金）。``applied_fills`` **不搬**：那是隔壁
+# 用**委托号**做的当日幂等标记（"25446": {"filled": 200, "ts": "2026-09-23"}），
+# 而本仓的幂等是 ``(租户, 用户, 成交日, fill_key)`` 唯一索引、键是券商成交号——
+# 委托号在这里既不是键也认不出归属，搬过去只是一串没人读的历史。故只记条数。
+
+
+#: 期初结转流水的 ``fill_key`` 前缀。带它的行**不是本仓成交**，是「迁入时就有的
+#: 仓」：对账侧（体检 C14）按同一常量把这类行单独计数，不当「无对应成交」报。
+SEED_FILL_PREFIX = "legacy-seed:"
+
+
+def seed_fill_key(code: Any) -> str:
+    """期初结转的流水幂等键（**后缀码**为准，与账本列同口径）。"""
+    return f"{SEED_FILL_PREFIX}{StockCodeUtil.to_suffix(str(code or '').strip())}"
+
+
+@dataclass(frozen=True, slots=True)
+class SeedPosition:
+    """一条迁入的持仓（``code`` 已归一到后缀式）。"""
+
+    code: str
+    volume: float
+    cost_price: float
+    buy_ts: datetime | None = None
+    last_ts: datetime | None = None
+
+    @property
+    def cost(self) -> float:
+        """这条仓的成本（``volume × cost_price``）。"""
+        return round(self.volume * self.cost_price, 2)
+
+
+@dataclass(frozen=True, slots=True)
+class SeedAgent:
+    """一个 agent 的期初结转段。"""
+
+    agent: str
+    virtual_cash: float
+    positions: tuple[SeedPosition, ...] = ()
+
+    @property
+    def used(self) -> float:
+        """已用额度 = 现持仓成本合计（与 :func:`agent_used` 同口径，供报告比对）。"""
+        return round(sum(p.cost for p in self.positions), 2)
+
+
+@dataclass(frozen=True, slots=True)
+class LegacySeed:
+    """解析结果。``problems`` 非空 = **不许落库**（调用点必须拒绝，不许按猜的搬）。"""
+
+    version: int
+    agents: tuple[SeedAgent, ...]
+    problems: tuple[str, ...] = ()
+    notes: tuple[str, ...] = ()
+    applied_fills: int = 0
+
+    @property
+    def ok(self) -> bool:
+        return not self.problems
+
+    def agent(self, name: str) -> SeedAgent | None:
+        for a in self.agents:
+            if a.agent == name:
+                return a
+        return None
+
+
+def parse_legacy_ledger(raw: Any) -> LegacySeed:
+    """隔壁 ``logs/live_ledger.json`` → 期初结转计划（**纯解析，不碰库**）。
+
+    三种输出分得很清，落库侧只认第一种：
+
+    * ``problems``：**阻断**（版本不认识、现金/数量/成本非有限或非正、同一 agent
+      内归一后重码、类型不对）——按猜测搬会把脏值写进一本新账，之后再也分不清
+      「迁入时就这样」还是「本仓记错了」；
+    * ``notes``：**降级但不阻断**（时间戳缺失/不可解析 ⇒ 持仓天数将为 ``None``、
+      现金为负 ⇒ 透支如实搬、数量非整手、``used`` 字段与现算不符、未知字段）；
+    * 其余照搬。
+
+    ``agents`` 按名字排序（报告可复现，两次跑同一份文件输出逐字相同）。
+    """
+    problems: list[str] = []
+    notes: list[str] = []
+    if not isinstance(raw, Mapping):
+        return LegacySeed(1, (), (f"顶层不是 JSON 对象（{type(raw).__name__}）",), ())
+
+    version = raw.get("version")
+    if version != 1:
+        problems.append(f"版本 {version!r} 不是 1：不认识的账本格式（拒绝按猜测解析）")
+
+    agents_raw = raw.get("agents")
+    if not isinstance(agents_raw, Mapping):
+        problems.append(f"agents 段不是对象（{type(agents_raw).__name__}）")
+        agents_raw = {}
+
+    agents: list[SeedAgent] = []
+    for name, rec in sorted(agents_raw.items(), key=lambda kv: str(kv[0])):
+        agent_name = str(name or "").strip()
+        if not agent_name:
+            problems.append("有一个 agent 名为空：无法定位归属")
+            continue
+        if not isinstance(rec, Mapping):
+            problems.append(f"{agent_name}: 段不是对象（{type(rec).__name__}）")
+            continue
+        for key in rec:
+            if key not in ("positions", "virtual_cash", "used"):
+                notes.append(f"{agent_name}: 忽略未知字段 {key!r}")
+
+        cash = _finite(rec.get("virtual_cash"))
+        if cash is None:
+            problems.append(
+                f"{agent_name}: virtual_cash {rec.get('virtual_cash')!r} 非有限"
+            )
+            cash = 0.0
+        elif cash < 0:
+            notes.append(f"{agent_name}: 虚拟现金为负（{cash:.2f}）——透支如实搬")
+
+        positions, pos_problems, pos_notes = _parse_seed_positions(
+            agent_name, rec.get("positions")
+        )
+        problems.extend(pos_problems)
+        notes.extend(pos_notes)
+
+        used_raw = _finite(rec.get("used"))
+        seed_agent = SeedAgent(agent_name, round(cash, 4), tuple(positions))
+        if used_raw is not None and abs(used_raw - seed_agent.used) > 0.01:
+            # 实测（2026-09-23 dump）：文件里的 used 是**旧版遗留**，与按持仓现算
+            # 差一个数量级（356421.2 vs 19174.0）。读侧（隔壁 agent_used）本来就是
+            # 现算的，故以现算为准，只把不一致记成 note。
+            notes.append(
+                f"{agent_name}: 文件 used={used_raw:.2f} 与按持仓现算 "
+                f"{seed_agent.used:.2f} 不符（该字段已弃用，以现算为准）"
+            )
+        agents.append(seed_agent)
+
+    applied = raw.get("applied_fills")
+    if isinstance(applied, Mapping):
+        applied_count = len(applied)
+    else:
+        applied_count = 0
+        if applied is not None:
+            notes.append(
+                f"applied_fills 段不是对象（{type(applied).__name__}）：按 0 条计"
+            )
+    for key in raw:
+        if key not in ("version", "agents", "applied_fills"):
+            notes.append(f"忽略未知顶层字段 {key!r}")
+
+    return LegacySeed(
+        version=1 if version == 1 else 0,
+        agents=tuple(agents),
+        problems=tuple(problems),
+        notes=tuple(notes),
+        applied_fills=applied_count,
+    )
+
+
+def _parse_seed_positions(
+    agent_name: str, raw: Any
+) -> tuple[list[SeedPosition], list[str], list[str]]:
+    """持仓段解析：``(持仓, problems, notes)``（缺段按空仓，不阻断）。"""
+    problems: list[str] = []
+    notes: list[str] = []
+    out: list[SeedPosition] = []
+    if raw is None:
+        notes.append(f"{agent_name}: 无 positions 段（按空仓处理）")
+        return out, problems, notes
+    if not isinstance(raw, Mapping):
+        problems.append(f"{agent_name}: positions 段不是对象（{type(raw).__name__}）")
+        return out, problems, notes
+
+    seen: set[str] = set()
+    for code_raw, pos in sorted(raw.items(), key=lambda kv: str(kv[0])):
+        if not isinstance(pos, Mapping):
+            problems.append(
+                f"{agent_name}/{code_raw}: 持仓不是对象（{type(pos).__name__}）"
+            )
+            continue
+        code = StockCodeUtil.to_suffix(str(code_raw or "").strip())
+        if not code:
+            problems.append(f"{agent_name}/{code_raw}: 标的代码归一后为空")
+            continue
+        if code != str(code_raw):
+            notes.append(f"{agent_name}: 代码 {code_raw} 归一为 {code}")
+        if code in seen:
+            problems.append(
+                f"{agent_name}: 归一后重码 {code}（同一只票两行：无法合并）"
+            )
+            continue
+        seen.add(code)
+
+        volume = _finite(pos.get("volume"))
+        price = _finite(pos.get("cost_price"))
+        if volume is None or volume <= 0:
+            problems.append(
+                f"{agent_name}/{code}: 数量 {pos.get('volume')!r} 非正或非有限"
+            )
+            continue
+        if price is None or price <= 0:
+            problems.append(
+                f"{agent_name}/{code}: 成本价 {pos.get('cost_price')!r} 非正或非有限"
+            )
+            continue
+        if not float(volume).is_integer():
+            notes.append(f"{agent_name}/{code}: 数量 {volume} 非整股")
+        elif int(volume) % 100:
+            notes.append(
+                f"{agent_name}/{code}: 数量 {int(volume)} 非整手（送股/零股属正常）"
+            )
+        for key in pos:
+            if key not in ("volume", "cost_price", "buy_ts", "last_ts"):
+                notes.append(f"{agent_name}/{code}: 忽略未知字段 {key!r}")
+
+        buy_ts = _parse_ts(pos.get("buy_ts"))
+        last_ts = _parse_ts(pos.get("last_ts"))
+        if pos.get("buy_ts") is not None and buy_ts is None:
+            notes.append(
+                f"{agent_name}/{code}: buy_ts {pos.get('buy_ts')!r} 不可解析（持仓天数将为 None）"
+            )
+        if buy_ts is None:
+            notes.append(
+                f"{agent_name}/{code}: 无 buy_ts（持仓天数与结转流水日期将用结转日）"
+            )
+        out.append(
+            SeedPosition(code, float(volume), round(float(price), 4), buy_ts, last_ts)
+        )
+    return out, problems, notes
 
 
 # ── 内部 ────────────────────────────────────────────────────────────
