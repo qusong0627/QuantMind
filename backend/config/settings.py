@@ -19,7 +19,10 @@ class LoggingSettings:
 
 @dataclass
 class SecuritySettings:
-    secret_key: str = os.getenv("SECRET_KEY", "dev-secret-key")
+    # 兜底为空（原为 "dev-secret-key"）：任何形如密钥的字面量都可能被当成真的用上。
+    # JWT 密钥的实际读取点是 shared.auth.get_jwt_secret（含公开默认值过滤与启动期生成），
+    # 这里只作展示/兼容，不作为签名依据。见 backend/shared/auth.py。
+    secret_key: str = os.getenv("SECRET_KEY", "")
     jwt_algorithm: str = os.getenv("JWT_ALGORITHM", "HS256")
     jwt_expire_minutes: int = int(os.getenv("JWT_EXPIRE_MINUTES", "2880"))  # 48 hours
 

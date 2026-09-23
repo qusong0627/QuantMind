@@ -14,6 +14,7 @@ from fastapi import APIRouter, Depends, Request, Response
 
 from backend.services.api.routers.proxy_error_mapping import map_upstream_http_error
 from backend.services.api.user_app.middleware.auth import get_optional_user
+from backend.shared.trusted_headers import sanitize_forward_headers
 
 logger = logging.getLogger(__name__)
 
@@ -21,12 +22,9 @@ TRADE_BASE_URL = os.getenv("TRADE_SERVICE_URL", "http://trade-core:8002").rstrip
 
 router = APIRouter(tags=["Trade-Proxy"])
 
-# 剥离清单（C1 纵深 2026-09-17）：客户端携带的内部信任头一律不得透传给 trade——
-# 身份头由下方按鉴权上下文**重建**；X-Internal-Call 只允许服务间直连（容器网络）携带。
-_SKIP_HEADERS = {
-    "host", "content-length", "transfer-encoding",
-    "x-internal-call", "x-user-id", "x-tenant-id",
-}
+# 剥离清单（C1 纵深 2026-09-17）已收敛到 `shared/trusted_headers`（2026-09-23）：
+# 客户端携带的内部信任头一律不得透传给 trade——身份头由下方按鉴权上下文**重建**；
+# X-Internal-Call 只允许服务间直连（容器网络）携带。名单不再本地手抄。
 
 
 _client: httpx.AsyncClient | None = None
@@ -69,7 +67,7 @@ async def _do_proxy(request: Request, user: dict | None = None) -> Response:
     if request.url.query:
         url = f"{url}?{request.url.query}"
 
-    headers = {k: v for k, v in request.headers.items() if k.lower() not in _SKIP_HEADERS}
+    headers = sanitize_forward_headers(request.headers.items())
 
     # 显式注入身份
     if user:

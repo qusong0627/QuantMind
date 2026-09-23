@@ -23,8 +23,29 @@ DEFAULT_INTERNAL_CALL_SECRET = "dev-internal-call-secret"
 # （含 admin）并经内部网关直下真单（trading_mode 缺省 REAL）。轮换后应同步清理 .env 与
 # compose 的默认回退值。
 _PUBLIC_INTERNAL_DEFAULTS = frozenset(
-    {"changeme-internal-secret", "dev-internal-call-secret"}
+    {"changeme-internal-secret", "dev-internal-call-secret", "quantmind-internal-secret"}
 )
+
+#: 用户 JWT 签名密钥的已知公开默认值——**一律视为未配置**。
+#:
+#: 与 `_PUBLIC_INTERNAL_DEFAULTS` 同一类问题（2026-09-23 复核）。此前该键没有任何过滤：
+#: `config/settings.py` 兜底 `"dev-secret-key"`，compose 回退
+#: `"changeme-generate-a-random-secret"`，`.env.example` 印 `CHANGE_ME_...`。
+#: 三条都公开，而这是**签用户 JWT 的密钥**——拿仓库里读到的字面量自签一枚
+#: `{"sub":"1","roles":["admin"]}` 即可通过标准鉴权路径冒充管理员（已实测复现，
+#: 比 C1 更直接：C1 需要走内部请求头通道，这条走的是普通登录口）。
+_PUBLIC_JWT_DEFAULTS = frozenset(
+    {
+        "dev-secret-key",  # config/settings.py 的 os.getenv 兜底
+        "changeme-generate-a-random-secret",  # docker-compose.yml 的 :- 回退
+        "CHANGE_ME_GENERATE_YOUR_OWN_SECRET_KEY",  # .env.example
+        "CHANGE_ME_GENERATE_YOUR_OWN_JWT_SECRET",  # .env.example
+        "dev-secret",  # decode_jwt_token 的历史兜底
+    }
+)
+
+#: JWT 密钥候选键，按优先级。MRO 与历史行为一致（SECRET_KEY 优先）。
+_JWT_SECRET_ENV_KEYS = ("SECRET_KEY", "JWT_SECRET_KEY", "JWT_SECRET")
 
 
 def get_internal_call_secret() -> str:
@@ -52,13 +73,66 @@ def get_internal_call_secret() -> str:
     return ""
 
 
+def get_jwt_secret() -> str:
+    """用户 JWT 签名密钥（**唯一读取点**）。
+
+    权威优先级与 `get_internal_call_secret` 一致：**runtime.env（运维/管理台可热换）**
+    > 环境变量（非公开默认）> ""（空 = 无有效密钥，签/验一律拒绝 = fail-closed）。
+
+    同样**文件优先**：compose 会给 `SECRET_KEY`/`JWT_SECRET_KEY` 注入（可能过期的）
+    环境变量，若按「env 优先」会把启动期自动生成并落盘的新密钥遮蔽掉，
+    表现为**每次重启都轮换一次签名密钥**（同 2026-09-17 内部密钥的实测事故）。
+
+    返回 "" 是「部署未配置」而非「密钥为空串」——调用方必须**拒绝服务**，
+    绝不能把空串喂给 jwt.decode（那等于承认「用空密钥签的令牌」）。
+    """
+    import os
+
+    env_file: dict[str, str] = {}
+    try:
+        from .runtime_secrets import _parse, runtime_env_path
+
+        env_file = _parse(runtime_env_path())
+    except Exception:  # noqa: BLE001 - 读取失败回落环境变量
+        pass
+
+    for source in (env_file, os.environ):
+        for key in _JWT_SECRET_ENV_KEYS:
+            v = str(source.get(key, "") or "").strip()
+            if v and v not in _PUBLIC_JWT_DEFAULTS:
+                return v
+    return ""
+
+
 class AuthManager:
     """认证管理器"""
 
     def __init__(self):
-        self.secret_key = settings.security.secret_key
         self.algorithm = settings.security.jwt_algorithm
         self.expire_minutes = settings.security.jwt_expire_minutes
+
+    @property
+    def secret_key(self) -> str:
+        """**每次实时解析**，不是启动期快照。
+
+        启动期自动生成的新密钥要立刻生效（`main_oss.py` 生成时本对象已存在），
+        运维在 runtime.env 里换密钥也不该要求重启。见 `get_jwt_secret`。
+        """
+        return get_jwt_secret()
+
+    def _require_secret(self) -> str:
+        """取签名密钥；未配置则拒绝服务。
+
+        这里**不能**退回 `settings.security.secret_key`——那正是公开字面量
+        `dev-secret-key` 的来源。未配置就是不可用（fail-closed）。
+        """
+        key = self.secret_key
+        if not key:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="jwt_secret_not_configured",
+            )
+        return key
 
     def create_access_token(self, data: dict[str, Any]) -> str:
         """创建访问令牌
@@ -73,7 +147,7 @@ class AuthManager:
         expire = datetime.utcnow() + timedelta(minutes=self.expire_minutes)
         to_encode.update({"exp": expire})
 
-        encoded_jwt = jwt.encode(to_encode, self.secret_key, algorithm=self.algorithm)
+        encoded_jwt = jwt.encode(to_encode, self._require_secret(), algorithm=self.algorithm)
 
         logger.info(f"Access token created for user: {data.get('sub', 'unknown')}")
         return encoded_jwt
@@ -90,8 +164,9 @@ class AuthManager:
         Raises:
             HTTPException: 令牌无效时抛出
         """
+        secret = self._require_secret()  # 未配置 → 503，绝不拿空串/公开字面量验签
         try:
-            payload = jwt.decode(token, self.secret_key, algorithms=[self.algorithm])
+            payload = jwt.decode(token, secret, algorithms=[self.algorithm])
             return payload
         except jwt.ExpiredSignatureError:
             logger.warning("Token has expired")
@@ -100,7 +175,12 @@ class AuthManager:
                 detail="Token has expired",
                 headers={"WWW-Authenticate": "Bearer"},
             )
-        except jwt.JWTError as e:
+        except jwt.PyJWTError as e:
+            # 注意：这里不能写 `jwt.JWTError`。现装 PyJWT(2.13) 没有这个名字，
+            # 只有 `PyJWTError`/`InvalidTokenError`。写过的话，解释器在求值
+            # except 子句时自己抛 AttributeError，于是**任何格式非法的令牌
+            # 都变成 500 而不是 401**（匿名可触发，还会刷 traceback 日志）。
+            # 只有「已过期」那一支因为在前一个 except 里而幸免。
             logger.warning(f"Invalid token: {e}")
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
@@ -255,7 +335,14 @@ def decode_jwt_token(token: str) -> dict:
     except ImportError:  # pragma: no cover
         raise RuntimeError("python-jose 未安装，请执行: pip install python-jose[cryptography]")
 
-    secret_key = os.getenv("SECRET_KEY") or os.getenv("JWT_SECRET_KEY") or os.getenv("JWT_SECRET") or "dev-secret"
+    # 此前这里是自带的 `or "dev-secret"` 兜底——与 AuthManager 独立开来，
+    # 修一处漏一处。统一走 get_jwt_secret()：它就是 JWT 密钥的唯一读取点。
+    secret_key = get_jwt_secret()
+    if not secret_key:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="jwt_secret_not_configured",
+        )
     algorithm = os.getenv("ALGORITHM") or os.getenv("JWT_ALGORITHM") or "HS256"
 
     try:

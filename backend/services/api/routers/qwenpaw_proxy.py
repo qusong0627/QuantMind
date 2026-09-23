@@ -18,6 +18,7 @@ from backend.services.api.routers.proxy_error_mapping import (
     map_upstream_http_error,
 )
 from backend.services.api.user_app.middleware.auth import get_current_user
+from backend.shared.trusted_headers import sanitize_forward_headers
 
 router = APIRouter(tags=["OpenClaw-QwenPaw"])
 
@@ -36,18 +37,6 @@ QWENPAW_AUTH_PASSWORD = os.getenv("QWENPAW_AUTH_PASSWORD", "")
 _QWENPAW_TOKEN: str | None = None
 _QWENPAW_TOKEN_EXPIRY: float = 0
 
-_HOP_HEADERS = {
-    "connection",
-    "keep-alive",
-    "proxy-authenticate",
-    "proxy-authorization",
-    "te",
-    "trailers",
-    "transfer-encoding",
-    "upgrade",
-    "host",
-    "content-length",
-}
 _ALLOWED_UPLOAD_SUFFIXES = {
     ".pdf",
     ".doc",
@@ -108,11 +97,12 @@ OpenClawChatRequest.model_rebuild()
 
 
 def _sanitize_headers(headers: Iterable, bearer_token: str | None = None) -> dict[str, str]:
-    out: dict[str, str] = {}
-    for key, value in headers:
-        if key.lower() in _HOP_HEADERS:
-            continue
-        out[key] = value
+    """客户端头 → QwenPaw 上游。
+
+    2026-09-23 收紧：此前只过滤逐跳头，客户端自带的信任头会被透传。
+    `bearer_token` 是**服务端**另行取得的凭证，与客户端头无关。
+    """
+    out = sanitize_forward_headers(headers)
     if bearer_token:
         out["Authorization"] = f"Bearer {bearer_token}"
     return out

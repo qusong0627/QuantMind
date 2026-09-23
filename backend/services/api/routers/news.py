@@ -27,6 +27,8 @@ import httpx
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import Response
 
+from backend.shared.trusted_headers import sanitize_forward_headers
+
 try:
     from zoneinfo import ZoneInfo
     _HUNTLY_TZ = ZoneInfo("Asia/Shanghai")
@@ -2106,7 +2108,10 @@ async def _huntly_ui_proxy_api(request: Request) -> Response:
     if request.url.query:
         target += "?" + request.url.query
 
-    headers = {k: v for k, v in request.headers.items() if k.lower() not in ("host", "content-length", "connection")}
+    # 2026-09-23：改走统一剥离（此前只丢 host/content-length/connection，
+    # 客户端自带的信任头会被透传给 Huntly）。`Cookie` 有意保留——
+    # Huntly 子路径代理靠它携带浏览器侧会话，见下方 Set-Cookie 透传注释。
+    headers = sanitize_forward_headers(request.headers.items())
     # 后端全局 JWT 会话兜底（覆盖转发任何客户端 token，保证 UI 请求总有有效鉴权）
     try:
         token = await _ensure_session()

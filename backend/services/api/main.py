@@ -50,6 +50,8 @@ from backend.services.api.routers.push_orders import router as push_orders_route
 from backend.services.api.stock_terminal_us.router import router as stock_terminal_us_router
 from backend.services.api.routers.system import router as system_router
 from backend.services.api.routers.trade_proxy import router as trade_proxy_router
+from backend.services.api.routers.external.router import router as external_router
+from backend.shared.live_trading_gate import EXT_API
 from backend.services.api.routers.public_sync import router as public_sync_router
 from backend.services.api.routers.ws_proxy import router as ws_proxy_router
 from backend.services.api.user_app.api.v1.api_keys import router as api_keys_router
@@ -392,6 +394,9 @@ app.include_router(notifications.router, prefix="/api/v1", tags=["Notifications"
 app.include_router(inquiry.router, prefix="/api/v1", tags=["Inquiry"])
 app.include_router(files_router, prefix="/api/v1")
 app.include_router(public_sync_router, prefix="/api/v1")
+# 对外 API（外部系统/智能体接入）。前缀 EXT_API 是唯一出处——实盘闸门按同一
+# 常量做「未登记即拒绝」，两边不能各写一份。
+app.include_router(external_router, prefix=EXT_API)
 app.include_router(admin_router, prefix="/api/v1/admin")
 app.include_router(
     model_training_router, prefix="/api/v1/models", tags=["ModelTraining"]

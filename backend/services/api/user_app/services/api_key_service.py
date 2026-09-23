@@ -1,6 +1,5 @@
 import secrets
 import string
-from datetime import datetime
 from typing import List, Optional, Tuple
 
 from passlib.context import CryptContext
@@ -121,19 +120,31 @@ class ApiKeyService:
         return True
 
     async def validate_key(self, access_key: str) -> ApiKey | None:
-        """Internal use: Validate key and update last_used_at"""
+        """Internal use: Validate key and update last_used_at
+
+        ⚠️ 每个请求都会 ``commit`` 一次 ``last_used_at``。**高频调用路径不要用它**
+        （对外 API 走 `backend/services/api/routers/external/auth.py::load_active_key`，
+        只读、不提交，`last_used_at` 改在铸造令牌时更新）。
+
+        2026-09-23 修：原先用 ``datetime.now()``（naive）与 ``expires_at``
+        （TIMESTAMPTZ → asyncpg 回 aware）比较。aware 与 naive 相比会抛
+        ``TypeError``，所以**任何设了过期时间的凭据一旦走到这里就是 500**，
+        而不是「过期返回 None」。写入 ``last_used_at`` 同理——naive 值进
+        TIMESTAMPTZ 列会被按不同口径解释。现统一走 `shared/utc_datetime`；
+        判定本身收进 `shared/api_key_checks` 的**唯一实现**（这份判定曾在仓库里
+        被手写四遍，trade/qmt_agent 那份漂成了 500）。
+        """
+        from backend.shared.api_key_checks import api_key_rejection_reason
+        from backend.shared.utc_datetime import utc_now
+
         stmt = select(ApiKey).where(ApiKey.access_key == access_key)
         result = await self.db.execute(stmt)
         key = result.scalar_one_or_none()
 
-        if not key or not key.is_active:
+        if api_key_rejection_reason(key) is not None:
             return None
 
-        if key.expires_at and key.expires_at < datetime.now():
-            return None
-
-        # Update last_used (async, maybe optimize to not update on every hit)
-        key.last_used_at = datetime.now()
+        key.last_used_at = utc_now()
         await self.db.commit()
 
         return key

@@ -10,6 +10,7 @@ from fastapi.responses import Response, StreamingResponse
 from starlette.background import BackgroundTask
 
 from backend.services.api.routers.proxy_error_mapping import map_upstream_http_error
+from backend.shared.trusted_headers import HOP_HEADERS, sanitize_forward_headers
 from backend.services.api.user_app.middleware.auth import get_optional_user
 from backend.shared.auth import get_internal_call_secret
 
@@ -19,29 +20,13 @@ router = APIRouter()
 
 # 统一指向 Engine 服务的端口
 AI_IDE_SERVICE_URL = os.getenv("AI_IDE_SERVICE_URL", "http://127.0.0.1:8001").rstrip("/")
-_HOP_HEADERS = {
-    "connection",
-    "keep-alive",
-    "proxy-authenticate",
-    "proxy-authorization",
-    "te",
-    "trailers",
-    "transfer-encoding",
-    "upgrade",
-    "host",
-    "content-length",
-}
 
-# 客户端绝不允许自带身份/内部调用 Header — 否则可冒充任意用户
-_UNTRUSTED_CLIENT_HEADERS = {"x-user-id", "x-tenant-id", "x-internal-call"}
+# 客户端绝不允许自带身份/内部调用 Header — 否则可冒充任意用户。
+# 清单已收敛到 `shared/trusted_headers`（C1 续，2026-09-23）。
 
 
 def _sanitize_request_headers(headers: Iterable, user: dict | None = None) -> dict[str, str]:
-    out: dict[str, str] = {}
-    for k, v in headers:
-        if k.lower() in _HOP_HEADERS or k.lower() in _UNTRUSTED_CLIENT_HEADERS:
-            continue
-        out[k] = v
+    out = sanitize_forward_headers(headers)
 
     # 添加内部调用凭证
     out["X-Internal-Call"] = get_internal_call_secret()
@@ -55,7 +40,7 @@ def _sanitize_request_headers(headers: Iterable, user: dict | None = None) -> di
 def _sanitize_response_headers(headers: httpx.Headers) -> dict[str, str]:
     out: dict[str, str] = {}
     for k, v in headers.items():
-        if k.lower() in _HOP_HEADERS:
+        if k.lower() in HOP_HEADERS:
             continue
         out[k] = v
     return out

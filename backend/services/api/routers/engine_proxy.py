@@ -15,6 +15,7 @@ from fastapi import APIRouter, Depends, Request, Response
 from backend.services.api.routers.proxy_error_mapping import map_upstream_http_error
 from backend.services.api.user_app.middleware.auth import get_optional_user
 from backend.shared.auth import get_internal_call_secret
+from backend.shared.trusted_headers import sanitize_forward_headers
 
 logger = logging.getLogger(__name__)
 
@@ -22,8 +23,9 @@ ENGINE_BASE_URL = os.getenv("ENGINE_SERVICE_URL", "http://127.0.0.1:8001").rstri
 ENGINE_PROXY_TIMEOUT_SECONDS = float(os.getenv("ENGINE_PROXY_TIMEOUT_SECONDS", "120"))
 ENGINE_PROXY_LLM_TIMEOUT_SECONDS = float(os.getenv("ENGINE_PROXY_LLM_TIMEOUT_SECONDS", "600"))
 
-# 客户端绝不允许自带身份/内部调用 Header — 否则可冒充任意用户
-_UNTRUSTED_CLIENT_HEADERS = {"x-user-id", "x-tenant-id", "x-internal-call"}
+# 客户端绝不允许自带身份/内部调用 Header — 否则可冒充任意用户。
+# 清单已收敛到 `shared/trusted_headers`（C1 续，2026-09-23）：不再本地手抄，
+# 新增信任头只改那一处。转发时统一走 `sanitize_forward_headers()`。
 
 # 注意：这里不设 prefix，在 main.py 挂载
 router = APIRouter()
@@ -48,12 +50,7 @@ async def _proxy(request: Request, user: dict | None = None) -> Response:
     if request.url.query:
         url = f"{url}?{request.url.query}"
 
-    headers = {
-        k: v
-        for k, v in request.headers.items()
-        if k.lower() not in {"host", "content-length", "transfer-encoding"}
-        and k.lower() not in _UNTRUSTED_CLIENT_HEADERS
-    }
+    headers = sanitize_forward_headers(request.headers.items())
     headers["X-Internal-Call"] = get_internal_call_secret()
 
     if user:

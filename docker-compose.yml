@@ -79,13 +79,22 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    # 安全：业务端口保持公网可达（登录/仪表盘用）；数据库/中间件端口仅回环。
-    # 容器内仍需 0.0.0.0 监听（见 main_oss.py），宿主机暴露面由本节控制。
+    # 安全（2026-09-23 收敛）：**只有 8000 对外**，其余三个退回回环。
+    #
+    # C1 事故记录在案的一条是「8000-8003 全端口发布到宿主机可绕过 nginx」——
+    # 网关上的鉴权/限流/审计，只要 8001-8003 还开在局域网就等于装饰：绕过去
+    # 直接打 trade:8002 即可。收敛后全仓确认无消费者依赖非回环访问这三个端口：
+    # 服务间调用一律走容器内 127.0.0.1 或 Docker 网络主机名（都不经宿主机发布），
+    # 前端已收敛到 8000，Windows 便携包/实盘节点亦全用 127.0.0.1。
+    #
+    # 需要临时放开（如宿主机上的调试工具要从别的机器连）时，在 .env 覆盖
+    # QM_*_BIND 即可，无需改本文件。**不要**改默认为 0.0.0.0 提交。
+    # 容器内仍监听 0.0.0.0（见 main_oss.py），暴露面完全由本节控制。
     ports:
-      - "8000:8000"  # API Gateway
-      - "8001:8001"  # Engine (Qlib回测)
-      - "8002:8002"  # Trade (交易服务)
-      - "8003:8003"  # Stream (实时行情)
+      - "${QM_API_BIND:-0.0.0.0}:8000:8000"  # API Gateway —— 唯一对外入口
+      - "${QM_ENGINE_BIND:-127.0.0.1}:8001:8001"  # Engine (Qlib回测)
+      - "${QM_TRADE_BIND:-127.0.0.1}:8002:8002"  # Trade (交易服务)
+      - "${QM_STREAM_BIND:-127.0.0.1}:8003:8003"  # Stream (实时行情)
     environment:
       # 应用配置
       - APP_EDITION=oss
@@ -95,8 +104,16 @@ services:
       - PYTHONPATH=/app
 
       # 安全配置
-      - SECRET_KEY=${SECRET_KEY:-changeme-generate-a-random-secret}
-      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-changeme-generate-a-random-secret}
+      - SECRET_KEY=${SECRET_KEY:-}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-}
+      # 对外 API（/api/ext/v1）签名密钥。**空默认 = 对外 API 整体不可用**（握手 503），
+      # 这是有意的失败方向：不回落到任何默认值。
+      # 必须显式转发：本 compose 用 environment 白名单（无 env_file），只有被
+      # ${...} 引用的键才进容器。此前它只在 .env.example 里有名字却没在这里转发，
+      # 于是「按文档填了 .env、重启」→ 容器里读不到 → 永远 503，且与
+      # 「压根没打算开」**不可区分**——正是最该避免的静默不生效。
+      # 也可写进 config/runtime.env（挂载卷，管理台/宿主机可编辑，热生效）。
+      - EXTERNAL_API_SECRET=${EXTERNAL_API_SECRET:-}
 
       # 数据库配置
       - DB_DRIVER=asyncpg
@@ -116,6 +133,9 @@ services:
 
       # 远程数据源配置（用于从官方数据库拉取增量数据）
       - SOURCE_DATABASE_URL=${SOURCE_DATABASE_URL:-postgresql://user:pass@localhost:5432/quantmind}
+      # 公共数据同步的只读远端库（/api/v1/public-sync/*）。空默认 = 该面不可用。
+      # 同 EXTERNAL_API_SECRET：本 compose 用 environment 白名单，不转发就读不到。
+      - QM_PUBLIC_SYNC_REMOTE_DB_URL=${QM_PUBLIC_SYNC_REMOTE_DB_URL:-}
 
       # Redis 配置
       - REDIS_HOST=redis
@@ -214,7 +234,7 @@ services:
       - TRADING_AGENTS_RESULTS_DIR=/data/reports/trading_agents
 
       # 本地 Docker 训练编排（模型训练）
-      - INTERNAL_CALL_SECRET=${INTERNAL_CALL_SECRET:-changeme-internal-secret}
+      - INTERNAL_CALL_SECRET=${INTERNAL_CALL_SECRET:-}
       - TRAINING_IMAGE=${TRAINING_IMAGE:-quantmind-oss:latest}
       - TRAINING_DOCKER_NETWORK=${TRAINING_DOCKER_NETWORK:-quantmind_quantmind-net}
       - HOST_PROJECT_PATH=${HOST_PROJECT_PATH:-/opt/quantmind}
@@ -343,6 +363,12 @@ services:
       - ./backend:/app/backend
       # 内置文档（供管理后台「打开部署指南」等渲染 /static/docs 使用）
       - ./docs:/app/docs:ro
+      # 出厂配置（只读）。测试跑在容器里，而「公开默认密钥」护栏要扫的就是这两份
+      # 出厂文件——不挂进来它就只能跳过，跳过等于没有护栏。
+      # 两份都必须存在（已入库）；若某个部署缺文件，Docker 会在该路径建目录，
+      # 表现为测试报「不是一个文件」——比静默跳过好。
+      - ./.env.example:/app/.env.example:ro
+      - ./docker-compose.yml:/app/docker-compose.yml:ro
       - ./config:/app/config
       - ./scripts:/app/scripts
       # AlphaAgent 包源码（容器内 Python 通过 PYTHONPATH=/app 直接 import）
@@ -427,7 +453,7 @@ services:
       - TRADING_AGENTS_RESULTS_DIR=/data/reports/trading_agents
 
       # 本地 Docker 训练编排（模型训练）
-      - INTERNAL_CALL_SECRET=${INTERNAL_CALL_SECRET:-changeme-internal-secret}
+      - INTERNAL_CALL_SECRET=${INTERNAL_CALL_SECRET:-}
       - TRAINING_IMAGE=${TRAINING_IMAGE:-quantmind-oss:latest}
       - TRAINING_DOCKER_NETWORK=${TRAINING_DOCKER_NETWORK:-quantmind_quantmind-net}
       - HOST_PROJECT_PATH=${HOST_PROJECT_PATH:-/opt/quantmind}
@@ -737,7 +763,7 @@ services:
       - STRATEGY_TEMPLATES_DIR=/app/strategy_templates
       - QLIB_BACKTEST_RESULT_DIR=/data/backtest_results
       - QLIB_BACKTEST_KERNELS=1
-      - INTERNAL_CALL_SECRET=${INTERNAL_CALL_SECRET:-changeme-internal-secret}
+      - INTERNAL_CALL_SECRET=${INTERNAL_CALL_SECRET:-}
       - QUANTMIND_API_BASE_URL=http://quantmind:8000
       - QUANTMIND_ENGINE_URL=http://quantmind:8001
       - QUANTMIND_USER_ID=qwenpaw
@@ -765,6 +791,9 @@ services:
       - ./docker/training/fonts:/app/docker/training/fonts:ro
       # QuantMind 数据（读写）
       - ./data:/data
+      # 数据盘新家（2026-09-23）：data 目录已是软链 → /media/zbox/data/quantmind。
+      # 容器内按同一绝对路径挂载，保证 /quantmind/data 这条软链在容器内可解析。
+      - /media/zbox/data/quantmind:/media/zbox/data/quantmind:rw
       - ./db:/app/db
       - ./models:/app/models
       - ./logs:/app/logs

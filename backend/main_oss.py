@@ -57,6 +57,28 @@ if not _get_internal_secret():
         os.environ["INTERNAL_CALL_SECRET"] = _auto
         logger.warning("INTERNAL_CALL_SECRET 自动生成（仅本进程；落盘失败: %s）", _exc)
 
+# ── 同类加固（2026-09-23）：**用户 JWT 签名密钥**同样不得取公开默认值 ──
+# config/settings.py 兜底 "dev-secret-key"、compose 回退 "changeme-generate-a-random-secret"、
+# .env.example 印 "CHANGE_ME_..." —— 三条都公开。这是签用户 JWT 的密钥，拿公开字面量
+# 自签 {"sub":"1","roles":["admin"]} 就能通过标准登录口冒充管理员（已实测复现）。
+# 读写在 shared.auth.get_jwt_secret（runtime.env 权威，原因同上一段：compose 注入的
+# 环境变量会遮蔽落盘的新密钥，导致每次重启轮换一次）。
+from backend.shared.auth import get_jwt_secret as _get_jwt_secret
+
+if not _get_jwt_secret():
+    _auto_jwt = _secrets.token_urlsafe(48)
+    try:
+        _set_secret("SECRET_KEY", _auto_jwt)
+        logger.warning(
+            "SECRET_KEY 缺失或为公开默认值 → 已生成强随机并写入 runtime.env"
+            "（全服务生效；既有登录会话将失效，需重新登录）"
+        )
+    except Exception as _exc:  # noqa: BLE001
+        if os.getenv("QUANTMIND_ENV", "").lower() in ("production", "prod"):
+            raise RuntimeError(f"SECRET_KEY 无法生成/持久化: {_exc}") from _exc
+        os.environ["SECRET_KEY"] = _auto_jwt
+        logger.warning("SECRET_KEY 自动生成（仅本进程；落盘失败: %s）", _exc)
+
 # ── Qlib 数据目录修复 ──
 # features_real 是实际数据目录，Qlib 期望 features/
 # 通过 qlib_paths 统一解析，优先 QuantDB 缓存路径

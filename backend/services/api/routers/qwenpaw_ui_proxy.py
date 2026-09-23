@@ -21,23 +21,12 @@ import httpx
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, PlainTextResponse, Response, StreamingResponse
 
+from backend.shared.trusted_headers import sanitize_forward_headers
+
 router = APIRouter(tags=["QwenPaw-UI"])
 
 QWENPAW_BASE_URL = os.getenv("QWENPAW_BASE_URL", "http://qwenpaw:8088").rstrip("/")
 QWENPAW_WS_URL = QWENPAW_BASE_URL.replace("http://", "ws://").replace("https://", "wss://")
-
-_HOP_HEADERS = {
-    "connection",
-    "keep-alive",
-    "proxy-authenticate",
-    "proxy-authorization",
-    "te",
-    "trailers",
-    "transfer-encoding",
-    "upgrade",
-    "host",
-    "content-length",
-}
 
 _STATIC_MIME = {
     ".js": "application/javascript",
@@ -229,12 +218,12 @@ def _guess_mime(path: str) -> str:
 
 
 def _forward_headers(request: Request) -> dict[str, str]:
-    out: dict[str, str] = {}
-    for key, value in request.headers.items():
-        if key.lower() in _HOP_HEADERS:
-            continue
-        out[key] = value
-    return out
+    """客户端头 → QwenPaw UI。
+
+    2026-09-23 收紧：此前只过滤逐跳头，客户端自带的信任头会被透传
+    （本文件是 `test_trusted_headers` 的结构性扫描查出来的漏网代理）。
+    """
+    return sanitize_forward_headers(request.headers.items())
 
 
 async def _proxy_static(path: str, accept: str) -> Response:

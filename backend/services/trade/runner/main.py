@@ -99,7 +99,9 @@ def get_internal_call_secret() -> str:
         except Exception:
             pass
 
-    return str(os.getenv("INTERNAL_CALL_SECRET") or os.getenv("SECRET_KEY") or "dev-internal-call-secret").strip()
+    # 不再回落公开默认值，也不拿 SECRET_KEY（用户 JWT 签名密钥）当内部调用密钥使——
+    # 两者是独立信任链，串用会让任一处的泄露扩散到另一处。
+    return str(os.getenv("INTERNAL_CALL_SECRET") or "").strip()
 
 
 def _headers(user_id: str, tenant_id: str) -> dict[str, str]:

@@ -392,14 +392,9 @@ async def lifespan(app: FastAPI):
             run_simulation_t1_unlock_task(),
             name="simulation-t1-unlock",
         )
-        from backend.services.simulation.services.pending_order_worker import (
-            run_simulation_pending_order_worker,
-        )
-
-        simulation_pending_order_task = asyncio.create_task(
-            run_simulation_pending_order_worker(),
-            name="simulation-pending-order-worker",
-        )
+        # 挂单消费者与 EOD worker 的注册**只在下文 T-P0-06 块里各一处**
+        # （带 env 开关、且任务挂到 shutdown 会取消的变量上）。
+        # 此处曾各再注册一份 → 两个协程抢同一批 pending 单。
         from backend.services.live_trading.services.risk_trigger_scanner import (
             RiskTriggerScanner,
             scan_enabled,
@@ -423,18 +418,7 @@ async def lifespan(app: FastAPI):
             run_simulation_corporate_action_task(),
             name="simulation-corporate-action",
         )
-        try:
-            from backend.services.simulation.services.eod_service import (
-                run_simulation_eod_worker,
-            )
-
-            simulation_eod_task = asyncio.create_task(
-                run_simulation_eod_worker(),
-                name="simulation-eod-worker",
-            )
-            logger.info("Simulation EOD worker scheduled")
-        except Exception as e:
-            logger.error("trade simulation EOD worker start failed: %s", e, exc_info=True)
+        # EOD worker 的注册见下文 T-P0-06 块（同样只此一处）。
         # 模拟盘持久化权益结算（对账确权→行情重估→权益持久化，默认 30s 周期，
         # 无交易时段门控，启动即执行首周期）。取代旧的三个独立 worker：
         # 每日 03:20 reconcile、300s fund snapshot、仅交易时段运行的 remark——
@@ -480,7 +464,9 @@ async def lifespan(app: FastAPI):
                 "no",
                 "off",
             }:
-                app.state.sim_eod_worker_task = asyncio.create_task(
+                # 挂到 shutdown 取消清单里的变量（`app.state.*` 那份无人读取、
+                # 也从不取消，进程退出时任务泄漏）
+                simulation_eod_task = asyncio.create_task(
                     run_simulation_eod_worker(), name="simulation-eod"
                 )
                 logger.info("Simulation EOD worker started")
@@ -505,7 +491,8 @@ async def lifespan(app: FastAPI):
                 "no",
                 "off",
             }:
-                app.state.sim_pending_order_worker_task = asyncio.create_task(
+                # 同上：挂到 shutdown 会取消的变量，不挂 app.state
+                simulation_pending_order_task = asyncio.create_task(
                     run_simulation_pending_order_worker(),
                     name="simulation-pending-order",
                 )

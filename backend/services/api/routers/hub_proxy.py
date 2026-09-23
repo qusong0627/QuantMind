@@ -30,6 +30,7 @@ from backend.services.api.user_app.middleware.auth import get_current_user
 from backend.shared.database_manager_v2 import get_session
 from backend.shared.model_registry import model_registry_service
 from backend.shared.runtime_secrets import get_secret
+from backend.shared.trusted_headers import sanitize_forward_headers
 
 logger = logging.getLogger(__name__)
 
@@ -38,19 +39,6 @@ router = APIRouter(tags=["HubProxy"])
 HUB_BASE_URL = os.getenv("QUANTDB_HUB_URL", "https://quantdb.quantmind.cloud").rstrip(
     "/"
 )
-
-_HOP_HEADERS = {
-    "connection",
-    "keep-alive",
-    "proxy-authenticate",
-    "proxy-authorization",
-    "te",
-    "trailers",
-    "transfer-encoding",
-    "upgrade",
-    "host",
-    "content-length",
-}
 
 # 远端只接受 gzip 压缩的模型包
 _UPLOAD_CONTENT_TYPE = "application/gzip"
@@ -79,7 +67,13 @@ class ImportRemoteRequest(BaseModel):
 
 
 def _forward_headers(request: Request) -> dict[str, str]:
-    return {k: v for k, v in request.headers.items() if k.lower() not in _HOP_HEADERS}
+    """客户端头 → hub（**外部**第三方服务，本模块是全仓唯一对外转发点之一）。
+
+    2026-09-23 收紧：此前只过滤逐跳头，客户端自带的信任头会被原样递出到
+    组织边界之外——内部密钥一旦经此泄露给第三方即为不可挽回。统一走
+    `sanitize_forward_headers`。
+    """
+    return sanitize_forward_headers(request.headers.items())
 
 
 def _require_api_key() -> str:

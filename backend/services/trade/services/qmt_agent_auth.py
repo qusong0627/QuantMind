@@ -7,7 +7,6 @@ QMT Agent auth helpers.
 
 from __future__ import annotations
 
-from datetime import datetime
 from typing import Optional
 
 from passlib.context import CryptContext
@@ -16,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.services.api.user_app.models.api_key import ApiKey
 from backend.services.trade_shared.models.qmt_agent_binding import QMTAgentBinding
+from backend.shared.api_key_checks import api_key_rejection_reason
 from backend.shared.qmt_bridge_auth import (
     BridgeSessionContext,
     SESSION_REFRESH_THRESHOLD_SECONDS,
@@ -39,12 +39,19 @@ async def resolve_api_key(session: AsyncSession, access_key: str) -> ApiKey | No
 
 
 def validate_api_key_secret(key: ApiKey | None, secret_key: str) -> str | None:
-    if key is None:
-        return "access_key_not_found"
-    if not key.is_active:
-        return "access_key_inactive"
-    if key.expires_at and key.expires_at < datetime.now():
-        return "access_key_expired"
+    # 可用性判定（存在/启用/未过期）走 shared 的唯一实现，不再就地手写。
+    #
+    # 2026-09-23 修：这里原本自己写了一遍到期判断，用的是
+    # `key.expires_at < datetime.now()` —— 左边是 TIMESTAMPTZ（asyncpg 回
+    # **aware**），右边是 **naive** 本地墙钟，比较直接抛
+    # `TypeError: can't compare offset-naive and offset-aware datetimes`，
+    # 整条 QMT agent 鉴权 500（不是「偏 8 小时」这种温和走样）。
+    # 之所以一直没暴露：现网 api_keys 的 expires_at 全是 NULL（复核时实测 0/2），
+    # 短路让这行**从未被执行过**——直到有人签发一枚带有效期的凭据。
+    # 判定逻辑收进 `shared/api_key_checks` 之后，四份拷贝不会再各自漂移。
+    reason = api_key_rejection_reason(key)
+    if reason is not None:
+        return reason
     if not secret_key or not pwd_context.verify(secret_key, key.secret_hash):
         return "secret_key_invalid"
     return None
