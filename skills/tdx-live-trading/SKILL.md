@@ -39,7 +39,7 @@ QuantMind 交易执行链路的**操作 + 监控手册**：从模型推理信号
 | **L2 分数中性=无生产推理** | 无当天推理时 `load_latest_scores` 为空 → 融合回退中性 50 → 不触发买卖（正确的稳定性行为，不是故障） |
 | **A股红涨绿跌** | 前端/报告里红色=涨/买入，绿色=跌/卖出 |
 | **桥运行时配置在 Redis** | 容器 env 的 `TDX_BRIDGE_URL` 可能是过期 IP；真实生效值在 `trade:tdx_config:runtime`（当前桥 = http://192.168.31.31:8550） |
-| **exe 不提交** | 桥的 build_exe 产物禁止入库（主仓库 .gitignore 已含 `*.exe`） |
+| **实盘包跑源码、不跑 exe** | 仓库里的 `tools/bridge-windows/dist/TDXBridge.exe` 是 `.gitignore` 白名单内的历史产物，早于 BSFlag 买卖方向修复；`deploy/live-win/build_live_pack.sh` 从源码注入 `<包根>/bridge/tdx` |
 
 ## 链路架构
 
@@ -54,7 +54,7 @@ trade 服务 (8002) 两个自动循环
         融合分>2.2买 / ≤2.2卖 / 上证MA20 只卖不买 → 桥下单
        │
        ▼
-Windows 桥 bridge-windows (8550, token 认证)  ←─ /home/zbox/projects/quantmind/bridge/windows
+Windows 桥 bridge-windows (8550, token 认证)  ←─ /home/zbox/projects/quantmind/tools/bridge-windows
        │  http://127.0.0.1:17709  (TQ 常驻策略, 在通达信客户端内)
        ▼
 通达信客户端 TdxW.exe (完整 Windows 客户端 = tdx-datatest) ──> 券商服务器
