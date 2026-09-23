@@ -129,8 +129,9 @@ def map_snapshot(result: dict) -> dict:
 def check_sltp_trigger(price: float, entry_price: float, cfg: dict) -> tuple[bool, str]:
     """止损/止盈/移动止损触发判断（T-P2-04：**委托 exit_rules 唯一实现**）。
 
-    cfg: {stop_loss_pct, take_profit_pct, trailing_stop_pct, highest_price}
+    cfg: {stop_loss_pct, stop_loss_price, take_profit_pct, trailing_stop_pct, highest_price}
     highest_price 为持仓以来最高价（由调用方维护，只升不降）。
+    ``stop_loss_price`` 是绝对价硬止损（P1.3；与 pct 同时给时取更紧的那条）。
     返回 (triggered, reason)——文案与历史口径保持兼容（桥 daemon 与
     sltp_executor 零改动）。
     """
@@ -138,6 +139,7 @@ def check_sltp_trigger(price: float, entry_price: float, cfg: dict) -> tuple[boo
 
     rules = ExitRuleSet(
         hard_stop_pct=cfg.get("stop_loss_pct"),
+        hard_stop_price=cfg.get("stop_loss_price"),
         take_profit_pct=cfg.get("take_profit_pct"),
         trailing_stop_pct=cfg.get("trailing_stop_pct"),
     )

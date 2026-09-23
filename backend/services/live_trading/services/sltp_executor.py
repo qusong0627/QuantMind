@@ -4,13 +4,36 @@
 
 * 触发规则复用 :func:`tdx_quote_feed.check_sltp_trigger`（与 TDX 桥 ``stop_loss_daemon``
   同口径），避免两套语义。
-* 卖出保护价取桥的 ``DownStopPrice``（跌停价）：实测报跌停价成交在盘口买一
-  （2.21 报 → 2.34 成交），既保证成交又不让价；跌停封死时挂队等待并如实告警。
+* 卖出保护价默认 ``aggressive`` = ``max(跌停价, 现价 × 0.99)``——
+  **可成交且合法的最激进报价**。
+  ⚠️ 2026-09-21 更正：旧实现直接报跌停价（``DownStopPrice``），依据是「挂 2.21
+  成交 2.34」的实测；该结论只对当时那只票的工况（近跌停）成立，已**被证伪**——
+  报跌停价属**越界申报** → 柜台废单，当日 002074 按跌停价报的 42 笔真单全废、
+  0 成交，并形成「触发→废单→重布防→再触发」每 2 分钟一笔的死循环。
+  口径单源在 :func:`lot_rules.aggressive_sell_price`。
 * **不做追价/撤单重挂**：保护价已是当日最激进可报价，重挂只会丢队列优先级。
 * 走内部真单链路（落 ``orders`` 表 + ``qmt_exec_poller`` 回收），天然绕过镜像闸门。
 * 数量默认取柜台 ``can_use_volume`` 全量（全量卖出允许碎股）；部分卖出按板块整手对齐。
 * 一次触发当日只执行一次（``armed → triggered → submitted → filled/…``），
   ``POST /reset`` 或改规则后重新武装。
+
+**P1.3 三项扩展**（LLM 条件单口径：绝对价 / 棘轮 / 部分减仓）：
+
+* ``stop_loss_price`` —— 绝对价硬止损（支撑位是价位，不是百分比）。
+  与 ``stop_loss_pct`` 同时配置时取**更高（更紧）**的那条线（见 ``exit_rules``）。
+* ``move_stop_trigger`` + ``move_stop_to`` —— **条件棘轮**：现价上触触发价即把防守
+  抬到目标价（「上过 105 就把防守抬到保本」）。只升不降；``move_stop_to`` 必须低于
+  ``move_stop_trigger``（否则武装即触发 → 整条拒绝）。
+  抬高的防守位**跨交易日保留**（持仓拿几周是常态），但持仓一旦换了
+  （成本价变动超阈值 / 总量变大）立即作废并告警——否则新开的仓会被上一个仓的
+  防守位秒杀。``POST /reset`` 一并清掉，回到规则配置的初始防守位。
+* ``reduce_pct`` —— 部分减仓（如 0.33 = 减三分之一，按板块整手对齐）。
+  **单次触发语义不变**：减仓后规则即终态，剩余仓位要重新武装才继续受保护
+  （通知里明说）；分档减仓由调用方分多轮改规则实现，而不是一条规则反复触发。
+
+**配置纪律**：新字段任一项非法（``reduce_pct`` 越界、棘轮不成对/顺序反了、
+绝对价非正）一律**整条拒绝**并记入 ``rejected_rules``（读时派生、不落盘），
+绝不「清掉字段继续用」——把「减三分之一」静默执行成「全量卖出」是真金白银的错。
 """
 
 from __future__ import annotations
@@ -24,7 +47,11 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from backend.services.live_trading.services.lot_rules import align_sell_quantity
+from backend.services.live_trading.services.lot_rules import (
+    aggressive_sell_price,
+    align_sell_quantity,
+    protect_sell_price,
+)
 from backend.services.live_trading.services.tdx_quote_feed import (
     check_sltp_trigger,
     load_sltp_config,
@@ -34,6 +61,7 @@ from backend.services.live_trading.services.trading_session import (
     is_trading_time,
     trade_date_str,
 )
+from backend.shared.exit_rules import ratchet_stop_price
 
 logger = logging.getLogger(__name__)
 
@@ -60,14 +88,26 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "user_id": "1",
     "tenant_id": "default",
     "poll_interval_sec": 3,
-    "protect_price_mode": "limit_floor",  # limit_floor（跌停价保护）| market
+    "protect_price_mode": "aggressive",
     "pending_alert_sec": 300,  # 未成交告警 + 余量策略触发阈值（秒，0=立即）
     "remainder_policy": "alert_only",  # alert_only | cancel | requote_at_protect_price
     "close_reminder_sec": 300,  # 收盘前提醒窗口（秒）
     "rules": [],
 }
 
+# 保护价模式（**唯一白名单**，API 校验层引用此处，勿各写一份）：
+#   aggressive  = max(跌停价, 现价 × 0.99)，默认可成交且合法的最激进报价
+#   limit_floor = 原样报跌停价，**遗留**——仅「已封跌停要排队」时合法，其余越界废单
+#   market      = 市价委托（柜台映射最新价）
+VALID_PROTECT_MODES = ("aggressive", "limit_floor", "market")
+DEFAULT_PROTECT_MODE = "aggressive"
 VALID_REMAINDER_POLICIES = ("alert_only", "cancel", "requote_at_protect_price")
+
+
+def _resolve_mode(cfg: dict[str, Any]) -> str:
+    """配置 → 保护价模式（缺省/非法一律回落 ``aggressive``，绝不静默用遗留口径）。"""
+    mode = str(cfg.get("protect_price_mode") or "").strip().lower()
+    return mode if mode in VALID_PROTECT_MODES else DEFAULT_PROTECT_MODE
 
 # A 股收盘（沪深连续竞价 15:00 截止）
 _CLOSE_HOUR = 15
@@ -86,7 +126,63 @@ DEFAULT_RULE: dict[str, Any] = {
     "stop_loss_pct": None,
     "take_profit_pct": None,
     "trailing_stop_pct": None,
+    # P1.3：绝对价止损 / 条件棘轮（触发价 + 目标防守价）/ 部分减仓比例
+    "stop_loss_price": None,
+    "move_stop_trigger": None,
+    "move_stop_to": None,
+    "reduce_pct": None,
 }
+
+# 抬高的防守位与持仓对不上的判定阈值（P1.3）：
+# 成本价变动超 0.5%（券商均价两位小数，正常波动不会这么大）或总量变大 → 视为换了持仓。
+_STOP_ENTRY_TOLERANCE = 0.005
+
+# 参与「规则级 float 转换」的字段（normalize_rule 与 API 契约共用一份清单）
+_RULE_FLOAT_FIELDS = (
+    "entry_price",
+    "quantity",
+    "stop_loss_pct",
+    "take_profit_pct",
+    "trailing_stop_pct",
+    "stop_loss_price",
+    "move_stop_trigger",
+    "move_stop_to",
+    "reduce_pct",
+)
+
+
+def rule_reject_reason(rule: dict[str, Any]) -> str:
+    """P1.3 新字段的组合校验（**单源**：执行器与 API 契约都调它）。
+
+    返回非空 = 该规则必须**整条拒绝**，不能「清掉非法字段接着用」：
+
+    * ``reduce_pct`` 越界（如把 50% 写成 ``50``）→ 清掉它会退化成「全量卖出」，
+      即把「减三分之一」执行成「清仓」；
+    * 棘轮不成对 / ``move_stop_to ≥ move_stop_trigger`` → 武装即触发；
+    * ``stop_loss_price ≤ 0`` → 无意义的防守线（关闭请给 ``null``）；
+    * ``quantity`` 与 ``reduce_pct`` 同给 → 绝对值与比例互斥，谁优先都是猜。
+    """
+    rp_raw = rule.get("reduce_pct")
+    rp = _to_float(rp_raw)
+    if rp_raw is not None and (rp is None or not (0 < rp <= 1)):
+        return f"reduce_pct={rp_raw!r} 非法（须在 (0,1]；拒绝整条而非回落全量卖出）"
+    if rule.get("quantity") is not None and rp_raw is not None:
+        return "quantity 与 reduce_pct 互斥（绝对值 vs 比例，二者只给一个）"
+    trigger_raw, move_to_raw = rule.get("move_stop_trigger"), rule.get("move_stop_to")
+    if (trigger_raw is None) != (move_to_raw is None):
+        return "move_stop_trigger 与 move_stop_to 必须成对给出"
+    if trigger_raw is not None:
+        t, m = _to_float(trigger_raw), _to_float(move_to_raw)
+        if t is None or m is None or not (0 < m < t):
+            return (
+                f"move_stop_to={move_to_raw!r} 必须为正且低于 "
+                f"move_stop_trigger={trigger_raw!r}（否则武装即触发）"
+            )
+    sp_raw = rule.get("stop_loss_price")
+    sp = _to_float(sp_raw)
+    if sp_raw is not None and (sp is None or sp <= 0):
+        return f"stop_loss_price={sp_raw!r} 非法（须为正数，关闭请给 null）"
+    return ""
 
 
 # --------------------------------------------------------------------------
@@ -121,7 +217,7 @@ def normalize_rule(raw: dict[str, Any]) -> dict[str, Any]:
         logger.warning("[SltpExec] 规则 side=%s 非法，按 SELL 处理: %s", side, rule["symbol"])
         side = "SELL"
     rule["side"] = side
-    for key in ("entry_price", "quantity", "stop_loss_pct", "take_profit_pct", "trailing_stop_pct"):
+    for key in _RULE_FLOAT_FIELDS:
         value = rule.get(key)
         if value in ("", None):
             rule[key] = None
@@ -143,8 +239,19 @@ def merge_config(raw: dict[str, Any] | None) -> dict[str, Any]:
         cfg["pending_alert_sec"] = raw.get("unfilled_alert_sec")
     policy = str(cfg.get("remainder_policy") or "alert_only").strip().lower()
     cfg["remainder_policy"] = policy if policy in VALID_REMAINDER_POLICIES else "alert_only"
-    cfg["rules"] = [normalize_rule(r) for r in (cfg.get("rules") or []) if isinstance(r, dict)]
-    cfg["rules"] = [r for r in cfg["rules"] if r["symbol"]]
+    cleaned = [normalize_rule(r) for r in (cfg.get("rules") or []) if isinstance(r, dict)]
+    rules: list[dict[str, Any]] = []
+    rejected: list[dict[str, str]] = []
+    for rule in cleaned:
+        reason = rule_reject_reason(rule)
+        if reason:
+            logger.warning("[SltpExec] 规则整条拒绝 %s: %s", rule.get("symbol"), reason)
+            rejected.append({"symbol": rule.get("symbol") or "", "reason": reason})
+            continue
+        rules.append(rule)
+    cfg["rules"] = [r for r in rules if r["symbol"]]
+    #: 读时派生（每次 load_config 重算），不落盘——见 _persistable。
+    cfg["rejected_rules"] = rejected
     cfg["enabled"] = bool(cfg.get("enabled"))
     return cfg
 
@@ -154,6 +261,9 @@ def trigger_config(rule: dict[str, Any], fallback: dict[str, Any] | None) -> dic
 
     设置页把「止损止盈」整个关掉（``enabled=False``）时不再回落到它的阈值——
     否则用户关掉的提醒会以「执行器缺省阈值」的名义继续触发真单。
+
+    ``stop_loss_price`` **无设置页回落**：绝对价是规则级信息（含棘轮抬高后的
+    有效防守位，由调用方写进传入的 rule 副本），设置页没有对应字段。
     """
     fb = fallback or {}
     if fb.get("enabled") is False:
@@ -162,9 +272,50 @@ def trigger_config(rule: dict[str, Any], fallback: dict[str, Any] | None) -> dic
         "stop_loss_pct": rule.get("stop_loss_pct") if rule.get("stop_loss_pct") is not None else fb.get("stop_loss_pct"),
         "take_profit_pct": rule.get("take_profit_pct") if rule.get("take_profit_pct") is not None else fb.get("take_profit_pct"),
         "trailing_stop_pct": rule.get("trailing_stop_pct") if rule.get("trailing_stop_pct") is not None else fb.get("trailing_stop_pct"),
+        "stop_loss_price": _to_float(rule.get("stop_loss_price")),
         "highest_price": rule.get("highest_price"),
     }
     return cfg
+
+
+def effective_stop_price(rule: dict[str, Any], state_item: dict[str, Any]) -> float | None:
+    """当前生效的**绝对防守价**：规则固定价与棘轮抬高值取更高（更紧）者。
+
+    单源：执行器每轮评估、运维 CLI ``--evaluate`` 只读预演都走这里——
+    两处各写一份 ``max(...)`` 的话，预演说「不触发」而实盘卖出只是时间问题。
+    """
+    candidates = [
+        _to_float(rule.get("stop_loss_price")),
+        _to_float((state_item or {}).get("stop_price")),
+    ]
+    return max([x for x in candidates if x], default=0.0) or None
+
+
+def trigger_inputs(rule: dict[str, Any], state_item: dict[str, Any]) -> dict[str, Any]:
+    """喂给 :func:`trigger_config` 的规则视图（叠加持仓态：最高价 + 有效防守位）。
+
+    返回**新字典**，不改调用方的 rule（状态是持仓的，规则是配置的，两者不混写）。
+    """
+    return {
+        **rule,
+        "highest_price": (state_item or {}).get("highest_price"),
+        "stop_loss_price": effective_stop_price(rule, state_item or {}),
+    }
+
+
+def plan_sell_quantity(
+    symbol: str, rule: dict[str, Any], can_use: float
+) -> tuple[float, str]:
+    """计划卖出量（单源）：显式 ``quantity`` 优先，否则按 ``reduce_pct`` 取可用量比例。
+
+    比例算出的是**零股**（1000 × 0.33 = 330），继续走 ``align_sell_quantity``
+    做板别整手对齐——与手填量的口径完全一致（主板 300 / 创业板 200 / 碎股豁免）。
+    """
+    want = _to_float(rule.get("quantity")) or 0.0
+    reduce_pct = _to_float(rule.get("reduce_pct"))
+    if want <= 0 and reduce_pct is not None and 0 < reduce_pct <= 1:
+        want = float(can_use or 0.0) * reduce_pct
+    return align_sell_quantity(symbol, want, can_use)
 
 
 def update_highest_price(previous: float | None, price: float) -> float:
@@ -201,21 +352,57 @@ def is_retryable(state_item: dict[str, Any] | None) -> bool:
     return status == ST_TRIGGERED and not str(item.get("order_id") or "")
 
 
-def resolve_protect_price(
-    mode: str, detail: dict[str, Any] | None, live_price: float
-) -> tuple[str | None, float, str]:
-    """保护价决策（纯函数）：返回 ``(order_type, price, note)``，order_type 为 None 表示 fail-closed。
+def _detail_floor(detail: dict[str, Any] | None, symbol: str | None) -> float | None:
+    """跌停价下限：优先桥的 ``DownStopPrice``（权威，含板别/ST/日期口径）。
 
-    * ``market`` 模式 → ``("MARKET", 0, …)``（柜台映射最新价委托，实测可成交）。
-    * ``limit_floor`` 模式 → 桥的 ``DownStopPrice``（跌停价；实测报跌停价成交在盘口买一）。
-      取不到则 fail-closed 返回 ``(None, 0, 原因)``，由调用方告警而非乱报价。
+    桥没给时退回本地由昨收重算（单源见 ``lot_rules.protect_sell_price``）；
+    两者都拿不到 → ``None``，由调用方 fail-closed。
     """
-    if str(mode or "").strip().lower() == "market":
-        return "MARKET", 0.0, "市价委托（柜台映射最新价）"
     floor = _to_float((detail or {}).get("DownStopPrice"))
+    if floor is not None and floor > 0:
+        return floor
+    pre_close = _to_float((detail or {}).get("PreClose"))
+    if pre_close is None or not symbol:
+        return None
+    return protect_sell_price(symbol, pre_close)
+
+
+def resolve_protect_price(
+    mode: str,
+    detail: dict[str, Any] | None,
+    live_price: float,
+    symbol: str | None = None,
+) -> tuple[str | None, float, str]:
+    """保护价决策（纯函数）：返回 ``(order_type, price, note)``，``None`` = fail-closed。
+
+    * ``aggressive``（默认）→ ``max(跌停价, 现价 × 0.99)``，**可成交且合法的最激进报价**。
+    * ``limit_floor``（**遗留**）→ 原样报跌停价。只在「已封跌停、要排队」时合法；
+      其余工况属越界申报 → 废单（2026-09-21 002074 那 42 笔）。保留仅为兼容存量配置。
+    * ``market`` → ``("MARKET", 0, …)``（柜台映射最新价委托）。
+
+    fail-closed（返回 ``None``）的情形：拿不到跌停价下限、现价非法。调用方告警而非乱报价。
+    """
+    m = _resolve_mode({"protect_price_mode": mode})
+    if m == "market":
+        return "MARKET", 0.0, "市价委托（柜台映射最新价）"
+    floor = _detail_floor(detail, symbol)
     if floor is None or floor <= 0:
-        return None, 0.0, "桥未返回跌停价（DownStopPrice），fail-closed 不下单"
-    return "LIMIT", round(float(floor), 2), f"跌停保护价 {float(floor):.2f}"
+        return None, 0.0, "拿不到跌停价下限（桥无 DownStopPrice 且无昨收），fail-closed 不下单"
+    if m == "limit_floor":
+        logger.warning(
+            "[SltpExec] protect_price_mode=limit_floor 为遗留口径（报跌停价属越界申报，"
+            "非封板排队时会废单）；建议改为 aggressive。symbol=%s floor=%.2f",
+            symbol,
+            floor,
+        )
+        return "LIMIT", round(float(floor), 2), f"跌停保护价 {float(floor):.2f}（遗留口径）"
+    px = _to_float(live_price)
+    if px is None or px <= 0:
+        return None, 0.0, f"现价不可用（{live_price!r}），fail-closed 不下单"
+    price = aggressive_sell_price(symbol or "", None, px, floor=floor)
+    if price is None:
+        return None, 0.0, "激进保护价计算失败（现价/跌停价非法），fail-closed 不下单"
+    return "LIMIT", price, f"激进保护价 {price:.2f}（现价 {px:.2f} −1%，下限 {floor:.2f}）"
 
 
 def _to_float(value: Any) -> float | None:
@@ -254,9 +441,15 @@ def load_config(redis: Any) -> dict[str, Any]:
         return merge_config(None)
 
 
+def _persistable(cfg: dict[str, Any]) -> dict[str, Any]:
+    """待落盘的配置：剔除**读时派生**的键（``rejected_rules`` 是每次读重算的
+    诊断信息，写回去只会变成陈旧快照，还会让「同一条规则被拒两次」看起来像进了两次）。"""
+    return {k: v for k, v in cfg.items() if k != "rejected_rules"}
+
+
 def save_config(redis: Any, cfg: dict[str, Any]) -> dict[str, Any]:
     clean = merge_config(cfg)
-    redis.set(CONFIG_KEY, clean)
+    redis.set(CONFIG_KEY, _persistable(clean))
     return clean
 
 
@@ -270,7 +463,7 @@ def set_enabled(redis: Any, enabled: bool) -> dict[str, Any]:
     raw = redis.get(CONFIG_KEY)
     cfg = merge_config(raw if isinstance(raw, dict) else None)
     cfg["enabled"] = bool(enabled)
-    redis.set(CONFIG_KEY, cfg)
+    redis.set(CONFIG_KEY, _persistable(cfg))
     return cfg
 
 
@@ -284,7 +477,13 @@ def diff_state(
 
 
 def load_state(redis: Any, today: str | None = None) -> dict[str, Any]:
-    """读规则状态；跨日自动重置为 armed（当日一次触发的语义）。"""
+    """读规则状态；跨日自动重置为 armed（当日一次触发的语义）。
+
+    **例外：棘轮抬高的防守位跨日保留**（``stop_price`` 及其凭据 ``stop_entry`` /
+    ``stop_volume``）。它描述的是**持仓**的状态而不是当日触发次数：持仓拿几周是
+    常态，隔夜丢掉抬高过的防守位等于每天开盘都悄悄放松保护。持仓换了的作废逻辑
+    见 :func:`carried_stop_invalid_reason`（下一次评估时校验）。
+    """
     day = today or trade_date_str()
     try:
         raw = redis.get(STATE_KEY)
@@ -293,7 +492,17 @@ def load_state(redis: Any, today: str | None = None) -> dict[str, Any]:
         raw = None
     state = raw if isinstance(raw, dict) else {}
     if str(state.get("date") or "") != day:
-        state = {"date": day, "rules": {}}
+        carried: dict[str, Any] = {}
+        for symbol, item in (state.get("rules") or {}).items():
+            if not isinstance(item, dict) or _to_float(item.get("stop_price")) is None:
+                continue
+            carried[symbol] = {
+                "status": ST_ARMED,
+                "stop_price": item.get("stop_price"),
+                "stop_entry": item.get("stop_entry"),
+                "stop_volume": item.get("stop_volume"),
+            }
+        state = {"date": day, "rules": carried}
     state.setdefault("rules", {})
     for symbol, item in list(state["rules"].items()):
         if not isinstance(item, dict):
@@ -302,6 +511,34 @@ def load_state(redis: Any, today: str | None = None) -> dict[str, Any]:
             item.setdefault("status", ST_ARMED)
             item.setdefault("highest_price", None)
     return state
+
+
+def carried_stop_invalid_reason(
+    state_item: dict[str, Any],
+    *,
+    entry: float | None,
+    volume: float | None,
+) -> str:
+    """跨日保留的抬高防守位是否已作废（纯函数，空串 = 保留）。
+
+    作废判据（任一命中即作废）——两个信号都是为了防「**新持仓被旧防守位秒杀**」：
+
+    * **成本价变了**（相对差 > ``_STOP_ENTRY_TOLERANCE``）：清仓后再买回、或加过仓；
+    * **持仓总量变大**：同一只票的仓换过（冻结中的挂单不影响 ``volume``，
+      故用总量而非可用量）。
+
+    ``entry``/``volume`` 传 ``None`` = **读不到**（不是「没有」）→ 不作废：
+    在读不到持仓时撤掉正在生效的保护，比保守留着更危险。
+    """
+    stop_entry = _to_float(state_item.get("stop_entry"))
+    stop_volume = _to_float(state_item.get("stop_volume"))
+    cur_entry = _to_float(entry)
+    cur_volume = _to_float(volume)
+    if stop_entry and cur_entry and abs(cur_entry - stop_entry) > stop_entry * _STOP_ENTRY_TOLERANCE:
+        return f"持仓成本已变化（{stop_entry:.2f}→{cur_entry:.2f}）"
+    if stop_volume and cur_volume and cur_volume > stop_volume + 1e-6:
+        return f"持仓数量已增加（{stop_volume:g}→{cur_volume:g}）"
+    return ""
 
 
 def save_state(
@@ -349,7 +586,12 @@ def save_state(
 
 
 def reset_rules(redis: Any, symbols: list[str] | None = None) -> dict[str, Any]:
-    """重新武装（全部或指定标的）。"""
+    """重新武装（全部或指定标的）。
+
+    **棘轮抬高的防守位一并清掉**：reset 的语义是「这条规则从头来过」，
+    回到规则配置里的初始防守位（保留抬高值会让「重新武装」变成「继续用旧防守」，
+    与规则表里的配置对不上，排障时看不出防守位是从哪来的）。
+    """
     state = load_state(redis)
     targets = [normalize_symbol(s) for s in symbols] if symbols else list(state["rules"].keys())
     for symbol in targets:
@@ -526,7 +768,19 @@ async def run_sltp_cycle(deps: SltpDeps, *, config: dict[str, Any] | None = None
             continue
         st["entry_price"] = entry
 
-        tcfg = trigger_config({**rule, "highest_price": st.get("highest_price")}, fallback_cfg)
+        # 绝对防守位（规则固定价 / 棘轮抬高值）在本轮内落进 st，再由
+        # trigger_inputs 一并交给判定——判定口径与状态落账同源，不会各算各的。
+        positions = await _apply_ratchet(
+            deps,
+            st,
+            rule,
+            price=price,
+            entry=entry,
+            positions=positions,
+            user_id=user_id,
+            tenant_id=tenant_id,
+        )
+        tcfg = trigger_config(trigger_inputs(rule, st), fallback_cfg)
         triggered, reason = check_sltp_trigger(price, entry, tcfg)
         if not triggered:
             continue
@@ -551,6 +805,91 @@ async def run_sltp_cycle(deps: SltpDeps, *, config: dict[str, Any] | None = None
     return summary
 
 
+async def _apply_ratchet(
+    deps: SltpDeps,
+    st: dict[str, Any],
+    rule: dict[str, Any],
+    *,
+    price: float,
+    entry: float,
+    positions: list[dict[str, Any]] | None,
+    user_id: str,
+    tenant_id: str,
+) -> list[dict[str, Any]] | None:
+    """条件棘轮 + 跨日防守位校验（每个可评估的规则每轮一次）。
+
+    返回**持仓列表**（可能被补拉过，调用方沿用以免重复查询柜台）；生效的绝对
+    防守价落在 ``st["stop_price"]``，由 :func:`effective_stop_price` 统一读取
+    （判定与 CLI 预演同源，不在这里返回值里再传一份）。
+
+    三件事，顺序固定：
+
+    1. **校验跨日保留的防守位**：持仓换了（成本/总量对不上）→ 作废 + 告警，
+       防「新开的仓被上一个仓的防守位秒杀」；
+    2. **条件棘轮**：现价上触触发价 → 抬到目标防守价（只升不降），落状态 + 通知；
+    3. 规则**没配棘轮但状态里有抬高值**时保留该值（它是持仓的防守位，
+       不是规则的字段；要去掉它走 ``POST /reset``）。
+    """
+    symbol = str(rule.get("symbol") or "")
+    base_stop = _to_float(rule.get("stop_loss_price"))
+
+    if _to_float(st.get("stop_price")) is not None:
+        if positions is None:
+            positions = await _fetch_positions(deps)
+        pos = _find_position(positions, symbol)
+        invalid = carried_stop_invalid_reason(
+            st, entry=entry, volume=_to_float((pos or {}).get("volume"))
+        )
+        if invalid:
+            for key in ("stop_price", "stop_entry", "stop_volume"):
+                st.pop(key, None)
+            await deps.notify(
+                user_id,
+                f"{symbol} 棘轮防守位已复位",
+                f"{invalid}，抬高的防守位作废，按当前持仓与规则重新评估"
+                + (f"（规则防守价 {base_stop:.2f}）。" if base_stop else "。"),
+                "warning",
+                tenant_id=tenant_id,
+            )
+
+    new_stop, note = ratchet_stop_price(
+        trigger=_to_float(rule.get("move_stop_trigger")),
+        move_to=_to_float(rule.get("move_stop_to")),
+        current=effective_stop_price(rule, st),
+        price=price,
+    )
+    if new_stop is None:
+        # note 非空 = 配置非法（如武装即触发）。告警一次且绝不武装——
+        # 静默忽略的话，用户以为有棘轮，实际整轮防守都停在规则初始位。
+        if note and not st.get("ratchet_config_notified"):
+            st["ratchet_config_notified"] = True
+            await deps.notify(
+                user_id,
+                f"{symbol} 棘轮配置无效",
+                f"{note}。该规则本轮未武装棘轮，请修正规则后重新武装。",
+                "error",
+                tenant_id=tenant_id,
+            )
+        return positions
+
+    if positions is None:
+        positions = await _fetch_positions(deps)
+    pos = _find_position(positions, symbol)
+    st["stop_price"] = new_stop
+    st["stop_entry"] = entry
+    st["stop_volume"] = _to_float((pos or {}).get("volume"))
+    logger.info("[SltpExec] %s %s（防守位 %.2f）", symbol, note, new_stop)
+    await deps.notify(
+        user_id,
+        f"{symbol} 防守位已抬高",
+        f"{note}；现价跌破该价即卖出。棘轮只升不降且跨交易日保留，"
+        "持仓变动时自动复位。",
+        "info",
+        tenant_id=tenant_id,
+    )
+    return positions
+
+
 async def _execute_trigger(
     deps: SltpDeps,
     cfg: dict[str, Any],
@@ -567,7 +906,7 @@ async def _execute_trigger(
 ) -> None:
     symbol = rule["symbol"]
     can_use = _to_float((position or {}).get("can_use_volume")) or 0.0
-    quantity, note = align_sell_quantity(symbol, _to_float(rule.get("quantity")) or 0.0, can_use)
+    quantity, note = plan_sell_quantity(symbol, rule, can_use)
     if quantity <= 0:
         st["status"] = ST_SKIPPED
         st["skip_reason"] = note
@@ -582,14 +921,16 @@ async def _execute_trigger(
         return
 
     detail: dict[str, Any] | None = None
-    mode = str(cfg.get("protect_price_mode") or "limit_floor")
-    if mode.strip().lower() != "market":
+    mode = _resolve_mode(cfg)
+    if mode != "market":
         try:
             detail = await deps.client.get_instrument_detail(symbol)
         except Exception as exc:  # noqa: BLE001
             detail = None
             logger.warning("[SltpExec] 取 %s 合约详情失败: %s", symbol, exc)
-    order_type, order_price, price_note = resolve_protect_price(mode, detail, price)
+    order_type, order_price, price_note = resolve_protect_price(
+        mode, detail, price, symbol
+    )
     if order_type is None:
         st["status"] = ST_FAILED
         st["skip_reason"] = price_note
@@ -652,6 +993,15 @@ async def _execute_trigger(
     )
     summary["submitted"] += 1
     extra = f"（{note}）" if note else ""
+    # 部分减仓（或手填少于可用）：这一步之后规则即终态，剩余仓位不再被评估。
+    # 必须明说——否则用户以为「减一半」之后另一半还在防守里。
+    tail = ""
+    remainder = max(0.0, can_use - quantity)
+    if remainder > 0:
+        tail = (
+            f"剩余 {remainder:g} 股本次未了结：触发即终态，本规则当日不再自动触发，"
+            "如需继续保护请重新武装（POST /reset）或改规则。"
+        )
     logger.info(
         "[SltpExec] 已提交 %s %s %s股 @%s order_id=%s",
         symbol,
@@ -663,7 +1013,7 @@ async def _execute_trigger(
     await deps.notify(
         user_id,
         f"{symbol} 触发卖出已提交",
-        f"{reason}；以{price_note}报单 {quantity:g} 股{extra}，委托号 {st['order_id']}。",
+        f"{reason}；以{price_note}报单 {quantity:g} 股{extra}，委托号 {st['order_id']}。{tail}",
         "info",
         tenant_id=tenant_id,
     )
@@ -715,6 +1065,27 @@ async def _monitor_pending(
     alert_sec = float(cfg.get("pending_alert_sec") or 0)
     policy = str(cfg.get("remainder_policy") or "alert_only")
     close_window = float(cfg.get("close_reminder_sec") or 0)
+    # 重挂基准要**当前市价**（aggressive 口径的目标价 = 现价 × 0.99）。本段平时不拉
+    # 行情——触发评估段虽然拉，但那只覆盖 `is_retryable` 的规则，在途单不在其中。
+    # 故仅在确实要重挂、且尚未处理过时补拉一次；拉不到就退回委托价（见下）。
+    live_prices: dict[str, float] = {}
+    if policy == "requote_at_protect_price" and bool(
+        getattr(deps.client, "configured", True)
+    ):
+        need = [
+            sym
+            for sym, item in (state.get("rules") or {}).items()
+            if item.get("status") in _LIVE_STATES and not item.get("remainder_applied")
+        ]
+        if need:
+            try:
+                ticks = await deps.client.get_full_tick(need)
+                for sym in need:
+                    px = _to_float(((ticks or {}).get(sym) or {}).get("lastPrice"))
+                    if px is not None and px > 0:
+                        live_prices[sym] = px
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[SltpExec] 重挂取实时行情失败: %s", exc)
     for symbol, st in list(state.get("rules", {}).items()):
         if st.get("status") not in _LIVE_STATES:
             continue
@@ -805,6 +1176,7 @@ async def _monitor_pending(
                 tenant_id,
                 now,
                 summary,
+                ref_price=live_prices.get(symbol),
             )
 
 
@@ -819,8 +1191,13 @@ async def _apply_remainder_policy(
     tenant_id: str,
     now: float,
     summary: dict[str, Any],
+    ref_price: float | None = None,
 ) -> None:
-    """未成交余量处理：alert_only（默认，仅提醒）/ cancel / requote_at_protect_price。"""
+    """未成交余量处理：alert_only（默认，仅提醒）/ cancel / requote_at_protect_price。
+
+    ``ref_price`` = 本次调用时点的市价（由调用方批量拉取）；缺省时退回该规则最近
+    一次的 tick 价，再退回原委托价——按陈旧基准改价不如保守留旧价。
+    """
     if remaining <= 0:
         st["remainder_applied"] = True
         return
@@ -835,7 +1212,7 @@ async def _apply_remainder_policy(
 
     order_id = str(st.get("order_id") or "")
     order_price = _to_float(st.get("order_price")) or 0.0
-    mode = str(cfg.get("protect_price_mode") or "limit_floor")
+    mode = _resolve_mode(cfg)
     order_type = str(st.get("order_type") or "")
 
     # 重挂前置：仅当当前委托价与保护价确有偏离才值得撤挂（否则丢队列优先级）
@@ -848,7 +1225,13 @@ async def _apply_remainder_policy(
         except Exception as exc:  # noqa: BLE001
             logger.warning("[SltpExec] %s 重挂取合约详情失败: %s", symbol, exc)
             return
-        new_type, new_price, _note = resolve_protect_price(mode, detail, order_price)
+        # 用**当前市价**算重挂目标价；三级兜底到原委托价（宁可不动，不按陈旧基准改价）。
+        ref = (
+            ref_price
+            or _to_float(st.get("last_price"))
+            or order_price
+        )
+        new_type, new_price, _note = resolve_protect_price(mode, detail, ref, symbol)
         if new_type is None:
             st["remainder_applied"] = True
             return

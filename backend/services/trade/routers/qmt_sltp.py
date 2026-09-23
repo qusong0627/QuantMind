@@ -19,7 +19,7 @@ import logging
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from backend.services.live_trading.services import sltp_executor as executor
 from backend.services.trade_shared.deps import AuthContext, get_redis, require_admin
@@ -28,7 +28,8 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 MAX_RULES = 50
-VALID_MODES = ("limit_floor", "market")
+# 白名单引用执行器（**单源**）——避免 API 层与执行层各写一份后漂移。
+VALID_MODES = executor.VALID_PROTECT_MODES
 
 
 class SltpRule(BaseModel):
@@ -40,6 +41,19 @@ class SltpRule(BaseModel):
     stop_loss_pct: float | None = Field(None, gt=0, lt=1, description="止损比例 0.05=5%")
     take_profit_pct: float | None = Field(None, gt=0, lt=10, description="止盈比例 0.10=10%")
     trailing_stop_pct: float | None = Field(None, gt=0, lt=1, description="移动止损回撤比例")
+    # P1.3：绝对价止损 / 条件棘轮 / 部分减仓。字段级只做类型，组合口径
+    # 复用执行器的 rule_reject_reason（**单源**，防两处校验漂移）。
+    stop_loss_price: float | None = Field(None, description="绝对价止损（元），与 pct 取更紧者")
+    move_stop_trigger: float | None = Field(None, description="棘轮触发价：现价上触即抬防守")
+    move_stop_to: float | None = Field(None, description="棘轮目标防守价（须低于触发价）")
+    reduce_pct: float | None = Field(None, description="部分减仓比例 (0,1]，如 0.33=减三分之一")
+
+    @model_validator(mode="after")
+    def _check_combinations(self) -> SltpRule:
+        reason = executor.rule_reject_reason(self.model_dump())
+        if reason:
+            raise ValueError(reason)
+        return self
 
     @field_validator("symbol")
     @classmethod
@@ -64,7 +78,13 @@ class SltpConfigUpdate(BaseModel):
     user_id: str = Field("1", description="真账户用户 id（与镜像白名单口径一致）")
     tenant_id: str = Field("default", min_length=1, max_length=32)
     poll_interval_sec: float = Field(3, ge=1, le=60, description="轮询间隔（秒）")
-    protect_price_mode: str = Field("limit_floor", description="limit_floor=跌停价保护 / market=市价")
+    protect_price_mode: str = Field(
+        executor.DEFAULT_PROTECT_MODE,
+        description=(
+            "aggressive=max(跌停价,现价×0.99) 可成交且合法的最激进报价（推荐） / "
+            "limit_floor=原样报跌停价（遗留：非封板排队时会越界废单） / market=市价"
+        ),
+    )
     pending_alert_sec: float = Field(
         300, ge=0, le=3600, description="未成交告警阈值（秒，0=立即；同时驱动余量策略）"
     )

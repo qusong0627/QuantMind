@@ -149,10 +149,11 @@ class Harness:
 
 
 def _cfg(rules: list[dict], **over) -> dict:
+    # 夹具默认跟随**生产缺省**（aggressive）；要测遗留 limit_floor 口径的用例显式传入。
     base = {
         "enabled": True,
         "user_id": "1",
-        "protect_price_mode": "limit_floor",
+        "protect_price_mode": ex.DEFAULT_PROTECT_MODE,
         "pending_alert_sec": 180,
         "rules": rules,
     }
@@ -248,10 +249,15 @@ class TestQuantity:
         assert qty == 200
         assert "整手" in note
 
-    def test_star_partial_under_200_sells_all(self) -> None:
+    def test_star_partial_under_200_lifts_to_min_not_liquidates(self) -> None:
+        """2026-09-23 更正：旧实现「不足 200 股 → 全量卖出」是**超卖**。
+
+        科创板最小申报量 200 股本身合法（1 股递增只约束 200 以上），意图 100 股时
+        抬到 200 即可；旧实现会卖掉全部 1000 股（10 倍于意图）。
+        """
         qty, note = align_sell_quantity("688596.SH", 100, 1000)
-        assert qty == 1000
-        assert "全量" in note
+        assert qty == 200
+        assert "最小申报量" in note
 
     def test_star_partial_over_200_keeps_quantity(self) -> None:
         qty, _ = align_sell_quantity("688596.SH", 300, 1000)
@@ -260,7 +266,7 @@ class TestQuantity:
     def test_bj_min_lot_100(self) -> None:
         qty, note = align_sell_quantity("920950.BJ", 30, 1000)
         assert qty == 100
-        assert "最少 100" in note
+        assert "最小申报量" in note
 
     def test_can_use_zero_skips_with_notice(self) -> None:
         h = Harness(
@@ -286,9 +292,36 @@ class TestQuantity:
 # 3. 保护价
 # --------------------------------------------------------------------------
 class TestProtectPrice:
-    def test_uses_down_stop_price(self) -> None:
+    def test_aggressive_prices_at_live_minus_one_pct(self) -> None:
+        """默认口径：``max(跌停价, 现价 × 0.99)`` —— 报得出去、也成交得了。"""
         h = Harness(
             cfg=_cfg([_rule()]),
+            ticks={"600036.SH": {"lastPrice": 90.0}},
+            details={"600036.SH": {"DownStopPrice": 85.5, "UpStopPrice": 104.5}},
+            positions=[_position()],
+        )
+        h.cycle()
+        order = h.dispatched[0]
+        assert order["order_type"] == "LIMIT"
+        # 90.0 × 0.99 = 89.1，高于跌停价 85.5 → 取 89.1（而非旧实现的 85.5）
+        assert order["price"] == 89.1
+
+    def test_aggressive_clamps_to_floor_near_limit_down(self) -> None:
+        """近跌停时现价 × 0.99 会跌破跌停价 → 夹到跌停价（此时报跌停价合法）。"""
+        h = Harness(
+            cfg=_cfg([_rule()]),
+            ticks={"600036.SH": {"lastPrice": 86.0}},
+            details={"600036.SH": {"DownStopPrice": 85.5}},
+            positions=[_position()],
+        )
+        h.cycle()
+        # 86.0 × 0.99 = 85.14 < 85.5 → 夹到 85.5
+        assert h.dispatched[0]["price"] == 85.5
+
+    def test_legacy_limit_floor_still_available(self) -> None:
+        """``limit_floor`` 保留（封板排队场景）：显式选了就按跌停价报。"""
+        h = Harness(
+            cfg=_cfg([_rule()], protect_price_mode="limit_floor"),
             ticks={"600036.SH": {"lastPrice": 90.0}},
             details={"600036.SH": {"DownStopPrice": 85.5, "UpStopPrice": 104.5}},
             positions=[_position()],
@@ -311,7 +344,7 @@ class TestProtectPrice:
         assert summary["failed"] == 1
         st = h.state()["rules"]["600036.SH"]
         assert st["status"] == ex.ST_FAILED
-        assert "DownStopPrice" in st["skip_reason"]
+        assert "跌停价下限" in st["skip_reason"]
         assert h.notices and h.notices[-1]["level"] == "error"
 
     def test_market_mode_skips_detail_lookup(self) -> None:
@@ -329,10 +362,35 @@ class TestProtectPrice:
         assert ex.resolve_protect_price("limit_floor", {"DownStopPrice": 9.5}, 10.0) == (  # fidelity: allow-limit-threshold — 非阈值：券商回报的跌停保护价（DownStopPrice）夹具
             "LIMIT",
             9.5,  # fidelity: allow-limit-threshold — 非阈值：断言保护价原样透传（值即夹具）
-            "跌停保护价 9.50",  # fidelity: allow-limit-threshold — 非阈值：文案里的保护价
+            "跌停保护价 9.50（遗留口径）",  # fidelity: allow-limit-threshold — 非阈值：文案里的保护价
         )
         assert ex.resolve_protect_price("limit_floor", {}, 10.0)[0] is None
         assert ex.resolve_protect_price("limit_floor", {"DownStopPrice": 0}, 10.0)[0] is None
+
+    def test_resolve_protect_price_aggressive_never_quotes_floor(self) -> None:
+        """2026-09-21 002074 回归：市价 26.26 报跌停价 23.53 → 42 笔真单全废。
+
+        缺省/非法 mode 一律回落 ``aggressive``（**绝不**静默沿用遗留口径）。
+        """
+        for mode in ("", None, "typo", "AGGRESSIVE"):
+            got = ex.resolve_protect_price(mode, {"DownStopPrice": 23.53}, 26.26)  # fidelity: allow-limit-threshold — 非阈值：券商回报的跌停保护价（DownStopPrice）夹具
+            assert got[:2] == ("LIMIT", 26.00), f"mode={mode!r} → {got}"
+            assert got[1] > 23.53, "报价绝不可等于跌停价（越界申报 → 废单）"
+        # 近跌停 → 夹到跌停价
+        assert ex.resolve_protect_price(
+            "aggressive", {"DownStopPrice": 23.53}, 23.60  # fidelity: allow-limit-threshold — 非阈值：同上夹具
+        )[:2] == ("LIMIT", 23.53)  # fidelity: allow-limit-threshold — 非阈值：同上夹具
+        # 现价非法 → fail-closed，**绝不**退回跌停价
+        for bad in (0, 0.0, float("nan"), float("inf")):
+            assert ex.resolve_protect_price(
+                "aggressive", {"DownStopPrice": 23.53}, bad  # fidelity: allow-limit-threshold — 非阈值：同上夹具
+            )[0] is None, f"现价 {bad!r} 应 fail-closed"
+
+    def test_default_config_mode_is_aggressive(self) -> None:
+        """生产缺省必须是 aggressive —— 改回 limit_floor 等于重新引入那 42 笔废单。"""
+        assert ex.DEFAULT_CONFIG["protect_price_mode"] == "aggressive"
+        assert ex.DEFAULT_PROTECT_MODE == "aggressive"
+        assert set(ex.VALID_PROTECT_MODES) == {"aggressive", "limit_floor", "market"}
 
 
 # --------------------------------------------------------------------------
@@ -580,7 +638,11 @@ class TestRemainderPolicy:
 
     def test_requote_same_price_keeps_queue(self) -> None:
         h = Harness(
-            cfg=_cfg([_rule()], remainder_policy="requote_at_protect_price"),
+            cfg=_cfg(
+                [_rule()],
+                remainder_policy="requote_at_protect_price",
+                protect_price_mode="limit_floor",
+            ),
             ticks={"600036.SH": {"lastPrice": 90.0}},
             positions=[_position()],
         )
@@ -593,7 +655,11 @@ class TestRemainderPolicy:
     def test_requote_when_price_deviates(self) -> None:
         detail = {"DownStopPrice": 88.0}
         h = Harness(
-            cfg=_cfg([_rule()], remainder_policy="requote_at_protect_price"),
+            cfg=_cfg(
+                [_rule()],
+                remainder_policy="requote_at_protect_price",
+                protect_price_mode="limit_floor",
+            ),
             ticks={"600036.SH": {"lastPrice": 90.0}},
             positions=[_position()],
             details={"600036.SH": detail},
@@ -621,7 +687,11 @@ class TestRemainderPolicy:
     def test_requote_dispatch_failure_notifies(self) -> None:
         detail = {"DownStopPrice": 88.0}
         h = Harness(
-            cfg=_cfg([_rule()], remainder_policy="requote_at_protect_price"),
+            cfg=_cfg(
+                [_rule()],
+                remainder_policy="requote_at_protect_price",
+                protect_price_mode="limit_floor",
+            ),
             ticks={"600036.SH": {"lastPrice": 90.0}},
             positions=[_position()],
             details={"600036.SH": detail},
@@ -632,6 +702,30 @@ class TestRemainderPolicy:
         h.now += 200
         h.cycle()
         assert any("余量重挂失败" in n["title"] for n in h.notices)
+
+    def test_requote_aggressive_uses_live_price_not_floor(self) -> None:
+        """``aggressive`` 口径下的重挂：基准取**当前市价**（``st["last_price"]``）。
+
+        委托挂在保护价上、市价已走开 → 重挂到 ``现价 × 0.99``，而不是跌停价
+        （报跌停价在非封板场景属越界申报，正是 2026-09-21 那 42 笔废单的报价）。
+        """
+        detail = {"DownStopPrice": 88.0}
+        h = Harness(
+            cfg=_cfg([_rule()], remainder_policy="requote_at_protect_price"),
+            ticks={"600036.SH": {"lastPrice": 90.0}},
+            positions=[_position()],
+            details={"600036.SH": detail},
+        )
+        order_id = self._submit_pending(h)
+        # 市价走低到 84 → 现价×0.99 = 83.16 > 跌停价 80 → 重挂到 83.16
+        detail["DownStopPrice"] = 80.0
+        h.client.ticks["600036.SH"]["lastPrice"] = 84.0
+        h.now += 200
+        h.cycle()
+        assert h.cancelled == [order_id], "委托价 88 已偏离 83.16 → 应撤挂"
+        requote = h.dispatched[1]
+        assert requote["price"] == 83.16, f"应报现价−1%，实际 {requote['price']}"
+        assert requote["price"] > detail["DownStopPrice"], "绝不可重挂到跌停价"
 
 
 # --------------------------------------------------------------------------
