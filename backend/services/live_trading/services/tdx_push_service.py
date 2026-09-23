@@ -352,12 +352,20 @@ class TdxPushService:
             from sqlalchemy import select
 
             from backend.services.trade.services.real_account_ledger_service import (
+                normalize_equity,
                 upsert_real_account_daily_ledger,
             )
 
+            # 锚值（day_open/month_open/initial_equity）取自快照表的**原始** total 列，
+            # 必须先过一致性归一：被读错的总资产当锚会把假跌/假涨带进派生列
+            # （2026-09-07 实况：day_open 拷贝 09-04 的坏值 856,948.02 → 假 +7.32%）。
             async def _first_asset(*where) -> float | None:
                 stmt = (
-                    select(RealAccountSnapshot.total_asset)
+                    select(
+                        RealAccountSnapshot.total_asset,
+                        RealAccountSnapshot.cash,
+                        RealAccountSnapshot.market_value,
+                    )
                     .where(
                         RealAccountSnapshot.tenant_id == tenant_id,
                         RealAccountSnapshot.user_id == (user_id or "0"),
@@ -371,10 +379,17 @@ class TdxPushService:
                     .limit(1)
                 )
                 row = (await db.execute(stmt)).first()
-                return float(row[0]) if row and row[0] else None
+                if not row or not row[0]:
+                    return None
+                equity, _ = normalize_equity(row[0], row[1], row[2])
+                return float(equity) if equity else None
 
             prev_day_stmt = (
-                select(RealAccountSnapshot.total_asset)
+                select(
+                    RealAccountSnapshot.total_asset,
+                    RealAccountSnapshot.cash,
+                    RealAccountSnapshot.market_value,
+                )
                 .where(
                     RealAccountSnapshot.tenant_id == tenant_id,
                     RealAccountSnapshot.user_id == (user_id or "0"),
@@ -388,9 +403,12 @@ class TdxPushService:
                 .limit(1)
             )
             prev_row = (await db.execute(prev_day_stmt)).first()
-            prev_close_equity = (
-                float(prev_row[0]) if prev_row and prev_row[0] else None
-            )
+            prev_close_equity = None
+            if prev_row and prev_row[0]:
+                prev_close_equity, _ = normalize_equity(
+                    prev_row[0], prev_row[1], prev_row[2]
+                )
+                prev_close_equity = prev_close_equity or None
             day_open_equity = prev_close_equity or await _first_asset(
                 RealAccountSnapshot.snapshot_date == snapshot_date
             )

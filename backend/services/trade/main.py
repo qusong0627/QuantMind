@@ -360,6 +360,26 @@ async def lifespan(app: FastAPI):
             advice_generator_task = None
             logger.info("advice generator disabled (QM_ADVICE_GEN_ENABLED=false)")
 
+        # 风险档位定档（P1.8 生产者）：交易日 09:10 按波动/回撤/情绪决定当日档位，
+        # 写 qm:risk:tier 供闸门收紧买入侧参数（档位缺失=买入侧按防守回退，故这是
+        # 买入侧唯一的"每日节流阀"，不能默默不跑）。
+        if str(os.getenv("QM_RISK_TIER_ENABLED", "true")).strip().lower() not in {
+            "0",
+            "false",
+            "no",
+            "off",
+        }:
+            from backend.services.trade.services.risk_tier_producer import (
+                run_risk_tier_worker,
+            )
+
+            risk_tier_task = asyncio.create_task(
+                run_risk_tier_worker(), name="risk-tier-worker"
+            )
+        else:
+            risk_tier_task = None
+            logger.info("risk tier worker disabled (QM_RISK_TIER_ENABLED=false)")
+
         # 月度体检复检（T-P4-06 ③）：每月首周对 SIM/LIVE 策略重跑回测体检
         from backend.services.trade.services.health_recheck_service import (
             run_health_recheck_worker,
@@ -657,7 +677,7 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning("trade risk trigger scanner stop failed: %s", e)
 
-    for task in (scanner_task, margin_task, snapshot_task, ledger_settlement_task, manual_execution_task, sandbox_signal_task, tdx_account_sync_task, qmt_account_sync_task, qmt_exec_poller_task, mirror_queue_drainer_task, qmt_sltp_executor_task, qmt_quote_backup_task, dual_book_reconcile_task, shadow_compare_task, eval_scores_task, health_recheck_task, close_audit_task, tdx_quote_feed_task, tdx_l2_capture_task, tdx_l2_realtime_task, t1_unlock_task, simulation_pending_order_task, corp_action_task, simulation_eod_task, hot_set_builder_task, sentinel_alert_task, sentinel_backfill_task, holding_sentinel_task, advice_backfill_task, advice_generator_task, tdx_hot_set_feed_task):
+    for task in (scanner_task, margin_task, snapshot_task, ledger_settlement_task, manual_execution_task, sandbox_signal_task, tdx_account_sync_task, qmt_account_sync_task, qmt_exec_poller_task, mirror_queue_drainer_task, qmt_sltp_executor_task, qmt_quote_backup_task, dual_book_reconcile_task, shadow_compare_task, eval_scores_task, health_recheck_task, close_audit_task, tdx_quote_feed_task, tdx_l2_capture_task, tdx_l2_realtime_task, t1_unlock_task, simulation_pending_order_task, corp_action_task, simulation_eod_task, hot_set_builder_task, sentinel_alert_task, sentinel_backfill_task, holding_sentinel_task, advice_backfill_task, advice_generator_task, tdx_hot_set_feed_task, risk_tier_task):
         if task is None:
             continue
         task.cancel()

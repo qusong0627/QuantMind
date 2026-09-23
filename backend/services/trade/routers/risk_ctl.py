@@ -69,6 +69,83 @@ async def risk_status(
         raise HTTPException(status_code=503, detail=f"Redis 不可读: {exc}") from exc
 
 
+@router.get("/risk/tier")
+async def risk_tier_status(
+    redis: Any = Depends(get_redis),
+    auth: AuthContext = Depends(require_admin),
+) -> dict[str, Any]:
+    """当前风险档位（P1.8）：原文 + 新鲜度 + 实际改写（或不改写）了哪些规则参数。
+
+    `applied` 来自 `load_config` 的同一套合并（不另算一遍）——档位读侧与判定侧
+    必须是同一个数，否则面板会显示一个"看起来生效"的档位。
+    """
+    from backend.shared.risk.tiers import (
+        PENDING_KEYS,
+        TARGETS,
+        TIER_DETAIL_KEY,
+        TIER_KEY,
+        tier_stale_reason,
+    )
+
+    try:
+        client = _client(redis)
+        raw = client.hgetall(TIER_KEY) or {}
+        cfg = risk.load_config(redis)
+        today = datetime.now(tz=CST).date()
+
+        def _loads(value: Any, fallback: Any) -> Any:
+            try:
+                return json.loads(value) if value else fallback
+            except (TypeError, ValueError):
+                return fallback
+
+        history = []
+        for back in range(5):
+            d = (today - timedelta(days=back)).strftime("%Y%m%d")
+            try:
+                row = client.hgetall(TIER_DETAIL_KEY.format(date=d)) or {}
+            except Exception:  # noqa: BLE001 - 历史明细读失败不影响当前档位展示
+                row = {}
+            if row:
+                history.append(
+                    {
+                        "date": d,
+                        "level": row.get("level", ""),
+                        "label": row.get("label", ""),
+                        "source": row.get("source", ""),
+                        "reasons": _loads(row.get("reasons"), []),
+                    }
+                )
+        return {
+            "success": True,
+            "data": {
+                "present": bool(raw),
+                "date": raw.get("date", ""),
+                "level": raw.get("level", ""),
+                "label": raw.get("label", ""),
+                "source": raw.get("source", ""),
+                "budget": _loads(raw.get("budget"), {}),
+                "reasons": _loads(raw.get("reasons"), []),
+                "inputs": _loads(raw.get("inputs"), {}),
+                "updated_at": raw.get("updated_at", ""),
+                "stale_reason": tier_stale_reason(raw or None, today=today),
+                # 生效面：闸门这一侧实际合并后的结果（含 source=absent 时的"未生效"）
+                "effective_level": getattr(cfg, "tier_level", "") if cfg else "",
+                "effective_source": getattr(cfg, "tier_source", "") if cfg else "unconfigured",
+                "applied": getattr(cfg, "tier_applied", {}) if cfg else {},
+                "history": history,
+                "pending_keys": sorted(PENDING_KEYS),
+                "targets": {k: list(v) for k, v in TARGETS.items()},
+                "caliber": (
+                    "档位只收紧不放宽（与配置取更严者）；source=absent 表示从未定档、"
+                    "不覆盖任何参数；stale 表示文档过期，买入侧已回退防守参数"
+                ),
+            },
+        }
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=f"档位不可读: {exc}") from exc
+
+
 class RiskConfigUpdate(BaseModel):
     enabled: bool | None = None
     shadow: bool | None = None

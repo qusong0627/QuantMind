@@ -10,16 +10,19 @@ from backend.services.trade_shared.deps import AuthContext, get_auth_context, ge
 from backend.services.trade.services.real_account_ledger_service import (
     backfill_daily_ledgers_from_snapshots,
     list_real_account_daily_ledgers,
+    list_real_account_daily_ledgers_by_family,
 )
 
 from .real_trading_utils import (
     _fetch_latest_real_account_snapshot,
     _normalize_identity,
     _fetch_real_account_baseline,
-    _upsert_real_account_baseline
+    _upsert_real_account_baseline,
 )
 from backend.services.trade_shared.portfolio.models import Portfolio
-from backend.services.trade_shared.models.real_account_ledger import RealAccountLedgerDailySnapshot
+from backend.services.trade_shared.models.real_account_ledger import (
+    RealAccountLedgerDailySnapshot,
+)
 from sqlalchemy import and_, select
 
 router = APIRouter()
@@ -67,7 +70,53 @@ class RealAccountSettingsRequest(BaseModel):
     initial_equity: float
 
 
-@router.get("/account/ledger/daily", response_model=list[RealAccountLedgerDailySnapshotResponse])
+async def _read_ledger_rows(
+    db: AsyncSession,
+    *,
+    tenant_id: str,
+    user_id: str,
+    requested_account_id: str | None,
+    resolved_account_id: str,
+    days: int,
+):
+    """台账读路径（显式点名=精确读；未点名=读当前账户的家族）。
+
+    独立成模块级函数以便测试分支选择（家族读是"实盘账户页曲线不在改名日断头"的
+    全部依据，选错分支=历史重新消失，必须可断言）。
+    """
+    if requested_account_id:
+        # 调用方显式点名账户键 → 精确读（语义优先，不做家族展开）
+        return await list_real_account_daily_ledgers(
+            db,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            account_id=requested_account_id,
+            days=days,
+        )
+    if resolved_account_id:
+        # 未点名 → 读「当前账户」的**家族**：账户键在 2026-09-18 用户 id 规范化时
+        # 整键改名（tdx-default-00000001 → tdx-default-10000001），按单键读会让
+        # 权益曲线在改名日断头（历史全在旧键下）。家族口径见
+        # real_account_ledger_service.account_family（与档位生产者同源）。
+        return await list_real_account_daily_ledgers_by_family(
+            db,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            account_id=resolved_account_id,
+            days=days,
+        )
+    return await list_real_account_daily_ledgers(
+        db,
+        tenant_id=tenant_id,
+        user_id=user_id,
+        account_id=None,
+        days=days,
+    )
+
+
+@router.get(
+    "/account/ledger/daily", response_model=list[RealAccountLedgerDailySnapshotResponse]
+)
 async def get_account_daily_ledger(
     days: int = Query(default=30, ge=1, le=3650),
     account_id: str | None = Query(default=None),
@@ -76,20 +125,27 @@ async def get_account_daily_ledger(
     auth: AuthContext = Depends(get_auth_context),
     db: AsyncSession = Depends(get_db),
 ):
-    resolved_user_id, resolved_tenant_id = _normalize_identity(auth, user_id=user_id, tenant_id=tenant_id)
+    resolved_user_id, resolved_tenant_id = _normalize_identity(
+        auth, user_id=user_id, tenant_id=tenant_id
+    )
     current_snapshot = await _fetch_latest_real_account_snapshot(
         db,
         tenant_id=resolved_tenant_id,
         user_id=resolved_user_id,
     )
-    resolved_account_id = str(current_snapshot.get("account_id") or "").strip() if current_snapshot else ""
+    resolved_account_id = (
+        str(current_snapshot.get("account_id") or "").strip()
+        if current_snapshot
+        else ""
+    )
     target_account_id = str(account_id or resolved_account_id or "").strip()
 
-    rows = await list_real_account_daily_ledgers(
+    rows = await _read_ledger_rows(
         db,
         tenant_id=resolved_tenant_id,
         user_id=resolved_user_id,
-        account_id=target_account_id or None,
+        requested_account_id=account_id,
+        resolved_account_id=target_account_id,
         days=days,
     )
 
@@ -102,11 +158,12 @@ async def get_account_daily_ledger(
             days=days,
         )
         await db.commit()
-        rows = await list_real_account_daily_ledgers(
+        rows = await _read_ledger_rows(
             db,
             tenant_id=resolved_tenant_id,
             user_id=resolved_user_id,
-            account_id=target_account_id,
+            requested_account_id=account_id,
+            resolved_account_id=target_account_id,
             days=days,
         )
 
@@ -115,7 +172,9 @@ async def get_account_daily_ledger(
 
     return [
         RealAccountLedgerDailySnapshotResponse(
-            account_id=str(row.account_id or target_account_id or resolved_account_id or ""),
+            account_id=str(
+                row.account_id or target_account_id or resolved_account_id or ""
+            ),
             snapshot_date=row.snapshot_date,
             last_snapshot_at=row.last_snapshot_at,
             snapshot_kind="daily_ledger",
@@ -152,9 +211,15 @@ async def get_account_daily_ledger(
                 "month_open_equity": float(row.month_open_equity or 0.0),
             },
             position_count=int(row.position_count or 0),
-            settlement_finalized=bool((row.payload_json or {}).get("settlement_finalized")),
-            settlement_finalized_at=(row.payload_json or {}).get("settlement_finalized_at"),
-            settlement_snapshot_count=int((row.payload_json or {}).get("settlement_snapshot_count") or 0),
+            settlement_finalized=bool(
+                (row.payload_json or {}).get("settlement_finalized")
+            ),
+            settlement_finalized_at=(row.payload_json or {}).get(
+                "settlement_finalized_at"
+            ),
+            settlement_snapshot_count=int(
+                (row.payload_json or {}).get("settlement_snapshot_count") or 0
+            ),
             source=str(row.source or "qmt_bridge"),
         )
         for row in rows
@@ -168,13 +233,17 @@ async def get_real_account_settings(
     auth: AuthContext = Depends(get_auth_context),
     db: AsyncSession = Depends(get_db),
 ):
-    resolved_user_id, resolved_tenant_id = _normalize_identity(auth, user_id=user_id, tenant_id=tenant_id)
+    resolved_user_id, resolved_tenant_id = _normalize_identity(
+        auth, user_id=user_id, tenant_id=tenant_id
+    )
     current_snapshot = await _fetch_latest_real_account_snapshot(
         db,
         tenant_id=resolved_tenant_id,
         user_id=resolved_user_id,
     )
-    resolved_account_id = str((current_snapshot or {}).get("account_id") or resolved_user_id or "").strip()
+    resolved_account_id = str(
+        (current_snapshot or {}).get("account_id") or resolved_user_id or ""
+    ).strip()
 
     baseline = await _fetch_real_account_baseline(
         db,
@@ -184,12 +253,16 @@ async def get_real_account_settings(
     )
 
     initial_equity = float(baseline["initial_equity"]) if baseline else 0.0
-    last_modified_at = baseline["first_snapshot_at"].isoformat() if baseline and baseline.get("first_snapshot_at") else None
+    last_modified_at = (
+        baseline["first_snapshot_at"].isoformat()
+        if baseline and baseline.get("first_snapshot_at")
+        else None
+    )
 
     return RealAccountSettingsResponse(
         initial_equity=initial_equity,
         last_modified_at=last_modified_at,
-        can_modify=True
+        can_modify=True,
     )
 
 
@@ -213,9 +286,14 @@ async def update_real_account_settings(
         current_snapshot_data = await _fetch_latest_real_account_snapshot(
             db, tenant_id=resolved_tenant_id, user_id=resolved_user_id
         )
-        resolved_account_id = str((current_snapshot_data or {}).get("account_id") or resolved_user_id or "").strip()
+        resolved_account_id = str(
+            (current_snapshot_data or {}).get("account_id") or resolved_user_id or ""
+        ).strip()
         if not resolved_account_id:
-            raise HTTPException(status_code=400, detail="未检测到该用户的实盘账户 ID，请确保 QMT Agent 已正常上报过一次数据")
+            raise HTTPException(
+                status_code=400,
+                detail="未检测到该用户的实盘账户 ID，请确保 QMT Agent 已正常上报过一次数据",
+            )
 
         await _upsert_real_account_baseline(
             db,
@@ -224,47 +302,60 @@ async def update_real_account_settings(
             account_id=resolved_account_id,
             initial_equity=request.initial_equity,
             first_snapshot_at=datetime.utcnow(),
-            source="manual_update"
+            source="manual_update",
         )
     except HTTPException:
         raise
     except Exception as e:
         import logging
-        logging.getLogger(__name__).error("Failed to update real account baseline: %s", e)
+
+        logging.getLogger(__name__).error(
+            "Failed to update real account baseline: %s", e
+        )
         raise HTTPException(status_code=500, detail=str(e))
 
     # 2. 同时同步到活跃 Portfolio
     try:
         from sqlalchemy import update
+
         stmt = (
             update(Portfolio)
             .where(
                 and_(
                     Portfolio.tenant_id == resolved_tenant_id,
                     Portfolio.user_id == resolved_user_id,
-                    Portfolio.mode == "REAL"
+                    Portfolio.mode == "REAL",
                 )
             )
-            .values(initial_capital=request.initial_equity, updated_at=datetime.utcnow())
+            .values(
+                initial_capital=request.initial_equity, updated_at=datetime.utcnow()
+            )
         )
         await db.execute(stmt)
     except Exception as e:
         import logging
-        logging.getLogger(__name__).warning("Failed to sync initial_equity to portfolio: %s", e)
+
+        logging.getLogger(__name__).warning(
+            "Failed to sync initial_equity to portfolio: %s", e
+        )
 
     # 3. 立即刷新当日账本中的累计盈亏数据
     try:
         sh_tz = ZoneInfo("Asia/Shanghai")
         today_date = datetime.now(sh_tz).date()
 
-        ledger_stmt = select(RealAccountLedgerDailySnapshot).where(
-            and_(
-                RealAccountLedgerDailySnapshot.tenant_id == resolved_tenant_id,
-                RealAccountLedgerDailySnapshot.user_id == resolved_user_id,
-                RealAccountLedgerDailySnapshot.account_id == resolved_account_id,
-                RealAccountLedgerDailySnapshot.snapshot_date == today_date
+        ledger_stmt = (
+            select(RealAccountLedgerDailySnapshot)
+            .where(
+                and_(
+                    RealAccountLedgerDailySnapshot.tenant_id == resolved_tenant_id,
+                    RealAccountLedgerDailySnapshot.user_id == resolved_user_id,
+                    RealAccountLedgerDailySnapshot.account_id == resolved_account_id,
+                    RealAccountLedgerDailySnapshot.snapshot_date == today_date,
+                )
             )
-        ).limit(1)
+            .limit(1)
+        )
         res_ledger = await db.execute(ledger_stmt)
         ledger = res_ledger.scalar_one_or_none()
 
@@ -272,7 +363,11 @@ async def update_real_account_settings(
             total_asset = float(ledger.total_asset or 0.0)
             initial_equity = float(request.initial_equity)
             new_cumulative_pnl = total_asset - initial_equity
-            new_total_return_pct = (new_cumulative_pnl / initial_equity * 100.0) if initial_equity > 0 else 0.0
+            new_total_return_pct = (
+                (new_cumulative_pnl / initial_equity * 100.0)
+                if initial_equity > 0
+                else 0.0
+            )
 
             ledger.initial_equity = initial_equity
             ledger.total_return_pct = new_total_return_pct
@@ -280,9 +375,10 @@ async def update_real_account_settings(
             db.add(ledger)
     except Exception as e:
         import logging
-        logging.getLogger(__name__).warning("Failed to sync initial_equity to daily ledger: %s", e)
+
+        logging.getLogger(__name__).warning(
+            "Failed to sync initial_equity to daily ledger: %s", e
+        )
 
     await db.commit()
     return {"status": "success", "message": "实盘统计基准已更新并同步到当日账本"}
-
-

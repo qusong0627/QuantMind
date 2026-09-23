@@ -140,6 +140,13 @@ JOBS: tuple[JobSpec, ...] = (
         "SIM/LIVE 策略月度回测体检复检（T-P4-06 ③；结论退化告警）",
     ),
     JobSpec(
+        "risk_tier", "风险档位定档（P1.8）", "worker", "trade",
+        "交易日 09:10（300s 轮询；日键防重）",
+        "QM_RISK_TIER_ENABLED", True, 900,
+        "python backend/scripts/schedule_ctl.py run risk_tier [--date YYYY-MM-DD]",
+        "波动/回撤/情绪 → 当日档位 qm:risk:tier（闸门买入侧参数只收紧，tiers.py 消费）",
+    ),
+    JobSpec(
         "auto_inference", "自动推理", "celery_beat", "celery", "交易日 08:00",
         None, True, 345600,
         "python backend/scripts/schedule_ctl.py run auto_inference --date YYYY-MM-DD",

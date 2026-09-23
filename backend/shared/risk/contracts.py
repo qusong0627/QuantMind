@@ -90,6 +90,14 @@ class RiskContext:
     available_cash: float | None = None
     sellable_volume: int | None = None
     total_assets: float | None = None
+    # 全账户持仓市值合计（元）—— 总杠杆闸 l1.leverage_cap 的分子；
+    # None = 快照没读到持仓结构（≠ 没有持仓，后者是 0.0）→ 该规则 fail-closed 拒买
+    total_position_value: float | None = None
+    # 该快照的**时点与来源**：只读证据，让规则能说"这个数字是何时、从哪座账户读的"。
+    # account_age_s = 判定时刻 − 快照时点（秒）；**None = 时点不可得，不是 0**（0 是"刚更新"）；
+    # account_source = tdx_bridge / qmt_exec / sim（"" = 未标注）。
+    account_age_s: float | None = None
+    account_source: str = ""
     position_pct: float | None = None      # 该标的当前占比（0-1，含本单前）
     industry_pct: float | None = None      # 该行业当前占比（0-1）
     daily_pnl_pct: float | None = None     # 当日盈亏（%，负=亏）
@@ -104,6 +112,13 @@ class RiskContext:
     orders_last_minute: int = 0
     orders_today: int = 0
     cancels_today: int = 0
+    # 当日已**成交**买入的标的（去重，`l1.new_buys_per_day` 的输入）。
+    # None = 计数不可得（查询失败）≠ 空元组（今天还没买过）——买入新仓时 fail-closed，
+    # 加仓/卖出不受影响。
+    # **代码口径按库原样**（REAL 的 orders 是后缀式、sim_orders 是前缀式），不在构造处
+    # 归一：归一必须发生在**比较处**（规则内把两侧都过 `StockCodeUtil.to_prefix`），
+    # 否则日后新增的消费者照样会踩"跨层等值匹配静默查空"。
+    opened_today: tuple[str, ...] | None = None
     recent_symbol_sides: tuple[tuple[str, str], ...] = ()   # 窗口内 (symbol, side)
     recent_fingerprints: tuple[str, ...] = ()               # 窗口内订单指纹
 

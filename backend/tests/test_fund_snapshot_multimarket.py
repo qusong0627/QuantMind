@@ -421,7 +421,15 @@ def test_fund_snapshot_contract_and_reader_source_guards():
     assert "market = 'ALL'" in health
 
     account_card = (root / "scripts/eval/account_card.py").read_text(encoding="utf-8")
-    assert "market = 'CN'" in account_card
+    # 与 desk 同款判据（"必须有绑定市场谓词"，见上）：account_card 的默认市场是 CN，
+    # 但谓词走 :m 命名绑定——守卫若钉死字面量 'CN'，脚本一改用绑定就变红，
+    # 而它**恰恰是**这条纪律要保留的形态（红着的守卫等于没有守卫）。
+    assert "AND market = :m " in account_card, (
+        "account_card 净值序列未按市场取行（会混排）"
+    )
+    assert '"m": str(market or "CN").upper()' in account_card, (
+        "account_card 市场谓词未绑定入参市场"
+    )
 
     service = (
         root / "services/simulation/services/fund_snapshot_service.py"

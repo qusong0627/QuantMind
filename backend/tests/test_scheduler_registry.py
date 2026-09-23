@@ -49,6 +49,9 @@ _HEARTBEAT_WIRED = {
     "advice_backfill": "services/trade/services/advice_backfill.py",
     "advice_generator": "services/trade/services/advice_generator.py",
     "holding_sentinel": "services/trade/services/holding_sentinel.py",
+    # P1.8 生产者（风险档位定档）：档位缺失时闸门按买入侧防守收紧，心跳是
+    # "档位到底有没有人在定" 的唯一可观测信号，必须接线。
+    "risk_tier": "services/trade/services/risk_tier_producer.py",
 }
 
 #: 心跳用模块常量（``_sched_heartbeat(SCHEDULER_NAME)``）间接引用的任务：
@@ -183,6 +186,8 @@ def test_schedule_ctl_dispatch_covers_rerun_declared_jobs():
         "sentinel_backfill",
         "advice_backfill",
         "advice_generator",
+        # P1.8 生产者
+        "risk_tier",
     }
 
     # 未知任务 → 退出码 2（纯函数路径，不触发真实执行）

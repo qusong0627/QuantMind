@@ -317,6 +317,13 @@ async def test_fetch_latest_real_account_snapshot_returns_ledger_metrics():
 
 @pytest.mark.asyncio
 async def test_account_daily_ledger_route_uses_current_account_id(monkeypatch):
+    """未点名账户 → 账户键必须来自**当前快照**，且走**家族读**。
+
+    两件事一起钉住：① 键来源（不是别人/别的键）；② 分支选择——未点名时走
+    `list_real_account_daily_ledgers_by_family`（账户键在 2026-09-18 用户 id 规范化时
+    整键改名，按单键精确读会让权益曲线在改名日**断头**）；点名时走精确读，
+    那半边的断言在 `tests/test_real_account_ledger_family.py`。
+    """
     auth = AuthContext(user_id="1001", tenant_id="default", raw_sub="1001", roles=["user"])
     captured = {}
 
@@ -324,6 +331,11 @@ async def test_account_daily_ledger_route_uses_current_account_id(monkeypatch):
         return {
             "account_id": "8886664999",
         }
+
+    async def _fail_precise_read(*_args, **_kwargs):
+        raise AssertionError(
+            "未点名账户时不得走精确读（单键读 = 改名日权益曲线断头）"
+        )
 
     async def _fake_list_ledgers(*_args, **kwargs):
         captured["account_id"] = kwargs.get("account_id")
@@ -355,7 +367,10 @@ async def test_account_daily_ledger_route_uses_current_account_id(monkeypatch):
         ]
 
     monkeypatch.setattr(real_ledger, "_fetch_latest_real_account_snapshot", _fake_latest_snapshot)
-    monkeypatch.setattr(real_ledger, "list_real_account_daily_ledgers", _fake_list_ledgers)
+    monkeypatch.setattr(real_ledger, "list_real_account_daily_ledgers", _fail_precise_read)
+    monkeypatch.setattr(
+        real_ledger, "list_real_account_daily_ledgers_by_family", _fake_list_ledgers
+    )
 
     result = await real_ledger.get_account_daily_ledger(
         days=7,

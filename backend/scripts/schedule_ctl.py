@@ -191,6 +191,67 @@ def _run_eval_scores(date_str: str | None, force: bool) -> int:
     return 0 if summary.get("total_scored") else 1
 
 
+def _run_sentinel_backfill(date_str: str | None, force: bool) -> int:
+    from backend.services.trade.services.sentinel_backfill import (
+        backfill_pending,
+        main as _service_main,
+    )
+
+    if not date_str:
+        return _service_main()
+    from datetime import date
+
+    stats = backfill_pending(limit=1000, today=date.fromisoformat(date_str))
+    print(f"sentinel_backfill {date_str}: {stats}")
+    return 0
+
+
+def _run_advice_backfill(date_str: str | None, force: bool) -> int:
+    from backend.services.trade.services.advice_backfill import (
+        backfill_once,
+        main as _service_main,
+    )
+
+    if not date_str:
+        return _service_main()
+    from datetime import date
+
+    stats = backfill_once(limit=1000, today=date.fromisoformat(date_str))
+    print(f"advice_backfill {date_str}: {stats}")
+    return 0
+
+
+def _run_advice_generator(date_str: str | None, force: bool) -> int:
+    # 建议卡按「当日信号」生成，date_str 语义不适用（服务内部取最新交易日），
+    # 传了也不假装生效——直接说明后按默认口径跑，避免造出「指定日期」的假象。
+    if date_str:
+        print(f"提示：advice_generator 不接受日期参数（收到 {date_str}），按默认口径执行")
+    from backend.services.trade.services.advice_generator import main as _service_main
+
+    return _service_main()
+
+
+def _run_risk_tier(date_str: str | None, force: bool) -> int:
+    """手动定档（P1.8 生产者）：直接算一次并按当日口径写入，不走 worker 的日键。
+
+    重跑语义：与 worker 的日键无关（本入口不查、不置日键），但 `resolve_level` 的
+    同日防抖仍然生效——重跑只可能复算或**收紧**，不会把当天已定的档位放宽。
+    """
+    import asyncio
+    from datetime import date
+
+    from backend.services.trade.services.risk_tier_producer import run_tier_decision
+
+    target = date.fromisoformat(date_str) if date_str else None
+    result = asyncio.run(run_tier_decision(today=target))
+    print(
+        f"risk_tier {result.get('date')}: level={result.get('level')} "
+        f"({result.get('label')}) source={result.get('source')} "
+        f"reasons={'·'.join(result.get('reasons') or []) or '(无)'}"
+    )
+    return 0 if result.get("ok") else 1
+
+
 def _run_health_recheck(date_str: str | None, force: bool) -> int:
     import asyncio
 
@@ -221,6 +282,12 @@ _RERUN_DISPATCH: dict[str, Callable[[str | None, bool], int]] = {
     "mirror_shadow": _run_shadow_compare,
     "eval_scores": _run_eval_scores,
     "health_recheck": _run_health_recheck,
+    "risk_tier": _run_risk_tier,
+    # T-RC-14：三个日级任务此前声明了 rerun 却不在分发表，守卫测试因此长期为红
+    # （红灯的守卫等于没有守卫）。三者都有干净的 main() 一次性入口。
+    "sentinel_backfill": _run_sentinel_backfill,
+    "advice_backfill": _run_advice_backfill,
+    "advice_generator": _run_advice_generator,
 }
 
 
