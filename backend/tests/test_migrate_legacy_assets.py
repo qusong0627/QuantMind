@@ -425,22 +425,94 @@ def test_cli_verify_refuses_a_missing_manifest(tmp_path, capsys):
     assert "清单不存在" in capsys.readouterr().out
 
 
+def remove_repo_residue(path: Path) -> None:
+    """删掉仓库树里那个「永不创建」的名字（不存在就什么都不做）。
+
+    **不用 ``ignore_errors=True``**：这些用例要防的恰恰是「产物进了仓」，静默吞掉删
+    不掉的事实就等于把要防的东西留在原地。真删不掉就让它红（容器里跑是 root，删得掉）。
+    """
+    if path.is_dir():
+        shutil.rmtree(path)
+    elif path.exists():
+        path.unlink()
+
+
 def test_cli_refuses_a_destination_inside_a_git_worktree(tmp_path, capsys):
     """本仓 ``data/`` 是符号链接、``data/*.sql`` 被跟踪：产物落进工作树会被 git 波及。"""
     src = _make_source(tmp_path / "src")
     inside = Path(__file__).resolve().parents[2] / "backend/tests/_never_created"
-    rc = cli.main(["--from", str(src), "--dest", str(inside), "--apply"])
+    remove_repo_residue(inside)  # 上一次跑（尤其变红的负控跑法）的残留先清掉
+    try:
+        rc = cli.main(["--from", str(src), "--dest", str(inside), "--apply"])
 
-    assert rc == cli.EXIT_USAGE
-    assert not inside.exists(), "守卫必须在写任何东西之前就拦住"
-    out = capsys.readouterr().out
-    assert "拒绝执行" in out and ("git 工作树" in out or "QuantMind 仓库树" in out)
+        assert rc == cli.EXIT_USAGE
+        assert not inside.exists(), "守卫必须在写任何东西之前就拦住"
+        out = capsys.readouterr().out
+        assert "拒绝执行" in out and ("git 工作树" in out or "QuantMind 仓库树" in out)
+    finally:
+        # 变红时这里躺着一份**真的写进仓**的落地区（实测 17 只，含 configs/ 与 logs/），
+        # 由容器里的 root 生成；不清掉，下一次基线会先红在 ``exists()`` 上（看起来像
+        # 新 bug），而残留本身还会被 git 收走。所以清理写进 finally。
+        remove_repo_residue(inside)
 
 
 def test_cli_accepts_a_destination_outside_the_worktree(tmp_path):
     assert cli._inside_git_worktree(tmp_path / "dest") is None, (
         "在临时目录里不该判成工作树"
     )
+
+
+def test_the_refusal_has_a_git_free_criterion_for_the_container(tmp_path):
+    """**判据两条并列，且 P5 存档守卫与这里共用同一份**（容器里没有 ``.git``）。
+
+    只问 git 的那一版在容器里恒放行（``/app`` 挂载进来时不带 ``.git``），产物就会躺在
+    仓库树里等下一次 ``git add``。所以「在仓库树内」这一条**不依赖 git**，而它必须与
+    P5 的 ``--record`` 守卫是**同一个实现**——收紧一处漏掉另一处的代价，正好落在恢复
+    现场时唯一还留着证据的那个文件上。
+    """
+    from backend.shared import migration_paths
+    from backend.scripts import migrate_legacy_watch as watch_cli
+
+    root = tmp_path / "repo"
+    root.mkdir()
+    inside = root / "backend" / "archive.json"  # 目录还不存在（第一次创建）
+
+    # 1) 判据本身：**刻意不 git init**（等价于容器里那棵树），仓库树那条仍然拦
+    assert not (root / ".git").exists()
+    why = migration_paths.artifact_refusal(inside, project_root=root)
+    assert why is not None and "仓库树" in why
+
+    # 2) 两处调用点共用同一份实现：真仓树里的名字，两边都拦（容器里也无 .git）
+    in_repo = cli.PROJECT_ROOT / "backend/tests/_never_created_archive"
+    assert cli._dest_refusal(in_repo) is not None
+    assert watch_cli._record_refusal(in_repo) is not None
+
+    # 3) 树外放行（判据不许把合规落点误判成违规——那会让人去改命令而不是查判据）
+    outside = tmp_path / "elsewhere" / "archive.json"
+    assert cli._dest_refusal(outside) is None
+    assert watch_cli._record_refusal(outside) is None
+
+
+def test_the_refusal_resolves_symlinks_first(tmp_path):
+    """本仓 ``data/`` 就是符号链接：判据必须看 ``resolve()`` 之后的落点。
+
+    只看字面路径会两头都错——合规落点（``data/legacy/...`` 解析后在另一块盘上）被误判
+    成违规，或者反过来把一条指向仓里的符号链接放行。
+    """
+    from backend.shared import migration_paths
+
+    real = tmp_path / "repo"
+    (real / "sub").mkdir(parents=True)
+    link = tmp_path / "link"
+    link.symlink_to(real, target_is_directory=True)
+
+    # 经由符号链接进到根里 ⇒ 拦（字面路径 /tmp/.../link/sub 不在根下）
+    why = migration_paths.artifact_refusal(link / "sub" / "a.json", project_root=real)
+    assert why is not None and "仓库树" in why
+
+    # 反过来：根自己是符号链接，落点经由**解析后的真身**进到根里 ⇒ 也拦
+    why = migration_paths.artifact_refusal(real / "sub" / "a.json", project_root=link)
+    assert why is not None and "仓库树" in why
 
 
 def test_cli_rejects_no_source_check_outside_verify(tmp_path, capsys):

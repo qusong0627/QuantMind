@@ -30,7 +30,6 @@
 from __future__ import annotations
 
 import argparse
-import subprocess
 import sys
 from pathlib import Path
 
@@ -44,6 +43,10 @@ from backend.shared.legacy_assets import (  # noqa: E402
     apply_plan,
     plan_legacy_assets,
     verify,
+)
+from backend.shared.migration_paths import (  # noqa: E402
+    artifact_refusal,
+    inside_git_worktree,
 )
 
 EXIT_OK = 0
@@ -73,54 +76,22 @@ def _print_plan(plan) -> None:
 def _inside_git_worktree(path: Path) -> str | None:
     """落地点若在某个 git 工作树里，返回该工作树根（否则 ``None``）。
 
-    先 ``resolve()``（要穿过 ``data/`` 这类符号链接），再问 git——**不能只看字符串
-    前缀**：``data/legacy`` 字面上在仓里，解析后其实在另一块盘上。
+    判据的**唯一实现**已搬到 ``shared/legacy_assets.inside_git_worktree``
+    （P5 守护计划迁移的 ``--record`` 存档用同一份：两处各写一份，收紧一处就会漏掉
+    另一处，而漏掉的那一处正好是恢复现场时唯一还留着证据的文件）。这里保留这个
+    名字，是为了不动既有用例的调用点。
     """
-    probe = path.resolve()
-    while not probe.exists() and probe != probe.parent:
-        probe = probe.parent
-    try:
-        cp = subprocess.run(
-            ["git", "-C", str(probe), "rev-parse", "--show-toplevel"],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if cp.returncode != 0:
-        return None
-    top = Path(cp.stdout.strip()).resolve()
-    try:
-        path.resolve().relative_to(top)
-    except ValueError:
-        return None
-    return str(top)
+    return inside_git_worktree(path)
 
 
 def _dest_refusal(dest: Path) -> str | None:
     """落地点不合规时返回理由（``None`` = 放行）。
 
-    两条**并列**，缺一不可：
-
-    1. 在 **QuantMind 仓库树**内——这条不依赖 git。容器里看不到 ``.git``（挂载进来的是
-       子目录），只靠 git 判断会静默放行，把产物写进用户挂载的仓库树；
-    2. 在某个 **git 工作树**内——宿主上覆盖「产物落到别的 checkout」。
-
-    两条都先 ``resolve()``：``data/`` 是符号链接，解析后在另一块盘上，看字面前缀会误判。
+    判据的**唯一实现**已搬到 ``shared/migration_paths.artifact_refusal``（P5 守护计划
+    迁移的 ``--record`` 存档用同一份：见 ``migrate_legacy_watch._record_refusal``）。
+    这里保留这个函数名，是为了不动既有用例的调用点。
     """
-    resolved = dest.resolve()
-    top = PROJECT_ROOT.resolve()
-    try:
-        resolved.relative_to(top)
-    except ValueError:
-        pass
-    else:
-        return f"在 QuantMind 仓库树 {top} 内"
-    worktree = _inside_git_worktree(dest)
-    if worktree is not None:
-        return f"在 git 工作树 {worktree} 内"
-    return None
+    return artifact_refusal(dest, project_root=PROJECT_ROOT)
 
 
 def _run(args: argparse.Namespace) -> int:
