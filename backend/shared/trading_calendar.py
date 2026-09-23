@@ -190,6 +190,43 @@ def _get_xcal_calendar(market_code: str):
         return None
 
 
+#: 全仓跑决策/训练/推理的三个市场 → 真日历名（与
+#: ``admin_training_utils._MARKET_TO_XCAL`` 同口径：CN/HK/US）。
+#: C13 体检按这张表逐历查覆盖年限。
+TRADED_MARKET_XCALS: tuple[tuple[str, str], ...] = (
+    ("CN", "XSHG"),
+    ("HK", "XHKG"),
+    ("US", "XNYS"),
+)
+
+
+def xcal_coverage() -> dict[str, tuple[date | None, str]]:
+    """各市场真日历的**最后一天**：``{日历名: (最后一天, 取不到的原因)}``。
+
+    覆盖年限是硬性运维期限，不是兴趣指标：``exchange_calendars`` 只印发到某个
+    固定日期（容器内 4.13.2 实测 XSHG → 2026-12-31、XHKG/XNYS → 2027-09-24），
+    过期后 ``cal.is_session`` 抛 DateOutOfBounds → ``_is_trading_day_xcal`` 吞掉
+    返回 None → 退化成 ``SRC_WEEKDAY_FALLBACK``（只按周末判断）。决策轮**拒绝**
+    降级判定（fail-closed），所以越过那天的后果不是「乱下单」而是**一轮决策都不出**
+    ——静默停摆，必须提前可见（体检 C13）。
+    """
+    out: dict[str, tuple[date | None, str]] = {}
+    try:
+        import exchange_calendars as xcals
+    except ImportError as exc:
+        return {
+            name: (None, f"exchange_calendars 未安装: {exc}")
+            for _, name in TRADED_MARKET_XCALS
+        }
+    for _market, name in TRADED_MARKET_XCALS:
+        try:
+            last = xcals.get_calendar(name).last_session
+            out[name] = (last.date() if hasattr(last, "date") else last, "")
+        except Exception as exc:  # noqa: BLE001 - 单历失败不掩其余（原因如实带出）
+            out[name] = (None, f"{type(exc).__name__}: {exc}")
+    return out
+
+
 # ============================================================================
 # TradingCalendarService
 # ============================================================================

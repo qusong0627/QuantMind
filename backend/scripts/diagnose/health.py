@@ -8,13 +8,14 @@
   （query / redis_get / redis_scan），测试可传假实现；
 - 有 ``fail`` 项时退出码 = 1，可直接进 cron / CI。
 
-十项断言（原 12 项中「模型契约一致」「风控状态」待 P1/P4 前置设施就绪后补）：
+十三项断言（「模型契约一致」「风控状态」待 P1/P4 前置设施就绪后补）：
   C01 信号分布（全 HOLD / 分布坍缩）      C06 对账差异
   C02 信号就绪标记与残 run                C07 调度心跳（收盘核对）
   C03 账户键一致性（1 vs 00000001 类）    C08 数据同步新鲜度
   C04 快照 ↔ Redis 同源                   C09 远端行情配置状态
   C05 台账写入（成交必落账）              C10 账户种子存在性
   C11 runner 只读 DB 账号                 C12 本地行情数据可用性
+  C13 真日历覆盖年限（决策轮 fail-closed 的硬期限）
 
 用法（容器内）:
     python backend/scripts/diagnose/health.py                # 全量
@@ -41,6 +42,12 @@ sys.path.insert(0, PROJECT_ROOT)
 
 REDIS_DB_GENERAL = 0
 REDIS_DB_TRADE = 2
+
+#: C13 真日历覆盖年限阈值（天）：距「最后一天」不足 WARN 告警、不足 FAIL 报红。
+#: 提前一个季度告警——这段窗口足够升级 exchange_calendars，或把次年交易日
+#: 落进 qm_market_calendar_day（DB override 优先于真日历）。
+CALENDAR_WARN_DAYS = 90
+CALENDAR_FAIL_DAYS = 30
 
 LEVEL_ORDER = {"ok": 0, "warn": 1, "fail": 2}
 
@@ -683,6 +690,65 @@ async def check_c12_local_market_data(ctx: HealthContext) -> CheckResult:
     return classify_local_market_data(available, missing)
 
 
+def classify_calendar_coverage(
+    coverage: dict[str, tuple[date | None, str]], today: date
+) -> CheckResult:
+    """C13 判定（纯函数）：真日历覆盖年限。
+
+    逐个日历算「距覆盖截止还有几天」，**取最紧的那个**定级：
+    剩余 < ``CALENDAR_FAIL_DAYS``（含已过期）→ fail；< ``CALENDAR_WARN_DAYS`` → warn。
+    取不到某个日历（``None``）**只算 warn**：读不到不等于没问题，但也不该让体检
+    整体报红——真日历全丢时决策轮本来就 fail-closed，那是 C13 之外的表现。
+    """
+    parts: list[str] = []
+    metrics: dict[str, Any] = {}
+    worst = "ok"
+    for name, (last, reason) in sorted(coverage.items()):
+        if last is None:
+            parts.append(f"{name} 取不到（{reason or '未知原因'}）")
+            metrics[f"{name}_last_session"] = None
+            if LEVEL_ORDER["warn"] > LEVEL_ORDER[worst]:
+                worst = "warn"
+            continue
+        remaining = (last - today).days
+        metrics[f"{name}_last_session"] = last.isoformat()
+        metrics[f"{name}_remaining_days"] = remaining
+        if remaining < CALENDAR_FAIL_DAYS:
+            parts.append(f"{name} 覆盖到 {last.isoformat()}（剩 {remaining} 天，告急）")
+            worst = "fail"
+        elif remaining < CALENDAR_WARN_DAYS:
+            parts.append(f"{name} 覆盖到 {last.isoformat()}（剩 {remaining} 天）")
+            if LEVEL_ORDER["warn"] > LEVEL_ORDER[worst]:
+                worst = "warn"
+        else:
+            parts.append(f"{name} 覆盖到 {last.isoformat()}（剩 {remaining} 天）")
+    detail = "；".join(parts) or "无日历可查"
+    if worst == "ok":
+        return CheckResult("C13", "真日历覆盖年限", "ok", detail, metrics=metrics)
+    suggestion = (
+        "越过覆盖截止后 is_session 抛 DateOutOfBounds → 判定退化成「只按周末判断」，"
+        "决策轮拒绝降级依据（fail-closed）⇒ 不是乱下单，是**一轮决策都不出**。"
+        "两条修法：①升级 exchange_calendars（随版本前移）；②把次年交易日写进 "
+        "qm_market_calendar_day（DB override 优先于真日历，SRC_DB_OVERRIDE）。"
+    )
+    return CheckResult("C13", "真日历覆盖年限", worst, detail, suggestion, metrics)
+
+
+async def check_c13_trading_calendar_coverage(ctx: HealthContext) -> CheckResult:
+    """真日历覆盖年限：CN/HK/US 三个市场各自印发到哪一天。
+
+    这条不查 DB 也不查 Redis（只问进程内库），保留 ``ctx`` 形参是为了与
+    ``CHECKS`` 里其余检查同签名。
+    """
+    from backend.shared.trading_calendar import xcal_coverage
+
+    try:
+        coverage = xcal_coverage()
+    except Exception as exc:  # noqa: BLE001 - 体检不因探测本身失败中断
+        coverage = {"XSHG": (None, f"{type(exc).__name__}: {exc}")}
+    return classify_calendar_coverage(coverage, ctx.today)
+
+
 def _crypto_market_enabled() -> bool:
     """加密市场是否启用（委托 quantbc_hub，避免 ENABLE_CRYPTO 解析两处口径分叉）。"""
     from backend.services.engine.data_platform.quantbc_hub import _crypto_enabled
@@ -703,6 +769,7 @@ CHECKS: list[tuple[str, str, Callable]] = [
     ("C10", "账户种子", check_c10_initial_seed_presence),
     ("C11", "runner 只读 DB", check_c11_runner_db_role),
     ("C12", "本地行情数据", check_c12_local_market_data),
+    ("C13", "真日历覆盖年限", check_c13_trading_calendar_coverage),
 ]
 
 

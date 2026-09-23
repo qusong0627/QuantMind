@@ -9,7 +9,7 @@
 
 from pathlib import Path
 
-from backend.services.api.routers.desk import build_pipeline
+from backend.services.api.routers.desk import build_evidence_rings, build_pipeline
 
 _BACKEND = Path(__file__).resolve().parents[1]
 
@@ -35,6 +35,32 @@ def test_build_pipeline_unknown_when_health_skipped():
     pipeline = build_pipeline({})
     assert len(pipeline) == 4
     assert all(p["status"] == "unknown" for p in pipeline)
+
+
+def test_system_ring_surfaces_calendar_coverage_check():
+    """C13（真日历覆盖年限）必须落进「系统」环节的下钻里。
+
+    这条钉的是**接线**，不是判定（判定单测在 ``test_health_checks.py``）：判定写了、
+    体检跑了，但没人把结果送进界面，等于没有——C13 说的又是「决策轮从哪天起一轮都不出」
+    这种停摆级事件，界面看不见就等于没有。
+    """
+    rings = build_evidence_rings(
+        {
+            "health_items": {
+                "C13": {
+                    "name": "真日历覆盖年限",
+                    "level": "warn",
+                    "detail": "XSHG 覆盖到 2026-12-31（剩 77 天）",
+                    "suggestion": "升级 exchange_calendars 或落 DB override",
+                }
+            }
+        }
+    )
+    system = next(r for r in rings if r["key"] == "system")
+    item = next(i for i in system["items"] if i["id"] == "C13")
+    assert item["level"] == "warn"
+    assert item["source"] == "scripts/diagnose/health.py:C13"
+    assert "2026-12-31" in item["detail"]
 
 
 def test_desk_wiring_source_assertions():

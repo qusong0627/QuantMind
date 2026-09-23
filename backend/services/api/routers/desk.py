@@ -518,7 +518,9 @@ _RING_HEALTH_IDS: dict[str, tuple[str, ...]] = {
     "data": ("C08",),
     "signal": ("C01", "C02"),
     "ledger": ("C04", "C05", "C06"),
-    "system": ("C03", "C07", "C09", "C10"),
+    # C13 真日历覆盖年限也归「系统」：它不是行情/账本的新鲜度，而是**决策轮能不能跑**
+    # 的硬期限（越过覆盖截止 → 判定降级 → 决策轮 fail-closed，一轮都不出）。
+    "system": ("C03", "C07", "C09", "C10", "C13"),
 }
 
 
@@ -1135,7 +1137,7 @@ async def execute_plan(
 
 @router.get("/today")
 async def desk_today(
-    health: bool = Query(True, description="是否运行体检（10 项断言，约 1-2s）"),
+    health: bool = Query(True, description="是否运行体检（13 项断言，约 1-2s）"),
     plan: bool = Query(True, description="是否运行调仓计划预演（dry-run 引擎，约 1-3s）"),
     exclude: str | None = Query(None, description="人工排除标的（逗号分隔；退出规则单不受影响）"),
     market: str | None = Query(

@@ -4,10 +4,16 @@
 与 HealthContext 鸭子类型一致——检查函数因此可在不连 DB/Redis 下单测。
 """
 
+from datetime import date
+
 import pytest
 
 from backend.scripts.diagnose.health import (
+    CALENDAR_FAIL_DAYS,
+    CALENDAR_WARN_DAYS,
+    CHECKS,
     classify_account_key_forms,
+    classify_calendar_coverage,
     classify_cid_duplicates,
     classify_ledger_writes,
     classify_local_market_data,
@@ -17,6 +23,7 @@ from backend.scripts.diagnose.health import (
     check_c04_snapshot_consistency,
     check_c05_ledger_writes,
     check_c12_local_market_data,
+    check_c13_trading_calendar_coverage,
     exit_code,
     summarize,
 )
@@ -25,10 +32,11 @@ from backend.scripts.diagnose.health import (
 class FakeCtx:
     """注入式上下文假实现：按 SQL 子串给行，按 key 给值。"""
 
-    def __init__(self, rows_by_sql=None, keys=None, values=None):
+    def __init__(self, rows_by_sql=None, keys=None, values=None, today=None):
         self._rows = rows_by_sql or {}
         self._keys = keys or []
         self._values = values or {}
+        self.today = today or date.today()
 
     def query(self, sql, **params):
         for needle, rows in self._rows.items():
@@ -247,6 +255,87 @@ def test_c12_nothing_available_is_fail():
     )
     assert r.level == "fail"
     assert "模拟盘撮合" in r.suggestion
+
+
+# --- C13 真日历覆盖年限 -----------------------------------------------------
+
+
+def test_calendar_coverage_far_out_is_ok():
+    """离覆盖截止还有半年 → ok。"""
+    r = classify_calendar_coverage({"XSHG": (date(2027, 6, 30), "")}, date(2026, 1, 1))
+    assert r.level == "ok"
+    assert r.metrics["XSHG_remaining_days"] > CALENDAR_WARN_DAYS
+
+
+def test_calendar_coverage_inside_warn_window():
+    """落在告警窗内（不足 CALENDAR_WARN_DAYS）→ warn，且剩多少天要说清楚。"""
+    today = date(2026, 10, 15)
+    last = date(2026, 12, 31)  # 剩 77 天：> FAIL 阈值、< WARN 阈值
+    r = classify_calendar_coverage({"XSHG": (last, "")}, today)
+    assert r.level == "warn"
+    assert r.metrics["XSHG_remaining_days"] == (last - today).days < CALENDAR_WARN_DAYS
+    assert "2026-12-31" in r.detail
+
+
+def test_calendar_coverage_inside_fail_window():
+    """不足 CALENDAR_FAIL_DAYS → fail，建议里两条修法都要在（升级库 / 落 DB override）。"""
+    r = classify_calendar_coverage(
+        {"XSHG": (date(2026, 10, 10), "")}, date(2026, 10, 1)
+    )
+    assert r.level == "fail"
+    assert r.metrics["XSHG_remaining_days"] < CALENDAR_FAIL_DAYS
+    assert "exchange_calendars" in r.suggestion
+    assert "qm_market_calendar_day" in r.suggestion
+
+
+def test_calendar_coverage_already_expired_is_fail():
+    """已经越过截止日 → fail（剩余为负也要算 fail，不能因为减法溢出成 ok）。"""
+    r = classify_calendar_coverage({"XSHG": (date(2026, 12, 31), "")}, date(2027, 3, 1))
+    assert r.level == "fail"
+    assert r.metrics["XSHG_remaining_days"] < 0
+
+
+def test_calendar_coverage_worst_market_wins():
+    """多历取最紧的那个：HK 还很远也不能把 CN 的告急盖成 ok。"""
+    r = classify_calendar_coverage(
+        {"XSHG": (date(2026, 10, 15), ""), "XHKG": (date(2027, 9, 24), "")},
+        date(2026, 10, 1),
+    )
+    assert r.level == "fail"
+    assert "XSHG" in r.detail and "XHKG" in r.detail
+
+
+def test_calendar_coverage_unreadable_only_warns():
+    """取不到日历只算 warn，但**原因必须带出来**（不许静默说 ok）。"""
+    r = classify_calendar_coverage(
+        {"XSHG": (None, "ImportError: no exchange_calendars")}, date(2026, 9, 24)
+    )
+    assert r.level == "warn"
+    assert "ImportError" in r.detail
+    assert r.metrics["XSHG_last_session"] is None
+
+
+def test_c13_registered_in_checks():
+    """C13 必须在 CHECKS 里，否则体检根本不会跑它（接线与判定要一起钉）。"""
+    ids = [cid for cid, _name, _fn in CHECKS]
+    assert "C13" in ids
+
+
+@pytest.mark.asyncio
+async def test_c13_live_calendar_still_covers_today():
+    """**到期即红**的看门狗：容器内真日历今天还没过期。
+
+    这不是「测库版本」，是钉住本批引入的运维期限：2026-12-31 XSHG 到期时
+    这条会红，提醒先升级 exchange_calendars 或落 DB override——正是 C13 想让人
+    在停摆**之前**看见的那件事。
+    """
+    from backend.shared.trading_calendar import TRADED_MARKET_XCALS, xcal_coverage
+
+    coverage = xcal_coverage()
+    assert set(coverage) == {name for _m, name in TRADED_MARKET_XCALS}
+    r = await check_c13_trading_calendar_coverage(FakeCtx())
+    assert r.level != "fail", r.detail
+    assert r.metrics["XSHG_last_session"] is not None, r.detail
 
 
 @pytest.mark.asyncio
