@@ -290,6 +290,10 @@ class AccountRead:
     market_value: float | None = None
     total_asset: float | None = None
     source: str = ""
+    #: 读这份快照时选定的券商（``broker:selected:CN``）——两座真实账户差 ~25 倍，
+    #: 复盘必须能看出「这一轮的额度是从谁的账上读的」。审计 ``context_meta.account``
+    #: 带上它（读失败/未选定时为空串）。
+    broker: str = ""
     snapshot_at: str = ""
     age_min: float | None = None
     errors: tuple[str, ...] = ()
@@ -468,8 +472,69 @@ def abort_result(day: date, slot: RoundSlot, reason: str, **meta: Any) -> RoundR
     )
 
 
+def position_source_meta(pos_meta: Any) -> Mapping[str, Any]:
+    """``load_positions`` 的 meta → ``sources`` 段（形状不对返回空表，不抛）。
+
+    取数方的 meta 是外部形状（替身、旧版本、部分实现都可能给别的样子）；这里只是
+    「有就拿来用、没有就算了」的读法，不该让形状问题把一轮编排炸成 error。
+    """
+    if not isinstance(pos_meta, Mapping):
+        return {}
+    src = pos_meta.get("sources")
+    return src if isinstance(src, Mapping) else {}
+
+
+def _empty_holdings_attribution(sources: Mapping[str, Any] | None) -> str:
+    """空持仓时**下一步该查哪里**：源读到 0 行 / 全部停更 / 有行但无可用代码。
+
+    三种成因的排查方向完全不同（源侧链路 / 新鲜度窗口 / symbol 口径），一句笼统的
+    「持仓链路断了」会把第三种引到错处——它是本仓 normalize 口径的问题，源是好的。
+
+    本函数**不许抛**：它在 abort 的理由文本里，形状怪异的 meta（positions 不是数）
+    若炸出去，这一轮会从「有理由的 abort」变成没有可读理由的 ERROR——**abort 的理由
+    正是这一轮唯一说得清的东西**。数不动就如实说数不动，不猜成 0 行。
+    """
+    fresh_rows = stale_rows = 0
+    unreadable: list[str] = []
+    for name, meta in (sources or {}).items():
+        if not isinstance(meta, Mapping):
+            unreadable.append(str(name))
+            continue
+        try:
+            rows = int(meta.get("positions") or 0)
+        except (TypeError, ValueError):
+            unreadable.append(str(name))
+            continue
+        if meta.get("stale"):
+            stale_rows += rows
+        else:
+            fresh_rows += rows
+    if fresh_rows == 0 and stale_rows == 0:
+        if unreadable:
+            # 「读到 0 行」是我们**数出来**的结论；数不动的时候不许这么说
+            return (
+                f"持仓源 {'、'.join(sorted(unreadable))} 的行数读不出（meta 不是可读"
+                "的源摘要）：归因不可用，先查该源的 payload 形状"
+            )
+        return (
+            "持仓源本次读到 0 行（payload 为空或源缺席：桥返回空持仓是常见形态，"
+            "先查源侧链路）"
+        )
+    if fresh_rows == 0:
+        base = f"持仓源读到 {stale_rows} 行但全部被判停更、未并入（查源的新鲜度/时钟）"
+    else:
+        base = f"持仓源读到 {fresh_rows} 行但无一行有可识别代码（查 symbol 口径）"
+    if unreadable:
+        base += f"；另有源的行数读不出：{'、'.join(sorted(unreadable))}"
+    return base
+
+
 def positions_consistency_issue(
-    *, holdings: int, market_value: float | None, total_asset: float | None
+    *,
+    holdings: int,
+    market_value: float | None,
+    total_asset: float | None,
+    sources: Mapping[str, Any] | None = None,
 ) -> str:
     """持仓面是否与资金面自相矛盾；矛盾则返回理由（非空串），一致则返回 ``""``。
 
@@ -483,6 +548,10 @@ def positions_consistency_issue(
     判据只用**同一行快照里的两个数**（不引入新的取数）：持仓表为空，而市值占总资产的
     比例超过 :data:`EMPTY_POSITIONS_MV_RATIO`，就是自相矛盾。真空仓的账户市值为 0，
     不会被误伤；总资产读不到时按市值自身作分母（保守：宁可判矛盾）。
+
+    理由文本要**如实标注分母**（``总资产`` 缺失时不能说「占总资产的 X%」——那是拿市值
+    自己比出来的 100%），并按 ``sources`` 给出下一步排查方向（见
+    :func:`_empty_holdings_attribution`）。
     """
     if holdings > 0:
         return ""
@@ -493,10 +562,14 @@ def positions_consistency_issue(
     base = ta if (ta or 0.0) > 0 else mv
     if mv <= EMPTY_POSITIONS_MV_RATIO * base:
         return ""
+    if (ta or 0.0) > 0:
+        denom = f"占总资产 {base:,.0f} 的 {mv / base * 100:.1f}%"
+    else:
+        denom = "而总资产读不到（以市值自身作分母判矛盾，非占比）"
     return (
-        f"持仓面与资金面自相矛盾：持仓表为空而市值 {mv:,.0f} 占总资产 {base:,.0f} 的 "
-        f"{mv / base * 100:.1f}%（判为持仓面不可信，不是空仓）——持仓链路可能断在"
-        f"桥侧，照此决策会「该卖的没卖、不该买的买了」"
+        f"持仓面与资金面自相矛盾：持仓表为空而市值 {mv:,.0f} {denom}；"
+        f"{_empty_holdings_attribution(sources)}——判为持仓面不可信，不是空仓，"
+        f"照此决策会「该卖的没卖、不该买的买了」"
     )
 
 
@@ -540,6 +613,7 @@ def context_meta(**kw: Any) -> dict[str, Any]:
         },
         "account": {
             "source": account.source,
+            "broker": account.broker,
             "snapshot_at": account.snapshot_at,
             "age_min": account.age_min,
             "total_asset": account.total_asset,
@@ -565,6 +639,6 @@ def context_meta(**kw: Any) -> dict[str, Any]:
             "present": excluded.present,
             "symbols": len(excluded.symbols),
         },
-        "sources": dict((kw["pos_meta"] or {}).get("sources") or {}),
+        "sources": dict(position_source_meta(kw["pos_meta"])),
         "notes": list(kw["notes"]),
     }

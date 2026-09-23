@@ -48,10 +48,12 @@ Redis 键（全部在**交易库** DB2）与幂等
 
 为什么 claim/done/status 走**原生** redis-py 客户端
 ------------------------------------------------
+（这三把键的读写都在调度层 ``decision_round_tick``；这条口径是两层的共同前提，
+写在这里免得读调度层的人回头找。）
 ``trade_shared.redis_client.RedisClient`` 的 ``get``/``set`` 会把任何异常吞成
 ``None``/``None``（只记一条日志）。用 ``set(key, nx=True)`` 认领槽位时，一次写失败
 返回 ``None`` 会被读成「别人已经跑过了」——这一轮**永不执行且无人报错**，正是
-``sltp_executor`` 里那套 ``read_key_strict`` 修的病。故本模块自己持有原生客户端
+``sltp_executor`` 里那套 ``read_key_strict`` 修的病。故调度层持有原生客户端
 （异常可见），而规则表/档位仍走包装客户端（它们内部自带 ``_raw_client`` 解包，
 不再添第 9 份拷贝）。
 
@@ -64,13 +66,24 @@ fail-closed 分层（每一层的姿态都是**选的**，不是顺手写的）
 持仓（real_account_snapshots）abort：模型看不到持仓就不该动它
 资金面（cash/market_value）   abort：额度三数不许编（``build_context``
                              的默认 100k 会把真账户编成假额度）
-行情客户端/快照               **降级**：行情块整段不出现（既有口径）；
-                             执行段按「无价」否决（``l3.no_quote``）
+券商选择                       abort（仅决策轮）：``broker:selected:CN``
+                             读不到就不知道读哪座账（两座差 ~25 倍），
+                             不许回退 env 默认掷硬币
+行情客户端/快照               **看池面**：池里一只价都取不到时——
+                             交易时段 abort（模型只能看到空池，出的不是
+                             决策）；非交易时段与「只有部分无价」降级，
+                             行情块整段不出现、执行段按「无价」否决
 候选池文件                    跑，响亮留痕（守护轮不依赖池）
 排除名单                      跑，``blocked_symbols=()`` + 留痕
                              （对齐档位层「absent 不是故障」）
 档位 ``per_stock_pct`` 非法    abort：把 15 当 15% 会让单票夹取成空操作
+执行段 aborted 且零提交        abort：且**不许覆盖守护规则表**（整组替换
+                             会把既有止损清掉、给未买入的标的 arm 规则）
 =========================  ==========================================
+
+**调度层**（``decision_round_tick``）另有一张表：槽位认领、补跑去重、状态键，
+它的失败姿态（认领不了就不跑、补跑读不到 done 键就不跑且放掉认领……）见那个
+模块的 docstring——这一层与「一轮里发生了什么」是两件事，故与本文分家。
 
 非交易时段（含午休）：**照常出决策与守护规则，腿一条不提交**——守护规则就是
 给开盘用的，止盈止损规则不因当前是午休而失效。拒发发生在提交器上（每条腿留一行
@@ -90,53 +103,50 @@ P1.3 桥自带止损 + 本模块的守护规则吸收）占用，批次号**不�
 CLI / 常驻 worker：**不在这里**，见 ``decision_round_runner.py``（驱动层）。本模块只回答
 「一轮里发生了什么」；``python -m backend.services.trade.services.decision_round_runner
 [--slot HHMM] [--dry-run]`` 才是操作员入口。
+
+分层（单向依赖，测试有源码守卫）::
+
+    runner（常驻循环/CLI） → tick（到点/认领/去重/状态） → round（本模块：一轮）
+                          → io（生产接线） → core（纯逻辑）
 """
 
 from __future__ import annotations
 
 import logging
+from collections import Counter
 from collections.abc import Mapping, Sequence
-from dataclasses import replace
 from datetime import date, datetime
 from typing import Any
 
 from backend.shared.decision.contract import SCHEMA_INTRADAY
-from backend.shared.decision.gates import BuyGate, filter_pool
+from backend.shared.decision.gates import (
+    RULE_POOL_ROW_INVALID,
+    RULE_UNAFFORDABLE,
+    BuyGate,
+    filter_pool,
+)
 from backend.services.trade.services.decision_round_core import (
     ACCOUNT_AGE_WARN_MIN,
-    DEFAULT_GRACE_MIN,
-    DONE_TTL_S,
     STATUS_ABORTED,
     STATUS_ERROR,
     STATUS_LLM_FAILED,
     STATUS_OK,
-    STATUS_SKIPPED,
     TENANT_ID,
-    AccountRead,
-    ExclusionRead,
     RoundDeps,
     RoundResult,
     RoundSlot,
     abort_result,
     build_pool_stamps,
     context_meta,
-    due_slots,
     gate_row_to_pool_row,
     merge_outcomes,
     pool_row_to_gate_row,
+    position_source_meta,
     positions_consistency_issue,
     refusing_submitter,
     round_id_for,
-    slot_keys,
     snap_price,
     tier_numbers,
-)
-from backend.services.trade.services.decision_round_io import (
-    CLAIM_MANUAL,
-    claim_slot,
-    default_round_deps,
-    native_redis_client,
-    write_status,
 )
 
 logger = logging.getLogger(__name__)
@@ -151,8 +161,8 @@ async def run_once(
 ) -> RoundResult:
     """跑一轮（**前提：槽位已认领**；取数→提示词→LLM→执行→守护→审计）。
 
-    不含 Redis 认领/去重（那是 :func:`round_tick` 的事）：本函数可被 CLI、测试、
-    补跑器直接调用，语义是「现在，就按这个槽位跑一轮」。
+    不含 Redis 认领/去重（那是 ``decision_round_tick.round_tick`` 的事）：本函数可被
+    CLI、测试、补跑器直接调用，语义是「现在，就按这个槽位跑一轮」。
     """
 
     now = now or deps.now()
@@ -235,7 +245,11 @@ async def _run_once_inner(
             day,
             slot,
             "资金面不可信：" + "；".join(account.errors),
-            account={"source": account.source, "snapshot_at": account.snapshot_at},
+            account={
+                "source": account.source,
+                "broker": account.broker,
+                "snapshot_at": account.snapshot_at,
+            },
         )
     if account.age_min is not None and account.age_min > ACCOUNT_AGE_WARN_MIN:
         logger.warning(
@@ -251,6 +265,7 @@ async def _run_once_inner(
         holdings=len(positions or {}),
         market_value=account.market_value,
         total_asset=account.total_asset,
+        sources=position_source_meta(pos_meta),
     )
     if pos_issue:
         logger.error("[DecisionRound] %s %s", round_id, pos_issue)
@@ -258,7 +273,11 @@ async def _run_once_inner(
             day,
             slot,
             pos_issue,
-            account={"source": account.source, "snapshot_at": account.snapshot_at},
+            account={
+                "source": account.source,
+                "broker": account.broker,
+                "snapshot_at": account.snapshot_at,
+            },
             positions=pos_meta or {},
         )
 
@@ -290,15 +309,19 @@ async def _run_once_inner(
             day.strftime("%Y%m%d"),
         )
 
-    # ④ 行情（客户端未配置 → 降级：行情块整段不出现，执行段按无价否决）
+    # ④ 行情。客户端不可用/读失败本身**不在这里中止**：守护轮与已有持仓仍要靠它，
+    # 而「池子整段没有价」能不能继续取决于时段——那由 ⑦ 的行情闸门判。
     quote_client = None
     snapped: Mapping[str, Mapping[str, Any]] = {}
+    #: 行情不可用的**原因**（客户端构造失败/读取异常），进 abort 理由与日志。
+    quotes_failure = ""
     holding_meta = pos_meta or {}
     positions_list = list((positions or {}).values())
     try:
         quote_client = deps.quote_client()
     except Exception as exc:  # noqa: BLE001
-        logger.warning("[DecisionRound] 行情客户端不可用: %s", exc)
+        quotes_failure = f"行情客户端不可用：{type(exc).__name__}: {exc}"
+        logger.warning("[DecisionRound] %s", quotes_failure)
     # 要价的代码：持仓（原始 payload 直接取 symbol，不必先建一次持仓行）+ 池
     codes = sorted(
         {
@@ -311,8 +334,9 @@ async def _run_once_inner(
     if quote_client is not None and codes:
         try:
             snapped = deps.read_snaps(quote_client, codes) or {}
-        except Exception as exc:  # noqa: BLE001 行情读不到 = 降级（不是 abort）
-            logger.warning("[DecisionRound] 快照读取失败（按无行情继续）: %s", exc)
+        except Exception as exc:  # noqa: BLE001 读失败先记因，是否中止见 ⑦ 的行情闸门
+            quotes_failure = f"行情快照读取失败：{type(exc).__name__}: {exc}"
+            logger.warning("[DecisionRound] %s（按无行情继续）", quotes_failure)
             snapped = {}
     holding_rows = positions_to_holding_rows(positions_list, snaps=snapped)
 
@@ -347,18 +371,66 @@ async def _run_once_inner(
         return abort_result(day, slot, f"闸门参数非法：{exc}（本轮不问模型）")
 
     pool_prices = {str(r.code): snap_price(snapped.get(str(r.code))) for r in pool_rows}
+    # 行情闸门（**在滤池之前**、在问模型之前）：池里一只价都取不到 ⇒ 模型看到的是
+    # 空池，只能回报「全部持有」。那不是决策，是把「行情断了」写成「今天不建仓」——
+    # 而 ``decision_round_tick.round_tick`` 按 ``result.ok`` 置 done 键，当天 10:05/11:05 两个补跑槽会全部
+    # 「当日已出过 rebalance 决策」跳过：一次行情抖动吃掉当天全部建仓轮，状态键、日志、
+    # CLI 退出码三面却全绿。交易时段内 fail-closed（abort 且不置 done，补跑槽会再来）；
+    # 非交易时段（08:30/09:00 的盘前规划轮）保持降级：那种轮本来就不发腿，只出计划与
+    # 守护规则，而盘前拿不到价是常态（下同 :data:`in_session` 分支的口径）。
+    in_session = bool(deps.is_trading_time(now))
+    n_no_price = sum(1 for r in pool_rows if pool_prices.get(str(r.code)) is None)
+    if pool_rows and in_session and n_no_price == len(pool_rows):
+        why = quotes_failure or (
+            "行情客户端未配置（REMOTE_QUOTE_REDIS_HOST 为空）"
+            if quote_client is None
+            else "行情源未返回这些代码"
+        )
+        reason = (
+            f"候选池 {len(pool_rows)} 只在交易时段内全部无可用现价（{why}）："
+            "模型只能看到空池，本轮不做（补跑槽会再来）"
+        )
+        logger.error("[DecisionRound] %s %s", round_id, reason)
+        return abort_result(
+            day,
+            slot,
+            reason,
+            quotes={"client": quote_client is not None, "rows": len(snapped)},
+            pool={"file": pool_file, "rows": len(pool_rows)},
+        )
+    if 0 < n_no_price < len(pool_rows):
+        # 部分无价：照跑，但要说出来——「池里 N 只没进模型视野」与「模型没选它们」
+        # 在审计里长得一样，归因会指向模型。
+        logger.warning(
+            "[DecisionRound] %s 候选池 %d 只中有 %d 只无可用现价（不进模型视野）",
+            round_id,
+            len(pool_rows),
+            n_no_price,
+        )
+        notes.append(
+            f"候选池 {n_no_price}/{len(pool_rows)} 只无可用现价（不进模型视野）"
+        )
     gate_rows = [
         pool_row_to_gate_row(r, pool_prices.get(str(r.code))) for r in pool_rows
     ]
     kept_rows, dropped_rows = filter_pool(gate_rows, gate, budget=per_stock_budget)
     kept = [gate_row_to_pool_row(row) for row in kept_rows]
     if pool_rows and not kept:
-        # 整个池子被「买不起一手」剔光：不是错，但一定要看得见（否则表现为
-        # 「模型这轮一只都没点」，归因会指向模型）
+        # 整个池子被剔光：不是错，但一定要看得见（否则表现为「模型这轮一只都没点」，
+        # 归因会指向模型）。计数**按闸门规则分流**：缺现价与买不起一手是两件完全不同
+        # 的事（前者是行情链路、后者是预算/档位），一句「全部未过闸」会把排障引向错处。
+        by_rule = Counter(
+            str(getattr(verdict, "rule", "") or "") for _, verdict in dropped_rows
+        )
         logger.warning(
-            "[DecisionRound] %s 候选池 %d 只全部未过闸（单票预算 ¥%.2f）",
+            "[DecisionRound] %s 候选池 %d 只全部未过闸：缺可用现价 %d 只（%s）、"
+            "买不起一手 %d 只（%s）（单票预算 ¥%.2f）",
             round_id,
             len(pool_rows),
+            by_rule.get(RULE_POOL_ROW_INVALID, 0),
+            RULE_POOL_ROW_INVALID,
+            by_rule.get(RULE_UNAFFORDABLE, 0),
+            RULE_UNAFFORDABLE,
             per_stock_budget,
         )
 
@@ -403,17 +475,18 @@ async def _run_once_inner(
         wanted=[str(getattr(d, "code", "") or "") for d in decisions],
     )
 
-    # ⑨ 执行段与守护段（同一份快照、同一把闸门、同一个 round_id）
+    # ⑨ 执行段与守护段（同一份快照、同一把闸门、同一个 round_id）。``in_session``
+    # 已在 ⑦ 的行情闸门处取（那处也要用；一轮内不变）。
     exec_holdings = holdings_from_rows(holding_rows)
     exec_symbols = sorted(set(exec_holdings) | {str(r.code) for r in kept})
     exec_quotes = quotes_for(exec_symbols, snapped, trade_date=day)
-    in_session = bool(deps.is_trading_time(now))
 
     inflight: frozenset[tuple[str, str]] | None = None
     submitter: Any = None
     #: 执行段缺 ``outcomes`` 属性时的留痕（见 try 块内的赋值点）；``try`` 正常走完才会
     #: 到达下面的返回，这里先绑定是为了「有没有取到」这件事在任何路径上都有定义。
     outcomes_gap = ""
+    watch_result: Any = None
     if not in_session:
         # 非交易时段：计划照算（留痕），但一条腿都不发。
         inflight = frozenset()
@@ -436,9 +509,23 @@ async def _run_once_inner(
                 tenant_id=TENANT_ID,
                 user_id=user,
             )
-            watch_result = _maybe_write_watch(
-                deps=deps, slot=slot, decisions=decisions, agent=agent, notes=notes
-            )
+            # 执行段取数要在**写守护规则之前**：``aborted`` 且零提交的轮次不许动守护
+            # 规则表——``write_watch_plan`` 是整组替换，用它去覆盖等于把 09:00 挂上的
+            # 止损全清掉，还给一批**从未买入**的标的 arm 上规则（本条见 P2.8 评审 H3：
+            # 原先守护段写在 aborted 判定之前，一次瞬时在读途账失败就会清空守护层）。
+            aborted, summary = _exec_summary(outcome)
+            submitted = int(summary.get("submitted", 0) or 0)
+            if aborted and not submitted:
+                logger.warning(
+                    "[DecisionRound] %s 执行段 aborted 且零提交：守护规则表本轮整组"
+                    "保留（不覆盖既有止损，也不 arm 未买入的标的）",
+                    round_id,
+                )
+                notes.append("执行段 aborted 且零提交：守护规则表整组保留")
+            else:
+                watch_result = _maybe_write_watch(
+                    deps=deps, slot=slot, decisions=decisions, agent=agent, notes=notes
+                )
             # 「取不到」与「真的是空」必须分开（同 ``summary`` 那条纪律）：没有
             # ``outcomes`` 属性时合并结果只剩守护段，审计行会显示「这一轮什么也没发生」
             # ——而腿可能已经真出去了。不改状态（此刻单已在下，报 error 会让补跑槽重来
@@ -505,32 +592,22 @@ async def _run_once_inner(
             decisions=len(decisions),
         )
 
-    # 执行段的结果取数：契约是 ``outcome.summary()``（ExecutionOutcome 的方法），
-    # 但**映射也收**——只认方法的话，一个带 ``summary`` dict 的实现会让这一轮以
-    # ``legs=0/submitted=0`` 收尾：状态键显示「ok、没动腿」，而真单已经出去了。
-    # 「取不到」与「真的是 0」在这里必须分开，否则状态键会说谎。
-    _summary_src = getattr(outcome, "summary", None)
-    if callable(_summary_src):
-        summary = _summary_src() or {}
-    elif isinstance(_summary_src, Mapping):
-        summary = dict(_summary_src)
-    else:
-        summary = {}
-    aborted = str(getattr(outcome, "aborted", "") or "")
-    submitted = int(summary.get("submitted", 0) or 0)
+    # 执行段的结果取数（``aborted``/``summary``）已在 try 块内完成——守护段的写与不写
+    # 要由它决定（见那里的注释），所以这里不再重取。
     if aborted and not submitted:
-        # 执行段的 ``aborted`` 语义是**一张单都没发**（``decision_executor.execute_round``
+        # 执行段的 ``aborted`` 语义是**一张单都没发**（``decision_executor.run_round``
         # 只在在途账读不到时置它）。此前它只进 ``note``，状态仍是 ``ok`` —— 后果不是
-        # 「日志难看」：``round_tick`` 按 ``result.ok`` 写 done 键，于是当天 10:05/11:05
+        # 「日志难看」：``decision_round_tick.round_tick`` 按 ``result.ok`` 写 done 键，于是当天 10:05/11:05
         # 两个补跑槽全部「当日已出过 rebalance 决策」跳过，**一次瞬时读失败吃掉当天
         # 全部建仓轮**，而状态键、日志、CLI 退出码三面全绿。core 的账户闸门走
         # ``abort_result`` → ``STATUS_ABORTED`` → 不置 done 键，这里对齐同一条口径。
+        # 守护规则表本轮未动，也要写进 note：那张表是**外部状态**，审计表里看不出它。
         return RoundResult(
             status=STATUS_ABORTED,
             day=day,
             slot=slot,
             round_id=round_id,
-            note=aborted,
+            note=f"{aborted}（守护规则表本轮整组保留）",
             errors=(aborted, outcomes_gap) if outcomes_gap else (aborted,),
             agent=agent,
             mode=mode,
@@ -576,25 +653,22 @@ async def _run_once_inner(
     )
 
 
-def _abandoned_claim_note(client: Any, done_key: str) -> str:
-    """认领键在、done 键不在 ⇒ 这一槽今天大概率不会再被**自动** tick 碰到。
+def _exec_summary(outcome: Any) -> tuple[str, dict[str, Any]]:
+    """执行段结果 → ``(aborted, summary)``。
 
-    「有人正在跑」与「跑到一半没了」在认领键上长得一模一样，但后果不同：后者意味着
-    本轮在 LLM 调用期间（数十秒窗口）被重启/被杀，认领键 TTL 还有两天，后续每一次自动
-    tick 都只说一句 info 就跳过——状态键里没有这一轮、审计表里没有这一轮、心跳照写
-    （worker 活着），**唯一的痕迹就是这行日志**。所以这里降级为 warning 并给出补跑入口。
-    不自动抢占：覆盖写拦不住真在跑的那一轮，且会让「重启后自动补跑」变成一条没人复核的
-    隐性下单路径（要抢由人来点 ``--force``）。
+    契约是 ``outcome.summary()``（ExecutionOutcome 的方法），但**映射也收**——只认
+    方法的话，一个带 ``summary`` dict 的实现会让这一轮以 ``legs=0/submitted=0`` 收尾：
+    状态键显示「ok、没动腿」，而真单已经出去了。「取不到」与「真的是 0」在这里必须
+    分开，否则状态键会说谎。
     """
-    try:
-        if client.get(done_key):
-            return ""
-    except Exception:  # noqa: BLE001 读不到就不猜
-        return ""
-    return (
-        f"且无 done 键（{done_key}）：可能上一轮中途夭折，自动 tick 不会再跑它；"
-        "要补这一槽：python backend/scripts/schedule_ctl.py run decision_round --force"
-    )
+    src = getattr(outcome, "summary", None)
+    if callable(src):
+        summary = dict(src() or {})
+    elif isinstance(src, Mapping):
+        summary = dict(src)
+    else:
+        summary = {}
+    return str(getattr(outcome, "aborted", "") or ""), summary
 
 
 def _maybe_write_watch(
@@ -644,128 +718,3 @@ def _maybe_write_watch(
         logger.warning("[DecisionRound] 守护规则未全部落库：%s", detail)
         notes.append(f"守护规则未全部落库：{detail}")
     return result
-
-
-async def round_tick(
-    *,
-    deps: RoundDeps | None = None,
-    native: Any = None,
-    now: datetime | None = None,
-    grace_min: int | None = None,
-    force: bool = False,
-    slot: RoundSlot | None = None,
-) -> tuple[RoundResult, ...]:
-    """一次轮询：到点的槽位逐个「认领 → 跑 → 置 done → 写状态」。
-
-    ``force``：**手动重跑**——抢占槽位认领（覆盖写）并忽略当日 done 键。只忽略 done
-    键是不够的（认领键在 done 之前就把它挡住了，CLI 于是报「无到点槽位」）；覆盖写
-    只能拦住之后到点的自动 tick，正在跑的那次靠执行段的订单幂等键兜底，见
-    ``claim_slot``。``slot``：显式指定槽位（CLI ``--slot``），跳过时刻表与交易日
-    判定——操作员点名要跑就是意图，跳过只留日志。
-    """
-    deps = deps or default_round_deps()
-    now = now or deps.now()
-    grace = DEFAULT_GRACE_MIN if grace_min is None else int(grace_min)
-    day = now.date()
-
-    if slot is not None:
-        due: tuple[RoundSlot, ...] = (slot,)
-        logger.warning(
-            "[DecisionRound] 显式指定槽位 %s（跳过时刻表/交易日判定）", slot.label
-        )
-    else:
-        try:
-            trading_day = await deps.is_trading_day(day)
-        except Exception as exc:  # noqa: BLE001 日历不可用 → 不跑（宁缺勿滥）
-            logger.warning("[DecisionRound] 交易日判定失败，本 tick 不跑: %s", exc)
-            return ()
-        if not trading_day:
-            logger.debug("[DecisionRound] %s 非交易日，跳过", day)
-            return ()
-        due = due_slots(now, grace_min=grace)
-    if not due:
-        return ()
-
-    client = native
-    if client is None:
-        try:
-            client = native_redis_client()
-        except Exception as exc:  # noqa: BLE001 没有 Redis 就没有去重 → 不跑
-            logger.error("[DecisionRound] Redis 客户端构造失败，本 tick 不跑: %s", exc)
-            return ()
-    try:
-        out: list[RoundResult] = []
-        for s in due:
-            slot_key, done_key = slot_keys(day, s)
-            # 抢占了别人的认领要在**这一轮的结果里**留痕：运营读状态键时若只看到
-            # 「ok」，就分不清这轮是自动跑的（一轮一天一次）还是人手点出来的
-            # （可以点很多次）——而后者决定了复盘时该不该按「计划内」看待这批单。
-            takeover = ""
-            if force:
-                try:
-                    holder = client.get(slot_key)
-                except Exception as exc:  # noqa: BLE001 读不到就当没人认领
-                    logger.debug("[DecisionRound] 认领键读失败: %s", exc)
-                    holder = None
-                if holder:
-                    takeover = f"手动重跑：抢占已认领槽位（原认领={holder}）"
-                    logger.warning("[DecisionRound] %s: %s", slot_key, takeover)
-            try:
-                claimed = claim_slot(client, slot_key, force=force)
-            except Exception as exc:  # noqa: BLE001 认领失败 = 不跑（不许当「已跑过」）
-                logger.error(
-                    "[DecisionRound] 槽位认领失败 %s: %s（本轮不跑）", slot_key, exc
-                )
-                continue
-            if not claimed:
-                abandoned = _abandoned_claim_note(client, done_key)
-                if abandoned:
-                    logger.warning(
-                        "[DecisionRound] 槽位已被认领 %s（跳过）：%s",
-                        slot_key,
-                        abandoned,
-                    )
-                else:
-                    logger.info("[DecisionRound] 槽位已被认领 %s（跳过）", slot_key)
-                continue
-            if s.catch_up and not force:
-                try:
-                    if client.get(done_key):
-                        skipped = RoundResult(
-                            status=STATUS_SKIPPED,
-                            day=day,
-                            slot=s,
-                            round_id=round_id_for(day, s),
-                            note=f"当日已出过 {s.schema} 决策（{done_key}）：补跑跳过",
-                        )
-                        write_status(client, skipped, at=now)
-                        out.append(skipped)
-                        continue
-                except Exception as exc:  # noqa: BLE001 读不到 done 键 → 当作没跑过
-                    logger.warning(
-                        "[DecisionRound] done 键读取失败（按未跑过处理）: %s", exc
-                    )
-            result = await run_once(s, deps=deps, now=now, day=day)
-            if takeover:
-                result = replace(
-                    result,
-                    note=f"{takeover}；{result.note}" if result.note else takeover,
-                )
-            if result.ok:
-                try:
-                    client.set(done_key, "1", ex=DONE_TTL_S)
-                except Exception as exc:  # noqa: BLE001 置键失败：下个补跑槽可能重来
-                    logger.error(
-                        "[DecisionRound] done 键写入失败 %s（补跑槽可能重跑）: %s",
-                        done_key,
-                        exc,
-                    )
-            write_status(client, result, at=deps.now())
-            out.append(result)
-        return tuple(out)
-    finally:
-        if native is None and client is not None:
-            try:
-                client.close()
-            except Exception:  # noqa: BLE001
-                pass

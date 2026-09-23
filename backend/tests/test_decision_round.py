@@ -30,15 +30,9 @@ from backend.shared.decision_context_source import PoolDoc
 from backend.services.trade.services import decision_round as R
 from backend.services.trade.services import decision_round_io as IO
 from backend.services.trade.services import decision_round_runner as RUN
-from backend.services.trade.services.decision_round import (
-    AccountRead,
-    ExclusionRead,
-    RoundDeps,
-    RoundResult,
-    RoundSlot,
-    round_tick,
-    run_once,
-)
+from backend.services.trade.services import decision_round_tick as TICK
+from backend.services.trade.services.decision_round import run_once
+from backend.services.trade.services.decision_round_tick import round_tick
 from backend.services.trade.services.decision_round_io import (
     CLAIM_AUTO,
     CLAIM_MANUAL,
@@ -48,13 +42,20 @@ from backend.services.trade.services.decision_round_core import (
     LAST_KEY,
     LOG_KEY,
     SLOTS,
+    STATUS_SKIPPED,
+    AccountRead,
+    ExclusionRead,
     LLMBinding,
+    RoundDeps,
+    RoundResult,
+    RoundSlot,
     as_float,
     build_pool_stamps,
     due_slots,
     gate_row_to_pool_row,
     merge_outcomes,
     pool_row_to_gate_row,
+    position_source_meta,
     positions_consistency_issue,
     refusing_submitter,
     round_id_for,
@@ -100,12 +101,14 @@ class FakeNative:
         fail_claim: bool = False,
         fail_get: bool = False,
         fail_done_set: bool = False,
+        fail_delete: bool = False,
     ) -> None:
         self.store: dict[str, str] = {}
         self.calls: list[tuple] = []
         self.fail_claim = fail_claim
         self.fail_get = fail_get
         self.fail_done_set = fail_done_set
+        self.fail_delete = fail_delete
         self.closed = False
 
     def set(self, key, value, nx=False, ex=None):  # noqa: A002 - 与 redis-py 同形
@@ -125,6 +128,12 @@ class FakeNative:
         if self.fail_get:
             raise RuntimeError("redis 读不下来")
         return self.store.get(key)
+
+    def delete(self, key):
+        self.calls.append(("delete", key))
+        if self.fail_delete:
+            raise RuntimeError("redis 删不下来")
+        return 1 if self.store.pop(key, None) is not None else 0
 
     def lpush(self, key, value):
         self.calls.append(("lpush", key))
@@ -286,9 +295,26 @@ def make_harness(**over) -> Harness:
         log["llm"].append({"prompt": prompt, "schema": schema})
         return attempt_from(text, schema=schema)
 
+    # meta 形状与生产同形（``real_positions.merge_real_sources``）：每源一个 dict，
+    # 空持仓时的归因（读到几行 / 是否停更）就靠这几个字段，形状不同则测试测不到真分支。
+    pos_meta = over.pop(
+        "pos_meta",
+        {
+            "sources": {
+                "tdx_bridge": {
+                    "snapshot_at": "2026-09-24T09:30:00+08:00",
+                    "positions": len(positions),
+                    "stale": False,
+                    "lag_min": 0.0,
+                    "active_broker": True,
+                }
+            }
+        },
+    )
+
     async def load_positions(tenant, user):
         log["positions"].append((tenant, user))
-        return positions, {"sources": {"tdx_bridge": 1}}
+        return positions, pos_meta
 
     async def load_account(tenant, user):
         log["account"].append((tenant, user))
@@ -483,6 +509,64 @@ def test_positions_consistency_issue_renders_both_numbers():
     assert "120,000" in got and "170,000" in got and "70.6%" in got
 
 
+def test_positions_consistency_issue_says_which_source_state_emptied_the_table():
+    """空持仓的成因要指向**下一步查哪里**——三种成因的排查方向完全不同：
+
+    源读到 0 行（源侧链路）／读到行但全部停更（新鲜度窗口或时钟）／读到行但没有
+    一行的代码能识别（本仓 normalize 口径——源其实是好的）。一句笼统的「持仓链路
+    断了」会把最后一种引到错处。
+    """
+    kw = {"holdings": 0, "market_value": 120000.0, "total_asset": 170000.0}
+    zero = positions_consistency_issue(
+        **kw, sources={"tdx_bridge": {"positions": 0, "stale": False}}
+    )
+    assert "读到 0 行" in zero
+
+    all_stale = positions_consistency_issue(
+        **kw, sources={"qmt_exec": {"positions": 12, "stale": True}}
+    )
+    assert "12 行" in all_stale and "全部被判停更" in all_stale
+
+    no_codes = positions_consistency_issue(
+        **kw, sources={"qmt_exec": {"positions": 7, "stale": False}}
+    )
+    assert "7 行" in no_codes and "symbol 口径" in no_codes
+
+    # 源摘要读不出（不是映射 / 行数不是数字）：**数不动就如实说数不动**，不许猜成
+    # 0 行（那会把排查引向源侧链路），也不许炸出去（abort 的理由文本正是这一轮唯一
+    # 说得清的东西）
+    odd = positions_consistency_issue(**kw, sources={"weird": "not-a-mapping"})
+    assert "weird" in odd and "读不出" in odd
+    unreadable = positions_consistency_issue(
+        **kw, sources={"weird": {"positions": "nan?"}}
+    )
+    assert "weird" in unreadable and "读不出" in unreadable
+    # 有源读得出来、也有源读不出：结论照给，但**读不出的那处必须仍然可见**
+    mixed = positions_consistency_issue(
+        **kw, sources={"qmt_exec": {"positions": 7}, "weird": {"positions": "nan?"}}
+    )
+    assert "7 行" in mixed and "另有源的行数读不出：weird" in mixed
+    assert position_source_meta(None) == {} and position_source_meta("nope") == {}
+    assert position_source_meta({"sources": {"s": 1}}) == {"s": 1}
+
+
+def test_positions_consistency_issue_labels_the_denominator_honestly():
+    """总资产读不到时**不许**写「占总资产的 X%」——那个分母是市值自己（=100%）。
+
+    拿市值跟自己比出来的百分比会被读成「七成仓位」，而真相是「分母缺失」。
+    """
+    without = positions_consistency_issue(
+        holdings=0, market_value=120000.0, total_asset=None
+    )
+    assert "总资产读不到" in without and "非占比" in without
+    assert "占总资产" not in without
+
+    with_ta = positions_consistency_issue(
+        holdings=0, market_value=120000.0, total_asset=170000.0
+    )
+    assert "占总资产 170,000 的 70.6%" in with_ta
+
+
 def test_gate_row_roundtrip_keeps_every_prompt_column():
     """闸门只认 code/name/price，但筛一遍池子不该把行业/理由/排名筛没。"""
     row = pool_row_to_gate_row(BANK_ROW, 40.0)
@@ -607,10 +691,20 @@ async def test_run_once_aborts_when_empty_holdings_contradict_market_value():
     默认替身账户：市值 12 万 / 总资产 17 万（70.6%）且持仓表为空——两面对不上，
     照此决策会「该卖的没卖、不该买的买了」。空仓的正常形态见上一条用例。
     """
-    h = make_harness(positions={})
+    h = make_harness(
+        positions={},
+        # 源侧真的读到 1 行、未停更，但并进来 0 行 ⇒ 归因必须指向 symbol 口径
+        # （另外两种成因的文案见 core 的单测；文案给错会把排查引到别的链路上）
+        pos_meta={"sources": {"tdx_bridge": {"positions": 1, "stale": False}}},
+    )
     result = await run_once(SLOT_0935, deps=h.deps, now=NOW)
     assert result.status == R.STATUS_ABORTED
     assert "持仓面与资金面自相矛盾" in result.note
+    assert "读到 1 行但无一行有可识别代码" in result.note
+    assert result.meta["account"]["source"] == "tdx_bridge"
+    assert result.meta["positions"] == {
+        "sources": {"tdx_bridge": {"positions": 1, "stale": False}}
+    }
     assert h.log["llm"] == [] and h.log["exec"] == [] and h.log["ledger"] == []
 
 
@@ -712,6 +806,18 @@ async def test_run_once_happy_path_wires_round_quota_and_audit():
     }
     assert meta["account"]["source"] == "tdx_bridge"
     assert meta["account"]["age_min"] == 5.0
+    assert meta["account"]["broker"] == ""  # 替身没给券商：宁可为空，不许编一个
+    assert meta[
+        "sources"
+    ] == {  # 持仓源面（空持仓时的归因依据）：生产同形 per-source dict
+        "tdx_bridge": {
+            "snapshot_at": "2026-09-24T09:30:00+08:00",
+            "positions": 1,
+            "stale": False,
+            "lag_min": 0.0,
+            "active_broker": True,
+        }
+    }
     assert meta["tier"] == {"level": "normal", "source": "doc"}
     assert meta["quotes"]["client"] is True
     # pool_ctx 是**这一行自己的**位置戳（按原始写法代码对上号），不是按代码分组的映射
@@ -750,26 +856,117 @@ async def test_run_once_pool_missing_still_runs_and_leaves_a_trace():
 
 
 @pytest.mark.asyncio
-async def test_run_once_degrades_without_quote_client():
-    """行情拿不到 = 降级（不是 abort）：行情块整段不出现，执行段按无价否决。"""
-    h = make_harness(quote_client=lambda: None)
+async def test_run_once_pool_missing_without_quotes_does_not_trip_the_quote_gate():
+    """行情闸门判的是**池面**：没有池文件时「一只价都没有」无从谈起，不许据此 abort。
+
+    缺池 + 缺行情同时发生是盘前常态（池文件还没生成、行情服务器还没起）。此时
+    持仓与守护规则仍要靠它跑——把闸门挂在「行情可用性」而不是「池里无可用价」上，
+    会让这类轮次整片消失。
+    """
+    h = make_harness(pool=None, quote_client=lambda: None)
     result = await run_once(SLOT_0935, deps=h.deps, now=NOW)
     assert result.status == R.STATUS_OK
-    assert h.log["snaps"] == []  # 没客户端就不去读
-    meta = h.log["ledger"][0][0].context_meta
-    assert meta["quotes"] == {"rows": 0, "stale": 0, "client": False}
+    assert h.log["llm"] != []
 
 
 @pytest.mark.asyncio
-async def test_run_once_quote_read_failure_degrades_not_aborts():
+async def test_partially_unpriced_pool_still_runs_and_says_so():
+    """只有部分无价 ⇒ 照跑（有价的那只仍是候选），但「谁没进模型视野」必须留痕。
+
+    「池里 N 只没进视野」与「模型没选它们」在审计里长得一模一样，不留痕时归因会
+    指向模型。
+    """
+    h = make_harness(snaps={"600036.SH": SNAPS["600036.SH"]})  # 茅台无价
+    result = await run_once(SLOT_0935, deps=h.deps, now=NOW)
+    assert result.status == R.STATUS_OK
+    meta = h.log["ledger"][0][0].context_meta
+    assert meta["pool"]["shown"] == 1 and meta["pool"]["dropped"] == 1
+    assert any("1/2 只无可用现价" in n for n in meta["notes"])
+
+
+@pytest.mark.asyncio
+async def test_all_dropped_pool_warning_splits_no_price_from_unaffordable(caplog):
+    """全池被剔光时的 warning 要**按规则分流**：缺现价（行情链路）与买不起一手
+    （预算/档位）排查方向完全不同，一句「全部未过闸」会把人引向错处。
+
+    池面：茅台有价但一手 17 万 > 单票预算 7,500 ⇒ ``l1.unaffordable``；另一只
+    压根没价 ⇒ ``l2.pool_row_invalid``。两只都剔光但**原因不同**（有一只有价
+    就不触发行情闸门——那条判的是「一只价都取不到」）。
+    """
+    unpriced = PoolRow(
+        code="000001.SZ",
+        name="平安银行",
+        industry="银行",
+        score=1.0,
+        fusion=0.6,
+        rank=2,
+        remark="无价哨兵",
+    )
+    h = make_harness(
+        pool=pool_doc(PRICEY_ROW, unpriced),
+        snaps={"600519.SH": SNAPS["600519.SH"]},  # 只有茅台有价
+    )
+    with caplog.at_level("WARNING"):
+        result = await run_once(SLOT_0935, deps=h.deps, now=NOW)
+    hit = [r for r in caplog.records if "全部未过闸" in r.getMessage()]
+    assert hit, "整池剔光必须留一条 warning（否则归因指向模型）"
+    msg = hit[0].getMessage()
+    assert "缺可用现价 1 只" in msg and "买不起一手 1 只" in msg
+    assert result.status == R.STATUS_OK  # 有价 ⇒ 不是行情闸门那条，照常出决策
+    assert h.log["ledger"][0][0].context_meta["pool"]["shown"] == 0
+
+
+@pytest.mark.asyncio
+async def test_run_once_aborts_in_session_when_not_a_single_pool_row_has_a_price():
+    """池里一只价都取不到 **且** 在交易时段 ⇒ 本轮不做（不是降级）。
+
+    模型只能看到空池，回报必然是「全部持有」——那不是决策，是把「行情断了」写成
+    「今天不建仓」。而 ``round_tick`` 按 ``result.ok`` 置 done 键，当天 10:05/11:05
+    两个补跑槽会全部「当日已出过决策」跳过：**一次行情抖动吃掉当天全部建仓轮**，
+    状态键/日志/CLI 退出码三面却全绿。
+    """
+    h = make_harness(quote_client=lambda: None)
+    result = await run_once(SLOT_0935, deps=h.deps, now=NOW)
+    assert result.status == R.STATUS_ABORTED
+    assert "全部无可用现价" in result.note
+    assert "行情客户端未配置" in result.note  # 原因写清楚：客户端没造出来
+    assert h.log["snaps"] == []  # 没客户端就不去读
+    assert h.log["llm"] == [] and h.log["exec"] == [] and h.log["watch"] == []
+    assert result.meta["quotes"] == {"client": False, "rows": 0}
+    assert result.meta["pool"]["rows"] == 2  # 池面可查：2 只一条价都没有
+
+
+@pytest.mark.asyncio
+async def test_run_once_quote_read_failure_aborts_in_session_with_the_cause():
+    """读失败与「没客户端」在 abort 理由里必须分得开（一个查配置、一个查链路）。"""
     h = make_harness()
 
     def boom(client, codes):
         raise RuntimeError("远端行情不通")
 
     result = await run_once(SLOT_0935, deps=replace(h.deps, read_snaps=boom), now=NOW)
+    assert result.status == R.STATUS_ABORTED
+    assert "行情快照读取失败" in result.note and "远端行情不通" in result.note
+    assert result.meta["quotes"]["client"] is True  # 客户端在，是读的时候断的
+    assert h.log["llm"] == []
+
+
+@pytest.mark.asyncio
+async def test_run_once_degrade_survives_outside_the_session():
+    """非交易时段的盘前轮（08:30）拿不到价是常态：只出计划与守护规则，照跑。
+
+    那类轮本就不发腿（``refusing_submitter``），「模型看到空池」不构成危险——它
+    要的不是候选就是要守的仓。这条与上面两条是同一条判据的两侧，缺了它就容易
+    把「fail-closed」误扩成「盘前一没价就什么都不做」。
+    """
+    h = make_harness(quote_client=lambda: None, is_trading_time=lambda now: False)
+    result = await run_once(
+        SLOT_0830, deps=h.deps, now=datetime(2026, 9, 24, 8, 30, tzinfo=CST)
+    )
     assert result.status == R.STATUS_OK
-    assert h.log["ledger"][0][0].context_meta["quotes"]["client"] is True
+    assert h.log["llm"] != []  # 照常问模型
+    meta = h.log["ledger"][0][0].context_meta
+    assert meta["quotes"] == {"rows": 0, "stale": 0, "client": False}
 
 
 # ── 守护规则（整组替换的两条纪律） ───────────────────────────────────
@@ -881,15 +1078,18 @@ async def test_stale_account_snapshot_warns_but_does_not_abort(caplog):
 
 
 @pytest.mark.asyncio
-async def test_quote_client_construction_failure_degrades():
+async def test_quote_client_construction_failure_aborts_in_session():
+    """客户端构造抛异常与「没配」同一条路：原因带上，交易时段内 fail-closed。"""
+
     def boom():
         raise RuntimeError("远端行情未配置")
 
     h = make_harness(quote_client=boom)
     result = await run_once(SLOT_0935, deps=h.deps, now=NOW)
-    assert result.status == R.STATUS_OK
+    assert result.status == R.STATUS_ABORTED
+    assert "行情客户端不可用" in result.note and "远端行情未配置" in result.note
     assert h.log["snaps"] == []
-    assert h.log["ledger"][0][0].context_meta["quotes"]["client"] is False
+    assert h.log["exec"] == []
 
 
 @pytest.mark.asyncio
@@ -989,15 +1189,50 @@ async def test_executor_abort_without_a_single_order_is_aborted_not_ok():
     此前它只进 ``note``、状态仍是 ``ok``——而 ``round_tick`` 按 ``result.ok`` 写
     done 键，于是当天 10:05/11:05 两个 rebalance 补跑槽全部「当日已出过决策」跳过：
     **一次瞬时读失败吃掉当天全部建仓轮**，状态键、日志、CLI 退出码三面却全绿。
+
+    note 里还要点名**守护规则表没被本轮动过**：那张表是外部状态，审计表里看不出它。
     """
     h = make_harness(
         outcome=FakeOutcome(aborted="在途账读不到：本轮不提交腿", legs=2, submitted=0)
     )
     result = await run_once(SLOT_0935, deps=h.deps, now=NOW)
     assert result.status == R.STATUS_ABORTED
-    assert result.note == "在途账读不到：本轮不提交腿"
+    assert result.note == "在途账读不到：本轮不提交腿（守护规则表本轮整组保留）"
     assert result.errors == ("在途账读不到：本轮不提交腿",)
     assert result.submitted == 0
+
+
+@pytest.mark.asyncio
+async def test_aborted_round_never_touches_the_watch_table():
+    """H3：执行段 aborted 且零提交时**不许写守护规则表**（整组替换会清掉既有止损）。
+
+    ``write_watch_plan`` 是整组替换：拿一轮「一张单都没发」的决策去覆盖，等于把
+    09:00 挂上的止损全摘掉，还给一批**从未买入**的标的 arm 上规则——守卫的空仓
+    卖出提醒就是这么来的。守护段与执行段共享同一份快照，执行段说「这轮不算数」时
+    守护段必须跟着不动。
+    """
+    h = make_harness(
+        decision_text=WATCH_TEXT,
+        outcome=FakeOutcome(aborted="在途账读不到：本轮不提交腿", legs=1, submitted=0),
+    )
+    result = await run_once(SLOT_1000, deps=h.deps, now=TEN_05)
+    assert result.status == R.STATUS_ABORTED
+    assert h.log["watch"] == []  # 规则表一根手指头都没碰
+    assert result.watch_armed == 0
+    meta = h.log["ledger"][0][0].context_meta
+    assert any("守护规则表整组保留" in n for n in meta["notes"])  # 审计里也看得见
+
+
+@pytest.mark.asyncio
+async def test_aborted_round_with_orders_already_out_still_writes_the_watch():
+    """已有腿真出去 ⇒ 这轮的决策就是有效的：守护规则照写（判据是「零提交」）。"""
+    h = make_harness(
+        decision_text=WATCH_TEXT,
+        outcome=FakeOutcome(aborted="后半程在途账读不到", legs=2, submitted=1),
+    )
+    result = await run_once(SLOT_1000, deps=h.deps, now=TEN_05)
+    assert result.status == R.STATUS_OK
+    assert len(h.log["watch"]) == 1 and result.watch_armed == 1
 
 
 @pytest.mark.asyncio
@@ -1152,12 +1387,11 @@ async def test_tick_without_a_redis_client_never_runs(monkeypatch):
     没有去重就开跑，两个进程会同时把同一轮决策下成两批真单——「不知道有没有人
     在跑」在这种场景下的正确处置是**不动**。（构造失败要抛，不能被吞成 ``None``。）
     """
-    from backend.services.trade.services import decision_round as R
 
     def boom():
         raise RuntimeError("redis 构造不了")
 
-    monkeypatch.setattr(R, "native_redis_client", boom)
+    monkeypatch.setattr(TICK, "native_redis_client", boom)
     h = make_harness()
     assert await round_tick(deps=h.deps, native=None, now=TICK_NOW) == ()
     assert h.log["llm"] == []
@@ -1184,11 +1418,9 @@ async def test_tick_done_key_write_failure_still_reports_the_round(caplog):
 @pytest.mark.asyncio
 async def test_tick_closes_a_client_it_opened_itself(monkeypatch):
     """自己开的连接自己关：worker 是常驻循环，每 tick 漏一条连接就是稳定泄漏。"""
-    from backend.services.trade.services import decision_round as R
-
     h = make_harness()
     native = FakeNative()
-    monkeypatch.setattr(R, "native_redis_client", lambda: native)
+    monkeypatch.setattr(TICK, "native_redis_client", lambda: native)
     results = await round_tick(deps=h.deps, native=None, now=TICK_NOW)
     assert [r.status for r in results] == [R.STATUS_OK]
     assert native.closed is True
@@ -1202,7 +1434,7 @@ async def test_tick_closes_a_client_it_opened_itself(monkeypatch):
         def close(self):
             raise RuntimeError("连接关不掉")
 
-    monkeypatch.setattr(R, "native_redis_client", lambda: _StubbornClose())
+    monkeypatch.setattr(TICK, "native_redis_client", lambda: _StubbornClose())
     results = await round_tick(deps=h.deps, native=None, now=TICK_NOW)
     assert [r.status for r in results] == [R.STATUS_OK]  # 关不掉也吞掉：结果不能丢
 
@@ -1234,7 +1466,7 @@ async def test_catch_up_slot_is_skipped_when_the_day_already_has_a_decision():
     native = FakeNative()
     native.store[slot_keys(DAY, SLOT_1005)[1]] = "1"  # 当日已有 rebalance 决策
     results = await round_tick(deps=h.deps, native=native, now=TICK_1005)
-    assert [r.status for r in results] == [R.STATUS_SKIPPED]
+    assert [r.status for r in results] == [STATUS_SKIPPED]
     assert results[0].slot.hhmm == "1005" and "已出过" in results[0].note
     assert h.log["llm"] == []  # 补跑没有真的问模型
 
@@ -1250,12 +1482,73 @@ async def test_main_slot_does_not_consult_the_done_key():
 
 
 @pytest.mark.asyncio
-async def test_catch_up_runs_when_the_done_key_cannot_be_read():
-    """读不到 done 键 → 当作没跑过（补跑比漏跑安全：腿还有在途账兜底）。"""
+async def test_catch_up_does_not_run_when_the_done_key_cannot_be_read():
+    """补跑槽读不到 done 键 ⇒ **不跑**（SKIPPED），且放掉认领让窗口内还能再试。
+
+    「补跑槽存在」的全部意义是「当日还没出过这个 schema 的决策」；读不到 = 不知道
+    出没出过。此时跑下去可能发出**第二批**建仓计划——补跑的 round_id 与主槽不同，
+    订单幂等键挡不住重复腿（同槽重试才同键）。漏跑一轮的代价是「今天少建一次仓」，
+    重跑一轮的代价是「同一批意图下两次单」，两者不对称，所以 fail-closed。
+
+    认领键必须放掉：不放的话同一个 45 分钟宽限窗里后续每次 tick 都只回一句「已被
+    认领」，故障修好了也没人再来——而这条路径**从来没有真的跑过一轮**，放键不会
+    让任何东西重复执行。
+    """
     h = make_harness()
     native = FakeNative(fail_get=True)
     results = await round_tick(deps=h.deps, native=native, now=TICK_1005)
+    assert [r.status for r in results] == [STATUS_SKIPPED]
+    assert "done 键读取失败" in results[0].note
+    assert "--force" in results[0].note  # 出口：修不好时人要能显式重跑
+    assert h.log["llm"] == [] and h.log["exec"] == [] and h.log["watch"] == []
+    slot_key, done_key = slot_keys(DAY, SLOT_1005)
+    assert slot_key not in native.store  # 认领已放掉
+    assert done_key not in native.store  # 也绝不算「跑过」
+    assert json.loads(native.store[LAST_KEY])["status"] == "skipped"  # 状态键如实
+
+
+@pytest.mark.asyncio
+async def test_catch_up_retries_within_the_window_once_the_read_recovers():
+    """同一条失败的补跑，读恢复后**在下一次 tick 里真的跑起来**（认领键没被占死）。"""
+    h = make_harness()
+    native = FakeNative(fail_get=True)
+    assert [
+        r.status for r in await round_tick(deps=h.deps, native=native, now=TICK_1005)
+    ] == [STATUS_SKIPPED]
+    native.fail_get = False  # 运维修好了
+    results = await round_tick(deps=h.deps, native=native, now=TICK_1005)
     assert [r.status for r in results] == [R.STATUS_OK]
+    assert h.log["llm"] != []  # 这一次真的问了模型
+
+
+@pytest.mark.asyncio
+async def test_catch_up_claim_release_failure_still_reports_skipped(caplog):
+    """认领键删不掉（Redis 抖）不能让这一轮变成 error：只是少一次重试机会。"""
+    h = make_harness()
+    native = FakeNative(fail_get=True, fail_delete=True)
+    with caplog.at_level("WARNING"):
+        results = await round_tick(deps=h.deps, native=native, now=TICK_1005)
+    assert [r.status for r in results] == [STATUS_SKIPPED]
+    assert any("认领键释放失败" in r.message for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_tick_never_marks_done_when_the_quote_gate_aborts(caplog):
+    """H1 在 tick 层的落点：行情整段不可用 ⇒ 不置 done 键 ⇒ 补跑槽照来。
+
+    09:35 建仓轮在「池里一只价都没有」时 abort；若它在 tick 层仍被记成「跑过」，
+    10:05/11:05 两个 rebalance 补跑槽就都不会来——行情十分钟后恢复了也没用。
+    """
+    h = make_harness(quote_client=lambda: None)
+    native = FakeNative()
+    results = await round_tick(deps=h.deps, native=native, now=NOW, slot=SLOT_0935)
+    assert [r.status for r in results] == [R.STATUS_ABORTED]
+    done_key = slot_keys(DAY, SLOT_0935)[1]
+    assert done_key not in native.store
+    # 紧接着的补跑槽：done 键不在 ⇒ 它真的会跑（这里用同一批替身再 tick 一次）
+    catch_up = await round_tick(deps=h.deps, native=native, now=TICK_1005)
+    assert [r.status for r in catch_up] == [R.STATUS_ABORTED]  # 行情还没好，仍在 abort
+    assert h.log["llm"] == []
 
 
 @pytest.mark.asyncio
@@ -1517,7 +1810,7 @@ def test_cli_empty_result_names_all_four_causes(monkeypatch, capsys):
         (R.STATUS_OK, 0),
         # 「按设计跳过」（补跑槽当天已有该 schema 的决策）**不是失败**：退出码 1 会让
         # 依赖它的封装（脚本、控制台按钮、cron 包装）去查一个不存在的问题。
-        (R.STATUS_SKIPPED, 0),
+        (STATUS_SKIPPED, 0),
         (R.STATUS_ABORTED, 1),
         (R.STATUS_ERROR, 1),
     ],
@@ -1593,13 +1886,17 @@ class _SessionCM:
 
 
 def _patch_snapshot(monkeypatch, row):
-    """账户快照的单行替身：把 ``get_session`` 与选源换掉，SQL 仍是真件。"""
+    """账户快照的单行替身：把 ``get_session`` 与选源换掉，SQL 仍是真件。
+
+    替身签名必须收 ``strict=`` —— ``load_account_numbers`` 要的是「读不到就不许
+    回退 env 默认」的那个严格口径（不回退是它的全部意义，见那里的 docstring）。
+    """
     import backend.shared.database_manager_v2 as dbm
     import backend.shared.real_positions as rp
 
     cm = _SessionCM(row)
     monkeypatch.setattr(dbm, "get_session", lambda **kw: cm)
-    monkeypatch.setattr(rp, "active_broker_type", lambda: "qmt")
+    monkeypatch.setattr(rp, "active_broker_type", lambda **kw: "qmt")
     monkeypatch.setattr(rp, "snapshot_source_for_broker", lambda b: "tdx_bridge")
     return cm
 
@@ -1625,6 +1922,38 @@ async def test_load_account_numbers_reads_one_row_and_derives_the_three(monkeypa
     assert account.quota_total - account.quota_used == account.cash
     assert account.age_min is not None and account.age_min < 1.0
     assert cm.session.params["s"] == "tdx_bridge"  # 选源进了 SQL（两座真账户不许混读）
+    # 用的是哪家券商要能一路查到审计：源与券商是两个维度（映射表可改，映射错时
+    # 光看 source 分不清「运维选的就是它」还是「读错了回退成 env 默认」）。
+    assert account.broker == "qmt"
+
+
+@pytest.mark.asyncio
+async def test_load_account_numbers_fails_closed_when_the_broker_read_fails(
+    monkeypatch,
+):
+    """券商选择**读不到** ⇒ 本轮不做，**不许**回退 ``REAL_BROKER_TYPE``。
+
+    回退的语义是「没人显式选过，用部署默认」；读失败的语义是「不知道有没有人选过、
+    选的是谁」。两座真实账户（tdx 8 只 / qmt 50 只，实测差 ~25 倍）之间掷硬币决定
+    本轮额度，比不跑危险得多——本轮**一行都不许读库**。
+    """
+    import backend.shared.database_manager_v2 as dbm
+    import backend.shared.real_positions as rp
+
+    def boom(**kw):
+        raise rp.BrokerSelectionUnreadable("RuntimeError: 交易库 Redis 不可用")
+
+    monkeypatch.setattr(rp, "active_broker_type", boom)
+
+    def _no_db(**kw):  # 券商未定时还去读库 = 这条用例要钉的那件事发生了
+        raise AssertionError("券商选择读不到时不该读账户表")
+
+    monkeypatch.setattr(dbm, "get_session", _no_db)
+    account = await IO.load_account_numbers("default", "10000001")
+    assert account.ok is False
+    reasons = "".join(account.errors)
+    assert "券商选择读取失败" in reasons and "本轮不做" in reasons
+    assert "交易库 Redis 不可用" in reasons  # 原异常留下来（排障要看根因）
 
 
 @pytest.mark.asyncio
@@ -1674,7 +2003,7 @@ async def test_load_account_numbers_refuses_when_the_broker_maps_to_no_source(
     import backend.shared.database_manager_v2 as dbm
     import backend.shared.real_positions as rp
 
-    monkeypatch.setattr(rp, "active_broker_type", lambda: "some_broker")
+    monkeypatch.setattr(rp, "active_broker_type", lambda **kw: "some_broker")
     monkeypatch.setattr(rp, "snapshot_source_for_broker", lambda b: "")
 
     def _no_db(**kw):  # 无源还去读库 = 这条用例要钉的那件事发生了
@@ -1908,15 +2237,21 @@ async def test_default_round_deps_refuse_a_degraded_trading_day_verdict(monkeypa
 
 # ══ H. 分层与体量的源码守卫 ══════════════════════════════════════════
 def test_modules_stay_within_the_file_budget_and_layering():
-    """四块分工：core 无 IO、io 无编排、round 只编排、runner 只驱动；每块 < 800 行。"""
+    """五块分工：core 无 IO、io 无编排、round 只编排、tick 只调度、runner 只驱动。
+
+    每块 < 800 行——``round`` 曾在一个文件里同时装「一轮里发生了什么」与「哪些槽位
+    该跑」（900 行），拆出 ``tick`` 才回到预算内。
+    """
     from pathlib import Path
 
     base = Path(__file__).resolve().parents[1] / "services/trade/services"
     src = {
-        name: (base / f"decision_round_{name}.py").read_text(encoding="utf-8")
-        if name != "round"
-        else (base / "decision_round.py").read_text(encoding="utf-8")
-        for name in ("core", "io", "round", "runner")
+        name: (
+            (base / "decision_round.py")
+            if name == "round"
+            else (base / f"decision_round_{name}.py")
+        ).read_text(encoding="utf-8")
+        for name in ("core", "io", "round", "tick", "runner")
     }
     for name, text in src.items():
         assert len(text.splitlines()) < 800, f"decision_round_{name} 超出单文件上限"
@@ -1929,9 +2264,14 @@ def test_modules_stay_within_the_file_budget_and_layering():
         "httpx",
     ):
         assert banned not in src["core"], f"core 里出现了 IO 依赖：{banned}"
-    # 认领/状态键走原生客户端（包装客户端会把异常吞成 None，见模块 docstring）
-    assert "RedisClient(" not in src["round"] and "import redis" not in src["round"]
-    assert "native_redis_client" in src["round"] and "claim_slot" in src["round"]
+    # 认领/状态键走原生客户端（包装客户端会把异常吞成 None，见模块 docstring）：
+    # 这一层在 tick 而不是 round——拆层时最容易跟着 round_tick 一起搬错地方。
+    assert "RedisClient(" not in src["tick"] and "import redis" not in src["tick"]
+    assert "native_redis_client" in src["tick"] and "claim_slot" in src["tick"]
+    # 编排层不许直接拿 Redis 键（它只回答「一轮里发生了什么」）
+    assert (
+        "claim_slot" not in src["round"] and "native_redis_client" not in src["round"]
+    )
     # 驱动层**不许出现下单/取数**：这里出事只能是「不跑」，不能是「乱下」。
     # 断言的是**执行与取数模块名**（不是 "submit" 这种会撞上日志占位符的词）。
     for banned in (
@@ -1942,19 +2282,25 @@ def test_modules_stay_within_the_file_budget_and_layering():
         "get_session",  # 驱动层不读库：CLI 只允许 import close_database 收连接池
     ):
         assert banned not in src["runner"], f"runner 里出现了执行/取数代码：{banned}"
-    # 依赖方向单向：runner → round → io → core。反向 import 会成环或成「谁都能
-    # 抓谁」的泥球——逐层钉死它不许 import 上层的模块路径。
+    # 依赖方向单向：runner → tick → round → io → core。反向 import 会成环或成
+    # 「谁都能抓谁」的泥球——逐层钉死它不许 import 上层的模块路径。
     forbidden = {
         "core": (
             "decision_round_io import",
             "services.trade.services.decision_round import",
+            "decision_round_tick import",
             "decision_round_runner import",
         ),
         "io": (
             "services.trade.services.decision_round import",
+            "decision_round_tick import",
             "decision_round_runner import",
         ),
-        "round": ("decision_round_runner import",),
+        "round": (
+            "decision_round_tick import",
+            "decision_round_runner import",
+        ),
+        "tick": ("decision_round_runner import",),
     }
     for layer, markers in forbidden.items():
         for marker in markers:

@@ -4,6 +4,8 @@
 
     runner  ← 谁在什么时候调用轮次（本文件：常驻循环 / 操作员命令行）
       ↓
+    tick    ← 哪些槽位该跑、谁在跑、今天跑过没有（``decision_round_tick``）
+      ↓
     round   ← 一轮做什么（取数→提示词→LLM→执行→守护→审计，``decision_round``）
       ↓
     io      ← 与外界打交道（客户端构造、状态键、认领键，``decision_round_io``）
@@ -14,6 +16,8 @@
 与「一轮里发生了什么」完全无关，混在一个文件里时，审阅一轮的下单逻辑必须先在
 一百多行的 argparse 与 sleep 循环里找入口。分开之后，``decision_round.py`` 里
 只剩编排，本文件里不出现任何下单/取数代码——**这里出错只会「不跑」，不会「乱下」**。
+（``tick`` 层是「到点/认领/去重」——它同样属于「什么时候跑」而不是「跑起来做什么」，
+故与 worker 分开、但在同一张依赖图上。）
 
 与 ``trade/main.py`` 的分工：任务由 main 的 lifespan 起停（那里也判一次开关），
 本模块的 worker 是**循环体**；``ENV_FLAG`` 判两次是有意的——main 里判决定「要不要
@@ -28,7 +32,6 @@ import os
 import sys
 from collections.abc import Sequence
 
-from backend.services.trade.services.decision_round import round_tick
 from backend.services.trade.services.decision_round_core import (
     DEFAULT_GRACE_MIN,
     DEFAULT_POLL_S,
@@ -41,6 +44,7 @@ from backend.services.trade.services.decision_round_core import (
     RoundResult,
     due_slots,
 )
+from backend.services.trade.services.decision_round_tick import round_tick
 
 logger = logging.getLogger(__name__)
 

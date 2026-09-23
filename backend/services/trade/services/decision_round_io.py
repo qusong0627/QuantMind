@@ -43,11 +43,15 @@ async def load_account_numbers(tenant_id: str, user_id: str) -> AccountRead:
     """实盘账户额度三数（**一行快照**：cash + market_value + total_asset）。
 
     选源与选户都走既有唯一实现：``real_positions.snapshot_source_for_broker(
-    active_broker_type())`` + ``simulation_account_keys.ledger_user_id_candidates``。
-    ——同一 ``(tenant, user)`` 下 ``tdx_bridge`` 与 ``qmt_exec`` 是两座互不相交的
-    真实账户（实测规模差 ~25 倍），不带源地「取最新一行」等于在两座账户间掷硬币。
-    券商类型**没映射到任何源**时同样不做无源取数：那是「不知道该读哪座账」，
-    按 ``ok=False`` 报错让编排层中止本轮（不是猜一行继续）。
+    active_broker_type(strict=True))`` + ``simulation_account_keys.
+    ledger_user_id_candidates``。——同一 ``(tenant, user)`` 下 ``tdx_bridge`` 与
+    ``qmt_exec`` 是两座互不相交的真实账户（实测规模差 ~25 倍），不带源地「取最新
+    一行」等于在两座账户间掷硬币。券商类型**没映射到任何源**时同样不做无源取数：
+    那是「不知道该读哪座账」，按 ``ok=False`` 报错让编排层中止本轮（不是猜一行继续）。
+
+    **券商选择读不到时不回退**（``strict=True``）：回退 ``REAL_BROKER_TYPE`` 的语义是
+    「没人显式选过」，而读失败是「不知道有没有人选过」——本轮的额度可能因此来自另一座
+    账户（规模差 ~25 倍），故按 ``ok=False`` 中止（同「不知道是谁的账」那条纪律）。
 
     ``cash`` 或 ``market_value`` 取不到 = **账不可信**（``ok=False``）：拿一个编出来的
     数字当可用资金，比不跑这一轮危险得多（模型会据此报出买不起的单）。``total_asset``
@@ -57,6 +61,7 @@ async def load_account_numbers(tenant_id: str, user_id: str) -> AccountRead:
 
     from backend.shared.database_manager_v2 import get_session
     from backend.shared.real_positions import (
+        BrokerSelectionUnreadable,
         active_broker_type,
         snapshot_source_for_broker,
     )
@@ -66,7 +71,15 @@ async def load_account_numbers(tenant_id: str, user_id: str) -> AccountRead:
     if not account:
         return AccountRead(errors=("账户身份为空：无法读资金面",))
 
-    broker = active_broker_type()
+    try:
+        broker = active_broker_type(strict=True)
+    except BrokerSelectionUnreadable as exc:
+        return AccountRead(
+            errors=(
+                f"券商选择读取失败：{exc}（不知道有没有人选过、选的是谁：无法确定读"
+                "哪座账户的资金面，本轮不做）",
+            )
+        )
     snap_source = snapshot_source_for_broker(broker)
     if not snap_source:
         # 券商类型没映射到任何快照源 ⇒ **不知道该读哪座账户**。此时若照旧不加
@@ -126,6 +139,7 @@ async def load_account_numbers(tenant_id: str, user_id: str) -> AccountRead:
         market_value=market_value,
         total_asset=as_float(row[1]),
         source=str(row[4] or ""),
+        broker=str(broker or ""),
         snapshot_at=(
             snap_at.isoformat() if hasattr(snap_at, "isoformat") else str(snap_at or "")
         ),

@@ -38,7 +38,12 @@ from backend.shared.scheduler_registry import (  # noqa: E402
     switch_enabled,
 )
 
-_STATE_LABEL = {"ok": "✓ 新鲜", "stale": "✗ 过期", "off": "· 关闭", "missing": "! 无记录"}
+_STATE_LABEL = {
+    "ok": "✓ 新鲜",
+    "stale": "✗ 过期",
+    "off": "· 关闭",
+    "missing": "! 无记录",
+}
 
 
 def _redis_client():
@@ -226,7 +231,9 @@ def _run_advice_generator(date_str: str | None, force: bool) -> int:
     # 建议卡按「当日信号」生成，date_str 语义不适用（服务内部取最新交易日），
     # 传了也不假装生效——直接说明后按默认口径跑，避免造出「指定日期」的假象。
     if date_str:
-        print(f"提示：advice_generator 不接受日期参数（收到 {date_str}），按默认口径执行")
+        print(
+            f"提示：advice_generator 不接受日期参数（收到 {date_str}），按默认口径执行"
+        )
     from backend.services.trade.services.advice_generator import main as _service_main
 
     return _service_main()
@@ -247,7 +254,8 @@ def _run_decision_round(date_str: str | None, force: bool) -> int:
     """
     if date_str:
         print(f"提示：decision_round 不接受日期参数（收到 {date_str}），按当下槽位执行")
-    # 驱动层（runner）持有 CLI；编排层 decision_round 只有 round_tick/run_once。
+    # 驱动层（runner）持有 CLI；调度层 decision_round_tick 只有 round_tick，
+    # 编排层 decision_round 只有 run_once。
     from backend.services.trade.services.decision_round_runner import (
         main as _service_main,
     )
@@ -345,17 +353,23 @@ def cmd_run(job_key: str, date_str: str | None, force: bool) -> int:
         return 2
     if force:
         print(_force_notice(job_key))
-    print(f"== 手动重跑 {spec.key}（{spec.name}）{f'date={date_str}' if date_str else ''} ==")
+    print(
+        f"== 手动重跑 {spec.key}（{spec.name}）{f'date={date_str}' if date_str else ''} =="
+    )
     return _RERUN_DISPATCH[job_key](date_str, force)
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="调度控制台（注册表见 shared/scheduler_registry.py）")
+    parser = argparse.ArgumentParser(
+        description="调度控制台（注册表见 shared/scheduler_registry.py）"
+    )
     sub = parser.add_subparsers(dest="cmd", required=True)
     sub.add_parser("list", help="列出调度表与心跳状态")
     run_p = sub.add_parser("run", help="手动重跑指定任务")
     run_p.add_argument("job", help="任务 key（如 sim_eod/inference/data_sync）")
-    run_p.add_argument("--date", default="", help="目标日期 YYYY-MM-DD（语义按任务而定）")
+    run_p.add_argument(
+        "--date", default="", help="目标日期 YYYY-MM-DD（语义按任务而定）"
+    )
     run_p.add_argument(
         "--force",
         action="store_true",
