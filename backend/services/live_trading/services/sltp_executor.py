@@ -68,6 +68,16 @@ logger = logging.getLogger(__name__)
 CONFIG_KEY = "qmt:sltp:executor:config"
 STATE_KEY = "qmt:sltp:executor:state"
 
+#: 规则表容量上限（**单源**：API 契约与决策层写入端都引这里）。
+#: 表是「一个标的一个状态位」的平表，撑爆它意味着后续人工改规则会被 API 拒收。
+MAX_RULES = 50
+
+#: 规则归属（P2.4）：``""`` = 人工（CLI / 控制面 API 挂的），``"llm:<agent>"`` = 决策层
+#: 某个 agent 的整组（每轮整组替换，见 ``decision/watch_writer.py``）。
+#: **测试与文档都按字符串**：不要引入 Enum——``str`` 子类的 ``==`` 在本仓踩过坑。
+OWNER_MANUAL = ""
+OWNER_LLM_PREFIX = "llm:"
+
 # 规则状态机
 ST_ARMED = "armed"
 ST_TRIGGERED = "triggered"
@@ -120,6 +130,9 @@ _TICK_MISS_ALERT_THRESHOLD = 10
 
 DEFAULT_RULE: dict[str, Any] = {
     "symbol": "",
+    # 归属标记（P2.4）：**必须在词表里**，否则 normalize_rule 会把 LLM 挂的规则
+    # 静默洗成人工规则——下一轮整组替换就再也认不出自己那一组。
+    "owner": OWNER_MANUAL,
     "enabled": True,
     "side": "SELL",
     "entry_price": None,
@@ -241,7 +254,20 @@ def normalize_rule(raw: dict[str, Any]) -> dict[str, Any]:
         except (TypeError, ValueError):
             rule[key] = None
     rule["enabled"] = bool(rule.get("enabled", True))
+    # 归属一律**成串**（Redis 里手改过、老版本写过的可能是 null/数字）：
+    # 归属不是数字也不是布尔，比较永远按归一后的字符串来。
+    rule["owner"] = str(rule.get("owner") or "").strip()
     return rule
+
+
+def llm_owner(agent: str) -> str:
+    """agent 名 → 决策层规则归属标记；**空 agent 不构造**（返回 ``""``）。
+
+    裸前缀 ``"llm:"`` 是危险的：它会让「任何没给 agent 名的写者」共用同一组，
+    组内整组替换就变成彼此互删。调用方拿到 ``""`` 必须**拒绝写入**，不能当成人工组。
+    """
+    name = str(agent or "").strip()
+    return f"{OWNER_LLM_PREFIX}{name}" if name else OWNER_MANUAL
 
 
 def merge_config(raw: dict[str, Any] | None) -> dict[str, Any]:
@@ -382,6 +408,15 @@ def is_retryable(state_item: dict[str, Any] | None) -> bool:
     return status == ST_TRIGGERED and not str(item.get("order_id") or "")
 
 
+def is_live_state(state_item: dict[str, Any] | None) -> bool:
+    """该状态是否对应一笔**在途真单**。
+
+    摘规则（``qmt_sltp_ctl --rm``）时会连状态一起清掉；对已触发未终结的规则，
+    清掉状态等于**丢掉这笔委托的跟踪与终态通知**。故写侧在清理前先问这一句。
+    """
+    return str((state_item or {}).get("status") or "") in _LIVE_STATES
+
+
 def _detail_floor(detail: dict[str, Any] | None, symbol: str | None) -> float | None:
     """跌停价下限：优先桥的 ``DownStopPrice``（权威，含板别/ST/日期口径）。
 
@@ -483,6 +518,54 @@ def load_config(redis: Any) -> dict[str, Any]:
         return merge_config(None)
 
 
+def _raw_client(redis: Any) -> Any:
+    """取底层 redis-py 客户端（有就用它，拿不到就退回对象自身）。
+
+    ``trade_shared.redis_client.RedisClient`` 的 ``get``/``set`` 会把**任何**异常
+    吞掉：``get`` 失败返回 ``None``、``set`` 失败静默不写。对执行器的轮询这只是
+    「本轮空转」，但对**读-改-写**的写侧是致命的——「Redis 抖了」被伪装成
+    「配置是空的」，接着整表写回就等于把所有规则（含人工挂的）一起抹掉。
+    """
+    return redis.client if hasattr(redis, "client") else redis
+
+
+def read_key_strict(redis: Any, key: str) -> Any | None:
+    """读一个键：**异常照抛**，``None`` 只表示「键确实不存在」。"""
+    client = _raw_client(redis)
+    if client is None:
+        # 连接器没连上：get 只会返回 None、set 只会静默丢弃 → 必须当读失败
+        raise RuntimeError("Redis 未连接（client 为空）")
+    raw = client.get(key)
+    if raw is None:
+        return None
+    if isinstance(raw, bytes):  # 未开 decode_responses 的客户端
+        raw = raw.decode("utf-8")
+    if isinstance(raw, str):
+        raw = json.loads(raw)
+    return raw
+
+
+def read_config_strict(redis: Any) -> dict[str, Any]:
+    """读配置：**读不到就抛错**，绝不拿默认配置冒充「没有规则」。
+
+    与 :func:`load_config` 的分工是刻意划的：
+
+    * ``load_config`` 是**显示/轮询**口径——读失败回落默认（执行器下一拍重试，
+      代价是这一拍空转）；
+    * ``read_config_strict`` 是**写侧**口径——任何写路径（CLI ``--arm``/``--rm``、
+      控制面 PUT、决策层整组替换）都必须先过它，否则一次 Redis 抖动就会把规则表
+      整份写成「我刚编出来的那几条」。
+
+    调用方负责把异常转成「本次不写」。
+    """
+    raw = read_key_strict(redis, CONFIG_KEY)
+    if raw is None:
+        return merge_config(None)
+    if not isinstance(raw, dict):
+        raise ValueError(f"{CONFIG_KEY} 不是对象（{type(raw).__name__}）")
+    return merge_config(raw)
+
+
 def _persistable(cfg: dict[str, Any]) -> dict[str, Any]:
     """待落盘的配置：剔除**读时派生**的键（``rejected_rules`` 是每次读重算的
     诊断信息，写回去只会变成陈旧快照，还会让「同一条规则被拒两次」看起来像进了两次）。"""
@@ -495,18 +578,46 @@ def save_config(redis: Any, cfg: dict[str, Any]) -> dict[str, Any]:
     return clean
 
 
+def _config_fingerprint(cfg: dict[str, Any]) -> tuple[Any, ...]:
+    """整表指纹（比对用）：开关 + 其余顶层配置 + 归一后的规则列表。
+
+    ``rejected_rules`` 不在内：它是**读时派生**的诊断信息，两边各算一次，逐字比必然不等。
+    """
+    return (
+        bool(cfg.get("enabled")),
+        {k: cfg.get(k) for k in DEFAULT_CONFIG if k != "rules"},
+        [normalize_rule(r) for r in (cfg.get("rules") or [])],
+    )
+
+
+def save_config_strict(redis: Any, cfg: dict[str, Any]) -> dict[str, Any]:
+    """写配置并**回读确认**，写没生效就抛错（控制面 PUT / CLI 用）。
+
+    ``RedisClient.set`` 会把写失败吞掉（只记一条日志），所以「写成功」不能靠返回值
+    自证——运维在控制面上看到 200、以为止损挂上了，实际一条都没进 Redis，这是真单
+    链路上最不能接受的一类静默失败。与决策层写入端（``decision/watch_writer.py``）
+    的分工是粒度：那边要逐条回报「哪条没落库」，这里只要「写进去了没有」。
+    """
+    clean = save_config(redis, cfg)
+    after = read_config_strict(redis)
+    if _config_fingerprint(after) != _config_fingerprint(clean):
+        raise RuntimeError("写入未生效：回读的规则表与写入内容不一致")
+    return clean
+
+
 def set_enabled(redis: Any, enabled: bool) -> dict[str, Any]:
     """只改总开关，不动规则表。
 
     与 :func:`save_config` 的区别是**读失败直接抛错**（调用方回 5xx）：把「读不到」
     当空配置再整体写回，会在 Redis 抖动时把规则表整份抹掉。这里只有真的读到
     （含键不存在 → 默认配置）才会写。
+
+    ⚠️ 读必须走 :func:`read_config_strict`：``RedisClient.get`` 会把读失败吞成 ``None``，
+    用普通 ``get`` 的话「读不到」永远抛不出来，这条防线就成了纸面上的。
     """
-    raw = redis.get(CONFIG_KEY)
-    cfg = merge_config(raw if isinstance(raw, dict) else None)
+    cfg = merge_config(read_config_strict(redis))
     cfg["enabled"] = bool(enabled)
-    redis.set(CONFIG_KEY, _persistable(cfg))
-    return cfg
+    return save_config_strict(redis, cfg)
 
 
 def diff_state(
@@ -601,12 +712,22 @@ def save_state(
       执行器每轮都写状态，整份覆盖会把并发的 ``POST /reset``、CLI ``--rm``/``--arm``
       一并冲掉（后写覆盖先写）——真单链路上「用户以为已经解除，执行器照旧触发」
       是不能接受的。
+
+    **读回失败一律不写**（``_strict_get``）：``RedisClient.get`` 会把读失败吞成
+    ``None``，而这条路径把「读不到」当成「没有现存状态」→ 写回一份只剩本轮改动
+    的状态，等于把**所有在途委托的跟踪与棘轮防守位一并抹掉**。写不成只是这一轮
+    状态没落盘（下一次评估重算，下单幂等由 ``rule_client_order_id`` 兜底），
+    抹掉则是不可逆的。
     """
     try:
         if dirty is None and removed is None:
             redis.set(STATE_KEY, state)
             return
-        current = redis.get(STATE_KEY)
+        try:
+            current = read_key_strict(redis, STATE_KEY)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("[SltpExec] 状态读回失败，本次不写（不用空状态覆盖）: %s", exc)
+            return
         day = str(state.get("date") or "")
         if isinstance(current, dict) and str(current.get("date") or "") == day:
             merged = dict(current)

@@ -20,6 +20,8 @@ IO 与编排在别处：提示词取数 ``backend/shared/decision_context_source
 LLM 真调用 ``backend/shared/decision_llm_client.py``、
 执行段取数与提交 ``backend/services/trade/services/decision_executor.py``、
 审计表 ``backend/shared/decision_ledger_store.py``、
+止盈止损规则表写入 ``backend/shared/decision/watch_writer.py``（`watch` → 规则表，
+整组替换 + 写后回读）、
 轮次调度 ``backend/services/trade/services/decision_round.py``、
 运维 CLI ``backend/scripts/decision_ledger.py``。
 

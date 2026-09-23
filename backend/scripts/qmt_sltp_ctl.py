@@ -50,17 +50,18 @@ def _dump(obj) -> None:
 def _load(redis):
     """读配置 + 状态。
 
-    配置**读失败直接抛错**：CLI 的写路径都是「读-改-写」，把「读不到」当空配置
-    再写回会把规则表整份抹掉（真单链路上等于静默解除所有止损）。
+    配置**读失败直接抛错**（``read_config_strict``）：CLI 的写路径都是「读-改-写」，
+    把「读不到」当空配置再写回会把规则表整份抹掉（真单链路上等于静默解除所有止损）。
+    注意不能用 ``load_config``：它读失败回落默认，而 ``RedisClient.get`` 恰好会把
+    读失败吞成 ``None``——那句「读不到」就永远不会抛出来。
     """
-    raw = redis.get(ex.CONFIG_KEY)
-    cfg = ex.merge_config(raw if isinstance(raw, dict) else None)
-    return cfg, ex.load_state(redis)
+    return ex.read_config_strict(redis), ex.load_state(redis)
 
 
 def _save(redis, cfg):
-    saved = ex.save_config(redis, cfg)
-    return saved
+    # 写后回读确认：`RedisClient.set` 写失败是静默的，不确认就会打印「已武装」
+    # 而 Redis 里一条都没有（用户以为有止损，实盘裸奔）。
+    return ex.save_config_strict(redis, cfg)
 
 
 def cmd_arm(redis, args) -> None:
@@ -87,6 +88,9 @@ def cmd_arm(redis, args) -> None:
     if reason:
         print(f"规则被拒绝（未写入）：{reason}", file=sys.stderr)
         raise SystemExit(2)
+    # 人工 `--arm` 是**显式接管**：同标的的旧规则（不管是人工的还是决策层挂的）
+    # 一律被这条顶掉，归属回到空（人工）。决策层下一轮会看到「该标的已有人工规则」
+    # 并按人工优先处理（见 decision/watch_writer.py），不会反过来把它删掉。
     rules = [
         r
         for r in cfg.get("rules") or []
@@ -123,10 +127,11 @@ def cmd_rm(redis, args) -> None:
     ]
     cfg["rules"] = rules
     _save(redis, cfg)
-    # 同步清掉状态，避免同名规则复用时沿用旧状态
+    # 同步清掉状态，避免同名规则复用时沿用旧状态。
+    # 走 `removed=` 而不是整份覆盖：整份覆盖的输入是上面那次读，读失败（Redis 抖动，
+    # `RedisClient.get` 会把它吞成空状态）就会把**全部**规则状态一起抹掉。
     state = ex.load_state(redis)
-    state.get("rules", {}).pop(target, None)
-    ex.save_state(redis, state)
+    ex.save_state(redis, state, removed={target})
     print(f"已移除 {target}（剩余 {len(rules)} 条规则）")
 
 

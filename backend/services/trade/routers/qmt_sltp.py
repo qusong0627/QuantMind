@@ -11,6 +11,10 @@
 **鉴权口径**：止盈止损执行器触发即下真单（保护价报单），是真金白银的控制面，
 全部端点要求管理员（``require_admin``）。所有 Redis 键读写封装在
 ``sltp_executor`` 内，本路由只做参数校验、鉴权与审计。
+
+``PUT /qmt-sltp/config`` 是**整表替换**：请求里没带 ``owner`` 的规则会落成人工规则
+（``owner=""``）。要保留决策层挂的那一组（``owner="llm:<agent>"``），把 GET 回来的
+``owner`` 原样带回去——规则表里「谁挂的」就是靠这个字段认的。
 """
 
 from __future__ import annotations
@@ -27,8 +31,9 @@ from backend.services.trade_shared.deps import AuthContext, get_redis, require_a
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-MAX_RULES = 50
-# 白名单引用执行器（**单源**）——避免 API 层与执行层各写一份后漂移。
+# 白名单与容量引用执行器（**单源**）——避免 API 层与执行层各写一份后漂移。
+# 容量尤其要同源：决策层整组替换也按同一个上限判，否则 API 能存下的表决策层写不进去。
+MAX_RULES = executor.MAX_RULES
 VALID_MODES = executor.VALID_PROTECT_MODES
 
 
@@ -69,6 +74,23 @@ class SltpRule(BaseModel):
     reduce_pct: float | None = Field(
         None, description="部分减仓比例 (0,1]，如 0.33=减三分之一"
     )
+    # P2.4：规则归属。空 = 人工（本控制面/CLI 挂的）；``llm:<agent>`` = 决策层某个
+    # agent 的整组（每轮整组替换）。**GET 回来的值要原样带回去**：PUT 是整表替换，
+    # 丢了它这批规则就变成人工规则，决策层再也认不出自己那一组。
+    owner: str = Field(
+        "", max_length=64, description="规则归属：空=人工；llm:<agent>=决策层整组"
+    )
+
+    @field_validator("owner")
+    @classmethod
+    def _clean_owner(cls, value: str) -> str:
+        text = str(value or "").strip()
+        if text == executor.OWNER_LLM_PREFIX:
+            # 裸前缀不属于任何 agent：这种规则没有任何写者会整组替换它（挂了就摘不掉）
+            raise ValueError(
+                f"owner 不能是裸前缀 {executor.OWNER_LLM_PREFIX!r}（它不属于任何 agent）"
+            )
+        return text
 
     @model_validator(mode="after")
     def _check_combinations(self) -> SltpRule:
@@ -147,13 +169,17 @@ class SltpResetRequest(BaseModel):
 
 
 def _read(redis: Any) -> dict[str, Any]:
+    """读配置 + 状态。
+
+    配置走**严格读**：运维看到的就是表里真有的那份。用 ``load_config`` 的话，
+    Redis 抖一下会被渲染成「没有规则」——运维据此改一次配置（整表替换），
+    真实的规则就真没了。
+    """
     try:
-        return {
-            "config": executor.load_config(redis),
-            "state": executor.load_state(redis),
-        }
+        config = executor.read_config_strict(redis)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=503, detail=f"Redis 读取失败: {exc}") from exc
+    return {"config": config, "state": executor.load_state(redis)}
 
 
 @router.get("/qmt-sltp/config")
@@ -186,10 +212,14 @@ async def put_sltp_config(
     redis: Any = Depends(get_redis),
     auth: AuthContext = Depends(require_admin),
 ):
-    """整体替换配置。改规则后需 ``POST /reset`` 才会重新武装当日已触发的标的。"""
+    """整体替换配置。改规则后需 ``POST /reset`` 才会重新武装当日已触发的标的。
+
+    写走 ``save_config_strict``（写后回读确认）：``RedisClient.set`` 写失败是静默的，
+    不确认就只能「相信」——而这里回一句 200 就等于告诉运维「止损已经挂好了」。
+    """
     data = payload.model_dump()
     try:
-        saved = executor.save_config(redis, data)
+        saved = executor.save_config_strict(redis, data)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=503, detail=f"Redis 写入失败: {exc}") from exc
     logger.info(
