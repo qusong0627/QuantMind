@@ -111,6 +111,10 @@ class SimOrder(Base, TimestampMixin):
     client_order_id: Mapped[str | None] = mapped_column(
         String(100), nullable=True, index=True)
     source: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # P2.7 分账契约列：这条腿是哪家模型下的。模拟台账是**意图的源头**——真单是它的
+    # 镜像，镜像单的 agent 从这条行上抄（见 real_mirror_service 的 payload）。
+    # 人点/风控/托管单恒 NULL。不建索引（同 trade_shared 侧口径：取值域个位数）。
+    agent: Mapped[str | None] = mapped_column(String(64), nullable=True)
     remarks: Mapped[str | None] = mapped_column(String(500), nullable=True)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     total_fee: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)

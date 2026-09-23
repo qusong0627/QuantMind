@@ -45,7 +45,13 @@ class OrderRequest:
     run_id: str = ""
     mirror: bool = False  # 成交后是否触发真单镜像
     mirror_source: str = ""
+    #: 真单限价（仅约束镜像出去的那一笔）。``None`` = 由镜像按参考价 ± 滑点带派生。
+    #: 模拟腿**不看**这个字段：模拟成交价仍取服务端快照价。
+    real_limit_price: float | None = None
     strict_market: bool | None = None  # None=按模式自动
+    #: P2.7 分账：这条腿属于哪家模型（LLM 决策腿由执行段传入）。落 ``sim_orders.agent``
+    #: 并随镜像 payload 传给真单——成交回报只能从订单上读归属，别处都读不到。
+    agent: str = ""
 
     def resolved_strict(self) -> bool:
         if self.strict_market is not None:
@@ -177,6 +183,7 @@ async def _submit_immediate(db, manager, req: OrderRequest) -> RouterOutcome:
         trigger_source=req.source,
         strict_market=req.resolved_strict(),
         bar=req.bar,
+        agent=req.agent,
     )
     return RouterOutcome(
         success=bool(outcome.success),
@@ -272,6 +279,7 @@ async def _submit_from_bar(db, manager, req: OrderRequest) -> RouterOutcome:
                     remarks=req.remarks,
                     position_side=str(req.position_side or "long").strip().lower(),
                     is_margin_trade=bool(req.is_margin_trade),
+                    agent=req.agent,
                 ),
                 trigger_source=req.source,
             )
@@ -342,6 +350,8 @@ async def _mirror_fill(redis, req: OrderRequest, routed: RouterOutcome) -> dict 
             strategy_id=str(req.strategy_id or ""),
             market=market,
             source=req.mirror_source or req.source,
+            limit_price=req.real_limit_price,
+            agent=req.agent,
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("[OrderRouter] 镜像调用异常（不影响虚拟成交）: %s", exc)

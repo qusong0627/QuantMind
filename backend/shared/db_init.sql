@@ -863,6 +863,9 @@ CREATE TABLE IF NOT EXISTS orders (
     -- T-P1-03 Order 契约列（REAL：成交来源 + 订单来源分类）
     price_source    VARCHAR(64),
     source          VARCHAR(32),
+    -- P2.7 分账归属：这条真单是哪家模型（LLM 决策腿）下的。成交回报只带来订单、
+    -- 不带决策上下文，回写分账账本的 agent 只能从这一列读。非 LLM 腿恒 NULL。
+    agent           VARCHAR(64),
     remarks         VARCHAR(500),
     version         INTEGER NOT NULL DEFAULT 1,
     created_at      TIMESTAMP NOT NULL DEFAULT NOW(),
@@ -1205,6 +1208,9 @@ CREATE TABLE IF NOT EXISTS sim_orders (
     -- T-P1-03 Order 契约列（client_order_id 落台账；source=rebalance/manual/...）
     client_order_id VARCHAR(100),
     source          VARCHAR(32),
+    -- P2.7 分账归属（agent = 哪家模型）：模拟台账是**意图的源头**，真单镜像从这列抄。
+    -- 非 LLM 腿（人点/风控/托管）恒 NULL。
+    agent           VARCHAR(64),
     remarks         VARCHAR(500),
     version         INTEGER NOT NULL DEFAULT 1,
     total_fee       FLOAT NOT NULL DEFAULT 0,

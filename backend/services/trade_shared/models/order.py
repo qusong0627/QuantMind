@@ -96,6 +96,12 @@ class Order(Base, TimestampMixin):
     # T-P1-03 Order 契约列：REAL 成交来源（broker_fill）与订单来源分类（manual/mirror/...）
     price_source = Column(String(64), nullable=True)
     source = Column(String(32), nullable=True)
+    # P2.7 分账契约列：这条单属于哪家模型（agent）。多模型共用一个券商账户时必须从
+    # 订单本身读得出归属——成交回报只带来订单，不带决策上下文，而回写分账账本
+    # （位置 + 虚拟现金）正是按这个字段落段。非 LLM 腿（人点/风控/托管）恒 NULL。
+    # 不建索引：取值域是「账号下同时跑着几家模型」（个位数），任何真实查询都会带上
+    # 日期/账户前缀，单列 agent 索引选不中——真需要时按查询形态建复合索引。
+    agent = Column(String(64), nullable=True)
     remarks = Column(String(500), nullable=True)
     version = Column(Integer, nullable=False, default=1)
 

@@ -21,21 +21,25 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import re
 import time
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
 SIM_ORDER_COLUMNS = (
     ("client_order_id", "VARCHAR(100)"),
     ("source", "VARCHAR(32)"),
+    ("agent", "VARCHAR(64)"),
 )
 
 ORDER_COLUMNS = (
     ("price_source", "VARCHAR(64)"),
     ("source", "VARCHAR(32)"),
+    ("agent", "VARCHAR(64)"),
 )
 
 # source 取值域（Order 契约：来源分类，供过滤/对账/下钻）
@@ -59,6 +63,29 @@ PRICE_SOURCE_SNAPSHOT = "snapshot"  # F2 快照级撮合取价（T-P6-17）
 
 # 幂等键长度上限（与 VARCHAR(100) 对齐）
 MAX_CLIENT_ORDER_ID_LEN = 100
+
+#: ``agent`` 列宽（P2.7 分账）。别名而不是每处写 ``VARCHAR(64)``：
+#: 三个写入点（契约列、两个模型）必须同宽，改一处漏一处会在入库时被 PG 静默截断。
+AGENT_LEN = 64
+
+
+def normalize_agent(value: Any) -> str:
+    """agent 名 → 入库形态（去空白 + 按列宽截断）；空 → 空串。
+
+    **截断口径必须唯一**：``llm_decision`` 腿的 agent 名来自 env 里的模型名
+    （``deepseek-v4-flash`` 这种），多个写入点各自 ``[:64]`` 迟早会有一个写成
+    ``[:32]``，而两处宽度不同 = 同一条腿在两张表里是两个 agent，对账时查不出原因。
+    同一个名字还是四处共用的**键**：幂等键的 agent 段、分账账本的分段名、
+    ``sim_orders.agent``、``orders.agent``——差一个字符就是「账本记在 A 名下、
+    订单挂在 B 名下」的账。
+
+    生产链在**身份**产生处就该调它（决策轮取 ``binding.model`` 时、派发器读队列
+    载荷时、提交段组 ``SimOrderCreate`` 时）；下游 schema 的 ``max_length`` 是兜底
+    而不是唯一防线：它**抛校验错**（整笔单发不出去），而这里只是截断。
+    给模型厂商看的 id（API 调用参数）**不要**过这里——截了就不是同一把模型。
+    """
+    return str(value or "").strip()[:AGENT_LEN]
+
 
 _ensured = False
 
@@ -113,16 +140,38 @@ def build_llm_decision_client_order_id(
     **一轮里有多个 agent 就必须传**：``round_id`` 是「轮」的标识，两家模型在同标的同
     方向上会算出**同一个键**，后一家被静默去重——正是本函数开头那段「模型让卖、
     系统静默不卖」的另一种形态。单 agent 轮次留空，键与历史完全一致（不改既有台账
-    的去重口径）。长度预算：4+24+1+8+1+9+1+4 = 52 < 100。
+    的去重口径）。长度预算：4+24+1+15+1+9+1+4 = 59 < 100。
     """
     rid = "".join(ch for ch in str(round_id or "") if ch.isalnum())[:24]
     sym = str(symbol or "").strip().upper()
     sd = str(side or "").strip().lower()
     if not rid or not sym or not sd:
         return None
-    ag = "".join(ch for ch in str(agent or "") if ch.isalnum())[:8]
+    ag = _agent_segment(agent)
     segments = ["lld", rid] + ([ag] if ag else []) + [sym, sd]
     return "-".join(segments)[:MAX_CLIENT_ORDER_ID_LEN]
+
+
+def _agent_segment(agent: Any) -> str:
+    """agent 名 → 幂等键里的一段（≤15 字符，**不同 agent 必须不同段**）。
+
+    前 8 个字符 + 6 位 SHA1 尾巴。为什么不直接用 ``[:8]``：``deepseek-v4-flash`` 与
+    ``deepseek-v4-pro`` 的前 8 个字符**一模一样**（都是 ``deepseek``），同轮同标的
+    同方向上两条腿会算出一个键，第二条被 ``uq_sim_orders_scope_client_order_id``
+    当重复单丢掉——多模型分账刚落地就会被自己的幂等键吃掉一半腿，而台账上只留一行
+    ``duplicate``。截断本身没问题，截断后**没有区分度**才是问题。
+
+    名字 ≤8 字符时**不加尾巴**（``flash``/``pro`` 与历史键逐字一致）：既有台账里
+    短名的键不变，长名的键从此带上尾巴——两族键不会互相碰撞（前者更短）。
+    哈希取 SHA1 前 6 位十六进制（16^6 ≈ 1.7e7）：同一轮的 agent 数以十计，
+    碰撞概率可忽略；它**不是**安全边界，只是区分码。
+    """
+    raw = "".join(ch for ch in str(agent or "") if ch.isalnum())
+    if not raw:
+        return ""
+    if len(raw) <= 8:
+        return raw
+    return f"{raw[:8]}-{hashlib.sha1(raw.encode('utf-8')).hexdigest()[:6]}"
 
 
 def build_bridge_plan_id(

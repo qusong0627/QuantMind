@@ -847,8 +847,12 @@ async def mirror_virtual_fill(
     bypass_price_gate: bool = False,
     trigger: str = "",
     limit_price: float | None = None,
+    agent: str = "",
 ) -> dict[str, Any]:
     """虚拟成交 → 真单镜像。**永不抛异常**，返回结构化决策结果。
+
+    ``agent``：这条腿属于哪家模型（P2.7 分账）。随载荷一路带到 ``orders.agent``——
+    成交回报回来时只认订单，届时才知道该记进哪本分账。非 LLM 腿留空。
 
     ``trigger``：成交通知里那句「这笔真单为什么会有」的原因是**可覆盖**的。默认句是
     「模拟盘成交触发真单镜像」，但实盘独有持仓直卖（``SOURCE_REAL_DIRECT``）没有模拟腿，
@@ -891,6 +895,7 @@ async def mirror_virtual_fill(
             bypass_price_gate=bool(bypass_price_gate),
             trigger=str(trigger or ""),
             limit_price=None if limit_price is None else float(limit_price),
+            agent=str(agent or ""),
         )
     except Exception as exc:  # noqa: BLE001 - 镜像失败绝不影响虚拟账本
         logger.error(
@@ -923,6 +928,7 @@ async def _mirror_virtual_fill(
     bypass_price_gate: bool = False,
     trigger: str = "",
     limit_price: float | None = None,
+    agent: str = "",
 ) -> dict[str, Any]:
     def _skip(reason: str) -> dict[str, Any]:
         logger.info(
@@ -988,6 +994,10 @@ async def _mirror_virtual_fill(
         "source": source,
         "queued_at": datetime.now(timezone.utc).isoformat(),
     }
+    if str(agent or "").strip():
+        # 只在有归属时入载荷（与 trigger/limit_price 同规矩）：空串入队会让
+        # 「这条单没有归属」与「归属是空串」在队列里长得一样。
+        payload["agent"] = str(agent).strip()
     if bypass_price_gate:
         payload["bypass_price_gate"] = True
     if trigger:
@@ -1225,6 +1235,8 @@ async def _submit_payload(
                 "strategy_id": payload.get("strategy_id") or None,
                 "client_order_id": mirror_cid,
                 "remarks": f"mirror:{payload.get('source') or 'sim'}",
+                # P2.7：归属随真单落 orders.agent（队列载荷是跨进程数据，缺了就空）
+                "agent": payload.get("agent") or None,
             },
             user_id=user_id,
             tenant_id=tenant,

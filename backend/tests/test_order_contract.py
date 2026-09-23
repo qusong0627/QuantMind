@@ -42,15 +42,15 @@ def test_build_sim_client_order_id():
 
 
 def test_column_lists():
-    assert {n for n, _ in SIM_ORDER_COLUMNS} == {"client_order_id", "source"}
-    assert {n for n, _ in ORDER_COLUMNS} == {"price_source", "source"}
+    assert {n for n, _ in SIM_ORDER_COLUMNS} == {"client_order_id", "source", "agent"}
+    assert {n for n, _ in ORDER_COLUMNS} == {"price_source", "source", "agent"}
 
 
 def test_missing_columns_logic():
     """安全化自愈：列齐全 → 零 DDL；缺列 → 只列缺口（2026-09-16 锁事故后重构）。"""
-    assert _missing_for("sim_orders", {"client_order_id", "source"}) == []
+    assert _missing_for("sim_orders", {"client_order_id", "source", "agent"}) == []
     gaps = _missing_for("sim_orders", {"source"})
-    assert gaps == [("client_order_id", "VARCHAR(100)")]
+    assert gaps == [("client_order_id", "VARCHAR(100)"), ("agent", "VARCHAR(64)")]
     assert _missing_for("orders", set()) == list(ORDER_COLUMNS)
 
 
@@ -129,6 +129,87 @@ def test_models_have_contract_fields():
 
     assert hasattr(SimOrder, "client_order_id") and hasattr(SimOrder, "source")
     assert hasattr(Order, "price_source") and hasattr(Order, "source")
+    # P2.7 分账归属列：成交回报只带来订单，这两列是「这笔该记进哪本分账」的唯一出处
+    assert hasattr(SimOrder, "agent") and hasattr(Order, "agent")
+
+
+def test_agent_column_width_is_one_number_in_all_four_write_points():
+    """``agent`` 宽度必须四处同数：契约列（启动期自愈的 DDL）/ ``db_init.sql``（新装）/
+    两个 ORM 模型（create_all 路径）。改一处漏一处 = PG 在入库时**静默截断**，
+    同一条腿在两张表里成了两个 agent，对账时查不出原因（见 ``normalize_agent``）。
+    """
+    import re
+
+    from backend.shared.order_contract import AGENT_LEN
+
+    for name, col_type in (*SIM_ORDER_COLUMNS, *ORDER_COLUMNS):
+        if name == "agent":
+            assert col_type == f"VARCHAR({AGENT_LEN})"
+
+    ddl = (_BACKEND / "shared/db_init.sql").read_text(encoding="utf-8")
+    for table in ("orders", "sim_orders"):
+        block = ddl.split(f"CREATE TABLE IF NOT EXISTS {table} (", 1)[1].split(");", 1)[0]
+        assert re.search(rf"\bagent\s+VARCHAR\({AGENT_LEN}\)", block), table
+        # 必须可空：非 LLM 腿（人点/风控/托管）本来就没有归属，NOT NULL 会让它们插不进去
+        assert re.search(r"\bagent\s+VARCHAR\(\d+\)[^,]*NOT NULL", block) is None, table
+
+    for rel in (
+        "services/trade_shared/models/order.py",
+        "services/simulation/models/order.py",
+    ):
+        src = (_BACKEND / rel).read_text(encoding="utf-8")
+        assert re.search(rf"agent[^\n]*String\({AGENT_LEN}\)", src), rel
+
+
+def test_normalize_agent_strips_and_truncates_never_raises():
+    from backend.shared.order_contract import AGENT_LEN, normalize_agent
+
+    assert normalize_agent("  deepseek-v4-flash ") == "deepseek-v4-flash"
+    assert normalize_agent(None) == ""
+    assert normalize_agent("") == ""
+    assert normalize_agent("   ") == ""
+    long_name = normalize_agent("x" * (AGENT_LEN + 20))
+    assert len(long_name) == AGENT_LEN
+
+
+def test_create_schemas_keep_the_agent_field():
+    """两个下单 schema 都必须**显式声明** ``agent``。
+
+    ``SimOrderCreate`` 是 ``extra="ignore"``：没声明的字段会被静默丢掉——调用方传了、
+    台账里却是 NULL，且没有任何报错（有 agent 与没 agent 在库里长得一样，
+    分账到时候只能数出一本空账）。宽度则按列封顶：超宽**抛校验错**而不是交给 PG 截断
+    （调用方一律先过 ``normalize_agent``，走到 schema 时已经合法）。
+    """
+    from pydantic import ValidationError
+
+    from backend.services.simulation.models.order import OrderSide, OrderType
+    from backend.services.simulation.schemas.order import SimOrderCreate
+    from backend.services.trade_shared.models.enums import (
+        OrderSide as TOrderSide,
+        OrderType as TOrderType,
+    )
+    from backend.services.trade_shared.schemas.order import OrderCreate
+
+    sim_kw = {
+        "symbol": "600036.SH",
+        "side": OrderSide("buy"),
+        "order_type": OrderType("market"),
+        "quantity": 100.0,
+    }
+    assert SimOrderCreate(**sim_kw, agent="deepseek-v4-flash").agent == "deepseek-v4-flash"
+    with pytest.raises(ValidationError):
+        SimOrderCreate(**sim_kw, agent="x" * 100)
+
+    real_kw = {
+        "portfolio_id": 0,
+        "symbol": "600036.SH",
+        "side": TOrderSide("buy"),
+        "order_type": TOrderType("market"),
+        "quantity": 100.0,
+    }
+    assert OrderCreate(**real_kw, agent="deepseek-v4-flash").agent == "deepseek-v4-flash"
+    with pytest.raises(ValidationError):
+        OrderCreate(**real_kw, agent="x" * 100)
 
 
 def test_source_taxonomy_constants():
@@ -213,12 +294,42 @@ def test_build_llm_decision_client_order_id_separates_agents_in_one_round():
     b = build(*args, agent="lgbm-238")
     assert a is not None and b is not None
     assert a != legacy and b != legacy and a != b
-    # agent 段只留 [A-Za-z0-9] 且至多 8 位（长度预算见 docstring）
-    assert (
-        build(*args, agent="native tft/v5")
-        == "lld-rnd202609240930-nativetf-600036.SH-sell"
+    # agent 段只留 [A-Za-z0-9]；≤8 位与历史键**逐字节一致**（既有台账的去重口径不动）
+    assert build(*args, agent="native tft/v5") == build(*args, agent="nativetftv5")
+    assert build(*args, agent="pro") == "lld-rnd202609240930-pro-600036.SH-sell"
+    # 长名带区分码尾巴：前 8 位相同的两家**不能**算出同一个键（见 _agent_segment）
+    assert build(*args, agent="deepseek-v4-flash") != build(
+        *args, agent="deepseek-v4-pro"
     )
-    assert build(*args, agent="a" * 40) == build(*args, agent="a" * 8)
+
+
+def test_agent_segment_keeps_long_names_distinct_and_short_names_verbatim():
+    """``[:8]`` 会把 ``deepseek-v4-flash`` 与 ``deepseek-v4-pro`` 截成同一个 ``deepseek``：
+    同轮同标的同方向的两条腿算出**一个**键，后一家被 ``uq_sim_orders_scope_client_order_id``
+    当重复单丢掉——多模型分账刚落地就被自己的幂等键吃掉一半腿，而台账上只留一行
+    ``duplicate``。
+    """
+    import hashlib as _hashlib
+
+    from backend.shared.order_contract import _agent_segment
+
+    # 短名逐字保留（既有台账里 pro/flash 这类键不变），剥掉非字母数字再算长度
+    assert _agent_segment("pro") == "pro"
+    assert _agent_segment("pro max") == "promax"
+    assert _agent_segment("native tft/v5") == _agent_segment("nativetftv5")  # 11 位 → 带尾巴
+    # 长名 = 前 8 位 + 6 位 SHA1（钉住算法：换哈希函数会悄悄重新发键）
+    raw = "deepseekv4flash"
+    assert (
+        _agent_segment("deepseek-v4-flash")
+        == f"deepseek-{_hashlib.sha1(raw.encode('utf-8')).hexdigest()[:6]}"
+    )
+    assert _agent_segment("deepseek-v4-flash") != _agent_segment("deepseek-v4-pro")
+    # 确定性：跨进程重放同一轮要落在同一个键上
+    assert _agent_segment("deepseek-v4-flash") == _agent_segment("deepseek-v4-flash")
+    # 空 → 空段（键里不出现空段，单 agent 轮次的键与历史一致）
+    assert _agent_segment("") == "" and _agent_segment(None) == ""
+    # 只要有字母数字就非空；纯符号名算「没有归属」
+    assert _agent_segment("---") == ""
 
 
 def test_build_llm_decision_client_order_id_refuses_to_fabricate():
@@ -649,6 +760,103 @@ async def test_real_order_scope_index_e2e_on_live_db():
             await session.rollback()
     finally:
         await close_database()
+
+
+@pytest.mark.asyncio
+async def test_agent_column_exists_and_reaches_the_table_on_the_live_db():
+    """真库 E2E（**自己清理，不留行**；``t-`` 随机租户）：
+
+    1. 启动期自愈后 ``orders``/``sim_orders`` 都有**可空**的 ``agent VARCHAR(64)``
+       ——「老库升级后这条腿的归属写不进去」是本批最可能的线上形态；
+    2. 行为面：``create_order(agent=...)`` 真的落进 ``sim_orders.agent``，超宽名按
+       列宽截断；不传的单是 NULL（非 LLM 腿不会被上一轮的归属串味）。
+    """
+    import uuid as _uuid
+
+    for attempt in range(2):
+        try:
+            await _ensure_db_pool_tp208()
+            break
+        except Exception:  # noqa: BLE001
+            if attempt == 1:
+                pytest.skip("数据库不可用")
+
+    from sqlalchemy import text as sa_text
+
+    from backend.services.simulation.models.order import OrderSide, OrderType
+    from backend.services.simulation.schemas.order import SimOrderCreate
+    from backend.services.simulation.services.order_service import SimOrderService
+    from backend.shared.database_manager_v2 import get_session
+    from backend.shared.order_contract import (
+        AGENT_LEN,
+        ensure_order_contract_columns_async,
+        normalize_agent,
+    )
+
+    # 异步变体的契约是「补齐列」而不是「返回布尔」（返回 None）；真正的断言是下面
+    # 的 information_schema —— 列在不在，只有库知道。
+    await ensure_order_contract_columns_async()
+    async with get_session(read_only=True) as session:
+        rows = (
+            await session.execute(
+                sa_text(
+                    "SELECT table_name, is_nullable, character_maximum_length "
+                    "FROM information_schema.columns "
+                    "WHERE table_name IN ('orders', 'sim_orders') AND column_name = 'agent'"
+                )
+            )
+        ).fetchall()
+    got = {str(r[0]): (str(r[1]), int(r[2])) for r in rows}
+    assert got == {"orders": ("YES", AGENT_LEN), "sim_orders": ("YES", AGENT_LEN)}, got
+
+    tenant = f"t-agent-{_uuid.uuid4().hex[:8]}"
+    user = "10000001"
+    long_name = "m" * (AGENT_LEN + 16)
+    cid_owned = f"{tenant}-600036.SH-buy"
+    cid_plain = f"{tenant}-600519.SH-buy"
+    try:
+        async with get_session(read_only=False) as session:
+            svc = SimOrderService(session)
+            for cid, raw_agent in ((cid_owned, long_name), (cid_plain, "")):
+                await svc.create_order(
+                    tenant,
+                    user,
+                    SimOrderCreate(
+                        portfolio_id=0,
+                        client_order_id=cid,
+                        symbol="600036.SH",
+                        side=OrderSide("buy"),
+                        order_type=OrderType("market"),
+                        quantity=100.0,
+                        price=40.0,
+                        remarks="P2.7 agent E2E",
+                        # 生产链一律先归一（决策轮/派发器/提交段三处）——schema 的
+                        # max_length 是**兜底**，超宽直接抛错；库侧再截断一次
+                        agent=normalize_agent(raw_agent),
+                    ),
+                    trigger_source="llm_decision",
+                )
+        async with get_session(read_only=True) as session:
+            stored = dict(
+                (
+                    await session.execute(
+                        sa_text(
+                            "SELECT client_order_id, agent FROM sim_orders "
+                            "WHERE tenant_id = :t AND client_order_id = ANY(:c)"
+                        ),
+                        {"t": tenant, "c": [cid_owned, cid_plain]},
+                    )
+                ).fetchall()
+            )
+        assert stored[cid_owned] == normalize_agent(long_name) == "m" * AGENT_LEN
+        assert stored[cid_plain] is None, "没归属的单必须是 NULL（空串会与真归属混在一起）"
+    finally:
+        async with get_session(read_only=False) as session:
+            for table in ("sim_orders", "simulation_orders"):
+                await session.execute(
+                    sa_text(f"DELETE FROM {table} WHERE tenant_id = :t"),
+                    {"t": tenant},
+                )
 
 
 @pytest.mark.asyncio

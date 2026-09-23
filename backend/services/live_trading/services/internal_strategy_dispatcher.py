@@ -24,6 +24,7 @@ from backend.services.live_trading.services.real_mirror_service import (
     mirror_virtual_fill,
 )
 from backend.shared.live_trading_gate import ensure_real_trading_allowed
+from backend.shared.order_contract import normalize_agent
 
 logger = logging.getLogger(__name__)
 
@@ -587,6 +588,11 @@ async def dispatch_internal_strategy_order(
                 trading_mode=trading_mode,
                 client_order_id=client_order_id,
                 remarks=remarks,
+                # P2.7 分账：LLM 腿的归属（镜像单从模拟单继承）；非 LLM 单为空。
+                # 归一用共享实现而非裸 strip：agent 名来自 env 里的模型名，
+                # 超宽时 schema 的 max_length 会**抛校验错**（整笔单丢失），
+                # 而共享实现按列宽截断——与 sim_orders 侧逐字节同值。
+                agent=normalize_agent(order_data.get("agent")) or None,
             ),
         )
     except IntegrityError:

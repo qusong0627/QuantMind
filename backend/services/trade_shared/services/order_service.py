@@ -11,6 +11,7 @@ from typing import List, Optional
 from uuid import UUID
 
 from backend.services.trade_shared.utils.stock_lookup import lookup_symbol_name
+from backend.shared.order_contract import normalize_agent
 
 from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -259,6 +260,9 @@ class OrderService:
             stop_price=order_data.stop_price,
             order_value=order_value,
             client_order_id=order_data.client_order_id,
+            # P2.7 分账：归属随订单落库（成交回报只带订单，不带决策上下文）。
+            # 截断口径只此一处（``normalize_agent``）：与契约列同宽。
+            agent=normalize_agent(order_data.agent) or None,
             remarks=order_data.remarks,
             status=OrderStatus.PENDING,
         )

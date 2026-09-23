@@ -91,12 +91,15 @@ class SimOrderService:
         from backend.shared.order_contract import (
             SOURCE_MANUAL,
             ensure_order_contract_columns_async,
+            normalize_agent,
         )
 
         client_order_id = str(data.client_order_id or "").strip() or None
         trigger_source = str(kwargs.get("trigger_source") or "").strip()
         order.client_order_id = client_order_id
         order.source = (trigger_source or SOURCE_MANUAL)[:32]
+        # P2.7 分账归属：模拟台账是意图的源头，镜像真单从这一列继承。非 LLM 腿为空。
+        order.agent = normalize_agent(data.agent) or None
         await ensure_order_contract_columns_async()
         # T-P2-08：幂等键唯一索引（部分索引，cid 非空行）；未启用（存量重复/失败）则旧语义
         from backend.shared.order_contract import ensure_sim_order_unique_index_async

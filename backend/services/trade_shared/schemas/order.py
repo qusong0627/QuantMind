@@ -43,6 +43,8 @@ class OrderCreate(OrderBase):
     portfolio_id: int = Field(..., ge=0)
     strategy_id: int | None = Field(None, gt=0)
     trading_mode: TradingMode | None = None
+    #: P2.7 分账：这条腿属于哪家模型（镜像单从模拟单继承）。非 LLM 腿留空。
+    agent: str | None = Field(None, max_length=64)
 
 
 class OrderUpdate(BaseModel):

@@ -128,6 +128,7 @@ from backend.shared.decision.gates import (
     BuyGate,
     filter_pool,
 )
+from backend.shared.order_contract import normalize_agent
 from backend.services.trade.services.decision_round_core import (
     ACCOUNT_AGE_WARN_MIN,
     STATUS_ABORTED,
@@ -297,7 +298,9 @@ async def _run_once_inner(
             errors=(f"{type(exc).__name__}: {exc}",),
             mode=mode,
         )
-    agent = binding.model
+    # agent 名先归一（去空白 + 按列宽截断）：它是幂等键段/账本段/两张订单表的**同一个
+    # 键**（口径见 normalize_agent）。归一只做在身份上，API 调用仍用 binding.model 原名。
+    agent = normalize_agent(binding.model)
 
     # ②b 分账账本（P2.7）：本 agent 名下的持仓 + 子账户虚拟现金。**在 ② 之后**是因为
     # 账本按 agent 切段，而 agent 名来自 LLM 绑定（纯 env 解析，不花钱不触网）。

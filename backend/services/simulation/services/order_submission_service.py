@@ -29,6 +29,7 @@ from backend.services.simulation.services.order_service import (
 from backend.services.simulation.services.simulation_manager import (
     SimulationAccountManager,
 )
+from backend.shared.order_contract import normalize_agent
 
 
 @dataclass
@@ -73,6 +74,7 @@ class SimulationOrderSubmissionService:
         expires_at: datetime | None = None,
         strict_market: bool = True,
         bar: Any = None,
+        agent: str = "",
     ) -> SimulationSubmissionOutcome:
         # P0-1/P0-4：同用户临界区串行化（幂等查+建单+撮合+落库），防并发双花与
         # 融券读-改-写丢更新。锁忙直接失败由调用方重试，不静默放行。
@@ -110,6 +112,7 @@ class SimulationOrderSubmissionService:
                     expires_at=expires_at,
                     strict_market=strict_market,
                     bar=bar,
+                    agent=agent,
                 )
         except RuntimeError:
             return SimulationSubmissionOutcome(
@@ -140,6 +143,7 @@ class SimulationOrderSubmissionService:
         expires_at: datetime | None = None,
         strict_market: bool = True,
         bar: Any = None,
+        agent: str = "",
     ) -> SimulationSubmissionOutcome:
         normalized_client_order_id = str(client_order_id or "").strip() or None
         if normalized_client_order_id:
@@ -195,6 +199,11 @@ class SimulationOrderSubmissionService:
                     trade_action=trade_action,
                     position_side=str(position_side or "long").strip().lower(),
                     is_margin_trade=bool(is_margin_trade),
+                    # P2.7 分账归属：即时链是 DecisionRouter 的唯一落地路径，落台账后
+                    # 镜像真单从这一列继承。此处按列宽归一**而不是**把裸名交给 schema：
+                    # 超宽名会被 ``max_length`` 抛校验错 → 整笔单发不出去（模型让卖、
+                    # 系统没卖），而所有权都是「这个名太长了」这种非交易原因。
+                    agent=normalize_agent(agent),
                 ),
                 trigger_source=trigger_source,
             )

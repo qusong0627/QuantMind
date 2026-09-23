@@ -38,6 +38,10 @@ class SimOrderCreate(SimOrderBase):
     trade_action: str | None = Field(None, max_length=32)
     position_side: str | None = Field(None, max_length=16)
     is_margin_trade: bool | None = False
+    #: P2.7 分账：这条腿属于哪家模型（多模型共用一个账户）。非 LLM 腿留空。
+    #: 注意本模型的 ``extra="ignore"``：**字段没在这里声明就会静默丢掉**，
+    #: 传参方以为写进去了而台账是 NULL——故它必须显式在场（有测试钉住）。
+    agent: str | None = Field(None, max_length=64)
 
 
 class SimOrderCancelRequest(BaseModel):

@@ -30,7 +30,7 @@ from backend.shared.decision.contract import (
     DecisionBatch,
     Pct,
 )
-from backend.shared.decision.execution import Holding, Quote
+from backend.shared.decision.execution import Holding, Leg, Quote
 
 # ---------------------------------------------------------------------------
 # 构造器（用例读起来要像在说交易场景）
@@ -632,6 +632,92 @@ async def test_execute_batch_puts_the_agent_into_the_idempotency_key() -> None:
         keys.append(submitter.calls[0][2])
     assert keys[0] == "lld-rnd20260924-600036.SH-sell"  # 留空 = 与历史一致
     assert len(set(keys)) == 3
+
+
+@pytest.mark.asyncio
+async def test_default_submitter_closes_the_agent_into_the_order_request(
+    monkeypatch,
+) -> None:
+    """agent 与 tenant/账户同处理：由**构造时闭合**（「这一轮是谁在跑」不是每条腿
+    各自决定的事）。它随 ``OrderRequest`` 落 ``sim_orders.agent`` 并跟着镜像进
+    ``orders.agent``——成交回报带回来的只有订单，读不出归属就没法分账（P2.7）。"""
+    from backend.services.simulation.services import order_router as router
+
+    captured: list[object] = []
+
+    async def _fake_submit_order(db, redis, req):  # noqa: ANN001 - 与真实签名同形
+        captured.append(req)
+        return _FakeOutcome(order_id="ord-1")
+
+    monkeypatch.setattr(router, "submit_order", _fake_submit_order)
+    submit = dx._make_default_submitter(
+        db=object(),
+        redis=object(),
+        tenant_id="default",
+        user_id=str(_ACCOUNT),
+        source="llm_decision",
+        agent="deepseek-v4-flash",
+    )
+    leg = Leg(
+        index=0,
+        symbol="600036.SH",
+        side="sell",
+        quantity=100.0,
+        limit_price=38.0,
+        reason="止盈",
+    )
+    await submit(leg, "lld-rnd1-600036.SH-sell", True)
+
+    assert len(captured) == 1
+    req = captured[0]
+    assert req.agent == "deepseek-v4-flash"
+    assert (req.tenant_id, req.user_id) == ("default", _ACCOUNT)
+    assert (req.symbol, req.quantity, req.client_order_id) == (
+        "600036.SH",
+        100.0,
+        "lld-rnd1-600036.SH-sell",
+    )
+    # 真单腿才镜像；模拟腿 mirror=False（别把 agent 也当成「这条要镜像」的信号）
+    assert req.mirror is True
+    assert req.mirror_source == "llm_decision"
+
+
+@pytest.mark.asyncio
+async def test_default_submitter_without_an_agent_sends_an_empty_string(
+    monkeypatch,
+) -> None:
+    """单 agent 轮次留空 → ``OrderRequest.agent`` 是空串（入口形态与历史一致），
+    由落库侧的 ``normalize_agent`` 统一转成 NULL。"""
+    from backend.services.simulation.services import order_router as router
+
+    captured: list[object] = []
+
+    async def _fake_submit_order(db, redis, req):  # noqa: ANN001
+        captured.append(req)
+        return _FakeOutcome(order_id="ord-2")
+
+    monkeypatch.setattr(router, "submit_order", _fake_submit_order)
+    submit = dx._make_default_submitter(
+        db=object(),
+        redis=object(),
+        tenant_id="default",
+        user_id=str(_ACCOUNT),
+        source="llm_decision",
+    )
+    await submit(
+        Leg(
+            index=0,
+            symbol="600036.SH",
+            side="buy",
+            quantity=100.0,
+            limit_price=38.0,
+            reason="建仓",
+        ),
+        None,
+        False,
+    )
+    assert captured[0].agent == ""
+    assert captured[0].client_order_id is None
 
 
 @pytest.mark.asyncio

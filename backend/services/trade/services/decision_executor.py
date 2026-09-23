@@ -561,13 +561,17 @@ Submitter = Callable[[Leg, str | None, bool], Any]
 
 
 def _make_default_submitter(
-    *, db, redis, tenant_id: str, user_id: object, source: str
+    *, db, redis, tenant_id: str, user_id: object, source: str, agent: str = ""
 ) -> Submitter:
     """默认提交器：``OrderRouter.submit_order``（唯一入口，链内含风控/幂等/落账）。
 
     ``real`` 决定是否镜像真单：**模拟腿的成交价仍取服务端快照价**（``order_type``
     用 market），``price``/``real_limit_price`` 只约束镜像出去的那一笔——与
     ``push_orders`` 的候选推送完全同形，别在这里另创一套。
+
+    ``agent`` 由构造时闭合（同 ``tenant_id``：它属于「这一轮是谁在跑」，不是每笔
+    腿各自决定的事），随 ``OrderRequest`` 落台账并跟着镜像进真单——成交回报只能
+    从订单上读归属（P2.7）。
     """
     from backend.shared.simulation_account_keys import normalize_runtime_user
 
@@ -596,6 +600,7 @@ def _make_default_submitter(
                 mirror=real,
                 mirror_source=source if real else "",
                 real_limit_price=leg.limit_price if real else None,
+                agent=agent,
             ),
         )
 
@@ -658,6 +663,9 @@ async def execute_batch(
             tenant_id=tenant_id,
             user_id=user_id,
             source=SOURCE_LLM_DECISION,
+            # 归属与幂等键同源（同一个 ``agent`` 既进 cid 也落订单列）：成交回报回来时
+            # 只认订单，届时靠 ``orders.agent`` 才知道这笔该记进哪本分账（P2.7）。
+            agent=agent,
         )
 
     receipts: list[LegReceipt] = []

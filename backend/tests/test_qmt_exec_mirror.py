@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, patch
@@ -342,6 +343,33 @@ class TestQueue:
         assert second["reason"] == "queue_duplicate"
         assert len(redis.client.lists["mirror:queue"]) == 1
 
+    def test_queue_payload_carries_the_agent(self) -> None:
+        """P2.7 分账：归属必须在**下单那一刻**就写进单里——成交回报只带来订单、
+        不带决策上下文，镜像这一跳是把 agent 从模拟腿搬到真单的唯一通道。"""
+        redis = self._open_redis()
+        with (
+            patch.object(m, "_real_trading_ready", return_value=(True, "")),
+            patch.object(m, "is_trading_time", return_value=False),
+        ):
+            result = _mirror(redis=redis, agent="deepseek-v4-flash")
+        assert result["status"] == "queued"
+        assert result["agent"] == "deepseek-v4-flash"
+        queued = json.loads(redis.client.lists["mirror:queue"][0])
+        assert queued["agent"] == "deepseek-v4-flash"
+
+    def test_blank_agent_is_absent_not_empty(self) -> None:
+        """空串**不**入载荷：队列是跨进程数据，「这条单没有归属」与「归属是空串」
+        必须长得不同，否则消费端分不出非 LLM 单与归一化漏掉的一单。"""
+        redis = self._open_redis()
+        with (
+            patch.object(m, "_real_trading_ready", return_value=(True, "")),
+            patch.object(m, "is_trading_time", return_value=False),
+        ):
+            result = _mirror(redis=redis)  # 不传 agent
+        assert "agent" not in result
+        queued = json.loads(redis.client.lists["mirror:queue"][0])
+        assert "agent" not in queued
+
     def test_queue_disabled_skips(self) -> None:
         redis = self._open_redis()
         with (
@@ -570,6 +598,38 @@ class TestSubmit:
         assert kwargs["order_data"]["side"] == "BUY"
         assert kwargs["tenant_id"] == "default"
         assert notify.calls, "提交成功应推送通知"
+
+    def test_submit_maps_the_agent_into_the_order_data(self) -> None:
+        """agent 的终点是 ``orders.agent``——下发参数是它进那条路的唯一入口。"""
+        redis = self._open_redis()
+        dispatch = AsyncMock(return_value={"status": "success", "order_id": "1001"})
+        with (
+            patch(
+                "backend.services.live_trading.services.internal_strategy_dispatcher"
+                ".dispatch_internal_strategy_order",
+                dispatch,
+            ),
+            patch.object(m, "notify", side_effect=lambda **kw: None),
+        ):
+            result = self._submit(redis, agent="deepseek-v4-flash")
+        assert result["status"] == "submitted"
+        assert dispatch.await_args.kwargs["order_data"]["agent"] == "deepseek-v4-flash"
+
+    def test_submit_without_agent_sends_none_not_empty_string(self) -> None:
+        """没归属的单传 ``None``：空串会与「归属是空串」的行在真台账里长得一样。"""
+        redis = self._open_redis()
+        dispatch = AsyncMock(return_value={"status": "success", "order_id": "1001"})
+        with (
+            patch(
+                "backend.services.live_trading.services.internal_strategy_dispatcher"
+                ".dispatch_internal_strategy_order",
+                dispatch,
+            ),
+            patch.object(m, "notify", side_effect=lambda **kw: None),
+        ):
+            result = self._submit(redis)
+        assert result["status"] == "submitted"
+        assert dispatch.await_args.kwargs["order_data"]["agent"] is None
 
     def test_submit_failure_releases_quota(self) -> None:
         redis = self._open_redis()
