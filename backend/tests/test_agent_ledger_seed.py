@@ -65,6 +65,23 @@ REAL_SHAPE = {
     },
 }
 
+#: 与 REAL_SHAPE 逐只相符的桥快照（真实切换时取 ``load_real_positions``，这里手写）。
+REAL_BRIDGE = {"603213.SH": 700, "002074.SZ": 200, "002709.SZ": 300}
+
+
+def _plan(raw=REAL_SHAPE, bridge=REAL_BRIDGE, **kw):
+    """解析 + **桥锚定对账** → 可落库的计划（store 只收这一种：类型即闸门）。"""
+    from backend.shared.decision.agent_ledger import (
+        bridge_positions,
+        reconcile_seed_with_bridge,
+    )
+
+    bmap, problems = bridge_positions(
+        [{"code": c, "volume": v} for c, v in dict(bridge or {}).items()]
+    )
+    assert not problems, problems
+    return reconcile_seed_with_bridge(parse_legacy_ledger(raw), bmap, **kw)
+
 
 # --- 纯解析 -----------------------------------------------------------------
 
@@ -222,8 +239,12 @@ def test_unknown_fields_are_noted_not_blocked():
     assert any("extra_top" in n for n in s.notes)
 
 
-def test_seed_fill_key_is_suffix_coded():
-    assert seed_fill_key("SH600036") == f"{SEED_FILL_PREFIX}600036.SH"
+def test_seed_fill_key_carries_the_agent_and_the_suffix_code():
+    """键里必须带 agent：**两家同持一只票**时（实测 600276.SH），第二家的流水
+    本来是会被幂等守卫静默吞掉的（真库 E2E 逮到过 7 条只落 6 条）。"""
+    assert seed_fill_key("pro", "SH600036") == f"{SEED_FILL_PREFIX}pro:600036.SH"
+    assert seed_fill_key("pro", "600036.SH") != seed_fill_key("flash", "600036.SH")
+    assert len(seed_fill_key("x" * 64, "600036.SH")) < 128
 
 
 # --- 落库（假 session） ------------------------------------------------------
@@ -294,7 +315,7 @@ async def test_import_refuses_on_a_non_empty_book():
         session,
         tenant_id="default",
         user_id="1001",
-        seed=parse_legacy_ledger(raw),
+        plan=_plan(raw),
         as_of=date(2026, 9, 25),
     )
     assert rep.applied is False
@@ -312,7 +333,7 @@ async def test_import_writes_accounts_positions_and_seed_fills():
         session,
         tenant_id="default",
         user_id="1001",
-        seed=parse_legacy_ledger(REAL_SHAPE),
+        plan=_plan(),
         as_of=date(2026, 9, 25),
     )
     assert rep.applied is True and rep.refused == ()
@@ -324,9 +345,9 @@ async def test_import_writes_accounts_positions_and_seed_fills():
     assert any("qm_agent_ledger_fill" in w for w in session.writes)
     # 流水键必须是**带前缀的后缀码**：C14 靠这个前缀把它们单独计数（不带 = 当孤儿报）
     assert session.seed_keys() == {
-        f"{SEED_FILL_PREFIX}603213.SH",
-        f"{SEED_FILL_PREFIX}002074.SZ",
-        f"{SEED_FILL_PREFIX}002709.SZ",
+        f"{SEED_FILL_PREFIX}deepseek-v4-flash:603213.SH",
+        f"{SEED_FILL_PREFIX}deepseek-v4-flash:002074.SZ",
+        f"{SEED_FILL_PREFIX}deepseek-v4-pro:002709.SZ",
     }
 
 
@@ -339,7 +360,7 @@ async def test_dry_run_writes_nothing_but_reports_the_plan():
         session,
         tenant_id="default",
         user_id="1001",
-        seed=parse_legacy_ledger(REAL_SHAPE),
+        plan=_plan(),
         as_of=date(2026, 9, 25),
         dry_run=True,
     )
@@ -357,11 +378,12 @@ async def test_blocked_plan_never_touches_the_session():
     from backend.shared.agent_ledger_store import import_legacy_seed
 
     session = _SeedSession()
-    bad = parse_legacy_ledger(
+    bad = _plan(
         {"version": 1, "agents": {"a": {"positions": {}, "virtual_cash": None}}}
     )
+    assert not bad.ok  # 解析阻断 → 对账也不放行（问题项原样上抛）
     rep = await import_legacy_seed(
-        session, tenant_id="default", user_id="1001", seed=bad, as_of=date(2026, 9, 25)
+        session, tenant_id="default", user_id="1001", plan=bad, as_of=date(2026, 9, 25)
     )
     assert rep.applied is False
     assert rep.refused == bad.problems
@@ -377,11 +399,51 @@ async def test_empty_plan_is_not_an_error():
         session,
         tenant_id="default",
         user_id="1001",
-        seed=parse_legacy_ledger({"version": 1, "agents": {}}),
+        plan=_plan({"version": 1, "agents": {}}, bridge={}),
         as_of=date(2026, 9, 25),
     )
     assert rep.applied is True and rep.accounts_written == 0
     assert session.writes == []
+
+
+@pytest.mark.asyncio
+async def test_store_refuses_an_unreconciled_seed():
+    """**原始解析结果不许落库**——类型就是这道闸门（否则等于照搬台账、幻影入账）。"""
+    from backend.shared.agent_ledger_store import import_legacy_seed
+
+    with pytest.raises(TypeError, match="SeedReconciliation"):
+        await import_legacy_seed(
+            _SeedSession(),
+            tenant_id="default",
+            user_id="1001",
+            plan=parse_legacy_ledger(REAL_SHAPE),  # type: ignore[arg-type]
+            as_of=date(2026, 9, 25),
+        )
+
+
+@pytest.mark.asyncio
+async def test_store_writes_the_anchored_decision_into_the_fill_note():
+    """被锚定过的标的：判定进结转流水行的 note（日后答得出「为什么是 200 股」）。"""
+    from backend.shared.agent_ledger_store import import_legacy_seed
+
+    anchored = _plan(bridge={"603213.SH": 700, "002074.SZ": 200, "002709.SZ": 250})
+    assert anchored.ok, anchored.problems
+    assert anchored.record("002709.SZ").kind == "anchored"
+    session = _SeedSession()
+    rep = await import_legacy_seed(
+        session,
+        tenant_id="default",
+        user_id="1001",
+        plan=anchored,
+        as_of=date(2026, 9, 25),
+    )
+    assert rep.applied and rep.positions_written == 3
+    notes = [str(p.get("note") or "") for p in session.params]
+    assert any(
+        "期初结转" in n and "对账：" in n and "单一认领人" in n for n in notes
+    ), notes
+    # 未被动过的两只照旧只有来路说明（note 不许无差别加料）
+    assert any(n and "对账：" not in n for n in notes)
 
 
 # --- 接线（源码守卫） -------------------------------------------------------
@@ -474,11 +536,11 @@ async def test_seed_import_on_live_db_round_trips_through_load_ledger() -> None:
 
     tenant = f"t-seed-{_uuid.uuid4().hex[:8]}"
     user = f"99{_uuid.uuid4().int % 1_000_000:06d}"
-    seed = parse_legacy_ledger(REAL_SHAPE)
+    plan = _plan()
     try:
         async with get_session(read_only=False) as session:
             first = await import_legacy_seed(
-                session, tenant_id=tenant, user_id=user, seed=seed, as_of="2026-09-25"
+                session, tenant_id=tenant, user_id=user, plan=plan, as_of="2026-09-25"
             )
             await session.commit()
         assert first.applied and first.accounts_written == 2
@@ -509,12 +571,14 @@ async def test_seed_import_on_live_db_round_trips_through_load_ledger() -> None:
                 .all()
             )
         assert {r["fill_key"] for r in fills} == {
-            f"{SEED_FILL_PREFIX}603213.SH",
-            f"{SEED_FILL_PREFIX}002074.SZ",
-            f"{SEED_FILL_PREFIX}002709.SZ",
+            f"{SEED_FILL_PREFIX}deepseek-v4-flash:603213.SH",
+            f"{SEED_FILL_PREFIX}deepseek-v4-flash:002074.SZ",
+            f"{SEED_FILL_PREFIX}deepseek-v4-pro:002709.SZ",
         }
         by_key = {r["fill_key"]: r for r in fills}
-        assert by_key[f"{SEED_FILL_PREFIX}603213.SH"]["trade_date"] == date(2026, 9, 11)
+        assert by_key[f"{SEED_FILL_PREFIX}deepseek-v4-flash:603213.SH"][
+            "trade_date"
+        ] == date(2026, 9, 11)
         assert all(
             r["order_id"] == "" and r["applied_volume"] == r["volume"] for r in fills
         )
@@ -523,7 +587,7 @@ async def test_seed_import_on_live_db_round_trips_through_load_ledger() -> None:
         # 二次结转：空账本纪律生效（正是「同一批仓记两遍」的入口）
         async with get_session(read_only=False) as session:
             again = await import_legacy_seed(
-                session, tenant_id=tenant, user_id=user, seed=seed, as_of="2026-09-25"
+                session, tenant_id=tenant, user_id=user, plan=plan, as_of="2026-09-25"
             )
         assert again.applied is False
         assert again.refused, "非空账本必须拒绝"

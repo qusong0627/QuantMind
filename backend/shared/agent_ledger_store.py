@@ -8,7 +8,8 @@
 
 * :func:`apply_fill` —— 记**一笔成交**，全书通用，任何时刻可调用；
 * :func:`import_legacy_seed` —— 搬**迁入那一刻的状态**（P3 数据迁移），
-  **只许在空账本上执行**（这三个 agent 一行都没有），否则整批拒绝。
+  **只收桥锚定对账后的计划**（:class:`SeedReconciliation`；原始解析结果在类型上就进不来）
+  且**只许在空账本上执行**（这三个 agent 一行都没有），否则整批拒绝。
 
 三段职责，逐段可单测
 --------------------
@@ -68,7 +69,7 @@ from backend.shared.decision.agent_ledger import (
     BAD_TICK_TOLERANCE,
     DEFAULT_AGENT_QUOTA,
     LedgerChange,
-    LegacySeed,
+    SeedReconciliation,
     agent_cash,
     agent_positions,
     record_buy,
@@ -469,22 +470,29 @@ async def import_legacy_seed(
     *,
     tenant_id: str,
     user_id: str,
-    seed: LegacySeed,
+    plan: SeedReconciliation,
     as_of: date | str,
     dry_run: bool = False,
 ) -> SeedImportReport:
     """把隔壁账本的 ``agents`` 段结转成本仓账本的**期初状态**（收调用方的 session）。
 
     与 :func:`apply_fill` 的关系：两者写的是同一批表，但语义不同——``apply_fill``
-    记的是**这一笔成交**，本函数搬的是**迁入那一刻的状态**。故有两条独有纪律：
+    记的是**这一笔成交**，本函数搬的是**迁入那一刻的状态**。故有三条独有纪律：
 
-    1. **只许在空账本上执行**：这三个 agent 只要在账户表/持仓表/流水表里已有任何一行，
+    1. **只收对账后的计划**（:class:`SeedReconciliation`）：隔壁台账是派生数据，
+       卖出没归因回去时只增不减（实测多出两只幻影仓）。传 :class:`LegacySeed`
+       =「照搬台账」⇒ 幻影入账 ⇒ 提示词里的仓柜台没有。类型就是这道闸门
+       （见 ``reconcile_seed_with_bridge``）。
+    2. **只许在空账本上执行**：这三个 agent 只要在账户表/持仓表/流水表里已有任何一行，
        整批拒绝（一行不写）。半本账上再叠一层期初状态，等于同一批仓记两遍——
        ``used`` 翻倍、``virtual_cash`` 被覆盖，且**新账本里看不出这是怎么来的**。
        拒绝时逐 agent 报出脏在哪张表、几行，由人来决定（本函数不删不改任何行）。
-    2. **流水行照写**（``applied_volume = volume`` 的买入行，``fill_key`` 带
-       :data:`SEED_FILL_PREFIX`）：账本状态要能从流水推回来，否则「流水即事实」在
-       迁入这一刻就断了。对账侧（体检 C14）按同一前缀把这类行单独计数，不当异常。
+    3. **流水行照写**（``applied_volume = volume`` 的买入行，``fill_key`` 带
+       :data:`SEED_FILL_PREFIX` **且含 agent**——两家同持一只票时键才不撞、
+       第二家的流水才不会被幂等守卫吞掉，见 :func:`seed_fill_key`）：账本状态要能
+       从流水推回来，否则「流水即事实」在迁入这一刻就断了。对账侧（体检 C14）按同一
+       前缀把这类行单独计数，不当异常；被桥锚定/人工判定过的标的，对账判定追加进
+       该行 ``note``（账本里能看见来路）。
 
     ``as_of``：结转日。**由调用方给**，且只用于没有 ``buy_ts`` 的持仓的流水日期
     （有 ``buy_ts`` 的按它的 **UTC 日**记，与 ``post_fill_for_order`` 的缺省口径一致）。
@@ -494,6 +502,19 @@ async def import_legacy_seed(
     """
     from backend.shared.decision.agent_ledger import seed_fill_key
 
+    if not isinstance(plan, SeedReconciliation):
+        # 编程错误（不是数据问题）：宁可当场炸，也不许把没对账的台账写进新账本。
+        raise TypeError(
+            f"import_legacy_seed 只收对账后的计划（SeedReconciliation），"
+            f"收到 {type(plan).__name__}：原始解析结果不许直接落库——那是「照搬台账」，"
+            "会把桥侧早已清仓的幻影仓写进新账本（见 reconcile_seed_with_bridge）"
+        )
+    seed = plan.seed
+    if not plan.ok:
+        # 对账不齐 / 解析阻断：整批拒绝（plan.problems 已含两边的理由）。
+        return SeedImportReport(
+            applied=False, dry_run=dry_run, refused=tuple(plan.problems)
+        )
     if not seed.ok:
         return SeedImportReport(
             applied=False, dry_run=dry_run, refused=tuple(seed.problems)
@@ -551,7 +572,7 @@ async def import_legacy_seed(
                 tenant_id=str(tenant_id or "default")[:64],
                 user_id=str(user_id or "")[:64],
                 agent=a.agent[:AGENT_COL_LEN],
-                fill_key=seed_fill_key(p.code)[:FILL_KEY_LEN],
+                fill_key=seed_fill_key(a.agent, p.code)[:FILL_KEY_LEN],
                 order_id="",
                 trade_date=buy_day,
                 code=p.code[:32],
@@ -560,7 +581,7 @@ async def import_legacy_seed(
                 price=p.cost_price,
                 applied_volume=p.volume,
                 approx_price=False,
-                note=_SEED_NOTE,
+                note=_seed_fill_note(plan, p.code),
                 filled_at=p.buy_ts or utc_now(),
             )
             if duplicated:
@@ -581,6 +602,18 @@ async def import_legacy_seed(
 
 #: 结转流水的 ``note``（人话：这一行为什么没有对应的本仓成交）。
 _SEED_NOTE = "期初结转：迁入时就持有的仓（来源=隔壁 live_ledger.json，非本仓成交）"
+
+
+def _seed_fill_note(plan: SeedReconciliation, code: str) -> str:
+    """结转流水行的 note：来路 + **该标的的对账判定**（锚定量/人工判定在账本里可见）。
+
+    为什么把判定也写进流水行：账单里日后能看到的只有这张流水表（持仓表没有 note 列），
+    「这只票为什么是 200 股而不是台账里的 400」必须在这一行里答得出来。
+    """
+    extra = plan.note_for(code)
+    if not extra:
+        return _SEED_NOTE
+    return f"{_SEED_NOTE}；{extra}"[:_NOTE_LIMIT]
 
 
 async def _seed_dirty_agents(

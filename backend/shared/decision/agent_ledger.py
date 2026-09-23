@@ -55,13 +55,18 @@
 真实账户里——不搬这一段，模型看不见自己的持仓（``mine_of`` 全空），与 2026-09-08
 事故同族、只是方向反过来。只搬 ``agents`` 段；搬的是**状态**，故 store 侧另有一条
 只许在空账本上执行的结转写入（见 ``agent_ledger_store.import_legacy_seed``）。
+
+但**解析结果不是可落库的计划**：隔壁台账是派生数据，卖出没归因回去时它只增不减
+（实测多出两只幻影仓）。故中间必须有 :func:`reconcile_seed_with_bridge`——**仓位唯一
+事实源是桥**（PG ``real_account_snapshots``），台账只提供归属；幻影剔除、单一认领人
+按桥锚定量、孤仓显式记录、人工判定留理由，最后过一道双向对账断言才准落库。
 """
 
 from __future__ import annotations
 
 import math
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Any
 
@@ -69,21 +74,33 @@ from backend.shared.stock_utils import StockCodeUtil
 from backend.shared.utc_datetime import as_utc, to_utc_iso
 
 __all__ = [
+    "BRIDGE_ANCHORED",
+    "BRIDGE_DRIFT",
+    "BRIDGE_MATCH",
+    "BRIDGE_ORPHAN",
+    "BRIDGE_OVERRIDE",
+    "BRIDGE_PHANTOM",
     "DEFAULT_AGENT_QUOTA",
     "SEED_FILL_PREFIX",
+    "BridgePosition",
     "LedgerChange",
     "LegacySeed",
+    "ReconcileRecord",
     "SeedAgent",
     "SeedPosition",
+    "SeedReconciliation",
     "agent_cash",
     "agent_positions",
     "agent_remaining",
     "agent_used",
+    "bridge_positions",
+    "bridge_rows_from_view",
     "ensure_agent",
     "fill_delta",
     "holding_days",
     "mine_of",
     "parse_legacy_ledger",
+    "reconcile_seed_with_bridge",
     "record_buy",
     "record_sell",
     "recorded_baseline",
@@ -423,9 +440,19 @@ def holding_days(buy_ts: Any, sell_ts: Any) -> float | None:
 SEED_FILL_PREFIX = "legacy-seed:"
 
 
-def seed_fill_key(code: Any) -> str:
-    """期初结转的流水幂等键（**后缀码**为准，与账本列同口径）。"""
-    return f"{SEED_FILL_PREFIX}{StockCodeUtil.to_suffix(str(code or '').strip())}"
+def seed_fill_key(agent: Any, code: Any) -> str:
+    """期初结转的流水幂等键：``legacy-seed:{agent}:{后缀码}``。
+
+    ``agent`` 必须在键里：流水表按 ``(租户, 用户, 成交日, fill_key)`` 唯一，而
+    **两个 agent 可以同持一只票、同日买入**（实测 600276.SH 就是 flash 与 pro 各
+    100 股）——键里不带 agent，第二家的结转流水会被幂等守卫静默跳过，它的持仓在
+    流水表里就查无此行（「状态要能从流水推回来」当场断掉）。
+
+    长度：前缀 12 + agent(≤64) + 1 + 码(≤32) < ``FILL_KEY_LEN``=128，不会截断撞键。
+    """
+    who = str(agent or "").strip()
+    suffix = StockCodeUtil.to_suffix(str(code or "").strip())
+    return f"{SEED_FILL_PREFIX}{who}:{suffix}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -639,6 +666,496 @@ def _parse_seed_positions(
             SeedPosition(code, float(volume), round(float(price), 4), buy_ts, last_ts)
         )
     return out, problems, notes
+
+
+# ── 期初结转的**桥锚定对账**（P0.4：仓位唯一事实源是桥）────────────────
+#
+# 为什么结转必须过这一层：隔壁台账的仓位是**派生数据**——「卖出没归因回去」时它
+# 只增不减（实测：台账 2400 股 vs 桥 1900 股，差 `002518.SZ` 400 + `603678.SH` 100
+# 两只幻影；桥侧那两只早已是**量为 0 的清仓残留行**）。照搬台账 = 把幻影迁进新账本
+# ⇒ 提示词告诉模型「你还有 400 股」而柜台没有 ⇒ 挂单被拒/部分成交，且**新账本自身
+# 看不出这是怎么来的**。故：**仓位唯一事实源是桥**（``real_positions.load_real_positions``
+# → PG ``real_account_snapshots``），台账只提供**归属**（这一只是谁买的）。
+#
+# 逐只标的的四种判定（全部落进 :class:`ReconcileRecord`，不静默丢弃）：
+#
+# | 判定 | 情形 | 处置 |
+# |---|---|---|
+# | ``match`` | 认领合计 == 桥 | 原样迁入（含多 agent 各持一份：600276.SH 实测两家各 100） |
+# | ``anchored`` | **单一认领人**、量不符 | 量按桥锚定（台账只说「这只归谁」，不说「还有多少股」） |
+# | ``phantom`` | 桥为 0/无此仓、台账有量 | 剔除，记录「原台账量 / 桥实况 / 差额 / 判定」 |
+# | ``orphan`` | 桥有量、无任何 agent 认领 | 不入分账（属总账户既有仓），显式记录 |
+#
+# 多认领人且合计≠桥 ⇒ **阻断**（归属不可判定，任何摊派都是编造——尤其按比例摊派会
+# 让其中一家**静默少仓**，那正是本层要消灭的那类事故）。人工判定走 ``overrides``，
+# 理由必填（不加理由的判定不可审计）。
+#
+# 成本价**不锚定**：桥的成本是账户级摊薄成本（实测 002074.SZ 桥 24.87 vs 台账 25.44
+# ——含费/含该股历史回合），而台账那个数才是**该 agent 的真实买入成本**，它是盈亏列与
+# 回合台账的输入。量以桥为准、成本以台账为准，两者各管各的。
+
+
+#: 对账判定（进 :class:`ReconcileRecord`；``match`` 之外都是「要人看一眼」的）。
+#: ``drift`` = 多认领人合计不齐（**阻断**，见 :func:`reconcile_seed_with_bridge`）。
+BRIDGE_MATCH = "match"
+BRIDGE_ANCHORED = "anchored"
+BRIDGE_PHANTOM = "phantom"
+BRIDGE_ORPHAN = "orphan"
+BRIDGE_OVERRIDE = "override"
+BRIDGE_DRIFT = "drift"
+
+#: 股数比较容差（送股/拆股会带来小数股；1e-6 之下算同一批货）。
+_QTY_EPS = 1e-6
+
+
+@dataclass(frozen=True, slots=True)
+class BridgePosition:
+    """桥侧一只票（``code`` 后缀式）。``volume == 0`` = 快照仍有该行但已清仓。"""
+
+    code: str
+    volume: float
+    cost_price: float | None = None
+    source: str = ""
+
+    @property
+    def held(self) -> bool:
+        return self.volume > _QTY_EPS
+
+
+def bridge_rows_from_view(view: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """``real_positions.merge_real_sources`` 的视图（prefix 键）→ 捕获行（后缀码）。
+
+    只取对账用得到的四个字段：代码、数量、成本、出处。视图里的键是 **prefix 式**
+    （``SH600036``），而账本列与 :class:`BridgePosition` 一律后缀式——这里若忘了归一，
+    ``mine_of`` 那类匹配会静默全空，故出口只留一种写法（``symbol`` 缺了也要归一次键）。
+    """
+    rows: list[dict[str, Any]] = []
+    for key, item in (view or {}).items():
+        rec = item if isinstance(item, Mapping) else {}
+        rows.append(
+            {
+                "code": StockCodeUtil.to_suffix(
+                    str(rec.get("symbol") or key or "").strip()
+                ),
+                "volume": rec.get("volume"),
+                "cost_price": rec.get("cost_price"),
+                "source": rec.get("source") or "",
+            }
+        )
+    return sorted(rows, key=lambda r: str(r.get("code") or ""))
+
+
+def bridge_positions(
+    items: Any,
+) -> tuple[dict[str, BridgePosition], list[str]]:
+    """捕获行（list[dict]）→ ``{后缀码: BridgePosition}`` + 阻断理由。
+
+    阻断（``手写快照文件`` 出错时宁可拒，不许按猜的对账）：同一只票两行（归属与数量
+    都无从判起）、数量非有限或为负、缺代码。量为 0 的行**保留**（它是「快照仍留着这只
+    的残留行」这一事实的载体，判定侧要靠它区分「桥无此仓」与「桥有行但已清仓」）。
+    """
+    if items is None:
+        return {}, []
+    if isinstance(items, Mapping):  # 容忍 {code: {...}} / {code: volume} 的手写形态
+        items = [
+            (dict(v, code=k) if isinstance(v, Mapping) else {"code": k, "volume": v})
+            for k, v in items.items()
+        ]
+    if not isinstance(items, (list, tuple)):
+        return {}, [f"桥快照不是列表（{type(items).__name__}）：无法解析"]
+
+    out: dict[str, BridgePosition] = {}
+    problems: list[str] = []
+    for row in items:
+        if not isinstance(row, Mapping):
+            problems.append(f"桥快照有一行不是对象（{type(row).__name__}）")
+            continue
+        code = StockCodeUtil.to_suffix(
+            str(row.get("code") or row.get("symbol") or "").strip()
+        )
+        if not code:
+            problems.append(f"桥快照有一行代码为空：{dict(row)!r}")
+            continue
+        if code in out:
+            problems.append(f"桥快照里 {code} 出现两行：数量/归属无从判起（拒绝对账）")
+            continue
+        vol = _finite(row.get("volume"))
+        if vol is None or vol < 0:
+            problems.append(f"桥快照 {code}: 数量 {row.get('volume')!r} 非有限或为负")
+            continue
+        cost = _finite(row.get("cost_price"))
+        out[code] = BridgePosition(
+            code,
+            _num(vol),
+            None if cost is None else round(cost, 4),
+            str(row.get("source") or ""),
+        )
+    return out, problems
+
+
+@dataclass(frozen=True, slots=True)
+class ReconcileRecord:
+    """一只标的的对账记录（P0.4 规则 2 要的那四项：原台账量 / 桥实况 / 差额 / 判定）。"""
+
+    code: str
+    kind: str
+    ledger_volume: float
+    bridge_volume: float
+    carried_volume: float = 0.0
+    claims: tuple[tuple[str, float], ...] = ()
+    bridge_present: bool = True
+    verdict: str = ""
+    reason: str = ""
+
+    @property
+    def delta(self) -> float:
+        """桥 − 台账（正 = 桥比台账多，负 = 台账虚增/幻影）。"""
+        return _num(round(self.bridge_volume - self.ledger_volume, 4))
+
+
+@dataclass(frozen=True, slots=True)
+class SeedReconciliation:
+    """对账结果：``seed`` 是**可落库**的计划（幻影已剔、量已按桥锚定）。
+
+    ``ok`` 同时要求「无 problems」与「双向对账断言通过」（P0.4 规则 4）——断言不是
+    事后检查项，而是 ``ok`` 的一半：一个不平衡的计划在类型上就不算合格产物。
+
+    ``bridge_held`` / ``carried`` 是断言的两个操作数（``(码, 量)`` 对，排序可复现），
+    ``orphan_total`` 是「桥有量但无人认领」的合计——断言把它从桥侧扣掉，因为孤仓
+    **按定义**不在任何 agent 名下（与 2026-08-31 之前那批 ¥92 万既存仓同性质）。
+    """
+
+    seed: LegacySeed
+    records: tuple[ReconcileRecord, ...] = ()
+    problems: tuple[str, ...] = ()
+    notes: tuple[str, ...] = ()
+    bridge_held: tuple[tuple[str, float], ...] = ()
+    carried: tuple[tuple[str, float], ...] = ()
+    orphan_total: float = 0.0
+
+    @property
+    def ok(self) -> bool:
+        return not self.problems and not self.assert_balances()
+
+    @property
+    def bridge_total(self) -> float:
+        return _num(round(sum(v for _c, v in self.bridge_held), 4))
+
+    @property
+    def carried_total(self) -> float:
+        return _num(round(sum(v for _c, v in self.carried), 4))
+
+    @property
+    def changed(self) -> tuple[ReconcileRecord, ...]:
+        """与台账不一致的判定（幻影/锚定/孤仓/人工判定）——都为「要人看一眼」。"""
+        return tuple(r for r in self.records if r.kind != BRIDGE_MATCH)
+
+    @property
+    def phantom_codes(self) -> tuple[str, ...]:
+        return tuple(r.code for r in self.records if r.kind == BRIDGE_PHANTOM)
+
+    @property
+    def orphan_codes(self) -> tuple[str, ...]:
+        return tuple(r.code for r in self.records if r.kind == BRIDGE_ORPHAN)
+
+    def record(self, code: str) -> ReconcileRecord | None:
+        want = StockCodeUtil.to_suffix(str(code or "").strip())
+        for r in self.records:
+            if r.code == want:
+                return r
+        return None
+
+    def note_for(self, code: str) -> str:
+        """该标的的对账说明（进结转流水行的 ``note``）；逐字相符的返回空串。"""
+        r = self.record(code)
+        if r is None or r.kind == BRIDGE_MATCH:
+            return ""
+        return f"对账：{r.verdict}"
+
+    def assert_balances(self) -> str:
+        """P0.4 规则 4 的双向对账断言；通过返回 ``""``，否则返回**人话理由**。
+
+        三条：① 迁入的每只在桥里都有、且量逐只相等；② 迁入合计 == 桥合计 − 孤仓合计；
+        ③ （由 ① 的「在桥里都有」隐含）迁入不含桥侧没有的标的——幻影正是靠这条被拦。
+        """
+        held = dict(self.bridge_held)
+        carried = dict(self.carried)
+        for code, vol in carried.items():
+            if code not in held:
+                return f"{code}: 计划迁入 {vol:g} 股，但桥侧没有这只（幻影不得迁入）"
+            if abs(float(held[code]) - float(vol)) > _QTY_EPS:
+                return f"{code}: 计划迁入 {vol:g} 股 ≠ 桥 {held[code]:g} 股"
+        want = round(sum(float(v) for v in held.values()) - float(self.orphan_total), 4)
+        got = round(sum(float(v) for v in carried.values()), 4)
+        if abs(want - got) > _QTY_EPS:
+            return (
+                f"迁入合计 {_num(got)} 股 ≠ 桥 {_num(self.bridge_total)} 股 − 孤仓 "
+                f"{_num(self.orphan_total)} 股 = {_num(want)} 股"
+            )
+        return ""
+
+
+def reconcile_seed_with_bridge(
+    seed: LegacySeed,
+    bridge: Mapping[str, Any],
+    *,
+    overrides: Mapping[str, Mapping[str, Any]] | None = None,
+    reasons: Mapping[str, str] | None = None,
+) -> SeedReconciliation:
+    """把解析出的台账**按桥重建**成可落库的结转计划（纯函数，两次跑逐字相同）。
+
+    :param seed: :func:`parse_legacy_ledger` 的结果（``problems`` 非空则不进入对账）。
+    :param bridge: ``{后缀码: BridgePosition}``（:func:`bridge_positions` 的产物；
+        也容忍 ``{码: {"volume": …}}`` 或 ``{码: 数量}`` 的手写形态）。
+    :param overrides: 人工判定：``{码: {agent: 数量}}``——**整只替换**该码的认领表
+        （要减一家就把它从表里去掉，不许写 0 蒙混）；只有多认领人合计不齐（阻断）
+        时才需要它。
+    :param reasons: 人工判定的**理由**（与 ``overrides`` 同键）：空理由即阻断——
+        明天没人能解释「为什么这只票归它」。
+
+    返回 :class:`SeedReconciliation`；``ok`` 为假时调用点必须拒绝落库（store 侧另有一道）。
+    """
+    problems: list[str] = list(seed.problems)
+    notes: list[str] = list(seed.notes)
+    if not seed.ok:
+        # 解析都没过，谈不上对账：原样把阻断项往上抛（含「不许按猜的搬」）。
+        return SeedReconciliation(
+            seed=seed, problems=tuple(problems), notes=tuple(notes)
+        )
+
+    bmap: dict[str, BridgePosition] = {}
+    for code, val in (bridge or {}).items():
+        bp = _as_bridge_pos(code, val)
+        if bp is None:
+            problems.append(f"桥表 {code!r} 形态不认识：{val!r}（拒绝对账）")
+            continue
+        bmap[bp.code] = bp
+
+    ov: dict[str, dict[str, float]] = {}
+    for code_raw, claims in (overrides or {}).items():
+        code = StockCodeUtil.to_suffix(str(code_raw or "").strip())
+        if not code:
+            problems.append(f"人工判定缺代码：{code_raw!r}")
+            continue
+        if not isinstance(claims, Mapping):
+            problems.append(
+                f"人工判定 {code}: 认领表不是对象（{type(claims).__name__}）"
+            )
+            continue
+        ov[code] = dict(claims)
+    rs = {
+        StockCodeUtil.to_suffix(str(k or "").strip()): str(v or "").strip()
+        for k, v in (reasons or {}).items()
+    }
+
+    names = {a.agent for a in seed.agents}
+    bad_overrides: set[str] = set()
+    for code, claims in sorted(ov.items()):
+        if not rs.get(code):
+            problems.append(
+                f"人工判定 {code}: 缺 reason——不加理由的判定不可审计（拒绝结转）"
+            )
+            bad_overrides.add(code)
+        if not claims:
+            problems.append(f"人工判定 {code}: 认领表为空（要剔除请别写这条判定）")
+            bad_overrides.add(code)
+        for agent, vol in sorted(claims.items()):
+            if agent not in names:
+                problems.append(
+                    f"人工判定 {code}: agent {agent!r} 不在台账里——不许凭空开户"
+                )
+            v = _finite(vol)
+            if v is None or v <= 0:
+                problems.append(f"人工判定 {code}/{agent}: 数量 {vol!r} 非正或非有限")
+
+    ledger_claims: dict[str, dict[str, float]] = {}
+    for a in seed.agents:
+        for p in a.positions:
+            ledger_claims.setdefault(p.code, {})[a.agent] = float(p.volume)
+
+    carried: dict[str, dict[str, float]] = {}
+    records: list[ReconcileRecord] = []
+    for code in sorted(set(ledger_claims) | set(bmap) | set(ov)):
+        valid_override = code in ov and code not in bad_overrides
+        orig = dict(ledger_claims.get(code) or {})
+        claims = dict(ov[code]) if valid_override else dict(orig)
+        bp = bmap.get(code)
+        b_held = bp is not None and bp.held
+        b_vol = float(bp.volume) if bp is not None else 0.0
+        l_vol = round(sum(orig.values()), 4)
+        claims_sorted = tuple(sorted((a, float(v)) for a, v in claims.items()))
+
+        if not claims:
+            if bp is None:
+                # 只可能是「被判无效的残条人工判定」（否则它必在台账或桥里）。
+                continue
+            if not b_held:
+                # 桥侧残留的零量行（实测 4 条）且无人认领：无信息量，记 note 即可。
+                notes.append(
+                    f"桥快照有 {code} 但量为 0 且无 agent 认领（清仓残留行）：忽略"
+                )
+                continue
+            records.append(
+                ReconcileRecord(
+                    code,
+                    BRIDGE_ORPHAN,
+                    0.0,
+                    b_vol,
+                    0.0,
+                    (),
+                    verdict=f"桥有 {_num(bp.volume)} 股、无任何 agent 认领：不入分账"
+                    f"（属总账户既有仓，与 2026-08-31 之前那批同性质）",
+                )
+            )
+            continue
+        if not b_held:
+            records.append(
+                ReconcileRecord(
+                    code,
+                    BRIDGE_PHANTOM,
+                    l_vol,
+                    0.0,
+                    0.0,
+                    claims_sorted,
+                    bridge_present=bp is not None,
+                    verdict=(
+                        f"台账 {_num(l_vol)} 股，桥"
+                        + (
+                            "该行为 0 股（券商已清仓、台账未回写）"
+                            if bp is not None
+                            else "无此仓"
+                        )
+                        + "——幻影，不迁入"
+                    ),
+                )
+            )
+            continue
+
+        total = round(sum(claims.values()), 4)
+        if valid_override:
+            kind = BRIDGE_OVERRIDE
+            verdict = (
+                f"人工判定：原台账 {_num(l_vol)} 股 → {_num(total)} 股"
+                f"（理由：{rs.get(code, '')}）"
+            )
+            reason = rs.get(code, "")
+        elif abs(total - float(bp.volume)) <= _QTY_EPS:
+            kind = BRIDGE_MATCH
+            verdict = f"台账 {_num(l_vol)} 股 == 桥 {_num(bp.volume)} 股：逐只相符"
+            reason = ""
+        elif len(claims) == 1:
+            agent = next(iter(claims))
+            kind = BRIDGE_ANCHORED
+            reason = ""
+            verdict = (
+                f"单一认领人 {agent}：台账 {_num(l_vol)} 股 → 桥 {_num(bp.volume)} 股"
+                f"（仓位以桥为准，台账只提供归属）"
+            )
+            claims = {agent: float(bp.volume)}
+            total = round(sum(claims.values()), 4)
+        else:
+            # 多认领人、合计不齐：归属不可判定。阻断（本码不迁入，整批不落库）。
+            records.append(
+                ReconcileRecord(
+                    code,
+                    BRIDGE_DRIFT,
+                    l_vol,
+                    float(bp.volume),
+                    0.0,
+                    claims_sorted,
+                    verdict=f"台账合计 {_num(l_vol)} 股 vs 桥 {_num(bp.volume)} 股："
+                    f"多个 agent 认领，归属不可判定——不迁入，待人工判定",
+                )
+            )
+            problems.append(
+                f"{code}: 台账合计 {_num(l_vol)} 股 vs 桥 {_num(bp.volume)} 股"
+                f"（差 {_num(round(float(bp.volume) - l_vol, 4)):+g}）——"
+                f"{len(claims)} 个 agent 都认领，无法判定归属；"
+                f"请用 --resolve 给出人工判定（含理由）后重跑"
+            )
+            continue
+
+        carried[code] = claims
+        records.append(
+            ReconcileRecord(
+                code,
+                kind,
+                l_vol,
+                float(bp.volume),
+                _num(round(total, 4)),
+                claims_sorted,
+                verdict=verdict,
+                reason=reason,
+            )
+        )
+
+    agents_out: list[SeedAgent] = []
+    for a in seed.agents:
+        keep: list[SeedPosition] = []
+        for p in a.positions:
+            mine = carried.get(p.code) or {}
+            if a.agent not in mine:
+                continue
+            keep.append(replace(p, volume=_num(float(mine[a.agent]))))
+        dropped = len(a.positions) - len(keep)
+        if dropped:
+            notes.append(
+                f"{a.agent}: {dropped} 只未迁入（见对账记录）"
+                + ("——结转后名下无持仓（现金照迁）" if not keep else "")
+            )
+        agents_out.append(SeedAgent(a.agent, a.virtual_cash, tuple(keep)))
+
+    plan = LegacySeed(
+        version=seed.version,
+        agents=tuple(agents_out),
+        problems=(),
+        notes=(),
+        applied_fills=seed.applied_fills,
+    )
+    rec = SeedReconciliation(
+        seed=plan,
+        records=tuple(records),
+        problems=tuple(problems),
+        notes=tuple(notes),
+        bridge_held=tuple(sorted((c, float(b.volume)) for c, b in bmap.items())),
+        carried=tuple(
+            sorted((c, round(sum(v.values()), 4)) for c, v in carried.items())
+        ),
+        orphan_total=_num(
+            round(sum(r.bridge_volume for r in records if r.kind == BRIDGE_ORPHAN), 4)
+        ),
+    )
+    reason = rec.assert_balances()
+    if reason:
+        # P0.4 规则 4：断言失败 = 不许落库。把它写成问题（不是断言异常——CLI 要能
+        # 把它打印给人看，而不是甩一个 traceback）。
+        rec = replace(rec, problems=(*rec.problems, f"对账断言未通过：{reason}"))
+    return rec
+
+
+def _as_bridge_pos(code: Any, val: Any) -> BridgePosition | None:
+    """桥表的一项 → :class:`BridgePosition`（容忍手写形态；认不出返回 ``None``）。"""
+    if isinstance(val, BridgePosition):
+        return val
+    if isinstance(val, Mapping):
+        v = _finite(val.get("volume"))
+        cost = _finite(val.get("cost_price"))
+        code_s = StockCodeUtil.to_suffix(
+            str(val.get("code") or val.get("symbol") or code or "").strip()
+        )
+        if not code_s or v is None or v < 0:
+            return None
+        return BridgePosition(
+            code_s,
+            _num(v),
+            None if cost is None else round(cost, 4),
+            str(val.get("source") or ""),
+        )
+    v = _finite(val)
+    code_s = StockCodeUtil.to_suffix(str(code or "").strip())
+    if not code_s or v is None or v < 0:
+        return None
+    return BridgePosition(code_s, _num(v))
 
 
 # ── 内部 ────────────────────────────────────────────────────────────
