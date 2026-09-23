@@ -1,0 +1,76 @@
+
+# ==== BayMax 生产级持久化（每分钟：探活 + 自愈拉起）====
+# ==== TDAI 记忆蒸馏窗口（注释为北京时间；本机 UTC+9 = 北京时间+1h）====
+0 10-15 * * 1-5 /home/zbox/baymax/.venv/bin/python /home/zbox/baymax/scripts/live_hourly_analysis.py >> /home/zbox/baymax/logs/live_hourly_analysis.log 2>&1
+0 1 * * 1     /home/zbox/.memory-tencentdb/switch-gateway.sh off   # 周一 00:00 北京 周末收窗
+0 1 * * 6     /home/zbox/.memory-tencentdb/switch-gateway.sh on    # 周六 00:00 北京 周末开窗
+0 3 * * * bash /home/zbox/baymax/scripts/backup.sh >> /home/zbox/backups/baymax/backup.log 2>&1
+2 15 * * 1-5  /home/zbox/.memory-tencentdb/switch-gateway.sh off   # 工作日 14:02 午间收窗
+30 9 * * 1-5 /home/zbox/baymax/.venv/bin/python /home/zbox/baymax/scripts/live_hourly_analysis.py >> /home/zbox/baymax/logs/live_hourly_analysis.log 2>&1
+58 0 * * 2-6  /home/zbox/.memory-tencentdb/switch-gateway.sh off   # 工作日 23:58 夜间收窗
+58 12 * * 1-5 /home/zbox/.memory-tencentdb/switch-gateway.sh on    # 工作日 11:58 午间开窗
+58 18 * * 1-5 /home/zbox/.memory-tencentdb/switch-gateway.sh on    # 工作日 17:58 晚间开窗
+*/5 * * * * bash /home/zbox/baymax/scripts/alert.sh
+* 9-15 * * 1-5 /home/zbox/baymax/.venv/bin/python /home/zbox/baymax/scripts/live_hourly_analysis.py --record-only >> /home/zbox/baymax/logs/live_hourly_analysis.log 2>&1
+* * * * * bash /home/zbox/baymax/scripts/auto-heal.sh
+* * * * * bash /home/zbox/baymax/scripts/status-probe.sh
+@reboot sleep 90 && $HOME/.memory-tencentdb/reboot-resume-gateway.sh
+0 0 * * 2-6 /usr/bin/python3 /home/zbox/projects/quantmind/scripts/postmarket_pipeline.py >> /home/zbox/baymax/logs/postmarket_pipeline.log 2>&1  # 复盘 JST00:00=北京23:00
+35 0 * * 2-6 /usr/bin/python3 /home/zbox/projects/quantmind/scripts/postmarket_pipeline.py --picks-only --wait-l2-min 30 >> /home/zbox/baymax/logs/postmarket_pipeline.log 2>&1  # 明日备选 JST00:35=北京23:35
+35 10 * * 1-5 /home/zbox/baymax/.venv/bin/python /home/zbox/baymax/scripts/live_llm_trade.py --execute >> /home/zbox/baymax/logs/live_llm_trade.log 2>&1  # 模型自主调仓实盘 北京09:35
+10 10 * * 1-5 /home/zbox/baymax/.venv/bin/python /home/zbox/baymax/scripts/hk_picks.py >> /home/zbox/baymax/logs/hk_picks.log 2>&1  # 港股候选池 北京09:10
+# 【A股优先·2026-09-04 暂停】35 10 * * 1-5 /home/zbox/baymax/.venv/bin/python /home/zbox/baymax/scripts/live_hourly_analysis_hk.py >> /home/zbox/baymax/logs/live_hourly_analysis_hk.log 2>&1  # 港股开盘分析 北京09:35
+# 【A股优先·2026-09-04 暂停】0 11-17 * * 1-5 /home/zbox/baymax/.venv/bin/python /home/zbox/baymax/scripts/live_hourly_analysis_hk.py >> /home/zbox/baymax/logs/live_hourly_analysis_hk.log 2>&1  # 港股整点分析 北京10-16
+* 10-12,14-16 * * 1-5 /home/zbox/baymax/.venv/bin/python /home/zbox/baymax/scripts/live_price_watch.py >> /home/zbox/baymax/logs/live_price_watch.log 2>&1  # 分钟级价格哨兵 北京9:30-11:30/13:00-15:00
+*/5 10-12,14-15 * * 1-5 /home/zbox/baymax/.venv/bin/python /home/zbox/baymax/scripts/live_l2_capture.py >> /home/zbox/baymax/logs/live_l2_capture.log 2>&1  # L2因子采集 北京9:30-15:00每5分钟（盘后收窄）
+0,5 16 * * 1-5 /home/zbox/baymax/.venv/bin/python /home/zbox/baymax/scripts/live_l2_capture.py >> /home/zbox/baymax/logs/live_l2_capture.log 2>&1  # L2收盘定格 北京15:00/15:05
+15 22 * * * /home/zbox/baymax/.venv/bin/python /home/zbox/baymax/scripts/us_picks.py >> /home/zbox/baymax/logs/us_picks.log 2>&1  # 美股候选池 美东盘前(夏令时09:15)
+# 【A股优先·2026-09-04 暂停】0 22-23,0-4 * * * /home/zbox/baymax/.venv/bin/python /home/zbox/baymax/scripts/live_hourly_analysis_us.py >> /home/zbox/baymax/logs/live_hourly_analysis_us.log 2>&1  # 美股整点分析 美东9:30-16:00(脚本内时区精确闸)
+* 10-12,14-16 * * 1-5 /home/zbox/baymax/.venv/bin/python /home/zbox/baymax/scripts/replay_deferred.py >> /home/zbox/baymax/logs/replay_deferred.log 2>&1  # 延期单重放（桥断链拒单恢复后自动补执行）北京9:30-11:30/13:00-15:00
+* 10-12,14-15 * * 1-5 /home/zbox/baymax/.venv/bin/python /home/zbox/baymax/scripts/leverage_guard.py >> /home/zbox/baymax/logs/leverage_guard.log 2>&1  # 独立杠杆守护（超1.5×权益自动减仓，不依赖LLM）北京9:30-11:30/13:00-15:00（盘后冗余已收窄）
+* * * * * /home/zbox/baymax/.venv/bin/python /home/zbox/baymax/scripts/analysis_trigger_worker.py >> /home/zbox/baymax/logs/analysis_trigger_worker.log 2>&1  # 手动分析任务 worker（前端「立即分析」按钮）
+35 16 * * 1-5 /home/zbox/baymax/.venv/bin/python /home/zbox/baymax/scripts/post_review.py >> /home/zbox/baymax/logs/post_review.log 2>&1  # 盘后复盘agent 北京15:35（JST16:35）
+30 3 * * 2-6 /home/zbox/baymax/.venv/bin/python /home/zbox/baymax/scripts/night_pool_agent.py >> /home/zbox/baymax/logs/night_pool.log 2>&1  # 晚间市场研究（研究总控）北京02:30=JST 03:30 周二~周六——等 quantdb 当日分区落盘（01:05）产按目标交易日命名的池（2026-09-12 P1-4；原 19:30 恒滞后一天）
+30 4 * * 2-6 /home/zbox/baymax/.venv/bin/python /home/zbox/baymax/scripts/night_pool_agent.py --if-missing >> /home/zbox/baymax/logs/night_pool.log 2>&1  # 幂等补跑：目标日池已存在则立即退出（覆盖 quantdb 分区同步延迟/主跑数据未落）
+0 22 * * 0 /home/zbox/baymax/.venv/bin/python /home/zbox/baymax/scripts/hypothesis_lab.py --symbols 80 --days 260 >> /home/zbox/baymax/logs/hypothesis_lab.log 2>&1  # 假设库周度复测 北京21:00
+10 10 * * 1-5 /home/zbox/baymax/.venv/bin/python /home/zbox/baymax/scripts/risk_budget_agent.py >> /home/zbox/baymax/logs/risk_budget.log 2>&1  # 风险预算meta 北京9:10（盘前定档）
+12 10 * * 1-5 /home/zbox/baymax/.venv/bin/python /home/zbox/baymax/scripts/preflight_bridge.py >> /home/zbox/baymax/logs/preflight.log 2>&1  # 盘前健检 北京09:12（账户通道/台账对账/执行开关/条件位）
+0 18 * * 1-5 /home/zbox/baymax/.venv/bin/python /home/zbox/baymax/scripts/daily_report_agent.py >> /home/zbox/baymax/logs/daily_report.log 2>&1  # 系统运行日报 北京17:00
+0 5 * * 0 /home/zbox/baymax/.venv/bin/python /home/zbox/baymax/scripts/log_cleanup.py --days 30 >> /home/zbox/baymax/logs/log_cleanup.log 2>&1  # 日志治理 北京04:00
+* * * * * /home/zbox/baymax/.venv/bin/python /home/zbox/baymax/scripts/ops_worker.py >> /home/zbox/baymax/logs/ops_worker.log 2>&1  # ops 远程重启执行器
+*/5 * * * * /home/zbox/baymax/.venv/bin/python /home/zbox/baymax/scripts/rt_probe.py >> /home/zbox/baymax/logs/rt_probe.log 2>&1  # 实时行情源健康看板
+* 10-12,14-16 * * 1-5 /home/zbox/baymax/.venv/bin/python /home/zbox/baymax/scripts/min_snapshot.py >> /home/zbox/baymax/logs/min_snapshot.log 2>&1  # 盘中富字段快照采样器 20s×3（TdxAiData备胎）
+0 19 * * 1-5 /home/zbox/baymax/.venv/bin/python /home/zbox/baymax/scripts/event_radar.py collect >> /home/zbox/baymax/logs/event_radar.log 2>&1  # 事件雷达采集 解禁/质押/回购 北京18:00
+# ===== 基本面/长期趋势劣化清单（2026-09-11；quantdb 01:55 落盘后、盘前新闻前）=====
+35 9 * * 1-5 /home/zbox/baymax/.venv/bin/python /home/zbox/baymax/scripts/fundamental_flags.py build >> /home/zbox/baymax/logs/fundamental_flags.log 2>&1 && /home/zbox/baymax/.venv/bin/python /home/zbox/baymax/scripts/industry_risk.py build >> /home/zbox/baymax/logs/industry_risk.log 2>&1  # 基本面劣化扫描 + 行业风险榜（提示词软提示）北京08:35
+# ===== 新闻 Agent 管线（2026-09-07）=====
+25 10 * * 1-5 /home/zbox/baymax/.venv/bin/python /home/zbox/baymax/scripts/news_brief.py >> /home/zbox/baymax/logs/news_brief.log 2>&1  # 新闻盘前 北京09:25
+55 10,11,13,14 * * 1-5 /home/zbox/baymax/.venv/bin/python /home/zbox/baymax/scripts/news_brief.py >> /home/zbox/baymax/logs/news_brief.log 2>&1  # 新闻盘中 北京09:55/10:55/12:55/13:55 整点交易前5分钟
+5 20 * * 1-5 /home/zbox/baymax/.venv/bin/python /home/zbox/baymax/scripts/news_brief.py >> /home/zbox/baymax/logs/news_brief.log 2>&1  # 新闻收盘全景 北京19:05（夜池19:30消费；节假日口径：白天跳过晚间一次）
+30 23 * * 1-5 /home/zbox/baymax/.venv/bin/python /home/zbox/baymax/scripts/news_review.py >> /home/zbox/baymax/logs/news_review.log 2>&1  # 新闻晚间复盘 北京22:30（信号有效性→lessons经验）
+0-10 16 * * 1-5 /home/zbox/baymax/.venv/bin/python /home/zbox/baymax/scripts/live_hourly_analysis.py --record-only >> /home/zbox/baymax/logs/live_hourly_analysis.log 2>&1  # 净值采样收盘段 北京15:00-15:10（record_window 收盘定格）
+45 15 * * 1-5 /home/zbox/baymax/.venv/bin/python /home/zbox/baymax/scripts/live_hourly_analysis.py >> /home/zbox/baymax/logs/live_hourly_analysis.log 2>&1  # 尾盘决策轮 北京14:45（收盘前可执行减仓/换仓）
+10 1 * * 2-6 /home/zbox/baymax/.venv/bin/python /home/zbox/baymax/scripts/decision_track.py --backfill --update --report >> /home/zbox/baymax/logs/decision_track.log 2>&1  # 决策远期记分卡 北京00:10（postmarket数据就绪后）
+* * * * * /home/zbox/baymax/.venv/bin/python /home/zbox/baymax/scripts/pine_transpile_worker.py >> /home/zbox/baymax/logs/pine_transpile_worker.log 2>&1  # Pine 策略库转写/回测队列（宿主侧 bwrap 沙箱执行）
+* * * * * /home/zbox/baymax/.venv/bin/python /home/zbox/baymax/scripts/pine_chat_worker.py >> /home/zbox/baymax/logs/pine_chat_worker.log 2>&1  # Pine 策略对话队列（宿主侧调模型，容器不执行模型代码）
+
+# ===== 2026-09-09 调仓补跑 + alpha_library 夜间刷新 =====
+5 11,12 * * 1-5 /home/zbox/baymax/.venv/bin/python /home/zbox/baymax/scripts/live_llm_trade.py --execute --catch-up >> /home/zbox/baymax/logs/live_llm_trade.log 2>&1  # 09:35 调仓补跑 JST11:05/12:05=北京10:05/11:05（幂等：已成功或已下单即跳过；锁被占即退出）
+30 2 * * 2-6 bash /home/zbox/baymax/scripts/alpha_library_refresh.sh >> /home/zbox/baymax/logs/alpha_library_refresh.log 2>&1  # alpha_library 因子库夜间全量刷新(实测~80min/峰值RSS~24GB) JST02:30=北京01:30（内存<30GB 或分区不可写自动跳过）
+
+# ==== l2-warehouse: sata 挂载自愈看门狗（2026-09-10 加；容器 l2-sata-fuse 掉线导致挂载 ENOTCONN）====
+*/5 * * * * bash /media/zbox/nas-seagate/l2-warehouse/bin/ensure_sata_mount.sh
+# ==== l2-warehouse: 18 天补跑守卫（等 Stage 3 + 沪B 补单批释放 import.lock 后自动开跑）====
+# [2026-09-11 用户要求:Stage 3 完成后暂停自动补跑,恢复时删掉本行注释] */30 * * * * bash /media/zbox/nas-seagate/l2-warehouse/bin/redo_when_idle.sh
+# QQ 交易通知: 盘前Win/桥在线探测+QQ通知 北京09:18 (2026-09-14)
+18 10 * * 1-5 /home/zbox/baymax/.venv/bin/python /home/zbox/baymax/scripts/premarket_win_probe.py >> /home/zbox/baymax/logs/premarket_win_probe.log 2>&1
+# QQ 定时简报 (2026-09-14): 早盘/复盘/选股
+28 10 * * 1-5 /home/zbox/baymax/.venv/bin/python /home/zbox/baymax/scripts/push_daily_briefs.py morning >> /home/zbox/baymax/logs/push_daily_briefs.log 2>&1
+45 16 * * 1-5 /home/zbox/baymax/.venv/bin/python /home/zbox/baymax/scripts/push_daily_briefs.py postreview >> /home/zbox/baymax/logs/push_daily_briefs.log 2>&1
+40 0 * * 2-6 /home/zbox/baymax/.venv/bin/python /home/zbox/baymax/scripts/push_daily_briefs.py evening >> /home/zbox/baymax/logs/push_daily_briefs.log 2>&1
+# QQ 交易通知: 盘中桥哨兵（断线/恢复即时推送）北京 9:00-16:00 每分钟 (2026-09-15)
+* 10-16 * * 1-5 /home/zbox/baymax/.venv/bin/python /home/zbox/baymax/scripts/bridge_watch.py >> /home/zbox/baymax/logs/bridge_watch.log 2>&1
+* * * * * /home/zbox/baymax/.venv/bin/python /home/zbox/baymax/scripts/host_watchdog.py >> /home/zbox/baymax/logs/host_watchdog.log 2>&1  # 主机存活看门狗（离线/冻结→QQ 告警）2026-09-18
+@reboot sleep 90 && /home/zbox/baymax/.venv/bin/python /home/zbox/baymax/scripts/host_watchdog.py --boot >> /home/zbox/baymax/logs/host_watchdog.log 2>&1  # 重启后补报离线窗口
+2-57/5 11 * * 1-5 /home/zbox/baymax/.venv/bin/python /home/zbox/baymax/scripts/live_llm_trade.py --shadow-context >> /home/zbox/baymax/logs/shadow_context.log 2>&1  # P1 影子A/B采样 北京10:02-10:57 每5分钟重试档（主入口锁未释放/当日已采则跳过；只记录不下单，判据见 scripts/shadow_context_report.py）
+0 21 * * 0 /home/zbox/baymax/.venv/bin/python /home/zbox/baymax/scripts/shadow_context_report.py --days 7 --out /home/zbox/baymax/logs/shadow_context/report_latest.md --push >> /home/zbox/baymax/logs/shadow_context.log 2>&1  # P1 影子A/B周报 周日北京20:00（先落盘再推 QQ 一行；落盘失败 rc≠0）
