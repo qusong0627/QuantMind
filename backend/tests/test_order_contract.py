@@ -66,10 +66,12 @@ def test_ensure_is_lock_safe():
 def test_db_init_synced():
     ddl = (_BACKEND / "shared/db_init.sql").read_text(encoding="utf-8")
     assert "T-P1-03 Order 契约列" in ddl
-    # orders 侧（带 UNIQUE 的原列）与 sim_orders 侧（列 + T-P2-08 部分唯一索引）
-    assert "client_order_id VARCHAR(100) UNIQUE" in ddl
+    # 两表同口径：裸列 + 各自的部分唯一索引（P2.7-⑧ 把 orders 从「列上全库 UNIQUE」
+    # 收敛到与 sim_orders 相同的 (tenant_id, user_id, client_order_id) 限定唯一）
+    assert "client_order_id VARCHAR(100) UNIQUE" not in ddl
     assert "client_order_id VARCHAR(100)," in ddl
     assert "uq_sim_orders_scope_client_order_id" in ddl
+    assert "uq_orders_scope_client_order_id" in ddl
     assert "WHERE client_order_id IS NOT NULL" in ddl
 
 
@@ -402,3 +404,261 @@ async def test_unique_index_real_db_and_duplicate_create_e2e():
                 {"c": cid},
             )
         await close_database()
+
+
+# ── P2.7-⑧：orders(REAL) 幂等键唯一索引 —— 补上租户/账户维度 ────────────
+#
+# 病灶（2026-09-24 实测，dev 库 pg_constraint）：
+#   ``orders_client_order_id_key`` = ``UNIQUE (client_order_id)`` —— **全库唯一**，
+#   而派发层查重与落账都按 ``(tenant_id, user_id, client_order_id)`` 限定。两个口径
+#   不一致时跨租户同键的后果是：INSERT 撞全局唯一 → IntegrityError → 兜底按 (租户,用户)
+#   反查**查不到**冲突行（它属于别家）→ raise → HTTP 500，**真单发不出去**。
+#   ``lld-*`` 的 round 段是 ``rnd-{日期}-{槽位}``（不含租户），两个租户在同一决策槽
+#   必然算出同一个键 —— 不是概率问题而是构造性碰撞。``sim_orders`` 早已是
+#   ``(tenant_id, user_id, client_order_id) WHERE client_order_id IS NOT NULL``
+#   部分唯一索引（T-P2-08），本批把 REAL 台账对齐到同一口径。
+
+
+class _FakeResult:
+    def __init__(self, rows):
+        self._rows = list(rows)
+
+    def fetchone(self):
+        return self._rows[0] if self._rows else None
+
+    def fetchall(self):
+        return list(self._rows)
+
+
+class _FakeSession:
+    """按 SQL 文本返回预置行；记录语句顺序与提交次数（可注入失败）。"""
+
+    def __init__(self, *, index_exists=False, dupes=(), legacy=()):
+        self.statements: list[str] = []
+        self.commits = 0
+        self.raise_on: str | None = None
+        self._index_exists = index_exists
+        self._dupes = list(dupes)
+        self._legacy = list(legacy)
+
+    async def execute(self, stmt, params=None):  # noqa: ARG002 - 假体
+        sql = str(stmt)
+        if self.raise_on and self.raise_on in sql:
+            raise RuntimeError(f"injected: {sql}")
+        self.statements.append(sql)
+        if "pg_indexes" in sql:
+            return _FakeResult([(1,)] if self._index_exists else [])
+        if "HAVING count(*) > 1" in sql:
+            return _FakeResult(self._dupes)
+        if "pg_constraint" in sql:
+            return _FakeResult([(n,) for n in self._legacy])
+        return _FakeResult([])
+
+    async def commit(self):
+        self.commits += 1
+
+
+def _wire_sessions(monkeypatch, read: _FakeSession, write: _FakeSession):
+    """把 order_contract 用到的 get_session 换成本地假体，并清进程内缓存。"""
+    import contextlib
+
+    from backend.shared import database_manager_v2 as dbm
+    from backend.shared import order_contract as oc
+
+    used: list[bool] = []
+
+    @contextlib.asynccontextmanager
+    async def _get_session(read_only=False):
+        used.append(bool(read_only))
+        yield read if read_only else write
+
+    monkeypatch.setattr(dbm, "get_session", _get_session)
+    monkeypatch.setattr(oc, "_order_scope_index_ready", None, raising=False)
+    return used
+
+
+def _ensure_orders_index():
+    from backend.shared.order_contract import ensure_real_order_scope_unique_index_async
+
+    return ensure_real_order_scope_unique_index_async()
+
+
+@pytest.mark.asyncio
+async def test_real_order_scope_index_creates_then_drops_global_constraint(monkeypatch):
+    """迁移顺序：**先建限定索引，再删全局约束** —— 中间不留「无唯一性」窗口。
+
+    反过来（先删后建）若 CREATE 失败，台账就退回「cid 可以重复落两行」，
+    而重复的 cid 会让幂等反查拿到任意一行 ⇒「模型让卖、系统报成功但没卖」。
+    """
+    read = _FakeSession(index_exists=False, legacy=["orders_client_order_id_key"])
+    write = _FakeSession()
+    used = _wire_sessions(monkeypatch, read, write)
+
+    assert await _ensure_orders_index() is True
+    assert used == [True, False]  # 探读一次，写一次
+
+    ddl = [s for s in write.statements if s.startswith(("CREATE", "ALTER"))]
+    assert len(ddl) == 2
+    assert ddl[0].startswith("CREATE UNIQUE INDEX IF NOT EXISTS uq_orders_scope_client_order_id")
+    assert "(tenant_id, user_id, client_order_id)" in ddl[0]
+    assert "WHERE client_order_id IS NOT NULL" in ddl[0]
+    assert ddl[1] == 'ALTER TABLE orders DROP CONSTRAINT "orders_client_order_id_key"'
+    assert write.commits == 1
+
+
+@pytest.mark.asyncio
+async def test_real_order_scope_index_refuses_when_duplicates_exist(monkeypatch):
+    """存量重复（同租户同用户同键）存在时**什么都不做**：不建索引、不删全局约束。
+
+    删了全局约束又建不成限定索引，等于把台账的唯一性整个拿掉 —— 比重复本身更危险。
+    """
+    read = _FakeSession(
+        index_exists=False, dupes=[("default", "10000001", "cand-x-600036.SH-buy", 2)]
+    )
+    write = _FakeSession()
+    _wire_sessions(monkeypatch, read, write)
+
+    assert await _ensure_orders_index() is False
+    assert write.statements == []
+
+
+@pytest.mark.asyncio
+async def test_real_order_scope_index_fast_path_when_already_scoped(monkeypatch):
+    """已经是限定索引且全局约束已删 → 零 DDL 快路径（不写库）。"""
+    read = _FakeSession(index_exists=True, legacy=[])
+    write = _FakeSession()
+    _wire_sessions(monkeypatch, read, write)
+
+    assert await _ensure_orders_index() is True
+    assert write.statements == []
+    assert read.commits == 0
+
+
+@pytest.mark.asyncio
+async def test_real_order_scope_index_only_drops_when_half_migrated(monkeypatch):
+    """半迁移态（索引已在、全局约束还在）：只补删全局约束，不重复建索引。"""
+    read = _FakeSession(index_exists=True, legacy=["orders_client_order_id_key"])
+    write = _FakeSession()
+    _wire_sessions(monkeypatch, read, write)
+
+    assert await _ensure_orders_index() is True
+    ddl = [s for s in write.statements if s.startswith(("CREATE", "ALTER"))]
+    assert ddl == ['ALTER TABLE orders DROP CONSTRAINT "orders_client_order_id_key"']
+
+
+@pytest.mark.asyncio
+async def test_real_order_scope_index_failure_is_not_fatal(monkeypatch):
+    """DDL 失败只告警不抛（旧语义=全库唯一仍在，业务不中断），下次启动重试。"""
+    read = _FakeSession(index_exists=False, legacy=["orders_client_order_id_key"])
+    write = _FakeSession()
+    write.raise_on = "CREATE UNIQUE INDEX"
+    _wire_sessions(monkeypatch, read, write)
+
+    assert await _ensure_orders_index() is False
+    # 建索引失败 ⇒ 绝不走到删约束那一步
+    assert not any(s.startswith("ALTER") for s in write.statements)
+
+
+def test_orders_scope_index_declared_in_ddl_model_and_startup():
+    """三处同步：db_init.sql（新装）/ ORM 模型（create_all 路径）/ 启动期自愈接线。"""
+    ddl = (_BACKEND / "shared/db_init.sql").read_text(encoding="utf-8")
+    orders_block = ddl.split("CREATE TABLE IF NOT EXISTS orders (", 1)[1].split(");", 1)[0]
+    assert "client_order_id VARCHAR(100) UNIQUE" not in orders_block
+    assert "client_order_id VARCHAR(100)," in orders_block
+    assert "CREATE UNIQUE INDEX IF NOT EXISTS uq_orders_scope_client_order_id" in ddl
+    assert (
+        "ON orders (tenant_id, user_id, client_order_id)" in ddl
+        and "WHERE client_order_id IS NOT NULL" in ddl
+    )
+
+    model = (_BACKEND / "services/trade_shared/models/order.py").read_text(encoding="utf-8")
+    cid_line = [
+        ln for ln in model.splitlines() if ln.strip().startswith("client_order_id = Column")
+    ]
+    assert len(cid_line) == 1
+    assert "unique=True" not in cid_line[0]  # 全库唯一由模型删掉（DB 侧改限定索引）
+
+    startup = (_BACKEND / "services/trade/main.py").read_text(encoding="utf-8")
+    assert "ensure_real_order_scope_unique_index_async" in startup
+
+
+@pytest.mark.asyncio
+async def test_real_order_scope_index_e2e_on_live_db():
+    """真库 E2E（**全程 rollback，不留任何订单行**）：自愈后
+
+    1. 索引形态 = ``(tenant_id, user_id, client_order_id) WHERE client_order_id IS NOT NULL``；
+    2. 旧的 ``UNIQUE (client_order_id)`` 全库约束已不在（不删它，跨租户同键照样 500）；
+    3. 行为面：不同租户**同键可共存**（修复点），同租户同用户同键**仍被拒**（唯一性没丢）。
+    """
+    import uuid as _uuid
+
+    for attempt in range(2):
+        try:
+            await _ensure_db_pool_tp208()
+            break
+        except Exception:  # noqa: BLE001
+            if attempt == 1:
+                pytest.skip("数据库不可用")
+
+    from sqlalchemy import text as sa_text
+    from sqlalchemy.exc import IntegrityError
+
+    from backend.shared.database_manager_v2 import close_database, get_session
+    from backend.shared.order_contract import ensure_real_order_scope_unique_index_async
+
+    assert await ensure_real_order_scope_unique_index_async() is True
+    async with get_session(read_only=True) as session:
+        idx = (
+            await session.execute(
+                sa_text(
+                    "SELECT indexdef FROM pg_indexes "
+                    "WHERE indexname = 'uq_orders_scope_client_order_id'"
+                )
+            )
+        ).fetchone()
+        legacy = (
+            await session.execute(
+                sa_text(
+                    "SELECT conname FROM pg_constraint "
+                    "WHERE conrelid = 'orders'::regclass AND contype = 'u' "
+                    "AND pg_get_constraintdef(oid) = 'UNIQUE (client_order_id)'"
+                )
+            )
+        ).fetchall()
+    assert idx is not None, "限定索引未建立"
+    assert "(tenant_id, user_id, client_order_id)" in str(idx[0])
+    assert "WHERE (client_order_id IS NOT NULL)" in str(idx[0])
+    assert legacy == [], f"旧全库唯一约束仍在: {legacy}"
+
+    cid = f"t-e2e-{_uuid.uuid4().hex[:8]}-600036.SH-buy"
+    insert = sa_text(
+        "INSERT INTO orders (order_id, tenant_id, user_id, portfolio_id, symbol, "
+        "side, position_side, order_type, trading_mode, status, quantity, "
+        "client_order_id) VALUES (gen_random_uuid(), :t, :u, 0, '600036.SH', "
+        "'buy', 'LONG', 'limit', 'REAL', 'pending', 100, :cid)"
+    )
+    try:
+        async with get_session(read_only=False) as session:
+            await session.execute(insert, {"t": "t-a", "u": "t-a", "cid": cid})
+            # 跨租户同键：修复前这里会 IntegrityError（全局唯一）⇒ 真单发不出去
+            await session.execute(insert, {"t": "t-b", "u": "t-b", "cid": cid})
+            with pytest.raises(IntegrityError):
+                async with session.begin_nested():
+                    await session.execute(insert, {"t": "t-a", "u": "t-a", "cid": cid})
+            # 显式回滚：上面的两行是**行为探针**，不许落进真台账
+            await session.rollback()
+    finally:
+        await close_database()
+
+
+@pytest.mark.asyncio
+async def test_real_order_scope_index_process_cache_short_circuits(monkeypatch):
+    """进程内缓存命中 → 连库都不连（启动期每次都会调，不能每次三趟查询）。"""
+    read = _FakeSession()
+    write = _FakeSession()
+    used = _wire_sessions(monkeypatch, read, write)
+    from backend.shared import order_contract as oc
+
+    monkeypatch.setattr(oc, "_order_scope_index_ready", True, raising=False)
+    assert await _ensure_orders_index() is True
+    assert used == [] and read.statements == [] and write.statements == []

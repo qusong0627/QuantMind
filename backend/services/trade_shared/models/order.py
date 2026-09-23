@@ -88,7 +88,10 @@ class Order(Base, TimestampMixin):
     expired_at = Column(DateTime, nullable=True)
 
     # Additional info
-    client_order_id = Column(String(100), nullable=True, unique=True)
+    # 幂等键的唯一性由 (tenant_id, user_id, client_order_id) 部分唯一索引承担
+    # （`uq_orders_scope_client_order_id`，db_init.sql + order_contract 启动自愈）——
+    # 不再是列上的全库唯一：那与查重口径不一致，跨租户同键会 500（P2.7-⑧）。
+    client_order_id = Column(String(100), nullable=True)
     exchange_order_id = Column(String(100), nullable=True)
     # T-P1-03 Order 契约列：REAL 成交来源（broker_fill）与订单来源分类（manual/mirror/...）
     price_source = Column(String(64), nullable=True)

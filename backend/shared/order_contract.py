@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 
 logger = logging.getLogger(__name__)
@@ -367,4 +368,113 @@ async def ensure_sim_order_unique_index_async() -> bool:
         return True
     except Exception as exc:  # noqa: BLE001 - 失败不阻断（旧语义继续，体检可查）
         logger.warning("[OrderContract] 唯一索引自愈失败（不阻断）: %s", exc)
+        return False
+
+
+# ── orders(REAL) 幂等键唯一索引（P2.7-⑧）────────────────────────────
+#
+# sim_orders 的唯一性是 (tenant_id, user_id, client_order_id) 限定的（T-P2-08），
+# 而 orders 至今是**全库唯一** `orders_client_order_id_key`（2026-09-24 实测 dev 库
+# pg_constraint），与查重/落账口径（派发层两处查询都按租户+用户限定）**不一致**：
+# 跨租户同键 → INSERT 撞全局唯一 → ``except IntegrityError`` 兜底再按 (租户,用户)
+# 反查**查不到**冲突行（它属于别家）→ ``raise`` → HTTP 500，**真单发不出去**。
+# 这不是概率问题：``lld-*`` 的 round 段是 ``rnd-{日期}-{槽位}``，不含租户，两个租户
+# 在同一决策槽**必然**算出同一个键（多租户部署 = OSS 的常态）。
+
+ORDER_SCOPE_UNIQUE_INDEX = "uq_orders_scope_client_order_id"
+
+#: 要被取代的旧形态：全库唯一约束（用 pg_get_constraintdef 精确匹配，不按名字猜）
+_LEGACY_CID_CONSTRAINT_DEF = "UNIQUE (client_order_id)"
+
+_order_scope_index_ready: bool | None = None
+
+_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_$]*$")
+
+
+async def ensure_real_order_scope_unique_index_async() -> bool:
+    """幂等把 orders 的幂等键唯一性收敛到 ``(tenant_id, user_id, client_order_id)``。
+
+    顺序**先建后删**：CREATE 失败时不碰全局约束（旧语义=全库唯一继续拦着，业务只是
+    维持现状），绝不出现「两边都没有」的窗口——台账一旦没有唯一性，同一 cid 能落两行，
+    幂等反查就会拿到任意一行。
+
+    存量重复（同租户同用户同键）存在时**什么都不做**并 ERROR 点名：删了全局约束又建不成
+    限定索引，等于把唯一性整个拿掉，比重复本身更危险（自动删金融行更不可接受）。
+    与列迁移/sim 索引同款三纪律：零 DDL 快路径 → 仅真变更才 DDL（lock_timeout=3s）→
+    异常只告警不抛出（不阻断启动/写入）。
+    """
+    global _order_scope_index_ready
+    if _order_scope_index_ready:
+        return True
+    from sqlalchemy import text as sa_text
+
+    from backend.shared.database_manager_v2 import get_session
+
+    try:
+        async with get_session(read_only=True) as session:
+            indexed_row = await session.execute(
+                sa_text("SELECT 1 FROM pg_indexes WHERE indexname = :n LIMIT 1"),
+                {"n": ORDER_SCOPE_UNIQUE_INDEX},
+            )
+            indexed = indexed_row.fetchone() is not None
+            legacy = [
+                str(row[0])
+                for row in (
+                    await session.execute(
+                        sa_text(
+                            "SELECT conname FROM pg_constraint "
+                            "WHERE conrelid = 'orders'::regclass AND contype = 'u' "
+                            "AND pg_get_constraintdef(oid) = :d"
+                        ),
+                        {"d": _LEGACY_CID_CONSTRAINT_DEF},
+                    )
+                ).fetchall()
+                if _IDENT_RE.match(str(row[0]))
+            ]
+            if indexed and not legacy:
+                _order_scope_index_ready = True
+                return True
+            if not indexed:
+                dupes = (
+                    await session.execute(
+                        sa_text(
+                            "SELECT tenant_id, user_id, client_order_id, count(*) AS c "
+                            "FROM orders WHERE client_order_id IS NOT NULL "
+                            "GROUP BY tenant_id, user_id, client_order_id "
+                            "HAVING count(*) > 1 LIMIT 3"
+                        )
+                    )
+                ).fetchall()
+                if dupes:
+                    logger.error(
+                        "[OrderContract] 存量重复真单阻止 orders 限定索引启用"
+                        "（需人工处置，不自动删金融行）: %s",
+                        [(str(d[0]), str(d[1]), str(d[2]), int(d[3])) for d in dupes],
+                    )
+                    return False
+        async with get_session(read_only=False) as session:
+            await session.execute(sa_text("SET LOCAL lock_timeout = '3s'"))
+            if not indexed:
+                await session.execute(
+                    sa_text(
+                        f"CREATE UNIQUE INDEX IF NOT EXISTS {ORDER_SCOPE_UNIQUE_INDEX} "
+                        "ON orders (tenant_id, user_id, client_order_id) "
+                        "WHERE client_order_id IS NOT NULL"
+                    )
+                )
+            for name in legacy:
+                await session.execute(
+                    sa_text(f'ALTER TABLE orders DROP CONSTRAINT "{name}"')
+                )
+            await session.commit()
+        _order_scope_index_ready = True
+        logger.info(
+            "[OrderContract] orders 幂等键唯一索引已收敛到租户/账户维度（P2.7-⑧）："
+            "新建=%s，删除旧全局约束=%s",
+            not indexed,
+            legacy or "无",
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001 - 失败不阻断（旧全局唯一继续，业务维持现状）
+        logger.warning("[OrderContract] orders 限定索引自愈失败（不阻断）: %s", exc)
         return False

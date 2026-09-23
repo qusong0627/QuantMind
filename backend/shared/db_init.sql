@@ -858,7 +858,7 @@ CREATE TABLE IF NOT EXISTS orders (
     filled_at       TIMESTAMP,
     cancelled_at    TIMESTAMP,
     expired_at      TIMESTAMP,
-    client_order_id VARCHAR(100) UNIQUE,
+    client_order_id VARCHAR(100),
     exchange_order_id VARCHAR(100),
     -- T-P1-03 Order 契约列（REAL：成交来源 + 订单来源分类）
     price_source    VARCHAR(64),
@@ -868,6 +868,15 @@ CREATE TABLE IF NOT EXISTS orders (
     created_at      TIMESTAMP NOT NULL DEFAULT NOW(),
     updated_at      TIMESTAMP NOT NULL DEFAULT NOW()
 );
+
+-- P2.7-⑧：REAL 订单幂等键唯一索引 —— 与 sim_orders 同口径，租户/账户**限定**唯一
+-- （原先列上内联 UNIQUE 是**全库唯一**，与派发层按 (租户,用户) 限定的查重口径不一致：
+--  跨租户同键 → INSERT 撞全局唯一 → 兜底反查查不到别家的冲突行 → 500，真单发不出去。
+--  `lld-*` 的 round 段不含租户，两个租户在同一决策槽必然算出同一个键）。旧库由
+--  `order_contract.ensure_real_order_scope_unique_index_async` 启动期自愈（先建后删）。
+CREATE UNIQUE INDEX IF NOT EXISTS uq_orders_scope_client_order_id
+    ON orders (tenant_id, user_id, client_order_id)
+    WHERE client_order_id IS NOT NULL;
 
 -- ========================
 -- 33. TRADES

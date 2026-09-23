@@ -101,7 +101,36 @@ def test_cid_duplicates_scan():
     )
     assert dup.level == "fail"
     assert "2 组" in dup.detail
+    assert "sim_orders" in dup.detail  # 默认走模拟台账，消息与历史一致
     assert "sim-r-600036.SH-buy" in dup.detail
+
+
+def test_cid_duplicates_scan_covers_real_orders_table():
+    """P2.7-⑧：实盘台账（orders）同口径扫描 —— 重复既是幂等失守，也是迁移停手的原因。
+
+    只测判定函数的 ``table`` 参数会让「C05 真的扫了 orders」漏掉，故连查询一起钉：
+    ``check_c05`` 里必须出现 orders 的重复扫描 SQL。
+    """
+    dup = classify_cid_duplicates(
+        [
+            {
+                "tenant_id": "default",
+                "user_id": 10000001,
+                "client_order_id": "lld-r-600036.SH-sell",
+            }
+        ],
+        table="orders",
+    )
+    assert dup.level == "fail"
+    assert dup.detail.startswith("orders 幂等键重复")
+
+    import inspect
+
+    from backend.scripts.diagnose import health
+
+    src = inspect.getsource(health.check_c05_ledger_writes)
+    assert "FROM orders " in src and "HAVING count(*) > 1" in src
+    assert 'classify_cid_duplicates(real_dup_rows or [], table="orders")' in src
 
 
 def test_summary_and_exit_code():

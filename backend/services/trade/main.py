@@ -131,13 +131,17 @@ async def lifespan(app: FastAPI):
             ensure_accounts_market_contract_async,
             ensure_ledger_contract_columns_async,
         )
-        from backend.shared.order_contract import ensure_order_contract_columns_async
+        from backend.shared.order_contract import (
+            ensure_order_contract_columns_async,
+            ensure_real_order_scope_unique_index_async,
+        )
         from backend.shared.signal_contract import (
             ensure_signal_contract_columns_async,
         )
 
         for _ensure in (
             ensure_order_contract_columns_async,
+            ensure_real_order_scope_unique_index_async,
             ensure_accounts_market_contract_async,
             ensure_ledger_contract_columns_async,
             ensure_fund_snapshot_contract_async,
