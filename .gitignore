@@ -285,6 +285,8 @@ minibt/build/
 
 # 实盘 Win 节点专用（本地，不进公开仓；与 local-live 同纪律）
 deploy/live-win/
+# 本机独有运维文档（含内网地址、隔壁项目拓扑，绝不进公开仓）
+docs/local/
 # arena（quant-Trader）代理：同上——实盘栏的 arena 页面靠它转发到本机 8091。
 # 公开仓缺此文件时 main.py 的 try/except 注册静默跳过（端点树不变）。
 backend/services/api/routers/agent_arena_proxy.py
