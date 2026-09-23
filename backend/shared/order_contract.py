@@ -22,6 +22,8 @@
 from __future__ import annotations
 
 import logging
+import os
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +85,25 @@ def build_candidate_client_order_id(batch_id: str, symbol: str, side: str) -> st
     sym = str(symbol or "").strip().upper() or "NA"
     sd = str(side or "").strip().lower() or "na"
     return f"cand-{bid}-{sym}-{sd}"[:MAX_CLIENT_ORDER_ID_LEN]
+
+
+def build_bridge_plan_id(
+    client_order_id: str | None = None, *, now_ns: int | None = None
+) -> str:
+    """合成下发给交易桥的 ``plan_id``（``/api/v1/plans/execute``）；给了键就原样用。
+
+    精度**必须**是纳秒。桥侧 ``tools/bridge-windows/src/executor/plan_executor.py``
+    的 ``execute_plan`` 按 ``plan_id`` 去重（命中即 ``status=duplicate`` → HTTP 409
+    ``DUPLICATE_PLAN``），所以撞号不是「多下一单」而是**整笔单被丢掉**：没有
+    ``order_id``、没有成交，客户端只拿到失败回执。原实现用 ``int(time.time())``（秒），
+    同一秒内连发两笔（止损批量卖出多只标的最典型）必然撞号、第二笔凭空消失。
+
+    ``now_ns`` 仅供测试注入，生产链路不传（取真实时钟）。
+    """
+    if client_order_id:
+        return str(client_order_id)
+    ns = time.time_ns() if now_ns is None else int(now_ns)
+    return f"qm_{ns}_{os.getpid()}"
 
 
 def build_sim_client_order_id(run_id: str, symbol: str, side: str) -> str | None:

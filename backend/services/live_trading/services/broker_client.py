@@ -8,7 +8,6 @@ import abc
 import logging
 import os
 import random
-import time
 from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Dict, Optional
@@ -23,6 +22,7 @@ from sqlalchemy import text
 from backend.services.trade_shared.trade_config import settings
 from backend.shared.auth import get_internal_call_secret
 from backend.shared.database_manager_v2 import get_session
+from backend.shared.order_contract import build_bridge_plan_id
 
 logger = logging.getLogger(__name__)
 
@@ -1138,7 +1138,8 @@ class TdxBroker(BaseBroker):
                     success=False, message="限价单必须提供价格 (price)"
                 )
 
-        plan_id = str(client_order_id or f"qm_{int(time.time())}_{os.getpid()}")
+        # plan_id 撞号 = 桥按 plan_id 去重后整单丢弃（详见 shared.order_contract）
+        plan_id = build_bridge_plan_id(client_order_id)
         payload = {
             "plan_id": plan_id,
             "account": self.account,

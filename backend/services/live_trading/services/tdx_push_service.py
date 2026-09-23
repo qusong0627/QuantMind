@@ -14,6 +14,7 @@ import uuid
 from typing import Any, Optional
 
 from backend.shared.database_manager_v2 import get_session
+from backend.shared.order_contract import build_bridge_plan_id
 
 logger = logging.getLogger(__name__)
 
@@ -156,7 +157,8 @@ class TdxPushService:
             "price": price,
         }
         return await self._post("/api/v1/plans/execute", {
-            "plan_id": plan_id or f"qm_{int(__import__('time').time())}",
+            # 缺省号同样必须纳秒（秒精度会让同秒两笔单撞号 → 桥去重整单丢弃）
+            "plan_id": build_bridge_plan_id(plan_id),
             "orders": [order],
         })
 
