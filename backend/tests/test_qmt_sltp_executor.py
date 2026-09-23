@@ -20,6 +20,7 @@ from backend.services.live_trading.services import sltp_executor as ex
 from backend.services.live_trading.services.lot_rules import (
     align_sell_quantity,
     describe_violation,
+    is_full_position_sell,
     resolve_board,
 )
 
@@ -243,6 +244,51 @@ class TestQuantity:
     def test_full_position_sell_allows_odd_lot(self) -> None:
         qty, note = align_sell_quantity("600036.SH", 0, 246)
         assert (qty, note) == (246, "")
+
+    def test_is_full_position_sell_contract(self) -> None:
+        """整仓断言的判据（push_plan 手填卖单 / 止损 / 减仓三处同源）：
+
+        * 取不到可用持仓（``None``）或可用为 0（T+1 锁定）→ ``False``：
+          **不凭想象**替调用方放行一张碎股卖单；
+        * 买入无「整仓」概念 → ``False``；
+        * 大小写不敏感（调用点传 ``sell`` 与 ``SELL`` 两种写法）。
+        """
+        assert is_full_position_sell("SELL", 246, 246) is True
+        assert is_full_position_sell("sell", 246.0, 246.0) is True
+        # 手量 ≥ 可用（多出的部分由柜台拦，本谓词只管「是不是整仓」）
+        assert is_full_position_sell("SELL", 300, 246) is True
+        assert is_full_position_sell("SELL", 200, 246) is False  # 部分卖出
+        assert is_full_position_sell("SELL", 246, None) is False  # 没取到持仓
+        assert is_full_position_sell("SELL", 246, 0) is False  # 可用为 0
+        assert is_full_position_sell("BUY", 246, 246) is False
+        assert is_full_position_sell("", 246, 246) is False
+
+    def test_liquidating_trigger_marks_the_order_as_a_full_position_sell(self) -> None:
+        """整仓清掉的触发单带 ``full_position_sell``（评审 M4）。
+
+        数量来自柜台**实时**可用量，而派发层整手预检只看**当日快照**：快照比实时大
+        （当天已有成交）时，合法的碎股全清会被判 ``lot_blocked`` ⇒ **该止损的时候
+        止损单发不出去**（委托行已落库，每轮重试都被拒）。断言订单报文。
+        """
+        h = Harness(
+            cfg=_cfg([_rule()]),  # 未给 quantity/reduce_pct ⇒ 整仓卖出
+            ticks={"600036.SH": {"lastPrice": 94.9}},
+            positions=[_position(can_use=246)],
+        )
+        h.cycle()
+        assert h.dispatched[0]["quantity"] == pytest.approx(246.0)
+        assert h.dispatched[0]["full_position_sell"] is True
+
+    def test_partial_reduce_does_not_mark_full_position_sell(self) -> None:
+        h = Harness(
+            cfg=_cfg([_rule(reduce_pct=0.33)]),
+            ticks={"600036.SH": {"lastPrice": 94.9}},
+            positions=[_position(can_use=1000)],
+        )
+        h.cycle()
+        order = h.dispatched[0]
+        assert order["quantity"] == pytest.approx(300.0)  # 1000 × 0.33 = 330 → 整手 300
+        assert order["full_position_sell"] is False
 
     def test_partial_sell_aligned_to_lot(self) -> None:
         qty, note = align_sell_quantity("600036.SH", 246, 1000)

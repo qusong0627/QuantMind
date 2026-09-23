@@ -448,6 +448,8 @@ def test_plan_trim_never_sells_below_min_lot_for_star_board() -> None:
     )
     assert plan.legs[0].quantity == pytest.approx(300.0)  # 意图 300 已是整手
     assert plan.planned_value == pytest.approx(30_000.0)
+    # 部分卖出（可用 2000 只卖 300）**不许**带整仓断言：那会让派发层跳过整手预检
+    assert plan.legs[0].full_exit is False
 
 
 def test_plan_trim_clears_odd_lot_remainder() -> None:
@@ -461,6 +463,8 @@ def test_plan_trim_clears_odd_lot_remainder() -> None:
     # 缺口 10,000 → 意图 100 股 → 卖后剩 50 股碎股 → 全清 150
     assert plan.legs[0].quantity == pytest.approx(150.0)
     assert "碎股" in plan.legs[0].note
+    # 卖的就是**全部**可用量 ⇒ 派发层要带整仓断言（评审 M4：预检只看当日快照）
+    assert plan.legs[0].full_exit is True
 
 
 def test_plan_trim_skips_a_leg_the_lot_helper_zeroes(monkeypatch) -> None:

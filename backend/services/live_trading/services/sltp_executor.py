@@ -50,6 +50,7 @@ from typing import Any
 from backend.services.live_trading.services.lot_rules import (
     aggressive_sell_price,
     align_sell_quantity,
+    is_full_position_sell,
     protect_sell_price,
 )
 from backend.services.live_trading.services.tdx_quote_feed import (
@@ -1167,6 +1168,10 @@ async def _execute_trigger(
         "strategy_id": None,
         "client_order_id": cid,
         "remarks": remarks,
+        # 卖光实时可用量 = 整仓卖出（零股合法）：数量来自柜台**实时**持仓，而派发层的
+        # 整手预检只看当日快照 —— 快照比实时大时合法的碎股全清会被判 ``lot_blocked``，
+        # 该止损的时候止损单发不出去（委托行已落库，每轮重试都被拒）。
+        "full_position_sell": is_full_position_sell("SELL", quantity, can_use),
     }
     try:
         resp = await deps.dispatch(order_data, user_id)

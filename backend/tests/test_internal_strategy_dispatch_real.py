@@ -273,10 +273,24 @@ def _snapshot_row(*positions: dict[str, Any]) -> SimpleNamespace:
     return SimpleNamespace(payload_json={"positions": list(positions)})
 
 
-def _lot_check(db, *, side="SELL", symbol="600036.SH", quantity=150, user_id="1"):
+def _lot_check(
+    db,
+    *,
+    side="SELL",
+    symbol="600036.SH",
+    quantity=150,
+    user_id="1",
+    full_position_sell=False,
+):
     return _run(
         d._sell_lot_violation(
-            db, tenant="default", user_id=user_id, symbol=symbol, side=side, quantity=quantity
+            db,
+            tenant="default",
+            user_id=user_id,
+            symbol=symbol,
+            side=side,
+            quantity=quantity,
+            full_position_sell=full_position_sell,
         )
     )
 
@@ -354,3 +368,32 @@ def test_full_exit_within_tolerance_passes():
         _snapshot_row({"stock_code": "600036.SH", "available_volume": 101})
     )
     assert _lot_check(db, quantity=100) is None
+
+
+def test_caller_declared_full_exit_wins_over_a_stale_snapshot():
+    """下单方按**实时**可用量断言「这就是整仓」时，快照滞后不许把它判成整手违规。
+
+    病灶（评审 M4）：减仓执行器/止损执行器的可用量来自柜台**实时**持仓，而这里的
+    预检只看**当日最后一次**真账户快照。当天已有成交（任何路径卖的）时快照的可用量
+    比实时大 —— 此时一笔合法的碎股全清（如持仓 345 股全卖）会被按「部分卖出」拒绝
+    （``lot_blocked``），而委托行已经落库（``create_order`` 在前）⇒ 执行器每轮重试、
+    减仓/止损**执行不了**（止损尤其危险：该卖的时候卖不掉）。
+    ``full_position_sell`` 是调用方**已取到实时可用持仓**时的断言，与
+    ``shared/push_plan.py`` 的手填卖单同一判据；柜台 ``251150`` 仍是最终闸门。
+    """
+    db = FakeSnapshotDb(
+        _snapshot_row({"stock_code": "600036.SH", "available_volume": 400})
+    )
+    # 实时可用 345（当天已有成交）而快照停在 400：按快照算「不是全清」→ 现在的行为是拒
+    assert _lot_check(db, quantity=345) is not None
+    # 调用方刚读过实时持仓、断言这就是整仓 → 放行
+    assert _lot_check(db, quantity=345, full_position_sell=True) is None
+
+
+def test_caller_declared_full_exit_still_runs_the_absolute_checks():
+    """整仓断言只豁免**整手**规则，不豁免绝对非法检查（0 股/非整数股照样拒）。"""
+    db = FakeSnapshotDb(
+        _snapshot_row({"stock_code": "600036.SH", "available_volume": 345})
+    )
+    assert _lot_check(db, quantity=0, full_position_sell=True) is not None
+    assert _lot_check(db, quantity=100.5, full_position_sell=True) is not None

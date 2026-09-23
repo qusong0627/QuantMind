@@ -160,6 +160,11 @@ async def submit_leg(
         "strategy_id": None,
         "client_order_id": cid,
         "remarks": f"{REMARK_PREFIX}减仓执行器 {price_note}",
+        # 整仓卖出的腿带上断言：派发层的整手预检读的是**当日快照**的可用量，而本执行器
+        # 读的是柜台**实时**持仓 —— 当天已有成交时快照更大，一笔合法的碎股全清会被判
+        # ``lot_blocked``（委托行已落库 ⇒ 每轮重试都被拒、该清的仓清不掉）。判据在
+        # ``lot_rules.is_full_position_sell``，与 push_plan 的手填卖单、止损执行器同源。
+        "full_position_sell": bool(plan_leg.full_exit),
     }
     if deps.dry_run:
         # **提交咽喉上的闸**：``dry_run`` 是 deps 的属性，不是「调用方记得换个 dispatch」

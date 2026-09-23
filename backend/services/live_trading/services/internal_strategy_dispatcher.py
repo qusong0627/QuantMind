@@ -201,12 +201,21 @@ async def _sell_lot_violation(
     symbol: str,
     side: str,
     quantity: float,
+    full_position_sell: bool = False,
 ) -> str | None:
     """卖单整手预检（人类可读原因；``None`` = 放行）。
 
     只有能从**当日**真账户快照确认「这不是全量卖出」时才拦——全量卖出允许碎股，
     且快照可能滞后，拿不准时不拦（柜台 ``251150`` 仍是最终闸门）。
     整手规则是 A 股口径，非 A 股标的（港股/美股等）不做预检。
+
+    ``full_position_sell`` = 调用方**已读到柜台实时可用持仓**并断言「这就是整仓」
+    （判据见 ``lot_rules.is_full_position_sell``，与 ``shared/push_plan.py`` 的手填
+    卖单同一口径）。这条断言优先于快照：快照是当日**最后一次**落库的账户，当天已有
+    成交（任何路径卖的）时它的可用量比实时**大**，拿它判「不是全清」会把一笔合法的
+    碎股全清拒掉——止损/减仓执行器读的正是实时持仓，被拒一次就有一轮该卖没卖（委托
+    行已落库，见 ``leverage_trim_submit`` 的 HIGH-1）。断言只豁免整手规则，绝对检查
+    （数量为正整数股）在上面已做，柜台仍是最终闸门。
     """
     from backend.services.live_trading.services import lot_rules
     from backend.shared.stock_utils import StockCodeUtil
@@ -219,6 +228,11 @@ async def _sell_lot_violation(
     target = StockCodeUtil.to_suffix(str(symbol or ""))
     if not str(target or "").endswith((".SH", ".SZ", ".BJ")):
         return None
+    if full_position_sell:
+        # 调用方的实时读数为准，不必再翻当日的旧快照（连查询都不做）。
+        return lot_rules.describe_violation(
+            str(symbol or ""), "SELL", qty, full_position_sell=True
+        )
     available: float | None = None
     try:
         snapshot = await _fetch_latest_real_account_snapshot(
@@ -610,7 +624,13 @@ async def dispatch_internal_strategy_order(
         raise HTTPException(status_code=500, detail=str(exc))
 
     lot_violation = await _sell_lot_violation(
-        db, tenant=tenant, user_id=db_uid, symbol=symbol, side=side_raw, quantity=quantity
+        db,
+        tenant=tenant,
+        user_id=db_uid,
+        symbol=symbol,
+        side=side_raw,
+        quantity=quantity,
+        full_position_sell=bool(order_data.get("full_position_sell")),
     )
     if lot_violation:
         await order_service.transition_order_status(

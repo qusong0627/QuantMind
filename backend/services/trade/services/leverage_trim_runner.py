@@ -29,6 +29,8 @@ from backend.services.trade.services.leverage_trim_core import (
 from backend.services.trade.services.leverage_trim_io import (
     ENV_FLAG,
     ENV_POLL_S,
+    MAX_INTERVAL_SEC,
+    MIN_INTERVAL_SEC,
     TrimDeps,
     default_trim_deps,
     load_config,
@@ -39,10 +41,14 @@ logger = logging.getLogger(__name__)
 
 # ── 常驻 worker ─────────────────────────────────────────────────────
 def _poll_s(default: int = 60) -> int:
+    """起点节拍（环境变量）。**上下夹取与配置侧同一对常量**——这条路径只决定
+    「首轮之前那行日志」与配置读失败时的回落值，同一个数字有两个不夹取的口子
+    就会重新长出一个比心跳 TTL 大的节拍（评审 M6 的病灶）。"""
     try:
-        return max(5, int(os.getenv(ENV_POLL_S, "") or default))
+        raw = int(os.getenv(ENV_POLL_S, "") or default)
     except ValueError:
-        return default
+        raw = default
+    return min(MAX_INTERVAL_SEC, max(MIN_INTERVAL_SEC, raw))
 
 
 async def run_leverage_trim_worker() -> None:

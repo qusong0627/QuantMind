@@ -323,6 +323,27 @@ def describe_limit_problem(problem: str) -> str:
     return _LIMIT_PROBLEM_TEXT.get(key, key or "未知原因")
 
 
+def is_full_position_sell(side: str, quantity: float, can_use: float | None) -> bool:
+    """这一笔是不是「整仓卖出」：手量 ≥ 柜台**实时**可用量。
+
+    A 股规则：零股只能随整仓**一次性**卖出（部分卖出必须是整手），所以这个谓词是
+    「这笔单的碎股合不合法」的判据，也是 ``describe_violation(full_position_sell=…)``
+    的唯一来源。三个调用点共用：``shared/push_plan.py``（手填卖单体检）、止损执行器、
+    减仓执行器——各写一遍必然分叉（一边 ``>`` 一边 ``>=``，一边不判 None）。
+
+    ``can_use`` 为 ``None``/``0`` = **没取到**可用持仓 → 一律 ``False``：
+    不允许凭想象替调用方放行一张碎股卖单（push_plan 的原始注释即此意）。
+    """
+    if str(side or "").strip().upper() != "SELL":
+        return False
+    if can_use is None:
+        return False
+    can = float(can_use)
+    if not can > 0:
+        return False
+    return float(quantity or 0) >= can
+
+
 def align_sell_quantity(symbol: str, want: float, can_use: float) -> tuple[float, str]:
     """确定卖出报单数量（数量口径收敛，返回 ``(数量, 调整说明)``）。
 

@@ -34,7 +34,10 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-from backend.services.live_trading.services.lot_rules import align_sell_quantity
+from backend.services.live_trading.services.lot_rules import (
+    align_sell_quantity,
+    is_full_position_sell,
+)
 from backend.shared.decision.execution import at_limit_down
 from backend.shared.risk.registry import get_rule
 
@@ -365,6 +368,10 @@ class LegPlan:
     price: float
     value: float
     note: str = ""
+    #: 这一腿卖的是**全部**实时可用量（整仓卖出）。派发层的整手预检只能看当日快照，
+    #: 快照比实时大时会把合法的碎股全清判成整手违规 —— 带着它随委托下发，判据见
+    #: ``lot_rules.is_full_position_sell``（评审 M4）。
+    full_exit: bool = False
 
 
 @dataclass(frozen=True)
@@ -518,7 +525,18 @@ def plan_trim(
             skipped.append((leg.symbol, note or "可卖数量算得 0"))
             continue
         value = qty * price
-        planned.append(LegPlan(leg.symbol, qty, price, value, note))
+        planned.append(
+            LegPlan(
+                leg.symbol,
+                qty,
+                price,
+                value,
+                note,
+                # 卖光实时可用量 = 整仓卖出（零股合法）：派发层据此放行碎股，
+                # 不再拿当日的旧快照反推「这是不是全清」。
+                full_exit=is_full_position_sell("SELL", qty, leg.available),
+            )
+        )
         remaining -= value
 
     if not planned:

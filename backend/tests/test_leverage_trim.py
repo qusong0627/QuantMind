@@ -682,6 +682,40 @@ def test_unwired_risk_config_leaves_the_tier_line_in_charge() -> None:
     assert [c["client_order_id"] for c in disp.calls]  # 真提交了
 
 
+def test_full_exit_leg_carries_the_full_position_sell_flag() -> None:
+    """整仓卖光的腿带 ``full_position_sell``（评审 M4）。
+
+    派发层的整手预检只能看**当日快照**的可用量；本执行器读的是柜台**实时**持仓。
+    持仓 2,600 股但实时可用只有 200（T+1 未解锁）时，缺口 600 股只能把可用的 200 股
+    全清——碎股，快照一旦比实时大就会被判 ``lot_blocked``，而委托行已落库（HIGH-1
+    的同一机制），该清的仓永远清不掉。断言的是**订单报文**，不是内部字段。
+    """
+    client = FakeClient(
+        asset={"total_asset": 200_000.0, "cash": 0.0, "market_value": 260_000.0},
+        positions=[_position("600036.SH", 2_600.0, can_use=200.0, mv=260_000.0)],
+        ticks={"600036.SH": _tick(100.0)},
+    )
+    deps, disp, _, _ = _deps(client, tier=FakeTier(_tier_budget()))
+
+    summary = asyncio.run(lt.run_trim_cycle(deps))
+
+    assert summary["action"] == core.ACTION_TRIM
+    assert disp.calls[0]["quantity"] == pytest.approx(200.0)
+    assert disp.calls[0]["full_position_sell"] is True
+
+
+def test_partial_leg_does_not_carry_the_full_position_sell_flag() -> None:
+    """部分卖出的腿**不许**带整仓断言：那会让派发层跳过本该做的整手预检。"""
+    client, _ = _over_limit_account()  # 持仓 13,000 股可卖 13,000，缺口只要 3,000
+    deps, disp, _, _ = _deps(client, tier=FakeTier(_tier_budget()))
+
+    summary = asyncio.run(lt.run_trim_cycle(deps))
+
+    assert summary["action"] == core.ACTION_TRIM
+    assert disp.calls[0]["quantity"] == pytest.approx(3_000.0)
+    assert disp.calls[0]["full_position_sell"] is False
+
+
 def test_missing_reported_value_with_no_legs_blocks_the_round() -> None:
     """空仓时柜台自报的是 0.0；自报缺失 + 逐腿为空 = 读取异常，不许读成「未超限」。"""
     client = FakeClient(asset={"total_asset": 1_000_000.0, "cash": 0.0}, positions=[])
@@ -2089,13 +2123,18 @@ def test_worker_propagates_cancellation_from_a_round(monkeypatch) -> None:
 
 
 def test_worker_poll_interval_floor_and_garbage(monkeypatch) -> None:
-    """轮询拍的解析：下限 5s（别把柜台刷穿）、坏值/未配置回落默认。"""
+    """轮询拍的解析：下限 5s（别把柜台刷穿）、**上限 120s**（< 心跳 TTL 300s，
+    否则活着的执行器会被 C07 判 stale，而体检说明写着「--force 重跑」= 真减一轮）、
+    坏值/未配置回落默认。"""
     monkeypatch.setenv(io.ENV_POLL_S, "0")
     assert runner._poll_s() == 5
     monkeypatch.setenv(io.ENV_POLL_S, "1")
     assert runner._poll_s() == 5
     monkeypatch.setenv(io.ENV_POLL_S, "7")
     assert runner._poll_s() == 7
+    monkeypatch.setenv(io.ENV_POLL_S, "100000")
+    # 与配置侧同一对常量，不再有第二个口子
+    assert runner._poll_s() == io.MAX_INTERVAL_SEC
     monkeypatch.setenv(io.ENV_POLL_S, "abc")
     assert runner._poll_s() == 60
     monkeypatch.delenv(io.ENV_POLL_S)
