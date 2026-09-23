@@ -29,6 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.services.trade_shared.models.enums import OrderSide, OrderStatus
 from backend.services.trade_shared.models.order import Order
 from backend.services.trade_shared.models.trade import Trade
+from backend.shared.agent_ledger_fill import post_fill_for_order
 
 logger = logging.getLogger(__name__)
 
@@ -284,6 +285,9 @@ async def apply_execution_report(
                 )
             )
             if existing.scalar_one_or_none() is None:
+                # 成交瞬时只取一次：成交行与分账账本（P2.7）必须记同一个值——
+                # 「成交日」是账本幂等键的一半，两处各取一次 now() 会在跨零点时打架。
+                filled_stamp = datetime.now()
                 db.add(
                     Trade(
                         tenant_id=order.tenant_id,
@@ -302,13 +306,24 @@ async def apply_execution_report(
                         trade_value=trade_value,
                         commission=0.0,
                         exchange_trade_id=trade_id,
-                        executed_at=datetime.now(),
+                        executed_at=filled_stamp,
                         remarks=(
                             (f"[{error_code}] " if error_code else "")
                             + str(message or "")
                         ).strip()
                         or None,
                     )
+                )
+                # P2.7 分账：同一事务把成交记进 ``orders.agent`` 名下（非 LLM 腿静默跳过）。
+                # 挂在**插入分支**上：一笔成交一行 Trade ⇒ 一次落账，升级合成成交的行
+                # 不走这里（幂等键会变，重记就是双计）。不 catch——见 agent_ledger_fill。
+                await post_fill_for_order(
+                    db,
+                    order=order,
+                    fill_key=trade_id,
+                    quantity=filled_qty,
+                    price=price,
+                    filled_at=filled_stamp,
                 )
                 order.filled_quantity = (
                     float(getattr(order, "filled_quantity", 0.0) or 0.0) + filled_qty

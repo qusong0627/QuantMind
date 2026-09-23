@@ -47,6 +47,7 @@ def _order(
     filled: float = 0.0,
     quantity: float = 100.0,
     filled_value: float = 0.0,
+    agent: str | None = None,
 ) -> Any:
     return SimpleNamespace(
         order_id="9001",
@@ -55,6 +56,8 @@ def _order(
         portfolio_id=None,
         symbol="SH600519",
         symbol_name="贵州茅台",
+        # P2.7 分账归属：非 LLM 腿恒 None（本文件的既有用例都是这一类）
+        agent=agent,
         side=OrderSide.BUY,
         trade_action=None,
         position_side=None,
@@ -245,3 +248,72 @@ class TestNormalizeStatus:
         assert normalize_status("PARTIALLY_FILLED") is OrderStatus.PARTIALLY_FILLED
         assert normalize_status("garbage") is OrderStatus.SUBMITTED
         assert normalize_status(None) is OrderStatus.SUBMITTED
+
+
+class TestAgentLedgerHook:
+    """P2.7 分账：落账挂在**插入分支**上——一笔成交一行 Trade ⇒ 恰好一次落账。
+
+    这是「账本与成交行同生共死」的最小证据：插入了就写账本，去重命中了就不写。
+    """
+
+    @staticmethod
+    def _spy(monkeypatch: Any) -> Any:
+        from unittest.mock import AsyncMock
+
+        stub = AsyncMock(return_value=None)
+        monkeypatch.setattr(mod, "post_fill_for_order", stub)
+        return stub
+
+    def test_insert_branch_posts_once_with_the_fill_identity(
+        self, monkeypatch: Any
+    ) -> None:
+        stub = self._spy(monkeypatch)
+        order = _order(agent="deepseek-v4-pro")
+        _, session = _apply(
+            order, "PARTIALLY_FILLED", qty=40.0, price=10.0, trade_id="T1"
+        )
+
+        assert len(session.added) == 1
+        assert stub.await_count == 1
+        assert stub.await_args.args[0] is session, "必须写进调用方的事务"
+        kw = stub.await_args.kwargs
+        assert kw["order"] is order
+        assert kw["fill_key"] == "T1"
+        assert kw["quantity"] == 40.0
+        assert kw["price"] == 10.0
+        # 成交行与账本必须记同一个瞬时（成交日是账本幂等键的一半）
+        assert kw["filled_at"] == session.added[0].executed_at
+
+    def test_duplicate_trade_id_never_posts(self, monkeypatch: Any) -> None:
+        """成交号已入账（桥重发）：既不插成交行，也不碰账本（否则双计额度）。"""
+        stub = self._spy(monkeypatch)
+        order = _order(agent="deepseek-v4-pro")
+        _apply(
+            order,
+            "PARTIALLY_FILLED",
+            qty=40.0,
+            price=10.0,
+            trade_id="T1",
+            session=FakeSession(rows=[SimpleNamespace(exchange_trade_id="T1")]),
+        )
+        assert stub.await_count == 0
+
+    def test_status_only_report_without_trade_id_never_posts(
+        self, monkeypatch: Any
+    ) -> None:
+        """状态回调（无唯一成交号）只推进状态、不落成交行——自然也不落账本。"""
+        stub = self._spy(monkeypatch)
+        _apply(
+            _order(agent="m-a"), "PARTIALLY_FILLED", qty=40.0, price=10.0, trade_id=""
+        )
+        assert stub.await_count == 0
+
+    def test_leg_without_agent_still_records_the_trade(self) -> None:
+        """非 LLM 腿（人点/风控/托管）：走**真** hook 也必须静默放过，成交行照落。"""
+        order = _order(agent=None)
+        result, session = _apply(
+            order, "PARTIALLY_FILLED", qty=40.0, price=10.0, trade_id="T1"
+        )
+        assert result is OrderStatus.PARTIALLY_FILLED
+        assert len(session.added) == 1
+        assert order.filled_quantity == 40.0

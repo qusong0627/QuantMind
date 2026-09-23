@@ -15,6 +15,7 @@ from sqlalchemy import and_, select
 from backend.services.trade_shared.models.enums import OrderStatus
 from backend.services.trade_shared.models.order import Order
 from backend.services.trade_shared.models.trade import Trade
+from backend.shared.agent_ledger_fill import post_fill_for_order
 from backend.shared.database_manager_v2 import get_session
 from backend.shared.notification_publisher import publish_notification_async
 
@@ -458,6 +459,18 @@ class ExecutionStreamConsumer:
                 remarks=str(fields.get("reason") or ""),
             )
             session.add(trade)
+
+            # P2.7 分账：同一事务把成交记进 ``orders.agent`` 名下（非 LLM 腿静默跳过）。
+            # 与 ``qmt_exec_reconciler`` 同一条纪律：只在插入分支落账（上面已按
+            # 成交号去重过），不 catch（写不进去 = 这笔成交也不提交，留给重投）。
+            # 成交日取 UTC 日：重投（``_trade_idempotency_key`` 的键）要能算出同一天。
+            await post_fill_for_order(
+                session,
+                order=order,
+                fill_key=idem_key,
+                quantity=filled_qty,
+                price=filled_price,
+            )
 
             # T-P1-03：Fill 契约——成交价来源（券商回报），REAL 订单可溯取价链路
             from backend.shared.order_contract import (
