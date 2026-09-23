@@ -206,6 +206,17 @@ JOBS: tuple[JobSpec, ...] = (
         "池 → 闸门筛 → LLM 决策 → 执行段（下单/守护规则）→ 审计表；真钱生产者，默认关。"
         "重跑 = 抢占槽位再跑一轮 = 会真的再下单（同槽同向同标的被幂等键挡住）",
     ),
+    # P2.6 减仓执行器：档位表 ``leverage_trim_to`` 的消费者（闸门的 ``l1.leverage_cap``
+    # 只拒买、不压仓）。开关同样走 ``env_flags.env_flag``（**只有 "true" 生效**）。
+    # 心跳写在 worker 常驻循环里；**默认关闭**——切流是 P5 的显式动作。
+    JobSpec(
+        "leverage_trim", "杠杆减仓执行器（P2.6）", "worker", "trade",
+        "盘中 60s 一拍（``qm:risk:trim:config.interval_sec`` 可调）",
+        "QM_LEVERAGE_TRIM_ENABLED", False, 300,
+        "python backend/scripts/schedule_ctl.py run leverage_trim --force",
+        "总杠杆越过档位 ``leverage_max`` → 减到 ``leverage_trim_to``（整手/T+1/跌停/在途都复核）。"
+        "真钱风控动作，默认关。重跑 = 立刻真减一次（当日幂等号与同标的尝试上限仍然生效）",
+    ),
 )
 
 JOBS_BY_KEY: dict[str, JobSpec] = {job.key: job for job in JOBS}

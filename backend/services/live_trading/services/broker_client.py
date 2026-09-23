@@ -1280,7 +1280,7 @@ class TdxBroker(BaseBroker):
 #   sltp-  止损执行器（保护价=跌停价，天然贴边）
 #   flat-/flatten-  人工/脚本全量平仓
 #   mir-   镜像单（已过 2% 偏离闸门 + 强平豁免）
-_PRICE_PROTECTION_EXEMPT_CID_PREFIXES = ("sltp-", "flat-", "flatten-", "mir-")
+_PRICE_PROTECTION_EXEMPT_CID_PREFIXES = ("sltp-", "flat-", "flatten-", "mir-", "trim-")
 # 涨跌停带容差：报价允许比带边界再外扩 2%（覆盖滑点/复权误差），超出即拒
 _PRICE_PROTECTION_BAND_TOLERANCE = 0.02
 

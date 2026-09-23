@@ -436,7 +436,7 @@ def test_apply_enables_disabled_buy_side_rule_with_tier_value():
     assert merged["l1.position_cap"]["max_pct"] == BUDGET["per_stock_pos_pct"]
     assert merged["l1.per_order_pct"]["max_pct"] == BUDGET["per_stock_pct"]
     assert merged["l1.new_buys_per_day"]["max_new_buys"] == BUDGET["max_new_buys"]
-    # leverage_trim_to 无规则消费者（PENDING_KEYS）→ 不进 applied
+    # leverage_trim_to 的消费者是减仓执行器而非规则（EXECUTOR_KEYS）→ 不进 applied
     assert set(applied) == {
         "l1.leverage_cap",
         "l1.position_cap",
@@ -474,8 +474,12 @@ def test_unknown_budget_key_is_reported_at_boundary():
     assert any("unknown_knob" in p for p in problems)  # 也随档位态冒到调用方
 
 
-def test_apply_pending_keys_are_not_reported():
-    """`leverage_trim_to` 是**已知待接**（减仓执行器 P2.6 的输入）→ 不算异常。"""
+def test_apply_executor_keys_are_not_reported():
+    """`leverage_trim_to` 由减仓执行器（P2.6）消费 → **不算未知键**、不报异常。
+
+    同时钉住「执行器键与规则键是两套消费者」：执行器键不进 ``applied``（没有对应
+    规则可改），但也不该被当成缺口报出来——否则每次定档都刷一条假告警。
+    """
     _, _, problems = T.apply_to_rules({}, T.parse_tier_doc(_doc(WED), today=WED))
 
     assert not any("leverage_trim_to" in p for p in problems)

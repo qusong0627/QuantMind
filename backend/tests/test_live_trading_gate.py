@@ -146,6 +146,9 @@ def test_shared_runtime_not_prefix_blocked(method: str, path: str) -> None:
         f"{API}/real-trading/account/settings",  # GET 放行（只读）
         f"{API}/risk/status",
         f"{API}/risk/config",  # 风控对模拟盘同样生效
+        # 减仓执行器状态（P2.6）：只读摘要，拦掉不会少发一笔单，只会让面板报错。
+        # 前缀表里也没有 `/risk`——加前缀时这条会红。
+        f"{API}/risk/trim",
     ],
 )
 def test_adjacent_reads_allowed(path: str) -> None:

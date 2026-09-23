@@ -1,6 +1,8 @@
 """风控运维权（T-RC-02）：状态 / 配置 / 全撤——require_admin 收口。
 
 - `GET  /api/v1/risk/status`     —— 配置 + 当日决策计数（含影子拒绝数，翻闸判据）
+- `GET  /api/v1/risk/tier`       —— 当前档位（原文 + 新鲜度 + 改写了哪些规则参数）
+- `GET  /api/v1/risk/trim`       —— 减仓执行器最近一轮摘要（P2.6，含逐腿与当日计数）
 - `POST /api/v1/risk/config`     —— 改配置（enabled/shadow/rules），version 自增 + 留痕
 - `POST /api/v1/risk/cancel-all` —— HALT 全撤指定账户全部未成交模拟单（OrderRouter.cancel_all）
 
@@ -34,7 +36,15 @@ CST = timezone(timedelta(hours=8))
 
 
 def _client(redis: Any):
-    return getattr(redis, "client", redis)
+    """解包成原生客户端：包装层只有 JSON 编解码的 get/set，没有 hgetall（评审 M1）。
+
+    **必须判 ``callable``**：原生 ``redis.Redis`` 自带一个 ``client()`` 方法（连接
+    工厂），只判 ``is not None`` 会把方法当句柄拆出来 ⇒ ``'function' object has no
+    attribute 'hgetall'`` ⇒ 端点 500。判据同 ``shared/risk/tiers.py::_client``
+    与 ``leverage_trim_io._client``（2026-09-23 定档首跑与 C1 各踩过一次）。
+    """
+    client = getattr(redis, "client", None)
+    return client if client is not None and not callable(client) else redis
 
 
 @router.get("/risk/status")
@@ -80,8 +90,9 @@ async def risk_tier_status(
     必须是同一个数，否则面板会显示一个"看起来生效"的档位。
     """
     from backend.shared.risk.tiers import (
-        PENDING_KEYS,
+        EXECUTOR_KEYS,
         TARGETS,
+        TARGETS_PENDING,
         TIER_DETAIL_KEY,
         TIER_KEY,
         tier_stale_reason,
@@ -131,10 +142,16 @@ async def risk_tier_status(
                 "stale_reason": tier_stale_reason(raw or None, today=today),
                 # 生效面：闸门这一侧实际合并后的结果（含 source=absent 时的"未生效"）
                 "effective_level": getattr(cfg, "tier_level", "") if cfg else "",
-                "effective_source": getattr(cfg, "tier_source", "") if cfg else "unconfigured",
+                "effective_source": getattr(cfg, "tier_source", "")
+                if cfg
+                else "unconfigured",
                 "applied": getattr(cfg, "tier_applied", {}) if cfg else {},
                 "history": history,
-                "pending_keys": sorted(PENDING_KEYS),
+                # 「已有消费者但不是规则」的键：`leverage_trim_to` 由减仓执行器读
+                # （P2.6），不进 `applied` 但那不是缺口。
+                "executor_keys": sorted(EXECUTOR_KEYS),
+                # 「映射已定、规则待建」的键：与上者不同，这里非空 = 档位看着生效实则没约束。
+                "pending_keys": sorted(TARGETS_PENDING),
                 "targets": {k: list(v) for k, v in TARGETS.items()},
                 "caliber": (
                     "档位只收紧不放宽（与配置取更严者）；source=absent 表示从未定档、"
@@ -144,6 +161,54 @@ async def risk_tier_status(
         }
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=503, detail=f"档位不可读: {exc}") from exc
+
+
+@router.get("/risk/trim")
+async def risk_trim_status(
+    redis: Any = Depends(get_redis),
+    auth: AuthContext = Depends(require_admin),
+) -> dict[str, Any]:
+    """减仓执行器最近一轮摘要（P2.6）：状态键 `qm:risk:trim:last`。
+
+    面向运维的一句话：**这一轮减没减、减了多少、为什么没减**。面板要能分辨
+    「在限额内（idle，正常）」与「该减却减不动（blocked，数据故障）」——两者都是
+    「没有新委托」，但一个是稳态、一个是事故。另附配置（暂停/节拍/保护价模式）与
+    当日计数（已提交笔数、失败次数、已告警的成因），以及逐腿明细。
+    """
+    from backend.services.trade.services import leverage_trim_io as trim_io
+
+    try:
+        client = _client(redis)
+        summary = trim_io.read_status(client)
+        day = datetime.now(tz=CST).strftime("%Y-%m-%d")
+        state = trim_io.load_state(client, day)
+        config = trim_io.load_config(client)
+        return {
+            "success": True,
+            "data": {
+                "configured": bool(summary),
+                "last": summary,
+                "config": config,
+                "today": {
+                    "date": day,
+                    "submitted": state.get("submitted") or {},
+                    #: 当日**作废**的幂等号（委托行已落库且不在途：被拒 / 幂等命中）。
+                    #: 下一条腿的委托号 = submitted + burned + 1，缺这一格就解释不了
+                    #: 「为什么今天已经用到 g7 了，submitted 却只有 3」。
+                    "burned": state.get("burned") or {},
+                    "attempts": state.get("attempts") or {},
+                    "alerted": state.get("alerted") or [],
+                },
+                "caliber": (
+                    "action=idle 在限额内或有意不动手（含档位未给减仓参数、非交易时段、"
+                    "paused 只报不卖——后者 paused_would 给出本该执行的动作）；"
+                    "action=trim 已提交减仓腿（legs 逐腿可见）；"
+                    "action=blocked **该动手却动不了**（账户/行情/在途/档位读不出，或全部腿被拒）"
+                ),
+            },
+        }
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=f"Redis 不可读: {exc}") from exc
 
 
 class RiskConfigUpdate(BaseModel):
@@ -186,13 +251,20 @@ async def risk_config_update(
         if not current:
             updates.setdefault("enabled", "true")
             updates.setdefault("shadow", "true")
-            updates.setdefault("rules", json.dumps(risk.DEFAULT_RULES, ensure_ascii=False))
+            updates.setdefault(
+                "rules", json.dumps(risk.DEFAULT_RULES, ensure_ascii=False)
+            )
         client.hset(risk.CONFIG_KEY, mapping=updates)
         logger.warning(
             "[RiskCtl] 配置变更 by=%s version=%d updates=%s",
-            getattr(auth, "username", ""), version, sorted(updates),
+            getattr(auth, "username", ""),
+            version,
+            sorted(updates),
         )
-        return {"success": True, "data": {"version": version, "updates": sorted(updates)}}
+        return {
+            "success": True,
+            "data": {"version": version, "updates": sorted(updates)},
+        }
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001
@@ -217,14 +289,18 @@ async def risk_cancel_all(
 
     started = time.time()
     result = await cancel_all(
-        db, redis,
+        db,
+        redis,
         tenant_id=str(payload.tenant_id or "default"),
         user_id=int(payload.user_id),
         reason=str(payload.reason or "risk_halt")[:80],
     )
     logger.warning(
         "[RiskCtl] cancel-all by=%s user=%s → cancelled=%d failed=%d (%.2fs)",
-        getattr(auth, "username", ""), payload.user_id,
-        result["cancelled"], result["failed"], time.time() - started,
+        getattr(auth, "username", ""),
+        payload.user_id,
+        result["cancelled"],
+        result["failed"],
+        time.time() - started,
     )
     return {"success": True, "data": result}

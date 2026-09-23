@@ -56,6 +56,9 @@ _HEARTBEAT_WIRED = {
     # ——关着时 C07 记 off（不算故障），开了却没心跳就是故障。
     # 心跳写在**驱动层**（runner 的常驻循环里），编排层不含 worker。
     "decision_round": "services/trade/services/decision_round_runner.py",
+    # P2.6 减仓执行器（真钱风控动作）：同上，心跳写在常驻循环里（四层拆分后
+    # 常驻循环在 ``_runner``，编排层 ``leverage_trim.py`` 不含 worker）。
+    "leverage_trim": "services/trade/services/leverage_trim_runner.py",
 }
 
 #: 心跳用模块常量（``_sched_heartbeat(SCHEDULER_NAME)``）间接引用的任务：
@@ -88,19 +91,40 @@ def test_switch_enabled_pure():
 def test_classify_scheduler_status_pure():
     ok_entries = [
         {"key": "a", "name": "A", "enabled": True, "state": "ok", "age": 10, "ttl": 60},
-        {"key": "b", "name": "B", "enabled": False, "state": "off", "age": None, "ttl": 60},
+        {
+            "key": "b",
+            "name": "B",
+            "enabled": False,
+            "state": "off",
+            "age": None,
+            "ttl": 60,
+        },
     ]
     level, detail, metrics = classify_scheduler_status(ok_entries)
     assert level == "ok" and metrics["off"] == ["b"]
 
     stale_entries = [
-        {"key": "a", "name": "A", "enabled": True, "state": "stale", "age": 999, "ttl": 60}
+        {
+            "key": "a",
+            "name": "A",
+            "enabled": True,
+            "state": "stale",
+            "age": 999,
+            "ttl": 60,
+        }
     ]
     level, detail, metrics = classify_scheduler_status(stale_entries)
     assert level == "fail" and "停摆" in detail and metrics["stale"] == ["a"]
 
     missing_entries = [
-        {"key": "a", "name": "A", "enabled": True, "state": "missing", "age": None, "ttl": 60}
+        {
+            "key": "a",
+            "name": "A",
+            "enabled": True,
+            "state": "missing",
+            "age": None,
+            "ttl": 60,
+        }
     ]
     level, detail, _ = classify_scheduler_status(missing_entries)
     assert level == "warn" and "无心跳记录" in detail
@@ -141,7 +165,9 @@ def test_all_jobs_heartbeat_wired_in_source():
             assert f'{const} = "{job_key}"' in src, f"{job_key} 常量名不符（{rel}）"
             assert f"_sched_heartbeat({const})" in src, f"{job_key} 未接心跳（{rel}）"
         else:
-            assert f'_sched_heartbeat("{job_key}")' in src, f"{job_key} 未接心跳（{rel}）"
+            assert f'_sched_heartbeat("{job_key}")' in src, (
+                f"{job_key} 未接心跳（{rel}）"
+            )
     for job_key in (
         "auto_inference",
         "news_enrich",
@@ -177,7 +203,9 @@ def test_schedule_ctl_dispatch_covers_rerun_declared_jobs():
     from backend.scripts import schedule_ctl
 
     declared = {j.key for j in JOBS if j.rerun}
-    assert declared <= set(schedule_ctl._RERUN_DISPATCH), "声明了 rerun 的任务必须在分发表中"
+    assert declared <= set(schedule_ctl._RERUN_DISPATCH), (
+        "声明了 rerun 的任务必须在分发表中"
+    )
     assert set(schedule_ctl._RERUN_DISPATCH) == {
         "sim_eod",
         "auto_inference",
@@ -194,6 +222,8 @@ def test_schedule_ctl_dispatch_covers_rerun_declared_jobs():
         "risk_tier",
         # P2.8 决策轮
         "decision_round",
+        # P2.6 减仓执行器
+        "leverage_trim",
     }
 
     # 未知任务 → 退出码 2（纯函数路径，不触发真实执行）

@@ -263,6 +263,23 @@ def _run_decision_round(date_str: str | None, force: bool) -> int:
     return _service_main(["--force"] if force else [])
 
 
+def _run_leverage_trim(date_str: str | None, force: bool) -> int:
+    """跑一轮减仓（P2.6）：**会真的提交减仓委托**（除非环境/档位/账户任一不满足）。
+
+    ``date_str`` 语义不适用（一轮的档位、账户、行情全取当下）。``--force`` 只解除
+    ``paused`` 软开关——交易时段、实盘闸门、券商选定三道判据照旧，因为「现在是不是
+    能下单」不该由操作员的按钮决定。重跑不是幂等空转：真减一次，但同一个当日单号
+    只提交一次、同标的当日失败到顶即停手（防废单死循环）。
+    """
+    if date_str:
+        print(f"提示：leverage_trim 不接受日期参数（收到 {date_str}），按当下账户执行")
+    from backend.services.trade.services.leverage_trim_runner import (
+        main as _service_main,
+    )
+
+    return _service_main(["--once", "--force"] if force else ["--once"])
+
+
 def _run_risk_tier(date_str: str | None, force: bool) -> int:
     """手动定档（P1.8 生产者）：直接算一次并按当日口径写入，不走 worker 的日键。
 
@@ -322,6 +339,8 @@ _RERUN_DISPATCH: dict[str, Callable[[str | None, bool], int]] = {
     "advice_generator": _run_advice_generator,
     # P2.8 决策轮（真钱生产者）：一次性入口就是 CLI 本身，「重跑」= 立刻跑一轮。
     "decision_round": _run_decision_round,
+    # P2.6 减仓执行器（真钱风控动作）：同上，「重跑」= 立刻真减一次。
+    "leverage_trim": _run_leverage_trim,
 }
 
 
@@ -336,6 +355,12 @@ def _force_notice(job_key: str) -> str:
         return (
             "提示：--force = 抢占已认领的槽位、忽略当日 done 键，"
             "会真的再发一批新订单（同槽同标的同向腿被订单幂等键挡住）"
+        )
+    if job_key == "leverage_trim":
+        return (
+            "提示：--force = 忽略 paused 软开关，**会真的提交减仓委托**"
+            "（交易时段/实盘闸门/券商选定三道判据不受 --force 影响；"
+            "当日幂等号与同标的尝试上限仍然生效）"
         )
     return f"提示：--force 已传给 {job_key}；该任务的重跑本身不看这个参数"
 

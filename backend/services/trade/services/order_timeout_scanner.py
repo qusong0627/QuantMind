@@ -42,14 +42,15 @@ _BRIDGE_ACK_TIMEOUT_MARKER = "[BRIDGE_ACK_TIMEOUT_PENDING_REVIEW]"
 #   mirror:%    ：QMT 执行端镜像真单，qmt_exec_poller 每 2s 回写柜台状态
 # 本地超时启发式不得越权覆盖这两类，否则镜像单在柜台仍挂着（甚至随时可能成交），
 # 本地却已 EXPIRED 进入终态，委托列表与柜台长期错位、成交回报也被终态守卫吞掉。
-_BROKER_MANAGED_REMARK_PREFIXES = ("mirror:", "sltp:", "通达信桥委托")
+_BROKER_MANAGED_REMARK_PREFIXES = ("mirror:", "sltp:", "trim:", "通达信桥委托")
 _BROKER_MANAGED_REMARK_CONTAINS = ("通达信桥委托",)
 # 备注会被成交回报覆盖（qmt_exec_reconciler: ``order.remarks = msg``），
 # client_order_id 不会 —— 只能靠 cid 前缀兜底识别：
 #   mir-     ：SIM→真单镜像（qmt_exec_poller 2s 回写）
 #   sltp-    ：止损/止盈执行器真单（挂跌停价排队可能超过本地超时阈值）
 #   flat- / flatten- ：按清单平仓脚本真单
-_BROKER_MANAGED_CID_PREFIXES = ("mir-", "sltp-", "flat-", "flatten-")
+#   trim-    ：杠杆减仓执行器真单（挂在保护价上可能排队超过本地超时阈值）
+_BROKER_MANAGED_CID_PREFIXES = ("mir-", "sltp-", "flat-", "flatten-", "trim-")
 # 兼容既有引用口径：LIKE 模式列表（前缀式 + 包含式，两者都保留：
 # 「通达信桥委托」既可作前缀也可作备注中段标记，如 [AWAITING_BRIDGE_ACK] 通达信桥委托）
 _BROKER_MANAGED_REMARK_PATTERNS = tuple(

@@ -39,10 +39,13 @@ _COUNTER_TERMINAL = {"FILLED", "CANCELLED", "REJECTED"}
 # 本地非终态
 _LOCAL_OPEN = {"pending", "submitted", "partially_filled"}
 # QMT 通道本地单识别（client_order_id 前缀，与 order_timeout_scanner / broker_client 同口径）：
-#   mir- / sltp- / flat- / flatten-
+#   mir- / sltp- / flat- / flatten- / trim-
 # 只有这些单的真实状态由 QMT 执行端轮询器回写，才适合拿 QMT 柜台委托对照。
 # 通达信桥委托由桥自己的同步器回写状态，拿 QMT 柜台核对只会产生假「本地残留」。
-_QMT_CHANNEL_CID_PREFIXES = ("mir-", "sltp-", "flat-", "flatten-")
+# ``trim-`` = 减仓执行器（P2.6）的 ``trim-<code>-<日>-g<代次>``：同样是 QMT 执行端
+# 下单、同样由轮询器回写状态。**这五个前缀是一族**，改一处必须五处同改
+# （``test_forced_exit_prefix_registries`` 反漂移钉住）。
+_QMT_CHANNEL_CID_PREFIXES = ("mir-", "sltp-", "flat-", "flatten-", "trim-")
 
 
 def _env_bool(name: str, default: bool) -> bool:

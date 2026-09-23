@@ -82,6 +82,7 @@ async def lifespan(app: FastAPI):
     simulation_eod_task = None
     hot_set_builder_task = None
     decision_round_task = None
+    leverage_trim_task = None
 
     try:
         await init_unified_config(service_name="quantmind-trade")
@@ -447,6 +448,20 @@ async def lifespan(app: FastAPI):
         else:
             decision_round_task = None
 
+        # 杠杆减仓执行器（P2.6）：档位 leverage_max 触发 → 减到 leverage_trim_to。
+        # 与决策轮同一道闸口径（``env_flag``，**只有 "true" 生效**）、同样**默认关闭**。
+        if _env_flag("QM_LEVERAGE_TRIM_ENABLED"):
+            from backend.services.trade.services.leverage_trim_runner import (
+                run_leverage_trim_worker,
+            )
+
+            leverage_trim_task = asyncio.create_task(
+                run_leverage_trim_worker(), name="leverage-trim-worker"
+            )
+            logger.info("leverage trim worker started (QM_LEVERAGE_TRIM_ENABLED=true)")
+        else:
+            leverage_trim_task = None
+
         # 月度体检复检（T-P4-06 ③）：每月首周对 SIM/LIVE 策略重跑回测体检
         from backend.services.trade.services.health_recheck_service import (
             run_health_recheck_worker,
@@ -809,6 +824,7 @@ async def lifespan(app: FastAPI):
         tdx_hot_set_feed_task,
         risk_tier_task,
         decision_round_task,
+        leverage_trim_task,
     ):
         if task is None:
             continue

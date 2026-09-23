@@ -65,7 +65,7 @@ def _normalize_strategy_id(raw: Any) -> int | None:
 
 # 强平/止损类来源标记：这些订单"一定要成交"，镜像时豁免 2% 偏离闸门
 # （限价改用盘口价基准，见 real_mirror_service._submit_payload）。
-_FORCED_EXIT_REMARK_PREFIXES = ("sltp:", "flatten:", "forced-exit:")
+_FORCED_EXIT_REMARK_PREFIXES = ("sltp:", "flatten:", "forced-exit:", "trim:")
 
 _MIRROR_REASON_CN = {
     "price_drift": "价格偏离昨收超过镜像闸门（±2%），疑似行情脱钩",

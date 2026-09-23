@@ -106,9 +106,14 @@ TARGETS: dict[str, tuple[str, str, str]] = {
     "max_new_buys": ("l1.new_buys_per_day", "max_new_buys", "lower"),
 }
 
-#: 已知但**尚无消费者**的键（有意为之，不算异常）：
-#: - `leverage_trim_to`：减仓执行器（P2.6）的输入，只从档位文档读、不进规则参数。
-PENDING_KEYS: frozenset[str] = frozenset({"leverage_trim_to"})
+#: 由**执行器**（而非风控规则）消费的档位键（有意为之，不算异常、不进 ``applied``）：
+#: - `leverage_trim_to`：减仓执行器（P2.6）的输入——它不进规则参数，而是被
+#:   `services/trade/services/leverage_trim.py` 读去当减仓目标。改键名/改语义要
+#:   两边一起看（本表是「还有谁在读档位文档」的唯一登记处）。
+#:
+#: 与下面的 ``TARGETS_PENDING`` 是两回事：这里是**已有消费者**（只是不是规则），
+#: 那里是**规则待建**。写成 PENDING 会让「有人接手了」看起来还欠着活。
+EXECUTOR_KEYS: frozenset[str] = frozenset({"leverage_trim_to"})
 
 #: 映射已定、**规则待建**的键（P1.8 批次 B）。规则一旦注册，必须从此集合移除——
 #: 测试钉死了这条自清理不变量（否则"待接"会变成永久借口，档位看着生效实则没有约束）。
@@ -492,7 +497,7 @@ def apply_to_rules(
     for key, value in tier.budget.items():
         target = TARGETS.get(key)
         if target is None:
-            if key not in PENDING_KEYS:
+            if key not in EXECUTOR_KEYS:
                 problems.append(f"档位键 {key} 没有消费者（未知键），本次未生效")
             continue
         rule_id, param, direction = target

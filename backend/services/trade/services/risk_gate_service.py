@@ -91,6 +91,10 @@ _FORCED_EXIT_PREFIXES = (
     "forced_exit:",
     "flat-",
     "mir-",
+    # 减仓执行器（P2.6）：档位要求的强减同样是「风险动作优先于价格纪律」——
+    # 少了这一条，快速下跌里减仓腿会被自己的 l3.price_deviation 拒掉。
+    "trim:",
+    "trim-",
 )
 
 _CORE = RiskGateCore()
