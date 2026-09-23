@@ -29,6 +29,7 @@ from backend.services.simulation.services.local_market_data import (
     LIMIT_TOLERANCE_BSE,
     compute_limits,
     limit_pct,
+    limit_threshold,
 )
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -297,6 +298,103 @@ def test_low_price_case_that_two_tenths_would_have_missed():
     # 与实现同口径再确认一次：真封板价确实等于 compute_limits 的限价
     up, _ = compute_limits("000639.SZ", 1.44, is_st=False, trade_date=date(2026, 9, 18))  # fidelity: allow-limit-threshold — 显式传参：该票当日非 ST，与权威同传才可比
     assert float(up) == 1.58
+
+
+# ---------------------------------------------------------------------------
+# 「到板」谓词的边界闭环：容差要同时压住**取整偏差**与**浮点边界**
+#
+# 上面那条性质断言只钉了算术事实（实际板别 ≥ 名义板别 − 容差）。谓词一侧还有
+# 第二个坑：涨跌幅是 ``price / pre_close - 1`` 算出来的，¥100.00 → ¥90.00 的商是
+# ``-0.09999999999999998``，**比 -0.10 大** —— 阈值恰好等于名义板别时
+# ``chg <= -thr``（``execution.at_limit_down``）与 ``check_limit_reach`` 会判不出
+# 到板，且是静默漏判（账面只表现为"少拦一条"）。
+#
+# 生产路径上够不到：每个调用点传的都是 ``limit_threshold`` = 名义板别 − 0.5pp
+# （北交所 1pp），容差比浮点尾大 13 个数量级。但「够不到」必须被钉住，而不是靠
+# 读者相信：谁把容差调到取整偏差以下（见 ``test_legacy_two_tenths_family_is_gone``
+# 的实测漏判），或者新调用点改传名义板别，下面两条就红。
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("symbol", "is_st", "pre_close"),
+    [
+        ("600036.SH", False, 100.00),  # 沪深 10%：跌停价 90.00 —— 商恰带浮点尾
+        ("600036.SH", False, 10.03),  # 沪深 10%：跌停价 9.03，取整把跌幅拉到 9.97%
+        ("600036.SH", False, 1.44),  # 面值退市线：0.2pp 容差曾在此漏判
+        ("300750.SZ", False, 33.33),  # 创业板 20%
+        ("830799.BJ", False, 7.77),  # 北交所 30%：涨跌停价取整方向相反
+        ("600036.SH", True, 5.55),  # ST 主板 5%
+    ],
+)
+def test_at_board_predicates_hold_at_the_cent_rounding_boundary(
+    symbol, is_st, pre_close
+):
+    """**实际涨跌停价**换算成涨跌幅后，两个到板谓词都必须判得出来。
+
+    参数表刻意放进「商带浮点尾」（100.00→90.00）与「取整方向相反」（北交所）
+    两类边界，而不是只挑几个好算的价。
+    """
+    from backend.shared.decision.execution import at_limit_down
+    from backend.shared.decision.gates import (
+        RULE_LIMIT_DOWN,
+        RULE_LIMIT_UP,
+        check_limit_reach,
+    )
+
+    td = date(2026, 9, 18)
+    thr = limit_threshold(symbol, is_st=is_st, trade_date=td)
+    up_price, down_price = compute_limits(symbol, pre_close, is_st=is_st, trade_date=td)
+    assert up_price > 0 and down_price > 0, "无涨跌幅限制的用例不该进本参数表"
+
+    down_chg = down_price / pre_close - 1
+    assert at_limit_down(down_chg, thr) is True, (
+        f"{symbol} 前收 {pre_close} 跌停价 {down_price}（跌幅 {down_chg!r}）"
+        f"未判为跌停：容差 {thr} 没压住取整/浮点偏差"
+    )
+    down_verdict = check_limit_reach(day_chg_ratio=down_chg, limit_threshold_ratio=thr)
+    assert down_verdict.allowed is False and down_verdict.rule == RULE_LIMIT_DOWN
+
+    # 涨停：同一条谓词的镜像分支（``chg >= thr``）
+    up_chg = up_price / pre_close - 1
+    up_verdict = check_limit_reach(day_chg_ratio=up_chg, limit_threshold_ratio=thr)
+    assert up_verdict.allowed is False and up_verdict.rule == RULE_LIMIT_UP
+
+    # 反向控制：离跌停价还有 2%（¥100 的票报到 ¥92）**不**得到板 —— 容差是 0.5pp，
+    # 不是「沾边就算」。没有这条，把容差调成半个板别也能让上面全绿。
+    off_chg = down_price * 1.02 / pre_close - 1
+    assert at_limit_down(off_chg, thr) is False
+    assert (
+        check_limit_reach(day_chg_ratio=off_chg, limit_threshold_ratio=thr).allowed
+        is True
+    )
+
+
+@pytest.mark.parametrize("symbol,is_st", [("600036.SH", False)])
+def test_only_the_authoritative_threshold_absorbs_the_float_boundary(symbol, is_st):
+    """谓词自身在**名义板别**上确实漏判，事实源把它补上 —— 两半都要钉住。
+
+    这一条是上面那条的「为什么需要容差」的反证：同一个跌幅，传名义板别 ``0.10``
+    判不出、传 ``limit_threshold`` 判得出。于是「生产路径安全」的前提被写成可执行
+    的断言：**调用点必须传 ``limit_threshold``，不能自己拿名义板别来比**。
+    """
+    from backend.shared.decision.execution import at_limit_down
+
+    td = date(2026, 9, 18)
+    pre_close = 100.00
+    # 走真实现取跌停价（Decimal 精确，但**调用点拿到的是 float** —— 浮点尾就是
+    # 从 float 除法来的，别在这里用 Decimal 除，那会把要复现的尾数算没）。
+    _, down_price = compute_limits(symbol, pre_close, is_st=is_st, trade_date=td)
+    chg = down_price / pre_close - 1
+    nominal = float(limit_pct(symbol, is_st=is_st, trade_date=td))
+    authoritative = limit_threshold(symbol, is_st=is_st, trade_date=td)
+
+    assert chg == pytest.approx(-0.1) and chg > -0.1  # 浮点尾：-0.09999999999999998
+    assert nominal == pytest.approx(0.10)
+    assert authoritative == pytest.approx(nominal - LIMIT_TOLERANCE)
+
+    assert at_limit_down(chg, nominal) is False  # 浮点边界上的静默漏判
+    assert at_limit_down(chg, authoritative) is True  # 唯一事实源补上了它
 
 
 def test_ast_scan_finds_no_python2_style_assignment_regression():
