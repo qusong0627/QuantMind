@@ -224,13 +224,25 @@ async def migrate(
     )
     from backend.services.engine.data_platform.quantdb_factor_reader import (
         QuantDBFactorReader,
+        split_features_by_availability,
     )
 
     data_dir = Path(_resolve_market_factor_data_dir(disk_meta))
     source = str(disk_meta.get("factor_source") or "l1_factors")
-    status = QuantDBFactorReader(data_dir).describe(source)
-    mapped = list((disk_meta.get("factor_field_sources") or {}).values())
-    missing = [c for c in mapped if c not in status.columns]
+    reader = QuantDBFactorReader(data_dir)
+    status = reader.describe(source)
+    # 跨库组合（"库:列"）逐库对照：值直接与锚库列集比对会把副库映射列全判缺失。
+    field_sources = {
+        str(k): str(v) for k, v in (disk_meta.get("factor_field_sources") or {}).items()
+    }
+    _valid, missing_features = split_features_by_availability(
+        reader,
+        list(field_sources),
+        field_sources,
+        anchor=source,
+        columns_of=lambda lib: status.columns if lib == source else reader.describe(lib).columns,
+    )
+    missing = [field_sources[name] for name in missing_features]
     hash_ok = (not disk_meta.get("factor_schema_hash")) or (
         disk_meta["factor_schema_hash"] == status.schema_hash
     )

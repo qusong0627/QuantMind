@@ -555,6 +555,48 @@ def test_quantdb_baseline_real_source():
     assert {"open", "high", "low", "close", "volume", "amount"} <= set(hist.columns)
 
 
+@pytest.mark.integration
+def test_quantdb_baseline_cross_lib_real_source():
+    """跨库基线（集成）：副库（库:列）特征必须真取到值，不得被锚库列集过滤成缺席。
+
+    回归 2026-09-23 修掉的缺陷：``load_baseline_quantdb`` 曾拿锚库列名过滤全部请求
+    特征，副库条目整体进不了 ``read_day`` → 实时推理写出全 NaN 行却**不报错**，
+    表现为「模型在线但该列永远缺失」，只在特征重要性上留下无从解释的痕迹。
+    """
+    from pathlib import Path as _P
+
+    if not _P("/data/quantdb/6_ml_datasets/l1_factors").is_dir():
+        pytest.skip("QuantDB 因子源不存在（非容器环境）")
+    from backend.services.engine.data_platform.quantdb_factor_reader import (
+        QuantDBFactorReader,
+    )
+    from backend.services.engine.inference.realtime_core import load_baseline_quantdb
+
+    reader = QuantDBFactorReader(market="CN")
+    cross_col = "micro_liquidity_amihud_5"
+    if cross_col not in set(reader.describe("l2_factors").columns):
+        pytest.skip(f"l2_factors 已无 {cross_col}：换一列后保留本条跨库断言")
+    latest = reader.available_dates("l1_factors")[-1]
+    if latest not in set(reader.available_dates("l2_factors")):
+        pytest.skip("锚库与副库当前无共同可用日，跨库断言无对象")
+
+    meta = _qdb_meta(
+        factor_source="l1_factors",
+        factor_field_sources={
+            "mom_ret_1d": "mom_ret_1d",
+            cross_col: f"l2_factors:{cross_col}",
+        },
+    )
+    day = date.fromisoformat(latest) + timedelta(days=1)
+    bundle = load_baseline_quantdb(
+        ["600036.SH"], day, meta=meta, cols=["mom_ret_1d", cross_col]
+    )
+
+    row = bundle["rows"]["600036"]
+    assert row["mom_ret_1d"] is not None, "锚库列必须照常取到"
+    assert row[cross_col] is not None, "副库列被静默丢弃——跨库判可用性回归了"
+
+
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_tick_clears_stale_error_on_normal_skip(tmp_path):

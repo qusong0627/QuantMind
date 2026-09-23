@@ -18,7 +18,8 @@ from sqlalchemy import text
 from backend.services.api.user_app.middleware.auth import require_admin
 from backend.services.engine.data_platform.quantdb_factor_reader import (
     DEFAULT_FACTOR_SOURCE,
-    EXCLUDED_TRAIN_DATASETS,
+    EXCLUDED_FROM_DISCOVERY,
+    EXCLUDED_FROM_TRAINING,
     FACTOR_SOURCE_DIRS,
     KEY_COLUMNS,
     REQUIRED_COLUMNS,
@@ -208,10 +209,12 @@ def _validate_source(source: str) -> str:
     动态目录（未来新增的 6_ml_datasets/xxx_factors）由“刷新字段”扫描注册进
     qm_quantdb_factor_source_status 后即可建目录/发布；读取层
     QuantDBFactorReader.validate_source 会二次校验目录真实存在与排除清单。
+    factor_defs/alpha_library 等「清单库」可显式发布目录（跨库组合训练需要），
+    只是不参与「刷新字段」自动发现（见 EXCLUDED_FROM_DISCOVERY）。
     """
     if source in _VALID_SOURCE:
         return source
-    if source in EXCLUDED_TRAIN_DATASETS or not re.fullmatch(
+    if source in EXCLUDED_FROM_TRAINING or not re.fullmatch(
         r"[A-Za-z_][A-Za-z0-9_]*", source
     ):
         raise HTTPException(status_code=400, detail=f"Unknown factor source: {source}")
@@ -296,7 +299,7 @@ async def _cached_factor_sources(
         dataset
         for dataset in cached
         if dataset not in known
-        and dataset not in EXCLUDED_TRAIN_DATASETS
+        and dataset not in EXCLUDED_FROM_DISCOVERY
         and (reader.data_dir / "6_ml_datasets" / dataset).is_dir()
     ]
     for source in known + extras:
@@ -326,35 +329,61 @@ async def _cached_factor_sources(
     return sources
 
 
-async def _store_discovered_sources(
-    session, discovered: dict[str, dict[str, Any]], market: str = "CN"
+async def record_source_fields(
+    session, source: str, status: dict[str, Any], market: str = "CN"
 ) -> None:
+    """把一次扫描结果写入数据源状态表 + 字段注册表（两表 upsert 的唯一出处）。
+
+    ``/sources/refresh``（自动发现）与 ``backend/scripts/bootstrap_factor_catalog.py``
+    （清单库引导：factor_defs/alpha_library 不参与自动发现）共用同一套 SQL，
+    避免两处口径漂移。
+    """
     market = normalize_market(market)
-    for source, status in discovered.items():
+    await session.execute(text("""
+        INSERT INTO qm_quantdb_factor_source_status
+          (market, dataset_id, files, column_count, schema_hash, min_date,
+           max_date, ready, missing_required, reason, refreshed_at)
+        VALUES (:market, :dataset_id, :files, :column_count, :schema_hash,
+                :min_date, :max_date, :ready, :missing_required, :reason, NOW())
+        ON CONFLICT (market, dataset_id) DO UPDATE SET
+          files = EXCLUDED.files, column_count = EXCLUDED.column_count,
+          schema_hash = EXCLUDED.schema_hash, min_date = EXCLUDED.min_date,
+          max_date = EXCLUDED.max_date, ready = EXCLUDED.ready,
+          missing_required = EXCLUDED.missing_required, reason = EXCLUDED.reason,
+          refreshed_at = NOW()
+    """), {
+        "market": market,
+        "dataset_id": source,
+        "files": status["files"],
+        "column_count": len(status["columns"]),
+        "schema_hash": status["schema_hash"],
+        "min_date": date.fromisoformat(status["min_date"]) if status["min_date"] else None,
+        "max_date": date.fromisoformat(status["max_date"]) if status["max_date"] else None,
+        "ready": status["ready"],
+        "missing_required": json.dumps(status["missing_required"]),
+        "reason": status["reason"],
+    })
+    # 本次扫描未出现的列翻转为 is_present=FALSE（保留历史行，不物理删除）
+    await session.execute(text("""
+        UPDATE qm_quantdb_factor_field SET is_present = FALSE, discovered_at = NOW()
+        WHERE market = :market AND dataset_id = :source
+    """), {"market": market, "source": source})
+    for column in status["columns"]:
         await session.execute(text("""
-            INSERT INTO qm_quantdb_factor_source_status
-              (market, dataset_id, files, column_count, schema_hash, min_date,
-               max_date, ready, missing_required, reason, refreshed_at)
-            VALUES (:market, :dataset_id, :files, :column_count, :schema_hash,
-                    :min_date, :max_date, :ready, :missing_required, :reason, NOW())
-            ON CONFLICT (market, dataset_id) DO UPDATE SET
-              files = EXCLUDED.files, column_count = EXCLUDED.column_count,
-              schema_hash = EXCLUDED.schema_hash, min_date = EXCLUDED.min_date,
-              max_date = EXCLUDED.max_date, ready = EXCLUDED.ready,
-              missing_required = EXCLUDED.missing_required, reason = EXCLUDED.reason,
-              refreshed_at = NOW()
+            INSERT INTO qm_quantdb_factor_field
+              (market, dataset_id, column_name, data_type, schema_hash, min_date, max_date, is_present, discovered_at)
+            VALUES (:market, :dataset_id, :column_name, :data_type, :schema_hash, :min_date, :max_date, TRUE, NOW())
+            ON CONFLICT (market, dataset_id, column_name) DO UPDATE SET
+              data_type = EXCLUDED.data_type, schema_hash = EXCLUDED.schema_hash, min_date = EXCLUDED.min_date,
+              max_date = EXCLUDED.max_date, is_present = TRUE, discovered_at = NOW()
         """), {
-            "market": market,
-            "dataset_id": source,
-            "files": status["files"],
-            "column_count": len(status["columns"]),
-            "schema_hash": status["schema_hash"],
+            "market": market, "dataset_id": source, "column_name": column,
+            "data_type": status["column_types"].get(column), "schema_hash": status["schema_hash"],
             "min_date": date.fromisoformat(status["min_date"]) if status["min_date"] else None,
             "max_date": date.fromisoformat(status["max_date"]) if status["max_date"] else None,
-            "ready": status["ready"],
-            "missing_required": json.dumps(status["missing_required"]),
-            "reason": status["reason"],
         })
+
+
 
 
 async def _catalog_payload(session, version: dict[str, Any], source_dataset: str) -> dict[str, Any]:
@@ -577,26 +606,8 @@ async def refresh_factor_sources(
     )
     async with get_session() as session:
         await _ensure_schema(session)
-        await _store_discovered_sources(session, discovered, market)
         for source, status in discovered.items():
-            await session.execute(text("""
-                UPDATE qm_quantdb_factor_field SET is_present = FALSE, discovered_at = NOW()
-                WHERE market = :market AND dataset_id = :source
-            """), {"market": market, "source": source})
-            for column in status["columns"]:
-                await session.execute(text("""
-                    INSERT INTO qm_quantdb_factor_field
-                      (market, dataset_id, column_name, data_type, schema_hash, min_date, max_date, is_present, discovered_at)
-                    VALUES (:market, :dataset_id, :column_name, :data_type, :schema_hash, :min_date, :max_date, TRUE, NOW())
-                    ON CONFLICT (market, dataset_id, column_name) DO UPDATE SET
-                      data_type = EXCLUDED.data_type, schema_hash = EXCLUDED.schema_hash, min_date = EXCLUDED.min_date,
-                      max_date = EXCLUDED.max_date, is_present = TRUE, discovered_at = NOW()
-                """), {
-                    "market": market, "dataset_id": source, "column_name": column,
-                    "data_type": status["column_types"].get(column), "schema_hash": status["schema_hash"],
-                    "min_date": date.fromisoformat(status["min_date"]) if status["min_date"] else None,
-                    "max_date": date.fromisoformat(status["max_date"]) if status["max_date"] else None,
-                })
+            await record_source_fields(session, source, status, market)
     return {"sources": discovered, "market": market}
 
 
@@ -630,6 +641,27 @@ async def list_factor_fields(
     return {"source_dataset": source_dataset, "fields": fields}
 
 
+async def create_catalog_draft(
+    session, source_dataset: str, version_name: str, market: str = "CN",
+    created_by: str = "admin",
+) -> str:
+    """建空白草稿，返回 version_id（端点与引导脚本共用）。"""
+    market = normalize_market(market)
+    source_dataset = _validate_source(source_dataset)
+    version_id = f"qdb-{market.lower()}-{source_dataset}-{uuid.uuid4().hex[:12]}"
+    await session.execute(text("""
+        INSERT INTO qm_training_factor_catalog_version
+          (version_id, market, version_name, status, source_dataset, created_by)
+        VALUES (:version_id, :market, :version_name, 'draft', :source_dataset, :created_by)
+    """), {
+        "version_id": version_id, "market": market,
+        "version_name": version_name,
+        "source_dataset": source_dataset,
+        "created_by": created_by,
+    })
+    return version_id
+
+
 @router.post("/versions")
 async def create_draft_version(
     payload: CatalogVersionCreate,
@@ -638,21 +670,14 @@ async def create_draft_version(
 ):
     """Create an empty draft. Mapping rows are explicitly added by the admin UI."""
     market = normalize_market(market)
-    source_dataset = _validate_source(payload.source_dataset)
-    version_id = f"qdb-{market.lower()}-{source_dataset}-{uuid.uuid4().hex[:12]}"
     async with get_session() as session:
         await _ensure_schema(session)
-        await session.execute(text("""
-            INSERT INTO qm_training_factor_catalog_version
-              (version_id, market, version_name, status, source_dataset, created_by)
-            VALUES (:version_id, :market, :version_name, 'draft', :source_dataset, :created_by)
-        """), {
-            "version_id": version_id, "market": market,
-            "version_name": payload.version_name,
-            "source_dataset": source_dataset,
-            "created_by": str(current_user.get("user_id") or current_user.get("sub") or "admin"),
-        })
-    return {"version_id": version_id, "status": "draft", "source_dataset": source_dataset, "market": market}
+        version_id = await create_catalog_draft(
+            session, payload.source_dataset, payload.version_name, market,
+            created_by=str(current_user.get("user_id") or current_user.get("sub") or "admin"),
+        )
+    return {"version_id": version_id, "status": "draft",
+            "source_dataset": _validate_source(payload.source_dataset), "market": market}
 
 
 @router.get("/catalog")
@@ -744,33 +769,85 @@ async def upsert_factor_mapping(version_id: str, payload: MappingUpdate, current
     return {"mapping_id": mapping_id, "version_id": version_id}
 
 
+async def publish_catalog_version(session, version_id: str) -> None:
+    """草稿 → 发布（同源同市场旧版本自动归档）。端点与引导脚本共用。"""
+    version = (await session.execute(text("""
+        SELECT version_id, source_dataset, market, status FROM qm_training_factor_catalog_version
+        WHERE version_id = :version_id
+    """), {"version_id": version_id})).mappings().first()
+    if not version:
+        raise HTTPException(status_code=404, detail="Catalog version not found")
+    if version["status"] != "draft":
+        raise HTTPException(status_code=409, detail="Only draft catalogs can be published")
+    count = (await session.execute(text("""
+        SELECT count(*) FROM qm_training_factor_mapping
+        WHERE version_id = :version_id AND enabled
+    """), {"version_id": version_id})).scalar_one()
+    if not count:
+        raise HTTPException(status_code=400, detail="A published catalog needs at least one enabled factor")
+    await session.execute(text("""
+        UPDATE qm_training_factor_catalog_version SET status = 'archived'
+        WHERE source_dataset = :source_dataset AND market = :market AND status = 'published'
+    """), {"source_dataset": version["source_dataset"], "market": version["market"]})
+    await session.execute(text("""
+        UPDATE qm_training_factor_catalog_version
+        SET status = 'published', published_at = :published_at WHERE version_id = :version_id
+    """), {"version_id": version_id, "published_at": datetime.now(timezone.utc)})
+
+
+async def seed_catalog_mappings(session, version: dict[str, Any]) -> dict[str, int]:
+    """把已发现的字段全量播种为该草稿的映射（端点与引导脚本共用）。
+
+    default_selected 默认勾选仅适用于 CN 市场（48 核心集基于 CN l1_l2
+    实际字段挑选）；HK/CUSTOM 等市场默认全不勾选，由管理员按实际
+    发现字段手动勾选，避免把不存在的 CN 因子带入训练。
+    """
+    fields = (await session.execute(text("""
+        SELECT column_name FROM qm_quantdb_factor_field
+        WHERE market = :market AND dataset_id = :dataset_id AND is_present
+        ORDER BY column_name
+    """), {"market": version["market"], "dataset_id": version["source_dataset"]})).scalars().all()
+    count = 0
+    default_selected_count = 0
+    market_defaults = (
+        DEFAULT_SELECTED_FACTORS if str(version["market"]).upper() == "CN" else frozenset()
+    )
+    for column in fields:
+        if column in KEY_COLUMNS or column in REQUIRED_COLUMNS:
+            continue
+        definition = definition_for(str(column))
+        cat_id = str(definition["category_id"])
+        cat_name = str(definition["category_name"])
+        is_default_selected = str(column) in market_defaults
+        await session.execute(text("""
+            INSERT INTO qm_training_factor_mapping
+             (mapping_id, version_id, source_dataset, source_column, feature_key, display_name,
+              category_id, category_name, enabled, default_selected, required, sort_order)
+            VALUES (:mapping_id, :version_id, :source_dataset, :source_column, :feature_key, :display_name,
+                    :category_id, :category_name, TRUE, :default_selected, FALSE, :sort_order)
+            ON CONFLICT (version_id, source_dataset, source_column) DO NOTHING
+        """), {
+            "mapping_id": uuid.uuid4().hex, "version_id": version["version_id"],
+            "source_dataset": version["source_dataset"], "source_column": column,
+            "feature_key": column,
+            "category_name": cat_name,
+            "category_id": cat_id,
+            "display_name": str(definition["display_name"]),
+            "default_selected": is_default_selected,
+            "sort_order": int(definition["sort_order"]) + count,
+        })
+        count += 1
+        default_selected_count += int(is_default_selected)
+    return {"seeded_fields": count, "enabled_fields": count,
+            "default_selected_fields": default_selected_count}
+
+
 @router.post("/versions/{version_id}/publish")
 async def publish_factor_catalog(version_id: str, current_user: dict = Depends(require_admin)):
     _ = current_user
     async with get_session() as session:
         await _ensure_schema(session)
-        version = (await session.execute(text("""
-            SELECT version_id, source_dataset, market, status FROM qm_training_factor_catalog_version
-            WHERE version_id = :version_id
-        """), {"version_id": version_id})).mappings().first()
-        if not version:
-            raise HTTPException(status_code=404, detail="Catalog version not found")
-        if version["status"] != "draft":
-            raise HTTPException(status_code=409, detail="Only draft catalogs can be published")
-        count = (await session.execute(text("""
-            SELECT count(*) FROM qm_training_factor_mapping
-            WHERE version_id = :version_id AND enabled
-        """), {"version_id": version_id})).scalar_one()
-        if not count:
-            raise HTTPException(status_code=400, detail="A published catalog needs at least one enabled factor")
-        await session.execute(text("""
-            UPDATE qm_training_factor_catalog_version SET status = 'archived'
-            WHERE source_dataset = :source_dataset AND market = :market AND status = 'published'
-        """), {"source_dataset": version["source_dataset"], "market": version["market"]})
-        await session.execute(text("""
-            UPDATE qm_training_factor_catalog_version
-            SET status = 'published', published_at = :published_at WHERE version_id = :version_id
-        """), {"version_id": version_id, "published_at": datetime.now(timezone.utc)})
+        await publish_catalog_version(session, version_id)
     return {"version_id": version_id, "status": "published"}
 
 
@@ -809,60 +886,17 @@ async def clone_factor_catalog(version_id: str, payload: CatalogVersionClone, cu
 
 @router.post("/versions/{version_id}/seed")
 async def seed_draft_mappings(version_id: str, current_user: dict = Depends(require_admin)):
-    """Convenience endpoint: add all discovered factor columns to a draft as mappings.
-
-    新建草稿后：全部发现字段默认启用（enabled=True）。
-    default_selected 默认勾选仅适用于 CN 市场（48 核心集基于 CN l1_l2
-    实际字段挑选）；HK/CUSTOM 等市场默认全不勾选，由管理员按实际
-    发现字段手动勾选，避免把不存在的 CN 因子带入训练。
-    """
+    """Convenience endpoint: add all discovered factor columns to a draft as mappings."""
     _ = current_user
     async with get_session() as session:
         await _ensure_schema(session)
         version = (await session.execute(text("""
-            SELECT status, source_dataset, market FROM qm_training_factor_catalog_version WHERE version_id = :version_id
+            SELECT version_id, status, source_dataset, market FROM qm_training_factor_catalog_version
+            WHERE version_id = :version_id
         """), {"version_id": version_id})).mappings().first()
         if not version:
             raise HTTPException(status_code=404, detail="Catalog version not found")
         if version["status"] != "draft":
             raise HTTPException(status_code=409, detail="Only draft catalogs can be seeded")
-        fields = (await session.execute(text("""
-            SELECT column_name FROM qm_quantdb_factor_field
-            WHERE market = :market AND dataset_id = :dataset_id AND is_present
-            ORDER BY column_name
-        """), {"market": version["market"], "dataset_id": version["source_dataset"]})).scalars().all()
-        count = 0
-        default_selected_count = 0
-        market_defaults = (
-            DEFAULT_SELECTED_FACTORS if str(version["market"]).upper() == "CN" else frozenset()
-        )
-        for column in fields:
-            if column in KEY_COLUMNS or column in REQUIRED_COLUMNS:
-                continue
-            definition = definition_for(str(column))
-            cat_id = str(definition["category_id"])
-            cat_name = str(definition["category_name"])
-            is_default_selected = str(column) in market_defaults
-            await session.execute(text("""
-                INSERT INTO qm_training_factor_mapping
-                 (mapping_id, version_id, source_dataset, source_column, feature_key, display_name,
-                  category_id, category_name, enabled, default_selected, required, sort_order)
-                VALUES (:mapping_id, :version_id, :source_dataset, :source_column, :feature_key, :display_name,
-                        :category_id, :category_name, TRUE, :default_selected, FALSE, :sort_order)
-                ON CONFLICT (version_id, source_dataset, source_column) DO NOTHING
-            """), {
-                "mapping_id": uuid.uuid4().hex, "version_id": version_id,
-                "source_dataset": version["source_dataset"], "source_column": column,
-                "feature_key": column,
-                "category_name": cat_name,
-                "category_id": cat_id,
-                "display_name": str(definition["display_name"]),
-                "default_selected": is_default_selected,
-                "sort_order": int(definition["sort_order"]) + count,
-            })
-            count += 1
-            default_selected_count += int(is_default_selected)
-    return {
-        "version_id": version_id, "seeded_fields": count,
-        "enabled_fields": count, "default_selected_fields": default_selected_count,
-    }
+        seeded = await seed_catalog_mappings(session, dict(version))
+    return {"version_id": version_id, **seeded}

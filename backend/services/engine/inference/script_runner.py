@@ -551,11 +551,26 @@ class InferenceScriptRunner:
             # 单位契约与金样回归守，别指望这道门。
             schema_hash = str(meta.get("factor_schema_hash") or "")
             hash_drift = bool(schema_hash) and schema_hash != status.schema_hash
-            missing = [
-                column for column in (meta.get("factor_field_sources") or {}).values()
-                if column not in status.columns
-            ]
-            if missing:
+            # 跨库组合（库:列）须逐库对照列集：拿锚库列名判定会把副库特征整体误判
+            # 为缺失。复用推理侧同一 describe 缓存，锚库不重复全量扫描。
+            from backend.services.engine.data_platform.quantdb_factor_reader import (
+                split_features_by_availability,
+            )
+
+            field_sources = {
+                str(k): str(v) for k, v in (meta.get("factor_field_sources") or {}).items()
+            }
+            _, missing_features = split_features_by_availability(
+                reader,
+                list(field_sources),
+                field_sources,
+                anchor=source,
+                columns_of=lambda lib: _cached_describe(reader, lib).columns,
+            )
+            if missing_features:
+                # 报「取不到的列」而非特征键：跨库条目的键与列名常常不同名，
+                # 只说特征键（如 f1）无从定位到底缺哪一列。
+                missing = [field_sources.get(name, name) for name in missing_features]
                 return {
                     "ready": False,
                     "detail": f"missing mapped fields: {missing[:5]}",

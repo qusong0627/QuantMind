@@ -107,8 +107,8 @@ def baseline_source_label(model_dir: str) -> str:
     return "遗留快照 parquet（model_features_{year}）"
 
 
-def _quantdb_columns(meta: dict[str, Any]) -> set[str] | None:
-    """quantdb 绑定模型的因子源列集合；不可判 → None（回落 parquet 口径）。"""
+def _quantdb_reader_for_meta(meta: dict[str, Any]) -> tuple[Any, str] | None:
+    """quantdb 绑定模型的 ``(reader, 锚源)``；不可判 → None（回落 parquet 口径）。"""
     try:
         from backend.services.engine.data_platform.quantdb_factor_reader import (
             QuantDBFactorReader,
@@ -122,6 +122,18 @@ def _quantdb_columns(meta: dict[str, Any]) -> set[str] | None:
             str((meta.get("context") or {}).get("market") or "").strip().upper() or None
         )
         reader = QuantDBFactorReader(str(pinned) if pinned else None, market=market)
+        return reader, source
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _quantdb_columns(meta: dict[str, Any]) -> set[str] | None:
+    """quantdb 绑定模型的**锚源**列集合；不可判 → None。"""
+    resolved = _quantdb_reader_for_meta(meta)
+    if resolved is None:
+        return None
+    reader, source = resolved
+    try:
         return set(reader.describe(source).columns)
     except Exception:  # noqa: BLE001
         return None
@@ -139,14 +151,23 @@ def feature_coverage(model_dir: str, feature_columns: list[str]) -> tuple[int, i
     """
     meta = _model_meta(model_dir)
     if str(meta.get("data_source") or "").strip() == "quantdb_factors":
-        available = _quantdb_columns(meta)
-        if available is not None:
+        resolved = _quantdb_reader_for_meta(meta)
+        if resolved is not None:
+            from backend.services.engine.data_platform.quantdb_factor_reader import (
+                split_features_by_availability,
+            )
+
+            reader, source = resolved
             mapping = {
                 str(k): str(v) for k, v in (meta.get("factor_field_sources") or {}).items()
             }
-            hit = sum(1 for c in feature_columns if mapping.get(c, c) in available)
+            # 跨库组合（"库:列"）逐库对照：只比锚库列集会把副库特征整片判为未覆盖，
+            # 触发"覆盖率过低"误拒。
+            valid, _missing = split_features_by_availability(
+                reader, feature_columns, mapping, anchor=source
+            )
             total = max(1, len(feature_columns))
-            return (hit, len(feature_columns), hit / total)
+            return (len(valid), len(feature_columns), len(valid) / total)
 
     import datetime as _dt
     from pathlib import Path

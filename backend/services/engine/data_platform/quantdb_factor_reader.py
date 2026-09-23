@@ -15,7 +15,7 @@ from dataclasses import asdict, dataclass
 from datetime import date
 from pathlib import Path
 from typing import Literal
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable, Mapping
 
 import numpy as np
 import pandas as pd
@@ -51,18 +51,26 @@ MARKET_FACTOR_SOURCES: dict[str, tuple[FactorSource, ...]] = {
     "CUSTOM": ("l1_factors",),
 }
 
-# ── 6_ml_datasets 下不参与训练直读的目录（“刷新字段”自动发现时排除）─────────────
-# - features_daily：含未来收益标签列（return_Nd）与 OHLCV 重复列，作为特征会泄漏；
+# ── 6_ml_datasets 下的排除清单（2026-09-23 拆为两套语义）────────────────────
+# 拆因：跨库组合选择（读时拼接，feature_sources 值写 "库:列"）要求 factor_defs /
+# alpha_library 这类「清单库」能做训练直读；但它们在「刷新字段」自动发现里仍会
+# 造成超长字段列表，所以「发现面」与「训练面」的排除范围不再相同。
+#
+# EXCLUDED_FROM_DISCOVERY —— 后台“刷新字段”/数据源列表不自动登记：
+# - features_daily：含未来收益标签列（return_Nd）与 OHLCV 重复列；
 # - alpha_library_labels：纯标签库；
-# - alpha_library：历史策略预计算 Alpha 库（如需纳入训练直读，从本集合移除即可）；
-# - factor_defs：同属「清单库」性质（1300+ 条，与研究/报告同源），
-#   让它自动进训练候选池会让「刷新字段」突然多出一个超长列表；要训练时显式移除即可。
-# 其余新增因子目录（如未来上线的 xxx_factors）无需改代码，刷新字段即自动注册。
-EXCLUDED_TRAIN_DATASETS: frozenset[str] = frozenset({
+# - alpha_library：历史策略预计算 Alpha 库（1300+ 清单性质）；
+# - factor_defs：1300+ 条研究/报告同源清单库。
+# EXCLUDED_FROM_TRAINING —— 读取层硬拦（标签/泄漏库，任何路径都不得当特征源）。
+EXCLUDED_FROM_DISCOVERY: frozenset[str] = frozenset({
     "features_daily",
     "alpha_library_labels",
     "alpha_library",
     "factor_defs",
+})
+EXCLUDED_FROM_TRAINING: frozenset[str] = frozenset({
+    "features_daily",
+    "alpha_library_labels",
 })
 DEFAULT_FACTOR_SOURCE_BY_MARKET: dict[str, FactorSource] = {
     "CN": "l1_factors",
@@ -173,6 +181,61 @@ def _quote(identifier: str) -> str:
     return f'"{identifier}"'
 
 
+def split_qualified_source(value: str) -> tuple[str | None, str]:
+    """解析 feature_sources 的值：``"库:列"`` → ``(库, 列)``；纯列名 → ``(None, 列)``。
+
+    跨库组合读（库=包，读时拼接）的唯一语法点：值不写库名即锚库（``read_range`` 的
+    ``source``），载荷与旧模型元数据逐字兼容；写库名则从该库 LEFT JOIN 取列。
+    库与列均为 SQL 标识符，不含冒号，因此冒号可安全作为分隔符。
+    """
+    text = str(value or "").strip()
+    if ":" not in text:
+        return None, text
+    lib, _, column = text.partition(":")
+    return (lib.strip() or None), column.strip()
+
+
+def split_features_by_availability(
+    reader: QuantDBFactorReader,
+    features: Iterable[str],
+    feature_sources: Mapping[str, str] | None = None,
+    *,
+    anchor: str,
+    columns_of: Callable[[str], Iterable[str]] | None = None,
+) -> tuple[list[str], list[str]]:
+    """按库解析限定名并逐库检查列存在性，返回 ``(可取特征, 缺失特征)``。
+
+    编排器（训练前过滤）/ 推理前置检查（script_runner）/ 实时推理（realtime_core）
+    三处共用：跨库组合下不能再用锚库列名对照全部特征，否则副库特征会被整体误判为
+    缺失。missing 保留调用方原始写法（含 ``"库:列"`` 限定形式），便于报错定位。
+
+    ``columns_of`` 允许调用方注入带缓存的列查询（script_runner 的 ``describe``
+    TTL 缓存）；不给则每库直接 ``reader.describe`` 一次。
+    """
+    feature_sources = feature_sources or {}
+
+    def _columns(lib: str) -> set[str]:
+        if columns_of is not None:
+            return {str(c) for c in columns_of(lib)}
+        return {str(c) for c in reader.describe(lib).columns}
+
+    cache: dict[str, set[str]] = {}
+    valid: list[str] = []
+    missing: list[str] = []
+    for feature in features:
+        lib, column = split_qualified_source(feature)
+        if lib is None:
+            lib, column = split_qualified_source(feature_sources.get(feature, feature))
+        lib = lib or anchor
+        if lib not in cache:
+            try:
+                cache[lib] = _columns(lib)
+            except Exception:  # noqa: BLE001 — 描述失败/未知副库 → 该库特征判缺失
+                cache[lib] = set()
+        (valid if column in cache[lib] else missing).append(feature)
+    return valid, missing
+
+
 class QuantDBFactorReader:
     """Read one raw QuantDB factor source without materialising a snapshot."""
 
@@ -195,13 +258,13 @@ class QuantDBFactorReader:
         - 静态注册目录（FACTOR_SOURCE_DIRS）直接放行；
         - 未注册目录只要真实存在于该市场 6_ml_datasets/ 且命名合规即放行
           —— 未来新增因子数据集（如 xxx_factors）无需改代码；
-        - 排除清单（EXCLUDED_TRAIN_DATASETS）与非法命名给出明确拒绝原因。
+        - 硬拦清单（EXCLUDED_FROM_TRAINING，标签/泄漏库）与非法命名给出明确拒绝原因。
         """
         if source not in FACTOR_SOURCE_DIRS:
-            if source in EXCLUDED_TRAIN_DATASETS:
+            if source in EXCLUDED_FROM_TRAINING:
                 raise QuantDBFactorError(
                     f"Factor dataset {source!r} is excluded from direct training "
-                    "(see EXCLUDED_TRAIN_DATASETS in quantdb_factor_reader)"
+                    "(label/leakage dataset; see EXCLUDED_FROM_TRAINING in quantdb_factor_reader)"
                 )
             if not _IDENTIFIER.fullmatch(source):
                 raise QuantDBFactorError(f"Invalid factor dataset name: {source!r}")
@@ -300,7 +363,16 @@ class QuantDBFactorReader:
         # _stage 等暂存目录一并 glob，暂存文件 schema 与分区不一致会抛
         # "Hive partition mismatch"，导致整个因子源无法直读训练。
         parquet_glob = str(root / "dt=*" / "*.parquet").replace("'", "''")
-        return f"read_parquet('{parquet_glob}', hive_partitioning=true, union_by_name=true)"
+        # 2026-09-23 去掉 union_by_name（原为「分区 schema 漂移容错」）：跨库组合读
+        # （锚库 + 5 副库 ≈ 15,600 个分区文件）下，它会在绑定期打开**每一个文件**读
+        # footer 做 schema 归一，实测单次查询 16.85G / 17.5s，且**与日期区间无关**
+        # （单日 5,529 行与单月 116,335 行同为 16.6G——裁剪根本没省下这项）；去掉后
+        # 2.57G / 6.9s，输出按 (symbol, trade_date) 归一后**逐位一致**。
+        # 安全性：六库分区 schema 抽样 24 个/库，不一致 0；真出现漂移时 DuckDB 直接报
+        # "schema mismatch in glob"（响亮失败，不会静默少列）。反向理由见
+        # scripts/generate_feature_snapshots.py：union 出来的「老分区 NULL / 新分区
+        # 非 NULL」列正是年代指示器，一旦被选入模型就是静默泄露。
+        return f"read_parquet('{parquet_glob}', hive_partitioning=true)"
 
     def _daily_backward_relation(self) -> str | None:
         """返回后复权日线关系；数据未部署时保持因子表原有行为。
@@ -314,7 +386,9 @@ class QuantDBFactorReader:
         if not root.is_dir() or not any(root.glob("dt=*/*.parquet")):
             return None
         parquet_glob = str(root / "dt=*" / "*.parquet").replace("'", "''")
-        return f"read_parquet('{parquet_glob}', hive_partitioning=true, union_by_name=true)"
+        # union_by_name 同 _relation 去掉：全量 glob 下它按文件读 footer 归一 schema，
+        # 是每次查询的固定开销（与区间无关），且 union 会造年代指示器列。
+        return f"read_parquet('{parquet_glob}', hive_partitioning=true)"
 
     def _ohlcv_donor_relation(self) -> str | None:
         """返回同目录 l1_factors 关系，作为无 OHLCV 次要源（ccass/south）的行情补给。
@@ -326,7 +400,8 @@ class QuantDBFactorReader:
         if not root.is_dir() or not any(root.glob("dt=*/*.parquet")):
             return None
         parquet_glob = str(root / "dt=*" / "*.parquet").replace("'", "''")
-        return f"read_parquet('{parquet_glob}', hive_partitioning=true, union_by_name=true)"
+        # union_by_name 同 _relation 去掉（全量 glob 的固定绑定开销 + 年代指示器）
+        return f"read_parquet('{parquet_glob}', hive_partitioning=true)"
 
     @staticmethod
     def _relation_columns(relation: str) -> set[str]:
@@ -433,7 +508,7 @@ class QuantDBFactorReader:
 
         - market=None：扫描全部静态注册目录（跨市场工具场景）；
         - market 给定：静态注册目录 + 该市场 6_ml_datasets 下自动发现的新目录
-          （排除 EXCLUDED_TRAIN_DATASETS），未来新增因子数据集无需改代码。
+          （排除 EXCLUDED_FROM_DISCOVERY），未来新增因子数据集无需改代码。
         """
         if market is None:
             sources = list(FACTOR_SOURCE_DIRS)
@@ -452,7 +527,7 @@ class QuantDBFactorReader:
             name = child.name
             if not child.is_dir() or name.startswith("_") or not _IDENTIFIER.fullmatch(name):
                 continue
-            if name in FACTOR_SOURCE_DIRS or name in EXCLUDED_TRAIN_DATASETS or name in known:
+            if name in FACTOR_SOURCE_DIRS or name in EXCLUDED_FROM_DISCOVERY or name in known:
                 continue
             dynamic.append(name)
         return known + dynamic
@@ -531,19 +606,66 @@ class QuantDBFactorReader:
             raise QuantDBFactorError(
                 "Mapped factor names cannot overwrite key or OHLCV columns"
             )
-        if any(not _IDENTIFIER.fullmatch(feature) for feature in requested):
-            raise QuantDBFactorError("Mapped factor names must be SQL identifiers")
         feature_sources = feature_sources or {}
-        source_columns = {
-            feature: feature_sources.get(feature, feature) for feature in requested
-        }
+        # 逻辑名/输出列名 → (库, 原始列)。两种等价写法：
+        # ① features 里直接写限定名 "库:列"（输出列名取裸列名）；
+        # ② features 写裸名 + feature_sources[名] = "库:列"（输出列名 = 该裸名）。
+        # 值不写库名即锚库同名列 —— 旧载荷（恒等映射）逐字兼容。
+        resolved: list[tuple[str, str, str]] = []
+        extra_refs: dict[str, list[str]] = {}
+        seen_aliases: set[str] = set()
+        for feature in requested:
+            explicit_lib, explicit_column = split_qualified_source(feature)
+            if explicit_lib is not None:
+                lib, column, alias = explicit_lib, explicit_column, explicit_column
+            else:
+                lib, column = split_qualified_source(
+                    feature_sources.get(feature, feature)
+                )
+                alias = feature
+            lib = lib or source
+            if not _IDENTIFIER.fullmatch(alias):
+                raise QuantDBFactorError(
+                    f"Mapped factor names must be SQL identifiers: {alias!r}"
+                )
+            if not _IDENTIFIER.fullmatch(column):
+                raise QuantDBFactorError(f"Invalid QuantDB column name: {column!r}")
+            if alias in seen_aliases:
+                raise QuantDBFactorError(f"Duplicate factor alias: {alias!r}")
+            seen_aliases.add(alias)
+            resolved.append((alias, lib, column))
+            if lib != source:
+                extra_refs.setdefault(lib, []).append(column)
         missing = [
-            column for column in source_columns.values() if column not in available
+            column
+            for feature, lib, column in resolved
+            if lib == source and column not in available
         ]
         if missing:
             raise QuantDBFactorError(
                 f"{source} is missing mapped fields: {', '.join(missing[:10])}"
             )
+        # 副库（非锚库）按库校验：库名合法、分区存在、列存在。
+        extra_columns: dict[str, set[str]] = {}
+        for lib in sorted(extra_refs):
+            self.validate_source(lib)
+            if not self._files(lib):
+                raise QuantDBFactorError(
+                    f"Secondary factor dataset {lib!r} has no published partitions"
+                )
+            extra_columns[lib] = set(self.describe(lib).columns)
+        missing_extra = [
+            f"{lib}:{column}"
+            for lib in sorted(extra_refs)
+            for column in dict.fromkeys(extra_refs[lib])
+            if column not in extra_columns[lib]
+        ]
+        if missing_extra:
+            raise QuantDBFactorError(
+                "Secondary factor datasets are missing mapped fields: "
+                f"{', '.join(missing_extra[:10])}"
+            )
+        lib_alias = {lib: f"s{i}" for i, lib in enumerate(sorted(extra_refs))}
 
         factor_relation = self._relation(source)
         factor_date = self._qualified_date_expression(status.columns, "f")
@@ -560,7 +682,19 @@ class QuantDBFactorReader:
             else None
         )
         ohlcv_join = ohlcv_donor or daily_relation
+        # 行情列**名单**与下面的 SELECT 必须由同一分支产出（单一事实源）：名单一旦与
+        # SELECT 脱钩，预分配块里对应的列就永远不被写入，输出会带上 np.empty 的
+        # 未初始化内存（`include_ohlcv=False` 且补给表存在时就会这样）。
+        # 补给表存在时 6 列全出（源内没有的走 k 侧）；否则只出源内自有的——
+        # 此前只统计锚库自有行情列，会把补给列读出来又丢掉，HK ccass/south 直读时
+        # close 等列因此在返回帧里消失。
+        ohlcv_names: list[str] = []
         if include_ohlcv:
+            ohlcv_names = (
+                list(OHLCV_COLUMNS)
+                if ohlcv_join
+                else [c for c in OHLCV_COLUMNS if c in status.columns]
+            )
             for column in REQUIRED_COLUMNS[2:]:
                 if column in status.columns:
                     factor_column = f"f.{_quote(column)}"
@@ -579,11 +713,11 @@ class QuantDBFactorReader:
         # 429 因子 × 全历史长表在 float64 下 ≈ 42GB+，超出训练容器 48GB mem_limit
         # 会被 OOM(SIGKILL 137) 杀死（2026-08-29 实测 train_20260829065659_af1fcf16）。
         # 训练/推理/IC 计算全部接受 float32，精度损失可忽略；调用方无需再降精度。
+        factor_names = [feature for feature, _lib, _column in resolved]
         selected.extend(
-            f"CAST(f.{_quote(source_column)} AS FLOAT) AS {_quote(feature)}"
-            if source_column != feature
-            else f"CAST(f.{_quote(feature)} AS FLOAT) AS {_quote(feature)}"
-            for feature, source_column in source_columns.items()
+            f"CAST({'f' if lib == source else lib_alias[lib]}.{_quote(column)} AS FLOAT)"
+            f" AS {_quote(feature)}"
+            for feature, lib, column in resolved
         )
         start_s, end_s = str(start)[:10], str(end)[:10]
 
@@ -600,6 +734,22 @@ class QuantDBFactorReader:
                     " ON k.symbol = f.symbol"
                     f" AND CAST(k.dt AS VARCHAR) = strftime({date_expr}, '%Y%m%d')"
                 )
+            # 副库（跨库组合读）：同款 symbol+dt 左连接；行集仍由锚库决定，
+            # 副库缺该标的日子留空 → NaN，走既有缺失处理。
+            # 区间谓词必须挂在 ON 上而非 WHERE：WHERE 里引用右表列会把 LEFT JOIN
+            # 退化成 INNER JOIN，副库覆盖不到的标的日会整行丢失（2026-09-23 实测
+            # 182,312 vs 锚库 183,744）。
+            join_aliases: list[tuple[str, str]] = []
+            for lib, alias in lib_alias.items():
+                from_clause += (
+                    f" LEFT JOIN {self._relation(lib)} AS {alias}"
+                    f" ON {alias}.symbol = f.symbol"
+                    f" AND CAST({alias}.dt AS VARCHAR) = strftime({date_expr}, '%Y%m%d')"
+                    # 按月分块显式限定副库 dt 区间：仅靠连接条件里的 strftime，
+                    # 优化器无法把 f.date 的区间下推到副库扫描（每分块全量扫副库）。
+                    f" AND CAST({alias}.dt AS VARCHAR) BETWEEN ? AND ?"
+                )
+                join_aliases.append((lib, alias))
             base_sql = (
                 f"SELECT {', '.join(selected)} FROM {from_clause} "
                 f"WHERE {date_expr} BETWEEN CAST(? AS DATE) AND CAST(? AS DATE)"
@@ -610,23 +760,36 @@ class QuantDBFactorReader:
             # 均超出训练容器 48GB mem_limit 被 OOM(SIGKILL 137) 杀死。
             # 方案：先 count 总行数 → 预分配 float32 numpy → 按月查询、
             # 块内清洗后直接填入，零复制累积，峰值 ≈ 最终帧 + 单块。
+            # 组装段（2026-09-23 二次修复）：pandas 2.3 下 pd.concat(axis=1,
+            # copy=False) 仍要付「一份拷贝 + 一份瞬时」＝2 份整帧（2M×283 实测
+            # HWM +4.30G/2.11G 帧），全量 10.72M×283 即 ~24G，是读取段 44G 尖峰
+            # 的主因。改为「单块 2D 数组建帧 + insert 元数据列」：实测零拷贝。
+            # 行数以锚库为准（不含 LEFT JOIN）：连接不会增行（副库/补给表按
+            # symbol+dt 唯一），以锚库计数做预分配上界，块内去重后只会更少。
             count_sql = (
-                f"SELECT count(*) FROM {from_clause} "
+                f"SELECT count(*) FROM {factor_relation} AS f "
                 f"WHERE {date_expr} BETWEEN CAST(? AS DATE) AND CAST(? AS DATE)"
             )
             total_rows = int(con.execute(count_sql, [start_s, end_s]).fetchone()[0])
-            factor_names = list(source_columns.keys())
-            ohlcv_names = [c for c in OHLCV_COLUMNS if c in status.columns]
             sym_arr = np.empty(total_rows, dtype=object)
             date_arr = np.empty(total_rows, dtype="datetime64[ns]")
-            factor_arr = np.empty((total_rows, len(factor_names)), dtype=np.float32)
-            ohlcv_arr = np.empty((total_rows, len(ohlcv_names)), dtype=np.float32)
+            # 因子列与行情列放**同一块** float32 矩阵：单块建帧才是零拷贝，也避免
+            # 「273 因子 = 273 块碎片」那种布局（碎片会让后续取行先合并、内存翻倍）。
+            n_factor = len(factor_names)
+            block = np.empty((total_rows, n_factor + len(ohlcv_names)), dtype=np.float32)
             pos = 0
             date_list = self.available_dates(source, start=start_s, end=end_s)
             for month in sorted({d[:7] for d in date_list}):
                 month_days = [d for d in date_list if d.startswith(month)]
                 m_lo, m_hi = month_days[0], month_days[-1]  # 实际交易日边界
-                chunk = con.execute(base_sql, [m_lo, m_hi]).fetchdf()
+                # 占位符按 SQL 文本顺序绑定：FROM 里的副库区间在前，WHERE 日期在后
+                chunk_args: list[str] = []
+                if join_aliases:
+                    lo_compact, hi_compact = m_lo.replace("-", ""), m_hi.replace("-", "")
+                    for _lib, _alias in join_aliases:
+                        chunk_args += [lo_compact, hi_compact]
+                chunk_args += [m_lo, m_hi]
+                chunk = con.execute(base_sql, chunk_args).fetchdf()
                 chunk["trade_date"] = pd.to_datetime(chunk["trade_date"], errors="coerce")
                 chunk = chunk.dropna(subset=["symbol", "trade_date"]).drop_duplicates(
                     subset=["symbol", "trade_date"], keep="last"
@@ -640,28 +803,25 @@ class QuantDBFactorReader:
                 sym_arr[pos:pos + n] = chunk["symbol"].values
                 date_arr[pos:pos + n] = chunk["trade_date"].values
                 for i, name in enumerate(factor_names):
-                    factor_arr[pos:pos + n, i] = chunk[name].values
+                    block[pos:pos + n, i] = chunk[name].values
                 for i, name in enumerate(ohlcv_names):
-                    ohlcv_arr[pos:pos + n, i] = chunk[name].values
+                    # 不设 `if name in chunk.columns` 守卫：走到这里就说明 SELECT 与
+                    # 名单同源，列必在；守卫反而是「静默跳过 + 留下未初始化内存」。
+                    block[pos:pos + n, n_factor + i] = chunk[name].values
                 pos += n
-            # 组装成少数连续块：pandas 会把「逐列 1D 切片」各建一个块（273 因子=
+            # 组装成**单块**连续帧：pandas 会把「逐列 1D 切片」各建一个块（273 因子=
             # 273 块碎片），后续 sort/filter/groupby 每次都要先合并碎片，大表
             # （8.5M×279）直读时峰值内存翻倍、实测 OOM(SIGKILL 137)。2D 数组
             # 直接交给 DataFrame 则是单块，copy=False 让帧零复制共享预分配缓冲。
-            _pieces = [
-                pd.DataFrame(
-                    {
-                        "symbol": pd.Series(sym_arr[:pos], dtype=object),
-                        "trade_date": pd.Series(date_arr[:pos]),
-                    }
-                ),
-                pd.DataFrame(factor_arr[:pos], columns=factor_names, copy=False),
-            ]
-            if ohlcv_names:
-                _pieces.append(
-                    pd.DataFrame(ohlcv_arr[:pos], columns=ohlcv_names, copy=False)
-                )
-            frame = pd.concat(_pieces, axis=1, copy=False)
+            # 元数据两列走 insert（各建一块，只拷自身），**不 concat**——concat
+            # 在 pandas 2.3 下要额外付 2 份整帧的瞬时内存（见上方组装段注释）。
+            frame = pd.DataFrame(
+                block[:pos],
+                columns=[*factor_names, *ohlcv_names],
+                copy=False,
+            )
+            frame.insert(0, "symbol", pd.Series(sym_arr[:pos], dtype=object))
+            frame.insert(1, "trade_date", pd.Series(date_arr[:pos]))
         finally:
             con.close()
         return frame

@@ -375,6 +375,10 @@ def load_baseline_quantdb(
       mom_* 系统性偏负，2026-09-17 实测）。
     直读失败**显式抛出**（由调用方记 last_error），绝不静默回落 parquet 防混源。
     """
+    from backend.services.engine.data_platform.quantdb_factor_reader import (
+        split_features_by_availability,
+    )
+
     if reader is None:
         reader = _quantdb_reader_for_meta(meta)
     source = str(meta.get("factor_source") or "l1_l2_factors")
@@ -383,11 +387,17 @@ def load_baseline_quantdb(
         return {"rows": {}, "history": {}}
     latest = dates[-1]
 
-    available = set(reader.describe(source).columns)
     mapping = {
         str(k): str(v) for k, v in (meta.get("factor_field_sources") or {}).items()
     }
-    requested = [c for c in dict.fromkeys(cols) if mapping.get(c, c) in available]
+    # 跨库组合（库:列）逐库判可用：拿锚库列集过滤会把副库特征整体静默丢掉，
+    # 实时推理写出全 NaN 行而不报错。缺失特征交 fill 兜底（与 parquet 路径同纪律）。
+    requested, _missing = split_features_by_availability(
+        reader,
+        dict.fromkeys(cols),
+        mapping,
+        anchor=source,
+    )
     wanted = {digits(s) for s in symbols}
 
     rows: dict[str, dict[str, Any]] = {}

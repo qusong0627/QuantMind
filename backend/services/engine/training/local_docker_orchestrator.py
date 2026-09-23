@@ -19,7 +19,7 @@ import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any
 
 try:
     import docker
@@ -509,7 +509,10 @@ class LocalDockerOrchestrator(TrainingOrchestrator):
         _, market_mount_dir = _market_data_mount(market)
         if factor_source:
             try:
-                from backend.services.engine.data_platform.quantdb_factor_reader import QuantDBFactorReader
+                from backend.services.engine.data_platform.quantdb_factor_reader import (
+                    QuantDBFactorReader,
+                    split_features_by_availability,
+                )
 
                 source_start = payload.get("train_start") or "2023-01-11"
                 source_end = payload.get("test_end") or payload.get("valid_end") or payload.get("train_end") or ""
@@ -520,16 +523,14 @@ class LocalDockerOrchestrator(TrainingOrchestrator):
                     start=str(source_start) or None,
                     end=str(source_end) or None,
                 )
-                available = set(source_status.columns)
-                field_sources = dict(payload.get("factor_field_sources") or {})
-                valid_features = [
-                    feature for feature in requested_features
-                    if field_sources.get(feature, feature) in available
-                ]
-                missing_features = [
-                    feature for feature in requested_features
-                    if field_sources.get(feature, feature) not in available
-                ]
+                # 跨库组合：按 (库, 列) 逐库对照；副库限定特征（"库:列"）不能拿
+                # 锚库列名判定，否则会被整体误判缺失。
+                valid_features, missing_features = split_features_by_availability(
+                    QuantDBFactorReader(market=market),
+                    requested_features,
+                    payload.get("factor_field_sources") or {},
+                    anchor=factor_source,
+                )
             except Exception as exc:
                 raise RuntimeError(f"QuantDB factor source {factor_source} is not ready: {exc}") from exc
         else:
@@ -608,6 +609,7 @@ class LocalDockerOrchestrator(TrainingOrchestrator):
                     ),
                     factor_source=factor_source or None,
                     factor_catalog_version=str(payload.get("factor_catalog_version") or "") or None,
+                    factor_catalog_versions=dict(payload.get("factor_catalog_versions") or {}),
                     factor_schema_hash=source_status.schema_hash if factor_source else None,
                     factor_field_sources=dict(payload.get("factor_field_sources") or {}),
                     factor_catalog_published_at=str(payload.get("factor_catalog_published_at") or "") or None,

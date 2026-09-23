@@ -1205,6 +1205,7 @@ class RemoteSSHOrchestrator(TrainingOrchestrator):
                 "local_dir": "/tmp/feature_snapshots",
                 "factor_source": str(payload.get("factor_source") or "") or None,
                 "factor_catalog_version": str(payload.get("factor_catalog_version") or "") or None,
+                "factor_catalog_versions": dict(payload.get("factor_catalog_versions") or {}),
                 "factor_schema_hash": str(payload.get("factor_schema_hash") or "") or None,
                 "factor_field_sources": dict(payload.get("factor_field_sources") or {}),
                 "factor_catalog_published_at": str(payload.get("factor_catalog_published_at") or "") or None,

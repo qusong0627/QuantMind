@@ -6,7 +6,7 @@ import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 from docker import DockerClient
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException
@@ -19,7 +19,10 @@ from backend.services.api.user_app.middleware.auth import require_admin
 from backend.services.engine.training.orchestrator_base import get_orchestrator, REGISTRY
 from backend.services.engine.training.local_docker_orchestrator import LocalDockerOrchestrator
 from backend.services.engine.training.training_log_stream import TrainingRunLogStream
-from backend.services.engine.data_platform.quantdb_factor_reader import QuantDBFactorReader
+from backend.services.engine.data_platform.quantdb_factor_reader import (
+    QuantDBFactorReader,
+    split_qualified_source,
+)
 from backend.shared.database_manager_v2 import get_session
 from backend.shared.model_registry import model_registry_service
 from backend.shared.training.request import (
@@ -411,6 +414,7 @@ def _normalize_payload(payload: dict[str, Any], allowed_features: list[str]) -> 
     if payload.get("factor_source"):
         normalized["factor_source"] = str(payload["factor_source"])
         normalized["factor_catalog_version"] = str(payload.get("factor_catalog_version") or "")
+        normalized["factor_catalog_versions"] = dict(payload.get("factor_catalog_versions") or {})
         normalized["factor_field_sources"] = dict(payload.get("factor_field_sources") or {})
         normalized["factor_schema_hash"] = str(payload.get("factor_schema_hash") or "")
         normalized["factor_catalog_published_at"] = str(payload.get("factor_catalog_published_at") or "")
@@ -494,7 +498,17 @@ def _normalize_payload(payload: dict[str, Any], allowed_features: list[str]) -> 
 
 
 async def _resolve_quantdb_factor_payload(payload: dict[str, Any], market: str) -> tuple[dict[str, Any], list[str]]:
-    """Validate an immutable published mapping and pin logical fields to raw columns."""
+    """校验已发布目录并 pin 逻辑名到原始列（支持跨库组合：库=包，读时拼接）。
+
+    跨库写法（2026-09-23）：
+    - ``factor_catalog_versions: {"库": version_id}`` 声明参与的副库（可选值；
+      缺省时取该库当前 active 发布版本）；显式在 features 里写 ``"库:列"`` 的库
+      若未声明，也自动取 active 版本；
+    - ``features`` 可写裸名（按 锚库 → 声明序 依次解析，首个命中者胜）或
+      ``"库:列"``（显式限定，输出列名取裸列名）。
+    产出的 ``factor_field_sources`` 值对副库写 ``"库:列"``、锚库写裸列名，
+    与旧载荷（恒等映射）逐字兼容；读取端 QuantDBFactorReader 解析该语法。
+    """
     source = str(payload.get("factor_source") or "").strip()
     if not source:
         return payload, await _load_allowed_features(market=market)
@@ -510,31 +524,119 @@ async def _resolve_quantdb_factor_payload(payload: dict[str, Any], market: str) 
     except Exception as exc:
         raise HTTPException(status_code=422, detail=f"QuantDB factor source is not ready: {exc}") from exc
 
-    async with get_session() as session:
-        version = (await session.execute(text("""
-            SELECT version_id, published_at FROM qm_training_factor_catalog_version
-            WHERE version_id = :version_id AND status = 'published'
-              AND source_dataset = :source AND market = :market
-        """), {"version_id": version_id, "source": source, "market": market})).first()
-        if not version:
-            raise HTTPException(status_code=422, detail="factor_catalog_version is not the active published source version")
-        rows = (await session.execute(text("""
-            SELECT feature_key, source_column FROM qm_training_factor_mapping
-            WHERE version_id = :version_id AND source_dataset = :source AND enabled
-        """), {"version_id": version_id, "source": source})).mappings().all()
-    mapping = {str(row["feature_key"]): str(row["source_column"]) for row in rows}
     requested = [str(item).strip() for item in (payload.get("features") or []) if str(item).strip()]
-    invalid = [feature for feature in requested if feature not in mapping]
-    if invalid:
-        raise HTTPException(status_code=422, detail=f"Features are not enabled in pinned QuantDB catalog: {', '.join(invalid[:8])}")
     if not requested:
         raise HTTPException(status_code=422, detail="At least one enabled QuantDB factor must be selected")
+
+    declared = payload.get("factor_catalog_versions") or {}
+    if not isinstance(declared, dict):
+        raise HTTPException(status_code=422, detail="factor_catalog_versions must be an object of {dataset: version_id}")
+    dataset_versions: dict[str, str] = {source: version_id}
+    for lib_raw, vid_raw in declared.items():
+        lib, vid = str(lib_raw).strip(), str(vid_raw).strip()
+        if lib and lib != source:
+            dataset_versions[lib] = vid
+    # features 里显式限定的库若未声明版本，取该库 active 发布版本
+    for item in requested:
+        lib = split_qualified_source(item)[0]
+        if lib and lib != source:
+            dataset_versions.setdefault(lib, "")
+
+    async with get_session() as session:
+        per_lib: dict[str, dict[str, str]] = {}
+        resolved_versions: dict[str, str] = {}
+        published_at: dict[str, str] = {}
+        for lib, vid in dataset_versions.items():
+            if vid:
+                version = (await session.execute(text("""
+                    SELECT version_id, published_at FROM qm_training_factor_catalog_version
+                    WHERE version_id = :version_id AND status = 'published'
+                      AND source_dataset = :source AND market = :market
+                """), {"version_id": vid, "source": lib, "market": market})).mappings().first()
+                if not version:
+                    raise HTTPException(
+                        status_code=422,
+                        detail=f"factor_catalog_version for {lib} is not the active published source version",
+                    )
+            else:
+                version = (await session.execute(text("""
+                    SELECT version_id, published_at FROM qm_training_factor_catalog_version
+                    WHERE status = 'published' AND source_dataset = :source AND market = :market
+                    ORDER BY published_at DESC NULLS LAST LIMIT 1
+                """), {"source": lib, "market": market})).mappings().first()
+                if not version:
+                    raise HTTPException(
+                        status_code=422,
+                        detail=f"QuantDB 因子源 {lib} 没有已发布目录版本（先刷新字段并发布）",
+                    )
+            rows = (await session.execute(text("""
+                SELECT feature_key, source_column FROM qm_training_factor_mapping
+                WHERE version_id = :version_id AND source_dataset = :source AND enabled
+            """), {"version_id": version["version_id"], "source": lib})).mappings().all()
+            per_lib[lib] = {str(row["feature_key"]): str(row["source_column"]) for row in rows}
+            resolved_versions[lib] = str(version["version_id"])
+            published_at[lib] = str(version["published_at"] or "")
+
+    pinned_features: list[str] = []
+    pinned_sources: dict[str, str] = {}
+    used_versions: dict[str, str] = {}
+    seen: set[str] = set()
+    for item in requested:
+        explicit_lib, key = split_qualified_source(item)
+        key = key if explicit_lib else item
+        if explicit_lib:
+            if explicit_lib not in per_lib or key not in per_lib[explicit_lib]:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"Features are not enabled in pinned QuantDB catalog: {item}",
+                )
+            lib, column = explicit_lib, per_lib[explicit_lib][key]
+        else:
+            hit = next(
+                ((lib, mapping[key]) for lib, mapping in per_lib.items() if key in mapping),
+                None,
+            )
+            if hit is None:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"Features are not enabled in pinned QuantDB catalog: {key}",
+                )
+            lib, column = hit
+        resolved_ref = column if lib == source else f"{lib}:{column}"
+        if key in seen:
+            # 输出列名 = 逻辑名，重名必然撞列。同来源重复（载荷里同一特征写两遍）
+            # 静默去重；**来源不同则响亮报错**——否则用户显式点名的那个特征会被
+            # 悄悄丢掉，直到模型少了一列才被发现。
+            if pinned_sources[key] != resolved_ref:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f"Feature {key!r} is requested from two different sources: "
+                        f"{pinned_sources[key]!r} and {resolved_ref!r}"
+                    ),
+                )
+            continue
+        seen.add(key)
+        pinned_features.append(key)
+        pinned_sources[key] = resolved_ref
+        used_versions[lib] = resolved_versions[lib]
+
     pinned = dict(payload)
-    pinned["factor_field_sources"] = {feature: mapping[feature] for feature in requested}
+    pinned["features"] = pinned_features
+    pinned["factor_field_sources"] = pinned_sources
+    pinned["factor_catalog_versions"] = used_versions
     pinned["factor_schema_hash"] = status.schema_hash
-    pinned["factor_catalog_published_at"] = str(version.published_at or "")
-    pinned["factor_coverage"] = {"min_date": status.min_date, "max_date": status.max_date}
-    return pinned, list(mapping)
+    pinned["factor_catalog_published_at"] = published_at.get(source, "")
+    pinned["factor_coverage"] = {
+        "min_date": status.min_date,
+        "max_date": status.max_date,
+        "datasets": {
+            lib: {"version_id": vid, "published_at": published_at.get(lib, "")}
+            for lib, vid in used_versions.items()
+        },
+    }
+    allowed = [key for mapping in per_lib.values() for key in mapping]
+    return pinned, allowed
 
 
 def _normalize_artifacts(raw: Any) -> list[dict[str, str]]:

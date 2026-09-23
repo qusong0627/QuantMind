@@ -46,6 +46,7 @@ _SHARED_FIELDS: dict[str, Any] = {
     "wfa": (Any, None),
     "factor_source": (Any, None),
     "factor_catalog_version": (Any, None),
+    "factor_catalog_versions": (Any, None),
     "factor_field_sources": (Any, None),
     "factor_schema_hash": (Any, None),
     "factor_catalog_published_at": (Any, None),

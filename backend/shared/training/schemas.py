@@ -80,6 +80,8 @@ class DataCfg(BaseModel):
     factor_catalog_version: str | None = None
     factor_schema_hash: str | None = None
     factor_field_sources: dict = Field(default_factory=dict)
+    # 跨库组合（库=包）：参与的副库 → 各自目录版本；锚库仍在 factor_catalog_version
+    factor_catalog_versions: dict = Field(default_factory=dict)
     factor_catalog_published_at: str | None = None
     factor_coverage: dict = Field(default_factory=dict)
     quantdb_dir: str | None = None
