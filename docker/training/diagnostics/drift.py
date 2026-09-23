@@ -129,6 +129,42 @@ def _compute_rank_disp_all(
     return out
 
 
+def _sample_rows(
+    frame: pd.DataFrame,
+    mask,
+    columns: list[str],
+    n: int,
+    random_state: int = 42,
+) -> pd.DataFrame:
+    """在掩码选中的行里抽 n 行——等价于 `frame[mask][columns].dropna(how="all").sample(n, ...)`。
+
+    **为什么不用那一行**：`frame[mask]` → `[columns]`（283 列切片）→ `.dropna(how="all")`
+    是**三份整帧级临时量**。train 窗覆盖全区间时每份 ≈ 一整个全帧，投影峰值
+    12.5(df) + 12.2 + 12.1 + 12.1 ≈ **48.9G**——2026-09-23 实测 VmHWM 48.61G、
+    宿主可用一度只剩 3.71G（内核 global_oom 门槛），就是它。
+
+    等价性依据（2026-09-23 在**训练镜像 pandas 2.3.3** 上实测）：
+
+    - `dropna(how="all")` 的判定 ⟺ 逐列 `pd.isna` 取与。逐列累加只驻留一列的
+      中间量（8.4M 行时约 34MB），不复制整块切片；
+    - `sample(n, random_state=42)` 的**抽取只取决于 (行数, n, 种子)**，与列内容无关，
+      顺序也一致 → 在**同长度的零列薄帧**上抽样即可复现同一批位置；
+    - 行数不足时 pandas 抛的 `ValueError` 照旧（薄帧与候选集等长）。
+
+    注意薄帧方案依赖上面第二条这个实现细节；换 pandas 大版本需重跑该实测。
+    """
+    pos = np.flatnonzero(np.asarray(mask))
+    all_nan = np.ones(len(pos), dtype=bool)
+    for col in columns:
+        # 不强制 dtype：特征列里可能有非浮点（如 ind_code_l1/l2），
+        # `to_numpy(dtype=float32)` 会在对象列上直接抛错，而 pandas 的 dropna 不会。
+        all_nan &= pd.isna(frame[col].to_numpy()[pos])
+    keep_pos = pos[~all_nan]
+    thin = pd.DataFrame(index=pd.RangeIndex(len(keep_pos)))
+    sel = thin.sample(n, random_state=random_state).index.to_numpy()
+    return frame.take(keep_pos[sel])[columns]
+
+
 def compute_psi_drift(
     df: pd.DataFrame,
     features: list[str],
@@ -176,14 +212,17 @@ def compute_psi_drift(
         return {"enabled": False, "reason": "no data"}
 
     train_mask = (df["trade_date"] >= pd.Timestamp(train_start)) & (df["trade_date"] <= pd.Timestamp(train_end))
-    train_df = df[train_mask]
+    # 不物化 `df[train_mask]`：这份整帧拷贝只服务于「空判 + 抽样」两件事，
+    # 而抽样改走 `_sample_rows`（见其 docstring），空判用行数即可。
+    n_train_rows = int(train_mask.sum())
     # 最近 n 个交易日
     all_dates = sorted(df["trade_date"].unique())
     recent_dates = all_dates[-n_recent_days:]
     if not recent_dates:
         return {"enabled": False, "reason": "no recent dates"}
-    recent_df = df[df["trade_date"].isin(recent_dates)]
-    if train_df.empty or recent_df.empty:
+    recent_mask = df["trade_date"].isin(recent_dates)
+    recent_df = df[recent_mask]
+    if not n_train_rows or recent_df.empty:
         return {"enabled": False, "reason": "empty train or recent frame"}
 
     # rank_disp 基准窗：与 recent 等长、紧邻其前的交易日窗口。
@@ -206,8 +245,8 @@ def compute_psi_drift(
     # 只取可用特征
     usable = [f for f in features if f in df.columns]
     # 采样控制计算量：每边最多 5 万行
-    train_sample = train_df[usable].dropna(how="all").sample(min(50000, len(train_df)), random_state=42)
-    recent_sample = recent_df[usable].dropna(how="all").sample(min(50000, len(recent_df)), random_state=42)
+    train_sample = _sample_rows(df, train_mask, usable, min(50000, n_train_rows), random_state=42)
+    recent_sample = _sample_rows(df, recent_mask, usable, min(50000, len(recent_df)), random_state=42)
     if train_sample.empty or recent_sample.empty:
         return {"enabled": False, "reason": "empty sample"}
 

@@ -29,8 +29,12 @@ MIN_COVER_RATIO = 0.01
 MIN_COVER_ROWS = 20
 
 _WINSOR_QUANTILES = (0.01, 0.99)
-# 每次处理的交易日数（内存与向量化效率的平衡；单块 ≈ chunk×股票数 行）
-_CHUNK_DATES = 100
+# 每次处理的交易日数（内存与向量化效率的平衡；单块 ≈ chunk×股票数 行）。
+# 2026-09-23 由 100 降到 30：截面统计量逐日独立，块大小**只影响内存不影响口径**
+# （逐位相同）。实测 2M 行 × 283 列下，预处理峰值从 11.97G（=帧外多 4.2 份）
+# 降到 6.66G（与建帧峰值齐平，即不再是瓶颈），耗时 69.1s → 76.8s（+11%）。
+# 100 天/块在 10.72M 行 × 283 列的真实训练里是 OOM 前的最后一段。
+_CHUNK_DATES = 30
 
 
 def binarize_labels(y: np.ndarray | pd.Series, threshold: float = 0.0) -> np.ndarray:

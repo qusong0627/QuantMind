@@ -13,6 +13,7 @@ import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 
+from data.memprobe import log_rss, rss_stage
 from data.splits import _EXECUTION_LAG_DAYS
 
 logger = logging.getLogger("quantmind.train")
@@ -165,13 +166,14 @@ def load_data(
             range_start.date(),
             range_end.date(),
         )
-        df = reader.read_range(
-            direct_factor_source,
-            features=features,
-            feature_sources=factor_field_sources,
-            start=range_start.date(),
-            end=range_end.date(),
-        )
+        with rss_stage("读全量因子", f"{len(features)} 特征"):
+            df = reader.read_range(
+                direct_factor_source,
+                features=features,
+                feature_sources=factor_field_sources,
+                start=range_start.date(),
+                end=range_end.date(),
+            )
         logger.info(
             "Direct QuantDB factor source %s: %d rows, %s to %s",
             direct_factor_source,
@@ -179,6 +181,7 @@ def load_data(
             df["trade_date"].min() if not df.empty else "N/A",
             df["trade_date"].max() if not df.empty else "N/A",
         )
+        log_rss("读出帧", f"{len(df):,} 行 × {len(df.columns)} 列")
         # 池尽早过滤（P3）：直读返回全市场（1053 万行），114 列 float64 在
         # 后续复制展开期峰值会触发容器 mem_limit（Exit 137）；池内成分先过滤，
         # 后续 downcast/漂移/标签全量受益。直读 symbol 为前缀式。
@@ -203,6 +206,7 @@ def load_data(
                     "股票池过滤后无数据：池内标的在训练区间/数据源内无记录"
                     "（请检查池成分与训练时间窗是否匹配）"
                 )
+            log_rss("池过滤后", f"{len(df):,} 行（过滤前 {_before_early:,}）")
         # 与 core parquet 分支一致：数值列统一降为 float32，降低内存峰值。
         # 直读 reader 已在 DuckDB 侧 CAST AS FLOAT，多数列本来就是 float32 —— 此时
         # **必须整段跳过**：逐列 `df[col] = astype(...)` 会把连续块重新拆成数百个

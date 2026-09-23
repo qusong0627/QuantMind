@@ -10,9 +10,45 @@ import logging
 import numpy as np
 import pandas as pd
 
+from data.memprobe import log_rss, peak_gb, reset_peak, rss_gb
+
 logger = logging.getLogger("quantmind.train")
 
 _EXECUTION_LAG_DAYS = 1
+
+
+def _take_rows(frame: pd.DataFrame, mask, name: str) -> pd.DataFrame:
+    """按布尔掩码取行，**只付一份整段拷贝**，索引归零且与源帧脱钩。
+
+    实测（2026-09-23，320k×291 缩比帧 + `clear_refs` 逐步骤清零高水位）：
+
+    | 写法 | 该步峰值增量 |
+    |---|---|
+    | `frame[mask].reset_index(drop=True)` | **2.01 份段** |
+    | `frame.take(pos)` + 就地赋 index | **1.01 份段** |
+    | `frame[mask]`（单看掩码选帧） | 0.99 份段 |
+
+    多出来的那份来自 pandas 2.3（无 CoW）下 `reset_index` 内部的
+    `self.copy(deep=None)` —— 调用期间新旧两份**同时驻留**。两种写法输出逐位一致
+    （值/dtype/列序/索引全等，均为 RangeIndex，`_is_copy` 均为 None，原地写不回灌
+    源帧）。10.72M 行 × 287 列时一份段 ≈ 9.65G。
+
+    `take` 取的是**位置**，与源帧索引是否为 RangeIndex 无关；掩码按位置
+    `np.flatnonzero` 转成位置数组，与 `frame[mask]` 的取值口径相同。
+    """
+    pos = np.flatnonzero(np.asarray(mask))
+    rss_before = rss_gb()
+    reset_peak()
+    seg = frame.take(pos)
+    rss_after_take, step_peak = rss_gb(), peak_gb()
+    seg.index = pd.RangeIndex(len(seg))
+    logger.info(
+        "[mem] 取段 %s: %d 行 × %d 列  rss %.1f→%.1fG（take 自耗 %.2fG）"
+        "该步峰值增量 %.2fG",
+        name, len(seg), seg.shape[1], rss_before, rss_after_take,
+        rss_after_take - rss_before, step_peak - rss_before,
+    )
+    return seg
 
 
 def _split_data(df: pd.DataFrame, cfg: dict) -> tuple:
@@ -20,12 +56,52 @@ def _split_data(df: pd.DataFrame, cfg: dict) -> tuple:
 
     时间序列切分必须保证 train < val < test，严禁 test=val（经典数据泄漏）。
     """
+    # 切分**入口**的基线 RSS 是归因的分水岭：切分自己只该付「全帧 + 每段份数」。
+    # 若入口就已经很高（上游 PSI 的整帧临时量没还给 OS），切分段报出来的高水位
+    # 是继承来的，不是切分烧的——2026-09-23 那轮就差点把它记到切分头上。
+    log_rss("切分开始", f"{len(df):,} 行 × {len(df.columns)} 列")
     model_cfg = cfg.get("model", {})
 
     def _frame_range_text(frame: pd.DataFrame) -> str:
         if frame.empty:
             return "EMPTY"
         return f"{frame['trade_date'].min().date()}~{frame['trade_date'].max().date()}"
+
+    # ── Embargo：标签是未来 horizon 日收益，train 末尾样本的标签落在 val 区间内 ──
+    # 不隔离会让 val/test 的价格信息经标签渗回 train。裁掉每段尾部 horizon 个交易日。
+    _horizon = max(1, int((cfg.get("label", {}) or {}).get("target_horizon_days") or 1))
+    _embargo_days = _horizon + _EXECUTION_LAG_DAYS
+
+    def _take_segment(mask: pd.Series, name: str, embargo: bool = True) -> pd.DataFrame:
+        """按掩码从源帧切一段，返回索引归零的独立帧。
+
+        两处内存约定（10.72M 行 × 291 列的全窗口帧 ≈ 12.1G，每多一份整段拷贝 ≈ 9.65G）：
+
+        1. embargo 折进**源帧掩码**，而不是切完再对那一段切一刀——后者要多付两份
+           整段拷贝（临时 + 结果）。2026-09-23 的 283 特征训练正是死在 train 的这一
+           刀上（切分段 HWM 47.4G，宿主全局 OOM）。
+        2. 取行走 `_take_rows`（`take` + 就地赋 index）而不是
+           `df[mask].reset_index(drop=True)`：后者要多付一份整段拷贝（实测 2.01 份段
+           vs 1.01 份段，见 `_take_rows`）。裁剪量由该段自身的交易日历决定。
+        """
+        n_before = int(mask.sum())
+        # 空段不裁也不告警（旧实现空帧直接返回），由调用方的空段校验统一报错
+        if embargo and _embargo_days > 0 and n_before:
+            days = np.sort(df.loc[mask, "trade_date"].unique())
+            if len(days) <= _embargo_days:
+                logger.warning(
+                    "Embargo skipped for %s: only %d trading days <= label span %d",
+                    name, len(days), _embargo_days,
+                )
+            else:
+                mask = mask & (df["trade_date"] < days[-_embargo_days])
+        seg = _take_rows(df, mask, name)
+        if len(seg) != n_before:
+            logger.info(
+                "Embargo %s: dropped last %d trading days (%d -> %d rows)",
+                name, _embargo_days, n_before, len(seg),
+            )
+        return seg
 
     split_cfg = cfg.get("split", {})
     if split_cfg.get("valid"):
@@ -41,14 +117,16 @@ def _split_data(df: pd.DataFrame, cfg: dict) -> tuple:
                 f"split.valid start ({valid_start_str}); overlapping segments "
                 "leak validation data into training."
             )
-        train_df = df[
+        train_df = _take_segment(
             (df["trade_date"] >= pd.Timestamp(train_start_str)) &
-            (df["trade_date"] <= pd.Timestamp(train_end_str))
-        ].copy()
-        val_df   = df[
+            (df["trade_date"] <= pd.Timestamp(train_end_str)),
+            "train",
+        )
+        val_df = _take_segment(
             (df["trade_date"] >= pd.Timestamp(valid_start_str)) &
-            (df["trade_date"] <= pd.Timestamp(valid_end_str))
-        ].copy()
+            (df["trade_date"] <= pd.Timestamp(valid_end_str)),
+            "val",
+        )
         if split_cfg.get("test"):
             test_start_str, test_end_str = split_cfg["test"]
             if pd.Timestamp(test_start_str) <= pd.Timestamp(valid_end_str):
@@ -58,10 +136,12 @@ def _split_data(df: pd.DataFrame, cfg: dict) -> tuple:
                     "make early stopping and final evaluation share data."
                 )
             requested_test = f"{test_start_str}~{test_end_str}"
-            test_df = df[
+            test_df = _take_segment(
                 (df["trade_date"] >= pd.Timestamp(test_start_str)) &
-                (df["trade_date"] <= pd.Timestamp(test_end_str))
-            ].copy()
+                (df["trade_date"] <= pd.Timestamp(test_end_str)),
+                "test",
+                embargo=False,
+            )
         else:
             raise RuntimeError(
                 "split.test is required when split.valid is configured. "
@@ -86,9 +166,11 @@ def _split_data(df: pd.DataFrame, cfg: dict) -> tuple:
         test_start_idx = int(len(dates) * (1 - test_ratio))
         val_start = dates[val_start_idx]
         test_start = dates[test_start_idx]
-        train_df = df[df["trade_date"] < val_start].copy()
-        val_df   = df[(df["trade_date"] >= val_start) & (df["trade_date"] < test_start)].copy()
-        test_df  = df[df["trade_date"] >= test_start].copy()
+        train_df = _take_segment(df["trade_date"] < val_start, "train")
+        val_df = _take_segment(
+            (df["trade_date"] >= val_start) & (df["trade_date"] < test_start), "val"
+        )
+        test_df = _take_segment(df["trade_date"] >= test_start, "test", embargo=False)
         train_start = pd.Timestamp(df["trade_date"].min()).date()
         train_end = (pd.Timestamp(val_start) - pd.Timedelta(days=1)).date()
         requested_train = f"{train_start}~{train_end}"
@@ -100,35 +182,11 @@ def _split_data(df: pd.DataFrame, cfg: dict) -> tuple:
             f"  test[{len(test_df)}] {pd.Timestamp(test_start).date()}~"
         )
 
-    # ── Embargo：标签是未来 horizon 日收益，train 末尾样本的标签落在 val 区间内 ──
-    # 不隔离会让 val/test 的价格信息经标签渗回 train。裁掉每段尾部 horizon 个交易日。
-    _horizon = max(1, int((cfg.get("label", {}) or {}).get("target_horizon_days") or 1))
-    _embargo_days = _horizon + _EXECUTION_LAG_DAYS
-    if _embargo_days > 0:
-        def _embargo(frame: pd.DataFrame, name: str) -> pd.DataFrame:
-            if frame.empty:
-                return frame
-            days = sorted(frame["trade_date"].unique())
-            if len(days) <= _embargo_days:
-                logger.warning(
-                    "Embargo skipped for %s: only %d trading days <= label span %d",
-                    name, len(days), _embargo_days,
-                )
-                return frame
-            cutoff = days[-_embargo_days]
-            trimmed = frame[frame["trade_date"] < cutoff].copy()
-            logger.info(
-                "Embargo %s: dropped last %d trading days (%d -> %d rows)",
-                name, _embargo_days, len(frame), len(trimmed),
-            )
-            return trimmed
-
-        train_df = _embargo(train_df, "train")
-        val_df = _embargo(val_df, "val")
-
-    train_df = train_df.reset_index(drop=True)
-    val_df = val_df.reset_index(drop=True)
-    test_df = test_df.reset_index(drop=True)
+    log_rss(
+        "切分完成",
+        f"train {len(train_df):,} / val {len(val_df):,} / test {len(test_df):,} 行"
+        f"，{len(df.columns)} 列（全帧仍驻留 {len(df):,} 行）",
+    )
     if train_df.empty or val_df.empty or test_df.empty:
         available_range = "EMPTY"
         if not df.empty:
@@ -208,9 +266,11 @@ def _prepare_arrays(
             return out
 
         train_df = _apply_prep(train_df)
+        log_rss("截面预处理 train")
         val_df = _apply_prep(val_df)
         for _extra in extra_frames or []:
             _apply_prep(_extra)
+            log_rss("截面预处理 extra", f"{len(_extra):,} 行 × {len(_extra.columns)} 列")
         logger.info(
             "Cross-sectional preprocessing enabled: %d features "
             "(exclude %s, fill=%s, standardize=%s, winsor=%s%s)",
@@ -242,6 +302,8 @@ def _prepare_arrays(
 
     X_train = _fill(train_df)
     y_train = train_df["label"].astype("float32").to_numpy()
+    log_rss("X_train 物化", f"{X_train.shape[0]:,} × {X_train.shape[1]}")
     X_val = _fill(val_df)
     y_val = val_df["label"].astype("float32").to_numpy()
+    log_rss("X_val 物化", f"{X_val.shape[0]:,} × {X_val.shape[1]}")
     return fill_values, X_train, y_train, X_val, y_val, _fill

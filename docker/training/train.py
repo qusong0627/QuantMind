@@ -142,6 +142,7 @@ from diagnostics.utils import _sanitize_nan_inf, detect_hardware
 from diagnostics.wfa import train_wfa
 from data.factor_selection import _log_factor_selection_summary, select_top_factors
 from data.loading import load_data
+from data.memprobe import log_rss, peak_gb, reset_peak, rss_gb
 from data.splits import _EXECUTION_LAG_DAYS, _prepare_arrays, _split_data
 from model_trainers.predict import _predict_with_model
 
@@ -1290,6 +1291,12 @@ def main() -> int:
         if drift_cfg.get("enabled") is False:
             psi_result = {"enabled": False, "reason": "disabled by config"}
         else:
+            # PSI 内部要造 3~4 份**整帧级**临时量（`df[train_mask]` → `train_df[usable]`
+            # → `.dropna(how="all")`）；train 窗覆盖全区间时每份 ≈ 一整个全帧。
+            # 先清零高水位，把 PSI 自己的峰值与切分段的峰值分开归因：VmHWM 进程内
+            # 单调，不分开就会像 2026-09-23 那轮一样把上游的高水位记到切分头上。
+            reset_peak()
+            _psi_rss0 = rss_gb()
             psi_result = compute_psi_drift(
                 df,
                 valid_features,
@@ -1297,6 +1304,12 @@ def main() -> int:
                 cfg["data"]["train_end"],
                 n_recent_days=int(drift_cfg.get("n_recent_days", 30)),
             )
+            log_rss("PSI 完成", f"该步峰值增量 {peak_gb() - _psi_rss0:.2f}G")
+            # PSI 造的整帧临时量（每份 ≈ 全帧）释放后默认滞留在 glibc 空闲链里：
+            # 不 trim，切分就会在这块未归还的堆上**再叠**一份，把峰值推成
+            # PSI 峰值 + 切分峰值。2026-09-23 实测 cgroup 冲到 47.06G、宿主可用
+            # 只剩 3.71G，切分段报出的 `peak=48.6G` 其实多半继承自这里。
+            _trim_memory("after PSI")
         if psi_result.get("enabled"):
             logger.info(
                 "Data drift (PSI): overall=%s max_rank_disp=%.4f stable=%d medium=%d severe=%d",
@@ -1495,6 +1508,7 @@ def main() -> int:
                 "data_source": "quantdb_factors" if factor_source else "parquet",
                 "factor_source": factor_source or None,
                 "factor_catalog_version": str((cfg.get("data", {}) or {}).get("factor_catalog_version") or "") or None,
+                "factor_catalog_versions": (cfg.get("data", {}) or {}).get("factor_catalog_versions") or {},
                 "factor_schema_hash": str((cfg.get("data", {}) or {}).get("factor_schema_hash") or "") or None,
                 "quantdb_dir": str((cfg.get("data", {}) or {}).get("quantdb_dir") or "") or None,
                 # 全局股票池（P3/P4）：记录池版本以便复现 + 供引用回填
@@ -1735,6 +1749,7 @@ def main() -> int:
                 "data_source": "quantdb_factors" if factor_source else "parquet",
                 "factor_source": factor_source or None,
                 "factor_catalog_version": str((cfg.get("data", {}) or {}).get("factor_catalog_version") or "") or None,
+                "factor_catalog_versions": (cfg.get("data", {}) or {}).get("factor_catalog_versions") or {},
                 "factor_schema_hash": str((cfg.get("data", {}) or {}).get("factor_schema_hash") or "") or None,
                 "quantdb_dir": str((cfg.get("data", {}) or {}).get("quantdb_dir") or "") or None,
                 # 全局股票池（P3/P4）：记录池版本以便复现 + 供引用回填
