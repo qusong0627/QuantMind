@@ -43,7 +43,9 @@ def api(method, path, token=None, body=None, params=None, timeout=120):
 
 def login():
     d = api("POST", "/auth/login", body={
-        "username": "admin", "password": "admin123", "tenant_id": "default"})
+        "username": os.getenv("QM_USER", "admin"),
+        "password": os.getenv("QM_PASSWORD", ""),  # 口令不入库，从 .env 读
+        "tenant_id": "default"})
     return d["access_token"]
 
 

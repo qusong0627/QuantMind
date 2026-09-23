@@ -1056,7 +1056,7 @@ class TdxBroker(BaseBroker):
     下单成功返回 Wtbh 作为 exchange_order_id，成交回报由用户确认后由桥回写。
 
     配置:
-      TDX_BRIDGE_URL  - 桥地址, 如 http://192.168.31.31:8550
+      TDX_BRIDGE_URL  - 桥地址, 如 http://192.0.2.31:8550（示例；真值走环境变量）
       TDX_BRIDGE_TOKEN - 桥鉴权 token (与 Linux 侧 BRIDGE_AUTH_TOKEN 一致)
       TDX_ACCOUNT     - 通达信资金账号 (可选, 为空则用默认账号 account_id=0)
       TDX_ACCOUNT_TYPE - 账号类型, 默认 "stock"

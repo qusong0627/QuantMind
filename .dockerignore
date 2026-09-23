@@ -61,6 +61,13 @@ htmlcov/
 .coverage
 coverage.xml
 
+# 凭据与运行期本地配置（2026-09-23）：`.gitignore` 只管 git，**docker 不看它**。
+# `COPY backend backend` / `COPY config config` 会把这些原样烘进镜像——
+# 账户口令密文与运行时内网地址就是这么进的 `quantmind-oss:latest`。
+backend/config/users/
+config/runtime.env
+
+
 # Build Artifacts
 build/
 dist/

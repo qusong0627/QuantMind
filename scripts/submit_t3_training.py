@@ -4,6 +4,7 @@
 本任务: 同样时间，target_horizon_days=3。
 """
 import asyncio
+import os
 from backend.shared.database_manager_v2 import get_session
 from sqlalchemy import text
 
@@ -23,7 +24,6 @@ async def get_t5_features():
 
 
 async def main():
-    import os
     payload = await get_t5_features()
     if not payload:
         print("找不到 T+5 训练请求，从 metadata 构造")
@@ -48,7 +48,7 @@ async def main():
     # 提交到 run-training
     import httpx
     async with httpx.AsyncClient(base_url="http://localhost:8000/api/v1", timeout=60) as c:
-        login = await c.post("/auth/login", json={"username": "admin", "password": "admin123", "tenant_id": "default"})
+        login = await c.post("/auth/login", json={"username": "admin", "password": os.getenv("QM_PASSWORD", ""), "tenant_id": "default"})
         tok = login.json().get("access_token") or login.json().get("data", {}).get("access_token", "")
         r = await c.post("/models/run-training", json=t3, headers={"Authorization": f"Bearer {tok}"})
         print("提交结果:", r.status_code, str(r.text)[:300])

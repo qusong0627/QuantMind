@@ -57,7 +57,7 @@ description: "个股深度投研分析（智能体自主版）— 拉取 QuantMi
 ```bash
 BASE=http://127.0.0.1:8000
 TOKEN=$(curl -s -X POST $BASE/api/v1/auth/login -H "Content-Type: application/json" \
-  -d '{"username":"admin","password":"admin123","tenant_id":"default"}' \
+  -d '{"username":"admin","password":"<管理员口令>","tenant_id":"default"}' \
   | python3 -c "import sys,json; print(json.load(sys.stdin).get('access_token',''))")
 AUTH="Authorization: Bearer $TOKEN"
 CT="Content-Type: application/json"

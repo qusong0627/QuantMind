@@ -4,6 +4,7 @@
 """
 
 import logging
+import os
 import time
 from typing import Any, Dict, List, Optional
 import pandas as pd
@@ -150,7 +151,7 @@ class EastMoneyProvider:
         params = {
             "input": keyword,
             "type": "14",
-            "token": "D43BF722C8E33BDC906FB84D85E326E8",
+            "token": os.getenv("EASTMONEY_SEARCH_TOKEN", ""),
             "count": limit,
         }
 

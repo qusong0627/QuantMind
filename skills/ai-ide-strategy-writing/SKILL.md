@@ -29,7 +29,7 @@ AI-IDE 用 AI 生成 Qlib 量化策略代码，并在 **Docker 容器**中隔离
 ```bash
 BASE=http://127.0.0.1:8000
 TOKEN=$(curl -s -X POST $BASE/api/v1/auth/login -H "Content-Type: application/json" \
-  -d '{"username":"admin","password":"admin123","tenant_id":"default"}' \
+  -d '{"username":"admin","password":"<管理员口令>","tenant_id":"default"}' \
   | python3 -c "import sys,json; print(json.load(sys.stdin).get('access_token',''))")
 AUTH="Authorization: Bearer $TOKEN"
 CT="Content-Type: application/json"

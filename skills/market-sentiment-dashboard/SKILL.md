@@ -5,7 +5,7 @@ description: "市场情绪温度报告 — 一键输出 A股情绪仪表盘：�
 
 > ## ⚙️ 运行环境契约（最高优先级，先于本文其余内容执行）
 >
-> 1. **执行位置**：本技能脚本在**宿主机或 dsh host 网络**直接跑（需直连通达信桥 192.168.31.13:8550 + 本地 quantdb 数据目录）；quantdb 目录探测优先级
+> 1. **执行位置**：本技能脚本在**宿主机或 dsh host 网络**直接跑（需直连通达信桥 192.0.2.13:8550 + 本地 quantdb 数据目录）；quantdb 目录探测优先级
 >    `/home/zbox/projects/quantmind/data/quantdb` → `/quantmind/data/quantdb` → `/data/quantdb`。
 > 2. **收盘后/盘前**：以 quantdb 昨日全景为准，并明确标注"非今日实时"。
 > 3. **盘中**：不要使用 quantdb EOD 温度冒充实时；实时温度只用桥快照信号

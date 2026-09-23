@@ -78,7 +78,7 @@ cd 仓库根 && backend 依赖环境下 python -c \
 
 ## 分发
 
-- SMB 共享(本机):`\\192.168.31.68\quantmind` → deploy/portable(dist 内含产物),`quantmind-repo` → 仓库根;凭据向用户确认,勿写入脚本/文档
+- SMB 共享(本机):`\\192.0.2.68\quantmind` → deploy/portable(dist 内含产物),`quantmind-repo` → 仓库根;凭据向用户确认,勿写入脚本/文档
 - GPU 要求:RTX 20 系+(sm_75+)、驱动 ≥525;Win cu128 torch 自包含(库在 torch/lib 内);Linux 增补包从本地 `quantmind-oss-gpu:latest` 镜像提取
 - 版本检查:`electron/package.json` version;便携包含 `VERSION` 文件
 

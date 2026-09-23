@@ -156,7 +156,7 @@ docker info >/dev/null 2>&1 && echo "docker OK" || echo "docker 未安装（部�
 
 | 部署时问什么              | 示例答案                          | 说明                                |
 | ------------------- | ----------------------------- | --------------------------------- |
-| 服务器 IP              | `192.168.1.100` / `localhost` | 无公网 IP 用 localhost 或局域网 IP        |
+| 服务器 IP              | `192.0.2.100` / `localhost` | 无公网 IP 用 localhost 或局域网 IP        |
 | 选择镜像源               | 国内选阿里云/中科大                    | 网络差时自动选，也可 `QUANTMIND_MIRROR=` 指定 |
 | 是否确认部署              | `y`                           | 确认后开始安装                           |
 | （可选）QuantDB API Key | `qdb_xxx`                     | **部署后**在后台填，见 \[\[quantdb-sdk]]   |
@@ -196,8 +196,8 @@ QUANTMIND_DEPLOY_SHA256=<sha256> QUANTMIND_DEPLOY_TAG=v1.9.0-beta sudo bash quic
 sudo bash deploy/quick-deploy.sh
 # 指定服务器 IP（公网/局域网/localhost 自动检测）
 sudo bash deploy/deploy.sh localhost
-sudo bash deploy/deploy.sh 192.168.1.100
-QUANTMIND_SERVER_IP=192.168.1.100 sudo bash deploy/deploy.sh
+sudo bash deploy/deploy.sh 192.0.2.100
+QUANTMIND_SERVER_IP=192.0.2.100 sudo bash deploy/deploy.sh
 ```
 
 ## 4. 手动部署
@@ -259,7 +259,7 @@ curl -s http://localhost:8000/api/v1/health
 ```bash
 curl -s -X POST http://localhost:8000/api/v1/auth/login \
   -H "Content-Type: application/json" \
-  -d '{"username":"admin","password":"admin123","tenant_id":"default"}'
+  -d '{"username":"admin","password":"<管理员口令>","tenant_id":"default"}'
 # 期望返回 access_token；若 401/500 → users 表问题（见排查）
 ```
 
@@ -322,7 +322,7 @@ curl -s http://localhost:8000/api/v1/system/version
 # 登录（数据库补丁执行无碍）
 curl -s -X POST http://localhost:8000/api/v1/auth/login \
   -H "Content-Type: application/json" \
-  -d '{"username":"admin","password":"admin123","tenant_id":"default"}'
+  -d '{"username":"admin","password":"<管理员口令>","tenant_id":"default"}'
 ```
 
 ## 8. 云端 GPU 训练（AutoDL）
@@ -511,7 +511,7 @@ SPA 子路径代理必须做对四件事，缺一即部分功能失灵（实战�
 ```bash
 for p in 8000 8001 8002 8003; do curl -s http://127.0.0.1:$p/health; done   # 四服务 healthy
 time curl -s -X POST http://127.0.0.1:8000/api/v1/auth/login -H 'Content-Type: application/json' \
-  -d '{"username":"admin","password":"admin123","tenant_id":"default"}'      # 返回 access_token 且 <1s
+  -d '{"username":"admin","password":"<管理员口令>","tenant_id":"default"}'      # 返回 access_token 且 <1s
 #   若 >20s 必是 /.dockerenv 陷阱（见踩坑清单第 2 条）
 /root/miniconda3/envs/qm/bin/python -c "import torch; print(torch.cuda.get_device_name(0))"
 
@@ -519,7 +519,7 @@ time curl -s -X POST http://127.0.0.1:8000/api/v1/auth/login -H 'Content-Type: a
 curl -skI https://<实例ID>.westd.seetacloud.com:8443/ | head -1               # 前端 200
 curl -sk -X POST https://<实例ID>.westd.seetacloud.com:8443/api/v1/auth/login \
   -H 'Content-Type: application/json' \
-  -d '{"username":"admin","password":"admin123","tenant_id":"default"}'      # 公网登录链路 200
+  -d '{"username":"admin","password":"<管理员口令>","tenant_id":"default"}'      # 公网登录链路 200
 ```
 
 ## 9. 问题排查（诊断树，按顺序走）

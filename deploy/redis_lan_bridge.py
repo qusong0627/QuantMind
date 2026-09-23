@@ -10,12 +10,12 @@ Windows 桥（bigqmt Redis-RPC 传输）自此在局域网内够不到 Redis（�
 环境变量:
   REDIS_LAN_BIND_IPS    监听 IP（逗号分隔；默认自动枚举全部 192.168.* 非回环 IPv4）
   REDIS_LAN_BIND_PORTS  监听端口（逗号分隔；默认 6379,6380——覆盖历史两种配置）
-  REDIS_LAN_ALLOW       源 IP 白名单（CIDR 或精确 IP，逗号分隔；默认 192.168.31.13）
+  REDIS_LAN_ALLOW       源 IP 白名单（CIDR 或精确 IP，逗号分隔；**默认为空 = 全部拒绝**）
   REDIS_LAN_TARGET      转发目标（默认 127.0.0.1:6379）
 
 运行（宿主机）:
   docker run -d --name quantmind-redis-lan-bridge --restart unless-stopped \
-    --network host -e REDIS_LAN_ALLOW=192.168.31.13 \
+    --network host -e REDIS_LAN_ALLOW=192.0.2.13 \
     -v <repo>/deploy/redis_lan_bridge.py:/bridge.py:ro \
     python:3.10-slim-bookworm python3 /bridge.py
 """
@@ -28,7 +28,11 @@ import os
 import socket
 import sys
 
-DEFAULT_ALLOW = "192.168.31.13"
+#: 白名单默认**空**（2026-09-23 改）：空 = 拒绝所有源 IP（fail-closed）。
+#: 这里原先写着一个具体内网 IP——公开仓里那就是运营者的机器坐标，且它恰好是
+#: 唯一挡在 Redis 前面的那道门（Redis 本体免密 + 回环绑定）。要放行就显式给
+#: `REDIS_LAN_ALLOW`（已部署容器就是这么起的），别指望默认值。
+DEFAULT_ALLOW = ""
 TARGET_HOST = os.getenv("REDIS_LAN_TARGET_HOST", "127.0.0.1")
 TARGET_PORT = int(os.getenv("REDIS_LAN_TARGET_PORT", "6379"))
 PIPE_BUFSIZE = 65536
@@ -72,6 +76,14 @@ def _parse_ports() -> list[int]:
 
 def _parse_allow() -> list[ipaddress.IPv4Network | ipaddress.IPv4Address]:
     raw = os.getenv("REDIS_LAN_ALLOW", DEFAULT_ALLOW).strip() or DEFAULT_ALLOW
+    if not raw:
+        # 空白名单 = 谁都进不来。这不是「配置漏了」的静默降级，是有意的 fail-closed：
+        # 说清楚，省得下一个人对着「连接全被拒」查半天网络。
+        print(
+            "[redis-lan-bridge] REDIS_LAN_ALLOW 为空：拒绝所有源 IP（fail-closed）。"
+            "要放行请显式设置，例如 -e REDIS_LAN_ALLOW=192.0.2.13",
+            file=sys.stderr,
+        )
     nets = []
     for x in raw.split(","):
         x = x.strip()

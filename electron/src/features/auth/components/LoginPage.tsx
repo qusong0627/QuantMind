@@ -747,7 +747,7 @@ const LoginPage: React.FC = () => {
           </Text>
         </div>
         <Input
-          placeholder="192.168.1.100"
+          placeholder="192.0.2.100"
           value={serverIp}
           onChange={(e) => setServerIp(e.target.value)}
           prefix={<SettingOutlined style={{ color: '#999' }} />}

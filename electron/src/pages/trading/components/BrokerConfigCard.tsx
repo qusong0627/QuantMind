@@ -50,13 +50,13 @@ const FIELD_DEFS: Record<BrokerKey, FieldDef[]> = {
       { value: 'CREDIT', label: 'CREDIT（信用）' },
     ] },
     { name: 'strategy_name', label: '策略名', placeholder: 'quantmind（用于识别本系统的委托）' },
-    { name: 'redis_host', label: 'RPC Redis 地址', placeholder: 'big-convert 服务端所在机器的 IP，如 192.168.31.20' },
+    { name: 'redis_host', label: 'RPC Redis 地址', placeholder: 'big-convert 服务端所在机器的 IP，如 192.0.2.20' },
     { name: 'redis_port', label: 'RPC Redis 端口', placeholder: '6379' },
     { name: 'redis_db', label: 'RPC Redis 库', placeholder: '0' },
     { name: 'redis_password', label: 'RPC Redis 密码', sensitive: true, placeholder: 'big-convert 传输通道密码' },
   ],
   tdx: [
-    { name: 'bridge_url', label: '桥地址', placeholder: '如 http://192.168.31.13:8550' },
+    { name: 'bridge_url', label: '桥地址', placeholder: '如 http://192.0.2.13:8550' },
     { name: 'bridge_token', label: '桥 Token', sensitive: true, placeholder: '与 Windows 桥一致的 token' },
     { name: 'account', label: '资金账号', placeholder: '通达信资金账号（可留空）' },
     { name: 'account_type', label: '账号类型', placeholder: '', options: [
@@ -70,7 +70,7 @@ const FIELD_DEFS: Record<BrokerKey, FieldDef[]> = {
     { name: 'account', label: '交易账户', placeholder: '实盘 U 开头 / 模拟 SIM 开头，如 SIM123456' },
   ],
   futu: [
-    { name: 'opend_host', label: 'FutuOpenD 地址', placeholder: 'OpenD 所在机器的局域网 IP，如 192.168.31.68' },
+    { name: 'opend_host', label: 'FutuOpenD 地址', placeholder: 'OpenD 所在机器的局域网 IP，如 192.0.2.68' },
     { name: 'opend_port', label: 'FutuOpenD 端口', placeholder: '11111' },
     { name: 'trade_pwd_md5', label: '交易密码 MD5', sensitive: true, placeholder: '交易密码的 MD5（实盘下单前自动解锁）' },
     { name: 'trade_env', label: '交易环境', placeholder: '', options: [

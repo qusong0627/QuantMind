@@ -249,7 +249,7 @@ docker exec -w /app/backend -e PYTHONPATH=/app quantmind \
 **成因（2026-09-18 修正为两层）**：
 1. **端口层（先查这个）**：安全修复 93f5bbe5 把 Redis 端口映射改绑 `127.0.0.1`，
    该改动**只随容器重建生效**。2026-09-17 09:52 Redis 容器重建后，Windows 桥
-   （192.168.31.13）在 LAN 上 TCP 层即不可达——此时**重载策略永远无效**。
+   （192.0.2.13）在 LAN 上 TCP 层即不可达——此时**重载策略永远无效**。
    已上常驻转发桥 `quantmind-redis-lan-bridge`（`deploy/redis_lan_bridge.py`，
    源 IP 白名单，仅放行 .13，Redis 本体保持回环）。排查：
    `ss -ltn | grep 6379`（应有 .68/.56 监听）、

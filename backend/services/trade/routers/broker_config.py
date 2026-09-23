@@ -374,7 +374,7 @@ async def test_broker_connection(
                 account_type=stored.get("account_type", "") or "stock",
             )
             if not broker_obj.bridge_url:
-                return {"success": False, "message": "未填写桥地址（如 http://192.168.31.13:8550）"}
+                return {"success": False, "message": "未填写桥地址（如 http://192.0.2.13:8550）"}
             account = await broker_obj.query_account("test")
             if account.get("total_asset") or account.get("available_cash"):
                 return {

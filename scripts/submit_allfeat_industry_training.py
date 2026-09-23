@@ -11,6 +11,7 @@
 """
 import asyncio
 import json
+import os
 
 from backend.shared.database_manager_v2 import get_session
 from sqlalchemy import text
@@ -148,7 +149,7 @@ async def main():
     import httpx
     async with httpx.AsyncClient(base_url="http://localhost:8000/api/v1", timeout=120) as c:
         login = await c.post("/auth/login", json={
-            "username": "admin", "password": "admin123", "tenant_id": "default"})
+            "username": "admin", "password": os.getenv("QM_PASSWORD", ""), "tenant_id": "default"})
         tok = (login.json().get("access_token")
                or login.json().get("data", {}).get("access_token", ""))
         headers = {"Authorization": f"Bearer {tok}"}

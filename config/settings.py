@@ -15,17 +15,17 @@ class DatabaseSettings(BaseSettings):
     model_config = SettingsConfigDict(extra="allow")
 
     # PostgreSQL配置
-    postgres_host: str = os.getenv("DB_MASTER_HOST", "192.168.1.88")
-    postgres_port: int = int(os.getenv("DB_MASTER_PORT", "6789"))
+    postgres_host: str = os.getenv("DB_MASTER_HOST", "127.0.0.1")
+    postgres_port: int = int(os.getenv("DB_MASTER_PORT", "5432"))
     postgres_user: str = os.getenv("DB_USER", "quantmind")
-    postgres_password: str = os.getenv("DB_PASSWORD", "admin123")
+    postgres_password: str = os.getenv("DB_PASSWORD", "")
     postgres_database: str = os.getenv("DB_NAME", "quantmind")
 
     # Redis配置
-    redis_host: str = os.getenv("REDIS_HOST", "192.168.1.88")
+    redis_host: str = os.getenv("REDIS_HOST", "127.0.0.1")
     redis_port: int = int(os.getenv("REDIS_PORT", "6379"))
     redis_user: str | None = os.getenv("REDIS_USER")
-    redis_password: str | None = os.getenv("REDIS_PASSWORD", "admin123")
+    redis_password: str | None = os.getenv("REDIS_PASSWORD")
     redis_db: int = int(os.getenv("REDIS_DB", "0"))
     redis_use_sentinel: bool = os.getenv("REDIS_USE_SENTINEL", "false").lower() == "true"
     redis_sentinels: str = os.getenv("REDIS_SENTINELS", "")

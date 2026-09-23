@@ -24,7 +24,7 @@ API Key 格式：
 范围查询语法：{start}<{end}  或  {start}<N (到最新)
 字段投影：vals(...).get("close,open") 通过 fields 参数
 
-配置：环境变量 FREE_STOCKDB_HOST，默认 192.168.31.27:7899
+配置：环境变量 FREE_STOCKDB_HOST（默认 127.0.0.1:7899）
 """
 
 from __future__ import annotations
@@ -46,7 +46,7 @@ from backend.services.engine.data_platform.base import (
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_HOST = os.getenv("FREE_STOCKDB_HOST", "192.168.31.27:7899")
+_DEFAULT_HOST = os.getenv("FREE_STOCKDB_HOST", "127.0.0.1:7899")
 
 
 def _api_url(

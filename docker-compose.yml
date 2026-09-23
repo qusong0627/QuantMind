@@ -141,6 +141,14 @@ services:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - REDIS_PASSWORD=
+      # 行情服务（stream:8003）用的行情 Redis 口令。**曾经把 Fernet 密钥与密文内置在
+      # 源码里**——密文与主密钥同在一个公开仓 = 等于公开。现在只认环境变量
+      # （backend/services/stream/market_app/market_config.py）：MARKET_REDIS_PASSWORD
+      # 明文优先，其次 QM_MARKET_REDIS_FERNET_KEY + QM_MARKET_REDIS_CT 解密；两者皆缺
+      # = 空口令 + 启动告警（与本文件 REDIS_PASSWORD= 同口径：容器网内 Redis 免密）。
+      - MARKET_REDIS_PASSWORD=${MARKET_REDIS_PASSWORD:-}
+      - QM_MARKET_REDIS_FERNET_KEY=${QM_MARKET_REDIS_FERNET_KEY:-}
+      - QM_MARKET_REDIS_CT=${QM_MARKET_REDIS_CT:-}
       # 模拟撮合实时行情；生产可覆盖为独立行情 Redis，禁止在源码中内置凭据。
       - REMOTE_QUOTE_REDIS_HOST=${REMOTE_QUOTE_REDIS_HOST:-redis}
       - REMOTE_QUOTE_REDIS_PORT=${REMOTE_QUOTE_REDIS_PORT:-6379}
@@ -211,8 +219,13 @@ services:
       - USER_SERVICE_URL=http://127.0.0.1:8002
       - REAL_TRADING_SERVICE_URL=http://127.0.0.1:8002
 
+      # 数据源凭据（东方财富搜索接口 token）。曾经硬编码在
+      # backend/services/engine/data_gateway/providers/eastmoney_provider.py 里，
+      # 公开仓里那枚 token 等于已泄露——改从环境变量读，空值 = 用东财的匿名额度。
+      - EASTMONEY_SEARCH_TOKEN=${EASTMONEY_SEARCH_TOKEN:-}
+
       # 通达信(TDX)交易桥配置（Windows 桥地址/token，与 Windows 侧 setup.bat 一致）
-      - TDX_BRIDGE_URL=${TDX_BRIDGE_URL:-http://192.168.31.31:8550}
+      - TDX_BRIDGE_URL=${TDX_BRIDGE_URL:-http://192.0.2.31:8550}
       - TDX_BRIDGE_TOKEN=${TDX_BRIDGE_TOKEN:-}
       - ENABLE_TDX_PUSH=${ENABLE_TDX_PUSH:-false}
       - ENABLE_REAL_TRADING=${ENABLE_REAL_TRADING:-false}
@@ -332,7 +345,7 @@ services:
 
       # 本机 arena（quant-Trader）代理，供电给「实盘交易」栏里的 arena 页面。
       # 缺省留空：代理模块本身是本地独有（gitignore），公开仓里连路由都不注册；
-      # 配上时容器内地址要指宿主（如 http://192.168.31.68:8091），token 同 arena 的 API_TOKEN。
+      # 配上时容器内地址要指宿主（如 http://192.0.2.68:8091），token 同 arena 的 API_TOKEN。
       - AGENT_ARENA_BASE_URL=${AGENT_ARENA_BASE_URL:-}
       - AGENT_ARENA_API_TOKEN=${AGENT_ARENA_API_TOKEN:-}
 
@@ -515,7 +528,7 @@ services:
       - DAILY_SYNC_ENABLED=true
 
       # 通达信(TDX)交易桥配置（自动推理完成后推送 Top N 选股到通达信）
-      - TDX_BRIDGE_URL=${TDX_BRIDGE_URL:-http://192.168.31.31:8550}
+      - TDX_BRIDGE_URL=${TDX_BRIDGE_URL:-http://192.0.2.31:8550}
       - TDX_BRIDGE_TOKEN=${TDX_BRIDGE_TOKEN:-}
       - ENABLE_TDX_PUSH=${ENABLE_TDX_PUSH:-false}
       - TDX_ACCOUNT=${TDX_ACCOUNT:-}
@@ -643,6 +656,9 @@ services:
     environment:
       - TZ=Asia/Shanghai
       - PYTHONPATH=/app
+      # 东方财富搜索接口 token（providers/eastmoney_provider.search 用）。本服务
+      # 直接挂着 data_gateway 的 market/technical 路由，不转发就读不到。
+      - EASTMONEY_SEARCH_TOKEN=${EASTMONEY_SEARCH_TOKEN:-}
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:8004/health || exit 1"]
       interval: 30s

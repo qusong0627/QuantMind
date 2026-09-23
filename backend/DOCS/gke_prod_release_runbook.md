@@ -57,7 +57,7 @@ export DB_USER="quantmind"
 export DB_PASSWORD="replace-with-prod-db-password"
 export SQL_INSTANCE_CONNECTION_NAME="your-project:asia-east1:quantmind-prod-pg"
 
-export REDIS_HOST="10.0.0.15"
+export REDIS_HOST="198.51.100.15"
 export REDIS_PORT="6379"
 export REDIS_PASSWORD="replace-with-prod-redis-password"
 export REDIS_USE_SENTINEL="false"

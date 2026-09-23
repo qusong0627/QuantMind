@@ -10,7 +10,7 @@ channels:
   http:
     enabled: true
     # Windows 交易机 IP
-    host: "192.168.31.22"
+    host: "127.0.0.1"  # 改成 Windows 交易机 IP（示例 192.0.2.22）
     port: 8550
     timeout_seconds: 30
   file_sync:

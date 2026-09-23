@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 
 ORIGINAL_RUN_ID = "train_20260817084510_d18103ea"
 
@@ -121,7 +122,7 @@ async def main() -> None:
     async with httpx.AsyncClient(base_url="http://localhost:8000/api/v1", timeout=120) as c:
         login = await c.post(
             "/auth/login",
-            json={"username": "admin", "password": "admin123", "tenant_id": "default"},
+            json={"username": "admin", "password": os.getenv("QM_PASSWORD", ""), "tenant_id": "default"},
         )
         body = login.json()
         tok = body.get("access_token") or body.get("data", {}).get("access_token", "")

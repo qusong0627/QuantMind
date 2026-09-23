@@ -1,4 +1,6 @@
 import json
+import logging
+import os
 from pathlib import Path
 from typing import List
 
@@ -6,28 +8,56 @@ from cryptography.fernet import Fernet
 from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+logger = logging.getLogger(__name__)
+
 ROOT_ENV = Path(__file__).resolve().parents[4] / ".env"
 
 # ============================================================
-# 行情 Redis 硬编码配置 (quantmind-redis 访客只读用户)
-# 密码使用 Fernet 对称加密存储，运行时解密
+# 行情 Redis 配置 (quantmind-redis 访客只读用户)
+#
+# 口令**不再内置**（2026-09-23 移除）：原先把 Fernet 密钥与密文一起写在本文件里，
+# 而本仓是公开仓——密钥写进公开仓就不叫密钥，谁 clone 谁就能解出那个口令。
+# 现在按下面的优先级取，取不到就空口令 + 告警（与当前 docker-compose 一致：
+# 它给 stream 传的就是空的 `REDIS_PASSWORD=`，该实例按免密访问）。
 # ============================================================
-_MARKET_REDIS_FERNET_KEY = b"sPe1LUze878C7xz8Ekvy4wCK9kURt70Vr-uWnfpqJyg="
-_MARKET_REDIS_ENCRYPTED_PASSWORD = (
-    b"gAAAAABp-ibRrZocS4wY2cULfQuTe64sH6ZgPWtB0nU3J2RW4MrPVXAXp0GoFxzoEOm58ocE7POB53XbMX9TmrIasUtB6oe0Bg=="
-)
+_ENV_MARKET_REDIS_PASSWORD = "MARKET_REDIS_PASSWORD"
+_ENV_FERNET_KEY = "QM_MARKET_REDIS_FERNET_KEY"
+_ENV_FERNET_CIPHERTEXT = "QM_MARKET_REDIS_CT"
 
 
-def _decrypt_market_redis_password() -> str:
-    """解密行情 Redis 密码"""
-    return Fernet(_MARKET_REDIS_FERNET_KEY).decrypt(
-        _MARKET_REDIS_ENCRYPTED_PASSWORD
-    ).decode()
+def _resolve_market_redis_password() -> str:
+    """行情 Redis 口令：明文环境变量优先，其次「Fernet 密钥 + 密文」两个环境变量。
+
+    容错放在这里而不是让调用方去猜：任一来源缺失/解密失败都只降级为空口令并告警，
+    不抛异常——stream 服务起不来比口令少一层鉴权严重得多（且 Redis 只在容器网内可达）。
+    """
+    plain = os.getenv(_ENV_MARKET_REDIS_PASSWORD, "").strip()
+    if plain:
+        return plain
+
+    key = os.getenv(_ENV_FERNET_KEY, "").strip()
+    ciphertext = os.getenv(_ENV_FERNET_CIPHERTEXT, "").strip()
+    if key and ciphertext:
+        try:
+            return Fernet(key.encode()).decrypt(ciphertext.encode()).decode()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "行情 Redis 口令解密失败（%s/%s 不匹配）：%s；按空口令继续",
+                _ENV_FERNET_KEY, _ENV_FERNET_CIPHERTEXT, exc,
+            )
+            return ""
+
+    logger.warning(
+        "未配置行情 Redis 口令（%s 或 %s+%s 皆缺）——按空口令访问；"
+        "该实例若开了 requirepass 会连接失败，请在 .env 里补上",
+        _ENV_MARKET_REDIS_PASSWORD, _ENV_FERNET_KEY, _ENV_FERNET_CIPHERTEXT,
+    )
+    return ""
 
 
 MARKET_REDIS_HOST = "quantmind-redis"
 MARKET_REDIS_PORT = 6379
-MARKET_REDIS_PASSWORD = _decrypt_market_redis_password()
+MARKET_REDIS_PASSWORD = _resolve_market_redis_password()
 MARKET_REDIS_DB = 3
 
 

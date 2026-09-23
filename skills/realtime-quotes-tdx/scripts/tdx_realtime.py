@@ -14,7 +14,7 @@ import sys
 import urllib.request
 from datetime import datetime, timedelta, timezone
 
-DEFAULT_URL = "http://192.168.31.13:8550"
+DEFAULT_URL = "http://127.0.0.1:8550"
 BJ = timezone(timedelta(hours=8))
 INDEXES = [("000001.SH", "上证指数"), ("000016.SH", "上证50"), ("000300.SH", "沪深300"),
            ("399001.SZ", "深证成指"), ("399006.SZ", "创业板指"), ("000688.SH", "科创50")]

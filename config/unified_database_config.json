@@ -3,7 +3,7 @@
     "postgresql": {
       "description": "PostgreSQL数据库配置 - 生产标准",
       "connection": {
-        "host": "192.168.1.88",
+        "host": "127.0.0.1",
         "port": 6789,
         "database": "quantmind",
         "username": "postgres",

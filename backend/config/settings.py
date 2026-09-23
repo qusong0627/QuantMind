@@ -31,7 +31,7 @@ class SecuritySettings:
 class DatabaseSettings:
     postgres_url: str = os.getenv(
         "DATABASE_URL",
-        "postgresql+psycopg2://quantmind:admin123@192.168.1.88:6789/quantmind",
+        "postgresql+psycopg2://quantmind@127.0.0.1:5432/quantmind",  # 口令走 DATABASE_URL 环境变量
     )
 
 

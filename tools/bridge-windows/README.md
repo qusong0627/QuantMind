@@ -11,11 +11,11 @@
 2. **登录交易账号**（模拟盘账号或实盘账号均可）
 
 ### 第 2 步：运行一键脚本
-1. 打开共享目录：`\\192.168.31.22\PYPlugins\bridge-windows\`
+1. 打开共享目录：`\\192.0.2.22\PYPlugins\bridge-windows\`
 2. **右键 `setup.ps1` → 使用 PowerShell 运行**
    - 如果右键没有这个选项：打开 PowerShell，输入
      ```
-     cd \\192.168.31.22\PYPlugins\bridge-windows
+     cd \\192.0.2.22\PYPlugins\bridge-windows
      .\setup.ps1
      ```
 3. 按提示输入 `BRIDGE_AUTH_TOKEN`（64 位 hex，与 Linux 侧 `.env` 里的 `TDX_BRIDGE_TOKEN` **必须一致**）

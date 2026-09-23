@@ -14,7 +14,13 @@
 #    8. 引导启动通达信 + 保持 keepalive 运行
 # ============================================================
 param(
-    [string]$Mode = "auto"
+    [string]$Mode = "auto",
+    # Ubuntu 侧挂载 SMB 共享用的账号/口令。**没有默认口令**——它曾经是写死的
+    # 字面量，于是每台桥机的这个账号都是同一个口令，且它连同内网地址一起留在了
+    # 公开仓的 git 历史里。留空则现场生成一个随机口令并打印一次，请当场记下：
+    # Ubuntu 侧 mount 时用 `-o username=<SmbUser>,password=<该口令>`。
+    [string]$SmbUser = "esxi",
+    [string]$SmbPassword = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -62,13 +68,29 @@ if (-not $shareExists) {
     }
 }
 
-# 确保 esxi 账号存在 (Ubuntu 挂载用的账号)
-$esxiUser = net user esxi 2>$null
+# 确保 SMB 挂载账号存在 (Ubuntu 挂载用的账号)
+$esxiUser = net user $SmbUser 2>$null
 if (-not $esxiUser) {
-    Write-Host "      创建账号 esxi ..." -ForegroundColor Yellow
-    net user esxi 951951 /add 2>$null | Out-Null
-    net localgroup Administrators esxi /add 2>$null | Out-Null
-    Write-Host "      账号 esxi 已创建 (密码 951951)" -ForegroundColor Green
+    if (-not $SmbPassword) {
+        # 现场生成: 22 位, 去掉 look-alike 字符 (0/O、1/l/I), 便于人工抄录
+        $alphabet = "abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+        $SmbPassword = -join (1..22 | ForEach-Object { $alphabet[(Get-Random -Maximum $alphabet.Length)] })
+        $generated = $true
+    }
+    Write-Host "      创建账号 $SmbUser ..." -ForegroundColor Yellow
+    net user $SmbUser $SmbPassword /add 2>$null | Out-Null
+    net localgroup Administrators $SmbUser /add 2>$null | Out-Null
+    if ($generated) {
+        Write-Host ""
+        Write-Host "      ============================================================" -ForegroundColor Cyan
+        Write-Host "      SMB 账号 $SmbUser 已创建, 口令 (只显示这一次, 请立即记下):" -ForegroundColor Cyan
+        Write-Host "        $SmbPassword" -ForegroundColor White
+        Write-Host "      Ubuntu 侧挂载: -o username=$SmbUser,password=<上面这串>" -ForegroundColor Cyan
+        Write-Host "      ============================================================" -ForegroundColor Cyan
+        Write-Host ""
+    } else {
+        Write-Host "      账号 $SmbUser 已创建 (口令来自 -SmbPassword 参数)" -ForegroundColor Green
+    }
 }
 # 确保 SMB 1.0 兼容 + 防火墙放行 SMB
 try {

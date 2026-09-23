@@ -18,7 +18,7 @@ from backend.shared.order_contract import build_bridge_plan_id
 
 logger = logging.getLogger(__name__)
 
-TDX_BRIDGE_URL = os.getenv("TDX_BRIDGE_URL", "http://192.168.31.31:8550")
+TDX_BRIDGE_URL = os.getenv("TDX_BRIDGE_URL", "http://127.0.0.1:8550")
 TDX_BRIDGE_TOKEN = os.getenv("TDX_BRIDGE_TOKEN", "")
 TIMEOUT = 10.0
 

@@ -2,12 +2,12 @@
 
 postgres:
   role: user-service primary
-  default_url: "postgresql+psycopg2://quantmind:admin123@192.168.1.88:6789/quantmind"
+  default_url: "postgresql+psycopg2://quantmind@127.0.0.1:5432/quantmind"
   defaults:
-    host: "192.168.1.88"
-    port: 6789
+    host: "127.0.0.1"
+    port: 5432
     user: "quantmind"
-    password: "admin123"
+    password: "${DB_PASSWORD}"
     database: "quantmind"
   env:
     host: "DB_HOST|POSTGRES_HOST"
@@ -44,11 +44,11 @@ redis:
 
 redis_trade:
   role: trade service dedicated
-  default_url: "redis://:7f3a9c2e8b1d4f605a7c9e2b8d1f4a6c@139.199.75.121:6379/2"
+  default_url: "redis://127.0.0.1:6379/2"
   defaults:
-    host: "139.199.75.121"
+    host: "127.0.0.1"
     port: 6379
-    password: "7f3a9c2e8b1d4f605a7c9e2b8d1f4a6c"
+    password: "${REDIS_TRADE_PASSWORD}"
     db: 2
   env:
     host: "REDIS_TRADE_HOST"

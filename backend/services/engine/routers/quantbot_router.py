@@ -24,45 +24,41 @@ task_store = QuantBotTaskStore()
 
 # AlphaAgent 回环调用（查询/回测/解读/导出已挖因子）
 _ALPHA_BASE = os.getenv("ALPHA_AGENT_BASE_URL", "http://127.0.0.1:8000")
-_alpha_token: str = ""
 
 
-async def _alpha_admin_token() -> str:
-    global _alpha_token
-    if _alpha_token:
-        return _alpha_token
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            r = await client.post(
-                f"{_ALPHA_BASE}/api/v1/auth/login",
-                json={"username": "admin", "password": "admin123", "tenant_id": "default"},
-            )
-            r.raise_for_status()
-            _alpha_token = r.json().get("access_token", "")
-    except Exception as e:
-        logger.warning(f"alpha admin token failed: {e}")
-        _alpha_token = ""
-    return _alpha_token
+def _alpha_headers() -> dict[str, str]:
+    """回环调用 AlphaAgent 的身份头（内部信任链，**不用口令**）。
+
+    这里原是「拿 admin/admin123 去 /auth/login 换 JWT」——把一个管理员口令写进
+    源码（公开仓 = 公开），而且那条路一旦口令变了就静默 401。可它本来就是**同进程
+    回环**调用（`_ALPHA_BASE` 默认 127.0.0.1:8000），走 `X-Internal-Call` 这条
+    内部信任链才是对的口径：密钥读 `shared/auth.get_internal_call_secret()`
+    （唯一读取点，启动期自动生成并落盘；空 = fail-closed，绝不退回默认值）。
+    """
+    from backend.shared.auth import get_internal_call_secret
+
+    secret = get_internal_call_secret()
+    if not secret:
+        logger.warning("内部调用密钥缺失：AlphaAgent 回环调用将拿不到管理员身份")
+        return {}
+    return {
+        "X-Internal-Call": secret,
+        "X-User-Id": os.getenv("ALPHA_INTERNAL_USER_ID", "10000001"),  # admin
+        "X-Tenant-Id": os.getenv("ALPHA_INTERNAL_TENANT_ID", "default"),
+    }
 
 
 async def _alpha_get(path: str) -> dict:
-    token = await _alpha_admin_token()
     async with httpx.AsyncClient(timeout=45) as client:
-        r = await client.get(
-            f"{_ALPHA_BASE}{path}",
-            headers={"Authorization": f"Bearer {token}"} if token else {},
-        )
+        r = await client.get(f"{_ALPHA_BASE}{path}", headers=_alpha_headers())
         r.raise_for_status()
         return r.json()
 
 
 async def _alpha_post(path: str, params: dict | None = None) -> dict:
-    token = await _alpha_admin_token()
     async with httpx.AsyncClient(timeout=45) as client:
         r = await client.post(
-            f"{_ALPHA_BASE}{path}",
-            params=params,
-            headers={"Authorization": f"Bearer {token}"} if token else {},
+            f"{_ALPHA_BASE}{path}", params=params, headers=_alpha_headers()
         )
         r.raise_for_status()
         return r.json()

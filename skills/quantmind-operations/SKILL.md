@@ -22,7 +22,7 @@ description: "QuantMind 平台运营操作技能 — 覆盖模型训练、模型
 
 # QuantMind 运营操作技能
 
-QuantMind 量化平台的完整运营操作指南。所有 API 都通过 API 网关（默认 `http://127.0.0.1:8000` 或 `http://192.168.31.68:3080`）访问，统一加 `/api/v1` 前缀。
+QuantMind 量化平台的完整运营操作指南。所有 API 都通过 API 网关（默认 `http://127.0.0.1:8000` 或 `http://192.0.2.68:3080`）访问，统一加 `/api/v1` 前缀。
 
 ## 认证
 
@@ -31,7 +31,7 @@ QuantMind 量化平台的完整运营操作指南。所有 API 都通过 API 网
 # 获取 token（admin 账号）
 TOKEN=$(curl -s -X POST $BASE/api/v1/auth/login \
   -H "Content-Type: application/json" \
-  -d '{"username":"admin","password":"admin123","tenant_id":"default"}' \
+  -d '{"username":"admin","password":"<管理员口令>","tenant_id":"default"}' \
   | python3 -c "import sys,json; print(json.load(sys.stdin).get('access_token',''))")
 
 # 通用请求头

@@ -84,7 +84,7 @@ export DB_PASSWORD="<从 Secret Manager 读取 quantmind-prod-db-password>"
 路径 A：使用已创建的 Memorystore Redis
 
 ```bash
-export REDIS_HOST="10.75.220.251"
+export REDIS_HOST="198.51.100.251"
 export REDIS_PORT="6379"
 export REDIS_PASSWORD=""
 export REDIS_USE_SENTINEL="false"
@@ -138,7 +138,7 @@ export DB_USER="quantmind"
 export DB_PASSWORD="<从 Secret Manager 读取 quantmind-prod-db-password>"
 export SQL_INSTANCE_CONNECTION_NAME="gen-lang-client-0953736716:asia-east1:quantmind-prod-pg"
 
-export REDIS_HOST="10.75.220.251"
+export REDIS_HOST="198.51.100.251"
 export REDIS_PORT="6379"
 export REDIS_PASSWORD=""
 export REDIS_USE_SENTINEL="false"

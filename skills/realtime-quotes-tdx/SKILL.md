@@ -5,7 +5,7 @@ description: "通达信桥实时行情直读（准确引导版）— 任意 A �
 
 > ## ⚙️ 运行环境契约（最高优先级，先于本文其余内容执行）
 >
-> 1. **桥地址/Token**：`TDX_BRIDGE_URL`（Windows 交易机通达信桥，默认 `http://192.168.31.13:8550`）+ `TDX_BRIDGE_TOKEN`。取值优先级：环境变量 → `/quantmind/.env` / `/quantmind/runtime_env_cn.json` → 技能默认值。Token 缺失时只读 `/api/v1/health`（免鉴权），其它接口一律 401。
+> 1. **桥地址/Token**：`TDX_BRIDGE_URL`（Windows 交易机通达信桥，默认 `http://192.0.2.13:8550`）+ `TDX_BRIDGE_TOKEN`。取值优先级：环境变量 → `/quantmind/.env` / `/quantmind/runtime_env_cn.json` → 技能默认值。Token 缺失时只读 `/api/v1/health`（免鉴权），其它接口一律 401。
 > 2. **必须在宿主机或 host 网络环境直连桥**（Linux 侧 192.168.31.x 可达）；quantmind 容器内如网络隔离则退回 `docker exec` 外宿主机执行。
 > 3. **新鲜度铁律**：桥可能"假活"（健康检查绿但行情停更，2026-09 实战教训）。**每次报实时价前先验行情新鲜度**：日K最后一根 bar 必须 ≥ 北京今天（盘后/周末顺延），快照的 Volume 必须 > 0 且与昨收合理；停更时明确告知「行情疑似停更，价格可能陈旧」，绝不把缓存价当实时价报。
 > 4. 报告/速览落盘按需写 `/data/reports/`；纯查价不需要落盘。

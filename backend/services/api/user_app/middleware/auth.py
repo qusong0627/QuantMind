@@ -238,7 +238,17 @@ async def get_optional_user(
 
     支持从 Authorization Header 或 URL 参数 (access_token) 中获取
     如果没有Token也不报错，返回None
+
+    内部调用（`X-Internal-Call` 密钥匹配 + `X-User-Id`）与 `get_current_user`
+    同口径采信——本函数挂在**代理**上（engine / trade / ai_ide / files），而代理
+    的职责正是「把身份透传给下游」：少了这一条，同容器内的回环调用明明握着内部
+    密钥，却因为拿不出 JWT 在这里被判成匿名，下游再以「需要登录」401
+    （2026-09-23 实测：QuantBot → alpha-agent 因子查询即栽在这）。
     """
+    internal_user = _get_internal_user_from_headers(request)
+    if internal_user:
+        return internal_user
+
     token = None
     if credentials:
         token = credentials.credentials

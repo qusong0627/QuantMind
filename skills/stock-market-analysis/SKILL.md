@@ -47,7 +47,7 @@ description: "股票市场深度数据分析与导出 — 全市场信号扫描�
 ```bash
 BASE=http://127.0.0.1:8000
 TOKEN=$(curl -s -X POST $BASE/api/v1/auth/login -H "Content-Type: application/json" \
-  -d '{"username":"admin","password":"admin123","tenant_id":"default"}' \
+  -d '{"username":"admin","password":"<管理员口令>","tenant_id":"default"}' \
   | python3 -c "import sys,json; print(json.load(sys.stdin).get('access_token',''))")
 AUTH="Authorization: Bearer $TOKEN"
 CT="Content-Type: application/json"

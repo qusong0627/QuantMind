@@ -23,7 +23,7 @@ nodes: []
   # 示例：按需增删节点
   # - id: autodl-1
   #   name: "AutoDL GPU"
-  #   host: "192.168.31.66"
+  #   host: "192.0.2.66"
   #   port: 22
   #   user: "root"
   #   ssh_password: ""

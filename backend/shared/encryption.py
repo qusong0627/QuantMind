@@ -16,17 +16,38 @@ logger = logging.getLogger(__name__)
 
 
 class ConfigEncryption:
-    """配置加密类"""
+    """配置加密类。
+
+    主密钥**只能来自环境变量** `QUANTMIND_MASTER_KEY` 或显式入参。
+
+    2026-09-23 移除内置默认主密钥：本模块曾用 `os.getenv(..., "<字面量>")` 兜底，而
+    盐是常量、密文（`backend/config/users/*.json`）又在同一个仓库里——**钥匙和锁
+    一起发出去**，而这是个公开仓。缺密钥时现在直接抛错，不再静默用一个人人都知道的
+    密钥「加密」券商口令。
+
+    历史密文迁移：旧部署若用过那个默认值，先在**本机**用当值环境变量跑一次
+    `decrypt_password()` 读出明文，再用新的 `QUANTMIND_MASTER_KEY` 重新 `encrypt_password()`
+    写回（密钥换掉即作废旧的公开密钥）。
+    """
 
     def __init__(self, master_key: str = None):
         """
         初始化加密器
 
         Args:
-            master_key: 主密钥，如果不提供则从环境变量读取
+            master_key: 主密钥；不提供则从环境变量 `QUANTMIND_MASTER_KEY` 读取
+
+        Raises:
+            RuntimeError: 未提供主密钥（不再有内置默认值）
         """
         if master_key is None:
-            master_key = os.getenv("QUANTMIND_MASTER_KEY", "quantmind-default-key-2024")
+            master_key = os.getenv("QUANTMIND_MASTER_KEY")
+        if not master_key:
+            raise RuntimeError(
+                "缺少 QUANTMIND_MASTER_KEY：配置加密不再提供内置默认主密钥"
+                "（默认值与密文同在一个公开仓里 = 公开）。请在部署环境（.env 或密钥"
+                "管理器）里设置后重启；历史密文的迁移办法见 ConfigEncryption 类文档。"
+            )
 
         self.master_key = master_key
         self.cipher = self._create_cipher()

@@ -19,7 +19,7 @@
 │   REAL/SHADOW ──────────→ TdxBroker (通达信实盘) ─┐                  │
 └───────────────────────────────────────────────────┼──────────────────┘
                                                      │ HTTP POST /api/v1/*
-┌───────────────────────── 局域网 (192.168.31.22) ─────────────────────┐
+┌───────────────────────── 局域网 (192.0.2.22) ─────────────────────┐
 │                                                    ▼                 │
 │   Windows 桥 (bridge-windows, :8550, token 鉴权)                     │
 │       │                                                            │
@@ -88,7 +88,7 @@ ENABLE_REAL_TRADING=true
 # 实盘 broker 类型
 REAL_BROKER_TYPE=tdx
 # Windows 桥地址
-TDX_BRIDGE_URL=http://192.168.31.22:8550
+TDX_BRIDGE_URL=http://192.0.2.22:8550
 # 桥鉴权 token (与 Windows 侧 BRIDGE_AUTH_TOKEN 一致)
 TDX_BRIDGE_TOKEN=你的64位hextoken
 # 通达信资金账号 (留空用默认账号)
@@ -103,7 +103,7 @@ TDX_ACCOUNT_TYPE=stock
 ## 五、Windows 部署步骤
 
 ### 1. 文件准备
-`bridge-windows/` 已放在共享目录 `\\192.168.31.22\PYPlugins\bridge-windows\`，里面包含：
+`bridge-windows/` 已放在共享目录 `\\192.0.2.22\PYPlugins\bridge-windows\`，里面包含：
 - `setup.bat` — **一键启动脚本**（检测 Python → 装依赖 → 设环境变量 → **自动放行防火墙 8550** → 启动桥）
 - `start_bridge.ps1` / `bootstrap.bat` — 备用启动脚本
 - `main.py` + `src/` — 桥程序本体
@@ -128,7 +128,7 @@ curl -s http://127.0.0.1:8550/api/v1/health
 ## 六、Linux/QuantMind 部署步骤
 
 ### 1. 前提
-- SMB 共享已挂载：`mount -t cifs //192.168.31.22/PYPlugins /mnt/tdx-shared -o username=esxi,password=951951,vers=3.0,uid=1000,gid=1000`
+- SMB 共享已挂载：`mount -t cifs //192.0.2.22/PYPlugins /mnt/tdx-shared -o username=esxi,password=<SMB口令>,vers=3.0,uid=1000,gid=1000`
 - QuantMind 的 trade 服务已能启动（docker 或本地）
 
 ### 2. 配置

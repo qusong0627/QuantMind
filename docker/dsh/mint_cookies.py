@@ -24,7 +24,7 @@ iframe，唯一进门凭证就是 cookie。本脚本用 dsh 持久化的签名�
 
 用法（entrypoint 调用）：
     python3 mint_cookies.py --days 3600 --port 8088 \
-        --authorities "192.168.1.10,quantbot.example.com:8088" \
+        --authorities "192.0.2.10,quantbot.example.com:8088" \
         --out /etc/nginx/conf.d/dsh-cookies.conf
 
 任何失败都会写「透传兜底」map（保证 nginx 能启动），并在 stderr 告警。

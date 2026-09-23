@@ -149,13 +149,21 @@ redis/data/appendonlydir/appendonly.aof.2.incr.aof
 # Windows specific build artifacts
 *.exe
 *.msi
-# 通达信交易桥 Windows 端（TDXBridge.exe）需要纳入版本管理
-!tools/bridge-windows/dist/TDXBridge.exe
-!tools/bridge-windows/dist/config.yaml
+
+# 通达信交易桥的构建产物与出厂配置：
+# 曾经例外入库（TDXBridge.exe + config.yaml），2026-09-23 撤掉——那份 config.yaml
+# 里带着**真实的桥 auth token**（与运行中的 `.env` 同值，即报单入口的钥匙），
+# 而公开仓的历史是删不掉的。构建产物一律不入库：包由 deploy/live-win/build_live_pack.sh
+# 从源码现烤（它本来也不用这个 8 月的 exe）。
+tools/bridge-windows/dist/
 
 # 桥运行时产物（日志/缓存/执行报告，不提交）
 tools/bridge-windows/data/
 tools/bridge-windows/execution_reports/
+
+# 用户券商凭据存储（Fernet 密文 + 历史版本；曾入库，2026-09-23 撤掉）
+# 它属于**运行期数据**，且加密用的主密钥默认值也曾在源码里（见 shared/encryption.py）。
+backend/config/users/
 .codegraph/
 /exports/
 

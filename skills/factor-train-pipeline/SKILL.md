@@ -8,7 +8,7 @@ description: "因子训练链路：把「因子研究」筛选保留集（可按
 > 凡 import `pandas/duckdb/backend` 等重依赖的脚本，**必须在 quantmind 容器内执行**：
 > `docker cp <脚本> quantmind:/tmp/ && docker exec -w /app quantmind python3 /tmp/<脚本> <参数>`。
 > API 一律 `http://127.0.0.1:8000`（宿主）或 `http://quantmind:8000`（容器网络），管理员令牌：
-> `POST /api/v1/auth/login {"username":"admin","password":"admin123","tenant_id":"default"}`。
+> `POST /api/v1/auth/login {"username":"admin","password":"<管理员口令>","tenant_id":"default"}`。
 
 # 因子训练链路（筛选 → 自定义市场 → 生产级训练）
 
