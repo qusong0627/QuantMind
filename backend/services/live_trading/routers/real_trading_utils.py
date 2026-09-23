@@ -30,7 +30,9 @@ import redis as redis_lib
 from backend.services.trade_shared.deps import AuthContext, get_auth_context, get_db
 from backend.services.trade_shared.models.order import Order
 from backend.services.trade_shared.models.preflight_snapshot import PreflightSnapshot
-from backend.services.trade_shared.models.real_account_snapshot import RealAccountSnapshot
+from backend.services.trade_shared.models.real_account_snapshot import (
+    RealAccountSnapshot,
+)
 from backend.services.trade_shared.portfolio.models import Portfolio
 from backend.services.trade_shared.models.trade import Trade
 from backend.services.trade_shared.redis_client import RedisClient, get_redis
@@ -164,7 +166,9 @@ def _snapshot_ts_key(value: Any) -> float:
             parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
         except ValueError:
             return 0.0
-        return (parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)).timestamp()
+        return (
+            parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+        ).timestamp()
     return 0.0
 
 
@@ -195,7 +199,9 @@ async def fetch_account_source_rows(
     user_ids = _snapshot_candidate_user_ids(user_id)
     if not user_ids:
         return []
-    stmt = text(_PER_SOURCE_LATEST_SQL).bindparams(bindparam("user_ids", expanding=True))
+    stmt = text(_PER_SOURCE_LATEST_SQL).bindparams(
+        bindparam("user_ids", expanding=True)
+    )
     result = await db.execute(stmt, {"tenant_id": tenant_id, "user_ids": user_ids})
     return [dict(row) for row in result.mappings().all()]
 
@@ -274,9 +280,7 @@ def _build_real_account_contract(
     positions = payload.get("positions") or []
     # 桥可能返回已清仓残留（volume=0），过滤后仅统计真实持仓
     if isinstance(positions, list):
-        positions = [
-            p for p in positions if float(p.get("volume") or 0) > 0
-        ]
+        positions = [p for p in positions if float(p.get("volume") or 0) > 0]
 
     daily_pnl = (
         total_asset - day_open_equity if day_open_equity > 0 else broker_today_pnl_raw
@@ -418,7 +422,9 @@ def _read_active_strategy_raw(redis: RedisClient, tenant_id: str, user_id: str):
     return None
 
 
-def _delete_active_strategy_aliases(redis: RedisClient, tenant_id: str, user_id: str) -> None:
+def _delete_active_strategy_aliases(
+    redis: RedisClient, tenant_id: str, user_id: str
+) -> None:
     from backend.shared.simulation_account_keys import active_strategy_lookup_keys
 
     client = getattr(redis, "client", None)
@@ -543,7 +549,9 @@ async def _fetch_active_portfolio_snapshot(
     if initial_capital > 0:
         raw_daily_return = daily_pnl / initial_capital
     else:
-        raw_daily_return = _decimal_to_float(getattr(portfolio, "daily_return", 0.0), 0.0)
+        raw_daily_return = _decimal_to_float(
+            getattr(portfolio, "daily_return", 0.0), 0.0
+        )
 
     total_pnl = _decimal_to_float(getattr(portfolio, "total_pnl", None), 0.0)
     total_return = _decimal_to_float(getattr(portfolio, "total_return", None), 0.0)
@@ -1402,17 +1410,80 @@ def check_tdx_bridge_online() -> tuple[bool, str]:
     try:
         resp = httpx.get(f"{bridge_url.rstrip('/')}/api/v1/health", timeout=3.0)
         if resp.status_code == 200:
-            payload = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
+            payload = (
+                resp.json()
+                if resp.headers.get("content-type", "").startswith("application/json")
+                else {}
+            )
             tdx_connected = bool((payload or {}).get("tdx_connected", True))
             return True, (
-                "TDX 桥在线，通达信已连接" if tdx_connected else "TDX 桥在线，通达信客户端未连接"
+                "TDX 桥在线，通达信已连接"
+                if tdx_connected
+                else "TDX 桥在线，通达信客户端未连接"
             )
         return False, f"TDX 桥返回 HTTP {resp.status_code}"
     except Exception as exc:
         return False, f"TDX 桥不可达: {exc}"
 
 
-def _probe_freshest_series_age(redis_like, symbols: list[str]) -> tuple[str | None, float | None]:
+def check_bridge_sltp_disarmed() -> tuple[bool, str, bool]:
+    """探测**桥自带止损 daemon** 是否被 arm —— 返回 ``(ok, detail, armed)``。
+
+    为什么这是一条硬闸门
+    --------------------
+    桥侧 ``StopLossDaemon``（``tools/bridge-windows/src/executor/stop_loss_daemon.py``）
+    是个**独立的卖出者**：5s 轮询、触发即 ``order_stock(..., Side.SELL, MARKET)``。
+    而 QuantMind 的 ``sltp_executor`` 已经占了守护单这个位（同一账户、同一持仓）。
+    两者同时对同一仓位触发 = **超卖**（可用量不够则部分失败，够则双倍卖出）。
+    故桥侧必须恒为空。
+
+    ``enabled`` 而非列表长度
+    -----------------------
+    触发过的条目会被置 ``enabled=False`` 但**留在列表里**（见 ``_tick``：``if not
+    it["enabled"]: continue``）。按列表长度判定会把一次历史触发变成永久红灯，
+    最终被人忽略——按 ``enabled`` 计数才是「当前真的会不会卖」。
+
+    可达性不在这里兜底：桥不可达时 ``check_tdx_bridge_online`` 已单独拦住，
+    本函数只把「可达但说不清状态」标为告警（``required=False``）。
+    """
+    bridge_url = str(getattr(settings, "TDX_BRIDGE_URL", "") or "").strip()
+    bridge_token = str(getattr(settings, "TDX_BRIDGE_TOKEN", "") or "").strip()
+    if not bridge_url or not bridge_token:
+        # 没配桥 = 没有桥侧 daemon = 无此风险（不是「跳过检查」）
+        return True, "未配置 TDX 桥，无桥侧止损 daemon", False
+    try:
+        resp = httpx.get(
+            f"{bridge_url.rstrip('/')}/api/v1/sltp/state",
+            headers={"Authorization": f"Bearer {bridge_token}"},
+            timeout=3.0,
+        )
+        if resp.status_code != 200:
+            return (
+                False,
+                f"桥侧止损状态查询返回 HTTP {resp.status_code}（无法确认无第二卖出者）",
+                False,
+            )
+        items = (resp.json() or {}).get("items") or []
+        armed = [it for it in items if isinstance(it, dict) and it.get("enabled")]
+        if not armed:
+            return (
+                True,
+                f"桥侧止损 daemon 未 arm（{len(items)} 条历史记录均已停用）",
+                False,
+            )
+        codes = [str(it.get("stock_code") or "?") for it in armed]
+        detail = (
+            f"⚠️ 桥侧止损 daemon 已 arm {len(armed)} 条（{', '.join(codes[:5])}）"
+            "——与 QuantMind sltp_executor 会对同一仓位重复卖出，必须先在桥侧停用"
+        )
+        return False, detail, True
+    except Exception as exc:  # noqa: BLE001 — 探测失败绝不能把整个 preflight 带崩
+        return False, f"桥侧止损状态不可达: {exc}", False
+
+
+def _probe_freshest_series_age(
+    redis_like, symbols: list[str]
+) -> tuple[str | None, float | None]:
     """探测 symbols 中最新的 market:series 年龄（秒，保留浮点）；无数据返回 (None, None)。"""
     matched: str | None = None
     latest_age: float | None = None
@@ -1461,9 +1532,13 @@ def check_stream_series_freshness(
     # 于 `/trading-precheck`（REAL 分支无 try 兜底）表现为整个端点 500 ——
     # 语义上「远端行情关掉」是**该降级到日线兜底**，不是探测失败。
     try:
-        stream_redis, stream_redis_host, stream_redis_port = _get_stream_series_redis_client()
+        stream_redis, stream_redis_host, stream_redis_port = (
+            _get_stream_series_redis_client()
+        )
         stream_redis.ping()
-        matched_symbol, latest_age_raw = _probe_freshest_series_age(stream_redis, stream_symbols)
+        matched_symbol, latest_age_raw = _probe_freshest_series_age(
+            stream_redis, stream_symbols
+        )
         level = policy.classify(latest_age_raw)
     except Exception as exc:
         # 远端探测异常时降级到交易 Redis，并在 details 回显原因
@@ -1499,15 +1574,20 @@ def check_stream_series_freshness(
             ok = True
             source = "quantdb_daily"
             db_label = {
-                "CN": "QuantDB", "HK": "QuantHK", "US": "QuantUS",
-                "FUTURES": "QuantFutures", "CRYPTO": "QuantBC",
+                "CN": "QuantDB",
+                "HK": "QuantHK",
+                "US": "QuantUS",
+                "FUTURES": "QuantFutures",
+                "CRYPTO": "QuantBC",
             }.get(market_upper, "QuantDB")
             message = (
                 f"Redis 行情时序未接入，回退 {db_label} 日线可用"
                 f"（最近交易日 {qdb_detail}）"
             )
         else:
-            message = f"Redis 行情时序未接入且 {market_upper} 市场日线不可用: {qdb_detail}"
+            message = (
+                f"Redis 行情时序未接入且 {market_upper} 市场日线不可用: {qdb_detail}"
+            )
 
     return {
         "ok": ok,
@@ -1593,7 +1673,6 @@ def check_stream_quote_persist_rate(
         }
     except Exception as e:
         return {"ok": False, "message": f"行情落库检测异常: {e}", "details": {}}
-
 
 
 def _local_today_for_preflight():

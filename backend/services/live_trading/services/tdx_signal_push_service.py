@@ -8,6 +8,7 @@ TDX Signal Push Service - 把模型推理选股推送到通达信
   - script_runner.py（推理完成后自动推送）
   - trade /tdx/push-signals API（前端手动重推）
 """
+
 import asyncio
 import logging
 from datetime import datetime
@@ -17,6 +18,7 @@ from typing import Any
 from backend.shared.database_manager_v2 import get_session
 from backend.shared.quantdb_paths import resolve_quantdb_subdir
 from backend.shared.stock_utils import StockCodeUtil
+from backend.shared.symbol_policy import is_risky_name
 from backend.services.live_trading.services.tdx_push_service import (
     TdxPushError,
     tdx_pusher,
@@ -95,13 +97,48 @@ class TdxSignalPushService:
 
     @staticmethod
     def _pick_stocks(signals: list[dict[str, Any]], top_n: int) -> list[dict[str, Any]]:
-        scored = [
-            s
-            for s in signals
-            if isinstance(s.get("fusion_score"), (int, float))
-        ]
+        scored = [s for s in signals if isinstance(s.get("fusion_score"), (int, float))]
         scored.sort(key=lambda s: float(s["fusion_score"]), reverse=True)
         return scored[: max(1, top_n)]
+
+    @staticmethod
+    def _screen_candidates(
+        top: list[dict[str, Any]],
+        name_map: dict[str, str],
+        price_map: dict[str, float],
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """候选行 → （可推送, 被剔除）。**纯函数**：名称表与价格表由调用方取好。
+
+        剔除顺序即优先级：先判「有没有价」（取不到价连展示都做不到），再判
+        「是不是禁买名称」。名称判据的唯一出处是 `shared/symbol_policy.py`——
+        本处曾是 ``"ST" in name.upper()`` 的子串判定且**完全不看退市**，与决策层
+        判据分裂：推送栏会放行一只退市整理期的票，而它随后真的会被下单。
+        """
+        picked: list[dict[str, Any]] = []
+        skipped: list[dict[str, Any]] = []
+        for s in top:
+            symbol = str(s["symbol"]).strip()
+            suffix = StockCodeUtil.to_suffix(symbol)
+            name = name_map.get(suffix, "")
+            close = price_map.get(symbol, 0.0)
+            if close <= 0:
+                skipped.append({"symbol": suffix or symbol, "reason": "无收盘价"})
+                continue
+            if is_risky_name(name):
+                skipped.append(
+                    {"symbol": suffix or symbol, "name": name, "reason": "ST/退市"}
+                )
+                continue
+            picked.append(
+                {
+                    "symbol": suffix,
+                    "name": name,
+                    "score": round(float(s["fusion_score"]), _SCORE_DIGITS),
+                    "close": round(close, 2),
+                    "side": str(s.get("signal_side") or "BUY").upper(),
+                }
+            )
+        return picked, skipped
 
     async def load_top_stocks(
         self,
@@ -220,30 +257,11 @@ class TdxSignalPushService:
             symbols,
         )
 
-        # 剔除 ST/停牌/无收盘价
-        name_map = _batch_lookup_names([StockCodeUtil.to_suffix(str(s["symbol"])) for s in top])
-        picked: list[dict[str, Any]] = []
-        skipped: list[dict[str, Any]] = []
-        for s in top:
-            symbol = str(s["symbol"]).strip()
-            suffix = StockCodeUtil.to_suffix(symbol)
-            name = name_map.get(suffix, "")
-            close = price_map.get(symbol, 0.0)
-            if close <= 0:
-                skipped.append({"symbol": suffix or symbol, "reason": "无收盘价"})
-                continue
-            if name and ("ST" in name.upper() or name.startswith("*")):
-                skipped.append({"symbol": suffix or symbol, "name": name, "reason": "ST"})
-                continue
-            picked.append(
-                {
-                    "symbol": suffix,
-                    "name": name,
-                    "score": round(float(s["fusion_score"]), _SCORE_DIGITS),
-                    "close": round(close, 2),
-                    "side": str(s.get("signal_side") or "BUY").upper(),
-                }
-            )
+        # 剔除 ST/退市/停牌/无收盘价（判据唯一出处 `shared/symbol_policy.py`）
+        name_map = _batch_lookup_names(
+            [StockCodeUtil.to_suffix(str(s["symbol"])) for s in top]
+        )
+        picked, skipped = self._screen_candidates(top, name_map, price_map)
         if not picked:
             return {
                 "success": False,

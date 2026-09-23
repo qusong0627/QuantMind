@@ -5,17 +5,24 @@
 - 把 `falsify` 抄成 `evidence` → 红（依据与失效条件必须是两段话）；
 - 把全表标成 `structural` 以逃过代价记账 → 红（关键规则必须可计价）；
 - 复核日过去却没人复核 → 由 `review_overdue` 在报告里显式列出（本测试只钉判定口径）。
+
+覆盖的是**两族**规则的并集（P2.1b 起）：执行族（`builtin_rules.py` 里走
+`@rule` 注册的判定）+ 决策族（`backend/shared/decision/gates.py` 的纯函数）。
+两族的区别与"为什么不合成一族"写在 `gate_registry` 的模块 docstring 里。
 """
 
 from __future__ import annotations
 
+import importlib
 from datetime import date
 
 import pytest
 
+from backend.shared.decision.gates import ALL_RULE_IDS as DECISION_RULE_IDS
 from backend.shared.risk import builtin_rules  # noqa: F401  —— 触发 @rule 注册
 from backend.shared.risk.gate_registry import (
     KIND_STRUCTURAL,
+    KIND_UNSEEN,
     KIND_VETO,
     KINDS,
     REVIEW_ACTIONS,
@@ -27,6 +34,14 @@ from backend.shared.risk.gate_registry import (
     review_overdue,
 )
 from backend.shared.risk.registry import all_rules
+
+#: `where` 的首段是**模块名**（如 `builtin_rules.l1_available_cash`），这里给出
+#: 它到导入路径的映射。新增一族规则要往这里加一行——**没有映射即红**，
+#: 因为猜模块路径正是这条不变量要防的漂移（改名/搬家后 `where` 会烂掉）。
+_MODULE_PATHS = {
+    "builtin_rules": "backend.shared.risk.builtin_rules",
+    "gates": "backend.shared.decision.gates",
+}
 
 
 #: 必须可计价的规则（**不能**被改成 structural 逃过记账）。选它们是因为
@@ -48,11 +63,12 @@ _MUST_BE_PRICED = (
 
 
 def _registered_ids() -> set[str]:
-    return {r.rule_id for r in all_rules()}
+    """两族规则的**并集**：执行族（@rule 注册表）+ 决策族（gates.py 的常量表）。"""
+    return {r.rule_id for r in all_rules()} | set(DECISION_RULE_IDS)
 
 
 def test_every_code_rule_is_registered_and_vice_versa():
-    """双向覆盖：代码注册的规则 ↔ 登记表条目，任一边多出即红。"""
+    """双向覆盖：代码里的规则 ↔ 登记表条目，任一边多出即红。"""
     code_ids = _registered_ids()
     spec_ids = {g.rule_id for g in all_gates()}
 
@@ -60,6 +76,37 @@ def test_every_code_rule_is_registered_and_vice_versa():
     extra = sorted(spec_ids - code_ids)
     assert not missing, f"以下规则在代码里注册了但登记表没有条目：{missing}"
     assert not extra, f"登记表有以下条目但代码里没有对应规则：{extra}"
+
+
+def test_decision_family_is_covered_by_the_union():
+    """决策族的 id 必须真的被登记表收下（并集不是"看着像有覆盖"）。
+
+    少了这条，若 `ALL_RULE_IDS` 被误改成空元组，上面的并集覆盖会**静默通过**
+    ——那正是「零项参与 = 通过」的变体。
+    """
+    assert DECISION_RULE_IDS, "决策族规则常量为空，说明 gates.py 的 ALL_RULE_IDS 坏了"
+    spec_ids = {g.rule_id for g in all_gates()}
+    missing = sorted(set(DECISION_RULE_IDS) - spec_ids)
+    assert not missing, f"决策族规则没有登记表条目：{missing}"
+
+
+def test_where_points_at_a_real_function():
+    """`where` 必须能**机械解析**到一个真实函数：指针要是指空，等于没写。
+
+    只写文件名（`gates.py`）也能糊过去，但那样改名/搬家之后没人知道断没断。
+    模块名到导入路径的映射写在 `_MODULE_PATHS`（不许猜），没有映射即红。
+    """
+    for g in all_gates():
+        module_name, _, attr = g.where.partition(".")
+        path = _MODULE_PATHS.get(module_name)
+        assert path is not None, (
+            f"{g.rule_id} 的 where={g.where!r} 首段模块名未登记到 _MODULE_PATHS"
+        )
+        assert attr, f"{g.rule_id} 的 where={g.where!r} 只给了模块名，没有函数名"
+        module = importlib.import_module(path)
+        assert callable(getattr(module, attr, None)), (
+            f"{g.rule_id} 的 where={g.where!r} 指向的不是可调用对象（改名/搬家了？）"
+        )
 
 
 def test_registry_ids_are_unique():
@@ -135,6 +182,12 @@ def test_must_be_priced_rules_are_still_priced():
 
 def test_priced_kinds_is_the_single_source_for_accounting():
     assert priced_kinds() == (KIND_VETO,)
+
+
+def test_unseen_is_not_priced():
+    """`unseen` 没有「放行即成交」的反事实（模型未必会选那只票），不许进代价账。"""
+    assert KIND_UNSEEN in KINDS
+    assert KIND_UNSEEN not in priced_kinds()
 
 
 def test_kind_of_unknown_rule_defaults_to_veto():

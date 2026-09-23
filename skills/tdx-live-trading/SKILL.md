@@ -38,7 +38,7 @@ QuantMind 交易执行链路的**操作 + 监控手册**：从模型推理信号
 | **RedisClient 静默 no-op** | `get/set` 在 client 为 None 时静默返回 —— 独立脚本必须先 `r.connect()`，否则配置"保存成功"实际没写 |
 | **L2 分数中性=无生产推理** | 无当天推理时 `load_latest_scores` 为空 → 融合回退中性 50 → 不触发买卖（正确的稳定性行为，不是故障） |
 | **A股红涨绿跌** | 前端/报告里红色=涨/买入，绿色=跌/卖出 |
-| **桥运行时配置在 Redis** | 容器 env 的 `TDX_BRIDGE_URL` 可能是过期 IP；真实生效值在 `trade:tdx_config:runtime`（当前桥 = http://192.168.31.31:8550） |
+| **桥运行时配置在 Redis** | 真实生效地址一律取 `trade:tdx_config:runtime` 的 `bridge_url`（桥换过机，env 与文档里的字面量都可能是过期 IP —— 本表**不记录具体地址**，避免又一处会腐烂的常量） |
 | **实盘包跑源码、不跑 exe** | 仓库里的 `tools/bridge-windows/dist/TDXBridge.exe` 是 `.gitignore` 白名单内的历史产物，早于 BSFlag 买卖方向修复；`deploy/live-win/build_live_pack.sh` 从源码注入 `<包根>/bridge/tdx` |
 
 ## 链路架构
@@ -103,7 +103,7 @@ docker exec -i -w /app quantmind python - < skills/tdx-live-trading/scripts/tdx_
   ```bash
   docker exec quantmind python -c "
   import asyncio
-  from backend.services.trade.redis_client import RedisClient
+  from backend.services.trade_shared.redis_client import get_redis
   async def m():
       r = RedisClient(); r.connect()
       c = r.get('tdx:l2:config') or {}
@@ -126,7 +126,7 @@ docker exec -i -w /app quantmind python - < skills/tdx-live-trading/scripts/tdx_
 
 ## 4. 下单 / 挂单 / 卖出 / 撤单
 
-桥 API（`http://192.168.31.31:8550`，需 Bearer token，token 在 Redis `trade:tdx_config:runtime`）：
+桥 API（地址与 token 都取 Redis `trade:tdx_config:runtime` 的 `bridge_url` / `bridge_token`，需 `Authorization: Bearer <token>`）：
 
 | 操作 | 路径 | 要点 |
 |---|---|---|
@@ -188,7 +188,7 @@ docker exec quantmind kill <trade-PID>   # 通过 0x1F42 端口归属确认
 
 ```bash
 docker exec quantmind python -c "
-from backend.services.trade.redis_client import RedisClient
+from backend.services.trade_shared.redis_client import get_redis
 r = RedisClient(); r.connect()
 print(r.get('trade:tdx_config:runtime'))   # 真实生效的 bridge_url/token
 "

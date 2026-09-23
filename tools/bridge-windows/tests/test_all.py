@@ -254,6 +254,22 @@ def main():
     print("  ✅ SQLite 缓存层正确")
     db.close()
 
+    # 桥自带止损守护的默认值必须是「关」。
+    # 它是个独立卖出者（触发即市价卖出），守护单已由 QuantMind 的 sltp_executor
+    # 承担；两者同触发即对同一账户同一持仓超卖。
+    # 注意**两处默认值各自独立生效**：Config.get(dotted, default) 在 config.yaml
+    # 存在但缺该段时返回调用方给的 default —— 部署包通常自带 config.yaml，
+    # 所以 main.py 那一处才是真正生效的门，只关 DEFAULT_CONFIG 等于没关。
+    print("\n=== 止损守护默认关闭 ===")
+    import yaml
+    from src.utils.config import DEFAULT_CONFIG
+    _d = yaml.safe_load(DEFAULT_CONFIG)
+    assert _d["sltp_daemon"]["enabled"] is False, "DEFAULT_CONFIG 里 sltp_daemon.enabled 应为 false"
+    _main_src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "main.py"), encoding="utf-8").read()
+    assert 'cfg.get("sltp_daemon.enabled", False)' in _main_src, "main.py 的 sltp_daemon.enabled 默认值应为 False"
+    assert 'cfg.get("sltp_daemon.enabled", True)' not in _main_src, "main.py 仍有 True 默认值"
+    print("  ✅ 两处默认值均为「关」")
+
     srv.shutdown()
     print(f"\n=== 结果: {passed} 通过, {failed} 失败 ===")
     return 1 if failed else 0

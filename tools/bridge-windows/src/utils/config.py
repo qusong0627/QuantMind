@@ -41,7 +41,12 @@ tdx:
   request_timeout_seconds: 15
   max_retries: 2
 sltp_daemon:
-  enabled: true
+  # 默认 **关**：桥自带的 StopLossDaemon 是个独立卖出者（触发即市价卖出），
+  # 而守护单已由 QuantMind 的 sltp_executor 承担 —— 两个卖出者指向同一账户
+  # 同一持仓，同时触发就是超卖。原默认 true 意味着「不配置 = 开着一个
+  # 与主系统打架的止损」，对一个共享桥上的真钱账户过于危险。
+  # 需要它时在 config.yaml 显式写 enabled: true（但仍须确认主系统未接管守护单）。
+  enabled: false
   poll_interval_seconds: 5
 order_tracking:
   state_file: "./data/active_orders.json"

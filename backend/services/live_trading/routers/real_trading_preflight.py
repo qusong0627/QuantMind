@@ -54,9 +54,8 @@ def _is_cn_trading_hours() -> bool:
         now = datetime.now(ZoneInfo("Asia/Shanghai"))
     except Exception:
         now = datetime.now()
-    return (
-        now.weekday() < 5
-        and ((now.hour == 9 and now.minute >= 15) or (10 <= now.hour < 15))
+    return now.weekday() < 5 and (
+        (now.hour == 9 and now.minute >= 15) or (10 <= now.hour < 15)
     )
 
 
@@ -77,7 +76,9 @@ async def preflight_check(
     - Runner 镜像配置（REAL/SHADOW 必需）
     - INTERNAL_CALL_SECRET 配置（必需）
     """
-    resolved_user_id, resolved_tenant_id = _normalize_identity(auth, user_id=user_id, tenant_id=tenant_id)
+    resolved_user_id, resolved_tenant_id = _normalize_identity(
+        auth, user_id=user_id, tenant_id=tenant_id
+    )
     mode = str(trading_mode or "REAL").strip().upper()
     if mode not in {"REAL", "SHADOW", "SIMULATION"}:
         raise HTTPException(status_code=400, detail=f"unsupported trading_mode: {mode}")
@@ -132,9 +133,13 @@ async def preflight_check(
 
     internal_secret = get_internal_call_secret()
     if internal_secret:
-        add_check("internal_secret", "内部密钥", True, True, "INTERNAL_CALL_SECRET 已配置")
+        add_check(
+            "internal_secret", "内部密钥", True, True, "INTERNAL_CALL_SECRET 已配置"
+        )
     else:
-        add_check("internal_secret", "内部密钥", False, True, "缺少 INTERNAL_CALL_SECRET 配置")
+        add_check(
+            "internal_secret", "内部密钥", False, True, "缺少 INTERNAL_CALL_SECRET 配置"
+        )
 
     # 4) User ID 格式（执行链路要求可转 int）
     try:
@@ -228,20 +233,26 @@ async def preflight_check(
         )
     elif mode in {"REAL", "SHADOW"}:
         orchestration_ok = bool(k8s_manager.api and k8s_manager.core_api)
-        orchestration_label = "Docker 引擎" if k8s_manager.mode == "docker" else "K8s 集群"
+        orchestration_label = (
+            "Docker 引擎" if k8s_manager.mode == "docker" else "K8s 集群"
+        )
         add_check(
             "orchestration",
             orchestration_label,
             orchestration_ok,
             True,
-            f"{orchestration_label} 客户端已就绪" if orchestration_ok else f"{orchestration_label} 客户端未初始化",
+            f"{orchestration_label} 客户端已就绪"
+            if orchestration_ok
+            else f"{orchestration_label} 客户端未初始化",
         )
 
     # 7) QMT Agent 在线状态（PG 账户快照 + Redis 心跳）; 无 QMT 时回退通达信桥
     bridge_required = mode == "REAL"
     account_report: dict | None = None
     if bridge_required:
-        heartbeat_key = build_trade_agent_heartbeat_key(resolved_tenant_id, resolved_user_id)
+        heartbeat_key = build_trade_agent_heartbeat_key(
+            resolved_tenant_id, resolved_user_id
+        )
         qmt_failed_detail: str | None = None
         try:
             account_snapshot = await _fetch_latest_real_account_snapshot(
@@ -251,7 +262,9 @@ async def preflight_check(
             )
             heartbeat_raw = redis.client.get(heartbeat_key)
             if not account_snapshot:
-                qmt_failed_detail = "未检测到 PostgreSQL 实盘账户快照，请先等待 QMT Agent 上报并落库"
+                qmt_failed_detail = (
+                    "未检测到 PostgreSQL 实盘账户快照，请先等待 QMT Agent 上报并落库"
+                )
             elif not heartbeat_raw:
                 qmt_failed_detail = f"未检测到 QMT Agent 心跳上报({heartbeat_key})，请确认 QMT Agent 已连接"
             else:
@@ -267,16 +280,27 @@ async def preflight_check(
                 if not isinstance(heartbeat_report, dict):
                     qmt_failed_detail = "检测到 QMT Agent 心跳格式异常（非 JSON 对象）"
                 else:
-                    account_ts = _parse_snapshot_timestamp(account_snapshot.get("snapshot_at"))
+                    account_ts = _parse_snapshot_timestamp(
+                        account_snapshot.get("snapshot_at")
+                    )
                     heartbeat_ts = _parse_bridge_report_ts(heartbeat_report)
                     if account_ts is None or heartbeat_ts is None:
-                        qmt_failed_detail = "QMT Agent 上报缺少有效时间戳（PG 账户快照或心跳）"
+                        qmt_failed_detail = (
+                            "QMT Agent 上报缺少有效时间戳（PG 账户快照或心跳）"
+                        )
                     else:
                         account_age_sec = max(0, int(time.time() - account_ts))
                         heartbeat_age_sec = max(0, int(time.time() - heartbeat_ts))
-                        account_threshold_sec = int(os.getenv("QMT_AGENT_ACCOUNT_STALE_THRESHOLD_SEC", "120"))
-                        heartbeat_threshold_sec = int(os.getenv("QMT_AGENT_HEARTBEAT_STALE_THRESHOLD_SEC", "60"))
-                        if account_age_sec <= account_threshold_sec and heartbeat_age_sec <= heartbeat_threshold_sec:
+                        account_threshold_sec = int(
+                            os.getenv("QMT_AGENT_ACCOUNT_STALE_THRESHOLD_SEC", "120")
+                        )
+                        heartbeat_threshold_sec = int(
+                            os.getenv("QMT_AGENT_HEARTBEAT_STALE_THRESHOLD_SEC", "60")
+                        )
+                        if (
+                            account_age_sec <= account_threshold_sec
+                            and heartbeat_age_sec <= heartbeat_threshold_sec
+                        ):
                             add_check(
                                 "qmt_agent_online",
                                 "QMT Agent 在线状态",
@@ -319,14 +343,36 @@ async def preflight_check(
                     f"{qmt_failed_detail}；且 {tdx_detail}",
                 )
 
+    # 7) 桥侧自带止损 daemon 必须未 arm（P0.6）
+    # 桥的 StopLossDaemon 与 QuantMind 的 sltp_executor 是**两个独立卖出者**、
+    # 同一账户同一持仓：同时触发 = 超卖。桥侧恒应为空。
+    # 仅在实盘模式下列入（模拟盘不经过桥）。armed 时 required=True 阻断启动——
+    # 这不是「提醒」，是「另一个东西正在替你卖」。
+    if mode == "REAL":
+        from backend.services.live_trading.routers.real_trading_utils import (
+            check_bridge_sltp_disarmed,
+        )
+
+        sltp_ok, sltp_detail, sltp_armed = check_bridge_sltp_disarmed()
+        add_check(
+            "bridge_sltp_disarmed",
+            "桥侧止损 daemon 未启用",
+            sltp_ok,
+            sltp_armed,  # 只有「确实 arm 了」才阻断；不可达属在线检查的职责
+            sltp_detail,
+            {"armed": sltp_armed},
+        )
+
     # 7.1~7.4) 双向交易专属预检
     margin_enabled = bool(getattr(settings, "ENABLE_MARGIN_TRADING", False))
     add_check(
         "margin_trading_feature",
         "双向交易功能开关",
         True,  # 警告：不阻断启动
-        False, # 不阻断
-        "ENABLE_MARGIN_TRADING 已开启" if margin_enabled else "[WARNING] ENABLE_MARGIN_TRADING 未开启(部分双向策略可能无法下单)",
+        False,  # 不阻断
+        "ENABLE_MARGIN_TRADING 已开启"
+        if margin_enabled
+        else "[WARNING] ENABLE_MARGIN_TRADING 未开启(部分双向策略可能无法下单)",
     )
 
     if margin_enabled:
@@ -342,9 +388,16 @@ async def preflight_check(
                 (
                     f"融资融券股票池已加载，共 {snapshot.record_count} 只股票"
                     if snapshot.record_count > 0
-                    else ("[WARNING] 融资融券股票池为空（模拟盘不阻断）" if is_sim_margin else "融资融券股票池为空")
+                    else (
+                        "[WARNING] 融资融券股票池为空（模拟盘不阻断）"
+                        if is_sim_margin
+                        else "融资融券股票池为空"
+                    )
                 ),
-                {"source_path": snapshot.source_path, "record_count": snapshot.record_count},
+                {
+                    "source_path": snapshot.source_path,
+                    "record_count": snapshot.record_count,
+                },
             )
         except Exception as e:
             is_sim_margin2 = mode == "SIMULATION"
@@ -353,7 +406,9 @@ async def preflight_check(
                 "融资融券股票池",
                 True if is_sim_margin2 else False,
                 False if is_sim_margin2 else True,
-                f"[WARNING] 融资融券股票池加载失败: {e}（模拟盘不阻断）" if is_sim_margin2 else f"融资融券股票池加载失败: {e}",
+                f"[WARNING] 融资融券股票池加载失败: {e}（模拟盘不阻断）"
+                if is_sim_margin2
+                else f"融资融券股票池加载失败: {e}",
             )
 
         real_short_required = mode == "REAL"
@@ -376,12 +431,18 @@ async def preflight_check(
             (
                 "ENABLE_LONG_SHORT_REAL 已开启"
                 if long_short_enabled
-                else ("通达信桥通道，跳过实盘多空灰度" if short_skip else "ENABLE_LONG_SHORT_REAL 未开启")
+                else (
+                    "通达信桥通道，跳过实盘多空灰度"
+                    if short_skip
+                    else "ENABLE_LONG_SHORT_REAL 未开启"
+                )
             ),
         )
         whitelist_users = {
             item.strip()
-            for item in str(getattr(settings, "LONG_SHORT_WHITELIST_USERS", "")).split(",")
+            for item in str(getattr(settings, "LONG_SHORT_WHITELIST_USERS", "")).split(
+                ","
+            )
             if item and item.strip()
         }
         in_whitelist = str(resolved_user_id) in whitelist_users
@@ -417,7 +478,8 @@ async def preflight_check(
         )
 
         account_has_credit_fields = isinstance(account_report, dict) and any(
-            key in account_report for key in ("liabilities", "credit_limit", "short_market_value")
+            key in account_report
+            for key in ("liabilities", "credit_limit", "short_market_value")
         )
         add_check(
             "margin_account_state",
@@ -435,8 +497,10 @@ async def preflight_check(
             ),
             account_report if account_has_credit_fields else {},
         )
-        short_admission_ready = isinstance(account_report, dict) and bool(account_report.get("credit_enabled", False)) and (
-            int(account_report.get("shortable_symbols_count") or 0) > 0
+        short_admission_ready = (
+            isinstance(account_report, dict)
+            and bool(account_report.get("credit_enabled", False))
+            and (int(account_report.get("shortable_symbols_count") or 0) > 0)
         )
         add_check(
             "short_admission_capability",
@@ -450,9 +514,7 @@ async def preflight_check(
             )
             if isinstance(account_report, dict) and account_report
             else (
-                "通达信桥通道，无需做空准入检查"
-                if short_skip
-                else "未检测到账户快照"
+                "通达信桥通道，无需做空准入检查" if short_skip else "未检测到账户快照"
             ),
         )
 
@@ -472,7 +534,13 @@ async def preflight_check(
                 "Stream时序序列",
                 True if is_sim else res["ok"],
                 False if is_sim else True,
-                res["message"] if res["ok"] else (f"[WARNING] {res['message']}（已回退日线开盘价撮合，不阻断模拟盘）" if is_sim else res["message"]),
+                res["message"]
+                if res["ok"]
+                else (
+                    f"[WARNING] {res['message']}（已回退日线开盘价撮合，不阻断模拟盘）"
+                    if is_sim
+                    else res["message"]
+                ),
                 res["details"],
             )
         except Exception as e:
@@ -481,7 +549,9 @@ async def preflight_check(
                 "Stream时序序列",
                 mode == "SIMULATION",
                 mode != "SIMULATION",
-                f"[WARNING] 行情检测异常: {e}（已回退日线开盘价撮合）" if mode == "SIMULATION" else f"行情检测异常: {e}",
+                f"[WARNING] 行情检测异常: {e}（已回退日线开盘价撮合）"
+                if mode == "SIMULATION"
+                else f"行情检测异常: {e}",
             )
 
         # 2. Stream行情落库 (SIMULATION 回退日线，不阻断)
@@ -497,7 +567,13 @@ async def preflight_check(
                 "Stream行情落库",
                 True if is_sim2 else res["ok"],
                 False if is_sim2 else True,
-                res["message"] if res["ok"] else (f"[WARNING] {res['message']}（已回退日线，不阻断模拟盘）" if is_sim2 else res["message"]),
+                res["message"]
+                if res["ok"]
+                else (
+                    f"[WARNING] {res['message']}（已回退日线，不阻断模拟盘）"
+                    if is_sim2
+                    else res["message"]
+                ),
                 res["details"],
             )
         except Exception as e:
@@ -506,17 +582,23 @@ async def preflight_check(
                 "Stream行情落库",
                 mode == "SIMULATION",
                 mode != "SIMULATION",
-                f"[WARNING] 行情落库检测失败: {e}（已回退日线）" if mode == "SIMULATION" else f"行情落库检测失败: {e}",
+                f"[WARNING] 行情落库检测失败: {e}（已回退日线）"
+                if mode == "SIMULATION"
+                else f"行情落库检测失败: {e}",
             )
             await db.rollback()
 
         # 10) Stream K线拉取可用性（只做可用性探针，默认非阻断）
         kline_required = False
         kline_symbol = _resolve_preflight_symbols()[0]
-        stream_base_url = str(settings.MARKET_DATA_SERVICE_URL or "http://quantmind-stream:8003").rstrip("/")
+        stream_base_url = str(
+            settings.MARKET_DATA_SERVICE_URL or "http://quantmind-stream:8003"
+        ).rstrip("/")
         kline_url = f"{stream_base_url}/api/v1/klines/{kline_symbol}"
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(5.0, connect=2.0)) as client:
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(5.0, connect=2.0)
+            ) as client:
                 resp = await client.get(
                     kline_url,
                     params={"interval": "1d", "limit": 3, "use_cache": False},
@@ -570,14 +652,24 @@ async def preflight_check(
             if not default_model:
                 try:
                     candidates = await model_registry_service.list_models(
-                        tenant_id=resolved_tenant_id, user_id=resolved_user_id, include_archived=False
+                        tenant_id=resolved_tenant_id,
+                        user_id=resolved_user_id,
+                        include_archived=False,
                     )
-                    avail = [m for m in candidates if str(m.get("status") or "").lower() in {"ready", "active"}]
+                    avail = [
+                        m
+                        for m in candidates
+                        if str(m.get("status") or "").lower() in {"ready", "active"}
+                    ]
                     chosen = (avail or candidates[:1] or [None])[0]
                     if chosen and chosen.get("model_id"):
                         try:
-                            default_model = await model_registry_service.set_default_model(
-                                tenant_id=resolved_tenant_id, user_id=resolved_user_id, model_id=str(chosen.get("model_id"))
+                            default_model = (
+                                await model_registry_service.set_default_model(
+                                    tenant_id=resolved_tenant_id,
+                                    user_id=resolved_user_id,
+                                    model_id=str(chosen.get("model_id")),
+                                )
                             )
                         except Exception:
                             default_model = chosen
@@ -595,8 +687,12 @@ async def preflight_check(
                     else "未配置默认模型（单模型/多模型均需设置默认模型），请先在模型管理中设置默认模型后再启动模拟盘"
                 ),
                 {
-                    "model_id": default_model.get("model_id") if model_configured else None,
-                    "model_name": default_model.get("model_name") if model_configured else None,
+                    "model_id": default_model.get("model_id")
+                    if model_configured
+                    else None,
+                    "model_name": default_model.get("model_name")
+                    if model_configured
+                    else None,
                 },
             )
         except Exception as e:
@@ -680,7 +776,9 @@ async def preflight_check(
                 "模拟盘数据表",
                 tables_ok,
                 True,
-                "模拟盘关键表已就绪" if tables_ok else f"缺少模拟盘关键表: {', '.join(missing_tables)}",
+                "模拟盘关键表已就绪"
+                if tables_ok
+                else f"缺少模拟盘关键表: {', '.join(missing_tables)}",
                 {
                     "required_tables": [
                         "sim_orders",
@@ -702,8 +800,12 @@ async def preflight_check(
             await db.rollback()
 
         # 11.4 权益结算任务配置（非阻断，便于排障）
-        settle_enabled = str(os.getenv("SIM_EQUITY_SETTLE_ENABLED", "true")).strip().lower() not in {"0", "false", "no", "off"}
-        interval_raw = str(os.getenv("SIM_EQUITY_SETTLE_INTERVAL_SECONDS", "30")).strip()
+        settle_enabled = str(
+            os.getenv("SIM_EQUITY_SETTLE_ENABLED", "true")
+        ).strip().lower() not in {"0", "false", "no", "off"}
+        interval_raw = str(
+            os.getenv("SIM_EQUITY_SETTLE_INTERVAL_SECONDS", "30")
+        ).strip()
         try:
             interval_seconds = int(interval_raw)
         except Exception:
@@ -741,13 +843,19 @@ async def preflight_check(
             if mode == "SIMULATION":
                 stream_ok = True
                 stream_required = False
-                res_msg = res["message"] if res.get("ok") else f"[WARNING] {res['message']}（已回退日线开盘价撮合，不阻断模拟盘）"
+                res_msg = (
+                    res["message"]
+                    if res.get("ok")
+                    else f"[WARNING] {res['message']}（已回退日线开盘价撮合，不阻断模拟盘）"
+                )
             else:
                 is_trading_hours = _is_cn_trading_hours()
                 stream_required = is_trading_hours
                 res_msg = res["message"]
             details = dict(res.get("details") or {})
-            details["is_trading_hours"] = _is_cn_trading_hours() if mode != "SIMULATION" else False
+            details["is_trading_hours"] = (
+                _is_cn_trading_hours() if mode != "SIMULATION" else False
+            )
             add_check(
                 "stream_series_freshness",
                 "实时行情服务",
@@ -834,7 +942,9 @@ async def list_preflight_snapshots_daily(
     auth: AuthContext = Depends(get_auth_context),
     db: AsyncSession = Depends(get_db),
 ):
-    resolved_user_id, resolved_tenant_id = _normalize_identity(auth, user_id=user_id, tenant_id=tenant_id)
+    resolved_user_id, resolved_tenant_id = _normalize_identity(
+        auth, user_id=user_id, tenant_id=tenant_id
+    )
     query = (
         select(PreflightSnapshot)
         .where(
@@ -862,7 +972,9 @@ async def list_preflight_snapshots_daily(
             "passed_checks": int(r.passed_checks or 0),
             "required_failed_count": int(r.required_failed_count or 0),
             "failed_required_keys": r.failed_required_keys or [],
-            "last_checked_at": r.last_checked_at.isoformat() if r.last_checked_at else None,
+            "last_checked_at": r.last_checked_at.isoformat()
+            if r.last_checked_at
+            else None,
             "updated_at": r.updated_at.isoformat() if r.updated_at else None,
             "checks": r.checks or [],
         }
@@ -977,7 +1089,9 @@ async def get_account(
     响应含 ``account_source`` / ``source_downgraded`` 供前端标注实际口径。
     """
     try:
-        resolved_user_id, resolved_tenant_id = _normalize_identity(auth, user_id=user_id, tenant_id=tenant_id)
+        resolved_user_id, resolved_tenant_id = _normalize_identity(
+            auth, user_id=user_id, tenant_id=tenant_id
+        )
         latest_snapshot = await _fetch_latest_real_account_snapshot(
             db,
             tenant_id=resolved_tenant_id,
@@ -1024,13 +1138,21 @@ async def get_account(
 
         account_info = dict(latest_snapshot)
         snapshot_ts = _parse_snapshot_timestamp(account_info.get("snapshot_at"))
-        stale_threshold_sec = max(30, int(os.getenv("QMT_AGENT_ACCOUNT_STALE_THRESHOLD_SEC", "120") or 120))
-        account_age_sec = None if snapshot_ts is None else max(0.0, time.time() - snapshot_ts)
-        account_info["is_online"] = bool(account_age_sec is not None and account_age_sec <= stale_threshold_sec)
+        stale_threshold_sec = max(
+            30, int(os.getenv("QMT_AGENT_ACCOUNT_STALE_THRESHOLD_SEC", "120") or 120)
+        )
+        account_age_sec = (
+            None if snapshot_ts is None else max(0.0, time.time() - snapshot_ts)
+        )
+        account_info["is_online"] = bool(
+            account_age_sec is not None and account_age_sec <= stale_threshold_sec
+        )
         if account_age_sec is not None:
             account_info["account_age_seconds"] = int(account_age_sec)
         if account_info["is_online"] is False:
-            account_info["stale_reason"] = f"account_snapshot_stale({int(account_age_sec or 0)}s)"
+            account_info["stale_reason"] = (
+                f"account_snapshot_stale({int(account_age_sec or 0)}s)"
+            )
 
         # ── 字段归一化 ──────────────────────────────────────────────────
         # 对外暴露语义统一来自 PostgreSQL 最新快照视图：
@@ -1065,7 +1187,9 @@ async def get_account(
             account_info["baseline"] = {
                 "initial_equity": float(account_info.get("initial_equity") or 0.0),
                 "day_open_equity": float(account_info.get("day_open_equity") or 0.0),
-                "month_open_equity": float(account_info.get("month_open_equity") or 0.0),
+                "month_open_equity": float(
+                    account_info.get("month_open_equity") or 0.0
+                ),
             }
 
             return account_info
