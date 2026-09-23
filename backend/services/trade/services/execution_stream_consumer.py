@@ -11,6 +11,7 @@ from uuid import UUID
 
 import redis
 from sqlalchemy import and_, select
+from sqlalchemy.exc import IntegrityError
 
 from backend.services.trade_shared.models.enums import OrderStatus
 from backend.services.trade_shared.models.order import Order
@@ -427,11 +428,6 @@ class ExecutionStreamConsumer:
             raise ValueError("order_filled invalid filled_qty/filled_price")
 
         async with get_session() as session:
-            # 幂等检查：已有同 idem_key 的成交则直接返回
-            dup_result = await session.execute(select(Trade).where(Trade.exchange_trade_id == idem_key).limit(1))
-            if dup_result.scalar_one_or_none() is not None:
-                return
-
             order = await self._resolve_order(session, fields)
             if order is None:
                 raise ValueError(
@@ -440,6 +436,26 @@ class ExecutionStreamConsumer:
                     f"client_order_id={fields.get('client_order_id')} "
                     f"exchange_order_id={fields.get('exchange_order_id') or fields.get('broker_order_id')}"
                 )
+
+            # 幂等检查（P2.7）：按 **(租户, 用户, 成交号)** 去重——券商成交号只在一个
+            # 账户内唯一。此前这里是**全库** SELECT：另一个账户（多租户，或两个券商各自
+            # 从 1 开始编号）的同号成交会把这一笔静默丢掉——不落成交行、不更新订单、
+            # 不记分账。成交行的租户/用户取自订单，所以判定必须排在订单定位之后。
+            # 兜底是 DB 层的 uq_trades_scope_exchange_trade_id（见 trade_contract）：
+            # 并发下两条路径都 SELECT 不到时，后提交的那条撞唯一键 → 这里接住当「已记过」。
+            dup_result = await session.execute(
+                select(Trade)
+                .where(
+                    and_(
+                        Trade.tenant_id == order.tenant_id,
+                        Trade.user_id == order.user_id,
+                        Trade.exchange_trade_id == idem_key,
+                    )
+                )
+                .limit(1)
+            )
+            if dup_result.scalar_one_or_none() is not None:
+                return
 
             trade_value = filled_qty * filled_price
             trade = Trade(
@@ -500,7 +516,20 @@ class ExecutionStreamConsumer:
             elif order.filled_quantity > 0:
                 order.status = OrderStatus.PARTIALLY_FILLED
 
-            await session.commit()
+            try:
+                await session.commit()
+            except IntegrityError:
+                # 并发双写：另一条路径（QMT 轮询 / 桥上报）刚落了同一笔成交，唯一键
+                # （uq_trades_scope_exchange_trade_id）把这一条挡在门外。这不是错误
+                # ——重投的语义就是「已记过」：回滚本事务（订单状态由先提交的那一方
+                # 推进，本事务里没有别的工作），事件照常 ack，不再走 DLQ 重试。
+                await session.rollback()
+                logger.info(
+                    "order_filled 撞成交唯一键（并发路径已记过）order_id=%s trade_id=%s",
+                    order.order_id,
+                    idem_key,
+                )
+                return
 
     async def _handle_order_cancelled(self, fields: dict[str, Any]) -> None:
         reason = str(fields.get("reason") or "stream cancelled")

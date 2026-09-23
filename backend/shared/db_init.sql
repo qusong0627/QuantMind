@@ -913,6 +913,14 @@ CREATE TABLE IF NOT EXISTS trades (
     updated_at      TIMESTAMP NOT NULL DEFAULT NOW()
 );
 
+-- P2.7：一笔成交只允许一行——(租户, 用户, 成交号) 部分唯一。
+-- 没有它，「commit 成功但进程以为失败」的重投（SELECT-then-INSERT + 原样 requeue）
+-- 会落两条成交行，分账账本随之双记（虚拟现金凭空多一笔）。
+-- 券商成交号只在一个账户内唯一 → 必须带租户/用户；状态回调无成交号不落行 → 排除 NULL。
+CREATE UNIQUE INDEX IF NOT EXISTS uq_trades_scope_exchange_trade_id
+    ON trades (tenant_id, user_id, exchange_trade_id)
+    WHERE exchange_trade_id IS NOT NULL;
+
 -- ========================
 -- 34. PORTFOLIOS
 -- ========================

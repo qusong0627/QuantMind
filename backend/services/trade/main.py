@@ -141,6 +141,7 @@ async def lifespan(app: FastAPI):
         from backend.shared.signal_contract import (
             ensure_signal_contract_columns_async,
         )
+        from backend.shared.trade_contract import ensure_trade_unique_index_async
 
         for _ensure in (
             ensure_order_contract_columns_async,
@@ -154,6 +155,7 @@ async def lifespan(app: FastAPI):
             ensure_ghost_ledger_table_async,
             ensure_decision_ledger_table_async,
             ensure_agent_ledger_tables_async,
+            ensure_trade_unique_index_async,
         ):
             try:
                 await _ensure()

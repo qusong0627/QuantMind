@@ -8,7 +8,7 @@
   （query / redis_get / redis_scan），测试可传假实现；
 - 有 ``fail`` 项时退出码 = 1，可直接进 cron / CI。
 
-十三项断言（「模型契约一致」「风控状态」待 P1/P4 前置设施就绪后补）：
+十四项断言（「模型契约一致」「风控状态」待 P1/P4 前置设施就绪后补）：
   C01 信号分布（全 HOLD / 分布坍缩）      C06 对账差异
   C02 信号就绪标记与残 run                C07 调度心跳（收盘核对）
   C03 账户键一致性（1 vs 00000001 类）    C08 数据同步新鲜度
@@ -16,6 +16,7 @@
   C05 台账写入（成交必落账）              C10 账户种子存在性
   C11 runner 只读 DB 账号                 C12 本地行情数据可用性
   C13 真日历覆盖年限（决策轮 fail-closed 的硬期限）
+  C14 分账账本一致性（LLM 腿成交 ↔ 分账流水 ↔ 成交唯一键）
 
 用法（容器内）:
     python backend/scripts/diagnose/health.py                # 全量
@@ -31,7 +32,7 @@ import os
 import re
 import sys
 from dataclasses import dataclass, field, replace
-from datetime import date
+from datetime import date, timedelta
 from typing import Any
 from collections.abc import Callable
 
@@ -48,6 +49,15 @@ REDIS_DB_TRADE = 2
 #: 落进 qm_market_calendar_day（DB override 优先于真日历）。
 CALENDAR_WARN_DAYS = 90
 CALENDAR_FAIL_DAYS = 30
+
+#: C14 回看窗口（天）。比 C05 的 7 天长：分账流水是幂等键的载体，一笔错账不会随时间
+#: 自愈（该 agent 的虚拟现金与持仓会一直偏），30 天足够覆盖一次真实成交、又不至于翻成年账。
+AGENT_LEDGER_WINDOW_DAYS = 30
+
+#: 窗口两侧各放宽一天再取数：成交侧按 ``executed_at``（瞬时）滤，账本侧按 ``trade_date``
+#: （日期）滤，两者由同一个成交瞬时推出来但落点不同——窗口卡死会在边界日把一对合法
+#: 记录判成「漏记 + 孤儿」。
+AGENT_LEDGER_WINDOW_SLACK_DAYS = 1
 
 LEVEL_ORDER = {"ok": 0, "warn": 1, "fail": 2}
 
@@ -205,6 +215,273 @@ def classify_ledger_coverage(trades_7d: int, covered_7d: int) -> CheckResult:
         f"近 7 日 {trades_7d} 笔成交中 {missing} 笔无 cash_ledger 流水",
         "历史成交属 T-P1-04 前已知缺口（7 日内自然过期）；若为新增成交则是落账链路回归，查 [CONTRACT:LEDGER] 日志",
         {"trades_7d": trades_7d, "covered_7d": covered_7d},
+    )
+
+
+# ---------------------------------------------------------------------------
+# 分账账本 ↔ 成交 对账（P2.7）
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class LedgerParity:
+    """分账账本 ↔ 成交的对账结果（纯数据；判定见 :func:`classify_agent_ledger_parity`）。
+
+    以**订单**为锚配对：账本流水行带 ``order_id``，成交行经同一列也能归组，
+    同一张委托的多次部分成交天然成对。
+    """
+
+    orders: int
+    trades: int
+    ledger_rows: int
+    posted: int
+    missing: tuple[str, ...]
+    mismatch: tuple[str, ...]
+    dup_posts: tuple[str, ...]
+    orphans: tuple[str, ...]
+    unapplied: tuple[str, ...]
+    index_enabled: bool
+
+
+def _group_by_order(rows: Any) -> dict[tuple[str, str, str], list[dict]]:
+    """按 ``(租户, 用户, 订单号)`` 分组。"""
+    grouped: dict[tuple[str, str, str], list[dict]] = {}
+    for row in rows or ():
+        item = dict(row)
+        key = (
+            str(item.get("tenant_id") or ""),
+            str(item.get("user_id") or ""),
+            str(item.get("order_id") or ""),
+        )
+        grouped.setdefault(key, []).append(item)
+    return grouped
+
+
+def _take_exact(index: dict[str, list[int]], used: set[int], fill_key: str) -> int | None:
+    """按成交号精确取一行；取走的划掉——同一行不会被两笔成交认领。"""
+    for i in index.get(fill_key, ()):
+        if i not in used:
+            used.add(i)
+            return i
+    return None
+
+
+def _take_prefixed(index: dict[str, list[int]], used: set[int], prefix: str) -> int | None:
+    """取一行**合成键**流水（``qmt-synth-…``）：合成成交先落账、真实明细到达后就地升级
+    改了成交行 ``exchange_trade_id``，而账本流水按「流水即事实」不跟着改键——这是登记在
+    ``agent_ledger_fill`` 里的**有界偏差**，对账必须认这个配对，否则每笔升级都会报漏记。
+    """
+    for fill_key in sorted(index):
+        if not fill_key.startswith(prefix):
+            continue
+        for i in index[fill_key]:
+            if i not in used:
+                used.add(i)
+                return i
+    return None
+
+
+def ledger_parity(
+    trades: Any,
+    ledger_fills: Any,
+    *,
+    index_enabled: bool,
+    synth_prefix: str,
+) -> LedgerParity:
+    """逐单配对（纯函数）：成交行 ↔ 账本流水行，分成五类偏差。
+
+    * ``missing`` —— 成交有、流水没有：账本少记一笔（额度/持仓一直偏小）；
+    * ``mismatch`` —— 配对成功但 ``agent`` 不一致：钱记到了别人名下；
+    * ``dup_posts`` —— 账本多出的**合成键**流水没有成交行认领：合成成交落账后又把真实
+      成交单独记了一遍 ⇒ 虚拟现金被多扣一笔（双记）；
+    * ``orphans`` —— 账本多出的**真实键**流水（历史导入 / 成交行被删），要人看；
+    * ``unapplied`` —— 流水落了但 ``applied_volume = 0``（方向未知/代码识别不出/卖出超
+      持仓被裁剪）：账本其实没反映这笔成交，原因在 ``note`` 列。
+
+    ``synth_prefix`` 由调用方给（与写入方同一个常量），不在这里写死字面量。
+    """
+    trades_by_order = _group_by_order(trades)
+    ledger_by_order = _group_by_order(ledger_fills)
+    posted = 0
+    missing: list[str] = []
+    mismatch: list[str] = []
+    dup_posts: list[str] = []
+    orphans: list[str] = []
+    unapplied: list[str] = []
+
+    for key in sorted(set(trades_by_order) | set(ledger_by_order)):
+        order_id = key[2]
+        pool = ledger_by_order.get(key, [])
+        by_fill_key: dict[str, list[int]] = {}
+        for i, row in enumerate(pool):
+            fill_key = str(row.get("fill_key") or "")
+            by_fill_key.setdefault(fill_key, []).append(i)
+            if float(row.get("applied_volume") or 0.0) == 0.0:
+                unapplied.append(f"{order_id}:{fill_key}")
+        used: set[int] = set()
+        for trade in trades_by_order.get(key, []):
+            fill_key = str(trade.get("exchange_trade_id") or "")
+            agent = str(trade.get("agent") or "")
+            partner = _take_exact(by_fill_key, used, fill_key)
+            if partner is None:
+                partner = _take_prefixed(by_fill_key, used, synth_prefix)
+            if partner is None:
+                missing.append(f"{order_id}:{fill_key}")
+                continue
+            booked = str(pool[partner].get("agent") or "")
+            if booked != agent:
+                mismatch.append(f"{order_id}:{fill_key}（订单 {agent} / 账本 {booked}）")
+                continue
+            posted += 1
+        for i, row in enumerate(pool):
+            if i in used:
+                continue
+            fill_key = str(row.get("fill_key") or "")
+            if fill_key.startswith(synth_prefix):
+                dup_posts.append(f"{order_id}:{fill_key}")
+            else:
+                orphans.append(f"{order_id}:{fill_key}")
+
+    return LedgerParity(
+        orders=len(set(trades_by_order) | set(ledger_by_order)),
+        trades=sum(len(v) for v in trades_by_order.values()),
+        ledger_rows=sum(len(v) for v in ledger_by_order.values()),
+        posted=posted,
+        missing=tuple(missing),
+        mismatch=tuple(mismatch),
+        dup_posts=tuple(dup_posts),
+        orphans=tuple(orphans),
+        unapplied=tuple(unapplied),
+        index_enabled=index_enabled,
+    )
+
+
+#: C14 取数 SQL（两侧都绑 ``since``：一个日期）。抽成常量是为了让真库用例跑**同一份**
+#: SQL——体检的假上下文用例只证明「判定对」，取数断裂（列改名/表搬家）只有真库能证。
+C14_TRADES_SQL = (
+    "SELECT t.tenant_id, t.user_id, t.order_id, t.exchange_trade_id, o.agent "
+    "FROM trades t JOIN orders o ON o.order_id = t.order_id "
+    "WHERE o.agent IS NOT NULL AND o.agent <> '' "
+    "AND t.exchange_trade_id IS NOT NULL AND t.executed_at >= :since"
+)
+C14_LEDGER_SQL = (
+    "SELECT tenant_id, user_id, order_id, fill_key, agent, applied_volume, note "
+    "FROM qm_agent_ledger_fill WHERE trade_date >= :since"
+)
+
+#: C14 各偏差类别 → (字段, 级别, 人话标签, 建议)。顺序 = 优先级（同级按业务后果排）。
+_LEDGER_PARITY_RULES: tuple[tuple[str, str, str, str], ...] = (
+    (
+        "missing",
+        "fail",
+        "漏记",
+        "账本少记：额度与持仓会一直偏小（该 agent 可以多买）。账本写失败会整笔回滚"
+        "（成交行也在同一事务里），所以「成交在、流水不在」正常不会出现——查 [AgentLedger] "
+        "告警、账本表写入权限与写入方是否被改成了先提交后落账",
+    ),
+    (
+        "mismatch",
+        "fail",
+        "归属不符",
+        "账本把成交记在了另一个 agent 名下：等于替别人加仓、替自己减仓，两边额度都会错。"
+        "查该订单的 agent 与账本段名是否逐字一致（幂等键段/台账段/订单列三处共用一个名字）",
+    ),
+    (
+        "dup_posts",
+        "fail",
+        "重复记账",
+        "同一笔成交在账本里记了两次（合成成交先落账、真实成交又单独记了一笔）⇒ "
+        "虚拟现金被多扣一笔、持仓翻倍。该订单的成交表已收敛（合成行被删/被改键），"
+        "账本流水按「流水即事实」不会自动回滚——需人工核对后按冲正处理",
+    ),
+    (
+        "unapplied",
+        "warn",
+        "记了未生效",
+        "流水落了但一行都没生效（applied_volume = 0）：方向未知、代码识别不出或卖出超"
+        "持仓被裁剪。账本的现金与持仓其实没反映这笔成交，原因写在流水 note 列",
+    ),
+    (
+        "orphans",
+        "warn",
+        "无对应成交",
+        "账本有流水、成交表没有这一笔：历史导入（隔壁台账迁移）或成交行被删过。"
+        "两种都要人看一眼，确认不是「成交被删而账本留着」",
+    ),
+)
+
+
+def classify_agent_ledger_parity(p: LedgerParity) -> CheckResult:
+    """C14 判定：每一笔 LLM 腿成交在分账账本里有且只有一条流水，且归属一致。
+
+    零参与（窗口内既无 LLM 腿成交、账本也无流水）**如实写「未参与」**——这条检查只有
+    在分账真的跑起来之后才可能变红，别把它读成「账本没问题」。成交唯一键未启用单独告警：
+    它不在时并发/重投双写没有 DB 兜底，账本可能双记。
+    """
+    metrics = {
+        "orders": p.orders,
+        "trades": p.trades,
+        "ledger_rows": p.ledger_rows,
+        "posted": p.posted,
+        "missing": len(p.missing),
+        "agent_mismatch": len(p.mismatch),
+        "dup_posts": len(p.dup_posts),
+        "orphans": len(p.orphans),
+        "unapplied": len(p.unapplied),
+        "trade_unique_index": p.index_enabled,
+    }
+    index_note = "" if p.index_enabled else "；成交唯一键未启用（并发双写无 DB 兜底）"
+    index_fix = (
+        "成交唯一键（(租户, 用户, 成交号) 部分唯一）未建：重投/并发双写时没有 DB 兜底，"
+        "账本可能双记。正常由 trade 服务启动期自愈；建不起来多半是存量重复成交挡着"
+        "（先去重），见 C14 告警里的重复组"
+    )
+    if p.trades == 0 and p.ledger_rows == 0:
+        if p.index_enabled:
+            return CheckResult(
+                "C14", "分账账本一致性", "ok", "近 30 日无 LLM 腿成交、账本无流水（分账未参与）",
+                metrics=metrics,
+            )
+        return CheckResult(
+            "C14",
+            "分账账本一致性",
+            "warn",
+            f"近 30 日无 LLM 腿成交、账本无流水（分账未参与）{index_note}",
+            index_fix,
+            metrics,
+        )
+
+    parts: list[str] = []
+    suggestions: list[str] = []
+    level = "ok"
+    for bucket, lv, label, fix in _LEDGER_PARITY_RULES:
+        rows = getattr(p, bucket)
+        if not rows:
+            continue
+        parts.append(f"{len(rows)} 条{label}（如 {'，'.join(rows[:3])}）")
+        suggestions.append(fix)
+        if LEVEL_ORDER[lv] > LEVEL_ORDER[level]:
+            level = lv
+    if not p.index_enabled:
+        parts.append("成交唯一键未启用")
+        suggestions.append(index_fix)
+        if LEVEL_ORDER["warn"] > LEVEL_ORDER[level]:
+            level = "warn"
+    if not parts:
+        return CheckResult(
+            "C14",
+            "分账账本一致性",
+            "ok",
+            f"近 30 日 {p.trades} 笔 LLM 腿成交全部落账（账本 {p.ledger_rows} 行，归属一致）",
+            metrics=metrics,
+        )
+    return CheckResult(
+        "C14",
+        "分账账本一致性",
+        level,
+        f"近 30 日 {p.trades} 笔 LLM 腿成交 / 账本 {p.ledger_rows} 行：" + "；".join(parts),
+        " ".join(dict.fromkeys(suggestions)),
+        metrics,
     )
 
 
@@ -749,6 +1026,81 @@ async def check_c13_trading_calendar_coverage(ctx: HealthContext) -> CheckResult
     return classify_calendar_coverage(coverage, ctx.today)
 
 
+async def check_c14_agent_ledger_parity(ctx: HealthContext) -> CheckResult:
+    """分账账本一致性（P2.7）：LLM 腿成交 ↔ 账本流水 ↔ 成交唯一键。
+
+    只看**实盘链**（``trades`` JOIN ``orders``）：分账账本的两个落账点都在实盘路径上
+    （``qmt_exec_reconciler`` 的成交插入分支、``execution_stream_consumer`` 的成交事件），
+    模拟盘（``sim_trades``）不写账本。窗口 :data:`AGENT_LEDGER_WINDOW_DAYS` 天，
+    两侧各放宽 :data:`AGENT_LEDGER_WINDOW_SLACK_DAYS` 天（见该常量）。
+    """
+    from backend.shared.trade_contract import (
+        DUP_FILLS_SQL,
+        SYNTH_TRADE_PREFIX,
+        TRADE_UNIQUE_INDEX,
+    )
+
+    try:
+        dups = ctx.query(DUP_FILLS_SQL, limit=3)
+    except Exception as exc:  # noqa: BLE001 - 表缺失等不阻断（旧库）
+        return CheckResult("C14", "分账账本一致性", "warn", f"成交重复扫描失败: {exc}")
+    if dups:
+        sample = "，".join(
+            f"{d.get('tenant_id')}:{d.get('user_id')}:{d.get('exchange_trade_id')}×{d.get('c')}"
+            for d in dups[:3]
+        )
+        return CheckResult(
+            "C14",
+            "分账账本一致性",
+            "fail",
+            f"成交重复 {len(dups)} 组（{sample}）",
+            "同租户同用户同成交号落了两行 ⇒ 成交数量与分账账本都会双记。不自动删金融行："
+            "先按两份记录的时间与来源人工定夺哪一行是真的，去重后再让成交唯一键启用",
+            {"dup_groups": len(dups)},
+        )
+    since = ctx.today - timedelta(
+        days=AGENT_LEDGER_WINDOW_DAYS + AGENT_LEDGER_WINDOW_SLACK_DAYS
+    )
+    try:
+        trades = ctx.query(C14_TRADES_SQL, since=since)
+    except Exception as exc:  # noqa: BLE001 - 取数失败不伪造结论
+        return CheckResult("C14", "分账账本一致性", "warn", f"成交取数失败: {exc}")
+    try:
+        ledger = ctx.query(C14_LEDGER_SQL, since=since)
+    except Exception as exc:  # noqa: BLE001 - 账本表可能还没建
+        if not trades:
+            # 没有 LLM 腿成交 = 分账还没参与，表不在属正常（模拟盘-only 部署不建账本表）
+            return CheckResult(
+                "C14",
+                "分账账本一致性",
+                "ok",
+                f"近 {AGENT_LEDGER_WINDOW_DAYS} 日无 LLM 腿成交，账本表未建（分账未参与）",
+            )
+        return CheckResult(
+            "C14",
+            "分账账本一致性",
+            "warn",
+            f"{len(trades)} 笔 LLM 腿成交但账本取数失败: {exc}",
+            "账本表由 trade 服务启动期建（ensure_agent_ledger_tables）；表不在 = 落账在"
+            "「成交已提交、账本没写」的失败形态上——查 trade 服务启动日志",
+            {"trades": len(trades)},
+        )
+    try:
+        indexed = bool(
+            ctx.query(
+                "SELECT 1 AS present FROM pg_indexes WHERE indexname = :n LIMIT 1",
+                n=TRADE_UNIQUE_INDEX,
+            )
+        )
+    except Exception:  # noqa: BLE001 - 探测失败按未启用（与 trade_contract 同口径）
+        indexed = False
+    return classify_agent_ledger_parity(
+        ledger_parity(
+            trades, ledger, index_enabled=indexed, synth_prefix=SYNTH_TRADE_PREFIX
+        )
+    )
+
+
 def _crypto_market_enabled() -> bool:
     """加密市场是否启用（委托 quantbc_hub，避免 ENABLE_CRYPTO 解析两处口径分叉）。"""
     from backend.services.engine.data_platform.quantbc_hub import _crypto_enabled
@@ -770,6 +1122,7 @@ CHECKS: list[tuple[str, str, Callable]] = [
     ("C11", "runner 只读 DB", check_c11_runner_db_role),
     ("C12", "本地行情数据", check_c12_local_market_data),
     ("C13", "真日历覆盖年限", check_c13_trading_calendar_coverage),
+    ("C14", "分账账本一致性", check_c14_agent_ledger_parity),
 ]
 
 

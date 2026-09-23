@@ -63,6 +63,31 @@ def test_system_ring_surfaces_calendar_coverage_check():
     assert "2026-12-31" in item["detail"]
 
 
+def test_ledger_ring_surfaces_agent_ledger_check():
+    """C14（分账账本一致性）必须落进「账本」环节的下钻里。
+
+    同样只钉**接线**：判定单测在 ``test_health_checks.py``。C05 问的是「有没有流水」，
+    C14 问的是「这笔流水记对了没有、记全了没有」——账本对不上而界面看不见，等于没查。
+    """
+    rings = build_evidence_rings(
+        {
+            "health_items": {
+                "C14": {
+                    "name": "分账账本一致性",
+                    "level": "fail",
+                    "detail": "近 30 日 3 笔 LLM 腿成交 / 账本 2 行：1 条漏记（如 o1:T9）",
+                    "suggestion": "查 [AgentLedger] 告警与账本表写入权限",
+                }
+            }
+        }
+    )
+    ledger = next(r for r in rings if r["key"] == "ledger")
+    item = next(i for i in ledger["items"] if i["id"] == "C14")
+    assert item["level"] == "fail"
+    assert item["source"] == "scripts/diagnose/health.py:C14"
+    assert "漏记" in item["detail"]
+
+
 def test_desk_wiring_source_assertions():
     src = (_BACKEND / "services/api/routers/desk.py").read_text(encoding="utf-8")
     # 与体检脚本同源（唯一实现复用，不重复造判定）

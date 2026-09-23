@@ -67,9 +67,22 @@ class FakeResult:
 
 
 class FakeSession:
-    def __init__(self, rows: list[Any] | None = None) -> None:
+    """按 SQL 形状分派结果集的替身。
+
+    ``_upgrade_synth_trade`` 会连发两条查询（合成行 LIKE 查询、真实行
+    ``(租户, 用户, 成交号)`` 探测），一条 ``return self.rows`` 会让第二条也拿到合成
+    行本身——于是「真实行已存在」的判定恒真，升级路径根本走不到。
+    """
+
+    def __init__(
+        self,
+        rows: list[Any] | None = None,
+        real_rows: list[Any] | None = None,
+    ) -> None:
         self.commits = 0
-        self.rows = list(rows or [])
+        self.rows = list(rows or [])  # 合成成交行（LIKE 查询）
+        self.real_rows = list(real_rows or [])  # 真实成交行（(租户, 用户, 成交号) 探测）
+        self.deleted: list[Any] = []
         self.executed = 0
 
     async def __aenter__(self) -> FakeSession:
@@ -78,9 +91,17 @@ class FakeSession:
     async def __aexit__(self, *exc: Any) -> bool:
         return False
 
-    async def execute(self, *_args: Any, **_kwargs: Any) -> FakeResult:
+    async def execute(self, statement: Any = None, *_args: Any, **_kwargs: Any) -> FakeResult:
         self.executed += 1
+        sql = str(statement) if statement is not None else ""
+        if "LIKE" in sql:
+            return FakeResult(self.rows)
+        if "trades.tenant_id" in sql and "trades.exchange_trade_id" in sql:
+            return FakeResult(self.real_rows)
         return FakeResult(self.rows)
+
+    async def delete(self, row: Any) -> None:
+        self.deleted.append(row)
 
     async def commit(self) -> None:
         self.commits += 1
@@ -89,6 +110,8 @@ class FakeSession:
 def _fake_order(status: str = "SUBMITTED", filled: float = 0.0) -> Any:
     return SimpleNamespace(
         status=OrderStatus(status),
+        tenant_id="default",
+        user_id="10000001",
         filled_quantity=filled,
         filled_value=0.0,
         average_price=None,
@@ -350,6 +373,64 @@ class TestPollOnce:
         ):
             asyncio.run(poller._sync_trades(session, [trade_item], strategy_name="quantmind"))
         assert order.filled_quantity == 40.0
+
+    def test_coexisting_real_row_deletes_synth_row_and_reverts_totals(self) -> None:
+        """真实成交行已存在时**删合成行**而不是改键（P2.7 唯一键）。
+
+        真实行先落（桥上报 / 流式消费者）时，改键会撞 ``uq_trades_scope_exchange_trade_id``
+        且下一轮照样撞——合成行永远升级不了、轮询周期永远抛错。删掉合成行、并把订单
+        累计里合成行的份额减掉：它是同一笔成交的替身，真身已在。
+        """
+        row = _fake_trade_row(qty=100.0, price=10.0)
+        session = FakeSession(rows=[row], real_rows=[SimpleNamespace(exchange_trade_id="T1")])
+        order = _fake_order("FILLED", 200.0)  # 合成 100 + 真实 100 都记在订单上
+        order.filled_value = 2000.0
+        order.average_price = 10.0
+        poller = _make_poller(FakeClient())
+        with patch.object(
+            mod, "apply_execution_report", AsyncMock(return_value=OrderStatus.FILLED)
+        ) as apply:
+            upgraded = asyncio.run(
+                poller._upgrade_synth_trade(
+                    session, order, trade_id="T1", volume=100.0, price=10.5
+                )
+            )
+        assert upgraded is True
+        assert session.deleted == [row]
+        assert row.exchange_trade_id == f"{mod._SYNTH_TRADE_PREFIX}123"  # 不改要删的行
+        assert order.filled_quantity == 100.0  # 200 - 100（合成份额），不翻倍
+        assert order.filled_value == 1000.0
+        assert order.average_price == 10.0
+        assert apply.await_count == 0  # 本函数自己不下单，落库由调用方同轮继续
+
+    def test_coexistence_through_sync_trades_keeps_one_real_row(self) -> None:
+        """走完整 ``_sync_trades``：合成行被删，订单累计只剩真实行的份额。
+
+        再落一次真单由 `apply_execution_report` 的 (租户, 用户, 成交号) 去重拦住——
+        这里把它打成桩，断言它**仍然被调用**（调用方不因删了合成行而短路）。
+        """
+        row = _fake_trade_row(qty=100.0, price=10.0)
+        session = FakeSession(rows=[row], real_rows=[SimpleNamespace(exchange_trade_id="T1")])
+        order = _fake_order("FILLED", 200.0)
+        order.filled_value = 2000.0
+        trade_item = {
+            "order_sysid": "123",
+            "order_remark": "qmabc",
+            "trade_id": "T1",
+            "traded_volume": 100,
+            "traded_price": 10.0,
+        }
+        poller = _make_poller(FakeClient())
+        apply = AsyncMock(return_value=OrderStatus.FILLED)
+        with (
+            patch.object(QmtExecPoller, "_resolve", AsyncMock(return_value=order)),
+            patch.object(mod, "apply_execution_report", apply),
+        ):
+            asyncio.run(poller._sync_trades(session, [trade_item], strategy_name="quantmind"))
+        assert session.deleted == [row]
+        assert order.filled_quantity == 100.0
+        assert apply.await_args.kwargs["exchange_trade_id"] == "T1"
+        assert poller._seen_trades == {"T1"}
 
     def test_poll_order_of_sync_trades_before_orders(self) -> None:
         """成交明细必须先于委托回报处理（否则同轮双计）。"""

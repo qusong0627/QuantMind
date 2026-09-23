@@ -13,6 +13,7 @@ from backend.scripts.diagnose.health import (
     CALENDAR_WARN_DAYS,
     CHECKS,
     classify_account_key_forms,
+    classify_agent_ledger_parity,
     classify_calendar_coverage,
     classify_cid_duplicates,
     classify_ledger_writes,
@@ -24,7 +25,9 @@ from backend.scripts.diagnose.health import (
     check_c05_ledger_writes,
     check_c12_local_market_data,
     check_c13_trading_calendar_coverage,
+    check_c14_agent_ledger_parity,
     exit_code,
+    ledger_parity,
     summarize,
 )
 
@@ -369,3 +372,182 @@ async def test_c12_check_reports_missing_market_with_reason(monkeypatch):
 
     assert r.level == "warn"
     assert "CN" in r.detail and "HK" in r.detail
+
+
+# --- C14 分账账本一致性 ----------------------------------------------------
+
+SYNTH = "qmt-synth-"
+
+
+def _parity(trades, ledger, *, index=True):
+    return classify_agent_ledger_parity(
+        ledger_parity(trades, ledger, index_enabled=index, synth_prefix=SYNTH)
+    )
+
+
+def _t(key, agent="alpha", order="o1", user="1001"):
+    return {
+        "tenant_id": "default",
+        "user_id": user,
+        "order_id": order,
+        "exchange_trade_id": key,
+        "agent": agent,
+    }
+
+
+def _l(key, agent="alpha", order="o1", user="1001", applied=100.0):
+    return {
+        "tenant_id": "default",
+        "user_id": user,
+        "order_id": order,
+        "fill_key": key,
+        "agent": agent,
+        "applied_volume": applied,
+        "note": "",
+    }
+
+
+def test_c14_every_fill_posted_is_ok():
+    r = _parity([_t("k1"), _t("k2")], [_l("k1"), _l("k2")])
+    assert r.level == "ok"
+    assert r.metrics["posted"] == 2
+    assert r.metrics["trades"] == 2
+
+
+def test_c14_partial_fills_pair_per_order():
+    """同一张委托的两次部分成交：逐条配对，不按订单数一刀切。"""
+    r = _parity([_t("k1"), _t("k2")], [_l("k1"), _l("k2"), _l("k3")])
+    assert r.level == "warn"  # k3 无对应成交（孤儿）
+    assert r.metrics["posted"] == 2
+
+
+def test_c14_synth_upgrade_pairs_by_order():
+    """合成成交升级改键：成交行是真实号、账本流水留在合成键上——**登记过的有界偏差**。
+
+    认不认这个配对，决定这条检查是「每笔升级都报漏记」还是「只在真出问题时响」。
+    """
+    r = _parity([_t("T1")], [_l(f"{SYNTH}o1")])
+    assert r.level == "ok"
+    assert r.metrics["posted"] == 1
+
+
+def test_c14_leftover_synth_row_is_double_post():
+    """账本里合成键与真实键各一条、成交只有一条 ⇒ 同一笔成交记了两次（fail）。"""
+    r = _parity([_t("T1")], [_l(f"{SYNTH}o1"), _l("T1")])
+    assert r.level == "fail"
+    assert r.metrics["dup_posts"] == 1
+    assert r.metrics["posted"] == 1
+
+
+def test_c14_missing_post_is_fail():
+    r = _parity([_t("k1")], [])
+    assert r.level == "fail"
+    assert r.metrics["missing"] == 1
+    assert "k1" in r.detail
+
+
+def test_c14_agent_mismatch_is_fail():
+    r = _parity([_t("k1", agent="beta")], [_l("k1", agent="alpha")])
+    assert r.level == "fail"
+    assert r.metrics["agent_mismatch"] == 1
+    assert "beta" in r.detail and "alpha" in r.detail
+
+
+def test_c14_synth_partner_still_checks_agent():
+    """合成了、也升级了，但归属不符——不能因为配对成功就放过归属。"""
+    r = _parity([_t("T1", agent="beta")], [_l(f"{SYNTH}o1", agent="alpha")])
+    assert r.level == "fail"
+    assert r.metrics["agent_mismatch"] == 1
+
+
+def test_c14_orphan_and_unapplied_warn_without_failing():
+    r = _parity([_t("k1")], [_l("k1", applied=0.0), _l("zz9")])
+    assert r.level == "warn"
+    assert r.metrics["unapplied"] == 1
+    assert r.metrics["orphans"] == 1
+
+
+def test_c14_missing_unique_index_warns():
+    r = _parity([_t("k1")], [_l("k1")], index=False)
+    assert r.level == "warn"
+    assert r.metrics["trade_unique_index"] is False
+    assert "唯一键" in r.detail
+
+
+def test_c14_zero_participation_says_so():
+    """零参与必须**明说未参与**：这条检查只有分账跑起来之后才可能变红。"""
+    r = _parity([], [])
+    assert r.level == "ok"
+    assert "未参与" in r.detail
+    r2 = _parity([], [], index=False)
+    assert r2.level == "warn"
+    assert "未参与" in r2.detail
+
+
+def test_c14_registered_in_checks():
+    """C14 必须在 CHECKS 里，否则体检根本不跑它（接线与判定一起钉）。"""
+    ids = [cid for cid, _name, _fn in CHECKS]
+    assert "C14" in ids
+
+
+@pytest.mark.asyncio
+async def test_c14_check_flags_duplicate_fills_before_parity():
+    """存量重复成交：唯一键建不起来、账本可能已双记——先报这个（fail）。"""
+    ctx = FakeCtx(
+        {
+            "FROM trades WHERE exchange_trade_id IS NOT NULL": [
+                {"tenant_id": "default", "user_id": "1001", "exchange_trade_id": "T9", "c": 2}
+            ]
+        }
+    )
+    r = await check_c14_agent_ledger_parity(ctx)
+    assert r.level == "fail"
+    assert r.metrics["dup_groups"] == 1
+    assert "T9" in r.detail
+
+
+@pytest.mark.asyncio
+async def test_c14_check_reports_all_buckets_from_one_run():
+    ctx = FakeCtx(
+        {
+            "FROM trades t JOIN orders o": [_t("k1"), _t("k2", agent="beta")],
+            "FROM qm_agent_ledger_fill": [_l("k1"), _l("k2", agent="alpha")],
+            "pg_indexes": [],
+        }
+    )
+    r = await check_c14_agent_ledger_parity(ctx)
+    assert r.level == "fail"
+    assert r.metrics["agent_mismatch"] == 1
+    assert r.metrics["trade_unique_index"] is False
+    assert "唯一键" in r.detail  # 一次跑出全部偏差，不用连跑几次才看全
+
+
+@pytest.mark.asyncio
+async def test_c14_check_missing_ledger_table_without_llm_fills_is_ok():
+    """模拟盘-only 部署：账本表没建、也没有 LLM 腿成交 → 如实说「未参与」，不报红。"""
+
+    class _NoLedgerTable(FakeCtx):
+        def query(self, sql, **params):
+            if "qm_agent_ledger_fill" in sql:
+                raise RuntimeError('relation "qm_agent_ledger_fill" does not exist')
+            return super().query(sql, **params)
+
+    r = await check_c14_agent_ledger_parity(_NoLedgerTable({"pg_indexes": []}))
+    assert r.level == "ok"
+    assert "未参与" in r.detail
+
+
+@pytest.mark.asyncio
+async def test_c14_check_missing_ledger_table_with_llm_fills_is_warn():
+    """有 LLM 腿成交却查不到账本表：不能当「未参与」糊过去，要人看。"""
+
+    class _NoLedgerTable(FakeCtx):
+        def query(self, sql, **params):
+            if "qm_agent_ledger_fill" in sql:
+                raise RuntimeError('relation "qm_agent_ledger_fill" does not exist')
+            return super().query(sql, **params)
+
+    ctx = _NoLedgerTable({"FROM trades t JOIN orders o": [_t("k1")], "pg_indexes": []})
+    r = await check_c14_agent_ledger_parity(ctx)
+    assert r.level == "warn"
+    assert r.metrics["trades"] == 1

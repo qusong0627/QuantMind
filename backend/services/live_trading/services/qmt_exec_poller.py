@@ -42,6 +42,7 @@ from backend.services.live_trading.services.trading_session import (
     is_trading_time,
     trade_date_str,
 )
+from backend.shared.trade_contract import SYNTH_TRADE_PREFIX
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +51,8 @@ OFF_HOURS_SLEEP_SECONDS = 30.0  # 非交易时段（只需低频确认开盘）
 DISABLED_SLEEP_SECONDS = 60.0  # 未启用/未配置时空转间隔
 SETTINGS_REFRESH_SECONDS = 30.0  # 页面配置重读间隔
 
-_SYNTH_TRADE_PREFIX = "qmt-synth-"
+# 合成成交幂等键前缀：唯一事实源在 shared（对账/体检也要认族，见 trade_contract）。
+_SYNTH_TRADE_PREFIX = SYNTH_TRADE_PREFIX
 
 
 class QmtExecPoller:
@@ -372,8 +374,14 @@ class QmtExecPoller:
         插入，同一笔成交会留下两行（合成行与真实行 ``exchange_trade_id`` 不同，
         去重挡不住）→ 成交数量/金额双计。这里就地替换该行，并按差额校正订单累计。
         返回是否发生了替换。
+
+        **真实行已存在时不能改键**（P2.7 唯一键 ``uq_trades_scope_exchange_trade_id``
+        上线后）：另一条路径（桥 HTTP 上报 / stream 消费者）可能先落了同一笔真实成交，
+        此时改键会撞唯一索引 → 整个轮询周期抛错，且下一轮照样撞（合成行永远升级不了）。
+        那种情况走下面那条分支：**删掉合成行**（它是同一笔成交的替身，真身已在），
+        并把订单累计里合成行的份额减掉。
         """
-        from sqlalchemy import select
+        from sqlalchemy import and_, select
 
         from backend.services.trade_shared.models.trade import Trade
 
@@ -390,6 +398,41 @@ class QmtExecPoller:
             return False
         old_qty = float(row.quantity or 0.0)
         old_value = float(row.trade_value or 0.0)
+
+        real = await db.execute(
+            select(Trade)
+            .where(
+                and_(
+                    Trade.tenant_id == order.tenant_id,
+                    Trade.user_id == order.user_id,
+                    Trade.exchange_trade_id == trade_id,
+                )
+            )
+            .limit(1)
+        )
+        if real.scalars().first() is not None:
+            order.filled_quantity = max(
+                0.0, float(getattr(order, "filled_quantity", 0.0) or 0.0) - old_qty
+            )
+            order.filled_value = max(
+                0.0, float(getattr(order, "filled_value", 0.0) or 0.0) - old_value
+            )
+            order.average_price = (
+                order.filled_value / order.filled_quantity
+                if order.filled_quantity > 0
+                else None
+            )
+            await db.delete(row)
+            logger.warning(
+                "[QmtExecPoller] 合成成交与真实成交并存（唯一键判定）：删除合成行 "
+                "order_id=%s synth_qty=%s synth_value=%s trade_id=%s",
+                order.order_id,
+                old_qty,
+                old_value,
+                trade_id,
+            )
+            return True
+
         new_value = float(volume) * price if price else old_value
         order.filled_quantity = (
             float(getattr(order, "filled_quantity", 0.0) or 0.0) + float(volume) - old_qty

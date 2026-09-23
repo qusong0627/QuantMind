@@ -204,6 +204,144 @@ async def test_order_filled_posts_the_agent_fill_once(monkeypatch):
     assert (kw["quantity"], kw["price"]) == (100.0, 10.5)
 
 
+def _scoped_params(stmt) -> dict:
+    """ORM select 的绑定值，按去掉序号后缀的列名索引（``tenant_id_1`` → ``tenant_id``）。"""
+    return {key.rsplit("_", 1)[0]: value for key, value in stmt.compile().params.items()}
+
+
+class _ScopedTradeSession:
+    """按 ``(租户, 用户, 成交号)`` 决定「这一笔记过没有」的替身。
+
+    ——全库去重与账户内去重的分野就在这里：另一账户的同号成交**不该**吞掉这一笔。
+    查询用的三个维度也一并记下来，供断言「去重查询确实带上了租户与用户」。
+    """
+
+    def __init__(self, *, order, trades_by_scope=None, commit_error=None):
+        self.order = order
+        self.trades = dict(trades_by_scope or {})
+        self.commit_error = commit_error
+        self.added = []
+        self.committed = False
+        self.rolled_back = False
+        self.queried_scopes = []
+
+    async def execute(self, stmt):
+        sql = str(stmt)
+        if "FROM trades" in sql:
+            p = _scoped_params(stmt)
+            scope = (p.get("tenant_id"), p.get("user_id"), p.get("exchange_trade_id"))
+            self.queried_scopes.append(scope)
+            return _ScalarResult(self.trades.get(scope))
+        if "FROM orders" in sql:
+            return _ScalarResult(self.order)
+        raise AssertionError(f"unexpected sql: {sql}")
+
+    def add(self, value):
+        self.added.append(value)
+
+    async def commit(self):
+        if self.commit_error is not None:
+            raise self.commit_error
+        self.committed = True
+
+    async def rollback(self):
+        self.rolled_back = True
+
+
+@pytest.mark.asyncio
+async def test_order_filled_dedupe_is_scoped_to_the_account(monkeypatch):
+    """另一个账户的**同号成交**不再吞掉这一笔（此前全库去重 → 静默丢单）。
+
+    券商成交号只在一个账户内唯一：两个账户（多租户，或两个券商各自从 1 开始编号）
+    撞出同一个号时，全库 SELECT 会把这一笔当重投丢掉——不落成交行、不更新订单、
+    不记分账，而任何地方都不报错。
+    """
+    from unittest.mock import AsyncMock
+
+    import backend.services.trade.services.execution_stream_consumer as mod
+
+    order = _filled_order(agent="deepseek-v4-pro")
+    session = _ScopedTradeSession(
+        order=order,
+        trades_by_scope={
+            ("default", 2002, "tid-009"): SimpleNamespace(trade_id="t-2"),
+        },
+    )
+    consumer = ExecutionStreamConsumer()
+    monkeypatch.setattr(mod, "get_session", lambda: _FakeSessionContext(session))
+    stub = AsyncMock(return_value=None)
+    monkeypatch.setattr(mod, "post_fill_for_order", stub)
+
+    async def _noop_notification(**_kwargs):
+        return None
+
+    monkeypatch.setattr(mod, "publish_notification_async", _noop_notification)
+
+    await consumer._handle_order_filled(_filled_event())
+
+    assert session.queried_scopes == [("default", 1001, "tid-009")], (
+        "去重查询必须带上租户与用户（成交行的租户/用户取自订单）"
+    )
+    assert session.committed is True
+    assert len(session.added) == 1, "本账户的这笔必须落库"
+    assert stub.await_count == 1, "分账也要记——此前整笔成交被静默丢掉"
+
+
+@pytest.mark.asyncio
+async def test_order_filled_same_scope_replay_is_suppressed(monkeypatch):
+    """同账户同成交号才是重投：不插行、不落账本。"""
+    from unittest.mock import AsyncMock
+
+    import backend.services.trade.services.execution_stream_consumer as mod
+
+    order = _filled_order(agent="deepseek-v4-pro")
+    session = _ScopedTradeSession(
+        order=order,
+        trades_by_scope={
+            ("default", 1001, "tid-009"): SimpleNamespace(trade_id="t-1"),
+        },
+    )
+    consumer = ExecutionStreamConsumer()
+    monkeypatch.setattr(mod, "get_session", lambda: _FakeSessionContext(session))
+    stub = AsyncMock(return_value=None)
+    monkeypatch.setattr(mod, "post_fill_for_order", stub)
+
+    await consumer._handle_order_filled(_filled_event())
+
+    assert session.added == []
+    assert stub.await_count == 0
+    assert session.committed is False
+
+
+@pytest.mark.asyncio
+async def test_order_filled_integrity_error_means_already_recorded(monkeypatch):
+    """并发双写撞成交唯一键：回滚、不抛（事件照常 ack）——重投的语义就是「已记过」。
+
+    分账落账与本事务同生共死：这条路径回滚时账本也一起回滚，由先提交的那一方记。
+    """
+    from sqlalchemy.exc import IntegrityError
+    from unittest.mock import AsyncMock
+
+    import backend.services.trade.services.execution_stream_consumer as mod
+
+    order = _filled_order(agent="deepseek-v4-pro")
+    session = _ScopedTradeSession(
+        order=order,
+        commit_error=IntegrityError("INSERT INTO trades", {}, Exception("dup")),
+    )
+    consumer = ExecutionStreamConsumer()
+    monkeypatch.setattr(mod, "get_session", lambda: _FakeSessionContext(session))
+    stub = AsyncMock(return_value=None)
+    monkeypatch.setattr(mod, "post_fill_for_order", stub)
+
+    await consumer._handle_order_filled(_filled_event())  # 不抛
+
+    assert stub.await_count == 1
+    assert session.rolled_back is True
+    assert session.committed is False
+    assert len(session.added) == 1
+
+
 @pytest.mark.asyncio
 async def test_order_filled_replay_never_posts(monkeypatch):
     """同成交号重投（已有成交行）：既不插行也不落账本——否则额度被同一笔扣两次。"""
