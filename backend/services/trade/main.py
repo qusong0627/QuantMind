@@ -12,7 +12,11 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.services.live_trading.routers import real_trading
-from backend.services.simulation.routers import simulation, simulation_history, simulation_orders
+from backend.services.simulation.routers import (
+    simulation,
+    simulation_history,
+    simulation_orders,
+)
 from backend.services.trade.routers import (
     internal_strategy,
     portfolios,
@@ -94,7 +98,9 @@ async def lifespan(app: FastAPI):
             get_db_manager()._master_engine,
             schema_keys=("trade.core", "trade.portfolio", "trade.simulation"),
         )
-        from backend.services.live_trading.services.manual_execution_persistence import manual_execution_persistence
+        from backend.services.live_trading.services.manual_execution_persistence import (
+            manual_execution_persistence,
+        )
 
         await manual_execution_persistence.ensure_tables()
         app.state.db_connected = True
@@ -106,6 +112,9 @@ async def lifespan(app: FastAPI):
     # （超时扫描器 / EOD / 热集 / 对账 / 评估）先用到就每轮报 UndefinedColumn。
     # 启动期统一补齐——各 ensure 幂等，单个失败只告警，不置 startup_healthy。
     try:
+        from backend.shared.decision_ledger_contract import (
+            ensure_decision_ledger_table_async,
+        )
         from backend.shared.eval_contract import ensure_eval_scores_table_async
         from backend.shared.fund_snapshot_contract import (
             ensure_fund_snapshot_contract_async,
@@ -134,6 +143,7 @@ async def lifespan(app: FastAPI):
             ensure_eval_scores_table_async,
             ensure_holding_alerts_table_async,
             ensure_ghost_ledger_table_async,
+            ensure_decision_ledger_table_async,
         ):
             try:
                 await _ensure()
@@ -181,30 +191,48 @@ async def lifespan(app: FastAPI):
         logger.error("trade stock cache warmup failed: %s", e, exc_info=True)
 
     try:
-        from backend.services.trade.services.execution_stream_consumer import ExecutionStreamConsumer
+        from backend.services.trade.services.execution_stream_consumer import (
+            ExecutionStreamConsumer,
+        )
 
         exec_consumer = ExecutionStreamConsumer()
         await exec_consumer.start()
         app.state.execution_stream_consumer = exec_consumer
     except Exception as e:
         app.state.startup_healthy = False
-        logger.error("trade execution stream consumer start failed: %s", e, exc_info=True)
+        logger.error(
+            "trade execution stream consumer start failed: %s", e, exc_info=True
+        )
 
     try:
-        from backend.services.trade.services.margin_interest_scanner import run_margin_interest_scanner
-        from backend.services.trade.services.order_timeout_scanner import run_order_timeout_scanner
-        from backend.services.trade.services.portfolio_snapshot_task import run_portfolio_snapshot_task
+        from backend.services.trade.services.margin_interest_scanner import (
+            run_margin_interest_scanner,
+        )
+        from backend.services.trade.services.order_timeout_scanner import (
+            run_order_timeout_scanner,
+        )
+        from backend.services.trade.services.portfolio_snapshot_task import (
+            run_portfolio_snapshot_task,
+        )
         from backend.services.trade.services.real_account_ledger_settlement_task import (
             run_real_account_ledger_settlement_task,
         )
-        from backend.services.live_trading.services.manual_execution_worker import run_manual_execution_worker
-        from backend.services.live_trading.services.tdx_account_sync_task import run_tdx_account_sync_task
+        from backend.services.live_trading.services.manual_execution_worker import (
+            run_manual_execution_worker,
+        )
+        from backend.services.live_trading.services.tdx_account_sync_task import (
+            run_tdx_account_sync_task,
+        )
 
         scanner_task = asyncio.create_task(run_order_timeout_scanner())
         margin_task = asyncio.create_task(run_margin_interest_scanner())
         snapshot_task = asyncio.create_task(run_portfolio_snapshot_task())
-        ledger_settlement_task = asyncio.create_task(run_real_account_ledger_settlement_task())
-        manual_execution_task = asyncio.create_task(run_manual_execution_worker(), name="manual-execution-worker")
+        ledger_settlement_task = asyncio.create_task(
+            run_real_account_ledger_settlement_task()
+        )
+        manual_execution_task = asyncio.create_task(
+            run_manual_execution_worker(), name="manual-execution-worker"
+        )
         tdx_account_sync_task = asyncio.create_task(
             run_tdx_account_sync_task(interval_seconds=30),
             name="tdx-account-sync",
@@ -287,7 +315,10 @@ async def lifespan(app: FastAPI):
         )
         # TDX 桥热集行情轮询（2026-09-17 用户拍板）：热集 529 只预算内轮转 → 标准键
         if str(os.getenv("TDX_HOTSET_FEED_ENABLED", "true")).strip().lower() not in {
-            "0", "false", "no", "off",
+            "0",
+            "false",
+            "no",
+            "off",
         }:
             from backend.services.live_trading.services.tdx_hot_set_feed import (
                 run_tdx_hot_set_feed_task,
@@ -302,7 +333,10 @@ async def lifespan(app: FastAPI):
 
         # 哨兵告警（T-P6-15）：总线消费→留痕→分级推送 + T+1 回填（Redis 门控热读）
         if str(os.getenv("QM_SENTINEL_WORKER_ENABLED", "true")).strip().lower() not in {
-            "0", "false", "no", "off",
+            "0",
+            "false",
+            "no",
+            "off",
         }:
             from backend.services.trade.services.sentinel_alert_service import (
                 run_sentinel_alert_worker,
@@ -336,7 +370,10 @@ async def lifespan(app: FastAPI):
 
         # 建议卡兑现回填（T-P6-16 闭环）：决策日收盘 → T+1/T+3/T+5 超额 vs 沪深300
         if str(os.getenv("QM_ADVICE_BACKFILL_ENABLED", "true")).strip().lower() not in {
-            "0", "false", "no", "off",
+            "0",
+            "false",
+            "no",
+            "off",
         }:
             from backend.services.trade.services.advice_backfill import (
                 run_advice_backfill_worker,
@@ -351,7 +388,10 @@ async def lifespan(app: FastAPI):
 
         # 建议卡规则生成（T-P6-16 闭环补全）：信号×情报共振 → 观察仓卡（人在环）
         if str(os.getenv("QM_ADVICE_GEN_ENABLED", "true")).strip().lower() not in {
-            "0", "false", "no", "off",
+            "0",
+            "false",
+            "no",
+            "off",
         }:
             from backend.services.trade.services.advice_generator import (
                 run_advice_generator_worker,
@@ -402,7 +442,9 @@ async def lifespan(app: FastAPI):
             run_close_audit_task(),
             name="close-cleanup-audit",
         )
-        from backend.services.live_trading.services.tdx_quote_feed import run_tdx_quote_feed_task
+        from backend.services.live_trading.services.tdx_quote_feed import (
+            run_tdx_quote_feed_task,
+        )
 
         tdx_quote_feed_task = asyncio.create_task(
             run_tdx_quote_feed_task(),
@@ -509,7 +551,9 @@ async def lifespan(app: FastAPI):
                 run_simulation_pending_order_worker,
             )
 
-            if str(os.getenv("SIM_PENDING_ORDER_WORKER_ENABLED", "true")).strip().lower() not in {
+            if str(
+                os.getenv("SIM_PENDING_ORDER_WORKER_ENABLED", "true")
+            ).strip().lower() not in {
                 "0",
                 "false",
                 "no",
@@ -538,7 +582,9 @@ async def lifespan(app: FastAPI):
                 run_hot_set_builder_worker,
             )
 
-            if str(os.getenv("QM_HOT_SET_BUILD_ENABLED", "true")).strip().lower() not in {
+            if str(
+                os.getenv("QM_HOT_SET_BUILD_ENABLED", "true")
+            ).strip().lower() not in {
                 "0",
                 "false",
                 "no",
@@ -580,8 +626,12 @@ async def lifespan(app: FastAPI):
             logger.error(
                 "trade strategy monitor pusher start failed: %s", e, exc_info=True
             )
-        from backend.services.live_trading.services.tdx_l2_capture_task import run_tdx_l2_capture_task
-        from backend.services.live_trading.services.tdx_l2_realtime import run_tdx_l2_realtime_task
+        from backend.services.live_trading.services.tdx_l2_capture_task import (
+            run_tdx_l2_capture_task,
+        )
+        from backend.services.live_trading.services.tdx_l2_realtime import (
+            run_tdx_l2_realtime_task,
+        )
 
         tdx_l2_capture_task = asyncio.create_task(
             run_tdx_l2_capture_task(), name="tdx-l2-capture"
@@ -614,15 +664,21 @@ async def lifespan(app: FastAPI):
         restorer = SimulationRuntimeRestorer(redis_client)
         restored_count = await restorer.restore_all()
         if restored_count > 0:
-            logger.info("Simulation runtime restored %d sandboxes after restart", restored_count)
+            logger.info(
+                "Simulation runtime restored %d sandboxes after restart", restored_count
+            )
     except Exception as e:
         logger.warning("Simulation runtime restore failed: %s", e)
 
     # 启动沙箱信号消费者（将沙箱信号转换为模拟盘订单）
     try:
-        from backend.services.trade.services.sandbox_signal_consumer import sandbox_signal_consumer
+        from backend.services.trade.services.sandbox_signal_consumer import (
+            sandbox_signal_consumer,
+        )
 
-        sandbox_signal_task = asyncio.create_task(sandbox_signal_consumer.start(), name="sandbox-signal-consumer")
+        sandbox_signal_task = asyncio.create_task(
+            sandbox_signal_consumer.start(), name="sandbox-signal-consumer"
+        )
         app.state.sandbox_signal_consumer = sandbox_signal_consumer
         logger.info("Sandbox signal consumer started")
     except Exception as e:
@@ -631,7 +687,12 @@ async def lifespan(app: FastAPI):
 
     # 启动模拟盘定时调度器
     try:
-        enabled = os.getenv("ENABLE_SIMULATION_SCHEDULER", "false").lower() in {"1", "true", "yes", "on"}
+        enabled = os.getenv("ENABLE_SIMULATION_SCHEDULER", "false").lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
         if enabled:
             from backend.services.simulation.scheduler import simulation_scheduler
 
@@ -643,7 +704,9 @@ async def lifespan(app: FastAPI):
 
     # 启动模拟盘策略级托管调度器（按前端弹窗配置的调仓周期/时间点触发）
     try:
-        hosted_enabled = os.getenv("ENABLE_SIMULATION_HOSTED_SCHEDULER", "true").lower() in {"1", "true", "yes", "on"}
+        hosted_enabled = os.getenv(
+            "ENABLE_SIMULATION_HOSTED_SCHEDULER", "true"
+        ).lower() in {"1", "true", "yes", "on"}
         if hosted_enabled:
             from backend.services.simulation.services.simulation_hosted_scheduler import (
                 SimulationHostedScheduler,
@@ -654,9 +717,15 @@ async def lifespan(app: FastAPI):
             app.state.simulation_hosted_scheduler = hosted_scheduler
             logger.info("Simulation hosted scheduler started")
     except Exception as e:
-        logger.error("trade simulation hosted scheduler start failed: %s", e, exc_info=True)
+        logger.error(
+            "trade simulation hosted scheduler start failed: %s", e, exc_info=True
+        )
 
-    healthy = bool(app.state.startup_healthy and app.state.db_connected and app.state.redis_connected)
+    healthy = bool(
+        app.state.startup_healthy
+        and app.state.db_connected
+        and app.state.redis_connected
+    )
     set_service_health("quantmind-trade", healthy)
 
     try:
@@ -667,7 +736,9 @@ async def lifespan(app: FastAPI):
             level="info" if healthy else "error",
             source="quantmind-trade",
             title="交易核心启动完成" if healthy else "交易核心启动异常",
-            message="QuantMind Trade 启动完成" if healthy else "Trade 启动存在初始化失败，请检查日志",
+            message="QuantMind Trade 启动完成"
+            if healthy
+            else "Trade 启动存在初始化失败，请检查日志",
         )
     except Exception:  # noqa: BLE001 - 事件记录非关键路径
         pass
@@ -681,7 +752,40 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning("trade risk trigger scanner stop failed: %s", e)
 
-    for task in (scanner_task, margin_task, snapshot_task, ledger_settlement_task, manual_execution_task, sandbox_signal_task, tdx_account_sync_task, qmt_account_sync_task, qmt_exec_poller_task, mirror_queue_drainer_task, qmt_sltp_executor_task, qmt_quote_backup_task, dual_book_reconcile_task, shadow_compare_task, eval_scores_task, health_recheck_task, close_audit_task, tdx_quote_feed_task, tdx_l2_capture_task, tdx_l2_realtime_task, t1_unlock_task, simulation_pending_order_task, corp_action_task, simulation_eod_task, hot_set_builder_task, sentinel_alert_task, sentinel_backfill_task, holding_sentinel_task, advice_backfill_task, advice_generator_task, tdx_hot_set_feed_task, risk_tier_task):
+    for task in (
+        scanner_task,
+        margin_task,
+        snapshot_task,
+        ledger_settlement_task,
+        manual_execution_task,
+        sandbox_signal_task,
+        tdx_account_sync_task,
+        qmt_account_sync_task,
+        qmt_exec_poller_task,
+        mirror_queue_drainer_task,
+        qmt_sltp_executor_task,
+        qmt_quote_backup_task,
+        dual_book_reconcile_task,
+        shadow_compare_task,
+        eval_scores_task,
+        health_recheck_task,
+        close_audit_task,
+        tdx_quote_feed_task,
+        tdx_l2_capture_task,
+        tdx_l2_realtime_task,
+        t1_unlock_task,
+        simulation_pending_order_task,
+        corp_action_task,
+        simulation_eod_task,
+        hot_set_builder_task,
+        sentinel_alert_task,
+        sentinel_backfill_task,
+        holding_sentinel_task,
+        advice_backfill_task,
+        advice_generator_task,
+        tdx_hot_set_feed_task,
+        risk_tier_task,
+    ):
         if task is None:
             continue
         task.cancel()
@@ -789,18 +893,28 @@ install_live_trading_gate_middleware(app, service_name="quantmind-trade")
 
 app.include_router(trading_orders.router, prefix="/api/v1/orders", tags=["Orders"])
 app.include_router(trading_history.router, prefix="/api/v1/trades", tags=["Trades"])
-app.include_router(real_trading.router, prefix="/api/v1/real-trading", tags=["Real Trading"])
+app.include_router(
+    real_trading.router, prefix="/api/v1/real-trading", tags=["Real Trading"]
+)
 app.include_router(portfolios.router, prefix="/api/v1/portfolios", tags=["Portfolios"])
 app.include_router(positions.router, prefix="/api/v1", tags=["Positions"])
-app.include_router(simulation.router, prefix="/api/v1/simulation", tags=["Simulation-Account"])
-app.include_router(simulation_orders.router, prefix="/api/v1/simulation", tags=["Simulation-Orders"])
-app.include_router(simulation_history.router, prefix="/api/v1/simulation", tags=["Simulation-Trades"])
+app.include_router(
+    simulation.router, prefix="/api/v1/simulation", tags=["Simulation-Account"]
+)
+app.include_router(
+    simulation_orders.router, prefix="/api/v1/simulation", tags=["Simulation-Orders"]
+)
+app.include_router(
+    simulation_history.router, prefix="/api/v1/simulation", tags=["Simulation-Trades"]
+)
 app.include_router(simulation_batch.router)
 app.include_router(internal_strategy.router)
 app.include_router(replay_router)
 
 from backend.services.trade.routers.tdx_config import router as tdx_config_router
-from backend.services.trade.routers.tdx_quote_feed import router as tdx_quote_feed_router
+from backend.services.trade.routers.tdx_quote_feed import (
+    router as tdx_quote_feed_router,
+)
 from backend.services.trade.routers.tdx_l2 import router as tdx_l2_router
 from backend.services.trade.routers.broker_config import router as broker_config_router
 from backend.services.trade.routers.qmt_mirror import router as qmt_mirror_router

@@ -50,6 +50,7 @@ SOURCE_TDX_ROLLING = "tdx_rolling"  # 通达信滚动 paper 单（T-P2-01 收敛
 SOURCE_CO_PILOT = "co_pilot"  # 副驾驶建议卡一键执行（T-P6-16）
 SOURCE_CANDIDATE_PUSH = "candidate_push"  # 候选信号页多选一键推送（T-FE-09）
 SOURCE_REAL_DIRECT = "real_direct"  # 实盘独有持仓直卖（用户一键卖出，不经模拟台账）
+SOURCE_LLM_DECISION = "llm_decision"  # 决策层 LLM 调仓腿（P2.3b；执行段执行、决策层不管执行）
 
 # Fill 取价来源（REAL 侧：成交回报来自券商）
 PRICE_SOURCE_BROKER_FILL = "broker_fill"
@@ -85,6 +86,42 @@ def build_candidate_client_order_id(batch_id: str, symbol: str, side: str) -> st
     sym = str(symbol or "").strip().upper() or "NA"
     sd = str(side or "").strip().lower() or "na"
     return f"cand-{bid}-{sym}-{sd}"[:MAX_CLIENT_ORDER_ID_LEN]
+
+
+def build_llm_decision_client_order_id(
+    round_id: str, symbol: str, side: str, *, agent: str = ""
+) -> str | None:
+    """决策层 LLM 调仓腿的幂等键：同轮同标的同方向 → 同键；**缺参不强造**。
+
+    ``round_id`` 是**那一轮决策**的标识（调用点在开轮时生成一次，跨重试不变）。
+    它不是时间戳也不是内容哈希：轮内重试、进程重启后重放同一轮、桥回执丢失后的
+    补投，都必须落在同一个键上。换 ``round_id`` 的唯一理由是**要真的再下一单**
+    （也就是下一轮决策）。
+
+    这里是 ``build_candidate_client_order_id`` 的**镜像选择**，理由不同：那一族
+    的入参由前端生成，缺参说明请求坏了，占位符能让重试落在同一键上；本族三个入参
+    全由本仓生成，缺参说明代码有 bug，而**固定占位符会把「我不知道这是哪一轮」
+    变成「所有未知轮都是同一轮」**——同一个 (标的, 方向) 在后续轮次里会被静默去重，
+    即「模型让卖、系统静默不卖」。故缺参一律 ``None``（不带幂等键的单照下，由
+    调用点告警；``client_order_id`` 列可空、唯一索引是部分索引，这条路本来就支持）。
+
+    与 ``cand-`` 同族形态（同长度预算、同截断口径），前缀不同是为了让「这条单从哪来」
+    在台账里一眼可查——``cand`` 是人点的，``lld`` 是模型定的。
+
+    ``agent`` = 做这条腿的那个**模型/agent**（多模型竞争 P2.7 落地时由调用点传入）。
+    **一轮里有多个 agent 就必须传**：``round_id`` 是「轮」的标识，两家模型在同标的同
+    方向上会算出**同一个键**，后一家被静默去重——正是本函数开头那段「模型让卖、
+    系统静默不卖」的另一种形态。单 agent 轮次留空，键与历史完全一致（不改既有台账
+    的去重口径）。长度预算：4+24+1+8+1+9+1+4 = 52 < 100。
+    """
+    rid = "".join(ch for ch in str(round_id or "") if ch.isalnum())[:24]
+    sym = str(symbol or "").strip().upper()
+    sd = str(side or "").strip().lower()
+    if not rid or not sym or not sd:
+        return None
+    ag = "".join(ch for ch in str(agent or "") if ch.isalnum())[:8]
+    segments = ["lld", rid] + ([ag] if ag else []) + [sym, sd]
+    return "-".join(segments)[:MAX_CLIENT_ORDER_ID_LEN]
 
 
 def build_bridge_plan_id(

@@ -142,6 +142,7 @@ def test_source_taxonomy_constants():
         oc.SOURCE_TDX_ROLLING,
         oc.SOURCE_HOSTED,
         oc.SOURCE_FORCED_LIQUIDATION,
+        oc.SOURCE_LLM_DECISION,
     } == {
         "rebalance",
         "manual",
@@ -152,8 +153,94 @@ def test_source_taxonomy_constants():
         "tdx_rolling",
         "hosted",
         "forced_liquidation",
+        "llm_decision",
     }
     assert SOURCE_REBALANCE == "rebalance"
+
+
+def test_source_values_are_distinct_and_fit_the_column():
+    """``source`` 是 ``VARCHAR(32)``：新增来源撞值或超宽都会静默截断/串类。"""
+    from backend.shared import order_contract as oc
+
+    pairs = [
+        (name, getattr(oc, name))
+        for name in dir(oc)
+        if name.startswith("SOURCE_") and isinstance(getattr(oc, name), str)
+    ]
+    values = [v for _, v in pairs]
+    assert len(values) == len(set(values)), "两个 SOURCE_* 常量取了同一个值"
+    for name, value in pairs:
+        assert value == value.strip().lower(), f"{name}={value!r} 不是小写下划线形态"
+        assert len(value) <= 32, f"{name}={value!r} 超出 orders.source 列宽 32"
+
+
+# ── P2.3b：决策层 LLM 调仓腿的幂等键 ─────────────────────────────────
+
+
+def test_build_llm_decision_client_order_id_is_round_scoped():
+    from backend.shared.order_contract import (
+        build_llm_decision_client_order_id as build,
+    )
+
+    key = build("rnd-20260924-0930-flash", "600036.SH", "SELL")
+    # 非字母数字被剥掉后正好 20 字符（未触及 24 位上限）
+    assert key == "lld-rnd202609240930flash-600036.SH-sell"
+    # 同轮同标的同方向 → 同键（轮内重试/桥回执丢失后的补投都落在它上面）
+    assert key == build("rnd-20260924-0930-flash", "600036.SH", "sell")
+    # 换轮 / 换标的 / 换方向 → 必须换键（否则真单被静默去重）
+    assert key != build("rnd-20260924-1000-flash", "600036.SH", "SELL")
+    assert key != build("rnd-20260924-0930-flash", "600519.SH", "SELL")
+    assert key != build("rnd-20260924-0930-flash", "600036.SH", "BUY")
+    assert key.startswith("lld-")
+
+
+def test_build_llm_decision_client_order_id_separates_agents_in_one_round():
+    """**一轮多 agent**（P2.7 多模型竞争）：同一轮的同一标的同一方向必须是**两个键**。
+
+    不带 agent 时两家模型算出同一个键 → 后一家被静默去重（「模型让卖、系统不卖」）。
+    留空则与历史键**逐字节一致**（不改单 agent 台账的去重口径）。
+    """
+    from backend.shared.order_contract import (
+        build_llm_decision_client_order_id as build,
+    )
+
+    args = ("rnd-20260924-0930", "600036.SH", "SELL")
+    legacy = build(*args)
+    assert build(*args, agent="") == legacy
+    a = build(*args, agent="native-tft")
+    b = build(*args, agent="lgbm-238")
+    assert a is not None and b is not None
+    assert a != legacy and b != legacy and a != b
+    # agent 段只留 [A-Za-z0-9] 且至多 8 位（长度预算见 docstring）
+    assert (
+        build(*args, agent="native tft/v5")
+        == "lld-rnd202609240930-nativetf-600036.SH-sell"
+    )
+    assert build(*args, agent="a" * 40) == build(*args, agent="a" * 8)
+
+
+def test_build_llm_decision_client_order_id_refuses_to_fabricate():
+    """**缺参不强造**：固定占位符会把「不知道这是哪一轮」变成「所有未知轮是同一轮」，
+    于是后续轮次里同标的同方向的真单会被静默去重。缺参一律 ``None``。"""
+    from backend.shared.order_contract import (
+        build_llm_decision_client_order_id as build,
+    )
+
+    assert build("", "600036.SH", "BUY") is None
+    assert build("r1", "", "BUY") is None
+    assert build("r1", "600036.SH", "") is None
+    assert build(None, None, None) is None  # type: ignore[arg-type]
+
+
+def test_build_llm_decision_client_order_id_truncates_to_the_column_width():
+    from backend.shared.order_contract import (
+        build_llm_decision_client_order_id as build,
+    )
+
+    key = build("r" * 200, "600036.SH", "buy")
+    assert key is not None and len(key) <= MAX_CLIENT_ORDER_ID_LEN
+    # 截断只吃 round_id（前缀+标的+方向必须完整保留，否则键会串到别的票上）
+    assert key.endswith("-600036.SH-buy")
 
 
 # ── T-P2-08：幂等键唯一索引（部分索引）+ 重复语义 ─────────────────────

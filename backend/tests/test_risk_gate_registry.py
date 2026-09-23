@@ -6,9 +6,11 @@
 - 把全表标成 `structural` 以逃过代价记账 → 红（关键规则必须可计价）；
 - 复核日过去却没人复核 → 由 `review_overdue` 在报告里显式列出（本测试只钉判定口径）。
 
-覆盖的是**两族**规则的并集（P2.1b 起）：执行族（`builtin_rules.py` 里走
-`@rule` 注册的判定）+ 决策族（`backend/shared/decision/gates.py` 的纯函数）。
-两族的区别与"为什么不合成一族"写在 `gate_registry` 的模块 docstring 里。
+覆盖的是**三族**规则的并集（P2.1b 起两族，P2.3b 起三族）：
+执行族（`builtin_rules.py` 里走 `@rule` 注册的判定）
++ 决策族（`backend/shared/decision/gates.py` 的纯函数：该不该买）
++ 决策执行族（`backend/shared/decision/execution.py` 的纯函数：能不能下出去）。
+各族的区别与"为什么不合成一族"写在 `gate_registry` 的模块 docstring 里。
 """
 
 from __future__ import annotations
@@ -18,6 +20,7 @@ from datetime import date
 
 import pytest
 
+from backend.shared.decision.execution import ALL_RULE_IDS as EXECUTION_RULE_IDS
 from backend.shared.decision.gates import ALL_RULE_IDS as DECISION_RULE_IDS
 from backend.shared.risk import builtin_rules  # noqa: F401  —— 触发 @rule 注册
 from backend.shared.risk.gate_registry import (
@@ -41,6 +44,7 @@ from backend.shared.risk.registry import all_rules
 _MODULE_PATHS = {
     "builtin_rules": "backend.shared.risk.builtin_rules",
     "gates": "backend.shared.decision.gates",
+    "execution": "backend.shared.decision.execution",
 }
 
 
@@ -63,8 +67,10 @@ _MUST_BE_PRICED = (
 
 
 def _registered_ids() -> set[str]:
-    """两族规则的**并集**：执行族（@rule 注册表）+ 决策族（gates.py 的常量表）。"""
-    return {r.rule_id for r in all_rules()} | set(DECISION_RULE_IDS)
+    """三族规则的**并集**：执行族（@rule 注册表）+ 决策族 + 决策执行族。"""
+    return (
+        {r.rule_id for r in all_rules()} | set(DECISION_RULE_IDS) | set(EXECUTION_RULE_IDS)
+    )
 
 
 def test_every_code_rule_is_registered_and_vice_versa():
@@ -78,16 +84,24 @@ def test_every_code_rule_is_registered_and_vice_versa():
     assert not extra, f"登记表有以下条目但代码里没有对应规则：{extra}"
 
 
-def test_decision_family_is_covered_by_the_union():
-    """决策族的 id 必须真的被登记表收下（并集不是"看着像有覆盖"）。
+@pytest.mark.parametrize(
+    ("family", "rule_ids"),
+    [
+        ("决策族（gates.py：该不该买）", DECISION_RULE_IDS),
+        ("决策执行族（execution.py：能不能下出去）", EXECUTION_RULE_IDS),
+    ],
+    ids=["decision", "execution"],
+)
+def test_decision_family_is_covered_by_the_union(family: str, rule_ids: tuple[str, ...]):
+    """每一族的 id 必须真的被登记表收下（并集不是"看着像有覆盖"）。
 
-    少了这条，若 `ALL_RULE_IDS` 被误改成空元组，上面的并集覆盖会**静默通过**
+    少了这条，若某族的 `ALL_RULE_IDS` 被误改成空元组，上面的并集覆盖会**静默通过**
     ——那正是「零项参与 = 通过」的变体。
     """
-    assert DECISION_RULE_IDS, "决策族规则常量为空，说明 gates.py 的 ALL_RULE_IDS 坏了"
+    assert rule_ids, f"{family} 的规则常量为空，说明该模块的 ALL_RULE_IDS 坏了"
     spec_ids = {g.rule_id for g in all_gates()}
-    missing = sorted(set(DECISION_RULE_IDS) - spec_ids)
-    assert not missing, f"决策族规则没有登记表条目：{missing}"
+    missing = sorted(set(rule_ids) - spec_ids)
+    assert not missing, f"{family}规则没有登记表条目：{missing}"
 
 
 def test_where_points_at_a_real_function():

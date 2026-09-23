@@ -108,6 +108,13 @@ RULE_BELOW_MIN_LOT = "l3.below_min_lot"
 RULE_SYMBOL_BOUNDARY = "l4.symbol_boundary"
 RULE_LIMIT_UP = "l4.limit_up"
 RULE_LIMIT_DOWN = "l4.limit_down"
+#: ⚠️ **当前无生产者**（2026-09-24 实测）：判定与单测都在，但没人往
+#: ``check_buy(halted=…)`` 里填过值——执行段读快照的 ``halted``/``is_halted``/
+#: ``suspended`` 三键，而快照写入方（``tdx_aidata/collector.py:118``、
+#: ``tdx_quote_feed.py:122``、``qmt_quote_backup.py:186``）只写
+#: ``Now/Open/PreClose/High/Low/Volume/Amount`` + 五档，三键一个都没有，
+#: 于是 ``halted`` 恒为 ``None``（不判 + 留痕）⇒ 本规则至今一次未触发。接上停牌源
+#: （如 QMT 合约详情里的状态位）之前，它是影子账里那条「永不命中的规则」。
 RULE_HALTED = "l4.halted"
 
 #: 本族全部规则 id。**新增规则必须同时**：加常量、进本元组、在

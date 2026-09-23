@@ -9,6 +9,8 @@
   输入是已取好的快照，**不读 Redis/不读文件**）；
 * :mod:`~backend.shared.decision.llm_call` —— 提示词 → 决策 + usage（解析重试与失败
   分类的**纯状态机**，网络由注入的 caller 承担）；
+* :mod:`~backend.shared.decision.execution` —— 一条决策批次 → **执行计划**（能不能
+  变成一张单、多少股、什么价；纯函数，不读行情快照/不碰 Redis）；
 * :mod:`~backend.shared.decision.watch_map` —— `watch` 决策 → 守护单规则。
 
 记分卡侧的纯函数在 :mod:`~backend.shared.decision.tags`（入场前形态标签），
@@ -16,6 +18,7 @@
 
 IO 与编排在别处：提示词取数 ``backend/shared/decision_context_source.py``、
 LLM 真调用 ``backend/shared/decision_llm_client.py``、
+执行段取数与提交 ``backend/services/trade/services/decision_executor.py``、
 审计表 ``backend/shared/decision_ledger_store.py``、
 轮次调度 ``backend/services/trade/services/decision_round.py``、
 运维 CLI ``backend/scripts/decision_ledger.py``。
