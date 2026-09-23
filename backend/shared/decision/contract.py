@@ -124,6 +124,18 @@ STATUS_OK = "ok"
 STATUS_API_FAILED = "api_failed"  # 调用失败，无输出
 STATUS_EMPTY_OUTPUT = "empty_output"  # 返回空串
 STATUS_PARSE_FAILED = "parse_failed"  # 有输出但取不出合法决策
+#: 供应商没配（缺 key/base/占位符）——与 ``empty_output`` **必须分开**：前者去查
+#: 配置，后者去查接口/限流，排查方向完全相反。相邻系统把这一态混进了 empty_output
+#: （``call_llm`` 缺配置时返回 ``("", None)``），故它是本仓的新增态。
+STATUS_NOT_CONFIGURED = "not_configured"
+
+#: 四种失败态（``STATUS_OK`` 之外）。留痕/告警按它取文案，别在调用点写 if 链。
+FAILURE_STATUSES: tuple[str, ...] = (
+    STATUS_API_FAILED,
+    STATUS_EMPTY_OUTPUT,
+    STATUS_PARSE_FAILED,
+    STATUS_NOT_CONFIGURED,
+)
 
 #: ``DecisionBatch.raw`` 的截断上限（字符）。留痕要有限度：模型可能吐几十 KB 散文，
 #: 审计表不能跟着爆。
@@ -346,10 +358,20 @@ class DecisionBatch:
     def ok(self) -> bool:
         return self.status == STATUS_OK
 
+    @property
+    def failed(self) -> bool:
+        """四种失败态之一（``ok`` 的反面，但读起来告诉你「这不是成功」而非「它坏了」）。"""
+        return self.status in FAILURE_STATUSES
+
     @classmethod
     def api_failed(cls, schema: str) -> DecisionBatch:
         """LLM 调用失败（无输出）——与「有输出但解析不了」分开，排查方向不同。"""
         return cls(status=STATUS_API_FAILED, schema=schema)
+
+    @classmethod
+    def not_configured(cls, schema: str) -> DecisionBatch:
+        """供应商未配置（缺 key/base 或落到了占位符）——别让运维去查模型输出格式。"""
+        return cls(status=STATUS_NOT_CONFIGURED, schema=schema)
 
     def codes(self) -> tuple[str, ...]:
         """本轮涉及的标的（去重、保序）——执行段的在途/去重检查按它取数。"""
