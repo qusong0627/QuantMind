@@ -310,6 +310,26 @@ def test_duplicate_alias_from_two_libraries_is_rejected(tmp_path):
         )
 
 
+def test_qualified_alias_cannot_shadow_a_reserved_column(tmp_path):
+    """限定写法的 alias 也必须过保留名闸门，否则静默取到**锚库行情**的值。
+
+    副库真有一列叫 close 时（jq110/alpha360/cand_factors/tdxgs 都带 close），SELECT
+    会产出两个 close：DuckDB 把第二个改名 close_1，而回填按 `chunk["close"]` 取值
+    —— 拿到的是锚库 OHLCV 的 close，请求的特征被换成另一个数列，不报错、无日志。
+    """
+    _write_factor_partition(tmp_path, "l1_factors", _frame("2024-01-02", 10), "20240102")
+    secondary = _alpha_frame("2024-01-02", 1.5, 9.0)
+    secondary["close"] = [77.0, 78.0]  # 与锚库行情同名、不同值：撞了才看得出来
+    _write_factor_partition(tmp_path, "alpha_library", secondary, "20240102")
+
+    reader = QuantDBFactorReader(tmp_path)
+    with pytest.raises(QuantDBFactorError, match="overwrite key or OHLCV"):
+        reader.read_day("l1_factors", features=["alpha_library:close"], trade_date="2024-01-02")
+    # 形式② 的裸键同样不得借道映射挤进保留列名
+    with pytest.raises(QuantDBFactorError, match="overwrite key or OHLCV"):
+        reader.read_day("l1_factors", features=["close"], trade_date="2024-01-02")
+
+
 def test_secondary_library_partial_coverage_leaves_nan(tmp_path):
     for day, close in [("2024-01-02", 10), ("2024-01-03", 11)]:
         _write_factor_partition(
@@ -325,8 +345,13 @@ def test_secondary_library_partial_coverage_leaves_nan(tmp_path):
         end="2024-01-03",
     )
 
+    # 行数先断：日期谓词若从 ON 挪进 WHERE，LEFT JOIN 退化成 INNER，day2 的**整行**
+    # 都会被丢掉——那时 day2 是空集，而空列的 `.isna().all()` 恒为 True，下面那条
+    # 覆盖率断言照样绿（2026-09-23 审查实测）。丢行是这条契约唯一会坏的方式。
+    assert len(frame) == 4
     day1 = frame[frame["trade_date"] == pd.Timestamp("2024-01-02")]
     day2 = frame[frame["trade_date"] == pd.Timestamp("2024-01-03")]
+    assert len(day1) == 2 and len(day2) == 2
     assert day1["a101_x"].notna().all()
     assert day2["a101_x"].isna().all()
 

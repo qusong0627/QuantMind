@@ -211,6 +211,9 @@ def split_features_by_availability(
 
     ``columns_of`` 允许调用方注入带缓存的列查询（script_runner 的 ``describe``
     TTL 缓存）；不给则每库直接 ``reader.describe`` 一次。
+
+    异常口径：只有 ``QuantDBFactorError``（未知库/标签库/命名非法）算「列取不到」；
+    IO 错误与 parquet 损坏一律上抛，不得吞成 missing。
     """
     feature_sources = feature_sources or {}
 
@@ -230,8 +233,11 @@ def split_features_by_availability(
         if lib not in cache:
             try:
                 cache[lib] = _columns(lib)
-            except Exception:  # noqa: BLE001 — 描述失败/未知副库 → 该库特征判缺失
+            except QuantDBFactorError:
+                # 未知副库 / 标签库 / 命名非法 → 该库特征确实取不到，判缺失。
                 cache[lib] = set()
+            # 其余异常（IO 错误、parquet 损坏）一律**上抛**：吞掉等于把「库读不出来」
+            # 降级成「列不存在」，调用方（实时推理/训练预检）会拿着全 NaN 继续跑。
         (valid if column in cache[lib] else missing).append(feature)
     return valid, missing
 
@@ -602,10 +608,6 @@ class QuantDBFactorReader:
         available = set(status.columns)
         requested = list(dict.fromkeys(features))
         reserved = set(REQUIRED_COLUMNS) | {"trade_date", "dt"}
-        if any(feature in reserved for feature in requested):
-            raise QuantDBFactorError(
-                "Mapped factor names cannot overwrite key or OHLCV columns"
-            )
         feature_sources = feature_sources or {}
         # 逻辑名/输出列名 → (库, 原始列)。两种等价写法：
         # ① features 里直接写限定名 "库:列"（输出列名取裸列名）；
@@ -624,6 +626,15 @@ class QuantDBFactorReader:
                 )
                 alias = feature
             lib = lib or source
+            # 保留名闸门必须判**解析后的 alias**，不能判原始请求串：形式① 的 alias
+            # 是裸列名，副库真有一列叫 close 时（jq110/alpha360/cand_factors/tdxgs
+            # 都带 close）SELECT 会产出两个 close——DuckDB 把第二个改名 close_1，
+            # 回填按 chunk["close"] 取到的是**锚库 OHLCV** 的值：请求的特征被静默
+            # 换成另一个数列，不报错、无日志（2026-09-23 审查实测）。
+            if alias in reserved:
+                raise QuantDBFactorError(
+                    f"Mapped factor names cannot overwrite key or OHLCV columns: {alias!r}"
+                )
             if not _IDENTIFIER.fullmatch(alias):
                 raise QuantDBFactorError(
                     f"Mapped factor names must be SQL identifiers: {alias!r}"
