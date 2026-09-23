@@ -114,6 +114,9 @@ async def lifespan(app: FastAPI):
     # （超时扫描器 / EOD / 热集 / 对账 / 评估）先用到就每轮报 UndefinedColumn。
     # 启动期统一补齐——各 ensure 幂等，单个失败只告警，不置 startup_healthy。
     try:
+        from backend.shared.agent_ledger_contract import (
+            ensure_agent_ledger_tables_async,
+        )
         from backend.shared.decision_ledger_contract import (
             ensure_decision_ledger_table_async,
         )
@@ -150,6 +153,7 @@ async def lifespan(app: FastAPI):
             ensure_holding_alerts_table_async,
             ensure_ghost_ledger_table_async,
             ensure_decision_ledger_table_async,
+            ensure_agent_ledger_tables_async,
         ):
             try:
                 await _ensure()

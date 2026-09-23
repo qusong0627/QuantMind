@@ -2600,3 +2600,94 @@ CREATE INDEX IF NOT EXISTS idx_decision_ledger_pool ON qm_decision_ledger (pool_
 CREATE INDEX IF NOT EXISTS idx_decision_ledger_day ON qm_decision_ledger (tenant_id, user_id, trade_date DESC);
 CREATE INDEX IF NOT EXISTS idx_decision_ledger_agent ON qm_decision_ledger (agent, trade_date DESC);
 CREATE INDEX IF NOT EXISTS idx_decision_ledger_unpriced ON qm_decision_ledger (trade_date) WHERE priced_at IS NULL;
+
+-- ---------------------------------------------------------------------------
+-- 分账账本（P2.7）：几个决策 agent 共用**一个真实账户**时的虚拟子账，四张表
+--
+-- 多模型竞争下每家模型各自决策，但券商只有一个账户——持仓是同一批股票。2026-09-08
+-- 隔壁实录 `pro` 卖了 `flash` 的生益电子，根因是把共享账户的全量持仓当成「你名下」
+-- 喂给了空账本的 agent。故本层第一件事是把「这本账里有没有它」变成**可见性**。
+-- 与 backend/shared/agent_ledger_contract.py 同口径（老库由该模块启动期自愈建表，
+-- 这里同步一份给全新安装的库）。两者 DDL 由测试逐字符比对，改一处必须改两处。
+--
+-- qm_agent_ledger_account   每个 (租户, 账户, agent) 一行，只有 virtual_cash。
+--                           **不存 quota**：它是绑定层参数，存进来就有了第二个事实源。
+-- qm_agent_ledger_position  该 agent **名下**的持仓——互卖防线的唯一来源（空表 = 无仓，
+--                           不是「没配分账就全给我」）。
+-- qm_agent_ledger_fill      成交记账流水。唯一键是 (租户, 账户, **交易日**, fill_key)：
+--                           A 股成交编号每日重排（实测形如 00161170），全库唯一索引
+--                           会把次日的同号成交静默吞掉（ON CONFLICT DO NOTHING 不报错），
+--                           账本于是少一只票、agent 卖不掉自己的持仓。
+-- qm_agent_ledger_roundtrip 回合台账（影子账户与行为归因的底座）。
+--
+-- `code` 一律**后缀式**（600036.SH），与读侧 HoldingRow.code 同口径；存前缀式会让
+-- mine 匹配永远失败，互卖防线与成本列同时静默失效。
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS qm_agent_ledger_account (
+    tenant_id      VARCHAR(64) NOT NULL DEFAULT 'default',
+    user_id        VARCHAR(64) NOT NULL,
+    agent          VARCHAR(64) NOT NULL,
+    virtual_cash   DOUBLE PRECISION NOT NULL DEFAULT 0,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (tenant_id, user_id, agent)
+);
+
+CREATE TABLE IF NOT EXISTS qm_agent_ledger_position (
+    tenant_id      VARCHAR(64) NOT NULL DEFAULT 'default',
+    user_id        VARCHAR(64) NOT NULL,
+    agent          VARCHAR(64) NOT NULL,
+    code           VARCHAR(32) NOT NULL,
+    volume         DOUBLE PRECISION NOT NULL,
+    cost_price     DOUBLE PRECISION NOT NULL,
+    buy_ts         TIMESTAMPTZ,
+    last_ts        TIMESTAMPTZ,
+    updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (tenant_id, user_id, agent, code)
+);
+
+CREATE TABLE IF NOT EXISTS qm_agent_ledger_fill (
+    id             BIGSERIAL PRIMARY KEY,
+    tenant_id      VARCHAR(64) NOT NULL DEFAULT 'default',
+    user_id        VARCHAR(64) NOT NULL,
+    agent          VARCHAR(64) NOT NULL,
+    fill_key       VARCHAR(128) NOT NULL,
+    order_id       VARCHAR(64) NOT NULL DEFAULT '',
+    trade_date     DATE NOT NULL,
+    code           VARCHAR(32) NOT NULL,
+    side           VARCHAR(16) NOT NULL,
+    volume         DOUBLE PRECISION NOT NULL,
+    price          DOUBLE PRECISION NOT NULL,
+    applied_volume DOUBLE PRECISION NOT NULL,
+    approx_price   BOOLEAN NOT NULL DEFAULT FALSE,
+    note           TEXT NOT NULL DEFAULT '',
+    filled_at      TIMESTAMPTZ NOT NULL,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT uq_agent_ledger_fill_key
+        UNIQUE (tenant_id, user_id, trade_date, fill_key)
+);
+
+CREATE TABLE IF NOT EXISTS qm_agent_ledger_roundtrip (
+    id             BIGSERIAL PRIMARY KEY,
+    tenant_id      VARCHAR(64) NOT NULL DEFAULT 'default',
+    user_id        VARCHAR(64) NOT NULL,
+    agent          VARCHAR(64) NOT NULL,
+    market         VARCHAR(16) NOT NULL DEFAULT 'CN',
+    code           VARCHAR(32) NOT NULL,
+    volume         DOUBLE PRECISION NOT NULL,
+    cost_price     DOUBLE PRECISION NOT NULL,
+    sell_price     DOUBLE PRECISION NOT NULL,
+    realized_pnl   DOUBLE PRECISION NOT NULL,
+    pnl_pct        DOUBLE PRECISION,
+    buy_ts         TIMESTAMPTZ,
+    sell_ts        TIMESTAMPTZ NOT NULL,
+    holding_days   DOUBLE PRECISION,
+    closed         BOOLEAN NOT NULL DEFAULT FALSE,
+    exit_reason    VARCHAR(32) NOT NULL DEFAULT '',
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_ledger_pos_agent ON qm_agent_ledger_position (tenant_id, user_id, agent);
+CREATE INDEX IF NOT EXISTS idx_agent_ledger_fill_day ON qm_agent_ledger_fill (tenant_id, user_id, trade_date DESC);
+CREATE INDEX IF NOT EXISTS idx_agent_ledger_fill_order ON qm_agent_ledger_fill (order_id);
+CREATE INDEX IF NOT EXISTS idx_agent_ledger_rt_agent ON qm_agent_ledger_roundtrip (tenant_id, user_id, agent, sell_ts DESC);
