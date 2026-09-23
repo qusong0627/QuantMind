@@ -9,7 +9,9 @@
     python backend/scripts/qmt_sltp_ctl.py --arm 600036.SH --stop 0.05 --take 0.10
     python backend/scripts/qmt_sltp_ctl.py --arm 600036.SH --entry 41.5 --stop 0.03 --qty 100
     python backend/scripts/qmt_sltp_ctl.py --arm 600036.SH --stop-price 44.6     # 绝对价止损
+    python backend/scripts/qmt_sltp_ctl.py --arm 600036.SH --take-price 52.0     # 绝对价止盈
     python backend/scripts/qmt_sltp_ctl.py --arm 600036.SH --move-trigger 105 --move-to 100
+    python backend/scripts/qmt_sltp_ctl.py --arm 600036.SH --move-trigger 105 --move-to 105
     python backend/scripts/qmt_sltp_ctl.py --arm 600036.SH --stop 0.05 --reduce-pct 0.33
     python backend/scripts/qmt_sltp_ctl.py --rm 600036.SH
     python backend/scripts/qmt_sltp_ctl.py --reset 600036.SH
@@ -26,7 +28,12 @@ import json
 import os
 import sys
 
-sys.path.insert(0, "/app" if os.path.isdir("/app/backend") else os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+sys.path.insert(
+    0,
+    "/app"
+    if os.path.isdir("/app/backend")
+    else os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+)
 
 from backend.services.live_trading.services import sltp_executor as ex  # noqa: E402
 from backend.services.live_trading.services.tdx_quote_feed import (  # noqa: E402
@@ -68,6 +75,7 @@ def cmd_arm(redis, args) -> None:
         "take_profit_pct": args.take,
         "trailing_stop_pct": args.trail,
         "stop_loss_price": args.stop_price,
+        "take_profit_price": args.take_price,
         "move_stop_trigger": args.move_trigger,
         "move_stop_to": args.move_to,
         "reduce_pct": args.reduce_pct,
@@ -79,12 +87,21 @@ def cmd_arm(redis, args) -> None:
     if reason:
         print(f"规则被拒绝（未写入）：{reason}", file=sys.stderr)
         raise SystemExit(2)
-    rules = [r for r in cfg.get("rules") or [] if ex.normalize_symbol(r.get("symbol", "")) != rule["symbol"]]
+    rules = [
+        r
+        for r in cfg.get("rules") or []
+        if ex.normalize_symbol(r.get("symbol", "")) != rule["symbol"]
+    ]
     rules.append(rule)
     cfg["rules"] = rules
     saved = _save(redis, cfg)
     armed = next(
-        (r for r in saved["rules"] if ex.normalize_symbol(r.get("symbol", "")) == rule["symbol"]), None
+        (
+            r
+            for r in saved["rules"]
+            if ex.normalize_symbol(r.get("symbol", "")) == rule["symbol"]
+        ),
+        None,
     )
     if armed is None:  # 兜底：写入后被拒（正常已在上面拦住）
         print(
@@ -99,7 +116,11 @@ def cmd_arm(redis, args) -> None:
 def cmd_rm(redis, args) -> None:
     cfg, _ = _load(redis)
     target = ex.normalize_symbol(args.rm)
-    rules = [r for r in cfg.get("rules") or [] if ex.normalize_symbol(r.get("symbol", "")) != target]
+    rules = [
+        r
+        for r in cfg.get("rules") or []
+        if ex.normalize_symbol(r.get("symbol", "")) != target
+    ]
     cfg["rules"] = rules
     _save(redis, cfg)
     # 同步清掉状态，避免同名规则复用时沿用旧状态
@@ -109,7 +130,9 @@ def cmd_rm(redis, args) -> None:
     print(f"已移除 {target}（剩余 {len(rules)} 条规则）")
 
 
-def evaluate_lines(cfg: dict, state: dict, ticks: dict, positions: list, fallback: dict) -> list[str]:
+def evaluate_lines(
+    cfg: dict, state: dict, ticks: dict, positions: list, fallback: dict
+) -> list[str]:
     """只读预演的每行输出（纯函数：喂给它的行情/持仓就是全部输入）。
 
     **与执行器同源**：``trigger_inputs``（含棘轮抬高后的有效防守位）与
@@ -123,7 +146,11 @@ def evaluate_lines(cfg: dict, state: dict, ticks: dict, positions: list, fallbac
         tick = (ticks or {}).get(symbol) or {}
         price = float(tick.get("lastPrice") or 0)
         pos = ex._find_position(positions, symbol)
-        entry = rule.get("entry_price") or st.get("entry_price") or ex._position_entry_price(pos)
+        entry = (
+            rule.get("entry_price")
+            or st.get("entry_price")
+            or ex._position_entry_price(pos)
+        )
         can_use = float((pos or {}).get("can_use_volume") or 0)
         tcfg = ex.trigger_config(ex.trigger_inputs(rule, st), fallback)
         triggered, reason = check_sltp_trigger(price, float(entry or 0), tcfg)
@@ -143,7 +170,9 @@ async def cmd_evaluate(redis, args) -> None:
     if not rules:
         print("无启用规则")
         return
-    from backend.services.live_trading.services.qmt_exec_client import get_qmt_exec_client
+    from backend.services.live_trading.services.qmt_exec_client import (
+        get_qmt_exec_client,
+    )
 
     client = get_qmt_exec_client()
     try:
@@ -153,7 +182,9 @@ async def cmd_evaluate(redis, args) -> None:
     if not client.configured:
         print("QMT 执行端未配置/未启用（QMT_EXEC_ENABLED、QMT_EXEC_ACCOUNT_ID）")
         return
-    fallback = load_sltp_config(str(cfg.get("tenant_id") or "default"), str(cfg.get("user_id") or "1"))
+    fallback = load_sltp_config(
+        str(cfg.get("tenant_id") or "default"), str(cfg.get("user_id") or "1")
+    )
     ticks = await client.get_full_tick([r["symbol"] for r in rules])
     positions = await client.get_positions()
     for line in evaluate_lines(cfg, state, ticks, positions, fallback):
@@ -165,7 +196,9 @@ def main() -> None:
     parser.add_argument("--status", action="store_true", help="打印配置与状态")
     parser.add_argument("--enable", action="store_true")
     parser.add_argument("--disable", action="store_true")
-    parser.add_argument("--mode", choices=list(ex.VALID_PROTECT_MODES), help="保护价模式")
+    parser.add_argument(
+        "--mode", choices=list(ex.VALID_PROTECT_MODES), help="保护价模式"
+    )
     parser.add_argument("--interval", type=float, help="轮询间隔（秒）")
     parser.add_argument("--alert-sec", type=float, help="未成交告警阈值（秒）")
     parser.add_argument(
@@ -180,12 +213,25 @@ def main() -> None:
     parser.add_argument("--stop", type=float, help="止损比例，如 0.05")
     parser.add_argument("--take", type=float, help="止盈比例，如 0.10")
     parser.add_argument("--trail", type=float, help="移动止损回撤比例，如 0.03")
-    parser.add_argument("--stop-price", type=float, help="绝对价止损（元），与 --stop 取更紧者")
-    parser.add_argument("--move-trigger", type=float, help="棘轮触发价：现价上触即抬防守")
-    parser.add_argument("--move-to", type=float, help="棘轮目标防守价（须低于触发价）")
+    parser.add_argument(
+        "--stop-price", type=float, help="绝对价止损（元），与 --stop 取更紧者"
+    )
+    parser.add_argument(
+        "--take-price", type=float, help="绝对价止盈（元），与 --take 取更早触发者"
+    )
+    parser.add_argument(
+        "--move-trigger", type=float, help="棘轮触发价：现价上触即抬防守"
+    )
+    parser.add_argument(
+        "--move-to",
+        type=float,
+        help="棘轮目标防守价（须不高于触发价；相等即零间隙棘轮）",
+    )
     parser.add_argument("--reduce-pct", type=float, help="部分减仓比例 (0,1]，如 0.33")
     parser.add_argument("--rm", metavar="SYMBOL", help="删除规则")
-    parser.add_argument("--reset", nargs="*", metavar="SYMBOL", help="重新武装（留空=全部）")
+    parser.add_argument(
+        "--reset", nargs="*", metavar="SYMBOL", help="重新武装（留空=全部）"
+    )
     parser.add_argument("--evaluate", action="store_true", help="只读评估（不下单）")
     args = parser.parse_args()
 
@@ -199,9 +245,19 @@ def main() -> None:
 
 def _dispatch(redis, args, parser) -> None:
     if args.status or not any(
-        [args.enable, args.disable, args.mode, args.interval, args.alert_sec,
-         args.policy, args.close_reminder,
-         args.arm, args.rm, args.reset is not None, args.evaluate]
+        [
+            args.enable,
+            args.disable,
+            args.mode,
+            args.interval,
+            args.alert_sec,
+            args.policy,
+            args.close_reminder,
+            args.arm,
+            args.rm,
+            args.reset is not None,
+            args.evaluate,
+        ]
     ):
         cfg, state = _load(redis)
         _dump({"config": cfg, "state": state})

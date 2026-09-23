@@ -36,9 +36,9 @@ POSITIONS_REFRESH_SECONDS = 30.0
 # 非交易时段探测周期（只需低频检查是否开盘）
 OFF_HOURS_SLEEP = 30.0
 
-SNAPSHOT_TTL = 300          # 快照 Hash TTL（与行情快照写入规范一致）
-SERIES_TTL = 172800         # 时序 ZSET TTL（stream 侧一致）
-SERIES_MAX_POINTS = 6000    # 时序保留点数（stream 侧一致）
+SNAPSHOT_TTL = 300  # 快照 Hash TTL（与行情快照写入规范一致）
+SERIES_TTL = 172800  # 时序 ZSET TTL（stream 侧一致）
+SERIES_MAX_POINTS = 6000  # 时序保留点数（stream 侧一致）
 
 ALERT_COOLDOWN_SECONDS = 300.0  # 同标的同类型提醒冷却，防刷屏
 
@@ -53,24 +53,24 @@ TICK_FLUSH_SECONDS = 10.0
 TICK_INSERT_BATCH = 500
 
 # 持仓会话（tick 归属）：进程内缓存 + PG tdx_position_sessions 持久化（重启可恢复）
-_tick_sessions: dict[str, str] = {}   # symbol(prefix) -> session_id
-_tick_buffer: list[dict] = []         # 待落库的 tick 行
+_tick_sessions: dict[str, str] = {}  # symbol(prefix) -> session_id
+_tick_buffer: list[dict] = []  # 待落库的 tick 行
 _tick_tables_ready = False
 
 # Feed 运行状态（供 GET /tdx/quote-feed/status 读取）
 feed_status: dict = {
     "running": False,
     "bridge_ok": False,
-    "last_feed_at": None,        # ISO 时间
+    "last_feed_at": None,  # ISO 时间
     "last_feed_age_sec": None,
-    "symbols": [],               # 当前监控的持仓 symbol（prefix 格式）
+    "symbols": [],  # 当前监控的持仓 symbol（prefix 格式）
     "quote_points_written": 0,
     "sltp_alerts_fired": 0,
     "strategy_alerts_fired": 0,
-    "ticks_saved": 0,            # 已落库 tick 行数
+    "ticks_saved": 0,  # 已落库 tick 行数
     "active_sessions": 0,
     "last_error": None,
-    "rate_limited": False,       # 桥限流避让中（60次/分钟）
+    "rate_limited": False,  # 桥限流避让中（60次/分钟）
     "member_gate": {"enabled": True, "allowed": True, "checked_at": None},
 }
 
@@ -129,9 +129,13 @@ def map_snapshot(result: dict) -> dict:
 def check_sltp_trigger(price: float, entry_price: float, cfg: dict) -> tuple[bool, str]:
     """止损/止盈/移动止损触发判断（T-P2-04：**委托 exit_rules 唯一实现**）。
 
-    cfg: {stop_loss_pct, stop_loss_price, take_profit_pct, trailing_stop_pct, highest_price}
+    cfg: {stop_loss_pct, stop_loss_price, take_profit_pct, take_profit_price,
+          trailing_stop_pct, highest_price}
     highest_price 为持仓以来最高价（由调用方维护，只升不降）。
-    ``stop_loss_price`` 是绝对价硬止损（P1.3；与 pct 同时给时取更紧的那条）。
+    ``stop_loss_price`` 是绝对价硬止损（P1.3；与 pct 同时给时取更紧的那条）；
+    ``take_profit_price`` 是绝对价止盈（P1.3b；与 pct 同时给时取更早触发的那条）。
+    **两个绝对价键都是可选的**——不传时行为与历史逐字一致（桥 daemon 现网形态
+    不带这两个键）。
     返回 (triggered, reason)——文案与历史口径保持兼容（桥 daemon 与
     sltp_executor 零改动）。
     """
@@ -141,6 +145,7 @@ def check_sltp_trigger(price: float, entry_price: float, cfg: dict) -> tuple[boo
         hard_stop_pct=cfg.get("stop_loss_pct"),
         hard_stop_price=cfg.get("stop_loss_price"),
         take_profit_pct=cfg.get("take_profit_pct"),
+        take_profit_price=cfg.get("take_profit_price"),
         trailing_stop_pct=cfg.get("trailing_stop_pct"),
     )
     pos = PositionState(
@@ -158,7 +163,9 @@ def load_sltp_config(tenant_id: str, user_id: str) -> dict:
     返回 {stop_loss_pct, take_profit_pct, trailing_stop_pct, enabled}。
     """
     cfg = {
-        "stop_loss_pct": float(os.getenv("TDX_SLTP_STOP_LOSS_PCT", str(DEFAULT_STOP_LOSS_PCT))),
+        "stop_loss_pct": float(
+            os.getenv("TDX_SLTP_STOP_LOSS_PCT", str(DEFAULT_STOP_LOSS_PCT))
+        ),
         "take_profit_pct": None,
         "trailing_stop_pct": None,
         "enabled": True,
@@ -166,9 +173,16 @@ def load_sltp_config(tenant_id: str, user_id: str) -> dict:
     try:
         from backend.services.trade_shared.redis_client import get_redis
 
-        saved = get_redis().get(SLTP_CONFIG_KEY.format(tenant_id=tenant_id, user_id=user_id))
+        saved = get_redis().get(
+            SLTP_CONFIG_KEY.format(tenant_id=tenant_id, user_id=user_id)
+        )
         if isinstance(saved, dict):
-            for key in ("stop_loss_pct", "take_profit_pct", "trailing_stop_pct", "enabled"):
+            for key in (
+                "stop_loss_pct",
+                "take_profit_pct",
+                "trailing_stop_pct",
+                "enabled",
+            ):
                 if key in saved and saved[key] is not None:
                     cfg[key] = saved[key]
     except Exception as exc:
@@ -180,8 +194,12 @@ def save_sltp_config(tenant_id: str, user_id: str, cfg: dict) -> dict:
     """保存止损止盈配置到 Redis（设置页）。"""
     clean = {
         "stop_loss_pct": float(cfg.get("stop_loss_pct") or DEFAULT_STOP_LOSS_PCT),
-        "take_profit_pct": float(cfg["take_profit_pct"]) if cfg.get("take_profit_pct") else None,
-        "trailing_stop_pct": float(cfg["trailing_stop_pct"]) if cfg.get("trailing_stop_pct") else None,
+        "take_profit_pct": float(cfg["take_profit_pct"])
+        if cfg.get("take_profit_pct")
+        else None,
+        "trailing_stop_pct": float(cfg["trailing_stop_pct"])
+        if cfg.get("trailing_stop_pct")
+        else None,
         "enabled": bool(cfg.get("enabled", True)),
     }
     from backend.services.trade_shared.redis_client import get_redis
@@ -228,13 +246,15 @@ async def _pull_positions() -> list[dict]:
             if not code or volume <= 0:
                 continue
             prefix = _normalize_prefix(code)
-            positions.append({
-                "symbol": prefix,
-                "suffix": _to_suffix(prefix),
-                "name": str(p.get("stock_name") or "").strip(),
-                "volume": volume,
-                "cost_price": float(p.get("cost_price") or 0),
-            })
+            positions.append(
+                {
+                    "symbol": prefix,
+                    "suffix": _to_suffix(prefix),
+                    "name": str(p.get("stock_name") or "").strip(),
+                    "volume": volume,
+                    "cost_price": float(p.get("cost_price") or 0),
+                }
+            )
         if positions:
             return positions
     except Exception as exc:
@@ -244,7 +264,9 @@ async def _pull_positions() -> list[dict]:
     try:
         from sqlalchemy import select
         from backend.shared.database_manager_v2 import get_session
-        from backend.services.trade_shared.models.real_account_snapshot import RealAccountSnapshot
+        from backend.services.trade_shared.models.real_account_snapshot import (
+            RealAccountSnapshot,
+        )
 
         async with get_session(read_only=True) as db:
             row = (
@@ -261,13 +283,15 @@ async def _pull_positions() -> list[dict]:
                 if not code or volume <= 0:
                     continue
                 prefix = _normalize_prefix(code)
-                positions.append({
-                    "symbol": prefix,
-                    "suffix": _to_suffix(prefix),
-                    "name": str(p.get("name") or "").strip(),
-                    "volume": volume,
-                    "cost_price": float(p.get("cost_price") or 0),
-                })
+                positions.append(
+                    {
+                        "symbol": prefix,
+                        "suffix": _to_suffix(prefix),
+                        "name": str(p.get("name") or "").strip(),
+                        "volume": volume,
+                        "cost_price": float(p.get("cost_price") or 0),
+                    }
+                )
     except Exception as exc:
         logger.warning("[TdxFeed] PG 持仓快照读取失败: %s", exc)
     return positions
@@ -278,6 +302,7 @@ async def _write_snapshot(prefix: str, snap: dict) -> bool:
 
     与 stream 服务 remote_redis_source 的读写格式完全一致（同步 Redis 放线程池）。
     """
+
     def _do() -> bool:
         try:
             from backend.services.live_trading.routers.real_trading_utils import (
@@ -301,12 +326,17 @@ async def _write_snapshot(prefix: str, snap: dict) -> bool:
                 "source": "tdx_bridge",
             }
             pipe = client.pipeline(transaction=False)
-            pipe.hset(_snapshot_key(prefix), mapping={
-                **snap,
-                "source": "tdx_bridge",
-            })
+            pipe.hset(
+                _snapshot_key(prefix),
+                mapping={
+                    **snap,
+                    "source": "tdx_bridge",
+                },
+            )
             pipe.expire(_snapshot_key(prefix), SNAPSHOT_TTL)
-            pipe.zadd(_series_key(prefix), {json.dumps(payload, ensure_ascii=False): ts})
+            pipe.zadd(
+                _series_key(prefix), {json.dumps(payload, ensure_ascii=False): ts}
+            )
             pipe.zremrangebyrank(_series_key(prefix), 0, -(SERIES_MAX_POINTS + 1))
             pipe.expire(_series_key(prefix), SERIES_TTL)
             pipe.execute()
@@ -379,8 +409,9 @@ async def ensure_tdx_quote_tables() -> None:
     from backend.shared.database_manager_v2 import get_session
 
     async with get_session() as db:
-        await db.execute(text(
-            """
+        await db.execute(
+            text(
+                """
             CREATE TABLE IF NOT EXISTS tdx_position_sessions (
                 session_id   VARCHAR(128) PRIMARY KEY,
                 tenant_id    VARCHAR(64)  NOT NULL,
@@ -393,9 +424,11 @@ async def ensure_tdx_quote_tables() -> None:
                 updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
             )
             """
-        ))
-        await db.execute(text(
-            """
+            )
+        )
+        await db.execute(
+            text(
+                """
             CREATE TABLE IF NOT EXISTS tdx_position_ticks (
                 id           BIGSERIAL PRIMARY KEY,
                 tenant_id    VARCHAR(64)  NOT NULL,
@@ -414,13 +447,18 @@ async def ensure_tdx_quote_tables() -> None:
                 created_at   TIMESTAMPTZ  NOT NULL DEFAULT now()
             )
             """
-        ))
-        await db.execute(text(
-            "CREATE INDEX IF NOT EXISTS idx_tdx_ticks_session ON tdx_position_ticks(session_id, tick_time)"
-        ))
-        await db.execute(text(
-            "CREATE INDEX IF NOT EXISTS idx_tdx_ticks_symbol ON tdx_position_ticks(symbol, tick_time)"
-        ))
+            )
+        )
+        await db.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS idx_tdx_ticks_session ON tdx_position_ticks(session_id, tick_time)"
+            )
+        )
+        await db.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS idx_tdx_ticks_symbol ON tdx_position_ticks(symbol, tick_time)"
+            )
+        )
         await db.commit()
     _tick_tables_ready = True
     logger.info("[TdxFeed] tick 表已就绪: tdx_position_ticks / tdx_position_sessions")
@@ -436,18 +474,26 @@ async def restore_open_sessions() -> None:
 
         async with get_session(read_only=True) as db:
             rows = (
-                await db.execute(
-                    text(
-                        """
+                (
+                    await db.execute(
+                        text(
+                            """
                         SELECT session_id, symbol FROM tdx_position_sessions
                         WHERE status = 'OPEN'
                         """
+                        )
                     )
                 )
-            ).mappings().all()
+                .mappings()
+                .all()
+            )
         _tick_sessions = {str(r["symbol"]): str(r["session_id"]) for r in rows}
         if _tick_sessions:
-            logger.info("[TdxFeed] 恢复 %d 个持仓会话: %s", len(_tick_sessions), list(_tick_sessions))
+            logger.info(
+                "[TdxFeed] 恢复 %d 个持仓会话: %s",
+                len(_tick_sessions),
+                list(_tick_sessions),
+            )
     except Exception as exc:
         logger.warning("[TdxFeed] 恢复持仓会话失败: %s", exc)
 
@@ -462,7 +508,11 @@ async def _apply_session_changes(
     """根据最新持仓清单开会话/闭会话（更新 PG 与进程内状态）。"""
     global _tick_sessions
     new_sessions, kept, opened, closed = reconcile_sessions(
-        held, _tick_sessions, now, tenant_id, user_id,
+        held,
+        _tick_sessions,
+        now,
+        tenant_id,
+        user_id,
     )
     if not opened and not closed:
         _tick_sessions = kept
@@ -556,14 +606,16 @@ def _buffer_tick(*, tenant_id: str, user_id: str, symbol: str, snap: dict) -> No
     session_id = _tick_sessions.get(symbol)
     if not session_id:
         return
-    _tick_buffer.append(build_tick_row(
-        tenant_id=tenant_id,
-        user_id=user_id,
-        symbol=symbol,
-        session_id=session_id,
-        snap=snap,
-        now=datetime.now(timezone.utc),
-    ))
+    _tick_buffer.append(
+        build_tick_row(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            symbol=symbol,
+            session_id=session_id,
+            snap=snap,
+            now=datetime.now(timezone.utc),
+        )
+    )
 
 
 async def _notify(
@@ -644,14 +696,16 @@ async def _check_sltp_alerts(
             title=f"止损止盈提醒 · {name}",
             content=f"{p['symbol']} {reason}（成本 {entry:.2f}，现价 {price:.2f}）",
             level="warning",
-            push_tdx=[{
-                "symbol": p["suffix"],
-                "side": "sell",
-                "price": price,
-                "close": price,
-                "volume": int(p.get("volume") or 0),
-                "reason": f"{reason} 注意持仓风控",
-            }],
+            push_tdx=[
+                {
+                    "symbol": p["suffix"],
+                    "side": "sell",
+                    "price": price,
+                    "close": price,
+                    "volume": int(p.get("volume") or 0),
+                    "reason": f"{reason} 注意持仓风控",
+                }
+            ],
         )
         feed_status["sltp_alerts_fired"] += 1
 
@@ -689,9 +743,10 @@ async def _check_strategy_alerts(
 
         async with get_session(read_only=True) as db:
             row = (
-                await db.execute(
-                    text(
-                        """
+                (
+                    await db.execute(
+                        text(
+                            """
                         SELECT run_id, prediction_trade_date::text AS prediction_trade_date
                         FROM qm_model_inference_runs
                         WHERE tenant_id = :tenant_id
@@ -699,28 +754,35 @@ async def _check_strategy_alerts(
                           AND status = 'completed'
                         ORDER BY created_at DESC LIMIT 1
                         """
-                    ),
-                    {"tenant_id": tenant_id, "user_id": user_id},
+                        ),
+                        {"tenant_id": tenant_id, "user_id": user_id},
+                    )
                 )
-            ).mappings().first()
+                .mappings()
+                .first()
+            )
             if not row:
                 return
             run_id = str(row.get("run_id") or "")
             if not run_id or run_id == last_run:
                 return
             rows = (
-                await db.execute(
-                    text(
-                        """
+                (
+                    await db.execute(
+                        text(
+                            """
                         SELECT symbol, fusion_score
                         FROM engine_signal_scores
                         WHERE run_id = :run_id AND tenant_id = :tenant_id AND user_id = :user_id
                           AND (universe_tag IS NULL OR universe_tag = 'CN')
                         """
-                    ),
-                    {"run_id": run_id, "tenant_id": tenant_id, "user_id": user_id},
+                        ),
+                        {"run_id": run_id, "tenant_id": tenant_id, "user_id": user_id},
+                    )
                 )
-            ).mappings().all()
+                .mappings()
+                .all()
+            )
 
         redis_client.set(last_key, run_id)
         for r in rows:
@@ -742,14 +804,16 @@ async def _check_strategy_alerts(
                         f"（预测日 {row.get('prediction_trade_date') or '--'}）"
                     ),
                     level="warning",
-                    push_tdx=[{
-                        "symbol": p["suffix"],
-                        "side": "sell",
-                        "price": 0,
-                        "close": 0,
-                        "volume": int(p.get("volume") or 0),
-                        "reason": reason,
-                    }],
+                    push_tdx=[
+                        {
+                            "symbol": p["suffix"],
+                            "side": "sell",
+                            "price": 0,
+                            "close": 0,
+                            "volume": int(p.get("volume") or 0),
+                            "reason": reason,
+                        }
+                    ],
                 )
                 feed_status["strategy_alerts_fired"] += 1
     except Exception as exc:
@@ -772,7 +836,9 @@ async def run_tdx_quote_feed_task(interval: float = POLL_INTERVAL):
         await ensure_tdx_quote_tables()
         await restore_open_sessions()
     except Exception as exc:
-        logger.warning("[TdxFeed] tick 表/会话初始化失败（tick 持久化暂不可用）: %s", exc)
+        logger.warning(
+            "[TdxFeed] tick 表/会话初始化失败（tick 持久化暂不可用）: %s", exc
+        )
     feed_status["running"] = True
     feed_status["active_sessions"] = len(_tick_sessions)
 
@@ -785,7 +851,8 @@ async def run_tdx_quote_feed_task(interval: float = POLL_INTERVAL):
 
     logger.info(
         "[TdxFeed] TDX 实时行情 Feed 启动: bridge=%s interval=%ss",
-        tdx_pusher.bridge_url, interval,
+        tdx_pusher.bridge_url,
+        interval,
     )
 
     positions: list[dict] = []
@@ -814,7 +881,9 @@ async def run_tdx_quote_feed_task(interval: float = POLL_INTERVAL):
                 )
                 # 持仓刷新后同步一次策略提醒（新 run 才触发）
                 await _check_strategy_alerts(
-                    tenant_id=tenant_id, user_id=user_id, positions=positions,
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    positions=positions,
                 )
 
             if not positions:
@@ -868,8 +937,11 @@ async def run_tdx_quote_feed_task(interval: float = POLL_INTERVAL):
                 feed_status["last_feed_at"] = _now_sh().isoformat(timespec="seconds")
                 feed_status["last_feed_age_sec"] = 0
                 await _check_sltp_alerts(
-                    tenant_id=tenant_id, user_id=user_id,
-                    positions=positions, prices=prices, highest=highest,
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    positions=positions,
+                    prices=prices,
+                    highest=highest,
                 )
 
             # 周期批量落库（每 10s 一次）

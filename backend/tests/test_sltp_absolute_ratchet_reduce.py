@@ -54,7 +54,12 @@ def _rule_ext(symbol: str = "600036.SH", **over) -> dict:
     return base
 
 
-def _pos(symbol: str = "600036.SH", can_use: float = 1000, cost: float = 100.0, volume: float | None = None):
+def _pos(
+    symbol: str = "600036.SH",
+    can_use: float = 1000,
+    cost: float = 100.0,
+    volume: float | None = None,
+):
     return {
         "stock_code": symbol,
         "symbol": symbol,
@@ -79,22 +84,30 @@ class TestAbsoluteStopPrice:
 
     def test_absolute_price_not_triggered_above(self) -> None:
         rules = ExitRuleSet(hard_stop_price=97.0)
-        decision = evaluate_exit(rules, PositionState(entry_price=100.0, last_price=97.1))
+        decision = evaluate_exit(
+            rules, PositionState(entry_price=100.0, last_price=97.1)
+        )
         assert decision.should_exit is False
 
     def test_tighter_of_pct_and_price_wins(self) -> None:
         """pct 5% → 95，绝对价 97 → 取 97（更高 = 更紧），96 应触发。"""
         rules = ExitRuleSet(hard_stop_pct=0.05, hard_stop_price=97.0)
-        decision = evaluate_exit(rules, PositionState(entry_price=100.0, last_price=96.0))
+        decision = evaluate_exit(
+            rules, PositionState(entry_price=100.0, last_price=96.0)
+        )
         assert decision.should_exit is True
         assert decision.snapshot.get("stop_source") == "price"
 
     def test_looser_absolute_price_is_ignored(self) -> None:
         """绝对价 93 低于 pct 线 95 → 95 仍生效，96 不触发。"""
         rules = ExitRuleSet(hard_stop_pct=0.05, hard_stop_price=93.0)
-        decision = evaluate_exit(rules, PositionState(entry_price=100.0, last_price=96.0))
+        decision = evaluate_exit(
+            rules, PositionState(entry_price=100.0, last_price=96.0)
+        )
         assert decision.should_exit is False
-        decision2 = evaluate_exit(rules, PositionState(entry_price=100.0, last_price=94.9))
+        decision2 = evaluate_exit(
+            rules, PositionState(entry_price=100.0, last_price=94.9)
+        )
         assert decision2.should_exit is True
         assert decision2.snapshot.get("stop_source") == "pct"
 
@@ -119,37 +132,58 @@ class TestAbsoluteStopPrice:
 # --------------------------------------------------------------------------
 class TestRatchetPure:
     def test_arms_when_price_touches_trigger(self) -> None:
-        new_stop, note = ratchet_stop_price(trigger=105.0, move_to=100.0, current=None, price=106.0)
+        new_stop, note = ratchet_stop_price(
+            trigger=105.0, move_to=100.0, current=None, price=106.0
+        )
         assert new_stop == 100.0
         assert note  # 有说明（用于通知）
 
     def test_quiet_below_trigger(self) -> None:
-        new_stop, note = ratchet_stop_price(trigger=105.0, move_to=100.0, current=None, price=104.9)
+        new_stop, note = ratchet_stop_price(
+            trigger=105.0, move_to=100.0, current=None, price=104.9
+        )
         assert (new_stop, note) == (None, "")
 
     def test_never_lowers_existing_stop(self) -> None:
         """已经抬到 101，目标 100 → 不动（棘轮只升不降）。"""
-        new_stop, note = ratchet_stop_price(trigger=105.0, move_to=100.0, current=101.0, price=106.0)
+        new_stop, note = ratchet_stop_price(
+            trigger=105.0, move_to=100.0, current=101.0, price=106.0
+        )
         assert (new_stop, note) == (None, "")
 
     def test_raises_when_target_above_current(self) -> None:
-        new_stop, _ = ratchet_stop_price(trigger=105.0, move_to=100.0, current=95.0, price=105.0)
+        new_stop, _ = ratchet_stop_price(
+            trigger=105.0, move_to=100.0, current=95.0, price=105.0
+        )
         assert new_stop == 100.0
 
-    def test_move_to_at_or_above_trigger_is_rejected(self) -> None:
-        """武装即触发（目标防守价 ≥ 触发价）→ 拒配（note 非空 = 要告警）。"""
-        new_stop, note = ratchet_stop_price(trigger=105.0, move_to=105.0, current=None, price=106.0)
+    def test_move_to_above_trigger_is_rejected(self) -> None:
+        """目标防守价**高于**触发价 → 拒配（note 非空 = 要告警）。
+
+        2026-09-23（P1.3b）口径变更：原判据是 ``move_to >= trigger`` 全拒，
+        现放宽为只拒 ``move_to > trigger``。**零间隙**（``move_to == trigger``，
+        隔壁 BayMax LLM 决策语料 ``move_stop`` 覆盖 49.3% 的形态）改为合法，
+        由调用方 ``_apply_ratchet`` 的同轮去抖兜住「武装即触发」。
+        放宽的依据与演示见 ``test_sltp_tp_price_and_zerogap.py``。
+        """
+        new_stop, note = ratchet_stop_price(
+            trigger=105.0, move_to=105.5, current=None, price=106.0
+        )
         assert new_stop is None
         assert note
 
     def test_non_positive_move_to_is_rejected(self) -> None:
-        new_stop, note = ratchet_stop_price(trigger=105.0, move_to=0.0, current=None, price=106.0)
+        new_stop, note = ratchet_stop_price(
+            trigger=105.0, move_to=0.0, current=None, price=106.0
+        )
         assert new_stop is None
         assert note
 
     def test_disabled_when_unset(self) -> None:
         """两端都没配 = 没启用棘轮 → 静默。"""
-        assert ratchet_stop_price(trigger=None, move_to=None, current=None, price=106.0) == (None, "")
+        assert ratchet_stop_price(
+            trigger=None, move_to=None, current=None, price=106.0
+        ) == (None, "")
 
     def test_unpaired_config_is_rejected(self) -> None:
         """只配一半（有目标没触发价）→ 报错不静默。
@@ -158,12 +192,16 @@ class TestRatchetPure:
         这里）；纯函数仍需 fail-closed——半配置若被静默忽略，用户以为有棘轮，
         实际整轮防守停在规则初始位。
         """
-        new_stop, note = ratchet_stop_price(trigger=None, move_to=100.0, current=None, price=106.0)
+        new_stop, note = ratchet_stop_price(
+            trigger=None, move_to=100.0, current=None, price=106.0
+        )
         assert new_stop is None
         assert note
 
     def test_invalid_price_fails_closed(self) -> None:
-        new_stop, note = ratchet_stop_price(trigger=105.0, move_to=100.0, current=None, price=float("nan"))
+        new_stop, note = ratchet_stop_price(
+            trigger=105.0, move_to=100.0, current=None, price=float("nan")
+        )
         assert new_stop is None
         assert note
 
@@ -192,19 +230,34 @@ class TestRatchetCycle:
         summary2 = h.cycle()
         assert len(h.dispatched) == 1
         assert summary2["triggered"] == 1
-        assert "100.00" in h.dispatched[0]["remarks"] or "100.00" in h.notices[-1]["content"]
+        assert (
+            "100.00" in h.dispatched[0]["remarks"]
+            or "100.00" in h.notices[-1]["content"]
+        )
 
     def test_arm_is_idempotent_across_cycles(self) -> None:
         rule = _rule_ext(move_stop_trigger=105.0, move_stop_to=100.0)
-        h = Harness(cfg=_cfg([rule]), ticks={"600036.SH": {"lastPrice": 106.0}}, positions=[_pos()])
+        h = Harness(
+            cfg=_cfg([rule]),
+            ticks={"600036.SH": {"lastPrice": 106.0}},
+            positions=[_pos()],
+        )
         h.cycle()
         armed_notices = [n for n in h.notices if "防守" in n["title"]]
         h.cycle()
-        assert len([n for n in h.notices if "防守" in n["title"]]) == len(armed_notices) == 1
+        assert (
+            len([n for n in h.notices if "防守" in n["title"]])
+            == len(armed_notices)
+            == 1
+        )
 
     def test_raised_stop_does_not_fire_while_price_above(self) -> None:
         rule = _rule_ext(move_stop_trigger=105.0, move_stop_to=100.0)
-        h = Harness(cfg=_cfg([rule]), ticks={"600036.SH": {"lastPrice": 106.0}}, positions=[_pos()])
+        h = Harness(
+            cfg=_cfg([rule]),
+            ticks={"600036.SH": {"lastPrice": 106.0}},
+            positions=[_pos()],
+        )
         h.cycle()
         h.client.ticks = {"600036.SH": {"lastPrice": 101.0}}
         h.cycle()
@@ -216,7 +269,12 @@ class TestRatchetCycle:
 # --------------------------------------------------------------------------
 class TestCarriedStopLifecycle:
     def _state_with_stop(self, **over) -> dict:
-        item = {"status": "filled", "stop_price": 100.0, "stop_entry": 100.0, "stop_volume": 1000.0}
+        item = {
+            "status": "filled",
+            "stop_price": 100.0,
+            "stop_entry": 100.0,
+            "stop_volume": 1000.0,
+        }
         item.update(over)
         return {"date": PREV_DAY, "rules": {"600036.SH": item}}
 
@@ -241,7 +299,13 @@ class TestCarriedStopLifecycle:
         ``price ≥ trigger > move_to`` 时武装，武装价必然低于现价，不会立刻成交。
         """
         h = Harness(
-            cfg=_cfg([_rule_ext(entry_price=120.0, move_stop_trigger=105.0, move_stop_to=100.0)]),
+            cfg=_cfg(
+                [
+                    _rule_ext(
+                        entry_price=120.0, move_stop_trigger=105.0, move_stop_to=100.0
+                    )
+                ]
+            ),
             state=self._state_with_stop(),
             ticks={"600036.SH": {"lastPrice": 110.0}},
             positions=[_pos(cost=120.0)],
@@ -278,7 +342,13 @@ class TestCarriedStopLifecycle:
         95 < 触发价 105，棘轮条件不成立 → 不会重新挂 —— 结果是**不卖**。
         """
         h = Harness(
-            cfg=_cfg([_rule_ext(entry_price=95.0, move_stop_trigger=105.0, move_stop_to=100.0)]),
+            cfg=_cfg(
+                [
+                    _rule_ext(
+                        entry_price=95.0, move_stop_trigger=105.0, move_stop_to=100.0
+                    )
+                ]
+            ),
             state=self._state_with_stop(),
             ticks={"600036.SH": {"lastPrice": 95.0}},
             positions=[_pos(cost=95.0)],
@@ -375,20 +445,38 @@ class TestConfigRejection:
         assert "reduce_pct" in cfg["rejected_rules"][0]["reason"]
 
     def test_reduce_pct_with_quantity_rejected(self) -> None:
-        cfg = ex.merge_config(_cfg([_rule(stop_loss_pct=0.05, reduce_pct=0.5, quantity=200.0)]))
+        cfg = ex.merge_config(
+            _cfg([_rule(stop_loss_pct=0.05, reduce_pct=0.5, quantity=200.0)])
+        )
         assert cfg["rules"] == []
         assert cfg["rejected_rules"]
 
     def test_move_stop_must_be_paired(self) -> None:
-        cfg = ex.merge_config(_cfg([_rule(stop_loss_pct=0.05, move_stop_trigger=105.0)]))
+        cfg = ex.merge_config(
+            _cfg([_rule(stop_loss_pct=0.05, move_stop_trigger=105.0)])
+        )
         assert cfg["rules"] == []
         assert "成对" in cfg["rejected_rules"][0]["reason"]
 
-    def test_move_stop_target_not_below_trigger_rejected(self) -> None:
+    def test_move_stop_target_above_trigger_rejected(self) -> None:
+        """目标**高于**触发价 → 整条拒绝（P1.3b 起只拒这一侧，见纯函数同名用例）。"""
         cfg = ex.merge_config(
-            _cfg([_rule(stop_loss_pct=0.05, move_stop_trigger=105.0, move_stop_to=106.0)])
+            _cfg(
+                [_rule(stop_loss_pct=0.05, move_stop_trigger=105.0, move_stop_to=106.0)]
+            )
         )
         assert cfg["rules"] == []
+        assert cfg["rejected_rules"]
+
+    def test_move_stop_target_equal_to_trigger_accepted(self) -> None:
+        """零间隙棘轮（``move_to == trigger``）自 P1.3b 起合法，必须能落库。"""
+        cfg = ex.merge_config(
+            _cfg(
+                [_rule(stop_loss_pct=0.05, move_stop_trigger=105.0, move_stop_to=105.0)]
+            )
+        )
+        assert len(cfg["rules"]) == 1
+        assert cfg["rules"][0]["move_stop_to"] == 105.0
 
     def test_stop_loss_price_non_positive_rejected(self) -> None:
         cfg = ex.merge_config(_cfg([_rule(stop_loss_price=0.0)]))
@@ -437,7 +525,10 @@ class TestRouterContract:
 
     def test_new_fields_accepted(self) -> None:
         rule = self._rule_model(
-            stop_loss_price=97.0, move_stop_trigger=105.0, move_stop_to=100.0, reduce_pct=0.33
+            stop_loss_price=97.0,
+            move_stop_trigger=105.0,
+            move_stop_to=100.0,
+            reduce_pct=0.33,
         )
         assert rule.reduce_pct == 0.33
 
@@ -460,10 +551,16 @@ class TestRouterContract:
             self._rule_model(move_stop_trigger=105.0)
 
     def test_move_stop_order_422(self) -> None:
+        """目标价**高于**触发价 → 422（P1.3b 起只拒这一侧）。"""
         from pydantic import ValidationError
 
         with pytest.raises(ValidationError, match="move_stop_to"):
-            self._rule_model(move_stop_trigger=105.0, move_stop_to=105.0)
+            self._rule_model(move_stop_trigger=105.0, move_stop_to=106.0)
+
+    def test_move_stop_zero_gap_accepted(self) -> None:
+        """零间隙棘轮过 API（隔壁 LLM 决策 49.3% 的形态，不能卡在 422）。"""
+        rule = self._rule_model(move_stop_trigger=105.0, move_stop_to=105.0)
+        assert rule.move_stop_to == rule.move_stop_trigger == 105.0
 
     def test_api_validation_uses_the_same_single_source(self) -> None:
         """API 拒因与执行器拒因同一函数（防两处口径漂移）。"""
@@ -491,6 +588,7 @@ class TestCliArm:
             "take": None,
             "trail": None,
             "stop_price": None,
+            "take_price": None,
             "move_trigger": None,
             "move_to": None,
             "reduce_pct": None,
@@ -512,6 +610,7 @@ class TestCliArm:
             self._args(
                 arm="600036.SH",
                 stop_price=44.6,
+                take_price=52.0,
                 move_trigger=105.0,
                 move_to=100.0,
                 reduce_pct=0.33,
@@ -519,15 +618,19 @@ class TestCliArm:
         )
         rule = ex.load_config(redis)["rules"][0]
         assert rule["stop_loss_price"] == 44.6
+        assert rule["take_profit_price"] == 52.0
         assert rule["move_stop_trigger"] == 105.0
         assert rule["move_stop_to"] == 100.0
         assert rule["reduce_pct"] == 0.33
 
     def test_invalid_combo_exits_without_writing(self) -> None:
-        """武装即触发（move_to ≥ trigger）→ 退出码 2 且**不写配置**。
+        """目标价高于触发价 → 退出码 2 且**不写配置**。
 
         不拦的话 save_config 会静默丢规则、CLI 还报「已武装」——用户以为有止损，
         实际一条都没落下。
+
+        P1.3b 起 ``move_to == trigger``（零间隙）**合法**，故此处用 ``106 > 105``
+        的真错单构造；零间隙的 CLI 路径由 ``test_zero_gap_ratchet_arms`` 正向钉住。
         """
         from backend.scripts import qmt_sltp_ctl as ctl
 
@@ -535,10 +638,21 @@ class TestCliArm:
         with pytest.raises(SystemExit) as excinfo:
             ctl.cmd_arm(
                 redis,
-                self._args(arm="600036.SH", move_trigger=105.0, move_to=105.0),
+                self._args(arm="600036.SH", move_trigger=105.0, move_to=106.0),
             )
         assert excinfo.value.code == 2
         assert ex.load_config(redis)["rules"] == []
+
+    def test_zero_gap_ratchet_arms(self) -> None:
+        """零间隙棘轮是隔壁 LLM 决策的主流形态，CLI 必须能直接武装。"""
+        from backend.scripts import qmt_sltp_ctl as ctl
+
+        redis = self._redis()
+        ctl.cmd_arm(
+            redis, self._args(arm="600036.SH", move_trigger=105.0, move_to=105.0)
+        )
+        rule = ex.load_config(redis)["rules"][0]
+        assert rule["move_stop_to"] == rule["move_stop_trigger"] == 105.0
 
     def test_valid_rule_still_reports_armed(self, capsys) -> None:
         from backend.scripts import qmt_sltp_ctl as ctl
@@ -555,8 +669,14 @@ class TestSharedDecisionInputs:
     """``--evaluate`` 是盘中确认「规则还灵不灵」的工具——它必须和真单同口径。"""
 
     def test_effective_stop_takes_the_tighter_of_rule_and_carried(self) -> None:
-        assert ex.effective_stop_price({"stop_loss_price": 95.0}, {"stop_price": 100.0}) == 100.0
-        assert ex.effective_stop_price({"stop_loss_price": 97.0}, {"stop_price": 96.0}) == 97.0
+        assert (
+            ex.effective_stop_price({"stop_loss_price": 95.0}, {"stop_price": 100.0})
+            == 100.0
+        )
+        assert (
+            ex.effective_stop_price({"stop_loss_price": 97.0}, {"stop_price": 96.0})
+            == 97.0
+        )
         assert ex.effective_stop_price({}, {}) is None
 
     def test_trigger_inputs_does_not_mutate_rule(self) -> None:
@@ -583,8 +703,20 @@ class TestSharedDecisionInputs:
         """
         from backend.scripts import qmt_sltp_ctl as ctl
 
-        cfg = {"rules": [_rule_ext(move_stop_trigger=105.0, move_stop_to=100.0, reduce_pct=0.33)]}
-        state = {"rules": {"600036.SH": {"stop_price": 100.0, "stop_entry": 100.0, "stop_volume": 1000.0}}}
+        cfg = {
+            "rules": [
+                _rule_ext(move_stop_trigger=105.0, move_stop_to=100.0, reduce_pct=0.33)
+            ]
+        }
+        state = {
+            "rules": {
+                "600036.SH": {
+                    "stop_price": 100.0,
+                    "stop_entry": 100.0,
+                    "stop_volume": 1000.0,
+                }
+            }
+        }
         ticks = {"600036.SH": {"lastPrice": 99.0}}
         positions = [_pos(can_use=1000)]
         lines = ctl.evaluate_lines(cfg, state, ticks, positions, {"enabled": False})

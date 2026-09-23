@@ -33,20 +33,42 @@ VALID_MODES = executor.VALID_PROTECT_MODES
 
 
 class SltpRule(BaseModel):
-    symbol: str = Field(..., min_length=1, max_length=32, description="标的（600036.SH）")
+    symbol: str = Field(
+        ..., min_length=1, max_length=32, description="标的（600036.SH）"
+    )
     enabled: bool = Field(True, description="该规则是否启用")
     side: str = Field("SELL", description="方向（当前仅支持 SELL）")
-    entry_price: float | None = Field(None, gt=0, description="成本价；缺省取柜台持仓成本")
+    entry_price: float | None = Field(
+        None, gt=0, description="成本价；缺省取柜台持仓成本"
+    )
     quantity: float | None = Field(None, gt=0, description="数量；缺省取柜台可用全量")
-    stop_loss_pct: float | None = Field(None, gt=0, lt=1, description="止损比例 0.05=5%")
-    take_profit_pct: float | None = Field(None, gt=0, lt=10, description="止盈比例 0.10=10%")
-    trailing_stop_pct: float | None = Field(None, gt=0, lt=1, description="移动止损回撤比例")
+    stop_loss_pct: float | None = Field(
+        None, gt=0, lt=1, description="止损比例 0.05=5%"
+    )
+    take_profit_pct: float | None = Field(
+        None, gt=0, lt=10, description="止盈比例 0.10=10%"
+    )
+    trailing_stop_pct: float | None = Field(
+        None, gt=0, lt=1, description="移动止损回撤比例"
+    )
     # P1.3：绝对价止损 / 条件棘轮 / 部分减仓。字段级只做类型，组合口径
     # 复用执行器的 rule_reject_reason（**单源**，防两处校验漂移）。
-    stop_loss_price: float | None = Field(None, description="绝对价止损（元），与 pct 取更紧者")
-    move_stop_trigger: float | None = Field(None, description="棘轮触发价：现价上触即抬防守")
-    move_stop_to: float | None = Field(None, description="棘轮目标防守价（须低于触发价）")
-    reduce_pct: float | None = Field(None, description="部分减仓比例 (0,1]，如 0.33=减三分之一")
+    stop_loss_price: float | None = Field(
+        None, description="绝对价止损（元），与 pct 取更紧者"
+    )
+    # P1.3b：绝对价止盈（与 stop_loss_price 对称）。LLM 给的是压力位不是「成本 +x%」。
+    take_profit_price: float | None = Field(
+        None, description="绝对价止盈（元），与 take_profit_pct 取更早触发者"
+    )
+    move_stop_trigger: float | None = Field(
+        None, description="棘轮触发价：现价上触即抬防守"
+    )
+    move_stop_to: float | None = Field(
+        None, description="棘轮目标防守价（须不高于触发价；等于触发价即零间隙棘轮）"
+    )
+    reduce_pct: float | None = Field(
+        None, description="部分减仓比例 (0,1]，如 0.33=减三分之一"
+    )
 
     @model_validator(mode="after")
     def _check_combinations(self) -> SltpRule:
@@ -92,7 +114,9 @@ class SltpConfigUpdate(BaseModel):
         "alert_only",
         description="未成交余量策略：alert_only=仅提醒 / cancel=撤单 / requote_at_protect_price=偏离保护价才重挂",
     )
-    close_reminder_sec: float = Field(300, ge=0, le=3600, description="收盘前提醒窗口（秒，0=关闭）")
+    close_reminder_sec: float = Field(
+        300, ge=0, le=3600, description="收盘前提醒窗口（秒，0=关闭）"
+    )
     rules: list[SltpRule] = Field(default_factory=list, max_length=MAX_RULES)
 
     @field_validator("protect_price_mode")
@@ -108,7 +132,9 @@ class SltpConfigUpdate(BaseModel):
     def _clean_policy(cls, value: str) -> str:
         text = str(value or "alert_only").strip().lower()
         if text not in executor.VALID_REMAINDER_POLICIES:
-            raise ValueError(f"remainder_policy 仅支持 {executor.VALID_REMAINDER_POLICIES}")
+            raise ValueError(
+                f"remainder_policy 仅支持 {executor.VALID_REMAINDER_POLICIES}"
+            )
         return text
 
 
@@ -131,13 +157,17 @@ def _read(redis: Any) -> dict[str, Any]:
 
 
 @router.get("/qmt-sltp/config")
-async def get_sltp_config(redis: Any = Depends(get_redis), auth: AuthContext = Depends(require_admin)):
+async def get_sltp_config(
+    redis: Any = Depends(get_redis), auth: AuthContext = Depends(require_admin)
+):
     """执行器配置 + 规则当日状态。"""
     return _read(redis)
 
 
 @router.get("/qmt-sltp/status")
-async def get_sltp_status(redis: Any = Depends(get_redis), auth: AuthContext = Depends(require_admin)):
+async def get_sltp_status(
+    redis: Any = Depends(get_redis), auth: AuthContext = Depends(require_admin)
+):
     """仅状态（配置里的 rules 不带回，减少敏感面）。"""
     snapshot = _read(redis)
     state = snapshot.get("state") or {}
@@ -187,8 +217,15 @@ async def put_sltp_enabled(
     try:
         saved = executor.set_enabled(redis, payload.enabled)
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=503, detail=f"Redis 读取/写入失败: {exc}") from exc
-    logger.info("[SltpAPI] enabled tenant=%s user=%s → %s", auth.tenant_id, auth.user_id, saved["enabled"])
+        raise HTTPException(
+            status_code=503, detail=f"Redis 读取/写入失败: {exc}"
+        ) from exc
+    logger.info(
+        "[SltpAPI] enabled tenant=%s user=%s → %s",
+        auth.tenant_id,
+        auth.user_id,
+        saved["enabled"],
+    )
     return {"enabled": saved["enabled"]}
 
 
@@ -205,6 +242,9 @@ async def post_sltp_reset(
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=503, detail=f"Redis 写入失败: {exc}") from exc
     logger.info(
-        "[SltpAPI] reset tenant=%s user=%s symbols=%s", auth.tenant_id, auth.user_id, symbols or "ALL"
+        "[SltpAPI] reset tenant=%s user=%s symbols=%s",
+        auth.tenant_id,
+        auth.user_id,
+        symbols or "ALL",
     )
     return {"date": state.get("date"), "rules": state.get("rules") or {}}

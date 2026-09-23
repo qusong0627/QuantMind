@@ -30,11 +30,13 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any
 
+from backend.services.live_trading.services import lot_rules
 from backend.services.live_trading.services.qmt_account_sync_task import (
     batch_quantdb_last_close,
 )
@@ -71,7 +73,8 @@ _MAX_CLIENT_ORDER_ID_LEN = 100
 
 # 强平/止损单（bypass_price_gate）的 sanity 上界：偏离昨收超过该比例视为脏数据，
 # 即使豁免 2% 偏离闸门也不下单（防把过期/错符号的报价当盘口价打出去）。
-_SANITY_MAX_DRIFT = 0.20
+# 数值的**唯一出处**在 lot_rules（与逐笔限价的合理带上界同源），此处只是别名。
+_SANITY_MAX_DRIFT = lot_rules.SANITY_MAX_DRIFT
 
 # 镜像跳过记录：mirror:skipped:{YYYYMMDD} 哈希，field={symbol}:{reason} → 次数，
 # 供当日双轨对账报表使用（TTL 7 天）。
@@ -843,12 +846,18 @@ async def mirror_virtual_fill(
     source: str = "",
     bypass_price_gate: bool = False,
     trigger: str = "",
+    limit_price: float | None = None,
 ) -> dict[str, Any]:
     """虚拟成交 → 真单镜像。**永不抛异常**，返回结构化决策结果。
 
     ``trigger``：成交通知里那句「这笔真单为什么会有」的原因是**可覆盖**的。默认句是
     「模拟盘成交触发真单镜像」，但实盘独有持仓直卖（``SOURCE_REAL_DIRECT``）没有模拟腿，
     照原样说出去就是假话 —— 真钱通知的第一句必须是真的。
+
+    ``limit_price``：调用方（LLM 决策 / 交易台）**逐笔指定**的限价。``None`` 时按
+    参考价 ± ``max_slippage_pct`` 派生（历史行为）。给了值就进队列载荷，由
+    :func:`_submit_payload` 用 :func:`lot_rules.resolve_limit_price` 复核——
+    预检放行的价在此**再核一遍**：队列里的载荷是跨进程数据，不能当可信输入。
 
     ``db`` 缺省时自建独立会话（调用方持有未提交事务时用，避免真单写入
     提前提交调用方的事务）。
@@ -881,6 +890,7 @@ async def mirror_virtual_fill(
             source=str(source or ""),
             bypass_price_gate=bool(bypass_price_gate),
             trigger=str(trigger or ""),
+            limit_price=None if limit_price is None else float(limit_price),
         )
     except Exception as exc:  # noqa: BLE001 - 镜像失败绝不影响虚拟账本
         logger.error(
@@ -912,6 +922,7 @@ async def _mirror_virtual_fill(
     source: str,
     bypass_price_gate: bool = False,
     trigger: str = "",
+    limit_price: float | None = None,
 ) -> dict[str, Any]:
     def _skip(reason: str) -> dict[str, Any]:
         logger.info(
@@ -936,6 +947,9 @@ async def _mirror_virtual_fill(
         return _skip("invalid_side")
     if quantity <= 0 or price <= 0:
         return _skip("invalid_quantity_or_price")
+    if limit_price is not None and (not math.isfinite(limit_price) or limit_price <= 0):
+        # 脏价不进队列：``NaN`` 经 json.dumps 会写成非标准的 ``NaN`` 字面量
+        return _skip("invalid_limit_price")
 
     cfg = load_config(redis)
     if not mirror_enabled(redis, cfg):
@@ -979,6 +993,9 @@ async def _mirror_virtual_fill(
     if trigger:
         # 只在被覆盖时入载荷：队列里的这一笔开盘后仍要说同一句真话
         payload["trigger"] = str(trigger)
+    if limit_price is not None:
+        # 只在给出时入载荷：``None`` 走「参考价 ± max_slippage_pct」派生（历史行为）
+        payload["limit_price"] = float(limit_price)
     if not is_trading_time():
         if not cfg.queue_outside_hours:
             return _skip("outside_trading_hours")
@@ -1092,12 +1109,28 @@ async def _submit_payload(
     base_price = live_price if bypass else ref_price
     if base_price <= 0:
         return _skip("no_reference_price")
-    if side == "BUY":
-        limit_price = round(base_price * (1 + cfg.max_slippage_pct), 2)
-    else:
-        limit_price = round(base_price * (1 - cfg.max_slippage_pct), 2)
-    if limit_price <= 0:
-        return _skip("invalid_limit_price")
+    # 限价：调用方逐笔给了就用它的（单边带内才放行），没给就按参考价 ± 2% 派生。
+    # 预检（push_orders）用同一个函数算过一遍，这里是**真金白银的最终边界**——
+    # 队列里的载荷可能来自另一个进程/更早的版本，一律重核，不信任输入。
+    limit_price, problem = lot_rules.resolve_limit_price(
+        side,
+        base_price,
+        requested=payload.get("limit_price"),
+        max_slip=cfg.max_slippage_pct,
+    )
+    if limit_price is None:
+        logger.warning(
+            "[Mirror] 限价被拒 %s %s cid=%s requested=%s base=%.3f 原因=%s",
+            symbol,
+            side,
+            mirror_cid,
+            payload.get("limit_price"),
+            base_price,
+            problem,
+        )
+        return _skip(
+            "invalid_limit_price" if problem == "limit_price_not_positive" else problem
+        )
     order_value = round(limit_price * quantity, 2)
     if order_value <= 0:
         return _skip("invalid_order_value")
@@ -1122,9 +1155,7 @@ async def _submit_payload(
         # 账户快照键为后缀式（QuantDB 口径），payload 的 symbol 可能带市场后缀差异，
         # 查前统一归一化，避免口径不符导致的假「持仓不足」。
         available = float(
-            (account.get("available_volume") or {}).get(
-                StockCodeUtil.to_suffix(symbol)
-            )
+            (account.get("available_volume") or {}).get(StockCodeUtil.to_suffix(symbol))
             or 0
         )
         if available < quantity:

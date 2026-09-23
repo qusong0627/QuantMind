@@ -322,6 +322,16 @@ def scale_note(
     return base
 
 
+def _leg_is_buy(leg: dict[str, Any], default_side: str) -> bool:
+    """这一腿是不是买单：腿上有 ``side`` 就用腿的，没有才退回整批的 ``side``。
+
+    混向批次（``orders`` 形态）里整批没有方向，腿各带各的 —— 用整批方向去判会把
+    卖腿当买腿缩量（卖腿是**回收**资金，缩它等于凭空少卖）。
+    """
+    raw = str(leg.get("side") or default_side or "").strip().lower()
+    return raw == "buy"
+
+
 def apply_batch_scale(
     legs: list[dict[str, Any]], available_cash: float | None, side: str
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -333,16 +343,22 @@ def apply_batch_scale(
     * **已阻断的腿不缩**：它本来就不花钱，缩它只会让这一行的数量与原因对不上；
     * **note 里的整手对齐要重写**：那句说的是**缩放前**的数，留着用户一核对就以为算错了。
 
+    **只约束买腿**：``side`` 是整批形态的方向；逐笔形态（``side=""``）下逐腿看
+    ``leg["side"]``。卖腿不进合计也不被缩 —— 它回收资金，缩了就是凭空少卖。
+
     不缩量时原样返回入参（连复制都省了）；缩量时返回新列表，不就地改调用方的数据。
     """
-    if str(side or "").strip().lower() != "buy" or not legs:
+    if not legs:
+        return legs, {"applied": False, "factor": 1.0}
+    buy_legs = [x for x in legs if _leg_is_buy(x, side) and x.get("executable")]
+    if not buy_legs:
         return legs, {"applied": False, "factor": 1.0}
 
     # 合计需求含手填的腿（它们同样要花钱），但只缩自动算出来的
     needs = [
         float(x.get("amount") or 0)
-        for x in legs
-        if x.get("executable") and x.get("source") in ("auto", "manual")
+        for x in buy_legs
+        if x.get("source") in ("auto", "manual")
     ]
     factor = batch_scale(available_cash, needs)
     planned = round(sum(needs), 2)
@@ -359,7 +375,11 @@ def apply_batch_scale(
 
     scaled_legs: list[dict[str, Any]] = []
     for leg in legs:
-        if leg.get("source") != "auto" or not leg.get("executable"):
+        if (
+            not _leg_is_buy(leg, side)
+            or leg.get("source") != "auto"
+            or not leg.get("executable")
+        ):
             scaled_legs.append(leg)
             continue
         before = float(leg.get("quantity") or 0)

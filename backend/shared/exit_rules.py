@@ -46,8 +46,13 @@ class ExitRuleSet:
     """一组退出规则（None/0 表示该规则关闭）。"""
 
     hard_stop_pct: float | None = None
-    hard_stop_price: float | None = None  # 绝对价硬止损（元）；与 pct 同时给 → 取更高（更紧）者
+    hard_stop_price: float | None = (
+        None  # 绝对价硬止损（元）；与 pct 同时给 → 取更高（更紧）者
+    )
     take_profit_pct: float | None = None
+    take_profit_price: float | None = (
+        None  # 绝对价止盈（元）；与 pct 同时给 → 取更低（更早触发）者
+    )
     trailing_stop_pct: float | None = None
     max_hold_days: int | None = None
 
@@ -113,13 +118,25 @@ def evaluate_exit(
                 stop_source=stop_source,
             )
 
-    # 2. 固定止盈
+    # 2. 固定止盈（pct 线 = 成本×(1+pct)；绝对价线 = 价位本身）
+    #    两条都是「上方退出触发线」，取**更低（更早触发）**的那条——与止损取更高
+    #    同构：两条都配了就该按任一条一触即走，取更晚的等于让先到的那条失效。
+    #    绝对价来自 LLM 给的压力位（不是「成本 +x%」），换仓/加仓后不会漂移。
+    tp_lines: list[tuple[float, str]] = []
     tp = rules.take_profit_pct
     if tp and float(tp) > 0:
-        line = entry * (1 + float(tp))
+        tp_lines.append((entry * (1 + float(tp)), "pct"))
+    tpp = rules.take_profit_price
+    if tpp and float(tpp) > 0:
+        tp_lines.append((float(tpp), "price"))
+    if tp_lines:
+        line, tp_source = min(tp_lines, key=lambda item: item[0])
         if price >= line:
             return _decide(
-                RULE_TAKE_PROFIT, f"止盈触发 现价{price:.2f} ≥ {line:.2f}", line=round(line, 4)
+                RULE_TAKE_PROFIT,
+                f"止盈触发 现价{price:.2f} ≥ {line:.2f}",
+                line=round(line, 4),
+                take_profit_source=tp_source,
             )
 
     # 3. 移动止损（从最高价回撤）
@@ -181,21 +198,36 @@ def ratchet_stop_price(
     （「上过 105 就把防守抬到保本」），触发价与目标价都由调用方显式给出，
     适合 LLM 依据支撑/压力位产出的条件单。
 
-    ``move_to < trigger`` 是硬性约束：武装瞬间价格 ≥ trigger > move_to，
-    保证抬高后的防守位**不会立刻成交**；写成 ``move_to ≥ trigger`` 等于「武装即触发」，
-    是真金白银的错单，故 fail-closed 拒绝。``current`` 传入现有有效防守位，
-    棘轮**只升不降**（低于现价位的防守是放松保护，不是棘轮的本意）。
+    ``move_to <= trigger`` 是硬性约束，两种形态都合法：
+
+    * ``move_to < trigger``：**有间隙**棘轮，抬高后防守位在触发价之下；
+    * ``move_to == trigger``：**零间隙**棘轮（``move_stop: 105`` = 「上触 105 就把
+      防守抬到 105」），隔壁 BayMax 的 LLM 决策语料里 ``move_stop`` 覆盖率 49.3%
+      都是这一形态（迁移计划 §P2 结论二）。
+
+    零间隙**必须由调用方配同轮去抖**才能安全：武装瞬间价格 ≥ trigger == move_to，
+    若同一轮就拿抬高后的价位做触发判定，会当场卖出（「武装即触发」）。调用方
+    （:func:`~backend.services.live_trading.services.sltp_executor.run_sltp_cycle`）
+    的方案是「本轮判定用**抬升前**的防守价」——与隔壁 ``stop_at_entry`` 同语义。
+    本函数不认识调用时序，故只拦真正非法的 ``move_to > trigger``（抬完立刻
+    低于现价，无任何语义）。
+
+    ``current`` 传入现有有效防守位，棘轮**只升不降**
+    （低于现价位的防守是放松保护，不是棘轮的本意）。
     """
     t = _finite_positive(trigger)
     m = _finite_positive(move_to)
     if trigger is None and move_to is None:
         return None, ""
     if t is None or m is None:
-        return None, f"棘轮配置非法（trigger={trigger!r} move_to={move_to!r}，须为正数）"
-    if m >= t:
+        return (
+            None,
+            f"棘轮配置非法（trigger={trigger!r} move_to={move_to!r}，须为正数）",
+        )
+    if m > t:
         return None, (
-            f"棘轮配置非法：move_stop_to({m:g}) 必须低于 move_stop_trigger({t:g})，"
-            "否则武装即触发"
+            f"棘轮配置非法：move_stop_to({m:g}) 不得高于 move_stop_trigger({t:g})，"
+            "否则武装后防守位立刻低于现价"
         )
     px = _finite_positive(price)
     if px is None:

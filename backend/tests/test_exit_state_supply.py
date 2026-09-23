@@ -21,6 +21,15 @@ import pytest
 _BACKEND = Path(__file__).resolve().parents[1]
 
 
+async def _no_inflight(db, tenant_id, user_id):
+    """引擎的在途委托查询桩（见 test_desk_plan_execute 同款说明）。
+
+    引擎把外部读取一律做成可桩的 ``_load_*`` 方法；不桩会真连库，表现为
+    跨事件循环的 "Future attached to a different loop"，只在批量跑时复现。
+    """
+    return []
+
+
 # ── 纯函数 ──────────────────────────────────────────────────────────
 
 
@@ -143,24 +152,36 @@ async def test_resolve_open_dates_lots_then_trades_real_db():
                     "VALUES (gen_random_uuid(), :oid, 'default', :u, 0, "
                     " '000001.SZ', 'buy', 'SIMULATION', 100, 10, :ts)"
                 ),
-                {"u": int(user), "oid": _trade_order_id, "ts": datetime(2026, 8, 5, 10, 0, 0)},
+                {
+                    "u": int(user),
+                    "oid": _trade_order_id,
+                    "ts": datetime(2026, 8, 5, 10, 0, 0),
+                },
             )
-        got = await resolve_open_dates("default", str(user), ["SH600036", "000001.SZ", "999999.SZ"])
+        got = await resolve_open_dates(
+            "default", str(user), ["SH600036", "000001.SZ", "999999.SZ"]
+        )
         assert got.get("600036.SH") == d1  # 最早 lot 胜
         assert got.get("000001.SZ") == date(2026, 8, 5)  # trades 回退
         assert "999999.SZ" not in got  # 无来源 → 缺省（不猜）
     finally:
         async with get_session(read_only=False) as session:
             await session.execute(
-                sa_text("DELETE FROM simulation_position_lots WHERE tenant_id='default' AND CAST(user_id AS varchar)=:u"),
+                sa_text(
+                    "DELETE FROM simulation_position_lots WHERE tenant_id='default' AND CAST(user_id AS varchar)=:u"
+                ),
                 {"u": str(user)},
             )
             await session.execute(
-                sa_text("DELETE FROM sim_trades WHERE tenant_id='default' AND CAST(user_id AS varchar)=:u"),
+                sa_text(
+                    "DELETE FROM sim_trades WHERE tenant_id='default' AND CAST(user_id AS varchar)=:u"
+                ),
                 {"u": str(user)},
             )
             await session.execute(
-                sa_text("DELETE FROM sim_orders WHERE tenant_id='default' AND CAST(user_id AS varchar)=:u"),
+                sa_text(
+                    "DELETE FROM sim_orders WHERE tenant_id='default' AND CAST(user_id AS varchar)=:u"
+                ),
                 {"u": str(user)},
             )
         await close_database()
@@ -174,7 +195,10 @@ async def test_daily_highs_batch_matches_direct_query_real_db():
         load_daily_highs_batch,
     )
     from backend.services.simulation.services.local_market_data import LocalMarketData
-    from backend.services.simulation.services.market_rules import Market, normalize_market
+    from backend.services.simulation.services.market_rules import (
+        Market,
+        normalize_market,
+    )
     from backend.shared.backtest_health import load_index_closes_between  # noqa: F401 (导入连通性)
     from backend.shared.database_manager_v2 import close_database
 
@@ -184,14 +208,19 @@ async def test_daily_highs_batch_matches_direct_query_real_db():
         got = load_daily_highs_batch("CN", {"600036.SH": open_d}, as_of)
         assert got.get("600036.SH"), "真库应有 600036 的日线 high"
         hub = LocalMarketData._resolve_hub(normalize_market("CN"))
-        direct = hub.fetch_daily_kline_batch(["600036.SH"], open_d, as_of, adjust="none")
+        direct = hub.fetch_daily_kline_batch(
+            ["600036.SH"], open_d, as_of, adjust="none"
+        )
         direct_highs = [
             float(r.high)
             for r in direct.itertuples(index=False)
             if str(r.symbol) == "600036.SH"
-            and (r.trade_date.date() if hasattr(r.trade_date, "date") else r.trade_date) >= open_d
+            and (r.trade_date.date() if hasattr(r.trade_date, "date") else r.trade_date)
+            >= open_d
         ]
-        assert sorted(got["600036.SH"]) == sorted(direct_highs), "批量与直查必须逐值一致"
+        assert sorted(got["600036.SH"]) == sorted(direct_highs), (
+            "批量与直查必须逐值一致"
+        )
         # 早于开仓日的 high 不得混入
         early = load_daily_highs_batch("CN", {"600036.SH": date(2026, 9, 1)}, as_of)
         assert max(early["600036.SH"]) <= max(got["600036.SH"])
@@ -228,7 +257,10 @@ async def test_load_symbol_exit_states_assembly_and_store(monkeypatch):
                 {"u": str(user), "d": open_d, "acct": f"e2e:{user}"},
             )
         fake = _FakeRedisWrapper()
-        positions = {"SH600036": {"volume": 100, "cost": 30.0}, "300649.SZ": {"volume": 200, "cost": 20.0}}
+        positions = {
+            "SH600036": {"volume": 100, "cost": 30.0},
+            "300649.SZ": {"volume": 200, "cost": 20.0},
+        }
         prices = {"600036.SH": 32.0, "300649.SZ": 21.0}
         states, missing = await svc.load_symbol_exit_states(
             redis_like=fake,
@@ -282,7 +314,9 @@ async def test_load_symbol_exit_states_assembly_and_store(monkeypatch):
     finally:
         async with get_session(read_only=False) as session:
             await session.execute(
-                sa_text("DELETE FROM simulation_position_lots WHERE tenant_id='default' AND CAST(user_id AS varchar)=:u"),
+                sa_text(
+                    "DELETE FROM simulation_position_lots WHERE tenant_id='default' AND CAST(user_id AS varchar)=:u"
+                ),
                 {"u": str(user)},
             )
         await close_database()
@@ -312,7 +346,9 @@ async def test_exit_ruleset_loader_reads_trailing(monkeypatch):
         ({"trailing_stop_pct": -0.08}, 0.08),
         ({"stop_loss": -0.05, "max_hold_days": 10}, None),
     ):
-        monkeypatch.setattr(eng_mod, "get_strategy_storage_service", lambda c=cfg: _Storage(c))
+        monkeypatch.setattr(
+            eng_mod, "get_strategy_storage_service", lambda c=cfg: _Storage(c)
+        )
         rules = await engine._load_exit_ruleset("99", "1")
         if expect_trail is None:
             assert rules.trailing_stop_pct is None
@@ -360,7 +396,9 @@ async def test_engine_run_cycle_trailing_and_time_stop_real_rules(monkeypatch):
         return {
             "cash": 1000.0,
             "total_asset": 1000.0,
-            "positions": {"600519.SH": {"volume": 100, "cost": 10.0, "available_volume": 100}},
+            "positions": {
+                "600519.SH": {"volume": 100, "cost": 10.0, "available_volume": 100}
+            },
         }
 
     async def _bars(symbols, as_of=None, market=None):
@@ -372,17 +410,25 @@ async def test_engine_run_cycle_trailing_and_time_stop_real_rules(monkeypatch):
     from backend.shared.exit_rules import ExitRuleSet as _ERS
 
     async def _rules(strategy_id, uid):
-        return _ERS(hard_stop_pct=None, take_profit_pct=None, trailing_stop_pct=0.05, max_hold_days=5)
+        return _ERS(
+            hard_stop_pct=None,
+            take_profit_pct=None,
+            trailing_stop_pct=0.05,
+            max_hold_days=5,
+        )
 
     monkeypatch.setattr(engine, "_load_strategy_config", _cfg)
     monkeypatch.setattr(engine.account_manager, "get_account", _acct)
     monkeypatch.setattr(engine, "_load_bars", _bars)
+    monkeypatch.setattr(engine, "_load_inflight_orders", _no_inflight)
     monkeypatch.setattr(engine, "_load_exit_ruleset", _rules)
     monkeypatch.setattr(engine, "_apply_risk_buy_locks", lambda orders, **kw: orders)
 
     # 状态供给桩：成本 10、现价 9（-10%）、高水位 12（回撤 25% > 5% 阈值）、持有 7 日 > 5
     async def _stub_states(**kwargs):
-        from backend.services.simulation.services.exit_state_service import SymbolExitState
+        from backend.services.simulation.services.exit_state_service import (
+            SymbolExitState,
+        )
 
         return (
             {
@@ -427,13 +473,13 @@ async def test_engine_run_cycle_trailing_and_time_stop_real_rules(monkeypatch):
 
 @pytest.mark.unit
 def test_tp204b_wiring_source_guards():
-    svc = (
-        _BACKEND / "services/simulation/services/exit_state_service.py"
-    ).read_text(encoding="utf-8")
+    svc = (_BACKEND / "services/simulation/services/exit_state_service.py").read_text(
+        encoding="utf-8"
+    )
     # 唯一实现复用（不得重造折叠/日历）
     assert "update_highest_price" in svc
     assert "trading_days_between" in svc
-    assert "adjust=\"none\"" in svc  # 不复权（cost 为成交原价）
+    assert 'adjust="none"' in svc  # 不复权（cost 为成交原价）
 
     engine = (_BACKEND / "services/simulation/engine.py").read_text(encoding="utf-8")
     assert "load_symbol_exit_states(" in engine
@@ -441,7 +487,7 @@ def test_tp204b_wiring_source_guards():
     assert "trailing_stop_pct=abs(float(trail)) if trail else None" in engine
     assert "无开仓日历史" in engine  # 缺省点名（不静默）
 
-    router = (
-        _BACKEND / "services/simulation/routers/simulation.py"
-    ).read_text(encoding="utf-8")
+    router = (_BACKEND / "services/simulation/routers/simulation.py").read_text(
+        encoding="utf-8"
+    )
     assert router.count("clear_high_water(") >= 2  # reset + OCR 同步

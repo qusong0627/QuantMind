@@ -30,7 +30,7 @@ from dataclasses import replace
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from backend.services.api.user_app.middleware.auth import get_current_user
 from backend.shared.live_trading_gate import ensure_real_trading_allowed
@@ -47,12 +47,55 @@ MAX_BATCH_SYMBOLS = 50
 #: 卖出的整仓语义下逐笔都要查可用持仓，但单批仍沿用同一上限
 MAX_QUANTITY = 1_000_000
 
+#: 逐笔限价的 schema 上界（A 股最高价约 2,600 元；留两个数量级只是防手滑多打几个 0，
+#: 真正的合理性判断在 ``lot_rules.resolve_limit_price`` 的 ±20% 带上）
+MAX_LIMIT_PRICE = 100_000.0
+
+
+class PushLegIn(BaseModel):
+    """逐笔形态的一条腿：方向（与可选限价）都写在腿上。
+
+    来自 2026-09-23 实盘实录：一次调仓决策常常同时有买有卖（卖 002518 买 600276），
+    而整批一个 ``side`` 的旧契约表达不出来 —— 只能拆成两批，两批之间还有先卖后买的
+    资金顺序问题。限价同理：调用方的 ``limit_px`` 是"贴着打保成交"的价，服务端算死
+    的 ``ref ± 2%`` 表达不了。
+    """
+
+    symbol: str = Field(..., min_length=1, max_length=32)
+    side: Literal["buy", "sell"]
+    quantity: float | None = Field(
+        None,
+        gt=0,
+        le=MAX_QUANTITY,
+        description="本腿股数；缺省由服务端按可用资金×仓位信号算",
+    )
+    limit_price: float | None = Field(
+        None,
+        gt=0,
+        le=MAX_LIMIT_PRICE,
+        description=(
+            "本腿限价；仅约束实盘真单（模拟腿按服务端快照价撮合）。"
+            "须落在参考价 ±max_slippage_pct 的带内（买不得更高、卖不得更低），越界在预检即阻断"
+        ),
+    )
+
 
 class PushIn(BaseModel):
-    """预检与推送共用载荷（预检时只有 ``batch_id`` 会被回显，不产生副作用）。"""
+    """预检与推送共用载荷（预检时只有 ``batch_id`` 会被回显，不产生副作用）。
 
-    symbols: list[str] = Field(..., min_length=1, max_length=MAX_BATCH_SYMBOLS)
-    side: Literal["buy", "sell"]
+    两种形态**互斥**，必须二选一：
+
+    * 整批同向（旧）：``symbols`` + ``side``；
+    * 逐笔（新）：``orders``，方向与限价写在每条腿上。
+
+    混用直接 422 而不是"取其一"：两种形态的 side 语义不同，猜错了代价是真单。
+    """
+
+    symbols: list[str] | None = Field(None, min_length=1, max_length=MAX_BATCH_SYMBOLS)
+    side: Literal["buy", "sell"] | None = None
+    orders: list[PushLegIn] | None = Field(
+        None, min_length=1, max_length=MAX_BATCH_SYMBOLS
+    )
     channels: list[Literal["sim", "real"]] = Field(..., min_length=1)
     batch_id: str = Field(
         ...,
@@ -70,6 +113,51 @@ class PushIn(BaseModel):
     dry_run: bool = Field(
         False, description="只跑预检不落单（与 /preflight 等价，便于前端只发一个请求）"
     )
+
+    @model_validator(mode="after")
+    def _check_shape(self) -> PushIn:
+        has_legacy = self.symbols is not None or self.side is not None
+        if has_legacy and self.orders is not None:
+            raise ValueError(
+                "symbols/side 与 orders 不能同时给：前者整批同向、后者逐笔"
+            )
+        if not has_legacy and self.orders is None:
+            raise ValueError("必须给 symbols+side（整批同向）或 orders（逐笔）")
+        if has_legacy and (self.symbols is None or self.side is None):
+            raise ValueError("整批形态必须同时给 symbols 与 side")
+        if self.orders is not None:
+            if self.quantities:
+                raise ValueError(
+                    "orders 形态的数量写在每条腿的 quantity 上，不能再给 quantities"
+                )
+            seen: set[str] = set()
+            for leg in self.orders:
+                key = leg.symbol.strip().upper()
+                if key in seen:
+                    raise ValueError(
+                        f"orders 里 {leg.symbol} 重复：同一批里同一只票只能出现一次"
+                    )
+                seen.add(key)
+        return self
+
+    def leg_plan(self) -> list[PushLegIn]:
+        """归一成逐笔形态（整批形态按 ``side`` 展开）—— 下游只认这一种。"""
+        if self.orders is not None:
+            return list(self.orders)
+        return [
+            PushLegIn(symbol=s, side=self.side)  # type: ignore[arg-type]
+            for s in (self.symbols or [])
+        ]
+
+    def batch_side_label(self) -> str:
+        """回执里的方向标签：同向时报该方向，混合时报 ``mixed``。
+
+        绝不能随便挑一个方向报出去 —— 前端会把卖单渲染成买单。
+        """
+        sides = {leg.side for leg in self.leg_plan()}
+        if len(sides) == 1:
+            return next(iter(sides))
+        return "mixed"
 
 
 # ---------------------------------------------------------------------------
@@ -348,17 +436,19 @@ async def _build_legs(
         require_sim_user_id(str(current_user.get("user_id") or ""), tenant_id=tenant_id)
     )
 
-    # 三形归一为后缀式（parquet/风控/镜像同口径），去重后保持用户勾选顺序
-    normalized: list[str] = []
+    # 三形归一为后缀式（parquet/风控/镜像同口径），去重后保持用户勾选顺序。
+    # 整批形态下同一只票只出现一次（旧行为）；逐笔形态下重复已在契约层 422。
+    plan_lines: list[tuple[PushLegIn, str]] = []
     seen: set[str] = set()
-    for raw in body.symbols:
-        sym = StockCodeUtil.to_suffix(str(raw or "").strip().upper())
+    for line in body.leg_plan():
+        sym = StockCodeUtil.to_suffix(str(line.symbol or "").strip().upper())
         if not sym or sym in seen:
             continue
         seen.add(sym)
-        normalized.append(sym)
-    if not normalized:
+        plan_lines.append((line, sym))
+    if not plan_lines:
         raise HTTPException(status_code=400, detail="没有可识别的股票代码")
+    normalized = [sym for _line, sym in plan_lines]
 
     prices = _resolve_prices(normalized)
     scores, signal_date = await _resolve_position_scores(normalized)
@@ -375,11 +465,12 @@ async def _build_legs(
 
     # 卖出的可卖量还要看实盘账户：模拟台账没有的票，可能只持有在实盘（直发，Phase 4）。
     # 买入不读 —— 与实盘持仓无关，白读一次 PG 只会让预检变慢。
-    is_sell = str(body.side).strip().lower() == "sell"
+    # 整批只读一次：混向批次里只要有**任一**卖腿就得读（逐腿判断会读 N 次同一份快照）。
+    has_sell = any(line.side == "sell" for line, _sym in plan_lines)
     real_positions: dict[str, Any] = {}
     real_meta: dict[str, Any] = {}
     real_known = False
-    if is_sell:
+    if has_sell:
         try:
             from backend.shared.real_positions import load_real_positions
 
@@ -397,8 +488,15 @@ async def _build_legs(
         plan_quantity,
     )
 
+    real_wanted = "real" in body.channels
+    # 限价的带（镜像配置）只在真要下真单时才读 —— 纯模拟批次不碰 Redis。
+    # 派生与校验都要用它（没人给限价时也要按它派生），不能只在"有人给了限价"时才读。
+    max_slip = _mirror_max_slip(redis) if real_wanted else 0.0
+
     legs: list[dict[str, Any]] = []
-    for sym in normalized:
+    for line, sym in plan_lines:
+        leg_side = line.side
+        is_sell = leg_side == "sell"
         bare = sym.split(".")[0]
         price = prices.get(sym)
         risk_payload = risk["by_symbol"].get(sym)
@@ -415,12 +513,13 @@ async def _build_legs(
             source_plan = choose_sell_source(
                 sim_available=available_position,
                 real_available=real_available,
-                real_requested="real" in body.channels,
+                real_requested=real_wanted,
             )
             available_position = source_plan.available
 
-        override = None
-        if body.quantities:
+        # 手填量：逐笔形态写在腿上（``quantity``），整批形态走 ``quantities`` 映射。
+        override = line.quantity
+        if override is None and body.quantities:
             for key in (sym, bare, StockCodeUtil.to_prefix(sym)):
                 if key in body.quantities:
                     override = body.quantities[key]
@@ -428,7 +527,7 @@ async def _build_legs(
 
         plan = plan_quantity(
             symbol=sym,
-            side=body.side,
+            side=leg_side,
             price=price,
             position_score=scores.get(bare),
             available_cash=available_cash,
@@ -449,6 +548,8 @@ async def _build_legs(
 
         leg: dict[str, Any] = {
             "symbol": sym,
+            # 逐笔方向：回执、风控判定、幂等键、下单请求全按它走，不再读 batch 级 side
+            "side": leg_side,
             "name": _name_of(sym),
             "price": price,
             "position_score": scores.get(bare),
@@ -460,28 +561,45 @@ async def _build_legs(
             # 可卖量的取数来源与下单路径（`sim` 走模拟台账；`real_direct` 实盘独有持仓直发）
             "position_source": source_plan.source if source_plan else "sim",
             "exec_path": source_plan.exec_path if source_plan else "sim",
+            # 限价（仅实盘真单）：由下面的 _resolve_leg_limit 回填
+            "limit_price": None,
+            "limit_source": "",
+            "limit_problem": "",
             # 镜像预检结果由 _mirror_plan 回填
             "mirror_precheck": None,
         }
         leg.update(plan.as_dict())
         if source_plan is not None and source_plan.note and leg.get("executable"):
-            leg["note"] = f"{leg['note']}；{source_plan.note}" if leg.get("note") else source_plan.note
+            leg["note"] = (
+                f"{leg['note']}；{source_plan.note}"
+                if leg.get("note")
+                else source_plan.note
+            )
 
         if not plan.executable:
             leg["blocked_by"] = "quantity"
         else:
-            blocked, problem, note = _list_gate(body.side, risk_payload, body.ack_risk)
+            blocked, problem, note = _list_gate(leg_side, risk_payload, body.ack_risk)
             if blocked:
                 leg["executable"] = False
                 leg["blocked_by"] = "list"
                 leg["problem"] = problem
             elif note:
                 leg["note"] = f"{leg.get('note')}；{note}" if leg.get("note") else note
+
+        _apply_leg_limit(
+            leg,
+            side=leg_side,
+            requested=line.limit_price,
+            real_wanted=real_wanted,
+            max_slip=max_slip,
+        )
         legs.append(leg)
 
     # 整批资金约束（仅买入）：逐笔各自按全量可用资金算量会系统性超配，
     # 多出来的单子在账户层逐笔被拒，表现为「推 3 只成交 1 只、另两只莫名失败」。
-    legs, budget = apply_batch_scale(legs, available_cash, body.side)
+    # 混向批次里只缩买腿 —— 卖腿是回收资金，缩它等于凭空少卖。
+    legs, budget = apply_batch_scale(legs, available_cash, body.side or "")
     if budget.get("applied"):
         logger.info(
             "[push] 批次资金约束缩量 batch=%s factor=%.4f planned=%.2f cash=%.2f",
@@ -509,7 +627,7 @@ async def _build_legs(
         "exclusion": risk["meta"],
         "exclusion_imported": risk["imported"],
         "budget": budget,
-        # 卖出取数的第二个来源（买入批次不查，如实报 null 而不是编一个空快照）
+        # 卖出取数的第二个来源（没有卖腿的批次不查，如实报 null 而不是编一个空快照）
         "real_positions": (
             {
                 "known": real_known,
@@ -518,11 +636,90 @@ async def _build_legs(
                 "sources": real_meta.get("sources") or {},
                 "active_broker": real_meta.get("active_broker"),
             }
-            if is_sell
+            if has_sell
             else None
         ),
     }
     return legs, {"mirror": mirror_info, "summary": summary, "meta": meta}
+
+
+def _mirror_max_slip(redis: Any) -> float:
+    """镜像的滑点带（``ref ± max_slippage_pct``）—— 预检与真单**必须同源**。
+
+    预检若用另一个数（哪怕只差一点），就会出现「确认面板放行、点下去被镜像拒」，
+    而用户已经按下去了。
+    """
+    from backend.services.live_trading.services import real_mirror_service as mirror
+
+    # load_config 自身吞掉 Redis 读取异常（读不到就用 env 基线），不会抛。
+    return float(mirror.load_config(redis).max_slippage_pct)
+
+
+def _apply_leg_limit(
+    leg: dict[str, Any],
+    *,
+    side: str,
+    requested: float | None,
+    real_wanted: bool,
+    max_slip: float,
+) -> None:
+    """把这一腿的限价定下来并写回 ``leg``（就地，回填字段已在 leg 里预置）。
+
+    * ``real_wanted=False``：限价**不参与**模拟腿撮合（模拟按服务端快照价成交）。
+      给了合法限价就如实说明它约束的是谁；给了越界限价只加提示、**不阻断** ——
+      那条价根本不参与这次撮合，为它挡掉一笔模拟单是误伤。
+    * ``real_wanted=True``：买不得高于 / 卖不得低于 ``ref ± max_slip``，越界即阻断。
+      在预检就拦下，用户看得见；等真单提交时才被镜像拒，用户只收到一条失败回执。
+    """
+    from backend.services.live_trading.services import lot_rules
+
+    if not real_wanted:
+        if requested is not None:
+            leg["note"] = _append_note(
+                leg.get("note"),
+                f"限价 {requested:g} 仅约束实盘真单；模拟腿按快照价撮合",
+            )
+        return
+
+    price, source, problem = _resolve_leg_limit(
+        side=side,
+        reference=leg.get("price"),
+        requested=requested,
+        max_slip=max_slip,
+    )
+    leg["limit_price"] = price
+    leg["limit_source"] = source
+    if not problem:
+        return
+    leg["limit_problem"] = problem
+    if leg.get("executable"):
+        leg["executable"] = False
+        leg["blocked_by"] = "limit"
+        leg["problem"] = f"限价越界（{lot_rules.describe_limit_problem(problem)}）"
+
+
+def _resolve_leg_limit(
+    *,
+    side: str,
+    reference: float | None,
+    requested: float | None,
+    max_slip: float,
+) -> tuple[float | None, str, str]:
+    """→ ``(生效限价, 来源, 问题)``；来源 ``requested``（采纳调用方）/ ``derived``（服务端派生）。"""
+    from backend.services.live_trading.services import lot_rules
+
+    price, problem = lot_rules.resolve_limit_price(
+        side, reference, requested=requested, max_slip=max_slip
+    )
+    if problem:
+        return None, "", problem
+    return price, "requested" if requested is not None else "derived", ""
+
+
+def _append_note(note: Any, extra: str) -> str:
+    """note 是「；」串起来的多句；追加一句（空 note 时不留下前导分隔符）。"""
+    head = str(note or "").strip()
+    return f"{head}；{extra}" if head else extra
 
 
 def _name_of(symbol: str) -> str:
@@ -600,13 +797,15 @@ async def _apply_risk_verdicts(
                 if qty <= 0:
                     continue
                 symbol = str(leg.get("symbol") or "")
+                # 方向取**这一笔**的：混向批次里用 batch 级 side 会把卖单判成买单
+                leg_side = str(leg.get("side") or "")
                 req: Any
                 if real:
                     req = DirectOrderReq(
                         tenant_id=tenant_id,
                         user_id=uid,
                         symbol=symbol,
-                        side=body.side,
+                        side=leg_side,
                         quantity=qty,
                         price=leg.get("price"),
                         remarks=f"candidate_push:{body.batch_id}",
@@ -620,7 +819,7 @@ async def _apply_risk_verdicts(
                         tenant_id=tenant_id,
                         user_id=uid,
                         symbol=symbol,
-                        side=body.side,
+                        side=leg_side,
                         quantity=qty,
                         price=leg.get("price"),
                         remarks=f"candidate_push:{body.batch_id}",
@@ -692,7 +891,7 @@ async def push_orders_preflight(
         "success": True,
         "data": {
             "batch_id": body.batch_id,
-            "side": body.side,
+            "side": body.batch_side_label(),
             "channels": list(body.channels),
             "channels_effective": _channels_effective(body.channels),
             "ack_risk": body.ack_risk,
@@ -783,6 +982,7 @@ async def push_orders(body: PushIn, current_user: dict = Depends(get_current_use
                 results.append(
                     {
                         "symbol": symbol,
+                        "side": str(leg.get("side") or ""),
                         "success": False,
                         "executed": False,
                         "skipped_reason": leg.get("problem")
@@ -807,6 +1007,7 @@ async def push_orders(body: PushIn, current_user: dict = Depends(get_current_use
                         )
                     )
                     continue
+                leg_side = str(leg.get("side") or "")
                 outcome = await submit_order(
                     session,
                     redis,
@@ -814,22 +1015,25 @@ async def push_orders(body: PushIn, current_user: dict = Depends(get_current_use
                         tenant_id=tenant_id,
                         user_id=uid,
                         symbol=symbol,
-                        side=body.side,
+                        side=leg_side,
                         quantity=float(leg.get("quantity") or 0),
                         order_type="market",
                         price=leg.get("price"),
                         source=SOURCE_CANDIDATE_PUSH,
                         client_order_id=build_candidate_client_order_id(
-                            body.batch_id, symbol, body.side
+                            body.batch_id, symbol, leg_side
                         ),
                         remarks=f"候选信号一键推送 batch={body.batch_id}",
                         mirror=real,
                         mirror_source=SOURCE_CANDIDATE_PUSH if real else "",
+                        # 限价只对真单有意义（模拟腿按快照价撮合），没开实盘就不传
+                        real_limit_price=leg.get("limit_price") if real else None,
                     ),
                 )
                 results.append(
                     {
                         "symbol": symbol,
+                        "side": leg_side,
                         "success": bool(outcome.success),
                         "executed": True,
                         "order_id": outcome.order_id,
@@ -843,10 +1047,13 @@ async def push_orders(body: PushIn, current_user: dict = Depends(get_current_use
                     }
                 )
             except Exception as exc:  # noqa: BLE001 - 单腿失败不阻断其余
-                logger.warning("[push] 下单失败 %s %s: %s", symbol, body.side, exc)
+                logger.warning(
+                    "[push] 下单失败 %s %s: %s", symbol, leg.get("side"), exc
+                )
                 results.append(
                     {
                         "symbol": symbol,
+                        "side": str(leg.get("side") or ""),
                         "success": False,
                         "executed": True,
                         "message": str(exc)[:200],
@@ -874,7 +1081,7 @@ async def push_orders(body: PushIn, current_user: dict = Depends(get_current_use
             "batch_id": body.batch_id,
             "dry_run": False,
             "status": status,
-            "side": body.side,
+            "side": body.batch_side_label(),
             "channels": list(body.channels),
             "channels_effective": _channels_effective(body.channels),
             "results": results,
@@ -933,6 +1140,7 @@ async def _execute_real_direct(
             ),
             source=SOURCE_REAL_DIRECT,
             trigger="用户从持仓页一键卖出实盘持仓（不经模拟台账）",
+            limit_price=leg.get("limit_price"),
         )
     except Exception as exc:  # noqa: BLE001 - 单腿失败不阻断其余（mirror 本就不该抛）
         logger.warning("[push] 实盘直卖异常 %s: %s", symbol, exc)
