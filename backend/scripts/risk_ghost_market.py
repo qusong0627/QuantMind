@@ -4,6 +4,11 @@
 （去哪儿拿、拿哪一天、拿不到算什么）。分开的好处是定价口径能在没有行情的地方
 单测，而这里的每条数据来源都能单独解释。
 
+**同一个问题，两种行来源**（P2.1d 起）：影子账问的是「拦下的单要是放行会怎样」，
+决策记分卡问的是「模型说的那些话事后怎样」，两者**取数口径必须逐字一致**，否则
+两张表能对出两套结论。故主入口是 :meth:`GhostMarket.price_batch`（吃
+`PriceQuery`，与行从哪来无关），`price_inputs` 只是影子账的适配器。
+
 为什么两个数据源（**不能只用一套**）
 ------------------------------------
 * **算收益用前复权**（`1_kline_data/daily_forward`）。若用不复权，除权日会在价格上
@@ -116,6 +121,32 @@ class Panel:
         return {s for s, _ in self.bars}
 
 
+@dataclass(frozen=True)
+class PriceQuery:
+    """一条「假如当时放行了」的问句（与 :class:`GhostRow` 解耦的那部分）。
+
+    影子账与决策记分卡问的是同一个问题，只是**行的来源不同**（前者来自闸门留痕，
+    后者来自决策审计表）。取数逻辑只该有一份，故把「我问什么」抽成本类型：
+    `key` 由调用方定（影子账用 `ghost_id`，记分卡用审计行 id），只用于回填对应。
+    """
+
+    key: str
+    #: 决策/拦下那天（YYYY-MM-DD）
+    day: str
+    #: 标的（前缀式/后缀式皆可，内部转后缀）
+    symbol: str
+    #: `buy` / `sell`（决定涨停还是跌停的可成交性判定）
+    side: str
+
+
+@dataclass(frozen=True)
+class PriceBatch:
+    """一批问句的定价输入 + 取数时用的那个截面（标签归因要回看入场前收盘）。"""
+
+    inputs: dict[str, PriceInput]
+    panel: Panel
+
+
 class GhostMarket:
     """影子账的市场侧取数器（日历 / 前复权截面 / 可成交性）。"""
 
@@ -173,7 +204,8 @@ class GhostMarket:
             raise RuntimeError(f"交易日历没有可识别的日期列：{list(df.columns)}")
         if "IsTradingDay" in df.columns:
             df = df[
-                pd.to_numeric(df["IsTradingDay"], errors="coerce").fillna(0).astype(int) == 1
+                pd.to_numeric(df["IsTradingDay"], errors="coerce").fillna(0).astype(int)
+                == 1
             ]
         days = sorted(
             {
@@ -218,7 +250,9 @@ class GhostMarket:
             _QFQ_REL, [str(d) for d in dts], cols="symbol, time, open, close, volume"
         )
         if df is None or df.empty:
-            logger.warning("前复权截面为空（读过日期 %s）", ",".join(str(d) for d in dts))
+            logger.warning(
+                "前复权截面为空（读过日期 %s）", ",".join(str(d) for d in dts)
+            )
             return Panel({})
         # 日期键取 `time` 而非返回的 `dt` 列：hive 分区列与文件内 dt 同名，
         # 谁优先由 DuckDB 决定；`time` 没有这个歧义（两者取值本应一致）。
@@ -268,30 +302,37 @@ class GhostMarket:
             out[(entry_day, exit_day)] = cross_section_mean(rets)
         return out
 
-    # ── 主入口：行 → PriceInput ────────────────────────────────────
-    def price_inputs(
+    # ── 主入口：问句 → PriceInput（+ 取数时用的截面）─────────────────
+    def price_batch(
         self,
-        rows: Sequence[GhostRow],
+        queries: Sequence[PriceQuery],
         *,
         horizons: Iterable[int] = HORIZONS,
-    ) -> dict[str, PriceInput]:
-        """给每行算出一个 `PriceInput`（键 = `ghost_id`）。
+        lookback_days: int = 0,
+    ) -> PriceBatch:
+        """给每条问句算出一个 `PriceInput`（键 = `PriceQuery.key`）。
 
         输入里都是**已取好**的数：入场日/入场价/可成交性/各期出场价/各期基准。
         取不到的一律留 None 并给出原因——**不补 0、不沿用上一日**。
+
+        ``lookback_days > 0`` 时把每条问句**入场日之前**的这么多交易日也读进
+        `panel`（形态标签要回看入场前收盘，见 `decision.tags`）——与定价共用
+        同一次取数，调用方拿 :meth:`prior_closes` 从返回的 panel 里切。
         """
         hs = tuple(int(h) for h in horizons)
-        # ① 每行推窗口（纯日历运算，不碰盘）
+        after = max(int(lookback_days), 0)
+        # ① 每条推窗口（纯日历运算，不碰盘）
         windows: dict[str, tuple[str | None, dict[int, str | None]]] = {}
-        for r in rows:
-            entry = self.entry_day(r.date)
-            windows[ghost_id(r)] = (entry, self.horizon_exits(entry, hs) if entry else {})
+        for q in queries:
+            entry = self.entry_day(q.day)
+            windows[q.key] = (entry, self.horizon_exits(entry, hs) if entry else {})
 
         # ② 一次把要用的日期全读了（含基准所需的全市场截面）
         wanted: set[str] = set()
         for entry, exits in windows.values():
             if entry:
                 wanted.add(entry)
+                wanted.update(self._days_before(entry, after))
             wanted.update(d for d in exits.values() if d)
         panel = self.panel(sorted(wanted))
 
@@ -305,12 +346,11 @@ class GhostMarket:
         }
         bench = self.bench_returns(panel, sorted(pairs))
 
-        # ④ 逐行装配
+        # ④ 逐条装配
         out: dict[str, PriceInput] = {}
-        for r in rows:
-            gid = ghost_id(r)
-            entry, exits = windows[gid]
-            sym = StockCodeUtil.to_suffix(r.symbol)
+        for q in queries:
+            entry, exits = windows[q.key]
+            sym = StockCodeUtil.to_suffix(q.symbol)
             entry_bar = panel.get(sym, to_dt(entry)) if entry else None
             exit_px: dict[int, float | None] = {}
             for h in hs:
@@ -320,14 +360,36 @@ class GhostMarket:
                 entry_day=entry,
                 entry_px=entry_bar.open if entry_bar else None,
                 exit_px=exit_px,
-                bench={h: bench.get((entry, exits[h])) if entry and exits.get(h) else None for h in hs},
+                bench={
+                    h: bench.get((entry, exits[h])) if entry and exits.get(h) else None
+                    for h in hs
+                },
                 entry_pending=entry is None,
             )
-            out[gid] = self._with_tradability(inp, r, sym, entry)
-        return out
+            out[q.key] = self._with_tradability(inp, side=q.side, sym=sym, entry=entry)
+        return PriceBatch(inputs=out, panel=panel)
+
+    def price_inputs(
+        self,
+        rows: Sequence[GhostRow],
+        *,
+        horizons: Iterable[int] = HORIZONS,
+    ) -> dict[str, PriceInput]:
+        """（适配器）影子账行 → `PriceInput`，键 = `ghost_id`。
+
+        与决策记分卡共用 :meth:`price_batch`（取数逻辑只此一份）；这里只做
+        「行 → 问句」的翻译。
+        """
+        return self.price_batch(
+            [
+                PriceQuery(key=ghost_id(r), day=r.date, symbol=r.symbol, side=r.side)
+                for r in rows
+            ],
+            horizons=horizons,
+        ).inputs
 
     def _with_tradability(
-        self, inp: PriceInput, row: GhostRow, sym: str, entry: str | None
+        self, inp: PriceInput, *, side: str, sym: str, entry: str | None
     ) -> PriceInput:
         """入场日可否成交（一字板/停牌）——走**不复权**的 `LocalMarketData`。"""
         if entry is None:
@@ -335,7 +397,7 @@ class GhostMarket:
         day = _as_date(entry)
         bar = self.lmd.get_bar(sym, day) if day else None
         why = entry_unfillable_reason(
-            row.side,
+            side,
             open_px=bar.open if bar else None,
             limit_up=bar.limit_up if bar else None,
             limit_down=bar.limit_down if bar else None,
@@ -345,6 +407,45 @@ class GhostMarket:
         if why is None:
             return inp
         return replace(inp, tradable=False, reason=why)
+
+    # ── 入场前收盘（形态标签用）─────────────────────────────────────
+    def _days_before(self, day: str, n: int) -> tuple[str, ...]:
+        """`day` **之前**的 n 个交易日（升序）；`day` 不在日历上则空。"""
+        if n <= 0:
+            return ()
+        days = self.trading_days()
+        try:
+            i = days.index(day)
+        except ValueError:
+            return ()
+        return days[max(i - n, 0) : i]
+
+    def prior_closes(
+        self,
+        panel: Panel,
+        symbol: str,
+        entry_day: str | None,
+        lookback: int,
+    ) -> tuple[float, ...]:
+        """入场日**之前** `lookback` 个交易日的收盘（升序）。
+
+        * **截止在入场日之前**：入场发生在**开盘**，入场日收盘是决策之后的数；
+          把它算进窗口，「接近60日高」会因当天大涨而恒真（前视）。取数侧不替
+          调用方把关，故此处明写。
+        * 缺 bar 的日子**跳过而不补**（不沿用上一日收盘）。
+        * 值的有效性（None/非正/非有限）**不在这里剔**：那是
+          `decision.tags.form_tags` 的唯一职责，两处各剔一遍迟早分叉。
+        """
+        if not entry_day:
+            return ()
+        sym = StockCodeUtil.to_suffix(symbol)
+        out: list[float] = []
+        for d in self._days_before(entry_day, int(lookback)):
+            bar = panel.get(sym, to_dt(d))
+            if bar is None or bar.close is None:
+                continue
+            out.append(float(bar.close))
+        return tuple(out)
 
     # ── 体检 ────────────────────────────────────────────────────────
     def coverage(self, rows: Sequence[GhostRow]) -> dict[str, Any]:
@@ -358,7 +459,9 @@ class GhostMarket:
             "rows": len(rows),
             "rows_with_entry_day": sum(1 for i in inputs.values() if i.entry_day),
             "rows_entry_pending": sum(1 for i in inputs.values() if i.entry_pending),
-            "rows_with_entry_price": sum(1 for i in inputs.values() if i.entry_px is not None),
+            "rows_with_entry_price": sum(
+                1 for i in inputs.values() if i.entry_px is not None
+            ),
             "rows_untradable": sum(1 for i in inputs.values() if i.tradable is False),
             "panel_dates": [from_dt(d) for d in dts],
         }
@@ -369,6 +472,8 @@ __all__ = [
     "GhostMarket",
     "Panel",
     "PanelBar",
+    "PriceBatch",
+    "PriceQuery",
     "from_dt",
     "to_dt",
 ]

@@ -2522,3 +2522,72 @@ CREATE TABLE IF NOT EXISTS qm_risk_ghost_ledger (
 CREATE INDEX IF NOT EXISTS idx_ghost_ledger_date ON qm_risk_ghost_ledger (trade_date, rule_id);
 CREATE INDEX IF NOT EXISTS idx_ghost_ledger_rule ON qm_risk_ghost_ledger (rule_id, trade_date DESC);
 CREATE INDEX IF NOT EXISTS idx_ghost_ledger_user ON qm_risk_ghost_ledger (tenant_id, user_id, trade_date DESC);
+
+-- ---------------------------------------------------------------------------
+-- qm_decision_ledger：决策审计表（P2.1d）——一轮里的一条决策，一行
+--
+-- 隔壁 `logs/decision_pool.jsonl` 每天每（agent, 标的, 动作）只留**第一条**，
+-- 盘中改主意的第二次决策留不下来；原始 log.jsonl 又随隔壁一起下线。本表是
+-- QuantMind 决策的唯一持久面：含被拒的决策（带拒绝理由，隔壁静默丢）。
+--
+-- 两个身份键：id = sha1(round|序号|code|action)[:16]（审计，一轮一条，重跑不覆盖
+-- 决策字段）；pool_key = 隔壁 make_id(agent|日|code|动作)[:16]（记分卡去重口径，
+-- 读侧 DISTINCT ON 即复现「每天第一条」的池）。与存量池对账按 (agent,日,标的,动作)
+-- 元组、**不比哈希**：隔壁哈希吃的是模型原样写法，本表是归一写法。
+--
+-- 与 backend/shared/decision_ledger_contract.py 同口径（老库由该模块的 ensure_*
+-- 在 trade 启动期自愈建表，这里同步一份给全新安装的库）。两者 DDL 由测试逐语句
+-- 比对，改一处必须改两处。**不需要 data/upgrade_v1.*.sql**：本文件随代码走、每次
+-- 启动完整重放，新表放这里就够了；那份目录靠挂载数据目录到达（且探测目录历史上
+-- 找错过一次），送达可靠性低一档——理由详见 contract 模块 docstring。
+--
+-- decided_at 一律 TIMESTAMPTZ + aware UTC（瞬时列口径）；审计字段先写为准，
+-- 只有执行结果（armed/reject_reason/notes/order_id）与定价列可被后续写入刷新。
+-- fwd 存各期收益明细，未到期/不可成交一律 null 而非 0；tags 存入场前形态标签
+-- （「追高/超跌」这类归因分组），历史不足时为空数组而不是猜一个。
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS qm_decision_ledger (
+    id             VARCHAR(32) PRIMARY KEY,
+    pool_key       VARCHAR(32) NOT NULL,
+    round_id       VARCHAR(64) NOT NULL,
+    tenant_id      VARCHAR(64) NOT NULL DEFAULT 'default',
+    user_id        VARCHAR(64) NOT NULL DEFAULT '',
+    agent          VARCHAR(64) NOT NULL DEFAULT '',
+    market         VARCHAR(16) NOT NULL DEFAULT 'CN',
+    trade_date     DATE NOT NULL,
+    decided_at     TIMESTAMPTZ NOT NULL,
+    code           VARCHAR(32) NOT NULL DEFAULT '',
+    code_raw       VARCHAR(32) NOT NULL DEFAULT '',
+    action         VARCHAR(16) NOT NULL,
+    kind           VARCHAR(16) NOT NULL DEFAULT 'none',
+    pct            DOUBLE PRECISION,
+    pct_state      VARCHAR(16) NOT NULL DEFAULT 'missing',
+    pct_raw        VARCHAR(32) NOT NULL DEFAULT '',
+    confidence     DOUBLE PRECISION,
+    stop_loss      DOUBLE PRECISION,
+    take_profit    DOUBLE PRECISION,
+    move_stop      DOUBLE PRECISION,
+    invalidation   TEXT NOT NULL DEFAULT '',
+    risk_amount    DOUBLE PRECISION,
+    reason         TEXT NOT NULL DEFAULT '',
+    armed          BOOLEAN NOT NULL DEFAULT FALSE,
+    reject_reason  TEXT NOT NULL DEFAULT '',
+    notes          JSONB NOT NULL DEFAULT '[]',
+    order_id       VARCHAR(64) NOT NULL DEFAULT '',
+    pool_ctx       JSONB,
+    context_meta   JSONB NOT NULL DEFAULT '{}',
+    entry_date     DATE,
+    entry_px       DOUBLE PRECISION,
+    tradable       BOOLEAN,
+    fwd            JSONB,
+    tags           JSONB NOT NULL DEFAULT '[]',
+    priced_at      TIMESTAMPTZ,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_decision_ledger_round ON qm_decision_ledger (round_id);
+CREATE INDEX IF NOT EXISTS idx_decision_ledger_pool ON qm_decision_ledger (pool_key);
+CREATE INDEX IF NOT EXISTS idx_decision_ledger_day ON qm_decision_ledger (tenant_id, user_id, trade_date DESC);
+CREATE INDEX IF NOT EXISTS idx_decision_ledger_agent ON qm_decision_ledger (agent, trade_date DESC);
+CREATE INDEX IF NOT EXISTS idx_decision_ledger_unpriced ON qm_decision_ledger (trade_date) WHERE priced_at IS NULL;

@@ -65,7 +65,7 @@ def resolve_board(symbol: str) -> str:
     code = body
     for prefix in ("SH", "SZ", "BJ"):
         if code.startswith(prefix) and len(code) > len(prefix):
-            code = code[len(prefix):]
+            code = code[len(prefix) :]
             break
     if suffix == "BJ" or code.startswith(("4", "8")):
         return BOARD_BJ
@@ -74,6 +74,17 @@ def resolve_board(symbol: str) -> str:
     if code.startswith("30"):
         return BOARD_GEM
     return BOARD_MAIN
+
+
+def min_buy_quantity(symbol: str) -> int:
+    """买入最小申报数量（股）：科创板 200，其余板块 100（北交所也是 100，
+    超过 100 的部分按 1 股递增——递增是**对齐**规则，见 :func:`align_buy_quantity`，
+    与"最低申报量"是两件事，别混）。
+
+    单独立出来是因为「买得起一手吗」这个判据（决策层闸门、推送预算筛选）到处
+    在问，而它此前在三个函数里各写了一遍同一句三元表达式。
+    """
+    return STAR_MIN_LOT if resolve_board(symbol) == BOARD_STAR else DEFAULT_LOT
 
 
 _SH = ZoneInfo("Asia/Shanghai")
@@ -382,7 +393,7 @@ def describe_violation(
             return f"{label}部分卖出需为 {DEFAULT_LOT} 股整数倍，got {qty:g}"
         return None
     if side_raw == "BUY":
-        min_lot = STAR_MIN_LOT if board == BOARD_STAR else DEFAULT_LOT
+        min_lot = min_buy_quantity(symbol)
         if qty < min_lot:
             return f"{board_display(board)}买入最少 {min_lot} 股，got {qty:g}"
         if board not in (BOARD_STAR, BOARD_BJ) and qty % DEFAULT_LOT != 0:
