@@ -20,6 +20,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
+from backend.services.api.routers.external import data as data_plane
 from backend.services.api.routers.external.auth import (
     DEFAULT_TTL_SECONDS,
     AuthBackendUnavailable,
@@ -106,6 +107,7 @@ async def _bump(redis: Any, key: str, window: int) -> int:
         await redis.expire(key, window)  # 自愈
     return count
 
+
 #: 凭据不存在时也要跑一次 bcrypt 比对的占位哈希。
 #: 不这么做的话，「不存在的 access_key」会比「存在的但 secret 错」快一个数量级，
 #: 计时差就是一个可用的**枚举 oracle**——能问出哪些 access_key 是真的。
@@ -188,7 +190,9 @@ async def _check_throttle(request: Request, access_key: str) -> None:
 
         count = await _bump(redis, _throttle_key(request, access_key), window)
         if count > HANDSHAKE_MAX_ATTEMPTS:
-            logger.warning("[ExtAuth] 握手节流触发（凭据维度）ak_fp=%s", _fingerprint(access_key))
+            logger.warning(
+                "[ExtAuth] 握手节流触发（凭据维度）ak_fp=%s", _fingerprint(access_key)
+            )
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 detail="too_many_attempts",
@@ -206,8 +210,12 @@ async def _check_throttle(request: Request, access_key: str) -> None:
 
 
 class SessionRequest(BaseModel):
-    access_key: str = Field(..., min_length=8, max_length=128, description="访问凭据 ID")
-    secret_key: str = Field(..., min_length=8, max_length=256, description="访问凭据密钥")
+    access_key: str = Field(
+        ..., min_length=8, max_length=128, description="访问凭据 ID"
+    )
+    secret_key: str = Field(
+        ..., min_length=8, max_length=256, description="访问凭据密钥"
+    )
 
 
 class SessionResponse(BaseModel):
@@ -242,7 +250,8 @@ async def create_session(payload: SessionRequest, request: Request) -> SessionRe
     except AuthBackendUnavailable as exc:
         logger.error("[ExtAuth] 握手查库失败：%s", exc)
         raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="auth_backend_unavailable"
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="auth_backend_unavailable",
         ) from exc
 
     # 与 ApiKeyService.verify_secret 同一个 pwd_context——不是另起一套哈希口径。
@@ -252,7 +261,9 @@ async def create_session(payload: SessionRequest, request: Request) -> SessionRe
     # ⚠️ 走线程池：bcrypt cost-12 是约 0.23s 的**同步** CPU 活。直接在 async 函数里
     # 调用会占住整个事件循环（API 服务 workers=1），一次握手就把全站卡 0.23s——
     # 攻击者匿名刷这个端点等于一个廉价的拒绝服务。
-    secret_ok = await run_in_threadpool(pwd_context.verify, payload.secret_key, stored_hash)
+    secret_ok = await run_in_threadpool(
+        pwd_context.verify, payload.secret_key, stored_hash
+    )
 
     # 失败一律同一个 401（同 detail、同耗时、同响应头）：区分开就是枚举 oracle。
     # 走 auth._reject 而不是就地造 HTTPException——`WWW-Authenticate` 头与日志
@@ -326,7 +337,9 @@ class CapabilitiesResponse(BaseModel):
     """
 
     api_version: str
-    server_time: float = Field(..., description="服务器 Unix 秒。用于对齐时钟/判断新鲜度")
+    server_time: float = Field(
+        ..., description="服务器 Unix 秒。用于对齐时钟/判断新鲜度"
+    )
     principal: PrincipalInfo
     trading: TradingInfo
     planes: list[PlaneInfo]
@@ -381,7 +394,7 @@ async def get_capabilities(
                 plane="data",
                 description="QuantDB、特征快照、推理结果、RSS",
                 transport="cursor-incremental + parquet-over-http",
-                available=False,
+                available=True,
             ),
             PlaneInfo(
                 plane="stream",
@@ -399,4 +412,22 @@ async def get_capabilities(
     )
 
 
-__all__ = ["router", "API_VERSION", "HANDSHAKE_MAX_ATTEMPTS", "HANDSHAKE_WINDOW_SECONDS"]
+# ---------------------------------------------------------------------------
+# 子路由挂载
+# ---------------------------------------------------------------------------
+#
+# 每个面一个模块、一条 include。前缀写成**相对的**（`/data`）：
+# 命名空间字面量只允许出现在 `live_trading_gate.EXT_API` 一处。
+# `test_router_does_not_hardcode_the_namespace` 会在本文件里做一次朴素的字面量
+# 扫描（引号紧跟命名空间开头那种写法），连注释里出现都会红——那条守卫刻意
+# 做笨，免得「只扫代码」这种聪明规则自己长出漏洞。所以本段也不写那个字面量。
+
+router.include_router(data_plane.router, prefix="/data")
+
+
+__all__ = [
+    "router",
+    "API_VERSION",
+    "HANDSHAKE_MAX_ATTEMPTS",
+    "HANDSHAKE_WINDOW_SECONDS",
+]

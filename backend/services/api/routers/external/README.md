@@ -152,41 +152,92 @@ GET /api/ext/v1/capabilities           # 需要 Bearer
 
 ---
 
-## 5. 五个面与当前进度
+## 5. 错误的形状与请求追踪（所有面通用）
+
+失败响应有**两种**形状，对接时都按机器可读的那个字段取：
+
+```jsonc
+// 普通 HTTPException（各面的 4xx/5xx 绝大多数）
+{ "detail": "invalid_cursor" }
+
+// 闸门拒绝（实盘关闭时的 403）——多一层给人和给日志的信息
+{ "detail": "real_trading_disabled", "success": false,
+  "message": "本部署未启用实盘交易（ENABLE_REAL_TRADING=false）…",
+  "error": { "code": "real_trading_disabled", "message": "real trading is disabled on this deployment" } }
+```
+
+**判定逻辑请只读 `detail`**：它在两种形状里是同一个字符串，也是唯一稳定的
+机器可读码（`error.code` 与它同值，是给打印日志的人看的）。**不要按 HTTP 状态码
+或 message 文本分支**——message 是中文、会改。
+
+每个响应都带 `X-Request-ID`：你传 `X-Request-ID` 就沿用你的，不传就服务端生成
+一个 UUID。**报故障时带上它**，服务端日志按它串得起一条请求。
+
+> 两种形状并存是现状，不是设计。统一信封（`{success, data, error}`）是控制面
+> 批次的事——那要一次改掉已经发出的所有 4xx，现在做会让批次 2 的契约测试
+> 与外部节点同时失效。这里如实写清楚，好过写一个「统一信封」的漂亮话。
+
+---
+
+## 6. 五个面与当前进度
 
 | 面 | 内容 | 传输 | 状态 |
 |---|---|---|---|
 | control | 策略 / 模型 / 账户 / 能力 | JSON REST | 规划中 |
 | task | 训练、因子演化、回测、数据同步、TradingAgents 分析 | `202 + task_id` + SSE | 规划中 |
-| data | QuantDB、特征快照、推理结果、RSS | 游标增量 + Parquet over HTTP | 规划中 |
+| data | QuantDB、特征快照、推理结果、新闻富化 | 游标增量 + Parquet over HTTP | **已实现（本批）** |
 | stream | 实时行情、情报总线、信号 | WebSocket | 规划中 |
 | trading | 订单 / 持仓 / 风控 | REST + 幂等键 | 规划中 |
 
-**目前只有第 3、4 节的两个端点可用**（握手 + 能力查询）。其余四个面按批次
-推进，`available` 为 `false` 的一律去试也是 404/403。
+`available=false` 的面一律别去试（现在会 403 或 404）。
+
+### 6.1 数据面（`/api/ext/v1/data/*`）
+
+五个端点：可用性索引、分区清单、取分区文件、取单文件数据集、行级增量。
+**语义与实测结论写在 [`DESIGN-data-plane.md`](./DESIGN-data-plane.md)**，
+这里只放对接方最需要的三件事：
+
+1. **每个响应都有 `as_of`（数据自己的时间），它不是 `server_time`。**
+   `as_of` 为空（`null`）表示这个数据集没有数据——**不是 0、也不是现在**。
+   把「没有数据」显示成「数据是现在的」是最坏的一种错。
+2. **行级增量是「至少一次」。** 同一行可能来两次（边界重叠、重试），客户端必须
+   按主键幂等写入。另外：以**早于你手里水位**的时间戳写进来的行（补数据、
+   批量重算）增量**永远看不到**，删除也**看不见**——所以响应里有
+   `full_sync_recommended_after`，到点做一次全量兜底。
+3. **先问再下。** 分区清单里给的 `etag` 与文件端点返回的 `ETag` 是
+   **同一个字符串**，带上 `If-None-Match` 就能只拿 304。别按日期猜「变没变」。
 
 ---
 
-## 6. 与实盘闸门的关系（重要，且反直觉）
+## 7. 与实盘闸门的关系（重要，且反直觉）
 
 `live_trading_gate` 的默认策略是「新路由默认落在拒绝侧」，但**对外命名空间
-自成一域**，用的是「登记过才放行、未登记即拒绝」：
+自成一域**，用的是「登记过才放行、未登记即拒绝」。
 
-* 已登记的对外端点（`/auth/session`、`/capabilities`）**在实盘关闭的部署上
-  照样可用**——它们不碰交易。所以 `ENABLE_REAL_TRADING=false` 的部署
-  一样能建连、一样能握手、一样能读能力文档。
-* 判定是**精确相等**，不是前缀匹配：登记 `/auth/session` **不会**连带放行
-  `/auth/session/anything`。
+放行侧有**两张表**，按端点形状分工：
+
+* `_ALLOWED_EXT_ENDPOINTS` —— **精确相等**。登记 `/auth/session` **不会**连带
+  放行 `/auth/session/anything`；登记 `/data/datasets` 也不会连带放行
+  `/data/datasets/{name}/partitions`。
+* `_ALLOWED_EXT_PATTERNS` —— 带路径参数的端点（数据面几乎每个都是）。
+  正则**逐段写死**：参数位是窄字符类 `[a-z0-9_]+`，其余每段都是字面量，
+  `fullmatch` 两端锚死。**不写成整段前缀放行**（`/api/ext/v1/data/`）：
+  那正是上面那条精确登记想堵的洞（将来加 `/data/orders` 会被顺带放行）。
+
+已登记的端点（含整个数据面）**在实盘关闭的部署上照样可用**——数据面不碰交易。
+所以 `ENABLE_REAL_TRADING=false` 的部署一样能建连、握手、读能力文档、拉数据。
 
 将来对外交易面端点在 `_BLOCKED_EXT_PREFIXES` 登记后，才会在实盘关闭时返 403
 （`detail: real_trading_disabled`）。
 
 ---
 
-## 7. 给改这个目录的人
+## 8. 给改这个目录的人
 
-* **加端点必须去 `live_trading_gate._ALLOWED_EXT_ENDPOINTS` 登记一行**，
-  否则实盘关闭的部署上它一律 403。`test_external_api_gate_coverage.py` 会强制。
+* **加端点必须去 `live_trading_gate` 的放行表登记一行**（无参数进
+  `_ALLOWED_EXT_ENDPOINTS`，带参数进 `_ALLOWED_EXT_PATTERNS`），否则实盘关闭的
+  部署上它一律 403。`test_external_api_gate_coverage.py` 会强制：它从 router
+  实际枚举路由，逐条拿**具体取值**跑一遍闸门判定。
 * **响应模型必须是有类型的具名 `BaseModel`**，不要返回裸 `dict[str, Any]`：
   在 OpenAPI 里那会退化成一团 `additionalProperties`，外部节点生成的客户端
   拿不到任何字段信息，字段改名要等对面运行时报错才发现。
@@ -198,8 +249,14 @@ GET /api/ext/v1/capabilities           # 需要 Bearer
   匿名者一个伪造日志行、污染终端回显的通道。
 * 判定「这枚 key 还能用吗」请调 `backend/shared/api_key_checks.py`，
   不要就地再写一遍（这份逻辑曾在仓库里被手写四遍，其中一份漂成了 500）。
+* **数据面的路径一律不许自己拼。** 数据集名只能从 `datasets.py` 的注册表查，
+  分区名只能过 `normalize_partition`，拼出来的路径必须过 `resolve_under_root`
+  （`commonpath`，不是 `startswith`）。
+* **JSON 端点里不许读 parquet 内容**（api 服务是单 worker 单事件循环），
+  目录枚举走 `run_in_threadpool`，文件传输走 `FileResponse`。
+  理由写在 `data.py` 模块 docstring 里。
 
-## 8. 测试
+## 9. 测试
 
 ```bash
 docker exec quantmind python -m pytest backend/tests/ -q \
@@ -210,9 +267,11 @@ docker exec quantmind python -m pytest backend/tests/ -q \
 |---|---|
 | `test_external_api_auth.py` | 令牌往返/防篡改/撤销即失效；失败方向统一 |
 | `test_external_api_contract.py` | OpenAPI schema 即对外契约（字段集合钉死） |
-| `test_external_api_handshake.py` | 握手端点行为、bcrypt 计时拉平 |
+| `test_external_api_handshake.py` | 握手端点行为、bcrypt 计时拉平、**面的可用性与路由是否对得上** |
 | `test_external_api_throttle.py` | 两层节流桶、TTL 自愈、fail-open |
-| `test_external_api_gate_coverage.py` | 新端点有没有登记进闸门白名单 |
+| `test_external_api_gate_coverage.py` | 新端点有没有登记进闸门放行表；**路径集合的唯一出处** |
+| `test_external_api_datasets.py` | 注册表不变量（名字在上游存在、`layout` 相符）、路径越界、etag 与 starlette 逐字一致 |
+| `test_external_api_data.py` | 数据面端点行为：304/Range/分页不漏不重/游标原生类型绑定/租户过滤 |
 | `test_api_key_checks.py` | 凭据可用性判定的唯一实现 |
 | `test_qmt_agent_auth_expiry.py` | aware/naive 比较那个 500 的回归 |
 | `test_env_example_reachability.py` | `.env.example` 里的键 compose 是否真的转发 |

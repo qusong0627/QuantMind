@@ -283,17 +283,62 @@ def test_capabilities_reports_real_trading_state_honestly(
     assert on.json()["trading"]["real_trading_enabled"] is True
 
 
+#: 每个面当前的真实状态。**批次落地时改这里**——改完下面那条断言会把
+#: 「声明为可用」与「真的有路由」对齐检查一遍。
+EXPECTED_PLANE_AVAILABILITY = {
+    "control": False,  # 批次 4
+    "task": False,  # 批次 4
+    "data": True,  # 批次 3
+    "stream": False,  # 批次 4
+    "trading": False,  # 批次 4
+}
+
+
 def test_capabilities_marks_unbuilt_planes_unavailable(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """规划中的面必须如实标 False——不要让节点以为某条路已经通了。"""
+    """每个面的 `available` 必须如实——这是外部节点的**接入前提**。
+
+    `available=False` 的面，节点不该去试；`true` 的面，节点会直接按它写代码。
+    所以两个方向都要钉：没实现却报 true（节点撞 404）、实现了却报 false
+    （功能白做）都是故障，只是后者安静一些。
+    """
     _install_fake_db(monkeypatch, _FakeKey())
     body = client.get(f"{gate.EXT_API}/capabilities", headers=_bearer(monkeypatch)).json()
     planes = {p["plane"]: p for p in body["planes"]}
-    assert set(planes) == {"control", "task", "data", "stream", "trading"}
-    assert all(p["available"] is False for p in planes.values()), (
-        "有面被标成可用但尚未实现——外部节点会去调它"
+    assert set(planes) == set(EXPECTED_PLANE_AVAILABILITY)
+    actual = {name: p["available"] for name, p in planes.items()}
+    assert actual == EXPECTED_PLANE_AVAILABILITY, (
+        f"面的可用性与实现不符：{actual}。"
+        "批次落地时请同步更新 EXPECTED_PLANE_AVAILABILITY。"
     )
+
+
+def test_planes_marked_available_have_real_routes(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
+    """**`available=True` 必须真的有路由**，否则节点按它去调只会收 404。
+
+    这条把「自我描述」与「实际挂载」钉在一起：上面那条测的是声明，
+    这条测的是声明与网关的实际形状一致。反过来（有路由却报 false）
+    只损失一个功能，不致错——所以只单向断言。
+    """
+    import warnings
+
+    from backend.services.api.main import app
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        served = {p for p in app.openapi().get("paths", {}) if p.startswith(gate.EXT_API)}
+
+    for plane, available in EXPECTED_PLANE_AVAILABILITY.items():
+        if not available:
+            continue
+        prefix = f"{gate.EXT_API}/{plane}/"
+        assert [p for p in served if p.startswith(prefix)], (
+            f"面 {plane} 被标成 available=true，但网关下没有 {prefix}* 的路由——"
+            "外部节点照它写代码会全部 404"
+        )
 
 
 def test_capabilities_carries_server_time(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -70,11 +70,41 @@ def test_unregistered_ext_paths_are_denied(path: str) -> None:
     assert gate.is_blocked("POST", path) is True
 
 
-@pytest.mark.parametrize("path", ["/api/ext/v1/auth/session", "/api/ext/v1/capabilities"])
+#: 对外路由的**形状**清单（带 `{参数}` 占位符）。加端点必须改这里——
+#: 它同时驱动下面两条断言：router 实际枚举 与 网关 OpenAPI。
+EXPECTED_EXT_ROUTES = {
+    "/api/ext/v1/auth/session",
+    "/api/ext/v1/capabilities",
+    # 批次 3：数据面
+    "/api/ext/v1/data/datasets",
+    "/api/ext/v1/data/datasets/{name}/partitions",
+    "/api/ext/v1/data/datasets/{name}/partitions/{partition}/file",
+    "/api/ext/v1/data/datasets/{name}/blob",
+    "/api/ext/v1/data/{dataset}/changes",
+}
+
+#: 把形状里的参数位换成**真实取值**，用来跑闸门判定。
+#: 取值一律取自注册表里确实存在的名字——用一个不存在的名字会让
+#: 「闸门放行」和「注册表查不到」混在一起，测出来的就不是闸门了。
+_SAMPLE_PARAMS = {
+    "{name}": "daily_forward",
+    "{dataset}": "news_enrichment",
+    "{partition}": "2026-09-22",
+}
+
+
+def _concretize(path: str) -> str:
+    for placeholder, value in _SAMPLE_PARAMS.items():
+        path = path.replace(placeholder, value)
+    return path
+
+
+@pytest.mark.parametrize("path", sorted(EXPECTED_EXT_ROUTES))
 def test_registered_ext_paths_are_allowed(path: str) -> None:
     """已登记的非交易端点放行（否则对外接入连握手都做不了）。"""
-    assert gate.is_blocked("POST", path) is False
-    assert gate.is_blocked("GET", path) is False
+    concrete = _concretize(path)
+    assert gate.is_blocked("POST", concrete) is False
+    assert gate.is_blocked("GET", concrete) is False
 
 
 def test_every_real_ext_route_is_covered_by_the_policy() -> None:
@@ -84,20 +114,36 @@ def test_every_real_ext_route_is_covered_by_the_policy() -> None:
     改端点名，那些字面量就变成在测一个不存在的路径，而新路径默默落进
     「未登记即拒绝」——功能没坏，但**外部节点会莫名其妙收 403**，
     而测试全绿。这条把两边钉在一起。
+
+    参数位换成真实取值再判：`_ALLOWED_EXT_PATTERNS` 只认具体形状，
+    拿 `{name}` 去判会得到「拒绝」——那是**测试的输入不合法**，
+    不是闸门拦错了。
+
+    ⚠️ 枚举走**一次性的 FastAPI 装配 + openapi()**，不是 `ext_router.routes`：
+    本仓的 FastAPI 把 `include_router` 进来的子路由包成一个 `_IncludedRouter`
+    节点（没有 `.path`），`r.path` 会直接 AttributeError——数据面一挂进来
+    这条测试就炸了。`app.openapi()` 是这台框架上**唯一**能拿到展开后路径的入口。
+    这里单独装一个小 app（而不是用真网关），是为了把「router 模块自己的路由集」
+    与「main.py 挂在哪」分成两条断言：这条管前者，下面那条管后者。
     """
     from backend.services.api.routers.external.router import router as ext_router
 
-    real = {gate.EXT_API + r.path for r in ext_router.routes}
+    probe = FastAPI()
+    probe.include_router(ext_router, prefix=gate.EXT_API)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        real = {p for p in probe.openapi().get("paths", {}) if p.startswith(gate.EXT_API)}
     assert real, "对外 router 一条路由都没有——下面的断言会空转"
-    assert real == {
-        "/api/ext/v1/auth/session",
-        "/api/ext/v1/capabilities",
-    }, f"对外路由集合变了：{sorted(real)}。请同步更新本文件与闸门登记表。"
+    assert real == EXPECTED_EXT_ROUTES, (
+        f"对外路由集合变了：{sorted(real)}。请同步更新本文件、"
+        "`test_external_api_contract.py` 与闸门登记表。"
+    )
 
-    uncovered = [p for p in real if gate.is_blocked("GET", p)]
+    uncovered = [p for p in real if gate.is_blocked("GET", _concretize(p))]
     assert not uncovered, (
         f"这些对外路由没在闸门里登记，实盘关闭的部署上会 403：{uncovered}。"
-        "请在 live_trading_gate._ALLOWED_EXT_ENDPOINTS 或 _BLOCKED_EXT_PREFIXES 登记。"
+        "请在 live_trading_gate._ALLOWED_EXT_ENDPOINTS / "
+        "_ALLOWED_EXT_PATTERNS / _BLOCKED_EXT_PREFIXES 登记。"
     )
 
 
@@ -124,10 +170,7 @@ def test_real_app_serves_ext_at_the_expected_paths() -> None:
         paths = set(app.openapi().get("paths", {}))
 
     served = {p for p in paths if p.startswith(gate.EXT_API)}
-    assert served == {
-        "/api/ext/v1/auth/session",
-        "/api/ext/v1/capabilities",
-    }, (
+    assert served == EXPECTED_EXT_ROUTES, (
         f"网关实际伺服的对外路径与预期不符：{sorted(served)}。"
         "如果确实改了，请同步更新 router 测试与闸门登记表。"
     )
@@ -212,6 +255,49 @@ def test_exact_match_survives_trailing_slash(path: str) -> None:
     assert gate.is_blocked("POST", path) is False
 
 
+def test_pattern_entries_are_shape_scoped_not_prefix_scoped() -> None:
+    """带路径参数的端点走**模式表**，模式必须**逐段写死**。
+
+    这里列的全是「差一点点」的形状：多一段、少一段、日期写法松一点、
+    字符类之外的字符。它们必须**全部**被拒——如果哪天有人图省事把模式表
+    换成 `f"{EXT_API}/data/"` 这样的整段前缀放行，这些断言会一起红。
+    """
+    near_miss = (
+        # 多一段 / 少一段
+        "/api/ext/v1/data/datasets/daily_forward/partitions/2026-09-22/file/extra",
+        "/api/ext/v1/data/datasets/daily_forward/blob/extra",
+        "/api/ext/v1/data/news_enrichment/changes/extra",
+        "/api/ext/v1/data/datasets/daily_forward/partitions/2026-09-22",
+        # 日期写法松一格就走不到注册表，这里也不该放行
+        "/api/ext/v1/data/datasets/daily_forward/partitions/2026-9-22/file",
+        "/api/ext/v1/data/datasets/daily_forward/partitions/20260922/file",
+        # 参数位的字符类之外
+        "/api/ext/v1/data/datasets/Daily_Forward/blob",
+        "/api/ext/v1/data/datasets/daily-forward/blob",
+        "/api/ext/v1/data/datasets/daily_forward/partitions/2026-09-22/files",
+        # 参数位后面直接跟别的东西，以及整个数据面之外的路径
+        "/api/ext/v1/data/datasets/x",
+        "/api/ext/v1/data/orders",
+    )
+    leaked = [p for p in near_miss if gate.is_blocked("GET", p) is False]
+    assert not leaked, (
+        f"这些形状没被模式表挡住：{leaked}。"
+        "模式表可能退化成了前缀放行——见 _ALLOWED_EXT_PATTERNS 上方的注释。"
+    )
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/ext/v1/data/datasets/daily_forward/blob/",  # 尾斜杠同判
+        "/api/ext/v1/data/news_enrichment/changes/",
+    ],
+)
+def test_pattern_match_survives_trailing_slash(path: str) -> None:
+    """与精确表同理：`_normalize` 先去掉尾斜杠，两种写法落同一个字符串。"""
+    assert gate.is_blocked("GET", path) is False
+
+
 def test_allowlist_is_load_bearing(monkeypatch: pytest.MonkeyPatch) -> None:
     """清空放行表后，已登记端点必须变成拒绝。
 
@@ -221,6 +307,20 @@ def test_allowlist_is_load_bearing(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(gate, "_ALLOWED_EXT_ENDPOINTS", ())
     assert gate.is_blocked("POST", "/api/ext/v1/auth/session") is True
     assert gate.is_blocked("GET", "/api/ext/v1/capabilities") is True
+
+
+def test_pattern_table_is_load_bearing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """与上一条同构：清空模式表，数据面必须整段变成拒绝。
+
+    没有这条的话，「模式表被读到了」这件事全靠间接推断——而它与精确表
+    是**两条**独立的判据，`is_blocked` 里少一次 `any(...)` 不会影响
+    精确表那几条断言。
+    """
+    monkeypatch.setattr(gate, "_ALLOWED_EXT_PATTERNS", ())
+    for shape in EXPECTED_EXT_ROUTES:
+        if "{" not in shape:
+            continue  # 无参数的走精确表，本就不该受模式表影响
+        assert gate.is_blocked("GET", _concretize(shape)) is True, shape
 
 
 def test_default_deny_is_not_an_accident(monkeypatch: pytest.MonkeyPatch) -> None:

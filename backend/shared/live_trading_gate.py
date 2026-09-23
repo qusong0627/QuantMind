@@ -52,6 +52,7 @@
 from __future__ import annotations
 
 import logging
+import re
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -160,6 +161,30 @@ _BLOCKED_EXT_PREFIXES: tuple[str, ...] = ()
 _ALLOWED_EXT_ENDPOINTS: tuple[str, ...] = (
     f"{EXT_API}/auth/session",
     f"{EXT_API}/capabilities",
+    # 数据面（批次 3）。不带路径参数的那几条走精确表，带参数的走下面的模式表。
+    f"{EXT_API}/data/datasets",
+)
+
+#: 带**路径参数**的对外端点。上面那张表是精确相等，表达不了
+#: `/data/{dataset}/changes` 这类形状——而数据面几乎每个端点都有参数。
+#:
+#: 为什么不是「整段前缀放行」（`/api/ext/v1/data/`）：那正是上一条注释里说的
+#: 架空。模式必须**逐段写死**：参数位用窄字符类（`[a-z0-9_]+`，与数据面注册表
+#: 的标识符形状同源），其余每一段都是字面量，两端锚死。
+#:
+#: `fullmatch` 而非 `match`：不加 `$` 锚的 `match` 会放行
+#: `/api/ext/v1/data/x/changes/../../orders` 这类带尾巴的路径。
+_ALLOWED_EXT_PATTERNS: tuple[re.Pattern[str], ...] = (
+    # 分区清单 / 取文件
+    re.compile(rf"{EXT_API}/data/datasets/[a-z0-9_]+/partitions"),
+    re.compile(
+        rf"{EXT_API}/data/datasets/[a-z0-9_]+/partitions/"
+        r"\d{4}-\d{2}-\d{2}/file"
+    ),
+    # 单文件数据集
+    re.compile(rf"{EXT_API}/data/datasets/[a-z0-9_]+/blob"),
+    # 行级增量（游标）——**不碰交易**，所以放行；放行的是「读」，不是「下单」
+    re.compile(rf"{EXT_API}/data/[a-z0-9_]+/changes"),
 )
 
 
@@ -208,7 +233,10 @@ def is_blocked(method: str, path: str) -> bool:
         # 表现是「实盘关闭的部署上 403」，而不是「悄悄可达」。
         # 放行侧用精确相等——见 `_ALLOWED_EXT_ENDPOINTS` 上方那段：
         # 前缀匹配会让「登记一个端点」顺带放行它的整棵子树。
-        return path not in _ALLOWED_EXT_ENDPOINTS
+        if path in _ALLOWED_EXT_ENDPOINTS:
+            return False
+        # 带路径参数的端点走模式表（形状同样是逐段写死的，见其上方注释）
+        return not any(p.fullmatch(path) for p in _ALLOWED_EXT_PATTERNS)
 
     # 1) 行情先行：无论什么方法，行情端点一律放行
     if any(_matches(path, p) for p in _MARKET_DATA_PREFIXES):

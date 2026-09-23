@@ -194,6 +194,26 @@ def test_session_response_field_names_follow_rfc6749() -> None:
 
 
 def test_ext_namespace_is_actually_served() -> None:
-    """防空转：schema 里一条对外路径都没有时，上面所有断言都在空转。"""
+    """防空转：schema 里一条对外路径都没有时，上面所有断言都在空转。
+
+    路径集合的**唯一出处**是 `test_external_api_gate_coverage.EXPECTED_EXT_ROUTES`
+    （那边同时拿它判闸门登记是否覆盖）。这里 import 过来而不是再抄一份：
+    两处各抄一份的结果是加端点时只改一处，另一处变成一条在测旧世界的断言。
+    """
+    from backend.tests.test_external_api_gate_coverage import EXPECTED_EXT_ROUTES
+
     served = {p for p in _spec()["paths"] if p.startswith(gate.EXT_API)}
-    assert served == {"/api/ext/v1/auth/session", "/api/ext/v1/capabilities"}
+    assert served == EXPECTED_EXT_ROUTES
+
+
+def test_data_plane_is_reachable_through_the_namespace() -> None:
+    """数据面在 schema 里必须真的挂着，且**一个面一个前缀**。
+
+    `/api/ext/v1/data/data/...` 这种「前缀写重了一遍」是第一版真实犯过的错
+    （子路由里又写了一次 `/data`）。它在 router 级断言里看不出来——路径拼出来
+    仍然是合法的、只是多了一层。所以这里直接盯着形状。
+    """
+    paths = {p for p in _spec()["paths"] if p.startswith(f"{gate.EXT_API}/data/")}
+    assert paths, "数据面一条路径都没有挂上"
+    doubled = [p for p in paths if p.startswith(f"{gate.EXT_API}/data/data/")]
+    assert not doubled, f"数据面前缀写重了：{doubled}"
