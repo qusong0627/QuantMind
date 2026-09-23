@@ -45,6 +45,7 @@ from backend.services.trade.services.decision_round_core import (
     STATUS_SKIPPED,
     AccountRead,
     AgentLedgerRead,
+    AgentRun,
     ExclusionRead,
     LLMBinding,
     RoundDeps,
@@ -58,6 +59,7 @@ from backend.services.trade.services.decision_round_core import (
     pool_row_to_gate_row,
     position_source_meta,
     positions_consistency_issue,
+    select_runs,
     refusing_submitter,
     round_id_for,
     slot_keys,
@@ -399,6 +401,8 @@ def make_harness(**over) -> Harness:
         is_trading_time=over.pop("is_trading_time", lambda now: True),
         real_enabled=over.pop("real_enabled", lambda: False),
         now=over.pop("now", lambda: NOW),
+        # 默认无名册 = 单家路径（历史行为）。多模型用例自己传 ``roster=``。
+        roster=over.pop("roster", None),
     )
     assert not over, f"未消费的替身参数：{sorted(over)}"
     return Harness(deps=deps, log=log)
@@ -451,6 +455,37 @@ def test_slot_keys_separate_schema_and_day():
     assert done_key == "trade:decision-round:done:20260924:rebalance"
     # done 键是 **schema 维度**：建仓轮出过决策不等于守护轮出过
     assert done_key != slot_keys(DAY, SLOT_0830)[1]
+
+
+def test_slot_keys_segment_by_agent_only_when_named():
+    """多模型名册（P2.9）：**agent 是槽位键与 done 键的一个维度**。
+
+    不留空段是刻意的：空的 agent 逐字保留历史键形（今天的部署升级后不会突然
+    「所有 done 键查无此人」⇒ 当天补跑槽集体重跑一轮真钱）。名册一开，每家的
+    认领键与 done 键各自独立——一家的「今天跑过了」不许替另一家说话。
+    """
+    base_slot, base_done = slot_keys(DAY, SLOT_0935)
+    pro_slot, pro_done = slot_keys(DAY, SLOT_0935, "deepseek-v4-pro")
+    assert pro_slot == f"{base_slot}:deepseek-v4-pro"
+    assert pro_done == f"{base_done}:deepseek-v4-pro"
+    assert pro_slot != slot_keys(DAY, SLOT_0935, "deepseek-v4-flash")[0]
+    assert slot_keys(DAY, SLOT_0935, "") == (base_slot, base_done)  # 空 = 历史键形
+
+
+def test_select_runs_refuses_a_name_that_is_not_in_the_roster():
+    """点名一家不在名册里的模型 = **参数错**，不是「那就跑全家」。
+
+    静默跑全家是这里最坏的失败形态：运营以为在重跑一家，实际三家都下了单。
+    """
+    runs = (
+        AgentRun(agent="a", load_llm=lambda: None),
+        AgentRun(agent="b", load_llm=lambda: None),
+    )
+    assert [r.agent for r in select_runs(runs, "b")] == ["b"]
+    assert [r.agent for r in select_runs(runs, "")] == ["a", "b"]  # 不点名 = 全员
+    with pytest.raises(ValueError) as exc:
+        select_runs(runs, "c")
+    assert "c" in str(exc.value) and "a, b" in str(exc.value)
 
 
 def test_round_id_shape_feeds_the_order_idempotency_key():
@@ -1678,6 +1713,208 @@ async def test_explicit_slot_bypasses_the_schedule_for_operators():
     assert [r.slot.hhmm for r in results] == ["1005"]  # 到点与否由人说了算
 
 
+# ══ F2. 多模型名册（P2.9）：一槽多家，各家一本账 ═════════════════════
+def _roster_harness(*agents: str, **over):
+    """一份名册替身：每家一个 ``AgentRun``，各带绑定（身份与模型名同名）。
+
+    ``decision_text`` 与单家 harness 同一语义（不传 = 各家持有的那家观望）；每家的
+    调用都记进 ``log["llm"]`` 并带上 agent，让「哪家真问过模型」可断言。
+    断言另有四处：``log["agent_ledger"]``（分账按家切段）、``log["watch"]``（守护归属）、
+    ``log["ledger"]``（审计行 ``agent`` 与 ``id`` 不撞主键）、状态键 ``last:{agent}``。
+    """
+    text = over.get("decision_text") or decisions_json(
+        {"action": "hold", "code": "600036.SH", "reason": "名册：各家观望"}
+    )
+    h = make_harness(**over)
+
+    def _run(agent: str) -> AgentRun:
+        def _load() -> LLMBinding:
+            def _decide(prompt, schema):
+                h.log["llm"].append(
+                    {"agent": agent, "prompt": prompt, "schema": schema}
+                )
+                return attempt_from(text, schema=schema)
+
+            return LLMBinding(model=agent, decide=_decide)
+
+        return AgentRun(agent=agent, load_llm=_load)
+
+    h.deps = replace(h.deps, roster=lambda: tuple(_run(a) for a in agents))
+    return h
+
+
+@pytest.mark.asyncio
+async def test_tick_runs_every_roster_agent_in_one_slot():
+    """一家一槽一轮：两家都有决策、都写账本、都写守护规则——**各写各的**。"""
+    h = _roster_harness("deepseek-v4-pro", "deepseek-v4-flash")
+    native = FakeNative()
+    results = await round_tick(deps=h.deps, native=native, now=TICK_NOW)
+
+    assert [r.agent for r in results] == ["deepseek-v4-pro", "deepseek-v4-flash"]
+    assert [r.status for r in results] == [R.STATUS_OK, R.STATUS_OK]
+    # 分账账本按家切段：第二家绝不许看见第一家的账（2026-09-08 跨 agent 卖仓那条）
+    assert [a for _t, _u, a in h.log["agent_ledger"]] == [
+        "deepseek-v4-pro",
+        "deepseek-v4-flash",
+    ]
+    # 审计行：两家的 id 不同（同轮同序号同码同动作也不许撞主键）
+    ids = [rows[0].id for rows in h.log["ledger"]]
+    assert len(ids) == 2 and ids[0] != ids[1]
+    assert [rows[0].agent for rows in h.log["ledger"]] == [
+        "deepseek-v4-pro",
+        "deepseek-v4-flash",
+    ]
+    assert len(h.log["llm"]) == 2  # 两家各问了一次
+
+
+@pytest.mark.asyncio
+async def test_watch_rules_are_written_per_agent_not_as_one_group():
+    """守护规则归属按家（``llm:<agent>``）：盘中轮两家各写各的那组。
+
+    写错归属的后果不是「少一条规则」：整组替换只动 ``owner == 自己`` 那组，两家
+    若共用一个 owner，后跑的那家会把前一家的止损单**整组摘掉**——账户当场裸奔。
+    """
+    h = _roster_harness("pro", "flash", decision_text=WATCH_TEXT)
+    native = FakeNative()
+    results = await round_tick(deps=h.deps, native=native, now=TEN_05, slot=SLOT_1000)
+    assert [r.status for r in results] == [R.STATUS_OK, R.STATUS_OK]
+    assert [w["agent"] for w in h.log["watch"]] == ["pro", "flash"]
+    assert [r.watch_armed for r in results] == [1, 1]
+
+
+@pytest.mark.asyncio
+async def test_tick_keeps_claim_and_done_keys_per_agent():
+    """键必须按家分段：**一家的 done 键不许替另一家说话**。
+
+    不分段的后果是「迁完只剩一个模型」：第一家认领并置 done 之后，第二家进到
+    同一个槽位时被自己的认领键挡住（或补跑槽读到的 done 键说「今天出过了」），
+    状态键上一切正常，而另外两家整天空转——正是迁移计划里警告的那一条。
+    """
+    h = _roster_harness("pro", "flash")
+    native = FakeNative()
+    await round_tick(deps=h.deps, native=native, now=TICK_NOW)
+
+    for agent in ("pro", "flash"):
+        slot_key, done_key = slot_keys(DAY, SLOT_0935, agent)
+        assert slot_key in native.store and done_key in native.store
+        assert json.loads(native.store[f"{LAST_KEY}:{agent}"])["agent"] == agent
+    assert slot_keys(DAY, SLOT_0935)[1] not in native.store  # 不带段的那把不写
+
+
+@pytest.mark.asyncio
+async def test_tick_one_agent_failure_does_not_take_the_others_down():
+    """某家 LLM 没配好 ⇒ 只有那家记 llm_failed，其余家照跑（隔壁的 ``continue``）。
+
+    一家的 key 过期/欠费是**常态**，不是事故；让整槽 abort 等于「便宜的模型欠费
+    导致主力模型当天不决策」——而那正是这次要保住的能力。
+    """
+    from backend.shared.decision.llm_call import LLMNotConfigured
+
+    h = _roster_harness("pro", "flash")
+    good = h.deps.roster
+
+    def _load_bad():
+        raise LLMNotConfigured("决策 LLM 未配置：QM_DECISION_LLM_API_KEY 为空")
+
+    def _roster():
+        pro, flash = good()
+        return (AgentRun(agent=pro.agent, load_llm=_load_bad), flash)
+
+    h.deps = replace(h.deps, roster=_roster)
+    native = FakeNative()
+    results = await round_tick(deps=h.deps, native=native, now=TICK_NOW)
+
+    assert [(r.agent, r.status) for r in results] == [
+        ("pro", R.STATUS_LLM_FAILED),
+        ("flash", R.STATUS_OK),
+    ]
+    assert json.loads(native.store[f"{LAST_KEY}:pro"])["status"] == "llm_failed"
+    assert slot_keys(DAY, SLOT_0935, "pro")[1] not in native.store  # 没跑成 ⇒ 不算跑过
+    assert slot_keys(DAY, SLOT_0935, "flash")[1] in native.store
+    assert h.log["llm"], "第二家必须真的问过模型"
+
+
+@pytest.mark.asyncio
+async def test_catch_up_slot_resumes_only_the_agent_that_missed():
+    """补跑槽按家续：pro 当日已出过 rebalance，flash 没有 ⇒ 10:47 只补 flash 一家。
+
+    done 键是 **schema 维度**（09:35 建仓轮置的键，10:05/10:47 补跑槽读的是同一把）；
+    分段之后每家读**自己那把**——pro 跑成了不许替 flash 说话，否则 flash 当天一次
+    决策都没有（分账里的货没人管），而状态键上一切正常。
+    """
+    h = _roster_harness("pro", "flash")
+    native = FakeNative()
+    native.store[slot_keys(DAY, SLOT_0935, "pro")[1]] = "1"  # pro 出过决策
+    results = await round_tick(deps=h.deps, native=native, now=TICK_1005)
+    assert [(r.agent, r.status) for r in results] == [
+        ("pro", STATUS_SKIPPED),
+        ("flash", R.STATUS_OK),
+    ]
+    assert [t["agent"] for t in h.log["llm"]] == ["flash"]  # pro 没重问模型
+    assert slot_keys(DAY, SLOT_0935, "flash")[1] in native.store  # flash 补上了
+
+    # 窗口内不再重跑（认领键按家、按槽按着）：要来第二次只能由人点名，而点名的
+    # 那家**只跑那家**——静默跑全员 = 运营以为在补 flash，实际三家都下了单。
+    assert await round_tick(deps=h.deps, native=native, now=TICK_1005) == ()
+    h.log["llm"].clear()
+    forced = await round_tick(
+        deps=h.deps, native=native, now=TICK_1005, force=True, agent="flash"
+    )
+    assert [(r.agent, r.status) for r in forced] == [("flash", R.STATUS_OK)]
+    assert [t["agent"] for t in h.log["llm"]] == ["flash"]
+
+
+@pytest.mark.asyncio
+async def test_agent_filter_runs_only_the_named_agent():
+    """``--agent``：运营点名一家（例：那家的 key 刚续上）。"""
+    h = _roster_harness("pro", "flash")
+    native = FakeNative()
+    results = await round_tick(deps=h.deps, native=native, now=TICK_NOW, agent="flash")
+    assert [r.agent for r in results] == ["flash"]
+    assert slot_keys(DAY, SLOT_0935, "pro")[0] not in native.store  # pro 的键没动
+
+    with pytest.raises(ValueError):
+        await round_tick(deps=h.deps, native=native, now=TICK_NOW, agent="nope")
+
+
+@pytest.mark.asyncio
+async def test_roster_resolution_failure_marks_the_slot_llm_failed():
+    """名册本身坏了（写错一项）⇒ 每槽如实记 llm_failed + 原因，**不许回落到单家**。
+
+    回落是这里最坏的选择：全局三件套还有效时它会让轮次**照常下单**，只是三家变
+    一家，而名册里的另外两家再也不出现——审计上看起来像「模型没意见」。
+    """
+    h = make_harness()
+    from backend.shared.decision.llm_call import LLMNotConfigured
+
+    def _boom():
+        raise LLMNotConfigured("QM_DECISION_LLM_ROSTER 第 2 项缺 model")
+
+    h.deps = replace(h.deps, roster=_boom)
+    native = FakeNative()
+    results = await round_tick(deps=h.deps, native=native, now=TICK_NOW)
+
+    assert len(results) == 1 and results[0].status == R.STATUS_LLM_FAILED
+    assert "第 2 项缺 model" in results[0].note
+    assert h.log["llm"] == [] and h.log["exec"] == []  # 一轮都没跑起来
+    assert slot_keys(DAY, SLOT_0935)[1] not in native.store
+
+
+@pytest.mark.asyncio
+async def test_empty_roster_keeps_the_single_agent_path():
+    """``roster`` 给空（测试替身/未接线的 deps）⇒ 走单家：键不分段、只跑一轮。"""
+    h = make_harness(roster=lambda: ())
+    native = FakeNative()
+    results = await round_tick(deps=h.deps, native=native, now=TICK_NOW)
+    assert [r.status for r in results] == [R.STATUS_OK]
+    # 认领/done 键**不分段**（升级当天已跑过的槽还认得出）；状态键照旧写 ``last``，
+    # 按家的那把由模型名给出（身份 = 归一后的模型名），只是**绝不留空段键** ——
+    # ``last:`` 空段没人读得到，只会变成 Redis 里的孤儿。
+    assert slot_keys(DAY, SLOT_0935)[0] in native.store
+    assert LAST_KEY in native.store
+    assert f"{LAST_KEY}:" not in native.store
+
+
 # ══ G. worker / CLI 开关（驱动层：decision_round_runner） ═════════════
 def test_worker_returns_immediately_unless_the_flag_is_exactly_true(monkeypatch):
     """未开（含 "1"/空串）时立即返回——若误开，2 秒超时会把用例判红而不是挂住。"""
@@ -1796,15 +2033,103 @@ async def test_worker_keeps_looping_when_the_heartbeat_write_throws(monkeypatch)
         await RUN.run_decision_round_worker()  # 走到了 sleep 就是活着的
 
 
-def test_cli_dry_run_lists_slots(capsys):
+def test_cli_dry_run_lists_slots(capsys, monkeypatch):
+    """``--dry-run`` 也要说清**名册**：运营拿它核对「今天这一槽会有几家出主意」。"""
+    for name in ("QM_DECISION_LLM_ROSTER",):
+        monkeypatch.delenv(name, raising=False)
     assert RUN.main(["--dry-run"]) == 0
     out = capsys.readouterr().out
     assert "到点槽位" in out and "09:35" in out and "14:45" in out
+    assert "名册：" in out  # 未开名册时也要给出「单家（…）」这句
+
+    monkeypatch.setenv(
+        "QM_DECISION_LLM_ROSTER",
+        '[{"model": "pro", "base_url_env": "U", "api_key_env": "K"},'
+        ' {"model": "flash", "base_url_env": "U", "api_key_env": "K"}]',
+    )
+    monkeypatch.setenv("U", "https://example.invalid/v1")
+    monkeypatch.setenv("K", "sk-not-printed")
+    assert RUN.main(["--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert "名册 2 家" in out and "'pro'" in out and "'flash'" in out
+    assert "sk-not-printed" not in out  # 名册行只报家名，绝不回显 key
 
 
 def test_cli_rejects_an_unknown_slot(capsys):
     assert RUN.main(["--slot", "9999"]) == 2
     assert "未知槽位" in capsys.readouterr().err
+
+
+def test_cli_rejects_an_agent_that_is_not_in_the_roster(capsys, monkeypatch):
+    """``--agent`` 校验要在**跑之前**：点名不在名册里 = 参数错（rc 2）。
+
+    放进去的两种坏法：① 在 tick 里抛栈（操作员看到一屏 traceback）；② 静默跑全员
+    （运营以为在补一家，实际名册上每家都下了一批单）。两种都不许有。
+    """
+    monkeypatch.setenv(
+        "QM_DECISION_LLM_ROSTER",
+        '[{"model": "pro", "base_url_env": "U", "api_key_env": "K"}]',
+    )
+    monkeypatch.setenv("U", "https://example.invalid/v1")
+    monkeypatch.setenv("K", "sk-x")
+    assert RUN.main(["--agent", "nope"]) == 2
+    err = capsys.readouterr().err
+    assert "'nope'" in err and "pro" in err
+
+    # 名册没开（单家路径）：没有可点名的家 —— 也要 rc 2，而不是「点了名却跑全员」
+    monkeypatch.delenv("QM_DECISION_LLM_ROSTER", raising=False)
+    assert RUN.main(["--agent", "pro"]) == 2
+    assert "不在名册里" in capsys.readouterr().err
+
+
+def test_cli_stops_on_a_broken_roster_before_touching_anything(capsys, monkeypatch):
+    """名册写坏一项 = 配置错（rc 2），**不进真钱路径**（不取账户、不问模型）。"""
+    monkeypatch.setenv("QM_DECISION_LLM_ROSTER", '[{"base_url": "x"}]')
+    called = []
+
+    async def _never(**kw):  # pragma: no cover - 真被调用就是回归
+        called.append(kw)
+        return ()
+
+    monkeypatch.setattr(RUN, "round_tick", _never)
+    assert RUN.main([]) == 2
+    err = capsys.readouterr().err
+    assert "名册不可用" in err and "QM_DECISION_LLM_ROSTER" in err
+    assert called == []
+
+
+def test_cli_passes_the_agent_filter_down_and_prints_it(monkeypatch, capsys):
+    """点名一家 ⇒ 只跑那家，输出行里带 ``agent=``（运维 grep 的对象）。"""
+    import backend.shared.database_manager_v2 as _dbm
+
+    async def _no_db():
+        pass
+
+    seen = {}
+
+    async def _one(**kw):
+        seen.update(kw)
+        return (
+            RoundResult(
+                status=R.STATUS_OK,
+                day=DAY,
+                slot=SLOT_0935,
+                round_id="rnd-20260924-0935",
+                agent=kw.get("agent") or "",
+            ),
+        )
+
+    monkeypatch.setenv(
+        "QM_DECISION_LLM_ROSTER",
+        '[{"model": "pro", "base_url_env": "U", "api_key_env": "K"}]',
+    )
+    monkeypatch.setenv("U", "https://example.invalid/v1")
+    monkeypatch.setenv("K", "sk-x")
+    monkeypatch.setattr(RUN, "round_tick", _one)
+    monkeypatch.setattr(_dbm, "close_database", _no_db)
+    assert RUN.main(["--agent", "pro"]) == 0
+    assert seen["agent"] == "pro"
+    assert "agent=pro" in capsys.readouterr().out
 
 
 async def _empty_tick(**kw):
@@ -2170,6 +2495,30 @@ def test_claim_slot_always_sets_a_ttl(force):
     assert seen["value"] == (IO.CLAIM_MANUAL if force else IO.CLAIM_AUTO)
 
 
+def test_write_status_adds_a_per_agent_last_key():
+    """``last``/``log`` 照旧（前端与 C07 心跳读它们），**另加**按家的 ``last:{agent}``。
+
+    不带 agent 段的那把是「**最后完成的那一家**」——它保留下来是为了不动既有读者；
+    要问「pro 那家跑得怎么样」就得有一把不会被别的家覆盖的键。
+    """
+    native = FakeNative()
+    result = RoundResult(
+        status=R.STATUS_OK, day=DAY, slot=SLOT_0935, round_id="rnd-x", agent="pro"
+    )
+    IO.write_status(native, result, at=NOW)
+    assert json.loads(native.store[LAST_KEY])["agent"] == "pro"
+    assert json.loads(native.store[f"{LAST_KEY}:pro"])["round_id"] == "rnd-x"
+    assert any(
+        c[0] == "ltrim" and c[1] == LOG_KEY for c in native.calls
+    )  # 日志仍是共享时间线
+
+    # 空 agent（单家/名册解析失败那家）：只有不带段的那把，不留 ``last:`` 空段键
+    native2 = FakeNative()
+    IO.write_status(native2, replace(result, agent=""), at=NOW)
+    assert native2.store[LAST_KEY]
+    assert f"{LAST_KEY}:" not in " ".join(native2.store)
+
+
 def test_write_status_never_raises_on_a_broken_client():
     """状态键写失败不该影响已完成的决策（只告警）。"""
 
@@ -2179,6 +2528,30 @@ def test_write_status_never_raises_on_a_broken_client():
 
     result = RoundResult(status=R.STATUS_OK, day=DAY, slot=SLOT_0935)
     IO.write_status(_Broken(), result, at=NOW)  # 不抛就是通过
+
+
+def test_default_roster_stays_empty_until_the_roster_env_is_set(monkeypatch):
+    """未开名册 ⇒ ``()``（**单家路径**）：不能把全局那一家也包进名册。
+
+    包进来的后果不是「多跑一家」，而是**键形变了**：认领/done 键从
+    ``…:{schema}`` 变成 ``…:{schema}:{模型名}``，升级当天已跑过的槽在 done 键上
+    查无此人 ⇒ 补跑槽把出过决策的槽再跑一遍真钱（见 ``slot_keys``）。
+    """
+    for name in ("QM_DECISION_LLM_ROSTER", "QM_DECISION_LLM_MODEL"):
+        monkeypatch.delenv(name, raising=False)
+    assert IO.default_roster() == ()
+
+    monkeypatch.setenv(
+        "QM_DECISION_LLM_ROSTER",
+        '[{"model": "deepseek-v4-pro", "base_url_env": "U", "api_key_env": "K"},'
+        ' {"model": "deepseek-v4-flash", "base_url_env": "U", "api_key_env": "K"}]',
+    )
+    monkeypatch.setenv("U", "https://example.invalid/v1")
+    monkeypatch.setenv("K", "sk-x")
+    runs = IO.default_roster()
+    assert [r.agent for r in runs] == ["deepseek-v4-pro", "deepseek-v4-flash"]
+    # 每家的绑定指向自己那套配置（顺序即执行顺序；绑定延迟到真要问模型时才建客户端）
+    assert [r.load_llm().model for r in runs] == ["deepseek-v4-pro", "deepseek-v4-flash"]
 
 
 def test_default_round_deps_fills_every_injection_point(monkeypatch):

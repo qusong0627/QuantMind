@@ -34,6 +34,7 @@ done 键写入失败              照常返回本轮结果（决策已做、单�
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable, Sequence
 from dataclasses import replace
 from datetime import datetime
 from typing import Any
@@ -43,11 +44,13 @@ from backend.services.trade.services.decision_round_core import (
     DEFAULT_GRACE_MIN,
     DONE_TTL_S,
     STATUS_SKIPPED,
+    AgentRun,
     RoundDeps,
     RoundResult,
     RoundSlot,
     due_slots,
     round_id_for,
+    select_runs,
     slot_keys,
 )
 from backend.services.trade.services.decision_round_io import (
@@ -98,6 +101,30 @@ def _abandoned_claim_note(client: Any, done_key: str) -> str:
     )
 
 
+def _raiser(exc: BaseException) -> Callable[[], Any]:
+    """造一个「取绑定就抛」的路子（名册解析失败时那一家用）。"""
+
+    def _load() -> Any:
+        raise exc
+
+    return _load
+
+
+def _agent_runs(
+    deps: RoundDeps, runs: Sequence[AgentRun]
+) -> tuple[tuple[str, RoundDeps], ...]:
+    """本轮要跑的 ``(agent, 该家的 deps)`` 序列。
+
+    空名册 → ``(("", deps),)``：**单家路径逐字不变**（键不带家段，绑定照旧走
+    ``deps.load_llm``）。有名册时每家换掉 ``load_llm`` 一个注入点，其余（账户、
+    持仓、池、行情、执行段）**同一批**——多模型竞争的语义是「同一座账户、同一份
+    行情，几家模型各出主意」，不是「几套世界」。
+    """
+    if not runs:
+        return (("", deps),)
+    return tuple((r.agent, replace(deps, load_llm=r.load_llm)) for r in runs)
+
+
 async def round_tick(
     *,
     deps: RoundDeps | None = None,
@@ -106,19 +133,38 @@ async def round_tick(
     grace_min: int | None = None,
     force: bool = False,
     slot: RoundSlot | None = None,
+    agent: str = "",
 ) -> tuple[RoundResult, ...]:
-    """一次轮询：到点的槽位逐个「认领 → 跑 → 置 done → 写状态」。
+    """一次轮询：到点的槽位逐个、槽位内**逐家**「认领 → 跑 → 置 done → 写状态」。
 
     ``force``：**手动重跑**——抢占槽位认领（覆盖写）并忽略当日 done 键。只忽略 done
     键是不够的（认领键在 done 之前就把它挡住了，CLI 于是报「无到点槽位」）；覆盖写
     只能拦住之后到点的自动 tick，正在跑的那次靠执行段的订单幂等键兜底，见
     ``claim_slot``。``slot``：显式指定槽位（CLI ``--slot``），跳过时刻表与交易日
-    判定——操作员点名要跑就是意图，跳过只留日志。
+    判定——操作员点名要跑就是意图，跳过只留日志。``agent``：名册里只跑点名的那家
+    （CLI ``--agent``），**不在名册里 = 抛 ValueError**（静默跑全员会让「重跑一家」
+    变成三家都下单）。
+
+    名册（P2.9）在这层展开：一次 tick 只解析一次（轮询期间不换），每家一个
+    ``(槽位键, done 键)`` 与一个绑定。**一家跑不动不带停其余家**——某家欠费/改配置
+    是常态，让它拖停整槽等于「便宜的模型挂了，主力模型当天不决策」。
     """
     deps = deps or default_round_deps()
     now = now or deps.now()
     grace = DEFAULT_GRACE_MIN if grace_min is None else int(grace_min)
     day = now.date()
+
+    # 名册解析失败（env 写错一项）⇒ **一家都跑不动**：合成一个「取绑定就抛」的家，
+    # 让每一槽都如实记 llm_failed + 原始原因。绝不回落到单家三件套——全局 key 还
+    # 有效时那会变成「名册里另外两家静默消失、轮次照常下单」。
+    try:
+        runs = tuple((deps.roster or (lambda: ()))() or ())
+    except Exception as exc:  # noqa: BLE001 名册坏了 = 配置错，报出去而不是猜
+        logger.error(
+            "[DecisionRound] 名册解析失败，本轮按「一家都跑不动」处理: %s", exc
+        )
+        runs = (AgentRun(agent="", load_llm=_raiser(exc)),)
+    runs = select_runs(runs, agent)
 
     if slot is not None:
         due: tuple[RoundSlot, ...] = (slot,)
@@ -148,91 +194,100 @@ async def round_tick(
     try:
         out: list[RoundResult] = []
         for s in due:
-            slot_key, done_key = slot_keys(day, s)
-            # 抢占了别人的认领要在**这一轮的结果里**留痕：运营读状态键时若只看到
-            # 「ok」，就分不清这轮是自动跑的（一轮一天一次）还是人手点出来的
-            # （可以点很多次）——而后者决定了复盘时该不该按「计划内」看待这批单。
-            takeover = ""
-            if force:
+            for run_agent, run_deps in _agent_runs(deps, runs):
+                slot_key, done_key = slot_keys(day, s, run_agent)
+                # 抢占了别人的认领要在**这一轮的结果里**留痕：运营读状态键时若只看到
+                # 「ok」，就分不清这轮是自动跑的（一轮一天一次）还是人手点出来的
+                # （可以点很多次）——而后者决定了复盘时该不该按「计划内」看待这批单。
+                takeover = ""
+                if force:
+                    try:
+                        holder = client.get(slot_key)
+                    except Exception as exc:  # noqa: BLE001 读不到就当没人认领
+                        logger.debug("[DecisionRound] 认领键读失败: %s", exc)
+                        holder = None
+                    if holder:
+                        takeover = f"手动重跑：抢占已认领槽位（原认领={holder}）"
+                        logger.warning("[DecisionRound] %s: %s", slot_key, takeover)
                 try:
-                    holder = client.get(slot_key)
-                except Exception as exc:  # noqa: BLE001 读不到就当没人认领
-                    logger.debug("[DecisionRound] 认领键读失败: %s", exc)
-                    holder = None
-                if holder:
-                    takeover = f"手动重跑：抢占已认领槽位（原认领={holder}）"
-                    logger.warning("[DecisionRound] %s: %s", slot_key, takeover)
-            try:
-                claimed = claim_slot(client, slot_key, force=force)
-            except Exception as exc:  # noqa: BLE001 认领失败 = 不跑（不许当「已跑过」）
-                logger.error(
-                    "[DecisionRound] 槽位认领失败 %s: %s（本轮不跑）", slot_key, exc
-                )
-                continue
-            if not claimed:
-                abandoned = _abandoned_claim_note(client, done_key)
-                if abandoned:
-                    logger.warning(
-                        "[DecisionRound] 槽位已被认领 %s（跳过）：%s",
-                        slot_key,
-                        abandoned,
-                    )
-                else:
-                    logger.info("[DecisionRound] 槽位已被认领 %s（跳过）", slot_key)
-                continue
-            if s.catch_up and not force:
-                try:
-                    already = client.get(done_key)
-                except Exception as exc:  # noqa: BLE001 读不到 done 键 → 不猜、也不跑
-                    # 「补跑槽存在」的全部意义就是**当日还没出过这个 schema 的决策**；
-                    # 读不到 done 键 = 不知道出没出过，此时跑下去可能发出**第二批**建仓
-                    # 计划（补跑的 round_id 与主槽不同 ⇒ 订单幂等键不同，挡不住重复腿）。
-                    # 所以 fail-closed：本轮不跑、不置 done、放掉认领让窗口内还能再试。
-                    reason = (
-                        f"done 键读取失败（{type(exc).__name__}: {exc}）：无法确认当日"
-                        f"是否已有 {s.schema} 决策，补跑不做（修好后窗口内会重试，"
-                        "也可用 --force 显式重跑）"
-                    )
-                    logger.warning("[DecisionRound] %s: %s", slot_key, reason)
-                    skipped = RoundResult(
-                        status=STATUS_SKIPPED,
-                        day=day,
-                        slot=s,
-                        round_id=round_id_for(day, s),
-                        note=reason,
-                    )
-                    write_status(client, skipped, at=now)
-                    out.append(skipped)
-                    _release_claim(client, slot_key)
-                    continue
-                if already:
-                    skipped = RoundResult(
-                        status=STATUS_SKIPPED,
-                        day=day,
-                        slot=s,
-                        round_id=round_id_for(day, s),
-                        note=f"当日已出过 {s.schema} 决策（{done_key}）：补跑跳过",
-                    )
-                    write_status(client, skipped, at=now)
-                    out.append(skipped)
-                    continue
-            result = await run_once(s, deps=deps, now=now, day=day)
-            if takeover:
-                result = replace(
-                    result,
-                    note=f"{takeover}；{result.note}" if result.note else takeover,
-                )
-            if result.ok:
-                try:
-                    client.set(done_key, "1", ex=DONE_TTL_S)
-                except Exception as exc:  # noqa: BLE001 置键失败：下个补跑槽可能重来
+                    claimed = claim_slot(client, slot_key, force=force)
+                except Exception as exc:  # noqa: BLE001 认领失败 = 不跑（不许当「已跑过」）
                     logger.error(
-                        "[DecisionRound] done 键写入失败 %s（补跑槽可能重跑）: %s",
-                        done_key,
-                        exc,
+                        "[DecisionRound] 槽位认领失败 %s: %s（本轮不跑）", slot_key, exc
                     )
-            write_status(client, result, at=deps.now())
-            out.append(result)
+                    continue
+                if not claimed:
+                    abandoned = _abandoned_claim_note(client, done_key)
+                    if abandoned:
+                        logger.warning(
+                            "[DecisionRound] 槽位已被认领 %s（跳过）：%s",
+                            slot_key,
+                            abandoned,
+                        )
+                    else:
+                        logger.info("[DecisionRound] 槽位已被认领 %s（跳过）", slot_key)
+                    continue
+                if s.catch_up and not force:
+                    try:
+                        already = client.get(done_key)
+                    except Exception as exc:  # noqa: BLE001 读不到 done 键 → 不猜、也不跑
+                        # 「补跑槽存在」的全部意义就是**当日还没出过这个 schema 的
+                        # 决策**；读不到 done 键 = 不知道出没出过，此时跑下去可能发出
+                        # **第二批**建仓计划（补跑的 round_id 与主槽不同 ⇒ 订单幂等键
+                        # 不同，挡不住重复腿）。所以 fail-closed：本轮不跑、不置 done、
+                        # 放掉认领让窗口内还能再试。
+                        reason = (
+                            f"done 键读取失败（{type(exc).__name__}: {exc}）：无法确认"
+                            f"当日是否已有 {s.schema} 决策，补跑不做（修好后窗口内会"
+                            "重试，也可用 --force 显式重跑）"
+                        )
+                        logger.warning("[DecisionRound] %s: %s", slot_key, reason)
+                        skipped = RoundResult(
+                            status=STATUS_SKIPPED,
+                            day=day,
+                            slot=s,
+                            round_id=round_id_for(day, s),
+                            note=reason,
+                            agent=run_agent,
+                        )
+                        write_status(client, skipped, at=now)
+                        out.append(skipped)
+                        _release_claim(client, slot_key)
+                        continue
+                    if already:
+                        skipped = RoundResult(
+                            status=STATUS_SKIPPED,
+                            day=day,
+                            slot=s,
+                            round_id=round_id_for(day, s),
+                            note=f"当日已出过 {s.schema} 决策（{done_key}）：补跑跳过",
+                            agent=run_agent,
+                        )
+                        write_status(client, skipped, at=now)
+                        out.append(skipped)
+                        continue
+                result = await run_once(s, deps=run_deps, now=now, day=day)
+                if run_agent and result.agent != run_agent:
+                    # 绑定取不出来时（llm_failed 那条）``run_once`` 认不出家——而状态键
+                    # 正是按家分段的：不补这一下，某家欠费时 ``last:{agent}`` 一把都不
+                    # 会写，三家在 ``log`` 里只剩三行「llm_failed」，运营查不出是哪家。
+                    result = replace(result, agent=run_agent)
+                if takeover:
+                    result = replace(
+                        result,
+                        note=f"{takeover}；{result.note}" if result.note else takeover,
+                    )
+                if result.ok:
+                    try:
+                        client.set(done_key, "1", ex=DONE_TTL_S)
+                    except Exception as exc:  # noqa: BLE001 置键失败：下个补跑槽可能重来
+                        logger.error(
+                            "[DecisionRound] done 键写入失败 %s（补跑槽可能重跑）: %s",
+                            done_key,
+                            exc,
+                        )
+                write_status(client, result, at=deps.now())
+                out.append(result)
         return tuple(out)
     finally:
         if native is None and client is not None:

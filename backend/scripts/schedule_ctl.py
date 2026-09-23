@@ -239,7 +239,7 @@ def _run_advice_generator(date_str: str | None, force: bool) -> int:
     return _service_main()
 
 
-def _run_decision_round(date_str: str | None, force: bool) -> int:
+def _run_decision_round(date_str: str | None, force: bool, agent: str = "") -> int:
     """跑一次决策轮（P2.8）：默认按时刻表跑到点槽位，``--force`` 抢占槽位重跑。
 
     ``date_str`` 语义不适用（一轮的提示词、账户额度、池文件与槽位判定**全取当下**，
@@ -251,6 +251,10 @@ def _run_decision_round(date_str: str | None, force: bool) -> int:
     不是「重算一遍报告」，而是「抢占槽位、再问一次模型、可能再下一批单」（同槽同
     标的同向腿被幂等键挡住，模型给出新意图则照下）。所以它只在控制台的显式重跑
     路径上传下去，不影响 worker 的自动 tick。
+
+    ``agent``（P2.9）：名册下只重跑点名的那一家。校验在 runner 里（点名不在名册里
+    = rc 2）——**在这里放行等于把「补一家」变成「三家都下单」**，所以本任务只转手，
+    绝不吞掉这个参数。
     """
     if date_str:
         print(f"提示：decision_round 不接受日期参数（收到 {date_str}），按当下槽位执行")
@@ -260,7 +264,10 @@ def _run_decision_round(date_str: str | None, force: bool) -> int:
         main as _service_main,
     )
 
-    return _service_main(["--force"] if force else [])
+    argv = ["--force"] if force else []
+    if agent:
+        argv += ["--agent", agent]
+    return _service_main(argv)
 
 
 def _run_leverage_trim(date_str: str | None, force: bool) -> int:
@@ -344,6 +351,14 @@ _RERUN_DISPATCH: dict[str, Callable[[str | None, bool], int]] = {
 }
 
 
+#: 认 ``--agent`` 的任务（P2.9）：**只有这些**允许带 ``--agent`` 重跑。
+#: 其余任务没有「模型」这个维度，收到 ``--agent`` 一律 rc 2 —— 静默忽略是这里最坏的
+#: 形态（操作员以为只补了一家模型，实际整个任务重跑了一遍，而 decision_round 会下单）。
+_AGENT_RERUN: dict[str, Callable[[str | None, bool, str], int]] = {
+    "decision_round": _run_decision_round,
+}
+
+
 def _force_notice(job_key: str) -> str:
     """``--force`` 的提示文案：按任务说清"会发生什么"。
 
@@ -354,7 +369,8 @@ def _force_notice(job_key: str) -> str:
     if job_key == "decision_round":
         return (
             "提示：--force = 抢占已认领的槽位、忽略当日 done 键，"
-            "会真的再发一批新订单（同槽同标的同向腿被订单幂等键挡住）"
+            "会真的再发一批新订单（同槽同标的同向腿被订单幂等键挡住）；"
+            "只补名册里的一家加 --agent <模型名>（不给 = 名册全员各跑一轮）"
         )
     if job_key == "leverage_trim":
         return (
@@ -365,7 +381,7 @@ def _force_notice(job_key: str) -> str:
     return f"提示：--force 已传给 {job_key}；该任务的重跑本身不看这个参数"
 
 
-def cmd_run(job_key: str, date_str: str | None, force: bool) -> int:
+def cmd_run(job_key: str, date_str: str | None, force: bool, agent: str = "") -> int:
     spec = JOBS_BY_KEY.get(job_key)
     if spec is None:
         print(f"未知任务: {job_key}；可用: {', '.join(JOBS_BY_KEY)}", file=sys.stderr)
@@ -376,11 +392,23 @@ def cmd_run(job_key: str, date_str: str | None, force: bool) -> int:
             file=sys.stderr,
         )
         return 2
+    if agent and job_key not in _AGENT_RERUN:
+        print(
+            f"任务 {job_key} 没有模型维度：--agent 只对 "
+            f"{', '.join(sorted(_AGENT_RERUN))} 有效（其余任务静默忽略该参数 = 让"
+            "操作员以为只重跑了一家）",
+            file=sys.stderr,
+        )
+        return 2
     if force:
         print(_force_notice(job_key))
     print(
-        f"== 手动重跑 {spec.key}（{spec.name}）{f'date={date_str}' if date_str else ''} =="
+        f"== 手动重跑 {spec.key}（{spec.name}）"
+        f"{f'date={date_str}' if date_str else ''}"
+        f"{f' agent={agent}' if agent else ''} =="
     )
+    if agent:
+        return _AGENT_RERUN[job_key](date_str, force, agent)
     return _RERUN_DISPATCH[job_key](date_str, force)
 
 
@@ -400,11 +428,16 @@ def main() -> int:
         action="store_true",
         help="按任务而定的重跑语义（decision_round：抢占槽位、会真的再下单）",
     )
+    run_p.add_argument(
+        "--agent",
+        default="",
+        help="只重跑名册里的这一家模型（decision_round 专用，P2.9）",
+    )
     args = parser.parse_args()
 
     if args.cmd == "list":
         return cmd_list()
-    return cmd_run(args.job, args.date or None, args.force)
+    return cmd_run(args.job, args.date or None, args.force, args.agent)
 
 
 if __name__ == "__main__":

@@ -16,6 +16,12 @@
 ``QM_DECISION_LLM_MODEL``     模型名；它同时进系统提示词（见下）
 ======================  ==================================================
 
+**名册（P2.9，一个账户几家模型）**：``QM_DECISION_LLM_ROSTER`` 是一段 JSON 数组，
+一家一项；不配 = 上面那套单家配置（逐字同旧行为）。解析与校验见
+:func:`resolve_roster`。**agent 身份 = 归一后的模型名**（:func:`~backend.shared.
+order_contract.normalize_agent`）：它进槽位键、分账账本段、订单幂等键与审计行，
+所以名册按归一后的身份查重——同一家写两遍不是「跑两遍」，是把两家并成一本账。
+
 不做「``QM_DECISION_LLM_*`` 缺了就用 ``OPENAI_*`` 顶」的兜底：那会演成「以为在跑 A
 模型、账单上是 B 模型」。缺哪个直接 :class:`~backend.shared.decision.llm_call.LLMNotConfigured`
 点名哪个（**不打印 key 本身**）。
@@ -33,6 +39,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from collections.abc import Callable, Mapping
@@ -40,6 +47,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from backend.shared.decision.llm_call import LLMNotConfigured, normalize_usage
+from backend.shared.order_contract import normalize_agent
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +77,16 @@ _PLACEHOLDER_MARKERS = ("your-", "mock-", "xxx", "在此", "changeme", "<", ">")
 _ENV_BASE = "QM_DECISION_LLM_BASE_URL"
 _ENV_KEY = "QM_DECISION_LLM_API_KEY"
 _ENV_MODEL = "QM_DECISION_LLM_MODEL"
+_ENV_TIMEOUT = "QM_DECISION_LLM_TIMEOUT"
+_ENV_MAX_TOKENS = "QM_DECISION_LLM_MAX_TOKENS"
+_ENV_TEMPERATURE = "QM_DECISION_LLM_TEMPERATURE"
+#: 名册（P2.9）：一个账户几家模型。不配 = 单家三件套。
+ENV_ROSTER = "QM_DECISION_LLM_ROSTER"
+
+#: 名册上限（家）。一轮里**逐家串行**，每家最长 :data:`DEFAULT_TIMEOUT_S` 秒、
+#: 最坏两次调用：8 家 × 2 × 120s = 32min，还在 45min 宽限窗以内。再多家就会挤掉
+#: 排在后面的家，而「跑不完」的表现是**那家当天不决策**（账本上看起来像它没意见）。
+AGENT_LIMIT = 8
 
 #: 错误文案里响应体的截断上限（网关 200 + HTML 错误页是常态，别把整页塞进日志）。
 _BODY_LIMIT = 400
@@ -98,6 +116,19 @@ class DecisionLLMConfig:
         return SYSTEM_PROMPT_TEMPLATE.format(model=self.model)
 
 
+def _tuning(src: Mapping[str, str]) -> tuple[float, int, float]:
+    """全局调参三件（``timeout`` / ``max_tokens`` / ``temperature``）。
+
+    单家与名册**共用这一处**：两家各写一份解析，迟早会出现「单家改了、名册没改」
+    这类只在一半路径上生效的差异。值不合法照旧抛 ``ValueError``（配置错，不是运行态）。
+    """
+    return (
+        float(src.get(_ENV_TIMEOUT, "") or DEFAULT_TIMEOUT_S),
+        int(src.get(_ENV_MAX_TOKENS, "") or DEFAULT_MAX_TOKENS),
+        float(src.get(_ENV_TEMPERATURE, "") or DEFAULT_TEMPERATURE),
+    )
+
+
 def resolve_config(env: Mapping[str, str] | None = None) -> DecisionLLMConfig:
     """读三个环境变量 → :class:`DecisionLLMConfig`；缺/占位 → :class:`LLMNotConfigured`。
 
@@ -115,16 +146,214 @@ def resolve_config(env: Mapping[str, str] | None = None) -> DecisionLLMConfig:
             f"决策 LLM 未配置：{', '.join(missing)} 为空或仍是占位符"
             f"（需要 {_ENV_BASE} / {_ENV_KEY} / {_ENV_MODEL} 三件套，见模块 docstring）"
         )
+    timeout, max_tokens, temperature = _tuning(src)
     return DecisionLLMConfig(
         base_url=src[_ENV_BASE].strip(),
         api_key=src[_ENV_KEY].strip(),
         model=src[_ENV_MODEL].strip(),
-        timeout=float(src.get("QM_DECISION_LLM_TIMEOUT", "") or DEFAULT_TIMEOUT_S),
-        max_tokens=int(src.get("QM_DECISION_LLM_MAX_TOKENS", "") or DEFAULT_MAX_TOKENS),
-        temperature=float(
-            src.get("QM_DECISION_LLM_TEMPERATURE", "") or DEFAULT_TEMPERATURE
-        ),
+        timeout=timeout,
+        max_tokens=max_tokens,
+        temperature=temperature,
     )
+
+
+def _entry_text(entry: Mapping[str, Any], key: str) -> str:
+    """项里的字符串字段（去空白）；缺席/非字符串 → ``""``（= 没给）。"""
+    raw = entry.get(key)
+    return raw.strip() if isinstance(raw, str) else ""
+
+
+def _entry_credential(
+    entry: Mapping[str, Any],
+    field: str,
+    *,
+    index: int,
+    model: str,
+    src: Mapping[str, str],
+    global_value: str | None,
+) -> str:
+    """一家模型的 ``base_url`` / ``api_key``：**变量名 > 字面值 > 全局三件套**。
+
+    中间那层（变量名）不是洁癖：名册串会被打进日志、``docker inspect`` 与工单，
+    key 只能以**变量名**的形式出现在里面（``api_key_env``）——隔壁 ``${GLM_API_KEY}``
+    那套间接写法同源。字面值仍允许（本机调试），但不推荐。
+    """
+    name = _entry_text(entry, f"{field}_env")
+    if name:
+        value = str(src.get(name, "")).strip()
+        if _looks_like_placeholder(value):
+            raise LLMNotConfigured(
+                f"{ENV_ROSTER} 第 {index + 1} 项（{model}）的 {field}_env 指向 {name}，"
+                f"但 {name} 没配或仍是占位符"
+            )
+        return value
+    literal = _entry_text(entry, field)
+    if literal:
+        if _looks_like_placeholder(literal):
+            raise LLMNotConfigured(
+                f"{ENV_ROSTER} 第 {index + 1} 项（{model}）的 {field} 是占位符"
+            )
+        return literal
+    if global_value is None:
+        # 回落全局但全局没配：抛**单家那条**报错（同一故障不该有两套排查话术）
+        raise _global_error(src, field)
+    return global_value
+
+
+def _global_error(src: Mapping[str, str], field: str) -> LLMNotConfigured:
+    """全局三件套缺件时的报错（逐字由 :func:`resolve_config` 造出来）。"""
+    try:
+        resolve_config(src)
+    except LLMNotConfigured as exc:
+        return exc
+    # 全局是好的：能走到这里说明调用点判错了「全局缺不缺」，如实说清而不是编一句
+    return LLMNotConfigured(
+        f"{ENV_ROSTER} 的某一项缺 {field}，且回落全局也取不到值（见模块 docstring）"
+    )
+
+
+def _entry_tuning(
+    entry: Mapping[str, Any],
+    *,
+    index: int,
+    model: str,
+    fallback: tuple[float, int, float],
+) -> tuple[float, int, float]:
+    """一家模型的调用参数：项里给了就用项里的，否则用全局那套。"""
+    out: list[Any] = []
+    for key, cast, base in (
+        ("timeout", float, fallback[0]),
+        ("max_tokens", int, fallback[1]),
+        ("temperature", float, fallback[2]),
+    ):
+        raw = entry.get(key)
+        if raw is None or raw == "":
+            out.append(base)
+            continue
+        try:
+            out.append(cast(raw))
+        except (TypeError, ValueError):
+            raise LLMNotConfigured(
+                f"{ENV_ROSTER} 第 {index + 1} 项（{model}）的 {key}={raw!r} 不是数字"
+            ) from None
+    return float(out[0]), int(out[1]), float(out[2])
+
+
+def resolve_roster(
+    env: Mapping[str, str] | None = None,
+) -> tuple[DecisionLLMConfig, ...]:
+    """``QM_DECISION_LLM_ROSTER`` → 每家一份 :class:`DecisionLLMConfig`（**顺序即执行顺序**）。
+
+    不配名册 = ``(resolve_config(),)``：单家路径逐字不变。配了就是名册路径，字段：
+
+    ==================  ====================================================
+    ``model``           **必填**。模型名，同时是这个 agent 的**身份**（见下）
+    ``base_url_env``   变量名，指向这家用的端点（例 ``GLM_API_BASE``）
+    ``api_key_env``    变量名，指向这家用的 key（例 ``GLM_API_KEY``）
+    ``base_url``/``api_key``  字面值（本机调试用；key 会进名册串，不推荐）
+    ``timeout``/``max_tokens``/``temperature``  逐家调参，缺省用全局那套
+    ==================  ====================================================
+
+    **agent 身份 = ``normalize_agent(model)``**：它进槽位键（认领/done）、分账账本段、
+    订单幂等键段与审计行。本函数按**归一后**的身份查重并要求唯一——两家写同一个身份
+    不是「跑两遍」，是把两家的持仓并成一本账（各自的虚拟现金与名义持仓会互相吃掉）。
+    归一后仍然不同、但模型名不同的两家，是两本账，天经地义。
+
+    **错误一律 :class:`LLMNotConfigured`**（名册是配置，坏了就是没配好）：要点名的
+    东西三样——第几项、哪家模型、哪个变量名；**绝不打印变量值**（异常会进日志、
+    状态键与审计表）。
+    """
+    src = os.environ if env is None else env
+    raw = str(src.get(ENV_ROSTER, "")).strip()
+    if not raw:
+        return (resolve_config(src),)
+
+    try:
+        doc = json.loads(raw)
+    except ValueError as exc:
+        raise LLMNotConfigured(
+            f"{ENV_ROSTER} 不是合法 JSON（{type(exc).__name__}）："
+            "它要么不配（走单家三件套），要么是一段 JSON 数组"
+        ) from None
+    if not isinstance(doc, list):
+        raise LLMNotConfigured(
+            f"{ENV_ROSTER} 不是 JSON 数组（收到 {type(doc).__name__}）："
+            '一家一项，例 [{"model": "deepseek-v4-pro"}]'
+        )
+    if not doc:
+        raise LLMNotConfigured(
+            f"{ENV_ROSTER} 是空名册：一轮都不会跑。它是一条**没有痕迹**的停机"
+            "（心跳照写、状态键照写空结果）——要停决策轮请关 QM_DECISION_ROUND_ENABLED"
+        )
+    if len(doc) > AGENT_LIMIT:
+        raise LLMNotConfigured(
+            f"{ENV_ROSTER} 配了 {len(doc)} 家，超过上限 {AGENT_LIMIT} 家："
+            "一轮里逐家串行跑，排在后面的家会跑不完（表现为那家当天不决策）"
+        )
+
+    # 全局三件套只在**真被回落到**时才要求配齐：整段名册自带端点与 key 时，
+    # 全局那三个变量一个都不需要（否则「换供应商」还得养一套用不上的假配置）。
+    try:
+        global_cfg: DecisionLLMConfig | None = resolve_config(src)
+    except LLMNotConfigured:
+        global_cfg = None
+    tuning = _tuning(src)
+    fallback = (
+        (global_cfg.timeout, global_cfg.max_tokens, global_cfg.temperature)
+        if global_cfg is not None
+        else (tuning[0], tuning[1], tuning[2])
+    )
+
+    out: list[DecisionLLMConfig] = []
+    seen: dict[str, int] = {}
+    for index, entry in enumerate(doc):
+        if not isinstance(entry, Mapping):
+            raise LLMNotConfigured(
+                f"{ENV_ROSTER} 第 {index + 1} 项不是对象（收到 "
+                f'{type(entry).__name__}）：一家一项，形如 {{"model": "…"}}'
+            )
+        model = _entry_text(entry, "model")
+        if _looks_like_placeholder(model):
+            raise LLMNotConfigured(
+                f"{ENV_ROSTER} 第 {index + 1} 项缺 model（或仍是占位符）："
+                "模型名是必填的，它同时是这个 agent 的身份"
+            )
+        agent = normalize_agent(model)
+        if agent in seen:
+            raise LLMNotConfigured(
+                f"{ENV_ROSTER} 第 {index + 1} 项（{model}）与第 {seen[agent]} 项归一后"
+                f"重名（agent={agent}）：agent 进分账账本段/幂等键/审计行，"
+                "同名会把两家并成一本账"
+            )
+        seen[agent] = index + 1
+        timeout, max_tokens, temperature = _entry_tuning(
+            entry, index=index, model=model, fallback=fallback
+        )
+        out.append(
+            DecisionLLMConfig(
+                base_url=_entry_credential(
+                    entry,
+                    "base_url",
+                    index=index,
+                    model=model,
+                    src=src,
+                    global_value=global_cfg.base_url if global_cfg else None,
+                ),
+                api_key=_entry_credential(
+                    entry,
+                    "api_key",
+                    index=index,
+                    model=model,
+                    src=src,
+                    global_value=global_cfg.api_key if global_cfg else None,
+                ),
+                model=model,
+                timeout=timeout,
+                max_tokens=max_tokens,
+                temperature=temperature,
+            )
+        )
+    return tuple(out)
 
 
 def _post(

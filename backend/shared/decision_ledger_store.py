@@ -81,14 +81,25 @@ _NOTE_LIMIT = 512
 _REASON_LIMIT = 2000
 
 
-def decision_id(round_id: str, index: int, code: str, action: str) -> str:
+def decision_id(
+    round_id: str, index: int, code: str, action: str, agent: str = ""
+) -> str:
     """**审计身份**：一轮里一条决策一个 id（重跑同内容幂等，内容变了就是新行）。
 
     为什么不用隔壁的 ``make_id``（agent|日|code|动作）当主键：那个键**每天只留
     第一条**，盘中改主意的第二次决策会撞键——撞键在本表意味着被覆盖或丢失，
     而这正是审计要回答的问题。隔壁的去重口径改由 :func:`pool_key` 承载。
+
+    ``agent``（P2.9）**必须给**「一轮里有多家模型」的调用点：一轮 = 一个槽位
+    （:func:`~backend.services.trade.services.decision_round_core.round_id_for`），
+    两家模型同槽同码同动作、序号又都是 0，不带上 agent 就是**同一个主键**——
+    后写的那家把先写的覆盖掉，而本表是「模型当时说了什么」的唯一出处。空 agent
+    **逐字保留历史公式**（升级不改已入表行的 id；导入行 :func:`records_from_pool`
+    另有 agent 维度的轮号，故不给）。
     """
     raw = f"{round_id}|{index}|{code}|{action}"
+    if agent:
+        raw = f"{raw}|{agent}"
     return hashlib.sha1(raw.encode()).hexdigest()[:ID_HEX_LEN]
 
 
@@ -247,7 +258,7 @@ def build_records(
         notes = res.get("notes") or ()
         records.append(
             DecisionRecord(
-                id=decision_id(round_id, i, code, action),
+                id=decision_id(round_id, i, code, action, agent),
                 pool_key=pool_key(agent, day, code, action),
                 round_id=round_id,
                 tenant_id=tenant_id or "default",
@@ -360,6 +371,9 @@ def records_from_pool(
         ctx = r.get("pool_ctx")
         out.append(
             DecisionRecord(
+                # **不带 agent**（与决策轮那条相反）：这里的轮号 ``qt-pool:{隔壁 id}``
+                # 本身就是隔壁按 (agent|日|code|动作) 算的，已含 agent 维度；再叠一层
+                # 只会让「重跑导入」算出新 id ⇒ 老行留下、新行插进，导入不再幂等。
                 id=decision_id(round_id, 0, code, action),
                 pool_key=pool_key(agent, day, code, action),
                 round_id=round_id,

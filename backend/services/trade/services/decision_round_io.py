@@ -8,6 +8,9 @@
 Redis 客户端**两套并存**且分工明确（理由见 ``decision_round`` 模块 docstring）：
 认领/去重/状态键走本模块的 :func:`native_redis_client`（原生，异常可见），
 规则表/档位走 ``trade_shared.deps.get_redis()``（包装，内部自带解包）。
+
+名册（P2.9）：:func:`default_roster` 只在 ``QM_DECISION_LLM_ROSTER`` **显式开了**时
+逐家返回，未开返回空 ⇒ 走单家路径、键形与 P2.8 逐字一致（升级零风险，见该函数）。
 """
 
 from __future__ import annotations
@@ -30,6 +33,7 @@ from backend.services.trade.services.decision_round_core import (
     TENANT_ID,
     AccountRead,
     AgentLedgerRead,
+    AgentRun,
     ExclusionRead,
     LLMBinding,
     RoundDeps,
@@ -219,17 +223,51 @@ def load_excluded_symbols() -> ExclusionRead:
     )
 
 
-def _default_llm_binding() -> LLMBinding:
-    """env → (模型名, 调用器)。未配置抛 ``LLMNotConfigured``（调用点接住转状态）。"""
+def _binding_for(config: Any) -> LLMBinding:
+    """一套已解析的 LLM 配置 → (模型名, 调用器)。构造本身不发请求。"""
     from backend.shared.decision.llm_call import decide_with_retry
-    from backend.shared.decision_llm_client import make_caller, resolve_config
+    from backend.shared.decision_llm_client import make_caller
 
-    config = resolve_config()
     caller = make_caller(config=config)
     return LLMBinding(
         model=config.model,
         decide=lambda prompt, schema: decide_with_retry(caller, prompt, schema=schema),
     )
+
+
+def _default_llm_binding() -> LLMBinding:
+    """env → (模型名, 调用器)。未配置抛 ``LLMNotConfigured``（调用点接住转状态）。"""
+    from backend.shared.decision_llm_client import resolve_config
+
+    return _binding_for(resolve_config())
+
+
+def _run_for(config: Any) -> AgentRun:
+    """一套配置 → 名册里的一家（身份 = 归一后的模型名）。"""
+    from backend.shared.order_contract import normalize_agent
+
+    return AgentRun(
+        agent=normalize_agent(config.model),
+        load_llm=lambda: _binding_for(config),
+    )
+
+
+def default_roster() -> tuple[AgentRun, ...]:
+    """名册（P2.9）：``QM_DECISION_LLM_ROSTER`` 未开时**返回空**（= 单家路径）。
+
+    返回空而不是「把全局那一套包成一家」：后者会让键形从 ``…:{schema}`` 变成
+    ``…:{schema}:{模型名}``，升级当天已跑过的槽在 done 键上查无此人 ⇒ 补跑槽把出过
+    决策的槽**再跑一遍真钱**（见 ``slot_keys``）。**只有显式开了名册**才走逐家键。
+
+    ``LLMNotConfigured`` **不接住**：名册写错一项时，编排层要按「一家都跑不动」如实
+    记录每一槽的失败原因（那层合成一个抛错的家）；在这里吞掉只剩单家三家变一家，
+    正是迁移计划里「迁完只剩一个模型」那条警告的形态。
+    """
+    from backend.shared.decision_llm_client import ENV_ROSTER, resolve_roster
+
+    if not str(os.getenv(ENV_ROSTER) or "").strip():
+        return ()
+    return tuple(_run_for(config) for config in resolve_roster())
 
 
 def default_round_deps() -> RoundDeps:
@@ -295,6 +333,7 @@ def default_round_deps() -> RoundDeps:
         read_snaps=read_snapshots,
         load_tier=lambda: load_tier(get_redis()),
         load_llm=_default_llm_binding,
+        roster=default_roster,
         open_db=lambda: get_session(read_only=False),
         run_exec=_run_exec,
         write_watch=_write_watch,
@@ -351,12 +390,20 @@ def claim_slot(native: Any, key: str, *, force: bool = False) -> bool:
 def write_status(
     native: Any, result: RoundResult, *, at: datetime | None = None
 ) -> None:
-    """状态键：``last``（最近一轮）+ ``log``（LPUSH 截断）。失败只告警不抛。"""
+    """状态键：``last`` + ``last:{agent}``（名册下按家）+ ``log``（LPUSH 截断）。
+
+    不带家段的那把保留给既有读者（前端/C07 心跳），语义变成「**最后完成的那一家**」；
+    名册下问「pro 那家跑得怎么样」得有一把不会被别家覆盖的键，故另写按家的那把。
+    空 ``agent``（单家、名册解析失败那家）**不写** ``last:`` 空段键——空段的键没人
+    读得到，只会变成 Redis 里的孤儿。失败只告警不抛。
+    """
     payload = json.dumps(
         result.as_status(at=at or datetime.now(CST)), ensure_ascii=False, default=str
     )
     try:
         native.set(LAST_KEY, payload, ex=LAST_TTL_S)
+        if result.agent:
+            native.set(f"{LAST_KEY}:{result.agent}", payload, ex=LAST_TTL_S)
         native.lpush(LOG_KEY, payload)
         native.ltrim(LOG_KEY, 0, LOG_KEEP - 1)
     except Exception as exc:  # noqa: BLE001 状态写失败不该影响已完成的决策

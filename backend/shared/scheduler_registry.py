@@ -202,9 +202,11 @@ JOBS: tuple[JobSpec, ...] = (
         "decision_round", "决策轮（P2.8）", "worker", "trade",
         "交易日 11 个槽位（08:30~14:45，30s 轮询、45min 补跑窗）",
         "QM_DECISION_ROUND_ENABLED", False, 300,
-        "python backend/scripts/schedule_ctl.py run decision_round --force",
+        "python backend/scripts/schedule_ctl.py run decision_round --force "
+        "[--agent <模型名>]",
         "池 → 闸门筛 → LLM 决策 → 执行段（下单/守护规则）→ 审计表；真钱生产者，默认关。"
-        "重跑 = 抢占槽位再跑一轮 = 会真的再下单（同槽同向同标的被幂等键挡住）",
+        "重跑 = 抢占槽位再跑一轮 = 会真的再下单（同槽同向同标的被幂等键挡住）；"
+        "开了名册（QM_DECISION_LLM_ROSTER）时一家模型一轮，只补一家加 --agent",
     ),
     # P2.6 减仓执行器：档位表 ``leverage_trim_to`` 的消费者（闸门的 ``l1.leverage_cap``
     # 只拒买、不压仓）。开关同样走 ``env_flags.env_flag``（**只有 "true" 生效**）。

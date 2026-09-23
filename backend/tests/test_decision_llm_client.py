@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,7 @@ import pytest
 from backend.shared.decision.contract import SCHEMA_REBALANCE
 from backend.shared.decision.llm_call import LLMNotConfigured, decide_with_retry
 from backend.shared.decision_llm_client import (
+    AGENT_LIMIT,
     DEFAULT_MAX_TOKENS,
     DEFAULT_TEMPERATURE,
     DEFAULT_TIMEOUT_S,
@@ -25,6 +27,7 @@ from backend.shared.decision_llm_client import (
     call_with_usage,
     make_caller,
     resolve_config,
+    resolve_roster,
 )
 
 GOLDEN = Path(__file__).parent / "fixtures" / "decision_prompt_golden.json"
@@ -38,6 +41,7 @@ _ENV_NAMES = (
     "QM_DECISION_LLM_TIMEOUT",
     "QM_DECISION_LLM_MAX_TOKENS",
     "QM_DECISION_LLM_TEMPERATURE",
+    "QM_DECISION_LLM_ROSTER",
 )
 
 ENV = {
@@ -220,6 +224,225 @@ def test_placeholders_count_as_not_configured(
 def test_config_without_env_is_not_configured(clean_env) -> None:
     with pytest.raises(LLMNotConfigured):
         resolve_config()
+
+
+# ---------------------------------------------------------------------------
+# 名册（P2.9）：一个账户几家模型
+# ---------------------------------------------------------------------------
+def _roster(monkeypatch, *entries: dict, env: dict | None = None) -> None:
+    """名册进 env（与生产同一条路：``QM_DECISION_LLM_ROSTER`` 是一段 JSON）。"""
+    for k, v in (env or ENV).items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.setenv(
+        "QM_DECISION_LLM_ROSTER", json.dumps(list(entries), ensure_ascii=False)
+    )
+
+
+def test_roster_absent_is_exactly_the_single_global_config(
+    clean_env, monkeypatch
+) -> None:
+    """没配名册 = 一家（今天的行为）：单家路径与名册路径**走同一份配置**。"""
+    for k, v in ENV.items():
+        monkeypatch.setenv(k, v)
+    roster = resolve_roster()
+    assert roster == (resolve_config(),)
+
+
+def test_roster_absent_and_unconfigured_says_what_single_config_says(
+    clean_env, monkeypatch
+) -> None:
+    """三件套没配时的报错**逐字**与单家一致——否则同一故障有两套排查话术。"""
+    with pytest.raises(LLMNotConfigured) as single:
+        resolve_config()
+    with pytest.raises(LLMNotConfigured) as roster:
+        resolve_roster()
+    assert str(roster.value) == str(single.value)
+
+
+def test_roster_shares_the_global_endpoint_and_varies_the_model(
+    clean_env, monkeypatch
+) -> None:
+    """隔壁的形态：一个端点 + 一个 key，几家模型各跑各的（deepseek flash/pro）。"""
+    _roster(
+        monkeypatch,
+        {"model": "deepseek-v4-flash"},
+        {"model": "deepseek-v4-pro"},
+        {"model": "deepseek-v4-mini"},
+    )
+    roster = resolve_roster()
+    assert [c.model for c in roster] == [
+        "deepseek-v4-flash",
+        "deepseek-v4-pro",
+        "deepseek-v4-mini",
+    ]
+    assert {c.base_url for c in roster} == {ENV["QM_DECISION_LLM_BASE_URL"]}
+    assert {c.api_key for c in roster} == {ENV["QM_DECISION_LLM_API_KEY"]}
+
+
+def test_roster_entry_points_at_its_own_env_vars(clean_env, monkeypatch) -> None:
+    """换供应商的形态（隔壁的 GLM 那家）：端点与 key 各自指一个变量名。
+
+    名册串里**没有 key 材料**——它会被打进日志、docker inspect 与工单，
+    所以 key 只能以变量名的形式出现（``api_key_env``）。
+    """
+    _roster(
+        monkeypatch,
+        {"model": "deepseek-v4-pro"},
+        {
+            "model": "glm-5.3-flash",
+            "base_url_env": "GLM_API_BASE",
+            "api_key_env": "GLM_API_KEY",
+        },
+    )
+    monkeypatch.setenv("GLM_API_BASE", "https://open.bigmodel.cn/api/paas/v4")
+    monkeypatch.setenv("GLM_API_KEY", "glm-not-a-real-key")
+    roster = resolve_roster()
+    flash = roster[1]
+    assert flash.base_url == "https://open.bigmodel.cn/api/paas/v4"
+    assert flash.api_key == "glm-not-a-real-key"
+    # 名字指对了 ≠ 值进过名册串
+    assert "glm-not-a-real-key" not in os.environ["QM_DECISION_LLM_ROSTER"]
+
+
+def test_roster_entry_overrides_call_parameters(clean_env, monkeypatch) -> None:
+    """逐家调参：便宜的那家可以更小的 max_tokens / 更低的温度。"""
+    _roster(
+        monkeypatch,
+        {"model": "deepseek-v4-pro"},
+        {
+            "model": "deepseek-v4-mini",
+            "timeout": 30,
+            "max_tokens": 800,
+            "temperature": 0,
+        },
+    )
+    pro, mini = resolve_roster()
+    assert (pro.timeout, pro.max_tokens, pro.temperature) == (
+        DEFAULT_TIMEOUT_S,
+        DEFAULT_MAX_TOKENS,
+        DEFAULT_TEMPERATURE,
+    )
+    assert (mini.timeout, mini.max_tokens, mini.temperature) == (30.0, 800, 0.0)
+
+
+@pytest.mark.parametrize(
+    "models",
+    [
+        ("deepseek-v4-pro", "deepseek-v4-pro"),  # 一模一样
+        ("  deepseek-v4-pro  ", "deepseek-v4-pro"),  # 去空白后撞上
+        # 归一化截断到 64 字符之后才撞上：**必须先归一后比较**
+        ("m" * 64 + "-alpha", "m" * 64 + "-beta"),
+    ],
+)
+def test_roster_refuses_duplicate_agents_after_normalization(
+    clean_env, monkeypatch, models: tuple[str, str]
+) -> None:
+    """重名 = 两家并成一本账（agent 是分账账本/幂等键/审计行的同一个键）。
+
+    这是**拒绝**而不是「去重保留先到」：静默去掉一家，运营看到的是「写了三家、
+    跑了一家」，而账单和账本上分不出是哪一家。
+    """
+    _roster(monkeypatch, *({"model": m} for m in models))
+    with pytest.raises(LLMNotConfigured) as exc:
+        resolve_roster()
+    assert "重名" in str(exc.value) or "重复" in str(exc.value), exc.value
+
+
+def test_roster_absent_single_agent_is_not_a_duplicate(clean_env, monkeypatch) -> None:
+    """单家路径不该被自己那条重名检查误伤（走的是另一条分支）。"""
+    for k, v in ENV.items():
+        monkeypatch.setenv(k, v)
+    assert len(resolve_roster()) == 1
+
+
+def test_roster_refuses_an_empty_list(clean_env, monkeypatch) -> None:
+    """空名册 = 一轮都不跑。要停就关 ``QM_DECISION_ROUND_ENABLED``——
+    空名册停摆是一条**没有痕迹**的停机（心跳照写、状态键照写空结果）。"""
+    _roster(monkeypatch)
+    with pytest.raises(LLMNotConfigured) as exc:
+        resolve_roster()
+    assert "空" in str(exc.value)
+    assert "QM_DECISION_ROUND_ENABLED" in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        '{"model": "x"}',  # 不是数组
+        '[{"model": "x"}, "deepseek-v4-pro"]',  # 项不是对象
+        "[{}]",  # 缺 model
+        '[{"model": "   "}]',  # 空 model
+        '[{"model": "your-model-here"}]',  # 占位符
+        '[{"model": "x", "api_key": "your-key"}]',  # 写死的 key 是占位符
+        "not json at all",
+    ],
+)
+def test_roster_refuses_malformed_entries_by_index(
+    clean_env, monkeypatch, raw: str
+) -> None:
+    """坏名册**点名第几项**：三家里有一家写错时，重试成本全在这句话上。"""
+    for k, v in ENV.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.setenv("QM_DECISION_LLM_ROSTER", raw)
+    with pytest.raises(LLMNotConfigured) as exc:
+        resolve_roster()
+    assert "QM_DECISION_LLM_ROSTER" in str(exc.value)
+    assert ENV["QM_DECISION_LLM_API_KEY"] not in str(exc.value)
+
+
+def test_roster_names_the_entry_that_misses_its_own_env_var(
+    clean_env, monkeypatch
+) -> None:
+    """指了 ``GLM_API_KEY`` 但那个变量没配：报错必须说得出是哪一家、哪个变量。"""
+    _roster(
+        monkeypatch,
+        {"model": "deepseek-v4-pro"},
+        {"model": "glm-5.3-flash", "api_key_env": "GLM_API_KEY"},
+    )
+    monkeypatch.delenv("GLM_API_KEY", raising=False)
+    with pytest.raises(LLMNotConfigured) as exc:
+        resolve_roster()
+    msg = str(exc.value)
+    assert "GLM_API_KEY" in msg and "glm-5.3-flash" in msg
+
+
+def test_roster_is_capped(clean_env, monkeypatch) -> None:
+    """上限不是洁癖：一轮里 N 家串行跑，每家最长两分钟级——名册无上限时
+    写错一行就变成「宽限窗里跑不完」，而跑不完的表现是**后面的家当天不决策**。"""
+    _roster(monkeypatch, *({"model": f"m{i}"} for i in range(AGENT_LIMIT + 1)))
+    with pytest.raises(LLMNotConfigured) as exc:
+        resolve_roster()
+    assert str(AGENT_LIMIT) in str(exc.value)
+
+
+def test_roster_never_echoes_key_material(clean_env, monkeypatch) -> None:
+    """坏名册的报错里不许出现 key：异常会进日志、状态键与审计表。"""
+    secret = "sk-" + "F" * 32
+    for k, v in ENV.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.setenv("QM_DECISION_LLM_API_KEY", secret)
+    monkeypatch.setenv(
+        "QM_DECISION_LLM_ROSTER", f'[{{"model": "a", "api_key": "{secret}"}}, 7]'
+    )
+    with pytest.raises(LLMNotConfigured) as exc:
+        resolve_roster()
+    assert secret not in str(exc.value)
+
+
+def test_roster_entry_may_write_a_literal_key_for_local_debugging(
+    clean_env, monkeypatch
+) -> None:
+    """写死 key 是**允许**的（本机调试），但得知道它会进名册串——故不推荐。"""
+    for k, v in ENV.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.setenv(
+        "QM_DECISION_LLM_ROSTER",
+        '[{"model": "local", "base_url": "http://127.0.0.1:8001/v1", '
+        '"api_key": "local-dev-key"}]',
+    )
+    (cfg,) = resolve_roster()
+    assert cfg.base_url == "http://127.0.0.1:8001/v1"
+    assert cfg.api_key == "local-dev-key"
 
 
 def test_chat_url_appends_verbatim() -> None:

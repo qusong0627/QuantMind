@@ -26,6 +26,7 @@ from sqlalchemy.dialects import postgresql
 from backend.shared.decision.contract import SCHEMA_INTRADAY, parse_decisions
 from backend.shared.decision.watch_map import plan_watch
 from backend.shared.decision_ledger_store import (
+    ID_HEX_LEN,
     KIND_BULLISH,
     KIND_NONE,
     KIND_POSITION,
@@ -127,6 +128,48 @@ class TestIdentity:
         assert a != decision_id("r1", 1, "SH600519", "watch"), "同轮不同序号必须不同 id"
         assert a != decision_id("r1", 0, "SZ000001", "watch")
         assert a != decision_id("r1", 0, "SH600519", "sell")
+
+    def test_decision_id_separates_agents_in_one_round(self) -> None:
+        """同轮同序号同码同动作、**两家模型**：主键必须不同。
+
+        主键撞上不是「多一行少一行」：``id`` 是 ``qm_decision_ledger`` 的主键，
+        两家写同一行 = 一家的决策被另一家**覆盖**，而审计表是「模型当时说了什么」
+        的唯一出处。多模型竞争下这一撞是必然事件（两家都盯着同一只票）。
+        """
+        pro = decision_id("rnd-20260924-0935", 0, "SH600519", "buy", "deepseek-v4-pro")
+        flash = decision_id(
+            "rnd-20260924-0935", 0, "SH600519", "buy", "deepseek-v4-flash"
+        )
+        assert pro != flash
+        assert pro == decision_id(
+            "rnd-20260924-0935", 0, "SH600519", "buy", "deepseek-v4-pro"
+        ), "同家同输入必须同 id（重跑幂等）"
+
+    def test_decision_id_without_agent_keeps_the_historical_formula(self) -> None:
+        """空 agent = 历史口径：**已入表的行 id 逐字不变**（升级不改旧账）。"""
+        raw = "rnd-20260924-0935|0|SH600519|buy"
+        assert (
+            decision_id("rnd-20260924-0935", 0, "SH600519", "buy")
+            == (hashlib.sha1(raw.encode()).hexdigest()[:ID_HEX_LEN])
+        )
+        assert decision_id("r1", 0, "SH600519", "watch", "") == decision_id(
+            "r1", 0, "SH600519", "watch"
+        )
+
+    def test_build_records_carries_the_agent_into_the_id(self) -> None:
+        """一轮两家模型各建一次记录：id 分家（由 ``build_records`` 真正传下去）。"""
+        decisions = _rows({"action": "buy", "code": "SH600519"})
+        ids = {
+            agent: build_records(
+                decisions,
+                round_id="rnd-20260924-0935",
+                agent=agent,
+                trade_date=date(2026, 9, 24),
+                decided_at=_TS,
+            )[0].id
+            for agent in ("deepseek-v4-pro", "deepseek-v4-flash")
+        }
+        assert ids["deepseek-v4-pro"] != ids["deepseek-v4-flash"]
 
     def test_decision_id_is_not_the_pool_key(self) -> None:
         """两个身份键**不能相等**：相等就等于「每天只留第一条」，审计当场失效。"""

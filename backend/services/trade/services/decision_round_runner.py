@@ -92,10 +92,11 @@ async def run_decision_round_worker() -> None:
             results = await round_tick(grace_min=_grace_min())
             for r in results:
                 logger.info(
-                    "[DecisionRound] %s %s status=%s decisions=%d legs=%d "
+                    "[DecisionRound] %s %s agent=%s status=%s decisions=%d legs=%d "
                     "submitted=%d watch=%d audit=%d note=%s",
                     r.slot.label if r.slot else "-",
                     r.round_id,
+                    r.agent or "-",
                     r.status,
                     r.decisions,
                     r.legs,
@@ -109,10 +110,34 @@ async def run_decision_round_worker() -> None:
         await asyncio.sleep(_poll_s())
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    """CLI：跑一次（``--slot HHMM`` 指定槽位 / ``--force`` 手动重跑）。
+def _roster_view() -> tuple[tuple[str, ...], str, bool]:
+    """``(名册里的家, 人话说明, 名册坏没坏)``——CLI 打印与 ``--agent`` 校验的唯一出处。
 
-    ``--dry-run``：只打印当前 tick 会跑哪些槽位，不认领、不调模型。
+    名册**没开**时家为空（单家路径）：这不是「名册里有一家叫某模型名」——键形不带家段
+    （见 ``slot_keys``），``--agent`` 在那儿没有可点名的对象，点了也不许放行。
+    """
+    from backend.services.trade.services.decision_round_io import default_roster
+
+    try:
+        runs = default_roster()
+    except Exception as exc:  # noqa: BLE001 名册写错一项 = 整轮一家都跑不动
+        return (), f"{type(exc).__name__}: {exc}", True
+    if runs:
+        return tuple(r.agent for r in runs), f"名册 {len(runs)} 家", False
+
+    from backend.shared.decision_llm_client import resolve_config
+
+    try:
+        model = resolve_config().model
+    except Exception as exc:  # noqa: BLE001 单家也没配：说清楚，别替它编一个名字
+        return (), f"单家（决策 LLM 未配置：{type(exc).__name__}）", False
+    return (), f"单家（{model}，未开 QM_DECISION_LLM_ROSTER）", False
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """CLI：跑一次（``--slot HHMM`` 指定槽位 / ``--force`` 手动重跑 / ``--agent`` 点名一家）。
+
+    ``--dry-run``：只打印当前 tick 会跑哪些槽位与名册，不认领、不调模型。
     """
     import argparse
 
@@ -123,10 +148,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="手动重跑：抢占已认领的槽位并忽略当日 done 键（会真的再下一轮单）",
     )
+    parser.add_argument(
+        "--agent",
+        default="",
+        help="名册（P2.9）里只跑点名的这一家；默认全员。未开名册时不可用",
+    )
     parser.add_argument("--dry-run", action="store_true", help="只打印会跑哪些槽位")
     args = parser.parse_args(list(argv) if argv is not None else None)
 
     logging.basicConfig(level=logging.INFO)
+    agents, roster_note, roster_broken = _roster_view()
+
     if args.dry_run:
         from backend.shared.decision_context_source import now_cn
 
@@ -137,7 +169,28 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"{[s.label for s in due] or '（无）'}；当日全部槽位 "
             f"{[s.label for s in SLOTS]}"
         )
+        print(f"名册：{roster_note}；agent={list(agents) or '（未开名册）'}")
         return 0
+
+    if roster_broken:
+        # 名册本身坏了（写错一项、归一后重名、超上限）：**在这里拦下**，别走完取账户/
+        # 行情那一大圈再让每一槽记 llm_failed。配置错就报配置错（rc 2），操作员在跟前。
+        print(
+            f"名册不可用（{roster_note}）：一家模型都取不到绑定，本轮不做。\n"
+            "  先修 QM_DECISION_LLM_ROSTER（或清空它回单家），再重跑。",
+            file=sys.stderr,
+        )
+        return 2
+
+    if args.agent and args.agent not in agents:
+        # 点名的家不在名册里 = **参数错**：放进去要么在 tick 里抛栈，要么（更坏的实现）
+        # 静默跑全员——运营以为在补一家，实际三家都下了单。
+        print(
+            f"--agent {args.agent!r} 不在名册里：{roster_note}；"
+            f"可选 {list(agents) or '（未开名册，--agent 不可用）'}",
+            file=sys.stderr,
+        )
+        return 2
 
     slot = SLOTS_BY_HHMM.get(args.slot) if args.slot else None
     if args.slot and slot is None:
@@ -150,7 +203,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         from backend.shared.database_manager_v2 import close_database
 
         try:
-            return await round_tick(force=args.force, slot=slot, grace_min=_grace_min())
+            return await round_tick(
+                force=args.force, slot=slot, grace_min=_grace_min(), agent=args.agent
+            )
         finally:
             await close_database()
 
@@ -160,9 +215,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         # 「槽位已被认领」。前三种是等待对象的差别，第四种相反——那一槽**正在或
         # 已经**跑过。写成一句话会把第四种读成第一种，运营于是去查时刻表，而真因
         # 在 Redis 键上。逐项点名，并把「确实要再来一遍」的入口写出来。
+        only = (
+            f"\n  注：本轮只跑了 agent={args.agent}（名册里其余家未被选中）。"
+            if args.agent
+            else ""
+        )
         print(
             "本轮无结果：可能①没到点/已过宽限窗 ②非交易日 ③交易日历读不到 "
-            "④槽位已被认领（worker 正在跑，或今天已跑过）。\n"
+            "④槽位已被认领（worker 正在跑，或今天已跑过）。"
+            f"{only}\n"
             "  已到点、要立刻再跑一轮：加 --force 抢占槽位；"
             "只跑指定槽位再配 --slot HHMM。",
             file=sys.stderr,
@@ -170,9 +231,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
     for r in results:
         print(
-            f"{r.round_id} {r.status} decisions={r.decisions} legs={r.legs} "
-            f"submitted={r.submitted} watch={r.watch_armed} audit={r.audit_rows} "
-            f"— {r.note}"
+            f"{r.round_id} agent={r.agent or '-'} {r.status} decisions={r.decisions} "
+            f"legs={r.legs} submitted={r.submitted} watch={r.watch_armed} "
+            f"audit={r.audit_rows} — {r.note}"
         )
     # 「按设计跳过」不是失败：补跑槽在当天已有该 schema 的决策时就是跳过
     # （``STATUS_SKIPPED``）。退出码若为 1，依赖退出码的封装（脚本、控制台按钮、

@@ -232,6 +232,23 @@ def test_schedule_ctl_dispatch_covers_rerun_declared_jobs():
     assert schedule_ctl.cmd_run("equity_settle", None, False) == 2
 
 
+def test_agent_scoped_rerun_is_a_subset_of_the_rerun_table(capsys):
+    """``--agent``（P2.9）只对**有模型维度**的任务有效；其余任务收到它一律 rc 2。
+
+    静默忽略是这里最坏的形态：``decision_round`` 的 ``--agent`` 若被吞掉，操作员以为
+    只补了一家模型，实际名册上三家各跑一轮、各下一批单。所以两件事都要守住——
+    （a）认 ``--agent`` 的任务必须在分发表里（否则没人接这个参数）；
+    （b）不认的任务必须**报错退出**，不能装作没看见。
+    """
+    from backend.scripts import schedule_ctl
+
+    assert set(schedule_ctl._AGENT_RERUN) <= set(schedule_ctl._RERUN_DISPATCH)
+    assert "decision_round" in schedule_ctl._AGENT_RERUN
+    # 不认 ``--agent`` 的任务：rc 2，且**不派发**（真派发会在此用例里跑真任务）
+    assert schedule_ctl.cmd_run("sim_eod", None, False, "deepseek-v4-pro") == 2
+    assert "没有模型维度" in capsys.readouterr().err
+
+
 def test_force_notice_states_the_real_semantics_per_job():
     """控制台的 ``--force`` 提示必须与任务真实语义一致。
 

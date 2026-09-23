@@ -144,12 +144,52 @@ def due_slots(
     return tuple(sorted(out, key=lambda s: s.hhmm))
 
 
-def slot_keys(day: date, slot: RoundSlot) -> tuple[str, str]:
-    """``(槽位键, 当日该 schema 的 done 键)``。"""
+def slot_keys(day: date, slot: RoundSlot, agent: str = "") -> tuple[str, str]:
+    """``(槽位键, 当日该 schema 的 done 键)``；``agent`` 非空时两把键都带家段。
+
+    家段（P2.9）不是装饰：这两个键回答的是「这一槽谁在跑 / 今天跑过了没」，而多模型
+    名册下**每家各自跑一轮**。不带家段时第一家跑完就把第二家挡在认领键外、
+    或让补跑槽读到「今天出过了」——状态键上一切正常，另外几家整天空转（迁移计划里
+    「迁完只剩一个模型」那条警告的机制）。
+
+    空 ``agent`` **逐字保留历史键形**：升级那一刻名册还没开，若键形变了，`claim` 与
+    `done` 会集体查无此人 ⇒ 当天补跑槽把已经出过决策的槽**再跑一遍真钱**。
+    """
+    seg = f":{agent}" if agent else ""
     return (
-        f"{SLOT_KEY_PREFIX}:{day:%Y%m%d}:{slot.hhmm}:{slot.schema}",
-        f"{DONE_KEY_PREFIX}:{day:%Y%m%d}:{slot.schema}",
+        f"{SLOT_KEY_PREFIX}:{day:%Y%m%d}:{slot.hhmm}:{slot.schema}{seg}",
+        f"{DONE_KEY_PREFIX}:{day:%Y%m%d}:{slot.schema}{seg}",
     )
+
+
+@dataclass(frozen=True, slots=True)
+class AgentRun:
+    """名册里的一家模型（P2.9）：**身份 + 取绑定的路子**。
+
+    ``agent`` 是归一后的身份（= 归一后的模型名，见 ``normalize_agent``）：它进槽位键、
+    分账账本段、订单幂等键段与审计行——**四处必须同一个字符串**，所以这里只存一份。
+
+    ``load_llm`` 是**每家自己的**取绑定路子：它是延迟的（一轮到底要不要问模型由编排层
+    决定），失败（缺 key/名册指了没配的变量）由编排层收成这一家的 ``llm_failed``——
+    其余家照跑。隔壁每家一段 ``try/except continue`` 就是这个语义。
+    """
+
+    agent: str
+    load_llm: Callable[[], LLMBinding]
+
+
+def select_runs(runs: Sequence[AgentRun], agent: str = "") -> tuple[AgentRun, ...]:
+    """按名点名（``--agent``）；空 = 全员。**点名不在名册里的 = 参数错，抛**。
+
+    静默跑全员是这里最坏的失败形态：运营以为在重跑一家，实际名册上三家都下了单。
+    """
+    if not agent:
+        return tuple(runs)
+    picked = tuple(r for r in runs if r.agent == agent)
+    if not picked:
+        known = ", ".join(r.agent for r in runs) or "（空名册）"
+        raise ValueError(f"名册里没有 agent={agent!r}（名册：{known}）")
+    return picked
 
 
 #: 池行 → 闸门行时**必须原样带过去**的字段（缺一个，提示词里就少一列）。
@@ -387,6 +427,9 @@ class RoundDeps:
     real_enabled: Callable[[], bool]
     #: () → 当前北京时间（aware）
     now: Callable[[], datetime]
+    #: () → 名册（P2.9）：**一家一项**，顺序即执行顺序（``None``/空 = 单家路径，
+    #: 走 ``load_llm`` 那一条）。解析失败上抛，由 tick 收成「一家都跑不动」。
+    roster: Callable[[], Sequence[AgentRun]] | None = None
 
 
 @dataclass(frozen=True, slots=True)
