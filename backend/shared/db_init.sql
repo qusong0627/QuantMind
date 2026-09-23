@@ -2480,3 +2480,45 @@ CREATE TABLE IF NOT EXISTS qm_holding_alerts (
 CREATE UNIQUE INDEX IF NOT EXISTS uq_holding_alerts_dedupe ON qm_holding_alerts (dedupe_key);
 CREATE INDEX IF NOT EXISTS idx_holding_alerts_user ON qm_holding_alerts (tenant_id, user_id, status, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_holding_alerts_symbol ON qm_holding_alerts (tenant_id, user_id, symbol, created_at DESC);
+
+-- ---------------------------------------------------------------------------
+-- qm_risk_ghost_ledger：影子代价账（P1.6）——被风控拦下的决策 × 规则，一行一条
+--
+-- 风控留痕（qm:risk:decisions:{date}）是 Redis Stream：会 trim、会过期，没法跨
+-- 规则/跨日聚合。"这条闸门该不该留"要的是多年的账，故落 PG 持久化。
+-- 与 backend/shared/ghost_ledger_contract.py 同口径（老库由该模块启动期自愈建表，
+-- 这里同步一份给全新安装的库）。两者 DDL 由测试逐字符比对，改一处必须改两处。
+--
+-- id = sha1(tenant|uid|日|标的|方向|规则) 前 16 hex（见 risk/ghost.py:ghost_id），
+-- 故同规则同日同标的同方向只一行：幂等重跑靠 ON CONFLICT(id) 回填定价列。
+-- fwd 存各期定价明细（state/ret/bench/excess/cost），未到期/不可成交一律 null 而非 0。
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS qm_risk_ghost_ledger (
+    id             VARCHAR(32) PRIMARY KEY,
+    tenant_id      VARCHAR(64) NOT NULL DEFAULT 'default',
+    user_id        VARCHAR(64) NOT NULL DEFAULT '',
+    trade_date     DATE NOT NULL,
+    rule_id        VARCHAR(64) NOT NULL,
+    kind           VARCHAR(16) NOT NULL,
+    registered     BOOLEAN NOT NULL DEFAULT TRUE,
+    symbol         VARCHAR(32) NOT NULL,
+    side           VARCHAR(8) NOT NULL,
+    quantity       DOUBLE PRECISION,
+    source         VARCHAR(32) NOT NULL DEFAULT '',
+    reason         VARCHAR(200) NOT NULL DEFAULT '',
+    evidence       JSONB NOT NULL DEFAULT '{}',
+    enforced       BOOLEAN NOT NULL DEFAULT FALSE,
+    version        INTEGER NOT NULL DEFAULT 0,
+    blocked_at     TIMESTAMPTZ NOT NULL,
+    entry_date     DATE,
+    entry_px       DOUBLE PRECISION,
+    tradable       BOOLEAN,
+    fwd            JSONB,
+    priced_at      TIMESTAMPTZ,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_ghost_ledger_date ON qm_risk_ghost_ledger (trade_date, rule_id);
+CREATE INDEX IF NOT EXISTS idx_ghost_ledger_rule ON qm_risk_ghost_ledger (rule_id, trade_date DESC);
+CREATE INDEX IF NOT EXISTS idx_ghost_ledger_user ON qm_risk_ghost_ledger (tenant_id, user_id, trade_date DESC);

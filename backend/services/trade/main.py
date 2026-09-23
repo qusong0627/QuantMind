@@ -110,6 +110,9 @@ async def lifespan(app: FastAPI):
         from backend.shared.fund_snapshot_contract import (
             ensure_fund_snapshot_contract_async,
         )
+        from backend.shared.ghost_ledger_contract import (
+            ensure_ghost_ledger_table_async,
+        )
         from backend.shared.holding_alert_contract import (
             ensure_holding_alerts_table_async,
         )
@@ -130,6 +133,7 @@ async def lifespan(app: FastAPI):
             ensure_signal_contract_columns_async,
             ensure_eval_scores_table_async,
             ensure_holding_alerts_table_async,
+            ensure_ghost_ledger_table_async,
         ):
             try:
                 await _ensure()
