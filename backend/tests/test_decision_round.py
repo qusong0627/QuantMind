@@ -44,6 +44,7 @@ from backend.services.trade.services.decision_round_core import (
     SLOTS,
     STATUS_SKIPPED,
     AccountRead,
+    AgentLedgerRead,
     ExclusionRead,
     LLMBinding,
     RoundDeps,
@@ -283,6 +284,7 @@ def make_harness(**over) -> Harness:
     log: dict[str, list] = {
         "positions": [],
         "account": [],
+        "agent_ledger": [],
         "pool": [],
         "snaps": [],
         "llm": [],
@@ -320,6 +322,31 @@ def make_harness(**over) -> Harness:
         log["account"].append((tenant, user))
         return account
 
+    # 分账账本默认**与持仓同集**（键转后缀式）：不显式换 ``ledger=`` 的用例里，
+    # 裁剪是空操作，既有断言全部照旧。要测裁剪的用例自己传一个更小的账本。
+    ledger = over.pop("ledger", None)
+    if ledger is None:
+        from backend.shared.stock_utils import StockCodeUtil
+
+        ledger = AgentLedgerRead(
+            ok=True,
+            known=bool(positions),
+            positions={
+                StockCodeUtil.to_suffix(str(code)): {
+                    "volume": float(row.get("volume") or 0),
+                    "cost_price": float(row.get("cost_price") or 0),
+                    "buy_ts": "2026-09-20T01:30:00Z",
+                    "last_ts": "2026-09-20T01:30:00Z",
+                }
+                for code, row in positions.items()
+                if isinstance(row, Mapping)
+            },
+        )
+
+    async def load_agent_ledger(tenant, user, agent):
+        log["agent_ledger"].append((tenant, user, agent))
+        return ledger
+
     def load_pool(day: str):
         log["pool"].append(day)
         return pool
@@ -352,6 +379,7 @@ def make_harness(**over) -> Harness:
         account_user=over.pop("account_user", lambda: "10000001"),
         load_positions=over.pop("load_positions", load_positions),
         load_account=over.pop("load_account", load_account),
+        load_agent_ledger=over.pop("load_agent_ledger", load_agent_ledger),
         load_pool=over.pop("load_pool", load_pool),
         load_excluded=over.pop(
             "load_excluded",

@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import date, datetime
 from typing import Any
 
@@ -29,12 +29,14 @@ from backend.services.trade.services.decision_round_core import (
     SLOT_TTL_S,
     TENANT_ID,
     AccountRead,
+    AgentLedgerRead,
     ExclusionRead,
     LLMBinding,
     RoundDeps,
     RoundResult,
     as_float,
 )
+from backend.shared.decision.agent_ledger import DEFAULT_AGENT_QUOTA
 
 logger = logging.getLogger(__name__)
 
@@ -148,6 +150,51 @@ async def load_account_numbers(tenant_id: str, user_id: str) -> AccountRead:
     )
 
 
+async def load_agent_ledger(
+    tenant_id: str, user_id: str, agent: str
+) -> AgentLedgerRead:
+    """本 agent 的分账账本段（P2.7）——持仓 + 子账户虚拟现金。
+
+    读失败（DB 不可用、表缺失、agent 名为空）一律 ``ok=False``：调用点据此中止本轮。
+    **不 catch 成空账本**——「读不到」被当成「名下没有货」的后果是模型看不见自己的
+    持仓、于是永远不卖（该止盈止损的仓位烂在账上），而账面全绿。
+
+    ``known`` 与 ``ok`` 分开：读到账本里查无此 agent 是**正常状态**（这家模型还没在
+    这本账里成交过），语义是「名下没有货」而不是「没配分账就全给我」。
+
+    归一：``agent`` 空串直接报错不查库（空 agent 会命中一切 ``agent = ''`` 的行，
+    那是别家厂商的历史垃圾行，不是「没有这个模型」）。
+    """
+    from backend.shared.agent_ledger_store import load_ledger as _load_ledger
+    from backend.shared.database_manager_v2 import get_session
+
+    name = str(agent or "").strip()
+    if not name:
+        return AgentLedgerRead(errors=("agent 名为空：无法定位分账账本段",))
+    try:
+        async with get_session(read_only=True) as session:
+            doc = await _load_ledger(
+                session, tenant_id=tenant_id, user_id=user_id, agents=[name]
+            )
+    except Exception as exc:  # noqa: BLE001 读不到 = 账本不可信（调用点 abort）
+        return AgentLedgerRead(
+            errors=(f"分账账本读取失败：{type(exc).__name__}: {exc}",),
+        )
+    rec = (doc.get("agents") or {}).get(name)
+    if not isinstance(rec, Mapping):
+        return AgentLedgerRead(ok=True, known=False)
+    cash = as_float(rec.get("virtual_cash"))
+    positions = rec.get("positions")
+    return AgentLedgerRead(
+        ok=True,
+        known=True,
+        positions=dict(positions) if isinstance(positions, Mapping) else {},
+        # 现金为负**原样带回**（不夹到 0）：透支是真实状态，夹掉只会让「为什么一直
+        # 不买」变成一个查不出的问题。负值在下游自然是「什么都买不起」。
+        virtual_cash=DEFAULT_AGENT_QUOTA if cash is None else float(cash),
+    )
+
+
 def load_excluded_symbols() -> ExclusionRead:
     """排除名单（blocking 且未过期）→ 集合 + 留痕文案。
 
@@ -241,6 +288,7 @@ def default_round_deps() -> RoundDeps:
         account_user=lambda: resolve_db_account_user(ENV_ACCOUNT_USER),
         load_positions=load_real_positions,
         load_account=load_account_numbers,
+        load_agent_ledger=load_agent_ledger,
         load_pool=load_pool_doc,
         load_excluded=load_excluded_symbols,
         quote_client=make_sync_client,

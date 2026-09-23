@@ -20,6 +20,7 @@ from types import SimpleNamespace
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from backend.shared.decision.agent_ledger import DEFAULT_AGENT_QUOTA
 from backend.shared.decision.contract import SCHEMA_INTRADAY, SCHEMA_REBALANCE
 
 logger = logging.getLogger(__name__)
@@ -318,6 +319,34 @@ class ExclusionRead:
 
 
 @dataclass(frozen=True, slots=True)
+class AgentLedgerRead:
+    """本 agent 在**分账账本**里的那一段（P2.7）：名下持仓 + 子账户虚拟现金。
+
+    ``ok=False`` 只有一个来路——**读失败**（DB 不可用/表缺失）。调用点必须中止本轮：
+    看不到自己的账 ⇒ 既不知道哪些票是自己的（卖错票正是 2026-09-08 那次事故），
+    也不知道自己还剩多少额度。
+
+    与「读到了，但账本里查无此 agent」是**两件事**，后者是 ``ok=True`` +
+    ``known=False``：语义是「这家模型名下没有货」——``positions`` 是空集，**不是**
+    「没配分账就全给我」。那一句兜底（``if mine else holdings``）正是事故的成因，
+    故本 DTO 里**没有**「回退到全账户持仓」这个选项可以选。
+    """
+
+    ok: bool = False
+    #: 账本里有没有这家 agent（有账户行或持仓行）。``False`` = 从未在这本账里成交过。
+    known: bool = False
+    #: ``{后缀码: {volume, cost_price, buy_ts, last_ts}}``——与 ``HoldingRow.code`` 同形态。
+    positions: Mapping[str, Any] = field(default_factory=dict)
+    #: 子账户虚拟现金（元）。账本无此行 = 满额 :data:`DEFAULT_AGENT_QUOTA`。
+    virtual_cash: float = DEFAULT_AGENT_QUOTA
+    errors: tuple[str, ...] = ()
+
+    def mine(self) -> frozenset[str]:
+        """本 agent 名下的后缀码集合（``mine_of`` 的口径：**空集就是空集**）。"""
+        return frozenset(self.positions)
+
+
+@dataclass(frozen=True, slots=True)
 class RoundDeps:
     """一轮编排的全部外界（frozen；测试逐项换替身，生产见 :func:`default_round_deps`）。"""
 
@@ -327,6 +356,9 @@ class RoundDeps:
     load_positions: Callable[[str, str], Awaitable[tuple[dict[str, dict], dict]]]
     #: (tenant, user) → 资金面
     load_account: Callable[[str, str], Awaitable[AccountRead]]
+    #: (tenant, user, agent) → 本 agent 的分账账本段（P2.7）。**必填**：缺了它
+    #: 「哪些票是自己的」就没有出处，而那个问题的默认答案（全账户）是事故本身。
+    load_agent_ledger: Callable[[str, str, str], Awaitable[AgentLedgerRead]]
     #: "YYYYMMDD" → 池产物（文件不在 → None）
     load_pool: Callable[[str], Any]
     #: () → 排除名单读取结果
@@ -639,6 +671,35 @@ def context_meta(**kw: Any) -> dict[str, Any]:
             "present": excluded.present,
             "symbols": len(excluded.symbols),
         },
+        "ledger": ledger_meta(kw.get("ledger")),
         "sources": dict(position_source_meta(kw["pos_meta"])),
         "notes": list(kw["notes"]),
     }
+
+
+def ledger_meta(read: Any) -> dict[str, Any]:
+    """分账账本段（P2.7）→ 审计。
+
+    ``positions`` 记**本 agent 名下的只数**（不是金额，也不是代码清单）：审计要回答的
+    是「这一轮模型手里有几只货、额度还剩多少」，代码清单在账本表里查得到，抄进审计
+    行只会在两处之间制造对不上的机会。
+
+    ``known=False`` 且 ``ok=True`` = 账本里查无此 agent（还没在这本账里成交过），
+    那时 ``virtual_cash`` 是**满额默认值**——写进审计是为了让「这条线从没花过钱」
+    与「这条线的钱花完了」在事后看得出区别（两者在提示词里长得一样）。
+
+    没有这段（``None``，老调用点/替身）→ 空表，不抛：审计少一节不是故障。
+    """
+    if read is None:
+        return {}
+    try:
+        cash = float(getattr(read, "virtual_cash", 0.0) or 0.0)
+        n_pos = len(getattr(read, "positions", None) or {})
+        return {
+            "ok": bool(getattr(read, "ok", False)),
+            "known": bool(getattr(read, "known", False)),
+            "positions": n_pos,
+            "virtual_cash": round(cash, 2),
+        }
+    except Exception:  # noqa: BLE001 形状怪异的替身不该把审计炸成 error
+        return {}

@@ -66,6 +66,9 @@ fail-closed 分层（每一层的姿态都是**选的**，不是顺手写的）
 持仓（real_account_snapshots）abort：模型看不到持仓就不该动它
 资金面（cash/market_value）   abort：额度三数不许编（``build_context``
                              的默认 100k 会把真账户编成假额度）
+分账账本段（P2.7）            abort：读不到就不知道哪些票是自己的
+                             （当成空账本 ⇒ 该卖的卖不掉；回退全账户
+                             持仓 ⇒ 2026-09-08 跨 agent 卖仓）
 券商选择                       abort（仅决策轮）：``broker:selected:CN``
                              读不到就不知道读哪座账（两座差 ~25 倍），
                              不许回退 env 默认掷硬币
@@ -296,6 +299,33 @@ async def _run_once_inner(
         )
     agent = binding.model
 
+    # ②b 分账账本（P2.7）：本 agent 名下的持仓 + 子账户虚拟现金。**在 ② 之后**是因为
+    # 账本按 agent 切段，而 agent 名来自 LLM 绑定（纯 env 解析，不花钱不触网）。
+    # 读失败 = 中止本轮，**不是**「当成空账本继续」：看不到自己的账就不知道哪些票是
+    # 自己的——把「读不到」当「名下没有货」会让该卖的卖不掉且账面全绿；反过来回退到
+    # 全账户持仓就是 2026-09-08 那次跨 agent 卖仓（pro 卖了 flash 的生益电子）。
+    try:
+        ledger = await deps.load_agent_ledger(TENANT_ID, user, agent)
+    except Exception as exc:  # noqa: BLE001
+        return abort_result(
+            day,
+            slot,
+            f"分账账本读取异常：{type(exc).__name__}: {exc}（本轮不问模型）",
+        )
+    if not ledger.ok:
+        return abort_result(
+            day,
+            slot,
+            "分账账本不可读："
+            + "；".join(ledger.errors or ("未报告原因",))
+            + "（本轮不问模型）",
+        )
+    mine = ledger.mine()
+    virtual_cash = float(ledger.virtual_cash)
+    #: 必须可见的说明（某项没判、口径回退…）。在裁剪持仓之前就要有：那一行留痕本身
+    #: 是「模型为什么对这几只票视而不见」的唯一答案，不能等到 ⑥ 才建表。
+    notes: list[str] = []
+
     # ③ 候选池（日格式 **%Y%m%d**——传 ISO 日期会静默拿到 None）
     pool_doc = deps.load_pool(day.strftime("%Y%m%d"))
     pool_rows: tuple[Any, ...] = tuple(getattr(pool_doc, "rows", ()) or ())
@@ -340,6 +370,37 @@ async def _run_once_inner(
             snapped = {}
     holding_rows = positions_to_holding_rows(positions_list, snaps=snapped)
 
+    # ④b 分账裁剪（P2.7）：**只把本 agent 名下的持仓交给模型与执行段**。
+    #
+    # 桥账户是共用的，`positions_list` 是整座账户的持仓；`mine` 是这本分账账本里属于
+    # 本 agent 的那些代码（后缀式，与 `HoldingRow.code` 同形态）。模型看不见的仓位它
+    # 就卖不掉——这是**可见性**防线，不是权限判断。2026-09-08：空账本的 agent 拿到
+    # 全账户持仓，把另一家模型的票卖了。故这里**没有**「mine 为空就回退全量」的分支。
+    #
+    # 数量口径不变（可卖量仍取桥账户的 `avail`）：账本是「归属」的事实源，桥是
+    # 「今天能不能卖」的事实源——T+1 锁定只有桥知道。
+    all_rows = holding_rows
+    holding_rows = tuple(h for h in all_rows if h.code in mine)
+    hidden = len(all_rows) - len(holding_rows)
+    if hidden:
+        # 一定要说出来：迁移未完成（历史仓位尚未导入分账账本）时，这一行的存在就是
+        # 「模型为什么对这几只票视而不见」的答案。
+        note = (
+            f"分账裁剪：桥账户 {len(all_rows)} 只持仓中 {hidden} 只不在本 agent"
+            f"（{agent}）名下，已从提示词与执行段一并隐藏"
+        )
+        notes.append(note)
+        logger.info("[DecisionRound] %s %s", round_id, note)
+        if not holding_rows:
+            logger.warning(
+                "[DecisionRound] %s 本 agent（%s）名下**一只都没有**，而桥账户持有 %d 只："
+                "本轮模型看不到任何持仓（只可能买、不可能卖）。历史仓位若尚未导入"
+                "分账账本，这是预期行为",
+                round_id,
+                agent,
+                len(all_rows),
+            )
+
     # ⑤ 档位（读失败由 tiers 自己回退收紧，不抛）
     tier = deps.load_tier()
     tier_pct, tier_buys = tier_numbers(tier)
@@ -348,14 +409,19 @@ async def _run_once_inner(
 
     # ⑥ 排除名单（缺失 ≠ 空名单）
     excluded = deps.load_excluded()
-    notes: list[str] = []
     if not excluded.present:
         notes.append(excluded.note)
 
     # ⑦ 闸门的候选侧：先按「买得起一手」筛池，再交给模型
     quota_total = account.quota_total
     quota_used = account.quota_used
+    # 单票预算取**两个口径中更紧的那个**（与隔壁 `min(remaining*PER_STOCK_PCT,
+    # agent_virtual_cash)` 同形）：真实账户口径决定「这座账户还有多少钱」，分账虚拟
+    # 现金决定「这条线还能买多少」。只取前者，一条线可以把共用账户的钱花光；只取
+    # 后者，会在真账户已无现金时给出买不起的池面。
     per_stock_budget = round((quota_total - quota_used) * per_stock_pct, 2)
+    if virtual_cash < per_stock_budget:
+        per_stock_budget = round(virtual_cash, 2)
     try:
         gate = BuyGate(
             pool_codes=frozenset(str(r.code) for r in pool_rows),
@@ -363,7 +429,9 @@ async def _run_once_inner(
             per_stock_pct=per_stock_pct,
             allow_st=False,
             max_new_buys_round=max_new_buys,
-            virtual_cash=None,  # 分账（P2.7）未建模：不判 + 留 note
+            # 子账户虚拟现金（本 agent 的 ¥10 万名义额度的余额）：买入腿的硬上限，
+            # 与真实账户现金**各自独立**成立（隔壁 `o["cost"] > vcash` 那条闸）。
+            virtual_cash=virtual_cash,
         )
     except ValueError as exc:
         # per_stock_pct 不是比例（例如档位文档里写了 15）：夹取会变成空操作，
@@ -443,7 +511,9 @@ async def _run_once_inner(
         now=now,
         quotes=quotes,
         quotes_stale_count=stale,
-        ledger_positions=None,  # 分账账本未建模：成本列走桥口径并带 * 标记
+        # 成本/浮盈按**本 agent 的分账账本**渲染（账本无该票时回退桥口径并打 `*`）：
+        # 共用账户里，桥的持仓成本是混合口径，拿它算「我这笔赚没赚」是错的基准。
+        ledger_positions=ledger.positions,
         quota_total=quota_total,
         quota_used=quota_used,
         per_stock_pct=per_stock_pct,
@@ -500,7 +570,12 @@ async def _run_once_inner(
                 holdings=exec_holdings,
                 quotes=exec_quotes,
                 gate=gate,
-                quota=quota_total - quota_used,
+                # 腿的**尺度口径**取两个额度里更紧的那个（``per_stock_budget`` 同式）：
+                # 执行段按 ``quota × pct`` 算股数（``execution._Plan.buy``），拿真实账户
+                # 的剩余额度当尺子会把腿算大到超出子账户线，而超出只是被 ``l2.vcash``
+                # 否决——本可成交的腿变成一条否决记录。取更紧的那个之后，vcash 闸退回
+                # 它真正的职责：``per_stock_pct`` 未配置（=不夹取）时的最后一道兜底。
+                quota=min(quota_total - quota_used, virtual_cash),
                 new_buys_round=max_new_buys,
                 inflight=inflight,
                 agent=agent,
@@ -547,6 +622,7 @@ async def _run_once_inner(
                 mode=mode,
                 attempt=attempt,
                 account=account,
+                ledger=ledger,
                 pos_meta=holding_meta,
                 pool_file=pool_file,
                 kept=kept_rows,
