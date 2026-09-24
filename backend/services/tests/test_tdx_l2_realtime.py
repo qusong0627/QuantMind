@@ -12,7 +12,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from backend.services.trade_shared.redis_client import RedisClient
 from backend.services.live_trading.services.tdx_l2_capture_task import FACTOR_ICIR
 from backend.services.live_trading.services.tdx_l2_realtime import (
     _z_score,
@@ -23,6 +22,7 @@ from backend.services.live_trading.services.tdx_l2_realtime import (
     save_l2_config,
     set_cooldown,
 )
+from backend.services.trade_shared.redis_client import RedisClient
 
 
 def _factors(**overrides) -> dict:
@@ -136,8 +136,15 @@ class _FakeRedis:
         self.store: dict = {}
         self.expired_at: dict = {}
 
-    def set(self, key: str, value, **kwargs) -> None:
+    def set(self, key: str, value, ex=None, **kwargs) -> None:
+        # 如实记录 TTL：旧版把 **kwargs 整个吞掉，于是「写实时键从不带过期」
+        # 这个缺陷在测试里**永远不可见**——325 个键 ttl=-1 累积了一个月陈料。
         self.store[key] = value
+        if ex is None:
+            # 与真 Redis 一致：SET 不带 EX 会**清掉**该键既有的 TTL
+            self.expired_at.pop(key, None)
+        else:
+            self.expired_at[key] = ex
 
     def get(self, key):
         return self.store.get(key)
@@ -290,7 +297,9 @@ class TestOrderQuotePersistence:
         # Arrange
         rc = _patched_redis()
         with patch("backend.services.live_trading.services.tdx_l2_realtime.trade_redis", rc):
-            from backend.services.live_trading.services.tdx_l2_realtime import merge_order_states
+            from backend.services.live_trading.services.tdx_l2_realtime import (
+                merge_order_states,
+            )
 
             merge_order_states([{"order_id": "9999", "status": "filled"}])
         # Assert: 无异常且无写入
@@ -489,15 +498,23 @@ def run_retry_sync(coro, pusher):
 
 class TestLoopStability:
     def _seed_pool(self, rc, n: int = 6):
+        """写 n 只**新鲜**因子（与生产同形：ts = 当前上海墙钟）。
+
+        旧夹具写死 ``2026-08-25T10:00:00``（陈旧）而回环仍照常评分——**等于把
+        「不筛时间戳」这个缺陷固化成前提**。生产写的是当前钟，夹具须同形。
+        """
+        from datetime import datetime
+
         from backend.services.live_trading.services.tdx_l2_realtime import _REALTIME_KEY
 
+        ts = datetime.now().isoformat(timespec="seconds")  # noqa: DTZ005 — naive 上海墙钟正是契约本身（写侧写它、读侧同钟比较）
         for i in range(n):
             sym = f"SH60000{i}"
             rc.set(
                 _REALTIME_KEY.format(symbol=sym),
                 {
                     "symbol": sym,
-                    "ts": "2026-08-25T10:00:00",
+                    "ts": ts,
                     "factors": _factors(micro_vpin_vol_ratio=0.5, micro_open_gap=0.02),
                     "now": 10.0 + i,
                 },
@@ -507,7 +524,9 @@ class TestLoopStability:
         from datetime import datetime
 
         from backend.services.live_trading.services import tdx_l2_capture_task as cap
-        from backend.services.live_trading.services.tdx_l2_realtime import save_l2_config
+        from backend.services.live_trading.services.tdx_l2_realtime import (
+            save_l2_config,
+        )
 
         with patch("backend.services.live_trading.services.tdx_l2_realtime.trade_redis", rc):
             save_l2_config({
@@ -612,6 +631,188 @@ class TestLoopStability:
         assert len(score_keys) >= 6
         assert status["capture_stale"] is True
         pusher.place_order.assert_not_called()
+
+    def test_execution_path_actually_reaches_broker(self):
+        """有买卖项且 execute_mode≠off 时，执行段必须真正走到券商调用。
+
+        回归 70c538c9 引入的元组数不匹配：``_execute_signals`` 返回
+        ``(placed, failed, error)`` **三元组**（docstring 亦然），调用点却按两元组
+        解包 → 每轮抛 ``ValueError`` → 被外层兜住记「实时推理异常」
+        → **L2 实时自动交易从未下过单**（分数照写、界面看着是活的）。
+
+        ⚠️ 本类既有三个用例断言 ``pusher.place_order`` 未被调用，**恰好因这个异常
+        而通过** —— 空参与。本用例断言执行段被触达，异常一回来它就红。
+        """
+        # Arrange
+        rc = _patched_redis()
+        self._seed_pool(rc)
+        svc = MagicMock()
+        self._bootstrap(rc, svc)
+        # Act
+        _pusher, status = self._run_loop(rc, svc)
+        # Assert
+        assert svc.place_rolling_orders.await_count >= 1, (
+            "执行段未触达券商调用（execute_mode=tdx 且有买卖项）"
+        )
+        assert "unpack" not in (status["last_error"] or ""), (
+            f"执行段抛异常：{status['last_error']}"
+        )
+
+    def test_loop_mirrors_status_to_redis(self):
+        """循环必须把状态镜像到 `tdx:l2:realtime:status`（运维脚本/设置页读它）。
+
+        该键**此前从未被写过**（`_STATUS_KEY` 定义了但零引用）→ 监控恒显示 {}。
+        """
+        # Arrange
+        from backend.services.live_trading.services.tdx_l2_realtime import _STATUS_KEY
+
+        rc = _patched_redis()
+        self._seed_pool(rc)
+        svc = MagicMock()
+        self._bootstrap(rc, svc)
+        # Act
+        self._run_loop(rc, svc)
+        # Assert
+        mirrored = rc.get(_STATUS_KEY)
+        assert isinstance(mirrored, dict), "状态键未被写入——监控面板会一直空着"
+        assert mirrored.get("running") is True
+        assert mirrored.get("last_cycle_at"), "镜像里必须带 last_cycle_at（活性判据）"
+        assert rc.client.expired_at.get(_STATUS_KEY), "活性键必须有 TTL，否则死循环留下假活状态"
+
+    def test_status_key_never_enters_factor_pool(self):
+        """状态键与因子池**同前缀**（`tdx:l2:realtime:*`），不得被当成一只标的进池。
+
+        ⚠️ 用的 ``ts`` 必须**新鲜**：陈旧时间戳会被新鲜度闸门顺手挡掉，那样测的是
+        闸门而不是本守卫 —— 本用例初版就栽在这里（探针验出的空参与）。
+        """
+        # Arrange
+        from datetime import datetime
+
+        from backend.services.live_trading.services.tdx_l2_realtime import _STATUS_KEY
+
+        rc = _patched_redis()
+        self._seed_pool(rc)
+        # 故意给状态键塞一个 symbol 字段（最坏情况：未来有人给状态加了这个字段）
+        rc.set(_STATUS_KEY, {
+            "symbol": "SH999999",
+            "factors": _factors(),
+            "ts": datetime.now().isoformat(timespec="seconds"),  # noqa: DTZ005 — 新鲜 → 只能靠守卫挡
+        })
+        svc = MagicMock()
+        self._bootstrap(rc, svc)
+        # Act
+        _pusher, _status = self._run_loop(rc, svc)
+        # Assert
+        scored = {k.removeprefix("tdx:l2:score:") for k in rc.client.store
+                  if k.startswith("tdx:l2:score:")}
+        assert "SH999999" not in scored, "状态键被当成了标的进池"
+
+    def test_stale_pool_entries_excluded_from_cross_section(self):
+        """陈旧键必须**出池**：截面标准化的分母只能是同一时刻的那批标的。
+
+        2026-09-23 实测：325 键中 212 个是 08-25~09-22 的陈料且 ttl=-1，
+        采集停过的标的会一直留在池里，把今日每只标的的 z 都拉偏。
+        """
+        # Arrange: 6 只新鲜 + 4 只陈旧（模拟采集停摆后残留）
+        from datetime import datetime, timedelta
+
+        from backend.services.live_trading.services.tdx_l2_realtime import _REALTIME_KEY
+
+        rc = _patched_redis()
+        self._seed_pool(rc, n=6)
+        stale_ts = (datetime.now() - timedelta(days=29)).isoformat(timespec="seconds")  # noqa: DTZ005
+        for i in range(4):
+            sym = f"SH99999{i}"
+            rc.set(
+                _REALTIME_KEY.format(symbol=sym),
+                {
+                    "symbol": sym,
+                    "ts": stale_ts,
+                    "factors": _factors(micro_vpin_vol_ratio=99.0),  # 极端值：混入必拉偏截面
+                    "now": 10.0,
+                },
+            )
+        svc = MagicMock()
+        self._bootstrap(rc, svc)
+        # Act
+        _pusher, status = self._run_loop(rc, svc)
+        # Assert: 分数只落新鲜的 6 只，陈旧的 4 只一个都没有
+        scored = {k.removeprefix("tdx:l2:score:") for k in rc.client.store
+                  if k.startswith("tdx:l2:score:")}
+        assert not {f"SH99999{i}" for i in range(4)} & scored, "陈旧标的混进了截面"
+        assert len(scored & {f"SH60000{i}" for i in range(6)}) >= 6, "新鲜标的被误杀"
+        assert status["pool_stale_skipped"] == 4
+
+    def test_malformed_ts_excluded_fail_closed(self):
+        """``ts`` 取不到 → 按陈旧处理（宁可少一只，不可偏一池）。"""
+        # Arrange
+        from backend.services.live_trading.services.tdx_l2_realtime import _REALTIME_KEY
+
+        rc = _patched_redis()
+        self._seed_pool(rc, n=6)
+        for i, bad in enumerate(("", None, "not-a-time")):
+            sym = f"SH88888{i}"
+            rc.set(
+                _REALTIME_KEY.format(symbol=sym),
+                {"symbol": sym, "ts": bad, "factors": _factors(), "now": 10.0},
+            )
+        svc = MagicMock()
+        self._bootstrap(rc, svc)
+        # Act
+        _pusher, status = self._run_loop(rc, svc)
+        # Assert
+        scored = {k.removeprefix("tdx:l2:score:") for k in rc.client.store
+                  if k.startswith("tdx:l2:score:")}
+        assert not {f"SH88888{i}" for i in range(3)} & scored
+        assert status["pool_stale_skipped"] == 3
+
+
+class TestPayloadAge:
+    """``_payload_age_sec``：池新鲜度判据（纯函数，读写同钟）。"""
+
+    def _age(self, payload):
+        from backend.services.live_trading.services.tdx_l2_realtime import (
+            _payload_age_sec,
+        )
+
+        return _payload_age_sec(payload)
+
+    def test_fresh_payload_is_near_zero(self):
+        # Arrange
+        from datetime import datetime
+
+        payload = {"ts": datetime.now().isoformat(timespec="seconds")}  # noqa: DTZ005 — naive 上海墙钟正是契约本身（写侧写它、读侧同钟比较）
+        # Act / Assert
+        assert 0 <= self._age(payload) < 5
+
+    def test_old_payload_age_tracks_wall_clock(self):
+        # Arrange: 本仓实测的那批陈料是 29 天前
+        from datetime import datetime, timedelta
+
+        payload = {"ts": (datetime.now() - timedelta(days=29)).isoformat(timespec="seconds")}  # noqa: DTZ005
+        # Act / Assert
+        assert self._age(payload) == pytest.approx(29 * 86400, abs=5)
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {},
+            {"ts": ""},
+            {"ts": None},
+            {"ts": "   "},
+            {"ts": "not-a-time"},
+            {"ts": "2026-13-45T99:99:99"},
+        ],
+    )
+    def test_missing_or_malformed_ts_is_none(self, payload):
+        assert self._age(payload) is None
+
+    def test_aware_ts_normalized_to_local_clock(self):
+        """aware 时间戳（防御性分支）不得因时区差算成十几个小时。"""
+        from datetime import datetime, timezone
+
+        payload = {"ts": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+        assert abs(self._age(payload)) < 5
 
 
 def run_loop_sync(coro):

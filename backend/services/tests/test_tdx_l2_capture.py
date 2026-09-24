@@ -295,3 +295,62 @@ class TestResolveWatchlist:
         watch = _resolve_watchlist(scores, [], [], pool_size=50)
         # Assert
         assert len(watch) <= 50
+
+
+class TestRealtimeKeyLifecycle:
+    """实时因子键**必须**带 TTL —— 它此前是永不过期的（325 键 ttl=-1 攒了一个月陈料）。"""
+
+    def _raw(self):
+        from backend.services.tests.test_tdx_l2_realtime import _FakeRedis
+
+        return _FakeRedis()
+
+    def _rc(self, raw):
+        from backend.services.trade_shared.redis_client import RedisClient
+
+        rc = RedisClient()
+        rc.client = raw
+        return rc
+
+    def test_realtime_key_written_with_ttl(self):
+        # Arrange
+        from unittest.mock import patch
+
+        from backend.services.live_trading.services import tdx_l2_capture_task as cap
+
+        raw = self._raw()
+        rc = self._rc(raw)
+        key = cap._REALTIME_KEY.format(symbol="SH600036")
+        # Act
+        with patch(
+            "backend.services.live_trading.services.tdx_l2_capture_task.trade_redis", rc
+        ):
+            cap._redis_set_json(key, {"symbol": "SH600036", "factors": {}}, ttl=cap._REALTIME_TTL)
+        # Assert
+        assert raw.expired_at.get(key) == cap._REALTIME_TTL
+
+    def test_ttl_shorter_than_overnight_gap(self):
+        """4h < 隔夜 18.5h：昨日的键**绝无可能**活到次日开盘（写侧兜底的意义）。"""
+        from backend.services.live_trading.services.tdx_l2_capture_task import (
+            _REALTIME_TTL,
+        )
+
+        overnight_gap_sec = 18.5 * 3600  # 15:00 收盘 → 次日 09:30 开盘
+        assert _REALTIME_TTL < overnight_gap_sec
+
+    def test_max_age_window_covers_worst_case_capture_cycle(self):
+        """读侧窗口必须覆盖采集最坏周转，否则会静默掏空因子池（<5 只整轮跳过）。"""
+        from backend.services.live_trading.services.tdx_l2_capture_task import (
+            _CALLS_PER_MIN,
+            _REALTIME_MAX_AGE_SEC,
+            MAX_WATCHLIST,
+        )
+
+        # 轮内：MAX_WATCHLIST 只 × 2 次调用 × (120/_CALLS_PER_MIN) 秒节奏
+        in_cycle = MAX_WATCHLIST * 2 * (120.0 / _CALLS_PER_MIN)
+        # 轮间：interval = max(60, pool_size*3)，pool_size ≤ 50 → 150s；限流时 ×2
+        between_cycles = max(60, 50 * 3) * 2
+        worst_case = in_cycle + between_cycles
+        assert _REALTIME_MAX_AGE_SEC > worst_case, (
+            f"窗口 {_REALTIME_MAX_AGE_SEC}s 覆盖不了最坏周转 {worst_case:.0f}s —— 会静默掏空池子"
+        )

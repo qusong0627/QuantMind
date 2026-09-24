@@ -25,10 +25,10 @@ from typing import Any
 
 from sqlalchemy import text
 
+from backend.services.trade_shared.redis_client import redis_client as trade_redis
 from backend.shared.database_manager_v2 import get_session
 from backend.shared.simulation_account_keys import resolve_db_account_user
 from backend.shared.stock_utils import StockCodeUtil
-from backend.services.trade_shared.redis_client import redis_client as trade_redis
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +45,20 @@ ZONE_BOUNDARIES = [("T3", (600, 630)), ("T4", (630, 660)), ("T5", (660, 690)), (
 _STATUS_KEY = "tdx:l2:capture:status"
 _REALTIME_KEY = "tdx:l2:realtime:{symbol}"
 _CONFIG_KEY = "tdx:l2:config"
+
+# ---- 实时因子键的生命周期契约（写侧 TTL + 读侧新鲜度窗口）----
+# 这两个常数是一件事的两半：`compute_signal_scores` 在**整池**做截面标准化，
+# 池里混进陈料 = 今日每只标的的 z 都建立在跨会话的分布上。
+#   2026-09-23 实测：325 键中 212 个是 08-25~09-22 的陈料，且**全部 ttl=-1**
+#   （永不过期）——采集停过的标的会一直留在池里，日复一日拉偏分布。
+# 写侧 TTL 是不可逆的兜底（键最终一定会消失）；读侧窗口才是正确性保证
+# （池必须相对当前周期时间同质）。两者都要，缺一不可。
+_REALTIME_TTL = 4 * 3600          # 写侧兜底过期；**4h < 隔夜 18.5h** → 昨日的键绝无可能活到今天开盘
+_REALTIME_MAX_AGE_SEC = 900       # 读侧新鲜度窗口（15 min）
+# ↑ 900s 的出处：最坏情况下一个键的年龄 ≈ 轮内节奏 + 轮间间隔 + 限流礼让
+#   = 40s（50 只 ×2 次调用 × 0.4s）+ 150s（interval=max(60, pool_size*3)，pool_size≤50）
+#   + 限流时 ×2 → ≈340s。900s 给出约 2.6× 余量：既不会在正常抖动下把池子掏空
+#   （池 <5 只会整轮跳过 = 静默停摆），又远小于任何跨会话尺度。
 
 # 14 个回测推荐因子的 ICIR 权重（l2_recommended_factors.csv, 去 micro_pin 后 13 个）
 FACTOR_ICIR = {
@@ -252,7 +266,7 @@ def _vol_matrix(data: dict, col: int, key: str = "vol_4x4") -> float:
 class L2SeriesState:
     """单只股票的 60s 采样序列 + 时段基准。"""
 
-    __slots__ = ("samples", "zone_baselines", "prev_price")
+    __slots__ = ("prev_price", "samples", "zone_baselines")
 
     def __init__(self) -> None:
         self.samples: collections.deque = collections.deque(maxlen=SAMPLE_WINDOW)
@@ -540,9 +554,13 @@ async def _upsert_snapshot(
         await db.commit()
 
 
-def _redis_set_json(key: str, value: dict) -> None:
-    """经 RedisClient 包装层写 JSON（内部 json.dumps + 异常吞掉）。"""
-    trade_redis.set(key, value)
+def _redis_set_json(key: str, value: dict, ttl: int | None = None) -> None:
+    """经 RedisClient 包装层写 JSON（内部 json.dumps + 异常吞掉）。
+
+    ``ttl`` 是**必填的选择**：不传即永不过期。实时因子这类盘中量一律带上
+    ``_REALTIME_TTL``——历史上漏过一次（325 个键 ttl=-1，陈料累积一个月）。
+    """
+    trade_redis.set(key, value, ttl)
 
 
 async def run_tdx_l2_capture_task(interval_sec: int = 0) -> None:
@@ -647,7 +665,11 @@ async def run_tdx_l2_capture_task(interval_sec: int = 0) -> None:
                         "l2_tic_num": data.get("l2_tic_num"),
                         "l2_order_num": data.get("l2_order_num"),
                     }
-                    _redis_set_json(_REALTIME_KEY.format(symbol=prefix), redis_payload)
+                    _redis_set_json(
+                        _REALTIME_KEY.format(symbol=prefix),
+                        redis_payload,
+                        ttl=_REALTIME_TTL,
+                    )
                     saved += 1
                     processed += 1
                 except Exception as exc:  # noqa: BLE001 单只失败只跳过本只：

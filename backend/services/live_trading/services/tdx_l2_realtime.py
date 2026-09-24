@@ -19,16 +19,17 @@ import asyncio
 import logging
 import math
 import time
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any
 
-from backend.services.trade_shared.redis_client import redis_client as trade_redis
 from backend.services.live_trading.services.tdx_l2_capture_task import (
-    FACTOR_ICIR,
     _CONFIG_KEY,
     _REALTIME_KEY,
+    _REALTIME_MAX_AGE_SEC,
+    FACTOR_ICIR,
 )
 from backend.services.live_trading.services.tdx_push_service import tdx_pusher
+from backend.services.trade_shared.redis_client import redis_client as trade_redis
 from backend.shared.simulation_account_keys import resolve_db_account_user
 from backend.shared.stock_utils import StockCodeUtil
 
@@ -47,6 +48,11 @@ _CONFIG_DEFAULTS: dict[str, Any] = {
 }
 
 _STATUS_KEY = "tdx:l2:realtime:status"
+# 状态键是**活性键**：循环活着就每周期重写，死了就过期消失。
+# 「键不存在」与「从未跑过」语义相同（都是"没在跑"），故用短 TTL 而非长留存——
+# 长 TTL 会让一份早已停摆的状态看起来还活着。
+_STATUS_TTL_CYCLES = 10
+_STATUS_TTL_FLOOR = 600
 _SCORE_KEY = "tdx:l2:score:{symbol}"
 _COOLDOWN_KEY = "tdx:l2:cooldown:{symbol}"
 _INFLIGHT_KEY = "tdx:l2:inflight:{symbol}"
@@ -94,7 +100,29 @@ def _capture_is_stale(interval: float) -> bool:
         age = (datetime.now() - datetime.fromisoformat(str(last))).total_seconds()
         return age > max(interval * 3, 300)
     except Exception:
-        return False
+        # fail-closed：本函数的存在意义就是「避免拿断裂链路残留的陈旧 L2 因子下单」，
+        # 读不到状态时返回 False（=不陈旧）恰好放行了下单，与自身目的相反。
+        # 返回 True 只阻断**触发执行**，评分照常（见调用点注释）。
+        return True
+
+
+def _payload_age_sec(payload: dict[str, Any]) -> float | None:
+    """单条实时因子 payload 的年龄（秒）；``ts`` 缺失/不可解析 → None。
+
+    ``ts`` 由采集任务以 ``datetime.now().isoformat(timespec="seconds")`` 写入
+    （naive 上海墙钟），读写同进程同钟，故直接用 naive ``datetime.now()`` 作差。
+    出现 aware 时间戳时归一到本地钟再比（防御性，正常路径不会走到）。
+    """
+    raw = str(payload.get("ts") or "").strip()
+    if not raw:
+        return None
+    try:
+        ts = datetime.fromisoformat(raw)
+    except (TypeError, ValueError):
+        return None
+    if ts.tzinfo is not None:
+        ts = ts.astimezone().replace(tzinfo=None)
+    return (datetime.now() - ts).total_seconds()  # noqa: DTZ005 — naive 上海墙钟正是契约本身（写侧写它、读侧同钟比较）
 
 
 # ============ 配置 ============
@@ -390,7 +418,9 @@ async def _retry_inflight_orders(
     inflight = list_inflight()
     if not inflight:
         return stats
-    from backend.services.live_trading.services.tdx_rolling_trade_service import LOT_SIZE
+    from backend.services.live_trading.services.tdx_rolling_trade_service import (
+        LOT_SIZE,
+    )
 
     by_code: dict[str, list[dict]] = {}
     for o in today_orders:
@@ -619,7 +649,14 @@ async def run_tdx_l2_realtime_task(interval_sec: int = 0) -> None:
                 continue
             keys = trade_redis.client.scan_iter(match=_REALTIME_KEY.format(symbol="*"))
             pool_data: dict[str, dict[str, Any]] = {}
+            stale_skipped = 0
             for key in keys:
+                # 本模块每周期写的状态键 `tdx:l2:realtime:status` **就在池的扫描范围内**
+                # （前缀相同，见文件头 _STATUS_KEY）。排除掉，否则它会被当成一只标的
+                # 参与截面标准化——目前只是靠「状态字典里没有 symbol 字段」侥幸幸免，
+                # 真钱键空间上不留这种巧合。
+                if key == _STATUS_KEY:
+                    continue
                 payload = trade_redis.get(key)
                 if not isinstance(payload, dict):
                     continue
@@ -627,8 +664,23 @@ async def run_tdx_l2_realtime_task(interval_sec: int = 0) -> None:
                 if not isinstance(factors, dict):
                     continue
                 sym = str(payload.get("symbol") or "")
-                if sym:
-                    pool_data[sym] = payload
+                if not sym:
+                    continue
+                # 新鲜度闸门：截面标准化的分母是**同一时刻的**那批标的，
+                # 混进陈料会让今日每只标的的 z 都建立在跨会话的分布上。
+                # 取不到 ts 的按陈旧处理（fail-closed）——宁可少一只，不可偏一池。
+                age = _payload_age_sec(payload)
+                if age is None or age > _REALTIME_MAX_AGE_SEC:
+                    stale_skipped += 1
+                    continue
+                pool_data[sym] = payload
+            if stale_skipped and realtime_status.get("pool_stale_skipped") != stale_skipped:
+                logger.warning(
+                    "[TdxL2] 因子池丢弃 %d 个陈旧键（>%ds）——采集链路可能已部分停摆",
+                    stale_skipped,
+                    _REALTIME_MAX_AGE_SEC,
+                )
+            realtime_status["pool_stale_skipped"] = stale_skipped
             pool_factors = {s: p.get("factors") or {} for s, p in pool_data.items()}
             realtime_status["pool_size"] = len(pool_factors)
             if len(pool_factors) < 5:
@@ -798,7 +850,11 @@ async def run_tdx_l2_realtime_task(interval_sec: int = 0) -> None:
             # 8. 执行（先卖后买，同 rolling；桥断时上面已无买无卖, 天然跳过）
             if execute_mode != "off" and (buy_items or sell_items):
                 _, run_id, _ = await svc.load_latest_scores(tenant_id=tenant_id, user_id=user_id)
-                placed, failed = await _execute_signals(
+                # _execute_signals 返回**三元组** (placed, failed, error)。
+                # 曾按两元组解包 → 每轮 ValueError → 执行段整段跳过、L2 实时自动
+                # 交易从未下过单（分数照写, 界面看着是活的）。见回归用例
+                # test_execution_path_actually_reaches_broker。
+                placed, failed, exec_error = await _execute_signals(
                     tenant_id=tenant_id,
                     user_id=user_id,
                     run_id=run_id or "l2",
@@ -806,6 +862,8 @@ async def run_tdx_l2_realtime_task(interval_sec: int = 0) -> None:
                     sells=sell_items,
                     execute_mode=execute_mode,
                 )
+                if exec_error:
+                    logger.warning("[TdxL2] 执行段返回：%s", exec_error)
                 buys_all = [p for p in placed if p.get("side") == "buy"]
                 sells_all = [p for p in placed if p.get("side") == "sell"]
                 for item in placed:
@@ -870,7 +928,22 @@ async def run_tdx_l2_realtime_task(interval_sec: int = 0) -> None:
             )
         except Exception as exc:
             realtime_status["last_error"] = str(exc)
-            logger.warning("[TdxL2] 实时推理异常: %s", exc)
+            # exc_info 必须带上：本行曾只打 str(exc)，于是 "too many values to unpack"
+            # 这类缺陷在日志里没有文件行号，**潜伏了一整次重构周期**未被定位。
+            logger.warning("[TdxL2] 实时推理异常: %s", exc, exc_info=True)
+
+        # 状态镜像到 Redis。运维脚本 `tdx_live_status.py` 与「设置→实盘」页读的是
+        # `_STATUS_KEY`，而它**此前从未被写过**（定义在那儿，零引用）→ 监控面板
+        # 恒为空 {}，看不出循环是死是活。放在 try 之外：出错的周期也要如实上报。
+        if trade_redis.client is not None:
+            try:
+                trade_redis.set(
+                    _STATUS_KEY,
+                    dict(realtime_status),
+                    ttl=max(_STATUS_TTL_CYCLES * int(interval), _STATUS_TTL_FLOOR),
+                )
+            except Exception as exc:  # noqa: BLE001 — 镜像失败绝不影响主循环
+                logger.warning("[TdxL2] 状态镜像写入失败: %s", exc)
 
         elapsed = time.monotonic() - cycle_start
         await asyncio.sleep(max(5.0, interval - elapsed))
