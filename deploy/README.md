@@ -98,7 +98,7 @@ sudo bash deploy/update.sh --force
 sudo bash deploy/update.sh --no-build
 ```
 
-更新脚本只同步代码和核心容器，不会默认删除 PostgreSQL、Redis、`data/`、`models/` 或 `db/qlib_data/`，并会自动导入 `data/upgrade_*.sql` 数据库升级补丁（补丁需保持幂等，可重复执行）。
+更新脚本只同步代码和核心容器，不会默认删除 PostgreSQL、Redis、`data/`、`models/` 或 `db/qlib_data/`。数据库结构以 `backend/shared/db_init.sql` 为准：服务启动时自动幂等重放，其中第 66 节已合并原 `data/upgrade_v1.0.1 ~ v1.0.8` 全部补丁，负责把存量库拉齐（补列 / 补约束 / 订正 user_id / 瞬时列转 TIMESTAMPTZ）。若仍有后续增量补丁，新建 `data/upgrade_vX.Y.Z.sql`，`backend/main_oss.py` 会自动扫描并重放（需保持幂等、可重复执行）。
 
 ## 验证与排障
 

@@ -130,10 +130,12 @@ POST   /bindings/reconcile       从模型 metadata 回填引用
 
 ## 数据库落地
 
-- 新装：`backend/shared/db_init.sql` 第 64 节（元信息表 + binding 表）。
-- 存量升级：`data/upgrade_v1.0.5.sql`（v2 简化：补 file_path、DROP
-  version/member 表、状态归一）。启动期 `ensure_tables` 也会执行
-  `migrations/001_create_stock_pool.sql`（与两者一致，幂等）。
+- 结构唯一入口：`backend/shared/db_init.sql`
+  - 第 64 节：新装建全（元信息表 + binding 表，直接含 `file_path`）。
+  - 第 66.3 节：存量收敛（合并自 `upgrade_v1.0.4/1.0.5`）——补 `file_path`、
+    DROP v1 遗留的 version/member 表、状态归一 draft/published → active。
+- 启动期 `ensure_tables` 也会执行 `migrations/001_create_stock_pool.sql`
+  （与上面一致，幂等）。
 
 ## 边界（明确不做）
 

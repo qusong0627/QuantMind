@@ -2326,6 +2326,26 @@ CREATE INDEX IF NOT EXISTS idx_qm_stock_pool_binding_pool
     ON qm_stock_pool_binding (pool_id);
 
 -- ========================
+-- 65. SYSTEM_EVENTS（系统运行事件持久化时间线）
+-- 原为 data/upgrade_v1.0.2.sql，已合并进本文件
+-- 由 backend/shared/system_events.py 写入，管理后台 /admin/system-events 查询
+-- ========================
+CREATE TABLE IF NOT EXISTS system_events (
+    id          BIGSERIAL PRIMARY KEY,
+    event_type  VARCHAR(64)  NOT NULL,   -- service_lifecycle / health_transition / node_alert / data_sync / error
+    level       VARCHAR(16)  NOT NULL DEFAULT 'info',   -- info / warning / error / critical
+    source      VARCHAR(64)  NOT NULL,   -- quantmind-api / quantmind-engine / quantmind-stream / quantmind-trade / sync
+    title       TEXT         NOT NULL,
+    message     TEXT,
+    meta        JSONB        DEFAULT '{}'::jsonb,
+    created_at  TIMESTAMPTZ  NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_system_events_created ON system_events (created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_system_events_type   ON system_events (event_type);
+CREATE INDEX IF NOT EXISTS idx_system_events_level  ON system_events (level);
+
+-- ========================
 -- 默认管理员（admin / admin123）
 -- NOTE: 幂等，仅在不存在时创建，不覆盖用户已改密码；display_name / 头像由启动期 seed_data.py 负责
 -- ========================
@@ -2337,6 +2357,326 @@ WHERE NOT EXISTS (
     SELECT 1 FROM users WHERE tenant_id = 'default' AND username = 'admin'
 )
 ON CONFLICT (user_id) DO NOTHING;
+
+-- ============================================================
+-- 66. 存量库收敛（合并自 data/upgrade_v1.0.1 ~ v1.0.8）
+--
+-- 这 8 个增量补丁已合并进本文件，data/upgrade_v1.0.*.sql 不再单独维护。
+-- 为什么需要本节（而不是只靠上面的建表语句）：
+--   CREATE TABLE IF NOT EXISTS 不会改动已存在的表，所以「曾经按旧版本建过表」
+--   的存量库即便跑过本文件也补齐不了新增列 / 唯一约束 / 数据订正。
+-- 全部语句幂等（IF NOT EXISTS / DO + 异常兜底），可重复执行：
+--   - 新库：上面第 1~65 节已直接建全，本节基本是 no-op；
+--   - 存量库：靠本节把老结构拉齐，避免 column does not exist 等线上报错。
+-- 写法约束：本节不得出现百分号字符（psycopg2 fallback 路径会误解析，
+--           故统一用 quote_ident / quote_literal 拼接 + NOTICE 字符串连接）。
+-- 执行时机：每次服务启动由 backend/main_oss.py 自动重跑，无需手工干预。
+-- ============================================================
+
+-- ---- 66.1（原 v1.0.1）real_trading_preflight_snapshots 唯一约束 ----
+--     代码用 ON CONFLICT ON CONSTRAINT 依赖该约束；缺失会导致每次落库抛
+--     UndefinedObjectError 并刷屏。
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'uq_preflight_snapshot_daily'
+    ) THEN
+        ALTER TABLE real_trading_preflight_snapshots
+            ADD CONSTRAINT uq_preflight_snapshot_daily
+            UNIQUE (tenant_id, user_id, trading_mode, snapshot_date);
+    END IF;
+END $$;
+
+-- ---- 66.2（原 v1.0.3）news_article_enrichment 补 title 列 ----
+--     enricher.py 的 upsert 引用该列，缺失会让 news_enrich_recent 首条写入即报错
+ALTER TABLE news_article_enrichment
+    ADD COLUMN IF NOT EXISTS title TEXT;
+
+-- ---- 66.3（原 v1.0.4 / v1.0.5）全局股票池 v2 收敛 ----
+--     v1 用「元信息 + 版本表 + 成员表 + parquet 快照」重型模型，v2 收敛为
+--     元信息单表 + 前缀式 TXT 成员。上面第 64 节已按 v2 建全，本节只处理存量：
+-- 元信息表补 file_path（若库还是 v1 结构）
+ALTER TABLE qm_stock_pool ADD COLUMN IF NOT EXISTS file_path TEXT;
+
+-- v1 遗留表清理（v2 不再使用）
+DROP TABLE IF EXISTS qm_stock_pool_member;
+DROP TABLE IF EXISTS qm_stock_pool_version;
+
+-- 状态归一：v1 的 draft/published 行统一改为 active（无发布语义了）
+UPDATE qm_stock_pool
+   SET status = 'active'
+ WHERE status IN ('draft', 'published');
+
+-- ---- 66.4（原 v1.0.6）管理员 user_id 纠正：'admin' → '00000001' ----
+--     背景：db_init.sql 曾 seed user_id='admin' 的坏行（username='admin' 正确），
+--     且 seed 按 username 判存在后跳过。登录 JWT 的 sub 取 user_id，全链路
+--     （信号表/池目录/Redis 键）用的都是它，与 8 位规范 ID 不一致。
+--     整数型 user_id 列（strategies/replay_sessions 等存 users.id）不受影响。
+--     Redis 键与 JWT 刷新不在 SQL 范围（重登一次即可；全量迁移跑
+--     backend/scripts/migrate_legacy_user_ids.py）。
+--     FK 说明：4 个指向 users(user_id) 的约束为即时检查，子表先改则子侧校验
+--     失败、父表先改则父侧校验失败，故先卸后建（原名，与 db_init.sql 一致）。
+DO $$
+DECLARE
+    t TEXT;
+    n INT;
+    fk TEXT[][];
+    f TEXT[];
+BEGIN
+    fk := ARRAY[
+        ['user_roles', 'user_roles_user_id_fkey'],
+        ['identity_verifications', 'identity_verifications_user_id_fkey'],
+        ['notifications', 'notifications_user_id_fkey'],
+        ['password_reset_tokens', 'password_reset_tokens_user_id_fkey']
+    ];
+
+    -- 1. 卸 FK（IF EXISTS，老库无约束也不报错）
+    FOREACH f SLICE 1 IN ARRAY fk LOOP
+        BEGIN
+            EXECUTE 'ALTER TABLE ' || quote_ident(f[1])
+                || ' DROP CONSTRAINT IF EXISTS ' || quote_ident(f[2]);
+        EXCEPTION WHEN OTHERS THEN
+            RAISE NOTICE 'merge 66.4 drop FK skipped';
+        END;
+    END LOOP;
+
+    -- 2. 全库字符型 user_id 列 sweep（users 表最后单独处理）
+    FOR t IN
+        SELECT table_name FROM information_schema.columns
+        WHERE table_schema = 'public' AND column_name = 'user_id'
+          AND data_type IN ('character varying', 'character', 'text')
+          AND table_name <> 'users'
+        ORDER BY table_name
+    LOOP
+        BEGIN
+            EXECUTE 'UPDATE ' || quote_ident(t)
+                || ' SET user_id = ' || quote_literal('00000001')
+                || ' WHERE user_id = ' || quote_literal('admin');
+            GET DIAGNOSTICS n = ROW_COUNT;
+            IF n > 0 THEN
+                RAISE NOTICE 'merge 66.4 sweep done';
+            END IF;
+        EXCEPTION WHEN OTHERS THEN
+            RAISE NOTICE 'merge 66.4 sweep skipped';
+        END;
+    END LOOP;
+
+    -- 3. users 主行
+    BEGIN
+        UPDATE users SET user_id = '00000001' WHERE user_id = 'admin';
+        GET DIAGNOSTICS n = ROW_COUNT;
+        IF n > 0 THEN
+            RAISE NOTICE 'merge 66.4 users row fixed';
+        END IF;
+    EXCEPTION WHEN OTHERS THEN
+        RAISE NOTICE 'merge 66.4 sweep users skipped';
+    END;
+
+    -- 4. 原名建回 FK
+    FOREACH f SLICE 1 IN ARRAY fk LOOP
+        BEGIN
+            EXECUTE 'ALTER TABLE ' || quote_ident(f[1])
+                || ' ADD CONSTRAINT ' || quote_ident(f[2])
+                || ' FOREIGN KEY (user_id) REFERENCES users(user_id)';
+        EXCEPTION WHEN OTHERS THEN
+            RAISE NOTICE 'merge 66.4 add FK skipped';
+        END;
+    END LOOP;
+
+    -- 5. 模拟盘整型/字符 user_id：sim 账户 0 → 1。
+    --    背景：旧 admin 的 sub 非数字，sim 侧被映射为 user 0；纠正后新身份读
+    --    user 1，资金会 stranded。仅当目标 user 1 完全无行时才搬（NOT EXISTS
+    --    守卫，绝不覆盖已有账户）；部分表已存在 user 1 行时跳过并 NOTICE。
+    FOR t IN
+        SELECT x FROM (VALUES
+            ('simulation_accounts'),
+            ('simulation_cash_ledger'),
+            ('simulation_fills'),
+            ('simulation_position_lots'),
+            ('simulation_position_daily'),
+            ('simulation_account_daily'),
+            ('simulation_fund_snapshots'),
+            ('simulation_orders'),
+            ('simulation_rebalance_jobs'),
+            ('simulation_reconcile_reports'),
+            ('sim_orders'),
+            ('sim_trades')
+        ) AS v(x)
+        WHERE EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_schema = 'public' AND table_name = v.x
+              AND column_name = 'user_id'
+        )
+        ORDER BY 1
+    LOOP
+        BEGIN
+            EXECUTE 'UPDATE ' || quote_ident(t)
+                || ' SET user_id = ' || quote_literal('1')
+                || ' WHERE user_id::text = ' || quote_literal('0')
+                || ' AND NOT EXISTS (SELECT 1 FROM ' || quote_ident(t)
+                || ' WHERE user_id::text = ' || quote_literal('1') || ')';
+            GET DIAGNOSTICS n = ROW_COUNT;
+            IF n > 0 THEN
+                RAISE NOTICE 'merge 66.4 sim moved';
+            END IF;
+        EXCEPTION WHEN OTHERS THEN
+            RAISE NOTICE 'merge 66.4 sim skipped';
+        END;
+    END LOOP;
+END $$;
+
+-- ---- 66.5（原 v1.0.7）模拟成交瞬时列统一为 TIMESTAMPTZ ----
+--     背景：sim_trades.executed_at 在旧升级脚本里是 timestamptz，新 ORM 一度按
+--     TIMESTAMP WITHOUT TIME ZONE 写 naive UTC。asyncpg 按真实列类型编码，
+--     旧库（timestamptz + naive）和新库（timestamp + aware）会交替报
+--     "can't subtract offset-naive and offset-aware datetimes"，成交整笔回滚。
+--     本段把瞬时列统一成 timestamptz，与 UtcDateTime + aware UTC 写入对齐
+--     （存量 naive 值按 UTC 解释，禁止当上海墙钟）。
+DO $$
+DECLARE
+    rec RECORD;
+BEGIN
+    FOR rec IN
+        SELECT c.table_name, c.column_name
+        FROM information_schema.columns c
+        WHERE c.table_schema = 'public'
+          AND c.table_name IN ('sim_trades', 'sim_orders')
+          AND c.column_name IN (
+              'executed_at', 'submitted_at', 'filled_at', 'cancelled_at',
+              'created_at', 'updated_at'
+          )
+          AND c.data_type = 'timestamp without time zone'
+    LOOP
+        EXECUTE 'ALTER TABLE ' || quote_ident(rec.table_name)
+            || ' ALTER COLUMN ' || quote_ident(rec.column_name)
+            || ' TYPE timestamptz USING '
+            || quote_ident(rec.column_name)
+            || ' AT TIME ZONE ' || quote_literal('UTC');
+        RAISE NOTICE 'merge 66.5 converted timestamp column to timestamptz';
+    END LOOP;
+END $$;
+
+-- ---- 66.6（原 v1.0.7 / v1.0.8）管理员 user_id 收口为 10000001 ----
+--     v1.0.7 把 users.user_id 纠正和加 FK 拆成独立语句（v1.0.6 放同一 DO 块，
+--     后面失败会整段回滚，线上仍可能停在 user_id='admin'）。
+--     v1.0.8 再把 00000001 收口成 10000001：规范 ID 曾以 0 开头，
+--     Python int('00000001') = 1，JWT sub 与模拟账户键错位，仪表盘显示总资产 0。
+--     本节只改字符型 user_id（含 users）以及模拟盘整数 user_id
+--     （sim_orders / sim_trades）。strategies.user_id 存的是 users.id
+--     主键，不要改。
+ALTER TABLE user_roles DROP CONSTRAINT IF EXISTS user_roles_user_id_fkey;
+ALTER TABLE identity_verifications DROP CONSTRAINT IF EXISTS identity_verifications_user_id_fkey;
+ALTER TABLE notifications DROP CONSTRAINT IF EXISTS notifications_user_id_fkey;
+ALTER TABLE password_reset_tokens DROP CONSTRAINT IF EXISTS password_reset_tokens_user_id_fkey;
+
+DO $$
+DECLARE
+    t TEXT;
+    old_id TEXT;
+BEGIN
+    FOREACH old_id IN ARRAY ARRAY['admin', '00000001']
+    LOOP
+        FOR t IN
+            SELECT table_name FROM information_schema.columns
+            WHERE table_schema = 'public' AND column_name = 'user_id'
+              AND data_type IN ('character varying', 'character', 'text')
+              AND table_name <> 'users'
+            ORDER BY table_name
+        LOOP
+            BEGIN
+                EXECUTE 'UPDATE ' || quote_ident(t)
+                    || ' SET user_id = ' || quote_literal('10000001')
+                    || ' WHERE user_id = ' || quote_literal(old_id);
+            EXCEPTION WHEN OTHERS THEN
+                RAISE NOTICE 'merge 66.6 sweep skipped';
+            END;
+        END LOOP;
+    END LOOP;
+END $$;
+
+UPDATE users SET user_id = '10000001'
+ WHERE user_id IN ('admin', '00000001')
+   AND NOT EXISTS (SELECT 1 FROM users WHERE user_id = '10000001');
+
+DO $$
+BEGIN
+    BEGIN
+        ALTER TABLE user_roles
+            ADD CONSTRAINT user_roles_user_id_fkey
+            FOREIGN KEY (user_id) REFERENCES users(user_id);
+    EXCEPTION WHEN duplicate_object THEN
+        NULL;
+    WHEN OTHERS THEN
+        RAISE NOTICE 'merge 66.6 add user_roles FK skipped';
+    END;
+    BEGIN
+        ALTER TABLE identity_verifications
+            ADD CONSTRAINT identity_verifications_user_id_fkey
+            FOREIGN KEY (user_id) REFERENCES users(user_id);
+    EXCEPTION WHEN duplicate_object THEN
+        NULL;
+    WHEN OTHERS THEN
+        RAISE NOTICE 'merge 66.6 add identity_verifications FK skipped';
+    END;
+    BEGIN
+        ALTER TABLE notifications
+            ADD CONSTRAINT notifications_user_id_fkey
+            FOREIGN KEY (user_id) REFERENCES users(user_id);
+    EXCEPTION WHEN duplicate_object THEN
+        NULL;
+    WHEN OTHERS THEN
+        RAISE NOTICE 'merge 66.6 add notifications FK skipped';
+    END;
+    BEGIN
+        ALTER TABLE password_reset_tokens
+            ADD CONSTRAINT password_reset_tokens_user_id_fkey
+            FOREIGN KEY (user_id) REFERENCES users(user_id);
+    EXCEPTION WHEN duplicate_object THEN
+        NULL;
+    WHEN OTHERS THEN
+        RAISE NOTICE 'merge 66.6 add password_reset_tokens FK skipped';
+    END;
+END $$;
+
+-- 模拟资金快照：历史 0 / 1 / 00000001 / admin -> 10000001
+-- 同一天已有规范行则跳过，避免 UNIQUE (tenant_id, user_id, snapshot_date)
+DO $$
+BEGIN
+    IF to_regclass('public.simulation_fund_snapshots') IS NULL THEN
+        RETURN;
+    END IF;
+    UPDATE simulation_fund_snapshots s
+       SET user_id = '10000001'
+     WHERE s.user_id IN ('0', '1', '00000001', 'admin')
+       AND NOT EXISTS (
+           SELECT 1 FROM simulation_fund_snapshots x
+            WHERE x.tenant_id = s.tenant_id
+              AND x.user_id = '10000001'
+              AND x.snapshot_date = s.snapshot_date
+       );
+EXCEPTION WHEN OTHERS THEN
+    RAISE NOTICE 'merge 66.6 snapshots skipped';
+END $$;
+
+-- 模拟委托/成交整数 user_id：0 / 1 -> 10000001
+DO $$
+BEGIN
+    IF to_regclass('public.sim_orders') IS NOT NULL THEN
+        UPDATE sim_orders SET user_id = 10000001 WHERE user_id IN (0, 1);
+    END IF;
+EXCEPTION WHEN OTHERS THEN
+    RAISE NOTICE 'merge 66.6 sim_orders skipped';
+END $$;
+
+DO $$
+BEGIN
+    IF to_regclass('public.sim_trades') IS NOT NULL THEN
+        UPDATE sim_trades SET user_id = 10000001 WHERE user_id IN (0, 1);
+    END IF;
+EXCEPTION WHEN OTHERS THEN
+    RAISE NOTICE 'merge 66.6 sim_trades skipped';
+END $$;
 
 -- ========================
 -- DONE - 所有缺失表已创建

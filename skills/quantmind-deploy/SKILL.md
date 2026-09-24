@@ -285,10 +285,10 @@ docker compose up -d
 | 1 拉代码   | `git fetch origin $REF`；分支走 `checkout -B`,tag 走 `checkout --detach`；有未提交改动且未加 `--force` 时终止，`--force` 时 `reset --hard` + `clean`（排除 `data/models/db/logs/user_pools_local/.env`） | 否                           |
 | 2 重建后端  | `docker compose build quantmind`（`--no-build` 跳过）                                                                                                                                | 否                           |
 | 3 重启服务  | `up -d --no-deps --force-recreate quantmind [celery-worker celery-beat]` + `up -d --remove-orphans`                                                                              | 否                           |
-| 4 数据库升级 | 扫描并执行 `data/upgrade_*.sql`（经 db 容器 `psql`）；**无去重/版本表/自动备份**，补丁需自身幂等                                                                                                              | 否（PG 数据在 `postgres-data` 卷） |
+| 4 数据库升级 | 扫描并执行 `data/upgrade_*.sql`（经 db 容器 `psql`）；**无去重/自动备份**，补丁需自身幂等。历史补丁 v1.0.1~v1.0.8 已合并进 `backend/shared/db_init.sql` 第 66 节 | 否（PG 数据在 `postgres-data` 卷） |
 | 5 健康检查  | `curl http://127.0.0.1:8000/health`（30 次 × 2s），失败即终止                                                                                                                             | 否                           |
 
-> ⚠️ 数据库补丁为**可重复执行的幂等 SQL**：每次 update 都会重跑一遍所有 `data/upgrade_*.sql`（无去重记录），需用 `IF NOT EXISTS` 等自防重。打新版本补丁时在 `data/` 新增 `upgrade_vX.Y.Z.sql` 即可，不用改脚本。
+> ⚠️ 数据库结构以 `backend/shared/db_init.sql` 为准，服务启动时幂等重放：新库按第 1~65 节建全，存量库靠第 66 节（已合并原 `upgrade_v1.0.1~v1.0.8`）补列 / 补约束 / 订正数据。`data/upgrade_*.sql` 仅承接后续新补丁，每次 update 都会重跑一遍（无去重记录），必须用 `IF NOT EXISTS` 等自防重；打新补丁时在 `data/` 新增 `upgrade_vX.Y.Z.sql` 即可，不用改脚本。
 
 > ⚠️ update.sh 只重建后端 `quantmind` 镜像，**不** `build web`/data-gateway/dashboard。前端或可选服务代码有改动时，需走离线包成品镜像或手动 `docker compose build` 对应服务。
 

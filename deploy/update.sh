@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # QuantMind 一键更新脚本
 # 核心流程：拉代码 → 重建/重启后端容器 → 跑 data/upgrade_*.sql → 同步 QwenPaw 技能与人格 → 健康检查。
+# 数据库结构以 backend/shared/db_init.sql 为唯一入口（服务启动幂等重放）；其中第 66 节已合并
+# 原 data/upgrade_v1.0.1 ~ v1.0.8，负责把存量库拉齐。本脚本第 4 步只处理后续新增的补丁文件。
 # db/redis/qwenpaw 等基础设施容器不强制重启（仅 compose 配置漂移时按需重建；qwenpaw 在技能同步后重启一次使新技能生效）。
 # 用法：sudo bash deploy/update.sh [--ref master] [--remote gitee|github|origin] [--force] [--no-build] [--skip-backup] [--skip-skills]
 

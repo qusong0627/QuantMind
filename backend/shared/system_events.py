@@ -1,7 +1,8 @@
 """「最近事件」系统运行事件统一写入器。
 
 把 QuantMind 各服务的运行活动（启停、健康迁移、节点阈值告警、数据同步结果）
-收敛写入一张持久化表 ``system_events``（由 ``data/upgrade_v1.0.2.sql`` 建表），
+收敛写入一张持久化表 ``system_events``（由 ``backend/shared/db_init.sql``
+第 65 节建表，原 ``data/upgrade_v1.0.2.sql`` 已合并入该文件），
 供管理后台 ``/api/v1/admin/system-events`` 查询成一条可回查的「最近事件」时间线。
 
 写入走共享同步 PG 池（``backend/shared/database_pool``），低频操作：

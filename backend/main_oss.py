@@ -422,7 +422,11 @@ def _ensure_database_schema():
 
 
 def _upgrade_script_paths() -> list[str]:
-    """升级 SQL 候选路径（去重保序）。
+    """未来增量补丁 SQL 的候选路径（去重保序）。
+
+    历史补丁 v1.0.1 ~ v1.0.8 已合并进 backend/shared/db_init.sql 第 66 节
+    （存量库收敛），data/upgrade_v1.0.*.sql 不再维护。这里保留扫描能力，
+    供后续新增的 data/upgrade_vX.Y.Z.sql 使用。
 
     /app/data 是历史路径（容器里常是 uploads）；compose 把仓库 data/ 挂到 /data。
     再扫仓库相对路径，避免本地直接跑 main_oss 时漏脚本。
@@ -446,11 +450,10 @@ def _upgrade_script_paths() -> list[str]:
 
 
 def _ensure_upgrade_scripts(env: dict) -> None:
-    """执行 /app/data/upgrade_*.sql 增量迁移（system_events、news title 等）。
+    """执行 /app/data/upgrade_*.sql 增量迁移。
 
-    幂等（均含 IF NOT EXISTS / DO IF NOT EXISTS），可重复执行，避免
-    新表/新列因未自动迁移而导致线上 500（如 system_events 缺失、
-    news_article_enrichment.title 缺失）。
+    v1.0.1 ~ v1.0.8 已合并进 db_init.sql 第 66 节，随主初始化一起幂等重放，
+    此处只处理后续新增补丁；新库第一次部署也不会因此缺表缺列。
     """
     import glob as _glob
     import subprocess as _sp
