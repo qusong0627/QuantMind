@@ -575,7 +575,84 @@ class TestHealthCountsOverrides:
 
 
 # --------------------------------------------------------------------------
-# 6. CLI
+# 6. 对外同步端点：SQL 打得中真表
+# --------------------------------------------------------------------------
+class TestPublicSyncCalendarEndpoint:
+    """``/api/v1/public/sync/calendar`` 的取数语句必须能打到**真表**上。
+
+    这条守的是一次真实事故：该端点把列名写成 ``day``（实表是 ``trade_date``），
+    于是每次调用都 500、**从未返回过一行**——而它那一整份加固测试只钉「匿名要
+    401」，一个永远 500 的端点在那些用例下照样全绿。假库也测不出来（假库回固定
+    行，不看 SQL）。所以这里真连库跑一次，并且做**反向对照**：同一个 SQL 把列名
+    换回 ``day`` 必须真的抛错（否则这条用例证明不了它修的是什么）。
+    """
+
+    def test_endpoint_sql_runs_against_the_real_table(self) -> None:
+        from backend.services.api.routers import public_sync
+        from backend.shared.database_manager_v2 import close_database, get_session
+
+        tenant, user = _scope()
+        day = _first_day_beyond_library_coverage("CN")
+
+        async def _main() -> tuple[dict, str]:
+            await _fresh_pool()
+            try:
+                await seed.apply_rows(
+                    market="CN",
+                    rows=[seed.DayRow(trade_date=day, is_trading_day=False)],
+                    tenant_id=tenant,
+                    user_id=user,
+                    source=seed.SEED_SOURCE,
+                    version="test",
+                )
+                # 逐参数显式传：FastAPI 的 Query(...) 默认值在**直调**时是个对象
+                # （恒真），不传就会把 Query 实例当参数发给库——本仓踩过这个坑
+                payload = await public_sync.sync_calendar(
+                    start_date=day,
+                    end_date=day,
+                    tenant_id=tenant,
+                    user_id=user,
+                )
+                # 反向对照：同一条语句把列名换回 day 必须炸（证明这条用例不是空过）
+                from sqlalchemy import text
+
+                broken = ""
+                try:
+                    async with get_session(read_only=True) as session:
+                        await session.execute(
+                            text(
+                                "SELECT trade_date, market, is_trading_day FROM "
+                                "qm_market_calendar_day WHERE day >= :d"
+                            ),
+                            {"d": day},
+                        )
+                except Exception as exc:  # noqa: BLE001 - 这里就是要它炸
+                    broken = type(exc).__name__
+                return payload, broken
+            finally:
+                await _purge(tenant)
+                await close_database()
+
+        payload, broken = asyncio.run(_main())
+
+        rows = payload["data"]
+        # 播种是按查询键组的 —— 同一天在 CN/SSE/SZSE 三个键下各一行
+        assert len(rows) == len(seed.market_keys("CN")), rows
+        assert [r["trade_date"] for r in rows] == [day] * len(rows), rows
+        assert {r["market"] for r in rows} == set(seed.market_keys("CN")), rows
+        assert all(r["is_trading_day"] is False for r in rows)
+        assert set(rows[0]) == {
+            "trade_date",
+            "market",
+            "is_trading_day",
+            "source",
+            "version",
+        }, rows[0]
+        assert broken, "把列名换回 day 竟然没炸——真表上真的存在 day 列？"
+
+
+# --------------------------------------------------------------------------
+# 7. CLI
 # --------------------------------------------------------------------------
 def _write_holidays(tmp_path: Path, year: int) -> Path:
     path = tmp_path / f"holidays-{year}.txt"

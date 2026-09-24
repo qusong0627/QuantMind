@@ -19,6 +19,13 @@
 API Key，**不要**加匿名开关绕回去。
 
 本 router 在仓库内没有任何调用方（前端/测试/其他代码都无），改动不影响站内功能。
+
+2026-09-24 修
+-------------
+``/calendar`` 用的列名是 ``day``，实表（``qm_market_calendar_day``）是
+``trade_date`` ⇒ 每次调用 500，**从未成功返回过一行**。加固那一轮只审了鉴权与
+凭据，一个「永远 500 的端点」在鉴权用例下照样全绿——所以这次补了一条真连库的
+行为用例（真 SQL 打到真表上），并把 ``SELECT *`` 收窄成显式列。
 """
 
 from __future__ import annotations
@@ -33,6 +40,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from backend.shared.auth import get_current_user
 from backend.shared.database_manager_v2 import get_session
+from backend.shared.market_calendar_seed import DEFAULT_TENANT, DEFAULT_USER
 from backend.shared.runtime_secrets import get_secret
 
 #: 远程库地址的配置键。runtime.env 权威（管理台可热换）→ 环境变量 → 未配置即拒。
@@ -145,16 +153,35 @@ async def sync_feature_data(
 async def sync_calendar(
     start_date: date = Query(..., description="Start date"),
     end_date: date | None = None,
+    tenant_id: str = Query(
+        DEFAULT_TENANT, description="作用域租户（默认 default）"
+    ),
+    user_id: str = Query(DEFAULT_USER, description="作用域用户（* = 全局兜底）"),
 ) -> dict[str, Any]:
+    """同步交易日历（``qm_market_calendar_day``）。
+
+    2026-09-24 修：本端点此前把列名写成 ``day``，而实表列名是 ``trade_date``
+    ——每次调用都抛 ``UndefinedColumnError``（500），**从未成功返回过一行**。
+    同时把 ``SELECT *`` 收窄成显式列：原写法会把 ``tenant_id`` / ``user_id`` /
+    ``metadata`` 一起带出去（同步方要的是「哪天开市」，不是库内的作用域标记）。
+
+    作用域默认 ``('default','*')``＝**全局兜底**（播种器 CLI 的默认落点，也是任何
+    (tenant,user) 查询 override 时的最后一档），要取某个租户的专属覆盖就显式传参。
     """
-    同步交易日历
-    """
-    sql = "SELECT * FROM qm_market_calendar_day WHERE day >= :s_date"
-    params: dict[str, Any] = {"s_date": start_date}
+    sql = (
+        "SELECT trade_date, market, is_trading_day, source, version "
+        "FROM qm_market_calendar_day "
+        "WHERE tenant_id = :tenant AND user_id = :user AND trade_date >= :s_date"
+    )
+    params: dict[str, Any] = {
+        "tenant": tenant_id,
+        "user": user_id,
+        "s_date": start_date,
+    }
     if end_date:
-        sql += " AND day <= :e_date"
+        sql += " AND trade_date <= :e_date"
         params["e_date"] = end_date
-    sql += " ORDER BY day ASC"
+    sql += " ORDER BY market, trade_date"
 
     async with get_session(read_only=True) as session:
         result = await session.execute(text(sql), params)

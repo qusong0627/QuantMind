@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import re
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -183,3 +184,74 @@ def test_remote_url_actually_flows_through_dsn_validation(
     url = public_sync.resolve_remote_db_url()  # 取值这一步不校验
     with pytest.raises(RuntimeError):
         public_sync._async_dsn(url)
+
+
+# ---------------------------------------------------------------------------
+# 4. /calendar 真的能取到行（2026-09-24 修：列名 day → trade_date）
+# ---------------------------------------------------------------------------
+
+
+class _CapturingSession:
+    """记下发给库的 SQL 与参数，再回几行——用于断言**取数语句的形状**。
+
+    真正的「这条 SQL 打得中真表」由 ``test_market_calendar_seed.py`` 那条真库用例
+    负责；这里只管形状（列名 / 投影 / 作用域），因为它能跑在无库环境里。
+    """
+
+    def __init__(self) -> None:
+        self.sql = ""
+        self.params: dict = {}
+
+    async def execute(self, clause, params=None):
+        self.sql = str(clause)
+        self.params = dict(params or {})
+
+        class _Result:
+            @staticmethod
+            def __iter__():
+                return iter([])
+
+        return _Result()
+
+
+class _Ctx:
+    def __init__(self, session: _CapturingSession) -> None:
+        self._session = session
+
+    async def __aenter__(self) -> _CapturingSession:
+        return self._session
+
+    async def __aexit__(self, *exc) -> bool:
+        return False
+
+
+def test_calendar_reads_the_real_column_names(monkeypatch: pytest.MonkeyPatch) -> None:
+    """取数语句必须用实表列名 ``trade_date``，且不得把作用域列带出去。
+
+    此前是 ``WHERE day >= …``——实表没有 ``day`` 列，端点每次 500。这类「列名写错」
+    用假库测不出来（假库回固定行），所以这里钉 SQL 文本，另一处钉真库能跑通。
+    """
+    import asyncio
+
+    session = _CapturingSession()
+    monkeypatch.setattr(public_sync, "get_session", lambda **_kw: _Ctx(session))
+
+    asyncio.run(
+        public_sync.sync_calendar(
+            start_date=date(2027, 1, 1),
+            end_date=date(2027, 1, 31),
+            tenant_id="default",
+            user_id="*",
+        )
+    )
+
+    assert " trade_date " in session.sql
+    assert " day " not in session.sql, session.sql
+    assert "SELECT *" not in session.sql, "SELECT * 会把 tenant_id/user_id/metadata 带出去"
+    assert "tenant_id = :tenant" in session.sql and "user_id = :user" in session.sql
+    assert session.params == {
+        "tenant": "default",
+        "user": "*",
+        "s_date": date(2027, 1, 1),
+        "e_date": date(2027, 1, 31),
+    }
