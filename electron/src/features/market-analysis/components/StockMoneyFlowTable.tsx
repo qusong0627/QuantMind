@@ -213,7 +213,7 @@ export const StockMoneyFlowTable: React.FC<StockMoneyFlowTableProps> = ({
       ),
     },
     {
-      title: '股票代码 / 名称',
+      title: '股票代码',
       dataIndex: 'symbol',
       key: 'symbol',
       width: 165,
@@ -336,7 +336,7 @@ export const StockMoneyFlowTable: React.FC<StockMoneyFlowTableProps> = ({
       ),
     },
     {
-      title: '股票代码 / 名称',
+      title: '股票代码',
       dataIndex: 'symbol',
       key: 'symbol',
       width: 145,

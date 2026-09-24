@@ -151,7 +151,7 @@ export const TagLookupPanel: React.FC = () => {
       render: (_, __, i) => <span className="font-mono text-xs font-bold text-purple-600">{i + 1}</span>,
     },
     {
-      title: '股票代码 / 名称',
+      title: '股票代码',
       dataIndex: 'symbol',
       key: 'symbol',
       width: 170,
