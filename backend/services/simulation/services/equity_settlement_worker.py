@@ -181,6 +181,7 @@ account.market_value = long_mv
 account.long_market_value = long_mv
 account.short_market_value = short_mv
 account.total_asset = tonumber(account.cash or 0) + long_mv - short_mv
+account.equity = account.total_asset
 
 redis.call("SET", key, cjson.encode(account))
 return cjson.encode({success=true, changed=changed, total_asset=account.total_asset})

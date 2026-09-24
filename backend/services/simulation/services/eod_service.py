@@ -165,6 +165,10 @@ async def _execute_eod(trade_date: date) -> bool:
             projection_svc = SimulationProjectionService(session)
             snapshot_svc = SimulationDailySnapshotService(session)
 
+            # 预热本地日线缓存：取价优先 local_market_data（权威日线源），
+            # 单次全市场加载后逐股命中缓存，避免并发重复读分区。
+            await asyncio.to_thread(_prime_local_close_cache_sync)
+
             # P0-2：逐户独立提交。单户异常只回滚该户，不污染后续户事务；
             # P0-6：total计入Redis侧short_proceeds，与盘中equity口径对齐。
             failed_accounts = 0
@@ -369,7 +373,56 @@ def _rebuild_redis(
     write_trade_account_cache(redis_client, tenant_id, user_id, payload)
 
 
+def _local_close_price_sync(symbol: str) -> float:
+    """本地 parquet 日线最近交易日收盘价（同步磁盘 IO，调用方须放线程）。
+
+    与权益结算 worker 的兜底口径一致：local_market_data 是模拟盘权威日线源，
+    随数据同步落盘；stock_daily_latest 只在同步开启后刷新，未配置时会长期停在
+    旧日期，导致日终权益被打回 T-1 甚至更早。
+    """
+    try:
+        from backend.services.simulation.services.local_market_data import (
+            get_local_market_data,
+        )
+
+        lmd = get_local_market_data("CN")
+        trade_date = lmd.latest_trade_date()
+        if trade_date is None:
+            return 0.0
+        bar = lmd.get_bar(symbol, trade_date)
+        if bar is None:
+            return 0.0
+        close = float(bar.close or 0.0)
+        return close if close > 0 else 0.0
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Local daily close load failed %s: %s", symbol, exc)
+        return 0.0
+
+
+def _prime_local_close_cache_sync() -> None:
+    """预热本地日线缓存，避免并发取价时重复读取同一分区。"""
+    try:
+        from backend.services.simulation.services.local_market_data import (
+            get_local_market_data,
+        )
+
+        lmd = get_local_market_data("CN")
+        trade_date = lmd.latest_trade_date()
+        if trade_date is not None:
+            lmd.load_date(trade_date)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Prime local daily cache failed: %s", exc)
+
+
 async def _load_close_price(session, symbol: str) -> float:
+    """EOD 收盘价：本地 parquet 日线优先，PG stock_daily_latest 兜底。
+
+    本地 parquet 缺失（同步未落盘/新标的）时才回退到 PG 快照表。
+    """
+    local_price = await asyncio.to_thread(_local_close_price_sync, symbol)
+    if local_price > 0:
+        return local_price
+
     from sqlalchemy import text
     from backend.shared.stock_utils import StockCodeUtil
 

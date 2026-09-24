@@ -229,6 +229,7 @@ account.cash = new_cash
 account.positions = positions
 account.market_value = total_market_value
 account.total_asset = new_cash + total_market_value
+account.equity = account.total_asset
 
 redis.call("SET", key, cjson.encode(account))
 return cjson.encode({success=true})

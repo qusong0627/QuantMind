@@ -131,13 +131,12 @@ def test_daily_close_fallback_allowed_shanghai_window(monkeypatch):
 def test_eod_default_trigger_after_six():
     from pathlib import Path
 
-    source = Path("backend/services/simulation/services/eod_service.py").read_text(
-        encoding="utf-8"
+    services = (
+        Path(__file__).resolve().parents[1] / "services" / "simulation" / "services"
     )
+    source = (services / "eod_service.py").read_text(encoding="utf-8")
     assert 'SIM_EOD_TRIGGER_TIME", "06:05"' in source
-    recon = Path(
-        "backend/services/simulation/services/reconcile_service.py"
-    ).read_text(encoding="utf-8")
+    recon = (services / "reconcile_service.py").read_text(encoding="utf-8")
     assert "(6, 20)" in recon
 
 
