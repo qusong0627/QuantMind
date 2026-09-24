@@ -401,6 +401,11 @@ services:
       # RD-Agent 已 pip install 到镜像中，不再需要运行时挂载
       # 允许 API 容器调用宿主机 Docker 启动训练容器
       - /var/run/docker.sock:/var/run/docker.sock
+      # 通达信桥共享目录（宿主以 CIFS 挂 //<win>/PYPlugins，见 /etc/fstab）。
+      # 「重启桥」端点写 bridge-windows/restart_bridge.flag，Windows 侧
+      # watchdog.ps1 每 30s 消费一次。宿主未挂载时容器内是空目录——端点自带
+      # cifs 挂载守卫会如实拒绝（往本地空目录写 = 静默黑洞）。
+      - /mnt/tdx-shared:/mnt/tdx-shared
       # QwenPaw 共享文件目录
     # 都访问 PyPI 安装依赖（离线/受限网络会一直卡在此步骤）。
     command: >

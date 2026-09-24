@@ -1,7 +1,7 @@
 /** 实盘券商接入配置卡：按市场可选，配置存 Trade Redis。 */
 import React, { useCallback, useEffect, useState } from 'react';
-import { Alert, Button, Input, Select, Tag, Typography, message } from 'antd';
-import { BankOutlined, CheckCircleOutlined, ReloadOutlined } from '@ant-design/icons';
+import { Alert, Button, Input, Popconfirm, Select, Tag, Typography, message } from 'antd';
+import { BankOutlined, CheckCircleOutlined, PoweroffOutlined, ReloadOutlined } from '@ant-design/icons';
 import { authService } from '../../../features/auth/services/authService';
 import { SERVICE_URLS } from '../../../config/services';
 
@@ -96,6 +96,8 @@ export const BrokerConfigCard: React.FC<{ market: string }> = ({ market }) => {
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null);
+  const [restarting, setRestarting] = useState(false);
+  const [restartInfo, setRestartInfo] = useState<{ ok: boolean; message: string } | null>(null);
 
   const authHeaders = () => {
     const token = authService.getAccessToken();
@@ -183,6 +185,26 @@ export const BrokerConfigCard: React.FC<{ market: string }> = ({ market }) => {
     }
   };
 
+  /** 远程重启 TDX 桥：写宿主共享目录 flag，Windows 看门狗 30s 内消费。
+   *  未挂载共享时后端如实拒绝并给出挂载指引（不制造"点了没反应"的假象）。 */
+  const restartBridge = async () => {
+    setRestarting(true);
+    setRestartInfo(null);
+    try {
+      const resp = await fetch(`${apiBase}/tdx/bridge-restart`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      });
+      const data = await resp.json().catch(() => null);
+      if (!resp.ok) throw new Error(data?.detail || `HTTP ${resp.status}`);
+      setRestartInfo({ ok: Boolean(data?.success), message: String(data?.detail || '') });
+    } catch (e: any) {
+      setRestartInfo({ ok: false, message: e?.message || '重启请求失败' });
+    } finally {
+      setRestarting(false);
+    }
+  };
+
   if (brokers.length === 0) {
     return (
       <Alert
@@ -262,7 +284,7 @@ export const BrokerConfigCard: React.FC<{ market: string }> = ({ market }) => {
           )}
           {selected === 'tdx' && (
             <div className="text-[11px] leading-5 text-amber-700 bg-amber-50 border border-amber-200 rounded-xl p-2.5">
-              配置步骤：① 在 Windows 上启动 TDX 桥（HTTP 服务）并确保通达信已登录；② 上方填写桥的 <b>局域网地址</b> 与 <b>Token</b>（两侧一致）；③ 保存后点「测试连接」应返回账户资金。注意：TDX 桥与 QMT 执行端是两条独立通道，同一市场只能选其一。
+              配置步骤：① 在 Windows 上启动 TDX 桥（HTTP 服务）并确保通达信已登录；② 上方填写桥的 <b>局域网地址</b> 与 <b>Token</b>（两侧一致）；③ 保存后点「测试连接」应返回账户资金。桥卡死/需加载新代码时可用「<b>重启桥进程</b>」（经宿主共享目录通知 Windows 看门狗，最长 30 秒；宿主需已挂载共享目录，未挂载时会给出挂载指引）。注意：TDX 桥与 QMT 执行端是两条独立通道，同一市场只能选其一。
             </div>
           )}
           {FIELD_DEFS[selected].map(({ name, label, sensitive, placeholder, options }) => {
@@ -295,9 +317,25 @@ export const BrokerConfigCard: React.FC<{ market: string }> = ({ market }) => {
             );
           })}
           <div className="flex items-center justify-between gap-2 pt-1">
-            <Button icon={<ReloadOutlined />} loading={testing} onClick={testConnection}>
-              测试连接
-            </Button>
+            <div className="flex items-center gap-2">
+              <Button icon={<ReloadOutlined />} loading={testing} onClick={testConnection}>
+                测试连接
+              </Button>
+              {selected === 'tdx' && (
+                <Popconfirm
+                  title="重启通达信桥？"
+                  description="桥看门狗将在 30 秒内重启桥进程（加载最新代码/清状态），期间行情与交易通道短暂中断。"
+                  okText="重启"
+                  cancelText="取消"
+                  okButtonProps={{ danger: true }}
+                  onConfirm={restartBridge}
+                >
+                  <Button danger icon={<PoweroffOutlined />} loading={restarting}>
+                    重启桥进程
+                  </Button>
+                </Popconfirm>
+              )}
+            </div>
             <div className="flex gap-2">
               <Button onClick={() => void load()}>还原</Button>
               <Button type="primary" loading={saving} onClick={save}>保存配置</Button>
@@ -308,6 +346,14 @@ export const BrokerConfigCard: React.FC<{ market: string }> = ({ market }) => {
               type={testResult.ok ? 'success' : 'error'}
               showIcon
               message={testResult.message}
+              className="!text-xs"
+            />
+          )}
+          {restartInfo && (
+            <Alert
+              type={restartInfo.ok ? 'success' : 'error'}
+              showIcon
+              message={restartInfo.message}
               className="!text-xs"
             />
           )}

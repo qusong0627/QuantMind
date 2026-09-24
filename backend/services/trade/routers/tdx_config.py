@@ -382,3 +382,31 @@ async def update_rolling_config(
         "execute_mode": execute_mode,
         "auto_place": execute_mode != DEFAULT_EXECUTE_MODE,
     }
+
+
+@router.post("/tdx/bridge-restart")
+async def restart_tdx_bridge(
+    auth: AuthContext = Depends(require_admin),  # 写主机共享目录=主机面操作
+):
+    """远程重启 Windows 通达信桥（写共享目录 restart_bridge.flag，看门狗 30s 内消费）。
+
+    前置身守卫在 bridge_restart 模块内（cifs 挂载 + bridge-windows 子目录双重
+    校验）：共享未挂载时如实拒绝——往本地空目录写 flag 是静默黑洞（老系统
+    ops_worker 从没成功过的根因），不制造"点了没反应"的假象。
+    """
+    from backend.services.live_trading.services.bridge_restart import request_restart
+
+    return await asyncio.to_thread(
+        request_restart,
+        actor=f"{(auth.tenant_id or 'default')}:{auth.user_id}",
+    )
+
+
+@router.get("/tdx/bridge-restart/status")
+async def get_tdx_bridge_restart_status(
+    auth: AuthContext = Depends(get_auth_context),
+):
+    """重启链状态（共享挂载 / 桥目录 / flag 是否待消费）。前端点完按钮轮询它。"""
+    from backend.services.live_trading.services.bridge_restart import restart_status
+
+    return await asyncio.to_thread(restart_status)
