@@ -448,7 +448,8 @@ sync_qwenpaw_skills() {
 #   TORCH_DEVICE / QUANTMIND_TORCH_DEVICE > .env > 镜像 Label（qm.torch.device 或
 #   用 auto/cpu/gpu/skip 重算指纹与 qm.req.sha 对拍）。
 # 有现成镜像却推断不出时直接失败，禁止默认 skip——否则会把 cpu/gpu 离线包盖成无 torch。
-# 仅「镜像不存在」（全新安装）才回落 auto，并写入 .env 供后续对齐。
+# 仅「镜像不存在」（全新安装）才回落 cpu（初始部署强制 CPU；GPU 用 deploy/enable-gpu.sh），
+# 并写入 .env 供后续对齐。
 persist_torch_device() {
     local device="$1"
     local env_file="$PROJECT_DIR/.env"
@@ -485,8 +486,8 @@ ensure_torch_device() {
                 inferred=auto
                 log '未指定 TORCH_DEVICE，镜像无法推断，按 auto 处理'
             else
-                inferred=auto
-                log '未指定 TORCH_DEVICE 且无 quantmind-oss 镜像，按 auto 处理（全新安装）'
+                inferred=cpu
+                log '未指定 TORCH_DEVICE 且无 quantmind-oss 镜像，全新安装按 cpu 处理（GPU 用 deploy/enable-gpu.sh）'
             fi
         else
             log "未指定 TORCH_DEVICE，已从镜像推断/回落为 $inferred"

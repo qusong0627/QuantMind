@@ -112,6 +112,9 @@ STORAGE_MODE=local
 # 系统一键更新（Web 控制台「更新系统」）：docker socket 已挂载，默认开启。
 # 如需关闭，改此行后 `docker compose up -d --force-recreate quantmind` 生效。
 QUANTMIND_ENABLE_WEB_UPDATE=true
+# torch 形态：初始部署强制 CPU 版（体积小、构建快、无 GPU 依赖）。
+# 需要 GPU（CUDA 版 torch + 本地训练镜像）时执行: sudo bash deploy/enable-gpu.sh
+TORCH_DEVICE=cpu
 EOF
 }
 

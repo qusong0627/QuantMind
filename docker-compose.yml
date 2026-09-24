@@ -56,7 +56,10 @@ services:
       context: .
       dockerfile: docker/Dockerfile.oss
       args:
-        TORCH_DEVICE: ${TORCH_DEVICE:-auto}
+        # 默认强制 CPU 版 torch（体积小、构建快、无 GPU 依赖）。
+        # 需要 GPU（CUDA 版 torch + 本地训练镜像）时执行:
+        #   sudo bash deploy/enable-gpu.sh
+        TORCH_DEVICE: ${TORCH_DEVICE:-cpu}
         TORCH_CPU_INDEX_URL: ${TORCH_CPU_INDEX_URL:-https://download.pytorch.org/whl/cpu}
         QM_REQ_SHA: ${QM_REQ_SHA:-unknown}
         APT_MIRROR: ${APT_MIRROR:-mirrors.tuna.tsinghua.edu.cn}
