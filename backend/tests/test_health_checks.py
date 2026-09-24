@@ -4,7 +4,7 @@
 与 HealthContext 鸭子类型一致——检查函数因此可在不连 DB/Redis 下单测。
 """
 
-from datetime import date
+from datetime import date, datetime
 
 import pytest
 
@@ -289,13 +289,61 @@ def test_calendar_coverage_inside_fail_window():
     assert r.metrics["XSHG_remaining_days"] < CALENDAR_FAIL_DAYS
     assert "exchange_calendars" in r.suggestion
     assert "qm_market_calendar_day" in r.suggestion
+    # 建议必须**指名可执行的入口**：只写「把次年交易日写进表里」等于让运维自己
+    # 去手写 SQL（生产者缺席的老问题换了个地方出现）
+    assert "seed_trading_calendar.py" in r.suggestion
 
 
 def test_calendar_coverage_already_expired_is_fail():
-    """已经越过截止日 → fail（剩余为负也要算 fail，不能因为减法溢出成 ok）。"""
+    """已经越过截止日 → fail（剩余为负也要算 fail，不能因为减法溢出成 ok）。
+
+    同时是「没有 override」的反向对照：上面那条 DB override 用例若把它删掉，
+    就可能只是闸门永远在报 ok。
+    """
     r = classify_calendar_coverage({"XSHG": (date(2026, 12, 31), "")}, date(2027, 3, 1))
     assert r.level == "fail"
     assert r.metrics["XSHG_remaining_days"] < 0
+
+
+def test_calendar_coverage_counts_db_override_horizon():
+    """真日历过期、但 DB override 已补到次年 → **转绿**（否则「照建议修好了照样红」）。
+
+    2027-01-01 之后 XSHG 必然过期；运维按 C13 的建议把次年交易日落进
+    ``qm_market_calendar_day``（判定层里 override 优先级更高）。一个修不好的红灯
+    很快就会被人忽略——那才是真正的危险。
+    """
+    r = classify_calendar_coverage(
+        {"XSHG": (date(2026, 12, 31), "")}, date(2027, 3, 1), {"XSHG": date(2027, 12, 31)}
+    )
+
+    assert r.level == "ok", r.detail
+    assert r.metrics["XSHG_effective_last_session"] == "2027-12-31"
+    assert r.metrics["XSHG_override_last_session"] == "2027-12-31"
+    assert "DB override" in r.detail
+    assert "2026-12-31" in r.detail  # 真日历只到哪天也要说清楚（不藏信息）
+
+
+def test_calendar_coverage_override_earlier_than_calendar_does_not_help():
+    """override 比真日历还早时不顶用：有效覆盖取**较晚者**，不是「有 override 就 ok」。"""
+    r = classify_calendar_coverage(
+        {"XSHG": (date(2026, 12, 31), "")}, date(2026, 10, 15), {"XSHG": date(2026, 1, 15)}
+    )
+
+    assert r.level == "warn", r.detail  # 78 天 → 落在告警窗
+    assert r.metrics["XSHG_effective_last_session"] == "2026-12-31"
+    assert "DB override" not in r.detail
+
+
+def test_calendar_coverage_unreadable_calendar_with_override_counts():
+    """真日历整个取不到（如 importerror），但库里 override 覆盖到未来 → 不算告急。"""
+    r = classify_calendar_coverage(
+        {"XSHG": (None, "ImportError: no exchange_calendars")},
+        date(2027, 3, 1),
+        {"XSHG": date(2027, 12, 31)},
+    )
+
+    assert r.level == "ok", r.detail
+    assert "ImportError" in r.detail  # 原因仍然如实带出
 
 
 def test_calendar_coverage_worst_market_wins():
@@ -339,6 +387,47 @@ async def test_c13_live_calendar_still_covers_today():
     r = await check_c13_trading_calendar_coverage(FakeCtx())
     assert r.level != "fail", r.detail
     assert r.metrics["XSHG_last_session"] is not None, r.detail
+
+
+@pytest.mark.asyncio
+async def test_c13_check_wires_db_override_into_the_verdict():
+    """判定被接线到库上：有 override 行 → 转绿；没有 → 仍报红。
+
+    两方向都钉。只看「有 override 时绿」的话，一个永远返回空 override 的接线
+    （查询写错表名/列名）会与「没有 override」不可区分——正是静默失效的老形态。
+    """
+    from backend.shared.market_calendar_seed import market_keys
+
+    assert "CN" in market_keys("CN")  # 键组口径来自播种器，不在体检里各写一份
+    rows = [{"market": "CN", "last_day": date(2027, 12, 31)}]
+    ctx = FakeCtx(rows_by_sql={"qm_market_calendar_day": rows}, today=date(2027, 3, 1))
+
+    r = await check_c13_trading_calendar_coverage(ctx)
+    assert r.level != "fail", r.detail
+    assert r.metrics["XSHG_effective_last_session"] == "2027-12-31"
+
+    empty = FakeCtx(today=date(2027, 3, 1))
+    r_empty = await check_c13_trading_calendar_coverage(empty)
+    assert r_empty.level == "fail", r_empty.detail
+
+
+def test_c13_override_rows_are_normalised_across_driver_types():
+    """``last_day`` 可能是 date / datetime / str：``datetime`` 与 ``date`` 比较会抛
+    ``TypeError``（Python 3 的坑），所以必须先归一再比较；坏行跳过不抛。"""
+    from backend.scripts.diagnose.health import _latest_override_by_market
+
+    got = _latest_override_by_market(
+        [
+            {"market": "CN", "last_day": date(2027, 1, 5)},
+            {"market": "cn", "last_day": "2027-06-30T00:00:00"},  # 小写 + 带时间戳的字符串
+            {"market": "CN", "last_day": datetime(2027, 2, 1, 0, 0)},  # 更早的 datetime
+            {"market": "SSE", "last_day": None},
+            {"market": "", "last_day": date(2030, 1, 1)},
+            {"market": "SZSE", "last_day": "不是日期"},
+        ]
+    )
+
+    assert got == {"CN": date(2027, 6, 30)}
 
 
 @pytest.mark.asyncio

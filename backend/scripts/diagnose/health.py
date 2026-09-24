@@ -32,7 +32,7 @@ import os
 import re
 import sys
 from dataclasses import dataclass, field, replace
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any
 from collections.abc import Callable
 
@@ -989,55 +989,150 @@ async def check_c12_local_market_data(ctx: HealthContext) -> CheckResult:
     return classify_local_market_data(available, missing)
 
 
+def _level_for_remaining(remaining: int) -> str:
+    """剩余天数 → 级别（含已过期的负值）。"""
+    if remaining < CALENDAR_FAIL_DAYS:
+        return "fail"
+    if remaining < CALENDAR_WARN_DAYS:
+        return "warn"
+    return "ok"
+
+
 def classify_calendar_coverage(
-    coverage: dict[str, tuple[date | None, str]], today: date
+    coverage: dict[str, tuple[date | None, str]],
+    today: date,
+    overrides: dict[str, date] | None = None,
 ) -> CheckResult:
-    """C13 判定（纯函数）：真日历覆盖年限。
+    """C13 判定（纯函数）：交易日历覆盖年限（真日历 ∪ DB override）。
 
     逐个日历算「距覆盖截止还有几天」，**取最紧的那个**定级：
     剩余 < ``CALENDAR_FAIL_DAYS``（含已过期）→ fail；< ``CALENDAR_WARN_DAYS`` → warn。
     取不到某个日历（``None``）**只算 warn**：读不到不等于没问题，但也不该让体检
     整体报红——真日历全丢时决策轮本来就 fail-closed，那是 C13 之外的表现。
+
+    ``overrides``（日历名 → 库内 override 的最晚日期）必须算进来，否则本检查会
+    **「照建议修好了还照样红」**：2027-01-01 之后真日历必然过期，而运维按建议把次年
+    交易日落进了 ``qm_market_calendar_day``（判定层里 DB override 优先级更高，见
+    ``backend/shared/market_calendar_seed.py``）。一个修不好的红灯很快就会被忽略，
+    那才是真正的危险。有效覆盖 = 真日历与 override 的**较晚者**。
     """
+    override_map = overrides or {}
     parts: list[str] = []
     metrics: dict[str, Any] = {}
     worst = "ok"
     for name, (last, reason) in sorted(coverage.items()):
-        if last is None:
+        override_last = override_map.get(name)
+        metrics[f"{name}_last_session"] = last.isoformat() if last else None
+        if override_last is not None:
+            metrics[f"{name}_override_last_session"] = override_last.isoformat()
+
+        horizons = [d for d in (last, override_last) if d is not None]
+        if not horizons:
             parts.append(f"{name} 取不到（{reason or '未知原因'}）")
-            metrics[f"{name}_last_session"] = None
             if LEVEL_ORDER["warn"] > LEVEL_ORDER[worst]:
                 worst = "warn"
             continue
-        remaining = (last - today).days
-        metrics[f"{name}_last_session"] = last.isoformat()
+
+        effective = max(horizons)
+        remaining = (effective - today).days
+        metrics[f"{name}_effective_last_session"] = effective.isoformat()
         metrics[f"{name}_remaining_days"] = remaining
-        if remaining < CALENDAR_FAIL_DAYS:
-            parts.append(f"{name} 覆盖到 {last.isoformat()}（剩 {remaining} 天，告急）")
-            worst = "fail"
-        elif remaining < CALENDAR_WARN_DAYS:
-            parts.append(f"{name} 覆盖到 {last.isoformat()}（剩 {remaining} 天）")
-            if LEVEL_ORDER["warn"] > LEVEL_ORDER[worst]:
-                worst = "warn"
+        if override_last is not None and (last is None or override_last > last):
+            origin = (
+                f"真日历只到 {last.isoformat()}" if last else f"真日历取不到：{reason or '未知原因'}"
+            )
+            parts.append(
+                f"{name} 覆盖到 {effective.isoformat()}（剩 {remaining} 天，"
+                f"来自 DB override；{origin}）"
+            )
         else:
-            parts.append(f"{name} 覆盖到 {last.isoformat()}（剩 {remaining} 天）")
+            parts.append(f"{name} 覆盖到 {effective.isoformat()}（剩 {remaining} 天）")
+
+        level = _level_for_remaining(remaining)
+        if level == "fail":
+            worst = "fail"
+        elif level == "warn" and LEVEL_ORDER["warn"] > LEVEL_ORDER[worst]:
+            worst = "warn"
+
     detail = "；".join(parts) or "无日历可查"
     if worst == "ok":
         return CheckResult("C13", "真日历覆盖年限", "ok", detail, metrics=metrics)
     suggestion = (
         "越过覆盖截止后 is_session 抛 DateOutOfBounds → 判定退化成「只按周末判断」，"
         "决策轮拒绝降级依据（fail-closed）⇒ 不是乱下单，是**一轮决策都不出**。"
-        "两条修法：①升级 exchange_calendars（随版本前移）；②把次年交易日写进 "
-        "qm_market_calendar_day（DB override 优先于真日历，SRC_DB_OVERRIDE）。"
+        "两条修法：①升级 exchange_calendars（随版本前移；A 股次年节假日安排国务院"
+        "年底才印发，这条路在期限前走不通）；②拿到次年放假安排后，运行 "
+        "`python backend/scripts/seed_trading_calendar.py --year <次年> "
+        "--holidays-file <清单> --apply`，把次年交易日写进 qm_market_calendar_day"
+        "（DB override 优先于真日历，SRC_DB_OVERRIDE，并会一并覆盖 CN/SSE/SZSE 三个"
+        "查询键）。补完这条检查会自己转绿。"
     )
     return CheckResult("C13", "真日历覆盖年限", worst, detail, suggestion, metrics)
 
 
-async def check_c13_trading_calendar_coverage(ctx: HealthContext) -> CheckResult:
-    """真日历覆盖年限：CN/HK/US 三个市场各自印发到哪一天。
+def _latest_override_by_market(rows: list[dict]) -> dict[str, date]:
+    """``[{market, last_day}]`` → ``{market: 最晚日期}``。坏行**跳过不抛**。
 
-    这条不查 DB 也不查 Redis（只问进程内库），保留 ``ctx`` 形参是为了与
-    ``CHECKS`` 里其余检查同签名。
+    ``last_day`` 在不同驱动下可能是 ``date`` / ``datetime`` / ``str``：``datetime``
+    与 ``date`` 比较会抛 ``TypeError``（Python 3 的已知坑），所以先归一到 ``date``。
+    """
+    out: dict[str, date] = {}
+    for row in rows:
+        market = str(row.get("market") or "").strip().upper()
+        raw = row.get("last_day")
+        if isinstance(raw, datetime):
+            day: date | None = raw.date()
+        elif isinstance(raw, date):
+            day = raw
+        elif raw:
+            try:
+                day = date.fromisoformat(str(raw)[:10])
+            except ValueError:
+                continue
+        else:
+            continue
+        if market and day > out.get(market, date.min):
+            out[market] = day
+    return out
+
+
+def _calendar_overrides(ctx: HealthContext) -> dict[str, date]:
+    """库内 DB override 已覆盖到哪天（按日历名聚合到市场键组）。
+
+    取不到（旧库没这张表 / 查询失败）就返回空 —— 体检不因这一路的失败而中断，
+    退化成「只有真日历」的老口径。
+
+    两个过滤条件是**测试卫生**，不是业务规则：``t-*`` 租户与 ``version='test'``
+    是集成测试写进去的行（见 ``integration-tests-pollute-real-ledgers`` 记忆），
+    它们若被算成真覆盖，会把 C13 假绿（测试行可以写到任意未来日期）。
+    """
+    from backend.shared.market_calendar_seed import market_keys
+    from backend.shared.trading_calendar import TRADED_MARKET_XCALS
+
+    try:
+        rows = ctx.query(
+            "SELECT market, MAX(trade_date) AS last_day FROM qm_market_calendar_day "
+            "WHERE strpos(tenant_id, 't-') <> 1 AND version IS DISTINCT FROM 'test' "
+            "GROUP BY market"
+        )
+    except Exception:  # noqa: BLE001 - 旧库无表 / 权限不足都不该让体检中断
+        return {}
+
+    by_market = _latest_override_by_market(list(rows or []))
+    out: dict[str, date] = {}
+    for code, name in TRADED_MARKET_XCALS:
+        horizons = [by_market[key] for key in market_keys(code) if key in by_market]
+        if horizons:
+            out[name] = max(horizons)
+    return out
+
+
+async def check_c13_trading_calendar_coverage(ctx: HealthContext) -> CheckResult:
+    """交易日历覆盖年限：CN/HK/US 各自「真日历到哪天」+「DB override 补到哪天」。
+
+    真日历只印发到固定日期（容器内实测 XSHG → 2026-12-31），越过那天判定就退化成
+    周末兜底；DB override 是唯一能在期限前落地的修法（2027 年 A 股节假日安排要等
+    国务院年底印发，升级库也修不了），所以这里必须把 override 的horizon 一起看。
     """
     from backend.shared.trading_calendar import xcal_coverage
 
@@ -1045,7 +1140,7 @@ async def check_c13_trading_calendar_coverage(ctx: HealthContext) -> CheckResult
         coverage = xcal_coverage()
     except Exception as exc:  # noqa: BLE001 - 体检不因探测本身失败中断
         coverage = {"XSHG": (None, f"{type(exc).__name__}: {exc}")}
-    return classify_calendar_coverage(coverage, ctx.today)
+    return classify_calendar_coverage(coverage, ctx.today, _calendar_overrides(ctx))
 
 
 async def check_c14_agent_ledger_parity(ctx: HealthContext) -> CheckResult:
