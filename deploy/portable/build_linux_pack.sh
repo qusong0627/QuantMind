@@ -14,6 +14,7 @@
 #   PIP_INDEX_URL      默认清华源
 #   PG_VERSION         默认 15.19.0 (zonky)
 #   REDIS_VERSION      默认 7.2.9
+#   WEB_DIST           前端产物目录，默认 electron/dist-react
 #   SKIP_TAR=1         只组装不压缩
 # ============================================================
 set -euo pipefail
@@ -29,6 +30,11 @@ PIP_FALLBACKS=("$PIP_DEFAULT" "https://pypi.tuna.tsinghua.edu.cn/simple/" "https
 TORCH_INDEX="https://download.pytorch.org/whl/cpu"
 PG_VERSION="${PG_VERSION:-15.19.0}"
 REDIS_VERSION="${REDIS_VERSION:-7.2.9}"
+# 前端产物目录。**发给他人的包要在干净检出里构建**：`electron/src/features/local-live/*.tsx`
+# 是未跟踪的本机独有实盘栏目，`import.meta.glob` 按文件系统存在与否决定是否打包，主工作树
+# 构建会把它整块打进 web/。`scripts/package-for-windows.sh` 已自动化这件事，本脚本留这个
+# 口子给同样的产物用（同一个 dist-react 既能伺服 Linux 包也能伺服 Windows 包）。
+WEB_DIST="${WEB_DIST:-$REPO_ROOT/electron/dist-react}"
 NPROC="$(nproc 2>/dev/null || echo 4)"
 
 log()  { echo -e "\033[36m[build]\033[0m $(date '+%H:%M:%S') $*"; }
@@ -75,7 +81,7 @@ except Exception: pass' "$ver" "$pattern" 2>/dev/null || true)"
 # ── 前置检查 ────────────────────────────────────────────────
 command -v curl >/dev/null || fail "需要 curl"
 command -v make >/dev/null || command -v cc >/dev/null || fail "编译 Redis 需要 gcc/make"
-[ -f "$REPO_ROOT/electron/dist-react/index.html" ] || fail "缺少前端构建产物 electron/dist-react/，先运行 npm run dashboard:build"
+[ -f "$WEB_DIST/index.html" ] || fail "缺少前端构建产物：$WEB_DIST —— 先 npm run dashboard:build，或用 WEB_DIST=<干净检出的 dist-react> 指定"
 
 mkdir -p "$BUILD/cache" "$STAGE"
 AVAIL_KB=$(df -k "$BUILD" | awk 'NR==2{print $4}')
@@ -242,16 +248,25 @@ fi
 
 # ── 6. 源码与前端产物 ────────────────────────────────────────
 log "复制源码与前端产物 ..."
-for d in backend config strategy_templates; do
+for d in backend strategy_templates; do
     rm -rf "$STAGE/$d"
     cp -a "$REPO_ROOT/$d" "$STAGE/$d"
 done
+# config 单独走 tar：必须排除 runtime.env。那份文件是**宿主机上跑着的后端**写入的运行期
+# 密钥（容器以 root 落盘，本机 0600 root:root），两个理由都不能进包：
+#   1. 跨节点泄漏 INTERNAL_CALL_SECRET —— 目标机的密钥必须自己生成；
+#   2. 读不了会让 cp -a 直接报错、set -e 中断整包构建（2026-09-24 实测：加了这个文件之后
+#      本脚本就再也出不了包，Windows 侧 09-17 已修，这里漏改）。
+# 目标机首次启动时 backend/main_oss.py 会自行生成强随机并写入该文件。
+rm -rf "$STAGE/config"
+tar -C "$REPO_ROOT" --exclude='config/runtime.env' -cf - config | tar -C "$STAGE" -xf -
 find "$STAGE/backend" -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || true
 rm -rf "$STAGE/backend/scratch" "$STAGE/backend/htmlcov" "$STAGE/backend/coverage.xml" 2>/dev/null || true
 
 rm -rf "$STAGE/web"
 mkdir -p "$STAGE/web"
-cp -a "$REPO_ROOT/electron/dist-react/." "$STAGE/web/"
+cp -a "$WEB_DIST/." "$STAGE/web/"
+log "前端产物来源: $WEB_DIST"
 # 便携版 UI 与 API 同源伺服：清掉构建产物里硬编码的网关地址
 # （默认 http://127.0.0.1:8000，便携部署中会跨域打到别的实例），改走相对路径
 find "$STAGE/web/assets" -name '*.js' -type f \

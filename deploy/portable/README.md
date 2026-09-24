@@ -78,6 +78,12 @@ bash scripts/package-for-windows.sh --require-clean   # 发版：工作树有未
 bash deploy/portable/build_linux_pack.sh
 # 成品: deploy/portable/dist/QuantMind-Portable-linux-x64.tar.gz
 
+# 发给他人的 Linux 包：前端产物要用干净检出的那份（与 Windows 包同一个 dist-react）
+#   bash scripts/package-for-windows.sh --skip-assemble --keep-worktree
+#   WEB_DIST=$PWD/deploy/portable/build/clean-src/electron/dist-react \
+#     bash deploy/portable/build_linux_pack.sh
+# 默认取 electron/dist-react（本机工作树产物，含未跟踪的实盘栏目 ⇒ 只适合自用）
+
 # GPU 增补包（可选，约 40 分钟，下载 CUDA 版 torch ~2.5GB）
 # 依赖主包已构建；构建机有 NVIDIA 驱动时会实测 CUDA
 bash deploy/portable/build_gpu_addon.sh
