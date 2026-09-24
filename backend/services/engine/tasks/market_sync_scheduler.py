@@ -177,6 +177,29 @@ def run_market_sync(market: str, cfg: dict[str, Any]) -> dict[str, Any]:
         return result
 
     if market == "CUSTOM":
+        # 先增量更新三个经典因子库（alpha360/tdxgs/jq110）：它们没有独立
+        # 调度、上游就是 QuantDB 日线，缺哪天分区，下面的合并就静默少列
+        # （2026-09-14 起三库停更 → 合并产物少 122 列的事故形态）。
+        # 三库都已有最新分区时整段跳过；build_libraries 内部只写缺失分区。
+        from backend.scripts.build_factor_library import (
+            ALL_LIBS,
+            build_libraries,
+            latest_source_date,
+            libraries_up_to_date,
+            update_start,
+        )
+
+        latest = latest_source_date()
+        if latest and libraries_up_to_date(latest):
+            result["libraries"] = {"skipped": f"三库已覆盖 {latest}"}
+        elif latest:
+            result["libraries"] = build_libraries(
+                list(ALL_LIBS), update_start(), log=logger.info
+            )
+        else:
+            # 源目录不可读：交给 rebuild 的空窗口/预检路径报错
+            result["libraries"] = {"skipped": "daily_forward 源目录不可读"}
+
         # 重建「筛选保留合并因子」数据集（/data/quantcustom）；days/datasets/
         # with_qlib 不适用。增量守卫在 rebuild 内：筛选集或参数变化自动全量。
         from backend.scripts.build_factor_custom_dataset import (

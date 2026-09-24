@@ -197,6 +197,26 @@ def _missing_dates(dates: list[str], out_root: Path) -> list[str]:
     return [d for d in dates if not (out_root / f"dt={d}" / "data.parquet").exists()]
 
 
+def _missing_source_partitions(
+    write_dates: list[str], cols_by_lib: dict[str, list[str]], root: Path
+) -> list[tuple[str, str]]:
+    """源库分区完整性预检：返回 [(dt, lib), …]（只查有待合并列的库）。
+
+    合并循环对缺失源的旧行为是 `continue` —— 静默少列照常落盘。
+    2026-09-14 起 alpha360/tdxgs/jq110 三库停更（无夜间调度），合并产物
+    每天少 122 列（273→151），直到 reader 的 schema 硬校验才炸。预检把
+    这个失败**提前到写入之前**，且以异常形式暴露，不再产出降级分区。
+    """
+    missing: list[tuple[str, str]] = []
+    for dt in write_dates:
+        for lib, dirs in LIB_DIRS.items():
+            if not cols_by_lib.get(lib):
+                continue
+            if not (root.joinpath(*dirs) / f"dt={dt}" / "data.parquet").exists():
+                missing.append((dt, lib))
+    return missing
+
+
 def rebuild(
     *,
     start: str = DEFAULT_START,
@@ -305,6 +325,16 @@ def rebuild(
     log(
         f"[3/5] 交易日 {len(dates)} 个（{dates[0]} ~ {dates[-1]}）→ {out_root}；待写 {len(write_dates)} 个（{mode}）"
     )
+
+    # 源库预检：缺分区合并必少列，宁可不写也不落降级分区（见函数注释）
+    missing_sources = _missing_source_partitions(write_dates, cols_by_lib, root)
+    if missing_sources:
+        head = "；".join(f"dt={dt} 缺 {lib}" for dt, lib in missing_sources[:6])
+        more = f"…共 {len(missing_sources)} 处" if len(missing_sources) > 6 else ""
+        raise RuntimeError(
+            f"源库分区缺失，合并会静默少列，拒绝写入: {head}{more}。"
+            "先补源库（build_factor_library.py），再重建。"
+        )
 
     def _ohlcv_of(dt: str) -> pd.DataFrame:
         d = pd.read_parquet(

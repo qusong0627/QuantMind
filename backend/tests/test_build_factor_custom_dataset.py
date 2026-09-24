@@ -20,6 +20,7 @@ from backend.scripts.build_factor_custom_dataset import (
     _limit_threshold,
     _limit_thresholds,
     _missing_dates,
+    _missing_source_partitions,
     _selection_fingerprint,
 )
 
@@ -185,3 +186,50 @@ def test_missing_dates_returns_only_unbuilt_partitions(tmp_path: Path):
 
     # Assert
     assert missing == ["20260911", "20260912"]
+
+
+# --- 源库分区完整性预检（2026-09-14 静默少列事故的结构性防御）----------------
+
+
+def _touch_partition(root: Path, lib: str, dt: str) -> None:
+    d = root / "6_ml_datasets" / lib / f"dt={dt}"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "data.parquet").write_bytes(b"x")
+
+
+def test_missing_source_partitions_names_dt_and_lib(tmp_path):
+    """只报「有待合并列」且分区不在的库；已就位的绝不误报。"""
+    cols = {"jq110": ["JQ110_EMAC_120"], "tdxgs": ["TDXGS_RSI"]}
+    _touch_partition(tmp_path, "jq110", "20260923")
+
+    assert _missing_source_partitions(["20260923"], cols, tmp_path) == [
+        ("20260923", "tdxgs")
+    ]
+
+
+def test_missing_source_partitions_ignores_libs_without_kept_columns(tmp_path):
+    """库在 LIB_DIRS 里但筛选集没保留它的列 → 分区缺失不拦（旧行为也不读它）。"""
+    cols = {"jq110": ["JQ110_EMAC_120"]}
+    _touch_partition(tmp_path, "jq110", "20260923")
+
+    # alpha360 / tdxgs / alpha_library / l1_factors 在 tmp 里一个分区都没有，
+    # 但它们不在 cols_by_lib 里，必须全部豁免。
+    assert _missing_source_partitions(["20260923"], cols, tmp_path) == []
+
+
+def test_missing_source_partitions_all_present_is_empty(tmp_path):
+    cols = {"jq110": ["a"], "alpha_library": ["b"]}
+    for lib in ("jq110", "alpha_library"):
+        _touch_partition(tmp_path, lib, "20260923")
+
+    assert _missing_source_partitions(["20260923"], cols, tmp_path) == []
+
+
+def test_missing_source_partitions_scans_every_write_date(tmp_path):
+    """补写多天时逐天检查——漏一天就少一天的量，不能只看最新日。"""
+    cols = {"jq110": ["a"]}
+    _touch_partition(tmp_path, "jq110", "20260923")
+
+    assert _missing_source_partitions(
+        ["20260922", "20260923"], cols, tmp_path
+    ) == [("20260922", "jq110")]

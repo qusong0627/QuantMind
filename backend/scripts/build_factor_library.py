@@ -137,27 +137,63 @@ def _meta(lib: str, n_factors: int, dates: pd.Index, n_syms: int, conv: str) -> 
     }
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser()
-    ap.add_argument(
-        "--lib", choices=["alpha360", "tdxgs", "jq110", "all"], default="all"
-    )
-    ap.add_argument("--start", default=START_DEFAULT)
-    ap.add_argument("--max-symbols", type=int, default=0, help="仅前 N 只（冒烟/调试）")
-    args = ap.parse_args()
+ALL_LIBS = ("alpha360", "tdxgs", "jq110")
 
+#: 夜间增量更新的回看窗（自然日 ≈ 930 个交易日）。EMAC_120 用
+#: ewm(span=120, adjust=False)——无限记忆算子，截断起点会在种子上留
+#: (1−2/121)^n 的残余：n≈930 → 3e-7（落进 float32 噪声），n=320（一年）
+#: 还有 0.5%，足以把 JQ110_EMAC_120 改到可见。定窗因子（rolling/shift，
+#: 最长 250 日）与截断无关，它们只依赖窗口内数据。
+LIB_UPDATE_LOOKBACK_DAYS = 1400
+
+
+def update_start(reference: pd.Timestamp | str | None = None) -> str:
+    """夜间增量更新的 --start：reference（默认现在）回退 LIB_UPDATE_LOOKBACK_DAYS。"""
+    ref = pd.Timestamp(reference) if reference is not None else pd.Timestamp.now()
+    return (ref - pd.Timedelta(days=LIB_UPDATE_LOOKBACK_DAYS)).strftime("%Y%m%d")
+
+
+def latest_source_date() -> str | None:
+    """QuantDB daily_forward 最新分区日（YYYYMMDD）；不可读时 None。"""
+    root = resolve_quantdb_dir() / "1_kline_data" / "daily_forward"
+    dates = sorted(p.name[3:] for p in root.glob("dt=*"))
+    return dates[-1] if dates else None
+
+
+def libraries_up_to_date(
+    latest_daily: str, libs: tuple[str, ...] | list[str] = ALL_LIBS
+) -> bool:
+    """各库对 latest_daily 是否都已有分区（都齐则夜间更新整段跳过）。"""
+    return all(
+        (_out_root(lib) / f"dt={latest_daily}" / "data.parquet").exists()
+        for lib in libs
+    )
+
+
+def build_libraries(
+    libs: list[str],
+    start: str,
+    max_symbols: int = 0,
+    log=print,  # noqa: ANN001
+) -> dict[str, int]:
+    """构建指定库的缺失分区（已有分区跳过），返回 {lib: 新写分区数}。
+
+    `start` 同时是**计算输入起点**（滚动/ewm 从它开始）与**写出下界**：
+    补写某日要得到与全历史构建一致的值，`start` 必须早于该日一个完整
+    回看窗（见 LIB_UPDATE_LOOKBACK_DAYS）。
+    """
     t0 = time.time()
-    daily, amount, turnover, vwap, market_ret = _load_inputs(args.start)
-    if args.max_symbols:
-        syms = list(daily["close"].columns)[: args.max_symbols]
+    daily, amount, turnover, vwap, market_ret = _load_inputs(start)
+    if max_symbols:
+        syms = list(daily["close"].columns)[:max_symbols]
         for d_ in (daily,):
             for k in d_:
                 d_[k] = d_[k][syms]
         amount, turnover, vwap = amount[syms], turnover[syms], vwap[syms]
 
-    libs = ["alpha360", "tdxgs", "jq110"] if args.lib == "all" else [args.lib]
+    written_by_lib: dict[str, int] = {}
     for lib in libs:
-        print(f"[2/3] 计算 {lib} ...")
+        log(f"[2/3] 计算 {lib} ...")
         tc = time.time()
         if lib == "alpha360":
             factors = None  # 流式
@@ -176,19 +212,19 @@ def main() -> int:
             "jq110": "聚宽口径；金额=名义成交额（元）、β=对中证500 真实回归；严格窗口",
         }[lib]
 
-        print(f"[3/3] 落盘 {lib} ...")
+        log(f"[3/3] 落盘 {lib} ...")
         out_root = _out_root(lib)
         if lib == "alpha360":
             written = 0
             for i, (ts, day) in enumerate(alpha360.iter_partitions(daily, vwap)):
-                if ts.strftime("%Y%m%d") < args.start:
+                if ts.strftime("%Y%m%d") < start:
                     continue
                 written += _write_day(out_root, ts, day, daily, i)
             n_factors = 360
             dates = daily["close"].index
             n_syms = daily["close"].shape[1]
         else:
-            written = _write_frames(factors, lib, args.start, daily)
+            written = _write_frames(factors, lib, start, daily)
             n_factors = len(factors)
             dates = next(iter(factors.values())).index
             n_syms = next(iter(factors.values())).shape[1]
@@ -196,11 +232,26 @@ def main() -> int:
         (out_root / "meta.json").write_text(
             json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8"
         )
-        print(
+        written_by_lib[lib] = written
+        log(
             f"      {lib}: {n_factors} 因子 × {len(dates)} 日 × {n_syms} 只；新写分区 {written}（{time.time() - tc:.0f}s）"
         )
 
-    print(f"完成（总 {time.time() - t0:.0f}s）")
+    log(f"完成（总 {time.time() - t0:.0f}s）")
+    return written_by_lib
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument(
+        "--lib", choices=["alpha360", "tdxgs", "jq110", "all"], default="all"
+    )
+    ap.add_argument("--start", default=START_DEFAULT)
+    ap.add_argument("--max-symbols", type=int, default=0, help="仅前 N 只（冒烟/调试）")
+    args = ap.parse_args()
+
+    libs = list(ALL_LIBS) if args.lib == "all" else [args.lib]
+    build_libraries(libs, args.start, max_symbols=args.max_symbols)
     return 0
 
 
