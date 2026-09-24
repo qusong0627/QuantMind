@@ -29,7 +29,7 @@ bash -c "$(curl -fsSL https://quantmindai.cn/gitea/qusong0627/QuantMind/raw/bran
 非交互（CI / 管道执行，需带齐环境变量）：
 
 ```bash
-QUANTDB_API_KEY=qdb_xxx AUTO_DL=yes AUTODL_SINCE=2024-01-01 AUTODL_DATASETS=l1_factors \
+QUANTDB_API_KEY=qdb_xxx AUTO_DL=yes \
   bash -c "$(curl -fsSL https://quantmindai.cn/gitea/qusong0627/QuantMind/raw/branch/master/deploy/autodl/quick-setup.sh)"
 ```
 
@@ -48,7 +48,7 @@ bash /root/setup-autodl-native.sh
 非交互：
 
 ```bash
-QUANTDB_API_KEY=qdb_xxx AUTO_DL=yes AUTODL_SINCE=2024-01-01 AUTODL_DATASETS=l1_factors \
+QUANTDB_API_KEY=qdb_xxx AUTO_DL=yes \
   bash setup-autodl-native.sh
 ```
 
@@ -68,7 +68,7 @@ AUTODL_RESYNC=1 bash setup-autodl-native.sh
 
 | 方式 | 何时 | 行为 |
 |------|------|------|
-| 自动拉取 | 空盘默认，或 `AUTO_DL=yes` | 枚举魔搭仓库 → 并发下载 `6_ml_datasets/<dataset>/` 下 parquet（sha256 校验 + `.part` 原子覆盖）；默认 **近 3 年**、仅 **`l1_factors`**（可用 `AUTODL_SINCE` / `AUTODL_DATASETS` 改） |
+| 自动拉取 | 空盘默认，或 `AUTO_DL=yes` | 枚举魔搭仓库 → 并发下载 `6_ml_datasets/<dataset>/` 下 parquet（sha256 校验 + `.part` 原子覆盖）；默认 **全量历史**、**`l1_factors,l2_factors,l1_l2_factors`**（可用 `AUTODL_SINCE` 裁窗口 / `AUTODL_DATASETS` 选集） |
 | 续传 | 已有数据后选 Y，或 `AUTODL_RESYNC=1` | 本地 size 一致的文件跳过，只补缺失/变更项，可反复重跑 |
 | 手动 | 选 N / `AUTO_DL=no` | 从魔搭下载后把 `6_ml_datasets/` 传到 `/root/autodl-fs/quantdb/6_ml_datasets/` |
 | 跳过 | 已有数据默认，或 `AUTO_DL=skip` | 不下载 |
@@ -81,8 +81,8 @@ AUTODL_RESYNC=1 bash setup-autodl-native.sh
 |------|------|------|
 | `AUTO_DL` | 空盘 yes / 有数据 skip | `yes` / `no` / `skip` |
 | `AUTODL_RESYNC` | 0 | `1` 时已有数据仍续传（已下载文件跳过） |
-| `AUTODL_SINCE` | `3-year` | `YYYY-MM-DD` 或 `full`；按 `dt=` 分区过滤下载窗口 |
-| `AUTODL_DATASETS` | `l1_factors` | 逗号分隔，如 `l1_factors,l1_l2_factors`（Alpha300 用 329 列宽表可设 `l1_l2_factors`） |
+| `AUTODL_SINCE` | 空（全量） | 只在显式给 `YYYY-MM-DD` 时按 `dt=` 分区裁剪；`full`/`none`/`off`/空 = 全量，`3-year` = 近三年 |
+| `AUTODL_DATASETS` | `l1_factors,l2_factors,l1_l2_factors` | 逗号分隔；Alpha300（329 列）用 `l1_l2_factors`，只吃 L1 可设 `l1_factors` |
 | `MODELSCOPE_DATASET_REPO` | `qusong0627/LightGBM_Alpha300` | 魔搭数据集 |
 | `MODELSCOPE_ENDPOINT` | `https://www.modelscope.cn` | 魔搭站点（可走内网代理） |
 | `MODELSCOPE_DATASET_REVISION` | `master` | 数据集修订 |

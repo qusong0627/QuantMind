@@ -11,8 +11,8 @@
 # 环境变量：
 #   AUTO_DL             yes | no | skip（默认：无数据 yes；已有数据 skip）
 #   AUTODL_RESYNC       1=已有数据时仍做增量同步（ModelScope 续传，已下载文件跳过）
-#   AUTODL_DATASETS     逗号分隔，默认 l1_factors（可选 l1_l2_factors 等）
-#   AUTODL_SINCE        YYYY-MM-DD，默认三年前；full=不裁剪（按 dt= 分区过滤）
+#   AUTODL_DATASETS     逗号分隔，默认 l1_factors,l2_factors,l1_l2_factors
+#   AUTODL_SINCE        YYYY-MM-DD 才裁剪下载窗口；默认空=全量历史（3-year 可解析为近三年）
 #   MODELSCOPE_DATASET_REPO    魔搭数据集，默认 qusong0627/LightGBM_Alpha300
 #   MODELSCOPE_ENDPOINT        默认 https://www.modelscope.cn
 #   MODELSCOPE_DATASET_REVISION 默认 master
@@ -35,7 +35,7 @@ ENV_FILE="${ENV_FILE:-/etc/profile.d/quantmind_sh.sh}"
 NODE_ENV_FILE="${NODE_ENV_FILE:-$WORK_DIR/.env}"
 PIP_INDEX="${PIP_INDEX:-https://pypi.tuna.tsinghua.edu.cn/simple/}"
 PIP_HOST="${PIP_TRUSTED_HOST:-pypi.tuna.tsinghua.edu.cn}"
-DEFAULT_DATASETS="${AUTODL_DATASETS:-l1_factors}"
+DEFAULT_DATASETS="${AUTODL_DATASETS:-l1_factors,l2_factors,l1_l2_factors}"
 # 初始训练数据来源：魔搭（ModelScope）公开数据集（即 QuantDB 本体，纯 HTTP，无需 SDK/Key）
 MODELSCOPE_ENDPOINT="${MODELSCOPE_ENDPOINT:-https://www.modelscope.cn}"
 MODELSCOPE_DATASET_REPO="${MODELSCOPE_DATASET_REPO:-qusong0627/LightGBM_Alpha300}"
@@ -238,13 +238,14 @@ if [ -d "$FACTOR_DIR" ] && [ -n "$(ls -A "$FACTOR_DIR" 2>/dev/null)" ]; then
 fi
 
 resolve_since() {
-    local raw="${AUTODL_SINCE:-3-year}"
+    # 默认不裁剪（拉全量历史）；AUTODL_SINCE 显式给出时才按 dt= 窗口过滤。
+    local raw="${AUTODL_SINCE:-}"
     case "$(echo "$raw" | tr 'A-Z' 'a-z')" in
-        ""|3-year|3-years)
-            date -d '3 years ago' +%Y-%m-%d 2>/dev/null || echo "2023-01-01"
-            ;;
-        0|none|full|off)
+        ""|0|none|full|off)
             echo ""
+            ;;
+        3-year|3-years)
+            date -d '3 years ago' +%Y-%m-%d 2>/dev/null || echo ""
             ;;
         *)
             echo "$raw"
@@ -559,8 +560,9 @@ echo "  nvidia-smi"
 echo "  du -sh $FACTOR_DIR 2>/dev/null || true"
 echo ""
 info "非交互示例："
-echo "  AUTO_DL=yes AUTODL_SINCE=2024-01-01 AUTODL_DATASETS=l1_factors bash $0"
-echo "  AUTODL_RESYNC=1 bash $0                  # 已有数据仍续传（已下载文件跳过）"
-echo "  AUTODL_DATASETS=l1_l2_factors bash $0    # 拉 329 列 L1+L2 宽表"
+echo "  AUTO_DL=yes bash $0                     # 默认拉 l1_factors,l2_factors,l1_l2_factors 全量历史"
+echo "  AUTODL_RESYNC=1 bash $0                 # 已有数据仍续传（已下载文件跳过）"
+echo "  AUTODL_DATASETS=l1_factors bash $0      # 只拉单个数据集"
+echo "  AUTODL_SINCE=2024-01-01 bash $0         # 只拉 2024 年以后的 dt= 分区"
 echo "=============================================="
 ok "脚本完成"
