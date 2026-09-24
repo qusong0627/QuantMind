@@ -1260,6 +1260,76 @@ async def check_c14_agent_ledger_parity(ctx: HealthContext) -> CheckResult:
     )
 
 
+def classify_model_artifact_drift(
+    rows: list[dict], path_exists: Callable[[str], bool]
+) -> CheckResult:
+    """C15 判定（纯函数）：注册表 ready 行与其磁盘目录的存在性。
+
+    - 启用模型目录缺失 = fail（该模型每天必失败，白跑还占调度）
+    - 未启用 ready 行目录缺失 = warn（注册表漂移在积累，尚不影响当日推理）
+    """
+    missing_enabled: list[str] = []
+    missing_idle: list[str] = []
+    for r in rows:
+        path = str(r.get("storage_path") or "")
+        if not path or path_exists(path):
+            continue
+        (missing_enabled if r.get("enabled") else missing_idle).append(
+            str(r.get("model_id"))
+        )
+    metrics = {
+        "checked": len(rows),
+        "missing_enabled": len(missing_enabled),
+        "missing_idle": len(missing_idle),
+    }
+    if missing_enabled:
+        sample = "，".join(missing_enabled[:3])
+        return CheckResult(
+            "C15",
+            "模型产物一致",
+            "fail",
+            f"{len(missing_enabled)} 个启用模型的目录已不在盘上（{sample}）",
+            "这些模型每个交易日都会失败：禁用（模型管理页）或重训恢复产物；"
+            "2026-09-24 事故形态 = 2 个启用模型目录消失、连败 10 天无人可见",
+            metrics,
+        )
+    if missing_idle:
+        sample = "，".join(missing_idle[:3])
+        return CheckResult(
+            "C15",
+            "模型产物一致",
+            "warn",
+            f"{len(missing_idle)} 条 ready 注册行目录缺失（{sample}…）",
+            "注册表状态已失效：归档这些行或恢复产物，避免未来被误选为推理模型",
+            metrics,
+        )
+    return CheckResult(
+        "C15", "模型产物一致", "ok", f"{len(rows)} 条 ready 行目录全在位", "", metrics
+    )
+
+
+async def check_c15_model_artifact_consistency(ctx: HealthContext) -> CheckResult:
+    """注册表（qm_user_models.status∈ready/active）与磁盘目录的漂移巡检。
+
+    storage_path 是容器内路径，健康检查与推理跑在同一容器，判定口径一致。
+    """
+    try:
+        rows = ctx.query(
+            "SELECT m.model_id, m.storage_path, "
+            "bool_or(COALESCE(s.enabled, false)) AS enabled "
+            "FROM qm_user_models m "
+            "LEFT JOIN qm_model_inference_settings s "
+            "  ON s.tenant_id = m.tenant_id AND s.user_id = m.user_id "
+            "  AND s.model_id = m.model_id "
+            "WHERE m.status IN ('ready', 'active') "
+            "AND COALESCE(m.storage_path, '') <> '' "
+            "GROUP BY m.model_id, m.storage_path"
+        )
+    except Exception as exc:  # noqa: BLE001 - 表缺失等不阻断（旧库）
+        return CheckResult("C15", "模型产物一致", "warn", f"注册表查询失败: {exc}")
+    return classify_model_artifact_drift(rows, os.path.isdir)
+
+
 def _crypto_market_enabled() -> bool:
     """加密市场是否启用（委托 quantbc_hub，避免 ENABLE_CRYPTO 解析两处口径分叉）。"""
     from backend.services.engine.data_platform.quantbc_hub import _crypto_enabled
@@ -1282,6 +1352,7 @@ CHECKS: list[tuple[str, str, Callable]] = [
     ("C12", "本地行情数据", check_c12_local_market_data),
     ("C13", "真日历覆盖年限", check_c13_trading_calendar_coverage),
     ("C14", "分账账本一致性", check_c14_agent_ledger_parity),
+    ("C15", "模型产物一致", check_c15_model_artifact_consistency),
 ]
 
 

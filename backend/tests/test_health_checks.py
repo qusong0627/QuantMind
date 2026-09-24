@@ -19,6 +19,7 @@ from backend.scripts.diagnose.health import (
     classify_cid_duplicates,
     classify_ledger_writes,
     classify_local_market_data,
+    classify_model_artifact_drift,
     classify_signal_distribution,
     classify_snapshot_consistency,
     check_c01_signal_distribution,
@@ -29,6 +30,7 @@ from backend.scripts.diagnose.health import (
     check_c12_local_market_data,
     check_c13_trading_calendar_coverage,
     check_c14_agent_ledger_parity,
+    check_c15_model_artifact_consistency,
     exit_code,
     ledger_parity,
     summarize,
@@ -868,3 +870,76 @@ async def test_c02_three_batch_runs_is_multi_run_warn():
 
     assert r.level == "warn"
     assert "同日多 run" in r.detail
+
+
+# --- C15 模型产物一致：注册表 ready 行 ↔ 磁盘目录 ----------------------------
+
+
+def test_c15_enabled_model_missing_dir_is_fail():
+    """2026-09-24 事故形态：2 个启用模型的目录消失，连败 10 天无人可见。"""
+    rows = [
+        {"model_id": "m_dead", "storage_path": "/gone/m_dead", "enabled": True},
+        {"model_id": "m_ok", "storage_path": "/ok/m_ok", "enabled": True},
+    ]
+    r = classify_model_artifact_drift(rows, lambda p: p == "/ok/m_ok")
+
+    assert r.level == "fail"
+    assert "m_dead" in r.detail
+    assert "m_ok" not in r.detail  # 在位的不得进点名清单
+    assert r.metrics == {"checked": 2, "missing_enabled": 1, "missing_idle": 0}
+
+
+def test_c15_idle_missing_is_warn_not_fail():
+    """未启用行的漂移只是积累中的隐患：warn，不能升级成 fail。"""
+    rows = [{"model_id": "m_old", "storage_path": "/gone/m_old", "enabled": False}]
+    r = classify_model_artifact_drift(rows, lambda p: False)
+
+    assert r.level == "warn"
+    assert "m_old" in r.detail
+    assert r.metrics["missing_idle"] == 1
+
+
+def test_c15_all_present_is_ok():
+    rows = [{"model_id": "m1", "storage_path": "/ok/m1", "enabled": True}]
+    r = classify_model_artifact_drift(rows, lambda p: True)
+
+    assert r.level == "ok"
+
+
+def test_c15_empty_storage_path_is_skipped_not_reported(tmp_path):
+    """老系统行（alpha158 等）storage_path 为空：不扫、不报，避免恒定噪声。"""
+    rows = [{"model_id": "sys-x", "storage_path": None, "enabled": False}]
+    r = classify_model_artifact_drift(rows, lambda p: False)
+
+    assert r.level == "ok"
+
+
+@pytest.mark.asyncio
+async def test_c15_check_reads_real_paths_and_settings_join(tmp_path):
+    """端到端形状：真实 os.path.isdir + 注册表行（含 enabled 维度）。"""
+    live = tmp_path / "live_model"
+    live.mkdir()
+    ctx = FakeCtx(
+        {
+            "qm_user_models": [
+                {"model_id": "m_live", "storage_path": str(live), "enabled": True},
+                {
+                    "model_id": "m_gone",
+                    "storage_path": str(tmp_path / "vanished"),
+                    "enabled": True,
+                },
+            ]
+        }
+    )
+    r = await check_c15_model_artifact_consistency(ctx)
+
+    assert r.level == "fail"
+    assert "m_gone" in r.detail
+
+
+def test_c15_sql_joins_settings_for_enabled_dimension():
+    """行为用例喂假行不经过 SQL —— JOIN 子句必须另有源断言，否则未来改成
+    只扫注册表时「启用模型缺失= fail」的区分会静默消失（全部退化成 warn）。"""
+    src = _HEALTH_PY.read_text(encoding="utf-8")
+    assert "qm_model_inference_settings" in src
+    assert '("C15", "模型产物一致", check_c15_model_artifact_consistency)' in src
