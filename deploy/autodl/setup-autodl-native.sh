@@ -9,11 +9,16 @@
 #   QUANTDB_API_KEY=qdb_xxx AUTO_DL=yes bash setup-autodl-native.sh
 #
 # 环境变量：
-#   QUANTDB_API_KEY     自动同步必填（也可事先 export）
 #   AUTO_DL             yes | no | skip（默认：无数据 yes；已有数据 skip）
-#   AUTODL_RESYNC       1=已有数据时仍做增量同步
-#   AUTODL_SINCE        YYYY-MM-DD，默认三年前；full=不裁剪
-#   AUTODL_DATASETS     逗号分隔，默认 l1_factors
+#   AUTODL_RESYNC       1=已有数据时仍做增量同步（ModelScope 续传，已下载文件跳过）
+#   AUTODL_DATASETS     逗号分隔，默认 l1_factors（可选 l1_l2_factors 等）
+#   AUTODL_SINCE        YYYY-MM-DD，默认三年前；full=不裁剪（按 dt= 分区过滤）
+#   MODELSCOPE_DATASET_REPO    魔搭数据集，默认 qusong0627/LightGBM_Alpha300
+#   MODELSCOPE_ENDPOINT        默认 https://www.modelscope.cn
+#   MODELSCOPE_DATASET_REVISION 默认 master
+#   MODELSCOPE_TOKEN           可选（私有仓库 / 提高限流阈值）
+#   MODELSCOPE_SYNC_WORKERS    并发下载数，默认 6
+#   QUANTDB_API_KEY     可选；仅主节点编排器的日常增量同步需要，初始数据不再依赖
 #   PIP_INDEX           默认清华 PyPI
 #   PYTHON_BIN / WORK_DIR / QUANTDB_DIR / ENV_FILE
 set -euo pipefail
@@ -31,6 +36,11 @@ NODE_ENV_FILE="${NODE_ENV_FILE:-$WORK_DIR/.env}"
 PIP_INDEX="${PIP_INDEX:-https://pypi.tuna.tsinghua.edu.cn/simple/}"
 PIP_HOST="${PIP_TRUSTED_HOST:-pypi.tuna.tsinghua.edu.cn}"
 DEFAULT_DATASETS="${AUTODL_DATASETS:-l1_factors}"
+# 初始训练数据来源：魔搭（ModelScope）公开数据集（即 QuantDB 本体，纯 HTTP，无需 SDK/Key）
+MODELSCOPE_ENDPOINT="${MODELSCOPE_ENDPOINT:-https://www.modelscope.cn}"
+MODELSCOPE_DATASET_REPO="${MODELSCOPE_DATASET_REPO:-qusong0627/LightGBM_Alpha300}"
+MODELSCOPE_DATASET_REVISION="${MODELSCOPE_DATASET_REVISION:-master}"
+MODELSCOPE_SYNC_WORKERS="${MODELSCOPE_SYNC_WORKERS:-6}"
 
 is_noninteractive() {
     [ "${AUTODL_NONINTERACTIVE:-0}" = "1" ] || [ ! -t 0 ]
@@ -190,9 +200,9 @@ if [ -n "$API_KEY" ]; then
     fi
 else
     if is_noninteractive; then
-        warn "未提供 QUANTDB_API_KEY，跳过数据源配置（后续可用 AUTODL_RESYNC=1 QUANTDB_API_KEY=… 补）"
+        warn "未提供 QUANTDB_API_KEY（初始数据改由 ModelScope 拉取，不需要 Key；仅编排器日常增量同步需要）"
     else
-        ask_line "请输入 QUANTDB_API_KEY（可选，跳过则不自动下载因子）:" || true
+        ask_line "请输入 QUANTDB_API_KEY（可选；初始数据从 ModelScope 拉取不需要，仅编排器日常增量同步需要）:" || true
         API_KEY="${REPLY:-}"
     fi
 fi
@@ -287,93 +297,241 @@ SYNC_MODE="$(choose_sync_mode)"
 
 print_manual_hint() {
     echo ""
-    warn "离线 / 手动同步："
-    echo "  1) 在已有 QuantDB 的机器同步 6_ml_datasets/"
-    echo "  2) 上传到："
+    warn "离线 / 手动获取数据："
+    echo "  1) 从魔搭数据集下载（公开，无需 Key，可断点续传）："
+    echo "     ${MODELSCOPE_ENDPOINT}/datasets/${MODELSCOPE_DATASET_REPO}"
+    echo "  2) 将 6_ml_datasets/ 放到："
     ok "     $FACTOR_DIR/"
-    echo "  3) 或在本机稍后执行增量同步："
-    echo "     AUTODL_RESYNC=1 QUANTDB_API_KEY=… bash $0"
+    echo "  3) 或在本机稍后重跑本脚本（已下载文件自动跳过）："
+    echo "     AUTODL_RESYNC=1 bash $0"
 }
 
-run_sdk_sync() {
-    local since="$1"
-    local datasets="$2"
-    info "开始同步 datasets=$datasets since=${since:-full} → $QUANTDB_DIR"
-    QUANTDB_API_KEY="$API_KEY" \
+run_modelscope_sync() {
+    local datasets="$1"
+    local since="$2"
+    info "从魔搭拉取训练数据 datasets=$datasets since=${since:-full} → $QUANTDB_DIR"
+    MODELSCOPE_ENDPOINT="$MODELSCOPE_ENDPOINT" \
+    MODELSCOPE_DATASET_REPO="$MODELSCOPE_DATASET_REPO" \
+    MODELSCOPE_DATASET_REVISION="$MODELSCOPE_DATASET_REVISION" \
+    MODELSCOPE_SYNC_WORKERS="$MODELSCOPE_SYNC_WORKERS" \
+    MODELSCOPE_TOKEN="${MODELSCOPE_TOKEN:-${MODELSCOPE_API_TOKEN:-}}" \
     QM_QUANTDB_DATA_DIR="$QUANTDB_DIR" \
-    AUTODL_SINCE="$since" \
     AUTODL_DATASETS="$datasets" \
+    AUTODL_SINCE="$since" \
     "$PYTHON_BIN" - <<'PY'
-import os, sys
+"""从魔搭（ModelScope）公开数据集拉取训练 parquet（纯 HTTP，无需 modelscope SDK/Key）。
 
-try:
-    from quantdb_sdk import QuantDBClient
-except Exception as e:
-    print(f"[ERROR] 导入 quantdb_sdk 失败: {e}", file=sys.stderr)
-    sys.exit(2)
+与 backend/services/engine/data_platform/modelscope_dataset_sync.py 同源：
+分页枚举仓库 tree（含 sha256/size）→ 并发流式下载到 QM_QUANTDB_DATA_DIR → 逐文件
+sha256 校验 + .part 原子覆盖；本地 size 一致则跳过（可断点续传）。
+只拉 6_ml_datasets/<dataset>/ 下的 parquet，并按 AUTODL_SINCE 过滤 dt= 分区。
+"""
+import concurrent.futures
+import hashlib
+import os
+import sys
+import time
+from urllib.parse import quote
 
-key = (os.environ.get("QUANTDB_API_KEY") or "").strip()
-if not key:
-    print("[ERROR] 未配置 QUANTDB_API_KEY", file=sys.stderr)
-    sys.exit(3)
+import requests
 
-save_dir = os.environ.get("QM_QUANTDB_DATA_DIR") or "."
-since = (os.environ.get("AUTODL_SINCE") or "").strip()
-datasets = [x.strip() for x in (os.environ.get("AUTODL_DATASETS") or "l1_factors").split(",") if x.strip()]
-os.makedirs(save_dir, exist_ok=True)
-client = QuantDBClient(api_key=key, timeout=(15, 600), max_retries=3)
-failed = 0
+EP = (os.environ.get("MODELSCOPE_ENDPOINT") or "https://www.modelscope.cn").rstrip("/")
+REPO = os.environ.get("MODELSCOPE_DATASET_REPO") or "qusong0627/LightGBM_Alpha300"
+REV = os.environ.get("MODELSCOPE_DATASET_REVISION") or "master"
+TOKEN = (os.environ.get("MODELSCOPE_TOKEN") or "").strip()
+ROOT = os.path.abspath(os.environ.get("QM_QUANTDB_DATA_DIR") or ".")
+SINCE = (os.environ.get("AUTODL_SINCE") or "").strip().replace("-", "")
+DATASETS = [
+    x.strip()
+    for x in (os.environ.get("AUTODL_DATASETS") or "l1_factors").split(",")
+    if x.strip()
+]
+WORKERS = max(1, int(os.environ.get("MODELSCOPE_SYNC_WORKERS") or 6))
+PAGE = 1000
+RETRIES = 3
 
-def sync_one(ds: str):
-    attempts = []
-    if since:
-        attempts.append({"since": since})
-        attempts.append({"start_date": since})
-        attempts.append({"start": since})
-    attempts.append({})
-    last_err = None
-    for extra in attempts:
-        try:
-            return client.sync_dataset(ds, save_dir=save_dir, **extra)
-        except TypeError as exc:
-            last_err = exc
-            continue
-    raise last_err or RuntimeError(f"sync_dataset({ds}) 调用失败")
+HEADERS = {"User-Agent": "QuantMind-AutoDL-ModelScopeSync/1.0"}
+if TOKEN:
+    HEADERS["Authorization"] = f"Bearer {TOKEN}"
 
-for ds in datasets:
-    print(f"[SYNC] {ds} since={since or 'full'} ...", flush=True)
-    try:
-        r = sync_one(ds)
-        if isinstance(r, dict):
-            errs = r.get("errors") or []
-            print(
-                f"[SYNC] {ds} 完成: synced={r.get('synced')} matched={r.get('matched')} errors={len(errs)}",
-                flush=True,
+
+def dt_ok(path):
+    """按 dt=YYYYMMDD 分区过滤（SINCE 之后的窗口；无 dt= 的静态文件保留）。"""
+    if not SINCE:
+        return True
+    for part in path.split("/"):
+        if part.startswith("dt="):
+            return part[3:] >= SINCE
+    return True
+
+
+def enumerate_files():
+    url = f"{EP}/api/v1/datasets/{REPO}/repo/tree"
+    out, page, seen, total = [], 1, 0, None
+    with requests.Session() as sess:
+        sess.headers.update(HEADERS)
+        while True:
+            resp = sess.get(
+                url,
+                params={
+                    "Revision": REV,
+                    "Recursive": "true",
+                    "PageNumber": page,
+                    "PageSize": PAGE,
+                },
+                timeout=(15, 120),
             )
-        else:
-            print(f"[SYNC] {ds} 完成: {r}", flush=True)
-    except Exception as e:
-        failed += 1
-        print(f"[WARN] {ds} 同步失败: {e}", flush=True)
-if failed:
-    sys.exit(4)
-print("[DONE] 数据集同步结束", flush=True)
+            resp.raise_for_status()
+            body = resp.json()
+            if body.get("Code") != 200:
+                print(
+                    f"[ERROR] ModelScope tree API 失败: {body.get('Message') or body.get('Code')}",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
+            data = body.get("Data") or {}
+            files = data.get("Files") or []
+            if total is None:
+                total = int(data.get("TotalCount") or 0)
+            seen += len(files)
+            for ent in files:
+                if ent.get("Type") != "blob":
+                    continue
+                path = ent.get("Path") or ""
+                if not path.endswith(".parquet"):
+                    continue
+                if not any(path.startswith(f"6_ml_datasets/{ds}/") for ds in DATASETS):
+                    continue
+                if not dt_ok(path):
+                    continue
+                out.append(
+                    (path, int(ent.get("Size") or 0), (ent.get("Sha256") or "").lower())
+                )
+            if page % 20 == 0 or not files or (total is not None and seen >= total):
+                print(
+                    f"[ENUM] 已扫描 {seen}/{total or '?'} 项，命中 {len(out)} 个 parquet",
+                    flush=True,
+                )
+            if not files or (total is not None and seen >= total):
+                break
+            page += 1
+    return out
+
+
+def download_one(rel, size, sha):
+    url = (
+        f"{EP}/api/v1/datasets/{REPO}/repo"
+        f"?Revision={quote(REV, safe='')}&FilePath={quote(rel, safe='')}"
+    )
+    dst = os.path.join(ROOT, *rel.split("/"))
+    if size and os.path.isfile(dst) and os.path.getsize(dst) == size:
+        return "skipped", 0
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    part = dst + ".part"
+    last = None
+    for attempt in range(RETRIES):
+        try:
+            digest = hashlib.sha256()
+            got = 0
+            with requests.get(
+                url, headers=HEADERS, stream=True, timeout=(15, 300), allow_redirects=True
+            ) as resp:
+                resp.raise_for_status()
+                with open(part, "wb") as fh:
+                    for chunk in resp.iter_content(1 << 20):
+                        if not chunk:
+                            continue
+                        fh.write(chunk)
+                        digest.update(chunk)
+                        got += len(chunk)
+            if size and got != size:
+                raise OSError(f"size 不符: 期望 {size} 实得 {got}")
+            if sha and digest.hexdigest() != sha:
+                raise OSError("sha256 校验失败")
+            os.replace(part, dst)
+            return "downloaded", got
+        except Exception as exc:  # noqa: BLE001 - 重试后统一抛出
+            last = exc
+            try:
+                if os.path.exists(part):
+                    os.remove(part)
+            except OSError:
+                pass
+            if attempt < RETRIES - 1:
+                time.sleep(1.5 * (attempt + 1))
+    raise last or RuntimeError("下载失败")
+
+
+def main():
+    os.makedirs(ROOT, exist_ok=True)
+    print(
+        f"[MODELSCOPE] repo={REPO} rev={REV} endpoint={EP} "
+        f"datasets={DATASETS} since={SINCE or 'full'} → {ROOT}",
+        flush=True,
+    )
+    files = enumerate_files()
+    if not files:
+        print(
+            "[WARN] 未枚举到匹配文件（检查 AUTODL_DATASETS / AUTODL_SINCE / 网络）",
+            flush=True,
+        )
+        return 5
+    total_bytes = sum(f[1] for f in files)
+    print(
+        f"[MODELSCOPE] 待处理 {len(files)} 个文件，约 {total_bytes / 1024**3:.2f} GB",
+        flush=True,
+    )
+    downloaded = skipped = errors = done_bytes = 0
+    err_samples = []
+    t0 = time.time()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=WORKERS) as pool:
+        futures = {
+            pool.submit(download_one, rel, size, sha): rel
+            for rel, size, sha in files
+        }
+        for idx, fut in enumerate(concurrent.futures.as_completed(futures), 1):
+            try:
+                status, got = fut.result()
+                if status == "downloaded":
+                    downloaded += 1
+                    done_bytes += got
+                else:
+                    skipped += 1
+            except Exception as exc:  # noqa: BLE001
+                errors += 1
+                if len(err_samples) < 20:
+                    err_samples.append(f"{futures[fut]}: {exc}")
+            if idx % 25 == 0 or idx == len(files):
+                print(
+                    f"[DL] {idx}/{len(files)} 下载={downloaded} 跳过={skipped} "
+                    f"失败={errors} 已下 {done_bytes / 1024**3:.2f} GB "
+                    f"用时 {time.time() - t0:.0f}s",
+                    flush=True,
+                )
+    print(
+        f"[DONE] 魔搭同步结束: 下载={downloaded} 跳过={skipped} 失败={errors} "
+        f"共 {done_bytes / 1024**3:.2f} GB，用时 {time.time() - t0:.0f}s",
+        flush=True,
+    )
+    for sample in err_samples:
+        print(f"[ERR] {sample}", flush=True)
+    return 0 if errors == 0 else 4
+
+
+sys.exit(main())
 PY
 }
 
 case "$SYNC_MODE" in
     yes)
-        if [ -z "$API_KEY" ]; then
-            warn "未配置 QUANTDB_API_KEY，无法自动同步；改为手动上传"
-            print_manual_hint
-        elif run_sdk_sync "$SINCE" "$DATASETS"; then
+        if run_modelscope_sync "$DATASETS" "$SINCE"; then
             if [ -d "$FACTOR_DIR" ] && [ -n "$(ls -A "$FACTOR_DIR" 2>/dev/null)" ]; then
                 ok "数据集已就绪 $(du -sh "$FACTOR_DIR" | cut -f1): $(ls -1 "$FACTOR_DIR" | tr '\n' ' ')"
             else
-                warn "同步命令结束但未看到 $FACTOR_DIR，请检查 Key / 网络"
+                warn "同步命令结束但未看到 $FACTOR_DIR，请检查 AUTODL_DATASETS / 网络"
             fi
         else
-            warn "自动同步未完全成功（可设 AUTODL_RESYNC=1 重跑续传）"
+            warn "魔搭同步未完全成功（可设 AUTODL_RESYNC=1 重跑，已下载文件会跳过）"
             print_manual_hint
         fi
         ;;
@@ -388,10 +546,11 @@ esac
 # ── 收尾 ─────────────────────────────────────────────
 echo ""
 echo "=============================================="
-ok "节点初始化完成（依赖 + 目录 + API Key）。"
+ok "节点初始化完成（依赖 + 目录 + 训练数据）。"
 echo ""
+info "训练数据来源：魔搭 ${MODELSCOPE_ENDPOINT}/datasets/${MODELSCOPE_DATASET_REPO}（即 QuantDB 本体）。"
 info "train.py / training 包 / backend 直读子树由主节点编排器每次 rsync，本脚本不部署训练代码。"
-info "日常增量：提交远程训练时编排器会再跑 quantdb_daily_sync.py --parquet-only。"
+info "日常增量：提交远程训练时编排器会再跑 quantdb_daily_sync.py --parquet-only（需 QUANTDB_API_KEY）。"
 echo ""
 info "手工验证："
 echo "  set -a; . $NODE_ENV_FILE; set +a"
@@ -400,7 +559,8 @@ echo "  nvidia-smi"
 echo "  du -sh $FACTOR_DIR 2>/dev/null || true"
 echo ""
 info "非交互示例："
-echo "  QUANTDB_API_KEY=qdb_xxx AUTO_DL=yes AUTODL_SINCE=2024-01-01 AUTODL_DATASETS=l1_factors bash $0"
-echo "  AUTODL_RESYNC=1 QUANTDB_API_KEY=qdb_xxx bash $0   # 已有数据仍增量"
+echo "  AUTO_DL=yes AUTODL_SINCE=2024-01-01 AUTODL_DATASETS=l1_factors bash $0"
+echo "  AUTODL_RESYNC=1 bash $0                  # 已有数据仍续传（已下载文件跳过）"
+echo "  AUTODL_DATASETS=l1_l2_factors bash $0    # 拉 329 列 L1+L2 宽表"
 echo "=============================================="
 ok "脚本完成"

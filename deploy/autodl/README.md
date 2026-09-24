@@ -52,36 +52,43 @@ QUANTDB_API_KEY=qdb_xxx AUTO_DL=yes AUTODL_SINCE=2024-01-01 AUTODL_DATASETS=l1_f
   bash setup-autodl-native.sh
 ```
 
-已有数据仍做增量：
+已有数据仍续传（已下载文件跳过）：
 
 ```bash
-AUTODL_RESYNC=1 QUANTDB_API_KEY=qdb_xxx bash setup-autodl-native.sh
+AUTODL_RESYNC=1 bash setup-autodl-native.sh
 ```
 
-脚本会：检测 Python / GPU；安装训练依赖（缺啥装啥，pandas 钉在 2.x）；创建 `/root/workspace` 与 `/root/autodl-fs/quantdb`；（可选）写入 API Key；按选择自动同步 / 增量 / 跳过并提示手动上传。
+脚本会：检测 Python / GPU；安装训练依赖（缺啥装啥，pandas 钉在 2.x）；创建 `/root/workspace` 与 `/root/autodl-fs/quantdb`；（可选）写入 QuantDB API Key（仅供编排器日常增量）；按选择从 **魔搭 ModelScope** 拉取 / 跳过训练数据，或提示手动获取。
 
 ## 数据集
 
 训练直读 QuantDB 因子 parquet，放 **数据盘** `/root/autodl-fs/quantdb`（重启不丢；系统盘 `/` 会清）。
 
+初始数据来源为 **魔搭 ModelScope 公开数据集** <https://www.modelscope.cn/datasets/qusong0627/LightGBM_Alpha300>（即 QuantDB 本体；纯 HTTP 拉取，**不需要 QuantDB API Key**）：
+
 | 方式 | 何时 | 行为 |
 |------|------|------|
-| 自动同步 | 空盘默认，或 `AUTO_DL=yes` | `quantdb-sdk` 增量拉取，默认 **近 3 年**、仅 **`l1_factors`**（可用 `AUTODL_SINCE` / `AUTODL_DATASETS` 改） |
-| 增量 | 已有数据后选 Y，或 `AUTODL_RESYNC=1` | 同样走 SDK，已下载分区会匹配跳过 |
-| 手动 | 选 N / `AUTO_DL=no` | 自行把 `6_ml_datasets/` 传到 `/root/autodl-fs/quantdb/6_ml_datasets/` |
+| 自动拉取 | 空盘默认，或 `AUTO_DL=yes` | 枚举魔搭仓库 → 并发下载 `6_ml_datasets/<dataset>/` 下 parquet（sha256 校验 + `.part` 原子覆盖）；默认 **近 3 年**、仅 **`l1_factors`**（可用 `AUTODL_SINCE` / `AUTODL_DATASETS` 改） |
+| 续传 | 已有数据后选 Y，或 `AUTODL_RESYNC=1` | 本地 size 一致的文件跳过，只补缺失/变更项，可反复重跑 |
+| 手动 | 选 N / `AUTO_DL=no` | 从魔搭下载后把 `6_ml_datasets/` 传到 `/root/autodl-fs/quantdb/6_ml_datasets/` |
 | 跳过 | 已有数据默认，或 `AUTO_DL=skip` | 不下载 |
 
-日常开训时，主节点编排器还会再跑 `quantdb_daily_sync.py --parquet-only`（与本脚本独立）。
+日常开训时，主节点编排器还会再跑 `quantdb_daily_sync.py --parquet-only`（QuantDB SDK 增量，需 `QUANTDB_API_KEY`；与本脚本独立）。
 
 环境变量：
 
 | 变量 | 默认 | 说明 |
 |------|------|------|
-| `QUANTDB_API_KEY` | 无 | **可选**；自动/增量同步时必填，不填则跳过数据源配置（手动上传） |
 | `AUTO_DL` | 空盘 yes / 有数据 skip | `yes` / `no` / `skip` |
-| `AUTODL_RESYNC` | 0 | `1` 时已有数据仍增量 |
-| `AUTODL_SINCE` | `3-year` | `YYYY-MM-DD` 或 `full` |
-| `AUTODL_DATASETS` | `l1_factors` | 逗号分隔，如 `l1_factors,l2_factors` |
+| `AUTODL_RESYNC` | 0 | `1` 时已有数据仍续传（已下载文件跳过） |
+| `AUTODL_SINCE` | `3-year` | `YYYY-MM-DD` 或 `full`；按 `dt=` 分区过滤下载窗口 |
+| `AUTODL_DATASETS` | `l1_factors` | 逗号分隔，如 `l1_factors,l1_l2_factors`（Alpha300 用 329 列宽表可设 `l1_l2_factors`） |
+| `MODELSCOPE_DATASET_REPO` | `qusong0627/LightGBM_Alpha300` | 魔搭数据集 |
+| `MODELSCOPE_ENDPOINT` | `https://www.modelscope.cn` | 魔搭站点（可走内网代理） |
+| `MODELSCOPE_DATASET_REVISION` | `master` | 数据集修订 |
+| `MODELSCOPE_TOKEN` | 无 | 可选（私有仓库 / 提高限流阈值） |
+| `MODELSCOPE_SYNC_WORKERS` | 6 | 并发下载数 |
+| `QUANTDB_API_KEY` | 无 | **可选**；仅编排器日常增量同步需要，初始数据从魔搭拉取不需要 |
 | `PIP_INDEX` | 清华 PyPI | 国内源，可用 `PIP_INDEX` 改阿里云等 |
 
 ## 环境变量持久化

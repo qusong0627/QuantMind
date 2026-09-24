@@ -19,7 +19,7 @@
 #   QUANTMIND_SETUP_URL     直接指定脚本 URL，覆盖上面两项拼装
 #   QUANTMIND_SETUP_FILE    直接指定本地脚本路径，跳过下载
 #   QUANTMIND_SETUP_SHA256  期望脚本的 SHA-256（可选，供应链校验）
-# 其余变量（QUANTDB_API_KEY / AUTO_DL / AUTODL_SINCE / AUTODL_DATASETS / PIP_INDEX …）
+# 其余变量（AUTO_DL / AUTODL_SINCE / AUTODL_DATASETS / MODELSCOPE_* / PIP_INDEX …）
 # 原样透传给 setup-autodl-native.sh。
 
 set -Eeuo pipefail
@@ -37,7 +37,7 @@ usage() {
 用法: bash quick-setup.sh [setup-autodl-native.sh 的参数]
 
 本脚本负责定位/下载 deploy/autodl/setup-autodl-native.sh 并执行。
-初始化行为由环境变量控制（QUANTDB_API_KEY / AUTO_DL / AUTODL_* / PIP_INDEX …）。
+初始化行为由环境变量控制（AUTO_DL / AUTODL_* / MODELSCOPE_* / PIP_INDEX …）。
 
 下载器选项（环境变量）:
   QUANTMIND_REF=<branch|tag>   拉取版本（默认 master）
