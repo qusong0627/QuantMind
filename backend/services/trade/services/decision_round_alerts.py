@@ -26,10 +26,14 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
 from typing import Any
 
+from backend.shared.alert_delivery import (
+    ALERT_TTL_S,
+    Alert,
+    Notifier,
+    deliver_alert,
+)
 from backend.services.trade.services.decision_round_core import (
     STATUS_ABORTED,
     STATUS_ERROR,
@@ -47,8 +51,8 @@ ALERT_FAILED = "failed"
 ALERT_LLM_FAILED = "llm_failed"
 ALERT_ERROR = "error"
 
-#: 去重键存活期（秒）。跨过一整个交易日即可：口径是「一天一次」，不是「一段时间一次」。
-_ALERT_TTL_S = 90_000
+#: 去重键存活期（秒）：与 ``alert_delivery.ALERT_TTL_S`` 同值（保留本名给既有读者）。
+_ALERT_TTL_S = ALERT_TTL_S
 
 _KEY_FMT = "qm:decision:alert:{day}:{agent}:{kind}"
 
@@ -59,19 +63,9 @@ MANUAL_RERUN_HINT = (
 )
 
 
-@dataclass(frozen=True, slots=True)
-class RoundAlert:
-    """一条待推的告警（`level` 只取 ``publish_notification`` 认识的档位）。"""
-
-    kind: str
-    level: str
-    title: str
-    content: str
-
-
-#: 通知器形状：``(user_id, title, content, level) -> Awaitable``。**账户坐标不在参数
-#: 里**（与 ``Submitter`` 同一条纪律：它属于「这一轮是谁在跑」，构造时闭合进去）。
-Notifier = Callable[..., Awaitable[Any]]
+#: 一条待推的告警。形状与投递纪律（去重、送达后才记键）在 ``shared.alert_delivery``，
+#: 本模块只负责**判据**（哪一轮要推、推什么）。保留 ``RoundAlert`` 这个名字给既有读者。
+RoundAlert = Alert
 
 
 def _label(result: RoundResult) -> str:
@@ -172,23 +166,6 @@ def default_notifier() -> Notifier:
     return _notify
 
 
-def _already_sent(redis: Any, key: str) -> bool:
-    """读过键没有。**读不到按「没推过」办**（重复推优于沉默）。"""
-    try:
-        return bool(redis.get(key))
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("[DecisionRound] 告警去重键读取失败 %s: %s", key, exc)
-        return False
-
-
-def _remember(redis: Any, key: str) -> None:
-    """记下「已推」。写失败只告警：下次会重复推一条，这不是要拦下的错。"""
-    try:
-        redis.set(key, "1", ex=_ALERT_TTL_S)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("[DecisionRound] 告警去重键写入失败 %s: %s", key, exc)
-
-
 async def alert_round(
     result: RoundResult,
     *,
@@ -209,34 +186,14 @@ async def alert_round(
     draft = round_alert(result)
     if draft is None:
         return False
-
-    uid = str(user_id or "").strip()
-    if not uid:
-        logger.warning(
-            "[DecisionRound] %s 有失败（%s）但账户坐标为空，通知未推: %s",
-            result.round_id,
-            draft.kind,
-            draft.title,
-        )
-        return False
-
-    key = alert_key(result, draft.kind)
-    if redis is not None and _already_sent(redis, key):
-        return False
-
-    send = notifier if notifier is not None else default_notifier()
-    try:
-        delivered = bool(await send(uid, draft.title, draft.content, draft.level))
-    except Exception as exc:  # noqa: BLE001 通知炸了不许带走这一轮的结果
-        logger.warning(
-            "[DecisionRound] 通知发送失败（%s）: %s", draft.kind, exc, exc_info=True
-        )
-        return False
-
-    if delivered and redis is not None:
-        _remember(redis, key)
-    if not delivered:
-        logger.warning(
-            "[DecisionRound] 通知未送达（%s）：下一轮同类失败会再试", draft.kind
-        )
-    return delivered
+    return await deliver_alert(
+        draft,
+        key=alert_key(result, draft.kind),
+        user_id=user_id,
+        redis=redis,
+        # 现造而不是先造：见 docstring「没有要推的事就连通知设施都不碰」。
+        notifier_factory=(lambda: notifier)
+        if notifier is not None
+        else default_notifier,
+        log_prefix="[DecisionRound]",
+    )

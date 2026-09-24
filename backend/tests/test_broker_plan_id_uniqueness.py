@@ -167,9 +167,15 @@ def test_显式_client_order_id_原样透传() -> None:
 
 
 def test_推送服务缺省号同秒内也不撞(monkeypatch: Any) -> None:
-    """第二个生成点：``tdx_pusher.place_order`` 未传 ``plan_id`` 时的缺省号。"""
+    """第二个生成点：``tdx_pusher.place_order`` 未传 ``plan_id`` 时的缺省号。
+
+    时段事实必须**注入**：``place_order`` 有真单时段闸门（盘外不发单），
+    不注入的话本用例白天绿、收盘后红——测的是墙上钟，不是缺省号。
+    """
+    from backend.services.live_trading.services import tdx_push_service as push_mod
     from backend.services.live_trading.services.tdx_push_service import tdx_pusher
 
+    monkeypatch.setattr(push_mod, "is_trading_time", lambda now=None: True)
     clock = _FakeClock(_BASE_NS)
     monkeypatch.setattr(time, "time", clock.time)
     monkeypatch.setattr(time, "time_ns", clock.time_ns)

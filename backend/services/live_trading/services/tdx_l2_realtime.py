@@ -28,7 +28,14 @@ from backend.services.live_trading.services.tdx_l2_capture_task import (
     _REALTIME_MAX_AGE_SEC,
     FACTOR_ICIR,
 )
+from backend.services.live_trading.services.tdx_exec_alerts import (
+    FAMILY_L2,
+    alert_exec_leg,
+    l2_alerts,
+    resolve_exec_leg,
+)
 from backend.services.live_trading.services.tdx_push_service import tdx_pusher
+from backend.services.live_trading.services.trading_session import is_trading_time
 from backend.services.trade_shared.redis_client import redis_client as trade_redis
 from backend.shared.simulation_account_keys import resolve_db_account_user
 from backend.shared.stock_utils import StockCodeUtil
@@ -82,7 +89,29 @@ realtime_status: dict[str, Any] = {
     "capture_stale": False,
     "inflight": {},
     "retry_stats": {},
+    # —— 下列字段是**本周期**的事实（每周期起点清空，见主循环）：状态面板与告警面
+    # 读同一份，留着上一轮的值会让「这一轮好了」永远看不出来（恢复通知就发不出去）。
+    "cycle_error": None,            # 本周期整体异常
+    "positions_error": None,        # 持仓读不到（⇒ 触发与重挂整体跳过）
+    "trigger_skipped_symbols": 0,   # 因持仓读不到而未做触发判断的标的数
+    "session_skipped_symbols": 0,   # 因非交易时段（tdx 模式）而未做触发判断的标的数
+    "exec_error": None,             # 执行段没能执行
+    "orders_failed": [],            # 本周期下单失败的腿（最多 _MAX_LISTED_FAILURES 条）
+    "orders_failed_count": 0,
+    "pool_starved_cycles": 0,       # 因子池连续不足的周期数（≥阈值=停摆）
+    "in_trading_hours": False,
 }
+
+#: 本进程当天推过的告警键（``seen``：见 ``shared.alert_delivery.deliver_alert``）。
+#: 循环每 ~60s 跑一次，而 Redis 读不出来时只靠 Redis 去重键会退化成「每周期推一条」。
+#: 键里自带交易日，故跨日自然失效，不需要清理。
+_ALERTED_KEYS: set[str] = set()
+
+#: 状态镜像里最多带几条失败腿（面板要能一屏读完；总数在 orders_failed_count）。
+_MAX_LISTED_FAILURES = 5
+
+#: 因子池不足的下限（与主循环里的判据同源，提到模块级给状态字段用）。
+_MIN_POOL_SIZE = 5
 
 
 def _capture_is_stale(interval: float) -> bool:
@@ -624,15 +653,72 @@ async def run_tdx_l2_realtime_task(interval_sec: int = 0) -> None:
     # 账户名唯一口径：规范名 10000001（前端配置/分数/模拟盘均按规范名读写）
     tenant_id, user_id = "default", resolve_db_account_user("TDX_ACCOUNT_USER_ID")
     base_interval = float(interval_sec or 0)
+    # 先给兜底值：首周期若在读到配置前就异常，状态镜像算 TTL 也要有 interval 可用
+    # （此前它在 try 内赋值，首周期异常时镜像那行会 NameError——被自己的 except 吞掉，
+    # 表现为「刚启动出错时面板空白」）。
+    interval = base_interval or 60.0
     realtime_status["running"] = True
     realtime_status["started_at"] = datetime.now().isoformat(timespec="seconds")
     logger.info("[TdxL2] 实时推理任务启动")
+
+    async def _publish_cycle_status() -> None:
+        """状态镜像 + 失败可见性。**每个周期结束都要走**（含提前 continue 的分支）。
+
+        镜像在先：通知里说的那份状态落地时，面板上已经是同一份。
+        去重设施不可用（``trade_redis.client is None``）时**不推**——循环每 ~60s
+        一次，没有进程内 ``seen`` 的去重等于每周期推一条（那会把通知刷成噪音）；
+        状态键同样写不了，故障仍在日志里。宁可这条不推，也不刷屏。
+        """
+        if trade_redis.client is None:
+            return
+        try:
+            trade_redis.set(
+                _STATUS_KEY,
+                dict(realtime_status),
+                ttl=max(_STATUS_TTL_CYCLES * int(interval), _STATUS_TTL_FLOOR),
+            )
+        except Exception as exc:  # noqa: BLE001 — 镜像失败绝不影响主循环
+            logger.warning("[TdxL2] 状态镜像写入失败: %s", exc)
+        try:
+            alerts = l2_alerts(realtime_status)
+            if alerts:
+                await alert_exec_leg(
+                    FAMILY_L2,
+                    alerts,
+                    user_id=user_id,
+                    redis=trade_redis,
+                    seen=_ALERTED_KEYS,
+                )
+            else:
+                await resolve_exec_leg(FAMILY_L2, user_id=user_id, redis=trade_redis)
+        except Exception as exc:  # noqa: BLE001 — 告警面故障不许带走循环
+            logger.warning("[TdxL2] 失败可见性推送异常: %s", exc, exc_info=True)
 
     while True:
         cycle_start = time.monotonic()
         buys_all: list[dict[str, Any]] = []
         sells_all: list[dict[str, Any]] = []
         error = None
+        failed: list[dict[str, Any]] = []
+        exec_error: str | None = None
+        positions_error: str | None = None
+        trigger_skipped = 0
+        session_skipped = 0
+        in_trading_hours = is_trading_time()
+        # 本周期字段清零：告警/恢复通知靠「这一轮干不干净」判定，留着上一轮的值
+        # 会让干净的一轮看起来还在坏（恢复通知永远发不出去）。
+        realtime_status.update(
+            {
+                "cycle_error": None,
+                "positions_error": None,
+                "trigger_skipped_symbols": 0,
+                "session_skipped_symbols": 0,
+                "exec_error": None,
+                "orders_failed": [],
+                "orders_failed_count": 0,
+                "in_trading_hours": in_trading_hours,
+            }
+        )
         try:
             cfg = load_l2_config()
             interval = float(cfg.get("interval_sec") or base_interval or 60)
@@ -683,22 +769,28 @@ async def run_tdx_l2_realtime_task(interval_sec: int = 0) -> None:
             realtime_status["pool_stale_skipped"] = stale_skipped
             pool_factors = {s: p.get("factors") or {} for s, p in pool_data.items()}
             realtime_status["pool_size"] = len(pool_factors)
-            if len(pool_factors) < 5:
-                # 因子池不足：采集链路可能中断。评分无法进行, 状态如实标记
+            if len(pool_factors) < _MIN_POOL_SIZE:
+                # 因子池不足：采集链路可能中断。评分无法进行, 状态如实标记。
+                # 连续计数是给告警用的：开盘头几分钟池子还在构建，只有"连续 N 个
+                # 周期都不足"才叫停摆（单周期不足报警是每天一次的假警）。
+                starved = int(realtime_status.get("pool_starved_cycles") or 0) + 1
                 realtime_status.update(
                     {
                         "capture_stale": capture_stale,
                         "bridge_ok": not capture_stale,
+                        "pool_starved_cycles": starved,
                         "last_error": (
-                            "L2 因子池不足 5 只（采集链路可能中断）"
+                            f"L2 因子池不足 {_MIN_POOL_SIZE} 只（采集链路可能中断）"
                             if capture_stale
                             else None
                         ),
                         "last_cycle_at": realtime_status.get("last_cycle_at"),
                     }
                 )
+                await _publish_cycle_status()
                 await asyncio.sleep(interval)
                 continue
+            realtime_status["pool_starved_cycles"] = 0
 
             # 3. 信号分 + 日频融合分（engine 失败降级中性分, 不阻断评分）
             signal_scores = compute_signal_scores(pool_factors, cfg.get("factor_weights"))
@@ -738,19 +830,31 @@ async def run_tdx_l2_realtime_task(interval_sec: int = 0) -> None:
 
             # 5. 三档模式（会员门控已移除，全部登录用户可执行）
             _, fixed_buy_amount, execute_mode = load_rolling_config(tenant_id, user_id)
+            # 真单闸门：本循环 24/7 常驻，而 A 股委托只在交易时段有效
+            # （09:15–11:35 / 12:55–15:05）。非交易时段的真单要么被柜台拒、要么
+            # 被客户端挂成次日单——"现在的分"变成"明天的无主委托"。paper 是本地
+            # 撮合（盘后演练正需要它），不受限。物理出口另有一道闸
+            # （tdx_push_service.place_order），这里这道负责不动 + 如实登记。
+            real_orders_allowed = in_trading_hours or execute_mode != "tdx"
 
             # 6. 持仓（tdx/off 读桥, paper 读模拟盘）。
             #    桥断只跳过触发执行——评分已在上一步落盘, 推理不停
             bridge_ok = True
             try:
                 if execute_mode == "paper":
-                    positions, _ = await svc.load_positions_from_paper(tenant_id, user_id)
+                    positions, pos_err = await svc.load_positions_from_paper(tenant_id, user_id)
                 else:
-                    positions, _ = await svc.load_positions_from_tdx()
+                    positions, pos_err = await svc.load_positions_from_tdx()
             except Exception as exc:
+                positions, pos_err = [], f"持仓查询失败: {exc}"
+            if pos_err:
+                # 两个 loader 都是「出错返回 ([], 原因)」而**不抛**：此前用 `_` 把原因
+                # 丢掉，于是这个 except 分支永不触发、bridge_ok 保持 True，held={} 仍然
+                # 算出「每只达标标的都是新仓」的买单。持仓未知 ⇒ 不触发（fail-closed）：
+                # 少做一轮远好过按错的持仓做一轮。
                 bridge_ok = False
-                positions = []
-                error = f"持仓查询失败(跳过触发执行): {exc}"
+                positions_error = str(pos_err)
+                error = f"持仓查询失败(跳过触发执行): {pos_err}"
                 logger.warning("[TdxL2] %s", error)
             held = {p.get("symbol"): p for p in positions if isinstance(p, dict)}
 
@@ -761,7 +865,7 @@ async def run_tdx_l2_realtime_task(interval_sec: int = 0) -> None:
             #    抑制集保证"不能多": 标的已有活单在撮合时不重复触发新单。
             suppressed: set[str] = set()
             retry_stats: dict[str, Any] = {}
-            if bridge_ok and execute_mode == "tdx":
+            if bridge_ok and execute_mode == "tdx" and real_orders_allowed:
                 try:
                     today_orders = await svc.pull_today_orders()
                     # 成交后把实际成交均价并进委托时点记录（"什么价成交"）
@@ -788,10 +892,18 @@ async def run_tdx_l2_realtime_task(interval_sec: int = 0) -> None:
                         k: v for k, v in retry_stats.items()
                     }
 
-            # 7. 触发判断（桥断/采集陈旧/有活单 → 只评分不触发, 避免拿坏数据下单）
+            # 7. 触发判断（桥断/采集陈旧/持仓读不到/非交易时段/有活单 → 只评分不触发）
             sell_items: list[dict[str, Any]] = []
             buy_items: list[dict[str, Any]] = []
-            if bridge_ok and not capture_stale:
+            if positions_error:
+                # 触发整段没做：池里这些标的**本可以**产生买卖信号而全部落空。
+                # 这是告警面要的数字（"少了一轮判断"），不是普通日志。
+                trigger_skipped = len(pool_data)
+            elif not real_orders_allowed:
+                # 非交易时段的 tdx 模式：本轮不做触发判断（池里这些标的没有判断，
+                # 不是"判断了没通过"）。不是失败，故不进告警面。
+                session_skipped = len(pool_data)
+            if bridge_ok and not capture_stale and real_orders_allowed:
                 for sym, signal in signal_scores.items():
                     fusion = fusion_scores.get(sym)
                     realtime_score = compute_realtime_score(
@@ -864,6 +976,11 @@ async def run_tdx_l2_realtime_task(interval_sec: int = 0) -> None:
                 )
                 if exec_error:
                     logger.warning("[TdxL2] 执行段返回：%s", exec_error)
+                if failed:
+                    # 失败腿进状态（带条数上限）：告警面读它，面板也读它。
+                    failed = list(failed)
+                    realtime_status["orders_failed"] = failed[:_MAX_LISTED_FAILURES]
+                    realtime_status["orders_failed_count"] = len(failed)
                 buys_all = [p for p in placed if p.get("side") == "buy"]
                 sells_all = [p for p in placed if p.get("side") == "sell"]
                 for item in placed:
@@ -923,27 +1040,24 @@ async def run_tdx_l2_realtime_task(interval_sec: int = 0) -> None:
                     "index_above_ma20": index_above,
                     "market_detail": market_detail,
                     "execute_mode": execute_mode,
+                    "positions_error": positions_error,
+                    "trigger_skipped_symbols": trigger_skipped,
+                    "session_skipped_symbols": session_skipped,
+                    "exec_error": exec_error,
                     "last_error": error,
                 }
             )
         except Exception as exc:
+            realtime_status["cycle_error"] = str(exc)
             realtime_status["last_error"] = str(exc)
             # exc_info 必须带上：本行曾只打 str(exc)，于是 "too many values to unpack"
             # 这类缺陷在日志里没有文件行号，**潜伏了一整次重构周期**未被定位。
             logger.warning("[TdxL2] 实时推理异常: %s", exc, exc_info=True)
 
-        # 状态镜像到 Redis。运维脚本 `tdx_live_status.py` 与「设置→实盘」页读的是
+        # 状态镜像 + 失败可见性。运维脚本 `tdx_live_status.py` 与「设置→实盘」页读的是
         # `_STATUS_KEY`，而它**此前从未被写过**（定义在那儿，零引用）→ 监控面板
         # 恒为空 {}，看不出循环是死是活。放在 try 之外：出错的周期也要如实上报。
-        if trade_redis.client is not None:
-            try:
-                trade_redis.set(
-                    _STATUS_KEY,
-                    dict(realtime_status),
-                    ttl=max(_STATUS_TTL_CYCLES * int(interval), _STATUS_TTL_FLOOR),
-                )
-            except Exception as exc:  # noqa: BLE001 — 镜像失败绝不影响主循环
-                logger.warning("[TdxL2] 状态镜像写入失败: %s", exc)
+        await _publish_cycle_status()
 
         elapsed = time.monotonic() - cycle_start
         await asyncio.sleep(max(5.0, interval - elapsed))

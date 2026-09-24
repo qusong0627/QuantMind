@@ -21,11 +21,16 @@ from typing import Any
 
 from sqlalchemy import text
 
+from backend.services.trade_shared.redis_client import redis_client as trade_redis
 from backend.shared.database_manager_v2 import get_session
 from backend.shared.stock_utils import StockCodeUtil
 from backend.services.live_trading.services.tdx_push_service import (
     TdxPushError,
     tdx_pusher,
+)
+from backend.services.live_trading.services.trading_session import (
+    is_trading_time,
+    now_shanghai,
 )
 
 logger = logging.getLogger(__name__)
@@ -690,23 +695,27 @@ class TdxRollingTradeService:
         score_threshold, saved_amount, execute_mode = load_rolling_config(tenant_id, user_id)
         if fixed_buy_amount is None:
             fixed_buy_amount = saved_amount
+        # 时段事实（一次取值，下面三处共用：真单闸门、预警面、结果字典）。
+        in_session = is_trading_time()
 
         # 直接下单（通达信实盘或模拟盘）已对全部登录用户开放（会员门控移除）
         # 通达信实盘下单需要桥；模拟盘直接下单不依赖桥（预警推送尽力而为）
         bridge_ok = tdx_pusher.enabled
         if execute_mode == "tdx" and not bridge_ok:
-            return {
+            outcome = {
                 "success": False,
                 "error": "TDX_BRIDGE_URL/TOKEN 未配置",
                 "buys": [],
                 "sells": [],
             }
+            await _alert_rolling_run(outcome, user_id=user_id)
+            return outcome
 
         selected_run, score_map, prediction_trade_date = await self.load_latest_scores(
             tenant_id=tenant_id, user_id=user_id, run_id=run_id, trade_date=trade_date
         )
         if not selected_run or not score_map:
-            return {
+            outcome = {
                 "success": False,
                 "error": (
                     f"没有可用的推理信号（日期 {trade_date}）"
@@ -716,14 +725,21 @@ class TdxRollingTradeService:
                 "buys": [],
                 "sells": [],
             }
+            await _alert_rolling_run(outcome, user_id=user_id)
+            return outcome
 
         # 持仓来源: 模拟直接下单读本地模拟盘，其余读通达信桥
         if execute_mode == "paper":
             positions, pos_error = await self.load_positions_from_paper(tenant_id, user_id)
         else:
             positions, pos_error = await self.load_positions_from_tdx()
-        if pos_error:
-            logger.warning("[TdxRolling] %s", pos_error)
+        # 持仓读不到 ⇒ **本轮不产生任何对外产物**（预警与真单都不发）。
+        # 两个 loader 都是「出错返回 ([], 原因)」而不是抛，此前那行 warning 之后流程
+        # 照走：held={} 让卖出腿全空（想卖的卖不掉）、买入腿把每只达标标的都当成
+        # 新仓买满一篮子。持仓未知时算出来的信号不是"少一条"，是**算错**。
+        positions_unreadable = bool(pos_error)
+        if positions_unreadable:
+            logger.warning("[TdxRolling] %s（本轮信号整体跳过）", pos_error)
 
         # 推历史分数时不再用当日大盘 MA20 过滤（历史日期应只看当天的信号）
         if check_index and not trade_date:
@@ -758,8 +774,10 @@ class TdxRollingTradeService:
         warnings_total = 0
         results: dict[str, Any] = {}
 
-        # 预警/消息推送需要桥（模拟直接下单模式桥不可用时跳过，不影响成交）
-        if bridge_ok:
+        # 预警/消息推送需要桥（模拟直接下单模式桥不可用时跳过，不影响成交）。
+        # 持仓读不到时整体跳过：预警是按 held 算出来的，held={} 时买预警会是一篮子
+        # 新仓、卖预警一条没有——推出去等于给操作者一份错的建议。
+        if bridge_ok and not positions_unreadable:
             # 卖出预警
             if sells:
                 sell_list = sells[:_MAX_SELL_WARNINGS]
@@ -826,6 +844,11 @@ class TdxRollingTradeService:
                 except TdxPushError as exc:
                     logger.warning("[TdxRolling] 消息推送失败: %s", exc)
                     results["message"] = {"success": False, "error": str(exc)}
+        elif positions_unreadable:
+            results["warnings_skipped"] = {
+                "success": False,
+                "error": f"持仓读不到，预警整体跳过: {pos_error}",
+            }
         elif execute_mode == "paper":
             results["warnings_skipped"] = {
                 "success": False,
@@ -835,15 +858,36 @@ class TdxRollingTradeService:
         # 直接下单（可选）—— 先卖后买
         #   tdx 模式: 通达信客户端弹确认框
         #   paper 模式: 模拟盘本地撮合直接成交（免确认）
+        # 持仓读不到 ⇒ 一律不下单（见上方 positions_unreadable 注释）。
+        # 非交易时段 ⇒ **真单**不下（paper 是本地撮合，盘后演练正需要它，不受限）。
+        # 这条与推送触发时机无关：rolling 是「每次推理完跑一次」拉动的，推理
+        # 完全可能在盘后完成（收盘后重算/补跑），那一刻的真单只会被柜台拒或被
+        # 客户端挂成次日单。物理出口还有一道闸（tdx_push_service.place_order），
+        # 这里这道负责**如实登记**"本轮有几条被时段压下了"。
         placed_orders: list[dict[str, Any]] = []
         failed_orders: list[dict[str, Any]] = []
-        if execute_mode == "tdx" and (buys or sells):
+        session_suppressed = 0
+        if (
+            not positions_unreadable
+            and execute_mode == "tdx"
+            and not in_session
+            and (buys or sells)
+        ):
+            session_suppressed = len(buys) + len(sells)
+            results["execute_skipped"] = {
+                "success": False,
+                "error": (
+                    f"非交易时段（{now_shanghai().strftime('%H:%M')}），"
+                    f"本轮 {session_suppressed} 条真单未提交"
+                ),
+            }
+        elif not positions_unreadable and execute_mode == "tdx" and (buys or sells):
             placed_orders, failed_orders = await self.place_rolling_orders(
                 run_id=selected_run,
                 buys=buys[:_MAX_BUY_WARNINGS],
                 sells=sells[:_MAX_SELL_WARNINGS],
             )
-        elif execute_mode == "paper" and (buys or sells):
+        elif not positions_unreadable and execute_mode == "paper" and (buys or sells):
             placed_orders, failed_orders = await self.place_paper_orders(
                 tenant_id=tenant_id,
                 user_id=user_id,
@@ -856,8 +900,15 @@ class TdxRollingTradeService:
         if failed_orders:
             results["orders_failed"] = {"success": False, "failed": failed_orders}
 
+        # 本轮有几条对外产物被「持仓读不到」压下了（预警/真单都算）。
+        # 只统计**确实被压下的**：没有信号可压时这条失败没有后果，也不该报警。
+        leg_armed = bridge_ok or execute_mode != DEFAULT_EXECUTE_MODE
+        signals_suppressed = (
+            len(buys) + len(sells) if (positions_unreadable and leg_armed) else 0
+        )
+
         logger.info(
-            "[TdxRolling] run=%s buys=%d sells=%d holds=%d market=%s orders=%d/%d",
+            "[TdxRolling] run=%s buys=%d sells=%d holds=%d market=%s orders=%d/%d%s%s",
             selected_run,
             len(buys),
             len(sells),
@@ -865,8 +916,10 @@ class TdxRollingTradeService:
             market_detail,
             len(placed_orders),
             len(placed_orders) + len(failed_orders),
+            f" suppressed={signals_suppressed}" if signals_suppressed else "",
+            f" session_skipped={session_suppressed}" if session_suppressed else "",
         )
-        return {
+        outcome = {
             "success": True,
             "run_id": selected_run,
             "prediction_trade_date": prediction_trade_date,
@@ -878,10 +931,14 @@ class TdxRollingTradeService:
             },
             "score_threshold": score_threshold,
             "execute_mode": execute_mode,
+            "bridge_ok": bridge_ok,
             "auto_place": execute_mode != DEFAULT_EXECUTE_MODE,
             "positions_source": "paper" if execute_mode == "paper" else "tdx",
             "positions_count": len(positions),
             "positions_error": pos_error,
+            "signals_suppressed": signals_suppressed,
+            "session_suppressed": session_suppressed,
+            "in_trading_hours": in_session,
             "buys": buys,
             "sells": sells,
             "holds": signals["holds"],
@@ -891,6 +948,33 @@ class TdxRollingTradeService:
             "results": results,
             "pushed_at": datetime.now().isoformat(timespec="seconds"),
         }
+        await _alert_rolling_run(outcome, user_id=user_id)
+        return outcome
+
+
+async def _alert_rolling_run(outcome: dict[str, Any], *, user_id: str | None) -> None:
+    """一次运行之后的失败可见性：有失败推一条（一天一次），干净的一次负责发「已恢复」。
+
+    **绝不抛**：调用点在「信号已算完、单可能已经出去」之后，通知层的毛病不许把
+    这次运行变成异常（同 ``decision_round_alerts.alert_round`` 的纪律）。
+    """
+    from backend.services.live_trading.services.tdx_exec_alerts import (
+        FAMILY_ROLLING,
+        alert_exec_leg,
+        resolve_exec_leg,
+        rolling_alerts,
+    )
+
+    try:
+        alerts = rolling_alerts(outcome)
+        if alerts:
+            await alert_exec_leg(
+                FAMILY_ROLLING, alerts, user_id=user_id, redis=trade_redis
+            )
+        else:
+            await resolve_exec_leg(FAMILY_ROLLING, user_id=user_id, redis=trade_redis)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[TdxRolling] 失败可见性推送异常: %s", exc, exc_info=True)
 
 
 def _batch_last_close(symbols: list[str]) -> dict[str, float]:

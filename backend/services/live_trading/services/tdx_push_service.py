@@ -13,6 +13,7 @@ import os
 import uuid
 from typing import Any, Optional
 
+from backend.services.live_trading.services.trading_session import is_trading_time
 from backend.shared.database_manager_v2 import get_session
 from backend.shared.order_contract import build_bridge_plan_id
 
@@ -147,7 +148,30 @@ class TdxPushService:
                           price: float | None = None,
                           price_type: int | None = None,
                           plan_id: str = "") -> dict:
-        """通过桥下单到通达信."""
+        """通过桥下单到通达信.
+
+        **真单时段闸门（咽喉点）**：A 股委托只可能在交易时段有效
+        （09:15–11:35 / 12:55–15:05，与 QMT 执行端、真单镜像、时段判据同一口径，
+        见 ``trading_session``）。其余时间提交的委托要么被柜台拒，要么被客户端
+        **挂成次日单**——后者尤其坏：一笔"现在"的决定变成了明天的无主委托。
+
+        闸门放在这里而不是各调用点：本函数是**真单唯一的物理出口**（滚动单、
+        L2 主单、L2 在途重挂三条路都汇到这里），而 L2 实时循环是 24/7 常驻的
+        ——调用点漂移一次就是一次真钱事故。撤单不走此闸门：撤单是减小风险的
+        动作，任何时间都该放行（见 ``cancel_order``）。
+        """
+        if not is_trading_time():
+            logger.warning(
+                "[TdxPush] 非交易时段拒发真单: %s %s %s股", stock_code, side, volume
+            )
+            # 形状与桥的拒单一致（status=error）：调用方按"失败"处理并留痕，
+            # 绝不能被当成"已下单"——滚动/L2 都按 status 分拣 placed/failed。
+            return {
+                "status": "error",
+                "skipped": "out_of_session",
+                "message": "非交易时段（A 股 09:15–11:35 / 12:55–15:05），委托未提交",
+                "orders": [],
+            }
         order = {
             "stock_code": stock_code,
             "side": side,

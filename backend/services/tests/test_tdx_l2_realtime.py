@@ -496,6 +496,18 @@ def run_retry_sync(coro, pusher):
 
 # ============ 主循环稳定性（桥断/engine断/采集陈旧都不停评分） ============
 
+class _SpyNotifier:
+    """通知替身：记调用（形状与 ``notification_publisher`` 的通知器一致）。"""
+
+    def __init__(self, ok: bool = True) -> None:
+        self.ok = ok
+        self.calls: list[tuple] = []
+
+    async def __call__(self, user_id, title, content, level="info") -> bool:
+        self.calls.append((user_id, title, content, level))
+        return self.ok
+
+
 class TestLoopStability:
     def _seed_pool(self, rc, n: int = 6):
         """写 n 只**新鲜**因子（与生产同形：ts = 当前上海墙钟）。
@@ -545,7 +557,21 @@ class TestLoopStability:
         svc.place_rolling_orders = AsyncMock(return_value=([], []))
         return cap.l2_status
 
-    def _run_loop(self, rc, svc):
+    def _run_loop(
+        self, rc, svc, *, in_trading_hours=True, notifier=None, mode="tdx", stop_after=2
+    ):
+        """跑 ``stop_after - 1`` 个**跑满**的周期（第 ``stop_after`` 周期注入
+        CancelledError 退出）。
+
+        停止钩子挂在**持仓查询**（step 6）上：它之前的评分已落盘、之后的执行与
+        状态镜像尚未发生——要跑满 N 轮就传 ``N + 1``。
+
+        **时段与执行模式一律注入**（``in_trading_hours`` / ``mode``）：真单闸门读
+        它们，靠墙上钟或真配置的话同样的用例白天绿、收盘后红——「机构级」的测试
+        不能在收盘后变色。
+        ``notifier`` 传替身时随告警面一起装上（``tdx_exec_alerts.default_notifier``
+        是惰性工厂，只有真有事要推时才会被调用）。
+        """
         import asyncio
 
         from backend.services.live_trading.services import tdx_l2_capture_task as cap
@@ -554,23 +580,37 @@ class TestLoopStability:
             run_tdx_l2_realtime_task,
         )
 
-        # 先完整跑通 1 个周期（评分+状态落盘），第 2 周期注入 CancelledError 退出
         cycles = {"n": 0}
-        original_pos = svc.load_positions_from_tdx
+        loader = (
+            svc.load_positions_from_paper if mode == "paper" else svc.load_positions_from_tdx
+        )
 
         async def stop_after_cycles(*args, **kwargs):
             cycles["n"] += 1
-            if cycles["n"] >= 2:
+            if cycles["n"] >= stop_after:
                 raise asyncio.CancelledError()
-            return await original_pos(*args, **kwargs)
+            return await loader(*args, **kwargs)
 
-        svc.load_positions_from_tdx = AsyncMock(side_effect=stop_after_cycles)
+        if mode == "paper":
+            svc.load_positions_from_paper = AsyncMock(side_effect=stop_after_cycles)
+        else:
+            svc.load_positions_from_tdx = AsyncMock(side_effect=stop_after_cycles)
+        notifier_patch = (
+            patch(
+                "backend.services.live_trading.services.tdx_exec_alerts.default_notifier",
+                new=lambda: notifier,
+            )
+            if notifier is not None
+            else patch("backend.services.live_trading.services.tdx_exec_alerts.default_notifier")
+        )
 
         with patch("backend.services.live_trading.services.tdx_l2_realtime.trade_redis", rc), \
              patch("backend.services.live_trading.services.tdx_l2_realtime.tdx_pusher") as pusher, \
              patch("backend.services.live_trading.services.tdx_l2_realtime.asyncio.sleep", AsyncMock()), \
+             notifier_patch, \
+             patch("backend.services.live_trading.services.tdx_l2_realtime.is_trading_time", return_value=in_trading_hours), \
              patch("backend.services.live_trading.services.tdx_rolling_trade_service.TdxRollingTradeService", return_value=svc), \
-             patch("backend.services.live_trading.services.tdx_rolling_trade_service.load_rolling_config", return_value=("tdx", 10000.0, "tdx")), \
+             patch("backend.services.live_trading.services.tdx_rolling_trade_service.load_rolling_config", return_value=("tdx", 10000.0, mode)), \
              patch("backend.services.trade.services.member_gate.is_paid_member", AsyncMock(return_value=True)), \
              patch("backend.services.live_trading.services.tdx_l2_capture_task.l2_status", cap.l2_status):
             with pytest.raises(asyncio.CancelledError):
@@ -765,6 +805,150 @@ class TestLoopStability:
                   if k.startswith("tdx:l2:score:")}
         assert not {f"SH88888{i}" for i in range(3)} & scored
         assert status["pool_stale_skipped"] == 3
+
+    # ── 执行闸门与失败可见性（循环级） ────────────────────────────────
+    @pytest.fixture(autouse=True)
+    def _reset_alert_seen(self):
+        """清掉 ``_ALERTED_KEYS``：它是**模块级**的进程内去重集（生产里一天一进程）。
+
+        不清的话用例之间会互相压制——前一个用例投递成功的告警键留在集合里，
+        后一个用例的同类故障**静默不推**（判据对、投递对，红在别处）。
+        """
+        from backend.services.live_trading.services import tdx_l2_realtime as mod
+
+        mod._ALERTED_KEYS.clear()
+        yield
+        mod._ALERTED_KEYS.clear()
+
+    def _mirrored(self, rc):
+        """最后一轮**跑满**的周期镜像（面板/运维脚本读的那份，也是喂给判据的那份）。
+
+        不能直接读模块级 ``realtime_status``：停止钩子抛在下一周期的**清零块之后**，
+        那面字典会停在半途（字段已清、本轮还没写回）。
+        """
+        from backend.services.live_trading.services.tdx_l2_realtime import _STATUS_KEY
+
+        snap = rc.get(_STATUS_KEY)
+        assert isinstance(snap, dict), "状态键未写入——面板会一直空着"
+        return snap
+
+    def test_unreadable_positions_skip_trigger_and_reach_the_human(self):
+        """持仓读不到 ⇒ 本周期一个触发都不做，且这条**要推给人**。
+
+        循环 24/7 常驻、无人值守：把「少做了一整轮判断」写成一行 warning，
+        等于让它自然消失。状态里的 ``trigger_skipped_symbols`` 是说给人听的数字。
+        """
+        # Arrange
+        rc = _patched_redis()
+        self._seed_pool(rc)
+        svc = MagicMock()
+        self._bootstrap(rc, svc)
+        notifier = _SpyNotifier()
+        svc.load_positions_from_tdx = AsyncMock(return_value=([], "通达信桥持仓拉取失败"))
+        # Act
+        pusher, _status = self._run_loop(rc, svc, notifier=notifier)
+        # Assert
+        pusher.place_order.assert_not_called()
+        mirrored = self._mirrored(rc)
+        assert mirrored["positions_error"] == "通达信桥持仓拉取失败"
+        assert mirrored["trigger_skipped_symbols"] == 6
+        assert mirrored["session_skipped_symbols"] == 0
+        assert mirrored["in_trading_hours"] is True
+        assert len(notifier.calls) == 1, "持仓读不到在交易时段内必须推一条"
+        assert "持仓读不到" in notifier.calls[0][1]
+
+    def test_out_of_hours_tdx_holds_real_orders_without_alerting(self):
+        """盘外（tdx 模式）：不下真单、不做触发判断，但**分数照写**、且不推告警。
+
+        「盘外不发单」不是故障——把它报成告警，每天收盘后都会响一次，
+        人就开始无视这一类通知（那才是不再看得见真故障的时刻）。
+        """
+        # Arrange
+        rc = _patched_redis()
+        self._seed_pool(rc)
+        svc = MagicMock()
+        self._bootstrap(rc, svc)
+        notifier = _SpyNotifier()
+        # Act
+        pusher, _status = self._run_loop(rc, svc, in_trading_hours=False, notifier=notifier)
+        # Assert
+        pusher.place_order.assert_not_called()
+        svc.place_rolling_orders.assert_not_awaited()
+        mirrored = self._mirrored(rc)
+        assert mirrored["session_skipped_symbols"] == 6
+        assert mirrored["trigger_skipped_symbols"] == 0
+        assert mirrored["in_trading_hours"] is False
+        assert mirrored["positions_error"] is None
+        score_keys = [k for k in rc.client.store if k.startswith("tdx:l2:score:")]
+        assert len(score_keys) >= 6, "盘外仍要评分（信号面板与次日基线都读它）"
+        assert notifier.calls == [], "盘外不发单不是故障，不该推告警"
+
+    def test_out_of_hours_paper_still_runs_the_full_trigger(self):
+        """盘外（paper 模式）：本地撮合不受时段闸门约束（盘后演练正需要它）。"""
+        # Arrange
+        rc = _patched_redis()
+        self._seed_pool(rc)
+        svc = MagicMock()
+        self._bootstrap(rc, svc)
+        svc.load_positions_from_paper = AsyncMock(return_value=([], None))
+        svc.place_paper_orders = AsyncMock(return_value=([], []))
+        # Act
+        _pusher, _status = self._run_loop(
+            rc, svc, in_trading_hours=False, mode="paper"
+        )
+        # Assert
+        svc.place_paper_orders.assert_awaited()
+        mirrored = self._mirrored(rc)
+        assert mirrored["session_skipped_symbols"] == 0
+        assert mirrored["in_trading_hours"] is False
+
+    def test_a_cycle_error_is_mirrored_and_pushed(self):
+        """本周期抛异常 ⇒ ``cycle_error`` 进状态镜像**并推一条**（带 exc_info 的日志不够）。
+
+        「循环在跑但每轮都炸」在外表上是最安静的一种坏法：状态键仍被写、面板仍是绿的。
+        """
+        # Arrange
+        rc = _patched_redis()
+        self._seed_pool(rc)
+        svc = MagicMock()
+        self._bootstrap(rc, svc)
+        notifier = _SpyNotifier()
+        svc.is_index_above_ma20 = AsyncMock(side_effect=RuntimeError("指数读取炸了"))
+        # Act
+        _pusher, _status = self._run_loop(rc, svc, notifier=notifier)
+        # Assert
+        assert "指数读取炸了" in (self._mirrored(rc)["cycle_error"] or "")
+        assert [c for c in notifier.calls if "本周期异常" in c[1]], "周期异常必须推给人"
+
+    def test_a_fault_then_a_clean_cycle_pushes_exactly_one_recovery(self):
+        """先坏一轮、再好一轮 ⇒ 推一条「已恢复」，且**只有一条**。
+
+        恢复通知的前提是「今天报过 + 本轮干净」两个事实都在：只按"本轮干净"推
+        会在每个正常周期都报一次平安；只按"今天报过"推则永远等不到干净的一轮。
+        """
+        # Arrange
+        rc = _patched_redis()
+        self._seed_pool(rc)
+        svc = MagicMock()
+        self._bootstrap(rc, svc)
+        notifier = _SpyNotifier()
+        faults = {"n": 0}
+
+        async def first_cycle_faults():
+            faults["n"] += 1
+            return ([], "通达信桥持仓拉取失败") if faults["n"] == 1 else ([], None)
+
+        svc.load_positions_from_tdx = AsyncMock(side_effect=first_cycle_faults)
+        # Act：跑满两个周期，第三个周期的持仓查询处退出
+        _pusher, _status = self._run_loop(rc, svc, notifier=notifier, stop_after=3)
+        # Assert
+        assert len(notifier.calls) == 2, (
+            f"应恰好两条（一条故障 + 一条恢复），实际 {[c[1] for c in notifier.calls]}"
+        )
+        assert "持仓读不到" in notifier.calls[0][1]
+        assert notifier.calls[1][3] == "success"
+        assert "已恢复" in notifier.calls[1][1]
+        assert self._mirrored(rc)["positions_error"] is None, "干净的那轮状态必须回到干净"
 
 
 class TestPayloadAge:

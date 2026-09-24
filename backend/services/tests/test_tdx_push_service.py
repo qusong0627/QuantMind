@@ -212,3 +212,92 @@ async def test_sync_skips_order_without_exchange_id_and_symbol():
 
     assert db.inserts == []
     assert db.updates == []
+
+
+# ============ 真单时段闸门（咽喉点） ============
+
+class TestRealOrderSessionGate:
+    """``place_order`` 是**真单唯一的物理出口**（滚动单、L2 主单、L2 在途重挂
+    三条路都汇到这里）。闸门放这一层而不是各调用点：调用点漂移一次就是一次
+    真钱事故——A 股委托在盘外要么被柜台拒、要么被客户端挂成次日单。
+
+    时段事实一律**注入**（``is_trading_time``），不读墙上钟：否则同样的用例
+    白天绿、收盘后红。
+    """
+
+    @staticmethod
+    def _wire(monkeypatch, *, in_session: bool) -> list[tuple[str, dict]]:
+        from backend.services.live_trading.services import tdx_push_service as push_mod
+
+        monkeypatch.setattr(push_mod, "is_trading_time", lambda now=None: in_session)
+        sent: list[tuple[str, dict]] = []
+
+        async def _fake_post(path: str, payload: dict) -> dict:
+            sent.append((path, payload))
+            return {"status": "executed", "orders": []}
+
+        monkeypatch.setattr(push_mod.tdx_pusher, "_post", _fake_post)
+        return sent
+
+    @pytest.mark.asyncio
+    async def test_out_of_session_real_order_never_reaches_the_bridge(self, monkeypatch):
+        from backend.services.live_trading.services.tdx_push_service import tdx_pusher
+
+        sent = self._wire(monkeypatch, in_session=False)
+
+        resp = await tdx_pusher.place_order(
+            stock_code="600036.SH", side="sell", volume=100, price=12.5
+        )
+
+        assert sent == [], "盘外的真单到了桥上——客户端会把它挂成次日单"
+        assert resp.get("skipped") == "out_of_session"
+        assert resp.get("orders") == []
+        # 形状必须是"失败"：滚动/L2 都按 status 分拣 placed/failed，
+        # 报成成功会让上游记一条不存在的委托
+        assert resp.get("status") != "submitted"
+        assert resp.get("status") == "error"
+
+    @pytest.mark.asyncio
+    async def test_in_session_the_same_call_goes_through(self, monkeypatch):
+        """对照组：闸门不是"恒拒发"（那会让上面那条用例空过）。"""
+        from backend.services.live_trading.services.tdx_push_service import tdx_pusher
+
+        sent = self._wire(monkeypatch, in_session=True)
+
+        await tdx_pusher.place_order(
+            stock_code="600036.SH", side="sell", volume=100, price=12.5
+        )
+
+        assert len(sent) == 1
+        path, payload = sent[0]
+        assert path.endswith("/api/v1/plans/execute")
+        assert payload["orders"][0]["stock_code"] == "600036.SH"
+
+    @pytest.mark.asyncio
+    async def test_cancel_is_allowed_out_of_session(self, monkeypatch):
+        """撤单不走这道闸：它是**减小风险**的动作，任何时间都该放行。"""
+        from backend.services.live_trading.services.tdx_push_service import tdx_pusher
+
+        sent = self._wire(monkeypatch, in_session=False)
+
+        await tdx_pusher.cancel_order(stock_code="600036.SH", order_id="Wtbh-1")
+
+        assert len(sent) == 1, "盘外撤单被闸住了——风险敞口会挂到下一个交易日"
+        assert sent[0][0].endswith("/api/v1/orders/cancel")
+
+    def test_the_gate_uses_the_shared_session_predicate(self):
+        """窗口口径唯一：不许在这里（或任何调用点）另写一份时间判断。
+
+        另写一份的形态就是"看着差不多"的比小时数——两个口径在节假日、
+        集合竞价、尾盘缓冲上必然分叉，而分叉的方向是「多发了真单」。
+        """
+        from pathlib import Path
+
+        src = (
+            Path(__file__).resolve().parents[1]
+            / "live_trading/services/tdx_push_service.py"
+        ).read_text(encoding="utf-8")
+        assert "from backend.services.live_trading.services.trading_session import" in src, (
+            "place_order 的时段闸门没走 trading_session 唯一口径"
+        )
+        assert "is_trading_time()" in src, "闸门没读时段谓词——它就不会拦任何东西"

@@ -391,3 +391,246 @@ class TestTdxBridgeInteraction:
 
         assert orders == [{"order_id": "160356"}]
         fake_tdx.pull_orders.assert_awaited_once_with("SH600206")
+
+
+# ============ 执行闸门：持仓读不到 / 非交易时段（真单） ============
+
+class _SpyNotifier:
+    """通知替身：记调用、可注入失败（本类用例断言"真的推出去了"）。"""
+
+    def __init__(self, ok: bool = True) -> None:
+        self.ok = ok
+        self.calls: list[tuple] = []
+
+    async def __call__(self, user_id, title, content, level="info") -> bool:
+        self.calls.append((user_id, title, content, level))
+        return self.ok
+
+
+class _FakeRedis:
+    """原生形状的去重设施替身（``set(k, v, ex=)``）。"""
+
+    def __init__(self) -> None:
+        self.store: dict = {}
+
+    def set(self, key, value, ex=None):
+        self.store[key] = value
+        return True
+
+    def get(self, key):
+        return self.store.get(key)
+
+
+def _pusher(enabled: bool = True):
+    """通达信推送服务替身：**所有被 await 的方法都必须是 AsyncMock**。
+
+    漏一个就红在 ``object MagicMock can't be used in 'await' expression``——
+    报错点落在服务代码里，看起来像实现坏了（预警段走 ``push_message``，
+    不是 ``push_warnings``，两条路都要铺）。故集中一处造。
+    """
+    pusher = MagicMock()
+    pusher.enabled = enabled
+    pusher.push_message = AsyncMock(return_value={"success": True})
+    pusher.push_warnings = AsyncMock(return_value={"success": True})
+    return pusher
+
+
+def _patch_stack(*, mode: str, in_session: bool, notifier, redis):
+    """rolling 运行路径上的旁路替身（不碰真 Redis/真通知表）。
+
+    ``is_trading_time`` **注入**：真单闸门读它，靠墙上钟的话用例白天绿、收盘后红。
+    """
+    from contextlib import ExitStack
+
+    stack = ExitStack()
+    stack.enter_context(
+        patch(f"{ROLLING_MODULE}.load_rolling_config", return_value=(2.2, 10000.0, mode))
+    )
+    stack.enter_context(patch(f"{ROLLING_MODULE}.is_trading_time", return_value=in_session))
+    stack.enter_context(patch(f"{ROLLING_MODULE}.trade_redis", redis))
+    stack.enter_context(
+        patch(
+            "backend.services.live_trading.services.tdx_exec_alerts.default_notifier",
+            new=lambda: notifier,
+        )
+    )
+    stack.enter_context(
+        patch(
+            "backend.services.trade.services.member_gate.is_paid_member",
+            new=AsyncMock(return_value=True),
+        )
+    )
+    stack.enter_context(
+        patch(
+            "backend.services.live_trading.services.tdx_signal_push_service._batch_lookup_names",
+            new=MagicMock(return_value={}),
+        )
+    )
+    return stack
+
+
+_BUY = {"symbol": "600519.SH", "score": 2.8, "volume": 100, "close": 1500.0}
+_SELL = {"symbol": "000001.SZ", "score": 1.5, "volume": 200, "available_volume": 200,
+         "close": 12.0, "name": "平安银行", "reason": "掉下阈值"}
+
+
+def _arm(svc, *, sells=None, buys=None):
+    """铺好「有买卖信号」的一次运行所需的全部旁路（执行段之前）。"""
+    svc.load_latest_scores = AsyncMock(
+        return_value=("run1", {"600519.SH": 2.8, "000001.SZ": 1.5}, "2026-08-25")
+    )
+    svc.is_index_above_ma20 = AsyncMock(return_value=(True, "ok"))
+    svc.compute_rolling_signals = MagicMock(
+        return_value={"buys": buys if buys is not None else [dict(_BUY)],
+                      "sells": sells if sells is not None else [dict(_SELL)],
+                      "holds": []}
+    )
+    svc.place_rolling_orders = AsyncMock(return_value=([], []))
+    svc.place_paper_orders = AsyncMock(return_value=([], []))
+
+
+class TestRollingExecutionGates:
+    @pytest.mark.asyncio
+    async def test_unreadable_positions_block_orders_and_warnings(self):
+        """持仓读不到 ⇒ fail-closed：不下单、不推预警，且把原因与条数登记在结果里。
+
+        两个 loader 都是「出错返回 ([], 原因)」而**不抛**：此前那个原因只落一行
+        warning，流程照走 —— held={} 让卖出腿全空（想卖的卖不掉）、买入腿把每只
+        达标标的当成新仓买满一篮子。持仓未知时算出来的信号不是"少几条"，是**算错**。
+        """
+        svc = TdxRollingTradeService()
+        _arm(svc)
+        svc.load_positions_from_tdx = AsyncMock(return_value=([], "通达信桥持仓拉取失败"))
+        fake_tdx, notifier, redis = _pusher(), _SpyNotifier(), _FakeRedis()
+
+        with _patch_stack(mode="tdx", in_session=True, notifier=notifier, redis=redis), \
+                patch(f"{ROLLING_MODULE}.tdx_pusher", fake_tdx):
+            result = await svc.run_rolling_push(tenant_id="default", user_id="10000001")
+
+        svc.place_rolling_orders.assert_not_awaited()
+        fake_tdx.push_warnings.assert_not_awaited()          # 预警也是按 held 算的
+        assert result["positions_error"] == "通达信桥持仓拉取失败"
+        assert result["signals_suppressed"] == 2             # 1 买 + 1 卖
+        assert result["results"]["warnings_skipped"]["success"] is False
+        assert result["in_trading_hours"] is True
+        # 告警面：交易时段内这条必须推出去（人不在场正是需要它的场合）
+        assert len(notifier.calls) == 1
+        assert "持仓读不到" in notifier.calls[0][1]
+
+    @pytest.mark.asyncio
+    async def test_unreadable_positions_also_block_paper_orders(self):
+        """模拟盘同一把闸：持仓未知时算出来的买卖腿同样是错的。"""
+        svc = TdxRollingTradeService()
+        _arm(svc)
+        svc.load_positions_from_paper = AsyncMock(return_value=([], "模拟盘账户不可用"))
+        fake_tdx, notifier, redis = _pusher(enabled=False), _SpyNotifier(), _FakeRedis()
+
+        with _patch_stack(mode="paper", in_session=True, notifier=notifier, redis=redis), \
+                patch(f"{ROLLING_MODULE}.tdx_pusher", fake_tdx):
+            result = await svc.run_rolling_push(tenant_id="default", user_id="10000001")
+
+        svc.place_paper_orders.assert_not_awaited()
+        assert result["signals_suppressed"] == 2
+        assert result["positions_error"] == "模拟盘账户不可用"
+
+    @pytest.mark.asyncio
+    async def test_out_of_hours_real_orders_are_held_back_and_recorded(self):
+        """非交易时段的真单一律不提交，但**登记在案**（不是静默消失）。
+
+        rolling 是「每次推理完跑一次」拉动的：推理完全可能在盘后完成（收盘重算/
+        补跑），那一刻的真单只会被柜台拒、或被客户端挂成次日单。
+        """
+        svc = TdxRollingTradeService()
+        _arm(svc)
+        svc.load_positions_from_tdx = AsyncMock(return_value=([], ""))
+        fake_tdx, notifier, redis = _pusher(), _SpyNotifier(), _FakeRedis()
+
+        with _patch_stack(mode="tdx", in_session=False, notifier=notifier, redis=redis), \
+                patch(f"{ROLLING_MODULE}.tdx_pusher", fake_tdx):
+            result = await svc.run_rolling_push(tenant_id="default", user_id="10000001")
+
+        svc.place_rolling_orders.assert_not_awaited()
+        assert result["session_suppressed"] == 2
+        assert "非交易时段" in result["results"]["execute_skipped"]["error"]
+        assert result["in_trading_hours"] is False
+        # 预警照发（预警是建议、不是委托）：盘后仍可以给人看
+        assert fake_tdx.push_warnings.await_count >= 1
+
+    @pytest.mark.asyncio
+    async def test_out_of_hours_paper_orders_still_simulate(self):
+        """模拟盘不受时段闸门约束：盘后手动「立即执行」演练正需要它。"""
+        svc = TdxRollingTradeService()
+        _arm(svc)
+        svc.load_positions_from_paper = AsyncMock(return_value=([], ""))
+        fake_tdx, notifier, redis = _pusher(enabled=False), _SpyNotifier(), _FakeRedis()
+
+        with _patch_stack(mode="paper", in_session=False, notifier=notifier, redis=redis), \
+                patch(f"{ROLLING_MODULE}.tdx_pusher", fake_tdx):
+            result = await svc.run_rolling_push(tenant_id="default", user_id="10000001")
+
+        assert svc.place_paper_orders.await_count == 1
+        assert result["session_suppressed"] == 0
+
+    @pytest.mark.asyncio
+    async def test_the_outcome_carries_every_field_the_alert_judges_read(self):
+        """夹具形状=生产形状：判据读的字段必须真的由 ``run_rolling_push`` 写。
+
+        判据是「读字典 → 判断」，字段名漂移两边都不报错：结果里没有该字段 ⇒
+        ``.get`` 得 None ⇒ 判据恒不触发 ⇒ 告警面静默消失（判据用例全绿）。
+        两类字段分开钉——**每次运行都写**的事实（面板与判据共用）与
+        **只在早退失败分支写**的 ``error``。
+        """
+        svc = TdxRollingTradeService()
+        _arm(svc, buys=[], sells=[])
+        svc.load_positions_from_tdx = AsyncMock(return_value=([], ""))
+        fake_tdx, notifier, redis = _pusher(), _SpyNotifier(), _FakeRedis()
+
+        with _patch_stack(mode="tdx", in_session=True, notifier=notifier, redis=redis), \
+                patch(f"{ROLLING_MODULE}.tdx_pusher", fake_tdx):
+            result = await svc.run_rolling_push(tenant_id="default", user_id="10000001")
+
+        for field in (
+            "success", "positions_error", "signals_suppressed",
+            "session_suppressed", "in_trading_hours", "failed_orders",
+        ):
+            assert field in result, f"结果字典里没有告警判据要读的字段：{field}"
+        assert result["success"] is True
+        assert "error" not in result, (
+            "成功路径上带了 error 键——判据读法是 not success and err，"
+            "键在而值为空是对的、值有内容就会把成功当失败"
+        )
+
+        # 另一条分支：早退型失败（无分数）必须带上原因，aborted 判据靠它
+        svc2 = TdxRollingTradeService()
+        svc2.load_latest_scores = AsyncMock(return_value=(None, {}, ""))
+        notifier2, redis2 = _SpyNotifier(), _FakeRedis()
+        with _patch_stack(mode="tdx", in_session=True, notifier=notifier2, redis=redis2), \
+                patch(f"{ROLLING_MODULE}.tdx_pusher", _pusher()):
+            failed = await svc2.run_rolling_push(tenant_id="default", user_id="10000001")
+
+        assert failed["success"] is False
+        assert str(failed.get("error") or "").strip(), (
+            "早退失败没有写 error——「一条都没执行」的告警就没有原因可讲"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_failed_leg_is_pushed_with_its_reason(self):
+        """真去下单但失败 ⇒ 推一条（一天一次），且点明"不会自动重发"。"""
+        svc = TdxRollingTradeService()
+        _arm(svc)
+        svc.load_positions_from_tdx = AsyncMock(return_value=([], ""))
+        svc.place_rolling_orders = AsyncMock(
+            return_value=([], [{"symbol": "600519.SH", "side": "buy", "error": "风控拒单[L1]"}])
+        )
+        fake_tdx, notifier, redis = _pusher(), _SpyNotifier(), _FakeRedis()
+
+        with _patch_stack(mode="tdx", in_session=True, notifier=notifier, redis=redis), \
+                patch(f"{ROLLING_MODULE}.tdx_pusher", fake_tdx):
+            result = await svc.run_rolling_push(tenant_id="default", user_id="10000001")
+
+        assert result["failed_orders"]
+        assert len(notifier.calls) == 1
+        title, content = notifier.calls[0][1], notifier.calls[0][2]
+        assert "下单失败" in title
+        assert "风控拒单[L1]" in content
+        assert "不会自动重发" in content
