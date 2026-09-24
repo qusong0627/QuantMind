@@ -58,8 +58,7 @@ cp -r skills/<skill-name> ~/.claude/skills/
 | 技能 | 功能 | 触发词示例 |
 |------|------|-----------|
 | [simulation-trading](simulation-trading/) | 模拟交易：下单买卖、持仓管理、成交查询、资金快照、模拟盘启动、实盘/模拟盘切换 | 模拟交易、买入股票、查持仓、查账户 |
-| [tdx-live-trading](tdx-live-trading/) | TDX 通达信实盘交易 + 全链路监控：L2 实时推理、自动买卖、挂单/撤单、交易记录、持仓、桥健康巡检 | 实盘下单、自动买卖、挂单、撤单、TDX、链路状态 |
-| [ibkr-cli](ibkr-cli/) | Interactive Brokers CLI：IB Gateway/TWS 配置、下单交易、订单管理、账户/持仓/盈亏、行情、期权链、扫描器、基本面 | IBKR、TWS、IB Gateway、brokerage CLI |
+
 
 ### 券商 OpenAPI SDK
 

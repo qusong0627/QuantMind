@@ -24,7 +24,6 @@ SKILLS = REPO / "skills"
 EXEMPT_CONTRACT = {
     "futuapi",
     "install-futu-opend",
-    "ibkr-cli",
     "tigeropen",
     "tigeropen-cpp",
     "tigeropen-csharp",

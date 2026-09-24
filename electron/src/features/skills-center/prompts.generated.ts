@@ -181,20 +181,4 @@ export const PROMPTS: PromptMeta[] = [
     outputs: '交易结果',
     body: `请帮我操作模拟交易：{买入/卖出 某股票及数量 / 查持仓 / 查账户与资金 / 查成交记录}。\n\n请读取 skills/simulation-trading/SKILL.md，通过 /api/v1/simulation/* 接口执行。下单前把订单要素（代码、方向、数量、价格）列给我确认后再提交；完成后返回成交结果与最新持仓。`,
   },
-  {
-    name: 'tdx-live-trading',
-    title: 'TDX 实盘监控与交易',
-    category: '交易',
-    description: '通达信实盘链路：实时推理、自动买卖、挂单/撤单、交易记录、持仓、桥健康巡检',
-    outputs: '链路状态/交易结果',
-    body: `我需要处理 TDX 实盘链路：{查看链路健康状态 / 查今日交易记录与持仓 / 配置实时推理 / 下单、撤单操作}。\n\n请读取 skills/tdx-live-trading/SKILL.md：先跑 tdx_live_status.py 状态快照并按异常判定表巡检；涉及实盘下单/撤单的操作必须先列出订单要素经我确认。实盘资金安全第一，任何异常先停止操作并报告。`,
-  },
-  {
-    name: 'ibkr-cli',
-    title: 'IBKR 盈透证券操作',
-    category: '交易',
-    description: 'Interactive Brokers CLI：行情、下单、订单管理、账户/持仓/盈亏、期权链、扫描器',
-    outputs: '操作结果',
-    body: `我需要通过 Interactive Brokers 操作：{行情查询 / 下单 / 账户持仓盈亏 / 期权链 / 基本面数据}。\n\n请读取 skills/ibkr-cli/SKILL.md 获取 ibkr-cli 用法并执行。涉及真实订单的操作先与我确认要素；输出用表格，注明币种与数据时点。`,
-  },
 ];

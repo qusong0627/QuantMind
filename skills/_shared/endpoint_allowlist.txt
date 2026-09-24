@@ -3,8 +3,4 @@
 每行一个精确路径（归一化后比较，{param} 视为通配）。
 只有「有意保留的历史提及」才能进这里，正常端点漂移必须修技能正文，不许加豁免。
 
-# TDX Windows 桥原生端点（host 是 TDX_BRIDGE_URL，不是网关 $BASE；
-# 后端 broker_client.py / tdx_push_service.py 以 f"{bridge_url}/api/v1/..." 调用，属实）：
-#   - tdx-live-trading §4 桥 API 表、§6 权威来源
-/api/v1/account/query
-/api/v1/plans/execute
+

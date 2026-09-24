@@ -42,12 +42,6 @@
       "sourceType": "github",
       "skillPath": "skills/tigeropen-typescript/SKILL.md",
       "computedHash": "1d4be43542690bde88be27f43cbeac1ca7da39e081585778ea48280902246544"
-    },
-    "ibkr-cli": {
-      "source": "fatwang2/ibkr-cli",
-      "sourceType": "github",
-      "skillPath": "skills/ibkr-cli/SKILL.md",
-      "computedHash": "23b14f87f38da695fa1da61e5119037bb61d58f47bc41dae224c6012d325ad7b"
     }
   }
 }

@@ -70,7 +70,6 @@ outputs: <产出物与落盘目录>
 | 提示词 | 用途 |
 |--------|------|
 | [simulation-trading](simulation-trading.md) | 模拟交易下单与查询 |
-| [tdx-live-trading](tdx-live-trading.md) | TDX 实盘监控与交易 |
-| [ibkr-cli](ibkr-cli.md) | IBKR 盈透证券操作 |
+
 
 > 富途 / 老虎等券商 OpenAPI 技能仍保留在 `skills/` 供 QuantBot 按需读取，**不在技能中心展示**。

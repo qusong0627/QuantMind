@@ -160,21 +160,6 @@ P.append(("simulation-trading", "模拟交易", "交易",
 
 请读取 skills/simulation-trading/SKILL.md，通过 /api/v1/simulation/* 接口执行。下单前把订单要素（代码、方向、数量、价格）列给我确认后再提交；完成后返回成交结果与最新持仓。"""))
 
-P.append(("tdx-live-trading", "TDX 实盘监控与交易", "交易",
-    "通达信实盘链路：实时推理、自动买卖、挂单/撤单、交易记录、持仓、桥健康巡检",
-    "链路状态/交易结果",
-    """我需要处理 TDX 实盘链路：{查看链路健康状态 / 查今日交易记录与持仓 / 配置实时推理 / 下单、撤单操作}。
-
-请读取 skills/tdx-live-trading/SKILL.md：先跑 tdx_live_status.py 状态快照并按异常判定表巡检；涉及实盘下单/撤单的操作必须先列出订单要素经我确认。实盘资金安全第一，任何异常先停止操作并报告。"""))
-
-P.append(("ibkr-cli", "IBKR 盈透证券操作", "交易",
-    "Interactive Brokers CLI：行情、下单、订单管理、账户/持仓/盈亏、期权链、扫描器",
-    "操作结果",
-    """我需要通过 Interactive Brokers 操作：{行情查询 / 下单 / 账户持仓盈亏 / 期权链 / 基本面数据}。
-
-请读取 skills/ibkr-cli/SKILL.md 获取 ibkr-cli 用法并执行。涉及真实订单的操作先与我确认要素；输出用表格，注明币种与数据时点。"""))
-
-
 def write(name, title, category, desc, outputs, body):
     content = "---\n"
     content += "name: " + name + "\n"
