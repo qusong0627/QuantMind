@@ -515,21 +515,55 @@ _USER_KEY_RE = re.compile(r"^simulation:account:([^:]+):([^:]+)(?::([A-Z]+))?$")
 
 
 async def check_c01_signal_distribution(ctx: HealthContext) -> CheckResult:
+    # 分布只认非实时行：realtime 行 signal_side 恒 NULL，混进来之后
+    # 「批量信号缺失」会显示成「全 HOLD（N 行无 BUY/SELL）」——2026-09-24
+    # 实测的假警报形态（当日批量推理 5 任务全失败，健康页却报全 HOLD）。
     rows = ctx.query(
-        "SELECT signal_side, count(*) AS n FROM engine_signal_scores "
+        "SELECT source, signal_side, count(*) AS n FROM engine_signal_scores "
         "WHERE COALESCE(market, 'CN') = :m "
         "AND trade_date = (SELECT max(trade_date) FROM engine_signal_scores WHERE COALESCE(market, 'CN') = :m) "
-        "GROUP BY signal_side",
+        "GROUP BY source, signal_side",
         m=ctx.market,
     )
-    counts = {str(r["signal_side"]): int(r["n"]) for r in rows}
-    result = classify_signal_distribution(counts)
-    # 空态说明市场：不分市场时「无任何信号数据」看不出是哪个市场没有
-    if result.level == "fail" and not counts:
-        return CheckResult(
-            "C01", "信号分布", "fail", f"{ctx.market} 市场无任何信号数据", "检查该市场推理任务是否执行"
+    counts: dict[str, int] = {}
+    realtime_rows = 0
+    unknown_side = 0
+    for r in rows:
+        n = int(r["n"])
+        if str(r["source"]) == "realtime":
+            realtime_rows += n
+            continue
+        if r["signal_side"] is None:
+            unknown_side += n
+        else:
+            counts[str(r["signal_side"])] = counts.get(str(r["signal_side"]), 0) + n
+    extra = {"market": ctx.market, "realtime_rows": realtime_rows}
+    if not counts:
+        # 批量行整批缺失/字段为空的形态：推理没产出，不是闸门坍缩
+        if unknown_side:
+            return CheckResult(
+                "C01",
+                "信号分布",
+                "fail",
+                f"批量行 signal_side 全为空（{unknown_side} 行）",
+                "检查批量推理的落库字段",
+                {**extra, "unknown_side": unknown_side},
+            )
+        detail = (
+            f"批量信号缺失（{ctx.market} 最新日仅 {realtime_rows} 行实时行）"
+            if realtime_rows
+            else f"{ctx.market} 市场无任何信号数据"
         )
-    return replace(result, metrics={**result.metrics, "market": ctx.market})
+        return CheckResult(
+            "C01",
+            "信号分布",
+            "fail",
+            detail,
+            "批量推理未产出：查推理任务与源数据分区（派发留痕 reason_detail / 健康 C02）",
+            extra,
+        )
+    result = classify_signal_distribution(counts)
+    return replace(result, metrics={**result.metrics, **extra})
 
 
 async def check_c02_signal_readiness(ctx: HealthContext) -> CheckResult:
@@ -553,10 +587,13 @@ async def check_c02_signal_readiness(ctx: HealthContext) -> CheckResult:
 
     ready_raw = ctx.redis_get(ready_key(ctx.market, latest_str), REDIS_DB_GENERAL)
     marker = ctx.redis_get(f"qm:inference:completed:{latest_str}", REDIS_DB_GENERAL)
-    # 残 run 迹象：近 7 日单日多 run（>2 说明重跑/竞态频发）
+    # 残 run 迹象：单日多 run（>2 说明重跑/竞态频发）。只数批量行：
+    # 实时推理每天每模型一个 rt- run_id，与批量重跑/竞态无关，计进来会把
+    # 「2 批量 + N 实时」的常态顶过阈值天天误报（2026-09-24 实测 runs=3）。
     run_rows = ctx.query(
         "SELECT count(DISTINCT run_id) AS n FROM engine_signal_scores "
-        "WHERE trade_date = :d AND COALESCE(market, 'CN') = :m",
+        "WHERE trade_date = :d AND COALESCE(market, 'CN') = :m "
+        "AND COALESCE(source, 'batch') = 'batch'",
         d=latest,
         m=ctx.market,
     )

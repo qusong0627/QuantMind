@@ -270,8 +270,13 @@ async def test_c01_filters_signal_distribution_by_market():
 
     ctx = _FakeCtx(
         "HK",
-        rows=[[{"signal_side": "BUY", "n": 3}, {"signal_side": "SELL", "n": 3},
-               {"signal_side": "HOLD", "n": 4}]],
+        # 行形状必须含 source：C01 的 SQL 现在 SELECT source 并按它分桶
+        # （realtime 行 signal_side 恒 NULL，混入会把缺批量误报成全 HOLD）
+        rows=[[
+            {"source": "batch", "signal_side": "BUY", "n": 3},
+            {"source": "batch", "signal_side": "SELL", "n": 3},
+            {"source": "batch", "signal_side": "HOLD", "n": 4},
+        ]],
     )
     result = await check_c01_signal_distribution(ctx)
 

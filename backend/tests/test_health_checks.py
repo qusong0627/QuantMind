@@ -5,6 +5,7 @@
 """
 
 from datetime import date, datetime
+from pathlib import Path
 
 import pytest
 
@@ -20,6 +21,8 @@ from backend.scripts.diagnose.health import (
     classify_local_market_data,
     classify_signal_distribution,
     classify_snapshot_consistency,
+    check_c01_signal_distribution,
+    check_c02_signal_readiness,
     check_c03_account_key_consistency,
     check_c04_snapshot_consistency,
     check_c05_ledger_writes,
@@ -35,11 +38,14 @@ from backend.scripts.diagnose.health import (
 class FakeCtx:
     """注入式上下文假实现：按 SQL 子串给行，按 key 给值。"""
 
-    def __init__(self, rows_by_sql=None, keys=None, values=None, today=None):
+    def __init__(self, rows_by_sql=None, keys=None, values=None, today=None, market="CN"):
         self._rows = rows_by_sql or {}
         self._keys = keys or []
         self._values = values or {}
         self.today = today or date.today()
+        # 与 HealthContext.market 同默认值：C01/C02/C08 按市场取数，
+        # 鸭子类型必须把这个字段也补齐，否则检查函数读 ctx.market 直接炸。
+        self.market = market
 
     def query(self, sql, **params):
         for needle, rows in self._rows.items():
@@ -714,3 +720,151 @@ async def test_c14_check_wires_the_seed_prefix_from_the_writer_side():
     assert r.level == "ok", r.detail
     assert r.metrics["seeds"] == 1
     assert r.metrics["orphans"] == 0
+
+
+# --- C01 信号分布：按 source 分桶 -------------------------------------------
+
+
+_C01_SQL_KEY = "GROUP BY source, signal_side"
+
+
+@pytest.mark.asyncio
+async def test_c01_batch_missing_with_realtime_rows_is_not_all_hold():
+    """2026-09-24 实测假警报形态：当日只有实时行（signal_side 恒 NULL）。
+
+    旧实现把 551 行实时行拼进分布，`str(None)` 落 "None" 桶 → 报「全 HOLD
+    （551 行无 BUY/SELL）」——指向闸门坍缩，真相是批量推理没产出。
+    """
+    ctx = FakeCtx({_C01_SQL_KEY: [{"source": "realtime", "signal_side": None, "n": 551}]})
+    r = await check_c01_signal_distribution(ctx)
+
+    assert r.level == "fail"
+    assert "批量信号缺失" in r.detail
+    assert "全 HOLD" not in r.detail
+    assert r.metrics["realtime_rows"] == 551
+
+
+@pytest.mark.asyncio
+async def test_c01_distribution_counts_batch_rows_only():
+    """同一交易日批量行与实时行并存时，分布只认批量——实时行不进分母。"""
+    ctx = FakeCtx(
+        {
+            _C01_SQL_KEY: [
+                {"source": "batch", "signal_side": "BUY", "n": 1299},
+                {"source": "batch", "signal_side": "HOLD", "n": 3924},
+                {"source": "batch", "signal_side": "SELL", "n": 1271},
+                {"source": "realtime", "signal_side": None, "n": 551},
+            ]
+        }
+    )
+    r = await check_c01_signal_distribution(ctx)
+
+    assert r.level == "ok", r.detail
+    assert r.metrics["total"] == 1299 + 3924 + 1271
+    assert r.metrics["realtime_rows"] == 551
+
+
+@pytest.mark.asyncio
+async def test_c01_batch_rows_all_null_side_is_its_own_failure():
+    """批量行在、signal_side 整列 NULL：是落库字段问题，不是「无数据」。"""
+    ctx = FakeCtx({_C01_SQL_KEY: [{"source": "batch", "signal_side": None, "n": 42}]})
+    r = await check_c01_signal_distribution(ctx)
+
+    assert r.level == "fail"
+    assert "signal_side 全为空" in r.detail
+    assert r.metrics["unknown_side"] == 42
+
+
+@pytest.mark.asyncio
+async def test_c01_empty_market_says_so_without_realtime_noise():
+    ctx = FakeCtx({})
+    r = await check_c01_signal_distribution(ctx)
+
+    assert r.level == "fail"
+    assert "无任何信号数据" in r.detail
+    assert "0 行实时行" not in r.detail
+
+
+# --- C02 信号就绪：runs 计数按 source 收敛 -----------------------------------
+
+
+_C02_RUNS_SQL_KEY = "count(DISTINCT run_id)"
+_HEALTH_PY = Path(__file__).resolve().parents[1] / "scripts" / "diagnose" / "health.py"
+
+
+@pytest.mark.asyncio
+async def test_c02_batch_runs_at_threshold_is_ok_with_ready_marker():
+    """2026-09-24 实测形态：2 批量 run + 就绪标记 → ok，不得报「同日多 run」。
+
+    实时行每日每模型一个 rt- run_id（与批量重跑/竞态无关），旧计数不筛
+    source 时 runs=3 顶过 >2 阈值，把常态判成周赛/回填异常。
+    """
+    from backend.shared.inference_lock import ready_key
+
+    ctx = FakeCtx(
+        {
+            "max(trade_date)": [{"d": date(2026, 9, 24)}],
+            _C02_RUNS_SQL_KEY: [{"n": 2}],
+        },
+        values={ready_key("CN", "2026-09-24"): '{"run_id": "run_x", "symbols": 3274}'},
+    )
+    r = await check_c02_signal_readiness(ctx)
+
+    assert r.level == "ok", r.detail
+    assert "同日多 run" not in r.detail
+    assert r.metrics["runs"] == 2
+
+
+def test_c02_runs_sql_filters_to_batch_source():
+    """行为用例喂的是假行、不经过 SQL —— 过滤词必须另有源断言钉住，
+    否则把子句删掉全部行为用例仍绿（假通过形态）。"""
+    src = _HEALTH_PY.read_text(encoding="utf-8")
+    assert "COALESCE(source, 'batch') = 'batch'" in src
+
+
+@pytest.mark.asyncio
+async def test_c02_completed_marker_is_fallback_when_ready_absent():
+    """就绪键缺失（2026-09-24 前的历史全缺失）时，完成标记兜底 → ok。"""
+    ctx = FakeCtx(
+        {
+            "max(trade_date)": [{"d": date(2026, 9, 24)}],
+            _C02_RUNS_SQL_KEY: [{"n": 2}],
+        },
+        values={"qm:inference:completed:2026-09-24": "run_20260923_995286b3"},
+    )
+    r = await check_c02_signal_readiness(ctx)
+
+    assert r.level == "ok", r.detail
+    assert "回退读完成标记" in r.detail
+
+
+@pytest.mark.asyncio
+async def test_c02_no_markers_at_all_is_warn():
+    ctx = FakeCtx(
+        {
+            "max(trade_date)": [{"d": date(2026, 9, 24)}],
+            _C02_RUNS_SQL_KEY: [{"n": 1}],
+        }
+    )
+    r = await check_c02_signal_readiness(ctx)
+
+    assert r.level == "warn"
+    assert "无就绪/完成标记" in r.detail
+
+
+@pytest.mark.asyncio
+async def test_c02_three_batch_runs_is_multi_run_warn():
+    """阈值仍要能报：3 个批量 run 同日才是真异常（重跑/竞态）。"""
+    from backend.shared.inference_lock import ready_key
+
+    ctx = FakeCtx(
+        {
+            "max(trade_date)": [{"d": date(2026, 9, 24)}],
+            _C02_RUNS_SQL_KEY: [{"n": 3}],
+        },
+        values={ready_key("CN", "2026-09-24"): '{"run_id": "run_x"}'},
+    )
+    r = await check_c02_signal_readiness(ctx)
+
+    assert r.level == "warn"
+    assert "同日多 run" in r.detail
