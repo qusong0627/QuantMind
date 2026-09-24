@@ -384,6 +384,113 @@ class TestCarriedStopLifecycle:
 
 
 # --------------------------------------------------------------------------
+# 4b. 移动止损的高水位跨日保留（2026-09-24 补）
+# --------------------------------------------------------------------------
+class TestCarriedHighWater:
+    """跨日保留的是「**持仓以来**最高价」，不是「今日最高价」。
+
+    ``exit_rules`` 的移动止损线是 ``high_water × (1 - trail)``，而 ``high_water``
+    缺省回落到 ``entry``。日切丢弃 ``highest_price`` 时不会立刻变松——同一轮
+    的第一个报价又把它重置成**今日现价**（``update_highest_price(None, price)``），
+    于是回撤线每个交易日往下挪一档：只升不降的保护变成只降不升，恰好在这个
+    保护唯一有意义的场景（冲高之后回落）里失效。
+
+    与棘轮防守位同一条纪律：抬高的保护跨日保留，但**持仓换了就作废**——
+    旧仓的高点是旧仓的成绩，套到新仓上等于开仓即被卖出。
+    """
+
+    def _state_with_hw(self, **over) -> dict:
+        item = {
+            "status": "armed",
+            "highest_price": 120.0,
+            "highest_entry": 100.0,  # 这个高点是在成本 100 的持仓上创下的
+        }
+        item.update(over)
+        return {"date": PREV_DAY, "rules": {"600036.SH": item}}
+
+    def test_high_water_survives_day_roll(self) -> None:
+        """成本 100、昨日冲到 120、trail 5% → 回撤线 114；今日 112 必须卖出。
+
+        丢高水位的话这一轮算出来的是「今日 112 的 5%」= 106.4，112 在其之上
+        → 不卖。要一直跌到 106.4 才动，等于把昨日那 8 毛浮盈的保护全让回去。
+        """
+        h = Harness(
+            cfg=_cfg([_rule_ext(trailing_stop_pct=0.05)]),
+            state=self._state_with_hw(),
+            ticks={"600036.SH": {"lastPrice": 112.0}},
+            positions=[_pos()],
+        )
+        h.cycle()
+        assert len(h.dispatched) == 1, (
+            "日切后高水位被丢掉，回撤线从 114 退到 106.4——"
+            "移动止损在「冲高后回落」这个唯一有意义的场景里没有起作用"
+        )
+        assert any("移动止损" in n["content"] for n in h.notices), h.notices
+
+    def test_new_high_is_recorded_with_its_entry(self) -> None:
+        """创新高时把「这笔高点是在哪个成本上创的」一并记下。
+
+        没有这个凭据，日切后无从判断旧高点该不该作废（棘轮防守位用
+        ``stop_entry`` 做同一件事）。
+        """
+        h = Harness(
+            cfg=_cfg([_rule_ext(trailing_stop_pct=0.05)]),
+            state=self._state_with_hw(),
+            ticks={"600036.SH": {"lastPrice": 130.0}},
+            positions=[_pos()],
+        )
+        h.cycle()
+        st = h.state()["rules"]["600036.SH"]
+        assert st["highest_price"] == 130.0
+        assert st["highest_entry"] == 100.0
+
+    def test_stale_high_water_dropped_when_entry_changed(self) -> None:
+        """换了持仓（成本 100→120）→ 旧高点作废，不得秒杀新仓。
+
+        旧仓冲到 150 是**上一个仓**的成绩。沿用它得到回撤线 142.5，于是一笔
+        成本 120、现价 130（浮盈中）的新仓当场被卖——正是棘轮那道校验要防的
+        「新持仓被旧防守位秒杀」，只是换成了百分比形态。
+        """
+        h = Harness(
+            cfg=_cfg([_rule_ext(entry_price=120.0, trailing_stop_pct=0.05)]),
+            state=self._state_with_hw(highest_price=150.0, highest_entry=100.0),
+            ticks={"600036.SH": {"lastPrice": 130.0}},
+            positions=[_pos(cost=120.0)],
+        )
+        h.cycle()
+        assert h.dispatched == [], (
+            "新持仓（成本 120、现价 130）被上一个仓 150 的高水位卖出"
+        )
+        assert any("最高价" in n["title"] for n in h.notices), h.notices
+        st = h.state()["rules"]["600036.SH"]
+        assert float(st.get("highest_price") or 0) < 150.0
+
+    def test_legacy_high_water_without_provenance_is_kept(self) -> None:
+        """旧状态没有 ``highest_entry``（本次修复之前写入的）→ 保留，不静默撤防。
+
+        缺凭据 ≠ 持仓变了——``carried_stop_invalid_reason`` 对读不到的持仓也是
+        这条纪律（宁可保护过度，不可静默撤防）。保留的代价是万一持仓真换了会
+        多卖一次；作废的代价是必然丢掉一整段保护。
+
+        非空过：这一轮的判定确实用上了 120——回撤线 114，现价 112 → 卖出。
+        """
+        h = Harness(
+            cfg=_cfg([_rule_ext(trailing_stop_pct=0.05)]),
+            state={
+                "date": PREV_DAY,
+                "rules": {"600036.SH": {"status": "armed", "highest_price": 120.0}},
+            },
+            ticks={"600036.SH": {"lastPrice": 112.0}},
+            positions=[_pos()],
+        )
+        h.cycle()
+        assert len(h.dispatched) == 1, (
+            "缺凭据的旧高水位被当成「持仓变了」作废——升级那一刻把在跑的"
+            "移动止损保护全撤了"
+        )
+
+
+# --------------------------------------------------------------------------
 # 5. pct 部分减仓
 # --------------------------------------------------------------------------
 class TestReducePct:

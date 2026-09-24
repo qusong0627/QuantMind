@@ -706,13 +706,23 @@ def load_state(redis: Any, today: str | None = None) -> dict[str, Any]:
     if str(state.get("date") or "") != day:
         carried: dict[str, Any] = {}
         for symbol, item in (state.get("rules") or {}).items():
-            if not isinstance(item, dict) or _to_float(item.get("stop_price")) is None:
+            if not isinstance(item, dict):
+                continue
+            has_stop = _to_float(item.get("stop_price")) is not None
+            has_high = _to_float(item.get("highest_price")) is not None
+            if not has_stop and not has_high:
                 continue
             carried[symbol] = {
                 "status": ST_ARMED,
-                "stop_price": item.get("stop_price"),
+                "stop_price": item.get("stop_price") if has_stop else None,
                 "stop_entry": item.get("stop_entry"),
                 "stop_volume": item.get("stop_volume"),
+                # 高水位同棘轮防守位一样跨日保留：trailing 的 H 是「**持仓以来**
+                # 最高价」，丢掉它会让回撤线在次日退回开仓价、再被当日第一个报价
+                # 重置成今日现价——只升不降的保护变成只降不升，每个交易日往下
+                # 挪一档（详见 carried_high_water_invalid_reason）。
+                "highest_price": item.get("highest_price") if has_high else None,
+                "highest_entry": item.get("highest_entry"),
             }
         state = {"date": day, "rules": carried}
     state.setdefault("rules", {})
@@ -746,15 +756,47 @@ def carried_stop_invalid_reason(
     stop_volume = _to_float(state_item.get("stop_volume"))
     cur_entry = _to_float(entry)
     cur_volume = _to_float(volume)
-    if (
-        stop_entry
-        and cur_entry
-        and abs(cur_entry - stop_entry) > stop_entry * _STOP_ENTRY_TOLERANCE
-    ):
+    if _entry_changed(stop_entry, cur_entry):
         return f"持仓成本已变化（{stop_entry:.2f}→{cur_entry:.2f}）"
     if stop_volume and cur_volume and cur_volume > stop_volume + 1e-6:
         return f"持仓数量已增加（{stop_volume:g}→{cur_volume:g}）"
     return ""
+
+
+def _entry_changed(recorded: float | None, current: float | None) -> bool:
+    """记录的成本价与当前成本价是否已经不是同一个持仓（相对差 > 容差）。
+
+    ``None``（读不到）**不算变化**——在读不到持仓时撤掉正在生效的保护，比保守
+    留着更危险。两条跨日承载位（棘轮防守位 / 移动止损高水位）共用这一判据：
+    各写一份的话，容差与缺失语义迟早分叉，而分叉的方向是「静默撤防」。
+    """
+    return bool(
+        recorded
+        and current
+        and abs(current - recorded) > recorded * _STOP_ENTRY_TOLERANCE
+    )
+
+
+def carried_high_water_invalid_reason(
+    state_item: dict[str, Any], *, entry: float | None
+) -> str:
+    """跨日保留的移动止损高水位是否已作废（纯函数，空串 = 保留）。
+
+    高水位是**某个持仓**的成绩：旧仓冲到 150 之后清仓、在 120 重新买回，沿用
+    150 会把回撤线定在 142.5，一笔浮盈中的新仓当场被卖——与
+    :func:`carried_stop_invalid_reason` 防的是同一件事，只是换成了百分比形态。
+
+    ``highest_entry`` 缺失（本次修复之前写入的旧状态）**不作废**：缺凭据 ≠ 持仓
+    变了，与上面「读不到持仓不作废」同一条纪律。
+    """
+    if not _entry_changed(
+        _to_float(state_item.get("highest_entry")), _to_float(entry)
+    ):
+        return ""
+    return (
+        f"持仓成本已变化（{_to_float(state_item.get('highest_entry')):.2f}"
+        f"→{_to_float(entry):.2f}）"
+    )
 
 
 def save_state(
@@ -814,9 +856,10 @@ def save_state(
 def reset_rules(redis: Any, symbols: list[str] | None = None) -> dict[str, Any]:
     """重新武装（全部或指定标的）。
 
-    **棘轮抬高的防守位一并清掉**：reset 的语义是「这条规则从头来过」，
-    回到规则配置里的初始防守位（保留抬高值会让「重新武装」变成「继续用旧防守」，
-    与规则表里的配置对不上，排障时看不出防守位是从哪来的）。
+    **棘轮抬高的防守位与移动止损的高水位一并清掉**：reset 的语义是「这条规则
+    从头来过」，回到规则配置里的初始防守位（保留抬高值会让「重新武装」变成
+    「继续用旧防守」，与规则表里的配置对不上，排障时看不出防守位是从哪来的）；
+    高水位同理——它属于**上一个持仓轮次**。
     """
     state = load_state(redis)
     targets = (
@@ -834,6 +877,7 @@ def reset_rules(redis: Any, symbols: list[str] | None = None) -> dict[str, Any]:
         state["rules"][symbol] = {
             "status": ST_ARMED,
             "highest_price": None,
+            "highest_entry": None,
             "entry_price": keep_entry,
             # generation 保留：重新武装后再触发要下**新**单（委托号含代数），
             # 而崩溃重试复用同代委托号、交给调度器幂等去重
@@ -979,7 +1023,8 @@ async def run_sltp_cycle(
             continue
         st["misses"] = 0
         st["last_price"] = price
-        st["highest_price"] = update_highest_price(st.get("highest_price"), price)
+        # 高水位的更新在 entry 解析之后（见下）——它要连带记下「这笔高点是在哪个
+        # 成本上创的」，而成本要到那里才知道。
 
         if fallback_cfg is None:
             try:
@@ -1004,6 +1049,28 @@ async def run_sltp_cycle(
                 )
             continue
         st["entry_price"] = entry
+
+        # 高水位的凭据校验必须**在本轮抬高之前**：晚一步，本轮的上涨会先把
+        # ``highest_entry`` 改写成当前成本，持仓变更就永远看不出来了。
+        # （棘轮防守位的同类校验在 _apply_ratchet 里，那里没有这个先后问题。）
+        invalid_hw = carried_high_water_invalid_reason(st, entry=entry)
+        if invalid_hw:
+            for key in ("highest_price", "highest_entry"):
+                st.pop(key, None)
+            await deps.notify(
+                user_id,
+                f"{symbol} 移动止损最高价已复位",
+                f"{invalid_hw}，上一个持仓的高点作废，按当前持仓从现价重新累计。",
+                "warning",
+                tenant_id=tenant_id,
+            )
+
+        # 高水位（只升不降）：本轮的报价在**凭据校验之后**入账，并记下这笔高点
+        # 是在哪个成本上创的——下一个交易日据此判断该不该作废。
+        prev_high = _to_float(st.get("highest_price"))
+        st["highest_price"] = update_highest_price(prev_high, price)
+        if st["highest_price"] > (prev_high or 0.0):
+            st["highest_entry"] = entry
 
         # 绝对防守位（规则固定价 / 棘轮抬高值）在本轮内落进 st，再由
         # trigger_inputs 一并交给判定——判定口径与状态落账同源，不会各算各的。
