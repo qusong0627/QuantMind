@@ -236,6 +236,41 @@ class TestPriceSourceLabeling:
         assert order.price_source == "broker_fill"
 
 
+class TestFeeColumns:
+    """成交行的四个费用列必须都写（只写 ``commission=0.0`` 时另三列吃默认 0 ⇒
+    ``get_trade_statistics`` 求和恒为 0，UI 上「总佣金 ¥0.00」）。
+
+    金额取 **10 万**（高于最低佣金）才有区分力：真单记的是券商实收的估计
+    （万2.5），撮合默认是万3，两者只在最低佣金之上才分得开。
+    """
+
+    def test_the_trade_row_carries_the_full_fee_breakdown(self) -> None:
+        from backend.services.simulation.services.market_rules import CN_RULES
+
+        order = _order(status=OrderStatus.SUBMITTED, filled=0.0)
+        _, session = _apply(order, "PARTIALLY_FILLED", qty=1000, price=100.0, trade_id="T-1")
+        trade = session.added[0]
+        commission, stamp, transfer = CN_RULES.compute_real_order_breakdown(
+            1000, 100.0, OrderSide.BUY
+        )
+        assert (trade.commission, trade.stamp_duty, trade.transfer_fee) == (
+            commission,
+            stamp,
+            transfer,
+        ), "费用分项必须来自 market_rules（费率单实现）"
+        assert trade.total_fee == round(commission + stamp + transfer, 2)
+        assert trade.total_fee == 26.0, "10 万买入 = 25（万2.5）+ 1 过户；31.0 即取了撮合口径"
+
+    def test_a_sell_row_pays_the_stamp_duty(self) -> None:
+        """卖方印花税是逐笔金额级的差（万 5）：方向判错会静默少收。"""
+        order = _order(status=OrderStatus.SUBMITTED, filled=0.0)
+        order.side = OrderSide.SELL
+        _, session = _apply(order, "PARTIALLY_FILLED", qty=1000, price=100.0, trade_id="T-2")
+        trade = session.added[0]
+        assert trade.stamp_duty == 50.0  # 100000 × 0.05%
+        assert trade.total_fee == 76.0  # 佣金 25 + 印花 50 + 过户 1
+
+
 class TestNormalizeStatus:
     def test_enum_input_not_silently_degraded(self) -> None:
         """T-P2-06：枚举入参直接透传（str(enum) 查表失败曾静默降级 SUBMITTED 丢成交）。"""

@@ -95,7 +95,16 @@ async def _run_sync(db, orders, user_id="1001"):
 
 
 class TestEstimateOrderFee:
-    """费用估算: 佣金(万2.5 最低5元, 双边) + 印花税(万5, 仅卖出) + 过户费(万0.1, 双边)。"""
+    """费用估算: 佣金(万2.5 最低5元, 双边) + 印花税(万5, 仅卖出) + 过户费(万0.1, 双边)。
+
+    ⚠️ 这里估的是**真单**（``orders.commission``），故佣金取**券商成本假设**
+    （万2.5），不是撮合的计划口径（万3）。两者都在 ``CN_RULES`` 上、语义不同：
+    撮合刻意保守，真单记的是券商实收的估计。本模块**不再自带费率副本**——它曾
+    自带四个常量（三个同值、佣金一项万2.5），是分叉的孤儿副本；现在只留
+    ``CN_RULES.compute_real_order_fee`` 一个出处。费率的出处与「真单必须取券商
+    那一支」由 ``test_rule_parity.test_fee_parity_real_order_uses_the_broker_assumption``
+    钉住。
+    """
 
     def test_buy_fee_commission_plus_transfer(self):
         assert estimate_order_fee(100000, "buy") == 26.0  # 25 佣金 + 1 过户
@@ -123,7 +132,8 @@ async def test_sync_inserts_new_bridge_order():
     assert row["filled_quantity"] == 2400
     assert row["average_price"] == 50.90
     assert row["filled_value"] == round(2400 * 50.90, 2)
-    # 122160 × 0.00025 = 30.54 佣金 + 1.2216 过户费 = 31.76
+    # 122160 × 0.00025 = 30.54 佣金 + 1.2216 → 1.22 过户费 = 31.76
+    # （费率取自 CN_RULES 的**券商假设**一支：真单记的是券商实收的估计）
     assert row["commission"] == 31.76
     assert row["trading_mode"] == "REAL"
     assert row["submitted_at"].hour == 9 and row["submitted_at"].minute == 30

@@ -16,6 +16,7 @@ from sqlalchemy.exc import IntegrityError
 from backend.services.trade_shared.models.enums import OrderStatus
 from backend.services.trade_shared.models.order import Order
 from backend.services.trade_shared.models.trade import Trade
+from backend.services.trade_shared.order_fees import fee_columns
 from backend.shared.agent_ledger_fill import post_fill_for_order
 from backend.shared.database_manager_v2 import get_session
 from backend.shared.notification_publisher import publish_notification_async
@@ -469,7 +470,9 @@ class ExecutionStreamConsumer:
                 quantity=filled_qty,
                 price=filled_price,
                 trade_value=trade_value,
-                commission=0.0,
+                # 四个费用列都要写（只写 commission=0.0 时另三列吃默认 0，
+                # get_trade_statistics 求和恒为 0 ⇒ UI「总佣金 ¥0.00」）。
+                **fee_columns(order.symbol, filled_qty, filled_price, order.side),
                 exchange_trade_id=idem_key,
                 exchange_name="execution_stream",
                 remarks=str(fields.get("reason") or ""),

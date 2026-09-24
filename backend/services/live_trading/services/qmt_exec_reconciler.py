@@ -29,6 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.services.trade_shared.models.enums import OrderSide, OrderStatus
 from backend.services.trade_shared.models.order import Order
 from backend.services.trade_shared.models.trade import Trade
+from backend.services.trade_shared.order_fees import fee_columns
 from backend.shared.agent_ledger_fill import post_fill_for_order
 
 logger = logging.getLogger(__name__)
@@ -304,7 +305,12 @@ async def apply_execution_report(
                         quantity=filled_qty,
                         price=price,
                         trade_value=trade_value,
-                        commission=0.0,
+                        # 四个费用列都要写（只写 commission=0.0 时另三列吃默认 0，
+                        # get_trade_statistics 求和恒为 0 ⇒ UI「总佣金 ¥0.00」）。
+                        **fee_columns(
+                            order.symbol, filled_qty, price, order.side,
+                            market=getattr(order, "market", None),
+                        ),
                         exchange_trade_id=trade_id,
                         executed_at=filled_stamp,
                         remarks=(

@@ -229,3 +229,93 @@ def test_trade_config_commission_derives_from_single_source():
             f"{key} 的默认值须派生自 CN_RULES（传常量名），不得手写数字"
         )
     assert '"0.0013"' not in src, "0.0013 是印花税减半前的旧合计，不得再出现"
+
+
+def test_fee_parity_real_order_uses_the_broker_assumption():
+    """真单估费走**券商成本假设**（万2.5），不是撮合的计划费率（万3）。
+
+    平台里 A 股佣金率有两个，语义不同且**都有意保留**：
+    - ``CN_RULES.commission_rate`` = 万3 —— 撮合/回测的**计划口径**，刻意保守；
+    - ``CN_BROKER_COMMISSION_RATE`` = 万2.5 —— **券商实收的估计**（真单记录、
+      评估成本模型），与 ``CnExchange`` / ``trading_cost.CostModel`` / 前端
+      「默认券商佣金」三处同值。
+
+    本条钉两件事：
+    ① **出处**：券商假设与那两个同族模型逐位相同——「同值不代表同源」，三处各写
+       一份数字时改一处就会漂（``CostModel.stamp_duty`` 曾漂到 2 倍法定值而无人
+       发现，因为它在平价网之外）。
+    ② **用法**：真单唯一费用来源 ``estimate_order_fee`` 取的是券商假设那一支。
+       反过来钉同样重要——若它取了撮合的万3，每 10 万成交多记 5 元，而
+       ``orders.commission`` 是用户对账看的那个数。
+
+    两个费率**必须不同**，否则本条失去区分力（把它改成恒等式就等于删掉它）。
+    """
+    import inspect
+
+    from backend.services.engine.inference.trading_cost import CostModel
+    from backend.services.engine.qlib_app.utils.cn_exchange import CnExchange
+    from backend.services.live_trading.services.tdx_push_service import (
+        estimate_order_fee,
+    )
+    from backend.services.simulation.services.market_rules import (
+        CN_BROKER_COMMISSION_RATE,
+    )
+
+    assert CN_BROKER_COMMISSION_RATE != CN_RULES.commission_rate, (
+        "券商假设与撮合默认成了同一个数——本条只剩自比，失去区分力"
+    )
+
+    # ① 出处：三处同源
+    # `CnExchange` 需要 qlib 全局配置才能实例化（`Exchange.__init__` 读
+    # `C.trade_unit`），故取签名默认值——结论等价且不依赖运行环境。
+    ex = {
+        name: param.default
+        for name, param in inspect.signature(CnExchange.__init__).parameters.items()
+        if param.default is not inspect.Parameter.empty
+    }
+    assert CN_BROKER_COMMISSION_RATE == ex["commission"] == CostModel().commission_rate, (
+        f"券商佣金假设三处不一致：rules={CN_BROKER_COMMISSION_RATE} "
+        f"cn_exchange={ex['commission']} cost_model={CostModel().commission_rate}"
+    )
+    # 法定费率与撮合侧同值（这两项没有「口径差异」的余地）
+    assert CN_RULES.effective_broker_commission_rate == CN_BROKER_COMMISSION_RATE
+
+    # ② 用法：真单估费按券商假设；这里按 **filled_value** 口径对账
+    #（调用方手里只有成交金额，没有股数×价格）
+    for value, side in (
+        (100_000.0, "buy"),
+        (100_000.0, "sell"),
+        (10_000.0, "buy"),  # 触发最低佣金：两个费率在此同价，故必须另有高额样本
+        (123_456.78, "sell"),
+    ):
+        assert estimate_order_fee(value, side) == CN_RULES.compute_real_order_fee(
+            value, 1.0, side
+        ), f"{value} {side}"
+    assert estimate_order_fee(100_000.0, "buy") == 26.0, (
+        "10 万买入=25 佣金（万2.5）+1 过户；若得 31.0 说明取了撮合的万3"
+    )
+    assert estimate_order_fee(0, "buy") == 0.0
+
+
+def test_fee_parity_accepts_enum_sides():
+    """枚举方向必须与字符串方向同价。
+
+    ``str(OrderSide.SELL)`` 是 ``"OrderSide.SELL"`` 而不是 ``"sell"``（三个
+    OrderSide 枚举的 ``str`` 都是这个形状），按 ``str(side).lower() == "sell"``
+    判卖方时**印花税静默归零**：实测卖出 1000 股 @10 得 ``(5.0, 0.0, 0.1)``，
+    而同一笔传字符串得 ``(5.0, 5.0, 0.1)``——每笔卖出少收万 5。
+    """
+    from backend.services.simulation.models.order import (
+        OrderSide as SimOrderSide,
+    )
+    from backend.services.trade_shared.models.enums import (
+        OrderSide as TradeOrderSide,
+    )
+
+    for enum_cls in (SimOrderSide, TradeOrderSide):
+        for member in enum_cls:
+            assert CN_RULES.compute_fee_breakdown(1000, 10.0, member) == (
+                CN_RULES.compute_fee_breakdown(1000, 10.0, member.value)
+            ), f"{enum_cls.__name__}.{member.name} 的费率与字符串口径不一致"
+    sell = CN_RULES.compute_fee_breakdown(1000, 10.0, TradeOrderSide.SELL)
+    assert sell[1] == 5.0, "卖方印花税不得归零"

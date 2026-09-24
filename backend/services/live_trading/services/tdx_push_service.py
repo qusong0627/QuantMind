@@ -25,24 +25,29 @@ TDX_BRIDGE_URL = os.getenv("TDX_BRIDGE_URL", "http://127.0.0.1:8550")
 TDX_BRIDGE_TOKEN = os.getenv("TDX_BRIDGE_TOKEN", "")
 TIMEOUT = 10.0
 
-# A股费用估算（桥委托不含费用字段，按标准费率估算用于交易记录统计）
-COMMISSION_RATE = 0.00025  # 佣金 万2.5，双边收取
-COMMISSION_MIN = 5.0  # 佣金最低 5 元/笔
-STAMP_TAX_RATE = 0.0005  # 印花税 万5，仅卖出单边（2023-08-28 起）
-TRANSFER_FEE_RATE = 0.00001  # 过户费 万0.1，双边收取
 # tqcenter 市价单的 WtPrice 哨兵值（2026-09-18 实测：市价卖单 319893 返回 1.0）——
 # 落库时须归 MARKET，否则交易记录显示"限价 1.00 元"
 MARKET_ORDER_PRICE_SENTINEL = 1.0
 
 
 def estimate_order_fee(filled_value: float, side: str = "buy") -> float:
-    """估算 A股单笔委托总费用 = 佣金 + 印花税(仅卖出) + 过户费。"""
+    """估算 A股单笔委托总费用 = 佣金 + 印花税(仅卖出) + 过户费。
+
+    **费率与算法都不在这里**（T-P2-02 单实现）：本模块曾自带一份
+    ``COMMISSION_RATE``/``COMMISSION_MIN``/``STAMP_TAX_RATE``/``TRANSFER_FEE_RATE``
+    ——四个费率三个与 ``CN_RULES`` 同值、佣金一项不同，是分叉的孤儿副本。
+    桥回执确实不含费用字段（``tools/bridge-windows`` 全仓无 fee/commission 字段），
+    所以这里仍要估，但估的**依据**必须走 ``CN_RULES``。
+
+    口径用 ``compute_real_order_fee`` 而非 ``compute_commission``：真单记的是
+    **券商实收的估计**（万2.5），撮合默认（万3）是计划口径的保守值。两者混用会让
+    真单成本单向高估，而 UI 把真单与模拟盘放在同一张表里比。
+    """
     if filled_value <= 0:
         return 0.0
-    commission = max(filled_value * COMMISSION_RATE, COMMISSION_MIN)
-    stamp_tax = filled_value * STAMP_TAX_RATE if side == "sell" else 0.0
-    transfer_fee = filled_value * TRANSFER_FEE_RATE
-    return round(commission + stamp_tax + transfer_fee, 2)
+    from backend.services.simulation.services.market_rules import CN_RULES
+
+    return CN_RULES.compute_real_order_fee(float(filled_value), 1.0, side)
 
 
 class TdxPushError(Exception):

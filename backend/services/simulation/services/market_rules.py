@@ -89,6 +89,20 @@ SUPPORTED_BROKERS: dict[Market, tuple[str, ...]] = {
 }
 
 
+def side_text(side: object) -> str:
+    """买卖方向归一为 ``"buy"`` / ``"sell"``（吃字符串也吃枚举）。
+
+    ``str(OrderSide.SELL)`` 是 ``"OrderSide.SELL"`` **不是** ``"sell"``（``str``
+    混入的 Enum 在 3.10 仍用 ``Enum.__str__``）。按 ``str(side).lower()`` 判卖方，
+    传枚举时印花税**静默归零**——实测 ``compute_fee_breakdown(1000, 10, OrderSide.SELL)``
+    得 ``(5.0, 0.0, 0.1)``，而传 ``"sell"`` 得 ``(5.0, 5.0, 0.1)``：一笔卖出少收
+    万 5。本仓有**三个** OrderSide 枚举（simulation / trade_shared / backtest_engine），
+    故按 ``.value`` 解包（与 ``normalize_market`` 同一手法），不按类型嗅探。
+    """
+    raw = getattr(side, "value", side)
+    return str(raw or "").strip().lower()
+
+
 @dataclass(frozen=True)
 class MarketTradingRules:
     """单个市场的模拟撮合规则。"""
@@ -110,6 +124,13 @@ class MarketTradingRules:
     transfer_fee_rate: float = 0.0
     # 是否存在涨跌停限制（False 时行情层 limit_up/down 恒为 False）
     has_price_limit: bool = True
+    # **真单/评估侧**的券商佣金假设；None = 与 commission_rate 同。
+    # 与 commission_rate 分开是因为两者语义不同：commission_rate 是**撮合/回测的
+    # 计划口径**（CN 万3，刻意取保守值），本字段是**券商实收的估计**（CN 万2.5，
+    # 与 CnExchange / trading_cost.CostModel / 前端默认同值）。真单成交只发生一次，
+    # 记进去的费用必须按后者估——见 compute_real_order_fee。平价网与来源见
+    # test_rule_parity.test_fee_parity_real_order_uses_the_broker_assumption。
+    broker_commission_rate: float | None = None
 
     def compute_fee_breakdown(
         self,
@@ -138,7 +159,9 @@ class MarketTradingRules:
             self.transfer_fee_rate if transfer_fee_rate is None else float(transfer_fee_rate)
         )
         commission = round(max(gross * rate, min_fee), 2)
-        stamp = round(gross * stamp_rate, 2) if str(side).lower() == "sell" else 0.0
+        stamp = (
+            round(gross * stamp_rate, 2) if side_text(side) == "sell" else 0.0
+        )
         transfer = round(gross * transfer_rate, 2)
         return commission, stamp, transfer
 
@@ -146,6 +169,44 @@ class MarketTradingRules:
         """按市场规则计算单笔费用合计（佣金 + 印花税 + 过户费；向后兼容）。"""
         commission, stamp, transfer = self.compute_fee_breakdown(quantity, price, side)
         return round(commission + stamp + transfer, 2)
+
+    @property
+    def effective_broker_commission_rate(self) -> float:
+        """真单/评估口径的佣金率（未单独配置的市场与撮合默认同值）。"""
+        if self.broker_commission_rate is None:
+            return self.commission_rate
+        return float(self.broker_commission_rate)
+
+    def compute_real_order_breakdown(
+        self, quantity: float, price: float, side: str
+    ) -> tuple[float, float, float]:
+        """**真单/评估口径**的费用分项：(佣金, 印花税, 过户费)。
+
+        与 ``compute_fee_breakdown`` 同实现、只差佣金率——真单记的是**券商实收的
+        估计**，撮合/回测的计划费率（CN 万3）比它保守，用它记会系统性高估真单成本
+        （每 10 万成交差 5 元，且只有真单那一侧错）。法定费率（印花税/过户费）两侧
+        相同，不参与这处差异。
+        """
+        return self.compute_fee_breakdown(
+            quantity, price, side, commission_rate=self.effective_broker_commission_rate
+        )
+
+    def compute_real_order_fee(self, quantity: float, price: float, side: str) -> float:
+        """真单/评估口径的单笔费用合计（佣金 + 印花税 + 过户费）。"""
+        commission, stamp, transfer = self.compute_real_order_breakdown(
+            quantity, price, side
+        )
+        return round(commission + stamp + transfer, 2)
+
+
+# A 股**券商实收**佣金假设（万2.5）。与撮合默认 ``commission_rate``（万3）**刻意不同**：
+# 万3 是计划口径的保守值（回测/模拟盘宁可多算成本），万2.5 是券商成本假设
+# （``CnExchange`` 主回测引擎 / ``inference.trading_cost.CostModel`` / 前端
+# ``config/backtest.ts`` 的「默认券商佣金」三处同值，见 ``docs/回测费用配置说明.md``
+# 的「真实A股费用结构」）。**同值不代表同源**，故这里立一个具名常量并由
+# ``test_rule_parity.test_fee_parity_real_order_uses_the_broker_assumption``
+# 把三方钉住——改任一处而不改其余会让该用例转红，而不是让真单成本静默漂移。
+CN_BROKER_COMMISSION_RATE: float = 0.00025
 
 
 CN_RULES = MarketTradingRules(
@@ -160,6 +221,7 @@ CN_RULES = MarketTradingRules(
     # 回归由 test_ashare_matcher 抓出（2026-09-16 T-P2-07 批次修复）
     transfer_fee_rate=0.00001,
     has_price_limit=True,
+    broker_commission_rate=CN_BROKER_COMMISSION_RATE,
 )
 HK_RULES = MarketTradingRules(
     market=Market.HK,

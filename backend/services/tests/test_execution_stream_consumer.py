@@ -103,6 +103,49 @@ async def test_order_filled_matches_by_client_order_id_and_uses_exchange_trade_i
 
 
 @pytest.mark.asyncio
+async def test_the_trade_row_carries_the_full_fee_breakdown(monkeypatch):
+    """四个费用列都要写。
+
+    此前只写 ``commission=0.0``、另三列吃默认 0 ⇒ ``get_trade_statistics`` 求和
+    恒为 0 ⇒ UI 上「总佣金 ¥0.00」——真单的成本口径不能是 0（复盘/风控/披露都读它）。
+
+    金额取 10 万（高于最低佣金）才有区分力：真单按券商实收的估计（万2.5）记，
+    撮合默认是万3，两者只在最低佣金之上才分得开。
+    """
+    from backend.services.simulation.services.market_rules import CN_RULES
+
+    order = _filled_order(quantity=1000.0)
+    session = _FakeSession(order=order, trade=None)
+    consumer = ExecutionStreamConsumer()
+    monkeypatch.setattr(
+        "backend.services.trade.services.execution_stream_consumer.get_session",
+        lambda: _FakeSessionContext(session),
+    )
+
+    async def _noop_notification(**_kwargs):
+        return None
+
+    monkeypatch.setattr(
+        "backend.services.trade.services.execution_stream_consumer.publish_notification_async",
+        _noop_notification,
+    )
+
+    await consumer._handle_order_filled({**_filled_event(), "filled_qty": "1000", "filled_price": "100"})
+
+    trade = session.added[0]
+    commission, stamp, transfer = CN_RULES.compute_real_order_breakdown(
+        1000, 100, OrderSide.BUY
+    )
+    assert (trade.commission, trade.stamp_duty, trade.transfer_fee) == (
+        commission,
+        stamp,
+        transfer,
+    ), "费用分项必须来自 market_rules（费率单实现）"
+    assert trade.total_fee == round(commission + stamp + transfer, 2)
+    assert trade.total_fee == 26.0, "10 万买入 = 25（万2.5）+ 1 过户；31.0 即取了撮合口径"
+
+
+@pytest.mark.asyncio
 async def test_order_submitted_matches_by_exchange_order_id_when_broker_order_id_is_not_uuid(monkeypatch):
     order = SimpleNamespace(
         order_id=uuid4(),
