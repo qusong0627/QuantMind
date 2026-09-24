@@ -81,6 +81,17 @@ _SANITY_MAX_DRIFT = lot_rules.SANITY_MAX_DRIFT
 _SKIP_HASH_PREFIX = "mirror:skipped:"
 _SKIP_TTL_SECONDS = 7 * 24 * 3600
 
+# 镜像**下单失败**台账：mirror:failed:{YYYYMMDD} 哈希，形状同跳过记录。
+# 与跳过分开记账：跳过是「我们决定不发」，失败是「发了、没成」——一个看策略闸门，
+# 一个看通道；混进同一个哈希，对账报表就只能靠 reason 前缀猜。
+_FAIL_HASH_PREFIX = "mirror:failed:"
+_FAIL_TTL_SECONDS = 7 * 24 * 3600
+
+# 失败告警去重键：mirror:alert:{YYYYMMDD}:{kind}——**一类一天一条**。
+_ALERT_KEY_FMT = "mirror:alert:{date}:{kind}"
+_ALERT_TTL_SECONDS = 7 * 24 * 3600
+ALERT_SUBMIT_FAILED = "submit_failed"
+
 # 账户/行情缓存：避免每笔镜像都打一次 RPC
 _ACCOUNT_CACHE_SECONDS = 10.0
 _account_cache: dict[str, Any] = {"at": 0.0, "data": None}
@@ -361,50 +372,44 @@ def _daily_key(field: str, date_str: str | None = None) -> str:
     return _DAILY_KEY.format(date=date_str or trade_date_str(), field=field)
 
 
-def record_skip(
+def _record_ledger(
+    prefix: str,
     redis: Any,
     *,
     symbol: str,
-    side: str,
-    quantity: float,
     reason: str,
-    source: str,
+    detail: dict[str, Any],
+    ttl: int,
 ) -> None:
-    """记录一次镜像跳过（供当日双轨对账报表），失败只记日志不打断下单流程。"""
+    """当日台账写一笔（哈希 ``field={symbol}:{reason}`` → 次数 + ``:detail``），只记日志。"""
     client = _redis_client(redis)
     if client is None:
         return
-    key = f"{_SKIP_HASH_PREFIX}{trade_date_str()}"
+    key = f"{prefix}{trade_date_str()}"
     field = f"{symbol}:{reason}"
-    detail = json.dumps(
-        {
-            "side": side,
-            "quantity": quantity,
-            "source": source,
-            "at": datetime.now().isoformat(timespec="seconds"),
-        },
-        ensure_ascii=False,
-    )
+    payload = json.dumps(detail, ensure_ascii=False)
     try:
         pipe = client.pipeline()
         pipe.hincrby(key, field, 1)
-        pipe.hset(key, f"{field}:detail", detail)
-        pipe.expire(key, _SKIP_TTL_SECONDS)
+        pipe.hset(key, f"{field}:detail", payload)
+        pipe.expire(key, ttl)
         pipe.execute()
     except Exception as exc:  # noqa: BLE001
-        logger.debug("[Mirror] 记录跳过失败 %s %s: %s", symbol, reason, exc)
+        logger.debug("[Mirror] 记录台账失败 %s %s: %s", symbol, reason, exc)
 
 
-def load_skips(redis: Any, date_str: str | None = None) -> dict[str, int]:
-    """读取某日的跳过计数：{ "symbol:reason": count }（对账报表用）。"""
+def _load_ledger(
+    prefix: str, redis: Any, date_str: str | None = None
+) -> dict[str, int]:
+    """读某日台账：``{"symbol:reason": count}``（``:detail`` 行不算计数）。"""
     client = _redis_client(redis)
     if client is None:
         return {}
-    key = f"{_SKIP_HASH_PREFIX}{date_str or trade_date_str()}"
+    key = f"{prefix}{date_str or trade_date_str()}"
     try:
         raw = client.hgetall(key)
     except Exception as exc:  # noqa: BLE001
-        logger.warning("[Mirror] 读取跳过记录失败: %s", exc)
+        logger.warning("[Mirror] 读取台账失败: %s", exc)
         return {}
     counts: dict[str, int] = {}
     for field, value in (raw or {}).items():
@@ -416,6 +421,71 @@ def load_skips(redis: Any, date_str: str | None = None) -> dict[str, int]:
         except (TypeError, ValueError):
             continue
     return counts
+
+
+def _entry_detail(side: str, quantity: float, source: str) -> dict[str, Any]:
+    return {
+        "side": side,
+        "quantity": quantity,
+        "source": source,
+        "at": datetime.now().isoformat(timespec="seconds"),
+    }
+
+
+def record_skip(
+    redis: Any,
+    *,
+    symbol: str,
+    side: str,
+    quantity: float,
+    reason: str,
+    source: str,
+) -> None:
+    """记录一次镜像跳过（供当日双轨对账报表），失败只记日志不打断下单流程。"""
+    _record_ledger(
+        _SKIP_HASH_PREFIX,
+        redis,
+        symbol=symbol,
+        reason=reason,
+        detail=_entry_detail(side, quantity, source),
+        ttl=_SKIP_TTL_SECONDS,
+    )
+
+
+def load_skips(redis: Any, date_str: str | None = None) -> dict[str, int]:
+    """读取某日的跳过计数：{ "symbol:reason": count }（对账报表用）。"""
+    return _load_ledger(_SKIP_HASH_PREFIX, redis, date_str)
+
+
+def record_failure(
+    redis: Any,
+    *,
+    symbol: str,
+    side: str,
+    quantity: float,
+    reason: str,
+    source: str,
+) -> None:
+    """记录一次真单**提交失败**（异常 / 拒单 / 券商拒收），当日按标的与原因计数。
+
+    与 :func:`record_skip` 分开记（跳过 = 决定不发，失败 = 发了没成）。也与
+    ``mirror:rejects`` 是两回事：那是**连续**计数、成功一笔就清零，间歇性失败
+    （失败一笔、成功一笔、再失败一笔）在它上面永远到不了熔断阈值，于是既没有急停、
+    也没有通知、状态快照还读 0 —— 当日台账补的就是这一格。
+    """
+    _record_ledger(
+        _FAIL_HASH_PREFIX,
+        redis,
+        symbol=symbol,
+        reason=reason,
+        detail=_entry_detail(side, quantity, source),
+        ttl=_FAIL_TTL_SECONDS,
+    )
+
+
+def load_failures(redis: Any, date_str: str | None = None) -> dict[str, int]:
+    """读取某日的失败计数：{ "symbol:reason": count }（状态快照 / 对账用）。"""
+    return _load_ledger(_FAIL_HASH_PREFIX, redis, date_str)
 
 
 # --------------------------------------------------------------------------
@@ -561,6 +631,13 @@ def status_snapshot(redis: Any) -> dict[str, Any]:
         },
         "queue_length": _as_int(client.llen(_QUEUE_KEY)),
         "consecutive_rejects": _as_int(client.get(_REJECTS_KEY)),
+        # 连续计数**成功一笔就清零**，间歇性失败在它上面读不出「今天出过事」——
+        # 当日台账是那一格（按标的与原因，供值班决定补哪一笔）。
+        "daily_failures": {
+            "date": today,
+            "count": _as_int(client.get(_daily_key("failed", today))),
+            "ledger": load_failures(redis, today),
+        },
         "trading_time": is_trading_time(),
         "broker_selected": selected,
         "real_trading_ready": ready,
@@ -713,17 +790,126 @@ def _release_quota(
         )
 
 
-def _record_reject(redis: Any, cfg: MirrorConfig, *, reason: str) -> None:
-    """连续拒单熔断：达到阈值自动急停 + 通知。"""
+def _incr_daily(client: Any, field: str) -> int:
+    """当日计数 +1；读不到返回 0（台账/告警缺一个数，不该打断真单路径）。"""
+    try:
+        key = _daily_key(field)
+        value = int(client.incr(key))
+        client.expire(key, _DAILY_TTL_SECONDS)
+        return value
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("[Mirror] 当日计数失败 %s: %s", field, exc)
+        return 0
+
+
+def _alert_key(kind: str, date_str: str | None = None) -> str:
+    return _ALERT_KEY_FMT.format(date=date_str or trade_date_str(), kind=kind)
+
+
+def _release_mark(client: Any, mark_key: str) -> None:
+    """放掉去重占位键：推送没送达时用它把「今天推过」撤回。"""
+    if client is None:
+        return
+    try:
+        client.delete(mark_key)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("[Mirror] 告警去重键释放失败 %s: %s", mark_key, exc)
+
+
+def _deliver(
+    client: Any, mark_key: str, *, title: str, content: str, level: str
+) -> None:
+    """旁路推送（**不 await**：真单路径不许等一次写库）。"""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        # 同步上下文（无事件循环，如脚本）：这条推不出去 ⇒ 立即放掉占位键，
+        # 好让之后的失败真能推出来。日志要如实说「没送出去」，不许装成已推。
+        logger.warning(
+            "[Mirror] 下单失败告警未推送：当前没有事件循环（key=%s）", mark_key
+        )
+        _release_mark(client, mark_key)
+        return
+    asyncio.create_task(_deliver_then_verify(client, mark_key, title, content, level))
+
+
+async def _deliver_then_verify(
+    client: Any, mark_key: str, title: str, content: str, level: str
+) -> None:
+    try:
+        delivered = await _publish(title=title, content=content, level=level)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[Mirror] 下单失败告警推送异常: %s", exc)
+        delivered = False
+    if delivered:
+        return
+    logger.warning(
+        "[Mirror] 下单失败告警未送达，放掉去重键（下次失败再推）: %s", mark_key
+    )
+    _release_mark(client, mark_key)
+
+
+def _push_failure_once(
+    redis: Any, *, symbol: str, reason: str, failed_today: int
+) -> bool:
+    """当日**首笔**下单失败推一条（同类当天只此一条）。返回有没有推。
+
+    去重键**先占位、推失败再放掉**：占位是同步的，能挡住同一秒里并发拒单各推一条；
+    放掉则保证「没送达 ⇒ 不烧键」——重复推优于沉默（同止损失败/决策轮告警的纪律，
+    差别只在那两条路能 await 送达，真单路径不能，所以拆成走/验两步）。
+    """
+    client = _redis_client(redis)
+    key = _alert_key(ALERT_SUBMIT_FAILED)
+    if client is not None:
+        try:
+            if client.get(key):
+                return False
+            client.set(key, "1", ex=_ALERT_TTL_SECONDS)
+        except Exception as exc:  # noqa: BLE001 读不到按没推过办（重复优于沉默）
+            logger.warning("[Mirror] 失败告警去重键不可用: %s", exc)
+    where = f"{symbol} " if symbol else ""
+    _deliver(
+        client,
+        key,
+        title="真单镜像有下单失败",
+        content=(
+            f"{where}{reason}\n"
+            f"今日第 {failed_today or 1} 笔。本笔**不会自动重发**——请先核对 orders 里的"
+            "实际委托与柜台状态，再决定是否补单。"
+        ),
+        level="error",
+    )
+    return True
+
+
+def _record_reject(
+    redis: Any,
+    cfg: MirrorConfig,
+    *,
+    reason: str,
+    symbol: str = "",
+    side: str = "",
+    quantity: float = 0.0,
+    source: str = "",
+) -> None:
+    """一笔真单没发成：**当日台账 + 首笔告警 + 连续拒单熔断**（三件事各自独立）。
+
+    台账先写、计数后写：计数键坏了不该让这一笔在系统里消失（此前那条 ``return`` 会
+    让「计数失败」与「什么都没发生」长得一模一样）。
+    """
     client = _redis_client(redis)
     if client is None:
         return
+    record_failure(
+        redis, symbol=symbol, side=side, quantity=quantity, reason=reason, source=source
+    )
+    failed_today = _incr_daily(client, "failed")
     try:
         count = int(client.incr(_REJECTS_KEY))
         client.expire(_REJECTS_KEY, _DAILY_TTL_SECONDS)
     except Exception as exc:  # noqa: BLE001
         logger.warning("[Mirror] 拒单计数失败: %s", exc)
-        return
+        count = 0
     if cfg.max_consecutive_rejects > 0 and count >= cfg.max_consecutive_rejects:
         try:
             set_kill_switch(redis, True)
@@ -743,9 +929,14 @@ def _record_reject(redis: Any, cfg: MirrorConfig, *, reason: str) -> None:
             ),
             level="error",
         )
+        return
+    # 阈值之下：至少让今天的第一笔被看见。熔断那条已经说明了一切（含次数与最近原因），
+    # 不再叠一条——两条同秒到达只会稀释「已停单」这条。
+    _push_failure_once(redis, symbol=symbol, reason=reason, failed_today=failed_today)
 
 
 def _record_success(redis: Any) -> None:
+    """一笔成功 ⇒ 连续计数清零。**当日台账与当日失败计数不动**（那是已经发生的事）。"""
     client = _redis_client(redis)
     if client is None:
         return
@@ -755,21 +946,26 @@ def _record_success(redis: Any) -> None:
         pass
 
 
+async def _publish(*, title: str, content: str, level: str) -> bool:
+    """站内通知（落库 → 前端通知中心）。返回是否送达。"""
+    from backend.shared.notification_publisher import publish_notification_async
+
+    return bool(
+        await publish_notification_async(
+            user_id=resolve_db_account_user("MIRROR_NOTIFY_USER_ID"),
+            tenant_id="default",
+            title=title,
+            content=content,
+            type="trading",
+            level=level,
+        )
+    )
+
+
 def notify(*, title: str, content: str, level: str = "warning") -> None:
     """站内通知（尽力而为，不阻断交易路径）。旁路任务（账户同步等）也可复用。"""
     try:
-        from backend.shared.notification_publisher import publish_notification_async
-
-        asyncio.create_task(
-            publish_notification_async(
-                user_id=resolve_db_account_user("MIRROR_NOTIFY_USER_ID"),
-                tenant_id="default",
-                title=title,
-                content=content,
-                type="trading",
-                level=level,
-            )
-        )
+        asyncio.create_task(_publish(title=title, content=content, level=level))
     except Exception as exc:  # noqa: BLE001
         logger.warning("[Mirror] 通知推送失败: %s", exc)
 
@@ -1252,7 +1448,15 @@ async def _submit_payload(
             was_new_symbol=was_new_symbol,
             date_str=quota_date,
         )
-        _record_reject(redis, cfg, reason=str(exc))
+        _record_reject(
+            redis,
+            cfg,
+            reason=str(exc),
+            symbol=symbol,
+            side=side,
+            quantity=quantity,
+            source=str(payload.get("source") or ""),
+        )
         logger.error(
             "[Mirror] 真单提交失败 cid=%s symbol=%s: %s", mirror_cid, symbol, exc
         )
@@ -1305,7 +1509,15 @@ async def _submit_payload(
             was_new_symbol=was_new_symbol,
             date_str=quota_date,
         )
-        _record_reject(redis, cfg, reason=failure)
+        _record_reject(
+            redis,
+            cfg,
+            reason=failure,
+            symbol=symbol,
+            side=side,
+            quantity=quantity,
+            source=str(payload.get("source") or ""),
+        )
         logger.warning(
             "[Mirror] 真单未成功 cid=%s symbol=%s status=%s execution=%s detail=%s",
             mirror_cid,

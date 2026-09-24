@@ -17,6 +17,27 @@ from backend.services.live_trading.services import real_mirror_service as m
 from backend.shared.live_trading_gate import ENV_KEY
 
 
+class FakePipeline:
+    """``record_skip`` / ``record_failure`` 只用 hincrby+hset+expire：立刻落到客户端。"""
+
+    def __init__(self, client: FakeRedisClient) -> None:
+        self.client = client
+
+    def hincrby(self, key: str, field: str, amount: int = 1) -> FakePipeline:
+        self.client.hincrby(key, field, amount)
+        return self
+
+    def hset(self, key: str, field: str, value: Any) -> FakePipeline:
+        self.client.hset(key, field, value)
+        return self
+
+    def expire(self, key: str, seconds: int) -> FakePipeline:
+        return self
+
+    def execute(self) -> list[Any]:
+        return []
+
+
 class FakeRedisClient:
     """内存版 Redis（只实现镜像服务用到的命令）。"""
 
@@ -25,10 +46,14 @@ class FakeRedisClient:
         *,
         strings: dict[str, str] | None = None,
         sets: dict[str, set[str]] | None = None,
+        hashes: dict[str, dict[str, Any]] | None = None,
     ):
         self.strings: dict[str, str] = dict(strings or {})
         self.sets: dict[str, set[str]] = {k: set(v) for k, v in (sets or {}).items()}
         self.lists: dict[str, list[str]] = {}
+        self.hashes: dict[str, dict[str, Any]] = {
+            k: dict(v) for k, v in (hashes or {}).items()
+        }
 
     # -- string --
     def get(self, key: str) -> str | None:
@@ -37,7 +62,8 @@ class FakeRedisClient:
     def exists(self, key: str) -> int:
         return int(key in self.strings or key in self.sets)
 
-    def set(self, key: str, value: Any) -> bool:
+    def set(self, key: str, value: Any, **kwargs: Any) -> bool:
+        # ``ex=`` 等选项照收不校验 TTL：这里是行为替身，不是 Redis 语义模拟器
         self.strings[key] = str(value)
         return True
 
@@ -102,6 +128,24 @@ class FakeRedisClient:
 
     def llen(self, key: str) -> int:
         return len(self.lists.get(key) or [])
+
+    # -- hash（跳过/失败台账用）--
+    def hincrby(self, key: str, field: str, amount: int = 1) -> int:
+        target = self.hashes.setdefault(key, {})
+        target[field] = int(target.get(field) or 0) + int(amount)
+        return int(target[field])
+
+    def hset(self, key: str, field: str, value: Any) -> int:
+        target = self.hashes.setdefault(key, {})
+        is_new = field not in target
+        target[field] = value
+        return int(is_new)
+
+    def hgetall(self, key: str) -> dict[str, Any]:
+        return dict(self.hashes.get(key) or {})
+
+    def pipeline(self) -> FakePipeline:
+        return FakePipeline(self)
 
     def eval(self, script: str, numkeys: int, *args: Any) -> list[Any]:
         """按 ``_RESERVE_LUA`` 的语义做最小模拟（真 Lua 已在真实 Redis 验证）。
@@ -654,6 +698,27 @@ class TestSubmit:
         assert release.calls and release.calls[0]["was_new_symbol"] is True
         record_reject.assert_called_once()
 
+    def test_submit_failure_hands_the_symbol_to_the_failure_ledger(self) -> None:
+        """台账要能**按标的**读：symbol 必须从下单路径一路带进 ``_record_reject``。
+
+        只记「今天失败了 N 笔」不够——值班要知道是哪只、什么原因，才谈得上补单。
+        """
+        redis = self._open_redis()
+        with (
+            patch(
+                "backend.services.live_trading.services.internal_strategy_dispatcher"
+                ".dispatch_internal_strategy_order",
+                AsyncMock(return_value={"status": "rejected", "detail": "风控拒单"}),
+            ),
+            patch.object(m, "_release_quota"),
+            patch.object(m, "_record_reject") as record_reject,
+        ):
+            result = self._submit(redis)
+        assert result["status"] == "failed"
+        kwargs = record_reject.call_args.kwargs
+        assert kwargs["symbol"] == "SH600519"
+        assert kwargs["side"] == "BUY"
+
     def test_submit_exception_releases_quota(self) -> None:
         redis = self._open_redis()
         with (
@@ -887,6 +952,169 @@ class TestQuotaAndBreaker:
         assert redis.client.strings["mirror:kill"] == "1"
         m.set_kill_switch(redis, False)
         assert "mirror:kill" not in redis.client.strings
+
+
+# --------------------------------------------------------------------------
+# 失败可见性（P4 附-②：当日台账 + 首条告警）
+# --------------------------------------------------------------------------
+class TestFailureVisibility:
+    """缺的那一层：``mirror:rejects`` 是**连续**计数，成功一次就清零。
+
+    「失败一笔、成功一笔、再失败一笔」在计数上永远到不了阈值：熔断不响、状态快照读 0，
+    而这两笔是**真钱委托**——在系统里只剩一行 WARNING 日志。台账（按日按标的）与首条
+    告警补的就是这两格：数字归零不等于今天没出过事。
+    """
+
+    def test_the_daily_ledger_survives_a_success(self) -> None:
+        redis = _redis()
+        cfg = _cfg(max_consecutive_rejects=5)
+        m._record_reject(redis, cfg, reason="broker_rejected", symbol="SH600519")
+        m._record_success(redis)  # 一笔成功：连续计数清零（既有语义不变）
+        assert m._REJECTS_KEY not in redis.client.strings
+        m._record_reject(redis, cfg, reason="broker_rejected", symbol="SH600036")
+        assert redis.client.strings[m._REJECTS_KEY] == "1"  # 连续计数从 1 重新起算
+        ledger = m.load_failures(redis, m.trade_date_str())
+        assert ledger["SH600519:broker_rejected"] == 1
+        assert ledger["SH600036:broker_rejected"] == 1
+
+    def test_a_single_failure_below_the_threshold_is_pushed(self) -> None:
+        async def _case() -> dict[str, Any]:
+            redis = _redis()
+            with patch.object(m, "_publish", AsyncMock(return_value=True)) as publish:
+                m._record_reject(
+                    redis,
+                    _cfg(max_consecutive_rejects=5),
+                    reason="broker_rejected:资金不足",
+                    symbol="SH600519",
+                )
+                await asyncio.sleep(0)  # 推送走旁路任务：让出一条给循环
+            assert publish.await_count == 1
+            return publish.await_args.kwargs
+
+        kwargs = asyncio.run(_case())
+        assert kwargs["level"] == "error"
+        assert "SH600519" in kwargs["content"]
+        assert "资金不足" in kwargs["content"]
+        # 不写清「不会自动重发」，值班就会以为系统自己会再试一遍
+        assert "不会自动重发" in kwargs["content"]
+
+    def test_only_the_first_failure_of_the_day_is_pushed(self) -> None:
+        async def _case() -> int:
+            redis = _redis()
+            cfg = _cfg(max_consecutive_rejects=99)  # 阈值很高：熔断不参与
+            with patch.object(m, "_publish", AsyncMock(return_value=True)) as publish:
+                for _ in range(3):
+                    m._record_reject(redis, cfg, reason="timeout", symbol="SH600519")
+                await asyncio.sleep(0)
+            assert m.load_failures(redis, m.trade_date_str())["SH600519:timeout"] == 3
+            return publish.await_count
+
+        assert asyncio.run(_case()) == 1
+
+    def test_a_new_day_gets_its_own_alert(self) -> None:
+        """「一天一条」按**交易日**分：跨日必须重新推（否则昨天推过 ⇒ 今天永远沉默）。"""
+
+        async def _case() -> int:
+            redis = _redis()
+            cfg = _cfg(max_consecutive_rejects=99)
+            with patch.object(m, "_publish", AsyncMock(return_value=True)) as publish:
+                with patch.object(m, "trade_date_str", return_value="20260924"):
+                    m._record_reject(redis, cfg, reason="timeout", symbol="SH600519")
+                    await asyncio.sleep(0)
+                with patch.object(m, "trade_date_str", return_value="20260925"):
+                    m._record_reject(redis, cfg, reason="timeout", symbol="SH600519")
+                    await asyncio.sleep(0)
+            return publish.await_count
+
+        assert asyncio.run(_case()) == 2
+
+    def test_a_failed_push_does_not_burn_the_dedupe_key(self) -> None:
+        """没送达 ⇒ 放掉占位键：下一笔失败还得有人知道（重复优于沉默）。"""
+
+        async def _case() -> int:
+            redis = _redis()
+            cfg = _cfg(max_consecutive_rejects=99)
+            with patch.object(m, "_publish", AsyncMock(return_value=False)) as publish:
+                m._record_reject(redis, cfg, reason="timeout", symbol="SH600519")
+                await asyncio.sleep(0)
+                m._record_reject(redis, cfg, reason="timeout", symbol="SH600036")
+                await asyncio.sleep(0)
+            return publish.await_count
+
+        assert asyncio.run(_case()) == 2
+
+    def test_the_fuse_notification_still_goes_out(self) -> None:
+        """首条告警不许顶掉熔断那条：两条说的不是一件事（「有失败」/「已停单」）。"""
+        redis = _redis()
+        with (
+            patch.object(m, "set_kill_switch"),
+            patch.object(m, "notify") as notify,
+        ):
+            for _ in range(3):
+                m._record_reject(redis, _cfg(max_consecutive_rejects=3), reason="x")
+        assert notify.call_count == 1
+        assert "急停" in notify.call_args.kwargs["title"]
+
+    def test_a_broken_counter_still_leaves_a_trace(self) -> None:
+        """连续计数键坏了**不许**变成「什么都没发生」：台账与首笔告警都不依赖它。
+
+        此前那条 ``return`` 会让「计数写不进去」与「今天没出过事」长得一模一样。
+        """
+
+        async def _case() -> tuple[int, dict[str, int]]:
+            redis = _redis()
+            with (
+                patch.object(
+                    redis.client, "incr", side_effect=RuntimeError("redis 挂了")
+                ),
+                patch.object(m, "set_kill_switch"),
+                patch.object(m, "notify"),
+                patch.object(m, "_publish", AsyncMock(return_value=True)) as publish,
+            ):
+                m._record_reject(
+                    redis,
+                    _cfg(max_consecutive_rejects=3),
+                    reason="timeout",
+                    symbol="SH600519",
+                )
+                await asyncio.sleep(0)
+            return publish.await_count, m.load_failures(redis, m.trade_date_str())
+
+        pushed, ledger = asyncio.run(_case())
+        assert pushed == 1  # 计数坏了照样有人知道
+        assert ledger["SH600519:timeout"] == 1
+
+    def test_record_failure_tolerates_a_broken_client(self) -> None:
+        class Broken:
+            def pipeline(self) -> None:
+                raise RuntimeError("redis 挂了")
+
+            def hgetall(self, key: str) -> None:
+                raise RuntimeError("redis 挂了")
+
+        broken = SimpleNamespace(client=Broken())
+        m.record_failure(
+            broken,
+            symbol="SH600519",
+            side="BUY",
+            quantity=100.0,
+            reason="timeout",
+            source="sim",
+        )  # 记账失败不许打断真单路径
+        assert m.load_failures(broken, "20260924") == {}
+
+    def test_status_snapshot_shows_the_days_failures(self) -> None:
+        """控制面读得出「今天失败过几笔」——正是连续计数被清零后读不出的那一格。"""
+        redis = _redis()
+        cfg = _cfg(max_consecutive_rejects=5)
+        m._record_reject(redis, cfg, reason="timeout", symbol="SH600519")
+        m._record_reject(redis, cfg, reason="timeout", symbol="SH600036")
+        m._record_success(redis)  # 之后一笔成功
+        snap = m.status_snapshot(redis)
+        assert snap["consecutive_rejects"] == 0  # 既有字段：读 0（缺口本身）
+        assert snap["daily_failures"]["date"] == m.trade_date_str()
+        assert snap["daily_failures"]["count"] == 2
+        assert snap["daily_failures"]["ledger"]["SH600519:timeout"] == 1
 
 
 class TestRealTradingGate:

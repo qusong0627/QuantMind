@@ -40,6 +40,10 @@ interface MirrorStatus {
     quota: { date: string; daily_value: number; daily_orders: number; daily_symbols: number };
     queue_length: number;
     consecutive_rejects: number;
+    // 当日下单失败台账（后端 `mirror:failed:{日}`）。**不是**连续计数：成功一笔就会
+    // 把 consecutive_rejects 清零，间歇性失败在那一格上永远读 0。可选：滚动部署时
+    // 前端可能先于后端上线。
+    daily_failures?: { date: string; count: number; ledger: Record<string, number> };
     trading_time: boolean;
     broker_selected: string;
     real_trading_ready: boolean;
@@ -320,6 +324,19 @@ const QmtMirrorCard: React.FC = () => {
                     {status.consecutive_rejects > 0 && (
                         <Tag color="orange" className="!mr-0">
                             连续拒单 {status.consecutive_rejects}
+                        </Tag>
+                    )}
+                    {/* 当日失败台账：连续计数被一笔成功清零后，这一格仍然说得出
+                        「今天有几笔真钱委托没发成」——按标的与原因在 title 里展开。 */}
+                    {(status.daily_failures?.count ?? 0) > 0 && (
+                        <Tag
+                            color="red"
+                            className="!mr-0"
+                            title={Object.entries(status.daily_failures?.ledger ?? {})
+                                .map(([entry, times]) => `${entry} ×${times}`)
+                                .join('\n')}
+                        >
+                            今日下单失败 {status.daily_failures?.count ?? 0}
                         </Tag>
                     )}
                     {blockedLabel && (
