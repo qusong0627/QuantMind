@@ -948,6 +948,182 @@ class TestIdempotentRetry:
 
 
 # --------------------------------------------------------------------------
+# 9b. 保护性重试（P4 附-①）：分类先于重试
+# --------------------------------------------------------------------------
+class TestProtectiveRetry:
+    """「失败就重试」是错的 —— sltp「一次触发当日只执行一次」本身是 2026-09-21
+    事故（002074：42 笔越界价废单、0 成交；触发→废单→重新武装→再触发每 2 分钟
+    一轮）之后的刻意设计。边界：**暂时性**失败且保护条件仍成立才换代重试；
+    价格类废单与状态未知（派发异常/超时）一次都不重试。
+
+    设计原文见 docs/local/quant-trader-migration-plan.md「P4 附-c」。
+    """
+
+    #: 暂时性失败的真实形状：派发没抛，引擎走到了券商，券商侧通道断（终态 REJECTED）
+    TRANSIENT = {
+        "status": "failed",
+        "execution": "direct",
+        "order_id": "OID-1",
+        "message": "执行异常: 柜台连接中断",
+    }
+
+    def _harness(self, dispatch_result: dict) -> Harness:
+        return Harness(
+            cfg=_cfg([_rule()]),
+            ticks={"600036.SH": {"lastPrice": 90.0}},
+            positions=[_position()],
+            dispatch_result=dispatch_result,
+        )
+
+    def test_transient_failure_retries_next_cycle_with_new_generation(self) -> None:
+        """①暂时性失败 + 条件仍成立 → 下一轮再发，且**代次 +1**（新委托号）。
+
+        同号重发会撞派发层幂等 → duplicate_skipped，而幂等命中不是「又下了一单」
+        —— 单永远出不去、状态还停在已提交（P2.6 教训）。
+        """
+        h = self._harness(dict(self.TRANSIENT))
+        s1 = h.cycle()
+        st = h.state()["rules"]["600036.SH"]
+        assert s1["retry_scheduled"] == 1
+        assert st["status"] == ex.ST_TRIGGERED, "暂时性失败必须保持可重试，不能进当日终态"
+        assert not st.get("order_id"), "失败的那张单不是我们的在途单，不得记进状态"
+        assert st["retry_attempts"] == 1
+
+        h.now += ex._RETRY_COOLDOWN_SEC + 1  # 越过冷却窗（轮询 3s，没有它 9s 烧光预算）
+        h.dispatch_result = {"status": "success", "order_id": "OID-2"}
+        s2 = h.cycle()
+        assert s2["submitted"] == 1
+        assert len(h.dispatched) == 2, "条件仍成立（现价 90 ≤ 防守位 95）却不再重试"
+        cids = [d["client_order_id"] for d in h.dispatched]
+        assert cids[0].endswith("-g1") and cids[1].endswith("-g2"), cids
+        assert h.state()["rules"]["600036.SH"]["status"] == ex.ST_SUBMITTED
+
+    def test_retry_waits_while_condition_no_longer_holds(self) -> None:
+        """重试是「条件仍成立」的函数，不是定时重放：价格回到防守位上方就不发。
+
+        等于用户裁决第三条（不重放陈旧意图）：行情已变，重放旧触发=按过期判断下单。
+        """
+        h = self._harness(dict(self.TRANSIENT))
+        h.cycle()
+        h.now += ex._RETRY_COOLDOWN_SEC + 1  # 越过冷却窗：本轮不发只能是条件的原因
+        h.client.ticks["600036.SH"] = {"lastPrice": 99.0}  # 防守位 95，条件不再成立
+        h.cycle()
+        assert len(h.dispatched) == 1, "条件已不成立还重发 = 按过期判断卖股票"
+        st = h.state()["rules"]["600036.SH"]
+        # 仍在「待重试」态（而不是当日终态）：价格再跌破时当日仍能补上这笔保护，
+        # 收盘仍未落单则由 _notify_stranded_triggers 收口告警。
+        assert st["status"] == ex.ST_TRIGGERED
+
+    def test_retry_respects_cooldown_between_attempts(self) -> None:
+        """冷却窗内不发单、也不记尝试：轮询周期 3s，没有冷却挡着，3 次换代会在
+        9 秒内烧光当日重试预算 —— 一次十秒级通道抖动之后就再也补不上保护。"""
+        h = self._harness(dict(self.TRANSIENT))
+        h.cycle()  # 首发失败 → retry_attempts=1、last_failure_at=now
+        h.now += 1.0  # 下一拍轮询
+        h.cycle()
+        assert len(h.dispatched) == 1, "冷却期内重发 = 3 秒一轮的静默重试"
+        assert h.state()["rules"]["600036.SH"]["retry_attempts"] == 1
+        h.now += ex._RETRY_COOLDOWN_SEC
+        h.cycle()
+        assert len(h.dispatched) == 2, "冷却过后条件仍成立 → 必须补上这笔保护"
+
+    def test_retry_cap_escalates_exactly_once_and_stops(self) -> None:
+        """②到上限（3 次/标的/日）→ 当日终态 + 一条**升级**告警，之后不再发。
+
+        上限是防「无限静默重试」的那道网（隔壁 replay_deferred 正是栽在这里）。
+        """
+        h = self._harness(dict(self.TRANSIENT))
+        for _ in range(4):  # 首发 1 + 重试 3
+            h.cycle()
+            h.now += ex._RETRY_COOLDOWN_SEC + 1
+        assert len(h.dispatched) == 4
+        st = h.state()["rules"]["600036.SH"]
+        assert st["status"] == ex.ST_FAILED
+        assert st["retry_attempts"] == 3
+
+        escalations = [
+            n for n in h.notices if n["level"] == "error" and "重试" in n["title"]
+        ]
+        assert len(escalations) == 1, f"升级告警必须恰好一条: {[n['title'] for n in h.notices]}"
+        assert "人工" in escalations[0]["content"]
+
+        h.cycle()  # 终态后当日不再发
+        assert len(h.dispatched) == 4
+
+    def test_price_reject_is_never_retried(self) -> None:
+        """③价格类废单不重发同单：2026-09-21 那 42 笔循环的回归线。
+
+        触发→废单→重新武装→再触发，每 2 分钟一轮就是这么来的。价格可修时交人工
+        改价（或下一个交易日的重新武装），执行器不做「同参数再试一次」。
+        """
+        h = self._harness(
+            {
+                "status": "failed",
+                "execution": "direct",
+                "order_id": "OID-9",
+                "result": {
+                    "success": False,
+                    "status": "rejected",
+                    "message": "Broker拒绝: 废单：委托价格超出涨跌幅限制",
+                },
+            }
+        )
+        for _ in range(3):
+            h.cycle()
+        assert len(h.dispatched) == 1, "越界价废单被自动重试 = 重演 2026-09-21 循环"
+        st = h.state()["rules"]["600036.SH"]
+        assert st["status"] == ex.ST_FAILED
+        assert st["failure"] == "Broker拒绝: 废单：委托价格超出涨跌幅限制"
+        assert not any("重试" in n["title"] for n in h.notices)
+
+    def test_dispatch_exception_unknown_state_is_never_retried(self) -> None:
+        """④状态未知绝不重试（双卖防线）：派发层自己抛异常时没有 order_id，
+        无法证明单没到柜台 —— 重发可能变成第二张卖单。
+
+        （真·超时的形态更好：引擎把 `[BRIDGE_ACK_TIMEOUT_PENDING_REVIEW]` 单当
+        submitted 报成功，执行器根本走不到失败分支；这条覆盖的是派发契约破损时
+        的兜底分类。）
+        """
+        h = self._harness({"status": "error", "message": "TimeoutError: 桥回执超时"})
+        for _ in range(3):
+            h.cycle()
+        assert len(h.dispatched) == 1
+        assert h.state()["rules"]["600036.SH"]["status"] == ex.ST_FAILED
+
+    def test_timeout_pending_review_stays_submitted_not_retried(self) -> None:
+        """④（真超时形态）引擎「已提交待核查」→ 记在途、绝不重发。"""
+        h = self._harness(
+            {
+                "status": "success",
+                "order_id": "OID-1",
+                "result": {"status": "submitted", "message": "订单待核查（桥回执超时）"},
+            }
+        )
+        for _ in range(3):
+            h.cycle()
+        assert len(h.dispatched) == 1
+        st = h.state()["rules"]["600036.SH"]
+        assert st["status"] == ex.ST_SUBMITTED and st["order_id"] == "OID-1"
+
+    def test_duplicate_skipped_follows_the_order_without_burning_budget(self) -> None:
+        """⑤幂等命中：不烧重试预算、也不当作一笔新的提交 —— 由该委托号的真实
+        终态收口（崩溃重试路径原本就该是同一个号）。
+
+        与 P2.6 减仓腿的口径区别：那边的代次可能与**此前被拒**的行撞号，故命中
+        即作废换号；这里代次是 (标的,日,代) 的确定函数，命中只会是自己此前那一张。
+        """
+        h = self._harness(
+            {"status": "success", "execution": "duplicate_skipped", "order_id": "OID-7"}
+        )
+        h.cycle()
+        h.cycle()
+        assert len(h.dispatched) == 1
+        st = h.state()["rules"]["600036.SH"]
+        assert st["status"] == ex.ST_SUBMITTED and st["order_id"] == "OID-7"
+        assert not st.get("retry_attempts"), "幂等命中不是一次重试尝试"
+
+
+# --------------------------------------------------------------------------
 # 10. 状态回写与并发（review LOW 12 / MEDIUM 3）
 # --------------------------------------------------------------------------
 class TestStateWriteMerge:

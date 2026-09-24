@@ -94,6 +94,21 @@ _TERMINAL_STATES = {ST_FILLED, ST_CANCELLED, ST_REJECTED, ST_FAILED, ST_SKIPPED}
 _LIVE_STATES = {ST_SUBMITTED, ST_PARTIAL}
 _HISTORY_DAYS = 7
 
+# ── 保护性重试（P4 附-①，见 docs/local/quant-trader-migration-plan.md「P4 附-c」）──
+#: 触发失败的处置类别（``classify_dispatch_failure`` 的输出，重试与否的唯一判据）。
+FAIL_PRICE = "price_reject"
+FAIL_DETERMINISTIC = "deterministic"
+FAIL_TRANSIENT = "transient"
+FAIL_UNKNOWN = "unknown"
+#: 暂时性失败当日自动重试上限（次/标的/日）：防「无限静默重试」。
+_RETRY_MAX_PER_DAY = 3
+#: 两次自动重试的最小间隔（秒）。轮询默认 3s——没有冷却挡着，3 次换代会在 9 秒内
+#: 烧光当日预算，一次十秒级通道抖动之后就再也补不上这笔保护。
+_RETRY_COOLDOWN_SEC = 60.0
+#: 价格/参数类废单的拒因特征词（券商原话）。命中即回退人工，绝不自动重发同参数单
+#: ——2026-09-21 的 42 笔越界价循环就是「自动重发同参数」的直接产物。
+_PRICE_REJECT_MARKERS = ("废单", "涨跌幅", "价格超出", "无效价格", "价格非法")
+
 DEFAULT_CONFIG: dict[str, Any] = {
     "enabled": False,
     "user_id": "1",
@@ -505,6 +520,35 @@ def dispatch_failure_text(resp: dict[str, Any] | None) -> str:
     return str(env.get("message") or env.get("detail") or nested_msg or resp)
 
 
+def classify_dispatch_failure(resp: dict[str, Any] | None) -> str:
+    """派发失败信封 → 处置类别（重试与否的**唯一**判据，纯函数）。
+
+    「失败就重试」是错的 —— sltp「一次触发当日只执行一次」是 2026-09-21 事故
+    （002074：42 笔越界价废单、0 成交；触发→废单→重新武装→再触发每 2 分钟一轮）
+    之后的刻意设计。分类边界（设计原文见 docs/local/quant-trader-migration-plan.md
+    「P4 附-c」）：
+
+    * ``deterministic``：本层预检/风控拒（``execution ∈ {lot_blocked, risk_blocked}``）
+      —— 参数不变结论不变；
+    * ``price_reject``：券商价格/参数类废单 —— 同参数自动重发只会重演那 42 笔循环；
+    * ``transient``：派发层给出了**明确结论**（``status="failed"`` **且有 order_id**，
+      即委托行已落库、券商明确拒了这张单）且拒因不属上面两类 —— 通道/繁忙类，
+      可换代有界重试；
+    * ``unknown``：拿不到派发层的结论（``status="error"`` / 无 order_id / 形状不认识）
+      —— 状态未知，绝不重试：重发可能变成第二张卖单（超时的 ``submitted`` 走不到
+      这里，它在引擎侧就以成功+待核查返回）。
+    """
+    env = resp if isinstance(resp, dict) else {}
+    if str(env.get("execution") or "") in {"lot_blocked", "risk_blocked"}:
+        return FAIL_DETERMINISTIC
+    text = dispatch_failure_text(env)
+    if any(marker in text for marker in _PRICE_REJECT_MARKERS):
+        return FAIL_PRICE
+    if str(env.get("status") or "") == "failed" and str(env.get("order_id") or ""):
+        return FAIL_TRANSIENT
+    return FAIL_UNKNOWN
+
+
 def order_status_to_rule_state(db_status: str) -> str | None:
     """DB 订单状态 → 规则状态（未知返回 None，保持原状）。"""
     s = str(db_status or "").strip().lower()
@@ -862,6 +906,9 @@ async def run_sltp_cycle(
         "triggered": 0,
         "submitted": 0,
         "failed": 0,
+        #: 本轮登记的暂时性失败重试（不落终态；终态才进 ``failed``）。它不是「失败」
+        #: 也不是「成功」：日志/测试按它观察保护性重试，人不再需要从 status 猜。
+        "retry_scheduled": 0,
         "monitored": 0,
     }
     if not cfg.get("enabled"):
@@ -1166,9 +1213,30 @@ async def _execute_trigger(
         )
         return
 
+    # 保护性重试的冷却闸：上一次是**暂时性失败**且冷却未到时本轮不发单。
+    # 判定保持 triggered（无委托号 = 可重试），下一轮再看——条件不成立时根本
+    # 走不到这里（本轮不会触发），成立时最多等一个冷却窗。首单（attempts=0）
+    # 不受此闸约束。见 ``_RETRY_COOLDOWN_SEC``。
+    prior_attempts = int(st.get("retry_attempts") or 0)
+    last_failure_at = _to_float(st.get("last_failure_at"))
+    if (
+        prior_attempts > 0
+        and last_failure_at is not None
+        and (now - last_failure_at) < _RETRY_COOLDOWN_SEC
+    ):
+        st["status"] = ST_TRIGGERED  # 触发判定已成立，维持待重试态
+        logger.info(
+            "[SltpExec] %s 重试冷却中（%.0fs / %.0fs），本轮不报单",
+            symbol,
+            now - last_failure_at,
+            _RETRY_COOLDOWN_SEC,
+        )
+        return
+
     generation = int(st.get("generation") or 0) + 1
     st["generation"] = generation
-    # 当日同规则固定委托号：崩溃重试复用同号，由调度器幂等去重（不会重复下单）
+    # 当日同规则固定委托号：崩溃重试复用同号，由调度器幂等去重（不会重复下单）；
+    # 换代重试（每次失败 generation+1）拿到**新号**，不会被自己的旧号挡成幂等命中。
     cid = rule_client_order_id(symbol, now, generation)
     remarks = f"sltp:{reason[:40]}" if reason else "sltp:trigger"
     order_data = {
@@ -1192,14 +1260,58 @@ async def _execute_trigger(
     except Exception as exc:  # noqa: BLE001
         resp = {"status": "error", "message": str(exc)}
     if str((resp or {}).get("status")) != "success":
-        st["status"] = ST_FAILED
         st["failure"] = dispatch_failure_text(resp)
+        fail_class = classify_dispatch_failure(resp)
+        attempts = int(st.get("retry_attempts") or 0)
+        if fail_class == FAIL_TRANSIENT and attempts < _RETRY_MAX_PER_DAY:
+            # 暂时性失败：保持**可重试**（triggered 无委托号），下一轮重新判定条件，
+            # 仍成立才以新代次再报。不落 order_id：那张被拒的单不是我们的在途单。
+            st["retry_attempts"] = attempts + 1
+            st["status"] = ST_TRIGGERED
+            st["last_failure_at"] = now
+            summary["retry_scheduled"] += 1
+            logger.error(
+                "[SltpExec] %s 下单失败（将自动重试 %d/%d）: %s",
+                symbol,
+                attempts + 1,
+                _RETRY_MAX_PER_DAY,
+                st["failure"],
+            )
+            await deps.notify(
+                user_id,
+                f"{symbol} 触发卖出失败（将自动重试）",
+                f"{reason}；下单失败：{st['failure']}。保护条件仍成立时"
+                f"{int(_RETRY_COOLDOWN_SEC)} 秒后自动重试（第 {attempts + 1}/{_RETRY_MAX_PER_DAY} 次，"
+                "换新委托号）。",
+                "warning",
+                tenant_id=tenant_id,
+            )
+            return
+        st["status"] = ST_FAILED
         summary["failed"] += 1
         logger.error("[SltpExec] %s 下单失败: %s", symbol, st["failure"])
+        if fail_class == FAIL_TRANSIENT:
+            # 到上限：当日终态 + 升级告警（终态后不再发放，结构上恰好一条）。
+            await deps.notify(
+                user_id,
+                f"{symbol} 止损委托重试 {attempts} 次仍失败",
+                f"{reason}；最近一次失败：{st['failure']}。已自动重试 {attempts} 次"
+                f"（当日上限 {_RETRY_MAX_PER_DAY} 次）仍未报出委托，当日不再重试，"
+                "请人工介入（手动卖出，或排查通道/柜台后重新武装）。",
+                "error",
+                tenant_id=tenant_id,
+            )
+            return
+        hint = ""
+        if fail_class == FAIL_PRICE:
+            hint = "（价格类废单不做自动重发：同参数重发只会再次废单，请人工调整价位）"
+        elif fail_class == FAIL_DETERMINISTIC:
+            hint = "（预检/风控拒绝：参数不变结论不变，请先修正持仓/额度/数量）"
         await deps.notify(
             user_id,
             f"{symbol} 触发卖出失败",
-            f"{reason}；下单失败：{st['failure']}。保护价 {price_note}，现价 {price:.2f}，请人工介入。",
+            f"{reason}；下单失败：{st['failure']}。保护价 {price_note}，现价 {price:.2f}，"
+            f"请人工介入。{hint}",
             "error",
             tenant_id=tenant_id,
         )
@@ -1269,10 +1381,16 @@ async def _notify_stranded_triggers(
         if st.get("stranded_notified"):
             continue
         st["stranded_notified"] = True
+        attempts = int(st.get("retry_attempts") or 0)
+        # 两种来源都收口在这：进程中断（attempts=0）与保护性重试未成功（attempts>0，
+        # 例如条件一直没再成立、或到上限前收盘）。文案必须区分，否则用户以为没人试过。
+        how = (
+            f"自动重试 {attempts} 次仍未成功" if attempts else "触发时执行器中断"
+        )
         await deps.notify(
             user_id,
             f"{symbol} 止损触发未能下单",
-            f"{st.get('reason') or '触发'}；但触发时执行器中断且已收盘，当天未能报出委托。"
+            f"{st.get('reason') or '触发'}；但{how}且已收盘，当天未能报出委托。"
             "请人工确认是否手动卖出，或下一个交易日重新武装（POST /reset）。",
             "error",
             tenant_id=tenant_id,
@@ -1669,6 +1787,7 @@ async def run_qmt_sltp_executor_task() -> None:
                     summary.get("triggered")
                     or summary.get("submitted")
                     or summary.get("failed")
+                    or summary.get("retry_scheduled")
                 ):
                     logger.info(
                         "[SltpExec] 本轮：%s", json.dumps(summary, ensure_ascii=False)
