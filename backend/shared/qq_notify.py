@@ -109,50 +109,75 @@ def _get_token() -> str:
     return token
 
 
-def send_text(content: str) -> dict:
-    """发一条 C2C 纯文本给所有者；失败抛异常（notify 层兜底）。"""
+def _api_code(body: object) -> int:
+    """接口返回体里的业务码；没有该字段 = 0（成功体只有 ``id``/``timestamp``）。"""
+    if not isinstance(body, dict):
+        return 0
+    for key in ("code", "errcode", "retcode"):
+        if key in body:
+            try:
+                return int(body[key] or 0)
+            except (TypeError, ValueError):
+                return -1  # 解析不出来的码一律当失败：宁可报错，不许静默当成功
+    return 0
+
+
+def _send_message(payload: dict) -> dict:
+    """发一条 C2C 消息给所有者，并**校验接口的业务返回码**。
+
+    为什么要看 body：腾讯的失败**不一定给非 2xx**——配额/频控这类错误可以是
+    HTTP 200 + ``{"code": N, "message": "…"}``。原先只 ``raise_for_status()`` 就把
+    body 丢了，于是「已推送」可能是假的：手机上没收到、日志里全绿（实测 2026-09-24
+    一小时内推出 26~29 条，全记成功而平台侧主动消息配额约 20 条/小时——不发 body
+    就分不清是「配额没管」还是「静默被拒」）。
+
+    报错只带 code 与 message：**绝不回显 token 与请求体**（日志会被贴进 issue）。
+    """
     import requests
 
     openid = _cfg(OWNER_OPENID_KEY)
     if not openid:
         raise RuntimeError(f"未配置 {OWNER_OPENID_KEY}（写入 config/runtime.env）")
-    token = _get_token()
     resp = requests.post(
         SEND_URL.format(openid=openid),
         timeout=TIMEOUT_SECONDS,
         headers={
-            "Authorization": f"QQBot {token}",  # v2 要求 QQBot 前缀（Bearer → 11241）
+            # v2 要求 QQBot 前缀（Bearer → 11241）
+            "Authorization": f"QQBot {_get_token()}",
             "Content-Type": "application/json",
         },
-        json={
+        json=payload,
+    )
+    resp.raise_for_status()
+    try:
+        body: object = resp.json()
+    except ValueError:
+        body = None
+    code = _api_code(body)
+    if code != 0:
+        message = ""
+        if isinstance(body, dict):
+            message = str(body.get("message") or body.get("msg") or "")[:120]
+        raise RuntimeError(
+            f"QQ 接口拒绝：code={code}" + (f" message={message}" if message else "")
+        )
+    return body if isinstance(body, dict) else {}
+
+
+def send_text(content: str) -> dict:
+    """发一条 C2C 纯文本给所有者；失败抛异常（notify 层兜底）。"""
+    return _send_message(
+        {
             "content": content,
             "msg_type": 0,
             "msg_seq": int(time.time() * 1000) % (2**31),
-        },
+        }
     )
-    resp.raise_for_status()
-    return resp.json()
 
 
 def send_markdown(content: str) -> dict:
     """发一条 C2C markdown；失败抛异常（notify 层会降级纯文本重发）。"""
-    import requests
-
-    openid = _cfg(OWNER_OPENID_KEY)
-    if not openid:
-        raise RuntimeError(f"未配置 {OWNER_OPENID_KEY}（写入 config/runtime.env）")
-    token = _get_token()
-    resp = requests.post(
-        SEND_URL.format(openid=openid),
-        timeout=TIMEOUT_SECONDS,
-        headers={
-            "Authorization": f"QQBot {token}",
-            "Content-Type": "application/json",
-        },
-        json={"msg_type": 2, "markdown": {"content": content}},
-    )
-    resp.raise_for_status()
-    return resp.json()
+    return _send_message({"msg_type": 2, "markdown": {"content": content}})
 
 
 def _strip_bold(text: str) -> str:

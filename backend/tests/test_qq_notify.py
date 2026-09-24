@@ -139,6 +139,47 @@ def test_send_text_uses_qqbot_auth_and_v2_endpoint(configured, monkeypatch, tmp_
     assert captured["json"]["msg_type"] == 0 and captured["json"]["content"] == "hello"
 
 
+@pytest.mark.unit
+def test_business_error_code_in_a_200_body_is_a_failure(
+    configured, monkeypatch, tmp_path
+):
+    """配额/频控这类失败可以是 **HTTP 200 + body 里的 code≠0**。
+
+    原先发送路径只 ``raise_for_status()`` 就把 body 丢了：平台拒了、日志记「已推送」，
+    手机上什么都没收到——本仓最贵的就是这种静默失败。报错须带 code 与 message，
+    且不得回显令牌。
+    """
+    monkeypatch.setenv("QM_QQ_TOKEN_CACHE", str(tmp_path / "t.json"))
+
+    def _fake_post(url, **kwargs):
+        if url == qq_notify.TOKEN_URL:
+            return _FakeResp({"access_token": "tok-secret", "expires_in": 7200})
+        return _FakeResp({"code": 11244, "message": "主动消息额度不足"})
+
+    monkeypatch.setattr("requests.post", _fake_post)
+    with pytest.raises(RuntimeError) as excinfo:
+        qq_notify.send_text("hello")
+    text = str(excinfo.value)
+    assert "11244" in text and "额度" in text
+    assert "tok-secret" not in text, "报错里不得回显令牌"
+
+
+@pytest.mark.unit
+def test_success_body_without_code_is_not_treated_as_error(
+    configured, monkeypatch, tmp_path
+):
+    """成功体只有 id/timestamp（没有 code 字段）——不许把正常返回判成失败。"""
+    monkeypatch.setenv("QM_QQ_TOKEN_CACHE", str(tmp_path / "t.json"))
+
+    def _fake_post(url, **kwargs):
+        if url == qq_notify.TOKEN_URL:
+            return _FakeResp({"access_token": "tok", "expires_in": 7200})
+        return _FakeResp({"id": "msg-9", "timestamp": 1})
+
+    monkeypatch.setattr("requests.post", _fake_post)
+    assert qq_notify.send_markdown("**x**") == {"id": "msg-9", "timestamp": 1}
+
+
 # ── notify 降级链 ────────────────────────────────────────────────────────
 
 
