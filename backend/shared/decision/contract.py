@@ -72,6 +72,7 @@ __all__ = [
     "STATUS_PARSE_FAILED",
     "WATCH",
     "parse_decisions",
+    "parse_level",
     "parse_pct",
 ]
 
@@ -221,13 +222,17 @@ def parse_pct(x: object) -> Pct:
 
 
 # ── 字段级解析（坏了降级，不炸整轮）───────────────────────────────────
-def _num(x: object) -> float | None:
+def parse_level(x: object) -> float | None:
     """价位解析：``None``/空/``N-A`` → None；非数、非有限、≤0、布尔 → None。
 
     价位字段（``stop_loss``/``take_profit``/``move_stop``/``risk_amount``）坏了按
     **「没给」**处理而不是炸穿整轮——一个字段脏掉不该让整个 agent 当天不交易。
     带 ``%`` 的字符串一律 None：价位写成百分数是另一种笔误，猜出来的止损位比没有
     止损位更危险（用户以为有保护）。
+
+    对外公开（P5 迁移用）：隔壁 ``live_watch.json`` 的价位与决策里的价位是**同一个
+    口径**，迁移层若自己再写一份「字符串转价位」就是本仓反复告警的「同一个数第二次
+    被写死」——那一份迟早与这份分叉（比如 ``"12.5%"`` 在一处是 None、在另一处是 12.5）。
     """
     if x is None or isinstance(x, bool):
         return None
@@ -409,12 +414,12 @@ def _rows(obj: dict, allowed: tuple[str, ...]) -> tuple[list[Decision], int, lis
                 code=str(x.get("code") or "").strip(),
                 name=str(x.get("name") or "").strip(),
                 pct=parse_pct(x.get("pct")),
-                stop_loss=_num(x.get("stop_loss")),
-                take_profit=_num(x.get("take_profit")),
-                move_stop=_num(x.get("move_stop")),
+                stop_loss=parse_level(x.get("stop_loss")),
+                take_profit=parse_level(x.get("take_profit")),
+                move_stop=parse_level(x.get("move_stop")),
                 invalidation=str(x.get("invalidation") or "").strip(),
                 confidence=_fnum(x.get("confidence")),
-                risk_amount=_num(x.get("risk_amount")),
+                risk_amount=parse_level(x.get("risk_amount")),
                 # 文本字段一律 strip。612 条真实输出差分下来这是**唯一**被语料命中的
                 # 行为差异：既有实现不 strip，一条 `reason` 结尾多一个空格。去掉它
                 # 只为让审计比对/去重/日志对齐拿到稳定串，正文一字未改。

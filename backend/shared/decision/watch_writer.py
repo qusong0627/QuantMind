@@ -186,10 +186,15 @@ class WatchWriteResult:
         }
 
 
-def _resolve(
+def resolve_plan(
     plan: WatchPlan, others_by_symbol: dict[str, dict[str, Any]], owner: str
 ) -> tuple[list[tuple[WatchRule, dict[str, Any]]], list[Conflict]]:
     """计划 → ``(可挂的, 冲突)``（纯函数：喂给它的规则表就是全部输入）。
+
+    **对外公开**：P5 的守护计划迁移（``shared/decision/legacy_watch.py``）要在
+    **不写任何东西**的前提下预演「这批规则挂上去会撞到谁」，用的必须是这一份判定
+    ——迁移工具自己再写一遍「人工优先 / 别家先到先得 / 同标的多条只挂第一条」，
+    预演与实际落库迟早会给出两个答案，而操作员是**照着预演按确认**的。
 
     落库形态用 ``normalize_rule`` 现算：**校验的、比对落库结果的是同一份**，
     避免「库里是 A、内存里比自己写的 B」这种对不上的比对。
@@ -328,7 +333,7 @@ def write_watch_plan(
     others = [r for r in existing if str(r.get("owner") or "") != owner]
     others_by_symbol = {str(r.get("symbol") or ""): r for r in others}
 
-    armed, conflicts = _resolve(plan, others_by_symbol, owner)
+    armed, conflicts = resolve_plan(plan, others_by_symbol, owner)
     total = len(others) + len(armed)
     if total > max_rules:
         return WatchWriteResult(
@@ -464,5 +469,6 @@ __all__ = [
     "REJECT_SAME_SYMBOL",
     "Conflict",
     "WatchWriteResult",
+    "resolve_plan",
     "write_watch_plan",
 ]
