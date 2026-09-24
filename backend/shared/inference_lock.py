@@ -88,6 +88,22 @@ def should_mark_ready(*, partial: bool, symbol_count: int, min_symbols: int) -> 
     return int(symbol_count) >= int(min_symbols)
 
 
+def ready_symbol_count(symbols: list | None, signals: list) -> int:
+    """置就绪标记时上报的标的数：有显式股票池取池大小，全市场取信号数。
+
+    全市场 run 传 ``symbols=None``（script_runner 的默认参数）。旧实现在
+    调用点直接 ``len(symbols)`` → ``TypeError: object of type 'NoneType'
+    has no len()``，被外层 except 吞成一行 warning —— 于是**就绪键从未写
+    成功过**（2026-09-24 实测：Redis 全库 0 个 ``qm:signal:ready:*`` 键，
+    而完成标记键在；C02 常年「无就绪标记」回退）。
+
+    单股补推/股票池 run 的 ``symbols`` 是目标池：目标无信号时代码会保留
+    全量信号避免空库（此时 partial 标志亦为 False），必须按池大小判定，
+    拿信号数会把这类残 run 误置为就绪。
+    """
+    return len(symbols) if symbols is not None else len(signals)
+
+
 def mark_signal_ready_if_full(
     redis_client,
     *,

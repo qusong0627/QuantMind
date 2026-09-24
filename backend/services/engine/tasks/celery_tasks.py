@@ -125,6 +125,26 @@ def _already_done_probe_sql(model_name: str | None) -> str:
     return sql + " LIMIT 1"
 
 
+def _failure_detail(exec_res: Any) -> str:
+    """执行失败摘要（写进派发留痕 reason_detail）。
+
+    `ExecutionResult` **没有 message 字段** —— 旧实现读 `exec_res.message`
+    恒得空串，失败原因在留痕表里整月为空（2026-09-24 排查时只能靠翻容器
+    日志）。真正的出口是 `error` + `failure_stage` + `exit_code`。
+    """
+    parts: list[str] = []
+    stage = str(getattr(exec_res, "failure_stage", "") or "")
+    if stage:
+        parts.append(f"stage={stage}")
+    err = str(getattr(exec_res, "error", "") or "")
+    if err:
+        parts.append(err)
+    code = getattr(exec_res, "exit_code", None)
+    if code not in (None, 0):
+        parts.append(f"exit={code}")
+    return " | ".join(parts) or "unknown failure"
+
+
 @celery_app.task(
     name="engine.tasks.auto_inference_if_needed",
     max_retries=1,
@@ -479,7 +499,9 @@ def auto_inference_if_needed() -> dict[str, Any]:
                     model_id=mid,
                     status="success" if exec_res.success else "failed",
                     reason_code=None if exec_res.success else "EXECUTION_FAILED",
-                    reason_detail=None if exec_res.success else str(getattr(exec_res, "message", "") or ""),
+                    reason_detail=(
+                        None if exec_res.success else _failure_detail(exec_res)
+                    ),
                     run_id=getattr(exec_res, "run_id", None),
                 )
             except Exception as task_exc:

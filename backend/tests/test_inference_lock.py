@@ -19,6 +19,7 @@ from backend.shared.inference_lock import (
     acquire,
     inference_lock_key,
     ready_key,
+    ready_symbol_count,
     release,
     should_mark_ready,
 )
@@ -34,6 +35,28 @@ def test_should_mark_ready_rules():
     assert should_mark_ready(partial=True, symbol_count=5000, min_symbols=1000) is False
     assert should_mark_ready(partial=False, symbol_count=460, min_symbols=1000) is False
     assert should_mark_ready(partial=False, symbol_count=1000, min_symbols=1000) is True
+
+
+def test_ready_symbol_count_full_market_uses_signal_count():
+    """全市场 run 的 symbols 是 None —— 裸 len() 曾让就绪键永不落。
+
+    2026-09-24 实测：完成标记键在（qm:inference:completed:2026-09-24），
+    全库 0 个 qm:signal:ready:* 键；根因即 `len(None)` 抛 TypeError 被
+    script_runner 外层 except 吞成一行 warning。
+    """
+    assert ready_symbol_count(None, [{"symbol": "SH600036"}] * 3274) == 3274
+
+
+def test_ready_symbol_count_explicit_universe_wins_over_signals():
+    """单股补推：目标无信号时代码保留全量信号避免空库（partial 亦 False），
+
+    此时若按信号数判定会把残 run 误置就绪；必须按目标池大小。
+    """
+    assert ready_symbol_count(["SH600036"], [{"symbol": "x"}] * 5000) == 1
+
+
+def test_ready_symbol_count_empty_universe_is_zero_not_none():
+    assert ready_symbol_count([], [{"symbol": "x"}] * 5000) == 0
 
 
 def test_key_builders():

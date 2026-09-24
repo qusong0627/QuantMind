@@ -1267,12 +1267,18 @@ class InferenceScriptRunner:
             else:
                 run_id = f"run_{date.replace('-', '')}_{uuid.uuid4().hex[:8]}"
                 fallback_reason = f"主模型推理脚本不存在: {script_path}"
-                logger.warning(
-                    "[InferenceScriptRunner] 主模型脚本缺失，触发 兜底模型, run_id=%s, reason=%s",
-                    run_id,
-                    fallback_reason,
-                )
                 if not self.enable_fallback or model_market not in ("CN", "A"):
+                    # 用户模型走 independent_execution（enable_fallback=False）：
+                    # 旧实现先打印「触发兜底」再在此早退，日志看起来像兜底跑了，
+                    # 实际 5ms 即失败（2026-09-24 排查时被这条日志误导过一次）。
+                    logger.error(
+                        "[InferenceScriptRunner] 主模型脚本缺失且兜底已禁用"
+                        "（enable_fallback=%s, market=%s），直接失败, run_id=%s, reason=%s",
+                        self.enable_fallback,
+                        model_market,
+                        run_id,
+                        fallback_reason,
+                    )
                     return ExecutionResult(
                         success=False,
                         exit_code=1,
@@ -1283,6 +1289,11 @@ class InferenceScriptRunner:
                         failure_stage="main_script",
                         active_model_id=self.primary_model_id,
                     )
+                logger.warning(
+                    "[InferenceScriptRunner] 主模型脚本缺失，触发 兜底模型, run_id=%s, reason=%s",
+                    run_id,
+                    fallback_reason,
+                )
                 return self._execute_fallback(
                     date=date,
                     tenant_id=tenant_id,
@@ -1347,12 +1358,15 @@ class InferenceScriptRunner:
 
         if not readiness.get("ready", False):
             fallback_reason = f"主模型维度门禁未通过: {readiness.get('detail', 'N/A')}"
-            logger.warning(
-                "[InferenceScriptRunner] 主模型数据维度不足，触发 兜底模型, run_id=%s, reason=%s",
-                run_id,
-                fallback_reason,
-            )
             if not self.enable_fallback or model_market not in ("CN", "A"):
+                logger.error(
+                    "[InferenceScriptRunner] 主模型数据维度不足且兜底已禁用"
+                    "（enable_fallback=%s, market=%s），直接失败, run_id=%s, reason=%s",
+                    self.enable_fallback,
+                    model_market,
+                    run_id,
+                    fallback_reason,
+                )
                 return ExecutionResult(
                     success=False,
                     exit_code=1,
@@ -1363,6 +1377,11 @@ class InferenceScriptRunner:
                     failure_stage="main_script",
                     active_model_id=self.primary_model_id,
                 )
+            logger.warning(
+                "[InferenceScriptRunner] 主模型数据维度不足，触发 兜底模型, run_id=%s, reason=%s",
+                run_id,
+                fallback_reason,
+            )
             return self._execute_fallback(
                 date=date,
                 tenant_id=tenant_id,
@@ -1462,10 +1481,17 @@ class InferenceScriptRunner:
                     if stderr.strip()
                     else "v10 数据质量不足"
                 )
-                logger.warning(
-                    f"[InferenceScriptRunner] v10 数据质量不足 (exit=2)，启动 兜底模型, run_id={run_id}"
-                )
                 if not self.enable_fallback or model_market not in ("CN", "A"):
+                    # 2026-09-24：这条路径曾是「先打印触发兜底、再 5ms 早退」的
+                    # 骗人日志。顺序颠倒过来——禁用了就明说直接失败。
+                    logger.error(
+                        "[InferenceScriptRunner] v10 数据质量不足 (exit=2) 且兜底已禁用"
+                        "（enable_fallback=%s, market=%s），直接失败, run_id=%s, reason=%s",
+                        self.enable_fallback,
+                        model_market,
+                        run_id,
+                        fallback_reason,
+                    )
                     return ExecutionResult(
                         success=False,
                         exit_code=exit_code,
@@ -1476,6 +1502,9 @@ class InferenceScriptRunner:
                         failure_stage="main_script",
                         active_model_id=self.primary_model_id,
                     )
+                logger.warning(
+                    f"[InferenceScriptRunner] v10 数据质量不足 (exit=2)，启动 兜底模型, run_id={run_id}"
+                )
                 return self._execute_fallback(
                     date=date,
                     tenant_id=tenant_id,
@@ -1634,8 +1663,14 @@ class InferenceScriptRunner:
                     run_id,
                     ex=86400,
                 )
-                # T-P1-02：全量校验通过才置就绪标记（部分推/池裁剪不置位）
-                from backend.shared.inference_lock import mark_signal_ready_if_full
+                # T-P1-02：全量校验通过才置就绪标记（部分推/池裁剪不置位）。
+                # symbol_count 必须走 ready_symbol_count：全市场 run 的 symbols
+                # 是 None，裸 len() 抛 TypeError 会被外层 except 吞掉，就绪键
+                # 静默永不落（2026-09-24 实测全库 0 个 ready 键）。
+                from backend.shared.inference_lock import (
+                    mark_signal_ready_if_full,
+                    ready_symbol_count,
+                )
 
                 mark_signal_ready_if_full(
                     redis_client,
@@ -1643,7 +1678,7 @@ class InferenceScriptRunner:
                     trade_date=prediction_trade_date,
                     run_id=run_id,
                     partial=(partial_applied or pool_scoped),
-                    symbol_count=len(symbols),
+                    symbol_count=ready_symbol_count(symbols, signals),
                 )
             except Exception as exc:
                 logger.warning(
