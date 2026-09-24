@@ -151,6 +151,62 @@ def load_day_data(trade_date: str, data_dir: Path, market: str = "CN") -> pd.Dat
 # 3. 源模型加载（支持单模型 + stacking 融合）
 # ═══════════════════════════════════════════════════════════════════════════
 
+def _load_plain_pickle(path: Path):
+    """读普通 pickle 产物（sklearn MLP / Ridge 元学习器等），容忍新式 numpy 的 RNG state。
+
+    训练端 numpy(>=2) 与推理环境 numpy(1.26) 对 RandomState 的 pickle 口径不同：
+    新版把 BitGenerator **类对象**传给 `__bit_generator_ctor`（旧版只认类名字符串），
+    state 的键值也变了；旧版 cython 校验直接抛
+    `... is not a known BitGenerator module.`。实测同一份产物在
+    `inference_parquet.py` 模板里让 mlp 基模型加载失败 —— 融合模板的 .pkl 分支
+    同样会踩（基模型含 mlp/linear、或 meta_model.pkl 出自新版 numpy 时）。
+    该 state 只在 fit/sample 抽样时用到，**推理不抽样** → 丢弃它是安全的。
+    与 `inference_parquet.py` / `inference/model_loader.py` 同口径（本模板要被复制到
+    模型目录里独立运行，不 import 后端包，故三处各留一份）。
+    """
+    try:
+        with open(path, "rb") as f:
+            return pickle.load(f)
+    except ValueError as exc:
+        if "BitGenerator" not in str(exc) and "MT19937" not in str(exc):
+            raise
+        logger.warning("模型 pickle 含本环境读不了的新式 RNG state，按兼容模式加载: %s", exc)
+
+    class _NumpyCompatUnpickler(pickle._Unpickler):  # type: ignore[attr-defined]
+        """必须用纯 Python Unpickler 并显式改写 dispatch 表：C 版表不可改，
+        子类只重写 load_build 不会生效（表里存的是函数对象，不走属性查找）。"""
+
+        def find_class(self, module, name):
+            resolved = super().find_class(module, name)
+            if module == "numpy.random._pickle" and name == "__bit_generator_ctor":
+                def _ctor(bit_generator="MT19937", *args, **kwargs):
+                    if isinstance(bit_generator, type):  # numpy>=2 传的是类对象
+                        bit_generator = bit_generator.__name__
+                    return resolved(bit_generator, *args, **kwargs)
+                return _ctor
+            if module == "numpy.random._pickle" and name == "__randomstate_ctor":
+                def _rs_ctor(bit_generator="MT19937", *args, **kwargs):
+                    if isinstance(bit_generator, np.random.BitGenerator):  # numpy>=2 传实例
+                        return np.random.RandomState(bit_generator)
+                    return resolved(bit_generator, *args, **kwargs)
+                return _rs_ctor
+            return resolved
+
+        def load_build(self):
+            try:
+                return super().load_build()
+            except ValueError as exc:
+                if "MT19937" not in str(exc) and "BitGenerator" not in str(exc):
+                    raise
+                # state 已被 super() 弹出，直接返回 = 丢弃该 state（见上方说明）
+                return
+
+    _NumpyCompatUnpickler.dispatch = pickle._Unpickler.dispatch.copy()  # type: ignore[attr-defined]
+    _NumpyCompatUnpickler.dispatch[pickle.BUILD[0]] = _NumpyCompatUnpickler.load_build
+    with open(path, "rb") as f:
+        return _NumpyCompatUnpickler(f).load()
+
+
 def _load_base_model(model_path: Path, model_type: str):
     """按类型加载单个基模型权重。"""
     suffix = model_path.suffix.lower()
@@ -175,8 +231,7 @@ def _load_base_model(model_path: Path, model_type: str):
         # 返回标记 dict，由 main() 委派成员目录 inference.py 推理。
         return {"__dl_member__": True, "path": str(model_path)}
     # .pkl → sklearn / pickle 模型
-    with open(model_path, "rb") as f:
-        return pickle.load(f)
+    return _load_plain_pickle(model_path)
 
 
 def load_source_model(model_dir: Path) -> tuple[object, dict]:
@@ -353,8 +408,7 @@ def _load_stacking(model_dir: Path, meta: dict) -> _StackingEnsemble:
     meta_model_path = model_dir / meta.get("meta_model_file", "meta_model.pkl")
     if not meta_model_path.exists():
         raise FileNotFoundError(f"Stacking meta_model 不存在: {meta_model_path}")
-    with open(meta_model_path, "rb") as f:
-        meta_data = pickle.load(f)
+    meta_data = _load_plain_pickle(meta_model_path)
     meta_model = meta_data["model"] if isinstance(meta_data, dict) else meta_data
 
     fill_values = {}

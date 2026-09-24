@@ -30,6 +30,73 @@ def _is_model_weight(path: Path) -> bool:
     stem = path.stem.lower()
     return stem not in _ARTIFACT_STEMS and not stem.startswith("pred_")
 
+
+def _load_plain_pickle(path: Path) -> Any:
+    """读普通 pickle 产物（sklearn MLP / Ridge 等），容忍新式 numpy 的 RNG state。
+
+    训练端 numpy(>=2) 与推理环境 numpy(1.26) 对 RandomState 的 pickle 口径不同：
+    新版把 BitGenerator **类对象**传给 `__bit_generator_ctor`（旧版只认类名字符串），
+    `__randomstate_ctor` 收到的也是实例，且 state 的 key 是 ndarray；旧版 cython
+    校验直接抛 `... is not a known BitGenerator module.` 或
+    `state is not a legacy MT19937 state`。该 state 只在 fit/sample 抽样时用到，
+    **推理不抽样** → 丢弃它是安全的（对象退化为默认确定性的 RandomState，
+    权重复原不受影响）。与 `templates/inference_parquet.py::_load_plain_pickle`
+    同口径（模板自包含、不 import 本模块，故两处各留一份）。
+    """
+    try:
+        with open(path, "rb") as f:
+            return pickle.load(f)
+    except ValueError as exc:
+        if "BitGenerator" not in str(exc) and "MT19937" not in str(exc):
+            raise
+        logger.warning("模型 pickle 含本环境读不了的新式 RNG state，按兼容模式加载: %s", exc)
+        return _load_pickle_with_rng_state_dropped(path)
+
+
+class _NumpyCompatUnpickler(pickle._Unpickler):  # type: ignore[attr-defined]
+    """兼容洗牌：折算新旧 numpy 的 RandomState 构造口径，读不了的 state 丢弃。
+
+    必须用纯 Python 的 `pickle._Unpickler` 并显式改写 dispatch 表：子类只重写
+    `load_build` 不会生效——dispatch 里存的是函数对象，不走实例属性查找
+    （`find_class` 走属性查找，所以只重写它才有效）。
+    """
+
+    def find_class(self, module: str, name: str) -> Any:
+        resolved = super().find_class(module, name)
+        if module == "numpy.random._pickle" and name == "__bit_generator_ctor":
+            def _ctor(bit_generator: Any = "MT19937", *args: Any, **kwargs: Any) -> Any:
+                if isinstance(bit_generator, type):  # numpy>=2 传的是类对象
+                    bit_generator = bit_generator.__name__
+                return resolved(bit_generator, *args, **kwargs)
+            return _ctor
+        if module == "numpy.random._pickle" and name == "__randomstate_ctor":
+            def _rs_ctor(bit_generator: Any = "MT19937", *args: Any, **kwargs: Any) -> Any:
+                import numpy as np
+
+                if isinstance(bit_generator, np.random.BitGenerator):  # numpy>=2 传实例
+                    return np.random.RandomState(bit_generator)
+                return resolved(bit_generator, *args, **kwargs)
+            return _rs_ctor
+        return resolved
+
+    def load_build(self) -> None:
+        try:
+            return super().load_build()
+        except ValueError as exc:
+            if "MT19937" not in str(exc) and "BitGenerator" not in str(exc):
+                raise
+            # state 已被 super() 弹出，直接返回 = 丢弃该 state（见上方说明）
+            return
+
+
+_NumpyCompatUnpickler.dispatch = pickle._Unpickler.dispatch.copy()  # type: ignore[attr-defined]
+_NumpyCompatUnpickler.dispatch[pickle.BUILD[0]] = _NumpyCompatUnpickler.load_build
+
+
+def _load_pickle_with_rng_state_dropped(path: Path) -> Any:
+    with open(path, "rb") as f:
+        return _NumpyCompatUnpickler(f).load()
+
 # 默认最大缓存模型数
 DEFAULT_MAX_MODELS = 5
 
@@ -215,8 +282,7 @@ class ModelLoader:
             if not candidates:
                 raise FileNotFoundError(f"No sklearn model file found in {model_dir}")
             model_file = candidates[0]
-        with open(model_file, "rb") as f:
-            return pickle.load(f)
+        return _load_plain_pickle(model_file)
 
     def _load_pytorch(self, model_dir: Path, metadata: dict[str, Any]) -> Any:
         """加载 PyTorch / TFT / Qlib DL 模型"""
@@ -254,7 +320,26 @@ class ModelLoader:
 
             return load_native_tft_state_dict(str(model_file), metadata)
 
-        return torch.load(str(model_file), map_location="cpu")
+        # mlp 等「非 Qlib 类」的落盘对象：训练端 `train.py::_save_model` 对 mlp/linear
+        # 走 `pickle.dump`（普通 pickle，**不是** torch 序列化）。weights_only=False 是
+        # PyTorch>=2.6 读整体对象的前提（默认 True 直接拒读）。
+        try:
+            return torch.load(str(model_file), map_location="cpu", weights_only=False)
+        except (RuntimeError, ValueError) as exc:
+            # torch.load 误读普通 pickle 的两种表现：
+            #  - 反序列化成功、比对 magic number 失败 → "Invalid magic number; corrupt file?"
+            #  - 含新式 numpy RNG state → 反序列化中途报 BitGenerator 相关 ValueError
+            message = str(exc)
+            if (
+                "Invalid magic number" not in message
+                and "BitGenerator" not in message
+                and "MT19937" not in message
+            ):
+                raise
+            logger.info(
+                "%-30s 不是 torch 序列化产物，改按普通 pickle 加载", model_file.name
+            )
+            return _load_plain_pickle(model_file)
 
     @staticmethod
     def _load_qlib_dl_model(model_file: Path, metadata: dict[str, Any], model_class_name: str) -> Any:
@@ -262,13 +347,18 @@ class ModelLoader:
         import importlib
         import torch
 
+        # 键必须与训练端写进 metadata 的 model_class_name 一致
+        # （`backend/shared/model_algorithm_meta.ALGO_CLASS_NAMES`）；
+        # 曾用 "Transformer"/"TabNet" 短名，与写入值 "TransformerModel"/"TabnetModel"
+        # 对不上 → ValueError: Unknown Qlib model class。与推理模板
+        # `inference/templates/inference_parquet.py::_QLIB_DL_MAP` 保持同表。
         _QLIB_MODEL_MAP = {
-            "GRU":         ("qlib.contrib.model.pytorch_gru_ts",         "GRU"),
-            "LSTM":        ("qlib.contrib.model.pytorch_lstm_ts",        "LSTM"),
-            "ALSTM":       ("qlib.contrib.model.pytorch_alstm_ts",       "ALSTM"),
-            "Transformer": ("qlib.contrib.model.pytorch_transformer_ts", "Transformer"),
-            "TCN":         ("qlib.contrib.model.pytorch_tcn_ts",         "TCN"),
-            "TabNet":      ("qlib.contrib.model.pytorch_tabnet",         "TabNet"),
+            "GRU":              ("qlib.contrib.model.pytorch_gru_ts",         "GRU"),
+            "LSTM":             ("qlib.contrib.model.pytorch_lstm_ts",        "LSTM"),
+            "ALSTM":            ("qlib.contrib.model.pytorch_alstm_ts",       "ALSTM"),
+            "TransformerModel": ("qlib.contrib.model.pytorch_transformer_ts", "TransformerModel"),
+            "TCN":              ("qlib.contrib.model.pytorch_tcn_ts",         "TCN"),
+            "TabnetModel":      ("qlib.contrib.model.pytorch_tabnet",         "TabnetModel"),
         }
 
         if model_class_name not in _QLIB_MODEL_MAP:
