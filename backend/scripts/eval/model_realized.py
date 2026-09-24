@@ -675,7 +675,9 @@ def _resolve_pred(
         extra: dict[str, Any] = {}
         if collect_series:
             extra["series"] = series
-            if series is None:
+            # 空 dict 也是「没有载荷」（轻量调用写的缓存就是 series={}）——
+            # 只认 None 会让侧车拿兜底文案冒充原因，序列缺了却看不出来
+            if not series:
                 extra["series_note"] = (
                     f"缓存（{CACHE_NAME} v{CACHE_VERSION}）里没有长序列载荷"
                     "——删缓存重跑即可重建"

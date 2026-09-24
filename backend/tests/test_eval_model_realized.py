@@ -397,6 +397,52 @@ def test_resolve_dims_uses_cached_sidecar_when_unchanged(tmp_path: Path, monkeyp
 
 
 @pytest.mark.unit
+def test_resolve_dims_annotates_seriesless_cache_when_series_requested(tmp_path: Path):
+    """轻量调用写下的缓存（series={}）在要序列的路径上必须**如实标注缺载荷**。
+
+    列表接口先跑一次 collect_series=False 会把 ``series: {}`` 写进 sidecar；
+    随后夜间/落盘路径 collect_series=True 命中该缓存时，空 dict 不是「有序列」——
+    不标注的话侧车会拿兜底文案当原因（"该级证据不产长序列" 是假话：
+    pred.parquet 一级正是产序列的那一级），序列缺了却看不出来。
+    """
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from backend.scripts.eval import model_realized
+
+    model_dir = tmp_path / "mdl_seriesless_cache"
+    model_dir.mkdir()
+    n_days, n_stocks = 3, 10
+    frame = pd.DataFrame(
+        {
+            "symbol": [f"S{i:03d}.SZ" for _ in range(n_days) for i in range(n_stocks)],
+            "trade_date": pd.to_datetime(
+                [f"2026-01-{d + 1:02d}" for d in range(n_days) for _ in range(n_stocks)]
+            ),
+            "label": np.tile(np.arange(n_stocks, dtype=float) / 100.0, n_days),
+            "pred": np.tile(np.arange(n_stocks, dtype=float), n_days),
+            "split": ["test"] * (n_days * n_stocks),
+        }
+    )
+    pq.write_table(
+        pa.Table.from_pandas(frame, preserve_index=False), model_dir / "pred.parquet"
+    )
+
+    # Arrange：轻量调用（不带序列）把缓存写成 series={}
+    model_realized.resolve_dims("mdl_x", meta=None, model_dir=model_dir)
+
+    # Act：落盘路径要序列，命中同一份缓存
+    _, evidence = model_realized.resolve_dims(
+        "mdl_x", meta=None, model_dir=model_dir, collect_series=True
+    )
+
+    # Assert：命中缓存 + 如实标注缺长序列载荷（而不是静默给空 dict）
+    assert evidence["cache"] == "hit"
+    assert not evidence.get("series")
+    assert "长序列载荷" in str(evidence.get("series_note"))
+
+
+@pytest.mark.unit
 def test_resolve_dims_reports_insufficient_when_artifact_off_disk(tmp_path: Path):
     """证据可用性闸门：产物不在盘 → 如实缺省 + 指定 note，绝不静默跳过。"""
     from backend.scripts.eval import model_realized
