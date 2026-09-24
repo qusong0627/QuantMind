@@ -137,7 +137,9 @@ def run_market_sync(market: str, cfg: dict[str, Any]) -> dict[str, Any]:
     if market == "A":
         from backend.scripts.quantdb_daily_sync import run_daily_sync
 
-        result["result"] = run_daily_sync(skip_pg=True)
+        # 不跳过 PG：QuantDB 同步完成后滚动刷新 stock_daily_latest 最近 N 天
+        # （run_daily_sync Phase 2，自带「QuantDB 未推进则跳过」门控）。
+        result["result"] = run_daily_sync(skip_pg=False)
         return result
 
     if market == "US":

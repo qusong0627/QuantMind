@@ -1115,13 +1115,19 @@ def run_daily_sync(
         result["finished"] = datetime.now().isoformat()
         return result
 
-    # Phase 2: fill PG from parquet
+    # Phase 2: 刷新 PG stock_daily_latest（随 QuantDB 同步一起跑；滚动最近 N 天）。
+    # 任务自带「QuantDB 未推进则跳过」门控，避免同一天重复同步时空跑。
     if not skip_pg:
-        log.info("=== Phase 2: Fill PG from parquet ===")
+        log.info("=== Phase 2: Refresh PG stock_daily_latest ===")
         if full:
             result["pg_fill"] = fill_pg_from_parquet(start_date=QUANTDB_EPOCH)
         else:
-            result["pg_fill"] = fill_pg_from_parquet()
+            from backend.scripts.stock_daily_latest_refresh import (
+                refresh_stock_daily_latest,
+            )
+
+            days = int(os.getenv("PG_REFRESH_DAYS", "30"))
+            result["pg_fill"] = refresh_stock_daily_latest(days=days)
 
     # Phase 3: update Qlib cache
     if not skip_qlib:

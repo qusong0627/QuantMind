@@ -762,13 +762,26 @@ def _run_sync_job(job_id: str, req: SyncDatasetsRequest) -> None:
         _job_update(job_id, status="cancelled", current=None, finished_at=_now_iso())
         return
 
-    # Phase 2: PG 填充
+    # Phase 2: PG 填充（滚动刷新最近 N 天 + 名称/行业/缺口列富化）
     if req.with_pg:
         _job_update(job_id, stage="pg_fill")
         try:
-            from backend.scripts.quantdb_daily_sync import fill_pg_from_parquet, QUANTDB_EPOCH
-            start = QUANTDB_EPOCH if req.pg_full else None
-            _job_update(job_id, pg_fill=fill_pg_from_parquet(start_date=start))
+            from backend.scripts.quantdb_daily_sync import (
+                QUANTDB_EPOCH,
+                fill_pg_from_parquet,
+            )
+
+            if req.pg_full:
+                _job_update(job_id, pg_fill=fill_pg_from_parquet(start_date=QUANTDB_EPOCH))
+            else:
+                from backend.scripts.stock_daily_latest_refresh import (
+                    refresh_stock_daily_latest,
+                )
+
+                _job_update(
+                    job_id,
+                    pg_fill=refresh_stock_daily_latest(days=30, force=True),
+                )
         except Exception as exc:  # noqa: BLE001
             logger.error("quantdb sync job %s: pg fill failed: %s", job_id, exc, exc_info=True)
             _job_update(job_id, pg_fill={"status": "error", "reason": str(exc)})

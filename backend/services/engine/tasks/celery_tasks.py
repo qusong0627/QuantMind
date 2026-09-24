@@ -657,44 +657,6 @@ def sync_stock_daily_latest_task(
     }
 
 
-@celery_app.task(
-    name="engine.tasks.rolling_sync_stock_daily_recent",
-    max_retries=0,
-)
-def rolling_sync_stock_daily_recent_task(days: int = 30) -> dict[str, Any]:
-    """滚动刷新 stock_daily_latest 最近 N 天（默认 30 天，QuantDB 源）。
-
-    复用 quantdb_daily_sync.fill_pg_from_parquet，口径与市场定时同步一致；
-    幂等 upsert，可重复运行（QuantDB 分区落盘时间不固定）。
-    """
-    import subprocess
-    import sys
-    from pathlib import Path
-
-    script = Path("/app/scripts/data/maintenance/rolling_sync_stock_daily_recent.py")
-    if not script.exists():
-        logger.error("[RollingSync] 脚本不存在: %s", script)
-        return {"success": False, "error": f"script not found: {script}"}
-
-    cmd = [sys.executable, str(script), "--days", str(max(1, int(days)))]
-    try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
-    except subprocess.TimeoutExpired:
-        logger.error("[RollingSync] 超时（>1800s）")
-        return {"success": False, "error": "timeout"}
-
-    ok = proc.returncode == 0
-    logger.info("[RollingSync] rc=%s", proc.returncode)
-    if not ok:
-        logger.error("[RollingSync] 失败: %s", (proc.stderr or "")[-1000:])
-    return {
-        "success": ok,
-        "returncode": proc.returncode,
-        "stdout_tail": (proc.stdout or "")[-2000:],
-        "stderr_tail": (proc.stderr or "")[-2000:],
-    }
-
-
 @celery_app.task(name="engine.tasks.get_data_status_task")
 def get_data_status_task(market: str = "a_share") -> dict[str, Any]:
     """
