@@ -84,8 +84,11 @@ class SimulationProjectionService:
             "account_version": account_version,
             "snapshot_at": snapshot_at,
             "cash": cash,
-            "available_cash": float(getattr(account, "available_cash", 0.0) or 0.0),
-            "frozen_cash": float(getattr(account, "frozen_cash", 0.0) or 0.0),
+            # 模拟盘无现金冻结机制（订单即时全成，无挂单占用），可用现金恒等于
+            # 现金，冻结恒为 0。历史曾把 PG 里失真的 available_cash/frozen_cash
+            # 原样回填，导致前端"冻结"显示旧值，故此处按现金派生。
+            "available_cash": cash,
+            "frozen_cash": 0.0,
             "market_value": market_value,
             "long_market_value": long_market_value,
             "short_market_value": short_market_value,

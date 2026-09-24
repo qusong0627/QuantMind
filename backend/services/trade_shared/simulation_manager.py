@@ -230,6 +230,8 @@ account.positions = positions
 account.market_value = total_market_value
 account.total_asset = new_cash + total_market_value
 account.equity = account.total_asset
+account.available_cash = new_cash
+account.frozen_cash = 0
 
 redis.call("SET", key, cjson.encode(account))
 return cjson.encode({success=true})
@@ -571,6 +573,8 @@ return 0
 
         account_data = {
             "cash": initial_cash,
+            "available_cash": initial_cash,
+            "frozen_cash": 0.0,
             "total_asset": initial_cash,
             "market_value": 0.0,
             "short_market_value": 0.0,

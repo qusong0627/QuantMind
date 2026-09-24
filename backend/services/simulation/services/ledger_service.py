@@ -350,13 +350,10 @@ class SimulationLedgerService:
         market_value = float(account_snapshot.get("market_value") or 0.0)
         short_market_value = float(account_snapshot.get("short_market_value") or 0.0)
         account.cash = float(account_snapshot.get("cash") or account.cash or 0.0)
-        account.available_cash = float(
-            account_snapshot.get("available_cash")
-            or account_snapshot.get("cash")
-            or account.available_cash
-            or 0.0
-        )
-        account.frozen_cash = max(0.0, account.cash - account.available_cash)
+        # 模拟盘无现金冻结机制：可用现金恒等于现金，冻结恒为 0，与 Redis 侧
+        # 成交/重估 Lua 的口径保持一致（避免前端"冻结"显示失真旧值）。
+        account.available_cash = account.cash
+        account.frozen_cash = 0.0
         account.long_market_value = max(0.0, market_value)
         account.short_market_value = max(0.0, short_market_value)
         account.total_asset = float(account_snapshot.get("total_asset") or account.total_asset or 0.0)

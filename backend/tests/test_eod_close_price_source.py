@@ -94,6 +94,53 @@ def test_remark_lua_syncs_equity_with_total_asset():
     assert "account.equity = account.total_asset" in _REMARK_LUA
 
 
+class _CountResult:
+    def __init__(self, n):
+        self._n = n
+
+    def scalar_one_or_none(self):
+        return self._n
+
+
+class _CountSession:
+    def __init__(self, n):
+        self._n = n
+
+    async def execute(self, _stmt):
+        return _CountResult(self._n)
+
+
+def test_eod_position_snapshot_exists_true():
+    ok = asyncio.run(
+        eod._eod_position_snapshot_exists(
+            _CountSession(3), "default", "10000001", date(2026, 9, 23)
+        )
+    )
+    assert ok is True
+
+
+def test_eod_position_snapshot_exists_false():
+    ok = asyncio.run(
+        eod._eod_position_snapshot_exists(
+            _CountSession(0), "default", "10000001", date(2026, 9, 23)
+        )
+    )
+    assert ok is False
+
+
+def test_eod_position_snapshot_exists_error_returns_false():
+    class _Boom:
+        async def execute(self, _stmt):
+            raise RuntimeError("db down")
+
+    ok = asyncio.run(
+        eod._eod_position_snapshot_exists(
+            _Boom(), "default", "10000001", date(2026, 9, 23)
+        )
+    )
+    assert ok is False
+
+
 def test_trade_lua_syncs_equity_with_total_asset():
     lua = SimulationAccountManager(redis=None)._update_balance_lua
     assert "account.equity = account.total_asset" in lua

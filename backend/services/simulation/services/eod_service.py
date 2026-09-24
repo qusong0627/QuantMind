@@ -143,6 +143,36 @@ def _read_short_proceeds(tenant_id: str, user_id: str) -> float:
         return 0.0
 
 
+async def _eod_position_snapshot_exists(
+    session, tenant_id: str, user_id: str, trade_date: date
+) -> bool:
+    """该日 EOD 持仓快照是否已存在（= 日终已结算过）。
+
+    仅 EOD 的 replace_daily_snapshot 会写 simulation_position_daily，盘中
+    权益 worker 只维护账户级汇总，故它可作为「EOD 是否已跑过该日」的判据。
+    """
+    try:
+        from backend.services.simulation.models.position_daily import (
+            SimulationPositionDaily,
+        )
+
+        count = (
+            await session.execute(
+                select(func.count())
+                .select_from(SimulationPositionDaily)
+                .where(
+                    SimulationPositionDaily.tenant_id == tenant_id,
+                    SimulationPositionDaily.user_id == str(user_id),
+                    SimulationPositionDaily.snapshot_date == trade_date,
+                )
+            )
+        ).scalar_one_or_none()
+        return bool(count)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("EOD position snapshot existence check failed: %s", exc)
+        return False
+
+
 async def _execute_eod(trade_date: date) -> bool:
     """Run the full EOD pipeline. Returns True only when all accounts succeed."""
     try:
@@ -225,14 +255,21 @@ async def _execute_eod(trade_date: date) -> bool:
                         source="eod_remarking",
                     )
 
-                    await snapshot_svc.replace_daily_snapshot(
-                        tenant_id=account.tenant_id,
-                        user_id=account.user_id,
-                        account_id=account.account_id,
-                        snapshot_date=trade_date,
-                        account_payload=account_payload,
-                        positions=positions,
-                    )
+                    # 重启重跑昨日 trade_date 时，若该日 EOD 持仓快照已存在，
+                    # 说明日终已结算过：重跑用的是「当前持仓」，用它回写历史日期
+                    # 会把该日曲线写错（实测重启当日把 09-23 曲线写成本日持仓）。
+                    # 此时只刷新 Redis 现值，不改历史日快照。
+                    if not await _eod_position_snapshot_exists(
+                        session, account.tenant_id, account.user_id, trade_date
+                    ):
+                        await snapshot_svc.replace_daily_snapshot(
+                            tenant_id=account.tenant_id,
+                            user_id=account.user_id,
+                            account_id=account.account_id,
+                            snapshot_date=trade_date,
+                            account_payload=account_payload,
+                            positions=positions,
+                        )
 
                     await asyncio.to_thread(
                         _rebuild_redis,
