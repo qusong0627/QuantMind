@@ -28,7 +28,6 @@ import {
   getStatusConfig,
   isSystemModel,
   modelDisplayName,
-  modelIdToDisplayName,
   resolveMetricNumber,
 } from './modelRegistryUtils';
 const { Text } = Typography;
@@ -845,6 +844,8 @@ export const InferenceCenterPanel: React.FC<{
   onRun: () => void;
   onRunAsDefault?: () => void;
   isDefault?: boolean;
+  /** 全局默认模型（自动推理只跑它），与当前查看的 model 可能不是同一个 */
+  defaultModel?: UserModelRecord | null;
   lastRun: InferenceRunRecord | null;
   history: InferenceRunRecord[];
   historyLoading: boolean;
@@ -862,16 +863,11 @@ export const InferenceCenterPanel: React.FC<{
   onDeleteHistory?: (runId: string) => void;
 }> = ({
   model, inferenceDate, onDateChange, targetDate, targetDateLoading, horizonDays,
-  running, onRun, onRunAsDefault, isDefault, lastRun, history, historyLoading,
+  running, onRun, onRunAsDefault, isDefault, defaultModel, lastRun, history, historyLoading,
   latestInferenceRun, latestInferenceRunLoading, precheck, precheckLoading, onRefreshPrecheck,
   historyRunIdFilter, onHistoryRunIdFilterChange, historyStatusFilter, onHistoryStatusFilterChange, historyDateFilter, onHistoryDateFilterChange,
   onDeleteHistory,
 }) => {
-  const currentModelName = modelDisplayName(model);
-  const latestRunModelLabel = latestInferenceRun?.model_id === model.model_id
-    ? currentModelName
-    : modelIdToDisplayName(latestInferenceRun?.model_id);
-
   // 本次推理排名：单日推理完成后自动拉取该 run 的排名结果并展示在右侧
   const [rankingResult, setRankingResult] = useState<InferenceRankingResult | null>(null);
   const [rankingLoading, setRankingLoading] = useState(false);
@@ -1043,50 +1039,61 @@ export const InferenceCenterPanel: React.FC<{
         {/* 右侧：状态与历史 - 使用 flex-1 拉齐高度 */}
         <div className="col-span-4 space-y-4 flex flex-col h-full">
            <div className="glass-panel rounded-2xl p-4 border border-slate-100/50 bg-gradient-to-br from-white to-emerald-50/10">
-              <div className="flex items-center justify-between mb-3">
-                  <Text className="text-xs font-bold text-slate-500">当前模拟生效</Text>
-                  {(() => {
-                     const todayStr = dayjs().format('YYYY-MM-DD');
-                     const isEffective = latestInferenceRun?.run_id && 
-                                       latestInferenceRun.prediction_trade_date && 
-                                       latestInferenceRun.prediction_trade_date >= todayStr;
-                     
-                     return isEffective ? (
-                       <Badge status="processing" text={<span className="text-xs font-bold text-emerald-600 uppercase">Active</span>} />
-                     ) : (
-                       <Badge status="default" text={<span className="text-xs font-bold text-slate-400 uppercase">Inactive</span>} />
-                     );
-                 })()}
-              </div>
-              <Spin spinning={latestInferenceRunLoading}>
-                {(() => {
-                  const todayStr = dayjs().format('YYYY-MM-DD');
-                  const isEffective = latestInferenceRun?.run_id && 
-                                    latestInferenceRun.prediction_trade_date && 
-                                    latestInferenceRun.prediction_trade_date >= todayStr;
+              {(() => {
+                const todayStr = dayjs().format('YYYY-MM-DD');
+                const latestDate = latestInferenceRun?.prediction_trade_date;
+                const isEffective = !!(latestInferenceRun?.run_id && latestDate && latestDate >= todayStr);
+                // 自动推理只跑默认模型，故此卡恒定展示默认模型，而不是当前查看的
+                // model；「当前查看的是否默认」由下方「每日自动补全」卡的标签承担。
+                const effectiveName = defaultModel ? modelDisplayName(defaultModel) : '未设置默认模型';
 
-                   return isEffective ? (
+                return (
+                  <>
+                    <div className="flex items-center justify-between mb-2.5">
+                      <Text className="text-xs font-bold text-slate-500">模拟盘生效模型</Text>
+                      <Badge
+                        status={isEffective ? 'processing' : 'default'}
+                        text={
+                          <span
+                            className={`text-xs font-bold uppercase ${
+                              isEffective ? 'text-emerald-600' : 'text-slate-400'
+                            }`}
+                          >
+                            {isEffective ? 'Active' : 'Inactive'}
+                          </span>
+                        }
+                      />
+                    </div>
+                    <Spin spinning={latestInferenceRunLoading}>
                       <div className="bg-white/60 rounded-xl p-3 border border-emerald-100/30">
-                          <Text className="text-xs font-mono font-bold text-slate-800 break-all leading-tight block">
-                             {latestInferenceRun.run_id.slice(0, 24)}...
+                        <div className="flex items-center gap-1.5">
+                          <Star size={13} className="text-amber-400 shrink-0" fill="currentColor" />
+                          <Text className="text-sm font-bold text-slate-800 truncate">
+                            {effectiveName}
                           </Text>
-                          <div className="mt-2 flex items-center justify-between">
-                            <Tag className="m-0 bg-emerald-500 text-white border-0 text-xs font-bold px-1.5 leading-none py-0.5">{latestInferenceRun.prediction_trade_date}</Tag>
-                            <Text className="text-xs text-slate-500 font-mono leading-none">{dayjs(latestInferenceRun.updated_at).format('HH:mm')}</Text>
-                          </div>
+                        </div>
+                        <div className="mt-2 flex items-center justify-between gap-2">
+                          <Tag className="m-0 bg-emerald-500 text-white border-0 text-xs font-bold px-1.5 leading-none py-0.5">
+                            {latestDate ? `信号日 ${latestDate}` : '暂无信号'}
+                          </Tag>
+                          {latestInferenceRun?.updated_at && (
+                            <Text className="text-xs text-slate-500 font-mono leading-none">
+                              {dayjs(latestInferenceRun.updated_at).format('HH:mm')}
+                            </Text>
+                          )}
+                        </div>
                       </div>
-                   ) : (
-                     <div className="py-4 flex flex-col items-center justify-center bg-slate-50/50 rounded-xl border border-dashed border-slate-200">
-                       <Clock size={16} className="text-slate-300 mb-2" />
-                       <Text className="text-xs text-slate-500 font-bold">暂无当前生效推理</Text>
-                       <Text className="text-xs text-slate-400 mt-0.5">请手动执行最新行情推理</Text>
-                     </div>
-                   );
-                })()}
-              </Spin>
+                      {/* 当前查看模型是否为默认，由下方「每日自动补全」卡的
+                          「默认模型已纳入/未纳入」标签承担，此处不重复占高度。 */}
+                    </Spin>
+                  </>
+                );
+              })()}
            </div>
 
-            {/* 本次推理排名：固定高度露出 10 只，其余滚动 */}
+            {/* 本次推理排名：固定视口只露出 10 行，其余内部滚动。
+                必须用固定高度 + shrink-0：右列在 items-stretch 网格里，改成
+                flex-1 会随左列高度无限长高，并把左列的股票池容器挤扁。 */}
             <div
               className="glass-panel rounded-2xl p-3 border border-slate-100/50 bg-white flex flex-col overflow-hidden shrink-0"
               style={{ height: rankingPanelHeight }}
@@ -1143,18 +1150,18 @@ export const InferenceCenterPanel: React.FC<{
               )}
            </div>
 
-            <div className="glass-panel rounded-2xl p-4 border border-slate-100/50 flex items-center justify-between shrink-0">
-               <div className="flex items-center gap-3">
-                 <RefreshCw size={14} className="text-blue-500" />
-                 <div>
-                   <Text className="text-xs font-bold text-slate-700 block leading-tight">每日自动补全</Text>
-                   <Text className="text-xs text-slate-400">工作日 06:30 对默认模型补齐缺口（含历史）</Text>
-                 </div>
+            <div className="glass-panel rounded-2xl p-4 border border-slate-100/50 flex items-center gap-3 shrink-0">
+               <RefreshCw size={14} className="text-blue-500 shrink-0" />
+               <div className="min-w-0 flex-1">
+                 <Text className="text-xs font-bold text-slate-700 block leading-tight">每日自动补全</Text>
+                 <Text className="text-xs text-slate-400 block leading-tight mt-0.5 truncate">
+                   工作日 06:00–16:30 每 30 分钟补齐默认模型缺口
+                 </Text>
                </div>
                {isDefault ? (
-                 <Tag color="blue" className="m-0 rounded-full text-[10px] font-bold">默认模型已纳入</Tag>
+                 <Tag color="blue" className="m-0 rounded-full text-[10px] font-bold shrink-0">默认模型已纳入</Tag>
                ) : (
-                 <Tag className="m-0 rounded-full text-[10px] font-bold">设为默认后生效</Tag>
+                 <Tag className="m-0 rounded-full text-[10px] font-bold shrink-0">设为默认后生效</Tag>
                )}
             </div>
          </div>

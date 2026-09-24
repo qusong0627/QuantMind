@@ -734,6 +734,7 @@ export const InferenceCenterPage: React.FC = () => {
                 onRun={handleRunCrossSectionInference}
                 onRunAsDefault={handleSetDefaultModel}
                 isDefault={selectedModel.is_default}
+                defaultModel={registeredModels.find((m) => m.is_default) ?? null}
                 lastRun={lastInferenceRun}
                 history={inferenceHistory}
                 historyLoading={inferenceHistoryLoading}
