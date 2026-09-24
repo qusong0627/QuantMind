@@ -141,12 +141,18 @@ function Get-PortOwner([int]$port) {
         $conn = Get-NetTCPConnection -State Listen -LocalPort $port -ErrorAction Stop | Select-Object -First 1
         if ($conn) { return [int]$conn.OwningProcess }
     } catch {
-        # Get-NetTCPConnection unavailable (old PowerShell) -> netstat fallback
-        $line = netstat -ano | Select-String -Pattern ":$port\s" | Select-String -Pattern 'LISTENING' | Select-Object -First 1
-        if ($line) {
-            $parts = ($line.ToString() -split '\s+') | Where-Object { $_ -ne '' }
-            if ($parts.Count -ge 5) { return [int]$parts[-1] }
-        }
+        # Get-NetTCPConnection unavailable (old PowerShell) -> netstat fallback.
+        # Guarded on purpose: this block already runs inside a catch, and with
+        # $ErrorActionPreference = 'Stop' an unguarded failure here (no netstat,
+        # unexpected output shape) escapes as a terminating error - the installer
+        # would die with a raw stack trace instead of a [fail] line.
+        try {
+            $line = netstat -ano | Select-String -Pattern ":$port\s" | Select-String -Pattern 'LISTENING' | Select-Object -First 1
+            if ($line) {
+                $parts = ($line.ToString() -split '\s+') | Where-Object { $_ -ne '' }
+                if ($parts.Count -ge 5) { return [int]$parts[-1] }
+            }
+        } catch { }
     }
     return 0
 }
@@ -244,8 +250,16 @@ if (Test-Path $envPath) {
         '#QM_OPEN_BROWSER=0'
     )
     # UTF-8 without BOM: start.bat reads it via `Get-Content -Encoding UTF8`.
-    [System.IO.File]::WriteAllLines($envPath, $lines, (New-Object System.Text.UTF8Encoding($false)))
-    Good 'pack.env created (random local database password, ports left at defaults)'
+    # Guarded: in a read-only folder (C:\Program Files\..., a mounted image) the
+    # write throws, and with $ErrorActionPreference = 'Stop' that aborts the whole
+    # script as a raw .NET error - install.bat then says "see the [fail] lines
+    # above" while there are none.
+    try {
+        [System.IO.File]::WriteAllLines($envPath, $lines, (New-Object System.Text.UTF8Encoding($false)))
+        Good 'pack.env created (random local database password, ports left at defaults)'
+    } catch {
+        FailCheck "cannot write $envPath ($($_.Exception.Message)) - move the pack to a folder you can write to (e.g. D:\QuantMind) and run install.bat again."
+    }
 }
 
 # ---------------------------------------------------------------
