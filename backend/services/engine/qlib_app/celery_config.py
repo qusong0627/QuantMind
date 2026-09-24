@@ -96,13 +96,17 @@ NEWS_ENRICH_ENABLED = os.getenv("NEWS_ENRICH_ENABLED", "true").lower() == "true"
 NEWS_ENRICH_INTERVAL_SEC = int(os.getenv("NEWS_ENRICH_INTERVAL_SEC", "60"))
 NEWS_MATCHER_RELOAD_SEC = int(os.getenv("NEWS_MATCHER_RELOAD_SEC", "600"))
 
-# 推理缺口轮询窗口（工作日）。上游 QuantDB 因子分区落盘时间不固定（实测可晚至
-# 当日中午），固定单点会漏掉当天才落盘的分区、使推理整体滞后一天；改为窗口内
-# 每 30 分钟轮询：任务自带「无缺口则跳过」门控，因子到齐后的那次自然补上，
-# 只有真存在缺口时才会跑推理。覆盖：AUTO_INFERENCE_POLL_MINUTE /
-# AUTO_INFERENCE_POLL_HOUR。
+# 推理缺口轮询窗口（工作日）。上游 QuantDB 因子分区落盘时间不固定，实测为次日
+# 中午前后（l1_factors：数据日 09-21 于 09-22 13:43 落盘，09-22/09-23 于 09-24
+# 12:00 批量落盘），固定单点会漏掉当天才落盘的分区、使推理整体滞后一个交易日；
+# 改为窗口内每 30 分钟轮询：任务自带「无缺口则跳过」门控（compute_coverage 的
+# is_up_to_date），因子到齐后的那次自然补上，只有真存在缺口时才会跑推理。
+#
+# 窗口下界取市场同步的建议区间（01:00-06:00）之后，上界必须晚于因子落盘时刻，
+# 否则每轮都判定无缺口并 skipped，推理恒滞后一天。
+# 覆盖：AUTO_INFERENCE_POLL_MINUTE / AUTO_INFERENCE_POLL_HOUR。
 AUTO_INFERENCE_POLL_MINUTE = os.getenv("AUTO_INFERENCE_POLL_MINUTE", "0,30")
-AUTO_INFERENCE_POLL_HOUR = os.getenv("AUTO_INFERENCE_POLL_HOUR", "6-10")
+AUTO_INFERENCE_POLL_HOUR = os.getenv("AUTO_INFERENCE_POLL_HOUR", "6-16")
 
 # Celery配置
 beat_schedule = {}

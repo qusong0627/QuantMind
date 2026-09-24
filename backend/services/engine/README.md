@@ -80,7 +80,8 @@
 `quantmind-engine` 使用 Celery 处理耗时的异步回测和复杂的参数优化任务。Worker 进程必须独立于主 API 服务启动。
 当前已统一为 Celery 异步执行：`/api/v1/pipeline/*`、`/api/v1/qlib/backtest?async_mode=true`、`/api/v1/strategy-backtest-loop/*`。
 API 进程仅负责入队或同步请求处理，不再保留 `BackgroundTasks` / `create_task` / 线程池式后台执行路径。
-“明日信号生成”支持三种触发方式：管理员手动触发 `POST /api/v1/admin/models/run-inference`、策略激活后按当前 `tenant_id + user_id(8位)` 异步触发一次推理、以及 Celery Beat 工作日 08:00 扫描 `engine.tasks.auto_inference_if_needed`（仅 running 组合 + 已启用的自动推理设置，见 `celery_config.beat_schedule`）。
+“明日信号生成”支持三种触发方式：管理员手动触发 `POST /api/v1/admin/models/run-inference`、策略激活后按当前 `tenant_id + user_id(8位)` 异步触发一次推理、以及 Celery Beat 工作日在轮询窗口（默认 `AUTO_INFERENCE_POLL_HOUR=6-16`，每 30 分钟一次）内执行 `engine.tasks.backfill_default_inference` —— 对所有 `is_default` 模型按 `pred.parquet` 覆盖与因子可用日的差集补缺口（含历史空洞），任务自带「无缺口即跳过」门控。原 08:00 的 `auto_inference_if_needed`（用户开关 + running 组合）已下线，统一收敛到本任务，函数仍保留供紧急手动 `celery call`。
+窗口上界必须晚于上游因子分区落盘时刻（实测约次日 12:00-14:00），否则每轮都判定无缺口并 `skipped`，推理恒滞后一个交易日。
 生产部署必须同时运行 `celery-worker` 与 `celery-beat`；仅启动 worker 不会触发定时自动推理。
 如需因硬件压力临时暂停自动推理，可在运行环境设置 `AUTO_INFERENCE_ENABLED=false`（仅关闭 Beat 定时调度，不影响手动触发）。
 推理链路已升级为“多用户模型解析”：
