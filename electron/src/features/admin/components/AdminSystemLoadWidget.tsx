@@ -115,7 +115,7 @@ export const AdminSystemLoadWidget: React.FC<AdminSystemLoadWidgetProps> = ({ co
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-1.5">
               <span className={`w-2 h-2 rounded-full ${getHealthBadgeColor(healthScore)} animate-pulse`} />
-              <Text className="text-[10px] font-black text-slate-500 uppercase tracking-wider">系统真实负载</Text>
+              <Text className="text-xs font-black text-slate-500 uppercase tracking-wider">系统真实负载</Text>
             </div>
             {totalServices > 0 && (
               <span className="text-[10px] font-mono font-bold text-slate-400 bg-white px-1.5 py-0.2 rounded border border-slate-100">

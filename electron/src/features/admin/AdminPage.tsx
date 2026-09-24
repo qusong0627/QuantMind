@@ -57,7 +57,16 @@ const AdminUpdateBadge: React.FC = () => {
     }
     if (update.behind != null && update.behind > 0) {
         return (
-            <Tooltip title="概览页可执行「更新系统」，或在服务器执行：sudo bash deploy/update.sh">
+            <Tooltip
+                title={
+                    <div className="text-xs leading-relaxed">
+                        概览页可点击「更新系统」一键执行；或用 SSH 工具登录服务器执行
+                        <div className="mt-1 rounded bg-white/15 px-1.5 py-0.5 font-mono break-all">
+                            cd /opt/quantmind && sudo bash deploy/update.sh --force
+                        </div>
+                    </div>
+                }
+            >
                 <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-50 text-amber-700 border border-amber-200 px-3 py-1 text-xs font-medium">
                     <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
                     {`落后 ${update.behind} 个提交`}

@@ -128,17 +128,9 @@ class UpdaterBusy(RuntimeError):
     """已有 updater 容器在跑，本次触发应放弃。"""
 
 
-def _build_container_spec(image: str, *, guard_dirty: bool = False) -> dict:
-    # Web 一键更新默认 --force：本地未提交改动一律 reset --hard 覆盖，避免脏树阻断升级
+def _build_container_spec(image: str) -> dict:
+    # 一律 --force：客户端服务器必须与远端仓库保持一致，服务器上的本地改动不保留。
     cmd = f"bash {shlex.quote(_SCRIPT_PATH)} --force > {shlex.quote(_LOG_PATH)} 2>&1"
-    if guard_dirty:
-        # 自动更新无人值守，脏树一旦被 reset --hard 就是静默丢代码；这里在跑 update.sh
-        # 之前先中止并把原因写进同一份日志，让状态接口能报「中止」而不是「升级成功」。
-        cmd = (
-            f"if [ -n \"$(git -C {shlex.quote(_PROJECT_DIR)} status --porcelain)\" ]; then "
-            f"echo '自动更新中止：工作区存在未提交改动，为避免覆盖已丢弃的代码不执行更新' "
-            f"> {shlex.quote(_LOG_PATH)}; exit 1; fi; " + cmd
-        )
     binds = [
         f"{_PROJECT_DIR}:{_PROJECT_DIR}:rw",
         f"{_SOCKET}:/var/run/docker.sock",
@@ -169,14 +161,13 @@ def _build_container_spec(image: str, *, guard_dirty: bool = False) -> dict:
     }
 
 
-def launch_updater(*, guard_dirty: bool = False, source: str = "web") -> dict:
+def launch_updater(*, source: str = "web") -> dict:
     """创建并启动分离的 updater 容器，立即返回（不等待更新跑完）。
 
     updater 容器不属于 compose 管理，因此 ``deploy/update.sh`` 里的
     ``--force-recreate`` 重建 main 服务时不会波及它 —— 调用方被这次重启杀掉
     也不影响更新跑完。**任何情况下都不要 await 它结束。**
 
-    :param guard_dirty: True 时 updater 内先检查 git 工作区，脏则中止（自动更新用）
     :param source: 事件来源标记，web=手动按钮，auto=定时任务
     """
     if not _enabled():
@@ -187,7 +178,7 @@ def launch_updater(*, guard_dirty: bool = False, source: str = "web") -> dict:
         raise UpdaterBusy("已有更新任务在执行中")
 
     image = _detect_image(client)
-    spec = _build_container_spec(image, guard_dirty=guard_dirty)
+    spec = _build_container_spec(image)
     _remove_stale(client)
 
     created = client.post(
@@ -217,15 +208,11 @@ def launch_updater(*, guard_dirty: bool = False, source: str = "web") -> dict:
             level="info",
             source="quantmind-api",
             title="系统强制更新已触发" + ("（每日自动）" if source == "auto" else "（Web）"),
-            message=(
-                f"updater 镜像 {image} 已启动（--force"
-                f"{'，脏树保护已启用' if guard_dirty else ''}），容器 {cid[:12]}"
-            ),
+            message=f"updater 镜像 {image} 已启动（--force），容器 {cid[:12]}",
             meta={
                 "container_id": cid,
                 "image": image,
                 "force": True,
-                "guard_dirty": guard_dirty,
                 "trigger": source,
             },
         ))
@@ -241,7 +228,7 @@ async def trigger_update(
 ):
     """触发宿主 deploy/update.sh（分离 updater 容器，立即返回）。已移除环境变量与 confirm 强校验。"""
     try:
-        data = launch_updater(guard_dirty=False, source="web")
+        data = launch_updater(source="web")
     except UpdaterBusy as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except UpdaterUnavailable as exc:
@@ -282,10 +269,12 @@ async def update_status(
     tail = log_content[-2000:]
     if running:
         state = "running"
-    elif "更新完成" in log_content:
+    elif "升级完成" in log_content or "系统更新成功" in log_content:
+        # deploy/update.sh 成功时打印「升级完成 ✓」并记一条「系统更新成功」；
+        # 早先这里匹配的是「更新完成」，脚本从没输出过该串，导致成功也被判成 failed。
         state = "done"
         message = "系统更新完成"
-    elif "健康检查失败" in log_content or "错误" in log_content:
+    elif "健康检查失败" in log_content or "系统更新失败" in log_content:
         state = "failed"
         message = "系统更新失败"
     elif log_content:

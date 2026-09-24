@@ -42,10 +42,19 @@ export const AdminHelpCenter: React.FC = () => {
         },
     ];
 
-    const faqs = [
+    const faqs: { q: string; a: string; extra?: React.ReactNode }[] = [
         {
             q: '如何判断当前平台是否为最新版本？',
-            a: '侧边栏左下角的负载监控卡片上方，以及系统概览页会展示「落后 N 个提交」提示。若显示落后，可在概览页执行「更新系统」，或在服务器执行：sudo bash deploy/update.sh。',
+            a: '侧边栏左下角的负载监控卡片上方，以及系统概览页会展示「落后 N 个提交」提示。若显示落后，可在概览页点击「更新系统」一键执行；也可用 SSH 工具登录服务器，手动执行下面这条命令：',
+            extra: (
+                <Paragraph
+                    code
+                    copyable={{ text: 'cd /opt/quantmind && sudo bash deploy/update.sh --force' }}
+                    className="!mt-2.5 !mb-0 !text-[13px] !text-slate-700 break-all"
+                >
+                    cd /opt/quantmind && sudo bash deploy/update.sh --force
+                </Paragraph>
+            ),
         },
         {
             q: '行情数据很久没有更新怎么办？',
@@ -134,6 +143,7 @@ export const AdminHelpCenter: React.FC = () => {
                             <Paragraph className="!mt-2 !mb-0 !text-slate-500 !text-sm leading-relaxed">
                                 {f.a}
                             </Paragraph>
+                            {f.extra}
                         </div>
                     ))}
                 </div>

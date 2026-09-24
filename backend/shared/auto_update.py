@@ -8,11 +8,13 @@
   quantmind:auto_update:fired:DATE  当日已决策（NX 抢锁，防多 worker 重复触发）
   quantmind:auto_update:last        最近一次决策结果，供前端回显
 
-三道闸门，任一不过就只记事件、不更新：
+两道闸门，任一不过就只记事件、不更新：
   1. 到点且在放行窗口内、当日未决策；
-  2. 版本闸门：release-index 明确「有落后」才放行。索引不可达或 status=diverged
-     时无法判断，一律跳过 —— 宁可不更，不可在未知状态下 reset --hard；
-  3. 脏工作区：由 updater 容器内的 guard_dirty 检查兜底（API 容器没有宿主 .git）。
+  2. 版本闸门：release-index 明确「有落后」才放行。已是最新时无需重启（避免每天
+     白刷一次服务断连 + 数据库备份）；索引不可达或 status=diverged 时无法判断，跳过。
+
+闸门之后一律 ``--force`` 执行：本产品的口径是**客户端服务器必须与远端仓库保持一致**，
+服务器上的本地改动（含未提交的脏树与未推送的本地 commit）会被覆盖丢弃，不做保护。
 
 调度循环跑在 API 进程内而不是 Celery：docker.sock 只挂在 quantmind 主容器
 （docker-compose.yml），celery-worker / celery-beat 拿不到 socket。
@@ -163,7 +165,7 @@ async def tick(now: datetime | None = None) -> None:
         _record("跳过", reason)
         return
     try:
-        data = await asyncio.to_thread(launch_updater, guard_dirty=True, source="auto")
+        data = await asyncio.to_thread(launch_updater, source="auto")
     except UpdaterBusy:
         _record("跳过", "已有更新任务在执行中", level="warning")
         return

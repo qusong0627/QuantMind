@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Switch, Tag, Typography, message, Alert, Modal } from 'antd';
+import { Switch, Tag, Typography, message, Alert } from 'antd';
 import {
     RobotOutlined,
     SettingOutlined,
@@ -58,7 +58,7 @@ function StatusPill({
 
     return (
         <div className={`rounded-xl border px-3 py-2.5 text-center ${tone}`}>
-            <div className="flex items-center justify-center gap-1.5 text-[11px] opacity-70">
+            <div className="flex items-center justify-center gap-1.5 text-xs opacity-70">
                 {icon}
                 <span>{label}</span>
             </div>
@@ -66,12 +66,6 @@ function StatusPill({
         </div>
     );
 }
-
-const RISK_ITEMS = [
-    '执行 deploy/update.sh --force：服务器上的未提交改动会被 git reset --hard 覆盖',
-    '全部后端服务重启，进行中的回测 / 推理 / 页面连接会中断',
-    '无自动回滚：更新后健康检查失败不会退回旧版本，需人工介入恢复',
-];
 
 function AutoUpdateCard() {
     const [info, setInfo] = useState<AutoUpdateInfo | null>(null);
@@ -123,35 +117,7 @@ function AutoUpdateCard() {
     };
 
     const handleChange = (next: boolean) => {
-        if (!next) {
-            apply(false);
-            return;
-        }
-        Modal.confirm({
-            title: '开启每日自动强制更新？',
-            width: 560,
-            okText: '我已了解风险，开启',
-            okButtonProps: { danger: true },
-            cancelText: '取消',
-            content: (
-                <div className="text-xs leading-relaxed text-slate-600 space-y-1.5 pt-1">
-                    <p className="!mb-1">
-                        开启后<b>每天 {info?.run_at || '00:00'}</b>
-                        自动执行一次强制更新，请确认以下风险：
-                    </p>
-                    <ul className="list-disc pl-4 space-y-1 !mb-1">
-                        {RISK_ITEMS.map((t) => (
-                            <li key={t}>{t}</li>
-                        ))}
-                    </ul>
-                    <p className="!mb-0 text-slate-400">
-                        已做保护：无新版本时不重启；服务器工作区有未提交改动时中止；
-                        版本索引不可达时跳过。每次决策都记入「最近事件」。
-                    </p>
-                </div>
-            ),
-            onOk: () => apply(true),
-        });
+        apply(next);
     };
 
     if (!info) {
@@ -161,12 +127,12 @@ function AutoUpdateCard() {
                     <span className="inline-flex h-8 w-8 items-center justify-center rounded-xl bg-slate-100 text-slate-400">
                         <CloudSyncOutlined />
                     </span>
-                    <h3 className="m-0 text-sm font-bold text-slate-700">每日自动强制更新</h3>
-                    <Tag className="m-0 border-none text-[11px]" color="default">
+                    <h3 className="m-0 text-base font-bold text-slate-800">每日自动强制更新</h3>
+                    <Tag className="m-0 border-none text-xs" color="default">
                         不可用
                     </Tag>
                 </div>
-                <Text className="mt-2 block text-xs text-slate-400">
+                <Text className="mt-2 block text-[13px] text-slate-400">
                     配置读取失败：{loadError || '未知原因'}
                 </Text>
             </section>
@@ -194,15 +160,20 @@ function AutoUpdateCard() {
                             </h3>
                             <Tag
                                 color={disabled ? 'warning' : info.enabled ? 'success' : 'default'}
-                                className="m-0 border-none text-[11px]"
+                                className="m-0 border-none text-xs"
                             >
                                 {disabled ? '不可用' : info.enabled ? '已开启' : '已关闭'}
                             </Tag>
                         </div>
-                        <p className="mt-2 mb-0 text-xs leading-relaxed text-slate-500">
+                        <p className="mt-2 mb-0 text-[13px] leading-relaxed text-slate-500">
                             开启后每天 {info.run_at} 自动执行一次
-                            <code className="mx-1 text-[11px]">deploy/update.sh --force</code>
+                            <code className="mx-1 text-xs">deploy/update.sh --force</code>
                             拉取最新代码并重启全部服务。
+                        </p>
+                        <p className="mt-2 mb-0 text-[13px] font-semibold leading-relaxed text-amber-600">
+                            谨慎开启：本开关用于让客户环境与远端仓库保持一致，会<b>覆盖丢弃</b>
+                            服务器上的一切本地改动（未提交的修改、未推送的本地 commit），
+                            且无自动回滚；重启期间回测与页面连接会中断。
                         </p>
                     </div>
 
@@ -215,47 +186,31 @@ function AutoUpdateCard() {
                             checkedChildren="开"
                             unCheckedChildren="关"
                         />
-                        <span className="text-[11px] text-slate-400">
+                        <span className="text-[13px] text-slate-400">
                             {disabled ? '需挂载 docker socket' : `下次 ${nextRun}`}
                         </span>
                     </div>
                 </div>
             </div>
 
-            {info.enabled && (
-                <div className="px-5 pb-4 sm:px-6">
-                    <Alert
-                        type="warning"
-                        showIcon
-                        className="rounded-xl text-xs !py-2 !px-3"
-                        message="自动更新会覆盖服务器上的未提交改动并重启服务"
-                        description={
-                            <ul className="list-disc pl-4 space-y-0.5 !mb-0">
-                                {RISK_ITEMS.map((t) => (
-                                    <li key={t}>{t}</li>
-                                ))}
-                            </ul>
-                        }
-                    />
-                </div>
-            )}
-
             <div className="border-t border-slate-100 bg-slate-50/60 px-5 py-3 sm:px-6">
                 <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
-                    <Text className="text-[11px] text-slate-400 flex items-center gap-1.5">
+                    <Text className="text-[13px] text-slate-500 flex items-center gap-1.5">
                         <ClockCircleOutlined />
                         上次决策：
-                        <span className={lastFailed ? 'text-red-500' : 'text-slate-500'}>
+                        <span className={lastFailed ? 'font-semibold text-red-500' : 'font-semibold text-slate-700'}>
                             {last ? `${last.at.replace('T', ' ')} · ${last.action} · ${last.reason}` : '尚未自动执行过'}
                         </span>
                     </Text>
                     {updateState?.state === 'running' ? (
-                        <Text className="text-[11px] text-amber-500">更新正在执行中</Text>
-                    ) : updateState?.state === 'failed' ? (
-                        <Text className="text-[11px] text-red-500">
-                            最近一次更新失败，请查看 data/update.log
+                        <Text className="text-[13px] font-semibold text-amber-600">
+                            更新正在执行中
                         </Text>
-                    ) : null}
+                    ) : (
+                        <Text className="text-[13px] text-slate-400">
+                            如遇更新失败请查看 data/update.log
+                        </Text>
+                    )}
                 </div>
             </div>
         </section>
@@ -352,7 +307,7 @@ export const AdminSystemSettings: React.FC = () => {
                 >
                     <SettingOutlined className="text-slate-600" /> 系统设置
                 </Title>
-                <Text className="text-slate-400 text-xs">基础设施与 AI 能力开关</Text>
+                <Text className="text-slate-400 text-[13px]">基础设施与 AI 能力开关</Text>
             </header>
 
             <section className="rounded-2xl border border-slate-200 bg-white shadow-sm overflow-hidden">
@@ -369,12 +324,12 @@ export const AdminSystemSettings: React.FC = () => {
                                 </h3>
                                 <Tag
                                     color={statusTone.tag}
-                                    className="m-0 border-none text-[11px]"
+                                    className="m-0 border-none text-xs"
                                 >
                                     {statusTone.text}
                                 </Tag>
                             </div>
-                            <p className="mt-2 mb-0 text-xs leading-relaxed text-slate-500">
+                            <p className="mt-2 mb-0 text-[13px] leading-relaxed text-slate-500">
                                 入库资讯走中文金融情感推理；关闭后仅用字典法，CPU
                                 零开销。切换即时生效，无需重启。
                             </p>
@@ -389,7 +344,7 @@ export const AdminSystemSettings: React.FC = () => {
                                 unCheckedChildren="关"
                                 disabled={cannotEnable}
                             />
-                            <span className="text-[11px] text-slate-400">
+                            <span className="text-[13px] text-slate-400">
                                 {notInstalled
                                     ? '需先装权重'
                                     : noFramework
@@ -446,17 +401,17 @@ export const AdminSystemSettings: React.FC = () => {
                             <Alert
                                 type="warning"
                                 showIcon
-                                className="rounded-xl text-xs !py-2 !px-3"
+                                className="rounded-xl text-[13px] !py-2 !px-3"
                                 message="模型权重未安装"
                                 description={
                                     <span>
-                                        未检测到 <code className="text-[11px]">{modelName}</code>{' '}
+                                        未检测到 <code className="text-xs">{modelName}</code>{' '}
                                         （路径{' '}
-                                        <code className="text-[11px]">
+                                        <code className="text-xs">
                                             /app/models/finbert-zh-base
                                         </code>
                                         ）。请先执行{' '}
-                                        <code className="text-[11px]">
+                                        <code className="text-xs">
                                             backend/scripts/download_finbert.py
                                         </code>{' '}
                                         后再开启。
@@ -468,12 +423,12 @@ export const AdminSystemSettings: React.FC = () => {
                             <Alert
                                 type="warning"
                                 showIcon
-                                className="rounded-xl text-xs !py-2 !px-3"
+                                className="rounded-xl text-[13px] !py-2 !px-3"
                                 message="缺少 PyTorch 推理框架"
                                 description={
                                     <span>
                                         权重已就绪，但镜像未含 torch/transformers。请在服务器执行{' '}
-                                        <code className="text-[11px]">
+                                        <code className="text-xs">
                                             sudo bash deploy/install-model-deps.sh
                                         </code>{' '}
                                         补装后重试。
@@ -487,12 +442,12 @@ export const AdminSystemSettings: React.FC = () => {
                 {/* 页脚元信息 */}
                 <div className="border-t border-slate-100 bg-slate-50/60 px-5 py-3 sm:px-6">
                     <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
-                        <Text className="text-[11px] text-slate-400 truncate">
+                        <Text className="text-[13px] text-slate-400 truncate">
                             模型 <span className="font-mono text-slate-500">{modelName}</span>
                             <span className="mx-1.5 text-slate-300">·</span>
                             约 391M · 离线推理
                         </Text>
-                        <Text className="text-[11px] text-slate-400">
+                        <Text className="text-[13px] text-slate-400">
                             首次开启约 10–20s 加载；历史资讯需重建 enrichment
                         </Text>
                     </div>
