@@ -2652,10 +2652,14 @@ def test_modules_stay_within_the_file_budget_and_layering():
             if name == "round"
             else (base / f"decision_round_{name}.py")
         ).read_text(encoding="utf-8")
-        for name in ("core", "io", "round", "tick", "runner")
+        for name in ("core", "io", "round", "tick", "runner", "alerts")
     }
     for name, text in src.items():
         assert len(text.splitlines()) < 800, f"decision_round_{name} 超出单文件上限"
+    # alerts 是**叶子**：只认 core 的常量与 RoundResult。它会 import 谁都写在下面
+    # 那张反向依赖表里——可见性这层不许反过来碰执行/取数，否则「推不动就不推」
+    # 这条兜底会被它自己拉起的重依赖破坏。
+    assert "decision_round_alerts" not in src["core"]
     # core 不许碰 IO（否则「纯函数可单测」这条就没了）
     for banned in (
         "import redis",
@@ -2702,6 +2706,14 @@ def test_modules_stay_within_the_file_budget_and_layering():
             "decision_round_runner import",
         ),
         "tick": ("decision_round_runner import",),
+        # 可见性层（P4 附-②）只许 import core：它要在**跑完之后**用，任何往回拉
+        # 执行/取数/调度的依赖都会让它从「最后一步的旁路」变成链条上的一环。
+        "alerts": (
+            "decision_round_io import",
+            "services.trade.services.decision_round import",
+            "decision_round_tick import",
+            "decision_round_runner import",
+        ),
     }
     for layer, markers in forbidden.items():
         for marker in markers:

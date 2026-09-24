@@ -40,6 +40,11 @@ from datetime import datetime
 from typing import Any
 
 from backend.services.trade.services.decision_round import run_once
+from backend.services.trade.services.decision_round_alerts import (
+    MANUAL_RERUN_HINT,
+    Notifier,
+    alert_round,
+)
 from backend.services.trade.services.decision_round_core import (
     DEFAULT_GRACE_MIN,
     DONE_TTL_S,
@@ -97,7 +102,7 @@ def _abandoned_claim_note(client: Any, done_key: str) -> str:
         return ""
     return (
         f"且无 done 键（{done_key}）：可能上一轮中途夭折，自动 tick 不会再跑它；"
-        "要补这一槽：python backend/scripts/schedule_ctl.py run decision_round --force"
+        f"{MANUAL_RERUN_HINT}"
     )
 
 
@@ -125,6 +130,19 @@ def _agent_runs(
     return tuple((r.agent, replace(deps, load_llm=r.load_llm)) for r in runs)
 
 
+def _alert_user(deps: RoundDeps) -> str:
+    """告警要推给谁：决策账户（与下单同一个账户坐标）。取不到就返回空串。
+
+    不抛——账户解析是**通知**的前置，不是这一轮的成败条件；它炸了该由
+    ``alert_round`` 记 warning 后不推，而不是把已经跑完的一轮变成异常。
+    """
+    try:
+        return str(deps.account_user() or "").strip()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[DecisionRound] 告警账户解析失败，本轮失败通知不推: %s", exc)
+        return ""
+
+
 async def round_tick(
     *,
     deps: RoundDeps | None = None,
@@ -134,8 +152,14 @@ async def round_tick(
     force: bool = False,
     slot: RoundSlot | None = None,
     agent: str = "",
+    notify: Notifier | None = None,
 ) -> tuple[RoundResult, ...]:
     """一次轮询：到点的槽位逐个、槽位内**逐家**「认领 → 跑 → 置 done → 写状态」。
+
+    ``notify``：失败可见性的推口（P4 附-②）。``None`` ⇒ **真有事时**才现造生产通知器
+    （落库 → 前端通知中心；无事的一轮连它都不碰）；测试逐项换替身。只在真出了事时
+    用：aborted / 有腿失败 / 模型未出决策 / 执行段异常——「按设计跳过」不推。同一家
+    同一类失败一天一条，去重键走本层的原生客户端（同认领/状态键，理由见模块 docstring）。
 
     ``force``：**手动重跑**——抢占槽位认领（覆盖写）并忽略当日 done 键。只忽略 done
     键是不够的（认领键在 done 之前就把它挡住了，CLI 于是报「无到点槽位」）；覆盖写
@@ -287,6 +311,14 @@ async def round_tick(
                             exc,
                         )
                 write_status(client, result, at=deps.now())
+                # 失败可见性（P4 附-②）写在状态键**之后**：通知里若带跳转，落地时
+                # 状态键已经是在说的那一份；且推失败只记 warning，不影响下面的
+                # done 键与返回值——一轮真跑完的结果不许被通知层吃掉。
+                # ``notifier`` 留空交给 alert_round 现造：没有要推的事就连通知设施
+                # 都不碰（正常的一轮不该在通知链路上留足迹）。
+                await alert_round(
+                    result, notifier=notify, user_id=_alert_user(deps), redis=client
+                )
                 out.append(result)
         return tuple(out)
     finally:
