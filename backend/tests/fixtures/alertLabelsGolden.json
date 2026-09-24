@@ -1,0 +1,25 @@
+{
+  "_note": "告警文案标签金样：后端 backend/shared/alert_text.py 与前端 electron/src/features/desk/components/copilotModel.ts 各持一份实现（不同语言、不同产物），两边都对着这一份对拍。改口径必须同时改三处，否则两侧测试各红一条（与 researchScoreGolden.json 同一模式）。",
+  "severity": {
+    "critical": "严重",
+    "warn": "关注",
+    "info": "提示"
+  },
+  "type": {
+    "news:risk_event": "新闻风险",
+    "news:negative": "新闻利空",
+    "news:positive": "新闻利好",
+    "news:sentiment_spike": "情绪突变",
+    "anomaly:volume_surge": "异常放量",
+    "anomaly:price_limit_up": "涨停异动",
+    "anomaly:price_limit_down": "跌停异动",
+    "anomaly:price_surge": "大幅波动",
+    "anomaly:account_cancel_ratio": "撤单异常",
+    "anomaly:account_concentration": "集中度偏高",
+    "anomaly:data_jump": "数据跳变",
+    "anomaly:data_gap": "数据缺口",
+    "anomaly:model_ic_drop": "模型 IC 异常",
+    "regime": "市场状态"
+  },
+  "unknownPassthrough": ["anomaly:not_a_kind", "unknown:x", "no_such_type"]
+}

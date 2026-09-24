@@ -19,6 +19,21 @@ def test_alert_direction_mapping():
     assert alert_direction("anomaly:price_limit_down", {"kind": "price_limit_down"}) == "down"
     assert alert_direction("anomaly:price_limit_up", {"kind": "price_limit_up"}) == "up"
     assert alert_direction("anomaly:volume_surge", {"kind": "volume_surge"}) == "none"
+    # price_surge 是**双向** kind：方向只能从涨跌幅符号读（2026-09-24 前恒判 up，
+    # 而默认只推 warn=下行 ⇒ 每一条被推出去的都记反）。
+    assert alert_direction(
+        "anomaly:price_surge", {"kind": "price_surge", "metrics": {"pct_chg": -0.0986}}
+    ) == "down"
+    assert alert_direction(
+        "anomaly:price_surge", {"kind": "price_surge", "metrics": {"pct_chg": 0.077}}
+    ) == "up"
+    assert alert_direction(
+        "anomaly:price_surge", {"kind": "price_surge", "pctchg": -0.03}
+    ) == "down"  # 顶层拼写兜底
+    assert alert_direction("anomaly:price_surge", {"kind": "price_surge"}) == "none"  # 缺值不臆造
+    assert alert_direction(
+        "anomaly:price_surge", {"kind": "price_surge", "metrics": {"pct_chg": 0.0}}
+    ) == "none"  # 打平不可评分
     assert alert_direction("regime", {"state": "bear"}) == "down"
     assert alert_direction("regime", {"state": "bull"}) == "up"
     assert alert_direction("regime", {"state": "neutral"}) == "none"
@@ -194,6 +209,36 @@ def test_decide_push_levels_cooldown_rate_and_audience():
     row3 = {**row, "symbol": "000002.SZ"}
     assert svc._decide_push(holder["cfg"], fake, row3) == "throttled_rate"
     assert len(notes) == 2
+
+
+def test_decide_push_sends_human_text_not_the_envelope():
+    """推送出去的是中文人话：不带 JSON 花括号、不带浮点原值、标题有中文级别。
+
+    2026-09-24 实测故障：正文是告警信封的 ``json.dumps``，用户看到的是一串
+    ``{"alert_type": ...}``（正文构造已收到 ``shared/alert_text``，这条钉住接线）。
+    """
+    from backend.services.trade.services.sentinel_alert_service import SentinelConfig
+
+    svc, notes, holder = _service(cfg=SentinelConfig(enabled=True))
+    fake = _FakeRedis()
+    row = {
+        "alert_type": "anomaly:price_surge", "symbol": "600503.SH", "severity": "warn",
+        "ts": 1790233748.213, "market": "CN", "targets": ["600503.SH"],
+        "title": "600503.SH 大幅下行", "direction": "down",
+        "detail": {"payload": {"kind": "price_surge",
+                               "description": "涨跌幅 -9.86%（阈值 5.0%）",
+                               "metrics": {"price": 2.65,
+                                           "pct_chg": -0.09863945578231292}}},
+    }
+    assert svc._decide_push(holder["cfg"], fake, row) == "pushed"
+    note = notes[-1]
+    assert note["level"] == "warning"  # warn → notification 级别映射
+    assert note["title"].startswith("[关注]")
+    assert "{" not in note["content"] and "alert_type" not in note["content"]
+    assert "-0.09863945578231292" not in note["content"]
+    assert "涨跌幅 -9.86%（阈值 5.0%）" in note["content"]
+    # 信封照旧留在留痕行里给机器读（人读的只有推送文案）
+    assert row["detail"]["payload"]["metrics"]["pct_chg"] == pytest.approx(-0.09863945578231292)
 
 
 def test_decide_push_no_audience():

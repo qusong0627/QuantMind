@@ -22,6 +22,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from backend.services.api.user_app.middleware.auth import get_current_user
 from backend.shared.database_manager_v2 import get_session
+from backend.shared.market_labels import MARKET_LABELS
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +82,9 @@ SYSTEM_MODEL_LABELS: dict[str, str] = {
     "ensemble_cn": "多模型融合（CN）",
 }
 
-_MARKET_LABELS = {"CN": "A股", "HK": "港股", "US": "美股", "CRYPTO": "加密", "FUTURES": "期货"}
+# 市场中文名收敛到 shared/market_labels（唯一实现）——本文件曾自带一份，
+# 告警文案再自带一份就成三份；别名保留以免改动调用点。
+_MARKET_LABELS = MARKET_LABELS
 
 # 用户模型 id 前缀 → 中文（mdl_<market>_<kind>_<ts>_...；训练元数据缺 display_name 时的兜底名）
 _MODEL_MARKET_LABELS = {"cn": "A股", "hk": "港股", "us": "美股", "cust": "自定义", "crypto": "加密"}

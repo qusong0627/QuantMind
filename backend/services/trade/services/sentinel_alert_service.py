@@ -28,6 +28,8 @@ from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from backend.shared.alert_text import format_sentinel_alert
+
 logger = logging.getLogger(__name__)
 _SH_TZ = ZoneInfo("Asia/Shanghai")
 
@@ -369,21 +371,16 @@ class SentinelAlertService:
                 return "throttled_rate"
         except Exception as exc:  # noqa: BLE001
             self._note_error(f"rate: {exc}")
-        content = json.dumps(
-            {
-                "alert_type": row["alert_type"],
-                "market": row["market"],
-                "targets": row["targets"][:10],
-                "detail": row["detail"].get("payload", {}),
-            },
-            ensure_ascii=False,
-            default=str,
-        )
+        # 正文给人读（中文名 + 中文说明），**不再把告警信封 json.dumps 端给用户**：
+        # 用户收到的曾是一串 {"alert_type": "anomaly:price_surge", ...} 加浮点原值
+        # （2026-09-24 实测），标的是裸代码。信封照旧留在 sentinel_alerts.detail 里
+        # 给机器读；要下钻原始字段去交易台 → 实时情报。文案构造见 shared/alert_text。
+        title, content = format_sentinel_alert(row)
         ok = False
         try:
             ok = bool(
                 self._notifier(
-                    title=f"[{row['severity']}] {row['title']}",
+                    title=title,
                     content=content,
                     level=_LEVEL_TO_NOTIFY.get(row["severity"], "info"),
                 )

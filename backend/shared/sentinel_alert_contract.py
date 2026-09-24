@@ -86,6 +86,21 @@ def ensure_sentinel_alerts_table() -> bool:
         return False
 
 
+def _metric_pct(payload: Mapping[str, Any]) -> float | None:
+    """payload 里的涨跌幅（``metrics.pct_chg`` 优先，顶层两种拼写兜底）；读不到 → None。"""
+    metrics = payload.get("metrics")
+    sources: tuple[Mapping[str, Any], ...] = (
+        (metrics, payload) if isinstance(metrics, Mapping) else (payload,)
+    )
+    for src in sources:
+        for key in ("pct_chg", "pctchg"):
+            try:
+                return float(src[key])
+            except (KeyError, TypeError, ValueError):
+                continue
+    return None
+
+
 def alert_direction(alert_type: str, payload: Mapping[str, Any] | None = None) -> str:
     """告警方向（up/down/none）：T+1 命中判定用；none = 不可评分（只留痕）。"""
     payload = payload or {}
@@ -101,8 +116,18 @@ def alert_direction(alert_type: str, payload: Mapping[str, Any] | None = None) -
         if kind in {"price_limit_down", "data_jump", "data_gap", "model_ic_drop",
                     "account_cancel_ratio", "account_concentration"}:
             return "down"
-        if kind in {"price_limit_up", "price_surge"}:
+        if kind == "price_limit_up":
             return "up"
+        if kind == "price_surge":
+            # **双向 kind**：`price_surge` 同时承载「大幅上行（info）」与「大幅下行
+            # （warn）」（anomaly_detectors 按 pct 正负分开发），一律判 up 会把下行
+            # 告警记成「看涨」⇒ T+1 命中判定整类反向。默认只推 warn，也就是**被推出去的
+            # 每一条**都判反（2026-09-24 实测：600503.SH -9.86% 判成 up）。
+            # 方向只能从涨跌幅符号读；读不到就如实判「不可评分」，不臆造。
+            pct = _metric_pct(payload)
+            if pct is None or pct != pct or pct == 0:  # 缺值 / NaN / 打平
+                return "none"
+            return "up" if pct > 0 else "down"
         return "none"
     if atype.startswith("regime"):
         state = str(payload.get("state") or payload.get("regime") or "").strip().lower()
