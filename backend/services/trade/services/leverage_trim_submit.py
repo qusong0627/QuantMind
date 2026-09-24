@@ -160,6 +160,9 @@ async def submit_leg(
         "strategy_id": None,
         "client_order_id": cid,
         "remarks": f"{REMARK_PREFIX}减仓执行器 {price_note}",
+        # P1.6 TCA 基准价 = **计划时看到的价**（`plan_leg.price`，也是喂给保护价函数的
+        # 那个现价）。上面落库的 `price` 是派生出来的保护价，两者量的是不同的事。
+        "ref_price": float(plan_leg.price),
         # 整仓卖出的腿带上断言：派发层的整手预检读的是**当日快照**的可用量，而本执行器
         # 读的是柜台**实时**持仓 —— 当天已有成交时快照更大，一笔合法的碎股全清会被判
         # ``lot_blocked``（委托行已落库 ⇒ 每轮重试都被拒、该清的仓清不掉）。判据在

@@ -1066,6 +1066,75 @@ def backfill_inference_quality(horizon_days: int = 5, limit: int = 500) -> dict[
 
 
 # ---------------------------------------------------------------------------
+# 执行损耗 TCA 日读数（P1.6）
+# ---------------------------------------------------------------------------
+@celery_app.task(name="engine.tasks.tca_daily_report")
+def tca_daily_report(days: int = 30, tenant_id: str = "default") -> dict[str, Any]:
+    """执行损耗 TCA 日读数：取数 → 组装 → 落 ``data/reports/tca/{date}_tca.{json,md}``。
+
+    为什么是**日频快照**而不是"每天算当天"：``days`` 是滚动窗口（默认 30 天），
+    所以每份文件都能回答"最近一个月执行得怎么样"，而文件名给的是产出日。同一份
+    报告连着几天一模一样是正常的（昨天没有新成交），**不要**因此以为任务没跑——
+    看心跳（``schedule_ctl.py list`` 的 ``tca_report`` 行）。
+
+    薄样本**不算失败**：样本 < ``MIN_SAMPLE`` 时返回 ``attention=True``（与 CLI 的
+    退出码 1 同义）——"还没攒够"和"算错了"是两件事，混成一个失败率会让真正的故障
+    被淹没在噪声里。
+
+    取数口径（基准价、路径识别、已知边界）全在 ``backend/scripts/tca_report.py``，
+    本任务只负责"按日跑一次并落盘"，不复制任何判读逻辑。
+    """
+    from backend.shared.scheduler_registry import heartbeat as _sched_heartbeat
+
+    _sched_heartbeat("tca_report")  # T-P1-06 调度心跳
+    try:
+        from backend.scripts.tca_report import (
+            DEFAULT_DAYS,
+            ENV_ACCOUNT_USER,
+            MIN_SAMPLE,
+            collect,
+            reports_dir,
+            write_report,
+        )
+        from backend.shared.simulation_account_keys import resolve_db_account_user
+
+        user_id = resolve_db_account_user(ENV_ACCOUNT_USER)
+        window_days = int(days) if days is not None else DEFAULT_DAYS
+        rep = asyncio.run(
+            collect(days=window_days, tenant_id=tenant_id, user_id=user_id)
+        )
+        json_path, md_path = write_report(
+            rep, reports_dir(), stamp=str(rep["generated"])[:10]
+        )
+        sample_n = int((rep.get("sample") or {}).get("n") or 0)
+        summary = {
+            "status": "success",
+            "days": window_days,
+            "user_id": user_id,
+            "window": rep.get("window"),
+            "n_orders": rep.get("n_orders"),
+            "n_priced": rep.get("n_priced"),
+            "n_unpriced": rep.get("n_unpriced"),
+            "n_zero_fill": rep.get("n_zero_fill"),
+            "slip_bps_w": (rep.get("sample") or {}).get("slip_bps_w"),
+            "attention": sample_n < MIN_SAMPLE,
+            "json": str(json_path),
+            "md": str(md_path),
+        }
+        logger.info(
+            "[TCA] 报告完成: 委托 %s · 可定价 %s · 不可定价 %s%s",
+            summary["n_orders"],
+            summary["n_priced"],
+            summary["n_unpriced"],
+            "（样本不足，仅供参考）" if summary["attention"] else "",
+        )
+        return summary
+    except Exception as e:  # noqa: BLE001 —— 读数面故障不许把 celery 打崩
+        logger.exception("[TCA] 报告失败: %s", e)
+        return {"status": "failed", "error": str(e)}
+
+
+# ---------------------------------------------------------------------------
 # 市场定时同步调度（前端每市场配置 HH:MM，beat 每分钟派发检查）
 # ---------------------------------------------------------------------------
 @celery_app.task(name="engine.tasks.dispatch_market_sync")

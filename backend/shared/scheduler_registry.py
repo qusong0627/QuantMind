@@ -179,6 +179,17 @@ JOBS: tuple[JobSpec, ...] = (
         "backfill_quality", "推理质量回填", "celery_beat", "celery", "每日 02:30",
         None, True, 345600, None, "滞后 5 天回填真实收益算 Rank IC",
     ),
+    # P1.6 执行损耗 TCA：纯读（成交×委托×决策账 → 报告落盘），故挂在 celery 而非
+    # trade 常驻循环里——它不需要券商会话，也不需要与交易循环共享内存态。
+    # 心跳 TTL 4 天（同 backfill_quality）：cron 是 mon-sat，周末最长间隔 48h。
+    JobSpec(
+        "tca_report", "执行损耗 TCA（P1.6）", "celery_beat", "celery",
+        "周一至周六 16:40",
+        "TCA_REPORT_ENABLED", True, 345600,
+        "python backend/scripts/schedule_ctl.py run tca_report",
+        "成交损耗读数（基准=orders.ref_price，正号=比基准差）→ "
+        "data/reports/tca/{date}_tca.{json,md}；补写前的老成交计「不可定价」不倒推基准",
+    ),
     # T-RC-14：两个关键交易循环此前不在册——它们挂掉时 C07 无项可判，
     # 表现为「体检全绿但策略不再调仓」。心跳写 ``qm:sched:hb:*``（db0）。
     JobSpec(

@@ -176,6 +176,7 @@ def test_all_jobs_heartbeat_wired_in_source():
         "strategy_lab_scan",
         "backfill_quality",
         "market_sync_dispatch",
+        "tca_report",
     ):
         assert f'_sched_heartbeat("{job_key}")' in celery_src, f"{job_key} 未接心跳"
 
@@ -187,6 +188,7 @@ def test_all_jobs_heartbeat_wired_in_source():
         "strategy_lab_scan",
         "backfill_quality",
         "market_sync_dispatch",
+        "tca_report",
     }
     registry = {j.key for j in JOBS if j.heartbeat_ttl is not None}
     assert registry == wired, f"注册表与接线不一致: {registry ^ wired}"
@@ -224,6 +226,8 @@ def test_schedule_ctl_dispatch_covers_rerun_declared_jobs():
         "decision_round",
         # P2.6 减仓执行器
         "leverage_trim",
+        # P1.6 执行损耗读数面（纯读，重跑无副作用）
+        "tca_report",
     }
 
     # 未知任务 → 退出码 2（纯函数路径，不触发真实执行）

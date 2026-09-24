@@ -125,7 +125,13 @@ async def _reference_prices(symbols: list[str]) -> dict[str, float]:
 
 
 async def _submit_via_dispatcher(
-    *, symbol: str, quantity: float, price: float, cid: str, user_id: str
+    *,
+    symbol: str,
+    quantity: float,
+    price: float,
+    cid: str,
+    user_id: str,
+    ref_price: float = 0.0,
 ) -> dict:
     from backend.services.live_trading.services.internal_strategy_dispatcher import (
         dispatch_internal_strategy_order,
@@ -146,6 +152,13 @@ async def _submit_via_dispatcher(
                 "strategy_id": None,
                 "client_order_id": cid,
                 "remarks": "flatten:manual",
+                # P1.6 TCA 基准价 = **决策时看到的价**（QuantDB 最近收盘，即下面派生限价的
+                # 基准），不是派生的那个 `price`（收盘 × (1 − limit_pct) 的限价）。
+                # 拿限价当基准会把「我们主动让出的那部分折价」算成执行损耗——
+                # 读出来永远是 `≈ limit_pct × 1e4` 的自证数（同 sltp/trim/manual 腿）。
+                # 取数失败时这里天然是 0.0 → 派发层 `_positive_or_none` 落空，
+                # 报告按「不可定价」计数，而不是倒推一个假基准。
+                "ref_price": ref_price,
             },
             user_id=user_id,
             tenant_id="default",
@@ -257,6 +270,7 @@ async def _run(args: argparse.Namespace) -> int:
                     price=row["limit"],
                     cid=cid,
                     user_id=args.user_id,
+                    ref_price=row["reference"],
                 )
             else:
                 result = await _submit_via_direct(

@@ -101,6 +101,14 @@ NEWS_MATCHER_RELOAD_SEC = int(os.getenv("NEWS_MATCHER_RELOAD_SEC", "600"))
 NEWS_TAG_ROLLUP_ENABLED = os.getenv("NEWS_TAG_ROLLUP_ENABLED", "true").lower() == "true"
 NEWS_TAG_WINDOW_DAYS = int(os.getenv("NEWS_TAG_WINDOW_DAYS", "20"))
 
+# 执行损耗 TCA 日读数（P1.6）。开关独立于其它新闻/推理任务——理由同
+# NEWS_TAG_ROLLUP_ENABLED：注册表按 switch_env 判「关闭」还是「停摆」，
+# 借别人的开关会让体检把「本就没开」报成「停摆」。
+TCA_REPORT_ENABLED = os.getenv("TCA_REPORT_ENABLED", "true").lower() == "true"
+# 滚动窗口天数（含产出当天）。取数走 orders.ref_price（决策链取价时刻），
+# 补写是 2026-09-24 上的，故窗口开头的成交天然落在「不可定价」——报告里如实分列。
+TCA_REPORT_DAYS = int(os.getenv("TCA_REPORT_DAYS", "30"))
+
 # Celery配置
 beat_schedule = {}
 if AUTO_INFERENCE_ENABLED:
@@ -117,6 +125,18 @@ if AUTO_INFERENCE_ENABLED:
             "schedule": crontab(minute="30", hour="2", day_of_week="1-6"),
             "kwargs": {"horizon_days": 5, "limit": 500},
         },
+    }
+
+# 执行损耗 TCA 日读数（P1.6）：16:40 = 盘后（15:00 收）且晚于 eval_scores（16:00）
+# 与 advice_generator（16:20）——那些任务不看成交，但把报表挤在同一分钟内只会让
+# 盘后的 PG 更忙。**全量落盘**（滚动 30 天窗口，一份/天），不推送：这是读数面，
+# 要人在仪表盘上看，不是报警。沿用 backfill_quality 的 mon-sat 形态：周日不跑，
+# 周六跑（周六那份覆盖含周五收盘的窗口，周末打开也看得到最近一个月）。
+if TCA_REPORT_ENABLED:
+    beat_schedule["tca-daily-report"] = {
+        "task": "engine.tasks.tca_daily_report",
+        "schedule": crontab(minute="40", hour="16", day_of_week="1-6"),
+        "kwargs": {"days": TCA_REPORT_DAYS},
     }
 
 if NEWS_ENRICH_ENABLED:

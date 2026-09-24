@@ -102,6 +102,11 @@ class Order(Base, TimestampMixin):
     # 不建索引：取值域是「账号下同时跑着几家模型」（个位数），任何真实查询都会带上
     # 日期/账户前缀，单列 agent 索引选不中——真需要时按查询形态建复合索引。
     agent = Column(String(64), nullable=True)
+    # P1.6 TCA 基准价：**决策时点我们看到的那个价**（LLM 腿 = 决策报价；镜像腿 =
+    # 模拟虚拟成交价/强平盘口价），执行损耗报告按它算滑点。可空，且**老单恒空**——
+    # 空缺如实计入"不可定价"，不用成交价倒推（倒推出来的滑点是自证式的假读数）。
+    # 与 ``price``（我方限价，衡量口径是"吃掉多少缓冲"）是两回事，别互相顶替。
+    ref_price = Column(Float, nullable=True)
     remarks = Column(String(500), nullable=True)
     version = Column(Integer, nullable=False, default=1)
 

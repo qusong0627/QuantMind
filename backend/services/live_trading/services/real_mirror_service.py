@@ -1315,6 +1315,11 @@ async def _submit_payload(
     base_price = live_price if bypass else ref_price
     if base_price <= 0:
         return _skip("no_reference_price")
+    # TCA 基准价（P1.6）= 决策腿当时的价 = ``live_price``（载荷里那句 price：模拟腿的
+    # 虚拟成交价，或强平单的当时盘口）。**刻意不用上面那个昨收 ``ref_price``**：它是
+    # 偏离闸门的锚，拿它当基准会把隔夜跳空算成"执行损耗"。``live_price`` 非正时留空，
+    # 报告按"不可定价"计数——编一个价会让滑点变成自证式的假读数。
+    tca_ref_price = live_price if live_price > 0 else None
     # 限价：调用方逐笔给了就用它的（单边带内才放行），没给就按参考价 ± 2% 派生。
     # 预检（push_orders）用同一个函数算过一遍，这里是**真金白银的最终边界**——
     # 队列里的载荷可能来自另一个进程/更早的版本，一律重核，不信任输入。
@@ -1433,6 +1438,10 @@ async def _submit_payload(
                 "remarks": f"mirror:{payload.get('source') or 'sim'}",
                 # P2.7：归属随真单落 orders.agent（队列载荷是跨进程数据，缺了就空）
                 "agent": payload.get("agent") or None,
+                # P1.6 TCA 基准价 = **决策腿当时看到的价**（载荷 price，即模拟虚拟
+                # 成交价 / 强平盘口价），不是上面那个昨收 `ref_price`——那个是偏离闸门
+                # 的锚，用它当基准会把隔夜跳空算进滑点里，读出"执行很差"的假象。
+                "ref_price": tca_ref_price,
             },
             user_id=user_id,
             tenant_id=tenant,

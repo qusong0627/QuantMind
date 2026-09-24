@@ -64,6 +64,28 @@ def _normalize_strategy_id(raw: Any) -> int | None:
     return parsed if parsed > 0 else None
 
 
+def _positive_or_none(raw: Any) -> float | None:
+    """正数 → float，其余（None/0/负/NaN/非数字）→ None。
+
+    ``ref_price`` 是 **TCA 观测字段**（决策时点参考价），与 ``_normalize_strategy_id``
+    同一条纪律：``OrderCreate`` 的 ``gt=0`` 会把脏值变成**校验错**，代价是整笔真单被
+    打回——观测字段没有这个权力。弃值不编值：报告按"不可定价"如实计数。
+
+    ``bool`` 与 ``exec_cost._num`` 同一口径判脏：``True`` 是 ``int`` 的子类，
+    ``float(True) == 1.0`` 会一路通过正数检查，最后在报告里变成一笔"¥1 成交"的
+    假基准价。价格列里出现布尔值永远是缺陷，不是数据。
+    """
+    if isinstance(raw, bool):
+        return None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if value != value or value in (float("inf"), float("-inf")):  # NaN / ±inf
+        return None
+    return value if value > 0 else None
+
+
 # 强平/止损类来源标记：这些订单"一定要成交"，镜像时豁免 2% 偏离闸门
 # （限价改用盘口价基准，见 real_mirror_service._submit_payload）。
 _FORCED_EXIT_REMARK_PREFIXES = ("sltp:", "flatten:", "forced-exit:", "trim:")
@@ -605,6 +627,10 @@ async def dispatch_internal_strategy_order(
                 # 超宽时 schema 的 max_length 会**抛校验错**（整笔单丢失），
                 # 而共享实现按列宽截断——与 sim_orders 侧逐字节同值。
                 agent=normalize_agent(order_data.get("agent")) or None,
+                # P1.6 TCA 基准价：调用方（镜像/强平/人工腿）给的**决策时点参考价**。
+                # 这里只做透传与**正数校验**：0/负/NaN 一律丢弃（`gt=0` 会抛校验错，
+                # 把整笔真单打回去——比缺一个观测字段的代价大得多）。
+                ref_price=_positive_or_none(order_data.get("ref_price")),
             ),
         )
     except IntegrityError:

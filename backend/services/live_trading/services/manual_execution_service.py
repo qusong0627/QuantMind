@@ -2812,6 +2812,10 @@ class ManualExecutionService:
                     "client_order_id": f"manual-{task_id[-8:]}-{index:04d}",
                     "order_type": order_type,
                     "trading_mode": trading_mode,
+                    # P1.6 TCA 基准价 = **预览价**（用户在预览里看到、据此点确认的那个价），
+                    # 而 `price` 是保护限价 —— 用保护价当基准只会读出"损耗恰好等于保护比例"
+                    # 的自证式结果。
+                    "ref_price": preview_price,
                     "agent_price_mode": "protect_limit",
                     "protect_price_ratio": protect_price_ratio,
                     "remarks": (

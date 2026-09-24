@@ -263,6 +263,9 @@ class OrderService:
             # P2.7 分账：归属随订单落库（成交回报只带订单，不带决策上下文）。
             # 截断口径只此一处（``normalize_agent``）：与契约列同宽。
             agent=normalize_agent(order_data.agent) or None,
+            # P1.6 TCA 基准价：决策时点的参考价（与 price 是两回事，见契约列注释）。
+            # 缺省 None 是**如实缺省**：老腿/前端直单没有这个价，报告按"不可定价"计。
+            ref_price=order_data.ref_price,
             remarks=order_data.remarks,
             status=OrderStatus.PENDING,
         )

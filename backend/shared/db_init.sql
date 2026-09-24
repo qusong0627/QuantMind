@@ -866,6 +866,9 @@ CREATE TABLE IF NOT EXISTS orders (
     -- P2.7 分账归属：这条真单是哪家模型（LLM 决策腿）下的。成交回报只带来订单、
     -- 不带决策上下文，回写分账账本的 agent 只能从这一列读。非 LLM 腿恒 NULL。
     agent           VARCHAR(64),
+    -- P1.6 TCA 基准价：决策时点的参考价（LLM 腿=决策报价，镜像腿=模拟虚拟成交价）。
+    -- 老单为空 → 该笔进"不可定价"，倒推假基准比缺数更坏。写入口径见 order_contract。
+    ref_price       DOUBLE PRECISION,
     remarks         VARCHAR(500),
     version         INTEGER NOT NULL DEFAULT 1,
     created_at      TIMESTAMP NOT NULL DEFAULT NOW(),

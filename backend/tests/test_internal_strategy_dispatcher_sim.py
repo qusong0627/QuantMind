@@ -6,6 +6,7 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from backend.services.live_trading.services.internal_strategy_dispatcher import (
+    _positive_or_none,
     dispatch_internal_strategy_order,
 )
 from backend.services.simulation.services.order_submission_service import (
@@ -128,3 +129,19 @@ def test_simulation_dispatch_skips_duplicate_remark():
         ctor.assert_not_called()
 
     asyncio.run(_run())
+
+
+# ── P1.6 TCA 基准价的入参守卫 ────────────────────────────────────────
+def test_positive_or_none_drops_dirty_prices_instead_of_raising():
+    """``ref_price`` 是观测字段：脏值只能**丢**，不能让 ``OrderCreate`` 的 ``gt=0``
+    把整笔真单变成校验错。
+
+    （与 ``_normalize_strategy_id`` 同一条纪律：镜像单曾因 ``strategy_id=0`` 触发
+    ``gt=0`` 被 422 打回，压测里表现为"镜像单全部失败"。）
+    """
+    assert _positive_or_none(10.5) == 10.5
+    assert _positive_or_none("10.5") == 10.5
+    assert _positive_or_none(1) == 1.0
+    for dirty in (None, "", 0, 0.0, -1, "abc", float("nan"), float("inf"),
+                  float("-inf"), True, False, [], {}):
+        assert _positive_or_none(dirty) is None, dirty

@@ -1250,6 +1250,10 @@ async def _execute_trigger(
         "strategy_id": None,
         "client_order_id": cid,
         "remarks": remarks,
+        # P1.6 TCA 基准价 = **触发时的现价**（本函数一路用的 `price`，也是告警里那句
+        # "现价 X"）：保护腿真正要回答的问题是"从看到价到成交，掉价多少"，而不是
+        # "我的保护价排得贵不贵"（那是 cushion 的口径，另有其数）。
+        "ref_price": price,
         # 卖光实时可用量 = 整仓卖出（零股合法）：数量来自柜台**实时**持仓，而派发层的
         # 整手预检只看当日快照 —— 快照比实时大时合法的碎股全清会被判 ``lot_blocked``，
         # 该止损的时候止损单发不出去（委托行已落库，每轮重试都被拒）。
@@ -1624,6 +1628,10 @@ async def _apply_remainder_policy(
         "strategy_id": None,
         "client_order_id": cid,
         "remarks": f"sltp:requote{(st.get('reason') or '')[:32]}",
+        # P1.6 TCA 基准价 = 这次重挂所依据的价（`ref`：当前市价，三级兜底见上）。
+        # 按定义它就是"决策时点我们看到的那个价"——兜底到原委托价时也一样如实记录，
+        # 不假装它是新鲜行情。
+        "ref_price": ref,
     }
     try:
         resp = await deps.dispatch(order_data, user_id)

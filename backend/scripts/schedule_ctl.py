@@ -329,6 +329,51 @@ def _run_health_recheck(date_str: str | None, force: bool) -> int:
     return 0 if not summary.get("errors") else 1
 
 
+def _run_tca_report(date_str: str | None, force: bool) -> int:
+    """执行损耗 TCA 读数（P1.6）：重跑 = 立刻按默认窗口（30 天）重算并落盘。
+
+    重跑**覆盖当日同一份文件**（报告是快照，不是台账）——同一天跑两次不会留两份，
+    也不会追加。要换窗口（比如全历史 ``--days 0``）请直接用读数面本身：
+    ``python backend/scripts/tca_report.py --days 0``；``--date`` 在这里**不看**
+    （窗口是"距今天数"而不是某一天，给了会被当成不存在的语义静默忽略）。
+    """
+    import asyncio
+
+    from backend.scripts.tca_report import (
+        DEFAULT_DAYS,
+        ENV_ACCOUNT_USER,
+        MIN_SAMPLE,
+        collect,
+        render,
+        reports_dir,
+        write_report,
+    )
+    from backend.shared.database_manager_v2 import close_database
+    from backend.shared.simulation_account_keys import resolve_db_account_user
+
+    user_id = resolve_db_account_user(ENV_ACCOUNT_USER)
+
+    async def _run():
+        try:
+            return await collect(
+                days=DEFAULT_DAYS, tenant_id="default", user_id=user_id
+            )
+        finally:
+            await close_database()
+
+    rep = asyncio.run(_run())
+    print("\n".join(render(rep)))
+    json_path, md_path = write_report(
+        rep, reports_dir(), stamp=str(rep["generated"])[:10]
+    )
+    print(f"\n[TCA] 已落盘 {json_path} / {md_path}")
+    sample_n = int((rep.get("sample") or {}).get("n") or 0)
+    if sample_n < MIN_SAMPLE:
+        print(f"[TCA] 样本 {sample_n} < {MIN_SAMPLE}：只展示不做结论（退出码 1 = 注意）")
+        return 1
+    return 0
+
+
 _RERUN_DISPATCH: dict[str, Callable[[str | None, bool], int]] = {
     # 键 = 注册表任务键（唯一标识，禁止别名——测试防止漂移）
     "sim_eod": _run_sim_eod,
@@ -348,6 +393,8 @@ _RERUN_DISPATCH: dict[str, Callable[[str | None, bool], int]] = {
     "decision_round": _run_decision_round,
     # P2.6 减仓执行器（真钱风控动作）：同上，「重跑」= 立刻真减一次。
     "leverage_trim": _run_leverage_trim,
+    # P1.6 TCA 读数面：纯读，重跑 = 重算并覆盖当日报告（无副作用）。
+    "tca_report": _run_tca_report,
 }
 
 

@@ -42,8 +42,15 @@ def test_build_sim_client_order_id():
 
 
 def test_column_lists():
+    # 精确集合（不是"包含"）：加列必须是一次有意的改动——``ref_price``（P1.6 TCA
+    # 基准价）就是带着自己的写入点与报告口径一起进来的，改这行的人该看见它。
     assert {n for n, _ in SIM_ORDER_COLUMNS} == {"client_order_id", "source", "agent"}
-    assert {n for n, _ in ORDER_COLUMNS} == {"price_source", "source", "agent"}
+    assert {n for n, _ in ORDER_COLUMNS} == {
+        "price_source",
+        "source",
+        "agent",
+        "ref_price",
+    }
 
 
 def test_missing_columns_logic():

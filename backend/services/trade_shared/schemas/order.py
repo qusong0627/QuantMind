@@ -45,6 +45,10 @@ class OrderCreate(OrderBase):
     trading_mode: TradingMode | None = None
     #: P2.7 分账：这条腿属于哪家模型（镜像单从模拟单继承）。非 LLM 腿留空。
     agent: str | None = Field(None, max_length=64)
+    #: P1.6 TCA 基准价：**决策时点我们看到的那个价**（LLM 腿 = 决策报价；镜像腿 =
+    #: 模拟虚拟成交价/强平盘口价）。**不是** ``price``（我方限价 = 愿意出的价），
+    #: 两者量的是不同的事——前端直单没有决策参考价，一律留空。
+    ref_price: float | None = Field(None, gt=0)
 
 
 class OrderUpdate(BaseModel):
