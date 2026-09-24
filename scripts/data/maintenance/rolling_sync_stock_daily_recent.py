@@ -215,7 +215,8 @@ def _enrich_gap_columns(db_url: str, start_date: date, end_date: date) -> None:
 
     每交易日（features_daily）：is_st / idx_hs300 / idx_margin / idx_all /
       roe(=net_profit_ttm/equity，小数口径) / bp(=1/pb) / ep_ttm(=1/pe_ttm) /
-      ln_mv_total(=ln(total_mv))。
+      ln_mv_total(=ln(total_mv)) / turnover_rate(=hs_turnover，百分数) /
+      listed_days(=(trade_date - list_date).days)。
     静态（index_weights / sector_concept）：idx_zz1000 / idx_chinext / concept_*。
     """
     import os
@@ -235,10 +236,21 @@ def _enrich_gap_columns(db_url: str, start_date: date, end_date: date) -> None:
     fd = hub.fetch_features_daily(start=start_date, end=end_date)
     if not fd.empty and "trade_date" in fd.columns:
         mv = _to_num(fd.get("total_mv"))
+        trade_dt = pd.to_datetime(fd["trade_date"])
+        list_raw = fd.get("list_date")
+        list_dt = (
+            pd.to_datetime(
+                list_raw.astype(str).str.replace(r"\.0$", "", regex=True),
+                format="%Y%m%d",
+                errors="coerce",
+            )
+            if list_raw is not None
+            else pd.Series(pd.NaT, index=fd.index)
+        )
         per_date = pd.DataFrame(
             {
                 "symbol": fd["symbol"].map(lambda s: StockCodeUtil.to_prefix(str(s))),
-                "trade_date": pd.to_datetime(fd["trade_date"]).dt.date,
+                "trade_date": trade_dt.dt.date,
                 "is_st": _to_num(fd.get("is_st")).fillna(0).astype(int),
                 "idx_hs300": _to_num(fd.get("in_hs300")).fillna(0).astype(int),
                 "idx_margin": _to_num(fd.get("is_margin")).fillna(0).astype(int),
@@ -249,9 +261,14 @@ def _enrich_gap_columns(db_url: str, start_date: date, end_date: date) -> None:
                 "bp": (1.0 / _to_num(fd.get("pb")).replace(0, np.nan)).round(6),
                 "ep_ttm": (1.0 / _to_num(fd.get("pe_ttm")).replace(0, np.nan)).round(6),
                 "ln_mv_total": np.log(mv.where(mv > 0)).round(6),
+                "turnover_rate": _to_num(fd.get("hs_turnover")).round(6),
+                "listed_days": (trade_dt - list_dt).dt.days,
             }
         )
-        rows = [tuple(r) for r in per_date.itertuples(index=False, name=None)]
+        rows = [
+            tuple(None if pd.isna(v) else v for v in r)
+            for r in per_date.itertuples(index=False, name=None)
+        ]
         conn = psycopg2.connect(db_url)
         try:
             with conn.cursor() as cur:
@@ -260,18 +277,23 @@ def _enrich_gap_columns(db_url: str, start_date: date, end_date: date) -> None:
                     "symbol text, trade_date date, is_st int, idx_hs300 int, "
                     "idx_margin int, idx_all int, roe double precision, "
                     "bp double precision, ep_ttm double precision, "
-                    "ln_mv_total double precision) ON COMMIT DROP"
+                    "ln_mv_total double precision, turnover_rate double precision, "
+                    "listed_days int) ON COMMIT DROP"
                 )
                 execute_values(cur, "INSERT INTO _sdl_per_date VALUES %s", rows, page_size=5000)
                 cur.execute(
                     "UPDATE stock_daily_latest s SET "
                     "is_st=m.is_st, idx_hs300=m.idx_hs300, idx_margin=m.idx_margin, "
                     "idx_all=m.idx_all, roe=m.roe, bp=m.bp, ep_ttm=m.ep_ttm, "
-                    "ln_mv_total=m.ln_mv_total "
+                    "ln_mv_total=m.ln_mv_total, turnover_rate=m.turnover_rate, "
+                    "listed_days=m.listed_days "
                     "FROM _sdl_per_date m "
                     "WHERE s.symbol=m.symbol AND s.trade_date=m.trade_date"
                 )
-                LOGGER.info("富化每交易日列(is_st/idx_hs300/idx_margin/roe/bp/ep/ln_mv): %s 行", cur.rowcount)
+                LOGGER.info(
+                    "富化每交易日列(is_st/idx_hs300/idx_margin/roe/bp/ep/ln_mv/turnover/listed_days): %s 行",
+                    cur.rowcount,
+                )
             conn.commit()
         finally:
             conn.close()
