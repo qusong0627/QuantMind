@@ -217,19 +217,28 @@ async def test_sync_skips_order_without_exchange_id_and_symbol():
 # ============ 真单时段闸门（咽喉点） ============
 
 class TestRealOrderSessionGate:
-    """``place_order`` 是**真单唯一的物理出口**（滚动单、L2 主单、L2 在途重挂
-    三条路都汇到这里）。闸门放这一层而不是各调用点：调用点漂移一次就是一次
-    真钱事故——A 股委托在盘外要么被柜台拒、要么被客户端挂成次日单。
+    """``place_order`` 是滚动单 / L2 主单 / L2 在途重挂三条路的汇合点。闸门放这一
+    层而不是各调用点：调用点漂移一次就是一次真钱事故——A 股委托在盘外要么被柜台
+    拒、要么被客户端挂成次日单。
 
-    时段事实一律**注入**（``is_trading_time``），不读墙上钟：否则同样的用例
-    白天绿、收盘后红。
+    ⚠️ 它**不是**真单唯一的物理出口（2026-09-24 更正）：``broker_client`` 的五个
+    真券商通道走同一座桥，闸门已补齐到那五处，共用同一句拒因
+    （``test_broker_session_gate.py``）。本类的断言不变。
+
+    时段事实一律**注入**（``trading_session.is_trading_time``），不读墙上钟：否则
+    同样的用例白天绿、收盘后红。
     """
 
     @staticmethod
     def _wire(monkeypatch, *, in_session: bool) -> list[tuple[str, dict]]:
-        from backend.services.live_trading.services import tdx_push_service as push_mod
+        from backend.services.live_trading.services import (
+            tdx_push_service as push_mod,
+            trading_session,
+        )
 
-        monkeypatch.setattr(push_mod, "is_trading_time", lambda now=None: in_session)
+        # 注入打在**谓词所在模块**上：闸门（`real_order_session_refusal`）在调用时
+        # 才查这个全局名，所以它跟着一起被接管；也免得用例去认闸门函数的名字。
+        monkeypatch.setattr(trading_session, "is_trading_time", lambda now=None: in_session)
         sent: list[tuple[str, dict]] = []
 
         async def _fake_post(path: str, payload: dict) -> dict:
@@ -300,4 +309,9 @@ class TestRealOrderSessionGate:
         assert "from backend.services.live_trading.services.trading_session import" in src, (
             "place_order 的时段闸门没走 trading_session 唯一口径"
         )
-        assert "is_trading_time()" in src, "闸门没读时段谓词——它就不会拦任何东西"
+        # 闸门走的是**共用拒因函数**（各写一份文案 → 用户在委托备注里看到的原因
+        # 会取决于他从哪条路进来）。该函数本身在 trading_session 里读 is_trading_time，
+        # 窗口口径仍然只有一份。
+        assert "real_order_session_refusal(" in src, (
+            "闸门没走 trading_session 的共用判据——它要么没拦任何东西，要么自写了一份时间判断"
+        )

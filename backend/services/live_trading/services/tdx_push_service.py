@@ -13,7 +13,9 @@ import os
 import uuid
 from typing import Any, Optional
 
-from backend.services.live_trading.services.trading_session import is_trading_time
+from backend.services.live_trading.services.trading_session import (
+    real_order_session_refusal,
+)
 from backend.shared.database_manager_v2 import get_session
 from backend.shared.order_contract import build_bridge_plan_id
 
@@ -155,12 +157,18 @@ class TdxPushService:
         见 ``trading_session``）。其余时间提交的委托要么被柜台拒，要么被客户端
         **挂成次日单**——后者尤其坏：一笔"现在"的决定变成了明天的无主委托。
 
-        闸门放在这里而不是各调用点：本函数是**真单唯一的物理出口**（滚动单、
-        L2 主单、L2 在途重挂三条路都汇到这里），而 L2 实时循环是 24/7 常驻的
-        ——调用点漂移一次就是一次真钱事故。撤单不走此闸门：撤单是减小风险的
-        动作，任何时间都该放行（见 ``cancel_order``）。
+        闸门放在这里而不是各调用点：本函数是滚动单/L2 主单/L2 在途重挂三条路的
+        汇合点，而 L2 实时循环是 24/7 常驻的——调用点漂移一次就是一次真钱事故。
+        撤单不走此闸门：撤单是减小风险的动作，任何时间都该放行（见 ``cancel_order``）。
+
+        ⚠️ 「真单**唯一**的物理出口」是 2026-09-24 之前的说法，**不成立**：
+        ``broker_client`` 的五个真券商通道（TdxBroker/RedisBroker/QMTBroker/
+        QMTBridgeBroker/QmtExecBroker）走的是同一个 Windows 桥，此前全无闸门。
+        现在两边共用 ``trading_session.real_order_session_refusal`` 的同一句拒因
+        （见 ``test_broker_session_gate.py``）。
         """
-        if not is_trading_time():
+        refusal = real_order_session_refusal()
+        if refusal:
             logger.warning(
                 "[TdxPush] 非交易时段拒发真单: %s %s %s股", stock_code, side, volume
             )
@@ -169,7 +177,7 @@ class TdxPushService:
             return {
                 "status": "error",
                 "skipped": "out_of_session",
-                "message": "非交易时段（A 股 09:15–11:35 / 12:55–15:05），委托未提交",
+                "message": refusal,
                 "orders": [],
             }
         order = {

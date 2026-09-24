@@ -116,7 +116,15 @@ def _ns_of(plan_id: str) -> int:
 
 
 def test_同秒内两笔单得到不同_plan_id(monkeypatch: Any) -> None:
-    """止损批量卖出多只票：同一秒内连发两笔，桥不得当成同一个计划。"""
+    """止损批量卖出多只票：同一秒内连发两笔，桥不得当成同一个计划。
+
+    时段事实必须**注入**：``TdxBroker.place_order`` 有真单时段闸门（与
+    ``tdx_pusher`` 共用 ``trading_session.real_order_session_refusal``），
+    不注入的话本用例白天绿、收盘后红。
+    """
+    from backend.services.live_trading.services import trading_session
+
+    monkeypatch.setattr(trading_session, "is_trading_time", lambda now=None: True)
     clock = _FakeClock(_BASE_NS)
     monkeypatch.setattr(time, "time", clock.time)
     monkeypatch.setattr(time, "time_ns", clock.time_ns)
@@ -146,8 +154,11 @@ def test_同秒内两笔单得到不同_plan_id(monkeypatch: Any) -> None:
     )
 
 
-def test_显式_client_order_id_原样透传() -> None:
+def test_显式_client_order_id_原样透传(monkeypatch: Any) -> None:
     """调用方给了幂等键就用它（下游按此键对账，不得二次加工）。"""
+    from backend.services.live_trading.services import trading_session
+
+    monkeypatch.setattr(trading_session, "is_trading_time", lambda now=None: True)
     cid = "sltp-600036-20260923-r1"
     assert build_bridge_plan_id(cid) == cid
 
@@ -172,10 +183,13 @@ def test_推送服务缺省号同秒内也不撞(monkeypatch: Any) -> None:
     时段事实必须**注入**：``place_order`` 有真单时段闸门（盘外不发单），
     不注入的话本用例白天绿、收盘后红——测的是墙上钟，不是缺省号。
     """
-    from backend.services.live_trading.services import tdx_push_service as push_mod
+    from backend.services.live_trading.services import trading_session
     from backend.services.live_trading.services.tdx_push_service import tdx_pusher
 
-    monkeypatch.setattr(push_mod, "is_trading_time", lambda now=None: True)
+    # 注入打在**谓词所在模块**上：闸门（real_order_session_refusal）与所有时段
+    # 消费方共用它。此前打在 push_mod.is_trading_time 上——2026-09-24 闸门改走
+    # 共用拒因函数后那个补丁静默失效（用例在盘中仍然绿，盘外才红）。
+    monkeypatch.setattr(trading_session, "is_trading_time", lambda now=None: True)
     clock = _FakeClock(_BASE_NS)
     monkeypatch.setattr(time, "time", clock.time)
     monkeypatch.setattr(time, "time_ns", clock.time_ns)

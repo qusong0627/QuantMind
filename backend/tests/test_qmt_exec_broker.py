@@ -8,12 +8,24 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+import pytest
+
+from backend.services.live_trading.services import trading_session
 from backend.services.live_trading.services.broker_client import (
     QmtExecBroker,
     check_price_protection_band,
     create_broker,
 )
 from backend.services.live_trading.services.qmt_exec_client import QmtExecError
+
+
+@pytest.fixture(autouse=True)
+def _in_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    """时段事实**注入**：本文件的被测对象 ``QmtExecBroker.place_order`` 有真单时段
+    闸门（盘外不发单，见 ``test_broker_session_gate.py``），不注入的话本文件
+    白天绿、收盘后集体转红——测的是墙上钟而不是映射逻辑。
+    """
+    monkeypatch.setattr(trading_session, "is_trading_time", lambda now=None: True)
 
 
 class FakeExecClient:

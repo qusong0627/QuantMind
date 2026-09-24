@@ -19,12 +19,41 @@ if TYPE_CHECKING:
 
 from sqlalchemy import text
 
+from backend.services.live_trading.services.trading_session import (
+    real_order_session_refusal,
+)
 from backend.services.trade_shared.trade_config import settings
 from backend.shared.auth import get_internal_call_secret
 from backend.shared.database_manager_v2 import get_session
 from backend.shared.order_contract import build_bridge_plan_id
 
 logger = logging.getLogger(__name__)
+
+
+def _session_refusal() -> "BrokerResult | None":  # noqa: F821 - 定义在下方（无 future import）
+    """真单时段闸门：盘外不下单，返回与桥拒单同形的失败结果。
+
+    **为什么闸在券商里而不是在 ``TradingEngine.submit_order``**：判据是"这条
+    通道会不会真的碰到柜台"，而这件事各券商自己知道得最清楚——``TradingEngine``
+    拿到的可能是纸面券商（``SIMULATION`` → ``PaperTradingBroker``，盘后演练正需要
+    它），按引擎判会连演练一起拦。闸在券商类里还有两个好处：① 新增调用方（今天
+    没枚举到的后台循环）自动被覆盖；② 不引入"白天绿、收盘后红"的用例——引擎侧
+    的既有用例用的是桩券商，不进这道闸。
+
+    **为什么必须拒**：见 ``trading_session.real_order_session_refusal`` ——
+    盘外委托要么被柜台拒，要么被客户端挂成次日单。
+
+    调用点：本模块五个 A 股真券商通道（TdxBroker / RedisBroker / QMTBroker /
+    QMTBridgeBroker / QmtExecBroker）的 ``place_order`` **第一条语句**。
+    ``PaperTradingBroker`` 不下真单、不受此闸；``BaseBroker`` 是抽象基类。
+    新增真券商时 ``backend/tests/test_broker_session_gate.py`` 会点名。
+    """
+    refusal = real_order_session_refusal()
+    if refusal is None:
+        return None
+    logger.warning("[Broker] 非交易时段拒发真单: %s", refusal)
+    return BrokerResult(success=False, message=refusal)
+
 
 # 涨跌停判定的取整容差不再在本模块持有数值：唯一事实源 =
 # ``local_market_data.LIMIT_TOLERANCE``（0.5pp），用时在函数内导入。
@@ -480,6 +509,8 @@ class QMTBroker(BaseBroker):
         price: float | None = None,
         tenant_id: str = "default",
     ) -> BrokerResult:
+        if (refusal := _session_refusal()) is not None:
+            return refusal
         try:
             client = await self._get_session()
             payload = {
@@ -650,6 +681,8 @@ class QMTBridgeBroker(BaseBroker):
         position_side: str | None = None,
         is_margin_trade: bool | None = None,
     ) -> BrokerResult:
+        if (refusal := _session_refusal()) is not None:
+            return refusal
         client_oid = str(client_order_id or "").strip()
         if not client_oid:
             return BrokerResult(
@@ -924,6 +957,8 @@ class RedisBroker(BaseBroker):
         tenant_id: str = "default",
         client_order_id: str = "",
     ) -> BrokerResult:
+        if (refusal := _session_refusal()) is not None:
+            return refusal
         import uuid as _uuid
 
         # client_order_id 必须由上层传入，确保重试幂等性。
@@ -1121,6 +1156,8 @@ class TdxBroker(BaseBroker):
         position_side: str | None = None,
         is_margin_trade: bool | None = None,
     ) -> BrokerResult:
+        if (refusal := _session_refusal()) is not None:
+            return refusal
         if not self.bridge_url:
             return BrokerResult(success=False, message="TDX_BRIDGE_URL 未配置")
         if not self.bridge_token:
@@ -1387,6 +1424,8 @@ class QmtExecBroker(BaseBroker):
         position_side: str | None = None,
         is_margin_trade: bool | None = None,
     ) -> BrokerResult:
+        if (refusal := _session_refusal()) is not None:
+            return refusal
         _ = (user_id, tenant_id, trade_action, position_side, is_margin_trade)
         from backend.services.live_trading.services.qmt_exec_client import QmtExecError
 
