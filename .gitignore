@@ -266,3 +266,9 @@ backend/scripts/evaluate_signal_factors.py
 # 内部发布脚本（含 COS 上传与 CDN 刷新，不进开源仓库）
 scripts/cos-publish/
 REFACTOR_PLAN.md
+
+# 训练节点配置（含 SSH 凭据，仅本地保留）
+config/training_nodes.yaml
+
+# 训练节点配置（含 SSH 凭据，仅本地保留）
+config/training_nodes.yaml

@@ -541,6 +541,26 @@ class ModelTrainingService {
     return resp.data;
   }
 
+  /** 探针读取本地/远程节点的数据窗口与建议切分（时间切分唯一来源）。 */
+  async getDataWindow(params: {
+    nodeId?: string;
+    factorSource?: string;
+    market?: string;
+    valRatio?: number;
+    trainStart?: string;
+    trainEnd?: string;
+  }): Promise<DataWindowResult> {
+    const query: Record<string, string> = {};
+    if (params.nodeId) query.node_id = params.nodeId;
+    if (params.factorSource) query.factor_source = params.factorSource;
+    if (params.market) query.market = params.market;
+    if (typeof params.valRatio === 'number') query.val_ratio = String(params.valRatio);
+    if (params.trainStart) query.train_start = params.trainStart;
+    if (params.trainEnd) query.train_end = params.trainEnd;
+    const resp = await this.client.get<DataWindowResult>('/models/data-window', { params: query });
+    return resp.data;
+  }
+
   async runTraining<T extends object>(payload: T): Promise<ModelTrainingRunResponse> {
     const resp = await this.client.post<ModelTrainingRunResponse>('/models/run-training', payload);
     return resp.data;
@@ -1033,6 +1053,44 @@ class ModelTrainingService {
     );
     return resp.data;
   }
+}
+
+export interface DataWindowInfo {
+  kind: 'local' | 'remote';
+  node_id: string;
+  source: string;
+  market: string;
+  ready: boolean;
+  min_date: string | null;
+  max_date: string | null;
+  trading_days: number;
+  column_count: number;
+  schema_hash: string;
+  reason?: string | null;
+  probed_at?: string;
+}
+
+export interface DataWindowCoverage {
+  window: { start: string; end: string };
+  center_trading_days: number;
+  node_trading_days: number;
+  missing_days: number;
+  missing_ratio: number;
+  missing_segments: Array<{ start: string; end: string; days: number }>;
+  tail_lag_only: boolean;
+  aligned: boolean;
+}
+
+export interface DataWindowResult {
+  status: string;
+  window: DataWindowInfo;
+  window_span: { start: string; end: string } | null;
+  suggested_split: {
+    train: [string, string];
+    valid: [string, string];
+    test: [string, string];
+  } | null;
+  coverage: DataWindowCoverage | null;
 }
 
 export const modelTrainingService = new ModelTrainingService();

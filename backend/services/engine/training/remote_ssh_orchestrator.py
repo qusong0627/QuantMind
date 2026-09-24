@@ -14,12 +14,14 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import shlex
 import tempfile
 import time
 from collections.abc import Callable
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +37,33 @@ logger = logging.getLogger(__name__)
 
 def _env_or(key: str, default: str) -> str:
     return (os.getenv(key) or default).strip()
+
+
+def _derive_absolute_split(payload: dict) -> dict[str, list[str]] | None:
+    """兜底（同步）：探针不可用时，用中心 QuantDB 的交易日序列算切分。
+
+    正常路径是 ``window_probe.probe_data_window()`` 异步探针（本地或远程节点），
+    本函数只服务于无法 await 的同步构建路径，且窗口取自中心数据 —— 与节点实际
+    日期集合可能有偏差，调用方应记录告警。
+    """
+    from backend.services.engine.training import window_probe as wp
+
+    source = str(payload.get("factor_source") or "").strip()
+    if not source or not wp.window_span(payload):
+        return None
+    context = payload.get("context") if isinstance(payload.get("context"), dict) else {}
+    market = str(context.get("market") or "CN").upper()
+    try:
+        window = wp.probe_local_window(source, market)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("derive absolute split failed, fall back to val_ratio: %s", exc)
+        return None
+    split = wp.build_split_from_window(window, payload)
+    if split:
+        logger.warning(
+            "split derived from CENTER calendar (node probe unavailable): %s", split
+        )
+    return split
 
 
 class RemoteSSHOrchestrator(TrainingOrchestrator):
@@ -83,6 +112,12 @@ class RemoteSSHOrchestrator(TrainingOrchestrator):
             self.gpus = _env_or("TRAINING_AUTODL_GPUS", "").strip()
             self.quantdb_dir = _env_or("TRAINING_AUTODL_QUANTDB_DIR", "/data/quantdb")
             self.exec_mode = _env_or("TRAINING_AUTODL_EXEC_MODE", "ssh_docker").strip()
+        # 远端数据已由魔搭（ModelScope）数据集初始化时，跳过每次训练的增量同步。
+        # 节点配置 skip_data_sync: true 或 TRAINING_AUTODL_SKIP_DATA_SYNC=1
+        raw_skip = (node_config or {}).get("skip_data_sync")
+        if raw_skip is None:
+            raw_skip = _env_or("TRAINING_AUTODL_SKIP_DATA_SYNC", "")
+        self.skip_data_sync = str(raw_skip).strip().lower() in ("1", "true", "yes", "on")
         # 免 docker 模式：原生 Python 解释器路径（AutoDL 容器为 /root/miniconda3/bin/python）
         self.native_python = _env_or("TRAINING_AUTODL_PYTHON", "/root/miniconda3/bin/python").strip()
         self.api_base = _env_or("QUANTMIND_API_BASE_URL", "http://quantmind-api:8000")
@@ -90,6 +125,8 @@ class RemoteSSHOrchestrator(TrainingOrchestrator):
         self.master_host = _env_or("TRAINING_MASTER_HOST", "")
         self.internal_secret = _env_or("INTERNAL_CALL_SECRET", "")
         self.log_stream = TrainingRunLogStream()
+        # 探针读到的节点数据窗口（window_probe.DataWindow），launch 时填充
+        self._window: Any | None = None
         self._tenant_id = _env_or("TRAINING_DEFAULT_TENANT", "default")
         self._user_id = _env_or("TRAINING_DEFAULT_USER", "admin")
 
@@ -353,6 +390,35 @@ class RemoteSSHOrchestrator(TrainingOrchestrator):
         try:
             # Direct jobs bind exactly one raw QuantDB source; legacy jobs keep
             # their immutable snapshot mount for historical model compatibility.
+            # ── 数据探针（时间切分的唯一来源）────────────────────────────────
+            # 切分不再依赖后端因子目录的草稿/发布状态：直接探针读取本节点
+            # （远程 AutoDL）自己的 QuantDB 窗口与交易日序列，本地/远端各自自洽。
+            probe_source = str(payload.get("factor_source") or "").strip()
+            _ctx = payload.get("context") if isinstance(payload.get("context"), dict) else {}
+            probe_market = str(_ctx.get("market") or "CN").upper()
+            if probe_source:
+                from backend.services.engine.training import window_probe as wp
+
+                try:
+                    self._window = await wp.probe_data_window(
+                        self.node_id, probe_source, market=probe_market
+                    )
+                    self._log(
+                        run_id,
+                        f"[PROBE] 节点数据窗口 {self._window.min_date}~{self._window.max_date}"
+                        f"（{len(self._window.trading_dates)} 个交易日，"
+                        f"{len(self._window.columns)} 列）",
+                        progress=6,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    self._window = None
+                    logger.warning("[%s] 节点数据探针失败: %s", run_id, exc)
+                    self._log(
+                        run_id,
+                        f"[PROBE] 节点数据探针失败，退回中心日历兜底: {exc}",
+                        progress=6,
+                    )
+
             config = self._build_config_yaml(run_id, payload)
             direct_source = str(config["data"].get("factor_source") or "")
             # 远程节点（AutoDL）目前仅支持 A 股 QuantDB 直读：非 CN 市场的
@@ -423,37 +489,47 @@ class RemoteSSHOrchestrator(TrainingOrchestrator):
                         "python /app/backend/scripts/quantdb_daily_sync.py",
                     )
                 quoted_dir = shlex.quote(self.quantdb_dir)
-                # 只同步训练实际请求的因子源（factor_source），避免每次把 l2/l1_l2 等
-                # 无关数据集全量拉取（几 GB、拖慢冒烟/训练启动）。
-                sync_datasets = direct_source or "l1_factors"
-                since_note = f"，since={sync_since}" if "sync_since" in locals() and sync_since else ""
-                self._log(
-                    run_id,
-                    f"[SYNC] 开始增量同步 QuantDB {sync_datasets}{since_note}（过程日志会持续刷新）...",
-                    progress=8,
-                )
-
-                def _on_sync_line(text: str) -> None:
-                    self._log(run_id, f"[SYNC] {text}", progress=10)
-
-                def _on_sync_heartbeat(elapsed: int) -> None:
+                if self.skip_data_sync:
+                    # 远端数据由魔搭（ModelScope）数据集独立初始化，不再增量同步。
+                    # 此时中心 pin 的 factor_coverage 就是训练区间的权威边界，
+                    # 远端数据覆盖不足会在 loading 阶段 fail fast（见 loading.py）。
                     self._log(
                         run_id,
-                        f"[SYNC] QuantDB {sync_datasets} 仍在同步{since_note}… 已等待 {elapsed}s",
-                        progress=10,
+                        f"[SYNC] 跳过远端数据同步（节点自带数据）: {quoted_dir}",
+                        progress=15,
+                    )
+                else:
+                    # 只同步训练实际请求的因子源（factor_source），避免每次把 l2/l1_l2 等
+                    # 无关数据集全量拉取（几 GB、拖慢冒烟/训练启动）。
+                    sync_datasets = direct_source or "l1_factors"
+                    since_note = f"，since={sync_since}" if "sync_since" in locals() and sync_since else ""
+                    self._log(
+                        run_id,
+                        f"[SYNC] 开始增量同步 QuantDB {sync_datasets}{since_note}（过程日志会持续刷新）...",
+                        progress=8,
                     )
 
-                code, out, err = await self._ssh_exec_streaming(
-                    f"mkdir -p {quoted_dir} && QM_QUANTDB_DATA_DIR={quoted_dir} "
-                    f"{sync_cmd} --parquet-only --datasets {sync_datasets}",
-                    timeout=1800,
-                    on_line=_on_sync_line,
-                    heartbeat_sec=self._HEARTBEAT_SEC,
-                    heartbeat_fn=_on_sync_heartbeat,
-                )
-                if code != 0:
-                    raise RuntimeError(f"AutoDL QuantDB sync failed: {err or out}")
-                self._log(run_id, f"[SYNC] QuantDB 因子源已增量同步: {direct_source}", progress=15)
+                    def _on_sync_line(text: str) -> None:
+                        self._log(run_id, f"[SYNC] {text}", progress=10)
+
+                    def _on_sync_heartbeat(elapsed: int) -> None:
+                        self._log(
+                            run_id,
+                            f"[SYNC] QuantDB {sync_datasets} 仍在同步{since_note}… 已等待 {elapsed}s",
+                            progress=10,
+                        )
+
+                    code, out, err = await self._ssh_exec_streaming(
+                        f"mkdir -p {quoted_dir} && QM_QUANTDB_DATA_DIR={quoted_dir} "
+                        f"{sync_cmd} --parquet-only --datasets {sync_datasets}",
+                        timeout=1800,
+                        on_line=_on_sync_line,
+                        heartbeat_sec=self._HEARTBEAT_SEC,
+                        heartbeat_fn=_on_sync_heartbeat,
+                    )
+                    if code != 0:
+                        raise RuntimeError(f"AutoDL QuantDB sync failed: {err or out}")
+                    self._log(run_id, f"[SYNC] QuantDB 因子源已增量同步: {direct_source}", progress=15)
             else:
                 feature_files = self._resolve_feature_files(payload)
                 if feature_files:
@@ -645,7 +721,7 @@ class RemoteSSHOrchestrator(TrainingOrchestrator):
             raise RuntimeError(f"远端原生训练未返回 pid: {err or out}")
         return pid, log_path
 
-    async def _deploy_native_backend(self, run_id: str) -> None:
+    async def _deploy_native_backend(self, run_id: str, *, log: bool = True) -> None:
         """把免 docker 直读所需的 backend 最小子树 rsync 到远端 {work_dir}/backend_min/。
 
         仅训练数据路径上硬性 import 的一小撮文件（含 reader/hub 及其 import 链），
@@ -695,9 +771,71 @@ class RemoteSSHOrchestrator(TrainingOrchestrator):
             init_file.write_text("", encoding="utf-8")
         try:
             await self._rsync_push(str(dest_root.parent), f"{self.work_dir}/backend_min/", is_dir=True)
-            self._log(run_id, f"[SYNC] backend 直读子树已同步到 {self.work_dir}/backend_min")
+            if log:
+                self._log(run_id, f"[SYNC] backend 直读子树已同步到 {self.work_dir}/backend_min")
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
+
+    # ── 数据探针（时间切分的唯一数据来源）─────────────────────────────────────
+
+    async def probe_data_profile(self, source: str, *, market: str = "CN") -> dict[str, Any]:
+        """只读探测节点数据画像：交易日序列 / 因子列 / schema_hash / 覆盖区间。
+
+        远端（魔搭数据集）与中心的交易日集合并不一致（存在整段缺失），时间切分
+        必须以节点自己的交易日序列为基准，因此要把整份日期列表读回来。本方法
+        只做 SSH 读取，**绝不触发数据同步**；缓存由
+        ``window_probe.probe_data_window()`` 统一负责。
+        """
+        await self._deploy_native_backend("probe", log=False)
+        python = self.native_python or "/root/miniconda3/bin/python"
+        remote_code = "\n".join(
+            [
+                "import json, sys",
+                f'sys.path.insert(0, "{self.work_dir}/backend_min")',
+                "from backend.services.engine.data_platform.quantdb_factor_reader "
+                "import QuantDBFactorReader",
+                f'r = QuantDBFactorReader("{self.quantdb_dir}", market="{market}")',
+                f'st = r.describe("{source}")',
+                f'dates = r.available_dates("{source}")',
+                f'cols = sorted(r.factor_columns("{source}"))',
+                'print("QM_PROFILE=" + json.dumps({"ready": bool(st.ready), '
+                '"min_date": st.min_date, "max_date": st.max_date, '
+                '"schema_hash": st.schema_hash, "columns": cols, '
+                '"trading_dates": dates, "reason": st.reason}))',
+            ]
+        )
+        cmd = (
+            f"PYTHONUNBUFFERED=1 PYTHONPATH={self.work_dir}:{self.work_dir}/backend_min "
+            f"{python} - <<'QM_PROFILE_EOF'\n{remote_code}\nQM_PROFILE_EOF"
+        )
+        code, out, err = await self._ssh_exec(cmd, timeout=300)
+        profile = self._parse_profile(out)
+        if profile is None:
+            lines = [ln for ln in (err or out).strip().splitlines() if ln.strip()]
+            raise RuntimeError(
+                f"节点数据探针失败（{self.node_id}/{source}）: "
+                f"{lines[-1][:240] if lines else f'ssh exit {code}'}"
+            )
+        profile.update(
+            {
+                "node_id": self.node_id,
+                "source": source,
+                "market": market,
+                "probed_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        return profile
+
+    @staticmethod
+    def _parse_profile(out: str) -> dict[str, Any] | None:
+        for line in (out or "").splitlines():
+            if line.startswith("QM_PROFILE="):
+                try:
+                    data = json.loads(line[len("QM_PROFILE=") :])
+                except Exception:  # noqa: BLE001
+                    return None
+                return data if isinstance(data, dict) else None
+        return None
 
     async def _poll_remote(self, run_id: str, container_name: str) -> None:
         """轮询远端训练（容器或原生进程）日志，解析进度，完成后拉取产物。
@@ -1003,6 +1141,11 @@ class RemoteSSHOrchestrator(TrainingOrchestrator):
                 "factor_field_sources": dict(payload.get("factor_field_sources") or {}),
                 "factor_catalog_published_at": str(payload.get("factor_catalog_published_at") or "") or None,
                 "factor_coverage": dict(payload.get("factor_coverage") or {}),
+                # 节点数据窗口画像（探针读到的真实区间与交易日数），供训练侧
+                # 记录与事后核对：切分就是在这份交易日序列上取的边界。
+                "node_window": (
+                    self._window.to_dict() if self._window is not None else None
+                ),
                 # 全局股票池（P3）：远端容器无 DB，池成分在本机解析后传入
                 **resolve_training_pool(payload),
             },
@@ -1051,6 +1194,14 @@ class RemoteSSHOrchestrator(TrainingOrchestrator):
             "cache": {"dir": "/tmp"},
         }
 
+        # 覆盖边界以探针窗口为准（训练数据就在该节点上）：训练侧 loading.py 用它
+        # 钳制取数区间，避免用中心日历去要求节点数据（两侧日期集合本不同步）。
+        if self._window is not None and self._window.min_date and self._window.max_date:
+            config["data"]["factor_coverage"] = {
+                "min_date": self._window.min_date,
+                "max_date": self._window.max_date,
+            }
+
         split_fields = ["valid_start", "valid_end", "test_start", "test_end"]
         if all(payload.get(k) for k in split_fields):
             config["split"] = {
@@ -1059,6 +1210,22 @@ class RemoteSSHOrchestrator(TrainingOrchestrator):
                 "test": [payload.get("test_start"), payload.get("test_end")],
             }
             config["model"]["val_ratio"] = None
+        else:
+            # 探针模式：切分点用「本节点自己的交易日序列」按 val_ratio 换算成
+            # 绝对日期下发，远端只按日期过滤。远端魔搭数据集的日期集合与中心
+            # 不同（实测少 225 个交易日且成段缺失），用中心日历算切分会让节点上
+            # 的实际样本占比失真；探针不可用时才退回中心日历兜底。
+            from backend.services.engine.training import window_probe as wp
+
+            derived = None
+            if self._window is not None:
+                derived = wp.build_split_from_window(self._window, payload)
+            if not derived:
+                derived = _derive_absolute_split(payload)
+            if derived:
+                config["split"] = derived
+                config["model"]["val_ratio"] = None
+                logger.info("[remote] absolute split from probed window: %s", derived)
 
         if payload.get("wfa") and isinstance(payload.get("wfa"), dict):
             config["wfa"] = payload["wfa"]

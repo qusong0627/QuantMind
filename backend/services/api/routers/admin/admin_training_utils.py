@@ -400,6 +400,9 @@ def _normalize_payload(payload: dict[str, Any], allowed_features: list[str]) -> 
         normalized["factor_schema_hash"] = str(payload.get("factor_schema_hash") or "")
         normalized["factor_catalog_published_at"] = str(payload.get("factor_catalog_published_at") or "")
         normalized["factor_coverage"] = dict(payload.get("factor_coverage") or {})
+    # 探针报告（窗口/切分来源/缺失段）随任务落库，供训练记录与事后核对
+    if isinstance(payload.get("data_window"), dict):
+        normalized["data_window"] = payload["data_window"]
 
     # 训练起止（split gap 推导用； TrainingRequest 已校验可解析，此处不再抛错）
     dt_train_start = _parse_date(req.train_start, "train_start")
@@ -520,6 +523,87 @@ async def _resolve_quantdb_factor_payload(payload: dict[str, Any], market: str) 
     pinned["factor_catalog_published_at"] = str(version.published_at or "")
     pinned["factor_coverage"] = {"min_date": status.min_date, "max_date": status.max_date}
     return pinned, list(mapping)
+
+
+async def _apply_window_probe(payload: dict[str, Any], market: str) -> dict[str, Any]:
+    """探针模式：训练窗口与时间切分由「探针读到的数据」决定，不依赖目录发布状态。
+
+    - 本地节点（node_id=local）：直读本机 QuantDB；
+    - 远程节点（autodl-*）：SSH 读节点自己的 QuantDB（魔搭数据集，日期集合与
+      中心不同步：实测 l1_factors 少 225 个交易日且成段缺失）；
+    - 远程节点在训练窗口内**成段缺失**时直接拒绝（否则会训出只覆盖部分区间、
+      指标不可比的模型，且事后很难发现）；
+    - 未显式指定 valid/test 时，用**节点探针窗口的交易日序列**把 val_ratio 换算
+      成三段绝对日期写回 payload（随后由 _normalize_payload 做 gap 校验）。
+
+    探针失败（SSH 不通/节点数据不可读）不阻断训练：返回原 payload，由编排器
+    退回中心日历兜底并记日志。
+    """
+    from backend.services.engine.training import window_probe as wp
+
+    source = str(payload.get("factor_source") or "").strip()
+    span = wp.window_span(payload)
+    if not source or not span:
+        return payload
+    node_id = str(payload.get("node_id") or "local").strip() or "local"
+    start, end = span
+
+    try:
+        node_window = await wp.probe_data_window(node_id, source, market=market)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "window probe failed (node=%s source=%s market=%s): %s",
+            node_id, source, market, exc,
+        )
+        return payload
+
+    report: dict[str, Any] = {
+        "node_id": node_id,
+        "source": source,
+        "market": market,
+        "window": {"start": start, "end": end},
+        "probe": node_window.to_dict(),
+        "probe_ok": bool(node_window.trading_dates),
+    }
+
+    if node_id != "local":
+        center_window = await wp.probe_center_window(source, market)
+        coverage = wp.coverage_report(center_window, node_window, start=start, end=end)
+        report["coverage"] = coverage
+        if coverage["missing_days"] and not coverage["tail_lag_only"]:
+            segments = "；".join(
+                f"{seg['start']}~{seg['end']}({seg['days']}天)"
+                for seg in coverage["missing_segments"][:5]
+            )
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"训练节点 {node_id} 在训练窗口内缺失 {coverage['missing_days']} 个交易日"
+                    f"（占 {coverage['missing_ratio'] * 100:.1f}%）：{segments}。"
+                    "节点数据集（魔搭月度）与中心日期集合并不同步，请先更新节点数据，"
+                    "或改用本地节点训练。"
+                ),
+            )
+        if coverage["missing_days"]:
+            # 尾部滞后：正常现象，仅记录，实际窗口末端由 loading 侧钳制
+            report["tail_lag_days"] = coverage["missing_days"]
+
+    explicit = ["valid_start", "valid_end", "test_start", "test_end"]
+    if not all(payload.get(k) for k in explicit):
+        split = wp.build_split_from_window(node_window, payload)
+        if split:
+            payload = {
+                **payload,
+                "train_start": split["train"][0],
+                "train_end": split["train"][1],
+                "valid_start": split["valid"][0],
+                "valid_end": split["valid"][1],
+                "test_start": split["test"][0],
+                "test_end": split["test"][1],
+            }
+            report["derived_split"] = split
+
+    return {**payload, "data_window": report}
 
 
 def _normalize_artifacts(raw: Any) -> list[dict[str, str]]:
@@ -741,6 +825,9 @@ async def submit_training_job(
     benchmark_hint = str(context.get("benchmark") or "SH000300").strip()
     market = _resolve_market(context.get("market"), benchmark_hint)
     payload, allowed_features = await _resolve_quantdb_factor_payload(payload, market)
+    # 探针模式：窗口与切分来自数据本身（本地直读 / 远程 SSH 探针），
+    # 与因子目录的草稿·发布状态无关；远程节点成段缺数据在此拦截。
+    payload = await _apply_window_probe(payload, market)
     normalized_payload = _normalize_payload(payload, allowed_features)
     run_id = f"train_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:8]}"
 

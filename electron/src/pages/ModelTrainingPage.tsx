@@ -11,7 +11,7 @@ import {
 import dayjs, { Dayjs } from 'dayjs';
 import { clsx } from 'clsx';
 import { PAGE_LAYOUT } from '../config/pageLayout';
-import { modelTrainingService } from '../services/modelTrainingService';
+import { modelTrainingService, type DataWindowResult } from '../services/modelTrainingService';
 import { useAppDispatch, useAppSelector } from '../store';
 import { selectCurrentMarket, AppMarket, setMarket } from '../store/slices/uiSlice';
 import { getMarketConfig } from '../config/marketConfig';
@@ -199,6 +199,9 @@ export const ModelTrainingPage: React.FC = () => {
   const [factorSources, setFactorSources] = useState<QuantDBTrainingSource[]>([]);
   const [factorCatalogVersion, setFactorCatalogVersion] = useState<string | null>(null);
   const [dataCoverage, setDataCoverage] = useState<AdminModelFeatureDataCoverage | null>(null);
+  // 探针结果：本地/远程节点真实数据窗口与建议切分（与目录发布状态无关）
+  const [dataWindow, setDataWindow] = useState<DataWindowResult | null>(null);
+  const probeSuggestionAppliedRef = useRef<string>('');
   const [trainingStatus, setTrainingStatus] = useState<TrainingStatus>('draft');
   const [executionStage, setExecutionStage] = useState('待配置');
   const [backendRunStatus, setBackendRunStatus] = useState<string>('');
@@ -259,12 +262,27 @@ export const ModelTrainingPage: React.FC = () => {
   const valDays = useMemo(() => daysBetween(timePeriods.val), [timePeriods.val]);
   const testDays = useMemo(() => daysBetween(timePeriods.test), [timePeriods.test]);
   const totalDays = trainDays + valDays + testDays;
-  const coverageDisplay = dataCoverage?.file_count
-    ? `${dataCoverage.file_count} 个交易日`
-    : '—';
-  const coverageHint = dataCoverage?.min_date && dataCoverage?.max_date
-    ? `${dataCoverage.min_date} ～ ${dataCoverage.max_date}`
-    : '等待数据源状态';
+  // 覆盖展示优先用探针读到的节点窗口：远程节点（魔搭数据集）与中心的交易日
+  // 集合并不同步，目录里的覆盖区间只反映中心，会误导时间区间选择。
+  const nodeCoverage = dataWindow?.coverage || null;
+  const remoteWindowActive = Boolean(
+    dataWindow && dataWindow.window.kind === 'remote' && dataWindow.window.ready
+  );
+  const coverageDisplay = remoteWindowActive
+    ? `${dataWindow?.window.trading_days ?? 0} 个交易日`
+    : dataCoverage?.file_count
+      ? `${dataCoverage.file_count} 个交易日`
+      : '—';
+  const coverageHint = remoteWindowActive
+    ? `${dataWindow?.window.min_date} ～ ${dataWindow?.window.max_date}（节点探针）`
+    : dataCoverage?.min_date && dataCoverage?.max_date
+      ? `${dataCoverage.min_date} ～ ${dataCoverage.max_date}`
+      : '等待数据源状态';
+  const nodeWindowWarning = nodeCoverage && nodeCoverage.missing_days > 0 && !nodeCoverage.tail_lag_only
+    ? `节点数据在训练窗口内缺失 ${nodeCoverage.missing_days} 个交易日（${(nodeCoverage.missing_ratio * 100).toFixed(1)}%）：${nodeCoverage.missing_segments.slice(0, 3).map((s) => `${s.start}~${s.end}(${s.days}天)`).join('、')}。提交会被拦截，请更新节点数据或改用本地节点。`
+    : nodeCoverage && nodeCoverage.missing_days > 0
+      ? `节点数据滞后中心 ${nodeCoverage.missing_days} 个交易日（尾部滞后，训练末端会自动钳制）。`
+      : '';
   const requestPreview = useMemo(
     () => buildTrainingRequest(selectedFeatures, featureCategories, timePeriods, target, params, context, displayName, currentMarket, wfaConfig, formState.poolRef),
     [selectedFeatures, featureCategories, timePeriods, target, params, context, displayName, currentMarket, wfaConfig, formState.poolRef]
@@ -318,6 +336,52 @@ export const ModelTrainingPage: React.FC = () => {
   useEffect(() => {
     if (selectedNode) localStorage.setItem(NODE_STORAGE_KEY, selectedNode);
   }, [selectedNode]);
+
+  // 探针：直接读本地/远程节点的真实数据窗口（时间切分唯一来源）。
+  // 本地 → 直读本机 QuantDB；远程 → 后端 SSH 只读探针（带缓存），
+  // 与因子目录的草稿/发布状态无关。
+  useEffect(() => {
+    if (!isQuantDBMarket(currentMarket)) {
+      setDataWindow(null);
+      return;
+    }
+    let cancelled = false;
+    // 远程节点：把探针按「节点自己的交易日序列」算出的三段绝对日期直接套到
+    // 时间区间（同一节点+数据源只自动套用一次，避免覆盖用户手动调整）。
+    const applySuggestedSplit = (result: DataWindowResult) => {
+      const split = result.suggested_split;
+      if (!split || result.window.kind !== 'remote') return;
+      const key = `${result.window.node_id}:${result.window.source}`;
+      if (probeSuggestionAppliedRef.current === key) return;
+      probeSuggestionAppliedRef.current = key;
+      (['train', 'valid', 'test'] as const).forEach((seg) => {
+        const [s, e] = split[seg];
+        dispatch({
+          type: 'SET_TIME',
+          key: seg === 'valid' ? 'val' : seg,
+          value: [dayjs(s), dayjs(e)],
+        });
+      });
+    };
+    const load = async () => {
+      try {
+        const result = await modelTrainingService.getDataWindow({
+          nodeId: selectedNode || 'local',
+          factorSource,
+          market: currentMarket,
+        });
+        if (cancelled) return;
+        setDataWindow(result);
+        applySuggestedSplit(result);
+      } catch {
+        if (!cancelled) setDataWindow(null);
+      }
+    };
+    load();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedNode, factorSource, currentMarket]);
 
   useEffect(() => {
     if (trainingNodes.length === 0) return;
@@ -976,6 +1040,15 @@ export const ModelTrainingPage: React.FC = () => {
                     <MetricCard label="数据覆盖" value={coverageDisplay} hint={coverageHint} centered />
                     <MetricCard label="状态" value={trainingStatus === 'draft' ? '待配置' : trainingStatus === 'running' ? '训练中' : '已完成'} centered />
                 </div>
+
+                {nodeWindowWarning && (
+                  <Alert
+                    type={nodeCoverage && !nodeCoverage.tail_lag_only ? 'error' : 'warning'}
+                    showIcon
+                    className="mt-3 rounded-2xl"
+                    message={nodeWindowWarning}
+                  />
+                )}
 
                 <AnimatePresence mode="wait">
                   <motion.div key={currentStep} initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -10 }} transition={{ duration: 0.2 }}>

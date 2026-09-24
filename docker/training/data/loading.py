@@ -92,6 +92,18 @@ _MARKET_DATA_DIR_ENV: dict[str, str] = {
 }
 
 
+def _coverage_tolerance_days() -> int:
+    """允许的本地/远端数据滞后天数（默认 35 天 ≈ 魔搭数据集一个月更新周期 + 缓冲）。
+
+    远端节点数据来自魔搭月度数据集，中心每日更新，滞后几天到几十天是常态；
+    超过容差说明节点数据版本过旧，应 fail fast 而不是静默少训练一大段。
+    """
+    try:
+        return max(0, int(os.getenv("TRAINING_COVERAGE_TOLERANCE_DAYS", "35")))
+    except ValueError:
+        return 35
+
+
 def load_data(
     train_start: str,
     train_end: str,
@@ -109,6 +121,7 @@ def load_data(
     quantdb_dir: str | None = None,
     factor_field_sources: dict[str, str] | None = None,
     pool_symbols: list[str] | None = None,
+    factor_coverage: dict | None = None,
 ) -> tuple:
     local_root = Path(local_dir).expanduser() if local_dir else None
     if local_root is None:
@@ -152,13 +165,67 @@ def load_data(
             quantdb_dir or os.getenv(_MARKET_DATA_DIR_ENV[market_upper]) or None,
             market=market_upper,
         )
-        # 标签构建缓冲(range_start)可能早于数据可用起点(如 train_start 恰为数据首日)。
-        # 数据缺失部分无法提供，钳制到数据起点即可，避免 assert_ready 越界抛错。
         _status = reader.describe(direct_factor_source)
-        if _status.min_date:
+        # 训练窗口的钳制基准是编排器 pin 的 factor_coverage（中心数据口径），
+        # 不是本机/远端数据的 min/max。远端数据常由魔搭数据集独立初始化，
+        # 若按本地 min/max 钳制，同一份 config 在本地与远端会切出不同窗口
+        # （静默缩短训练区间、切分点漂移）。两端统一以 pin coverage 为准：
+        # 本地数据更长 → 多出部分不参与训练；本地数据更短 → 直接 fail fast。
+        _pinned_min = str((factor_coverage or {}).get("min_date") or "").strip()
+        _pinned_max = str((factor_coverage or {}).get("max_date") or "").strip()
+        if _pinned_min:
+            range_start = max(range_start, pd.Timestamp(_pinned_min))
+        elif _status.min_date:
+            # 无 pin coverage（旧任务/快照路径）：维持原行为，钳制到数据起点
             range_start = max(range_start, pd.Timestamp(_status.min_date))
-        if _status.max_date:
+        if _pinned_max:
+            range_end = min(range_end, pd.Timestamp(_pinned_max))
+        elif _status.max_date:
             range_end = min(range_end, pd.Timestamp(_status.max_date))
+
+        if _pinned_min or _pinned_max:
+            # 远端节点数据来自魔搭数据集（月度更新），中心每日更新，滞后是常态。
+            # 因此：缺口在容差内 → 钳制到本机实际末端并告警（少训练尾部几天，
+            # 切分点仍严格用中心下发的绝对日期，不影响可比性）；缺口超过容差
+            # → 说明节点数据长期未更新/版本错配，fail fast 而不是静默少训一大段。
+            _tol = _coverage_tolerance_days()
+            _local_min = pd.Timestamp(_status.min_date) if _status.min_date else None
+            _local_max = pd.Timestamp(_status.max_date) if _status.max_date else None
+            if _local_min is not None and _local_min > range_start:
+                _gap = (_local_min - range_start).days
+                if _gap > _tol:
+                    raise RuntimeError(
+                        f"QuantDB {direct_factor_source} 数据起点 {_local_min.date()} 晚于训练窗口起点 "
+                        f"{range_start.date()} {_gap} 天（容差 {_tol} 天，中心 pin coverage "
+                        f"{_pinned_min or 'n/a'}）；节点数据版本过旧，请更新节点数据集后再训练。"
+                    )
+                logger.warning(
+                    "Coverage drift at start: pinned %s but local starts %s (%d days late); "
+                    "window start clamped to local min",
+                    range_start.date(), _local_min.date(), _gap,
+                )
+                range_start = _local_min
+            if _local_max is not None and _local_max < range_end:
+                _gap = (range_end - _local_max).days
+                if _gap > _tol:
+                    raise RuntimeError(
+                        f"QuantDB {direct_factor_source} 数据末端 {_local_max.date()} 早于训练窗口末端 "
+                        f"{range_end.date()} {_gap} 天（容差 {_tol} 天，中心 pin coverage "
+                        f"{_pinned_max or 'n/a'}）；节点数据版本过旧，请更新节点数据集后再训练。"
+                    )
+                logger.warning(
+                    "Coverage drift at end: pinned %s but local ends %s (%d days behind); "
+                    "window end clamped to local max",
+                    range_end.date(), _local_max.date(), _gap,
+                )
+                range_end = _local_max
+            logger.info(
+                "Coverage aligned to pinned catalog: window %s..%s (local %s..%s, tolerance %dd)",
+                range_start.date(), range_end.date(),
+                _local_min.date() if _local_min is not None else "n/a",
+                _local_max.date() if _local_max is not None else "n/a",
+                _tol,
+            )
         logger.info(
             "Direct QuantDB read %s: requesting %s .. %s",
             direct_factor_source,

@@ -1066,7 +1066,19 @@ def main() -> int:
             factor_field_sources=(cfg.get("data", {}) or {}).get("factor_field_sources") or None,
             # 全局股票池（P3）：编排器已把池解析成代码列表随 config.yaml 传入
             pool_symbols=(cfg.get("data", {}) or {}).get("pool_symbols") or None,
+            # 中心 pin 的数据覆盖：训练窗口钳制的权威基准（远端数据独立初始化时
+            # 靠它对齐时间切分，见 data/loading.py）
+            factor_coverage=(cfg.get("data", {}) or {}).get("factor_coverage") or None,
         )
+
+        # 实际读到的数据覆盖：与 config 里 pin 的 coverage 对照，可事后核对
+        # 远端/本地时间切分是否真的对齐（写进 metadata.json）
+        _actual_coverage: dict[str, str] = {}
+        if not df.empty and "trade_date" in df.columns:
+            _actual_coverage = {
+                "min_date": str(pd.Timestamp(df["trade_date"].min()).date()),
+                "max_date": str(pd.Timestamp(df["trade_date"].max()).date()),
+            }
 
         # ── 行业编码开关：load_data 只负责 merge 列，不会自动进入特征集 ──
         # 此前 ind_code_l1 从未被加入 valid_features，开关空转。
@@ -1281,6 +1293,8 @@ def main() -> int:
                 "factor_field_sources": (cfg.get("data", {}) or {}).get("factor_field_sources") or {},
                 "factor_catalog_published_at": str((cfg.get("data", {}) or {}).get("factor_catalog_published_at") or "") or None,
                 "factor_coverage": (cfg.get("data", {}) or {}).get("factor_coverage") or {},
+                # 实际读到的数据区间（远端节点数据独立初始化时的对齐凭证）
+                "data_coverage_actual": _actual_coverage,
                 "context": context_cfg,
                 "best_iteration": best_iteration,
                 "target_horizon_days": int((cfg.get("label", {}) or {}).get("target_horizon_days") or 1),
@@ -1492,6 +1506,8 @@ def main() -> int:
                 "factor_field_sources": (cfg.get("data", {}) or {}).get("factor_field_sources") or {},
                 "factor_catalog_published_at": str((cfg.get("data", {}) or {}).get("factor_catalog_published_at") or "") or None,
                 "factor_coverage": (cfg.get("data", {}) or {}).get("factor_coverage") or {},
+                # 实际读到的数据区间（远端节点数据独立初始化时的对齐凭证）
+                "data_coverage_actual": _actual_coverage,
                 "context": context_cfg,
                 "best_iteration": best_iteration,
                 "target_horizon_days": int((cfg.get("label", {}) or {}).get("target_horizon_days") or 1),

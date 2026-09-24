@@ -641,6 +641,65 @@ async def get_quantdb_training_sources(
     return await load_quantdb_training_sources(market or "CN")
 
 
+@router.get(
+    "/data-window",
+    summary="探针读取本地/远程节点的数据窗口与建议切分（时间切分唯一来源）",
+)
+async def get_data_window(
+    node_id: str | None = Query(
+        None, description="训练节点：local（本机）或 autodl-xxx（远程节点）"
+    ),
+    factor_source: str | None = Query(None, description="因子源，默认 l1_factors"),
+    market: str | None = Query(None, description="市场，默认 CN"),
+    val_ratio: float = Query(0.15, description="验证/测试段比例，用于推导建议切分"),
+    train_start: str | None = Query(None, description="训练窗口起点，缺省用数据起点"),
+    train_end: str | None = Query(None, description="训练窗口末端，缺省用数据末端"),
+    include_dates: bool = Query(
+        False, description="是否返回完整交易日列表（默认 false，避免大响应）"
+    ),
+    current_user: dict[str, Any] = Depends(get_current_user),
+):
+    """探针模式的时间切分入口：直接读数据侧真实区间，与目录发布状态无关。
+
+    - ``node_id=local`` 直读本机 QuantDB；``autodl-xxx`` 走 SSH 只读探针；
+    - 建议切分用**该侧自己的交易日序列**按 val_ratio 换算成绝对日期，
+      因此本地与远程各自自洽（两端日期集合本就不同步）；
+    - 远程节点额外返回与中心的覆盖差分：``coverage.tail_lag_only=true`` 表示
+      只是尾部滞后（正常），否则说明窗口内成段缺失（提交会被拦截）。
+    """
+    from backend.services.engine.training import window_probe as wp
+
+    _ = current_user
+    node = str(node_id or "local").strip() or "local"
+    source = str(factor_source or wp.DEFAULT_FACTOR_SOURCE).strip()
+    market_upper = str(market or "CN").upper()
+
+    window = await wp.probe_data_window(node, source, market=market_upper)
+    probe_payload = {
+        "train_start": str(train_start or window.min_date or ""),
+        "train_end": str(train_end or window.max_date or ""),
+        "val_ratio": val_ratio,
+        "factor_source": source,
+    }
+    span = wp.window_span(probe_payload)
+    split = wp.build_split_from_window(window, probe_payload)
+
+    coverage = None
+    if node != "local" and window.trading_dates and span:
+        center_window = await wp.probe_center_window(source, market_upper)
+        coverage = wp.coverage_report(
+            center_window, window, start=span[0], end=span[1]
+        )
+
+    return {
+        "status": "success",
+        "window": window.to_dict(with_dates=include_dates),
+        "window_span": {"start": span[0], "end": span[1]} if span else None,
+        "suggested_split": split,
+        "coverage": coverage,
+    }
+
+
 @router.get("/qlib-data-range", summary="获取 Qlib 数据日期范围")
 async def get_qlib_data_range(
     current_user: dict[str, Any] = Depends(get_current_user),
