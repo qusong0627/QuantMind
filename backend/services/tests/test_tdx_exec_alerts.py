@@ -148,6 +148,43 @@ def test_failed_legs_are_listed_with_cap_and_remainder_count() -> None:
     assert "不会自动重发" in body
 
 
+# ── 「干净的一轮」= 恢复通知的前提 ──────────────────────────────────────
+def test_a_round_suppressed_by_the_session_gate_is_not_a_clean_round() -> None:
+    """盘外补跑、真单被自家闸门全压下的那轮**不算**「恢复正常」。
+
+    只判 ``alerts`` 为空就会在这里误发「已恢复」——那轮一条委托都没提交过，
+    上午报的故障（比如桥断了）可能还在，值班收到恢复后就再没人看它。
+    """
+    clean = _rolling(session_suppressed=0, execute_mode="tdx")
+    assert X.rolling_round_is_clean(clean) is True  # 正向对照：判据不是恒假
+    assert X.rolling_round_is_clean({**clean, "session_suppressed": 1}) is False
+    assert X.rolling_round_is_clean({**clean, "positions_error": "桥断了"}) is False
+    assert (
+        X.rolling_round_is_clean({**clean, "failed_orders": [{"symbol": "SH600000"}]})
+        is False
+    )
+    assert X.rolling_round_is_clean({**clean, "success": False}) is False
+
+
+def test_an_out_of_hours_tdx_round_cannot_announce_recovery() -> None:
+    """盘外 tdx 模式**结构上**下不了真单：没试过的路径不算好。
+
+    恢复要等一个真能下单的轮次（盘中，或 paper 模式——它盘后也能成交）来宣布。
+    """
+    assert (
+        X.rolling_round_is_clean(
+            _rolling(in_trading_hours=False, execute_mode="tdx", session_suppressed=0)
+        )
+        is False
+    )
+    assert (
+        X.rolling_round_is_clean(
+            _rolling(in_trading_hours=False, execute_mode="paper")
+        )
+        is True
+    )
+
+
 # ── 判据：L2 实时腿 ───────────────────────────────────────────────────
 def _l2(**over) -> dict:
     base: dict = {
@@ -566,6 +603,33 @@ async def test_resolve_is_not_sent_when_today_only_aborted() -> None:
         is False
     )
     assert len(notifier.calls) == 1  # 只有那条 aborted
+
+
+@pytest.mark.asyncio
+async def test_resolve_uses_the_loop_seen_set_so_a_broken_redis_does_not_spam() -> None:
+    """去重设施读不出来时，「已恢复」同样要靠进程内 ``seen`` 兜住。
+
+    L2 每 ~60s 一轮：Redis 可以读、写不进去（磁盘满时会这样）时，去重键永远
+    写不落，每轮都会重推一条「已恢复」——告警路径传了 ``seen``，恢复路径此前
+    漏了，于是同一次恢复被推 5 次。
+    """
+    notifier = SpyNotifier()
+    redis = FakeRedis(fail_set=True)
+    redis.store[X.alert_key(X.FAMILY_L2, X.KIND_STALLED, DAY)] = "1"  # 今天真报过
+    seen: set[str] = set()
+    sent = [
+        await X.resolve_exec_leg(
+            X.FAMILY_L2,
+            user_id="u1",
+            redis=redis,
+            notifier_factory=lambda: notifier,
+            day=DAY,
+            seen=seen,
+        )
+        for _ in range(5)
+    ]
+    assert sent == [True, False, False, False, False]
+    assert len(notifier.calls) == 1
 
 
 # ── 夹具形状 = 生产形状 ────────────────────────────────────────────────

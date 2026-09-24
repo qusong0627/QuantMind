@@ -634,3 +634,181 @@ class TestRollingExecutionGates:
         assert "下单失败" in title
         assert "风控拒单[L1]" in content
         assert "不会自动重发" in content
+
+
+class TestSessionRefusalProducer:
+    """生产者侧：券商回执里「被时段闸挡下」这件事怎么变成失败行上的标记。
+
+    上一条纪律（``TestAlertDiscipline``）测的是消费方——它喂进去的是**已经带标记**
+    的行。标记本身由提交器从信封里翻译过来：``{status:error, skipped:out_of_session}``
+    按 ``status`` 判就是"下单被拒"，会被推成「订单失败，请核对 orders 补单」，
+    而 orders 里根本没有这些单。这条把信封形状与告警口径钉在一起。
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_refusal_from_the_bridge_is_recorded_as_not_submitted(self):
+        from types import SimpleNamespace
+
+        from backend.services.live_trading.services.trading_session import (
+            OUT_OF_SESSION_MESSAGE,
+        )
+
+        svc = TdxRollingTradeService()
+        _arm(svc)
+        svc.__dict__.pop("place_rolling_orders", None)  # 走真的提交器（_arm 铺的是替身）
+        svc.load_positions_from_tdx = AsyncMock(return_value=([], ""))
+        fake_tdx, notifier, redis = _pusher(), _SpyNotifier(), _FakeRedis()
+        fake_tdx.place_order = AsyncMock(
+            return_value={
+                "status": "error",
+                "skipped": "out_of_session",
+                "message": OUT_OF_SESSION_MESSAGE,
+                "orders": [],
+            }
+        )
+
+        with _patch_stack(mode="tdx", in_session=True, notifier=notifier, redis=redis), \
+                patch(f"{ROLLING_MODULE}.tdx_pusher", fake_tdx), patch(
+                    "backend.services.trade.services.risk_gate_service.check_direct_order",
+                    new=AsyncMock(return_value=SimpleNamespace(passed=True, rule_id=None, reason=None)),
+                ):
+            result = await svc.run_rolling_push(tenant_id="default", user_id="10000001")
+
+        assert fake_tdx.place_order.await_count == 2, "两条腿都要真的走到提交器"
+        assert result["failed_orders"] == []
+        assert result["session_suppressed"] == 2
+        assert "非交易时段" in result["results"]["execute_skipped"]["error"]
+        assert notifier.calls == [], "被闸门挡下不是故障，不该推告警"
+
+
+class TestAlertDiscipline:
+    """告警面的三条纪律（exec-leg 复审 2026-09-24）：被自家闸门压住的一轮不冒充
+    「已恢复」；跨时段的拒单不算下单失败；坐标取账户，不取「谁跑的推理」。"""
+
+    @staticmethod
+    def _reported_today(redis) -> None:
+        """让「今天报过」成立：告警键只在送达后写，这里直接铺一条。"""
+        from backend.services.live_trading.services import tdx_exec_alerts as X
+
+        redis.store[X.alert_key(X.FAMILY_ROLLING, X.KIND_ORDERS_FAILED,
+                                X.now_shanghai().date())] = "1"
+
+    @pytest.mark.asyncio
+    async def test_a_suppressed_round_does_not_announce_recovery(self):
+        """10:00 报过故障、20:00 补跑被时段闸全压住 ⇒ **不许**推「已恢复」。
+
+        那一轮一条委托都没提交过：上午的故障（比如桥断了）可能还在，而值班
+        收到「已恢复」后就再没人看它。恢复要等一个真能下单的轮次来宣布。
+        """
+        svc = TdxRollingTradeService()
+        _arm(svc)                       # 有 1 买 1 卖 ⇒ 盘外必进 session_suppressed
+        svc.load_positions_from_tdx = AsyncMock(return_value=([], ""))
+        fake_tdx, notifier, redis = _pusher(), _SpyNotifier(), _FakeRedis()
+        self._reported_today(redis)
+
+        with _patch_stack(mode="tdx", in_session=False, notifier=notifier, redis=redis), \
+                patch(f"{ROLLING_MODULE}.tdx_pusher", fake_tdx):
+            result = await svc.run_rolling_push(tenant_id="default", user_id="10000001")
+
+        assert result["session_suppressed"] == 2, "夹具没造出「被压住的一轮」"
+        assert notifier.calls == []
+
+    @pytest.mark.asyncio
+    async def test_a_clean_in_session_round_announces_recovery(self):
+        """反向对照：同一份「今天报过」的铺垫 + 盘中干净的一轮 ⇒ 「已恢复」必须推。
+
+        没有它，上面那条 ``calls == []`` 在「恢复通知链路整个断了」时也是绿的。
+        """
+        svc = TdxRollingTradeService()
+        _arm(svc, buys=[], sells=[])
+        svc.load_positions_from_tdx = AsyncMock(return_value=([], ""))
+        fake_tdx, notifier, redis = _pusher(), _SpyNotifier(), _FakeRedis()
+        self._reported_today(redis)
+
+        with _patch_stack(mode="tdx", in_session=True, notifier=notifier, redis=redis), \
+                patch(f"{ROLLING_MODULE}.tdx_pusher", fake_tdx):
+            await svc.run_rolling_push(tenant_id="default", user_id="10000001")
+
+        assert len(notifier.calls) == 1
+        assert "已恢复" in notifier.calls[0][1]
+
+    @pytest.mark.asyncio
+    async def test_a_session_refusal_at_the_gate_is_not_a_failed_order(self):
+        """跨 11:35/15:05 的运行：提交时被闸门拒 ⇒ 记「未提交」，不推「下单失败」。
+
+        混进失败清单会推「N 条腿下单失败，请核对 orders 补单」——而去核对的话
+        orders 里根本没有这些单（它们压根没出过门）。
+        """
+        svc = TdxRollingTradeService()
+        _arm(svc)
+        svc.load_positions_from_tdx = AsyncMock(return_value=([], ""))
+        svc.place_rolling_orders = AsyncMock(
+            return_value=(
+                [],
+                [
+                    {
+                        "symbol": "600519.SH",
+                        "side": "buy",
+                        "error": "非交易时段（A 股 09:15–11:35 / 12:55–15:05），委托未提交",
+                        "session_refused": True,
+                    }
+                ],
+            )
+        )
+        fake_tdx, notifier, redis = _pusher(), _SpyNotifier(), _FakeRedis()
+
+        with _patch_stack(mode="tdx", in_session=True, notifier=notifier, redis=redis), \
+                patch(f"{ROLLING_MODULE}.tdx_pusher", fake_tdx):
+            result = await svc.run_rolling_push(tenant_id="default", user_id="10000001")
+
+        assert result["failed_orders"] == []
+        assert result["session_suppressed"] == 1
+        assert "未提交" in result["results"]["execute_skipped"]["error"]
+        assert notifier.calls == []
+
+    @pytest.mark.asyncio
+    async def test_alerts_go_to_the_account_not_to_whoever_ran_the_inference(
+        self, monkeypatch
+    ):
+        """定时全局任务以 ``user_id="system"`` 触发推理——那不是能收通知的坐标
+        （``notifications.user_id`` 有 FK 指向 ``users(user_id)``，插不进去 ⇒
+        被判「未送达」⇒ 去重键不写 ⇒ 每次运行重试、每次都失败）。回退到账户坐标。
+        """
+        monkeypatch.setenv("TDX_ACCOUNT_USER_ID", "00000001")  # 老口径 → 规范名
+        svc = TdxRollingTradeService()
+        _arm(svc)
+        svc.load_positions_from_tdx = AsyncMock(return_value=([], "通达信桥持仓拉取失败"))
+        fake_tdx, notifier, redis = _pusher(), _SpyNotifier(), _FakeRedis()
+
+        with _patch_stack(mode="tdx", in_session=True, notifier=notifier, redis=redis), \
+                patch(f"{ROLLING_MODULE}.tdx_pusher", fake_tdx):
+            await svc.run_rolling_push(tenant_id="default", user_id="system")
+
+        assert len(notifier.calls) == 1
+        assert notifier.calls[0][0] == "10000001"
+
+        # 反向对照：本来就是账户坐标的调用方不被改写（否则这条规则会把所有人的
+        # 告警都并到管理员账户上）
+        notifier2, redis2 = _SpyNotifier(), _FakeRedis()
+        with _patch_stack(mode="tdx", in_session=True, notifier=notifier2, redis=redis2), \
+                patch(f"{ROLLING_MODULE}.tdx_pusher", fake_tdx):
+            await svc.run_rolling_push(tenant_id="default", user_id="00002002")
+
+        assert notifier2.calls[0][0] == "00002002"
+
+    @pytest.mark.asyncio
+    async def test_a_crash_mid_run_is_still_visible(self):
+        """运行中途抛异常（DB/数据源）也必须有人看见——此前只有 script_runner 的
+        一行 warning，而告警面是「人不在场时唯一会响的东西」。异常照旧上抛。"""
+        svc = TdxRollingTradeService()
+        svc.load_latest_scores = AsyncMock(side_effect=RuntimeError("db down"))
+        fake_tdx, notifier, redis = _pusher(), _SpyNotifier(), _FakeRedis()
+
+        with _patch_stack(mode="tdx", in_session=True, notifier=notifier, redis=redis), \
+                patch(f"{ROLLING_MODULE}.tdx_pusher", fake_tdx):
+            with pytest.raises(RuntimeError):
+                await svc.run_rolling_push(tenant_id="default", user_id="10000001")
+
+        assert len(notifier.calls) == 1
+        assert "异常" in notifier.calls[0][1]
+        assert "db down" in notifier.calls[0][2]

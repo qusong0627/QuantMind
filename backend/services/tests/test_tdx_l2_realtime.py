@@ -950,6 +950,77 @@ class TestLoopStability:
         assert "已恢复" in notifier.calls[1][1]
         assert self._mirrored(rc)["positions_error"] is None, "干净的那轮状态必须回到干净"
 
+    def test_an_out_of_hours_cycle_cannot_announce_recovery(self):
+        """盘外的 tdx 周期**结构上**不会成交 ⇒ 不许宣布「已恢复」。
+
+        与上面那条盘内用例互为对照：故障键就摆在那里（今天真的报过），盘外这轮
+        当然也没有新告警——只按「``alerts`` 为空」判，就会在每天收盘后推一条平安：
+        上午报的桥故障在盘外被时段门压住、本来就不报（见 ``l2_alerts`` 的两处
+        ``in_trading_hours`` 守卫），值班收到「已恢复」后就再没人看它了。
+        """
+        # Arrange: 今天报过「数据链停摆」，且这一事实只写在去重键上
+        rc = _patched_redis()
+        self._seed_pool(rc)
+        svc = MagicMock()
+        self._bootstrap(rc, svc)
+        notifier = _SpyNotifier()
+        from backend.shared.alert_delivery import remember_sent
+        from backend.services.live_trading.services import tdx_exec_alerts as X
+
+        key = X.alert_key(X.FAMILY_L2, X.KIND_STALLED, X.now_shanghai().date())
+        remember_sent(rc, key)
+        assert rc.get(key), "铺垫失败：故障键没写进去（那这条用例就是空过的）"
+        # Act
+        _pusher, _status = self._run_loop(
+            rc, svc, in_trading_hours=False, notifier=notifier
+        )
+        # Assert
+        assert notifier.calls == [], (
+            f"盘外没有验证过任何执行动作，不该报平安：{[c[1] for c in notifier.calls]}"
+        )
+
+    def test_session_refusals_from_the_broker_are_not_failures(self):
+        """跨 11:35/15:05 的周期：回执说「被时段闸挡在门内」⇒ 不是下单失败。
+
+        混进 ``orders_failed`` 会推「N 条腿下单失败，请核对 orders 补单」——而
+        orders 里根本没有这些单（它们压根没出过门），值班会去查一个不存在的缺口。
+        它们并进 ``session_skipped_symbols``（与「本周期开始时就不在时段内」是
+        同一件事的两种到达方式）。
+        """
+        # Arrange
+        from backend.services.live_trading.services.trading_session import (
+            OUT_OF_SESSION_MESSAGE,
+        )
+
+        rc = _patched_redis()
+        self._seed_pool(rc)
+        svc = MagicMock()
+        self._bootstrap(rc, svc)
+        notifier = _SpyNotifier()
+        svc.place_rolling_orders = AsyncMock(
+            return_value=(
+                [],
+                [
+                    {
+                        "symbol": "SH600000",
+                        "side": "buy",
+                        "error": OUT_OF_SESSION_MESSAGE,
+                        "session_refused": True,
+                    }
+                ],
+            )
+        )
+        # Act
+        _pusher, _status = self._run_loop(rc, svc, notifier=notifier)
+        # Assert
+        mirrored = self._mirrored(rc)
+        assert mirrored["orders_failed_count"] == 0
+        assert mirrored["orders_failed"] == []
+        assert mirrored["session_skipped_symbols"] >= 1
+        assert not [c for c in notifier.calls if "下单失败" in c[1]], (
+            f"被闸门挡下的单被报成了下单失败：{[c[1] for c in notifier.calls]}"
+        )
+
 
 class TestPayloadAge:
     """``_payload_age_sec``：池新鲜度判据（纯函数，读写同钟）。"""

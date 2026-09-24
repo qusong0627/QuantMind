@@ -13,7 +13,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import datetime
+from typing import Any
 from zoneinfo import ZoneInfo
 
 TZ = ZoneInfo("Asia/Shanghai")
@@ -68,3 +70,48 @@ def real_order_session_refusal(now: datetime | None = None) -> str | None:
     if is_trading_time(now):
         return None
     return OUT_OF_SESSION_MESSAGE
+
+
+#: 提交结果信封里的**带内标记**：这一条被时段闸门挡在门内（``place_order`` 会带
+#: 着 ``skipped="out_of_session"`` 返回，而 ``orders`` 恒为空）。
+SKIPPED_OUT_OF_SESSION = "out_of_session"
+
+#: 执行腿把上面那条信封翻译成失败行上的标记。**它必须与真失败分开**：混在一起
+#: 会推「N 条腿下单失败，请核对 orders 补单」——而去核对的话 orders 里根本没有
+#: 这些单（它们压根没出过门），值班会去查一个不存在的缺口。
+SESSION_REFUSED_FLAG = "session_refused"
+
+
+def session_refusal_of(envelope: Any) -> str | None:
+    """提交结果信封里有没有「被时段闸挡下」这件事；有则返回拒因文案。
+
+    两条腿（滚动 + L2）的提交器形状一致，故判据也只写一处。
+    """
+    if not isinstance(envelope, Mapping):
+        return None
+    if str(envelope.get("skipped") or "") != SKIPPED_OUT_OF_SESSION:
+        return None
+    return str(envelope.get("message") or OUT_OF_SESSION_MESSAGE)
+
+
+def session_refusal_row(item: Mapping[str, Any], side: str, message: str) -> dict[str, Any]:
+    """把一次时段拒单记成「未提交」行（带标记，供 ``split_session_refusals`` 分拣）。"""
+    return {**item, "side": side, "error": message, SESSION_REFUSED_FLAG: True}
+
+
+def split_session_refusals(
+    rows: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """失败清单 → ``(真失败, 被时段闸挡下的)``。
+
+    调用点在「一次运行/一个周期结束」处：真失败要推人，被挡下的只登记不报警
+    （见 ``SESSION_REFUSED_FLAG``）。
+    """
+    real: list[dict[str, Any]] = []
+    refused: list[dict[str, Any]] = []
+    for row in rows or ():
+        if isinstance(row, Mapping) and row.get(SESSION_REFUSED_FLAG):
+            refused.append(dict(row))
+        else:
+            real.append(row)  # type: ignore[arg-type]
+    return real, refused

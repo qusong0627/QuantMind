@@ -16,6 +16,11 @@
 能落地——一次干净的运行/周期会把今天报过的类别合成一条「已恢复」。没有它，一条
 告警挂在那里就再也分不清「还在坏」和「早好了」。
 
+而「干净」**不能**拿「本轮的 ``alerts`` 为空」当判据：告警面只报有后果的事，于是
+盘外补跑、被时段闸压住的轮次、结构上下不了真单的周期全都"没有告警"——它们同时
+也没有做任何事。判据按**事实**来（``rolling_round_is_clean`` / ``l2_cycle_is_clean``），
+两条腿同一姿态：这一轮/周期必须真的具备执行条件，才够格宣布恢复。
+
 **时段闸门**：`positions_error` / `stalled` 只在交易时段推。非交易时段通达信客户端
 通常不在线，此时「持仓读不到」没有让任何可做的事落空（预警与真单本来也出不去）；
 交易时段内它才等于「本可以做的事没做」。时段判据用
@@ -175,6 +180,42 @@ def rolling_alerts(result: Mapping[str, Any]) -> list[Alert]:
     return out
 
 
+def rolling_round_is_clean(result: Mapping[str, Any]) -> bool:
+    """这一轮够不够格宣布「已恢复」。
+
+    调用方原本的判据是「``rolling_alerts`` 返回空」——但告警面**只报有后果的事**，
+    于是几种「什么都没做成」的轮次也被算成了干净：
+
+    * **被自家时段闸全压住的盘后补跑**（``session_suppressed > 0``）：一条委托都
+      没提交过，上午报的故障（比如桥断了）可能还在，可这个判据本来也报不出它
+      ——盘后持仓读不到不推告警。值班收到「已恢复」后就再没人看它。
+    * **盘外的 tdx 模式轮次**：结构上下不了真单。没试过的路径不算好。
+    * ``positions_error`` 有值但没信号可压（``signals_suppressed == 0`` ⇒ 不报）：
+      持仓读不到这件事本身还在。
+
+    所以「干净」按**事实**判，不按「告警面说了什么」判。paper 模式盘后本地撮合
+    照常成交，不受时段限制，故只有 tdx 模式看时段。
+    """
+    if not result.get("success"):
+        return False
+    for field in ("error", "positions_error"):
+        if str(result.get(field) or "").strip():
+            return False
+    for field in ("signals_suppressed", "session_suppressed"):
+        if int(result.get(field) or 0):
+            return False
+    if result.get("failed_orders"):
+        return False
+    mode = str(result.get("execute_mode") or "")
+    if mode == "tdx":
+        return bool(result.get("in_trading_hours"))
+    if mode == "paper":
+        return True
+    # 模式未知（生产者漂移）：说不清这轮有没有能力真下单，按「不干净」办。
+    # 代价是少一条恢复通知——比假恢复通知便宜。
+    return False
+
+
 # ── 判据：L2 实时腿 ────────────────────────────────────────────────
 def l2_alerts(status: Mapping[str, Any]) -> list[Alert]:
     """L2 实时循环**本周期**状态里有没有要推给人的事。
@@ -273,6 +314,35 @@ def l2_alerts(status: Mapping[str, Any]) -> list[Alert]:
     return out
 
 
+def l2_cycle_is_clean(status: Mapping[str, Any]) -> bool:
+    """这一周期够不够格宣布「已恢复」——与 ``rolling_round_is_clean`` 同一姿态。
+
+    这个循环 24/7 常驻，而触发与真单只在时段内发生：盘外的每个周期都是「什么都没
+    做」的周期，只按「``l2_alerts`` 为空」判，收盘后必定推一条平安（而上午报的
+    桥故障在盘外被时段门压住、本来就不报——见 ``l2_alerts`` 的 ``in_trading_hours``
+    两处守卫）。停摆（``capture_stale`` / 池子连续不足）是**与时段无关的事实**，
+    盘外也照样算「不干净」：链路断着的时候没有「已恢复」可言。
+    """
+    for field in ("cycle_error", "positions_error", "exec_error"):
+        if str(status.get(field) or "").strip():
+            return False
+    if int(status.get("orders_failed_count") or 0):
+        return False
+    if int(status.get("session_skipped_symbols") or 0):
+        return False
+    if bool(status.get("capture_stale")):
+        return False
+    if int(status.get("pool_starved_cycles") or 0) >= POOL_STARVED_ALERT_CYCLES:
+        return False
+    mode = str(status.get("execute_mode") or "")
+    if mode == "tdx":
+        return bool(status.get("in_trading_hours"))
+    if mode == "paper":
+        return True
+    # off（本周期只评分不执行）与未知模式：这一周期结构上没有验证过执行链路。
+    return False
+
+
 # ── 投递 ────────────────────────────────────────────────────────────
 def default_notifier() -> Notifier:
     """生产通知器：走 ``publish_notification_async``（落库 → 前端通知中心）。
@@ -350,12 +420,17 @@ async def resolve_exec_leg(
     notifier_factory: NotifierFactory | None = None,
     day: date | None = None,
     at: str = "",
+    seen: MutableSet[str] | None = None,
 ) -> bool:
     """今天报过、现在干净了 ⇒ 推一条「已恢复」（一天最多一条，按腿）。
 
     只在**本周期/本次运行没有任何告警**时调用（调用方负责这个前提：先看
     ``alerts`` 空不空）。判断"今天报过"用告警键本身——键只在送达之后才写，
     所以它存在 ⟺ 人真的看到过那条告警。
+
+    ``seen``：循环型调用方传进程内去重集。与告警路径同一个坑——去重键读得出、
+    写不进去时（磁盘满/只读副本），每轮都会重推一条「已恢复」。恢复通知尤其
+    经不起这个：它本来就是"可以安心了"的信号，重复五遍比不推更糟。
     """
     if redis is None:
         return False
@@ -383,5 +458,6 @@ async def resolve_exec_leg(
         user_id=user_id,
         redis=redis,
         notifier_factory=notifier_factory or default_notifier,
+        seen=seen,
         log_prefix=f"[TdxExec:{family}]",
     )

@@ -31,6 +31,9 @@ from backend.services.live_trading.services.tdx_push_service import (
 from backend.services.live_trading.services.trading_session import (
     is_trading_time,
     now_shanghai,
+    session_refusal_of,
+    session_refusal_row,
+    split_session_refusals,
 )
 
 logger = logging.getLogger(__name__)
@@ -548,6 +551,13 @@ class TdxRollingTradeService:
                     price_type=price_type,
                     plan_id=plan_id,
                 )
+                # 时段闸拒单（跨 11:35/15:05 的运行：本轮开始时在盘内、提交时已在盘外）：
+                # 这单**没有提交过**，不是下单失败。混进 failed 会推「N 条腿下单失败，
+                # 请核对 orders 补单」——而去核对的话 orders 里根本没有这些单。
+                refusal = session_refusal_of(resp)
+                if refusal:
+                    failed.append(session_refusal_row(item, side, refusal))
+                    return
                 # 桥返回 {plan_id, status, orders:[{stock_code,side,volume,status,order_id,message}]}
                 first = (resp.get("orders") or [{}])[0] if isinstance(resp, dict) else {}
                 order_status = str(first.get("status") or resp.get("status") or "unknown")
@@ -678,6 +688,37 @@ class TdxRollingTradeService:
         return placed, failed
 
     async def run_rolling_push(
+        self,
+        *,
+        tenant_id: str,
+        user_id: str,
+        run_id: str | None = None,
+        trade_date: str | None = None,
+        fixed_buy_amount: float | None = None,
+        push_message: bool = True,
+        check_index: bool = True,
+    ) -> dict[str, Any]:
+        """执行一次滚动买卖检查并推送（三档执行模式）——**带崩溃可见性的外壳**。
+
+        异常照旧上抛（调用方的 try/except 与重试逻辑一个字不改），但先推一条
+        告警：这条腿是定时/事件驱动的，崩在算信号之前时面板与通知中心都没有痕迹，
+        而它承载的是一整批买卖动作（本轮推理的信号全都没落地）。
+        """
+        try:
+            return await self._run_rolling_push(
+                tenant_id=tenant_id,
+                user_id=user_id,
+                run_id=run_id,
+                trade_date=trade_date,
+                fixed_buy_amount=fixed_buy_amount,
+                push_message=push_message,
+                check_index=check_index,
+            )
+        except Exception as exc:
+            await _alert_rolling_crash(exc, user_id=user_id)
+            raise
+
+    async def _run_rolling_push(
         self,
         *,
         tenant_id: str,
@@ -895,6 +936,22 @@ class TdxRollingTradeService:
                 buys=buys[:_MAX_BUY_WARNINGS],
                 sells=sells[:_MAX_SELL_WARNINGS],
             )
+        # 跨 11:35/15:05 的那一轮：本轮开头在盘内、提交时已在盘外。这些单被时段闸
+        # 挡在门内（``session_refused`` 带内标记），**不算下单失败**——与上面那条
+        # 「本轮开始时就不在时段内」是同一件事的两种到达方式，故并进同一个计数。
+        failed_orders, session_refusals = split_session_refusals(failed_orders)
+        if session_refusals:
+            session_suppressed += len(session_refusals)
+            results.setdefault(
+                "execute_skipped",
+                {
+                    "success": False,
+                    "error": (
+                        f"非交易时段（{now_shanghai().strftime('%H:%M')}），"
+                        f"本轮 {session_suppressed} 条真单未提交"
+                    ),
+                },
+            )
         if placed_orders:
             results["orders"] = {"success": True, "placed": placed_orders}
         if failed_orders:
@@ -952,6 +1009,29 @@ class TdxRollingTradeService:
         return outcome
 
 
+def alert_user_id(user_id: object) -> str:
+    """告警收件人坐标：**能收通知的账户**，不是「谁跑的这一轮」。
+
+    定时全局任务以 ``user_id="system"`` 跑推理并原样传到告警面——而
+    ``notifications.user_id`` 有外键指向 ``users(user_id)``（存量只有账户名一行），
+    这个值插不进去 ⇒ 投递被判失败 ⇒ 按纪律「未送达不记去重键」⇒ 每次运行重试、
+    每次都失败 = 一条通知都发不出去（失败可见性整体失效，且日志里只有一行 warning）。
+
+    非数字（``system``/``admin`` 之类执行者身份）与空值一律回退到**账户坐标**
+    ——与这两条腿下单用的是同一座账户（``TDX_ACCOUNT_USER_ID``）。数字身份原样归一
+    （管理员族收口 ``10000001``，其余补零 8 位），``users`` 里存的就是这个形状。
+    """
+    from backend.shared.simulation_account_keys import (
+        normalize_runtime_user,
+        resolve_db_account_user,
+    )
+
+    raw = str(user_id or "").strip()
+    if raw.isdigit():
+        return normalize_runtime_user(raw)
+    return resolve_db_account_user("TDX_ACCOUNT_USER_ID")
+
+
 async def _alert_rolling_run(outcome: dict[str, Any], *, user_id: str | None) -> None:
     """一次运行之后的失败可见性：有失败推一条（一天一次），干净的一次负责发「已恢复」。
 
@@ -963,18 +1043,57 @@ async def _alert_rolling_run(outcome: dict[str, Any], *, user_id: str | None) ->
         alert_exec_leg,
         resolve_exec_leg,
         rolling_alerts,
+        rolling_round_is_clean,
     )
 
     try:
+        uid = alert_user_id(user_id)
         alerts = rolling_alerts(outcome)
         if alerts:
-            await alert_exec_leg(
-                FAMILY_ROLLING, alerts, user_id=user_id, redis=trade_redis
-            )
-        else:
-            await resolve_exec_leg(FAMILY_ROLLING, user_id=user_id, redis=trade_redis)
+            await alert_exec_leg(FAMILY_ROLLING, alerts, user_id=uid, redis=trade_redis)
+        elif rolling_round_is_clean(outcome):
+            # 「alerts 为空」不等于「这一轮是好的」：被自家时段闸压住的补跑、
+            # 盘外的 tdx 轮次都既没有告警也没有动作。见 ``rolling_round_is_clean``。
+            await resolve_exec_leg(FAMILY_ROLLING, user_id=uid, redis=trade_redis)
     except Exception as exc:  # noqa: BLE001
         logger.warning("[TdxRolling] 失败可见性推送异常: %s", exc, exc_info=True)
+
+
+async def _alert_rolling_crash(exc: BaseException, *, user_id: str | None) -> None:
+    """运行中途抛异常 ⇒ 推一条（一天一次）。**绝不抛**。
+
+    此前这条路只有 ``script_runner`` 的一行 ``logger.warning``：定时任务崩了，
+    面板上没有痕迹、通知中心没有一条——而失败可见性本来就是为「人不在场」建的。
+    """
+    from backend.services.live_trading.services.tdx_exec_alerts import (
+        FAMILY_ROLLING,
+        Alert,
+        KIND_CYCLE_ERROR,
+        alert_exec_leg,
+    )
+
+    try:
+        await alert_exec_leg(
+            FAMILY_ROLLING,
+            [
+                Alert(
+                    kind=KIND_CYCLE_ERROR,
+                    level="error",
+                    title=f"滚动买卖运行异常：{' '.join(str(exc).split())[:60]}",
+                    content=(
+                        f"{type(exc).__name__}: {exc}\n"
+                        "本轮**在算出信号之前就中断了**（没有委托、也没有预警），"
+                        "所以这次推理对应的买卖动作整批缺失。\n"
+                        "下一轮推理完成后会自动重来；连续出现查后端日志 [TdxRolling] 段"
+                        "（异常带 exc_info，有文件行号）。"
+                    ),
+                )
+            ],
+            user_id=alert_user_id(user_id),
+            redis=trade_redis,
+        )
+    except Exception as alert_exc:  # noqa: BLE001
+        logger.warning("[TdxRolling] 崩溃告警推送异常: %s", alert_exc, exc_info=True)
 
 
 def _batch_last_close(symbols: list[str]) -> dict[str, float]:

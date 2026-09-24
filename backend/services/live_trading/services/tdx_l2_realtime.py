@@ -32,10 +32,14 @@ from backend.services.live_trading.services.tdx_exec_alerts import (
     FAMILY_L2,
     alert_exec_leg,
     l2_alerts,
+    l2_cycle_is_clean,
     resolve_exec_leg,
 )
 from backend.services.live_trading.services.tdx_push_service import tdx_pusher
-from backend.services.live_trading.services.trading_session import is_trading_time
+from backend.services.live_trading.services.trading_session import (
+    is_trading_time,
+    split_session_refusals,
+)
 from backend.services.trade_shared.redis_client import redis_client as trade_redis
 from backend.shared.simulation_account_keys import resolve_db_account_user
 from backend.shared.stock_utils import StockCodeUtil
@@ -689,8 +693,16 @@ async def run_tdx_l2_realtime_task(interval_sec: int = 0) -> None:
                     redis=trade_redis,
                     seen=_ALERTED_KEYS,
                 )
-            else:
-                await resolve_exec_leg(FAMILY_L2, user_id=user_id, redis=trade_redis)
+            elif l2_cycle_is_clean(realtime_status):
+                # 「alerts 为空」不等于「这一周期是好的」：盘外的每个周期都没做
+                # 触发判断（那件事被时段门压住、本来就不报），盘外的 tdx 周期更
+                # 是结构上不可能成交。恢复要等一个真能执行的周期来宣布。
+                await resolve_exec_leg(
+                    FAMILY_L2,
+                    user_id=user_id,
+                    redis=trade_redis,
+                    seen=_ALERTED_KEYS,
+                )
         except Exception as exc:  # noqa: BLE001 — 告警面故障不许带走循环
             logger.warning("[TdxL2] 失败可见性推送异常: %s", exc, exc_info=True)
 
@@ -976,6 +988,12 @@ async def run_tdx_l2_realtime_task(interval_sec: int = 0) -> None:
                 )
                 if exec_error:
                     logger.warning("[TdxL2] 执行段返回：%s", exec_error)
+                # 跨 11:35/15:05 的周期：提交时被时段闸挡在门内的腿**没有提交过**，
+                # 不是下单失败——混进 orders_failed 会推「N 条腿下单失败，请核对
+                # orders 补单」，而 orders 里根本没有这些单。并进 session_skipped，
+                # 它们与上面那条「本周期开始时就不在时段内」是同一件事。
+                failed, refused = split_session_refusals(failed)
+                session_skipped += len(refused)
                 if failed:
                     # 失败腿进状态（带条数上限）：告警面读它，面板也读它。
                     failed = list(failed)
