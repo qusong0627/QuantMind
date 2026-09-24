@@ -1408,6 +1408,15 @@ BRIDGE_ACCOUNT_TIMEOUT_S = 12.0
 #: 单独成常量：判据文案与测试都引用它，改一处即可。
 BRIDGE_ACCOUNT_REMEDY = "需在 Windows 侧 RDP 重登通达信交易端后重试"
 
+#: 账户通道「活着」的最低总资产（元）。**不是**业务门槛，是**通道活性**判据：
+#: 交易端掉线时账户查询**不一定报错**，会静默返回 asset=0 —— 隔壁 2026-09-10 就是
+#: 这种形态（行情通道正常、账户通道整日 asset=0，7 轮盘中分析 + 3 次调仓 + 全部
+#: 哨兵条件位静默哑火，全天零成交，收盘后才复盘发现）。故 `asset <= 0` 与
+#: 「读不出来」一律判掉线，绝不当作「查到了，钱是 0」。
+#: 同一判据在隔壁 ``scripts/preflight_bridge.py`` 的 ``evaluate()`` 里写作
+#: ``account = {"ok": asset > 0, ...}``。
+BRIDGE_ACCOUNT_MIN_ASSET = 0.0
+
 
 def check_tdx_bridge_online() -> tuple[bool, str]:
     """探测通达信桥**进程与行情通道**是否在线（QMT Agent 缺失时的兜底通道）。
@@ -1450,9 +1459,13 @@ def check_bridge_account_channel() -> tuple[bool, str, dict]:
     返回 ``(ok, detail, details)``。
 
     被守护的故障（**已发生过**，不是理论风险）：桥进程活着、行情照常，而**交易端
-    掉线**（隔壁 ``logs/preflight.json`` 09:12:17 实录 ``account.ok=false /
-    "TDX 桥账户查询失败: Read timed out"``）。此时盘中分析/调仓/哨兵条件位会
-    静默停摆，而只看 health 的探针会一路判「在线」。
+    掉线**。此时盘中分析/调仓/哨兵条件位会静默停摆，而只看 health 的探针会一路
+    判「在线」。隔壁记下了它**两种形态**，两种都赔过一整天：
+
+    * 查询报错：``logs/preflight.json`` 09:12:17 实录 ``account.ok=false /
+      "TDX 桥账户查询失败: Read timed out"``。
+    * 查询正常、资产恒 0：2026-09-10 实录（``preflight_bridge.py`` 模块 docstring）
+      —— 7 轮盘中分析 + 3 次调仓 + 全部哨兵条件位哑火，**全天零成交**。
 
     判据（失败方向一律**报出来**）：
 
@@ -1462,6 +1475,9 @@ def check_bridge_account_channel() -> tuple[bool, str, dict]:
       ``TDX_UNAVAILABLE``）。
     * **200 但没查到东西**（``asset`` 缺失/非 dict/空 dict）⇒ 也不通过。桥一旦改成
       吞异常回 200，只剩这条能挡住它静默失效。
+    * **200、有 asset、但总资产读成 0 或读不出** ⇒ 也不通过。这是桥假活的**静默
+      形态**（隔壁 2026-09-10 实录，详见 :data:`BRIDGE_ACCOUNT_MIN_ASSET`）——
+      查询不报错，只是资产恒为 0，比超时那一路更难发现。
     * 不可达/超时/任何异常 ⇒ 不通过，**绝不抛**（探测失败不许把整个 preflight 带崩）。
 
     ``positions`` 为空是**合法**状态（今天没持仓），不算失败——只数条数，不判门槛。
@@ -1494,10 +1510,22 @@ def check_bridge_account_channel() -> tuple[bool, str, dict]:
                 {"status_code": 200},
             )
         positions = payload.get("positions")
+        total_asset = _as_float(asset.get("asset"))
+        # 桥「假活」的**静默形态**：掉线时查询照样 200，只是资产读成 0
+        # （见 BRIDGE_ACCOUNT_MIN_ASSET 常量注释里的 2026-09-10 实录）。
+        # 「读不出来」（None）同样不许当「查到了」——未知与 0 都要报出来。
+        if total_asset is None or total_asset <= BRIDGE_ACCOUNT_MIN_ASSET:
+            shown = "读不出" if total_asset is None else f"¥{total_asset:,.2f}"
+            return (
+                False,
+                f"账户通道返回资产 {shown}（行情通/账号掉线＝桥假活）"
+                f"（{BRIDGE_ACCOUNT_REMEDY}）",
+                {"status_code": 200, "total_asset": total_asset},
+            )
         details = {
             "account_id": payload.get("account_id"),
             "position_count": len(positions) if isinstance(positions, list) else 0,
-            "total_asset": _as_float(asset.get("asset")),
+            "total_asset": total_asset,
         }
         return (
             True,

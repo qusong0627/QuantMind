@@ -204,6 +204,68 @@ def test_a_200_without_a_real_asset_is_not_ok(monkeypatch, payload):
     assert "未返回有效" in detail
 
 
+def test_the_silent_zero_asset_form_is_caught(monkeypatch):
+    """桥假活的**静默形态**：查询不报错、HTTP 200，只是资产恒为 0。
+
+    隔壁 ``scripts/preflight_bridge.py`` 模块 docstring 记着这一路：2026-09-10
+    行情通道正常、账户通道整日 ``asset=0``，7 轮盘中分析 + 3 次 09:35 调仓 +
+    全部哨兵条件位静默哑火，**全天零成交**。它比超时那一路更难发现（没有异常、
+    没有非 200），靠的就是 ``ok = asset > 0`` 这一条。
+    """
+    _configure(monkeypatch)
+    monkeypatch.setattr(
+        rtu.httpx,
+        "post",
+        lambda *a, **k: _healthy(asset=dict(_HEALTHY_ASSET, asset=0.0)),
+    )
+
+    ok, detail, details = rtu.check_bridge_account_channel()
+
+    assert ok is False, "资产 0 必须判掉线"
+    assert "桥假活" in detail
+    assert "RDP" in detail
+    assert details["total_asset"] == 0.0
+
+    # 正向对照（少了这半条，把探针整根改成 `return False, …` 也能让上面全绿）：
+    # 同一根桩只把资产换回健康值 ⇒ 必须判在线。
+    monkeypatch.setattr(rtu.httpx, "post", lambda *a, **k: _healthy())
+    assert rtu.check_bridge_account_channel()[0] is True
+
+
+@pytest.mark.parametrize("amount", [None, "abc", [], -1.0, "-5"])
+def test_unreadable_or_negative_asset_amount_is_not_ok(monkeypatch, amount):
+    """读不出 ≠ 查到了；负数更不是「查到」—— 未知与 0 一律报出来。"""
+    _configure(monkeypatch)
+    monkeypatch.setattr(
+        rtu.httpx,
+        "post",
+        lambda *a, **k: _healthy(asset=dict(_HEALTHY_ASSET, asset=amount)),
+    )
+
+    ok, detail, _details = rtu.check_bridge_account_channel()
+
+    assert ok is False
+    assert "桥假活" in detail
+
+
+def test_the_liveness_boundary_is_any_positive_asset(monkeypatch):
+    """边界从两侧夹住：最小的正数算活、0 算掉线（免得门槛被写成 1 万之类）。"""
+    _configure(monkeypatch)
+    monkeypatch.setattr(
+        rtu.httpx,
+        "post",
+        lambda *a, **k: _healthy(asset=dict(_HEALTHY_ASSET, asset=0.01)),
+    )
+    assert rtu.check_bridge_account_channel()[0] is True
+
+    monkeypatch.setattr(
+        rtu.httpx,
+        "post",
+        lambda *a, **k: _healthy(asset=dict(_HEALTHY_ASSET, asset=0)),
+    )
+    assert rtu.check_bridge_account_channel()[0] is False
+
+
 def test_zero_positions_is_still_ok(monkeypatch):
     """空仓是合法状态 —— 不许把「今天没持仓」判成「通道坏了」。"""
     _configure(monkeypatch)
