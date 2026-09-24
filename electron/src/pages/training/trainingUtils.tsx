@@ -250,6 +250,37 @@ export interface EvalReport {
   error?: string;
 }
 
+/** 评估报告磁贴的主展示口径：优先测试段（样本外）。
+ *
+ * headline（`rank_ic`）是全窗合计、含训练段，约虚高 1.5×（2026-09-24 实测：
+ * 49 份 CN 报告 test 段 IC 中位 0.085 vs 全窗 0.127）；无 test 段的老报告回落
+ * 全窗，调用方必须用 `tag` 在标签上如实标注口径——不许静默拿全窗冒充样本外。
+ */
+export interface EvalIcHeadline {
+  /** 磁贴标签后缀（'测试段' / '全窗含训练'） */
+  tag: string;
+  /** 是否样本外（测试段）口径 */
+  isTest: boolean;
+  mean: number | null | undefined;
+  icir: number | null | undefined;
+  winRate: number | null | undefined;
+}
+
+export function resolveEvalIcHeadline(report: EvalReport): EvalIcHeadline {
+  const testSeg = report.by_split?.test;
+  if (testSeg && testSeg.mean != null) {
+    return {
+      tag: '测试段',
+      isTest: true,
+      mean: testSeg.mean,
+      icir: testSeg.icir,
+      winRate: testSeg.win_rate,
+    };
+  }
+  const ric = report.rank_ic || {};
+  return { tag: '全窗含训练', isTest: false, mean: ric.mean, icir: ric.icir, winRate: ric.win_rate };
+}
+
 export interface TrainingResult {
   modelId: string;
   modelName: string;
