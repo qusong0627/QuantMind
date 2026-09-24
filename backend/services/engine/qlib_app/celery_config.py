@@ -143,16 +143,14 @@ if os.getenv("MARKET_SYNC_SCHEDULE_ENABLED", "true").lower() == "true":
         "schedule": crontab(minute="*", hour="*"),
     }
 
-# 每日滚动刷新 stock_daily_latest 最近 N 天（QuantDB 源，口径同市场同步）。
-# 数据同步约 01:00–06:00 完成后触发；幂等 upsert，可重复运行。天数/时间/开关
-# 可用 ROLLING_SDL_SYNC_DAYS / _HOUR / _MINUTE / _ENABLED 覆盖。
+# 跟随 QuantDB 同步滚动刷新 stock_daily_latest 最近 N 天（QuantDB 源，口径同市场同步）。
+# 每 10 分钟轮询一次；任务自带新鲜度门控——QuantDB 分区未推进（没同步到新交易日）时
+# 直接跳过，因此实际执行节奏与 QuantDB 同步一致，不会空跑。幂等 upsert，可重复运行。
+# 覆盖：ROLLING_SDL_SYNC_ENABLED / _MINUTE / _DAYS。
 if os.getenv("ROLLING_SDL_SYNC_ENABLED", "true").lower() == "true":
     beat_schedule["rolling-sdl-sync-daily"] = {
         "task": "engine.tasks.rolling_sync_stock_daily_recent",
-        "schedule": crontab(
-            minute=os.getenv("ROLLING_SDL_SYNC_MINUTE", "40"),
-            hour=os.getenv("ROLLING_SDL_SYNC_HOUR", "6"),
-        ),
+        "schedule": crontab(minute=os.getenv("ROLLING_SDL_SYNC_MINUTE", "*/10")),
         "kwargs": {"days": int(os.getenv("ROLLING_SDL_SYNC_DAYS", "30"))},
     }
 

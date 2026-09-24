@@ -6,9 +6,12 @@
 特征（qdb_features_daily）+ 基于前复权 close 重算的价格派生指标（ma*/ma_gap_*/
 vol_atr_14），symbol 统一前缀式内码。
 
-与既有增量脚本（只补 PG 最大日之后的新日期）不同，本脚本每天**重刷最近一个月**：
+与既有增量脚本（只补 PG 最大日之后的新日期）不同，本脚本**重刷最近一个月**：
 QuantDB 分区落盘时间不固定（可晚至次日中午），且迟到补数/修订需要回灌；upsert
 幂等，可重复运行。
+
+默认带「QuantDB 未推进则跳过」门控（表内最新日 >= QuantDB 最新分区日即退出），
+使实际执行节奏跟随 QuantDB 同步、不会空跑；`--force` 可强制回刷窗口。
 
 用法：
     # 滚动刷新最近 30 天（默认）
@@ -56,6 +59,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="删除窗口外的历史行（真正滚动窗口；默认保留历史）",
     )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="忽略「QuantDB 未推进」门控，强制回刷窗口",
+    )
     parser.add_argument("--dry-run", action="store_true", help="只枚举窗口内交易日，不写库")
     return parser.parse_args()
 
@@ -88,6 +96,14 @@ def _table_range(db_url: str) -> tuple[int, object, object]:
         return int(row[0] or 0), row[1], row[2]
     finally:
         engine.dispose()
+
+
+def _quantdb_latest_trade_date(hub) -> date | None:
+    """QuantDB daily_forward 分区里的最新交易日（枚举目录名，毫秒级）。"""
+    from backend.scripts.quantdb_daily_sync import _trade_dates
+
+    days = _trade_dates(hub, date(2000, 1, 1), date.today())
+    return days[-1] if days else None
 
 
 def _prune(db_url: str, before: date) -> int:
@@ -398,6 +414,16 @@ def main() -> int:
         trade_days[0],
         trade_days[-1],
     )
+
+    if not args.force:
+        qdb_latest = _quantdb_latest_trade_date(hub)
+        if qdb_latest is not None and max_before is not None and max_before >= qdb_latest:
+            LOGGER.info(
+                "QuantDB 未推进（QuantDB 最新=%s，表内最新=%s），跳过；--force 可强制",
+                qdb_latest,
+                max_before,
+            )
+            return 0
 
     if args.dry_run:
         LOGGER.info("dry-run：将刷新 %d 个交易日，未写库", len(trade_days))
