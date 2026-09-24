@@ -473,20 +473,34 @@ def _report_strat(report: dict[str, Any], groups: dict[str, Any]) -> dict[str, A
     }
 
 
+def _segment_ic(body: dict[str, Any]) -> Any:
+    """分段 IC 的取值键：生产报告里每段就是 ``_series_stats`` 的输出。
+
+    ``docker/training/model_trainers/metrics.py`` 把段 IC 写在 **``mean``** 键上
+    （by_split/yearly 均无 ``rank_ic``）；``rank_ic``/``ic_mean`` 是历史手写报告的
+    旧键名，按序兼容。此前只读后两个键 → 对**所有真报告**取不到值 → 评估中心
+    「稳健性」维度恒判 insufficient（单测 fixture 恰好也写 ``rank_ic``，所以测试全绿）。
+    """
+    for key in ("mean", "rank_ic", "ic_mean"):
+        if body.get(key) is not None:
+            return body[key]
+    return None
+
+
 def _report_segments(report: dict[str, Any]) -> dict[str, dict[str, Any]]:
     """eval_report 的分段 IC：by_split + yearly（年度段一并作为子样本）。"""
     segments: dict[str, dict[str, Any]] = {}
     for name, body in (report.get("by_split") or {}).items():
         if isinstance(body, dict):
             segments[str(name)] = {
-                "ic_mean": body.get("rank_ic", body.get("ic_mean")),
+                "ic_mean": _segment_ic(body),
                 "n_days": body.get("n_days"),
             }
     for row in report.get("yearly") or []:
         if isinstance(row, dict) and row.get("year") is not None:
             segments.setdefault(
                 str(row["year"]),
-                {"ic_mean": row.get("rank_ic"), "n_days": row.get("n_days")},
+                {"ic_mean": _segment_ic(row), "n_days": row.get("n_days")},
             )
     return segments
 
@@ -522,20 +536,24 @@ def dims_from_eval_report(
 ) -> dict[str, DimensionScore]:
     """二级证据：``metadata.eval_report``（训练期留存的评估报告）。
 
-    报告里有分层（``groups``）、分段（``by_split``/``yearly``）、滚动（``ic_curve``），
-    **没有持仓与成交序列** → 换手与成本如实缺省（不硬造）。
+    报告里有分层（``groups``）与分段（``by_split``/``yearly``）→ 两维可判；
+    **没有持仓与成交序列** → 换手与成本如实缺省（不硬造）；``ic_curve`` 是
+    **抽稀后的累计 IC**（``[date, cum]`` 对，见 metrics.py ``_downsample``），
+    还原不出「近 20 日逐日 IC」→ 滚动健康同样如实缺省（此前按平铺浮点读，
+    对全部真报告直接 TypeError；见本文件测试的 fixture 形状注记）。
     """
     strat = _report_strat(report, report.get("groups") or {})
     robust = _report_robust(_report_segments(report))
-    health = rolling_health(
-        {str(i): float(v) for i, v in enumerate(report.get("ic_curve") or [])}
+    rolling_note = (
+        "metadata.eval_report 的 ic_curve 为抽稀后的累计 IC（[date, cum] 对），"
+        "无法还原逐日 IC 序列——滚动健康需 pred 路径或推理质量表"
     )
     cost_note = "metadata.eval_report 无持仓/成交序列，成本后收益无从计算（如实缺省）"
     return _stamp(
         {
             "stratification": score_stratification(strat),
             "robustness": score_robustness(robust),
-            "rolling_health": score_rolling_health(health),
+            "rolling_health": _insufficient_dim("rolling_health", rolling_note),
             "turnover_cost": _insufficient_dim("turnover_cost", cost_note),
         },
         TIER_EVAL_REPORT,

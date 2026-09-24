@@ -705,6 +705,12 @@ const EvalReportSection: React.FC<{ report?: EvalReport }> = ({ report }) => {
   const basisText = report.return_basis === 'label_return' ? '真实收益口径' : '秩标签口径';
   const bySplit = report.by_split || {} as NonNullable<EvalReport['by_split']>;
   const splitLabel: Record<string, string> = { train: '训练', valid: '验证', test: '测试' };
+  // 主展示口径：优先测试段（样本外）——headline 是全窗合计（含训练段，约虚高 1.5 倍）。
+  // 无 test 段（老报告）时回落全窗，并在标签上如实标注口径，不让两种口径看起来一样。
+  const testSeg = bySplit.test && bySplit.test.mean != null ? bySplit.test : null;
+  const icHead = testSeg
+    ? { tag: '测试段', mean: testSeg.mean, icir: testSeg.icir, winRate: testSeg.win_rate }
+    : { tag: '全窗含训练', mean: ric.mean, icir: ric.icir, winRate: ric.win_rate };
   return (
     <Card
       className="rounded-2xl border-emerald-100"
@@ -720,9 +726,9 @@ const EvalReportSection: React.FC<{ report?: EvalReport }> = ({ report }) => {
     >
       <div className="grid grid-cols-3 gap-2 md:grid-cols-6">
         {[
-          { label: 'RankIC 均值', value: fmt(ric.mean, 4), cls: lvl(ric.mean, 0.03, 0.015) },
-          { label: 'ICIR', value: fmt(ric.icir, 3), cls: lvl(ric.icir, 0.3, 0.15) },
-          { label: 'IC 胜率', value: fmt(ric.win_rate, 1, 100), cls: lvl(ric.win_rate, 0.55, 0.5) },
+          { label: `RankIC ${icHead.tag}`, value: fmt(icHead.mean, 4), cls: lvl(icHead.mean, 0.03, 0.015) },
+          { label: `ICIR ${icHead.tag}`, value: fmt(icHead.icir, 3), cls: lvl(icHead.icir, 0.3, 0.15) },
+          { label: `IC 胜率 ${icHead.tag}`, value: fmt(icHead.winRate, 1, 100), cls: lvl(icHead.winRate, 0.55, 0.5) },
           { label: '分层单调性', value: fmt(groups.monotonicity, 3), cls: lvl(groups.monotonicity, 0.9, 0.6) },
           { label: '多空夏普', value: fmt(ls.sharpe, 2), cls: lvl(ls.sharpe, 1.0, 0.5) },
           { label: '多空年化', value: fmt(ls.ann_return, 1, 100), cls: 'text-slate-800' },
@@ -778,8 +784,9 @@ const EvalReportSection: React.FC<{ report?: EvalReport }> = ({ report }) => {
         </div>
       )}
       <div className="mt-2 text-[10px] text-slate-400">
-        分层收益为未来收益口径（T+1 执行、持有 N 日）；多空净值按每日 Top−Bottom 平均收益复利累计，未扣交易成本；
-        IC 胜率 = 日 RankIC 为正的比例。
+        磁贴 RankIC/ICIR/胜率口径：{testSeg ? '测试段（样本外）' : '全窗合计（该报告无测试段）'}；
+        分层与多空为全窗口径（含训练段）。分层收益为未来收益口径（T+1 执行、持有 N 日）；
+        多空净值按每日 Top−Bottom 平均收益复利累计，未扣交易成本；IC 胜率 = 日 RankIC 为正的比例。
       </div>
     </Card>
   );

@@ -186,7 +186,12 @@ def test_dims_from_pred_frame_keeps_real_signal_days():
 
 
 def _eval_report_fixture() -> dict:
-    """metadata.eval_report 的最小真实形态（groups/long_short/by_split/ic_curve）。"""
+    """metadata.eval_report 的最小真实形态（groups/long_short/by_split/ic_curve）。
+
+    形状必须与生产一致（此前 fixture 把段 IC 写成 ``rank_ic``，生产写的是
+    ``_series_stats`` 输出的 ``mean``——错形状让「真报告取不到段 IC」的病全绿）：
+    ``docker/training/model_trainers/metrics.py`` 的 ``_series_stats`` / by_split 组装。
+    """
     return {
         "version": 1,
         "n_rows": 1000,
@@ -198,10 +203,12 @@ def _eval_report_fixture() -> dict:
             "win_rate": 0.6,
             "t_stat": 3.0,
         },
-        "ic_curve": [0.05] * 20 + [0.03] * 20,
+        # ic_curve 是抽稀后的**累计** IC：[date, cum] 对（metrics.py _downsample），
+        # 不是平铺的逐日浮点——两个消费点（n_days 兜底 / 滚动健康）都按此形状判
+        "ic_curve": [["2026-01-05", 0.05], ["2026-01-06", 0.08], ["2026-01-07", 0.11]],
         "yearly": [
-            {"year": 2025, "rank_ic": 0.06, "n_days": 20},
-            {"year": 2026, "rank_ic": 0.04, "n_days": 20},
+            {"year": 2025, "mean": 0.06, "icir": 1.1, "win_rate": 0.6, "n_days": 20},
+            {"year": 2026, "mean": 0.04, "icir": 0.9, "win_rate": 0.55, "n_days": 20},
         ],
         "groups": {
             "n_groups": 10,
@@ -215,9 +222,9 @@ def _eval_report_fixture() -> dict:
             "curve": [0.001] * 40,
         },
         "by_split": {
-            "train": {"rank_ic": 0.08, "n_days": 15},
-            "valid": {"rank_ic": 0.05, "n_days": 12},
-            "test": {"rank_ic": 0.03, "n_days": 13},
+            "train": {"mean": 0.08, "icir": 1.2, "win_rate": 0.7, "n_days": 15},
+            "valid": {"mean": 0.05, "icir": 1.0, "win_rate": 0.6, "n_days": 12},
+            "test": {"mean": 0.03, "icir": 0.8, "win_rate": 0.55, "n_days": 13},
         },
     }
 
@@ -240,13 +247,34 @@ def test_dims_from_eval_report_maps_groups_and_split_ic():
     # 年度段由 yearly 提供（口径与 pred 路径不同，如实标注）
     assert robust.detail["min_segment"] == pytest.approx(0.03)
 
+    # ic_curve 是抽稀累计曲线 → 还原不出逐日 IC，滚动健康如实缺省（不硬造）
     health = dims["rolling_health"]
-    assert health.detail["ic_mean_20"] == pytest.approx(0.03)
-    assert health.detail["n_days"] == 40
+    assert health.score is None
+    assert health.detail["insufficient"] is True
+    assert "累计" in health.detail["note"]
 
     # eval_report 不含换手证据 → 如实缺省（不硬造）
     assert dims["turnover_cost"].score is None
     assert dims["turnover_cost"].detail["insufficient"] is True
+
+
+@pytest.mark.unit
+def test_dims_from_eval_report_accepts_legacy_segment_keys():
+    """历史报告把段 IC 写在 rank_ic/ic_mean 键上——兼容读取不能随生产键名切换而失联。"""
+    from backend.scripts.eval.model_realized import dims_from_eval_report
+
+    report = _eval_report_fixture()
+    report["by_split"] = {
+        "train": {"rank_ic": 0.08, "n_days": 15},
+        "test": {"ic_mean": 0.03, "n_days": 13},
+    }
+    report["yearly"] = [{"year": 2025, "rank_ic": 0.06, "n_days": 20}]
+
+    robust = dims_from_eval_report(report)["robustness"]
+
+    assert robust.detail["by_split"]["test"]["ic_mean"] == pytest.approx(0.03)
+    assert robust.detail["by_split"]["2025"]["ic_mean"] == pytest.approx(0.06)
+    assert robust.detail["min_segment"] == pytest.approx(0.03)
 
 
 @pytest.mark.unit
