@@ -168,8 +168,8 @@
     <text x="141" y="18" text-anchor="middle" font-size="11" font-weight="600" fill="#334155">市场：A股 / 港股 / 美股 / 期货</text>
     <text x="141" y="33" text-anchor="middle" font-size="10" fill="#64748b">加密默认关闭（ENABLE_CRYPTO=false）</text>
     <rect x="298" y="0" width="284" height="44" rx="6" fill="#ffffff" stroke="#e2e8f0" filter="url(#softShadow)"/>
-    <text x="440" y="18" text-anchor="middle" font-size="11" font-weight="600" fill="#334155">LLM：Qwen / DeepSeek / MiMo</text>
-    <text x="440" y="33" text-anchor="middle" font-size="10" fill="#64748b">OpenAI 兼容 · SiliconFlow embedding</text>
+    <text x="440" y="18" text-anchor="middle" font-size="11" font-weight="600" fill="#334155">LLM：Qwen / DeepSeek（用户自配）</text>
+    <text x="440" y="33" text-anchor="middle" font-size="10" fill="#64748b">OpenAI 兼容 · 用户自配 embedding</text>
     <rect x="597" y="0" width="283" height="44" rx="6" fill="#ffffff" stroke="#e2e8f0" filter="url(#softShadow)"/>
     <text x="738" y="18" text-anchor="middle" font-size="11" font-weight="600" fill="#334155">训练算力：本地 Docker / AutoDL</text>
     <text x="738" y="33" text-anchor="middle" font-size="10" fill="#64748b">bind mount 热更新 · 改依赖才重 build</text>

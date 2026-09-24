@@ -2,7 +2,7 @@
 
 背景（线上实测故障）：用户在个人中心「AI 服务配置」填了可用的 LLM
 （deepseek-flash + 有效 key），但因子挖掘子进程仍用容器 env 的占位符
-（OPENAI_API_KEY=mock-api-key-not-configured / CHAT_MODEL=mimo-v2.5-pro）
+（OPENAI_API_KEY=mock-api-key-not-configured / CHAT_MODEL=container-default-model）
 发起调用，最终 401 Invalid API Key、30 次重试后任务失败。
 
 根因：market_adapters 的 get_env_overrides() 只读 os.getenv，且在
@@ -29,9 +29,9 @@ from backend.services.engine.alpha_agent.launcher import (
 _CONTAINER_ENV = {
     "AI_IDE_LLM_API_KEY": "mock-api-key-not-configured",
     "OPENAI_API_KEY": "mock-api-key-not-configured",
-    "OPENAI_BASE_URL": "https://token-plan-cn.xiaomimimo.com/v1",
-    "OPENAI_API_BASE": "https://token-plan-cn.xiaomimimo.com/v1",
-    "CHAT_MODEL": "mimo-v2.5-pro",
+    "OPENAI_BASE_URL": "https://container.example.invalid/v1",
+    "OPENAI_API_BASE": "https://container.example.invalid/v1",
+    "CHAT_MODEL": "container-default-model",
 }
 
 # 用户个人中心「AI 服务配置」（LLMConfig.llm_env_overrides() 的产物）
@@ -88,7 +88,7 @@ def test_user_profile_llm_wins_over_container_placeholder(
     # 兜底：任何 LLM 相关变量都不允许残留占位符 / 容器默认模型
     for key in _LLM_KEYS:
         assert "mock-api-key" not in str(env.get(key, "")), key
-        assert env.get(key) != "mimo-v2.5-pro", key
+        assert env.get(key) != "container-default-model", key
     # 非 LLM 的市场适配器变量仍要生效
     assert env["QLIB_FACTOR_UNIVERSE"] == "csi300"
     assert env["CHAT_STREAM"] == "false"

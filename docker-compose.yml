@@ -216,6 +216,12 @@ services:
       - TRAINING_AUTODL_DOCKER_IMAGE=${TRAINING_AUTODL_DOCKER_IMAGE:-quantmind-oss:latest}
       - TRAINING_AUTODL_NODE_NAME=${TRAINING_AUTODL_NODE_NAME:-AutoDL GPU}
       - TRAINING_AUTODL_GPUS=${TRAINING_AUTODL_GPUS:-all}
+      # native_python 模式（AutoDL 官方 Python 实例，免嵌套 docker）所需；
+      # 由 backend/services/engine/training/{remote_ssh_orchestrator,node_manager}.py 读取，
+      # 默认值与代码兜底保持一致（未配置时行为不变）
+      - TRAINING_AUTODL_EXEC_MODE=${TRAINING_AUTODL_EXEC_MODE:-ssh_docker}
+      - TRAINING_AUTODL_PYTHON=${TRAINING_AUTODL_PYTHON:-/root/miniconda3/bin/python}
+      - TRAINING_AUTODL_QUANTDB_DIR=${TRAINING_AUTODL_QUANTDB_DIR:-/data/quantdb}
       - TRAINING_MASTER_HOST=${TRAINING_MASTER_HOST:-}
 
       # Qwen/DashScope API (用于 AI 策略功能)
@@ -231,30 +237,43 @@ services:
       - AI_IDE_LLM_API_KEY=${AI_IDE_LLM_API_KEY:-mock-api-key-not-configured}
       - AI_IDE_LLM_BASE_URL=${AI_IDE_LLM_BASE_URL:-}
 
-      # AI-IDE Chat LLM 配置（OpenAI 兼容；默认 MiMo）
+      # AI-IDE Chat LLM 配置（OpenAI 兼容；默认值一律留空，
+      # 由 .env 的 AI_IDE_LLM_* 或个人中心「AI 服务配置」提供）
       - AI_IDE_LLM_MODEL=${AI_IDE_LLM_MODEL:-}
 
       # RD-Agent / AlphaAgent 使用 OpenAI 兼容 API（复用 AI_IDE 配置）
-      # 模型名称由 .env 的 AI_IDE_LLM_MODEL 决定；默认 mimo-v2.5-pro
-      - CHAT_MODEL=${AI_IDE_LLM_MODEL:-mimo-v2.5-pro}
+      # 不预置任何模型默认值：填了第三方端点会让客户在未配置时直接 401，
+      # 且报错被 30 次重试放大。留空时由用户配置覆盖（见 llm_env_overrides）。
+      - CHAT_MODEL=${AI_IDE_LLM_MODEL:-}
       # AlphaAgent reasoning_flag 默认 True → 用 reasoning_model；
       # 如果为空则发 model="" 导致 400。镜像 CHAT_MODEL 即可。
-      - REASONING_MODEL=${AI_IDE_LLM_MODEL:-mimo-v2.5-pro}
+      - REASONING_MODEL=${AI_IDE_LLM_MODEL:-}
       # 关闭 streaming — reasoning 模型的 reasoning_content chunk 导致 OpenAI SDK JSON 解析失败
       - CHAT_STREAM=false
       - OPENAI_API_KEY=${AI_IDE_LLM_API_KEY:-mock-api-key-not-configured}
-      - OPENAI_API_BASE=${AI_IDE_LLM_BASE_URL:-https://token-plan-cn.xiaomimimo.com/v1}
+      - OPENAI_API_BASE=${AI_IDE_LLM_BASE_URL:-}
       # AlphaAgent LLM 重试配置（502/429 等临时错误需更多重试）
       - MAX_RETRY=30
       - RETRY_WAIT_SECONDS=5
       # AlphaAgent reads OPENAI_BASE_URL (modern SDK convention); duplicate
       # OPENAI_API_BASE here so its factor-mining subprocess hits the right host.
-      - OPENAI_BASE_URL=${AI_IDE_LLM_BASE_URL:-https://token-plan-cn.xiaomimimo.com/v1}
+      - OPENAI_BASE_URL=${AI_IDE_LLM_BASE_URL:-}
 
-      # AlphaAgent 因子去重用 embedding；MiMo 不提供 embedding，走硅基流动
-      - EMBEDDING_API_KEY=${EMBEDDING_API_KEY:-mock-api-key-not-configured}
-      - EMBEDDING_BASE_URL=${EMBEDDING_BASE_URL:-https://api.siliconflow.cn/v1}
-      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-BAAI/bge-m3}
+      # AlphaAgent 因子去重用 embedding：不再预置任何供应商（原默认硅基流动 + mock key，
+      # 该组合必然 401，且与「统一用户自定义模型」冲突）。
+      # 一律改为裸透传（只写变量名、不给默认值）：.env 里不配就完全不注入容器，
+      # alphaagent 的 embedding 客户端会回落到用户「AI 服务配置」下发的
+      # OPENAI_API_KEY / OPENAI_BASE_URL（launcher 写入）。
+      # ⚠️ 禁止写成 ${VAR:-}：显式注入空串会让 openai SDK 认为凭证「已给定」，
+      #    反而屏蔽上述回落（见 alphaagent/oai/llm_utils.py:403）。
+      # 需要独立 embedding 供应商时才在 .env 填写：
+      #   - legacy alphaagent/（a_share）：EMBEDDING_MODEL / EMBEDDING_BASE_URL / EMBEDDING_API_KEY
+      #   - rd-agent（多市场）：EMBEDDING_MODEL=litellm_proxy/<模型名> + LITELLM_PROXY_API_KEY / LITELLM_PROXY_API_BASE
+      - EMBEDDING_MODEL
+      - EMBEDDING_API_KEY
+      - EMBEDDING_BASE_URL
+      - LITELLM_PROXY_API_KEY
+      - LITELLM_PROXY_API_BASE
 
       # QuantDB SDK（付费高质量数据源：K线/Tick/财报/估值/315维AI因子）
       # QuantDB API（密钥已删除，如需在线同步请加回 QUANTDB_API_KEY 行）
@@ -285,7 +304,6 @@ services:
 
       # QuantBot 代理（QwenPaw 机器人集成）
       # qwenpaw 容器已加入同一网络，通过 http://qwenpaw:8088 访问
-      - COPAW_BASE_URL=${COPAW_BASE_URL:-http://qwenpaw:8088}
       - QWENPAW_BASE_URL=${QWENPAW_BASE_URL:-http://qwenpaw:8088}
       # QwenPaw 上游认证信息（按需配置）
       - QWENPAW_AUTH_USERNAME=${QWENPAW_AUTH_USERNAME:-}
@@ -423,6 +441,12 @@ services:
       - TRAINING_AUTODL_DOCKER_IMAGE=${TRAINING_AUTODL_DOCKER_IMAGE:-quantmind-oss:latest}
       - TRAINING_AUTODL_NODE_NAME=${TRAINING_AUTODL_NODE_NAME:-AutoDL GPU}
       - TRAINING_AUTODL_GPUS=${TRAINING_AUTODL_GPUS:-all}
+      # native_python 模式（AutoDL 官方 Python 实例，免嵌套 docker）所需；
+      # 由 backend/services/engine/training/{remote_ssh_orchestrator,node_manager}.py 读取，
+      # 默认值与代码兜底保持一致（未配置时行为不变）
+      - TRAINING_AUTODL_EXEC_MODE=${TRAINING_AUTODL_EXEC_MODE:-ssh_docker}
+      - TRAINING_AUTODL_PYTHON=${TRAINING_AUTODL_PYTHON:-/root/miniconda3/bin/python}
+      - TRAINING_AUTODL_QUANTDB_DIR=${TRAINING_AUTODL_QUANTDB_DIR:-/data/quantdb}
       - TRAINING_MASTER_HOST=${TRAINING_MASTER_HOST:-}
 
       # 回测进度回调地址（OSS 模式使用 quantmind 容器名）
@@ -437,7 +461,7 @@ services:
       - DEEPSEEK_BASE_URL=${DEEPSEEK_BASE_URL:-}
       - DEEPSEEK_MODEL=${DEEPSEEK_MODEL:-}
 
-      # AI-IDE Chat LLM 配置（OpenAI 兼容；默认 MiMo）
+      # AI-IDE Chat LLM 配置（OpenAI 兼容；默认值留空，由 .env 或个人中心提供）
       - AI_IDE_LLM_BASE_URL=${AI_IDE_LLM_BASE_URL:-}
       - AI_IDE_LLM_MODEL=${AI_IDE_LLM_MODEL:-}
       - AI_IDE_LLM_API_KEY=${AI_IDE_LLM_API_KEY:-mock-api-key-not-configured}

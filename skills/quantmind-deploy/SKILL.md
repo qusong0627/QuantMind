@@ -426,7 +426,8 @@ conda create -n qwenpaw python=3.11 pip -y          # 注意：conda 可能因�
 #   已补 /etc/hosts: db→127.0.0.1、redis→127.0.0.1、qwenpaw→127.0.0.1、copaw→127.0.0.1
 qwenpaw init --defaults --accept-security            # 生成 /app/working/config.json
 qwenpaw app --host 0.0.0.0 --port 8088               # 启动（用 /root/qwenpaw-start.sh 带启动锁）
-# 后端连 QwenPaw：.env.sh 加 QWENPAW_BASE_URL=http://127.0.0.1:8088 + COPAW_BASE_URL，重启后端
+# 后端连 QwenPaw：.env.sh 加 QWENPAW_BASE_URL=http://127.0.0.1:8088，重启后端
+# （COPAW_BASE_URL 为 Copaw 旧名遗留，代码已不读取，勿再配置）
 # 前端访问：/api/v1/qwenpaw-ui/ 代理（无需 8088 直接暴露）
 ````
 
