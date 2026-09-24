@@ -272,3 +272,6 @@ config/training_nodes.yaml
 
 # 训练节点配置（含 SSH 凭据，仅本地保留）
 config/training_nodes.yaml
+
+# Windows 保留名残留文件（误重定向产生，不跟踪）
+/nul
