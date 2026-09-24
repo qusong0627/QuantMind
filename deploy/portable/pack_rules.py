@@ -36,7 +36,7 @@ import fnmatch
 import os
 import re
 import subprocess
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -53,6 +53,19 @@ class Exclude:
     pattern: str
     reason: str
     scope: str = "ours"  # "ours" | "all"
+
+    #: 这条规则放行「模板/示例」后缀（见 :func:`is_template_env`）。
+    #:
+    #: **只给凭据载体这类规则开**：那里 ``.env.example`` 与 ``.env`` 是两个东西——
+    #: 前者是给人抄的模板、后者是真值，一刀切会把模板也剔掉。
+    #:
+    #: **绝不要开在目录级裁剪上**（``qwenpaw_runtime/**``、``huntly/**`` 这类）。
+    #: 实测踩过：豁免曾经写成 ``match_excludes`` 开头的**全局早退**，于是任何名字以
+    #: ``.example``/``.sample``/``.template`` 结尾的文件**绕过全部规则**——两片裁剪各漏了
+    #: 文件（上游随包带的 ``Dockerfile.template``、``jmxremote.password.template``）进产物，
+    #: 而报告里一条都不报。同名后缀是**文件的写法**，不是「这不是真值」的证明：
+    #: 按后缀发通行证的检查，等于教人把要排除的东西改个名。
+    template_exempt: bool = False
 
 
 #: 自家树的顶层（``scope="ours"`` 的判定依据）。包根文件（``start.bat`` 等）也算自家。
@@ -92,8 +105,10 @@ EXCLUDES: tuple[Exclude, ...] = (
     ),
     Exclude(
         "**/.env.*",
-        "同上（.env.production 这类变体；模板后缀由 _KEEP_SUFFIXES 放行）",
+        "同上（.env.production 这类变体；模板后缀由本规则的 template_exempt 放行——"
+        "只放行这一条，裁剪照切）",
         "all",
+        template_exempt=True,
     ),
     Exclude(
         "**/runtime.env",
@@ -110,7 +125,13 @@ EXCLUDES: tuple[Exclude, ...] = (
         "start.bat 首次启动在本机生成的密钥文件——随包等于把上一位用户的密钥发给下一位",
         "all",
     ),
-    Exclude("**/.credentials*", "凭据缓存（dsh/integrations 那一族的落盘形态）", "all"),
+    Exclude(
+        "**/.credentials*",
+        "凭据缓存（dsh/integrations 那一族的落盘形态）；.credentials.yaml.example 这类"
+        "模板放行（本规则 template_exempt）",
+        "all",
+        template_exempt=True,
+    ),
     Exclude("**/integrations/sessions/**", "登录会话缓存（拿它可冒充登录态）", "all"),
     Exclude(
         "backend/config/users/**",
@@ -183,7 +204,10 @@ EXCLUDES: tuple[Exclude, ...] = (
 )
 
 
-#: 放行的「模板/示例」后缀：它们本来就是给人抄的，不是真值。
+#: 「模板/示例」后缀：给人抄的，不是真值。
+#:
+#: **它本身不是一条规则**，只是 :func:`is_template_env` 的词表；放行与否由规则上的
+#: :attr:`Exclude.template_exempt` 决定（见那里的长注释：这里曾经是全局早退，让裁剪漏文件）。
 _KEEP_SUFFIXES = (".example", ".sample", ".template", ".example.env")
 
 
@@ -366,24 +390,38 @@ def matches_pattern(pattern: str, rel: str) -> bool:
 
 
 def is_template_env(rel: str) -> bool:
-    """``.env.example`` 这类**模板**放行：它们本来就该随包。"""
+    """``.env.example`` 这类**模板**：名字像凭据载体，内容却是给人抄的空壳。
+
+    **它自己不做任何判断**——放行与否要问命中的那条规则有没有 :attr:`Exclude.template_exempt`。
+    判据只有一个「文件叫什么」，所以拿它当全局通行证会让整片目录裁剪静默失效。
+    """
     name = rel.rsplit("/", 1)[-1].lower()
     return name.endswith(_KEEP_SUFFIXES)
 
 
-def match_excludes(rel: str) -> Exclude | None:
-    """命中哪条排除规则（没命中返回 None）。``scope="ours"`` 的规则只作用于自家树。"""
-    if is_template_env(rel):
-        return None
-    for rule in EXCLUDES:
+def match_excludes(
+    rel: str, rules: tuple[Exclude, ...] | None = None
+) -> Exclude | None:
+    """命中哪条排除规则（没命中返回 None）。``scope="ours"`` 的规则只作用于自家树。
+
+    模板后缀的放行是**逐条**的（``rule.template_exempt``），不是在循环外面开一个总开关：
+    命中一条 ``template_exempt`` 规则只是「这条不算」，后面的规则照查——``.env.example``
+    不该被当密钥剔掉，但也**不该因此从裁剪目录里复活**（用 ``continue`` 而不是 ``return None``）。
+    """
+    for rule in rules if rules is not None else EXCLUDES:
         if rule.scope == "ours" and not in_trees(rel, OUR_TREES):
             continue
-        if matches_pattern(rule.pattern, rel):
-            return rule
+        if not matches_pattern(rule.pattern, rel):
+            continue
+        if rule.template_exempt and is_template_env(rel):
+            continue
+        return rule
     return None
 
 
-def find_private_chunks(dist_root: Path) -> list[str]:
+def find_private_chunks(
+    dist_root: Path, chunks: tuple[tuple[str, str], ...] | None = None
+) -> list[str]:
     """前端产物目录里命中的私有栏目 chunk（返回 ``web/...`` 形式的包根相对路径）。
 
     :data:`PRIVATE_CHUNKS` 的模式按**包根**写（``web/`` 即前端的 ``dist-react/``），
@@ -391,6 +429,7 @@ def find_private_chunks(dist_root: Path) -> list[str]:
     ``build_windows_pack.sh`` 用它把这道判据提到构建期（否则要等 4GB 依赖下完、
     走到最后一步才报）。判据一份，两个调用点。
     """
+    pats = PRIVATE_CHUNKS if chunks is None else chunks
     hits: list[str] = []
     root = Path(dist_root)
     for dirpath, dirnames, filenames in os.walk(root):
@@ -398,7 +437,7 @@ def find_private_chunks(dist_root: Path) -> list[str]:
         for name in sorted(filenames):
             path = Path(dirpath) / name
             rel = "web/" + str(path.relative_to(root))
-            if any(matches_pattern(pat, rel) for pat, _ in PRIVATE_CHUNKS):
+            if any(matches_pattern(pat, rel) for pat, _ in pats):
                 hits.append(rel)
     return hits
 
@@ -535,3 +574,296 @@ def host_needles(
             continue
         kept.append((source, value))
     return sorted(kept, key=lambda x: x[0]), unreadable, sorted(dropped)
+
+
+# ---------------------------------------------------------------------------
+# 包形态（profile）：同一套检测器，判据按「这份包该长什么样」分叉
+# ---------------------------------------------------------------------------
+#
+# 为什么要有这一层：通用便携包与实盘节点包**共用一份 staging**（实盘构建器往同一
+# 份 staging 覆盖 start.bat / pack.env / bridge/ / live/ / 前端产物）。于是同一批
+# 东西，在一份包里是「绝不许带的泄漏」，在另一份包里是「少一个就是残包」：
+#
+#   pack.env / bridge/** / live/** / README-LIVE.md / dsh/** —— 通用包：违规；
+#                                                              实盘包：必备。
+#   web/assets/LiveTradingPage*                              —— 通用包：违规（不开源）；
+#                                                              实盘包：必须有。
+#
+# **检测器不复制**（正则、宿主探针、明文口令都是同一份实现），分叉的只是判据清单。
+# 两份清单各写一套禁止项 = 迟早分叉，这正是本闸门从一开始就要避免的形状。
+
+
+@dataclass(frozen=True)
+class ContentAssert:
+    """内容级必备判据：``pattern`` 命中的文件里，**至少一个**要 ``check`` 通过。
+
+    ``check`` 返回 None = 通过，返回字符串 = 违规原因（原因要写清「为什么会错」，
+    不只是「不符合要求」）。
+    """
+
+    pattern: str
+    check: Callable[[bytes], str | None]
+    reason: str
+
+
+def _flag_present(needle: bytes) -> Callable[[bytes], str | None]:
+    def check(blob: bytes) -> str | None:
+        return None if needle in blob else f"找不到构建期内联标记 {needle.decode()}"
+
+    return check
+
+
+def _bridge_daemon_disarmed(blob: bytes) -> str | None:
+    """出厂桥配置里 ``sltp_daemon.enabled`` 必须**显式**写成 false。
+
+    桥自带 StopLossDaemon 是个独立卖出者（5s 轮询、触发即市价卖出），而守护单已由
+    QuantMind 的 sltp_executor 承担 —— 同一账户同一持仓，两边同时触发就是超卖。
+    2026-09-23 翻转了两处**代码**默认值，漏了出厂 config.yaml（它写着 true，压过
+    默认值），节点起来桥就在自己卖。
+
+    判据要求**显式**，不接受「靠代码默认值兜」：这个文件的上一版就是显式写错值。
+    """
+    in_section = False
+    for raw in blob.decode("utf-8", "replace").splitlines():
+        line = raw.split("#", 1)[0].rstrip()
+        if not line.strip():
+            continue
+        stripped = line.strip()
+        if len(line) - len(line.lstrip()) == 0:
+            in_section = stripped == "sltp_daemon:"
+            continue
+        if in_section and stripped.startswith("enabled:"):
+            value = stripped.split(":", 1)[1].strip()
+            if value == "false":
+                return None
+            return (
+                f"sltp_daemon.enabled = {value}（必须显式 false：桥会自己市价卖出，"
+                "与 QuantMind 的 sltp_executor 对同一持仓重复卖）"
+            )
+    return "找不到 sltp_daemon.enabled（不许靠代码默认值兜：出厂配置必须显式关）"
+
+
+@dataclass(frozen=True)
+class Profile:
+    """一份包的判据全集。``GENERAL``（出厂通用包）与 ``LIVE``（实盘节点包）各一份。"""
+
+    name: str
+    excludes: tuple[Exclude, ...]
+    required_files: tuple[str, ...]
+    required_globs: tuple[tuple[str, str], ...]
+    required_pairs: tuple[tuple[str, str, str], ...]
+    optional_components: tuple[tuple[str, str], ...]
+    #: 禁止的构建期内联标记（``web/`` 里的二进制串匹配）。
+    shape_markers: tuple[tuple[bytes, str], ...]
+    #: 默认禁止的私有栏目产物（``--allow-local-live`` 可显式放行）。
+    private_chunks: tuple[tuple[str, str], ...]
+    #: 必备的栏目产物：``pattern`` 至少命中 1 个文件，否则违规（通用/实盘正好相反）。
+    required_chunks: tuple[tuple[str, str], ...] = ()
+    #: 内容级必备判据（见 :class:`ContentAssert`）。
+    required_content: tuple[ContentAssert, ...] = ()
+    #: **有意随包分发**的内网坐标：``pattern`` 命中的文件里出现内网地址只记为提示
+    #: （报告里会点名），其它文件里出现仍然是违规。理由必填——「为什么这个文件可以
+    #: 带坐标」比「允许它带」重要，下一个人要知道这是决定而不是疏忽。
+    coord_exempt: tuple[tuple[str, str], ...] = ()
+    #: 有意随包分发的宿主探针值：``(文件pattern, 探针来源后缀, 理由)``。
+    #: 例：``("pack.env", ".env:DB_PASSWORD", …)`` —— 节点就是要用这个口令连库。
+    needle_exempt: tuple[tuple[str, str, str], ...] = ()
+    #: 只存在于产物里、staging 阶段不校验的必备文件（构建器写进 zip 的清单）。
+    artifact_only_required: tuple[str, ...] = ()
+    #: **先于排除清单判定**的保留路径：命中即不排除（但仍照常过内容判据与探针）。
+    #: 用于「某条排除规则在这份包里有一条合法的例外」——例：实盘包的 dsh 载荷自带
+    #: ``node_modules``（运行时要它），而通用清单把 ``**/node_modules/**`` 全排除。
+    #: 写得**尽量窄**：宽到 ``dsh/**`` 就会把 ``.credentials*`` 那类安全排除也一起放行。
+    keep_globs: tuple[tuple[str, str], ...] = ()
+
+    def match_excludes(self, rel: str) -> Exclude | None:
+        for pattern, _reason in self.keep_globs:
+            if matches_pattern(pattern, rel):
+                return None
+        return match_excludes(rel, self.excludes)
+
+    def keep_reason(self, rel: str) -> str | None:
+        for pattern, reason in self.keep_globs:
+            if matches_pattern(pattern, rel):
+                return reason
+        return None
+
+    def coord_reason(self, rel: str) -> str | None:
+        for pattern, reason in self.coord_exempt:
+            if matches_pattern(pattern, rel):
+                return reason
+        return None
+
+    def needle_reason(self, rel: str, source: str) -> str | None:
+        for pattern, suffix, reason in self.needle_exempt:
+            if matches_pattern(pattern, rel) and source.endswith(suffix):
+                return reason
+        return None
+
+
+#: 实盘构建器**有意**随包分发的那几样：通用包按泄漏拦，实盘包按必备管。
+#: 这份名单就是 :data:`EXCLUDES` 第 4 节那 8 条的一一对应物。
+LIVE_KEEPS = frozenset(
+    {
+        "pack.env",
+        "bridge/**",
+        "live/**",
+        "README-LIVE.md",
+        "CHECKLIST.md",
+        "quantbot_front.py",
+        "start-quantbot.bat",
+        "dsh/**",
+    }
+)
+
+#: 实盘节点裁掉的整块内容（README-LIVE.md 8.3）。出现在产物里 = 瘦身没生效：
+#: 包体白涨（qwenpaw 几百 MB、huntly 240MB+、训练环境 156MB 字体），还把运营者的
+#: 工具链一起发出去。判据在**产物**侧，所以打包时真的漏了会被拦下。
+LIVE_TRIMMED: tuple[Exclude, ...] = (
+    Exclude("qwenpaw_runtime/**", "实盘节点裁掉：AI 编码助手与交易无关（8.3）", "all"),
+    Exclude(
+        "huntly/**",
+        "实盘节点裁掉：新闻读 Ubuntu 那台（pack.env HUNTLY_BASE_URL）",
+        "all",
+    ),
+    Exclude(
+        "docker/training/**", "实盘节点裁掉：本机不训练（156MB 是 PDF 字体）", "all"
+    ),
+)
+
+#: 实盘包**不是**通用包的子集：dsh 载荷（QuantBot 免 Docker）自带 ``node_modules``
+#: ——Node 自带的 npm、global 包（express 那一族）、web profile 的依赖都在里面，
+#: 运行时真的要用（``install_tools.bat`` 就是调它）。通用清单那条 ``**/node_modules/**``
+#: 是为前端依赖树写的（实盘包的前端产物在 ``web/``，源码树根本不进包），照搬会把
+#: QuantBot 拆成「页面在、点开报错」。**只放行这一条**：``dsh/**`` 下的
+#: ``.credentials*`` / ``integrations/sessions/**`` 仍按安全排除拦（实测 2026-09-24：
+#: 载荷里除 node_modules 外再没有别的命中项，34939 个文件全部来自这一条规则）。
+LIVE_KEEP_GLOBS: tuple[tuple[str, str], ...] = (
+    (
+        "dsh/**/node_modules/**",
+        "QuantBot 载荷的运行期依赖树（内嵌 Node/npm + 网关的 global 包）",
+    ),
+)
+
+#: 通用便携包的 ``VERSION`` 是**那份包**的清单（``pack=QuantMind-Portable-win-x64``）。
+#: 实盘包复用同一份 staging，会在 zip 里同时出现两份互相矛盾的清单 —— 出问题时
+#: 第一眼就会看错。实盘包只留自己的 ``VERSION-LIVE``（本项在 zip 侧校验）。
+LIVE_DROPS: tuple[Exclude, ...] = (
+    Exclude(
+        "VERSION",
+        "通用便携包的清单（身份写的是 Portable）；实盘包的清单是 VERSION-LIVE",
+        "all",
+    ),
+)
+
+LIVE_EXCLUDES: tuple[Exclude, ...] = (
+    tuple(r for r in EXCLUDES if r.pattern not in LIVE_KEEPS)
+    + LIVE_TRIMMED
+    + LIVE_DROPS
+)
+
+LIVE_REQUIRED_FILES: tuple[str, ...] = (
+    "start.bat",
+    "stop.bat",
+    "install.bat",
+    "install.ps1",
+    "pack.env",
+    "README-LIVE.md",
+    "CHECKLIST.md",
+    "start-quantbot.bat",
+    "quantbot_front.py",
+    "backend/main_oss.py",
+    "web/index.html",
+    "data/stocks/stocks_index.json",
+    "runtime/python/python.exe",
+    "redis/redis-server.exe",
+    "bridge/tdx/main.py",
+    "bridge/tdx/config.yaml",
+    "pg_setup.py",
+)
+
+LIVE_REQUIRED_GLOBS: tuple[tuple[str, str], ...] = (
+    ("data/upgrade_*.sql", "增量升级 SQL（缺了增量迁移永不执行）"),
+    ("live/*.py", "实盘节点的导入脚本（缺了 live\\*.bat 全是死链）"),
+)
+
+#: 半个 QuantBot 是最坏形态：页面入口在、点开才报错。
+LIVE_REQUIRED_PAIRS: tuple[tuple[str, str, str], ...] = (
+    (
+        "dsh/dsh.cordis.yml",
+        "dsh/node/node.exe",
+        "QuantBot 载荷有入口没有内嵌 Node（页面点开即报错）",
+    ),
+    (
+        "dsh/dsh.cordis.yml",
+        "dsh/global/node_modules/express/package.json",
+        "载荷的 node 依赖树被整棵排掉了（QuantBot 起不来；见 LIVE_KEEP_GLOBS）",
+    ),
+)
+
+LIVE_REQUIRED_CONTENT: tuple[ContentAssert, ...] = (
+    ContentAssert(
+        "web/assets/*.js",
+        _flag_present(b'VITE_LIVE_NODE_ONLY:"true"'),
+        "前端必须是实盘节点形态：漏传 VITE_LIVE_NODE_ONLY=true 的产物是全栏目形态，"
+        "大盘分析/回测/训练那些栏目在这台机器上点开全是空的",
+    ),
+    ContentAssert(
+        "web/assets/*.js",
+        _flag_present(b'VITE_ENABLE_REAL_TRADING:"true"'),
+        "前端实盘开关必须是 true：否则整页兜底成「实盘未启用」，这一包就白打了",
+    ),
+    ContentAssert(
+        "bridge/tdx/config.yaml",
+        _bridge_daemon_disarmed,
+        "桥自带止损 daemon 必须关（见 _bridge_daemon_disarmed 的说明）",
+    ),
+)
+
+#: 有意随包分发的内网坐标：这台节点存在的意义就是去连那台机器。
+LIVE_COORD_EXEMPT: tuple[tuple[str, str], ...] = (
+    ("pack.env", "节点配置：库里那台的地址、SMB 共享路径（没它连不上）"),
+    ("CHECKLIST.md", "首次部署清单：照着连那台机器做的步骤"),
+    ("README-LIVE.md", "部署文档：拓扑与排障步骤"),
+    ("live/**", "节点侧的导入/同步脚本：目标就是那台机器"),
+)
+
+PROFILES: dict[str, Profile] = {
+    "general": Profile(
+        name="general",
+        excludes=EXCLUDES,
+        required_files=REQUIRED_FILES,
+        required_globs=REQUIRED_GLOBS,
+        required_pairs=REQUIRED_PAIRS,
+        optional_components=OPTIONAL_COMPONENTS,
+        shape_markers=SHAPE_MARKERS,
+        private_chunks=PRIVATE_CHUNKS,
+    ),
+    "live": Profile(
+        name="live",
+        excludes=LIVE_EXCLUDES,
+        required_files=LIVE_REQUIRED_FILES,
+        required_globs=LIVE_REQUIRED_GLOBS,
+        required_pairs=LIVE_REQUIRED_PAIRS,
+        optional_components=(
+            (
+                "dsh/dsh.cordis.yml",
+                "QuantBot 载荷没注入：这一包没有 QuantBot 整栏"
+                "（要带上先跑 deploy/live-win/linux/build_dsh_payload.sh）",
+            ),
+        ),
+        shape_markers=(),
+        private_chunks=(),
+        required_chunks=(
+            (
+                "web/assets/LiveTradingPage*",
+                "实盘栏目的前端产物——整包的意义就是它（源码在 "
+                "electron/src/features/local-live/，本机独有）",
+            ),
+        ),
+        required_content=LIVE_REQUIRED_CONTENT,
+        coord_exempt=LIVE_COORD_EXEMPT,
+        artifact_only_required=("VERSION-LIVE",),
+        keep_globs=LIVE_KEEP_GLOBS,
+    ),
+}

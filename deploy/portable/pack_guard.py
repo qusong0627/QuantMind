@@ -6,9 +6,14 @@
     python3 deploy/portable/pack_guard.py --stage  <staging 目录>
     python3 deploy/portable/pack_guard.py --make-zip <staging 目录> <输出.zip>
     python3 deploy/portable/pack_guard.py --zip    <输出.zip>
+    python3 deploy/portable/pack_guard.py --zip <实盘包.zip> --profile live
 
 三种模式都接受 ``--allow-local-live``（显式放行本机独有实盘栏目的前端产物，
-自用包；默认拒绝，与 ``scripts/deploy_frontend.sh`` 同名同义）。
+自用包；默认拒绝，与 ``scripts/deploy_frontend.sh`` 同名同义）与 ``--profile``
+（``general`` 默认 / ``live``）：**检测器是同一份，分叉的只是判据清单**——
+``pack.env``、``bridge/**``、``live/**``、``dsh/**`` 在通用包里是「泄漏」，
+在实盘包里是「少一个就是残包」；实盘包还必须带上 ``web/assets/LiveTradingPage*``
+（通用包反过来禁止它）。理由与两清单的关系写在 ``pack_rules`` 的「包形态」一节。
 退出码：``0`` 通过 / ``1`` 有违规（非零即中止出包）/ ``2`` 用法或 IO 错误。
 
 为什么要有这道闸门（不是「再加一层保险」）
@@ -21,7 +26,7 @@
 `.pytest_cache`、`htmlcov` 一起收；`cp -a models` 会连 `models/users/`（1.3G 私有
 模型）一起收。这些都是**看构建日志看不出来**的（cp 不报错），只能靠出包后拿清单核对。
 
-四层判据（全部在 ``pack_rules.py``，本文件只负责执行）
+三层判据（全部在 ``pack_rules.py``，本文件只负责执行）
 ------------------------------------------------------
 1. **路径清单**：排除项（打包时跳过；压缩后还在 = 违规）与必备项（少一个 = 残包）；
    另有 **私有栏目产物**（``R.PRIVATE_CHUNKS``）：``electron/src/features/local-live/``
@@ -56,7 +61,7 @@ import importlib.util
 import os
 import sys
 import zipfile
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import partial
@@ -224,22 +229,33 @@ def scan_entries(
     needles: list[tuple[str, str]],
     detectors,
     allow_private: bool = False,
+    profile: R.Profile | None = None,
 ) -> tuple[list[Finding], list[str]]:
     """``mode`` ∈ {"stage", "zip"}：stage 下命中排除项只是提示，zip 下是违规。
 
-    私有栏目产物（``R.PRIVATE_CHUNKS``）在**两种模式下都是违规**：它不在排除清单里，
-    打包时不会消失——出现在 staging 就等于会出现在产物里。``allow_private`` 是
-    ``--allow-local-live`` 的显式放行（与 ``scripts/deploy_frontend.sh`` 同名同义）。
+    私有栏目产物（``profile.private_chunks``）在**两种模式下都是违规**：它不在排除
+    清单里，打包时不会消失——出现在 staging 就等于会出现在产物里。``allow_private``
+    是 ``--allow-local-live`` 的显式放行（与 ``scripts/deploy_frontend.sh`` 同名同义）。
+
+    ``profile`` 决定「这份包该长什么样」（见 pack_rules 的包形态一节）：默认通用包。
     """
+    profile = profile or R.PROFILES["general"]
     findings: list[Finding] = []
     notes: list[str] = []
+    kept: dict[str, list[str]] = {}
     seen: set[str] = set()
     for entry in entries:
         rel = entry.rel
         if rel in seen:
             continue
         seen.add(rel)
-        rule = R.match_excludes(rel)
+        keep = profile.keep_reason(rel)
+        if keep is not None:
+            # 这份包对该条排除规则有一条合法例外（例：dsh 载荷自带的 node_modules）。
+            # 逐文件记提示会刷屏三万行，按原因归并成一条；内容判据照常跑（例外只免
+            # 「排除」，不免「检查」）。
+            kept.setdefault(keep, []).append(rel)
+        rule = profile.match_excludes(rel)
         if rule is not None:
             findings.append(
                 Finding(
@@ -251,7 +267,7 @@ def scan_entries(
             )
             # 排除项不会出厂 ⇒ 内容判据不必再看它（省掉 models/users 那 1.3G 的读）。
             continue
-        for pattern, reason in R.PRIVATE_CHUNKS:
+        for pattern, reason in profile.private_chunks:
             if R.matches_pattern(pattern, rel):
                 findings.append(
                     Finding(
@@ -266,7 +282,9 @@ def scan_entries(
                         fatal=not allow_private,
                     )
                 )
-        findings.extend(_scan_content(entry, needles, detectors, notes))
+        findings.extend(_scan_content(entry, needles, detectors, notes, profile))
+    for reason, rels in kept.items():
+        notes.append(f"有意保留：{len(rels)} 个文件（{reason}）—— 例 {rels[0]}")
     return findings, notes
 
 
@@ -288,8 +306,15 @@ def _regex_scope(rel: str, detectors) -> bool:
     return not detectors._is_test_file(rel)
 
 
-def _scan_content(entry: Entry, needles, detectors, notes: list[str]) -> list[Finding]:
+def _scan_content(
+    entry: Entry,
+    needles,
+    detectors,
+    notes: list[str],
+    profile: R.Profile | None = None,
+) -> list[Finding]:
     """单个条目的内容判据：形态标记 / 内网地址 / 明文口令 / 宿主残留值。"""
+    profile = profile or R.PROFILES["general"]
     rel = entry.rel
     out: list[Finding] = []
     in_regex_scope = _regex_scope(rel, detectors)
@@ -301,7 +326,7 @@ def _scan_content(entry: Entry, needles, detectors, notes: list[str]) -> list[Fi
     # 形态标记：web/assets 里的构建期内联开关（二进制串匹配，与是否文本后缀无关）
     if rel.startswith("web/"):
         blob = b"".join(entry.chunks())
-        for marker, reason in R.SHAPE_MARKERS:
+        for marker, reason in profile.shape_markers:
             if marker in blob:
                 out.append(Finding("形态", rel, reason, True))
         del blob
@@ -314,8 +339,19 @@ def _scan_content(entry: Entry, needles, detectors, notes: list[str]) -> list[Fi
         else:
             raw = b"".join(entry.chunks())
             text = raw.decode("utf-8", "replace")
+            coord_reason = profile.coord_reason(rel)
+            coords = 0
             for lineno, addr, _line in detectors.find_internal_addresses(text):
+                if coord_reason is not None:
+                    # 有意随包分发（实盘节点就是去连那台机器）：记提示并点名，
+                    # 既不静默放过、也不误报成违规——一条会误报的护栏等于没有护栏。
+                    coords += 1
+                    continue
                 out.append(Finding("内网地址", f"{rel}:{lineno}", f"地址 {addr}", True))
+            if coords:
+                notes.append(
+                    f"有意分发：{rel} 含 {coords} 处内网坐标（{coord_reason}）"
+                )
             code = Path(rel).suffix.lower() in getattr(
                 detectors, "_CODE_SUFFIXES", {".py", ".ts", ".tsx", ".js"}
             )
@@ -328,12 +364,18 @@ def _scan_content(entry: Entry, needles, detectors, notes: list[str]) -> list[Fi
         and in_needle_scope
         and (text_like or 0 <= entry.size <= MAX_SMALL_BINARY_BYTES)
     ):
-        out.extend(_scan_needles(entry, needles))
+        out.extend(_scan_needles(entry, needles, notes, profile))
     return out
 
 
-def _scan_needles(entry: Entry, needles: list[tuple[str, str]]) -> list[Finding]:
+def _scan_needles(
+    entry: Entry,
+    needles: list[tuple[str, str]],
+    notes: list[str],
+    profile: R.Profile | None = None,
+) -> list[Finding]:
     """宿主真实值逐字匹配（流式，跨块用 needle 长度做重叠）。"""
+    profile = profile or R.PROFILES["general"]
     probes = [(src, val.encode()) for src, val in needles]
     longest = max(len(b) for _, b in probes)
     tail = b""
@@ -354,6 +396,11 @@ def _scan_needles(entry: Entry, needles: list[tuple[str, str]]) -> list[Finding]
         offset += len(block)
     out: list[Finding] = []
     for source, at in hits[:MAX_LINES_PER_KIND]:
+        reason = profile.needle_reason(entry.rel, source)
+        if reason is not None:
+            # 有意随包分发的那几个值（节点就是用它连库）：点来源名，值永不回显。
+            notes.append(f"有意分发：{entry.rel} 含打包机 {source} 的值（{reason}）")
+            continue
         # 行号要再读一遍（流式扫描不留全文）；值仍然不回显。
         lineno = _line_of(at, entry.chunks)
         out.append(
@@ -376,20 +423,54 @@ def _scan_needles(entry: Entry, needles: list[tuple[str, str]]) -> list[Finding]
     return out
 
 
-def check_required(entries: Iterator[Entry]) -> list[Finding]:
-    rels = {e.rel for e in entries}
+def check_required(
+    entries: Iterator[Entry],
+    profile: R.Profile | None = None,
+    *,
+    mode: str = "stage",
+) -> list[Finding]:
+    """必备判据。``mode`` ∈ {"stage", "zip"}。
+
+    ``mode`` 只影响 ``artifact_only_required``：那几项是构建器**最后一步**才写进 zip 的
+    （``VERSION-LIVE`` 就是），staging 阶段查它必然报缺、且这个缺永远修不好——报一个
+    改不掉的错等于让整条闸门被无视；zip 阶段缺了才是真漏写。
+
+    ``entries`` 是**一次性**迭代器（``--zip`` 那条路上还绑着 zip 句柄的顺序读）：这里
+    先落成列表，后面几组判据各扫各的。曾经的写法是「集合推导吃一遍、内容判据再吃同一
+    个迭代器」——第二遍拿到的是空序列，于是内容判据**读都没读就判定缺必备**，任何包都
+    过不了这一关。一次都没生效的检查比没有检查更坏：它看起来在守。
+    """
+    profile = profile or R.PROFILES["general"]
+    items = list(entries)
+    rels = {e.rel for e in items}
     out: list[Finding] = []
-    for must in R.REQUIRED_FILES:
+    for must in profile.required_files:
         if must not in rels:
             out.append(Finding("缺必备", must, "包不完整", True))
-    for pattern, reason in R.REQUIRED_GLOBS:
+    for pattern, reason in profile.required_globs:
         if not any(R.matches_pattern(pattern, rel) for rel in rels):
             out.append(Finding("缺必备", pattern, reason, True))
     # 成对项：哨兵在、必备不在 → 半个组件（看着有、点开报错）。两个都不在只提示。
-    for sentinel, must, reason in R.REQUIRED_PAIRS:
+    for sentinel, must, reason in profile.required_pairs:
         if sentinel in rels and must not in rels:
             out.append(Finding("缺必备", must, reason, True))
-    for sentinel, note in R.OPTIONAL_COMPONENTS:
+    # 必备栏目产物：与私有栏目产物是同一判据的两面（一份包禁止、另一份必查）。
+    for pattern, reason in profile.required_chunks:
+        if not any(R.matches_pattern(pattern, rel) for rel in rels):
+            out.append(Finding("缺必备", pattern, reason, True))
+    if mode == "zip":
+        for must in profile.artifact_only_required:
+            if must not in rels:
+                out.append(
+                    Finding(
+                        "缺必备",
+                        must,
+                        "构建器没把它写进产物（该项只在 zip 侧校验）",
+                        True,
+                    )
+                )
+    out.extend(_check_required_content(items, profile))
+    for sentinel, note in profile.optional_components:
         if sentinel not in rels:
             out.append(Finding("提示", sentinel, note, False))
     if not any(rel.startswith("models/production/") for rel in rels):
@@ -404,16 +485,68 @@ def check_required(entries: Iterator[Entry]) -> list[Finding]:
     return out
 
 
+def _check_required_content(
+    entries: Sequence[Entry], profile: R.Profile
+) -> list[Finding]:
+    """内容级必备判据：``pattern`` 命中的文件里**至少一个**要 ``check`` 通过。
+
+    「至少一个」是必须的、不是偷懒：构建期内联的开关（``VITE_*``）只会出现在**一个**
+    chunk 里，而 ``web/assets/*.js`` 有三百多个候选。反过来也不能只看「有命中」——
+    那正是「夹具形状≠生产形状」那类假通过的来路：文件在、内容错，照样出厂。
+
+    入参必须是**可重复读**的序列（``check_required`` 已落成列表）：三条判据各扫一遍，
+    传一次性迭代器会让后两条读到空序列、**不读内容就报缺**。
+    """
+    out: list[Finding] = []
+    for spec in profile.required_content:
+        candidates = [e for e in entries if R.matches_pattern(spec.pattern, e.rel)]
+        if not candidates:
+            out.append(Finding("缺必备", spec.pattern, spec.reason, True))
+            continue
+        failing: list[tuple[str, str]] = []
+        for entry in candidates:
+            why = spec.check(b"".join(entry.chunks()))
+            if why is None:
+                failing = []
+                break
+            failing.append((entry.rel, why))
+        if failing:
+            rel, why = failing[0]
+            more = (
+                f"（{spec.pattern} 命中 {len(candidates)} 个候选，逐个读过全都不符合；"
+                "上为第一个）"
+                if len(failing) > 1
+                else ""
+            )
+            out.append(Finding("缺必备", rel, f"{spec.reason} —— {why}{more}", True))
+    return out
+
+
 # ---------------------------------------------------------------------------
 # 写 zip（排除清单唯一生效点）
 # ---------------------------------------------------------------------------
 
 
-def make_zip(stage: Path, out: Path, *, deflate: bool = False) -> tuple[str, int, int]:
+def make_zip(
+    stage: Path,
+    out: Path,
+    *,
+    deflate: bool = False,
+    profile: R.Profile | None = None,
+    root_name: str | None = None,
+) -> tuple[str, int, int]:
+    """写出产物。``profile`` 决定按哪份排除清单跳过（**排除清单的唯一生效点**）。
+
+    ``root_name`` 是 zip 里的顶层目录名，默认取 staging 目录名。实盘包必须显式给
+    （``QuantMind-Live-win-x64``）：staging 是与通用包共用的 ``QuantMind-Portable-win-x64``，
+    顶层目录撞名的话，Windows 上解压会把两份包**并进同一个文件夹**，后来的那份
+    覆掉对方的 ``start.bat`` / ``pack.env``（2026-09 实测发生过，文档是对的、产物错了）。
+    """
+    profile = profile or R.PROFILES["general"]
     if not stage.is_dir():
         raise SystemExit(f"[guard] staging 不存在：{stage}")
     entries = list(iter_stage(stage))
-    root = stage.name
+    root = root_name or stage.name
     skipped: list[str] = []
     written: list[str] = []
     dirs: set[str] = set()
@@ -423,7 +556,7 @@ def make_zip(stage: Path, out: Path, *, deflate: bool = False) -> tuple[str, int
     try:
         with zipfile.ZipFile(tmp, "w", comp) as zf:
             for entry in entries:
-                if R.match_excludes(entry.rel) is not None:
+                if profile.match_excludes(entry.rel) is not None:
                     skipped.append(entry.rel)
                     continue
                 zf.write(stage / entry.rel, f"{root}/{entry.rel}")
@@ -512,6 +645,12 @@ def main(argv: list[str] | None = None) -> int:
         help="压缩（默认 store：包体大头是二进制，压不动）",
     )
     ap.add_argument(
+        "--root",
+        metavar="NAME",
+        help="zip 内顶层目录名（默认取 staging 目录名）；实盘包必须写成 "
+        "QuantMind-Live-win-x64，否则在 Windows 上解压会并进便携包同一个文件夹",
+    )
+    ap.add_argument(
         "--env-file", action="append", default=[], help="补充宿主探针来源（可多次）"
     )
     ap.add_argument(
@@ -520,10 +659,21 @@ def main(argv: list[str] | None = None) -> int:
         help="显式放行本机独有实盘栏目的前端产物（自用包；"
         "与 scripts/deploy_frontend.sh 同名同义，默认拒绝）",
     )
+    ap.add_argument(
+        "--profile",
+        choices=sorted(R.PROFILES),
+        default="general",
+        help="判据清单：general=出厂通用便携包（默认），live=实盘节点包"
+        "（哪些是必备、哪些是违规随之翻转，见 pack_rules 的包形态一节）",
+    )
     args = ap.parse_args(argv)
     modes = [bool(args.stage), bool(args.zip), bool(args.make_zip)]
     if sum(modes) != 1:
         ap.error("--stage / --zip / --make-zip 三选一")
+    if args.root and not args.make_zip:
+        # 静默忽略比报错危险：以为改掉了顶层目录名，其实没改。
+        ap.error("--root 只在 --make-zip 下有意义（--stage/--zip 是校验，不产出）")
+    profile = R.PROFILES[args.profile]
 
     detectors = load_detectors()
     env_files = [Path(p) for p in args.env_file] or [
@@ -541,13 +691,20 @@ def main(argv: list[str] | None = None) -> int:
             dropped,
             detectors,
             allow_private=args.allow_local_live,
+            profile=profile,
         )
         if code != 0:
             print(
                 "\n  ✗ staging 有违规，拒绝出包（修正后重跑；排除清单在 pack_rules.py）"
             )
             return code
-        root, written, skipped = make_zip(stage, out, deflate=args.deflate)
+        root, written, skipped = make_zip(
+            stage,
+            out,
+            deflate=args.deflate,
+            profile=profile,
+            root_name=args.root,
+        )
         print(
             f"\n  ✓ 已写出 {out}（根目录 {root}/，{written} 个文件，"
             f"按清单排除 {skipped} 个）"
@@ -562,6 +719,7 @@ def main(argv: list[str] | None = None) -> int:
             dropped,
             detectors,
             allow_private=args.allow_local_live,
+            profile=profile,
         )
 
     zip_path = Path(args.zip)
@@ -574,10 +732,12 @@ def main(argv: list[str] | None = None) -> int:
             needles=needles,
             detectors=detectors,
             allow_private=args.allow_local_live,
+            profile=profile,
         )
-        findings.extend(check_required(iter(entries)))
+        findings.extend(check_required(iter(entries), profile, mode="zip"))
     headline = (
-        f"[guard] 产物校验：{zip_path}（根目录 {root}/，{len(entries)} 个文件）\n"
+        f"[guard] 产物校验：{zip_path}（形态 {profile.name}，根目录 {root}/，"
+        f"{len(entries)} 个文件）\n"
         f"        探针来源 {len(needles)} 个"
         + (f"，另有 {len(unreadable)} 个读不到" if unreadable else "")
     )
@@ -589,8 +749,16 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _verify_stage(
-    stage: Path, needles, unreadable, dropped, detectors, *, allow_private: bool = False
+    stage: Path,
+    needles,
+    unreadable,
+    dropped,
+    detectors,
+    *,
+    allow_private: bool = False,
+    profile: R.Profile | None = None,
 ) -> int:
+    profile = profile or R.PROFILES["general"]
     if not stage.is_dir():
         raise SystemExit(f"[guard] staging 不存在：{stage}")
     entries = list(iter_stage(stage))
@@ -600,9 +768,12 @@ def _verify_stage(
         needles=needles,
         detectors=detectors,
         allow_private=allow_private,
+        profile=profile,
     )
-    findings.extend(check_required(iter(entries)))
-    headline = f"[guard] staging 校验：{stage}（{len(entries)} 个文件）"
+    findings.extend(check_required(iter(entries), profile, mode="stage"))
+    headline = (
+        f"[guard] staging 校验：{stage}（形态 {profile.name}，{len(entries)} 个文件）"
+    )
     for path in unreadable:
         notes.append(f"探针来源读不到（该来源未参与匹配）：{path}")
     for key in dropped:
