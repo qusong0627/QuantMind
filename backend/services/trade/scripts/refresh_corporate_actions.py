@@ -243,12 +243,17 @@ async def _refresh_redis_for_account(account_id: str) -> bool:
         if projection.account is None:
             print(f"    [warn] projection 为空: {account_id}")
             return False
+        sim_key = account_key(account.tenant_id, account.user_id)
+        from backend.shared.trade_account_cache import read_json_cache
+
+        live = read_json_cache(redis_client, sim_key) or {}
         payload = SimulationProjectionService.build_cache_payload(
             account=projection.account,
             positions=projection.positions or {},
             source="refresh_corporate_actions_script",
+            short_proceeds=float(live.get("short_proceeds") or 0.0),
         )
-        sim_key = account_key(account.tenant_id, account.user_id)
+        payload = SimulationProjectionService.merge_preserved(live, payload)
         write_json_cache(redis_client, sim_key, payload)
         write_trade_account_cache(
             redis_client, account.tenant_id, account.user_id, payload

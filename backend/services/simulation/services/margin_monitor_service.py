@@ -25,6 +25,7 @@ from backend.services.simulation.services.projection_service import (
 from backend.shared.database_manager_v2 import get_session
 from backend.shared.simulation_account_keys import account_key
 from backend.shared.trade_account_cache import (
+    read_json_cache,
     write_json_cache,
     write_trade_account_cache,
 )
@@ -259,12 +260,15 @@ async def _rebuild_redis_cache(account: SimulationAccount) -> None:
         )
         if projection.account is None:
             return
+        sim_key = account_key(account.tenant_id, account.user_id)
+        live = read_json_cache(redis_client, sim_key) or {}
         payload = SimulationProjectionService.build_cache_payload(
             account=projection.account,
             positions=projection.positions or {},
             source="margin_monitor_projection",
+            short_proceeds=float(live.get("short_proceeds") or 0.0),
         )
-        sim_key = account_key(account.tenant_id, account.user_id)
+        payload = SimulationProjectionService.merge_preserved(live, payload)
         write_json_cache(redis_client, sim_key, payload)
         write_trade_account_cache(
             redis_client, account.tenant_id, account.user_id, payload

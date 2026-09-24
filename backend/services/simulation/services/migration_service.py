@@ -101,6 +101,7 @@ class SimulationMigrationService:
             account_snapshot = self.ledger_service.apply_trade_to_account_snapshot(
                 trade=trade,
                 account_snapshot=before_snapshot,
+                order=order_stub,
             )
             if str(getattr(trade, "position_side", "long") or "long").strip().lower() == "short":
                 skipped_short += 1

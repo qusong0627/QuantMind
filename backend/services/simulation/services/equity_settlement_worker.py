@@ -38,6 +38,10 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from backend.services.trade_shared.redis_client import RedisClient
+from backend.shared.simulation_position_keys import (
+    build_position_key,  # noqa: F401  (re-export for callers/tests)
+    split_position_key,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -126,16 +130,8 @@ def overnight_series_max_age_sec() -> int:
         return _DEFAULT_OVERNIGHT_SERIES_MAX_AGE_SEC
 
 
-# 持仓键 → (代码, 方向)。兼容三种历史键形：
-#   SYMBOL::long（交易 Lua 写入）/ SYMBOL（init/旧数据）/ SYMBOL:short（台账投影）。
-def split_position_key(pos_key: str) -> tuple[str, str]:
-    text = str(pos_key or "").strip()
-    for suffix in ("::short", ":short"):
-        if text.endswith(suffix):
-            return text[: -len(suffix)], "short"
-    if text.endswith("::long"):
-        return text[: -len("::long")], "long"
-    return text, "long"
+# 持仓键 → (代码, 方向)。统一收口到 backend.shared.simulation_position_keys，
+# 兼容 SYMBOL / SYMBOL::long / SYMBOL:short 等历史键形（同名再导出）。
 
 
 # 原子重估：只改 price/market_value 与派生汇总字段，不碰现金/成本/可卖量。
@@ -180,7 +176,8 @@ account.positions = positions
 account.market_value = long_mv
 account.long_market_value = long_mv
 account.short_market_value = short_mv
-account.total_asset = tonumber(account.cash or 0) + long_mv - short_mv
+local short_proceeds = tonumber(account.short_proceeds or 0)
+account.total_asset = tonumber(account.cash or 0) + short_proceeds + long_mv - short_mv
 account.equity = account.total_asset
 account.available_cash = tonumber(account.cash or 0)
 account.frozen_cash = 0
@@ -545,8 +542,15 @@ class SimulationEquitySettlementWorker:
         updates = build_remark_updates(account, prices)
         positions = account.get("positions") or {}
         cash = float(account.get("cash") or 0)
+        short_proceeds = float(account.get("short_proceeds") or 0.0)
         _long_mv, _short_mv, net_mv = summarize_positions(positions)
-        drift = abs(float(account.get("total_asset") or 0) - (cash + net_mv)) > 0.01
+        drift = (
+            abs(
+                float(account.get("total_asset") or 0)
+                - (cash + short_proceeds + net_mv)
+            )
+            > 0.01
+        )
         if not updates and not drift:
             return False
         if not self.redis.client:
@@ -597,7 +601,8 @@ class SimulationEquitySettlementWorker:
                     account.get("positions")
                 )
                 cash = float(account.get("cash") or 0)
-                total_asset = round(cash + net_mv, 4)
+                short_proceeds = float(account.get("short_proceeds") or 0.0)
+                total_asset = round(cash + short_proceeds + net_mv, 4)
                 result = await session.execute(
                     sa_update(SimulationAccount)
                     .where(SimulationAccount.account_id == account_id)

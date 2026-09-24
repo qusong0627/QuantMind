@@ -14,6 +14,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from backend.services.trade_shared.redis_client import RedisClient
+from backend.shared.simulation_position_keys import SHORT, split_position_key
 
 logger = logging.getLogger(__name__)
 
@@ -61,18 +62,29 @@ async def _ensure_table() -> None:
 
 def _positions_by_symbol(
     positions: Any, field: str = "volume"
-) -> dict[str, float]:
-    out: dict[str, float] = {}
+) -> dict[tuple[str, str], float]:
+    """按 (代码, 方向) 汇总持仓字段。
+
+    方向必须参与分组：多空同标的不汇总（否则一多一空净额会互相抵消，
+    掩盖真实差异）。键形兼容 ``SYMBOL`` / ``SYMBOL::short`` / ``SYMBOL:short``。
+    """
+    out: dict[tuple[str, str], float] = {}
     if not isinstance(positions, dict):
         return out
     for key, pos in positions.items():
         if not isinstance(pos, dict):
             continue
-        code = str(key).split("::", 1)[0].strip().upper()
+        code, side = split_position_key(str(key))
+        code = code.strip().upper()
         if not code:
             continue
-        out[code] = out.get(code, 0.0) + float(pos.get(field) or 0)
+        grouped_key = (code, side)
+        out[grouped_key] = out.get(grouped_key, 0.0) + float(pos.get(field) or 0)
     return out
+
+
+def _report_symbol(code: str, side: str) -> str:
+    return code if side != SHORT else f"{code}::{SHORT}"
 
 
 async def run_reconcile_once(
@@ -121,64 +133,90 @@ async def run_reconcile_once(
         try:
             import json as _json
 
-            live_raw = await asyncio.to_thread(redis.client.get, key)
-            live = _json.loads(live_raw) if live_raw else {}
-            if not isinstance(live, dict):
-                live = {}
-            rebuilt = await manager._rebuild_from_ledger(user_id, tenant_id, market)
-            if not rebuilt:
-                continue
-            diffs: list[dict[str, Any]] = []
-            cash_diff = float(live.get("cash") or 0) - float(rebuilt.get("cash") or 0)
-            if abs(cash_diff) > _DIFF_TOL:
-                diffs.append({
-                    "field": "cash", "symbol": "",
-                    "redis_value": float(live.get("cash") or 0),
-                    "pg_value": float(rebuilt.get("cash") or 0),
-                    "diff": cash_diff,
-                })
-            live_pos = _positions_by_symbol(live.get("positions"))
-            pg_pos = _positions_by_symbol(rebuilt.get("positions"))
-            for code in sorted(set(live_pos) | set(pg_pos)):
-                d = live_pos.get(code, 0.0) - pg_pos.get(code, 0.0)
-                if abs(d) > _DIFF_TOL:
-                    diffs.append({
-                        "field": "volume", "symbol": code,
-                        "redis_value": live_pos.get(code, 0.0),
-                        "pg_value": pg_pos.get(code, 0.0),
-                        "diff": d,
-                    })
-            live_available = _positions_by_symbol(
-                live.get("positions"), "available_volume"
+            from backend.services.simulation.services.projection_service import (
+                SimulationProjectionService,
             )
-            pg_available = _positions_by_symbol(
-                rebuilt.get("positions"), "available_volume"
-            )
-            for code in sorted(set(live_available) | set(pg_available)):
-                d = live_available.get(code, 0.0) - pg_available.get(code, 0.0)
-                if abs(d) > _DIFF_TOL:
+
+            # 与撮合/结算共用同一把执行锁：避免「读 Redis → 台账重建 → 回写」
+            # 期间穿插的成交被 autofix 整包覆盖（丢更新）。拿不到锁本周期跳过。
+            async with manager.locked_execution(user_id, tenant_id):
+                live_raw = await asyncio.to_thread(redis.client.get, key)
+                live = _json.loads(live_raw) if live_raw else {}
+                if not isinstance(live, dict):
+                    live = {}
+                rebuilt = await manager._rebuild_from_ledger(
+                    user_id, tenant_id, market
+                )
+                if not rebuilt:
+                    continue
+                diffs: list[dict[str, Any]] = []
+                cash_diff = float(live.get("cash") or 0) - float(
+                    rebuilt.get("cash") or 0
+                )
+                if abs(cash_diff) > _DIFF_TOL:
                     diffs.append(
                         {
-                            "field": "available_volume",
-                            "symbol": code,
-                            "redis_value": live_available.get(code, 0.0),
-                            "pg_value": pg_available.get(code, 0.0),
-                            "diff": d,
+                            "field": "cash",
+                            "symbol": "",
+                            "redis_value": float(live.get("cash") or 0),
+                            "pg_value": float(rebuilt.get("cash") or 0),
+                            "diff": cash_diff,
                         }
                     )
-            if not diffs:
-                continue
-            stats["diff_fields"] += len(diffs)
-            fixed = False
-            if autofix:
-                try:
-                    from backend.shared.trade_account_cache import write_json_cache
+                live_pos = _positions_by_symbol(live.get("positions"))
+                pg_pos = _positions_by_symbol(rebuilt.get("positions"))
+                for pos_key in sorted(set(live_pos) | set(pg_pos)):
+                    d = live_pos.get(pos_key, 0.0) - pg_pos.get(pos_key, 0.0)
+                    if abs(d) > _DIFF_TOL:
+                        diffs.append(
+                            {
+                                "field": "volume",
+                                "symbol": _report_symbol(*pos_key),
+                                "redis_value": live_pos.get(pos_key, 0.0),
+                                "pg_value": pg_pos.get(pos_key, 0.0),
+                                "diff": d,
+                            }
+                        )
+                live_available = _positions_by_symbol(
+                    live.get("positions"), "available_volume"
+                )
+                pg_available = _positions_by_symbol(
+                    rebuilt.get("positions"), "available_volume"
+                )
+                for pos_key in sorted(set(live_available) | set(pg_available)):
+                    d = live_available.get(pos_key, 0.0) - pg_available.get(
+                        pos_key, 0.0
+                    )
+                    if abs(d) > _DIFF_TOL:
+                        diffs.append(
+                            {
+                                "field": "available_volume",
+                                "symbol": _report_symbol(*pos_key),
+                                "redis_value": live_available.get(pos_key, 0.0),
+                                "pg_value": pg_available.get(pos_key, 0.0),
+                                "diff": d,
+                            }
+                        )
+                if not diffs:
+                    continue
+                stats["diff_fields"] += len(diffs)
+                fixed = False
+                if autofix:
+                    try:
+                        from backend.shared.trade_account_cache import (
+                            write_json_cache,
+                        )
 
-                    await asyncio.to_thread(write_json_cache, redis, key, rebuilt)
-                    fixed = True
-                    stats["autofixed"] += 1
-                except Exception as exc:
-                    logger.warning("reconcile autofix failed %s: %s", key, exc)
+                        # 保留 PG 不可考的 Redis 独有字段（short_proceeds /
+                        # warning_level / market / t1_settlement_date）。
+                        merged = SimulationProjectionService.merge_preserved(
+                            live, rebuilt
+                        )
+                        await asyncio.to_thread(write_json_cache, redis, key, merged)
+                        fixed = True
+                        stats["autofixed"] += 1
+                    except Exception as exc:
+                        logger.warning("reconcile autofix failed %s: %s", key, exc)
             try:
                 async with _get_session() as session:
                     for d in diffs:

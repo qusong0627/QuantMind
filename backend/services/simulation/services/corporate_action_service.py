@@ -507,41 +507,44 @@ class SimulationCorporateActionService:
         if not redis_client.client:
             return
         sim_key = account_key(tenant_id, user_id)
+        try:
+            from backend.shared.trade_account_cache import read_json_cache
+
+            current = read_json_cache(redis_client, sim_key) or {}
+        except Exception:
+            current = {}
         # 空投影保护（与 EOD _rebuild_redis 同理）：ledger 为空时不覆盖 Redis 实盘持仓
         if not positions:
-            try:
-                from backend.shared.trade_account_cache import read_json_cache
-
-                current = read_json_cache(redis_client, sim_key) or {}
-                live = current.get("positions") or {}
-                if isinstance(live, str):
-                    try:
-                        live = json.loads(live)
-                    except Exception:
-                        live = {}
-                live_count = (
-                    sum(
-                        1
-                        for pos in live.values()
-                        if isinstance(pos, dict) and float(pos.get("volume") or 0) > 0
-                    )
-                    if isinstance(live, dict)
-                    else 0
+            live = current.get("positions") or {}
+            if isinstance(live, str):
+                try:
+                    live = json.loads(live)
+                except Exception:
+                    live = {}
+            live_count = (
+                sum(
+                    1
+                    for pos in live.values()
+                    if isinstance(pos, dict) and float(pos.get("volume") or 0) > 0
                 )
-                if live_count > 0:
-                    logger.error(
-                        "Corporate-action rebuild skipped for %s: ledger projection empty "
-                        "but Redis holds live positions",
-                        sim_key,
-                    )
-                    return
-            except Exception:
-                pass
+                if isinstance(live, dict)
+                else 0
+            )
+            if live_count > 0:
+                logger.error(
+                    "Corporate-action rebuild skipped for %s: ledger projection empty "
+                    "but Redis holds live positions",
+                    sim_key,
+                )
+                return
         payload = SimulationProjectionService.build_cache_payload(
             account=account,
             positions=positions,
             source="corporate_action_apply",
+            short_proceeds=float(current.get("short_proceeds") or 0.0),
         )
+        # 保留 PG 不可考的 Redis 独有字段（warning_level / market / t1_settlement_date）
+        payload = SimulationProjectionService.merge_preserved(current, payload)
         redis_client.client.set(sim_key, json.dumps(payload, ensure_ascii=False))
         write_trade_account_cache(redis_client, tenant_id, user_id, payload)
 

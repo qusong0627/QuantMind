@@ -14,6 +14,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.services.simulation.models.account import SimulationAccount
 from backend.services.simulation.models.cash_ledger import SimulationCashLedger
 from backend.services.simulation.models.position_lot import SimulationPositionLot
+from backend.shared.simulation_margin_math import margin_trade_deltas
+from backend.shared.simulation_position_keys import build_position_key
 
 
 @dataclass
@@ -66,6 +68,7 @@ class SimulationLedgerService:
         *,
         trade: Any,
         account_snapshot: dict[str, Any],
+        order: Any | None = None,
     ) -> dict[str, Any]:
         snapshot = dict(account_snapshot or {})
         cash = float(snapshot.get("cash") or 0.0)
@@ -75,24 +78,42 @@ class SimulationLedgerService:
         short_market_value = float(snapshot.get("short_market_value") or 0.0)
 
         side = str(getattr(getattr(trade, "side", None), "value", getattr(trade, "side", "")) or "").strip().lower()
-        trade_action = str(getattr(trade, "trade_action", None) or "").strip().lower()
-        position_side = str(getattr(trade, "position_side", None) or "long").strip().lower()
+        # position_side/trade_action 在订单上（SimTrade 无这两列）。不取订单会
+        # 让融券成交落进多头分支（把卖空所得直接记进现金），口径与撮合侧不符。
+        position_side = str(
+            getattr(order, "position_side", None)
+            or getattr(trade, "position_side", None)
+            or "long"
+        ).strip().lower()
+        trade_action = str(
+            getattr(order, "trade_action", None)
+            or getattr(trade, "trade_action", None)
+            or ""
+        ).strip().lower()
+        symbol = str(
+            getattr(order, "symbol", None) or getattr(trade, "symbol", None) or ""
+        ).strip().upper()
         gross = float(getattr(trade, "trade_value", 0.0) or 0.0)
         total_fee = float(getattr(trade, "total_fee", 0.0) or 0.0)
+        quantity = float(getattr(trade, "quantity", 0.0) or 0.0)
 
         if position_side == "short" or trade_action in {"sell_to_open", "buy_to_close"}:
-            if trade_action == "sell_to_open":
-                cash -= total_fee
-                available_cash -= total_fee
-                short_proceeds += gross
-                liabilities += gross
-                short_market_value += gross
-            elif trade_action == "buy_to_close":
-                cash -= gross + total_fee
-                available_cash -= gross + total_fee
-                liabilities = max(0.0, liabilities - gross)
-                short_proceeds = max(0.0, short_proceeds - gross)
-                short_market_value = max(0.0, short_market_value - gross)
+            positions = snapshot.get("positions")
+            positions = positions if isinstance(positions, dict) else {}
+            pos = positions.get(build_position_key(symbol, "short")) or {}
+            # 与撮合侧 _update_balance_margin 共用同一增量实现（单一口径）
+            deltas = margin_trade_deltas(
+                trade_action=trade_action,
+                gross=gross,
+                quantity=quantity,
+                pos_cost=float((pos or {}).get("cost") or 0.0),
+            )
+            cash += deltas["cash"]
+            available_cash += deltas["cash"]
+            short_proceeds = max(0.0, short_proceeds + deltas["short_proceeds"])
+            liabilities = max(0.0, liabilities + deltas["liabilities"])
+            # short_market_value 由持仓重算，撮合侧与 30s 结算 worker 会刷新，
+            # 此处不臆造增量（快照 positions 是成交前状态）。
         else:
             if side == "buy":
                 cash -= gross + total_fee
@@ -126,6 +147,7 @@ class SimulationLedgerService:
         after_snapshot = self.apply_trade_to_account_snapshot(
             trade=trade,
             account_snapshot=before_snapshot,
+            order=order,
         )
 
         cash_entries = self.build_cash_entries(

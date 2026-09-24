@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.services.simulation.models.account import SimulationAccount
 from backend.services.simulation.models.position_lot import SimulationPositionLot
+from backend.shared.simulation_position_keys import build_position_key
 
 _SH_TZ = ZoneInfo("Asia/Shanghai")
 
@@ -34,12 +35,42 @@ class SimulationProjectionService:
         return f"sim:{str(tenant_id or 'default').strip() or 'default'}:{str(user_id).strip()}"
 
     @staticmethod
+    def merge_preserved(
+        live: dict[str, Any] | None,
+        rebuilt: dict[str, Any],
+    ) -> dict[str, Any]:
+        """把 Redis 独有、PG 台账不可考的字段从现值并入重建 payload。
+
+        PG 没有 short_proceeds / warning_level / market / t1_settlement_date 列，
+        重建（EOD / 对账 autofix）若整包覆盖会把这些字段清零，导致融券户权益
+        跳变、风险等级丢失。保留现值并按 short_proceeds 重算总资产。
+        """
+        out = dict(rebuilt)
+        live = live or {}
+        short_proceeds = float(live.get("short_proceeds") or 0.0)
+        if short_proceeds:
+            out["short_proceeds"] = short_proceeds
+            cash = float(out.get("cash") or 0.0)
+            long_mv = float(out.get("long_market_value") or 0.0)
+            short_mv = float(out.get("short_market_value") or 0.0)
+            total_asset = round(cash + short_proceeds + long_mv - short_mv, 2)
+            out["market_value"] = round(long_mv - short_mv, 2)
+            out["total_asset"] = total_asset
+            out["equity"] = total_asset
+        for key in ("warning_level", "market", "t1_settlement_date"):
+            value = live.get(key)
+            if value not in (None, ""):
+                out[key] = value
+        return out
+
+    @staticmethod
     def build_cache_payload(
         *,
         account: SimulationAccount,
         positions: dict[str, dict[str, float]] | None,
         source: str,
         rebuilt_at: datetime | None = None,
+        short_proceeds: float = 0.0,
     ) -> dict[str, Any]:
         snapshot_dt = (
             rebuilt_at
@@ -79,7 +110,8 @@ class SimulationProjectionService:
         account_version = int(snapshot_dt.timestamp() * 1000)
         initial_equity = float(account.initial_equity or 0.0)
         cash = float(account.cash or 0.0)
-        total_asset = round(cash + market_value, 2)
+        short_proceeds = float(short_proceeds or 0.0)
+        total_asset = round(cash + short_proceeds + market_value, 2)
         payload = {
             "account_version": account_version,
             "snapshot_at": snapshot_at,
@@ -89,6 +121,7 @@ class SimulationProjectionService:
             # 原样回填，导致前端"冻结"显示旧值，故此处按现金派生。
             "available_cash": cash,
             "frozen_cash": 0.0,
+            "short_proceeds": short_proceeds,
             "market_value": market_value,
             "long_market_value": long_market_value,
             "short_market_value": short_market_value,
@@ -189,7 +222,9 @@ class SimulationProjectionService:
             price_map[symbol] = float(value) if isinstance(value, (int, float)) else 0.0
 
         grouped: dict[tuple[str, str], dict[str, float]] = {}
-        as_of_date = date.today()
+        # T+1 判定按上海交易日（与 load_available_quantities / 撮合侧一致），
+        # 不能用 date.today()（依赖进程本地时区，容器非上海时凌晨会差一天）。
+        as_of_date = datetime.now(_SH_TZ).date()
         for lot in lots:
             normalized_symbol = str(lot.symbol or "").strip().upper()
             side = str(lot.position_side or "long").strip().lower()
@@ -223,11 +258,7 @@ class SimulationProjectionService:
             total_cost = float(bucket["cost_amount"] or 0.0)
             cost_price = total_cost / qty if qty > 0 else 0.0
             market_value = round(price * qty, 2) if price > 0 else 0.0
-            key = (
-                normalized_symbol
-                if side == "long"
-                else f"{normalized_symbol}:short"
-            )
+            key = build_position_key(normalized_symbol, side)
             cost_rounded = round(cost_price, 4) if cost_price > 0 else 0.0
             positions[key] = {
                 "symbol": normalized_symbol,

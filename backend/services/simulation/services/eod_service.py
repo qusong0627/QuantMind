@@ -37,6 +37,7 @@ from backend.services.simulation.services.projection_service import (
 )
 from backend.shared.database_manager_v2 import get_session
 from backend.shared.trade_account_cache import (
+    read_json_cache,
     write_json_cache,
     write_trade_account_cache,
 )
@@ -253,6 +254,7 @@ async def _execute_eod(trade_date: date) -> bool:
                         account=projection_account,
                         positions=positions,
                         source="eod_remarking",
+                        short_proceeds=short_proceeds,
                     )
 
                     # 重启重跑昨日 trade_date 时，若该日 EOD 持仓快照已存在，
@@ -412,6 +414,13 @@ def _rebuild_redis(
         account=account,
         positions=positions,
         source="eod_remarking",
+        short_proceeds=float(
+            (read_json_cache(redis_client, sim_key) or {}).get("short_proceeds") or 0.0
+        ),
+    )
+    # 保留 PG 不可考的 Redis 独有字段（warning_level / market / t1_settlement_date）
+    payload = SimulationProjectionService.merge_preserved(
+        read_json_cache(redis_client, sim_key), payload
     )
     write_json_cache(redis_client, sim_key, payload)
     write_trade_account_cache(redis_client, tenant_id, user_id, payload)

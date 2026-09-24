@@ -481,8 +481,9 @@ return 0
 
     @staticmethod
     def _position_key(symbol: str, position_side: str) -> str:
-        side = str(position_side or "long").strip().lower()
-        return f"{symbol.upper()}::{side}"
+        from backend.shared.simulation_position_keys import build_position_key
+
+        return build_position_key(symbol, position_side)
 
     @staticmethod
     def _utc_now() -> datetime:
@@ -1128,8 +1129,17 @@ return 0
         pos = dict(positions.get(pos_key) or {})
         old_qty = float(pos.get("volume") or 0.0)
         gross = float(quantity) * float(price)
-        # 统一手续费费率，回测默认约 0.0015 包含印花税，这里简化表示
-        borrow_fee = gross * float(settings.DEFAULT_BORROW_RATE) / 252.0
+
+        # 现金/负债/冻结资金增量与台账投影（ledger_service）共用同一实现，
+        # 避免 Redis 与 PG 两边口径漂移、对账反复互相覆盖。
+        from backend.shared.simulation_margin_math import margin_trade_deltas
+
+        deltas = margin_trade_deltas(
+            trade_action=action,
+            gross=gross,
+            quantity=float(quantity),
+            pos_cost=float(pos.get("cost") or 0.0),
+        )
 
         if action == "sell_to_open":
             new_qty = old_qty + float(quantity)
@@ -1139,34 +1149,24 @@ return 0
             pos["price"] = float(price)
             pos["market_value"] = new_qty * float(price)
             pos["side"] = "short"
-            pos["borrow_fee"] = float(pos.get("borrow_fee") or 0.0) + borrow_fee
+            pos["borrow_fee"] = float(pos.get("borrow_fee") or 0.0) + deltas[
+                "borrow_fee"
+            ]
 
-            # 融券所得资金冻结
-            short_proceeds += gross
-            # 现金只扣减手续费
-            cash -= borrow_fee
-
-            liabilities += gross
-            short_market_value += pos["market_value"]
+            # 融券所得资金冻结；现金只扣减借券费；负债记卖出金额
+            short_proceeds += deltas["short_proceeds"]
+            cash += deltas["cash"]
+            liabilities += deltas["liabilities"]
+            positions[pos_key] = pos
         elif action == "buy_to_close":
             if old_qty < float(quantity):
                 return {"success": False, "reason": "INSUFFICIENT_SHORT_POSITION"}
 
-            avg_cost = float(pos.get("cost") or 0.0)
-            short_entry_val = avg_cost * float(quantity)
-
-            # 实现盈亏 = 融券开仓价值 - 买入平仓成本 - 手续费
-            realized = short_entry_val - gross - borrow_fee
-
-            # 只有净盈亏结算至可用现金
-            cash += realized
-
-            # 释放对应的冻结本金
-            short_proceeds = max(0.0, short_proceeds - short_entry_val)
-
             new_qty = old_qty - float(quantity)
-            liabilities = max(0.0, liabilities - short_entry_val)
-            short_market_value = max(0.0, short_market_value - short_entry_val)
+            # 实现盈亏结算至现金，释放对应冻结本金与负债
+            cash += deltas["cash"]
+            short_proceeds = max(0.0, short_proceeds + deltas["short_proceeds"])
+            liabilities = max(0.0, liabilities + deltas["liabilities"])
 
             if new_qty <= 1e-6:
                 positions.pop(pos_key, None)
@@ -1174,22 +1174,28 @@ return 0
                 pos["volume"] = new_qty
                 pos["price"] = float(price)
                 pos["market_value"] = new_qty * float(price)
-                pos["borrow_fee"] = float(pos.get("borrow_fee") or 0.0) + borrow_fee
-                pos["realized_pnl"] = float(pos.get("realized_pnl") or 0.0) + realized
+                pos["borrow_fee"] = float(pos.get("borrow_fee") or 0.0) + deltas[
+                    "borrow_fee"
+                ]
+                pos["realized_pnl"] = (
+                    float(pos.get("realized_pnl") or 0.0) + deltas["cash"]
+                )
                 positions[pos_key] = pos
         else:
             return {"success": False, "reason": f"UNSUPPORTED_TRADE_ACTION:{action}"}
 
-        if action == "sell_to_open":
-            positions[pos_key] = pos
-
-        total_market_value = 0.0
+        # 多空市值统一从持仓重算（此前空头累加 pos.market_value 会重复计总额）
+        long_market_value = 0.0
+        short_market_value = 0.0
         for position in positions.values():
             qty = float(position.get("volume") or 0.0)
             px = float(position.get("price") or 0.0)
-            side = str(position.get("side") or "long").lower()
             mv = qty * px
-            total_market_value += mv if side == "long" else -mv
+            if str(position.get("side") or "long").lower() == "short":
+                short_market_value += mv
+            else:
+                long_market_value += mv
+        total_market_value = long_market_value - short_market_value
 
         equity = cash + short_proceeds + total_market_value
 
@@ -1209,6 +1215,7 @@ return 0
                 "short_proceeds": short_proceeds,
                 "positions": positions,
                 "market_value": total_market_value,
+                "long_market_value": long_market_value,
                 "short_market_value": short_market_value,
                 "liabilities": liabilities,
                 "maintenance_margin_ratio": maintenance_ratio,
