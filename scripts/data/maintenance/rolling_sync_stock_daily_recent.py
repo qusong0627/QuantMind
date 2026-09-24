@@ -181,6 +181,166 @@ def _enrich_names_industry(db_url: str, start_date: date) -> int:
         conn.close()
 
 
+# 概念板块名 → PG concept_* 固定列（板块名含任一关键词即置 1）
+_CONCEPT_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "concept_ai": (
+        "人工智能", "AIGC", "多模态AI", "智谱AI", "AI", "算力", "数据中心",
+        "大数据", "数据要素", "数据确权", "时空大数据", "机器人",
+    ),
+    "concept_chip": ("芯片", "半导体"),
+    "concept_new_energy": ("新能源", "储能", "光伏", "锂"),
+    "concept_pv": ("光伏",),
+    "concept_lithium": ("锂",),
+    "concept_military": ("军工", "国防"),
+    "concept_medical": ("医药", "医疗"),
+    "concept_fintech": ("数字货币", "金融科技", "互联网金融"),
+    "concept_consumption": ("消费", "白酒", "食品饮料"),
+    "concept_state_owned": ("国企", "央企", "国资"),
+}
+# 指数成分（QuantDB index_weights，按 symbol 静态快照）→ PG idx_* 列
+_IDX_WEIGHT_FILES: dict[str, str] = {
+    "idx_zz1000": "000852.SH.parquet",
+    "idx_chinext": "399006.SZ.parquet",
+}
+
+
+def _to_num(series):
+    import pandas as pd
+
+    return pd.to_numeric(series, errors="coerce")
+
+
+def _enrich_gap_columns(db_url: str, start_date: date, end_date: date) -> None:
+    """回填 fill_pg_from_parquet 未覆盖的列。
+
+    每交易日（features_daily）：is_st / idx_hs300 / idx_margin / idx_all /
+      roe(=net_profit_ttm/equity，小数口径) / bp(=1/pb) / ep_ttm(=1/pe_ttm) /
+      ln_mv_total(=ln(total_mv))。
+    静态（index_weights / sector_concept）：idx_zz1000 / idx_chinext / concept_*。
+    """
+    import os
+
+    import numpy as np
+    import pandas as pd
+    import psycopg2
+    from psycopg2.extras import execute_values
+
+    from backend.services.engine.data_platform.quantdb_hub import QuantDBDataHub
+    from backend.shared.stock_utils import StockCodeUtil
+
+    hub = QuantDBDataHub.get_instance()
+    base = str(hub.data_dir)
+
+    # ---- 每交易日列 ----
+    fd = hub.fetch_features_daily(start=start_date, end=end_date)
+    if not fd.empty and "trade_date" in fd.columns:
+        mv = _to_num(fd.get("total_mv"))
+        per_date = pd.DataFrame(
+            {
+                "symbol": fd["symbol"].map(lambda s: StockCodeUtil.to_prefix(str(s))),
+                "trade_date": pd.to_datetime(fd["trade_date"]).dt.date,
+                "is_st": _to_num(fd.get("is_st")).fillna(0).astype(int),
+                "idx_hs300": _to_num(fd.get("in_hs300")).fillna(0).astype(int),
+                "idx_margin": _to_num(fd.get("is_margin")).fillna(0).astype(int),
+                "idx_all": 1,
+                "roe": (
+                    _to_num(fd.get("net_profit_ttm")) / _to_num(fd.get("equity"))
+                ).round(6),
+                "bp": (1.0 / _to_num(fd.get("pb")).replace(0, np.nan)).round(6),
+                "ep_ttm": (1.0 / _to_num(fd.get("pe_ttm")).replace(0, np.nan)).round(6),
+                "ln_mv_total": np.log(mv.where(mv > 0)).round(6),
+            }
+        )
+        rows = [tuple(r) for r in per_date.itertuples(index=False, name=None)]
+        conn = psycopg2.connect(db_url)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "CREATE TEMP TABLE _sdl_per_date ("
+                    "symbol text, trade_date date, is_st int, idx_hs300 int, "
+                    "idx_margin int, idx_all int, roe double precision, "
+                    "bp double precision, ep_ttm double precision, "
+                    "ln_mv_total double precision) ON COMMIT DROP"
+                )
+                execute_values(cur, "INSERT INTO _sdl_per_date VALUES %s", rows, page_size=5000)
+                cur.execute(
+                    "UPDATE stock_daily_latest s SET "
+                    "is_st=m.is_st, idx_hs300=m.idx_hs300, idx_margin=m.idx_margin, "
+                    "idx_all=m.idx_all, roe=m.roe, bp=m.bp, ep_ttm=m.ep_ttm, "
+                    "ln_mv_total=m.ln_mv_total "
+                    "FROM _sdl_per_date m "
+                    "WHERE s.symbol=m.symbol AND s.trade_date=m.trade_date"
+                )
+                LOGGER.info("富化每交易日列(is_st/idx_hs300/idx_margin/roe/bp/ep/ln_mv): %s 行", cur.rowcount)
+            conn.commit()
+        finally:
+            conn.close()
+    else:
+        LOGGER.warning("features_daily 无数据，跳过每交易日列富化")
+
+    # ---- 静态列：概念 / 指数成分 ----
+    concept_flags: dict[str, set[str]] = {}
+    sm_path = os.path.join(base, "2_base_sector", "sector_concept", "sector_members.parquet")
+    if os.path.exists(sm_path):
+        sm = pd.read_parquet(sm_path)
+        # 只用概念板块（行业/地区板块名称含关键词会误命中，如"半导体"行业）
+        if "SectorType" in sm.columns:
+            sm = sm[sm["SectorType"].astype(str) == "概念板块"]
+        for name, sym in zip(
+            sm["SectorName"].astype(str), sm["Symbol"].astype(str), strict=False
+        ):
+            hit = [c for c, kws in _CONCEPT_KEYWORDS.items() if any(k in name for k in kws)]
+            if hit:
+                concept_flags.setdefault(StockCodeUtil.to_prefix(sym), set()).update(hit)
+
+    idx_members: dict[str, set[str]] = {}
+    for col, fname in _IDX_WEIGHT_FILES.items():
+        p = os.path.join(base, "2_base_sector", "index_weights", fname)
+        if os.path.exists(p):
+            df = pd.read_parquet(p, columns=["Symbol"])
+            idx_members[col] = {StockCodeUtil.to_prefix(str(s)) for s in df["Symbol"]}
+
+    symbols = set(concept_flags)
+    for members in idx_members.values():
+        symbols |= members
+    if symbols:
+        concept_cols = list(_CONCEPT_KEYWORDS)
+        idx_cols = list(_IDX_WEIGHT_FILES)
+        rows2 = []
+        for sym in sorted(symbols):
+            flags = concept_flags.get(sym, set())
+            rows2.append(
+                (sym,)
+                + tuple(1 if c in flags else 0 for c in concept_cols)
+                + tuple(1 if sym in idx_members.get(c, set()) else 0 for c in idx_cols)
+            )
+        conn = psycopg2.connect(db_url)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "CREATE TEMP TABLE _sdl_static (symbol text, "
+                    + ", ".join(f"{c} int" for c in concept_cols + idx_cols)
+                    + ") ON COMMIT DROP"
+                )
+                execute_values(cur, "INSERT INTO _sdl_static VALUES %s", rows2, page_size=5000)
+                set_sql = ", ".join(f"{c}=m.{c}" for c in concept_cols + idx_cols)
+                # 先清零窗口内旧值，再按映射置位（否则上一版误命中的 1 不会被清掉）
+                cur.execute(
+                    "UPDATE stock_daily_latest SET "
+                    + ", ".join(f"{c}=0" for c in concept_cols + idx_cols)
+                    + " WHERE trade_date >= %s",
+                    (start_date,),
+                )
+                cur.execute(
+                    f"UPDATE stock_daily_latest s SET {set_sql} "
+                    "FROM _sdl_static m WHERE s.symbol=m.symbol"
+                )
+                LOGGER.info("富化概念/指数成分列: %s 行（映射 %s 只）", cur.rowcount, len(rows2))
+            conn.commit()
+        finally:
+            conn.close()
+
+
 def main() -> int:
     args = parse_args()
     days = max(1, int(args.days))
@@ -230,6 +390,11 @@ def main() -> int:
         _enrich_names_industry(db_url, start_date)
     except Exception as exc:  # noqa: BLE001
         LOGGER.warning("名称/行业富化失败（不阻断）: %s", exc)
+
+    try:
+        _enrich_gap_columns(db_url, start_date, end_date)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.warning("缺口列富化失败（不阻断）: %s", exc)
 
     if args.prune:
         deleted = _prune(db_url, start_date)
