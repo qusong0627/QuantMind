@@ -134,13 +134,29 @@ PLAN: tuple[Entry, ...] = (
     Entry(
         "preflight_bridge.py",
         "qm_covered",
-        why="盘前健检（L37：账户通道/台账对账/执行开关/条件位）。本仓实盘运维面有对应端点"
-        "`GET /api/v1/real-trading/preflight`（含日快照），由开户/开闸流程消费。",
+        why="盘前健检（L37：账户通道/台账对账/执行开关/条件位）。**四项并非一一对应**，"
+        "本仓拆到了不同落点：①账户通道 ⇒ 端点内 `bridge_account_channel` 行（2026-09-24"
+        "补，见 manual_checks）；②台账对账 ⇒ 隔壁对的是 live_ledger 分账台账，本仓在"
+        "影子账/决策台账那条链上（`backend/scripts/decision_ledger.py` 一带），"
+        "**不在这条端点里**；③执行开关 ⇒ 本仓没有 intraday_exec.json 那种「哨兵只打印"
+        "不真卖」的独立开关，能不能真卖由总闸门 `ENABLE_REAL_TRADING` + 止盈止损规则表"
+        "活性共同决定；④条件位清单 ⇒ P5 步骤 3 迁移工具"
+        "（`backend/scripts/migrate_legacy_watch.py`）已把 live_watch.json 搬进本仓规则表。"
+        "端点本体：`GET /api/v1/real-trading/preflight`（含日快照），由开户/开闸流程消费。",
         covered_by="code:backend/services/live_trading/routers/real_trading_preflight.py:preflight_check",
         manual_checks=(
             "本仓 preflight 是**按需端点**（开实盘/盘前人工触发 + 日快照），不是 cron 作业；"
             "隔壁那条是每天 09:12 无人值守自动跑。删它 = 少一层无人值守的盘前体检，"
             "请确认你接受「改为需要时才触发」。",
+            "2026-09-24 复核：原先这条 `qm_covered` 属**过度声明** —— 当时端点里唯一探桥的是"
+            "`check_tdx_bridge_online`（只读桥 health），而 health 的 tdx_connected 来自"
+            "`health_check_fast`（发的 `get_match_stkinfo` 是**行情类**查询），交易端掉线时"
+            "照样为真 ⇒ 结构上判不出 L37 的头号故障「桥假活」（2026-09-10 资产恒 0 与"
+            "2026-09-24 查询超时各赔过一天）。已补 `check_bridge_account_channel`：真查一次"
+            "`POST /api/v1/account/query`，「报错」与「200 但资产恒 0/读不出」两种形态都判"
+            "不通过，并在两个 REAL 闸门（`/preflight` 的 ready、`/trading-precheck` 的"
+            "passed）各注册独立一行 `bridge_account_channel`。**台账对账那一项仍未覆盖**"
+            "（见 why ②）。",
         ),
     ),
     # ② 本仓的供数链：删了断粮（含传递依赖）
