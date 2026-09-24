@@ -970,6 +970,9 @@ from backend.services.trade.routers.broker_config import router as broker_config
 from backend.services.trade.routers.qmt_mirror import router as qmt_mirror_router
 from backend.services.trade.routers.qmt_sltp import router as qmt_sltp_router
 from backend.services.trade.routers.risk_ctl import router as risk_ctl_router
+from backend.services.trade.routers.decision_roster import (
+    router as decision_roster_router,
+)
 
 app.include_router(tdx_config_router, prefix="/api/v1", tags=["TDX-Bridge"])
 app.include_router(tdx_quote_feed_router, prefix="/api/v1", tags=["TDX-Bridge"])
@@ -978,6 +981,7 @@ app.include_router(broker_config_router, prefix="/api/v1", tags=["Broker-Config"
 app.include_router(qmt_mirror_router, prefix="/api/v1", tags=["QMT-Mirror"])
 app.include_router(qmt_sltp_router, prefix="/api/v1", tags=["QMT-SLTP"])
 app.include_router(risk_ctl_router, prefix="/api/v1", tags=["Risk-Control"])
+app.include_router(decision_roster_router, prefix="/api/v1", tags=["Decision-Round"])
 
 app.add_middleware(
     CORSMiddleware,

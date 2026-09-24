@@ -165,6 +165,12 @@ async def _do_proxy(request: Request, user: dict | None = None) -> Response:
     methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
     include_in_schema=False,
 )
+@router.api_route("/api/v1/decision", methods=["GET", "POST", "OPTIONS"], include_in_schema=False)
+@router.api_route(
+    "/api/v1/decision/{p:path}",
+    methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+    include_in_schema=False,
+)
 @router.api_route("/api/v1/portfolios", methods=["GET", "POST", "OPTIONS"], include_in_schema=False)
 @router.api_route(
     "/api/v1/portfolios/{p:path}", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"], include_in_schema=False

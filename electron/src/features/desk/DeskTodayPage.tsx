@@ -26,6 +26,7 @@ import { EvidenceMatrix } from './components/EvidenceMatrix';
 import { HealthCard } from './components/DeskCards';
 import { CARD } from './components/cardKit';
 import { RealtimeInferenceCard } from './components/RealtimeInferenceCard';
+import { DecisionRosterCard } from './components/DecisionRosterCard';
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : '请求失败';
@@ -163,6 +164,11 @@ const DeskTodayPage: React.FC<{ embedded?: boolean; tradingRunning?: boolean }> 
               </section>
             )}
           </div>
+
+          {/* 第四行：决策模型名册（整行）。
+              决策轮是 A 股实盘的执行段（无市场维度），与实时推理同一条 CN-only 理由。
+              名册决定「哪几家模型在给真钱下单」，配置面必须与它的执行面（交易台）同屏。 */}
+          {isCnMarket && <DecisionRosterCard />}
 
         </>
       ) : (

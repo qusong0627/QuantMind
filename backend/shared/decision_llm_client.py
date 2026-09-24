@@ -92,7 +92,8 @@ AGENT_LIMIT = 8
 _BODY_LIMIT = 400
 
 
-def _looks_like_placeholder(value: str) -> bool:
+def looks_like_placeholder(value: str) -> bool:
+    """占位符判据（**公开**：trade 的名册配置面用同一套，不另写一份）。"""
     low = value.strip().lower()
     return (not low) or any(m in low for m in _PLACEHOLDER_MARKERS)
 
@@ -139,7 +140,7 @@ def resolve_config(env: Mapping[str, str] | None = None) -> DecisionLLMConfig:
     missing = [
         name
         for name in (_ENV_BASE, _ENV_KEY, _ENV_MODEL)
-        if _looks_like_placeholder(src.get(name, ""))
+        if looks_like_placeholder(src.get(name, ""))
     ]
     if missing:
         raise LLMNotConfigured(
@@ -181,7 +182,7 @@ def _entry_credential(
     name = _entry_text(entry, f"{field}_env")
     if name:
         value = str(src.get(name, "")).strip()
-        if _looks_like_placeholder(value):
+        if looks_like_placeholder(value):
             raise LLMNotConfigured(
                 f"{ENV_ROSTER} 第 {index + 1} 项（{model}）的 {field}_env 指向 {name}，"
                 f"但 {name} 没配或仍是占位符"
@@ -189,7 +190,7 @@ def _entry_credential(
         return value
     literal = _entry_text(entry, field)
     if literal:
-        if _looks_like_placeholder(literal):
+        if looks_like_placeholder(literal):
             raise LLMNotConfigured(
                 f"{ENV_ROSTER} 第 {index + 1} 项（{model}）的 {field} 是占位符"
             )
@@ -313,7 +314,7 @@ def resolve_roster(
                 f'{type(entry).__name__}）：一家一项，形如 {{"model": "…"}}'
             )
         model = _entry_text(entry, "model")
-        if _looks_like_placeholder(model):
+        if looks_like_placeholder(model):
             raise LLMNotConfigured(
                 f"{ENV_ROSTER} 第 {index + 1} 项缺 model（或仍是占位符）："
                 "模型名是必填的，它同时是这个 agent 的身份"

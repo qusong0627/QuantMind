@@ -110,6 +110,50 @@ def set_secret(key: str, value: str) -> Path:
     return path
 
 
+def read_runtime_env() -> dict[str, str]:
+    """runtime.env 的当前内容（**不含**进程环境变量的覆盖）。"""
+    return _parse(runtime_env_path())
+
+
+def delete_secret(key: str) -> bool:
+    """删除一条密钥：从 runtime.env 抹掉，并立即从本进程环境中移除。
+
+    返回「本进程现在还看不看得见它」。**真实环境变量不删**——那是运维在
+    docker-compose / 启动脚本里声明的，进程内删掉只会制造「这个进程看不见、别的进程
+    还看得见」的假象（而调用方会以为删干净了）；这种情况打警告并返回 ``False``。
+
+    与 ``set_secret`` 对称：空值在本模块的语义里等于「未配置」（见模块 docstring），
+    所以删掉后重启不会把它再注入回来。
+    """
+    if not _KEY_PATTERN.match(key):
+        raise ValueError(f"非法的配置键名: {key}")
+
+    path = runtime_env_path()
+    removed_from_file = False
+    if path.is_file():
+        lines = path.read_text(encoding="utf-8").splitlines()
+        kept = [line for line in lines if not line.strip().startswith(f"{key}=")]
+        if len(kept) != len(lines):
+            path.write_text("\n".join(kept) + ("\n" if kept else ""), encoding="utf-8")
+            os.chmod(path, 0o600)
+            removed_from_file = True
+
+    was_injected = key in _injected_keys
+    _injected_keys.discard(key)
+    if removed_from_file or was_injected:
+        os.environ.pop(key, None)
+        return True
+    if os.environ.get(key, "").strip():
+        logger.warning(
+            "delete_secret(%s)：runtime.env 里没有它，但本进程环境里有（真实环境变量，"
+            "由编排/启动脚本注入）。未做任何删除——要真正下线请改那里。",
+            key,
+        )
+        return False
+    os.environ.pop(key, None)  # 空串按「未配置」处理
+    return True
+
+
 def mask_secret(value: str | None) -> str:
     """脱敏展示，永不回传明文。"""
     if not value:
