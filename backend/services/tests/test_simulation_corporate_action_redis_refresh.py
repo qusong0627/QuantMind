@@ -74,7 +74,9 @@ async def test_dividend_apply_writes_redis_cache(monkeypatch):
                 account_id="sim:default:08030005",
                 tenant_id="default",
                 user_id="08030005",
-                symbol="SH600519",
+                # 台账 lots 真实为后缀式（公司行为表为前缀式）：此前测试误用
+                # 前缀式，掩盖了 _apply_action 按前缀查空、分红永不入账的 bug。
+                symbol="600519.SH",
                 position_side="long",
                 quantity_open=100.0,
                 quantity_remaining=100.0,
@@ -163,7 +165,9 @@ async def test_bonus_share_apply_writes_redis_with_updated_quantity(monkeypatch)
                 account_id="sim:default:08030005",
                 tenant_id="default",
                 user_id="08030005",
-                symbol="SH600519",
+                # 台账 lots 真实为后缀式（公司行为表为前缀式）：此前测试误用
+                # 前缀式，掩盖了 _apply_action 按前缀查空、分红永不入账的 bug。
+                symbol="600519.SH",
                 position_side="long",
                 quantity_open=100.0,
                 quantity_remaining=100.0,

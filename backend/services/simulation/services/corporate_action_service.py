@@ -34,6 +34,15 @@ logger = logging.getLogger(__name__)
 
 class SimulationCorporateActionService:
     @staticmethod
+    def _lot_symbol_candidates(symbol: str) -> set[str]:
+        """台账 lots 的代码候选集合：后缀式 + 前缀式。
+
+        台账/成交/Redis 持仓统一用后缀式（600036.SH），公司行为表用前缀式
+        （SH600036）。两者都返回，避免层间格式漂移把查询打成空集。
+        """
+        return {StockCodeUtil.to_suffix(symbol), StockCodeUtil.to_prefix(symbol)}
+
+    @staticmethod
     def _merge_action_note(action: SimulationCorporateAction, summary: str) -> None:
         summary_text = str(summary or "").strip()
         if not summary_text:
@@ -148,12 +157,17 @@ class SimulationCorporateActionService:
         applied_at: datetime,
     ) -> None:
         normalized_type = str(action.action_type or "").strip().lower()
-        normalized_symbol = StockCodeUtil.to_prefix(action.symbol)
+        # 台账 lots 用后缀式（600036.SH），公司行为表用前缀式（SH600036）。
+        # 历史 bug：这里按前缀查 lots，与台账后缀永不匹配，导致分红/送股
+        # 静默不入账（dividend_applied_accounts=0）。统一按后缀查询，同时
+        # 保留前缀候选，兼容未来格式迁移。
+        normalized_symbol = StockCodeUtil.to_suffix(action.symbol)
+        symbol_candidates = cls._lot_symbol_candidates(action.symbol)
         lots = list(
             (
                 await session.execute(
                     select(SimulationPositionLot).where(
-                        SimulationPositionLot.symbol == normalized_symbol,
+                        SimulationPositionLot.symbol.in_(symbol_candidates),
                         SimulationPositionLot.position_side == "long",
                         SimulationPositionLot.status == "open",
                         SimulationPositionLot.quantity_remaining > 0,
