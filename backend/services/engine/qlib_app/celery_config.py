@@ -155,11 +155,15 @@ if os.getenv("MARKET_SYNC_SCHEDULE_ENABLED", "true").lower() == "true":
         "schedule": crontab(minute="*", hour="*"),
     }
 
-# Strategy Lab daily scan — runs after the data sync settles (Day 16)
+# Strategy Lab daily scan — 工作日盘后 20:00。
+# 原为 23:00：一是与每日 00:00 的自动强制更新（会 --force-recreate celery-worker）
+# 撞车，扫描未跑完会被打断；二是 23:00 并不在数据同步之后 —— 同步时刻由用户在前端
+# 「同步调度」配置，建议区间是次日 01:00-06:00，所以两种时刻读到的都是前一交易日
+# 收盘数据，提前到 20:00 不改变数据口径。
 if os.getenv("STRATEGY_LAB_SCAN_ENABLED", "true").lower() == "true":
     beat_schedule["strategy-lab-daily-scan"] = {
         "task": "engine.tasks.strategy_lab_daily_scan",
-        "schedule": crontab(minute="0", hour="23", day_of_week="1-5"),
+        "schedule": crontab(minute="0", hour="20", day_of_week="1-5"),
         "kwargs": {"lookback_days": 7},
     }
 
