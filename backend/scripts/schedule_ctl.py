@@ -152,9 +152,12 @@ def _run_dual_book(date_str: str | None, force: bool) -> int:
 
     # 与 worker 同一客户端（报表统一落 trade 库；sentinel 客户端形态不含 .client）
     report = asyncio.run(run_dual_book_reconciliation(get_redis(), date_str))
+    # 跳过与真单失败分开读：前者是「决定不发」，后者是「发了没成」
     print(
         f"dual_book {report.get('date')}: 差异={len(report.get('diffs') or [])} "
-        f"未解释={len(report.get('unexplained') or [])} ok={report.get('ok')}"
+        f"未解释={len(report.get('unexplained') or [])} "
+        f"跳过={report.get('skip_events')} 真单失败={report.get('failure_events')} "
+        f"ok={report.get('ok')}"
     )
     return 0 if report.get("ok") else 1
 

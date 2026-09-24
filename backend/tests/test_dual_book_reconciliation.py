@@ -52,15 +52,37 @@ class FakePipeline:
 
 
 class FakeRedisClient:
+    """最小 Redis 替身：哈希（跳过/失败台账）+ 字符串键（报表/去重）。
+
+    ``set/get/exists`` 不是装饰：报表落盘（``_save_report``）与通知去重键
+    （``_notify_report`` 的 ``set(nx=True)``）都走字符串键；少了它们，那些
+    分支会被自己的 ``except Exception`` 吞掉，测试就再也看不见「有没有落盘」。
+    """
+
     def __init__(self) -> None:
         self.hashes: dict[str, dict] = {}
         self.ttls: dict[str, int] = {}
+        self.kv: dict[str, str] = {}
+        self.set_calls: list[tuple] = []
 
     def pipeline(self) -> FakePipeline:
         return FakePipeline(self)
 
     def hgetall(self, key):
         return dict(self.hashes.get(key, {}))
+
+    def set(self, key, value, nx: bool = False, ex: int | None = None):
+        self.set_calls.append((key, value, nx, ex))
+        if nx and key in self.kv:
+            return None
+        self.kv[key] = value
+        return True
+
+    def get(self, key):
+        return self.kv.get(key)
+
+    def exists(self, key) -> bool:
+        return key in self.kv
 
 
 class FakeRedis:
@@ -166,6 +188,159 @@ class TestReconciliationReport:
         assert report["diffs"][0]["kind"] == "excess"
         assert report["sim_symbols"] == 0
         assert report["real_symbols"] == 1
+
+
+class TestFailureAwareness:
+    """真单**提交失败**台账（``mirror:failed:*``）接进对账报表。
+
+    跳过与失败是两回事：「我们决定不发」vs「发了没成」。失败**不解释**缺口——
+    缺口照旧是 unexplained（照样告警），但要把原因写在缺口旁边，否则 15:10 的报表
+    只会说「缺口 1000 股」，而原因在另一个键里躺着。
+    """
+
+    @staticmethod
+    def _report(*, sim_rows, real_rows, skips=None, failures=None):
+        return reconcile.build_reconciliation_report(
+            date_str="20260911",
+            sim_rows=sim_rows,
+            real_rows=real_rows,
+            skips=skips,
+            failures=failures,
+        )
+
+    def test_a_failure_does_not_explain_the_gap_away(self) -> None:
+        report = self._report(
+            sim_rows=[("600036.SH", "SELL", 1000)],
+            real_rows=[],
+            failures={"600036.SH:TDX_UNAVAILABLE": 1},
+        )
+
+        assert report["ok"] is False
+        diff = report["diffs"][0]
+        assert diff["explained"] is False
+        assert [d["symbol"] for d in report["unexplained"]] == ["600036.SH"]
+
+    def test_failure_reasons_ride_along_on_the_diff(self) -> None:
+        report = self._report(
+            sim_rows=[("600036.SH", "SELL", 1000)],
+            real_rows=[],
+            failures={"600036.SH:TDX_UNAVAILABLE": 1},
+        )
+
+        assert report["diffs"][0]["failure_reasons"] == {"TDX_UNAVAILABLE": 1}
+
+    def test_failures_do_not_bleed_across_symbols_or_into_skips(self) -> None:
+        report = self._report(
+            sim_rows=[("600036.SH", "SELL", 1000), ("000001.SZ", "BUY", 100)],
+            real_rows=[],
+            skips={"600036.SH:price_drift": 1},
+            failures={"000001.SZ:rejected": 1},
+        )
+
+        by_symbol = {d["symbol"]: d for d in report["diffs"]}
+        assert by_symbol["600036.SH"]["skip_reasons"] == {"price_drift": 1}
+        assert by_symbol["600036.SH"]["failure_reasons"] == {}
+        assert by_symbol["600036.SH"]["explained"] is True
+        assert by_symbol["000001.SZ"]["failure_reasons"] == {"rejected": 1}
+        assert by_symbol["000001.SZ"]["skip_reasons"] == {}
+        assert by_symbol["000001.SZ"]["explained"] is False
+
+    def test_failure_events_are_counted_even_without_a_gap(self) -> None:
+        """失败一笔、重试成功 ⇒ 没有缺口，但计数要在（面板读得出「今天失败过」）。"""
+        recovered = self._report(
+            sim_rows=[("600036.SH", "SELL", 1000)],
+            real_rows=[("600036.SH", "SELL", 1000)],
+            failures={"600036.SH:TDX_UNAVAILABLE": 2},
+        )
+        assert recovered["failure_events"] == 2
+        assert recovered["ok"] is True
+
+        clean = self._report(sim_rows=[], real_rows=[])
+        assert clean["failure_events"] == 0
+
+    def test_a_report_without_failures_keeps_the_old_shape(self) -> None:
+        """滚动升级：老调用方不传 failures，报表与旧版逐字段相同。"""
+        report = self._report(
+            sim_rows=[("600036.SH", "SELL", 1000)],
+            real_rows=[],
+            skips={"600036.SH:price_drift": 1},
+        )
+
+        assert report["ok"] is True
+        assert report["diffs"][0]["failure_reasons"] == {}
+        assert report["failure_events"] == 0
+
+
+class TestReconcileNotification:
+    def test_the_alert_names_the_failure_reason(self) -> None:
+        published: list[dict] = []
+
+        async def _fake_publish(**kwargs):
+            published.append(kwargs)
+
+        report = reconcile.build_reconciliation_report(
+            date_str="20260911",
+            sim_rows=[("600036.SH", "SELL", 1000)],
+            real_rows=[],
+            failures={"600036.SH:TDX_UNAVAILABLE": 1},
+        )
+        with patch(
+            "backend.shared.notification_publisher.publish_notification_async",
+            _fake_publish,
+        ):
+            asyncio.run(reconcile._notify_report(FakeRedis(), report))
+
+        assert published, "正向对照：有缺口时通知必须发得出去"
+        content = published[0]["content"]
+        assert "TDX_UNAVAILABLE" in content
+        assert "真单提交失败" in content
+
+
+class TestFailureLedgerWiring:
+    """参数没人传就是死代码 —— 真跑一次任务，看失败台账有没有进报表。"""
+
+    @staticmethod
+    def _patch_pipeline(*, failures, skips=None, real_rows=None):
+        async def _sim_rows(*_a, **_k):
+            return [("600036.SH", "SELL", 1000.0)]
+
+        async def _real_rows(*_a, **_k):
+            return real_rows or []
+
+        return (
+            patch.object(reconcile, "collect_sim_rows", _sim_rows),
+            patch.object(reconcile, "collect_real_rows", _real_rows),
+            # 函数体内 import ⇒ 只有打**源模块**才生效（打在 reconcile 上静默无效）
+            patch.object(mirror, "load_skips", lambda *_a, **_k: skips or {}),
+            patch.object(mirror, "load_failures", failures),
+            patch.object(mirror, "load_config", lambda *_a, **_k: {}),
+            patch.object(mirror, "mirror_enabled", lambda *_a, **_k: False),
+        )
+
+    def test_the_task_reads_the_failure_ledger(self) -> None:
+        patches = self._patch_pipeline(
+            failures=lambda *_a, **_k: {"600036.SH:TDX_UNAVAILABLE": 1}
+        )
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
+            report = asyncio.run(
+                reconcile.run_dual_book_reconciliation(FakeRedis(), "20260911")
+            )
+
+        assert report["failure_events"] == 1
+        assert report["diffs"][0]["failure_reasons"] == {"TDX_UNAVAILABLE": 1}
+
+    def test_an_unreadable_failure_ledger_is_reported_not_swallowed(self) -> None:
+        def _boom(*_a, **_k):
+            raise RuntimeError("redis down")
+
+        patches = self._patch_pipeline(failures=_boom)
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
+            report = asyncio.run(
+                reconcile.run_dual_book_reconciliation(FakeRedis(), "20260911")
+            )
+
+        assert report["ok"] is False
+        assert any("failures_query_failed" in e for e in report["errors"])
 
 
 class TestReconcileDayWindow:

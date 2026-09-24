@@ -7,13 +7,17 @@
 本任务每日收盘后（默认 15:10）对比：
   1) 模拟台账成交（``sim_trades``）按 (symbol, side) 聚合；
   2) 真实镜像单（``orders.client_order_id LIKE 'mir-%'``）按 (symbol, side) 聚合；
-  3) 当日镜像跳过记录（Redis ``mirror:skipped:{YYYYMMDD}``，见 real_mirror_service）。
+  3) 当日镜像跳过记录（Redis ``mirror:skipped:{YYYYMMDD}``，见 real_mirror_service）；
+  4) 当日镜像**提交失败**台账（Redis ``mirror:failed:{YYYYMMDD}``，同上）。
 
 差异分两类：
-  * ``shortfall``：模拟成交 > 真单成交（镜像被跳过/未成交/部分成交）；
+  * ``shortfall``：模拟成交 > 真单成交（镜像被跳过/未成交/部分成交/提交失败）；
   * ``excess``：真单成交 > 模拟成交（疑似重复下单，严重，需人工核实）。
 
 带跳过原因的 shortfall 视为「已解释」；无原因或 excess 一律告警通知（每日一次）。
+**失败不解释缺口**：跳过是「我们决定不发」（预期内），失败是「发了没成」（已出错）
+—— 缺口照旧 unexplained，只把 ``failure_reasons`` 附在缺口旁边，让 15:10 这条
+告警自己说清原因，而不是留一句光秃秃的「缺口 1000 股」。
 
 报表写入 Redis ``mirror:reconcile:{YYYYMMDD}``（JSON，TTL 30 天）。
 
@@ -93,25 +97,36 @@ def cst_day_window(date_str: str) -> tuple[datetime, datetime]:
     return start, start + timedelta(days=1)
 
 
+def _by_symbol(ledger: dict[str, int] | None) -> dict[str, dict[str, int]]:
+    """``{"symbol:reason": count}`` → ``{SYMBOL: {reason: count}}``（两张台账同形状）。"""
+    out: dict[str, dict[str, int]] = {}
+    for field, count in (ledger or {}).items():
+        symbol, _, reason = str(field).partition(":")
+        if not symbol or not reason:
+            continue
+        out.setdefault(symbol.upper(), {})[reason] = int(count)
+    return out
+
+
 def build_reconciliation_report(
     *,
     date_str: str,
     sim_rows: list[tuple[str, str, float]],
     real_rows: list[tuple[str, str, float]],
     skips: dict[str, int] | None = None,
+    failures: dict[str, int] | None = None,
 ) -> dict:
     """纯函数：聚合双轨数据并标注差异。
 
     ``sim_rows`` / ``real_rows``：``(symbol, side, quantity)`` 列表（side 为 BUY/SELL 大写）。
     ``skips``：``{"symbol:reason": count}``（real_mirror_service.load_skips 口径）。
+    ``failures``：同形状，来自 ``load_failures``（真单**提交失败**台账）。
+
+    两个 ``*_reasons`` 的语义**不同**：``skip_reasons`` 非空 ⇒ 缺口已解释（不算告警）；
+    ``failure_reasons`` 非空 ⇒ 缺口**照旧告警**，只是附上了原因。
     """
-    skips = skips or {}
-    skips_by_symbol: dict[str, dict[str, int]] = {}
-    for field, count in skips.items():
-        symbol, _, reason = str(field).partition(":")
-        if not symbol or not reason:
-            continue
-        skips_by_symbol.setdefault(symbol.upper(), {})[reason] = int(count)
+    skips_by_symbol = _by_symbol(skips)
+    failures_by_symbol = _by_symbol(failures)
 
     def _aggregate(rows: list[tuple[str, str, float]]) -> dict[tuple[str, str], dict]:
         agg: dict[tuple[str, str], dict] = {}
@@ -145,9 +160,11 @@ def build_reconciliation_report(
                 "real_count": real["count"],
                 "delta": delta,
                 "kind": kind,
-                # shortfall 且有跳过记录 → 已解释（原因随附）；excess 永远 unexplained
+                # shortfall 且有跳过记录 → 已解释（原因随附）；excess 永远 unexplained。
+                # 失败记录**不**参与这里：它只解释「为什么」，不豁免「要不要看」。
                 "explained": kind == "shortfall" and bool(symbol_skips),
                 "skip_reasons": symbol_skips,
+                "failure_reasons": failures_by_symbol.get(symbol, {}),
             }
         )
 
@@ -157,7 +174,8 @@ def build_reconciliation_report(
         "generated_at": datetime.now(TZ).isoformat(timespec="seconds"),
         "sim_symbols": len(sim_agg),
         "real_symbols": len(real_agg),
-        "skip_events": int(sum(skips.values())),
+        "skip_events": int(sum((skips or {}).values())),
+        "failure_events": int(sum((failures or {}).values())),
         "diffs": diffs,
         "unexplained": unexplained,
         "ok": not unexplained,
@@ -259,6 +277,7 @@ async def run_dual_book_reconciliation(redis, date_str: str | None = None) -> di
     """执行一次对账（可手动触发），返回报表并落 Redis。"""
     from backend.services.live_trading.services.real_mirror_service import (
         load_config,
+        load_failures,
         load_skips,
         mirror_enabled,
     )
@@ -268,6 +287,7 @@ async def run_dual_book_reconciliation(redis, date_str: str | None = None) -> di
     sim_rows: list[tuple[str, str, float]] = []
     real_rows: list[tuple[str, str, float]] = []
     skips: dict[str, int] = {}
+    failures: dict[str, int] = {}
     errors: list[str] = []
 
     try:
@@ -284,9 +304,20 @@ async def run_dual_book_reconciliation(redis, date_str: str | None = None) -> di
         skips = load_skips(redis, date_str)
     except Exception as exc:  # noqa: BLE001
         logger.warning("[Reconcile] 读取跳过记录失败: %s", exc)
+    try:
+        failures = load_failures(redis, date_str)
+    except Exception as exc:  # noqa: BLE001 — 读不到就**报出来**：没有失败台账的
+        # 报表会把「真单失败造成的缺口」显示成无原因缺口，读者会以为没人查过。
+        # 与上面两条 sim/real 查询失败同档（进 errors ⇒ ok=False ⇒ 告警带上它）。
+        logger.error("[Reconcile] 读取失败台账失败: %s", exc, exc_info=True)
+        errors.append(f"failures_query_failed: {exc}")
 
     report = build_reconciliation_report(
-        date_str=date_str, sim_rows=sim_rows, real_rows=real_rows, skips=skips
+        date_str=date_str,
+        sim_rows=sim_rows,
+        real_rows=real_rows,
+        skips=skips,
+        failures=failures,
     )
     if errors:
         report["errors"] = errors
@@ -302,13 +333,15 @@ async def run_dual_book_reconciliation(redis, date_str: str | None = None) -> di
 
     _save_report(redis, report)
     logger.info(
-        "[Reconcile] %s 对账完成：sim=%d 标的 real=%d 标的 差异=%d（未解释=%d）跳过=%d",
+        "[Reconcile] %s 对账完成：sim=%d 标的 real=%d 标的 差异=%d（未解释=%d）"
+        "跳过=%d 真单失败=%d",
         date_str,
         report["sim_symbols"],
         report["real_symbols"],
         len(report["diffs"]),
         len(report["unexplained"]),
         report["skip_events"],
+        report["failure_events"],
     )
 
     if expected and (report["unexplained"] or errors):
@@ -332,11 +365,18 @@ async def _notify_report(redis, report: dict) -> None:
     unexplained = report.get("unexplained") or []
     lines = []
     for item in unexplained[:5]:
-        lines.append(
+        line = (
             f"{item['symbol']} {item['side']} 模拟 {item['sim_quantity']:.0f} 股 / "
             f"真单 {item['real_quantity']:.0f} 股（{'多出' if item['delta'] > 0 else '缺口'} "
             f"{abs(item['delta']):.0f}）"
         )
+        # 有失败台账就把原因写在缺口旁边（`mirror:failed:*` 与跳过是两本账，
+        # 这里只取原因，不改判定）
+        failed = item.get("failure_reasons") or {}
+        if failed:
+            reasons = "、".join(f"{r}×{n}" for r, n in sorted(failed.items()))
+            line += f"（真单提交失败：{reasons}）"
+        lines.append(line)
     if len(unexplained) > 5:
         lines.append(f"……另有 {len(unexplained) - 5} 项")
     content = f"{date_str} 模拟盘与真单成交不一致：\n" + "\n".join(lines)
