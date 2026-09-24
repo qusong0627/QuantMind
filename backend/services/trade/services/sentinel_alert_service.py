@@ -47,10 +47,10 @@ _TRUTHY = {"1", "true", "yes", "on"}
 @dataclass(frozen=True)
 class SentinelConfig:
     enabled: bool = False
-    push_level_min: str = "warn"      # 推送下限（info 只留痕不推）
-    cooldown_s: float = 1800.0        # 同 (alert_type, symbol) 推送冷却
-    hourly_cap: int = 20              # 全局小时推送上限（防过载）
-    push_max_age_s: float = 900.0     # 事件过旧只留痕不推送（回放/积压防打扰）
+    push_level_min: str = "warn"  # 推送下限（info 只留痕不推）
+    cooldown_s: float = 1800.0  # 同 (alert_type, symbol) 推送冷却
+    hourly_cap: int = 20  # 全局小时推送上限（防过载）
+    push_max_age_s: float = 900.0  # 事件过旧只留痕不推送（回放/积压防打扰）
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any] | None) -> SentinelConfig:
@@ -166,11 +166,18 @@ class SentinelAlertService:
                     "ON CONFLICT (dedupe_key) DO NOTHING"
                 ),
                 {
-                    "dk": row["dedupe_key"], "t": row["tenant_id"], "ts": row["ts"],
-                    "d": row["trade_date"], "m": row["market"], "s": row["symbol"],
+                    "dk": row["dedupe_key"],
+                    "t": row["tenant_id"],
+                    "ts": row["ts"],
+                    "d": row["trade_date"],
+                    "m": row["market"],
+                    "s": row["symbol"],
                     "tg": json.dumps(row["targets"], ensure_ascii=False),
-                    "at": row["alert_type"], "sev": row["severity"], "src": row["source"],
-                    "ti": row["title"], "dt": json.dumps(row["detail"], ensure_ascii=False, default=str),
+                    "at": row["alert_type"],
+                    "sev": row["severity"],
+                    "src": row["source"],
+                    "ti": row["title"],
+                    "dt": json.dumps(row["detail"], ensure_ascii=False, default=str),
                     "dir": row["direction"],
                 },
             )
@@ -198,31 +205,26 @@ class SentinelAlertService:
     # ── 推送（管理员 fanout）────────────────────────────────────────
 
     def _default_notify(self, *, title: str, content: str, level: str) -> bool:
-        from sqlalchemy import text as sql_text
+        # 管理员 fanout 口径与其它运维告警共用（notification_publisher），
+        # 不再各自写 SQL（受众规则一改就得改多处，必漂移）。
+        from backend.shared.notification_publisher import (
+            publish_notification_to_admins,
+        )
 
-        from backend.shared.notification_publisher import publish_notification
-        from backend.shared.sync_db import sync_session
-
-        with sync_session() as session:
-            admins = session.execute(
-                sql_text(
-                    "SELECT user_id, COALESCE(tenant_id, 'default') AS tid "
-                    "FROM users WHERE is_admin = true"
-                )
-            ).fetchall()
-        if not admins:
+        try:
+            delivered, audience = publish_notification_to_admins(
+                title=title,
+                content=content,
+                type="sentinel",
+                level=level,
+            )
+        except Exception as exc:  # noqa: BLE001 - 查询失败按无受众处理并留痕
+            logger.warning("[sentinel] 推送失败: %s", exc)
+            return False
+        if audience == 0:
             logger.warning("[sentinel] 无管理员用户可推送: %s", title)
             return False
-        sent = False
-        for user_id, tenant_id in admins:
-            try:
-                sent = publish_notification(
-                    user_id=str(user_id), tenant_id=str(tenant_id),
-                    title=title[:128], content=content[:4000], type="sentinel", level=level,
-                ) or sent
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("[sentinel] 推送失败 user=%s: %s", user_id, exc)
-        return sent
+        return delivered > 0
 
     # ── 主循环 ─────────────────────────────────────────────────────
 
@@ -243,7 +245,11 @@ class SentinelAlertService:
             # 新消费者从 "$" 起：只消费增量，不回放留存事件（防历史告警风暴）
             ensure_group(client, group=CONSUMER_GROUP, start_id="$")
             events = read_events(
-                client, group=CONSUMER_GROUP, consumer=CONSUMER_NAME, count=100, block_ms=1500
+                client,
+                group=CONSUMER_GROUP,
+                consumer=CONSUMER_NAME,
+                count=100,
+                block_ms=1500,
             )
             scanned = len(events)
             for msg_id, event in events:
@@ -272,8 +278,13 @@ class SentinelAlertService:
                 self.counters["last_build_at"] = datetime.now(_SH_TZ).isoformat()
                 snapshot = dict(self.counters)
             self._write_status(client, snapshot)
-            return {"enabled": True, "scanned": scanned, "recorded": recorded,
-                    "pushed": pushed, "counters": snapshot}
+            return {
+                "enabled": True,
+                "scanned": scanned,
+                "recorded": recorded,
+                "pushed": pushed,
+                "counters": snapshot,
+            }
         finally:
             try:
                 client.close()
@@ -289,16 +300,25 @@ class SentinelAlertService:
         alert_type = f"{etype}:{kind}" if kind else etype
         ts = float(event.get("ts") or self._now())
         trade_date = datetime.fromtimestamp(ts, tz=_SH_TZ).date().isoformat()
-        title = str(payload.get("title") or payload.get("description")
-                    or f"{alert_type} {symbol}").strip()[:256]
+        title = str(
+            payload.get("title")
+            or payload.get("description")
+            or f"{alert_type} {symbol}"
+        ).strip()[:256]
         title_hash = hashlib.sha1(title.encode("utf-8")).hexdigest()[:16]
-        from backend.shared.sentinel_alert_contract import alert_direction, make_dedupe_key
+        from backend.shared.sentinel_alert_contract import (
+            alert_direction,
+            make_dedupe_key,
+        )
 
         source = str(event.get("source") or "unknown")[:64]
         return {
             "dedupe_key": make_dedupe_key(
-                source=source, alert_type=alert_type, symbol=symbol,
-                trade_date=trade_date, title_hash=f"{title_hash}:{msg_id}",
+                source=source,
+                alert_type=alert_type,
+                symbol=symbol,
+                trade_date=trade_date,
+                title_hash=f"{title_hash}:{msg_id}",
             ),
             "tenant_id": "default",
             "ts": ts,
@@ -318,12 +338,19 @@ class SentinelAlertService:
             "direction": alert_direction(alert_type, payload),
         }
 
-    def _decide_push(self, cfg: SentinelConfig, client: Any, row: dict[str, Any]) -> str:
+    def _decide_push(
+        self, cfg: SentinelConfig, client: Any, row: dict[str, Any]
+    ) -> str:
         """推送裁决（纯逻辑+Redis 双闸门）：返回 push_reason。"""
-        if cfg.push_max_age_s > 0 and (self._now() - float(row.get("ts") or 0)) > cfg.push_max_age_s:
+        if (
+            cfg.push_max_age_s > 0
+            and (self._now() - float(row.get("ts") or 0)) > cfg.push_max_age_s
+        ):
             self._bump("stale")
             return "stale"
-        if _SEVERITY_RANK.get(row["severity"], 0) < _SEVERITY_RANK.get(cfg.push_level_min, 1):
+        if _SEVERITY_RANK.get(row["severity"], 0) < _SEVERITY_RANK.get(
+            cfg.push_level_min, 1
+        ):
             self._bump("below_level")
             return "below_level"
         cd_key = f"{COOLDOWN_PREFIX}{row['alert_type']}:{row['symbol']}"
@@ -343,17 +370,24 @@ class SentinelAlertService:
         except Exception as exc:  # noqa: BLE001
             self._note_error(f"rate: {exc}")
         content = json.dumps(
-            {"alert_type": row["alert_type"], "market": row["market"],
-             "targets": row["targets"][:10], "detail": row["detail"].get("payload", {})},
-            ensure_ascii=False, default=str,
+            {
+                "alert_type": row["alert_type"],
+                "market": row["market"],
+                "targets": row["targets"][:10],
+                "detail": row["detail"].get("payload", {}),
+            },
+            ensure_ascii=False,
+            default=str,
         )
         ok = False
         try:
-            ok = bool(self._notifier(
-                title=f"[{row['severity']}] {row['title']}",
-                content=content,
-                level=_LEVEL_TO_NOTIFY.get(row["severity"], "info"),
-            ))
+            ok = bool(
+                self._notifier(
+                    title=f"[{row['severity']}] {row['title']}",
+                    content=content,
+                    level=_LEVEL_TO_NOTIFY.get(row["severity"], "info"),
+                )
+            )
         except Exception as exc:  # noqa: BLE001
             self._note_error(f"notify: {exc}")
         if not ok:
@@ -372,10 +406,13 @@ class SentinelAlertService:
 
     def _write_status(self, client: Any, counters: dict[str, Any]) -> None:
         try:
-            client.hset(STATUS_KEY, mapping={
-                "last_build_at": str(counters.get("last_build_at") or ""),
-                "counters": json.dumps(counters, ensure_ascii=False, default=str),
-            })
+            client.hset(
+                STATUS_KEY,
+                mapping={
+                    "last_build_at": str(counters.get("last_build_at") or ""),
+                    "counters": json.dumps(counters, ensure_ascii=False, default=str),
+                },
+            )
             client.expire(STATUS_KEY, 86400)
         except Exception:  # noqa: BLE001
             pass

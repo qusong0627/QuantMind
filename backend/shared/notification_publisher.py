@@ -105,8 +105,12 @@ def _push_notification_event(payload: dict) -> bool:
         return False
 
     try:
-        normalized = {key: "" if value is None else str(value) for key, value in payload.items()}
-        client.xadd(NOTIFICATION_EVENTS_STREAM, normalized, maxlen=10000, approximate=True)
+        normalized = {
+            key: "" if value is None else str(value) for key, value in payload.items()
+        }
+        client.xadd(
+            NOTIFICATION_EVENTS_STREAM, normalized, maxlen=10000, approximate=True
+        )
         inc_counter(notification_event_push_total, "success")
         return True
     except Exception as exc:
@@ -153,7 +157,23 @@ def _looks_like_missing_table_error(error: ProgrammingError) -> bool:
 
 def _looks_like_user_fk_violation(error: IntegrityError) -> bool:
     msg = str(error).lower()
-    return "notifications_user_id_fkey" in msg or ("foreign key" in msg and "notifications" in msg and "user_id" in msg)
+    return "notifications_user_id_fkey" in msg or (
+        "foreign key" in msg and "notifications" in msg and "user_id" in msg
+    )
+
+
+def _maybe_qq_alert(*, type: str, level: str, title: str, content: str) -> None:
+    """warning/error 等级的通知旁路到 QQ（daemon 线程，调用方零阻塞）。
+
+    独立于库/事件流：notifications 表写失败（如 FK 缺用户）时告警仍应到人——
+    手机 QQ 才是真正的告警面。通道未配置/异常只记日志，不影响通知主链。
+    """
+    try:
+        from backend.shared.qq_notify import alert_async
+
+        alert_async(level=level, title=title, content=content, alert_type=type)
+    except Exception as exc:  # noqa: BLE001
+        logger.info("qq alert bypass skipped: %s", exc)
 
 
 def publish_notification(
@@ -170,6 +190,9 @@ def publish_notification(
     """
     同步发布通知。失败时返回 False，不抛出异常阻断主业务。
     """
+    # 告警旁路先行：与库/流成败解耦（低等级在 alert_async 内部即被过滤）
+    _maybe_qq_alert(type=type, level=level, title=title, content=content)
+
     if get_db is None:
         logger.warning("notification publish skipped: database pool unavailable")
         inc_counter(notification_publish_total, "skipped")
@@ -233,7 +256,9 @@ def publish_notification(
                 "level": params["level"],
                 "action_url": params["action_url"],
                 "created_at": (
-                    created_at.isoformat() if hasattr(created_at, "isoformat") else str(created_at or now.isoformat())
+                    created_at.isoformat()
+                    if hasattr(created_at, "isoformat")
+                    else str(created_at or now.isoformat())
                 ),
             }
         )
@@ -291,3 +316,49 @@ async def publish_notification_async(**kwargs) -> bool:
     异步包装：将同步写库放入线程池。
     """
     return await asyncio.to_thread(publish_notification, **kwargs)
+
+
+def publish_notification_to_admins(
+    *,
+    title: str,
+    content: str,
+    type: str = "system",
+    level: str = "info",
+    action_url: str | None = None,
+    expire_days: int | None = None,
+) -> tuple[int, int]:
+    """向全部管理员 fanout 通知，返回 ``(送达条数, 收件人数)``。
+
+    运维类告警（桥掉线/巡检失败/风控）没有天然的用户坐标，受众就是管理员
+    （``users WHERE is_admin``）——与 sentinel 告警同一口径，故收口在这里，
+    避免每个生产者各写一份 SQL 后各自漂移。查询失败向上抛（调用方自行兜底，
+    不把「库挂了」伪装成「没有管理员」）；无管理员时返回 ``(0, 0)``。
+    """
+    from backend.shared.sync_db import sync_session
+
+    with sync_session() as session:
+        admins = session.execute(
+            text(
+                "SELECT user_id, COALESCE(tenant_id, 'default') AS tid "
+                "FROM users WHERE is_admin = true"
+            )
+        ).fetchall()
+    sent = 0
+    for user_id, tenant_id in admins:
+        if publish_notification(
+            user_id=str(user_id),
+            tenant_id=str(tenant_id),
+            title=title,
+            content=content,
+            type=type,
+            level=level,
+            action_url=action_url,
+            expire_days=expire_days,
+        ):
+            sent += 1
+    return sent, len(admins)
+
+
+async def publish_notification_to_admins_async(**kwargs) -> tuple[int, int]:
+    """异步包装：管理员 fanout 放入线程池（查询与逐条写库都阻塞）。"""
+    return await asyncio.to_thread(publish_notification_to_admins, **kwargs)
