@@ -112,6 +112,14 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"❌ node-history sampler start failed: {e}", exc_info=True)
 
+    # 每日自动强制更新轮询（开关由管理后台保存于 Redis；不可用/异常均不影响启动健康）
+    try:
+        from backend.shared.auto_update import start_auto_update_loop
+
+        start_auto_update_loop()
+    except Exception as e:
+        logger.error(f"❌ auto-update loop start failed: {e}", exc_info=True)
+
     try:
         from backend.shared.system_events import record_system_event_async
 
@@ -130,6 +138,12 @@ async def lifespan(app: FastAPI):
     yield
     try:
         await stop_node_history_sampler()
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from backend.shared.auto_update import stop_auto_update_loop
+
+        await stop_auto_update_loop()
     except Exception:  # noqa: BLE001
         pass
     try:

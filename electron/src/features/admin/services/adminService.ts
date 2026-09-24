@@ -609,6 +609,23 @@ class AdminService {
         return this.unwrap(resp.data);
     }
 
+    // 每日自动强制更新开关
+    async getAutoUpdate(): Promise<{
+        enabled: boolean;
+        run_at: string;
+        next_run_at: string | null;
+        available: boolean;
+        last_decision: { at: string; action: string; reason: string } | null;
+    }> {
+        const resp = await this.axiosInstance.get('/admin/system/auto-update');
+        return resp.data?.data ?? resp.data;
+    }
+
+    async setAutoUpdate(enabled: boolean): Promise<{ enabled: boolean }> {
+        const resp = await this.axiosInstance.post('/admin/system/auto-update', { enabled });
+        return resp.data?.data ?? resp.data;
+    }
+
     // FinBERT 开关（独立控制按键）
     async getFinbertStatus(): Promise<{
         enabled: boolean;

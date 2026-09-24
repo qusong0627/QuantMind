@@ -116,9 +116,29 @@ def _remove_stale(client: httpx.Client) -> None:
         pass
 
 
-def _build_container_spec(image: str) -> dict:
+class UpdaterUnavailable(RuntimeError):
+    """无法启动 updater 的情况（socket 缺失、创建/启动容器失败）。"""
+
+    def __init__(self, message: str, status_code: int = 403) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+class UpdaterBusy(RuntimeError):
+    """已有 updater 容器在跑，本次触发应放弃。"""
+
+
+def _build_container_spec(image: str, *, guard_dirty: bool = False) -> dict:
     # Web 一键更新默认 --force：本地未提交改动一律 reset --hard 覆盖，避免脏树阻断升级
     cmd = f"bash {shlex.quote(_SCRIPT_PATH)} --force > {shlex.quote(_LOG_PATH)} 2>&1"
+    if guard_dirty:
+        # 自动更新无人值守，脏树一旦被 reset --hard 就是静默丢代码；这里在跑 update.sh
+        # 之前先中止并把原因写进同一份日志，让状态接口能报「中止」而不是「升级成功」。
+        cmd = (
+            f"if [ -n \"$(git -C {shlex.quote(_PROJECT_DIR)} status --porcelain)\" ]; then "
+            f"echo '自动更新中止：工作区存在未提交改动，为避免覆盖已丢弃的代码不执行更新' "
+            f"> {shlex.quote(_LOG_PATH)}; exit 1; fi; " + cmd
+        )
     binds = [
         f"{_PROJECT_DIR}:{_PROJECT_DIR}:rw",
         f"{_SOCKET}:/var/run/docker.sock",
@@ -149,63 +169,89 @@ def _build_container_spec(image: str) -> dict:
     }
 
 
+def launch_updater(*, guard_dirty: bool = False, source: str = "web") -> dict:
+    """创建并启动分离的 updater 容器，立即返回（不等待更新跑完）。
+
+    updater 容器不属于 compose 管理，因此 ``deploy/update.sh`` 里的
+    ``--force-recreate`` 重建 main 服务时不会波及它 —— 调用方被这次重启杀掉
+    也不影响更新跑完。**任何情况下都不要 await 它结束。**
+
+    :param guard_dirty: True 时 updater 内先检查 git 工作区，脏则中止（自动更新用）
+    :param source: 事件来源标记，web=手动按钮，auto=定时任务
+    """
+    if not _enabled():
+        raise UpdaterUnavailable("docker socket 未挂载，无法触发更新")
+
+    client = _docker_client()
+    if _container_running(client):
+        raise UpdaterBusy("已有更新任务在执行中")
+
+    image = _detect_image(client)
+    spec = _build_container_spec(image, guard_dirty=guard_dirty)
+    _remove_stale(client)
+
+    created = client.post(
+        "http://localhost/containers/create",
+        params={"name": _CONTAINER_NAME},
+        json=spec,
+    )
+    if created.status_code not in (201, 200):
+        raise UpdaterUnavailable(
+            f"创建 updater 容器失败: {created.text[:300]}", status_code=502
+        )
+    cid = created.json().get("Id", "")
+    # 注意：docker daemon 的 start 端点不带尾斜杠（带斜杠会 404）；204/304 均算成功。
+    started = client.post(f"http://localhost/containers/{cid}/start")
+    if started.status_code not in (204, 200, 304):
+        raise UpdaterUnavailable(
+            f"启动 updater 容器失败: {started.text[:300]}", status_code=502
+        )
+
+    # 异步记录“更新已触发”事件（失败不阻断主流程）
+    try:
+        from backend.shared.system_events import record_system_event_async
+        import asyncio as _asyncio
+
+        _asyncio.create_task(record_system_event_async(
+            event_type="system_update",
+            level="info",
+            source="quantmind-api",
+            title="系统强制更新已触发" + ("（每日自动）" if source == "auto" else "（Web）"),
+            message=(
+                f"updater 镜像 {image} 已启动（--force"
+                f"{'，脏树保护已启用' if guard_dirty else ''}），容器 {cid[:12]}"
+            ),
+            meta={
+                "container_id": cid,
+                "image": image,
+                "force": True,
+                "guard_dirty": guard_dirty,
+                "trigger": source,
+            },
+        ))
+    except Exception:  # noqa: BLE001 - 事件记录非关键路径
+        pass
+    return {"started": True, "task_id": cid, "image": image}
+
+
 @router.post("/update")
 async def trigger_update(
     confirm: int = Query(default=1, ge=0, le=1),
     x_update_token: str | None = Header(default=None, alias="X-Update-Token"),
 ):
     """触发宿主 deploy/update.sh（分离 updater 容器，立即返回）。已移除环境变量与 confirm 强校验。"""
-    if not _enabled():
-        raise HTTPException(
-            status_code=403,
-            detail="docker socket 未挂载，无法触发更新",
-        )
-
     try:
-        client = _docker_client()
-        if _container_running(client):
-            raise HTTPException(status_code=409, detail="已有更新任务在执行中")
-
-        image = _detect_image(client)
-        spec = _build_container_spec(image)
-        _remove_stale(client)
-
-        created = client.post(
-            "http://localhost/containers/create",
-            params={"name": _CONTAINER_NAME},
-            json=spec,
-        )
-        if created.status_code not in (201, 200):
-            raise HTTPException(
-                status_code=502, detail=f"创建 updater 容器失败: {created.text[:300]}"
-            )
-        cid = created.json().get("Id", "")
-        # 注意：docker daemon 的 start 端点不带尾斜杠（带斜杠会 404）；204/304 均算成功。
-        started = client.post(f"http://localhost/containers/{cid}/start")
-        if started.status_code not in (204, 200, 304):
-            raise HTTPException(
-                status_code=502, detail=f"启动 updater 容器失败: {started.text[:300]}"
-            )
-        # 异步记录“更新已触发”事件（失败不阻断主流程）
-        try:
-            from backend.shared.system_events import record_system_event_async
-            import asyncio as _asyncio
-            _asyncio.create_task(record_system_event_async(
-                event_type="system_update",
-                level="info",
-                source="quantmind-api",
-                title="系统强制更新已触发（Web）",
-                message=f"updater 镜像 {image} 已启动（--force），容器 {cid[:12]}",
-                meta={"container_id": cid, "image": image, "force": True},
-            ))
-        except Exception:
-            pass
-        return {"success": True, "data": {"started": True, "task_id": cid}}
+        data = launch_updater(guard_dirty=False, source="web")
+    except UpdaterBusy as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except UpdaterUnavailable as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001
         logger.error("trigger update failed: %s", exc, exc_info=True)
         raise HTTPException(status_code=500, detail=f"触发更新失败: {exc}") from exc
+    return {"success": True, "data": data}
 
 
 @router.get("/update/status")
