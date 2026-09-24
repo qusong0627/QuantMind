@@ -321,6 +321,7 @@ async def preflight_check(
         # QMT 未就绪时回退通达信桥（用户使用 TDX 通道，无 QMT Agent）
         if qmt_failed_detail:
             from backend.services.live_trading.routers.real_trading_utils import (
+                check_bridge_account_channel,
                 check_tdx_bridge_online,
             )
 
@@ -342,6 +343,21 @@ async def preflight_check(
                     bridge_required,
                     f"{qmt_failed_detail}；且 {tdx_detail}",
                 )
+            # 行情通 ≠ 账户通（P0.3 核出的那个 ⚠️）。上面那条只读桥的 health，
+            # 而 health 里的 tdx_connected 来自 health_check_fast —— 一个**行情类**
+            # 查询；交易端掉线时它照样返回 True，账户查询却超时。隔壁
+            # 2026-09-24 09:12 的 preflight.json 正是此形态（account.ok=false 而
+            # 桥进程活着），它的判词是「盘中分析/调仓/哨兵条件位会静默停摆」。
+            # 故账户通道单独一行、**真查一次**：分开列才知道断的是哪一半。
+            account_ok, account_detail, account_details = check_bridge_account_channel()
+            add_check(
+                "bridge_account_channel",
+                "账户通道（通达信桥）",
+                account_ok,
+                bridge_required,
+                account_detail,
+                account_details,
+            )
 
     # 7) 桥侧自带止损 daemon 必须未 arm（P0.6）
     # 桥的 StopLossDaemon 与 QuantMind 的 sltp_executor 是**两个独立卖出者**、

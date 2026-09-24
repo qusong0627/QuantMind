@@ -1398,10 +1398,28 @@ def _check_quantdb_latest_daily(market: str = "CN") -> tuple[bool, str]:
         return False, f"{market_upper} 行情库检查失败: {exc}"
 
 
-def check_tdx_bridge_online() -> tuple[bool, str]:
-    """探测通达信桥健康状态（QMT Agent 缺失时的兜底交易通道）。
+#: 账户通道探针的客户端超时（秒）：**必须大于桥自己的 TDX 调用预算**。
+#: 桥侧 ``TDX_CALL_TIMEOUT = 8.0``（``tools/bridge-windows/src/api/routes.py``）。
+#: 小于它 ⇒ 先断的是我们这边 ⇒ 失败退化成说不清的 "Read timed out"，分不出
+#: 「桥在忙」与「交易端掉线」，桥侧的真实报错（``TDX_UNAVAILABLE``）永远读不到。
+BRIDGE_ACCOUNT_TIMEOUT_S = 12.0
 
-    返回 (online, detail)。桥已配置且 /api/v1/health 返回 200 即视为在线。
+#: 隔壁那条故障实录里验证过的修法（原文：「需 RDP 重登通达信交易端」）。
+#: 单独成常量：判据文案与测试都引用它，改一处即可。
+BRIDGE_ACCOUNT_REMEDY = "需在 Windows 侧 RDP 重登通达信交易端后重试"
+
+
+def check_tdx_bridge_online() -> tuple[bool, str]:
+    """探测通达信桥**进程与行情通道**是否在线（QMT Agent 缺失时的兜底通道）。
+
+    返回 ``(online, detail)``。桥已配置且 ``/api/v1/health`` 返回 200 即视为在线。
+
+    .. warning::
+       本条**只覆盖行情/进程这一半**，判不出「行情通、账户不通」。
+       health 里的 ``tdx_connected`` 来自桥的 ``health_check_fast``，而后者发的是
+       ``get_match_stkinfo``（行情类查询，``tools/bridge-windows/src/tdx/client.py``）
+       —— 交易端掉线时它照样返回 True。账户那一半见
+       :func:`check_bridge_account_channel`；两个 REAL 闸门都必须**并列**看这两条。
     """
     bridge_url = str(getattr(settings, "TDX_BRIDGE_URL", "") or "").strip()
     bridge_token = str(getattr(settings, "TDX_BRIDGE_TOKEN", "") or "").strip()
@@ -1417,13 +1435,105 @@ def check_tdx_bridge_online() -> tuple[bool, str]:
             )
             tdx_connected = bool((payload or {}).get("tdx_connected", True))
             return True, (
-                "TDX 桥在线，通达信已连接"
+                "TDX 桥在线，行情通道已连接"
                 if tdx_connected
-                else "TDX 桥在线，通达信客户端未连接"
+                else "TDX 桥在线，但行情通道未连接（tdx_connected=false）"
             )
         return False, f"TDX 桥返回 HTTP {resp.status_code}"
     except Exception as exc:
         return False, f"TDX 桥不可达: {exc}"
+
+
+def check_bridge_account_channel() -> tuple[bool, str, dict]:
+    """探测**账户通道**是否真的通 —— 走一次真实账户查询，而不是看心跳。
+
+    返回 ``(ok, detail, details)``。
+
+    被守护的故障（**已发生过**，不是理论风险）：桥进程活着、行情照常，而**交易端
+    掉线**（隔壁 ``logs/preflight.json`` 09:12:17 实录 ``account.ok=false /
+    "TDX 桥账户查询失败: Read timed out"``）。此时盘中分析/调仓/哨兵条件位会
+    静默停摆，而只看 health 的探针会一路判「在线」。
+
+    判据（失败方向一律**报出来**）：
+
+    * 未配 URL/TOKEN ⇒ 不通过（与 :func:`check_bridge_sltp_disarmed` 的方向故意
+      相反：那条判「有没有第二个卖出者」，没桥就没有；本条判「通道能不能用」）。
+    * 非 200 ⇒ 不通过，带出桥侧 ``error.message``（桥对 ``TdxError`` 回 502
+      ``TDX_UNAVAILABLE``）。
+    * **200 但没查到东西**（``asset`` 缺失/非 dict/空 dict）⇒ 也不通过。桥一旦改成
+      吞异常回 200，只剩这条能挡住它静默失效。
+    * 不可达/超时/任何异常 ⇒ 不通过，**绝不抛**（探测失败不许把整个 preflight 带崩）。
+
+    ``positions`` 为空是**合法**状态（今天没持仓），不算失败——只数条数，不判门槛。
+    """
+    bridge_url = str(getattr(settings, "TDX_BRIDGE_URL", "") or "").strip()
+    bridge_token = str(getattr(settings, "TDX_BRIDGE_TOKEN", "") or "").strip()
+    if not bridge_url or not bridge_token:
+        return False, "TDX 桥未配置（TDX_BRIDGE_URL/TOKEN 为空）", {}
+    try:
+        resp = httpx.post(
+            f"{bridge_url.rstrip('/')}/api/v1/account/query",
+            json={"account_type": "stock"},
+            headers={"Authorization": f"Bearer {bridge_token}"},
+            timeout=BRIDGE_ACCOUNT_TIMEOUT_S,
+        )
+        if resp.status_code != 200:
+            return (
+                False,
+                f"{_bridge_error_text(resp)}（{BRIDGE_ACCOUNT_REMEDY}）",
+                {"status_code": resp.status_code},
+            )
+        payload = resp.json() if resp.content else {}
+        if not isinstance(payload, dict):
+            payload = {}
+        asset = payload.get("asset")
+        if not isinstance(asset, dict) or not asset:
+            return (
+                False,
+                f"账户通道返回 200 但未返回有效资产数据（{BRIDGE_ACCOUNT_REMEDY}）",
+                {"status_code": 200},
+            )
+        positions = payload.get("positions")
+        details = {
+            "account_id": payload.get("account_id"),
+            "position_count": len(positions) if isinstance(positions, list) else 0,
+            "total_asset": _as_float(asset.get("asset")),
+        }
+        return (
+            True,
+            f"账户通道已连接（持仓 {details['position_count']} 条）",
+            details,
+        )
+    except Exception as exc:  # noqa: BLE001 — 探测失败绝不能把整个 preflight 带崩
+        return False, f"TDX 桥账户通道不可达: {exc}", {}
+
+
+def _bridge_error_text(resp: httpx.Response) -> str:
+    """把桥的错误信封压成一行人话（``error.message`` 优先，取不到再退回状态码）。"""
+    try:
+        payload = resp.json() if resp.content else {}
+    except Exception:  # noqa: BLE001 — 错误面自己不许再抛
+        payload = {}
+    if isinstance(payload, dict):
+        err = payload.get("error")
+        message = ""
+        if isinstance(err, dict):
+            message = str(err.get("message") or "").strip()
+            code = str(err.get("code") or "").strip()
+            if message:
+                return f"账户通道不可用：{code + ' ' if code else ''}{message}"
+        message = str(payload.get("message") or "").strip()
+        if message:
+            return f"账户通道不可用：{message}"
+    return f"账户通道返回 HTTP {resp.status_code}"
+
+
+def _as_float(value: Any) -> float | None:
+    """尽力转 float，转不动就 ``None``（**不**用 0.0 顶替未知值）。"""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def check_bridge_sltp_disarmed() -> tuple[bool, str, bool]:

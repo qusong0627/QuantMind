@@ -626,6 +626,7 @@ async def run_trading_readiness_precheck(
         if not qmt_ok:
             # QMT Agent 未就绪时回退通达信桥（用户使用 TDX 通道）
             from backend.services.live_trading.routers.real_trading_utils import (
+                check_bridge_account_channel,
                 check_tdx_bridge_online,
             )
 
@@ -641,6 +642,23 @@ async def run_trading_readiness_precheck(
                 qmt_detail = f"{tdx_detail}（QMT Agent 未接入: {qmt_detail}）"
             else:
                 qmt_detail = f"{qmt_detail}；且 {tdx_detail}"
+            # 行情通 ≠ 账户通：上面那条只读桥的 health（`health_check_fast` 发的是
+            # 行情类查询），交易端掉线时它照样判在线——而账户查询会超时。隔壁
+            # 2026-09-24 09:12 的 preflight.json 就是这种形态（account.ok=false、
+            # 桥进程活着）。账户通道必须**真查一次**，单独一行，失败时界面能看出
+            # 是哪一半断的。
+            # （`_build_check` 只有四个形参、没有 details 段——持仓数已写进 detail。）
+            account_ok, account_detail, _account_details = (
+                check_bridge_account_channel()
+            )
+            checks.append(
+                _build_check(
+                    "bridge_account_channel",
+                    "账户通道（通达信桥）",
+                    account_ok,
+                    account_detail,
+                )
+            )
         checks.append(
             _build_check(
                 "qmt_agent_online",
