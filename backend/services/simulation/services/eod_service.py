@@ -259,9 +259,16 @@ async def _execute_eod(trade_date: date) -> bool:
                     # 说明日终已结算过：重跑用的是「当前持仓」，用它回写历史日期
                     # 会把该日曲线写错（实测重启当日把 09-23 曲线写成本日持仓）。
                     # 此时只刷新 Redis 现值，不改历史日快照。
-                    if not await _eod_position_snapshot_exists(
+                    if await _eod_position_snapshot_exists(
                         session, account.tenant_id, account.user_id, trade_date
                     ):
+                        logger.info(
+                            "EOD daily snapshot for %s already exists (%s), "
+                            "skipping overwrite (rerun)",
+                            trade_date,
+                            account.account_id,
+                        )
+                    else:
                         await snapshot_svc.replace_daily_snapshot(
                             tenant_id=account.tenant_id,
                             user_id=account.user_id,
