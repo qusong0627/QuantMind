@@ -685,8 +685,21 @@ class QuantDBDataHub:
 
         返回 DataFrame 包含: symbol, ind_name_l1, ind_code_l1
         """
-        file_path = self._data_dir / "2_base_sector" / "instrument_detail" / "instrument_detail.parquet"
-        if not file_path.exists():
+        base_dir = self._data_dir / "2_base_sector" / "instrument_detail"
+        # QuantDB 落盘文件名历史上为 instrument_detail.parquet，现行同步产出
+        # instrument_list.parquet；两者都要试，否则行业映射静默返回空。
+        file_path = next(
+            (
+                p
+                for p in (
+                    base_dir / "instrument_detail.parquet",
+                    base_dir / "instrument_list.parquet",
+                )
+                if p.exists()
+            ),
+            None,
+        )
+        if file_path is None:
             return pd.DataFrame()
         df = pd.read_parquet(file_path)
         # QuantDB instrument_detail 包含 rs_hyname(行业名称) 和 rs_hycode_sim(行业代码)

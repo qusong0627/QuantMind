@@ -145,8 +145,19 @@ def _latest_roe(hub, symbol: str) -> float | None:
     return None
 
 
-def load_quantdb_frame(hub, start_date, end_date) -> pd.DataFrame:
-    """从 QuantDB 构建待同步宽表 (features_daily 技术+估值 + 未复权K线 + roe/industry)。"""
+def load_quantdb_frame(
+    hub,
+    start_date,
+    end_date,
+    *,
+    with_roe: bool = True,
+    with_industry: bool = True,
+) -> pd.DataFrame:
+    """从 QuantDB 构建待同步宽表 (features_daily 技术+估值 + 未复权K线 + roe/industry)。
+
+    with_roe=False 跳过逐股读取 3_financial_data（全市场 ~5k 次小文件读，较慢），
+    供「最近一个月滚动刷新」这类高频批量场景使用；相应列不写、保留原值。
+    """
     frames: list[pd.DataFrame] = []
 
     fd = hub.fetch_features_daily(start=start_date, end=end_date)
@@ -173,27 +184,60 @@ def load_quantdb_frame(hub, start_date, end_date) -> pd.DataFrame:
         frame = frame.merge(extra, on=keys, how="outer", suffixes=("", "_k"))
 
     if "symbol" in frame.columns:
-        symbols_all = sorted(frame["symbol"].unique().tolist())
-        try:
-            roe = {s: _latest_roe(hub, s) for s in symbols_all}
-            if any(v is not None for v in roe.values()):
-                frame["roe"] = frame["symbol"].map(roe)
-            ind = hub.fetch_instrument_industry()
-            if not ind.empty and "symbol" in ind.columns and "ind_name_l1" in ind.columns:
-                ind_map = dict(zip(ind["symbol"], ind["ind_name_l1"], strict=False))
-                frame["industry"] = frame["symbol"].map(ind_map)
-        except Exception as exc:
-            LOGGER.warning("QuantDB roe/industry attach failed: %s", exc)
+        if with_roe:
+            symbols_all = sorted(frame["symbol"].unique().tolist())
+            try:
+                roe = {s: _latest_roe(hub, s) for s in symbols_all}
+                if any(v is not None for v in roe.values()):
+                    frame["roe"] = frame["symbol"].map(roe)
+            except Exception as exc:
+                LOGGER.warning("QuantDB roe attach failed: %s", exc)
+        if with_industry:
+            try:
+                ind = hub.fetch_instrument_industry()
+                if not ind.empty and "symbol" in ind.columns and "ind_name_l1" in ind.columns:
+                    ind_map = dict(zip(ind["symbol"], ind["ind_name_l1"], strict=False))
+                    frame["industry"] = frame["symbol"].map(ind_map)
+            except Exception as exc:
+                LOGGER.warning("QuantDB industry attach failed: %s", exc)
+            try:
+                stock_list = hub.fetch_stock_list()
+                name_col = next(
+                    (c for c in ("Name", "name", "stock_name") if c in stock_list.columns),
+                    None,
+                )
+                if not stock_list.empty and "symbol" in stock_list.columns and name_col:
+                    name_map = dict(zip(stock_list["symbol"], stock_list[name_col], strict=False))
+                    frame["stock_name"] = frame["symbol"].map(name_map)
+            except Exception as exc:
+                LOGGER.warning("QuantDB stock_name attach failed: %s", exc)
 
     if "trade_date" in frame.columns:
         frame["trade_date"] = pd.to_datetime(frame["trade_date"])
     return frame.sort_values(["trade_date", "symbol"]).reset_index(drop=True)
 
 
+def _to_pg_symbol(symbol: object) -> str:
+    """QuantDB 后缀式 600036.SH -> PG 内码 前缀式 SH600036（与 quantdb_daily_sync 一致）。
+
+    stock_daily_latest 的主键/查询一律前缀式；不转换会写出后缀式重复行，
+    使 `WHERE symbol='SH600036'` 类查询落空。
+    """
+    s = str(symbol or "").strip().upper()
+    if "." in s:
+        code, ex = s.split(".", 1)
+        if code and ex in ("SH", "SZ", "BJ"):
+            return f"{ex}{code}"
+    return s
+
+
 def normalize_frame(frame: pd.DataFrame, target_columns: list[str]) -> tuple[pd.DataFrame, list[str]]:
     common_columns = [col for col in target_columns if col in frame.columns]
     skipped_columns = [col for col in target_columns if col not in frame.columns]
     normalized = frame.reindex(columns=common_columns).copy()
+
+    if "symbol" in normalized.columns:
+        normalized["symbol"] = normalized["symbol"].map(_to_pg_symbol)
 
     for col in common_columns:
         if col == "trade_date":

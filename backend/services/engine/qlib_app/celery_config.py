@@ -143,6 +143,19 @@ if os.getenv("MARKET_SYNC_SCHEDULE_ENABLED", "true").lower() == "true":
         "schedule": crontab(minute="*", hour="*"),
     }
 
+# 每日滚动刷新 stock_daily_latest 最近 N 天（QuantDB 源，口径同市场同步）。
+# 数据同步约 01:00–06:00 完成后触发；幂等 upsert，可重复运行。天数/时间/开关
+# 可用 ROLLING_SDL_SYNC_DAYS / _HOUR / _MINUTE / _ENABLED 覆盖。
+if os.getenv("ROLLING_SDL_SYNC_ENABLED", "true").lower() == "true":
+    beat_schedule["rolling-sdl-sync-daily"] = {
+        "task": "engine.tasks.rolling_sync_stock_daily_recent",
+        "schedule": crontab(
+            minute=os.getenv("ROLLING_SDL_SYNC_MINUTE", "40"),
+            hour=os.getenv("ROLLING_SDL_SYNC_HOUR", "6"),
+        ),
+        "kwargs": {"days": int(os.getenv("ROLLING_SDL_SYNC_DAYS", "30"))},
+    }
+
 # Strategy Lab daily scan — runs after the data sync settles (Day 16)
 if os.getenv("STRATEGY_LAB_SCAN_ENABLED", "true").lower() == "true":
     beat_schedule["strategy-lab-daily-scan"] = {
