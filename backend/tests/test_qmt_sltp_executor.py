@@ -481,6 +481,40 @@ class TestStateMachine:
         assert "柜台拒绝" in st["failure"]
         assert any(n["level"] == "error" for n in h.notices)
 
+    def test_dispatch_failure_reads_nested_production_envelope(self) -> None:
+        """拒因藏在**嵌套** ``result.message`` 里（派发层的真实形状）也要取到。
+
+        真派发层拒单时的信封是
+        ``{"status": "failed", "execution": "direct", "result": {...}}`` —— 顶层
+        **没有** message。上面那条用例喂的是顶层带 message 的假信封，于是「线上告警
+        把整个信封 ``str()`` 成 Python 字典」这件事测不出来（夹具形状≠生产形状，
+        与 2026-09-24 引擎假成功同一类盲区）。
+        """
+        h = Harness(
+            cfg=_cfg([_rule()]),
+            ticks={"600036.SH": {"lastPrice": 90.0}},
+            positions=[_position()],
+            dispatch_result={
+                "status": "failed",
+                "execution": "direct",
+                "order_id": "OID-9",
+                "result": {
+                    "success": False,
+                    "status": "rejected",
+                    "message": "Broker拒绝: 废单：委托价格超出涨跌幅限制",
+                },
+            },
+        )
+        summary = h.cycle()
+        assert summary["failed"] == 1
+        st = h.state()["rules"]["600036.SH"]
+        assert st["status"] == ex.ST_FAILED
+        # 断言**等于**拒因而不是「含有」：信封的 ``str()`` 兜底也含「废单」二字
+        # （字典 repr 里有嵌套原文），用 ``in`` 会被退化路径满足 —— 那就等于没测。
+        assert st["failure"] == "Broker拒绝: 废单：委托价格超出涨跌幅限制", (
+            f"用户告警里会是一段 Python 字典: {st['failure']}"
+        )
+
     def test_entry_price_from_position_cost(self) -> None:
         h = Harness(
             cfg=_cfg([_rule(entry_price=None)]),

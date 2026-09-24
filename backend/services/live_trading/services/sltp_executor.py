@@ -491,6 +491,20 @@ def _to_float(value: Any) -> float | None:
     return x if x == x and abs(x) != float("inf") else None
 
 
+def dispatch_failure_text(resp: dict[str, Any] | None) -> str:
+    """派发信封 → 用户告警里的失败文案。
+
+    顶层 ``message``/``detail`` 优先；派发层 ``execution="direct"`` 的失败信封把
+    拒因放在**嵌套** ``result.message``（引擎原话，如 ``Broker拒绝: 废单：…``），
+    也要取到 —— 否则只剩整个信封的 ``str()``，用户告警里会出现一段 Python 字典
+    （2026-09-24 核实：夹具喂顶层 message，线上是嵌套，测试测不到）。
+    """
+    env = resp if isinstance(resp, dict) else {}
+    nested = env.get("result")
+    nested_msg = nested.get("message") if isinstance(nested, dict) else None
+    return str(env.get("message") or env.get("detail") or nested_msg or resp)
+
+
 def order_status_to_rule_state(db_status: str) -> str | None:
     """DB 订单状态 → 规则状态（未知返回 None，保持原状）。"""
     s = str(db_status or "").strip().lower()
@@ -1179,9 +1193,7 @@ async def _execute_trigger(
         resp = {"status": "error", "message": str(exc)}
     if str((resp or {}).get("status")) != "success":
         st["status"] = ST_FAILED
-        st["failure"] = (
-            (resp or {}).get("message") or (resp or {}).get("detail") or str(resp)
-        )
+        st["failure"] = dispatch_failure_text(resp)
         summary["failed"] += 1
         logger.error("[SltpExec] %s 下单失败: %s", symbol, st["failure"])
         await deps.notify(

@@ -175,12 +175,24 @@ class TradingEngine:
             logger.info(f"Order submitted: {order.order_id}")
 
             # 通过 Broker 执行（自动选择模拟/真实）
-            await self._execute_via_broker(order, tenant_id=tenant_id)
+            reject_reason = await self._execute_via_broker(order, tenant_id=tenant_id)
+
+            # 终态以 broker 回报为准：被拒的单绝不能报 success —— 调用方（止损执行器、
+            # 调仓腿…）按这个字段判成败，报成功会把一笔废掉的止损单记成「已提交」进当日
+            # 终态：不重试、无失败告警，保护是假的（2026-09-24 核实）。
+            # 判别依据只能是终态 REJECTED，**不是**「执行时出过异常」：超时时状态未知、
+            # 单可能已在柜台，那时必须保持「已提交 + 待核查」（见 _execute_via_broker）。
+            if order.status == OrderStatus.REJECTED:
+                return {
+                    "success": False,
+                    "order_id": str(order.order_id),
+                    "status": order.status.value,
+                    "message": reject_reason or "Order rejected by broker",
+                }
 
             # 仅在未被 Broker 拒绝时尝试同步账户状态（严格以 broker 回报为准）
             tenant_id = (tenant_id or "").strip() or "default"
-            if order.status != OrderStatus.REJECTED:
-                await self._sync_account_to_redis(tenant_id, order.user_id)
+            await self._sync_account_to_redis(tenant_id, order.user_id)
 
             return {
                 "success": True,
@@ -206,10 +218,14 @@ class TradingEngine:
                 "message": str(e),
             }
 
-    async def _execute_via_broker(self, order: Order, tenant_id: str = "default"):
+    async def _execute_via_broker(self, order: Order, tenant_id: str = "default") -> str | None:
         """
         通过 Broker 执行订单 (工业级防御性实现)
         原则：本地 PENDING 记录必须先于外部动作。
+
+        :returns: 拒单原因（``None`` = 未被拒）。**本函数把 broker 侧异常全部吞掉并
+            置 REJECTED**，所以调用方判成败只能看 ``order.status``／本返回值，不能看
+            「有没有异常抛出」—— 否则拒单会被当成正常路径（2026-09-24 修复）。
         """
         broker = self._get_stock_broker(order.trading_mode, order.symbol)
 
@@ -260,7 +276,7 @@ class TradingEngine:
                         action_url="/trading",
                     )
                 )
-                return
+                return f"Broker拒绝: {result.message}"
 
             # 3. 成功后处理：
             # - Bridge 模式通常先返回“已受理/已派发”，filled_quantity=0，真实成交稍后通过
@@ -358,6 +374,7 @@ class TradingEngine:
                     action_url="/trading",
                 )
             )
+            return f"执行异常: {e}"
 
     def _get_stock_broker(
         self, trading_mode: TradingMode, symbol: str | None = None

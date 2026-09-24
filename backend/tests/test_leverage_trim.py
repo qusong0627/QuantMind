@@ -2245,3 +2245,30 @@ def test_modules_stay_within_the_file_budget_and_layering() -> None:
     assert (
         "from backend.services.trade.services.leverage_trim import" not in src["core"]
     )
+
+
+def test_reject_note_carries_the_broker_reason_from_the_envelope() -> None:
+    """拒单腿的 note 必须带**券商原话**（信封顶层 ``message``）。
+
+    真派发层把引擎拒因抬在顶层 ``message``（嵌套 ``result.message`` 的原文）；
+    而 note 此前只从 ``violations`` 拼 —— 拒单没有 violations，于是 note 退化成
+    ``「提交失败 status=failed execution=direct」``：运维看不到**为什么**被拒，
+    下一轮重试与否也没有依据（2026-09-24 与引擎假成功同批核实）。
+    """
+    client, _ = _over_limit_account()
+    reject = {
+        "status": "failed",
+        "execution": "direct",
+        "order_id": "o-7",
+        "message": "Broker拒绝: 废单：委托价格超出涨跌幅限制",
+    }
+    deps, disp, notify, redis = _deps(
+        client, tier=FakeTier(_tier_budget()), dispatch=FakeDispatch([reject])
+    )
+
+    summary = asyncio.run(lt.run_trim_cycle(deps))
+
+    note = summary["legs"][0]["note"]
+    assert note.endswith("Broker拒绝: 废单：委托价格超出涨跌幅限制"), (
+        f"拒因没进 note，运维只能看到状态码: {note!r}"
+    )

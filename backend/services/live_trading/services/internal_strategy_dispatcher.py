@@ -261,6 +261,18 @@ async def _sell_lot_violation(
     return lot_rules.describe_violation(str(symbol or ""), "SELL", qty)
 
 
+def _violations_text(violations: Any) -> str:
+    """预检/风控 violations → 一句人话（抬到信封顶层，供各告警面直读）。"""
+    items = violations if isinstance(violations, list) else [violations]
+    parts: list[str] = []
+    for item in items:
+        if isinstance(item, dict):
+            parts.append(str(item.get("message") or item.get("rule") or item))
+        elif item:
+            parts.append(str(item))
+    return "；".join(parts)
+
+
 async def dispatch_internal_strategy_order(
     *,
     order_data: dict[str, Any],
@@ -649,6 +661,7 @@ async def dispatch_internal_strategy_order(
             "status": "rejected",
             "execution": "lot_blocked",
             "order_id": str(order.order_id),
+            "message": lot_violation,
             "violations": [{"rule": "lot_size", "message": lot_violation}],
         }
 
@@ -663,13 +676,17 @@ async def dispatch_internal_strategy_order(
             "status": "rejected",
             "execution": "risk_blocked",
             "order_id": str(order.order_id),
+            "message": _violations_text(risk_result.get("violations", [])),
             "violations": risk_result.get("violations", []),
         }
 
     submit_result = await engine.submit_order(order, tenant_id=tenant)
+    # ``message`` 抬到顶层：拒因在引擎返回值的 ``result.message`` 里（嵌套），而各
+    # 告警面（止损执行器、调仓腿）只读顶层字段 —— 不抬上来，用户告警就只能念字典。
     return {
         "status": "success" if submit_result.get("success") else "failed",
         "execution": "direct",
         "order_id": str(order.order_id),
+        "message": submit_result.get("message"),
         "result": submit_result,
     }

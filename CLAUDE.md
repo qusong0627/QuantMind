@@ -53,6 +53,7 @@ npm run dashboard:build  # 生产环境构建
 
 - **特征工程**：48 维特征由外部服务写入 `market_data_daily` 表
 - **交易服务**：外部报单前强制「本地优先」落库持久化
+- **真单成败判据 = 订单终态**（2026-09-24 修）：`TradingEngine.submit_order` 只在终态 `REJECTED` 时返回 `success: False` —— 券商不抛异常直接拒、执行异常两条路径**都由 `_execute_via_broker` 吞掉并置终态**，所以调用方**不能**按「有没有异常」判成败（旧实现把拒单报成 success，止损链因此记 `ST_SUBMITTED` 当日终态：不重试、无告警）。超时保持 `submitted` + `success: True`（单**可能已在柜台**，绝不可当失败重试）。告警面的拒因出口 = 派发信封**顶层** `message`（`internal_strategy_dispatcher` 的 `lot_blocked`/`risk_blocked`/`direct` 三个失败分支都抬出；嵌套 `result.message` 是原始出处），消费方**不要**拿 `str(信封)` 当文案
 - **Redis 库分配**：0=通用，1=认证，2=交易，3=行情，4=回测，5=缓存
 - **共享模块**：`backend/shared/` 存放跨服务代码（DB 管理器、Redis 客户端、配置、日志）
 - **瞬时时间（成交/委托）**：`sim_trades.executed_at` 等瞬时列一律 `TIMESTAMPTZ` + aware UTC。写入走 `backend/shared/utc_datetime.py` 的 `utc_now()` / `UtcDateTime`，JSON 输出带 `Z`。禁止 naive UTC 与上海墙钟混用。存量库由 `data/upgrade_v1.0.7.sql` 对齐。

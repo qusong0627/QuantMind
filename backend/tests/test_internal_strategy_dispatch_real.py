@@ -397,3 +397,53 @@ def test_caller_declared_full_exit_still_runs_the_absolute_checks():
     )
     assert _lot_check(db, quantity=0, full_position_sell=True) is not None
     assert _lot_check(db, quantity=100.5, full_position_sell=True) is not None
+
+
+def test_broker_reject_envelope_carries_the_reason_at_top_level():
+    """引擎报拒单 → 信封 ``status="failed"`` **且顶层带 message**。
+
+    消费方都只读**顶层**字段：止损执行器取 ``message``/``detail``（取不到就把整个
+    信封 ``str()`` 进用户告警 —— 线上会退化成念 Python 字典），调仓腿取 ``violations``。
+    而拒单的真实拒因在引擎返回值的 ``result.message`` 里（嵌套），顶层不抬上来，
+    「券商为什么拒」这条信息就**到不了任何一个告警面**（2026-09-24 核实）。
+    """
+    db = FakeDb(results=[None, None])  # portfolio 快照/兜底查询、幂等查询都给空
+    redis = SimpleNamespace()
+
+    class _RejectingEngine(FakeEngine):
+        async def submit_order(self, order, tenant_id=None):
+            # 引擎修复后的真实形状：success=False + 终态 rejected + 拒因
+            return {
+                "success": False,
+                "order_id": str(order.order_id),
+                "status": "rejected",
+                "message": "Broker拒绝: 废单：委托价格超出涨跌幅限制",
+            }
+
+    with (
+        patch.object(d, "_fetch_active_portfolio_snapshot", AsyncMock(return_value=None)),
+        patch.object(d, "OrderService", FakeOrderService),
+        patch.object(d, "TradingEngine", _RejectingEngine),
+    ):
+        result = _run(
+            d.dispatch_internal_strategy_order(
+                order_data={
+                    "symbol": "600036.SH",
+                    "side": "SELL",
+                    "quantity": 100,
+                    "price": 41.0,
+                    "order_type": "LIMIT",
+                    "trading_mode": "REAL",
+                    "client_order_id": "sltp-reject-1",
+                },
+                user_id="1",
+                tenant_id="default",
+                redis=redis,
+                db=db,
+            )
+        )
+
+    assert result["status"] == "failed"
+    assert "废单" in str(result.get("message") or ""), (
+        f"拒因没有抬到顶层，告警面只能念字典: {result}"
+    )

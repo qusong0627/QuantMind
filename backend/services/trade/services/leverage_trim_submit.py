@@ -226,6 +226,11 @@ async def submit_leg(
     detail_text = "；".join(
         str(v.get("message") if isinstance(v, Mapping) else v) for v in violations
     )
+    if not detail_text:
+        # 拒单（引擎被券商拒）没有 violations，拒因在信封顶层 ``message``
+        # （派发层从引擎返回值的 ``result.message`` 抬上来的）。不取它，note 就只剩
+        # 「提交失败 status=failed execution=direct」——为什么被拒全靠猜。
+        detail_text = str(resp.get("message") or "")
     if order_id:
         # 委托行已落库（有 order_id）= 这个号当日**用掉了**：预检/风控在 ``create_order``
         # 之后才拒，行以 REJECTED 留在库里。不作废的话下一轮会算出同一代次、撞回这行，
