@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -39,6 +40,10 @@ CREATE TABLE IF NOT EXISTS simulation_reconcile_reports (
 
 
 _table_ensured = False
+
+# 台账自身一致性审计节流（整表聚合，OSS 多账户时不必每 30s 跑）
+_LEDGER_AUDIT_INTERVAL_SEC = 3600.0
+_last_ledger_audit = 0.0
 
 
 async def _ensure_table() -> None:
@@ -163,6 +168,21 @@ async def run_reconcile_once(
                             "diff": cash_diff,
                         }
                     )
+                # 负债（融券户）：PG 有列、可直接比对。short_proceeds/market_value
+                # 属 Redis 现值口径（PG 不可考 / 按收盘重估），不参与比对。
+                liabilities_diff = float(live.get("liabilities") or 0) - float(
+                    rebuilt.get("liabilities") or 0
+                )
+                if abs(liabilities_diff) > _DIFF_TOL:
+                    diffs.append(
+                        {
+                            "field": "liabilities",
+                            "symbol": "",
+                            "redis_value": float(live.get("liabilities") or 0),
+                            "pg_value": float(rebuilt.get("liabilities") or 0),
+                            "diff": liabilities_diff,
+                        }
+                    )
                 live_pos = _positions_by_symbol(live.get("positions"))
                 pg_pos = _positions_by_symbol(rebuilt.get("positions"))
                 for pos_key in sorted(set(live_pos) | set(pg_pos)):
@@ -245,6 +265,18 @@ async def run_reconcile_once(
         except Exception as exc:
             logger.debug("reconcile skipped %s: %s", key, exc)
             continue
+
+    # 台账自身一致性审计（每小时一次）：PG 台账是对账的"真理"，但它自己也可能
+    # 漂移（漏记流水/重复扣款），Redis↔台账比对无法发现。只告警+留痕，不自动改。
+    global _last_ledger_audit
+    now_mono = time.monotonic()
+    if now_mono - _last_ledger_audit >= _LEDGER_AUDIT_INTERVAL_SEC:
+        _last_ledger_audit = now_mono
+        try:
+            stats["ledger_drift"] = await _audit_ledger_cash()
+        except Exception as exc:
+            logger.warning("ledger cash audit failed: %s", exc)
+
     log = logger.info if stats["diff_fields"] else logger.debug
     log(
         "simulation reconcile done: checked=%d diff_fields=%d autofixed=%d",
@@ -253,6 +285,73 @@ async def run_reconcile_once(
         stats["autofixed"],
     )
     return stats
+
+
+async def _audit_ledger_cash() -> int:
+    """审计 PG 台账自身一致性，返回漂移账户数。
+
+    判据：``simulation_accounts.cash`` 应等于
+    ``initial_equity + Σ simulation_cash_ledger.amount``（成交/公司行为流水）。
+    漂移只告警并写 simulation_reconcile_reports(field='ledger_cash')，不自动改数
+    （需人工核对流水）。
+    """
+    from sqlalchemy import text as _text
+
+    from backend.shared.database_manager_v2 import get_session as _get_session
+
+    drifted = 0
+    async with _get_session() as session:
+        rows = (
+            await session.execute(
+                _text(
+                    "SELECT a.account_id, a.tenant_id, a.user_id, "
+                    "a.initial_equity, a.cash, "
+                    "COALESCE(SUM(l.amount), 0) AS ledger_sum "
+                    "FROM simulation_accounts a "
+                    "LEFT JOIN simulation_cash_ledger l "
+                    "  ON l.account_id = a.account_id "
+                    "WHERE a.initial_equity > 0 "
+                    "GROUP BY a.account_id, a.tenant_id, a.user_id, "
+                    "a.initial_equity, a.cash"
+                )
+            )
+        ).fetchall()
+        for row in rows:
+            m = row._mapping
+            implied = float(m["initial_equity"] or 0.0) + float(
+                m["ledger_sum"] or 0.0
+            )
+            cash = float(m["cash"] or 0.0)
+            drift = cash - implied
+            if abs(drift) <= _DIFF_TOL:
+                continue
+            drifted += 1
+            logger.warning(
+                "ledger cash drift account=%s cash=%.2f implied=%.2f drift=%.2f",
+                m["account_id"],
+                cash,
+                implied,
+                drift,
+            )
+            await session.execute(
+                _text(
+                    "INSERT INTO simulation_reconcile_reports "
+                    "(tenant_id, user_id, market, field, symbol, "
+                    "redis_value, pg_value, diff, autofixed) "
+                    "VALUES (:tid, :uid, 'CN', 'ledger_cash', '', "
+                    ":rv, :pv, :df, FALSE)"
+                ),
+                {
+                    "tid": m["tenant_id"],
+                    "uid": str(m["user_id"]),
+                    "rv": implied,
+                    "pv": cash,
+                    "df": drift,
+                },
+            )
+        if drifted:
+            await session.commit()
+    return drifted
 
 
 def autofix_enabled() -> bool:

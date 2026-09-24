@@ -200,3 +200,6 @@ def test_reconcile_autofix_preserves_redis_only_fields():
     src = (_services_dir() / "reconcile_service.py").read_text(encoding="utf-8")
     assert "merge_preserved" in src
     assert "locked_execution" in src
+    # 负债可比对；台账自身漂移有审计
+    assert '"field": "liabilities"' in src
+    assert "_audit_ledger_cash" in src
