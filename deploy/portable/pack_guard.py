@@ -7,6 +7,8 @@
     python3 deploy/portable/pack_guard.py --make-zip <staging 目录> <输出.zip>
     python3 deploy/portable/pack_guard.py --zip    <输出.zip>
 
+三种模式都接受 ``--allow-local-live``（显式放行本机独有实盘栏目的前端产物，
+自用包；默认拒绝，与 ``scripts/deploy_frontend.sh`` 同名同义）。
 退出码：``0`` 通过 / ``1`` 有违规（非零即中止出包）/ ``2`` 用法或 IO 错误。
 
 为什么要有这道闸门（不是「再加一层保险」）
@@ -19,9 +21,13 @@
 `.pytest_cache`、`htmlcov` 一起收；`cp -a models` 会连 `models/users/`（1.3G 私有
 模型）一起收。这些都是**看构建日志看不出来**的（cp 不报错），只能靠出包后拿清单核对。
 
-三层判据（全部在 ``pack_rules.py``，本文件只负责执行）
+四层判据（全部在 ``pack_rules.py``，本文件只负责执行）
 ------------------------------------------------------
 1. **路径清单**：排除项（打包时跳过；压缩后还在 = 违规）与必备项（少一个 = 残包）；
+   另有 **私有栏目产物**（``R.PRIVATE_CHUNKS``）：``electron/src/features/local-live/``
+   是运营者本机独有、不开源的实盘栏目（``.gitignore`` 排除），本机构建会把它打进
+   ``dist-react/``，而两份包都从那里取 ``web/`` —— 产物里出现它的 chunk 即违规，
+   与 ``scripts/deploy_frontend.sh`` 第 3 步同源同判；
 2. **内容判据**：内网地址与明文口令——检测器**复用**
    ``backend/tests/test_no_internal_addresses_or_plaintext_secrets.py``，
    本文件不重写正则。那份是权威定义（含全部误报豁免与理由），这里只是把扫描面
@@ -51,7 +57,9 @@ import os
 import sys
 import zipfile
 from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import NamedTuple
 
@@ -141,8 +149,18 @@ def _read_chunks(path: Path, limit: int | None = None) -> Iterator[bytes]:
                 return
 
 
-def iter_zip(zip_path: Path) -> tuple[str, list[Entry]]:
-    """返回 (包根目录名, 条目)。目录项不进检查（空目录是要留的，见 pack_rules）。"""
+@contextmanager
+def iter_zip(zip_path: Path) -> Iterator[tuple[str, list[Entry]]]:
+    """产出 (包根目录名, 条目)。目录项不进检查（空目录是要留的，见 pack_rules）。
+
+    **一个 zip 只解析一次中央目录**：``ZipFile.open()`` 每次调用都要重读一遍中央目录，
+    12 万条目的包里逐文件重开 = O(条目数 × 中央目录)，实测 `--zip` 复核从 1 分钟涨到
+    十几分钟——而这条命令在发版路径上，慢到没人愿意跑就等于没有闸门。
+
+    共用一个句柄要求**顺序读**：条目生成器必须用完再取下一个（本文件的两个扫描函数
+    都是逐条目整读，没有交叉持有）。谁要在同一条目上读两遍（``_line_of`` 就是这样）
+    也没问题——前一个生成器那时已经耗尽、句柄已还。
+    """
     with zipfile.ZipFile(zip_path) as zf:
         names = [i.filename for i in zf.infolist() if not i.is_dir()]
         roots = {n.split("/", 1)[0] for n in names if "/" in n}
@@ -152,28 +170,25 @@ def iter_zip(zip_path: Path) -> tuple[str, list[Entry]]:
                 "        解压时会**并进**别的文件夹，覆掉对方的 start.bat / pack.env。"
             )
         root = roots.pop()
-        entries = []
-        for info in zf.infolist():
-            if info.is_dir():
-                continue
-            rel = info.filename.split("/", 1)[1]
-            entries.append(
-                Entry(
-                    rel,
-                    info.file_size,
-                    (lambda n=info.filename, z=zip_path: _zip_chunks(z, n)),
-                )
+
+        def chunks(name: str) -> Iterator[bytes]:
+            with zf.open(name) as fh:
+                while True:
+                    block = fh.read(CHUNK)
+                    if not block:
+                        return
+                    yield block
+
+        entries = [
+            Entry(
+                info.filename.split("/", 1)[1],
+                info.file_size,
+                partial(chunks, info.filename),
             )
-    return root, entries
-
-
-def _zip_chunks(zip_path: Path, name: str) -> Iterator[bytes]:
-    with zipfile.ZipFile(zip_path) as zf, zf.open(name) as fh:
-        while True:
-            block = fh.read(CHUNK)
-            if not block:
-                return
-            yield block
+            for info in zf.infolist()
+            if not info.is_dir()
+        ]
+        yield root, entries
 
 
 # ---------------------------------------------------------------------------
@@ -208,8 +223,14 @@ def scan_entries(
     mode: str,
     needles: list[tuple[str, str]],
     detectors,
+    allow_private: bool = False,
 ) -> tuple[list[Finding], list[str]]:
-    """``mode`` ∈ {"stage", "zip"}：stage 下命中排除项只是提示，zip 下是违规。"""
+    """``mode`` ∈ {"stage", "zip"}：stage 下命中排除项只是提示，zip 下是违规。
+
+    私有栏目产物（``R.PRIVATE_CHUNKS``）在**两种模式下都是违规**：它不在排除清单里，
+    打包时不会消失——出现在 staging 就等于会出现在产物里。``allow_private`` 是
+    ``--allow-local-live`` 的显式放行（与 ``scripts/deploy_frontend.sh`` 同名同义）。
+    """
     findings: list[Finding] = []
     notes: list[str] = []
     seen: set[str] = set()
@@ -230,6 +251,21 @@ def scan_entries(
             )
             # 排除项不会出厂 ⇒ 内容判据不必再看它（省掉 models/users 那 1.3G 的读）。
             continue
+        for pattern, reason in R.PRIVATE_CHUNKS:
+            if R.matches_pattern(pattern, rel):
+                findings.append(
+                    Finding(
+                        "私有栏目",
+                        rel,
+                        reason
+                        + (
+                            "（已由 --allow-local-live 显式放行）"
+                            if allow_private
+                            else ""
+                        ),
+                        fatal=not allow_private,
+                    )
+                )
         findings.extend(_scan_content(entry, needles, detectors, notes))
     return findings, notes
 
@@ -349,6 +385,13 @@ def check_required(entries: Iterator[Entry]) -> list[Finding]:
     for pattern, reason in R.REQUIRED_GLOBS:
         if not any(R.matches_pattern(pattern, rel) for rel in rels):
             out.append(Finding("缺必备", pattern, reason, True))
+    # 成对项：哨兵在、必备不在 → 半个组件（看着有、点开报错）。两个都不在只提示。
+    for sentinel, must, reason in R.REQUIRED_PAIRS:
+        if sentinel in rels and must not in rels:
+            out.append(Finding("缺必备", must, reason, True))
+    for sentinel, note in R.OPTIONAL_COMPONENTS:
+        if sentinel not in rels:
+            out.append(Finding("提示", sentinel, note, False))
     if not any(rel.startswith("models/production/") for rel in rels):
         out.append(
             Finding(
@@ -414,6 +457,7 @@ def _report(findings: list[Finding], notes: list[str], headline: str) -> int:
     order = [
         "缺必备",
         "排除项",
+        "私有栏目",
         "形态",
         "内网地址",
         "明文口令",
@@ -470,6 +514,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--env-file", action="append", default=[], help="补充宿主探针来源（可多次）"
     )
+    ap.add_argument(
+        "--allow-local-live",
+        action="store_true",
+        help="显式放行本机独有实盘栏目的前端产物（自用包；"
+        "与 scripts/deploy_frontend.sh 同名同义，默认拒绝）",
+    )
     args = ap.parse_args(argv)
     modes = [bool(args.stage), bool(args.zip), bool(args.make_zip)]
     if sum(modes) != 1:
@@ -484,7 +534,14 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.make_zip:
         stage, out = Path(args.make_zip[0]), Path(args.make_zip[1])
-        code = _verify_stage(stage, needles, unreadable, dropped, detectors)
+        code = _verify_stage(
+            stage,
+            needles,
+            unreadable,
+            dropped,
+            detectors,
+            allow_private=args.allow_local_live,
+        )
         if code != 0:
             print(
                 "\n  ✗ staging 有违规，拒绝出包（修正后重跑；排除清单在 pack_rules.py）"
@@ -498,16 +555,27 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.stage:
-        return _verify_stage(Path(args.stage), needles, unreadable, dropped, detectors)
+        return _verify_stage(
+            Path(args.stage),
+            needles,
+            unreadable,
+            dropped,
+            detectors,
+            allow_private=args.allow_local_live,
+        )
 
     zip_path = Path(args.zip)
     if not zip_path.is_file():
         raise SystemExit(f"[guard] 产物不存在：{zip_path}")
-    root, entries = iter_zip(zip_path)
-    findings, notes = scan_entries(
-        entries, mode="zip", needles=needles, detectors=detectors
-    )
-    findings.extend(check_required(iter(entries)))
+    with iter_zip(zip_path) as (root, entries):
+        findings, notes = scan_entries(
+            entries,
+            mode="zip",
+            needles=needles,
+            detectors=detectors,
+            allow_private=args.allow_local_live,
+        )
+        findings.extend(check_required(iter(entries)))
     headline = (
         f"[guard] 产物校验：{zip_path}（根目录 {root}/，{len(entries)} 个文件）\n"
         f"        探针来源 {len(needles)} 个"
@@ -520,12 +588,18 @@ def main(argv: list[str] | None = None) -> int:
     return _report(findings, notes, headline)
 
 
-def _verify_stage(stage: Path, needles, unreadable, dropped, detectors) -> int:
+def _verify_stage(
+    stage: Path, needles, unreadable, dropped, detectors, *, allow_private: bool = False
+) -> int:
     if not stage.is_dir():
         raise SystemExit(f"[guard] staging 不存在：{stage}")
     entries = list(iter_stage(stage))
     findings, notes = scan_entries(
-        iter(entries), mode="stage", needles=needles, detectors=detectors
+        iter(entries),
+        mode="stage",
+        needles=needles,
+        detectors=detectors,
+        allow_private=allow_private,
     )
     findings.extend(check_required(iter(entries)))
     headline = f"[guard] staging 校验：{stage}（{len(entries)} 个文件）"

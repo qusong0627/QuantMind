@@ -71,15 +71,20 @@ set "PYTHONPATH=%ROOT%"
 set "DB_DRIVER=asyncpg"
 set "DB_HOST=127.0.0.1"
 set "DB_PORT=%QM_PG_PORT%"
+rem DB_PASSWORD / DB_USER may come from pack.env (or the environment) - same
+rem shape as start.sh: one variable drives the connection URL, the client env
+rem and the initdb pwfile. Do NOT change DB_PASSWORD after pgdata\ exists: the
+rem password is fixed at initdb time and the server keeps the old one
+rem (symptom: backend cannot connect even though pack.env looks right).
+if not defined DB_USER set "DB_USER=quantmind"
+if not defined DB_PASSWORD set "DB_PASSWORD=quantmind2026"
 set "DB_NAME=quantmind"
-set "DB_USER=quantmind"
-set "DB_PASSWORD=quantmind2026"
-set "DATABASE_URL=postgresql+asyncpg://quantmind:quantmind2026@127.0.0.1:%QM_PG_PORT%/quantmind"
+set "DATABASE_URL=postgresql+asyncpg://%DB_USER%:%DB_PASSWORD%@127.0.0.1:%QM_PG_PORT%/%DB_NAME%"
 set "POSTGRES_HOST=127.0.0.1"
 set "POSTGRES_PORT=%QM_PG_PORT%"
-set "POSTGRES_USER=quantmind"
-set "POSTGRES_PASSWORD=quantmind2026"
-set "POSTGRES_DB=quantmind"
+set "POSTGRES_USER=%DB_USER%"
+set "POSTGRES_PASSWORD=%DB_PASSWORD%"
+set "POSTGRES_DB=%DB_NAME%"
 set "REDIS_HOST=127.0.0.1"
 set "REDIS_PORT=%QM_REDIS_PORT%"
 set "REDIS_URL=redis://127.0.0.1:%QM_REDIS_PORT%"
@@ -155,7 +160,7 @@ echo MARK-D
 echo [QuantMind] Checking PostgreSQL ...
 if exist "%ROOT%pgdata\PG_VERSION" goto :pg_started
 echo [QuantMind] First run: initializing PostgreSQL data dir ...
-echo quantmind2026> "%ROOT%run\pg_pw.txt"
+echo %DB_PASSWORD%>"%ROOT%run\pg_pw.txt"
 "%PGBIN%\initdb.exe" -D "%ROOT%pgdata" -U quantmind -A scram-sha-256 --pwfile="%ROOT%run\pg_pw.txt" -E UTF8 --no-locale
 del "%ROOT%run\pg_pw.txt" 2>nul
 :pg_started

@@ -192,6 +192,8 @@ _KEEP_SUFFIXES = (".example", ".sample", ".template", ".example.env")
 REQUIRED_FILES: tuple[str, ...] = (
     "start.bat",
     "stop.bat",
+    "install.bat",
+    "install.ps1",
     "pack.env.example",
     "README.md",
     "VERSION",
@@ -212,6 +214,28 @@ REQUIRED_GLOBS: tuple[tuple[str, str], ...] = (
     ("data/upgrade_*.sql", "增量升级 SQL（缺了增量迁移永不执行——历史 bug）"),
 )
 
+#: **成对必备项** ``(哨兵, 必备, 理由)``：哨兵在、必备不在 = 违规；两个都不在只给提示
+#: （整块没有是受支持的降级形态，见 :data:`OPTIONAL_COMPONENTS`）。
+#:
+#: 用于「附属组件要么整块在、要么整块不在」的情形。**半个组件是最坏形态**：文件清单
+#: 看着有、界面入口也在，点开才报错——比整块没有更难排查，也正是本闸门存在的理由。
+REQUIRED_PAIRS: tuple[tuple[str, str, str], ...] = (
+    (
+        "huntly/server.jar",
+        "huntly/jre/bin/java.exe",
+        "Huntly 有 jar 没有 Windows JRE（新闻聚合点开即报错；"
+        "组装判据按内容，不按可执行位——解压不还原权限位）",
+    ),
+)
+
+#: 可选组件**整块缺失**时的提示（不拦出包）：受支持的降级形态，别让护栏误报。
+OPTIONAL_COMPONENTS: tuple[tuple[str, str], ...] = (
+    (
+        "huntly/server.jar",
+        "未内置 Huntly（构建机上没有 lcomplete/huntly 镜像、缓存也没有）：新闻聚合降级",
+    ),
+)
+
 #: **显式保留的空目录**：内容按排除清单清掉了，目录本身要留在产物里。
 #: 后端按固定路径找它们（模型注册表扫 ``models/users``、日志写 ``backend/logs``、
 #: start.bat 往 ``run/`` 写密钥），缺目录比空目录更容易出怪问题。
@@ -224,6 +248,25 @@ SHAPE_MARKERS: tuple[tuple[bytes, str], ...] = (
     (
         b'VITE_LIVE_NODE_ONLY:"true"',
         "实盘节点形态前端：整页只剩 QuantBot/实盘两栏，通用包的其它栏目全没了",
+    ),
+)
+
+#: **私有栏目产物**：按路径判（路径在排除清单之外，所以是独立的一类判据）。
+#:
+#: ``electron/src/features/local-live/`` 是运营者本机独有的实盘交易栏目
+#: （``.gitignore:221`` 排除、不开源）：本机 ``npm run build`` 会把它整块打进
+#: ``dist-react/``，而两份包都从这里取 ``web/``。判据（chunk 名）与
+#: ``scripts/deploy_frontend.sh`` 第 3 步**同源**——那份脚本拿它拦「别把不开源的
+#: 部分 ``docker cp`` 到面向公网的容器」，这里拦的是同一件事的另一条出口。
+#:
+#: 元组第二项是显式放行开关的名字（``--allow-local-live``，与那份脚本同名同义）：
+#: 本机自用包允许带，默认拒绝。**拦的是意外，不是决定**——本机开发时那个目录
+#: 一直在，没有这条判据就只剩「构建日志里什么都没有」。
+PRIVATE_CHUNKS: tuple[tuple[str, str], ...] = (
+    (
+        "web/assets/LiveTradingPage*",
+        "本机独有实盘栏目的前端产物（源码 electron/src/features/local-live/ 未跟踪、"
+        "不开源）——随包出厂等于把不开源的部分发给别人",
     ),
 )
 
@@ -340,6 +383,26 @@ def match_excludes(rel: str) -> Exclude | None:
     return None
 
 
+def find_private_chunks(dist_root: Path) -> list[str]:
+    """前端产物目录里命中的私有栏目 chunk（返回 ``web/...`` 形式的包根相对路径）。
+
+    :data:`PRIVATE_CHUNKS` 的模式按**包根**写（``web/`` 即前端的 ``dist-react/``），
+    这里补上前缀，让同一份模式既能校验 staging，也能直接校验前端产物目录本身——
+    ``build_windows_pack.sh`` 用它把这道判据提到构建期（否则要等 4GB 依赖下完、
+    走到最后一步才报）。判据一份，两个调用点。
+    """
+    hits: list[str] = []
+    root = Path(dist_root)
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames.sort()
+        for name in sorted(filenames):
+            path = Path(dirpath) / name
+            rel = "web/" + str(path.relative_to(root))
+            if any(matches_pattern(pat, rel) for pat, _ in PRIVATE_CHUNKS):
+                hits.append(rel)
+    return hits
+
+
 def is_text_path(rel: str) -> bool:
     name = rel.rsplit("/", 1)[-1].lower()
     if name in ("license", "readme", "version", "notice", "makefile", "dockerfile"):
@@ -413,6 +476,10 @@ def is_published(value: str, repo_root: Path) -> bool:
 
     git 不可用（容器里没有 .git / 没装 git）时返回 False：**保守留作探针**，
     宁可多报也不放过。
+
+    ⚠️ 给测试的提醒：夹具里**原样写死**的探针值一旦提交，就把自己也变成了
+    「已公开值」——探针当场失效，用例静默退化（本文件配套测试里踩过一次：
+    ``test_pack_guard.py`` 的探针一律由碎片拼出，且在文件里说明了原因）。
     """
     if not (repo_root / ".git").exists():
         return False

@@ -12,7 +12,41 @@
 
 不支持的架构：ARM/M 苹果芯片的 Linux、Alpine/musl 系发行版。
 
-## 启动步骤
+## 一键安装（Windows，推荐）
+
+1. 解压到任意**纯英文、不含空格**的本地路径（如 `D:\QuantMind`）。
+2. 双击 **`install.bat`**。它会先体检、再启动：
+
+   | 检查 | 说明 |
+   |---|---|
+   | 64 位 Windows | 32 位系统直接拒绝 |
+   | 包完整性 | 缺文件（多半是解压了一半）当场指出，不再往下走 |
+   | 磁盘位置 | 网络盘 / 映射盘 / 含中文的路径会被拦下（PostgreSQL、Redis 在那儿跑不起来） |
+   | 剩余空间 | 少于 10GB 拒绝启动（A 股全量数据约 60GB，可按需准备） |
+   | 端口占用 | 5432 / 6379 / 8000-8003 被占 → 给出占用进程与改端口的位置；8090/8088（可选组件）只提示不拦 |
+   | 已在运行 | 若本机已经跑着一个实例，直接打开页面，不再重复启动 |
+
+3. 首次安装会生成 `pack.env`（端口、本机数据库随机口令、AI 密钥等可改项都在里面），
+   然后拉起 `start.bat`。**首次启动要 1-3 分钟**（建库 → 建表 → 4 个后端服务 + Celery），
+   就绪后浏览器自动打开 `http://127.0.0.1:8000/`。
+
+常用选项（命令行）：
+
+```
+install.bat                    # 体检 + 安装 + 启动（等同双击）
+install.bat --help             # 查看 install.ps1 的全部开关
+powershell -ExecutionPolicy Bypass -File install.ps1 -NoStart     # 只体检安装，不启动
+powershell -ExecutionPolicy Bypass -File install.ps1 -Shortcut    # 顺带建桌面快捷方式
+```
+
+不想用安装器也行：直接双击 `start.bat`（它自带首次初始化），手动做上面那些检查。
+退出码：`0` 正常 / `1` 有阻塞项未启动 / `2` 包不完整 / `3` 没有 PowerShell（跳过体检）。
+
+**下载校验**：产物随附 `QuantMind-Portable-win-x64.zip.sha256`，比对方法
+`certutil -hashfile QuantMind-Portable-win-x64.zip SHA256`（Windows）或
+`sha256sum -c QuantMind-Portable-win-x64.zip.sha256`（Linux/WSL）。
+
+## 启动步骤（手动）
 
 1. 把整个文件夹解压到任意**纯英文、不含空格**的路径（如 `D:\QuantMind` 或 `~/quantmind`）。
 2. Linux/WSL：`bash start.sh`（前台运行，Ctrl+C 停止；`bash start.sh --bg` 后台运行，`bash stop.sh` 停止）。

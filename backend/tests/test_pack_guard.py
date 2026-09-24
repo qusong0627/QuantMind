@@ -121,6 +121,17 @@ def _probe_env(tmp_path: Path, **kv: str) -> Path:
     return _write(tmp_path, "probe.env", "".join(f"{k}={v}\n" for k, v in kv.items()))
 
 
+def _probe_value(*parts: str) -> str:
+    """拼出探针值——**本文件里不许写整串字面量**。
+
+    这份用例是受版本控制的，而闸门会先用 ``pack_rules.is_published()`` 把「已经在
+    跟踪文件里出现过的值」从探针里剔掉（仓库公开，``git grep -F`` 一搜就中）。所以
+    谁把探针值**原样**写进来，谁就把自己也变成了「已公开」——探针当场失效，用例
+    仍然全绿，静默退化。碎片在运行时拼，任何一格都搜不到整串。
+    """
+    return "".join(parts)
+
+
 def _clean(tmp_path: Path) -> tuple[Path, Path]:
     return _make_stage(tmp_path), _probe_env(tmp_path)
 
@@ -187,6 +198,38 @@ def test_guard_is_cwd_independent(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_zip_central_directory_is_parsed_once(tmp_path: Path, monkeypatch) -> None:
+    """12 万条目的包只许解析一次中央目录。
+
+    ``ZipFile.open()`` 每次调用都重读一遍中央目录，逐文件重开就是 O(条目数 × 中央目录)：
+    实测 `--zip` 复核从 1 分钟涨到十几分钟，而这条命令在发版路径上——**慢到没人愿意跑的
+    闸门等于没有闸门**。按打开次数钉，不按耗时（时间断言在别人的机器上必然翻车）。
+    """
+    zpath = tmp_path / "pack.zip"
+    with zipfile.ZipFile(zpath, "w") as zf:
+        for i in range(40):
+            zf.writestr(f"root/text{i}.py", "x = 1\n")
+    real = pack_guard.zipfile.ZipFile
+    opened = 0
+
+    class Counting(real):  # type: ignore[misc, valid-type]
+        def __init__(self, *a, **kw):
+            nonlocal opened
+            opened += 1
+            super().__init__(*a, **kw)
+
+    monkeypatch.setattr(pack_guard.zipfile, "ZipFile", Counting)
+    with pack_guard.iter_zip(zpath) as (root, entries):
+        assert root == "root"
+        for entry in entries:
+            b"".join(entry.chunks())
+            b"".join(
+                entry.chunks()
+            )  # 同一条目读两遍（`_line_of` 就这么干）也要能顺序复用
+    assert len(entries) == 40
+    assert opened == 1, f"中央目录被解析了 {opened} 次——逐文件重开会把复核拖成十几分钟"
+
+
 def test_missing_required_file_is_fatal(tmp_path: Path) -> None:
     stage, env = _clean(tmp_path)
     (stage / "web/index.html").unlink()
@@ -211,6 +254,58 @@ def test_missing_preinstalled_models_is_only_a_note(tmp_path: Path) -> None:
     proc = _verify(stage, env)
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "models/production" in proc.stdout
+
+
+def test_half_a_component_is_fatal(tmp_path: Path) -> None:
+    """**成对项**：哨兵在、必备不在 = 半个组件，必须拦。
+
+    半个组件是最坏形态——文件清单看着有、界面入口也在，点开才报错。实测起源：
+    Huntly 的 Windows JRE 是 ``python3 -m zipfile -e`` 解出来的（不还原 POSIX 权限位），
+    构建脚本拿 ``-x`` 当判据，于是每次都说「组装失败」而包照出。
+    """
+    stage, env = _clean(tmp_path)
+    _write(stage, "huntly/server.jar", "jar")
+    proc = _verify(stage, env)
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "缺必备" in proc.stdout and "huntly/jre/bin/java.exe" in proc.stdout
+
+
+def test_absent_optional_component_is_only_a_note(tmp_path: Path) -> None:
+    """整块没有是**受支持的降级形态**（构建机上没有 huntly 镜像时不内置），只提示。
+
+    拦它就成了会误报的护栏，而「一条会误报的护栏等于没有护栏」。
+    """
+    stage, env = _clean(tmp_path)
+    proc = _verify(stage, env)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "合计：违规 0 项" in proc.stdout
+    assert "huntly/server.jar" in proc.stdout  # 提示那行必须说出来，不许静默
+
+
+def test_whole_component_present_reports_neither(tmp_path: Path) -> None:
+    """整块在 = 既不是违规、也不再提示（否则这条护栏的噪声会把真问题淹掉）。"""
+    stage, env = _clean(tmp_path)
+    _write(stage, "huntly/server.jar", "jar")
+    _write(stage, "huntly/jre/bin/java.exe", "exe")
+    proc = _verify(stage, env)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "huntly" not in proc.stdout, proc.stdout
+
+
+def test_pair_entries_are_live_and_do_not_overlap_the_flat_list() -> None:
+    """成对项的不变量：两边都不能被排除清单吃掉；必备那一半不在平铺清单里（否则是死规则）。"""
+    assert pack_rules.REQUIRED_PAIRS, "成对项清单空了——这条判据会静默失效"
+    for sentinel, must, reason in pack_rules.REQUIRED_PAIRS:
+        assert reason.strip(), f"{must} 没写理由"
+        assert sentinel != must, f"{must}：哨兵与必备项不能是同一个文件"
+        for rel in (sentinel, must):
+            assert pack_rules.match_excludes(rel) is None, f"{rel} 被排除清单吃掉了"
+            assert rel not in pack_rules.REQUIRED_FILES, (
+                f"{rel} 已在 REQUIRED_FILES 里：成对/可选判据永远不会触发（死规则）"
+            )
+    for sentinel, note in pack_rules.OPTIONAL_COMPONENTS:
+        assert note.strip(), f"{sentinel} 的提示没写理由"
+        assert pack_rules.match_excludes(sentinel) is None, sentinel
 
 
 def test_required_files_are_not_swallowed_by_the_exclude_list() -> None:
@@ -304,12 +399,13 @@ def test_planted_plaintext_secret_is_fatal_and_the_value_is_not_echoed(
 ) -> None:
     """命中行里就是明文口令——报告只许给「文件:行 + 键名」。"""
     stage, env = _clean(tmp_path)
-    _write(stage, "backend/config/db.py", 'password = "Nettle92b4Qq"\n')
+    secret = _probe_value("Nettle", "92b4", "Qq")
+    _write(stage, "backend/config/db.py", f'password = "{secret}"\n')
     proc = _verify(stage, env)
     assert proc.returncode == 1, proc.stdout + proc.stderr
     assert "明文口令" in proc.stdout and "db.py:1" in proc.stdout
-    assert "Nettle92b4Qq" not in proc.stdout
-    assert "Nettle92b4Qq" not in proc.stderr
+    assert secret not in proc.stdout
+    assert secret not in proc.stderr
 
 
 def test_planted_host_needle_is_fatal_and_the_value_is_never_echoed(
@@ -321,7 +417,7 @@ def test_planted_host_needle_is_fatal_and_the_value_is_never_echoed(
     两件事：命中了，且值一次都没出现在输出里——只出现来源键名。
     """
     stage, _ = _clean(tmp_path)
-    secret = "Zq7xNettle92b4Qq"
+    secret = _probe_value("Zq7x", "Nettle", "92b4Qq")
     env = _probe_env(tmp_path, FAKE_DB_PASSWORD=secret)
     _write(stage, "backend/config/app.yaml", f"db_password: {secret}\n")
 
@@ -335,12 +431,100 @@ def test_planted_host_needle_is_fatal_and_the_value_is_never_echoed(
 def test_needle_scan_reaches_model_metadata(tmp_path: Path) -> None:
     """模型产物目录也在探针扫描面内：``metadata.json`` 记着训练时的端点与 key。"""
     stage, _ = _clean(tmp_path)
-    secret = "Zq7xNettle92b4Qq"
+    secret = _probe_value("Zq7x", "Nettle", "92b4Qq")
     env = _probe_env(tmp_path, TRAIN_API_KEY=secret)
     _write(stage, "models/production/m1/metadata.json", f'{{"endpoint": "{secret}"}}\n')
     proc = _verify(stage, env)
     assert proc.returncode == 1, proc.stdout + proc.stderr
     assert "metadata.json" in proc.stdout
+
+
+#: 本机独有实盘栏目的产物 chunk（真实形态，取自 2026-09-24 的本机构建：
+#: `LiveTradingPage-Bi6VNCLg.js` / `LiveTradingPage-DDUnkuO4.css`）。
+PRIVATE_CHUNKS = (
+    "web/assets/LiveTradingPage-Bi6VNCLg.js",
+    "web/assets/LiveTradingPage-DDUnkuO4.css",
+)
+
+
+@pytest.mark.parametrize("rel", PRIVATE_CHUNKS)
+def test_private_live_column_chunk_is_fatal_by_default(
+    tmp_path: Path, rel: str
+) -> None:
+    """`electron/src/features/local-live/` 未跟踪、不开源，本机构建会把它打进
+    `dist-react/`，而两份包都从那里取 `web/` —— 随包出厂就是把不开源的部分发了出去。
+
+    这一条**在 stage 模式下也必须是违规**：它不在排除清单里，打包时不会消失。
+    """
+    stage, env = _clean(tmp_path)
+    _write(stage, rel, "// live column\n")
+    proc = _verify(stage, env)
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "私有栏目" in proc.stdout and rel in proc.stdout
+    assert "local-live" in proc.stdout  # 报告要指出它出自哪里
+
+
+def test_private_live_column_can_be_explicitly_allowed(tmp_path: Path) -> None:
+    """本机自用包正当存在，所以给一条显式出路（与 deploy_frontend.sh 同名同义）：
+    **拦的是意外，不是决定**。放行时仍要如实列出来，不许静默。"""
+    stage, env = _clean(tmp_path)
+    _write(stage, PRIVATE_CHUNKS[0], "// live column\n")
+    out = tmp_path / "pack.zip"
+    proc = _run(
+        "--make-zip",
+        str(stage),
+        str(out),
+        "--env-file",
+        str(env),
+        "--allow-local-live",
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert out.is_file()
+    assert "私有栏目" in proc.stdout and "显式放行" in proc.stdout
+
+
+def test_private_chunk_judgement_matches_deploy_frontend_script() -> None:
+    """**耦合标记**（不是行为断言）：这条判据与 `scripts/deploy_frontend.sh` 第 3 步
+    同源，chunk 名是两份判据之间的契约。哪边改了名前另一边必须一起改——
+    所以这里直接钉住两处都还认得这个名字。"""
+    script = (REPO_ROOT / "scripts" / "deploy_frontend.sh").read_text(encoding="utf-8")
+    assert "LiveTradingPage*.js" in script, "deploy_frontend.sh 的本机栏目判据不见了"
+    patterns = [p for p, _ in pack_rules.PRIVATE_CHUNKS]
+    assert any("LiveTradingPage" in p for p in patterns), "闸门这边的判据不见了"
+    for rel in PRIVATE_CHUNKS:
+        assert any(pack_rules.matches_pattern(p, rel) for p in patterns), (
+            f"{rel} 不再被任何一条私有栏目判据覆盖"
+        )
+
+
+def test_find_private_chunks_scans_a_frontend_dist(tmp_path: Path) -> None:
+    """构建期那一道（`build_windows_pack.sh` 第 90 行附近）走的入口。
+
+    它扫的是**前端产物目录**而不是 staging，所以规则里那层 ``web/`` 前缀由本函数补。
+    前缀补错（比如漏了 ``web/``）时模式一个都匹配不上——闸门静默空转，构建期那道
+    就白设了，所以这里连「命中」带「不误报」一起钉。
+    """
+    dist = tmp_path / "dist-react"
+    live_js, live_css = (
+        PRIVATE_CHUNKS[0].split("/", 1)[1],
+        PRIVATE_CHUNKS[1].split("/", 1)[1],
+    )
+    _write(dist, live_js, "// live column\n")
+    _write(dist, live_css, "/* live column */\n")
+    _write(dist, "index.html", "<html></html>\n")
+    _write(dist, "assets/MarketPage-AAAA1111.js", "// normal chunk\n")
+
+    assert pack_rules.find_private_chunks(dist) == sorted(
+        [PRIVATE_CHUNKS[0], PRIVATE_CHUNKS[1]]
+    )
+
+
+def test_find_private_chunks_on_a_clean_dist_is_empty(tmp_path: Path) -> None:
+    """干净产物必须零命中——否则每次构建都白报一次，护栏会被无视。"""
+    dist = tmp_path / "dist-react"
+    _write(dist, "index.html", "<html></html>\n")
+    _write(dist, "assets/MarketPage-AAAA1111.js", "// normal chunk\n")
+    assert pack_rules.find_private_chunks(dist) == []
 
 
 def test_planted_live_node_frontend_shape_is_fatal(tmp_path: Path) -> None:
@@ -421,10 +605,11 @@ def test_zip_with_two_roots_is_rejected(tmp_path: Path) -> None:
 def test_excluded_content_is_not_scanned(tmp_path: Path) -> None:
     """已排除的文件不再做内容判读：``models/users`` 上千个文件不该被逐个读一遍。"""
     stage, env = _clean(tmp_path)
+    leak = _probe_value("Nettle", "92b4", "Qq")
     _write(
-        stage, "backend/config/users/db_user_001.json", '{"password": "Nettle92b4Qq"}\n'
+        stage, "backend/config/users/db_user_001.json", f'{{"password": "{leak}"}}\n'
     )
-    _write(stage, "models/users/mine/leak.json", '{"token": "Nettle92b4Qq"}\n')
+    _write(stage, "models/users/mine/leak.json", f'{{"token": "{leak}"}}\n')
     proc = _verify(stage, env)
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "明文口令" not in proc.stdout
@@ -494,5 +679,9 @@ def test_is_published_only_covers_tracked_literals(tmp_path: Path) -> None:
     """已跟踪文件里的字面量 = 已经公开（本仓是公开仓），拿它当探针只会淹掉护栏；
     git 不可用时一律**保守留作探针**（宁可多报也不放过）。"""
     assert pack_rules.is_published("QuantMind", REPO_ROOT) is True
-    assert pack_rules.is_published("Zq7xNettle92b4Qq", REPO_ROOT) is False
+    # 这个值在本仓任何跟踪文件里都**搜不到整串**（探针一律碎片拼出，见 _probe_value）
+    assert (
+        pack_rules.is_published(_probe_value("Zq7x", "Nettle", "92b4Qq"), REPO_ROOT)
+        is False
+    )
     assert pack_rules.is_published("QuantMind", tmp_path) is False  # 没有 .git
