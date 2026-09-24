@@ -13,12 +13,15 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 from dataclasses import fields
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 import pytest
 
 from backend.services.trade.services import decision_round_alerts as A
+from backend.services.trade.services import decision_round_runner as RUNNER
 from backend.services.trade.services import decision_round_tick as TICK
 from backend.services.trade.services.decision_round_core import (
     CST,
@@ -430,3 +433,459 @@ async def test_a_broken_account_lookup_does_not_break_the_round(monkeypatch) -> 
     assert len(out) == 1 and out[0].status == STATUS_ABORTED
     assert notifier.calls == []
     assert any(c[0] == "set" and c[2] is False for c in native.calls)  # 状态键写了
+
+
+# ── 停滞：worker 活着，但整天一轮都没跑成 ──────────────────────────────
+# 四类 ``alert_round`` 告警的判据都吃 ``RoundResult``——**都以「跑过一轮」为前提**。
+# 每个 tick 都被更早的闸门挡回（典型：交易日历不可用 → is_trading_day 抛）时一个
+# RoundResult 都不产生，四种告警一条都不发；而 C07 判的是**进程心跳**，心跳写在循环
+# 体顶部，进程活着它就新鲜。于是「面板全绿、整天没决策」。本组测的就是这一类的判据。
+#
+# 纪律（见 ``verification-vacuous-pass-guard`` 第九/十形态）：
+# ①**时刻一律注入**（``now=``），绝不读墙上钟——否则白天绿、收盘后红；
+# ②``_STALL_SEEN`` 是**模块级进程内去重集**，生产里一天一进程、测试里不清就会
+#   前一个用例把后一个用例静默压掉，故 autouse fixture 前后各清一次。
+LAST_HHMM = SLOTS[-1].hhmm  # 14:45
+_DAY_STR = DAY.isoformat()
+
+
+def _at_due(grace_min: int = 45) -> datetime:
+    """过了最后槽位 + 宽限的时刻（缺省 15:30）——**注入**，不看墙上钟。"""
+    last = SLOTS[-1]
+    return last.due_at(DAY) + timedelta(minutes=grace_min)
+
+
+def _entry(day: date = DAY, **over) -> str:
+    payload = {"day": day.isoformat(), "status": STATUS_OK, "round_id": "rnd-x-1445"}
+    payload.update(over)
+    return json.dumps(payload, ensure_ascii=False)
+
+
+@pytest.fixture(autouse=True)
+def _clear_stall_seen():
+    """``_STALL_SEEN`` 是模块级去重集：用例之间必须归零（见本组开头的纪律②）。"""
+    RUNNER._STALL_SEEN.clear()
+    yield
+    RUNNER._STALL_SEEN.clear()
+
+
+def test_before_the_last_slot_a_missing_round_is_normal() -> None:
+    """还没到点：上午十点「今天还没有轮次」是**对的**，不许报。"""
+    assert (
+        A.stall_alert(
+            now=datetime(2026, 9, 24, 10, 0, tzinfo=CST),
+            raw_entries=[],
+            expect_rounds=True,
+            grace_min=45,
+        )
+        is None
+    )
+
+
+def test_the_grace_boundary_is_closed_on_the_due_side() -> None:
+    """边界：差一分钟不报、到点就报（``>=``）——免得靠「差一点点」蒙混。"""
+    assert not A.stall_due(
+        _at_due() - timedelta(seconds=1), grace_min=45, last_slot=SLOTS[-1]
+    )
+    assert A.stall_due(_at_due(), grace_min=45, last_slot=SLOTS[-1])
+
+
+def test_a_non_trading_day_never_reports_a_stall() -> None:
+    """周末 worker 照样每 30s 醒一次，此时「没有轮次」是对的——推它等于每周误报两天。"""
+    assert (
+        A.stall_alert(
+            now=_at_due(),
+            raw_entries=[],
+            expect_rounds=False,
+            grace_min=45,
+        )
+        is None
+    )
+
+
+def test_a_day_with_a_round_is_not_a_stall() -> None:
+    assert (
+        A.stall_alert(
+            now=_at_due(), raw_entries=[_entry()], expect_rounds=True, grace_min=45
+        )
+        is None
+    )
+
+
+def test_an_empty_log_is_a_stall_that_names_the_day() -> None:
+    """空日志 ⇒ 报，且标题里必须有**日期**：值班要一眼看出停的是哪一天。"""
+    alert = A.stall_alert(
+        now=_at_due(), raw_entries=[], expect_rounds=True, grace_min=45
+    )
+    assert alert is not None
+    assert alert.kind == A.ALERT_STALLED
+    assert alert.level == "error"
+    assert _DAY_STR in alert.title
+    # 成因与两个入口都要在正文里：只说「没跑」等于让值班自己摸
+    assert LAST_HHMM[:2] + ":" + LAST_HHMM[2:] in alert.content
+    assert A.MANUAL_DIAGNOSE_HINT in alert.content
+    assert A.MANUAL_RERUN_HINT in alert.content
+
+
+def test_only_todays_round_counts() -> None:
+    """log 保留 20 条、**跨日存活**：昨天的轮次不能把今天的停滞压下去。"""
+    yesterday = date(2026, 9, 23)
+    assert (
+        A.stall_alert(
+            now=_at_due(),
+            raw_entries=[_entry(yesterday), _entry(yesterday)],
+            expect_rounds=True,
+            grace_min=45,
+        )
+        is not None
+    )
+
+
+def test_unreadable_entries_report_a_stall_rather_than_pass() -> None:
+    """读不懂的条目**一律不算「跑过了」**：判据的失败方向必须是报出来。
+
+    这一组正是「假通过」的温床——若实现写成「解析失败就 continue 并当没事」，
+    日志被写坏的那天就会静默；写成本用例这样才与「宁可误报」一致。
+    """
+    junk: list[object] = [
+        "{不合法 json",
+        "3",
+        "[1, 2]",
+        '{"no_day": 1}',
+        b"\xff\xfe",
+        None,
+        123,
+    ]
+    assert (
+        A.stall_alert(now=_at_due(), raw_entries=junk, expect_rounds=True, grace_min=45)
+        is not None
+    )
+    # 正向对照（防本用例变成「反正都报」的恒真断言）：合法且是今天的条目**不报**
+    assert (
+        A.stall_alert(
+            now=_at_due(),
+            raw_entries=[*junk, _entry()],
+            expect_rounds=True,
+            grace_min=45,
+        )
+        is None
+    )
+
+
+def test_the_calendar_note_reaches_the_reader() -> None:
+    """日历不可用是**最常见的成因**，附注必须原样进正文（值班据此决定去不去看 C13）。"""
+    alert = A.stall_alert(
+        now=_at_due(),
+        raw_entries=[],
+        expect_rounds=True,
+        grace_min=45,
+        calendar_note="交易日历不可用（DateOutOfBounds），按「工作日」推断。",
+    )
+    assert alert is not None
+    assert "DateOutOfBounds" in alert.content
+
+
+@pytest.mark.asyncio
+async def test_a_stall_is_pushed_once_even_when_the_dedupe_store_is_gone() -> None:
+    """**Redis 全丢**时靠 ``seen`` 兜住重复：Redis 挂了既是常见成因，也让去重键写不下去。
+
+    没有 ``seen`` 时这里会退化成每 ``POLL_S`` 一条（30 分钟推 60 条），把人训练成
+    不看通知——而「不看通知」正好废掉整条可见性链。
+    """
+    notifier = SpyNotifier()
+    kw = {
+        "now": _at_due(),
+        "raw_entries": [],
+        "expect_rounds": True,
+        "grace_min": 45,
+        "user_id": "u1",
+        "notifier": notifier,
+        "redis": None,  # 去重装置整个没了
+        "seen": set(),
+    }
+    assert await A.alert_stall(**kw)
+    assert not await A.alert_stall(**kw)  # 第二次：本进程那把 seen 拦住
+    assert len(notifier.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_the_stall_key_is_what_survives_a_restart() -> None:
+    """跨重启那把是 Redis 键：换了进程（``seen`` 空）也不许再推一条。"""
+    redis, notifier = FakeRedis(), SpyNotifier()
+    kw = {
+        "now": _at_due(),
+        "raw_entries": [],
+        "expect_rounds": True,
+        "grace_min": 45,
+        "user_id": "u1",
+        "notifier": notifier,
+        "redis": redis,
+    }
+    assert await A.alert_stall(**kw, seen=set())
+    assert not await A.alert_stall(**kw, seen=set())  # 新进程：只认 Redis
+    assert len(notifier.calls) == 1
+    assert A.stall_key(DAY) in redis.store
+    # 键形不带家段：停滞是账户级事实（见 stall_key 的 docstring）
+    assert ":stalled" in A.stall_key(DAY) and "pro" not in A.stall_key(DAY)
+
+
+@pytest.mark.asyncio
+async def test_no_push_when_a_round_ran_but_the_same_pipe_still_pushes() -> None:
+    """「有轮次就不推」必须配**正向对照**，否则断言 ``calls == []`` 恒真。
+
+    两条路各用**全新的去重装置**：共用的话，「不推」可能只是被上一条写的去重键挡住，
+    与判据毫无关系——那正是假通过。
+    """
+    notifier = SpyNotifier()
+    not_ran = {
+        "now": _at_due(),
+        "raw_entries": [_entry()],
+        "expect_rounds": True,
+        "grace_min": 45,
+        "user_id": "u1",
+        "notifier": notifier,
+        "redis": FakeRedis(),
+        "seen": set(),
+    }
+    assert not await A.alert_stall(**not_ran)
+    assert notifier.calls == []
+    # 正向对照：同一条管路、只把日志换成空的 ⇒ 推得出去（证明上一步的沉默来自判据）
+    assert await A.alert_stall(
+        now=_at_due(),
+        raw_entries=[],
+        expect_rounds=True,
+        grace_min=45,
+        user_id="u1",
+        notifier=notifier,
+        redis=FakeRedis(),
+        seen=set(),
+    )
+    assert len(notifier.calls) == 1
+
+
+# ── 驱动层：谁在什么时候问这个问题 ────────────────────────────────────
+# 判据在 ``alerts``、取数在 ``runner``。这一层测两件事：**日历三态怎么收口**、以及
+# **循环真的每周期都问**（后者必须是行为测试——删掉循环里那行调用要能变红，
+# 字符串断言证明不了「跑得起来」，见 ``verification-vacuous-pass-guard`` 第四形态）。
+class _VerdictService:
+    """``TradingCalendarService`` 替身：只铺本路径会碰的那一个方法。"""
+
+    def __init__(self, verdict=None, source=None, raises=None) -> None:
+        self._verdict, self._source, self._raises = verdict, source, raises
+
+    async def trading_day_verdict(self, **_kw):
+        if self._raises is not None:
+            raise self._raises
+        return self._verdict, self._source
+
+
+def _patch_calendar(monkeypatch, service) -> None:
+    import backend.shared.trading_calendar as cal
+
+    monkeypatch.setattr(cal, "TradingCalendarService", lambda: service)
+
+
+WEEKDAY = date(2026, 9, 24)  # 周四
+SATURDAY = date(2026, 9, 26)
+
+
+@pytest.mark.asyncio
+async def test_the_authoritative_verdict_is_used_as_is(monkeypatch) -> None:
+    _patch_calendar(monkeypatch, _VerdictService(True, "exchange_calendar"))
+    assert await RUNNER._expect_rounds_today(WEEKDAY) == (True, "")
+
+
+@pytest.mark.asyncio
+async def test_a_holiday_from_the_authoritative_calendar_is_respected(
+    monkeypatch,
+) -> None:
+    """权威日历说「休市」就得安静：国庆/中秋不是交易日，本来就不该有轮次。"""
+    _patch_calendar(monkeypatch, _VerdictService(False, "exchange_calendar"))
+    assert await RUNNER._expect_rounds_today(WEEKDAY) == (False, "")
+
+
+@pytest.mark.asyncio
+async def test_a_degraded_calendar_on_a_weekday_is_treated_as_expecting_rounds(
+    monkeypatch,
+) -> None:
+    """**降级的三态收口**：日历读不到时工作日按「该出」办——正是这种日子决策层停摆
+    （每个 tick 都被 fail-closed 拒跑），最需要有人知道；且附注必须带上成因。"""
+    _patch_calendar(monkeypatch, _VerdictService(True, "weekday_fallback"))
+    expect, note = await RUNNER._expect_rounds_today(WEEKDAY)
+    assert expect is True
+    assert "降级" in note
+
+
+@pytest.mark.asyncio
+async def test_a_degraded_calendar_on_the_weekend_stays_quiet(monkeypatch) -> None:
+    """第二半同样重要：周末 + 降级**不能**报——否则每周误报两天，人就把它静音了。"""
+    _patch_calendar(monkeypatch, _VerdictService(True, "weekday_fallback"))
+    expect, note = await RUNNER._expect_rounds_today(SATURDAY)
+    assert expect is False
+    assert note  # 成因照留（日志里有它，排查看得见）
+
+
+@pytest.mark.asyncio
+async def test_a_calendar_that_raises_does_not_escape(monkeypatch) -> None:
+    """抛异常与降级同办：都是「日历这层不可用」。"""
+    _patch_calendar(
+        monkeypatch, _VerdictService(raises=RuntimeError("DateOutOfBounds"))
+    )
+    expect, note = await RUNNER._expect_rounds_today(WEEKDAY)
+    assert expect is True
+    assert "DateOutOfBounds" in note
+
+
+class _LogRedis:
+    """只铺停滞检查要用的两个动作（``lrange`` 读日志；去重键走 set/get）。"""
+
+    def __init__(self, entries: list[str]) -> None:
+        self.entries = entries
+        self.store: dict[str, str] = {}
+        self.lrange_calls: list[tuple] = []
+
+    def lrange(self, key, start, end):
+        self.lrange_calls.append((key, start, end))
+        return list(self.entries)
+
+    def set(self, key, value, nx=False, ex=None):  # noqa: A002 - 与 redis-py 同形
+        if nx and key in self.store:
+            return None
+        self.store[key] = value
+        return True
+
+    def get(self, key):
+        return self.store.get(key)
+
+
+def _patch_stall_env(monkeypatch, *, redis, now, service) -> SpyNotifier:
+    """把 ``_stall_watch`` 的三个外界分别接上：时钟、Redis、日历、通知器。"""
+    import backend.shared.decision_context_source as ctx
+
+    monkeypatch.setattr(ctx, "now_cn", lambda: now)
+    monkeypatch.setattr(RUNNER, "native_redis_client", lambda: redis, raising=False)
+    import backend.services.trade.services.decision_round_io as IO
+
+    monkeypatch.setattr(IO, "native_redis_client", lambda: redis)
+    _patch_calendar(monkeypatch, service)
+    notifier = SpyNotifier()
+    monkeypatch.setattr(A, "default_notifier", lambda: notifier)
+    return notifier
+
+
+@pytest.mark.asyncio
+async def test_stall_watch_reads_the_log_and_pushes_on_a_dead_day(monkeypatch) -> None:
+    redis = _LogRedis([])
+    notifier = _patch_stall_env(
+        monkeypatch,
+        redis=redis,
+        now=_at_due(),
+        service=_VerdictService(True, "exchange_calendar"),
+    )
+    await RUNNER._stall_watch()
+    assert redis.lrange_calls, "必须真去读当天日志（否则判据吃的是空集）"
+    assert len(notifier.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_stall_watch_is_silent_before_it_is_due(monkeypatch) -> None:
+    """未到点就不该问 Redis/日历——worker 每 30s 一次，绝大多数 tick 的答案都是这个。
+
+    正向对照同上：同一套替身、只把时刻推到到点，必须推得出去。
+    """
+    early = datetime(2026, 9, 24, 10, 0, tzinfo=CST)
+    redis = _LogRedis([])
+    early_notifier = _patch_stall_env(
+        monkeypatch,
+        redis=redis,
+        now=early,
+        service=_VerdictService(True, "exchange_calendar"),
+    )
+    await RUNNER._stall_watch()
+    assert redis.lrange_calls == []
+    assert early_notifier.calls == []
+
+    # 正向对照：同一条管路、只把时刻推到到点 ⇒ 推得出去（证明上一步的沉默来自时刻闸门）
+    due_notifier = _patch_stall_env(
+        monkeypatch,
+        redis=redis,
+        now=_at_due(),
+        service=_VerdictService(True, "exchange_calendar"),
+    )
+    await RUNNER._stall_watch()
+    assert len(due_notifier.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_stall_watch_is_silent_when_todays_round_is_in_the_log(
+    monkeypatch,
+) -> None:
+    redis = _LogRedis([_entry()])
+    notifier = _patch_stall_env(
+        monkeypatch,
+        redis=redis,
+        now=_at_due(),
+        service=_VerdictService(True, "exchange_calendar"),
+    )
+    await RUNNER._stall_watch()
+    assert redis.lrange_calls
+    assert notifier.calls == []
+
+
+@pytest.mark.asyncio
+async def test_stall_watch_never_raises_when_redis_is_down(monkeypatch) -> None:
+    """Redis 挂了是「整天没跑成」的常见成因：此时既读不到日志也推不出去，
+    但**调用点不许因此炸**（它跑在刚结束一轮的循环里）。"""
+
+    def boom():
+        raise RuntimeError("redis 全挂了")
+
+    monkeypatch.setattr(RUNNER, "native_redis_client", boom, raising=False)
+    import backend.services.trade.services.decision_round_io as IO
+
+    monkeypatch.setattr(IO, "native_redis_client", boom)
+    import backend.shared.decision_context_source as ctx
+
+    monkeypatch.setattr(ctx, "now_cn", lambda: _at_due())
+    _patch_calendar(monkeypatch, _VerdictService(True, "exchange_calendar"))
+    notifier = SpyNotifier()
+    monkeypatch.setattr(A, "default_notifier", lambda: notifier)
+
+    await RUNNER._stall_watch()  # 不抛即通过
+    assert len(notifier.calls) == 1  # 读不到日志 ⇒ 按「没跑过」报（fail-loud）
+
+
+@pytest.mark.asyncio
+async def test_the_worker_loop_asks_the_stall_question_every_cycle(monkeypatch) -> None:
+    """**行为测试**：循环体里那行调用被删掉时本用例必须变红。
+
+    ``round_tick`` 换成「永远空手而归」（正是停摆那天的样子），``_stall_watch`` 换成
+    记账替身；``_poll_s`` 归零让循环转得起来，跑几个周期后取消。
+    """
+    import backend.shared.env_flags as flags
+
+    monkeypatch.setattr(flags, "env_flag", lambda *_a, **_k: True)
+    monkeypatch.setattr(RUNNER, "_poll_s", lambda: 0)
+    monkeypatch.setattr(RUNNER, "_grace_min", lambda: 45)
+
+    async def empty_tick(**_kw):
+        return ()
+
+    monkeypatch.setattr(RUNNER, "round_tick", empty_tick)
+    seen_calls: list[int] = []
+
+    async def spy_watch() -> None:
+        seen_calls.append(1)
+
+    monkeypatch.setattr(RUNNER, "_stall_watch", spy_watch)
+    import backend.shared.scheduler_registry as sched
+
+    monkeypatch.setattr(sched, "heartbeat", lambda *_a, **_k: None)
+
+    task = asyncio.create_task(RUNNER.run_decision_round_worker())
+    for _ in range(5):
+        await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert seen_calls, "循环每周期都必须问一次停滞问题（空 tick 时更必须问）"

@@ -31,6 +31,8 @@ import logging
 import os
 import sys
 from collections.abc import Sequence
+from datetime import date
+from typing import Any
 
 from backend.services.trade.services.decision_round_core import (
     DEFAULT_GRACE_MIN,
@@ -41,6 +43,7 @@ from backend.services.trade.services.decision_round_core import (
     SLOTS,
     SLOTS_BY_HHMM,
     STATUS_SKIPPED,
+    TENANT_ID,
     RoundResult,
     due_slots,
 )
@@ -61,6 +64,97 @@ def _grace_min() -> int:
         return max(0, int(os.getenv(ENV_GRACE_MIN, "") or DEFAULT_GRACE_MIN))
     except ValueError:
         return DEFAULT_GRACE_MIN
+
+
+#: 停滞告警的**本进程**去重集（见 ``alert_delivery.deliver_alert`` 的 ``seen``）。
+#: 循环调用的判据必须传它：Redis 挂掉既是「整天没跑成」的常见成因，也让去重键写不
+#: 下去——不传就是每 ``POLL_S`` 推一条。
+_STALL_SEEN: set[str] = set()
+
+
+async def _expect_rounds_today(day: date) -> tuple[bool, str]:
+    """今天该不该出轮次 + 日历附注（「日历读不到」这一态的收口处）。
+
+    正常日子 = 「今天是交易日」的权威判定。日历读不到（未安装 / 超出覆盖年限 /
+    拉取失败）时返回 **工作日就算该出**——这是**故意选的方向**：``weekday_fallback``
+    意味着决策轮的交易日闸门每个 tick 都 fail-closed 拒跑（``io._is_trading_day``），
+    也就是**恰好这种日子最需要有人知道决策层停了**；周末本来就没有轮次，挡掉它不会
+    误报，故「工作日」这一半照旧沿用日历自己的降级口径。
+    """
+    from backend.shared.simulation_account_keys import resolve_db_account_user
+    from backend.shared.trading_calendar import (
+        SRC_WEEKDAY_FALLBACK,
+        TradingCalendarService,
+    )
+    from backend.services.trade.services.decision_round_core import ENV_ACCOUNT_USER
+
+    weekday = day.weekday() < 5
+    try:
+        verdict, source = await TradingCalendarService().trading_day_verdict(
+            market="CN",
+            trade_date=day,
+            tenant_id=TENANT_ID,
+            user_id=resolve_db_account_user(ENV_ACCOUNT_USER),
+        )
+    except Exception as exc:  # noqa: BLE001 日历不可用 ⇒ 工作日按「该出」办
+        return weekday, (
+            f"交易日历不可用（{type(exc).__name__}: {exc}），按「工作日」推断。"
+        )
+    if source == SRC_WEEKDAY_FALLBACK:
+        return weekday, (
+            "交易日历降级为「只看周末」：决策轮的交易日闸门会拒跑（fail-closed），"
+            "今天大概率一轮都不会出。"
+        )
+    return bool(verdict), ""
+
+
+async def _stall_watch() -> None:
+    """worker 活着但整天没跑成一轮 ⇒ 推一条（一天一次）。判据在 ``alerts``，这里只取数。
+
+    与 C07 心跳**互补**：心跳写在循环体顶部，进程活着它就新鲜，因而「活着但不出活」
+    这一类它判不出（见 ``decision_round_alerts.stall_alert``）。本函数只在**过了最后
+    槽位 + 宽限**之后才问 Redis 与日历——worker 每 ``POLL_S``（缺省 30s）醒一次，
+    绝大多数 tick 的答案都是「还没到点」。
+    """
+    from backend.shared.decision_context_source import now_cn
+    from backend.services.trade.services import decision_round_alerts as alerts
+    from backend.services.trade.services.decision_round_core import LOG_KEY
+
+    now = now_cn()
+    grace = _grace_min()
+    if not alerts.stall_due(now, grace_min=grace):
+        return
+    expect, note = await _expect_rounds_today(now.date())
+    if not expect:
+        return  # 非交易日：没有轮次是对的，连 Redis 都不读
+
+    redis: Any = None
+    raw: list[Any] = []
+    try:
+        from backend.services.trade.services.decision_round_io import (
+            native_redis_client,
+        )
+
+        redis = native_redis_client()
+        raw = list(redis.lrange(LOG_KEY, 0, -1) or [])
+    except Exception as exc:  # noqa: BLE001 读不到日志 ⇒ 交给判据（空集 = 报）
+        logger.warning("[DecisionRound] 停滞检查读 log 失败: %s", exc)
+
+    try:
+        from backend.shared.simulation_account_keys import resolve_db_account_user
+        from backend.services.trade.services.decision_round_core import ENV_ACCOUNT_USER
+
+        await alerts.alert_stall(
+            now=now,
+            raw_entries=raw,
+            expect_rounds=expect,
+            grace_min=grace,
+            user_id=resolve_db_account_user(ENV_ACCOUNT_USER),
+            redis=redis,
+            seen=_STALL_SEEN,
+        )
+    except Exception as exc:  # noqa: BLE001 可见性失败不许弄死循环
+        logger.warning("[DecisionRound] 停滞告警失败: %s", exc)
 
 
 async def run_decision_round_worker() -> None:
@@ -107,6 +201,12 @@ async def run_decision_round_worker() -> None:
                 )
         except Exception as exc:  # noqa: BLE001 循环不许死
             logger.error("[DecisionRound] tick 异常: %s", exc, exc_info=True)
+        # 「活着但整天不出活」的可见性：判据在 alerts，本层只负责「什么时候问」。
+        # 与 tick 分开 try：可见性问题绝不许影响下一轮决策。
+        try:
+            await _stall_watch()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[DecisionRound] 停滞检查异常: %s", exc)
         await asyncio.sleep(_poll_s())
 
 
