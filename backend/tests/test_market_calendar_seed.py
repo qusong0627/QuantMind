@@ -739,11 +739,14 @@ class TestCli:
         assert cli._incomplete_groups([{"market": "A"}]) == []
 
     def test_status_names_legacy_keys_outside_any_group(self) -> None:
-        """库里的 ``market='A'``（9862 行 baostock 遗留、含周末全判交易日）要点名。
+        """库里冒出来的未知 market 键（``'A'`` 这类遗留痕迹）要点名。
 
-        它是**实测存在**的 fail-open 面：判定层不做别名归一，决策轮查 ``CN`` 看不到
-        它，但任何显式查 ``'A'`` 的调用方会拿到「周六也是交易日」。满屏
-        「A 2026 365 天」还容易被误读成「次年日历已补好」，所以必须说清它不是。
+        历史实例：9862 行 ``market='A'`` / ``source='baostock'``（含周末全判交易日），
+        2026-09-24 已从库里清掉（备份与回滚脚本在
+        ``/media/zbox/data/quantmind/backups_calendar_20260924/``）——正因为它**真的
+        存在过**才是 fail-open 面：判定层不做别名归一，决策轮查 ``CN`` 看不到它，
+        但任何显式查 ``'A'`` 的调用方会拿到「周六也是交易日」。满屏「A 2026 365 天」
+        还容易被误读成「次年日历已补好」，所以必须说清它不是。
         同样两个方向都钉：遗留键要点名，已知键要静默。
         """
         from backend.scripts import seed_trading_calendar as cli

@@ -249,12 +249,13 @@ def _incomplete_groups(inventory: list[dict]) -> list[str]:
 def _unknown_market_keys(inventory: list[dict]) -> list[str]:
     """库里存在、但**不在任何已知键组里**的 market（遗留数据的痕迹）。
 
-    真实的例子：本库有 9862 行 ``market='A'`` / ``source='baostock'``（2000–2026
-    全年、**含周末全部判交易日**）。判定层不做别名归一，所以决策轮（查 ``CN``）看不到
-    它们；但任何显式传 ``'A'`` 的调用方会查到，并且因为那批行把周末也写成交易日，
-    结果是 **fail-open**（该休市的日子判成可交易）。这些行不是本脚本写的，本脚本
-    也不删它——只把它**说出来**，否则运维看到满屏「A 2026 365 天」会误以为次年
-    日历已经补好。
+    真实的例子：库里曾有过 9862 行 ``market='A'`` / ``source='baostock'``（2000–2026
+    全年、**含周末全部判交易日**），2026-09-24 已删除（备份 CSV、回滚脚本与哈希
+    见 ``/media/zbox/data/quantmind/backups_calendar_20260924/``）。判定层不做别名
+    归一，所以决策轮（查 ``CN``）看不到它们；但任何显式传 ``'A'`` 的调用方会查到，
+    并且因为那批行把周末也写成交易日，结果是 **fail-open**（该休市的日子判成可
+    交易）。本脚本不负责删这类行——只把它**说出来**，否则运维看到满屏
+    「A 2026 365 天」会误以为次年日历已经补好。
     """
     known = {key for keys in seed.MARKET_KEY_GROUPS.values() for key in keys}
     totals: dict[str, int] = {}
