@@ -951,16 +951,31 @@ def backfill_default_inference(
     model_id: str | None = None,
     dry_run: bool = False,
 ) -> dict[str, Any]:
-    """工作日 06:30：补全所有用户默认模型推理缺口（含历史空洞）。
+    """工作日窗口内轮询：补全所有用户默认模型推理缺口（含历史空洞）。
 
     与前端「一键补全至最新」同链路（gap_backfill）：
     扫描 pred.parquet 覆盖，缺口上限截至 QuantDB 因子已产出日，
     逐日 InferenceScriptRunner 并合并回 pred.parquet。
-    数据同步窗口约 01:00–06:00，本任务安排在同步之后。
+    数据同步窗口约 01:00–06:00，本任务在窗口内每 30 分钟轮询，
+    无缺口时直接跳过（上游分区晚到也能在当天补上）。
     """
     from backend.services.engine.inference.gap_backfill import (
         backfill_all_default_models,
     )
+
+    # 轮询窗口防重入：全量调度（无过滤条件）拿不到锁说明上一轮仍在跑，跳过；
+    # 带 tenant/user/model 的手动调用不受锁限制。Redis 不可用时降级放行。
+    if not (tenant_id or user_id or model_id) and not dry_run:
+        from zoneinfo import ZoneInfo as _ZoneInfo
+
+        _today = datetime.now(_ZoneInfo("Asia/Shanghai")).date().isoformat()
+        if not _try_acquire_strategy_lock(
+            "default_backfill", _today, owner="celery_backfill_default_inference"
+        ):
+            logger.info(
+                "[DefaultInferenceBackfill] 上一轮仍在执行（锁占用），本周期跳过"
+            )
+            return {"status": "skipped", "reason": "LOCK_HELD"}
 
     try:
         result = _run_async(

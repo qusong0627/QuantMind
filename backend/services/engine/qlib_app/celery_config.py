@@ -96,17 +96,29 @@ NEWS_ENRICH_ENABLED = os.getenv("NEWS_ENRICH_ENABLED", "true").lower() == "true"
 NEWS_ENRICH_INTERVAL_SEC = int(os.getenv("NEWS_ENRICH_INTERVAL_SEC", "60"))
 NEWS_MATCHER_RELOAD_SEC = int(os.getenv("NEWS_MATCHER_RELOAD_SEC", "600"))
 
+# 推理缺口轮询窗口（工作日）。上游 QuantDB 因子分区落盘时间不固定（实测可晚至
+# 当日中午），固定单点会漏掉当天才落盘的分区、使推理整体滞后一天；改为窗口内
+# 每 30 分钟轮询：任务自带「无缺口则跳过」门控，因子到齐后的那次自然补上，
+# 只有真存在缺口时才会跑推理。覆盖：AUTO_INFERENCE_POLL_MINUTE /
+# AUTO_INFERENCE_POLL_HOUR。
+AUTO_INFERENCE_POLL_MINUTE = os.getenv("AUTO_INFERENCE_POLL_MINUTE", "0,30")
+AUTO_INFERENCE_POLL_HOUR = os.getenv("AUTO_INFERENCE_POLL_HOUR", "6-10")
+
 # Celery配置
 beat_schedule = {}
 if AUTO_INFERENCE_ENABLED:
     beat_schedule = {
-        # 数据同步约 01:00–06:00 完成后，工作日 06:30 补全所有用户默认模型
-        # 推理缺口（含历史中间空洞），链路同前端「一键补全至最新」。
+        # 数据同步约 01:00–06:00 完成后，工作日按窗口轮询补全所有用户「默认
+        # 模型」的推理缺口（含历史中间空洞），链路同前端「一键补全至最新」。
         # 原 08:00 auto_inference_if_needed（用户开关 + running 组合）已下线，
         # 统一收敛到本任务；任务函数仍保留供紧急手动 celery call。
         "backfill-default-inference-weekdays": {
             "task": "engine.tasks.backfill_default_inference",
-            "schedule": crontab(minute="30", hour="6", day_of_week="1-5"),
+            "schedule": crontab(
+                minute=AUTO_INFERENCE_POLL_MINUTE,
+                hour=AUTO_INFERENCE_POLL_HOUR,
+                day_of_week="1-5",
+            ),
         },
         # 推理质量回填：每日 02:30 回填已完成推理但缺 quality 记录的日期
         # （滞后 5 天等真实收益兑现，算生产 Rank IC）
