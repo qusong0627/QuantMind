@@ -827,11 +827,14 @@ class TestP3InferenceWiring:
         assert "pool_resolver.resolve_sync(" in src
         assert "await pool_resolver" not in src
 
-    def test_router_service_forwards_pool_id_on_both_paths(self):
+    def test_router_service_forwards_pool_id_to_runner(self):
         src = self._src("services/engine/inference/router_service.py")
         assert "pool_id: str | None = None," in src
-        # 主模型路径 + alpha158 兜底路径都要带上
-        assert src.count("pool_id=pool_id") >= 2
+        # 系统内置 model_qlib/alpha158 兜底链已下线（见 router_service
+        # 「用户模型失败时不再补位」），推理只剩 runner.execute 单条路径；
+        # pool_id 必须透传给 script_runner 做严格池过滤，漏传=全市场信号混入
+        assert "runner.execute(" in src
+        assert src.count("pool_id=pool_id") >= 1
 
     def test_user_api_exposes_pool_id(self):
         src = self._src("services/api/routers/model_training.py")
