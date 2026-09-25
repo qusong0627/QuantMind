@@ -18,16 +18,12 @@ Ubuntu 22.04 / 24.04 is supported. The recommended production method is the comp
 ```bash
 # Complete deployment (full package from CDN, production-ready)
 curl -fsSL https://gitee.com/qusong0627/QuantMind/raw/master/deploy/full-deploy.sh | sudo bash
-
-# Online source deployment
-curl -fsSL https://gitee.com/qusong0627/QuantMind/raw/master/deploy/deploy.sh | sudo bash
 ```
 
 The default complete package URL is `https://cdn.quantmind.cloud/quantmind-offline`. To update an existing server:
 
 ```bash
-cd /opt/quantmind
-sudo bash deploy/update.sh
+cd /opt/quantmind && sudo bash deploy/update.sh --force
 ```
 
 | Service | Default URL |

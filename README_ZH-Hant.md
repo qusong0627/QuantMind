@@ -18,16 +18,12 @@ QuantMind 是面向中國 A 股量化研究與交易的一體化平台，將資�
 ```bash
 # 完整線上部署（自 CDN 下載完整包，開箱即用）
 curl -fsSL https://gitee.com/qusong0627/QuantMind/raw/master/deploy/full-deploy.sh | sudo bash
-
-# 線上原始碼部署
-curl -fsSL https://gitee.com/qusong0627/QuantMind/raw/master/deploy/deploy.sh | sudo bash
 ```
 
 預設完整包位址為 `https://cdn.quantmind.cloud/quantmind-offline`。更新既有伺服器：
 
 ```bash
-cd /opt/quantmind
-sudo bash deploy/update.sh
+cd /opt/quantmind && sudo bash deploy/update.sh --force
 ```
 
 | 服務 | 預設位址 |

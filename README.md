@@ -90,14 +90,11 @@ curl -fsSL https://gitee.com/qusong0627/QuantMind/raw/master/deploy/full-deploy.
 
 * **Swagger API 文档**: `http://<服务器 IP>:8000/docs`
 
-### 2. 在线部署与平滑更新
+### 2. 平滑更新
 
 ```bash
-# 在线部署
-curl -fsSL https://gitee.com/qusong0627/QuantMind/raw/master/deploy/deploy.sh | sudo bash
-
 # 已部署服务器一键更新（不清除数据库与模型资产）
-sudo bash deploy/update.sh
+cd /opt/quantmind && sudo bash deploy/update.sh --force
 ```
 
 ### 3. 数据准备与 QuantDB 同步
