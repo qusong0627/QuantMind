@@ -3,7 +3,7 @@
 
 流程：
   1. 从 GitHub Releases 下载最新的 qlib_bin.tar.gz
-  2. 解压并更新 db/qlib_data/ (calendars, instruments, features)
+  2. 解压并更新规范 Qlib 目录 data/qlib/cn_data/ (calendars, instruments, features)
   3. 用 Qlib API 读取 OHLCV 数据，写入 PostgreSQL stock_daily_latest
   4. 可选：用 Qlib API 生成 parquet 快照到 db/feature_snapshots/
 
@@ -41,7 +41,14 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 # ── 配置 ──────────────────────────────────────────────────────────────────────
-QLIB_DATA_DIR = PROJECT_ROOT / "db" / "qlib_data"
+# A 股 Qlib 规范目录（与 qlib_paths / QlibDataBuilder / full-deploy 口径一致）：
+# 容器内为 /data/qlib/cn_data，宿主机直跑回落 PROJECT_ROOT/data/qlib/cn_data。
+# 禁止再写历史遗留的 db/qlib_data，避免「夜间同步写 A 目录、回测读 B 目录」。
+QLIB_DATA_DIR = (
+    Path("/data/qlib/cn_data")
+    if Path("/data").is_dir()
+    else PROJECT_ROOT / "data" / "qlib" / "cn_data"
+)
 FEATURE_SNAPSHOTS_DIR = PROJECT_ROOT / "db" / "feature_snapshots"
 DOWNLOAD_DIR = PROJECT_ROOT / "tmp" / "investment_data"
 REPO = "chenditc/investment_data"
@@ -102,7 +109,7 @@ def _download_asset(version: str, target: Path) -> None:
 
 
 def _extract_qlib_data(archive: Path) -> None:
-    """解压 qlib_bin.tar.gz 到 db/qlib_data/ 并同步到 investment_data 目录"""
+    """解压 qlib_bin.tar.gz 到规范 Qlib 目录并同步到 investment_data 目录"""
     _log(f"Extracting {archive} to {QLIB_DATA_DIR} ...")
     tmp_dir = DOWNLOAD_DIR / "extract"
     if tmp_dir.exists():

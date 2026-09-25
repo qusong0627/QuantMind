@@ -4,10 +4,10 @@
 目录布局：
     /opt/quantmind/db/parquet/{source}/{market}/{field}/{year}/{symbol}.parquet
 
-Qlib 导出：
-    /opt/quantmind/db/qlib_data/cn_data/features/{symbol}/{field}.day.bin
-    /opt/quantmind/db/qlib_data/cn_data/calendars/day.txt
-    /opt/quantmind/db/qlib_data/cn_data/instruments/all.txt
+Qlib 导出（规范目录，容器内挂载路径；与 backend/shared/qlib_paths.py 口径一致）：
+    /data/qlib/cn_data/features/{symbol}/{field}.day.bin
+    /data/qlib/cn_data/calendars/day.txt
+    /data/qlib/cn_data/instruments/all.txt
 
 写出策略：
 - Parquet 用 Zstd 压缩，单标的单年单文件，方便增量与并行。
@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 # 默认路径，允许 ENV 覆盖
 PARQUET_ROOT = Path(os.getenv("QM_PARQUET_ROOT", "/opt/quantmind/db/parquet"))
-QLIB_BIN_ROOT = Path(os.getenv("QM_QLIB_BIN_ROOT", "/opt/quantmind/db/qlib_data/cn_data"))
+QLIB_BIN_ROOT = Path(os.getenv("QM_QLIB_BIN_ROOT", "/data/qlib/cn_data"))
 
 
 class ParquetWriter:

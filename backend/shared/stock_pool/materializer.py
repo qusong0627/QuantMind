@@ -34,8 +34,18 @@ def pool_dir() -> Path:
 
 
 def qlib_data_dir() -> Path:
-    """Qlib 数据根目录（与 engine 的 QLIB_PROVIDER_URI 默认值一致）。"""
-    return Path(os.getenv("QLIB_PROVIDER_URI", "db/qlib_data"))
+    """Qlib 数据根目录（与 engine 读取端同源：统一走 qlib_paths 解析）。
+
+    QLIB_PROVIDER_URI 显式覆盖优先；否则由 qlib_paths 按固定目录
+    /data/qlib/cn_data 优先解析，避免股票池 instruments 落到旧 db/qlib_data
+    造成「物化写 A、回测读 B」的分裂缓存。
+    """
+    env_val = os.getenv("QLIB_PROVIDER_URI", "").strip()
+    if env_val:
+        return Path(env_val)
+    from backend.shared.qlib_paths import resolve_qlib_data_dir
+
+    return Path(resolve_qlib_data_dir("CN"))
 
 
 # ---------------------------------------------------------------------------
