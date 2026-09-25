@@ -325,6 +325,26 @@ install_payload_data() {
     rm -rf "$STAGING_DIR"
 }
 
+# 离线包的 postgres-all.sql（pg_dumpall）内嵌 `ALTER ROLE ... PASSWORD`，
+# 会把角色密码覆盖成打包机上的值，与本机 .env 生成的随机 DB_PASSWORD 不一致，
+# 导致后端 asyncpg 认证失败（登录 500：password authentication failed）。
+# 恢复/保留数据后统一把角色密码对齐到本机 compose 实际使用的值（幂等）。
+# 走本地 socket（pg_hba trust），无需旧密码。
+align_database_password() {
+    local pg_user pg_pass
+    pg_user="$(grep -E '^DB_USER=' "$PROJECT_DIR/.env" 2>/dev/null \
+        | head -1 | cut -d= -f2- | tr -d "\"' " || true)"
+    pg_user="${pg_user:-quantmind}"
+    pg_pass="$(grep -E '^(DB_PASSWORD|POSTGRES_PASSWORD)=' "$PROJECT_DIR/.env" 2>/dev/null \
+        | head -1 | cut -d= -f2- | tr -d "\"' " | head -c 200 || true)"
+    pg_pass="${pg_pass:-${POSTGRES_PASSWORD:-${DB_PASSWORD:-quantmind2026}}}"
+
+    docker exec quantmind-db psql -U "$pg_user" -d postgres -v ON_ERROR_STOP=1 \
+        -c "ALTER USER \"$pg_user\" WITH PASSWORD '$pg_pass'" >/dev/null \
+        || die "数据库角色密码对齐失败（用户 $pg_user）"
+    log "数据库角色密码已对齐到本机 .env 配置（用户 $pg_user）"
+}
+
 restore_database() {
     local archive="$PACKAGE_DIR/postgres-all.sql.zst"
     log '步骤 7/8：恢复 PostgreSQL 业务数据'
@@ -353,10 +373,12 @@ restore_database() {
         'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tAc "SELECT count(*) FROM pg_tables WHERE schemaname = '\''public'\''"')"
     if [[ "$table_count" != 0 && ${QUANTMIND_REPLACE_DATABASE:-false} != true ]]; then
         log "检测到已有 PostgreSQL 数据（$table_count 张表），保留现有数据"
-        return 0
+    else
+        zstd --decompress --stdout "$archive" \
+            | docker exec -i quantmind-db sh -lc 'psql -U "$POSTGRES_USER"'
     fi
-    zstd --decompress --stdout "$archive" \
-        | docker exec -i quantmind-db sh -lc 'psql -U "$POSTGRES_USER"'
+    # 无论走恢复还是保留分支都对齐一次：dump 会覆盖密码，历史部署也可能残留不一致。
+    align_database_password
 }
 
 restore_qwenpaw_volumes() {
