@@ -126,6 +126,9 @@ run/*.pid
 config/runtime.env
 # 本地 compose 覆盖（deploy/enable-gpu.sh 生成的 GPU 直通等；机器本地状态）
 docker-compose.override.yml
+# 离线初始化包制作脚本（维护端本地工具，不入库；服务器侧备份在仓库外
+# /opt/quantmind-offline-build/make-offline-pkg.sh）
+deploy/make-offline-pkg.sh
 *.pem
 *.key
 .ssh/
