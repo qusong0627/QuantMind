@@ -119,7 +119,7 @@ ssh ${SSH_TARGET} "cd ${PROJECT_DIR} && git pull && docker compose restart quant
 
 ### 4. QwenPaw（QuantBot）技能更新
 - **统一入口**：`bash scripts/quantbot_init.sh`（在服务器上、项目根目录执行）。一次完成：本地 `skills/` 全部技能经 API 导入技能池 → 广播到 `default` 工作区并启用 → 写入量化人格（SOUL/PROFILE/AGENTS）。
-- **部署脚本硬性规则**：`deploy/update.sh` / `deploy.sh` / `full-deploy.sh` 的技能同步**只允许**调用 `deploy/sync-qwenpaw-skills.sh`。该脚本经 `docker exec qwenpaw` 探活并执行 `quantbot_init`（容器内 `127.0.0.1:8088`）。**禁止**在部署脚本里再写 `curl http://127.0.0.1:$QWENPAW_PORT/health` 或在 updater 容器宿主网络外直跑 `quantbot_init`——Web 一键更新的 updater 是 bridge 网络，`127.0.0.1` 不是宿主，会导致「升级成功但技能/人格未同步」。
+- **部署脚本硬性规则**：`deploy/update.sh` / `deploy/full-deploy.sh` 的技能同步**只允许**调用 `deploy/sync-qwenpaw-skills.sh`。该脚本经 `docker exec qwenpaw` 探活并执行 `quantbot_init`（容器内 `127.0.0.1:8088`）。**禁止**在部署脚本里再写 `curl http://127.0.0.1:$QWENPAW_PORT/health` 或在 updater 容器宿主网络外直跑 `quantbot_init`——Web 一键更新的 updater 是 bridge 网络，`127.0.0.1` 不是宿主，会导致「升级成功但技能/人格未同步」。
 - **禁止手工拷贝技能目录**（如直接 `rsync`/`docker cp` 到 `skill_pool/` 或 `workspaces/default/skills/`）：磁盘文件与 `skill.json` 清单会漂移，导致后续上传冲突（31 个技能全量 conflict）且无法经 API 删除，只能逐个手工清理。
 - 只更新技能：`--skills-only`；只写人格：`--persona-only`。
 - 技能更新后需 `docker restart qwenpaw` 使其生效；验证用 `docker exec qwenpaw qwenpaw skills list`（技能数与启用数应一致）和 `docker exec qwenpaw qwenpaw skills test <name>`。

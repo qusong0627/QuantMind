@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # QuantMind AutoDL 训练节点「一键初始化」下载器。
 #
-# 作用：像 deploy/quick-deploy.sh 一样，无需先 scp，直接在 AutoDL 实例上一条命令
-#      拉取并执行 deploy/autodl/setup-autodl-native.sh（免 Docker 的 native_python 节点）。
+# 作用：无需先 scp，直接在 AutoDL 实例上一条命令拉取并执行
+#      deploy/autodl/setup-autodl-native.sh（免 Docker 的 native_python 节点）。
 #
 # 用法（AutoDL 实例上，保留 stdin 以便交互）：
 #   bash -c "$(curl -fsSL https://quantmindai.cn/gitea/qusong0627/QuantMind/raw/branch/master/deploy/autodl/quick-setup.sh)"

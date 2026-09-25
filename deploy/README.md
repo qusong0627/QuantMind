@@ -5,7 +5,6 @@
 | 方式 | 适用场景 | 入口 |
 | --- | --- | --- |
 | 完整部署 | 从 CDN 下载完整业务数据、模型与 Qlib 数据包，一键迁移；开箱即用 | `full-deploy.sh` |
-| 在线源码部署 | 新服务器可稳定访问代码和镜像仓库，部署后另行准备数据 | `deploy.sh` |
 | 一键更新 | 已部署服务器更新代码和核心服务 | `update.sh` |
 | AutoDL GPU 训练 | 主节点已就绪，把模型训练卸到 AutoDL 显卡实例（免 Docker） | `autodl/README.md` |
 
@@ -69,21 +68,6 @@ images.tar.zst；来不及重打包时，联网部署机会自动重建补齐（
 镜像）时执行 `sudo bash deploy/enable-gpu.sh`（`--cpu` 可回退）；也可用
 `TORCH_DEVICE=auto|cpu|gpu|skip` 直接覆盖（`auto` = 构建期动态探测：本地 wheel >
 基础镜像已含 torch > 构建机有 GPU > CPU）。打包与部署两侧须取同一取值，指纹才对得上。
-
-## 在线源码部署
-
-```bash
-sudo bash deploy/deploy.sh
-```
-
-常用参数：
-
-```bash
-sudo bash deploy/deploy.sh --ref NEXT
-sudo bash deploy/deploy.sh --force
-```
-
-在线脚本会安装运行时、配置 Docker 镜像加速、同步代码、首次生成 `.env`、构建核心镜像并启动 Compose 服务。
 
 ## 一键更新
 

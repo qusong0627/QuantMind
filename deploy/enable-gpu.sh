@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # QuantMind GPU 扩展脚本：把默认（CPU 版 torch）部署切换为 CUDA 版 torch。
 #
-# 初始部署（deploy.sh / full-deploy.sh）默认强制 TORCH_DEVICE=cpu：镜像小、构建快、
+# 初始部署（deploy/full-deploy.sh）默认强制 TORCH_DEVICE=cpu：镜像小、构建快、
 # 无 GPU 依赖。需要 GPU 推理/训练时用本脚本显式升级，并顺带开启 compose 的 GPU 直通。
 #
 # 用法:

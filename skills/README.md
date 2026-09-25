@@ -95,7 +95,7 @@ cp -r skills/<skill-name> ~/.claude/skills/
 
 ## 同步与校验（唯一入口）
 
-- 日常更新走部署链路自动同步：`deploy/update.sh` / `deploy.sh` / `full-deploy.sh` 统一调用 `deploy/sync-qwenpaw-skills.sh`（经 `docker exec qwenpaw` 跑 `quantbot_init`，避免 Web updater 容器打不到宿主 8088）；`--skip-skills` / `QUANTMIND_SKIP_SKILLS=true` 可跳过
+- 日常更新走部署链路自动同步：`deploy/update.sh` / `deploy/full-deploy.sh` 统一调用 `deploy/sync-qwenpaw-skills.sh`（经 `docker exec qwenpaw` 跑 `quantbot_init`，避免 Web updater 容器打不到宿主 8088）；`--skip-skills` / `QUANTMIND_SKIP_SKILLS=true` 可跳过
 - 手动同步：服务器上 `bash scripts/quantbot_init.sh`（或 `--skills-only`），再 `docker restart qwenpaw`
 - 更新技能后走 API 进技能池，**禁止手工拷贝**
 - 验证：`docker exec qwenpaw qwenpaw skills list`（技能数与启用数一致）+ `docker exec qwenpaw qwenpaw skills test <name>`

@@ -59,7 +59,7 @@ unzip quantmind-operations-skill.zip -d ~/.config/opencode/
 
 - "部署不上，帮我排查" → AI 按"问题排查"诊断树逐项定位
 
-- "一键部署" → AI 执行 `quick-deploy.sh`
+- "一键部署" → AI 执行 `deploy/full-deploy.sh`
 
 ### 推荐编程工具（部署环境）
 
@@ -128,7 +128,7 @@ docker info >/dev/null 2>&1 && echo "docker OK" || echo "docker 未安装（部�
 
 **网络差时的应对**：
 
-- 手动指定镜像源：`QUANTMIND_MIRROR=aliyun sudo bash deploy.sh`（或 `tuna`/`huaweicloud`）
+- 手动指定 Docker 镜像源：`QUANTMIND_DOCKER_MIRROR=https://你的加速域名 sudo -E bash deploy/full-deploy.sh`
 
 - Docker 镜像源：`/etc/docker/daemon.json` 配置 `registry-mirrors`（阿里云/腾讯云镜像加速）
 
@@ -155,47 +155,46 @@ sudo cp -r /opt/quantmind/data /opt/quantmind/data.bak.$(date +%Y%m%d)
 ## 2. 一键部署（推荐）
 
 ```bash
-# 需要 root 权限；默认固定到发布 tag v1.9.0-beta（可复现、可校验）
-curl -fsSL https://gitee.com/qusong0627/QuantMind/raw/v1.9.0-beta/deploy/quick-deploy.sh | sudo bash
+# 完整一键部署：从 CDN 下载完整业务数据/模型/Qlib 数据 + 镜像包，恢复后开箱即用
+curl -fsSL https://gitee.com/qusong0627/QuantMind/raw/master/deploy/full-deploy.sh | sudo bash
 
-# 使用最新 master（不推荐生产）
-QUANTMIND_DEPLOY_TAG=master curl -fsSL https://gitee.com/qusong0627/QuantMind/raw/master/deploy/quick-deploy.sh | sudo bash
-
-# 校验 deploy.sh 完整性（生产建议设置 SHA256）
-QUANTMIND_DEPLOY_SHA256=<sha256> QUANTMIND_DEPLOY_TAG=v1.9.0-beta sudo bash quick-deploy.sh
+# 自定义 CDN / 分支 / 镜像加速
+sudo QUANTMIND_OFFLINE_BASE_URL='https://cdn.example.com/quantmind-offline' \
+     QUANTMIND_REF='master' \
+     QUANTMIND_DOCKER_MIRROR='https://你的镜像加速域名' \
+     bash deploy/full-deploy.sh
 ```
 
-**部署 6 阶段**：
+**部署 8 阶段**（详见 `docs/部署指南.md` 第四节）：
 
-1. **系统准备**：更新依赖、装 Docker & Compose v2.19+、Node 20、Nginx
-2. **代码部署**：从 Gitee 克隆到 `/opt/quantmind`、配置 `.env`、创建数据目录
-3. **后端部署**：构建 Docker 镜像、启动 PG/Redis/QuantMind、**执行** **`db_init.sql`** **初始化数据库**
-4. **前端部署**：npm 依赖 + 构建 + PM2 启动
-5. **Nginx 配置**：反向代理
-6. **验证**：健康检查 + 防火墙
+1. 安装系统依赖与 Docker / Compose，配置镜像加速；
+2. 从 CDN 下载离线包并 SHA-256 全量校验（支持断点续传 / 复用）；
+3. 导入 Docker 镜像（9 个；`rsshub` 部署时在线拉取）；
+4. 拉取代码（支持 Compose/Dockerfile 受控覆盖层）；
+5. 恢复业务数据、模型与 Qlib 数据；
+6. 恢复 PostgreSQL 业务数据（已有数据默认保留）；
+7. 恢复 QwenPaw 持久化卷；
+8. 构建启动全部服务并自动配置 QwenPaw 运行时。
 
-## 3. 快速部署（已下载脚本）
+## 3. 源码部署（已下线）
 
-```bash
-sudo bash deploy/quick-deploy.sh
-# 指定服务器 IP（公网/局域网/localhost 自动检测）
-sudo bash deploy/deploy.sh localhost
-sudo bash deploy/deploy.sh 192.168.1.100
-QUANTMIND_SERVER_IP=192.168.1.100 sudo bash deploy/deploy.sh
-```
+> 在线源码部署脚本 `deploy/deploy.sh` / `quick-deploy.sh` 已从仓库移除。请使用第 2 节「一键部署」（`deploy/full-deploy.sh`），或按第 4 节用 `docker compose` 手动部署。
 
-## 4. 手动部署
+## 4. 手动部署（源码）
 
 ```bash
 sudo git clone https://gitee.com/qusong0627/QuantMind.git /opt/quantmind
 cd /opt/quantmind
-sudo chmod +x deploy/deploy.sh
-sudo ./deploy/deploy.sh
+# 编写 .env：DB_PASSWORD / SECRET_KEY / JWT_SECRET_KEY / STORAGE_MODE=local（见 docs/部署指南.md）
+sudo docker compose build quantmind
+sudo docker compose up -d
 ```
+
+详见 `docs/部署指南.md` 第五节「完全手动部署」。
 
 ## 5. 数据库初始化（关键）
 
-**deploy.sh 自动执行** **`backend/shared/db_init.sql`**（含 users 等全部核心表）：
+服务启动时自动幂等重放 **`backend/shared/db_init.sql`**（含 users 等全部核心表）：
 
 - 容器内路径 `/app/backend/shared/db_init.sql`（由 `./backend:/app/backend` 挂载提供）
 
@@ -563,7 +562,7 @@ docker exec quantmind-db pg_isready -U quantmind
 
 | AI 常犯错误             | 正确做法                                       | <br />                     |
 | ------------------- | ------------------------------------------ | -------------------------- |
-| 跳过交互式确认             | `quick-deploy.sh` 是交互式，用 \`echo y          | sudo bash ...`或确认到`--yes\` |
+| 跳过交互式确认             | `full-deploy.sh` 从 CDN 下载并恢复，非交互式（`curl ... \| sudo bash` 即可）        | <br />                     |
 | 忽略系统版本              | 必须先 `check_system`（仅 Ubuntu 22.04+）        | <br />                     |
 | 不检查 users 表         | 部署后必查 `\dt users`，这是登录失败主因                 | <br />                     |
 | 直接 `docker-compose` | 新版用 `docker compose`（带空格）                  | <br />                     |

@@ -12,20 +12,9 @@ curl -fsSL https://gitee.com/qusong0627/QuantMind/raw/master/deploy/full-deploy.
 
 默认 CDN 地址为 `https://cdn.quantmind.cloud/quantmind-offline`。详情见 [deploy/README.md](deploy/README.md)。
 
-## 源码在线部署
+## 源码手动部署
 
-适用于服务器可以稳定访问 Gitee、Docker Registry 和依赖镜像源的场景：
-
-```bash
-sudo bash deploy/deploy.sh
-```
-
-脚本会安装 Docker Compose、配置 Docker 镜像加速、克隆 `master`、首次生成 `.env`、构建核心服务并检查健康状态。默认目录为 `/opt/quantmind`。
-
-```bash
-# 部署指定分支；已有未提交代码时确认覆盖
-sudo bash deploy/deploy.sh --ref NEXT --force
-```
+在线源码部署脚本（`deploy/deploy.sh` / `quick-deploy.sh`）已下线。若需从源码手动部署，请按 [部署指南 → 完全手动部署](../部署指南.md) 克隆代码、编写 `.env`，再用 `docker compose` 构建启动。默认目录为 `/opt/quantmind`。
 
 ## 服务入口
 
