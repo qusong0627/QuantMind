@@ -57,7 +57,7 @@ describe('WebSocketService', () => {
     vi.unstubAllGlobals();
   });
 
-  it('断链后应在 3 秒后重试连接', async () => {
+  it('断链后应在 3 秒（抖动上限 4 秒）内重试连接', async () => {
     const service = new WebSocketService('ws://example.test/ws');
     const connectPromise = service.connect();
 
@@ -70,10 +70,12 @@ describe('WebSocketService', () => {
     FakeWebSocket.instances[0].close(1006, 'network error', false);
     expect(service.getStatus()).toBe(WebSocketStatus.RECONNECTING);
 
+    // 首次重连延迟 = 3000ms 基数 + 0~1000ms 随机抖动（见 getReconnectDelay），
+    // 因此按「下界之前不重试、上界之内必重试」断言，不依赖 Math.random 的具体取值。
     vi.advanceTimersByTime(2999);
     expect(FakeWebSocket.instances).toHaveLength(1);
 
-    vi.advanceTimersByTime(1);
+    vi.advanceTimersByTime(1001); // 累计 4000ms，覆盖抖动上限
     expect(FakeWebSocket.instances).toHaveLength(2);
 
     FakeWebSocket.instances[1].open();
