@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { renderHook, waitFor, act } from '@testing-library/react';
+import { waitFor, act } from '@testing-library/react';
+import { renderHookWithProviders } from '../../test-utils/renderWithProviders';
 import { useStrategies } from '../useStrategies';
 import { strategyService, Strategy } from '../../services/strategyService';
 
@@ -59,7 +60,7 @@ describe('useStrategies', () => {
             data: mockStrategies,
         });
 
-        const { result } = renderHook(() => useStrategies({ autoRefresh: false }));
+        const { result } = renderHookWithProviders(() => useStrategies({ autoRefresh: false }));
 
         expect(result.current.loading).toBe(true);
         expect(result.current.strategies).toEqual([]);
@@ -88,7 +89,7 @@ describe('useStrategies', () => {
             data: [],
         });
 
-        const { result } = renderHook(() => useStrategies({ autoRefresh: false }));
+        const { result } = renderHookWithProviders(() => useStrategies({ autoRefresh: false }));
 
         await waitFor(() => {
             expect(result.current.loading).toBe(false);
@@ -110,7 +111,7 @@ describe('useStrategies', () => {
             data: { success: true, message: 'Started', status: 'running' },
         });
 
-        const { result } = renderHook(() => useStrategies({ autoRefresh: false }));
+        const { result } = renderHookWithProviders(() => useStrategies({ autoRefresh: false }));
 
         await waitFor(() => {
             expect(result.current.loading).toBe(false);
@@ -138,7 +139,7 @@ describe('useStrategies', () => {
             data: { success: true, message: 'Stopped', status: 'paused' },
         });
 
-        const { result } = renderHook(() => useStrategies({ autoRefresh: false }));
+        const { result } = renderHookWithProviders(() => useStrategies({ autoRefresh: false }));
 
         await waitFor(() => {
             expect(result.current.loading).toBe(false);

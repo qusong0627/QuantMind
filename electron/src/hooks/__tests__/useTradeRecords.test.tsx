@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { renderHook, waitFor } from '@testing-library/react';
+import { waitFor } from '@testing-library/react';
+import { renderHookWithProviders } from '../../test-utils/renderWithProviders';
 import { useTradeRecords } from '../useTradeRecords';
 import { tradingService } from '../../services/tradingService';
 import { refreshOrchestrator } from '../../services/refreshOrchestrator';
@@ -27,7 +28,7 @@ describe('useTradeRecords', () => {
     });
 
     it('实盘模式应透传 real 给服务层', async () => {
-        renderHook(() => useTradeRecords({ tradingMode: 'real', autoRefresh: false }));
+        renderHookWithProviders(() => useTradeRecords({ tradingMode: 'real', autoRefresh: false }));
 
         await waitFor(() => {
             expect(tradingService.getRecentTrades).toHaveBeenCalled();
@@ -36,7 +37,7 @@ describe('useTradeRecords', () => {
     });
 
     it('模拟盘模式应透传 simulation 给服务层', async () => {
-        renderHook(() => useTradeRecords({ tradingMode: 'simulation', autoRefresh: false }));
+        renderHookWithProviders(() => useTradeRecords({ tradingMode: 'simulation', autoRefresh: false }));
 
         await waitFor(() => {
             expect(tradingService.getRecentTrades).toHaveBeenCalled();
@@ -45,7 +46,7 @@ describe('useTradeRecords', () => {
     });
 
     it('autoRefresh=true 时应注册刷新协调器', async () => {
-        renderHook(() => useTradeRecords({ autoRefresh: true, refreshInterval: 5000 }));
+        renderHookWithProviders(() => useTradeRecords({ autoRefresh: true, refreshInterval: 5000 }));
 
         await waitFor(() => {
             expect(refreshOrchestrator.register).toHaveBeenCalled();
