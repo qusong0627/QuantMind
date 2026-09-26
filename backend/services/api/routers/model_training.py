@@ -657,6 +657,10 @@ async def get_data_window(
     include_dates: bool = Query(
         False, description="是否返回完整交易日列表（默认 false，避免大响应）"
     ),
+    refresh: bool = Query(
+        False,
+        description="强制重探（跳过探针缓存并回填新结果），供连接节点后立即扫描数据覆盖",
+    ),
     current_user: dict[str, Any] = Depends(get_current_user),
 ):
     """探针模式的时间切分入口：直接读数据侧真实区间，与目录发布状态无关。
@@ -674,7 +678,9 @@ async def get_data_window(
     source = str(factor_source or wp.DEFAULT_FACTOR_SOURCE).strip()
     market_upper = str(market or "CN").upper()
 
-    window = await wp.probe_data_window(node, source, market=market_upper)
+    window = await wp.probe_data_window(
+        node, source, market=market_upper, force=refresh
+    )
     probe_payload = {
         "train_start": str(train_start or window.min_date or ""),
         "train_end": str(train_end or window.max_date or ""),
@@ -686,7 +692,7 @@ async def get_data_window(
 
     coverage = None
     if node != "local" and window.trading_dates and span:
-        center_window = await wp.probe_center_window(source, market_upper)
+        center_window = await wp.probe_center_window(source, market_upper, force=refresh)
         coverage = wp.coverage_report(
             center_window, window, start=span[0], end=span[1]
         )

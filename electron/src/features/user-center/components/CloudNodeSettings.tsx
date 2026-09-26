@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Button, Spin, Modal, Form, Input, InputNumber, message, Select, Popconfirm, Empty } from 'antd';
 import { Server, Plus, Trash2, Pencil, PlugZap, RefreshCw, Cpu, HardDrive, MemoryStick, CircuitBoard, Cloud } from 'lucide-react';
 import { adminService } from '../../admin/services/adminService';
+import { modelTrainingService, type DataWindowResult } from '../../../services/modelTrainingService';
 import { parseSshSnippet, suggestAutodlNodeId } from '../utils/parseSshSnippet';
 
 interface CloudNodeInfo {
@@ -128,6 +129,10 @@ export const CloudNodeSettings: React.FC = () => {
   const [statusLoadingId, setStatusLoadingId] = useState<string | null>(null);
   const [sshPaste, setSshPaste] = useState('');
   const [idTouched, setIdTouched] = useState(false);
+  // 连接节点后自动扫描的数据覆盖（远程节点探针结果）
+  const [probeResult, setProbeResult] = useState<DataWindowResult | null>(null);
+  const [probeNodeId, setProbeNodeId] = useState<string | null>(null);
+  const [probeLoading, setProbeLoading] = useState(false);
   const [form] = Form.useForm<NodeFormValues>();
   const execMode = Form.useWatch('exec_mode', form);
   const nodesRef = useRef<CloudNodeInfo[]>([]);
@@ -215,6 +220,8 @@ export const CloudNodeSettings: React.FC = () => {
     setEditingId(null);
     setIdTouched(false);
     setSshPaste('');
+    setProbeResult(null);
+    setProbeNodeId(null);
     form.setFieldsValue(DEFAULT_FORM);
     setIsModalOpen(true);
   };
@@ -245,10 +252,40 @@ export const CloudNodeSettings: React.FC = () => {
         form.setFieldsValue({ ...DEFAULT_FORM, name: node.name || '', host: node.host || '', id: node.id });
       }
       setIsModalOpen(true);
+      // 打开已有节点时顺带扫一次数据覆盖，让弹窗一开就能看到节点侧真实区间
+      void scanNodeData(node.id);
     } catch (error: any) {
       message.error(error.message || '加载节点详情失败');
     }
   };
+
+  // 连上节点后自动扫描一次远程数据覆盖。
+  // 用 refresh=true 强制重探：后端探针按 (节点,数据源,市场) 缓存 600s，若不清一次，
+  // 前端看到的时间切分可能是旧值，而后端提交时会重探，表现为「界面正常但提交被拦」。
+  const scanNodeData = useCallback(async (nodeId?: string | null) => {
+    const target = String(nodeId || '').trim();
+    if (!target || target === 'local') {
+      setProbeResult(null);
+      setProbeNodeId(null);
+      return;
+    }
+    setProbeNodeId(target);
+    setProbeLoading(true);
+    setProbeResult(null); // 先清空上一个节点的结果，避免扫描期间串数据
+    try {
+      const result = await modelTrainingService.getDataWindow({
+        nodeId: target,
+        market: 'CN',
+        refresh: true,
+      });
+      setProbeResult(result);
+    } catch (error: any) {
+      setProbeResult(null);
+      message.warning(error?.message || '扫描节点数据覆盖失败');
+    } finally {
+      setProbeLoading(false);
+    }
+  }, []);
 
   const handleSave = async () => {
     try {
@@ -275,8 +312,12 @@ export const CloudNodeSettings: React.FC = () => {
       const resp = await adminService.saveTrainingNode(payload);
       if (resp?.success) {
         message.success(editingId ? '节点已更新' : '节点已创建');
-        setIsModalOpen(false);
+        // 保存后不关闭弹窗：紧接着要回显本次扫描到的数据覆盖（见弹窗顶部探针区块）。
+        // 同时切到编辑态，避免再次点保存时重复创建。
+        const savedId = String(resp?.node?.id || nodeId || '');
+        if (savedId) setEditingId(savedId);
         await loadNodes();
+        await scanNodeData(savedId);
       } else {
         message.error(resp?.error || '保存失败');
       }
@@ -312,6 +353,8 @@ export const CloudNodeSettings: React.FC = () => {
         } else {
           message.warning(`节点 ${nodeId} SSH 可用，但 Docker 不可用（免 Docker 节点可忽略）`);
         }
+        // 连接可用即顺手扫一次数据覆盖，避免后续训练时前后端时间切分不一致
+        void scanNodeData(nodeId);
       } else {
         message.error(resp?.error || '测试连接失败');
       }
@@ -412,6 +455,11 @@ export const CloudNodeSettings: React.FC = () => {
       </div>
     );
   }
+
+  // 扫描结果派生值：ready 且有交易日才算可用
+  const probeWindow = probeResult?.window;
+  const probeUsable = Boolean(probeWindow?.ready && (probeWindow?.trading_days ?? 0) > 0);
+  const probeCoverage = probeResult?.coverage ?? null;
 
   return (
     <div className="w-full space-y-3">
@@ -555,6 +603,43 @@ export const CloudNodeSettings: React.FC = () => {
         destroyOnHidden
       >
         <Form form={form} layout="vertical" initialValues={DEFAULT_FORM} className="!pt-1">
+          {(probeLoading || probeResult || probeNodeId) && (
+            <div
+              className={`mb-4 rounded-xl border p-3 ${
+                probeLoading
+                  ? 'border-slate-200 bg-slate-50/60'
+                  : probeUsable
+                    ? 'border-emerald-100 bg-emerald-50/50'
+                    : 'border-amber-100 bg-amber-50/50'
+              }`}
+            >
+              <div
+                className={`text-[11px] font-semibold mb-1.5 ${
+                  probeLoading ? 'text-slate-600' : probeUsable ? 'text-emerald-700' : 'text-amber-700'
+                }`}
+              >
+                节点数据覆盖{probeNodeId ? `（${probeNodeId}）` : ''}
+              </div>
+              {probeLoading ? (
+                <div className="text-[11px] text-slate-500">扫描中…</div>
+              ) : probeUsable ? (
+                <div className="text-[11px] text-slate-600">
+                  {probeWindow?.min_date} ～ {probeWindow?.max_date}，共 {probeWindow?.trading_days} 个交易日
+                  {probeWindow?.source ? `（${probeWindow.source}）` : ''}
+                  {probeCoverage && probeCoverage.missing_days > 0
+                    ? probeCoverage.tail_lag_only
+                      ? `；滞后中心 ${probeCoverage.missing_days} 个交易日（尾部滞后，训练末端会自动钳制）`
+                      : `；在训练窗口内缺失 ${probeCoverage.missing_days} 个交易日（${(probeCoverage.missing_ratio * 100).toFixed(1)}%），提交会被拦截`
+                    : ''}
+                </div>
+              ) : (
+                <div className="text-[11px] text-slate-600">
+                  未读到可用数据{probeWindow?.reason ? `：${probeWindow.reason}` : ''}
+                  {probeResult ? '；请确认节点上的数据目录已同步' : ''}
+                </div>
+              )}
+            </div>
+          )}
           <div className="mb-4 rounded-xl border border-indigo-100 bg-indigo-50/40 p-3">
             <div className="text-[11px] font-semibold text-indigo-700 mb-1.5">粘贴 AutoDL SSH 命令</div>
             <Input.TextArea

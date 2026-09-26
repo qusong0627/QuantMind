@@ -32,6 +32,10 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_FACTOR_SOURCE = "l1_factors"
 DEFAULT_TTL_SEC = 600
+# 探针结果不可用（SSH 通但数据目录为空 / 尚未同步）时的缓存时长。
+# 这类结果基本都是暂时状态，若按默认 600s 缓存，节点数据就位后前端仍会看到
+# 「0 个交易日」直到缓存过期——这是前后端时间切分不一致的来源之一。
+UNUSABLE_TTL_SEC = 30
 # 相邻缺失交易日间隔超过该值即视为新的一段（>4 天 ≈ 跨周末 + 节假日）
 _SEGMENT_GAP_DAYS = 4
 MIN_TRADING_DAYS_FOR_SPLIT = 30
@@ -105,6 +109,11 @@ def _cache_put(key: tuple[str, str, str, str], window: DataWindow, ttl: int) -> 
 def clear_cache() -> None:
     """测试/手动刷新用。"""
     _CACHE.clear()
+
+
+def _is_usable(window: DataWindow) -> bool:
+    """探针结果是否可用于时间切分：ready 且至少有一个交易日。"""
+    return bool(window.ready) and bool(window.trading_dates)
 
 
 # ---------------------------------------------------------------------------
@@ -191,31 +200,44 @@ async def probe_data_window(
     market: str = "CN",
     *,
     ttl: int = DEFAULT_TTL_SEC,
+    force: bool = False,
 ) -> DataWindow:
     """探测数据窗口：``node_id`` 为空 / "local" 读本机，否则 SSH 读远程节点。
 
     结果按 (kind, node_id, source, market) 缓存 ttl 秒。
+
+    - ``force=True``：跳过缓存读取，但**仍回填**新结果。供「连上节点后强制重扫」
+      使用；只用 ttl=0 会绕过读取却不覆盖旧缓存，旧值仍会继续被服务到过期。
+    - 不可用结果（未 ready / 无交易日）改用 ``UNUSABLE_TTL_SEC`` 短缓存，
+      避免空结果把前端钉住 10 分钟。
+    - ``ttl=0`` 语义保持为「完全不写缓存」。
     """
     node = str(node_id or "local").strip() or "local"
     kind = "local" if node == "local" else "remote"
     market = str(market or "CN").upper()
     key = (kind, node, source, market)
-    cached = _cache_get(key)
-    if cached is not None:
-        return cached
+    if not force:
+        cached = _cache_get(key)
+        if cached is not None:
+            return cached
 
     if kind == "local":
         window = await asyncio.to_thread(_probe_local, source, market)
     else:
         window = await _probe_remote(node, source, market)
-    return _cache_put(key, window, ttl)
+    effective_ttl = ttl if _is_usable(window) else min(ttl, UNUSABLE_TTL_SEC)
+    return _cache_put(key, window, effective_ttl)
 
 
 async def probe_center_window(
-    source: str = DEFAULT_FACTOR_SOURCE, market: str = "CN", *, ttl: int = DEFAULT_TTL_SEC
+    source: str = DEFAULT_FACTOR_SOURCE,
+    market: str = "CN",
+    *,
+    ttl: int = DEFAULT_TTL_SEC,
+    force: bool = False,
 ) -> DataWindow:
     """中心（本机）窗口，作为差分校验的对照侧。"""
-    return await probe_data_window("local", source, market, ttl=ttl)
+    return await probe_data_window("local", source, market, ttl=ttl, force=force)
 
 
 # ---------------------------------------------------------------------------

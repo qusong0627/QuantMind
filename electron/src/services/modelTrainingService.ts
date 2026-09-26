@@ -549,6 +549,8 @@ class ModelTrainingService {
     valRatio?: number;
     trainStart?: string;
     trainEnd?: string;
+    /** 强制重探（跳过后端探针缓存并回填），用于连接节点后立即扫描数据覆盖 */
+    refresh?: boolean;
   }): Promise<DataWindowResult> {
     const query: Record<string, string> = {};
     if (params.nodeId) query.node_id = params.nodeId;
@@ -557,6 +559,7 @@ class ModelTrainingService {
     if (typeof params.valRatio === 'number') query.val_ratio = String(params.valRatio);
     if (params.trainStart) query.train_start = params.trainStart;
     if (params.trainEnd) query.train_end = params.trainEnd;
+    if (params.refresh) query.refresh = 'true';
     const resp = await this.client.get<DataWindowResult>('/models/data-window', { params: query });
     return resp.data;
   }
