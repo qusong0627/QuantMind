@@ -34,7 +34,10 @@ from backend.services.api.routers.market_kline import router as market_kline_rou
 from backend.services.api.routers.model_training import router as model_training_router
 from backend.services.api.routers.training_per_model import build_per_model_router
 from backend.services.api.user_app.middleware.auth import get_current_user
-from backend.services.api.routers.news import router as news_router
+from backend.services.api.routers.news import (
+    public_router as news_public_router,
+    router as news_router,
+)
 from backend.services.api.routers.research import router as research_router
 from backend.services.api.routers.stocks_search import router as stocks_search_router
 from backend.services.api.routers.stock_terminal import router as stock_terminal_router
@@ -413,6 +416,8 @@ app.include_router(trade_proxy_router)
 app.include_router(ai_ide_proxy_router)
 app.include_router(qwenpaw_proxy_router)
 app.include_router(news_router)
+# 免鉴权子集：/health、/rsshub/*（图标 <img src>）、/huntly-ui*（新标签页导航）
+app.include_router(news_public_router)
 app.include_router(data_gateway_proxy_router)
 app.include_router(hub_proxy_router)
 app.include_router(data_dashboard_router)

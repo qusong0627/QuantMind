@@ -24,8 +24,13 @@ from typing import Any
 from urllib.parse import quote, urlsplit
 
 import httpx
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import Response
+
+from backend.services.api.user_app.middleware.auth import (
+    get_current_user,
+    require_admin,
+)
 
 try:
     from zoneinfo import ZoneInfo
@@ -35,7 +40,18 @@ except Exception:
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/v1/news", tags=["News"])
+# 鉴权分层（原实现全部端点无鉴权）：
+# - router        业务端点，统一要求登录态。用 router 级依赖而非逐端点补
+#                 Depends，避免后续新增端点再次漏加。
+# - public_router 浏览器直取的资源，无法携带 Authorization 头，只能保持公开：
+#                 /health、/rsshub/*（连接器图标以 <img src> 加载）、
+#                 /huntly-ui*（新标签页直接打开的 Huntly UI 及其内部 API 调用）。
+router = APIRouter(
+    prefix="/api/v1/news",
+    tags=["News"],
+    dependencies=[Depends(get_current_user)],
+)
+public_router = APIRouter(prefix="/api/v1/news", tags=["News"])
 
 HUNTLY_BASE_URL = os.getenv("HUNTLY_BASE_URL", "http://quantmind-huntly").rstrip("/")
 HUNTLY_USERNAME = os.getenv("HUNTLY_USERNAME", "")
@@ -730,7 +746,7 @@ def _normalize_page(page: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 
-@router.get("/health")
+@public_router.get("/health")
 async def news_health():
     """检查 Huntly 上游连通性 (无须登录)"""
     try:
@@ -749,10 +765,18 @@ async def news_health():
         }
 
 
-@router.get("/rsshub/{path:path}", include_in_schema=False)
+@public_router.get("/rsshub/{path:path}", include_in_schema=False)
 async def proxy_rsshub_asset(path: str, request: Request):
-    """代理 RSSHub 静态资源，避免把 Docker 服务名暴露给浏览器。"""
-    target = f"{RSSHUB_BASE_URL}/{path.lstrip('/')}"
+    """代理 RSSHub 静态资源，避免把 Docker 服务名暴露给浏览器。
+
+    该端点必须保持免鉴权：连接器图标由浏览器以 <img src> 直接加载，无法携带
+    Authorization 头。因此对 path 做收敛，避免它被当作任意路径转发器使用——
+    拒绝 ".." 段与带 scheme / 协议相对的绝对地址，确保目标始终落在 RSSHub 内。
+    """
+    clean = path.lstrip("/")
+    if ".." in clean.split("/") or "://" in clean or clean.startswith("//"):
+        raise HTTPException(status_code=400, detail="非法的 RSSHub 资源路径")
+    target = f"{RSSHUB_BASE_URL}/{clean}"
     try:
         async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
             upstream = await client.get(target, params=request.query_params)
@@ -821,7 +845,7 @@ async def list_sources(request: Request):
 
 
 @router.post("/sources/{source_id}/refresh")
-async def refresh_source(source_id: int):
+async def refresh_source(source_id: int, _admin: dict = Depends(require_admin)):
     """手动触发抓取（Huntly 上游 v0.5.x 未公开 fetchNow 端点，这里仅作占位返回 202）"""
     return {
         "ok": False,
@@ -843,7 +867,7 @@ def _huntly_error(r: httpx.Response, action: str) -> HTTPException:
 
 
 @router.get("/admin/folders")
-async def admin_list_folders(request: Request):
+async def admin_list_folders(request: Request, _admin: dict = Depends(require_admin)):
     """列出所有文件夹（含其下的 connector 概览）
 
     Huntly 的 /setting/folder/all 只返回文件夹元信息，connector 列表是空的。
@@ -935,7 +959,7 @@ async def admin_list_folders(request: Request):
 
 
 @router.post("/admin/folders")
-async def admin_create_folder(payload: dict):
+async def admin_create_folder(payload: dict, _admin: dict = Depends(require_admin)):
     """新建文件夹: body = {name}"""
     name = (payload or {}).get("name", "").strip()
     if not name:
@@ -947,7 +971,7 @@ async def admin_create_folder(payload: dict):
 
 
 @router.put("/admin/folders/{folder_id}")
-async def admin_rename_folder(folder_id: int, payload: dict):
+async def admin_rename_folder(folder_id: int, payload: dict, _admin: dict = Depends(require_admin)):
     """重命名文件夹: body = {name}"""
     name = (payload or {}).get("name", "").strip()
     if not name:
@@ -961,7 +985,7 @@ async def admin_rename_folder(folder_id: int, payload: dict):
 
 
 @router.delete("/admin/folders/{folder_id}")
-async def admin_delete_folder(folder_id: int):
+async def admin_delete_folder(folder_id: int, _admin: dict = Depends(require_admin)):
     """删除文件夹（其下 connector 会自动回到 未分组）"""
     r = await _huntly_request(
         "POST", "/api/setting/folder/delete", params={"folderId": folder_id}
@@ -972,7 +996,7 @@ async def admin_delete_folder(folder_id: int):
 
 
 @router.get("/admin/preview")
-async def admin_preview_feed(subscribe_url: str = Query(..., alias="subscribe_url")):
+async def admin_preview_feed(subscribe_url: str = Query(..., alias="subscribe_url"), _admin: dict = Depends(require_admin)):
     """添加前预览订阅源元信息 (title / siteLink / subscribed)"""
     r = await _huntly_request(
         "GET", "/api/setting/feeds/preview", params={"subscribeUrl": subscribe_url}
@@ -983,7 +1007,7 @@ async def admin_preview_feed(subscribe_url: str = Query(..., alias="subscribe_ur
 
 
 @router.post("/admin/sources")
-async def admin_create_source(payload: dict):
+async def admin_create_source(payload: dict, _admin: dict = Depends(require_admin)):
     """新增订阅源: body = {subscribe_url, folder_id?, name?}
 
     Huntly /feeds/follow 仅接受 subscribeUrl，folder/name 需追加一次 updateSetting。
@@ -1061,7 +1085,7 @@ async def admin_create_source(payload: dict):
 
 
 @router.put("/admin/sources/{connector_id}")
-async def admin_update_source(connector_id: int, payload: dict):
+async def admin_update_source(connector_id: int, payload: dict, _admin: dict = Depends(require_admin)):
     """编辑订阅源: body = {name?, folder_id?, fetch_interval_minutes?, enabled?, crawl_full_content?}
 
     Huntly updateSetting 是全量覆盖更新，先读当前设置合并成完整 body 再提交，
@@ -1103,7 +1127,7 @@ async def admin_update_source(connector_id: int, payload: dict):
 
 
 @router.delete("/admin/sources/{connector_id}")
-async def admin_delete_source(connector_id: int):
+async def admin_delete_source(connector_id: int, _admin: dict = Depends(require_admin)):
     """删除订阅源"""
     r = await _huntly_request(
         "POST", "/api/setting/feeds/delete", params={"connectorId": connector_id}
@@ -1114,7 +1138,7 @@ async def admin_delete_source(connector_id: int):
 
 
 @router.get("/admin/sources/{connector_id}/setting")
-async def admin_get_source_setting(connector_id: int):
+async def admin_get_source_setting(connector_id: int, _admin: dict = Depends(require_admin)):
     """查询单个订阅源的详细设置"""
     r = await _huntly_request(
         "GET", "/api/setting/feeds/setting", params={"connectorId": connector_id}
@@ -1661,7 +1685,7 @@ async def enrichment_stats(
 
 
 @router.post("/enrichment/run")
-async def enrichment_run_now(limit: int = Query(200, ge=1, le=5000)):
+async def enrichment_run_now(limit: int = Query(200, ge=1, le=5000), _admin: dict = Depends(require_admin)):
     """手动触发一次 enrich（同步执行，便于调试 / 首次回填）。"""
     try:
         from backend.services.api.news import run_enrichment_batch
@@ -1672,7 +1696,7 @@ async def enrichment_run_now(limit: int = Query(200, ge=1, le=5000)):
 
 
 @router.post("/enrichment/rebuild-all")
-async def enrichment_rebuild_all(force: bool = Query(False, description="true=覆盖已 enrich 的文章")):
+async def enrichment_rebuild_all(force: bool = Query(False, description="true=覆盖已 enrich 的文章"), _admin: dict = Depends(require_admin)):
     """一键全量重建标签 — 直接读 Huntly SQLite, 后台线程跑, 立即返回."""
     try:
         from backend.services.api.news import start_full_rebuild_async
@@ -1786,6 +1810,7 @@ async def admin_list_tags(
     kind: str | None = Query(None, description="按 kind 筛选"),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
+    _admin: dict = Depends(require_admin),
 ):
     """列出 finance_lexicon 词条（支持分页、筛选）"""
     where: list[str] = []
@@ -1824,7 +1849,7 @@ async def admin_list_tags(
 
 
 @router.post("/admin/purge-old")
-async def admin_purge_old(hours: int = Query(24, ge=1, le=720)):
+async def admin_purge_old(hours: int = Query(24, ge=1, le=720), _admin: dict = Depends(require_admin)):
     """一键清理超过 N 小时的资讯（Huntly SQLite + PG enrichment）。
 
     前端“清理”按钮直连此接口，默认 hours=24。
@@ -1879,7 +1904,7 @@ async def admin_purge_old(hours: int = Query(24, ge=1, le=720)):
 
 
 @router.post("/admin/tags")
-async def admin_create_tag(payload: dict):
+async def admin_create_tag(payload: dict, _admin: dict = Depends(require_admin)):
     """新增词条: {term, kind, event_tag?, weight?, note?}"""
     term = (payload or {}).get("term", "").strip()
     kind = (payload or {}).get("kind", "").strip()
@@ -1905,7 +1930,7 @@ async def admin_create_tag(payload: dict):
 
 
 @router.put("/admin/tags/{tag_id}")
-async def admin_update_tag(tag_id: int, payload: dict):
+async def admin_update_tag(tag_id: int, payload: dict, _admin: dict = Depends(require_admin)):
     """编辑词条: {term?, kind?, event_tag?, weight?, note?}"""
     fields: list[str] = []
     params: list = []
@@ -1932,7 +1957,7 @@ async def admin_update_tag(tag_id: int, payload: dict):
 
 
 @router.delete("/admin/tags/{tag_id}")
-async def admin_delete_tag(tag_id: int):
+async def admin_delete_tag(tag_id: int, _admin: dict = Depends(require_admin)):
     """删除词条"""
     try:
         with _pg_conn() as conn, conn.cursor() as cur:
@@ -1944,7 +1969,7 @@ async def admin_delete_tag(tag_id: int):
 
 
 @router.patch("/admin/tags/{tag_id}/toggle")
-async def admin_toggle_tag(tag_id: int):
+async def admin_toggle_tag(tag_id: int, _admin: dict = Depends(require_admin)):
     """启用/禁用词条"""
     try:
         with _pg_conn() as conn, conn.cursor() as cur:
@@ -2098,18 +2123,18 @@ async def _huntly_ui_proxy_api(request: Request) -> Response:
 # ⚠️ API 路由必须先于静态路由声明：FastAPI 按声明顺序匹配，
 # /huntly-ui/api/{path:path} 若排在 /huntly-ui/{path:path}（静态）之后，
 # GET 会被静态路由吞掉（转发时不带鉴权会话），Huntly 返回 405/401。
-@router.api_route("/huntly-ui/api/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"])
+@public_router.api_route("/huntly-ui/api/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"])
 async def huntly_ui_api(path: str, request: Request):
     return await _huntly_ui_proxy_api(request)
 
 
-@router.get("/huntly-ui/{path:path}")
+@public_router.get("/huntly-ui/{path:path}")
 async def huntly_ui_static(path: str, request: Request):
     accept = request.headers.get("accept", "*/*")
     return await _huntly_ui_proxy_static(path, accept)
 
 
-@router.get("/huntly-ui")
+@public_router.get("/huntly-ui")
 async def huntly_ui_index(request: Request):
     accept = request.headers.get("accept", "*/*")
     return await _huntly_ui_proxy_static("", accept)
