@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { waitFor, act } from '@testing-library/react';
 import { renderHookWithProviders } from '../../test-utils/renderWithProviders';
 import { useStrategies } from '../useStrategies';
-import { strategyService, Strategy } from '../../services/strategyService';
+import { strategyService, Strategy, StrategyActionResponse } from '../../services/strategyService';
 
 vi.mock('../../services/strategyService', () => ({
     strategyService: {
@@ -105,11 +105,15 @@ describe('useStrategies', () => {
             message: 'Success',
             data: mockStrategies,
         });
-        vi.mocked(strategyService.startStrategy).mockResolvedValue({
-            code: 200,
-            message: 'Started',
-            data: { success: true, message: 'Started', status: 'running' },
-        });
+        // 用 deferred promise 把后端调用挂起，以便在「请求进行中」断言乐观更新。
+        // 若直接 await 整个操作，随后的 fetchData 会用服务端返回的状态覆盖乐观值，
+        // 那样断言到的就不是乐观更新了（乐观值只是临时占位）。
+        let resolveStart!: (v: StrategyActionResponse) => void;
+        vi.mocked(strategyService.startStrategy).mockReturnValue(
+            new Promise<StrategyActionResponse>((resolve) => {
+                resolveStart = resolve;
+            }),
+        );
 
         const { result } = renderHookWithProviders(() => useStrategies({ autoRefresh: false }));
 
@@ -117,14 +121,26 @@ describe('useStrategies', () => {
             expect(result.current.loading).toBe(false);
         });
 
+        let pending!: Promise<boolean>;
         await act(async () => {
-            await result.current.startStrategy('2');
+            pending = result.current.startStrategy('2');
         });
 
         expect(strategyService.startStrategy).toHaveBeenCalledWith('2');
 
-        const strategy2 = result.current.strategies.find((s) => s.id === '2');
-        expect(strategy2?.status).toBe('starting');
+        // 后端尚未返回：此时应看到乐观状态
+        const optimistic = result.current.strategies.find((s) => s.id === '2');
+        expect(optimistic?.status).toBe('starting');
+
+        // 放行后端响应并收尾，避免留下悬挂的 act
+        await act(async () => {
+            resolveStart({
+                code: 200,
+                message: 'Started',
+                data: { success: true, message: 'Started', status: 'running' },
+            });
+            await pending;
+        });
     });
 
     it('should stop strategy with optimistic update and backend call', async () => {
@@ -133,11 +149,13 @@ describe('useStrategies', () => {
             message: 'Success',
             data: mockStrategies,
         });
-        vi.mocked(strategyService.stopStrategy).mockResolvedValue({
-            code: 200,
-            message: 'Stopped',
-            data: { success: true, message: 'Stopped', status: 'paused' },
-        });
+        // 同 start：挂起后端调用，在请求进行中断言乐观更新。
+        let resolveStop!: (v: StrategyActionResponse) => void;
+        vi.mocked(strategyService.stopStrategy).mockReturnValue(
+            new Promise<StrategyActionResponse>((resolve) => {
+                resolveStop = resolve;
+            }),
+        );
 
         const { result } = renderHookWithProviders(() => useStrategies({ autoRefresh: false }));
 
@@ -145,13 +163,25 @@ describe('useStrategies', () => {
             expect(result.current.loading).toBe(false);
         });
 
+        let pending!: Promise<boolean>;
         await act(async () => {
-            await result.current.stopStrategy('1');
+            pending = result.current.stopStrategy('1');
         });
 
         expect(strategyService.stopStrategy).toHaveBeenCalledWith('1');
 
-        const strategy1 = result.current.strategies.find((s) => s.id === '1');
-        expect(strategy1?.status).toBe('stopped');
+        // 后端尚未返回：此时应看到乐观状态
+        const optimistic = result.current.strategies.find((s) => s.id === '1');
+        expect(optimistic?.status).toBe('stopped');
+
+        // 放行后端响应并收尾，避免留下悬挂的 act
+        await act(async () => {
+            resolveStop({
+                code: 200,
+                message: 'Stopped',
+                data: { success: true, message: 'Stopped', status: 'paused' },
+            });
+            await pending;
+        });
     });
 });
