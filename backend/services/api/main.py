@@ -112,6 +112,15 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"❌ node-history sampler start failed: {e}", exc_info=True)
 
+    # 训练任务启动对账（远程训练的进度轮询是进程内协程，容器重启会把它杀掉而远端
+    # 训练仍在跑；对账负责重新挂载轮询或按远端真实状态收尾，避免永久卡 running）
+    try:
+        from backend.services.engine.training.run_reconciler import start_run_reconciler
+
+        start_run_reconciler()
+    except Exception as e:
+        logger.error(f"❌ run reconciler start failed: {e}", exc_info=True)
+
     # 每日自动强制更新轮询（开关由管理后台保存于 Redis；不可用/异常均不影响启动健康）
     try:
         from backend.shared.auto_update import start_auto_update_loop
@@ -138,6 +147,12 @@ async def lifespan(app: FastAPI):
     yield
     try:
         await stop_node_history_sampler()
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from backend.services.engine.training.run_reconciler import stop_run_reconciler
+
+        await stop_run_reconciler()
     except Exception:  # noqa: BLE001
         pass
     try:

@@ -837,14 +837,19 @@ class RemoteSSHOrchestrator(TrainingOrchestrator):
                 return data if isinstance(data, dict) else None
         return None
 
-    async def _poll_remote(self, run_id: str, container_name: str) -> None:
+    async def _poll_remote(
+        self, run_id: str, container_name: str, *, skip_existing_log: bool = False
+    ) -> None:
         """轮询远端训练（容器或原生进程）日志，解析进度，完成后拉取产物。
 
         native_python 模式下 run_key 为 （pid 或 "native-{run_id}"/日志文件路径），
         通过读写远端日志文件与进程存活探测替代 docker logs / docker inspect。
+
+        ``skip_existing_log=True``：重挂轮询（后端重启对账）时跳过远端已有日志行，
+        避免前端日志流里出现重复内容。
         """
         if self.exec_mode == "native_python":
-            await self._poll_native_process(run_id)
+            await self._poll_native_process(run_id, skip_existing_log=skip_existing_log)
             return
         seen_lines: set[str] = set()
         progress = 22
@@ -889,7 +894,9 @@ class RemoteSSHOrchestrator(TrainingOrchestrator):
             logger.error("[%s] 远程轮询异常: %s", run_id, exc, exc_info=True)
             self._log(run_id, f"[ERROR] 远程轮询异常: {exc}", status="failed", progress=progress)
 
-    async def _poll_native_process(self, run_id: str) -> None:
+    async def _poll_native_process(
+        self, run_id: str, *, skip_existing_log: bool = False
+    ) -> None:
         """轮询免 docker 直跑的原生训练进程（一次 SSH 取日志+存活，静默时心跳）。"""
         log_path = f"{self.work_dir}/train_{run_id}.log"
         pid_file = f"{self.work_dir}/train_{run_id}.pid"
@@ -901,6 +908,8 @@ class RemoteSSHOrchestrator(TrainingOrchestrator):
         ssh_fails = 0
         missing_pid_rounds = 0
         last_pid = ""
+        # 重挂轮询时先跳过远端已有日志（首轮只对齐行号，不回放旧内容）
+        emit_log = not skip_existing_log
         try:
             while True:
                 if self.log_stream.is_cancel_requested(run_id):
@@ -944,16 +953,20 @@ class RemoteSSHOrchestrator(TrainingOrchestrator):
                 log_blob, _, meta_blob = blob.partition("===META===")
                 log_blob = log_blob.replace("===LOG===", "")
                 got_new = False
-                for line in log_blob.splitlines():
-                    line = line.strip()
-                    if not line or line in seen_lines:
-                        continue
-                    if line.lower().startswith("ssh:"):
-                        continue
-                    seen_lines.add(line)
-                    got_new = True
-                    progress = max(progress, LocalDockerProgress.infer(line, progress))
-                    self._log(run_id, line, status="running", progress=progress)
+                if emit_log:
+                    for line in log_blob.splitlines():
+                        line = line.strip()
+                        if not line or line in seen_lines:
+                            continue
+                        if line.lower().startswith("ssh:"):
+                            continue
+                        seen_lines.add(line)
+                        got_new = True
+                        progress = max(progress, LocalDockerProgress.infer(line, progress))
+                        self._log(run_id, line, status="running", progress=progress)
+                else:
+                    # 重挂首轮：不回放旧日志，仅从本轮对齐行号
+                    emit_log = True
 
                 meta = {}
                 for line in meta_blob.splitlines():
