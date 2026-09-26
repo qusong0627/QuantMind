@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import time
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -21,6 +22,10 @@ from model_trainers.trainers_gbdt import (
     _train_linear,
     _train_xgb,
 )
+
+# WFA 直调支持的类型子集（与注册表分派刻意不同，见模块 docstring）。
+# DL 类型与其余未列出的类型都跳过，但原因会写进结果，不再静默。
+_WFA_SUPPORTED_MODEL_TYPES = frozenset({"lightgbm", "xgboost", "catboost", "linear"})
 
 logger = logging.getLogger("quantmind.train")
 
@@ -134,13 +139,25 @@ def _train_wfa_single(
     val_df: pd.DataFrame,
     wfa: dict,
     idx: int,
+    skip_reasons: list[dict] | None = None,
 ) -> dict | None:
-    """训练单个 WFA 窗口，返回该窗口的指标。支持树模型 + linear。"""
+    """训练单个 WFA 窗口，返回该窗口的指标。支持树模型 + linear。
+
+    skip_reasons 非空时，跳过原因会追加进去供 run_wfa 汇总。原实现只 `return None`，
+    调用方静默丢弃，用户最终只看到 "no windows completed"，无法区分是模型类型不支持、
+    样本不足，还是窗口为空。
+    """
+
+    def _skip(reason: str, **extra: Any) -> None:
+        if skip_reasons is not None:
+            skip_reasons.append({"window_idx": idx, "reason": reason, **extra})
+
     model_cfg = cfg.get("model", {})
     model_type = str(model_cfg.get("type", "lightgbm")).strip().lower()
 
     if model_type in _DL_MODEL_TYPES:
         logger.warning("[WFA] window %d: skip DL model '%s' (too slow for WFA)", idx, model_type)
+        _skip("dl_model_unsupported", model_type=model_type)
         return None
 
     try:
@@ -149,6 +166,7 @@ def _train_wfa_single(
         )
         if X_train.shape[0] < 100 or X_val.shape[0] < 10:
             logger.warning("[WFA] window %d: too few samples train=%d val=%d", idx, X_train.shape[0], X_val.shape[0])
+            _skip("too_few_samples", train_rows=int(X_train.shape[0]), val_rows=int(X_val.shape[0]))
             return None
 
         if model_type == "lightgbm":
@@ -161,6 +179,7 @@ def _train_wfa_single(
             model = _train_linear(cfg, features, X_train, y_train, X_val, y_val)
         else:
             logger.warning("[WFA] window %d: unsupported model '%s'", idx, model_type)
+            _skip("model_type_unsupported", model_type=model_type)
             return None
 
         y_val_pred = _predict_with_model(model, _fill(val_df), model_type, features)
@@ -205,26 +224,54 @@ def train_wfa(df: pd.DataFrame, features: list[str], cfg: dict) -> dict:
     model_cfg = cfg.get("model", {})
     model_type = str(model_cfg.get("type", "lightgbm")).strip().lower()
 
-    # 训练时长预算：WFA 窗口间检查剩余时间，超时则停止后续窗口
+    # 训练时长预算：WFA 窗口间检查剩余时间，超时则停止后续窗口。
+    # 默认只把总预算的 60% 给 WFA，为随后的正式训练留出余量——这是有意设计，
+    # 但比例此前硬编码、且生效预算既不打日志也不进结果，导致 max_time_minutes=120
+    # 实际只跑 72 分钟却无处可见。改为可配置，并把生效预算写进返回值。
     budget_min = int((cfg.get("max_time_minutes") or 120))
-    # 为正式训练预留至少 40% 时长，WFA 最多用 60%
-    wfa_budget_deadline = time.time() + max(1, budget_min * 60 * 0.6)
+    wfa_budget_ratio = min(max(float(cfg.get("wfa_time_budget_ratio") or 0.6), 0.05), 1.0)
+    wfa_budget_min = max(1.0, budget_min * wfa_budget_ratio)
+    wfa_budget_info: dict[str, Any] = {
+        "max_time_minutes": budget_min,
+        "ratio": round(wfa_budget_ratio, 4),
+        "effective_minutes": round(wfa_budget_min, 1),
+        "exhausted": False,
+    }
+    logger.info(
+        "[WFA] time budget: %.0f min (%.0f%% of max_time_minutes=%d)",
+        wfa_budget_min, wfa_budget_ratio * 100, budget_min,
+    )
+    wfa_budget_deadline = time.time() + wfa_budget_min * 60
 
     windows: list[dict] = []
+    skip_reasons: list[dict] = []
     for idx in range(wfa["n_windows"]):
         if time.time() >= wfa_budget_deadline:
-            logger.warning("[WFA] time budget (%.0f%% of %dmin) reached, stop at window %d", 60, budget_min, idx)
+            wfa_budget_info["exhausted"] = True
+            logger.warning(
+                "[WFA] time budget (%.0f min = %.0f%% of %d min) reached, stop at window %d",
+                wfa_budget_min, wfa_budget_ratio * 100, budget_min, idx,
+            )
             break
         train_df, val_df = _wfa_split_window(df, wfa, idx)
         if train_df.empty or val_df.empty:
             logger.warning("[WFA] window %d skipped: empty split", idx)
+            skip_reasons.append({"window_idx": idx, "reason": "empty_split"})
             continue
-        res = _train_wfa_single(cfg, features, train_df, val_df, wfa, idx)
+        res = _train_wfa_single(cfg, features, train_df, val_df, wfa, idx, skip_reasons)
         if res:
             windows.append(res)
 
     if not windows:
-        return {"enabled": True, "strategy": wfa["strategy"], "windows": [], "error": "no windows completed"}
+        return {
+            "enabled": True,
+            "strategy": wfa["strategy"],
+            "windows": [],
+            "error": "no windows completed",
+            "budget": wfa_budget_info,
+            "skipped": skip_reasons,
+            "supported_model_types": sorted(_WFA_SUPPORTED_MODEL_TYPES),
+        }
 
     ic_vals = [w["ic"] for w in windows if w["ic"] is not None and np.isfinite(w["ic"])]
     ric_vals = [w["rank_ic"] for w in windows if w["rank_ic"] is not None and np.isfinite(w["rank_ic"])]
@@ -255,4 +302,10 @@ def train_wfa(df: pd.DataFrame, features: list[str], cfg: dict) -> dict:
     else:
         summary["overall_icir"] = float("nan")
 
-    return {"enabled": True, **summary, "windows": windows}
+    return {
+        "enabled": True,
+        **summary,
+        "windows": windows,
+        "budget": wfa_budget_info,
+        "skipped": skip_reasons,
+    }
