@@ -17,8 +17,9 @@ postgres:
     database: "DB_NAME|POSTGRES_DB"
     url: "DATABASE_URL|USER_DATABASE_URL"
   used_by:
-    - backend/user/database_user.py
+    - backend/shared/database_manager_v2.py
     - backend/shared/database_pool.py
+    - backend/services/api/user_app/database.py (user-service session deps)
 
 redis:
   role: system cache (local docker, ACL nopass for default user)
@@ -36,9 +37,8 @@ redis:
     password: "REDIS_PASSWORD"
     db: "REDIS_DB"
   used_by:
-    - backend/cache/redis_client.py
-    - backend/cache/cache_manager.py
-    - backend/shared/celery_app.py (broker DB1 / backend DB2)
+    - backend/services/trade_shared/redis_client.py
+    - backend/services/engine/qlib_app/cache_manager.py
     - backend/services/engine/qlib_app/celery_config.py (broker DB3 / backend DB4)
     - backend/services/engine/ai_strategy/ai_strategy_config.py (DB5)
 
@@ -56,8 +56,7 @@ redis_trade:
     password: "REDIS_TRADE_PASSWORD"
     db: "REDIS_DB_TRADE"
   used_by:
-    - backend/services/trade/trade_config.py
-    - backend/services/trade/redis_client.py
+    - backend/services/trade_shared/trade_config.py
 
 redis_market:
   role: market data dedicated (stream service)
