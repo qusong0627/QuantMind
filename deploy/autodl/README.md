@@ -18,26 +18,7 @@ AutoDL 显卡实例默认是 Python 容器（有 torch + GPU，但**没有 docke
 
 开通带 GPU 的 AutoDL Python 实例，SSH 登录后在 **AutoDL 本机**（不是主节点）执行。
 
-### 方式一：一键下载执行（推荐）
-
-无需先 `scp` 脚本，直接 curl 拉取即跑（保留 stdin，可交互）：
-
-```bash
-bash -c "$(curl -fsSL https://quantmindai.cn/gitea/qusong0627/QuantMind/raw/branch/master/deploy/autodl/quick-setup.sh)"
-```
-
-非交互（CI / 管道执行，需带齐环境变量）：
-
-```bash
-QUANTDB_API_KEY=qdb_xxx AUTO_DL=yes \
-  bash -c "$(curl -fsSL https://quantmindai.cn/gitea/qusong0627/QuantMind/raw/branch/master/deploy/autodl/quick-setup.sh)"
-```
-
-> `quick-setup.sh` 是下载器，内部自动拉取并执行 `setup-autodl-native.sh`。
-> 可用 `QUANTMIND_REF`（分支/tag）、`QUANTMIND_RAW_BASE`（raw 根地址）、
-> `QUANTMIND_SETUP_SHA256`（脚本校验）覆盖下载行为。
-
-### 方式二：先上传再执行
+### 先上传再执行
 
 ```bash
 scp -P <端口> deploy/autodl/setup-autodl-native.sh root@connect.xxx.seetacloud.com:/root/
