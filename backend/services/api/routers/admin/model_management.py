@@ -2,6 +2,7 @@ import asyncio
 import glob
 import hashlib
 import json
+import logging
 import math
 import os
 import re
@@ -47,6 +48,8 @@ from .model_management_utils import (
     _INFERENCE_LOCK_KEY_PREFIX,
     _INFERENCE_LOCK_TTL_SEC,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(dependencies=[Depends(require_admin)])  # 路由器级认证兜底
 
@@ -177,6 +180,100 @@ async def get_models(
 from .model_management_ops import router as model_management_ops_router
 router.include_router(model_management_ops_router)
 
+async def _record_admin_inference_run(
+    *,
+    tenant_id: str,
+    user_id: str,
+    model_id: str,
+    data_trade_date: str,
+    prediction_trade_date: str,
+    run_id: str,
+    status: str,
+    payload: dict[str, Any],
+) -> None:
+    """管理员手动推理的 run 落库（qm_model_inference_runs + settings）。
+
+    与用户态 ``/models/inference/run``（``_execute_single_day_inference``）保持
+    同一份持久化口径。此前本端点只经 script_runner 写 ``engine_signal_scores``
+    与 ``pred.parquet``，不写 run 表，导致：
+    - 「推理历史」查不到这批信号；
+    - ``manual_execution_service.get_default_model_hosted_status``（读
+      ``qm_model_inference_runs`` 取 latest_run_id）拿不到最新批次，
+      信号就绪判定落到 ``missing_latest_run``，托管/自动交易与模拟盘被拦。
+
+    落库失败只告警，不影响推理本身（信号与 pred.parquet 已写入）。
+    """
+    rid = str(run_id or "").strip()
+    mid = str(model_id or "").strip()
+    if not rid or not mid:
+        logger.warning(
+            "管理员推理 run 未落库：run_id=%r model_id=%r（无法作为 run 主键/模型桶）",
+            run_id,
+            model_id,
+        )
+        return
+
+    def _as_date(value: Any) -> date:
+        try:
+            return date.fromisoformat(str(value)[:10])
+        except Exception:
+            return date.fromisoformat(str(data_trade_date)[:10])
+
+    try:
+        from backend.services.engine.services.model_inference_persistence import (
+            model_inference_persistence,
+        )
+
+        now = datetime.now(ZoneInfo("Asia/Shanghai"))
+        await model_inference_persistence.create_run(
+            run_id=rid,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            model_id=mid,
+            data_trade_date=_as_date(data_trade_date),
+            prediction_trade_date=_as_date(prediction_trade_date),
+            status=status,
+            request_payload={
+                "source": "admin_manual_run_inference",
+                "date": str(data_trade_date),
+            },
+            created_at=now,
+        )
+        await model_inference_persistence.update_run(
+            run_id=rid,
+            status=status,
+            updated_at=now,
+            signals_count=int(payload.get("signals_count") or 0),
+            duration_ms=payload.get("duration_ms"),
+            fallback_used=bool(payload.get("fallback_used")),
+            fallback_reason=str(payload.get("fallback_reason") or ""),
+            failure_stage=str(payload.get("failure_stage") or ""),
+            error_message=str(payload.get("error_message") or "") or None,
+            stdout=str(payload.get("stdout") or ""),
+            stderr=str(payload.get("stderr") or ""),
+            active_model_id=str(payload.get("active_model_id") or ""),
+            effective_model_id=str(payload.get("effective_model_id") or ""),
+            model_source=str(payload.get("model_source") or ""),
+            active_data_source=str(payload.get("active_data_source") or ""),
+            result_payload=payload,
+        )
+        await model_inference_persistence.record_run_to_settings(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            model_id=mid,
+            run_payload=payload,
+        )
+        logger.info(
+            "管理员推理 run 已落库: run_id=%s model_id=%s status=%s signals=%s",
+            rid,
+            mid,
+            status,
+            payload.get("signals_count"),
+        )
+    except Exception as exc:  # noqa: BLE001 - 落库失败不影响推理结果返回
+        logger.warning("管理员推理 run 落库失败（信号已写入，忽略）: %s", exc)
+
+
 @router.post("/run-inference", summary="手动触发每日推理（管理员）")
 async def run_inference(
     model_file: str = Query("model.bin", description="模型文件名（保留兼容，实际执行 inference.py）"),
@@ -233,6 +330,7 @@ async def run_inference(
     )
 
     try:
+        _inference_start_ts = time_module.perf_counter()
         result = await asyncio.get_event_loop().run_in_executor(
             None,
             lambda: router_service.run_daily_inference_script(
@@ -251,8 +349,16 @@ async def run_inference(
         except Exception:
             pass
 
+    duration_ms = int((time_module.perf_counter() - _inference_start_ts) * 1000)
+    effective_model_id = str(
+        resolved_model.get("effective_model_id")
+        or getattr(result, "active_model_id", "")
+        or ""
+    )
+    model_source = str(resolved_model.get("model_source") or "")
+
     if not result.success:
-        return {
+        failure_response: dict[str, Any] = {
             "success": False,
             "trade_date": prediction_trade_date,
             "requested_inference_date": requested_data_trade_date,
@@ -262,6 +368,7 @@ async def run_inference(
             "run_id": result.run_id,
             "exit_code": result.exit_code,
             "signals_count": 0,
+            "duration_ms": duration_ms,
             "error": result.error,
             "failure_stage": result.failure_stage,
             "fallback_used": result.fallback_used,
@@ -273,9 +380,23 @@ async def run_inference(
             "stderr": result.stderr[-2000:] if result.stderr else "",
             "active_model_id": result.active_model_id,
             "active_data_source": result.active_data_source,
+            "effective_model_id": effective_model_id,
+            "model_source": model_source,
+            "error_message": result.error,
         }
+        await _record_admin_inference_run(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            model_id=effective_model_id,
+            data_trade_date=data_trade_date,
+            prediction_trade_date=prediction_trade_date,
+            run_id=str(result.run_id or ""),
+            status="failed",
+            payload=failure_response,
+        )
+        return failure_response
 
-    return {
+    success_response: dict[str, Any] = {
         "success": True,
         "message": f"推理已完成（预测日 {prediction_trade_date}，数据日 {data_trade_date}），共生成 {result.signals_count} 条信号",
         "trade_date": prediction_trade_date,
@@ -286,6 +407,7 @@ async def run_inference(
         "run_id": result.run_id,
         "exit_code": result.exit_code,
         "signals_count": result.signals_count,
+        "duration_ms": duration_ms,
         "fallback_used": result.fallback_used,
         "fallback_reason": result.fallback_reason,
         "execution_mode": result.execution_mode,
@@ -296,9 +418,22 @@ async def run_inference(
         "stderr": result.stderr[-2000:] if result.stderr else "",
         "active_model_id": result.active_model_id,
         "active_data_source": result.active_data_source,
+        "effective_model_id": effective_model_id,
+        "model_source": model_source,
         "lock_key": lock_key,
         "lock_ttl_sec": _INFERENCE_LOCK_TTL_SEC,
     }
+    await _record_admin_inference_run(
+        tenant_id=tenant_id,
+        user_id=user_id,
+        model_id=effective_model_id,
+        data_trade_date=data_trade_date,
+        prediction_trade_date=prediction_trade_date,
+        run_id=str(result.run_id or ""),
+        status="completed",
+        payload=success_response,
+    )
+    return success_response
 
 
 @router.get("/predictions", summary="管理员查询模型预测批次")

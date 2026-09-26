@@ -593,10 +593,25 @@ class InferenceRouterService:
                 )
 
                 pred_file = Path(primary_dir) / "pred.parquet"
+                pred_existed = pred_file.is_file()
                 merged = merge_signals_into_pred(
-                    pred_file, [(str(date), list(result.signals))]
+                    pred_file,
+                    [(str(date), list(result.signals))],
+                    create_if_missing=True,
                 )
-                if merged:
+                if merged and not pred_existed:
+                    # 模型目录原本没有 pred.parquet（模型广场导入包不含该产物、
+                    # 或训练产物丢失）：旧行为是静默返回 0，于是推理「跑了但文件
+                    # 永远不出现」，模拟交易回放建会话被 pred.parquet 门禁永久拦死
+                    # （simulation/replay/router.py 报「模型缺少 pred.parquet」）。
+                    # 现在用本次单日分数建文件，先让下游可用；历史分数需「一键补全」。
+                    logger.warning(
+                        "[InferenceRouter] %s 原本缺少 pred.parquet，"
+                        "已用 %s 的单日分数新建（历史分数请走「一键补全至最新」）",
+                        primary_dir,
+                        date,
+                    )
+                elif merged:
                     logger.info(
                         "[InferenceRouter] 已回写 %s 行分数到 %s",
                         merged,

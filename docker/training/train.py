@@ -1744,7 +1744,16 @@ def main():
     best_iter = meta.get("best_iteration")
     if model_type == "xgb":
         dmat = xgb.DMatrix(X_values, feature_names=list(X_df.columns))
-        scores = model.predict(dmat, iteration_range=(0, best_iter) if best_iter else None)
+        # 与训练侧 model_trainers/predict.py 同口径：右开区间需 +1 才含最优轮，
+        # 且禁止传 None（xgboost>=2.0 不接受；未开 early stopping 时 best_iteration
+        # 缺失/为 0 会走到该分支）。缺失时 (0, 0) = 全部树。
+        _iter_end = 0
+        if best_iter is not None:
+            try:
+                _iter_end = int(best_iter) + 1
+            except (TypeError, ValueError):
+                _iter_end = 0
+        scores = model.predict(dmat, iteration_range=(0, _iter_end))
     elif model_type == "catboost":
         scores = model.predict(X_values)
     elif model_type == "sklearn":

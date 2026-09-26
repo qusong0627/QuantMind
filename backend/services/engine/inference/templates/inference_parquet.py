@@ -745,7 +745,20 @@ def main():
         scores = quantile_values[:, 1]
     elif model_type == "xgb":
         dmat = xgb.DMatrix(X_values, feature_names=list(X_df.columns))
-        scores = model.predict(dmat, iteration_range=(0, best_iter) if best_iter else None)
+        # 与训练侧 docker/training/model_trainers/predict.py 严格同口径：
+        # iteration_range 右开区间，best_iteration 是 0-based，需 +1 才包含最优轮。
+        # 旧写法 `(0, best_iter) if best_iter else None` 有两个问题：
+        #   1) best_iteration 缺失/为 0（未开 early stopping 的常见情形）时传 None，
+        #      xgboost>=2.0 不接受，会让 XGBoost 推理直接抛错（LightGBM 正常）；
+        #   2) 少算一轮，推理与训练打分口径不一致。
+        # 缺失时退化为 (0, 0) = 使用全部树（xgboost 约定）。
+        _iter_end = 0
+        if best_iter is not None:
+            try:
+                _iter_end = int(best_iter) + 1
+            except (TypeError, ValueError):
+                _iter_end = 0
+        scores = model.predict(dmat, iteration_range=(0, _iter_end))
     elif model_type == "catboost":
         # 分类模型必须输出正类概率而非 predict() 的硬标签，保证线上排序与
         # 训练期 AUC/选股信号口径一致。

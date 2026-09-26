@@ -226,6 +226,13 @@ async def test_run_inference_failure_releases_lock_and_returns_standard_fields(m
 
     monkeypatch.setattr(mm, "InferenceRouterService", _FakeRouterService)
 
+    recorded: list[dict] = []
+
+    async def _fake_record_run(**kwargs):
+        recorded.append(kwargs)
+
+    monkeypatch.setattr(mm, "_record_admin_inference_run", _fake_record_run)
+
     resp = await mm.run_inference(current_user={"tenant_id": "t1", "user_id": "u1"})
 
     assert resp["success"] is False
@@ -235,6 +242,11 @@ async def test_run_inference_failure_releases_lock_and_returns_standard_fields(m
     assert resp["active_model_id"] == "model_base"
     assert resp["active_data_source"] == "db/ModelBase_bin"
     assert any(k.startswith("qm:lock:inference:daily:") for k in fake_redis.deleted)
+    # 失败批次同样要落 run 记录，否则「推理历史」看不到这次失败
+    assert len(recorded) == 1
+    assert recorded[0]["status"] == "failed"
+    assert recorded[0]["run_id"] == "run_20260320_test"
+    assert recorded[0]["model_id"] == "demo_model"
 
 
 @pytest.mark.anyio
@@ -282,6 +294,13 @@ async def test_run_inference_success_releases_lock_and_returns_standard_fields(m
 
     monkeypatch.setattr(mm, "InferenceRouterService", _FakeRouterService)
 
+    recorded: list[dict] = []
+
+    async def _fake_record_run(**kwargs):
+        recorded.append(kwargs)
+
+    monkeypatch.setattr(mm, "_record_admin_inference_run", _fake_record_run)
+
     resp = await mm.run_inference(current_user={"tenant_id": "t1", "user_id": "u1"})
 
     assert resp["success"] is True
@@ -292,6 +311,11 @@ async def test_run_inference_success_releases_lock_and_returns_standard_fields(m
     assert resp["active_model_id"] == "model_demo"
     assert resp["active_data_source"] == "db/qlib_data"
     assert any(k.startswith("qm:lock:inference:daily:") for k in fake_redis.deleted)
+    # 成功批次必须落 run 记录（信号就绪读 qm_model_inference_runs 取 latest_run_id）
+    assert len(recorded) == 1
+    assert recorded[0]["status"] == "completed"
+    assert recorded[0]["run_id"] == "run_20260320_ok"
+    assert recorded[0]["model_id"] == "demo_model"
 
 
 # ═══════════════════════════════════════════════════════════════════════════
