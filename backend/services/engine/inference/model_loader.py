@@ -386,6 +386,20 @@ class ModelLoader:
                 return self._loaded_models[cache_id]
         return None
 
+    def unload_model(self, model_id: str, *, cache_key: str | None = None) -> bool:
+        """从内存缓存移除模型，返回是否确有移除。
+
+        cache_key 是租户/用户命名空间，调用方必须传入自己的命名空间，
+        否则会误卸载其他用户已加载的模型。
+        """
+        cache_id = self._build_cache_key(model_id, cache_key)
+        with self._lock:
+            if cache_id in self._loaded_models:
+                del self._loaded_models[cache_id]
+                logger.info(f"🗑️ Unloaded model from memory: {cache_id}")
+                return True
+        return False
+
     def get_model_metadata(self, model_id: str, *, model_dir: Path | None = None) -> dict[str, Any] | None:
         resolved_model_dir = model_dir or self._resolve_model_dir(model_id)
         return self._get_metadata(resolved_model_dir) or None
