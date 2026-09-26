@@ -14,6 +14,7 @@ import {
   InferenceRunRecord,
   InferencePrecheckResult,
   InferenceRankingResult,
+  InferenceRankingItem,
   LatestInferenceRunInfo,
   ModelShapSummaryResponse,
   ModelShapSummaryItem, modelTrainingService,
@@ -30,6 +31,7 @@ import {
   modelDisplayName,
   resolveMetricNumber,
 } from './modelRegistryUtils';
+import { StockMiniTerminalModal } from '../features/inference-center/components/StockMiniTerminalModal';
 const { Text } = Typography;
 
 const MARKET_LABELS: Record<string, string> = {
@@ -871,6 +873,8 @@ export const InferenceCenterPanel: React.FC<{
   // 本次推理排名：单日推理完成后自动拉取该 run 的排名结果并展示在右侧
   const [rankingResult, setRankingResult] = useState<InferenceRankingResult | null>(null);
   const [rankingLoading, setRankingLoading] = useState(false);
+  // 点排名行 → 精简版个股终端弹窗（K 线 + 该 run 模型的分数曲线）
+  const [miniStock, setMiniStock] = useState<InferenceRankingItem | null>(null);
 
   useEffect(() => {
     const runId = lastRun?.run_id;
@@ -1117,7 +1121,9 @@ export const InferenceCenterPanel: React.FC<{
                     {topRankings.map((r) => (
                       <div
                         key={r.code}
-                        className="flex h-8 items-center gap-2 px-2 rounded-lg bg-slate-50/70 border border-slate-100/60 hover:bg-blue-50/40 transition-colors whitespace-nowrap overflow-hidden"
+                        onClick={() => setMiniStock(r)}
+                        title="点击查看 K 线与模型分数"
+                        className="flex h-8 items-center gap-2 px-2 rounded-lg bg-slate-50/70 border border-slate-100/60 hover:bg-blue-50/40 transition-colors whitespace-nowrap overflow-hidden cursor-pointer"
                       >
                         <span className={clsx(
                           'w-6 h-6 rounded-md flex items-center justify-center text-xs font-bold shrink-0',
@@ -1166,6 +1172,17 @@ export const InferenceCenterPanel: React.FC<{
             </div>
          </div>
        </div>
+
+        {/* 点排名行 → 精简版个股终端：只保留 K 线 + 该 run 模型的分数副图，
+            分数锁定跑出这个排名的模型，并在 K 线上标出 run 的基准日 */}
+        <StockMiniTerminalModal
+          open={!!miniStock}
+          onClose={() => setMiniStock(null)}
+          symbol={miniStock?.code ?? ''}
+          name={miniStock?.name}
+          modelId={rankingResult?.model_id}
+          asOfDate={rankingResult?.inference_date}
+        />
      </div>
    );
  };
