@@ -404,6 +404,15 @@ def load_data(
             df["is_st"] = pd.to_numeric(df["is_st"], errors="coerce").fillna(0).astype(int)
             df = df[df["is_st"] == 0].copy()
             logger.info(f"After ST filter: {len(df)} rows (removed {before - len(df)} ST rows)")
+        else:
+            # is_st 缺失时必须显式告警。QuantDB 直读模式（l1_factors / l1_l2_factors）
+            # 的数据集没有这一列，原实现 `if "is_st" in df.columns` 静默跳过过滤，
+            # 训练集里混入 ST/*ST 股票却无人知晓，会直接污染 IC/ICIR 等评估指标。
+            logger.warning(
+                "is_st 列缺失，已跳过 ST/*ST 过滤：%d 行全部保留，"
+                "评估指标可能被 ST/*ST 股票污染（QuantDB 直读数据集无此列）",
+                len(df),
+            )
 
         # 行业条件化：合并 ind_code_l1（CSRC 一级行业编码）
         if industry_as_feature or "ind_code_l1" in features:

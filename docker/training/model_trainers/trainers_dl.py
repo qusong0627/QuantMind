@@ -243,9 +243,12 @@ def _train_dl(
     n_epochs    = int(_dl("n_epochs", 200))
     batch_size  = int(_dl("batch_size", 4000))
     lr          = float(_dl("lr", 0.001))
-    step_len    = int(dl_params.get("dl_step_len", 20))
-    early_stop  = int(dl_params.get("early_stopping_rounds", 20))
-    metric_name = str(dl_params.get("metric", "")).lower()
+    # 与 NativeTFT 路径（_train_native_tft）取值口径保持一致：
+    # 原先这里只认带 dl_ 前缀的 key，前端按无前缀（step_len）传参时会被静默忽略、
+    # 回落到默认值 20，而同样参数在 NativeTFT 路径下却生效。
+    step_len    = int(_dl("step_len", 20))
+    early_stop  = int(dl_params.get("early_stopping_rounds", dl_params.get("early_stop", 20)))
+    metric_name = str(_dl("metric", "")).lower()
 
     # 确定 GPU 和训练参数
     # 所有 Qlib DL 模型（GRU/LSTM/ALSTM/TransformerModel/TCN/TabnetModel）都接受 GPU/n_epochs/lr/batch_size/early_stop/metric
