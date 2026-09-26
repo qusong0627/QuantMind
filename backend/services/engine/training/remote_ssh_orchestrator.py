@@ -1309,13 +1309,23 @@ class RemoteSSHOrchestrator(TrainingOrchestrator):
         return files
 
     def _callback_url(self, run_id: str) -> str:
-        """构建训练回调 URL。
+        """构建训练回调 URL；拿不到远端可达地址时返回空串（即不发回调）。
 
-        优先用主节点局域网地址（TRAINING_MASTER_HOST），使远端容器能直接回调；
-        否则回退 api_base（容器内服务名，远端可能不可达，主节点仍会自拉产物兜底）。
+        远端节点只能回调「协调机可达地址」，即 ``TRAINING_MASTER_HOST``（局域网 IP 或
+        公网域名）。未配置时**不再回退 ``api_base``**——那是容器内服务名
+        （如 ``http://quantmind:8000``），在远端节点上必然解析失败，只会让每次训练
+        白等 15s 超时，并在训练日志里留下一条误导性的 ``Callback failed``。
+
+        远端训练的完成由主节点轮询负责（拉产物 + 触发注册），回调只是可选冗余；
+        拿不到可达地址就不发，交给轮询即可。空值在 train.py 侧是合法输入
+        （``if callback_url:`` 直接跳过）。
+
+        注意：本地 docker 训练走 ``LocalDockerOrchestrator`` 自己的 ``api_base``
+        （同 compose 网络内可解析），不受此处影响。
         """
-        base = f"http://{self.master_host}:8000" if self.master_host else self.api_base
-        return f"{base}/api/v1/models/training-runs/{run_id}/complete"
+        if not self.master_host:
+            return ""
+        return f"http://{self.master_host}:8000/api/v1/models/training-runs/{run_id}/complete"
 
     def _build_docker_run_cmd(self, container_name: str, *, direct_source: str = "") -> str:
         """构造远端 docker run 命令字符串。
