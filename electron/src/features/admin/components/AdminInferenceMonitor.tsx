@@ -26,12 +26,14 @@ const STATUS_LABEL: Record<string, string> = {
     success: '成功',
     failed: '失败',
     skipped: '已跳过',
+    running: '运行中',
 };
 
 const STATUS_COLOR: Record<string, string> = {
     success: 'green',
     failed: 'red',
     skipped: 'default',
+    running: 'blue',
 };
 
 /** 调度记录表：固定列宽，表头与数据行共用同一模板，避免列位漂移 */
@@ -53,9 +55,11 @@ const emptyMonitor = (): AdminInferenceMonitorData => ({
         success: 0,
         failed: 0,
         skipped: 0,
+        running: 0,
         today_success: 0,
         today_failed: 0,
         today_skipped: 0,
+        today_running: 0,
         latest_at: null,
     },
     settings: [],
@@ -174,7 +178,14 @@ export const AdminInferenceMonitor: React.FC = () => {
                 </Card>
                 <Card size="small" className={statCardClass}>
                     <Statistic title="累计成功 / 失败" value={`${summary.success} / ${summary.failed}`} />
-                    <div className="mt-1 text-xs text-slate-500">最近 {formatTime(summary.latest_at)}</div>
+                    <div className="mt-1 text-xs text-slate-500">
+                        最近 {formatTime(summary.latest_at)}
+                        {(summary.running ?? 0) > 0 && (
+                            <span className="ml-2 font-semibold text-amber-600">
+                                运行中 {summary.running}（未结束=任务被杀）
+                            </span>
+                        )}
+                    </div>
                 </Card>
             </div>
 

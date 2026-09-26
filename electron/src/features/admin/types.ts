@@ -560,9 +560,12 @@ export interface AdminInferenceMonitor {
         success: number;
         failed: number;
         skipped: number;
+        /** 任务开始时写入、正常结束即删除的标记行；长期存在说明任务中途被杀（如 OOM） */
+        running?: number;
         today_success: number;
         today_failed: number;
         today_skipped: number;
+        today_running?: number;
         latest_at?: string | null;
     };
     settings: AdminInferenceSettingItem[];

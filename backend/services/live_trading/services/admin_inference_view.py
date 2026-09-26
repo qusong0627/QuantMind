@@ -37,6 +37,8 @@ REASON_LABELS = {
     "PARTIAL": "部分补全失败",
     "BACKFILL_FAILED": "缺口补全失败",
     "NO_TARGETS": "无调度目标",
+    # 任务开始时的 running 标记：正常结束会被删掉，长期留着说明任务中途被杀（如 OOM）
+    "STARTED": "已启动（未结束）",
 }
 
 

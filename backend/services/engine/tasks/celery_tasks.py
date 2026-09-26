@@ -975,7 +975,23 @@ def backfill_default_inference(
             logger.info(
                 "[DefaultInferenceBackfill] 上一轮仍在执行（锁占用），本周期跳过"
             )
+            _insert_backfill_dispatch_log(
+                status="skipped",
+                reason_code="LOCK_HELD",
+                reason_detail="上一轮补全仍在执行（Redis 锁占用），本周期跳过",
+            )
             return {"status": "skipped", "reason": "LOCK_HELD"}
+
+    # 开始留痕：先写一条 running 记录，正常结束时再删掉。
+    # 存在的意义是让「静默死亡」可见：任务被 OOM 杀掉时进程直接消失，来不及写任何
+    # 结果行，这条 running 就会一直留在管理台「推理监控」里。
+    # 2026-09-25 默认模型缺口连续被 OOM 杀掉十几次，管理台却一条记录都没有，
+    # 就是因为只有成功路径才写留痕。
+    marker_id = _insert_backfill_dispatch_log(
+        status="running",
+        reason_code="STARTED",
+        reason_detail="任务已启动，等待完成；长期停留此状态说明任务中途被杀",
+    )
 
     try:
         result = _run_async(
@@ -993,6 +1009,7 @@ def backfill_default_inference(
             logger.warning(
                 "[DefaultInferenceBackfill] 写 dispatch_logs 失败: %s", log_exc
             )
+        _delete_backfill_dispatch_log(marker_id)
         logger.info(
             "[DefaultInferenceBackfill] done status=%s models=%s completed=%s "
             "partial=%s failed=%s skipped=%s",
@@ -1006,7 +1023,122 @@ def backfill_default_inference(
         return result
     except Exception as exc:
         logger.exception("[DefaultInferenceBackfill] failed")
+        _insert_backfill_dispatch_log(
+            status="failed",
+            reason_code="EXCEPTION",
+            reason_detail=str(exc)[:500],
+        )
+        _delete_backfill_dispatch_log(marker_id)
         return {"status": "failed", "error": str(exc)}
+
+
+_DISPATCH_LOG_DDL = """
+CREATE TABLE IF NOT EXISTS qm_model_inference_dispatch_logs (
+  id BIGSERIAL PRIMARY KEY,
+  trigger_source TEXT NOT NULL,
+  tenant_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  strategy_id TEXT,
+  model_id TEXT,
+  data_trade_date DATE,
+  prediction_trade_date DATE,
+  status TEXT NOT NULL,
+  reason_code TEXT,
+  reason_detail TEXT,
+  run_id TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+)
+"""
+
+
+def _backfill_dispatch_db():
+    """默认模型补全留痕用的同步 DB 会话；不可用时返回 (None, None)。"""
+    import os
+
+    from sqlalchemy import create_engine as sa_create_engine
+    from sqlalchemy.orm import sessionmaker as sa_sessionmaker
+
+    sync_db_url = str(os.getenv("DATABASE_URL", "")).strip()
+    if "+asyncpg" in sync_db_url:
+        sync_db_url = sync_db_url.replace("+asyncpg", "+psycopg2")
+    if not sync_db_url or "postgresql" not in sync_db_url:
+        return None, None
+    engine = sa_create_engine(sync_db_url, pool_pre_ping=True)
+    return sa_sessionmaker(bind=engine)(), engine
+
+
+def _insert_backfill_dispatch_log(
+    *,
+    status: str,
+    reason_code: str | None,
+    reason_detail: str,
+    model_id: str | None = None,
+) -> int | None:
+    """写一条默认模型补全留痕，返回自增 id（供结束时删除标记行）。"""
+    from sqlalchemy import text as sa_text
+
+    db = engine = None
+    try:
+        db, engine = _backfill_dispatch_db()
+        if db is None:
+            return None
+        db.execute(sa_text(_DISPATCH_LOG_DDL))
+        row_id = db.execute(
+            sa_text(
+                """
+                INSERT INTO qm_model_inference_dispatch_logs (
+                  trigger_source, tenant_id, user_id, strategy_id, model_id,
+                  data_trade_date, prediction_trade_date,
+                  status, reason_code, reason_detail, run_id, created_at
+                ) VALUES (
+                  'celery_backfill_default_inference', 'default', 'system', NULL,
+                  :model_id, NULL, NULL,
+                  :status, :reason_code, :reason_detail, NULL, NOW()
+                ) RETURNING id
+                """
+            ),
+            {
+                "model_id": model_id,
+                "status": status,
+                "reason_code": reason_code,
+                "reason_detail": str(reason_detail or "")[:500],
+            },
+        ).scalar()
+        db.commit()
+        return int(row_id) if row_id is not None else None
+    except Exception as exc:
+        logger.warning("[DefaultInferenceBackfill] 写调度留痕失败: %s", exc)
+        return None
+    finally:
+        if db is not None:
+            db.close()
+        if engine is not None:
+            engine.dispose()
+
+
+def _delete_backfill_dispatch_log(row_id: int | None) -> None:
+    """删除任务开始时的 running 标记行（任务已正常收尾时调用）。"""
+    if row_id is None:
+        return
+    from sqlalchemy import text as sa_text
+
+    db = engine = None
+    try:
+        db, engine = _backfill_dispatch_db()
+        if db is None:
+            return
+        db.execute(
+            sa_text("DELETE FROM qm_model_inference_dispatch_logs WHERE id = :id"),
+            {"id": row_id},
+        )
+        db.commit()
+    except Exception as exc:
+        logger.warning("[DefaultInferenceBackfill] 删除调度留痕失败: %s", exc)
+    finally:
+        if db is not None:
+            db.close()
+        if engine is not None:
+            engine.dispose()
 
 
 def _write_default_backfill_dispatch_logs(result: dict[str, Any]) -> None:
@@ -1030,27 +1162,7 @@ def _write_default_backfill_dispatch_logs(result: dict[str, Any]) -> None:
     Session = sa_sessionmaker(bind=engine)
     db = Session()
     try:
-        db.execute(
-            sa_text(
-                """
-                CREATE TABLE IF NOT EXISTS qm_model_inference_dispatch_logs (
-                  id BIGSERIAL PRIMARY KEY,
-                  trigger_source TEXT NOT NULL,
-                  tenant_id TEXT NOT NULL,
-                  user_id TEXT NOT NULL,
-                  strategy_id TEXT,
-                  model_id TEXT,
-                  data_trade_date DATE,
-                  prediction_trade_date DATE,
-                  status TEXT NOT NULL,
-                  reason_code TEXT,
-                  reason_detail TEXT,
-                  run_id TEXT,
-                  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-                )
-                """
-            )
-        )
+        db.execute(sa_text(_DISPATCH_LOG_DDL))
         for d in details:
             st = str(d.get("status") or "")
             if st == "up_to_date":

@@ -97,9 +97,11 @@ async def get_inference_monitor(
             "success": 0,
             "failed": 0,
             "skipped": 0,
+            "running": 0,
             "today_success": 0,
             "today_failed": 0,
             "today_skipped": 0,
+            "today_running": 0,
             "latest_at": None,
         },
         "settings": [],
@@ -126,9 +128,11 @@ async def get_inference_monitor(
                       COUNT(*) FILTER (WHERE status = 'success') AS success,
                       COUNT(*) FILTER (WHERE status = 'failed') AS failed,
                       COUNT(*) FILTER (WHERE status = 'skipped') AS skipped,
+                      COUNT(*) FILTER (WHERE status = 'running') AS running,
                       COUNT(*) FILTER (WHERE created_at >= :today AND status = 'success') AS today_success,
                       COUNT(*) FILTER (WHERE created_at >= :today AND status = 'failed') AS today_failed,
                       COUNT(*) FILTER (WHERE created_at >= :today AND status = 'skipped') AS today_skipped,
+                      COUNT(*) FILTER (WHERE created_at >= :today AND status = 'running') AS today_running,
                       MAX(created_at) AS latest_at
                     FROM qm_model_inference_dispatch_logs
                     """
@@ -141,9 +145,11 @@ async def get_inference_monitor(
             "success": int(summary_row.success or 0),
             "failed": int(summary_row.failed or 0),
             "skipped": int(summary_row.skipped or 0),
+            "running": int(summary_row.running or 0),
             "today_success": int(summary_row.today_success or 0),
             "today_failed": int(summary_row.today_failed or 0),
             "today_skipped": int(summary_row.today_skipped or 0),
+            "today_running": int(summary_row.today_running or 0),
             "latest_at": isoformat_dt(summary_row.latest_at),
         }
 
