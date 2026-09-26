@@ -335,6 +335,11 @@ async def save_training_node_config(
         return {"success": True, "node": node}
     except ValueError as exc:
         return {"success": False, "error": str(exc)}
+    except Exception as exc:  # noqa: BLE001
+        # 写盘失败（配置目录不可写、磁盘满等）以前会直接冒成 500，前端只能看到
+        # "Request failed with status code 500"，真实原因（如配置文件缺失）看不到。
+        logger.exception("保存训练节点失败")
+        return {"success": False, "error": f"保存失败：{exc}"}
 
 
 @router.delete("/training-nodes/{node_id}", summary="删除 AutoDL 节点配置")
@@ -345,7 +350,11 @@ async def delete_training_node_config(
     """从 training_nodes.yaml 删除节点配置。"""
     from backend.services.engine.training.node_manager import delete_training_node
 
-    deleted = delete_training_node(node_id)
+    try:
+        deleted = delete_training_node(node_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("删除训练节点失败")
+        return {"success": False, "error": f"删除失败：{exc}"}
     return {"success": deleted, "node": node_id}
 
 

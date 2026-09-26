@@ -25,11 +25,15 @@ NODES_CONFIG_PATH = Path(__file__).resolve().parents[4] / "config" / "training_n
 NODES_CONFIG_CONTAINER = Path("/app/config/training_nodes.yaml")
 
 
-def _resolve_config_path() -> Path | None:
+def _resolve_config_path(*, for_write: bool = False) -> Path | None:
+    """定位节点配置文件；for_write=True 时允许返回尚不存在的可写路径。"""
     for p in (NODES_CONFIG_PATH, NODES_CONFIG_CONTAINER):
         if p.exists():
             return p
-    return None
+    # 写操作兜底：config/training_nodes.yaml 内含 SSH 明文密码，被 .gitignore 排除，
+    # 全新部署上只有 .example.yaml，两个候选路径都不存在。不兜底的话 _write_yaml 会抛
+    # RuntimeError，表现为「第一次添加节点」必然 500，且 UI 里没有任何路径能创建该文件。
+    return NODES_CONFIG_PATH if for_write else None
 
 
 def _env_or(key: str, default: str) -> str:
@@ -59,9 +63,12 @@ def _load_yaml() -> dict[str, Any]:
 
 
 def _write_yaml(data: dict[str, Any]) -> Path:
-    """原子写回节点配置文件（临时文件 + rename），返回写入路径。"""
-    cfg_path = _resolve_config_path()
-    if cfg_path is None:
+    """原子写回节点配置文件（临时文件 + rename），返回写入路径。
+
+    文件不存在时直接创建（含父目录）。该文件存放 SSH 明文密码，落盘后收敛为 0600。
+    """
+    cfg_path = _resolve_config_path(for_write=True)
+    if cfg_path is None:  # pragma: no cover - for_write 恒返回路径，仅作防御
         raise RuntimeError("未找到训练节点配置文件（training_nodes.yaml），无法保存节点配置")
     cfg_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = cfg_path.with_suffix(".yaml.tmp")
@@ -70,6 +77,10 @@ def _write_yaml(data: dict[str, Any]) -> Path:
         encoding="utf-8",
     )
     tmp_path.replace(cfg_path)
+    try:
+        os.chmod(cfg_path, 0o600)
+    except OSError as exc:  # 权限收敛失败不应影响保存结果
+        logger.warning("收紧训练节点配置权限失败 %s: %s", cfg_path, exc)
     return cfg_path
 
 
