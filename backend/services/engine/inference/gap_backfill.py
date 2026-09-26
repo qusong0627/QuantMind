@@ -302,6 +302,63 @@ async def _mark_failed_run(
         pass
 
 
+async def _mark_success_run(
+    *,
+    result: Any,
+    tenant_id: str,
+    user_id: str,
+    model_id: str,
+    d: str,
+    source: str,
+) -> None:
+    """补全成功的日期同样落一条 completed 记录。
+
+    以前只有失败才写 qm_model_inference_runs，于是补全出来的日期在「推理历史」
+    里查不到；更关键的是下游按该表判断「最新一次推理」的链路（信号就绪、托管交易、
+    TDX 推送）会一直停在补全前的那一天，看不到补全出来的信号。
+    """
+    if result is None or not getattr(result, "success", False):
+        return
+    try:
+        from backend.services.engine.services.model_inference_persistence import (
+            model_inference_persistence,
+        )
+
+        rid = str(getattr(result, "run_id", "") or "")
+        if not rid:
+            return
+
+        def _as_date(value: Any) -> date:
+            try:
+                return date.fromisoformat(str(value)[:10])
+            except Exception:
+                return date.fromisoformat(d)
+
+        now = datetime.now(ZoneInfo("Asia/Shanghai"))
+        await model_inference_persistence.create_run(
+            run_id=rid,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            model_id=model_id,
+            data_trade_date=_as_date(getattr(result, "data_trade_date", "") or d),
+            prediction_trade_date=_as_date(
+                getattr(result, "prediction_trade_date", "") or d
+            ),
+            status="completed",
+            request_payload={"source": source, "date": d},
+            created_at=now,
+        )
+        await model_inference_persistence.update_run(
+            run_id=rid,
+            status="completed",
+            updated_at=now,
+            signals_count=int(getattr(result, "signals_count", 0) or 0),
+        )
+    except Exception as exc:
+        # 落历史失败不能影响补全本身（pred.parquet 已经写好）
+        logger.warning("record success run %s %s failed: %s", model_id, d, exc)
+
+
 async def backfill_model_gaps(
     *,
     tenant_id: str,
@@ -406,6 +463,14 @@ async def backfill_model_gaps(
                     result = None
 
                 await _mark_failed_run(
+                    result=result,
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    model_id=model_id,
+                    d=d,
+                    source=source,
+                )
+                await _mark_success_run(
                     result=result,
                     tenant_id=tenant_id,
                     user_id=user_id,

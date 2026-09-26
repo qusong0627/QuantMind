@@ -38,6 +38,25 @@ def _try_acquire_strategy_lock(strategy_id: str, trade_date: str, owner: str) ->
         return True
 
 
+def _release_strategy_lock(strategy_id: str, trade_date: str, owner: str) -> None:
+    """任务收尾时释放策略锁；只删自己持有的那把，避免误删他人的锁。"""
+    try:
+        from backend.shared.redis_sentinel_client import get_redis_sentinel_client
+
+        redis = get_redis_sentinel_client()
+        lock_key = f"{_INFERENCE_LOCK_KEY_PREFIX}:{strategy_id}:{trade_date}"
+        current = redis.get(lock_key)
+        if current is None:
+            return
+        if isinstance(current, bytes):
+            current = current.decode("utf-8", "ignore")
+        if current == owner:
+            redis.delete(lock_key)
+    except Exception as e:
+        # 释放失败不影响任务结果，锁仍由 TTL 兜底过期
+        logger.warning("[InferenceLock] 释放策略锁失败（将由 TTL 兜底）: %s", e)
+
+
 from backend.services.engine.services.signal_generator import global_signal_generator
 
 
@@ -965,12 +984,14 @@ def backfill_default_inference(
 
     # 轮询窗口防重入：全量调度（无过滤条件）拿不到锁说明上一轮仍在跑，跳过；
     # 带 tenant/user/model 的手动调用不受锁限制。Redis 不可用时降级放行。
+    lock_owner = "celery_backfill_default_inference"
+    lock_day: str | None = None
     if not (tenant_id or user_id or model_id) and not dry_run:
         from zoneinfo import ZoneInfo as _ZoneInfo
 
-        _today = datetime.now(_ZoneInfo("Asia/Shanghai")).date().isoformat()
+        lock_day = datetime.now(_ZoneInfo("Asia/Shanghai")).date().isoformat()
         if not _try_acquire_strategy_lock(
-            "default_backfill", _today, owner="celery_backfill_default_inference"
+            "default_backfill", lock_day, owner=lock_owner
         ):
             logger.info(
                 "[DefaultInferenceBackfill] 上一轮仍在执行（锁占用），本周期跳过"
@@ -1030,6 +1051,13 @@ def backfill_default_inference(
         )
         _delete_backfill_dispatch_log(marker_id)
         return {"status": "failed", "error": str(exc)}
+    finally:
+        # 收尾释放锁：锁的本意是防重入，不是限流。原来只靠 TTL(1800s) 自动过期，
+        # 而调度间隔正好也是 30 分钟，于是下一轮总在锁过期前到达 → 隔轮被判
+        # LOCK_HELD 跳过，实际轮询频率掉到 60 分钟。被 OOM 杀掉时 finally 不执行，
+        # 仍由 TTL 兜底，原有保护不受影响。
+        if lock_day:
+            _release_strategy_lock("default_backfill", lock_day, owner=lock_owner)
 
 
 _DISPATCH_LOG_DDL = """
