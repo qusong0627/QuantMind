@@ -105,11 +105,19 @@ install_runtime() {
     #   - python3-pandas 已通过 apt 安装（读 parquet 还需 pyarrow 引擎）
     #   - duckdb 用于直接查询 quantdb 的海量 parquet 数据
     #   - pyarrow 补齐 pandas 的 parquet 引擎
+    # 国内直连官方 PyPI 常因跨境网络超时（表现为长时间卡在 Collecting duckdb），
+    # 因此与下方 qwenpaw 的 reportlab 安装保持一致：清华源优先，阿里云兜底。
+    # 需要指定其他镜像时用 QUANTMIND_PIP_INDEX_URL 覆盖。
     # 离线环境可能无 PyPI 访问，安装失败仅告警，不中断整体部署。
     if [[ ${QUANTMIND_SKIP_ANALYSIS_TOOLS:-false} != true ]]; then
         log '步骤 1/8：安装 parquet 分析工具（pandas/duckdb/pyarrow）'
-        python3 -m pip install --break-system-packages duckdb pyarrow \
-            || python3 -m pip install duckdb pyarrow --user \
+        local pip_index="${QUANTMIND_PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
+        local pip_fallback="${QUANTMIND_PIP_FALLBACK_INDEX_URL:-https://mirrors.aliyun.com/pypi/simple/}"
+        log "使用 PyPI 镜像：$pip_index"
+        python3 -m pip install --break-system-packages -i "$pip_index" duckdb pyarrow \
+            || python3 -m pip install -i "$pip_index" duckdb pyarrow --user \
+            || python3 -m pip install --break-system-packages -i "$pip_fallback" duckdb pyarrow \
+            || python3 -m pip install -i "$pip_fallback" duckdb pyarrow --user \
             || log '警告：parquet 分析工具安装失败（可能无外网），已跳过'
     fi
 
