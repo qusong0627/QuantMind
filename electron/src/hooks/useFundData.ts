@@ -39,6 +39,10 @@ export const useFundData = (options: UseFundDataOptions = {}): UseFundDataReturn
   const [isSimulated, setIsSimulated] = useState<boolean>(tradingMode === 'simulation');
   const fingerprintRef = useRef<string | null>(null);
   const dataRef = useRef<FundData | null>(null);
+  // 请求序号：只有最新一次请求的响应才允许写入状态。交易模式/账户切换会并发多次请求，
+  // 旧响应若晚到会把新数据覆盖回旧值（典型表现：仪表盘首次打开先按默认模式取到空数据，
+  // 随后模式被纠正为 simulation 并发出新请求，但旧的 real 响应后到，把正确金额覆盖成 0）。
+  const requestSeqRef = useRef(0);
 
   const storedUser = authService.getStoredUser() as { id?: string; user_id?: string; tenant_id?: string } | null;
   const resolvedUserId = String(
@@ -57,6 +61,7 @@ export const useFundData = (options: UseFundDataOptions = {}): UseFundDataReturn
 
   const fetchData = useCallback(async (params?: { silent?: boolean }) => {
     const silent = params?.silent ?? true;
+    const seq = ++requestSeqRef.current;
 
     try {
       // 静默刷新不打断已有展示，避免大盘「加载慢 / 闪回 100 万」
@@ -66,6 +71,11 @@ export const useFundData = (options: UseFundDataOptions = {}): UseFundDataReturn
       setError(null);
 
       const result = await portfolioService.getFundOverview(resolvedUserId, tradingMode, resolvedTenantId);
+
+      // 已有更新的请求发出，丢弃本次过期响应（否则会把新数据覆盖回旧值）
+      if (seq !== requestSeqRef.current) {
+        return;
+      }
 
       const nextSnapshot = {
         data: result.data,
@@ -85,6 +95,10 @@ export const useFundData = (options: UseFundDataOptions = {}): UseFundDataReturn
       setLastUpdate(result.data.lastUpdate);
       fingerprintRef.current = fingerprint;
     } catch (err) {
+      // 过期请求的失败不应污染最新状态
+      if (seq !== requestSeqRef.current) {
+        return;
+      }
       const errorMessage = err instanceof Error ? err.message : '未知错误';
       setError(errorMessage);
       console.error('获取资金数据失败:', errorMessage);
@@ -96,7 +110,10 @@ export const useFundData = (options: UseFundDataOptions = {}): UseFundDataReturn
         fingerprintRef.current = null;
       }
     } finally {
-      setLoading(false);
+      // 仅最新请求可以收尾 loading，否则会把仍在进行中的新请求标记为已结束
+      if (seq === requestSeqRef.current) {
+        setLoading(false);
+      }
     }
   }, [resolvedUserId, resolvedTenantId, tradingMode]);
 

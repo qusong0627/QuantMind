@@ -11,12 +11,13 @@ export interface UIState {
   currentMarket: AppMarket;
 }
 
-const TRADING_MODE_PREF_KEY = 'qm:trading_mode_pref';
 const MARKET_PREF_KEY = 'qm:current_market';
 
-const savedMode = localStorage.getItem(TRADING_MODE_PREF_KEY);
-const initialTradingMode: 'real' | 'simulation' =
-  (savedMode === 'real' || savedMode === 'simulation') ? savedMode : 'real';
+// 仅保留模拟交易：实盘入口已在前端移除（HeaderBar / RealTradingPage），默认值必须与
+// 产品口径一致为 simulation。历史 localStorage 可能残留 'real'，这里不再读取——否则
+// 首帧会先用 real 发一次请求，与随后的模式纠正形成竞态，表现为仪表盘首次打开金额为 0
+// （配合 useFundData 的请求序号保护）。
+const initialTradingMode: 'real' | 'simulation' = 'simulation';
 
 const savedMarket = localStorage.getItem(MARKET_PREF_KEY);
 const validMarkets: AppMarket[] = (['CN', 'US', 'HK', 'CRYPTO', 'FUTURES'] as AppMarket[]).filter((m) => isMarketEnabled(m));
