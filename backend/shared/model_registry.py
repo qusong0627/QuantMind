@@ -12,6 +12,11 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy import text
 
+from backend.shared.model_paths import (
+    models_fallback_production_dir,
+    models_production_dir,
+)
+
 from backend.shared.cos_service import get_cos_service
 from backend.shared.database_manager_v2 import get_session
 from backend.shared.database_pool import get_db
@@ -62,10 +67,8 @@ class ModelRegistryService:
         )
         self.primary_model_id = os.getenv("PRIMARY_MODEL_ID", "")
         self.fallback_model_id = os.getenv("FALLBACK_MODEL_ID", "")
-        self.primary_model_dir = str(
-            os.getenv("MODELS_PRODUCTION", "/app/models/production")
-        )
-        self.fallback_model_dir = str(os.getenv("MODELS_FALLBACK_PRODUCTION", ""))
+        self.primary_model_dir = models_production_dir()
+        self.fallback_model_dir = models_fallback_production_dir()
         self.production_models_root = Path(self.primary_model_dir)
 
     async def ensure_tables(self) -> None:

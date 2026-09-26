@@ -25,6 +25,8 @@ from typing import Any
 import pandas as pd
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.shared.model_paths import models_production_dir
+
 from backend.services.simulation.services.local_market_data import (
     get_local_market_data,
 )
@@ -40,7 +42,7 @@ logger = logging.getLogger(__name__)
 
 def _resolve_model_dir(model_id: str | None = None) -> Path:
     """定位模型目录。优先 model_id 对应的子目录。"""
-    base = Path(os.getenv("MODELS_PRODUCTION", "/app/models/production"))
+    base = Path(models_production_dir())
     if model_id:
         candidate = base / model_id
         if candidate.is_dir():

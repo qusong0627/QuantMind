@@ -306,10 +306,11 @@ async def _resolve_model_dir_for_user(
     实际跑的是默认模型，比直接报错更难排查。
     """
     import json as _json
-    import os as _os
+
+    from backend.shared.model_paths import models_production_dir
 
     # 1. 生产模型目录
-    prod_base = Path(_os.getenv("MODELS_PRODUCTION", "/app/models/production"))
+    prod_base = Path(models_production_dir())
     candidate = prod_base / model_id
     if candidate.is_dir():
         return _validate_model_dir(candidate, model_id, _json)

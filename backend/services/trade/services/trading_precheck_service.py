@@ -14,6 +14,7 @@ from backend.services.live_trading.services.k8s_manager import k8s_manager
 from backend.services.live_trading.services.signal_readiness_service import (
     signal_readiness_service,
 )
+from backend.shared.model_paths import models_production_dir
 from backend.shared.trade_redis_keys import (
     pick_first_matching_key,
     trade_agent_heartbeat_key_candidates,
@@ -254,9 +255,7 @@ async def _query_market_data_readiness(
 
 def _check_inference_model_exists() -> tuple[bool, str]:
     """检查推理模型文件是否存在，不查询数据库。"""
-    production_dir = Path(
-        os.getenv("MODELS_PRODUCTION", "/app/models/production")
-    )
+    production_dir = Path(models_production_dir())
     user_models_dir = Path(
         os.getenv("USER_MODELS_ROOT", "/app/models/users")
     )

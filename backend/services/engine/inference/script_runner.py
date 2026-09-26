@@ -45,6 +45,11 @@ from typing import Any, Optional
 import exchange_calendars as xcals
 from sqlalchemy import create_engine, text
 
+from backend.shared.model_paths import (
+    models_fallback_production_dir,
+    models_production_dir,
+)
+
 # QuantDB factor describe 结果缓存（TTL 300s）
 # describe() 会全量扫描 parquet 求 min/max/schema，单次 ~2.6s；
 # 预检/就绪检查高频调用时缓存以避免阻塞单 worker 事件循环。
@@ -265,12 +270,14 @@ class InferenceScriptRunner:
         resolved_primary = (
             primary_model_dir
             or models_production
-            or os.getenv("MODELS_PRODUCTION", "/app/models/production")
+            or models_production_dir()
         )
         self.primary_model_dir = Path(resolved_primary)
+        # 兜底目录未配置时回落生产目录——这是本文件原有语义，与
+        # model_registry / router_service 的「未配置 = 无兜底」不同，故显式声明。
         self.fallback_model_dir = Path(
             fallback_model_dir
-            or os.getenv("MODELS_FALLBACK_PRODUCTION", "/app/models/production")
+            or models_fallback_production_dir(default_to_production=True)
         )
         self.primary_data_dir = self._normalize_provider_uri(
             str(primary_data_dir or os.getenv("QLIB_PRIMARY_DATA_PATH", ""))
