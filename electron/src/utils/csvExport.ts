@@ -21,8 +21,9 @@ export function forceTextCsvCell(value: unknown): string {
 export interface CsvExportOptions {
   /** 强制按文本导出的列下标集合（0-based），如股票代码列。 */
   textColumns?: number[];
-  /** 文件名（不含扩展名部分由调用方传入完整名）。 */
-  filename: string;
+  /** 文件名占位字段。buildCsvText 本身不使用它（下载文件名由 downloadCsvFile 的第二个参数决定），
+   *  保留为可选仅为兼容既有调用点。 */
+  filename?: string;
 }
 
 /** 组装 CSV 文本（带 BOM，Excel 直开不乱码）。 */

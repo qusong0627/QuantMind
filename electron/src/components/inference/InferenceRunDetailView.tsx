@@ -71,8 +71,9 @@ const RankRow: React.FC<{ item: InferenceRankingItem; onOpen: (item: InferenceRa
 };
 
 export const InferenceRunDetailView: React.FC<Props> = ({ runId, result, loading, onBack, onRetry, onNavigateDate }) => {
-  // 日期导航：从 runId（run_YYYYMMDD_xxx）解析当前推理日期
-  const [datePickerValue, setDatePickerValue] = useState<dayjs.Dayjs | null>(null);
+  // 日期导航：从 runId（run_YYYYMMDD_xxx）解析当前推理日期。
+  // DatePicker 的 value 直接由它派生，±1 天切换后也会跟着变（原先只在手动选择时写入，
+  // 切完前后一天输入框仍显示旧日期）。
   const currentInferenceDate = useMemo(() => {
     const m = runId.match(/run_(\d{4})(\d{2})(\d{2})/);
     return m ? `${m[1]}-${m[2]}-${m[3]}` : null;
@@ -84,7 +85,6 @@ export const InferenceRunDetailView: React.FC<Props> = ({ runId, result, loading
   }, [currentInferenceDate, onNavigateDate]);
   const handlePickDate = useCallback((d: dayjs.Dayjs | null) => {
     if (d && onNavigateDate) {
-      setDatePickerValue(d);
       onNavigateDate(d.format('YYYY-MM-DD'));
     }
   }, [onNavigateDate]);
@@ -111,8 +111,19 @@ export const InferenceRunDetailView: React.FC<Props> = ({ runId, result, loading
     }
   };
 
-  // 4 指标 + 左右双列：直接从排名明細计算，与列表展示永远一致
+  // 4 指标 + 左右双列：优先用后端 run 级 score_distribution（与历史列表同源，两处口径必然一致），
+  // 该字段缺失时再按 rankings 现场重算兜底
   const distStats = useMemo(() => {
+    const dist = result?.summary?.score_distribution;
+    if (dist && typeof dist.count === 'number') {
+      return {
+        pos: dist.positive_count ?? 0,
+        neg: dist.negative_count ?? 0,
+        zero: dist.zero_count ?? 0,
+        mean: typeof dist.mean === 'number' && Number.isFinite(dist.mean) ? dist.mean : null as number | null,
+        total: dist.count,
+      };
+    }
     const rankings = result?.rankings ?? [];
     let pos = 0;
     let neg = 0;
@@ -211,7 +222,7 @@ export const InferenceRunDetailView: React.FC<Props> = ({ runId, result, loading
               </Tooltip>
               <DatePicker
                 size="small"
-                value={datePickerValue}
+                value={currentInferenceDate ? dayjs(currentInferenceDate) : null}
                 onChange={handlePickDate}
                 allowClear={false}
                 placeholder="选日期"

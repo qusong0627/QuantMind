@@ -39,6 +39,7 @@ import { StockPoolPickerModal } from '../components/backtest/StockPoolPickerModa
 import type { StockPoolOption } from '../services/stockPoolOptionService';
 import { StockForecastChart } from '../features/inference-center/components/StockForecastChart';
 import { ModelScoreCurveGrid } from '../features/inference-center/components/ModelScoreCurveGrid';
+import { FeatureDriversPanel } from '../features/inference-center/components/FeatureDriversPanel';
 import { InferenceHistoryPanel } from '../components/inference/InferenceHistoryPanel';
 import { useAppSelector } from '../store';
 import { selectCurrentMarket } from '../store/slices/uiSlice';
@@ -67,7 +68,8 @@ export const InferenceCenterPage: React.FC = () => {
   const marketConfig = getMarketConfig(currentMarket);
 
   // 顶层 Tab：'cross-section'（市场截面推理）| 'individual'（个股预测推理）
-  const initialTopTab = (location.state as any)?.tab === 'cross-section' ? 'cross-section' : 'cross-section';
+  // 从别的页面带 state.tab 跳进来时要真正生效（原来三元两支都写 'cross-section'，该 Tab 永远进不去）
+  const initialTopTab = (location.state as any)?.tab === 'individual' ? 'individual' : 'cross-section';
   const initialModelId = (location.state as any)?.modelId || '';
   const [topTab, setTopTab] = useState<'cross-section' | 'individual'>(initialTopTab);
 
@@ -1118,14 +1120,26 @@ export const InferenceCenterPage: React.FC = () => {
                     </div>
                   </div>
 
-                  <div className="bg-white rounded-2xl border border-gray-200 shadow-xs overflow-hidden flex-1 min-h-0">
-                    <ModelScoreCurveGrid
-                      consensus={prediction.consensus}
-                      consensusScore={prediction.consensus_score}
-                      selectedCount={consensusModelIds.length}
-                      suffixSymbol={toSuffixCode(prediction.symbol || symbol)}
-                      asOfDate={prediction.as_of_date}
-                    />
+                  {/* 归因面板与多模型分数卡并排：/research/predict-stock 一直在返回 drivers /
+                      drivers_source，此前没有任何组件渲染它（FeatureDriversPanel 建好却无人引用），
+                      等于后端的 SHAP 归因白算。此处接回。 */}
+                  <div className="flex-1 min-h-0 grid grid-cols-1 xl:grid-cols-2 gap-3 overflow-y-auto xl:overflow-hidden custom-scrollbar">
+                    <div className="bg-white rounded-2xl border border-gray-200 shadow-xs overflow-hidden min-h-0">
+                      <FeatureDriversPanel
+                        drivers={prediction.drivers ?? []}
+                        source={prediction.drivers_source}
+                      />
+                    </div>
+
+                    <div className="bg-white rounded-2xl border border-gray-200 shadow-xs overflow-hidden min-h-0">
+                      <ModelScoreCurveGrid
+                        consensus={prediction.consensus}
+                        consensusScore={prediction.consensus_score}
+                        selectedCount={consensusModelIds.length}
+                        suffixSymbol={toSuffixCode(prediction.symbol || symbol)}
+                        asOfDate={prediction.as_of_date}
+                      />
+                    </div>
                   </div>
                 </div>
               ) : (

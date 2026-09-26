@@ -18,6 +18,7 @@ import axios from 'axios';
 import { modelTrainingService, StockScoreHistoryItem } from '../../services/modelTrainingService';
 import { authService } from '../../features/auth/services/authService';
 import { SERVICE_ENDPOINTS } from '../../config/services';
+import { toSuffixCode } from '../../utils/portfolioUtils';
 
 const { Text } = Typography;
 
@@ -31,7 +32,7 @@ interface KlineItem {
 }
 
 interface Props {
-  symbol: string;         // 纯数字，如 600365
+  symbol: string;         // 前缀式或后缀式代码（SH600519 / 600519.SH），内部统一转后缀式取行情
   name?: string;
   /** 当前批次该股信息（排名/分数/板块/行业/市值） */
   stockInfo?: {
@@ -80,10 +81,10 @@ const baseURL =
   (import.meta as any).env?.VITE_USER_API_URL || SERVICE_ENDPOINTS.USER_SERVICE;
 
 /** 从 QuantDB 本地 parquet 取 K 线（/market/kline，A股优先 quantdb_parquet） */
-async function fetchQuantdbKline(symbol: string, days: number): Promise<KlineItem[]> {
+async function fetchQuantdbKline(symbol: string, days: number, market: string): Promise<KlineItem[]> {
   const token = authService.getAccessToken();
   const resp = await axios.get(`${baseURL}/market/kline`, {
-    params: { symbol, market: 'A', period: 'daily', days },
+    params: { symbol, market, period: 'daily', days },
     headers: token ? { Authorization: `Bearer ${token}` } : {},
     timeout: 30000,
   });
@@ -124,6 +125,31 @@ async function fetchShanghaiIndex(days: number): Promise<{
   }
 }
 
+/** 普通量纲分档（非融合宽幅）：图例与 annotateScore 共用同一份定义，避免两处口径漂移 */
+const NORMAL_SCORE_BUCKETS: Array<{ min: number; label: string; color: string; chip: string }> = [
+  { min: 0.20, label: '高分区', color: '#f43f5e', chip: 'bg-rose-50 text-rose-600' },
+  { min: 0.15, label: '较高分区', color: '#f97316', chip: 'bg-orange-50 text-orange-600' },
+  { min: 0.12, label: '中等偏高', color: '#f59e0b', chip: 'bg-amber-50 text-amber-600' },
+  { min: 0.10, label: '中等分区', color: '#10b981', chip: 'bg-emerald-50 text-emerald-600' },
+  { min: 0.00, label: '中低分区', color: '#94a3b8', chip: 'bg-slate-100 text-slate-600' },
+];
+
+/** 融合模型宽幅分档（分数可达 ±1 以上） */
+const WIDE_SCORE_BUCKETS: Array<{ min: number; label: string; color: string; chip: string }> = [
+  { min: 0.50, label: '最高分', color: '#f43f5e', chip: 'bg-rose-50 text-rose-600' },
+  { min: 0.20, label: '高分区', color: '#f97316', chip: 'bg-orange-50 text-orange-600' },
+  { min: 0.05, label: '中高分', color: '#f59e0b', chip: 'bg-amber-50 text-amber-600' },
+  { min: -0.05, label: '中低分', color: '#94a3b8', chip: 'bg-slate-100 text-slate-600' },
+  { min: -0.30, label: '低分区', color: '#f97316', chip: 'bg-orange-50 text-orange-600' },
+];
+
+/** 负向分档：按「越低越差」依次判定 */
+const NEGATIVE_SCORE_BUCKETS: Array<{ max: number; label: string; color: string; chip: string }> = [
+  { max: -0.20, label: '低分区', color: '#e11d48', chip: 'bg-rose-50 text-rose-700' },
+  { max: -0.15, label: '较低分区', color: '#f43f5e', chip: 'bg-rose-50 text-rose-600' },
+  { max: -0.06, label: '低分区', color: '#f97316', chip: 'bg-orange-50 text-orange-600' },
+];
+
 /** 分数标注逻辑：按当前模型分数范围动态分档（融合模型高分如 2.7 也能分层） */
 function annotateScore(score: number, wideScale = false, scoreMin?: number, scoreMax?: number): { label: string; color: string } | null {
   // 有动态范围时按分位数比例分档（更普适）
@@ -137,22 +163,18 @@ function annotateScore(score: number, wideScale = false, scoreMin?: number, scor
     return { label: '低分区', color: '#10b981' };
   }
   if (wideScale) {
-    // 融合模型：高分/中高/中低/低分 四档（0.8 分位以上为最高分）
-    if (score >= 0.50) return { label: '最高分', color: '#f43f5e' };
-    if (score >= 0.20) return { label: '高分区', color: '#f97316' };
-    if (score >= 0.05) return { label: '中高分', color: '#f59e0b' };
-    if (score >= -0.05) return { label: '中低分', color: '#94a3b8' };
-    if (score >= -0.30) return { label: '低分区', color: '#f97316' };
+    // 融合模型：最高/高/中高/中低/低 五档 + 最低分兜底
+    for (const b of WIDE_SCORE_BUCKETS) {
+      if (score >= b.min) return { label: b.label, color: b.color };
+    }
     return { label: '最低分', color: '#e11d48' };
   }
-  if (score >= 0.20) return { label: '高分区', color: '#f43f5e' };
-  if (score >= 0.15) return { label: '较高分区', color: '#f97316' };
-  if (score >= 0.12) return { label: '中等偏高', color: '#f59e0b' };
-  if (score >= 0.10) return { label: '中等分区', color: '#10b981' };
-  if (score >= 0) return { label: '中低分区', color: '#94a3b8' };
-  if (score <= -0.20) return { label: '低分区', color: '#e11d48' };
-  if (score <= -0.15) return { label: '较低分区', color: '#f43f5e' };
-  if (score <= -0.06) return { label: '低分区', color: '#f97316' };
+  for (const b of NORMAL_SCORE_BUCKETS) {
+    if (score >= b.min) return { label: b.label, color: b.color };
+  }
+  for (const b of NEGATIVE_SCORE_BUCKETS) {
+    if (score <= b.max) return { label: b.label, color: b.color };
+  }
   return { label: '中低分区', color: '#94a3b8' };
 }
 
@@ -219,17 +241,9 @@ export const StockScoreChart: React.FC<Props> = ({ symbol, name, stockInfo, mark
   const [tradeModal, setTradeModal] = useState<{ date: string; open: number; close: number; idx: number } | null>(null);
   const [tradeShares, setTradeShares] = useState(100);
 
-  // 归一化 symbol → suffix
-  const suffixSymbol = useMemo(() => {
-    if (symbol.includes('.')) return symbol;
-    const code = symbol.replace(/^(SH|SZ|BJ)/, '');
-    if (code.startsWith('688')) return `${code}.SH`;
-    if (code.startsWith('30')) return `${code}.SZ`;
-    if (code.startsWith('00') || code.startsWith('002') || code.startsWith('003')) return `${code}.SZ`;
-    if (code.startsWith('60')) return `${code}.SH`;
-    if (code.startsWith('4') || code.startsWith('8') || code.startsWith('9')) return `${code}.BJ`;
-    return `${code}.SH`;
-  }, [symbol]);
+  // 代码归一：行情接口一律用后缀式（600519.SH）。转换走仓库统一工具，
+  // 禁止手写号段切片——9xxxxx 属 SH、2xxxxx 属 SZ 等规则由工具保证。
+  const suffixSymbol = useMemo(() => toSuffixCode(symbol), [symbol]);
 
   /* ---- 拉数据 ---- */
   // K 线固定加载一次；分数默认加载当前模型（modelId），不带则全部模型
@@ -240,7 +254,7 @@ export const StockScoreChart: React.FC<Props> = ({ symbol, name, stockInfo, mark
       setLoading(true);
       try {
         const [kresp, sresp, idxresp] = await Promise.all([
-          fetchQuantdbKline(suffixSymbol, days),
+          fetchQuantdbKline(suffixSymbol, days, market),
           modelTrainingService.getStockInferenceHistory(symbol, days, modelId),
           fetchShanghaiIndex(days),
         ]);
@@ -294,16 +308,8 @@ export const StockScoreChart: React.FC<Props> = ({ symbol, name, stockInfo, mark
     }
   }, [klineItems.length]);
 
-  // 回放窗口：K线显示到 replayIdx-1（前一天收盘），信号显示到 replayIdx（当天信号，基于前一天数据）
-  // 这样模拟交易时：先看到当天信号（开盘前决策），K线后出现（收盘后才知道）
-  const visibleKline = useMemo(() => {
-    if (!replayEnabled) return klineItems;
-    const s = Math.min(startIdx, replayIdx);
-    // K线只显示到 replayIdx-1，当前日K线未出现
-    const e = Math.max(startIdx, Math.min(replayIdx, replayIdx - 1));
-    if (e < s) return [];
-    return klineItems.slice(s, e + 1);
-  }, [klineItems, replayEnabled, startIdx, replayIdx]);
+  // 回放窗口（K线显示到 replayIdx-1、信号显示到 replayIdx，先见信号再见 K 线）
+  // 由下方 option 内的 chartDates / chartKline 直接计算，此处只保留分数可见区间。
   const visibleScores = useMemo(() => {
     if (!replayEnabled) return scoreItems;
     const sDate = klineItems[Math.min(startIdx, klineItems.length - 1)]?.date || '';
@@ -624,9 +630,9 @@ export const StockScoreChart: React.FC<Props> = ({ symbol, name, stockInfo, mark
         ] : []),
       ],
     };
-  }, [visibleKline, visibleScores, trades, replayEnabled, defaultZoom, refLines, indexData]);
+  }, [klineItems, visibleScores, trades, replayEnabled, startIdx, replayIdx, defaultZoom, refLines, indexData, wideScale]);
 
-  // 打开回放时：点击逻辑绑定到 visibleKline 的索引
+  // 打开回放时：点击逻辑绑定到 clickableDates 的索引
   const onEvents = useMemo(() => ({ click: onChartClick }), [clickableDates]);
 
   return (
@@ -739,12 +745,30 @@ export const StockScoreChart: React.FC<Props> = ({ symbol, name, stockInfo, mark
         )}
       </div>
 
-      {/* 分数区间图例 */}
+      {/* 分数区间图例：与 annotateScore 的静态分档共用同一份定义（作用于下方日历着色）。
+          注意图表 tooltip 的标签走「按当前分数区间动态分位」档，与这里的固定阈值档不同口径。 */}
       <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
-        <span className="rounded-md bg-emerald-50 text-emerald-600 px-1.5 py-0.5 font-bold">高分区 0.10-0.12</span>
-        <span className="rounded-md bg-amber-50 text-amber-600 px-1.5 py-0.5 font-bold">中高分 0.12-0.15</span>
-        <span className="rounded-md bg-orange-50 text-orange-600 px-1.5 py-0.5 font-bold">中分区 0.15-0.20</span>
-        <span className="rounded-md bg-rose-50 text-rose-600 px-1.5 py-0.5 font-bold">低分区 ≤-0.15</span>
+        <span className="text-slate-400 font-bold">日历分档</span>
+        {wideScale
+          ? WIDE_SCORE_BUCKETS.map((b, i) => (
+              <span key={`leg-wide-${b.label}-${i}`} className={`rounded-md px-1.5 py-0.5 font-bold ${b.chip}`}>
+                {b.label} {i === 0 ? `≥${b.min.toFixed(2)}` : `${b.min.toFixed(2)}~${WIDE_SCORE_BUCKETS[i - 1].min.toFixed(2)}`}
+              </span>
+            ))
+          : (
+            <>
+              {NORMAL_SCORE_BUCKETS.map((b, i) => (
+                <span key={`leg-pos-${b.label}-${i}`} className={`rounded-md px-1.5 py-0.5 font-bold ${b.chip}`}>
+                  {b.label} {i === 0 ? `≥${b.min.toFixed(2)}` : `${b.min.toFixed(2)}~${NORMAL_SCORE_BUCKETS[i - 1].min.toFixed(2)}`}
+                </span>
+              ))}
+              {NEGATIVE_SCORE_BUCKETS.map((b, i) => (
+                <span key={`leg-neg-${b.label}-${i}`} className={`rounded-md px-1.5 py-0.5 font-bold ${b.chip}`}>
+                  {b.label} {i === 0 ? `≤${b.max.toFixed(2)}` : `${NEGATIVE_SCORE_BUCKETS[i - 1].max.toFixed(2)}~${b.max.toFixed(2)}`}
+                </span>
+              ))}
+            </>
+          )}
         <Button
           size="small"
           className="rounded-lg text-[11px] font-bold h-6 px-2 ml-auto"

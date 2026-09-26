@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import {
-  Button, Tag, Typography, Empty, Spin, Table,
+  Button, Tag, Typography, Empty, Spin, Table, message,
 } from 'antd';
 import { clsx } from 'clsx';
 import type { ColumnsType } from 'antd/es/table';
@@ -55,9 +55,10 @@ export const InferenceHistoryPanel: React.FC<Props> = ({ modelId, onDelete }) =>
       });
       setItems(resp.items);
       setTotal(resp.total);
-    } catch {
+    } catch (e: any) {
       setItems([]);
       setTotal(0);
+      message.error(`加载推理历史失败: ${e?.response?.data?.detail || e?.message || '未知错误'}`);
     } finally {
       setLoading(false);
     }
@@ -74,8 +75,9 @@ export const InferenceHistoryPanel: React.FC<Props> = ({ modelId, onDelete }) =>
     try {
       const r = await modelTrainingService.getInferenceResult(runId);
       setDetailResult(r);
-    } catch {
+    } catch (e: any) {
       setDetailResult(null);
+      message.error(`加载推理详情失败: ${e?.response?.data?.detail || e?.message || '未知错误'}`);
     } finally {
       setDetailLoading(false);
     }
@@ -99,8 +101,9 @@ export const InferenceHistoryPanel: React.FC<Props> = ({ modelId, onDelete }) =>
       } else {
         setDetailResult(null);
       }
-    } catch {
+    } catch (e: any) {
       setDetailResult(null);
+      message.error(`按日期加载推理结果失败: ${e?.response?.data?.detail || e?.message || '未知错误'}`);
     } finally {
       setDetailLoading(false);
     }

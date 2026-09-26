@@ -2,34 +2,32 @@ import { message } from 'antd';
 import type { InferenceRankingResult } from '../../services/modelTrainingService';
 import { buildCsvText, downloadCsvFile } from '../../utils/csvExport';
 
-/** 把 stdout/stderr 按行拆分：ERROR/CRITICAL/TRACEBACK 归入错误输出，其余归入标准输出。 */
+/** 把 stdout/stderr 按行拆分：硬错误（ERROR/CRITICAL/EXCEPTION/TRACEBACK/FAILED/FAILURE）
+ *  归入错误输出，其余（含 WARNING/INFO）一律归入标准输出。 */
 export function splitInferenceLogs(stdout?: string | null, stderr?: string | null): {
   stdout: string;
   stderr: string;
 } {
   const infoLines: string[] = [];
   const errorLines: string[] = [];
-  const pushLines = (raw: string, source: 'stdout' | 'stderr') => {
+  const pushLines = (raw: string) => {
     raw.split(/\r?\n/).forEach((line) => {
       const text = line.trimEnd();
       if (!text) return;
       const upper = text.toUpperCase();
       const isError = /\b(ERROR|CRITICAL|EXCEPTION|TRACEBACK|FAILED|FAILURE)\b/.test(upper);
-      const isInfo = /\bINFO\b/.test(upper);
-      const isWarn = /\b(WARNING|WARN)\b/.test(upper);
+      // 只有上述硬错误进错误输出；WARNING/INFO 留在标准输出。
+      // 原先这里还有个「stderr 且 INFO 且非 WARN」的分支，但它和下面的兜底 push 完全等价，
+      // 属空转逻辑，已删除。
       if (isError) {
         errorLines.push(text);
-        return;
-      }
-      if (source === 'stderr' && isInfo && !isWarn) {
-        infoLines.push(text);
         return;
       }
       infoLines.push(text);
     });
   };
-  if (stdout) pushLines(stdout, 'stdout');
-  if (stderr) pushLines(stderr, 'stderr');
+  if (stdout) pushLines(stdout);
+  if (stderr) pushLines(stderr);
   return {
     stdout: infoLines.join('\n'),
     stderr: errorLines.join('\n'),
@@ -47,7 +45,7 @@ export function exportRankingCsv(result: InferenceRankingResult): boolean {
     const csv = buildCsvText(
       ['排名', '股票代码', '股票名称', '预测得分', '信号'],
       rows,
-      { textColumns: [1], filename: '' },
+      { textColumns: [1] },
     );
     const ok = downloadCsvFile(
       csv,
