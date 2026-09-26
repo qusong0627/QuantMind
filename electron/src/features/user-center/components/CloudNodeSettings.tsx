@@ -560,7 +560,7 @@ export const CloudNodeSettings: React.FC = () => {
             <Input.TextArea
               value={sshPaste}
               rows={3}
-              placeholder={'ssh -p 27045 root@connect.bjb2.seetacloud.com\n密码可写在下一行'}
+              placeholder="ssh -p 27045 root@connect.bjb2.seetacloud.com"
               className="!rounded-lg"
               onChange={(e) => applySshPaste(e.target.value)}
               onPaste={(e) => {
