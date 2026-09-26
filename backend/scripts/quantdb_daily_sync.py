@@ -1104,6 +1104,27 @@ def run_daily_sync(
                     QUANTDB_DATA_DIR,
                     start=date.today() - timedelta(days=10),
                 )
+            except ModuleNotFoundError as exc:
+                # 免 docker（AutoDL native）节点只推 backend_min/ 最小子树，
+                # 不带 backend/scripts：此修复步骤天然不可用，不是故障，
+                # 降级为 info 避免日志里出现看着像报错的 failed。
+                # backfill 自身依赖缺失（如无 pandas）仍按 warning 报出。
+                missing = str(getattr(exc, "name", "") or "")
+                if missing.startswith("backend.scripts"):
+                    log.info(
+                        "L1 OHLCV backfill 跳过（当前环境无 %s，AutoDL native 模式属预期）",
+                        missing,
+                    )
+                    result["l1_ohlcv_backfill"] = {
+                        "status": "skipped",
+                        "reason": f"module unavailable: {missing}",
+                    }
+                else:
+                    log.warning("L1 OHLCV backfill failed: %s", exc)
+                    result["l1_ohlcv_backfill"] = {
+                        "status": "error",
+                        "reason": str(exc),
+                    }
             except Exception as exc:
                 log.warning("L1 OHLCV backfill failed: %s", exc)
                 result["l1_ohlcv_backfill"] = {"status": "error", "reason": str(exc)}
