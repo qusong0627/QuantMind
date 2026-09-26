@@ -4,7 +4,7 @@ import { Search, Star, X, Clock3, TrendingUp } from 'lucide-react';
 import { Spin } from 'antd';
 import { stockTerminalService } from '../services/stockTerminalService';
 import { StockListItem } from '../types';
-import { toPrefix } from './StockSidebar';
+import { normalizeStockCode } from '../../../utils/portfolioUtils';
 
 interface Props {
   onSelect: (item: StockListItem) => void;
@@ -133,7 +133,7 @@ export function StockSearchBar({ onSelect, watchlistSymbols, placeholder = 'æœç
                 </div>
               ) : items.length ? (
                 items.map((it, idx) => {
-                  const watched = watchlistSymbols.has(toPrefix(it.symbol));
+                  const watched = watchlistSymbols.has(normalizeStockCode(it.symbol));
                   const up = (it.pct_change ?? 0) >= 0;
                   return (
                     <button
