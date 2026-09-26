@@ -35,6 +35,11 @@ export default defineConfig(({ mode }) => {
       globals: true,
       environment: 'jsdom',
       setupFiles: './src/setupTests.ts',
+      // 只把 src 下的 *.test.ts(x) 当 vitest 套件。
+      // tests/*.test.mjs 是独立 Node 脚本（不引 vitest、无 describe/it，自带 main 流程），
+      // 默认 glob 会把它们当套件并报 “No test suite found in file” 造成假失败；
+      // 它们仍可用 `node tests/p0_4_draft_hydration.test.mjs` 单独运行。
+      include: ['src/**/*.{test,spec}.{ts,tsx}'],
       coverage: {
         reporter: ['text', 'json', 'html'],
         exclude: [
