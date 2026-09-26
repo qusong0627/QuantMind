@@ -58,7 +58,7 @@
 - 全局 WebSocket 服务已支持“首次鉴权未就绪”的补连流程，因此首次进入页面若 token 还在加载中，也会自动恢复到已连接状态。
 
 ## useTradingModeInitialization（2026-04 更新）
-- 该 Hook 只恢复用户显式保存的交易模式偏好（`qm:trading_mode_pref`），不再根据账户是否在线、是否存在快照来自动切换实盘/模拟模式。
+- 实盘入口已在前端移除，该 Hook 现在把交易模式**强制为 simulation**（`uiSlice` 的初始值同样是 `simulation`），不再读取历史遗留的 `qm:trading_mode_pref` 偏好。
 - 页面侧若需要决定读取哪个账户来源，应通过统一适配层 `pages/trading/utils/accountAdapter.ts` 与 `realTradingService.getRuntimeAccount()` 完成，不要在 Hook 中隐式改写全局模式。
 
 ## useStrategies（2026-02 补充）

@@ -2,8 +2,6 @@ import { useEffect, useCallback, useRef } from 'react';
 import { useAppDispatch, useAppSelector } from '../store';
 import { setTradingMode } from '../store/slices/uiSlice';
 
-const TRADING_MODE_PREF_KEY = 'qm:trading_mode_pref';
-
 export const useTradingModeInitialization = () => {
     const dispatch = useAppDispatch();
     const tradingMode = useAppSelector((state) => state.ui.tradingMode);
