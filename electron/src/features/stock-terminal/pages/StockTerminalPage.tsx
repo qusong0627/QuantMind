@@ -1,14 +1,15 @@
 /** 个股终端 — 搜索驱动展示：顶部搜索 + 左右布局（左 K线大图·推理分数底部副图 + 右详情） */
-import { useCallback, useEffect, useState } from 'react';
-import { CandlestickChart, Search, Layers, Building2, Database, TrendingUp, TrendingDown, Info } from 'lucide-react';
-import { message, Select } from 'antd';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { CandlestickChart, Search, Layers, Building2, Database, TrendingUp, TrendingDown, Info, CalendarDays } from 'lucide-react';
+import { message, Select, DatePicker } from 'antd';
+import dayjs from 'dayjs';
 import { PAGE_LAYOUT } from '../../../config/pageLayout';
 import { StockListItem, StockProfile, KlineBar } from '../types';
 import { stockTerminalService, type KlineAdjust } from '../services/stockTerminalService';
 import { modelTrainingService } from '../../../services/modelTrainingService';
 import { StockSearchBar } from '../components/StockSearchBar';
 import { type Point as ScorePoint } from '../components/InferenceScoreChart';
-import { KlineChart } from '../components/kline/KlineChart';
+import { KlineChart, type IndicatorConfig } from '../components/kline/KlineChart';
 import { OverviewTab } from '../components/OverviewTab';
 import { FinancialsTab, ValuationTab, ChipFlowTab, MarginTab, SentimentTab, HoldersTab } from '../components/tabs/P2Tabs';
 import { NewsTab } from '../components/tabs/NewsTab';
@@ -40,6 +41,9 @@ const KLINE_ADJUSTS: { key: KlineAdjust; label: string }[] = [
   { key: 'qfq', label: '前复权' },
   { key: 'hfq', label: '后复权' },
 ];
+
+/** K 线指标配置：模块级常量，避免每次 render 生成新对象导致图表 option 重算 */
+const KLINE_CONFIG: IndicatorConfig = { ma: true, subplots: ['vol'] };
 
 function resampleBars(bars: KlineBar[], period: 'weekly' | 'monthly'): KlineBar[] {
   const map = new Map<string, KlineBar[]>();
@@ -148,6 +152,26 @@ export default function StockTerminalPage() {
     setDetailTab('overview');
     setSignalDate(undefined);
   }, []);
+
+  // K 线柱点击 → 该日记为「点选日」，右侧 profile 与各 Tab 的 asof 全部跟随
+  const handleBarClick = useCallback((bar: KlineBar) => {
+    setSignalDate(bar.date);
+  }, []);
+
+  // 分数副图数据：保持稳定引用，避免每次 render 让 KlineChart 重算 option
+  const scoreSubplotPoints = useMemo(
+    () => scorePoints.map((p) => ({ date: p.date, value: p.value })),
+    [scorePoints],
+  );
+
+  // 页头展示的分数：点选历史日时取该日（含之前最近一条）的分数，未点选时为最新分数，
+  // 与右侧详情 / 各 Tab 的 asof 口径保持一致
+  const scoreShown = useMemo(() => {
+    if (!scorePoints.length) return null;
+    if (!signalDate) return scoreLast;
+    const hit = [...scorePoints].reverse().find((p) => p.date <= signalDate);
+    return hit ? { value: hit.value, date: hit.date, up: hit.value >= 0 } : null;
+  }, [scorePoints, signalDate, scoreLast]);
 
   // 详情随选中+信号日联动
   useEffect(() => {
@@ -291,40 +315,68 @@ export default function StockTerminalPage() {
                         {profile.close?.toFixed(3) ?? '--'} {up ? '+' : ''}{(profile.pct_change ?? 0).toFixed(3)}%
                       </span>
                     )}
-                    {scoreLast && (
+                    {scoreShown && (
                       <span className="flex items-center gap-1 shrink-0 text-[11px]">
                         <span className="text-slate-300">·</span>
                         <span className="flex items-center gap-0.5 text-slate-500">
-                          {scoreLast.up
+                          {scoreShown.up
                             ? <TrendingUp className="w-3 h-3 text-rose-500" />
                             : <TrendingDown className="w-3 h-3 text-emerald-500" />}
-                          <span className="font-mono font-bold text-slate-700">{scoreLast.value.toFixed(4)}</span>
+                          <span className="font-mono font-bold text-slate-700">{scoreShown.value.toFixed(4)}</span>
                         </span>
-                        <span className="text-slate-400">{scoreLast.date}</span>
+                        <span className="text-slate-400">{scoreShown.date}</span>
                       </span>
                     )}
                     {modelName && <span className="hidden xl:inline text-[10px] font-mono text-indigo-500 truncate max-w-[120px]">· {modelName}</span>}
+                    {signalDate && (
+                      <span className="shrink-0 text-[10px] px-1.5 py-0.5 rounded-md bg-blue-50 border border-blue-100 text-blue-600 font-bold">
+                        历史 {signalDate}
+                      </span>
+                    )}
                   </div>
-                  <div className="flex items-center gap-1 p-1 bg-slate-100 rounded-full shrink-0">
-                    {KLINE_PERIODS.map((p) => (
-                      <button
-                        key={p.key}
-                        onClick={() => setPeriod(p.key)}
-                        className={`px-3 py-1 rounded-full text-[11px] font-bold transition-colors ${period === p.key ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
-                      >
-                        {p.label}
-                      </button>
-                    ))}
-                    <div className="w-px h-4 bg-slate-200 mx-1" />
-                    {KLINE_ADJUSTS.map((a) => (
-                      <button
-                        key={a.key}
-                        onClick={() => setAdjust(a.key)}
-                        className={`px-2.5 py-1 rounded-full text-[11px] font-bold transition-colors ${adjust === a.key ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
-                      >
-                        {a.label}
-                      </button>
-                    ))}
+                  <div className="flex items-center gap-2 shrink-0">
+                    {/* 点选日：直接点 K 线柱，或用日期控件指定；右侧详情与各 Tab 全部跟随该日 */}
+                    <div className="flex items-center gap-1.5">
+                      <CalendarDays className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                      <DatePicker
+                        size="small"
+                        value={signalDate ? dayjs(signalDate) : null}
+                        onChange={(d) => setSignalDate(d ? d.format('YYYY-MM-DD') : undefined)}
+                        placeholder="最新交易日"
+                        allowClear
+                        style={{ width: 132 }}
+                      />
+                      {signalDate && (
+                        <button
+                          onClick={() => setSignalDate(undefined)}
+                          className="text-[11px] font-bold text-blue-600 hover:text-blue-700 whitespace-nowrap"
+                        >
+                          回到最新
+                        </button>
+                      )}
+                    </div>
+                    <div className="w-px h-4 bg-slate-200" />
+                    <div className="flex items-center gap-1 p-1 bg-slate-100 rounded-full shrink-0">
+                      {KLINE_PERIODS.map((p) => (
+                        <button
+                          key={p.key}
+                          onClick={() => setPeriod(p.key)}
+                          className={`px-3 py-1 rounded-full text-[11px] font-bold transition-colors ${period === p.key ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+                        >
+                          {p.label}
+                        </button>
+                      ))}
+                      <div className="w-px h-4 bg-slate-200 mx-1" />
+                      {KLINE_ADJUSTS.map((a) => (
+                        <button
+                          key={a.key}
+                          onClick={() => setAdjust(a.key)}
+                          className={`px-2.5 py-1 rounded-full text-[11px] font-bold transition-colors ${adjust === a.key ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+                        >
+                          {a.label}
+                        </button>
+                      ))}
+                    </div>
                   </div>
                 </div>
                 <div className="flex-1 min-h-0 p-2 flex flex-col">
@@ -332,7 +384,17 @@ export default function StockTerminalPage() {
                     <div className="h-full flex items-center justify-center text-xs text-slate-400">K线加载中…</div>
                   ) : bars.length ? (
                     <div className="flex-1 min-h-0">
-                      <KlineChart bars={bars} config={{ ma: true, boll: false, subplots: ['vol'] }} overlays={[]} period={period} scorePoints={scorePoints.map((p) => ({ date: p.date, value: p.value }))} showScoreSubplot={true} zoomStart={zoomStart} zoomEnd={100} />
+                      <KlineChart
+                        bars={bars}
+                        config={KLINE_CONFIG}
+                        period={period}
+                        scorePoints={scoreSubplotPoints}
+                        showScoreSubplot={true}
+                        zoomStart={zoomStart}
+                        zoomEnd={100}
+                        selectedDate={signalDate}
+                        onBarClick={handleBarClick}
+                      />
                     </div>
                   ) : (
                     <div className="h-full flex items-center justify-center text-xs text-slate-400">暂无K线</div>
