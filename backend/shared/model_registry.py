@@ -6,7 +6,7 @@ import logging
 import os
 import shutil
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -752,6 +752,193 @@ class ModelRegistryService:
         if archived is None:
             raise ValueError("archive result unavailable")
         return archived
+
+    async def purge_archived_models(
+        self,
+        *,
+        retention_days: int = 7,
+        tenant_id: str | None = None,
+        user_id: str | None = None,
+        dry_run: bool = False,
+        limit: int = 500,
+    ) -> dict[str, Any]:
+        """硬删除超过保留期的已归档模型（DB 行 + 磁盘目录）。
+
+        背景：归档是软删除——`archive_model` 只把 status 改成 'archived'，磁盘目录
+        （含 pred.parquet 全量历史分数）与 DB 行会永久残留。本方法按保留期做硬删除，
+        由每日 beat 任务 `engine.tasks.purge_archived_models` 调用。
+
+        安全约束：
+        - 只动 status='archived' 且 updated_at < now - retention_days 的行。
+          `archive_model` 归档时把 updated_at 写成归档时刻，故 updated_at 即归档时间。
+        - **仍被策略绑定的模型一律跳过**（skipped_referenced）——绝不静默破坏在用策略。
+        - readonly 系统模型跳过。
+        - 删目录前校验目标严格位于 user_models_root 之内且不等于 root 本身，
+          防止 storage_path 被污染成任意路径导致误删。
+        - 先删文件再删行：文件删失败则保留行，下一轮重试（幂等）。
+        - dry_run=True 只报告不删除。
+        """
+        days = int(retention_days)
+        if days < 0:
+            raise ValueError("retention_days must be >= 0")
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+
+        where = ["status = 'archived'", "updated_at < :cutoff"]
+        params: dict[str, Any] = {"cutoff": cutoff, "limit": int(limit)}
+        if tenant_id:
+            where.append("tenant_id = :tenant_id")
+            params["tenant_id"] = str(tenant_id)
+        if user_id:
+            where.append("user_id = :user_id")
+            params["user_id"] = str(user_id)
+
+        async with get_session(read_only=True) as session:
+            rows = (
+                (
+                    await session.execute(
+                        text(
+                            f"""
+                            SELECT tenant_id, user_id, model_id, storage_path, metadata_json
+                            FROM qm_user_models
+                            WHERE {" AND ".join(where)}
+                            ORDER BY updated_at ASC
+                            LIMIT :limit
+                            """
+                        ),
+                        params,
+                    )
+                )
+                .mappings()
+                .all()
+            )
+
+        # 按 (tenant, user) 批量取策略绑定，避免每个模型一次查询
+        owners = sorted(
+            {(str(r.get("tenant_id") or ""), str(r.get("user_id") or "")) for r in rows}
+        )
+        bound_ids: set[tuple[str, str, str]] = set()
+        for owner_tenant, owner_user in owners:
+            async with get_session(read_only=True) as session:
+                bound_rows = (
+                    (
+                        await session.execute(
+                            text(
+                                """
+                                SELECT model_id
+                                FROM qm_strategy_model_bindings
+                                WHERE tenant_id = :tenant_id AND user_id = :user_id
+                                """
+                            ),
+                            {"tenant_id": owner_tenant, "user_id": owner_user},
+                        )
+                    )
+                    .mappings()
+                    .all()
+                )
+            for bound in bound_rows:
+                bound_ids.add(
+                    (owner_tenant, owner_user, str(bound.get("model_id") or ""))
+                )
+
+        root = self.user_models_root.resolve()
+        purged: list[dict[str, Any]] = []
+        skipped_referenced: list[str] = []
+        skipped_readonly: list[str] = []
+        failed: list[dict[str, str]] = []
+
+        for row in rows:
+            row_tenant = str(row.get("tenant_id") or "")
+            row_user = str(row.get("user_id") or "")
+            mid = str(row.get("model_id") or "")
+            metadata = self._parse_json_field(row.get("metadata_json"))
+            if isinstance(metadata, dict) and bool(metadata.get("readonly")):
+                skipped_readonly.append(mid)
+                continue
+            if (row_tenant, row_user, mid) in bound_ids:
+                skipped_referenced.append(mid)
+                continue
+
+            raw_path = str(row.get("storage_path") or "").strip()
+            if not raw_path:
+                failed.append({"model_id": mid, "error": "storage_path is empty"})
+                continue
+
+            target = Path(raw_path).resolve()
+            if target == root or root not in target.parents:
+                logger.error(
+                    "purge: refuse to remove %s outside user_models_root (%s)", mid, target
+                )
+                failed.append(
+                    {
+                        "model_id": mid,
+                        "error": f"storage_path outside user_models_root: {raw_path}",
+                    }
+                )
+                continue
+
+            entry = {
+                "model_id": mid,
+                "tenant_id": row_tenant,
+                "user_id": row_user,
+                "storage_path": str(target),
+            }
+            if dry_run:
+                purged.append(entry)
+                continue
+
+            # 先删文件再删行：文件删失败则保留行，下一轮重试
+            try:
+                if target.exists():
+                    shutil.rmtree(target)
+            except Exception as exc:  # noqa: BLE001
+                logger.error("purge: failed to remove dir for %s: %s", mid, exc)
+                failed.append({"model_id": mid, "error": f"rmtree failed: {exc}"})
+                continue
+
+            try:
+                async with get_session() as session:
+                    await session.execute(
+                        text(
+                            """
+                            DELETE FROM qm_user_models
+                            WHERE tenant_id = :tenant_id AND user_id = :user_id
+                              AND model_id = :model_id AND status = 'archived'
+                            """
+                        ),
+                        {
+                            "tenant_id": row_tenant,
+                            "user_id": row_user,
+                            "model_id": mid,
+                        },
+                    )
+            except Exception as exc:  # noqa: BLE001
+                logger.error("purge: failed to delete row for %s: %s", mid, exc)
+                failed.append({"model_id": mid, "error": f"db delete failed: {exc}"})
+                continue
+
+            purged.append(entry)
+
+        result: dict[str, Any] = {
+            "retention_days": days,
+            "cutoff": cutoff.isoformat(),
+            "dry_run": bool(dry_run),
+            "scanned": len(rows),
+            "purged": len(purged),
+            "purged_models": purged,
+            "skipped_referenced": skipped_referenced,
+            "skipped_readonly": skipped_readonly,
+            "failed": failed,
+        }
+        if purged or failed or skipped_referenced:
+            logger.info(
+                "purge_archived_models: scanned=%d purged=%d referenced=%d readonly=%d failed=%d",
+                result["scanned"],
+                result["purged"],
+                len(skipped_referenced),
+                len(skipped_readonly),
+                len(failed),
+            )
+        return result
 
     async def activate_model(
         self, *, tenant_id: str, user_id: str, model_id: str

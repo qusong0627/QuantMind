@@ -1488,3 +1488,44 @@ def run_market_snapshot() -> dict[str, Any]:
     except Exception as e:
         logger.exception("[MarketSnapshot] 失败: %s", e)
         return {"status": "failed", "error": str(e)}
+
+
+@celery_app.task(name="engine.tasks.purge_archived_models")
+def purge_archived_models_task(
+    retention_days: int = 0, dry_run: bool = False
+) -> dict[str, Any]:
+    """清理超过保留期的已归档用户模型（DB 行 + 磁盘目录）。
+
+    归档是软删除（`archive_model` 只改 status），磁盘目录（含 pred.parquet 全量历史
+    分数）与 DB 行会永久残留。本任务按保留期做硬删除，由 beat 每日触发一次。
+
+    安全约束（详见 model_registry_service.purge_archived_models）：
+    - 仍被策略绑定的模型跳过，不会静默破坏在用策略；
+    - readonly 系统模型跳过；
+    - 目录必须位于 USER_MODELS_ROOT 之内，否则拒绝删除并计入 failed。
+
+    retention_days<=0 时取 MODEL_ARCHIVE_RETENTION_DAYS（默认 7）。
+    dry_run=True 只报告不删除，可先 `celery call` 预演。
+    """
+    from backend.shared.model_registry import model_registry_service
+
+    days = int(retention_days or 0)
+    if days <= 0:
+        days = int(os.getenv("MODEL_ARCHIVE_RETENTION_DAYS", "7"))
+    result = _run_async(
+        model_registry_service.purge_archived_models(
+            retention_days=days, dry_run=bool(dry_run)
+        )
+    )
+    logger.info(
+        "[PurgeArchivedModels] retention=%dd dry_run=%s scanned=%s purged=%s "
+        "referenced=%s readonly=%s failed=%s",
+        days,
+        bool(dry_run),
+        result.get("scanned"),
+        result.get("purged"),
+        len(result.get("skipped_referenced") or []),
+        len(result.get("skipped_readonly") or []),
+        len(result.get("failed") or []),
+    )
+    return result

@@ -182,6 +182,20 @@ if os.getenv("MARKET_SNAPSHOT_ENABLED", "true").lower() == "true":
         "schedule": crontab(minute="*/10", hour="4-5", day_of_week="1-5"),
     }
 
+# 已归档用户模型的保留期清理：归档是软删除（archive_model 只改 status），磁盘目录
+# （含 pred.parquet 全量历史分数）与 DB 行会永久残留。每日 03:30 硬删除超过保留期者。
+# 时刻选择：避开 02:30 的推理质量回填与 04:00-05:50 每 10 分钟的市场快照。
+# 任务自带引用守卫——仍被策略绑定的模型跳过，不会静默破坏在用策略。
+# 保留期由 MODEL_ARCHIVE_RETENTION_DAYS 控制（默认 7 天）。
+if os.getenv("MODEL_ARCHIVE_PURGE_ENABLED", "true").lower() == "true":
+    beat_schedule["purge-archived-models-daily"] = {
+        "task": "engine.tasks.purge_archived_models",
+        "schedule": crontab(minute="30", hour="3"),
+        "kwargs": {
+            "retention_days": int(os.getenv("MODEL_ARCHIVE_RETENTION_DAYS", "7"))
+        },
+    }
+
 celery_app.conf.update(
     # 序列化
     task_serializer="json",
