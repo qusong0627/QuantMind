@@ -321,13 +321,16 @@ def _parse_started_at(value: Any, market: Any = "CN") -> date | None:
         return None
 
 
-def _session_index(day: date, market: Any = "CN") -> int | None:
+def _session_index(
+    day: date, market: Any = "CN", *, direction: str = "previous"
+) -> int | None:
+    """日期 → 该市场会话序号；非交易日按 direction 折算（previous=上一个，next=下一个）。"""
     cal_id = market_calendar(market)
     if get_calendar is None or cal_id is None:
         return None
     try:
         calendar = get_calendar(cal_id)
-        session = calendar.date_to_session(pd.Timestamp(day), direction="previous")
+        session = calendar.date_to_session(pd.Timestamp(day), direction=direction)
         return int(calendar.sessions.get_loc(session))
     except Exception:
         return None
@@ -346,11 +349,18 @@ def _is_interval_rebalance_day(
         return True
 
     current_idx = _session_index(current_day, market)
-    started_idx = _session_index(started_day, market)
+    # 起算日锚到「当天或之后的第一个交易日」：周末/节假日启动 = 下一个交易日第 0 档。
+    # 曾用 direction="previous"（回退上一个交易日），周末启动的策略首调仓被推迟
+    # N-1 个交易日，管理端「下次窗口」同步错位（2026-09-28 修，
+    # 回归测试 tests/test_hosted_interval_anchor.py）。
+    started_idx = _session_index(started_day, market, direction="next")
     if current_idx is not None and started_idx is not None:
         return max(0, current_idx - started_idx) % rebalance_days == 0
 
-    return max(0, (current_day - started_day).days) % rebalance_days == 0
+    anchor = started_day
+    while anchor.weekday() >= 5:  # 无日历时以工作日近似交易日，锚点同样只向前滚
+        anchor += timedelta(days=1)
+    return max(0, (current_day - anchor).days) % rebalance_days == 0
 
 
 def _is_trading_day(day: date, market: Any = "CN") -> bool:
