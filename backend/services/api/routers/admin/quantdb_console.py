@@ -11,6 +11,11 @@ POST /api/v1/admin/data-platform/quantdb/sync-datasets   按数据集同步（�
 GET  /api/v1/admin/data-platform/quantdb/sync-jobs       同步任务列表
 GET  /api/v1/admin/data-platform/quantdb/sync-jobs/{id}  单个任务进度
 POST /api/v1/admin/data-platform/quantdb/sync-jobs/{id}/cancel  取消同步任务
+GET  /api/v1/admin/data-platform/quantdb/modelscope/preflight  魔搭远端预检（文件数/字节/磁盘余量）
+POST /api/v1/admin/data-platform/quantdb/modelscope/init       从魔搭拉取并覆盖本地数据目录
+GET  /api/v1/admin/data-platform/quantdb/modelscope/jobs       初始化任务列表
+GET  /api/v1/admin/data-platform/quantdb/modelscope/jobs/{id}  初始化任务进度
+POST /api/v1/admin/data-platform/quantdb/modelscope/jobs/{id}/cancel  取消初始化任务
 POST /api/v1/admin/data-platform/quantdb/query-kline     远端 K 线查询（消耗流量）
 GET  /api/v1/admin/data-platform/quantdb/stock-list      远端股票列表
 GET  /api/v1/admin/data-platform/quantdb/calendar        远端交易日历
@@ -1129,6 +1134,208 @@ async def cancel_local_scan_job(job_id: str, current_user: dict = Depends(requir
             "job_id": job_id,
             "status": "cancelling",
             "message": "取消信号已发送，当前数据集完成后将停止",
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
+# 初始化数据（魔搭 ModelScope → 覆盖本地 QuantDB 数据目录）
+# ---------------------------------------------------------------------------
+class ModelScopeInitRequest(BaseModel):
+    datasets: list[str] | None = Field(None, description="数据集名列表，留空=仓库内全部")
+
+
+# 独立于 _jobs / _scan_jobs：目录组件轮询 sync-jobs 并取 jobs[0]，
+# 混入初始化任务会被误渲染。
+_ms_init_jobs: dict[str, dict[str, Any]] = {}
+MAX_MS_INIT_JOB_HISTORY = 5
+
+
+@router.get("/modelscope/preflight")
+async def modelscope_preflight(
+    datasets: str | None = Query(None, description="数据集名（逗号分隔），留空=全部"),
+    current_user: dict = Depends(require_admin),
+):
+    """初始化数据预检：魔搭远端各数据集文件数/字节、目标目录与磁盘余量。"""
+    from backend.services.engine.data_platform.modelscope_dataset_sync import (
+        preflight_modelscope,
+    )
+
+    ds = [s for s in datasets.split(",") if s] if datasets else None
+    if ds:
+        for name in ds:
+            _spec(name)
+
+    try:
+        payload = await asyncio.to_thread(preflight_modelscope, ds)
+        return {"success": True, "data": payload}
+    except Exception as exc:  # noqa: BLE001
+        logger.error("modelscope preflight failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"failed: {exc}") from exc
+
+
+def _run_modelscope_init_job(job_id: str, payload: ModelScopeInitRequest) -> None:
+    from backend.services.engine.data_platform.modelscope_dataset_sync import (
+        init_from_modelscope,
+    )
+
+    def _cancelled() -> bool:
+        with _jobs_lock:
+            return bool(_ms_init_jobs.get(job_id, {}).get("cancel_requested"))
+
+    def _on_progress(event: str, **kw: Any) -> None:
+        with _jobs_lock:
+            job = _ms_init_jobs.get(job_id)
+            if job is None:
+                return
+            if event == "phase":
+                job["stage"] = kw.get("phase") or job["stage"]
+                job["current"] = kw.get("message")
+            elif event == "enumerate":
+                job["current"] = f"枚举远端清单 {kw.get('done')}/{kw.get('total')}"
+            elif event == "enumerate_done":
+                job["total"] = kw.get("datasets") or 0
+                job["files_total"] = kw.get("files") or 0
+                job["bytes_total"] = kw.get("bytes") or 0
+                job["current"] = f"远端 {kw.get('files')} 个文件，开始下载"
+            elif event == "dataset_start":
+                job["stage"] = "download"
+                job["current"] = (
+                    f"{kw.get('dataset')} 下载（待下 {kw.get('pending')}/{kw.get('files')}，"
+                    f"跳过 {kw.get('skipped', 0)}）"
+                )
+                job["current_detail"] = {
+                    "dataset": kw.get("dataset"),
+                    "phase": "dataset_start",
+                    "files": kw.get("files"),
+                    "pending": kw.get("pending"),
+                    "skipped": kw.get("skipped"),
+                }
+            elif event == "file":
+                job["bytes_done"] = (
+                    kw.get("processed") or kw.get("downloaded") or job.get("bytes_done") or 0
+                )
+                job["current_detail"] = {
+                    "dataset": kw.get("dataset"),
+                    "phase": "downloading",
+                    "done": kw.get("done"),
+                    "total": kw.get("total"),
+                }
+            elif event == "dataset_done":
+                job["done"] = job.get("done", 0) + 1
+                job["skipped"] = job.get("skipped", 0) + (kw.get("skipped") or 0)
+                job["current"] = (
+                    f"{kw.get('dataset')} 完成（下载 {kw.get('downloaded')}，"
+                    f"跳过 {kw.get('skipped', 0)}，失败 {kw.get('errors')}）"
+                )
+
+    started_at = _now_iso()
+    try:
+        summary = init_from_modelscope(
+            payload.datasets,
+            progress_cb=_on_progress,
+            should_cancel=_cancelled,
+        )
+        status = "cancelled" if summary.get("cancelled") else "completed"
+        with _jobs_lock:
+            job = _ms_init_jobs.get(job_id)
+            if job is not None:
+                job.update(
+                    status=status,
+                    summary=summary,
+                    bytes_done=job.get("bytes_total") or job.get("bytes_done"),
+                    finished_at=_now_iso(),
+                    current=None,
+                )
+    except Exception as exc:  # noqa: BLE001
+        logger.error("modelscope init job %s failed: %s", job_id, exc, exc_info=True)
+        with _jobs_lock:
+            job = _ms_init_jobs.get(job_id)
+            if job is not None:
+                job.update(status="failed", error=str(exc), finished_at=_now_iso())
+        return
+    logger.info("modelscope init job %s %s (started %s)", job_id, status, started_at)
+
+
+@router.post("/modelscope/init")
+async def start_modelscope_init(
+    payload: ModelScopeInitRequest, current_user: dict = Depends(require_admin)
+):
+    """启动「初始化数据」：从魔搭全量拉取并覆盖本地 QuantDB 数据目录（后台线程）。"""
+    if payload.datasets:
+        for name in payload.datasets:
+            _spec(name)
+
+    job_id = f"qdb-ms-{next(_job_counter)}"
+    job = {
+        "job_id": job_id,
+        "kind": "modelscope_init",
+        "status": "running",
+        "stage": "enumerate",
+        "datasets": payload.datasets,
+        "total": 0,  # 数据集数，enumerate_done 回填
+        "done": 0,
+        "skipped": 0,
+        "files_total": 0,
+        "bytes_total": 0,
+        "bytes_done": 0,
+        "current": "准备开始",
+        "current_detail": None,
+        "summary": None,
+        "error": None,
+        "cancel_requested": False,
+        "started_at": _now_iso(),
+        "started_by": current_user.get("username") or current_user.get("user_id"),
+    }
+    with _jobs_lock:
+        _ms_init_jobs[job_id] = job
+        for stale in sorted(_ms_init_jobs)[:-MAX_MS_INIT_JOB_HISTORY]:
+            if _ms_init_jobs[stale]["status"] != "running":
+                _ms_init_jobs.pop(stale, None)
+
+    threading.Thread(
+        target=_run_modelscope_init_job,
+        args=(job_id, payload),
+        daemon=True,
+    ).start()
+    return {"success": True, "data": {"job": job}}
+
+
+@router.get("/modelscope/jobs")
+async def list_modelscope_init_jobs(current_user: dict = Depends(require_admin)):
+    """初始化数据任务列表（最新在前）。"""
+    with _jobs_lock:
+        jobs = [_ms_init_jobs[k] for k in sorted(_ms_init_jobs, reverse=True)]
+    return {"success": True, "data": {"jobs": jobs, "timestamp": _now_iso()}}
+
+
+@router.get("/modelscope/jobs/{job_id}")
+async def get_modelscope_init_job(job_id: str, current_user: dict = Depends(require_admin)):
+    """单个初始化数据任务进度。"""
+    with _jobs_lock:
+        job = _ms_init_jobs.get(job_id)
+        snapshot = dict(job) if job is not None else None
+    if snapshot is None:
+        raise HTTPException(status_code=404, detail=f"任务不存在: {job_id}")
+    return {"success": True, "data": {"job": snapshot}}
+
+
+@router.post("/modelscope/jobs/{job_id}/cancel")
+async def cancel_modelscope_init_job(job_id: str, current_user: dict = Depends(require_admin)):
+    """取消初始化数据任务（协作式，当前批次完成后停止）。"""
+    with _jobs_lock:
+        job = _ms_init_jobs.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail=f"任务不存在: {job_id}")
+        if job["status"] != "running":
+            raise HTTPException(status_code=400, detail=f"任务状态为 {job['status']}，无法取消")
+        job["cancel_requested"] = True
+    return {
+        "success": True,
+        "data": {
+            "job_id": job_id,
+            "status": "cancelling",
+            "message": "取消信号已发送，当前批次完成后将停止",
         },
     }
 

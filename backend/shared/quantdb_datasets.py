@@ -60,7 +60,8 @@ DATASETS: tuple[DatasetSpec, ...] = (
     DatasetSpec("income", "利润表", "3", "financial", "3_financial_data/income", "symbol", "营收/净利/每股收益"),
     DatasetSpec("cashflow", "现金流量表", "3", "financial", "3_financial_data/cashflow", "symbol", "经营/投资/筹资现金流"),
     DatasetSpec("capital", "股本结构", "3", "financial", "3_financial_data/capital", "symbol", "总股本/流通股本变动"),
-    DatasetSpec("pershare_index", "每股指标", "3", "financial", "3_financial_data/pershare_index", "symbol", "每股收益/净资产等"),
+    DatasetSpec("pershare_index", "每股财务指标", "3", "financial", "3_financial_data/pershare_index", "symbol", "每股收益/净资产等"),
+    DatasetSpec("per_share", "每股指标(TTM)", "3", "financial", "3_financial_data/per_share", "symbol", "TTM 每股收益/营收/现金流"),
     DatasetSpec("dividend_factors", "分红因子", "3", "financial", "3_financial_data/dividend_factors", "symbol", "历次分红送转因子"),
     DatasetSpec("holder_num", "股东户数", "3", "financial", "3_financial_data/holder_num", "symbol", "股东户数变化"),
     # 4 债券/ETF

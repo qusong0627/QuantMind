@@ -299,3 +299,17 @@ python -m celery -A backend.services.engine.qlib_app.celery_config:celery_app fl
 
 - `docker-compose.yml` 中 Redis 必须 `--maxmemory-policy noeviction`：`allkeys-lru` 会在内存压力下静默淘汰队列消息，定时任务表现为「没跑」且无任何报错。
 - 单次改动可用 `redis-cli config set maxmemory-policy noeviction` 热生效，无需重建容器。
+
+### 5. 初始化数据：从魔搭（ModelScope）覆盖本地 QuantDB 目录
+
+- 入口：管理后台 → 数据平台 → A股 面板右上角「初始化数据」按钮（`AdminQuantDBPanel.tsx` 的 `ModelScopeInitModal`）。
+- API：`/api/v1/admin/data-platform/quantdb/modelscope/{preflight,init,jobs,jobs/{id},jobs/{id}/cancel}`，路由实现在 `quantdb_console.py`，后台线程 + 独立 job 命名空间（不混入 `sync-jobs`，避免目录组件误读 `jobs[0]`）。
+- 核心实现：`backend/services/engine/data_platform/modelscope_dataset_sync.py`。
+  - 只依赖 stdlib + `httpx`，不引入 `modelscope` SDK；用 `repo/tree?Recursive=true` 分页拿 `Path/Size/Sha256`，用 `repo?FilePath=` 走 302 → CDN 签名地址下载。
+  - 落盘目标即 `QM_QUANTDB_DATA_DIR`，远端仓库根与数据集 `rel_dir` 一一对应，无需映射表。
+  - 幂等可断点：已存在且 size 一致的文件跳过；下载写 `.part` → sha256 校验 → 原子 `os.replace`，重跑只补缺失/变更。
+  - 覆盖模式：`overwrite`（增量覆盖，不删无关文件）/ `purge`（先删选中数据集目录再全量拉）。前端对 `purge` 二次确认。
+  - 状态库重建：`meta`（默认，直接用远端 sha256 写 `objects`，免 56GB 重哈希）/ `rescan`（全量重扫校验 parquet magic）/ `none`。原地覆盖必须重建，否则 `_state_path` 旧 sha 会让增量 fast-path 误跳过已变文件。
+  - 可选后置：`with_pg` → `fill_pg_from_parquet`；`with_qlib` → `update_qlib_cache`。
+- 环境变量（均有默认值，可不配）：`MODELSCOPE_DATASET_REPO`（默认 `qusong0627/LightGBM_Alpha300`）、`MODELSCOPE_ENDPOINT`、`MODELSCOPE_DATASET_REVISION`、`MODELSCOPE_TOKEN`（私有/限流）、`MODELSCOPE_SYNC_WORKERS`（默认 6）。
+- 注意：暂为 API 进程内后台线程，API 重启会中断（已下载文件保留，重跑可续）；全量约 56 GB，预检会校验磁盘余量。
