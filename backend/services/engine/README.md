@@ -334,6 +334,7 @@ python backend/scripts/rd_mined_materialize.py --align-only                # 只
 ```
 
 - **取数**：执行因子代码，输入 = RD-Agent 同款 `daily_pv.h5`（共享缓存 `data/quantdb/.h5_cache/daily_pv_all.h5`，落盘后只读化 `0444`；被因子代码误当输出名写坏时按 HDF5 魔数 O(1) 发现并重生成）。超时 `--timeout`（默认 900s）。
+- **慢因子与超时升级**：900s 是护栏而非承诺——生成代码里逐窗 Python 回调（`rolling(w).apply(fn, raw=False)`）一类形态实测 ~361µs/行，785 万行的 h5 纯计算就要 ~50 分钟，必然撞线且重试同样撞线。此类因子落 `error` 桶（面板/清单可见，下轮自动重试）；要一次跑完用 `--factor-ids <factor_id> --timeout <秒>`（实测 `return_skewness_20d` 以 `--timeout 14400` 一次通过，66 分钟）。若日后在挖掘层提速：该形态的向量化等价式 = `rolling(w).skew() × (w−2)/√(w(w−1))`（把 pandas 的偏度校正换回代码口径的总体偏度；w=20 时 ×18/√380，实测最大相对差 3.6e-10）——物化层不擅改生成产物，改动属挖掘层决策。
 - **值级查重（贵层）**：逐日截面秩相关（日均 |ρ|）对照 CUSTOM `l1_factors` + `rd_mined` 既有列，≥ `--corr-threshold`（默认 0.9）拒绝入账、≥0.8 告警；排除本因子自己的旧列；样本取近窗 60 个交易日。「没算出可比对列」会单独计数（`corr_unverified`），不让门静默退化。
 - **落盘**：`merge_factor_into_source`（`backend/shared/feature_source.py`）按交易日合并进 `6_ml_datasets/rd_mined/dt=*/data.parquet`；列名 `feature_column_name`（`rd_` 前缀 + SQL 安全），跨因子重名按 factor_id 前缀消歧（同名不同因子各占一列，绝不互相覆盖）。
 - **落盘纪律**：因子值一律 float64（int64 与其余分区混读时 DuckDB 以第一个文件的类型为准**静默取整**）；临时文件不得以 `.parquet` 结尾（`dt=*/*.parquet` 通配符会把半写文件当分区读）；收尾必须跑分区列集对齐（读取层无 `union_by_name`，列漂移会响亮失败）。
