@@ -1,0 +1,460 @@
+"""rd_mined 物化器：清单/续跑、值级相关查重、因子代码执行、分区 schema 对齐。
+
+物化器把 ``rd_agent_factors`` 里带代码的因子执行出全历史因子值，
+写进 ``6_ml_datasets/rd_mined``（CUSTOM 市场），供训练直读消费。
+"""
+
+from __future__ import annotations
+
+import json
+import re
+
+import numpy as np
+import pandas as pd
+import pytest
+
+from backend.scripts.rd_mined_materialize import (
+    MANIFEST_NAME,
+    _align_partition_schemas,
+    _column_owners,
+    _disambiguate_column,
+    _eligible_row,
+    _execute_factor_code,
+    _load_manifest,
+    _max_abs_corr,
+    _pick_sample_days,
+    _save_manifest,
+    _should_materialize,
+    _to_canonical,
+)
+from backend.shared.factor_identity import code_fingerprint
+
+
+# ── 清单与续跑 ─────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_manifest_roundtrip(tmp_path):
+    assert _load_manifest(tmp_path) == {}
+    data = {"fid1": {"status": "materialized", "column": "rd_vz5", "rows": 123}}
+    _save_manifest(tmp_path, data)
+    assert (tmp_path / MANIFEST_NAME).is_file()
+    assert _load_manifest(tmp_path) == data
+
+
+@pytest.mark.unit
+def test_manifest_corrupt_file_treated_as_empty(tmp_path):
+    (tmp_path / MANIFEST_NAME).write_text("{ not json", encoding="utf-8")
+    assert _load_manifest(tmp_path) == {}
+
+
+@pytest.mark.unit
+def test_should_materialize_lifecycle():
+    row = {"factor_id": "fid1", "factor_code": "x = 1"}
+    # 新因子
+    assert _should_materialize(row, {}, force=False) == (True, "new")
+    # 已物化 → 跳过；--force 重做
+    m = {"fid1": {"status": "materialized"}}
+    ok, reason = _should_materialize(row, m, force=False)
+    assert not ok and reason == "already_materialized"
+    assert _should_materialize(row, m, force=True) == (True, "force")
+    # 值级查重拒入的因子默认不再尝试；--force 才重算
+    m2 = {"fid1": {"status": "rejected_duplicate"}}
+    ok, reason = _should_materialize(row, m2, force=False)
+    assert not ok and reason == "rejected_duplicate"
+    # 上次失败 → 重试
+    m3 = {"fid1": {"status": "error"}}
+    assert _should_materialize(row, m3, force=False) == (True, "retry")
+
+
+@pytest.mark.unit
+def test_should_materialize_code_change_invalidates_verdict():
+    """同 factor_id 代码改写（同任务重跑 UPDATE factor_code）→ 旧值/旧判定失效。"""
+    row_new = {"factor_id": "fid1", "factor_code": "x = 2"}
+    fp_old = code_fingerprint("x = 1  # 旧版")
+    row_old = {"factor_id": "fid1", "factor_code": "x = 1  # 旧版"}
+    # 代码未变 → 维持跳过
+    m = {"fid1": {"status": "materialized", "code_fp": fp_old}}
+    assert _should_materialize(row_old, m, force=False) == (
+        False,
+        "already_materialized",
+    )
+    # 代码变了 → 重算（物化与拒绝条目一视同仁）
+    assert _should_materialize(row_new, m, force=False) == (True, "code_changed")
+    m_rej = {"fid1": {"status": "rejected_duplicate", "code_fp": fp_old}}
+    assert _should_materialize(row_new, m_rej, force=False) == (True, "code_changed")
+    # 升级前写的旧清单没有指纹 → 保守不动（不因缺指纹误重算）
+    m_legacy = {"fid1": {"status": "materialized"}}
+    assert _should_materialize(row_new, m_legacy, force=False) == (
+        False,
+        "already_materialized",
+    )
+
+
+@pytest.mark.unit
+def test_eligible_row_market_and_code_gate():
+    ok, reason = _eligible_row(
+        {"factor_id": "a", "market": "a_share", "factor_code": "x = 1"}
+    )
+    assert ok and reason == "ok"
+    ok, reason = _eligible_row(
+        {"factor_id": "b", "market": "hong_kong", "factor_code": "x = 1"}
+    )
+    assert not ok and reason == "market_unsupported"
+    ok, reason = _eligible_row(
+        {"factor_id": "c", "market": "a_share", "factor_code": "  "}
+    )
+    assert not ok and reason == "no_code"
+    ok, reason = _eligible_row(
+        {"factor_id": "d", "market": "a_share", "factor_code": None}
+    )
+    assert not ok and reason == "no_code"
+
+
+# ── 采样日 ─────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_pick_sample_days_even_and_bounded():
+    days = [f"2026-{m:02d}-{d:02d}" for m in range(1, 5) for d in range(1, 11)]  # 40 天
+    picked = _pick_sample_days(days, n=10)
+    assert len(picked) == 10
+    assert picked[0] == days[0] and picked[-1] == days[-1]
+    assert picked == sorted(picked)
+    # 天数不足 → 全量
+    assert _pick_sample_days(days[:5], n=10) == days[:5]
+    assert _pick_sample_days([], n=10) == []
+
+
+# ── 值级查重（逐日截面秩相关，取日均）────────────────────────────────────
+
+
+def _corr_frame(n_days: int = 20, n_syms: int = 30, seed: int = 7):
+    days = [f"2026-01-{d:02d}" for d in range(1, n_days + 1)]
+    syms = [f"SH60{i:04d}" for i in range(n_syms)]
+    idx = pd.MultiIndex.from_product([days, syms], names=["trade_date", "symbol"])
+    rng = np.random.default_rng(seed)
+    base = pd.Series(rng.normal(size=len(idx)), index=idx, name="new")
+    controls = pd.DataFrame(
+        {
+            "dup": base * 3.0 + 1.0,  # 保秩变换 → |ρ|=1
+            "neg": -base,  # 反秩 → |ρ|=1
+            "noise": pd.Series(rng.normal(size=len(idx)), index=idx),
+        },
+        index=idx,
+    )
+    return base, controls
+
+
+@pytest.mark.unit
+def test_max_abs_corr_detects_rank_duplicate():
+    base, controls = _corr_frame()
+    rho, col = _max_abs_corr(base, controls)
+    assert rho == pytest.approx(1.0, abs=1e-9)
+    assert col in {"dup", "neg"}
+
+
+@pytest.mark.unit
+def test_max_abs_corr_noise_is_low():
+    base, controls = _corr_frame()
+    rho_noise, _ = _max_abs_corr(base, controls[["noise"]])
+    assert rho_noise < 0.3
+
+
+@pytest.mark.unit
+def test_max_abs_corr_ignores_nan_pairs():
+    base, controls = _corr_frame()
+    base_missing = base.copy()
+    base_missing.iloc[:100] = np.nan
+    rho, col = _max_abs_corr(base_missing, controls)
+    assert rho == pytest.approx(1.0, abs=1e-9)
+
+
+@pytest.mark.unit
+def test_max_abs_corr_respects_sample_days():
+    base, controls = _corr_frame()
+    days = sorted({d for d, _ in base.index})
+    # 只用一半日期：仍应识别 dup（同秩关系在子集上保持）
+    rho, col = _max_abs_corr(base, controls, sample_days=set(days[:10]))
+    assert rho == pytest.approx(1.0, abs=1e-9) and col in {"dup", "neg"}
+    # 无重叠日期 → 无法计算，返回 0（不误报）
+    rho0, col0 = _max_abs_corr(base, controls, sample_days={"1999-01-01"})
+    assert rho0 == 0.0 and col0 is None
+
+
+@pytest.mark.unit
+def test_max_abs_corr_excludes_own_old_column():
+    """--force 重做时排除自己的旧列：拿旧值比新值会 |ρ|=1 自我拒绝。"""
+    base, controls = _corr_frame()
+    frame = controls[["noise"]].assign(rd_old=base * 2.0)
+    # 不排除：与自己的旧列完全同秩，命中
+    rho_plain, col_plain = _max_abs_corr(base, frame)
+    assert rho_plain == pytest.approx(1.0, abs=1e-9) and col_plain == "rd_old"
+    # 排除后：只剩噪声列，不再自我拒绝
+    rho_excl, col_excl = _max_abs_corr(base, frame, exclude={"rd_old"})
+    assert col_excl == "noise" and rho_excl < 0.3
+    # 排除列不存在于对照帧：静默忽略（不抛错）
+    rho_miss, _ = _max_abs_corr(base, frame, exclude={"not_there"})
+    assert rho_miss == pytest.approx(1.0, abs=1e-9)
+
+
+# ── 执行结果规范化（_to_canonical）────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_to_canonical_cleans_inf_like_nan():
+    """±inf（除零产物）与 NaN 同罪，落库前统一清掉，绝不进训练列。"""
+    idx = pd.MultiIndex.from_arrays(
+        [
+            pd.to_datetime(["2026-01-05"] * 4),
+            ["sh600000", "sh600036", "sz000001", "sz000002"],
+        ],
+        names=["datetime", "instrument"],
+    )
+    frame = pd.DataFrame({"f": [1.0, np.inf, -np.inf, np.nan]}, index=idx)
+    out = _to_canonical(frame)
+    assert out.tolist() == [1.0]
+    assert out.index.get_level_values(0)[0] == "2026-01-05"
+    assert out.index.get_level_values(1)[0] == "SH600000"  # 前缀式标准化
+
+
+@pytest.mark.unit
+def test_to_canonical_rejects_wrong_index_shape():
+    frame = pd.DataFrame({"f": [1.0, 2.0]})  # 单层索引
+    with pytest.raises(ValueError):
+        _to_canonical(frame)
+
+
+# ── 因子代码执行（需要 PyTables 读写 h5）────────────────────────────────
+
+
+def _tiny_pv(path):
+    idx = pd.MultiIndex.from_product(
+        [
+            pd.to_datetime(["2026-01-05", "2026-01-06"]),
+            ["sh600000", "sh600036", "sz000001"],
+        ],
+        names=["datetime", "instrument"],
+    )
+    df = pd.DataFrame({"$close": np.arange(6, dtype="float64") + 1.0}, index=idx)
+    df.to_hdf(path, key="data", mode="w")
+
+
+@pytest.mark.unit
+def test_execute_factor_code_main_guard(tmp_path):
+    pytest.importorskip("tables")
+    h5 = tmp_path / "daily_pv.h5"
+    _tiny_pv(h5)
+    code = (
+        "import pandas as pd\n"
+        "def calculate_demo():\n"
+        "    df = pd.read_hdf('daily_pv.h5')\n"
+        "    df['demo'] = df['$close'] * 2.0\n"
+        "    result = df[['demo']].copy()\n"
+        "    result.to_hdf('result.h5', key='data', mode='w')\n"
+        "    return result\n"
+        "if __name__ == '__main__':\n"
+        "    calculate_demo()\n"
+    )
+    out = tmp_path / "out.parquet"
+    rows = _execute_factor_code(code, h5, out)
+    assert rows == 6
+    got = pd.read_parquet(out)
+    assert got.iloc[:, 0].tolist() == [2.0, 4.0, 6.0, 8.0, 10.0, 12.0]
+
+
+@pytest.mark.unit
+def test_execute_factor_code_no_guard_fallback(tmp_path):
+    """无 __main__ 守卫、只写返回值：脚本显式调用 calculate_*() 并落盘。"""
+    pytest.importorskip("tables")
+    h5 = tmp_path / "daily_pv.h5"
+    _tiny_pv(h5)
+    code = (
+        "import pandas as pd\n"
+        "def calculate_demo():\n"
+        "    df = pd.read_hdf('daily_pv.h5')\n"
+        "    return (df[['$close']] + 1.0).rename(columns={'$close': 'demo'})\n"
+    )
+    out = tmp_path / "out.parquet"
+    rows = _execute_factor_code(code, h5, out)
+    assert rows == 6
+    got = pd.read_parquet(out)
+    assert got.iloc[0, 0] == pytest.approx(2.0)
+
+
+@pytest.mark.unit
+def test_execute_factor_code_failure_raises(tmp_path):
+    pytest.importorskip("tables")
+    h5 = tmp_path / "daily_pv.h5"
+    _tiny_pv(h5)
+    with pytest.raises(RuntimeError):
+        _execute_factor_code("raise ValueError('boom')", h5, tmp_path / "o.parquet")
+    with pytest.raises(RuntimeError):
+        _execute_factor_code("x = 1", h5, tmp_path / "o2.parquet")  # 不产 result.h5
+
+
+# ── h5 缓存魔数校验（L5：防因子脚本写坏共享缓存）──────────────────────
+
+
+@pytest.mark.unit
+def test_h5_magic_validation(tmp_path):
+    from backend.scripts.rd_mined_materialize import _h5_is_valid
+
+    good = tmp_path / "good.h5"
+    good.write_bytes(b"\x89HDF\r\n\x1a\n" + b"\x00" * 16)
+    bad = tmp_path / "bad.h5"
+    bad.write_bytes(b"not an hdf5 file")
+    assert _h5_is_valid(good)
+    assert not _h5_is_valid(bad)
+    assert not _h5_is_valid(tmp_path / "missing.h5")
+
+
+# ── 分区 schema 对齐 ───────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_align_partition_schemas_unifies_columns(tmp_path):
+    def _write(dt, cols):
+        d = tmp_path / f"dt={dt}"
+        d.mkdir(parents=True)
+        pd.DataFrame(
+            {
+                "symbol": ["600000.SH", "600036.SH"],
+                "date": pd.to_datetime(["2026-01-05", "2026-01-05"]),
+                **cols,
+            }
+        ).to_parquet(d / "data.parquet", index=False)
+
+    _write("20260105", {"rd_a": np.array([1.0, 2.0])})
+    _write("20260106", {"rd_b": np.array([3.0, 4.0])})
+    report = _align_partition_schemas(tmp_path)
+    assert report["files"] == 2 and report["aligned"] == 2
+    a = pd.read_parquet(tmp_path / "dt=20260105" / "data.parquet")
+    b = pd.read_parquet(tmp_path / "dt=20260106" / "data.parquet")
+    assert list(a.columns) == list(b.columns)
+    assert {"rd_a", "rd_b"} <= set(a.columns)
+    assert np.isnan(a["rd_b"]).all() and a["rd_a"].tolist() == [1.0, 2.0]
+    # 幂等：再跑一遍全部已对齐
+    report2 = _align_partition_schemas(tmp_path)
+    assert report2["aligned"] == 0
+
+
+@pytest.mark.unit
+def test_align_partition_schemas_single_or_empty(tmp_path):
+    assert _align_partition_schemas(tmp_path)["files"] == 0
+
+
+@pytest.mark.unit
+def test_align_partition_schemas_normalizes_mixed_numeric_dtypes(tmp_path):
+    """int64 与 float64 混读时 DuckDB 按第一个文件的类型静默取整（1.5→2）。"""
+
+    def _write(dt, dtype):
+        d = tmp_path / f"dt={dt}"
+        d.mkdir(parents=True)
+        pd.DataFrame(
+            {
+                "symbol": ["600000.SH", "600036.SH"],
+                "date": pd.to_datetime(["2026-01-05"] * 2),
+                "rd_rank": np.array([1, 3], dtype=dtype),
+            }
+        ).to_parquet(d / "data.parquet", index=False)
+
+    _write("20260105", "int64")
+    _write("20260106", "float64")
+    report = _align_partition_schemas(tmp_path)
+    assert report["aligned"] == 1  # 只有 int64 那半边需要转型
+    a = pd.read_parquet(tmp_path / "dt=20260105" / "data.parquet")
+    b = pd.read_parquet(tmp_path / "dt=20260106" / "data.parquet")
+    assert a["rd_rank"].dtype == "float64" and b["rd_rank"].dtype == "float64"
+    assert a["rd_rank"].tolist() == [1.0, 3.0]
+    # 幂等：第二次全部已对齐
+    assert _align_partition_schemas(tmp_path)["aligned"] == 0
+
+
+# ── 列名冲突消歧 ───────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_column_owners_from_manifest():
+    manifest = {
+        "a": {"status": "materialized", "column": "rd_momentum_5d"},
+        # error 也占名：失败重试要落回原列，避免与后来者交错抢名
+        "b": {"status": "error", "column": "rd_x"},
+        "c": {"status": "materialized"},  # 无列名 → 不占
+    }
+    owners = _column_owners(manifest)
+    assert owners == {"rd_momentum_5d": "a", "rd_x": "b"}
+
+
+@pytest.mark.unit
+def test_disambiguate_column_collision_and_identity():
+    owners = {"rd_momentum_5d": "other-id"}
+    col = _disambiguate_column("rd_momentum_5d", "9636aa50xxxx", owners)
+    assert col == "rd_momentum_5d_9636aa"
+    assert len(col) <= 80
+    assert re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", col)
+    # 已归自己 / 无占用 → 原样
+    assert (
+        _disambiguate_column("rd_momentum_5d", "other-id", owners) == "rd_momentum_5d"
+    )
+    assert _disambiguate_column("rd_new", "fid", owners) == "rd_new"
+    # 超长名：截断时优先保后缀，长度仍 ≤80
+    long_base = "rd_" + "x" * 77
+    col2 = _disambiguate_column(long_base, "abcdef123456", {long_base: "other"})
+    assert col2.endswith("_abcdef") and len(col2) == 80
+    # 前 6 位也已占用 → 加长后缀直到唯一
+    owners2 = {long_base: "other", f"{long_base[:73]}_abcdef": "another"}
+    col3 = _disambiguate_column(long_base, "abcdef123456", owners2)
+    assert col3 != col2 and col3.endswith("_abcdef12") and len(col3) <= 80
+
+
+@pytest.mark.unit
+def test_disambiguate_column_empty_factor_id_numeric_fallback():
+    """factor_id 为空（历史脏数据）→ 数字后缀，循环恒有界。"""
+    owners = {"rd_x": "other"}
+    assert _disambiguate_column("rd_x", "", owners) == "rd_x_2"
+    owners2 = {"rd_x": "other", "rd_x_2": "another", "rd_x_3": "third"}
+    assert _disambiguate_column("rd_x", "", owners2) == "rd_x_4"
+    # factor_id 用尽（整个 id 已含进后缀）也不死循环：退数字后缀
+    full = "abcdef"
+    owners3 = {"rd_x": "other", f"rd_x_{full}": "another", "rd_x_2": "third"}
+    assert _disambiguate_column("rd_x", full, owners3) == "rd_x_3"
+
+
+# ── 运行锁（并发保护）──────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_run_lock_is_exclusive_and_releasable(tmp_path, monkeypatch):
+    """flock 独占：第二个进程（同进程第二个 fd 同语义）让位，释放后可再取。
+
+    锁路径指到 tmp_path：默认全局锁路径上可能正跑着真实回填，测试若去
+    抢同一把锁会随环境红/绿（拿到锁的一方行为相反）。
+    """
+    from backend.scripts.rd_mined_materialize import _acquire_run_lock
+
+    monkeypatch.setenv("RD_MINED_MATERIALIZE_LOCK", str(tmp_path / "run.lock"))
+    first = _acquire_run_lock()
+    assert first is not None
+    try:
+        assert _acquire_run_lock() is None, "持锁期间第二方必须拿不到（退出 0 让位）"
+    finally:
+        first.close()
+    second = _acquire_run_lock()
+    assert second is not None
+    second.close()
+
+
+@pytest.mark.unit
+def test_lock_path_env_override(tmp_path, monkeypatch):
+    """覆盖口本身要有效：设了 env 走覆盖路径、不设走全局默认。
+
+    没有这条，隔离缝被改坏时独占测试在「恰好没有回填在跑」的机器上照样
+    通过——缝坏了也是绿的。
+    """
+    from backend.scripts.rd_mined_materialize import _lock_path
+
+    monkeypatch.setenv("RD_MINED_MATERIALIZE_LOCK", str(tmp_path / "x.lock"))
+    assert _lock_path() == tmp_path / "x.lock"
+    monkeypatch.delenv("RD_MINED_MATERIALIZE_LOCK")
+    assert _lock_path().name == "_rd_mined_materialize.lock"

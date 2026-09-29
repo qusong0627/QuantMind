@@ -11,6 +11,7 @@ import asyncio
 import json
 import logging
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -74,6 +75,94 @@ async def persist_factors(factors: list[dict], task_id: str, user_id: str, marke
             logger.warning("Failed to persist factor %s: %s", f["name"], e)
 
     return count
+
+
+def _dedupe_against_corpus(
+    corpus: list[dict], factors: list[dict], task_id: str
+) -> set[str]:
+    """落库前查重（廉价层）：返回应跳过的 factor_id 集合。
+
+    与存量（同市场）+ 同批候选比对，口径 = 名称归一 / LaTeX 公式归一 /
+    代码指纹（``backend.shared.factor_identity``）。本任务自己的存量行不
+    参与比对——重跑同一任务应允许更新既有因子，而不是被自己挡住。
+    值级（相关）复核在物化时另做。
+    """
+    import hashlib
+
+    from backend.shared.factor_identity import partition_duplicates
+
+    def cand_id(name: str) -> str:
+        return hashlib.md5(f"{task_id}:{name}".encode()).hexdigest()
+
+    candidates = [
+        {
+            "factor_id": cand_id(f["name"]),
+            "factor_name": f["name"],
+            "factor_formulation": f.get("formulation", ""),
+            "factor_code": f.get("code", ""),
+        }
+        for f in factors
+    ]
+    own_ids = {str(c["factor_id"]) for c in candidates}
+    external = [r for r in corpus if str(r.get("factor_id") or "") not in own_ids]
+    _, duplicates = partition_duplicates(candidates, external)
+    skipped: set[str] = set()
+    for cand, verdict in duplicates:
+        skipped.add(str(cand["factor_id"]))
+        logger.warning(
+            "因子与存量重复（%s，命中 %s / %s），跳过落库：%s",
+            verdict.reason,
+            verdict.matched_name or "?",
+            str(verdict.matched_id or "?")[:8],
+            cand["factor_name"],
+        )
+    if skipped:
+        logger.info(
+            "落库前查重：跳过 %d 个重复因子（候选 %d 个）", len(skipped), len(candidates)
+        )
+    return skipped
+
+
+def _maybe_spawn_materialize(args, log_dir: str, data_path: str, persisted: int) -> None:
+    """落库后自动物化：把本任务因子写入 rd_mined 库（训练直读链路）。
+
+    ``RD_AGENT_AUTO_MATERIALIZE=false`` 可关闭；v1 只支持 a_share 市场。
+    失败只告警——物化链可事后用同一脚本手工补跑（清单支持断点续跑）。
+    """
+    if persisted <= 0 or args.market != "a_share":
+        return
+    flag = os.getenv("RD_AGENT_AUTO_MATERIALIZE", "true").strip().lower()
+    if flag in {"0", "false", "no", "off"}:
+        logger.info("自动物化已关闭（RD_AGENT_AUTO_MATERIALIZE=%s）", flag)
+        return
+    script = _project_root / "backend" / "scripts" / "rd_mined_materialize.py"
+    if not script.is_file():
+        logger.warning("物化器脚本不存在，跳过自动物化：%s", script)
+        return
+    cmd = [
+        sys.executable,
+        str(script),
+        "--task-id",
+        str(args.task_id),
+        "--market",
+        str(args.market),
+        "--register",
+    ]
+    if data_path and Path(data_path).exists():
+        cmd += ["--h5-path", str(data_path)]
+    log_file = Path(log_dir) / "materialize.log"
+    try:
+        with open(log_file, "ab") as handle:
+            subprocess.Popen(
+                cmd,
+                cwd=str(_project_root),
+                stdout=handle,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+        logger.info("自动物化已启动（后台）：log=%s", log_file)
+    except Exception as exc:  # noqa: BLE001 - 自动链路失败不阻断挖掘结果
+        logger.warning("自动物化启动失败：%s", exc)
 
 
 def _near_one_year_window() -> tuple[str, str]:
@@ -427,10 +516,27 @@ def main():
         async def _persist_and_metrics() -> int:
             p = RDAgentFactorPersistence()
             await p.ensure_tables()
+            corpus: list[dict] = []
+            corpus_limit = 5000
+            try:
+                corpus = await p.list_factors(market=args.market, limit=corpus_limit)
+            except Exception as exc:
+                logger.warning(
+                    "查重语料读取失败（跳过落库前查重，重复因子可能入库）：%s", exc
+                )
+            if len(corpus) >= corpus_limit:
+                # list_factors 按 created_at DESC 截断：被丢的是**最早**的因子，
+                # 恰恰是新因子最可能撞的那批——必须显式可见，别让廉价层静默变薄
+                logger.warning(
+                    "查重语料达上限 %d 条：更早的存量因子未参与本批查重", corpus_limit
+                )
+            dup_ids = _dedupe_against_corpus(corpus, factors, args.task_id)
             saved = 0
             for f in factors:
                 try:
                     fid = hashlib.md5(f"{args.task_id}:{f['name']}".encode()).hexdigest()
+                    if fid in dup_ids:
+                        continue
                     metadata: dict = {
                         "source": "rd_agent",
                         "market": args.market,
@@ -507,6 +613,9 @@ def main():
         logger.info("RD-Agent task complete! task_id=%s, market=%s", args.task_id, args.market)
         logger.info("  Found: %d factors, Persisted: %d", len(factors), count)
         logger.info("=" * 60)
+
+        # 落库后自动物化（rd_mined 库，训练直读链路）——后台子进程，不阻塞收尾
+        _maybe_spawn_materialize(args, log_dir, data_path, count)
 
     except Exception as e:
         logger.exception("RD-Agent runner failed: %s", e)

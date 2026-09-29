@@ -250,7 +250,9 @@ def merge_factor_into_source(
         else:
             logger.warning("分区不存在，跳过合并: %s", part)
             continue
-        tmp = part.parent / f".tmp-{part.name}"
+        # 临时名不得以 .parquet 结尾：dt=*/*.parquet 通配符会把它当分区读，
+        # DuckDB 撞上半写文件直接抛错（同上游 rd_mined 物化器的同名改名）
+        tmp = part.parent / f".{part.name}.tmp"
         try:
             merged.to_parquet(tmp, index=False, engine="pyarrow")
             tmp.replace(part)

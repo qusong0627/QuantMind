@@ -115,6 +115,7 @@ FACTOR_SOURCE_LABELS = {
     "ccass_factors": "CCASS 持仓结构",
     "south_factors": "南向资金结构",
     "alpha_library": "Alpha 库因子",
+    "rd_mined": "RD 挖掘因子",
 }
 
 _SCHEMA_SQL = """
@@ -506,12 +507,13 @@ async def load_quantdb_training_sources(market: str = "CN") -> dict[str, Any]:
         """), {"version_ids": [v["version_id"] for v in published.values()]})).mappings().all()
         counts = {str(r["source_dataset"]): int(r["n"]) for r in count_rows}
     sources = []
-    for source in sources_for_market(market):
-        status = statuses[source]
+    # 按 statuses（静态源 + 已注册且目录存在的动态数据集，如 rd_mined）迭代，
+    # 不是静态清单——动态数据集不能注册完就在训练页消失
+    for source, status in statuses.items():
         version = published.get(source)
         sources.append({
             "id": source,
-            "name": FACTOR_SOURCE_LABELS[source],
+            "name": FACTOR_SOURCE_LABELS.get(source, source),
             "default": source == default_source_for(market),
             "ready": bool(status["ready"]),
             "published": version is not None,
@@ -541,14 +543,16 @@ async def load_quantdb_training_catalog(
     """
     source_dataset = _validate_source(source_dataset)
     market = normalize_market(market)
-    if source_dataset not in sources_for_market(market):
-        raise HTTPException(
-            status_code=422,
-            detail=f"因子源 {source_dataset} 不属于市场 {market}",
-        )
     async with get_session() as session:
         await _ensure_schema(session)
         statuses = await _cached_factor_sources(session, market)
+        # 归属判定按 statuses（含动态数据集）而非静态清单：rd_mined 这类
+        # 动态源不在 sources_for_market 里，按清单拦会把自己的因子源 422 掉
+        if source_dataset not in statuses:
+            raise HTTPException(
+                status_code=422,
+                detail=f"因子源 {source_dataset} 不属于市场 {market}",
+            )
         status = statuses[source_dataset]
         version = await _active_version(session, source_dataset, market)
         coverage = _training_coverage(source_dataset, status)
