@@ -83,6 +83,50 @@ LIB_LABELS = {
     "factor_research": "经典因子（demo 复刻）",
     "gap_mined": "空档挖掘因子",  # GAP_MINED_MARK
 }
+
+
+def _lib_label(lib: str) -> str:
+    """库的中文标签；未登记的库回退成目录名。
+
+    `auto` 的语义是「扫描 6_ml_datasets 全部因子数据集」，所以必须容忍没登记过的
+    库：直接下标取字典的话，新增一个因子库就会在**跑完各库、落盘前**抛裸
+    `KeyError`，几分钟算力白费且报错点离原因几百行。全脚本只此一处取标签。
+    """
+    return LIB_LABELS.get(lib, lib)
+
+
+def _write_wide_scores(wide_parts: list[pd.DataFrame], path: Path) -> int:
+    """宽表打分落盘（多因子合成按列取数用）。返回列数（含两个索引列）。
+
+    不走 `pd.concat(axis=1) → reset_index() → to_parquet()`：那条路对整表复制三遍
+    （concat 一份、reset_index 一份、arrow 表一份）。因子数上到 2700+ 时，float64
+    单表就是 9.9 GB，峰值 ~29 GB，实测被 OOM 杀掉。这里按列直接拼 arrow 表 ——
+    各分片的列本来就是现成数组，`pa.table` 直接引用，不再整表复制。
+
+    因子列统一压成 float32：打分段是「截面 pct rank → 正态分位（±4 截断）」，
+    7 位有效数字绰绰有余，体积和峰值内存都减半（旧快照存的是 float64，读侧
+    `read_parquet(columns=[...])` 再 melt，对 dtype 无假设）。
+
+    列名跨分片必须唯一：arrow 允许重名，一旦漏网，下游按列取数取到哪一份就说不清。
+    扫描阶段已按优先级去重，这里兜底报错。
+    """
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    index = wide_parts[0].index
+    cols: dict[str, object] = {}
+    for lvl, name in enumerate(index.names):
+        cols[name] = pa.array(pd.Series(index.get_level_values(lvl)))
+    for part in wide_parts:
+        for c in part.columns:
+            if c in cols:
+                raise ValueError(f"宽表列名重复：{c}（跨分片重名会让下游按列取数取错）")
+            arr = part[c].to_numpy()
+            cols[c] = arr if arr.dtype == np.float32 else arr.astype(np.float32)
+    pq.write_table(pa.table(cols), path)
+    return len(cols)
+
+
 # 非因子列（标识与行情行情列不入库；date 为分区日期的冗余列）
 DROP_COLS = {
     "symbol",
@@ -154,7 +198,11 @@ def _load_auto(qroot: Path) -> tuple[dict[str, list[dict]], list[dict]]:
         raise FileNotFoundError(f"6_ml_datasets 目录缺失: {root}")
     found = set()
     for d_ in root.iterdir():
-        if not d_.is_dir() or d_.name in AUTO_SKIP or d_.name.startswith("."):
+        # 跳过：约定名、点目录、以及**下划线前缀**（临时/试跑目录的约定）。
+        # 下划线必须排除，不只是为了整洁：`_`(0x5F) 字典序在字母前，试跑目录会排在
+        # 正式库前面先占住列名，正式库的同名列随即被 seen 过滤掉 —— 因子还在，但
+        # 用的是试跑那份（通常窗口短得多）的数据，且全程不报错。
+        if not d_.is_dir() or d_.name in AUTO_SKIP or d_.name.startswith((".", "_")):
             continue
         parts = sorted(d_.glob("dt=*/data.parquet"))
         if parts:
@@ -227,9 +275,7 @@ def main() -> int:
     out = _out_dir()
     qroot = resolve_quantdb_dir()
     external, fr_kept = _load_sources(args.source, qroot)
-    src_desc = " + ".join(
-        f"{LIB_LABELS.get(k, k)} {len(v)}" for k, v in external.items()
-    )
+    src_desc = " + ".join(f"{_lib_label(k)} {len(v)}" for k, v in external.items())
     print(f"[1/6] 来源({args.source})：{src_desc} + factor_research {len(fr_kept)}")
 
     daily = frdata.load_daily_panel(LOOKBACK_START, "20991231")
@@ -369,7 +415,10 @@ def main() -> int:
         # 宽表打分（合成用）
         wide_parts.append(
             pd.DataFrame(
-                scores_o.reshape(len(dates) * close.shape[1], f_count),
+                # float32：分位数打分精度足够，宽表体积与峰值内存均减半
+                scores_o.reshape(len(dates) * close.shape[1], f_count).astype(
+                    np.float32
+                ),
                 index=idx,
                 columns=names,
             )
@@ -394,11 +443,11 @@ def main() -> int:
                     "code": name,
                     "name_cn": name,
                     "display_name": k.get("display_name") or name,
-                    "l1": LIB_LABELS[lib],
+                    "l1": _lib_label(lib),
                     "l2": sub_map[name],
                     "direction": int(sign[fi]),
                     "description": (
-                        f"来源：{LIB_LABELS[lib]} / {sub_map[name]}；方向按全样本 IC 自动统一（越大越好）。"
+                        f"来源：{_lib_label(lib)} / {sub_map[name]}；方向按全样本 IC 自动统一（越大越好）。"
                         + sel_note
                     ),
                     "formula": "",
@@ -474,8 +523,7 @@ def main() -> int:
     panel = pd.concat(panel_rows, ignore_index=True)
     panel["trade_date"] = pd.to_datetime(panel["trade_date"])
     panel.to_parquet(out / "factor_panel.parquet", index=False)
-    wide = pd.concat(wide_parts, axis=1)
-    wide.reset_index().to_parquet(out / "monthly_scores.parquet", index=False)
+    n_wide_cols = _write_wide_scores(wide_parts, out / "monthly_scores.parquet")
     ic_all = pd.concat(ic_parts, axis=0)
     ic_rows = ic_all.stack().reset_index()
     ic_rows.columns = ["factor_code", "trade_date", "ic"]
@@ -553,7 +601,7 @@ def main() -> int:
     )
     print(
         f"[6/6] 完成 → {out}（{len(meta_entries)} 因子 × {len(dates)} 期，"
-        f"面板 {len(panel):,} 行，总 {time.time() - t0:.0f}s）"
+        f"面板 {len(panel):,} 行，宽表 {n_wide_cols} 列，总 {time.time() - t0:.0f}s）"
     )
     return 0
 
