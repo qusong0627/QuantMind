@@ -137,14 +137,48 @@ export interface TrainingParams {
   prediction_mode?: 'point' | 'quantile';
 }
 
+/**
+ * 训练页可选市场 = 全局五市场 + 自定义数据市场（CUSTOM）。
+ *
+ * CUSTOM 只服务训练数据域（`data/quantcustom/6_ml_datasets/`，如 rd_mined
+ * 挖掘因子库），没有行情/交易语义，因此**不进全局 AppMarket**（各页面市场
+ * 切换器、交易时段表都不该出现它）；训练页用页面级覆盖选它。
+ */
+export type TrainingMarket = 'CN' | 'US' | 'HK' | 'CRYPTO' | 'FUTURES' | 'CUSTOM';
+
 export interface TrainingContext {
   initialCapital: number;
   benchmark: string;
   commissionRate: number;
   slippage: number;
   dealPrice: DealPrice;
-  market?: 'CN' | 'US' | 'HK' | 'CRYPTO' | 'FUTURES';
+  market?: TrainingMarket;
   industry_as_feature?: boolean;
+}
+
+/** 训练页市场下拉的选项（顺序即展示顺序；CUSTOM 排在最后，与全局五市场并列无分隔）。 */
+export const TRAINING_MARKET_OPTIONS: { value: TrainingMarket; label: string }[] = [
+  { value: 'CN', label: 'A股' },
+  { value: 'HK', label: '港股' },
+  { value: 'US', label: '美股' },
+  { value: 'CRYPTO', label: '区块链' },
+  { value: 'FUTURES', label: '期货' },
+  { value: 'CUSTOM', label: '自定义市场（自传数据）' },
+];
+
+/**
+ * 解析训练页的有效市场：页面级覆盖（CUSTOM）优先于全局市场。
+ * 纯函数，供页面与测试共用；非法覆盖值一律回落到全局市场。
+ */
+export function resolveTrainingMarket(
+  override: TrainingMarket | null | undefined,
+  globalMarket: string | undefined,
+): TrainingMarket {
+  if (override && TRAINING_MARKET_OPTIONS.some(option => option.value === override)) {
+    return override;
+  }
+  const upper = String(globalMarket || 'CN').toUpperCase();
+  return (TRAINING_MARKET_OPTIONS.some(option => option.value === upper) ? upper : 'CN') as TrainingMarket;
 }
 
 export interface WfaConfig {
@@ -587,6 +621,9 @@ export const MARKET_DEFAULT_FEATURES: Record<string, string[]> = {
     'volume_ma_5', 'vol_downside_20', 'style_beta_20',
     'mom_breakout_20d', 'vol_jump_zadj',
   ],
+  // 自定义数据市场的特征名由上传者定义（如 rd_mined 的挖掘因子列），
+  // 任何预设都是在猜——一律留空，默认勾选只认目录下发的 default_selected。
+  CUSTOM: [],
 };
 
 export const getDefaultFeaturesForMarket = (market: string): string[] => {
@@ -803,7 +840,7 @@ export const restoreRange = (range: [string, string] | undefined, fallback: [Day
   return [start, end];
 };
 
-const CONFIG_MARKETS: NonNullable<TrainingContext['market']>[] = ['CN', 'US', 'HK', 'CRYPTO', 'FUTURES'];
+const CONFIG_MARKETS: NonNullable<TrainingContext['market']>[] = ['CN', 'US', 'HK', 'CRYPTO', 'FUTURES', 'CUSTOM'];
 
 const isRecord = (value: unknown): value is Record<string, unknown> => (
   typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -1063,6 +1100,7 @@ export const toDynamicCategories = (catalog: AdminModelFeatureCatalog): FeatureC
  *
  * 优先用 catalog 自带的 `default_selected` flag（truth source）；当后端老版本不返
  * 回该字段时，回落到硬编码的 PRESET 列表，并 console.warn 提示。
+ * CN 与 CUSTOM 例外：这两类市场的特征名单只认 catalog flag，绝不用 PRESET 猜。
  */
 export const resolveDefaultSelectedFeatures = (
   categories: FeatureCategory[],
@@ -1076,8 +1114,11 @@ export const resolveDefaultSelectedFeatures = (
   }
 
   // QuantDB 目录必须完整下发默认选择；A 股直读模式禁止以旧前端预设
-  // 猜测字段，防止展示的特征与已发布数据契约不一致。
-  if (String(market).toUpperCase() === 'CN') return [];
+  // 猜测字段，防止展示的特征与已发布数据契约不一致。CUSTOM（自传数据，
+  // 如 rd_mined 挖掘因子）按控制流同样空返回：其特征名由数据方定义，
+  // 不在 PRESET 里，落兜底只会白过滤一场。
+  const normalizedMarket = String(market).toUpperCase();
+  if (normalizedMarket === 'CN' || normalizedMarket === 'CUSTOM') return [];
 
   // 兜底：后端没下发 default_selected，使用 PRESET 并过滤掉 catalog 没有的 key
   const availableKeys = new Set(allFeatures.map((f) => f.key));
@@ -1101,7 +1142,7 @@ export const buildTrainingRequest = (
   params: TrainingParams,
   context: TrainingContext,
   displayName: string,
-  market?: string,
+  market?: TrainingMarket,
   wfa?: WfaConfig,
   poolId?: string | null,
 ): TrainingRequestPayload => {
@@ -1109,7 +1150,7 @@ export const buildTrainingRequest = (
   const labelFormula = buildLabelFormula(target);
   const effectiveTradeDate = buildEffectiveTradeDate(target, timePeriods.test[0]);
   const trainingWindow = `${formatRange(timePeriods.train)} | ${formatRange(timePeriods.val)} | ${formatRange(timePeriods.test)}`;
-  const resolvedContext = market ? { ...context, market: market as TrainingContext['market'] } : context;
+  const resolvedContext = market ? { ...context, market } : context;
   return {
     displayName: displayName.trim() || buildAutoDisplayName(dayjs(), target, finalFeatures.length, undefined, market, params.model_type),
     selectedFeatures: finalFeatures,

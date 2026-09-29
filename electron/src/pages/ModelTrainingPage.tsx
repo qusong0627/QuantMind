@@ -15,7 +15,7 @@ import { modelTrainingService } from '../services/modelTrainingService';
 import { useAppDispatch, useAppSelector } from '../store';
 import { selectCurrentMarket, AppMarket, setMarket } from '../store/slices/uiSlice';
 import { getMarketConfig } from '../config/marketConfig';
-import { TrainingTarget, TrainingParams, TrainingContext, TrainingStatus, TrainingDraft, SplitKey, TimePeriodMap, FeatureCategory, STORAGE_KEY, DEFAULT_FEATURE_CATEGORIES, getDefaultFeaturesForMarket, resolveDefaultSelectedFeatures, DEFAULT_TIME_PERIODS, DEFAULT_TARGET, DEFAULT_PARAMS, DEFAULT_CONTEXT, buildAutoDisplayName, buildLabelFormula, buildEffectiveTradeDate, daysBetween, toISOStringRange, restoreRange, shouldMigrateLegacyDraftPeriods, buildTrainingRequest, formatRange, toDynamicCategories, TrainingResult, buildBackendTrainingPayload, parseTrainingResult, parseSuggestedTimePeriods, MODEL_DL_DEFAULTS, WfaConfig, ImportedTrainingConfig, buildTrainingConfigFile, parseTrainingConfig, serializeTrainingConfig, TrainingFactorFilterConfig, DEFAULT_FACTOR_FILTER } from './training/trainingUtils';
+import { TrainingTarget, TrainingParams, TrainingContext, TrainingStatus, TrainingDraft, SplitKey, TimePeriodMap, FeatureCategory, STORAGE_KEY, DEFAULT_FEATURE_CATEGORIES, getDefaultFeaturesForMarket, resolveDefaultSelectedFeatures, DEFAULT_TIME_PERIODS, DEFAULT_TARGET, DEFAULT_PARAMS, DEFAULT_CONTEXT, buildAutoDisplayName, buildLabelFormula, buildEffectiveTradeDate, daysBetween, toISOStringRange, restoreRange, shouldMigrateLegacyDraftPeriods, buildTrainingRequest, formatRange, toDynamicCategories, TrainingResult, buildBackendTrainingPayload, parseTrainingResult, parseSuggestedTimePeriods, MODEL_DL_DEFAULTS, WfaConfig, ImportedTrainingConfig, buildTrainingConfigFile, parseTrainingConfig, serializeTrainingConfig, TrainingFactorFilterConfig, DEFAULT_FACTOR_FILTER, TrainingMarket, TRAINING_MARKET_OPTIONS, resolveTrainingMarket } from './training/trainingUtils';
 import { AdminModelFeatureDataCoverage, QuantDBTrainingSource } from '../features/admin/types';
 import { adminService } from '../features/admin/services/adminService';
 import { FeatureSelector } from './training/FeatureSelector';
@@ -96,7 +96,7 @@ type FormAction =
   | { type: 'SET_WFA'; payload: WfaConfig }
   | { type: 'SET_POOL'; payload: { ref: string | null; name: string | null; id: string | null } }
   | { type: 'SET_FEATURE_CATEGORIES'; payload: FeatureCategory[] }
-  | { type: 'SET_MARKET_CONTEXT'; payload: { market: AppMarket; benchmark: string } };
+  | { type: 'SET_MARKET_CONTEXT'; payload: { market: TrainingMarket; benchmark: string } };
 
 function formReducer(state: FormState, action: FormAction): FormState {
   switch (action.type) {
@@ -174,15 +174,24 @@ export const ModelTrainingPage: React.FC = () => {
   const appDispatch = useAppDispatch();
   const currentMarket = useAppSelector(selectCurrentMarket);
 
+  // 自定义数据市场（CUSTOM，如 rd_mined 挖掘因子库）没有行情/交易语义，
+  // 不进全局 AppMarket，只在训练页做页面级覆盖：选它不改全局市场，
+  // 全局市场在别处被切换时自动撤销覆盖。
+  const [customMarketOverride, setCustomMarketOverride] = useState(false);
+  const trainingMarket = useMemo(
+    () => resolveTrainingMarket(customMarketOverride ? 'CUSTOM' : null, currentMarket),
+    [customMarketOverride, currentMarket],
+  );
+
   // ── useReducer：草稿持久化的 7 字段 ──
   const [formState, dispatch] = useReducer(formReducer, {
-    selectedFeatures: currentMarket === 'CN' ? [] : getDefaultFeaturesForMarket(currentMarket),
+    selectedFeatures: trainingMarket === 'CN' ? [] : getDefaultFeaturesForMarket(trainingMarket),
     timePeriods: DEFAULT_TIME_PERIODS,
     wfaConfig: { enabled: false, strategy: 'rolling', nWindows: 4, trainYears: 3, valMonths: 12, stepMonths: 12 },
     target: DEFAULT_TARGET,
     params: DEFAULT_PARAMS,
     context: DEFAULT_CONTEXT,
-    displayName: buildAutoDisplayName(dayjs(), DEFAULT_TARGET, 0, undefined, currentMarket, DEFAULT_PARAMS.model_type),
+    displayName: buildAutoDisplayName(dayjs(), DEFAULT_TARGET, 0, undefined, trainingMarket, DEFAULT_PARAMS.model_type),
     displayNameMode: 'auto' as const,
     poolRef: null,
     poolName: null,
@@ -242,18 +251,31 @@ export const ModelTrainingPage: React.FC = () => {
   const labelFormula = useMemo(() => buildLabelFormula(target), [target]);
   const effectiveTradeDate = useMemo(() => buildEffectiveTradeDate(target, timePeriods.test[0]), [target, timePeriods.test]);
 
-  // 市场切换
+  // 市场切换（含页面级 CUSTOM 覆盖）
   useEffect(() => {
-    const mc = getMarketConfig(currentMarket);
-    dispatch({ type: 'SET_MARKET_CONTEXT', payload: { market: currentMarket, benchmark: mc.benchmark } });
-    dispatch({ type: 'SET_FEATURES', payload: currentMarket === 'CN' ? [] : getDefaultFeaturesForMarket(currentMarket) });
+    const mc = getMarketConfig(trainingMarket);
+    dispatch({ type: 'SET_MARKET_CONTEXT', payload: { market: trainingMarket, benchmark: mc.benchmark } });
+    dispatch({ type: 'SET_FEATURES', payload: trainingMarket === 'CN' ? [] : getDefaultFeaturesForMarket(trainingMarket) });
     catalogSuggestionAppliedRef.current = false;
-  }, [currentMarket]);
+  }, [trainingMarket]);
+
+  // 全局市场在别处被切换时撤销页面级覆盖（覆盖只跟随本页下拉/导入）
+  useEffect(() => { setCustomMarketOverride(false); }, [currentMarket]);
+
+  // 训练市场下拉：五个真实市场走全局切换（各页面共享），CUSTOM 只置本页覆盖
+  const handleTrainingMarketChange = (next: TrainingMarket) => {
+    if (next === 'CUSTOM') {
+      setCustomMarketOverride(true);
+      return;
+    }
+    setCustomMarketOverride(false);
+    if (next !== currentMarket) appDispatch(setMarket(next));
+  };
 
   const featureCount = selectedFeatures.length;
   const autoDisplayName = useMemo(
-    () => buildAutoDisplayName(dayjs(), target, featureCount, undefined, currentMarket, params.model_type),
-    [target, featureCount, currentMarket, params.model_type]
+    () => buildAutoDisplayName(dayjs(), target, featureCount, undefined, trainingMarket, params.model_type),
+    [target, featureCount, trainingMarket, params.model_type]
   );
   const trainDays = useMemo(() => daysBetween(timePeriods.train), [timePeriods.train]);
   const valDays = useMemo(() => daysBetween(timePeriods.val), [timePeriods.val]);
@@ -266,8 +288,8 @@ export const ModelTrainingPage: React.FC = () => {
     ? `${dataCoverage.min_date} ～ ${dataCoverage.max_date}`
     : '等待数据源状态';
   const requestPreview = useMemo(
-    () => buildTrainingRequest(selectedFeatures, featureCategories, timePeriods, target, params, context, displayName, currentMarket, wfaConfig, formState.poolRef),
-    [selectedFeatures, featureCategories, timePeriods, target, params, context, displayName, currentMarket, wfaConfig, formState.poolRef]
+    () => buildTrainingRequest(selectedFeatures, featureCategories, timePeriods, target, params, context, displayName, trainingMarket, wfaConfig, formState.poolRef),
+    [selectedFeatures, featureCategories, timePeriods, target, params, context, displayName, trainingMarket, wfaConfig, formState.poolRef]
   );
   // 训练节点
   const selectedNodeObj = useMemo(
@@ -275,7 +297,7 @@ export const ModelTrainingPage: React.FC = () => {
     [trainingNodes, selectedNode]
   );
 
-  const isDirectCatalogReady = !isQuantDBMarket(currentMarket) || (
+  const isDirectCatalogReady = !isQuantDBMarket(trainingMarket) || (
     !!factorCatalogVersion && dataCoverage?.ready === true
   );
   const isSelectedNodeReady = selectedNodeObj
@@ -339,8 +361,8 @@ export const ModelTrainingPage: React.FC = () => {
       setFactorCatalogVersion(null);
       setDataCoverage(null);
       try {
-        if (isQuantDBMarket(currentMarket)) {
-          const sourceResult = await modelTrainingService.getQuantDBTrainingSources(currentMarket);
+        if (isQuantDBMarket(trainingMarket)) {
+          const sourceResult = await modelTrainingService.getQuantDBTrainingSources(trainingMarket);
           if (!active) return;
           setFactorSources(sourceResult.sources || []);
           const selectedSource = sourceResult.sources.find((item) => item.id === factorSource);
@@ -353,9 +375,9 @@ export const ModelTrainingPage: React.FC = () => {
         }
 
         const catalog = await modelTrainingService.getFeatureCatalog(
-          currentMarket,
+          trainingMarket,
           false,
-          isQuantDBMarket(currentMarket) ? factorSource : undefined,
+          isQuantDBMarket(trainingMarket) ? factorSource : undefined,
         );
         if (!active) return;
         const dynamicCats = toDynamicCategories(catalog);
@@ -379,7 +401,7 @@ export const ModelTrainingPage: React.FC = () => {
           dispatch({ type: 'SET_FEATURES', payload: restoredFeatures.filter((key) => availableKeys.has(key)) });
           restoredDraftFeaturesRef.current = null;
         } else {
-          dispatch({ type: 'SET_FEATURES', payload: resolveDefaultSelectedFeatures(dynamicCats, currentMarket) });
+          dispatch({ type: 'SET_FEATURES', payload: resolveDefaultSelectedFeatures(dynamicCats, trainingMarket) });
         }
         if (catalog.data_coverage?.suggested_periods && !catalogSuggestionAppliedRef.current) {
           const suggested = parseSuggestedTimePeriods(catalog.data_coverage.suggested_periods);
@@ -390,13 +412,17 @@ export const ModelTrainingPage: React.FC = () => {
             catalogSuggestionAppliedRef.current = true;
           }
         }
-      } catch {
-        if (active && currentMarket === 'CN') {
+      } catch (error) {
+        if (active && (trainingMarket === 'CN' || trainingMarket === 'CUSTOM')) {
+          // CN 与 CUSTOM 都禁止回退内置字段：字段名/契约只认后端已发布目录，
+          // 拿 A 股预设去猜自定义数据（rd_mined 挖掘因子）是在编造特征。
+          // 此分支刻意不弹提示（页面会以「目录未就绪」呈现），日志留痕供排查。
+          console.warn('[ModelTrainingPage] 训练目录加载失败，特征已清空（禁止回退内置字段）:', trainingMarket, error);
           setFeatureCategories([]);
           dispatch({ type: 'SET_FEATURES', payload: [] });
         } else if (active) {
           setFeatureCategories(DEFAULT_FEATURE_CATEGORIES);
-          dispatch({ type: 'SET_FEATURES', payload: getDefaultFeaturesForMarket(currentMarket) });
+          dispatch({ type: 'SET_FEATURES', payload: getDefaultFeaturesForMarket(trainingMarket) });
           message.warning('特征字典加载失败，已回退到内置字段');
         }
       } finally {
@@ -405,7 +431,7 @@ export const ModelTrainingPage: React.FC = () => {
     };
     loadCatalog();
     return () => { active = false; };
-  }, [currentMarket, factorSource]);
+  }, [trainingMarket, factorSource]);
 
   // P0-4: 草稿恢复 — 一次 dispatch 原子化写入（替代 7 个 setState）
   useEffect(() => {
@@ -414,6 +440,8 @@ export const ModelTrainingPage: React.FC = () => {
     try {
       const parsed = JSON.parse(saved) as TrainingDraft;
       dispatch({ type: 'HYDRATE', payload: parsed });
+      // 草稿里记的是自定义数据市场：恢复页面级覆盖，让目录按 CUSTOM 重新加载
+      if (parsed.context?.market === 'CUSTOM') setCustomMarketOverride(true);
       if (Array.isArray(parsed.selectedFeatures)) {
         restoredDraftFeaturesRef.current = parsed.selectedFeatures;
       }
@@ -488,7 +516,7 @@ export const ModelTrainingPage: React.FC = () => {
       return;
     }
     if (!isReadyToTrain) {
-      message.warning(isQuantDBMarket(currentMarket) ? '数据源、映射版本或覆盖范围尚未就绪' : '配置不完整');
+      message.warning(isQuantDBMarket(trainingMarket) ? '数据源、映射版本或覆盖范围尚未就绪' : '配置不完整');
       return;
     }
     clearTimers();
@@ -504,7 +532,7 @@ export const ModelTrainingPage: React.FC = () => {
 
     try {
       const payload = buildBackendTrainingPayload(requestPreview, timePeriods, { nodeId: selectedNode, maxTimeMinutes, factorFilter });
-      if (isQuantDBMarket(currentMarket) && factorCatalogVersion) {
+      if (isQuantDBMarket(trainingMarket) && factorCatalogVersion) {
         payload.factor_source = factorSource;
         payload.factor_catalog_version = factorCatalogVersion;
       }
@@ -656,8 +684,8 @@ export const ModelTrainingPage: React.FC = () => {
   const handleResetAll = () => {
     clearTimers();
     const features = featureCategories.length > 0
-      ? resolveDefaultSelectedFeatures(featureCategories, currentMarket)
-      : getDefaultFeaturesForMarket(currentMarket);
+      ? resolveDefaultSelectedFeatures(featureCategories, trainingMarket)
+      : getDefaultFeaturesForMarket(trainingMarket);
     dispatch({ type: 'SET_FEATURES', payload: features });
     const coveragePeriods = parseSuggestedTimePeriods(dataCoverage?.suggested_periods);
     dispatch({ type: 'SET_TIME',  key: 'train', value: coveragePeriods?.train || DEFAULT_TIME_PERIODS.train });
@@ -665,7 +693,8 @@ export const ModelTrainingPage: React.FC = () => {
     dispatch({ type: 'SET_TIME',  key: 'test',  value: coveragePeriods?.test || DEFAULT_TIME_PERIODS.test });
     dispatch({ type: 'SET_TARGET', payload: DEFAULT_TARGET });
     dispatch({ type: 'SET_PARAMS', payload: DEFAULT_PARAMS });
-    dispatch({ type: 'SET_CONTEXT', payload: DEFAULT_CONTEXT });
+    // 重置保留当前训练市场（含 CUSTOM 覆盖），否则上下文会被打回默认 A 股
+    dispatch({ type: 'SET_CONTEXT', payload: { ...DEFAULT_CONTEXT, market: trainingMarket, benchmark: getMarketConfig(trainingMarket).benchmark } });
     dispatch({ type: 'SET_DISPLAY_NAME', payload: { name: '', mode: 'auto' } });
     dispatch({ type: 'SET_WFA', payload: { enabled: false, strategy: 'rolling', nWindows: 4, trainYears: 3, valMonths: 12, stepMonths: 12 } });
     setTrainingStatus('draft');
@@ -682,14 +711,14 @@ export const ModelTrainingPage: React.FC = () => {
       if (file.size > 1024 * 1024) throw new Error('配置文件不能超过 1 MB');
       const config = parseTrainingConfig(await file.text());
       const availableKeys = new Set(featureCategories.flatMap((category) => category.features.map((feature) => feature.key)));
-      const unavailableFeatures = config.market === currentMarket && availableKeys.size > 0
+      const unavailableFeatures = config.market === trainingMarket && availableKeys.size > 0
         ? config.draft.selectedFeatures.filter((key) => !availableKeys.has(key))
         : [];
       setImportPreview({
         config,
         unavailableFeatures,
-        marketChanged: config.market !== currentMarket,
-        catalogVersionChanged: config.market === currentMarket
+        marketChanged: config.market !== trainingMarket,
+        catalogVersionChanged: config.market === trainingMarket
           && isQuantDBMarket(config.market)
           && Boolean(config.factorCatalogVersion)
           && config.factorCatalogVersion !== factorCatalogVersion,
@@ -710,7 +739,15 @@ export const ModelTrainingPage: React.FC = () => {
     // 配置中的时间切分优先级高于数据目录给出的首次打开建议值。
     catalogSuggestionAppliedRef.current = true;
     dispatch({ type: 'HYDRATE', payload: config.draft });
-    if (config.market !== currentMarket) appDispatch(setMarket(config.market as AppMarket));
+    if (config.market === 'CUSTOM') {
+      // CUSTOM 没有全局态：只置页面级覆盖
+      setCustomMarketOverride(true);
+    } else if (config.market && config.market !== trainingMarket) {
+      // 真实市场走全局切换（当前是 CUSTOM 覆盖时，这同时撤销覆盖）；
+      // 走到这里 market 已被排除 CUSTOM 与 undefined，即 AppMarket
+      setCustomMarketOverride(false);
+      appDispatch(setMarket(config.market));
+    }
     if (isQuantDBMarket(config.market) && config.factorSource && config.factorSource !== factorSource) {
       setFactorSource(config.factorSource);
     } else {
@@ -744,9 +781,9 @@ export const ModelTrainingPage: React.FC = () => {
       wfa: wfaConfig,
     };
     const content = serializeTrainingConfig(buildTrainingConfigFile(draft, {
-      market: currentMarket,
-      factor_source: isQuantDBMarket(currentMarket) ? factorSource : undefined,
-      factor_catalog_version: isQuantDBMarket(currentMarket) ? factorCatalogVersion : undefined,
+      market: trainingMarket,
+      factor_source: isQuantDBMarket(trainingMarket) ? factorSource : undefined,
+      factor_catalog_version: isQuantDBMarket(trainingMarket) ? factorCatalogVersion : undefined,
     }));
     const safeName = (displayName || 'model-training').replace(/[\\/:*?"<>|]/g, '_');
     const filename = `模型训练配置_${safeName}_${dayjs().format('YYYYMMDD')}.yml`;
@@ -894,7 +931,22 @@ export const ModelTrainingPage: React.FC = () => {
                       <CurrentIcon size={18} className="text-blue-500" />
                       <Title level={5} className="!mb-0">{currentModule.title}</Title>
                     </div>
-                    {isQuantDBMarket(currentMarket) && (
+                    <div className="flex items-center gap-2 text-xs shrink-0">
+                      <span className="font-medium text-slate-600 shrink-0">训练市场</span>
+                      <Select
+                        value={trainingMarket}
+                        onChange={handleTrainingMarketChange}
+                        className="min-w-36"
+                        disabled={isTrainingInProgress}
+                        options={TRAINING_MARKET_OPTIONS}
+                      />
+                      {trainingMarket === 'CUSTOM' && (
+                        <Tooltip title="自定义数据市场：训练直接用后端已发布的自传数据集（如 RD 挖掘因子库），不改全局市场。">
+                          <Tag color="purple" className="!m-0">自定义数据</Tag>
+                        </Tooltip>
+                      )}
+                    </div>
+                    {isQuantDBMarket(trainingMarket) && (
                       <div className="flex items-center gap-2 text-xs min-w-0">
                       <span className="font-medium text-slate-600 shrink-0">数据源</span>
                       <Select
@@ -967,7 +1019,7 @@ export const ModelTrainingPage: React.FC = () => {
                 </Card>
 
                 <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
-                    <MetricCard label="市场" value={getMarketConfig(currentMarket).label} centered />
+                    <MetricCard label="市场" value={getMarketConfig(trainingMarket).label} centered />
                     <MetricCard label="特征数" value={`${featureCount}`} centered />
                     <MetricCard label="预测周期" value={`T+${target.horizonDays}`} hint={target.mode} centered />
                     <MetricCard label="数据覆盖" value={coverageDisplay} hint={coverageHint} centered />
@@ -1009,7 +1061,7 @@ export const ModelTrainingPage: React.FC = () => {
                       </>
                     )}
                     {currentStep === 1 && <TrainingTargetConfig target={target} timePeriods={timePeriods} onTargetChange={(t) => dispatch({ type: 'SET_TARGET', payload: t })} onTimeChange={(k, v) => dispatch({ type: 'SET_TIME', key: k, value: v })} dataCoverage={dataCoverage} factorFilter={factorFilter} onFactorFilterChange={setFactorFilter} />}
-                    {currentStep === 2 && <ParameterConfig params={params} context={context} onParamsChange={(p) => dispatch({ type: 'SET_PARAMS', payload: p })} onContextChange={(c) => dispatch({ type: 'SET_CONTEXT', payload: c })} displayName={displayName} onDisplayNameChange={(n, m) => dispatch({ type: 'SET_DISPLAY_NAME', payload: { name: n, mode: m } })} autoDisplayName={autoDisplayName} market={currentMarket} target={target} onTargetChange={(t) => dispatch({ type: 'SET_TARGET', payload: t })} wfa={wfaConfig} onWfaChange={(w) => dispatch({ type: 'SET_WFA', payload: w })} />}
+                    {currentStep === 2 && <ParameterConfig params={params} context={context} onParamsChange={(p) => dispatch({ type: 'SET_PARAMS', payload: p })} onContextChange={(c) => dispatch({ type: 'SET_CONTEXT', payload: c })} displayName={displayName} onDisplayNameChange={(n, m) => dispatch({ type: 'SET_DISPLAY_NAME', payload: { name: n, mode: m } })} autoDisplayName={autoDisplayName} market={trainingMarket} target={target} onTargetChange={(t) => dispatch({ type: 'SET_TARGET', payload: t })} wfa={wfaConfig} onWfaChange={(w) => dispatch({ type: 'SET_WFA', payload: w })} />}
                     {currentStep === 3 && <TrainingConsole trainingStatus={trainingStatus} executionStage={executionStage} progress={progress} logs={logs} backendRunStatus={backendRunStatus} result={result} requestPreview={requestPreview} totalDays={totalDays} trainDays={trainDays} valDays={valDays} testDays={testDays} target={target} factorFilter={factorFilter} onGoToResult={() => setCurrentStep(4)} />}
                     {currentStep === 4 && <TrainingResultView result={result} resultError={resultError} settingDefaultModel={settingDefaultModel} onSetDefaultModel={handleSetDefaultModel} onExportConfig={handleExportConfig} trainingStatus={trainingStatus} />}
                   </motion.div>
@@ -1040,7 +1092,7 @@ export const ModelTrainingPage: React.FC = () => {
               <Alert
                 type="warning"
                 showIcon
-                message={`市场将从 ${getMarketConfig(currentMarket).label} 切换为 ${getMarketConfig(importPreview.config.market as AppMarket).label}`}
+                message={`市场将从 ${getMarketConfig(trainingMarket).label} 切换为 ${getMarketConfig(importPreview.config.market ?? 'CN').label}`}
                 description="系统会按新市场重新加载可用因子目录。"
               />
             )}
@@ -1067,7 +1119,7 @@ export const ModelTrainingPage: React.FC = () => {
         open={poolPickerOpen}
         onClose={() => setPoolPickerOpen(false)}
         selectedPoolId={formState.poolId}
-        market={currentMarket === 'CN' ? 'CN' : undefined}
+        market={trainingMarket === 'CN' || trainingMarket === 'CUSTOM' ? 'CN' : undefined}
         title="训练股票池"
         onSelect={(pool: StockPoolOption) => {
           dispatch({ type: 'SET_POOL', payload: { ref: `pool:${pool.code}`, name: pool.name, id: pool.pool_id } });

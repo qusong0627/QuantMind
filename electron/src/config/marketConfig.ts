@@ -86,7 +86,32 @@ export const MARKET_CONFIGS: Record<AppMarket, MarketConfig> = {
   },
 };
 
-export function getMarketConfig(market: AppMarket): MarketConfig {
+/**
+ * 自定义数据市场（CUSTOM）：训练页专用，不进全局 AppMarket。
+ *
+ * 它不是「市场」而是自传 parquet 的训练数据域（`data/quantcustom/6_ml_datasets/`，
+ * 如 rd_mined 挖掘因子库）。行情/交易语义全部沿用 A 股口径（OHLCV 由同库
+ * l1_factors 或库内行情补给），所以展示值镜像 CN；但绝不允许写进全局市场
+ * 切换器（dashboard/交易时段等处没有它的语义）。详见 trainingUtils 的
+ * TrainingMarket 类型与 resolveTrainingMarket。
+ */
+export const CUSTOM_DATA_MARKET_CONFIG: MarketConfig = {
+  label: '自定义市场',
+  qlibRegion: 'cn',
+  // qlibProviderUri 对 CUSTOM 无实际消费方：CUSTOM 不走 qlib 二进制缓存
+  // （后端 QlibDataBuilder.for_market 对未知市场直接抛错），保留此占位仅为
+  // 满足 MarketConfig 形状；展示时请不要引用它。
+  qlibProviderUri: '/data/quantcustom/.qlib_cache/custom_data',
+  defaultUniverse: 'all',
+  benchmark: 'SH000300',
+  benchmarkName: '沪深300',
+  currency: 'CNY',
+  calendar: 'SSE',
+  adapterId: 'a_share',
+};
+
+export function getMarketConfig(market: AppMarket | 'CUSTOM'): MarketConfig {
+  if (market === 'CUSTOM') return CUSTOM_DATA_MARKET_CONFIG;
   return MARKET_CONFIGS[market] || MARKET_CONFIGS.CN;
 }
 

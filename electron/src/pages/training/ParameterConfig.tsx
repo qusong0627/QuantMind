@@ -49,7 +49,8 @@ interface ParameterConfigProps {
   displayName: string;
   onDisplayNameChange: (name: string, mode: 'auto' | 'manual') => void;
   autoDisplayName: string;
-  market?: AppMarket;
+  /** 训练市场：全局五市场，或训练页专有的自定义数据市场（CUSTOM）。 */
+  market?: AppMarket | 'CUSTOM';
   target: TrainingTarget;
   onTargetChange: (target: TrainingTarget) => void;
   wfa?: WfaConfig;
