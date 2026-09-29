@@ -7,6 +7,7 @@ import {
 import { DatabaseOutlined, EditOutlined, InfoCircleOutlined, PlusOutlined, ReloadOutlined, RocketOutlined } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import { adminService } from '../services/adminService';
+import { RdMinedMaterializePanel } from './RdMinedMaterializePanel';
 
 const { Title, Text } = Typography;
 
@@ -293,6 +294,11 @@ export const AdminTrainingDatasets: React.FC = () => {
         message="自定义市场：自传 parquet，后端仅扫描因子"
         description="宿主机 ./data/quantcustom/6_ml_datasets/l1_factors/dt=YYYYMMDD/*.parquet（bind mount 自动同步进容器 /data/quantcustom）；至少包含 symbol + date（或 dt 分区）+ 自定因子列，不强制 OHLCV。缺 close 列时仅扫描浏览、无法构建训练标签。放好文件后点「字段发现」，再建草稿发布。"
       />
+    )}
+
+    {/* RD 挖掘因子物化：挖掘 → rd_mined 训练库的中间环节，落在 CUSTOM 市场 */}
+    {market === 'CUSTOM' && (
+      <RdMinedMaterializePanel onCompleted={() => { void load(); }} />
     )}
 
     <Row gutter={[16, 16]}>
