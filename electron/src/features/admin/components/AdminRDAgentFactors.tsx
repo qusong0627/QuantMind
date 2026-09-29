@@ -66,6 +66,7 @@ import {
 } from '../services/rdAgentService';
 import { useBacktestCenterStore } from '../../../stores/backtestCenterStore';
 import { setCurrentTab } from '../../../store/slices/aiStrategySlice';
+import { RdMinedMaterializePanel } from './RdMinedMaterializePanel';
 
 const { Title, Text, Paragraph } = Typography;
 
@@ -622,6 +623,13 @@ export const AdminRDAgentFactors: React.FC = () => {
           );
         })()}
       </Card>
+
+      {/* ③.5 物化面板：挖掘 → 训练库的中间环节，仅 A 股因子会物化 */}
+      {market === 'a_share' && (
+        <RdMinedMaterializePanel
+          onCompleted={() => { void reloadStats(); void reloadFactors(); void reloadTasks(); }}
+        />
+      )}
 
       {/* ④ 因子列表 */}
       <Card

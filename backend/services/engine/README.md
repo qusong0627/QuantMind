@@ -337,7 +337,7 @@ python backend/scripts/rd_mined_materialize.py --align-only                # 只
 - **值级查重（贵层）**：逐日截面秩相关（日均 |ρ|）对照 CUSTOM `l1_factors` + `rd_mined` 既有列，≥ `--corr-threshold`（默认 0.9）拒绝入账、≥0.8 告警；排除本因子自己的旧列；样本取近窗 60 个交易日。「没算出可比对列」会单独计数（`corr_unverified`），不让门静默退化。
 - **落盘**：`merge_factor_into_source`（`backend/shared/feature_source.py`）按交易日合并进 `6_ml_datasets/rd_mined/dt=*/data.parquet`；列名 `feature_column_name`（`rd_` 前缀 + SQL 安全），跨因子重名按 factor_id 前缀消歧（同名不同因子各占一列，绝不互相覆盖）。
 - **落盘纪律**：因子值一律 float64（int64 与其余分区混读时 DuckDB 以第一个文件的类型为准**静默取整**）；临时文件不得以 `.parquet` 结尾（`dt=*/*.parquet` 通配符会把半写文件当分区读）；收尾必须跑分区列集对齐（读取层无 `union_by_name`，列漂移会响亮失败）。
-- **清单与锁**：`_materialize_manifest.json` 逐因子记 `materialized / rejected_duplicate / error` + 代码指纹（代码被改写会自动重做）；`flock` 独占锁保证同一时刻只有一个物化进程，撞车方让位（成果由清单续跑兜底）。
+- **清单与锁**：`_materialize_manifest.json` 逐因子记 `materialized / rejected_duplicate / error` + 代码指纹（代码被改写会自动重做；**升级前写的旧条目没有指纹，按「保守不动」处理**——缺指纹不等于代码变了，要覆盖用 `--force`）；`flock` 独占锁保证同一时刻只有一个物化进程，撞车方让位（成果由清单续跑兜底）。
 - **回填节奏**：每个因子要把 1600+ 个分区整列合并写回，实测约 1~2 分钟/因子；全量回填建议 nohup 后台跑并盯日志。
 
 ### 3. 注册进训练目录（`--register`）
@@ -345,3 +345,10 @@ python backend/scripts/rd_mined_materialize.py --align-only                # 只
 - 刷新字段注册（`record_source_fields`：源状态表 + 字段表）并发布/更新训练目录版本；**幂等判据 = 已发布版本的 enabled 映射列集 vs 当前扫描列集**，相同则跳过（避免注册失败后「永远不再发」或每次空发新版）。
 - 训练页因子源列表按**源状态表**迭代（静态源 + 目录存在的动态数据集），`rd_mined` 这类动态源注册后即出现、不因不在静态清单里而消失；`load_quantdb_training_catalog` 的 422 归属校验同样按状态表判，不按静态清单。
 - 挖掘因子默认**不勾选**：`seed_catalog_mappings` 的既定口径是非 CN 市场（HK/CUSTOM）`default_selected` 全 false，勾选由管理员/用户在训练页显式完成，避免无人确认的挖掘因子悄悄进入训练集。
+
+### 4. Web 运维面（后台页内嵌面板）
+
+- 端点（admin 权限，挂 `/api/v1/admin/training-data/rd-mined`）：`GET /materialize/status`（运行态 flock 探测 + 候选分桶 + 清单统计 + 库/目录状态 + 日志尾）、`POST /materialize/start`（忙 409；固定 argv 起后台子进程，**回包前确认子进程真正持锁**，拿不到/即刻退出如实报 409/500）。
+- 状态端点是一条会被面板每 10s 轮询的只读路径：候选查询显式 `ensure=False` 跳过建表迁移（那串 DDL 每次调用都要拿 ACCESS EXCLUSIVE 锁），DB/库任一段读不出来降级成 `error` 字段返回，不整条 500。
+- **刻意没有停止端点**：中途 kill 会在库里留下「部分分区已有该列」的中间态，只能靠收尾对齐修复；让一次物化跑到收尾永远比中断便宜。
+- 前端完成判定的纪律：`running` 只能由服务端响应点亮。子进程冷启约 4s 才拿锁，start 回包后首拍探测为 false 属正常——前端不许把它读成「运行→结束」的边（否则刚开始就弹「已结束」，且轮询定时器装不上，整轮物化从面板消失）。

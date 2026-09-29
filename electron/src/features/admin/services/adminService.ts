@@ -21,6 +21,8 @@ import {
     AdminOrderHistoryItem,
     AdminPlannedOrderItem,
     AdminInferenceMonitor,
+    RdMinedMaterializeStatus,
+    RdMinedMaterializeStartResult,
 } from '../types';
 import { authService } from '../../auth/services/authService';
 import { SERVICE_ENDPOINTS, resolveWebSafeServiceBase } from '../../../config/services';
@@ -225,6 +227,24 @@ class AdminService {
         const resp = await this.axiosInstance.get('/admin/training-data/sources', {
             params: { market },
         });
+        return resp.data;
+    }
+
+    // RD 挖掘因子（CUSTOM 市场 rd_mined 库）的物化运维面。
+    async getRdMinedMaterializeStatus(): Promise<RdMinedMaterializeStatus> {
+        const resp = await this.axiosInstance.get<RdMinedMaterializeStatus>(
+            '/admin/training-data/rd-mined/materialize/status',
+            { timeout: 60_000 }, // 状态含全量分区扫描，给足超时
+        );
+        return resp.data;
+    }
+
+    async startRdMinedMaterialize(): Promise<RdMinedMaterializeStartResult> {
+        const resp = await this.axiosInstance.post<RdMinedMaterializeStartResult>(
+            '/admin/training-data/rd-mined/materialize/start',
+            undefined,
+            { timeout: 30_000 },
+        );
         return resp.data;
     }
 

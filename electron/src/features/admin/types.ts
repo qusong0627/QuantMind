@@ -581,3 +581,57 @@ export interface RiskDryRunItem {
     status: string;
     message: string;
 }
+
+// ── RD 挖掘因子物化运维面（CUSTOM 市场 rd_mined） ─────────────────────
+
+export interface RdMinedMaterializeLibrary {
+    ready: boolean;
+    factor_columns: number;
+    partitions: number;
+    min_date?: string | null;
+    max_date?: string | null;
+    error?: string;
+}
+
+export interface RdMinedMaterializeCatalog {
+    published_version: string | null;
+    published_columns: number;
+    up_to_date: boolean;
+    error?: string;
+}
+
+export interface RdMinedMaterializeOverview {
+    candidates: {
+        total: number;
+        pending: number;
+        pending_reasons: Record<string, number>;
+        skipped: Record<string, number>;
+        /** 候选查询降级信息：DB 读不出来时为错误摘要，正常时缺省 */
+        error?: string;
+    };
+    manifest: {
+        total: number;
+        by_status: Record<string, number>;
+        last_at: string;
+    };
+    library: RdMinedMaterializeLibrary;
+    catalog: RdMinedMaterializeCatalog;
+}
+
+export interface RdMinedMaterializeStatus {
+    running: boolean;
+    overview: RdMinedMaterializeOverview;
+    log: {
+        path: string;
+        exists: boolean;
+        size?: number;
+        lines: string[];
+    };
+}
+
+export interface RdMinedMaterializeStartResult {
+    started: boolean;
+    pid: number;
+    log_path: string;
+    message: string;
+}

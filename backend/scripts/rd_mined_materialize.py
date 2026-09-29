@@ -635,28 +635,43 @@ def _align_partition_schemas(lib_root: Path) -> dict[str, int]:
 # ── DB 交互 ────────────────────────────────────────────────────────────
 
 
-async def _load_candidates(args: argparse.Namespace) -> list[dict[str, Any]]:
+async def _query_candidates(
+    *,
+    factor_ids: list[str] | None = None,
+    task_id: str | None = None,
+    market: str | None = None,
+    limit: int = 0,
+    ensure: bool = True,
+) -> list[dict[str, Any]]:
+    """候选因子查询（显式参数版；CLI 与后台物化面板共用同一实现）。
+
+    ``ensure=False`` 供只读状态面复用：跳过建表迁移（那是一串无条件执行的
+    ``CREATE/ALTER TABLE``，在面板 10s 轮询下会反复取 ACCESS EXCLUSIVE 锁，
+    还会要求 API 侧 DB 账号具备 DDL 权限）。真实运行保持默认 True。
+    """
     from sqlalchemy import text
 
-    from backend.services.engine.qlib_app.services.rd_agent_persistence import (
-        RDAgentFactorPersistence,
-    )
     from backend.shared.database_manager_v2 import get_session
 
-    await RDAgentFactorPersistence().ensure_tables()
+    if ensure:
+        from backend.services.engine.qlib_app.services.rd_agent_persistence import (
+            RDAgentFactorPersistence,
+        )
+
+        await RDAgentFactorPersistence().ensure_tables()
 
     clauses: list[str] = []
     params: dict[str, Any] = {}
-    if args.factor_ids:
+    if factor_ids:
         clauses.append("factor_id = ANY(:ids)")
-        params["ids"] = list(args.factor_ids)
-    if args.task_id:
+        params["ids"] = list(factor_ids)
+    if task_id:
         clauses.append("metadata_json->>'task_id' = :task_id")
-        params["task_id"] = args.task_id
-    if args.market:
+        params["task_id"] = task_id
+    if market:
         clauses.append("COALESCE(market, :default_market) = :market")
         params["default_market"] = DEFAULT_MARKET
-        params["market"] = args.market
+        params["market"] = market
     where = " AND ".join(clauses) if clauses else "TRUE"
     sql = (
         "SELECT factor_id, factor_name, factor_code, factor_formulation, "
@@ -664,13 +679,22 @@ async def _load_candidates(args: argparse.Namespace) -> list[dict[str, Any]]:
         "FROM rd_agent_factors "
         f"WHERE {where} ORDER BY created_at"
     )
-    if args.limit and args.limit > 0:
+    if limit and limit > 0:
         sql += " LIMIT :limit"
-        params["limit"] = int(args.limit)
+        params["limit"] = int(limit)
         params.setdefault("default_market", DEFAULT_MARKET)
     async with get_session(read_only=True) as session:
         rows = (await session.execute(text(sql), params)).mappings().all()
     return [dict(row) for row in rows]
+
+
+async def _load_candidates(args: argparse.Namespace) -> list[dict[str, Any]]:
+    return await _query_candidates(
+        factor_ids=list(args.factor_ids or []),
+        task_id=args.task_id,
+        market=args.market,
+        limit=int(args.limit or 0),
+    )
 
 
 async def _update_factor_meta(factor_id: str, entry: Mapping[str, Any]) -> None:
@@ -688,14 +712,50 @@ async def _update_factor_meta(factor_id: str, entry: Mapping[str, Any]) -> None:
         logger.warning("回写 materialization 元数据失败 %s：%s", factor_id, exc)
 
 
+async def _published_enabled_columns(session: Any) -> tuple[str | None, set[str]]:
+    """rd_mined 最新已发布版本的 ``(version_id, enabled 映射列集)``。
+
+    「目录是否最新」判据的唯一来源（注册幂等与后台物化面板共用同一口径，
+    防止面板说「已最新」而注册又说要发新版）。无发布版本返回 ``(None, set())``。
+    """
+    from sqlalchemy import text
+
+    row = (
+        await session.execute(
+            text(
+                "SELECT version_id FROM qm_training_factor_catalog_version "
+                "WHERE source_dataset = :src AND market = :mkt "
+                "AND status = 'published' "
+                "ORDER BY published_at DESC NULLS LAST LIMIT 1"
+            ),
+            {"src": RD_MINED_SOURCE, "mkt": LIB_MARKET},
+        )
+    ).first()
+    if row is None:
+        return None, set()
+    version_id = str(row[0])
+    enabled = set(
+        (
+            await session.execute(
+                text(
+                    "SELECT source_column FROM qm_training_factor_mapping "
+                    "WHERE version_id = :vid AND enabled"
+                ),
+                {"vid": version_id},
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return version_id, enabled
+
+
 async def _register_library(lib_root: Path, *, force: bool = False) -> str | None:
     """刷新字段注册并发布/更新 rd_mined 训练目录版本。
 
     幂等判据 = 已发布版本的 enabled 映射列集 vs 当前扫描列集，相同则跳过
     （避免注册失败后「永远不再发」或每次空发新版）。
     """
-    from sqlalchemy import text
-
     from backend.services.api.routers.admin.quantdb_factor_catalog import (
         _ensure_schema,
         create_catalog_draft,
@@ -727,34 +787,10 @@ async def _register_library(lib_root: Path, *, force: bool = False) -> str | Non
     async with get_session() as session:
         await _ensure_schema(session)
         if not force:
-            row = (
-                await session.execute(
-                    text(
-                        "SELECT version_id FROM qm_training_factor_catalog_version "
-                        "WHERE source_dataset = :src AND market = :mkt "
-                        "AND status = 'published' "
-                        "ORDER BY published_at DESC NULLS LAST LIMIT 1"
-                    ),
-                    {"src": RD_MINED_SOURCE, "mkt": LIB_MARKET},
-                )
-            ).first()
-            if row is not None:
-                enabled = set(
-                    (
-                        await session.execute(
-                            text(
-                                "SELECT source_column FROM qm_training_factor_mapping "
-                                "WHERE version_id = :vid AND enabled"
-                            ),
-                            {"vid": str(row[0])},
-                        )
-                    )
-                    .scalars()
-                    .all()
-                )
-                if enabled == set(factor_cols):
-                    logger.info("rd_mined 目录已最新（%d 列），跳过", len(factor_cols))
-                    return None
+            _published_vid, enabled = await _published_enabled_columns(session)
+            if _published_vid is not None and enabled == set(factor_cols):
+                logger.info("rd_mined 目录已最新（%d 列），跳过", len(factor_cols))
+                return None
         await record_source_fields(session, RD_MINED_SOURCE, status_dict, LIB_MARKET)
         version_id = await create_catalog_draft(
             session,
@@ -818,6 +854,212 @@ def _acquire_run_lock() -> Any | None:
     return handle
 
 
+# ── 后台物化面板支撑（admin API 复用） ─────────────────────────────────
+
+
+def project_root() -> Path:
+    """仓库根目录（与模块内 ``_project_root`` 同源；API 侧拼子进程 cwd 用）。"""
+    return _project_root
+
+
+def _web_log_path() -> Path:
+    """后台「开始物化」的统一日志文件。
+
+    ``RD_MINED_MATERIALIZE_WEB_LOG`` 覆盖仅供测试隔离；容器内默认
+    ``/data/rd_mined_materialize_ui.log``（宿主 ./data 可见）。
+    """
+    override = os.getenv("RD_MINED_MATERIALIZE_WEB_LOG")
+    if override:
+        return Path(override)
+    return Path("/data/rd_mined_materialize_ui.log")
+
+
+def build_run_command() -> list[str]:
+    """后台触发的物化命令（固定 argv：全常量、无任何用户输入拼接）。
+
+    与手工 ``python3 backend/scripts/rd_mined_materialize.py --register``
+    等价；用 ``-m`` + ``cwd=project_root()`` 让 ``backend.*`` 绝对导入不依赖
+    PYTHONPATH 是否设置。
+    """
+    return [
+        sys.executable,
+        "-m",
+        "backend.scripts.rd_mined_materialize",
+        "--register",
+    ]
+
+
+def probe_run_lock() -> bool:
+    """是否有物化进程在运行（flock 试探：拿得到锁 = 没人跑，随即释放）。
+
+    与真实运行共用同一把锁，只作面板展示与重复启动的快速拒绝。探测与启动
+    之间若被人抢先，后启动的物化进程会自己取锁失败并安静退 0——并发安全
+    最终由物化进程的独占锁兜底，不依赖本探测。锁文件不可写时按「未运行」
+    处理并告警：物化子进程自带取锁兜底，误报「运行中」会让面板永久假卡死。
+    """
+    import fcntl
+
+    try:
+        handle = open(_lock_path(), "a", encoding="utf-8")
+    except OSError as exc:
+        logger.warning("物化锁探测失败（按未运行处理）：%s", exc)
+        return False
+    try:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return True
+        fcntl.flock(handle, fcntl.LOCK_UN)
+        return False
+    finally:
+        handle.close()
+
+
+def tail_web_log(max_lines: int = 120, max_bytes: int = 256 * 1024) -> dict[str, Any]:
+    """后台物化日志尾部（面板展示用）；文件不存在返回 exists=False。
+
+    符号链接一律拒读：日志路径可被同挂载域的低权限写者摆成任意文件的链接，
+    顺着读会把面板变成别人的文件浏览器（读到的内容进管理员浏览器）。
+    """
+    path = _web_log_path()
+    if path.is_symlink():
+        return {
+            "path": str(path),
+            "exists": False,
+            "lines": [],
+            "note": "路径是符号链接，拒绝读取",
+        }
+    if not path.is_file():
+        return {"path": str(path), "exists": False, "lines": []}
+    size = path.stat().st_size
+    truncated = size > max_bytes
+    with open(path, "rb") as fh:
+        if truncated:
+            start = size - max_bytes
+            # 边界前一字节是换行 → 截断点恰好落在行首，首行是完整的，不能丢
+            fh.seek(start - 1)
+            boundary_aligned = fh.read(1) == b"\n"
+            fh.seek(start)
+        else:
+            boundary_aligned = True
+        raw = fh.read()
+    content = raw.decode("utf-8", errors="replace")
+    lines = content.splitlines()
+    if truncated and not boundary_aligned and lines:
+        lines = lines[1:]  # 截断点落在行中间：首行是半个行，丢弃残片
+    return {
+        "path": str(path),
+        "exists": True,
+        "size": size,
+        "truncated": truncated,
+        "lines": lines[-max(1, int(max_lines)) :],
+    }
+
+
+async def materialize_overview(*, market: str = DEFAULT_MARKET) -> dict[str, Any]:
+    """后台物化面板的只读汇总：候选分桶 + 清单统计 + 库面/目录状态。
+
+    候选分桶复用与真实物化**完全相同**的 ``_eligible_row`` /
+    ``_should_materialize`` 判定——面板显示的「待物化」与点下按钮后的实际
+    工作量同口径，不另写一套近似逻辑。无业务写入，也不跑建表迁移
+    （``ensure=False``）；DB 抖动一律降级成 error 字段，不把状态接口打成
+    500——运行态与日志尾恰恰是故障时最需要看的两段。
+    """
+    from backend.services.engine.data_platform.quantdb_factor_reader import (
+        KEY_COLUMNS,
+        REQUIRED_COLUMNS,
+        QuantDBFactorReader,
+    )
+    from backend.shared.database_manager_v2 import get_session
+
+    lib_root = _lib_root()
+    manifest = _load_manifest(lib_root)
+    candidates: dict[str, Any] = {
+        "total": 0,
+        "pending": 0,
+        "pending_reasons": {},
+        "skipped": {},
+    }
+    try:
+        rows = await _query_candidates(market=market, ensure=False)
+    except Exception as exc:  # noqa: BLE001 - 候选查不出来也要能看运行态/日志
+        candidates["error"] = str(exc)[:300]
+        rows = []
+
+    pending = 0
+    pending_reasons: dict[str, int] = {}
+    skipped: dict[str, int] = {}
+    for row in rows:
+        ok, reason = _eligible_row(row)
+        if ok:
+            ok, reason = _should_materialize(row, manifest, force=False)
+        if ok:
+            pending += 1
+            pending_reasons[reason] = pending_reasons.get(reason, 0) + 1
+        else:
+            skipped[reason] = skipped.get(reason, 0) + 1
+    candidates.update(
+        total=len(rows),
+        pending=pending,
+        pending_reasons=pending_reasons,
+        skipped=skipped,
+    )
+
+    manifest_stats: dict[str, int] = {}
+    manifest_last_at = ""
+    for entry in manifest.values():
+        status = str((entry or {}).get("status") or "unknown")
+        manifest_stats[status] = manifest_stats.get(status, 0) + 1
+        at = str((entry or {}).get("at") or "")
+        if at > manifest_last_at:
+            manifest_last_at = at
+
+    factor_cols: set[str] = set()
+    library: dict[str, Any] = {"ready": False, "factor_columns": 0, "partitions": 0}
+    try:
+        status = QuantDBFactorReader(market=LIB_MARKET).describe(RD_MINED_SOURCE)
+        reserved = set(KEY_COLUMNS) | set(REQUIRED_COLUMNS)
+        factor_cols = {str(c) for c in status.columns if str(c) not in reserved}
+        library = {
+            "ready": bool(status.ready),
+            "factor_columns": len(factor_cols),
+            "partitions": int(status.files),
+            "min_date": status.min_date,
+            "max_date": status.max_date,
+        }
+    except Exception as exc:  # noqa: BLE001 - 面板要能显示「库读不出来」而不是 500
+        library["error"] = str(exc)[:300]
+
+    catalog: dict[str, Any] = {
+        "published_version": None,
+        "published_columns": 0,
+        "up_to_date": False,
+    }
+    try:
+        async with get_session() as session:
+            version_id, enabled = await _published_enabled_columns(session)
+        # 与 _register_library 的跳过判据同源：目录是否最新 = 已发布 enabled
+        # 映射列集 == 当前盘上列集。
+        catalog = {
+            "published_version": version_id,
+            "published_columns": len(enabled),
+            "up_to_date": version_id is not None and enabled == factor_cols,
+        }
+    except Exception as exc:  # noqa: BLE001 - DB 抖动时面板降级展示，不整页失败
+        catalog["error"] = str(exc)[:300]
+
+    return {
+        "candidates": candidates,
+        "manifest": {
+            "total": len(manifest),
+            "by_status": manifest_stats,
+            "last_at": manifest_last_at,
+        },
+        "library": library,
+        "catalog": catalog,
+    }
+
+
 async def _run(args: argparse.Namespace) -> int:
     lib_root = _lib_root()
     lock = _acquire_run_lock()
@@ -830,9 +1072,13 @@ async def _run(args: argparse.Namespace) -> int:
         return 0
 
     rows = await _load_candidates(args)
-    if not rows:
+    if not rows and not args.register:
         logger.info("无匹配因子（market=%s）", args.market)
         return 0
+    if not rows:
+        # --register 且没有候选：物化无事可做，但目录发布仍要照常刷新——
+        # 面板「待物化 0」时点开始，承诺的就是这一步（否则按钮静默变哑巴）。
+        logger.info("无匹配因子（market=%s），仅执行注册/发布", args.market)
     manifest = _load_manifest(lib_root)
     todo: list[dict[str, Any]] = []
     skipped: dict[str, int] = {}
