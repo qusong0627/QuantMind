@@ -307,6 +307,8 @@ services:
       # QuantDB API（密钥已删除，如需在线同步请加回 QUANTDB_API_KEY 行）
       # QuantDB 本地数据中枢（A 股优先数据源）
       - QM_QUANTDB_DATA_DIR=/data/quantdb
+      # QuantDB 同步状态库（避免容器内空库导致全量重下；与 celery-worker/beat 共用同一份）
+      - QUANTDB_STATE_DIR=/data/quantdb/.sync_state
       # 市场分析快照目录（脚本 compute.py 产出后经 scp 部署到宿主机 ./data/market-analysis）
       - QM_MARKET_SNAPSHOT_DIR=/data/market-analysis
       # QuantUS / QuantHK 本地数据中枢（美股/港股，Yahoo Finance 摄取）
