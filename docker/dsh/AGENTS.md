@@ -25,6 +25,7 @@
 | 副驾驶、实时上下文、操作建议、建议卡、持仓快照、今日告警 | `copilot-advice` |
 | 训练模型、模型管理、后台数据更新、RSS | `quantmind-operations` |
 | 挖因子、因子演化、RD-Agent、alpha | `rd-agent-factor-mining` |
+| 物化、因子没加进来、值级查重、因子目录草稿与发布、跨库训练 | `factor-materialize-catalog` |
 | 模拟交易、下单、持仓、资金 | `simulation-trading` |
 | 条件选股、选股策略、智能选股 | `smart-strategy-stock-picking` |
 | 全市场扫描、行业轮动、个股分析、数据导出 | `stock-market-analysis` |
