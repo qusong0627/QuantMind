@@ -19,6 +19,15 @@ import pytest
 _BACKEND = Path(__file__).resolve().parents[1]
 
 
+async def _no_inflight(db, tenant_id, user_id):
+    """引擎的在途委托查询桩（见 test_desk_plan_execute 同款说明）。
+
+    引擎把外部读取一律做成可桩的 ``_load_*`` 方法；不桩会真连库，表现为
+    跨事件循环的 "Future attached to a different loop"，只在批量跑时复现。
+    """
+    return []
+
+
 class _FakeBar:
     def __init__(self, close: float, limit_up: float = 0.0, limit_down: float = 0.0) -> None:
         self.close = close
@@ -80,6 +89,7 @@ async def test_engine_dry_run_plans_without_side_effects(monkeypatch):
     monkeypatch.setattr(engine, "_load_strategy_config", _fake_strategy_config)
     monkeypatch.setattr(engine.account_manager, "get_account", _fake_account)
     monkeypatch.setattr(engine, "_load_bars", _fake_bars)
+    monkeypatch.setattr(engine, "_load_inflight_orders", _no_inflight)
     monkeypatch.setattr(engine, "_load_exit_ruleset", _no_exit_rules)
     monkeypatch.setattr(engine, "_apply_risk_buy_locks", lambda orders, **kw: orders)
     monkeypatch.setattr(engine, "_sync_snapshot", _sync_spy)
@@ -156,6 +166,7 @@ async def test_engine_dry_run_includes_exit_orders(monkeypatch):
     monkeypatch.setattr(engine, "_load_strategy_config", _fake_strategy_config)
     monkeypatch.setattr(engine.account_manager, "get_account", _fake_account)
     monkeypatch.setattr(engine, "_load_bars", _fake_bars)
+    monkeypatch.setattr(engine, "_load_inflight_orders", _no_inflight)
     monkeypatch.setattr(engine, "_build_account", _fake_build_account)
     monkeypatch.setattr(engine, "_load_exit_ruleset", _exit_rules)
     monkeypatch.setattr(engine, "_apply_risk_buy_locks", lambda orders, **kw: orders)

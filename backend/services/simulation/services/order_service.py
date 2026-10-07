@@ -202,6 +202,41 @@ class SimOrderService:
         result = await self.db.execute(stmt)
         return list(result.scalars().all())
 
+    async def list_inflight_orders(
+        self,
+        tenant_id: str,
+        user_id: str,
+        *,
+        limit: int = 5000,
+    ) -> list[SimOrder]:
+        """**未成交且未终结**的委托——即"在途量"。
+
+        调仓规划的差额必须扣掉这批量（见 ``aggregate_inflight``）：持仓只反映
+        已成交部分，不看在途就会把同一笔差额反复下单。
+
+        取 ``pending``（已挂出，等撮合）与 ``submitted``（已报出，等回报）两态；
+        ``filled``/``cancelled``/``rejected`` 已是终态，不再占额度。
+
+        ``limit`` 给得大是刻意的：截断会让远处的在途单被漏掉，而漏掉就是重复下单
+        ——宁可多查几行也不能悄悄截断。真实在途量远小于此。
+        """
+        stmt = (
+            select(SimOrder)
+            .where(
+                and_(
+                    SimOrder.tenant_id == tenant_id,
+                    cast(SimOrder.user_id, String) == str(user_id),
+                    SimOrder.status.in_(
+                        [OrderStatus.PENDING, OrderStatus.SUBMITTED]
+                    ),
+                )
+            )
+            .order_by(SimOrder.created_at.desc())
+            .limit(limit)
+        )
+        result = await self.db.execute(stmt)
+        return list(result.scalars().all())
+
     async def cancel_order(
         self, order: SimOrder, reason: str | None = None
     ) -> SimOrder:

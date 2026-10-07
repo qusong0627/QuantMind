@@ -16,6 +16,17 @@ from fastapi import HTTPException
 _BACKEND = Path(__file__).resolve().parents[1]
 
 
+async def _no_inflight(db, tenant_id, user_id):
+    """引擎的在途委托查询桩。
+
+    引擎把外部读取一律做成可桩的 ``_load_*`` 方法（``_load_bars`` /
+    ``_load_exit_ruleset`` / ``_load_strategy_config``），本测试同款桩掉。
+    不桩的话会真连库，表现为跨事件循环的 "Future attached to a different loop"，
+    且**只在批量跑时复现**（单跑池子新鲜，看不出问题）。
+    """
+    return []
+
+
 # ── 纯函数 ──────────────────────────────────────────────────────────
 
 
@@ -177,6 +188,7 @@ async def test_engine_exclude_filters_rebalance_signals(monkeypatch):
     monkeypatch.setattr(engine, "_load_strategy_config", _cfg)
     monkeypatch.setattr(engine.account_manager, "get_account", _acct)
     monkeypatch.setattr(engine, "_load_bars", _bars)
+    monkeypatch.setattr(engine, "_load_inflight_orders", _no_inflight)
     monkeypatch.setattr(engine, "_load_exit_ruleset", _none)
     monkeypatch.setattr(engine, "_apply_risk_buy_locks", lambda orders, **kw: orders)
 
@@ -406,6 +418,7 @@ async def test_engine_quantity_overrides_full_chain(monkeypatch):
     monkeypatch.setattr(engine, "_load_strategy_config", _cfg)
     monkeypatch.setattr(engine.account_manager, "get_account", _acct)
     monkeypatch.setattr(engine, "_load_bars", _bars)
+    monkeypatch.setattr(engine, "_load_inflight_orders", _no_inflight)
     monkeypatch.setattr(engine, "_load_exit_ruleset", _none)
     monkeypatch.setattr(engine, "_apply_risk_buy_locks", lambda orders, **kw: orders)
     # 退出单桩（T-P2-04b 起评估为 async）：一只持仓触发止损（kind=exit，名单首位）

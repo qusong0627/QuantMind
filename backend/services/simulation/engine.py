@@ -72,7 +72,9 @@ from backend.services.simulation.services.rebalance_calculator import (
     SimulationAccount,
     StrategyConfig,
     WeightMode,
+    aggregate_inflight,
 )
+from backend.services.simulation.services.order_service import SimOrderService
 from backend.services.simulation.services.market_rules import (
     infer_market,
     infer_market_from_symbols,
@@ -478,11 +480,26 @@ class SimulationEngine:
                 )
 
                 # 5. 调仓计算
+                # 在途委托：已挂出但还没成交的量。**必须扣**——持仓只反映已成交
+                # 部分，不看在途就会把同一笔差额反复下单（实测 SH600023 目标 4100
+                # 股被三个周期累计挂了 11000 股）。
+                #
+                # 三个刻意的取舍：
+                # - **不按 strategy_id 过滤**：账户才是被承诺的资源，positions 本就是
+                #   全账户口径；别的策略挂着的单同样占着这笔钱/这只票。
+                # - **预演(dry_run) 也扣**：否则预演显示 77 条而实际只下 4 条，是假预告。
+                # - **读失败就抛，不降级为空**：降级 = 悄悄退回重复下单的老 bug，
+                #   是全套方案里最坏的失败方式（与 _load_strategy_config 同策略，
+                #   由 run_cycle 外层统一落 report.error）。
+                inflight = aggregate_inflight(
+                    await self._load_inflight_orders(db, tenant, uid)
+                )
                 orders = self.rebalance_calculator.calculate(
                     signals=signals,
                     strategy=strategy_config,
                     quotes=quotes,
                     account=account,
+                    inflight=inflight,
                 )
                 orders = self._apply_risk_buy_locks(
                     orders, tenant=tenant, user_id=uid, trade_date=datetime.now().date()
@@ -797,6 +814,25 @@ class SimulationEngine:
                 )
             )
         return out
+
+    async def _load_inflight_orders(
+        self,
+        db: AsyncSession,
+        tenant_id: str,
+        user_id: str,
+    ) -> list[Any]:
+        """在途委托（已挂出未成交）——调仓差额必须扣掉这批，否则重复下单。
+
+        独立成方法而非内联，是为了与 ``_load_bars`` / ``_load_exit_ruleset`` /
+        ``_load_strategy_config`` 同形：引擎测试一律桩掉 ``_load_*`` 保持无菌，
+        内联的 DB 访问会让这些测试意外连真实库（表现为跨事件循环的
+        "Future attached to a different loop"，且只在批量跑时复现）。
+
+        不按 strategy_id 过滤：账户才是被承诺的资源，positions 本就是全账户口径。
+        """
+        return await SimOrderService(db).list_inflight_orders(
+            tenant_id=tenant_id, user_id=user_id
+        )
 
     async def _load_strategy_config(
         self,

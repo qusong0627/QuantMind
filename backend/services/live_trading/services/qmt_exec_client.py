@@ -891,6 +891,22 @@ class QmtExecClient:
             self._get_backend(cfg).ping, timeout=min(float(cfg["timeout"]), 5.0)
         )
 
+    async def bridge_status(self) -> dict[str, Any]:
+        """桥自述（只读 RPC ping）——**不要求本侧总闸开启**。
+
+        与 :meth:`ping` 的分工：``ping()`` 是下单链路的存活探测，``enabled``
+        关闭即拒；本方法供状态展示用，本侧关闸时仍要看得到桥那头的
+        ``rpc_allow_order_methods`` 真实状态——把「自家未接线」说成「对方
+        未放开」会让排查走反方向（上游 baymax ``QmtBridgeBroker.bridge_status``
+        同语义同方法名）。账号未配置仍失败：没有账号就没有桥可问。
+        """
+        cfg = self._effective()
+        if not cfg["account_id"]:
+            raise QmtExecError("QMT_EXEC_ACCOUNT_ID 未配置", code="NOT_CONFIGURED")
+        return await self._call(
+            self._get_backend(cfg).ping, timeout=min(float(cfg["timeout"]), 5.0)
+        )
+
     async def get_asset(self) -> dict[str, Any]:
         cfg = self._require_enabled()
         return await self._call(self._get_backend(cfg).get_asset)
@@ -916,9 +932,7 @@ class QmtExecClient:
         if not qmt_codes:
             return {}
         cfg = self._require_enabled()
-        return await self._call(
-            self._get_backend(cfg).get_full_tick, codes=qmt_codes
-        )
+        return await self._call(self._get_backend(cfg).get_full_tick, codes=qmt_codes)
 
     async def get_instrument_detail(self, code: str) -> dict[str, Any]:
         """合约详情（涨跌停价保护位来源；参数名为 ``code``，用 ``stock_code`` 桥会报错）。"""

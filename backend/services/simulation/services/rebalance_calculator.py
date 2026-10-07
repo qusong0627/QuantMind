@@ -89,6 +89,36 @@ class SimulationAccount:
     positions: dict[str, dict[str, Any]]
 
 
+def aggregate_inflight(orders: "Any") -> dict[str, dict[str, int]]:
+    """在途委托行 → ``{标的: {"BUY": 未成交量, "SELL": 未成交量}}``。
+
+    只计**未成交**部分（``quantity - filled_quantity``）：部分成交的单，成交那部分
+    已经落到持仓里了，再算一遍等于重复扣。零与负数一律丢弃（不产生幽灵条目）。
+
+    方向取 ``side`` 归一后的大写——``SimOrder.side`` 是枚举，取出来可能是
+    ``OrderSide.BUY``（值为 ``buy``）也可能是裸字符串 ``"BUY"``，两种都得认。
+    """
+    inflight: dict[str, dict[str, int]] = {}
+    for order in orders or []:
+        side = str(getattr(order, "side", "") or "").strip().upper()
+        # 枚举取出来形如 "OrderSide.BUY"，兜底取最后一段
+        if "." in side:
+            side = side.rsplit(".", 1)[-1]
+        if side not in ("BUY", "SELL"):
+            continue
+        symbol = str(getattr(order, "symbol", "") or "").strip().upper()
+        if not symbol:
+            continue
+        quantity = float(getattr(order, "quantity", 0) or 0)
+        filled = float(getattr(order, "filled_quantity", 0) or 0)
+        remaining = int(quantity - filled)
+        if remaining <= 0:
+            continue
+        bucket = inflight.setdefault(symbol, {})
+        bucket[side] = bucket.get(side, 0) + remaining
+    return inflight
+
+
 class RebalanceCalculator:
     """
     调仓计算器：
@@ -107,6 +137,7 @@ class RebalanceCalculator:
         quotes: dict[str, Quote],
         account: SimulationAccount,
         day_index: int = 0,
+        inflight: dict[str, dict[str, int]] | None = None,
     ) -> list[Order]:
         """
         计算调仓指令。
@@ -117,6 +148,9 @@ class RebalanceCalculator:
             quotes: 行情数据 {symbol: Quote}
             account: 当前账户状态
             day_index: 会话内第几个交易日（0 起），用于调仓周期闸门
+            inflight: 已挂出未成交的量（``aggregate_inflight`` 产物）。
+                **只有实时执行路径需要传**：回测/预演里委托当期即成交，
+                没有"挂着"的状态，传 None 保持既有行为。
 
         Returns:
             交易指令列表（先卖后买）
@@ -192,6 +226,7 @@ class RebalanceCalculator:
             if strategy.deterministic_buy_order
             else None,
             force_exit_on_limit_down=strategy.force_exit_on_limit_down,
+            inflight=inflight,
         )
 
         logger.info(
@@ -490,6 +525,7 @@ class RebalanceCalculator:
         quotes: dict[str, Quote],
         score_order: list[str] | None = None,
         force_exit_on_limit_down: bool = False,
+        inflight: dict[str, dict[str, int]] | None = None,
     ) -> list[Order]:
         """
         生成调仓指令（先卖后买）。
@@ -503,6 +539,14 @@ class RebalanceCalculator:
 
         force_exit_on_limit_down=True 时，跌停的待清仓持仓仍生成卖单
         （bug 4 fix：让撮合层显式拒绝并留下 LIMIT_DOWN 记录，而非计算阶段静默丢弃）。
+
+        inflight 是**已挂出但未成交**的量（``aggregate_inflight`` 的产物，
+        ``{标的: {"BUY": n, "SELL": n}}``）。它必须从差额里扣掉：持仓只反映
+        **已成交**部分，若只看持仓，前一轮还挂在 pending 的单下一轮会被再算一遍。
+        实测形态——SH600023 目标 4100 股，三个周期分别挂了 2900/4000/4100，
+        累计 11000 股，开盘全成交即 3 倍超额建仓。
+        幂等键 ``sim-{run}-{sym}-{side}`` 只在**同一个 run 内**防重，跨 run 不可见，
+        所以补偿只能做在规划这一层。为 None 时行为与改前完全一致（回测/预演路径）。
         """
         sell_orders: list[Order] = []
         buy_orders: list[Order] = []
@@ -517,10 +561,13 @@ class RebalanceCalculator:
 
             if current_qty > target_qty:
                 sell_qty = current_qty - target_qty
+                # 在途卖单已承诺的量先扣掉；扣成负数是"反向下单"，必须夹到 0
+                sell_qty -= int((inflight or {}).get(symbol, {}).get("SELL", 0) or 0)
                 # T+1: 可卖量钳制
                 available = current_pos.get("available_volume")
                 if available is not None:
                     sell_qty = min(sell_qty, int(float(available)))
+                sell_qty = max(0, sell_qty)
                 quote = quotes.get(symbol)
                 price = quote.current_price if quote else 0
 
@@ -552,6 +599,9 @@ class RebalanceCalculator:
 
             if target_qty > current_qty:
                 buy_qty = target_qty - current_qty
+                # 同上：在途买单已承诺的量扣掉，再夹到 0
+                buy_qty -= int((inflight or {}).get(symbol, {}).get("BUY", 0) or 0)
+                buy_qty = max(0, buy_qty)
                 quote = quotes.get(symbol)
                 price = quote.current_price if quote else 0
 
