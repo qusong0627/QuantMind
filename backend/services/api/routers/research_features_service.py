@@ -20,6 +20,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from typing import Any
 
+from backend.shared.quantdb_flow_units import normalize_l2_flow_money_to_yuan
 from backend.shared.stock_utils import StockCodeUtil
 
 logger = logging.getLogger(__name__)
@@ -195,7 +196,7 @@ _UNIT_SCALES: dict[str, float] = {
     "flowLargeNet": 1e-6,
     "flowMediumNet": 1e-6,
     "flowSmallNet": 1e-6,
-    # l2_factors.flow_super_net 单位是元，与其他 flow* 一致（同类别统一 → 百万元）
+    # l2 flow 金额经 normalize_l2_flow_money_to_yuan 归一为元后再 ×1e-6 → 百万元
     "flowSuperNet": 1e-6,
 }
 
@@ -439,7 +440,17 @@ def _query_sources(
     # 2. 情绪面、L1 因子、L2 因子（非 dt 模式沿用全量）
     sources["qdb_market_sentiment"] = _latest_rows("qdb_market_sentiment", symbols, dt)
     sources["qdb_l1_factors"] = _fetch_l1(symbols, dt)
-    sources["qdb_l2_factors"] = _latest_rows("qdb_l2_factors", symbols, dt)
+    l2 = _latest_rows("qdb_l2_factors", symbols, dt)
+    if l2:
+        import pandas as pd
+
+        l2_df = pd.DataFrame(list(l2.values()))
+        l2_df = normalize_l2_flow_money_to_yuan(l2_df)
+        sources["qdb_l2_factors"] = {
+            str(row["symbol"]): row for row in l2_df.to_dict(orient="records")
+        }
+    else:
+        sources["qdb_l2_factors"] = {}
 
     if "turnoverRate" in wanted:
         # 日线视图只用于取 volume（现算换手率的原料）。其余列必须丢弃：

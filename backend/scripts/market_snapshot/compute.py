@@ -43,6 +43,7 @@ from backend.scripts.market_snapshot.schema_adapter import (
     get_conn,
     q as _q,
 )
+from backend.shared.quantdb_flow_units import normalize_l2_flow_money_to_yuan
 
 DEFAULT_OUT_DIR = (
     Path(os.getenv("QM_MARKET_SNAPSHOT_DIR", "")).resolve()
@@ -112,13 +113,14 @@ def _load_l2_flow(con, days: list[str]) -> pd.DataFrame:
     if not days:
         return pd.DataFrame()
     dt_in = ", ".join(f"'{d}'" for d in days)
-    return _q(
+    df = _q(
         con,
-        "SELECT symbol, dt, flow_net_amount, flow_buy_amount, flow_sell_amount, flow_net_ratio, "
+        "SELECT symbol, dt, amount, flow_net_amount, flow_buy_amount, flow_sell_amount, flow_net_ratio, "
         "flow_super_net, flow_large_net, flow_medium_net, flow_small_net, "
         "flow_large_ratio, flow_medium_ratio, flow_small_ratio, flow_money_flow_index "
         f"FROM qdb_l2_factors WHERE dt IN ({dt_in})",
     )
+    return normalize_l2_flow_money_to_yuan(df)
 
 
 def _load_prices(con, days: list[str]) -> pd.DataFrame:

@@ -1,7 +1,11 @@
 """research_features_service 单位换算表测试。
 
-覆盖 _apply_unit_scales 的两条路径（camelCase 投影 / snake_case 全量），
-以及 flowSuperNet 与同类别 flow* 字段的量纲一致性（bug #19 回归）。
+覆盖 _apply_unit_scales 的投影路径（camelCase），以及 flowSuperNet 与同类别
+flow* 字段的量纲一致性（bug #19 回归）。
+
+注：原 snake_case「全量路径」测试已删——`_build_payload` 全量路径在重构中
+下线（两条分支 HEAD 均只剩 `_build_projected_payload`），`_apply_unit_scales`
+不再收到 snake 键；该测试自重构起恒红，保留会淹没真实回归。
 """
 import os
 import sys
@@ -20,13 +24,6 @@ def test_apply_unit_scales_scales_flow_super_net_camel():
     _apply_unit_scales(values)
     assert abs(values["flowSuperNet"] - (-6.840376)) < 1e-9
     assert abs(values["flowNetAmount"] - (-274.1097977)) < 1e-9
-
-
-def test_apply_unit_scales_scales_flow_super_net_snake():
-    """snake_case 键 flow_super_net 同样缩放。"""
-    values = {"flow_super_net": 1_000_000.0}
-    _apply_unit_scales(values)
-    assert values["flow_super_net"] == 1.0
 
 
 def test_apply_unit_scales_mv_to_yi():

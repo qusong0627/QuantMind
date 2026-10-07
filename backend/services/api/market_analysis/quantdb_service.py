@@ -9,7 +9,8 @@
 取数口径与 quantdb_feed 对齐：交易日走 dt=YYYYMMDD 目录枚举，查询只打开真正
 需要的分区文件（read_parquet 精确路径数组），参考表按源文件 mtime 缓存；
 不用 ``SELECT DISTINCT dt`` / ``dt=*`` 全量 glob 去枚举上千个 parquet。
-单位口径遵循 quantdb-fields 技能：个股 amount=万元、l2 flow=元、指数 volume=手。
+单位口径遵循 quantdb-fields 技能：个股 amount=万元、l2 flow 按分区混存
+（读入归一为元）、指数 volume=手。
 """
 from __future__ import annotations
 
@@ -39,6 +40,7 @@ from backend.shared.market_breadth import (
     TOL_BJ,
     TOL_SHSZ,
 )
+from backend.shared.quantdb_flow_units import normalize_l2_flow_money_to_yuan
 
 logger = logging.getLogger(__name__)
 
@@ -410,7 +412,7 @@ def _l2_latest_dt() -> str | None:
 
 
 def _load_l2_flow(dt: str | None = None) -> pd.DataFrame:
-    """读取指定（默认最新）交易日资金流（单位：元）。
+    """读取指定（默认最新）交易日资金流（金额归一为元）。
 
     旧实现 ``FROM read_parquet('l2_factors/dt=*/data.parquet')`` 不带 dt 条件，
     每次请求都要读全历史（本机实测 885 个分区 / 8.2GB / 451 万行 / 22.5s），
@@ -419,14 +421,21 @@ def _load_l2_flow(dt: str | None = None) -> pd.DataFrame:
     day = dt or _l2_latest_dt()
     if not day:
         return pd.DataFrame(columns=["symbol", *_FLOW_COLS, "dt"])
-    df = _read(
-        f"SELECT symbol, {', '.join(_FLOW_COLS)}, dt FROM read_parquet("
-        f"'{_sql_rel(_L2_REL)}/dt={day}/*.parquet', hive_partitioning=true)"
-    )
+    # amount / flow_net_ratio 用于万元↔元自动识别；缺列时退回仅金额列
+    try:
+        df = _read(
+            f"SELECT symbol, amount, {', '.join(_FLOW_COLS)}, flow_net_ratio, dt FROM read_parquet("
+            f"'{_sql_rel(_L2_REL)}/dt={day}/*.parquet', hive_partitioning=true)"
+        )
+    except Exception:
+        df = _read(
+            f"SELECT symbol, {', '.join(_FLOW_COLS)}, dt FROM read_parquet("
+            f"'{_sql_rel(_L2_REL)}/dt={day}/*.parquet', hive_partitioning=true)"
+        )
     if df.empty:
         return df
     df["dt"] = df["dt"].astype(str)
-    return df
+    return normalize_l2_flow_money_to_yuan(df)
 
 
 def _sector_industry_members() -> pd.DataFrame:

@@ -29,6 +29,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from backend.services.api.user_app.middleware.auth import get_current_user
 from backend.shared.database_manager_v2 import get_session
 from backend.shared.logging_config import get_logger
+from backend.shared.quantdb_flow_units import normalize_l2_flow_money_to_yuan
 from backend.shared.signal_scores import score_freq_of
 
 logger = get_logger(__name__)
@@ -588,6 +589,7 @@ _SERIES_GROUPS: dict[str, tuple[str, list[str]]] = {
     ]),
     "flow": ("qdb_l2_factors", [
         "flow_net_amount", "flow_super_net", "flow_large_net", "flow_net_ratio",
+        "amount",
     ]),
     "sentiment": ("qdb_market_sentiment", [
         "buy_pressure", "sell_pressure", "liquidity_score", "am_pm_trend",
@@ -1382,8 +1384,12 @@ async def stock_series(
         _series_cache_set(cache_key, df)
     if df.empty:
         return {"success": True, "data": {"dates": [], "columns": {}}}
+    if group == "flow":
+        df = normalize_l2_flow_money_to_yuan(df)
+    # 对外不暴露对账用的 amount 列
+    out_cols = [c for c in cols if c in df.columns and c != "amount"]
     dates = [str(v)[:10] for v in df["dt"]]
-    columns = {c: [_safe_f(v) for v in df[c]] for c in cols if c in df.columns}
+    columns = {c: [_safe_f(v) for v in df[c]] for c in out_cols}
     return {"success": True, "data": {"dates": dates, "columns": columns}}
 
 

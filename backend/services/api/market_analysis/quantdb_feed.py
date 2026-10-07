@@ -4,7 +4,8 @@
 聚合个股/板块资金流向、指数快照、行业/概念标签等，供市场分析 API 使用。
 
 数据口径（单位）：
-- ``l2_factors.flow_*`` 金额为「元」；``index_daily.amount`` 为「万元」；
+- ``l2_factors.flow_*`` 金额：按分区混存（万元/元），读入经
+  ``normalize_l2_flow_money_to_yuan`` 归一为「元」；``index_daily.amount`` 为「万元」；
 - 输出统一转换为前端约定：个股资金流/板块净流入为「元」，趋势序列为「亿元」。
 """
 
@@ -20,6 +21,7 @@ from typing import Any
 import pandas as pd
 
 from backend.services.engine.data_platform.quantdb_hub import QuantDBDataHub
+from backend.shared.quantdb_flow_units import normalize_l2_flow_money_to_yuan
 from backend.shared.stock_utils import StockCodeUtil
 
 logger = logging.getLogger(__name__)
@@ -208,17 +210,18 @@ def _trading_days(end: str | None, n: int) -> list[str]:
 
 
 def _load_l2_flow(days: list[str]) -> pd.DataFrame:
-    """读取指定交易日的 L2 资金流明细。"""
+    """读取指定交易日的 L2 资金流明细（金额列归一为元）。"""
     if not days:
         return pd.DataFrame()
-    return _read_partitioned(
+    df = _read_partitioned(
         "6_ml_datasets/l2_factors",
         days,
-        "symbol, "
+        "symbol, amount, "
         "flow_net_amount, flow_buy_amount, flow_sell_amount, flow_net_ratio, "
         "flow_super_net, flow_large_net, flow_medium_net, flow_small_net, "
         "flow_large_ratio, flow_medium_ratio, flow_small_ratio, flow_money_flow_index",
     )
+    return normalize_l2_flow_money_to_yuan(df)
 
 
 def _load_prices(days: list[str]) -> pd.DataFrame:

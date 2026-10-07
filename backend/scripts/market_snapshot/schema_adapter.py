@@ -40,7 +40,7 @@ DATASET_DIRS = {
 
 # l2_factors 资金流必要列（供上层直接选取，缺失时降级）
 FLOW_COLUMNS = [
-    "symbol", "dt", "close",
+    "symbol", "dt", "close", "amount",
     "flow_net_amount", "flow_buy_amount", "flow_sell_amount", "flow_net_ratio",
     "flow_super_net", "flow_large_net", "flow_medium_net", "flow_small_net",
     "flow_large_ratio", "flow_medium_ratio", "flow_small_ratio",
