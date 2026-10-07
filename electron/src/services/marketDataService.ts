@@ -725,3 +725,46 @@ class MarketDataService {
 
 // 导出单例实例
 export const marketDataService = MarketDataService.getInstance();
+
+// ── 股票名称索引（data/stocks/stocks_index.json，经 GET /api/v1/stocks/index-file 提供）──
+// 供回测交易明细等按代码/符号补全股票名称；模块级缓存，只拉取一次。
+let stockNameIndexPromise: Promise<Map<string, string>> | null = null;
+
+/** 查询键：优先取纯数字代码（SH600036 / 600036.SH → 600036），非数字代码回退大写原串 */
+function stockNameKey(value: unknown): string {
+  const upper = String(value ?? '').trim().toUpperCase();
+  const digits = upper.replace(/[^0-9]/g, '');
+  return digits || upper;
+}
+
+/** 拉取并缓存全量股票名称索引；失败不缓存，便于后续重试 */
+export function loadStockNameIndex(): Promise<Map<string, string>> {
+  if (!stockNameIndexPromise) {
+    stockNameIndexPromise = apiClient
+      .get('/api/v1/stocks/index-file')
+      .then((response) => {
+        const items: any[] = Array.isArray(response.data?.items) ? response.data.items : [];
+        const map = new Map<string, string>();
+        for (const item of items) {
+          const name = String(item?.name ?? '').trim();
+          if (!name) continue;
+          const symbolKey = stockNameKey(item?.symbol);
+          const codeKey = stockNameKey(item?.code);
+          if (symbolKey) map.set(symbolKey, name);
+          if (codeKey) map.set(codeKey, name);
+        }
+        return map;
+      })
+      .catch((error) => {
+        stockNameIndexPromise = null;
+        throw error;
+      });
+  }
+  return stockNameIndexPromise;
+}
+
+/** 按代码/符号查名称，未命中返回空串 */
+export function lookupStockName(index: Map<string, string> | null, symbol: unknown): string {
+  if (!index || !symbol) return '';
+  return index.get(stockNameKey(symbol)) || '';
+}

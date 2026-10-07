@@ -2,7 +2,7 @@
  * Qlib 回测结果展示共享组件
  */
 
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   TrendingUp, Shield, Target, TrendingDown, Download, X, Copy, Check, Wand2, RefreshCw, AlertCircle
 } from 'lucide-react';
@@ -10,6 +10,7 @@ import ReactECharts from 'echarts-for-react';
 import { QlibBacktestResult, QlibBacktestConfig } from '../../types/backtest/qlib';
 import type { BacktestResult, BacktestConfig } from '../../services/backtestService';
 import { backtestClient } from '../../services/aiStrategyClients';
+import { loadStockNameIndex, lookupStockName } from '../../services/marketDataService';
 import { buildCsvText, downloadCsvFile } from '../../utils/csvExport';
 import { dataRangeRow } from '../../utils/exportDisclaimer';
 
@@ -540,6 +541,22 @@ const TradeListModal: React.FC<{ rows: TradeDisplayRow[]; onClose: () => void }>
   rows,
   onClose,
 }) => {
+  const [nameIndex, setNameIndex] = useState<Map<string, string> | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    loadStockNameIndex()
+      .then((index) => {
+        if (alive) setNameIndex(index);
+      })
+      .catch(() => {
+        /* 名称索引不可用时降级为 '-' */
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
   return (
     <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-md p-4">
       <div className="bg-white rounded-3xl w-[88%] h-[80vh] flex flex-col">
@@ -548,34 +565,36 @@ const TradeListModal: React.FC<{ rows: TradeDisplayRow[]; onClose: () => void }>
           <button onClick={onClose}><X /></button>
         </div>
         <div className="flex-1 overflow-auto">
-          <table className="w-full text-left text-xs">
+          <table className="w-full table-fixed text-xs">
             <thead className="bg-gray-50 sticky top-0">
               <tr>
-                <th className="p-4">日期</th>
-                <th>代码</th>
-                <th>方向</th>
-                <th className="text-right">成交价</th>
-                <th className="text-right">成交量</th>
-                <th className="text-right">成交金额</th>
-                <th className="text-right">手续费</th>
-                <th className="text-right pr-4">权益余额</th>
+                <th className="w-[11.11%] px-3 py-3 text-center font-semibold">日期</th>
+                <th className="w-[11.11%] px-3 py-3 text-center font-semibold">代码</th>
+                <th className="w-[11.11%] px-3 py-3 text-center font-semibold">股票名称</th>
+                <th className="w-[11.11%] px-3 py-3 text-center font-semibold">方向</th>
+                <th className="w-[11.11%] px-3 py-3 text-center font-semibold">成交价</th>
+                <th className="w-[11.11%] px-3 py-3 text-center font-semibold">成交量</th>
+                <th className="w-[11.11%] px-3 py-3 text-center font-semibold">成交金额</th>
+                <th className="w-[11.11%] px-3 py-3 text-center font-semibold">手续费</th>
+                <th className="w-[11.11%] px-3 py-3 text-center font-semibold">权益余额</th>
               </tr>
             </thead>
             <tbody>
               {rows.map((t, i) => (
                 <tr key={i} className="border-b border-gray-50">
-                  <td className="p-4">{t.date}</td>
-                  <td className="font-bold">{t.symbol}</td>
-                  <td>
+                  <td className="px-3 py-3 text-center whitespace-nowrap">{t.date}</td>
+                  <td className="px-3 py-3 text-center font-bold whitespace-nowrap">{t.symbol}</td>
+                  <td className="px-3 py-3 text-center text-gray-500 truncate">{lookupStockName(nameIndex, t.symbol) || '-'}</td>
+                  <td className="px-3 py-3 text-center">
                     <span className={t.isBuy ? 'text-red-500' : 'text-green-500'}>
                       {t.isBuy ? '买入' : '卖出'}
                     </span>
                   </td>
-                  <td className="text-right">¥{Number(t.displayPrice || 0).toFixed(2)}</td>
-                  <td className="text-right">{Number(t.qtyInt).toLocaleString()}</td>
-                  <td className="text-right">¥{Number(t.amount || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
-                  <td className="text-right">¥{Number(t.commission || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
-                  <td className="text-right pr-4">
+                  <td className="px-3 py-3 text-center whitespace-nowrap">¥{Number(t.displayPrice || 0).toFixed(2)}</td>
+                  <td className="px-3 py-3 text-center whitespace-nowrap">{Number(t.qtyInt).toLocaleString()}</td>
+                  <td className="px-3 py-3 text-center whitespace-nowrap">¥{Number(t.amount || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                  <td className="px-3 py-3 text-center whitespace-nowrap">¥{Number(t.commission || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                  <td className="px-3 py-3 text-center whitespace-nowrap">
                     {Number.isFinite(t.equityBalance as number)
                       ? `¥${Number(t.equityBalance).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
                       : '-'}
