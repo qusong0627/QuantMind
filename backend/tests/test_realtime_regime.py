@@ -159,15 +159,20 @@ def test_regime_service_publishes_snapshot_and_event():
         breadth_fetcher=lambda: {"coverage": "hot_set", "sample": 3, "up": 2, "down": 1,
                                  "flat": 0, "limit_up": 0, "limit_down": 0},
     )
+    # 消费组必须建在**发布之前**、且从流尾（"$"）开始：read_events 走 ">"（只读未投递
+    # 消息），建组若在发布之后，这 1.2 万条历史全成了「未投递」，count=500 只取到
+    # **最老的** 500 条，断言退化成「与几百条之前的历史事件比状态」——流一长必然假红
+    # （2026-10-08 实测：stream len 12316，取到的最新区块事件是旧的 neutral，而本次
+    # 计算是 bull）。组尾起步后，唯一的新消息就是本次 build_once 自己发的那条。
+    group = f"regime-test-{uuid.uuid4().hex[:8]}"
+    main.xgroup_create(ie.STREAM_KEY, group, id="$", mkstream=True)
     try:
         payload = svc.build_once()
         assert payload is not None and payload["state"] in ("bull", "neutral", "bear")
         snap = main.hgetall("qm:regime:intraday")
         assert snap and snap["state"] == payload["state"] and snap["index"] == "000300.SH"
         assert json.loads(snap["breadth"])["coverage"] == "hot_set"
-        # 总线事件可被消费（独立组从头读，按 type=regime 过滤取最新一条）
-        group = f"regime-test-{uuid.uuid4().hex[:8]}"
-        main.xgroup_create(ie.STREAM_KEY, group, id="0", mkstream=True)
+        # 总线事件可被消费（按 type=regime 过滤取最新一条）
         got = ie.read_events(main, group=group, consumer="t", block_ms=200, count=500)
         events = [ev for _id, ev in got if isinstance(ev, dict) and ev.get("type") == "regime"]
         assert events and events[-1]["source"] == "realtime_regime"
@@ -176,6 +181,11 @@ def test_regime_service_publishes_snapshot_and_event():
             ie.ack_event(main, msg_id, group=group)
     finally:
         main.delete("qm:regime:intraday")
+        # 共享流上的消费组不能留：每跑一次测试就多一个（长时间累积）
+        try:
+            main.xgroup_destroy(ie.STREAM_KEY, group)
+        except Exception:  # noqa: BLE001 - 清理失败不该盖住断言结果
+            pass
         main.close()
 
     # 未启用 → None；无 live → None + 计数
