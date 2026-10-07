@@ -129,6 +129,9 @@ run/*.pid
 !.env.example
 # 后台管理页面写入的运行时密钥
 config/runtime.env
+# SSH 训练节点配置（含明文 SSH 密码；曾入库，2026-10-07 撤掉）。
+# 模板见 config/training_nodes.example.yaml；运行时节点由「云端节点设置」页管理。
+config/training_nodes.yaml
 *.pem
 *.key
 .ssh/
