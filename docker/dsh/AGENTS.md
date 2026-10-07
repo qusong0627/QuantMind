@@ -26,6 +26,7 @@
 | 训练模型、模型管理、后台数据更新、RSS | `quantmind-operations` |
 | 挖因子、因子演化、RD-Agent、alpha | `rd-agent-factor-mining` |
 | 物化、因子没加进来、值级查重、因子目录草稿与发布、跨库训练 | `factor-materialize-catalog` |
+| 识别引擎、异动检测服务、异常告警没收到、模型 IC 骤降、告警落表失败、盘外/假期一堆异动告警 | `anomaly-engine-ops`（常驻检测服务；行情异动榜是另一回事，见下面 `ths-fuyao` 等） |
 | 模拟交易、下单、持仓、资金 | `simulation-trading` |
 | 条件选股、选股策略、智能选股 | `smart-strategy-stock-picking` |
 | 全市场扫描、行业轮动、个股分析、数据导出 | `stock-market-analysis` |
@@ -45,7 +46,7 @@
 | 联网搜索、查网页、找现成技能 | `tavily-search`、`web-search`、`find-skills` |
 | 迁移、旧 QwenPaw/千问数据、升级后导入旧技能/MCP、停掉千问 | `qwenpaw-migrate` |
 
-完整技能清单（98 个）见 `/root/.dsh/skills/`（= 仓库 `skills/`，索引见 `skills/README.md`）。没有匹配的技能时，用工具自己查，别硬套。
+完整技能清单（114 个）见 `/root/.dsh/skills/`（= 仓库 `skills/`，索引见 `skills/README.md`）。没有匹配的技能时，用工具自己查，别硬套。
 
 ## 平台连接信息
 

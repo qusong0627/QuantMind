@@ -39,6 +39,7 @@ QuantBot（dsh 容器 / DeepSeek Harness）**无需安装**：docker-compose 把
 | [copilot-advice](copilot-advice/) | 副驾驶实时上下文与建议卡：工具化查询持仓/信号/告警（/api/v1/copilot/context），生成建议卡由用户一键执行（OrderRouter，source=co_pilot 留痕） | 副驾驶、实时上下文、操作建议、建议卡、持仓快照 |
 | [tdx-aidata-ops](tdx-aidata-ops/) | TdxAiData（通达信 AI 数据 SDK）通道运维：状态体检（分片/帧/热集）、订阅推送 vs 请求通道语义与配额（3 次/窗口）、SDK API 方法表、故障与证据采集（盘中零数据帧、错误码 10/13） | TdxAiData、订阅推送、行情主源、零帧、配额、Token Insufficient、错误码10/13、tdx 自检 |
 | [qmt-bridge-ops](qmt-bridge-ops/) | 大 QMT 桥运维：桥状态体检（bridge_ok/position_events/RPC 队列）、Redis 重启后离线恢复三步（清队列→QMT 重载策略→验证）、队列卫生工具（订单类硬护栏）、备源行情席语义 | QMT桥、桥离线、bridge_ok、备源席、RPC队列积压、position_events、重载策略、BIGQMT_REDIS_DRYRUN |
+| [anomaly-engine-ops](anomaly-engine-ops/) | 识别引擎（异动/异常检测常驻服务）运维：四族检测→三类动作、subject 分族规则（哪些槽只装证券代码）、盘外/假期假报的时段闸口径、涨跌停类恒 0 的能力边界、体检与排查 | 识别引擎、异动检测服务、异常告警没收到、模型 IC 骤降、告警落表失败、盘外/假期异动告警、sentinel_alerts |
 
 ### 研究与分析
 
